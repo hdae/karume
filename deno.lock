@@ -28,6 +28,12 @@
         "dependencies": [
           "jsr:@hdae/fetch-cache@~0.3.1"
         ]
+      },
+      "packages/models": {
+        "dependencies": [
+          "jsr:@karume/hub@0.1",
+          "jsr:@karume/runtime@0.1"
+        ]
       }
     }
   }

@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "license": "MIT",
   "exports": {
-    ".": "./mod.ts"
+    ".": "./mod.ts",
+    "./anima": "./anima.ts"
+  },
+  "imports": {
+    "@karume/hub": "jsr:@karume/hub@^0.1.0",
+    "@karume/runtime": "jsr:@karume/runtime@^0.1.0"
   },
   "publish": {
     "exclude": ["tests/"]
