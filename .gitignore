@@ -1,0 +1,5 @@
+.claude/settings.local.json
+coverage/
+models/*
+!models/README.md
+*.safetensors
