@@ -30,7 +30,11 @@ LIBRARY_NAME = "karume"
 PIPELINE_TAG = "text-to-image"
 BASE_MODEL = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 BASE_MODEL_RELATION = "quantized"
-TAGS = ("text-to-image", "webgpu", "anime")
+TAGS = ("text-to-image", "webgpu")
+
+#: この配布形を上げる HF リポジトリ ID（manifest は自分の在り処を知らない — 使い方の
+#: スニペットに実 ID を綴るために持つ）。
+HF_REPO = "hdae/anima-turbo"
 
 #: ライセンス（実地確認）: base model のリポジトリ自身は license を宣言せず、カードは
 #: 「元のモデルカードを見よ」として `circlestone-labs/Anima` を指す。実値はそちらにある。
@@ -116,7 +120,7 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         f"A distribution that bakes **{LORA_NAME}** into"
         f" [{BASE_MODEL}](https://huggingface.co/{BASE_MODEL}) and converts it into the WebGPU",
-        "inference runtime **Karume**'s IR container (a single safetensors file = weights +",
+        "inference runtime **Karume**'s container format (a single safetensors file = weights +",
         "a graph JSON embedded in `__metadata__`). Runs as-is in the browser and in Deno.",
         "",
         f"- A few-step distillation (from the LoRA) tuned for **{defaults['steps']} steps /"
@@ -182,15 +186,15 @@ def _presets(manifest: Mapping[str, Any]) -> list[str]:
     lines = [
         "## Presets",
         "",
-        "| Preset | Weights | Compute | Default |",
-        "| ------ | ---- | ---- | ---- |",
+        "| Preset | Weights | Compute |",
+        "| ------ | ---- | ---- |",
     ]
     for name, preset in manifest["presets"].items():
         weights = " / ".join(
             f"`{component}` = `{label}`" for component, label in preset["weights"].items()
         )
-        mark = "**default**" if name == default else ""
-        lines.append(f"| `{name}` | {weights} | {_session(preset)} | {mark} |")
+        mark = " (default)" if name == default else ""
+        lines.append(f"| `{name}`{mark} | {weights} | {_session(preset)} |")
     lines += [
         "",
         f"If no preset is given, it runs as `{default}` (the distribution's recommended default).",
@@ -206,8 +210,8 @@ def _usage(manifest: Mapping[str, Any]) -> list[str]:
         "```ts",
         'import { AnimaPipeline, encodePng } from "jsr:@karume/models";',
         "",
-        f"// Pass this repository's ID (preset defaults to {default}).",
-        'using pipeline = await AnimaPipeline.fromPretrained("<owner>/<repo>");',
+        f"// The preset defaults to {default}.",
+        f'using pipeline = await AnimaPipeline.fromPretrained("{HF_REPO}");',
         "const image = await pipeline.generate({",
         '  prompt: "1girl, solo, long hair, blue eyes, school uniform, masterpiece",',
         "  seed: 42,",
@@ -254,7 +258,7 @@ def render_model_card(manifest: Mapping[str, Any]) -> str:
         )
     sections: Sequence[Sequence[str]] = (
         _frontmatter(),
-        ["", "# Anima Turbo — Karume IR", ""],
+        ["", "# Anima Turbo — Karume", ""],
         _overview(manifest),
         [""],
         _merged_lora(),

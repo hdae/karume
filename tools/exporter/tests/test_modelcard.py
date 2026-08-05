@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from karume.modelcard import SUPPORTED_PIPELINE, render_model_card
+from karume.modelcard import HF_REPO, SUPPORTED_PIPELINE, render_model_card
 
 
 def _manifest() -> dict[str, Any]:
@@ -100,8 +100,10 @@ class TestFrontmatter:
         assert "license: other" in head
         assert "license_name: circlestone-labs-non-commercial-license" in head
         assert "library_name: karume" in head
-        for tag in ("text-to-image", "webgpu", "anime"):
-            assert f"  - {tag}" in head
+        assert [line for line in head.splitlines() if line.startswith("  - ")] == [
+            "  - text-to-image",
+            "  - webgpu",
+        ]
 
 
 class TestSections:
@@ -123,7 +125,7 @@ class TestSections:
         assert "1b55e40bdb1d0e5a78cb498f245fccfdaae97823265db957d2aabdcf4cd3caf1" in card
 
     def test_it_shows_the_minimal_typescript_entry_point(self, card: str) -> None:
-        assert "AnimaPipeline.fromPretrained" in card
+        assert f'AnimaPipeline.fromPretrained("{HF_REPO}")' in card
         assert "@karume/models" in card
         assert "using pipeline" in card
 
@@ -153,11 +155,13 @@ class TestDerivation:
         assert "111 B" not in moved
         assert "999 B" in moved
 
-    def test_it_marks_exactly_the_default_preset(self, card: str) -> None:
+    def test_it_marks_exactly_the_default_preset_beside_its_name(self, card: str) -> None:
         rows = [line for line in card.splitlines() if line.startswith("| `")]
-        default = [line for line in rows if "**default**" in line]
+        default = [line for line in rows if "(default)" in line]
         assert len(default) == 1
-        assert default[0].startswith("| `w8a8` |")
+        assert default[0].startswith("| `w8a8` (default) |")
+        # 表に「既定」列を持たない（印は名前の横だけ — 列が空欄で並ぶ形にしない）。
+        assert "| Preset | Weights | Compute |" in card
 
     def test_it_carries_every_preset_with_its_session_knobs(self, card: str) -> None:
         assert "| `f16` | `transformer` = `f16` | — |" in card
