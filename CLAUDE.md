@@ -7,20 +7,18 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 焦点と落とし穴は [.claude/ACTIVE_DESIGN.md](.claude/ACTIVE_DESIGN.md)
 （レビュー・計画タスクは必読）。
 
-## 用語・命名
+## 用語
 
 - 「プロトタイプ」= 参考元の先行実験プロジェクト。**固有名は成果物（コード・コメント・
   コミットメッセージ含む）に書かない**。
-- **旧プロジェクト名は ADR 0037 にのみ記録** — それ以外の成果物に書かない（旧履歴は
-  非公開 bundle に退避済み。経緯・旧コミットハッシュの扱いは ADR 0037）。
 
 ## 構成
 
 - `packages/runtime/` — 公開 API は mod.ts の**薄い面のみ**（ADR 0008）。`src/` が本体
   （gpu / codegen / kernels / format / reference / runtime）
-- `packages/hub/` — manifest 解決・fetch・cache（manifest v1 仕様は P2 で ADR 起票）
+- `packages/hub/` — manifest 解決・fetch・cache（manifest v1 仕様は ADR 起票予定）
 - `packages/models/` — **barrel（mod.ts）+ ファミリ別サブパス export の両建て**
-- `tools/exporter/` — Python（uv）。`examples/` は P3 以降に整備
+- `tools/exporter/` — Python（uv）。`examples/` は整備予定
 
 ## 検証コマンド（変更後は全て）
 
@@ -44,5 +42,5 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 
 - `docs/decisions/` — ADR（MADR-lite）。インライン `DECIDED:` の指し先
 - `docs/ir-v1.md` — IR フォーマット仕様 / `docs/op-vocabulary.md` — op 語彙台帳
-- `docs/research/` — 調査・実測記録（**時点スナップショット** — 冒頭注記の規約は ADR 0037）
+- `docs/research/` — 調査・実測記録（**時点スナップショット** — 冒頭に性格を示す注記 1 行）
 - `docs/known-issues.md` / `docs/limitations.md` — 未解決バグ / by-design 制約
