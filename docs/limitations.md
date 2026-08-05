@@ -221,6 +221,15 @@ f32 マスクで、1 ずれても shape エラーにならない沈黙誤値ク�
 すると合流者も巻き添えで落ちる）。同一資産を並行に取る複数の `fetchAssets` では、キャンセルは
 この粒度でしか働かない（ADR 0038 §5）。単一呼び出しの abort は全ワーカーへ正しく透過する。
 
+## exporter CLI: `karume export` はリポジトリの作業ツリー専用（インストール版では動かない）
+
+export の台本 `export_anima.py` はパッケージ外のリポ直下スクリプトで wheel に入らず
+（ADR 0023 / 0034 が生きた決定として台本名を参照しているため、パッケージへ移動しない）、
+実重み export の依存（diffusers 等）も PyPI extras ではなく uv の dependency-groups にある。
+このため PyPI インストール版の `karume export` は台本の置き場を綴って fail loudly する。
+`karume dist` / `karume verify` はインストール版でも動く。解除するなら台本のパッケージ化と
+extras 化を 1 セットで行う（公開後の需要を見て判断）。
+
 ## hub: DL 前の適合チェックは GPU feature 軸のみ（limits は DL 後に fail loudly）
 
 preset が宣言できる GPU 前提は `gpuFeatures`（v1 は `shaderF16`）だけで、`maxBufferSize` /

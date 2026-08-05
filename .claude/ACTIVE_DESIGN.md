@@ -14,14 +14,16 @@
   karume.json 実 hash・**格納 dtype 門**付き）。**移植の門 = PNG sha256 ビット一致 ×4 が全緑**
   （ローカル / 取得層 + integrity / example CLI の 3 経路とも参照値と同一）。example は 90 行
   1 画面（移行元 1,111 行から縮退）。
-  次 = **P4 exporter CLI 化**: PyPI `karume` のサブコマンド式（export / dist / verify を包む）・
-  モデルカード README 自動生成（variant 表は manifest から導出）。同時裁定・回収する宿題:
-  ①rope_base の読み（models 側の parseSafetensors 再実装 130 行 — runtime 公開面に載せるか
-  IR コンテナ化か）②`AnimaFromPretrainedOptions` に `caches` 注入席（テスト用）③波 1 積み残しの
-  参照フィクスチャ系テスト（timestepsProj atol 突合等 — anima-pipeline 系列の再エミットが前提）
-  ④tokenizer parity fixture の models 側への移設。
+  **P4 進行中**: 配布形を **anima-turbo** へ改名（turbo LoRA マージ済みを名前に出す）、
+  `karume` サブコマンド CLI（export / dist / verify・argv 素通し・遅延 import）+ モデルカード
+  README 自動生成（`karume.modelcard` — 数値は全て manifest 導出・定数は base model /
+  license / LoRA 出所のみ）を実装済み。残る宿題: ①rope_base の読み（runtime 公開面 /
+  IR コンテナ化 / 現状維持 — **裁定待ち**）②`AnimaFromPretrainedOptions` に `caches` 注入席
+  （テスト用）③波 1 積み残しの参照フィクスチャ系テスト（timestepsProj atol 突合等 —
+  anima-pipeline 系列の再エミットが前提）④tokenizer parity fixture の models 側への移設。
   以降: **P5 HF 実網通し + 公開準備**（gated リポの Authorization 実網確認・Cache Storage
-  数 GB quota・sideEffects: false の実測もここ）。
+  数 GB quota・sideEffects: false 実測・使い方スニペットの実リポ ID 化〈`--repo`〉・
+  base_model_relation / license 表記の最終裁定もここ）。
 
 ## Pitfalls
 
@@ -32,6 +34,8 @@
   SKIP）。deberta / sbv2 の実重み e2e は移行元リポに残置のまま（SBV2 の取り込み時に復帰）。
 - **配布資産の格納形は series ディレクトリ名でなくヘッダが正** — dist.py の格納 dtype 門が
   組み立て時に検査する（`--dtype` 付け忘れの素 F32 が PNG 門まで沈黙した実測事故が根拠）。
+- 配布形の宣言外ファイル検査は直下の `karume.json` / `README.md` だけを例外にする（それ以外が
+  混ざると `verify_dist` が止まる — 前回残骸・`io.*` の混入を後段に見せない）。
 - models パッケージの tree-shaking は「全モジュール副作用ゼロ」不変条件が前提 —
   崩れると barrel 経由の shake が静かに死ぬ。
 - JSR npm 互換層が package.json に `sideEffects: false` を出すかは**未検証**（P2〜P3 で実測）。
