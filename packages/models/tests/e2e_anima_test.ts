@@ -19,7 +19,7 @@ import type { Manifest } from "@karume/hub";
 import { AnimaPipeline, encodePng, type GeneratedImage, type ImageSize } from "../mod.ts";
 import { formatResolution } from "../anima.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { withMemoryCaches } from "./helpers/memory-cache.ts";
+import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 /** 資産の置き場（リポ直下 `models/anima-turbo/`）。 */
 const ASSETS_DIR = new URL("../../../models/anima-turbo/", import.meta.url);
@@ -211,23 +211,26 @@ Deno.test({
     const server = serveAssets(paths);
     try {
       const hubUrl = `http://127.0.0.1:${server.addr.port}`;
-      await withMemoryCaches(async (caches) => {
-        const pipeline = await AnimaPipeline.fromPretrained({ repo: REPO, hubUrl }, { preset });
-        try {
-          await assertReferencePng("fromPretrained-512", pipeline, resolution, REFERENCE[1].sha256);
-        } finally {
-          pipeline.dispose();
-        }
-        // 取得したものは全て `karume/1` 名前空間へ入る（無認証経路）。実 Cache Storage を
-        // 汚していないことを、差し替えたメモリ側に現物があることで示す。
-        const cached = await caches.open("karume/1");
-        const entries = (await cached.keys()).length;
-        if (entries !== paths.size) {
-          throw new Error(
-            `キャッシュ名前空間 karume/1 のエントリ数が ${entries}（期待 ${paths.size}）`,
-          );
-        }
+      // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
+      const caches = new MemoryCacheStorage();
+      const pipeline = await AnimaPipeline.fromPretrained({ repo: REPO, hubUrl }, {
+        preset,
+        caches,
       });
+      try {
+        await assertReferencePng("fromPretrained-512", pipeline, resolution, REFERENCE[1].sha256);
+      } finally {
+        pipeline.dispose();
+      }
+      // 取得したものは全て `karume/1` 名前空間へ入る（無認証経路）。注入した側に現物があることで、
+      // 注入席が末端の取得層まで届いていること（= 実キャッシュを汚していないこと）を示す。
+      const cached = await caches.open("karume/1");
+      const entries = (await cached.keys()).length;
+      if (entries !== paths.size) {
+        throw new Error(
+          `キャッシュ名前空間 karume/1 のエントリ数が ${entries}（期待 ${paths.size}）`,
+        );
+      }
     } finally {
       await server.shutdown();
     }

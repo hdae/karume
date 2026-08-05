@@ -18,10 +18,11 @@
   README 自動生成（**英語** — `karume.modelcard`・数値は全て manifest 導出）を実装済み。
   rope_base の読みは裁定 a で解消（runtime 公開面に `parseSafetensors` / `tensorBytes` —
   ADR 0008 追記）。`AnimaPipeline` は `using` 対応（`[Symbol.dispose]`）。
-  base_model_relation = quantized・license 3 値継承はユーザー裁定で確定。残る宿題:
-  ②`AnimaFromPretrainedOptions` に `caches` 注入席（テスト用）③波 1 積み残しの参照
-  フィクスチャ系テスト（timestepsProj atol 突合等 — anima-pipeline 系列の再エミットが前提）
-  ④tokenizer parity fixture の models 側への移設。
+  base_model_relation = quantized・license 3 値継承はユーザー裁定で確定。宿題②は解消済み
+  （`AnimaFromPretrainedOptions` に `caches` / `fetch` 注入席 + hub 公開面に `clearHubCache` —
+  ADR 0038 追記）。残る宿題: ③波 1 積み残しの参照フィクスチャ系テスト（timestepsProj atol
+  突合等 — anima-pipeline 系列の再エミットが前提）④tokenizer parity fixture の models 側への
+  移設。
   以降: **P5 HF 実網通し + 公開準備**（gated リポの Authorization 実網確認・Cache Storage
   数 GB quota・sideEffects: false 実測・使い方スニペットの実リポ ID 化〈`--repo`〉・
   公開 README 群〈リポ直下 + packages/*〉の英語起草もここ）。

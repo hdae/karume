@@ -72,24 +72,3 @@ export class MemoryCacheStorage implements CacheStorage {
 
 const urlOf = (request: RequestInfo | URL): string =>
   typeof request === "string" ? request : request instanceof URL ? request.href : request.url;
-
-/**
- * `globalThis.caches` をメモリ実装へ差し替えて `body` を走らせ、必ず元へ戻す。
- *
- * NOTE: global 経由なのは、`AnimaPipeline.fromPretrained` が hub の `caches` / `fetch` 注入口を
- * **公開面に持たない**ため（models の公開 API を通して注入する手段が無い）。取得層は
- * `opts.caches ?? globalThis.caches` を**呼び出し時に**引くので、この差し替えが末端まで届く。
- */
-export const withMemoryCaches = async <T>(
-  body: (caches: MemoryCacheStorage) => Promise<T>,
-): Promise<T> => {
-  const original = Object.getOwnPropertyDescriptor(globalThis, "caches");
-  if (original === undefined) throw new Error("memory-cache: globalThis.caches が無い環境");
-  const memory = new MemoryCacheStorage();
-  Object.defineProperty(globalThis, "caches", { value: memory, configurable: true });
-  try {
-    return await body(memory);
-  } finally {
-    Object.defineProperty(globalThis, "caches", original);
-  }
-};

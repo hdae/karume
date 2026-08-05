@@ -130,6 +130,10 @@ export type AnimaFromPretrainedOptions = AnimaPipelineOptions & {
   readonly headers?: HeadersInit;
   readonly onProgress?: (progress: AssetProgress) => void;
   readonly onCacheError?: (diagnostic: CacheDiagnostic) => void;
+  /** `fetch` の差し替え（テスト・カスタム輸送用）。 */
+  readonly fetch?: typeof globalThis.fetch;
+  /** `CacheStorage` の差し替え（テスト用）。 */
+  readonly caches?: CacheStorage;
 };
 
 /** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
@@ -365,6 +369,8 @@ export class AnimaPipeline {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),
       ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+      ...(options.caches === undefined ? {} : { caches: options.caches }),
     };
     const loaded = await loadManifest(repoRef, hubOptions);
     const files = resolveFiles(loaded.manifest, options.preset);
