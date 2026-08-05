@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 # numpy は safetensors.torch の save/load が内部で要求する（torch 経由では入らない）。
 dependencies = ["numpy>=2.0", "safetensors>=0.8.0", "torch>=2.13.0"]
 
+[project.scripts]
+karume = "karume.cli:main"
+
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
 

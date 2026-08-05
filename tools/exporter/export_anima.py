@@ -22,6 +22,7 @@ docs/research/2026-08-02-anima-recon.md）。素の diffusers モジュールは
     uv run --group anima python export_anima.py --dtype f16      # → models/anima-f16/
     uv run --group anima python export_anima.py --dtype i8       # → models/anima-i8/（DiT のみ）
     uv run --group anima python export_anima.py --dtype f16 --dit-graph dyn  # → …-f16-dyn/
+    uv run --group anima karume export --dtype f16 --dit-graph dyn           # CLI 経由（同じ）
 
 MUST: `--dit-graph dyn` は **transformer 専用の追加系列**で、静的系列を置き換えない
 （既存資産・E2E・tolerance を 1 つも動かさないのが波 T2 の前提）。patchify /
@@ -656,7 +657,7 @@ def verify_target(target: str, args: argparse.Namespace) -> list[dict[str, Any]]
     return report
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument(
@@ -711,7 +712,7 @@ def main() -> None:
         help="export 前に重みへ焼き込む LoRA（transformer / text_conditioner に効く）",
     )
     parser.add_argument("--lora-scale", type=float, default=1.0, help="LoRA の倍率")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.out is None:
         root = DEFAULT_OUT_ROOTS[args.dtype]
         args.out = root.with_name(f"{root.name}{DYN_SUFFIX}") if args.dit_graph == "dyn" else root

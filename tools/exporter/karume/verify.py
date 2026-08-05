@@ -7,10 +7,13 @@ packages/runtime/src/format/container.ts（配布形との
 
 MUST: ここは fail loudly の門であって近似の場ではない — 未知キーも非正準表記も
 黙って無視せず、必ず例外にする（未リリースにつき前方互換チャネルは持たない）。
+
+    uv run karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -726,3 +729,34 @@ def verify_model(path: str | Path) -> IrGraph:
     assert_runtime_support(graph)
     assert_op_contracts(graph)
     return graph
+
+
+# ---- CLI ------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="配布形 safetensors を IR v1 の全規則で検証する")
+    parser.add_argument(
+        "models", type=Path, nargs="+", help="検証する model.safetensors（複数指定可）"
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """指定された配布形を 1 本ずつ検証する。
+
+    MUST: 落ちたファイルで止める（残りを検証して最後にまとめない）— 例外は規則違反の
+    位置まで綴ってあるので、そのまま送出するのが最も情報量が多い。
+    """
+    args = build_parser().parse_args(argv)
+    for path in args.models:
+        graph = verify_model(path)
+        print(
+            f"{path}: nodes={len(graph.nodes)} initializers={len(graph.initializers)}"
+            f" inputs={len(graph.inputs)} outputs={len(graph.outputs)}"
+            f" symbols={','.join(graph.symbols) if graph.symbols else '（静的）'}"
+        )
+
+
+if __name__ == "__main__":
+    main()
