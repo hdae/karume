@@ -1,0 +1,111 @@
+{
+  "format": "karume/1",
+  "generator": "karume/0.1.0",
+  "pipeline": "anima/1",
+  "components": {
+    "text_encoder": {
+      "file": {
+        "path": "text_encoder/model.safetensors",
+        "size": 42,
+        "sha256": "14a36a9dbd47cb0288f910d3c713008bef9a97ed11f4816082fe40d592c991b9"
+      }
+    },
+    "text_conditioner": {
+      "file": {
+        "path": "text_conditioner/model.safetensors",
+        "size": 46,
+        "sha256": "6c2c839f36130ea9889e282b706f93939337823efe553b27dc1c2bbf4d94be7e"
+      }
+    },
+    "transformer": {
+      "variants": {
+        "f16": {
+          "file": {
+            "path": "transformer/model.f16.safetensors",
+            "size": 45,
+            "sha256": "34e402b013ecd081136a12177f61d0c8bc861849e27b97e4a8af10f8e98e7e1e"
+          },
+          "extras": {
+            "rope_base": {
+              "path": "transformer/rope_base.safetensors",
+              "size": 45,
+              "sha256": "9b7060f4da16b75050e943f51334ae676699efaf73c86db253b248f5f7c8202e"
+            }
+          }
+        },
+        "i8": {
+          "file": {
+            "path": "transformer/model.i8.safetensors",
+            "size": 44,
+            "sha256": "9ee4f749d4f6e27b29c760a4ebab8cac2cc64c7e8fb9282ac314056e6dc39e32"
+          },
+          "extras": {
+            "rope_base": {
+              "path": "transformer/rope_base.safetensors",
+              "size": 45,
+              "sha256": "9b7060f4da16b75050e943f51334ae676699efaf73c86db253b248f5f7c8202e"
+            }
+          }
+        }
+      }
+    },
+    "rope_alias": {
+      "file": {
+        "path": "transformer/rope_base.safetensors",
+        "size": 45,
+        "sha256": "9b7060f4da16b75050e943f51334ae676699efaf73c86db253b248f5f7c8202e"
+      }
+    },
+    "vae_decoder": {
+      "file": {
+        "path": "vae_decoder/model.safetensors",
+        "size": 41,
+        "sha256": "422c2a6d4a1839415af25db2feb032c5df824df03f023da868cb4fabd6a6aec4"
+      }
+    },
+    "tokenizer": {
+      "file": {
+        "path": "tokenizer/qwen2-tokenizer.json",
+        "size": 42,
+        "sha256": "38793e49c2a2a1a2376b8677e804e42b9def9104e9b3b53d5b8fbc1a3d096449"
+      }
+    }
+  },
+  "presets": {
+    "f16": {
+      "weights": {
+        "transformer": "f16"
+      },
+      "session": {}
+    },
+    "w8a8-s16": {
+      "weights": {
+        "transformer": "i8"
+      },
+      "session": {
+        "linearCompute": "i8a8",
+        "attentionCompute": "i8a8",
+        "attentionScoreStorage": "f16"
+      }
+    },
+    "f16-c16": {
+      "weights": {
+        "transformer": "f16"
+      },
+      "session": {
+        "linearCompute": "f16",
+        "attentionCompute": "f16"
+      },
+      "gpuFeatures": {
+        "shaderF16": true
+      }
+    }
+  },
+  "defaultPreset": "w8a8-s16",
+  "pipelineConfig": {
+    "defaults": {
+      "steps": 8,
+      "guidanceScale": 1
+    }
+  }
+}

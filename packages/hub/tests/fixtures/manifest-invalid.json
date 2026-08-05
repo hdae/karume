@@ -1,0 +1,1032 @@
+{
+  "note": "ADR 0038 §1〜§3 の各検査が『その検査のエラー型で』赤くなることの正本表。error は throw されるべきクラス名。規模上限（components 65 / presets 33 / pipelineConfig 256KiB 超 / manifest 1MiB 超）だけは手書きが非現実的なのでテスト側で組み立てる。",
+  "cases": [
+    {
+      "name": "envelope-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "minRuntime": "0.1.0",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "format-unknown-major",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "format-foreign",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "diffusers/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "pipeline-without-major",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "pipeline-non-integer-major",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1.0",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "generator-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "pipeline-config-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p"
+      }
+    },
+    {
+      "name": "components-empty",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {},
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "presets-empty",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": {},
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "default-preset-dangling",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "q",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "default-preset-not-string",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": 0,
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "proto-key-as-component-name",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "__proto__": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "proto-key-inside-pipeline-config",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": { "defaults": { "constructor": { "steps": 8 } } }
+      }
+    },
+    {
+      "name": "component-file-and-variants",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            },
+            "variants": {
+              "f16": {
+                "file": {
+                  "path": "c/model.f16.safetensors",
+                  "size": 8,
+                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                }
+              }
+            }
+          }
+        },
+        "presets": { "p": { "weights": { "c": "f16" }, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "component-neither-file-nor-variants",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": { "c": {} },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "component-variants-empty",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": { "c": { "variants": {} } },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "component-extras-alongside-variants",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "variants": {
+              "f16": {
+                "file": {
+                  "path": "c/model.f16.safetensors",
+                  "size": 8,
+                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                }
+              }
+            },
+            "extras": {
+              "rope": {
+                "path": "c/rope.safetensors",
+                "size": 4,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            }
+          }
+        },
+        "presets": { "p": { "weights": { "c": "f16" }, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "file-ref-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "repo": "someone/else"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "sha256-uppercase",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "sha256-too-short",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "sha256-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": { "c": { "file": { "path": "c/model.safetensors", "size": 4 } } },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "size-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "size-zero",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 0,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "size-negative",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": -1,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "size-fractional",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4.5,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "size-over-16gib",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 17179869185,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "path-parent-traversal",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/../../etc/passwd",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "path-current-dir-segment",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/./model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "path-leading-slash",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "/c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "path-double-slash",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c//model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "path-trailing-slash",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors/",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "path-leading-dot-segment",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": ".git/config",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "path-forbidden-character",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model safetensors?x=1",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "path-empty",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "duplicate-path-size-mismatch",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "shared/rope.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          },
+          "d": {
+            "file": {
+              "path": "shared/rope.safetensors",
+              "size": 8,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "duplicate-path-sha256-mismatch",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "shared/rope.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          },
+          "d": {
+            "file": {
+              "path": "shared/rope.safetensors",
+              "size": 4,
+              "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "weights-missing-key",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "net": {
+            "variants": {
+              "f16": {
+                "file": {
+                  "path": "net/model.f16.safetensors",
+                  "size": 8,
+                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                }
+              },
+              "i8": {
+                "file": {
+                  "path": "net/model.i8.safetensors",
+                  "size": 4,
+                  "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                }
+              }
+            }
+          }
+        },
+        "presets": { "p": { "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "weights-incomplete-mapping",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "net": {
+            "variants": {
+              "f16": {
+                "file": {
+                  "path": "net/model.f16.safetensors",
+                  "size": 8,
+                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                }
+              }
+            }
+          },
+          "other": {
+            "variants": {
+              "i8": {
+                "file": {
+                  "path": "other/model.i8.safetensors",
+                  "size": 4,
+                  "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                }
+              }
+            }
+          }
+        },
+        "presets": { "p": { "weights": { "net": "f16" }, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "weights-names-single-file-component",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": { "c": "f16" }, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "weights-unknown-component",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": { "ghost": "f16" }, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "weights-unknown-label",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "net": {
+            "variants": {
+              "f16": {
+                "file": {
+                  "path": "net/model.f16.safetensors",
+                  "size": 8,
+                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                }
+              }
+            }
+          }
+        },
+        "presets": { "p": { "weights": { "net": "q4" }, "session": {} } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "preset-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": {
+          "p": { "weights": {}, "session": {}, "requiredLimits": { "maxBufferSize": 1 } }
+        },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "session-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": { "scoreStorage": "f16" } } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "session-submit-policy-rejected",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": { "submitPolicy": { "budgetMs": 1 } } } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "session-unknown-value",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": { "linearCompute": "i4a4" } } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "gpu-features-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": {
+          "p": { "weights": {}, "session": {}, "gpuFeatures": { "timestampQuery": true } }
+        },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "gpu-features-non-boolean",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "pipeline": "anima/1",
+        "components": {
+          "c": {
+            "file": {
+              "path": "c/model.safetensors",
+              "size": 4,
+              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            }
+          }
+        },
+        "presets": { "p": { "weights": {}, "session": {}, "gpuFeatures": { "shaderF16": "yes" } } },
+        "defaultPreset": "p",
+        "pipelineConfig": {}
+      }
+    },
+    {
+      "name": "root-is-array",
+      "error": "ManifestFormatError",
+      "manifest": []
+    }
+  ]
+}
