@@ -381,3 +381,29 @@ export const fetchAssets = async (
   }
   return assets;
 };
+
+/**
+ * karume が使うキャッシュ名前空間を**両方**消す（無認証 `karume/1` と認証隔離 `karume/1:auth`）。
+ * 「モデルを消して容量を空ける」に対応する面で、他コードの名前空間には触らない。
+ *
+ * MUST: 認証側だけ残さない — gated 資産の写しが端末に残り続ける。
+ *
+ * @returns 少なくとも 1 つが実在して消えたら `true`（元から 1 つも無ければ `false`）。
+ */
+export const clearHubCache = async (
+  options: { readonly caches?: CacheStorage } = {},
+): Promise<boolean> => {
+  const storage = options.caches ?? globalThis.caches;
+  if (storage === undefined) {
+    // 黙って no-op にしない。Cache Storage が無い環境（非セキュアオリジン等）で「消したつもり」に
+    // なるのが最悪 — 消えていない写しをアプリが消えたものとして扱う。
+    throw new Error(
+      "hub: この環境に CacheStorage が無いためキャッシュを消せない" +
+        "（options.caches で明示的に渡す）",
+    );
+  }
+  const deleted = await Promise.all(
+    [CACHE_NAMESPACE, AUTH_CACHE_NAMESPACE].map((name) => storage.delete(name)),
+  );
+  return deleted.includes(true);
+};

@@ -2,6 +2,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   type AssetProgress,
   type CacheDiagnostic,
+  clearHubCache,
   fetchAssets,
   HubFetchError,
   IntegrityError,
@@ -329,4 +330,68 @@ Deno.test("fetchAssets: cache I/O の失敗はアプリへ届く診断になる�
   assertEquals(Object.keys(assets).length, 7, "cache が死んでも取得は成立する");
   assert(diagnostics.length > 0, "quota 失敗が黙って握り潰されている");
   assertEquals(new Set(diagnostics.map((entry) => entry.op)), new Set(["put"]));
+});
+
+/** `globalThis.caches` を差し替えて `body` を走らせ、必ず元へ戻す（実キャッシュを触らせない）。 */
+const withGlobalCaches = async (
+  value: CacheStorage | undefined,
+  body: () => Promise<void>,
+): Promise<void> => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "caches");
+  if (original === undefined) throw new Error("この環境に globalThis.caches が無い");
+  Object.defineProperty(globalThis, "caches", { value, configurable: true });
+  try {
+    await body();
+  } finally {
+    Object.defineProperty(globalThis, "caches", original);
+  }
+};
+
+const populated = async (...names: readonly string[]): Promise<MemoryCacheStorage> => {
+  const caches = new MemoryCacheStorage();
+  for (const name of names) await caches.open(name);
+  return caches;
+};
+
+Deno.test("clearHubCache: karume の 2 名前空間だけを消す（他コードの名前空間は残す）", async () => {
+  const caches = await populated("karume/1", "karume/1:auth", "other/1");
+  assertEquals(await clearHubCache({ caches }), true);
+  assertEquals([...caches.namespaces.keys()], ["other/1"]);
+});
+
+Deno.test("clearHubCache: 認証側だけ残っていても消して true を返す", async () => {
+  const caches = await populated("karume/1:auth");
+  assertEquals(await clearHubCache({ caches }), true, "gated 資産の写しを残さない");
+  assertEquals([...caches.namespaces.keys()], []);
+});
+
+Deno.test("clearHubCache: 消すものが 1 つも無ければ false", async () => {
+  const caches = await populated("other/1");
+  assertEquals(await clearHubCache({ caches }), false);
+  assertEquals([...caches.namespaces.keys()], ["other/1"]);
+});
+
+Deno.test("clearHubCache: caches を渡すとそちらだけを消す（globalThis には触らない）", async () => {
+  const injected = await populated("karume/1");
+  const global = await populated("karume/1");
+  await withGlobalCaches(global, async () => {
+    assertEquals(await clearHubCache({ caches: injected }), true);
+  });
+  assertEquals([...injected.namespaces.keys()], []);
+  assertEquals([...global.namespaces.keys()], ["karume/1"]);
+});
+
+Deno.test("clearHubCache: caches 省略時は globalThis.caches を消す", async () => {
+  const global = await populated("karume/1", "karume/1:auth");
+  await withGlobalCaches(global, async () => {
+    assertEquals(await clearHubCache(), true);
+  });
+  assertEquals([...global.namespaces.keys()], []);
+});
+
+Deno.test("clearHubCache: CacheStorage が無い環境は fail loudly（黙って no-op にしない）", async () => {
+  await withGlobalCaches(undefined, async () => {
+    const error = await assertRejects(() => clearHubCache(), Error);
+    assert(error.message.includes("CacheStorage"), `${error.message} が原因を名指ししていない`);
+  });
 });

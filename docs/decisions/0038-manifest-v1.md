@@ -440,3 +440,11 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   `navigator.storage.persist()` 案内）/ JSR npm 互換層の `sideEffects: false` 出力 /
   **gated リポの実網取得**（HF の LFS はクロスオリジンリダイレクトで `Authorization` が
   落ちるため、署名付き URL で成立するかの確認）。
+
+## 追記
+
+- 2026-08-05: hub の公開面に `clearHubCache(options?)` を追加（「キャッシュを消して容量を
+  空ける」の利用者ストーリー）。§5 の 2 名前空間（`karume/1` / `karume/1:auth`）を**両方**消し、
+  他コードの名前空間には触らない — 認証側だけ残すと gated 資産の写しが端末に残る。1 つでも
+  実在して消えたら `true`。`caches` 省略時は `globalThis.caches` を使い、Cache Storage が無い
+  環境（非セキュアオリジン等）は fail loudly（「消したつもり」を作らない）。

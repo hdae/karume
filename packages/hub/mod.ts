@@ -5,7 +5,7 @@
  * 面は利用者ストーリーに対応する — manifest を読む（{@link parseManifest} /
  * {@link loadManifest}）/ 実行構成を選ぶ（{@link resolveFiles}）/ 資産を取る
  * （{@link fetchAssets}）/ 失敗を型で捌く（{@link HubError} 以下）/ キャッシュの診断を受け取る
- * （{@link CacheDiagnostic}）。
+ * （{@link CacheDiagnostic}）/ キャッシュを消して容量を空ける（{@link clearHubCache}）。
  *
  * 仕様の正本は `docs/decisions/0038-manifest-v1.md`。
  */
@@ -28,7 +28,7 @@ export type {
 export { resolveFiles } from "./src/resolve.ts";
 export type { ResolvedFiles } from "./src/resolve.ts";
 
-export { fetchAssets, loadManifest } from "./src/fetch.ts";
+export { clearHubCache, fetchAssets, loadManifest } from "./src/fetch.ts";
 export type {
   AssetPhase,
   AssetProgress,
