@@ -14,7 +14,13 @@ export { ContainerError, openModel } from "./src/format/container.ts";
 export type { KarumeModel } from "./src/format/container.ts";
 export { DimError } from "./src/format/dims.ts";
 export { IrError } from "./src/format/ir.ts";
-export { SafetensorsError } from "./src/format/safetensors.ts";
+/**
+ * safetensors 厳格リーダ（被覆・整列・dtype 検査込み）。IR コンテナでない付帯資産
+ * （例: Anima の rope 素表 — ADR 0038 §2 の extras）を models 側が同じ門で読むための面で、
+ * 汎用ローダの提供が目的ではない（DECIDED: 二重実装の解消 — ADR 0008 追記 2026-08-05）。
+ */
+export { parseSafetensors, SafetensorsError, tensorBytes } from "./src/format/safetensors.ts";
+export type { SafetensorsDtype, SafetensorsFile, TensorView } from "./src/format/safetensors.ts";
 
 export {
   acquireGpu,

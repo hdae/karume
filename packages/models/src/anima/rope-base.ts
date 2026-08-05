@@ -1,13 +1,11 @@
 /**
  * `rope_base.safetensors`（軸別 rope 素表）の読み取り。
  *
- * ## なぜ models 側に最小の safetensors 読みを持つのか
- *
  * 素表は IR コンテナではない**素の safetensors**（`transformer` の `extras.rope_base` —
- * ADR 0038 §2）なので `openModel` では開けず、`@karume/runtime` の公開面（ADR 0008 の
- * 薄い面）は `parseSafetensors` を出していない。したがってここは「F32・rank2 の表を数本
- * 引く」だけに限定した最小の読み手を持つ。汎用のリーダにはしない — 用途が広がったら
- * runtime 側の公開面に載せるかを設計判断する（現状はそこまでの需要が無い）。
+ * ADR 0038 §2）なので `openModel` では開けない。ファイルの解析は `@karume/runtime` 公開面の
+ * `parseSafetensors`（厳格リーダ — データ節の被覆・整列・dtype はそちらで検査済み）に委ね、
+ * この層は「F32・rank2 の表を軸ごとに引き、行数を突き合わせる」用途特化の検査だけを持つ
+ * （DECIDED: 二重実装の解消として runtime 公開面へ載せた — ADR 0008 追記 2026-08-05）。
  *
  * ## rope 表は「計算」ではなく「素表からの並べ替え」
  *
@@ -20,13 +18,17 @@
  * `seq = arange(max(max_size))` の長さ = モデル側の位置表の天井そのもの。
  */
 
+import { parseSafetensors } from "@karume/runtime";
+import type { SafetensorsFile } from "@karume/runtime";
+
 /** 素表のテンソルキー（順序は t → h → w のブロック順）。 */
 const ROPE_AXES = ["t", "h", "w"] as const;
 
-const HEADER_LENGTH_BYTES = 8;
 /** F32 のみ受ける（素表は cos / sin の実数表で、他の格納形は上流に存在しない）。 */
 const F32_DTYPE = "F32";
-const F32_BYTES = 4;
+
+/** 素表に在ってよいテンソルの全キー（想定外の同居は fail loudly）。 */
+const EXPECTED_KEYS = new Set(ROPE_AXES.flatMap((axis) => [`cos_${axis}`, `sin_${axis}`]));
 
 /** 軸ごとの cos / sin 素表（行 = 位置・列 = その軸のブロック幅）。 */
 export type RopeBase = {
@@ -45,92 +47,21 @@ type RawTable = {
   readonly shape: readonly [number, number];
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const asIndex = (value: unknown, where: string): number => {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`rope 素表 ${where}: ${String(value)} が非負整数でない`);
+/** F32・rank2 の表を 1 本引く（整列は `parseSafetensors` が保証済み — view はゼロコピー）。 */
+const tableOf = (file: SafetensorsFile, name: string): RawTable => {
+  const view = file.tensors.get(name);
+  if (view === undefined) throw new Error(`rope 素表に '${name}' が無い`);
+  if (view.dtype !== F32_DTYPE) {
+    throw new Error(`rope 素表 '${name}': 格納 dtype が ${view.dtype}（F32 が必要）`);
   }
-  return value;
-};
-
-/**
- * `[u64 LE ヘッダ長][ヘッダ JSON][データ節]` から F32・rank2 の表だけを引く。
- * data_offsets はデータ節先頭からの相対。
- */
-const readF32Tables = (buffer: ArrayBuffer): ReadonlyMap<string, RawTable> => {
-  if (buffer.byteLength < HEADER_LENGTH_BYTES) {
-    throw new Error(`rope 素表: ファイルが短すぎる（${buffer.byteLength} バイト）`);
+  if (view.shape.length !== 2) {
+    throw new Error(`rope 素表 '${name}': rank が 2 でない`);
   }
-  const rawHeaderLength = new DataView(buffer).getBigUint64(0, true);
-  if (rawHeaderLength > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`rope 素表: ヘッダ長 ${rawHeaderLength} が安全整数を超える`);
-  }
-  const headerLength = Number(rawHeaderLength);
-  const dataStart = HEADER_LENGTH_BYTES + headerLength;
-  if (dataStart > buffer.byteLength) {
-    throw new Error(`rope 素表: ヘッダ長 ${headerLength} がファイル長を超える`);
-  }
-  let header: unknown;
-  try {
-    header = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(
-        new Uint8Array(buffer, HEADER_LENGTH_BYTES, headerLength),
-      ),
-    );
-  } catch (cause) {
-    throw new Error("rope 素表: ヘッダを JSON として読めない", { cause });
-  }
-  if (!isRecord(header)) throw new Error("rope 素表: ヘッダがオブジェクトでない");
-
-  const tables = new Map<string, RawTable>();
-  for (const name of Object.keys(header)) {
-    if (name === "__metadata__") continue;
-    const raw = header[name];
-    if (!isRecord(raw)) throw new Error(`rope 素表 '${name}': 項目がオブジェクトでない`);
-    if (raw["dtype"] !== F32_DTYPE) {
-      throw new Error(`rope 素表 '${name}': 格納 dtype が ${String(raw["dtype"])}（F32 が必要）`);
-    }
-    const shapeRaw = raw["shape"];
-    if (!Array.isArray(shapeRaw) || shapeRaw.length !== 2) {
-      throw new Error(`rope 素表 '${name}': rank が 2 でない`);
-    }
-    const shape: readonly [number, number] = [
-      asIndex(shapeRaw[0], `'${name}'.shape[0]`),
-      asIndex(shapeRaw[1], `'${name}'.shape[1]`),
-    ];
-    const offsets = raw["data_offsets"];
-    if (!Array.isArray(offsets) || offsets.length !== 2) {
-      throw new Error(`rope 素表 '${name}': data_offsets が 2 要素の配列でない`);
-    }
-    const begin = asIndex(offsets[0], `'${name}'.data_offsets[0]`);
-    const end = asIndex(offsets[1], `'${name}'.data_offsets[1]`);
-    const expected = shape[0] * shape[1] * F32_BYTES;
-    if (end - begin !== expected) {
-      throw new Error(
-        `rope 素表 '${name}': サイズ不一致 offsets=${end - begin} 期待=${expected}`,
-      );
-    }
-    if (dataStart + end > buffer.byteLength) {
-      throw new Error(`rope 素表 '${name}': データ節の範囲外`);
-    }
-    if ((dataStart + begin) % F32_BYTES !== 0) {
-      // コピーを作らず typed array view を張る前提が崩れるため受理しない。
-      throw new Error(`rope 素表 '${name}': 絶対 offset が 4 バイト境界に整列していない`);
-    }
-    tables.set(name, {
-      data: new Float32Array(buffer, dataStart + begin, shape[0] * shape[1]),
-      shape,
-    });
-  }
-  return tables;
-};
-
-const tableOf = (tables: ReadonlyMap<string, RawTable>, name: string): RawTable => {
-  const table = tables.get(name);
-  if (table === undefined) throw new Error(`rope 素表に '${name}' が無い`);
-  return table;
+  const shape: readonly [number, number] = [view.shape[0], view.shape[1]];
+  return {
+    data: new Float32Array(file.buffer, view.byteOffset, shape[0] * shape[1]),
+    shape,
+  };
 };
 
 /**
@@ -140,14 +71,17 @@ const tableOf = (tables: ReadonlyMap<string, RawTable>, name: string): RawTable 
  * 取り違えが範囲内に収まって黙って通る。
  */
 export const parseRopeBase = (buffer: ArrayBuffer): RopeBase => {
-  const tables = readF32Tables(buffer);
+  const file = parseSafetensors(buffer);
+  for (const name of file.tensors.keys()) {
+    if (!EXPECTED_KEYS.has(name)) throw new Error(`rope 素表に想定外のテンソル '${name}' がある`);
+  }
   const cos: Float32Array[] = [];
   const sin: Float32Array[] = [];
   const widths: number[] = [];
   let rows: number | undefined;
   for (const axis of ROPE_AXES) {
-    const cosTable = tableOf(tables, `cos_${axis}`);
-    const sinTable = tableOf(tables, `sin_${axis}`);
+    const cosTable = tableOf(file, `cos_${axis}`);
+    const sinTable = tableOf(file, `sin_${axis}`);
     if (cosTable.shape[0] !== sinTable.shape[0] || cosTable.shape[1] !== sinTable.shape[1]) {
       throw new Error(`rope 素表 ${axis} の cos / sin で shape が違う`);
     }
