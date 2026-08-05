@@ -1,0 +1,1243 @@
+/**
+ * op の CPU 参照実装（素朴・GPU 非依存）。カーネルの数値検証（ADR 0005 の段 2）で
+ * GPU 出力と突合するオラクル。
+ *
+ * 方針: 速度を一切考えない直訳で書く。f32 の elementwise は演算ごとに `Math.fround` して
+ * f32 の丸めに寄せ、縮約（matmul / 行 reduce）は f64 で積んで格納時に 1 度だけ丸める
+ * （GPU 側は f32 逐次累積なので完全一致はしない — だから allclose で判定する）。
+ * i32 / bool は近似の余地が無いので**厳密一致**が期待値（突合側で allclose を使わない）。
+ *
+ * MUST: 座標→添字の計算を codegen と共有しない。stride の組み立てはまさに検証したい対象で、
+ * 同じ実装を呼べばテストは stride バグを検出できなくなる（意図的な二重実装）。
+ * MUST: 値式も codegen と別形にする（cast の truncate は WGSL の `i32()` に対し `Math.trunc`、
+ * bool 化は `select(…)` に対し比較演算）。同じ式を写すと誤りが両側で相殺する。
+ */
+
+import type { IrDtype } from "../format/ir.ts";
+import {
+  arityFits,
+  assertDtype,
+  assertSlotDtype,
+  attentionScale,
+  type BinaryOpName,
+  castTargetDtype,
+  catDim,
+  computeOutputShape,
+  conv1dAttrs,
+  conv2dAttrs,
+  convTranspose1dAttrs,
+  describeArity,
+  flipDim,
+  layerNormAttrs,
+  maskedFillValue,
+  numel,
+  type OpContract,
+  outputDtypeOf,
+  padAttrs,
+  permuteDims,
+  reduceDim,
+  type ReduceOpName,
+  resolveOpContract,
+  rmsNormEps,
+  scalarParamValues,
+  sliceAttrs,
+  type UnaryOpName,
+} from "../ops.ts";
+
+/** 参照実装に渡された値が契約に合わない（要素数と shape の食い違いなど）。 */
+export class ReferenceOpError extends Error {
+  override readonly name = "ReferenceOpError";
+}
+
+type RefTensorOf<D extends IrDtype, A> = {
+  readonly dtype: D;
+  readonly shape: readonly number[];
+  readonly data: A;
+};
+
+/** 公開 Tensor と同じ dtype 判別ユニオン（bool は u32 の 0 / 1 — ADR 0009）。 */
+export type RefTensor =
+  | RefTensorOf<"f32", Float32Array<ArrayBuffer>>
+  | RefTensorOf<"i32", Int32Array<ArrayBuffer>>
+  | RefTensorOf<"bool", Uint32Array<ArrayBuffer>>;
+
+/** 渡された TypedArray から dtype を決める（配列型と判別子の対応は 1 箇所に置く）。 */
+export const refTensor = (
+  shape: readonly number[],
+  data: Float32Array<ArrayBuffer> | Int32Array<ArrayBuffer> | Uint32Array<ArrayBuffer>,
+): RefTensor => {
+  if (data.length !== numel(shape)) {
+    throw new ReferenceOpError(`要素数 ${data.length} が shape [${shape.join(",")}] と合わない`);
+  }
+  if (data instanceof Float32Array) return { dtype: "f32", shape, data };
+  if (data instanceof Int32Array) return { dtype: "i32", shape, data };
+  return { dtype: "bool", shape, data };
+};
+
+/**
+ * 数値列を dtype ごとの TypedArray に落とす。i32 は `Int32Array` の格納そのものが
+ * 2 の補数ラップになるので、GPU 側（WGSL の i32 演算）と同じ折り返しになる。
+ */
+const materialize = (
+  dtype: IrDtype,
+  shape: readonly number[],
+  values: readonly number[],
+): RefTensor => {
+  switch (dtype) {
+    case "f32":
+      return { dtype, shape, data: Float32Array.from(values) };
+    case "i32":
+      return { dtype, shape, data: Int32Array.from(values) };
+    case "bool":
+      return { dtype, shape, data: Uint32Array.from(values) };
+  }
+};
+
+/**
+ * erf のマクローリン級数（f64 で収束するまで加算）。|x| > 4 では erfc(x) < 1.6e-8 で
+ * f32 の 1.0 と区別できないため ±1 に丸める。
+ *
+ * MUST: GPU 側（Abramowitz–Stegun 7.1.26）と同じ式を写さない。同じ近似式なら誤差が相殺し、
+ * gelu の突合テストが恒真になる。
+ */
+const erf = (x: number): number => {
+  const a = Math.abs(x);
+  if (a > 4) return Math.sign(x);
+  let term = a;
+  let sum = a;
+  for (let n = 1; n < 200; n += 1) {
+    term *= -(a * a) / n;
+    const contribution = term / (2 * n + 1);
+    sum += contribution;
+    if (Math.abs(contribution) < 1e-18 * Math.abs(sum)) break;
+  }
+  return Math.sign(x) * (2 / Math.sqrt(Math.PI)) * sum;
+};
+
+/**
+ * f32 → f32 の unary（bitwise_not は bool 専業、比較 3 本は bool を返すので別扱い）。
+ * 第 2 引数は attrs 由来のスカラ（{@link scalarParamValues} の並び）。
+ *
+ * MUST: `log1p` は `Math.log1p` を使う（GPU 側の補正式を写さない）。同じ式を書くと
+ * 「補正が外れている」ことを突合が検出できなくなる — erf / softmax と同じ規律。
+ * MUST: `leaky_relu` / `clamp` も GPU 側の select 形を写さず、比較の向きを逆にした
+ * 分岐で書く。NaN では全ての比較が false になるので、どちらの形でも NaN は素通りする
+ * （= torch と同じ伝播）。
+ */
+const UNARY_F32: Readonly<
+  Record<
+    Exclude<UnaryOpName, "bitwise_not" | "ge_scalar" | "le_scalar" | "gt_scalar">,
+    (x: number, scalars: readonly number[]) => number
+  >
+> = {
+  neg: (x) => -x,
+  abs: (x) => Math.abs(x),
+  exp: (x) => Math.exp(x),
+  log: (x) => Math.log(x),
+  log1p: (x) => Math.log1p(x),
+  sqrt: (x) => Math.sqrt(x),
+  tanh: (x) => Math.tanh(x),
+  sigmoid: (x) => 1 / (1 + Math.exp(-x)),
+  relu: (x) => Math.max(x, 0),
+  // torch 既定の gelu（approximate="none"）= 0.5·x·(1 + erf(x/√2))
+  gelu: (x) => 0.5 * x * (1 + erf(x / Math.SQRT2)),
+  clamp: (x, [min, max]) => (x < min ? min : x > max ? max : x),
+  // MUST: 分岐の向きを `x >= min ? x : min` にしない — NaN で false へ落ちて min を返し、
+  // torch の `clamp(NaN, min) = NaN` から静かに外れる（この 1 本が向きの検出器）。
+  // GPU 側は NaN 伝播をビット列判定の外殻で担う（src/codegen/elementwise.ts）— 参照は
+  // その式を写さず独立に書く（log1p / erf と同じ規律）。
+  clamp_min: (x, [min]) => (x < min ? min : x),
+  leaky_relu: (x, [slope]) => (x < 0 ? slope * x : x),
+};
+
+/** f32 → bool の比較（attrs のスカラと比べる）。bool は u32 の 0 / 1（ADR 0009）。 */
+const COMPARE_SCALAR: Readonly<
+  Record<"ge_scalar" | "le_scalar" | "gt_scalar", (x: number, value: number) => boolean>
+> = {
+  ge_scalar: (x, value) => x >= value,
+  le_scalar: (x, value) => x <= value,
+  gt_scalar: (x, value) => x > value,
+};
+
+/** f32 の算術（比較 / 論理は別表 — 出力 dtype が違う）。 */
+const BINARY_F32: Readonly<Partial<Record<BinaryOpName, (a: number, b: number) => number>>> = {
+  add: (a, b) => a + b,
+  sub: (a, b) => a - b,
+  mul: (a, b) => a * b,
+  div: (a, b) => a / b,
+};
+
+/**
+ * i32 の二項演算。JS の数値は f64 なので、32bit へ畳む演算を明示する
+ * （`Math.imul` / `| 0`）— 素の乗算は 2^53 を超えた時点で静かに精度を失う。
+ * 解禁しているのは mul / sub のみ（契約表 — 実測グラフに出る形だけ）。
+ */
+const BINARY_I32: Readonly<Partial<Record<BinaryOpName, (a: number, b: number) => number>>> = {
+  sub: (a, b) => (a - b) | 0,
+  mul: (a, b) => Math.imul(a, b),
+};
+
+/** f32 × f32 → bool の比較（出力は u32 の 0 / 1 — ADR 0009）。 */
+const COMPARE_F32: Readonly<Partial<Record<BinaryOpName, (a: number, b: number) => boolean>>> = {
+  ge: (a, b) => a >= b,
+};
+
+/**
+ * bool × bool → bool の論理演算。
+ * MUST: GPU 側（`select` + `!= 0u`）と別形にする — JS の真偽値へ落としてから素の論理演算で
+ * 書き、数値化は最後に 1 度だけ行う。
+ */
+const BINARY_BOOL: Readonly<Partial<Record<BinaryOpName, (a: boolean, b: boolean) => boolean>>> = {
+  bitwise_and: (a, b) => a && b,
+};
+
+/** dtype ごとの二項演算子（無い組み合わせは契約検査を通っていても参照実装が無い = 内部矛盾）。 */
+const binaryEvaluator = (
+  op: BinaryOpName,
+  dtype: IrDtype,
+): (a: number, b: number) => number => {
+  if (dtype === "bool") {
+    const logical = BINARY_BOOL[op];
+    if (logical !== undefined) return (a, b) => (logical(a !== 0, b !== 0) ? 1 : 0);
+  } else if (dtype === "i32") {
+    const integer = BINARY_I32[op];
+    if (integer !== undefined) return integer;
+  } else {
+    const compare = COMPARE_F32[op];
+    if (compare !== undefined) return (a, b) => (compare(a, b) ? 1 : 0);
+    const arithmetic = BINARY_F32[op];
+    if (arithmetic !== undefined) return (a, b) => Math.fround(arithmetic(a, b));
+  }
+  throw new ReferenceOpError(`op '${op}' に dtype '${dtype}' の参照実装が無い`);
+};
+
+export const referenceUnary = (
+  op: UnaryOpName,
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>> = {},
+): RefTensor => {
+  const contract = resolveOpContract(op);
+  assertDtype(contract, x.dtype, "reference");
+  const values = new Array<number>(x.data.length);
+  if (op === "bitwise_not") {
+    // bool（u32 の 0 / 1）の否定。WGSL 側の select とは別形（比較の結果を数値化する）。
+    for (let i = 0; i < values.length; i += 1) values[i] = x.data[i] === 0 ? 1 : 0;
+    return materialize(x.dtype, [...x.shape], values);
+  }
+  // MUST: スカラ attr は f32 へ丸めてから使う（GPU 側は params の f32 語で受け取る）。
+  const scalars = scalarParamValues(contract, attrs, "reference").map((value) =>
+    Math.fround(value)
+  );
+  const outDtype = outputDtypeOf(contract, x.dtype, "reference");
+  if (op === "ge_scalar" || op === "le_scalar" || op === "gt_scalar") {
+    const compare = COMPARE_SCALAR[op];
+    for (let i = 0; i < values.length; i += 1) values[i] = compare(x.data[i], scalars[0]) ? 1 : 0;
+    return materialize(outDtype, [...x.shape], values);
+  }
+  const apply = UNARY_F32[op];
+  for (let i = 0; i < values.length; i += 1) {
+    values[i] = Math.fround(apply(x.data[i], scalars));
+  }
+  return materialize(outDtype, [...x.shape], values);
+};
+
+/**
+ * 出力の平坦添字 → 入力の平坦添字（右詰め broadcast）。
+ *
+ * MUST: stride 表を作らない。codegen 側（elementwise.ts の `elementwiseParams`）は
+ * 「右から running product を積んで 1 の次元を 0 にする」形で stride を組むので、参照側で
+ * 同じ式を書くと stride 導出の誤りが両側で相殺し、GPU との突合テストが恒真化する。
+ * ここは別構造 —「出力座標を毎要素 divmod で分解 → 入力 shape を左から Horner 展開で畳む」
+ * — で導く。相互検証の根拠は実装の独立性そのものなので、codegen とヘルパも式形も共有しない。
+ *
+ * 右詰めで入力 rank に載らない先行次元は、入力側では常に座標 0（Horner の畳み込みに入らない）。
+ * 長さ 1 の次元も同様に座標 0 へ潰れる（これが broadcast）。
+ */
+const broadcastIndex = (
+  outIndex: number,
+  outShape: readonly number[],
+  inShape: readonly number[],
+): number => {
+  const rank = outShape.length;
+  const coords = new Array<number>(rank).fill(0);
+  let rest = outIndex;
+  for (let d = rank - 1; d >= 0; d -= 1) {
+    coords[d] = rest % outShape[d];
+    rest = Math.floor(rest / outShape[d]);
+  }
+  const offset = rank - inShape.length;
+  let index = 0;
+  for (let d = 0; d < inShape.length; d += 1) {
+    const extent = inShape[d];
+    index = index * extent + (extent === 1 ? 0 : coords[offset + d]);
+  }
+  return index;
+};
+
+export const referenceBinary = (op: BinaryOpName, a: RefTensor, b: RefTensor): RefTensor => {
+  const contract = resolveOpContract(op);
+  assertDtype(contract, a.dtype, "reference");
+  assertDtype(contract, b.dtype, "reference");
+  if (a.dtype !== b.dtype) {
+    throw new ReferenceOpError(`op '${op}' の入力 dtype が混在（${a.dtype} / ${b.dtype}）`);
+  }
+  const shape = computeOutputShape(contract, [a.shape, b.shape], "reference");
+  const evaluate = binaryEvaluator(op, a.dtype);
+  const values = new Array<number>(numel(shape));
+  for (let i = 0; i < values.length; i += 1) {
+    const va = a.data[broadcastIndex(i, shape, a.shape)];
+    const vb = b.data[broadcastIndex(i, shape, b.shape)];
+    values[i] = evaluate(va, vb);
+  }
+  return materialize(outputDtypeOf(contract, a.dtype, "reference"), shape, values);
+};
+
+/**
+ * where `out = cond ? a : b`（3 者とも右詰め broadcast）。
+ *
+ * 添字の導出は {@link broadcastIndex} — 「出力座標を毎要素 divmod → 入力 shape を左から
+ * Horner」で、codegen の stride 表とは別構造（同ファイル冒頭の MUST）。
+ * MUST: 分岐の向きは torch の `where(cond, a, b)`（真なら a）。取り違えても shape も dtype も
+ * 変わらないので、値でしか検出できない（テストは a / b を別の値域で埋める）。
+ */
+export const referenceWhere = (cond: RefTensor, a: RefTensor, b: RefTensor): RefTensor => {
+  const contract = resolveOpContract("where");
+  assertSlotDtype(contract, 0, cond.dtype, "reference");
+  assertSlotDtype(contract, 1, a.dtype, "reference");
+  assertSlotDtype(contract, 2, b.dtype, "reference");
+  const shape = computeOutputShape(contract, [cond.shape, a.shape, b.shape], "reference");
+  const values = new Array<number>(numel(shape));
+  for (let i = 0; i < values.length; i += 1) {
+    values[i] = cond.data[broadcastIndex(i, shape, cond.shape)] !== 0
+      ? a.data[broadcastIndex(i, shape, a.shape)]
+      : b.data[broadcastIndex(i, shape, b.shape)];
+  }
+  return materialize(outputDtypeOf(contract, cond.dtype, "reference"), shape, values);
+};
+
+/**
+ * 最終次元の前縁和 `out[…, j] = Σ_{i ≤ j} x[…, i]`。
+ *
+ * MUST: **各出力を独立した内側ループの総和として**計算する（O(n²)）。カーネルは
+ * 走査しながら累算器を持ち回る形なので、同じ漸化式で書くと累積方向・初期値・格納位置の
+ * 誤りが両側で相殺する。行長は実測 ~10（recon §2）でテストも小さいので、素朴な二重和で
+ * 十分速い。
+ * MUST: 内側ループは **1 項ごとに `Math.fround` で丸める**（f32 の累算を 1 段ずつ再現する）。
+ * JS の数値は f64 なので、まとめて足してから 1 回だけ丸めると参照側だけが f64 精度の
+ * 総和になり、行長が伸びるほど GPU との差が「実装バグではなく丸め経路の違い」で開く
+ * （行長 300 でオラクルの分解能が許容差を食い潰す）。二重和の**独立性は保ったまま**、
+ * 丸め経路だけをカーネルに揃える。
+ */
+export const referenceCumsum = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("cumsum");
+  assertDtype(contract, x.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const dim = shape[shape.length - 1];
+  const rows = numel(shape.slice(0, -1));
+  const out = new Float32Array(numel(shape));
+  for (let row = 0; row < rows; row += 1) {
+    const base = row * dim;
+    for (let last = 0; last < dim; last += 1) {
+      let acc = 0;
+      for (let i = 0; i <= last; i += 1) acc = Math.fround(acc + x.data[base + i]);
+      out[base + last] = acc;
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * 意味論 dtype の変換。契約（src/ops.ts）どおり
+ * **f32 → 整数は 0 方向切り捨て（torch の truncate）**、**x → bool は x != 0** で、
+ * bool → 数値は u32 の 0 / 1 をそのまま読む。
+ */
+export const referenceCast = (x: RefTensor, to: IrDtype): RefTensor => {
+  const values = new Array<number>(x.data.length);
+  for (let i = 0; i < values.length; i += 1) {
+    const v = x.data[i];
+    values[i] = to === "bool" ? (v !== 0 ? 1 : 0) : to === "i32" ? Math.trunc(v) : Math.fround(v);
+  }
+  return materialize(to, [...x.shape], values);
+};
+
+/** row-major の C[m,n] = A[m,k] · B[k,n]。f64 で積んで格納時に f32 へ丸める。 */
+export const referenceMatmul = (a: RefTensor, b: RefTensor): RefTensor => {
+  const contract = resolveOpContract("matmul");
+  assertDtype(contract, a.dtype, "reference");
+  assertDtype(contract, b.dtype, "reference");
+  const shape = computeOutputShape(contract, [a.shape, b.shape], "reference");
+  const [m, n] = shape;
+  const k = a.shape[1];
+  const out = new Float32Array(m * n);
+  for (let row = 0; row < m; row += 1) {
+    for (let col = 0; col < n; col += 1) {
+      let acc = 0;
+      for (let i = 0; i < k; i += 1) acc += a.data[row * k + i] * b.data[i * n + col];
+      out[row * n + col] = Math.fround(acc);
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * バッチ matmul `C[b,m,n] = A[b,m,k] · B[b,k,n]`。matmul と同じく f64 で積んで格納時に
+ * 1 度だけ f32 へ丸める。
+ *
+ * MUST: バッチのオフセットを「行列 1 枚の要素数」から**毎バッチ独立に**組む。GPU 側は
+ * dispatch の z 軸から同じ量を導くので、片方が軸を取り違えれば必ず値が食い違う形状
+ * （B / M / K / N を全て違う長さにしたケース）で突合すること。
+ */
+export const referenceBmm = (a: RefTensor, b: RefTensor): RefTensor => {
+  const contract = resolveOpContract("bmm");
+  assertDtype(contract, a.dtype, "reference");
+  assertDtype(contract, b.dtype, "reference");
+  const shape = computeOutputShape(contract, [a.shape, b.shape], "reference");
+  const [batch, m, n] = shape;
+  const k = a.shape[2];
+  const out = new Float32Array(batch * m * n);
+  for (let item = 0; item < batch; item += 1) {
+    const aBase = item * m * k;
+    const bBase = item * k * n;
+    const cBase = item * m * n;
+    for (let row = 0; row < m; row += 1) {
+      for (let col = 0; col < n; col += 1) {
+        let acc = 0;
+        for (let i = 0; i < k; i += 1) {
+          acc += a.data[aBase + row * k + i] * b.data[bBase + i * n + col];
+        }
+        out[cBase + row * n + col] = Math.fround(acc);
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * 最終次元の gather。`out[..., j] = src[..., index[..., j]]`（先行次元は src と index で一致）。
+ *
+ * MUST: **範囲外添字は必ず throw**。CPU 参照は契約のオラクルなので、GPU 側の裁定
+ * （範囲外は NaN 汚染 — src/kernels/gather.ts）に合わせて緩めない。合わせると「契約違反の
+ * グラフが両側で同じ値になる」ので突合が違反を検出できなくなる。
+ * MUST: 添字の分解を codegen と別形にする。カーネルは出力の平坦添字を `i / J` で行へ割るが、
+ * こちらは行と列の二重ループから平坦添字を組み立てる。
+ */
+export const referenceGather = (src: RefTensor, index: RefTensor): RefTensor => {
+  const contract = resolveOpContract("gather");
+  assertSlotDtype(contract, 0, src.dtype, "reference");
+  assertSlotDtype(contract, 1, index.dtype, "reference");
+  const shape = computeOutputShape(contract, [src.shape, index.shape], "reference");
+  const cols = shape[shape.length - 1];
+  const srcCols = src.shape[src.shape.length - 1];
+  const rows = numel(shape.slice(0, -1));
+  const out = new Float32Array(numel(shape));
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const flat = row * cols + col;
+      const pick = index.data[flat];
+      if (pick < 0 || pick >= srcCols) {
+        throw new ReferenceOpError(
+          `gather の添字 index[${flat}] = ${pick} が src の最終次元 ${srcCols} の範囲外`,
+        );
+      }
+      out[flat] = src.data[row * srcCols + pick];
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * 1 軸の reduce（keepdim 無し）。縮約軸 `axis` は attrs の `dim`（既定値補完はしない）。
+ *
+ * 走査は「出力要素ごとに縮約軸を `inner` 送りで舐める」形で、最終次元（`inner == 1`）は
+ * 連続走査に退化する。GPU 側は 2 変種に分かれるが、参照は**軸を添字式で扱う 1 本**でよい
+ * （f64 で積んで最後に 1 回だけ丸める性質は軸に依らない）。
+ *
+ * bool 入力の `sum` は**真の個数**（出力 i32 — 契約表の写像）。f64 で数えてから整数配列へ
+ * 落とすので、縮約長が 2^24 を超えても丸まらない。
+ */
+export const referenceRowReduce = (
+  op: ReduceOpName,
+  x: RefTensor,
+  axis: number,
+): RefTensor => {
+  const contract = resolveOpContract(op);
+  assertDtype(contract, x.dtype, "reference");
+  const attrs = { dim: axis };
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const outDtype = outputDtypeOf(contract, x.dtype, "reference");
+  const dim = x.shape[axis];
+  const inner = numel(x.shape.slice(axis + 1));
+  const count = numel(shape);
+  const values = new Array<number>(count);
+  for (let index = 0; index < count; index += 1) {
+    // 出力添字 index = outer·inner + i。縮約軸だけを外した先頭アドレスへ戻す。
+    const base = Math.floor(index / inner) * dim * inner + (index % inner);
+    if (op === "sum") {
+      let acc = 0;
+      for (let i = 0; i < dim; i += 1) {
+        const value = x.data[base + i * inner];
+        acc += x.dtype === "bool" ? (value !== 0 ? 1 : 0) : value;
+      }
+      values[index] = outDtype === "f32" ? Math.fround(acc) : acc;
+      continue;
+    }
+    let acc = x.data[base];
+    for (let i = 1; i < dim; i += 1) {
+      const value = x.data[base + i * inner];
+      acc = op === "amax" ? Math.max(acc, value) : Math.min(acc, value);
+    }
+    values[index] = acc;
+  }
+  return materialize(outDtype, shape, values);
+};
+
+/**
+ * 要素順を変えない形の付け替え（ADR 0011 の reshape）。データは連続のまま写す。
+ * 実行系はここでバッファを別名化してコピーを出さないが、参照側は素直に写して
+ * 「別名化しても値が変わらない」ことのオラクルになる。
+ */
+export const referenceReshape = (x: RefTensor, shape: readonly number[]): RefTensor => {
+  const target = [...shape];
+  if (numel(target) !== x.data.length) {
+    throw new ReferenceOpError(
+      `reshape の要素数が合わない ${x.data.length} → [${target.join(",")}]`,
+    );
+  }
+  return materialize(x.dtype, target, Array.from(x.data));
+};
+
+/**
+ * 軸の並べ替え。`dims[d]` = 出力の次元 d が取る入力の次元番号。
+ *
+ * MUST: codegen（strided.ts）と添字計算を共有しない。あちらは「出力座標 → 入力 stride の
+ * 内積」で読む gather 形なので、こちらは逆向きの scatter 形 —「**入力**の平坦添字を入力
+ * 座標へ分解 → 出力座標へ並べ替え → 左からの Horner で出力添字を畳む」— で書く。
+ * 同じ向きで書くと stride 表の組み立て誤りが両側で相殺し、突合テストが恒真化する。
+ */
+export const referencePermute = (x: RefTensor, dims: readonly number[]): RefTensor => {
+  const rank = x.shape.length;
+  if (dims.length !== rank || new Set(dims).size !== rank) {
+    throw new ReferenceOpError(
+      `permute の dims [${dims.join(",")}] が shape [${x.shape.join(",")}] の並べ替えでない`,
+    );
+  }
+  const outShape = dims.map((dim) => {
+    const extent = x.shape[dim];
+    if (extent === undefined) {
+      throw new ReferenceOpError(`permute の dims に軸 ${dim} が入っている（rank ${rank}）`);
+    }
+    return extent;
+  });
+  const values = new Array<number>(x.data.length);
+  const coords = new Array<number>(rank).fill(0);
+  for (let flat = 0; flat < x.data.length; flat += 1) {
+    let rest = flat;
+    for (let d = rank - 1; d >= 0; d -= 1) {
+      coords[d] = rest % x.shape[d];
+      rest = Math.floor(rest / x.shape[d]);
+    }
+    let out = 0;
+    for (let d = 0; d < rank; d += 1) out = out * outShape[d] + coords[dims[d]];
+    values[out] = x.data[flat];
+  }
+  return materialize(x.dtype, outShape, values);
+};
+
+/**
+ * 長さ 1 の次元だけを目標 shape へ複製する（右詰め）。添字の導出は
+ * {@link broadcastIndex} — binary elementwise と同じ「出力座標を毎要素 divmod → 入力
+ * shape を左から Horner」で、codegen の stride 表とは別構造（同ファイル冒頭の MUST）。
+ */
+export const referenceExpand = (x: RefTensor, shape: readonly number[]): RefTensor => {
+  const target = [...shape];
+  if (target.length < x.shape.length) {
+    throw new ReferenceOpError(
+      `expand は rank を下げられない [${x.shape.join(",")}] → [${target.join(",")}]`,
+    );
+  }
+  const offset = target.length - x.shape.length;
+  x.shape.forEach((extent, index) => {
+    if (extent !== 1 && extent !== target[offset + index]) {
+      throw new ReferenceOpError(
+        `expand は長さ 1 でない次元 ${index}（${extent}）を ${target[offset + index]} にできない`,
+      );
+    }
+  });
+  const values = new Array<number>(numel(target));
+  for (let i = 0; i < values.length; i += 1) {
+    values[i] = x.data[broadcastIndex(i, target, x.shape)];
+  }
+  return materialize(x.dtype, target, values);
+};
+
+/**
+ * 静的軸・静的範囲の切り出し（ADR 0014）。`dim` 軸の `[start, end)` を取り出す。
+ *
+ * MUST: codegen（strided.ts の読み族）と添字計算を共有しない。あちらは「出力座標 → 入力
+ * stride の内積 + offset」で読む gather 形なので、こちらは逆向きの scatter 形 —
+ * 「**入力**の平坦添字を入力座標へ分解 → 窓の外なら捨てる → 出力座標を左からの Horner で
+ * 畳む」— で書く（referenceSymPrefixSlice と同じ方針。offset の組み立て誤りを両側で
+ * 相殺させないため）。
+ */
+export const referenceSlice = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("slice");
+  assertDtype(contract, x.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const { dim, start } = sliceAttrs(attrs, "reference");
+  const rank = x.shape.length;
+  const values = new Array<number>(numel(shape));
+  const coords = new Array<number>(rank).fill(0);
+  for (let flat = 0; flat < x.data.length; flat += 1) {
+    let rest = flat;
+    for (let d = rank - 1; d >= 0; d -= 1) {
+      coords[d] = rest % x.shape[d];
+      rest = Math.floor(rest / x.shape[d]);
+    }
+    const picked = coords[dim] - start;
+    if (picked < 0 || picked >= shape[dim]) continue;
+    let out = 0;
+    for (let d = 0; d < rank; d += 1) out = out * shape[d] + (d === dim ? picked : coords[d]);
+    values[out] = x.data[flat];
+  }
+  return materialize(x.dtype, shape, values);
+};
+
+/**
+ * 静的軸の連結（ADR 0014）。入力を順に並べて `dim` 軸へ積む。
+ *
+ * MUST: 出力を**全て埋め切る**ことをオラクル側でも見る（未書き込みの穴が残ったら
+ * ReferenceOpError）。GPU 側は入力ごとの部分書きで全域を覆う形なので、参照実装が
+ * 「書かれなかった要素を 0 とみなす」と full-write の破れが両側で相殺する。
+ * MUST: 添字は入力ごとの走査（scatter 形）で、書き出し位置は**連結軸の座標をずらす**形に
+ * 組む — codegen は offset 1 語に畳んだ形なので、同じ式にはしない。
+ */
+export const referenceCat = (
+  inputs: readonly RefTensor[],
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("cat");
+  for (const input of inputs) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, inputs.map((input) => input.shape), "reference", {
+    attrs,
+  });
+  const dim = catDim(attrs, "reference");
+  const rank = shape.length;
+  const values = new Array<number | undefined>(numel(shape)).fill(undefined);
+  const coords = new Array<number>(rank).fill(0);
+  let written = 0;
+  for (const input of inputs) {
+    for (let flat = 0; flat < input.data.length; flat += 1) {
+      let rest = flat;
+      for (let d = rank - 1; d >= 0; d -= 1) {
+        coords[d] = rest % input.shape[d];
+        rest = Math.floor(rest / input.shape[d]);
+      }
+      let out = 0;
+      for (let d = 0; d < rank; d += 1) {
+        out = out * shape[d] + (d === dim ? coords[d] + written : coords[d]);
+      }
+      values[out] = input.data[flat];
+    }
+    written += input.shape[dim];
+  }
+  const hole = values.findIndex((value) => value === undefined);
+  if (hole >= 0) {
+    throw new ReferenceOpError(`cat の出力 [${shape.join(",")}] の要素 ${hole} が書かれていない`);
+  }
+  return materialize(inputs[0].dtype, shape, values as number[]);
+};
+
+/**
+ * 最終次元の定数 0 埋め（ADR 0014）。
+ *
+ * MUST: **0 で埋めてから転写する**（scatter 形）。GPU 側は出力 1 要素ごとに「範囲内か」を
+ * 判定して転写値か 0 を書く gather 形なので、同じ分岐を写すと境界の off-by-one が両側で
+ * 相殺する。ゼロ領域が本当に 0 であること自体もこの形なら値で出る。
+ */
+export const referencePad = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("pad");
+  assertDtype(contract, x.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const { left } = padAttrs(attrs, "reference");
+  const lengthIn = x.shape[x.shape.length - 1];
+  const lengthOut = shape[shape.length - 1];
+  const values = new Array<number>(numel(shape)).fill(0);
+  for (let flat = 0; flat < x.data.length; flat += 1) {
+    const row = Math.floor(flat / lengthIn);
+    const col = flat % lengthIn;
+    values[row * lengthOut + col + left] = x.data[flat];
+  }
+  return materialize(x.dtype, shape, values);
+};
+
+/**
+ * 静的軸の添字反転（ADR 0014）。
+ *
+ * MUST: codegen（src/kernels/flip.ts）と向きを揃えない。あちらは出力添字から
+ * `len - 1 - c` で入力を読む gather 形なので、こちらは**入力**を走査して反転先へ書く
+ * scatter 形にする（軸の取り違えと off-by-one を両側で相殺させないため）。
+ */
+export const referenceFlip = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("flip");
+  assertDtype(contract, x.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const dim = flipDim(attrs, "reference");
+  const rank = shape.length;
+  const values = new Array<number>(x.data.length);
+  const coords = new Array<number>(rank).fill(0);
+  for (let flat = 0; flat < x.data.length; flat += 1) {
+    let rest = flat;
+    for (let d = rank - 1; d >= 0; d -= 1) {
+      coords[d] = rest % x.shape[d];
+      rest = Math.floor(rest / x.shape[d]);
+    }
+    let out = 0;
+    for (let d = 0; d < rank; d += 1) {
+      out = out * shape[d] + (d === dim ? shape[d] - 1 - coords[d] : coords[d]);
+    }
+    values[out] = x.data[flat];
+  }
+  return materialize(x.dtype, shape, values);
+};
+
+/**
+ * 記号 prefix スライス（ADR 0010）— Tmax で焼いた定数 `x` の**各軸の先頭**を `shape` へ
+ * 切り出す。prefix 長そのものはランタイム側で `coeff·sym+offset` から決まるので、参照実装は
+ * 決まった長さを受け取るだけ。
+ *
+ * MUST: codegen（strided.ts）と添字計算を共有しない。あちらは「出力座標 → 入力 stride の
+ * 内積」で読む gather 形なので、こちらは逆向きの scatter 形 —「**入力**の平坦添字を Tmax 形の
+ * 座標へ分解 → prefix の外なら捨てる → 出力座標を左からの Horner で畳む」— で書く
+ * （referencePermute と同じ方針。stride 表の組み立て誤りを両側で相殺させないため）。
+ */
+export const referenceSymPrefixSlice = (x: RefTensor, shape: readonly number[]): RefTensor => {
+  const target = [...shape];
+  const rank = x.shape.length;
+  if (target.length !== rank) {
+    throw new ReferenceOpError(
+      `sym_prefix_slice は rank を変えない [${x.shape.join(",")}] → [${target.join(",")}]`,
+    );
+  }
+  target.forEach((extent, index) => {
+    if (extent < 0 || extent > x.shape[index]) {
+      throw new ReferenceOpError(
+        `sym_prefix_slice の prefix [${target.join(",")}] が定数 [${
+          x.shape.join(",")
+        }] に収まらない`,
+      );
+    }
+  });
+  const values = new Array<number>(numel(target));
+  const coords = new Array<number>(rank).fill(0);
+  for (let flat = 0; flat < x.data.length; flat += 1) {
+    let rest = flat;
+    for (let d = rank - 1; d >= 0; d -= 1) {
+      coords[d] = rest % x.shape[d];
+      rest = Math.floor(rest / x.shape[d]);
+    }
+    if (coords.some((coord, d) => coord >= target[d])) continue;
+    let out = 0;
+    for (let d = 0; d < rank; d += 1) out = out * target[d] + coords[d];
+    values[out] = x.data[flat];
+  }
+  return materialize(x.dtype, target, values);
+};
+
+/**
+ * linear `out[…, n] = Σ_k x[…, k] · weight[n, k] + bias[n]`（融合 op — ADR 0012）。
+ *
+ * MUST: 重みの添字を `weight[n * K + k]` の**転置レイアウトのまま**組む。GPU 側も同じ
+ * レイアウトを読むが、こちらは「先行次元をタイルではなく素の多重ループで走る」ので、
+ * タイル境界・端数の扱いを共有しない（そこが検証したい対象）。
+ */
+export const referenceLinear = (x: RefTensor, weight: RefTensor, bias: RefTensor): RefTensor => {
+  const contract = resolveOpContract("linear");
+  for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference");
+  const outFeatures = weight.shape[0];
+  const inFeatures = weight.shape[1];
+  const rows = numel(shape.slice(0, -1));
+  const out = new Float32Array(numel(shape));
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < outFeatures; col += 1) {
+      let acc = 0;
+      for (let i = 0; i < inFeatures; i += 1) {
+        acc += x.data[row * inFeatures + i] * weight.data[col * inFeatures + i];
+      }
+      out[row * outFeatures + col] = Math.fround(acc + bias.data[col]);
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * layer_norm（最終次元・affine あり）。分散は**母分散（N 割り、correction = 0）**で、
+ * `torch.var` の既定（N−1）ではない（台帳の反例集の該当行）。
+ *
+ * MUST: 2 パス（平均 → 偏差平方和）で書く。`E[x²] − E[x]²` の 1 パス形は桁落ちで負の分散を
+ * 出しうるうえ、GPU 側と同じ近道を写すと誤差が相殺して突合が恒真化する。
+ */
+export const referenceLayerNorm = (
+  x: RefTensor,
+  weight: RefTensor,
+  bias: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("layer_norm");
+  for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
+    attrs,
+  });
+  const { eps } = layerNormAttrs(attrs, "reference");
+  const dim = shape[shape.length - 1];
+  const rows = numel(shape.slice(0, -1));
+  const out = new Float32Array(numel(shape));
+  for (let row = 0; row < rows; row += 1) {
+    const base = row * dim;
+    let sum = 0;
+    for (let i = 0; i < dim; i += 1) sum += x.data[base + i];
+    const mean = sum / dim;
+    let squares = 0;
+    for (let i = 0; i < dim; i += 1) {
+      const deviation = x.data[base + i] - mean;
+      squares += deviation * deviation;
+    }
+    const inv = 1 / Math.sqrt(squares / dim + eps);
+    for (let i = 0; i < dim; i += 1) {
+      out[base + i] = Math.fround((x.data[base + i] - mean) * inv * weight.data[i] + bias.data[i]);
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * rms_norm（最終次元・weight のみ）。`out[r, i] = x[r, i] / sqrt(mean_r(x²) + eps) · weight[i]`
+ *
+ * MUST: **平均を引かない**（layer_norm を写さない）。rms_norm は二乗の平均そのものを使う
+ * ので、偏差平方和にするとゼロ平均でない入力で静かにずれる。
+ * MUST: 逆数平方根は `1 / Math.sqrt(…)` で書く（GPU 側は `inverseSqrt` の 1 演算）。同じ
+ * 組込みを写すと丸めの誤りが両側で相殺して突合が恒真化する — erf / softmax と同じ規律。
+ * MUST: 二乗和は f64 で積んで格納時に 1 度だけ丸める（縮約は matmul / 行 reduce と同じ扱い）。
+ */
+export const referenceRmsNorm = (
+  x: RefTensor,
+  weight: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("rms_norm");
+  for (const input of [x, weight]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape, weight.shape], "reference", { attrs });
+  const eps = rmsNormEps(attrs, "reference");
+  const dim = shape[shape.length - 1];
+  const rows = numel(shape.slice(0, -1));
+  const out = new Float32Array(numel(shape));
+  for (let row = 0; row < rows; row += 1) {
+    const base = row * dim;
+    let squares = 0;
+    for (let i = 0; i < dim; i += 1) squares += x.data[base + i] * x.data[base + i];
+    const inv = 1 / Math.sqrt(squares / dim + eps);
+    for (let i = 0; i < dim; i += 1) {
+      out[base + i] = Math.fround(x.data[base + i] * inv * weight.data[i]);
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * softmax（最終次元、safe-softmax）。
+ *
+ * MUST: **amax を引いた形**で書く。素朴形は台帳の反例集どおり大入力で壊れ、オラクル側が
+ * 同じ壊れ方をすると「カーネルの safe 化が外れている」ことを突合が検出できなくなる。
+ */
+export const referenceSoftmax = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("softmax");
+  assertDtype(contract, x.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const dim = shape[shape.length - 1];
+  const rows = numel(shape.slice(0, -1));
+  const out = new Float32Array(numel(shape));
+  for (let row = 0; row < rows; row += 1) {
+    const base = row * dim;
+    let amax = x.data[base];
+    for (let i = 1; i < dim; i += 1) amax = Math.max(amax, x.data[base + i]);
+    let total = 0;
+    for (let i = 0; i < dim; i += 1) total += Math.exp(x.data[base + i] - amax);
+    for (let i = 0; i < dim; i += 1) {
+      out[base + i] = Math.fround(Math.exp(x.data[base + i] - amax) / total);
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * 融合 attention `out = softmax_lastdim((q·scale) @ (k·scale)ᵀ) @ v`（ADR 0023）。
+ *
+ * MUST: **素直な 3 段**で書く（S を実体化 → safe-softmax で P を実体化 → PV）。GPU 側は
+ * P を実体化せず A タイル充填時に `exp(S−m)·inv` を評価する（1 パスの融合）ので、参照が
+ * 同じ融合形（online softmax や P 非実体化）で書かれていると、融合の段の誤りが両側で
+ * 相殺して突合が検出できなくなる — `referenceSoftmax` の「amax を引く MUST」と同じ規律。
+ * MUST: 縮約は f64 で積んで格納時に 1 度だけ f32 へ丸める（`referenceBmm` と同じ）。GPU の
+ * f32 逐次累積とはビット一致しないのが**正しい**（だから allclose で判定する）。
+ * MUST: `scale` は q と k の**両方**に掛ける（半スケール契約 — src/ops.ts）。片側だけに
+ * 掛ける実装と突き合わせると値が √ 倍ずれるので、その誤りはこのオラクルが検出する。
+ */
+export const referenceAttention = (
+  q: RefTensor,
+  k: RefTensor,
+  v: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("attention");
+  for (const input of [q, k, v]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, [q.shape, k.shape, v.shape], "reference", { attrs });
+  // GPU 側は params の f32 語で運ぶので、オラクルも f32 へ丸めた値を使う（masked_fill と同じ）。
+  const scale = Math.fround(attentionScale(attrs, "reference"));
+  const [batches, heads, rows, depth] = shape;
+  const cols = k.shape[2];
+  const out = new Float32Array(numel(shape));
+  // f32 の中間（S と P）は「実体化された 3 段」を素直に表す — 段ごとに丸めが 1 回入る。
+  const scores = new Float32Array(cols);
+  const weights = new Float32Array(cols);
+  for (let head = 0; head < batches * heads; head += 1) {
+    const qBase = head * rows * depth;
+    const kvBase = head * cols * depth;
+    for (let row = 0; row < rows; row += 1) {
+      // ① S[row, col] = Σ_d (q·scale)[row,d] · (k·scale)[col,d]
+      for (let col = 0; col < cols; col += 1) {
+        let acc = 0;
+        for (let d = 0; d < depth; d += 1) {
+          acc += (q.data[qBase + row * depth + d] * scale) *
+            (k.data[kvBase + col * depth + d] * scale);
+        }
+        scores[col] = Math.fround(acc);
+      }
+      // ② safe-softmax（amax を引く形 MUST — referenceSoftmax と同じ）
+      let amax = scores[0];
+      for (let col = 1; col < cols; col += 1) amax = Math.max(amax, scores[col]);
+      let total = 0;
+      for (let col = 0; col < cols; col += 1) total += Math.exp(scores[col] - amax);
+      for (let col = 0; col < cols; col += 1) {
+        weights[col] = Math.fround(Math.exp(scores[col] - amax) / total);
+      }
+      // ③ O[row, d] = Σ_col P[row,col] · v[col,d]
+      for (let d = 0; d < depth; d += 1) {
+        let acc = 0;
+        for (let col = 0; col < cols; col += 1) {
+          acc += weights[col] * v.data[kvBase + col * depth + d];
+        }
+        out[qBase + row * depth + d] = Math.fround(acc);
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * embedding `out[…, h] = weight[index[…], h]`。
+ *
+ * MUST: **範囲外添字は必ず throw**（gather と同じ裁定 — GPU 側は NaN 汚染）。オラクルを
+ * GPU 側に合わせて緩めると「契約違反のグラフが両側で同じ値になる」ので突合が違反を
+ * 検出できなくなる。
+ * NOTE: attrs の `padding_idx` は forward に効かないので受け取らない（契約 — src/ops.ts）。
+ */
+export const referenceEmbedding = (weight: RefTensor, index: RefTensor): RefTensor => {
+  const contract = resolveOpContract("embedding");
+  assertSlotDtype(contract, 0, weight.dtype, "reference");
+  assertSlotDtype(contract, 1, index.dtype, "reference");
+  const shape = computeOutputShape(contract, [weight.shape, index.shape], "reference");
+  const vocab = weight.shape[0];
+  const hidden = weight.shape[1];
+  const out = new Float32Array(numel(shape));
+  for (let row = 0; row < index.data.length; row += 1) {
+    const pick = index.data[row];
+    if (pick < 0 || pick >= vocab) {
+      throw new ReferenceOpError(
+        `embedding の添字 index[${row}] = ${pick} が語彙数 ${vocab} の範囲外`,
+      );
+    }
+    for (let col = 0; col < hidden; col += 1) {
+      out[row * hidden + col] = weight.data[pick * hidden + col];
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * masked_fill `out = mask ? value : x`（mask は右詰め broadcast）。
+ *
+ * 添字の導出は {@link broadcastIndex} — 「出力座標を毎要素 divmod → 入力 shape を左から
+ * Horner」で、codegen の stride 表とは別構造（同ファイル冒頭の MUST）。埋め値は GPU 側の
+ * f32 語に合わせて `Math.fround` で丸める。
+ */
+export const referenceMaskedFill = (
+  x: RefTensor,
+  mask: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("masked_fill");
+  assertSlotDtype(contract, 0, x.dtype, "reference");
+  assertSlotDtype(contract, 1, mask.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape, mask.shape], "reference");
+  const fill = Math.fround(maskedFillValue(attrs, "reference"));
+  const out = new Float32Array(numel(shape));
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = mask.data[broadcastIndex(i, shape, mask.shape)] !== 0 ? fill : x.data[i];
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * conv1d `out[b, oc, ox] = Σ_{ic,k} x[b, ic, ox·s + k·d − p] · w[oc, ic − g·Cin/groups, k] + b[oc]`
+ * （`g` は `oc` が属するグループ — ADR 0015 で groups / dilation を attrs 化）。
+ *
+ * MUST: padding 域は**読み飛ばす**（0 を足す形にしない）。0 加算に潰すと、範囲外読みの
+ * 分岐そのものが消えて添字が負でも通る実装を許してしまう。
+ */
+export const referenceConv1d = (
+  x: RefTensor,
+  weight: RefTensor,
+  bias: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("conv1d");
+  for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
+    attrs,
+  });
+  const { stride, padding, dilation, groups } = conv1dAttrs(attrs, "reference");
+  const [batch, channelsOut, lengthOut] = shape;
+  const channelsIn = x.shape[1];
+  const lengthIn = x.shape[2];
+  const kernel = weight.shape[2];
+  // 契約検査（computeOutputShape）で割り切れは済んでいる。
+  const inPerGroup = channelsIn / groups;
+  const outPerGroup = channelsOut / groups;
+  const out = new Float32Array(numel(shape));
+  for (let item = 0; item < batch; item += 1) {
+    for (let oc = 0; oc < channelsOut; oc += 1) {
+      // 重みの第 2 軸は Cin/groups — 入力チャネルはグループの帯だけを走る
+      const icBase = Math.floor(oc / outPerGroup) * inPerGroup;
+      for (let ox = 0; ox < lengthOut; ox += 1) {
+        let acc = bias.data[oc];
+        for (let icRel = 0; icRel < inPerGroup; icRel += 1) {
+          for (let k = 0; k < kernel; k += 1) {
+            const ix = ox * stride + k * dilation - padding;
+            if (ix < 0 || ix >= lengthIn) continue;
+            acc += x.data[(item * channelsIn + icBase + icRel) * lengthIn + ix] *
+              weight.data[(oc * inPerGroup + icRel) * kernel + k];
+          }
+        }
+        out[(item * channelsOut + oc) * lengthOut + ox] = Math.fround(acc);
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * conv2d `out[b, oc, oy, ox] = Σ_{ic,kh,kw}
+ *   x[b, ic, oy·sh + kh·dh − ph, ox·sw + kw·dw − pw] · w[oc, ic − g·Cin/groups, kh, kw] + b[oc]`
+ * （`g` は `oc` が属するグループ — ADR 0017）。
+ *
+ * MUST: 重みは `[Cout, Cin/groups, Kh, Kw]` で、**Kh と Kw の順**も契約。正方カーネル
+ * （Kh == Kw）では入れ替えても値が一致するので、テストは Kh ≠ Kw で固定する。
+ * MUST: padding 域は**読み飛ばす**（0 を足す形にしない）。0 加算に潰すと、範囲外読みの
+ * 分岐そのものが消えて添字が負でも通る実装を許してしまう。
+ * MUST: 添字は H / W を独立に組む（`(y·W + x)` の平坦化を先に済ませない）。1 本に潰すと
+ * 「H と W を取り違えた stride」が正方入力で一致してしまう。
+ */
+export const referenceConv2d = (
+  x: RefTensor,
+  weight: RefTensor,
+  bias: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("conv2d");
+  for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
+    attrs,
+  });
+  const { stride, padding, dilation, groups } = conv2dAttrs(attrs, "reference");
+  const [batch, channelsOut, heightOut, widthOut] = shape;
+  const channelsIn = x.shape[1];
+  const heightIn = x.shape[2];
+  const widthIn = x.shape[3];
+  const kernelH = weight.shape[2];
+  const kernelW = weight.shape[3];
+  // 契約検査（computeOutputShape）で割り切れは済んでいる。
+  const inPerGroup = channelsIn / groups;
+  const outPerGroup = channelsOut / groups;
+  const out = new Float32Array(numel(shape));
+  for (let item = 0; item < batch; item += 1) {
+    for (let oc = 0; oc < channelsOut; oc += 1) {
+      // 重みの第 2 軸は Cin/groups — 入力チャネルはグループの帯だけを走る
+      const icBase = Math.floor(oc / outPerGroup) * inPerGroup;
+      for (let oy = 0; oy < heightOut; oy += 1) {
+        for (let ox = 0; ox < widthOut; ox += 1) {
+          let acc = bias.data[oc];
+          for (let icRel = 0; icRel < inPerGroup; icRel += 1) {
+            const plane = (item * channelsIn + icBase + icRel) * heightIn;
+            const weightPlane = (oc * inPerGroup + icRel) * kernelH;
+            for (let kh = 0; kh < kernelH; kh += 1) {
+              const iy = oy * stride[0] + kh * dilation[0] - padding[0];
+              if (iy < 0 || iy >= heightIn) continue;
+              for (let kw = 0; kw < kernelW; kw += 1) {
+                const ix = ox * stride[1] + kw * dilation[1] - padding[1];
+                if (ix < 0 || ix >= widthIn) continue;
+                acc += x.data[(plane + iy) * widthIn + ix] *
+                  weight.data[(weightPlane + kh) * kernelW + kw];
+              }
+            }
+          }
+          out[((item * channelsOut + oc) * heightOut + oy) * widthOut + ox] = Math.fround(acc);
+        }
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * conv_transpose1d `out[b, oc, ox] = Σ_{ic,k} x[b, ic, (ox + p − k)/s] · w[ic, oc, k] + b[oc]`
+ * （`(ox + p − k)` が `s` で割り切れ、商が `[0, L)` に入る `(ic, k)` のみ — ADR 0015）。
+ *
+ * MUST: 重みは `[Cin, Cout, K]`（conv1d と転置）。
+ * MUST: 割り切れない `k` は**読み飛ばす**（そこに入力が無い＝寄与ゼロ）。0 を足す形に
+ * 潰すと、割り切れ判定そのものが消えた実装が通ってしまう。
+ */
+export const referenceConvTranspose1d = (
+  x: RefTensor,
+  weight: RefTensor,
+  bias: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("conv_transpose1d");
+  for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
+    attrs,
+  });
+  const { stride, padding } = convTranspose1dAttrs(attrs, "reference");
+  const [batch, channelsOut, lengthOut] = shape;
+  const channelsIn = x.shape[1];
+  const lengthIn = x.shape[2];
+  const kernel = weight.shape[2];
+  const out = new Float32Array(numel(shape));
+  for (let item = 0; item < batch; item += 1) {
+    for (let oc = 0; oc < channelsOut; oc += 1) {
+      for (let ox = 0; ox < lengthOut; ox += 1) {
+        let acc = bias.data[oc];
+        for (let ic = 0; ic < channelsIn; ic += 1) {
+          for (let k = 0; k < kernel; k += 1) {
+            const shifted = ox + padding - k;
+            if (shifted < 0 || shifted % stride !== 0) continue;
+            const ix = shifted / stride;
+            if (ix >= lengthIn) continue;
+            acc += x.data[(item * channelsIn + ic) * lengthIn + ix] *
+              weight.data[(ic * channelsOut + oc) * kernel + k];
+          }
+        }
+        out[(item * channelsOut + oc) * lengthOut + ox] = Math.fround(acc);
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * 契約表の kind で分岐する統一入口（テストがグラフをそのまま辿れるようにするため）。
+ *
+ * `outShape` は「出力の宣言 shape が目標形」の op（reshape / expand — ADR 0011）で必須。
+ * 入力からは導けないので、省略されたら黙って推測せず落とす。
+ */
+export const applyReferenceOp = (
+  op: string,
+  inputs: readonly RefTensor[],
+  attrs: Readonly<Record<string, unknown>> = {},
+  outShape?: readonly number[],
+): RefTensor => {
+  const contract: OpContract = resolveOpContract(op);
+  if (!arityFits(contract, inputs.length)) {
+    throw new ReferenceOpError(
+      `op '${op}' の入力数が ${inputs.length}（契約は ${describeArity(contract)}）`,
+    );
+  }
+  const declared = (): readonly number[] => {
+    if (outShape === undefined) {
+      throw new ReferenceOpError(`op '${op}' は出力 shape が目標形（outShape が要る）`);
+    }
+    return outShape;
+  };
+  switch (contract.kind) {
+    case "unary":
+      return referenceUnary(contract.name, inputs[0], attrs);
+    case "binary":
+      return referenceBinary(contract.name, inputs[0], inputs[1]);
+    case "where":
+      return referenceWhere(inputs[0], inputs[1], inputs[2]);
+    case "cumsum":
+      return referenceCumsum(inputs[0], attrs);
+    case "matmul":
+      return referenceMatmul(inputs[0], inputs[1]);
+    case "bmm":
+      return referenceBmm(inputs[0], inputs[1]);
+    case "gather":
+      return referenceGather(inputs[0], inputs[1]);
+    case "rowReduce":
+      return referenceRowReduce(contract.name, inputs[0], reduceDim(attrs, "reference"));
+    case "cast":
+      return referenceCast(inputs[0], castTargetDtype(attrs, "reference"));
+    case "reshape":
+      return referenceReshape(inputs[0], declared());
+    case "permute":
+      return referencePermute(inputs[0], permuteDims(attrs, "reference"));
+    case "expand":
+      return referenceExpand(inputs[0], declared());
+    case "slice":
+      return referenceSlice(inputs[0], attrs);
+    case "cat":
+      return referenceCat(inputs, attrs);
+    case "pad":
+      return referencePad(inputs[0], attrs);
+    case "flip":
+      return referenceFlip(inputs[0], attrs);
+    case "symPrefixSlice":
+      // prefix 長は束縛（`coeff·sym+offset`）から決まる — 入力からは導けないので、
+      // reshape / expand と同じく呼び出し側が解決済みの出力 shape を渡す。
+      return referenceSymPrefixSlice(inputs[0], declared());
+    case "linear":
+      return referenceLinear(inputs[0], inputs[1], inputs[2]);
+    case "layerNorm":
+      return referenceLayerNorm(inputs[0], inputs[1], inputs[2], attrs);
+    case "rmsNorm":
+      return referenceRmsNorm(inputs[0], inputs[1], attrs);
+    case "softmax":
+      return referenceSoftmax(inputs[0], attrs);
+    case "attention":
+      return referenceAttention(inputs[0], inputs[1], inputs[2], attrs);
+    case "embedding":
+      return referenceEmbedding(inputs[0], inputs[1]);
+    case "maskedFill":
+      return referenceMaskedFill(inputs[0], inputs[1], attrs);
+    case "conv1d":
+      return referenceConv1d(inputs[0], inputs[1], inputs[2], attrs);
+    case "conv2d":
+      return referenceConv2d(inputs[0], inputs[1], inputs[2], attrs);
+    case "convTranspose1d":
+      return referenceConvTranspose1d(inputs[0], inputs[1], inputs[2], attrs);
+  }
+};

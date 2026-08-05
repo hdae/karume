@@ -1,7 +1,7 @@
 {
   "workspace": ["./packages/runtime", "./packages/hub", "./packages/models"],
   "tasks": {
-    "verify": "deno fmt --check && deno lint && deno check packages/runtime/mod.ts packages/hub/mod.ts packages/models/mod.ts && deno test -A --permit-no-files"
+    "verify": "deno fmt --check && deno lint && deno check packages/runtime/mod.ts packages/hub/mod.ts packages/models/mod.ts && deno test -A"
   },
   "fmt": {
     "lineWidth": 100,

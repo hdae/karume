@@ -1,0 +1,259 @@
+import { assertEquals, assertThrows } from "@std/assert";
+import {
+  assertRuntimeSupport,
+  ContainerError,
+  IR_METADATA_KEY,
+  openModel,
+  type OpSupport,
+  type RuntimeSupport,
+} from "../src/format/container.ts";
+import { type IrDtype, IrError, type IrStorageDtype } from "../src/format/ir.ts";
+import { RUNTIME_SUPPORT } from "../src/ops.ts";
+import { baseGraph, baseModelBuffer, buildSafetensors, f32Bytes } from "./helpers/format.ts";
+
+/** M0 と同形（f32 のみ・attrs 無し・二項）の最小対応表。 */
+const f32Only: OpSupport = {
+  dtypes: new Set<IrDtype>(["f32"]),
+  slotDtypes: [new Set<IrDtype>(["f32"]), new Set<IrDtype>(["f32"])],
+  outDtypes: new Set<IrDtype>(["f32"]),
+  attrKeys: new Set<string>(),
+};
+
+const M0_SUPPORT: RuntimeSupport = {
+  ops: new Map([["matmul", f32Only], ["add", f32Only]]),
+  storage: new Set<IrStorageDtype>(["f32"]),
+  io: new Set<IrDtype>(["f32"]),
+};
+
+const i8Bytes = (length: number): Uint8Array<ArrayBuffer> => new Uint8Array(length);
+
+Deno.test("openModel: 正常系は graph と safetensors を結合して開ける", () => {
+  const model = openModel(baseModelBuffer());
+  assertEquals(model.graph.nodes.length, 2);
+  assertEquals(model.file.tensors.get("enc.w")?.shape, [4, 3]);
+  assertEquals(model.graph.initializers["w"].tensor, "enc.w");
+  assertRuntimeSupport(model.graph, M0_SUPPORT);
+});
+
+Deno.test("openModel: グラフ JSON が無いファイルを拒否する", () => {
+  const buffer = buildSafetensors([
+    { name: "enc.w", dtype: "F32", shape: [4, 3], data: f32Bytes(new Array(12).fill(0)) },
+  ]);
+  assertThrows(() => openModel(buffer), ContainerError, IR_METADATA_KEY);
+});
+
+Deno.test("openModel: initializer の参照先テンソルが無いものを拒否する", () => {
+  const graph = baseGraph();
+  graph.initializers["w"].tensor = "missing.w";
+  assertThrows(
+    () => openModel(baseModelBuffer(graph)),
+    ContainerError,
+    "がファイルに無い",
+  );
+});
+
+Deno.test("openModel: storage.dtype と safetensors dtype の不一致を拒否する", () => {
+  const buffer = baseModelBuffer(baseGraph(), [
+    { name: "enc.w", dtype: "BF16", shape: [4, 3], data: new Uint8Array(24) },
+    { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+  ]);
+  assertThrows(() => openModel(buffer), ContainerError, "F32 が必要");
+});
+
+Deno.test("openModel: 宣言 shape と実テンソル shape の不一致を拒否する", () => {
+  const graph = baseGraph();
+  graph.values["w"] = { dtype: "f32", shape: [3, 4] };
+  assertThrows(() => openModel(baseModelBuffer(graph)), ContainerError, "宣言 shape");
+});
+
+// 規則の正本はパーサ（ir.ts）— openModel 経由でも同じ拒否に到達することだけを固定する。
+Deno.test("openModel: 意味論と格納が交差した initializer を拒否する", () => {
+  const graph = baseGraph();
+  graph.values["w"] = { dtype: "i32", shape: [4, 3] };
+  assertThrows(() => openModel(baseModelBuffer(graph)), IrError, "組めない");
+});
+
+Deno.test("openModel: scale テンソルの欠落を拒否する", () => {
+  const graph = baseGraph();
+  graph.initializers["w"].storage = { dtype: "i8", scale: "enc.w.scale" };
+  const buffer = baseModelBuffer(graph, [
+    { name: "enc.w", dtype: "I8", shape: [4, 3], data: i8Bytes(12) },
+    { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+  ]);
+  assertThrows(() => openModel(buffer), ContainerError, "scale テンソル");
+});
+
+Deno.test("assertRuntimeSupport: 非対応 op を列挙して落とす", () => {
+  const graph = baseGraph();
+  graph.requires.ops = ["matmul", "gelu", "tanh"];
+  graph.nodes[1] = { op: "gelu", ins: ["h"], outs: ["y"], attrs: {} };
+  graph.nodes.push({ op: "tanh", ins: ["y"], outs: ["z"], attrs: {} });
+  graph.values["z"] = { dtype: "f32", shape: ["T", 3] };
+  const model = openModel(baseModelBuffer(graph));
+
+  const error = assertThrows(
+    () => assertRuntimeSupport(model.graph, M0_SUPPORT),
+    ContainerError,
+    "非対応 op (2)",
+  );
+  assertEquals(error.message.includes("gelu, tanh"), true, error.message);
+});
+
+// op 名だけの突合は「対応表にはあるのに実行時に落ちる」を作る（recon §3-9）。
+Deno.test("assertRuntimeSupport: 対応 op でも実行できない意味論 dtype を宣言ごとに列挙する", () => {
+  const graph = baseGraph();
+  graph.inputs = [{ name: "x", dtype: "i32", shape: ["T", 4] }];
+  graph.values["h"] = { dtype: "bool", shape: ["T", 3] };
+  const model = openModel(baseModelBuffer(graph));
+
+  const error = assertThrows(
+    () => assertRuntimeSupport(model.graph, M0_SUPPORT),
+    ContainerError,
+    // 件数は「直すべき宣言の本数」— h は matmul の outs と add の ins の 2 箇所に現れるが 1 件
+    "非対応 意味論 dtype (2)",
+  );
+  assertEquals(error.message.includes("値 'x': i32"), true, error.message);
+  assertEquals(error.message.includes("値 'h': bool"), true, error.message);
+});
+
+// エイリアス入力（同じ値を 2 回取るノード）で件数が水増しされないこと。
+Deno.test("assertRuntimeSupport: 同一宣言の dtype 違反を重複列挙しない", () => {
+  const graph = baseGraph();
+  graph.values["h"] = { dtype: "bool", shape: ["T", 3] };
+  graph.values["y"] = { dtype: "f32", shape: ["T", 3] };
+  graph.nodes[1] = { op: "add", ins: ["h", "h"], outs: ["y"], attrs: {} };
+  const model = openModel(baseModelBuffer(graph));
+
+  const error = assertThrows(
+    () => assertRuntimeSupport(model.graph, M0_SUPPORT),
+    ContainerError,
+    "非対応 意味論 dtype (1)",
+  );
+  assertEquals(error.message.includes("値 'h': bool"), true, error.message);
+});
+
+// ノード起点の突合だけでは、どのノードも消費しない入力の dtype 違反が門を素通りする
+// （実行器は全 graph.inputs を転送するので、転送層の制約は使用の有無と無関係に実在する）。
+Deno.test("assertRuntimeSupport: どのノードも使わない入力の dtype 違反も列挙する", () => {
+  const graph = baseGraph();
+  graph.inputs.push({ name: "z", dtype: "i32", shape: ["T"] });
+  const model = openModel(baseModelBuffer(graph));
+
+  const error = assertThrows(
+    () => assertRuntimeSupport(model.graph, M0_SUPPORT),
+    ContainerError,
+    "非対応 意味論 dtype (1)",
+  );
+  assertEquals(error.message.includes("値 'z': i32"), true, error.message);
+});
+
+// スロット別 dtype 契約（gather / embedding / masked_fill）は、受理集合の**和**で突き合わせると
+// 「値と添字を逆に渡した形」がどちらも和に入るため列挙門を素通りする。契約検査（plan.ts）まで
+// 落ちて 1 件ずつ止まると、「非対応は全件列挙して一度に見せる」という門の意図が壊れる。
+Deno.test("assertRuntimeSupport: スロットを取り違えた perSlot op を列挙する", () => {
+  const graph = baseGraph();
+  graph.requires = { ops: ["gather"] };
+  // 値 f32 と添字 i32 を**逆に**渡した形。和（{f32, i32}）だけの突合では両方通ってしまう。
+  graph.inputs = [
+    { name: "src", dtype: "i32", shape: ["T", 4] },
+    { name: "idx", dtype: "f32", shape: ["T", 3] },
+  ];
+  graph.outputs = ["y"];
+  graph.initializers = {};
+  graph.values = { y: { dtype: "f32", shape: ["T", 3] } };
+  graph.nodes = [{ op: "gather", ins: ["src", "idx"], outs: ["y"], attrs: {} }];
+  const model = openModel(baseModelBuffer(graph, []));
+
+  const error = assertThrows(
+    () => assertRuntimeSupport(model.graph, RUNTIME_SUPPORT),
+    ContainerError,
+    "非対応 意味論 dtype (2)",
+  );
+  assertEquals(error.message.includes("値 'src': i32"), true, error.message);
+  assertEquals(error.message.includes("値 'idx': f32"), true, error.message);
+});
+
+// 出力もスロット 0（値の側）と同型でなければ実行できない — 和で見ると gather の i32 出力が通る。
+Deno.test("assertRuntimeSupport: perSlot op の出力 dtype も値の側の受理集合で見る", () => {
+  const graph = baseGraph();
+  graph.requires = { ops: ["gather"] };
+  graph.inputs = [
+    { name: "src", dtype: "f32", shape: ["T", 4] },
+    { name: "idx", dtype: "i32", shape: ["T", 3] },
+  ];
+  graph.outputs = ["y"];
+  graph.initializers = {};
+  graph.values = { y: { dtype: "i32", shape: ["T", 3] } };
+  graph.nodes = [{ op: "gather", ins: ["src", "idx"], outs: ["y"], attrs: {} }];
+  const model = openModel(baseModelBuffer(graph, []));
+
+  const error = assertThrows(
+    () => assertRuntimeSupport(model.graph, RUNTIME_SUPPORT),
+    ContainerError,
+    "非対応 意味論 dtype (1)",
+  );
+  assertEquals(error.message.includes("値 'y': i32"), true, error.message);
+});
+
+Deno.test("assertRuntimeSupport: 対応 op に付いた未実装 attrs をノードごとに列挙する", () => {
+  const graph = baseGraph();
+  graph.nodes[1].attrs = { alpha: 1, approximate: "tanh" };
+  const model = openModel(baseModelBuffer(graph));
+
+  const error = assertThrows(
+    () => assertRuntimeSupport(model.graph, M0_SUPPORT),
+    ContainerError,
+    "未実装 attrs (1)",
+  );
+  assertEquals(error.message.includes("nodes[1] (add): alpha, approximate"), true, error.message);
+});
+
+Deno.test("assertRuntimeSupport: 非対応の格納 dtype を initializer 名つきで列挙する", () => {
+  const graph = baseGraph();
+  graph.initializers["w"].storage = { dtype: "f16" };
+  graph.initializers["b"].storage = { dtype: "bf16" };
+  const buffer = baseModelBuffer(graph, [
+    { name: "enc.w", dtype: "F16", shape: [4, 3], data: new Uint8Array(24) },
+    { name: "enc.b", dtype: "BF16", shape: [3], data: new Uint8Array(6) },
+  ]);
+  const model = openModel(buffer);
+
+  const error = assertThrows(
+    () => assertRuntimeSupport(model.graph, M0_SUPPORT),
+    ContainerError,
+    "capability 不足",
+  );
+  assertEquals(error.message.includes("'bf16' (1): b"), true, error.message);
+  assertEquals(error.message.includes("'f16' (1): w"), true, error.message);
+});
+
+// ADR 0010: 生の int32 格納は safetensors 側の I32 と 1 対 1（f32 の符号化語彙とは別系統）。
+Deno.test("openModel: 意味論 i32 の initializer は I32 テンソルと突合される", () => {
+  const graph = baseGraph();
+  graph.requires = { ops: ["sym_prefix_slice"] };
+  graph.inputs = [{ name: "x", dtype: "f32", shape: ["T"] }];
+  graph.outputs = ["y"];
+  graph.initializers = { table: { tensor: "enc.table", storage: { dtype: "i32" } } };
+  graph.values = {
+    table: { dtype: "i32", shape: [4, 3] },
+    y: { dtype: "i32", shape: ["T", 3] },
+  };
+  graph.nodes = [{
+    op: "sym_prefix_slice",
+    ins: ["table"],
+    outs: ["y"],
+    attrs: { sym: "T", slices: [{ dim: 0, coeff: 1, offset: 0 }] },
+  }];
+  const i32Tensor = { name: "enc.table", dtype: "I32", shape: [4, 3], data: new Uint8Array(48) };
+  assertEquals(openModel(baseModelBuffer(graph, [i32Tensor])).graph.values["table"].dtype, "i32");
+
+  // 格納 dtype と safetensors の実 dtype が食い違う形は受理しない（要素は同じ 4 バイト）
+  assertThrows(
+    () =>
+      openModel(
+        baseModelBuffer(graph, [{ ...i32Tensor, dtype: "F32", data: f32Bytes(new Array(12)) }]),
+      ),
+    ContainerError,
+    "格納 dtype",
+  );
+});

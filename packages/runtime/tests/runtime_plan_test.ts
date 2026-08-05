@@ -1,0 +1,315 @@
+import { assertEquals, assertThrows } from "@std/assert";
+import { DimError } from "../src/format/dims.ts";
+import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
+import { OpContractError } from "../src/ops.ts";
+import {
+  bindSymbols,
+  countUses,
+  ExecutionError,
+  planGraph,
+  resolveShape,
+  validateGraphContracts,
+} from "../src/runtime/plan.ts";
+import type { GraphJson } from "./helpers/format.ts";
+
+/** x: [T,4] → matmul(w[4,3]) → h[T,3] → add(b[3]) → y[T,3] */
+const linearGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["matmul", "add"] },
+  symbols: ["T"],
+  inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
+  outputs: ["y"],
+  initializers: {
+    w: { tensor: "w", storage: { dtype: "f32" } },
+    b: { tensor: "b", storage: { dtype: "f32" } },
+  },
+  values: {
+    w: { dtype: "f32", shape: [4, 3] },
+    b: { dtype: "f32", shape: [3] },
+    h: { dtype: "f32", shape: ["T", 3] },
+    y: { dtype: "f32", shape: ["T", 3] },
+  },
+  nodes: [
+    { op: "matmul", ins: ["x", "w"], outs: ["h"], attrs: {} },
+    { op: "add", ins: ["h", "b"], outs: ["y"], attrs: {} },
+  ],
+});
+
+const parse = (graph: GraphJson): IrGraph => parseIrGraph(JSON.stringify(graph));
+
+Deno.test("シンボル束縛は入力 shape の次元位置から取る", () => {
+  const graph = parse(linearGraph());
+  assertEquals(bindSymbols(graph, { x: [7, 4] }), { T: 7 });
+  assertEquals(bindSymbols(graph, { x: [0, 4] }), { T: 0 });
+});
+
+Deno.test("束縛と実 shape・宣言の食い違いは全て fail loudly", () => {
+  const graph = parse(linearGraph());
+  // 数値次元の不一致
+  assertThrows(() => bindSymbols(graph, { x: [7, 5] }), ExecutionError);
+  // rank の不一致
+  assertThrows(() => bindSymbols(graph, { x: [7] }), ExecutionError);
+  // 入力の欠落・余剰
+  assertThrows(() => bindSymbols(graph, {}), ExecutionError);
+  assertThrows(() => bindSymbols(graph, { x: [7, 4], z: [1] }), ExecutionError);
+  // 非負整数でない次元
+  assertThrows(() => bindSymbols(graph, { x: [-1, 4] }), ExecutionError);
+  // 明示束縛が入力 shape 由来の束縛と衝突
+  assertThrows(() => bindSymbols(graph, { x: [7, 4] }, { T: 8 }), ExecutionError);
+  // 宣言に無いシンボルの明示束縛
+  assertThrows(() => bindSymbols(graph, { x: [7, 4] }, { S: 8 }), ExecutionError);
+});
+
+Deno.test("明示束縛が入力 shape と一致していれば受理する", () => {
+  const graph = parse(linearGraph());
+  assertEquals(bindSymbols(graph, { x: [7, 4] }, { T: 7 }), { T: 7 });
+});
+
+Deno.test("束縛の有無は Object.hasOwn で見る（prototype 由来の名前は束縛済みにしない）", () => {
+  const source = linearGraph();
+  source.symbols = ["toString"];
+  source.inputs = [{ name: "x", dtype: "f32", shape: ["toString", 4] }];
+  source.values.h = { dtype: "f32", shape: ["toString", 3] };
+  source.values.y = { dtype: "f32", shape: ["toString", 3] };
+  const graph = parse(source);
+  assertEquals(bindSymbols(graph, { x: [6, 4] }), { toString: 6 });
+});
+
+Deno.test("bindSymbols は '__proto__' というシンボル名の束縛を own property として保全する", () => {
+  const source = linearGraph();
+  source.symbols = ["__proto__"];
+  source.inputs = [{ name: "x", dtype: "f32", shape: ["__proto__", 4] }];
+  source.values.h = { dtype: "f32", shape: ["__proto__", 3] };
+  source.values.y = { dtype: "f32", shape: ["__proto__", 3] };
+  const graph = parse(source);
+
+  const bindings = bindSymbols(graph, { x: [6, 4] });
+  // 実行系によっては `o["__proto__"] = v` でも own property が作られるため、hasOwn だけでは
+  // 素の `{}` への退行を検出できない。器が null プロトタイプであること（＝ 受理集合に
+  // エンジン差を持ち込まないこと）を併せて固定する。
+  assertEquals(Object.getPrototypeOf(bindings), null);
+  assertEquals(Object.hasOwn(bindings, "__proto__"), true);
+  assertEquals(bindings["__proto__"], 6);
+  // 束縛が後段まで生きている（shape が数値に落ちる）
+  assertEquals(resolveShape(graph.values["y"].shape, bindings), [6, 3]);
+
+  // 明示束縛（seed）側も同じ。MUST: 計算キーで作る — リテラルの `__proto__:` は own key では
+  // なく [[Prototype]] 指定になり、Object.entries に載らずに検査対象を外す。
+  const seeded = bindSymbols(graph, { x: [6, 4] }, { ["__proto__"]: 6 });
+  assertEquals(Object.getPrototypeOf(seeded), null);
+  assertEquals(seeded["__proto__"], 6);
+  assertThrows(() => bindSymbols(graph, { x: [6, 4] }, { ["__proto__"]: 5 }), ExecutionError);
+});
+
+Deno.test("派生形の次元は束縛源にせず、束縛確定後に照合する", () => {
+  const source = linearGraph();
+  // 入力は inputs[] だけで宣言される（values{} に置くと二重宣言で IR が落ちる）
+  source.inputs = [
+    { name: "x", dtype: "f32", shape: ["T", 4] },
+    { name: "m", dtype: "f32", shape: ["2T+1"] },
+  ];
+  const graph = parse(source);
+  assertEquals(bindSymbols(graph, { x: [3, 4], m: [7] }), { T: 3 });
+  assertThrows(() => bindSymbols(graph, { x: [3, 4], m: [6] }), ExecutionError);
+});
+
+Deno.test("planGraph が全値の shape を解決し、ノード出力を契約から照合する", () => {
+  const graph = parse(linearGraph());
+  const plan = planGraph(graph, { T: 5 });
+  assertEquals(plan.shapes.get("x"), [5, 4]);
+  assertEquals(plan.shapes.get("w"), [4, 3]);
+  assertEquals(plan.shapes.get("h"), [5, 3]);
+  assertEquals(plan.nodes.length, 2);
+  assertEquals(plan.nodes[0].outputShape, [5, 3]);
+  assertEquals(plan.nodes[1].contract.kind, "binary");
+});
+
+Deno.test("宣言 shape と計算 shape の不一致・未束縛シンボルは fail loudly", () => {
+  const source = linearGraph();
+  source.values.h = { dtype: "f32", shape: ["T", 4] };
+  assertThrows(() => planGraph(parse(source), { T: 5 }), ExecutionError);
+  assertThrows(() => planGraph(parse(linearGraph()), {}), DimError);
+  assertThrows(() => resolveShape(["T"], {}), DimError);
+  assertEquals(resolveShape([2, "T+1"], { T: 3 }), [2, 4]);
+});
+
+Deno.test("useCounts は node.ins の厳密な延べ計数（同じ値を 2 回取れば 2）", () => {
+  const source = linearGraph();
+  source.requires.ops = ["matmul", "add", "mul"];
+  source.nodes.push({ op: "mul", ins: ["y", "y"], outs: ["z"], attrs: {} });
+  source.values.z = { dtype: "f32", shape: ["T", 3] };
+  source.outputs = ["z"];
+  const counts = countUses(parse(source));
+  assertEquals(counts.get("y"), 2);
+  assertEquals(counts.get("x"), 1);
+  assertEquals(counts.get("z"), undefined);
+});
+
+Deno.test("契約検査は未対応 op・非空 attrs・非 f32 dtype を構築時に落とす", () => {
+  assertEquals(validateGraphContracts(parse(linearGraph())), undefined);
+
+  const foreignOp = linearGraph();
+  foreignOp.requires.ops = ["matmul", "softmax"];
+  foreignOp.nodes[1] = { op: "softmax", ins: ["h"], outs: ["y"], attrs: {} };
+  assertThrows(() => validateGraphContracts(parse(foreignOp)), OpContractError);
+
+  const withAttrs = linearGraph();
+  withAttrs.nodes[1].attrs = { alpha: 1 };
+  assertThrows(() => validateGraphContracts(parse(withAttrs)), OpContractError);
+
+  const intInput = linearGraph();
+  intInput.inputs = [{ name: "x", dtype: "i32", shape: ["T", 4] }];
+  assertThrows(() => validateGraphContracts(parse(intInput)), OpContractError);
+});
+
+/** table[6,5]（Tmax 形の i32 定数）→ sym_prefix_slice → y[T,T]。 */
+const prefixSliceGraph = (overrides: Partial<GraphJson> = {}): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["sym_prefix_slice"] },
+  symbols: ["T"],
+  inputs: [{ name: "bind", dtype: "f32", shape: ["T"] }],
+  outputs: ["y"],
+  initializers: { table: { tensor: "table", storage: { dtype: "i32" } } },
+  values: {
+    table: { dtype: "i32", shape: [6, 5] },
+    y: { dtype: "i32", shape: ["T", "T"] },
+  },
+  nodes: [{
+    op: "sym_prefix_slice",
+    ins: ["table"],
+    outs: ["y"],
+    attrs: {
+      sym: "T",
+      slices: [{ dim: 0, coeff: 1, offset: 0 }, { dim: 1, coeff: 1, offset: 0 }],
+    },
+  }],
+  ...overrides,
+});
+
+// ADR 0010: sym_prefix_slice の「グラフ全体を見ないと判定できない」契約は束縛前に落とす。
+Deno.test("sym_prefix_slice のグラフ文脈の契約は Session 構築時に落ちる", () => {
+  validateGraphContracts(parse(prefixSliceGraph()));
+
+  // sym が graph.symbols に無い（実行時に束縛が取れず prefix 長が決まらない）
+  const foreignSym = prefixSliceGraph();
+  foreignSym.nodes[0].attrs = {
+    sym: "U",
+    slices: [{ dim: 0, coeff: 1, offset: 0 }],
+  };
+  assertThrows(() => validateGraphContracts(parse(foreignSym)), ExecutionError);
+
+  // dim が入力 rank の外
+  const badDim = prefixSliceGraph();
+  badDim.nodes[0].attrs = { sym: "T", slices: [{ dim: 2, coeff: 1, offset: 0 }] };
+  assertThrows(() => validateGraphContracts(parse(badDim)), ExecutionError);
+
+  // MUST: 入力が記号 shape の形は束縛後の数値からは見分けが付かない（T = Tmax の run では
+  // 一致してしまう）。宣言の形を見られるここでしか検出できない。
+  const symbolicSource = prefixSliceGraph();
+  symbolicSource.initializers = {};
+  symbolicSource.inputs = [
+    { name: "bind", dtype: "f32", shape: ["T"] },
+    { name: "table", dtype: "i32", shape: ["T", 5] },
+  ];
+  delete symbolicSource.values["table"];
+  assertThrows(() => validateGraphContracts(parse(symbolicSource)), ExecutionError);
+});
+
+// prefix 長は attrs（+ 束縛）から計算し、宣言と照合する（宣言が目標形の reshape とは違う）。
+Deno.test("sym_prefix_slice の出力 shape は束縛から計算されて宣言と突合される", () => {
+  const graph = parse(prefixSliceGraph());
+  const plan = planGraph(graph, bindSymbols(graph, { bind: [3] }));
+  assertEquals(plan.nodes[0].outputShape, [3, 3]);
+
+  // Tmax 超過（定数バッファの範囲外読み出しになる）は束縛時点で落ちる
+  assertThrows(() => planGraph(graph, bindSymbols(graph, { bind: [6] })), OpContractError);
+});
+
+// ADR 0014: slice / cat / flip の対象軸は**宣言レベルで静的**（記号軸の切り出しは
+// sym_prefix_slice の担当）。束縛後の数値 shape では見分けが付かないので、宣言の形を見られる
+// validateGraphContracts でしか検出できない。
+const layoutAxisGraph = (
+  op: string,
+  attrs: Record<string, unknown>,
+  ins: readonly { name: string; shape: (number | string)[] }[],
+  outShape: (number | string)[],
+): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: [op] },
+  // 素の形（'T'）で現れる入力次元が無いグラフは symbols を宣言できない（束縛が取れない）
+  symbols: ins.some((spec) => spec.shape.includes("T")) ? ["T"] : [],
+  inputs: ins.map((spec) => ({ name: spec.name, dtype: "f32", shape: [...spec.shape] })),
+  outputs: ["y"],
+  initializers: {},
+  values: { y: { dtype: "f32", shape: [...outShape] } },
+  nodes: [{ op, ins: ins.map((spec) => spec.name), outs: ["y"], attrs }],
+});
+
+Deno.test("slice / cat / flip の記号軸は Session 構築時に落ちる（静的軸のみ）", () => {
+  // 受理: 対象軸は静的で、他の軸が記号なのは構わない
+  validateGraphContracts(
+    parse(layoutAxisGraph("slice", { dim: 1, start: 1, end: 3 }, [{
+      name: "x",
+      shape: ["T", 4],
+    }], ["T", 2])),
+  );
+  validateGraphContracts(
+    parse(layoutAxisGraph("cat", { dim: 1 }, [
+      { name: "a", shape: ["T", 2] },
+      { name: "b", shape: ["T", 3] },
+    ], ["T", 5])),
+  );
+  validateGraphContracts(
+    parse(layoutAxisGraph("flip", { dim: 1 }, [{ name: "x", shape: ["T", 4] }], ["T", 4])),
+  );
+
+  // 拒否: 対象軸そのものが記号
+  assertThrows(
+    () =>
+      validateGraphContracts(
+        parse(layoutAxisGraph("slice", { dim: 0, start: 0, end: 2 }, [{
+          name: "x",
+          shape: ["T", 4],
+        }], [2, 4])),
+      ),
+    ExecutionError,
+  );
+  assertThrows(
+    () =>
+      validateGraphContracts(
+        parse(layoutAxisGraph("cat", { dim: 0 }, [
+          { name: "a", shape: ["T", 2] },
+          { name: "b", shape: [3, 2] },
+        ], ["T+3", 2])),
+      ),
+    ExecutionError,
+  );
+  assertThrows(
+    () =>
+      validateGraphContracts(
+        parse(layoutAxisGraph("flip", { dim: 0 }, [{ name: "x", shape: ["T", 4] }], ["T", 4])),
+      ),
+    ExecutionError,
+  );
+});
+
+// cat のアリティは**下限** 2（可変アリティ — ADR 0014）。1 本は恒等コピーで語彙に無い。
+Deno.test("cat の入力は 2 本以上で、3 本以上も契約検査を通る", () => {
+  validateGraphContracts(
+    parse(layoutAxisGraph("cat", { dim: 1 }, [
+      { name: "a", shape: [2, 1] },
+      { name: "b", shape: [2, 2] },
+      { name: "c", shape: [2, 3] },
+    ], [2, 6])),
+  );
+  assertThrows(
+    () =>
+      validateGraphContracts(
+        parse(layoutAxisGraph("cat", { dim: 1 }, [{ name: "a", shape: [2, 1] }], [2, 1])),
+      ),
+    OpContractError,
+  );
+});

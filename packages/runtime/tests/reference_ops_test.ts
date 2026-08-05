@@ -1,0 +1,1096 @@
+import { assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
+import {
+  allclose,
+  AllcloseError,
+  compareTensors,
+  DEFAULT_TOLERANCE,
+  EXACT_TOLERANCE,
+  formatAllclose,
+} from "../src/reference/allclose.ts";
+import {
+  applyReferenceOp,
+  referenceAttention,
+  referenceBinary,
+  referenceBmm,
+  referenceCast,
+  referenceCat,
+  referenceConv1d,
+  referenceConv2d,
+  referenceConvTranspose1d,
+  referenceCumsum,
+  referenceEmbedding,
+  referenceExpand,
+  referenceFlip,
+  referenceGather,
+  referenceLayerNorm,
+  referenceLinear,
+  referenceMaskedFill,
+  referenceMatmul,
+  ReferenceOpError,
+  referencePad,
+  referencePermute,
+  referenceReshape,
+  referenceRmsNorm,
+  referenceRowReduce,
+  referenceSlice,
+  referenceSoftmax,
+  referenceSymPrefixSlice,
+  referenceUnary,
+  referenceWhere,
+  type RefTensor,
+  refTensor,
+} from "../src/reference/ops.ts";
+import { OpContractError, type UnaryOpName } from "../src/ops.ts";
+
+const t = (shape: readonly number[], values: readonly number[]): RefTensor =>
+  refTensor(shape, Float32Array.from(values));
+
+const i32 = (shape: readonly number[], values: readonly number[]): RefTensor =>
+  refTensor(shape, Int32Array.from(values));
+
+const bools = (shape: readonly number[], values: readonly number[]): RefTensor =>
+  refTensor(shape, Uint32Array.from(values));
+
+Deno.test("unary の既知値（torch 既定の定義に一致する）", () => {
+  const at = (op: UnaryOpName, x: number): number => referenceUnary(op, t([1], [x])).data[0];
+  assertEquals(at("neg", -2), 2);
+  assertEquals(at("abs", -2.5), 2.5);
+  assertAlmostEquals(at("exp", 1), Math.E, 1e-6);
+  assertAlmostEquals(at("log", Math.E), 1, 1e-6);
+  assertEquals(at("sqrt", 9), 3);
+  assertAlmostEquals(at("tanh", 1), 0.7615941559557649, 1e-6);
+  assertEquals(at("sigmoid", 0), 0.5);
+  assertAlmostEquals(at("sigmoid", 2), 0.8807970779778823, 1e-6);
+  assertEquals(at("relu", -1), 0);
+  assertEquals(at("relu", 3), 3);
+  // gelu(x) = x·Φ(x)（approximate="none"）— Φ(1)=0.8413447460685429
+  assertEquals(at("gelu", 0), 0);
+  assertAlmostEquals(at("gelu", 1), 0.8413447460685429, 1e-6);
+  assertAlmostEquals(at("gelu", -1), -0.15865525393145707, 1e-6);
+  assertAlmostEquals(at("gelu", 3), 2.9959503059051097, 1e-6);
+  // |x| > 4 で erf を ±1 に丸めても f32 では区別できない
+  assertAlmostEquals(at("gelu", 8), 8, 1e-6);
+});
+
+Deno.test("binary は右詰め broadcast で評価する", () => {
+  const sum = referenceBinary("add", t([2, 3], [1, 2, 3, 4, 5, 6]), t([3], [10, 20, 30]));
+  assertEquals(sum.shape, [2, 3]);
+  assertEquals([...sum.data], [11, 22, 33, 14, 25, 36]);
+
+  const product = referenceBinary("mul", t([2, 1], [1, 2]), t([1, 3], [10, 20, 30]));
+  assertEquals(product.shape, [2, 3]);
+  assertEquals([...product.data], [10, 20, 30, 20, 40, 60]);
+
+  const diff = referenceBinary("sub", t([2], [5, 7]), t([2], [1, 2]));
+  assertEquals([...diff.data], [4, 5]);
+  const quotient = referenceBinary("div", t([2], [6, 9]), t([2], [2, 3]));
+  assertEquals([...quotient.data], [3, 3]);
+});
+
+// 波3 の数理 op。既知値は torch の定義（clamp / leaky_relu / log1p / 比較）そのもの。
+Deno.test("attrs 付き unary は torch と同じ定義で、スカラは f32 に丸めて使う", () => {
+  const clamp = referenceUnary("clamp", t([5], [-3, -1, 0, 1, 3]), { min: -1, max: 1 });
+  assertEquals([...clamp.data], [-1, -1, 0, 1, 1]);
+  // 境界は両端とも「そのまま」（< / > の向きを取り違えると等値点で値が変わる）
+  assertEquals([...referenceUnary("clamp", t([2], [-1, 1]), { min: -1, max: 1 }).data], [-1, 1]);
+
+  // clamp_min は下限だけ（上限は素通し）。境界はそのまま返す。
+  const clampMin = referenceUnary("clamp_min", t([5], [-3, -1, 0, 1, 3]), { min: -1 });
+  assertEquals([...clampMin.data], [-1, -1, 0, 1, 3]);
+  // MUST: NaN は伝播する（torch の clamp(NaN, min=m) = NaN）。`x >= min ? x : min` の
+  // 向きで書くと NaN が min に化けるので、この 1 本が向きの検出器になる。
+  assertEquals(
+    Number.isNaN(referenceUnary("clamp_min", t([1], [NaN]), { min: 0 }).data[0]),
+    true,
+  );
+  // 実測のチャネル L2 正規化（clamp(min=eps)）— 下限が極小でも 0 が持ち上がる
+  assertEquals(
+    [...referenceUnary("clamp_min", t([2], [0, 5]), { min: 1e-12 }).data],
+    [Math.fround(1e-12), 5],
+  );
+  assertThrows(() => referenceUnary("clamp_min", t([1], [0]), {}), OpContractError);
+
+  // slope 2 種（ADR 0015 — 実測は 0.1 と 0.01 が混在する）
+  const steep = referenceUnary("leaky_relu", t([4], [-2, -1, 0, 3]), { negative_slope: 0.1 });
+  assertEquals([...steep.data], [-0.2, -0.1, 0, 3].map((v) => Math.fround(v)));
+  const shallow = referenceUnary("leaky_relu", t([2], [-2, 2]), { negative_slope: 0.01 });
+  assertEquals([...shallow.data], [Math.fround(-0.02), 2]);
+  // MUST: NaN は伝播する（torch の leaky_relu(NaN) = NaN）
+  assertEquals(
+    Number.isNaN(referenceUnary("leaky_relu", t([1], [NaN]), { negative_slope: 0.1 }).data[0]),
+    true,
+  );
+
+  // log1p は Math.log1p 準拠 — 素朴な log(1+x) が 0 に潰れる領域で値を持つ
+  assertEquals(referenceUnary("log1p", t([1], [0]), {}).data[0], 0);
+  assertAlmostEquals(referenceUnary("log1p", t([1], [Math.E - 1]), {}).data[0], 1, 1e-6);
+  assertEquals(referenceUnary("log1p", t([1], [1e-8]), {}).data[0], Math.fround(1e-8));
+
+  // 比較は bool（u32 の 0/1）を返す。等値点で ge と gt が割れる。
+  const ge = referenceUnary("ge_scalar", t([3], [-1, 0, 1]), { value: 0 });
+  assertEquals(ge.dtype, "bool");
+  assertEquals([...ge.data], [0, 1, 1]);
+  assertEquals([...referenceUnary("gt_scalar", t([3], [-1, 0, 1]), { value: 0 }).data], [0, 0, 1]);
+  assertEquals([...referenceUnary("le_scalar", t([3], [-1, 0, 1]), { value: 0 }).data], [1, 1, 0]);
+  // 必須 attr の欠落・値域外は契約が拒否する
+  assertThrows(() => referenceUnary("clamp", t([1], [0]), { min: 0 }), OpContractError);
+  assertThrows(() => referenceUnary("clamp", t([1], [0]), { min: 1, max: 0 }), OpContractError);
+  assertThrows(() => referenceUnary("leaky_relu", t([1], [0]), {}), OpContractError);
+});
+
+Deno.test("ge / bitwise_and は broadcast したうえで bool を返す", () => {
+  // searchsorted の形（inputs[…,None] >= bl）
+  const ge = referenceBinary("ge", t([3, 1], [-1, 0.5, 2]), t([3], [0, 1, 2]));
+  assertEquals(ge.dtype, "bool");
+  assertEquals(ge.shape, [3, 3]);
+  assertEquals([...ge.data], [0, 0, 0, 1, 0, 0, 1, 1, 1]);
+
+  const and = referenceBinary(
+    "bitwise_and",
+    bools([2, 2], [1, 1, 0, 0]),
+    bools([2], [1, 0]),
+  );
+  assertEquals(and.dtype, "bool");
+  assertEquals([...and.data], [1, 0, 0, 0]);
+  // dtype の混在と契約外 dtype は拒否
+  assertThrows(() => referenceBinary("bitwise_and", t([1], [1]), t([1], [1])), OpContractError);
+  assertThrows(() => referenceBinary("ge", bools([1], [1]), bools([1], [1])), OpContractError);
+});
+
+// MUST: 分岐の向き（真なら第 2 引数）は値でしか検出できない — a / b を別の値域で埋める。
+Deno.test("where は条件の真で a、偽で b を取り、三者を右詰め broadcast する", () => {
+  const out = referenceWhere(
+    bools([2, 3], [1, 0, 1, 0, 1, 0]),
+    t([2, 3], [1, 2, 3, 4, 5, 6]),
+    t([3], [-10, -20, -30]),
+  );
+  assertEquals(out.dtype, "f32");
+  assertEquals(out.shape, [2, 3]);
+  assertEquals([...out.data], [1, -20, 3, -10, 5, -30]);
+  // 条件が値より低い rank（spline の inside 判定の形）
+  const wide = referenceWhere(bools([2], [1, 0]), t([1], [7]), t([2, 2], [1, 2, 3, 4]));
+  assertEquals(wide.shape, [2, 2]);
+  assertEquals([...wide.data], [7, 2, 7, 4]);
+  assertThrows(
+    () => referenceWhere(bools([1], [1]), bools([1], [1]), t([1], [0])),
+    OpContractError,
+  );
+});
+
+// MUST: 累積方向は非対称な列でしか検出できない（[1,1,1] は逆向きでも同じ）。
+Deno.test("cumsum は最終次元の前縁和で、行ごとに独立している", () => {
+  const out = referenceCumsum(t([2, 4], [1, 2, 3, 4, 10, 20, 30, 40]), { dim: 1 });
+  assertEquals(out.shape, [2, 4]);
+  assertEquals([...out.data], [1, 3, 6, 10, 10, 30, 60, 100]);
+  // 逆向きなら [10,9,7,4] になる形（前縁と後縁が区別できる列）
+  assertEquals([...referenceCumsum(t([1, 4], [1, 2, 3, 4]), { dim: 1 }).data], [1, 3, 6, 10]);
+  // rank1（行 1 本）と最終次元以外の拒否
+  assertEquals([...referenceCumsum(t([3], [2, -1, 5]), { dim: 0 }).data], [2, 1, 6]);
+  assertThrows(() => referenceCumsum(t([2, 2], [1, 2, 3, 4]), { dim: 0 }), OpContractError);
+});
+
+Deno.test("matmul は row-major の既知値を返す", () => {
+  const out = referenceMatmul(t([2, 2], [1, 2, 3, 4]), t([2, 2], [5, 6, 7, 8]));
+  assertEquals(out.shape, [2, 2]);
+  assertEquals([...out.data], [19, 22, 43, 50]);
+
+  const rect = referenceMatmul(t([2, 3], [1, 2, 3, 4, 5, 6]), t([3, 1], [1, 1, 1]));
+  assertEquals(rect.shape, [2, 1]);
+  assertEquals([...rect.data], [6, 15]);
+});
+
+// MUST: B / M / K / N を全て違う長さで確かめる（ACTIVE_DESIGN の Pitfalls — 軸の取り違えは
+// 正方形や対称な形では数値に出ない）。ここは手計算の既知値で固定する。
+Deno.test("bmm はバッチごとに独立した rank-3 の行列積を返す", () => {
+  // B=2, M=3, K=2, N=1（全て違う長さ）。バッチ 1 は全要素を 10 倍にしてある。
+  const a = t([2, 3, 2], [1, 2, 3, 4, 5, 6, 10, 20, 30, 40, 50, 60]);
+  const b = t([2, 2, 1], [1, 10, 100, 1000]);
+  const out = referenceBmm(a, b);
+  assertEquals(out.shape, [2, 3, 1]);
+  // バッチ 0: [1·1+2·10, 3·1+4·10, 5·1+6·10] / バッチ 1: [10·100+20·1000, ...]
+  assertEquals([...out.data], [21, 43, 65, 21000, 43000, 65000]);
+
+  // バッチが 1 枚でも rank-3（matmul へは縮退しない）
+  const single = referenceBmm(t([1, 2, 2], [1, 2, 3, 4]), t([1, 2, 2], [5, 6, 7, 8]));
+  assertEquals(single.shape, [1, 2, 2]);
+  assertEquals([...single.data], [19, 22, 43, 50]);
+
+  // rank-2 / バッチ不一致 / 縮約不一致は契約が落とす
+  assertThrows(
+    () => referenceBmm(t([2, 2], [1, 2, 3, 4]), t([2, 2], [1, 2, 3, 4])),
+    OpContractError,
+  );
+  assertThrows(
+    () => referenceBmm(t([2, 1, 2], [1, 2, 3, 4]), t([1, 2, 1], [1, 2])),
+    OpContractError,
+  );
+  assertThrows(() => referenceBmm(i32([1, 1, 1], [1]), t([1, 1, 1], [1])), OpContractError);
+});
+
+// 契約: out[..., j] = src[..., index[..., j]]（最終次元固定）。範囲外添字は**必ず throw**
+// （GPU 側は NaN 汚染 — src/kernels/gather.ts の裁定。オラクル側は緩めない）。
+Deno.test("gather は行ごとに最終次元を引き直し、範囲外添字を拒否する", () => {
+  const src = t([2, 4], [1, 2, 3, 4, 10, 20, 30, 40]);
+  const index = i32([2, 3], [3, 0, 2, 1, 1, 0]);
+  const out = referenceGather(src, index);
+  assertEquals(out.dtype, "f32");
+  assertEquals(out.shape, [2, 3]);
+  // 行 0 は自分の行からだけ引く（行を跨いだら 10/20 が混ざる）
+  assertEquals([...out.data], [4, 1, 3, 20, 20, 10]);
+
+  // 実測形（src f32[16,T,512] / index i32[16,T,T]）と同型の rank-3
+  const cube = referenceGather(
+    t([2, 2, 3], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+    i32([2, 2, 2], [2, 0, 1, 1, 0, 2, 2, 2]),
+  );
+  assertEquals(cube.shape, [2, 2, 2]);
+  assertEquals([...cube.data], [3, 1, 5, 5, 7, 9, 12, 12]);
+
+  // 範囲外（上側 / 負）は fail loudly
+  assertThrows(() => referenceGather(src, i32([2, 3], [4, 0, 0, 0, 0, 0])), ReferenceOpError);
+  assertThrows(() => referenceGather(src, i32([2, 3], [0, 0, 0, 0, -1, 0])), ReferenceOpError);
+  // スロットの取り違え（src と index を逆に渡す）は契約が落とす
+  assertThrows(() => referenceGather(index, src as never), OpContractError);
+  assertThrows(() => referenceGather(src, t([2, 3], [0, 1, 2, 0, 1, 2])), OpContractError);
+  // 先行次元の不一致
+  assertThrows(() => referenceGather(src, i32([3, 3], new Array(9).fill(0))), OpContractError);
+});
+
+Deno.test("行 reduce は最終次元を keepdim 無しで畳む", () => {
+  const x = t([2, 3], [1, 2, 3, 4, 5, 6]);
+  assertEquals([...referenceRowReduce("sum", x, 1).data], [6, 15]);
+  assertEquals([...referenceRowReduce("amax", x, 1).data], [3, 6]);
+  assertEquals([...referenceRowReduce("amin", x, 1).data], [1, 4]);
+  assertEquals(referenceRowReduce("sum", x, 1).shape, [2]);
+
+  // rank 1 → rank 0（スカラ）
+  const scalar = referenceRowReduce("sum", t([3], [1, 2, 3]), 0);
+  assertEquals(scalar.shape, []);
+  assertEquals([...scalar.data], [6]);
+
+  const cube = referenceRowReduce("amax", t([2, 2, 2], [1, 8, 3, 2, 9, 4, 5, 6]), 2);
+  assertEquals(cube.shape, [2, 2]);
+  assertEquals([...cube.data], [8, 3, 9, 6]);
+});
+
+// 軸 reduce（最終次元以外）。**恒真化しない形**を選ぶ: 全ての軸で値が違い、軸を取り違えたら
+// 必ず別の数になる非対称なデータを使う（rank-3 の 3 軸それぞれで答えが割れる）。
+Deno.test("reduce は attrs.dim の軸だけを畳む（軸ごとに答えが割れる）", () => {
+  // x[i,j,k] = 100i + 10j + k（どの軸を畳んでも別の値になる）
+  const shape = [2, 3, 4];
+  const data = new Array<number>(24);
+  for (let i = 0; i < 2; i += 1) {
+    for (let j = 0; j < 3; j += 1) {
+      for (let k = 0; k < 4; k += 1) data[(i * 3 + j) * 4 + k] = 100 * i + 10 * j + k;
+    }
+  }
+  const x = t(shape, data);
+
+  const axis0 = referenceRowReduce("sum", x, 0);
+  assertEquals(axis0.shape, [3, 4]);
+  // Σ_i (100i + 10j + k) = 100 + 2·(10j + k)
+  assertEquals([...axis0.data], [100, 102, 104, 106, 120, 122, 124, 126, 140, 142, 144, 146]);
+
+  const axis1 = referenceRowReduce("sum", x, 1);
+  assertEquals(axis1.shape, [2, 4]);
+  // Σ_j (100i + 10j + k) = 300i + 30 + 3k
+  assertEquals([...axis1.data], [30, 33, 36, 39, 330, 333, 336, 339]);
+
+  const axis2 = referenceRowReduce("sum", x, 2);
+  assertEquals(axis2.shape, [2, 3]);
+  // Σ_k (100i + 10j + k) = 400i + 40j + 6
+  assertEquals([...axis2.data], [6, 46, 86, 406, 446, 486]);
+
+  // amax / amin も軸で割れる（sum の添字式だけを直しても通らない形）
+  assertEquals([...referenceRowReduce("amax", x, 1).data], [20, 21, 22, 23, 120, 121, 122, 123]);
+  assertEquals([...referenceRowReduce("amin", x, 0).data], [
+    0,
+    1,
+    2,
+    3,
+    10,
+    11,
+    12,
+    13,
+    20,
+    21,
+    22,
+    23,
+  ]);
+
+  // 軸は attrs 経由でも同じ（applyReferenceOp の結線）
+  assertEquals([...applyReferenceOp("sum", [x], { dim: 1 }).data], [...axis1.data]);
+  // 宣言必須（既定値補完をしない）
+  assertThrows(() => applyReferenceOp("sum", [x]), OpContractError);
+  assertThrows(() => applyReferenceOp("sum", [x], { dim: 3 }), OpContractError);
+});
+
+// 契約（src/ops.ts）: f32 → i32 は torch 準拠の truncate（0 方向切り捨て）。
+// MUST: round / floor と区別できる値を使う — -2.7 は trunc -2 / floor -3 / round -3。
+Deno.test("cast は f32 → i32 を 0 方向へ切り捨てる（round でも floor でもない）", () => {
+  const out = referenceCast(t([6], [2.7, -2.7, 0.5, -0.5, 1.5, -1.5]), "i32");
+  assertEquals(out.dtype, "i32");
+  assertEquals([...out.data], [2, -2, 0, 0, 1, -1]);
+});
+
+Deno.test("cast は x != 0 で真偽化し、bool は u32 の 0/1 として読む", () => {
+  const fromFloat = referenceCast(t([4], [0, -0.25, 3, -7]), "bool");
+  assertEquals(fromFloat.dtype, "bool");
+  assertEquals([...fromFloat.data], [0, 1, 1, 1]);
+  assertEquals([...referenceCast(i32([3], [0, -1, 5]), "bool").data], [0, 1, 1]);
+  // bool → 数値は 0/1 がそのまま出る
+  assertEquals([...referenceCast(bools([2], [0, 1]), "f32").data], [0, 1]);
+  assertEquals([...referenceCast(bools([2], [0, 1]), "i32").data], [0, 1]);
+  // 同型 cast は恒等コピー
+  assertEquals([...referenceCast(i32([2], [7, -7]), "i32").data], [7, -7]);
+});
+
+Deno.test("bitwise_not は bool の否定で、bool 以外は契約が拒否する", () => {
+  const out = referenceUnary("bitwise_not", bools([4], [0, 1, 1, 0]));
+  assertEquals(out.dtype, "bool");
+  assertEquals([...out.data], [1, 0, 0, 1]);
+  assertThrows(() => referenceUnary("bitwise_not", t([2], [0, 1])), OpContractError);
+  assertThrows(() => referenceUnary("relu", bools([2], [0, 1])), OpContractError);
+});
+
+Deno.test("i32 の binary は解禁した op だけを 32bit 演算で評価する", () => {
+  // mask 外積（実測グラフの形）: [3,1] × [1,3] の broadcast
+  const outer = referenceBinary("mul", i32([3, 1], [1, 0, 1]), i32([1, 3], [1, 1, 0]));
+  assertEquals(outer.dtype, "i32");
+  assertEquals([...outer.data], [1, 1, 0, 0, 0, 0, 1, 1, 0]);
+  assertEquals([...referenceBinary("sub", i32([2], [1, 1]), i32([2], [0, 1])).data], [1, 0]);
+  // i32 は 2 の補数で折り返す（GPU の i32 演算と同じ）
+  assertEquals([...referenceBinary("mul", i32([1], [65536]), i32([1], [65536])).data], [0]);
+  // 契約表が解禁していない組み合わせ
+  assertThrows(() => referenceBinary("add", i32([1], [1]), i32([1], [1])), OpContractError);
+  assertThrows(() => referenceBinary("div", i32([1], [4]), i32([1], [2])), OpContractError);
+  // dtype 混在（両方とも mul の契約 dtype ではあるが、混合型の elementwise は語彙に無い）
+  assertThrows(() => referenceBinary("mul", i32([1], [1]), t([1], [1])), ReferenceOpError);
+});
+
+Deno.test("reshape は要素順を変えずに形だけ付け替える", () => {
+  const out = referenceReshape(t([2, 3], [1, 2, 3, 4, 5, 6]), [3, 2]);
+  assertEquals(out.shape, [3, 2]);
+  assertEquals([...out.data], [1, 2, 3, 4, 5, 6]);
+  // dtype も素通し（要素に触れない op）
+  assertEquals(referenceReshape(bools([4], [0, 1, 1, 0]), [2, 2]).dtype, "bool");
+  assertThrows(() => referenceReshape(t([2, 3], [1, 2, 3, 4, 5, 6]), [4, 2]), ReferenceOpError);
+});
+
+// 期待値は手計算（codegen の stride 表と独立 — 参照実装は scatter 形で導く）。
+Deno.test("permute は dims の並べ替えで要素を配り直す", () => {
+  // [2,3] の転置: row-major [1,2,3 / 4,5,6] → [1,4 / 2,5 / 3,6]
+  const flat = referencePermute(t([2, 3], [1, 2, 3, 4, 5, 6]), [1, 0]);
+  assertEquals(flat.shape, [3, 2]);
+  assertEquals([...flat.data], [1, 4, 2, 5, 3, 6]);
+  // 実測形 [0,2,1,3]（attention の head 整形）を rank4 で踏む
+  const src = Array.from({ length: 24 }, (_, i) => i);
+  const heads = referencePermute(t([1, 2, 3, 4], src), [0, 2, 1, 3]);
+  assertEquals(heads.shape, [1, 3, 2, 4]);
+  assertEquals(
+    [...heads.data].join(","),
+    "0,1,2,3,12,13,14,15,4,5,6,7,16,17,18,19,8,9,10,11,20,21,22,23",
+  );
+  // MUST: 巡回長 3 の並べ替えを 1 本持つ（実測の形は全て対合で、逆置換との取り違えを
+  // 検出できない）。[2,3] の [1,0] とは違い [1,2,0] の逆置換は [2,0,1] で結果が変わる。
+  const cycled = referencePermute(t([1, 2, 3], [1, 2, 3, 4, 5, 6]), [1, 2, 0]);
+  assertEquals(cycled.shape, [2, 3, 1]);
+  assertEquals([...cycled.data], [1, 2, 3, 4, 5, 6]);
+  const rotated = referencePermute(t([2, 1, 3], [1, 2, 3, 4, 5, 6]), [1, 2, 0]);
+  assertEquals(rotated.shape, [1, 3, 2]);
+  assertEquals([...rotated.data], [1, 4, 2, 5, 3, 6]);
+  // 恒等な並べ替えは要素順を変えない
+  assertEquals([...referencePermute(t([2, 2], [1, 2, 3, 4]), [0, 1]).data], [1, 2, 3, 4]);
+  assertThrows(() => referencePermute(t([2, 3], [1, 2, 3, 4, 5, 6]), [0, 0]), ReferenceOpError);
+  assertThrows(() => referencePermute(t([2, 3], [1, 2, 3, 4, 5, 6]), [0]), ReferenceOpError);
+});
+
+Deno.test("expand は長さ 1 の次元だけを複製する", () => {
+  // gather 添字の実測形 [1,T,T] → [16,T,T] を縮めた [1,2,2] → [3,2,2]
+  const spread = referenceExpand(i32([1, 2, 2], [1, 2, 3, 4]), [3, 2, 2]);
+  assertEquals(spread.shape, [3, 2, 2]);
+  assertEquals([...spread.data], [1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4]);
+  // bool マスクの実測形 [1,T,1] → [1,T,C]
+  const mask = referenceExpand(bools([1, 2, 1], [1, 0]), [1, 2, 3]);
+  assertEquals([...mask.data], [1, 1, 1, 0, 0, 0]);
+  assertEquals(mask.dtype, "bool");
+  // rank が増える形（右詰め）
+  assertEquals([...referenceExpand(i32([2], [7, 8]), [2, 2]).data], [7, 8, 7, 8]);
+  assertThrows(() => referenceExpand(i32([2, 2], [1, 2, 3, 4]), [2, 4]), ReferenceOpError);
+  assertThrows(() => referenceExpand(i32([2, 2], [1, 2, 3, 4]), [4]), ReferenceOpError);
+});
+
+// ---- レイアウト第 2 群（ADR 0014）------------------------------------------
+
+Deno.test("slice は静的軸の [start, end) だけを取り出す", () => {
+  // enc_p の stats[:, :c] / stats[:, c:] を縮めた形（チャネル軸 4 → 前半 2 / 後半 2）
+  const stats = t([1, 4, 2], [1, 2, 3, 4, 5, 6, 7, 8]);
+  const head = referenceSlice(stats, { dim: 1, start: 0, end: 2 });
+  assertEquals(head.shape, [1, 2, 2]);
+  assertEquals([...head.data], [1, 2, 3, 4]);
+  const tail = referenceSlice(stats, { dim: 1, start: 2, end: 4 });
+  assertEquals([...tail.data], [5, 6, 7, 8]);
+  // 最終次元の切り出し（spline の bin_locations[..., :-1] と同型）— 行の送り幅は入力側のまま
+  const bins = t([2, 3], [1, 2, 3, 4, 5, 6]);
+  assertEquals([...referenceSlice(bins, { dim: 1, start: 0, end: 2 }).data], [1, 2, 4, 5]);
+  assertEquals([...referenceSlice(bins, { dim: 1, start: 1, end: 3 }).data], [2, 3, 5, 6]);
+  // 先頭軸の切り出しと、全長（恒等コピー）
+  assertEquals([...referenceSlice(bins, { dim: 0, start: 1, end: 2 }).data], [4, 5, 6]);
+  assertEquals([...referenceSlice(bins, { dim: 0, start: 0, end: 2 }).data], [...bins.data]);
+  // 契約違反（範囲外・逆転・軸の外）は shape 層が落とす
+  assertThrows(() => referenceSlice(bins, { dim: 1, start: 1, end: 4 }), OpContractError);
+  assertThrows(() => referenceSlice(bins, { dim: 1, start: 2, end: 1 }), OpContractError);
+  assertThrows(() => referenceSlice(bins, { dim: 2, start: 0, end: 1 }), OpContractError);
+});
+
+Deno.test("cat は連結軸に入力を順に並べ、出力を全て埋める", () => {
+  // coupling reverse の cat([x0,x1], 1) を縮めた形（軸 1 で 2 + 1）
+  const a = t([2, 2], [1, 2, 3, 4]);
+  const b = t([2, 1], [5, 6]);
+  const joined = referenceCat([a, b], { dim: 1 });
+  assertEquals(joined.shape, [2, 3]);
+  // MUST: 行ごとに交互に並ぶ（offset を「入力の要素数ぶん」で組む誤りだと [1,2,3,4,5,6] になる）
+  assertEquals([...joined.data], [1, 2, 5, 3, 4, 6]);
+  // 先頭軸の連結は素直な連結（行の並びがそのまま）
+  assertEquals([...referenceCat([a, t([1, 2], [9, 8])], { dim: 0 }).data], [1, 2, 3, 4, 9, 8]);
+  // 3 入力（可変アリティ）— 順序が値に出る形
+  const three = referenceCat([t([1, 1], [1]), t([1, 2], [2, 3]), t([1, 1], [4])], { dim: 1 });
+  assertEquals([...three.data], [1, 2, 3, 4]);
+  // 契約違反は shape 層が落とす（連結軸以外の不一致・入力 1 本）
+  assertThrows(() => referenceCat([a, t([3, 1], [1, 2, 3])], { dim: 1 }), OpContractError);
+  assertThrows(() => referenceCat([a], { dim: 1 }), OpContractError);
+});
+
+Deno.test("pad は最終次元を 0 で埋め、範囲外が厳密に 0 になる", () => {
+  // 相対位置 value 側の F.pad(p_attn, [w, w]) を縮めた形（w = 1）
+  const attn = t([2, 2], [1, 2, 3, 4]);
+  const padded = referencePad(attn, { left: 1, right: 1 });
+  assertEquals(padded.shape, [2, 4]);
+  assertEquals([...padded.data], [0, 1, 2, 0, 0, 3, 4, 0]);
+  // 非対称・片側 0（境界の off-by-one が値に出る形）
+  assertEquals([...referencePad(attn, { left: 2, right: 0 }).data], [0, 0, 1, 2, 0, 0, 3, 4]);
+  assertEquals([...referencePad(attn, { left: 0, right: 1 }).data], [1, 2, 0, 3, 4, 0]);
+  // 幅 0 は恒等コピー
+  assertEquals([...referencePad(attn, { left: 0, right: 0 }).data], [...attn.data]);
+  assertThrows(() => referencePad(attn, { left: -1, right: 0 }), OpContractError);
+});
+
+Deno.test("flip は静的軸の添字を反転する", () => {
+  // flow の Flip を縮めた形（軸 1 の長さ 3 — 長さ 2 だと off-by-one が対称で消える）
+  const x = t([2, 3, 2], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  const flipped = referenceFlip(x, { dim: 1 });
+  assertEquals(flipped.shape, [2, 3, 2]);
+  assertEquals([...flipped.data], [5, 6, 3, 4, 1, 2, 11, 12, 9, 10, 7, 8]);
+  // 軸を取り違えると別の値になる（先頭軸・最終軸それぞれ）
+  assertEquals([...referenceFlip(x, { dim: 0 }).data], [7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6]);
+  assertEquals([...referenceFlip(x, { dim: 2 }).data], [2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11]);
+  // 反転は対合（2 回で元に戻る）
+  assertEquals([...referenceFlip(referenceFlip(x, { dim: 1 }), { dim: 1 }).data], [...x.data]);
+  assertThrows(() => referenceFlip(x, { dim: 3 }), OpContractError);
+});
+
+Deno.test("sym_prefix_slice は Tmax 定数の先頭だけを切り出す", () => {
+  // 相対位置バケット表の実測形 — Tmax 4×4 の定数から T=2 の先頭 2×2 を取り出す
+  const table = i32([4, 4], [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+  ]);
+  const sliced = referenceSymPrefixSlice(table, [2, 2]);
+  assertEquals(sliced.shape, [2, 2]);
+  // MUST: 行の送り幅は **Tmax 形（4）** — 出力 shape（2）から組むと [0,1,2,3] になる
+  assertEquals([...sliced.data], [0, 1, 4, 5]);
+  assertEquals(sliced.dtype, "i32");
+  // 1 軸だけ縮める形（位置テーブル）と、縮めない形（恒等）
+  assertEquals([...referenceSymPrefixSlice(table, [2, 4]).data], [0, 1, 2, 3, 4, 5, 6, 7]);
+  assertEquals([...referenceSymPrefixSlice(table, [4, 4]).data], [...table.data]);
+  // f32 も同じ経路（位置スケール表）
+  const scale = t([3, 2], [0, 1, 2, 3, 4, 5]);
+  assertEquals([...referenceSymPrefixSlice(scale, [2, 1]).data], [0, 2]);
+  // 定数に収まらない prefix と rank 違いは fail loudly
+  assertThrows(() => referenceSymPrefixSlice(table, [5, 4]), ReferenceOpError);
+  assertThrows(() => referenceSymPrefixSlice(table, [4]), ReferenceOpError);
+});
+
+// ---- 融合 op（ADR 0012）の既知値 ------------------------------------------
+
+Deno.test("linear は転置レイアウトの重みで既知値を返す", () => {
+  // x[2,3] × W[2,3]（W は [out,in]）+ b[2]
+  const out = referenceLinear(
+    t([2, 3], [1, 2, 3, 4, 5, 6]),
+    t([2, 3], [1, 0, -1, 2, 2, 2]),
+    t([2], [10, -1]),
+  );
+  assertEquals(out.shape, [2, 2]);
+  // 行 0: [1·1+2·0+3·(−1)+10, 1·2+2·2+3·2+(−1)] = [8, 11]
+  // 行 1: [4·1+5·0+6·(−1)+10, 4·2+5·2+6·2+(−1)] = [8, 29]
+  assertEquals([...out.data], [8, 11, 8, 29]);
+  // 先行次元は平坦化される（rank-3 でも重みは同じ）
+  assertEquals(
+    referenceLinear(
+      t([2, 1, 3], [1, 2, 3, 4, 5, 6]),
+      t([2, 3], [1, 0, -1, 2, 2, 2]),
+      t([2], [
+        10,
+        -1,
+      ]),
+    ).shape,
+    [2, 1, 2],
+  );
+  // 特徴数・bias 長の不一致は契約が落とす
+  assertThrows(
+    () => referenceLinear(t([2, 3], [1, 2, 3, 4, 5, 6]), t([2, 2], [1, 0, 1, 0]), t([2], [0, 0])),
+    OpContractError,
+  );
+});
+
+// MUST: 分散は母分散（N 割り）。torch.var の既定（N−1）で組むと dim が小さいほど乖離する。
+Deno.test("layer_norm は母分散（correction=0）で正規化する", () => {
+  const attrs = { normalized_shape: [4], eps: 1e-12 };
+  const out = referenceLayerNorm(
+    t([1, 4], [1, 2, 3, 4]),
+    t([4], [1, 1, 1, 1]),
+    t([4], [0, 0, 0, 0]),
+    attrs,
+  );
+  // mean = 2.5 / 母分散 = 1.25（N−1 なら 1.6667 で、下の期待値と 15% 違う）
+  const inv = 1 / Math.sqrt(1.25);
+  assertAlmostEquals(out.data[0], -1.5 * inv, 1e-5);
+  assertAlmostEquals(out.data[3], 1.5 * inv, 1e-5);
+  // affine が効く（weight で伸ばし bias で平行移動）
+  const affine = referenceLayerNorm(
+    t([1, 4], [1, 2, 3, 4]),
+    t([4], [2, 2, 2, 2]),
+    t([4], [5, 5, 5, 5]),
+    attrs,
+  );
+  assertAlmostEquals(affine.data[0], -1.5 * inv * 2 + 5, 1e-5);
+  // 分散 0 の行は eps だけが残る（出力は bias そのもの）
+  const constant = referenceLayerNorm(
+    t([1, 4], [7, 7, 7, 7]),
+    t([4], [3, 3, 3, 3]),
+    t([4], [1, 2, 3, 4]),
+    { normalized_shape: [4], eps: 1e-7 },
+  );
+  assertEquals([...constant.data], [1, 2, 3, 4]);
+});
+
+// MUST: rms_norm は**平均を引かない**（layer_norm の写し間違いを手計算で押さえる）。
+Deno.test("rms_norm は二乗平均で正規化し、平均を引かない", () => {
+  const attrs = { eps: 1e-12 };
+  // mean(x²) = (1+4+9+16)/4 = 7.5 → rms = √7.5。layer_norm なら mean 2.5 を引くので
+  // 先頭が負になる（ここは全て正のまま = 平均を引いていない証拠）。
+  const out = referenceRmsNorm(t([1, 4], [1, 2, 3, 4]), t([4], [1, 1, 1, 1]), attrs);
+  const inv = 1 / Math.sqrt(7.5);
+  assertAlmostEquals(out.data[0], 1 * inv, 1e-6);
+  assertAlmostEquals(out.data[3], 4 * inv, 1e-6);
+  // weight は要素ごとに掛かる（bias は無い — アリティ 2）
+  const scaled = referenceRmsNorm(t([1, 4], [1, 2, 3, 4]), t([4], [2, 0, -1, 0.5]), attrs);
+  assertAlmostEquals(scaled.data[0], 1 * inv * 2, 1e-6);
+  assertEquals(scaled.data[1], 0);
+  assertAlmostEquals(scaled.data[2], 3 * inv * -1, 1e-6);
+  // 行ごとに独立（先行次元の平坦化が正しいこと）
+  const rows = referenceRmsNorm(t([2, 2], [3, 4, 6, 8]), t([2], [1, 1]), attrs);
+  assertAlmostEquals(rows.data[0], 3 / Math.sqrt(12.5), 1e-6);
+  assertAlmostEquals(rows.data[2], 6 / Math.sqrt(50), 1e-6);
+  // MUST: eps は**平方根の中**（外に足すと全要素 0 の行で 0 ではなく eps 倍の値が出る）。
+  // 全要素 0 の行は eps が無ければ 0/0 = NaN。ここが 0 でなければ eps の位置が誤っている。
+  const zeros = referenceRmsNorm(t([1, 3], [0, 0, 0]), t([3], [5, 5, 5]), { eps: 1e-6 });
+  assertEquals([...zeros.data], [0, 0, 0]);
+  // eps の効き方を値で押さえる（x=1 の 1 要素行: 1/√(1+eps)）
+  const epsy = referenceRmsNorm(t([1, 1], [1]), t([1], [1]), { eps: 0.5 });
+  assertAlmostEquals(epsy.data[0], 1 / Math.sqrt(1.5), 1e-6);
+  // weight 長・rank の不一致は契約が拒否する
+  assertThrows(
+    () => referenceRmsNorm(t([1, 4], [1, 2, 3, 4]), t([3], [1, 1, 1]), attrs),
+    OpContractError,
+  );
+  assertThrows(
+    () => referenceRmsNorm(t([1, 4], [1, 2, 3, 4]), t([1, 4], [1, 1, 1, 1]), attrs),
+    OpContractError,
+  );
+});
+
+// MUST: safe-softmax（amax 減算）。素朴形は台帳の反例集どおり大入力で NaN になる。
+Deno.test("softmax は amax を引いて大入力でも壊れない", () => {
+  const attrs = { dim: 1 };
+  const out = referenceSoftmax(t([1, 3], [1, 2, 3]), attrs);
+  const total = Math.exp(-2) + Math.exp(-1) + 1;
+  assertAlmostEquals(out.data[0], Math.exp(-2) / total, 1e-6);
+  assertAlmostEquals(out.data[0] + out.data[1] + out.data[2], 1, 1e-6);
+  // 素朴形なら exp(-200) が f32 で 0 に潰れて 0/0 = NaN になる領域
+  const huge = referenceSoftmax(t([1, 2], [-200, -199]), attrs);
+  assertEquals(huge.data.every((v) => Number.isFinite(v)), true);
+  assertAlmostEquals(huge.data[0] + huge.data[1], 1, 1e-6);
+  assertAlmostEquals(huge.data[1] / huge.data[0], Math.E, 1e-4);
+  // 全要素が同じ行（masked_fill で全マスクされた行）は一様分布
+  const masked = referenceSoftmax(t([1, 4], Array(4).fill(-3.4028234663852886e+38)), attrs);
+  assertEquals([...masked.data], [0.25, 0.25, 0.25, 0.25]);
+  // 最終次元以外は語彙に無い
+  assertThrows(() => referenceSoftmax(t([2, 3], [1, 2, 3, 4, 5, 6]), { dim: 0 }), OpContractError);
+});
+
+// 融合 attention（ADR 0023）。オラクルの規律は「素直な 3 段」で、GPU の融合形（P 非実体化）を
+// 写さないこと。**半スケール**（scale が q と k の両方に掛かる）と safe 化をここで固定する。
+Deno.test("attention は scale を q と k の両方へ掛け、safe-softmax で大入力を壊さない", () => {
+  // B=1 / H=1 / M=1 / N=2 / D=2 の手計算ケース。scale=2 なら内積に 4 が掛かる。
+  const q = t([1, 1, 1, 2], [1, 0]);
+  const key = t([1, 1, 2, 2], [1, 0, 0, 1]);
+  const value = t([1, 1, 2, 2], [10, 20, 30, 40]);
+  const out = referenceAttention(q, key, value, { scale: 2 });
+  assertEquals(out.shape, [1, 1, 1, 2]);
+  // S = [(1·2)·(1·2), (1·2)·(0·2)] = [4, 0] — **片側だけに掛けると [2, 0]** になる
+  const weight = 1 / (1 + Math.exp(-4));
+  assertAlmostEquals(out.data[0], weight * 10 + (1 - weight) * 30, 1e-5);
+  assertAlmostEquals(out.data[1], weight * 20 + (1 - weight) * 40, 1e-5);
+  // 片側スケール（誤実装）の値と一致しないことを明示的に固定する
+  const halfWeight = 1 / (1 + Math.exp(-2));
+  assertEquals(Math.abs(out.data[0] - (halfWeight * 10 + (1 - halfWeight) * 30)) > 1e-3, true);
+
+  // 全 logit が −200 級の行（素朴 softmax なら exp が f32 で 0 に潰れて 0/0 = NaN）
+  const huge = referenceAttention(
+    t([1, 1, 1, 2], [-10, -10]),
+    t([1, 1, 2, 2], [10, 10, 10, 11]),
+    value,
+    { scale: 1 },
+  );
+  assertEquals([...huge.data].every((v) => Number.isFinite(v)), true);
+
+  // B / H を別々の軸として扱う（積が同じ形で取り違えが起きない）
+  const batched = referenceAttention(
+    t([2, 1, 1, 1], [1, 2]),
+    t([2, 1, 1, 1], [1, 1]),
+    t([2, 1, 1, 1], [5, 7]),
+    { scale: 1 },
+  );
+  // N=1 なので softmax は恒等（確率 1）— 出力は v そのもの
+  assertEquals([...batched.data], [5, 7]);
+
+  // 契約違反（rank-3 / D 不一致 / scale 欠落）はオラクル側でも落ちる
+  assertThrows(() => referenceAttention(t([1, 1, 1], [1]), key, value, { scale: 1 }), Error);
+  assertThrows(
+    () => referenceAttention(q, key, t([1, 1, 2, 3], [1, 2, 3, 4, 5, 6]), { scale: 1 }),
+    OpContractError,
+  );
+  assertThrows(() => referenceAttention(q, key, value, {}), OpContractError);
+  // 統一入口からも同じ結果が出る（kind 分岐の結線）
+  assertEquals(
+    [...applyReferenceOp("attention", [q, key, value], { scale: 2 }).data],
+    [...out.data],
+  );
+});
+
+Deno.test("embedding は行を引き直し、範囲外添字を拒否する", () => {
+  const weight = t([3, 2], [1, 2, 3, 4, 5, 6]);
+  const out = referenceEmbedding(weight, i32([2, 2], [2, 0, 1, 2]));
+  assertEquals(out.shape, [2, 2, 2]);
+  assertEquals([...out.data], [5, 6, 1, 2, 3, 4, 5, 6]);
+  // padding_idx は forward に効かない（受け取らないので影響のしようが無い）
+  assertEquals(
+    [...applyReferenceOp("embedding", [weight, i32([1], [0])], { padding_idx: 0 }).data],
+    [1, 2],
+  );
+  // MUST: 範囲外は throw（GPU 側の NaN 汚染に合わせて緩めない）
+  assertThrows(() => referenceEmbedding(weight, i32([1], [3])), ReferenceOpError);
+  assertThrows(() => referenceEmbedding(weight, i32([1], [-1])), ReferenceOpError);
+});
+
+Deno.test("masked_fill は mask の真の位置だけを埋め、mask を右詰め broadcast する", () => {
+  const out = referenceMaskedFill(
+    t([2, 3], [1, 2, 3, 4, 5, 6]),
+    bools([3], [1, 0, 1]),
+    { value: -7.5 },
+  );
+  assertEquals(out.shape, [2, 3]);
+  assertEquals([...out.data], [-7.5, 2, -7.5, -7.5, 5, -7.5]);
+  // 実測の埋め値（f32 の最小有限値）が丸めで動かない
+  const extreme = referenceMaskedFill(t([2], [1, 2]), bools([2], [1, 0]), {
+    value: -3.4028234663852886e+38,
+  });
+  assertEquals([...extreme.data], [-3.4028234663852886e+38, 2]);
+  // mask が x を広げる形は契約が落とす（埋め値が本来無い要素へ漏れない）
+  assertThrows(
+    () => referenceMaskedFill(t([1], [1]), bools([3], [1, 0, 1]), { value: 0 }),
+    OpContractError,
+  );
+});
+
+const CONV = { stride: 1, padding: 0, dilation: 1, groups: 1 } as const;
+
+Deno.test("conv1d は padding を 0 詰めで扱い、stride で出力長が決まる", () => {
+  // x[1,1,4] = [1,2,3,4] / W[1,1,3] = [1,1,1] / bias = 0、stride 1 / padding 1
+  const same = referenceConv1d(
+    t([1, 1, 4], [1, 2, 3, 4]),
+    t([1, 1, 3], [1, 1, 1]),
+    t([1], [0]),
+    { ...CONV, padding: 1 },
+  );
+  assertEquals(same.shape, [1, 1, 4]);
+  // 両端は padding 域を読み飛ばす（[0+1+2, 1+2+3, 2+3+4, 3+4+0]）
+  assertEquals([...same.data], [3, 6, 9, 7]);
+  // padding を 0 扱いにすると出力長が 2 に縮む（別の形）
+  const valid = referenceConv1d(
+    t([1, 1, 4], [1, 2, 3, 4]),
+    t([1, 1, 3], [1, 1, 1]),
+    t([1], [0]),
+    CONV,
+  );
+  assertEquals(valid.shape, [1, 1, 2]);
+  assertEquals([...valid.data], [6, 9]);
+  // stride 2（出力長 floor((4+0−3)/2)+1 = 1）と bias
+  const strided = referenceConv1d(
+    t([1, 1, 4], [1, 2, 3, 4]),
+    t([1, 1, 3], [1, 1, 1]),
+    t([1], [100]),
+    { ...CONV, stride: 2 },
+  );
+  assertEquals(strided.shape, [1, 1, 1]);
+  assertEquals([...strided.data], [106]);
+  // 入力チャネルごとに縮約する（Cin=2 / Cout=2）
+  const multi = referenceConv1d(
+    t([1, 2, 3], [1, 2, 3, 10, 20, 30]),
+    t([2, 2, 1], [1, 0, 0, 1]),
+    t([2], [0, 0]),
+    CONV,
+  );
+  assertEquals(multi.shape, [1, 2, 3]);
+  assertEquals([...multi.data], [1, 2, 3, 10, 20, 30]);
+});
+
+Deno.test("conv1d の dilation はカーネル位置を飛ばし、groups は入力チャネル帯を絞る", () => {
+  // dilation 2 / k 3 は [x0, x2, x4] を見る（張りは 5 — 出力長 L − 4）
+  const dilated = referenceConv1d(
+    t([1, 1, 7], [1, 2, 3, 4, 5, 6, 7]),
+    t([1, 1, 3], [1, 1, 1]),
+    t([1], [0]),
+    { ...CONV, dilation: 2 },
+  );
+  assertEquals(dilated.shape, [1, 1, 3]);
+  assertEquals([...dilated.data], [1 + 3 + 5, 2 + 4 + 6, 3 + 5 + 7]);
+  // MUST: dilation は k に掛かる（ox に掛ける誤りは stride と同じ形になり、この
+  // 「入力長は据え置きで出力長だけ縮む」ケースでしか区別できない）
+  const strided = referenceConv1d(
+    t([1, 1, 7], [1, 2, 3, 4, 5, 6, 7]),
+    t([1, 1, 3], [1, 1, 1]),
+    t([1], [0]),
+    { ...CONV, stride: 2 },
+  );
+  assertEquals([...strided.data], [1 + 2 + 3, 3 + 4 + 5, 5 + 6 + 7]);
+
+  // depthwise（groups = Cin = Cout = 2）— 各出力チャネルは同番のチャネルだけを見る。
+  // グループ跨ぎで読む誤りは「別チャネルの値が混ざる」形で必ず値に出る。
+  const depthwise = referenceConv1d(
+    t([1, 2, 3], [1, 2, 3, 10, 20, 30]),
+    t([2, 1, 1], [1, 100]),
+    t([2], [0, 0]),
+    { ...CONV, groups: 2 },
+  );
+  assertEquals(depthwise.shape, [1, 2, 3]);
+  assertEquals([...depthwise.data], [1, 2, 3, 1000, 2000, 3000]);
+
+  // 中間の groups（Cin 4 / Cout 2 / g 2）— 重みの第 2 軸は Cin/groups = 2
+  const grouped = referenceConv1d(
+    t([1, 4, 2], [1, 2, 3, 4, 10, 20, 30, 40]),
+    t([2, 2, 1], [1, 1, 1, 1]),
+    t([2], [0, 0]),
+    { ...CONV, groups: 2 },
+  );
+  assertEquals(grouped.shape, [1, 2, 2]);
+  assertEquals([...grouped.data], [1 + 3, 2 + 4, 10 + 30, 20 + 40]);
+});
+
+/** conv2d の既定 attrs（各ケースは必要な軸だけ差し替える）。 */
+const CONV2D = {
+  stride: [1, 1],
+  padding: [0, 0],
+  dilation: [1, 1],
+  groups: 1,
+} as const;
+
+// MUST: 重みは [Cout, Cin/groups, Kh, Kw]。Kh と Kw を入れ替えて読む実装は**正方カーネルでは
+// 値まで一致する**ので、手計算ケースは必ず Kh ≠ Kw かつ重みが非対称なものにする。
+Deno.test("conv2d は [Cout,Cin/g,Kh,Kw] の重みで畳み込む（手計算・Kh≠Kw）", () => {
+  // x [[1,2,3],[4,5,6]] × w [[1,2,3],[4,5,6]]（Kh=2 / Kw=3）→ 出力 1 点
+  // Σ = 1·1 + 2·2 + 3·3 + 4·4 + 5·5 + 6·6 = 91。
+  // Kh/Kw を転置して読むと 1·1 + 2·3 + 3·5 + 4·2 + 5·4 + 6·6 = 86 になり必ず食い違う。
+  const exact = referenceConv2d(
+    t([1, 1, 2, 3], [1, 2, 3, 4, 5, 6]),
+    t([1, 1, 2, 3], [1, 2, 3, 4, 5, 6]),
+    t([1], [0]),
+    CONV2D,
+  );
+  assertEquals(exact.shape, [1, 1, 1, 1]);
+  assertEquals([...exact.data], [91]);
+  // bias は出力チャネルごとに 1 度だけ足す
+  const biased = referenceConv2d(
+    t([1, 1, 2, 3], [1, 2, 3, 4, 5, 6]),
+    t([1, 1, 2, 3], [1, 2, 3, 4, 5, 6]),
+    t([1], [9]),
+    CONV2D,
+  );
+  assertEquals([...biased.data], [100]);
+});
+
+// MUST: 空間 2 軸は独立に効く。H と W で同じ値を使うケースだけだと、軸を取り違えた
+// stride / padding / dilation が数値でも赤くならない。
+Deno.test("conv2d の stride / padding / dilation は H と W で独立に効く", () => {
+  // 3×4 入力・2×2 の識別可能な重み（1 / 10 / 100 / 1000）で、どのタップが効いたか値から読める
+  const x = t([1, 1, 3, 4], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  const taps = t([1, 1, 2, 2], [1, 10, 100, 1000]);
+  // stride [2,1] / padding [1,0]: H は (3+2−1−1)/2+1 = 2、W は (4−1−1)/1+1 = 3
+  const asym = referenceConv2d(x, taps, t([1], [0]), {
+    ...CONV2D,
+    stride: [2, 1],
+    padding: [1, 0],
+  });
+  assertEquals(asym.shape, [1, 1, 2, 3]);
+  assertEquals([...asym.data], [2100, 3200, 4300, 10965, 12076, 13187]);
+
+  // dilation [2,1]: H だけカーネル張りが 3 に伸びる（H は 1・W は 4）
+  const dilated = referenceConv2d(
+    t([1, 1, 3, 5], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+    taps,
+    t([1], [0]),
+    { ...CONV2D, dilation: [2, 1] },
+  );
+  assertEquals(dilated.shape, [1, 1, 1, 4]);
+  assertEquals([...dilated.data], [13121, 14232, 15343, 16454]);
+
+  // padding 域は 0 詰めで**読み飛ばす**（両端が padding だけを見る出力を持つ形）
+  const padded = referenceConv2d(
+    t([1, 1, 1, 1], [7]),
+    t([1, 1, 1, 1], [3]),
+    t([1], [0]),
+    { ...CONV2D, padding: [1, 0] },
+  );
+  assertEquals(padded.shape, [1, 1, 3, 1]);
+  assertEquals([...padded.data], [0, 21, 0]);
+});
+
+// MUST: Cin / Cout はどちらも 2 以上で互いに違う値を持つケースを用意する（片方が 1 だと
+// グループの帯オフセットを落とす誤りが偶然一致する — conv_transpose1d の教訓）。
+Deno.test("conv2d の groups は入力チャネル帯を絞る（depthwise と中間 groups）", () => {
+  // Cin 4 / Cout 6 / groups 2 → in_per_group 2 / out_per_group 3。
+  // oc 0..2 は ic 0,1 を、oc 3..5 は ic 2,3 だけを見る。
+  const grouped = referenceConv2d(
+    t([1, 4, 1, 2], [1, 2, 3, 4, 5, 6, 7, 8]),
+    t([6, 2, 1, 1], [1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1]),
+    t([6], [0, 0, 0, 0, 0, 0]),
+    { ...CONV2D, groups: 2 },
+  );
+  assertEquals(grouped.shape, [1, 6, 1, 2]);
+  // 帯オフセットを落とすと oc 3..5 が [1,2] / [3,4] / [4,6] に化ける
+  assertEquals([...grouped.data], [1, 2, 3, 4, 4, 6, 5, 6, 7, 8, 12, 14]);
+
+  // depthwise（groups = Cin = Cout = 3 → 重みの第 2 軸は 1）
+  const depthwise = referenceConv2d(
+    t([1, 3, 1, 1], [1, 1, 1]),
+    t([3, 1, 1, 1], [2, 3, 4]),
+    t([3], [0, 0, 0]),
+    { ...CONV2D, groups: 3 },
+  );
+  assertEquals([...depthwise.data], [2, 3, 4]);
+});
+
+Deno.test("conv_transpose1d は [Cin,Cout,K] の重みで入力を stride 倍に伸ばす", () => {
+  // x[1,1,3] = [1,2,3] / W[1,1,2] = [1,10] / stride 2 / padding 0 → 出力長 6
+  // out[2i] = x[i]·w[0] / out[2i+1] = x[i]·w[1]
+  const up = referenceConvTranspose1d(
+    t([1, 1, 3], [1, 2, 3]),
+    t([1, 1, 2], [1, 10]),
+    t([1], [0]),
+    { stride: 2, padding: 0 },
+  );
+  assertEquals(up.shape, [1, 1, 6]);
+  assertEquals([...up.data], [1, 10, 2, 20, 3, 30]);
+
+  // MUST: 重みは [Cin, Cout, K]。非対称チャネル（Cin 2 / Cout 1）で転置の取り違えを固定する。
+  // 転置して読むと w[1] を w[0] の位置で拾い、値が [1+20, …] ではなくなる。
+  const asym = referenceConvTranspose1d(
+    t([1, 2, 2], [1, 2, 10, 20]),
+    t([2, 1, 2], [1, 0, 0, 1]),
+    t([1], [0]),
+    { stride: 2, padding: 0 },
+  );
+  assertEquals(asym.shape, [1, 1, 4]);
+  // ic=0 は w=[1,0]（偶数位置へ）/ ic=1 は w=[0,1]（奇数位置へ）
+  assertEquals([...asym.data], [1, 10, 2, 20]);
+
+  // padding は出力の両端を削る（2P == K − S: K 4 / S 2 / P 1 で出力長 L·S）
+  const padded = referenceConvTranspose1d(
+    t([1, 1, 3], [1, 2, 3]),
+    t([1, 1, 4], [1, 2, 3, 4]),
+    t([1], [0]),
+    { stride: 2, padding: 1 },
+  );
+  assertEquals(padded.shape, [1, 1, 6]);
+  // 手計算（out[ox] = Σ_k x[(ox+1−k)/2]·w[k]。(ox+1−k) が非負の偶数で商 < 3 のときのみ）:
+  //   ox0: x0·w1                       = 2
+  //   ox1: x1·w0 + x0·w2               = 2 + 3   = 5
+  //   ox2: x1·w1 + x0·w3               = 4 + 4   = 8
+  //   ox3: x2·w0 + x1·w2               = 3 + 6   = 9
+  //   ox4: x2·w1 + x1·w3               = 6 + 8   = 14
+  //   ox5: x2·w2                       = 9
+  // padding を 0 扱いにすると全体が 1 つ左へずれる（両端の非対称性が検出器）。
+  assertEquals([...padded.data], [2, 5, 8, 9, 14, 9]);
+
+  // MUST: Cin / Cout が**どちらも 2 以上で互いに違う**ケースを 1 本持つ。転置して読む誤りは
+  // Cin == 1 でも Cout == 1 でも添字が一致してしまい、上の 2 ケースだけでは緑のまま通る
+  // （故障注入で実証済み — ADR 0015 の「非対称チャネル数で固定する」はここまで含む）。
+  const wide = referenceConvTranspose1d(
+    t([1, 2, 2], [1, 2, 10, 20]),
+    // W[ic][oc][k] = 1..12（ic 主・oc 次・k 最内）
+    t([2, 3, 2], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+    t([3], [0, 0, 0]),
+    { stride: 2, padding: 0 },
+  );
+  assertEquals(wide.shape, [1, 3, 4]);
+  // 手計算: out[oc][2i+j] = x0[i]·W[0][oc][j] + x1[i]·W[1][oc][j]
+  assertEquals([...wide.data], [
+    71,
+    82,
+    142,
+    164, // oc0
+    93,
+    104,
+    186,
+    208, // oc1
+    115,
+    126,
+    230,
+    252, // oc2
+  ]);
+
+  // bias は出力チャネルごとに 1 度だけ足される（寄与本数に比例しない）
+  const biased = referenceConvTranspose1d(
+    t([1, 1, 2], [1, 1]),
+    t([1, 2, 2], [1, 1, 1, 1]),
+    t([2], [5, 7]),
+    { stride: 2, padding: 0 },
+  );
+  assertEquals([...biased.data], [6, 6, 6, 6, 8, 8, 8, 8]);
+});
+
+Deno.test("applyReferenceOp は契約表の kind で分岐し、アリティ違反を拒否する", () => {
+  assertEquals([...applyReferenceOp("relu", [t([2], [-1, 2])]).data], [0, 2]);
+  assertEquals([...applyReferenceOp("sum", [t([1, 2], [3, 4])], { dim: 1 }).data], [7]);
+  assertEquals([...applyReferenceOp("cast", [t([2], [1.9, 0])], { to: "i32" }).data], [1, 0]);
+  assertThrows(() => applyReferenceOp("add", [t([2], [1, 2])]), ReferenceOpError);
+  // スロット別 dtype 契約の op も同じ入口を通る（テストがグラフをそのまま辿れる）
+  assertEquals(
+    [...applyReferenceOp("bmm", [t([1, 1, 2], [1, 2]), t([1, 2, 1], [3, 4])]).data],
+    [11],
+  );
+  assertEquals(
+    [...applyReferenceOp("gather", [t([1, 3], [7, 8, 9]), i32([1, 2], [2, 0])]).data],
+    [9, 7],
+  );
+  // cast の attrs は契約検査を通っていなくても参照実装側で落ちる
+  assertThrows(() => applyReferenceOp("cast", [t([2], [1, 2])]), OpContractError);
+  assertThrows(() => refTensor([2, 2], Float32Array.from([1, 2])), ReferenceOpError);
+
+  // レイアウト op（ADR 0011）— reshape / expand は目標形が要る
+  assertEquals(applyReferenceOp("reshape", [t([4], [1, 2, 3, 4])], {}, [2, 2]).shape, [2, 2]);
+  const transposed = applyReferenceOp("permute", [t([2, 2], [1, 2, 3, 4])], { dims: [1, 0] });
+  assertEquals([...transposed.data], [1, 3, 2, 4]);
+  assertEquals(applyReferenceOp("expand", [i32([1, 2], [5, 6])], {}, [2, 2]).shape, [2, 2]);
+  // MUST: 目標形を渡さずに黙って推測しない
+  assertThrows(() => applyReferenceOp("reshape", [t([4], [1, 2, 3, 4])]), ReferenceOpError);
+  assertThrows(() => applyReferenceOp("expand", [i32([1, 2], [5, 6])]), ReferenceOpError);
+  assertThrows(() => applyReferenceOp("permute", [t([2, 2], [1, 2, 3, 4])]), OpContractError);
+
+  // レイアウト第 2 群（ADR 0014）— 出力 shape は attrs から決まるので目標形は要らない
+  assertEquals(
+    [...applyReferenceOp("slice", [t([2, 2], [1, 2, 3, 4])], { dim: 1, start: 1, end: 2 }).data],
+    [2, 4],
+  );
+  assertEquals(
+    [...applyReferenceOp("cat", [t([1], [1]), t([2], [2, 3])], { dim: 0 }).data],
+    [1, 2, 3],
+  );
+  assertEquals(
+    [...applyReferenceOp("pad", [t([1, 2], [1, 2])], { left: 1, right: 0 }).data],
+    [0, 1, 2],
+  );
+  assertEquals([...applyReferenceOp("flip", [t([3], [1, 2, 3])], { dim: 0 }).data], [3, 2, 1]);
+  // 可変アリティは**下限**（1 本の cat は受理しない）
+  assertThrows(() => applyReferenceOp("cat", [t([2], [1, 2])], { dim: 0 }), ReferenceOpError);
+
+  // ADR 0017 の 3 本も同じ入口を通る（結線漏れは kind の網羅で型が止めるが、実行経路は別）
+  assertEquals(
+    [...applyReferenceOp("clamp_min", [t([2], [-1, 2])], { min: 0 }).data],
+    [0, 2],
+  );
+  // mean(x²) = 9 → rms 3 → 3/3·2 = 2（eps は 1e-12 で無視できる大きさ）
+  assertAlmostEquals(
+    applyReferenceOp("rms_norm", [t([1, 1], [3]), t([1], [2])], { eps: 1e-12 }).data[0],
+    2,
+    1e-6,
+  );
+  assertEquals(
+    [
+      ...applyReferenceOp(
+        "conv2d",
+        [t([1, 1, 1, 1], [2]), t([1, 1, 1, 1], [3]), t([1], [1])],
+        { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 1 },
+      ).data,
+    ],
+    [7],
+  );
+  assertThrows(
+    () => applyReferenceOp("rms_norm", [t([1, 1], [3])], { eps: 1e-6 }),
+    ReferenceOpError,
+  );
+});
+
+Deno.test("compareTensors は dtype で許容誤差を選び、dtype 混在を拒否する", () => {
+  assertEquals(EXACT_TOLERANCE, { atol: 0, rtol: 0 });
+  // f32 は既定の許容誤差で通る差
+  assertEquals(compareTensors(t([1], [1.000001]), t([1], [1])).pass, true);
+  // 整数は 1 でもずれたら不合格
+  assertEquals(compareTensors(i32([2], [1, 2]), i32([2], [1, 2])).pass, true);
+  assertEquals(compareTensors(i32([2], [1, 3]), i32([2], [1, 2])).pass, false);
+  assertEquals(compareTensors(bools([2], [0, 1]), bools([2], [0, 0])).pass, false);
+  assertThrows(() => compareTensors(i32([1], [1]), t([1], [1])), AllcloseError);
+});
+
+Deno.test("allclose は atol + rtol·|ref| で判定する", () => {
+  const expected = Float32Array.from([0, 1, 100]);
+  assertEquals(allclose(expected, expected).pass, true);
+  // atol=1e-5 の範囲内 / rtol=1e-3 が効く範囲内
+  assertEquals(allclose(Float32Array.from([5e-6, 1.0005, 100.05]), expected).pass, true);
+  const report = allclose(Float32Array.from([0, 1, 101]), expected);
+  assertEquals(report.pass, false);
+  assertEquals(report.failCount, 1);
+  assertEquals(report.worstIndex, 2);
+  assertEquals(formatAllclose(report).startsWith("fail=1"), true);
+});
+
+Deno.test("allclose は NaN / Inf をどちらの側でも不合格にする", () => {
+  const expected = Float32Array.from([1, 2]);
+  const withNan = allclose(Float32Array.from([Number.NaN, 2]), expected);
+  assertEquals(withNan.pass, false);
+  assertEquals(withNan.nonFiniteCount, 1);
+  assertEquals(withNan.maxAbsError, Number.POSITIVE_INFINITY);
+
+  const referenceInf = allclose(expected, Float32Array.from([Number.POSITIVE_INFINITY, 2]));
+  assertEquals(referenceInf.pass, false);
+  assertEquals(referenceInf.nonFiniteCount, 1);
+
+  assertEquals(DEFAULT_TOLERANCE.atol, 1e-5);
+  assertEquals(DEFAULT_TOLERANCE.rtol, 1e-3);
+  assertThrows(() => allclose(expected, Float32Array.from([1])), AllcloseError);
+});

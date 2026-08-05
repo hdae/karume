@@ -1,0 +1,1812 @@
+{
+  "_doc": [
+    "op 契約の適合ケース表（TS 側 src/ops.ts と Python 側 tools/exporter/karume/ops.py",
+    "が同じ契約を持つことの正本）。両実装は**自分の表をこのファイルへ突き合わせる** — 片側だけ",
+    "動かすと必ず赤になり、『export は緑、ブラウザだけ落ちる』を構造的に塞ぐ。",
+    "先例は tests/fixtures/dim-grammar.json（次元文法の適合表）で、節の作りもそれに倣う。",
+    "",
+    "節の意味:",
+    "- strided_rank_max: strided コピーカーネルが扱える最大 rank（両側の定数と一致すること）。",
+    "- ops: op ごとの宣言的な事実（アリティ / スロット dtype / 出力 dtype 写像 / attrs キー",
+    "  集合）。両側は自分の契約表からこの形を導出して突合する。dtype 集合と attrs キーは",
+    "  **昇順**で書く（Python 側は集合なので順序を持たない — 表現の差を突合の差にしない）。",
+    "  `variadic: true` は**入力数が可変**の op（cat のみ）で、そのとき arity は**下限**。",
+    "  省略 = 固定アリティ（入力数がちょうど arity）。",
+    "  out_dtypes は「スロット 0 の入力 dtype → 出力 dtype」で、**恒等でない op にだけ**書く",
+    "  （省略 = スロット 0 の受理集合上の恒等写像）。cast だけは出力が attrs.to で決まるので",
+    "  この欄を持たない。",
+    "  `weight_slot` は低精度格納が**適格**になる重みスロット番号（ADR 0018 — 両側の",
+    "  WEIGHT_SLOTS 表の鏡像）。省略 = そのスロットを持たない op で、bias スロットは",
+    "  **決して載らない**（載せた瞬間にプロトタイプの f16 降格バグが再来する — ADR 0006）。",
+    "  `channel_axis` は i8 の per-channel scale が乗る重みテンソルの軸（ADR 0019 — 両側の",
+    "  WEIGHT_CHANNEL_AXES 表の鏡像）。**weight_slot と過不足なく同時に載る**（片方だけの",
+    "  op があると、新しい重みスロットの i8 が軸 0 として黙って量子化される）。",
+    "- attr_values: attrs スキーマの**値域**。スキーマは両側とも検査関数なので構造比較ができない。",
+    "  代わりに accept / reject の実値を両側の検査関数へ通す（dim-grammar の valid / invalid と",
+    "  同じ作り）。値は IR JSON に実際に現れうるものだけ — 非有限値は IR v1 が JSON 層で",
+    "  拒否するので載せない（各実装の単体テストが個別に固定している）。",
+    "- shapes: 出力 shape 規則の適合ケース。ins / declared / out の次元は整数か次元言語",
+    "  （coeff·sym+offset）で書く。TS 側は bindings で数値へ解決してから computeOutputShape に",
+    "  渡し、Python 側は記号のまま compute_output_shape に渡す — 同じ表が両方の定義域で",
+    "  同じ結論になることを要求する。rank 上限（strided コピー族）もこの節が担う:",
+    "  rank 4 の受理と rank 5 / rank 0 の拒否をケースとして持つ。",
+    "",
+    "MUST: ops 節に載る op 集合は両実装の契約表と**完全一致**（過不足とも赤）。",
+    "MUST: shapes 節は ops 節の全 op を最低 1 件は受理ケースで踏む（新 op の shape 規則が",
+    "片側だけ実装されていない状態を通さない）。",
+    "NOTE: op の内部 kind 名（TS の camelCase / Python の snake_case）は載せない — 消費側の",
+    "分岐タグであって契約面ではなく、綴りの差が言語規約由来だから。",
+    "NOTE（この表が担保しない範囲）: **宣言 shape 層の規則**（レイアウト op の静的軸の扱い —",
+    "slice / cat の切り出し軸・連結軸が記号でないこと、記号次元どうしを式のまま比較すること等）",
+    "は載せられない。TS 側は束縛済みの数値を、Python 側は束縛前の記号式を定義域に取るので、",
+    "同じ規則が両側で同じ入力を持たないから（この表の shapes 節が要求する『同じ表が両方の",
+    "定義域で同じ結論』が成り立たない領域）。ここは両側の専用単体テストがそれぞれ固定する:",
+    "TS は tests/ops_contract_test.ts、Python は tools/exporter/tests/test_shapes.py と",
+    "境界での拒否を見る test_convert.py。"
+  ],
+  "strided_rank_max": 4,
+  "ops": [
+    { "op": "neg", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    { "op": "abs", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    { "op": "exp", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    { "op": "log", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    { "op": "log1p", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    { "op": "sqrt", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    { "op": "tanh", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    {
+      "op": "sigmoid",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": []
+    },
+    { "op": "relu", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    { "op": "gelu", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    {
+      "op": "bitwise_not",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["bool"] },
+      "attrs": []
+    },
+    {
+      "op": "clamp",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["max", "min"]
+    },
+    {
+      "op": "clamp_min",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["min"]
+    },
+    {
+      "op": "leaky_relu",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["negative_slope"]
+    },
+    {
+      "op": "ge_scalar",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "out_dtypes": { "f32": "bool" },
+      "attrs": ["value"]
+    },
+    {
+      "op": "le_scalar",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "out_dtypes": { "f32": "bool" },
+      "attrs": ["value"]
+    },
+    {
+      "op": "gt_scalar",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "out_dtypes": { "f32": "bool" },
+      "attrs": ["value"]
+    },
+    { "op": "add", "arity": 2, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    {
+      "op": "sub",
+      "arity": 2,
+      "dtypes": { "kind": "uniform", "accept": ["f32", "i32"] },
+      "attrs": []
+    },
+    {
+      "op": "mul",
+      "arity": 2,
+      "dtypes": { "kind": "uniform", "accept": ["f32", "i32"] },
+      "attrs": []
+    },
+    { "op": "div", "arity": 2, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    {
+      "op": "ge",
+      "arity": 2,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "out_dtypes": { "f32": "bool" },
+      "attrs": []
+    },
+    {
+      "op": "bitwise_and",
+      "arity": 2,
+      "dtypes": { "kind": "uniform", "accept": ["bool"] },
+      "attrs": []
+    },
+    {
+      "op": "where",
+      "arity": 3,
+      "dtypes": { "kind": "perSlot", "slots": [["bool"], ["f32"], ["f32"]] },
+      "out_dtypes": { "bool": "f32" },
+      "attrs": []
+    },
+    {
+      "op": "sum",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["bool", "f32"] },
+      "out_dtypes": { "bool": "i32", "f32": "f32" },
+      "attrs": ["dim"]
+    },
+    {
+      "op": "amax",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dim"]
+    },
+    {
+      "op": "amin",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dim"]
+    },
+    {
+      "op": "cumsum",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dim"]
+    },
+    { "op": "matmul", "arity": 2, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    { "op": "bmm", "arity": 2, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    {
+      "op": "gather",
+      "arity": 2,
+      "dtypes": { "kind": "perSlot", "slots": [["f32"], ["i32"]] },
+      "attrs": []
+    },
+    {
+      "op": "cast",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["bool", "f32", "i32"] },
+      "attrs": ["to"]
+    },
+    {
+      "op": "reshape",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["bool", "f32", "i32"] },
+      "attrs": []
+    },
+    {
+      "op": "permute",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dims"]
+    },
+    {
+      "op": "expand",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["bool", "f32", "i32"] },
+      "attrs": []
+    },
+    {
+      "op": "slice",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dim", "end", "start"]
+    },
+    {
+      "op": "cat",
+      "arity": 2,
+      "variadic": true,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dim"]
+    },
+    {
+      "op": "pad",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["left", "right"]
+    },
+    {
+      "op": "flip",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dim"]
+    },
+    {
+      "op": "sym_prefix_slice",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32", "i32"] },
+      "attrs": ["slices", "sym"]
+    },
+    {
+      "op": "linear",
+      "arity": 3,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": [],
+      "weight_slot": 1,
+      "channel_axis": 0
+    },
+    {
+      "op": "layer_norm",
+      "arity": 3,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["eps", "normalized_shape"]
+    },
+    {
+      "op": "rms_norm",
+      "arity": 2,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["eps"]
+    },
+    {
+      "op": "softmax",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dim"]
+    },
+    {
+      "op": "attention",
+      "arity": 3,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["scale"]
+    },
+    {
+      "op": "embedding",
+      "arity": 2,
+      "dtypes": { "kind": "perSlot", "slots": [["f32"], ["i32"]] },
+      "attrs": ["padding_idx"],
+      "weight_slot": 0,
+      "channel_axis": 0
+    },
+    {
+      "op": "masked_fill",
+      "arity": 2,
+      "dtypes": { "kind": "perSlot", "slots": [["f32"], ["bool"]] },
+      "attrs": ["value"]
+    },
+    {
+      "op": "conv1d",
+      "arity": 3,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dilation", "groups", "padding", "stride"],
+      "weight_slot": 1,
+      "channel_axis": 0
+    },
+    {
+      "op": "conv2d",
+      "arity": 3,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dilation", "groups", "padding", "stride"],
+      "weight_slot": 1,
+      "channel_axis": 0
+    },
+    {
+      "op": "conv_transpose1d",
+      "arity": 3,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["padding", "stride"],
+      "weight_slot": 1,
+      "channel_axis": 1
+    }
+  ],
+  "attr_values": [
+    {
+      "op": "cast",
+      "attr": "to",
+      "why": "変換先は IR v1 の意味論 dtype 語彙そのもの（同型 cast は恒等コピー）",
+      "accept": ["f32", "i32", "bool"],
+      "reject": ["i64", "f16", "u32", "", "F32", 3, null, true, ["f32"]]
+    },
+    {
+      "op": "permute",
+      "attr": "dims",
+      "why": "非負・重複無しの並べ替え表（負の軸表記はエクスポータ境界で正規化する規約）",
+      "accept": [[0], [1, 0], [0, 2, 1], [3, 0, 2, 1]],
+      "reject": [
+        [],
+        [0, -1],
+        [0, 0],
+        [0, 1.5],
+        [0, "1"],
+        [true],
+        [0, 1000000000000000000],
+        "0,1",
+        0,
+        null
+      ]
+    },
+    {
+      "op": "slice",
+      "attr": "dim",
+      "why": "非負の軸番号のみ（負の軸表記はエクスポータ境界で正規化する規約）",
+      "accept": [0, 1, 3],
+      "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "slice",
+      "attr": "start",
+      "why": "非負整数（start <= end と end <= 軸長は shapes 節が持つ — キーと入力を跨ぐ規則）",
+      "accept": [0, 4, 96],
+      "reject": [-1, 0.5, "0", null, true, 1000000000000000000]
+    },
+    {
+      "op": "slice",
+      "attr": "end",
+      "why": "非負整数（torch の既定 end（int64 最大）はエクスポータ境界で軸長へ詰める）",
+      "accept": [0, 4, 192],
+      "reject": [-1, 0.5, "0", null, true, 1000000000000000000]
+    },
+    {
+      "op": "cat",
+      "attr": "dim",
+      "why": "非負の軸番号のみ（連結軸。入力 rank との突合は shapes 節）",
+      "accept": [0, 1, 2],
+      "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "pad",
+      "attr": "left",
+      "why": "非負整数（負幅の切り詰めは pad ではなく slice の意味 — 受理すると同じ形が 2 通り書ける）",
+      "accept": [0, 1, 4],
+      "reject": [-1, 0.5, "0", null, true, 1000000000000000000]
+    },
+    {
+      "op": "pad",
+      "attr": "right",
+      "why": "非負整数（実測は左右対称の [w,w] だが、非対称も表現できる）",
+      "accept": [0, 1, 4],
+      "reject": [-1, 0.5, "0", null, true, 1000000000000000000]
+    },
+    {
+      "op": "flip",
+      "attr": "dim",
+      "why": "非負の軸番号のみ（反転軸。実測は flow の 192ch と sdp の 2ch）",
+      "accept": [0, 1, 2],
+      "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "sym_prefix_slice",
+      "attr": "sym",
+      "why": "次元言語のシンボル名（束縛済みかはグラフ側の検査）",
+      "accept": ["T", "_s", "seq_len", "T2"],
+      "reject": ["2T", "T+1", "", "T ", " T", 1, null, true, ["T"]]
+    },
+    {
+      "op": "sym_prefix_slice",
+      "attr": "slices",
+      "why": "軸ごとの prefix 長 coeff·sym+offset（coeff >= 1 / offset >= 0 / 軸の重複は不可）",
+      "accept": [
+        [{ "dim": 0, "coeff": 1, "offset": 0 }],
+        [{ "dim": 0, "coeff": 2, "offset": 3 }, { "dim": 2, "coeff": 1, "offset": 0 }]
+      ],
+      "reject": [
+        [],
+        [{ "dim": 0, "coeff": 0, "offset": 0 }],
+        [{ "dim": 0, "coeff": 1, "offset": -1 }],
+        [{ "dim": -1, "coeff": 1, "offset": 0 }],
+        [{ "dim": 0, "coeff": 1 }],
+        [{ "dim": 0, "coeff": 1, "offset": 0, "extra": 1 }],
+        [{ "dim": 0, "coeff": 1, "offset": 0 }, { "dim": 0, "coeff": 1, "offset": 1 }],
+        [{ "dim": true, "coeff": 1, "offset": 0 }],
+        [{ "dim": 0, "coeff": 1, "offset": 1000000000000000000 }],
+        [[0, 1, 0]],
+        { "dim": 0, "coeff": 1, "offset": 0 },
+        null
+      ]
+    },
+    {
+      "op": "layer_norm",
+      "attr": "normalized_shape",
+      "why": "最終次元 1 本のみ（多軸正規化は語彙に無い）",
+      "accept": [[1], [8], [1024]],
+      "reject": [[], [4, 8], [0], [-1], [1.5], [true], [1000000000000000000], 8, null]
+    },
+    {
+      "op": "layer_norm",
+      "attr": "eps",
+      "why": "有限の正数（0 は分散 0 の行で 1/sqrt(0) を作る）",
+      "accept": [1e-5, 1e-12, 0.5, 1],
+      "reject": [0, -1e-5, "1e-5", null, true, [1e-5]]
+    },
+    {
+      "op": "rms_norm",
+      "attr": "eps",
+      "why": "有限の正数（0 は全要素 0 の行で 1/sqrt(0) を作る）。実測は 1e-6",
+      "accept": [1e-6, 1e-12, 0.5, 1],
+      "reject": [0, -1e-6, "1e-6", null, true, [1e-6]]
+    },
+    {
+      "op": "softmax",
+      "attr": "dim",
+      "why": "非負の軸番号のみ（最終次元との突合は shape 側）",
+      "accept": [0, 1, 3],
+      "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "attention",
+      "attr": "scale",
+      "why": "有限の f32 スカラ（**半スケール** = q と k の両方に掛かる √scale_factor — ADR 0023）。実測は f32(128^-0.25)",
+      "accept": [0.2973017692565918, 0.7071067811865476, 1, 0.25],
+      "reject": ["0.29", null, true, [0.5]]
+    },
+    {
+      "op": "embedding",
+      "attr": "padding_idx",
+      "why": "torch 準拠で -1（未指定の番兵）以上。受理するが forward には効かない",
+      "accept": [-1, 0, 5],
+      "reject": [-2, 0.5, "0", null, true]
+    },
+    {
+      "op": "masked_fill",
+      "attr": "value",
+      "why": "有限の f32 スカラ（実測値 -3.4e38 は f32 の最小有限値ちょうど）",
+      "accept": [0, -1.5, 1e-8, -3.4028234663852886e38],
+      "reject": ["0", null, true, [0]]
+    },
+    {
+      "op": "clamp",
+      "attr": "min",
+      "why": "有限の f32 スカラ（min <= max はキーを跨ぐので shapes 節の拒否ケースが持つ）",
+      "accept": [0, -1.5, 1e-8, -3.4028234663852886e38],
+      "reject": ["0", null, true, [0]]
+    },
+    {
+      "op": "clamp",
+      "attr": "max",
+      "why": "有限の f32 スカラ",
+      "accept": [0, 1.5, 3.4028234663852886e38],
+      "reject": ["0", null, true, [0]]
+    },
+    {
+      "op": "clamp_min",
+      "attr": "min",
+      "why": "有限の f32 スカラ。上限の欄は無い（片側 clamp — ADR 0017）。実測はチャネル L2 の eps",
+      "accept": [1e-12, 0, -1.5, -3.4028234663852886e38],
+      "reject": ["0", null, true, [0]]
+    },
+    {
+      "op": "leaky_relu",
+      "attr": "negative_slope",
+      "why": "有限の f32 スカラ。実測は 0.1（ups / ResBlock）と 0.01（最終段の torch 既定）の 2 種",
+      "accept": [0.1, 0.01, 0, 1],
+      "reject": ["0.1", null, true, [0.1]]
+    },
+    {
+      "op": "ge_scalar",
+      "attr": "value",
+      "why": "有限の f32 スカラ（比較相手）",
+      "accept": [0, -1.5, 3.4028234663852886e38],
+      "reject": ["0", null, true, [0]]
+    },
+    {
+      "op": "le_scalar",
+      "attr": "value",
+      "why": "有限の f32 スカラ（比較相手）",
+      "accept": [0, 1.5, -3.4028234663852886e38],
+      "reject": ["0", null, true, [0]]
+    },
+    {
+      "op": "gt_scalar",
+      "attr": "value",
+      "why": "有限の f32 スカラ（比較相手）",
+      "accept": [0, -20, 0.5],
+      "reject": ["0", null, true, [0]]
+    },
+    {
+      "op": "cumsum",
+      "attr": "dim",
+      "why": "非負の軸番号のみ（最終次元との突合は shape 側 — softmax の dim と同じ）",
+      "accept": [0, 1, 3],
+      "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "sum",
+      "attr": "dim",
+      "why": "非負の軸番号のみ（**宣言必須** — 既定値補完をすると最終次元を畳んだ別の計算が黙って通る）",
+      "accept": [0, 1, 3],
+      "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "amax",
+      "attr": "dim",
+      "why": "非負の軸番号のみ（sum と同じ — reduce 族は 1 軸・keepdim 無し）",
+      "accept": [0, 1, 3],
+      "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "amin",
+      "attr": "dim",
+      "why": "非負の軸番号のみ（sum と同じ — reduce 族は 1 軸・keepdim 無し）",
+      "accept": [0, 1, 3],
+      "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "conv1d",
+      "attr": "stride",
+      "why": "正整数",
+      "accept": [1, 2, 7],
+      "reject": [0, -1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "conv1d",
+      "attr": "padding",
+      "why": "非負整数",
+      "accept": [0, 1, 4],
+      "reject": [-1, 0.5, "0", null, true]
+    },
+    {
+      "op": "conv1d",
+      "attr": "dilation",
+      "why": "正整数（ADR 0015 — 実測は 1 / 3 / 5 / 9）",
+      "accept": [1, 3, 9],
+      "reject": [0, -1, 1.5, "1", null, true]
+    },
+    {
+      "op": "conv1d",
+      "attr": "groups",
+      "why": "正整数（ADR 0015 — 実測は 1 と depthwise の 192）",
+      "accept": [1, 2, 192],
+      "reject": [0, -1, 1.5, "1", null, true]
+    },
+    {
+      "op": "conv2d",
+      "attr": "stride",
+      "why": "[H, W] の 2 成分・各成分は正整数（スカラ表記は境界で正規化する規約 — ADR 0017）",
+      "accept": [[1, 1], [2, 2], [1, 2]],
+      "reject": [
+        [0, 1],
+        [1, 0],
+        [-1, 1],
+        [1],
+        [1, 1, 1],
+        [1.5, 1],
+        ["1", 1],
+        [true, 1],
+        1,
+        null,
+        []
+      ]
+    },
+    {
+      "op": "conv2d",
+      "attr": "padding",
+      "why": "[H, W] の 2 成分・各成分は非負整数（H/W 非対称が実測に出る）",
+      "accept": [[0, 0], [1, 1], [2, 0], [0, 3]],
+      "reject": [[-1, 0], [0, -1], [0], [0, 0, 0], [0.5, 0], ["0", 0], [true, 0], 0, null]
+    },
+    {
+      "op": "conv2d",
+      "attr": "dilation",
+      "why": "[H, W] の 2 成分・各成分は正整数",
+      "accept": [[1, 1], [2, 3]],
+      "reject": [[0, 1], [1, 0], [-1, 1], [1], [1.5, 1], ["1", 1], [true, 1], 1, null]
+    },
+    {
+      "op": "conv2d",
+      "attr": "groups",
+      "why": "正整数のスカラ（空間軸を持たない唯一の conv2d attr）",
+      "accept": [1, 2, 128],
+      "reject": [0, -1, 1.5, "1", null, true, [1, 1]]
+    },
+    {
+      "op": "conv_transpose1d",
+      "attr": "stride",
+      "why": "正整数 MUST — stride 0 はカーネルのゼロ除算/ハング（recon §4）",
+      "accept": [1, 2, 8],
+      "reject": [0, -1, 1.5, "1", null, true]
+    },
+    {
+      "op": "conv_transpose1d",
+      "attr": "padding",
+      "why": "非負整数",
+      "accept": [0, 3, 4],
+      "reject": [-1, 0.5, "0", null, true]
+    }
+  ],
+  "shapes": [
+    { "op": "neg", "ins": [[3]], "out": [3] },
+    { "op": "abs", "ins": [[2, 3]], "out": [2, 3] },
+    { "op": "exp", "ins": [["T"]], "bindings": { "T": 4 }, "out": ["T"] },
+    { "op": "log", "ins": [[1, 1]], "out": [1, 1] },
+    { "op": "sqrt", "ins": [[5, 6]], "out": [5, 6] },
+    { "op": "tanh", "ins": [[2, 3, 4]], "out": [2, 3, 4] },
+    { "op": "sigmoid", "ins": [[7]], "out": [7] },
+    { "op": "relu", "ins": [[2, 3]], "out": [2, 3] },
+    { "op": "gelu", "ins": [[4, 8]], "out": [4, 8] },
+    { "op": "bitwise_not", "ins": [[5]], "out": [5] },
+    { "op": "log1p", "ins": [[3, 2]], "out": [3, 2] },
+    {
+      "op": "relu",
+      "ins": [[2], [2]],
+      "throws": true,
+      "why": "アリティ違反（入力 shape の本数が契約と違う）"
+    },
+
+    { "op": "clamp", "ins": [[2, 3]], "attrs": { "min": -1, "max": 1 }, "out": [2, 3] },
+    {
+      "op": "clamp",
+      "ins": [[4]],
+      "attrs": { "min": 2, "max": 2 },
+      "out": [4],
+      "why": "min == max（潰す形）は受理する"
+    },
+    {
+      "op": "clamp",
+      "ins": [[4]],
+      "attrs": { "min": 1, "max": -1 },
+      "throws": true,
+      "why": "min > max は WGSL の clamp が未定義になる向き（キーを跨ぐ不変条件）"
+    },
+    {
+      "op": "clamp",
+      "ins": [[4]],
+      "attrs": { "min": 0 },
+      "throws": true,
+      "why": "max の欠落（両方必須）"
+    },
+    {
+      "op": "clamp_min",
+      "ins": [[1, 16, 4, 4]],
+      "attrs": { "min": 1e-12 },
+      "out": [1, 16, 4, 4],
+      "why": "VAE のチャネル L2 正規化 clamp(min=eps)（ADR 0017）— 上限の欄は無い"
+    },
+    {
+      "op": "clamp_min",
+      "ins": [["T"]],
+      "attrs": { "min": -1.5 },
+      "bindings": { "T": 4 },
+      "out": ["T"],
+      "why": "負の下限も受理する（clamp と違い上限が無いだけ）"
+    },
+    {
+      "op": "clamp_min",
+      "ins": [[4]],
+      "attrs": {},
+      "throws": true,
+      "why": "min は必須（既定値補完はしない）"
+    },
+    {
+      "op": "leaky_relu",
+      "ins": [[2, 4]],
+      "attrs": { "negative_slope": 0.1 },
+      "out": [2, 4],
+      "why": "実測の slope 0.1（ups / ResBlock）"
+    },
+    {
+      "op": "leaky_relu",
+      "ins": [[5]],
+      "attrs": { "negative_slope": 0.01 },
+      "out": [5],
+      "why": "実測の slope 0.01（最終段 — torch 既定を境界で明示化したもの）"
+    },
+    {
+      "op": "leaky_relu",
+      "ins": [[5]],
+      "attrs": {},
+      "throws": true,
+      "why": "negative_slope は必須（既定値補完はしない — ADR 0015）"
+    },
+    { "op": "ge_scalar", "ins": [[3, 2]], "attrs": { "value": 0 }, "out": [3, 2] },
+    {
+      "op": "le_scalar",
+      "ins": [["T"]],
+      "attrs": { "value": 5 },
+      "bindings": { "T": 4 },
+      "out": ["T"]
+    },
+    { "op": "gt_scalar", "ins": [[2, 2]], "attrs": { "value": -20 }, "out": [2, 2] },
+
+    { "op": "add", "ins": [[4, 1], [1, 5]], "out": [4, 5] },
+    {
+      "op": "add",
+      "ins": [[2, "T", 4], [4]],
+      "bindings": { "T": 6 },
+      "out": [2, "T", 4],
+      "why": "右詰め broadcast（rank が違う被演算子）"
+    },
+    {
+      "op": "add",
+      "ins": [[2, 3], [4, 3]],
+      "throws": true,
+      "why": "どちらも長さ 1 でない次元は broadcast できない"
+    },
+    { "op": "sub", "ins": [[3], []], "out": [3], "why": "スカラ側は右詰めで長さ 1 として読む" },
+    {
+      "op": "mul",
+      "ins": [["T", "T"], [1, "T"]],
+      "bindings": { "T": 3 },
+      "out": ["T", "T"]
+    },
+    { "op": "div", "ins": [[2, 2], [2, 2]], "out": [2, 2] },
+    {
+      "op": "add",
+      "ins": [[0], [1]],
+      "out": [0],
+      "why": "0 と 1 の組は torch では 0（max で潰さない）"
+    },
+
+    { "op": "ge", "ins": [[2, 1], [1, 3]], "out": [2, 3], "why": "比較も右詰め broadcast" },
+    {
+      "op": "ge",
+      "ins": [[1, "T", 1], ["T"]],
+      "bindings": { "T": 4 },
+      "out": [1, "T", "T"],
+      "why": "searchsorted の inputs[…,None] >= bl（rank の違う被演算子）"
+    },
+    { "op": "bitwise_and", "ins": [[4], [4]], "out": [4] },
+    {
+      "op": "bitwise_and",
+      "ins": [[3, 4], [4]],
+      "out": [3, 4],
+      "why": "論理積も右詰め broadcast"
+    },
+
+    {
+      "op": "where",
+      "ins": [[1, 4], [3, 4], [3, 1]],
+      "out": [3, 4],
+      "why": "三者の右詰め broadcast（条件も値と同じ規則で広がる）"
+    },
+    {
+      "op": "where",
+      "ins": [["T", 1], [1, 5], [1, 1]],
+      "bindings": { "T": 3 },
+      "out": ["T", 5],
+      "why": "記号次元を含む三項 broadcast"
+    },
+    {
+      "op": "where",
+      "ins": [[2], [3], [1]],
+      "throws": true,
+      "why": "どちらも長さ 1 でない次元は broadcast できない（三項でも規則は同じ）"
+    },
+    {
+      "op": "where",
+      "ins": [[2], [2]],
+      "throws": true,
+      "why": "アリティ違反（三項 op に 2 本しか渡していない）"
+    },
+
+    { "op": "cumsum", "ins": [[2, 5]], "attrs": { "dim": 1 }, "out": [2, 5] },
+    {
+      "op": "cumsum",
+      "ins": [[1, 3, "T"]],
+      "attrs": { "dim": 2 },
+      "bindings": { "T": 4 },
+      "out": [1, 3, "T"]
+    },
+    {
+      "op": "cumsum",
+      "ins": [[2, 5]],
+      "attrs": { "dim": 0 },
+      "throws": true,
+      "why": "最終次元以外は受理しない（行カーネルの前提が崩れる）"
+    },
+    {
+      "op": "cumsum",
+      "ins": [[]],
+      "attrs": { "dim": 0 },
+      "throws": true,
+      "why": "スカラは累積できない"
+    },
+
+    { "op": "sum", "ins": [[6, 10]], "attrs": { "dim": 1 }, "out": [6] },
+    {
+      "op": "sum",
+      "ins": [[2, 384, 5, 7]],
+      "attrs": { "dim": 1 },
+      "out": [2, 5, 7],
+      "why": "チャネル軸の縮約（VAE decoder の L2 正規化 — permute 対を消した形）"
+    },
+    {
+      "op": "sum",
+      "ins": [[4, 6]],
+      "attrs": { "dim": 0 },
+      "out": [6],
+      "why": "先頭軸の縮約（rank-2 でも最終次元とは別の軸）"
+    },
+    {
+      "op": "sum",
+      "ins": [[3, 0]],
+      "attrs": { "dim": 1 },
+      "out": [3],
+      "why": "空軸の総和は 0（identity がある）"
+    },
+    {
+      "op": "sum",
+      "ins": [[]],
+      "attrs": { "dim": 0 },
+      "throws": true,
+      "why": "スカラは縮約できない"
+    },
+    {
+      "op": "sum",
+      "ins": [[6, 10]],
+      "throws": true,
+      "why": "attrs.dim は宣言必須（既定値補完をしない）"
+    },
+    {
+      "op": "sum",
+      "ins": [[6, 10]],
+      "attrs": { "dim": 2 },
+      "throws": true,
+      "why": "rank 外の軸"
+    },
+    { "op": "amax", "ins": [[2, 3, 4]], "attrs": { "dim": 2 }, "out": [2, 3] },
+    {
+      "op": "amax",
+      "ins": [[2, 3, 4]],
+      "attrs": { "dim": 0 },
+      "out": [3, 4],
+      "why": "amax も 1 軸 attr で軸を選ぶ（sum と同じ契約）"
+    },
+    {
+      "op": "amax",
+      "ins": [[3, 0]],
+      "attrs": { "dim": 1 },
+      "throws": true,
+      "why": "空軸の amax は identity が定義できない"
+    },
+    {
+      "op": "amax",
+      "ins": [[0, 3]],
+      "attrs": { "dim": 1 },
+      "out": [0],
+      "why": "長さ 0 なのが縮約軸でなければ受理（出力が空になるだけ）"
+    },
+    {
+      "op": "amin",
+      "ins": [["T", 5]],
+      "attrs": { "dim": 1 },
+      "bindings": { "T": 4 },
+      "out": ["T"]
+    },
+    {
+      "op": "amin",
+      "ins": [["T", 5]],
+      "attrs": { "dim": 0 },
+      "bindings": { "T": 4 },
+      "out": [5],
+      "why": "記号次元そのものを縮約する形"
+    },
+
+    { "op": "matmul", "ins": [[7, 5], [5, 3]], "out": [7, 3] },
+    { "op": "matmul", "ins": [[7, 5], [4, 3]], "throws": true, "why": "縮約次元の不一致" },
+    {
+      "op": "matmul",
+      "ins": [[2, 3, 4], [4, 3]],
+      "throws": true,
+      "why": "rank-2 × rank-2 のみ（バッチは bmm）"
+    },
+    { "op": "bmm", "ins": [[2, 6, 3], [2, 3, 5]], "out": [2, 6, 5] },
+    { "op": "bmm", "ins": [[6, 3], [3, 5]], "throws": true, "why": "rank-2 は matmul の担当" },
+    { "op": "bmm", "ins": [[2, 6, 3], [2, 5, 3]], "throws": true, "why": "縮約次元の不一致" },
+    { "op": "bmm", "ins": [[1, 6, 3], [2, 3, 5]], "throws": true, "why": "バッチ次元の不一致" },
+
+    {
+      "op": "gather",
+      "ins": [[4, 6, 9], [4, 6, 6]],
+      "out": [4, 6, 6],
+      "why": "出力は index と同形（値は src から引く）"
+    },
+    {
+      "op": "gather",
+      "ins": [[16, "T", 512], [16, "T", "T"]],
+      "bindings": { "T": 5 },
+      "out": [16, "T", "T"]
+    },
+    { "op": "gather", "ins": [[4, 6, 9], [4, 5, 6]], "throws": true, "why": "先行次元の不一致" },
+    { "op": "gather", "ins": [[4, 6, 9], [6, 6]], "throws": true, "why": "rank の不一致" },
+
+    { "op": "cast", "ins": [[2, 3, 4]], "attrs": { "to": "bool" }, "out": [2, 3, 4] },
+
+    { "op": "reshape", "ins": [[2, 3, 4]], "declared": [6, 4], "out": [6, 4] },
+    {
+      "op": "reshape",
+      "ins": [[1, "T", 1024]],
+      "declared": ["T", 1024],
+      "bindings": { "T": 6 },
+      "out": ["T", 1024]
+    },
+    {
+      "op": "reshape",
+      "ins": [[2, 3]],
+      "declared": [4, 2],
+      "throws": true,
+      "why": "要素数の不一致"
+    },
+    {
+      "op": "reshape",
+      "ins": [[2, 3]],
+      "throws": true,
+      "why": "目標形（出力の宣言 shape）を渡さずに推測しない"
+    },
+
+    { "op": "permute", "ins": [[2, 3, 4]], "attrs": { "dims": [1, 2, 0] }, "out": [3, 4, 2] },
+    {
+      "op": "permute",
+      "ins": [[2, 3, 4, 5]],
+      "attrs": { "dims": [3, 0, 2, 1] },
+      "out": [5, 2, 4, 3],
+      "why": "rank 上限ちょうど（上限を下げる誤りもここで赤くなる）"
+    },
+    {
+      "op": "permute",
+      "ins": [[2, 3]],
+      "attrs": { "dims": [0, 1, 2] },
+      "throws": true,
+      "why": "dims と入力 rank の不一致"
+    },
+    {
+      "op": "permute",
+      "ins": [[2, 2, 2, 2, 2]],
+      "attrs": { "dims": [0, 1, 2, 3, 4] },
+      "throws": true,
+      "why": "rank 5 は strided カーネルの params に載らない"
+    },
+    {
+      "op": "permute",
+      "ins": [[]],
+      "attrs": { "dims": [0] },
+      "throws": true,
+      "why": "rank 0 も同じ理由で載らない"
+    },
+
+    { "op": "expand", "ins": [[1, 6, 6]], "declared": [16, 6, 6], "out": [16, 6, 6] },
+    { "op": "expand", "ins": [[4]], "declared": [3, 4], "out": [3, 4], "why": "rank が増える形" },
+    {
+      "op": "expand",
+      "ins": [[1, 1, "T"]],
+      "declared": [1, "T", "T"],
+      "bindings": { "T": 3 },
+      "out": [1, "T", "T"]
+    },
+    {
+      "op": "expand",
+      "ins": [[2, 3]],
+      "declared": [4, 3],
+      "throws": true,
+      "why": "長さ 1 でない次元は拡張できない"
+    },
+    {
+      "op": "expand",
+      "ins": [["T"]],
+      "declared": ["2T"],
+      "bindings": { "T": 3 },
+      "throws": true,
+      "why": "記号次元も長さ 1 でない限り拡張できない"
+    },
+    {
+      "op": "expand",
+      "ins": [[1, 1, 1, 1, 1]],
+      "declared": [2, 2, 2, 2, 2],
+      "throws": true,
+      "why": "rank 5 は strided カーネルの params に載らない"
+    },
+
+    {
+      "op": "slice",
+      "ins": [[1, 8, 5]],
+      "attrs": { "dim": 1, "start": 4, "end": 8 },
+      "out": [1, 4, 5],
+      "why": "enc_p の stats[:, c:] と同型（チャネル軸の後半）"
+    },
+    {
+      "op": "slice",
+      "ins": [[1, 4, "T"]],
+      "attrs": { "dim": 1, "start": 0, "end": 2 },
+      "bindings": { "T": 6 },
+      "out": [1, 2, "T"],
+      "why": "切り出す軸だけが静的で、他の軸は記号のまま残る"
+    },
+    {
+      "op": "slice",
+      "ins": [[6]],
+      "attrs": { "dim": 0, "start": 0, "end": 6 },
+      "out": [6],
+      "why": "全長の切り出し（恒等コピー）も受理する"
+    },
+    {
+      "op": "slice",
+      "ins": [[3, 5]],
+      "attrs": { "dim": 1, "start": 2, "end": 6 },
+      "throws": true,
+      "why": "end が軸長を超える（GPU では例外なしに隣の行を読む形）"
+    },
+    {
+      "op": "slice",
+      "ins": [[3, 5]],
+      "attrs": { "dim": 1, "start": 4, "end": 2 },
+      "throws": true,
+      "why": "start > end は長さが負（キーを跨ぐ不変条件）"
+    },
+    {
+      "op": "slice",
+      "ins": [[3, 5]],
+      "attrs": { "dim": 2, "start": 0, "end": 1 },
+      "throws": true,
+      "why": "dim が入力 rank の外"
+    },
+    {
+      "op": "slice",
+      "ins": [[2, 2, 2, 2, 2]],
+      "attrs": { "dim": 0, "start": 0, "end": 1 },
+      "throws": true,
+      "why": "rank 5 は strided カーネルの params に載らない"
+    },
+
+    {
+      "op": "cat",
+      "ins": [[1, 4, 5], [1, 2, 5]],
+      "attrs": { "dim": 1 },
+      "out": [1, 6, 5],
+      "why": "coupling reverse の cat([x0,x1], 1) と同型（軸の和）"
+    },
+    {
+      "op": "cat",
+      "ins": [[2, 3], [2, 1], [2, 4]],
+      "attrs": { "dim": 1 },
+      "out": [2, 8],
+      "why": "3 入力（可変アリティ — 契約の arity 2 は下限）"
+    },
+    {
+      "op": "cat",
+      "ins": [[1, 3, "T"], [1, 5, "T"]],
+      "attrs": { "dim": 1 },
+      "bindings": { "T": 4 },
+      "out": [1, 8, "T"],
+      "why": "連結軸だけが静的で、他の軸は記号のまま一致を要求する"
+    },
+    {
+      "op": "cat",
+      "ins": [[2, 3]],
+      "attrs": { "dim": 0 },
+      "throws": true,
+      "why": "入力 1 本の cat は恒等コピー（下限 2 を割る）"
+    },
+    {
+      "op": "cat",
+      "ins": [[2, 3], [3, 3]],
+      "attrs": { "dim": 1 },
+      "throws": true,
+      "why": "連結軸以外が一致しない（出力に誰も書かない領域ができる）"
+    },
+    {
+      "op": "cat",
+      "ins": [[2, 3], [2, 3, 1]],
+      "attrs": { "dim": 0 },
+      "throws": true,
+      "why": "rank の不一致"
+    },
+    {
+      "op": "cat",
+      "ins": [[2, 3], [2, 3]],
+      "attrs": { "dim": 2 },
+      "throws": true,
+      "why": "dim が入力 rank の外"
+    },
+    {
+      "op": "cat",
+      "ins": [[2, 2, 2, 2, 2], [2, 2, 2, 2, 2]],
+      "attrs": { "dim": 0 },
+      "throws": true,
+      "why": "rank 5 は strided カーネルの params に載らない"
+    },
+
+    {
+      "op": "pad",
+      "ins": [[1, 2, 6, 6]],
+      "attrs": { "left": 4, "right": 4 },
+      "out": [1, 2, 6, 14],
+      "why": "相対位置注意の value 側 F.pad(p_attn, [w, w])（w = 4）"
+    },
+    {
+      "op": "pad",
+      "ins": [[1, 2, "T", "T"]],
+      "attrs": { "left": 4, "right": 4 },
+      "bindings": { "T": 6 },
+      "out": [1, 2, "T", "T+8"],
+      "why": "記号長の最終次元は T+2w = T+8（次元言語のオフセット付き形）"
+    },
+    {
+      "op": "pad",
+      "ins": [[3, 2]],
+      "attrs": { "left": 0, "right": 3 },
+      "out": [3, 5],
+      "why": "非対称パディング（片側 0）"
+    },
+    {
+      "op": "pad",
+      "ins": [[]],
+      "attrs": { "left": 1, "right": 1 },
+      "throws": true,
+      "why": "スカラには埋める最終次元が無い"
+    },
+
+    {
+      "op": "flip",
+      "ins": [[1, 192, "T"]],
+      "attrs": { "dim": 1 },
+      "bindings": { "T": 5 },
+      "out": [1, 192, "T"],
+      "why": "flow の Flip（192ch の静的軸）— shape は恒等"
+    },
+    {
+      "op": "flip",
+      "ins": [[1, 2, 7]],
+      "attrs": { "dim": 1 },
+      "out": [1, 2, 7],
+      "why": "sdp の Flip（2ch）"
+    },
+    {
+      "op": "flip",
+      "ins": [[2, 3]],
+      "attrs": { "dim": 2 },
+      "throws": true,
+      "why": "dim が入力 rank の外"
+    },
+    {
+      "op": "flip",
+      "ins": [[]],
+      "attrs": { "dim": 0 },
+      "throws": true,
+      "why": "スカラに反転する軸は無い"
+    },
+
+    {
+      "op": "sym_prefix_slice",
+      "ins": [[512, 512]],
+      "attrs": {
+        "sym": "T",
+        "slices": [
+          { "dim": 0, "coeff": 1, "offset": 0 },
+          { "dim": 1, "coeff": 1, "offset": 0 }
+        ]
+      },
+      "bindings": { "T": 7 },
+      "out": ["T", "T"],
+      "why": "相対位置バケット表の実測形（2 軸とも記号）"
+    },
+    {
+      "op": "sym_prefix_slice",
+      "ins": [[512, 64]],
+      "attrs": { "sym": "T", "slices": [{ "dim": 0, "coeff": 1, "offset": 0 }] },
+      "bindings": { "T": 7 },
+      "out": ["T", 64],
+      "why": "縮めない軸は Tmax 形のまま残る"
+    },
+    {
+      "op": "sym_prefix_slice",
+      "ins": [[64]],
+      "attrs": { "sym": "T", "slices": [{ "dim": 0, "coeff": 2, "offset": 3 }] },
+      "bindings": { "T": 5 },
+      "out": ["2T+3"]
+    },
+    {
+      "op": "sym_prefix_slice",
+      "ins": [[8, 8]],
+      "attrs": { "sym": "T", "slices": [{ "dim": 2, "coeff": 1, "offset": 0 }] },
+      "bindings": { "T": 4 },
+      "throws": true,
+      "why": "dim が入力 rank の外"
+    },
+    {
+      "op": "sym_prefix_slice",
+      "ins": [[2, 2, 2, 2, 2]],
+      "attrs": { "sym": "T", "slices": [{ "dim": 0, "coeff": 1, "offset": 0 }] },
+      "bindings": { "T": 2 },
+      "throws": true,
+      "why": "rank 5 は strided カーネルの params に載らない"
+    },
+
+    { "op": "linear", "ins": [[5, 7], [3, 7], [3]], "out": [5, 3] },
+    {
+      "op": "linear",
+      "ins": [[1, "T", 192], [192, 192], [192]],
+      "bindings": { "T": 8 },
+      "out": [1, "T", 192]
+    },
+    { "op": "linear", "ins": [[7], [3, 7], [3]], "out": [3] },
+    { "op": "linear", "ins": [[5, 7], [3, 6], [3]], "throws": true, "why": "入力特徴数の不一致" },
+    {
+      "op": "linear",
+      "ins": [[5, 7], [3, 7], [4]],
+      "throws": true,
+      "why": "bias 長が出力特徴数と違う"
+    },
+    {
+      "op": "linear",
+      "ins": [[5, 7], [2, 3, 7], [3]],
+      "throws": true,
+      "why": "W は rank-2 のみ"
+    },
+
+    {
+      "op": "layer_norm",
+      "ins": [[3, 8], [8], [8]],
+      "attrs": { "normalized_shape": [8], "eps": 1e-5 },
+      "out": [3, 8]
+    },
+    {
+      "op": "layer_norm",
+      "ins": [[1, "T", 1024], [1024], [1024]],
+      "attrs": { "normalized_shape": [1024], "eps": 1e-7 },
+      "bindings": { "T": 9 },
+      "out": [1, "T", 1024]
+    },
+    {
+      "op": "layer_norm",
+      "ins": [[3, 4], [8], [8]],
+      "attrs": { "normalized_shape": [8], "eps": 1e-5 },
+      "throws": true,
+      "why": "normalized_shape が入力の最終次元と違う"
+    },
+    {
+      "op": "layer_norm",
+      "ins": [[3, 8], [4], [8]],
+      "attrs": { "normalized_shape": [8], "eps": 1e-5 },
+      "throws": true,
+      "why": "affine の長さが normalized_shape と違う"
+    },
+
+    {
+      "op": "rms_norm",
+      "ins": [[4, 10], [10]],
+      "attrs": { "eps": 1e-6 },
+      "out": [4, 10],
+      "why": "アリティ 2（bias は無い）— 正規化長の正本は weight の長さ"
+    },
+    {
+      "op": "rms_norm",
+      "ins": [[1, "T", 1024], [1024]],
+      "attrs": { "eps": 1e-6 },
+      "bindings": { "T": 7 },
+      "out": [1, "T", 1024],
+      "why": "Qwen3 / DiT の実測形（hidden 1024・記号長 T）"
+    },
+    {
+      "op": "rms_norm",
+      "ins": [[3, 8], [4]],
+      "attrs": { "eps": 1e-6 },
+      "throws": true,
+      "why": "weight 長が入力の最終次元と違う"
+    },
+    {
+      "op": "rms_norm",
+      "ins": [[3, 8], [1, 8]],
+      "attrs": { "eps": 1e-6 },
+      "throws": true,
+      "why": "weight は rank1 のみ（[1,8] は要素数が合っても受理しない）"
+    },
+    {
+      "op": "rms_norm",
+      "ins": [[3, 0], [0]],
+      "attrs": { "eps": 1e-6 },
+      "throws": true,
+      "why": "長さ 0 の軸は正規化できない（mean が 0/0 になる）"
+    },
+    {
+      "op": "rms_norm",
+      "ins": [[3, 8], [8]],
+      "attrs": {},
+      "throws": true,
+      "why": "eps は必須（既定値補完はしない）"
+    },
+    {
+      "op": "rms_norm",
+      "ins": [[3, 8], [8]],
+      "attrs": { "eps": 0 },
+      "throws": true,
+      "why": "eps 0 は全要素 0 の行で 1/sqrt(0) を作る"
+    },
+
+    { "op": "softmax", "ins": [[2, 3, 4]], "attrs": { "dim": 2 }, "out": [2, 3, 4] },
+    {
+      "op": "softmax",
+      "ins": [[16, "T", "T"]],
+      "attrs": { "dim": 2 },
+      "bindings": { "T": 5 },
+      "out": [16, "T", "T"]
+    },
+    {
+      "op": "softmax",
+      "ins": [[2, 3, 4]],
+      "attrs": { "dim": 1 },
+      "throws": true,
+      "why": "最終次元以外は受理しない（行カーネルの前提が崩れる）"
+    },
+    {
+      "op": "softmax",
+      "ins": [[3, 0]],
+      "attrs": { "dim": 1 },
+      "throws": true,
+      "why": "空軸の softmax は amax の identity が定義できない"
+    },
+
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "out": [2, 3, 5, 4],
+      "why": "B / H / M / N / D が全て違う cross-attention 形（軸の取り違えが値に出る形）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 16, 1024, 128], [1, 16, 1024, 128], [1, 16, 1024, 128]],
+      "attrs": { "scale": 0.2973017692565918 },
+      "out": [1, 16, 1024, 128],
+      "why": "DiT の self-attention 実測形（scale は f32(128^-0.25) = torch math decomp の定数）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 1, 4096, 384], [1, 1, 4096, 384], [1, 1, 4096, 384]],
+      "attrs": { "scale": 0.2259794473648071 },
+      "out": [1, 1, 4096, 384],
+      "why": "VAE decoder の実測形（D=384 — flash 型なら共有メモリに載らない D も段階融合は通る）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "アリティ 3 固定（v の欠落）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4]],
+      "attrs": {},
+      "throws": true,
+      "why": "scale は宣言必須（既定値補完はしない）"
+    },
+    {
+      "op": "attention",
+      "ins": [[3, 5, 4], [3, 7, 4], [3, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "rank-3（head 軸を畳んだ形）は受理しない — rank-4 head-first 固定"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [3, 2, 7, 4], [3, 2, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "B と H の取り違え（積 6 は同じ — 軸ごとに突き合わせないと素通りする）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 6]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "v の D だけ違う形（契約は 3 者とも同じ D）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 9, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "k と v の N が違う形"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 0, 4], [2, 3, 0, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "N が 0 の attention は amax の identity が定義できない（softmax と同じ理由）"
+    },
+
+    {
+      "op": "embedding",
+      "ins": [[7, 4], [2, 3]],
+      "attrs": { "padding_idx": -1 },
+      "out": [2, 3, 4]
+    },
+    {
+      "op": "embedding",
+      "ins": [[100, 64], [1, "T"]],
+      "attrs": { "padding_idx": 0 },
+      "bindings": { "T": 6 },
+      "out": [1, "T", 64]
+    },
+    {
+      "op": "embedding",
+      "ins": [[7, 4], []],
+      "attrs": { "padding_idx": -1 },
+      "throws": true,
+      "why": "スカラ添字（rank 0）は契約の出力 […index, H] に載らない"
+    },
+    {
+      "op": "embedding",
+      "ins": [[7], [5]],
+      "attrs": { "padding_idx": -1 },
+      "throws": true,
+      "why": "weight は rank-2 [V,H] のみ"
+    },
+
+    {
+      "op": "masked_fill",
+      "ins": [[1, 3, 4, 5], [1, 1, 4, 5]],
+      "attrs": { "value": 0 },
+      "out": [1, 3, 4, 5]
+    },
+    { "op": "masked_fill", "ins": [[3, 4, 5], [5]], "attrs": { "value": -1.5 }, "out": [3, 4, 5] },
+    {
+      "op": "masked_fill",
+      "ins": [[1, 16, "T", "T"], [1, 1, "T", "T"]],
+      "attrs": { "value": -3.4028234663852886e38 },
+      "bindings": { "T": 6 },
+      "out": [1, 16, "T", "T"]
+    },
+    {
+      "op": "masked_fill",
+      "ins": [[1], [4]],
+      "attrs": { "value": 0 },
+      "throws": true,
+      "why": "mask が x を広げる形は拒否（出力は常に x と同形）"
+    },
+    {
+      "op": "masked_fill",
+      "ins": [[2, 2, 2, 2, 2], [2]],
+      "attrs": { "value": 0 },
+      "throws": true,
+      "why": "rank 5 は strided カーネルの params に載らない"
+    },
+    {
+      "op": "masked_fill",
+      "ins": [[2, 3], []],
+      "attrs": { "value": 0 },
+      "throws": true,
+      "why": "rank 0 の mask も同じ理由で載らない"
+    },
+
+    {
+      "op": "conv1d",
+      "ins": [[2, 3, 9], [4, 3, 3], [4]],
+      "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 1 },
+      "out": [2, 4, 9]
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 2, 11], [3, 2, 4], [3]],
+      "attrs": { "stride": 2, "padding": 0, "dilation": 1, "groups": 1 },
+      "out": [1, 3, 4],
+      "why": "出力長は floor((L + 2P - D*(K-1) - 1) / S) + 1"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 192, "P"], [192, 192, 3], [192]],
+      "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 1 },
+      "bindings": { "P": 8 },
+      "out": [1, 192, "P"],
+      "why": "記号長 × stride 1 は長さが保たれる（実測 dp の形）"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 4, "2T"], [6, 4, 2], [6]],
+      "attrs": { "stride": 2, "padding": 0, "dilation": 1, "groups": 1 },
+      "bindings": { "T": 5 },
+      "out": [1, 6, "T"],
+      "why": "stride が係数を割り切る記号長は正準表記へ落ちる"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 192, "P"], [192, 1, 5], [192]],
+      "attrs": { "stride": 1, "padding": 6, "dilation": 3, "groups": 192 },
+      "bindings": { "P": 20 },
+      "out": [1, 192, "P"],
+      "why": "sdp の DDSConv 実測形（depthwise groups=192 / dilation 3 / k 5 / pad 6）"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 8, "T"], [8, 8, 11], [8]],
+      "attrs": { "stride": 1, "padding": 25, "dilation": 5, "groups": 1 },
+      "bindings": { "T": 12 },
+      "out": [1, 8, "T"],
+      "why": "dec の ResBlock1 実測形（dilation 5 / k 11 / pad d*(k-1)/2 = 25）"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 2, 10], [3, 2, 3], [3]],
+      "attrs": { "stride": 1, "padding": 0, "dilation": 3, "groups": 1 },
+      "out": [1, 3, 4],
+      "why": "dilation は出力長を D*(K-1) だけ縮める"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 6, 11], [9, 2, 3], [9]],
+      "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 3 },
+      "out": [1, 9, 11],
+      "why": "中間の groups（Cin/groups = 2 が重みの第 2 軸・Cout は groups の倍数）"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[2, 3, 9], [4, 2, 3], [4]],
+      "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 1 },
+      "throws": true,
+      "why": "重みの第 2 軸が Cin/groups でない（groups 1 なので Cin と完全一致が契約）"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 6, 11], [6, 6, 3], [6]],
+      "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 6 },
+      "throws": true,
+      "why": "depthwise なのに重みの第 2 軸が Cin のまま（Cin/groups = 1 のはず）"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 6, 11], [9, 2, 3], [9]],
+      "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 4 },
+      "throws": true,
+      "why": "groups が Cin を割り切らない"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 6, 11], [8, 3, 3], [8]],
+      "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 3 },
+      "throws": true,
+      "why": "groups が Cout を割り切らない"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[2, 3, 9], [4, 3, 3], [3]],
+      "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 1 },
+      "throws": true,
+      "why": "bias 長が出力チャネルと違う"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 1, 2], [1, 1, 5], [1]],
+      "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 1 },
+      "throws": true,
+      "why": "padding 込みでもカーネル長に足りない"
+    },
+    {
+      "op": "conv1d",
+      "ins": [[1, 1, 6], [1, 1, 3], [1]],
+      "attrs": { "stride": 1, "padding": 0, "dilation": 4, "groups": 1 },
+      "throws": true,
+      "why": "dilation で伸びたカーネル張り（9）が入力長に足りない"
+    },
+
+    {
+      "op": "conv2d",
+      "ins": [[1, 3, 8, 10], [5, 3, 3, 3], [5]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 1],
+        "dilation": [1, 1],
+        "groups": 1
+      },
+      "out": [1, 5, 8, 10],
+      "why": "VAE の素の conv2d 実測形（k3 / pad1 / same）。H ≠ W で軸の取り違えが出る"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[2, 3, 9, 11], [5, 3, 2, 4], [5]],
+      "attrs": {
+        "stride": [2, 3],
+        "padding": [1, 0],
+        "dilation": [1, 1],
+        "groups": 1
+      },
+      "out": [2, 5, 5, 3],
+      "why": "Kh≠Kw・stride/padding が H/W 非対称（H: (9+2-2)/2+1=5 / W: (11-4)/3+1=3）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 2, 10, 12], [4, 2, 3, 2], [4]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [0, 0],
+        "dilation": [3, 2],
+        "groups": 1
+      },
+      "out": [1, 4, 4, 10],
+      "why": "dilation も H/W 非対称（H: 10-3·2=4 / W: 12-2·1=10）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 6, 7, 5], [6, 1, 3, 3], [6]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 1],
+        "dilation": [1, 1],
+        "groups": 6
+      },
+      "out": [1, 6, 7, 5],
+      "why": "depthwise（groups = Cin = Cout → 重みの第 2 軸は 1）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 6, 7, 5], [9, 2, 3, 1], [9]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 0],
+        "dilation": [1, 1],
+        "groups": 3
+      },
+      "out": [1, 9, 7, 5],
+      "why": "中間の groups（Cin/groups = 2 が重みの第 2 軸・Cin ≠ Cout）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 4, "T", 6], [8, 4, 3, 3], [8]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 1],
+        "dilation": [1, 1],
+        "groups": 1
+      },
+      "bindings": { "T": 5 },
+      "out": [1, 8, "T", 6],
+      "why": "記号の H は stride 1 / same padding で長さが保たれる（conv1d と同じ一次式規則）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 3, 8, 10], [5, 3, 3, 3], [5]],
+      "attrs": { "stride": [1, 1], "padding": [1, 1], "dilation": [1, 1] },
+      "throws": true,
+      "why": "groups の欠落（4 つとも宣言必須・既定値補完なし）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 3, 8, 10], [5, 3, 3, 3], [5]],
+      "attrs": { "stride": 1, "padding": [1, 1], "dilation": [1, 1], "groups": 1 },
+      "throws": true,
+      "why": "スカラ表記の stride は受理しない（[H, W] へ正規化するのは境界の仕事）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 3, 8, 10], [3, 5, 3, 3], [5]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 1],
+        "dilation": [1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "重みを [Cin/groups, Cout, Kh, Kw] と読む取り違え（非対称チャネルでのみ赤くなる）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 6, 7, 5], [6, 6, 3, 3], [6]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 1],
+        "dilation": [1, 1],
+        "groups": 6
+      },
+      "throws": true,
+      "why": "depthwise なのに重みの第 2 軸が Cin のまま（Cin/groups = 1 のはず）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 6, 7, 5], [9, 2, 3, 3], [9]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 1],
+        "dilation": [1, 1],
+        "groups": 4
+      },
+      "throws": true,
+      "why": "groups が Cin を割り切らない"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 3, 8, 10], [5, 3, 3, 3], [3]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 1],
+        "dilation": [1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "bias 長が出力チャネルと違う"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 1, 2, 8], [1, 1, 5, 3], [1]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [0, 0],
+        "dilation": [1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "H だけカーネル長に足りない（軸ごとに独立に見ていないと素通りする）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[1, 1, 8, 2], [1, 1, 3, 5], [1]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [0, 0],
+        "dilation": [1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "W だけカーネル長に足りない（H 側と対称に固定する）"
+    },
+    {
+      "op": "conv2d",
+      "ins": [[3, 8, 10], [5, 3, 3, 3], [5]],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 1],
+        "dilation": [1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "rank 4 / 4 / 1 以外は受理しない（rank3 は conv1d の担当）"
+    },
+
+    {
+      "op": "conv_transpose1d",
+      "ins": [[1, 5, 7], [5, 3, 2], [3]],
+      "attrs": { "stride": 2, "padding": 0 },
+      "out": [1, 3, 14],
+      "why": "重みは [Cin, Cout, K]・出力長は L*stride（dec の ups 末尾 2 本の形）"
+    },
+    {
+      "op": "conv_transpose1d",
+      "ins": [[1, 3, "T"], [3, 2, 16], [2]],
+      "attrs": { "stride": 8, "padding": 4 },
+      "bindings": { "T": 6 },
+      "out": [1, 2, "8T"],
+      "why": "記号長は係数が stride 倍になる（dec の ups 先頭 up 8 / k 16 / pad 4）"
+    },
+    {
+      "op": "conv_transpose1d",
+      "ins": [[1, 3, "2T+1"], [3, 2, 8], [2]],
+      "attrs": { "stride": 2, "padding": 3 },
+      "bindings": { "T": 4 },
+      "out": [1, 2, "4T+2"],
+      "why": "係数もオフセットも stride 倍（一次式のまま正準文法に載る）"
+    },
+    {
+      "op": "conv_transpose1d",
+      "ins": [[1, 5, 7], [3, 5, 2], [5]],
+      "attrs": { "stride": 2, "padding": 0 },
+      "throws": true,
+      "why": "重みを [Cout, Cin, K] と読む取り違え（非対称チャネルでのみ赤くなる）"
+    },
+    {
+      "op": "conv_transpose1d",
+      "ins": [[1, 5, 7], [5, 3, 2], [5]],
+      "attrs": { "stride": 2, "padding": 0 },
+      "throws": true,
+      "why": "bias 長が出力チャネルと違う"
+    },
+    {
+      "op": "conv_transpose1d",
+      "ins": [[1, 5, 7], [5, 3, 3], [3]],
+      "attrs": { "stride": 2, "padding": 0 },
+      "throws": true,
+      "why": "2P != K - S の一般形は受理しない（出力長が L*stride にならない）"
+    },
+    {
+      "op": "conv_transpose1d",
+      "ins": [[1, 5, 7], [5, 3, 2], [3]],
+      "attrs": { "stride": 2, "padding": 1 },
+      "throws": true,
+      "why": "padding が (K - S) / 2 と違う"
+    },
+    {
+      "op": "conv_transpose1d",
+      "ins": [[5, 7], [5, 3, 2], [3]],
+      "attrs": { "stride": 2, "padding": 0 },
+      "throws": true,
+      "why": "rank 3 / 3 / 1 以外は受理しない"
+    }
+  ]
+}

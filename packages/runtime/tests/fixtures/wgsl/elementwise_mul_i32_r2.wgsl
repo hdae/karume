@@ -1,0 +1,24 @@
+// karume elementwise mul (rank 2, generated)
+@group(0) @binding(0) var<storage, read> params: array<u32>;
+@group(0) @binding(1) var<storage, read> in0: array<i32>;
+@group(0) @binding(2) var<storage, read> in1: array<i32>;
+@group(0) @binding(3) var<storage, read_write> out: array<i32>;
+
+@compute @workgroup_size(256)
+fn main(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+  let n = params[0u];
+  let stride = nwg.x * 256u;
+  var i = gid.x;
+  while (i < n) {
+    var rem = i;
+    let c1 = rem % params[2u]; rem = rem / params[2u];
+    let c0 = rem;
+    let v0 = in0[c0 * params[3u] + c1 * params[4u]];
+    let v1 = in1[c0 * params[5u] + c1 * params[6u]];
+    out[i] = v0 * v1;
+    i = i + stride;
+  }
+}

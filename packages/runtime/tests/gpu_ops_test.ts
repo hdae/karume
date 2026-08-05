@@ -1,0 +1,1694 @@
+// 実 GPU 実行 vs CPU 参照の数値突合（ADR 0005 の段 2）。M0 の全 op を代表 shape で回す。
+// MUST: 乱数を使わない — 失敗が再現しないと原因の切り分けができない。
+
+import { assertEquals, assertThrows } from "@std/assert";
+import { openModel } from "../src/format/container.ts";
+import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
+import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
+import { applyReferenceOp, type RefTensor } from "../src/reference/ops.ts";
+import { createSession, type Tensor } from "../src/runtime/executor.ts";
+import type { GraphJson } from "./helpers/format.ts";
+import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+
+type OpCase = {
+  readonly name: string;
+  readonly op: string;
+  readonly inputs: readonly RefTensor[];
+  readonly outShape: readonly number[];
+  /** 既定は入力と同型（cast だけ出力 dtype が変わる）。 */
+  readonly outDtype?: "f32" | "i32" | "bool";
+  readonly attrs?: Record<string, unknown>;
+};
+
+/** 負値・0・正値を跨ぐ決定的な列。 */
+const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;
+/** log / sqrt の定義域内に収める列。 */
+const POSITIVE = (i: number): number => 0.125 + (i % 17) * 0.5;
+/** div の除数（0 を含まない）。 */
+const NONZERO = (i: number): number => ((i % 7) + 1) * 0.5;
+
+const runCase = async (gpu: GpuContext, testCase: OpCase): Promise<Tensor> => {
+  const graph = singleOpGraph(
+    testCase.op,
+    testCase.inputs.map((input) => input.shape),
+    testCase.outShape,
+    {
+      inDtypes: testCase.inputs.map((input) => input.dtype),
+      outDtype: testCase.outDtype ?? testCase.inputs[0].dtype,
+      attrs: testCase.attrs,
+    },
+  );
+  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  try {
+    const named: Record<string, Tensor> = {};
+    testCase.inputs.forEach((input, index) => {
+      named[`x${index}`] = input;
+    });
+    const outputs = await session.run(named);
+    return outputs["y"];
+  } finally {
+    await session.dispose();
+  }
+};
+
+const checkAll = async (cases: readonly OpCase[]): Promise<void> => {
+  const gpu = await acquireGpu();
+  try {
+    for (const testCase of cases) {
+      const actual = await runCase(gpu, testCase);
+      const expected = applyReferenceOp(
+        testCase.op,
+        testCase.inputs,
+        testCase.attrs ?? {},
+        testCase.outShape,
+      );
+      assertEquals(actual.shape, expected.shape, testCase.name);
+      assertEquals(actual.dtype, expected.dtype, `${testCase.name}: dtype`);
+      // f32 は allclose、i32 / bool は厳密一致（整数演算に丸め差は無い — ADR 0009）
+      const report = compareTensors(actual, expected);
+      assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
+    }
+  } finally {
+    gpu.destroy();
+  }
+};
+
+const UNARY_INPUTS: readonly (readonly [string, (index: number) => number])[] = [
+  ["neg", SIGNED],
+  ["abs", SIGNED],
+  ["exp", SIGNED],
+  ["log", POSITIVE],
+  ["sqrt", POSITIVE],
+  ["tanh", SIGNED],
+  ["sigmoid", SIGNED],
+  ["relu", SIGNED],
+  ["gelu", SIGNED],
+];
+
+const UNARY_CASES: readonly OpCase[] = UNARY_INPUTS.map(([op, generator]) => ({
+  name: `unary ${op} [3,5]`,
+  op,
+  inputs: [fill([3, 5], generator)],
+  outShape: [3, 5],
+}));
+
+const BINARY_CASES: readonly OpCase[] = [
+  {
+    name: "add 同形 [4,3]",
+    op: "add",
+    inputs: [fill([4, 3], SIGNED), fill([4, 3], POSITIVE)],
+    outShape: [4, 3],
+  },
+  {
+    name: "sub 右詰め broadcast [4,3] - [3]",
+    op: "sub",
+    inputs: [fill([4, 3], SIGNED), fill([3], POSITIVE)],
+    outShape: [4, 3],
+  },
+  {
+    name: "mul 両側 broadcast [4,1] * [1,3]",
+    op: "mul",
+    inputs: [fill([4, 1], SIGNED), fill([1, 3], POSITIVE)],
+    outShape: [4, 3],
+  },
+  {
+    name: "div rank3 broadcast [2,3,4] / [3,1]",
+    op: "div",
+    inputs: [fill([2, 3, 4], SIGNED), fill([3, 1], NONZERO)],
+    outShape: [2, 3, 4],
+  },
+  {
+    name: "add スカラ broadcast [5] + []",
+    op: "add",
+    inputs: [fill([5], SIGNED), fill([], () => 2.5)],
+    outShape: [5],
+  },
+];
+
+/** 0/1 を跨ぐ決定的な整数列（mask 経路の実測形に合わせる）。 */
+const MASK = (i: number): number => (i % 3 === 0 ? 0 : 1);
+/** 負値・0・正値を跨ぐ整数列。 */
+const INTEGERS = (i: number): number => (i % 11) - 5;
+/** 切り捨てが round / floor と区別できる小数列（±.5 と ±.7 を含む）。 */
+const FRACTIONS = (i: number): number => ((i % 9) - 4) * 0.6;
+
+/**
+ * i32 / bool の実行経路（ADR 0009）。解禁したのは実測グラフの mask 経路に出る形だけ:
+ * mask 外積 `mul(i32, i32)` / `1 - mask` の `sub(i32)` / 真偽化 cast / `bitwise_not`。
+ */
+const DTYPE_CASES: readonly OpCase[] = [
+  {
+    // mask 外積 [4,1] × [1,4]（実測は unsqueeze 経由の [1,1,T,1]×[1,1,1,T]）
+    name: "mul i32 の外積 broadcast [4,1] * [1,4]",
+    op: "mul",
+    inputs: [fill([4, 1], MASK, "i32"), fill([1, 4], MASK, "i32")],
+    outShape: [4, 4],
+  },
+  {
+    name: "sub i32 同形 [3,5]",
+    op: "sub",
+    inputs: [fill([3, 5], INTEGERS, "i32"), fill([3, 5], MASK, "i32")],
+    outShape: [3, 5],
+  },
+  {
+    name: "bitwise_not bool [2,6]",
+    op: "bitwise_not",
+    inputs: [fill([2, 6], MASK, "bool")],
+    outShape: [2, 6],
+  },
+  {
+    name: "cast f32 → i32（0 方向切り捨て）[3,3]",
+    op: "cast",
+    inputs: [fill([3, 3], FRACTIONS)],
+    outShape: [3, 3],
+    outDtype: "i32",
+    attrs: { to: "i32" },
+  },
+  {
+    name: "cast i32 → bool（x != 0）[3,4]",
+    op: "cast",
+    inputs: [fill([3, 4], INTEGERS, "i32")],
+    outShape: [3, 4],
+    outDtype: "bool",
+    attrs: { to: "bool" },
+  },
+  {
+    name: "cast bool → f32（0/1 の重み化）[2,5]",
+    op: "cast",
+    inputs: [fill([2, 5], MASK, "bool")],
+    outShape: [2, 5],
+    outDtype: "f32",
+    attrs: { to: "f32" },
+  },
+  {
+    name: "cast i32 → f32 [7]",
+    op: "cast",
+    inputs: [fill([7], INTEGERS, "i32")],
+    outShape: [7],
+    outDtype: "f32",
+    attrs: { to: "f32" },
+  },
+  {
+    name: "cast f32 → bool（x != 0）[6]",
+    op: "cast",
+    inputs: [fill([6], FRACTIONS)],
+    outShape: [6],
+    outDtype: "bool",
+    attrs: { to: "bool" },
+  },
+];
+
+/**
+ * M1-P3 波3 の数理 op 群（sdp の spline / dec の leaky_relu — recon §2）。
+ *
+ * MUST: 「向き」を持つ op は非対称な入力で踏む。where の分岐・比較の不等号・cumsum の
+ * 累積方向はいずれも shape も dtype も変えずに誤れるので、値でしか検出できない。
+ */
+const MATH_CASES: readonly OpCase[] = [
+  {
+    // 定義域 x > -1。小さい x（補正が効く領域）は専用テストが精度まで見る
+    name: "log1p [3,5]",
+    op: "log1p",
+    inputs: [fill([3, 5], POSITIVE)],
+    outShape: [3, 5],
+  },
+  {
+    // SIGNED は ±4.5 を跨ぐので、下側 / 内側 / 上側の 3 分岐を全て踏む
+    name: "clamp [3,5] min=-1.5 max=2.25",
+    op: "clamp",
+    inputs: [fill([3, 5], SIGNED)],
+    outShape: [3, 5],
+    attrs: { min: -1.5, max: 2.25 },
+  },
+  {
+    name: "clamp 潰す形 min == max",
+    op: "clamp",
+    inputs: [fill([6], SIGNED)],
+    outShape: [6],
+    attrs: { min: 1.5, max: 1.5 },
+  },
+  {
+    // 片側 clamp（ADR 0017）。SIGNED は ±4.5 を跨ぐので下側 / 上側の両分岐を踏む
+    name: "clamp_min [3,5] min=-1.5",
+    op: "clamp_min",
+    inputs: [fill([3, 5], SIGNED)],
+    outShape: [3, 5],
+    attrs: { min: -1.5 },
+  },
+  {
+    // 実測形（チャネル L2 正規化の clamp(min=eps)）— 正値だけの列で下限が効かない側も踏む
+    name: "clamp_min [4] min=1e-12（実測の eps 形）",
+    op: "clamp_min",
+    inputs: [fill([4], (i) => [0, -1, 1e-20, 2][i])],
+    outShape: [4],
+    attrs: { min: 1e-12 },
+  },
+  {
+    // 実測の slope 2 種（ADR 0015）。params 経由なので同じパイプラインで値だけが変わる
+    name: "leaky_relu slope=0.1 [3,5]",
+    op: "leaky_relu",
+    inputs: [fill([3, 5], SIGNED)],
+    outShape: [3, 5],
+    attrs: { negative_slope: 0.1 },
+  },
+  {
+    name: "leaky_relu slope=0.01 [3,5]",
+    op: "leaky_relu",
+    inputs: [fill([3, 5], SIGNED)],
+    outShape: [3, 5],
+    attrs: { negative_slope: 0.01 },
+  },
+  {
+    // SIGNED は i % 13 == 6 でちょうど 0 を取る = ge と gt の分かれ目を必ず踏む
+    name: "ge_scalar value=0（等値点を含む）",
+    op: "ge_scalar",
+    inputs: [fill([3, 5], SIGNED)],
+    outShape: [3, 5],
+    outDtype: "bool",
+    attrs: { value: 0 },
+  },
+  {
+    name: "gt_scalar value=0（等値点を含む）",
+    op: "gt_scalar",
+    inputs: [fill([3, 5], SIGNED)],
+    outShape: [3, 5],
+    outDtype: "bool",
+    attrs: { value: 0 },
+  },
+  {
+    name: "le_scalar value=0（等値点を含む）",
+    op: "le_scalar",
+    inputs: [fill([3, 5], SIGNED)],
+    outShape: [3, 5],
+    outDtype: "bool",
+    attrs: { value: 0 },
+  },
+  {
+    // searchsorted の形（inputs[…,None] >= bl）を縮めた右詰め broadcast
+    name: "ge [4,1] >= [3]（右詰め broadcast）",
+    op: "ge",
+    inputs: [fill([4, 1], SIGNED), fill([3], (i) => (i - 1) * 0.75)],
+    outShape: [4, 3],
+    outDtype: "bool",
+  },
+  {
+    name: "bitwise_and bool [2,6] & [6]",
+    op: "bitwise_and",
+    inputs: [fill([2, 6], MASK, "bool"), fill([6], (i) => (i % 2 === 0 ? 1 : 0), "bool")],
+    outShape: [2, 6],
+    outDtype: "bool",
+  },
+  {
+    // 分岐の取り違えが値に出るよう、a は正・b は負の値域で埋める
+    name: "where cond[1,4] ? a[3,4] : b[3,1]",
+    op: "where",
+    inputs: [
+      fill([1, 4], MASK, "bool"),
+      fill([3, 4], POSITIVE),
+      fill([3, 1], (i) => -10 - i),
+    ],
+    outShape: [3, 4],
+    // 出力は条件（スロット 0）ではなく**値の側**と同型（契約表の写像 bool → f32）
+    outDtype: "f32",
+  },
+  {
+    name: "where 同形 [2,3,4]",
+    op: "where",
+    inputs: [
+      fill([2, 3, 4], (i) => (i % 3 === 0 ? 1 : 0), "bool"),
+      fill([2, 3, 4], SIGNED),
+      fill([2, 3, 4], POSITIVE),
+    ],
+    outShape: [2, 3, 4],
+    outDtype: "f32",
+  },
+  {
+    // bool の sum は**真の個数**（出力 i32 — 契約表の写像）
+    name: "sum bool [6,10] → i32 のカウント",
+    op: "sum",
+    inputs: [fill([6, 10], MASK, "bool")],
+    outShape: [6],
+    outDtype: "i32",
+    attrs: { dim: 1 },
+  },
+  {
+    // 行長が workgroup サイズ（256）を超える → 1 スレッドが複数要素を畳む経路（bool 版）
+    name: "sum bool [3,700] → i32",
+    op: "sum",
+    inputs: [fill([3, 700], MASK, "bool")],
+    outShape: [3],
+    outDtype: "i32",
+    attrs: { dim: 1 },
+  },
+  {
+    // 累積方向が値に出る非対称な列（等差なら逆向きでも同じ値になりうる形を避ける）
+    name: "cumsum [4,7]",
+    op: "cumsum",
+    inputs: [fill([4, 7], SIGNED)],
+    outShape: [4, 7],
+    attrs: { dim: 1 },
+  },
+  {
+    name: "cumsum rank1 [10]",
+    op: "cumsum",
+    inputs: [fill([10], POSITIVE)],
+    outShape: [10],
+    attrs: { dim: 0 },
+  },
+  {
+    // 1 スレッドが 1 行を逐次で走る形なので、行長を伸ばして累算の長さも踏む
+    name: "cumsum 行長 300 rank3 [2,3,300]",
+    op: "cumsum",
+    inputs: [fill([2, 3, 300], SIGNED)],
+    outShape: [2, 3, 300],
+    attrs: { dim: 2 },
+  },
+  {
+    // 相対位置埋め込みの 4D 化（recon §2）— f32 の expand を解禁した形
+    name: "expand f32 [1,4,1] → [1,4,3]",
+    op: "expand",
+    inputs: [fill([1, 4, 1], SIGNED)],
+    outShape: [1, 4, 3],
+  },
+  {
+    name: "expand f32 rank 増 [3] → [2,4,3]",
+    op: "expand",
+    inputs: [fill([3], POSITIVE)],
+    outShape: [2, 4, 3],
+  },
+];
+
+/**
+ * matmul（64×64 レジスタタイル — src/kernels/gemm.ts）。
+ *
+ * MUST: タイル辺 64 を**跨ぐ**ケースを持つ。`[7,5]×[5,3]` のような小形は全て「1 タイル未満」に
+ * 潰れ、タイル原点・quad ガード・K タイル端数のどれも踏まない。
+ * MUST: v4（`k%4==0 && n%4==0`）とスカラの**両変種**を踏む。片方だけでは端数形状の
+ * フォールバックが黙って壊れても気づけない。
+ */
+const MATMUL_CASES: readonly OpCase[] = [
+  {
+    // タイル 16 の端数（m/n/k いずれもタイル境界に揃わない）
+    name: "matmul [7,5] × [5,3]",
+    op: "matmul",
+    inputs: [fill([7, 5], SIGNED), fill([5, 3], POSITIVE)],
+    outShape: [7, 3],
+  },
+  {
+    name: "matmul [32,16] × [16,32]",
+    op: "matmul",
+    inputs: [fill([32, 16], SIGNED), fill([16, 32], POSITIVE)],
+    outShape: [32, 32],
+  },
+  {
+    name: "matmul [1,64] × [64,1]",
+    op: "matmul",
+    inputs: [fill([1, 64], SIGNED), fill([64, 1], POSITIVE)],
+    outShape: [1, 1],
+  },
+  {
+    // v4 経路のタイル境界: n=68 は最終タイルの有効 quad が 16 中 1（quad ガードを外すと
+    // 隣接行を潰す）、k=20 は 4 の倍数だが 16 の倍数でない（K タイル端数の 0 埋め）、
+    // m=65 は行タイルを 2 枚跨ぐ。m/n/k は互いに違う長さ。
+    name: "matmul v4 タイル境界 [65,20] × [20,68]",
+    op: "matmul",
+    inputs: [fill([65, 20], SIGNED), fill([20, 68], POSITIVE)],
+    outShape: [65, 68],
+  },
+  {
+    // スカラ変種のタイル境界（k=19 / n=23 が 4 の倍数でない・m=70 は行タイル 2 枚）
+    name: "matmul スカラ変種 タイル境界 [70,19] × [19,23]",
+    op: "matmul",
+    inputs: [fill([70, 19], SIGNED), fill([19, 23], NONZERO)],
+    outShape: [70, 23],
+  },
+  {
+    // MUST: v4 判定は k と n の**両方**を見る。片方だけの判定が素通りすると、vec4 束縛と
+    // 実バイト数が食い違って例外なしの誤値になる。k のみ / n のみ 4 の倍数を対で持つ。
+    name: "matmul k のみ 4 の倍数 [66,20] × [20,19]",
+    op: "matmul",
+    inputs: [fill([66, 20], SIGNED), fill([20, 19], POSITIVE)],
+    outShape: [66, 19],
+  },
+  {
+    name: "matmul n のみ 4 の倍数 [66,19] × [19,20]",
+    op: "matmul",
+    inputs: [fill([66, 19], SIGNED), fill([19, 20], POSITIVE)],
+    outShape: [66, 20],
+  },
+];
+
+/**
+ * bmm（rank-3 バッチ matmul）。
+ *
+ * MUST: **B / M / K / N を全て違う長さ**にしたケースを持つ（ACTIVE_DESIGN の Pitfalls）。
+ * バッチ stride を隣の次元の積で組む誤りは、正方形や 2 軸が同じ長さの形では数値に出ない。
+ */
+const BMM_CASES: readonly OpCase[] = [
+  {
+    // 実測形 [16,T,64] × [16,64,T] を縮めた非対称形（B=3 / M=5 / K=7 / N=2）
+    name: "bmm 非対称 [3,5,7] × [3,7,2]",
+    op: "bmm",
+    inputs: [fill([3, 5, 7], SIGNED), fill([3, 7, 2], POSITIVE)],
+    outShape: [3, 5, 2],
+  },
+  {
+    // タイル 16 の端数をバッチ 2 枚で踏む（M / N / K いずれもタイル境界に揃わない）
+    name: "bmm タイル端数 [2,17,19] × [2,19,23]",
+    op: "bmm",
+    inputs: [fill([2, 17, 19], SIGNED), fill([2, 19, 23], NONZERO)],
+    outShape: [2, 17, 23],
+  },
+  {
+    // 1 タイルを跨ぐ K（縮約が複数タイルに割れる経路）とバッチ 4 枚
+    name: "bmm 縮約が複数タイル [4,3,40] × [4,40,5]",
+    op: "bmm",
+    inputs: [fill([4, 3, 40], SIGNED), fill([4, 40, 5], POSITIVE)],
+    outShape: [4, 3, 5],
+  },
+  {
+    name: "bmm バッチ 1 枚 [1,4,6] × [1,6,3]",
+    op: "bmm",
+    inputs: [fill([1, 4, 6], SIGNED), fill([1, 6, 3], POSITIVE)],
+    outShape: [1, 4, 3],
+  },
+  {
+    // MUST: v4 経路のバッチ base は **quad 単位**（`m * k4`）。要素単位のまま組む誤りは
+    // batch ≥ 2 でしか出ず、B/M/K/N が 1 つでも同じ長さだと数値に現れないことがある。
+    // M=68 で行タイル 2 枚・K=20 で K タイル端数・N=12 で列タイル 1 枚未満。
+    name: "bmm v4 タイル境界 [3,68,20] × [3,20,12]",
+    op: "bmm",
+    inputs: [fill([3, 68, 20], SIGNED), fill([3, 20, 12], POSITIVE)],
+    outShape: [3, 68, 12],
+  },
+  {
+    // スカラ変種でも同じ罠を踏む（base が要素単位なのは正しいが、3 本とも base 経由か）
+    name: "bmm スカラ変種 タイル境界 [2,70,19] × [2,19,23]",
+    op: "bmm",
+    inputs: [fill([2, 70, 19], SIGNED), fill([2, 19, 23], NONZERO)],
+    outShape: [2, 70, 23],
+  },
+];
+
+/**
+ * 融合 attention（ADR 0023）。契約は rank-4 head-first で、1 ノード = 3 dispatch。
+ *
+ * MUST: **B / H / M / N / D を全て違う長さ**にしたケースを持つ。カーネルは B と H を 1 本の
+ * バッチ軸へ畳むので、実測形（B=1）では軸の取り違えが値に出ない（設計 recon §4.6 の検出限界）。
+ * MUST: **D ≠ 128** を持つ（実測は DiT の 128 と VAE の 384 だけ）。D は WGSL に展開されない
+ * ので変種は増えないが、`gemmUsesVec4` の踏み分けは D で決まる。
+ * MUST: **端数 M / N** を持つ。実モデルは M,N ∈ {512,1024,4096} で全て 64 の倍数なので、
+ * タイル端数の経路はユニットテストが唯一の検出器（ADR 0022 が記録した穴と同型）。
+ */
+const attentionCase = (
+  name: string,
+  [b, h, m, n, d]: readonly [number, number, number, number, number],
+  options: {
+    readonly query?: (index: number) => number;
+    readonly key?: (index: number) => number;
+    readonly scale?: number;
+  } = {},
+): OpCase => ({
+  name,
+  op: "attention",
+  inputs: [
+    fill([b, h, m, d], options.query ?? SIGNED),
+    fill([b, h, n, d], options.key ?? POSITIVE),
+    fill([b, h, n, d], NONZERO),
+  ],
+  outShape: [b, h, m, d],
+  // 既定は契約どおりの半スケール（torch の `√(1/√D)`）。
+  attrs: { scale: options.scale ?? Math.fround(Math.sqrt(1 / Math.sqrt(d))) },
+});
+
+const ATTENTION_CASES: readonly OpCase[] = [
+  // B=2 / H=3 / M=5 / N=11 / D=7 — 5 軸とも違う長さ（軸の取り違えが必ず値に出る）
+  attentionCase("attention 全異 [2,3,5,7] × [2,3,11,7]", [2, 3, 5, 11, 7]),
+  // タイル端数（M % 64 ≠ 0 / N % 64 ≠ 0）+ D % 4 ≠ 0 でスカラ変種
+  attentionCase("attention 端数 [3,1,17,13] × [3,1,19,13]", [3, 1, 17, 19, 13]),
+  // v4 経路で行タイルを跨ぐ（M=68 > 64）
+  attentionCase("attention v4 タイル跨ぎ [1,2,68,12]", [1, 2, 68, 20, 12]),
+  // ① が v4・③ がスカラに落ちる混成（変種の踏み分けが段ごとに違うことの固定）
+  attentionCase("attention 段ごとに変種が違う [2,2,9,6]", [2, 2, 9, 8, 6]),
+  // D=64（conditioner 級）と D=384（VAE decoder 級 — flash 型が載らない D も段階融合は通る）
+  attentionCase("attention D=64 [1,3,7,64]", [1, 3, 7, 5, 64]),
+  attentionCase("attention D=384 [1,1,3,384]", [1, 1, 3, 5, 384]),
+  // N が 1（縮約が 1 要素 — softmax が恒等になる退化形）
+  attentionCase("attention N=1 [2,2,3,4]", [2, 2, 3, 1, 4]),
+  {
+    // MUST: 行統計の amax 減算が外れた瞬間に赤くなる形。q を大きい負値・k を全て正にすると
+    // S が −200 級に落ち、素朴 softmax なら exp が f32 で 0 に潰れて 0/0 = NaN になる。
+    ...attentionCase("attention 大きい負値 [1,2,4,4]（素朴形は underflow）", [1, 2, 4, 6, 4], {
+      query: () => -15,
+      key: (i) => 6 + (i % 5) * 0.25,
+    }),
+    name: "attention 大きい負値 [1,2,4,4]（素朴形は underflow）",
+  },
+  // 明示 scale（SDPA の `scale` 引数を指定した形 — 既定 1/√D 以外も契約どおり通る）
+  attentionCase("attention 明示 scale [2,2,5,4]", [2, 2, 5, 7, 4], { scale: 0.25 }),
+];
+
+/** src の最終次元 D=9 に収まる決定的な添字（恒等でも単調でもない列）。 */
+const PICKS = (i: number): number => (i * 5 + 3) % 9;
+/** 最終次元 D=4 に収まる添字。 */
+const PICKS4 = (i: number): number => (i * 3 + 1) % 4;
+
+/**
+ * gather（最終次元固定）。実測は src f32[16,T,512] / index i32[16,T,T]。
+ * MUST: 添字は行ごとに違う列を引く列にする（恒等添字だと行オフセットの誤りが出ない）。
+ */
+const GATHER_CASES: readonly OpCase[] = [
+  {
+    name: "gather rank3 src [4,5,9] / index [4,5,6]",
+    op: "gather",
+    inputs: [fill([4, 5, 9], SIGNED), fill([4, 5, 6], PICKS, "i32")],
+    outShape: [4, 5, 6],
+  },
+  {
+    // 出力の最終次元が src より長い（同じ添字を何度引いてもよい）
+    name: "gather 列が増える src [3,4] / index [3,7]",
+    op: "gather",
+    inputs: [fill([3, 4], POSITIVE), fill([3, 7], PICKS4, "i32")],
+    outShape: [3, 7],
+  },
+  {
+    name: "gather rank1 src [9] / index [5]",
+    op: "gather",
+    inputs: [fill([9], SIGNED), fill([5], PICKS, "i32")],
+    outShape: [5],
+  },
+  {
+    // 1 workgroup（256 要素）では覆えない大きさ。**grid-stride の縮退はここでは踏まない**
+    // （262144 要素 = 1024 workgroup で dispatch 上限の内側なので必要数がそのまま割り当たる）—
+    // 縮退経路は tests/gpu_gridstride_test.ts が dispatch 数を絞って直接踏む。
+    name: "gather 大きめ src [4096,9] / index [4096,64]",
+    op: "gather",
+    inputs: [fill([4096, 9], SIGNED), fill([4096, 64], PICKS, "i32")],
+    outShape: [4096, 64],
+  },
+];
+
+const REDUCE_CASES: readonly OpCase[] = [
+  {
+    name: "sum [6,10]",
+    op: "sum",
+    inputs: [fill([6, 10], SIGNED)],
+    outShape: [6],
+    attrs: { dim: 1 },
+  },
+  {
+    name: "amax [6,10]",
+    op: "amax",
+    inputs: [fill([6, 10], SIGNED)],
+    outShape: [6],
+    attrs: { dim: 1 },
+  },
+  {
+    name: "amin [6,10]",
+    op: "amin",
+    inputs: [fill([6, 10], SIGNED)],
+    outShape: [6],
+    attrs: { dim: 1 },
+  },
+  // 行長が workgroup サイズ（256）を超える → 1 スレッドが複数要素を畳む経路
+  {
+    name: "sum [3,700]",
+    op: "sum",
+    inputs: [fill([3, 700], SIGNED)],
+    outShape: [3],
+    attrs: { dim: 1 },
+  },
+  {
+    name: "amax rank3 [2,3,7]",
+    op: "amax",
+    inputs: [fill([2, 3, 7], SIGNED)],
+    outShape: [2, 3],
+    attrs: { dim: 2 },
+  },
+  // rank 1 → rank 0（スカラ出力）
+  {
+    name: "sum [4] → スカラ",
+    op: "sum",
+    inputs: [fill([4], SIGNED)],
+    outShape: [],
+    attrs: { dim: 0 },
+  },
+  // 最終次元以外の軸（軸 reduce 変種 — 実行カーネルが別物になる）
+  {
+    name: "sum 軸 1 [5,9,11]",
+    op: "sum",
+    inputs: [fill([5, 9, 11], SIGNED)],
+    outShape: [5, 11],
+    attrs: { dim: 1 },
+  },
+  {
+    name: "amax 軸 0 [7,13]",
+    op: "amax",
+    inputs: [fill([7, 13], SIGNED)],
+    outShape: [13],
+    attrs: { dim: 0 },
+  },
+  {
+    // 縮約長 > 256（軸変種の slot 走査が 2 周する経路）。中間軸なので inner も 1 でない。
+    name: "sum 軸 1 の縮約長 300 [2,300,5]",
+    op: "sum",
+    inputs: [fill([2, 300, 5], SIGNED)],
+    outShape: [2, 5],
+    attrs: { dim: 1 },
+  },
+  {
+    // bool の軸 sum（累算器 i32 + 真偽化が軸変種にも入っていること）
+    name: "sum bool 軸 1 [3,13,5] → i32",
+    op: "sum",
+    inputs: [fill([3, 13, 5], MASK, "bool")],
+    outShape: [3, 5],
+    outDtype: "i32",
+    attrs: { dim: 1 },
+  },
+];
+
+/**
+ * レイアウト op（ADR 0011）。reshape はバッファ別名なので dispatch を 1 本も出さず、
+ * permute / expand は strided 実体化コピー 1 カーネル族で実行する。
+ * 解禁 dtype は実測どおり（permute は f32、expand は i32 / bool）。
+ */
+const LAYOUT_CASES: readonly OpCase[] = [
+  {
+    name: "reshape [2,3,4] → [6,4]（別名）",
+    op: "reshape",
+    inputs: [fill([2, 3, 4], SIGNED)],
+    outShape: [6, 4],
+  },
+  {
+    name: "reshape i32 [6] → [1,6,1]（軸の挿入）",
+    op: "reshape",
+    inputs: [fill([6], INTEGERS, "i32")],
+    outShape: [1, 6, 1],
+  },
+  {
+    name: "reshape bool [2,3] → [6]（軸の削除）",
+    op: "reshape",
+    inputs: [fill([2, 3], MASK, "bool")],
+    outShape: [6],
+  },
+  {
+    // 実測形 [0,2,1,3]（attention の head 整形）
+    name: "permute rank4 [1,5,3,4] dims=[0,2,1,3]",
+    op: "permute",
+    inputs: [fill([1, 5, 3, 4], SIGNED)],
+    outShape: [1, 3, 5, 4],
+    attrs: { dims: [0, 2, 1, 3] },
+  },
+  {
+    // 実測形 [0,2,1]（scores の転置）
+    name: "permute rank3 [3,5,7] dims=[0,2,1]",
+    op: "permute",
+    inputs: [fill([3, 5, 7], POSITIVE)],
+    outShape: [3, 7, 5],
+    attrs: { dims: [0, 2, 1] },
+  },
+  {
+    name: "permute rank2 転置 [4,6] dims=[1,0]",
+    op: "permute",
+    inputs: [fill([4, 6], SIGNED)],
+    outShape: [6, 4],
+    attrs: { dims: [1, 0] },
+  },
+  {
+    // MUST: 巡回長 3 以上の並べ替えを 1 本持つ。実測に出る形（[0,2,1,3] / [0,2,1] / [1,0]）は
+    // 全て対合（自分自身が逆置換）で、stride 表を逆置換で組む誤りをどれも検出できない。
+    name: "permute rank3 の 3 巡回 [2,3,5] dims=[1,2,0]",
+    op: "permute",
+    inputs: [fill([2, 3, 5], SIGNED)],
+    outShape: [3, 5, 2],
+    attrs: { dims: [1, 2, 0] },
+  },
+  {
+    name: "permute rank4 の 4 巡回 [2,3,4,5] dims=[1,2,3,0]",
+    op: "permute",
+    inputs: [fill([2, 3, 4, 5], POSITIVE)],
+    outShape: [3, 4, 5, 2],
+    attrs: { dims: [1, 2, 3, 0] },
+  },
+  {
+    // gather 添字の実測形 [1,T,T] → [16,T,T]
+    name: "expand i32 [1,4,4] → [5,4,4]（先頭軸の複製）",
+    op: "expand",
+    inputs: [fill([1, 4, 4], INTEGERS, "i32")],
+    outShape: [5, 4, 4],
+  },
+  {
+    // conv 経路の bool マスク [1,T,1] → [1,T,C]
+    name: "expand bool [1,6,1] → [1,6,9]（最終軸の複製）",
+    op: "expand",
+    inputs: [fill([1, 6, 1], MASK, "bool")],
+    outShape: [1, 6, 9],
+  },
+  {
+    name: "expand i32 rank 増 [3] → [2,4,3]",
+    op: "expand",
+    inputs: [fill([3], INTEGERS, "i32")],
+    outShape: [2, 4, 3],
+  },
+];
+
+/**
+ * レイアウト第 2 群（ADR 0014）— slice / cat / pad / flip。
+ *
+ * MUST: **開始位置 0 でない slice** と **先頭でない cat の入力**を必ず持つ（offset が 0 の
+ * 形だけだと「offset を載せ忘れる / 取り違える」誤りが値に出ない）。
+ * MUST: 反転軸は**長さ 3 以上**を 1 本持つ（長さ 2 の反転は off-by-one が対称で消える）。
+ * MUST: pad は左右非対称の形を持つ（[w,w] だけだと左右の取り違えが値に出ない）。
+ */
+const LAYOUT2_CASES: readonly OpCase[] = [
+  {
+    // enc_p の stats[:, c:]（後半チャネル）と同型 — 開始位置が 0 でない中間軸の切り出し
+    name: "slice 中間軸の後半 [1,6,5] dim=1 [3,6)",
+    op: "slice",
+    inputs: [fill([1, 6, 5], SIGNED)],
+    outShape: [1, 3, 5],
+    attrs: { dim: 1, start: 3, end: 6 },
+  },
+  {
+    // spline の bin_locations[..., :-1] と同型（最終次元・末尾を落とす）
+    name: "slice 最終次元 [4,7] dim=1 [1,6)",
+    op: "slice",
+    inputs: [fill([4, 7], POSITIVE)],
+    outShape: [4, 5],
+    attrs: { dim: 1, start: 1, end: 6 },
+  },
+  {
+    // 先頭軸の切り出し（行の送り幅が変わらない形 — offset だけが効く）
+    name: "slice 先頭軸 [5,3] dim=0 [2,4)",
+    op: "slice",
+    inputs: [fill([5, 3], SIGNED)],
+    outShape: [2, 3],
+    attrs: { dim: 0, start: 2, end: 4 },
+  },
+  {
+    // rank4 の中間軸（strided params の左詰めを踏まない rank）
+    name: "slice rank4 [2,5,3,4] dim=1 [1,4)",
+    op: "slice",
+    inputs: [fill([2, 5, 3, 4], SIGNED)],
+    outShape: [2, 3, 3, 4],
+    attrs: { dim: 1, start: 1, end: 4 },
+  },
+  {
+    // coupling reverse の cat([x0,x1], 1) と同型（チャネル軸の連結 — 行が交互に並ぶ）
+    name: "cat チャネル軸 [1,3,5] + [1,2,5] dim=1",
+    op: "cat",
+    inputs: [fill([1, 3, 5], SIGNED), fill([1, 2, 5], POSITIVE)],
+    outShape: [1, 5, 5],
+    attrs: { dim: 1 },
+  },
+  {
+    // spline の cat 系（最終次元の連結 — 1 要素の帯を先頭に足す形）
+    name: "cat 最終次元 [3,1] + [3,4] dim=1",
+    op: "cat",
+    inputs: [fill([3, 1], NONZERO), fill([3, 4], SIGNED)],
+    outShape: [3, 5],
+    attrs: { dim: 1 },
+  },
+  {
+    // 3 入力（可変アリティ）— 真ん中の入力は offset も長さも 0 でない
+    name: "cat 3 入力 [2,1]+[2,3]+[2,2] dim=1",
+    op: "cat",
+    inputs: [fill([2, 1], POSITIVE), fill([2, 3], SIGNED), fill([2, 2], NONZERO)],
+    outShape: [2, 6],
+    attrs: { dim: 1 },
+  },
+  {
+    // 先頭軸の連結（行がそのまま積み上がる形）
+    name: "cat 先頭軸 [2,4] + [3,4] dim=0",
+    op: "cat",
+    inputs: [fill([2, 4], SIGNED), fill([3, 4], POSITIVE)],
+    outShape: [5, 4],
+    attrs: { dim: 0 },
+  },
+  {
+    // 相対位置 value 側の F.pad(p_attn, [w,w])（w=4）と同型
+    name: "pad 対称 [1,2,3,5] [4,4]",
+    op: "pad",
+    inputs: [fill([1, 2, 3, 5], SIGNED)],
+    outShape: [1, 2, 3, 13],
+    attrs: { left: 4, right: 4 },
+  },
+  {
+    name: "pad 非対称 [3,4] [2,1]",
+    op: "pad",
+    inputs: [fill([3, 4], POSITIVE)],
+    outShape: [3, 7],
+    attrs: { left: 2, right: 1 },
+  },
+  {
+    name: "pad 片側 0 [2,3] [0,3]",
+    op: "pad",
+    inputs: [fill([2, 3], SIGNED)],
+    outShape: [2, 6],
+    attrs: { left: 0, right: 3 },
+  },
+  {
+    // flow の Flip（192ch）を縮めた形 — 中間軸・長さ 5（奇数で中央が動かない形も踏む）
+    name: "flip 中間軸 [2,5,3] dim=1",
+    op: "flip",
+    inputs: [fill([2, 5, 3], SIGNED)],
+    outShape: [2, 5, 3],
+    attrs: { dim: 1 },
+  },
+  {
+    // sdp の Flip（2ch）と同型
+    name: "flip 2ch [1,2,6] dim=1",
+    op: "flip",
+    inputs: [fill([1, 2, 6], POSITIVE)],
+    outShape: [1, 2, 6],
+    attrs: { dim: 1 },
+  },
+  {
+    name: "flip 最終次元 [3,4] dim=1",
+    op: "flip",
+    inputs: [fill([3, 4], SIGNED)],
+    outShape: [3, 4],
+    attrs: { dim: 1 },
+  },
+  {
+    name: "flip 先頭軸 rank4 [4,2,3,2] dim=0",
+    op: "flip",
+    inputs: [fill([4, 2, 3, 2], SIGNED)],
+    outShape: [4, 2, 3, 2],
+    attrs: { dim: 0 },
+  },
+];
+
+/** masked_fill の実測埋め値（f32 の最小有限値 — ADR 0012）。 */
+const NEG_F32_MAX = -3.4028234663852886e+38;
+/** 素朴 softmax なら f32 で exp が 0 に潰れる領域（safe-softmax の必要性を踏む）。 */
+const HUGE_NEGATIVE = (i: number): number => -200 + (i % 7) * 3;
+/** 0/1 の bool マスク（3 要素に 1 つ真）。 */
+const MASKED = (i: number): number => (i % 3 === 0 ? 1 : 0);
+
+/**
+ * 融合 op 9 本（ADR 0012 / recon §5 + ADR 0015 の conv_transpose1d + ADR 0017 の rms_norm / conv2d）。
+ *
+ * MUST: 各 op に「軸の長さが全て違う」ケースを 1 本持つ。linear の m/n/k、conv1d の
+ * B/Cin/Cout/L/K は積で添字を組むので、2 軸が同じ長さの形では取り違えが数値に出ない。
+ */
+const FUSED_CASES: readonly OpCase[] = [
+  {
+    // 実測は [1,T,1024] × W[1024,1024]。ここは m/n/k を全て違う長さにした縮小形
+    name: "linear rank2 [5,7] × W[3,7] + b[3]",
+    op: "linear",
+    inputs: [fill([5, 7], SIGNED), fill([3, 7], POSITIVE), fill([3], NONZERO)],
+    outShape: [5, 3],
+  },
+  {
+    // 先行次元が 2 本（平坦化して GEMM に落とす経路）
+    name: "linear rank3 [2,4,6] × W[5,6] + b[5]",
+    op: "linear",
+    inputs: [fill([2, 4, 6], SIGNED), fill([5, 6], NONZERO), fill([5], SIGNED)],
+    outShape: [2, 4, 5],
+  },
+  {
+    // タイル 16 の端数（m/n/k いずれもタイル境界に揃わない）+ 縮約が複数タイルに割れる。
+    // n=19 は 4 の倍数でないのでスカラ変種で、共有メモリ転置（列 quad = wc/4・成分 = wc%4）が
+    // 1 タイル内で quad を跨ぐ形になる（列ごとに W が違うので入れ替えが数値に出る）。
+    name: "linear タイル端数 [17,40] × W[19,40] + b[19]",
+    op: "linear",
+    inputs: [fill([17, 40], SIGNED), fill([19, 40], POSITIVE), fill([19], NONZERO)],
+    outShape: [17, 19],
+  },
+  {
+    // v4 経路のタイル境界: n=68（最終タイルの有効 quad が 16 中 1・共有転置も quad を跨ぐ）/
+    // k=20（K タイル端数）/ m=65（行タイル 2 枚）。m/n/k は互いに違う長さ。
+    name: "linear v4 タイル境界 [65,20] × W[68,20] + b[68]",
+    op: "linear",
+    inputs: [fill([65, 20], SIGNED), fill([68, 20], POSITIVE), fill([68], SIGNED)],
+    outShape: [65, 68],
+  },
+  {
+    // スカラ変種でタイル辺 64 を跨ぐ（k=37 は 4 の倍数でも 2 の倍数でもない）
+    name: "linear スカラ変種 タイル境界 [70,37] × W[23,37] + b[23]",
+    op: "linear",
+    inputs: [fill([70, 37], SIGNED), fill([23, 37], NONZERO), fill([23], SIGNED)],
+    outShape: [70, 23],
+  },
+  {
+    name: "layer_norm [4,10] affine",
+    op: "layer_norm",
+    inputs: [fill([4, 10], SIGNED), fill([10], POSITIVE), fill([10], SIGNED)],
+    outShape: [4, 10],
+    attrs: { normalized_shape: [10], eps: 1e-5 },
+  },
+  {
+    // 行長が workgroup サイズ（256）を超える → 1 スレッドが複数要素を畳む経路
+    name: "layer_norm 行長 300 rank3 [2,3,300]",
+    op: "layer_norm",
+    inputs: [fill([2, 3, 300], SIGNED), fill([300], NONZERO), fill([300], SIGNED)],
+    outShape: [2, 3, 300],
+    attrs: { normalized_shape: [300], eps: 1e-7 },
+  },
+  {
+    // 実測の eps（1e-07）と**分散ちょうど 0 の行**（行ごとに定数）。eps が無ければ
+    // 1/sqrt(0) = inf で出力が NaN になる経路で、結果は bias そのものになる。
+    name: "layer_norm 分散 0 の行 [3,8] eps=1e-7",
+    op: "layer_norm",
+    inputs: [
+      fill([3, 8], (i) => Math.floor(i / 8) + 1),
+      fill([8], POSITIVE),
+      fill([8], SIGNED),
+    ],
+    outShape: [3, 8],
+    attrs: { normalized_shape: [8], eps: 1e-7 },
+  },
+  {
+    // ADR 0017: rms_norm は平均を引かない（アリティ 2）。SIGNED は 0 を跨ぐので、
+    // layer_norm を写した実装（平均を引く）なら CPU 参照と必ず食い違う。
+    name: "rms_norm [4,10] weight",
+    op: "rms_norm",
+    inputs: [fill([4, 10], SIGNED), fill([10], POSITIVE)],
+    outShape: [4, 10],
+    attrs: { eps: 1e-6 },
+  },
+  {
+    // 行長が workgroup サイズ（256）を超える → 1 スレッドが複数要素を畳む経路
+    name: "rms_norm 行長 300 rank3 [2,3,300]",
+    op: "rms_norm",
+    inputs: [fill([2, 3, 300], SIGNED), fill([300], NONZERO)],
+    outShape: [2, 3, 300],
+    attrs: { eps: 1e-6 },
+  },
+  {
+    // **全要素 0 の行**（二乗和 0）— eps が平方根の外にあると 1/sqrt(0) = inf で NaN 化する。
+    // 正しい実装ではちょうど 0 が返る（layer_norm の「分散 0 の行」と同型の押さえ）。
+    name: "rms_norm 全要素 0 の行 [3,8] eps=1e-6",
+    op: "rms_norm",
+    inputs: [fill([3, 8], () => 0), fill([8], POSITIVE)],
+    outShape: [3, 8],
+    attrs: { eps: 1e-6 },
+  },
+  {
+    name: "softmax 最終次元 [4,9]",
+    op: "softmax",
+    inputs: [fill([4, 9], SIGNED)],
+    outShape: [4, 9],
+    attrs: { dim: 1 },
+  },
+  {
+    // MUST: 素朴形なら exp(-200) が f32 で 0 に潰れて 0/0 = NaN になる領域。
+    // safe-softmax（amax 減算）が外れた瞬間にここが赤くなる。
+    name: "softmax 大きい負値 [3,11]（素朴形は underflow）",
+    op: "softmax",
+    inputs: [fill([3, 11], HUGE_NEGATIVE)],
+    outShape: [3, 11],
+    attrs: { dim: 1 },
+  },
+  {
+    // 全要素が同じ値の行（masked_fill で全マスクされた行と同じ形）— 一様分布になる
+    name: "softmax 全要素同値 [2,6]",
+    op: "softmax",
+    inputs: [fill([2, 6], () => NEG_F32_MAX)],
+    outShape: [2, 6],
+    attrs: { dim: 1 },
+  },
+  {
+    name: "softmax 行長 300 rank3 [2,3,300]",
+    op: "softmax",
+    inputs: [fill([2, 3, 300], SIGNED)],
+    outShape: [2, 3, 300],
+    attrs: { dim: 2 },
+  },
+  {
+    // 実測は weight f32[22012,1024] × index i32[1,T]。V/H/添字数を全て違う長さにした縮小形
+    name: "embedding weight [7,4] × index [2,3]",
+    op: "embedding",
+    inputs: [fill([7, 4], SIGNED), fill([2, 3], (i) => (i * 3 + 1) % 7, "i32")],
+    outShape: [2, 3, 4],
+    attrs: { padding_idx: -1 },
+  },
+  {
+    // padding_idx は forward に効かない（受理して不活性 — ADR 0012）。添字 0 を必ず引く列で
+    // 踏み、padding 行を 0 で潰す実装なら CPU 参照と食い違う。
+    name: "embedding padding_idx=0 は forward に効かない",
+    op: "embedding",
+    inputs: [fill([5, 3], POSITIVE), fill([4], (i) => i % 5, "i32")],
+    outShape: [4, 3],
+    attrs: { padding_idx: 0 },
+  },
+  {
+    // 実測形 mask [1,1,T,T] × x [1,16,T,T]（右詰め broadcast）を縮小したもの
+    name: "masked_fill rank4 broadcast x[1,3,4,5] mask[1,1,4,5]",
+    op: "masked_fill",
+    inputs: [fill([1, 3, 4, 5], SIGNED), fill([1, 1, 4, 5], MASKED, "bool")],
+    outShape: [1, 3, 4, 5],
+    attrs: { value: NEG_F32_MAX },
+  },
+  {
+    // 実測形 mask [1,T,1024] × x [1,T,1024]（同形・埋め値 0）
+    name: "masked_fill 同形 x[2,3,4] mask[2,3,4] value=0",
+    op: "masked_fill",
+    inputs: [fill([2, 3, 4], SIGNED), fill([2, 3, 4], MASKED, "bool")],
+    outShape: [2, 3, 4],
+    attrs: { value: 0 },
+  },
+  {
+    // rank を跨ぐ右詰め broadcast（mask の rank が x より低い形）
+    name: "masked_fill rank 違い x[3,4,5] mask[5]",
+    op: "masked_fill",
+    inputs: [fill([3, 4, 5], SIGNED), fill([5], MASKED, "bool")],
+    outShape: [3, 4, 5],
+    attrs: { value: -1.5 },
+  },
+  {
+    // 実測形（kernel 3 / stride 1 / padding 1）を B/Cin/Cout/L 全て違う長さで踏む
+    name: "conv1d [2,3,9] * W[4,3,3] stride=1 padding=1",
+    op: "conv1d",
+    inputs: [fill([2, 3, 9], SIGNED), fill([4, 3, 3], POSITIVE), fill([4], NONZERO)],
+    outShape: [2, 4, 9],
+    attrs: { stride: 1, padding: 1, dilation: 1, groups: 1 },
+  },
+  {
+    // padding 無し（出力長が縮む）+ stride 2（params 経路を踏む）
+    name: "conv1d [1,2,11] * W[3,2,4] stride=2 padding=0",
+    op: "conv1d",
+    inputs: [fill([1, 2, 11], SIGNED), fill([3, 2, 4], NONZERO), fill([3], SIGNED)],
+    outShape: [1, 3, 4],
+    attrs: { stride: 2, padding: 0, dilation: 1, groups: 1 },
+  },
+  {
+    // padding がカーネル長を超える形（両端が padding 域だけを見る出力を持つ）
+    name: "conv1d [1,1,3] * W[2,1,3] stride=1 padding=2",
+    op: "conv1d",
+    inputs: [fill([1, 1, 3], SIGNED), fill([2, 1, 3], POSITIVE), fill([2], NONZERO)],
+    outShape: [1, 2, 5],
+    attrs: { stride: 1, padding: 2, dilation: 1, groups: 1 },
+  },
+  // ---- conv 族の拡張（ADR 0015）--------------------------------------------
+  {
+    // sdp の DDSConv（depthwise groups=C・dilation 3・k=5）の縮小形。groups=Cin=Cout なので
+    // 重みの第 2 軸は 1 — グループ跨ぎで読む誤りは「別チャネルの値が混ざる」形で値に出る。
+    name: "conv1d depthwise [1,6,17] * W[6,1,5] dilation=3 groups=6",
+    op: "conv1d",
+    inputs: [fill([1, 6, 17], SIGNED), fill([6, 1, 5], POSITIVE), fill([6], NONZERO)],
+    outShape: [1, 6, 17],
+    attrs: { stride: 1, padding: 6, dilation: 3, groups: 6 },
+  },
+  {
+    // depthwise の dilation 9（DDSConv の 3 層目）。padding も d·(K−1)/2 = 18 まで伸びる
+    name: "conv1d depthwise [1,4,13] * W[4,1,5] dilation=9 groups=4",
+    op: "conv1d",
+    inputs: [fill([1, 4, 13], SIGNED), fill([4, 1, 5], NONZERO), fill([4], SIGNED)],
+    outShape: [1, 4, 13],
+    attrs: { stride: 1, padding: 18, dilation: 9, groups: 4 },
+  },
+  {
+    // 中間の groups（1 < g < C）— Cin/Cout ともグループごとに 2ch 以上あり、帯の
+    // 先頭オフセットを落とす誤りが値に出る。Cin ≠ Cout の非対称形。
+    name: "conv1d grouped [1,6,11] * W[9,2,3] groups=3",
+    op: "conv1d",
+    inputs: [fill([1, 6, 11], SIGNED), fill([9, 2, 3], POSITIVE), fill([9], NONZERO)],
+    outShape: [1, 9, 11],
+    attrs: { stride: 1, padding: 1, dilation: 1, groups: 3 },
+  },
+  {
+    // dec の ResBlock1（dilation 5・k=3・full チャネル）の縮小形
+    name: "conv1d dilated [1,3,15] * W[5,3,3] dilation=5",
+    op: "conv1d",
+    inputs: [fill([1, 3, 15], SIGNED), fill([5, 3, 3], NONZERO), fill([5], SIGNED)],
+    outShape: [1, 5, 15],
+    attrs: { stride: 1, padding: 5, dilation: 5, groups: 1 },
+  },
+  // ---- conv2d（ADR 0017）------------------------------------------------------
+  // MUST: 実装の取り違えは対称な形では数値に出ない。以下の 5 ケースで
+  // (a) Cin/Cout とも 2 以上で互いに違う (b) Kh ≠ Kw (c) stride/padding の H/W 非対称
+  // (d) dilation > 1 (e) groups > 1（depthwise 含む）を全て踏む。
+  {
+    // VAE の素の conv2d 実測形（k3 / pad1 / same）。B/Cin/Cout/H/W を全て違う長さにする
+    name: "conv2d [2,3,7,9] * W[5,3,3,3] stride=1 padding=1",
+    op: "conv2d",
+    inputs: [fill([2, 3, 7, 9], SIGNED), fill([5, 3, 3, 3], POSITIVE), fill([5], NONZERO)],
+    outShape: [2, 5, 7, 9],
+    attrs: { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 1 },
+  },
+  {
+    // Kh ≠ Kw かつ stride / padding が H/W 非対称
+    // H: (9 + 2 − 2)/2 + 1 = 5 / W: (11 + 0 − 4)/3 + 1 = 3
+    name: "conv2d [1,2,9,11] * W[4,2,2,4] stride=[2,3] padding=[1,0]",
+    op: "conv2d",
+    inputs: [fill([1, 2, 9, 11], SIGNED), fill([4, 2, 2, 4], NONZERO), fill([4], SIGNED)],
+    outShape: [1, 4, 5, 3],
+    attrs: { stride: [2, 3], padding: [1, 0], dilation: [1, 1], groups: 1 },
+  },
+  {
+    // dilation も H/W 非対称（H: 12 − 3·2 = 6 / W: 10 − 2·1 = 8）
+    name: "conv2d [1,2,12,10] * W[3,2,3,2] dilation=[3,2]",
+    op: "conv2d",
+    inputs: [fill([1, 2, 12, 10], SIGNED), fill([3, 2, 3, 2], POSITIVE), fill([3], NONZERO)],
+    outShape: [1, 3, 6, 8],
+    attrs: { stride: [1, 1], padding: [0, 0], dilation: [3, 2], groups: 1 },
+  },
+  {
+    // depthwise（groups = Cin = Cout → 重みの第 2 軸は 1）。グループ跨ぎで読む誤りは
+    // 「別チャネルの値が混ざる」形で必ず値に出る
+    name: "conv2d depthwise [1,6,5,7] * W[6,1,3,3] groups=6",
+    op: "conv2d",
+    inputs: [fill([1, 6, 5, 7], SIGNED), fill([6, 1, 3, 3], POSITIVE), fill([6], NONZERO)],
+    outShape: [1, 6, 5, 7],
+    attrs: { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 6 },
+  },
+  {
+    // 中間の groups（1 < g < C）で Cin ≠ Cout・Kh ≠ Kw — 帯の先頭オフセットを落とす誤りと
+    // カーネル 2 軸の取り違えを 1 本で同時に踏む
+    name: "conv2d grouped [1,6,6,8] * W[9,2,3,1] groups=3",
+    op: "conv2d",
+    inputs: [fill([1, 6, 6, 8], SIGNED), fill([9, 2, 3, 1], NONZERO), fill([9], SIGNED)],
+    outShape: [1, 9, 4, 8],
+    attrs: { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 3 },
+  },
+  {
+    // implicit GEMM（groups == 1 — ADR 0024）の**タイル境界**: m = 70 で行タイル 2 枚、
+    // n = Hout·Wout = 72 で列タイル 2 枚、K = 8·3·3 = 72 で K タイル端数（16·4 + 8）。
+    // kFlat % 4 == 0 かつ Wout % 4 == 0 かつ stride_w == 1 なので v4 変種を踏む。
+    name: "conv2d igemm v4 タイル境界 [1,8,9,8] * W[70,8,3,3] padding=1",
+    op: "conv2d",
+    inputs: [fill([1, 8, 9, 8], SIGNED), fill([70, 8, 3, 3], POSITIVE), fill([70], NONZERO)],
+    outShape: [1, 70, 9, 8],
+    attrs: { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 1 },
+  },
+  {
+    // **v4 判定の取り違えの検出器**（ADR 0024 の MUST ②）: Hout = Wout = 2 で N = 4 なので
+    // `N % 4` で判定すると v4 が選ばれるが、列 quad が出力行をまたぐため誤値になる。
+    // kFlat = 4·1·5 = 20 と stride_w = 1 は v4 の他条件を満たすので、`Wout % 4` だけが
+    // 分かれ目になる。実測形（Wout は全て 4 の倍数）では絶対に露見しない。
+    name: "conv2d igemm Hout=Wout=2（N%4==0 だが Wout%4≠0）[1,4,2,6] * W[3,4,1,5]",
+    op: "conv2d",
+    inputs: [fill([1, 4, 2, 6], SIGNED), fill([3, 4, 1, 5], POSITIVE), fill([3], NONZERO)],
+    outShape: [1, 3, 2, 2],
+    attrs: { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 1 },
+  },
+  {
+    // padding がカーネル張りを超える形（両端が padding 域だけを見る出力を持つ）
+    name: "conv2d [1,1,2,3] * W[2,1,3,1] padding=[2,0]",
+    op: "conv2d",
+    inputs: [fill([1, 1, 2, 3], SIGNED), fill([2, 1, 3, 1], POSITIVE), fill([2], NONZERO)],
+    outShape: [1, 2, 4, 3],
+    attrs: { stride: [1, 1], padding: [2, 0], dilation: [1, 1], groups: 1 },
+  },
+  {
+    // dec の ups 末尾 2 本（up 2 / k 2 / pad 0）。非対称チャネルで重みの転置を固定する
+    name: "conv_transpose1d [1,5,7] * W[5,3,2] stride=2 padding=0",
+    op: "conv_transpose1d",
+    inputs: [fill([1, 5, 7], SIGNED), fill([5, 3, 2], POSITIVE), fill([3], NONZERO)],
+    outShape: [1, 3, 14],
+    attrs: { stride: 2, padding: 0 },
+  },
+  {
+    // dec の ups 先頭（up 8 / k 16 / pad 4）の縮小形 — 1 出力に複数の k が寄与する形
+    name: "conv_transpose1d [1,3,5] * W[3,2,16] stride=8 padding=4",
+    op: "conv_transpose1d",
+    inputs: [fill([1, 3, 5], SIGNED), fill([3, 2, 16], NONZERO), fill([2], SIGNED)],
+    outShape: [1, 2, 40],
+    attrs: { stride: 8, padding: 4 },
+  },
+  {
+    // k = stride（pad 0）— 寄与する k がちょうど 1 本になる境界形
+    name: "conv_transpose1d [1,2,6] * W[2,4,4] stride=4 padding=0",
+    op: "conv_transpose1d",
+    inputs: [fill([1, 2, 6], SIGNED), fill([2, 4, 4], POSITIVE), fill([4], NONZERO)],
+    outShape: [1, 4, 24],
+    attrs: { stride: 4, padding: 0 },
+  },
+];
+
+// 境界ケース。MUST: 「大きめの入力」は grid-stride の**縮退**を踏まない — 要素数から
+// 必要な workgroup 数がそのまま割り当たるためで、`stride` を定数にする誤りはここでは緑のまま
+// 通る。縮退そのものは tests/gpu_gridstride_test.ts が dispatch 数を絞って直接検証する。
+// ここが受け持つのは「1 workgroup を超える大きさで添字計算が破綻しないこと」。
+const BOUNDARY_CASES: readonly OpCase[] = [
+  {
+    // 4096 workgroup（dispatch 上限の内側）— 1 スレッド 1 要素で全域が覆われる大きさ
+    name: "relu 大きめ 1 本 [1048576]",
+    op: "relu",
+    inputs: [fill([1 << 20], SIGNED)],
+    outShape: [1 << 20],
+  },
+  {
+    // strided copy も同じ大きさで踏む（出力 1048576 要素 = 4096 workgroup）
+    name: "permute 大きめ [512,2048] dims=[1,0]",
+    op: "permute",
+    inputs: [fill([512, 2048], SIGNED)],
+    outShape: [2048, 512],
+    attrs: { dims: [1, 0] },
+  },
+  {
+    // 行数 > maxComputeWorkgroupsPerDimension（既定 65535）— この 1 本だけは実測形のまま
+    // 縮退を踏む（gridStrideWorkgroups が上限で頭打ちになり、1 workgroup が複数行を回す）
+    name: "sum 行数多め [70000,4]",
+    op: "sum",
+    inputs: [fill([70000, 4], SIGNED)],
+    outShape: [70000],
+    attrs: { dim: 1 },
+  },
+];
+
+Deno.test({
+  name: "unary 9 種が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(UNARY_CASES),
+});
+
+Deno.test({
+  name: "binary 4 種が broadcast 込みで CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(BINARY_CASES),
+});
+
+Deno.test({
+  name: "i32 / bool の elementwise（mask 経路）が CPU 参照と厳密一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(DTYPE_CASES),
+});
+
+Deno.test({
+  name:
+    "波3 の数理 op（where / 比較 / clamp / leaky_relu / log1p / cumsum / bool sum）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(MATH_CASES),
+});
+
+/**
+ * leaky_relu の NaN 伝播（ADR 0015 の裁定を実 GPU で固定する）。
+ *
+ * torch は `leaky_relu(NaN) = NaN` だが、WGSL の `max` は NaN 伝播を保証しない実装が
+ * ありうる（relu / clamp が既に同じ乖離を抱えていることは limitations.md が既知化済み）。
+ * MUST: allclose は NaN をどちらの側でも不合格にするので、この検査は checkAll に載せられない
+ * — 生の値を見る専用テストとして持つ。
+ */
+Deno.test({
+  name: "leaky_relu は NaN を伝播する（select 形の裁定 — 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      const actual = await runCase(gpu, {
+        name: "leaky_relu NaN",
+        op: "leaky_relu",
+        inputs: [fill([4], (i) => [Number.NaN, -2, 0, 3][i])],
+        outShape: [4],
+        attrs: { negative_slope: 0.1 },
+      });
+      const values = [...actual.data];
+      assertEquals(values.map((v) => Number.isNaN(v)), [true, false, false, false]);
+      // NaN 以外は通常経路（負側は slope 倍・正側は素通し）
+      assertEquals(values[1], Math.fround(-0.2));
+      assertEquals(values[2], 0);
+      assertEquals(values[3], 3);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/** NaN の位置（先頭 / 中間 / 末尾）。elementwise の入力長 4 に対する添字。 */
+const NAN_POSITIONS = [0, 2, 3] as const;
+/** NaN を差し込む前の素の列。clamp（min=-1 / max=1）の下限側・上限側・素通しを跨ぐ。 */
+const NAN_BASE = [-3, -0.5, 0.5, 3] as const;
+
+/** 同じ op について「NaN の位置を変えた 3 本 + NaN 無しの対照 1 本」を組む。 */
+const nanUnaryCases = (op: string, attrs?: Record<string, unknown>): readonly OpCase[] => [
+  ...NAN_POSITIONS.map((position) => ({
+    name: `${op} NaN@${position}`,
+    op,
+    inputs: [fill([4], (i) => (i === position ? Number.NaN : NAN_BASE[i]))],
+    outShape: [4],
+    attrs,
+  })),
+  {
+    name: `${op} NaN 無し（対照）`,
+    op,
+    inputs: [fill([4], (i) => NAN_BASE[i])],
+    outShape: [4],
+    attrs,
+  },
+];
+
+/** 行ごとの NaN 位置（-1 = NaN 無しの対照行）。縮約は「行内のどこにあっても」伝播する。 */
+const NAN_REDUCE_AT = [0, 2, 3, -1] as const;
+const NAN_REDUCE_ROWS = (index: number): number => {
+  const row = Math.floor(index / 4);
+  const col = index % 4;
+  return col === NAN_REDUCE_AT[row] ? Number.NaN : (col - 1.5) * (row + 1);
+};
+
+const NAN_CASES: readonly OpCase[] = [
+  ...nanUnaryCases("clamp", { min: -1, max: 1 }),
+  ...nanUnaryCases("clamp_min", { min: 0 }),
+  ...nanUnaryCases("relu"),
+  ...(["amax", "amin"] as const).flatMap((op): readonly OpCase[] => [
+    {
+      name: `${op} 行内の位置を変えた NaN [4,4]`,
+      op,
+      inputs: [fill([4, 4], NAN_REDUCE_ROWS)],
+      outShape: [4],
+      attrs: { dim: 1 },
+    },
+    {
+      // 行長 300 > workgroup サイズ 256 → 添字 299 は 1 スレッドの走査ループの **2 周目**で
+      // 読まれる（[4,4] は 1 周目しか回らないので、この経路はここでしか踏まない）。
+      // 行 1 は NaN 無しの対照。
+      name: `${op} 走査ループ 2 周目の NaN [2,300]`,
+      op,
+      inputs: [fill([2, 300], (i) => (i === 299 ? Number.NaN : SIGNED(i)))],
+      outShape: [2],
+      attrs: { dim: 1 },
+    },
+  ]),
+];
+
+/**
+ * clamp / clamp_min / relu / amax / amin の NaN 伝播（ビット列判定の裁定を実 GPU で固定）。
+ *
+ * torch は 5 op とも「入力（縮約なら縮約対象の語群）に NaN があれば結果は NaN」。ドライバの
+ * `max` / `min` は NaN を飲むので、伝播を担うのは生成 WGSL のビット列判定だけ
+ * （機序は src/codegen/elementwise.ts の IS_NAN_FN）。
+ * MUST: allclose は NaN をどちらの側でも不合格にするので checkAll には載せられない —
+ * **CPU 参照との isNaN パターン一致**で突合する（NaN のビットパターン一致までは求めない）。
+ */
+Deno.test({
+  name: "clamp / clamp_min / relu / amax / amin が NaN を伝播する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const testCase of NAN_CASES) {
+        const actual = await runCase(gpu, testCase);
+        const expected = applyReferenceOp(
+          testCase.op,
+          testCase.inputs,
+          testCase.attrs ?? {},
+          testCase.outShape,
+        );
+        const actualValues = [...actual.data];
+        const expectedValues = [...expected.data];
+        const actualNan = actualValues.map((value) => Number.isNaN(value));
+        const expectedNan = expectedValues.map((value) => Number.isNaN(value));
+        assertEquals(actualNan, expectedNan, `${testCase.name}: NaN の位置`);
+        // MUST: 対照要素を持つこと。「常に NaN を返す」実装は位置の一致だけでは落ちない。
+        assertEquals(expectedNan.includes(false), true, `${testCase.name}: 対照要素が無い`);
+        // 非 NaN 側は丸め差の入らない値なので生で厳密一致（NaN 同士は比較が成立しないので
+        // 該当要素だけ 0 に潰してから見る）
+        const finiteOnly = (values: readonly number[], isNan: readonly boolean[]): number[] =>
+          values.map((value, index) => (isNan[index] ? 0 : value));
+        assertEquals(
+          finiteOnly(actualValues, actualNan),
+          finiteOnly(expectedValues, expectedNan),
+          `${testCase.name}: 非 NaN の値`,
+        );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * log1p の精度（実装方針の実測根拠 — src/codegen/elementwise.ts の LOG1P_FN）。
+ *
+ * 素朴な `log(1 + x)` は |x| ≪ 1 で `1 + x` の丸めが有効桁を食う。ここは f32 で
+ * 「1 + x が 1 に丸まる領域」を含む x を与え、CPU 参照（`Math.log1p`）との**相対誤差**が
+ * f32 の数 ulp に収まることを実測する。素朴形なら x = 1e-8 で出力 0（相対誤差 1）になり、
+ * この閾値では通らない。
+ */
+Deno.test({
+  name: "log1p は 1+x が丸まる領域でも相対誤差 f32 数 ulp に収まる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const smalls = [1e-8, -1e-8, 1e-7, 5e-7, -3e-6, 1e-4, -1e-3, 0.5, 2, 100];
+    const gpu = await acquireGpu();
+    let worst = 0;
+    try {
+      const actual = await runCase(gpu, {
+        name: "log1p small",
+        op: "log1p",
+        inputs: [fill([smalls.length], (i) => smalls[i])],
+        outShape: [smalls.length],
+      });
+      smalls.forEach((x, index) => {
+        const expected = Math.log1p(Math.fround(x));
+        const relative = Math.abs((actual.data[index] - expected) / expected);
+        worst = Math.max(worst, relative);
+      });
+    } finally {
+      gpu.destroy();
+    }
+    // f32 の eps は 1.19e-7。log / 除算・乗算の合成で数 ulp を見込んで 8 倍を上限にする
+    // （素朴形の誤差は x = 1e-8 で 1.0 = この閾値の 7 桁上）。
+    assertEquals(worst < 1e-6, true, `log1p の最悪相対誤差 ${worst}`);
+  },
+});
+
+Deno.test({
+  name: "matmul がタイル端数込みで CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(MATMUL_CASES),
+});
+
+Deno.test({
+  name: "bmm が非対称形・タイル端数込みで CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(BMM_CASES),
+});
+
+Deno.test({
+  name: "融合 attention が CPU 参照と一致する（軸全異・端数・D≠128 込み / 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(ATTENTION_CASES),
+});
+
+Deno.test({
+  name: "gather（最終次元固定）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(GATHER_CASES),
+});
+
+/**
+ * 範囲外添字の裁定（src/kernels/gather.ts）を実 GPU で固定する。
+ *
+ * GPU は例外を投げられないので、範囲外の要素**だけ**を NaN で汚染する（別の要素を静かに
+ * 返さない）。オラクル側の CPU 参照は同じ入力で必ず throw する — 両者が一致してしまうと
+ * 「契約違反のグラフが突合を通る」ことになるので、ここは意図的に非対称であることを固定する。
+ */
+Deno.test({
+  name: "gather の範囲外添字は GPU で NaN 汚染・CPU 参照で throw（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const src = fill([2, 4], POSITIVE);
+    // 添字 4（上限超え）と -1（負）をそれぞれ 1 本ずつ混ぜ、残りは正しい列を引く
+    const index = fill([2, 3], (i) => [1, 4, 0, 2, -1, 3][i], "i32");
+    const gpu = await acquireGpu();
+    try {
+      const actual = await runCase(gpu, {
+        name: "gather oob",
+        op: "gather",
+        inputs: [src, index],
+        outShape: [2, 3],
+      });
+      const values = [...actual.data];
+      assertEquals(values.map((v) => Number.isNaN(v)), [false, true, false, false, true, false]);
+      // 契約内の添字は通常どおり自分の行から引く（汚染は範囲外の要素だけ）
+      assertEquals(values[0], src.data[1]);
+      assertEquals(values[3], src.data[4 + 2]);
+    } finally {
+      gpu.destroy();
+    }
+    assertThrows(() => applyReferenceOp("gather", [src, index], {}, [2, 3]));
+  },
+});
+
+Deno.test({
+  name: "行 reduce 3 種が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(REDUCE_CASES),
+});
+
+Deno.test({
+  name: "レイアウト 3 種（別名 reshape / strided permute・expand）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(LAYOUT_CASES),
+});
+
+Deno.test({
+  name: "レイアウト第 2 群（slice / cat / pad / flip）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(LAYOUT2_CASES),
+});
+
+Deno.test({
+  name:
+    "融合 op 9 種（linear / layer_norm / rms_norm / softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(FUSED_CASES),
+});
+
+/**
+ * embedding の範囲外添字の裁定（src/kernels/embedding.ts）を実 GPU で固定する。gather と
+ * 同じ非対称性 — GPU は範囲外の**行だけ**を NaN で汚染し、オラクルの CPU 参照は throw する。
+ */
+Deno.test({
+  name: "embedding の範囲外添字は GPU で NaN 汚染・CPU 参照で throw（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const weight = fill([3, 2], POSITIVE);
+    // 添字 3（語彙数超え）と -1（負）をそれぞれ 1 本ずつ混ぜ、残りは正しい行を引く
+    const index = fill([4], (i) => [1, 3, -1, 0][i], "i32");
+    const gpu = await acquireGpu();
+    try {
+      const actual = await runCase(gpu, {
+        name: "embedding oob",
+        op: "embedding",
+        inputs: [weight, index],
+        outShape: [4, 2],
+        attrs: { padding_idx: -1 },
+      });
+      const values = [...actual.data];
+      assertEquals(
+        values.map((v) => Number.isNaN(v)),
+        [false, false, true, true, true, true, false, false],
+      );
+      // 契約内の添字は通常どおり自分の行を引く（汚染は範囲外の行だけ）
+      assertEquals(values[0], weight.data[2]);
+      assertEquals(values[1], weight.data[3]);
+      assertEquals(values[6], weight.data[0]);
+    } finally {
+      gpu.destroy();
+    }
+    assertThrows(() => applyReferenceOp("embedding", [weight, index], { padding_idx: -1 }, [4, 2]));
+  },
+});
+
+Deno.test({
+  name: "境界（大きめ 1 本 / 行数が workgroup 上限超え）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(BOUNDARY_CASES),
+});
+
+/**
+ * sym_prefix_slice（ADR 0010）— Tmax で焼いた定数の**先頭**を実行時の長さで切り出す。
+ * 実行は strided 実体化コピーの流用（新カーネル無し）で、読み出し stride は入力（Tmax 形）
+ * の連続 stride。
+ *
+ * MUST: **T < Tmax のケースだけを置く**。T = Tmax では「stride を束縛後の出力 shape から
+ * 組む」誤りと正しい実装が同じ答えを出すため、その形は検出器にならない（波 2 の permute で
+ * 対合の並べ替えが空振りしたのと同型の罠）。
+ * MUST: 縮める軸は最終次元だけでなく**先行次元**も踏む。最終次元だけを縮める形は行の
+ * 送り幅が変わらない特殊ケースで、stride の取り違えが値に出ない。
+ */
+const prefixSliceGraph = (
+  constShape: readonly number[],
+  outShape: readonly (number | string)[],
+  slices: readonly { dim: number; coeff: number; offset: number }[],
+  dtype: "f32" | "i32",
+): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["sym_prefix_slice"] },
+  symbols: ["T"],
+  // 束縛は入力 shape の次元位置からしか取れない（docs/ir-v1.md）ので、T を素の形で運ぶ
+  // ダミー入力を 1 本置く。
+  inputs: [{ name: "bind", dtype: "f32", shape: ["T"] }],
+  outputs: ["y"],
+  initializers: { table: { tensor: "table", storage: { dtype } } },
+  values: {
+    table: { dtype, shape: [...constShape] },
+    y: { dtype, shape: [...outShape] },
+  },
+  nodes: [{
+    op: "sym_prefix_slice",
+    ins: ["table"],
+    outs: ["y"],
+    attrs: { sym: "T", slices: slices.map((slice) => ({ ...slice })) },
+  }],
+});
+
+Deno.test({
+  name: "sym_prefix_slice が Tmax 定数の先頭を切り出す（実 GPU / T < Tmax）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const bound = 3;
+    const cases = [
+      {
+        name: "2 軸とも縮める（相対位置バケット表 i32 [6,5] → [3,3]）",
+        constShape: [6, 5],
+        outShape: ["T", "T"],
+        resolved: [3, 3],
+        slices: [{ dim: 0, coeff: 1, offset: 0 }, { dim: 1, coeff: 1, offset: 0 }],
+        dtype: "i32" as const,
+        generator: INTEGERS,
+      },
+      {
+        name: "先行次元だけ縮める（位置テーブル f32 [7,4] → [3,4]）",
+        constShape: [7, 4],
+        outShape: ["T", 4],
+        resolved: [3, 4],
+        slices: [{ dim: 0, coeff: 1, offset: 0 }],
+        dtype: "f32" as const,
+        generator: SIGNED,
+      },
+      {
+        name: "係数付き（f32 [16] → [2T+1] = [7]）",
+        constShape: [16],
+        outShape: ["2T+1"],
+        resolved: [7],
+        slices: [{ dim: 0, coeff: 2, offset: 1 }],
+        dtype: "f32" as const,
+        generator: POSITIVE,
+      },
+      {
+        name: "rank4 の中間軸を縮める（i32 [2,6,3,4] → [2,3,3,4]）",
+        constShape: [2, 6, 3, 4],
+        outShape: [2, "T", 3, 4],
+        resolved: [2, 3, 3, 4],
+        slices: [{ dim: 1, coeff: 1, offset: 0 }],
+        dtype: "i32" as const,
+        generator: INTEGERS,
+      },
+    ];
+    const gpu = await acquireGpu();
+    try {
+      for (const testCase of cases) {
+        const table = fill(testCase.constShape, testCase.generator, testCase.dtype);
+        const graph = prefixSliceGraph(
+          testCase.constShape,
+          testCase.outShape,
+          testCase.slices,
+          testCase.dtype,
+        );
+        const buffer = graphModelBuffer(graph, [{
+          name: "table",
+          dtype: testCase.dtype === "i32" ? "I32" : "F32",
+          shape: [...testCase.constShape],
+          data: new Uint8Array(table.data.buffer, table.data.byteOffset, table.data.byteLength),
+        }]);
+        const session = await createSession(gpu, openModel(buffer));
+        try {
+          const outputs = await session.run({ bind: fill([bound], SIGNED) });
+          // MUST: 期待 shape は**リテラル**（`resolved`）で持つ。実出力の shape を
+          // applyReferenceOp に渡して同じものと突き合わせると、束縛から prefix 長を導く経路が
+          // 丸ごと壊れていても恒真で通る。
+          assertEquals(outputs["y"].shape, testCase.resolved, `${testCase.name}: 束縛後の shape`);
+          const expected = applyReferenceOp(
+            "sym_prefix_slice",
+            [table],
+            graph.nodes[0].attrs as Record<string, unknown>,
+            testCase.resolved,
+          );
+          const report = compareTensors(outputs["y"], expected);
+          assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
+        } finally {
+          await session.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});

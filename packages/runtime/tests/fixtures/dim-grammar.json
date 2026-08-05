@@ -1,0 +1,114 @@
+{
+  "_doc": [
+    "次元言語 `coeff·sym+offset` の適合ケース表（docs/ir-v1.md『shape と次元言語』の正本）。",
+    "valid: 正準表記 → 分解結果。parse と format の往復が文字列同一であることも含む。",
+    "invalid: 受理してはならない文字列（非正準表記・複数シンボル・負値・空白など）。",
+    "eval: 束縛表 + 式 → 値。throws=true は評価が失敗しなければならないケース。",
+    "TS 実装と将来の Python 実装はこの表で検証する（実装側に文法の正本を置かない）。"
+  ],
+  "valid": [
+    { "text": "T", "coeff": 1, "sym": "T", "offset": 0 },
+    { "text": "2T", "coeff": 2, "sym": "T", "offset": 0 },
+    { "text": "8T", "coeff": 8, "sym": "T", "offset": 0 },
+    { "text": "1024T", "coeff": 1024, "sym": "T", "offset": 0 },
+    { "text": "T+1", "coeff": 1, "sym": "T", "offset": 1 },
+    { "text": "T+8", "coeff": 1, "sym": "T", "offset": 8 },
+    { "text": "8T+2", "coeff": 8, "sym": "T", "offset": 2 },
+    { "text": "16H+15", "coeff": 16, "sym": "H", "offset": 15 },
+    { "text": "batch", "coeff": 1, "sym": "batch", "offset": 0 },
+    { "text": "_s", "coeff": 1, "sym": "_s", "offset": 0 },
+    { "text": "s0", "coeff": 1, "sym": "s0", "offset": 0 },
+    { "text": "T2", "coeff": 1, "sym": "T2", "offset": 0 },
+    { "text": "2T2+2", "coeff": 2, "sym": "T2", "offset": 2 },
+    { "text": "seq_len", "coeff": 1, "sym": "seq_len", "offset": 0 }
+  ],
+  "invalid": [
+    "1T",
+    "T+0",
+    "0T",
+    "08T",
+    "T+08",
+    "+0",
+    "+T",
+    "T+",
+    "8",
+    "",
+    " ",
+    " T",
+    "T ",
+    "2 T",
+    "-T",
+    "-1T",
+    "T-1",
+    "T+-1",
+    "T+U",
+    "2T+3U",
+    "TU2+T",
+    "T*2",
+    "2*T",
+    "8+T",
+    "T++1",
+    "T+1+2",
+    "T.1",
+    "T+1.5",
+    "1.5T",
+    "99999999999999999999T",
+    "T+99999999999999999999"
+  ],
+  "eval": [
+    { "expr": "T", "bindings": { "T": 5 }, "value": 5 },
+    { "expr": "T", "bindings": { "T": 0 }, "value": 0 },
+    { "expr": "8T", "bindings": { "T": 5 }, "value": 40 },
+    { "expr": "T+8", "bindings": { "T": 5 }, "value": 13 },
+    { "expr": "8T+2", "bindings": { "T": 3 }, "value": 26 },
+    { "expr": "16H+15", "bindings": { "H": 0, "T": 7 }, "value": 15 },
+    {
+      "expr": "T",
+      "bindings": { "S": 5 },
+      "throws": true,
+      "why": "未束縛のシンボルは黙って通さない"
+    },
+    {
+      "expr": "toString",
+      "bindings": {},
+      "throws": true,
+      "why": "Object.prototype 由来のキーは束縛ではない（存在判定は hasOwn 相当のみ）"
+    },
+    {
+      "expr": "constructor",
+      "bindings": {},
+      "throws": true,
+      "why": "同上（prototype 汚染で算術が黙って NaN 化する経路を塞ぐ）"
+    },
+    {
+      "expr": "valueOf",
+      "bindings": {},
+      "throws": true,
+      "why": "同上"
+    },
+    {
+      "expr": "hasOwnProperty",
+      "bindings": {},
+      "throws": true,
+      "why": "同上"
+    },
+    {
+      "expr": "toString",
+      "bindings": { "toString": 4 },
+      "value": 4,
+      "why": "自前の束縛として存在するなら通る（名前そのものは禁止語ではない）"
+    },
+    {
+      "expr": "T",
+      "bindings": { "T": -1 },
+      "throws": true,
+      "why": "次元は非負"
+    },
+    {
+      "expr": "T",
+      "bindings": { "T": 1.5 },
+      "throws": true,
+      "why": "次元は整数"
+    }
+  ]
+}
