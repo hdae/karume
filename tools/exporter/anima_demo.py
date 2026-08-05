@@ -8,7 +8,7 @@ r"""examples/anima デモのプロンプト層（トークナイザ）の資産 
 出力は 2 系統（**1 回の実行で必ず両方**出す — 同じ表から作らないと、実行時資産と
 フィクスチャが別々に古びて「テストは緑だがデモだけ別の id 列」になる）:
 
-  ① 実行時資産 `models/anima-demo/text/`（`.gitignore` 配下・計 4.6MB 級）
+  ① 実行時資産 `outputs/series/anima-demo/text/`（`.gitignore` 配下・計 4.6MB 級）
        qwen2-tokenizer.json   語彙 / merges / 文字クラス表 / NFC 分節表 / 追加語彙
        t5-tokenizer.json      語彙 / スコア / 正規化表（Precompiled の畳み込み）/ 追加語彙
   ② パリティ用フィクスチャ `packages/runtime/tests/fixtures/anima-text/parity.json`
@@ -18,7 +18,7 @@ r"""examples/anima デモのプロンプト層（トークナイザ）の資産 
 
 MUST: 資産を `models/anima-turbo/`（配布形）直下に置かない。あちらは manifest が宣言した
 ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
-止まる（`models/sbv2-demo/` / `models/anima-pipeline/` を分けたのと同じ理由）。
+止まる（`models/sbv2-demo/` / 系列 `anima-pipeline/` を分けたのと同じ理由）。
 
 畳み方の根拠と検証は `karume/anima_text.py` の docstring が正本。要点だけ:
 **Unicode 判定は TS で再実装しないし標準 API にも委ねない** — 正本（Rust の `tokenizers` /
@@ -39,13 +39,14 @@ from pathlib import Path
 from typing import Any
 
 from karume import anima_text as at
+from karume.paths import SERIES_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 
 #: 実行時資産の置き場（`models/` は `.gitignore` 済み）。Deno 側 `examples/anima/text/tokenizer.ts`
 #: が同じ名前を読む。
-DEFAULT_ASSETS_DIR = REPO_ROOT / "models" / "anima-demo" / "text"
+DEFAULT_ASSETS_DIR = SERIES_ROOT / "anima-demo" / "text"
 QWEN_ASSET_FILE = "qwen2-tokenizer.json"
 T5_ASSET_FILE = "t5-tokenizer.json"
 

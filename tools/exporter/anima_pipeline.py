@@ -12,7 +12,7 @@ denoise.py / decoders.py）。この台本はその 4 ブロックの逐語的�
 `export_anima.py --verify` が別に測る — 検証網を独立に保つ。パッチ層をここでも通すと、
 パッチのバグが参照とテスト対象の両方に同じ形で乗り、差 0 のまま素通りする）。
 
-出力（既定 `<repo>/models/anima-pipeline/`、`--dtype f16` なら `models/anima-pipeline-f16/`）:
+出力（既定 `<repo>/outputs/series/anima-pipeline/`、`--dtype f16` ならその `-f16` 版）:
 
     pipeline.safetensors   各段のテンソル（下の `_TENSOR_ROLES` が用途の索引）
     pipeline.json          プロンプト・step 数・shift・CFG 係数・LoRA（`lora` / `lora_scale`）
@@ -27,7 +27,7 @@ MUST: 圧縮系列のフィクスチャは **4 コンポーネントとも** fak
 「量子化誤差 + 実装誤差」の合成になる。丸めは各モデルのロード直後に掛ける。
 
 MUST: `--dtype i8` は **DiT だけ i8・他 3 つは f16**（`COMPONENT_DTYPES`）。資産系列が
-`models/anima-i8/transformer` + `models/anima-f16/{text_encoder,text_conditioner,vae_decoder}`
+`anima-i8/transformer` + `anima-f16/{text_encoder,text_conditioner,vae_decoder}`
 という構成（ADR 0019）なので、フィクスチャの丸めもその構成と 1 対 1 に対応させる。全部を
 i8 にすると text 経路の参照だけが実行される資産と別のモデルの数になる。
 
@@ -37,7 +37,7 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
     uv run --group anima python anima_pipeline.py --dtype i8
     uv run --group anima python anima_pipeline.py --dtype f16 --steps 10 --ref-steps 10 \
         --guidance-scale 1.0 --lora ../../models/anima-turbo-lora-v0.2.safetensors \
-        --out ../../models/anima-pipeline-turbo-f16
+        --out ../../outputs/series/anima-pipeline-turbo-f16
 
 `--act-quant` は **w8a8**（`SessionOptions.linearCompute: "i8a8"`）の鏡像で、DiT の適格
 `nn.Linear` の入力を per-token i8 へ fake-quant してから参照を採る（数値仕様の正本は
@@ -46,7 +46,7 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
     uv run --group anima python anima_pipeline.py --dtype i8 --act-quant --steps 10 \
         --ref-steps 10 --guidance-scale 1.0 \
         --lora ../../models/anima-turbo-lora-v0.2.safetensors \
-        --out ../../models/anima-pipeline-turbo-i8a8
+        --out ../../outputs/series/anima-pipeline-turbo-i8a8
 
 `--resolution` は **WxH**（正方は略記できる）。非正方の参照は `--dit-graph dyn` の DiT と
 `--vae-tiling` の VAE を突き合わせる先で（#23）、綴りはデモの `--resolution` と同じ:
@@ -54,7 +54,7 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
     uv run --group anima python anima_pipeline.py --dtype f16 --steps 10 --ref-steps 2 \
         --guidance-scale 1.0 --resolution 1344x768 \
         --lora ../../models/anima-turbo-lora-v0.2.safetensors \
-        --out ../../models/anima-pipeline-turbo-f16-1344x768
+        --out ../../outputs/series/anima-pipeline-turbo-f16-1344x768
 
 DiT の forward は既定で 4 回（2 step × cond/uncond）、CFG=1 の turbo 系列では uncond を
 畳むので `--ref-steps` と同数（上の例なら 10 回）。CPU f32 なので数分かかる。ピーク RAM は
@@ -75,16 +75,17 @@ import torch
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
 from karume.emit import WEIGHT_DTYPES
+from karume.paths import SERIES_ROOT
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 from karume.resolution import parse_resolution, resolution_meta
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-#: 生成物の既定の置き場（格納 dtype 別）。**配布形 `models/anima-turbo/` とは別**（上の MUST）。
+#: 生成物の既定の置き場（格納 dtype 別）。**配布形 `models/` とは別の系列側**（上の MUST）。
 DEFAULT_OUTS = {
-    "f32": REPO_ROOT / "models" / "anima-pipeline",
-    "f16": REPO_ROOT / "models" / "anima-pipeline-f16",
-    "i8": REPO_ROOT / "models" / "anima-pipeline-i8",
+    "f32": SERIES_ROOT / "anima-pipeline",
+    "f16": SERIES_ROOT / "anima-pipeline-f16",
+    "i8": SERIES_ROOT / "anima-pipeline-i8",
 }
 
 #: 系列 → コンポーネントごとの実効格納 dtype（資産系列との 1 対 1 対応 — 上の MUST）。
@@ -384,7 +385,7 @@ def main() -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとに models/anima-pipeline{,-f16,-i8}/）",
+        help="出力先（既定は --dtype ごとに outputs/series/anima-pipeline{,-f16,-i8}/）",
     )
     parser.add_argument(
         "--dtype",

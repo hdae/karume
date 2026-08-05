@@ -35,10 +35,11 @@ from pathlib import Path
 from typing import Any
 
 from karume.modelcard import render_model_card
+from karume.paths import DIST_ROOT, SERIES_ROOT
 
-#: リポジトリの `models/`（karume/dist.py → karume → tools/exporter → tools → repo）。
-#: P4 の CLI 化ではパスを明示で受け取るため、この既定はリポ内実行の利便のためだけにある。
-_REPO_MODELS = Path(__file__).resolve().parents[3] / "models"
+#: 既定の配布名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。turbo LoRA を
+#: 焼き込んだ配布物であることを名前に出す。
+ANIMA_DIST_NAME = "anima-turbo"
 
 #: manifest のファイル名（ADR 0038 §1 — リポジトリ直下の固定名）。
 MANIFEST_FILENAME = "karume.json"
@@ -178,13 +179,13 @@ class AnimaSources:
     tokenizers: Path
 
 
-def anima_sources(models_dir: Path) -> AnimaSources:
-    """リポ内の既定配置（`models/` 直下の系列名）。"""
+def anima_sources(series_dir: Path) -> AnimaSources:
+    """系列の親ディレクトリ（`outputs/series/`）から Anima の 4 系列を引く。"""
     return AnimaSources(
-        transformer_f16=models_dir / "anima-turbo-f16-dyn",
-        transformer_i8=models_dir / "anima-turbo-i8-dyn",
-        base=models_dir / "anima-f16",
-        tokenizers=models_dir / "anima-demo" / "text",
+        transformer_f16=series_dir / "anima-turbo-f16-dyn",
+        transformer_i8=series_dir / "anima-turbo-i8-dyn",
+        base=series_dir / "anima-f16",
+        tokenizers=series_dir / "anima-demo" / "text",
     )
 
 
@@ -355,21 +356,24 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="配布ディレクトリ（HF アップ可能形）の組み立て")
     parser.add_argument(
-        "--models",
+        "--series",
         type=Path,
-        default=_REPO_MODELS,
-        help="系列ディレクトリ群の親（既定: リポの models/）",
+        default=SERIES_ROOT,
+        help="系列ディレクトリ群の親（既定: リポの outputs/series/）",
     )
     parser.add_argument(
-        "--out", type=Path, default=None, help="出力先（既定: <--models>/anima-turbo）"
+        "--out",
+        type=Path,
+        default=None,
+        help=f"出力先（既定: リポの models/{ANIMA_DIST_NAME}/ — 1 ディレクトリ = 1 HF リポ）",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    out_dir = args.out if args.out is not None else args.models / "anima-turbo"
-    manifest = assemble_anima(anima_sources(args.models), out_dir)
+    out_dir = args.out if args.out is not None else DIST_ROOT / ANIMA_DIST_NAME
+    manifest = assemble_anima(anima_sources(args.series), out_dir)
     verified = verify_dist(out_dir)
     # モデルカードは**検証を通った manifest** から描く（表と現物が食い違ったまま説明だけ
     # 生えることがない順序）。

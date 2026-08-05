@@ -19,8 +19,8 @@ docs/research/2026-08-02-anima-recon.md）。素の diffusers モジュールは
     uv run --group anima python export_anima.py --out /path/to/out
     uv run --group anima python export_anima.py --target vae_decoder --out /path/to/out
     uv run --group anima python export_anima.py --verify vae_decoder
-    uv run --group anima python export_anima.py --dtype f16      # → models/anima-f16/
-    uv run --group anima python export_anima.py --dtype i8       # → models/anima-i8/（DiT のみ）
+    uv run --group anima python export_anima.py --dtype f16   # → outputs/series/anima-f16/
+    uv run --group anima python export_anima.py --dtype i8    # → …/anima-i8/（DiT のみ）
     uv run --group anima python export_anima.py --dtype f16 --dit-graph dyn  # → …-f16-dyn/
     uv run --group anima karume export --dtype f16 --dit-graph dyn           # CLI 経由（同じ）
 
@@ -30,7 +30,7 @@ unpatchify / rope 表の構築はホストへ出るので、系列ディレク�
 golden io に加えて **`rope_base.safetensors`**（ホストが rope 表を組むための軸別素表）が並ぶ。
 
 MUST: `--dtype i8` は **transformer 専用**（ADR 0019 の系列設計）。DiT の −1.87GiB が支配項で、
-text / cond / VAE は `models/anima-f16/` を共有する。加えて VAE は「CausalConv3d の時間方向
+text / cond / VAE は `outputs/series/anima-f16/` を共有する。加えて VAE は「CausalConv3d の時間方向
 スライス」をパッチ適用時に行うため、丸めを先に当てると per-channel scale が**捨てられる要素の
 amax**まで数えた値になる（f16 の要素ごとの丸めと違い、scale は全要素の値を動かす）。他ターゲット
 への `--dtype i8` は CLI が機械的に拒否する。
@@ -39,7 +39,7 @@ MUST: `--dtype f16` は**重みを f16 表現可能値へ丸めてから**（fak
 golden を採り、適格な重みスロットだけを f16 で格納する（ADR 0018）。丸めは各 builder が
 モデルを組んだ直後に掛かる — 参照より後ろへ動かすと「参照だけ元の重み」になり、E2E の差が
 量子化誤差と実装誤差の合成になって tolerance の意味が消える。出力先は f32 系列と**別**
-（既定 `models/anima-f16/`）。
+（既定 `outputs/series/anima-f16/`）。
 
 MUST: `--verify` と emit は**同一プロセスで併用できない**（CLI が機械的に拒否する）。VAE の
 パッチはクラス属性のプロセス全域差し替えなので、emit 側が先にパッチを当てると「パッチ前の
@@ -81,21 +81,23 @@ from karume.convert import (
 )
 from karume.emit import WEIGHT_DTYPES, storage_breakdown
 from karume.ir import IrGraph
+from karume.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: 実重みの取得元（HF Hub。ローカルキャッシュ済み — recon §7）。
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-#: 生成物の既定の置き場（格納 dtype 別）。ターゲット名のサブディレクトリを 1 段掘る。
+#: 生成物の既定の置き場（格納 dtype 別の**系列**）。ターゲット名のサブディレクトリを 1 段掘る。
+#: 親は `SERIES_ROOT`（= outputs/series/）— models/ は配布形だけの場所（karume.paths）。
 #:
-#: MUST: f16 系列は**別ディレクトリ**（ADR 0018）。f32 系列（models/anima/）は
+#: MUST: f16 系列は**別ディレクトリ**（ADR 0018）。f32 系列（`anima/`）は
 #: 「量子化なしの実装誤差」を測る網として独立に残り、f16 系列がその上へ量子化の実装誤差を
 #: 上乗せで検証する。同じ場所に上書きすると片方の網が消える。
 DEFAULT_OUT_ROOTS = {
-    "f32": REPO_ROOT / "models" / "anima",
-    "f16": REPO_ROOT / "models" / "anima-f16",
-    "i8": REPO_ROOT / "models" / "anima-i8",
+    "f32": SERIES_ROOT / "anima",
+    "f16": SERIES_ROOT / "anima-f16",
+    "i8": SERIES_ROOT / "anima-i8",
 }
 
 TARGET_TEXT_ENCODER = "text_encoder"
@@ -664,7 +666,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとに models/anima{,-f16}/ — ADR 0018 の別系列）",
+        help="出力先（既定は --dtype ごとに outputs/series/anima{,-f16}/ — ADR 0018 の別系列）",
     )
     parser.add_argument(
         "--dtype",

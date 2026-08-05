@@ -57,9 +57,9 @@ def _write(path: Path, payload: bytes) -> None:
     path.write_bytes(payload)
 
 
-def _build_series(models_dir: Path, *, i8_rope: bytes | None = None) -> AnimaSources:
-    """`models/` の系列レイアウトを偽資産で再現する（`io.*` の混入込み）。"""
-    sources = anima_sources(models_dir)
+def _build_series(series_dir: Path, *, i8_rope: bytes | None = None) -> AnimaSources:
+    """系列レイアウト（`outputs/series/` 相当）を偽資産で再現する（`io.*` の混入込み）。"""
+    sources = anima_sources(series_dir)
     _write(sources.base / "text_encoder" / "model.safetensors", _PAYLOADS["text_encoder"])
     _write(sources.base / "text_conditioner" / "model.safetensors", _PAYLOADS["text_conditioner"])
     _write(sources.base / "vae_decoder" / "model.safetensors", _PAYLOADS["vae_decoder"])
@@ -86,7 +86,7 @@ def _build_series(models_dir: Path, *, i8_rope: bytes | None = None) -> AnimaSou
 
 @pytest.fixture
 def assembled(tmp_path: Path) -> tuple[Path, dict]:
-    sources = _build_series(tmp_path / "models")
+    sources = _build_series(tmp_path / "series")
     out_dir = tmp_path / "models" / "anima-turbo"
     manifest = assemble_anima(sources, out_dir)
     return out_dir, manifest
@@ -112,7 +112,7 @@ class TestLayout:
         assert i8.read_bytes() == _PAYLOADS["transformer_i8"]
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "models")
+        sources = _build_series(tmp_path / "series")
         out_dir = tmp_path / "models" / "anima-turbo"
         assemble_anima(sources, out_dir)
         assemble_anima(sources, out_dir)  # 既存リンクがあっても落ちない
@@ -132,7 +132,7 @@ class TestPlacementStrategy:
             raise OSError(f"cross-device link: {source} → {dest}")
 
         monkeypatch.setattr(os, "link", refuse)
-        sources = _build_series(tmp_path / "models")
+        sources = _build_series(tmp_path / "series")
         out_dir = tmp_path / "models" / "anima-turbo"
         assemble_anima(sources, out_dir)
         placed = out_dir / OUTPUT_PATHS["text_encoder"]
@@ -140,7 +140,7 @@ class TestPlacementStrategy:
         assert placed.stat().st_nlink == 1
 
     def test_it_stops_when_an_input_is_missing(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "models")
+        sources = _build_series(tmp_path / "series")
         (sources.base / "vae_decoder" / "model.safetensors").unlink()
         with pytest.raises(DistError, match="組み立ての入力が無い"):
             assemble_anima(sources, tmp_path / "models" / "anima-turbo")
@@ -157,7 +157,7 @@ class TestRopeBase:
         assert (out_dir / OUTPUT_PATHS["rope_base"]).read_bytes() == _PAYLOADS["rope_base"]
 
     def test_it_refuses_to_pick_a_side_when_the_series_disagree(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "models", i8_rope=b"rope-base-table-DIFFERENT")
+        sources = _build_series(tmp_path / "series", i8_rope=b"rope-base-table-DIFFERENT")
         out_dir = tmp_path / "models" / "anima-turbo"
         with pytest.raises(DistError, match="バイト同一でない"):
             assemble_anima(sources, out_dir)
@@ -169,7 +169,7 @@ class TestStorageGate:
     """格納 dtype の門（実測の事故が根拠 — `--dtype` 付け忘れの素 F32 は PNG 門まで沈黙した）。"""
 
     def test_it_stops_when_an_f16_component_is_stored_as_raw_f32(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "models")
+        sources = _build_series(tmp_path / "series")
         (sources.base / "text_encoder" / "model.safetensors").write_bytes(
             _fake_safetensors("F32", b"text-encoder-weights")
         )
@@ -180,7 +180,7 @@ class TestStorageGate:
         assert not out_dir.exists()
 
     def test_it_stops_when_the_i8_transformer_lacks_i8_storage(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "models")
+        sources = _build_series(tmp_path / "series")
         (sources.transformer_i8 / "transformer" / "model.safetensors").write_bytes(
             _fake_safetensors("F16", b"transformer-i8-weights")
         )
@@ -188,7 +188,7 @@ class TestStorageGate:
             assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
     def test_it_stops_when_a_header_is_not_safetensors(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "models")
+        sources = _build_series(tmp_path / "series")
         (sources.base / "vae_decoder" / "model.safetensors").write_bytes(b"not-a-safetensors")
         with pytest.raises(DistError, match="ヘッダが読めない"):
             assemble_anima(sources, tmp_path / "models" / "anima-turbo")
@@ -272,9 +272,9 @@ class TestModelCard:
     """`karume dist` は組み立て + 検証の**後**にモデルカードを書く。"""
 
     def _run(self, tmp_path: Path) -> Path:
-        _build_series(tmp_path / "models")
+        _build_series(tmp_path / "series")
         out_dir = tmp_path / "dist"
-        main(["--models", str(tmp_path / "models"), "--out", str(out_dir)])
+        main(["--series", str(tmp_path / "series"), "--out", str(out_dir)])
         return out_dir
 
     def test_it_writes_a_model_card_next_to_the_manifest(self, tmp_path: Path) -> None:
@@ -297,5 +297,5 @@ class TestModelCard:
     def test_it_reassembles_over_a_previous_card(self, tmp_path: Path) -> None:
         out_dir = self._run(tmp_path)
         first = (out_dir / MODEL_CARD_FILENAME).read_bytes()
-        main(["--models", str(tmp_path / "models"), "--out", str(out_dir)])
+        main(["--series", str(tmp_path / "series"), "--out", str(out_dir)])
         assert (out_dir / MODEL_CARD_FILENAME).read_bytes() == first

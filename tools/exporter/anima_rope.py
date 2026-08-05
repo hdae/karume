@@ -12,7 +12,7 @@ S 形の DiT（`--dit-graph dyn` — ADR 0034）はホストが rope の cos / s
 **Uint32 完全一致**で突き合わせる。焼くのは `patch_anima.dit_rope_tables` の出力そのもの
 （式は写さない — 素表と同じ規律）。
 
-出力（既定 `<repo>/models/anima-rope-nonsquare/`）:
+出力（既定 `<repo>/outputs/series/anima-rope-nonsquare/`）:
 
     rope.safetensors   幾何ごとの `cos_<WxH>` / `sin_<WxH>`（各 `[1,1,S,head_dim]`）
     rope.json          幾何の索引（latent 寸法・トークン格子・S・素表の行数）
@@ -33,11 +33,12 @@ from typing import Any
 import torch
 
 from karume import patch_anima
+from karume.paths import SERIES_ROOT
 from karume.resolution import format_resolution
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-DEFAULT_OUT = REPO_ROOT / "models" / "anima-rope-nonsquare"
+DEFAULT_OUT = SERIES_ROOT / "anima-rope-nonsquare"
 SPATIAL_COMPRESSION = 8
 
 #: 焼く幾何（ピクセル・`(幅, 高さ)`）。**16:9 と 3:4 の縦横 4 パターン**（#23 のユーザー指示）。

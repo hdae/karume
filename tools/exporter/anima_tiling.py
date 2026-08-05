@@ -16,9 +16,9 @@ TS 側と一致しない。**ブレンドの式**は上流の `blend_v` / `blend
 
 MUST: 重みは資産系列と同じ dtype へ fake-quant してから参照を採る（ADR 0006 —
 `anima_pipeline.py` と同じ規律）。`--dtype f16` が既定なのは、TS 側が
-`models/anima-f16/vae_decoder`（= f16 系列）をタイル decoder として開くから。
+`outputs/series/anima-f16/vae_decoder`（= f16 系列）をタイル decoder として開くから。
 
-出力（既定 `<repo>/models/anima-tiling-f16-1024/`）:
+出力（既定 `<repo>/outputs/series/anima-tiling-f16-1024/`）:
 
     tiling.safetensors   latents_denorm（タイル decode の入力）/ image_tiled（出力）
     tiling.json          タイル幾何（開始位置列・stride・ブレンド幅）とメタ
@@ -26,12 +26,12 @@ MUST: 重みは資産系列と同じ dtype へ fake-quant してから参照を�
     uv run --group anima python anima_tiling.py
     uv run --group anima python anima_tiling.py --dtype f16 --resolution 1024
     uv run --group anima python anima_tiling.py --resolution 1344x768 \
-        --latents ../../models/anima-pipeline-turbo-f16-1344x768/pipeline.safetensors
+        --latents ../../outputs/series/anima-pipeline-turbo-f16-1344x768/pipeline.safetensors
 
 `--resolution` は **WxH**（正方は略記できる）。非正方では VAE の静的資産が無いので、
 タイル decode が唯一の経路になる（#23 — デモ側も `--vae-tiling` を要求する）。
 
-入力 latent は既定で `models/anima-pipeline-turbo-f16-1024/pipeline.safetensors` の
+入力 latent は既定で `outputs/series/anima-pipeline-turbo-f16-1024/pipeline.safetensors` の
 `latents_denorm`（逆正規化済み = VAE decoder の入力そのもの）を借りる。randn ではなく実
 パイプラインの latent を使うのは、継ぎ目の出方が値の中身に依るため。同じフィクスチャの
 `image`（**非タイル**の torch decode）があれば、タイル化による差もメタに記録する
@@ -48,13 +48,14 @@ from typing import Any
 
 import torch
 
+from karume.paths import SERIES_ROOT
 from karume.quantize import round_weights_to_f16
 from karume.resolution import format_resolution, parse_resolution, resolution_meta
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 #: 入力 latent を借りる参照フィクスチャ（`anima_pipeline.py --dtype f16 --resolution 1024`）。
-DEFAULT_LATENTS = REPO_ROOT / "models" / "anima-pipeline-turbo-f16-1024" / "pipeline.safetensors"
+DEFAULT_LATENTS = SERIES_ROOT / "anima-pipeline-turbo-f16-1024" / "pipeline.safetensors"
 #: タイル decoder の latent 幅（= 512px 用資産の入力 `[1,16,64,64]`）。
 TILE_LATENT = 64
 #: 隣り合うタイルが latent で重なる最小幅（= sample 64px — TS 側 `MIN_TILE_OVERLAP_LATENT`）。
@@ -237,7 +238,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument(
-        "--out", type=Path, default=None, help="既定 models/anima-tiling-<dtype>-<解像度>/"
+        "--out", type=Path, default=None, help="既定 outputs/series/anima-tiling-<dtype>-<解像度>/"
     )
     parser.add_argument("--dtype", choices=("f32", "f16"), default="f16")
     parser.add_argument(
@@ -331,8 +332,7 @@ def main() -> None:
         print(f"[observe] 非タイル decode との差 max {difference.max():.4e}", flush=True)
 
     args.out = (
-        args.out
-        or REPO_ROOT / "models" / f"anima-tiling-{args.dtype}-{format_resolution(width, height)}"
+        args.out or SERIES_ROOT / f"anima-tiling-{args.dtype}-{format_resolution(width, height)}"
     )
     args.out.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(args.out / "tiling.safetensors"))
