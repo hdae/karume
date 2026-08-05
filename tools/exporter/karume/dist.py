@@ -106,6 +106,53 @@ class DistError(ValueError):
     """組み立ての前提が破れた（資産の欠落・rope 素表の不一致・manifest と現物の食い違い）。"""
 
 
+#: 各役割の safetensors ヘッダに**要求する格納 dtype**（存在検査）。実測の事故が根拠:
+#: f16 系列のつもりで `--dtype` を付け忘れた素の F32 資産は、組み立て・ロード・実行の全てを
+#: 通って**PNG の参照一致まで露見しなかった**。格納形は series ディレクトリ名でなくヘッダが正。
+#: f16 系列は fake-quant 対象だけが F16 になる（norm/bias 等は F32 のまま）ので「F16 を含む」
+#: を要求する。rope_base（F32 のみ）と tokenizer（JSON）はここに載せない。
+STORAGE_REQUIREMENTS: Mapping[str, str] = {
+    "text_encoder": "F16",
+    "text_conditioner": "F16",
+    "transformer_f16": "F16",
+    "transformer_i8": "I8",
+    "vae_decoder": "F16",
+}
+
+
+def storage_dtypes(path: Path) -> set[str]:
+    """safetensors ヘッダのテンソル dtype 集合（ヘッダだけ読む — 数 GB を舐めない）。"""
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        header_len = int.from_bytes(stream.read(8), "little")
+        # 宣言長はファイル実長で拘束する（不正な 8 バイトをそのまま read すると巨大確保になる）。
+        if header_len <= 0 or header_len > size - 8:
+            raise DistError(
+                f"{path}: safetensors ヘッダが読めない（ヘッダ長 {header_len} がファイル長"
+                f" {size} と矛盾）"
+            )
+        try:
+            header = json.loads(stream.read(header_len))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise DistError(f"{path}: safetensors ヘッダが読めない") from error
+    return {spec["dtype"] for name, spec in header.items() if name != "__metadata__"}
+
+
+def assert_storage(role: str, path: Path) -> None:
+    """役割が要求する格納 dtype がヘッダに存在することを検査する（無関係な役割は素通し）。"""
+    required = STORAGE_REQUIREMENTS.get(role)
+    if required is None:
+        return
+    if not path.is_file():
+        raise DistError(f"組み立ての入力が無い: {path}")
+    found = storage_dtypes(path)
+    if required not in found:
+        raise DistError(
+            f"{role}: {path} の格納 dtype に {required} が無い（実際: {sorted(found)}）。"
+            "系列を焼いたときの --dtype を確認する（f16 系列は --dtype f16 の fake-quant が必要）"
+        )
+
+
 @dataclass(frozen=True)
 class AnimaSources:
     """組み立ての入力となる系列ディレクトリ群。
@@ -239,6 +286,10 @@ def anima_manifest(out_dir: Path) -> dict[str, Any]:
 def assemble_anima(sources: AnimaSources, out_dir: Path) -> dict[str, Any]:
     """系列群を配布形へ組み立て、`karume.json` を書いて manifest を返す。"""
     placements = anima_placements(sources)
+    # MUST: 検査は配置の**前**に全役割ぶん済ませる（rope 不一致と同じ規律 — 落ちるなら
+    # 途中の配布形を 1 ファイルも残さない）。
+    for role, source in placements.items():
+        assert_storage(role, source)
     out_dir.mkdir(parents=True, exist_ok=True)
     for role, source in placements.items():
         place_file(source, out_dir / OUTPUT_PATHS[role])

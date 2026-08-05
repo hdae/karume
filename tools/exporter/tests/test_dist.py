@@ -1,7 +1,7 @@
 """配布ディレクトリ組み立て（`karume.dist`）の単体テスト。
 
-実資産は使わない — dist は safetensors の中身を一切解釈しない（並べて数えてハッシュを採る
-だけ）ので、数十バイトの偽資産で層の振る舞いは全て観測できる。
+実資産は使わない — dist が safetensors から読むのは**ヘッダの dtype 集合だけ**（格納形の門）
+なので、数十バイトの正規ヘッダ付き偽資産で層の振る舞いは全て観測できる。
 """
 
 from __future__ import annotations
@@ -26,14 +26,25 @@ from karume.dist import (
     verify_dist,
 )
 
-#: 偽資産の中身（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。
+
+def _fake_safetensors(dtype: str, payload: bytes) -> bytes:
+    """格納 dtype の門を通る最小の safetensors（8 バイト長 + ヘッダ JSON + データ節）。"""
+    header = json.dumps(
+        {"w": {"dtype": dtype, "shape": [len(payload)], "data_offsets": [0, len(payload)]}}
+    ).encode("utf-8")
+    return len(header).to_bytes(8, "little") + header + payload
+
+
+#: 偽資産の中身（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 5 役は
+#: `STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。rope_base はヘッダ検査の対象外
+#: だが、実物同様に正規形にしておく。
 _PAYLOADS = {
-    "text_encoder": b"text-encoder-weights",
-    "text_conditioner": b"text-conditioner-weights",
-    "transformer_f16": b"transformer-f16-weights",
-    "transformer_i8": b"transformer-i8-weights",
-    "rope_base": b"rope-base-table",
-    "vae_decoder": b"vae-decoder-weights",
+    "text_encoder": _fake_safetensors("F16", b"text-encoder-weights"),
+    "text_conditioner": _fake_safetensors("F16", b"text-conditioner-weights"),
+    "transformer_f16": _fake_safetensors("F16", b"transformer-f16-weights"),
+    "transformer_i8": _fake_safetensors("I8", b"transformer-i8-weights"),
+    "rope_base": _fake_safetensors("F32", b"rope-base-table"),
+    "vae_decoder": _fake_safetensors("F16", b"vae-decoder-weights"),
     "tokenizer": b'{"qwen2": true}',
     "tokenizer_2": b'{"t5": true}',
 }
@@ -150,6 +161,35 @@ class TestRopeBase:
             assemble_anima(sources, out_dir)
         # 止めた以上、途中の配布形を残さない（片方だけ入った出力を後段に見せない）。
         assert not (out_dir / MANIFEST_FILENAME).exists()
+
+
+class TestStorageGate:
+    """格納 dtype の門（実測の事故が根拠 — `--dtype` 付け忘れの素 F32 は PNG 門まで沈黙した）。"""
+
+    def test_it_stops_when_an_f16_component_is_stored_as_raw_f32(self, tmp_path: Path) -> None:
+        sources = _build_series(tmp_path / "models")
+        (sources.base / "text_encoder" / "model.safetensors").write_bytes(
+            _fake_safetensors("F32", b"text-encoder-weights")
+        )
+        out_dir = tmp_path / "models" / "anima"
+        with pytest.raises(DistError, match=r"text_encoder: .* F16 が無い"):
+            assemble_anima(sources, out_dir)
+        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない（rope 不一致と同じ規律）。
+        assert not out_dir.exists()
+
+    def test_it_stops_when_the_i8_transformer_lacks_i8_storage(self, tmp_path: Path) -> None:
+        sources = _build_series(tmp_path / "models")
+        (sources.transformer_i8 / "transformer" / "model.safetensors").write_bytes(
+            _fake_safetensors("F16", b"transformer-i8-weights")
+        )
+        with pytest.raises(DistError, match=r"transformer_i8: .* I8 が無い"):
+            assemble_anima(sources, tmp_path / "models" / "anima")
+
+    def test_it_stops_when_a_header_is_not_safetensors(self, tmp_path: Path) -> None:
+        sources = _build_series(tmp_path / "models")
+        (sources.base / "vae_decoder" / "model.safetensors").write_bytes(b"not-a-safetensors")
+        with pytest.raises(DistError, match="ヘッダが読めない"):
+            assemble_anima(sources, tmp_path / "models" / "anima")
 
 
 class TestManifest:
