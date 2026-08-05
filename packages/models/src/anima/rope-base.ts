@@ -27,9 +27,6 @@ const ROPE_AXES = ["t", "h", "w"] as const;
 /** F32 のみ受ける（素表は cos / sin の実数表で、他の格納形は上流に存在しない）。 */
 const F32_DTYPE = "F32";
 
-/** 素表に在ってよいテンソルの全キー（想定外の同居は fail loudly）。 */
-const EXPECTED_KEYS = new Set(ROPE_AXES.flatMap((axis) => [`cos_${axis}`, `sin_${axis}`]));
-
 /** 軸ごとの cos / sin 素表（行 = 位置・列 = その軸のブロック幅）。 */
 export type RopeBase = {
   /** 全軸で共通の行数（= モデル側の位置表の天井）。 */
@@ -72,8 +69,12 @@ const tableOf = (file: SafetensorsFile, name: string): RawTable => {
  */
 export const parseRopeBase = (buffer: ArrayBuffer): RopeBase => {
   const file = parseSafetensors(buffer);
+  // MUST: モジュールスコープの const に持たない（横断不変条件「全モジュール副作用ゼロ =
+  // import 時実行禁止」— barrel 経由 tree-shaking の成立条件。png.ts の buildCrcTable と同じ
+  // 理由）。素表のテンソルは 6 本だけで、呼び出しごとの構築は無視できる。
+  const expectedKeys = new Set(ROPE_AXES.flatMap((axis) => [`cos_${axis}`, `sin_${axis}`]));
   for (const name of file.tensors.keys()) {
-    if (!EXPECTED_KEYS.has(name)) throw new Error(`rope 素表に想定外のテンソル '${name}' がある`);
+    if (!expectedKeys.has(name)) throw new Error(`rope 素表に想定外のテンソル '${name}' がある`);
   }
   const cos: Float32Array[] = [];
   const sin: Float32Array[] = [];
