@@ -108,12 +108,12 @@ class TestSections:
     def test_it_carries_every_section(self, card: str) -> None:
         headings = [line for line in card.splitlines() if line.startswith("## ")]
         assert headings == [
-            "## これは何か",
-            "## 焼き込んだ LoRA",
-            "## ファイル",
-            "## preset",
-            "## 使い方",
-            "## 既定値",
+            "## What is this",
+            "## Baked-in LoRA",
+            "## Files",
+            "## Presets",
+            "## Usage",
+            "## Defaults",
         ]
 
     def test_it_names_the_merged_lora_with_its_source_and_hash(self, card: str) -> None:
@@ -125,7 +125,7 @@ class TestSections:
     def test_it_shows_the_minimal_typescript_entry_point(self, card: str) -> None:
         assert "AnimaPipeline.fromPretrained" in card
         assert "@karume/models" in card
-        assert "pipeline.dispose()" in card
+        assert "using pipeline" in card
 
 
 class TestDerivation:
@@ -155,14 +155,14 @@ class TestDerivation:
 
     def test_it_marks_exactly_the_default_preset(self, card: str) -> None:
         rows = [line for line in card.splitlines() if line.startswith("| `")]
-        default = [line for line in rows if "**既定**" in line]
+        default = [line for line in rows if "**default**" in line]
         assert len(default) == 1
         assert default[0].startswith("| `w8a8` |")
 
     def test_it_carries_every_preset_with_its_session_knobs(self, card: str) -> None:
         assert "| `f16` | `transformer` = `f16` | — |" in card
         assert "`linearCompute` = `i8a8`" in card
-        assert "要 `shaderF16`" in card
+        assert "requires `shaderF16`" in card
 
     def test_it_takes_the_defaults_from_the_pipeline_config(self, card: str) -> None:
         assert "- **steps**: 7" in card
@@ -172,10 +172,10 @@ class TestDerivation:
     def test_it_only_warns_about_the_unused_negative_prompt_at_guidance_one(
         self, card: str
     ) -> None:
-        assert "ネガティブプロンプトは使われない" in card
+        assert "the negative prompt is not used" in card
         manifest = _manifest()
         manifest["pipelineConfig"]["defaults"]["guidanceScale"] = 4
-        assert "ネガティブプロンプトは使われない" not in render_model_card(manifest)
+        assert "the negative prompt is not used" not in render_model_card(manifest)
 
 
 class TestDeterminism:

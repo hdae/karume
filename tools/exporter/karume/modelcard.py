@@ -62,7 +62,7 @@ def format_size(size: int) -> str:
     """バイト数を「単位付き + 生バイト」で綴る（両方出す — 前者は目安、後者が manifest の値）。"""
     for unit, scale in _UNITS:
         if size >= scale:
-            return f"{size / scale:.2f} {unit}（{size:,} B）"
+            return f"{size / scale:.2f} {unit} ({size:,} B)"
     return f"{size:,} B"
 
 
@@ -112,34 +112,35 @@ def _frontmatter() -> list[str]:
 def _overview(manifest: Mapping[str, Any]) -> list[str]:
     defaults = manifest["pipelineConfig"]["defaults"]
     return [
-        "## これは何か",
+        "## What is this",
         "",
-        f"[{BASE_MODEL}](https://huggingface.co/{BASE_MODEL}) に **{LORA_NAME}** を焼き込み、",
-        "WebGPU 推論ランタイム **Karume** の IR コンテナ（safetensors 1 ファイル = 重み +",
-        "`__metadata__` 埋め込みのグラフ JSON）へ変換した配布形。ブラウザと Deno でそのまま動く。",
+        f"A distribution that bakes **{LORA_NAME}** into"
+        f" [{BASE_MODEL}](https://huggingface.co/{BASE_MODEL}) and converts it into the WebGPU",
+        "inference runtime **Karume**'s IR container (a single safetensors file = weights +",
+        "a graph JSON embedded in `__metadata__`). Runs as-is in the browser and in Deno.",
         "",
-        f"- **{defaults['steps']} step / guidance {defaults['guidanceScale']}** 前提の"
-        "少ステップ蒸留（LoRA 由来）。",
-        "- diffusers では読めない（グラフ入りの別コンテナ）。読む側は"
-        f" `{manifest['pipeline']}` を実装するパイプライン。",
-        f"- 変換に使ったエクスポータ: `{manifest['generator']}`。"
-        f"配布 manifest は `karume.json`（`{manifest['format']}`）。",
+        f"- A few-step distillation (from the LoRA) tuned for **{defaults['steps']} steps /"
+        f" guidance {defaults['guidanceScale']}**.",
+        "- Not readable by diffusers (it's a different container with an embedded graph); the"
+        f" reader is a pipeline that implements `{manifest['pipeline']}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
+        f" is `karume.json` (`{manifest['format']}`).",
     ]
 
 
 def _merged_lora() -> list[str]:
     return [
-        "## 焼き込んだ LoRA",
+        "## Baked-in LoRA",
         "",
-        "重みに畳み込み済みで、別ファイルとしては配布に含まれない。",
+        "Folded into the weights — not distributed as a separate file.",
         "",
-        f"- **名称**: {LORA_NAME}",
-        f"- **作者**: {LORA_AUTHOR}（base model と同一作者）",
-        f"- **出所**: {LORA_SOURCE}",
-        f"- **ファイル**: `{LORA_FILE}`",
+        f"- **Name**: {LORA_NAME}",
+        f"- **Author**: {LORA_AUTHOR} (same author as the base model)",
+        f"- **Source**: {LORA_SOURCE}",
+        f"- **File**: `{LORA_FILE}`",
         f"- **sha256**: `{LORA_SHA256}`",
         "",
-        "出所ページの権限欄（取得時点の値）:",
+        "Permissions listed on the source page (as of retrieval):",
         "",
         *(f"- `{name}`: {value}" for name, value in LORA_PERMISSIONS),
     ]
@@ -147,9 +148,9 @@ def _merged_lora() -> list[str]:
 
 def _files(manifest: Mapping[str, Any]) -> list[str]:
     lines = [
-        "## ファイル",
+        "## Files",
         "",
-        "| キー | variant | パス | サイズ | sha256 |",
+        "| Key | Variant | Path | Size | sha256 |",
         "| ---- | ------- | ---- | ------ | ------ |",
     ]
     for key, labels, ref in file_rows(manifest):
@@ -160,10 +161,10 @@ def _files(manifest: Mapping[str, Any]) -> list[str]:
         )
     lines += [
         "",
-        "sha256 は先頭 16 桁のみ（完全な値と `size` は `karume.json` が持つ — 取得層はそちらで"
-        "検証する）。",
-        "variant ラベルはランタイムの**格納 dtype 語彙**（`f16` / `i8`）で、エコシステムで"
-        "見かける `fp16` 綴りには合わせていない。",
+        "Only the first 16 hex digits of the sha256 are shown (the full value and `size` live in"
+        " `karume.json` — verify against that at the fetch layer).",
+        "Variant labels use the runtime's **storage dtype vocabulary** (`f16` / `i8`), not the"
+        " `fp16` spelling common elsewhere in the ecosystem.",
     ]
     return lines
 
@@ -172,27 +173,27 @@ def _session(preset: Mapping[str, Any]) -> str:
     session = preset["session"]
     features = preset.get("gpuFeatures", {})
     parts = [f"`{key}` = `{value}`" for key, value in session.items()]
-    parts += [f"要 `{key}`" for key, value in features.items() if value]
+    parts += [f"requires `{key}`" for key, value in features.items() if value]
     return " / ".join(parts) if parts else "—"
 
 
 def _presets(manifest: Mapping[str, Any]) -> list[str]:
     default = manifest["defaultPreset"]
     lines = [
-        "## preset",
+        "## Presets",
         "",
-        "| preset | 重み | 計算 | 既定 |",
+        "| Preset | Weights | Compute | Default |",
         "| ------ | ---- | ---- | ---- |",
     ]
     for name, preset in manifest["presets"].items():
         weights = " / ".join(
             f"`{component}` = `{label}`" for component, label in preset["weights"].items()
         )
-        mark = "**既定**" if name == default else ""
+        mark = "**default**" if name == default else ""
         lines.append(f"| `{name}` | {weights} | {_session(preset)} | {mark} |")
     lines += [
         "",
-        f"preset を指定しなければ `{default}` で動く（配布側の推奨既定）。",
+        f"If no preset is given, it runs as `{default}` (the distribution's recommended default).",
     ]
     return lines
 
@@ -200,27 +201,23 @@ def _presets(manifest: Mapping[str, Any]) -> list[str]:
 def _usage(manifest: Mapping[str, Any]) -> list[str]:
     default = manifest["defaultPreset"]
     return [
-        "## 使い方",
+        "## Usage",
         "",
         "```ts",
         'import { AnimaPipeline, encodePng } from "jsr:@karume/models";',
         "",
-        f"// このリポジトリの ID を渡す（preset 省略で {default}）。",
-        'const pipeline = await AnimaPipeline.fromPretrained("<owner>/<repo>");',
-        "try {",
-        "  const image = await pipeline.generate({",
-        '    prompt: "1girl, solo, long hair, blue eyes, school uniform, masterpiece",',
-        "    seed: 42,",
-        "  });",
-        "  const png = await encodePng(image.data, image.width, image.height);",
-        '  await Deno.writeFile("anima.png", png);',
-        "} finally {",
-        "  pipeline.dispose();",
-        "}",
+        f"// Pass this repository's ID (preset defaults to {default}).",
+        'using pipeline = await AnimaPipeline.fromPretrained("<owner>/<repo>");',
+        "const image = await pipeline.generate({",
+        '  prompt: "1girl, solo, long hair, blue eyes, school uniform, masterpiece",',
+        "  seed: 42,",
+        "});",
+        "const png = await encodePng(image.data, image.width, image.height);",
+        'await Deno.writeFile("anima.png", png);',
         "```",
         "",
-        "重みは初回だけ取得してキャッシュする（`karume.json` の `size` / `sha256` で検証）。",
-        "ローカルに置いたディレクトリから読むこともできる（`AnimaPipeline.fromAssets`）。",
+        "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
+        "You can also load from a local directory (`AnimaPipeline.fromAssets`).",
     ]
 
 
@@ -229,9 +226,9 @@ def _defaults(manifest: Mapping[str, Any]) -> list[str]:
     resolution = defaults["resolution"]
     guidance = defaults["guidanceScale"]
     lines = [
-        "## 既定値",
+        "## Defaults",
         "",
-        "`generate()` で指定しなかったノブは manifest の既定が埋める。",
+        "Any knob not passed to `generate()` is filled in from the manifest's defaults.",
         "",
         f"- **steps**: {defaults['steps']}",
         f"- **guidanceScale**: {guidance}",
@@ -241,9 +238,9 @@ def _defaults(manifest: Mapping[str, Any]) -> list[str]:
     if guidance == 1:
         lines += [
             "",
-            f"guidance {guidance} では CFG の 2 本目の経路を通さないので、"
-            "**ネガティブプロンプトは使われない**",
-            "（guidance を上げたときだけ効く）。",
+            f"At guidance {guidance}, the second CFG branch is skipped, so"
+            " **the negative prompt is not used**",
+            "(it only takes effect once guidance is raised).",
         ]
     return lines
 
