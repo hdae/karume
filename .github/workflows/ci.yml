@@ -1,0 +1,38 @@
+name: CI
+
+# 品質ゲート。実 GPU テストは CI ランナーで回らない（ADR 0005: アダプタ無し環境は明示 SKIP・
+# リリース判定は実 GPU 緑が必須）。ここでは KARUME_ALLOW_NO_GPU=1 で GPU ケースを SKIP させて
+# 非 GPU テストの回帰を捕え、加えて `deno publish --dry-run` で JSR 公開グラフ（slow types・
+# 公開 API 型出力）を検証する。実 GPU 緑の担保はローカル / self-hosted の責務。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          # ローカル開発機と同一にピン（fmt の挙動はバージョンで変わり得るため）。
+          deno-version: "2.9.4"
+      - name: Format
+        run: deno fmt --check
+      - name: Lint
+        run: deno lint
+      - name: Type-check
+        run: deno check packages/runtime/mod.ts packages/hub/mod.ts packages/models/mod.ts
+      - name: Test (non-GPU)
+        # GPU ケースは GPU_AVAILABLE=false で ignore され、全 SKIP 門番は環境変数で抜ける。
+        env:
+          KARUME_ALLOW_NO_GPU: "1"
+        run: deno test -A
+      - name: Publish dry-run
+        # 認証不要（denoland/deno#22679 修正済み）。3 パッケージの公開グラフを検証する。
+        run: deno publish --dry-run
