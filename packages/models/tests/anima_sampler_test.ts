@@ -6,7 +6,7 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { cfgEulerStep, needsUncond, sigmaSchedule, timestepsProj } from "../src/anima/sampler.ts";
 
-/** `models/anima/karume.json` の `pipelineConfig.scheduler` と同じ値（形の検査用）。 */
+/** `models/anima-turbo/karume.json` の `pipelineConfig.scheduler` と同じ値（形の検査用）。 */
 const SHIFT = 3;
 const NUM_TRAIN_TIMESTEPS = 1000;
 

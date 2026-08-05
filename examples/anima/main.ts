@@ -34,7 +34,7 @@ const integer = (key: string): number | undefined => {
   return raw === undefined ? undefined : Number(raw);
 };
 
-const source = args.get("source") ?? "models/anima";
+const source = args.get("source") ?? "models/anima-turbo";
 const preset = args.get("preset");
 const prompt = args.get("prompt") ?? DEFAULT_PROMPT;
 const seed = integer("seed") ?? 42;

@@ -10,7 +10,7 @@
 
 - **立ち上げロードマップ（ADR 0037）**: P0〜P2 完了（runtime 移植 / IR 識別子確定 / hub =
   ADR 0038）。**P3 models/anima — 完了**: `AnimaPipeline`（fromPretrained / fromAssets・
-  段ごと Session・S 形 + 常時タイル）+ 共通 image 層 + `models/anima/` 配布形（dist.py・
+  段ごと Session・S 形 + 常時タイル）+ 共通 image 層 + `models/anima-turbo/` 配布形（dist.py・
   karume.json 実 hash・**格納 dtype 門**付き）。**移植の門 = PNG sha256 ビット一致 ×4 が全緑**
   （ローカル / 取得層 + integrity / example CLI の 3 経路とも参照値と同一）。example は 90 行
   1 画面（移行元 1,111 行から縮退）。
@@ -28,7 +28,7 @@
 - **現行識別子（`karume_ir` / `karume-ir`）以前に焼かれた資産は開けない**（互換シム無し —
   fail loudly）。`models/` の大型資産は P3 でエクスポータから再エミットするまで使えない。
   `models/` は untracked。
-- モデル e2e は anima の PNG 門 4 本が本リポに常駐（`models/anima/` 資産が前提・無ければ明示
+- モデル e2e は anima の PNG 門 4 本が本リポに常駐（`models/anima-turbo/` 資産が前提・無ければ明示
   SKIP）。deberta / sbv2 の実重み e2e は移行元リポに残置のまま（SBV2 の取り込み時に復帰）。
 - **配布資産の格納形は series ディレクトリ名でなくヘッダが正** — dist.py の格納 dtype 門が
   組み立て時に検査する（`--dtype` 付け忘れの素 F32 が PNG 門まで沈黙した実測事故が根拠）。

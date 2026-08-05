@@ -345,13 +345,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=_REPO_MODELS,
         help="系列ディレクトリ群の親（既定: リポの models/）",
     )
-    parser.add_argument("--out", type=Path, default=None, help="出力先（既定: <--models>/anima）")
+    parser.add_argument(
+        "--out", type=Path, default=None, help="出力先（既定: <--models>/anima-turbo）"
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    out_dir = args.out if args.out is not None else args.models / "anima"
+    out_dir = args.out if args.out is not None else args.models / "anima-turbo"
     manifest = assemble_anima(anima_sources(args.models), out_dir)
     verified = verify_dist(out_dir)
     for rel_path, size in sorted(verified.items()):

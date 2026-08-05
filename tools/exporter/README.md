@@ -865,9 +865,9 @@ uv run --group anima python anima_pipeline.py --resolution 1344x768 …   # 非�
 
 - 出力は `models/anima-pipeline/pipeline.safetensors`（21 テンソル・9.4MB）と `pipeline.json`
   （プロンプト・step 数・shift・CFG 係数・各テンソルの役割と shape）。
-- **`models/anima/` 直下に置かない** — あちらは `packages/runtime/tests/e2e_anima_test.ts` がターゲット全量の
-  等値検査をしているので、別種の資産を混ぜると資産完全性テストが赤くなる（`models/sbv2-demo/`
-  を分けたのと同じ理由）。
+- **配布形 `models/anima-turbo/` 直下に置かない** — あちらは manifest が宣言したファイルだけを
+  並べてそのまま HF へ上げる木で、宣言外のファイルが混ざると `verify_dist` が止まる
+  （`models/sbv2-demo/` を分けたのと同じ理由）。
 - プロンプトは英語 1 本の固定値（danbooru 系タグ）。**ネガティブを空文字列にしない** — 空の
   T5 id 列は長さ 1 になり conditioner の受理集合 `Dim("Ttgt", min=2)` から外れる。
 - `latents_init` は `SEED = 20260802` 固定（グローバル seed に依存しない）。
@@ -1012,8 +1012,8 @@ cd ../.. && deno fmt packages/runtime/tests/fixtures/anima-text/parity.json
 
 - 実行時資産（計 4.6MB）は **`models/` = `.gitignore` 配下**。生の `tokenizer.json` 計 13.8MB
   から実行に要る情報だけを抜いた形で、**ライセンス物をリポジトリに抱えない**。
-- **MUST: `models/anima/` 直下に置かない** — あちらは `packages/runtime/tests/e2e_anima_test.ts` がターゲット
-  全量の等値検査をしている（`models/anima-pipeline/` を分けたのと同じ理由）。
+- **MUST: 配布形 `models/anima-turbo/` 直下に置かない** — あちらは manifest が宣言したファイル
+  だけを並べてそのまま HF へ上げる木（`models/anima-pipeline/` を分けたのと同じ理由）。
 - フィクスチャは語彙の**部分集合**（Qwen2 218 語 / merges 375 / T5 125 語）だけを持つので、
   151k / 32k を commit せずに全ケースを再現できる。正規化表と文字クラス表は**畳み込みの成果物
   そのもの**（= 検証対象）なので全体を載せる。

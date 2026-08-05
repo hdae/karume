@@ -6,7 +6,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { parseAnimaPipelineConfig } from "../src/anima/config.ts";
 
-/** `models/anima/karume.json` と同じ形（実配布物の写し）。 */
+/** `models/anima-turbo/karume.json` と同じ形（実配布物の写し）。 */
 const VALID = {
   scheduler: { shift: 3, numTrainTimesteps: 1000 },
   defaults: {

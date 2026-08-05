@@ -18,9 +18,9 @@ denoise.py / decoders.py）。この台本はその 4 ブロックの逐語的�
     pipeline.json          プロンプト・step 数・shift・CFG 係数・LoRA（`lora` / `lora_scale`）
                            ・shape 一覧
 
-MUST: 出力先を `models/anima/` 直下にしない。あちらは golden E2E が
-**ターゲット全量の等値検査**をしているディレクトリで、別種の資産を混ぜると資産完全性の
-テストが赤くなる（音声デモで `models/sbv2-demo/` を分けたのと同じ理由）。
+MUST: 出力先を `models/anima-turbo/`（配布形）直下にしない。あちらは manifest が宣言した
+ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
+止まる（音声デモで `models/sbv2-demo/` を分けたのと同じ理由）。
 
 MUST: 圧縮系列のフィクスチャは **4 コンポーネントとも** fake-quant してから採る（ADR 0006）。
 1 つでも素の重みのまま残すと、その段だけ参照が別のモデルの数になり、通しチェーンの差が
@@ -80,7 +80,7 @@ from karume.resolution import parse_resolution, resolution_meta
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-#: 生成物の既定の置き場（格納 dtype 別）。**`models/anima/` とは別ディレクトリ**（上の MUST）。
+#: 生成物の既定の置き場（格納 dtype 別）。**配布形 `models/anima-turbo/` とは別**（上の MUST）。
 DEFAULT_OUTS = {
     "f32": REPO_ROOT / "models" / "anima-pipeline",
     "f16": REPO_ROOT / "models" / "anima-pipeline-f16",

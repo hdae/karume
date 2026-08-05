@@ -85,7 +85,7 @@ def _build_series(models_dir: Path, *, i8_rope: bytes | None = None) -> AnimaSou
 @pytest.fixture
 def assembled(tmp_path: Path) -> tuple[Path, dict]:
     sources = _build_series(tmp_path / "models")
-    out_dir = tmp_path / "models" / "anima"
+    out_dir = tmp_path / "models" / "anima-turbo"
     manifest = assemble_anima(sources, out_dir)
     return out_dir, manifest
 
@@ -111,7 +111,7 @@ class TestLayout:
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "models")
-        out_dir = tmp_path / "models" / "anima"
+        out_dir = tmp_path / "models" / "anima-turbo"
         assemble_anima(sources, out_dir)
         assemble_anima(sources, out_dir)  # 既存リンクがあっても落ちない
         assert verify_dist(out_dir)
@@ -131,7 +131,7 @@ class TestPlacementStrategy:
 
         monkeypatch.setattr(os, "link", refuse)
         sources = _build_series(tmp_path / "models")
-        out_dir = tmp_path / "models" / "anima"
+        out_dir = tmp_path / "models" / "anima-turbo"
         assemble_anima(sources, out_dir)
         placed = out_dir / OUTPUT_PATHS["text_encoder"]
         assert placed.read_bytes() == _PAYLOADS["text_encoder"]
@@ -141,7 +141,7 @@ class TestPlacementStrategy:
         sources = _build_series(tmp_path / "models")
         (sources.base / "vae_decoder" / "model.safetensors").unlink()
         with pytest.raises(DistError, match="組み立ての入力が無い"):
-            assemble_anima(sources, tmp_path / "models" / "anima")
+            assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
 
 class TestRopeBase:
@@ -156,7 +156,7 @@ class TestRopeBase:
 
     def test_it_refuses_to_pick_a_side_when_the_series_disagree(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "models", i8_rope=b"rope-base-table-DIFFERENT")
-        out_dir = tmp_path / "models" / "anima"
+        out_dir = tmp_path / "models" / "anima-turbo"
         with pytest.raises(DistError, match="バイト同一でない"):
             assemble_anima(sources, out_dir)
         # 止めた以上、途中の配布形を残さない（片方だけ入った出力を後段に見せない）。
@@ -171,7 +171,7 @@ class TestStorageGate:
         (sources.base / "text_encoder" / "model.safetensors").write_bytes(
             _fake_safetensors("F32", b"text-encoder-weights")
         )
-        out_dir = tmp_path / "models" / "anima"
+        out_dir = tmp_path / "models" / "anima-turbo"
         with pytest.raises(DistError, match=r"text_encoder: .* F16 が無い"):
             assemble_anima(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない（rope 不一致と同じ規律）。
@@ -183,13 +183,13 @@ class TestStorageGate:
             _fake_safetensors("F16", b"transformer-i8-weights")
         )
         with pytest.raises(DistError, match=r"transformer_i8: .* I8 が無い"):
-            assemble_anima(sources, tmp_path / "models" / "anima")
+            assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
     def test_it_stops_when_a_header_is_not_safetensors(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "models")
         (sources.base / "vae_decoder" / "model.safetensors").write_bytes(b"not-a-safetensors")
         with pytest.raises(DistError, match="ヘッダが読めない"):
-            assemble_anima(sources, tmp_path / "models" / "anima")
+            assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
 
 class TestManifest:

@@ -16,9 +16,9 @@ r"""examples/anima デモのプロンプト層（トークナイザ）の資産 
        全ケース（PROMPT_CASES）の参照 id 列と、その再現に要る語彙の**部分集合**
        （151k / 32k の語彙を commit しないための分離）、および NFC の実測対
 
-MUST: 資産を `models/anima/` 直下に置かない。あちらは `packages/runtime/tests/e2e_anima_test.ts` が
-**ターゲット全量の等値検査**をしているディレクトリで、別種の資産を混ぜると資産完全性の
-テストが赤くなる（`models/sbv2-demo/` / `models/anima-pipeline/` を分けたのと同じ理由）。
+MUST: 資産を `models/anima-turbo/`（配布形）直下に置かない。あちらは manifest が宣言した
+ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
+止まる（`models/sbv2-demo/` / `models/anima-pipeline/` を分けたのと同じ理由）。
 
 畳み方の根拠と検証は `karume/anima_text.py` の docstring が正本。要点だけ:
 **Unicode 判定は TS で再実装しないし標準 API にも委ねない** — 正本（Rust の `tokenizers` /
