@@ -8,24 +8,30 @@
 
 ## Active redesigns (in flight)
 
-- **立ち上げロードマップ（ADR 0037）**: P0 scaffold・P1 runtime 移植・P1.5 IR 識別子確定
-  （`karume_ir` / `karume-ir`）+ golden 再生成・**P2 hub — 完了**（manifest v1 = ADR 0038
-  〈pre-mortem 44 指摘反映・記録は research/2026-08-05-manifest-premortem.md〉+ `@karume/hub`
-  実装 429 テスト緑・取得層は `@hdae/fetch-cache`）。
-  次 = **P3 models/anima**: `AnimaPipeline` 再編（barrel + サブパス・副作用ゼロ）。
-  門 = 生成 PNG sha256 の参照一致。S 形 + タイル VAE 資産の再エミット（新識別子）と
-  モデル e2e の復帰を含む。以降: **P4 exporter CLI 化**（PyPI `karume`・サブコマンド式・
-  manifest 自動生成 + モデルカード README・HF アップ可能ディレクトリを直接出力）→
-  **P5 HF 実網通し + 公開準備**（gated リポの Authorization 実網確認・Cache Storage 数 GB
-  quota・sideEffects: false の実測もここ）。
+- **立ち上げロードマップ（ADR 0037）**: P0〜P2 完了（runtime 移植 / IR 識別子確定 / hub =
+  ADR 0038）。**P3 models/anima — 完了**: `AnimaPipeline`（fromPretrained / fromAssets・
+  段ごと Session・S 形 + 常時タイル）+ 共通 image 層 + `models/anima/` 配布形（dist.py・
+  karume.json 実 hash・**格納 dtype 門**付き）。**移植の門 = PNG sha256 ビット一致 ×4 が全緑**
+  （ローカル / 取得層 + integrity / example CLI の 3 経路とも参照値と同一）。example は 90 行
+  1 画面（移行元 1,111 行から縮退）。
+  次 = **P4 exporter CLI 化**: PyPI `karume` のサブコマンド式（export / dist / verify を包む）・
+  モデルカード README 自動生成（variant 表は manifest から導出）。同時裁定・回収する宿題:
+  ①rope_base の読み（models 側の parseSafetensors 再実装 130 行 — runtime 公開面に載せるか
+  IR コンテナ化か）②`AnimaFromPretrainedOptions` に `caches` 注入席（テスト用）③波 1 積み残しの
+  参照フィクスチャ系テスト（timestepsProj atol 突合等 — anima-pipeline 系列の再エミットが前提）
+  ④tokenizer parity fixture の models 側への移設。
+  以降: **P5 HF 実網通し + 公開準備**（gated リポの Authorization 実網確認・Cache Storage
+  数 GB quota・sideEffects: false の実測もここ）。
 
 ## Pitfalls
 
 - **現行識別子（`karume_ir` / `karume-ir`）以前に焼かれた資産は開けない**（互換シム無し —
   fail loudly）。`models/` の大型資産は P3 でエクスポータから再エミットするまで使えない。
   `models/` は untracked。
-- モデル e2e（anima / sbv2 / deberta の実重み系）は P3 まで不在 — カバレッジはランタイム核
-  のみ（意図的な過渡状態）。
+- モデル e2e は anima の PNG 門 4 本が本リポに常駐（`models/anima/` 資産が前提・無ければ明示
+  SKIP）。deberta / sbv2 の実重み e2e は移行元リポに残置のまま（SBV2 の取り込み時に復帰）。
+- **配布資産の格納形は series ディレクトリ名でなくヘッダが正** — dist.py の格納 dtype 門が
+  組み立て時に検査する（`--dtype` 付け忘れの素 F32 が PNG 門まで沈黙した実測事故が根拠）。
 - models パッケージの tree-shaking は「全モジュール副作用ゼロ」不変条件が前提 —
   崩れると barrel 経由の shake が静かに死ぬ。
 - JSR npm 互換層が package.json に `sideEffects: false` を出すかは**未検証**（P2〜P3 で実測）。
