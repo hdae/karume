@@ -14,9 +14,12 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 
 ## 言語
 
-- **公開 README は英語で書く**（リポ直下 README・`packages/*/README.md`・モデルカード
-  生成物〈`karume dist` が書く README.md〉）。コード内コメント・docs/・ACTIVE_DESIGN・
-  コミットメッセージ説明部は従来どおり日本語。
+- **README は全て英語で書く** — リポ直下 / `models/` / `tools/exporter/`（PyPI パッケージの
+  ドキュメント）/ 将来の `packages/*/`、およびモデルカード生成物（`karume dist` が書く
+  `README.md`）。コード内コメント・docstring・`docs/`・ACTIVE_DESIGN・コミットメッセージの
+  説明部は従来どおり日本語。
+- 例外: コードが実際に投げるエラー文言の逐語引用と、日本語 TTS のデモ入力は日本語のまま
+  （引用であって散文ではない — 訳すと現物と食い違う）。
 
 ## 構成
 
