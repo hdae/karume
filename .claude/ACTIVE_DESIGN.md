@@ -28,11 +28,16 @@
 
 ## Pitfalls
 
+- **`models/` に置くのは HF へそのまま上げられる配布形だけ**（1 ディレクトリ = 1 HF リポ）。
+  エクスポータの系列出力は `outputs/series/` — 綴りの正本は `karume/paths.py`
+  （`DIST_ROOT` / `SERIES_ROOT`）で、台本と `karume dist` がそこを共有する。**ADR と
+  docs/research 内の `models/anima-*` 表記は当時の記録**（時点スナップショットなので直さない）。
 - **現行識別子（`karume_ir` / `karume-ir`）以前に焼かれた資産は開けない**（互換シム無し —
-  fail loudly）。`models/` の大型資産は P3 でエクスポータから再エミットするまで使えない。
-  `models/` は untracked。
+  fail loudly）。`models/` と `outputs/` はどちらも untracked。
 - モデル e2e は anima の PNG 門 4 本が本リポに常駐（`models/anima-turbo/` 資産が前提・無ければ明示
   SKIP）。deberta / sbv2 の実重み e2e は移行元リポに残置のまま（SBV2 の取り込み時に復帰）。
+- 入力素材（SBV2 の実重み ckpt・turbo LoRA ファイル）の置き場は**未裁定** — 現状の綴りは
+  `models/` のままで、SBV2 取り込み時に配布形と分ける必要がある。
 - **配布資産の格納形は series ディレクトリ名でなくヘッダが正** — dist.py の格納 dtype 門が
   組み立て時に検査する（`--dtype` 付け忘れの素 F32 が PNG 門まで沈黙した実測事故が根拠）。
 - 配布形の宣言外ファイル検査は直下の `karume.json` / `README.md` だけを例外にする（それ以外が

@@ -26,7 +26,7 @@ prints the usage of the body's own parser). This shape keeps a copy of the exclu
 | `karume verify` | `karume.verify` (validates the distribution form against every IR v1 rule)  | (new)                    |
 
 ```sh
-uv run karume dist --models ../../models
+uv run karume dist --series ../../outputs/series
 uv run karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
 ```
 
@@ -532,7 +532,7 @@ through.
 ## Real-weight Anima export
 
 Real weights for the image generation side. `export_anima.py` writes out the 4 emit targets of ADR
-[0016](../../docs/decisions/0016-anima-chain-export.md). The full emit (`models/anima/`) and the
+[0016](../../docs/decisions/0016-anima-chain-export.md). The full emit (`outputs/series/anima/`) and the
 Deno-side E2E (`packages/runtime/tests/e2e_anima_test.ts`) were completed in M1-P4.
 
 ### Dependencies and obtaining the weights
@@ -565,7 +565,7 @@ uv run --group anima python export_anima.py --target transformer --lora turbo.sa
 
 # S form (one symbol for the token length), an additional series — transformer only; the default out gets -dyn
 uv run --group anima python export_anima.py --dtype f16 --dit-graph dyn --lora turbo.safetensors \
-  --out ../../models/anima-turbo-f16-dyn
+  --out ../../outputs/series/anima-turbo-f16-dyn
 uv run --group anima python export_anima.py --dtype f16 --dit-graph dyn --verify transformer \
   --lora turbo.safetensors
 ```
@@ -622,7 +622,7 @@ nodes after normalization). The full 28 layers of the DiT are 7.29GiB in f32, so
 in wave 3 — the layer count does not change the **kinds** of unsupported ops (the same block
 repeated).
 
-### Measurements (wave 3, **full depth**; all 4 into `models/anima/`)
+### Measurements (wave 3, **full depth**; all 4 into `outputs/series/anima/`)
 
 Measured with each target in a **separate process** (so that host RAM peaks do not overlap; listing
 several `--target`s in one process also works, but the DiT peak would stack on top of the other 3
@@ -635,8 +635,8 @@ staying resident).
 | `transformer`      | 3904     | 579          | 7,827,646,080 B   | 36.5s     | 11,593MiB |
 | `vae_decoder`      | 455      | 108          | 101,279,604 B     | 10.0s     | 1,546MiB  |
 
-`model.safetensors` totals 10,854,181,276 B, and `models/anima/` as a whole, including
-`io.<case>.safetensors`, is 10,868,931,292 B (10.12GiB). **`models/` is under `.gitignore`** (never
+`model.safetensors` totals 10,854,181,276 B, and `outputs/series/anima/` as a whole, including
+`io.<case>.safetensors`, is 10,868,931,292 B (10.12GiB). **`outputs/` is under `.gitignore`** (never
 committed). The op vocabulary is **23 kinds** across the 4 targets (`add bmm cat clamp clamp_min
 conv2d div embedding expand gelu layer_norm linear mul neg permute reshape rms_norm sigmoid slice
 softmax sqrt sum sym_prefix_slice`), with **zero new ops** (the 3 kinds added in wave 1 sufficed).
@@ -688,7 +688,7 @@ rounding (1.19e-7) growing into the 9e-6 class is consistent.
 
 `--dtype f16` takes the references and goldens **after rounding the weights to f16-representable
 values** (fake-quant) and stores **only the eligible weight slots** in f16. The output goes to
-`models/anima-f16/`, separate from the f32 series (the default for an omitted `--out` switches with
+`outputs/series/anima-f16/`, separate from the f32 series (the default for an omitted `--out` switches with
 `--dtype`).
 
 ```sh
@@ -746,7 +746,7 @@ storage).
 | `transformer`      | 3,914,867,592 B   | 50.0%  | 454 tensors / 3,912.8MB | 125 tensors / 1.22MB     | 42.2s     | 11,807MiB |
 | `vae_decoder`      | 50,732,956 B      | 50.1%  | 37 tensors / 50.5MB     | 71 tensors / 0.075MB     | 10.4s     | n/a       |
 
-`models/anima-f16/` as a whole is 5,444,414,308 B (5.07GiB; the f32 series is 10.12GiB). The rounded
+`outputs/series/anima-f16/` as a whole is 5,444,414,308 B (5.07GiB; the f32 series is 10.12GiB). The rounded
 weights amount to 5.96e8 elements for text_encoder, 1.35e8 for text_conditioner, 19.56e8 for
 transformer and 1.27e8 for the vae. **The ineligible bytes are under 0.5% for every target**
 (biases, norm weights, folded constants), so the constraint "ineligible means zero VRAM reduction"
@@ -776,7 +776,7 @@ maxAbs 6.68e-5, stage ② raw DiT output 3.03e-5, stage ③ end-to-end 6.41e-6).
 
 `anima_pipeline.py --dtype f16` fake-quants **all 4** components before taking the references (if
 even one were left unrounded, that stage alone would be the numbers of a different model). The
-output is `models/anima-pipeline-f16/` (21 tensors, 9.4MB), measured at 44s and 13.5s per DiT step.
+output is `outputs/series/anima-pipeline-f16/` (21 tensors, 9.4MB), measured at 44s and 13.5s per DiT step.
 
 #### Measurement: Anima's weights are already BF16, so f16 rounding is near-identity (2026-08-03)
 
@@ -817,7 +817,7 @@ treat this gate as redundant and remove it.
 
 `--dtype i8` fake-quants with **per-channel symmetric int8** (no zero point) before taking the
 references and goldens, and stores the eligible weight slots as i8 plus companion scales. The output
-goes to `models/anima-i8/`.
+goes to `outputs/series/anima-i8/`.
 
 ```sh
 uv run --group anima python export_anima.py --dtype i8              # transformer only
@@ -829,7 +829,7 @@ uv run --group anima python anima_pipeline.py --dtype i8            # fixture
 when spelled out with `--target` / `--verify`). Two reasons:
 
 1. **Series design** (ADR 0019): the DiT's −1.87GiB is the dominant term, while text / cond / VAE
-   share `models/anima-f16/`. Prototype measurements put i8 for the VAE two orders lower.
+   share `outputs/series/anima-f16/`. Prototype measurements put i8 for the VAE two orders lower.
 2. **The VAE cannot satisfy the rounding order constraint**: `patch_anima` replaces the CausalConv3d
    weights with **the last slice along the time axis**, which happens when the patches are applied
    (= after the reference capture). f16's element-wise rounding commutes with slicing and is
@@ -892,9 +892,9 @@ Linear weights are `[Cout, Cin]` with Cin as large as 1024–4096 (the scales on
 
 `anima_pipeline.py --dtype i8` rounds **the DiT in i8 and the other 3 components in f16** before
 taking the references (`COMPONENT_DTYPES`). This is to keep a one-to-one correspondence with the
-asset series (`models/anima-i8/transformer` plus the other 3 from `models/anima-f16/`); making
+asset series (`outputs/series/anima-i8/transformer` plus the other 3 from `outputs/series/anima-f16/`); making
 everything i8 would make the text-path references the numbers of a different model than the assets
-actually being executed. The output is `models/anima-pipeline-i8/` (21 tensors, 9,873,808 B),
+actually being executed. The output is `outputs/series/anima-pipeline-i8/` (21 tensors, 9,873,808 B),
 measured at 14.1s / 14.4s per DiT step.
 
 The real-GPU E2E measurements are authoritative in the tolerance comments of
@@ -967,12 +967,12 @@ put a patch bug into both the reference and the subject under test in the same s
 pass with a difference of 0).
 
 ```sh
-uv run --group anima python anima_pipeline.py                    # into models/anima-pipeline/
+uv run --group anima python anima_pipeline.py                    # into outputs/series/anima-pipeline/
 uv run --group anima python anima_pipeline.py --steps 32 --ref-steps 2
 uv run --group anima python anima_pipeline.py --resolution 1344x768 …   # non-square (#23)
 ```
 
-- The outputs are `models/anima-pipeline/pipeline.safetensors` (21 tensors, 9.4MB) and
+- The outputs are `outputs/series/anima-pipeline/pipeline.safetensors` (21 tensors, 9.4MB) and
   `pipeline.json` (prompt, step count, shift, CFG coefficient, and the role and shape of every
   tensor).
 - **Not placed directly under the distribution tree `models/anima-turbo/`** — that one holds exactly
@@ -1011,11 +1011,11 @@ Passing a few-step distilled Turbo LoRA to `--lora` (e.g.
 `models/anima-turbo-lora-v0.2.safetensors`; the real weights are not in the repository — place them
 by hand) fuses it into the weights before the export. This LoRA has been **measured to have an
 all-zero (noop) `lora_B` on the text_conditioner side**, so **emitting the transformer target alone
-is enough** (the other 3 targets share the existing `models/anima-f16/`):
+is enough** (the other 3 targets share the existing `outputs/series/anima-f16/`):
 
 ```sh
 uv run --group anima python export_anima.py --dtype f16 --target transformer \
-  --lora ../../models/anima-turbo-lora-v0.2.safetensors --out ../../models/anima-turbo-f16
+  --lora ../../models/anima-turbo-lora-v0.2.safetensors --out ../../outputs/series/anima-turbo-f16
 ```
 
 `--verify transformer --lora <path>` becomes an eager equivalence check against the post-LoRA
@@ -1027,7 +1027,7 @@ Reference fixture for turbo operation (steps=10 / CFG=1):
 ```sh
 uv run --group anima python anima_pipeline.py --dtype f16 --steps 10 --ref-steps 10 \
   --guidance-scale 1.0 --lora ../../models/anima-turbo-lora-v0.2.safetensors \
-  --out ../../models/anima-pipeline-turbo-f16
+  --out ../../outputs/series/anima-pipeline-turbo-f16
 ```
 
 `--guidance-scale 1.0` **skips the DiT call for the uncond branch entirely** (the same shape as a
@@ -1045,13 +1045,13 @@ the 512px assets can be used directly as the tile decoder. **Nothing is added to
 runtime**; only cutting, blending and pasting live on the host (`examples/anima/host/tiling.ts`).
 
 ```sh
-uv run --group anima python anima_tiling.py     # into models/anima-tiling-f16-1024/
+uv run --group anima python anima_tiling.py     # into outputs/series/anima-tiling-f16-1024/
 uv run --group anima python anima_tiling.py --resolution 1344x768 \
-  --latents ../../models/anima-pipeline-turbo-f16-1344x768/pipeline.safetensors
+  --latents ../../outputs/series/anima-pipeline-turbo-f16-1344x768/pipeline.safetensors
 ```
 
 - The input latent is borrowed from `latents_denorm` in
-  `models/anima-pipeline-turbo-f16-1024/pipeline.safetensors` (already denormalized = exactly the
+  `outputs/series/anima-pipeline-turbo-f16-1024/pipeline.safetensors` (already denormalized = exactly the
   VAE decoder input). **Generate that first** (otherwise it fails naming the missing file). A real
   pipeline latent is used rather than randn because how the seams show depends on the actual values.
 - The outputs are `tiling.safetensors` (`latents_denorm` / `image_tiled`, 13.0MB) and `tiling.json`
@@ -1070,7 +1070,7 @@ uv run --group anima python anima_tiling.py --resolution 1344x768 \
   scan is our own, this is the only place the formulas' isomorphism can be guaranteed.
 - The weights are fake-quantized to the same dtype as the asset series before the references are
   taken (ADR 0006 — the same discipline as `anima_pipeline.py`). The default `--dtype f16`
-  corresponds to the `models/anima-f16/vae_decoder` the TS side opens.
+  corresponds to the `outputs/series/anima-f16/vae_decoder` the TS side opens.
 
 - **`--resolution` takes `WxH`** (non-square is #23). The geometry is built from the shape of the
   input latent, so this argument only gates "is the borrowed latent at the intended resolution" and
@@ -1096,7 +1096,7 @@ apart**, so the upstream `model.rope` tables are baked for 4 geometries and comp
 side's reconstruction with exact Uint32 equality.
 
 ```sh
-uv run --group anima python anima_rope.py       # into models/anima-rope-nonsquare/ (a few seconds)
+uv run --group anima python anima_rope.py       # into outputs/series/anima-rope-nonsquare/ (a few seconds)
 ```
 
 - The geometries are the fixed 4 of `GEOMETRIES` (**16:9 and 3:4, both orientations** = 1344×768 /
@@ -1119,7 +1119,7 @@ implementation of prompt string → token id sequence) and the **parity fixture*
 touch the model graphs.
 
 ```sh
-# assets (2 files into models/anima-demo/text/) + fixture (packages/runtime/tests/fixtures/anima-text/)
+# assets (2 files into outputs/series/anima-demo/text/) + fixture (packages/runtime/tests/fixtures/anima-text/)
 cd tools/exporter
 uv run --group anima python anima_demo.py
 # always format afterwards (the committed form is what the formatter produces — verify's fmt --check covers fixtures too)
@@ -1133,16 +1133,16 @@ below).
 
 | Output                                                   | Size (measured)                | Content                                                                                                 |
 | -------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `models/anima-demo/text/qwen2-tokenizer.json`            | 3,514,619 B                    | vocabulary 151,643 / merges 151,387 / character class tables / NFC segmentation table / 26 added tokens |
-| `models/anima-demo/text/t5-tokenizer.json`               | 1,093,419 B                    | vocabulary 32,100 + scores / normalization table / 103 added tokens                                     |
+| `outputs/series/anima-demo/text/qwen2-tokenizer.json`    | 3,514,619 B                    | vocabulary 151,643 / merges 151,387 / character class tables / NFC segmentation table / 26 added tokens |
+| `outputs/series/anima-demo/text/t5-tokenizer.json`       | 1,093,419 B                    | vocabulary 32,100 + scores / normalization table / 103 added tokens                                     |
 | `packages/runtime/tests/fixtures/anima-text/parity.json` | 474KB (formatted, git-tracked) | reference id sequences for 28 cases + 251 NFC pairs + a **subset** of the vocabularies                  |
 
-- The runtime assets (4.6MB in total) live under **`models/` = `.gitignore`**. They keep only the
+- The runtime assets (4.6MB in total) live under **`outputs/` = `.gitignore`**. They keep only the
   information execution needs out of the raw `tokenizer.json` files (13.8MB in total), so that
   **licensed material is not carried in the repository**.
 - **MUST: do not place them directly under the distribution tree `models/anima-turbo/`** — that one
   holds exactly the files the manifest declares and is uploaded to HF as-is (the same reason
-  `models/anima-pipeline/` is kept separate).
+  `outputs/series/anima-pipeline/` is kept separate).
 - The fixture only holds a **subset** of the vocabularies (Qwen2 218 tokens / 375 merges / T5 125
   tokens), so every case can be reproduced without committing the 151k / 32k entries. The
   normalization table and the character class tables are **the folding output itself** (= the
@@ -1212,7 +1212,7 @@ regional indicators and emoji ZWJ sequences need no boundary rules implemented.
 - ③ **runs without the real assets** (the fixture contains a subset of the vocabularies). In an
   environment that has the assets, reproduction against the real 151k / 32k vocabularies and a
   cross-check against the `qwen_input_ids` / `t5_input_ids` (the id sequences captured by torch) of
-  `models/anima-pipeline{,-f16,-i8,-turbo-f16}/` run in addition. The latter goes through a **path
+  `outputs/series/anima-pipeline{,-f16,-i8,-turbo-f16}/` run in addition. The latter goes through a **path
   separate from the fixture generator**, so it catches the case where the fixture itself is wrong.
 - The structural assumptions about the upstream `tokenizer.json` (`normalizer.type` / the head of
   `pre_tokenizer` / ByteLevel's `add_prefix_space` / the special tokens added by the post_processor
