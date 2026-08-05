@@ -1,44 +1,45 @@
 # Karume exporter
 
-`torch.export` 済みモデルを Karume の **IR v1**（[../../docs/ir-v1.md](../../docs/ir-v1.md)）へ
-落とす Python ツール。uv 管理・CPU 版 torch のみ（GPU 不要）。
+Python tooling that lowers `torch.export`-ed models into Karume's **IR v1**
+([../../docs/ir-v1.md](../../docs/ir-v1.md)). Managed with uv; CPU-only torch (no GPU required).
 
-配布形は safetensors 1 ファイル — テンソル（重み・定数）と、`__metadata__` の
-キー `karume_ir` にグラフ JSON を持つ。
+The distribution form is a single safetensors file — tensors (weights and constants) plus the graph
+JSON under the `__metadata__` key `karume_ir`.
 
-## セットアップ
+## Setup
 
 ```sh
-uv sync            # tools/exporter/ で実行（CPU 版 torch を pytorch-cpu index から取る）
+uv sync            # run in tools/exporter/ (pulls CPU torch from the pytorch-cpu index)
 ```
 
-## CLI（`karume`）
+## CLI (`karume`)
 
-`[project.scripts]` が入れるサブコマンド。**CLI は引数を解釈しない** — サブコマンド名の後ろは
-そのまま各本体へ渡す（`karume <サブコマンド> --help` は本体の parser の使い方を出す）。排他規則
-（`--verify` × `--target` 等）の写しを CLI 側に持たないための形で、ディスパッチは遅延 import。
+The subcommands installed by `[project.scripts]`. **The CLI does not interpret arguments** —
+everything after the subcommand name is passed straight to the body (`karume <subcommand> --help`
+prints the usage of the body's own parser). This shape keeps a copy of the exclusivity rules
+(`--verify` × `--target` etc.) out of the CLI; dispatch is a lazy import.
 
-| サブコマンド    | 包む本体                                          | 従来の呼び方             |
-| --------------- | ------------------------------------------------- | ------------------------ |
-| `karume export` | 台本 `export_anima.py`（ADR 0016 の emit 4 本）   | `python export_anima.py` |
-| `karume dist`   | `karume.dist`（配布形の組み立て・引数は完全互換） | `python -m karume.dist`  |
-| `karume verify` | `karume.verify`（配布形を IR v1 の全規則で検証）  | （新設）                 |
+| Subcommand      | Wrapped body                                                                | Former invocation        |
+| --------------- | --------------------------------------------------------------------------- | ------------------------ |
+| `karume export` | script `export_anima.py` (the 4 emit targets of ADR 0016)                   | `python export_anima.py` |
+| `karume dist`   | `karume.dist` (assembles the distribution form; arguments fully compatible) | `python -m karume.dist`  |
+| `karume verify` | `karume.verify` (validates the distribution form against every IR v1 rule)  | (new)                    |
 
 ```sh
 uv run karume dist --models ../../models
 uv run karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
 ```
 
-台本はパッケージ**外**のスクリプトなので wheel には入らない — `karume export` はリポジトリの
-作業ツリーでだけ動く（無ければ置き場を綴って fail loudly）。
+The scripts are **outside** the package, so they are not in the wheel — `karume export` only runs in
+a repository working tree (when absent it spells out where the script belongs and fails loudly).
 
-`karume dist` は組み立てと `verify_dist` の後に**モデルカード `README.md`** を書く
-（`karume.modelcard` — ADR 0037 §3 の frontmatter 同梱）。数値・ファイル一覧・preset 表は
-manifest からの機械導出で、定数として持つのは manifest に載らない事実（base model・ライセンス・
-焼き込んだ LoRA の出所）だけ。`README.md` は `karume.json` と同格のメタファイルとして、
-宣言外ファイル検査の例外に入る。
+`karume dist` writes a **model card `README.md`** after assembly and `verify_dist`
+(`karume.modelcard` — including the ADR 0037 §3 frontmatter). The numbers, the file list and the
+preset table are derived mechanically from the manifest; the only constants it carries are the facts
+the manifest does not record (base model, license, provenance of the fused LoRA). `README.md` is a
+metadata file on par with `karume.json`, so it is exempt from the undeclared-file check.
 
-## 検証コマンド（変更後は全て）
+## Verification commands (all of them, after any change)
 
 ```sh
 uv run pytest
@@ -46,895 +47,982 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-## golden fixtures の再生成
+## Regenerating the golden fixtures
 
 ```sh
-uv run python -m karume.goldens          # 既定の出力先: ../../packages/runtime/tests/fixtures/golden/
-uv run python -m karume.goldens --out /tmp/golden   # 出力先を変える
+uv run python -m karume.goldens          # default output: ../../packages/runtime/tests/fixtures/golden/
+uv run python -m karume.goldens --out /tmp/golden   # change the output directory
 ```
 
-固定 seed（`karume.goldens.SEED`）なので、同じ環境なら**バイト単位で同一**の
-ファイルが出る（`tests/test_goldens.py::TestDeterminism` が再生成と突合する）。
-契約表の全 op（EMITTABLE_OPS）を全モデル合計で被覆していない場合は生成が失敗する —
-op を足したら golden も足す、が実装契約（ADR 0005）。
+The seed is fixed (`karume.goldens.SEED`), so the same environment produces **byte-identical** files
+(`tests/test_goldens.py::TestDeterminism` regenerates and compares). Generation fails when the
+models do not, in aggregate, cover every op in the contract table (EMITTABLE_OPS) — add an op, add a
+golden, is the implementation contract (ADR 0005).
 
-### golden レイアウト
+### Golden layout
 
 ```
-packages/runtime/tests/fixtures/golden/<model>/model.safetensors   重み・定数 + __metadata__.karume_ir
-packages/runtime/tests/fixtures/golden/<model>/io.safetensors      入力テンソルと torch CPU での期待出力
+packages/runtime/tests/fixtures/golden/<model>/model.safetensors   weights/constants + __metadata__.karume_ir
+packages/runtime/tests/fixtures/golden/<model>/io.safetensors      input tensors and expected outputs from torch CPU
 ```
 
-`io.safetensors` のテンソルキー命名規約:
+Tensor key naming convention in `io.safetensors`:
 
-| キー           | 内容                                                    |
-| -------------- | ------------------------------------------------------- |
-| `input.<name>` | `<name>` は **グラフ入力名**（`graph.inputs[].name`）。 |
-| `output.<i>`   | `<i>` は **`graph.outputs` の位置**（0 始まり）。       |
+| Key            | Content                                                       |
+| -------------- | ------------------------------------------------------------- |
+| `input.<name>` | `<name>` is the **graph input name** (`graph.inputs[].name`). |
+| `output.<i>`   | `<i>` is the **position in `graph.outputs`** (0-based).       |
 
-記号次元の束縛は別に持たない — 入力 shape の次元位置から取る（IR v1 の束縛規則と同じ。
-`"T"` のように係数 1・オフセット 0 で現れる次元の実長がその束縛値）。現在の golden は
-記号次元をすべて `GOLDEN_T` で焼いている。
+Symbolic dimension bindings are not stored separately — they come from the dimension positions of
+the input shapes (the same binding rule as IR v1: for a dimension that appears with coefficient 1
+and offset 0, such as `"T"`, its actual length is the bound value). The current goldens bake every
+symbolic dimension to `GOLDEN_T`.
 
-`io.safetensors` の格納 dtype は**意味論 dtype の実表現**（ADR 0009 の境界正規化）:
-f32 → `F32` / i32（torch の i64 を含む）→ `I32` / bool → `U32` の 0 / 1。値域外の i64 は
-fail loudly（`convert.normalize_boundary_tensor`）。
+The storage dtype in `io.safetensors` is the **concrete representation of the semantic dtype**
+(boundary normalization of ADR 0009): f32 → `F32` / i32 (including torch i64) → `I32` / bool → `U32`
+as 0 / 1. Out-of-range i64 fails loudly (`convert.normalize_boundary_tensor`).
 
-現在のモデルと被覆:
+Current models and coverage:
 
-| モデル             | 記号次元 | 踏む IR op                                                                                                 |
-| ------------------ | -------- | ---------------------------------------------------------------------------------------------------------- |
-| `unary_chain`      | なし     | neg, abs, sqrt, log, exp                                                                                   |
-| `activations`      | なし     | tanh, sigmoid, relu, gelu                                                                                  |
-| `broadcast_binary` | `T`      | add, sub, mul, div（右詰め broadcast + lifted 定数）                                                       |
-| `mlp`              | `T`      | matmul, add, relu（重み initializer 経由の rank-2 MLP）                                                    |
-| `row_reduce`       | `T`      | sum, amax, amin                                                                                            |
-| `mask_chain`       | `T`      | mul(i32), cast, bitwise_not（bool 出力あり）                                                               |
-| `int_cast`         | `T`      | cast(f32→i32 切り捨て), sub(i32), mul(i32)（i32 出力）                                                     |
-| `layout_chain`     | `T`      | permute(3 巡回), reshape ×3（別名の連鎖 + 係数次元 4T）                                                    |
-| `expand_mask`      | `T`      | expand(bool / i32), cast, mul, bitwise_not                                                                 |
-| `batch_matmul`     | `T`      | bmm(B/M/K/N 全て別長), permute（rank-3 バッチ matmul）                                                     |
-| `gather_last_dim`  | `T`      | gather(最終次元 / 添字は i32 入力), sum                                                                    |
-| `attention_block`  | `T`      | linear ×4, softmax ×2, layer_norm, bmm, permute, reshape, add                                              |
-| `fused_attention`  | なし     | attention（SDPA 保存の 1 ノード。B/H/M/N/D 全て別長・最終 query 行は logit −190 級）                       |
-| `embedding_lookup` | `T`      | embedding(padding_idx=0 は forward 不活性), sum                                                            |
-| `masked_scores`    | `T`      | masked_fill(−3.4e38 broadcast / 0 同形), softmax, cast, bitwise_not                                        |
-| `conv_block`       | `T`      | conv1d(kernel 3 / stride 1 / padding 1), permute                                                           |
-| `dilated_conv`     | `T`      | conv1d(depthwise g=C・dilation 1/3/9 / 中間 groups / 残差), leaky_relu, add                                |
-| `conv_transpose`   | `T`      | conv_transpose1d(up 2 と up 8 / 非対称チャネル), conv1d(bias 無し), tanh                                   |
-| `symbolic_table`   | `T`      | sym_prefix_slice(i32 2 軸 / f32 1 軸), gather, add（Tmax 畳み込み）                                        |
-| `scalar_operands`  | `T`      | add, sub, mul, div, cast（スカラ昇格 + 逆順 `1 − mask` を重みに使う）                                      |
-| `spline_pieces`    | `T`      | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape |
-| `coupling_split`   | `T`      | slice(split 分解 + pad 後の切り出し), cat, flip(軸長 3), pad, tanh, mul                                    |
-| `decoder_tail`     | `T`      | leaky_relu(slope 0.1 と既定 0.01), expand(f32), conv1d, tanh, mul                                          |
-| `i8_weights`       | `T`      | **i8 格納**で linear, conv1d, conv2d, conv_transpose1d, embedding（`WEIGHT_SLOTS` 全 5 op）, tanh          |
+| Model              | Symbolic dim | IR ops exercised                                                                                           |
+| ------------------ | ------------ | ---------------------------------------------------------------------------------------------------------- |
+| `unary_chain`      | none         | neg, abs, sqrt, log, exp                                                                                   |
+| `activations`      | none         | tanh, sigmoid, relu, gelu                                                                                  |
+| `broadcast_binary` | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                            |
+| `mlp`              | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                 |
+| `row_reduce`       | `T`          | sum, amax, amin                                                                                            |
+| `mask_chain`       | `T`          | mul(i32), cast, bitwise_not (has a bool output)                                                            |
+| `int_cast`         | `T`          | cast(f32→i32 truncating), sub(i32), mul(i32) (i32 output)                                                  |
+| `layout_chain`     | `T`          | permute(3-cycle), reshape ×3 (chain of aliases + coefficient dim 4T)                                       |
+| `expand_mask`      | `T`          | expand(bool / i32), cast, mul, bitwise_not                                                                 |
+| `batch_matmul`     | `T`          | bmm(B/M/K/N all distinct lengths), permute (rank-3 batched matmul)                                         |
+| `gather_last_dim`  | `T`          | gather(last dim / indices from an i32 input), sum                                                          |
+| `attention_block`  | `T`          | linear ×4, softmax ×2, layer_norm, bmm, permute, reshape, add                                              |
+| `fused_attention`  | none         | attention (one node preserved from SDPA; B/H/M/N/D all distinct, last query row has logits around −190)    |
+| `embedding_lookup` | `T`          | embedding(padding_idx=0 is inactive in forward), sum                                                       |
+| `masked_scores`    | `T`          | masked_fill(−3.4e38 broadcast / 0 same-shape), softmax, cast, bitwise_not                                  |
+| `conv_block`       | `T`          | conv1d(kernel 3 / stride 1 / padding 1), permute                                                           |
+| `dilated_conv`     | `T`          | conv1d(depthwise g=C, dilation 1/3/9 / intermediate groups / residual), leaky_relu, add                    |
+| `conv_transpose`   | `T`          | conv_transpose1d(up 2 and up 8 / asymmetric channels), conv1d(no bias), tanh                               |
+| `symbolic_table`   | `T`          | sym_prefix_slice(i32 on 2 axes / f32 on 1 axis), gather, add (Tmax folding)                                |
+| `scalar_operands`  | `T`          | add, sub, mul, div, cast (scalar promotion + reversed `1 − mask` used as a weight)                         |
+| `spline_pieces`    | `T`          | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape |
+| `coupling_split`   | `T`          | slice(split decomposition + slicing after pad), cat, flip(axis length 3), pad, tanh, mul                   |
+| `decoder_tail`     | `T`          | leaky_relu(slope 0.1 and the default 0.01), expand(f32), conv1d, tanh, mul                                 |
+| `i8_weights`       | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (all 5 `WEIGHT_SLOTS` ops), tanh    |
 
-`attention_block` の 2 本目の出力は **大きい負値（−205..−180）の softmax** で、素朴形
-（amax を引かない softmax）なら f32 で `exp` が 0 に潰れて `0/0 = NaN` になる領域。
-safe-softmax が外れた瞬間にこの golden が赤くなる。`masked_scores` の mask は 1 行を
-**全マスク**にしてあり、全要素が −3.4e38 になった行の softmax（一様分布）まで踏む。
+The second output of `attention_block` is a **softmax over large negative values (−205..−180)**, the
+regime where a naive form (a softmax that does not subtract amax) has `exp` collapse to 0 in f32 and
+yields `0/0 = NaN`. This golden turns red the moment safe-softmax comes off. The mask of
+`masked_scores` makes one row **fully masked**, so it also exercises the softmax of a row whose
+elements are all −3.4e38 (a uniform distribution).
 
-`dilated_conv` / `conv_transpose` は ADR 0015 の conv 族拡張の被覆。前者は depthwise
-（`groups = C`）・中間 groups（`1 < g < C`）・dilation 1/3/9 を 1 本の経路で踏み、後者は
-**チャネル数を全段で非対称**（5 → 3 → 2 → 1）にしてある — `conv_transpose1d` の重み
-`[Cin, Cout, K]` を `[Cout, Cin, K]` と読む取り違えは Cin == Cout だと要素数が合ってしまい、
-shape 検査も golden も素通りするため（recon §4）。最終段の `Conv1d(..., bias=False)` は
-**エクスポータのゼロ bias 合成**（アリティ 3 への正規化）を貫通させる唯一の golden。
+`dilated_conv` / `conv_transpose` cover the conv-family extension of ADR 0015. The former exercises
+depthwise (`groups = C`), intermediate groups (`1 < g < C`) and dilation 1/3/9 in a single path; the
+latter makes the **channel counts asymmetric at every stage** (5 → 3 → 2 → 1) — reading the
+`conv_transpose1d` weight `[Cin, Cout, K]` as `[Cout, Cin, K]` still gives a matching element count
+when Cin == Cout, so both the shape check and the golden would let it pass (recon §4). The final
+`Conv1d(..., bias=False)` is the only golden that goes through the exporter's **zero-bias
+synthesis** (normalization to arity 3).
 
-`spline_pieces` は波 3 の数理 op 群を **sdp の spline と同じ並び**（区間内判定 → 区間境界の
-cumsum → searchsorted-free の `sum(x[…,None] >= bl)` = bool の行 sum → 区間外復帰の where と
-softplus の log1p）で 1 本に通す。入力は ±TAIL と clamp の両端を**跨ぐ**列でなければならない
-（全要素が片側に寄ると where の分岐が片方しか踏まれない）。`coupling_split` は
-split → 片側だけ変換 → cat → flip の順序が値に出る形で、**チャネル数 6**（flip の軸長 3 —
-2ch の反転は off-by-one が対称に消える）。`decoder_tail` は leaky_relu の **slope 2 種**
-（0.1 と位置引数省略の torch 既定 0.01）を 1 グラフに混ぜ、attrs に slope を持たない設計だと
-片方が黙って誤ることを golden で塞ぐ。
+`spline_pieces` runs the numerical ops of wave 3 through one path **in the same order as the sdp
+spline** (in-interval test → cumsum over interval boundaries → searchsorted-free `sum(x[…,None] >=
+bl)` = a row sum over bools → the where for leaving the interval and the log1p of softplus). The
+input must be a sequence that **straddles** both ±TAIL and the clamp bounds (if every element lands
+on one side, only one branch of the where is taken). `coupling_split` is shaped so that the order
+split → transform one side only → cat → flip shows up in the values, with **6 channels** (flip over
+an axis of length 3 — reversing 2ch makes off-by-one errors cancel symmetrically). `decoder_tail`
+mixes **two leaky_relu slopes** (0.1 and torch's default 0.01 with the positional argument omitted)
+into one graph, so a design that does not carry the slope in attrs is caught by the golden instead
+of silently getting one of them wrong.
 
-`symbolic_table` は **T（= 6）< Tmax（= 24）** で焼くのが要点 — 読み出し stride を
-束縛後の shape から組む誤りは T = Tmax でしか一致しないので、実長の短い golden だけが
-検出器になる。`scalar_operands` の `1 − mask` は非可換で、定数を右に置く誤り（`mask − 1` に
-なる符号反転）がここで値に出る — そのためには**結果を値として下流に流す**必要がある
-（mask ∈ {0,1} では `(1 − mask) · mask` が逆順でも恒等 0 で、恒真な期待値になる）。生成側は
-「2 要素以上あるのに全要素が同じ値」の出力を書き出す前に落とす（`_assert_not_trivial`）。
+The point of `symbolic_table` is baking at **T (= 6) < Tmax (= 24)** — the mistake of building the
+read stride from the post-binding shape only agrees when T = Tmax, so only a golden with a shorter
+actual length is a detector. The `1 − mask` of `scalar_operands` is non-commutative, and putting the
+constant on the right (a sign flip that turns it into `mask − 1`) shows up in the values here — for
+which the **result must flow downstream as a value** (with mask ∈ {0,1}, `(1 − mask) · mask` is
+identically 0 in either order, giving a vacuously true expectation). The generator refuses to write
+out an output that "has more than one element yet every element is the same value"
+(`_assert_not_trivial`).
 
-`i8_weights` は**唯一の圧縮格納 golden**（`GoldenSpec.weight_dtype = "i8"` — 生成時に
-`fake_quant_int8` が export と期待値採取の**両方より前**に掛かる）。要点は 2 つ:
+`i8_weights` is the **only compressed-storage golden** (`GoldenSpec.weight_dtype = "i8"` — at
+generation time `fake_quant_int8` is applied **before both** the export and the expectation
+capture). Two points matter:
 
-- **重みの行長も総要素数も 4 の倍数にしない**（`[7,5]` / `[3,5]` / `[5,3,3]` / `[5,2,3]` /
-  `[3,2,3,1]`）。i8 は 4 要素を 1 u32 へ詰めるので、「語とレーンを行内相対添字から割り出す」
-  誤りは**行長が 4 の倍数のときだけ偶然一致する**（f16 の偶奇と同型の罠 — ADR 0019）。
-- **embedding の 1 行を全ゼロ**にする（`amax == 0` のチャネル）。scale の下限 clamp が外れると
-  `0/0 = NaN` になり、この 1 行だけが golden を赤くする。
+- **Neither the row length nor the total element count of a weight is a multiple of 4** (`[7,5]` /
+  `[3,5]` / `[5,3,3]` / `[5,2,3]` / `[3,2,3,1]`). i8 packs 4 elements into one u32, so the mistake
+  of "deriving word and lane from the row-relative index" **only agrees by accident when the row
+  length is a multiple of 4** (isomorphic to the f16 parity trap — ADR 0019).
+- **One row of the embedding is all zeros** (a channel with `amax == 0`). If the lower clamp on the
+  scale comes off, it becomes `0/0 = NaN`, and this single row is what turns the golden red.
 
-`conv_transpose1d` を混ぜてあるのは per-channel 軸が **1**（`[Cin,Cout,K]` の転置レイアウト）の
-唯一の op だから — 軸表の取り違えは他 4 op では値に出ない。
+`conv_transpose1d` is in the mix because it is the only op whose per-channel axis is **1** (the
+transposed `[Cin,Cout,K]` layout) — mixing up the axis table does not show up in the values for the
+other 4 ops.
 
-## 実重み DeBERTa の export と E2E（M1-P2 波 5）
+## Real-weight DeBERTa export and E2E (M1-P2 wave 5)
 
-tiny golden が「op 契約の被覆」を受け持つのに対し、`export_deberta.py` は**実重み・実トークン
-列での数値一致**を受け持つ。対象は SBV2 text front が使う BERT そのもの
-（HF `ku-nlp/deberta-v2-large-japanese-char-wwm`）。
+Where the tiny goldens take on "op contract coverage", `export_deberta.py` takes on **numerical
+agreement on real weights and real token sequences**. The target is the very BERT the SBV2 text
+front uses (HF `ku-nlp/deberta-v2-large-japanese-char-wwm`).
 
 ```sh
-# 1. 生成（重み・トークナイザの取得は transformers が HF から行う。初回のみ約 1.3GB のDL）
+# 1. generate (transformers fetches the weights and tokenizer from HF; ~1.3GB download on the first run)
 cd tools/exporter
-uv run --with 'transformers==5.14.1' python export_deberta.py            # 2 層 + 24 層
-uv run --with 'transformers==5.14.1' python export_deberta.py --layers 2 # 2 層だけ（開発用）
+uv run --with 'transformers==5.14.1' python export_deberta.py            # 2 layers + 24 layers
+uv run --with 'transformers==5.14.1' python export_deberta.py --layers 2 # 2 layers only (development)
 
-# 1b. i8 系列（ADR 0019 の格納 + ADR 0025 の w8a8 鏡像 golden）
+# 1b. i8 series (ADR 0019 storage + ADR 0025 w8a8 mirror goldens)
 uv run --with 'transformers==5.14.1' python export_deberta.py --dtype i8 --act-quant
 
-# 2. 実 GPU 突合（資産が無ければ全ケース SKIP）
+# 2. real-GPU comparison (every case SKIPs when the assets are absent)
 cd ../.. && deno test -A packages/runtime/tests/e2e_deberta_test.ts packages/runtime/tests/e2e_deberta_w8a8_test.ts
 ```
 
-- **transformers は 5.14.1 でピン**する（recon §6-5 — モデリングコードが変わるとグラフ形が
-  変わる）。`pyproject.toml` / `uv.lock` には入れず `--with` で一時的に足す。
-- 生成物は **`models/deberta/<variant>/`**（リポジトリ直下 `.gitignore` の `models/` で
-  コミット対象外 — 24 層の重みは 1.3GB）。`--dtype i8` は**別系列**
-  `models/deberta-i8/<variant>/`（24 層 319MB = f32 比 25.4%）。
+- **transformers is pinned to 5.14.1** (recon §6-5 — the graph shape changes when the modeling code
+  changes). It is not added to `pyproject.toml` / `uv.lock`; `--with` brings it in temporarily.
+- The outputs go to **`models/deberta/<variant>/`** (kept out of commits by the `models/` entry in
+  the top-level `.gitignore` — the 24-layer weights are 1.3GB). `--dtype i8` is a **separate
+  series** `models/deberta-i8/<variant>/` (24 layers, 319MB = 25.4% of f32).
 
 ```
-models/deberta/dev-2layer/model.safetensors      2 層（130 ノード / 208MB）
+models/deberta/dev-2layer/model.safetensors      2 layers (130 nodes / 208MB)
 models/deberta/dev-2layer/io.<case>.safetensors
-models/deberta/full-24layer/model.safetensors    24 層（1230 ノード / 1.32GB / 出力 25 本）
+models/deberta/full-24layer/model.safetensors    24 layers (1230 nodes / 1.32GB / 25 outputs)
 models/deberta/full-24layer/io.<case>.safetensors
 
-models/deberta-i8/full-24layer/model.safetensors      24 層 i8 格納（319MB）
-models/deberta-i8/full-24layer/io.<case>.safetensors       w8 の golden（活性は f32）
-models/deberta-i8/full-24layer/io-i8a8.<case>.safetensors  w8a8 の鏡像（--act-quant）
+models/deberta-i8/full-24layer/model.safetensors      24 layers in i8 storage (319MB)
+models/deberta-i8/full-24layer/io.<case>.safetensors       w8 goldens (activations in f32)
+models/deberta-i8/full-24layer/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
 ```
 
-io のテンソルキー命名は tiny golden と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
-1 モデルに対して io が**ケースごとに複数**ある点だけが違う。ケースは 4 つ:
+The io tensor key naming is the same as the tiny goldens (`input.<graph input name>` /
+`output.<position>`). The only difference is that a single model has **several io files, one per
+case**. There are 4 cases:
 
-| ケース   | 内容                             | T  |
-| -------- | -------------------------------- | -- |
-| `case0`  | 短文                             | 11 |
-| `case1`  | 長め                             | 26 |
-| `case2`  | 記号混じりの長文                 | 35 |
-| `padded` | `case0` + `[PAD]`×5（mask に 0） | 16 |
+| Case     | Content                             | T  |
+| -------- | ----------------------------------- | -- |
+| `case0`  | short sentence                      | 11 |
+| `case1`  | longer                              | 26 |
+| `case2`  | long sentence with symbols          | 35 |
+| `padded` | `case0` + `[PAD]`×5 (0 in the mask) | 16 |
 
-ラッパは `forward(input_ids, attention_mask) -> hidden_states`（全層のタプル）。層ごとに
-突合できるので、**誤差が層数でどう伸びるか**が golden から直接読める（tolerance の根拠が
-実測になる）。`padded` は `attention_mask=0` を混ぜてマスク経路（mul → cast →
-bitwise_not → masked_fill、および conv 経路の 0 埋め）を踏む唯一のケース。
+The wrapper is `forward(input_ids, attention_mask) -> hidden_states` (a tuple of all layers).
+Because every layer can be compared, **how the error grows with depth** can be read directly off the
+goldens (which puts the tolerances on a measured footing). `padded` is the only case that mixes in
+`attention_mask=0` and therefore exercises the mask path (mul → cast → bitwise_not → masked_fill,
+plus the zero fill on the conv path).
 
-Deno 側は `packages/runtime/tests/e2e_deberta_test.ts`（1 ケース = 1 テスト）。**資産が 1 件も無ければ全 SKIP**
-（生成コマンドを警告に出す）で、ADR 0005 の「全 SKIP は明示 FAIL」門番
-（`packages/runtime/tests/gpu_gate_test.ts`）とは独立 — 門番は GPU アダプタの有無だけを見ており、資産が
-無くても tiny golden の実 GPU テストは走る。一方、資産が**中途半端に**ある場合
-（片方の variant だけ / ケース欠け）は SKIP ではなく FAIL にする。tolerance は 24 層の誤差
-蓄積に合わせた専用値で、tiny golden の `GOLDEN_TOLERANCE` とは別（導出根拠は
-`packages/runtime/tests/e2e_deberta_test.ts` の `DEBERTA_TOLERANCE` のコメントが正本）。**f32 / i8 の 2 系列を
-同じ構造で回し、tolerance だけ系列ごとに実測導出する**（系列間の流用禁止）。
+On the Deno side: `packages/runtime/tests/e2e_deberta_test.ts` (one case = one test). **If not a
+single asset is present, everything SKIPs** (the generation command is printed in the warning); this
+is independent of the ADR 0005 "all-SKIP is an explicit FAIL" gate
+(`packages/runtime/tests/gpu_gate_test.ts`) — the gate only looks at whether a GPU adapter exists,
+and the tiny-golden real-GPU tests run even without the assets. When the assets are **partially**
+present (only one variant / a missing case) it is a FAIL, not a SKIP. The tolerance is a dedicated
+value matched to the error accumulation of 24 layers and is separate from the tiny goldens'
+`GOLDEN_TOLERANCE` (the derivation is authoritative in the `DEBERTA_TOLERANCE` comment in
+`packages/runtime/tests/e2e_deberta_test.ts`). **The f32 and i8 series run through the same
+structure, with the tolerance alone derived from measurements per series** (no reuse across series).
 
-`--act-quant` が書く `io-i8a8.<case>` は **w8a8**（`linearCompute: "i8a8"`）の鏡像で、
-`packages/runtime/tests/e2e_deberta_w8a8_test.ts` が使う。通常の `io.<case>` は**フックなし**で採る MUST
-（掛けたまま採ると w8 側 E2E の期待値が活性量子化ごと汚染される）。prefix を `io.` から
-分けてあるのは、Deno 側の通常ケース列挙（`io.` の startsWith）が鏡像を拾わないため。
-w8a8 の E2E は**数値パリティの網ではない**（活性量子化が不連続なので数層で GPU と torch が
-「同じ分布の別標本」になる）— 検出力の設計は同テスト冒頭のコメントが正本。
+The `io-i8a8.<case>` files written by `--act-quant` are the **w8a8** (`linearCompute: "i8a8"`)
+mirror, used by `packages/runtime/tests/e2e_deberta_w8a8_test.ts`. The regular `io.<case>` MUST be
+taken **without the hook** (taking it with the hook still applied would contaminate the w8-side E2E
+expectations with activation quantization). The prefix is kept apart from `io.` so that the
+Deno-side enumeration of regular cases (startsWith `io.`) does not pick up the mirror. The w8a8 E2E
+is **not a numerical parity net** (activation quantization is discontinuous, so after a few layers
+the GPU and torch become "different samples of the same distribution") — the design of its detection
+power is authoritative in the comment at the top of that test.
 
-## 実重み SBV2 の export と E2E（M1-P3 波 1: dp / 波 6: front / 波 7: flow・dec・voice）
+## Real-weight SBV2 export and E2E (M1-P3 wave 1: dp / wave 6: front / wave 7: flow, dec, voice)
 
-音響チェーン側の実重み。ADR [0013](../../docs/decisions/0013-sbv2-chain-export.md) の emit
-ターゲット 5 本が**全て揃っている**（`voice` の E2E が緑 = SBV2 全チェーン成立）:
+Real weights for the acoustic chain. All 5 emit targets of ADR
+[0013](../../docs/decisions/0013-sbv2-chain-export.md) are **in place** (a green `voice` E2E = the
+whole SBV2 chain holds):
 
-| ターゲット | 中身                                      | sym_max | 備考                                                |
-| ---------- | ----------------------------------------- | ------- | --------------------------------------------------- |
-| `dp`       | DurationPredictor 単体                    | 512 (P) | 波 1。パッチ層も語彙拡張も不要（貫通の足場）        |
-| `front`    | enc_p + dp + sdp(reverse) の融合 1 グラフ | 512 (P) | 波 6。**パッチ層必須**（下の「パッチ層」を参照）    |
-| `flow`     | TransformerCouplingBlock の reverse       | 4096(T) | 波 7。相対位置表を**グラフ入力**へ昇格              |
-| `dec`      | HiFi-GAN Generator                        | 4096(T) | 波 7。パッチ不要・`remove_weight_norm` だけが前処理 |
-| `voice`    | flow + dec の融合 1 グラフ                | 4096(T) | 波 7。**これが通ると全チェーンが揃う**              |
+| Target  | Contents                                       | sym_max | Notes                                                                                 |
+| ------- | ---------------------------------------------- | ------- | ------------------------------------------------------------------------------------- |
+| `dp`    | DurationPredictor alone                        | 512 (P) | Wave 1. Needs neither the patch layer nor vocabulary growth (the end-to-end scaffold) |
+| `front` | enc_p + dp + sdp(reverse) fused into one graph | 512 (P) | Wave 6. **Patch layer required** (see "Patch layer" below)                            |
+| `flow`  | reverse of TransformerCouplingBlock            | 4096(T) | Wave 7. Relative-position tables promoted to **graph inputs**                         |
+| `dec`   | HiFi-GAN Generator                             | 4096(T) | Wave 7. No patches; `remove_weight_norm` is the only preprocessing                    |
+| `voice` | flow + dec fused into one graph                | 4096(T) | Wave 7. **Once this passes, the whole chain is in place**                             |
 
-### 依存
+### Dependencies
 
 ```sh
 cd tools/exporter
 uv sync --group sbv2   # style-bert-vits2==2.5.0 / huggingface-hub
 ```
 
-- **`style-bert-vits2` は `==` でピン**する。後続の波のエクスポータはパッケージ内部
-  （モデリングコードのクラス属性）を monkeypatch する前提で組むので、マイナー更新で
-  差し替え先の名前や forward の形が変わるとグラフ形ごと黙って変わる。理由は
-  `pyproject.toml` の当該行にもコメントで残してある。
-- 既定の `uv sync` には**入れない**（base deps だけで tiny golden と pytest が回る状態を
-  保つ）。`transformers==5.14.1` はこのグループの推移的依存として入る。
-- **ビルド依存に注意**: 推移的依存の `pyopenjtalk-dict` は wheel が無く sdist から
-  ビルドされるため、**C / C++ コンパイラと cmake / make が要る**。無い環境では
-  `uv sync --group sbv2` が cmake のエラーで落ちる（dp の export 自体はこのパッケージを
-  一切使わないが、依存解決は素通りできない）。
+- **`style-bert-vits2` is pinned with `==`.** The exporters of the later waves are built on
+  monkeypatching package internals (class attributes of the modeling code), so a minor update that
+  renames a replacement target or changes the shape of a forward silently changes the graph itself.
+  The reason is also left as a comment on that line in `pyproject.toml`.
+- It is **not** part of the default `uv sync` (so that the base deps alone keep the tiny goldens and
+  pytest running). `transformers==5.14.1` comes in as a transitive dependency of this group.
+- **Watch the build dependencies**: the transitive dependency `pyopenjtalk-dict` has no wheel and is
+  built from an sdist, so it **requires a C / C++ compiler plus cmake and make**. Without them, `uv
+  sync --group sbv2` fails with a cmake error (the dp export itself never uses this package, but
+  dependency resolution cannot be skipped).
 
-### 重みの入手
+### Obtaining the weights
 
-**実重みはリポジトリに含まれない。ローカルに持っている資産を `models/sbv2/` へ手で配置する
-（配布元・取得手順は未特定 — 現時点でコードベースからも特定できていない）。**
+**The real weights are not part of the repository. Place the assets you hold locally under
+`models/sbv2/` by hand (the distribution source and the retrieval procedure are unidentified — at
+this point they cannot be determined from the codebase either).**
 
 ```
-models/sbv2/config.json                        HyperParameters（`version` が JP-Extra 判定に効く）
-models/sbv2/<任意名>.safetensors               ckpt（このディレクトリ直下に **1 本だけ**）
-models/sbv2/style_vectors.npy                  スタイルベクトル（front の style_vec に使う）
+models/sbv2/config.json                        HyperParameters (`version` drives the JP-Extra decision)
+models/sbv2/<any-name>.safetensors             ckpt (**exactly one** directly under this directory)
+models/sbv2/style_vectors.npy                  style vectors (used for the front's style_vec)
 ```
 
-ckpt は `models/sbv2/*.safetensors` の**一意存在**を要求する（複数あると「どれを読んだか」が
-黙って変わる）。生成物は 1 段下の `models/sbv2/<target>/` に置くので、この glob には掛からない。
+The ckpt is required to be the **unique** match of `models/sbv2/*.safetensors` (with several, which
+one was read would change silently). The outputs go one level down into `models/sbv2/<target>/`, so
+they do not match this glob.
 
-### 生成と突合
+### Generation and comparison
 
 ```sh
-# 1. 生成（重み 251MB 級のロード込みで 5 本合計およそ 40 秒）
+# 1. generate (about 40 seconds for all 5, including loading the 251MB-class weights)
 cd tools/exporter
-uv run --group sbv2 python export_sbv2.py                # 全ターゲット
-uv run --group sbv2 python export_sbv2.py --target front # 1 本だけ
-uv run --group sbv2 python export_sbv2.py --dtype f16    # f16 系列 → models/sbv2-f16/
-uv run --group sbv2 python export_sbv2.py --dtype i8     # i8 系列  → models/sbv2-i8/
+uv run --group sbv2 python export_sbv2.py                # all targets
+uv run --group sbv2 python export_sbv2.py --target front # one target only
+uv run --group sbv2 python export_sbv2.py --dtype f16    # f16 series → models/sbv2-f16/
+uv run --group sbv2 python export_sbv2.py --dtype i8     # i8 series  → models/sbv2-i8/
 
-# 2. 参照実装との eager 同値検証（**1 プロセス 1 ターゲット**。下の「パッチ層」を参照）
+# 2. eager equivalence against the reference implementation (**one target per process**; see "Patch layer" below)
 uv run --group sbv2 python export_sbv2.py --verify front
 uv run --group sbv2 python export_sbv2.py --verify flow
-uv run --group sbv2 python export_sbv2.py --verify dec    # remove_weight_norm 前後
+uv run --group sbv2 python export_sbv2.py --verify dec    # before/after remove_weight_norm
 uv run --group sbv2 python export_sbv2.py --verify voice
 
-# 3. 実 GPU 突合（資産が無ければ全ケース SKIP）
+# 3. real-GPU comparison (every case SKIPs when the assets are absent)
 cd ../.. && deno test -A packages/runtime/tests/e2e_sbv2_test.ts packages/runtime/tests/sbv2_relattn_parity_test.ts
 ```
 
 ```
-models/sbv2/dp/model.safetensors       IR   17 ノード /  12 initializer /   1.78MB
-models/sbv2/front/model.safetensors    IR  911 ノード / 263 initializer /  33.4MB（うち焼き込み表 2.1MB）
-models/sbv2/flow/model.safetensors     IR 1589 ノード / 458 initializer / 158.9MB（焼き込み表 0.15MB）
-models/sbv2/dec/model.safetensors      IR  246 ノード / 197 initializer /  58.7MB
-models/sbv2/voice/model.safetensors    IR 1836 ノード / 655 initializer / 217.6MB
-models/sbv2/<target>/io.<case>.safetensors  入力と torch CPU 期待出力
+models/sbv2/dp/model.safetensors       IR   17 nodes /  12 initializers /   1.78MB
+models/sbv2/front/model.safetensors    IR  911 nodes / 263 initializers /  33.4MB (2.1MB of baked tables)
+models/sbv2/flow/model.safetensors     IR 1589 nodes / 458 initializers / 158.9MB (0.15MB of baked tables)
+models/sbv2/dec/model.safetensors      IR  246 nodes / 197 initializers /  58.7MB
+models/sbv2/voice/model.safetensors    IR 1836 nodes / 655 initializers / 217.6MB
+models/sbv2/<target>/io.<case>.safetensors  inputs and expected torch CPU outputs
 ```
 
-#### 格納 dtype の系列（`--dtype f16` / `--dtype i8` — ADR 0018 / 0019）
+#### Storage dtype series (`--dtype f16` / `--dtype i8` — ADR 0018 / 0019)
 
-`--dtype f16` / `--dtype i8` はそれぞれ**別系列** `models/sbv2-f16/<target>/` /
-`models/sbv2-i8/<target>/` へ書く（f32 系列と同居させると既存 E2E の f32 tolerance が黙って
-圧縮資産に掛かる）。丸め（fake-quant）は共有の `quantize.round_weights_to_f16` /
-`quantize.fake_quant_int8` を **`remove_weight_norm` / パッチ適用の後・参照と golden の
-採取の前**に、export する各ターゲットのモジュールへ当てる。i8 は **w8a8 の受け皿ではない**
-（SBV2 は 5 ターゲットとも conv1d が 86〜90% で linear が実質 0 GFLOP — ADR 0025 決定⑤）—
-狙いは資産サイズとロード時間で、計算は f32 のまま（w8a32）。
+`--dtype f16` / `--dtype i8` each write to a **separate series**, `models/sbv2-f16/<target>/` /
+`models/sbv2-i8/<target>/` (keeping them next to the f32 series would silently apply the f32
+tolerance of the existing E2E to compressed assets). The rounding (fake-quant) uses the shared
+`quantize.round_weights_to_f16` / `quantize.fake_quant_int8` and is applied to the modules of each
+exported target **after `remove_weight_norm` and the patches, and before the reference and golden
+capture**. i8 is **not a vehicle for w8a8** (in all 5 SBV2 targets conv1d is 86–90% and linear is
+effectively 0 GFLOP — ADR 0025 decision ⑤) — the aim is asset size and load time, with the
+computation staying f32 (w8a32).
 
-| ターゲット | f32 格納 | f16 格納 |    比 | i8 格納 |    比 | 適格（圧縮常駐） |
-| ---------- | -------- | -------- | ----: | ------- | ----: | ---------------- |
-| `dp`       | 1.78MB   | 0.90MB   | 50.4% | 0.46MB  | 25.7% | 4 本 / 0.44MB    |
-| `front`    | 33.39MB  | 17.96MB  | 53.8% | 10.33MB | 30.9% | 80 本 / 7.72MB   |
-| `flow`     | 158.86MB | 79.92MB  | 50.3% | 40.65MB | 25.6% | 156 本 / 39.47MB |
-| `dec`      | 58.71MB  | 29.43MB  | 50.1% | 14.84MB | 25.3% | 98 本 / 14.64MB  |
-| `voice`    | 217.60MB | 109.37MB | 50.3% | 55.53MB | 25.5% | 254 本 / 54.11MB |
+| Target  | f32 storage | f16 storage | Ratio | i8 storage | Ratio | Eligible (compressed resident) |
+| ------- | ----------- | ----------- | ----: | ---------- | ----: | ------------------------------ |
+| `dp`    | 1.78MB      | 0.90MB      | 50.4% | 0.46MB     | 25.7% | 4 tensors / 0.44MB             |
+| `front` | 33.39MB     | 17.96MB     | 53.8% | 10.33MB    | 30.9% | 80 tensors / 7.72MB            |
+| `flow`  | 158.86MB    | 79.92MB     | 50.3% | 40.65MB    | 25.6% | 156 tensors / 39.47MB          |
+| `dec`   | 58.71MB     | 29.43MB     | 50.1% | 14.84MB    | 25.3% | 98 tensors / 14.64MB           |
+| `voice` | 217.60MB    | 109.37MB    | 50.3% | 55.53MB    | 25.5% | 254 tensors / 54.11MB          |
 
-（適格の本数は 3 系列で同じ。バイト数は i8 系列のもの — 圧縮対象の集合は格納 dtype に依らず
-`WEIGHT_SLOTS` の重みスロットだけで決まる。）front だけ比が高いのは、焼き込んだ相対位置表
-（2.1MB の i32 / f32 定数）が重みスロット適格外で f32 のまま残るため。合計は f32 470.34MB →
-f16 237.57MB（50.5%）→ **i8 121.81MB（25.9%）**で、i8 の companion scale は 505,576 B
-（圧縮バイトの 0.42%）。
+(The eligible counts are the same across all 3 series. The byte figures are from the i8 series — the
+set of compression candidates is determined solely by the `WEIGHT_SLOTS` weight slots and does not
+depend on the storage dtype.) The ratio is higher for `front` alone because the baked
+relative-position tables (2.1MB of i32 / f32 constants) are ineligible for weight slots and stay
+f32. The totals are f32 470.34MB → f16 237.57MB (50.5%) → **i8 121.81MB (25.9%)**, and the i8
+companion scales are 505,576 B (0.42% of the compressed bytes).
 
-MUST: `--dtype` は **emit 専用**（`--sym-max` と同じ）。`--verify` との併用は CLI が拒否する
-— 検証は格納形式を見ない eager 比較で、しかも dec / voice では丸めを `remove_weight_norm` の
-**後**にしか当てられないのに参照は remove の**前**に採るため、併用すると「丸めた側 vs
-丸めていない側」の比較になって `bit_exact` の主張が壊れる。
+MUST: `--dtype` is **emit-only** (like `--sym-max`). The CLI rejects combining it with `--verify` —
+verification is an eager comparison that does not look at the storage format, and for dec / voice
+the rounding can only be applied **after** `remove_weight_norm` while the reference is taken
+**before** the removal, so combining them would compare "the rounded side vs the unrounded side" and
+break the `bit_exact` claim.
 
-dp のラッパは `forward(h, x_mask, g) -> logw`。素の `DurationPredictor.forward` は `g` が
-`Optional` で分岐を持つので、必須にして分岐を消し、入力名を recon の呼び名に揃えている
-（IR の入力名は forward の引数名がそのまま出る）。動的軸は `Dim("P", min=2, max=512)` —
-**sym_max はターゲット別で、front 系が 512（P = 音素数）、flow/dec/voice は 4096
-（T = フレーム数）**。機械的な強制が無く誤値は沈黙するので、既定値は台本側に持たせて
-`--sym-max` で逸脱するときだけ明示させる（ADR 0013）。
+The dp wrapper is `forward(h, x_mask, g) -> logw`. The plain `DurationPredictor.forward` has `g` as
+`Optional` and therefore a branch, so it is made mandatory to remove the branch, and the input names
+are aligned with the names used in the recon (IR input names come straight from the forward argument
+names). The dynamic axis is `Dim("P", min=2, max=512)` — **sym_max is per target: 512 for the front
+family (P = number of phonemes) and 4096 for flow/dec/voice (T = number of frames)**. Nothing
+enforces it mechanically and a wrong value stays silent, so the default lives in the script and
+`--sym-max` only has to be spelled out when deviating from it (ADR 0013).
 
-front のラッパは `forward(x, x_mask, tone, language, bert, style_vec, g, z_noise)
--> (logw_sdp, logw_dp, m_p, logs_p)`。`x_mask` は**外部入力**（原実装は `x_lengths` から
-内部生成するが、長さを「値として」使う形は畳み込みに載らない）で、sdp reverse の乱数も
-外部入力 `z_noise` に昇格している（`noise_scale` の乗算はホスト側 — 実行時ノブをグラフに
-焼かない）。`sdp_ratio` の混合と durations 化も同じくホスト側。
+The front wrapper is `forward(x, x_mask, tone, language, bert, style_vec, g, z_noise) -> (logw_sdp,
+logw_dp, m_p, logs_p)`. `x_mask` is an **external input** (the original implementation derives it
+internally from `x_lengths`, but using a length "as a value" does not fit into the convolution), and
+the randomness of the sdp reverse is likewise promoted to the external input `z_noise` (multiplying
+by `noise_scale` is done on the host — runtime knobs are not baked into the graph). Mixing in
+`sdp_ratio` and turning the result into durations is host-side as well.
 
-flow / voice のラッパは `forward(z_p, y_mask, g, idx_k, valid) -> z / audio`、dec は素の
-`Generator.forward(x, g) -> audio [1,1,512T]`（ラッパを置いていない）。`idx_k` / `valid` は
-相対位置注意の `(T,T)` 表で、**front と違ってグラフ入力**（下の「パッチ層」を参照）。
+The flow / voice wrapper is `forward(z_p, y_mask, g, idx_k, valid) -> z / audio`, and dec is the
+plain `Generator.forward(x, g) -> audio [1,1,512T]` (no wrapper). `idx_k` / `valid` are the `(T,T)`
+tables of relative-position attention and, **unlike front, are graph inputs** (see "Patch layer"
+below).
 
-golden ケースは**全ターゲット共通の 5 本**（Deno 側が 1 本の表でターゲット横断に等値検査
-するため）。dp の `h`、front の `x` / `tone` / `bert`、flow / dec の `z_p` / `x` は長さごとの
-固定 seed の randn で、`g` は**実重みの話者埋め込み（`emb_g`）**、`style_vec` は**実資産
-（`style_vectors.npy`）**から引く（合成乱数だと値域が実運用と対応せず、tolerance の根拠が
-浮く）。
+The golden cases are **5 shared by every target** (so that the Deno side can check equality across
+targets from a single table). The dp `h`, the front `x` / `tone` / `bert`, and the flow / dec `z_p`
+/ `x` are randn with a fixed seed per length, `g` is the **real speaker embedding weight (`emb_g`)**
+and `style_vec` is taken from the **real asset (`style_vectors.npy`)** (with synthetic randomness
+the value ranges would not correspond to production and the tolerances would have no footing).
 
-| ケース   | 長さ | 内容                                                           |
-| -------- | ---- | -------------------------------------------------------------- |
-| `p2`     | 2    | 下限（`torch.export` の 0/1 特殊化を避ける最小値）             |
-| `p37`    | 37   | 短め                                                           |
-| `p203`   | 203  | 中                                                             |
-| `p512`   | 512  | front 系の宣言上限ちょうど                                     |
-| `padded` | 16   | 末尾 5 列をマスク 0（front / flow のマスク経路の唯一の検出器） |
+| Case     | Length | Content                                                                          |
+| -------- | ------ | -------------------------------------------------------------------------------- |
+| `p2`     | 2      | lower bound (the smallest value that avoids `torch.export`'s 0/1 specialization) |
+| `p37`    | 37     | short                                                                            |
+| `p203`   | 203    | medium                                                                           |
+| `p512`   | 512    | exactly the declared upper bound of the front family                             |
+| `padded` | 16     | last 5 columns masked to 0 (the only detector for the mask path of front / flow) |
 
-- ケース名の `p<n>` は front 系の **P（音素数）**由来だが、flow 系では **T（フレーム数）**を
-  指す。1 本の表を全ターゲットで共有する（＝どのターゲットもケースを欠かせない）ことを
-  優先して名前は据え置いてある。
-- **flow 系の宣言上限 4096 を踏む golden は無い**。表と注意スコアが O(T²)、dec の出力が
-  512·T なので、T=4096 では io 1 ケースで 134MB / 出力 210 万点になり golden 資産としても
-  実 GPU テストとしても割に合わない。上限近傍は「宣言上限に依存した実装が無いこと」を
-  長さの散らばり（2 → 512 で 256 倍）で踏む側に寄せている。
+- The `p<n>` in the case names comes from **P (number of phonemes)** in the front family, but in the
+  flow family it means **T (number of frames)**. The names are left as they are, prioritizing one
+  shared table across all targets (i.e. no target may skip a case).
+- **No golden reaches the declared upper bound 4096 of the flow family.** The tables and attention
+  scores are O(T²) and the dec output is 512·T, so at T=4096 a single io case would be 134MB with
+  2.1e6 output points — not worth it as a golden asset nor as a real-GPU test. Coverage near the
+  bound is instead shifted onto "no implementation depends on the declared upper bound", checked
+  through the spread of lengths (2 → 512, a factor of 256).
 
-`padded` の入力は**パディング列にも値が入っている** — マスク乗算が効いていれば出力の末尾は
-厳密に 0 になり、外れれば値が漏れる。この形でないとマスク経路の検出器にならない
-（`tests/test_export_sbv2.py` が「マスクを全 1 に差し替えると末尾が 0 でなくなる」ことまで
-固定して、恒真化を塞いでいる）。
+The `padded` input **has values in the padded columns too** — if the mask multiplication works, the
+tail of the output is exactly 0, and if it comes off, values leak. Without this shape it is not a
+detector for the mask path (`tests/test_export_sbv2.py` goes as far as pinning down that "replacing
+the mask with all ones makes the tail non-zero", closing off vacuous truth).
 
-ロード時に固定する assert が 2 つ:
+There are 2 asserts pinned at load time:
 
-- **相対位置注意の窓幅 == 4**（`enc_p` と `flow` の両方）。gather 化パッチの添字表は
-  `clamp(rel + 4, 0, 8)` を焼き込むので、窓幅が違うと**幅の違う埋め込みを黙って読む**
-  （要素数は合うので shape エラーにならない「沈黙誤値」クラス）。しかも golden も同じ誤りで
-  生成されるため数値突合もすり抜ける。ckpt を差し替えた瞬間に落とすのが最小の対処なので
-  ローダ側に置く（ADR 0013）。
-- **weight_norm 由来のパラメータが `enc_p` / `sdp` / `dp` / `flow` に無いこと**。残っていると
-  `weight` が実効重みではなくなり、そのまま書き出すと別のモデルになる（実測 0 件だが、
-  無い前提で何もしていない側なので fail loudly で固定する）。**`dec` はここに入らない** —
-  有効な weight_norm（95 モジュール / 190 パラメータ）を持って出荷される側で、除去は
-  `ensure_dec_plain` が export の直前に行う。
+- **The relative-position attention window size == 4** (for both `enc_p` and `flow`). The index
+  tables of the gather patch bake in `clamp(rel + 4, 0, 8)`, so a different window size would
+  **silently read an embedding of a different width** (the element count still matches, so it is the
+  "silent wrong value" class rather than a shape error). Worse, the goldens would be generated with
+  the same mistake, so a numerical comparison would pass as well. Failing the moment the ckpt is
+  swapped is the minimal remedy, so it lives in the loader (ADR 0013).
+- **No weight_norm-derived parameters remain in `enc_p` / `sdp` / `dp` / `flow`.** If any remain,
+  `weight` is no longer the effective weight and writing it out as-is produces a different model
+  (measured 0 occurrences, but this is the side that does nothing on the assumption they are absent,
+  so it is pinned with fail loudly). **`dec` is not on this list** — it ships with weight_norm
+  active (95 modules / 190 parameters), and removal is done by `ensure_dec_plain` immediately before
+  export.
 
-`ensure_dec_plain`（冪等）は dec の `remove_weight_norm` を通してから上の assert を掛ける。
-**重みの丸め（`--dtype f16` / `--dtype i8`）は remove 後の実効重みに当てる**順序制約があり
-（remove より先に丸めると `weight_g` / `weight_v` を丸めることになって実効重みが丸めの格子に
-乗らない。i8 では捨てられる要素が amax に効いて per-channel scale ごとずれる）、
-`ensure_dec_plain` と `_fake_quant` の docstring に MUST として書いてある
-（ADR 0013 / 0018 / 0019）。
+`ensure_dec_plain` (idempotent) runs dec through `remove_weight_norm` and then applies the asserts
+above. There is an ordering constraint that **weight rounding (`--dtype f16` / `--dtype i8`) is
+applied to the effective weights after the removal** (rounding before the removal would round
+`weight_g` / `weight_v`, leaving the effective weights off the rounding lattice; with i8 the
+discarded elements feed into amax and shift the whole per-channel scale), and it is written as a
+MUST in the docstrings of `ensure_dec_plain` and `_fake_quant` (ADR 0013 / 0018 / 0019).
 
-Deno 側は `packages/runtime/tests/e2e_sbv2_test.ts`（1 ケース = 1 テスト）と
-`packages/runtime/tests/sbv2_relattn_parity_test.ts`（表のバイト一致）。DeBERTa と同じ二段構えで、
-`models/sbv2/` に**ターゲットのディレクトリが 1 つも無ければ全 SKIP**（生の重みだけ置いて
-export をまだ流していない環境がこれ）、**中途半端にある場合**（ターゲット欠け / ケース欠け）
-は FAIL。**系列（f32 / f16 / i8）でパラメタ化**してあり、tolerance は**系列 × ターゲットごとに
-実測から導く**（系列間の流用禁止 — 片方の再導出がもう片方を黙って動かす）:
+On the Deno side: `packages/runtime/tests/e2e_sbv2_test.ts` (one case = one test) and
+`packages/runtime/tests/sbv2_relattn_parity_test.ts` (byte equality of the tables). Same two-stage
+structure as DeBERTa: **if `models/sbv2/` contains not a single target directory, everything SKIPs**
+(this is the environment where only the raw weights are in place and export has not been run yet),
+and when they are **partially** present (a missing target / a missing case) it is a FAIL. It is
+**parameterized by series (f32 / f16 / i8)**, and the tolerances are **derived from measurements per
+series × target** (no reuse across series — re-deriving one would silently move the other):
 
-| ターゲット | f32 atol | f32 rtol | 判定の主役   | f32 実測 maxAbs | f16 atol | f16 rtol | f16 実測 maxAbs | i8 atol | i8 rtol | i8 実測 maxAbs |
-| ---------- | -------- | -------- | ------------ | --------------- | -------- | -------- | --------------- | ------- | ------- | -------------- |
-| `dp`       | 1e-6     | 1e-5     | rtol         | 2.62e-6         | 1e-6     | 1e-5     | 3.58e-6         | 1e-6    | 2e-5    | 2.38e-6        |
-| `front`    | 1e-4     | 1e-5     | atol         | 1.75e-5         | 3e-4     | 1e-5     | 3.62e-5         | 2e-4    | 1e-5    | 2.37e-5        |
-| `flow`     | 2e-5     | 1e-6     | atol         | 2.74e-6         | 2e-5     | 1e-6     | 2.15e-6         | 2e-5    | 1e-6    | 2.62e-6        |
-| `dec`      | 3e-5     | 1e-6     | atol（単独） | 4.00e-6         | 2e-5     | 1e-6     | 2.37e-6         | 5e-5    | 1e-6    | 6.07e-6        |
-| `voice`    | 1e-5     | 1e-6     | atol（単独） | 1.60e-6         | 1.5e-5   | 1e-6     | 1.71e-6         | 1.5e-5  | 1e-6    | 1.74e-6        |
+| Target  | f32 atol | f32 rtol | Dominant check | f32 measured maxAbs | f16 atol | f16 rtol | f16 measured maxAbs | i8 atol | i8 rtol | i8 measured maxAbs |
+| ------- | -------- | -------- | -------------- | ------------------- | -------- | -------- | ------------------- | ------- | ------- | ------------------ |
+| `dp`    | 1e-6     | 1e-5     | rtol           | 2.62e-6             | 1e-6     | 1e-5     | 3.58e-6             | 1e-6    | 2e-5    | 2.38e-6            |
+| `front` | 1e-4     | 1e-5     | atol           | 1.75e-5             | 3e-4     | 1e-5     | 3.62e-5             | 2e-4    | 1e-5    | 2.37e-5            |
+| `flow`  | 2e-5     | 1e-6     | atol           | 2.74e-6             | 2e-5     | 1e-6     | 2.15e-6             | 2e-5    | 1e-6    | 2.62e-6            |
+| `dec`   | 3e-5     | 1e-6     | atol (alone)   | 4.00e-6             | 2e-5     | 1e-6     | 2.37e-6             | 5e-5    | 1e-6    | 6.07e-6            |
+| `voice` | 1e-5     | 1e-6     | atol (alone)   | 1.60e-6             | 1.5e-5   | 1e-6     | 1.71e-6             | 1.5e-5  | 1e-6    | 1.74e-6            |
 
-f16 系列で有意に増えたのは front の `logw_sdp` だけ（1.75e-5 → 3.62e-5）。他の 4 ターゲットは
-f32 系列と同桁で、丸めた重みが golden 側にも入っている（= 量子化誤差が差に入らない）ことの
-裏取りになっている — 掛け忘れていれば差は重みの相対 5e-4 級に化けて 3 桁上に出る。i8 系列も
-同じ構造で、5 ターゲットとも f32 系列と同桁に収まる（front が 1.4 倍・dec が 1.5 倍で最大 —
-掛け忘れなら per-channel の量子化誤差 4e-3 級が桁で上に出る）。判定の主役はどの系列でも
-ターゲットごとに同じ（値域の形で決まるので格納 dtype では動かない）。
+In the f16 series the only significant increase is the front's `logw_sdp` (1.75e-5 → 3.62e-5). The
+other 4 targets stay in the same order of magnitude as the f32 series, which corroborates that the
+rounded weights also went into the goldens (i.e. the quantization error does not enter the
+difference) — had the rounding been forgotten, the difference would have turned into the weights'
+relative 5e-4 class and shown up 3 orders higher. The i8 series has the same structure, with all 5
+targets landing in the same order of magnitude as the f32 series (front at 1.4× and dec at 1.5×
+being the largest — a forgotten rounding would push the per-channel quantization error of the 4e-3
+class up by an order of magnitude). Which check dominates is the same per target in every series (it
+is determined by the shape of the value range, so the storage dtype does not move it).
 
-flow / dec / voice で rtol を主役に据えられないのは、出力（潜在変数 z と波形）が 0 を跨ぐ
-値域で、`|ref|` の最小非ゼロが 1e-8 級まで落ちるため — そこで相対誤差が発散する（dec の
-実測 maxRel は 0.44 に達するが、その要素の絶対誤差は 1e-8 級）。導出根拠は同ファイルの
-`SBV2_*_TOLERANCE` のコメントが正本。**dec の最終段 `tanh` は WGSL 実装依存で torch と
-ビット一致しない**ので、この突合は原理的に許容誤差込みでしか成立しない。
+rtol cannot be the dominant check for flow / dec / voice because the outputs (the latent z and the
+waveform) span a range that crosses 0, where the smallest non-zero `|ref|` drops to the 1e-8 class —
+the relative error diverges there (dec's measured maxRel reaches 0.44, but the absolute error of
+that element is of the 1e-8 class). The derivations are authoritative in the `SBV2_*_TOLERANCE`
+comments in the same file. **The final `tanh` of dec is WGSL-implementation dependent and does not
+match torch bit for bit**, so this comparison can in principle only hold with a tolerance.
 
-pytest 側は `tests/test_export_sbv2.py`（台本の約束事）と `tests/test_patch_sbv2.py`
-（パッチ層の単体）。golden 入力の作りと CLI の排他は実重み不要で常に走り、export 本体は
-**実重みと `sbv2` グループが揃っている環境でだけ**走る（無ければ SKIP）。
+On the pytest side: `tests/test_export_sbv2.py` (the script's contract) and
+`tests/test_patch_sbv2.py` (unit tests for the patch layer). Building the golden inputs and the CLI
+exclusivity need no real weights and always run; the export body runs **only in an environment where
+the real weights and the `sbv2` group are both present** (otherwise SKIP).
 
-### パッチ層（`karume/patch_sbv2.py`）
+### Patch layer (`karume/patch_sbv2.py`)
 
-front と flow / voice は無改造では export できない（dec は不要）。パッチは import 済み
-クラスの属性差し替え（monkeypatch）とラッパで行い、`style_bert_vits2` パッケージ本体には
-触れない。
+front and flow / voice cannot be exported unmodified (dec does not need it). The patches work by
+replacing attributes of already-imported classes (monkeypatch) plus wrappers; the `style_bert_vits2`
+package itself is left untouched.
 
-| パッチ                        | 何をするか                                            | なぜ必要か                                                                                          |
-| ----------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| spline の分岐フリー・非破壊化 | boolean-mask indexing → clamp + where、in-place → cat | 区間内要素だけの抽出は**要素数がデータ依存**で `GuardOnDataDependentSymNode` になる                 |
-| 相対位置注意の gather 化      | rel⇄abs シフト → 添字表 + 最終次元 gather             | シフトが `2P−1` / `2P²` / `P(2P−1)` の**二次 shape 式**を作る（次元言語のアフィン拡張でも救えない） |
-| FFN の pad 畳み込み           | 明示 `F.pad` → `conv1d(padding=…)`                    | `constant_pad_nd` を減らす。**奇数 kernel かつ非 causal のときだけ**厳密に等価（assert で固定）     |
+| Patch                                      | What it does                                          | Why it is needed                                                                                                                                 |
+| ------------------------------------------ | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Branch-free, non-destructive spline        | boolean-mask indexing → clamp + where, in-place → cat | Extracting only the in-interval elements makes the **element count data-dependent**, giving `GuardOnDataDependentSymNode`                        |
+| Gather form of relative-position attention | rel⇄abs shift → index table + last-dim gather         | The shift creates **quadratic shape expressions** `2P−1` / `2P²` / `P(2P−1)` (not rescued even by an affine extension of the dimension language) |
+| Folding the FFN pad into the convolution   | explicit `F.pad` → `conv1d(padding=…)`                | Reduces `constant_pad_nd`. Exactly equivalent **only for an odd kernel and non-causal** (pinned by an assert)                                    |
 
-#### 相対位置表の 2 方式（ADR 0013）
+#### Two schemes for the relative-position tables (ADR 0013)
 
-添字表（`idx_k` / `valid` / `idx_v`）は `i` と `j` だけで決まり **長さに依存しない**ので、
-エクスポータの定数畳み込みが焼き込み + `sym_prefix_slice` に落とせる。ただし焼き込み量は
-O(sym_max²) なので、**ターゲットで方式を変える**:
+The index tables (`idx_k` / `valid` / `idx_v`) are determined by `i` and `j` alone and are
+**independent of length**, so the exporter's constant folding can lower them to baked tables +
+`sym_prefix_slice`. The baked volume is O(sym_max²), however, so **the scheme differs per target**:
 
-| 系統          | key 側 `idx_k` / `valid` | value 側 `idx_v`    | 焼き込み量  |
-| ------------- | ------------------------ | ------------------- | ----------- |
-| front (P≤512) | 焼き込み `(512,512)`     | 焼き込み            | 実測 2.1MB  |
-| flow / voice  | **グラフ入力**           | 焼き込み `(4096,9)` | 実測 0.15MB |
+| Family        | Key side `idx_k` / `valid` | Value side `idx_v` | Baked volume    |
+| ------------- | -------------------------- | ------------------ | --------------- |
+| front (P≤512) | baked `(512,512)`          | baked              | 2.1MB measured  |
+| flow / voice  | **graph inputs**           | baked `(4096,9)`   | 0.15MB measured |
 
-flow で焼き込むと `(4096,4096)` × 2 本 = **134MB** になるため入力へ昇格した。式の正本は
-`patch_sbv2.build_relattn_tables` で、**front の in-graph 構築も同じ関数を呼ぶ**（式を 2 箇所
-に書くと片方だけ直したとき両者が黙って別の表になる）。ホスト側の鏡像は
-`packages/runtime/tests/helpers/relattn-tables.ts`（SBV2 固有なので `packages/runtime/src/` には置かない — 将来
-`examples/` へ昇格する）で、**バイト一致は `packages/runtime/tests/sbv2_relattn_parity_test.ts` が golden の
-実データで固定**する。窓幅 4 の食い違いは shape エラーにならない沈黙誤値クラスなので、
-Python 側は `_assert_window_size`（ckpt ロード時）、TS 側はパリティテストが**コンテナに
-焼き込まれた `idx_v` の幅 `2w+1`** と突き合わせて落とす（両側に門を置くのは、片側だけだと
-ホストと golden が同じ誤りを共有してすり抜ける経路が残るため）。
+Baking them for flow would come to `(4096,4096)` × 2 tables = **134MB**, hence the promotion to
+inputs. The formulas are authoritative in `patch_sbv2.build_relattn_tables`, and **the in-graph
+construction for front calls the same function** (writing the formula in two places would silently
+produce two different tables the moment only one is fixed). The host-side mirror is
+`packages/runtime/tests/helpers/relattn-tables.ts` (SBV2-specific, so it is not placed under
+`packages/runtime/src/` — it will be promoted to `examples/` later), and **byte equality is pinned
+by `packages/runtime/tests/sbv2_relattn_parity_test.ts` against the goldens' real data**. A mismatch
+in window size 4 is of the silent-wrong-value class rather than a shape error, so the Python side
+has `_assert_window_size` (at ckpt load) and the TS side has the parity test comparing against **the
+width `2w+1` of the `idx_v` baked into the container**; gates on both sides exist because with only
+one side there remains a path where the host and the goldens share the same mistake and slip
+through.
 
-#### flow / voice のラッパ
+#### The flow / voice wrappers
 
-- `FlowReverse` は `[TransformerCouplingLayer(mean_only) + Flip] × 4` を reversed 順に適用。
-  coupling reverse は `torch.split` → 明示スライス（96/96）に置き換え、**`exp(−logs)` の
-  乗算を畳む**（`mean_only=True` なので `logs = zeros_like(m)`、`exp(−0.0)` は IEEE 754 で
-  厳密に 1.0 なのでビット一致 — `zeros_like` を IR に持ち込まないための定型手筋）。
-- `Sbv2Voice` は `FlowReverse` → `z * y_mask` → `dec`。参照 infer 末尾と同順で、`max_len`
-  スライス（推論経路では常に `None` = 恒等）は持ち込まない。
+- `FlowReverse` applies `[TransformerCouplingLayer(mean_only) + Flip] × 4` in reversed order. The
+  coupling reverse replaces `torch.split` with explicit slices (96/96) and **folds away the
+  multiplication by `exp(−logs)`** (with `mean_only=True`, `logs = zeros_like(m)` and `exp(−0.0)` is
+  exactly 1.0 under IEEE 754, so it is bit-identical — the standard trick for keeping `zeros_like`
+  out of the IR).
+- `Sbv2Voice` is `FlowReverse` → `z * y_mask` → `dec`. Same order as the tail of the reference
+  infer, without carrying in the `max_len` slice (always `None` = identity on the inference path).
 
-#### プロセス汚染に対する門
+#### Gates against process contamination
 
-- **`--verify` と emit は同一プロセスで併用できない**（CLI が `parser.error` で拒否する）。
-  パッチはクラス属性の**プロセス全域**差し替えで、`remove_weight_norm` は重みを破壊的に
-  畳むので、emit が先に走ると「前の参照」が採れなくなり同値検証が**恒真化して偽 PASS**
-  する。検証自体も「全ケースの参照を確定 → 変更 → 比較」の順序で、順序が破れたら
-  参照採取の直前で `RuntimeError` にする（ADR 0013）— front / flow / voice は
-  `patch_sbv2.patches_applied()`、**dec は逆向き**に「weight_norm 由来パラメータが
-  まだ残っていること」を見る（汚染源が remove だから。voice は両方の門を持つ）。
-- **`--verify` はターゲットを 1 つだけ取る**。「MHA パッチ系どうしは排他 / dec の remove は
-  voice とだけ排他 / 丸めは全てと排他」という対ごとの排他表を CLI に持たせると、表の穴が
-  そのまま偽 PASS になる。値を 1 つ取る形なら**汚染の組み合わせが構造的に存在しない**。
+- **`--verify` and emit cannot be combined in the same process** (the CLI rejects it with
+  `parser.error`). The patches replace class attributes **process-wide** and `remove_weight_norm`
+  destructively folds the weights, so if emit runs first the "pre-patch reference" can no longer be
+  taken and the equivalence check becomes **vacuously true, a false PASS**. The verification itself
+  follows the order "fix the references for every case → mutate → compare", and if that order is
+  broken it raises a `RuntimeError` right before the reference capture (ADR 0013) — front / flow /
+  voice check `patch_sbv2.patches_applied()`, while **dec checks the opposite**, that
+  weight_norm-derived parameters are still present (its contamination source is the removal; voice
+  has both gates).
+- **`--verify` takes exactly one target.** Giving the CLI a pairwise exclusivity table ("MHA-patch
+  targets are mutually exclusive / dec's removal conflicts only with voice / rounding conflicts with
+  everything") would turn every hole in the table into a false PASS. With a form that takes a single
+  value, **contaminating combinations structurally do not exist**.
 
-#### 同値の実測
+#### Measured equivalence
 
-| `--verify` | ケース | worst maxdiff               | 備考                                          |
-| ---------- | ------ | --------------------------- | --------------------------------------------- |
-| `front`    | 9      | 2.02e-5 @P=512              | `P ≤ 5` はビット一致                          |
-| `flow`     | 10     | 1.43e-6 @T=512              | `T ≤ 5` はビット一致                          |
-| `dec`      | 10     | **0（全ケースビット一致）** | remove_weight_norm 前後                       |
-| `voice`    | 10     | 1.25e-6 @T=203              | 未パッチ flow + weight_norm 有効 dec との比較 |
+| `--verify` | Cases | worst maxdiff                      | Notes                                                         |
+| ---------- | ----- | ---------------------------------- | ------------------------------------------------------------- |
+| `front`    | 9     | 2.02e-5 @P=512                     | `P ≤ 5` is bit-identical                                      |
+| `flow`     | 10    | 1.43e-6 @T=512                     | `T ≤ 5` is bit-identical                                      |
+| `dec`      | 10    | **0 (bit-identical in all cases)** | before/after remove_weight_norm                               |
+| `voice`    | 10    | 1.25e-6 @T=203                     | compared against unpatched flow + dec with weight_norm active |
 
-- 差の出所は value 側の縮約長が変わることによる BLAS の順序差で、実 GPU golden の誤差と
-  同じ桁に収まる（front 1.75e-5 / flow 2.74e-6 / voice 1.60e-6）。
-- **dec の全ケースビット一致は recon §6 の未検証事項を閉じたもの**（それまでは 1 ケース
-  `z=(1,192,50)` の実測しか無く、実効重み `g·v/‖v‖` の f32 再現はスペック保証ではないと
-  記録されていた）。`torch.equal` まで要求しているので `0.0` / `-0.0` の取り違えも通らない。
+- The differences come from BLAS ordering as the value-side reduction length changes, and stay in
+  the same order of magnitude as the real-GPU golden error (front 1.75e-5 / flow 2.74e-6 / voice
+  1.60e-6).
+- **dec being bit-identical in all cases closes an open item from recon §6** (until then there were
+  only measurements for the single case `z=(1,192,50)`, recorded with the note that f32
+  reproducibility of the effective weight `g·v/‖v‖` is not a spec guarantee). Since it requires
+  `torch.equal`, even a `0.0` / `-0.0` mix-up would not pass.
 
-## 実重み Anima の export
+## Real-weight Anima export
 
-画像生成側の実重み。ADR [0016](../../docs/decisions/0016-anima-chain-export.md) の emit
-ターゲット 4 本を `export_anima.py` が書き出す。フル emit（`models/anima/`）と Deno 側 E2E
-（`packages/runtime/tests/e2e_anima_test.ts`）まで M1-P4 で完了済み。
+Real weights for the image generation side. `export_anima.py` writes out the 4 emit targets of ADR
+[0016](../../docs/decisions/0016-anima-chain-export.md). The full emit (`models/anima/`) and the
+Deno-side E2E (`packages/runtime/tests/e2e_anima_test.ts`) were completed in M1-P4.
 
-### 依存と重みの入手
+### Dependencies and obtaining the weights
 
 ```bash
 uv sync --group anima   # accelerate / diffusers==0.39.0 / torchvision / transformers==5.14.1
 ```
 
-重みは HF Hub の `circlestone-labs/Anima-Base-v1.0-Diffusers`（初回だけ自動 DL・5.3GB）。
-`diffusers` を `==` でピンするのは、`patch_anima` が `QwenImageRMS_norm` /
-`QwenImageResample` / `QwenImageUpsample` / `QwenImageAttentionBlock` の forward をクラス属性
-ごと差し替え、`AnimaTextConditioner` / `CosmosTransformer3DModel` の forward を逐語で書き下した
-ラッパを持つため（マイナー更新でグラフ形や eager 同値の前提が黙って変わる）。
+The weights are `circlestone-labs/Anima-Base-v1.0-Diffusers` on the HF Hub (downloaded automatically
+on the first run; 5.3GB). `diffusers` is pinned with `==` because `patch_anima` replaces the
+forwards of `QwenImageRMS_norm` / `QwenImageResample` / `QwenImageUpsample` /
+`QwenImageAttentionBlock` at the class-attribute level and carries wrappers that transcribe the
+forwards of `AnimaTextConditioner` / `CosmosTransformer3DModel` line by line (a minor update would
+silently change the graph shape or the premises of eager equivalence).
 
-### 生成と突合
+### Generation and comparison
 
 ```bash
-# emit（IR + golden io を <out>/<target>/ へ）
+# emit (IR + golden io into <out>/<target>/)
 uv run --group anima python export_anima.py --out /path/to/out
 uv run --group anima python export_anima.py --target vae_decoder --out /path/to/out
 uv run --group anima python export_anima.py --target transformer --num-layers 2 --out ...
 
-# パッチ前後の eager 同値（**1 プロセス 1 ターゲット** — CLI が併用を拒否する）
+# eager equivalence across the patches (**one target per process** — the CLI rejects combining them)
 uv run --group anima python export_anima.py --verify text_encoder
 uv run --group anima python export_anima.py --verify vae_decoder
 
-# LoRA を焼き込んでから emit（transformer / text_conditioner に効く）
+# fuse a LoRA before emitting (applies to transformer / text_conditioner)
 uv run --group anima python export_anima.py --target transformer --lora turbo.safetensors
 
-# S 形（トークン長 1 シンボル）の追加系列 — transformer 専用・既定 out に -dyn が付く
+# S form (one symbol for the token length), an additional series — transformer only; the default out gets -dyn
 uv run --group anima python export_anima.py --dtype f16 --dit-graph dyn --lora turbo.safetensors \
   --out ../../models/anima-turbo-f16-dyn
 uv run --group anima python export_anima.py --dtype f16 --dit-graph dyn --verify transformer \
   --lora turbo.safetensors
 ```
 
-- **`--verify` と `--target` は同一プロセスで併用できない**。VAE パッチはクラス属性の
-  プロセス全域差し替えなので、emit 側が先に当てると「パッチ前の参照」が汚染されて同値検証が
-  恒真化する（差が常に 0 になる = 緑が証拠にならない壊れ方 — ADR 0013 の規律）。
-- **`--lora` は `--num-layers` より前に焼く**。後にすると切った層に対応する LoRA が「対象が
-  無い」まま黙って捨てられ、`fuse_lora` の取りこぼし検査が縮小モデルで効かなくなる。
+- **`--verify` and `--target` cannot be combined in the same process.** The VAE patches replace
+  class attributes process-wide, so if the emit side applies them first the "pre-patch reference" is
+  contaminated and the equivalence check becomes vacuously true (the difference is always 0 = a
+  breakage where green is no longer evidence — the discipline of ADR 0013).
+- **`--lora` is fused before `--num-layers`.** The other way around, the LoRA belonging to the
+  truncated layers would be silently discarded as "no target", and the leftover check of `fuse_lora`
+  would stop working on the reduced model.
 
-### `--dit-graph dyn`（DiT の S 化 — #21 波 T2）
+### `--dit-graph dyn` (the S form of the DiT — #21 wave T2)
 
-グラフの入口を patchify の**後ろ**へずらし、rope の cos / sin 表をグラフ入力へ昇格した
-**追加系列**（静的系列は 1 バイトも動かさない）。入口 `tokens [1,S,68]` / rope 表
-`[1,1,S,128]` ×2、出口は unpatchify 前の `[1,S,64]`。**解像度依存の焼き込みが 0 本**になる
-（静的形は padding channel と rope 表の 3 本）。設計の根拠は
-[dynres-vae-tiling](../../docs/research/2026-08-03-dynres-vae-tiling.md) §2.2。
+An **additional series** that moves the graph entrance **after** the patchify and promotes the rope
+cos / sin tables to graph inputs (the static series does not move by a single byte). The entrance is
+`tokens [1,S,68]` plus two rope tables `[1,1,S,128]`, and the exit is `[1,S,64]` before the
+unpatchify. **Zero resolution-dependent bakes remain** (the static form has 3: the padding channel
+and the rope tables). The design rationale is in
+[dynres-vae-tiling](../../docs/research/2026-08-03-dynres-vae-tiling.md) §2.2.
 
-- **transformer 専用**。他 3 ターゲットは解像度に依らないので静的系列と共有する（CLI が
-  他ターゲットの指定を拒否する）。`--resolution` も**効かないので拒否する** — golden の
-  解像度は `DIT_DYN_RESOLUTIONS = (512, 1024)` 固定で、グラフ自体は解像度を持たない。
-- 系列ディレクトリには `model.safetensors` / `io.*` に加えて
-  **`rope_base.safetensors`**（64KiB）が並ぶ。ホスト（`examples/anima/host/dit-tokens.ts`）が
-  rope 表を組むための**軸別素表**で、`model.rope` の出力から切り出したもの。
-  **これが要る理由**: `torch` の f32 三角関数は正しく丸めた値と 1 ulp ずれることがあり
-  （実測: 位置 × 周波数 8,192 通りで cos 472 件 / sin 231 件）、JS の `Math.cos` では
-  再現できない。静的グラフには torch の値が焼かれているので、素表を並べ替える形でしか
-  ビット同一にならない。素表は**解像度に依らず**、行数（= 上流の
-  `seq = arange(max(max_size))` の長さ）がモデル側の対応上限になる（Anima では 128 =
-  latent 256 = 2048px 相当）。
-- `--verify transformer --dit-graph dyn` は「ホスト patchify → S 形 → ホスト unpatchify」を
-  **パッチ前の diffusers 経路**と突き合わせる。実測（turbo LoRA 焼き込み・f16 丸め後）:
-  **2 ケースとも `bit_exact=True` / maxdiff 0.000e+00**（S=1,024 と S=4,096）。
-- 実 GPU の主門は `packages/runtime/tests/e2e_anima_dyn_test.ts`（S 形 ≡ 静的グラフの Uint32 完全一致）。
+- **transformer only.** The other 3 targets do not depend on the resolution and share the static
+  series (the CLI rejects specifying them). `--resolution` **has no effect and is therefore
+  rejected** too — the golden resolutions are fixed at `DIT_DYN_RESOLUTIONS = (512, 1024)` and the
+  graph itself carries no resolution.
+- Alongside `model.safetensors` / `io.*`, the series directory holds **`rope_base.safetensors`**
+  (64KiB). It is the **per-axis base table** the host (`examples/anima/host/dit-tokens.ts`) uses to
+  assemble the rope tables, cut out of the `model.rope` output. **Why it is needed**: torch's f32
+  trigonometric functions can be 1 ulp off from the correctly rounded value (measured: over 8,192
+  position × frequency combinations, cos 472 and sin 231 cases), and JS's `Math.cos` cannot
+  reproduce them. The static graph has torch's values baked in, so bit identity is only achievable
+  by permuting the base table. The base table is **independent of the resolution**, and its number
+  of rows (= the length of the upstream `seq = arange(max(max_size))`) is the model-side upper bound
+  (for Anima, 128 = latent 256 = the equivalent of 2048px).
+- `--verify transformer --dit-graph dyn` compares "host patchify → S form → host unpatchify" against
+  the **pre-patch diffusers path**. Measured (with the turbo LoRA fused and f16 rounding applied):
+  **`bit_exact=True` / maxdiff 0.000e+00 in both cases** (S=1,024 and S=4,096).
+- The main real-GPU gate is `packages/runtime/tests/e2e_anima_dyn_test.ts` (S form ≡ static graph,
+  exact Uint32 equality).
 
-### 実測（波 2 時点。DiT / Qwen3 は `--num-layers 2`、他はフル）
+### Measurements (as of wave 2; DiT / Qwen3 with `--num-layers 2`, the rest full)
 
-| ターゲット         | IR ノード | model.safetensors | symbols       | max rank |
-| ------------------ | --------- | ----------------- | ------------- | -------- |
-| `text_encoder`     | 131       | 749.8MB           | `T`           | 4        |
-| `text_conditioner` | 613       | 539.1MB           | `Tsrc` `Ttgt` | 4        |
-| `transformer`      | 316       | 629.4MB           | （静的）      | 4        |
-| `vae_decoder`      | 455       | 101.3MB           | （静的）      | 4        |
+| Target             | IR nodes | model.safetensors | symbols       | max rank |
+| ------------------ | -------- | ----------------- | ------------- | -------- |
+| `text_encoder`     | 131      | 749.8MB           | `T`           | 4        |
+| `text_conditioner` | 613      | 539.1MB           | `Tsrc` `Ttgt` | 4        |
+| `transformer`      | 316      | 629.4MB           | (static)      | 4        |
+| `vae_decoder`      | 455      | 101.3MB           | (static)      | 4        |
 
-**未対応 aten op は 4/4 とも 0 種**（波 2 着手時点は和集合 19 種 — recon §2）。層を切っていない
-`text_conditioner` / `vae_decoder` はこの表がそのままフル深度、`text_encoder` はフル 28 層でも
-別途 0 種を実測済み（正規化後の FX ノード 2467）。DiT のフル 28 層は f32 で 7.29GiB なので
-波 3 で測る — 層数は未対応 op の**種類**を変えない（同じブロックの繰り返し）。
+**Unsupported aten ops: 0 kinds in all 4** (at the start of wave 2 the union was 19 kinds — recon
+§2). `text_conditioner` / `vae_decoder` are not truncated, so this table is already the full depth
+for them; `text_encoder` was separately measured at 0 kinds for the full 28 layers as well (2467 FX
+nodes after normalization). The full 28 layers of the DiT are 7.29GiB in f32, so they are measured
+in wave 3 — the layer count does not change the **kinds** of unsupported ops (the same block
+repeated).
 
-### 実測（波 3・**フル深度**。`models/anima/` へ全 4 本）
+### Measurements (wave 3, **full depth**; all 4 into `models/anima/`)
 
-各ターゲットを**別プロセス**で回した実測（ホスト RAM のピークを重ねないため。`--target` を
-並べて 1 プロセスで回すこともできるが、DiT のピークが他の 3 本の常駐に積み上がる）。
+Measured with each target in a **separate process** (so that host RAM peaks do not overlap; listing
+several `--target`s in one process also works, but the DiT peak would stack on top of the other 3
+staying resident).
 
-| ターゲット         | IR ノード | initializer | model.safetensors | emit 時間 | ピーク RAM |
-| ------------------ | --------- | ----------- | ----------------- | --------- | ---------- |
-| `text_encoder`     | 1769      | 317         | 2,386,195,204 B   | 17.5s     | 3,794MiB   |
-| `text_conditioner` | 613       | 122         | 539,060,388 B     | 5.7s      | 1,152MiB   |
-| `transformer`      | 3904      | 579         | 7,827,646,080 B   | 36.5s     | 11,593MiB  |
-| `vae_decoder`      | 455       | 108         | 101,279,604 B     | 10.0s     | 1,546MiB   |
+| Target             | IR nodes | initializers | model.safetensors | emit time | peak RAM  |
+| ------------------ | -------- | ------------ | ----------------- | --------- | --------- |
+| `text_encoder`     | 1769     | 317          | 2,386,195,204 B   | 17.5s     | 3,794MiB  |
+| `text_conditioner` | 613      | 122          | 539,060,388 B     | 5.7s      | 1,152MiB  |
+| `transformer`      | 3904     | 579          | 7,827,646,080 B   | 36.5s     | 11,593MiB |
+| `vae_decoder`      | 455      | 108          | 101,279,604 B     | 10.0s     | 1,546MiB  |
 
-`model.safetensors` の合計 10,854,181,276 B、`io.<case>.safetensors` 込みの `models/anima/`
-全体で 10,868,931,292 B（10.12GiB）。**`models/` は `.gitignore` 配下**（git に入れない）。
-op 語彙は 4 本の和で **23 種**（`add bmm cat clamp clamp_min conv2d div embedding expand gelu
-layer_norm linear mul neg permute reshape rms_norm sigmoid slice softmax sqrt sum
-sym_prefix_slice`）で、**新 op はゼロ**（波 1 で足した 3 種で足りた）。
+`model.safetensors` totals 10,854,181,276 B, and `models/anima/` as a whole, including
+`io.<case>.safetensors`, is 10,868,931,292 B (10.12GiB). **`models/` is under `.gitignore`** (never
+committed). The op vocabulary is **23 kinds** across the 4 targets (`add bmm cat clamp clamp_min
+conv2d div embedding expand gelu layer_norm linear mul neg permute reshape rms_norm sigmoid slice
+softmax sqrt sum sym_prefix_slice`), with **zero new ops** (the 3 kinds added in wave 1 sufficed).
 
-**再生成の決定性**: `vae_decoder` を別ディレクトリへもう 1 度 emit し、`model.safetensors` /
-`io.case0` / `io.case1` の 3 本とも **sha256 一致**を確認した（乱数は `SEED` からの派生で
-グローバル seed に依存しない）。大物 3 本は emit 時間とディスクの都合で未確認 — 乱数経路は
-4 本とも同一実装なので、確認したのは `vae_decoder` の範囲であることを明示しておく。
+**Regeneration determinism**: `vae_decoder` was emitted a second time into a different directory and
+all 3 files — `model.safetensors` / `io.case0` / `io.case1` — were confirmed to have **matching
+sha256** (the randomness is derived from `SEED` and does not depend on the global seed). The 3 large
+targets are unconfirmed for reasons of emit time and disk space — the randomness path is the same
+implementation in all 4, so it is stated explicitly that the confirmation covers `vae_decoder` only.
 
-### 実測（波 3・`--verify` 済みの eager 同値はフル深度でも据え置き）
+### Measurements (wave 3; the `--verify` eager equivalence is unchanged at full depth)
 
-Deno 側の実 GPU 突合の結果は `packages/runtime/tests/e2e_anima_test.ts` の tolerance コメントが正本。要約:
+The Deno-side real-GPU comparison results are authoritative in the tolerance comments of
+`packages/runtime/tests/e2e_anima_test.ts`. In summary:
 
-| ターゲット         | 実 GPU golden              | 備考                                        |
-| ------------------ | -------------------------- | ------------------------------------------- |
-| `text_encoder`     | maxAbs 5.22e-4（3 ケース） | 折り込み -inf 130,816 個で **NaN 0 個**     |
-| `text_conditioner` | maxAbs 2.23e-6（2 ケース） | Tsrc/Ttgt を別々に振って取り違えを潰す      |
-| `transformer`      | **未実行**                 | 重み 7,465MiB が本機の GPU 上限 7,280MiB 超 |
-| `vae_decoder`      | maxAbs 1.01e-5（2 ケース） | `--verify` の 9.34e-6 と同じ桁              |
+| Target             | Real-GPU golden          | Notes                                                               |
+| ------------------ | ------------------------ | ------------------------------------------------------------------- |
+| `text_encoder`     | maxAbs 5.22e-4 (3 cases) | 130,816 folded -inf values with **0 NaN**                           |
+| `text_conditioner` | maxAbs 2.23e-6 (2 cases) | Tsrc/Ttgt varied separately to kill mix-ups                         |
+| `transformer`      | **not run**              | the 7,465MiB of weights exceed this machine's GPU limit of 7,280MiB |
+| `vae_decoder`      | maxAbs 1.01e-5 (2 cases) | same order as the 9.34e-6 of `--verify`                             |
 
-`transformer` が未実行なのは**グラフの問題ではない**: `--num-layers 20`（重み 5,613MiB）で
-emit したものは実 GPU で完走し torch と一致する（maxAbs 9.63e-5）。詳細は
-`docs/known-issues.md`。
+`transformer` being unrun is **not a graph problem**: what is emitted with `--num-layers 20`
+(5,613MiB of weights) runs to completion on a real GPU and agrees with torch (maxAbs 9.63e-5).
+Details in `docs/known-issues.md`.
 
-パッチ前後の eager 同値（`--verify`）:
+Eager equivalence across the patches (`--verify`):
 
-| ターゲット         | ケース | worst maxdiff       | 備考                                 |
-| ------------------ | ------ | ------------------- | ------------------------------------ |
-| `text_encoder`     | 3      | **0（ビット一致）** | 全 1 マスク落とし                    |
-| `text_conditioner` | 2      | **0（ビット一致）** | 全 1 マスク 2 本落とし               |
-| `transformer`      | 2      | **0（ビット一致）** | timestep 昇格 / padding ゼロ定数化   |
-| `vae_decoder`      | 2      | 9.34e-6             | conv3d → conv2d の縮約順序差（下記） |
+| Target             | Cases | worst maxdiff         | Notes                                                    |
+| ------------------ | ----- | --------------------- | -------------------------------------------------------- |
+| `text_encoder`     | 3     | **0 (bit-identical)** | all-ones mask dropped                                    |
+| `text_conditioner` | 2     | **0 (bit-identical)** | two all-ones masks dropped                               |
+| `transformer`      | 2     | **0 (bit-identical)** | timestep promotion / padding turned into a zero constant |
+| `vae_decoder`      | 2     | 9.34e-6               | conv3d → conv2d reduction order difference (below)       |
 
-VAE だけビット一致にならないのは、CausalConv3d(T=1) → conv2d が**同じ数の別の足し方**に
-なるため。書き換えごとの同値は `tests/test_patch_anima.py` が f64 で `< 1e-14` に固定して
-いる（conv3d↔conv2d / チャネル L2↔`F.normalize` / RMS_norm の rank4 化）。データ移動だけの
-nearest-exact ×2 は f32 で**ビット一致**。decoder 全体の増幅率は f64 実測で約 5.4e3 なので、
-f32 の丸め（1.19e-7）が 9e-6 級に育つのは整合する。
+The VAE alone is not bit-identical because CausalConv3d(T=1) → conv2d becomes **the same number of
+additions performed in a different order**. Equivalence per rewrite is pinned by
+`tests/test_patch_anima.py` at `< 1e-14` in f64 (conv3d↔conv2d / channel L2↔`F.normalize` / rank-4
+form of RMS_norm). The two nearest-exact resamples, which only move data, are **bit-identical** in
+f32. The amplification factor of the whole decoder is about 5.4e3 as measured in f64, so f32
+rounding (1.19e-7) growing into the 9e-6 class is consistent.
 
-> NOTE: 上の f64 単体検査と違い、`--verify` を f64 で回しても残差は 0 にならない
-> （実測 9.1e-8）。原因は `QwenImageUpsample.forward` が原実装で `x.float()` と f32 へ落として
-> いるため — f32 経路（= export する経路）では `.float()` が no-op なのでビット一致する。
+> NOTE: unlike the f64 unit checks above, running `--verify` in f64 does not drive the residual to 0
+> (measured 9.1e-8). The cause is that `QwenImageUpsample.forward` in the original implementation
+> drops to f32 with `x.float()` — on the f32 path (= the path that gets exported) `.float()` is a
+> no-op, so it is bit-identical there.
 
-### f16 格納の emit（`--dtype f16` — ADR 0018）
+### f16 storage emit (`--dtype f16` — ADR 0018)
 
-`--dtype f16` は**重みを f16 表現可能値へ丸めてから**（fake-quant）参照と golden を採り、
-**適格な重みスロットだけ**を f16 で格納する。出力先は f32 系列と別の `models/anima-f16/`
-（`--out` 省略時の既定が `--dtype` で切り替わる）。
+`--dtype f16` takes the references and goldens **after rounding the weights to f16-representable
+values** (fake-quant) and stores **only the eligible weight slots** in f16. The output goes to
+`models/anima-f16/`, separate from the f32 series (the default for an omitted `--out` switches with
+`--dtype`).
 
 ```sh
-uv run --group anima python export_anima.py --dtype f16                    # 4 本まとめて
+uv run --group anima python export_anima.py --dtype f16                    # all 4 at once
 uv run --group anima python export_anima.py --dtype f16 --target transformer
-uv run --group anima python anima_pipeline.py --dtype f16                  # フィクスチャ
+uv run --group anima python anima_pipeline.py --dtype f16                  # fixture
 ```
 
-**MUST: 丸めは参照・golden の採取より前**（ADR 0006）。各 builder がモデルを組んだ直後
-（`--lora` の焼き込みより**後**）に `_fake_quant` が掛かる。後ろへ動かすと参照だけが元の重みで
-計算され、E2E の差が「量子化誤差 + 実装誤差」の合成になる — tolerance を緩める方向にしか
-効かないので、**緑のまま検出力だけが落ちる**壊れ方になる。
+**MUST: the rounding happens before the reference and golden capture** (ADR 0006). `_fake_quant` is
+applied right after each builder assembles the model (and **after** any `--lora` fusion). Moving it
+later would leave only the reference computed on the original weights, making the E2E difference a
+mixture of "quantization error + implementation error" — which only ever loosens the tolerance, i.e.
+a breakage that **stays green while losing detection power**.
 
-**適格判定は 2 条件の AND**（`karume/emit.py`）:
+**Eligibility is the AND of 2 conditions** (`karume/emit.py`):
 
-1. その initializer の消費が `WEIGHT_SLOTS`（`linear` / `conv1d` / `conv2d` /
-   `conv_transpose1d` の重み = スロット 1、`embedding` = スロット 0）**だけ**である。
-   ランタイム側 `packages/runtime/src/runtime/plan.ts` の鏡像で、ずれは適合表
-   （`packages/runtime/tests/fixtures/op-contracts.json` の `weight_slot`）が TS / Python 双方から落とす。
-   **bias は絶対に載せない** — プロトタイプの f16 降格バグ（bias の f32 定数が weight を
-   道連れにして適格 0MB）の根治形。
-2. f32 → f16 → f32 の往復が**ビット一致**する。適格なのに一致しないものは fail loudly
-   （丸めの掛け忘れ / 順序の誤り / 畳み込み定数が重みスロットへ流れた、のいずれか）。
+1. That initializer is consumed **only** by `WEIGHT_SLOTS` (the weights of `linear` / `conv1d` /
+   `conv2d` / `conv_transpose1d` = slot 1, `embedding` = slot 0). This mirrors the runtime side
+   `packages/runtime/src/runtime/plan.ts`, and any divergence is caught from both TS and Python by
+   the conformance table (`weight_slot` in `packages/runtime/tests/fixtures/op-contracts.json`).
+   **Bias is never included** — the root-cause fix for the prototype's f16 demotion bug (an f32 bias
+   constant dragging the weight along with it, leaving 0MB eligible).
+2. The f32 → f16 → f32 round trip is **bit-identical**. Anything eligible that does not match fails
+   loudly (either the rounding was not applied, the order is wrong, or a folded constant flowed into
+   a weight slot).
 
-適格 0 本のまま f16 を指定した場合も `EmitError` で落ちる（ADR 0006 の「適格 0MB を
-沈黙させない」の書き出し側）。
+Specifying f16 while 0 tensors are eligible also fails with `EmitError` (the writer-side counterpart
+of ADR 0006's "never let 0MB eligible stay silent").
 
-**safetensors の並び順**（`docs/limitations.md`）: Karume のリーダはデータ節を「隙間なく・
-要素サイズに整列して」覆うことを要求するので、**要素数が奇数の F16**（バイト長 ≡ 2 mod 4）の
-直後に F32 / I32 を置くとロードが整列違反で落ちる。並べ替えはエクスポータの責務なので、
-`save_file` は使わず自前で順序を決めて書く（順序を外部ライブラリの実装詳細に預けない）:
+**safetensors ordering** (`docs/limitations.md`): Karume's reader requires the data section to be
+covered "without gaps and aligned to the element size", so placing an F32 / I32 tensor immediately
+after an **F16 with an odd element count** (byte length ≡ 2 mod 4) makes loading fail on an
+alignment violation. Ordering is the exporter's responsibility, so it does not use `save_file` but
+decides the order and writes the file itself (never entrusting the order to the implementation
+detail of an external library):
 
-    F32（名前昇順）→ I32（名前昇順）→ 偶数要素 F16 → **奇数要素 F16（末尾）**
+    F32 (name ascending) → I32 (name ascending) → even-count F16 → **odd-count F16 (last)**
 
-奇数 F16 より前は全て 4 の倍数長なので累積 offset は 4 の倍数を保ち、奇数 F16 どうしは
-2 バイト整列で足りる。書いた直後に `verify_model` が **Karume のリーダ規則を写した検査**
-（`assert_reader_layout`）を通す — HF の `safe_open` は整列違反のファイルを**読めてしまう**
-ので、そちらを通すだけでは検出できない（`tests/test_emit.py` の故障注入がこれを実証）。
-f16 / i8 を 1 本も含まないファイルではこの並びは `save_file` の出力と**バイト一致**する
-（tiny golden の f32 系 24 本で確認済み — f32 系列の資産は writer の差し替えで 1 バイトも
-動かない。25 本目の `i8_weights` だけが圧縮格納）。
+Everything before the odd F16 group has a length that is a multiple of 4, so the cumulative offset
+stays a multiple of 4, and odd F16 tensors among themselves only need 2-byte alignment. Right after
+writing, `verify_model` runs a **check that transcribes Karume's reader rules**
+(`assert_reader_layout`) — HF's `safe_open` **can still read** files with alignment violations, so
+going through it alone would not detect the problem (the fault injection in `tests/test_emit.py`
+demonstrates this). For a file that contains no f16 / i8 at all, this ordering is **byte-identical**
+to the output of `save_file` (confirmed on the 24 f32 tiny goldens — the f32-series assets do not
+move by a single byte when the writer is swapped; only the 25th, `i8_weights`, uses compressed
+storage).
 
-#### 実測（2026-08-03・`--dtype f16` でフル深度・別プロセス）
+#### Measurements (2026-08-03, `--dtype f16` at full depth, separate processes)
 
-| ターゲット         | model.safetensors | f32 比 | 適格（f16 格納）   | 適格外（f32 格納） | emit 時間 | ピーク RAM |
-| ------------------ | ----------------- | ------ | ------------------ | ------------------ | --------- | ---------- |
-| `text_encoder`     | 1,194,225,580 B   | 50.0%  | 197 本 / 1,192.0MB | 120 本 / 1.86MB    | 19.0s     | 4,292MiB   |
-| `text_conditioner` | 269,838,164 B     | 50.1%  | 62 本 / 269.2MB    | 60 本 / 0.48MB     | 6.2s      | 1,360MiB   |
-| `transformer`      | 3,914,867,592 B   | 50.0%  | 454 本 / 3,912.8MB | 125 本 / 1.22MB    | 42.2s     | 11,807MiB  |
-| `vae_decoder`      | 50,732,956 B      | 50.1%  | 37 本 / 50.5MB     | 71 本 / 0.075MB    | 10.4s     | 該当なし   |
+| Target             | model.safetensors | vs f32 | Eligible (f16 storage)  | Ineligible (f32 storage) | emit time | peak RAM  |
+| ------------------ | ----------------- | ------ | ----------------------- | ------------------------ | --------- | --------- |
+| `text_encoder`     | 1,194,225,580 B   | 50.0%  | 197 tensors / 1,192.0MB | 120 tensors / 1.86MB     | 19.0s     | 4,292MiB  |
+| `text_conditioner` | 269,838,164 B     | 50.1%  | 62 tensors / 269.2MB    | 60 tensors / 0.48MB      | 6.2s      | 1,360MiB  |
+| `transformer`      | 3,914,867,592 B   | 50.0%  | 454 tensors / 3,912.8MB | 125 tensors / 1.22MB     | 42.2s     | 11,807MiB |
+| `vae_decoder`      | 50,732,956 B      | 50.1%  | 37 tensors / 50.5MB     | 71 tensors / 0.075MB     | 10.4s     | n/a       |
 
-`models/anima-f16/` 全体で 5,444,414,308 B（5.07GiB。f32 系列は 10.12GiB）。丸めた重みは
-text_encoder 5.96 億 / text_conditioner 1.35 億 / transformer 19.56 億 / vae 1.27 億要素。
-**適格外のバイトは全ターゲットで 0.5% 未満**（bias・norm 系 weight・畳み込み定数）で、
-「適格外は VRAM 削減ゼロ」という制約は Anima では実害にならない。
+`models/anima-f16/` as a whole is 5,444,414,308 B (5.07GiB; the f32 series is 10.12GiB). The rounded
+weights amount to 5.96e8 elements for text_encoder, 1.35e8 for text_conditioner, 19.56e8 for
+transformer and 1.27e8 for the vae. **The ineligible bytes are under 0.5% for every target**
+(biases, norm weights, folded constants), so the constraint "ineligible means zero VRAM reduction"
+does no real harm for Anima.
 
-`Session.diagnostics().storage` の実測（Deno 側）— `residentCompressedBytes` は GPU に
-圧縮のまま載ったバイト数、`hostExpandedBytes` は f16 宣言のうちロード時に f32 展開したぶん:
+Measured `Session.diagnostics().storage` (Deno side) — `residentCompressedBytes` is the number of
+bytes that stayed compressed on the GPU, `hostExpandedBytes` is the part of the f16 declarations
+that was expanded to f32 at load time:
 
-| ターゲット         | resident   | hostExpanded |
+| Target             | resident   | hostExpanded |
 | ------------------ | ---------- | ------------ |
 | `text_encoder`     | 1,136.8MiB | 0.0MiB       |
 | `text_conditioner` | 256.8MiB   | 0.0MiB       |
 | `transformer`      | 3,731.5MiB | 0.0MiB       |
 | `vae_decoder`      | 48.2MiB    | 0.0MiB       |
 
-`hostExpanded` が全て 0 なのは**設計どおり**: エクスポータは適格判定を通ったものだけを f16 と
-**宣言する**ので、ランタイム側の「f16 宣言だが適格外 → CPU 展開」経路には入らない
-（この経路自体は手書き IR で踏めるので `packages/runtime/tests/gpu_f16_weights_test.ts` が単体で固定している）。
+`hostExpanded` being 0 everywhere is **by design**: the exporter only **declares** f16 for what
+passed the eligibility check, so the runtime's "declared f16 but ineligible → expand on the CPU"
+path is never entered (that path itself is reachable with hand-written IR, and
+`packages/runtime/tests/gpu_f16_weights_test.ts` pins it in isolation).
 
-**これで DiT フル 28 層が実 GPU に載った**: f32 の 7,465MiB は GPUBuffer 天井 7,280MiB
-（`docs/known-issues.md`）を超えて load できなかったが、f16 では 3,731.5MiB で天井の半分。
-実 GPU golden と通しチェーン段②の実測値は `packages/runtime/tests/e2e_anima_test.ts` の tolerance コメントが
-正本（DiT golden maxAbs 6.68e-5・段② 生の DiT 出力 3.03e-5・段③ 通し 6.41e-6）。
+**This is what put the full 28-layer DiT on a real GPU**: the 7,465MiB of f32 exceeded the GPUBuffer
+ceiling of 7,280MiB (`docs/known-issues.md`) and could not be loaded, whereas f16 is 3,731.5MiB,
+half the ceiling. The real-GPU golden and the stage-② measurements of the end-to-end chain are
+authoritative in the tolerance comments of `packages/runtime/tests/e2e_anima_test.ts` (DiT golden
+maxAbs 6.68e-5, stage ② raw DiT output 3.03e-5, stage ③ end-to-end 6.41e-6).
 
-`anima_pipeline.py --dtype f16` は 4 コンポーネント**全て**を fake-quant してから参照を採る
-（1 つでも素のまま残すとその段だけ別のモデルの数になる）。出力は
-`models/anima-pipeline-f16/`（21 テンソル・9.4MB）で、実測 44s / DiT 1 step あたり 13.5s。
+`anima_pipeline.py --dtype f16` fake-quants **all 4** components before taking the references (if
+even one were left unrounded, that stage alone would be the numbers of a different model). The
+output is `models/anima-pipeline-f16/` (21 tensors, 9.4MB), measured at 44s and 13.5s per DiT step.
 
-#### 実測: Anima の重みは元から BF16 なので、f16 丸めはほぼ恒等（2026-08-03）
+#### Measurement: Anima's weights are already BF16, so f16 rounding is near-identity (2026-08-03)
 
-HF の `circlestone-labs/Anima-Base-v1.0-Diffusers` は **4 コンポーネントとも safetensors 上が
-`BF16`**（`text_encoder/config.json` の `torch_dtype` も `bfloat16`）。BF16 の仮数 8bit は f16 の
-11bit に収まるため、f32 へ上げてから f16 へ丸めても値が動くのは **f16 の非正規化数域へ落ちる
-極小値だけ**:
+In HF's `circlestone-labs/Anima-Base-v1.0-Diffusers`, **all 4 components are `BF16` in the
+safetensors** (`torch_dtype` in `text_encoder/config.json` is `bfloat16` as well). BF16's 8-bit
+mantissa fits inside f16's 11 bits, so promoting to f32 and rounding to f16 only moves values that
+**fall into f16's subnormal range**:
 
-| コンポーネント     | 丸めで値が動く要素             | 最大変化 |
-| ------------------ | ------------------------------ | -------- |
-| `vae`              | 163,271 / 1.27 億 = **0.129%** | 2.98e-8  |
-| `text_conditioner` | 16,718 / 1.35 億 = **0.0124%** | 1.59e-4  |
+| Component          | Elements moved by rounding    | Max change |
+| ------------------ | ----------------------------- | ---------- |
+| `vae`              | 163,271 / 1.27e8 = **0.129%** | 2.98e-8    |
+| `text_conditioner` | 16,718 / 1.35e8 = **0.0124%** | 1.59e-4    |
 
-**この事実は f16 系列の読み方を縛る**: f16 系列と f32 系列の誤差が同じ桁だったのは
-「量子化が無害だから」ではなく「元が BF16 のモデルに f16 を掛けたから」で、f32 学習の重みでは
-別の話になる。
+**This fact constrains how the f16 series may be read**: the f16 and f32 series having errors of the
+same order was not because "quantization is harmless" but because f16 was applied to a model that
+was BF16 to begin with — for f32-trained weights the story is different.
 
-**故障注入の結果（重要 — 期待と違った）**: 「fake-quant を参照採取より後ろへ動かす」を実際に
-注入した結果は次のとおり。
+**Fault injection results (important — not what was expected)**: actually injecting "move the
+fake-quant after the reference capture" gave the following.
 
-| 注入                                        | 結果                                                                                                                                     |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| ① builder の `_fake_quant` を外す           | **emit が fail loudly**（`EmitError: initializer 'p_vae_decoder_conv_in_weight' … fake-quant が未適用か、参照採取より後に掛かっている`） |
-| ② ①に加えて適格判定（往復ビット一致）も外す | 資産は書けるが **E2E は緑のまま**（vae_decoder maxAbs 6.85e-6 / text_encoder 4.40e-4 — どちらも tolerance の内側）                       |
+| Injection                                                         | Result                                                                                                                                |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| ① remove `_fake_quant` from the builder                           | **emit fails loudly** (`EmitError: initializer 'p_vae_decoder_conv_in_weight' … fake-quant が未適用か、参照採取より後に掛かっている`) |
+| ② ① plus removing the eligibility check (round-trip bit equality) | the assets are written but **the E2E stays green** (vae_decoder maxAbs 6.85e-6 / text_encoder 4.40e-4 — both inside the tolerance)    |
 
-②で赤くならないのは上の BF16 の事実の帰結で、丸め前後の torch 出力の差そのものが小さい
-（実測: text_encoder t024 で 2.64e-3 = 値域 68.7 に対し相対 3.8e-5、vae_decoder で 1.72e-5）。
-つまり **Anima では E2E は「丸めの掛け忘れ」の検出器にならない** — 検出しているのは emit の
-適格判定 1 本だけである。この門を「冗長」と見なして外さないこと。
+② failing to turn red is a consequence of the BF16 fact above: the difference in torch's own output
+across the rounding is itself small (measured: 2.64e-3 for text_encoder t024 = 3.8e-5 relative to a
+range of 68.7, and 1.72e-5 for vae_decoder). In other words, **for Anima the E2E is not a detector
+for a forgotten rounding** — the only thing detecting it is the emit-side eligibility check. Do not
+treat this gate as redundant and remove it.
 
-> NOTE（2026-08-03・SBV2 f16 で対照実測）: この「E2E に映らない」は**モデル（配布 dtype）
-> 依存の性質**で、f16 格納一般の性質ではない。ckpt が真の f32 の SBV2 では同じ注入で
-> emit の門と E2E の**両方**が赤くなる（atol の 31 倍超過 — ADR 0027）。
+> NOTE (2026-08-03, measured against SBV2 f16 as a control): this "invisible to the E2E" property is
+> **a property of the model (its distribution dtype)**, not of f16 storage in general. For SBV2,
+> whose ckpt is genuinely f32, the same injection turns **both** the emit gate and the E2E red
+> (exceeding atol by more than 31× — ADR 0027).
 
-### i8 格納の emit（`--dtype i8` — ADR 0019）
+### i8 storage emit (`--dtype i8` — ADR 0019)
 
-`--dtype i8` は **per-channel symmetric int8**（zero-point なし）で fake-quant してから参照と
-golden を採り、適格な重みスロットだけを i8 + companion scale で格納する。出力先は
-`models/anima-i8/`。
+`--dtype i8` fake-quants with **per-channel symmetric int8** (no zero point) before taking the
+references and goldens, and stores the eligible weight slots as i8 plus companion scales. The output
+goes to `models/anima-i8/`.
 
 ```sh
-uv run --group anima python export_anima.py --dtype i8              # transformer だけ
+uv run --group anima python export_anima.py --dtype i8              # transformer only
 uv run --group anima python export_anima.py --verify transformer --dtype i8
-uv run --group anima python anima_pipeline.py --dtype i8            # フィクスチャ
+uv run --group anima python anima_pipeline.py --dtype i8            # fixture
 ```
 
-**MUST: `--dtype i8` は transformer 専用**（`DTYPE_TARGETS` — 他ターゲットは `--target` /
-`--verify` で明示しても CLI が拒否する）。理由は 2 つ:
+**MUST: `--dtype i8` is transformer-only** (`DTYPE_TARGETS` — the CLI rejects other targets even
+when spelled out with `--target` / `--verify`). Two reasons:
 
-1. **系列設計**（ADR 0019）: DiT の −1.87GiB が支配項で、text / cond / VAE は
-   `models/anima-f16/` を共有する。VAE の i8 化はプロトタイプ実測で 2 桁小さい。
-2. **VAE は丸めの順序制約を満たせない**: `patch_anima` は CausalConv3d の重みを
-   **時間方向の最終スライス**へ差し替えるが、これはパッチ適用時（= 参照採取より後）に起きる。
-   f16 の要素ごとの丸めはスライスと可換なので害が無いが、i8 の per-channel scale は
-   **捨てられる要素まで amax に数えてしまう**（scale がずれると全要素の値が動く）。
+1. **Series design** (ADR 0019): the DiT's −1.87GiB is the dominant term, while text / cond / VAE
+   share `models/anima-f16/`. Prototype measurements put i8 for the VAE two orders lower.
+2. **The VAE cannot satisfy the rounding order constraint**: `patch_anima` replaces the CausalConv3d
+   weights with **the last slice along the time axis**, which happens when the patches are applied
+   (= after the reference capture). f16's element-wise rounding commutes with slicing and is
+   therefore harmless, but i8's per-channel scale **counts even the discarded elements into amax**
+   (a shifted scale moves the value of every element).
 
-**量子化の定義**（`karume/quantize.py`）:
+**Definition of the quantization** (`karume/quantize.py`):
 
-- `scale = clamp(amax / 127, f32 tiny)` を出力チャネルごとに、`q = clamp(round(w/scale), ±127)`。
-  **−128 は使わない** — 最大絶対値要素が `q = ±127` に乗って `q·scale` で厳密に復元され、
-  fake-quant が**冪等**になる（再適用でビット不変）。下限 clamp は全ゼロチャネルの `0/0` 回避。
-- チャネル軸はモジュール型の表（`QUANT_CHANNEL_AXES`）。`ConvTranspose1d` だけ重みが
-  `[Cin, Cout, K]` の転置レイアウトなので **1**、他 4 つは 0。op 名で引く鏡像
-  （`ops.WEIGHT_CHANNEL_AXES` / TS 側 `packages/runtime/src/ops.ts`）とは適合表
-  （`packages/runtime/tests/fixtures/op-contracts.json` の `channel_axis`）が両側から突き合わせる。
-- 突合は **FQN**（`<module>.weight`）— `id(tensor)` は使わない（ADR 0006）。`convert.py` が
-  safetensors のテンソルキーに FQN をそのまま使うので、同じ空間で emit 側と噛み合う。
-  **`--dtype i8` は export するラッパ（`AnimaDit`）に丸めを当てる**のがそのため
-  （内側の `model` に当てると FQN の接頭辞が食い違う）。
-- 対象 0 本は `QuantizeError` で fail loudly（`--dtype i8` を指定したのに実質 f32 で書けた、を
-  沈黙させない）。
+- `scale = clamp(amax / 127, f32 tiny)` per output channel, and `q = clamp(round(w/scale), ±127)`.
+  **−128 is not used** — the element with the largest absolute value lands on `q = ±127` and is
+  restored exactly by `q·scale`, which makes the fake-quant **idempotent** (bit-invariant under
+  reapplication). The lower clamp avoids `0/0` for all-zero channels.
+- The channel axis comes from a table keyed by module type (`QUANT_CHANNEL_AXES`). Only
+  `ConvTranspose1d` has the transposed weight layout `[Cin, Cout, K]` and therefore axis **1**; the
+  other 4 use 0. Against the op-name-keyed mirror (`ops.WEIGHT_CHANNEL_AXES` / TS-side
+  `packages/runtime/src/ops.ts`), the conformance table (`channel_axis` in
+  `packages/runtime/tests/fixtures/op-contracts.json`) cross-checks from both sides.
+- Matching is by **FQN** (`<module>.weight`) — `id(tensor)` is not used (ADR 0006). `convert.py`
+  uses the FQN verbatim as the safetensors tensor key, so it meshes with the emit side in the same
+  namespace. **That is why `--dtype i8` applies the rounding to the exported wrapper (`AnimaDit`)**
+  (applying it to the inner `model` would make the FQN prefixes disagree).
+- 0 targets fails loudly with `QuantizeError` (never silently allowing "`--dtype i8` was given, yet
+  what got written is effectively f32").
 
-**適格判定は f16 と同じ 2 条件の AND**（`eligible_compressed_initializers` を共用）。2 つ目の
-「逆変換ビット一致」が i8 では `torch.equal(q8.to(f32) · scale, t)` になる。**scale は fake-quant が
-使った値をそのまま**書く（再計算しない）。
+**Eligibility is the same AND of 2 conditions as f16** (`eligible_compressed_initializers` is
+shared). The second one, "inverse-transform bit equality", becomes `torch.equal(q8.to(f32) · scale,
+t)` for i8. **The scale written out is exactly the one the fake-quant used** (never recomputed).
 
-**companion scale**: `karume.scale.<重みキー>` という F32 テンソルを同じファイルに入れ、IR 側は
-`storage.scale` でそのキーを明示宣言する（`i8` では**必須** — 既定 1.0 で補完すると書き忘れが
-「全チャネル 1.0 で dequant した重み」に化けてロードも実行も通ってしまう）。実テンソルとの
-名前衝突は書き出し前に検査する。
+**Companion scales**: an F32 tensor named `karume.scale.<weight key>` goes into the same file, and
+the IR declares that key explicitly via `storage.scale` (**mandatory for `i8`** — defaulting it to
+1.0 would turn a forgotten declaration into "a weight dequantized with 1.0 on every channel", which
+would load and run just fine). Name collisions with real tensors are checked before writing.
 
-**並び順**: I8 は要素サイズ 1 で整列制約が無いかわり**任意のバイト長**を作るので、既存の F16
-規則の後ろ = **末尾**に置く。前に置くと後続の絶対 offset が要素サイズの倍数から外れる
-（`test_emit.py` の故障注入がこれを実証 — HF の `safe_open` は読めてしまう）。
+**Ordering**: I8 has an element size of 1 and therefore no alignment constraint, but it does produce
+**arbitrary byte lengths**, so it goes after the existing F16 rules = **last**. Placing it earlier
+would push the following absolute offsets off the multiple of their element size (the fault
+injection in `test_emit.py` demonstrates this — HF's `safe_open` can still read them).
 
-    F32（名前昇順）→ I32 → 偶数要素 F16 → 奇数要素 F16 → **I8（末尾）**
+    F32 (name ascending) → I32 → even-count F16 → odd-count F16 → **I8 (last)**
 
-#### 実測（2026-08-03・`--dtype i8` でフル 28 層・別プロセス）
+#### Measurements (2026-08-03, `--dtype i8` at the full 28 layers, separate process)
 
-| 指標                            | 実測                                                      |
-| ------------------------------- | --------------------------------------------------------- |
-| `model.safetensors`             | 1,963,762,200 B（**1,872.8MiB**）                         |
-| f32 比 / f16 比                 | **25.09%** / **50.16%**（f32 7,465.0MiB・f16 3,733.5MiB） |
-| 適格（i8 格納）                 | 454 本 / 1,956.4MB（19.56 億要素）                        |
-| companion scale                 | 5.19MB = 適格バイトの **0.265%**                          |
-| 適格外（f32 格納）              | 125 本 / 1.22MB                                           |
-| emit 時間 / ピーク RSS          | 44.3s / 11,593MiB                                         |
-| `--verify transformer` 2 ケース | maxdiff 0.000e+00・**全ケースビット一致**                 |
+| Metric                          | Measured                                                 |
+| ------------------------------- | -------------------------------------------------------- |
+| `model.safetensors`             | 1,963,762,200 B (**1,872.8MiB**)                         |
+| vs f32 / vs f16                 | **25.09%** / **50.16%** (f32 7,465.0MiB, f16 3,733.5MiB) |
+| Eligible (i8 storage)           | 454 tensors / 1,956.4MB (19.56e8 elements)               |
+| Companion scales                | 5.19MB = **0.265%** of the eligible bytes                |
+| Ineligible (f32 storage)        | 125 tensors / 1.22MB                                     |
+| emit time / peak RSS            | 44.3s / 11,593MiB                                        |
+| `--verify transformer`, 2 cases | maxdiff 0.000e+00, **bit-identical in every case**       |
 
-`Session.diagnostics().storage`（Deno 側）は `residentCompressedBytes` **1,961,579,776 B
-（1,870.7MiB）**・`hostExpandedBytes` **0**。前者はエクスポータの
-`compressed_bytes + scale_bytes`（1,956,388,864 + 5,190,912）と**バイト単位で一致**する —
-「診断に scale を足す」がエクスポータとランタイムで同じ意味になっていることの実測。
+`Session.diagnostics().storage` (Deno side) reports `residentCompressedBytes` **1,961,579,776 B
+(1,870.7MiB)** and `hostExpandedBytes` **0**. The former matches the exporter's `compressed_bytes +
+scale_bytes` (1,956,388,864 + 5,190,912) **byte for byte** — a measurement that "adding the scales
+into the diagnostics" means the same thing in the exporter and the runtime.
 
-scale のオーバヘッドは ADR 0019 の試算（0.4〜0.9%）より小さい **0.265%**。DiT の Linear が
-`[Cout, Cin]` で Cin が 1024〜4096 と大きいため（scale は Cout 本しか要らない）。
+The scale overhead is **0.265%**, smaller than the 0.4–0.9% estimated in ADR 0019, because the DiT's
+Linear weights are `[Cout, Cin]` with Cin as large as 1024–4096 (the scales only need Cout entries).
 
-`anima_pipeline.py --dtype i8` は **DiT だけ i8・他 3 コンポーネントは f16** で丸めてから参照を
-採る（`COMPONENT_DTYPES`）。資産系列（`models/anima-i8/transformer` +
-`models/anima-f16/` の他 3 つ）と 1 対 1 に対応させるためで、全部を i8 にすると text 経路の
-参照だけが実行される資産と別のモデルの数になる。出力は `models/anima-pipeline-i8/`
-（21 テンソル・9,873,808 B）で、実測 DiT 1 step あたり 14.1s / 14.4s。
+`anima_pipeline.py --dtype i8` rounds **the DiT in i8 and the other 3 components in f16** before
+taking the references (`COMPONENT_DTYPES`). This is to keep a one-to-one correspondence with the
+asset series (`models/anima-i8/transformer` plus the other 3 from `models/anima-f16/`); making
+everything i8 would make the text-path references the numbers of a different model than the assets
+actually being executed. The output is `models/anima-pipeline-i8/` (21 tensors, 9,873,808 B),
+measured at 14.1s / 14.4s per DiT step.
 
-実 GPU E2E の実測値は `packages/runtime/tests/e2e_anima_i8_test.ts` の tolerance コメントが正本
-（DiT golden maxAbs 8.59e-5 / 段② 生の DiT 出力 5.34e-5 / 段② latents 1.19e-6）。**f16 系列の
-値は流用していない** — i8 は丸め後の重みが別の数なので、縮約順序に由来する実装誤差も別物になる。
+The real-GPU E2E measurements are authoritative in the tolerance comments of
+`packages/runtime/tests/e2e_anima_i8_test.ts` (DiT golden maxAbs 8.59e-5 / stage ② raw DiT output
+5.34e-5 / stage ② latents 1.19e-6). **The f16-series values are not reused** — i8 rounding produces
+different weights, so even the implementation error stemming from reduction order is a different
+quantity.
 
-#### 故障注入の結果（2026-08-03・pytest + tiny golden 再生成）
+#### Fault injection results (2026-08-03, pytest + tiny golden regeneration)
 
-1 点だけ壊して `uv run pytest tests/` と `python -m karume.goldens` を回した
-（ハーネスが必ず復元し、復元後のベースライン 1,602 passed も再確認済み）。
+Breaking exactly one thing and then running `uv run pytest tests/` and `python -m karume.goldens`
+(the harness always restores, and the post-restore baseline of 1,602 passed was re-confirmed).
 
-| 注入                                            | 結果                                                                                                                 |
-| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| ① 丸め順序の破れ（fake-quant を export の後へ） | pytest **208 errors** / golden 生成が `EmitError: … per-channel scale が無い` で停止                                 |
-| ② scale の再計算（軸 0 固定）                   | pytest **2 failed** / golden 生成が `EmitError: … 逆変換してもビット一致しない`（落ちたのは `up.weight` = 転置軸 1） |
-| ③ scale の再計算（**正しい軸**）                | pytest **2 failed**（門そのものが消えたことを負のテストが検出）。**golden はバイト不変で再生成できる**               |
-| ④ −128 混入（`scale = amax/128`・負側 −128）    | pytest **5 failed**（±127 / 冪等 / scale 定義 / golden 決定性 / scale 不動点）                                       |
-| ⑤ 書き出し順の破れ（I8 を先頭群へ）             | pytest **3 failed** / golden 生成が `ContainerError: … 絶対 offset 4175 が F32 の要素サイズ 4 に整列していない`      |
+| Injection                                                         | Result                                                                                                                                          |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| ① broken rounding order (fake-quant after the export)             | pytest **208 errors** / golden generation stops with `EmitError: … per-channel scale が無い`                                                    |
+| ② recomputing the scale (axis fixed to 0)                         | pytest **2 failed** / golden generation stops with `EmitError: … 逆変換してもビット一致しない` (the failure is `up.weight` = transposed axis 1) |
+| ③ recomputing the scale (**correct axis**)                        | pytest **2 failed** (the negative tests detect that the gate itself is gone). **The goldens regenerate byte-identically**                       |
+| ④ letting −128 in (`scale = amax/128`, −128 on the negative side) | pytest **5 failed** (±127 / idempotence / scale definition / golden determinism / scale fixed point)                                            |
+| ⑤ broken write order (I8 moved into the leading group)            | pytest **3 failed** / golden generation stops with `ContainerError: … 絶対 offset 4175 が F32 の要素サイズ 4 に整列していない`                  |
 
-**③ が重要（期待と違った）**: 「fake-quant 済みの重みから正しい軸で scale を引き直す」は
-**データとしては何も変えない**。`q` を ±127 に閉じているので最大絶対値要素は必ず `q = ±127` に
-乗り、`amax(|q·s|)/127 = fl(fl(127·s)/127) = s` が f32 の**不動点**になる（乱数 8.9e7 サンプルで
-反例ゼロ）。つまり ADR 0019 の「再計算禁止」は逆変換ゲートでは検出できない規律で、守るべき
-理由は「emit の時点の重みが実効重みでない / 軸が違う / 式が違う」ときに黙って別の scale に
-なることのほうにある（②がその実例）。この不動点性は
-`test_emit.py::test_recomputing_the_scale_from_a_quantized_weight_is_a_fixed_point` が固定している。
+**③ is the important one (not what was expected)**: "re-deriving the scale from an
+already-fake-quantized weight on the correct axis" **changes nothing in the data**. Because `q` is
+closed to ±127, the element with the largest absolute value necessarily lands on `q = ±127`, and
+`amax(|q·s|)/127 = fl(fl(127·s)/127) = s` is a **fixed point** in f32 (zero counterexamples over
+8.9e7 random samples). So ADR 0019's "no recomputation" is a discipline the inverse-transform gate
+cannot detect, and the reason to keep it lies elsewhere: when "the weight at emit time is not the
+effective weight / the axis is wrong / the formula is wrong", the scale silently becomes a different
+one (② is exactly that case). This fixed-point property is pinned by
+`test_emit.py::test_recomputing_the_scale_from_a_quantized_weight_is_a_fixed_point`.
 
-### パッチ層（`karume/patch_anima.py`）
+### Patch layer (`karume/patch_anima.py`)
 
-`patch_sbv2` と違い **export 可否ではなく IR の質**が目的（ADR 0016 / recon §5）。素のままでも
-4/4 export は通るが、そのままだと conv3d / `linalg_vector_norm` / `upsample_nearest2d` が語彙に
-要り、rank が 8 まで上がり、timestep 埋め込みがグラフに焼き込まれる。
+Unlike `patch_sbv2`, the goal is **not exportability but IR quality** (ADR 0016 / recon §5). All 4
+targets export even unpatched, but as-is the vocabulary would need conv3d / `linalg_vector_norm` /
+`upsample_nearest2d`, the rank would go up to 8, and the timestep embedding would be baked into the
+graph.
 
-| 対象        | 書き換え                                                                                                                                |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Qwen3       | `attention_mask` を渡さない（全 1 マスク ⇒ 因果マスクのみ・加算バイアス同一）                                                           |
-| Conditioner | 全 1 マスク 2 本を渡さない。512 パディングと出力マスク乗算はホスト側                                                                    |
-| DiT         | timestep 埋め込みをグラフ入力へ昇格 / `padding_mask` をゼロ定数チャネル化 / rank4 化                                                    |
-| VAE decoder | CausalConv3d(T=1) → conv2d / nearest-exact ×2 → reshape+expand / チャネル L2 → 最終次元 sum + `clamp_min` / `feat_cache` は fail loudly |
-| 共通        | RoPE の `inv_freq` をバッファ → 素の属性へ降格（定数畳み込みの葉にする）                                                                |
+| Subject     | Rewrite                                                                                                                              |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Qwen3       | do not pass `attention_mask` (an all-ones mask ⇒ the causal mask alone, with an identical additive bias)                             |
+| Conditioner | do not pass the two all-ones masks. The 512 padding and the output mask multiplication are host-side                                 |
+| DiT         | promote the timestep embedding to a graph input / turn `padding_mask` into a zero-constant channel / move to rank 4                  |
+| VAE decoder | CausalConv3d(T=1) → conv2d / nearest-exact ×2 → reshape+expand / channel L2 → last-dim sum + `clamp_min` / `feat_cache` fails loudly |
+| Shared      | demote RoPE's `inv_freq` from a buffer to a plain attribute (making it a leaf for constant folding)                                  |
 
-`--verify` の参照は**パッチ前**に採る（VAE は `vae_patches_applied()` が門番）。参照は
-`vae.decode` そのもの — 「conv3d ⇒ conv2d 等価」と「T=1 では feat_cache が結果に効かない」を
-1 度の突合で同時に実測する（片方を別経路で確かめると、もう片方の前提が黙って崩れる余地が残る）。
+The `--verify` references are taken **before the patches** (with `vae_patches_applied()` as the gate
+for the VAE). The reference is `vae.decode` itself — one comparison measures both "conv3d ⇒ conv2d
+equivalence" and "at T=1 the feat_cache does not affect the result" at the same time (checking one
+of them through a separate path would leave room for the other's premise to break silently).
 
-### LoRA（`karume/lora.py`）
+### LoRA (`karume/lora.py`)
 
-ΔW=(B@A)·scale を **f32 で計算**して元 dtype へ in-place 加算する。IR は 1 ノードも変わらず
-ランタイム実装は要らない（ADR 0016）。命名変換は diffusers 同梱の
-`_convert_non_diffusers_anima_lora_to_diffusers` を呼ぶ（対応表を自前で持たない）。
-fail loudly は 4 つ: ファイル全体の `lora_B` が全 0 / 対象 0 件 / `lora_A`・`lora_B` の片方欠け /
-形状不一致。成分ごとの ΔW=0 は正常でありうるので、そちらは `FuseReport.is_noop` で知らせる
-（例外にしない）。
+ΔW=(B@A)·scale is **computed in f32** and added in place to the original dtype. The IR does not
+change by a single node and no runtime implementation is required (ADR 0016). Name conversion calls
+`_convert_non_diffusers_anima_lora_to_diffusers` bundled with diffusers (no hand-maintained mapping
+table). There are 4 fail-loudly conditions: `lora_B` being all zeros for the whole file / 0 targets
+matched / one of `lora_A`, `lora_B` missing / a shape mismatch. A per-component ΔW=0 can
+legitimately happen, so that is reported through `FuseReport.is_noop` instead (not raised).
 
-## Anima のホストパイプライン参照フィクスチャ（`anima_pipeline.py`）
+## Anima host pipeline reference fixture (`anima_pipeline.py`)
 
-IR に載るのは 4 グラフだけで、その外側 — トークナイズ / sigma スケジュール / timestep 埋め込み表 /
-CFG / Euler 更新 / latent 逆正規化 / 512 パディング — は全てホストコードになる。**その「数の正」**を
-1 本のフィクスチャに落とす台本。正本は diffusers 0.39 の `modular_pipelines/anima/` 4 ブロックで、
-**パッチ層を通さない素の diffusers 経路**で採る（パッチ層の同値は `export_anima.py --verify` が
-別に測る — 検証網を独立に保つ。ここでもパッチを通すと、パッチのバグが参照とテスト対象の両方に
-同じ形で乗って差 0 のまま素通りする）。
+Only 4 graphs go into the IR; everything outside them — tokenization / sigma schedule / timestep
+embedding table / CFG / Euler update / latent denormalization / 512 padding — is host code. This
+script pins **the authoritative numbers for that part** into a single fixture. The authority is the
+4 blocks of `modular_pipelines/anima/` in diffusers 0.39, taken through the **plain diffusers path
+without the patch layer** (patch-layer equivalence is measured separately by `export_anima.py
+--verify` — keeping the verification nets independent; going through the patches here as well would
+put a patch bug into both the reference and the subject under test in the same shape, letting it
+pass with a difference of 0).
 
 ```sh
-uv run --group anima python anima_pipeline.py                    # models/anima-pipeline/ へ
+uv run --group anima python anima_pipeline.py                    # into models/anima-pipeline/
 uv run --group anima python anima_pipeline.py --steps 32 --ref-steps 2
-uv run --group anima python anima_pipeline.py --resolution 1344x768 …   # 非正方（#23）
+uv run --group anima python anima_pipeline.py --resolution 1344x768 …   # non-square (#23)
 ```
 
-- 出力は `models/anima-pipeline/pipeline.safetensors`（21 テンソル・9.4MB）と `pipeline.json`
-  （プロンプト・step 数・shift・CFG 係数・各テンソルの役割と shape）。
-- **配布形 `models/anima-turbo/` 直下に置かない** — あちらは manifest が宣言したファイルだけを
-  並べてそのまま HF へ上げる木で、宣言外のファイルが混ざると `verify_dist` が止まる
-  （`models/sbv2-demo/` を分けたのと同じ理由）。
-- プロンプトは英語 1 本の固定値（danbooru 系タグ）。**ネガティブを空文字列にしない** — 空の
-  T5 id 列は長さ 1 になり conditioner の受理集合 `Dim("Ttgt", min=2)` から外れる。
-- `latents_init` は `SEED = 20260802` 固定（グローバル seed に依存しない）。
-- **`--resolution` は `WxH`**（正方は略記 — 綴りはデモの `--resolution` と同じで、正本は
-  `karume/resolution.py`）。非正方では `latents_init [1,16,H/8,W/8]` と
-  `padding_mask [1,1,H,W]` の**軸の順**が唯一の落とし穴で、入れ替えても要素数は合う。
-  メタには綴り（`resolution`）と `width` / `height` の両方が載る — **読み手は後者を見る**
-  （`resolution` は正方のとき int のままで、既存フィクスチャを読むテストとの互換のため）。
-- 生の DiT 出力（`noise_cond_*` / `noise_uncond_*`）も残す。これが無いと Deno 側で CFG と Euler の
-  ホストグルーを**単体でパリティ検査できず**、DiT の誤差と混ざった形でしか見られない。しかも
-  σ の刻みが `sigmas[1] − sigmas[0] = −1.064e-2` しかないので、DiT の誤差は Euler 更新で
-  約 1/100 に薄まる（latent だけを見る検出器は構造的に鈍い）。
-- `image` は `vae.decode` の戻り値そのもの。`AutoencoderKLQwenImage._decode` が最後に
-  `clamp(-1, 1)` を掛けており（`AnimaVaeDecoder` が焼き込んでいるのはこの clamp で、
-  postprocess 由来ではない）、フィクスチャ側と IR 側で clamp の位置が揃う。
+- The outputs are `models/anima-pipeline/pipeline.safetensors` (21 tensors, 9.4MB) and
+  `pipeline.json` (prompt, step count, shift, CFG coefficient, and the role and shape of every
+  tensor).
+- **Not placed directly under the distribution tree `models/anima-turbo/`** — that one holds exactly
+  the files the manifest declares and is uploaded to HF as-is, and an undeclared file stops
+  `verify_dist` (the same reason `models/sbv2-demo/` is kept separate).
+- The prompt is a single fixed English string (danbooru-style tags). **The negative prompt is not
+  the empty string** — an empty T5 id sequence has length 1 and falls outside the conditioner's
+  accepted set `Dim("Ttgt", min=2)`.
+- `latents_init` uses the fixed `SEED = 20260802` (independent of the global seed).
+- **`--resolution` takes `WxH`** (square may be abbreviated; the spelling is the same as the demo's
+  `--resolution`, and `karume/resolution.py` is authoritative). For non-square, the **axis order**
+  of `latents_init [1,16,H/8,W/8]` and `padding_mask [1,1,H,W]` is the one pitfall, since swapping
+  them still gives a matching element count. The metadata carries both the spelling (`resolution`)
+  and `width` / `height` — **readers should use the latter** (`resolution` stays an int for square,
+  for compatibility with tests that read existing fixtures).
+- The raw DiT outputs (`noise_cond_*` / `noise_uncond_*`) are kept as well. Without them the Deno
+  side **cannot parity-check the CFG and Euler host glue in isolation** and can only see it mixed
+  with the DiT's error. On top of that, the σ step is only `sigmas[1] − sigmas[0] = −1.064e-2`, so
+  the DiT error is diluted roughly 100× by the Euler update (a detector that only looks at the
+  latents is structurally blunt).
+- `image` is the return value of `vae.decode` itself. `AutoencoderKLQwenImage._decode` applies a
+  final `clamp(-1, 1)` (this clamp is what `AnimaVaeDecoder` bakes in — it does not come from
+  postprocessing), so the clamp sits at the same position on the fixture side and the IR side.
 
-実測（`--steps 32 --ref-steps 2` / 512px）: **44.0s・ピーク RAM 12,918MiB**（DiT を CPU f32 で
-4 回 = 2 step × cond/uncond。1 step あたり 13.5s）。テキスト側は qwen 29 / t5 30 トークン
-（ネガティブは 13 / 21）。
+Measured (`--steps 32 --ref-steps 2`, 512px): **44.0s, peak RAM 12,918MiB** (4 DiT runs on CPU f32 =
+2 steps × cond/uncond; 13.5s per step). On the text side, qwen 29 and t5 30 tokens (negative 13 /
+21).
 
-Deno 側のホストグルー実装（`packages/runtime/tests/e2e_anima_test.ts` の `sigmaSchedule` / `cfgEulerStep` /
-`denormalizeLatents` / `padSequence`）は、このフィクスチャと **4 本ともビット一致**する
-（`Math.fround` で 1 演算ずつ f32 に丸める）。
+The Deno-side host glue implementation (`sigmaSchedule` / `cfgEulerStep` / `denormalizeLatents` /
+`padSequence` in `packages/runtime/tests/e2e_anima_test.ts`) is **bit-identical to this fixture in
+all 4** (rounding to f32 one operation at a time with `Math.fround`).
 
-### Turbo LoRA の焼き込みと turbo 参照フィクスチャ
+### Fusing the Turbo LoRA and the turbo reference fixture
 
-`--lora` に少ステップ蒸留の Turbo LoRA（例: `models/anima-turbo-lora-v0.2.safetensors`。
-実重みはリポジトリに含まれない — 手動配置）を渡すと export 前に重みへ焼き込まれる。この
-LoRA は text_conditioner 側の `lora_B` が**全ゼロ（noop）と実測済み**なので、**transformer
-ターゲットだけを emit すれば足りる**（他 3 ターゲットは既存 `models/anima-f16/` を共有）:
+Passing a few-step distilled Turbo LoRA to `--lora` (e.g.
+`models/anima-turbo-lora-v0.2.safetensors`; the real weights are not in the repository — place them
+by hand) fuses it into the weights before the export. This LoRA has been **measured to have an
+all-zero (noop) `lora_B` on the text_conditioner side**, so **emitting the transformer target alone
+is enough** (the other 3 targets share the existing `models/anima-f16/`):
 
 ```sh
 uv run --group anima python export_anima.py --dtype f16 --target transformer \
   --lora ../../models/anima-turbo-lora-v0.2.safetensors --out ../../models/anima-turbo-f16
 ```
 
-`--verify transformer --lora <path>` は LoRA 適用後の重みに対する eager 同値検証になる
-（`_apply_lora` が fake-quant・参照採取より前に効くため、追加のコード変更なしで両側が同じ
-LoRA 適用済みモデルを見る。実測: 全ケースビット一致）。
+`--verify transformer --lora <path>` becomes an eager equivalence check against the post-LoRA
+weights (`_apply_lora` takes effect before the fake-quant and the reference capture, so both sides
+see the same LoRA-applied model with no extra code changes; measured: bit-identical in every case).
 
-Turbo 運用（steps=10 / CFG=1）の参照フィクスチャ:
+Reference fixture for turbo operation (steps=10 / CFG=1):
 
 ```sh
 uv run --group anima python anima_pipeline.py --dtype f16 --steps 10 --ref-steps 10 \
@@ -942,236 +1030,271 @@ uv run --group anima python anima_pipeline.py --dtype f16 --steps 10 --ref-steps
   --out ../../models/anima-pipeline-turbo-f16
 ```
 
-`--guidance-scale 1.0` は **uncond 分岐の DiT 呼び出し自体を省略する**（実運用の turbo
-デプロイと同じ形）ため、出力フィクスチャに `noise_uncond_stepNNNN` キーが**存在しない**。
-guidance_scale != 1.0 の base 系列 fixture とキー集合が異なる点に注意（ホストグルー側は
-このキー欠落を「uncond を計算しない」分岐として扱う）。
+`--guidance-scale 1.0` **skips the DiT call for the uncond branch entirely** (the same shape as a
+production turbo deployment), so the output fixture **has no `noise_uncond_stepNNNN` keys**. Note
+that the key set differs from the base-series fixtures with guidance_scale != 1.0 (the host glue
+treats the missing keys as the "do not compute uncond" branch).
 
-## VAE decode の固定タイル化 参照フィクスチャ（`anima_tiling.py`）
+## VAE decode fixed-tiling reference fixture (`anima_tiling.py`)
 
-`examples/anima` の `--vae-tiling`（VAE decode を latent 64×64 の固定タイルに割る）の
-「ホスト側の数の正」。VAE decoder のグラフは**解像度に対して構造不変**なので（512px 用と
-1024px 用の `model.safetensors` はノード列・重みバイトまで完全一致 — recon
-`docs/research/2026-08-03-dynres-vae-tiling.md` §1.2）、512px 用資産をそのままタイル
-decoder として使える。**IR にもランタイムにも追加はゼロ**で、切り出し / ブレンド / 貼り付け
-だけがホスト（`examples/anima/host/tiling.ts`）に載る。
+The **authoritative host-side numbers** for `--vae-tiling` in `examples/anima` (splitting the VAE
+decode into fixed latent 64×64 tiles). The VAE decoder graph is **structurally invariant with
+respect to resolution** (the `model.safetensors` for 512px and for 1024px agree exactly, down to the
+node sequence and the weight bytes — recon `docs/research/2026-08-03-dynres-vae-tiling.md` §1.2), so
+the 512px assets can be used directly as the tile decoder. **Nothing is added to the IR or the
+runtime**; only cutting, blending and pasting live on the host (`examples/anima/host/tiling.ts`).
 
 ```sh
-uv run --group anima python anima_tiling.py     # models/anima-tiling-f16-1024/ へ
+uv run --group anima python anima_tiling.py     # into models/anima-tiling-f16-1024/
 uv run --group anima python anima_tiling.py --resolution 1344x768 \
   --latents ../../models/anima-pipeline-turbo-f16-1344x768/pipeline.safetensors
 ```
 
-- 入力 latent は `models/anima-pipeline-turbo-f16-1024/pipeline.safetensors` の
-  `latents_denorm`（逆正規化済み = VAE decoder の入力そのもの）を借りる。**先にそちらを
-  生成しておく**（無ければ名指しで落ちる）。randn ではなく実パイプラインの latent を使うのは、
-  継ぎ目の出方が値の中身に依るから。
-- 出力は `tiling.safetensors`（`latents_denorm` / `image_tiled`・13.0MB）と `tiling.json`
-  （**タイル幾何** = 軸ごとの開始位置列 / stride / ブレンド幅、および非タイル decode との
-  差の観測）。Deno 側（`packages/runtime/tests/e2e_anima_tiling_test.ts`）は数値だけでなく**この幾何メタとも
-  突き合わせる** — 数値だけだと「別の幾何でも tolerance の内側」を排除できない。
-- **`vae.enable_tiling()` は使わない**。上流の `tiled_decode` は `range(0, H, stride)` で
-  走査するので最後のタイルが短くなり、固定形のタイル decoder では食えない。走査は
-  「最後のタイルの開始位置を `extent − tile` へスナップする等間隔配置」に変えてある
-  （recon §4.2 が予告した意図的逸脱）。台本は `vae.use_tiling` が真なら fail loudly する。
-- **ブレンドの式は上流の逐語移植**（`blend_v` / `blend_h`）。同値は
-  `tests/test_anima_tiling.py` が**本物のメソッドとのビット一致**で固定する — 走査を自前に
-  した以上、式の同型はここでしか担保できない。
-- 重みは資産系列と同じ dtype へ fake-quant してから参照を採る（ADR 0006 —
-  `anima_pipeline.py` と同じ規律）。既定 `--dtype f16` は TS 側が開く `models/anima-f16/
-  vae_decoder` に対応する。
+- The input latent is borrowed from `latents_denorm` in
+  `models/anima-pipeline-turbo-f16-1024/pipeline.safetensors` (already denormalized = exactly the
+  VAE decoder input). **Generate that first** (otherwise it fails naming the missing file). A real
+  pipeline latent is used rather than randn because how the seams show depends on the actual values.
+- The outputs are `tiling.safetensors` (`latents_denorm` / `image_tiled`, 13.0MB) and `tiling.json`
+  (**the tile geometry** = per-axis start positions, stride and blend width, plus observations of
+  the difference against a non-tiled decode). The Deno side
+  (`packages/runtime/tests/e2e_anima_tiling_test.ts`) checks **against this geometry metadata** as
+  well as the numbers — numbers alone cannot rule out "a different geometry that also lands inside
+  the tolerance".
+- **`vae.enable_tiling()` is not used.** The upstream `tiled_decode` scans with `range(0, H,
+  stride)`, which makes the last tile shorter — something a fixed-shape tile decoder cannot digest.
+  The scan is changed to "evenly spaced placement that snaps the last tile's start to `extent −
+  tile`" (the deliberate deviation announced in recon §4.2). The script fails loudly if
+  `vae.use_tiling` is true.
+- **The blend formulas are transcribed verbatim from upstream** (`blend_v` / `blend_h`). Equivalence
+  is pinned by `tests/test_anima_tiling.py` as **bit equality against the real methods** — once the
+  scan is our own, this is the only place the formulas' isomorphism can be guaranteed.
+- The weights are fake-quantized to the same dtype as the asset series before the references are
+  taken (ADR 0006 — the same discipline as `anima_pipeline.py`). The default `--dtype f16`
+  corresponds to the `models/anima-f16/vae_decoder` the TS side opens.
 
-- **`--resolution` は `WxH`**（非正方は #23）。幾何は入力 latent の shape から組むので、
-  この引数は「借りた latent が意図した解像度か」の門と既定 `--out` の名前を決めるだけ。
-  1344×768（latent 96×168）は **2×3 = 6 タイル・stride 32/52・ブレンド 256/96px**。
+- **`--resolution` takes `WxH`** (non-square is #23). The geometry is built from the shape of the
+  input latent, so this argument only gates "is the borrowed latent at the intended resolution" and
+  determines the default `--out` name. 1344×768 (latent 96×168) is **2×3 = 6 tiles, stride 32/52,
+  blend 256/96px**.
 
-実測（1024px・CPU f32・9 タイル）: 非タイル decode との差は **maxAbs 5.07e-2 /
-mean 9.82e-4**。タイル化は decoder の attention の受容野をタイル内に閉じる**近似**（上流の
-`tiled_decode` と同じ近似）なので、**この差は 0 にならないのが正常**。実装誤差はこれとは別で、
-実 GPU 対 torch は maxAbs 1.642e-5（`packages/runtime/tests/e2e_anima_tiling_test.ts` の tolerance 導出）。
-1344×768（6 タイル）の同じ観測は **maxAbs 9.97e-2**、実 GPU 対 torch は **8.02e-6**
-（`packages/runtime/tests/e2e_anima_nonsquare_test.ts`）。
+Measured (1024px, CPU f32, 9 tiles): the difference against a non-tiled decode is **maxAbs 5.07e-2 /
+mean 9.82e-4**. Tiling is an **approximation** that confines the receptive field of the decoder's
+attention to within a tile (the same approximation as upstream `tiled_decode`), so **this difference
+being non-zero is correct**. The implementation error is a separate matter: real GPU vs torch is
+maxAbs 1.642e-5 (the tolerance derivation in `packages/runtime/tests/e2e_anima_tiling_test.ts`). The
+same observation for 1344×768 (6 tiles) is **maxAbs 9.97e-2**, with real GPU vs torch at **8.02e-6**
+(`packages/runtime/tests/e2e_anima_nonsquare_test.ts`).
 
-## 非正方の rope 表 参照フィクスチャ（`anima_rope.py`）
+## Non-square rope table reference fixture (`anima_rope.py`)
 
-S 形 DiT（`--dit-graph dyn`）のホストは rope の cos / sin を**軸別素表の並べ替え**で組む。
-**正方ではこの並べ替えの h ↔ w 取り違えが原理的に検出できない** — Anima の `rope_scale` は
-h と w が同値（`[1.0, 4.0, 4.0]`）なので `cos_h` と `cos_w` がバイト単位で一致し、H'=W' なら
-表そのものが同じ値になる（ADR 0034 の検出限界 1）。**非正方では位置の取り違えが割れる**ので、
-上流 `model.rope` の表を 4 幾何ぶん焼いて TS 側の再構成と Uint32 完全一致で突き合わせる。
+The host for the S-form DiT (`--dit-graph dyn`) assembles the rope cos / sin by **permuting the
+per-axis base tables**. **On square resolutions an h ↔ w mix-up in that permutation is in principle
+undetectable** — Anima's `rope_scale` has the same value for h and w (`[1.0, 4.0, 4.0]`), so `cos_h`
+and `cos_w` agree byte for byte and, with H'=W', the tables themselves hold the same values
+(detection limit 1 of ADR 0034). **On non-square resolutions the positional mix-up splits them
+apart**, so the upstream `model.rope` tables are baked for 4 geometries and compared against the TS
+side's reconstruction with exact Uint32 equality.
 
 ```sh
-uv run --group anima python anima_rope.py       # models/anima-rope-nonsquare/ へ（数秒）
+uv run --group anima python anima_rope.py       # into models/anima-rope-nonsquare/ (a few seconds)
 ```
 
-- 幾何は `GEOMETRIES` の固定 4 本（**16:9 と 3:4 の縦横** = 1344×768 / 768×1344 / 1152×896 /
-  896×1152・どれも S=4,032）。**縦横の対を必ず両方入れる** — 片方だけだと「h と w を
-  入れ替えた実装」がもう一方の幾何の表と一致してしまう。台本は正方が混ざったら落ちる。
-- **重みを 1 バイトも読まない**。`CosmosRotaryPosEmbed` はパラメータもバッファも持たない
-  純計算なので、モデルは `meta` デバイス上に config から組む（7.3GiB のロードが要らない）。
-- 出力は `rope.safetensors`（幾何ごとの `cos_<WxH>` / `sin_<WxH>`・各 `[1,1,S,128]`・16.5MB）と
-  `rope.json`（latent 寸法・トークン格子・S・素表の行数）。
-- Python 側の鏡像（素表からの再構成 ≡ 上流の表）は `tests/test_anima_rope.py` が**実重み無しの
-  合成 rope**（`rope_scale` の h と w を別の値にして取り違えが数に出る構成）で固定する。
+- The geometries are the fixed 4 of `GEOMETRIES` (**16:9 and 3:4, both orientations** = 1344×768 /
+  768×1344 / 1152×896 / 896×1152, all with S=4,032). **Both orientations of a pair must be
+  included** — with only one, "an implementation that swapped h and w" would agree with the table of
+  the other geometry. The script fails if a square resolution creeps in.
+- **Not a single byte of weights is read.** `CosmosRotaryPosEmbed` has neither parameters nor
+  buffers and is pure computation, so the model is built from the config on the `meta` device (no
+  7.3GiB load required).
+- The outputs are `rope.safetensors` (`cos_<WxH>` / `sin_<WxH>` per geometry, each `[1,1,S,128]`,
+  16.5MB) and `rope.json` (latent dimensions, token grid, S, number of rows in the base tables).
+- The Python-side mirror (reconstruction from the base tables ≡ the upstream tables) is pinned by
+  `tests/test_anima_rope.py` using a **synthetic rope without real weights** (a configuration where
+  h and w of `rope_scale` differ so that a mix-up shows up in the numbers).
 
-## 画像デモのプロンプト層（`anima_demo.py`）
+## Prompt layer of the image demo (`anima_demo.py`)
 
-`examples/anima/text/`（プロンプト文字列 → トークン id 列の Deno 実装）が要る**実行時資産**と、
-その**パリティ用フィクスチャ**を出す台本。モデルグラフには触らない。
+The script that produces the **runtime assets** required by `examples/anima/text/` (the Deno
+implementation of prompt string → token id sequence) and the **parity fixture** for it. It does not
+touch the model graphs.
 
 ```sh
-# 資産（models/anima-demo/text/ へ 2 本）+ フィクスチャ（packages/runtime/tests/fixtures/anima-text/）
+# assets (2 files into models/anima-demo/text/) + fixture (packages/runtime/tests/fixtures/anima-text/)
 cd tools/exporter
 uv run --group anima python anima_demo.py
-# 生成後は必ず整形する（commit 形はフォーマッタが正 — verify の fmt --check が fixtures も見る）
+# always format afterwards (the committed form is what the formatter produces — verify's fmt --check covers fixtures too)
 cd ../.. && deno fmt packages/runtime/tests/fixtures/anima-text/parity.json
 ```
 
-**1 回の実行で必ず両方**出す（同じ表から作らないと、実行時資産とフィクスチャが別々に古びて
-「テストは緑だがデモだけ別の id 列」になる）。実測 **約 3 分**（支配項は下の網羅検査）。
+**A single run always produces both** (if they are not built from the same table, the runtime
+assets and the fixture would age apart into "the tests are green but only the demo emits a
+different id sequence"). Measured at **about 3 minutes** (dominated by the exhaustive checks
+below).
 
-| 出力                                                     | サイズ（実測）            | 中身                                                                    |
-| -------------------------------------------------------- | ------------------------- | ----------------------------------------------------------------------- |
-| `models/anima-demo/text/qwen2-tokenizer.json`            | 3,514,619 B               | 語彙 151,643 / merges 151,387 / 文字クラス表 / NFC 分節表 / 追加語彙 26 |
-| `models/anima-demo/text/t5-tokenizer.json`               | 1,093,419 B               | 語彙 32,100 + スコア / 正規化表 / 追加語彙 103                          |
-| `packages/runtime/tests/fixtures/anima-text/parity.json` | 474KB（整形後・git 管理） | 28 ケースの参照 id 列 + NFC 251 対 + 語彙の**部分集合**                 |
+| Output                                                   | Size (measured)                | Content                                                                                                 |
+| -------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `models/anima-demo/text/qwen2-tokenizer.json`            | 3,514,619 B                    | vocabulary 151,643 / merges 151,387 / character class tables / NFC segmentation table / 26 added tokens |
+| `models/anima-demo/text/t5-tokenizer.json`               | 1,093,419 B                    | vocabulary 32,100 + scores / normalization table / 103 added tokens                                     |
+| `packages/runtime/tests/fixtures/anima-text/parity.json` | 474KB (formatted, git-tracked) | reference id sequences for 28 cases + 251 NFC pairs + a **subset** of the vocabularies                  |
 
-- 実行時資産（計 4.6MB）は **`models/` = `.gitignore` 配下**。生の `tokenizer.json` 計 13.8MB
-  から実行に要る情報だけを抜いた形で、**ライセンス物をリポジトリに抱えない**。
-- **MUST: 配布形 `models/anima-turbo/` 直下に置かない** — あちらは manifest が宣言したファイル
-  だけを並べてそのまま HF へ上げる木（`models/anima-pipeline/` を分けたのと同じ理由）。
-- フィクスチャは語彙の**部分集合**（Qwen2 218 語 / merges 375 / T5 125 語）だけを持つので、
-  151k / 32k を commit せずに全ケースを再現できる。正規化表と文字クラス表は**畳み込みの成果物
-  そのもの**（= 検証対象）なので全体を載せる。
+- The runtime assets (4.6MB in total) live under **`models/` = `.gitignore`**. They keep only the
+  information execution needs out of the raw `tokenizer.json` files (13.8MB in total), so that
+  **licensed material is not carried in the repository**.
+- **MUST: do not place them directly under the distribution tree `models/anima-turbo/`** — that one
+  holds exactly the files the manifest declares and is uploaded to HF as-is (the same reason
+  `models/anima-pipeline/` is kept separate).
+- The fixture only holds a **subset** of the vocabularies (Qwen2 218 tokens / 375 merges / T5 125
+  tokens), so every case can be reproduced without committing the 151k / 32k entries. The
+  normalization table and the character class tables are **the folding output itself** (= the
+  subject under test), so they are included in full.
 
-### なぜ表を焼くのか（`karume/anima_text.py`）
+### Why the tables are baked (`karume/anima_text.py`)
 
-**Unicode 判定を TS で再実装しない / 標準 API に委ねない**（`sbv2_demo.clean_text_ranges` と同じ
-規律）。判定の正本は Rust（`tokenizers` / その正規表現エンジン / `unicode-normalization`）側の
-Unicode 表で、JS エンジンの ICU 版とずれた瞬間に pre-token の切れ目や正規化結果が変わり、
-**例外も警告も出さずに id 列だけが別物**になる。Python から全コードポイントを実評価して
-閉区間表・写像表へ畳み、TS は二分探索で引くだけにする。
+**Unicode decisions are neither reimplemented in TS nor delegated to standard APIs** (the same
+discipline as `sbv2_demo.clean_text_ranges`). The authority for those decisions is the Unicode
+tables on the Rust side (`tokenizers` / its regex engine / `unicode-normalization`), and the moment
+they diverge from the JS engine's ICU version the pre-token boundaries or the normalization result
+change and **the id sequence alone becomes a different thing, with no exception and no warning**.
+Every code point is evaluated from Python and folded into closed-interval tables and mapping tables,
+leaving TS with nothing but a binary search.
 
-焼くのは 5 種:
+There are 5 kinds of baked tables:
 
-| 表                              | 焼き方（正本への問い合わせ）                                   | 実測                          |
-| ------------------------------- | -------------------------------------------------------------- | ----------------------------- |
-| 文字クラス `\p{L}` `\p{N}` `\s` | `Split(Regex(…), behavior="removed")` に 1 文字ずつ投げる      | 677 / 144 / 10 区間           |
-| `(?i:)` の同一視                | `Split(Regex("(?i:s)"), …)` を接尾辞 8 文字ぶん                | 9 組                          |
-| `NFC` の分節                    | `normalizers.NFC` と素の NFC が割れる cp を 8 文脈の探り針で   | 123 cp / 43 区間              |
-| `Precompiled` 正規化            | charsmap の DARTS 復号 + **発火しうる規則だけ**へ最小化        | 5,512 規則                    |
-| クラスタ境界（3 表）            | 「6 バイト以上へ押し上げると規則が不発火」を利用した**探り針** | extend / breakAfter / prepend |
+| Table                                  | How it is baked (querying the authority)                                          | Measured                      |
+| -------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------- |
+| character classes `\p{L}` `\p{N}` `\s` | feed one character at a time into `Split(Regex(…), behavior="removed")`           | 677 / 144 / 10 intervals      |
+| `(?i:)` case equivalence               | `Split(Regex("(?i:s)"), …)` for the 8 suffix characters                           | 9 pairs                       |
+| `NFC` segmentation                     | code points where `normalizers.NFC` and plain NFC diverge, via 8 context probes   | 123 cp / 43 intervals         |
+| `Precompiled` normalization            | DARTS decoding of the charsmap + minimization to **only the rules that can fire** | 5,512 rules                   |
+| cluster boundaries (3 tables)          | **probes** exploiting "pushing to 6 bytes or more makes the rule not fire"        | extend / breakAfter / prepend |
 
-**`NFC` も標準 API では足りない**（2026-08-03 実測）: 正本の `unicode-normalization` は Unicode 表が
-古く、**123 コードポイント**で `String.prototype.normalize("NFC")` / `unicodedata` と出力が割れる
-（120 cp は結合クラスを 0 と見なして並べ替えない・3 cp は新しい canonical composition を持たない）。
-畳み方は「割れる cp で文字列を分節し、各節だけを素の NFC に掛けて連結する（分節 cp 自身は正規化に
-参加させない）」。実害は id 列の沈黙不一致で、`PROMPT_CASES` に該当文字が 1 つも無かったため
-28 ケースの門を素通りしていた（乱択 1,200 プロンプトで Qwen2 6 件の不一致を実測 → 修正後 0 件）。
+**`NFC` is not covered by the standard API either** (measured 2026-08-03): the authoritative
+`unicode-normalization` has old Unicode tables and diverges from `String.prototype.normalize("NFC")`
+/ `unicodedata` on **123 code points** (120 cp treat the combining class as 0 and do not reorder; 3
+cp lack a newer canonical composition). The folding is "segment the string at the diverging code
+points, run plain NFC on each segment only, and concatenate (the segmenting code points themselves
+do not take part in normalization)". The real damage is a silent id-sequence mismatch, and because
+`PROMPT_CASES` contained not one of the affected characters, it slipped through the 28-case gate
+(measured on 1,200 randomized prompts: 6 mismatches for Qwen2 → 0 after the fix).
 
-**`(?i:)` は ASCII 相当ではない**（2026-08-03 実測）: Rust の `(?i:)` は Unicode の simple case
-folding で、接尾辞の 8 文字（s t r e v m l d）では **U+017F（ſ）が `s` と同一視される**。
-`.lower()` / `toLowerCase()` / ASCII の大小反転はいずれも正本ではなく、`it'ſs` の切れ目が
-`'ſ` + `s` ではなく `'ſs` になる（fixture ケース `apostrophe_fold` がこの境界）。
+**`(?i:)` is not the ASCII equivalent** (measured 2026-08-03): Rust's `(?i:)` is Unicode simple case
+folding, and among the 8 suffix characters (s t r e v m l d) **U+017F (ſ) is equated with `s`**.
+`.lower()` / `toLowerCase()` / flipping ASCII case are none of them authoritative, and the boundary
+in `it'ſs` becomes `'ſs` rather than `'ſ` + `s` (the fixture case `apostrophe_fold` is exactly this
+boundary).
 
-**`Precompiled` は NFKC でも最長一致でもない**: 書記素クラスタ単位の丸ごと置換 + **最短接頭辞
-勝ち**で、`A`+U+0301+U+0301 → `Á`（3 文字目が黙って消える）/ `A`+U+0302+U+0301 → `Â`
-（3cp 規則 `Ấ` ではなく 2cp 接頭辞が勝つ）。UTF-8 6 バイト以上のクラスタは丸ごと置換の経路に
-入らず、そのおかげでハングル / 地域表示子 / 絵文字 ZWJ 列は境界規則を実装せずに済んでいる。
+**`Precompiled` is neither NFKC nor longest-match**: it is whole-cluster replacement at the grapheme
+cluster level with **shortest prefix wins**, so `A`+U+0301+U+0301 → `Á` (the third character
+silently disappears) and `A`+U+0302+U+0301 → `Â` (the 2cp prefix wins over the 3cp rule `Ấ`).
+Clusters of 6 or more UTF-8 bytes never enter the whole-replacement path, which is why Hangul,
+regional indicators and emoji ZWJ sequences need no boundary rules implemented.
 
-### 検証の三段（どれか 1 つでも外れたら emit しない）
+### Three stages of verification (nothing is emitted if any one of them comes off)
 
-| 段                            | 場所                                             | 規模（実測）                                                                                                                                                |
-| ----------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ① 畳み込みの同値              | `anima_demo.py`（emit の門）                     | 全 1,112,064 cp + 規則鍵 5,512 + 乱択 200,000（seed 固定）/ pre-token 走査と NFC 分節はそれぞれ **全 cp × 11 文脈 = 12,232,704 件**                         |
-| ② 参照実装 vs `AutoTokenizer` | `anima_demo.py` + `tests/test_anima_demo.py`     | 28 ケース（`padding="longest"` / `max_length=512` / `truncation=True` — `anima_pipeline.encode_text` と同じ呼び方）+ **乱択 2,000 プロンプト**（seed 固定） |
-| ③ TS 実装 vs フィクスチャ     | `packages/runtime/tests/anima_tokenizer_test.ts` | 28 ケース × 2 トークナイザ + NFC 251 対 + 性質テスト + パイプライン参照とのクロスチェック                                                                   |
+| Stage                                         | Where                                            | Scale (measured)                                                                                                                                                          |
+| --------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ① equivalence of the folding                  | `anima_demo.py` (the emit gate)                  | all 1,112,064 cp + 5,512 rule keys + 200,000 randomized (fixed seed) / the pre-token scan and the NFC segmentation each cover **all cp × 11 contexts = 12,232,704 cases** |
+| ② reference implementation vs `AutoTokenizer` | `anima_demo.py` + `tests/test_anima_demo.py`     | 28 cases (`padding="longest"` / `max_length=512` / `truncation=True` — the same call as `anima_pipeline.encode_text`) + **2,000 randomized prompts** (fixed seed)         |
+| ③ TS implementation vs the fixture            | `packages/runtime/tests/anima_tokenizer_test.ts` | 28 cases × 2 tokenizers + 251 NFC pairs + property tests + a cross-check against the pipeline reference                                                                   |
 
-- ①は**再生成時にしか走らない**（数分かかる）。pytest 側（②）は commit 済みフィクスチャに対して
-  同じ突合をやり直すので、**再生成しなくても上流の tokenizer.json の変化に気づける**。
-- pre-token 走査の探り針は 11 文脈。`'{}` の 1 文字だけでは**足りない** — 短縮形の選択肢が
-  発火してもしなくても同じ 1 断片になり、大小無視の取り違えが素通りする（実測でこの穴を踏んだ）。
-  NFC 分節も同じ形で、検出用（8 文脈）と検証用（11 文脈）を**別に**持つ。
-- ②の乱択 2,000 件は「人手の台本が思いつかなかった組み合わせ」を機械的に踏ませる恒久の門
-  （NFC のエンジン差は 28 ケースの隙間を通って id 列を割った）。絵文字・結合文字・分節 cp・
-  各種空白を混ぜた alphabet から seed 固定で引く。
-- ③は**実資産なしで走る**（フィクスチャに語彙の部分集合が入っている）。資産がある環境では
-  実語彙 151k / 32k での再現と、`models/anima-pipeline{,-f16,-i8,-turbo-f16}/` の
-  `qwen_input_ids` / `t5_input_ids`（torch 側が採った id 列）とのクロスチェックが追加で走る。
-  後者は**フィクスチャ生成器とは別経路**なので、フィクスチャ自体が誤っている場合を捕まえる。
-- 上流 `tokenizer.json` の構造前提（`normalizer.type` / `pre_tokenizer` 先頭 / ByteLevel の
-  `add_prefix_space` / post_processor が足す特殊トークン / 追加語彙のフラグ / T5 の
-  `byte_fallback`）は `anima_demo.check_upstream_shape` が emit のたびに検査する。①〜③は
-  **叩いた範囲でしか**拾えないので、前提そのものは構造で固定する。
+- ① **only runs on regeneration** (it takes minutes). The pytest side (②) redoes the same comparison
+  against the committed fixture, so **a change in the upstream tokenizer.json is noticed even
+  without regenerating**.
+- The pre-token scan uses 11 context probes. `'{}` alone as a single character is **not enough** —
+  whether or not the contraction alternative fires, the result is the same single fragment, and a
+  case-insensitivity mix-up slips through (this hole was actually hit in practice). NFC segmentation
+  has the same shape, keeping the detection probes (8 contexts) and the verification probes (11
+  contexts) **separate**.
+- The 2,000 randomized cases of ② are a permanent gate that mechanically exercises "the combinations
+  a hand-written script did not think of" (the engine difference in NFC went through a gap between
+  the 28 cases and split the id sequence). They are drawn with a fixed seed from an alphabet mixing
+  emoji, combining characters, segmenting code points and various kinds of whitespace.
+- ③ **runs without the real assets** (the fixture contains a subset of the vocabularies). In an
+  environment that has the assets, reproduction against the real 151k / 32k vocabularies and a
+  cross-check against the `qwen_input_ids` / `t5_input_ids` (the id sequences captured by torch) of
+  `models/anima-pipeline{,-f16,-i8,-turbo-f16}/` run in addition. The latter goes through a **path
+  separate from the fixture generator**, so it catches the case where the fixture itself is wrong.
+- The structural assumptions about the upstream `tokenizer.json` (`normalizer.type` / the head of
+  `pre_tokenizer` / ByteLevel's `add_prefix_space` / the special tokens added by the post_processor
+  / the flags of the added tokens / T5's `byte_fallback`) are checked by
+  `anima_demo.check_upstream_shape` on every emit. ①–③ can only catch **what they hit**, so the
+  assumptions themselves are pinned structurally.
 
-## 音声デモの資産 prep と torch 参照（`sbv2_demo.py`）
+## Asset prep and torch reference for the voice demo (`sbv2_demo.py`)
 
-`examples/sbv2/`（実テキスト → WAV の Deno デモ）が要る**ホスト側資産**と、その出力の
-**数値パリティ**を受け持つ台本。モデルグラフには触らない（emit 経路も golden も変えない）。
+The script that provides the **host-side assets** required by `examples/sbv2/` (the Deno demo from
+real text to WAV) and takes on the **numerical parity** of its output. It does not touch the model
+graphs (neither the emit path nor the goldens change).
 
 ```sh
-# ① 実行時資産（models/sbv2-demo/ へ 3 本）
+# ① runtime assets (3 files into models/sbv2-demo/)
 uv run --group sbv2 python sbv2_demo.py assets
 
-# ② デモを走らせる（リポジトリ直下）→ out.wav と dump.safetensors
+# ② run the demo (from the repository root) → out.wav and dump.safetensors
 cd ../.. && deno task demo:sbv2 --text "こんにちは、これはテストです。" && cd tools/exporter
 
-# ③ torch 参照（dump の離散入力・乱数列で同じチェーンを再実行）→ reference.wav + 数値
+# ③ torch reference (rerun the same chain on the dump's discrete inputs and random sequence) → reference.wav + numbers
 uv run --group sbv2 python sbv2_demo.py reference --dump ../../models/sbv2-demo/out/dump.safetensors
 
-# ④ 公式 infer（pyopenjtalk 経路）→ official.wav（アクセントの聴き比べ用）
+# ④ official infer (the pyopenjtalk path) → official.wav (for listening comparisons of the accent)
 uv run --group sbv2 python sbv2_demo.py official --text "こんにちは、これはテストです。"
 ```
 
-### `assets` が出すもの
+### What `assets` produces
 
-| ファイル                 | 内容                                                                      |
-| ------------------------ | ------------------------------------------------------------------------- |
-| `symbols.json`           | JP-Extra の ID 化規則とモデル定数・ノブ既定値（**全て実物から引いた値**） |
-| `deberta-tokenizer.json` | DeBERTa 文字トークナイザの語彙・特殊 ID・`_clean_text` 判定表             |
-| `assets.safetensors`     | `style_vec` `[1,256]` と話者埋め込み `g` `[1,512,1]`                      |
+| File                     | Content                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| `symbols.json`           | the JP-Extra id rules, model constants and knob defaults (**all read from the real thing**) |
+| `deberta-tokenizer.json` | the DeBERTa character tokenizer's vocabulary, special ids and `_clean_text` decision table  |
+| `assets.safetensors`     | `style_vec` `[1,256]` and the speaker embedding `g` `[1,512,1]`                             |
 
-**MUST: 定数を手で写さない。** 記号表・tone 基点（`LANGUAGE_TONE_START_MAP["JP"]`）・言語 ID
-（`LANGUAGE_ID_MAP["JP"]`）・add_blank の挿入値は `style_bert_vits2` から引く。多言語版と
-JP-Extra で同じに見えて、ずれても **shape は合ったまま音だけが壊れる**（沈黙誤値クラス）。
-挿入値だけはソースにリテラルで書かれているので、`blank_id_from_source` が
-`infer.get_text` のソースから正規表現で 3 系列ぶん抜き、値が 1 種類に揃うことまで確認する。
+**MUST: never transcribe constants by hand.** The symbol table, the tone base
+(`LANGUAGE_TONE_START_MAP["JP"]`), the language id (`LANGUAGE_ID_MAP["JP"]`) and the add_blank
+insertion value are read from `style_bert_vits2`. The multilingual version and JP-Extra look the
+same, yet a divergence **keeps the shapes matching and only breaks the sound** (the silent
+wrong-value class). Only the insertion value is written as a literal in the source, so
+`blank_id_from_source` extracts it from the source of `infer.get_text` with a regular expression for
+all 3 series and additionally confirms that the value is the same across them.
 
-`_clean_text` の判定表を焼くのも同じ動機で、`unicodedata.category` の分類を TS へ移すと
-ICU の版差が静かな不一致になる — 全コードポイントを Python で実評価して閉区間に畳む。
+Baking the `_clean_text` decision table has the same motivation: moving the `unicodedata.category`
+classification into TS would turn ICU version differences into a silent mismatch — so every code
+point is evaluated in Python and folded into closed intervals.
 
-> NOTE: **`language` は JP-Extra でも全 0 ではない**。`infer.get_text` は
-> `cleaned_text_to_sequence(..., JP)` を通すので実音素位置は 1、add_blank の挿入位置だけが 0。
-> `export_sbv2.make_language` が全 0 なのは *golden の合成入力*としての選択（どんな値でも
-> golden は成立する）で、推論規則ではない。
+> NOTE: **`language` is not all zeros even for JP-Extra.** `infer.get_text` goes through
+> `cleaned_text_to_sequence(..., JP)`, so the real phoneme positions are 1 and only the add_blank
+> insertion positions are 0. `export_sbv2.make_language` being all zeros is a choice made for
+> _synthetic golden inputs_ (any value makes the golden valid); it is not the inference rule.
 
-### `reference` が主張すること
+### What `reference` claims
 
-`patch_sbv2` のモジュール群（`Sbv2Front` / `Sbv2Voice`）と**デモと同じホストグルー**を
-torch CPU で回し、dump に載った Karume の波形と突き合わせる。つまり測っているのは
-「同じ計算グラフを実 GPU で走らせた値 vs torch CPU で走らせた値」で、パッチ前の原実装との
-同値は `export_sbv2.py --verify` が別に持つ（層を混ぜない）。合わせて 2 つの門を通す:
+It runs the `patch_sbv2` modules (`Sbv2Front` / `Sbv2Voice`) together with **the same host glue as
+the demo** on torch CPU and compares against the Karume waveform recorded in the dump. So what is
+being measured is "the same computation graph run on a real GPU vs run on torch CPU"; equivalence
+against the original unpatched implementation is held separately by `export_sbv2.py --verify` (the
+layers are not mixed). Two gates are applied along with it:
 
-- **トークナイズのパリティ** — dump の `bertText` を Python のトークナイザに食わせ、
-  dump の `input_ids` と完全一致することを波形突合の**手前で**要求する。ここが割れると
-  BERT 特徴が別の音素へ配られ、「音は出るが崩れる」形で沈黙する。
-- **`w_ceil` の整数一致** — 継続長は `ceil` なので、front の出力が閾値の直上にいると
-  GPU/CPU の 1e-5 差で 1 フレーム飛ぶ。食い違った位置は `w` の値ごとレポートに出す
-  （フレークか実装差かを読み手が判定できる形）。
+- **Tokenization parity** — the dump's `bertText` is fed to the Python tokenizer and required to
+  match the dump's `input_ids` exactly, **before** the waveform comparison. A divergence here
+  distributes the BERT features to different phonemes and stays silent in the shape of "sound comes
+  out, but distorted".
+- **Integer equality of `w_ceil`** — durations use `ceil`, so if the front output sits just above a
+  threshold, a 1e-5 GPU/CPU difference shifts a frame. Positions that disagree are reported together
+  with the `w` values (in a form that lets the reader judge flake versus implementation difference).
 
-### `official` を別サブコマンドにする理由
+### Why `official` is a separate subcommand
 
-`patch_sbv2` のパッチはクラス属性の**プロセス全域**差し替えで、`reference` はそれを当てる。
-`official` の主張は「原実装の g2p（pyopenjtalk）・原実装の注意 / spline を通した音」なので、
-同一プロセスに同居させると黙ってパッチ後の経路になる。argparse のサブパーサは 1 プロセスに
-つき 1 つしか選べないため、**1 プロセス 1 サブコマンド**が構造的に成立する（`--verify` が
-対ごとの排他表を持たないのと同じ理由づけ）。
+The `patch_sbv2` patches replace class attributes **process-wide**, and `reference` applies them.
+What `official` claims is "the sound through the original implementation's g2p (pyopenjtalk) and the
+original implementation's attention / spline", so co-hosting it in the same process would silently
+put it on the patched path. Since argparse subparsers only allow one choice per process, **one
+subcommand per process** holds structurally (the same rationale as `--verify` not carrying a
+pairwise exclusivity table).
 
-3 本の wav（`out.wav` / `reference.wav` / `official.wav`）は同じ PCM16 変換規則
-（クリップ → `floor(x·32767 + 0.5)`）で書く。Python 組み込みの `round` は偶数丸めなので、
-そこを揃えないと聴き比べに実装差が混ざる。
+The 3 wav files (`out.wav` / `reference.wav` / `official.wav`) are written with the same PCM16
+conversion rule (clip → `floor(x·32767 + 0.5)`). Python's built-in `round` is banker's rounding, so
+without aligning that, an implementation difference would creep into the listening comparison.
 
-## 使い方（台本から）
+## Usage (from a script)
 
 ```python
 from karume import export_to_file
@@ -1179,193 +1302,219 @@ from karume import export_to_file
 graph = export_to_file(module, (x,), "model.safetensors", dynamic_shapes=({0: dim},))
 ```
 
-`export_to_file` は export → 正規化 → 変換 → 書き出し → **検証**まで通す。書けたが
-ランタイムが読めないファイルを配布物として残さないための門なので、経路を分岐させない。
+`export_to_file` runs export → normalize → convert → write → **verify**. It is the gate that keeps a
+file that was written but cannot be read by the runtime from being left behind as a distributable,
+so the path is never branched.
 
-## モジュール構成
+## Module structure
 
-| モジュール    | 役割                                                                                         |
-| ------------- | -------------------------------------------------------------------------------------------- |
-| `dims`        | 次元言語 `coeff·sym+offset`。文法の正本は `packages/runtime/tests/fixtures/dim-grammar.json` |
-| `ir`          | IR v1 のグラフ表現と JSON 直列化（`allow_nan=False`）                                        |
-| `ops`         | op 契約表（TS 側 `packages/runtime/src/ops.ts` の同義物）                                    |
-| `shapes`      | 出力 shape 規則（TS 側 `computeOutputShape` の同義物。宣言 shape と全ノード突合）            |
-| `convert`     | ExportedProgram → IR グラフ（定数畳み込み・aten 対応表・CSE）                                |
-| `normalize`   | 語彙を増やさない FX 同値書き換え（パス登録制）                                               |
-| `emit`        | safetensors への書き出し                                                                     |
-| `verify`      | IR v1 の全規則 + 配布形の突合 + ランタイム capability 突合                                   |
-| `pipeline`    | 上記を一本道に並べた `export_module` / `export_to_file`                                      |
-| `goldens`     | tiny golden fixtures の定義と生成                                                            |
-| `patch_sbv2`  | モデル別 — SBV2 を **export 可能にする** monkeypatch 層とラッパ                              |
-| `patch_anima` | モデル別 — Anima の **IR の質**を上げる monkeypatch 層とラッパ（動機が違う）                 |
-| `lora`        | export 前の LoRA 重み焼き込み（IR は 1 ノードも変わらない — ADR 0016）                       |
-| `resolution`  | 解像度の綴り `WxH`（参照台本 2 本が共有。**受理集合の正本はデモ側**）                        |
+| Module        | Role                                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `dims`        | dimension language `coeff·sym+offset`. The grammar is authoritative in `packages/runtime/tests/fixtures/dim-grammar.json` |
+| `ir`          | IR v1 graph representation and JSON serialization (`allow_nan=False`)                                                     |
+| `ops`         | op contract table (the counterpart of TS-side `packages/runtime/src/ops.ts`)                                              |
+| `shapes`      | output shape rules (the counterpart of TS-side `computeOutputShape`; declared shapes are compared on every node)          |
+| `convert`     | ExportedProgram → IR graph (constant folding, aten mapping table, CSE)                                                    |
+| `normalize`   | FX equivalence rewrites that do not grow the vocabulary (pass registration)                                               |
+| `emit`        | writing to safetensors                                                                                                    |
+| `verify`      | all IR v1 rules + distribution-form comparison + runtime capability comparison                                            |
+| `pipeline`    | `export_module` / `export_to_file`, the above laid out as one straight path                                               |
+| `goldens`     | definition and generation of the tiny golden fixtures                                                                     |
+| `patch_sbv2`  | model-specific — the monkeypatch layer and wrappers that **make SBV2 exportable**                                         |
+| `patch_anima` | model-specific — the monkeypatch layer and wrappers that raise **Anima's IR quality** (a different motivation)            |
+| `lora`        | fusing LoRA weights before the export (the IR does not change by a single node — ADR 0016)                                |
+| `resolution`  | the resolution spelling `WxH` (shared by the 2 reference scripts. **The accepted set is authoritative on the demo side**) |
 
-モデル固有なのは `patch_sbv2` / `patch_anima` の 2 本だけで、`style_bert_vits2` / `diffusers`
-の import は**関数内**に閉じてある（パッケージが無い環境でも `import` は通る = 他モジュールの
-テストが依存グループに引きずられない）。
+Only `patch_sbv2` / `patch_anima` are model-specific, and the `style_bert_vits2` / `diffusers`
+imports are confined **inside functions** (so `import` succeeds even where the packages are absent =
+tests of other modules are not dragged along by the dependency groups).
 
-**2 つのパッチ層は動機が違う**（ADR 0016）: `patch_sbv2` は「export 可否そのもの」が目的
-（分岐フリー化しないと `torch.export` が data-dependent guard で落ちる）。`patch_anima` は
-**素のままでも 4/4 export が通る**うえでの品質層 — 新 op を増やさない / rank ≤ 4 に収める /
-実行時ノブをグラフに焼かない、の 3 点のために置いている。
+**The two patch layers have different motivations** (ADR 0016): `patch_sbv2` targets "exportability
+itself" (without the branch-free form, `torch.export` fails on a data-dependent guard).
+`patch_anima` is a quality layer on top of the fact that **all 4 targets export even unpatched** —
+it exists for 3 things: not growing the op set, staying within rank ≤ 4, and not baking runtime
+knobs into the graph.
 
-### TS 側との契約の同期
+### Contract synchronization with the TS side
 
-`ops` と `shapes` は TS 側（`packages/runtime/src/ops.ts`）と**同じ契約の別実装**で、一致は人手の規律ではなく
-適合ケース表 `packages/runtime/tests/fixtures/op-contracts.json` が担保する（`dims` と
-`packages/runtime/tests/fixtures/dim-grammar.json` の関係と同じ）。両側のテスト
-（`tests/test_ops_conformance.py` / `packages/runtime/tests/ops_conformance_test.ts`）が**自分の実装から導いた
-表**をこのファイルへ突き合わせるので、片側だけ動かすと両方が赤になる。載せているのは
-op 名の全集合 / アリティ / スロット dtype / attrs キー集合 / attrs の値域 / 出力 shape 規則
-（strided コピー族の rank 上限を含む）。
+`ops` and `shapes` are **a different implementation of the same contract** as the TS side
+(`packages/runtime/src/ops.ts`), and their agreement is guaranteed not by human discipline but by
+the conformance case table `packages/runtime/tests/fixtures/op-contracts.json` (the same relation as
+between `dims` and `packages/runtime/tests/fixtures/dim-grammar.json`). The tests on both sides
+(`tests/test_ops_conformance.py` / `packages/runtime/tests/ops_conformance_test.ts`) compare **the
+table derived from their own implementation** against this file, so moving only one side turns both
+red. What it carries: the full set of op names / arity / slot dtypes / the attrs key set / the value
+ranges of attrs / output shape rules (including the rank ceiling of the strided-copy family).
 
-`shapes` は torch の meta が付けた宣言 shape を**正としない** — 契約の規則から独立に計算した
-shape と全ノードで突き合わせ、食い違えば export 時に落とす（`convert` の出口と
-`verify_model` の両方を通る）。束縛が要る判定（長さ 0 の軸・Tmax 超過）だけはランタイム側の層
-が持つ。
+`shapes` does **not** take the declared shapes attached by torch's meta as authoritative — it
+computes shapes independently from the contract rules and compares them on every node, failing the
+export on a mismatch (this runs both at the exit of `convert` and in `verify_model`). Only the
+decisions that need bindings (zero-length axes, exceeding Tmax) are held by the runtime-side layer.
 
-## 対応範囲（perf-a 時点）
+## Supported scope (as of perf-a)
 
-**op 数と契約の正本は `packages/runtime/tests/fixtures/op-contracts.json`**（TS 側 `packages/runtime/src/ops.ts` と Python 側
-`ops.py` が両方ここへ突き合わせる）。以下はその写しなので、食い違ったら適合表の側が正しい。
+**The op count and the contracts are authoritative in
+`packages/runtime/tests/fixtures/op-contracts.json`** (both TS-side `packages/runtime/src/ops.ts`
+and Python-side `ops.py` compare against it). What follows is a copy, so on any disagreement the
+conformance table is the correct one.
 
-- **意味論 dtype は f32 / i32 / bool**（ADR 0009）。torch の i64 はエクスポータ境界で i32 へ
-  正規化する（値域外は fail loudly）。**格納 dtype は f32 と i32**（i32 は生の int32 —
-  ADR 0010 の明示的な例外）。initializer の意味論 dtype は f32 / i32 で、意味論と格納の組は
-  `f32 × {f32,f16,bf16,i8}` と `i32 × i32` の 2 通りだけ（交差は fail loudly）。
-- IR op は **50 個**（ADR 0017 で `rms_norm` / `conv2d` / `clamp_min`、ADR 0023 で
-  `attention` を追加）:
-  - unary `neg abs exp log log1p sqrt tanh sigmoid relu gelu`（f32）/ `bitwise_not`（bool）/
-    attrs 付き unary `clamp` / `clamp_min` / `leaky_relu`（f32）
-  - スカラ比較 `ge_scalar le_scalar gt_scalar`（f32 → bool）
-  - binary `add div`（f32）/ `mul sub`（f32・i32）/ `ge`（f32 → bool）/
-    `bitwise_and`（bool）と三項 `where`（cond は bool）— いずれも torch 右詰め broadcast
-  - `cast`（f32 / i32 / bool 間）/ `matmul`（rank-2）/ `bmm`（rank-3）/
-    `gather`（最終次元固定）/ reduce `sum amax amin`（**1 軸**・attrs `dim` 宣言必須・
-    keepdim 無し。`sum` は bool 入力 → i32 も受理）/ `cumsum`（最終次元）
-  - レイアウト（ADR 0011 / 0014）: `reshape` / `permute` / `expand`（f32 も解禁）/
-    `slice` / `cat`（**IR v1 で唯一の可変アリティ op**）/ `pad` / `flip`
-  - 記号 prefix スライス（ADR 0010）: `sym_prefix_slice`
-  - 融合 op（ADR 0012 / 0015 / 0017 / 0023）: `linear` / `layer_norm` / **`rms_norm`** /
+- **The semantic dtypes are f32 / i32 / bool** (ADR 0009). torch's i64 is normalized to i32 at the
+  exporter boundary (out of range fails loudly). **The storage dtypes are f32 and i32** (i32 is raw
+  int32 — the explicit exception of ADR 0010). An initializer's semantic dtype is f32 or i32, and
+  the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8}` and `i32 × i32` (the cross products
+  fail loudly).
+- There are **50** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
+  `attention`):
+  - unary `neg abs exp log log1p sqrt tanh sigmoid relu gelu` (f32) / `bitwise_not` (bool) / unary
+    with attrs `clamp` / `clamp_min` / `leaky_relu` (f32)
+  - scalar comparison `ge_scalar le_scalar gt_scalar` (f32 → bool)
+  - binary `add div` (f32) / `mul sub` (f32, i32) / `ge` (f32 → bool) / `bitwise_and` (bool) and the
+    ternary `where` (cond is bool) — all with torch's right-aligned broadcast
+  - `cast` (among f32 / i32 / bool) / `matmul` (rank-2) / `bmm` (rank-3) / `gather` (fixed to the
+    last dim) / reduce `sum amax amin` (**1 axis**, the `dim` attr is mandatory, no keepdim; `sum`
+    also accepts bool input → i32) / `cumsum` (last dim)
+  - layout (ADR 0011 / 0014): `reshape` / `permute` / `expand` (f32 unlocked as well) / `slice` /
+    `cat` (**the only variadic-arity op in IR v1**) / `pad` / `flip`
+  - symbolic prefix slice (ADR 0010): `sym_prefix_slice`
+  - fused ops (ADR 0012 / 0015 / 0017 / 0023): `linear` / `layer_norm` / **`rms_norm`** /
     `softmax` / **`attention`** / `embedding` / `masked_fill` / `conv1d` / **`conv2d`** /
     `conv_transpose1d`
-- **attrs を持つのは 26 op**（`sum.dim` / `amax.dim` / `amin.dim` /
-  `attention.scale` / `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` /
-  `conv2d.{stride,padding,dilation,groups}` / `leaky_relu.negative_slope` /
-  `ge_scalar.value` / `le_scalar.value` / `gt_scalar.value` / `cumsum.dim` / `cast.to` /
-  `permute.dims` / `slice.{dim,start,end}` / `cat.dim` / `pad.{left,right}` / `flip.dim` /
-  `sym_prefix_slice.{sym,slices}` / `layer_norm.{normalized_shape,eps}` / `softmax.dim` /
-  `embedding.padding_idx` / `masked_fill.value` / `conv1d.{stride,padding,dilation,groups}` /
-  `conv_transpose1d.{stride,padding}`）。宣言キーは全て必須で、宣言外のキーと値域外は
-  fail loudly（ADR 0012）。**既定値の補完はしない** — `conv1d` の `dilation` / `groups` を
-  省略できると depthwise の IR が黙って通常畳み込みになる（ADR 0015）。
-  `gelu(approximate="tanh")` は載せる欄が無いので受理しない（黙って別の式で近似しない）。
-- 分解停止（preserved）の既定は **11 op**（`PRESERVED_OP_PREFIXES` — ADR 0007 の 9 op に
-  ADR 0015 で `leaky_relu`、ADR 0017 で `rms_norm` を追加）: linear / layer_norm / rms_norm /
-  softmax / gelu / leaky_relu / conv1d / conv2d / conv_transpose1d / embedding / masked_fill。
-  - **12 本目 `scaled_dot_product_attention` は既定に載らない**（ADR 0023）。SDPA は mask /
-    causal / GQA を引数で表せてしまい、既定へ足すと Anima text_encoder（−inf 折り込み因果
-    マスク）が `_h_attention` の fail loudly に当たって **export できなくなる**。有効化は
-    `export_module(…, preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION)` の**ターゲット別
-    opt-in**（`export_anima.TARGET_PRESERVED` — 現状は transformer と vae_decoder のみ）。
-  - **`rms_norm` の供給ルートは 2 系統**（ADR 0017）: diffusers `nn.RMSNorm` 由来の
-    `aten.rms_norm` は保存で残り、手書き分解形（Qwen3 / DiT）は保存では畳めないので
-    `normalize._fold_rms_norm` が受け持つ。
-- 融合 op のカーネル契約の狭さは IR ではなくランタイム capability 側に置く（ADR 0007）。
-  エクスポータ境界で落とすのは**表現が存在しない軸**だけ: 多軸 `normalized_shape`、
-  最終次元以外の softmax、非有限の `masked_fill` 埋め値、上限だけの clamp（`clamp_max` が
-  語彙に無い）、`output_padding` / `groups` / `dilation` が既定でない conv_transpose1d、
-  `2·padding ≠ K − stride`（出力長が `L·stride` にならない形）の conv_transpose1d。
-  - `conv1d` / `conv2d` の `groups` / `dilation` は**受理する**（ADR 0015 / 0017）。
-  - **省略可能なスロットは合成でアリティを固定する**（`Emitted.synth_consts`）— bias 無しの
-    conv / linear はゼロ bias、affine 無しの layer_norm は ones/zeros、weight 無しの rms_norm は
-    ones。カーネルと契約に arity 分岐を持ち込まないため（`+0` / `×1` の厳密恒等 —
-    ADR 0015 / 0016）。実測の重み: Anima の linear 711 本中 698 本が bias 無し、DiT の
-    layer_norm 85 本が全て affine 無し。
-  - 下限だけの `clamp(min=eps)` は**別 op**（`clamp_min`）へ落ちる（ADR 0017）。欠けた側を
-    ±有限最大値で補うのは「表現が無い形を黙って別の形で実行する」ことになるので採らない。
-- 未対応 aten op は**全件列挙**して落とす（1 件目で打ち切らない）。
+- **26 ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
+  `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `conv2d.{stride,padding,dilation,groups}` /
+  `leaky_relu.negative_slope` / `ge_scalar.value` / `le_scalar.value` / `gt_scalar.value` /
+  `cumsum.dim` / `cast.to` / `permute.dims` / `slice.{dim,start,end}` / `cat.dim` /
+  `pad.{left,right}` / `flip.dim` / `sym_prefix_slice.{sym,slices}` /
+  `layer_norm.{normalized_shape,eps}` / `softmax.dim` / `embedding.padding_idx` /
+  `masked_fill.value` / `conv1d.{stride,padding,dilation,groups}` /
+  `conv_transpose1d.{stride,padding}`). Every declared key is mandatory, and undeclared keys or
+  out-of-range values fail loudly (ADR 0012). **Defaults are never filled in** — being able to omit
+  `dilation` / `groups` on `conv1d` would silently turn a depthwise IR into an ordinary convolution
+  (ADR 0015). `gelu(approximate="tanh")` has no field to record it and is therefore not accepted
+  (never silently approximating with a different formula).
+- The default set of decomposition stops (preserved) is **11 ops** (`PRESERVED_OP_PREFIXES` — the 9
+  ops of ADR 0007 plus `leaky_relu` from ADR 0015 and `rms_norm` from ADR 0017): linear / layer_norm
+  / rms_norm / softmax / gelu / leaky_relu / conv1d / conv2d / conv_transpose1d / embedding /
+  masked_fill.
+  - **The 12th, `scaled_dot_product_attention`, is not in the default set** (ADR 0023). SDPA can
+    express mask / causal / GQA through its arguments, and adding it to the default would make
+    Anima's text_encoder (a causal mask with −inf folded in) hit the fail loudly of `_h_attention`
+    and become **unexportable**. Enabling it is a **per-target opt-in** via
+    `export_module(…, preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION)`
+    (`export_anima.TARGET_PRESERVED` — currently only transformer and vae_decoder).
+  - **`rms_norm` arrives through 2 routes** (ADR 0017): the `aten.rms_norm` coming from diffusers'
+    `nn.RMSNorm` survives preservation, while the hand-written decomposed form (Qwen3 / DiT) cannot
+    be folded by preservation and is handled by `normalize._fold_rms_norm`.
+- The narrowness of the fused ops' kernel contracts lives on the runtime capability side, not in the
+  IR (ADR 0007). What the exporter boundary rejects is only **the axes for which no representation
+  exists**: a multi-axis `normalized_shape`, a softmax on anything but the last dim, a non-finite
+  `masked_fill` fill value, a clamp with only an upper bound (`clamp_max` is not in the vocabulary),
+  a conv_transpose1d whose `output_padding` / `groups` / `dilation` are not the defaults, and a
+  conv_transpose1d with `2·padding ≠ K − stride` (a form whose output length is not `L·stride`).
+  - `groups` / `dilation` on `conv1d` / `conv2d` **are accepted** (ADR 0015 / 0017).
+  - **Optional slots are synthesized to fix the arity** (`Emitted.synth_consts`) — a conv / linear
+    without bias gets a zero bias, a layer_norm without affine gets ones/zeros, and an rms_norm
+    without weight gets ones. This keeps arity branching out of the kernels and the contracts (`+0`
+    / `×1` are exact identities — ADR 0015 / 0016). Measured weight: 698 of Anima's 711 linears have
+    no bias, and all 85 layer_norms of the DiT have no affine.
+  - A `clamp(min=eps)` with only a lower bound lowers to a **separate op** (`clamp_min`) (ADR 0017).
+    Filling the missing side with ±the largest finite value would amount to "silently executing a
+    form that has no representation as a different form", so it is not adopted.
+- Unsupported aten ops are **enumerated in full** before failing (never stopping at the first one).
 
-### 定数畳み込み（Tmax 畳み込みと 2 点評価 — ADR 0010）
+### Constant folding (Tmax folding and two-point evaluation — ADR 0010)
 
-定数と shape シンボルだけに依存する部分木は、**各シンボルの上限 Tmax で実評価**して
-initializer に焼き、実行時は `sym_prefix_slice` で先頭を切り出す。相対位置バケット表
-（`arange / sign / log / ceil / clamp / 比較 / where`）が丸ごとこの経路で消え、バケット境界の
-1ulp 差が gather 添字 1 ずれになるバグクラスを構造的に排除する。
+Subtrees that depend only on constants and shape symbols are **actually evaluated at each symbol's
+upper bound Tmax**, baked into an initializer, and sliced from the front at runtime with
+`sym_prefix_slice`. The relative-position bucket tables (`arange / sign / log / ceil / clamp /
+comparison / where`) disappear wholesale through this path, structurally eliminating the bug class
+where a 1ulp difference at a bucket boundary becomes a 1-off gather index.
 
-- **Tmax の出どころは `ExportedProgram.range_constraints`**（= `dynamic_shapes` の
-  `Dim(min=…, max=…)` が torch に登録した制約そのもの）。呼び出し側から別引数で受けない —
-  `dynamic_shapes` との二重管理になり、食い違ったときに「宣言より短い定数を焼いて実行時に
-  範囲外」が黙って通る。`Dim(max=…)` 未設定（`int_oo`）は fail loudly。
-- **適格判定は allowlist ではなく 2 点評価の実測**（`_check_prefix_commutes`）。
-  第 1 点 = Tmax、第 2 点 = **Tmax − 1**（0/1 特殊化を避けるため 2 以上でなければならない。
-  `Tmax − 1 < max(下限, 2)` の値域は「検査が恒真化する」として fail loudly）。第 2 点の
-  評価結果と、Tmax で焼いた定数の prefix（長さ `coeff·sym+offset`）をバイト比較し、
-  一致しなければ**畳まずに落とす**。`arange(T)/T` や `full((T,), T)` のように T を「値」
-  として使う形は allowlist 掲載 op だけで組めてしまうので、この実測だけが止められる。
-- 焼いた定数の dtype は f32 / i32（i64 は境界正規化で i32 へ、値域外は fail loudly）。
-  bool の定数は initializer の語彙が無いので落とす。
-- `expand` / `repeat` は allowlist に載せない（畳むと B·H 倍に実体化する）— frontier で
-  止まり、実行時の strided コピーで済む。
+- **Tmax comes from `ExportedProgram.range_constraints`** (= exactly the constraints that the
+  `Dim(min=…, max=…)` of `dynamic_shapes` registered with torch). It is not received from the caller
+  as a separate argument — that would be dual bookkeeping with `dynamic_shapes`, and on a
+  disagreement "a constant baked shorter than the declaration, out of range at runtime" would pass
+  silently. An unset `Dim(max=…)` (`int_oo`) fails loudly.
+- **Eligibility is measured by two-point evaluation, not by an allowlist**
+  (`_check_prefix_commutes`). The first point is Tmax and the second is **Tmax − 1** (which must be
+  at least 2 to avoid 0/1 specialization; the range where `Tmax − 1 < max(lower bound, 2)` fails
+  loudly as "the check would become vacuously true"). The result of the second evaluation is
+  byte-compared against the prefix (of length `coeff·sym+offset`) of the constant baked at Tmax, and
+  **if they disagree it is not folded but rejected**. Forms that use T "as a value", such as
+  `arange(T)/T` or `full((T,), T)`, can be built entirely out of allowlisted ops, so only this
+  measurement can stop them.
+- The dtype of a baked constant is f32 or i32 (i64 goes to i32 through boundary normalization; out
+  of range fails loudly). bool constants are rejected because there is no initializer vocabulary for
+  them.
+- `expand` / `repeat` are not on the allowlist (folding them would materialize B·H times over) —
+  they stop at the frontier and are handled by a strided copy at runtime.
 
-### 正規化パス（`normalize.py`）
+### Normalization passes (`normalize.py`)
 
-登録順に走る。IR 語彙も attrs も増やさない同値書き換えだけを置く。
+They run in registration order. Only equivalence rewrites that grow neither the IR vocabulary nor
+the attrs are placed here.
 
-| パス                       | 書き換え                                             | 発火条件（外れたら触らない）                        |
-| -------------------------- | ---------------------------------------------------- | --------------------------------------------------- |
-| `_drop_metadata_asserts`   | `_assert_tensor_metadata` を削除                     | 常時                                                |
-| `_fold_rms_norm`           | `x·rsqrt(mean(x²)+eps)·w` → `rms_norm`               | weight が最終次元長の rank1・eps が有限の正数       |
-| `_drop_safe_softmax_guard` | SDPA の safe-softmax ガードを除去                    | **不活性の証明が立つときだけ**（立たなければ例外）  |
-| `_lower_unit_expand`       | `unsqueeze→expand→view` → rank ≤ 3 の expand         | rank > `STRIDED_RANK`・複製軸が静的                 |
-| `_lower_split_unbind`      | 最終次元 split の幅 1 slice+squeeze → 最終次元 slice | rank > `STRIDED_RANK`・分割が連続で静的             |
-| `_lower_reshape_permute`   | rank ≥ 5 の reshape→permute→reshape → rank4 転置列   | rank > `STRIDED_RANK`・端点が rank ≤ 4              |
-| `_collect_dead_code`       | 途中 1 回の DCE（**位置に意味がある**）              | 常時                                                |
-| `_pow2_to_mul`             | `pow(x, 2)` → `mul(x, x)`                            | 指数がちょうど 2                                    |
-| `_drop_identity_repeat`    | `repeat(x, [1,…,1])` → `x`                           | **引数が全て 1 かつ本数 = rank**（rank 上げは別物） |
-| `_drop_identity_add`       | `add(x, 0)` → `x`                                    | Python スカラの 0 かつ dtype 不変                   |
-| `_promote_scalar_operands` | `add/sub/mul/div(tensor, スカラ)` → 二項 op + 定数   | dtype 不変・rank ≥ 1・`alpha=1`・有限スカラ         |
-| `_eq_zero_to_not_bool`     | `eq(x, 0)` → `bitwise_not(cast(x, bool))`            | 右辺がちょうど 0・出力が bool                       |
-| `_select_to_squeeze`       | `select.int(長さ 1 の軸, 0)` → `squeeze`             | **静的に**長さ 1（記号軸は例外）                    |
-| `_split_to_slices`         | `split_with_sizes` + `getitem` → `slice` 列          | 消費者が getitem のみ・分割軸が静的                 |
+| Pass                       | Rewrite                                                        | Firing condition (untouched otherwise)                                              |
+| -------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `_drop_metadata_asserts`   | remove `_assert_tensor_metadata`                               | always                                                                              |
+| `_fold_rms_norm`           | `x·rsqrt(mean(x²)+eps)·w` → `rms_norm`                         | weight is rank-1 of the last-dim length, eps a finite positive                      |
+| `_drop_safe_softmax_guard` | remove the safe-softmax guard of SDPA                          | **only when inactivity can be proven** (otherwise raises)                           |
+| `_lower_unit_expand`       | `unsqueeze→expand→view` → expand of rank ≤ 3                   | rank > `STRIDED_RANK`, the replicated axes static                                   |
+| `_lower_split_unbind`      | width-1 slice+squeeze of a last-dim split → last-dim slice     | rank > `STRIDED_RANK`, the split contiguous and static                              |
+| `_lower_reshape_permute`   | rank ≥ 5 reshape→permute→reshape → a rank-4 transpose sequence | rank > `STRIDED_RANK`, endpoints of rank ≤ 4                                        |
+| `_collect_dead_code`       | one DCE in the middle (**the position is meaningful**)         | always                                                                              |
+| `_pow2_to_mul`             | `pow(x, 2)` → `mul(x, x)`                                      | the exponent is exactly 2                                                           |
+| `_drop_identity_repeat`    | `repeat(x, [1,…,1])` → `x`                                     | **all arguments 1 and their count = rank** (raising the rank is a different matter) |
+| `_drop_identity_add`       | `add(x, 0)` → `x`                                              | a Python scalar 0 and the dtype unchanged                                           |
+| `_promote_scalar_operands` | `add/sub/mul/div(tensor, scalar)` → binary op + constant       | dtype unchanged, rank ≥ 1, `alpha=1`, a finite scalar                               |
+| `_eq_zero_to_not_bool`     | `eq(x, 0)` → `bitwise_not(cast(x, bool))`                      | the right side is exactly 0 and the output is bool                                  |
+| `_select_to_squeeze`       | `select.int(axis of length 1, 0)` → `squeeze`                  | **statically** of length 1 (symbolic axes are excluded)                             |
+| `_split_to_slices`         | `split_with_sizes` + `getitem` → a sequence of `slice`         | the only consumers are getitem, the split axis static                               |
 
-- **順序が載荷（3 本）**:
-  - `_fold_rms_norm` は `_pow2_to_mul` / `_promote_scalar_operands` より**先**（ADR 0016）。
-    eps が rank-1 定数へ昇格するとスカラ照合が外れて畳めなくなる。
-  - `_drop_identity_add` は `_promote_scalar_operands` より先。逆順だと `+0` が rank-1 定数に
-    なり、恒等除去の対象でなくなる。
-  - `_collect_dead_code` は rank 下げ 3 パスの**直後**。畳んだ元パターン（pow/mean/rsqrt・
-    ガードの eq/any/logical_not）をここで消さないと、後続パスが死んだ部分木を書き換えて
-    統計だけが膨らむ（IR は変わらないので緑のまま気づけない）。
-- **rank 下げ 3 パスの発火は `rank > STRIDED_RANK` 限定**（ADR 0016 の安全線）。既存グラフ
-  （SBV2 / DeBERTa は全て rank ≤ 4）へ誤爆しない — 新しい定数は作らず、「strided カーネルが
-  実行できない rank」を発火条件そのものにしている。実測: この波の追加で **tiny golden 22 本と
-  SBV2 / DeBERTa の IR はバイト単位で無変更**。
-- **ガードの除去は証明付き**（ADR 0016）: ①依存錐に -inf 源が無い ②-inf が加算マスク 1 本
-  由来で、2 つの記号長（5 / 9）の実評価で全行に有限要素が残る — のどちらかが立つときだけ。
-  立たなければ `NotImplementedError`（消すと NaN が下流へ流れる）。
-- 昇格した定数は `aten.full.default([1], value, dtype=…)` として挿入する。畳み込み
-  allowlist に載っている op なので、消費側が畳み込み対象なら定数ごと畳まれ、そうでなければ
-  rank-1 の initializer（i32 なら i32 initializer）になり broadcast で吸収される。
-- **定数は元のスカラが居た側に置く**。`sub` / `div` は非可換で、実測には
-  `sub.Tensor(1, mask)` のようにスカラが左に来る形がある（`1 − attention_mask`）。
-- 型昇格を伴う形（`div(i64, 128)` は f32 を返す）と rank-0 テンソル（`[] × [1] → [1]` で
-  rank が上がる）は**書き換えない** — 畳み込みか未対応 op の列挙に回す。
+- **Three orderings are load-bearing**:
+  - `_fold_rms_norm` comes **before** `_pow2_to_mul` / `_promote_scalar_operands` (ADR 0016). Once
+    eps is promoted to a rank-1 constant, the scalar match comes off and it can no longer be folded.
+  - `_drop_identity_add` comes before `_promote_scalar_operands`. In the reverse order, `+0` becomes
+    a rank-1 constant and is no longer a candidate for identity removal.
+  - `_collect_dead_code` comes **immediately after** the 3 rank-lowering passes. Without deleting
+    the folded source patterns here (pow/mean/rsqrt, the guard's eq/any/logical_not), later passes
+    would rewrite dead subtrees and inflate the statistics alone (the IR does not change, so it
+    stays green and unnoticed).
+- **The 3 rank-lowering passes only fire for `rank > STRIDED_RANK`** (the safety line of ADR 0016).
+  They do not misfire on existing graphs (SBV2 / DeBERTa are all rank ≤ 4) — they create no new
+  constants and take "a rank the strided kernel cannot execute" as the firing condition itself.
+  Measured: with this wave's additions, **the IR of the 22 tiny goldens and of SBV2 / DeBERTa is
+  unchanged byte for byte**.
+- **Guard removal comes with a proof** (ADR 0016): only when either ① the dependency cone contains
+  no -inf source, or ② the -inf comes from a single additive mask and evaluation at two symbolic
+  lengths (5 / 9) leaves a finite element in every row. If neither holds, `NotImplementedError`
+  (removing it would let NaN flow downstream).
+- Promoted constants are inserted as `aten.full.default([1], value, dtype=…)`. That op is on the
+  folding allowlist, so if the consumer is a folding candidate the constant is folded along with it,
+  and otherwise it becomes a rank-1 initializer (an i32 initializer for i32) absorbed by broadcast.
+- **The constant is placed on the side the original scalar was on.** `sub` / `div` are
+  non-commutative, and the measurements include forms where the scalar is on the left, such as
+  `sub.Tensor(1, mask)` (`1 − attention_mask`).
+- Forms that involve type promotion (`div(i64, 128)` returns f32) and rank-0 tensors (`[] × [1] →
+  [1]` raises the rank) are **not rewritten** — they go to folding or to the enumeration of
+  unsupported ops.
 
-## まだ無いもの（後続フェーズ）
+## Not there yet (later phases)
 
-- IR の Python 解釈オラクル（数値突合）。数値検証は Deno 側 E2E が受け持つ。
-- **bf16 格納**（IR の語彙にはあるが実行経路が無い — ADR 0006）。f16 は ADR 0018、
-  i8 + per-channel scale は ADR 0019 で実装済み。w4（group 量子化）は不採用確定。
-- **混成格納**（1 ターゲット内で i8 と f16 を混ぜる）。`_apply_weight_dtype` は
-  `weight_dtype` 1 個を全体に当てる。
-- Anima の `transformer` **f32 格納のフル 28 層の実 GPU 突合**（重み 7,465MiB が本機の
-  GPU バッファ上限 7,280MiB を超えて load できない — `docs/known-issues.md`）。f16 格納
-  （3,733.5MiB）と i8 格納（1,872.8MiB）では実 GPU E2E が走っている。
-- 実行時パイプライン（SBV2: テキスト → durations → y_mask 組み立て → voice / Anima:
-  トークナイズ → scheduler → CFG → 逆正規化）のホスト実装。emit したターゲットを繋ぐ層は
-  エクスポータの範囲外（Anima は `packages/runtime/tests/e2e_anima_test.ts` にテスト用の TS 実装がある）。
-  （Anima の**トークナイザ TS 移植**は `anima_demo.py` + `examples/anima/text/` で完了。
-  `packages/runtime/tests/e2e_anima_test.ts` は引き続きフィクスチャの `input_ids` を使う — あちらが測るのは
-  NN の数値で、トークナイズのパリティは `packages/runtime/tests/anima_tokenizer_test.ts` が別に持つ。）
+- A Python interpretation oracle for the IR (numerical comparison). Numerical verification is
+  handled by the Deno-side E2E.
+- **bf16 storage** (it is in the IR vocabulary but has no execution path — ADR 0006). f16 is
+  implemented in ADR 0018 and i8 + per-channel scale in ADR 0019. w4 (group quantization) is
+  confirmed as not adopted.
+- **Mixed storage** (mixing i8 and f16 within one target). `_apply_weight_dtype` applies a single
+  `weight_dtype` to everything.
+- **A real-GPU comparison of Anima's `transformer` in f32 storage at the full 28 layers** (the
+  7,465MiB of weights exceed this machine's GPU buffer limit of 7,280MiB and cannot be loaded —
+  `docs/known-issues.md`). The real-GPU E2E does run for f16 storage (3,733.5MiB) and i8 storage
+  (1,872.8MiB).
+- Host implementations of the runtime pipelines (SBV2: text → durations → assembling y_mask → voice
+  / Anima: tokenization → scheduler → CFG → denormalization). The layer that connects the emitted
+  targets is outside the exporter's scope (for Anima there is a TS implementation for testing in
+  `packages/runtime/tests/e2e_anima_test.ts`). (The **TS port of Anima's tokenizer** is complete, in
+  `anima_demo.py` + `examples/anima/text/`. `packages/runtime/tests/e2e_anima_test.ts` keeps using
+  the fixture's `input_ids` — what it measures is the NN's numbers, and tokenization parity is held
+  separately by `packages/runtime/tests/anima_tokenizer_test.ts`.)

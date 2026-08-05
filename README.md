@@ -1,10 +1,11 @@
 # Karume
 
-WebGPU で動く汎用 NN 推論スタック（Deno + ブラウザ両対応・純 TypeScript + WGSL・ランタイム依存
-ゼロ）。JSR の 3 パッケージ — `@karume/runtime`（IR 実行）/ `@karume/hub`（モデルの解決・取得・
-キャッシュ）/ `@karume/models`（パイプラインと tokenizer）— と、PyTorch のモデルを IR へ落とす
-PyPI パッケージ `karume`（エクスポータ CLI）で構成する。
+A general-purpose NN inference stack running on WebGPU (Deno + browser, pure TypeScript + WGSL,
+zero runtime dependencies). Composed of three JSR packages — `@karume/runtime` (IR execution) /
+`@karume/hub` (model resolution, fetch, and caching) / `@karume/models` (pipelines and tokenizer)
+— plus the PyPI package `karume` (exporter CLI) that lowers PyTorch models to IR.
 
-Status: **WIP**（本記述は公開準備の段で書く。現在の設計は [docs/decisions/](docs/decisions/) が正本）
+Status: **WIP** (this description gets written during release preparation. The current design's
+source of truth is [docs/decisions/](docs/decisions/))
 
-License: MIT（[LICENSE](LICENSE)）
+License: MIT ([LICENSE](LICENSE))

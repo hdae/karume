@@ -1,52 +1,56 @@
-# models/ — ローカル資産の索引（この README 以外は git 対象外）
+# models/ — index of local assets (nothing but this README is tracked in git)
 
-2 層に分かれる。**配布形**（`anima-turbo/` — そのまま HF へ上げられる 1 リポ）と、その**源になる
-系列ディレクトリ**（エクスポータが吐いた生の出力）。デモや計測の**生成物は `models/` に置かず
-リポ直下の `outputs/`** へ出す（資産と出力を同じ木に混ぜない）。
+Split into two layers: the **distribution form** (`anima-turbo/` — a single repo that can be
+uploaded to HF as-is) and its **source series directories** (the raw output the exporter
+produces). Demo and benchmark **outputs go to `outputs/` at the repo root, not `models/`** (don't
+mix assets and outputs in the same tree).
 
-## 配布形 — `anima-turbo/`
+## Distribution form — `anima-turbo/`
 
-`karume.json` + ADR 0038 §2 の規約名で並んだファイル群。ここに入るのは manifest が宣言した
-ファイルだけで、系列に並ぶ E2E フィクスチャ（`io.*.safetensors`）は**入らない**。
+`karume.json` plus files named per the convention in ADR 0038 §2. Only files declared by the
+manifest go here — the E2E fixtures (`io.*.safetensors`) present in the series directories are
+**not included**.
 
 ```
 cd tools/exporter && uv run karume dist
 ```
 
-組み立ては冪等（再実行で貼り直す）。同一ファイルシステムなので実体は**ハードリンク**で、
-系列と配布形が二重にディスクを食うことはない。
+Assembly is idempotent (rerunning relinks). Since it's the same filesystem, the actual files are
+**hard links** — the series and the distribution form don't double up disk usage.
 
-| パス                                 | 出所                                                        |
-| ------------------------------------ | ----------------------------------------------------------- |
-| `karume.json`                        | 組み立て時に**実ファイルから導出**（手書き禁止 — ADR 0038） |
-| `text_encoder/model.safetensors`     | `anima-f16/text_encoder/`                                   |
-| `text_conditioner/model.safetensors` | `anima-f16/text_conditioner/`                               |
-| `transformer/model.f16.safetensors`  | `anima-turbo-f16-dyn/transformer/`                          |
-| `transformer/model.i8.safetensors`   | `anima-turbo-i8-dyn/transformer/`                           |
-| `transformer/rope_base.safetensors`  | 上記 2 系列（**バイト同一を検証して 1 本化**）              |
-| `vae_decoder/model.safetensors`      | `anima-f16/vae_decoder/`                                    |
-| `tokenizer/qwen2-tokenizer.json`     | `anima-demo/text/`                                          |
-| `tokenizer_2/t5-tokenizer.json`      | `anima-demo/text/`                                          |
+| Path                                 | Source                                                                                 |
+| ------------------------------------ | -------------------------------------------------------------------------------------- |
+| `karume.json`                        | **Derived from the actual files** at assembly time (hand-writing forbidden — ADR 0038) |
+| `text_encoder/model.safetensors`     | `anima-f16/text_encoder/`                                                              |
+| `text_conditioner/model.safetensors` | `anima-f16/text_conditioner/`                                                          |
+| `transformer/model.f16.safetensors`  | `anima-turbo-f16-dyn/transformer/`                                                     |
+| `transformer/model.i8.safetensors`   | `anima-turbo-i8-dyn/transformer/`                                                      |
+| `transformer/rope_base.safetensors`  | The two series above (**verified byte-identical, then unified into one**)              |
+| `vae_decoder/model.safetensors`      | `anima-f16/vae_decoder/`                                                               |
+| `tokenizer/qwen2-tokenizer.json`     | `anima-demo/text/`                                                                     |
+| `tokenizer_2/t5-tokenizer.json`      | `anima-demo/text/`                                                                     |
 
-`rope_base` が系列間で食い違ったら組み立ては**止まる**（片方を黙って選ぶと、選ばれなかった
-系列の preset が別の幾何の rope 表で走り、ロードも実行も通って絵だけが壊れる）。
+If `rope_base` diverges between series, assembly **stops** (silently picking one would let the
+unselected series' preset run with a rope table of different geometry — loading and execution
+would both succeed while only the image comes out broken).
 
-## 系列ディレクトリ（組み立ての源 — 消さない）
+## Series directories (assembly source — do not delete)
 
-再生成コマンドの正本は [tools/exporter/README.md](../tools/exporter/README.md)。E2E は資産が
-無い系列を **SKIP** する（部分欠落は FAIL）ので、削除した系列のテストは再 emit まで走らない。
+The source of truth for regeneration commands is
+[tools/exporter/README.md](../tools/exporter/README.md). E2E **SKIP**s a series missing its
+assets (partial absence is FAIL), so tests for a deleted series won't run again until re-emitted.
 
-| ディレクトリ           | 内容                                                          |
-| ---------------------- | ------------------------------------------------------------- |
-| `anima-f16/`           | text_encoder / text_conditioner / VAE decoder（f16）+ io 参照 |
-| `anima-turbo-f16-dyn/` | turbo DiT f16 **S 形**（解像度非依存）+ rope 素表 + io 参照   |
-| `anima-turbo-i8-dyn/`  | turbo DiT i8 **S 形** + rope 素表 + io 参照                   |
-| `anima-demo/text/`     | トークナイザ表（Qwen2 BPE / T5 Unigram）                      |
+| Directory              | Contents                                                                           |
+| ---------------------- | ---------------------------------------------------------------------------------- |
+| `anima-f16/`           | text_encoder / text_conditioner / VAE decoder (f16) + io reference                 |
+| `anima-turbo-f16-dyn/` | turbo DiT f16 **S-shape** (resolution-independent) + raw rope table + io reference |
+| `anima-turbo-i8-dyn/`  | turbo DiT i8 **S-shape** + raw rope table + io reference                           |
+| `anima-demo/text/`     | Tokenizer tables (Qwen2 BPE / T5 Unigram)                                          |
 
-配布するのは S 形 1 本だけ（固定形は配布しない — ADR 0038 §4）。
+Only the single S-shape is distributed (fixed shapes are not distributed — ADR 0038 §4).
 
-## `outputs/`（リポ直下・git 対象外）
+## `outputs/` (repo root, not tracked in git)
 
-デモと計測の生成物の置き場。PNG・WAV・dump・目視ゲートの記録画像はここへ出す。`models/` は
-「入力（資産）」だけを持ち、`outputs/` が「出力」を持つ — 片方を丸ごと消しても、もう片方の
-再生成手順が変わらない分け方にしてある。
+Where demo and benchmark outputs live. PNG, WAV, dumps, and visual-gate record images go here.
+`models/` holds only "input (assets)"; `outputs/` holds "output" — the split is designed so that
+deleting one entirely doesn't change the other's regeneration procedure.
