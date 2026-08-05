@@ -8,14 +8,16 @@
 
 ## Active redesigns (in flight)
 
-- **立ち上げロードマップ（ADR 0037）**: P0 scaffold・P1 runtime 移植（404 テスト緑・publish
-  dry-run 緑）・P1.5 IR 識別子確定（`karume_ir` / `karume-ir`）+ golden 再生成 — **完了**。
-  次 = **P2 hub**: 配布 manifest v1 の ADR 起票 + 実装（variant 解決表 =「quantization ノブ →
-  グラフ/重みファイル選択 + 実行ノブ」が本体。HF アップロード習慣準拠のリポレイアウト
-  〈モデルカード README.md の YAML frontmatter 込み〉の実地確認を含む）。
-  以降: **P3 models/anima**（`AnimaPipeline` 再編。門 = 生成 PNG sha256 の参照一致。
-  大型資産の再エミット込み）→ **P4 exporter CLI 化**（PyPI `karume`・サブコマンド式・
-  HF アップ可能ディレクトリを直接出力）→ **P5 HF 実網通し + 公開準備**。
+- **立ち上げロードマップ（ADR 0037）**: P0 scaffold・P1 runtime 移植・P1.5 IR 識別子確定
+  （`karume_ir` / `karume-ir`）+ golden 再生成・**P2 hub — 完了**（manifest v1 = ADR 0038
+  〈pre-mortem 44 指摘反映・記録は research/2026-08-05-manifest-premortem.md〉+ `@karume/hub`
+  実装 429 テスト緑・取得層は `@hdae/fetch-cache`）。
+  次 = **P3 models/anima**: `AnimaPipeline` 再編（barrel + サブパス・副作用ゼロ）。
+  門 = 生成 PNG sha256 の参照一致。S 形 + タイル VAE 資産の再エミット（新識別子）と
+  モデル e2e の復帰を含む。以降: **P4 exporter CLI 化**（PyPI `karume`・サブコマンド式・
+  manifest 自動生成 + モデルカード README・HF アップ可能ディレクトリを直接出力）→
+  **P5 HF 実網通し + 公開準備**（gated リポの Authorization 実網確認・Cache Storage 数 GB
+  quota・sideEffects: false の実測もここ）。
 
 ## Pitfalls
 

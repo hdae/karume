@@ -213,3 +213,17 @@ f32 マスクで、1 ずれても shape エラーにならない沈黙誤値ク�
 - 窓幅（実測 4）の食い違いも同じ沈黙誤値クラスなので、Python 側は ckpt ロード時の
   `_assert_window_size`（net_g 全体を走査）、TS 側はパリティテストがコンテナに焼き込まれた
   `idx_v` の幅 `2w+1` と突き合わせて落とす。
+
+## hub: 並行取得のキャンセル粒度は single-flight の leader 単位
+
+取得層（`@hdae/fetch-cache`）の single-flight では、同一 (cacheName, URL) への 2 本目以降の
+呼び出しは先行フライトへ合流し、合流者に渡した `AbortSignal` は効かない（leader を abort
+すると合流者も巻き添えで落ちる）。同一資産を並行に取る複数の `fetchAssets` では、キャンセルは
+この粒度でしか働かない（ADR 0038 §5）。単一呼び出しの abort は全ワーカーへ正しく透過する。
+
+## hub: DL 前の適合チェックは GPU feature 軸のみ（limits は DL 後に fail loudly）
+
+preset が宣言できる GPU 前提は `gpuFeatures`（v1 は `shaderF16`）だけで、`maxBufferSize` /
+`maxStorageBufferBindingSize` 等の limits 不足は**ダウンロード後**の device / Session 構築時に
+fail loudly で判明する（数 GB を落とし切ってから落ちる）。preset の optional `requiredLimits`
+は ADR 0038 §7 の拡張席（解除予定はそこに従う）。
