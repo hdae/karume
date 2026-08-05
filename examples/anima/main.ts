@@ -71,20 +71,16 @@ const openPipeline = async (): Promise<AnimaPipeline> => {
 
 console.log(`[anima] ${source} / preset ${preset ?? "（manifest の既定）"} / seed ${seed}`);
 const started = performance.now();
-const pipeline = await openPipeline();
-try {
-  const image = await pipeline.generate({
-    prompt,
-    seed,
-    ...(steps === undefined ? {} : { steps }),
-    ...(resolution === undefined ? {} : { resolution }),
-  });
-  const png = await encodePng(image.data, image.width, image.height);
-  const name = `anima-${preset ?? "default"}-${image.width}x${image.height}` +
-    `-${steps ?? "default"}step-seed${seed}.png`;
-  await Deno.mkdir("outputs", { recursive: true });
-  await Deno.writeFile(`outputs/${name}`, png);
-  console.log(`[anima] outputs/${name}（${((performance.now() - started) / 1000).toFixed(1)}s）`);
-} finally {
-  pipeline.dispose();
-}
+using pipeline = await openPipeline();
+const image = await pipeline.generate({
+  prompt,
+  seed,
+  ...(steps === undefined ? {} : { steps }),
+  ...(resolution === undefined ? {} : { resolution }),
+});
+const png = await encodePng(image.data, image.width, image.height);
+const name = `anima-${preset ?? "default"}-${image.width}x${image.height}` +
+  `-${steps ?? "default"}step-seed${seed}.png`;
+await Deno.mkdir("outputs", { recursive: true });
+await Deno.writeFile(`outputs/${name}`, png);
+console.log(`[anima] outputs/${name}（${((performance.now() - started) / 1000).toFixed(1)}s）`);

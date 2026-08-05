@@ -162,12 +162,9 @@ for (const { preset, resolution, sha256 } of REFERENCE) {
     fn: async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, preset);
-      const pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { preset });
-      try {
-        await assertReferencePng(label, pipeline, resolution, sha256);
-      } finally {
-        pipeline.dispose();
-      }
+      // `using` は [Symbol.dispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
+      using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { preset });
+      await assertReferencePng(label, pipeline, resolution, sha256);
     },
   });
 }

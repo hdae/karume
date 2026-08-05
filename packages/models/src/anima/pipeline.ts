@@ -642,4 +642,9 @@ export class AnimaPipeline {
     this.#disposed = true;
     if (this.#state.ownsGpu) this.#state.gpu.destroy();
   }
+
+  /** `using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  [Symbol.dispose](): void {
+    this.dispose();
+  }
 }
