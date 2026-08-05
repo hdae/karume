@@ -12,6 +12,32 @@
 uv sync            # tools/exporter/ で実行（CPU 版 torch を pytorch-cpu index から取る）
 ```
 
+## CLI（`karume`）
+
+`[project.scripts]` が入れるサブコマンド。**CLI は引数を解釈しない** — サブコマンド名の後ろは
+そのまま各本体へ渡す（`karume <サブコマンド> --help` は本体の parser の使い方を出す）。排他規則
+（`--verify` × `--target` 等）の写しを CLI 側に持たないための形で、ディスパッチは遅延 import。
+
+| サブコマンド    | 包む本体                                          | 従来の呼び方             |
+| --------------- | ------------------------------------------------- | ------------------------ |
+| `karume export` | 台本 `export_anima.py`（ADR 0016 の emit 4 本）   | `python export_anima.py` |
+| `karume dist`   | `karume.dist`（配布形の組み立て・引数は完全互換） | `python -m karume.dist`  |
+| `karume verify` | `karume.verify`（配布形を IR v1 の全規則で検証）  | （新設）                 |
+
+```sh
+uv run karume dist --models ../../models
+uv run karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
+```
+
+台本はパッケージ**外**のスクリプトなので wheel には入らない — `karume export` はリポジトリの
+作業ツリーでだけ動く（無ければ置き場を綴って fail loudly）。
+
+`karume dist` は組み立てと `verify_dist` の後に**モデルカード `README.md`** を書く
+（`karume.modelcard` — ADR 0037 §3 の frontmatter 同梱）。数値・ファイル一覧・preset 表は
+manifest からの機械導出で、定数として持つのは manifest に載らない事実（base model・ライセンス・
+焼き込んだ LoRA の出所）だけ。`README.md` は `karume.json` と同格のメタファイルとして、
+宣言外ファイル検査の例外に入る。
+
 ## 検証コマンド（変更後は全て）
 
 ```sh

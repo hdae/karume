@@ -10,7 +10,7 @@
 ファイルだけで、系列に並ぶ E2E フィクスチャ（`io.*.safetensors`）は**入らない**。
 
 ```
-cd tools/exporter && uv run python -m karume.dist
+cd tools/exporter && uv run karume dist
 ```
 
 組み立ては冪等（再実行で貼り直す）。同一ファイルシステムなので実体は**ハードリンク**で、

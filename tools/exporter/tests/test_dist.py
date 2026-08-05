@@ -18,11 +18,13 @@ from karume.dist import (
     ANIMA_PIPELINE_CONFIG,
     ANIMA_PRESETS,
     MANIFEST_FILENAME,
+    MODEL_CARD_FILENAME,
     OUTPUT_PATHS,
     AnimaSources,
     DistError,
     anima_sources,
     assemble_anima,
+    main,
     verify_dist,
 )
 
@@ -251,3 +253,49 @@ class TestVerifyDist:
         (out_dir / "transformer" / "io.s01024t0699.safetensors").write_bytes(b"stale")
         with pytest.raises(DistError, match="宣言していないファイル"):
             verify_dist(out_dir)
+
+    def test_it_admits_the_model_card_as_a_meta_file(self, assembled) -> None:
+        """`README.md` は karume.json と同格のメタファイル（前回の組み立ての残りでも通す）。"""
+        out_dir, _ = assembled
+        (out_dir / MODEL_CARD_FILENAME).write_text("前回のモデルカード", encoding="utf-8")
+        assert sorted(verify_dist(out_dir)) == sorted(OUTPUT_PATHS.values())
+
+    def test_it_still_refuses_a_meta_name_in_a_subdirectory(self, assembled) -> None:
+        """例外は直下の 2 つだけ — 下位ディレクトリの同名は宣言外のまま。"""
+        out_dir, _ = assembled
+        (out_dir / "transformer" / MODEL_CARD_FILENAME).write_text("紛れ込み", encoding="utf-8")
+        with pytest.raises(DistError, match="宣言していないファイル"):
+            verify_dist(out_dir)
+
+
+class TestModelCard:
+    """`karume dist` は組み立て + 検証の**後**にモデルカードを書く。"""
+
+    def _run(self, tmp_path: Path) -> Path:
+        _build_series(tmp_path / "models")
+        out_dir = tmp_path / "dist"
+        main(["--models", str(tmp_path / "models"), "--out", str(out_dir)])
+        return out_dir
+
+    def test_it_writes_a_model_card_next_to_the_manifest(self, tmp_path: Path) -> None:
+        card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert card.startswith("---\n")
+        assert "base_model: circlestone-labs/Anima-Base-v1.0-Diffusers" in card
+
+    def test_it_derives_the_file_table_from_the_assembled_tree(self, tmp_path: Path) -> None:
+        out_dir = self._run(tmp_path)
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        for rel_path in OUTPUT_PATHS.values():
+            assert f"`{rel_path}`" in card
+        size = (out_dir / OUTPUT_PATHS["transformer_i8"]).stat().st_size
+        assert f"{size:,} B" in card
+
+    def test_it_leaves_the_tree_verifiable_after_writing_the_card(self, tmp_path: Path) -> None:
+        out_dir = self._run(tmp_path)
+        assert sorted(verify_dist(out_dir)) == sorted(OUTPUT_PATHS.values())
+
+    def test_it_reassembles_over_a_previous_card(self, tmp_path: Path) -> None:
+        out_dir = self._run(tmp_path)
+        first = (out_dir / MODEL_CARD_FILENAME).read_bytes()
+        main(["--models", str(tmp_path / "models"), "--out", str(out_dir)])
+        assert (out_dir / MODEL_CARD_FILENAME).read_bytes() == first

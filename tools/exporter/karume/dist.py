@@ -1,7 +1,8 @@
 """配布ディレクトリの組み立て — 系列ディレクトリ群 → HF へそのまま上げられる 1 リポ形。
 
 仕様の正本は ADR 0038（`docs/decisions/0038-manifest-v1.md`）。ここが作るのは §2 の規約名で
-並んだファイル群と、それを宣言する `karume.json`（§1〜§3）。
+並んだファイル群と、それを宣言する `karume.json`（§1〜§3）、そして manifest から機械導出した
+モデルカード `README.md`（ADR 0037 §3 の「そのまま HF リポとして上げられる形」）。
 
 MUST: **manifest は手書きせず資産から導出する**（ADR 0038 Context）。`size` / `sha256` は
 組み立て後の実ファイルから streaming で採る — 数 GB を丸読みしないことと、「表と現物が
@@ -17,7 +18,7 @@ sha256 で確かめてから 1 本化する — 食い違ったまま片方を�
 同一ファイルシステム上の組み立てなので配置は `os.link`（ハードリンク）を優先し、リンクを
 張れない場合（別 FS・権限）だけ copy へ落ちる。数 GB × 2 系列を複製しないため。
 
-    uv run python -m karume.dist
+    uv run karume dist          # = uv run python -m karume.dist（引数は同じ）
 """
 
 from __future__ import annotations
@@ -33,12 +34,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from karume.modelcard import render_model_card
+
 #: リポジトリの `models/`（karume/dist.py → karume → tools/exporter → tools → repo）。
 #: P4 の CLI 化ではパスを明示で受け取るため、この既定はリポ内実行の利便のためだけにある。
 _REPO_MODELS = Path(__file__).resolve().parents[3] / "models"
 
 #: manifest のファイル名（ADR 0038 §1 — リポジトリ直下の固定名）。
 MANIFEST_FILENAME = "karume.json"
+
+#: モデルカードのファイル名（ADR 0037 §3 — HF が frontmatter を読む固定名）。
+MODEL_CARD_FILENAME = "README.md"
+
+#: 配布形の**メタファイル**（配布形そのものの説明であって、manifest が宣言する資産ではない）。
+#: 宣言外ファイル検査はこの 2 つだけを例外にする — 例外を名前でなく相対 path で持つのは、
+#: 下位ディレクトリに紛れ込んだ同名ファイルまで見逃さないため。
+META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
 
 #: sha256 の読み出し単位。数 GB を丸読みしないための唯一の要件で、値自体は素の I/O 単位。
 _CHUNK_BYTES = 1 << 20
@@ -316,6 +327,10 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
 
     sha256 は組み立て時に実ファイルから採っているので採り直さない（数 GB の再ハッシュは
     ここでは新しい事実を生まない）。見るのは「表が現物を覆っているか」だけ。
+
+    宣言外ファイルの例外は {@link META_PATHS} の 2 つ（`karume.json` と `README.md`）だけ —
+    どちらも配布形そのものの説明で、manifest が宣言する資産ではない。それ以外は従来どおり
+    fail loudly（前回の組み立ての残骸や `io.*` の混入を後段へ見せない）。
     """
     manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     declared = _referenced_sizes(manifest)
@@ -327,9 +342,9 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
         if actual != size:
             raise DistError(f"{rel_path}: size が manifest と違う（宣言 {size} / 現物 {actual}）")
     present = {
-        str(path.relative_to(out_dir))
+        relative
         for path in out_dir.rglob("*")
-        if path.is_file() and path.name != MANIFEST_FILENAME
+        if path.is_file() and (relative := str(path.relative_to(out_dir))) not in META_PATHS
     }
     extra = sorted(present - set(declared))
     if extra:
@@ -356,9 +371,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     out_dir = args.out if args.out is not None else args.models / "anima-turbo"
     manifest = assemble_anima(anima_sources(args.models), out_dir)
     verified = verify_dist(out_dir)
+    # モデルカードは**検証を通った manifest** から描く（表と現物が食い違ったまま説明だけ
+    # 生えることがない順序）。
+    (out_dir / MODEL_CARD_FILENAME).write_text(render_model_card(manifest), encoding="utf-8")
     for rel_path, size in sorted(verified.items()):
         print(f"{size:>12}  {rel_path}")
-    print(f"{(out_dir / MANIFEST_FILENAME).stat().st_size:>12}  {MANIFEST_FILENAME}")
+    for rel_path in sorted(META_PATHS):
+        print(f"{(out_dir / rel_path).stat().st_size:>12}  {rel_path}")
     print(f"[dist] {out_dir} — {manifest['generator']} / preset {manifest['defaultPreset']}")
 
 
