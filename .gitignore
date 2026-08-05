@@ -1,5 +1,6 @@
 .claude/settings.local.json
 coverage/
+outputs/
 models/*
 !models/README.md
 *.safetensors
