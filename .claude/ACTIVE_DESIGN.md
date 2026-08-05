@@ -14,16 +14,17 @@
   karume.json 実 hash・**格納 dtype 門**付き）。**移植の門 = PNG sha256 ビット一致 ×4 が全緑**
   （ローカル / 取得層 + integrity / example CLI の 3 経路とも参照値と同一）。example は 90 行
   1 画面（移行元 1,111 行から縮退）。
-  **P4 進行中**: 配布形を **anima-turbo** へ改名（turbo LoRA マージ済みを名前に出す）、
-  `karume` サブコマンド CLI（export / dist / verify・argv 素通し・遅延 import）+ モデルカード
-  README 自動生成（`karume.modelcard` — 数値は全て manifest 導出・定数は base model /
-  license / LoRA 出所のみ）を実装済み。残る宿題: ①rope_base の読み（runtime 公開面 /
-  IR コンテナ化 / 現状維持 — **裁定待ち**）②`AnimaFromPretrainedOptions` に `caches` 注入席
-  （テスト用）③波 1 積み残しの参照フィクスチャ系テスト（timestepsProj atol 突合等 —
-  anima-pipeline 系列の再エミットが前提）④tokenizer parity fixture の models 側への移設。
+  **P4 進行中**: 配布形を **anima-turbo** へ改名、`karume` サブコマンド CLI + モデルカード
+  README 自動生成（**英語** — `karume.modelcard`・数値は全て manifest 導出）を実装済み。
+  rope_base の読みは裁定 a で解消（runtime 公開面に `parseSafetensors` / `tensorBytes` —
+  ADR 0008 追記）。`AnimaPipeline` は `using` 対応（`[Symbol.dispose]`）。
+  base_model_relation = quantized・license 3 値継承はユーザー裁定で確定。残る宿題:
+  ②`AnimaFromPretrainedOptions` に `caches` 注入席（テスト用）③波 1 積み残しの参照
+  フィクスチャ系テスト（timestepsProj atol 突合等 — anima-pipeline 系列の再エミットが前提）
+  ④tokenizer parity fixture の models 側への移設。
   以降: **P5 HF 実網通し + 公開準備**（gated リポの Authorization 実網確認・Cache Storage
   数 GB quota・sideEffects: false 実測・使い方スニペットの実リポ ID 化〈`--repo`〉・
-  base_model_relation / license 表記の最終裁定もここ）。
+  公開 README 群〈リポ直下 + packages/*〉の英語起草もここ）。
 
 ## Pitfalls
 

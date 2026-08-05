@@ -12,6 +12,12 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 - 「プロトタイプ」= 参考元の先行実験プロジェクト。**固有名は成果物（コード・コメント・
   コミットメッセージ含む）に書かない**。
 
+## 言語
+
+- **公開 README は英語で書く**（リポ直下 README・`packages/*/README.md`・モデルカード
+  生成物〈`karume dist` が書く README.md〉）。コード内コメント・docs/・ACTIVE_DESIGN・
+  コミットメッセージ説明部は従来どおり日本語。
+
 ## 構成
 
 - `packages/runtime/` — 公開 API は mod.ts の**薄い面のみ**（ADR 0008）。`src/` が本体
