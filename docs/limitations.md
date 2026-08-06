@@ -230,6 +230,26 @@ export の台本 `export_anima.py` はパッケージ外のリポ直下スクリ
 `karume dist` / `karume verify` はインストール版でも動く。解除するなら台本のパッケージ化と
 extras 化を 1 セットで行う（公開後の需要を見て判断）。
 
+## Metal（Apple GPU）では GPU 側 timestamp 計測が実用にならない（外部制約）
+
+`gpuTiming: true`（ADR 0021）は 1 dispatch = 1 pass に開いて pass 境界の timestamp を取るため、
+dispatch 数ぶんのカウンタサンプルが要る。Anima の DiT は 1 step = **3,301 dispatch** で、
+Metal はこの規模のサンプルバッファを確保できず
+
+```
+Failed to create counter sample buffer: Cannot allocate sample buffer (MTLCounterErrorDomain)
+```
+
+を返し、そのまま **device 消失**に至る（{@link GpuDeviceLostError} として可視化されるので
+沈黙はしない）。実測は Apple M2 / Deno 2.9.4。**Karume 側では回避不能**で、op 別の内訳が要る
+計測は Linux / Vulkan 機で行うか、dispatch 数の少ない小さいグラフに限る。壁時計だけなら
+計測を切って（既定）測れる。
+
+なお同じ理由で `docs/limitations.md` の「GPUBuffer 総確保がドライバ申告予算の 97% で頭打ち」は
+**Metal には効かない** — wgpu の `MemoryBudgetThresholds` は D3D12 と Vulkan のみ対応で、
+wgpu-hal metal の `check_if_oom()` は `Ok(())` を返す no-op（[wgpu#7460](https://github.com/gfx-rs/wgpu/issues/7460)
+の TODO 付き）。Metal では予算超過が例外にならず、遅くなるだけで進む。
+
 ## hub: DL 前の適合チェックは GPU feature 軸のみ（limits は DL 後に fail loudly）
 
 preset が宣言できる GPU 前提は `gpuFeatures`（v1 は `shaderF16`）だけで、`maxBufferSize` /
