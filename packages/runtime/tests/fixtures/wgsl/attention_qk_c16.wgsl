@@ -93,10 +93,32 @@ fn main(
     // 半スケール契約（ADR 0023）: scale は q 側と k 側の**両方**へ掛ける。範囲外は 0 のままで
     // 0 · scale = 0 なので端数タイルの結論は変わらない
     wv = wv * dims.scale;
-    sb[sb_base][wsl] = f16(wv.x);
-    sb[sb_base + 16u][wsl] = f16(wv.y);
-    sb[sb_base + 32u][wsl] = f16(wv.z);
-    sb[sb_base + 48u][wsl] = f16(wv.w);
+    switch wsl {
+      case 0u: {
+        sb[sb_base].x = f16(wv.x);
+        sb[sb_base + 16u].x = f16(wv.y);
+        sb[sb_base + 32u].x = f16(wv.z);
+        sb[sb_base + 48u].x = f16(wv.w);
+      }
+      case 1u: {
+        sb[sb_base].y = f16(wv.x);
+        sb[sb_base + 16u].y = f16(wv.y);
+        sb[sb_base + 32u].y = f16(wv.z);
+        sb[sb_base + 48u].y = f16(wv.w);
+      }
+      case 2u: {
+        sb[sb_base].z = f16(wv.x);
+        sb[sb_base + 16u].z = f16(wv.y);
+        sb[sb_base + 32u].z = f16(wv.z);
+        sb[sb_base + 48u].z = f16(wv.w);
+      }
+      default: {
+        sb[sb_base].w = f16(wv.x);
+        sb[sb_base + 16u].w = f16(wv.y);
+        sb[sb_base + 32u].w = f16(wv.z);
+        sb[sb_base + 48u].w = f16(wv.w);
+      }
+    }
     workgroupBarrier();
     // 共有ロード 5 回（B の vec4 1 + A のスカラ 4）で 16 MAC。縮約は k 昇順の逐次で、
     // 1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と完全に一致する。

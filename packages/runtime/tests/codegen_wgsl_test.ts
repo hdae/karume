@@ -1509,8 +1509,26 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
   // 1 タイル内で列が入れ替わる — 列ごとに値が違う端数形状だけが検出器になる。
   assertEquals(LINEAR_WGSL.includes("let wsq = wc / 4u;"), true);
   assertEquals(LINEAR_WGSL.includes("let wsl = wc % 4u;"), true);
-  assertEquals(LINEAR_WGSL.includes("sb[sb_base][wsl] = wv.x;"), true);
-  assertEquals(LINEAR_WGSL.includes("sb[sb_base + 16u][wsl] = wv.y;"), true);
+  // MUST: 成分は**静的**に書く（`sb[i][wsl] = v` の動的インデックスにしない）。Metal では
+  // wsl != 0 の書き込みが黙って捨てられ、4 要素中 3 要素が 0 のまま内積へ入る（機序は
+  // src/kernels/gemm.ts の storeBTransposed）。4 アームぶんの転置配置を全て固定する —
+  // 1 アームでも取り違えると 1 タイル内で列が入れ替わる。
+  assertEquals(LINEAR_WGSL.includes("[wsl]"), false);
+  const components = ["x", "y", "z", "w"] as const;
+  for (const [at, component] of components.entries()) {
+    assertEquals(
+      LINEAR_WGSL.includes(
+        `${at === components.length - 1 ? "default" : `case ${at}u`}: {\n` +
+          `        sb[sb_base].${component} = wv.x;\n` +
+          `        sb[sb_base + 16u].${component} = wv.y;\n` +
+          `        sb[sb_base + 32u].${component} = wv.z;\n` +
+          `        sb[sb_base + 48u].${component} = wv.w;\n` +
+          `      }`,
+      ),
+      true,
+      `linear の B タイル転置配置（成分 ${component}）`,
+    );
+  }
   // 末尾で bias を 1 度だけ足す（accumulator の初期値にはしない — 縮約順序を保つため）
   assertEquals(LINEAR_WGSL.includes("out[obase + ocol] = acc[i].x + bias[ocol];"), true);
   assertEquals(

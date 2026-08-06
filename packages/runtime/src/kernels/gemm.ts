@@ -372,6 +372,44 @@ ${
   }
     sb[bk * ${WG}u + bcq] = ${tileQuad(compute, "bv4")};`;
 
+/** 共有 B タイルの成分（転置後に `wsl` が指す先）。 */
+const TILE_COMPONENTS = ["x", "y", "z", "w"] as const;
+
+/**
+ * `wv` の k 連続 4 要素を共有 B タイルへ**転置して**置く（書き込む成分は実行時の `wsl`）。
+ *
+ * MUST: `sb[i][wsl] = v` と**動的インデックスで成分を書かない**。Deno 2.9.4 / Apple M2
+ * （Metal）では `wsl != 0` の書き込みが**黙って捨てられ**、B タイルの 4 要素中 3 要素が 0 の
+ * まま内積へ入る。動的成分書き込みを持たない matmul / bmm は無傷で、linear / attention /
+ * conv2d だけが壊れる — 相対誤差が 1 を超える「全く違う値」になるのに例外は一切出ない。
+ * ポインタ経由（`(*p)[wsl] = v`）も naga が同じ MSL に落とすため同様に壊れるので、
+ * **静的成分へ落とす以外に回避手段が無い**（現状 / switch / スカラ配列 / ポインタの 4 通りを
+ * 実機で突合して確認）。Linux / Vulkan では動的インデックスでも正しく動くため、この冗長さは
+ * Metal のためだけにある。
+ *
+ * NOTE: `wsl = (tid / 4) % 4` なので simdgroup 内に 4 値が揃い、4 アームとも実行される。
+ * コストが乗るのは B タイル充填だけで、頻度が桁違いに高い内積ループの読み出しは `sb` を
+ * vec4 のまま一括で読む（共有タイルのレイアウトを変えない選択の理由）。
+ */
+const storeBTransposed = (compute: GemmCompute): string => {
+  const arm = (component: string): string =>
+    TILE_COMPONENTS
+      .map((source, at) =>
+        `        sb[sb_base${at === 0 ? "" : ` + ${at * WG}u`}].${component} = ${
+          tileScalar(compute, `wv.${source}`)
+        };`
+      )
+      .join("\n");
+  const arms = TILE_COMPONENTS
+    .map((component, at) =>
+      `      ${at === TILE_COMPONENTS.length - 1 ? "default" : `case ${at}u`}: {\n${
+        arm(component)
+      }\n      }`
+    )
+    .join("\n");
+  return `    switch wsl {\n${arms}\n    }`;
+};
+
 /**
  * linear の B タイル（重み `[n,k]` — 連続方向が k）の担当。
  *
@@ -423,10 +461,7 @@ ${
       }
     }`
   }
-    sb[sb_base][wsl] = ${tileScalar(compute, "wv.x")};
-    sb[sb_base + ${WG}u][wsl] = ${tileScalar(compute, "wv.y")};
-    sb[sb_base + ${2 * WG}u][wsl] = ${tileScalar(compute, "wv.z")};
-    sb[sb_base + ${3 * WG}u][wsl] = ${tileScalar(compute, "wv.w")};`;
+${storeBTransposed(compute)}`;
 
 /**
  * 融合 attention ① の B タイル（k `[B·H, N, D]` — 連続方向が D）の担当。
@@ -472,10 +507,7 @@ ${
     // 半スケール契約（ADR 0023）: scale は q 側と k 側の**両方**へ掛ける。範囲外は 0 のままで
     // 0 · scale = 0 なので端数タイルの結論は変わらない
     wv = wv * dims.scale;
-    sb[sb_base][wsl] = ${tileScalar(compute, "wv.x")};
-    sb[sb_base + ${WG}u][wsl] = ${tileScalar(compute, "wv.y")};
-    sb[sb_base + ${2 * WG}u][wsl] = ${tileScalar(compute, "wv.z")};
-    sb[sb_base + ${3 * WG}u][wsl] = ${tileScalar(compute, "wv.w")};`;
+${storeBTransposed(compute)}`;
 
 /**
  * 融合 attention ③ が使う行統計の束縛（K タイルループ不変なので 1 度だけ引く）。

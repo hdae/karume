@@ -94,10 +94,32 @@ fn main(
         wv.w = dequant(wbase + 3u, wscale_v);
       }
     }
-    sb[sb_base][wsl] = wv.x;
-    sb[sb_base + 16u][wsl] = wv.y;
-    sb[sb_base + 32u][wsl] = wv.z;
-    sb[sb_base + 48u][wsl] = wv.w;
+    switch wsl {
+      case 0u: {
+        sb[sb_base].x = wv.x;
+        sb[sb_base + 16u].x = wv.y;
+        sb[sb_base + 32u].x = wv.z;
+        sb[sb_base + 48u].x = wv.w;
+      }
+      case 1u: {
+        sb[sb_base].y = wv.x;
+        sb[sb_base + 16u].y = wv.y;
+        sb[sb_base + 32u].y = wv.z;
+        sb[sb_base + 48u].y = wv.w;
+      }
+      case 2u: {
+        sb[sb_base].z = wv.x;
+        sb[sb_base + 16u].z = wv.y;
+        sb[sb_base + 32u].z = wv.z;
+        sb[sb_base + 48u].z = wv.w;
+      }
+      default: {
+        sb[sb_base].w = wv.x;
+        sb[sb_base + 16u].w = wv.y;
+        sb[sb_base + 32u].w = wv.z;
+        sb[sb_base + 48u].w = wv.w;
+      }
+    }
     workgroupBarrier();
     // 共有ロード 5 回（B の vec4 1 + A のスカラ 4）で 16 MAC。縮約は k 昇順の逐次で、
     // 1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と完全に一致する。
