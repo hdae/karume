@@ -33,9 +33,10 @@
   **動的インデックスで成分を書く**（`sb[i][wsl] = v`）と `wsl != 0` が黙って捨てられる。
   GEMM の B タイル充填は静的成分への `switch` 展開で回避済み（`gemm.ts` の
   `storeBTransposed`）で、**同じ形を新しく書かないこと**。残る誤値（attention i8a8 /
-  conv2d の 2 経路一致）と性能（Linux の 31〜41 倍遅い）は
-  [research/2026-08-06](../docs/research/2026-08-06-metal-silent-miscompute.md) と
-  known-issues.md。Metal では `gpuTiming` が使えない（dispatch 数がサンプル上限を超える）。
+  conv2d の 2 経路一致）は known-issues.md、**性能**（Linux の 31〜41 倍 — 帯域は健全なのに
+  GEMM のタイリングが 1.21x しか効かない = Apple GPU 向け未最適化）は
+  [research/2026-08-06](../docs/research/2026-08-06-metal-silent-miscompute.md) §3。
+  Metal では `gpuTiming` が使えない（dispatch 数がサンプル上限を超える）。
 
 - **`models/` に置くのは HF へそのまま上げられる配布形だけ**（1 ディレクトリ = 1 HF リポ）。
   エクスポータの系列出力は `outputs/series/` — 綴りの正本は `karume/paths.py`
