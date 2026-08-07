@@ -19,25 +19,33 @@ everything after the subcommand name is passed straight to the body (`karume <su
 prints the usage of the body's own parser). This shape keeps a copy of the exclusivity rules
 (`--verify` × `--target` etc.) out of the CLI; dispatch is a lazy import.
 
-| Subcommand      | Wrapped body                                                                | Former invocation        |
-| --------------- | --------------------------------------------------------------------------- | ------------------------ |
-| `karume export` | script `export_anima.py` (the 4 emit targets of ADR 0016)                   | `python export_anima.py` |
-| `karume dist`   | `karume.dist` (assembles the distribution form; arguments fully compatible) | `python -m karume.dist`  |
-| `karume verify` | `karume.verify` (validates the distribution form against every IR v1 rule)  | (new)                    |
+| Subcommand           | Wrapped body                                                                | Former invocation        |
+| -------------------- | --------------------------------------------------------------------------- | ------------------------ |
+| `karume export`      | script `export_anima.py` (the 4 emit targets of ADR 0016)                   | `python export_anima.py` |
+| `karume export-sbv2` | script `export_sbv2.py` (the 5 emit targets of ADR 0013)                    | `python export_sbv2.py`  |
+| `karume dist`        | `karume.dist` (assembles the distribution form; arguments fully compatible) | `python -m karume.dist`  |
+| `karume verify`      | `karume.verify` (validates the distribution form against every IR v1 rule)  | (new)                    |
+
+Which script runs is spelled in the **subcommand name**, never in a flag: `karume export --pipeline
+sbv2` would mean the CLI reads one argument of its own, and the no-copy rule above does not survive
+being true "except for one flag". Bare `karume export` stays Anima's spelling.
 
 ```sh
 uv run karume dist --series ../../outputs/series
+uv run karume dist --pipeline sbv2
 uv run karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
 ```
 
-The scripts are **outside** the package, so they are not in the wheel — `karume export` only runs in
-a repository working tree (when absent it spells out where the script belongs and fails loudly).
+The scripts are **outside** the package, so they are not in the wheel — `karume export` /
+`karume export-sbv2` only run in a repository working tree (when absent they spell out where the
+script belongs and fail loudly).
 
 `karume dist` writes a **model card `README.md`** after assembly and `verify_dist`
-(`karume.modelcard` — including the ADR 0037 §3 frontmatter). The numbers, the file list and the
-preset table are derived mechanically from the manifest; the only constants it carries are the facts
-the manifest does not record (base model, license, provenance of the fused LoRA). `README.md` is a
-metadata file on par with `karume.json`, so it is exempt from the undeclared-file check.
+(`karume.modelcard` — including the ADR 0037 §3 frontmatter), from a template per pipeline. The
+numbers, the file list, the preset table and the style / speaker tables are derived mechanically
+from the manifest; the only constants a template carries are the facts the manifest does not record
+(base model, license, provenance of the fused LoRA). `README.md` is a metadata file on par with
+`karume.json`, so it is exempt from the undeclared-file check.
 
 ## Verification commands (all of them, after any change)
 
