@@ -4,7 +4,7 @@
 > FIRST (alongside `CLAUDE.md` / `docs/`) so they don't start cold or misread an intentional
 > migration as a defect. Update it whenever the current design context shifts.
 >
-> Last updated: 2026-08-05
+> Last updated: 2026-08-07
 
 ## Active redesigns (in flight)
 
@@ -23,6 +23,14 @@
   ADR 0038 追記）。残る宿題: ③波 1 積み残しの参照フィクスチャ系テスト（timestepsProj atol
   突合等 — anima-pipeline 系列の再エミットが前提）④tokenizer parity fixture の models 側への
   移設。
+  **models/sbv2 — 到着済み**（P4 と並行）: SBV2（テキスト → 音声）を TS 側へ移植
+  （`packages/models/src/sbv2/` = text 7 / host 3 / relattn-tables / config / pipeline / style +
+  `src/audio/wav.ts`）。サブパス面 `@karume/models/sbv2` は `Sbv2Pipeline` だけを出し、example は
+  111 行（`examples/sbv2/main.ts`）。実重み e2e は `packages/runtime/tests/e2e_sbv2_test.ts`
+  （3 系列 × 5 ターゲット × 5 ケース）、GPU 不要のホスト側は
+  `packages/models/tests/sbv2_{relattn_parity,text,host,pipeline}_test.ts`。配布形
+  `models/sbv2-FN4/`（11 ファイル・504MiB）と CLI `karume export-sbv2` まで揃っている
+  （manifest の確定は ADR 0039）。
   以降: **P5 HF 実網通し + 公開準備**（gated リポの Authorization 実網確認・Cache Storage
   数 GB quota・sideEffects: false 実測・使い方スニペットの実リポ ID 化〈`--repo`〉・
   公開 README 群〈リポ直下 + packages/*〉の英語起草もここ）。
@@ -39,15 +47,20 @@
   Metal では `gpuTiming` が使えない（dispatch 数がサンプル上限を超える）。
 
 - **`models/` に置くのは HF へそのまま上げられる配布形だけ**（1 ディレクトリ = 1 HF リポ）。
-  エクスポータの系列出力は `outputs/series/` — 綴りの正本は `karume/paths.py`
-  （`DIST_ROOT` / `SERIES_ROOT`）で、台本と `karume dist` がそこを共有する。**ADR と
+  エクスポータの系列出力は `outputs/series/`、実重みの**入力素材**は `inputs/<ファミリ>/<名前>/`
+  — 綴りの正本は `karume/paths.py`（`DIST_ROOT` / `SERIES_ROOT` / `INPUTS_ROOT` /
+  `OUTPUTS_ROOT`）で、台本と `karume dist` がそこを共有する。**ADR と
   docs/research 内の `models/anima-*` 表記は当時の記録**（時点スナップショットなので直さない）。
 - **現行識別子（`karume_ir` / `karume-ir`）以前に焼かれた資産は開けない**（互換シム無し —
   fail loudly）。`models/` と `outputs/` はどちらも untracked。
 - モデル e2e は anima の PNG 門 4 本が本リポに常駐（`models/anima-turbo/` 資産が前提・無ければ明示
-  SKIP）。deberta / sbv2 の実重み e2e は移行元リポに残置のまま（SBV2 の取り込み時に復帰）。
-- 入力素材（SBV2 の実重み ckpt・turbo LoRA ファイル）の置き場は**未裁定** — 現状の綴りは
-  `models/` のままで、SBV2 取り込み時に配布形と分ける必要がある。
+  SKIP）。sbv2 の実重み e2e も復帰済み（系列 `outputs/series/sbv2-FN4{,-f16,-i8}/` が前提）。
+  **deberta の実重み e2e だけは移行元リポに残置のまま** — 系列
+  `outputs/series/deberta{,-i8}/full-24layer/` は SBV2 の text_encoder として使っているが、
+  テスト本体（`e2e_deberta_test.ts`）は未移植。
+- 入力素材の置き場は `inputs/<ファミリ>/<名前>/` で裁定済み（SBV2 の実重みは `inputs/sbv2/FN4/`）。
+  **turbo LoRA だけ未移行** — `anima_pipeline.py` の `--lora` 例が
+  `models/anima-turbo-lora-v0.2.safetensors` を綴ったままで、配布形の親に入力素材が混ざる。
 - **配布資産の格納形は series ディレクトリ名でなくヘッダが正** — dist.py の格納 dtype 門が
   組み立て時に検査する（`--dtype` 付け忘れの素 F32 が PNG 門まで沈黙した実測事故が根拠）。
 - 配布形の宣言外ファイル検査は直下の `karume.json` / `README.md` だけを例外にする（それ以外が
@@ -55,5 +68,6 @@
 - models パッケージの tree-shaking は「全モジュール副作用ゼロ」不変条件が前提 —
   崩れると barrel 経由の shake が静かに死ぬ。
 - JSR npm 互換層が package.json に `sideEffects: false` を出すかは**未検証**（P2〜P3 で実測）。
-- tokenizer パリティ資産 `anima-text/parity.json` は暫定で `packages/runtime/tests/fixtures/`
-  に置いた（exporter のテストが参照）— 最終の置き場は P3 で models 側へ見直し。
+- tokenizer パリティ資産 `anima-text/parity.json` は今も `packages/runtime/tests/fixtures/` に
+  ある（読むのは `packages/models/tests/anima_tokenizer_test.ts` と exporter の
+  `tests/test_anima_demo.py`）— models 側への移設は上の宿題④として未了。

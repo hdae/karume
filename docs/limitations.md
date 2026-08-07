@@ -207,9 +207,10 @@ f32 マスクで、1 ずれても shape エラーにならない沈黙誤値ク�
 
 - 式の正本は Python 側 `tools/exporter/karume/patch_sbv2.build_relattn_tables`
   （front の in-graph 構築も同じ関数を呼ぶ）。
-- ホスト側の鏡像は `packages/runtime/tests/helpers/relattn-tables.ts`（SBV2 固有なので `packages/runtime/src/` には置かない —
-  将来 `examples/` へ昇格）。両者のバイト一致は `packages/runtime/tests/sbv2_relattn_parity_test.ts` が
-  golden の実データで固定する。
+- ホスト側の正本は `packages/models/src/sbv2/relattn-tables.ts`（SBV2 固有なので
+  `packages/runtime/src/` には置かない — モデル側の知識を持つ models パッケージが持ち、
+  `Sbv2Pipeline` が T ごとに呼ぶ）。Python 側とのバイト一致は
+  `packages/models/tests/sbv2_relattn_parity_test.ts` が golden の実データで固定する。
 - 窓幅（実測 4）の食い違いも同じ沈黙誤値クラスなので、Python 側は ckpt ロード時の
   `_assert_window_size`（net_g 全体を走査）、TS 側はパリティテストがコンテナに焼き込まれた
   `idx_v` の幅 `2w+1` と突き合わせて落とす。
