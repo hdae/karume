@@ -315,7 +315,7 @@ uv run --group sbv2 python export_sbv2.py --verify dec    # before/after remove_
 uv run --group sbv2 python export_sbv2.py --verify voice
 
 # 3. real-GPU comparison (every case SKIPs when the assets are absent)
-cd ../.. && deno test -A packages/runtime/tests/e2e_sbv2_test.ts packages/runtime/tests/sbv2_relattn_parity_test.ts
+cd ../.. && deno test -A packages/runtime/tests/e2e_sbv2_test.ts packages/models/tests/sbv2_relattn_parity_test.ts
 ```
 
 ```
@@ -430,7 +430,7 @@ discarded elements feed into amax and shift the whole per-channel scale), and it
 MUST in the docstrings of `ensure_dec_plain` and `_fake_quant` (ADR 0013 / 0018 / 0019).
 
 On the Deno side: `packages/runtime/tests/e2e_sbv2_test.ts` (one case = one test) and
-`packages/runtime/tests/sbv2_relattn_parity_test.ts` (byte equality of the tables). Same two-stage
+`packages/models/tests/sbv2_relattn_parity_test.ts` (byte equality of the tables). Same two-stage
 structure as DeBERTa: **if `outputs/series/sbv2-FN4/` contains not a single target directory,
 everything SKIPs** (this is the environment where only the raw weights are in place and export has
 not been run yet), and when they are **partially** present (a missing target / a missing case) it is
@@ -495,9 +495,9 @@ Baking them for flow would come to `(4096,4096)` × 2 tables = **134MB**, hence 
 inputs. The formulas are authoritative in `patch_sbv2.build_relattn_tables`, and **the in-graph
 construction for front calls the same function** (writing the formula in two places would silently
 produce two different tables the moment only one is fixed). The host-side mirror is
-`packages/runtime/tests/helpers/relattn-tables.ts` (SBV2-specific, so it is not placed under
-`packages/runtime/src/` — it will be promoted to `examples/` later), and **byte equality is pinned
-by `packages/runtime/tests/sbv2_relattn_parity_test.ts` against the goldens' real data**. A mismatch
+`packages/models/src/sbv2/relattn-tables.ts` (SBV2-specific, so it is not placed under
+`packages/runtime/src/` — the models package owns the model-side knowledge), and **byte equality is
+pinned by `packages/models/tests/sbv2_relattn_parity_test.ts` against the goldens' real data**. A mismatch
 in window size 4 is of the silent-wrong-value class rather than a shape error, so the Python side
 has `_assert_window_size` (at ckpt load) and the TS side has the parity test comparing against **the
 width `2w+1` of the `idx_v` baked into the container**; gates on both sides exist because with only

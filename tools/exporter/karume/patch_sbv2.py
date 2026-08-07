@@ -317,8 +317,8 @@ def build_relattn_tables(
     Pmax 焼き込み + `sym_prefix_slice` を作らせるが、flow は Ty が桁違いで焼き込みが
     O(Tmax²)（sym_max=4096 で 134MB）になるため**グラフ入力へ昇格**する（ADR 0013）。
     昇格すると表の値を作る責務がホスト側へ移るので、ここが golden の供給元、
-    `packages/runtime/tests/helpers/relattn-tables.ts` がランタイム側の鏡像で、両者のバイト一致は
-    `packages/runtime/tests/sbv2_relattn_parity_test.ts` が golden の実データで固定する。
+    `packages/models/src/sbv2/relattn-tables.ts` が TS 側の鏡像で、両者のバイト一致は
+    `packages/models/tests/sbv2_relattn_parity_test.ts` が golden の実データで固定する。
 
     MUST: front の in-graph 構築も**この関数を呼ぶ**（{@link mha_gather_forward} の
     `relattn_tables is None` 経路）。式を 2 箇所に書くと、片方だけ直したとき front

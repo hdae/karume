@@ -356,7 +356,7 @@ class TestRelattnTableThreading:
 
 class TestRelattnTableBuilder:
     """表生成器そのもの
-    （ホスト TS 鏡像 `packages/runtime/tests/helpers/relattn-tables.ts` の正本）。
+    （ホスト TS 鏡像 `packages/models/src/sbv2/relattn-tables.ts` の正本）。
     """
 
     def test_the_tables_have_the_square_shape_and_dtypes(self):
