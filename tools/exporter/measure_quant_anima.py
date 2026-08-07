@@ -49,7 +49,7 @@ f32 重みを潰すので順序が逆にできない）。7.29GiB のロード�
     uv run --group anima python measure_quant_anima.py --out /path/to/q0
 
 NOTE: 非 DiT（text_encoder / text_conditioner / VAE）は全構成とも **f32 のまま**にする。
-比較軸を DiT の量子化 1 本に絞るため（資産系列 `models/anima-i8/` は他 3 つが f16 だが、
+比較軸を DiT の量子化 1 本に絞るため（資産系列 `outputs/series/anima-i8/` は他 3 つが f16 だが、
 その差は全構成に同じ形で乗るので相対比較では相殺される）。attention の差し替えも
 **DiT の denoise ループの間だけ**掛かる（text encode / VAE decode は素通し — 復元は
 `PRISTINE_SDPA` 検査で機械確認する）。

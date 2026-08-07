@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import pytest
 import torch
-from diffusers.models.transformers.transformer_cosmos import CosmosRotaryPosEmbed
 from torch import nn
 
 from karume.patch_anima import dit_rope_base_tables, dit_rope_tables
+
+transformer_cosmos = pytest.importorskip("diffusers.models.transformers.transformer_cosmos")
+CosmosRotaryPosEmbed = transformer_cosmos.CosmosRotaryPosEmbed
 
 #: 合成 rope の構成。`rope_scale` の **h と w を別の値**にするのが要点（Anima 実機は
 #: `[1.0, 4.0, 4.0]` で h と w が同値 = 取り違えが検出できない構成）。

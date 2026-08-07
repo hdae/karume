@@ -514,7 +514,7 @@ class TestWriteOrder:
     def test_f32_only_files_keep_the_bytes_that_save_file_produces(self, tmp_path):
         """f16 を含まない資産は writer を差し替えてもバイト列が変わらない。
 
-        f32 系列（models/anima/ 等）を再生成したときに、順序の変更だけで全ファイルが
+        f32 系列（outputs/series/anima/ 等）を再生成したときに、順序の変更だけで全ファイルが
         別バイトになるのを避けるための不変条件。
         """
         graph, tensors = weight_graph()

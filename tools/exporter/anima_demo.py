@@ -44,7 +44,7 @@ from karume.paths import SERIES_ROOT
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 
-#: 実行時資産の置き場（`models/` は `.gitignore` 済み）。Deno 側 `examples/anima/text/tokenizer.ts`
+#: 実行時資産の置き場（`outputs/` は `.gitignore` 済み）。Deno 側 `examples/anima/text/tokenizer.ts`
 #: が同じ名前を読む。
 DEFAULT_ASSETS_DIR = SERIES_ROOT / "anima-demo" / "text"
 QWEN_ASSET_FILE = "qwen2-tokenizer.json"

@@ -116,7 +116,7 @@ class TestComponentDtype:
         assert anima_pipeline.component_dtype("f16", label) == "f16"
 
     def test_i8_series_quantizes_only_the_transformer(self):
-        """資産は `models/anima-i8/transformer` + `models/anima-f16/` の他 3 つ。"""
+        """資産は `outputs/series/anima-i8/transformer` + `outputs/series/anima-f16/` の他 3 つ。"""
         assert anima_pipeline.component_dtype("i8", "transformer") == "i8"
         for label in ("text_encoder", "text_conditioner", "vae"):
             assert anima_pipeline.component_dtype("i8", label) == "f16", label
