@@ -181,19 +181,19 @@ cd ../.. && deno test -A packages/runtime/tests/e2e_deberta_test.ts packages/run
 
 - **transformers is pinned to 5.14.1** (recon §6-5 — the graph shape changes when the modeling code
   changes). It is not added to `pyproject.toml` / `uv.lock`; `--with` brings it in temporarily.
-- The outputs go to **`models/deberta/<variant>/`** (kept out of commits by the `models/` entry in
-  the top-level `.gitignore` — the 24-layer weights are 1.3GB). `--dtype i8` is a **separate
-  series** `models/deberta-i8/<variant>/` (24 layers, 319MB = 25.4% of f32).
+- The outputs go to **`outputs/series/deberta/<variant>/`** (kept out of commits by the `outputs/`
+  entry in the top-level `.gitignore` — the 24-layer weights are 1.3GB). `--dtype i8` is a
+  **separate series** `outputs/series/deberta-i8/<variant>/` (24 layers, 319MB = 25.4% of f32).
 
 ```
-models/deberta/dev-2layer/model.safetensors      2 layers (130 nodes / 208MB)
-models/deberta/dev-2layer/io.<case>.safetensors
-models/deberta/full-24layer/model.safetensors    24 layers (1230 nodes / 1.32GB / 25 outputs)
-models/deberta/full-24layer/io.<case>.safetensors
+outputs/series/deberta/dev-2layer/model.safetensors      2 layers (130 nodes / 208MB)
+outputs/series/deberta/dev-2layer/io.<case>.safetensors
+outputs/series/deberta/full-24layer/model.safetensors    24 layers (1230 nodes / 1.32GB / 25 outputs)
+outputs/series/deberta/full-24layer/io.<case>.safetensors
 
-models/deberta-i8/full-24layer/model.safetensors      24 layers in i8 storage (319MB)
-models/deberta-i8/full-24layer/io.<case>.safetensors       w8 goldens (activations in f32)
-models/deberta-i8/full-24layer/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
+outputs/series/deberta-i8/full-24layer/model.safetensors      24 layers in i8 storage (319MB)
+outputs/series/deberta-i8/full-24layer/io.<case>.safetensors       w8 goldens (activations in f32)
+outputs/series/deberta-i8/full-24layer/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
 ```
 
 The io tensor key naming is the same as the tiny goldens (`input.<graph input name>` /
@@ -267,19 +267,28 @@ uv sync --group sbv2   # style-bert-vits2==2.5.0 / huggingface-hub
 
 ### Obtaining the weights
 
-**The real weights are not part of the repository. Place the assets you hold locally under
-`models/sbv2/` by hand (the distribution source and the retrieval procedure are unidentified — at
-this point they cannot be determined from the codebase either).**
+**The real weights are not part of the repository.** The default speaker is `FN4` of HF
+`rufflet17/voice_models`, whose `FN/FN4/` directory carries `FN4.safetensors` / `config.json` /
+`style_vectors.npy` / `style_settings.json` (the same content is also packed in `zip/FN_sbv2.zip`,
+but the unpacked directory can be fetched file by file, so the zip is unnecessary). The publisher
+declares the model free to modify. Place the 3 files the exporter reads under `inputs/sbv2/FN4/` —
+the default `--model-dir` (`style_settings.json` is not read):
 
 ```
-models/sbv2/config.json                        HyperParameters (`version` drives the JP-Extra decision)
-models/sbv2/<any-name>.safetensors             ckpt (**exactly one** directly under this directory)
-models/sbv2/style_vectors.npy                  style vectors (used for the front's style_vec)
+inputs/sbv2/FN4/config.json         HyperParameters (`version` drives the JP-Extra decision)
+inputs/sbv2/FN4/FN4.safetensors     ckpt (**exactly one** `*.safetensors` directly under this dir)
+inputs/sbv2/FN4/style_vectors.npy   style vectors (used for the front's style_vec)
 ```
 
-The ckpt is required to be the **unique** match of `models/sbv2/*.safetensors` (with several, which
-one was read would change silently). The outputs go one level down into `models/sbv2/<target>/`, so
-they do not match this glob.
+`FN4` is a Style-Bert-VITS2 JP-Extra model (`version: 2.6.1-JP-Extra`) with `n_speakers: 1`, a
+`sampling_rate` of 44100, and 4 styles (`data.style2id` = Neutral / high / low / NSFW).
+
+The ckpt is required to be the **unique** match of `<model-dir>/*.safetensors` (with several, which
+one was read would change silently), and the glob is non-recursive. Nothing generated is written
+next to it: the exports go to a **separate root**, `outputs/series/`. Another speaker or another
+model therefore needs nothing but `--model-dir` pointing at its directory — the series name is
+derived from that directory's name (`inputs/sbv2/FN4/` → `outputs/series/sbv2-FN4/`), so two
+speakers cannot silently overwrite each other's assets.
 
 ### Generation and comparison
 
@@ -288,8 +297,8 @@ they do not match this glob.
 cd tools/exporter
 uv run --group sbv2 python export_sbv2.py                # all targets
 uv run --group sbv2 python export_sbv2.py --target front # one target only
-uv run --group sbv2 python export_sbv2.py --dtype f16    # f16 series → models/sbv2-f16/
-uv run --group sbv2 python export_sbv2.py --dtype i8     # i8 series  → models/sbv2-i8/
+uv run --group sbv2 python export_sbv2.py --dtype f16    # f16 series → outputs/series/sbv2-FN4-f16/
+uv run --group sbv2 python export_sbv2.py --dtype i8     # i8 series  → outputs/series/sbv2-FN4-i8/
 
 # 2. eager equivalence against the reference implementation (**one target per process**; see "Patch layer" below)
 uv run --group sbv2 python export_sbv2.py --verify front
@@ -302,24 +311,24 @@ cd ../.. && deno test -A packages/runtime/tests/e2e_sbv2_test.ts packages/runtim
 ```
 
 ```
-models/sbv2/dp/model.safetensors       IR   17 nodes /  12 initializers /   1.78MB
-models/sbv2/front/model.safetensors    IR  911 nodes / 263 initializers /  33.4MB (2.1MB of baked tables)
-models/sbv2/flow/model.safetensors     IR 1589 nodes / 458 initializers / 158.9MB (0.15MB of baked tables)
-models/sbv2/dec/model.safetensors      IR  246 nodes / 197 initializers /  58.7MB
-models/sbv2/voice/model.safetensors    IR 1836 nodes / 655 initializers / 217.6MB
-models/sbv2/<target>/io.<case>.safetensors  inputs and expected torch CPU outputs
+outputs/series/sbv2-FN4/dp/model.safetensors       IR   17 nodes /  12 initializers /   1.78MB
+outputs/series/sbv2-FN4/front/model.safetensors    IR  911 nodes / 263 initializers /  33.4MB (2.1MB of baked tables)
+outputs/series/sbv2-FN4/flow/model.safetensors     IR 1589 nodes / 458 initializers / 158.9MB (0.15MB of baked tables)
+outputs/series/sbv2-FN4/dec/model.safetensors      IR  246 nodes / 197 initializers /  58.7MB
+outputs/series/sbv2-FN4/voice/model.safetensors    IR 1836 nodes / 655 initializers / 217.6MB
+outputs/series/sbv2-FN4/<target>/io.<case>.safetensors  inputs and expected torch CPU outputs
 ```
 
 #### Storage dtype series (`--dtype f16` / `--dtype i8` — ADR 0018 / 0019)
 
-`--dtype f16` / `--dtype i8` each write to a **separate series**, `models/sbv2-f16/<target>/` /
-`models/sbv2-i8/<target>/` (keeping them next to the f32 series would silently apply the f32
-tolerance of the existing E2E to compressed assets). The rounding (fake-quant) uses the shared
-`quantize.round_weights_to_f16` / `quantize.fake_quant_int8` and is applied to the modules of each
-exported target **after `remove_weight_norm` and the patches, and before the reference and golden
-capture**. i8 is **not a vehicle for w8a8** (in all 5 SBV2 targets conv1d is 86–90% and linear is
-effectively 0 GFLOP — ADR 0025 decision ⑤) — the aim is asset size and load time, with the
-computation staying f32 (w8a32).
+`--dtype f16` / `--dtype i8` each write to a **separate series**,
+`outputs/series/sbv2-FN4-f16/<target>/` / `outputs/series/sbv2-FN4-i8/<target>/` (keeping them next
+to the f32 series would silently apply the f32 tolerance of the existing E2E to compressed assets).
+The rounding (fake-quant) uses the shared `quantize.round_weights_to_f16` /
+`quantize.fake_quant_int8` and is applied to the modules of each exported target **after
+`remove_weight_norm` and the patches, and before the reference and golden capture**. i8 is **not a
+vehicle for w8a8** (in all 5 SBV2 targets conv1d is 86–90% and linear is effectively 0 GFLOP — ADR
+0025 decision ⑤) — the aim is asset size and load time, with the computation staying f32 (w8a32).
 
 | Target  | f32 storage | f16 storage | Ratio | i8 storage | Ratio | Eligible (compressed resident) |
 | ------- | ----------- | ----------- | ----: | ---------- | ----: | ------------------------------ |
@@ -414,11 +423,12 @@ MUST in the docstrings of `ensure_dec_plain` and `_fake_quant` (ADR 0013 / 0018 
 
 On the Deno side: `packages/runtime/tests/e2e_sbv2_test.ts` (one case = one test) and
 `packages/runtime/tests/sbv2_relattn_parity_test.ts` (byte equality of the tables). Same two-stage
-structure as DeBERTa: **if `models/sbv2/` contains not a single target directory, everything SKIPs**
-(this is the environment where only the raw weights are in place and export has not been run yet),
-and when they are **partially** present (a missing target / a missing case) it is a FAIL. It is
-**parameterized by series (f32 / f16 / i8)**, and the tolerances are **derived from measurements per
-series × target** (no reuse across series — re-deriving one would silently move the other):
+structure as DeBERTa: **if `outputs/series/sbv2-FN4/` contains not a single target directory,
+everything SKIPs** (this is the environment where only the raw weights are in place and export has
+not been run yet), and when they are **partially** present (a missing target / a missing case) it is
+a FAIL. It is **parameterized by series (f32 / f16 / i8)**, and the tolerances are **derived from
+measurements per series × target** (no reuse across series — re-deriving one would silently move the
+other):
 
 | Target  | f32 atol | f32 rtol | Dominant check | f32 measured maxAbs | f16 atol | f16 rtol | f16 measured maxAbs | i8 atol | i8 rtol | i8 measured maxAbs |
 | ------- | -------- | -------- | -------------- | ------------------- | -------- | -------- | ------------------- | ------- | ------- | ------------------ |
@@ -977,7 +987,7 @@ uv run --group anima python anima_pipeline.py --resolution 1344x768 …   # non-
   tensor).
 - **Not placed directly under the distribution tree `models/anima-turbo/`** — that one holds exactly
   the files the manifest declares and is uploaded to HF as-is, and an undeclared file stops
-  `verify_dist` (the same reason `models/sbv2-demo/` is kept separate).
+  `verify_dist` (the same reason `outputs/sbv2-demo/` is kept separate).
 - The prompt is a single fixed English string (danbooru-style tags). **The negative prompt is not
   the empty string** — an empty T5 id sequence has length 1 and falls outside the conditioner's
   accepted set `Dim("Ttgt", min=2)`.
@@ -1227,14 +1237,14 @@ real text to WAV) and takes on the **numerical parity** of its output. It does n
 graphs (neither the emit path nor the goldens change).
 
 ```sh
-# ① runtime assets (3 files into models/sbv2-demo/)
+# ① runtime assets (3 files into outputs/sbv2-demo/)
 uv run --group sbv2 python sbv2_demo.py assets
 
 # ② run the demo (from the repository root) → out.wav and dump.safetensors
 cd ../.. && deno task demo:sbv2 --text "こんにちは、これはテストです。" && cd tools/exporter
 
 # ③ torch reference (rerun the same chain on the dump's discrete inputs and random sequence) → reference.wav + numbers
-uv run --group sbv2 python sbv2_demo.py reference --dump ../../models/sbv2-demo/out/dump.safetensors
+uv run --group sbv2 python sbv2_demo.py reference --dump ../../outputs/sbv2-demo/out/dump.safetensors
 
 # ④ official infer (the pyopenjtalk path) → official.wav (for listening comparisons of the accent)
 uv run --group sbv2 python sbv2_demo.py official --text "こんにちは、これはテストです。"
