@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -47,6 +48,28 @@ class TestDispatch:
         assert loaded == [cli.EXPORT_SCRIPT]
         assert seen == [["--dtype", "f16", "--target", "transformer"]]
 
+    def test_it_picks_the_export_script_by_subcommand_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """台本の選択はサブコマンド名だけ — 素の `export` は Anima のまま動かさない。
+
+        `--verify` × `--target` のような台本側の排他規則は、CLI が argv を 1 語も
+        読まないことでだけ抜けなく効く（`--pipeline` を CLI が食う形にしない根拠）。
+        """
+        seen: list[list[str]] = []
+        loaded: list[str] = []
+
+        def load(name: str) -> SimpleNamespace:
+            loaded.append(name)
+            return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
+
+        monkeypatch.setattr(cli, "load_script", load)
+        cli.main(["export-sbv2", "--verify", "front"])
+        cli.main(["export-sbv2", "--help"])
+        assert loaded == [cli.EXPORT_SBV2_SCRIPT, cli.EXPORT_SBV2_SCRIPT]
+        assert seen == [["--verify", "front"], ["--help"]]
+        assert cli.EXPORT_SBV2_SCRIPT != cli.EXPORT_SCRIPT
+
     def test_it_passes_help_through_to_the_body_parser(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -82,3 +105,9 @@ class TestExportScript:
         """
         module = cli.load_script(cli.EXPORT_SCRIPT)
         assert callable(module.main)
+
+    @pytest.mark.parametrize("script", ["EXPORT_SCRIPT", "EXPORT_SBV2_SCRIPT"])
+    def test_every_export_script_takes_argv(self, script: str) -> None:
+        """台本は 1 本残らず `main(argv)` を受ける（`argv` 無しの main は CLI に載らない）。"""
+        module = cli.load_script(getattr(cli, script))
+        assert "argv" in inspect.signature(module.main).parameters

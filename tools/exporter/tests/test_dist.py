@@ -742,7 +742,7 @@ class TestSbv2VerifyDist:
         assert sorted(verify_dist(out_dir)) == sorted(SBV2_OUTPUT_PATHS.values())
 
     def test_it_passes_without_a_model_card(self, sbv2_assembled) -> None:
-        """モデルカードは `anima/1` 専用。無いことは宣言外ファイル検査の障害にならない。"""
+        """検証は**カードを書く前**に走る。無いことは宣言外ファイル検査の障害にならない。"""
         out_dir, _ = sbv2_assembled
         assert not (out_dir / MODEL_CARD_FILENAME).exists()
         assert verify_dist(out_dir)
@@ -779,9 +779,11 @@ class TestPipelineDispatch:
         assert PIPELINES["anima"].dist_name == "anima-turbo"
         assert PIPELINES["sbv2"].dist_name == SBV2_DIST_NAME
 
-    def test_only_anima_renders_a_model_card(self) -> None:
-        assert PIPELINES["anima"].render_card is not None
-        assert PIPELINES["sbv2"].render_card is None
+    def test_every_pipeline_renders_its_own_model_card(self) -> None:
+        """カードは pipeline ごとのテンプレート — 描き手が他 pipeline の manifest を拒む。"""
+        for name, spec in PIPELINES.items():
+            with pytest.raises(ValueError):
+                spec.render_card({"pipeline": f"{name}/0"})
 
 
 @requires_sbv2_package
@@ -849,6 +851,10 @@ class TestSbv2Cli:
 
         out_dir = tmp_path / "models" / SBV2_DIST_NAME
         assert sorted(verify_dist(out_dir)) == sorted(SBV2_OUTPUT_PATHS.values())
-        assert not (out_dir / MODEL_CARD_FILENAME).exists()
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert manifest["pipelineConfig"]["defaults"]["style"] == knobs["style"]
+        # カードは検証を通った manifest から描かれる（スタイル表がそのまま本文に出る）。
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert "pipeline_tag: text-to-speech" in card
+        for style in manifest["pipelineConfig"]["styles"]:
+            assert f"| `{style}` |" in card

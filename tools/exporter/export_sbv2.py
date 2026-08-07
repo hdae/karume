@@ -1192,7 +1192,7 @@ VERIFY_SYMBOL = {
 }
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument(
@@ -1232,7 +1232,7 @@ def main() -> None:
         default=None,
         help="参照実装との eager 同値を検証する（emit はしない・1 プロセス 1 ターゲット）",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # MUST: 同一プロセスでの併用を機械的に拒否する。emit はパッチを当て・weight_norm を
     # 畳むので、後から採る「前の参照」が既に汚染済みになり、同値検証が恒真化して偽 PASS

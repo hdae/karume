@@ -43,7 +43,7 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save_file
 
-from karume.modelcard import render_model_card
+from karume.modelcard import render_model_card, render_sbv2_model_card
 from karume.paths import DIST_ROOT, INPUTS_ROOT, OUTPUTS_ROOT, SERIES_ROOT
 
 # ---- ① 共有部: 置き場の綴り・配置・ハッシュ・宣言と現物の突合 -----------------
@@ -57,7 +57,7 @@ MODEL_CARD_FILENAME = "README.md"
 #: 配布形の**メタファイル**（配布形そのものの説明であって、manifest が宣言する資産ではない）。
 #: 宣言外ファイル検査はこの 2 つだけを例外にする — 例外を名前でなく相対 path で持つのは、
 #: 下位ディレクトリに紛れ込んだ同名ファイルまで見逃さないため。**在ることは要求しない**
-#: （モデルカードを書かない pipeline では `README.md` が無いまま検査を通る）。
+#: （{@link verify_dist} はモデルカードを書く**前**に走るので、無いまま通る必要がある）。
 META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
 
 #: sha256 の読み出し単位。数 GB を丸読みしないための唯一の要件で、値自体は素の I/O 単位。
@@ -805,8 +805,8 @@ class Pipeline:
 
     dist_name: str
     assemble: Callable[[Path, Path], dict[str, Any]]
-    #: `None` はモデルカードを書かない pipeline（`karume.modelcard` は `anima/1` 専用）。
-    render_card: Callable[[Mapping[str, Any]], str] | None
+    #: モデルカードの描き手（`karume.modelcard` の pipeline 別テンプレート）。
+    render_card: Callable[[Mapping[str, Any]], str]
 
 
 def assemble_anima_dist(series_dir: Path, out_dir: Path) -> dict[str, Any]:
@@ -822,8 +822,7 @@ def assemble_sbv2_dist(series_dir: Path, out_dir: Path) -> dict[str, Any]:
 
 PIPELINES: Mapping[str, Pipeline] = {
     "anima": Pipeline(ANIMA_DIST_NAME, assemble_anima_dist, render_model_card),
-    # SBV2 のモデルカードは未対応（`modelcard.SUPPORTED_PIPELINE` は anima/1 専用）。
-    "sbv2": Pipeline(SBV2_DIST_NAME, assemble_sbv2_dist, None),
+    "sbv2": Pipeline(SBV2_DIST_NAME, assemble_sbv2_dist, render_sbv2_model_card),
 }
 
 DEFAULT_PIPELINE = "anima"
@@ -862,8 +861,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     verified = verify_dist(out_dir)
     # モデルカードは**検証を通った manifest** から描く（表と現物が食い違ったまま説明だけ
     # 生えることがない順序）。
-    if pipeline.render_card is not None:
-        (out_dir / MODEL_CARD_FILENAME).write_text(pipeline.render_card(manifest), encoding="utf-8")
+    (out_dir / MODEL_CARD_FILENAME).write_text(pipeline.render_card(manifest), encoding="utf-8")
     for rel_path, size in sorted(verified.items()):
         print(f"{size:>12}  {rel_path}")
     for rel_path in sorted(META_PATHS):
