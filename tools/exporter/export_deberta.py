@@ -1,8 +1,8 @@
 """実重み DeBERTa-v2（SBV2 text front）を IR v1 コンテナ + golden io へ書き出す台本。
 
 `karume.goldens` の tiny golden が「op 契約の被覆」を受け持つのに対し、こちらは
-**実重み・実トークン列での数値一致**を受け持つ（M1-P2 波 5）。生成物は `models/` 配下で、
-リポジトリ直下の `.gitignore` によりコミット対象外（重み 1.3GB 級）。
+**実重み・実トークン列での数値一致**を受け持つ（M1-P2 波 5）。生成物は `outputs/series/`
+配下で、リポジトリ直下の `.gitignore` によりコミット対象外（重み 1.3GB 級）。
 
     uv run --with 'transformers==5.14.1' python export_deberta.py
     uv run --with 'transformers==5.14.1' python export_deberta.py --layers 2
@@ -13,15 +13,15 @@ transformers は **5.14.1 でピン**する（recon §6-5 — モデリングコ
 
 出力レイアウト（Deno 側 `packages/runtime/tests/e2e_deberta_test.ts` が列挙する）:
 
-    models/deberta/<variant>/model.safetensors     重み・定数 + __metadata__.karume_ir
-    models/deberta/<variant>/io.<case>.safetensors 入力と torch CPU での期待出力
+    outputs/series/deberta/<variant>/model.safetensors     重み・定数 + __metadata__.karume_ir
+    outputs/series/deberta/<variant>/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
 1 モデルに対して io が複数ある点だけが違う。
 
 ## 格納 dtype と w8a8 の鏡像（ADR 0019 / 0025）
 
-`--dtype i8` は**別系列**（`models/deberta-i8/`）へ書く — f32 系列と同居させると既存 E2E の
+`--dtype i8` は**別系列**（`outputs/series/deberta-i8/`）へ書く — f32 系列と同居させると既存 E2E の
 網（f32 の tolerance）が黙って別の資産に掛かる。`--dtype f16` は**足さない**（SBV2 系列の
 f16 化と一体で決める話 — タスク #30 の領分）。
 
@@ -49,22 +49,22 @@ from torch.export import Dim
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
+from karume.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8
 
 #: SBV2 text front が使う BERT そのもの（recon §1）。
 MODEL_ID = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
 #: 対応する格納 dtype。**f16 は無い** — SBV2 系列と一体で決める（タスク #30）。
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "i8")
 
-#: 生成物の既定の置き場（格納 dtype 別の**系列**）。`.gitignore` の `models/` でコミット対象外。
+#: 生成物の既定の置き場（格納 dtype 別の**系列**）。親は `SERIES_ROOT`（= outputs/series/）—
+#: models/ は配布形だけの場所（karume.paths）。`.gitignore` の `outputs/` でコミット対象外。
 #: MUST: dtype ごとに別ディレクトリ（ADR 0019）— 同居させると f32 系列の網が i8 資産に掛かる。
 DEFAULT_OUT_ROOTS: Mapping[str, Path] = {
-    "f32": REPO_ROOT / "models" / "deberta",
-    "i8": REPO_ROOT / "models" / "deberta-i8",
+    "f32": SERIES_ROOT / "deberta",
+    "i8": SERIES_ROOT / "deberta-i8",
 }
 
 MODEL_FILE = "model.safetensors"
@@ -298,7 +298,7 @@ def main() -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとの系列 — models/deberta{,-i8}/）",
+        help="出力先（既定は --dtype ごとの系列 — outputs/series/deberta{,-i8}/）",
     )
     parser.add_argument(
         "--dtype",

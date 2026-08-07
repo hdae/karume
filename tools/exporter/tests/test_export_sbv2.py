@@ -1,6 +1,6 @@
 """SBV2 export 台本（dp / front / flow / dec / voice）の約束事の固定（M1-P3 波 1・6・7）。
 
-前半（golden 入力の作りと CLI の排他）は実重み不要で常に走る。後半は `models/sbv2/` の
+前半（golden 入力の作りと CLI の排他）は実重み不要で常に走る。後半は `inputs/sbv2/FN4/` の
 実重みと `sbv2` dependency-group が揃っている環境でだけ走り、無ければ SKIP する — 重みは
 251MB 級でリポジトリ管理外、依存も既定の `uv sync` には入らないため。
 
@@ -18,6 +18,7 @@ import math
 import re
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,7 @@ import export_sbv2
 from karume import patch_sbv2
 from karume.dims import parse_dim
 from karume.ops import EMITTABLE_OPS
+from karume.paths import REPO_ROOT, SERIES_ROOT
 from karume.quantize import (
     QUANT_CHANNEL_AXES,
     channel_scale,
@@ -528,12 +530,26 @@ class TestWeightDtypeSeries:
 
     def test_the_default_output_root_is_a_separate_series_per_dtype(self):
         """MUST: 圧縮系列は別ディレクトリ（ADR 0018 / 0019）— 同居させると f32 の網が掛かる。"""
-        roots = export_sbv2.DEFAULT_OUT_ROOTS
+        roots = {
+            dtype: export_sbv2.default_out_root(export_sbv2.DEFAULT_MODEL_DIR, dtype)
+            for dtype in export_sbv2.WEIGHT_DTYPES
+        }
 
-        assert set(roots) == set(export_sbv2.WEIGHT_DTYPES) == {"f32", "f16", "i8"}
+        assert set(roots) == {"f32", "f16", "i8"}
         assert len(set(roots.values())) == len(roots)
-        # f32 系列は実重みと同じ場所のまま（既存の配置と Deno 側の列挙を動かさない）。
-        assert roots["f32"] == export_sbv2.DEFAULT_MODEL_DIR
+        # 系列は `outputs/series/` 側（`models/` は配布形だけの場所 — ADR 0037）。
+        assert roots == {
+            "f32": SERIES_ROOT / "sbv2-FN4",
+            "f16": SERIES_ROOT / "sbv2-FN4-f16",
+            "i8": SERIES_ROOT / "sbv2-FN4-i8",
+        }
+
+    def test_the_series_name_carries_the_weights_directory_name(self):
+        """話者ごとに別系列（綴りを共有すると別話者の資産を黙って上書きする）。"""
+        other = export_sbv2.default_out_root(Path("inputs/sbv2/OTHER"), "f32")
+
+        assert other == SERIES_ROOT / "sbv2-OTHER"
+        assert other != export_sbv2.default_out_root(export_sbv2.DEFAULT_MODEL_DIR, "f32")
 
     def test_every_target_takes_the_dtype_knob(self):
         """5 ターゲット全部が系列ノブを持つ（1 本でも欠けると f32 資産が f16 系列に混ざる）。"""
@@ -710,7 +726,7 @@ def verify_report():
         if target not in cache:
             completed = subprocess.run(
                 [sys.executable, "export_sbv2.py", "--verify", target],
-                cwd=str(export_sbv2.REPO_ROOT / "tools" / "exporter"),
+                cwd=str(REPO_ROOT / "tools" / "exporter"),
                 capture_output=True,
                 text=True,
                 check=True,

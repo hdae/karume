@@ -18,5 +18,13 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 #: 配布形の親（`<DIST_ROOT>/<配布名>/` が 1 つの HF リポになる）。
 DIST_ROOT = REPO_ROOT / "models"
 
-#: エクスポータの系列出力の親。**`models/` には置かない**（上の DECIDED）。
-SERIES_ROOT = REPO_ROOT / "outputs" / "series"
+#: 実重みの**入力素材**の親（`<INPUTS_ROOT>/<ファミリ>/<名前>/` に ckpt と config を手で
+#: 置く）。生成物ではないので `outputs/` でもなく、配布形でもないので `models/` でもない。
+INPUTS_ROOT = REPO_ROOT / "inputs"
+
+#: エクスポータの生成物の親。**`models/` には置かない**（上の DECIDED）。
+OUTPUTS_ROOT = REPO_ROOT / "outputs"
+
+#: エクスポータの系列出力の親（IR + io フィクスチャ）。系列でない生成物（デモ資産など）は
+#: `OUTPUTS_ROOT` の直下へ置き、ここへは混ぜない。
+SERIES_ROOT = OUTPUTS_ROOT / "series"

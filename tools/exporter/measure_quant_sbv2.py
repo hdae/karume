@@ -5,7 +5,7 @@
 0 行で、ここで測るのは**量子化そのものの質**（ADR 0006 の fake-quant 方法論では E2E は
 実装誤差しか測らないため、品質は別軸で測る必要がある）。
 
-5 構成を**同一発話・同一乱数**（`models/sbv2-demo/out/dump.safetensors` の離散入力・ノイズ列）で
+5 構成を**同一発話・同一乱数**（`outputs/sbv2-demo/out/dump.safetensors` の離散入力・ノイズ列）で
 走らせる。**BERT は全構成 f32 固定**で、振るのは生成ネット側だけ:
 
     (1) f32    基準。`sbv2_demo.py reference` と同じ経路（既存 reference.wav とビット一致）
@@ -18,7 +18,7 @@
 
     uv run --group sbv2 python measure_quant_sbv2.py
 
-出力は `models/sbv2-demo/quant-sim/`（`<config>.wav` 5 本 + `report.json`）。
+出力は `outputs/sbv2-demo/quant-sim/`（`<config>.wav` 5 本 + `report.json`）。
 
 ## 活性量子化の粒度と適用点
 

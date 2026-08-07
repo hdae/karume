@@ -16,8 +16,8 @@
     uv sync --group sbv2                                    # tools/exporter/ で 1 回
     uv run --group sbv2 python export_sbv2.py               # 全ターゲットを emit
     uv run --group sbv2 python export_sbv2.py --target front
-    uv run --group sbv2 python export_sbv2.py --dtype f16   # → models/sbv2-f16/
-    uv run --group sbv2 python export_sbv2.py --dtype i8    # → models/sbv2-i8/
+    uv run --group sbv2 python export_sbv2.py --dtype f16   # → outputs/series/sbv2-FN4-f16/
+    uv run --group sbv2 python export_sbv2.py --dtype i8    # → outputs/series/sbv2-FN4-i8/
     uv run --group sbv2 python export_sbv2.py --verify flow  # 参照実装との eager 同値検証
 
 MUST: `--verify` と emit は**同一プロセスで併用できない**（CLI が機械的に拒否する）。
@@ -32,19 +32,20 @@ MUST: `--verify` は**ターゲットを 1 つだけ取る**（`--verify front` 
 だけ排他 / 丸めは全てと排他」という対ごとの排他表を CLI が持つことになり、表の穴が
 そのまま偽 PASS になる。**1 プロセス 1 検証**なら汚染の組み合わせが構造的に存在しない。
 
-重みは配布物に含まれない（`models/` は `.gitignore` 済み）。入手手順は README を参照。
+重みは配布物に含まれない（`inputs/` は `.gitignore` 済み）。入手手順は README を参照。
 
-出力レイアウト（Deno 側 `packages/runtime/tests/e2e_sbv2_test.ts` が列挙する）:
+出力レイアウト（Deno 側 `packages/runtime/tests/e2e_sbv2_test.ts` が列挙する）。系列名は
+`--model-dir` のディレクトリ名から導く（既定の `inputs/sbv2/FN4/` なら `sbv2-FN4`）:
 
-    models/sbv2/<target>/model.safetensors     重み・定数 + __metadata__.karume_ir
-    models/sbv2/<target>/io.<case>.safetensors 入力と torch CPU での期待出力
+    outputs/series/sbv2-FN4/<target>/model.safetensors     重み・定数 + __metadata__.karume_ir
+    outputs/series/sbv2-FN4/<target>/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グラフ入力名>` /
 `output.<位置>`）。
 
 ## 格納 dtype の系列（ADR 0018 / 0019）
 
-`--dtype f16` / `--dtype i8` はそれぞれ**別系列**（`models/sbv2-f16/` / `models/sbv2-i8/`）へ
+`--dtype f16` / `--dtype i8` はそれぞれ**別系列**（`sbv2-FN4-f16/` / `sbv2-FN4-i8/`）へ
 書く — f32 系列と同居させると既存 E2E の網（f32 の tolerance）が黙って別の資産に掛かる。
 丸め（fake-quant）は共有の `quantize.round_weights_to_f16` / `quantize.fake_quant_int8` を
 **remove_weight_norm / パッチ適用の後・参照と golden の採取の前**に当てる
@@ -75,12 +76,12 @@ from karume import patch_sbv2
 from karume.convert import normalize_boundary_tensor
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
+from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-#: 実重みの置き場。リポジトリ管理外（`.gitignore` の `models/`）で、手で配置する。
-DEFAULT_MODEL_DIR = REPO_ROOT / "models" / "sbv2"
+#: 実重みの置き場。リポジトリ管理外（`.gitignore` の `inputs/`）で、手で配置する。
+DEFAULT_MODEL_DIR = INPUTS_ROOT / "sbv2" / "FN4"
 
 #: 書き出せる格納 dtype。`i8` は **2026-08-04 のユーザー裁定**で足した（ADR 0027 決定 1 の
 #: 「i8 は足さない」の上書き — 記録は SBV2 w8 系列の ADR）。**w8a8 の受け皿ではない**点は
@@ -89,17 +90,22 @@ DEFAULT_MODEL_DIR = REPO_ROOT / "models" / "sbv2"
 #: （i8 格納・計算は f32）そのもの。
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
 
-#: 生成物の既定の置き場（格納 dtype 別の**系列**）。ターゲット名（`dp` / `front`）の
-#: サブディレクトリを 1 段掘る。
-#:
-#: MUST: dtype ごとに別ディレクトリ（ADR 0018 / 0019）— 同居させると f32 系列の網（実測から
-#: 導いたターゲット別 tolerance）が圧縮資産へ黙って掛かる。f32 系列は実重みと同じ
-#: `models/sbv2/` のまま（既存の配置と Deno 側の列挙を動かさない）。
-DEFAULT_OUT_ROOTS: Mapping[str, Path] = {
-    "f32": DEFAULT_MODEL_DIR,
-    "f16": REPO_ROOT / "models" / "sbv2-f16",
-    "i8": REPO_ROOT / "models" / "sbv2-i8",
-}
+
+def default_out_root(model_dir: Path, dtype: str) -> Path:
+    """生成物の既定の置き場（`outputs/series/sbv2-<実重みのディレクトリ名>{,-f16,-i8}/`）。
+
+    ターゲット名（`dp` / `front`）のサブディレクトリは呼び出し側が 1 段掘る。
+
+    話者名（`--model-dir` のディレクトリ名）を系列の綴りへ焼くのは、将来の多話者で系列
+    どうしを衝突させないため — 綴りを `sbv2/` で共有すると、別の話者を書き出した瞬間に
+    先の資産が黙って上書きされる。
+
+    MUST: dtype ごとに別ディレクトリ（ADR 0018 / 0019）— 同居させると f32 系列の網（実測から
+    導いたターゲット別 tolerance）が圧縮資産へ黙って掛かる。
+    """
+    suffix = "" if dtype == "f32" else f"-{dtype}"
+    return SERIES_ROOT / f"sbv2-{model_dir.name}{suffix}"
+
 
 TARGET_DP = "dp"
 TARGET_FRONT = "front"
@@ -240,7 +246,7 @@ class DurationPredictorGraph(nn.Module):
 
 
 def load_net_g(model_dir: Path) -> tuple[nn.Module, Any]:
-    """`models/sbv2/` に配置された実重みから net_g を組み立て、eval で返す。
+    """`inputs/sbv2/<名前>/` に配置された実重みから net_g を組み立て、eval で返す。
 
     ckpt は `*.safetensors` の一意存在を要求する（複数あると「どれを読んだか」が
     黙って変わる）。
@@ -248,7 +254,7 @@ def load_net_g(model_dir: Path) -> tuple[nn.Module, Any]:
     from style_bert_vits2.models.hyper_parameters import HyperParameters
     from style_bert_vits2.models.infer import get_net_g
 
-    # 非再帰の glob なので、生成物（`dp/` `front/` 配下の model / io）は引っかからない。
+    # 非再帰の glob。系列は `outputs/series/` 側なので、ここには入力素材しか並ばない。
     ckpts = sorted(model_dir.glob("*.safetensors"))
     if len(ckpts) != 1:
         raise FileNotFoundError(
@@ -466,7 +472,7 @@ def make_bert(length: int) -> torch.Tensor:
     """BERT 特徴 `bert` `[1, 1024, P]`。
 
     NOTE: 実 DeBERTa の hidden ではなく randn の合成値（実 hidden を作るには
-    `models/deberta` の 1.3GB と音素↔文字のアライメントが要り、front の数値検証の
+    `outputs/series/deberta` の 1.3GB と音素↔文字のアライメントが要り、front の数値検証の
     目的からは遠い）。bert_proj は 1x1 conv 1 本で下流は LayerNorm 群なので、
     値域の違いは h のスケールに一様に効くだけで、誤差の伸び方の構造は変わらない。
     """
@@ -1193,7 +1199,8 @@ def main() -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとの系列 — models/sbv2{,-f16,-i8}/）",
+        help="出力先（既定は --dtype ごとの系列 —"
+        " outputs/series/sbv2-<--model-dir のディレクトリ名>{,-f16,-i8}/）",
     )
     parser.add_argument(
         "--dtype",
@@ -1271,7 +1278,7 @@ def main() -> None:
     if args.sym_max is not None and len(targets) != 1:
         parser.error("--sym-max は --target をちょうど 1 つ指定したときだけ使える")
     if args.out is None:
-        args.out = DEFAULT_OUT_ROOTS[args.dtype]
+        args.out = default_out_root(args.model_dir, args.dtype)
 
     summaries = [
         EXPORTERS[target](

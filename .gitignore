@@ -1,6 +1,7 @@
 .claude/settings.local.json
 .claude/reviews/
 coverage/
+inputs/
 outputs/
 models/*
 !models/README.md
