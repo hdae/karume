@@ -56,6 +56,19 @@ import { CUMSUM_KEY, CUMSUM_WGSL, cumsumParams } from "../src/kernels/cumsum.ts"
 import { FLIP_KEY, FLIP_WGSL, flipParams } from "../src/kernels/flip.ts";
 import { PAD_KEY, PAD_WGSL, padParams } from "../src/kernels/pad.ts";
 import {
+  upsample2xParams,
+  UPSAMPLE_2X_KEY,
+  UPSAMPLE_2X_WGSL,
+  UPSAMPLE_2X_WORKGROUP_SIZE,
+} from "../src/kernels/upsample2x.ts";
+import {
+  SILU_WORKGROUP_SIZE,
+  siluKey,
+  type SiluMulOrder,
+  siluParams,
+  siluWgsl,
+} from "../src/kernels/silu.ts";
+import {
   EMBEDDING_OOB_BITS,
   embeddingKey,
   embeddingParams,
@@ -64,6 +77,7 @@ import {
 import { GATHER_KEY, GATHER_OOB_BITS, GATHER_WGSL, gatherParams } from "../src/kernels/gather.ts";
 import { LAYER_NORM_KEY, LAYER_NORM_WGSL, layerNormParams } from "../src/kernels/layer-norm.ts";
 import { RMS_NORM_KEY, RMS_NORM_WGSL, rmsNormParams } from "../src/kernels/rms-norm.ts";
+import { ROPE_KEY, ROPE_WGSL, ROPE_WORKGROUP_SIZE, ropeParams } from "../src/kernels/rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
   DP4A_WGSL_FEATURE,
@@ -236,7 +250,11 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // 書き族は cat 専用で、契約が f32 専業なので生成されうるのは f32 だけ（ADR 0014）
     ["strided_write_f32.wgsl", stridedWriteWgsl({ dtype: "f32" })],
     ["pad.wgsl", PAD_WGSL],
+    ["upsample2x.wgsl", UPSAMPLE_2X_WGSL],
+    ["silu_x_sigmoid.wgsl", siluWgsl("x-sigmoid")],
+    ["silu_sigmoid_x.wgsl", siluWgsl("sigmoid-x")],
     ["flip.wgsl", FLIP_WGSL],
+    ["rope.wgsl", ROPE_WGSL],
     ["linear.wgsl", LINEAR_WGSL],
     ["linear_v4.wgsl", linearWgsl("f32", true)],
     ["layer_norm.wgsl", LAYER_NORM_WGSL],
@@ -788,6 +806,91 @@ Deno.test("cumsum は 1 invocation = 1 行の前縁和で、行方向を grid-st
   assertEquals(cumsumParams(7, 3).byteLength, 16);
   assertThrows(() => cumsumParams(-1, 3), CodegenError);
   assertThrows(() => cumsumParams(1.5, 3), CodegenError);
+});
+
+Deno.test("half-split RoPE は積を workgroup u32 へ丸め、一様 barrier 後に加算する", () => {
+  assertEquals(ROPE_KEY, `rope:v1:half:f32:wg${ROPE_WORKGROUP_SIZE}`);
+  assertEquals(ROPE_WORKGROUP_SIZE, 256);
+  assertEquals(ROPE_WGSL.includes("var<workgroup> products: array<vec2<u32>, 256>;"), true);
+  assertEquals(
+    ROPE_WGSL.includes(
+      "rotated_bits = bitcast<u32>(x[row_base + d + params.half_dim]) ^ 0x80000000u;",
+    ),
+    true,
+  );
+  assertEquals(ROPE_WGSL.includes("products[lid] = vec2<u32>(direct_bits, cross_bits);"), true);
+  assertEquals(ROPE_WGSL.match(/workgroupBarrier\(\);/g)?.length, 2);
+  assertEquals(
+    ROPE_WGSL.includes("out[i] = bitcast<f32>(pair.x) + bitcast<f32>(pair.y);"),
+    true,
+  );
+  assertEquals([...ropeParams(2 * 3 * 128, 3, 128)], [768, 3, 128, 64]);
+  assertEquals(ropeParams(768, 3, 128).byteLength, 16);
+  assertThrows(() => ropeParams(768, 0, 128), CodegenError, "sequence");
+  assertThrows(() => ropeParams(768, 3, 127), CodegenError, "headDim");
+  assertThrows(() => ropeParams(767, 3, 128), CodegenError, "整数行");
+  assertThrows(() => ropeParams(0x1_0000_0000, 1, 128), CodegenError, "u32");
+});
+
+Deno.test("NCHW 2x upsample は入力要素ごとに 2x2 を書き、params の行境界を検査する", () => {
+  assertEquals(UPSAMPLE_2X_KEY, `upsample2x:v1:nchw:f32:wg${UPSAMPLE_2X_WORKGROUP_SIZE}`);
+  assertEquals(UPSAMPLE_2X_WORKGROUP_SIZE, 256);
+  assertEquals(
+    UPSAMPLE_2X_WGSL.includes("let base = 2u * row * params.out_width + 2u * col;"),
+    true,
+  );
+  // ビット複製なので入出力とも u32 view（NaN payload / subnormal / ±0 が正規化されない）
+  assertEquals(UPSAMPLE_2X_WGSL.includes("x: array<u32>"), true);
+  assertEquals(UPSAMPLE_2X_WGSL.includes("out: array<u32>"), true);
+  assertEquals(UPSAMPLE_2X_WGSL.includes("out[base + params.out_width + 1u] = value;"), true);
+  assertEquals([...upsample2xParams(24, 3)], [24, 3, 6, 0]);
+  assertEquals(upsample2xParams(24, 3).byteLength, 16);
+  assertThrows(() => upsample2xParams(-1, 3), CodegenError, "u32");
+  assertThrows(() => upsample2xParams(24, 0), CodegenError, "width");
+  assertThrows(() => upsample2xParams(25, 3), CodegenError, "整数行");
+  assertThrows(() => upsample2xParams(0x4000_0000, 1), CodegenError, "4 * n");
+  assertThrows(() => upsample2xParams(0, 0x8000_0000), CodegenError, "2 * width");
+});
+
+Deno.test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保ち、mul 順をキーへ残す", () => {
+  assertEquals(SILU_WORKGROUP_SIZE, 256);
+  assertEquals(siluKey("x-sigmoid"), "silu:v1:x-sigmoid:f32:wg256");
+  assertEquals(siluKey("sigmoid-x"), "silu:v1:sigmoid-x:f32:wg256");
+  assertNotEquals(siluKey("x-sigmoid"), siluKey("sigmoid-x"));
+  const invalid = "foreign-order" as SiluMulOrder;
+  assertThrows(() => siluKey(invalid), CodegenError, "入力順が不正");
+  assertThrows(() => siluWgsl(invalid), CodegenError, "入力順が不正");
+
+  const xs = siluWgsl("x-sigmoid");
+  const sx = siluWgsl("sigmoid-x");
+  for (const [where, wgsl] of [["x-sigmoid", xs], ["sigmoid-x", sx]] as const) {
+    assertEquals(wgsl.includes("var<workgroup> sigmoid_bits: array<u32, 256>;"), true, where);
+    assertEquals(
+      wgsl.includes("sigmoid_bits[lid] = bitcast<u32>(sigmoid_stable(x_for_sigmoid));"),
+      true,
+      where,
+    );
+    assertEquals(
+      wgsl.includes("let sigmoid_after_store = bitcast<f32>(sigmoid_bits[lid]);"),
+      true,
+      where,
+    );
+    assertEquals(wgsl.includes("let blocks = params.n / 256u +"), true, where);
+    assertEquals(wgsl.includes("select(0u, 1u, params.n % 256u != 0u);"), true, where);
+    assertEquals(wgsl.includes("while (block < blocks) {"), true, where);
+    assertEquals(wgsl.match(/workgroupBarrier\(\);/g)?.length, 2, where);
+    assertEquals(wgsl.includes("let x_for_mul = x[i];"), true, where);
+    // primitive sigmoid の安定式を共有する。素朴な exp(-x) 形への退行を防ぐ。
+    assertEquals(wgsl.includes("let t = exp(-abs(x));"), true, where);
+  }
+  assertEquals(xs.includes("out[i] = x_for_mul * sigmoid_after_store;"), true);
+  assertEquals(sx.includes("out[i] = sigmoid_after_store * x_for_mul;"), true);
+
+  assertEquals([...siluParams(257)], [257, 0, 0, 0]);
+  assertEquals(siluParams(0).byteLength, 16);
+  assertThrows(() => siluParams(-1), CodegenError, "u32");
+  assertThrows(() => siluParams(1.5), CodegenError, "u32");
+  assertThrows(() => siluParams(0x1_0000_0000), CodegenError, "u32");
 });
 
 Deno.test("elementwise params はスカラ attr を末尾に f32 のビット列で載せる", () => {

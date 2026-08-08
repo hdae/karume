@@ -151,7 +151,7 @@ Deno.test({
 });
 
 /**
- * reshape の別名（ADR 0011）を踏む鎖。
+ * reshape / 恒等 expand の別名（ADR 0011）を踏む鎖。
  *
  * - `r` は中間値 `h` の実バッファをそのまま指すグラフ出力（ピン留めが別名越しに効くこと）
  * - `g` の確保は `h` のバッファを掴んではいけない（別名 `r` がまだ生きている）
@@ -160,62 +160,78 @@ Deno.test({
  * 計数を 1 でも取り違えると、`g` の確保がプールから `h` のバッファを受け取り、`r` の中身が
  * 静かに exp(x) に化ける（例外は出ない）。
  */
-const aliasGraph = (): GraphJson => ({
-  format: "karume-ir",
-  version: 1,
-  requires: { ops: ["neg", "reshape", "exp", "add"] },
-  symbols: ["T"],
-  inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
-  outputs: ["r", "s"],
-  initializers: {},
-  values: {
-    h: { dtype: "f32", shape: ["T", 4] },
-    r: { dtype: "f32", shape: ["2T", 2] },
-    g: { dtype: "f32", shape: ["T", 4] },
-    q: { dtype: "f32", shape: ["2T", 2] },
-    s: { dtype: "f32", shape: ["2T", 2] },
-  },
-  nodes: [
-    { op: "neg", ins: ["x"], outs: ["h"], attrs: {} },
-    { op: "reshape", ins: ["h"], outs: ["r"], attrs: {} },
-    { op: "exp", ins: ["x"], outs: ["g"], attrs: {} },
-    { op: "reshape", ins: ["g"], outs: ["q"], attrs: {} },
-    { op: "add", ins: ["r", "q"], outs: ["s"], attrs: {} },
-  ],
-});
+const aliasGraph = (aliasOp: "reshape" | "expand"): GraphJson => {
+  // 恒等 expand は複製軸を持たないので入出力 shape が完全一致する形でしか別名化されない。
+  const aliasShape = aliasOp === "reshape" ? ["2T", 2] : ["T", 4];
+  return {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["neg", aliasOp, "exp", "add"] },
+    symbols: ["T"],
+    inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
+    outputs: ["r", "s"],
+    initializers: {},
+    values: {
+      h: { dtype: "f32", shape: ["T", 4] },
+      r: { dtype: "f32", shape: aliasShape },
+      g: { dtype: "f32", shape: ["T", 4] },
+      q: { dtype: "f32", shape: aliasShape },
+      s: { dtype: "f32", shape: aliasShape },
+    },
+    nodes: [
+      { op: "neg", ins: ["x"], outs: ["h"], attrs: {} },
+      { op: aliasOp, ins: ["h"], outs: ["r"], attrs: {} },
+      { op: "exp", ins: ["x"], outs: ["g"], attrs: {} },
+      { op: aliasOp, ins: ["g"], outs: ["q"], attrs: {} },
+      { op: "add", ins: ["r", "q"], outs: ["s"], attrs: {} },
+    ],
+  };
+};
 
-Deno.test({
-  name: "reshape の別名がコピー無しで、生きている別名を後続の確保に配り直さない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(graphModelBuffer(aliasGraph())));
-    try {
-      const x = fill([3, 4], (i) => ((i % 7) - 3) * 0.5);
-      const outputs = await session.run({ x });
-      assertEquals(Object.keys(outputs).sort(), ["r", "s"]);
-      assertEquals(outputs["r"].shape, [6, 2]);
-      assertEquals(outputs["s"].shape, [6, 2]);
+for (
+  const [aliasOp, expectedShape, identityExpands] of [
+    ["reshape", [6, 2], 0],
+    ["expand", [3, 4], 2],
+  ] as const
+) {
+  Deno.test({
+    name: `${aliasOp} の別名がコピー無しで、生きている別名を後続の確保に配り直さない（実 GPU）`,
+    ignore: !GPU_AVAILABLE,
+    fn: async () => {
+      const gpu = await acquireGpu();
+      const session = await createSession(gpu, openModel(graphModelBuffer(aliasGraph(aliasOp))));
+      try {
+        const x = fill([3, 4], (i) => ((i % 7) - 3) * 0.5);
+        const outputs = await session.run({ x });
+        assertEquals(Object.keys(outputs).sort(), ["r", "s"]);
+        assertEquals(outputs["r"].shape, expectedShape);
+        assertEquals(outputs["s"].shape, expectedShape);
 
-      const negated = applyReferenceOp("neg", [x]);
-      const exponent = applyReferenceOp("exp", [x]);
-      // 別名でもグラフ出力の readback は元の値のまま（形だけ [6,2] になる）
-      assertEquals(allclose(outputs["r"].data, negated.data).pass, true, "別名出力の readback");
-      const sum = applyReferenceOp("add", [negated, exponent]);
-      assertEquals(allclose(outputs["s"].data, sum.data).pass, true, "別名を消費した先の値");
+        const negated = applyReferenceOp("neg", [x]);
+        const exponent = applyReferenceOp("exp", [x]);
+        // 別名でもグラフ出力の readback は元の値のまま（reshape なら形だけ [6,2] になる）
+        assertEquals(allclose(outputs["r"].data, negated.data).pass, true, "別名出力の readback");
+        const sum = applyReferenceOp("add", [negated, exponent]);
+        assertEquals(allclose(outputs["s"].data, sum.data).pass, true, "別名を消費した先の値");
 
-      // 実体化コピーが出ていないことを実績で固定する。プール管理下（dispatch が書く出力
-      // ストレージ）の生存ピークは h / g / s の 3 本ぶん = 48×3。reshape が確保していれば
-      // r / q のぶんが上乗せされる。
-      assertEquals(session.diagnostics().lastRun?.peakTransientBytes, 144);
-      // dispatch は neg / exp / add の 3 本だけ（reshape は 1 本も出さない）
-      assertEquals(session.diagnostics().submit.dispatchCount, 3);
-    } finally {
-      await session.dispose();
-      gpu.destroy();
-    }
-  },
-});
+        // 実体化コピーが出ていないことを実績で固定する。プール管理下（dispatch が書く出力
+        // ストレージ）の生存ピークは h / g / s の 3 本ぶん = 48×3。別名側が確保していれば
+        // r / q のぶんが上乗せされる。
+        assertEquals(session.diagnostics().lastRun?.peakTransientBytes, 144);
+        // dispatch は neg / exp / add の 3 本だけ（reshape / 恒等 expand はどちらも 0 本）
+        assertEquals(session.diagnostics().submit.dispatchCount, 3);
+        assertEquals(
+          session.diagnostics().lastRunFusions?.identityExpand,
+          identityExpands,
+          "別名化カウンタ",
+        );
+      } finally {
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  });
+}
 
 Deno.test({
   name: "同一 Session への並行 run は直列化され、全件が CPU 参照と一致する（実 GPU）",

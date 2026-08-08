@@ -179,8 +179,11 @@ const WGSL_ZERO: Readonly<Record<IrDtype, string>> = {
  * MUST: 素朴な `1/(1+exp(-x))` にしない。WGSL は浮動小数のオーバーフロー結果を
  * indeterminate と規定しており、x ≲ -88 で沈黙 NaN になりうる実装が存在する。
  * exp の引数を -|x| に固定すれば結果は常に (0,1] に収まりオーバーフローが構造的に起きない。
+ *
+ * MUST: SiLU 融合カーネル（src/kernels/silu.ts）はこの本文をそのまま共有する。同じ式を
+ * 書き写すと、primitive の sigmoid と融合版で丸め列が割れうる（融合の前提はビット同一）。
  */
-const SIGMOID_FN = `fn sigmoid_stable(x: f32) -> f32 {
+export const SIGMOID_STABLE_WGSL = `fn sigmoid_stable(x: f32) -> f32 {
   let t = exp(-abs(x));
   return select(1.0 / (1.0 + t), t / (1.0 + t), x < 0.0);
 }`;
@@ -341,7 +344,7 @@ const HELPERS: readonly (readonly [string, string])[] = [
   ["erf_approx", ERF_FN],
   ["is_nan_bits", IS_NAN_FN],
   ["log1p_series", LOG1P_FN],
-  ["sigmoid_stable", SIGMOID_FN],
+  ["sigmoid_stable", SIGMOID_STABLE_WGSL],
 ];
 
 /**

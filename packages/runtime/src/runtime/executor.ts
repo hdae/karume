@@ -188,6 +188,7 @@ import {
   WEIGHT_SLOTS,
   WHERE_OP,
 } from "../ops.ts";
+import { type ExecStep, type FusedStep, type FusionCounts, planFusions } from "./fusion.ts";
 import {
   bindSymbols,
   countUses,
@@ -380,6 +381,14 @@ export type SessionDiagnostics = {
    * `lastRun` と同じ寿命で、run の開始でリセットされる。
    */
   readonly lastRunTiming: GpuTimingStats | undefined;
+  /**
+   * 直近 run の**計画時**に適用が決まった融合 / 別名化の回数（ルール別 —
+   * src/runtime/fusion.ts）。未実行なら undefined で、run のたびに丸ごと置き換わる。
+   *
+   * MUST: 常設診断として出す。融合はエクスポータのノード発行順が 1 つ変わるだけで黙って
+   * 外れ、値は正しいまま性能だけが戻る（例外も警告も出ない）。ここが唯一の観測点。
+   */
+  readonly lastRunFusions: FusionCounts | undefined;
 };
 
 /** MUST: `queue.writeBuffer` で書くバッファはプール外（アリーナの不変条件）。 */
@@ -498,6 +507,7 @@ type SessionState = {
 export class Session {
   readonly #state: SessionState;
   #lastRun: ArenaStats | undefined;
+  #lastRunFusions: FusionCounts | undefined;
   /**
    * 実行中 / 待機中の run と dispose の直列化チェーン。決着（成功・失敗）だけを次に渡すため
    * 自身は決して reject しない。
@@ -713,6 +723,7 @@ export class Session {
       storage: this.#state.storage,
       lastRun: this.#lastRun,
       lastRunTiming: this.#state.scheduler.timing,
+      lastRunFusions: this.#lastRunFusions,
     };
   }
 
@@ -733,6 +744,13 @@ export class Session {
     const inputShapes: Record<string, readonly number[]> = Object.create(null);
     for (const [name, tensor] of Object.entries(inputs)) inputShapes[name] = tensor.shape;
     const plan = planGraph(graph, bindSymbols(graph, inputShapes, bindings));
+    // 融合の判定は GPU に触れない純関数（src/runtime/fusion.ts）。掴めなかったノードは素の
+    // ままステップ列に並ぶので、この段は「速くなるか」だけを決め、正しさには関与しない。
+    const fusion = planFusions(plan.nodes, {
+      useCounts: this.#state.useCounts,
+      outputNames: this.#state.outputNames,
+    });
+    this.#lastRunFusions = fusion.counts;
 
     const device = gpu.device;
     const arena = new RunArena(device, () => scheduler.flush());
@@ -758,7 +776,7 @@ export class Session {
           for (const spec of graph.inputs) {
             env.set(spec.name, this.#uploadInput(spec.name, inputs[spec.name], plan.shapes, arena));
           }
-          for (const step of plan.nodes) await this.#encodeNode(step, env, arena);
+          for (const step of fusion.steps) await this.#encodeStep(step, env, arena);
           arena.assertDrained();
 
           await scheduler.flush();
@@ -870,12 +888,26 @@ export class Session {
     return buffer;
   }
 
-  async #encodeNode(
-    step: NodePlan,
+  /**
+   * 実行ステップ 1 つ（素のノード または 融合ステップ）のエンコード。
+   *
+   * MUST: 確保 → retain → 本体 → 入力の release（延べ）→ 定義ぶんの release、という簿記は
+   * 両者で**この 1 本**に閉じる。融合ごとに手書きの解放簿記を置くと、アリーナの参照計数が
+   * 融合の本数だけ別実装になり、1 本でもずれると例外なしの沈黙誤値になる（早すぎる解放なら
+   * プール再利用で値が化け、多すぎれば peak が落ちない）。
+   */
+  async #encodeStep(
+    step: ExecStep,
     env: Map<string, GPUBuffer>,
     arena: RunArena,
   ): Promise<void> {
-    const inputs = step.node.ins.map((name) => {
+    const outputName = step.kind === "node" ? step.plan.outputName : step.outputName;
+    const outputShape = step.kind === "node" ? step.plan.outputShape : step.outputShape;
+    // bind 面のオペランド順（重複無し）と解放簿記の延べ列は別物。素のノードでは
+    // どちらも node.ins に一致し、融合ステップだけが 2 つを別々に宣言する。
+    const bindNames = step.kind === "node" ? step.plan.node.ins : step.binds;
+    const consumedNames = step.kind === "node" ? step.plan.node.ins : step.ins;
+    const inputs = bindNames.map((name) => {
       const buffer = env.get(name);
       if (buffer === undefined) throw new ExecutionError(`値 '${name}' のバッファが無い`);
       return buffer;
@@ -883,21 +915,75 @@ export class Session {
     // MUST: 出力の確保は当該 dispatch のエンコードより前（アリーナの不変条件）。この順序が
     // 「まだ読まれる入力が出力として配り直される」事故を構造的に防いでいる。
     //
-    // reshape は要素順を変えないので**入力バッファをそのまま出力の実体にする**（別名 —
-    // ADR 0011）。dispatch も確保も出さない。要素数一致は planGraph が済ませているので、
+    // reshape と恒等 expand は要素順を変えないので**入力バッファをそのまま出力の実体にする**
+    // （別名 — ADR 0011）。dispatch も確保も出さない。要素数一致は planGraph が済ませているので、
     // 別名先の実バッファは宣言 shape ぶんの大きさを必ず満たす。
-    const out = step.contract.kind === "reshape"
+    const out = step.kind === "node" && step.aliasesInput
       ? inputs[0]
-      : arena.allocStorage(numel(step.outputShape) * 4);
+      : arena.allocStorage(numel(outputShape) * 4);
     // MUST: 別名でも retain は「定義ぶんの 1 + 出力値の消費回数」を**実バッファに積む**。
     // これで実バッファの参照数が「入力側の残り消費 + 出力側の消費」の和になり、別名越しの
     // 消費まで正確に数えられる。抜くと最終消費より早くプールへ戻り、次の確保に配り直された
     // 実体を後続が読む沈黙誤値になる（過剰に積めばプール再利用から外れて peak が落ちない）。
-    arena.retain(out, this.#state.useCounts.get(step.outputName) ?? 0, {
-      pinned: this.#state.outputNames.has(step.outputName),
+    arena.retain(out, this.#state.useCounts.get(outputName) ?? 0, {
+      pinned: this.#state.outputNames.has(outputName),
     });
-    env.set(step.outputName, out);
+    env.set(outputName, out);
 
+    if (step.kind === "node") {
+      await this.#encodeNode(step.plan, step.aliasesInput, inputs, out, arena);
+    } else {
+      await this.#encodeFused(step, inputs, out, arena);
+    }
+
+    // MUST: 解放はステップ境界（当該ステップの全 dispatch をエンコードし終えた後）のみ。
+    for (const name of consumedNames) {
+      const buffer = env.get(name);
+      if (buffer !== undefined) arena.release(buffer);
+    }
+    // MUST: retain が積んだ定義ぶんの 1 をここで返す。消費者ゼロの中間出力（グラフ出力にも
+    // ならない到達不能な値）が解放されるのはこの 1 本だけで、抜けるとプール再利用から外れて
+    // peakTransientBytes が実際より大きく出る。
+    arena.release(out);
+  }
+
+  /**
+   * 融合ステップの 1 dispatch。bind 面は「params, 入力…, 出力」で全ルール共通、params は
+   * 16 バイトの uniform で固定（src/runtime/fusion.ts の {@link FusedDispatch}）。
+   */
+  async #encodeFused(
+    step: FusedStep,
+    inputs: readonly GPUBuffer[],
+    out: GPUBuffer,
+    arena: RunArena,
+  ): Promise<void> {
+    const { key, gridItems, workgroupSize } = step.dispatch;
+    const pipeline = await this.#state.cache.get(key, step.dispatch.wgsl());
+    const params = this.#writeParams(arena, step.dispatch.params, PARAMS_UNIFORM_USAGE);
+    const bindGroup = this.#state.gpu.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: params } },
+        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
+        { binding: inputs.length + 1, resource: { buffer: out } },
+      ],
+    });
+    const groups = gridStrideWorkgroups(
+      gridItems,
+      workgroupSize,
+      this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
+    );
+    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], key);
+  }
+
+  /** 素のノード 1 つの本体（確保・retain・解放は {@link #encodeStep} が済ませている）。 */
+  async #encodeNode(
+    step: NodePlan,
+    aliasesInput: boolean,
+    inputs: readonly GPUBuffer[],
+    out: GPUBuffer,
+    arena: RunArena,
+  ): Promise<void> {
     switch (step.contract.kind) {
       case "unary":
       case "binary":
@@ -944,10 +1030,15 @@ export class Session {
         await this.#encodeRowReduce(step, step.contract.name, inputs, out, arena);
         break;
       case "permute":
-      case "expand":
       case "slice":
       case "symPrefixSlice":
         await this.#encodeStridedCopy(step, step.contract.kind, inputs, out, arena);
+        break;
+      case "expand":
+        // 恒等 expand は別名化済み（0 dispatch）。複製軸が 1 つでもあれば実体化コピー。
+        if (!aliasesInput) {
+          await this.#encodeStridedCopy(step, step.contract.kind, inputs, out, arena);
+        }
         break;
       case "cat":
         await this.#encodeCat(step, inputs, out, arena);
@@ -989,7 +1080,7 @@ export class Session {
         await this.#encodeConvTranspose1d(step, inputs, out, arena);
         break;
       case "reshape":
-        // 別名化は上で済んでいる（この op は 1 dispatch も出さない）。
+        // 別名化は #encodeStep で済んでいる（この op は 1 dispatch も出さない）。
         break;
       default: {
         // MUST: 未処理の kind をここで止める。switch が素通りすると出力バッファに 1 バイトも
@@ -1000,16 +1091,6 @@ export class Session {
         throw new ExecutionError(`未処理の op kind: ${JSON.stringify(unhandled)}`);
       }
     }
-
-    // MUST: 解放はノード境界（当該ノードの全 dispatch をエンコードし終えた後）のみ。
-    for (const name of step.node.ins) {
-      const buffer = env.get(name);
-      if (buffer !== undefined) arena.release(buffer);
-    }
-    // MUST: retain が積んだ定義ぶんの 1 をここで返す。消費者ゼロの中間出力（グラフ出力にも
-    // ならない到達不能な値）が解放されるのはこの 1 本だけで、抜けるとプール再利用から外れて
-    // peakTransientBytes が実際より大きく出る。
-    arena.release(out);
   }
 
   async #encodeElementwise(
@@ -1139,10 +1220,10 @@ export class Session {
   }
 
   /**
-   * permute / expand / slice / sym_prefix_slice の実体化コピー（strided 読み 1 カーネル族 —
+   * permute / 非恒等 expand / slice / sym_prefix_slice の実体化コピー（strided 読み 1 カーネル族 —
    * ADR 0011 / 0010 / 0014）。出力は常に連続で、入力側だけを stride で読む。expand の複製軸は
    * stride 0、sym_prefix_slice は **Tmax 形の入力**の連続 stride、slice は入力の連続 stride と
-   * **開始位置 offset**。
+   * **開始位置 offset**。恒等 expand は別名化されるのでここへは来ない。
    */
   async #encodeStridedCopy(
     step: NodePlan,
