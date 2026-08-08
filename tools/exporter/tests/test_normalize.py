@@ -538,6 +538,116 @@ class TestDropSafeSoftmaxGuard:
         assert stats["softmax_guard:no-neg-inf"] == 1
 
 
+class IdentityPermute(nn.Module):
+    """軸順を変えない単独 permute。"""
+
+    def forward(self, x):
+        return x.permute(0, 1, 2, 3)
+
+
+class InversePermuteChain(nn.Module):
+    """同じ転置を 2 回適用する恒等鎖。"""
+
+    def forward(self, x):
+        first = x.permute(0, 2, 1, 3)
+        return first.permute(0, 2, 1, 3)
+
+
+class NonIdentityPermuteChain(nn.Module):
+    """合成後も実体化が 1 回必要な隣接 permute。"""
+
+    def forward(self, x):
+        first = x.permute(0, 1, 3, 2)
+        return first.permute(0, 2, 1, 3)
+
+
+class ThreeStagePermuteChain(nn.Module):
+    """3 段の鎖（位相順に 1 度掃くだけで 1 ノードへ畳めること）。"""
+
+    def forward(self, x):
+        return x.permute(0, 1, 3, 2).permute(0, 2, 1, 3).permute(1, 0, 2, 3)
+
+
+class SharedIntermediatePermute(nn.Module):
+    """中間 permute に別の消費者がいる鎖（合成しても中間は残り、意味も変わらない）。"""
+
+    def forward(self, x):
+        first = x.permute(0, 1, 3, 2)
+        return first.permute(0, 2, 1, 3), first.sin()
+
+
+class TestComposePermuteChains:
+    def test_single_identity_permute_disappears(self):
+        graph, _ = export_and_convert(IdentityPermute(), (torch.randn(2, 3, 4, 5),))
+
+        assert node_ops(graph) == []
+        assert graph.outputs == ["x"]
+
+    def test_single_identity_permute_is_reported(self):
+        decomposed = decompose(IdentityPermute(), (torch.randn(2, 3, 4, 5),))
+
+        stats = normalize_graph(decomposed)
+
+        assert stats["permute:identity"] == 1
+
+    def test_inverse_pair_disappears(self):
+        graph, _ = export_and_convert(InversePermuteChain(), (torch.randn(2, 3, 4, 5),))
+
+        assert node_ops(graph) == []
+        assert graph.outputs == ["x"]
+
+    def test_identity_composition_is_reported(self):
+        decomposed = decompose(InversePermuteChain(), (torch.randn(2, 3, 4, 5),))
+
+        stats = normalize_graph(decomposed)
+
+        assert stats["permute_chain:identity"] == 1
+
+    def test_non_identity_pair_becomes_one_permute(self):
+        graph, _ = export_and_convert(NonIdentityPermuteChain(), (torch.randn(2, 3, 4, 5),))
+
+        assert node_ops(graph) == ["permute"]
+        assert only_node(graph, "permute").attrs == {"dims": [0, 3, 1, 2]}
+
+    def test_three_stage_chain_folds_in_one_pass(self):
+        """3 段以上でも 1 パスで 1 ノードになる（位相順に上流から畳まれるため）。"""
+        args = (torch.randn(2, 3, 4, 5),)
+        decomposed = decompose(ThreeStagePermuteChain(), args)
+
+        stats = normalize_graph(decomposed)
+
+        assert stats["permute_chain:composed"] == 2, "2 回の合成が 1 パス中に起きる"
+        graph, _ = export_and_convert(ThreeStagePermuteChain(), args)
+        assert node_ops(graph) == ["permute"]
+        # p1=[0,1,3,2] → p2=[0,2,1,3] → p3=[1,0,2,3] の合成は [3,0,1,2]
+        assert only_node(graph, "permute").attrs == {"dims": [3, 0, 1, 2]}
+
+    def test_shared_intermediate_keeps_its_own_consumer(self):
+        """中間に別の消費者がいても意味が変わらない（下流の入力だけを付け替えるため）。
+
+        合成順を取り違える（`q[p[i]]`）と、この形は**形状が合うまま値だけ**ずれる。
+        """
+        module = SharedIntermediatePermute()
+        args = (torch.randn(2, 3, 4, 5),)
+        expected = module(*args)
+        decomposed = decompose(module, args)
+
+        stats = normalize_graph(decomposed)
+
+        assert stats["permute_chain:composed"] == 1
+        actual = decomposed.module()(*args)
+        torch.testing.assert_close(actual[0], expected[0])
+        torch.testing.assert_close(actual[1], expected[1])
+        permutes = [
+            node
+            for node in decomposed.graph_module.graph.nodes
+            if node.op == "call_function" and node.target is aten.permute.default
+        ]
+        assert len(permutes) == 2, "中間 permute は消費者が残っているので生き残る"
+        assert [node.args[1] for node in permutes] == [[0, 1, 3, 2], [0, 3, 1, 2]]
+        assert permutes[1].args[0] is permutes[0].args[0], "下流は base を直接読む"
+
+
 class RepeatKv(nn.Module):
     """GQA の kv 複製（`unsqueeze → expand → view` が rank5 を作る唯一の形）。"""
 

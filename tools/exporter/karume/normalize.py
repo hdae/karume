@@ -14,6 +14,8 @@ convert() の前段で呼ぶ。各パスは `(graph, stats) -> None` の関数�
   （消費者が揃わない形は書き換えずスキップ）。
 - `_lower_reshape_permute`: rank≥5 の `reshape → permute → reshape`（patchify / unpatchify）を
   rank4 の隣接転置列へ分解する。
+- `_compose_permute_chains`: 恒等 `permute` の除去と、隣接する `permute` の合成（p∘q）。
+  中間の実体化コピーと dispatch がそのぶん消える。
 - `_pow2_to_mul`: `pow.Tensor_Scalar(x, 2)` → `mul(x, x)`。M0 語彙に pow は無いが、
   同値な mul はある（数値も同一 — 乗算 1 回に落ちるだけ）。
 - `_drop_identity_repeat`: `repeat(x, [1,…,1])` → x（recon §4-1。実測 4 本が全てこの形）。
@@ -624,6 +626,64 @@ def _lower_split_unbind(graph: Graph, stats: Counter) -> None:
             stats["split_unbind->slice"] += 1
 
 
+def _permute_order(node: Any) -> list[int] | None:
+    """`permute` の正規化済み軸順（負の添字を畳んだもの）。permute 以外なら None。"""
+    if not isinstance(node, Node) or node.op != "call_function":
+        return None
+    if node.target is not aten.permute.default or len(node.args) != 2:
+        return None
+    src = node.args[0]
+    if not isinstance(src, Node):
+        return None
+    rank = _rank(src)
+    raw = node.args[1]
+    if not isinstance(raw, (list, tuple)) or len(raw) != rank:
+        return None
+    # bool は int の部分型なので明示的に弾く（True が軸 1 に化ける）
+    if any(isinstance(axis, bool) or not isinstance(axis, int) for axis in raw):
+        return None
+    order = [axis % rank for axis in raw]
+    return order if sorted(order) == list(range(rank)) else None
+
+
+def _compose_permute_chains(graph: Graph, stats: Counter) -> None:
+    """恒等 `permute` を除去し、隣接する `permute` を 1 回に合成する。
+
+    IR の permute は strided な実体化コピーなので、鎖の各段が 1 dispatch と全要素の
+    読み書きを丸ごと 1 回ずつ増やす。`x.permute(p).permute(q)` は
+    `z.shape[i] = y.shape[q[i]] = x.shape[p[q[i]]]` なので、合成後の軸順は `p[q[i]]`。
+
+    **中間 permute の他の消費者は壊れない** — 書き換えるのは下流側の入力だけで、中間ノード
+    自体は（消費者が残っていれば）そのまま残る。誰も見なくなった中間だけが後段の DCE で
+    消える。グラフのノード列は位相順なので、3 段以上の鎖も上流から順に畳まれて 1 パスで
+    1 ノードに収束する。
+    """
+    for permute in list(graph.nodes):
+        outer = _permute_order(permute)
+        if outer is None:
+            continue
+        first = permute.args[0]
+        if not isinstance(first, Node):
+            continue
+        if outer == list(range(len(outer))):
+            _replace(graph, permute, first)
+            stats["permute:identity"] += 1
+            continue
+        inner = _permute_order(first)
+        if inner is None:
+            continue
+        base = first.args[0]
+        if not isinstance(base, Node) or len(inner) != len(outer):
+            continue
+        composed = [inner[axis] for axis in outer]
+        if composed == list(range(len(composed))):
+            _replace(graph, permute, base)
+            stats["permute_chain:identity"] += 1
+            continue
+        permute.args = (base, composed)
+        stats["permute_chain:composed"] += 1
+
+
 def _reshape_chain_back(node: Node) -> Node:
     """reshape 系を遡って「要素順が同じ」最上流のテンソルを返す。"""
     current = node
@@ -1038,6 +1098,8 @@ def _passes(placeholders: _Placeholders) -> tuple[Callable[[Graph, Counter], Non
         _lower_unit_expand,
         _lower_split_unbind,
         _lower_reshape_permute,
+        # rank 下げが挟む contiguous を跨がないので、位相順に 1 度掃くだけで鎖は畳み切れる
+        _compose_permute_chains,
         # MUST: ここで 1 度 DCE する（位置に意味がある — _collect_dead_code の docstring）
         _collect_dead_code,
         _pow2_to_mul,
