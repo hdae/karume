@@ -12,6 +12,7 @@ import {
   GpuDeviceLostError,
   GpuFeatureError,
   GpuLimitError,
+  GpuOutOfMemoryError,
   GpuValidationError,
   planRequiredLimits,
   planShaderF16Feature,
@@ -259,6 +260,43 @@ Deno.test("raceDeviceLost は消失を例外にし、決着時に購読を解除
   const error = await assertRejects(() => hanging, GpuDeviceLostError);
   assert(error.message.includes("flush"), error.message);
   assertEquals(gpu.pendingLostListeners, 0);
+});
+
+/**
+ * popFailureScopes が触る面（popErrorScope）だけのフェイク device。`scopes` は pop の発行順
+ * ＝ [validation, out-of-memory] に対応する（スタック先頭が validation）。
+ */
+const poppingDevice = (scopes: readonly (string | undefined)[]): GPUDevice => {
+  const queue = [...scopes];
+  return {
+    popErrorScope: (): Promise<GPUError | null> => {
+      const message = queue.shift();
+      return Promise.resolve(message === undefined ? null : { message } as GPUError);
+    },
+  } as unknown as GPUDevice;
+};
+
+Deno.test("popFailureScopes は両スコープ捕捉時に OOM を返す（validation は派生）", async () => {
+  // 余力切れの createBuffer は無効バッファを返し、それを使う後続の操作が
+  // `Buffer with '' label is invalid` を validation に立てる。validation を先に返すと根因の
+  // OOM が捨てられ、破棄後使用と区別のつかない報告になる（実測事故の再発防止）。
+  const both = await popFailureScopes(
+    poppingDevice(["Buffer with '' label is invalid", "not enough memory left"]),
+    "重みのアップロード",
+  );
+  assertInstanceOf(both, GpuOutOfMemoryError, "派生の validation でなく根因の OOM を返す");
+  assert(both.message.startsWith("重みのアップロード: "), both.message);
+  assert(both.message.includes("not enough memory left"), both.message);
+
+  // 純 validation（OOM スコープが空）の挙動は不変
+  const validationOnly = await popFailureScopes(
+    poppingDevice(["Buffer with '' label has been destroyed", undefined]),
+    "run のエンコード",
+  );
+  assertInstanceOf(validationOnly, GpuValidationError);
+  assert(validationOnly.message.includes("has been destroyed"), validationOnly.message);
+
+  assertEquals(await popFailureScopes(poppingDevice([]), "clean"), undefined);
 });
 
 Deno.test({

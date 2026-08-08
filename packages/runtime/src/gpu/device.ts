@@ -672,6 +672,12 @@ export const pushFailureScopes = (device: GPUDevice): void => {
  * MUST: 2 本の pop は**同一同期区間で発行**する（await するのは発行済みの promise だけ）。
  * pop はスタック先頭を無条件に取るため、発行の間に await を挟むと、その隙に他所が push した
  * スコープを 2 本目が取り、失敗が誤帰属する。
+ *
+ * MUST: 両方が捕捉されたときは out-of-memory を返す。確保が余力切れで失敗すると `createBuffer`
+ * は無効なバッファを返し、それを使う後続の `createBindGroup` / `writeBuffer` が
+ * `Buffer with '' label is invalid` という**派生の** validation エラーを立てる。validation を
+ * 先に返すと根因の OOM が捨てられ、区別のつかない「無効バッファ」として報告される
+ * （docs/research/2026-08-08-vram-oom-misreport.md）。
  */
 export const popFailureScopes = async (
   device: GPUDevice,
@@ -680,11 +686,11 @@ export const popFailureScopes = async (
   const validation = device.popErrorScope();
   const outOfMemory = device.popErrorScope();
   const [validationError, outOfMemoryError] = await Promise.all([validation, outOfMemory]);
-  if (validationError !== null) {
-    return new GpuValidationError(`${label}: ${validationError.message}`);
-  }
   if (outOfMemoryError !== null) {
     return new GpuOutOfMemoryError(`${label}: ${outOfMemoryError.message}`);
+  }
+  if (validationError !== null) {
+    return new GpuValidationError(`${label}: ${validationError.message}`);
   }
   return undefined;
 };
