@@ -633,6 +633,27 @@ export class Session {
       throw failure;
     }
 
+    // MUST: Session を返す前に**実際の submit を 1 回**出して完了まで待つ。queue.writeBuffer は
+    // staging を確保して溜め込み、submit の完了までそれを解放しない — 数 GiB の重みを上げた
+    // 直後は VRAM が二重計上のまま最初の run に入り、初回ピークが重み 1 本ぶん押し上がる
+    // （f16 preset で実測 +2.7GiB。docs/research/2026-08-08-vram-oom-misreport.md §4）。
+    // MUST NOT: scheduler.flush() で代用しない。pending dispatch が空だと submit を出さずに
+    // 即 return するため、staging は溜まったまま残る。
+    // NOTE: submit ごとの onSubmittedWorkDone を禁じているのは run のホットパス（submit.ts の
+    // 「計測の帰属」）で、ここは Session 生成ごと 1 回・窓の外なので推定にも壁時計にも乗らない。
+    // NOTE: errorScope で囲まないのは、空の submit が確保も検証も伴わないため（両建てで囲む
+    // のは「確保を伴う区間」— device.ts の pushFailureScopes）。加えて Session.create は
+    // GpuContext のスコープロック外なので、await を跨ぐスコープをここに張ると並行 Session の
+    // 失敗を誤帰属させる口になる。
+    try {
+      gpu.device.queue.submit([]);
+      // MUST: device 消失時 onSubmittedWorkDone は解決しない（ハングにしないため競わせる）。
+      await gpu.raceDeviceLost(gpu.device.queue.onSubmittedWorkDone(), "重みのアップロード");
+    } catch (cause) {
+      await weights.destroy().catch(() => undefined);
+      throw cause;
+    }
+
     return new Session({
       gpu,
       model,
