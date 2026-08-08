@@ -4,11 +4,14 @@
   "license": "MIT",
   "exports": {
     ".": "./mod.ts",
-    "./anima": "./anima.ts"
+    "./anima": "./anima.ts",
+    "./sbv2": "./sbv2.ts"
   },
   "imports": {
     "@karume/hub": "jsr:@karume/hub@^0.1.0",
-    "@karume/runtime": "jsr:@karume/runtime@^0.1.0"
+    "@karume/runtime": "jsr:@karume/runtime@^0.1.0",
+    "@hdae/yomi": "jsr:@hdae/yomi@^0.4.2",
+    "@hdae/yomi/loader": "jsr:@hdae/yomi@^0.4.2/loader"
   },
   "publish": {
     "exclude": ["tests/"]

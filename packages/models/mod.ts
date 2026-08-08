@@ -1,6 +1,6 @@
 /**
- * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima`）と両建て
- * （ADR 0037）。
+ * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima` / `./sbv2`）と
+ * 両建て（ADR 0037）。
  *
  * ADR 0008 の流儀で**薄い面**にする — ここに並ぶのは「パイプラインを組んで生成する」「出た
  * 画像を書き出す」という利用者ストーリーだけで、内部モジュールの素通し再輸出はしない。
@@ -20,8 +20,19 @@ export type {
 } from "./src/anima/pipeline.ts";
 export type { ImageSize } from "./src/anima/resolution.ts";
 
+export { Sbv2Pipeline } from "./src/sbv2/pipeline.ts";
+export type {
+  GeneratedAudio,
+  Sbv2Assets,
+  Sbv2FromPretrainedOptions,
+  Sbv2GenerateRequest,
+  Sbv2PipelineOptions,
+} from "./src/sbv2/pipeline.ts";
+
 /**
- * RGBA → PNG。**パイプライン非依存の共通処理**（画像生成モデルは総じて最後にこれを通す）
- * なので、ファミリのサブパスではなく barrel 直下に置く。
+ * RGBA → PNG / f32 波形 → WAV。**パイプライン非依存の共通処理**（画像生成モデルは総じて
+ * 最後に PNG を、音声生成モデルは WAV を通す）なので、ファミリのサブパスではなく barrel
+ * 直下に置く。
  */
 export { encodePng } from "./src/image/png.ts";
+export { encodeWav } from "./src/audio/wav.ts";

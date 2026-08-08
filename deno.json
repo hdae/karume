@@ -1,14 +1,18 @@
 {
   "workspace": ["./packages/runtime", "./packages/hub", "./packages/models"],
   "tasks": {
-    "verify": "deno fmt --check && deno lint && deno check packages/runtime/mod.ts packages/hub/mod.ts packages/models/mod.ts && deno test -A",
-    "demo:anima": "deno run -A examples/anima/main.ts"
+    "verify": "deno fmt --check && deno lint && deno check packages/runtime/mod.ts packages/hub/mod.ts packages/models/mod.ts examples/anima/main.ts examples/sbv2/main.ts examples/sbv2/dump.ts && deno test -A",
+    "demo:anima": "deno run -A examples/anima/main.ts",
+    "demo:sbv2": "deno run -A examples/sbv2/main.ts",
+    "dump:sbv2": "deno run -A examples/sbv2/dump.ts"
   },
   "fmt": {
     "lineWidth": 100,
     "proseWrap": "preserve"
   },
   "imports": {
-    "@std/assert": "jsr:@std/assert@1"
+    "@std/assert": "jsr:@std/assert@1",
+    "@hdae/yomi": "jsr:@hdae/yomi@^0.4.2",
+    "@hdae/yomi/loader": "jsr:@hdae/yomi@^0.4.2/loader"
   }
 }

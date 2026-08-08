@@ -59,7 +59,8 @@ BERT_REPO = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 #: `nlp/japanese/bert_feature.py` の `res["hidden_states"][-3:-2]` そのもの。
 BERT_HIDDEN_FROM_END = 3
 
-#: 資産ファイル名（Deno 側 `examples/sbv2/assets.ts` が同じ名前を読む）。
+#: 資産ファイル名。`symbols.json` / `deberta-tokenizer.json` は `karume dist` が配布形へ運び、
+#: `assets.safetensors` は `reference` が `--assets` で読む（Deno 側は配布形から読む）。
 SYMBOLS_FILE = "symbols.json"
 TOKENIZER_FILE = "deberta-tokenizer.json"
 STYLE_FILE = "assets.safetensors"
