@@ -2,7 +2,8 @@
  * GEMM 族（matmul / bmm / linear + 融合 attention の QK / PV + conv2d の implicit GEMM —
  * ADR 0022 / 0023 / 0024）が共有する **64×64 レジスタブロッキング + vec4** の骨格。
  *
- * 1 スレッドが 4×4 の出力を持ち（`acc: array<vec4<f32>, 4>` = 16 レジスタ）、共有 B タイルは
+ * 1 スレッドが 4×4 の出力を持ち（`acc` = vec4 × 4 = 16 レジスタ。linear だけは動的添字を
+ * 避けて `acc0..acc3` の名前付き変数へ展開する — {@link ACC_STATIC_ZERO}）、共有 B タイルは
  * **列方向を vec4 に束ねた** `[k][列 quad]`。内側ループは共有ロード 5 回（B の vec4 1 +
  * A のスカラ 4）で 16 MAC を回す — 1 スレッド 1 出力の 16×16 タイル（2 ロード 1 MAC）に対し
  * 共有帯域あたりの演算密度が 6.4 倍になる。
@@ -128,7 +129,7 @@ export const gemmKeyPart = (v4: boolean): string => `reg${GEMM_TILE}x${GEMM_TILE
  * 2. 内側ループはタイルから読んだ値を `f32()` へ広げてから MAC する（f16 → f32 は厳密なので
  *    丸めではない）。**MAC ごとに f16↔f32 変換を挟まない** — 変換はレジスタロード 1 回ぶんで、
  *    16 MAC あたり 8 回（B の vec4 1 回 + A のスカラ 4 回）。
- * 3. 累積は f32（`acc: array<vec4<f32>, 4>` のまま）。k が大きい経路で f16 累積にすると
+ * 3. 累積は f32（`acc` は vec4<f32> × 4 のまま）。k が大きい経路で f16 累積にすると
  *    桁落ちが値に出る。
  * 4. 出力は f32（唯一の例外が融合 attention の S — ①が f16 で書き②③が f16 で読む形にして
  *    transient を半減させる。この丸めは {@link store} の書き出し 1 箇所）。
@@ -526,6 +527,70 @@ const prologueAttentionStats = (): string =>
   let row_inv = stats[stat_at + 1u];`;
 
 /**
+ * 静的 accumulator 変種（{@link ACC_STATIC_ZERO}）の書き出し。行ループを codegen 時に
+ * 展開して `acc0..acc3` を静的に読む。ガードの構造・bias の足し順・書き出す語の並びは
+ * 展開前と同一で、変わるのは `acc` の持ち方だけ（値はビット同一）。
+ */
+const storeStatic = (
+  name: string,
+  base: string,
+  v4: boolean,
+  bias: boolean,
+  rows: string,
+  outF16: boolean,
+  score: ScoreStorage,
+): string => {
+  // 2 行目以降の行番号は展開時に確定するので、その場で let に落とす（0 行目は `rows`）
+  const rowDecl = (i: number, indent: string): string =>
+    i === 0 ? "" : `${indent}let orow${i} = orow0 + ${i}u;\n`;
+  if (v4) {
+    const biasBind = bias
+      ? `
+    // n % ${REG} == 0 かつ ocq < n4 なので oc + ${REG - 1} < n（bias は常に f32 — ADR 0006）
+    let oc = ocq * ${REG}u;
+    let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);`
+      : "";
+    const rowStores = Array.from({ length: REG }, (_, i) => {
+      const value = bias ? `acc${i} + biasv` : outF16 ? `vec4<f16>(acc${i})` : `acc${i}`;
+      return `${rowDecl(i, "    ")}    if (orow${i} < dims.m) {
+      ${scoreStoreQuad(name, score, `${base}orow${i} * n4 + ocq`, value)}
+    }`;
+    }).join("\n");
+    return `  let ocq = wid.x * ${WG}u + lid.x;
+${rows}
+  if (ocq < n4) {${biasBind}
+${rowStores}
+  }`;
+  }
+  const write = (i: number, component: string, offset: string): string =>
+    `${name}[obase + ocol${offset}] = ${
+      outF16 ? `f16(acc${i}.${component})` : `acc${i}.${component}`
+    }${bias ? ` + bias[ocol${offset}]` : ""};`;
+  const rowStores = Array.from(
+    { length: REG },
+    (_, i) =>
+      `${rowDecl(i, "  ")}  if (orow${i} < dims.m) {
+    let obase = ${base}orow${i} * dims.n;
+    if (ocol < dims.n) {
+      ${write(i, "x", "")}
+    }
+    if (ocol + 1u < dims.n) {
+      ${write(i, "y", " + 1u")}
+    }
+    if (ocol + 2u < dims.n) {
+      ${write(i, "z", " + 2u")}
+    }
+    if (ocol + 3u < dims.n) {
+      ${write(i, "w", " + 3u")}
+    }
+  }`,
+  ).join("\n");
+  return `  let ocol = wid.x * ${GEMM_TILE}u + lid.x * ${REG}u;
+${rows}
+${rowStores}`;
+};
+
+/**
  * 書き出し。`ceil(m/64) × ceil(n/64)` タイルが出力の全要素をちょうど 1 回ずつ覆う
  * （full-write — ADR 0014）。v4 は `n % 4 == 0` なので quad の端数が出ない。
  *
@@ -538,6 +603,8 @@ const prologueAttentionStats = (): string =>
  * `score` も融合 attention ① の S だけが立てる（案 γ 波 1 の `pack2x16float` 格納）。
  * MUST: **v4 経路でしか立たない** — スカラ経路の部分書きは同じ u32 語への read-modify-write
  * になる（src/kernels/score-storage.ts）。生成の入口が `!v4` を fail loudly で落とす。
+ *
+ * `staticAccumulator` は linear だけが立てる（{@link storeStatic} へ委ねる）。
  */
 const store = (
   name: string,
@@ -547,9 +614,11 @@ const store = (
   mTile = GEMM_TILE,
   outF16 = false,
   score: ScoreStorage = "f32",
+  staticAccumulator = false,
 ): string => {
   const base = batchBase(op, "cbase");
   const rows = `  let orow0 = wid.y * ${mTile}u + lid.y * ${REG}u;`;
+  if (staticAccumulator) return storeStatic(name, base, v4, bias, rows, outF16, score);
   if (v4) {
     const biasBind = bias
       ? `
@@ -607,6 +676,44 @@ const ACC_ZERO = `  var acc = array<vec4<f32>, ${REG}>(
   );`;
 
 /**
+ * linear が使う **`acc0..acc3` の名前付き変数**版の 0 初期化。
+ *
+ * `acc[i]` の動的添字はアドレス可能な関数ローカル領域を要求し、accumulator がレジスタから
+ * ローカルメモリへ落ちる（Metal で顕著）。linear-i8a8（src/kernels/linear-i8a8.ts）で先に
+ * 採った形をそのまま f32 / f16 計算の linear へ広げたもの。
+ * 展開しても K タイル幅・`t` / `kk` の昇順・1 出力要素あたりの加算順序は変わらない
+ * （行ごとに独立な縮約を 4 本の名前へ割り当て直すだけ）。i8a8 の i32 縮約と違って
+ * ここは f32 縮約なので、**backend の fma 縮約判断が変われば最終ビットは動きうる**
+ * — PNG sha256 門（f16-1024 を含む 4 本）が検出器。
+ * MUST: linear 以外の op には広げない。matmul / bmm / attention / conv2d の生成バイト列は
+ * スナップショットで固定されており、`store` / `skeleton` の既定は従来の文字列のまま。
+ */
+const ACC_STATIC_ZERO = Array.from(
+  { length: REG },
+  (_, i) => `  var acc${i} = vec4<f32>(0.0);`,
+).join("\n");
+
+/**
+ * K 内側ループの 4 行更新。既定は従来の動的ループ、静的変種は codegen 時に 4 本へ展開する。
+ * どちらも `acc_i += sa[…] * bv` を i 昇順で並べるだけなので、1 出力要素の加算順序は同一。
+ */
+const accumulatorUpdate = (compute: GemmCompute, staticAccumulator: boolean): string => {
+  const a = (row: string): string =>
+    compute === "f16"
+      ? `f32(sa[(lid.y * ${REG}u + ${row}) * ${TILE_K}u + kk])`
+      : `sa[(lid.y * ${REG}u + ${row}) * ${TILE_K}u + kk]`;
+  if (staticAccumulator) {
+    return Array.from(
+      { length: REG },
+      (_, i) => `      acc${i} = acc${i} + ${a(`${i}u`)} * bv;`,
+    ).join("\n");
+  }
+  return `      for (var i = 0u; i < ${REG}u; i = i + 1u) {
+        acc[i] = acc[i] + ${a("i")} * bv;
+      }`;
+};
+
+/**
  * head / Dims 追加欄 / prologue / fillA / fillB / store の断片を差し込んだ 1 本のシェーダ。
  *
  * `dimsExtra` は uniform の 4 語目以降（融合 attention ① の `scale` / conv2d の幾何 13 語）。
@@ -624,6 +731,7 @@ const skeleton = (
   accInit = ACC_ZERO,
   mTile = GEMM_TILE,
   compute: GemmCompute = "f32",
+  staticAccumulator = false,
 ): string =>
   `${header}${
     // MUST: `enable` はモジュール先頭・全ての global 宣言より前の directive（コメントだけが
@@ -680,13 +788,7 @@ ${fillTiles}
       let bv = ${
     compute === "f16" ? `vec4<f32>(sb[kk * ${WG}u + lid.x])` : `sb[kk * ${WG}u + lid.x]`
   };
-      for (var i = 0u; i < ${REG}u; i = i + 1u) {
-        acc[i] = acc[i] + ${
-    compute === "f16"
-      ? `f32(sa[(lid.y * ${REG}u + i) * ${TILE_K}u + kk])`
-      : `sa[(lid.y * ${REG}u + i) * ${TILE_K}u + kk]`
-  } * bv;
-      }
+${accumulatorUpdate(compute, staticAccumulator)}
     }
     workgroupBarrier();
   }
@@ -820,11 +922,13 @@ const linearVariantWgsl = (
 ${prologueBLinear(weight)}`,
     `${fillA("x", v4, undefined, compute)}
 ${fillBLinear("w", weight, v4, compute)}`,
-    store("out", "linear", v4, true),
+    // linear だけが静的 accumulator（{@link ACC_STATIC_ZERO}）を使う。
+    store("out", "linear", v4, true, GEMM_TILE, false, "f32", true),
     "",
-    ACC_ZERO,
+    ACC_STATIC_ZERO,
     GEMM_TILE,
     compute,
+    true,
   );
 };
 

@@ -141,27 +141,31 @@ const BMM_WGSL = bmmWgsl(false);
  * GEMM 骨格の全生成入力（6 op × 重み格納 × v4）を機械的に回すための直積。
  * 融合 attention の ①③（ADR 0023）と conv2d の implicit GEMM（ADR 0024）も同じ骨格を
  * 共有するので、内積ループ・タイル辺・キーの検査が自動でこちらにも掛かる。
+ * 4 番目の要素は accumulator の持ち方（`true` = `acc0..acc3` の静的展開 = linear だけ）。
  */
-const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, true].flatMap((
-  v4,
-) => [
-  [`matmul${v4 ? " v4" : ""}`, matmulKey(v4), matmulWgsl(v4)] as const,
-  [`bmm${v4 ? " v4" : ""}`, bmmKey(v4), bmmWgsl(v4)] as const,
-  [`attention_qk${v4 ? " v4" : ""}`, attentionQkKey(v4), attentionQkWgsl(v4)] as const,
-  [`attention_pv${v4 ? " v4" : ""}`, attentionPvKey(v4), attentionPvWgsl(v4)] as const,
-  ...WEIGHT_STORAGES.flatMap((weight) => [
-    [
-      `linear ${weight}${v4 ? " v4" : ""}`,
-      linearKey(weight, v4),
-      linearWgsl(weight, v4),
-    ] as const,
-    [
-      `conv2d igemm ${weight}${v4 ? " v4" : ""}`,
-      conv2dIgemmKey(weight, v4),
-      conv2dIgemmWgsl(weight, v4),
-    ] as const,
-  ]),
-]);
+const GEMM_VARIANTS: readonly (readonly [string, string, string, boolean])[] = [false, true]
+  .flatMap((
+    v4,
+  ) => [
+    [`matmul${v4 ? " v4" : ""}`, matmulKey(v4), matmulWgsl(v4), false] as const,
+    [`bmm${v4 ? " v4" : ""}`, bmmKey(v4), bmmWgsl(v4), false] as const,
+    [`attention_qk${v4 ? " v4" : ""}`, attentionQkKey(v4), attentionQkWgsl(v4), false] as const,
+    [`attention_pv${v4 ? " v4" : ""}`, attentionPvKey(v4), attentionPvWgsl(v4), false] as const,
+    ...WEIGHT_STORAGES.flatMap((weight) => [
+      [
+        `linear ${weight}${v4 ? " v4" : ""}`,
+        linearKey(weight, v4),
+        linearWgsl(weight, v4),
+        true,
+      ] as const,
+      [
+        `conv2d igemm ${weight}${v4 ? " v4" : ""}`,
+        conv2dIgemmKey(weight, v4),
+        conv2dIgemmWgsl(weight, v4),
+        false,
+      ] as const,
+    ]),
+  ]);
 const EMBEDDING_WGSL = embeddingWgsl("f32");
 const CONV1D_WGSL = conv1dWgsl("f32");
 const CONV1D_KEY = conv1dKey("f32");
@@ -1067,13 +1071,18 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
  */
 Deno.test("GEMM 骨格 6 op のタイル辺は 64 で、生成物・キー・TS 定数が一致する", () => {
   assertEquals(GEMM_TILE, 64);
-  for (const [where, key, wgsl] of GEMM_VARIANTS) {
+  for (const [where, key, wgsl, staticAcc] of GEMM_VARIANTS) {
     // 出力タイルの原点（行 / 列）と workgroup は骨格を共有する全 op で共通
     assertEquals(wgsl.includes(`let arow = wid.y * ${GEMM_TILE}u + ar;`), true, where);
     assertEquals(wgsl.includes(`let orow0 = wid.y * ${GEMM_TILE}u + lid.y * 4u;`), true, where);
     assertEquals(wgsl.includes("@compute @workgroup_size(16, 16)"), true, where);
-    // 1 スレッド 4×4 = レジスタ 16 本。共有は 4,096 B + 4,096 B
-    assertEquals(wgsl.includes("var acc = array<vec4<f32>, 4>("), true, where);
+    // 1 スレッド 4×4 = レジスタ 16 本（linear だけ acc0..acc3 の静的展開）。
+    // 共有は 4,096 B + 4,096 B
+    assertEquals(
+      wgsl.includes(staticAcc ? "var acc3 = vec4<f32>(0.0);" : "var acc = array<vec4<f32>, 4>("),
+      true,
+      where,
+    );
     assertEquals(wgsl.includes("var<workgroup> sa: array<f32, 1024>;"), true, where);
     assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 256>;"), true, where);
     // MUST: 生成パラメータはキーに載る（タイル辺を変えれば別キーになる）。conv2d の
@@ -1638,24 +1647,32 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
       `linear の B タイル転置配置（成分 ${component}）`,
     );
   }
-  // 末尾で bias を 1 度だけ足す（accumulator の初期値にはしない — 縮約順序を保つため）
-  assertEquals(LINEAR_WGSL.includes("out[obase + ocol] = acc[i].x + bias[ocol];"), true);
+  // 末尾で bias を 1 度だけ足す（accumulator の初期値にはしない — 縮約順序を保つため）。
+  // linear の acc は acc0..acc3 の静的展開なので、行ごとに同じ形が 4 本並ぶ。
+  assertEquals(LINEAR_WGSL.includes("out[obase + ocol] = acc0.x + bias[ocol];"), true);
   assertEquals(
     linearWgsl("f32", true).includes(
       "let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);",
     ),
     true,
   );
-  assertEquals(linearWgsl("f32", true).includes("out[orow * n4 + ocq] = acc[i] + biasv;"), true);
+  assertEquals(linearWgsl("f32", true).includes("out[orow0 * n4 + ocq] = acc0 + biasv;"), true);
   // MUST: matmul / bmm の生成物に融合 op の概念が漏れていない
   assertEquals(MATMUL_WGSL.includes("bias"), false);
   assertEquals(BMM_WGSL.includes("bias"), false);
   assertNotEquals(LINEAR_WGSL, MATMUL_WGSL);
   // MUST: 3 op は同じ内積ループ（= 同じ縮約順序）を共有する。1 箇所しか無いことを
   // 生成物の側から固定する（写し間違いが起きる余地を残さない）。
+  // linear は `acc[i]` を acc0..acc3 へ展開した形（添字と行番号が静的になるだけで、
+  // 読む共有タイルの位置も加算順序も同一）— 行ごとにちょうど 1 本ずつ。
   const innerLoop = "        acc[i] = acc[i] + sa[(lid.y * 4u + i) * 16u + kk] * bv;";
-  for (const [where, , wgsl] of GEMM_VARIANTS) {
-    assertEquals(wgsl.split(innerLoop).length, 2, `${where}: 内積ループが 1 箇所でない`);
+  const staticLoop = (i: number): string =>
+    `      acc${i} = acc${i} + sa[(lid.y * 4u + ${i}u) * 16u + kk] * bv;`;
+  for (const [where, , wgsl, staticAcc] of GEMM_VARIANTS) {
+    const lines = staticAcc ? [0, 1, 2, 3].map(staticLoop) : [innerLoop];
+    for (const line of lines) {
+      assertEquals(wgsl.split(line).length, 2, `${where}: 内積ループが 1 箇所でない`);
+    }
     assertEquals(wgsl.includes("let tiles = (dims.k + 15u) / 16u;"), true, where);
   }
 
@@ -1835,7 +1852,8 @@ Deno.test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4
   assertEquals(i8Wgsl.includes("return vec4<f32>(unpack4xI8(w[i >> 2u])) * scale;"), true);
   assertEquals(i8Wgsl.includes("let wscale_v = wscale[wcol];"), true, "scale は K ループの外");
   assertEquals(i8Wgsl.includes("wv = dequant4(wrow_base + wk0, wscale_v);"), true);
-  assertEquals(i8Wgsl.includes("acc[i] * "), false, "縮約の外で scale を掛けていない");
+  // linear の acc は acc0..acc3 の静的展開なので、縮約後に掛ける形はこの名前で見る
+  assertEquals(i8Wgsl.includes("acc0 * "), false, "縮約の外で scale を掛けていない");
 
   // 逆写像で f32 v4 変種そのものに戻る（他は一切動いていない）
   for (
@@ -1864,22 +1882,24 @@ Deno.test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4
  * 1. 丸めは**共有タイルへ書く 1 箇所**（`f16(...)` / `vec4<f16>(...)`）。
  * 2. 拡幅は**レジスタロード時に 1 回**（MAC ごとの `f32(av * bv)` は禁止 — プロトタイプの
  *    負の教訓で、変換回数が倍になるうえ積が f16 精度に落ちる）。
- * 3. 累積は f32（`acc: array<vec4<f32>, 4>`）。
+ * 3. 累積は f32（`vec4<f32>` × 4 — linear だけ `acc0..acc3` の静的展開で、要素型は同じ）。
  * 4. uniform は f16 にしない。
+ *
+ * 3 番目の要素は accumulator の持ち方（`true` = 静的展開）。
  */
-const COMPUTE_F16_VARIANTS: readonly (readonly [string, string])[] = [
-  ["attention_qk c16", attentionQkWgsl(false, "f16")],
-  ["attention_qk c16 v4", attentionQkWgsl(true, "f16")],
-  ["attention_pv c16", attentionPvWgsl(false, "f16")],
-  ["attention_pv c16 v4", attentionPvWgsl(true, "f16")],
-  ["linear c16", linearWgsl("f32", false, "f16")],
-  ["linear c16 v4", linearWgsl("f32", true, "f16")],
-  ["linear wf16 c16", linearWgsl("f16", false, "f16")],
-  ["linear wf16 c16 v4", linearWgsl("f16", true, "f16")],
+const COMPUTE_F16_VARIANTS: readonly (readonly [string, string, boolean])[] = [
+  ["attention_qk c16", attentionQkWgsl(false, "f16"), false],
+  ["attention_qk c16 v4", attentionQkWgsl(true, "f16"), false],
+  ["attention_pv c16", attentionPvWgsl(false, "f16"), false],
+  ["attention_pv c16 v4", attentionPvWgsl(true, "f16"), false],
+  ["linear c16", linearWgsl("f32", false, "f16"), true],
+  ["linear c16 v4", linearWgsl("f32", true, "f16"), true],
+  ["linear wf16 c16", linearWgsl("f16", false, "f16"), true],
+  ["linear wf16 c16 v4", linearWgsl("f16", true, "f16"), true],
 ];
 
 Deno.test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡幅の位置を 1 箇所に閉じる", () => {
-  for (const [where, wgsl] of COMPUTE_F16_VARIANTS) {
+  for (const [where, wgsl, staticAcc] of COMPUTE_F16_VARIANTS) {
     const lines = wgsl.split("\n");
     // enable はモジュール先頭（コメント 1 行の直後 = 全ての global 宣言より前）
     assertEquals(lines[0].startsWith("// karume "), true, where);
@@ -1888,11 +1908,19 @@ Deno.test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡
     assertEquals(wgsl.includes(`var<workgroup> sa: array<f16, ${GEMM_TILE * 16}>;`), true, where);
     assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f16>, 256>;"), true, where);
     // ③ 累積は f32 のまま（k 大の桁落ちを避ける — 変えると parity と E2E が赤くなる）
-    assertEquals(wgsl.includes("var acc = array<vec4<f32>, 4>("), true, where);
+    assertEquals(
+      wgsl.includes(staticAcc ? "var acc0 = vec4<f32>(0.0);" : "var acc = array<vec4<f32>, 4>("),
+      true,
+      where,
+    );
     // ② 拡幅はレジスタロード時に 1 回。MAC ごとの積の変換（f32(av * bv)）は出さない
     assertEquals(wgsl.includes("let bv = vec4<f32>(sb[kk * 16u + lid.x]);"), true, where);
     assertEquals(
-      wgsl.includes("acc[i] = acc[i] + f32(sa[(lid.y * 4u + i) * 16u + kk]) * bv;"),
+      wgsl.includes(
+        staticAcc
+          ? "acc0 = acc0 + f32(sa[(lid.y * 4u + 0u) * 16u + kk]) * bv;"
+          : "acc[i] = acc[i] + f32(sa[(lid.y * 4u + i) * 16u + kk]) * bv;",
+      ),
       true,
       where,
     );
@@ -1956,6 +1984,46 @@ Deno.test("計算変種の判別子はキーの f16 側だけに付き、格納�
   assertEquals(attentionQkKey(false, "f16"), "attention_qk:v1:f32:reg64x64:c16");
   assertEquals(attentionPvKey(true, "f16"), "attention_pv:v1:f32:reg64x64v4:c16");
   assertEquals(attentionStatsKey("f16"), `${ATTENTION_STATS_KEY}:c16`);
+});
+
+// `acc[i]` の動的添字はアドレス可能な関数ローカル領域を要求し、accumulator がレジスタから
+// ローカルメモリへ落ちる。linear（f32 / f16 計算 × 3 格納）は既定経路がこの静的展開になる。
+Deno.test("linear の accumulator は acc0..acc3 の静的展開で、他の GEMM op は配列のまま", () => {
+  for (const weight of WEIGHT_STORAGES) {
+    for (const v4 of [false, true]) {
+      const wgsl = linearWgsl(weight, v4);
+      const where = `linear ${weight} v4=${v4}`;
+      assertEquals(wgsl.includes("var acc = array<"), false, where);
+      // MUST: 動的添字が 1 つも残っていない（残ると展開の動機がそのまま消える）
+      assertEquals(wgsl.includes("acc["), false, where);
+      for (let i = 0; i < 4; i += 1) {
+        assertEquals(wgsl.includes(`var acc${i} = vec4<f32>(0.0);`), true, `${where}:init${i}`);
+        // 行 i の内積更新はちょうど 1 回（K タイル 16・kk 昇順・加算順序は展開前と同一）
+        assertEquals(
+          wgsl.split(`acc${i} = acc${i} + sa[(lid.y * 4u + ${i}u) * 16u + kk] * bv;`).length,
+          2,
+          `${where}:update${i}`,
+        );
+        // 書き出しも行ごとに静的な名前を読む
+        assertEquals(wgsl.includes(`orow${i} < dims.m`), true, `${where}:store${i}`);
+      }
+    }
+  }
+  // MUST: 静的展開は linear 限定。他 op へ広げると固定済みの生成バイト列が動く
+  for (
+    const [where, wgsl] of [
+      ["matmul", matmulWgsl(true)],
+      ["bmm", bmmWgsl(true)],
+      ["attention_qk", attentionQkWgsl(true)],
+      ["attention_pv", attentionPvWgsl(true)],
+      ["conv2d", conv2dIgemmWgsl("f32", true, GEMM_TILE)],
+    ] as const
+  ) {
+    assertEquals(wgsl.includes("var acc = array<vec4<f32>, 4>("), true, where);
+    assertEquals(wgsl.includes("acc[i] = acc[i] + "), true, where);
+  }
+  // キーとシグネチャは据え置き（変種ではなく既定経路の置き換え）
+  assertEquals(linearKey("f32", false), "linear:v2:f32:reg64x64");
 });
 
 Deno.test("重み i8 格納 × f16 計算（w8a16）は生成の入口で fail loudly", () => {

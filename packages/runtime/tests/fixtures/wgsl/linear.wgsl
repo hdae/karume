@@ -39,12 +39,10 @@ fn main(
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (dims.k + 15u) / 16u;
-  var acc = array<vec4<f32>, 4>(
-    vec4<f32>(0.0),
-    vec4<f32>(0.0),
-    vec4<f32>(0.0),
-    vec4<f32>(0.0),
-  );
+  var acc0 = vec4<f32>(0.0);
+  var acc1 = vec4<f32>(0.0);
+  var acc2 = vec4<f32>(0.0);
+  var acc3 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
     // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
     let ak0 = t * 16u + aq * 4u;
@@ -115,30 +113,76 @@ fn main(
     // 1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と完全に一致する。
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
       let bv = sb[kk * 16u + lid.x];
-      for (var i = 0u; i < 4u; i = i + 1u) {
-        acc[i] = acc[i] + sa[(lid.y * 4u + i) * 16u + kk] * bv;
-      }
+      acc0 = acc0 + sa[(lid.y * 4u + 0u) * 16u + kk] * bv;
+      acc1 = acc1 + sa[(lid.y * 4u + 1u) * 16u + kk] * bv;
+      acc2 = acc2 + sa[(lid.y * 4u + 2u) * 16u + kk] * bv;
+      acc3 = acc3 + sa[(lid.y * 4u + 3u) * 16u + kk] * bv;
     }
     workgroupBarrier();
   }
   let ocol = wid.x * 64u + lid.x * 4u;
   let orow0 = wid.y * 64u + lid.y * 4u;
-  for (var i = 0u; i < 4u; i = i + 1u) {
-    let orow = orow0 + i;
-    if (orow < dims.m) {
-      let obase = orow * dims.n;
-      if (ocol < dims.n) {
-        out[obase + ocol] = acc[i].x + bias[ocol];
-      }
-      if (ocol + 1u < dims.n) {
-        out[obase + ocol + 1u] = acc[i].y + bias[ocol + 1u];
-      }
-      if (ocol + 2u < dims.n) {
-        out[obase + ocol + 2u] = acc[i].z + bias[ocol + 2u];
-      }
-      if (ocol + 3u < dims.n) {
-        out[obase + ocol + 3u] = acc[i].w + bias[ocol + 3u];
-      }
+  if (orow0 < dims.m) {
+    let obase = orow0 * dims.n;
+    if (ocol < dims.n) {
+      out[obase + ocol] = acc0.x + bias[ocol];
+    }
+    if (ocol + 1u < dims.n) {
+      out[obase + ocol + 1u] = acc0.y + bias[ocol + 1u];
+    }
+    if (ocol + 2u < dims.n) {
+      out[obase + ocol + 2u] = acc0.z + bias[ocol + 2u];
+    }
+    if (ocol + 3u < dims.n) {
+      out[obase + ocol + 3u] = acc0.w + bias[ocol + 3u];
+    }
+  }
+  let orow1 = orow0 + 1u;
+  if (orow1 < dims.m) {
+    let obase = orow1 * dims.n;
+    if (ocol < dims.n) {
+      out[obase + ocol] = acc1.x + bias[ocol];
+    }
+    if (ocol + 1u < dims.n) {
+      out[obase + ocol + 1u] = acc1.y + bias[ocol + 1u];
+    }
+    if (ocol + 2u < dims.n) {
+      out[obase + ocol + 2u] = acc1.z + bias[ocol + 2u];
+    }
+    if (ocol + 3u < dims.n) {
+      out[obase + ocol + 3u] = acc1.w + bias[ocol + 3u];
+    }
+  }
+  let orow2 = orow0 + 2u;
+  if (orow2 < dims.m) {
+    let obase = orow2 * dims.n;
+    if (ocol < dims.n) {
+      out[obase + ocol] = acc2.x + bias[ocol];
+    }
+    if (ocol + 1u < dims.n) {
+      out[obase + ocol + 1u] = acc2.y + bias[ocol + 1u];
+    }
+    if (ocol + 2u < dims.n) {
+      out[obase + ocol + 2u] = acc2.z + bias[ocol + 2u];
+    }
+    if (ocol + 3u < dims.n) {
+      out[obase + ocol + 3u] = acc2.w + bias[ocol + 3u];
+    }
+  }
+  let orow3 = orow0 + 3u;
+  if (orow3 < dims.m) {
+    let obase = orow3 * dims.n;
+    if (ocol < dims.n) {
+      out[obase + ocol] = acc3.x + bias[ocol];
+    }
+    if (ocol + 1u < dims.n) {
+      out[obase + ocol + 1u] = acc3.y + bias[ocol + 1u];
+    }
+    if (ocol + 2u < dims.n) {
+      out[obase + ocol + 2u] = acc3.z + bias[ocol + 2u];
+    }
+    if (ocol + 3u < dims.n) {
+      out[obase + ocol + 3u] = acc3.w + bias[ocol + 3u];
     }
   }
 }
