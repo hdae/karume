@@ -4,21 +4,26 @@
 並んだファイル群と、それを宣言する `karume.json`（§1〜§3）、そして manifest から機械導出した
 モデルカード `README.md`（ADR 0037 §3 の「そのまま HF リポとして上げられる形」）。
 
+**pipeline 別のディスパッチ**（`--pipeline anima|sbv2`）。共有するのは「置く / sha256 を採る /
+宣言と現物を突き合わせる」層だけで、どのファイルをどの名前で並べ何を宣言するかは pipeline
+ごとの表が持つ（{@link PIPELINES}）。
+
 MUST: **manifest は手書きせず資産から導出する**（ADR 0038 Context）。`size` / `sha256` は
 組み立て後の実ファイルから streaming で採る — 数 GB を丸読みしないことと、「表と現物が
 食い違う」失敗様式を構造的に起こさないことの両方がここに掛かっている。
 
 MUST: 系列に散らばる `io.*.safetensors`（E2E の入出力フィクスチャ）は**配布に含めない**。
-出力へ入るのは {@link OUTPUT_PATHS} に載ったファイルだけで、表に無いものは黙って混ざらない。
+出力へ入るのは pipeline ごとの出力 path 表に載ったファイルだけで、表に無いものは黙って
+混ざらない。
 
-MUST: `rope_base.safetensors` は f16 / i8 の 2 系列に同名で並ぶ。両者のバイト同一を
-sha256 で確かめてから 1 本化する — 食い違ったまま片方を選ぶと、選ばれなかった系列の preset が
-「別の幾何の rope 表で走る」形になり、ロードも実行も通って絵だけが静かに壊れる。
+MUST: 検査（格納 dtype / rope 素表のバイト同一 / スタイル表・話者表の行数）は**配置の前**に
+全役割ぶん済ませる — 落ちるなら途中の配布形を 1 ファイルも残さない。
 
 同一ファイルシステム上の組み立てなので配置は `os.link`（ハードリンク）を優先し、リンクを
 張れない場合（別 FS・権限）だけ copy へ落ちる。数 GB × 2 系列を複製しないため。
 
-    uv run karume dist          # = uv run python -m karume.dist（引数は同じ）
+    uv run karume dist                  # = uv run python -m karume.dist（引数は同じ）
+    uv run karume dist --pipeline sbv2
 """
 
 from __future__ import annotations
@@ -29,17 +34,19 @@ import importlib.metadata
 import json
 import os
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from karume.modelcard import render_model_card
-from karume.paths import DIST_ROOT, SERIES_ROOT
+import numpy as np
+from safetensors import safe_open
+from safetensors.numpy import save_file
 
-#: 既定の配布名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。turbo LoRA を
-#: 焼き込んだ配布物であることを名前に出す。
-ANIMA_DIST_NAME = "anima-turbo"
+from karume.modelcard import render_model_card
+from karume.paths import DIST_ROOT, INPUTS_ROOT, OUTPUTS_ROOT, SERIES_ROOT
+
+# ---- ① 共有部: 置き場の綴り・配置・ハッシュ・宣言と現物の突合 -----------------
 
 #: manifest のファイル名（ADR 0038 §1 — リポジトリ直下の固定名）。
 MANIFEST_FILENAME = "karume.json"
@@ -49,11 +56,139 @@ MODEL_CARD_FILENAME = "README.md"
 
 #: 配布形の**メタファイル**（配布形そのものの説明であって、manifest が宣言する資産ではない）。
 #: 宣言外ファイル検査はこの 2 つだけを例外にする — 例外を名前でなく相対 path で持つのは、
-#: 下位ディレクトリに紛れ込んだ同名ファイルまで見逃さないため。
+#: 下位ディレクトリに紛れ込んだ同名ファイルまで見逃さないため。**在ることは要求しない**
+#: （モデルカードを書かない pipeline では `README.md` が無いまま検査を通る）。
 META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
 
 #: sha256 の読み出し単位。数 GB を丸読みしないための唯一の要件で、値自体は素の I/O 単位。
 _CHUNK_BYTES = 1 << 20
+
+
+class DistError(ValueError):
+    """組み立ての前提が破れた（資産の欠落・rope 素表の不一致・manifest と現物の食い違い）。"""
+
+
+def storage_dtypes(path: Path) -> set[str]:
+    """safetensors ヘッダのテンソル dtype 集合（ヘッダだけ読む — 数 GB を舐めない）。"""
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        header_len = int.from_bytes(stream.read(8), "little")
+        # 宣言長はファイル実長で拘束する（不正な 8 バイトをそのまま read すると巨大確保になる）。
+        if header_len <= 0 or header_len > size - 8:
+            raise DistError(
+                f"{path}: safetensors ヘッダが読めない（ヘッダ長 {header_len} がファイル長"
+                f" {size} と矛盾）"
+            )
+        try:
+            header = json.loads(stream.read(header_len))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise DistError(f"{path}: safetensors ヘッダが読めない") from error
+    return {spec["dtype"] for name, spec in header.items() if name != "__metadata__"}
+
+
+def assert_storage(role: str, path: Path, requirements: Mapping[str, str]) -> None:
+    """役割が要求する格納 dtype がヘッダに存在することを検査する（無関係な役割は素通し）。
+
+    要求表を引数で受けるのは、役割名が pipeline 間で衝突するため（Anima の `text_encoder` は
+    F16 を要求し、SBV2 の `text_encoder` は I8 を要求する）。1 つの表に混ぜると、どちらかの
+    要求が黙って他方に掛かる。
+    """
+    required = requirements.get(role)
+    if required is None:
+        return
+    if not path.is_file():
+        raise DistError(f"組み立ての入力が無い: {path}")
+    found = storage_dtypes(path)
+    if required not in found:
+        raise DistError(
+            f"{role}: {path} の格納 dtype に {required} が無い（実際: {sorted(found)}）。"
+            "系列を焼いたときの --dtype を確認する（f16 系列は --dtype f16 の fake-quant が必要）"
+        )
+
+
+def sha256_file(path: Path) -> str:
+    """ファイルの sha256（小文字 hex 64 桁）を streaming で採る。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def place_file(source: Path, dest: Path) -> str:
+    """`source` を `dest` へ置く。ハードリンク優先・不可なら copy。返り値は採れた手段。
+
+    既存の `dest` は先に外す（再組み立てで前回のリンクが残っていると `os.link` が落ちる）。
+    """
+    if not source.is_file():
+        raise DistError(f"組み立ての入力が無い: {source}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.unlink(missing_ok=True)
+    try:
+        os.link(source, dest)
+    except OSError:
+        shutil.copyfile(source, dest)
+        return "copy"
+    return "link"
+
+
+def file_ref(out_dir: Path, rel_path: str) -> dict[str, Any]:
+    """ADR 0038 §2 の 3 点セット `{path, size, sha256}` を実ファイルから導出する。"""
+    path = out_dir / rel_path
+    return {"path": rel_path, "size": path.stat().st_size, "sha256": sha256_file(path)}
+
+
+def generator_tag() -> str:
+    """`generator` に焼く値（ADR 0038 §1 — 障害報告の照合用・実行意味論なし）。"""
+    return f"karume/{importlib.metadata.version('karume')}"
+
+
+def _referenced_sizes(manifest: Mapping[str, Any]) -> dict[str, int]:
+    """manifest が参照する全ファイルの `{path: size}`（同一 path の重複は 1 つに畳む）。"""
+    sizes: dict[str, int] = {}
+    for component in manifest["components"].values():
+        entries = component["variants"].values() if "variants" in component else (component,)
+        for entry in entries:
+            for ref in (entry["file"], *entry.get("extras", {}).values()):
+                sizes[ref["path"]] = ref["size"]
+    return sizes
+
+
+def verify_dist(out_dir: Path) -> dict[str, int]:
+    """`karume.json` と現物を突き合わせる（実在・size 一致・宣言外ファイルの不在）。
+
+    sha256 は組み立て時に実ファイルから採っているので採り直さない（数 GB の再ハッシュは
+    ここでは新しい事実を生まない）。見るのは「表が現物を覆っているか」だけ。
+
+    宣言外ファイルの例外は {@link META_PATHS} の 2 つ（`karume.json` と `README.md`）だけ —
+    どちらも配布形そのものの説明で、manifest が宣言する資産ではない。それ以外は従来どおり
+    fail loudly（前回の組み立ての残骸や `io.*` の混入を後段へ見せない）。
+    """
+    manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    declared = _referenced_sizes(manifest)
+    for rel_path, size in sorted(declared.items()):
+        path = out_dir / rel_path
+        if not path.is_file():
+            raise DistError(f"manifest が参照するファイルが無い: {rel_path}")
+        actual = path.stat().st_size
+        if actual != size:
+            raise DistError(f"{rel_path}: size が manifest と違う（宣言 {size} / 現物 {actual}）")
+    present = {
+        relative
+        for path in out_dir.rglob("*")
+        if path.is_file() and (relative := str(path.relative_to(out_dir))) not in META_PATHS
+    }
+    extra = sorted(present - set(declared))
+    if extra:
+        raise DistError(f"manifest が宣言していないファイルが混ざっている: {', '.join(extra)}")
+    return declared
+
+
+# ---- ② Anima（text-to-image）-------------------------------------------------
+
+#: 既定の配布名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。turbo LoRA を
+#: 焼き込んだ配布物であることを名前に出す。
+ANIMA_DIST_NAME = "anima-turbo"
 
 #: 出力の相対 path（ADR 0038 §2 の規約名）— **配置表と manifest が共有する 1 箇所**。
 #: 役割名でだけ引くので、綴りが 2 箇所で独立に動くことは起きない。
@@ -113,11 +248,6 @@ ANIMA_PIPELINE_CONFIG: Mapping[str, Any] = {
     },
 }
 
-
-class DistError(ValueError):
-    """組み立ての前提が破れた（資産の欠落・rope 素表の不一致・manifest と現物の食い違い）。"""
-
-
 #: 各役割の safetensors ヘッダに**要求する格納 dtype**（存在検査）。実測の事故が根拠:
 #: f16 系列のつもりで `--dtype` を付け忘れた素の F32 資産は、組み立て・ロード・実行の全てを
 #: 通って**PNG の参照一致まで露見しなかった**。格納形は series ディレクトリ名でなくヘッダが正。
@@ -130,39 +260,6 @@ STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "transformer_i8": "I8",
     "vae_decoder": "F16",
 }
-
-
-def storage_dtypes(path: Path) -> set[str]:
-    """safetensors ヘッダのテンソル dtype 集合（ヘッダだけ読む — 数 GB を舐めない）。"""
-    size = path.stat().st_size
-    with path.open("rb") as stream:
-        header_len = int.from_bytes(stream.read(8), "little")
-        # 宣言長はファイル実長で拘束する（不正な 8 バイトをそのまま read すると巨大確保になる）。
-        if header_len <= 0 or header_len > size - 8:
-            raise DistError(
-                f"{path}: safetensors ヘッダが読めない（ヘッダ長 {header_len} がファイル長"
-                f" {size} と矛盾）"
-            )
-        try:
-            header = json.loads(stream.read(header_len))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise DistError(f"{path}: safetensors ヘッダが読めない") from error
-    return {spec["dtype"] for name, spec in header.items() if name != "__metadata__"}
-
-
-def assert_storage(role: str, path: Path) -> None:
-    """役割が要求する格納 dtype がヘッダに存在することを検査する（無関係な役割は素通し）。"""
-    required = STORAGE_REQUIREMENTS.get(role)
-    if required is None:
-        return
-    if not path.is_file():
-        raise DistError(f"組み立ての入力が無い: {path}")
-    found = storage_dtypes(path)
-    if required not in found:
-        raise DistError(
-            f"{role}: {path} の格納 dtype に {required} が無い（実際: {sorted(found)}）。"
-            "系列を焼いたときの --dtype を確認する（f16 系列は --dtype f16 の fake-quant が必要）"
-        )
 
 
 @dataclass(frozen=True)
@@ -189,40 +286,13 @@ def anima_sources(series_dir: Path) -> AnimaSources:
     )
 
 
-def sha256_file(path: Path) -> str:
-    """ファイルの sha256（小文字 hex 64 桁）を streaming で採る。"""
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(_CHUNK_BYTES):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def place_file(source: Path, dest: Path) -> str:
-    """`source` を `dest` へ置く。ハードリンク優先・不可なら copy。返り値は採れた手段。
-
-    既存の `dest` は先に外す（再組み立てで前回のリンクが残っていると `os.link` が落ちる）。
-    """
-    if not source.is_file():
-        raise DistError(f"組み立ての入力が無い: {source}")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.unlink(missing_ok=True)
-    try:
-        os.link(source, dest)
-    except OSError:
-        shutil.copyfile(source, dest)
-        return "copy"
-    return "link"
-
-
-def file_ref(out_dir: Path, rel_path: str) -> dict[str, Any]:
-    """ADR 0038 §2 の 3 点セット `{path, size, sha256}` を実ファイルから導出する。"""
-    path = out_dir / rel_path
-    return {"path": rel_path, "size": path.stat().st_size, "sha256": sha256_file(path)}
-
-
 def shared_rope_base(sources: AnimaSources) -> Path:
-    """f16 / i8 系列の rope 素表がバイト同一であることを確かめ、1 本化する元を返す。"""
+    """f16 / i8 系列の rope 素表がバイト同一であることを確かめ、1 本化する元を返す。
+
+    MUST: `rope_base.safetensors` は f16 / i8 の 2 系列に同名で並ぶ。両者のバイト同一を
+    sha256 で確かめてから 1 本化する — 食い違ったまま片方を選ぶと、選ばれなかった系列の
+    preset が「別の幾何の rope 表で走る」形になり、ロードも実行も通って絵だけが静かに壊れる。
+    """
     candidates = [
         series / "transformer" / "rope_base.safetensors"
         for series in (sources.transformer_f16, sources.transformer_i8)
@@ -255,11 +325,6 @@ def anima_placements(sources: AnimaSources) -> dict[str, Path]:
         "tokenizer": sources.tokenizers / "qwen2-tokenizer.json",
         "tokenizer_2": sources.tokenizers / "t5-tokenizer.json",
     }
-
-
-def generator_tag() -> str:
-    """`generator` に焼く値（ADR 0038 §1 — 障害報告の照合用・実行意味論なし）。"""
-    return f"karume/{importlib.metadata.version('karume')}"
 
 
 def anima_manifest(out_dir: Path) -> dict[str, Any]:
@@ -301,7 +366,7 @@ def assemble_anima(sources: AnimaSources, out_dir: Path) -> dict[str, Any]:
     # MUST: 検査は配置の**前**に全役割ぶん済ませる（rope 不一致と同じ規律 — 落ちるなら
     # 途中の配布形を 1 ファイルも残さない）。
     for role, source in placements.items():
-        assert_storage(role, source)
+        assert_storage(role, source, STORAGE_REQUIREMENTS)
     out_dir.mkdir(parents=True, exist_ok=True)
     for role, source in placements.items():
         place_file(source, out_dir / OUTPUT_PATHS[role])
@@ -312,49 +377,466 @@ def assemble_anima(sources: AnimaSources, out_dir: Path) -> dict[str, Any]:
     return manifest
 
 
-def _referenced_sizes(manifest: Mapping[str, Any]) -> dict[str, int]:
-    """manifest が参照する全ファイルの `{path: size}`（同一 path の重複は 1 つに畳む）。"""
-    sizes: dict[str, int] = {}
-    for component in manifest["components"].values():
-        entries = component["variants"].values() if "variants" in component else (component,)
-        for entry in entries:
-            for ref in (entry["file"], *entry.get("extras", {}).values()):
-                sizes[ref["path"]] = ref["size"]
-    return sizes
+# ---- ③ SBV2（text-to-speech）------------------------------------------------
+#
+# 配布するのは**実行に要る 3 グラフ + ホスト資産 4 本**だけ（ADR 0038 §2 の SBV2 例は
+# 5 グラフを並べるが、あれは形の例示）。`front` = enc_p + dp + sdp、`voice` = flow + dec の
+# 融合なので、`dp` / `flow` / `dec` は golden 検証専用の単体グラフで配布形には入らない。
+# `text_encoder`（DeBERTa）が i8 単体なのは、`export_deberta.py` が f16 を持たず、i8 は
+# ADR 0026 が聴感ゲート込みで受理済みだから（f32 の 1.32GB は配布に非現実的）。
+#
+# ホスト資産のうち `style_vectors` / `speaker_embeddings` は**表を配って実行時に行を引く**形。
+# `front` / `voice` のグラフ入力 `style_vec[1,256]` / `g[1,512,1]` はこの 2 表から作られ、
+# 名前 → 行の対応は `pipelineConfig` の `styles` / `speakers` が持つ（3 つで 1 組）。
+
+#: 実重みのディレクトリ名 — 系列の綴り（`sbv2-FN4{,-f16,-i8}`）と配布名を束ねる 1 語。
+#: `export_sbv2.default_out_root` が `--model-dir` のディレクトリ名から系列名を作るので、
+#: 読み手のこちらも同じ 1 語から組む。
+SBV2_MODEL_NAME = "FN4"
+
+#: 既定の配布名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。
+SBV2_DIST_NAME = f"sbv2-{SBV2_MODEL_NAME}"
+
+#: DeBERTa の系列とその variant ディレクトリ（`export_deberta.py` の綴り）。
+SBV2_TEXT_ENCODER_SERIES = "deberta-i8"
+SBV2_TEXT_ENCODER_VARIANT = "full-24layer"
+
+#: `sbv2_demo.py assets` が書くホスト資産の置き場と綴り。系列（IR + io）ではないので
+#: `outputs/series/` の下ではない。
+SBV2_DEMO_DIRNAME = "sbv2-demo"
+SBV2_SYMBOLS_FILE = "symbols.json"
+SBV2_TOKENIZER_FILE = "deberta-tokenizer.json"
+
+#: 実重みと config の置き場（`export_sbv2.DEFAULT_MODEL_DIR` と同じ場所）。
+SBV2_CONFIG_FILE = "config.json"
+SBV2_STYLE_FILE = "style_vectors.npy"
+
+#: 話者埋め込みの出所（ckpt のテンソルキー）。`front` / `voice` はどちらも `g[1,512,1]` を
+#: グラフ入力に取るので、**この表が無いと配布形だけではグラフを実行できない**。
+SBV2_SPEAKER_TENSOR = "emb_g.weight"
+
+#: 配布する表のテンソルキー（`.npy` / ckpt を 1 テンソルの safetensors へ移すときの唯一のキー）。
+SBV2_STYLE_KEY = "style_vectors"
+SBV2_SPEAKER_KEY = "speaker_embeddings"
+
+#: 出力の相対 path（ADR 0038 §2 の規約名）— **配置表・変換先・manifest が共有する 1 箇所**。
+#: `style_vectors` / `speaker_embeddings` だけは配置ではなく変換の出力なので
+#: {@link sbv2_placements} には現れない。
+SBV2_OUTPUT_PATHS: Mapping[str, str] = {
+    "text_encoder": "text_encoder/model.i8.safetensors",
+    "front_f16": "front/model.f16.safetensors",
+    "front_i8": "front/model.i8.safetensors",
+    "voice_f16": "voice/model.f16.safetensors",
+    "voice_i8": "voice/model.i8.safetensors",
+    "tokenizer": "tokenizer/deberta-tokenizer.json",
+    "symbols": "text/symbols.json",
+    "style_vectors": "styles/style_vectors.safetensors",
+    "speaker_embeddings": "speakers/speaker_embeddings.safetensors",
+}
+
+#: 格納 dtype の要求（Anima の {@link STORAGE_REQUIREMENTS} と同じ根拠 — 素の F32 資産が
+#: 組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。`text_encoder` は
+#: i8 系列 1 本だけを配るので I8 を要求する。tokenizer / symbols（JSON）と style_vectors
+#: （こちらが書く F32）はここに載せない。
+SBV2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
+    "text_encoder": "I8",
+    "front_f16": "F16",
+    "front_i8": "I8",
+    "voice_f16": "F16",
+    "voice_i8": "I8",
+}
+
+#: preset 表。`weights` は**variants を持つ全コンポーネントへの完全写像**が hub の検査要件
+#: （ADR 0038 §3）で、`{file}` 形の `text_encoder` は書いてはいけない（書くと
+#: `ManifestReferenceError`）。
+SBV2_PRESETS: Mapping[str, Any] = {
+    "f16": {"weights": {"front": "f16", "voice": "f16"}, "session": {}},
+    "w8": {"weights": {"front": "i8", "voice": "i8"}, "session": {}},
+    "w8a8": {
+        "weights": {"front": "i8", "voice": "i8"},
+        "session": {"linearCompute": "i8a8"},
+    },
+}
+
+SBV2_DEFAULT_PRESET = "w8"
+
+#: `pipelineConfig.defaults` に載る実行時ノブ（`style_bert_vits2.constants` 由来）。綴りは
+#: `symbols.json` の `defaults` と共有する — 同じ源から引いた同じ値が配布形の 2 つの資産に
+#: 並ぶので、食い違いは組み立てで落とす（{@link sbv2_knob_defaults}）。
+SBV2_KNOB_KEYS: tuple[str, ...] = (
+    "style",
+    "styleWeight",
+    "sdpRatio",
+    "noiseScale",
+    "noiseScaleW",
+    "lengthScale",
+)
 
 
-def verify_dist(out_dir: Path) -> dict[str, int]:
-    """`karume.json` と現物を突き合わせる（実在・size 一致・宣言外ファイルの不在）。
+@dataclass(frozen=True)
+class Sbv2Sources:
+    """組み立ての入力。系列 2 本のほかに、系列でない 2 つの置き場を跨ぐ。
 
-    sha256 は組み立て時に実ファイルから採っているので採り直さない（数 GB の再ハッシュは
-    ここでは新しい事実を生まない）。見るのは「表が現物を覆っているか」だけ。
-
-    宣言外ファイルの例外は {@link META_PATHS} の 2 つ（`karume.json` と `README.md`）だけ —
-    どちらも配布形そのものの説明で、manifest が宣言する資産ではない。それ以外は従来どおり
-    fail loudly（前回の組み立ての残骸や `io.*` の混入を後段へ見せない）。
+    `demo` は `sbv2_demo.py assets` が書くホスト資産（`outputs/` 直下 — 系列ではない）、
+    `model` は ckpt と `config.json` / `style_vectors.npy`（`inputs/` — 生成物ではない）。
+    どちらも `--series` の下に無いので、系列の親から機械的に導けるのは前 3 つだけ。
     """
-    manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-    declared = _referenced_sizes(manifest)
-    for rel_path, size in sorted(declared.items()):
-        path = out_dir / rel_path
-        if not path.is_file():
-            raise DistError(f"manifest が参照するファイルが無い: {rel_path}")
-        actual = path.stat().st_size
-        if actual != size:
-            raise DistError(f"{rel_path}: size が manifest と違う（宣言 {size} / 現物 {actual}）")
-    present = {
-        relative
-        for path in out_dir.rglob("*")
-        if path.is_file() and (relative := str(path.relative_to(out_dir))) not in META_PATHS
+
+    series_f16: Path
+    series_i8: Path
+    text_encoder: Path
+    demo: Path
+    model: Path
+
+
+def sbv2_sources(series_dir: Path) -> Sbv2Sources:
+    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
+    return Sbv2Sources(
+        series_f16=series_dir / f"{SBV2_DIST_NAME}-f16",
+        series_i8=series_dir / f"{SBV2_DIST_NAME}-i8",
+        text_encoder=series_dir / SBV2_TEXT_ENCODER_SERIES / SBV2_TEXT_ENCODER_VARIANT,
+        demo=OUTPUTS_ROOT / SBV2_DEMO_DIRNAME,
+        model=INPUTS_ROOT / "sbv2" / SBV2_MODEL_NAME,
+    )
+
+
+def sbv2_placements(sources: Sbv2Sources) -> dict[str, Path]:
+    """役割名 → 出所のファイル。出力の path は {@link SBV2_OUTPUT_PATHS} が持つ。
+
+    この表に無いものは出力へ入らない（`io.*.safetensors` を落とす仕掛けはこれで足りる）。
+    `style_vectors`（`.npy` → safetensors）と `speaker_embeddings`（ckpt の 1 テンソル →
+    safetensors）は配置ではなく**変換**なのでここには現れない。
+    """
+    return {
+        "text_encoder": sources.text_encoder / "model.safetensors",
+        "front_f16": sources.series_f16 / "front" / "model.safetensors",
+        "front_i8": sources.series_i8 / "front" / "model.safetensors",
+        "voice_f16": sources.series_f16 / "voice" / "model.safetensors",
+        "voice_i8": sources.series_i8 / "voice" / "model.safetensors",
+        "tokenizer": sources.demo / SBV2_TOKENIZER_FILE,
+        "symbols": sources.demo / SBV2_SYMBOLS_FILE,
     }
-    extra = sorted(present - set(declared))
-    if extra:
-        raise DistError(f"manifest が宣言していないファイルが混ざっている: {', '.join(extra)}")
-    return declared
+
+
+def sbv2_knob_defaults(symbols_path: Path) -> dict[str, Any]:
+    """実行時ノブの既定を `style_bert_vits2.constants` から引く（定数を写経しない）。
+
+    `sbv2_demo.jp_extra_rules` が `symbols.json` の `defaults` へ焼くのと**同じ源・同じ値**。
+    配布形には両方が並ぶので、食い違いをここで落とす — TS 側は `symbols.json` からノブを
+    読み（`parseJpExtraRules`）、hub 利用側は `karume.json` の `pipelineConfig.defaults` を
+    読むため、ずれると「どちらの既定で鳴ったのか」が沈黙で分かれる。
+
+    NOTE: `style_bert_vits2` は optional な `sbv2` dependency-group なので import は関数内。
+    Anima の組み立てと `karume.dist` の import 自体はこの依存に触れない。
+    """
+    from style_bert_vits2.constants import (
+        DEFAULT_LENGTH,
+        DEFAULT_NOISE,
+        DEFAULT_NOISEW,
+        DEFAULT_SDP_RATIO,
+        DEFAULT_STYLE,
+        DEFAULT_STYLE_WEIGHT,
+    )
+
+    knobs: dict[str, Any] = {
+        "style": DEFAULT_STYLE,
+        "styleWeight": DEFAULT_STYLE_WEIGHT,
+        "sdpRatio": DEFAULT_SDP_RATIO,
+        "noiseScale": DEFAULT_NOISE,
+        "noiseScaleW": DEFAULT_NOISEW,
+        "lengthScale": DEFAULT_LENGTH,
+    }
+    if not symbols_path.is_file():
+        raise DistError(f"組み立ての入力が無い: {symbols_path}")
+    shipped = json.loads(symbols_path.read_text(encoding="utf-8")).get("defaults")
+    if not isinstance(shipped, dict):
+        raise DistError(f"{symbols_path}: 'defaults' 節が無い（実行時ノブの写しの正本）")
+    disagreed = [
+        f"{key}: constants={knobs[key]!r} / symbols.json={shipped.get(key)!r}"
+        for key in SBV2_KNOB_KEYS
+        if shipped.get(key) != knobs[key]
+    ]
+    if disagreed:
+        raise DistError(
+            f"{symbols_path} の defaults が style_bert_vits2 の定数と食い違う"
+            f"（{', '.join(disagreed)}）— 資産を焼いたときと今の package が別版。"
+            "`sbv2_demo.py assets` を採り直す"
+        )
+    return knobs
+
+
+def sbv2_config(model_dir: Path) -> Mapping[str, Any]:
+    """`config.json` を読む（styles / speakers / 表の行数と列数の正本）。"""
+    path = model_dir / SBV2_CONFIG_FILE
+    if not path.is_file():
+        raise DistError(f"組み立ての入力が無い: {path}")
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise DistError(f"{path}: JSON として読めない") from error
+    if not isinstance(config, dict):
+        raise DistError(f"{path}: 最上位がオブジェクトでない")
+    return config
+
+
+def _sbv2_section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    """`config.json` の 1 節（`data` / `model`）を検査して読む。"""
+    section = config.get(name)
+    if not isinstance(section, dict):
+        raise DistError(f"config.json に '{name}' 節が無い（実際: {section!r}）")
+    return section
+
+
+def _sbv2_id_map(data: Mapping[str, Any], key: str) -> dict[str, int]:
+    """`config.json` の `data.<key>`（名前 → ID の非空マップ）を検査して読む。"""
+    table = data.get(key)
+    if not isinstance(table, dict) or not table:
+        raise DistError(f"config.json の data.{key} が非空のマップでない（実際: {table!r}）")
+    for name, value in table.items():
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise DistError(f"config.json の data.{key}[{name!r}] が整数でない（{value!r}）")
+    return dict(table)
+
+
+def _sbv2_int(section: Mapping[str, Any], key: str, where: str) -> int:
+    """`config.json` の整数フィールド（表の行数 / 列数の宣言）を検査して読む。"""
+    value = section.get(key)
+    # bool は int の派生。`"n_speakers": true` を 1 として通すと表の行数門が緩む。
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise DistError(f"config.json の {where}.{key} が整数でない（{value!r}）")
+    return value
+
+
+def sbv2_pipeline_config(config: Mapping[str, Any], knobs: Mapping[str, Any]) -> dict[str, Any]:
+    """`pipelineConfig` を config.json と実行時ノブから組む（表を焼き込まない）。
+
+    MUST: `styles` / `speakers` はハードコードしない。ckpt が変われば名前も並びも変わり
+    （この FN4 は Neutral / high / low / NSFW の 4 つ、別の ckpt は Neutral / Angry / … の
+    7 つ）、写した表を配ると **shape は合ったまま別のスタイルの声が出る**。`defaults` の
+    数値も同じ理由で `style_bert_vits2` から引いた値（{@link sbv2_knob_defaults}）を受ける。
+
+    `defaults.speaker` は `spk2id` の先頭キー（`sbv2_demo.resolve_style_and_speaker` と同式）。
+    `speakers` の名前 → 行の解決先は配布形の `speaker_embeddings`
+    （{@link sbv2_speaker_embeddings}）、`styles` の解決先は `style_vectors`。
+    """
+    data = _sbv2_section(config, "data")
+    styles = _sbv2_id_map(data, "style2id")
+    speakers = _sbv2_id_map(data, "spk2id")
+    missing = [key for key in SBV2_KNOB_KEYS if key not in knobs]
+    if missing:
+        raise DistError(f"実行時ノブの既定が足りない: {missing}")
+    if knobs["style"] not in styles:
+        raise DistError(
+            f"既定スタイル {knobs['style']!r} が config の style2id {sorted(styles)} に無い"
+            " — 存在しないスタイル名を既定に据えた配布形は起動時にしか落ちない"
+        )
+    return {
+        "styles": styles,
+        "speakers": speakers,
+        "defaults": {
+            "speaker": next(iter(speakers)),
+            **{key: knobs[key] for key in SBV2_KNOB_KEYS},
+        },
+    }
+
+
+def sbv2_style_vectors(model_dir: Path, config: Mapping[str, Any]) -> np.ndarray:
+    """`style_vectors.npy` を検査して f32 の `[スタイル数, 256]` として読む。
+
+    MUST: 行数が `data.num_styles` と `len(data.style2id)` の**両方**に一致すること。
+    スタイルの ID は行番号そのものなので、行と名前がずれてもロードも実行も通り、
+    **別のスタイルの声が出る**だけで沈黙する（表の行数を合わせる以外に検出手段がない）。
+    """
+    data = _sbv2_section(config, "data")
+    path = model_dir / SBV2_STYLE_FILE
+    if not path.is_file():
+        raise DistError(f"組み立ての入力が無い: {path}")
+    table = np.load(path)
+    if table.ndim != 2:
+        raise DistError(f"{path}: 形 {table.shape} が [スタイル数, 256] でない")
+    styles = _sbv2_id_map(data, "style2id")
+    num_styles = _sbv2_int(data, "num_styles", "data")
+    if table.shape[0] != num_styles or table.shape[0] != len(styles):
+        raise DistError(
+            f"{path}: 行数 {table.shape[0]} が config の num_styles {num_styles} /"
+            f" style2id {len(styles)} 件と一致しない — スタイル ID は行番号なので、"
+            "ずれたまま配ると別のスタイルの声が出る"
+        )
+    return np.ascontiguousarray(table, dtype=np.float32)
+
+
+def sbv2_ckpt(model_dir: Path) -> Path:
+    """実重みの ckpt。`*.safetensors` の一意存在を要求する（`export_sbv2.load_net_g` と同じ）。
+
+    複数あると「どれから話者埋め込みを引いたか」が黙って変わる。
+    """
+    ckpts = sorted(model_dir.glob("*.safetensors"))
+    if len(ckpts) != 1:
+        raise DistError(
+            f"{model_dir} の ckpt が一意でない（{len(ckpts)} 件: {[p.name for p in ckpts]}）"
+        )
+    return ckpts[0]
+
+
+def sbv2_speaker_embeddings(model_dir: Path, config: Mapping[str, Any]) -> np.ndarray:
+    """ckpt の `emb_g.weight` を f32 の `[話者数, gin_channels]` として引く。
+
+    `front` / `voice` はどちらも話者埋め込み `g` を**グラフ入力**に取るので、この表が無いと
+    配布形だけではグラフを実行できない（デモ経路は `assets.safetensors` に焼いていた）。
+    `style_vectors` と同じく「表を配って実行時に行を引く」形にする。
+
+    MUST: 行数が `data.n_speakers` と `len(data.spk2id)` の**両方**に一致すること —
+    話者 ID は行番号そのものなので、ずれてもロードも実行も通り、**別の話者の声が出る**
+    だけで沈黙する（スタイル表の行数門と同じ機序）。列数は `model.gin_channels` に一致
+    すること（こちらは config から導出できる値なので shape ごと縛れる）。
+
+    MUST: ckpt は 251MB 級。`safe_open` の遅延読みで**このテンソル 1 本だけ**を引く
+    （`load_file` は全量を numpy へ展開する）。
+    """
+    data = _sbv2_section(config, "data")
+    model = _sbv2_section(config, "model")
+    speakers = _sbv2_id_map(data, "spk2id")
+    num_speakers = _sbv2_int(data, "n_speakers", "data")
+    gin_channels = _sbv2_int(model, "gin_channels", "model")
+    ckpt = sbv2_ckpt(model_dir)
+    with safe_open(str(ckpt), framework="np") as handle:
+        # `keys()` はヘッダのテンソル名一覧（dict ではない）。`get_tensor` はそのテンソルの
+        # バイト範囲だけを読むので、251MB の ckpt から 2KB を引くのにファイル全量は載らない。
+        available = handle.keys()
+        if SBV2_SPEAKER_TENSOR not in available:
+            raise DistError(
+                f"{ckpt} に {SBV2_SPEAKER_TENSOR} が無い — 話者埋め込みの出所が変わった"
+            )
+        table = handle.get_tensor(SBV2_SPEAKER_TENSOR)
+    if table.ndim != 2:
+        raise DistError(f"{ckpt}: {SBV2_SPEAKER_TENSOR} の形 {table.shape} が 2 次元でない")
+    if table.shape[0] != num_speakers or table.shape[0] != len(speakers):
+        raise DistError(
+            f"{ckpt}: {SBV2_SPEAKER_TENSOR} の行数 {table.shape[0]} が config の"
+            f" n_speakers {num_speakers} / spk2id {len(speakers)} 件と一致しない —"
+            "話者 ID は行番号なので、ずれたまま配ると別の話者の声が出る"
+        )
+    if table.shape[1] != gin_channels:
+        raise DistError(
+            f"{ckpt}: {SBV2_SPEAKER_TENSOR} の列数 {table.shape[1]} が config の"
+            f" gin_channels {gin_channels} と一致しない — グラフ入力 g の幅と食い違う"
+        )
+    return np.ascontiguousarray(table, dtype=np.float32)
+
+
+def _write_table(path: Path, key: str, table: np.ndarray) -> None:
+    """1 テンソルだけの safetensors を書く（`.npy` / ckpt から移した表の配布形）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_file({key: table}, str(path))
+
+
+def sbv2_manifest(out_dir: Path, pipeline_config: Mapping[str, Any]) -> dict[str, Any]:
+    """組み立て済みディレクトリから SBV2 の `karume.json` を導出する。"""
+    refs = {role: file_ref(out_dir, path) for role, path in SBV2_OUTPUT_PATHS.items()}
+    return {
+        "format": "karume/1",
+        "generator": generator_tag(),
+        "pipeline": "sbv2/1",
+        "components": {
+            "text_encoder": {"file": refs["text_encoder"]},
+            "front": {
+                "variants": {
+                    "f16": {"file": refs["front_f16"]},
+                    "i8": {"file": refs["front_i8"]},
+                }
+            },
+            "voice": {
+                "variants": {
+                    "f16": {"file": refs["voice_f16"]},
+                    "i8": {"file": refs["voice_i8"]},
+                }
+            },
+            "tokenizer": {"file": refs["tokenizer"]},
+            "symbols": {"file": refs["symbols"]},
+            "style_vectors": {"file": refs["style_vectors"]},
+            "speaker_embeddings": {"file": refs["speaker_embeddings"]},
+        },
+        "presets": dict(SBV2_PRESETS),
+        "defaultPreset": SBV2_DEFAULT_PRESET,
+        "pipelineConfig": dict(pipeline_config),
+    }
+
+
+def assemble_sbv2(sources: Sbv2Sources, out_dir: Path, knobs: Mapping[str, Any]) -> dict[str, Any]:
+    """系列群と実重みの config を配布形へ組み立て、`karume.json` を書いて manifest を返す。
+
+    ノブの既定を引数で受けるのは、値の**出所**（`style_bert_vits2` の定数 — optional な
+    dependency-group）と配布形の**組み立て**を分けるため。出所の解決は
+    {@link sbv2_knob_defaults} が持つ。
+    """
+    placements = sbv2_placements(sources)
+    # MUST: 検査は配置の**前**に全役割ぶん済ませる（Anima と同じ規律 — 落ちるなら途中の
+    # 配布形を 1 ファイルも残さない）。config・スタイル表・話者表の検査も配置より前に置く。
+    config = sbv2_config(sources.model)
+    pipeline_config = sbv2_pipeline_config(config, knobs)
+    style_vectors = sbv2_style_vectors(sources.model, config)
+    speaker_embeddings = sbv2_speaker_embeddings(sources.model, config)
+    for role, source in placements.items():
+        assert_storage(role, source, SBV2_STORAGE_REQUIREMENTS)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for role, source in placements.items():
+        place_file(source, out_dir / SBV2_OUTPUT_PATHS[role])
+    _write_table(out_dir / SBV2_OUTPUT_PATHS["style_vectors"], SBV2_STYLE_KEY, style_vectors)
+    _write_table(
+        out_dir / SBV2_OUTPUT_PATHS["speaker_embeddings"], SBV2_SPEAKER_KEY, speaker_embeddings
+    )
+    manifest = sbv2_manifest(out_dir, pipeline_config)
+    (out_dir / MANIFEST_FILENAME).write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return manifest
+
+
+# ---- ④ pipeline 別ディスパッチと CLI -----------------------------------------
+
+
+@dataclass(frozen=True)
+class Pipeline:
+    """pipeline ごとに違うものだけを持つディスパッチ表の 1 行。
+
+    共有部（配置・sha256・宣言と現物の突合）は上の汎用関数が持つので、ここに並ぶのは
+    「既定の配布名 / 系列の親から配布形を組む手順 / モデルカードの描き手」の 3 つだけ。
+    """
+
+    dist_name: str
+    assemble: Callable[[Path, Path], dict[str, Any]]
+    #: `None` はモデルカードを書かない pipeline（`karume.modelcard` は `anima/1` 専用）。
+    render_card: Callable[[Mapping[str, Any]], str] | None
+
+
+def assemble_anima_dist(series_dir: Path, out_dir: Path) -> dict[str, Any]:
+    """`--series` の親から Anima の配布形を組む（CLI のディスパッチ先）。"""
+    return assemble_anima(anima_sources(series_dir), out_dir)
+
+
+def assemble_sbv2_dist(series_dir: Path, out_dir: Path) -> dict[str, Any]:
+    """`--series` の親から SBV2 の配布形を組む（CLI のディスパッチ先）。"""
+    sources = sbv2_sources(series_dir)
+    return assemble_sbv2(sources, out_dir, sbv2_knob_defaults(sources.demo / SBV2_SYMBOLS_FILE))
+
+
+PIPELINES: Mapping[str, Pipeline] = {
+    "anima": Pipeline(ANIMA_DIST_NAME, assemble_anima_dist, render_model_card),
+    # SBV2 のモデルカードは未対応（`modelcard.SUPPORTED_PIPELINE` は anima/1 専用）。
+    "sbv2": Pipeline(SBV2_DIST_NAME, assemble_sbv2_dist, None),
+}
+
+DEFAULT_PIPELINE = "anima"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="配布ディレクトリ（HF アップ可能形）の組み立て")
+    parser.add_argument(
+        "--pipeline",
+        choices=sorted(PIPELINES),
+        default=DEFAULT_PIPELINE,
+        help=f"組み立てるパイプライン（既定: {DEFAULT_PIPELINE}）",
+    )
     parser.add_argument(
         "--series",
         type=Path,
@@ -365,23 +847,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--out",
         type=Path,
         default=None,
-        help=f"出力先（既定: リポの models/{ANIMA_DIST_NAME}/ — 1 ディレクトリ = 1 HF リポ）",
+        help="出力先（既定は --pipeline ごと: "
+        + " / ".join(f"models/{spec.dist_name}/" for spec in PIPELINES.values())
+        + " — 1 ディレクトリ = 1 HF リポ）",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    out_dir = args.out if args.out is not None else DIST_ROOT / ANIMA_DIST_NAME
-    manifest = assemble_anima(anima_sources(args.series), out_dir)
+    pipeline = PIPELINES[args.pipeline]
+    out_dir = args.out if args.out is not None else DIST_ROOT / pipeline.dist_name
+    manifest = pipeline.assemble(args.series, out_dir)
     verified = verify_dist(out_dir)
     # モデルカードは**検証を通った manifest** から描く（表と現物が食い違ったまま説明だけ
     # 生えることがない順序）。
-    (out_dir / MODEL_CARD_FILENAME).write_text(render_model_card(manifest), encoding="utf-8")
+    if pipeline.render_card is not None:
+        (out_dir / MODEL_CARD_FILENAME).write_text(pipeline.render_card(manifest), encoding="utf-8")
     for rel_path, size in sorted(verified.items()):
         print(f"{size:>12}  {rel_path}")
     for rel_path in sorted(META_PATHS):
-        print(f"{(out_dir / rel_path).stat().st_size:>12}  {rel_path}")
+        meta = out_dir / rel_path
+        if meta.is_file():
+            print(f"{meta.stat().st_size:>12}  {rel_path}")
     print(f"[dist] {out_dir} — {manifest['generator']} / preset {manifest['defaultPreset']}")
 
 
