@@ -134,7 +134,9 @@ M1-P2 以降に解消する。
   NaN を飲むため、NaN 判定はビット列で行う（根治済み — 上の反例集）
 - WGSL `sign(NaN)` と torch の乖離（NaN を返す） — 分解でも組込みでも残る
 - select_scatter 分解の長さ 0 スライスが WebGPU の size>0 binding 要求で落ちるか
-- （プロトタイプ残課題）silu が UnaryOp にあるが executor から到達不能の死枝疑い
+- ~~（プロトタイプ残課題）silu が UnaryOp にあるが executor から到達不能の死枝疑い~~ →
+  **解消（2026-08-08）**: 公開 op は足さず、`sigmoid → mul` の隣接 2 ノードを実行時にだけ畳む
+  executor 内部の融合ルールにした（`src/runtime/fusion.ts`）
 
 ## 隣接で気づいた点（プロトタイプ側の観察）
 

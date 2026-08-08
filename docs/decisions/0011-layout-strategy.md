@@ -15,6 +15,10 @@
   で読み、出力は常に連続。expand は stride 0。**STRIDED_RANK = 4**
   （DeBERTa は全値 rank ≤ 4。rank ≥ 5 はエクスポータの rank 下げ正規化で先に潰す —
   プロトタイプ前例）。
+- 追記（2026-08-08 perf 更新）: 束縛後の入出力 shape が rank を含め完全一致する `expand` は
+  複製軸を持たない恒等写像なので、`reshape` と同じバッファ別名で実行する。1 軸でも異なる
+  非恒等 `expand` は従来どおり strided 実体化コピーへ戻す（判定は `src/runtime/fusion.ts`
+  の純関数パスに置き、適用回数は `Session.diagnostics().lastRunFusions` に出る）。
 - **elementwise / reduce / matmul の codegen は変更しない**（入力は連続前提のまま）。
   消費側カーネルへ strided 読みを融合してコピーを消す最適化は、**IR 語彙を変えずに実行
   戦略の差し替えだけで到達できる**ため、perf マイルストーンの upgrade path として明記して
