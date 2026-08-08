@@ -143,7 +143,7 @@ torch 参照との突合（f32 構成・`sbv2_demo.py reference`）: **`w_ceil` 
 `length_match: true`・波形 maxAbs **5.16e-5**（値域上端 0.396）・rmse 3.19e-6。`maxRel` は零交差で
 発散するので判定に使わない（golden E2E の dec / voice tolerance と同じ事情）。
 
-ゲート: `deno task verify` 687 passed / 0 failed / 4 ignored、pytest 2030 passed / 2 skipped。
+ゲート: `deno task verify` 687 passed / 0 failed / 4 ignored、pytest 2030 passed / 3 skipped。
 
 ### 量子化 — 測定値と聴感の乖離
 
