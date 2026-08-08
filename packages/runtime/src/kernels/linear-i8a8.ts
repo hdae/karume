@@ -120,9 +120,24 @@ fn idot(a: u32, b: u32) -> i32 {
   return dot(unpack4xI8(a), unpack4xI8(b));
 }`;
 
+/**
+ * 出力の書き出し。行ループは codegen 時に展開して {@link accumulatorInit} の `acc0..acc3` を
+ * 静的に読む（`acc[i]` の動的添字を残さないための展開 — 理由は同関数の docstring）。
+ * ガードの構造・`fma` の単一丸め・`xs·wscale` の畳み順は展開前と同一。
+ */
 const store = (v4: boolean): string => {
   const rows = `  let orow0 = wid.y * ${GEMM_TILE}u + lid.y * ${REG}u;`;
+  // 2 行目以降の行番号は展開時に確定するので、その場で let に落とす（0 行目は上の rows）
+  const rowDecl = (i: number, indent: string): string =>
+    i === 0 ? "" : `${indent}let orow${i} = orow0 + ${i}u;\n`;
   if (v4) {
+    const rowStores = Array.from(
+      { length: REG },
+      (_, i) =>
+        `${rowDecl(i, "    ")}    if (orow${i} < dims.m) {
+      out[orow${i} * n4 + ocq] = fma(vec4<f32>(acc${i}), xscale[orow${i}] * ws, biasv);
+    }`,
+    ).join("\n");
     return `  let n4 = dims.n / ${REG}u;
   let ocq = wid.x * ${WG}u + lid.x;
 ${rows}
@@ -131,40 +146,60 @@ ${rows}
     let oc = ocq * ${REG}u;
     let ws = vec4<f32>(wscale[oc], wscale[oc + 1u], wscale[oc + 2u], wscale[oc + 3u]);
     let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);
-    for (var i = 0u; i < ${REG}u; i = i + 1u) {
-      let orow = orow0 + i;
-      if (orow < dims.m) {
-        // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
-        out[orow * n4 + ocq] = fma(vec4<f32>(acc[i]), xscale[orow] * ws, biasv);
-      }
-    }
+    // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
+${rowStores}
   }`;
   }
-  const write = (component: string, offset: string): string =>
-    `out[obase + ocol${offset}] = fma(f32(acc[i].${component}), xs * wscale[ocol${offset}], bias[ocol${offset}]);`;
+  const write = (i: number, component: string, offset: string): string =>
+    `out[obase + ocol${offset}] = fma(f32(acc${i}.${component}), xs * wscale[ocol${offset}], bias[ocol${offset}]);`;
+  const rowStores = Array.from(
+    { length: REG },
+    (_, i) =>
+      `${rowDecl(i, "  ")}  if (orow${i} < dims.m) {
+    let obase = orow${i} * dims.n;
+    // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
+    let xs = xscale[orow${i}];
+    if (ocol < dims.n) {
+      ${write(i, "x", "")}
+    }
+    if (ocol + 1u < dims.n) {
+      ${write(i, "y", " + 1u")}
+    }
+    if (ocol + 2u < dims.n) {
+      ${write(i, "z", " + 2u")}
+    }
+    if (ocol + 3u < dims.n) {
+      ${write(i, "w", " + 3u")}
+    }
+  }`,
+  ).join("\n");
   return `  let ocol = wid.x * ${GEMM_TILE}u + lid.x * ${REG}u;
 ${rows}
-  for (var i = 0u; i < ${REG}u; i = i + 1u) {
-    let orow = orow0 + i;
-    if (orow < dims.m) {
-      let obase = orow * dims.n;
-      // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
-      let xs = xscale[orow];
-      if (ocol < dims.n) {
-        ${write("x", "")}
-      }
-      if (ocol + 1u < dims.n) {
-        ${write("y", " + 1u")}
-      }
-      if (ocol + 2u < dims.n) {
-        ${write("z", " + 2u")}
-      }
-      if (ocol + 3u < dims.n) {
-        ${write("w", " + 3u")}
-      }
-    }
-  }`;
+${rowStores}`;
 };
+
+/**
+ * i32 accumulator の初期化。**配列 1 本ではなく `acc0..acc3` の名前付き変数**にするのは、
+ * `acc[i]` の動的添字がアドレス可能な関数ローカル領域を要求し、レジスタに載らずローカル
+ * メモリへ落ちるため（Metal で顕著）。展開しても縮約は i32 の厳密加算のまま・行ごとに
+ * 独立なので、**返る整数は 1 ビットも変わらない**（実測でも M2 / RTX 3080 Ti の代表 6 形状が
+ * 全て bit 一致し、node 重み付きのカーネル時間は M2 で 1.175 倍・RTX で 1.429 倍）。
+ */
+const accumulatorInit = (): string =>
+  Array.from({ length: REG }, (_, i) => `  var acc${i} = vec4<i32>(0);`).join("\n");
+
+/**
+ * K パック内側の 4 行更新。{@link accumulatorInit} と対で展開する。
+ * 1 出力あたりの加算順序（kk 昇順・パック内 4 語まとめ）は展開前と同一。
+ */
+const accumulatorUpdate = (): string =>
+  Array.from(
+    { length: REG },
+    (_, i) =>
+      `      let a${i} = sa[p * ${GEMM_TILE}u + lid.y * ${REG}u + ${i}u];
+      acc${i} = acc${i} + vec4<i32>(idot(a${i}, b0), idot(a${i}, b1), idot(a${i}, b2), idot(a${i}, b3));`,
+  )
+    .join("\n");
 
 export const linearI8a8Wgsl = (v4: boolean, dp4a: boolean): string =>
   `// karume linear (x[m,k] · wᵀ[k,n] + bias[n], 活性 per-token i8 × 重み i8 の整数内積${
@@ -214,12 +249,7 @@ fn main(
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (k4 + ${K_PACKS - 1}u) / ${K_PACKS}u;
-  var acc = array<vec4<i32>, ${REG}>(
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-  );
+${accumulatorInit()}
   for (var t = 0u; t < tiles; t = t + 1u) {
     // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
     let apack = t * ${K_PACKS}u + ap;
@@ -245,10 +275,7 @@ fn main(
       let b1 = sb[bcol + 1u];
       let b2 = sb[bcol + 2u];
       let b3 = sb[bcol + 3u];
-      for (var i = 0u; i < ${REG}u; i = i + 1u) {
-        let a = sa[p * ${GEMM_TILE}u + lid.y * ${REG}u + i];
-        acc[i] = acc[i] + vec4<i32>(idot(a, b0), idot(a, b1), idot(a, b2), idot(a, b3));
-      }
+${accumulatorUpdate()}
     }
     workgroupBarrier();
   }

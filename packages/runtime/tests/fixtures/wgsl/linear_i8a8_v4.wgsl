@@ -44,12 +44,10 @@ fn main(
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (k4 + 3u) / 4u;
-  var acc = array<vec4<i32>, 4>(
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-  );
+  var acc0 = vec4<i32>(0);
+  var acc1 = vec4<i32>(0);
+  var acc2 = vec4<i32>(0);
+  var acc3 = vec4<i32>(0);
   for (var t = 0u; t < tiles; t = t + 1u) {
     // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
     let apack = t * 4u + ap;
@@ -73,10 +71,14 @@ fn main(
       let b1 = sb[bcol + 1u];
       let b2 = sb[bcol + 2u];
       let b3 = sb[bcol + 3u];
-      for (var i = 0u; i < 4u; i = i + 1u) {
-        let a = sa[p * 64u + lid.y * 4u + i];
-        acc[i] = acc[i] + vec4<i32>(idot(a, b0), idot(a, b1), idot(a, b2), idot(a, b3));
-      }
+      let a0 = sa[p * 64u + lid.y * 4u + 0u];
+      acc0 = acc0 + vec4<i32>(idot(a0, b0), idot(a0, b1), idot(a0, b2), idot(a0, b3));
+      let a1 = sa[p * 64u + lid.y * 4u + 1u];
+      acc1 = acc1 + vec4<i32>(idot(a1, b0), idot(a1, b1), idot(a1, b2), idot(a1, b3));
+      let a2 = sa[p * 64u + lid.y * 4u + 2u];
+      acc2 = acc2 + vec4<i32>(idot(a2, b0), idot(a2, b1), idot(a2, b2), idot(a2, b3));
+      let a3 = sa[p * 64u + lid.y * 4u + 3u];
+      acc3 = acc3 + vec4<i32>(idot(a3, b0), idot(a3, b1), idot(a3, b2), idot(a3, b3));
     }
     workgroupBarrier();
   }
@@ -88,12 +90,21 @@ fn main(
     let oc = ocq * 4u;
     let ws = vec4<f32>(wscale[oc], wscale[oc + 1u], wscale[oc + 2u], wscale[oc + 3u]);
     let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);
-    for (var i = 0u; i < 4u; i = i + 1u) {
-      let orow = orow0 + i;
-      if (orow < dims.m) {
-        // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
-        out[orow * n4 + ocq] = fma(vec4<f32>(acc[i]), xscale[orow] * ws, biasv);
-      }
+    // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
+    if (orow0 < dims.m) {
+      out[orow0 * n4 + ocq] = fma(vec4<f32>(acc0), xscale[orow0] * ws, biasv);
+    }
+    let orow1 = orow0 + 1u;
+    if (orow1 < dims.m) {
+      out[orow1 * n4 + ocq] = fma(vec4<f32>(acc1), xscale[orow1] * ws, biasv);
+    }
+    let orow2 = orow0 + 2u;
+    if (orow2 < dims.m) {
+      out[orow2 * n4 + ocq] = fma(vec4<f32>(acc2), xscale[orow2] * ws, biasv);
+    }
+    let orow3 = orow0 + 3u;
+    if (orow3 < dims.m) {
+      out[orow3 * n4 + ocq] = fma(vec4<f32>(acc3), xscale[orow3] * ws, biasv);
     }
   }
 }

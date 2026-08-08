@@ -1225,10 +1225,16 @@ Deno.test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を
         dp4a ? 0 : 1,
         `${where}: エミュ内積の出現数`,
       );
-      // 内積ループの正本は 1 箇所（4×4 出力 × 4 列 = 16 内積）
-      const inner =
-        "        acc[i] = acc[i] + vec4<i32>(idot(a, b0), idot(a, b1), idot(a, b2), idot(a, b3));";
-      assertEquals(wgsl.split(inner).length, 2, `${where}: 内積ループが 1 箇所でない`);
+      // 内積は 4 行へ静的展開（4×4 出力 × 4 列 = 16 内積）。**行ごとにちょうど 1 回**で、
+      // 行番号は codegen 時に確定する — accumulator に動的添字が残っていないことが条件。
+      for (let i = 0; i < 4; i += 1) {
+        const inner =
+          `      acc${i} = acc${i} + vec4<i32>(idot(a${i}, b0), idot(a${i}, b1), idot(a${i}, b2), idot(a${i}, b3));`;
+        assertEquals(wgsl.split(inner).length, 2, `${where}: 行 ${i} の内積が 1 箇所でない`);
+      }
+      // MUST: `acc[...]` の動的添字はアドレス可能なローカル領域を要求し、レジスタから落ちる
+      // （Metal で顕著）。展開の目的そのものなので、生成物に 1 つも残っていないことを見る。
+      assertEquals(wgsl.includes("acc["), false, `${where}: accumulator の動的添字が残っている`);
       // 共有タイルは [pack][row] / [pack][col]（バンク衝突 2-way — プロトタイプからの組み替え）
       assertEquals(wgsl.includes("sa[ap * 64u + ar] = av;"), true, where);
       assertEquals(wgsl.includes("sb[wp * 64u + wc] = wv;"), true, where);
@@ -1250,8 +1256,8 @@ Deno.test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を
       assertEquals(
         wgsl.includes(
           v4
-            ? "out[orow * n4 + ocq] = fma(vec4<f32>(acc[i]), xscale[orow] * ws, biasv);"
-            : "out[obase + ocol] = fma(f32(acc[i].x), xs * wscale[ocol], bias[ocol]);",
+            ? "out[orow0 * n4 + ocq] = fma(vec4<f32>(acc0), xscale[orow0] * ws, biasv);"
+            : "out[obase + ocol] = fma(f32(acc0.x), xs * wscale[ocol], bias[ocol]);",
         ),
         true,
         `${where}: dequant の乗算順序`,
