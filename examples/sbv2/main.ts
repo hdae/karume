@@ -61,7 +61,7 @@ const integer = (key: string): number | undefined => {
   return raw === undefined ? undefined : Number(raw);
 };
 
-const source = args.get("source") ?? "models/sbv2-FN4";
+const source = args.get("source") ?? "models/karume-sbv2-fn";
 const model = args.get("model");
 const quant = args.get("quant");
 /** hub / パイプラインへ渡す選択軸（未指定の欄は manifest の既定が埋める）。 */

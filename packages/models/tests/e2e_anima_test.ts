@@ -7,7 +7,7 @@
  * 赤のまま止めて差分の内容（PNG バイト長 / 画素の統計 / 実物の PNG）を出す。ここを緩めると
  * 「移植できた」の意味が消える。
  *
- * MUST: 資産は `models/anima-turbo/`（untracked・実 GPU 機のローカル資産）。無い環境と GPU 無し
+ * MUST: 資産は `models/karume-anima-turbo/`（untracked・実 GPU 機のローカル資産）。無い環境と GPU 無し
  * 環境は理由を出して**明示 SKIP**する（テストを消して無音で緑にしない — ADR 0005）。
  *
  * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
@@ -21,8 +21,8 @@ import { formatResolution } from "../anima.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
-/** 資産の置き場（リポ直下 `models/anima-turbo/`）。 */
-const ASSETS_DIR = new URL("../../../models/anima-turbo/", import.meta.url);
+/** 資産の置き場（リポ直下 `models/karume-anima-turbo/`）。 */
+const ASSETS_DIR = new URL("../../../models/karume-anima-turbo/", import.meta.url);
 const OUTPUTS_DIR = new URL("../../../outputs/", import.meta.url);
 
 /**

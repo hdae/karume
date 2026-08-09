@@ -34,7 +34,7 @@ const integer = (key: string): number | undefined => {
   return raw === undefined ? undefined : Number(raw);
 };
 
-const source = args.get("source") ?? "models/anima-turbo";
+const source = args.get("source") ?? "models/karume-anima-turbo";
 const model = args.get("model");
 const quant = args.get("quant");
 /** hub / パイプラインへ渡す選択軸（未指定の欄は manifest の既定が埋める）。 */
