@@ -29,3 +29,26 @@ uv run karume dist --pipeline sbv2 --card-profile jvnv \
   `--card-profile` — exporter の README 参照）。
 - 系列を消しても配布形は壊れない（独立コピー）。逆に配布形は `karume dist` でいつでも系列から
   再生成できる。
+
+## 公開（HF へのアップロード）
+
+**MUST: モデルファイルを HF へ上げるときは、以下の env を必ず付ける。**
+
+```sh
+export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
+export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE=1000000
+export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE_HYSTERESIS_FACTOR=1.0
+export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
+```
+
+付けないと Xet の chunk 単位 dedup が効きすぎて**再構成が断片化し、DL が 5〜6 倍遅くなる**。
+断片化は一度 CAS に載ると既定設定の再アップロードでは戻せない（片道ラチェット）ので、
+**初回アップロードで防ぐのが唯一の低コストな手**である。機序と実測は
+[research/2026-08-09-xet-fragmentation.md](research/2026-08-09-xet-fragmentation.md)。
+
+- 上げたら**必ず検証する** — reconstruction の term 数を数え、`MiB/レンジ` が 10 を大きく
+  下回っていないか見る（手順は同ドキュメント §9）。健全なら 1 xorb = 1 term に近くなる。
+- 既に断片化してしまったファイルは、**同じバイト列のまま同じパスへ上げ直せば直る**
+  （バイト列が変わらないので**コミットは増えない** — 変わるのは CAS の再構成記録だけ）。
+  その際は `~/.cache/huggingface/xet/*/shard-cache` を退避してから実行する。断片化した祖先の
+  shard がローカルに残っていると、そこへ dedup ヒットして元に戻る。

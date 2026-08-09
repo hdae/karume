@@ -17,13 +17,17 @@
    多重化して 21 MB/s を実測）。したがって **Range 並列はブラウザでも同じだけ効く**。
 3. 断片化は**アップロード時に確定し、既定設定のまま再アップロードしても治らない**（dedup が
    断片化した祖先を引き当てるため — 実証済み）。**E1 §5 の「再アップロードすれば治る公算が
-   大きい」は誤りだったので撤回する。** ただし dedup の断片化防止閾値を上げれば連続レイアウトで
-   上げ直せる余地がある（§5・未検証）。
+   大きい」は誤りだったので撤回する。**
+4. ただし **dedup を止めて上げ直せば直る**。`HF_XET_DEDUPLICATION_*` の 4 つを設定して同じ
+   バイト列を同じパスへ上げ直すと、再構成が 1 xorb = 1 term の健全形に戻り、**コミットは 1 つも
+   増えない**。実施済み（§5）— anima の text_encoder は 3069 → 18 term・1.92 → 9.61 MB/s。
+   恒久の公開手順は [assets-layout.md](../assets-layout.md) の「公開」節。
 
 ## 1. 速度と断片化の対応
 
 `https://cas-server.xethub.hf.co/v1/reconstructions/<x-xet-hash>` が返す term
 （= xorb 内のチャンク範囲）と、`fetch_info` の URL レンジ数を実測速度と並べる。
+**以下は修復前の値**（修復後は §5 の「本番適用の結果」）。
 
 | ファイル                             |   サイズ | terms | xorbs | fetch レンジ数 | MiB/レンジ | per-stream 実測 |
 | ------------------------------------ | -------: | ----: | ----: | -------------: | ---------: | --------------: |
@@ -141,18 +145,55 @@ global dedup クエリでサーバから取り寄せた shard**である。同�
   （`finalize()` → `add_file_reconstruction_info` → `upload_and_register_session_shards`）。
   §8 のリポジトリ間差はこれで説明できる。
 
-### 効きうるレバー（いずれも未検証）
+### レバーの実測（probe リポでの A/B・2026-08-09）
 
 `config_group!` の env 上書きは release ビルドでも有効（`xet_runtime/src/config/macros.rs` の
 `apply_env_overrides` に `cfg` ガードは無い）。変数名は `HF_XET_DEDUPLICATION_<定数名の大文字>`。
 
-| 手段                                                                               | 期待される効果                                                                    |
-| ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE` を極大 + `..._HYSTERESIS_FACTOR=1.0` | 短いマッチを全て蹴り、長い run のみ dedup する = 実質「連続レイアウトで上げ直す」 |
-| `HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false`                            | Level-3 のみ停止。ローカル shard cache 由来の dedup は残るので単独では弱い        |
-| `~/.cache/huggingface/xet/*/shard-cache` を消す                                    | 断片化した祖先 shard をローカルから見えなくする（上と併用）                       |
-| 1 ファイルずつ上げる / `upload_large_folder`                                       | **無効**。断片化は 1 ファイル内で完結する現象                                     |
-| xorb / chunk サイズの env 調整                                                     | **不可**。該当 env は `#[cfg(debug_assertions)]` でしか compile されない          |
+同一バイト列（text_conditioner・257 MiB・元 531 term）を private の `hdae/karume-probe` へ
+段階的に上げ直した。設定が読まれたことは hf_xet のログの `Config: … (user set)` 行で確認済み。
+
+| 設定                                                           | New Data Upload | terms | xorbs |
+| -------------------------------------------------------------- | --------------: | ----: | ----: |
+| 既定（対照）                                                   |      **0.00 B** |   531 |     8 |
+| `MIN_N_CHUNKS_PER_RANGE=1000000` + `..._HYSTERESIS_FACTOR=1.0` |         77.2 MB |   261 |     9 |
+| ＋ `NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1`            |          141 MB |   152 |    10 |
+| ＋ `GLOBAL_DEDUP_QUERY_ENABLED=false` かつ shard-cache 退避    |          223 MB | **6** |     5 |
+
+- **既定では New Data Upload が 0.00 B** — 別リポへ上げてもラチェットが断片化をそのまま継承する。
+- 推定器の窓が既定 128 range なのが 2 行目が中途半端な理由。**このファイルは全 261 range しか
+  無いので前半がまるごと無防備**だった（`defrag_prevention.rs` の `rolling_chunks_per_range` は
+  窓が埋まるまで `None` を返して素通しする）。窓を 1 にすると即座に効く。
+- **記録はリポジトリ単位**。probe 内では最後のアップロードが記録を置き換え、先に上げた別パスの
+  再構成も 6 term に変わった。一方その時点で本番リポは 531 term のままだった。
+- **同一パス・同一内容でも xet の preupload は走る**（`No files have been modified since last
+  commit. Skipping to prevent empty commit.` が出てもコミットが省かれるだけ）。つまり
+  **実パスへ上げ直せば直り、コミットは 1 つも増えない**。
+- **修復後は既定設定で上げても壊れない** — dedup が連続レイアウトの長いマッチを引き当てるため。
+
+### 本番適用の結果（2026-08-09）
+
+上表 4 行目の設定で、実パスへ上げ直した（コミットは 1 つも増えていない）。
+
+| リポ / ファイル           |         terms |    MiB/レンジ | per-stream（同一範囲・修復後は全域 cold） |
+| ------------------------- | ------------: | ------------: | ----------------------------------------: |
+| anima `text_encoder`      | 3069 → **18** |  0.74 → 63.27 |                      1.92 → **9.61** MB/s |
+| anima `text_conditioner`  |   531 → **9** |  0.79 → 42.89 |                     2.43 → **15.89** MB/s |
+| jvnv `F1/voice/model.f16` |    65 → **2** |  2.98 → 52.15 |                                  （未測） |
+| jvnv `F2/voice/model.f16` |    17 → **3** | 10.43 → 34.77 |                                  （未測） |
+| jvnv `M1/voice/model.f16` |    93 → **3** |  2.13 → 34.77 |                             **7.83** MB/s |
+| jvnv `M2/voice/model.f16` |    77 → **3** |  2.61 → 34.77 |                                  （未測） |
+| jvnv `M1/voice/model.i8`  |    87 → **3** |  1.18 → 26.47 |                                  （未測） |
+
+アップロード所要は anima の 2 本で計 120 秒、jvnv の 5 本で計 142 秒。手順は
+[assets-layout.md](../assets-layout.md) の「公開」節に恒久ルールとして書いた。
+
+### 効かない手段
+
+| 手段                                         | 理由                                                                     |
+| -------------------------------------------- | ------------------------------------------------------------------------ |
+| 1 ファイルずつ上げる / `upload_large_folder` | **無効**。断片化は 1 ファイル内で完結する現象                            |
+| xorb / chunk サイズの env 調整               | **不可**。該当 env は `#[cfg(debug_assertions)]` でしか compile されない |
 
 なお群 A の被覆欠損（232.3 MiB）と群 B の実体（152.5 MiB）は**同オーダーだが一致はしない**ので、
 「蹴られた dedup 区間がそのまま群 B に落ちた」だけでは全量を説明できない。祖先 xorb に
@@ -226,9 +267,10 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
 - **初回アップロードで断片化したのか、後続の再アップロードで断片化したのか**が切り分けられない
   （§8 の理由）。ただし E1 §5 の記録（2026-08-05 / 08-08 の実測で `hdae/anima-turbo` が
   3.1〜4.7 MB/s）から、**2026-08-09 の再アップロード以前に既に遅かった**ことは確か。
-- **§5 のレバーが未検証**。`HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE` を極大にして
-  上げ直せば連続レイアウトになるか、そしてそれが**既存の公開リポの reconstruction を
-  置き換えるか**は、probe リポでの A/B でしか答えられない。後者はサーバ側の挙動なので
-  ソースからは判定できない。
+- **修復した記録がどれだけ保つかは未検証**。同一環境での再アップロードでは壊れないことを
+  確認したが（§5）、CAS 側の GC / 再パックや、他者が同じバイト列を既定設定で上げた場合に
+  記録が入れ替わるかは分からない。**公開後にときどき term 数を測り直すのが安全**。
+- **`karume-sbv2-fn` は未適用**（HF 非公開のためローカル運用のみ）。公開する場合は
+  [assets-layout.md](../assets-layout.md) の「公開」節に従うこと。
 - Range 並列を `@karume/hub` の `fetch` 経路で実装したときに同じ数値が出るかは未検証
   （E1 §7 から引き継ぎ）。並列度は 16 を基準に再測が要る。
