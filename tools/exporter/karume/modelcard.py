@@ -4,10 +4,14 @@ HF は `README.md` の YAML frontmatter をモデルの機械可読メタデー�
 「そのまま HF リポとしてアップロードできる形」の最後の 1 枚）。ライセンスと由来は manifest に
 書かない決定なので（ADR 0038 §6）、その責務はここが持つ。
 
-**pipeline 別のテンプレート**（`karume.dist` の {@link karume.dist.PIPELINES} と 1 対 1）。
+**pipeline 別のテンプレート**（`karume.dist` の {@link karume.dist.PIPELINES} の各行に対応）。
 `karume.dist` と同じ層分けにしてある — 共有するのは「frontmatter を組む / モデル一覧を並べる /
 ファイル表を並べる / quant 表を並べる」層だけで、何を説明し何を使い方に綴るかは pipeline
 ごとの節が持つ。
+
+**帰属はテンプレートと別の軸**（{@link Sbv2CardProfile}）。同じ SBV2 のテンプレートでも、
+どのファミリーの重みを配るかで出所・ライセンス・引用が丸ごと変わるので、そこだけを
+プロファイルに分けて**呼び出し側に明示させる**。
 
 manifest v2（`karume/2` — ADR 0041）は **1 リポに複数モデル**を持てるので、カードも
 「リポ全体の説明 → モデル一覧 → 使い方 → モデルごとの節」の形にする。モデルごとの節が
@@ -59,15 +63,21 @@ class CardMetadata:
     adapter / merge / quantized / finetune の 4 値で、どちらの配布形も「base の重みを f16 と
     i8 の格納形へ落とし直したもの」なので `quantized` を採る。merge は **Hub 上の base_model を
     2 つ以上並べる**形に紐づいた値で、Hub にない出所（Anima の LoRA）を正しく表現できない。
+
+    `base_model` が並びなのは、**この配布形が再配布している上流を全部並べる**ため（重みの出所と
+    再配布する text encoder は別リポ）。並べても関係は `quantized` のまま — 重みを融合した
+    わけではなく、それぞれを格納形へ落とし直して 1 リポに同居させているだけ。
     """
 
     pipeline_tag: str
-    base_model: str
+    base_model: tuple[str, ...]
     base_model_relation: str
     license: str
-    license_name: str
-    license_link: str
     tags: tuple[str, ...]
+    #: `license: other` のときだけ HF が読む 2 席。SPDX 識別子を当てられた配布形は**持たない**
+    #: （空欄で並べると「名前の無い独自ライセンス」に読める）。
+    license_name: str | None = None
+    license_link: str | None = None
 
 
 def format_size(size: int) -> str:
@@ -121,16 +131,23 @@ def _require_pipeline(manifest: Mapping[str, Any], supported: str) -> None:
             )
 
 
+def _base_model(models: Sequence[str]) -> list[str]:
+    """`base_model`（1 本なら scalar・複数なら YAML の並び — HF はどちらも読む）。"""
+    if len(models) == 1:
+        return [f"base_model: {models[0]}"]
+    return ["base_model:", *(f"  - {model}" for model in models)]
+
+
 def _frontmatter(metadata: CardMetadata) -> list[str]:
     return [
         "---",
         f"library_name: {LIBRARY_NAME}",
         f"pipeline_tag: {metadata.pipeline_tag}",
-        f"base_model: {metadata.base_model}",
+        *_base_model(metadata.base_model),
         f"base_model_relation: {metadata.base_model_relation}",
         f"license: {metadata.license}",
-        f"license_name: {metadata.license_name}",
-        f"license_link: {metadata.license_link}",
+        *([f"license_name: {metadata.license_name}"] if metadata.license_name is not None else []),
+        *([f"license_link: {metadata.license_link}"] if metadata.license_link is not None else []),
         "tags:",
         *(f"  - {tag}" for tag in metadata.tags),
         "---",
@@ -255,7 +272,7 @@ PIPELINE_TAG = "text-to-image"
 #: 「元のモデルカードを見よ」として `circlestone-labs/Anima` を指す。実値はそちらにある。
 ANIMA_METADATA = CardMetadata(
     pipeline_tag=PIPELINE_TAG,
-    base_model="circlestone-labs/Anima-Base-v1.0-Diffusers",
+    base_model=("circlestone-labs/Anima-Base-v1.0-Diffusers",),
     base_model_relation="quantized",
     license="other",
     license_name="circlestone-labs-non-commercial-license",
@@ -287,7 +304,7 @@ def _default_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _overview(manifest: Mapping[str, Any]) -> list[str]:
     defaults = _default_model(manifest)["pipelineConfig"]["defaults"]
-    base_model = ANIMA_METADATA.base_model
+    base_model = ANIMA_METADATA.base_model[0]
     return [
         "## What is this",
         "",
@@ -400,13 +417,52 @@ SBV2_SUPPORTED_PIPELINE = "sbv2/1"
 
 SBV2_PIPELINE_TAG = "text-to-speech"
 
+#: アーキテクチャ（どのファミリーも JP-Extra 系 — 違うのは重みの出所であって形ではない）。
+SBV2_ARCHITECTURE = "Style-Bert-VITS2 JP-Extra"
+
+#: `text_encoder` の素になった日本語 BERT（`export_deberta.py` の `MODEL_ID`）。manifest は
+#: 役割名しか持たないので、帰属はカード側が負う。ライセンスは実地確認（2026-08-07）。
+#: **どのファミリーでも同じ 1 本**を再配布するので、プロファイルの席ではなくここが持つ。
+SBV2_TEXT_ENCODER_MODEL = "ku-nlp/deberta-v2-large-japanese-char-wwm"
+SBV2_TEXT_ENCODER_LICENSE = "cc-by-sa-4.0"
+
+#: 使い方スニペットのデモ文（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
+SBV2_DEMO_TEXT = "こんにちは、これはテストです。"
+
+
+@dataclass(frozen=True)
+class Sbv2CardProfile:
+    """SBV2 カードの**帰属プロファイル** — 声のファミリーごとに違う「manifest に無い事実」。
+
+    SBV2 のテンプレートは 1 つでも、帰属（出所・ライセンス・再配布の条件・引用）はファミリー
+    ごとに**別の法的事実**になる。決め打ちのまま別ファミリーのリポへ描くと、表も使い方も
+    正しいのに帰属だけが前のファミリーのまま残る — 配ってからでないと誰も気づけない誤りなので、
+    ここが席として分けて持つ（選択は {@link SBV2_CARD_PROFILES} 経由で**明示**）。
+
+    `attribution` が行の並びそのものなのは、この席に入るのが導出できない散文（ライセンス条項の
+    要約・引用・再配布条件）だから。機械的に組める 2 行（Voices / Architecture）だけは
+    {@link _sbv2_base_weights} が `source_dirs` / `source_version` から組む。
+    """
+
+    metadata: CardMetadata
+    title: str
+    #: 出所リポジトリの中で、この配布形の声になったディレクトリ群。
+    source_dirs: tuple[str, ...]
+    #: 出所の `config.json` が名乗る version 文字列。
+    source_version: str
+    #: Voices / Architecture に続く帰属の箇条（Markdown の行そのもの）。
+    attribution: tuple[str, ...]
+
+
+# ---- ③-a FN 系（単一モデル） -------------------------------------------------
+
 #: ライセンス（実地確認 2026-08-07 — https://huggingface.co/rufflet17/voice_models）: 出所の
 #: リポジトリは **license を宣言しておらず、モデルカードも無い**。SPDX 識別子を当てられない
 #: ので `other` を採り、`license_link` は「実際に条件が書かれている場所」= 出所のリポジトリを
 #: 指す。公開者が改変自由としている事実は本文の帰属節に書く（HF の語彙では表せない）。
-SBV2_METADATA = CardMetadata(
+SBV2_FN_METADATA = CardMetadata(
     pipeline_tag=SBV2_PIPELINE_TAG,
-    base_model="rufflet17/voice_models",
+    base_model=("rufflet17/voice_models",),
     base_model_relation="quantized",
     license="other",
     license_name="rufflet17-voice-models-terms",
@@ -414,20 +470,89 @@ SBV2_METADATA = CardMetadata(
     tags=("text-to-speech", "webgpu", "japanese"),
 )
 
-SBV2_TITLE = "Style-Bert-VITS2 — Karume"
+SBV2_FN_PROFILE = Sbv2CardProfile(
+    metadata=SBV2_FN_METADATA,
+    title="Style-Bert-VITS2 — Karume",
+    source_dirs=("FN/",),
+    source_version="2.6.1-JP-Extra",
+    attribution=(
+        "- **Terms**: the publisher declares the model free to modify. The source repository",
+        "  declares no SPDX license and carries no model card, so its page is where the",
+        f"  governing terms live — hence `license: {SBV2_FN_METADATA.license}` above,"
+        " pointed at it.",
+        f"- **Text encoder**: [{SBV2_TEXT_ENCODER_MODEL}]"
+        f"(https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}),",
+        f"  licensed **{SBV2_TEXT_ENCODER_LICENSE}** (as of retrieval). It is redistributed here",
+        "  in the container format as the `text_encoder` component, so that license travels with",
+        "  this repository too.",
+    ),
+)
 
-#: 素になった重み（manifest には現れない — 変換されて格納形だけが残るため）。
-SBV2_SOURCE_DIR = "FN/"
-SBV2_ARCHITECTURE = "Style-Bert-VITS2 JP-Extra"
-SBV2_SOURCE_VERSION = "2.6.1-JP-Extra"
 
-#: `text_encoder` の素になった日本語 BERT（`export_deberta.py` の `MODEL_ID`）。manifest は
-#: 役割名しか持たないので、帰属はカード側が負う。ライセンスは実地確認（2026-08-07）。
-SBV2_TEXT_ENCODER_MODEL = "ku-nlp/deberta-v2-large-japanese-char-wwm"
-SBV2_TEXT_ENCODER_LICENSE = "cc-by-sa-4.0"
+# ---- ③-b JVNV 系（ファミリー） -----------------------------------------------
 
-#: 使い方スニペットのデモ文（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
-SBV2_DEMO_TEXT = "こんにちは、これはテストです。"
+#: ライセンス（実地確認 2026-08-09 — https://huggingface.co/litagin/style_bert_vits2_jvnv）:
+#: 出所のリポジトリは「ライセンスは JVNV コーパスの cc-by-sa-4.0 を引き継ぐ」と明言している。
+#: SPDX 標準タグが当たるので `license_name` / `license_link` は持たない（HF が識別子から解決
+#: する席で、独自名を名乗らせると「名前の無い独自ライセンス」に読める）。
+#: `base_model` に text encoder を併記するのは、この配布形が**両方を再配布している**ため。
+#: 両者とも cc-by-sa-4.0 なので、SA（同一ライセンス継承）はリポジトリ全体で矛盾しない。
+SBV2_JVNV_METADATA = CardMetadata(
+    pipeline_tag=SBV2_PIPELINE_TAG,
+    base_model=("litagin/style_bert_vits2_jvnv", SBV2_TEXT_ENCODER_MODEL),
+    base_model_relation="quantized",
+    license="cc-by-sa-4.0",
+    tags=("text-to-speech", "webgpu", "japanese"),
+)
+
+#: CC BY-SA 4.0 の条文（BY の「ライセンス URL を示す」を、カード自身が満たすための 1 本）。
+SBV2_JVNV_LICENSE_URL = "https://creativecommons.org/licenses/by-sa/4.0/"
+
+SBV2_JVNV_PROFILE = Sbv2CardProfile(
+    metadata=SBV2_JVNV_METADATA,
+    title="Style-Bert-VITS2 JVNV — Karume",
+    source_dirs=("jvnv-F1-jp/", "jvnv-F2-jp/", "jvnv-M1-jp/", "jvnv-M2-jp/"),
+    source_version="2.0-JP-Extra",
+    attribution=(
+        f"- **Terms**: **[CC BY-SA 4.0]({SBV2_JVNV_LICENSE_URL})**, inherited from the JVNV"
+        " corpus the",
+        "  voices were trained on — the source repository states the corpus license carries over",
+        "  to the models. Redistribution here keeps it: credit the authors, name the source and",
+        "  the license URL, state that the weights were **converted to another format and"
+        " quantized**",
+        "  to i8, license any derivative work under CC BY-SA 4.0 as well, and impose no further",
+        "  restrictions. There is no NonCommercial and no NoDerivatives clause — commercial use",
+        "  and modification are both allowed.",
+        "- **Changes made here**: conversion into the Karume container format and **i8"
+        " quantization**",
+        "  of the weights. No retraining, no fine-tuning — the voices are the source checkpoints",
+        "  in a different storage form.",
+        f"- **Text encoder**: [{SBV2_TEXT_ENCODER_MODEL}]"
+        f"(https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}),",
+        f"  licensed **{SBV2_TEXT_ENCODER_LICENSE}** (as of retrieval). It is redistributed here",
+        "  in the container format as the `text_encoder` component — the same license as the",
+        "  voices, so the share-alike term is consistent across everything in this repository.",
+        "- **Training data**: the JVNV corpus, licensed CC BY-SA 4.0. Detai Xin, Junfeng Jiang,",
+        "  Shinnosuke Takamichi, Yuki Saito, Akiko Aizawa, Hiroshi Saruwatari,",
+        # 論文題は 1 行に収める（折り返すと、題での検索が本文にあるのに当たらなくなる）。
+        "  *JVNV: A Corpus of Japanese Emotional Speech with Verbal Content and"
+        " Nonverbal Expressions*,",
+        "  [arXiv:2310.06072](https://arxiv.org/abs/2310.06072). Corpus page:",
+        "  <https://sites.google.com/site/shinnosuketakamichi/research-topics/jvnv_corpus>",
+        "- **Training implementation**:"
+        " [Style-Bert-VITS2](https://github.com/litagin02/Style-Bert-VITS2)",
+        "  (AGPL-3.0). Karume's runtime contains **none of that code**: it is an independent",
+        "  implementation that reads these weights from its own container format, so the AGPL",
+        "  terms govern the training implementation, not the runtime that plays these files.",
+    ),
+)
+
+#: 選べる帰属プロファイル。**既定は置かない** — 省略時に片方を黙って選ぶと、新しいファミリーを
+#: 配るたびに前のファミリーの帰属が沈黙で再発する（`karume.dist` が明示を要求する）。
+SBV2_CARD_PROFILES: Mapping[str, Sbv2CardProfile] = {
+    "fn": SBV2_FN_PROFILE,
+    "jvnv": SBV2_JVNV_PROFILE,
+}
 
 
 def _sbv2_overview(manifest: Mapping[str, Any]) -> list[str]:
@@ -450,23 +575,18 @@ def _sbv2_overview(manifest: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _sbv2_base_weights() -> list[str]:
-    base_model = SBV2_METADATA.base_model
+def _sbv2_base_weights(profile: Sbv2CardProfile) -> list[str]:
+    """帰属節。声の出所リポジトリは `base_model` の先頭（= 重みの出所そのもの）から引く。"""
+    base_model = profile.metadata.base_model[0]
+    dirs = " / ".join(f"`{name}`" for name in profile.source_dirs)
     return [
         "## Base weights and attribution",
         "",
         "Converted into the container format — the original checkpoints are not distributed here.",
         "",
-        f"- **Voices**: `{SBV2_SOURCE_DIR}` of [{base_model}](https://huggingface.co/{base_model})",
-        f"- **Architecture**: {SBV2_ARCHITECTURE} (`version: {SBV2_SOURCE_VERSION}`)",
-        "- **Terms**: the publisher declares the model free to modify. The source repository",
-        "  declares no SPDX license and carries no model card, so its page is where the",
-        f"  governing terms live — hence `license: {SBV2_METADATA.license}` above, pointed at it.",
-        f"- **Text encoder**: [{SBV2_TEXT_ENCODER_MODEL}]"
-        f"(https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}),",
-        f"  licensed **{SBV2_TEXT_ENCODER_LICENSE}** (as of retrieval). It is redistributed here",
-        "  in the container format as the `text_encoder` component, so that license travels with",
-        "  this repository too.",
+        f"- **Voices**: {dirs} of [{base_model}](https://huggingface.co/{base_model})",
+        f"- **Architecture**: {SBV2_ARCHITECTURE} (`version: {profile.source_version}`)",
+        *profile.attribution,
     ]
 
 
@@ -553,16 +673,20 @@ def _sbv2_defaults(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def render_sbv2_model_card(manifest: Mapping[str, Any], repo: str) -> str:
-    """SBV2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+def render_sbv2_model_card(manifest: Mapping[str, Any], repo: str, profile: Sbv2CardProfile) -> str:
+    """SBV2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+
+    `profile` に既定を置かないのは MUST — 帰属はファミリーごとに違う事実で、既定を持たせた
+    瞬間に「別ファミリーのリポへ前のファミリーの帰属を描く」経路が黙って生える。
+    """
     _require_pipeline(manifest, SBV2_SUPPORTED_PIPELINE)
     return _render(
         (
-            _frontmatter(SBV2_METADATA),
-            ["", f"# {SBV2_TITLE}", ""],
+            _frontmatter(profile.metadata),
+            ["", f"# {profile.title}", ""],
             _sbv2_overview(manifest),
             [""],
-            _sbv2_base_weights(),
+            _sbv2_base_weights(profile),
             [""],
             _models(manifest),
             [""],

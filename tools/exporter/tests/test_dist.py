@@ -56,6 +56,7 @@ from karume.dist import (
     complete_quant_weights,
     default_out_dir,
     main,
+    resolve_card_renderer,
     sbv2_knob_defaults,
     sbv2_pipeline_config,
     sbv2_plan,
@@ -741,8 +742,41 @@ class TestCli:
         """カードは pipeline ごとのテンプレート — 描き手が他 pipeline の manifest を拒む。"""
         for name, spec in PIPELINES.items():
             manifest = {"models": {"m": {"pipeline": f"{name}/0"}}}
-            with pytest.raises(ValueError):
-                spec.render_card(manifest, "hdae/x")
+            for render_card in spec.card_profiles.values():
+                with pytest.raises(ValueError):
+                    render_card(manifest, "hdae/x")
+
+
+class TestCardProfile:
+    """帰属プロファイルの選択（`--card-profile`）— 誤帰属は配ってからでないと気づけない。"""
+
+    def test_it_is_unset_until_asked_for(self) -> None:
+        assert build_parser().parse_args([]).card_profile is None
+        assert build_parser().parse_args(["--card-profile", "jvnv"]).card_profile == "jvnv"
+
+    def test_a_pipeline_with_one_profile_needs_no_choice(self) -> None:
+        """anima の帰属は 1 通りしかない（選びようがないものを聞かない）。"""
+        profiles = PIPELINES["anima"].card_profiles
+        assert len(profiles) == 1
+        assert resolve_card_renderer(PIPELINES["anima"], None) is next(iter(profiles.values()))
+
+    def test_it_refuses_to_pick_an_attribution_when_several_exist(self) -> None:
+        """既定を黙って選ぶと、新しいファミリーへ前のファミリーの帰属がそのまま残る。"""
+        with pytest.raises(DistError, match="--card-profile") as error:
+            resolve_card_renderer(PIPELINES["sbv2"], None)
+        assert "fn" in str(error.value)
+        assert "jvnv" in str(error.value)
+
+    def test_it_refuses_a_profile_it_does_not_have(self) -> None:
+        with pytest.raises(DistError, match="jvnv"):
+            resolve_card_renderer(PIPELINES["sbv2"], "FN9")
+
+    def test_it_resolves_each_name_to_its_own_renderer(self) -> None:
+        """名前ごとに別の描き手（束ね違いなら 2 つのファミリーが同じカードを描く）。"""
+        profiles = PIPELINES["sbv2"].card_profiles
+        assert sorted(profiles) == ["fn", "jvnv"]
+        assert resolve_card_renderer(PIPELINES["sbv2"], "jvnv") is profiles["jvnv"]
+        assert profiles["fn"] is not profiles["jvnv"]
 
 
 # ---- SBV2（text-to-speech）---------------------------------------------------
@@ -1334,7 +1368,16 @@ class TestSbv2Cli:
         knobs, sources = self._sources(tmp_path, SBV2_DEFAULT_MODEL)
         self._reroot(tmp_path, monkeypatch)
 
-        main(["--pipeline", "sbv2", "--series", str(sources.series_f16.parent)])
+        main(
+            [
+                "--pipeline",
+                "sbv2",
+                "--card-profile",
+                "fn",
+                "--series",
+                str(sources.series_f16.parent),
+            ]
+        )
 
         out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
         expected = _in_subtree(SBV2_DEFAULT_MODEL, SBV2_OUTPUT_PATHS.values())
@@ -1354,7 +1397,18 @@ class TestSbv2Cli:
         _, sources = self._sources(tmp_path, "FN7")
         self._reroot(tmp_path, monkeypatch)
 
-        main(["--pipeline", "sbv2", "--model", "FN7", "--series", str(sources.series_f16.parent)])
+        main(
+            [
+                "--pipeline",
+                "sbv2",
+                "--card-profile",
+                "fn",
+                "--model",
+                "FN7",
+                "--series",
+                str(sources.series_f16.parent),
+            ]
+        )
 
         out_dir = tmp_path / "models" / "karume-sbv2-FN7"
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
@@ -1374,6 +1428,8 @@ class TestSbv2Cli:
             [
                 "--pipeline",
                 "sbv2",
+                "--card-profile",
+                "jvnv",
                 "--model",
                 "F1",
                 "--model",
@@ -1393,3 +1449,19 @@ class TestSbv2Cli:
         assert "## Model: F1" in card
         assert "## Model: F2" in card
         assert 'fromPretrained("hdae/karume-sbv2-jvnv"' in card
+        # 帰属は選んだファミリーのもの（FN の出所が 1 語も混ざらない）。
+        assert "base_model:\n  - litagin/style_bert_vits2_jvnv\n" in card
+        assert "license: cc-by-sa-4.0" in card
+        assert "rufflet17" not in card
+
+    def test_it_refuses_to_assemble_sbv2_without_an_attribution_profile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """カードの帰属を選ばせる — しかも**組み立てる前**に落ちる（残骸を作らない）。"""
+        _, sources = self._sources(tmp_path, SBV2_DEFAULT_MODEL)
+        self._reroot(tmp_path, monkeypatch)
+
+        with pytest.raises(DistError, match="--card-profile"):
+            main(["--pipeline", "sbv2", "--series", str(sources.series_f16.parent)])
+
+        assert not (tmp_path / "models").exists()

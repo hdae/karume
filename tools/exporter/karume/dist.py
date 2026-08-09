@@ -31,8 +31,13 @@ MUST: 検査（格納 dtype / rope 素表のバイト同一 / スタイル表・
 自己完結スナップショットとして吐き出す。
 
     uv run karume dist                                    # = uv run python -m karume.dist
-    uv run karume dist --pipeline sbv2
-    uv run karume dist --pipeline sbv2 --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
+    uv run karume dist --pipeline sbv2 --card-profile fn
+    uv run karume dist --pipeline sbv2 --card-profile jvnv \\
+        --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
+
+`--card-profile` はモデルカードの**帰属**（出所・ライセンス・引用）の選択で、sbv2 では必須
+（{@link resolve_card_renderer}）。組み立てる資産には掛からない — 同じ重みでも、どのファミリー
+として配るかで帰属が変わる。
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ import re
 import shutil
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +59,12 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save
 
-from karume.modelcard import HF_OWNER, render_model_card, render_sbv2_model_card
+from karume.modelcard import (
+    HF_OWNER,
+    SBV2_CARD_PROFILES,
+    render_model_card,
+    render_sbv2_model_card,
+)
 from karume.paths import DIST_ROOT, INPUTS_ROOT, OUTPUTS_ROOT, SERIES_ROOT
 
 # ---- ① 共有部: 置き場の綴り・配置・ハッシュ・共有の畳み込み・宣言と現物の突合 -------
@@ -1175,6 +1186,10 @@ def sbv2_plan(
 # ---- ⑤ pipeline 別ディスパッチと CLI -----------------------------------------
 
 
+#: モデルカードの描き手（manifest とリポ ID から本文 1 枚）。
+CardRenderer = Callable[[Mapping[str, Any], str], str]
+
+
 @dataclass(frozen=True)
 class Pipeline:
     """pipeline ごとに違うものだけを持つディスパッチ表の 1 行。
@@ -1188,8 +1203,31 @@ class Pipeline:
     #: 単一モデルのときの既定の出力ディレクトリ名（複数モデルのリポ名は導出できない）。
     repo_name: Callable[[str], str]
     plan: Callable[[Path, str], ModelPlan]
-    #: モデルカードの描き手（`karume.modelcard` の pipeline 別テンプレート）。
-    render_card: Callable[[Mapping[str, Any], str], str]
+    #: モデルカードの**帰属プロファイル**（名前 → 描き手）。テンプレートは pipeline 固有でも、
+    #: 帰属（出所・ライセンス・引用）は声のファミリーごとに別の事実になるため 1 対 1 ではない。
+    card_profiles: Mapping[str, CardRenderer]
+
+
+def resolve_card_renderer(pipeline: Pipeline, profile: str | None) -> CardRenderer:
+    """`--card-profile` を描き手へ解決する。
+
+    MUST: 選択肢が 2 つ以上あるとき、省略は**選択肢を並べて落とす** — 既定を黙って選ぶと、
+    新しいファミリーのリポへ前のファミリーの帰属がそのまま描かれる。表も使い方も正しいまま
+    帰属だけが誤るので、配ってからでないと誰も気づけない。1 つしかない pipeline は選びようが
+    ないので省略で通す（2 つ目が生えた瞬間に、この規則が自動で明示を要求しはじめる）。
+    """
+    choices = ", ".join(sorted(pipeline.card_profiles))
+    if profile is None:
+        if len(pipeline.card_profiles) != 1:
+            raise DistError(
+                f"--card-profile が要る（選択肢: {choices}）— モデルカードの帰属は"
+                "ファミリーごとに違う事実なので、既定を黙って選ばない"
+            )
+        return next(iter(pipeline.card_profiles.values()))
+    renderer = pipeline.card_profiles.get(profile)
+    if renderer is None:
+        raise DistError(f"帰属プロファイル '{profile}' は無い（選択肢: {choices}）")
+    return renderer
 
 
 def anima_dist_plan(series_dir: Path, model: str) -> ModelPlan:
@@ -1209,13 +1247,17 @@ PIPELINES: Mapping[str, Pipeline] = {
         # `karume-` prefix はリポ名裁定（2026-08-09）— HF org の代わりの名前空間。
         repo_name=lambda model: f"karume-{model}",
         plan=anima_dist_plan,
-        render_card=render_model_card,
+        # 帰属は 1 通りだけ（LoRA を焼いた base 1 本）— 選択肢が無いので省略で通る。
+        card_profiles={"anima": render_model_card},
     ),
     "sbv2": Pipeline(
         default_model=SBV2_DEFAULT_MODEL,
         repo_name=sbv2_repo_name,
         plan=sbv2_dist_plan,
-        render_card=render_sbv2_model_card,
+        card_profiles={
+            name: partial(render_sbv2_model_card, profile=profile)
+            for name, profile in SBV2_CARD_PROFILES.items()
+        },
     ),
 }
 
@@ -1254,6 +1296,17 @@ def build_parser() -> argparse.ArgumentParser:
         + "）",
     )
     parser.add_argument(
+        "--card-profile",
+        dest="card_profile",
+        metavar="NAME",
+        default=None,
+        help="モデルカードの帰属プロファイル（出所・ライセンス・引用）。選択肢が 2 つ以上ある"
+        " pipeline では必須: "
+        + " / ".join(
+            f"{name}={'|'.join(sorted(spec.card_profiles))}" for name, spec in PIPELINES.items()
+        ),
+    )
+    parser.add_argument(
         "--series",
         type=Path,
         default=SERIES_ROOT,
@@ -1274,6 +1327,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     pipeline = PIPELINES[args.pipeline]
     models = args.models if args.models else [pipeline.default_model]
     out_dir = args.out if args.out is not None else default_out_dir(pipeline, models)
+    # 帰属プロファイルは**組み立ての前**に解決する — 誤った / 足りない指定で数 GB を並べてから
+    # 最後の 1 枚で落ちる形にしない。
+    render_card = resolve_card_renderer(pipeline, args.card_profile)
     # MUST: 全モデルの計画（= 検査と読み取り）を配置の**前**に済ませる — 2 モデル目で落ちる
     # 形でも、1 モデル目だけ入った配布形を後段に見せない。
     plans = [pipeline.plan(args.series, model) for model in models]
@@ -1282,7 +1338,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     # モデルカードは**検証を通った manifest** から描く（表と現物が食い違ったまま説明だけ
     # 生えることがない順序）。リポ ID は組み立て先のディレクトリ名から導く — manifest は
     # 自分の在り処を知らず、ファミリーリポの名前は pipeline の定数にもできない。
-    card = pipeline.render_card(manifest, f"{HF_OWNER}/{out_dir.name}")
+    card = render_card(manifest, f"{HF_OWNER}/{out_dir.name}")
     (out_dir / MODEL_CARD_FILENAME).write_text(card, encoding="utf-8")
     for rel_path, size in sorted(verified.items()):
         print(f"{size:>12}  {rel_path}")

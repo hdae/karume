@@ -32,8 +32,9 @@ being true "except for one flag". Bare `karume export` stays Anima's spelling.
 
 ```sh
 uv run karume dist --series ../../outputs/series
-uv run karume dist --pipeline sbv2                       # model FN4 -> models/karume-sbv2-FN4/
-uv run karume dist --pipeline sbv2 --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
+uv run karume dist --pipeline sbv2 --card-profile fn     # model FN4 -> models/karume-sbv2-FN4/
+uv run karume dist --pipeline sbv2 --card-profile jvnv --model F1 --model F2 \
+    --out ../../models/karume-sbv2-jvnv
 uv run karume verify ../../models/karume-anima-turbo/anima-turbo/transformer/model.f16.safetensors
 ```
 
@@ -57,6 +58,13 @@ model list, the numbers, the file list, the quant table and the style / speaker 
 mechanically from the manifest; the only constants a template carries are the facts the manifest
 does not record (base model, license, provenance of the fused LoRA). `README.md` is a metadata file
 on par with `karume.json`, so it is exempt from the undeclared-file check.
+
+**Attribution is a separate axis from the template**: `--card-profile` picks which upstream family
+the card credits (source repository, source directories and version, license terms, citations).
+SBV2 ships two profiles — `fn` and `jvnv` — and naming one is **required** there, because a silent
+default would keep the previous family's attribution on the next family's repository, where every
+table and snippet still reads correctly and only the credit is wrong. Anima has a single profile,
+so the flag may be omitted; the moment a second one exists, the same rule starts demanding it.
 
 ## Verification commands (all of them, after any change)
 
