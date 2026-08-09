@@ -32,20 +32,31 @@ being true "except for one flag". Bare `karume export` stays Anima's spelling.
 
 ```sh
 uv run karume dist --series ../../outputs/series
-uv run karume dist --pipeline sbv2
-uv run karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
+uv run karume dist --pipeline sbv2                       # model FN4 -> models/sbv2-FN4/
+uv run karume dist --pipeline sbv2 --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
+uv run karume verify ../../models/anima-turbo/anima-turbo/transformer/model.f16.safetensors
 ```
 
 The scripts are **outside** the package, so they are not in the wheel — `karume export` /
 `karume export-sbv2` only run in a repository working tree (when absent they spell out where the
 script belongs and fail loudly).
 
+`--model` names the model to assemble (it moves the series it reads, the subtree it writes and the
+key it declares in the manifest). Repeating it assembles **one repository holding several models**
+(ADR 0041): the first one given becomes `defaultModel`, and files two models produce byte for byte
+identically are placed **once** under `shared/`, referenced by the same path from both. A family
+repository's name cannot be derived from the model list, so `--out` is required there.
+
+The layout inside a distribution is uniform — `<model>/…` subtrees plus `shared/`, with only
+`karume.json` and `README.md` at the root — and a single-model repository follows the same rule
+(otherwise adding a second model would move every existing path).
+
 `karume dist` writes a **model card `README.md`** after assembly and `verify_dist`
 (`karume.modelcard` — including the ADR 0037 §3 frontmatter), from a template per pipeline. The
-numbers, the file list, the preset table and the style / speaker tables are derived mechanically
-from the manifest; the only constants a template carries are the facts the manifest does not record
-(base model, license, provenance of the fused LoRA). `README.md` is a metadata file on par with
-`karume.json`, so it is exempt from the undeclared-file check.
+model list, the numbers, the file list, the quant table and the style / speaker tables are derived
+mechanically from the manifest; the only constants a template carries are the facts the manifest
+does not record (base model, license, provenance of the fused LoRA). `README.md` is a metadata file
+on par with `karume.json`, so it is exempt from the undeclared-file check.
 
 ## Verification commands (all of them, after any change)
 

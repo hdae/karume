@@ -1,29 +1,36 @@
 """配布ディレクトリの組み立て — 系列ディレクトリ群 → HF へそのまま上げられる 1 リポ形。
 
-仕様の正本は ADR 0038（`docs/decisions/0038-manifest-v1.md`）。ここが作るのは §2 の規約名で
-並んだファイル群と、それを宣言する `karume.json`（§1〜§3）、そして manifest から機械導出した
-モデルカード `README.md`（ADR 0037 §3 の「そのまま HF リポとして上げられる形」）。
+仕様の正本は ADR 0041（`docs/decisions/0041-manifest-v2.md`）。ここが作るのは §2 の形で
+並んだファイル群と、それを宣言する `karume.json`（`karume/2`）、そして manifest から機械導出
+したモデルカード `README.md`（ADR 0037 §3 の「そのまま HF リポとして上げられる形」）。
 
-**pipeline 別のディスパッチ**（`--pipeline anima|sbv2`）。共有するのは「置く / sha256 を採る /
-宣言と現物を突き合わせる」層だけで、どのファイルをどの名前で並べ何を宣言するかは pipeline
-ごとの表が持つ（{@link PIPELINES}）。
+**リポ内レイアウトは一律「モデル別サブツリー + `shared/` + 直下 `karume.json` / `README.md`」**
+（ADR 0041 §9）。単一モデルのリポも同じ規則で `<モデル名>/…` の下へ入る — 1 モデルだけ平置き
+という例外を作ると、2 個目のモデルを足した瞬間に既存 path が全部動く。
 
-MUST: **manifest は手書きせず資産から導出する**（ADR 0038 Context）。`size` / `sha256` は
-組み立て後の実ファイルから streaming で採る — 数 GB を丸読みしないことと、「表と現物が
-食い違う」失敗様式を構造的に起こさないことの両方がここに掛かっている。
+**pipeline 別のディスパッチ**（`--pipeline anima|sbv2`）と**モデル別の軸**（`--model`）。
+共有するのは「置く / sha256 を採る / 共有ファイルを畳む / 宣言と現物を突き合わせる」層だけで、
+どのファイルをどの名前で並べ何を宣言するかは pipeline ごとの表が持つ（{@link PIPELINES}）。
+
+MUST: **manifest は手書きせず資産から導出する**（ADR 0038 Context を v2 でも維持）。`size` /
+`sha256` は組み立て後の実ファイルから streaming で採る — 数 GB を丸読みしないことと、「表と
+現物が食い違う」失敗様式を構造的に起こさないことの両方がここに掛かっている。
 
 MUST: 系列に散らばる `io.*.safetensors`（E2E の入出力フィクスチャ）は**配布に含めない**。
 出力へ入るのは pipeline ごとの出力 path 表に載ったファイルだけで、表に無いものは黙って
 混ざらない。
 
 MUST: 検査（格納 dtype / rope 素表のバイト同一 / スタイル表・話者表の行数）は**配置の前**に
-全役割ぶん済ませる — 落ちるなら途中の配布形を 1 ファイルも残さない。
+**全モデルぶん**済ませる — 落ちるなら途中の配布形を 1 ファイルも残さない。組み立ては
+「計画（{@link ModelPlan} を組む = 検査と読み取りの全部）→ 実体化（{@link assemble_family}）」の
+2 段で、前段は 1 バイトも書かない。
 
 同一ファイルシステム上の組み立てなので配置は `os.link`（ハードリンク）を優先し、リンクを
 張れない場合（別 FS・権限）だけ copy へ落ちる。数 GB × 2 系列を複製しないため。
 
-    uv run karume dist                  # = uv run python -m karume.dist（引数は同じ）
+    uv run karume dist                                    # = uv run python -m karume.dist
     uv run karume dist --pipeline sbv2
+    uv run karume dist --pipeline sbv2 --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 """
 
 from __future__ import annotations
@@ -33,32 +40,53 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from safetensors import safe_open
-from safetensors.numpy import save_file
+from safetensors.numpy import save
 
-from karume.modelcard import render_model_card, render_sbv2_model_card
+from karume.modelcard import HF_OWNER, render_model_card, render_sbv2_model_card
 from karume.paths import DIST_ROOT, INPUTS_ROOT, OUTPUTS_ROOT, SERIES_ROOT
 
-# ---- ① 共有部: 置き場の綴り・配置・ハッシュ・宣言と現物の突合 -----------------
+# ---- ① 共有部: 置き場の綴り・配置・ハッシュ・共有の畳み込み・宣言と現物の突合 -------
 
-#: manifest のファイル名（ADR 0038 §1 — リポジトリ直下の固定名）。
+#: manifest のファイル名（ADR 0041 §1 — リポジトリ直下の固定名）。
 MANIFEST_FILENAME = "karume.json"
+
+#: manifest の形式識別子（ADR 0041 §1 — hub は v2 だけを読む）。
+MANIFEST_FORMAT = "karume/2"
 
 #: モデルカードのファイル名（ADR 0037 §3 — HF が frontmatter を読む固定名）。
 MODEL_CARD_FILENAME = "README.md"
+
+#: 複数モデルが**同じ相対 path・同じ sha256** で持つファイルを 1 回だけ置く席（ADR 0041 §5）。
+#: 専用の間接参照は持たず、各モデルの manifest エントリが同じ path を書くだけで共有になる。
+SHARED_DIRNAME = "shared"
 
 #: 配布形の**メタファイル**（配布形そのものの説明であって、manifest が宣言する資産ではない）。
 #: 宣言外ファイル検査はこの 2 つだけを例外にする — 例外を名前でなく相対 path で持つのは、
 #: 下位ディレクトリに紛れ込んだ同名ファイルまで見逃さないため。**在ることは要求しない**
 #: （{@link verify_dist} はモデルカードを書く**前**に走るので、無いまま通る必要がある）。
 META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
+
+#: 規模上限（ADR 0041 §7）。hub が同じ値で弾くので、**焼く側で先に落とす**
+#: （配布してから利用者の手元で初めて分かる形にしない）。
+MAX_MODELS = 32
+MAX_WEIGHTS = 32
+MAX_ASSETS = 32
+MAX_QUANTS = 32
+MAX_PIPELINE_CONFIG_BYTES = 256 * 1024
+MAX_MANIFEST_BYTES = 1024 * 1024
+
+#: モデル名の許可文字。モデル名は manifest のキーであると同時に**リポ内のディレクトリ名**
+#: なので、hub の path セグメント検査（ADR 0041 §6）と同じ集合に縛る。
+MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 
 #: sha256 の読み出し単位。数 GB を丸読みしないための唯一の要件で、値自体は素の I/O 単位。
 _CHUNK_BYTES = 1 << 20
@@ -132,40 +160,378 @@ def place_file(source: Path, dest: Path) -> str:
     return "link"
 
 
-def file_ref(out_dir: Path, rel_path: str) -> dict[str, Any]:
-    """ADR 0038 §2 の 3 点セット `{path, size, sha256}` を実ファイルから導出する。"""
-    path = out_dir / rel_path
-    return {"path": rel_path, "size": path.stat().st_size, "sha256": sha256_file(path)}
+@dataclass(frozen=True)
+class Artifact:
+    """配布形へ入る 1 ファイル。`rel_path` は**モデルサブツリー内**の相対 path。
+
+    出所は 2 通りだけ: 系列からの**配置**（`source`）と、組み立てが作る**生成物**（`payload`
+    — `.npy` / ckpt から移した表など）。どちらか一方だけを持つ。生成物をバイト列で持つのは、
+    「置く前に中身が確定している」ことを共有判定（{@link assemble_family}）と同じ規律で
+    扱えるようにするため。
+    """
+
+    rel_path: str
+    source: Path | None = None
+    payload: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if (self.source is None) == (self.payload is None):
+            raise DistError(f"{self.rel_path}: Artifact は source / payload のどちらか一方を持つ")
+
+
+def materialize(artifact: Artifact, dest: Path) -> None:
+    """`Artifact` の実体を `dest` に作る（配置 or 書き出し）。
+
+    MUST: 生成物も既存 `dest` を先に外してから書く — 前回の組み立てで**系列へのハードリンク**が
+    残っていると、開いて書いた瞬間に系列側の実ファイルを書き換えることになる。
+    """
+    if artifact.source is not None:
+        place_file(artifact.source, dest)
+        return
+    assert artifact.payload is not None  # __post_init__ の不変条件
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.unlink(missing_ok=True)
+    dest.write_bytes(artifact.payload)
+
+
+@dataclass(frozen=True)
+class WeightFiles:
+    """weights の 1 dtype ぶん（ADR 0041 §3 の `{file, extras?}`）。中身は**役割名**。
+
+    実 path は {@link Artifact} 側が持つ — 共有の畳み込みで path が `shared/…` へ動くので、
+    宣言側が path を直に握っていると 2 箇所が独立に動く。
+    """
+
+    file: str
+    extras: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ModelPlan:
+    """1 モデルぶんの組み立て計画 — **検査と読み取りを全部済ませた**、まだ 1 バイトも書いて
+    いない状態。ファミリー組み立てはこれを N 本受け取ってから初めて配置に入る。
+    """
+
+    name: str
+    #: パイプライン契約（`anima/1` — ADR 0041 §2 でモデル単位になった）。
+    pipeline: str
+    #: 役割名 → 配布形へ入る 1 ファイル。
+    artifacts: Mapping[str, Artifact]
+    #: weights 名 → dtype ラベル → ファイル群（役割名で指す）。
+    weights: Mapping[str, Mapping[str, WeightFiles]]
+    #: assets 名 → 役割名（quant 選択に依存しない無条件ファイル）。
+    assets: Mapping[str, str]
+    quants: Mapping[str, Any]
+    default_quant: str
+    pipeline_config: Mapping[str, Any]
 
 
 def generator_tag() -> str:
-    """`generator` に焼く値（ADR 0038 §1 — 障害報告の照合用・実行意味論なし）。"""
+    """`generator` に焼く値（ADR 0041 §2 — 障害報告の照合用・実行意味論なし）。"""
     return f"karume/{importlib.metadata.version('karume')}"
 
 
-def _referenced_sizes(manifest: Mapping[str, Any]) -> dict[str, int]:
-    """manifest が参照する全ファイルの `{path: size}`（同一 path の重複は 1 つに畳む）。"""
+def assert_model_name(name: str) -> str:
+    """モデル名を検査して返す（manifest のキー兼リポ内ディレクトリ名）。"""
+    if not MODEL_NAME_RE.match(name):
+        raise DistError(
+            f"モデル名 '{name}' は許可文字 [A-Za-z0-9._-]（先頭のドット不可）に一致しない"
+            " — モデル名はリポ内のディレクトリ名でもあるので hub の path 検査と同じ集合に縛る"
+        )
+    if name == SHARED_DIRNAME:
+        raise DistError(f"モデル名に '{SHARED_DIRNAME}' は使えない（共有ファイルの席と衝突する）")
+    return name
+
+
+def complete_quant_weights(
+    weights: Mapping[str, Mapping[str, WeightFiles]],
+    quants: Mapping[str, Any],
+) -> dict[str, Any]:
+    """quant の `weights` 写像を**完全写像**へ埋める（hub の受理要件 — ADR 0041 §3）。
+
+    dtype ラベルが 1 つしかない weights は quant で選びようがないので表に書かせず、ここが
+    機械的に埋める（書かせると「選択肢の無い席」が quant の数だけ複製され、dtype を増やした
+    ときに一斉更新が要る = 導出可能な状態の二重化）。**2 つ以上あるものは表が名指ししていな
+    ければ落とす** — 既定を勝手に選ぶと、黙って別の格納形が配られる。
+    """
+    completed: dict[str, Any] = {}
+    for quant_name, quant in quants.items():
+        declared = quant["weights"]
+        for name in declared:
+            if name not in weights:
+                raise DistError(f"quant '{quant_name}': 未知の weights '{name}'")
+            if declared[name] not in weights[name]:
+                raise DistError(
+                    f"quant '{quant_name}': weights '{name}' に dtype '{declared[name]}' が無い"
+                    f"（利用可能: {sorted(weights[name])}）"
+                )
+        # MUST: 並びは **weights の宣言順**（表が書いた順ではない）— 埋めた席だけが末尾に
+        # 溜まると、manifest の weights 節と quant 節で同じ役割が別の順に並ぶ。
+        mapping: dict[str, str] = {}
+        for name, labels in weights.items():
+            if name in declared:
+                mapping[name] = declared[name]
+                continue
+            if len(labels) != 1:
+                raise DistError(
+                    f"quant '{quant_name}': weights '{name}' の dtype が {sorted(labels)} の"
+                    "複数あるのに指定が無い — quant 表が名指しする"
+                )
+            mapping[name] = next(iter(labels))
+        completed[quant_name] = {**quant, "weights": mapping}
+    return completed
+
+
+def file_ref(out_dir: Path, rel_path: str, sha256: str) -> dict[str, Any]:
+    """ADR 0041 §2 の 3 点セット `{path, size, sha256}`（size は置いた現物から採る）。"""
+    return {
+        "path": rel_path,
+        "size": (out_dir / rel_path).stat().st_size,
+        "sha256": sha256,
+    }
+
+
+def _prune_empty_dirs(out_dir: Path, start: Path) -> None:
+    """`start` から `out_dir` まで、空になったディレクトリだけを畳む（共有の畳み込みの後始末）。"""
+    current = start
+    while current != out_dir and current.is_dir() and not any(current.iterdir()):
+        current.rmdir()
+        current = current.parent
+
+
+def _fold_shared(
+    out_dir: Path,
+    plans: Sequence[ModelPlan],
+    placed: dict[tuple[str, str], str],
+    digests: dict[str, str],
+) -> None:
+    """同じ相対 path・同じ sha256 のファイルを 2 モデル以上が持つとき `shared/` へ 1 回だけ置く。
+
+    MUST: 一致の条件は **モデルサブツリー内の相対 path と sha256 の両方**（ADR 0041 §5 の
+    「path の一致で共有」を、中身が同じであることまで確かめてから成立させる）。中身違いを
+    同じ席へ寄せると、どちらのモデルかで別の重みが黙って読まれる。
+    """
+    groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for plan in plans:
+        for role, artifact in plan.artifacts.items():
+            key = (artifact.rel_path, digests[placed[(plan.name, role)]])
+            groups.setdefault(key, []).append((plan.name, role))
+    for (rel_path, digest), members in groups.items():
+        if len({model for model, _ in members}) < 2:
+            continue
+        target = f"{SHARED_DIRNAME}/{rel_path}"
+        (out_dir / target).parent.mkdir(parents=True, exist_ok=True)
+        (out_dir / target).unlink(missing_ok=True)
+        moved = False
+        for model, role in members:
+            source_rel = placed[(model, role)]
+            if source_rel == target:
+                continue
+            source = out_dir / source_rel
+            if moved:
+                source.unlink(missing_ok=True)
+            else:
+                os.replace(source, out_dir / target)
+                moved = True
+            digests.pop(source_rel, None)
+            _prune_empty_dirs(out_dir, source.parent)
+            placed[(model, role)] = target
+        digests[target] = digest
+
+
+def _model_entry(plan: ModelPlan, refs: Mapping[str, dict[str, Any]]) -> dict:
+    """1 モデルぶんの manifest エントリ（ADR 0041 §2）。`refs` は役割名 → 3 点セット。"""
+    weights: dict[str, Any] = {}
+    for name, labels in plan.weights.items():
+        entry: dict[str, Any] = {}
+        for label, files in labels.items():
+            extras = {extra: refs[role] for extra, role in files.extras.items()}
+            entry[label] = {"file": refs[files.file], **({"extras": extras} if extras else {})}
+        weights[name] = entry
+    return {
+        "pipeline": plan.pipeline,
+        "weights": weights,
+        "assets": {name: refs[role] for name, role in plan.assets.items()},
+        "quants": dict(plan.quants),
+        "defaultQuant": plan.default_quant,
+        "pipelineConfig": dict(plan.pipeline_config),
+    }
+
+
+def assert_manifest_limits(manifest: Mapping[str, Any]) -> None:
+    """規模上限（ADR 0041 §7）を焼く側で先に落とす。"""
+    models = manifest["models"]
+    if len(models) > MAX_MODELS:
+        raise DistError(f"models が {len(models)} 件で上限 {MAX_MODELS} を超えた")
+    for name, model in models.items():
+        for key, limit in (
+            ("weights", MAX_WEIGHTS),
+            ("assets", MAX_ASSETS),
+            ("quants", MAX_QUANTS),
+        ):
+            if len(model[key]) > limit:
+                raise DistError(f"{name}.{key} が {len(model[key])} 件で上限 {limit} を超えた")
+        config_bytes = len(json.dumps(model["pipelineConfig"], ensure_ascii=False).encode("utf-8"))
+        if config_bytes > MAX_PIPELINE_CONFIG_BYTES:
+            raise DistError(
+                f"{name}.pipelineConfig が {config_bytes} バイトで上限"
+                f" {MAX_PIPELINE_CONFIG_BYTES} を超えた"
+            )
+    total = len(manifest_text(manifest).encode("utf-8"))
+    if total > MAX_MANIFEST_BYTES:
+        raise DistError(f"manifest が {total} バイトで上限 {MAX_MANIFEST_BYTES} を超えた")
+
+
+def manifest_text(manifest: Mapping[str, Any]) -> str:
+    """`karume.json` に書く綴り（末尾改行つき — 上限検査もこの綴りで測る）。"""
+    return json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+
+
+def assemble_family(
+    plans: Sequence[ModelPlan], out_dir: Path, default_model: str
+) -> dict[str, Any]:
+    """計画済みのモデル群を 1 リポへ組み立て、`karume.json` を書いて manifest を返す。
+
+    ① 各モデルのサブツリーへ置く → ② 共有ファイルを `shared/` へ畳む → ③ 現物から manifest。
+    検査は計画（`plans` を組む段）で済んでいるので、ここから先は落ちない前提で書ける。
+    """
+    if not plans:
+        raise DistError("組み立てるモデルが 1 つも無い")
+    names = [plan.name for plan in plans]
+    if len(set(names)) != len(names):
+        raise DistError(f"モデル名が重複している: {names}")
+    if default_model not in names:
+        raise DistError(f"既定モデル '{default_model}' が組み立て対象 {names} に無い")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    placed: dict[tuple[str, str], str] = {}
+    digests: dict[str, str] = {}
+    for plan in plans:
+        for role, artifact in plan.artifacts.items():
+            rel_path = f"{plan.name}/{artifact.rel_path}"
+            materialize(artifact, out_dir / rel_path)
+            placed[(plan.name, role)] = rel_path
+            # sha256 は**置いた現物**から採る（表と現物が食い違う失敗様式を構造的に消す）。
+            digests[rel_path] = sha256_file(out_dir / rel_path)
+    _fold_shared(out_dir, plans, placed, digests)
+
+    models: dict[str, Any] = {}
+    for plan in plans:
+        refs = {}
+        for role in plan.artifacts:
+            rel_path = placed[(plan.name, role)]
+            refs[role] = file_ref(out_dir, rel_path, digests[rel_path])
+        models[plan.name] = _model_entry(plan, refs)
+    manifest = {
+        "format": MANIFEST_FORMAT,
+        "generator": generator_tag(),
+        "defaultModel": default_model,
+        "models": models,
+    }
+    assert_manifest_limits(manifest)
+    (out_dir / MANIFEST_FILENAME).write_text(manifest_text(manifest), encoding="utf-8")
+    return manifest
+
+
+# ---- ② 宣言と現物の突合 ------------------------------------------------------
+
+
+def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[str, Any]]]:
+    """manifest が参照する全ファイルを `(場所, 3 点セット)` で流す（重複はそのまま流す）。"""
+    for model_name, model in manifest["models"].items():
+        for name, labels in model["weights"].items():
+            for label, entry in labels.items():
+                yield f"models.{model_name}.weights.{name}.{label}", entry["file"]
+                for extra, ref in entry.get("extras", {}).items():
+                    yield f"models.{model_name}.weights.{name}.{label}.extras.{extra}", ref
+        for name, ref in model["assets"].items():
+            yield f"models.{model_name}.assets.{name}", ref
+
+
+def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
+    """`karume/2` の構造整合（hub のパーサが受理する形かを焼いた側でも見る）。
+
+    ここが見るのは**この配布形が自分で閉じているか**だけ — `defaultModel` / `defaultQuant` の
+    指し先、quant の weights 完全写像、そしてレイアウト（ADR 0041 §9）。hub の全検査を写経
+    しても正本が 2 つになるだけなので、写すのは「組み立てが壊れたら真っ先に破れる」規則に絞る。
+    """
+    if manifest.get("format") != MANIFEST_FORMAT:
+        raise DistError(f"format が '{MANIFEST_FORMAT}' でない: {manifest.get('format')!r}")
+    if not manifest.get("generator"):
+        raise DistError("generator が無い / 空")
+    models = manifest.get("models")
+    if not isinstance(models, dict) or not models:
+        raise DistError("models が非空のオブジェクトでない")
+    if manifest.get("defaultModel") not in models:
+        raise DistError(
+            f"defaultModel '{manifest.get('defaultModel')}' が models {sorted(models)} に無い"
+        )
+    for model_name, model in models.items():
+        weights = model["weights"]
+        quants = model["quants"]
+        if model["defaultQuant"] not in quants:
+            raise DistError(
+                f"{model_name}.defaultQuant '{model['defaultQuant']}' が"
+                f" quants {sorted(quants)} に無い"
+            )
+        for quant_name, quant in quants.items():
+            where = f"{model_name}.quants.{quant_name}"
+            if set(quant["weights"]) != set(weights):
+                raise DistError(
+                    f"{where}.weights が weights の完全写像でない"
+                    f"（宣言 {sorted(quant['weights'])} / weights {sorted(weights)}）"
+                )
+            for name, label in quant["weights"].items():
+                if label not in weights[name]:
+                    raise DistError(
+                        f"{where}.weights: '{name}' に dtype '{label}' が無い"
+                        f"（利用可能: {sorted(weights[name])}）"
+                    )
+    allowed_roots = set(models) | {SHARED_DIRNAME}
+    for where, ref in _declared_refs(manifest):
+        root = ref["path"].split("/")[0]
+        if root not in allowed_roots:
+            raise DistError(
+                f"{where}: path '{ref['path']}' の先頭が {sorted(allowed_roots)} のどれでもない"
+                " — レイアウトはモデル別サブツリー + shared/（ADR 0041 §9）"
+            )
+
+
+def _declared_sizes(manifest: Mapping[str, Any]) -> dict[str, int]:
+    """manifest が参照する全ファイルの `{path: size}`。重複 path は 3 点セットの一致を要求する。
+
+    同一 path の重複参照はモデル間の共有そのもの（ADR 0041 §5）なので合法だが、`{size, sha256}`
+    が食い違えば取得層のキャッシュが振動する — hub と同じ規則をここでも落とす。
+    """
     sizes: dict[str, int] = {}
-    for component in manifest["components"].values():
-        entries = component["variants"].values() if "variants" in component else (component,)
-        for entry in entries:
-            for ref in (entry["file"], *entry.get("extras", {}).values()):
-                sizes[ref["path"]] = ref["size"]
+    seen: dict[str, Mapping[str, Any]] = {}
+    for where, ref in _declared_refs(manifest):
+        previous = seen.get(ref["path"])
+        if previous is not None and (
+            previous["size"] != ref["size"] or previous["sha256"] != ref["sha256"]
+        ):
+            raise DistError(
+                f"{where}: 重複 path '{ref['path']}' の size / sha256 が食い違う"
+                f"（{previous['size']} / {previous['sha256']} と {ref['size']} / {ref['sha256']}）"
+            )
+        seen[ref["path"]] = ref
+        sizes[ref["path"]] = ref["size"]
     return sizes
 
 
 def verify_dist(out_dir: Path) -> dict[str, int]:
-    """`karume.json` と現物を突き合わせる（実在・size 一致・宣言外ファイルの不在）。
+    """`karume.json` と現物を突き合わせる（構造整合・実在・size 一致・宣言外ファイルの不在）。
 
     sha256 は組み立て時に実ファイルから採っているので採り直さない（数 GB の再ハッシュは
-    ここでは新しい事実を生まない）。見るのは「表が現物を覆っているか」だけ。
+    ここでは新しい事実を生まない）。見るのは「表が自分で閉じていて、現物を覆っているか」だけ。
 
     宣言外ファイルの例外は {@link META_PATHS} の 2 つ（`karume.json` と `README.md`）だけ —
     どちらも配布形そのものの説明で、manifest が宣言する資産ではない。それ以外は従来どおり
     fail loudly（前回の組み立ての残骸や `io.*` の混入を後段へ見せない）。
     """
     manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-    declared = _referenced_sizes(manifest)
+    _assert_manifest_shape(manifest)
+    declared = _declared_sizes(manifest)
     for rel_path, size in sorted(declared.items()):
         path = out_dir / rel_path
         if not path.is_file():
@@ -184,13 +550,20 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
     return declared
 
 
-# ---- ② Anima（text-to-image）-------------------------------------------------
+# ---- ③ Anima（text-to-image）-------------------------------------------------
 
-#: 既定の配布名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。turbo LoRA を
-#: 焼き込んだ配布物であることを名前に出す。
-ANIMA_DIST_NAME = "anima-turbo"
+#: 既定のモデル名（= 単一モデルなら既定のリポ名でもある）。turbo LoRA を焼き込んだ配布物で
+#: あることを名前に出す。
+ANIMA_MODEL_NAME = "anima-turbo"
 
-#: 出力の相対 path（ADR 0038 §2 の規約名）— **配置表と manifest が共有する 1 箇所**。
+#: パイプライン契約（ADR 0041 §2 — モデル単位）。
+ANIMA_PIPELINE = "anima/1"
+
+#: モデル名に依らない系列（base の text 経路 / VAE と、tokenizer を書く台本の出力）。
+ANIMA_BASE_SERIES = "anima-f16"
+ANIMA_TOKENIZER_SERIES = "anima-demo"
+
+#: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
 #: 役割名でだけ引くので、綴りが 2 箇所で独立に動くことは起きない。
 OUTPUT_PATHS: Mapping[str, str] = {
     "text_encoder": "text_encoder/model.safetensors",
@@ -203,8 +576,10 @@ OUTPUT_PATHS: Mapping[str, str] = {
     "tokenizer_2": "tokenizer_2/t5-tokenizer.json",
 }
 
-#: preset 表。ADR 0038 Examples の Anima 表が正本（`session` の語彙は manifest 所有 — §3）。
-ANIMA_PRESETS: Mapping[str, Any] = {
+#: quant 表（v1 の `presets` — ADR 0041 §3 で改名）。`session` の語彙は manifest 所有。
+#: **dtype ラベルが 1 つしかない weights は書かない** — {@link complete_quant_weights} が
+#: 完全写像へ埋める（写せば済む席を quant の数だけ複製しない）。
+ANIMA_QUANTS: Mapping[str, Any] = {
     "f16": {"weights": {"transformer": "f16"}, "session": {}},
     "i8": {"weights": {"transformer": "i8"}, "session": {}},
     "w8a8": {"weights": {"transformer": "i8"}, "session": {"linearCompute": "i8a8"}},
@@ -227,9 +602,9 @@ ANIMA_PRESETS: Mapping[str, Any] = {
     },
 }
 
-ANIMA_DEFAULT_PRESET = "w8a8-s16"
+ANIMA_DEFAULT_QUANT = "w8a8-s16"
 
-#: パイプライン所有の設定（hub は素通し — ADR 0038 §1）。値は移行元の実装定数と一致する:
+#: パイプライン所有の設定（hub は素通し — ADR 0041 §2）。値は移行元の実装定数と一致する:
 #: `shift` / `numTrainTimesteps` は sampler の `ANIMA_SHIFT` / `ANIMA_NUM_TRAIN_TIMESTEPS`
 #: （エクスポータ側の `SHIFT` / `NUM_TRAIN_TIMESTEPS` = scheduler_config.json と同値）、
 #: `steps` / `guidanceScale` は turbo 既定（8 step / cfg 1 — ADR 0038 Examples が正。品質目視
@@ -261,6 +636,21 @@ STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "vae_decoder": "F16",
 }
 
+#: weights の宣言（dtype ラベル → 役割名）。ラベルは**格納 dtype 語彙**で、
+#: {@link STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。
+ANIMA_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
+    "text_encoder": {"f16": WeightFiles("text_encoder")},
+    "text_conditioner": {"f16": WeightFiles("text_conditioner")},
+    "transformer": {
+        "f16": WeightFiles("transformer_f16", {"rope_base": "rope_base"}),
+        "i8": WeightFiles("transformer_i8", {"rope_base": "rope_base"}),
+    },
+    "vae_decoder": {"f16": WeightFiles("vae_decoder")},
+}
+
+#: assets の宣言（quant 選択に依存しない無条件ファイル — ADR 0041 §3）。
+ANIMA_ASSETS: Mapping[str, str] = {"tokenizer": "tokenizer", "tokenizer_2": "tokenizer_2"}
+
 
 @dataclass(frozen=True)
 class AnimaSources:
@@ -276,13 +666,17 @@ class AnimaSources:
     tokenizers: Path
 
 
-def anima_sources(series_dir: Path) -> AnimaSources:
-    """系列の親ディレクトリ（`outputs/series/`）から Anima の 4 系列を引く。"""
+def anima_sources(series_dir: Path, model: str = ANIMA_MODEL_NAME) -> AnimaSources:
+    """系列の親ディレクトリ（`outputs/series/`）から Anima の 4 系列を引く。
+
+    モデル名は transformer の 2 系列にだけ掛かる — base（text 経路 / VAE）と tokenizer は
+    素のアーキテクチャ側の出力で、turbo かどうかに依らない。
+    """
     return AnimaSources(
-        transformer_f16=series_dir / "anima-turbo-f16-dyn",
-        transformer_i8=series_dir / "anima-turbo-i8-dyn",
-        base=series_dir / "anima-f16",
-        tokenizers=series_dir / "anima-demo" / "text",
+        transformer_f16=series_dir / f"{model}-f16-dyn",
+        transformer_i8=series_dir / f"{model}-i8-dyn",
+        base=series_dir / ANIMA_BASE_SERIES,
+        tokenizers=series_dir / ANIMA_TOKENIZER_SERIES / "text",
     )
 
 
@@ -291,7 +685,7 @@ def shared_rope_base(sources: AnimaSources) -> Path:
 
     MUST: `rope_base.safetensors` は f16 / i8 の 2 系列に同名で並ぶ。両者のバイト同一を
     sha256 で確かめてから 1 本化する — 食い違ったまま片方を選ぶと、選ばれなかった系列の
-    preset が「別の幾何の rope 表で走る」形になり、ロードも実行も通って絵だけが静かに壊れる。
+    quant が「別の幾何の rope 表で走る」形になり、ロードも実行も通って絵だけが静かに壊れる。
     """
     candidates = [
         series / "transformer" / "rope_base.safetensors"
@@ -327,57 +721,27 @@ def anima_placements(sources: AnimaSources) -> dict[str, Path]:
     }
 
 
-def anima_manifest(out_dir: Path) -> dict[str, Any]:
-    """組み立て済みディレクトリから Anima の `karume.json` を導出する。"""
-    refs = {role: file_ref(out_dir, path) for role, path in OUTPUT_PATHS.items()}
-    rope_base = refs["rope_base"]
-    return {
-        "format": "karume/1",
-        "generator": generator_tag(),
-        "pipeline": "anima/1",
-        "components": {
-            "text_encoder": {"file": refs["text_encoder"]},
-            "text_conditioner": {"file": refs["text_conditioner"]},
-            "transformer": {
-                "variants": {
-                    "f16": {
-                        "file": refs["transformer_f16"],
-                        "extras": {"rope_base": rope_base},
-                    },
-                    "i8": {
-                        "file": refs["transformer_i8"],
-                        "extras": {"rope_base": rope_base},
-                    },
-                }
-            },
-            "vae_decoder": {"file": refs["vae_decoder"]},
-            "tokenizer": {"file": refs["tokenizer"]},
-            "tokenizer_2": {"file": refs["tokenizer_2"]},
-        },
-        "presets": dict(ANIMA_PRESETS),
-        "defaultPreset": ANIMA_DEFAULT_PRESET,
-        "pipelineConfig": dict(ANIMA_PIPELINE_CONFIG),
-    }
-
-
-def assemble_anima(sources: AnimaSources, out_dir: Path) -> dict[str, Any]:
-    """系列群を配布形へ組み立て、`karume.json` を書いて manifest を返す。"""
+def anima_plan(sources: AnimaSources, model: str = ANIMA_MODEL_NAME) -> ModelPlan:
+    """Anima 1 モデルぶんの計画を組む（検査はここで全部済ませる — 1 バイトも書かない）。"""
+    assert_model_name(model)
     placements = anima_placements(sources)
-    # MUST: 検査は配置の**前**に全役割ぶん済ませる（rope 不一致と同じ規律 — 落ちるなら
-    # 途中の配布形を 1 ファイルも残さない）。
     for role, source in placements.items():
         assert_storage(role, source, STORAGE_REQUIREMENTS)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for role, source in placements.items():
-        place_file(source, out_dir / OUTPUT_PATHS[role])
-    manifest = anima_manifest(out_dir)
-    (out_dir / MANIFEST_FILENAME).write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    return ModelPlan(
+        name=model,
+        pipeline=ANIMA_PIPELINE,
+        artifacts={
+            role: Artifact(OUTPUT_PATHS[role], source=source) for role, source in placements.items()
+        },
+        weights=ANIMA_WEIGHTS,
+        assets=ANIMA_ASSETS,
+        quants=complete_quant_weights(ANIMA_WEIGHTS, ANIMA_QUANTS),
+        default_quant=ANIMA_DEFAULT_QUANT,
+        pipeline_config=ANIMA_PIPELINE_CONFIG,
     )
-    return manifest
 
 
-# ---- ③ SBV2（text-to-speech）------------------------------------------------
+# ---- ④ SBV2（text-to-speech）------------------------------------------------
 #
 # 配布するのは**実行に要る 3 グラフ + ホスト資産 4 本**だけ（ADR 0038 §2 の SBV2 例は
 # 5 グラフを並べるが、あれは形の例示）。`front` = enc_p + dp + sdp、`voice` = flow + dec の
@@ -389,15 +753,19 @@ def assemble_anima(sources: AnimaSources, out_dir: Path) -> dict[str, Any]:
 # `front` / `voice` のグラフ入力 `style_vec[1,256]` / `g[1,512,1]` はこの 2 表から作られ、
 # 名前 → 行の対応は `pipelineConfig` の `styles` / `speakers` が持つ（3 つで 1 組）。
 
-#: 実重みのディレクトリ名 — 系列の綴り（`sbv2-FN4{,-f16,-i8}`）と配布名を束ねる 1 語。
+#: 既定のモデル名 — 系列の綴り（`sbv2-FN4{,-f16,-i8}`）と実重みの置き場を束ねる 1 語。
 #: `export_sbv2.default_out_root` が `--model-dir` のディレクトリ名から系列名を作るので、
 #: 読み手のこちらも同じ 1 語から組む。
-SBV2_MODEL_NAME = "FN4"
+SBV2_DEFAULT_MODEL = "FN4"
 
-#: 既定の配布名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。
-SBV2_DIST_NAME = f"sbv2-{SBV2_MODEL_NAME}"
+#: 系列名とリポ名の接頭辞（`sbv2-<モデル名>`）。
+SBV2_SERIES_PREFIX = "sbv2"
 
-#: DeBERTa の系列とその variant ディレクトリ（`export_deberta.py` の綴り）。
+#: パイプライン契約（ADR 0041 §2 — モデル単位）。
+SBV2_PIPELINE = "sbv2/1"
+
+#: DeBERTa の系列とその variant ディレクトリ（`export_deberta.py` の綴り）。モデル名に依らない
+#: （ファミリー組み立てでは全モデルが同じ text_encoder を指し、`shared/` へ 1 回だけ入る）。
 SBV2_TEXT_ENCODER_SERIES = "deberta-i8"
 SBV2_TEXT_ENCODER_VARIANT = "full-24layer"
 
@@ -419,7 +787,7 @@ SBV2_SPEAKER_TENSOR = "emb_g.weight"
 SBV2_STYLE_KEY = "style_vectors"
 SBV2_SPEAKER_KEY = "speaker_embeddings"
 
-#: 出力の相対 path（ADR 0038 §2 の規約名）— **配置表・変換先・manifest が共有する 1 箇所**。
+#: 出力の相対 path（**モデルサブツリー内**）— 配置表・変換先・manifest が共有する 1 箇所。
 #: `style_vectors` / `speaker_embeddings` だけは配置ではなく変換の出力なので
 #: {@link sbv2_placements} には現れない。
 SBV2_OUTPUT_PATHS: Mapping[str, str] = {
@@ -446,10 +814,25 @@ SBV2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "voice_i8": "I8",
 }
 
-#: preset 表。`weights` は**variants を持つ全コンポーネントへの完全写像**が hub の検査要件
-#: （ADR 0038 §3）で、`{file}` 形の `text_encoder` は書いてはいけない（書くと
-#: `ManifestReferenceError`）。
-SBV2_PRESETS: Mapping[str, Any] = {
+#: weights の宣言（dtype ラベル → 役割名）。`text_encoder` は i8 単体でも**dtype キー必須**の
+#: 統一形で書く（ADR 0041 §3 — v1 の `{file}` / `{variants}` の 2 形は消えた）。
+SBV2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
+    "text_encoder": {"i8": WeightFiles("text_encoder")},
+    "front": {"f16": WeightFiles("front_f16"), "i8": WeightFiles("front_i8")},
+    "voice": {"f16": WeightFiles("voice_f16"), "i8": WeightFiles("voice_i8")},
+}
+
+#: assets の宣言（quant 選択に依存しない無条件ファイル）。
+SBV2_ASSETS: Mapping[str, str] = {
+    "tokenizer": "tokenizer",
+    "symbols": "symbols",
+    "style_vectors": "style_vectors",
+    "speaker_embeddings": "speaker_embeddings",
+}
+
+#: quant 表。dtype が 1 つしかない `text_encoder` は書かない（{@link complete_quant_weights}
+#: が完全写像へ埋める — hub は写像の完全性を実行時にも検査する）。
+SBV2_QUANTS: Mapping[str, Any] = {
     "f16": {"weights": {"front": "f16", "voice": "f16"}, "session": {}},
     "w8": {"weights": {"front": "i8", "voice": "i8"}, "session": {}},
     "w8a8": {
@@ -458,7 +841,7 @@ SBV2_PRESETS: Mapping[str, Any] = {
     },
 }
 
-SBV2_DEFAULT_PRESET = "w8"
+SBV2_DEFAULT_QUANT = "w8"
 
 #: `pipelineConfig.defaults` に載る実行時ノブ（`style_bert_vits2.constants` 由来）。綴りは
 #: `symbols.json` の `defaults` と共有する — 同じ源から引いた同じ値が配布形の 2 つの資産に
@@ -471,6 +854,11 @@ SBV2_KNOB_KEYS: tuple[str, ...] = (
     "noiseScaleW",
     "lengthScale",
 )
+
+
+def sbv2_repo_name(model: str) -> str:
+    """単一モデルの配布リポ名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。"""
+    return f"{SBV2_SERIES_PREFIX}-{model}"
 
 
 @dataclass(frozen=True)
@@ -489,14 +877,14 @@ class Sbv2Sources:
     model: Path
 
 
-def sbv2_sources(series_dir: Path) -> Sbv2Sources:
+def sbv2_sources(series_dir: Path, model: str = SBV2_DEFAULT_MODEL) -> Sbv2Sources:
     """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
     return Sbv2Sources(
-        series_f16=series_dir / f"{SBV2_DIST_NAME}-f16",
-        series_i8=series_dir / f"{SBV2_DIST_NAME}-i8",
+        series_f16=series_dir / f"{sbv2_repo_name(model)}-f16",
+        series_i8=series_dir / f"{sbv2_repo_name(model)}-i8",
         text_encoder=series_dir / SBV2_TEXT_ENCODER_SERIES / SBV2_TEXT_ENCODER_VARIANT,
         demo=OUTPUTS_ROOT / SBV2_DEMO_DIRNAME,
-        model=INPUTS_ROOT / "sbv2" / SBV2_MODEL_NAME,
+        model=INPUTS_ROOT / SBV2_SERIES_PREFIX / model,
     )
 
 
@@ -724,108 +1112,112 @@ def sbv2_speaker_embeddings(model_dir: Path, config: Mapping[str, Any]) -> np.nd
     return np.ascontiguousarray(table, dtype=np.float32)
 
 
-def _write_table(path: Path, key: str, table: np.ndarray) -> None:
-    """1 テンソルだけの safetensors を書く（`.npy` / ckpt から移した表の配布形）。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    save_file({key: table}, str(path))
+def _table_payload(key: str, table: np.ndarray) -> bytes:
+    """1 テンソルだけの safetensors のバイト列（`.npy` / ckpt から移した表の配布形）。"""
+    return save({key: table})
 
 
-def sbv2_manifest(out_dir: Path, pipeline_config: Mapping[str, Any]) -> dict[str, Any]:
-    """組み立て済みディレクトリから SBV2 の `karume.json` を導出する。"""
-    refs = {role: file_ref(out_dir, path) for role, path in SBV2_OUTPUT_PATHS.items()}
-    return {
-        "format": "karume/1",
-        "generator": generator_tag(),
-        "pipeline": "sbv2/1",
-        "components": {
-            "text_encoder": {"file": refs["text_encoder"]},
-            "front": {
-                "variants": {
-                    "f16": {"file": refs["front_f16"]},
-                    "i8": {"file": refs["front_i8"]},
-                }
-            },
-            "voice": {
-                "variants": {
-                    "f16": {"file": refs["voice_f16"]},
-                    "i8": {"file": refs["voice_i8"]},
-                }
-            },
-            "tokenizer": {"file": refs["tokenizer"]},
-            "symbols": {"file": refs["symbols"]},
-            "style_vectors": {"file": refs["style_vectors"]},
-            "speaker_embeddings": {"file": refs["speaker_embeddings"]},
-        },
-        "presets": dict(SBV2_PRESETS),
-        "defaultPreset": SBV2_DEFAULT_PRESET,
-        "pipelineConfig": dict(pipeline_config),
-    }
-
-
-def assemble_sbv2(sources: Sbv2Sources, out_dir: Path, knobs: Mapping[str, Any]) -> dict[str, Any]:
-    """系列群と実重みの config を配布形へ組み立て、`karume.json` を書いて manifest を返す。
+def sbv2_plan(
+    sources: Sbv2Sources, knobs: Mapping[str, Any], model: str = SBV2_DEFAULT_MODEL
+) -> ModelPlan:
+    """SBV2 1 モデルぶんの計画を組む（検査と表の読み取りをここで全部済ませる）。
 
     ノブの既定を引数で受けるのは、値の**出所**（`style_bert_vits2` の定数 — optional な
     dependency-group）と配布形の**組み立て**を分けるため。出所の解決は
     {@link sbv2_knob_defaults} が持つ。
     """
+    assert_model_name(model)
     placements = sbv2_placements(sources)
-    # MUST: 検査は配置の**前**に全役割ぶん済ませる（Anima と同じ規律 — 落ちるなら途中の
-    # 配布形を 1 ファイルも残さない）。config・スタイル表・話者表の検査も配置より前に置く。
     config = sbv2_config(sources.model)
     pipeline_config = sbv2_pipeline_config(config, knobs)
     style_vectors = sbv2_style_vectors(sources.model, config)
     speaker_embeddings = sbv2_speaker_embeddings(sources.model, config)
     for role, source in placements.items():
         assert_storage(role, source, SBV2_STORAGE_REQUIREMENTS)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for role, source in placements.items():
-        place_file(source, out_dir / SBV2_OUTPUT_PATHS[role])
-    _write_table(out_dir / SBV2_OUTPUT_PATHS["style_vectors"], SBV2_STYLE_KEY, style_vectors)
-    _write_table(
-        out_dir / SBV2_OUTPUT_PATHS["speaker_embeddings"], SBV2_SPEAKER_KEY, speaker_embeddings
+    artifacts = {
+        role: Artifact(SBV2_OUTPUT_PATHS[role], source=source)
+        for role, source in placements.items()
+    }
+    artifacts["style_vectors"] = Artifact(
+        SBV2_OUTPUT_PATHS["style_vectors"],
+        payload=_table_payload(SBV2_STYLE_KEY, style_vectors),
     )
-    manifest = sbv2_manifest(out_dir, pipeline_config)
-    (out_dir / MANIFEST_FILENAME).write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    artifacts["speaker_embeddings"] = Artifact(
+        SBV2_OUTPUT_PATHS["speaker_embeddings"],
+        payload=_table_payload(SBV2_SPEAKER_KEY, speaker_embeddings),
     )
-    return manifest
+    return ModelPlan(
+        name=model,
+        pipeline=SBV2_PIPELINE,
+        artifacts=artifacts,
+        weights=SBV2_WEIGHTS,
+        assets=SBV2_ASSETS,
+        quants=complete_quant_weights(SBV2_WEIGHTS, SBV2_QUANTS),
+        default_quant=SBV2_DEFAULT_QUANT,
+        pipeline_config=pipeline_config,
+    )
 
 
-# ---- ④ pipeline 別ディスパッチと CLI -----------------------------------------
+# ---- ⑤ pipeline 別ディスパッチと CLI -----------------------------------------
 
 
 @dataclass(frozen=True)
 class Pipeline:
     """pipeline ごとに違うものだけを持つディスパッチ表の 1 行。
 
-    共有部（配置・sha256・宣言と現物の突合）は上の汎用関数が持つので、ここに並ぶのは
-    「既定の配布名 / 系列の親から配布形を組む手順 / モデルカードの描き手」の 3 つだけ。
+    共有部（配置・共有の畳み込み・sha256・宣言と現物の突合）は上の汎用関数が持つので、
+    ここに並ぶのは「既定のモデル名 / 単一モデルの既定リポ名 / 系列とモデル名から計画を組む
+    手順 / モデルカードの描き手」の 4 つだけ。
     """
 
-    dist_name: str
-    assemble: Callable[[Path, Path], dict[str, Any]]
+    default_model: str
+    #: 単一モデルのときの既定の出力ディレクトリ名（複数モデルのリポ名は導出できない）。
+    repo_name: Callable[[str], str]
+    plan: Callable[[Path, str], ModelPlan]
     #: モデルカードの描き手（`karume.modelcard` の pipeline 別テンプレート）。
-    render_card: Callable[[Mapping[str, Any]], str]
+    render_card: Callable[[Mapping[str, Any], str], str]
 
 
-def assemble_anima_dist(series_dir: Path, out_dir: Path) -> dict[str, Any]:
-    """`--series` の親から Anima の配布形を組む（CLI のディスパッチ先）。"""
-    return assemble_anima(anima_sources(series_dir), out_dir)
+def anima_dist_plan(series_dir: Path, model: str) -> ModelPlan:
+    """`--series` の親から Anima 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+    return anima_plan(anima_sources(series_dir, model), model)
 
 
-def assemble_sbv2_dist(series_dir: Path, out_dir: Path) -> dict[str, Any]:
-    """`--series` の親から SBV2 の配布形を組む（CLI のディスパッチ先）。"""
-    sources = sbv2_sources(series_dir)
-    return assemble_sbv2(sources, out_dir, sbv2_knob_defaults(sources.demo / SBV2_SYMBOLS_FILE))
+def sbv2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
+    """`--series` の親から SBV2 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+    sources = sbv2_sources(series_dir, model)
+    return sbv2_plan(sources, sbv2_knob_defaults(sources.demo / SBV2_SYMBOLS_FILE), model)
 
 
 PIPELINES: Mapping[str, Pipeline] = {
-    "anima": Pipeline(ANIMA_DIST_NAME, assemble_anima_dist, render_model_card),
-    "sbv2": Pipeline(SBV2_DIST_NAME, assemble_sbv2_dist, render_sbv2_model_card),
+    "anima": Pipeline(
+        default_model=ANIMA_MODEL_NAME,
+        repo_name=lambda model: model,
+        plan=anima_dist_plan,
+        render_card=render_model_card,
+    ),
+    "sbv2": Pipeline(
+        default_model=SBV2_DEFAULT_MODEL,
+        repo_name=sbv2_repo_name,
+        plan=sbv2_dist_plan,
+        render_card=render_sbv2_model_card,
+    ),
 }
 
 DEFAULT_PIPELINE = "anima"
+
+
+def default_out_dir(pipeline: Pipeline, models: Sequence[str]) -> Path:
+    """`--out` 省略時の出力先。
+
+    複数モデルのリポ名は**導出できない**（`karume-sbv2-jvnv` のようなファミリー名は命名の
+    決定であって、モデル名の並びからは決まらない）ので、明示を求めて落とす。
+    """
+    if len(models) != 1:
+        raise DistError(
+            f"モデルを {len(models)} 個組む場合はリポ名を導出できない — --out で出力先を指定する"
+        )
+    return DIST_ROOT / pipeline.repo_name(models[0])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -837,6 +1229,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"組み立てるパイプライン（既定: {DEFAULT_PIPELINE}）",
     )
     parser.add_argument(
+        "--model",
+        action="append",
+        dest="models",
+        metavar="NAME",
+        help="組み立てるモデル名（繰り返すと 1 リポへまとめて組む = ファミリー組み立て。"
+        "最初の 1 つが defaultModel。既定: "
+        + " / ".join(f"{name}={spec.default_model}" for name, spec in PIPELINES.items())
+        + "）",
+    )
+    parser.add_argument(
         "--series",
         type=Path,
         default=SERIES_ROOT,
@@ -846,9 +1248,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --pipeline ごと: "
-        + " / ".join(f"models/{spec.dist_name}/" for spec in PIPELINES.values())
-        + " — 1 ディレクトリ = 1 HF リポ）",
+        help="出力先（既定は単一モデルのときだけ models/<リポ名>/ — 1 ディレクトリ = 1 HF リポ。"
+        "複数モデルを組むときは必須）",
     )
     return parser
 
@@ -856,19 +1257,31 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     pipeline = PIPELINES[args.pipeline]
-    out_dir = args.out if args.out is not None else DIST_ROOT / pipeline.dist_name
-    manifest = pipeline.assemble(args.series, out_dir)
+    models = args.models if args.models else [pipeline.default_model]
+    out_dir = args.out if args.out is not None else default_out_dir(pipeline, models)
+    # MUST: 全モデルの計画（= 検査と読み取り）を配置の**前**に済ませる — 2 モデル目で落ちる
+    # 形でも、1 モデル目だけ入った配布形を後段に見せない。
+    plans = [pipeline.plan(args.series, model) for model in models]
+    manifest = assemble_family(plans, out_dir, models[0])
     verified = verify_dist(out_dir)
     # モデルカードは**検証を通った manifest** から描く（表と現物が食い違ったまま説明だけ
-    # 生えることがない順序）。
-    (out_dir / MODEL_CARD_FILENAME).write_text(pipeline.render_card(manifest), encoding="utf-8")
+    # 生えることがない順序）。リポ ID は組み立て先のディレクトリ名から導く — manifest は
+    # 自分の在り処を知らず、ファミリーリポの名前は pipeline の定数にもできない。
+    card = pipeline.render_card(manifest, f"{HF_OWNER}/{out_dir.name}")
+    (out_dir / MODEL_CARD_FILENAME).write_text(card, encoding="utf-8")
     for rel_path, size in sorted(verified.items()):
         print(f"{size:>12}  {rel_path}")
     for rel_path in sorted(META_PATHS):
         meta = out_dir / rel_path
         if meta.is_file():
             print(f"{meta.stat().st_size:>12}  {rel_path}")
-    print(f"[dist] {out_dir} — {manifest['generator']} / preset {manifest['defaultPreset']}")
+    listing = ", ".join(
+        f"{name}({model['defaultQuant']})" for name, model in manifest["models"].items()
+    )
+    print(
+        f"[dist] {out_dir} — {manifest['generator']} /"
+        f" models {listing} / default {manifest['defaultModel']}"
+    )
 
 
 if __name__ == "__main__":
