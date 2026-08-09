@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@hdae/fetch-cache@0.4": "0.4.0",
     "jsr:@hdae/fetch-cache@~0.3.1": "0.3.1",
     "jsr:@hdae/yomi@~0.4.2": "0.4.2",
     "jsr:@std/assert@1": "1.0.19",
@@ -10,10 +11,13 @@
     "@hdae/fetch-cache@0.3.1": {
       "integrity": "47f90208b157d54ce245f190180ec63d4538fd2a825d2aaa8fd162672695e6a9"
     },
+    "@hdae/fetch-cache@0.4.0": {
+      "integrity": "7c3ca808c58ebc3d78c2b7a24fc98113fbfdba4abd8a5e6826d6c093a11f2ee2"
+    },
     "@hdae/yomi@0.4.2": {
       "integrity": "01f9dd3efbd01b2ff1d20e9d5cb2e3556ff7d1462a37fbd3e5f9e1ff37411394",
       "dependencies": [
-        "jsr:@hdae/fetch-cache"
+        "jsr:@hdae/fetch-cache@~0.3.1"
       ]
     },
     "@std/assert@1.0.19": {
@@ -34,7 +38,7 @@
     "members": {
       "packages/hub": {
         "dependencies": [
-          "jsr:@hdae/fetch-cache@~0.3.1"
+          "jsr:@hdae/fetch-cache@0.4"
         ]
       },
       "packages/models": {
