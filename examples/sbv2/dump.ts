@@ -4,7 +4,7 @@
  *
  *     deno task dump:sbv2 --text "こんにちは、これはテストです。"
  *     cd tools/exporter && uv run --group sbv2 python sbv2_demo.py reference \
- *         --dump ../../outputs/sbv2-demo/out/dump.safetensors
+ *         --dump ../../outputs/demo/sbv2-dump/dump.safetensors
  *
  * ## なぜ `main.ts` と別なのか
  *
@@ -86,7 +86,7 @@ const selection = {
 };
 const text = args.get("text");
 if (text === undefined || text.length === 0) throw new Error(`--text が必要（使い方: ${USAGE}）`);
-const outDir = args.get("out") ?? "outputs/sbv2-demo/out";
+const outDir = args.get("out") ?? "outputs/demo/sbv2-dump";
 const rawSeed = args.get("seed");
 if (rawSeed !== undefined && !/^\d+$/.test(rawSeed)) {
   throw new Error(`--seed ${rawSeed} が非負整数でない`);

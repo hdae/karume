@@ -1271,7 +1271,7 @@ uv run --group sbv2 python sbv2_demo.py assets
 cd ../.. && deno task demo:sbv2 --text "こんにちは、これはテストです。" && cd tools/exporter
 
 # ③ torch reference (rerun the same chain on the dump's discrete inputs and random sequence) → reference.wav + numbers
-uv run --group sbv2 python sbv2_demo.py reference --dump ../../outputs/sbv2-demo/out/dump.safetensors
+uv run --group sbv2 python sbv2_demo.py reference --dump ../../outputs/demo/sbv2-dump/dump.safetensors
 
 # ④ official infer (the pyopenjtalk path) → official.wav (for listening comparisons of the accent)
 uv run --group sbv2 python sbv2_demo.py official --text "こんにちは、これはテストです。"

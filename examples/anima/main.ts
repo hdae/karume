@@ -89,6 +89,8 @@ const image = await pipeline.generate({
 const png = await encodePng(image.data, image.width, image.height);
 const name = `anima-${quant ?? "default"}-${image.width}x${image.height}` +
   `-${steps ?? "default"}step-seed${seed}.png`;
-await Deno.mkdir("outputs", { recursive: true });
-await Deno.writeFile(`outputs/${name}`, png);
-console.log(`[anima] outputs/${name}（${((performance.now() - started) / 1000).toFixed(1)}s）`);
+await Deno.mkdir("outputs/demo", { recursive: true });
+await Deno.writeFile(`outputs/demo/${name}`, png);
+console.log(
+  `[anima] outputs/demo/${name}（${((performance.now() - started) / 1000).toFixed(1)}s）`,
+);

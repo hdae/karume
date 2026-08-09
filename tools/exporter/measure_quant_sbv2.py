@@ -5,7 +5,7 @@
 0 行で、ここで測るのは**量子化そのものの質**（ADR 0006 の fake-quant 方法論では E2E は
 実装誤差しか測らないため、品質は別軸で測る必要がある）。
 
-5 構成を**同一発話・同一乱数**（`outputs/sbv2-demo/out/dump.safetensors` の離散入力・ノイズ列）で
+5 構成を**同一発話・同一乱数**（`outputs/demo/sbv2-dump/dump.safetensors` の離散入力・ノイズ列）で
 走らせる。**BERT は全構成 f32 固定**で、振るのは生成ネット側だけ:
 
     (1) f32    基準。`sbv2_demo.py reference` と同じ経路（既存 reference.wav とビット一致）
@@ -18,7 +18,7 @@
 
     uv run --group sbv2 python measure_quant_sbv2.py
 
-出力は `outputs/sbv2-demo/quant-sim/`（`<config>.wav` 5 本 + `report.json`）。
+出力は `outputs/demo/quant-sim/`（`<config>.wav` 5 本 + `report.json`）。
 
 ## 活性量子化の粒度と適用点
 
@@ -90,12 +90,16 @@ import export_sbv2
 import sbv2_demo
 from karume import patch_sbv2
 from karume.act_quant import quantize_rows
+from karume.paths import OUTPUTS_ROOT
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
-DEFAULT_DUMP = sbv2_demo.DEFAULT_DEMO_DIR / "out" / "dump.safetensors"
+#: デモ・ベンチの生成物置き場。資産（`sbv2_demo.DEFAULT_DEMO_DIR`）と分離する —
+#: 生成物の掃除（`rm -rf outputs/demo`）が資産や系列を巻き込まないため（docs/assets-layout.md）。
+DEMO_OUT_ROOT = OUTPUTS_ROOT / "demo"
+DEFAULT_DUMP = DEMO_OUT_ROOT / "sbv2-dump" / "dump.safetensors"
 #: f32 構成の恒真化を防ぐ突合先（`sbv2_demo.py reference` が同じ dump から書いた WAV）。
-DEFAULT_REFERENCE_WAV = sbv2_demo.DEFAULT_DEMO_DIR / "out" / "reference.wav"
-DEFAULT_OUT = sbv2_demo.DEFAULT_DEMO_DIR / "quant-sim"
+DEFAULT_REFERENCE_WAV = DEMO_OUT_ROOT / "sbv2-dump" / "reference.wav"
+DEFAULT_OUT = DEMO_OUT_ROOT / "quant-sim"
 
 
 @dataclass(frozen=True)

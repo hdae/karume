@@ -6,7 +6,7 @@
 
     uv run --group sbv2 python sbv2_demo.py assets
     uv run --group sbv2 python sbv2_demo.py reference \\
-        --dump ../../outputs/sbv2-demo/out/dump.safetensors
+        --dump ../../outputs/demo/sbv2-dump/dump.safetensors
     uv run --group sbv2 python sbv2_demo.py official --text "こんにちは。"
 
 MUST（1 プロセス 1 サブコマンド）: `patch_sbv2` のパッチはクラス属性のプロセス全域差し替えで、

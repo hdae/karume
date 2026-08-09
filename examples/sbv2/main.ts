@@ -107,7 +107,7 @@ const audio = await pipeline.generate({
   ...(lengthScale === undefined ? {} : { lengthScale }),
 });
 const name = `sbv2-${quant ?? "default"}-${style ?? "default"}-seed${seed}.wav`;
-const out = args.get("out") ?? `outputs/${name}`;
+const out = args.get("out") ?? `outputs/demo/${name}`;
 const parent = out.slice(0, out.lastIndexOf("/"));
 if (parent !== "") await Deno.mkdir(parent, { recursive: true });
 await Deno.writeFile(out, encodeWav(audio.data, audio.sampleRate));

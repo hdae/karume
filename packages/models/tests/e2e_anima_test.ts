@@ -23,7 +23,7 @@ import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-anima-turbo/`）。 */
 const ASSETS_DIR = new URL("../../../models/karume-anima-turbo/", import.meta.url);
-const OUTPUTS_DIR = new URL("../../../outputs/", import.meta.url);
+const OUTPUTS_DIR = new URL("../../../outputs/demo/", import.meta.url);
 
 /**
  * 移行元デモの既定プロンプト（参照 PNG を焼いた時の文字列そのもの）。
@@ -115,7 +115,7 @@ const describePixels = (image: GeneratedImage): string => {
  * 参照 sha と食い違ったときの報告。
  *
  * MUST: ここで tolerance に逃げない。参照は sha256 しか無い（参照 PNG のバイト列は持って
- * いない）ので**先頭差分位置は原理的に出せない** — 代わりに実物を `outputs/` へ落として、
+ * いない）ので**先頭差分位置は原理的に出せない** — 代わりに実物を `outputs/demo/` へ落として、
  * バイト長・画素統計と併せて人が突き合わせられる形にする。
  */
 const mismatchReport = async (

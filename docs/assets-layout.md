@@ -4,12 +4,13 @@
 `SERIES_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。**3 根とも git 追跡しない**（全て再生成
 可能な生成物か手置きの実重みで、リポジトリが持つのは作り方だけ）。
 
-| 根                        | 中身                                                             | 例                                                                                   |
-| ------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `models/`                 | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる） | `models/karume-anima-turbo/` / `models/karume-sbv2-jvnv/` / `models/karume-sbv2-fn/` |
-| `outputs/series/`         | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）     | `outputs/series/sbv2-F1-f16/`                                                        |
-| `outputs/`（その他）      | デモ・ベンチの出力とホスト資産                                   | `outputs/sbv2-demo/` / `outputs/yomi/`                                               |
-| `inputs/<family>/<name>/` | 手置きの実重み（ckpt・config — 生成物ではない）                  | `inputs/sbv2/F1/`                                                                    |
+| 根                        | 中身                                                                 | 例                                                                                   |
+| ------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `models/`                 | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）     | `models/karume-anima-turbo/` / `models/karume-sbv2-jvnv/` / `models/karume-sbv2-fn/` |
+| `outputs/series/`         | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）         | `outputs/series/sbv2-F1-f16/`                                                        |
+| `outputs/demo/`           | **デモ・ベンチの生成物**（`rm -rf outputs/demo` で常に安全に消せる） | `outputs/demo/*.png` / `outputs/demo/sbv2-dump/` / `outputs/demo/quant-sim/`         |
+| `outputs/`（その他）      | ホスト資産（消すと再取得・再エミットが要る）                         | `outputs/sbv2-demo/` / `outputs/yomi/`                                               |
+| `inputs/<family>/<name>/` | 手置きの実重み（ckpt・config — 生成物ではない）                      | `inputs/sbv2/F1/`                                                                    |
 
 ## 組み立て（系列 → 配布形）
 
