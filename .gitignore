@@ -3,6 +3,5 @@
 coverage/
 inputs/
 outputs/
-models/*
-!models/README.md
+models/
 *.safetensors
