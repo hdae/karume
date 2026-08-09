@@ -856,9 +856,21 @@ SBV2_KNOB_KEYS: tuple[str, ...] = (
 )
 
 
-def sbv2_repo_name(model: str) -> str:
-    """単一モデルの配布リポ名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。"""
+def sbv2_series_name(model: str) -> str:
+    """系列名の幹（`outputs/series/<この名前>-{f16,i8}/`）。
+
+    綴りは `export_sbv2.default_out_root` と同一 — 書き手と読み手が同じ 1 語から組む。
+    """
     return f"{SBV2_SERIES_PREFIX}-{model}"
+
+
+def sbv2_repo_name(model: str) -> str:
+    """単一モデルの配布リポ名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。
+
+    `karume-` を前置する（リポ名裁定 2026-08-09 — HF org を作らない代わりに配布リポは
+    `karume-` prefix で名前空間を切る）。系列名（{@link sbv2_series_name}）には掛からない。
+    """
+    return f"karume-{SBV2_SERIES_PREFIX}-{model}"
 
 
 @dataclass(frozen=True)
@@ -880,8 +892,8 @@ class Sbv2Sources:
 def sbv2_sources(series_dir: Path, model: str = SBV2_DEFAULT_MODEL) -> Sbv2Sources:
     """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
     return Sbv2Sources(
-        series_f16=series_dir / f"{sbv2_repo_name(model)}-f16",
-        series_i8=series_dir / f"{sbv2_repo_name(model)}-i8",
+        series_f16=series_dir / f"{sbv2_series_name(model)}-f16",
+        series_i8=series_dir / f"{sbv2_series_name(model)}-i8",
         text_encoder=series_dir / SBV2_TEXT_ENCODER_SERIES / SBV2_TEXT_ENCODER_VARIANT,
         demo=OUTPUTS_ROOT / SBV2_DEMO_DIRNAME,
         model=INPUTS_ROOT / SBV2_SERIES_PREFIX / model,
@@ -1192,7 +1204,8 @@ def sbv2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 PIPELINES: Mapping[str, Pipeline] = {
     "anima": Pipeline(
         default_model=ANIMA_MODEL_NAME,
-        repo_name=lambda model: model,
+        # `karume-` prefix はリポ名裁定（2026-08-09）— HF org の代わりの名前空間。
+        repo_name=lambda model: f"karume-{model}",
         plan=anima_dist_plan,
         render_card=render_model_card,
     ),

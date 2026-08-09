@@ -32,9 +32,9 @@ being true "except for one flag". Bare `karume export` stays Anima's spelling.
 
 ```sh
 uv run karume dist --series ../../outputs/series
-uv run karume dist --pipeline sbv2                       # model FN4 -> models/sbv2-FN4/
+uv run karume dist --pipeline sbv2                       # model FN4 -> models/karume-sbv2-FN4/
 uv run karume dist --pipeline sbv2 --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
-uv run karume verify ../../models/anima-turbo/anima-turbo/transformer/model.f16.safetensors
+uv run karume verify ../../models/karume-anima-turbo/anima-turbo/transformer/model.f16.safetensors
 ```
 
 The scripts are **outside** the package, so they are not in the wheel — `karume export` /

@@ -61,6 +61,7 @@ from karume.dist import (
     sbv2_pipeline_config,
     sbv2_plan,
     sbv2_repo_name,
+    sbv2_series_name,
     sbv2_sources,
     sbv2_speaker_embeddings,
     sbv2_style_vectors,
@@ -726,8 +727,8 @@ class TestCli:
         assert PIPELINES["sbv2"].default_model == SBV2_DEFAULT_MODEL
 
     def test_the_default_output_directory_follows_the_single_model(self) -> None:
-        assert default_out_dir(PIPELINES["anima"], ["anima-turbo"]).name == "anima-turbo"
-        assert default_out_dir(PIPELINES["sbv2"], ["FN4"]).name == "sbv2-FN4"
+        assert default_out_dir(PIPELINES["anima"], ["anima-turbo"]).name == "karume-anima-turbo"
+        assert default_out_dir(PIPELINES["sbv2"], ["FN4"]).name == "karume-sbv2-FN4"
 
     def test_it_refuses_to_invent_a_family_repository_name(self) -> None:
         """`karume-sbv2-jvnv` のようなファミリー名はモデル名の並びからは決まらない。"""
@@ -827,10 +828,10 @@ def _build_sbv2_sources(
     `offset` は表と重みにモデルごとの差を入れる軸（ファミリー組み立ての共有判定を見るため）。
     """
     series = root / "outputs" / "series"
-    repo = sbv2_repo_name(model)
+    stem = sbv2_series_name(model)
     sources = Sbv2Sources(
-        series_f16=series / f"{repo}-f16",
-        series_i8=series / f"{repo}-i8",
+        series_f16=series / f"{stem}-f16",
+        series_i8=series / f"{stem}-i8",
         text_encoder=series / "deberta-i8" / "full-24layer",
         demo=root / "outputs" / "sbv2-demo",
         model=root / "inputs" / "sbv2" / model,
@@ -1353,7 +1354,7 @@ class TestSbv2Cli:
 
         main(["--pipeline", "sbv2", "--model", "FN7", "--series", str(sources.series_f16.parent)])
 
-        out_dir = tmp_path / "models" / "sbv2-FN7"
+        out_dir = tmp_path / "models" / "karume-sbv2-FN7"
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert list(manifest["models"]) == ["FN7"]
         assert verify_dist(out_dir)
