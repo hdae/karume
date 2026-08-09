@@ -25,8 +25,10 @@ MUST: 検査（格納 dtype / rope 素表のバイト同一 / スタイル表・
 「計画（{@link ModelPlan} を組む = 検査と読み取りの全部）→ 実体化（{@link assemble_family}）」の
 2 段で、前段は 1 バイトも書かない。
 
-同一ファイルシステム上の組み立てなので配置は `os.link`（ハードリンク）を優先し、リンクを
-張れない場合（別 FS・権限）だけ copy へ落ちる。数 GB × 2 系列を複製しないため。
+配置は常に**独立したコピー**（ハードリンク禁止 — 2026-08-09 裁定・ADR 0041 追記）。系列の
+書き手は既存ファイルを truncate で上書きするため、リンク共有した配布形は系列の再 export で
+黙って中身が変わり、manifest の sha256 と現物が食い違う。配布形は系列から独立した
+自己完結スナップショットとして吐き出す。
 
     uv run karume dist                                    # = uv run python -m karume.dist
     uv run karume dist --pipeline sbv2
@@ -143,21 +145,21 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def place_file(source: Path, dest: Path) -> str:
-    """`source` を `dest` へ置く。ハードリンク優先・不可なら copy。返り値は採れた手段。
+def place_file(source: Path, dest: Path) -> None:
+    """`source` を `dest` へ**独立したコピー**として置く。
 
-    既存の `dest` は先に外す（再組み立てで前回のリンクが残っていると `os.link` が落ちる）。
+    MUST: ハードリンクは使わない — 系列の書き手（`emit` の `open("wb")`）は既存ファイルを
+    truncate で上書きするため、リンクで置いた配布形は系列の再 export で黙って書き換わり、
+    manifest の sha256 と現物が食い違う（verify_dist は sha256 を採り直さないので沈黙する）。
+
+    既存の `dest` は先に外す — リンク方式だった頃の配布形の上へ再組み立てするとき、unlink が
+    先にリンクを切る（外さず開くと系列側の実ファイルを書き換える）。
     """
     if not source.is_file():
         raise DistError(f"組み立ての入力が無い: {source}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.unlink(missing_ok=True)
-    try:
-        os.link(source, dest)
-    except OSError:
-        shutil.copyfile(source, dest)
-        return "copy"
-    return "link"
+    shutil.copyfile(source, dest)
 
 
 @dataclass(frozen=True)
@@ -182,8 +184,8 @@ class Artifact:
 def materialize(artifact: Artifact, dest: Path) -> None:
     """`Artifact` の実体を `dest` に作る（配置 or 書き出し）。
 
-    MUST: 生成物も既存 `dest` を先に外してから書く — 前回の組み立てで**系列へのハードリンク**が
-    残っていると、開いて書いた瞬間に系列側の実ファイルを書き換えることになる。
+    MUST: 生成物も既存 `dest` を先に外してから書く — リンク方式だった頃の配布形が残っている
+    場合、外さず開いて書いた瞬間に系列側の実ファイルを書き換えることになる。
     """
     if artifact.source is not None:
         place_file(artifact.source, dest)

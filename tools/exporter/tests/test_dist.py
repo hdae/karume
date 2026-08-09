@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import os
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, ClassVar
@@ -204,24 +203,27 @@ class TestLayout:
 
 
 class TestPlacementStrategy:
-    def test_it_hardlinks_when_the_filesystem_allows_it(self, assembled) -> None:
+    def test_it_places_independent_copies(self, assembled) -> None:
+        """配布形はハードリンクを持たない（系列から独立した自己完結スナップショット）。"""
         out_dir, _ = assembled
-        placed = out_dir / ANIMA_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
-        assert placed.stat().st_nlink >= 2
-
-    def test_it_falls_back_to_copy_when_linking_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def refuse(source: Path, dest: Path) -> None:
-            raise OSError(f"cross-device link: {source} → {dest}")
-
-        monkeypatch.setattr(os, "link", refuse)
-        sources = _build_series(tmp_path / "series")
-        out_dir = tmp_path / "models" / "anima-turbo"
-        _assemble_anima(sources, out_dir)
         placed = out_dir / ANIMA_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
         assert placed.read_bytes() == _PAYLOADS["text_encoder"]
         assert placed.stat().st_nlink == 1
+
+    def test_a_series_rewrite_does_not_reach_the_dist(self, tmp_path: Path) -> None:
+        """系列の再 export（truncate 上書き）が組み立て済み配布形へ波及しないこと。
+
+        リンク方式ではここが破れていた — 同じ inode を共有するため、系列の書き直しが
+        manifest の sha256 と現物を黙って食い違わせる。
+        """
+        sources = _build_series(tmp_path / "series")
+        out_dir = tmp_path / "models" / "anima-turbo"
+        _assemble_anima(sources, out_dir)
+        source = sources.base / "text_encoder" / "model.safetensors"
+        with source.open("wb") as handle:
+            handle.write(_fake_safetensors("F16", b"rewritten-after-assembly"))
+        placed = out_dir / ANIMA_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
+        assert placed.read_bytes() == _PAYLOADS["text_encoder"]
 
     def test_it_stops_when_an_input_is_missing(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
