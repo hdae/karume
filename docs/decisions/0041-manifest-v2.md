@@ -162,3 +162,18 @@ using p = await Sbv2Pipeline.fromPretrained("hdae/karume-sbv2-jvnv", {
 3. models: `fromPretrained` オプション貫通（anima / sbv2 両パイプライン）
 4. anima-turbo の v2 再組み立て + 再アップ、JVNV 4 モデルの変換 → `karume-sbv2-jvnv` 組み立て
    （公開波 — ライセンス確認込み）
+
+## 追記（2026-08-09 — 実装時の追加裁定・いずれもユーザー裁定）
+
+- **リポ名は `karume-` prefix**: HF org は作らない（現状規模では不要・後から org へ移譲可能）
+  代わりに、配布リポ名で名前空間を切る。`hdae/anima-turbo` → **`hdae/karume-anima-turbo`**、
+  SBV2 は **`karume-sbv2-jvnv`**（HF 公開・JVNV 4 モデル）と **`karume-sbv2-fn`**（クローズド・
+  FN1〜FN10 の 10 モデル・defaultModel = FN1）。モデル名（`anima-turbo` / `FN4` / `jvnv-F1`…）は
+  不変で、リポ名だけが変わる。系列名（`outputs/series/sbv2-<model>-*`）には掛からない。
+- **配布形の配置はハードリンク禁止・常に独立コピー**: 系列の書き手は既存ファイルを truncate で
+  上書きするため、リンク共有した配布形は系列の再 export で黙って中身が変わり、manifest の
+  sha256 と現物が食い違う（`verify_dist` は sha256 を採り直さない設計なので沈黙する）。配布形は
+  系列から独立した自己完結スナップショットとする。export 段が `models/` へ直接書く案は不採用 —
+  1 リポ = N export 出力の合流（共有畳み込み・rope 同一検査・manifest は全部揃ってからしか
+  書けない）と、re-export ゼロでの組み替え（本 v2 移行がその実例）を失うため。
+- **ファミリー組み立ての defaultModel は最初の `--model`**（専用フラグは置かない）。

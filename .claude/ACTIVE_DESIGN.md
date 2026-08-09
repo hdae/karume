@@ -9,7 +9,7 @@
 ## Active redesigns (in flight)
 
 - **立ち上げロードマップ（ADR 0037）は P0〜P5 まで到達し一段落**。P3/P4 で `AnimaPipeline`
-  （fromPretrained / fromAssets・`using` 対応）+ 共通 image 層 + 配布形 `models/anima-turbo/`
+  （fromPretrained / fromAssets・`using` 対応）+ 共通 image 層 + 配布形（現 `models/karume-anima-turbo/`）
   （`karume dist`・実 hash・格納 dtype 門）+ `karume` サブコマンド CLI + **英語**モデルカード
   README 自動生成まで完了。**移植の門 = PNG sha256 ビット一致 ×4 が全緑**（ローカル /
   取得層 + integrity / example CLI）。P5 で HF 実網通しと配布形の公開まで済み、JSR publish の
@@ -20,7 +20,8 @@
   サブパス面 `@karume/models/sbv2` は `Sbv2Pipeline` だけを出す（example 111 行）。実重み e2e は
   `packages/runtime/tests/e2e_sbv2_test.ts`（3 系列 × 5 ターゲット × 5 ケース）、GPU 不要の
   ホスト側は `packages/models/tests/sbv2_{relattn_parity,text,host,pipeline}_test.ts`。配布形
-  `models/sbv2-FN4/` と CLI `karume export-sbv2` まで揃っている（manifest の確定は ADR 0039）。
+  `models/karume-sbv2-fn/`（FN1〜FN10）と CLI `karume export-sbv2` まで揃っている（manifest の
+  確定は ADR 0039 → v2 形は ADR 0041）。
 - **参照実装ブランチからの再実装（C 波）— 完了**: `codex/kernel-quick-fixes` の triage を
   **設計から書き直して**取り込んだ。C1 = i8a8 linear の accumulator 静的展開 / PipelineCache の
   未決着共有 / exporter の隣接 permute 合成、C2 = **融合パス新設**（RoPE・SiLU・upsample2x を
@@ -36,11 +37,16 @@
 - **配布の次手（未着手）**: HF Xet では**レイヤー分割は DL を速くしない**（分割なし + Range
   4 並列が最速・並列は 4 で飽和）ことを実測済み。hub 側の Range 並列取得が費用対効果で勝つ。
   [research/2026-08-08-xet-split-probe.md](../docs/research/2026-08-08-xet-split-probe.md)。
-- **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 裁定済み・実装待ち**:
-  1 リポ複数モデル（ファミリー / シリーズ / 作者の緩い括り・`defaultModel` 必須）+ 語彙整理
-  （presets → `quants`・variant → `dtype`・components → `weights` / `assets` 分離）。
-  **v1 パーサは持たない**（実配布は anima-turbo 1 件のみで v2 再アップ）。shards は実測で
-  見送り。実装順・積み残しは ADR 0041 末尾。
+- **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 実装完了（2026-08-09）**:
+  1 リポ複数モデル（`defaultModel` 必須）+ 語彙整理（presets → `quants`・variant → `dtype`・
+  components → `weights` / `assets` 分離）。**v1 パーサは持たない**。hub v2 パーサ +
+  `resolveFiles(manifest, {model?, quant?})` + models 貫通（`preset` オプション廃止）+
+  exporter の `--model` 軸 / ファミリー組み立て（同一相対 path + 同一 sha256 のみ `shared/`）
+  まで実装済み。**配布形の配置はハードリンク禁止・常に独立コピー**（ADR 0041 追記）。
+  ローカル配布形は **`models/karume-anima-turbo`**（モデル anima-turbo）と
+  **`models/karume-sbv2-fn`**（FN1〜FN10 の 10 モデル・defaultModel = FN1・DeBERTa は
+  shared/ に 1 本）へ再生成済み。残り = HF 再アップ（karume-anima-turbo）+ JVNV 公開波
+  （karume-sbv2-jvnv — ライセンス確認込み）+ JSR 0.2.0 ロックステップ。
 
 ## Pitfalls
 
@@ -76,8 +82,9 @@
   宣言外ファイル検査の例外は直下の `karume.json` / `README.md` だけ。
 - **現行識別子（`karume_ir` / `karume-ir`）以前に焼かれた資産は開けない**（互換シム無し —
   fail loudly）。`models/` と `outputs/` はどちらも untracked。
-- モデル e2e は anima の PNG 門 4 本が本リポに常駐（`models/anima-turbo/` 資産が前提・無ければ
-  明示 SKIP）。sbv2 の実重み e2e も復帰済み（系列 `outputs/series/sbv2-FN4{,-f16,-i8}/` が前提）。
+- モデル e2e は anima の PNG 門 4 本が本リポに常駐（`models/karume-anima-turbo/` 資産が前提・
+  無ければ明示 SKIP）。sbv2 の実重み e2e も復帰済み（系列 `outputs/series/sbv2-FN4{,-f16,-i8}/`
+  が前提 — 系列名は改名の対象外）。
   **deberta の実重み e2e だけは移行元リポに残置のまま**（`e2e_deberta_test.ts` は未移植）。
 - models パッケージの tree-shaking は「全モジュール副作用ゼロ」不変条件が前提 — 崩れると
   barrel 経由の shake が静かに死ぬ。JSR npm 互換層が `sideEffects: false` を出すかは**未検証**。
