@@ -45,8 +45,10 @@
   まで実装済み。**配布形の配置はハードリンク禁止・常に独立コピー**（ADR 0041 追記）。
   ローカル配布形は **`models/karume-anima-turbo`**（モデル anima-turbo）と
   **`models/karume-sbv2-fn`**（FN1〜FN10 の 10 モデル・defaultModel = FN1・DeBERTa は
-  shared/ に 1 本）へ再生成済み。残り = HF 再アップ（karume-anima-turbo）+ JVNV 公開波
-  （karume-sbv2-jvnv — ライセンス確認込み）+ JSR 0.2.0 ロックステップ。
+  shared/ に 1 本）へ再生成済み。**HF 公開済み（2026-08-09）**: `hdae/karume-anima-turbo`（新規・
+  旧 anima-turbo はユーザーが後日削除）+ `hdae/karume-sbv2-jvnv`（**モデル ID = F1/F2/M1/M2**・
+  cc-by-sa-4.0・帰属は exporter の `--card-profile jvnv` が機械生成・実網 fromPretrained 検証済み）。
+  版は 0.2.0 ロックステップ済み（JSR publish は Release CI・ユーザー）。
 
 ## Pitfalls
 

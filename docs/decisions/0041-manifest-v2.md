@@ -167,9 +167,10 @@ using p = await Sbv2Pipeline.fromPretrained("hdae/karume-sbv2-jvnv", {
 
 - **リポ名は `karume-` prefix**: HF org は作らない（現状規模では不要・後から org へ移譲可能）
   代わりに、配布リポ名で名前空間を切る。`hdae/anima-turbo` → **`hdae/karume-anima-turbo`**、
-  SBV2 は **`karume-sbv2-jvnv`**（HF 公開・JVNV 4 モデル）と **`karume-sbv2-fn`**（クローズド・
-  FN1〜FN10 の 10 モデル・defaultModel = FN1）。モデル名（`anima-turbo` / `FN4` / `jvnv-F1`…）は
-  不変で、リポ名だけが変わる。系列名（`outputs/series/sbv2-<model>-*`）には掛からない。
+  SBV2 は **`karume-sbv2-jvnv`**（HF 公開・**モデル ID = F1/F2/M1/M2** — リポ名がファミリー
+  名前空間を担うのでモデル ID では反復しない・defaultModel = F1。本文 §2/§8 の `jvnv-F1` は
+  裁定時の例示）と **`karume-sbv2-fn`**（クローズド・FN1〜FN10・defaultModel = FN1）。系列名
+  （`outputs/series/sbv2-<model>-*`）には karume- prefix は掛からない。
 - **配布形の配置はハードリンク禁止・常に独立コピー**: 系列の書き手は既存ファイルを truncate で
   上書きするため、リンク共有した配布形は系列の再 export で黙って中身が変わり、manifest の
   sha256 と現物が食い違う（`verify_dist` は sha256 を採り直さない設計なので沈黙する）。配布形は
