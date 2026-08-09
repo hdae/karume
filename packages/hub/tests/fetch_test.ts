@@ -257,7 +257,7 @@ Deno.test("fetchAssets: sha256 の食い違いは IntegrityError（文脈と利�
   assertEquals(error.source, "network");
   assertEquals(error.expected.length, 64);
   assert(error.expected !== error.actual);
-  assertEquals(error.available.presets, ["f16", "w8a8-s16", "f16-c16"]);
+  assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
 });
 
 Deno.test("fetchAssets: content-length が size と食い違えば受信前に止める", async () => {

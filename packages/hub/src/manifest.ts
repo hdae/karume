@@ -1,9 +1,15 @@
 /**
- * `karume.json`（配布 manifest v1）の parse と全構造検査 — ADR 0038 §1〜§3 の正本実装。
+ * `karume.json`（配布 manifest v2 = `karume/2`）の parse と全構造検査 — ADR 0041 の正本実装。
  *
+ * MUST: **v1 は読まない**。`format` が `karume/2` 以外なら unsupported format で落とす
+ * （2 形パースを持たない — ADR 0041 §1）。
  * MUST: 手書き parse・Web 標準 API のみ・未対応と想定外は fail loudly（黙って正規化しない）。
  * MUST: manifest 由来のマップは `Object.hasOwn` 経由でのみ引き、合成はスプレッドのみ
  * （`Object.assign` 禁止 — CLAUDE.md 横断不変条件 / ADR 0038 §1）。
+ *
+ * v1 からの語彙の対応（ADR 0041 §3）: `presets` → `quants` / `defaultPreset` → `defaultQuant` /
+ * variant → `dtype` / `components` → `weights`（dtype キー必須のテンソル容器）+ `assets`
+ * （quant 選択に依存しない無条件ファイル）。
  */
 
 import {
@@ -14,19 +20,22 @@ import {
   NO_LABELS,
 } from "./errors.ts";
 
-/** manifest のファイル名（リポジトリ直下の固定名 — ADR 0038 §1）。 */
+/** manifest のファイル名（リポジトリ直下の固定名 — ADR 0041 §1）。 */
 export const MANIFEST_FILENAME = "karume.json";
 
-/** manifest 本体の上限（DoS 防波堤 — ADR 0038 §1。取得中にも同じ値で abort する）。 */
+/** manifest 本体の上限（DoS 防波堤 — ADR 0041 §7。取得中にも同じ値で abort する）。 */
 export const MAX_MANIFEST_BYTES = 1024 * 1024;
 
-const MAX_COMPONENTS = 64;
-const MAX_PRESETS = 32;
+/** 規模上限（ADR 0041 §7）。 */
+const MAX_MODELS = 32;
+const MAX_WEIGHTS = 32;
+const MAX_ASSETS = 32;
+const MAX_QUANTS = 32;
 const MAX_PIPELINE_CONFIG_BYTES = 256 * 1024;
-/** 1 ファイルの上限バイト数（ADR 0038 §2）。 */
+/** 1 ファイルの上限バイト数（ADR 0038 §2 から据え置き）。 */
 const MAX_FILE_BYTES = 16 * 2 ** 30;
-/** hub が理解する `format` の major。未知 major は fail loudly（ADR 0038 §1）。 */
-const FORMAT_MAJOR = 1;
+/** hub が理解する `format` の major。未知 major は fail loudly（ADR 0041 §1）。 */
+const FORMAT_MAJOR = 2;
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
@@ -40,21 +49,21 @@ const PIPELINE_RE = /^([A-Za-z0-9_-]+)\/([1-9][0-9]*)$/;
  */
 const FORBIDDEN_KEYS: readonly string[] = ["__proto__", "constructor", "prototype"];
 
-const ENVELOPE_KEYS: readonly string[] = [
-  "format",
-  "generator",
+const ENVELOPE_KEYS: readonly string[] = ["format", "generator", "defaultModel", "models"];
+const MODEL_KEYS: readonly string[] = [
   "pipeline",
-  "components",
-  "presets",
-  "defaultPreset",
+  "weights",
+  "assets",
+  "quants",
+  "defaultQuant",
   "pipelineConfig",
 ];
-const COMPONENT_BASE_KEYS: readonly string[] = ["file", "extras"];
+const WEIGHT_DTYPE_KEYS: readonly string[] = ["file", "extras"];
 const FILE_REF_KEYS: readonly string[] = ["path", "size", "sha256"];
-const PRESET_KEYS: readonly string[] = ["weights", "session", "gpuFeatures"];
+const QUANT_KEYS: readonly string[] = ["weights", "session", "gpuFeatures"];
 const GPU_FEATURE_KEYS: readonly string[] = ["shaderF16"];
 
-/** `session` の allowlist（キーも値も — ADR 0038 §3）。runtime 型の素通しではなく manifest 所有。 */
+/** `session` の allowlist（キーも値も — ADR 0038 §3 から据え置き）。runtime 型の素通しではない。 */
 const LINEAR_COMPUTE: readonly LinearCompute[] = ["f32", "i8a8", "f16"];
 const ATTENTION_COMPUTE: readonly AttentionCompute[] = ["f32", "f16", "i8a8"];
 const SCORE_STORAGE: readonly ScoreStorage[] = ["f32", "f16"];
@@ -77,31 +86,39 @@ export type FileRef = {
   readonly sha256: string;
 };
 
-/** コンポーネントの基本形 `{file, extras?}`（ADR 0038 §2）。extras は無ければ空マップ。 */
-export type ComponentFiles = {
+/**
+ * weights の 1 dtype ぶんのファイル群（`{file, extras?}`）。
+ *
+ * NOTE: `extras`（rope_base 等）は v1 と同じ席 = dtype エントリの内側に置く（ADR 0041 §3 は
+ * components を weights / assets へ割るだけで、extras の位置は動かしていない）。dtype ごとに
+ * 別の付帯資産を持てることに意味がある（同一実体なら同じ path を書けば取得は 1 回に畳まれる）。
+ */
+export type WeightFiles = {
   readonly file: FileRef;
   readonly extras: Readonly<Record<string, FileRef>>;
 };
 
-/** `file` と `variants` の排他を型で持つ（ADR 0038 §2）。 */
-export type ManifestComponent =
-  | { readonly kind: "single"; readonly files: ComponentFiles }
-  | { readonly kind: "variants"; readonly variants: Readonly<Record<string, ComponentFiles>> };
+/**
+ * weights の 1 エントリ = **dtype ラベル → ファイル群**。v1 の `{file}` / `{variants}` の
+ * 2 形は消え、i8 単体のコンポーネントも `{ "i8": … }` と書く（ADR 0041 §3）。
+ */
+export type WeightEntry = Readonly<Record<string, WeightFiles>>;
 
-/** manifest 所有の実行ノブ語彙（v1 は 3 キー固定 — ADR 0038 §3）。 */
+/** manifest 所有の実行ノブ語彙（3 キー固定 — ADR 0038 §3）。 */
 export type SessionSpec = {
   readonly linearCompute?: LinearCompute;
   readonly attentionCompute?: AttentionCompute;
   readonly attentionScoreStorage?: ScoreStorage;
 };
 
-/** device 生成前に要る GPU feature（v1 は `shaderF16` のみ — ADR 0038 §3）。 */
+/** device 生成前に要る GPU feature（`shaderF16` のみ — ADR 0038 §3）。 */
 export type GpuFeaturesSpec = {
   readonly shaderF16?: boolean;
 };
 
-export type Preset = {
-  /** `variants` を持つ全コンポーネントへの完全写像。 */
+/** 名前付きの量子化・精度モード（v1 の Preset — ADR 0041 §3 で改名）。 */
+export type Quant = {
+  /** weights 名 → その dtype ラベルへの**完全写像**。 */
   readonly weights: Readonly<Record<string, string>>;
   readonly session: SessionSpec;
   readonly gpuFeatures?: GpuFeaturesSpec;
@@ -113,18 +130,33 @@ export type PipelineId = {
   readonly major: number;
 };
 
+/**
+ * 1 モデルぶんの宣言。`pipeline` が**モデル単位**なので、ファミリーリポに別アーキが混ざっても
+ * 壊れない（ADR 0041 §2）。
+ */
+export type ModelEntry = {
+  readonly pipeline: PipelineId;
+  /** dtype 別のテンソル容器。 */
+  readonly weights: Readonly<Record<string, WeightEntry>>;
+  /** quant 選択に依存しない無条件ファイル（tokenizer / symbols / style_vectors 等）。 */
+  readonly assets: Readonly<Record<string, FileRef>>;
+  readonly quants: Readonly<Record<string, Quant>>;
+  readonly defaultQuant: string;
+  /** パイプライン所有 — hub は素通し（スキーマ検証は `@karume/models` の各実装）。 */
+  readonly pipelineConfig: Readonly<Record<string, unknown>>;
+  /** このモデルで選べるもの（エラー提示にも使う）。 */
+  readonly available: AvailableLabels;
+};
+
 export type Manifest = {
   /** `karume/<major>`。major は hub が検査済み。 */
   readonly format: string;
   /** 焼いたツールの版（障害報告の照合用・実行意味論なし）。 */
   readonly generator: string;
-  readonly pipeline: PipelineId;
-  readonly components: Readonly<Record<string, ManifestComponent>>;
-  readonly presets: Readonly<Record<string, Preset>>;
-  readonly defaultPreset: string;
-  /** パイプライン所有 — hub は素通し（スキーマ検証は `@karume/models` の各実装）。 */
-  readonly pipelineConfig: Readonly<Record<string, unknown>>;
-  /** 利用可能な preset / variant ラベル（エラー提示にも使う）。 */
+  /** モデル未指定時に使うモデル名（必須 — ADR 0041 §2）。 */
+  readonly defaultModel: string;
+  readonly models: Readonly<Record<string, ModelEntry>>;
+  /** リポ全体で選べるもの（`quants` / `dtypes` はモデル文脈が無いので空）。 */
   readonly available: AvailableLabels;
 };
 
@@ -165,22 +197,29 @@ const assertNoForbiddenKeys = (value: unknown, where: string): void => {
 /**
  * 検査を通す前に「利用可能なもの」を最善努力で拾う。壊れた manifest でも
  * 「では何なら動くのか」をエラーに載せられるようにするためだけの走査で、絶対に throw しない。
+ *
+ * `model` を渡すとそのモデルの quant / dtype まで拾う（モデルを跨いだ混合はしない — 別モデルの
+ * quant 名を勧めるのは誤誘導）。
  */
-const surveyLabels = (root: Record<string, unknown>): AvailableLabels => {
-  const presetsRaw = root["presets"];
-  const presets = isRecord(presetsRaw) ? Object.keys(presetsRaw) : [];
-  const componentsRaw = root["components"];
-  let variants: Readonly<Record<string, readonly string[]>> = {};
-  if (isRecord(componentsRaw)) {
-    for (const name of Object.keys(componentsRaw)) {
-      const component = componentsRaw[name];
-      if (!isRecord(component)) continue;
-      const labels = component["variants"];
+const surveyLabels = (root: Record<string, unknown>, model?: string): AvailableLabels => {
+  const modelsRaw = root["models"];
+  if (!isRecord(modelsRaw)) return NO_LABELS;
+  const models = Object.keys(modelsRaw);
+  if (model === undefined) return { models, quants: [], dtypes: {} };
+  const entry = modelsRaw[model];
+  if (!isRecord(entry)) return { models, quants: [], dtypes: {} };
+  const quantsRaw = entry["quants"];
+  const quants = isRecord(quantsRaw) ? Object.keys(quantsRaw) : [];
+  const weightsRaw = entry["weights"];
+  let dtypes: Readonly<Record<string, readonly string[]>> = {};
+  if (isRecord(weightsRaw)) {
+    for (const name of Object.keys(weightsRaw)) {
+      const labels = weightsRaw[name];
       if (!isRecord(labels)) continue;
-      variants = { ...variants, [name]: Object.keys(labels) };
+      dtypes = { ...dtypes, [name]: Object.keys(labels) };
     }
   }
-  return { presets, variants };
+  return { models, quants, dtypes };
 };
 
 const assertAllowedKeys = (
@@ -197,8 +236,9 @@ const assertAllowedKeys = (
 };
 
 /**
- * path の**許可リスト**検査（ADR 0038 §2）。取得層はセグメントを percent-encode してもドットを
- * 透過するため、禁止列挙では抜けがそのまま SHA ピン外への traversal になる。
+ * path の**許可リスト**検査（ADR 0038 §2・v2 も据え置き = ADR 0041 §6）。取得層はセグメントを
+ * percent-encode してもドットを透過するため、禁止列挙では抜けがそのまま SHA ピン外への
+ * traversal になる。
  */
 const assertPath = (fail: Fail, path: string, where: string): void => {
   for (const segment of path.split("/")) {
@@ -224,8 +264,9 @@ const assertPath = (fail: Fail, path: string, where: string): void => {
 };
 
 /**
- * 3 点セットを検査して読む。同一 path の重複参照は合法だが `{size, sha256}` の完全一致を
- * 要求する（矛盾 manifest は self-heal を振動させ、正しいキャッシュを evict し続ける）。
+ * 3 点セットを検査して読む。同一 path の重複参照は合法（モデル間の共有はこれだけで成立する —
+ * ADR 0041 §5）だが `{size, sha256}` の完全一致を要求する（矛盾 manifest は self-heal を
+ * 振動させ、正しいキャッシュを evict し続ける）。
  */
 const parseFileRef = (
   fail: Fail,
@@ -265,12 +306,14 @@ const parseFileRef = (
   return ref;
 };
 
-const parseComponentFiles = (
+const parseWeightFiles = (
   fail: Fail,
-  raw: Record<string, unknown>,
+  raw: unknown,
   where: string,
   seen: Map<string, FileRef>,
-): ComponentFiles => {
+): WeightFiles => {
+  if (!isRecord(raw)) throw fail.format(`${where}: dtype エントリがオブジェクトでない`);
+  assertAllowedKeys(fail, raw, WEIGHT_DTYPE_KEYS, where);
   const file = parseFileRef(fail, raw["file"], `${where}.file`, seen);
   const extrasRaw = raw["extras"];
   if (extrasRaw === undefined) return { file, extras: {} };
@@ -283,39 +326,23 @@ const parseComponentFiles = (
   return { file, extras };
 };
 
-const parseComponent = (
+/** weights の 1 エントリ（dtype ラベル → ファイル群）。**dtype キーは 1 つ以上必須**。 */
+const parseWeightEntry = (
   fail: Fail,
   raw: unknown,
   where: string,
   seen: Map<string, FileRef>,
-): ManifestComponent => {
-  if (!isRecord(raw)) throw fail.format(`${where}: コンポーネントがオブジェクトでない`);
-  const hasFile = Object.hasOwn(raw, "file");
-  const hasVariants = Object.hasOwn(raw, "variants");
-  if (hasFile === hasVariants) {
-    throw fail.format(
-      `${where}: 'file' と 'variants' は排他必須（${hasFile ? "両方ある" : "両方ない"}）`,
-    );
+): WeightEntry => {
+  if (!isRecord(raw)) throw fail.format(`${where}: weights エントリがオブジェクトでない`);
+  const labels = Object.keys(raw);
+  if (labels.length === 0) {
+    throw fail.format(`${where}: 空（dtype ラベルが 1 つ以上要る — v2 は dtype キー必須）`);
   }
-  if (!hasVariants) {
-    assertAllowedKeys(fail, raw, COMPONENT_BASE_KEYS, where);
-    return { kind: "single", files: parseComponentFiles(fail, raw, where, seen) };
-  }
-  assertAllowedKeys(fail, raw, ["variants"], where);
-  const variantsRaw = raw["variants"];
-  if (!isRecord(variantsRaw)) throw fail.format(`${where}.variants: オブジェクトでない`);
-  const labels = Object.keys(variantsRaw);
-  if (labels.length === 0) throw fail.format(`${where}.variants: 空（1 つ以上のラベルが要る）`);
-  let variants: Readonly<Record<string, ComponentFiles>> = {};
+  let entry: WeightEntry = {};
   for (const label of labels) {
-    const entry = variantsRaw[label];
-    const at = `${where}.variants.${label}`;
-    if (!isRecord(entry)) throw fail.format(`${at}: オブジェクトでない`);
-    assertAllowedKeys(fail, entry, COMPONENT_BASE_KEYS, at);
-    if (!Object.hasOwn(entry, "file")) throw fail.format(`${at}: 'file' が無い`);
-    variants = { ...variants, [label]: parseComponentFiles(fail, entry, at, seen) };
+    entry = { ...entry, [label]: parseWeightFiles(fail, raw[label], `${where}.${label}`, seen) };
   }
-  return { kind: "variants", variants };
+  return entry;
 };
 
 const readEnum = <T extends string>(
@@ -366,69 +393,71 @@ const parseGpuFeatures = (
   return { shaderF16 };
 };
 
-const parseWeights = (
+/**
+ * quant の weights 写像を読む。**weights に実在するキー → そのエントリに実在する dtype ラベル**
+ * の完全写像であることを実行時にも検査する（型だけでは配布 JSON を縛れない — ADR 0041 §3）。
+ */
+const parseQuantWeights = (
   fail: Fail,
   raw: unknown,
   where: string,
-  components: Readonly<Record<string, ManifestComponent>>,
+  weights: Readonly<Record<string, WeightEntry>>,
 ): Readonly<Record<string, string>> => {
   if (!isRecord(raw)) throw fail.format(`${where}.weights: 無い / オブジェクトでない`);
-  let weights: Readonly<Record<string, string>> = {};
+  let mapping: Readonly<Record<string, string>> = {};
   for (const name of Object.keys(raw)) {
-    if (!Object.hasOwn(components, name)) {
-      throw fail.reference(`${where}.weights: 未知のコンポーネント '${name}'`);
-    }
-    const component = components[name];
-    if (component.kind !== "variants") {
+    if (!Object.hasOwn(weights, name)) {
       throw fail.reference(
-        `${where}.weights: コンポーネント '${name}' は variants を持たない（{file} 形）`,
+        `${where}.weights: 未知の weights '${name}'` +
+          `（利用可能: ${Object.keys(weights).join(" / ")}）`,
       );
     }
     const label = raw[name];
     if (typeof label !== "string") {
-      throw fail.format(`${where}.weights.${name}: ラベルが文字列でない`);
+      throw fail.format(`${where}.weights.${name}: dtype ラベルが文字列でない`);
     }
-    if (!Object.hasOwn(component.variants, label)) {
+    const entry = weights[name];
+    if (!Object.hasOwn(entry, label)) {
       throw fail.reference(
-        `${where}.weights: '${name}' に variant '${label}' が無い` +
-          `（利用可能: ${Object.keys(component.variants).join(" / ")}）`,
+        `${where}.weights: '${name}' に dtype '${label}' が無い` +
+          `（利用可能: ${Object.keys(entry).join(" / ")}）`,
       );
     }
-    weights = { ...weights, [name]: label };
+    mapping = { ...mapping, [name]: label };
   }
-  for (const name of Object.keys(components)) {
-    if (components[name].kind === "variants" && !Object.hasOwn(weights, name)) {
+  for (const name of Object.keys(weights)) {
+    if (!Object.hasOwn(mapping, name)) {
       throw fail.reference(
-        `${where}.weights: variants を持つ '${name}' の指定が無い（完全写像が必要）`,
+        `${where}.weights: '${name}' の dtype 指定が無い（完全写像が必要）`,
       );
     }
   }
-  return weights;
+  return mapping;
 };
 
-const parsePreset = (
+const parseQuant = (
   fail: Fail,
   raw: unknown,
   where: string,
-  components: Readonly<Record<string, ManifestComponent>>,
-): Preset => {
-  if (!isRecord(raw)) throw fail.format(`${where}: preset がオブジェクトでない`);
-  assertAllowedKeys(fail, raw, PRESET_KEYS, where);
-  const weights = parseWeights(fail, raw["weights"], where, components);
+  weights: Readonly<Record<string, WeightEntry>>,
+): Quant => {
+  if (!isRecord(raw)) throw fail.format(`${where}: quant がオブジェクトでない`);
+  assertAllowedKeys(fail, raw, QUANT_KEYS, where);
+  const mapping = parseQuantWeights(fail, raw["weights"], where, weights);
   const session = parseSession(fail, raw["session"], where);
   const gpuFeatures = parseGpuFeatures(fail, raw["gpuFeatures"], where);
   return {
-    weights,
+    weights: mapping,
     session,
     ...(gpuFeatures === undefined ? {} : { gpuFeatures }),
   };
 };
 
-const parsePipeline = (fail: Fail, raw: unknown): PipelineId => {
-  if (typeof raw !== "string") throw fail.format("pipeline: 無い / 文字列でない");
+const parsePipeline = (fail: Fail, raw: unknown, where: string): PipelineId => {
+  if (typeof raw !== "string") throw fail.format(`${where}.pipeline: 無い / 文字列でない`);
   const matched = PIPELINE_RE.exec(raw);
   if (matched === null) {
-    throw fail.format(`pipeline: '<name>/<major>' の形でない: '${raw}'`);
+    throw fail.format(`${where}.pipeline: '<name>/<major>' の形でない: '${raw}'`);
   }
   return { name: matched[1], major: Number(matched[2]) };
 };
@@ -448,29 +477,38 @@ const parseFormat = (fail: Fail, raw: unknown): string => {
   return raw;
 };
 
-const parsePipelineConfig = (fail: Fail, raw: unknown): Readonly<Record<string, unknown>> => {
+const parsePipelineConfig = (
+  fail: Fail,
+  raw: unknown,
+  where: string,
+): Readonly<Record<string, unknown>> => {
   if (!isRecord(raw)) {
-    throw fail.format("pipelineConfig: 無い / オブジェクトでない（空でも {} を明示）");
+    throw fail.format(`${where}.pipelineConfig: 無い / オブジェクトでない（空でも {} を明示）`);
   }
   const bytes = new TextEncoder().encode(JSON.stringify(raw)).length;
   if (bytes > MAX_PIPELINE_CONFIG_BYTES) {
     throw fail.format(
-      `pipelineConfig: ${bytes} バイトが上限 ${MAX_PIPELINE_CONFIG_BYTES} を超えた`,
+      `${where}.pipelineConfig: ${bytes} バイトが上限 ${MAX_PIPELINE_CONFIG_BYTES} を超えた`,
     );
   }
   return raw;
 };
 
+/**
+ * 名前付きマップを上限つきで読む。`allowEmpty` は「宣言は必須だが中身が無くてもよい」席
+ * （`assets` — 重みだけのモデルに空でない assets を捏造させない）にだけ使う。
+ */
 const parseMap = <T>(
   fail: Fail,
   raw: unknown,
   where: string,
   max: number,
   parseEntry: (name: string, value: unknown) => T,
+  allowEmpty = false,
 ): Readonly<Record<string, T>> => {
   if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
   const names = Object.keys(raw);
-  if (names.length === 0) throw fail.format(`${where}: 空（1 つ以上が要る）`);
+  if (names.length === 0 && !allowEmpty) throw fail.format(`${where}: 空（1 つ以上が要る）`);
   if (names.length > max) {
     throw fail.format(`${where}: ${names.length} 件が上限 ${max} を超えた`);
   }
@@ -481,10 +519,67 @@ const parseMap = <T>(
   return parsed;
 };
 
+const parseModel = (
+  root: Record<string, unknown>,
+  name: string,
+  raw: unknown,
+  seen: Map<string, FileRef>,
+): ModelEntry => {
+  const available = surveyLabels(root, name);
+  const fail = createFail(available);
+  const where = `models.${name}`;
+  if (!isRecord(raw)) throw fail.format(`${where}: モデルエントリがオブジェクトでない`);
+  assertAllowedKeys(fail, raw, MODEL_KEYS, where);
+
+  const pipeline = parsePipeline(fail, raw["pipeline"], where);
+  const weights = parseMap(
+    fail,
+    raw["weights"],
+    `${where}.weights`,
+    MAX_WEIGHTS,
+    (weightName, value) => parseWeightEntry(fail, value, `${where}.weights.${weightName}`, seen),
+  );
+  const assets = parseMap(
+    fail,
+    raw["assets"],
+    `${where}.assets`,
+    MAX_ASSETS,
+    (assetName, value) => parseFileRef(fail, value, `${where}.assets.${assetName}`, seen),
+    true,
+  );
+  const quants = parseMap(
+    fail,
+    raw["quants"],
+    `${where}.quants`,
+    MAX_QUANTS,
+    (quantName, value) => parseQuant(fail, value, `${where}.quants.${quantName}`, weights),
+  );
+
+  const defaultQuant = raw["defaultQuant"];
+  if (typeof defaultQuant !== "string") {
+    throw fail.format(`${where}.defaultQuant: 無い / 文字列でない`);
+  }
+  if (!Object.hasOwn(quants, defaultQuant)) {
+    throw fail.reference(
+      `${where}.defaultQuant: '${defaultQuant}' は quants に無い` +
+        `（利用可能: ${Object.keys(quants).join(" / ")}）`,
+    );
+  }
+  return {
+    pipeline,
+    weights,
+    assets,
+    quants,
+    defaultQuant,
+    pipelineConfig: parsePipelineConfig(fail, raw["pipelineConfig"], where),
+    available,
+  };
+};
+
 /**
- * `karume.json` のテキストを検査して読む。ADR 0038 §1〜§3 の検査を**全て** parse 時に走らせ、
- * 1 つでも破れたら fetch を開始せずに throw する（「DL 開始後に初めて欠けが分かる」を許さない
- * のが manifest 導入の目的そのもの）。
+ * `karume.json` のテキストを検査して読む。ADR 0041 の検査を**全て** parse 時に走らせ、1 つでも
+ * 破れたら fetch を開始せずに throw する（「DL 開始後に初めて欠けが分かる」を許さないのが
+ * manifest 導入の目的そのもの）。
  */
 export const parseManifest = (text: string): Manifest => {
   const bytes = new TextEncoder().encode(text).length;
@@ -503,56 +598,36 @@ export const parseManifest = (text: string): Manifest => {
   if (!isRecord(root)) throw new ManifestFormatError("manifest: 最上位がオブジェクトでない");
   assertNoForbiddenKeys(root, "manifest");
 
-  const fail = createFail(surveyLabels(root));
-  assertAllowedKeys(fail, root, ENVELOPE_KEYS, "manifest");
+  const available = surveyLabels(root);
+  const fail = createFail(available);
+  // MUST: `format` を未知キー検査より**先**に見る。v1 manifest はトップレベルの綴りが丸ごと
+  // 違うので、順が逆だと「未知キー 'components'」という的外れな診断が出て、本当の理由
+  // （この hub は karume/2 しか読まない）が隠れる（ADR 0041 §1）。
   const format = parseFormat(fail, root["format"]);
+  assertAllowedKeys(fail, root, ENVELOPE_KEYS, "manifest");
   const generator = root["generator"];
   if (typeof generator !== "string" || generator === "") {
     throw fail.format("generator: 無い / 非空文字列でない");
   }
-  const pipeline = parsePipeline(fail, root["pipeline"]);
 
+  // MUST: path の重複検査は manifest 全域で 1 つの表を共有する — モデル間の共有は「同じ path を
+  // 書く」だけで成立する形（ADR 0041 §5）なので、モデルごとに表を分けると矛盾を見逃す。
   const seenPaths = new Map<string, FileRef>();
-  const components = parseMap(
+  const models = parseMap(
     fail,
-    root["components"],
-    "components",
-    MAX_COMPONENTS,
-    (name, value) => parseComponent(fail, value, `components.${name}`, seenPaths),
-  );
-  const presets = parseMap(
-    fail,
-    root["presets"],
-    "presets",
-    MAX_PRESETS,
-    (name, value) => parsePreset(fail, value, `presets.${name}`, components),
+    root["models"],
+    "models",
+    MAX_MODELS,
+    (name, value) => parseModel(root, name, value, seenPaths),
   );
 
-  const defaultPreset = root["defaultPreset"];
-  if (typeof defaultPreset !== "string") throw fail.format("defaultPreset: 無い / 文字列でない");
-  if (!Object.hasOwn(presets, defaultPreset)) {
+  const defaultModel = root["defaultModel"];
+  if (typeof defaultModel !== "string") throw fail.format("defaultModel: 無い / 文字列でない");
+  if (!Object.hasOwn(models, defaultModel)) {
     throw fail.reference(
-      `defaultPreset: '${defaultPreset}' は presets に無い` +
-        `（利用可能: ${Object.keys(presets).join(" / ")}）`,
+      `defaultModel: '${defaultModel}' は models に無い` +
+        `（利用可能: ${Object.keys(models).join(" / ")}）`,
     );
   }
-  const pipelineConfig = parsePipelineConfig(fail, root["pipelineConfig"]);
-
-  let variants: Readonly<Record<string, readonly string[]>> = {};
-  for (const name of Object.keys(components)) {
-    const component = components[name];
-    if (component.kind === "variants") {
-      variants = { ...variants, [name]: Object.keys(component.variants) };
-    }
-  }
-  return {
-    format,
-    generator,
-    pipeline,
-    components,
-    presets,
-    defaultPreset,
-    pipelineConfig,
-    available: { presets: Object.keys(presets), variants },
-  };
+  return { format, generator, defaultModel, models, available };
 };

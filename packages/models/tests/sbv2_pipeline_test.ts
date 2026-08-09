@@ -2,9 +2,9 @@
 // example の dump 経路と golden E2E が持つ）。
 //
 // ここで押さえるのは 2 つ:
-//  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反を落とす（pipeline 名 /
-//     未知 major / 未知 preset / pipelineConfig のスキーマ）。落とす位置がずれると、GPU の
-//     無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+//  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反を落とす（未知 model /
+//     pipeline 名 / 未知 major / 未知 quant / pipelineConfig のスキーマ）。落とす位置が
+//     ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
 //  ② `styles` / `speakers` は「名前 → **表の行番号**」で、値が `0..件数-1` の順列であること。
 //     行番号がずれても `style_vec` / `g` の shape は合ったままなので、**別のスタイル・別の
 //     話者の声が出る**だけで沈黙する（`src/sbv2/config.ts` の doc）。既定が受理集合の外を
@@ -24,26 +24,32 @@ const FILE = {
 /** `models/sbv2-FN4/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/1",
+    format: "karume/2",
     generator: "karume/0.1.0",
-    pipeline: "sbv2/1",
-    components: { front: { file: FILE } },
-    presets: { w8: { weights: {}, session: {} } },
-    defaultPreset: "w8",
-    pipelineConfig: {
-      styles: { Neutral: 0, high: 1 },
-      speakers: { FN4: 0 },
-      defaults: {
-        speaker: "FN4",
-        style: "Neutral",
-        styleWeight: 1,
-        sdpRatio: 0.2,
-        noiseScale: 0.6,
-        noiseScaleW: 0.8,
-        lengthScale: 1,
+    defaultModel: "FN4",
+    models: {
+      FN4: {
+        pipeline: "sbv2/1",
+        weights: { front: { i8: { file: FILE } } },
+        assets: {},
+        quants: { w8: { weights: { front: "i8" }, session: {} } },
+        defaultQuant: "w8",
+        pipelineConfig: {
+          styles: { Neutral: 0, high: 1 },
+          speakers: { FN4: 0 },
+          defaults: {
+            speaker: "FN4",
+            style: "Neutral",
+            styleWeight: 1,
+            sdpRatio: 0.2,
+            noiseScale: 0.6,
+            noiseScaleW: 0.8,
+            lengthScale: 1,
+          },
+        },
+        ...patch,
       },
     },
-    ...patch,
   });
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
@@ -64,7 +70,7 @@ Deno.test("fromAssets: pipeline の契約名が sbv2 でない manifest を落�
 Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/2" }));
   // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
-  assertEquals(manifest.pipeline, { name: "sbv2", major: 2 });
+  assertEquals(manifest.models["FN4"].pipeline, { name: "sbv2", major: 2 });
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
@@ -72,12 +78,22 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   );
 });
 
-Deno.test("fromAssets: 存在しない preset は利用可能な一覧を添えて落とす", async () => {
+Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }, { preset: "f16" }),
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }, { quant: "f16" }),
     Error,
     "利用可能: w8",
+  );
+});
+
+Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+  // v2 で増えた軸（ファミリーリポの別話者を打ち間違えたときの一次情報 — ADR 0041 §8）。
+  const manifest = parseManifest(manifestText());
+  await assertRejects(
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }, { model: "FN1" }),
+    Error,
+    "利用可能: FN4",
   );
 });
 

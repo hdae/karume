@@ -2,9 +2,9 @@
 // （実 GPU の E2E は P3 波 2）。
 //
 // ここで押さえるのは 2 つ:
-//  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反を落とす（pipeline 名 /
-//     未知 major / 未知 preset）。落とす位置がずれると、GPU の無い環境では別の例外に化けて
-//     「何が悪かったのか」が読み手に伝わらない。
+//  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反を落とす（未知 model /
+//     pipeline 名 / 未知 major / 未知 quant）。落とす位置がずれると、GPU の無い環境では
+//     別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
 //  ② manifest の `session`（3 キー固定）→ runtime `SessionOptions` の写像が 1 キーずつ通る。
 //     ADR 0038 §3 の綴りの契約そのもので、抜けは**沈黙劣化**（未知キーは runtime が黙って
 //     無視する）になる。
@@ -22,21 +22,27 @@ const FILE = {
 /** `models/anima-turbo/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/1",
+    format: "karume/2",
     generator: "karume/0.1.0",
-    pipeline: "anima/1",
-    components: { transformer: { file: FILE } },
-    presets: { "w8a8-s16": { weights: {}, session: {} } },
-    defaultPreset: "w8a8-s16",
-    pipelineConfig: {
-      scheduler: { shift: 3, numTrainTimesteps: 1000 },
-      defaults: {
-        steps: 10,
-        guidanceScale: 1,
-        resolution: { width: 1024, height: 1024 },
+    defaultModel: "anima-turbo",
+    models: {
+      "anima-turbo": {
+        pipeline: "anima/1",
+        weights: { transformer: { f16: { file: FILE } } },
+        assets: {},
+        quants: { "w8a8-s16": { weights: { transformer: "f16" }, session: {} } },
+        defaultQuant: "w8a8-s16",
+        pipelineConfig: {
+          scheduler: { shift: 3, numTrainTimesteps: 1000 },
+          defaults: {
+            steps: 10,
+            guidanceScale: 1,
+            resolution: { width: 1024, height: 1024 },
+          },
+        },
+        ...patch,
       },
     },
-    ...patch,
   });
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
@@ -53,7 +59,7 @@ Deno.test("fromAssets: pipeline の契約名が anima でない manifest を落�
 Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/2" }));
   // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
-  assertEquals(manifest.pipeline, { name: "anima", major: 2 });
+  assertEquals(manifest.models["anima-turbo"].pipeline, { name: "anima", major: 2 });
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
@@ -70,12 +76,23 @@ Deno.test("fromAssets: pipelineConfig のスキーマ違反は構築時に落ち
   );
 });
 
-Deno.test("fromAssets: 存在しない preset は利用可能な一覧を添えて落とす", async () => {
+Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { preset: "w8a8" }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { quant: "w8a8" }),
     Error,
     "利用可能: w8a8-s16",
+  );
+});
+
+Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+  // v2 で増えた軸。モデル名を打ち間違えたときに「では何があるのか」を一次情報で返す
+  // （ADR 0041 §8）。
+  const manifest = parseManifest(manifestText());
+  await assertRejects(
+    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { model: "anima-xl" }),
+    Error,
+    "利用可能: anima-turbo",
   );
 });
 
@@ -86,7 +103,7 @@ Deno.test("toSessionOptions: 3 キーを 1 つずつ写す（未指定は欄ご�
   assertEquals(toSessionOptions({ attentionScoreStorage: "f16" }), {
     attentionScoreStorage: "f16",
   });
-  // 配布物の既定 preset（w8a8-s16）の 3 キーが全て通ること。1 キーでも落とすと
+  // 配布物の既定 quant（w8a8-s16）の 3 キーが全て通ること。1 キーでも落とすと
   // 「名前だけ s16」の沈黙劣化になる。
   assertEquals(
     toSessionOptions({

@@ -1,1032 +1,4322 @@
 {
-  "note": "ADR 0038 §1〜§3 の各検査が『その検査のエラー型で』赤くなることの正本表。error は throw されるべきクラス名。規模上限（components 65 / presets 33 / pipelineConfig 256KiB 超 / manifest 1MiB 超）だけは手書きが非現実的なのでテスト側で組み立てる。",
   "cases": [
     {
       "name": "envelope-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/1",
+        "format": "karume/2",
         "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "minRuntime": "0.1.0",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
           }
         },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
+        "presets": {}
       }
     },
     {
       "name": "format-unknown-major",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/2",
+        "format": "karume/3",
         "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
           }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
+        }
+      }
+    },
+    {
+      "name": "format-v1-not-read",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/1",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
       }
     },
     {
       "name": "format-foreign",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "diffusers/1",
+        "format": "onnx/1",
         "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
           }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
+        }
       }
     },
     {
-      "name": "pipeline-without-major",
+      "name": "format-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/1",
         "generator": "karume/0.1.0",
-        "pipeline": "anima",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
           }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "pipeline-non-integer-major",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1.0",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
+        }
       }
     },
     {
       "name": "generator-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/1",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
+        "format": "karume/2",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
           }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
+        }
       }
     },
     {
-      "name": "pipeline-config-missing",
+      "name": "generator-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
+        "format": "karume/2",
+        "generator": "",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
           }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p"
+        }
       }
     },
     {
-      "name": "components-empty",
+      "name": "default-model-not-string",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/1",
+        "format": "karume/2",
         "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {},
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "presets-empty",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
+        "defaultModel": 0,
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
           }
-        },
-        "presets": {},
-        "defaultPreset": "p",
-        "pipelineConfig": {}
+        }
       }
     },
     {
-      "name": "default-preset-dangling",
+      "name": "default-model-dangling",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/1",
+        "format": "karume/2",
         "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
+        "defaultModel": "absent",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
           }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "q",
-        "pipelineConfig": {}
+        }
       }
     },
     {
-      "name": "default-preset-not-string",
+      "name": "models-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/1",
+        "format": "karume/2",
         "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": 0,
-        "pipelineConfig": {}
+        "defaultModel": "m"
       }
     },
     {
-      "name": "proto-key-as-component-name",
+      "name": "models-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/1",
+        "format": "karume/2",
         "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
+        "defaultModel": "m",
+        "models": {}
+      }
+    },
+    {
+      "name": "models-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": []
+      }
+    },
+    {
+      "name": "model-entry-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": "anima/1"
+        }
+      }
+    },
+    {
+      "name": "proto-key-as-model-name",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          },
           "__proto__": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
           }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
+        }
       }
     },
     {
       "name": "proto-key-inside-pipeline-config",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/1",
+        "format": "karume/2",
         "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": { "defaults": { "constructor": { "steps": 8 } } }
-      }
-    },
-    {
-      "name": "component-file-and-variants",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            },
-            "variants": {
-              "f16": {
-                "file": {
-                  "path": "c/model.f16.safetensors",
-                  "size": 8,
-                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
-                }
-              }
-            }
-          }
-        },
-        "presets": { "p": { "weights": { "c": "f16" }, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "component-neither-file-nor-variants",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": { "c": {} },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "component-variants-empty",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": { "c": { "variants": {} } },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "component-extras-alongside-variants",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "variants": {
-              "f16": {
-                "file": {
-                  "path": "c/model.f16.safetensors",
-                  "size": 8,
-                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
                 }
               }
             },
-            "extras": {
-              "rope": {
-                "path": "c/rope.safetensors",
-                "size": 4,
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
                 "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
               }
-            }
-          }
-        },
-        "presets": { "p": { "weights": { "c": "f16" }, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "file-ref-unknown-key",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
-              "repo": "someone/else"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "sha256-uppercase",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "sha256-too-short",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "sha256-missing",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": { "c": { "file": { "path": "c/model.safetensors", "size": 4 } } },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "size-missing",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "size-zero",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 0,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "size-negative",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": -1,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "size-fractional",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4.5,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "size-over-16gib",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 17179869185,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "path-parent-traversal",
-      "error": "ManifestPathError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/../../etc/passwd",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "path-current-dir-segment",
-      "error": "ManifestPathError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/./model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "path-leading-slash",
-      "error": "ManifestPathError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "/c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "path-double-slash",
-      "error": "ManifestPathError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c//model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "path-trailing-slash",
-      "error": "ManifestPathError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors/",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "path-leading-dot-segment",
-      "error": "ManifestPathError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": ".git/config",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "path-forbidden-character",
-      "error": "ManifestPathError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model safetensors?x=1",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "path-empty",
-      "error": "ManifestPathError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "duplicate-path-size-mismatch",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "shared/rope.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          },
-          "d": {
-            "file": {
-              "path": "shared/rope.safetensors",
-              "size": 8,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "duplicate-path-sha256-mismatch",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "shared/rope.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          },
-          "d": {
-            "file": {
-              "path": "shared/rope.safetensors",
-              "size": 4,
-              "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "weights-missing-key",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "net": {
-            "variants": {
+            },
+            "quants": {
               "f16": {
-                "file": {
-                  "path": "net/model.f16.safetensors",
-                  "size": 8,
-                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
-                }
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
               },
-              "i8": {
-                "file": {
-                  "path": "net/model.i8.safetensors",
-                  "size": 4,
-                  "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {
+              "nested": {
+                "__proto__": {
+                  "polluted": true
                 }
               }
             }
           }
-        },
-        "presets": { "p": { "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "weights-incomplete-mapping",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "net": {
-            "variants": {
-              "f16": {
-                "file": {
-                  "path": "net/model.f16.safetensors",
-                  "size": 8,
-                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
-                }
-              }
-            }
-          },
-          "other": {
-            "variants": {
-              "i8": {
-                "file": {
-                  "path": "other/model.i8.safetensors",
-                  "size": 4,
-                  "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
-                }
-              }
-            }
-          }
-        },
-        "presets": { "p": { "weights": { "net": "f16" }, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "weights-names-single-file-component",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": { "c": "f16" }, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "weights-unknown-component",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": { "ghost": "f16" }, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "weights-unknown-label",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "net": {
-            "variants": {
-              "f16": {
-                "file": {
-                  "path": "net/model.f16.safetensors",
-                  "size": 8,
-                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
-                }
-              }
-            }
-          }
-        },
-        "presets": { "p": { "weights": { "net": "q4" }, "session": {} } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "preset-unknown-key",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": {
-          "p": { "weights": {}, "session": {}, "requiredLimits": { "maxBufferSize": 1 } }
-        },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "session-unknown-key",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": { "scoreStorage": "f16" } } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "session-submit-policy-rejected",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": { "submitPolicy": { "budgetMs": 1 } } } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "session-unknown-value",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": { "linearCompute": "i4a4" } } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "gpu-features-unknown-key",
-      "error": "ManifestReferenceError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": {
-          "p": { "weights": {}, "session": {}, "gpuFeatures": { "timestampQuery": true } }
-        },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
-      }
-    },
-    {
-      "name": "gpu-features-non-boolean",
-      "error": "ManifestFormatError",
-      "manifest": {
-        "format": "karume/1",
-        "generator": "karume/0.1.0",
-        "pipeline": "anima/1",
-        "components": {
-          "c": {
-            "file": {
-              "path": "c/model.safetensors",
-              "size": 4,
-              "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-            }
-          }
-        },
-        "presets": { "p": { "weights": {}, "session": {}, "gpuFeatures": { "shaderF16": "yes" } } },
-        "defaultPreset": "p",
-        "pipelineConfig": {}
+        }
       }
     },
     {
       "name": "root-is-array",
       "error": "ManifestFormatError",
       "manifest": []
+    },
+    {
+      "name": "model-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {},
+            "components": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "pipeline-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "pipeline-without-major",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "pipeline-non-integer-major",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1.5",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "weights-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "weights-empty",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {},
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "weights-entry-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": "f16"
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "weights-entry-without-dtype-key",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {}
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "weights-v1-file-shape-rejected",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "file": {
+                  "path": "net/model.safetensors",
+                  "size": 4,
+                  "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "weight-dtype-entry-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  },
+                  "variants": {}
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "weight-dtype-entry-missing-file",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {},
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "weight-extras-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": []
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "assets-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "assets-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": [],
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "assets-entry-not-file-ref",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "file": {
+                  "path": "tokenizer/tokenizer.json",
+                  "size": 12,
+                  "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                }
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quants-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quants-empty",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {},
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": "i8"
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "default-quant-not-string",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": 8,
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "default-quant-dangling",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "absent",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "pipeline-config-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8"
+          }
+        }
+      }
+    },
+    {
+      "name": "pipeline-config-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": ""
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-weights-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-weights-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": "i8",
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-weights-incomplete",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {},
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-weights-unknown-name",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8",
+                  "absent": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-weights-names-asset",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8",
+                  "tokenizer": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-weights-unknown-dtype",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "q4"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-weights-label-not-string",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": 8
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                },
+                "defaultQuant": "w8"
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "session-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": []
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "session-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8",
+                  "matmulCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "session-submit-policy-rejected",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8",
+                  "submitPolicy": "per-node"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "session-unknown-value",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i4a4"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "gpu-features-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                },
+                "gpuFeatures": {
+                  "subgroups": true
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "gpu-features-non-boolean",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                },
+                "gpuFeatures": {
+                  "shaderF16": "yes"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-unknown-key",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+                    "repo": "someone/other"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": "net/model.f16.safetensors"
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "sha256-uppercase",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "sha256-too-short",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "sha256-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "size-missing",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "size-zero",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 0,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "size-negative",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": -8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "size-fractional",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8.5,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "size-over-16gib",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 17179869185,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "path-parent-traversal",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "../secrets/model.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "path-current-dir-segment",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/./model.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "path-leading-slash",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "/net/model.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "path-double-slash",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net//model.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "path-trailing-slash",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.safetensors/",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "path-leading-dot-segment",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/.hidden/model.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "path-forbidden-character",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "path-empty",
+      "error": "ManifestPathError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "duplicate-path-size-mismatch",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              },
+              "alias": {
+                "path": "net/model.f16.safetensors",
+                "size": 9,
+                "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "duplicate-path-sha256-mismatch",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              },
+              "alias": {
+                "path": "net/model.f16.safetensors",
+                "size": 8,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "duplicate-path-cross-model-mismatch",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/2",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                  }
+                },
+                "i8": {
+                  "file": {
+                    "path": "net/model.i8.safetensors",
+                    "size": 4,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  },
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "i8a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          },
+          "other": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "file": {
+                    "path": "net/model.f16.safetensors",
+                    "size": 8,
+                    "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                  }
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "f16",
+            "pipelineConfig": {}
+          }
+        }
+      }
     }
   ]
 }

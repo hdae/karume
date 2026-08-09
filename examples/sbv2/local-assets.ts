@@ -3,11 +3,11 @@
  * — `fetchAssets` のローカル版。
  *
  * 公開面のデモ（`main.ts`）と torch 参照突合の dump 経路（`dump.ts`）が共有する。同じ資産の
- * 読み方が 2 本に割れると、「同じ preset なのに片方だけ別のファイルを開いていた」形の差が
+ * 読み方が 2 本に割れると、「同じ quant なのに片方だけ別のファイルを開いていた」形の差が
  * 波形の突合に混ざる。
  */
 
-import { parseManifest, resolveFiles } from "../../packages/hub/mod.ts";
+import { parseManifest, resolveFiles, type ResolveOptions } from "../../packages/hub/mod.ts";
 import type { Sbv2Assets } from "../../packages/models/mod.ts";
 
 export const MANIFEST_FILE = "karume.json";
@@ -16,9 +16,12 @@ export const MANIFEST_FILE = "karume.json";
 export const isLocalDist = (dir: string): Promise<boolean> =>
   Deno.stat(`${dir}/${MANIFEST_FILE}`).then(() => true, () => false);
 
-export const loadLocalAssets = async (dir: string, preset?: string): Promise<Sbv2Assets> => {
+export const loadLocalAssets = async (
+  dir: string,
+  selection: ResolveOptions = {},
+): Promise<Sbv2Assets> => {
   const manifest = parseManifest(await Deno.readTextFile(`${dir}/${MANIFEST_FILE}`));
-  const files = resolveFiles(manifest, preset);
+  const files = resolveFiles(manifest, selection);
   const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   for (const key of Object.keys(files)) {

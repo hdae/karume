@@ -48,6 +48,7 @@ import {
   type HubRepoRef,
   loadManifest,
   type Manifest,
+  type ModelEntry,
   resolveFiles,
   type SessionSpec,
 } from "@karume/hub";
@@ -81,7 +82,7 @@ import { parseRopeBase, type RopeBase, ropeWidth } from "./rope-base.ts";
 import { type AnimaTokenizers, createTokenizers } from "./text/tokenizer.ts";
 import { Randn } from "./random.ts";
 
-/** manifest の components 表に現れる取得キー（ADR 0038 §2 の規約名）。 */
+/** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const TEXT_ENCODER = "text_encoder";
 const TEXT_CONDITIONER = "text_conditioner";
 const TRANSFORMER = "transformer";
@@ -119,8 +120,10 @@ export type AnimaPipelineOptions = {
    * 破棄しない。省略時はパイプラインが内部で `acquireGpu` し、`dispose()` で破棄する。
    */
   readonly gpu?: GpuContext;
-  /** 実行構成（manifest の presets のキー）。省略時は `defaultPreset`。 */
-  readonly preset?: string;
+  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  readonly model?: string;
+  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  readonly quant?: string;
 };
 
 /** {@link AnimaPipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。 */
@@ -174,7 +177,7 @@ const assetBuffer = (
 ): ArrayBuffer => {
   if (!Object.hasOwn(assets, key)) {
     throw new Error(
-      `anima: 資産 '${key}' が無い（manifest の components に ${key} が要る）` +
+      `anima: 資産 '${key}' が無い（manifest の weights / assets に ${key} が要る）` +
         `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
     );
   }
@@ -373,25 +376,30 @@ export class AnimaPipeline {
       ...(options.caches === undefined ? {} : { caches: options.caches }),
     };
     const loaded = await loadManifest(repoRef, hubOptions);
-    const files = resolveFiles(loaded.manifest, options.preset);
+    const selection = {
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.quant === undefined ? {} : { quant: options.quant }),
+    };
+    const files = resolveFiles(loaded.manifest, selection);
     const assets = await fetchAssets(loaded, files, {
       ...hubOptions,
       ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     });
     return AnimaPipeline.fromAssets({ manifest: loaded.manifest, assets }, {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...(options.preset === undefined ? {} : { preset: options.preset }),
+      ...selection,
     });
   }
 
   /**
    * 取得済みの manifest + 資産から組む。**ここが核**で、以下を全て構築時に済ませる:
    *
+   * - `model` の選択（未知のモデル名は利用可能な一覧つきで fail loudly — ADR 0041 §8）
    * - `pipeline` の契約名と major の検査（**未知 major は fail loudly** — 検査責務は
    *   models 側。ADR 0038 §1）
    * - `pipelineConfig` の手書きスキーマ検証（未知キーも fail loudly）
-   * - preset の `session` → runtime `SessionOptions` の**明示写像**と `gpuFeatures` の解釈
-   * - 全コンポーネントの `openModel` / rope 素表 / トークナイザ 2 本の解釈
+   * - quant の `session` → runtime `SessionOptions` の**明示写像**と `gpuFeatures` の解釈
+   * - 全 weights / assets の `openModel` / rope 素表 / トークナイザ 2 本の解釈
    *
    * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
    */
@@ -400,7 +408,15 @@ export class AnimaPipeline {
     options: AnimaPipelineOptions = {},
   ): Promise<AnimaPipeline> {
     const { manifest, assets } = input;
-    const { name, major } = manifest.pipeline;
+    const modelName = options.model ?? manifest.defaultModel;
+    if (!Object.hasOwn(manifest.models, modelName)) {
+      throw new Error(
+        `AnimaPipeline: model '${modelName}' は manifest に無い` +
+          `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      );
+    }
+    const entry: ModelEntry = manifest.models[modelName];
+    const { name, major } = entry.pipeline;
     if (name !== ANIMA_PIPELINE_NAME) {
       throw new Error(
         `AnimaPipeline: manifest の pipeline が '${name}/${major}'` +
@@ -414,17 +430,17 @@ export class AnimaPipeline {
           `（この実装が読めるのは ${ANIMA_PIPELINE_NAME}/${ANIMA_PIPELINE_MAJOR}）`,
       );
     }
-    const config = parseAnimaPipelineConfig(manifest.pipelineConfig);
+    const config = parseAnimaPipelineConfig(entry.pipelineConfig);
 
-    const presetName = options.preset ?? manifest.defaultPreset;
-    if (!Object.hasOwn(manifest.presets, presetName)) {
+    const quantName = options.quant ?? entry.defaultQuant;
+    if (!Object.hasOwn(entry.quants, quantName)) {
       throw new Error(
-        `AnimaPipeline: preset '${presetName}' は manifest に無い` +
-          `（利用可能: ${manifest.available.presets.join(" / ")}）`,
+        `AnimaPipeline: quant '${quantName}' は manifest に無い` +
+          `（利用可能: ${entry.available.quants.join(" / ")}）`,
       );
     }
-    const preset = manifest.presets[presetName];
-    const wantsShaderF16 = preset.gpuFeatures?.shaderF16 === true;
+    const quant = entry.quants[quantName];
+    const wantsShaderF16 = quant.gpuFeatures?.shaderF16 === true;
 
     // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
     // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす — 通すと
@@ -435,7 +451,7 @@ export class AnimaPipeline {
     try {
       if (wantsShaderF16 && !gpu.shaderF16Enabled) {
         throw new Error(
-          `AnimaPipeline: preset '${presetName}' は shader-f16 を要求するが、渡された` +
+          `AnimaPipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +
             " GpuContext で有効になっていない（acquireGpu({ shaderF16: true }) で取り直す）",
         );
       }
@@ -443,7 +459,7 @@ export class AnimaPipeline {
         gpu,
         ownsGpu,
         config,
-        sessionOptions: toSessionOptions(preset.session),
+        sessionOptions: toSessionOptions(quant.session),
         tokenizers: createTokenizers(
           assetBytes(assets, TOKENIZER),
           assetBytes(assets, TOKENIZER_2),
@@ -523,7 +539,7 @@ export class AnimaPipeline {
       ]));
 
     // --- ③ denoise（DiT を N step。VAE ロードの前に解放する）-----------------
-    // 低精度計算のノブ（preset の session）は **DiT の Session にだけ**効かせる —
+    // 低精度計算のノブ（quant の session）は **DiT の Session にだけ**効かせる —
     // text 系 / VAE は対象外（比較の軸を DiT 1 本に保つ）。
     const { latents, latentShape } = await withSession(
       state.gpu,

@@ -1,29 +1,37 @@
 /**
- * hub のエラー型（ADR 0038 §5「エラーの形」）。
+ * hub のエラー型（ADR 0038 §5「エラーの形」・語彙は ADR 0041 の v2 へ更新）。
  *
  * 分類の軸は**利用者の分岐先**:
  * - {@link ManifestFormatError} — JSON / 構造 / 規模（manifest が形として壊れている）
- * - {@link ManifestReferenceError} — 参照と語彙（defaultPreset・weights 写像・未知キー / 未知値）
+ * - {@link ManifestReferenceError} — 参照と語彙（defaultModel / defaultQuant・weights 写像・未知キー）
  * - {@link ManifestPathError} — path 許可リスト違反（SHA ピン外への traversal 防波堤）
  * - {@link IntegrityError} — 取得物が 3 点セットと食い違う（size / sha256 / content-length）
  * - {@link HubFetchError} — 取得層由来（404・認証・revision 解決失敗）の文脈付き透過
  *
- * MUST: 全エラーに**利用可能な preset / variant ラベル一覧**（{@link AvailableLabels}）を載せる
- * — GGUF 利用者が README の quant 表で得ている情報の代替であり、失敗時に「では何なら動くのか」を
- * 一次情報として返すのが manifest 導入の目的の一部だから（ADR 0038 §5）。manifest の構造が
- * 壊れていて列挙できない場合だけ空になる。
+ * MUST: 全エラーに**利用可能な model / quant / dtype ラベル一覧**（{@link AvailableLabels}）を
+ * 載せる — GGUF 利用者が README の quant 表で得ている情報の代替であり、失敗時に「では何なら
+ * 動くのか」を一次情報として返すのが manifest 導入の目的の一部だから（ADR 0038 §5 / 0041 §8）。
+ * manifest の構造が壊れていて列挙できない場合だけ空になる。
  */
 
-/** 失敗時に提示する「今このリポで選べるもの」の一覧。 */
+/**
+ * 失敗時に提示する「今このリポで選べるもの」の一覧。
+ *
+ * NOTE: `quants` / `dtypes` は**文脈のモデル**のもの（v2 は 1 manifest = 複数モデルなので、
+ * モデルを跨いで混ぜると「別モデルの quant 名」を勧める誤誘導になる）。モデル文脈が定まらない
+ * 位置（トップレベルの検査・取得層）では空になり、`models` だけが埋まる。
+ */
 export type AvailableLabels = {
-  /** manifest に実在する preset 名。 */
-  readonly presets: readonly string[];
-  /** variants を持つコンポーネント名 → そのラベル一覧。 */
-  readonly variants: Readonly<Record<string, readonly string[]>>;
+  /** manifest に実在するモデル名（v2 で初めて機械可読になった列挙 — ADR 0041 §8）。 */
+  readonly models: readonly string[];
+  /** 文脈のモデルに実在する quant 名。 */
+  readonly quants: readonly string[];
+  /** 文脈のモデルの weights 名 → その dtype ラベル一覧。 */
+  readonly dtypes: Readonly<Record<string, readonly string[]>>;
 };
 
 /** manifest の構造が壊れていてラベルを列挙できないときの値。 */
-export const NO_LABELS: AvailableLabels = { presets: [], variants: {} };
+export const NO_LABELS: AvailableLabels = { models: [], quants: [], dtypes: {} };
 
 export type HubErrorOptions = {
   readonly available?: AvailableLabels;
@@ -35,7 +43,7 @@ export type HubErrorOptions = {
  * 捌けるようにするためだけに公開する）。
  */
 export class HubError extends Error {
-  /** 失敗時点で判明している利用可能 preset / variant ラベル。 */
+  /** 失敗時点で判明している利用可能 model / quant / dtype ラベル。 */
   readonly available: AvailableLabels;
 
   constructor(message: string, options: HubErrorOptions = {}) {
@@ -45,7 +53,7 @@ export class HubError extends Error {
   }
 }
 
-/** JSON 不正・構造違反・規模上限超過（ADR 0038 §1「parse 時の構造検査」「規模上限」）。 */
+/** JSON 不正・構造違反・規模上限超過（ADR 0041 §2「トップレベル形」・§7「規模上限」）。 */
 export class ManifestFormatError extends HubError {
   constructor(message: string, options: HubErrorOptions = {}) {
     super(message, options);
@@ -54,8 +62,8 @@ export class ManifestFormatError extends HubError {
 }
 
 /**
- * 参照と語彙の違反（ADR 0038 §1/§2/§3）。宙吊りの `defaultPreset` / preset 名・`weights` の
- * 過不足・未知キー・allowlist に無い `session` 値・重複 path の 3 点セット不一致。
+ * 参照と語彙の違反（ADR 0041 §2/§3）。宙吊りの `defaultModel` / `defaultQuant`・`weights`
+ * 写像の過不足・未知キー・allowlist に無い `session` 値・重複 path の 3 点セット不一致。
  */
 export class ManifestReferenceError extends HubError {
   constructor(message: string, options: HubErrorOptions = {}) {

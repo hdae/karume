@@ -19,9 +19,9 @@
  *
  * ## MUST: 低精度ノブが効くのは front / voice だけ
  *
- * preset の `session` は front / voice の Session にだけ渡す。配布形の `text_encoder` は
- * i8 単体で variant を持たず、preset の `weights` にも現れない（ADR 0026 が聴感ゲート込みで
- * 受理した 1 系列だけを配る）— 実行形ノブの比較軸を SBV2 本体に保つ。
+ * quant の `session` は front / voice の Session にだけ渡す。配布形の `text_encoder` は
+ * i8 の 1 dtype しか持たない（ADR 0026 が聴感ゲート込みで受理した 1 系列だけを配る）ので、
+ * どの quant を選んでも同じ実体が来る — 実行形ノブの比較軸を SBV2 本体に保つ。
  *
  * ## MUST: 数値の正はここでは担保されない
  *
@@ -31,7 +31,7 @@
  * ## NOTE: 日本語辞書だけが hub を経由しないネットワーク取得になっている
  *
  * ADR 0038 は資産の取得を hub に一元化しているが、`@hdae/yomi` の辞書（~19MB）は manifest の
- * components に無く、`fetchDictionaryBytes`（`@hdae/yomi/loader`）を**このパッケージが直接**
+ * weights / assets に無く、`fetchDictionaryBytes`（`@hdae/yomi/loader`）を**このパッケージが直接**
  * 呼んで取る。したがって `packages/models` が hub を経由せずネットワークへ出る唯一の経路で、
  * これは**テスト版として一旦この形**とするユーザー裁定（リファクタ時に再検討）。
  * 辞書を自前で管理したいホストとテストのために {@link Sbv2PipelineOptions.dictionary} の
@@ -55,6 +55,7 @@ import {
   type HubRepoRef,
   loadManifest,
   type Manifest,
+  type ModelEntry,
   resolveFiles,
   type SessionSpec,
 } from "@karume/hub";
@@ -85,7 +86,7 @@ import { Randn } from "./host/random.ts";
 import { buildRelattnTables } from "./relattn-tables.ts";
 
 /**
- * manifest の components 表に現れる取得キー（ADR 0038 §2 の規約名）。
+ * manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。
  * NOTE: `style_vectors` / `speaker_embeddings` は取得キーと safetensors のテンソル名が同綴り
  * （`style.ts` の {@link STYLE_TENSOR} / {@link SPEAKER_TENSOR}）だが、別の語彙なので別に持つ。
  */
@@ -131,8 +132,10 @@ export type Sbv2PipelineOptions = {
    * 破棄しない。省略時はパイプラインが内部で `acquireGpu` し、`dispose()` で破棄する。
    */
   readonly gpu?: GpuContext;
-  /** 実行構成（manifest の presets のキー）。省略時は `defaultPreset`。 */
-  readonly preset?: string;
+  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  readonly model?: string;
+  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  readonly quant?: string;
   /**
    * 日本語辞書の注入席。省略すると初回の `generate` で `fetchDictionaryBytes` が取りに出て、
    * 以降はインスタンスが保持する（モジュール doc の NOTE）。
@@ -189,7 +192,7 @@ const assetBuffer = (
 ): ArrayBuffer => {
   if (!Object.hasOwn(assets, key)) {
     throw new Error(
-      `sbv2: 資産 '${key}' が無い（manifest の components に ${key} が要る）` +
+      `sbv2: 資産 '${key}' が無い（manifest の weights / assets に ${key} が要る）` +
         `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
     );
   }
@@ -446,7 +449,15 @@ export const openSbv2State = async (
   options: Sbv2PipelineOptions = {},
 ): Promise<Sbv2State> => {
   const { manifest, assets } = input;
-  const { name, major } = manifest.pipeline;
+  const modelName = options.model ?? manifest.defaultModel;
+  if (!Object.hasOwn(manifest.models, modelName)) {
+    throw new Error(
+      `Sbv2Pipeline: model '${modelName}' は manifest に無い` +
+        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+    );
+  }
+  const entry: ModelEntry = manifest.models[modelName];
+  const { name, major } = entry.pipeline;
   if (name !== SBV2_PIPELINE_NAME) {
     throw new Error(
       `Sbv2Pipeline: manifest の pipeline が '${name}/${major}'` +
@@ -460,17 +471,17 @@ export const openSbv2State = async (
         `（この実装が読めるのは ${SBV2_PIPELINE_NAME}/${SBV2_PIPELINE_MAJOR}）`,
     );
   }
-  const config = parseSbv2PipelineConfig(manifest.pipelineConfig);
+  const config = parseSbv2PipelineConfig(entry.pipelineConfig);
 
-  const presetName = options.preset ?? manifest.defaultPreset;
-  if (!Object.hasOwn(manifest.presets, presetName)) {
+  const quantName = options.quant ?? entry.defaultQuant;
+  if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `Sbv2Pipeline: preset '${presetName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.presets.join(" / ")}）`,
+      `Sbv2Pipeline: quant '${quantName}' は manifest に無い` +
+        `（利用可能: ${entry.available.quants.join(" / ")}）`,
     );
   }
-  const preset = manifest.presets[presetName];
-  const wantsShaderF16 = preset.gpuFeatures?.shaderF16 === true;
+  const quant = entry.quants[quantName];
+  const wantsShaderF16 = quant.gpuFeatures?.shaderF16 === true;
 
   // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
   // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。
@@ -479,7 +490,7 @@ export const openSbv2State = async (
   try {
     if (wantsShaderF16 && !gpu.shaderF16Enabled) {
       throw new Error(
-        `Sbv2Pipeline: preset '${presetName}' は shader-f16 を要求するが、渡された` +
+        `Sbv2Pipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +
           " GpuContext で有効になっていない（acquireGpu({ shaderF16: true }) で取り直す）",
       );
     }
@@ -509,7 +520,7 @@ export const openSbv2State = async (
       front,
       voice,
       // 低精度ノブは front / voice の Session にだけ効かせる（モジュール doc の MUST）。
-      sessionOptions: toSessionOptions(preset.session),
+      sessionOptions: toSessionOptions(quant.session),
       dictionary: options.dictionary,
     };
   } catch (error) {
@@ -561,7 +572,7 @@ export const synthesizeSbv2 = async (
   const tokens = analysis.inputIds.length;
 
   // --- ② text_encoder（DeBERTa・hidden_states 全出し）----------------------
-  // preset の低精度ノブは渡さない（配布形は i8 単体で variant を持たない）。
+  // quant の低精度ノブは渡さない（配布形の text_encoder は i8 の 1 dtype しか無い）。
   const hidden = await withSession(state.gpu, state.textEncoder, {}, async (run) => {
     const outputs = await run({
       input_ids: i32(analysis.inputIds, [1, tokens]),
@@ -721,14 +732,18 @@ export class Sbv2Pipeline {
       ...(options.caches === undefined ? {} : { caches: options.caches }),
     };
     const loaded = await loadManifest(repoRef, hubOptions);
-    const files = resolveFiles(loaded.manifest, options.preset);
+    const selection = {
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.quant === undefined ? {} : { quant: options.quant }),
+    };
+    const files = resolveFiles(loaded.manifest, selection);
     const assets = await fetchAssets(loaded, files, {
       ...hubOptions,
       ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     });
     return Sbv2Pipeline.fromAssets({ manifest: loaded.manifest, assets }, {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...(options.preset === undefined ? {} : { preset: options.preset }),
+      ...selection,
       ...(options.dictionary === undefined ? {} : { dictionary: options.dictionary }),
     });
   }

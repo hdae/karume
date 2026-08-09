@@ -2,7 +2,7 @@
  * SBV2（テキスト → 音声）の 1 画面デモ。資産の出所だけが分岐で、あとは `generate` のノブ。
  *
  *     deno task demo:sbv2 --text "こんにちは、これはテストです。"
- *     deno task demo:sbv2 --source someone/sbv2 --preset f16 --style high --seed 7
+ *     deno task demo:sbv2 --source someone/sbv2 --model FN4 --quant f16 --style high --seed 7
  *
  * `--source` が `karume.json` を持つディレクトリならローカル読み（`fromAssets`）、それ以外は
  * HF リポジトリ名として `fromPretrained`。未指定のノブは manifest の
@@ -15,12 +15,13 @@
 import { encodeWav, Sbv2Pipeline } from "../../packages/models/mod.ts";
 import { isLocalDist, loadLocalAssets } from "./local-assets.ts";
 
-const USAGE = "--source <パス|HF repo> --text <文字列> --preset <名前> --style <名前>" +
-  " --style-weight <数> --sdp-ratio <数> --noise-scale <数> --noise-scale-w <数>" +
-  " --length-scale <数> --seed <整数> --out <パス>";
+const USAGE = "--source <パス|HF repo> --text <文字列> --model <名前> --quant <名前>" +
+  " --style <名前> --style-weight <数> --sdp-ratio <数> --noise-scale <数>" +
+  " --noise-scale-w <数> --length-scale <数> --seed <整数> --out <パス>";
 const KNOWN = new Set([
   "source",
-  "preset",
+  "model",
+  "quant",
   "text",
   "style",
   "style-weight",
@@ -61,7 +62,13 @@ const integer = (key: string): number | undefined => {
 };
 
 const source = args.get("source") ?? "models/sbv2-FN4";
-const preset = args.get("preset");
+const model = args.get("model");
+const quant = args.get("quant");
+/** hub / パイプラインへ渡す選択軸（未指定の欄は manifest の既定が埋める）。 */
+const selection = {
+  ...(model === undefined ? {} : { model }),
+  ...(quant === undefined ? {} : { quant }),
+};
 const text = args.get("text") ?? DEFAULT_TEXT;
 const style = args.get("style");
 const seed = integer("seed") ?? 0;
@@ -72,19 +79,19 @@ const noiseScaleW = number("noise-scale-w");
 const lengthScale = number("length-scale");
 
 const openPipeline = async (): Promise<Sbv2Pipeline> => {
-  const options = preset === undefined ? {} : { preset };
   if (await isLocalDist(source)) {
-    return Sbv2Pipeline.fromAssets(await loadLocalAssets(source, preset), options);
+    return Sbv2Pipeline.fromAssets(await loadLocalAssets(source, selection), selection);
   }
   return Sbv2Pipeline.fromPretrained(source, {
-    ...options,
+    ...selection,
     onProgress: ({ phase, loaded, total }) =>
       Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
   });
 };
 
 console.log(
-  `[sbv2] ${source} / preset ${preset ?? "（manifest の既定）"} / seed ${seed}\n` +
+  `[sbv2] ${source} / model ${model ?? "（manifest の既定）"}` +
+    ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}\n` +
     `       ${JSON.stringify(text)}`,
 );
 const started = performance.now();
@@ -99,7 +106,7 @@ const audio = await pipeline.generate({
   ...(noiseScaleW === undefined ? {} : { noiseScaleW }),
   ...(lengthScale === undefined ? {} : { lengthScale }),
 });
-const name = `sbv2-${preset ?? "default"}-${style ?? "default"}-seed${seed}.wav`;
+const name = `sbv2-${quant ?? "default"}-${style ?? "default"}-seed${seed}.wav`;
 const out = args.get("out") ?? `outputs/${name}`;
 const parent = out.slice(0, out.lastIndexOf("/"));
 if (parent !== "") await Deno.mkdir(parent, { recursive: true });

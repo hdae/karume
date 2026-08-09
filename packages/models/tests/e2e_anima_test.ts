@@ -37,21 +37,21 @@ const SEED = 42;
 /** 参照値（移行元デモの実測 — 変更禁止）。 */
 const REFERENCE = [
   {
-    preset: "w8a8-s16",
+    quant: "w8a8-s16",
     resolution: { width: 1024, height: 1024 },
     sha256: "aa013054d0ef6eefd6165462a089545574db227b0845057af52982d55753b608",
   },
   {
-    preset: "w8a8-s16",
+    quant: "w8a8-s16",
     resolution: { width: 512, height: 512 },
     sha256: "dd4506de50f346676a35919d471ff7030514992cd337077c04c0dd2ffa332756",
   },
   {
-    preset: "f16",
+    quant: "f16",
     resolution: { width: 1024, height: 1024 },
     sha256: "6943b541a21e3e22c40661d007bbc638f23365c17a95dd3e8363460abfc610db",
   },
-] as const satisfies readonly { preset: string; resolution: ImageSize; sha256: string }[];
+] as const satisfies readonly { quant: string; resolution: ImageSize; sha256: string }[];
 
 const manifestText = await Deno.readTextFile(new URL("karume.json", ASSETS_DIR)).catch(
   () => undefined,
@@ -74,14 +74,14 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
 const readManifest = (): Manifest => parseManifest(manifestText as string);
 
 /**
- * preset が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない
+ * quant が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない
  * 経路で、パイプライン単体を門に掛ける）。同じ path を指すキーは 1 度だけ読む。
  */
 const loadLocalAssets = async (
   manifest: Manifest,
-  preset: string,
+  quant: string,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
-  const files = resolveFiles(manifest, preset);
+  const files = resolveFiles(manifest, { quant });
   const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   for (const key of Object.keys(files)) {
@@ -153,17 +153,17 @@ const assertReferencePng = async (
   }
 };
 
-for (const { preset, resolution, sha256 } of REFERENCE) {
-  const label = `${preset}-${formatResolution(resolution)}`;
+for (const { quant, resolution, sha256 } of REFERENCE) {
+  const label = `${quant}-${formatResolution(resolution)}`;
   Deno.test({
-    name: `e2e(実GPU): preset ${preset} / ${formatResolution(resolution)} / ${STEPS}step / ` +
+    name: `e2e(実GPU): quant ${quant} / ${formatResolution(resolution)} / ${STEPS}step / ` +
       `seed ${SEED} の PNG が参照 sha256 と一致する`,
     ignore: !RUNNABLE,
     fn: async () => {
       const manifest = readManifest();
-      const assets = await loadLocalAssets(manifest, preset);
+      const assets = await loadLocalAssets(manifest, quant);
       // `using` は [Symbol.dispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-      using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { preset });
+      using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
       await assertReferencePng(label, pipeline, resolution, sha256);
     },
   });
@@ -204,9 +204,9 @@ Deno.test({
   name: "e2e(実GPU): fromPretrained（取得層 + integrity 検証）の PNG が参照 sha256 と一致する",
   ignore: !RUNNABLE,
   fn: async () => {
-    const preset = "w8a8-s16";
+    const quant = "w8a8-s16";
     const resolution: ImageSize = { width: 512, height: 512 };
-    const files = resolveFiles(readManifest(), preset);
+    const files = resolveFiles(readManifest(), { quant });
     const paths = new Set(["karume.json", ...Object.keys(files).map((key) => files[key].path)]);
     const server = serveAssets(paths);
     try {
@@ -214,7 +214,7 @@ Deno.test({
       // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
       const caches = new MemoryCacheStorage();
       const pipeline = await AnimaPipeline.fromPretrained({ repo: REPO, hubUrl }, {
-        preset,
+        quant,
         caches,
       });
       try {

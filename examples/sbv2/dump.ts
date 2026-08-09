@@ -38,12 +38,13 @@ import {
 import { type DumpTensor, writeSafetensors } from "./host/safetensors-write.ts";
 import { isLocalDist, loadLocalAssets } from "./local-assets.ts";
 
-const USAGE = "--source <パス> --text <文字列> --preset <名前> --style <名前>" +
+const USAGE = "--source <パス> --text <文字列> --model <名前> --quant <名前> --style <名前>" +
   " --style-weight <数> --sdp-ratio <数> --noise-scale <数> --noise-scale-w <数>" +
   " --length-scale <数> --seed <整数> --out <ディレクトリ>";
 const KNOWN = new Set([
   "source",
-  "preset",
+  "model",
+  "quant",
   "text",
   "style",
   "style-weight",
@@ -76,7 +77,13 @@ const number = (key: string): number | undefined => {
 };
 
 const source = args.get("source") ?? "models/sbv2-FN4";
-const preset = args.get("preset");
+const model = args.get("model");
+const quant = args.get("quant");
+/** hub / パイプラインへ渡す選択軸（未指定の欄は manifest の既定が埋める）。 */
+const selection = {
+  ...(model === undefined ? {} : { model }),
+  ...(quant === undefined ? {} : { quant }),
+};
 const text = args.get("text");
 if (text === undefined || text.length === 0) throw new Error(`--text が必要（使い方: ${USAGE}）`);
 const outDir = args.get("out") ?? "outputs/sbv2-demo/out";
@@ -108,9 +115,7 @@ if (!await isLocalDist(source)) {
 }
 
 const started = performance.now();
-const state = await openSbv2State(await loadLocalAssets(source, preset), {
-  ...(preset === undefined ? {} : { preset }),
-});
+const state = await openSbv2State(await loadLocalAssets(source, selection), selection);
 try {
   const { sampleRate, audio, trace } = await synthesizeSbv2(state, request);
   const { analysis } = trace;
@@ -158,7 +163,8 @@ try {
       bertHiddenOutput: trace.bertHiddenOutput,
       // 出所の記録（torch 参照突合は資産の構成に依存する — 差の原因を後から辿るため）。
       source,
-      preset: preset ?? "（manifest の既定）",
+      model: model ?? "（manifest の既定）",
+      quant: quant ?? "（manifest の既定）",
       speaker: trace.speaker,
       style: trace.style,
       styleWeight: trace.styleWeight,
