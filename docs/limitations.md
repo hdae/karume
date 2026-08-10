@@ -269,3 +269,27 @@ preset が宣言できる GPU 前提は `gpuFeatures`（v1 は `shaderF16`）だ
 `maxStorageBufferBindingSize` 等の limits 不足は**ダウンロード後**の device / Session 構築時に
 fail loudly で判明する（数 GB を落とし切ってから落ちる）。preset の optional `requiredLimits`
 は ADR 0038 §7 の拡張席（解除予定はそこに従う）。
+
+## sha256 参照門は参照環境専用 — クロスデバイスのビット同一は保証しない
+
+e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test`）は**参照環境
+（RTX 3080 Ti / Linux / Vulkan (wgpu)）で焼いた値**で、他バックエンド（Metal 等）では
+一致しない — これは仕様であり、門は参照環境での移植・退行検出器として機能する。
+
+機序: IEEE 754 の加減乗除はデバイス間でも完全同一だが、①超越関数（`exp` 等）の実装が
+ドライバ / コンパイラ依存 ②シェーダコンパイラの fma 融合判断（積和を 1 命令に融合すると
+丸めが 1 回減る）③コンパイル経路の違い（ブラウザ Tint / Deno naga）により、カーネル側で
+縮約順序を固定してもクロスデバイスの同一は成立しない。なお w8a8 経路には整数演算なのに
+値が違う未解明の Metal 差も別途ある（[known-issues.md](known-issues.md) の Metal 節）。
+
+保証するのは次の 2 つ（いずれも実測データ点は Vulkan と Metal — Apple M2 の実測は
+[research/2026-08-10-f32-geometry-probe.md](research/2026-08-10-f32-geometry-probe.md)
+§Apple M2）:
+
+- **デバイス内決定性**: 同一キー → バイト同一 WGSL → 同一出力（M2 で独立 2 セッションの
+  出力 sha 一致を実証）。
+- **幾何変更のビット不変**: タイル幾何は担当割りだけを変える（M2 で幾何 2 種の出力 sha
+  一致を実証）。
+
+別バックエンドでの健全性検証は参照 sha との一致ではなく**自己 A/B**（同一入力・幾何 2 種
+または新旧 2 版の出力 sha が互いに一致するか）で行う。

@@ -62,8 +62,11 @@
   ビット同一は実測命題（fma 留保は Vulkan で外れた）— **f32 では実行時オートチューン
   不可・既定変更は門の再実測とセット**（ADR 0022 追記が MUST）。実測の正本 =
   [research/2026-08-10-f32-geometry-probe.md](../docs/research/2026-08-10-f32-geometry-probe.md)。
-  **次手候補**: Metal A/B（acc 64 本/スレッドの spill 懸念 — 退行時は一括差し戻し）/
-  HOST-006（−5.1% 上限）/ PLAN-012（−0.8%）。m 小 linear は census 上対象外（GFLOP 0.003%）。
+  Metal（M2）追試済み: 退行なし（f16 ×1.06）・幾何 2 種の sha 一致 = ビット同一は
+  Vulkan/Metal の 2 環境で成立。既定はバックエンド共通 1 本（NVIDIA 第一 — ユーザー裁定）。
+  sha 参照門は参照環境専用の規約を limitations.md に明文化。
+  **次手候補**: HOST-006（−5.1% 上限）/ PLAN-012（−0.8%）。m 小 linear は census 上対象外
+  （GFLOP 0.003%）。AMD / Intel は未実測（検証は自己 A/B — limitations 参照）。
 - **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 実装完了（2026-08-09）**:
   1 リポ複数モデル（`defaultModel` 必須）+ 語彙整理（presets → `quants`・variant → `dtype`・
   components → `weights` / `assets` 分離）。**v1 パーサは持たない**。hub v2 パーサ +
