@@ -189,3 +189,24 @@ HOST-006 の第 1 波を実装・着地した（`9f47a04` = params の内容ア�
   次波は plan/fusion の Session キャッシュ + transient slot 固定 + bind group 再利用を
   土台に、staged execution（large-designs D — 特に E の prepared cross-attention K/V を
   量子化形 +57MiB で）を段階導入する（ユーザー裁定 2026-08-10: b と D は同一設計波）。
+
+## 8. 追記（同日・PreparedExecutionPlan 波 1 の着地 — 導出相は壁に出ていなかった）
+
+エンコード層を 2 相分離し（`32dad19`）、導出済み計画を bindings キーで Session 常駐させた
+（`b2e6ce0` — 設計の正本は ADR 0042）。同一 bindings の 2 run 目以降は planGraph / planFusions /
+WGSL 生成 / params キー構築 / 契約検査を丸ごと飛ばす。
+
+- **検収 ABBA（回文・門緑・各 2 走）: 壁時計は中立** — f16-1024 19.9/19.9 → 19.9/20.0s・
+  w8a8-1024 10.4/10.3 → 10.4/10.5s（差はノイズ幅内）。
+- **§7 の残余内訳候補の帰属が確定**: 「plan/fusion の毎 run 再計算・JS 残差」は露出 gap に
+  ほぼ寄与していなかった（GPU と完全重畳）。露出の本体は **createBindGroup 44.4ms/step +
+  アリーナ簿記（allocStorage/retain/release ×~3,280/run）+ 転送系**。波 2（transient slot 固定 +
+  bind group のレシピ焼き込み）がこの全てを対象にする。
+- **観測点の移設**: 定常 step（prepared ヒット）では導出相が走らないため `lastRunParams` は
+  {0,0} になる（§7 の「診断 lastRunParams で固定」は初回導出 run にのみ当てはまる）。params
+  キャッシュの門は gpu_params_cache_test が「run 内重複 + prepared 追い出し後の再導出 run」で
+  観測する形へ移設済み。ヒット/ミスの観測点は `lastRunPrepared`。
+- **VRAM 実測（設計材料・onRunDiagnostics 経由）**: DiT の run 中実確保は w8a8-1024 で
+  1062.5MiB / f16-1024 で 1461.7MiB（live ピーク 712.5 / 1184.5MiB）・VAE タイル 861.9MiB。
+  この量は現行でも毎 run 中に存在するため、slot を Session 寿命へ昇格（活性 1 signature ぶん）
+  しても新しい VRAM ピークは生まれない。

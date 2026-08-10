@@ -73,10 +73,16 @@
   GPU と重畳しており壁に出たのは露出分のみ。残余ホスト ≈1.1s ≈ 11%（実測の正本 =
   [research/2026-08-10-op-timing-stats.md](../docs/research/2026-08-10-op-timing-stats.md) §7）。
   PLAN-012 は見送り確定（−0.8% に VRAM +224MiB は不釣り合い — 量子化形は次波 E で復活）。
-  **次波（ユーザー裁定済み）: PreparedExecutionPlan 設計波** — plan/fusion の Session
-  キャッシュ + transient slot 固定 + bind group 再利用（旧 b 案）を土台に、staged execution
-  （large-designs D・最初は E の prepared cross-attention K/V を量子化形 +57MiB で）を段階
-  導入。設計先行 → 裁定の型。
+- **PreparedExecutionPlan 波 1 — 完了（2026-08-10・設計の正本 = ADR
+  [0042](../docs/decisions/0042-prepared-execution-plan.md)）**: エンコード層を導出/実行の
+  2 相へ分離（`32dad19`・fixture 0 diff が機械証明）し、導出済み計画（shapes + StepRecipe 列 +
+  FusionCounts）を解決済み bindings キーで Session 常駐（`b2e6ce0`・LRU 4・常設診断
+  `lastRunPrepared`・挙動テスト 5 本）。**検収 ABBA は壁時計中立** — 導出相は GPU と完全重畳
+  しており露出 gap ≈1.1s の本体は createBindGroup + アリーナ簿記 + 転送系と帰属確定
+  （op-timing-stats.md §8）。**波 2（承認済み・次の作業）= transient slot 固定 + bind group の
+  レシピ焼き込み + 入力 slot 固定**が壁の本丸。VRAM は活性 1 signature ぶん（w8a8 1062.5 /
+  f16 1461.7MiB — run 中に既存の量）で新ピークなし。波 2 後に再実測 → E（prepared
+  cross-attention K/V・量子化形 +57MiB）/ timestep stage は別裁定。
 - **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 実装完了（2026-08-09）**:
   1 リポ複数モデル（`defaultModel` 必須）+ 語彙整理（presets → `quants`・variant → `dtype`・
   components → `weights` / `assets` 分離）。**v1 パーサは持たない**。hub v2 パーサ +
