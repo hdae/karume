@@ -75,7 +75,19 @@ import {
   embeddingWgsl,
 } from "../src/kernels/embedding.ts";
 import { GATHER_KEY, GATHER_OOB_BITS, GATHER_WGSL, gatherParams } from "../src/kernels/gather.ts";
-import { LAYER_NORM_KEY, LAYER_NORM_WGSL, layerNormParams } from "../src/kernels/layer-norm.ts";
+import {
+  LAYER_NORM_AFFINE_WGSL,
+  LAYER_NORM_KEY,
+  LAYER_NORM_ROW_STATS_WGSL,
+  LAYER_NORM_WGSL,
+  layerNormParams,
+} from "../src/kernels/layer-norm.ts";
+import {
+  ADALN_NORM_KEY,
+  ADALN_NORM_WGSL,
+  ADALN_NORM_WORKGROUP_SIZE,
+  adalnNormParams,
+} from "../src/kernels/adaln-norm.ts";
 import { RMS_NORM_KEY, RMS_NORM_WGSL, rmsNormParams } from "../src/kernels/rms-norm.ts";
 import { ROPE_KEY, ROPE_WGSL, ROPE_WORKGROUP_SIZE, ropeParams } from "../src/kernels/rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
@@ -262,6 +274,9 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["linear.wgsl", LINEAR_WGSL],
     ["linear_v4.wgsl", linearWgsl("f32", true)],
     ["layer_norm.wgsl", LAYER_NORM_WGSL],
+    // adaLN 融合（ADR 0040 の 4 本目）。**素の layer_norm と対で置く**のが条件で、
+    // 行統計と affine の文字列を共有しているぶん、片方だけバイト列が動くのが最大の事故。
+    ["adaln_norm.wgsl", ADALN_NORM_WGSL],
     ["rms_norm.wgsl", RMS_NORM_WGSL],
     ["softmax.wgsl", SOFTMAX_WGSL],
     ["embedding.wgsl", EMBEDDING_WGSL],
@@ -895,6 +910,45 @@ Deno.test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保
   assertThrows(() => siluParams(-1), CodegenError, "u32");
   assertThrows(() => siluParams(1.5), CodegenError, "u32");
   assertThrows(() => siluParams(0x1_0000_0000), CodegenError, "u32");
+});
+
+Deno.test("adaLN は正規化本体を素の layer_norm と共有し、変調と積を u32 staging で 2 段に区切る", () => {
+  assertEquals(ADALN_NORM_WORKGROUP_SIZE, 256);
+  assertEquals(ADALN_NORM_KEY, "adaln_norm:v1:lastdim:f32:wg256");
+  assertNotEquals(ADALN_NORM_KEY, LAYER_NORM_KEY);
+
+  // MUST: 行統計（2 パス / 母分散）と affine は**同一文字列**。別々に書くと素の列と
+  // 融合版で縮約順が割れ、有限値のビット一致が崩れる。
+  assertEquals(LAYER_NORM_WGSL.includes(LAYER_NORM_ROW_STATS_WGSL), true, "素の側の共有");
+  assertEquals(ADALN_NORM_WGSL.includes(LAYER_NORM_ROW_STATS_WGSL), true, "融合側の共有");
+  assertEquals(
+    LAYER_NORM_WGSL.includes(`out[base + o] = ${LAYER_NORM_AFFINE_WGSL};`),
+    true,
+    "素の側の affine",
+  );
+  assertEquals(ADALN_NORM_WGSL.includes(`(${LAYER_NORM_AFFINE_WGSL}) * modulation`), true);
+
+  // 丸め障壁 2 段（`1 + scale` と `t * s`）。バッファは 6 in + 1 out。
+  assertEquals(ADALN_NORM_WGSL.includes("var<workgroup> staged: array<u32, 256>;"), true);
+  assertEquals(
+    ADALN_NORM_WGSL.includes("staged[lid] = bitcast<u32>(scale_vec[o] + one[0u]);"),
+    true,
+  );
+  assertEquals(ADALN_NORM_WGSL.includes("let modulation = bitcast<f32>(staged[lid]);"), true);
+  assertEquals(
+    ADALN_NORM_WGSL.includes("out[base + o] = bitcast<f32>(staged[lid]) + shift[o];"),
+    true,
+  );
+  assertEquals(ADALN_NORM_WGSL.includes("@binding(7) var<storage, read_write> out"), true);
+  assertEquals(ADALN_NORM_WGSL.includes("@binding(8)"), false, "storage は 7 本まで");
+  // 出力は block ループ（workgroup 一様）。`o = lid` の while のままでは barrier を置けない。
+  assertEquals(ADALN_NORM_WGSL.includes("while (block < blocks) {"), true);
+
+  // params は素の layer_norm と同一の生成器（rows / dim / eps）。
+  assertEquals([...adalnNormParams(4, 8, 1e-6)], [...layerNormParams(4, 8, 1e-6)]);
+  assertEquals(adalnNormParams(4, 8, 1e-6).byteLength, 16);
+  assertThrows(() => adalnNormParams(4, 0, 1e-6), CodegenError, "dim");
+  assertThrows(() => adalnNormParams(4, 8, 0), CodegenError, "eps");
 });
 
 Deno.test("elementwise params はスカラ attr を末尾に f32 のビット列で載せる", () => {

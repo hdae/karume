@@ -8,6 +8,7 @@
 
 import { assertEquals } from "@std/assert";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
+import { ADALN_NORM_KEY, adalnNormParams } from "../src/kernels/adaln-norm.ts";
 import { ROPE_KEY } from "../src/kernels/rope.ts";
 import { siluKey } from "../src/kernels/silu.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
@@ -46,7 +47,7 @@ const fusedAt = (plan: FusionPlan, index: number) => {
 };
 
 Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に効かない", () => {
-  assertEquals(FUSION_RULES.map((rule) => rule.name), ["silu", "upsample2x", "rope"]);
+  assertEquals(FUSION_RULES.map((rule) => rule.name), ["silu", "upsample2x", "rope", "adaln"]);
   const seen = new Set<string>();
   for (const rule of FUSION_RULES) {
     for (const head of rule.heads) {
@@ -54,7 +55,7 @@ Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に�
       seen.add(head);
     }
   }
-  assertEquals([...seen].sort(), ["mul", "reshape", "sigmoid", "slice"]);
+  assertEquals([...seen].sort(), ["layer_norm", "mul", "reshape", "sigmoid", "slice"]);
 });
 
 // ---------------------------------------------------------------- SiLU
@@ -420,6 +421,207 @@ Deno.test("恒等 expand だけが 0 dispatch の別名になり、複製軸が�
   assertEquals(replicated.counts.identityExpand, 0);
 });
 
+// --------------------------------------------------------------- adaLN
+
+const ROWS = 4;
+const DIM = 8;
+
+type AdalnOptions = {
+  /**
+   * 変調ベクトルを `reshape` で作る本数（= 窓内 passthrough の本数）。実測は 3（shift /
+   * scale / gate）と、末層だけ 2（gate 無し）。減らした分は直接 graph input にする。
+   */
+  readonly gaps?: number;
+  /** passthrough を 1 本増やし、それが layer_norm 出力を消費する（並べ替えが非合法）。 */
+  readonly gapConsumesNorm?: boolean;
+  /** layer_norm 出力を graph output にする。 */
+  readonly normOutput?: boolean;
+  /** layer_norm 出力に別 consumer を足す。 */
+  readonly normExtraConsumer?: boolean;
+  /** `1 + scale` の結果に別 consumer を足す。 */
+  readonly modulationExtraConsumer?: boolean;
+  /** mul の入力順を入れ替える。 */
+  readonly swappedMul?: boolean;
+  /** shift を足す add の入力順を入れ替える。 */
+  readonly swappedAdd?: boolean;
+  /** `1` の定数を `[1]` でなく `[dim]` にする（カーネルは `one[0]` しか読まない）。 */
+  readonly wideOne?: boolean;
+  /** 変調を broadcast でなく行ごとにする（near-shape）。 */
+  readonly perRowScale?: boolean;
+  /** layer_norm の weight と bias に同じ値名を渡す（bind 面が重複する形）。 */
+  readonly sharedAffine?: boolean;
+};
+
+/**
+ * 実 IR（anima DiT）の adaLN 鎖。`layer_norm` と `mul` の間に変調ベクトルの `reshape` が
+ * 挟まる**非隣接**の形をそのまま作る。
+ */
+const adalnGraph = (options: AdalnOptions = {}): GraphJson => {
+  const dtype = "f32";
+  const gaps = options.gaps ?? 3;
+  const row = [1, ROWS, DIM];
+  const modulation = options.perRowScale ? row : [1, 1, DIM];
+  const biasName = options.sharedAffine ? "ln_weight" : "ln_bias";
+  const values: GraphJson["values"] = {
+    t: { dtype, shape: [...row] },
+    s: { dtype, shape: [...modulation] },
+    p: { dtype, shape: [...row] },
+    y: { dtype, shape: [...row] },
+  };
+  const inputs: GraphJson["inputs"] = [
+    { name: "x", dtype, shape: [...row] },
+    { name: "ln_weight", dtype, shape: [DIM] },
+    ...(options.sharedAffine ? [] : [{ name: "ln_bias", dtype, shape: [DIM] }]),
+    { name: "one", dtype, shape: options.wideOne ? [DIM] : [1] },
+  ];
+  const nodes: GraphJson["nodes"] = [{
+    op: "layer_norm",
+    ins: ["x", "ln_weight", biasName],
+    outs: ["t"],
+    attrs: { normalized_shape: [DIM], eps: 0.000001 },
+  }];
+  const extraOutputs: string[] = [];
+
+  /** 変調ベクトル 1 本。`viaReshape` なら窓内 passthrough に、でなければ直接 graph input に。 */
+  const declare = (name: string, shape: readonly number[], viaReshape: boolean): void => {
+    if (!viaReshape) {
+      inputs.push({ name, dtype, shape: [...shape] });
+      return;
+    }
+    inputs.push({ name: `${name}_src`, dtype, shape: [shape[1], shape[2]] });
+    values[name] = { dtype, shape: [...shape] };
+    nodes.push({ op: "reshape", ins: [`${name}_src`], outs: [name], attrs: {} });
+  };
+
+  if (options.gapConsumesNorm) {
+    // 窓内 passthrough が鎖の値を読む形。融合ステップより前へ動かせない（同時に
+    // layer_norm 出力の consumer も 2 本になり、内部値の private 条件も外れる）。
+    values.norm_alias = { dtype, shape: [...row] };
+    nodes.push({ op: "reshape", ins: ["t"], outs: ["norm_alias"], attrs: {} });
+    extraOutputs.push("norm_alias");
+  }
+  // 実測の並び（shift → scale → gate）。gate は鎖の外で消費される。
+  declare("shift", [1, 1, DIM], gaps >= 1);
+  declare("scale", modulation, gaps >= 2);
+  for (const [at, name] of ["gate", "spare"].entries()) {
+    if (gaps < 3 + at) continue;
+    declare(name, [1, 1, DIM], true);
+    extraOutputs.push(name);
+  }
+
+  nodes.push(
+    { op: "add", ins: ["scale", "one"], outs: ["s"], attrs: {} },
+    { op: "mul", ins: options.swappedMul ? ["s", "t"] : ["t", "s"], outs: ["p"], attrs: {} },
+    {
+      op: "add",
+      ins: options.swappedAdd ? ["shift", "p"] : ["p", "shift"],
+      outs: ["y"],
+      attrs: {},
+    },
+  );
+  if (options.normExtraConsumer) {
+    values.t_copy = { dtype, shape: [...row] };
+    nodes.push({ op: "neg", ins: ["t"], outs: ["t_copy"], attrs: {} });
+    extraOutputs.push("t_copy");
+  }
+  if (options.modulationExtraConsumer) {
+    values.s_copy = { dtype, shape: [...modulation] };
+    nodes.push({ op: "neg", ins: ["s"], outs: ["s_copy"], attrs: {} });
+    extraOutputs.push("s_copy");
+  }
+  return {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: [],
+    inputs,
+    outputs: [...(options.normOutput ? ["t"] : []), "y", ...extraOutputs],
+    initializers: {},
+    values,
+    nodes,
+  };
+};
+
+/** 宣言 shape がそのまま実 shape（記号次元を使っていない）。 */
+const adalnInputs = (graph: GraphJson): Readonly<Record<string, readonly number[]>> =>
+  Object.fromEntries(graph.inputs.map((spec) => [spec.name, spec.shape as readonly number[]]));
+
+const fuseAdaln = (options: AdalnOptions = {}): FusionPlan => {
+  const graph = adalnGraph(options);
+  return fuse(graph, adalnInputs(graph));
+};
+
+Deno.test("adaLN は窓 7 / 窓 6 を掴み、reshape は融合ステップの前に素のまま並ぶ", () => {
+  for (const gaps of [3, 2] as const) {
+    const label = `窓 ${gaps + 4}`;
+    const plan = fuseAdaln({ gaps });
+    assertEquals(outline(plan.steps), [...Array(gaps).fill("reshape"), "fused:adaln"], label);
+    const step = fusedAt(plan, gaps);
+    // 外部入力の延べ列は**畳んだ 4 ノードだけ**から出る（passthrough は素のノードが数える）。
+    const operands = ["x", "ln_weight", "ln_bias", "scale", "one", "shift"];
+    assertEquals(step.ins, operands, `${label}: 外部入力の延べ列`);
+    assertEquals(step.binds, operands, `${label}: bind 順（カーネルの binding 1〜6）`);
+    assertEquals(step.nodeCount, 4, `${label}: 畳んだ本数は窓幅ではない`);
+    assertEquals(step.outputName, "y", label);
+    assertEquals(step.outputShape, [1, ROWS, DIM], label);
+    assertEquals(step.dispatch.key, ADALN_NORM_KEY, label);
+    // params は素の layer_norm と同一（rows / dim / eps のビット列）。
+    assertEquals([...step.dispatch.params], [...adalnNormParams(ROWS, DIM, 1e-6)], label);
+    assertEquals(step.dispatch.gridItems, ROWS, `${label}: 1 行 = 1 workgroup`);
+    assertEquals(step.dispatch.workgroupSize, 1, `${label}: 行数がそのまま workgroup 数`);
+    assertEquals(plan.counts.adaln, 1, label);
+  }
+});
+
+Deno.test("adaLN の窓内 passthrough は他ルールの受理位置を潰さない", () => {
+  const graph = adalnGraph();
+  const ir = parse(graph);
+  const plan = planGraph(ir, bindSymbols(ir, adalnInputs(graph)));
+  const context = { useCounts: countUses(ir), outputNames: new Set(ir.outputs) };
+  // 窓（layer_norm + reshape×3 + add + mul + add）の**全ての開始位置**で adaln 以外が
+  // 1 つも掴まないことを見る。`reshape` は upsample2x の先頭 op でもあるので、窓ごと
+  // 読み飛ばすことで他ルールの機会を奪っていないかはここでしか分からない。
+  for (let index = 0; index < 7; index += 1) {
+    for (const rule of FUSION_RULES) {
+      if (rule.name === "adaln") continue;
+      assertEquals(
+        rule.apply(plan.nodes, index, context),
+        undefined,
+        `窓の ${index} 番目で '${rule.name}' が掴んでいる`,
+      );
+    }
+  }
+});
+
+// NOTE: dtype 違いの反例は**構成できない** — layer_norm の契約が f32 専業で、続く
+// add / mul も dtype 一様を要求するので、planGraph が融合パスより先に落とす。
+// `allF32` は全ルール共通の適格条件として残す（層が変われば効き始める）。
+Deno.test("adaLN の反例（gap の本数 / gap が norm を消費 / 内部 output / 別 consumer / 入力順 / 定数形 / near-shape / bind 重複）は掴まない", () => {
+  const cases: readonly (readonly [string, AdalnOptions])[] = [
+    ["gap 無し（隣接鎖）", { gaps: 0 }],
+    ["gap 1 本", { gaps: 1 }],
+    ["gap 4 本", { gaps: 4 }],
+    ["gap が layer_norm 出力を消費", { gapConsumesNorm: true }],
+    ["layer_norm 出力が graph output", { normOutput: true }],
+    ["layer_norm 出力に別 consumer", { normExtraConsumer: true }],
+    ["1 + scale に別 consumer", { modulationExtraConsumer: true }],
+    ["mul(s, t)", { swappedMul: true }],
+    ["add(shift, p)", { swappedAdd: true }],
+    ["定数が [dim]", { wideOne: true }],
+    ["行ごとの scale（broadcast でない）", { perRowScale: true }],
+    ["weight と bias が同じ値名", { sharedAffine: true }],
+  ];
+  for (const [label, options] of cases) {
+    const plan = fuseAdaln(options);
+    assertEquals(plan.counts.adaln, 0, `${label}: 融合カウンタ`);
+    assertEquals(
+      plan.steps.every((step) => step.kind === "node"),
+      true,
+      `${label}: ${outline(plan.steps).join(",")}`,
+    );
+  }
+});
+
 Deno.test("カウンタは融合が並んだグラフでルール別に積み上がる", () => {
   const graph = ropeGraph({ heads: 2 });
   // RoPE 鎖の直後に SiLU 鎖を継ぎ足す（先頭 op が互いに素なので順に掴まれる）。
@@ -434,5 +636,5 @@ Deno.test("カウンタは融合が並んだグラフでルール別に積み上
 
   const plan = fuse(graph, ropeInputs({ heads: 2 }));
   assertEquals(outline(plan.steps), ["fused:rope", "fused:silu"]);
-  assertEquals(plan.counts, { silu: 1, upsample2x: 0, rope: 1, identityExpand: 0 });
+  assertEquals(plan.counts, { silu: 1, upsample2x: 0, rope: 1, adaln: 0, identityExpand: 0 });
 });

@@ -137,3 +137,83 @@ executor はステップ列を受け取って encode するだけで、判定を
   VAE channel L2 の 30 鎖、conditioner の D64 RoPE 22 鎖）は**未実装のまま**。特に VAE
   channel L2 は mul の storage 書込みが作る f32 丸め境界が消えるため、u32 staging で縮約順を
   再現できることを先に証明する必要がある（[large-designs.md](../research/2026-08-06-kernel-triage/large-designs.md) F3）。
+  → adaptive norm は 2026-08-10 の追記で実装済み（下記）。
+
+## 追記 2026-08-10: 窓内 passthrough の導入と adaLN 融合（OP-008）
+
+adaptive norm（DiT の変調）を 4 本目のルール `adaln` として実装した。本 ADR の Decision は
+**§2 の exact 一致も §1 の解放簿記も 1 つも変えない**。増えたのは「連続窓の一部を畳まずに
+通す」という走査側の概念 1 つだけである。
+
+### 前提の訂正: 鎖は隣接していない
+
+triage が「`layer_norm → mul → add` の 3 ノード」と書いていた形は、実 IR
+（anima DiT・`model.i8` / `model.f16` 共通）では**隣接していない**。85 鎖すべてが次の窓で、
+84 鎖が窓 7・末層の 1 鎖だけが窓 6（gate 無し）:
+
+```
+layer_norm(x, w, b)          -> t            [1,S,2048]  eps=1e-6
+reshape × 2〜3               （変調ベクトルの unsqueeze — shift / scale / gate）
+add(scale, const[1])         -> s            [1,1,2048]
+mul(t, s)                    -> p            [1,S,2048]
+add(p, shift)                -> y            [1,S,2048]
+```
+
+`layer_norm` の consumer はちょうど 1（mul）で、間の reshape は `layer_norm` 出力を 1 つも
+消費しない（依存が無い）ので、**reshape を融合ステップより前へ動かす並べ替えは合法**。
+
+### 決めたこと
+
+1. **ルールは連続窓（`window`）と畳む部分列（`chain`）を宣言し、差分は passthrough として
+   融合ステップの前に素のノードのまま並べる**。`planFusions` は `index += 窓幅` で進む。
+   - MUST: 走査幅・passthrough・解放簿記（`ins`）・畳んだ本数はすべて `defineRule` が
+     **窓と鎖から導出**する。ルール側は宣言しない（§1 の MUST をそのまま窓へ拡張した形）。
+     鎖が窓の部分列でなければ `defineRule` が fail loudly（取りこぼしは未実行、はみ出しは
+     二重実行で、どちらも例外の出ない沈黙誤値になる）。
+   - MUST: passthrough は鎖が定義する値を 1 つも消費しないこと（`passthroughIsIndependent`）。
+     現行 adaln では `internalsArePrivate` に包含されるが、鎖の**最終**ノードが passthrough
+     より前に来る将来の窓では独立に効く（internalsArePrivate は最終出力を見ない）。
+   - `reshape` は upsample2x の先頭 op でもあるので、**窓ごと読み飛ばすことで他ルールの機会を
+     奪っていないこと**を matcher テストが機械検査する（窓の全開始位置 × 他ルール = 掴まない）。
+2. **受理は実測形への決め打ち（§2 は不変）**。passthrough は「`layer_norm` の直後に並ぶ連続
+   `reshape` 2〜3 本」だけ、変調は `[1,…,1,dim]` の broadcast だけ、定数は shape `[1]` だけ、
+   `mul` / `add` の入力順は実測の 1 通りだけを受理する。**定数の値は仮定しない** — `1.0` を
+   焼き込むと「掴めなければ必ず正しい」の外へ出るので、`one` はバッファとして束ね
+   カーネルが `one[0]` を読む（storage 6 in + 1 out = 7 本・既定上限 8 の内側）。
+3. **カーネル `src/kernels/adaln-norm.ts`** は素の layer_norm と同じ「1 行 = 1 workgroup(256)・
+   行方向 grid-stride」。行統計（2 パス / 母分散）と affine の式は
+   **素の layer_norm と同一文字列を共有**する（`LAYER_NORM_ROW_STATS_WGSL` /
+   `LAYER_NORM_AFFINE_WGSL` — `SIGMOID_STABLE_WGSL` を silu と共有しているのと同じ理由）。
+   共有により素の `layer_norm.wgsl` のバイト列は 1 バイトも動いていない（スナップショットで固定）。
+   丸め障壁は **u32 staging + barrier の 2 段**（`1 + scale` と `t · s`）。素の列が持つ
+   3 つの実体化点のうち `t` は後段が乗算なので縮約の機会が無く、障壁を要さない。
+   出力ループは silu と同じ block ループへ組み替える（`o = lid` の while は workgroup 非一様で
+   barrier を置けない）。
+4. **`FusionCounterName` に `adaln` を追加**。`FusedDispatch.workgroupSize` は「grid-stride の
+   割り数」であって `@workgroup_size` ではないことを明記した（1 行 = 1 workgroup 族は 1 を渡す）。
+5. **executor は無変更**。bind 面「params, 入力…, 出力」・16 バイト uniform の共通形にそのまま乗る。
+
+### 実測（GPU 非依存・`planFusions` を実配布グラフに適用）
+
+`tests/assets_fusion_counts_test.ts` が **run 1 回あたり**の値を門にする（資産が無ければ SKIP）:
+
+| グラフ                                 | silu | upsample2x | rope |  adaln | identityExpand |
+| -------------------------------------- | ---: | ---------: | ---: | -----: | -------------: |
+| transformer（i8 / f16 共通・S 非依存） |    2 |          0 |   56 | **85** |              0 |
+| text encoder                           |   28 |          0 |   55 |      0 |            112 |
+| text conditioner                       |    0 |          0 |    0 |      0 |             48 |
+| VAE decoder（タイル 1 枚）             |   29 |          3 |    0 |      0 |              0 |
+
+上の実測欄が載せている predict 1 回ぶんの合計は、これをパイプラインの run 回数で畳んだもの:
+rope 56×8step + 55 = 503 / silu 2×8 + 28 + 29×9tile = 305 / upsample2x 3×9tile = 27 /
+identityExpand 112 + 48 = 160。**adaln は 85×8step = 680/predict**（研究ノートの「85」は
+静的な鎖の本数 = DiT の 1 run ぶん）。DiT のステップ列は 2601 → 2346（**−255/run**）。
+
+### 未確定（実 GPU 待ち）
+
+- 丸め障壁が実バックエンドで効いているか（`tests/gpu_adaln_fusion_test.ts` の双子グラフで
+  有限値ビット一致 / NaN 分類を見る）+ PNG sha256 門 4 本。
+- 特に `t · (scale + 1)` の**分配則**（`fma(t, scale, t)`）— `1 + scale` を staging で
+  実体化しているので理屈では起きないが、仕様保証ではないので A/B が判定点。割れた場合は
+  `1 + scale` を畳まない形（素の add を残し binds を 5 in にする）へ退避する。
+- 期待利得（帯域モデルからの逆算で GPU −135ms/8step）の直接 A/B。

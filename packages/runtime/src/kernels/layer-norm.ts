@@ -33,33 +33,17 @@ export const LAYER_NORM_WORKGROUP_SIZE = 256;
 
 export const LAYER_NORM_KEY = `layer_norm:v1:f32:lastdim:wg${LAYER_NORM_WORKGROUP_SIZE}`;
 
-export const LAYER_NORM_WGSL: string =
-  `// karume layer_norm (last dim, affine, f32, 2 パス / 母分散)
-struct Params {
-  rows: u32,
-  dim: u32,
-  eps: f32,
-}
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> x: array<f32>;
-@group(0) @binding(2) var<storage, read> weight: array<f32>;
-@group(0) @binding(3) var<storage, read> bias: array<f32>;
-@group(0) @binding(4) var<storage, read_write> out: array<f32>;
-
-var<workgroup> scratch: array<f32, ${LAYER_NORM_WORKGROUP_SIZE}>;
-
-@compute @workgroup_size(${LAYER_NORM_WORKGROUP_SIZE})
-fn main(
-  @builtin(workgroup_id) wid: vec3<u32>,
-  @builtin(local_invocation_id) lid3: vec3<u32>,
-  @builtin(num_workgroups) nwg: vec3<u32>,
-) {
-  let lid = lid3.x;
-  let dim = params.dim;
-  let scale = 1.0 / f32(dim);
-  var row = wid.x;
-  while (row < params.rows) {
-    let base = row * dim;
+/**
+ * 1 行ぶんの統計（`base` / `mean` / `inv`）を出す本体。**融合カーネルと同一文字列を共有する
+ * MUST** — 別々に書くと素の列と融合版で縮約順が割れ、`(x−mean)²` の足し合わせ順が 1 つ違う
+ * だけでビット一致が崩れる（`SIGMOID_STABLE_WGSL` を silu.ts と共有しているのと同じ理由）。
+ *
+ * 前提（利用側が用意する識別子）: `params`（rows / dim / eps）・`x`・`scratch`
+ * （`array<f32, {@link LAYER_NORM_WORKGROUP_SIZE}>`）・`lid`・`dim`・`scale`（= 1/dim）と、
+ * workgroup 一様な行ループ変数 `row`。barrier を含むのでこのブロックは**一様な制御流**の
+ * 中にしか置けない。
+ */
+export const LAYER_NORM_ROW_STATS_WGSL: string = `    let base = row * dim;
 
     // ① 和 → 平均
     var acc = 0.0;
@@ -102,11 +86,46 @@ fn main(
     }
     let inv = 1.0 / sqrt(scratch[0u] * scale + params.eps);
     // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
-    workgroupBarrier();
+    workgroupBarrier();`;
+
+/**
+ * 正規化済み 1 要素の affine（`weight` / `bias` を当てる式）。{@link LAYER_NORM_ROW_STATS_WGSL}
+ * と同じ理由で融合カーネルと**同一文字列を共有する MUST**（fma へ縮約するかどうかは式の
+ * 書き方で変わる）。行内添字は `base + o`、重み添字は `o` を前提にする。
+ */
+export const LAYER_NORM_AFFINE_WGSL = "(x[base + o] - mean) * inv * weight[o] + bias[o]";
+
+export const LAYER_NORM_WGSL: string =
+  `// karume layer_norm (last dim, affine, f32, 2 パス / 母分散)
+struct Params {
+  rows: u32,
+  dim: u32,
+  eps: f32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> weight: array<f32>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+
+var<workgroup> scratch: array<f32, ${LAYER_NORM_WORKGROUP_SIZE}>;
+
+@compute @workgroup_size(${LAYER_NORM_WORKGROUP_SIZE})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid3: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+  let lid = lid3.x;
+  let dim = params.dim;
+  let scale = 1.0 / f32(dim);
+  var row = wid.x;
+  while (row < params.rows) {
+${LAYER_NORM_ROW_STATS_WGSL}
 
     var o = lid;
     while (o < dim) {
-      out[base + o] = (x[base + o] - mean) * inv * weight[o] + bias[o];
+      out[base + o] = ${LAYER_NORM_AFFINE_WGSL};
       o = o + ${LAYER_NORM_WORKGROUP_SIZE}u;
     }
     row = row + nwg.x;
