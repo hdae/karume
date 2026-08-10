@@ -65,8 +65,18 @@
   Metal（M2）追試済み: 退行なし（f16 ×1.06）・幾何 2 種の sha 一致 = ビット同一は
   Vulkan/Metal の 2 環境で成立。既定はバックエンド共通 1 本（NVIDIA 第一 — ユーザー裁定）。
   sha 参照門は参照環境専用の規約を limitations.md に明文化。
-  **次手候補**: HOST-006（−5.1% 上限）/ PLAN-012（−0.8%）。m 小 linear は census 上対象外
-  （GFLOP 0.003%）。AMD / Intel は未実測（検証は自己 A/B — limitations 参照）。
+  m 小 linear は census 上対象外（GFLOP 0.003%）。AMD / Intel は未実測（検証は自己 A/B —
+  limitations 参照）。
+- **HOST-006 第 1 波 — 完了（2026-08-10）**: params の内容アドレスキャッシュ（Session 常駐・
+  一度書いたら不変・診断 `lastRunParams`）+ bind group layout の PipelineCache 保持。
+  **w8a8-1024 10.6 → 10.3s（×1.03）・f16-1024 20.2 → 20.0s**・門緑。params 系の約半分は
+  GPU と重畳しており壁に出たのは露出分のみ。残余ホスト ≈1.1s ≈ 11%（実測の正本 =
+  [research/2026-08-10-op-timing-stats.md](../docs/research/2026-08-10-op-timing-stats.md) §7）。
+  PLAN-012 は見送り確定（−0.8% に VRAM +224MiB は不釣り合い — 量子化形は次波 E で復活）。
+  **次波（ユーザー裁定済み）: PreparedExecutionPlan 設計波** — plan/fusion の Session
+  キャッシュ + transient slot 固定 + bind group 再利用（旧 b 案）を土台に、staged execution
+  （large-designs D・最初は E の prepared cross-attention K/V を量子化形 +57MiB で）を段階
+  導入。設計先行 → 裁定の型。
 - **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 実装完了（2026-08-09）**:
   1 リポ複数モデル（`defaultModel` 必須）+ 語彙整理（presets → `quants`・variant → `dtype`・
   components → `weights` / `assets` 分離）。**v1 パーサは持たない**。hub v2 パーサ +

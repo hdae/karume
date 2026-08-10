@@ -166,3 +166,26 @@ PLAN-012 の 308 node という分類結果も台帳の静的集計と完全一�
   別途マイクロベンチ波が要る（attention_stats の 29.4M workgroup/step という幾何は
   最初の観察対象候補）。
 - 観測面の恒久化（パイプラインから `Session.diagnostics()` へ到達する席が無い）は裁定待ち。
+
+## 7. 追記（同日・HOST-006 の第 1 波着地と残余の再実測）
+
+カーネル 3 波後（w8a8-1024 壁 13.9 → 10.6s）にホスト露出が相対拡大したため再実測し、
+HOST-006 の第 1 波を実装・着地した（`9f47a04` = params の内容アドレスキャッシュ・
+`2d1dad1` = bind group layout の PipelineCache 保持）。
+
+- **着地前の露出 gap（run 壁 − GPU・計測込み 1 走）**: w8a8-1024 で 2.26s / run 壁 10.32s。
+  §2 の「上限 −5.1%」は壁 13.9s 時点の比率であり、この時点で失効していた。
+- **params キャッシュ**: params の全バイトは (グラフ, attrs, 解決済み shape) の純関数という
+  実読結論に基づき、usage + 全要素連結をキーに Session 常駐（weights アリーナ所有・一度
+  書いたら不変）で共有。定常 step の新規生成は 0 本（診断 `lastRunParams` と挙動テスト
+  2 本で固定）。
+- **検収 ABBA（回文・門緑・各 2 走同値）**: w8a8-1024 10.6 → **10.3s（×1.03）**・
+  f16-1024 20.2 → **20.0s（×1.01）**。§2 の params 系 124ms/step に対し壁へ出たのは
+  ≈37ms/step — **約半分は GPU 実行と重なっていた**ため（overlap 分は消しても壁に出ない）。
+- **着地後の残余 gap**: 1.72s / run 壁 9.99s（計測込み）。装置代 ≈0.33s + 初回アップロード
+  ≈0.29s を引いた実質 ≈**1.1s ≈ 壁の 11%**。残余の内訳候補は createBindGroup 44.4ms/step・
+  plan/fusion の毎 run 再計算・入力アップロード・encode ループの JS 残差。
+- **帰結**: 残余はバッファ同一性の固定（= PreparedExecutionPlan）なしには取れない。
+  次波は plan/fusion の Session キャッシュ + transient slot 固定 + bind group 再利用を
+  土台に、staged execution（large-designs D — 特に E の prepared cross-attention K/V を
+  量子化形 +57MiB で）を段階導入する（ユーザー裁定 2026-08-10: b と D は同一設計波）。
