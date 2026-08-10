@@ -210,3 +210,24 @@ WGSL 生成 / params キー構築 / 契約検査を丸ごと飛ばす。
   1062.5MiB / f16-1024 で 1461.7MiB（live ピーク 712.5 / 1184.5MiB）・VAE タイル 861.9MiB。
   この量は現行でも毎 run 中に存在するため、slot を Session 寿命へ昇格（活性 1 signature ぶん）
   しても新しい VRAM ピークは生まれない。
+
+## 9. 追記（同日・波 2 着地 — 露出費用の帰属が確定し staged execution の前提が消えた）
+
+段 C（transient slot 固定 = `339fc0c`）と段 D（bind group 焼き込み + 入力固定 = `1751f3c`）の
+段別 ABBA（ADR 0042 の実測表が正本）:
+
+- **段 C が唯一の壁利得**: w8a8-1024 10.4-10.5 → 10.1s（×1.03-1.04）・f16-1024 20.0 → 19.6s
+  （×1.02）。露出していたのはアリーナ簿記（~3,280 呼び出し/run）+ createBuffer/destroy。
+- **段 D は中立**: createBindGroup 44.4ms/step（§7 で残余の筆頭候補としたもの）も GPU と
+  完全重畳していた。§7 の内訳候補は「候補列挙」であり、露出分の帰属は段別 ABBA で初めて
+  確定した — 本日 2 度目の見積り訂正。
+- **staged execution（PLAN-011 読み替え / large-designs D/E）への含意**: dispatch 削減が狙う
+  ホスト費用は重畳側で、GPU 側利得は E ≈ 0.60% / timestep-only ≈ 0.12%。**この環境では
+  壁時計の利得はほぼゼロ**（+57MiB と機構の複雑さに見合わない）。E の実装土台（prepared 値の
+  Session 常駐機構）自体は段 C/D で完成しており、将来 CFG（guidance > 1）や別モデルで
+  cross-attention 比重が変わった時に再評価できる。
+- 参考実測（gpuTiming on・generate 全体 1 走・w8a8-1024）: 壁 10.54s / GPU 8.03s
+  （transformer 6.61 + vae 1.31 + text 0.11）。差 2.50s は Session 構築 4 本（重みアップロード +
+  パイプライン初回生成）+ 装置代 + 露出残余の合算で、run 内の露出はもはや主因ではない。
+  次の最適化の桁は §2 の結論のまま **カーネル側**（DiT linear+attention 63.3% / VAE conv2d
+  19.1%）か、ロード時間（Session 構築）にある。

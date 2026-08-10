@@ -73,16 +73,18 @@
   GPU と重畳しており壁に出たのは露出分のみ。残余ホスト ≈1.1s ≈ 11%（実測の正本 =
   [research/2026-08-10-op-timing-stats.md](../docs/research/2026-08-10-op-timing-stats.md) §7）。
   PLAN-012 は見送り確定（−0.8% に VRAM +224MiB は不釣り合い — 量子化形は次波 E で復活）。
-- **PreparedExecutionPlan 波 1 — 完了（2026-08-10・設計の正本 = ADR
+- **PreparedExecutionPlan 波 1+2 — 完了（2026-08-10・設計の正本 = ADR
   [0042](../docs/decisions/0042-prepared-execution-plan.md)）**: エンコード層を導出/実行の
-  2 相へ分離（`32dad19`・fixture 0 diff が機械証明）し、導出済み計画（shapes + StepRecipe 列 +
-  FusionCounts）を解決済み bindings キーで Session 常駐（`b2e6ce0`・LRU 4・常設診断
-  `lastRunPrepared`・挙動テスト 5 本）。**検収 ABBA は壁時計中立** — 導出相は GPU と完全重畳
-  しており露出 gap ≈1.1s の本体は createBindGroup + アリーナ簿記 + 転送系と帰属確定
-  （op-timing-stats.md §8）。**波 2（承認済み・次の作業）= transient slot 固定 + bind group の
-  レシピ焼き込み + 入力 slot 固定**が壁の本丸。VRAM は活性 1 signature ぶん（w8a8 1062.5 /
-  f16 1461.7MiB — run 中に既存の量）で新ピークなし。波 2 後に再実測 → E（prepared
-  cross-attention K/V・量子化形 +57MiB）/ timestep stage は別裁定。
+  2 相へ分離（`32dad19`）→ 導出済み計画を bindings キーで Session 常駐（`b2e6ce0`・LRU 4・
+  `lastRunPrepared`）→ transient slot の GPU backing（`339fc0c`・容量 1・初ヒット遅延構築・
+  footprint 一致門）→ bind group 焼き込み + 入力固定（`1751f3c`・`planBacking` 診断）。
+  **段別 ABBA の帰結: 壁利得は段 C のみ（w8a8 10.4-10.5 → 10.1s ×1.03-1.04・f16 20.0 →
+  19.6s ×1.02）**。波 1 と段 D は中立 = 導出相も createBindGroup も GPU と完全重畳
+  （op-timing-stats §8/§9 — 見積り訂正 2 回）。**staged execution（E / timestep stage）は
+  前提消失で見送り推奨**（狙っていたホスト費用が重畳側・GPU 利得 E 0.60% / timestep 0.12% —
+  ユーザー裁定待ち）。backed run に残る run 毎費用は入力 writeBuffer + flush/readback +
+  dispatch ループのみ。次の桁はカーネル（DiT linear+attention 63.3% / VAE conv2d 19.1%）か
+  ロード時間（Session 構築 — gap 実測 2.50s の主成分）。
 - **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 実装完了（2026-08-09）**:
   1 リポ複数モデル（`defaultModel` 必須）+ 語彙整理（presets → `quants`・variant → `dtype`・
   components → `weights` / `assets` 分離）。**v1 パーサは持たない**。hub v2 パーサ +

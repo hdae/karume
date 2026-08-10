@@ -73,15 +73,43 @@ lastRunParams はヒット run で {0,0} になる（導出相が走らない事
 - 波 2（transient slot 固定 + bind group のレシピ焼き込み）は recipes に欄を足す形で載る。
   ヒット run の残存ホスト費用は createBindGroup とアリーナ簿記に一本化された。
 
+## 波 2 の追記（同日）: transient slot 固定と bind group 焼き込み
+
+### 4. transient slot の GPU backing（容量 1・初ヒットで遅延構築）
+
+`derivePlanSlots` がレシピ列から **RunArena のサイズクラス LIFO を仮想再生**して slot 表を導く
+（独自パッキング禁止 — footprint 一致がテストで固定され、常駐化しても VRAM の新ピークは
+生まれない）。backing（slot + 入力バッファ + 焼き込み bind group）は**初ヒット run で遅延構築**
+し、容量は活性 1 signature のみ（DiT で ~1GiB 規模のため本数倍にしない）。単発 run は slot
+メモリを一切払わない。破棄は退役キュー + flush 後の 1 箇所（切替 / LRU 追い出し / dispose
+相乗り）。新規構築した run が失敗したら backing を退役（一過性 OOM から次ヒットで回復・
+既存 backing は据え置き = スラッシング回避）。
+
+### 5. bind group 焼き込みと入力固定
+
+束縛先が全て run 跨ぎで固定（resident / slot / 常駐入力）なので、構築時に全 dispatch の
+GPUBindGroup を焼き込み、backed run は dispatch を積むだけ。入力は backing 所有バッファへ
+毎 run writeBuffer — 追い越し安全性は「#chain 直列化 + run は flush/readback 完了後にしか
+返らない + run 内では入力書き込みが全エンコードに先行」で論証（並行 run テストで固定）。
+残骸上書きの正しさは full-write（ADR 0014）1 本。診断 `planBacking {residentBytes, buildCount}`
+（signature 交互切替による毎 run 再構築が唯一の沈黙劣化 — buildCount が観測点）。
+
 ## 実測（検収 ABBA・回文・冷却規約・PNG 門込み・2026-08-10）
 
-`d7626c8`（波前）vs `b2e6ce0`（段 A+B）、e2e_anima 全 4 本 = 1 走・各 2 走:
+段ごとにコミットを切り替えた ABBA（e2e_anima 全 4 本 = 1 走・各側 2 走・代表値 min）:
 
-- f16-1024: 19.9/19.9 → 19.9/20.0s、w8a8-1024: 10.4/10.3 → 10.4/10.5s — **壁時計は中立**
-  （差はノイズ幅 ±0.1s の内側）。PNG 門は 4 走とも緑。
-- **帰属の確定（見積りの訂正）**: 露出 gap ≈1.1s のうち、導出相（plan/fusion 走査・WGSL
-  再生成・params キー文字列・契約検査）の寄与は**壁に出ない水準**だった — これらは GPU 実行と
-  ほぼ完全に重畳していた。露出費用の本体は createBindGroup（44.4ms/step）・アリーナ簿記
-  （allocStorage/retain/release ×~3,280/run）・転送系に絞られた。**波 2（transient slot 固定 +
-  bind group のレシピ焼き込み）が壁時計の本丸**であり、本 ADR の 2 相分離とキャッシュは
-  その前提条件（バッファ同一性を固定できる形）として機能する。
+| 区間                                                           | w8a8-1024                                | f16-1024                       | 判定     |
+| -------------------------------------------------------------- | ---------------------------------------- | ------------------------------ | -------- |
+| `d7626c8` → `b2e6ce0`（波 1 = 2 相分離 + 計画キャッシュ）      | 10.3-10.4 → 10.4-10.5s                   | 19.9 → 19.9-20.0s              | **中立** |
+| `b2e6ce0` → `339fc0c`（段 C = slot 固定）                      | 10.4-10.5 → **10.1/10.1s（×1.03-1.04）** | 20.0 → **19.6/19.6s（×1.02）** | **利得** |
+| `339fc0c` → `1751f3c`（段 D = bind group 焼き込み + 入力固定） | 10.1 → 10.1s（4 走同値）                 | 19.6 → 19.6s                   | **中立** |
+
+PNG 門は全 12 走緑。**帰属の確定（2 度の見積り訂正）**: 露出していたホスト費用は
+アリーナ簿記 + createBuffer/destroy（段 C が削除）だけで、導出相（波 1）も
+createBindGroup 44.4ms/step（段 D）も **GPU 実行と完全に重畳しており壁に出ていなかった**。
+段 D の価値は将来の dispatch 数増加への耐性と、E 系（prepared 値の常駐）の土台に限られる。
+
+**staged execution（large-designs D/E）への含意**: dispatch 削減系の候補（E = 392/predict・
+timestep-only stage = 772/predict）が狙っていたホスト費用は重畳側にあり、GPU 側の利得も
+E ≈ 0.60% / timestep ≈ 0.12% しかない。この環境では**壁時計の利得はほぼゼロ**と結論できる
+（採否の裁定は research 側の記録とともにユーザーへ）。
