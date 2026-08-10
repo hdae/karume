@@ -232,7 +232,7 @@ const runBoth = async (
     const count = dims.batch * dims.channelsOut * dims.heightOut * dims.widthOut;
     const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
     const bind = (
-      pipeline: GPUComputePipeline,
+      layout: GPUBindGroupLayout,
       params: Uint32Array<ArrayBuffer>,
     ): { readonly group: GPUBindGroup; readonly out: GPUBuffer } => {
       const paramsBuffer = arena.allocHostWritten(params.byteLength, UNIFORM_IN);
@@ -250,15 +250,18 @@ const runBoth = async (
         entries.push({ binding: CONV2D_SCALE_BINDING, resource: { buffer: scaleBuffer } });
       }
       return {
-        group: gpu.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }),
+        group: gpu.device.createBindGroup({ layout, entries }),
         out,
       };
     };
 
     // ① 直接カーネル（grid-stride）
     const directKey = conv2dKey(testCase.storage);
-    const directPipeline = await cache.get(directKey, conv2dWgsl(testCase.storage));
-    const direct = bind(directPipeline, conv2dParams(dims));
+    const { pipeline: directPipeline, layout: directLayout } = await cache.get(
+      directKey,
+      conv2dWgsl(testCase.storage),
+    );
+    const direct = bind(directLayout, conv2dParams(dims));
     scheduler.dispatch(directPipeline, direct.group, [
       gridStrideWorkgroups(count, CONV2D_WORKGROUP_SIZE, limit),
       1,
@@ -269,8 +272,11 @@ const runBoth = async (
     const kFlat = dims.channelsIn * dims.kernelH * dims.kernelW;
     const v4 = conv2dUsesVec4(kFlat, dims.widthOut, dims.strideW);
     const igemmKey = conv2dIgemmKey(testCase.storage, v4, mTile);
-    const igemmPipeline = await cache.get(igemmKey, conv2dIgemmWgsl(testCase.storage, v4, mTile));
-    const igemm = bind(igemmPipeline, conv2dIgemmParams(dims));
+    const { pipeline: igemmPipeline, layout: igemmLayout } = await cache.get(
+      igemmKey,
+      conv2dIgemmWgsl(testCase.storage, v4, mTile),
+    );
+    const igemm = bind(igemmLayout, conv2dIgemmParams(dims));
     scheduler.dispatch(igemmPipeline, igemm.group, [
       // MUST: n タイルは m タイルの変種に関わらず 64（2048px の n 上限の扱いを動かさない）
       tiledWorkgroups(dims.heightOut * dims.widthOut, GEMM_TILE, limit, testCase.name),

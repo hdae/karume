@@ -322,7 +322,10 @@ const runPvI8a8 = async (
     // (a) v[batch,N,D] → vT[batch,D,N]（既存の strided 読みコピー族 = permute）
     const stridedSpec = { dtype: "f32" } as const;
     const permuteKey = stridedKey(stridedSpec);
-    const permutePipeline = await cache.get(permuteKey, stridedWgsl(stridedSpec));
+    const { pipeline: permutePipeline, layout: permuteLayout } = await cache.get(
+      permuteKey,
+      stridedWgsl(stridedSpec),
+    );
     const permuteParams = arena.allocHostWritten(40, STORAGE_IN);
     gpu.device.queue.writeBuffer(
       permuteParams,
@@ -334,7 +337,7 @@ const runPvI8a8 = async (
     scheduler.dispatch(
       permutePipeline,
       gpu.device.createBindGroup({
-        layout: permutePipeline.getBindGroupLayout(0),
+        layout: permuteLayout,
         entries: [
           { binding: 0, resource: { buffer: permuteParams } },
           { binding: 1, resource: { buffer: v } },
@@ -346,7 +349,10 @@ const runPvI8a8 = async (
     );
 
     // (b) Vᵀ の per-row 量子化（= V の per-column 量子化）
-    const quantizePipeline = await cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
+    const { pipeline: quantizePipeline, layout: quantizeLayout } = await cache.get(
+      QUANTIZE_ROWS_KEY,
+      QUANTIZE_ROWS_WGSL,
+    );
     const quantizeParams = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(quantizeParams, 0, quantizeRowsParams(batch * d, n));
     const vq = arena.allocStorage(Math.max(4, batch * d * n));
@@ -356,7 +362,7 @@ const runPvI8a8 = async (
     scheduler.dispatch(
       quantizePipeline,
       gpu.device.createBindGroup({
-        layout: quantizePipeline.getBindGroupLayout(0),
+        layout: quantizeLayout,
         entries: [
           { binding: 0, resource: { buffer: quantizeParams } },
           { binding: 1, resource: { buffer: vt } },
@@ -372,7 +378,7 @@ const runPvI8a8 = async (
     const v4 = attentionPvI8a8UsesVec4(d);
     const dp4a = dot === "dp4a";
     const pipelineKey = attentionPvI8a8Key(v4, dp4a);
-    const pipeline = await cache.get(pipelineKey, attentionPvI8a8Wgsl(v4, dp4a));
+    const { pipeline, layout } = await cache.get(pipelineKey, attentionPvI8a8Wgsl(v4, dp4a));
     const params = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(params, 0, attentionPvI8a8Params(m, d, n));
     const out = arena.allocStorage(Math.max(4, batch * m * d * 4));
@@ -380,7 +386,7 @@ const runPvI8a8 = async (
     scheduler.dispatch(
       pipeline,
       gpu.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
+        layout,
         entries: [
           { binding: 0, resource: { buffer: params } },
           { binding: 1, resource: { buffer: scores } },

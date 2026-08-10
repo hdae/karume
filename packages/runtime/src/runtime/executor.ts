@@ -1002,10 +1002,10 @@ export class Session {
     out: GPUBuffer,
   ): Promise<void> {
     const { key, gridItems, workgroupSize } = step.dispatch;
-    const pipeline = await this.#state.cache.get(key, step.dispatch.wgsl());
+    const { pipeline, layout } = await this.#state.cache.get(key, step.dispatch.wgsl());
     const params = this.#writeParams(step.dispatch.params, PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
@@ -1147,7 +1147,7 @@ export class Session {
       ? { op: CAST_OP, rank, dtype: element.dtype, to: element.to }
       : { op: element.op, rank, dtype: element.dtype };
     const key = elementwiseKey(spec);
-    const pipeline = await this.#state.cache.get(key, elementwiseWgsl(spec));
+    const { pipeline, layout } = await this.#state.cache.get(key, elementwiseWgsl(spec));
     // attrs のスカラ（clamp の min/max など）は params の末尾に f32 で載る（並びは契約表）。
     const params = this.#writeParams(
       elementwiseParams(
@@ -1158,7 +1158,7 @@ export class Session {
       PARAMS_STORAGE_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
@@ -1196,7 +1196,7 @@ export class Session {
     const lastDim = axis === inputShape.length - 1;
     const outCount = numel(step.outputShape);
     const key = lastDim ? reduceKey(spec) : axisReduceKey(spec);
-    const pipeline = await this.#state.cache.get(
+    const { pipeline, layout } = await this.#state.cache.get(
       key,
       lastDim ? reduceWgsl(spec) : axisReduceWgsl(spec),
     );
@@ -1208,7 +1208,7 @@ export class Session {
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1237,10 +1237,10 @@ export class Session {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
-    const pipeline = await this.#state.cache.get(CUMSUM_KEY, CUMSUM_WGSL);
+    const { pipeline, layout } = await this.#state.cache.get(CUMSUM_KEY, CUMSUM_WGSL);
     const params = this.#writeParams(cumsumParams(rows, dim), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1290,13 +1290,13 @@ export class Session {
     // 要素型はキーに載る（bool マスク / i32 添字の expand が実測にある — ADR 0009）。
     const spec = { dtype: step.outputDtype };
     const key = stridedKey(spec);
-    const pipeline = await this.#state.cache.get(key, stridedWgsl(spec));
+    const { pipeline, layout } = await this.#state.cache.get(key, stridedWgsl(spec));
     const params = this.#writeParams(
       stridedParams(outShape, srcStrides, offset),
       PARAMS_STORAGE_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1331,7 +1331,7 @@ export class Session {
     const outStrides = catOutStrides(outShape);
     const spec = { dtype: step.outputDtype };
     const key = stridedWriteKey(spec);
-    const pipeline = await this.#state.cache.get(key, stridedWriteWgsl(spec));
+    const { pipeline, layout } = await this.#state.cache.get(key, stridedWriteWgsl(spec));
     let written = 0;
     for (const [index, buffer] of inputs.entries()) {
       const srcShape = step.inputShapes[index];
@@ -1340,7 +1340,7 @@ export class Session {
         PARAMS_STORAGE_USAGE,
       );
       const bindGroup = this.#state.gpu.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
+        layout,
         entries: [
           { binding: 0, resource: { buffer: params } },
           { binding: 1, resource: { buffer } },
@@ -1376,13 +1376,13 @@ export class Session {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputShape;
     const { left, right } = padAttrs(step.node.attrs, `nodes (${step.node.op})`);
-    const pipeline = await this.#state.cache.get(PAD_KEY, PAD_WGSL);
+    const { pipeline, layout } = await this.#state.cache.get(PAD_KEY, PAD_WGSL);
     const params = this.#writeParams(
       padParams(numel(srcShape.slice(0, -1)), srcShape[srcShape.length - 1], left, right),
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1408,7 +1408,7 @@ export class Session {
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = flipDim(step.node.attrs, `nodes (${step.node.op})`);
-    const pipeline = await this.#state.cache.get(FLIP_KEY, FLIP_WGSL);
+    const { pipeline, layout } = await this.#state.cache.get(FLIP_KEY, FLIP_WGSL);
     const params = this.#writeParams(
       // MUST: 軸の前後で分ける（`slice(0, dim)` と `slice(dim + 1)`）。境界を 1 つずらすと
       // 反転する軸が隣にずれ、shape も要素数も変わらないまま値だけが誤る。
@@ -1416,7 +1416,7 @@ export class Session {
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1443,10 +1443,10 @@ export class Session {
     // 両方へ渡す（同一キー ⇔ 同一バイト列は保たれる）。
     const v4 = gemmUsesVec4(k, n);
     const key = matmulKey(v4);
-    const pipeline = await this.#state.cache.get(key, matmulWgsl(v4));
+    const { pipeline, layout } = await this.#state.cache.get(key, matmulWgsl(v4));
     const params = this.#writeParams(matmulParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1478,10 +1478,10 @@ export class Session {
     const n = b[2];
     const v4 = gemmUsesVec4(k, n);
     const key = bmmKey(v4);
-    const pipeline = await this.#state.cache.get(key, bmmWgsl(v4));
+    const { pipeline, layout } = await this.#state.cache.get(key, bmmWgsl(v4));
     const params = this.#writeParams(bmmParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1512,13 +1512,13 @@ export class Session {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputShape;
     const count = numel(outShape);
-    const pipeline = await this.#state.cache.get(GATHER_KEY, GATHER_WGSL);
+    const { pipeline, layout } = await this.#state.cache.get(GATHER_KEY, GATHER_WGSL);
     const params = this.#writeParams(
       gatherParams(count, outShape[outShape.length - 1], srcShape[srcShape.length - 1]),
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1569,10 +1569,13 @@ export class Session {
     }
     const v4 = gemmUsesVec4(k, n);
     const key = linearKey(weightStorage, v4, compute);
-    const pipeline = await this.#state.cache.get(key, linearWgsl(weightStorage, v4, compute));
+    const { pipeline, layout } = await this.#state.cache.get(
+      key,
+      linearWgsl(weightStorage, v4, compute),
+    );
     const params = this.#writeParams(linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
@@ -1628,13 +1631,16 @@ export class Session {
     arena.retain(xs, 0);
 
     // ① 活性の per-token 量子化（1 行 = 1 workgroup・行方向 grid-stride）
-    const quantizePipeline = await this.#state.cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
+    const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
+      QUANTIZE_ROWS_KEY,
+      QUANTIZE_ROWS_WGSL,
+    );
     const quantizeParams = this.#writeParams(
       quantizeRowsParams(m, k),
       PARAMS_UNIFORM_USAGE,
     );
     const quantizeBindGroup = device.createBindGroup({
-      layout: quantizePipeline.getBindGroupLayout(0),
+      layout: quantizeLayout,
       entries: [
         { binding: 0, resource: { buffer: quantizeParams } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1653,13 +1659,13 @@ export class Session {
     const v4 = linearI8a8UsesVec4(n);
     const geometry = defaultI8a8Geometry("linear");
     const key = linearI8a8Key(v4, this.#state.i8a8Dot === "dp4a", geometry);
-    const pipeline = await this.#state.cache.get(
+    const { pipeline, layout } = await this.#state.cache.get(
       key,
       linearI8a8Wgsl(v4, this.#state.i8a8Dot === "dp4a", geometry),
     );
     const params = this.#writeParams(linearI8a8Params(m, n, k), PARAMS_UNIFORM_USAGE);
     const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: xq } },
@@ -1691,13 +1697,13 @@ export class Session {
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const { eps } = layerNormAttrs(step.node.attrs, `nodes (${step.node.op})`);
-    const pipeline = await this.#state.cache.get(LAYER_NORM_KEY, LAYER_NORM_WGSL);
+    const { pipeline, layout } = await this.#state.cache.get(LAYER_NORM_KEY, LAYER_NORM_WGSL);
     const params = this.#writeParams(
       layerNormParams(rows, dim, eps),
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
@@ -1725,10 +1731,10 @@ export class Session {
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const eps = rmsNormEps(step.node.attrs, `nodes (${step.node.op})`);
-    const pipeline = await this.#state.cache.get(RMS_NORM_KEY, RMS_NORM_WGSL);
+    const { pipeline, layout } = await this.#state.cache.get(RMS_NORM_KEY, RMS_NORM_WGSL);
     const params = this.#writeParams(rmsNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
@@ -1752,10 +1758,10 @@ export class Session {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
-    const pipeline = await this.#state.cache.get(SOFTMAX_KEY, SOFTMAX_WGSL);
+    const { pipeline, layout } = await this.#state.cache.get(SOFTMAX_KEY, SOFTMAX_WGSL);
     const params = this.#writeParams(softmaxParams(rows, dim), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -1852,7 +1858,7 @@ export class Session {
     } else {
       const qkV4 = gemmUsesVec4(depth, cols);
       const qkKey = attentionQkKey(qkV4, compute, scoreStorage);
-      const qkPipeline = await this.#state.cache.get(
+      const { pipeline: qkPipeline, layout: qkLayout } = await this.#state.cache.get(
         qkKey,
         attentionQkWgsl(qkV4, compute, scoreStorage),
       );
@@ -1861,7 +1867,7 @@ export class Session {
         PARAMS_UNIFORM_USAGE,
       );
       const qkBindGroup = device.createBindGroup({
-        layout: qkPipeline.getBindGroupLayout(0),
+        layout: qkLayout,
         entries: [
           { binding: 0, resource: { buffer: qkParams } },
           { binding: 1, resource: { buffer: inputs[0] } },
@@ -1882,7 +1888,7 @@ export class Session {
     // （値はどちらもビット同一 — src/kernels/attention.ts）。
     const statsRegCache = attentionStatsRegCache(cols);
     const statsKey = attentionStatsKey(compute, scoreStorage, statsRegCache);
-    const statsPipeline = await this.#state.cache.get(
+    const { pipeline: statsPipeline, layout: statsLayout } = await this.#state.cache.get(
       statsKey,
       attentionStatsWgsl(compute, scoreStorage, statsRegCache),
     );
@@ -1891,7 +1897,7 @@ export class Session {
       PARAMS_UNIFORM_USAGE,
     );
     const statsBindGroup = device.createBindGroup({
-      layout: statsPipeline.getBindGroupLayout(0),
+      layout: statsLayout,
       entries: [
         { binding: 0, resource: { buffer: statsParams } },
         { binding: 1, resource: { buffer: scores } },
@@ -1919,7 +1925,7 @@ export class Session {
     } else {
       const pvV4 = gemmUsesVec4(cols, depth);
       const pvKey = attentionPvKey(pvV4, compute, scoreStorage);
-      const pvPipeline = await this.#state.cache.get(
+      const { pipeline: pvPipeline, layout: pvLayout } = await this.#state.cache.get(
         pvKey,
         attentionPvWgsl(pvV4, compute, scoreStorage),
       );
@@ -1928,7 +1934,7 @@ export class Session {
         PARAMS_UNIFORM_USAGE,
       );
       const pvBindGroup = device.createBindGroup({
-        layout: pvPipeline.getBindGroupLayout(0),
+        layout: pvLayout,
         entries: [
           { binding: 0, resource: { buffer: pvParams } },
           { binding: 1, resource: { buffer: scores } },
@@ -2002,7 +2008,10 @@ export class Session {
     arena.retain(ks, 0);
 
     // (a)(b) 活性の per-token 量子化（1 行 = 1 workgroup・行方向 grid-stride）
-    const quantizePipeline = await this.#state.cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
+    const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
+      QUANTIZE_ROWS_KEY,
+      QUANTIZE_ROWS_WGSL,
+    );
     const quantize = (
       source: GPUBuffer,
       payload: GPUBuffer,
@@ -2014,7 +2023,7 @@ export class Session {
         PARAMS_UNIFORM_USAGE,
       );
       const bindGroup = device.createBindGroup({
-        layout: quantizePipeline.getBindGroupLayout(0),
+        layout: quantizeLayout,
         entries: [
           { binding: 0, resource: { buffer: params } },
           { binding: 1, resource: { buffer: source } },
@@ -2037,7 +2046,7 @@ export class Session {
     const dp4a = this.#state.i8a8Dot === "dp4a";
     const geometry = defaultI8a8Geometry("attention_qk");
     const key = attentionQkI8a8Key(v4, dp4a, scoreStorage, geometry);
-    const pipeline = await this.#state.cache.get(
+    const { pipeline, layout } = await this.#state.cache.get(
       key,
       attentionQkI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
     );
@@ -2046,7 +2055,7 @@ export class Session {
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: qq } },
@@ -2127,7 +2136,10 @@ export class Session {
     // D == N のときだけ一致する。実測形は D != N なので露見するが、単体テストが本来の検出器）。
     const stridedSpec = { dtype: "f32" } as const;
     const permuteKey = stridedKey(stridedSpec);
-    const permutePipeline = await this.#state.cache.get(permuteKey, stridedWgsl(stridedSpec));
+    const { pipeline: permutePipeline, layout: permuteLayout } = await this.#state.cache.get(
+      permuteKey,
+      stridedWgsl(stridedSpec),
+    );
     const permuteParams = this.#writeParams(
       stridedParams(
         [batch, depth, cols],
@@ -2137,7 +2149,7 @@ export class Session {
       PARAMS_STORAGE_USAGE,
     );
     const permuteBindGroup = device.createBindGroup({
-      layout: permutePipeline.getBindGroupLayout(0),
+      layout: permuteLayout,
       entries: [
         { binding: 0, resource: { buffer: permuteParams } },
         { binding: 1, resource: { buffer: inputs[2] } },
@@ -2151,13 +2163,16 @@ export class Session {
     ], permuteKey);
 
     // (b) Vᵀ の量子化（行 = (b,h,d)・行長 N — per-column scale と N 連続パックが同時に出る）
-    const quantizePipeline = await this.#state.cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
+    const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
+      QUANTIZE_ROWS_KEY,
+      QUANTIZE_ROWS_WGSL,
+    );
     const quantizeParams = this.#writeParams(
       quantizeRowsParams(batch * depth, cols),
       PARAMS_UNIFORM_USAGE,
     );
     const quantizeBindGroup = device.createBindGroup({
-      layout: quantizePipeline.getBindGroupLayout(0),
+      layout: quantizeLayout,
       entries: [
         { binding: 0, resource: { buffer: quantizeParams } },
         { binding: 1, resource: { buffer: vt } },
@@ -2176,7 +2191,7 @@ export class Session {
     const dp4a = this.#state.i8a8Dot === "dp4a";
     const geometry = defaultI8a8Geometry("attention_pv");
     const key = attentionPvI8a8Key(v4, dp4a, scoreStorage, geometry);
-    const pipeline = await this.#state.cache.get(
+    const { pipeline, layout } = await this.#state.cache.get(
       key,
       attentionPvI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
     );
@@ -2185,7 +2200,7 @@ export class Session {
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: scores } },
@@ -2221,13 +2236,13 @@ export class Session {
     const count = numel(step.outputShape);
     const weightStorage = this.#weightStorage(step);
     const key = embeddingKey(weightStorage);
-    const pipeline = await this.#state.cache.get(key, embeddingWgsl(weightStorage));
+    const { pipeline, layout } = await this.#state.cache.get(key, embeddingWgsl(weightStorage));
     const params = this.#writeParams(
       embeddingParams(count, weight[1], weight[0]),
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -2261,13 +2276,16 @@ export class Session {
       out: "masked_fill の出力",
     });
     const value = maskedFillValue(step.node.attrs, `nodes (${step.node.op})`);
-    const pipeline = await this.#state.cache.get(MASKED_FILL_KEY, MASKED_FILL_WGSL);
+    const { pipeline, layout } = await this.#state.cache.get(
+      MASKED_FILL_KEY,
+      MASKED_FILL_WGSL,
+    );
     const params = this.#writeParams(
       maskedFillParams(outShape, maskStrides, value),
       PARAMS_STORAGE_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: inputs[0] } },
@@ -2297,7 +2315,7 @@ export class Session {
     );
     const weightStorage = this.#weightStorage(step);
     const key = conv1dKey(weightStorage);
-    const pipeline = await this.#state.cache.get(key, conv1dWgsl(weightStorage));
+    const { pipeline, layout } = await this.#state.cache.get(key, conv1dWgsl(weightStorage));
     const params = this.#writeParams(
       conv1dParams({
         batch: outShape[0],
@@ -2314,7 +2332,7 @@ export class Session {
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
@@ -2372,10 +2390,10 @@ export class Session {
       return;
     }
     const key = conv2dKey(weightStorage);
-    const pipeline = await this.#state.cache.get(key, conv2dWgsl(weightStorage));
+    const { pipeline, layout } = await this.#state.cache.get(key, conv2dWgsl(weightStorage));
     const params = this.#writeParams(conv2dParams(dims), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
@@ -2418,10 +2436,13 @@ export class Session {
     // 生成・キーと同じ解決点から幾何を引く（dispatch のタイル辺が WGSL の辺と構造的に一致）。
     const geometry = gemmMTileGeometry(mTile);
     const key = conv2dIgemmKey(weightStorage, v4, mTile);
-    const pipeline = await this.#state.cache.get(key, conv2dIgemmWgsl(weightStorage, v4, mTile));
+    const { pipeline, layout } = await this.#state.cache.get(
+      key,
+      conv2dIgemmWgsl(weightStorage, v4, mTile),
+    );
     const params = this.#writeParams(conv2dIgemmParams(dims), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
@@ -2454,7 +2475,10 @@ export class Session {
     const { stride, padding } = convTranspose1dAttrs(step.node.attrs, `nodes (${step.node.op})`);
     const weightStorage = this.#weightStorage(step);
     const key = convTranspose1dKey(weightStorage);
-    const pipeline = await this.#state.cache.get(key, convTranspose1dWgsl(weightStorage));
+    const { pipeline, layout } = await this.#state.cache.get(
+      key,
+      convTranspose1dWgsl(weightStorage),
+    );
     const params = this.#writeParams(
       convTranspose1dParams({
         batch: outShape[0],
@@ -2469,7 +2493,7 @@ export class Session {
       PARAMS_UNIFORM_USAGE,
     );
     const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),

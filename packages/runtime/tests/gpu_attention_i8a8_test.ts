@@ -227,7 +227,10 @@ const runAttentionQkI8a8 = async (
   const arena = new RunArena(gpu.device, () => scheduler.flush());
   const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
   try {
-    const quantizePipeline = await cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
+    const { pipeline: quantizePipeline, layout: quantizeLayout } = await cache.get(
+      QUANTIZE_ROWS_KEY,
+      QUANTIZE_ROWS_WGSL,
+    );
     const quantize = (
       source: Float32Array<ArrayBuffer>,
       rows: number,
@@ -241,7 +244,7 @@ const runAttentionQkI8a8 = async (
       const scales = arena.allocStorage(Math.max(4, rows * 4));
       arena.retain(scales, 0, { pinned: true });
       const bindGroup = gpu.device.createBindGroup({
-        layout: quantizePipeline.getBindGroupLayout(0),
+        layout: quantizeLayout,
         entries: [
           { binding: 0, resource: { buffer: params } },
           { binding: 1, resource: { buffer: src } },
@@ -262,13 +265,13 @@ const runAttentionQkI8a8 = async (
     const v4 = attentionQkI8a8UsesVec4(n);
     const dp4a = dot === "dp4a";
     const pipelineKey = attentionQkI8a8Key(v4, dp4a);
-    const pipeline = await cache.get(pipelineKey, attentionQkI8a8Wgsl(v4, dp4a));
+    const { pipeline, layout } = await cache.get(pipelineKey, attentionQkI8a8Wgsl(v4, dp4a));
     const params = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(params, 0, attentionQkI8a8Params(m, n, d, prepared.scale));
     const scores = arena.allocStorage(Math.max(4, batch * m * n * 4));
     arena.retain(scores, 0, { pinned: true });
     const bindGroup = gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: query.payload } },

@@ -398,12 +398,12 @@ Deno.test({
       const scores = arena.allocStorage(m * n * 2);
       arena.retain(scores, 0, { pinned: true });
       const key = attentionQkKey(true, "f32", "f16");
-      const pipeline = await cache.get(key, attentionQkWgsl(true, "f32", "f16"));
+      const { pipeline, layout } = await cache.get(key, attentionQkWgsl(true, "f32", "f16"));
       const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
       scheduler.dispatch(
         pipeline,
         gpu.device.createBindGroup({
-          layout: pipeline.getBindGroupLayout(0),
+          layout,
           entries: [
             { binding: 0, resource: { buffer: params } },
             { binding: 1, resource: { buffer: host(q) } },
@@ -720,11 +720,11 @@ const observeQpS16 = async (
     gpu.device.queue.writeBuffer(params, 0, attentionPvI8a8Params(m, n, n));
     const v4 = attentionPvI8a8UsesVec4(n);
     const key = attentionPvI8a8Key(v4, true, "f16");
-    const pipeline = await cache.get(key, attentionPvI8a8Wgsl(v4, true, "f16"));
+    const { pipeline, layout } = await cache.get(key, attentionPvI8a8Wgsl(v4, true, "f16"));
     scheduler.dispatch(
       pipeline,
       gpu.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
+        layout,
         entries: [
           { binding: 0, resource: { buffer: params } },
           { binding: 1, resource: { buffer: host(packed) } },

@@ -135,10 +135,10 @@ Deno.test({
       openModel(graphModelBuffer(singleOpGraph("relu", [[8, 8]], [8, 8]))),
     );
     try {
-      const layout = (await new PipelineCache(gpu.device).get(
+      const { layout } = await new PipelineCache(gpu.device).get(
         "run-scope-lock-probe",
         wgslWithWorkgroupSize(64),
-      )).getBindGroupLayout(0);
+      );
       const x = fill([8, 8], (i) => (i % 13) - 6);
 
       // MUST: faulty 側を**先に**開かせる。pop はスタック先頭を無条件に取るので、誤帰属は

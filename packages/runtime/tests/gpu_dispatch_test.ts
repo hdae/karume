@@ -48,9 +48,12 @@ Deno.test({
       arena.retain(dst, 0, { pinned: true });
       assertEquals(arena.isReadable(dst), true);
 
-      const pipeline = await cache.get("test:double_plus_one:f32", DOUBLE_PLUS_ONE_WGSL);
+      const { pipeline, layout } = await cache.get(
+        "test:double_plus_one:f32",
+        DOUBLE_PLUS_ONE_WGSL,
+      );
       const bindGroup = gpu.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
+        layout,
         entries: [
           { binding: 0, resource: { buffer: src } },
           { binding: 1, resource: { buffer: dst } },
@@ -103,10 +106,13 @@ Deno.test({
       );
       gpu.device.queue.writeBuffer(source, 0, Float32Array.from({ length: count }, () => 1));
 
-      const pipeline = await cache.get("test:double_plus_one:f32", DOUBLE_PLUS_ONE_WGSL);
+      const { pipeline, layout } = await cache.get(
+        "test:double_plus_one:f32",
+        DOUBLE_PLUS_ONE_WGSL,
+      );
       const dispatchInto = (src: GPUBuffer, dst: GPUBuffer): void => {
         const bindGroup = gpu.device.createBindGroup({
-          layout: pipeline.getBindGroupLayout(0),
+          layout,
           entries: [
             { binding: 0, resource: { buffer: src } },
             { binding: 1, resource: { buffer: dst } },

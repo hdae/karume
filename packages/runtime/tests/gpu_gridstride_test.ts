@@ -195,7 +195,7 @@ const runDegenerate = async (gpu: GpuContext, testCase: DegenerateCase): Promise
   const cache = new PipelineCache(gpu.device);
   const arena = new RunArena(gpu.device, () => scheduler.flush());
   try {
-    const pipeline = await cache.get(testCase.key, testCase.wgsl);
+    const { pipeline, layout } = await cache.get(testCase.key, testCase.wgsl);
     const entries: GPUBindGroupEntry[] = [];
     const params = arena.allocHostWritten(
       testCase.params.byteLength,
@@ -225,7 +225,7 @@ const runDegenerate = async (gpu: GpuContext, testCase: DegenerateCase): Promise
     }
 
     const bindGroup = gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries,
     });
     scheduler.dispatch(pipeline, bindGroup, [testCase.groups, 1, 1], testCase.key);

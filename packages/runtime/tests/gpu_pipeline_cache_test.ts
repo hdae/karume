@@ -30,7 +30,7 @@ const createFakeGpu = (scopeError: GPUError | null = null): FakeGpu => {
     },
     createComputePipeline: () => {
       calls.push("createComputePipeline");
-      return { id: modules.length };
+      return { id: modules.length, getBindGroupLayout: () => ({ id: modules.length }) };
     },
   };
   const fake: FakeGpu = { device: device as unknown as GPUDevice, calls, modules, scopeError };

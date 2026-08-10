@@ -167,7 +167,7 @@ const runQuantizeRows = async (
   const cache = new PipelineCache(gpu.device);
   const arena = new RunArena(gpu.device, () => scheduler.flush());
   try {
-    const pipeline = await cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
+    const { pipeline, layout } = await cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
     const params = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(params, 0, quantizeRowsParams(rows, dim));
     const src = arena.allocHostWritten(Math.max(4, x.byteLength), STORAGE_IN);
@@ -177,7 +177,7 @@ const runQuantizeRows = async (
     const xs = arena.allocStorage(Math.max(4, rows * 4));
     arena.retain(xs, 0, { pinned: true });
     const bindGroup = gpu.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout,
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: src } },

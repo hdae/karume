@@ -305,7 +305,7 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      const pipeline = await new PipelineCache(gpu.device).get(
+      const { layout } = await new PipelineCache(gpu.device).get(
         "scope-lock-probe",
         `
 @group(0) @binding(0) var<storage, read_write> data: array<f32>;
@@ -315,7 +315,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `,
       );
-      const layout = pipeline.getBindGroupLayout(0);
 
       /**
        * #runOnce と同型の区間（push → await を跨ぐエンコード → pop）。`ticks` の差で

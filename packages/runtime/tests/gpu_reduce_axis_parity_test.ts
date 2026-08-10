@@ -144,7 +144,7 @@ const runBoth = async (
       return buffer;
     };
     const bind = (
-      pipeline: GPUComputePipeline,
+      layout: GPUBindGroupLayout,
       params: Uint32Array<ArrayBuffer>,
       usage: number,
       input: GPUBuffer,
@@ -153,7 +153,7 @@ const runBoth = async (
       const paramsBuffer = arena.allocHostWritten(params.byteLength, usage);
       gpu.device.queue.writeBuffer(paramsBuffer, 0, params);
       return gpu.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
+        layout,
         entries: [
           { binding: 0, resource: { buffer: paramsBuffer } },
           { binding: 1, resource: { buffer: input } },
@@ -167,9 +167,12 @@ const runBoth = async (
     const permutedShape = permuteDims.map((d) => shape[d]);
     const permuted = arena.allocStorage(Math.max(4, numel(shape) * 4));
     arena.retain(permuted, 0, { pinned: true });
-    const stridedPipeline = await cache.get(stridedKey({ dtype }), stridedWgsl({ dtype }));
+    const { pipeline: stridedPipeline, layout: stridedLayout } = await cache.get(
+      stridedKey({ dtype }),
+      stridedWgsl({ dtype }),
+    );
     const stridedGroup = gpu.device.createBindGroup({
-      layout: stridedPipeline.getBindGroupLayout(0),
+      layout: stridedLayout,
       entries: [
         {
           binding: 0,
@@ -197,23 +200,29 @@ const runBoth = async (
     ], stridedKey({ dtype }));
 
     const rowKey = reduceKey({ op, dtype });
-    const rowPipeline = await cache.get(rowKey, reduceWgsl({ op, dtype }));
+    const { pipeline: rowPipeline, layout: rowLayout } = await cache.get(
+      rowKey,
+      reduceWgsl({ op, dtype }),
+    );
     const rowOut = allocOut();
     scheduler.dispatch(
       rowPipeline,
-      bind(rowPipeline, reduceParams(outCount, axisLen), UNIFORM_IN, permuted, rowOut),
+      bind(rowLayout, reduceParams(outCount, axisLen), UNIFORM_IN, permuted, rowOut),
       [gridStrideWorkgroups(outCount, 1, limit), 1, 1],
       rowKey,
     );
 
     // ② 軸 reduce 変種（permute 無し・1 スレッド 1 出力）
     const axisKey = axisReduceKey({ op, dtype });
-    const axisPipeline = await cache.get(axisKey, axisReduceWgsl({ op, dtype }));
+    const { pipeline: axisPipeline, layout: axisLayout } = await cache.get(
+      axisKey,
+      axisReduceWgsl({ op, dtype }),
+    );
     const axisOut = allocOut();
     scheduler.dispatch(
       axisPipeline,
       bind(
-        axisPipeline,
+        axisLayout,
         axisReduceParams(outCount, axisLen, inner),
         UNIFORM_IN,
         xBuffer,
