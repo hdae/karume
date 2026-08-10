@@ -1,4 +1,4 @@
-// karume bmm (a[b,m,k] · b[b,k,n], f32, レジスタ 64x64 タイル / 1 スレッド 8x4 / wg 16x8)
+// karume bmm (a[b,m,k] · b[b,k,n], f32, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16)
 struct Dims {
   m: u32,
   n: u32,
@@ -9,12 +9,12 @@ struct Dims {
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read_write> c: array<f32>;
 
-// 共有 A タイル（64 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 16・列方向を vec4 に束ねた形）
-var<workgroup> sa: array<f32, 1024>;
-var<workgroup> sb: array<vec4<f32>, 256>;
+// 共有 A タイル（128 行 × K 16・スカラ格納）と
+// 共有 B タイル（K 16 × 列 quad 32・列方向を vec4 に束ねた形）
+var<workgroup> sa: array<f32, 2048>;
+var<workgroup> sb: array<vec4<f32>, 512>;
 
-@compute @workgroup_size(16, 8)
+@compute @workgroup_size(16, 16)
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
@@ -25,31 +25,39 @@ fn main(
   let abase = wid.z * dims.m * dims.k;
   let bbase = wid.z * dims.k * dims.n;
   let cbase = wid.z * dims.m * dims.n;
-  // A タイルの担当（64 行 × 4 quad を 128 スレッドで 2 巡）
+  // A タイルの担当（128 行 × 4 quad を 256 スレッドで 2 巡）
   let ar = tid / 4u;
   let aq = tid % 4u;
-  let arow0 = wid.y * 64u + ar;
+  let arow0 = wid.y * 128u + ar;
   let arow_base0 = abase + arow0 * dims.k;
   let sa_base0 = ar * 16u + aq * 4u;
-  let arow1 = arow0 + 32u;
-  let arow_base1 = arow_base0 + 32u * dims.k;
-  let sa_base1 = sa_base0 + 512u;
-  // B タイルの担当（K 16 行 × 列 quad 16 を 128 スレッドで 2 巡）
-  let bk0 = tid / 16u;
-  let bcq = tid % 16u;
-  let bcol = wid.x * 64u + bcq * 4u;
+  let arow1 = arow0 + 64u;
+  let arow_base1 = arow_base0 + 64u * dims.k;
+  let sa_base1 = sa_base0 + 1024u;
+  // B タイルの担当（K 16 行 × 列 quad 32 を 256 スレッドで 2 巡）
+  let bk0 = tid / 32u;
+  let bcq = tid % 32u;
+  let bcol = wid.x * 128u + bcq * 4u;
   let bk1 = bk0 + 8u;
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (dims.k + 15u) / 16u;
   var acc0_0 = vec4<f32>(0.0);
+  var acc0_1 = vec4<f32>(0.0);
   var acc1_0 = vec4<f32>(0.0);
+  var acc1_1 = vec4<f32>(0.0);
   var acc2_0 = vec4<f32>(0.0);
+  var acc2_1 = vec4<f32>(0.0);
   var acc3_0 = vec4<f32>(0.0);
+  var acc3_1 = vec4<f32>(0.0);
   var acc4_0 = vec4<f32>(0.0);
+  var acc4_1 = vec4<f32>(0.0);
   var acc5_0 = vec4<f32>(0.0);
+  var acc5_1 = vec4<f32>(0.0);
   var acc6_0 = vec4<f32>(0.0);
+  var acc6_1 = vec4<f32>(0.0);
   var acc7_0 = vec4<f32>(0.0);
+  var acc7_1 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
     // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
     let ak0 = t * 16u + aq * 4u;
@@ -108,7 +116,7 @@ fn main(
         bv4_0.w = b[brow_base + bcol + 3u];
       }
     }
-    sb[bk0 * 16u + bcq] = bv4_0;
+    sb[bk0 * 32u + bcq] = bv4_0;
     let brow1 = t * 16u + bk1;
     var bv4_1 = vec4<f32>(0.0);
     if (brow1 < dims.k) {
@@ -126,26 +134,35 @@ fn main(
         bv4_1.w = b[brow_base + bcol + 3u];
       }
     }
-    sb[bk1 * 16u + bcq] = bv4_1;
+    sb[bk1 * 32u + bcq] = bv4_1;
     workgroupBarrier();
-    // 共有ロード 9 回（B の vec4 1 + A のスカラ 8）で 32 MAC。
+    // 共有ロード 10 回（B の vec4 2 + A のスカラ 8）で 64 MAC。
     // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
     // 完全に一致する。
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
-      let bv0 = sb[kk * 16u + lid.x];
+      let bv0 = sb[kk * 32u + lid.x * 2u];
+      let bv1 = sb[kk * 32u + lid.x * 2u + 1u];
       acc0_0 = acc0_0 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv0;
+      acc0_1 = acc0_1 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv1;
       acc1_0 = acc1_0 + sa[(lid.y * 8u + 1u) * 16u + kk] * bv0;
+      acc1_1 = acc1_1 + sa[(lid.y * 8u + 1u) * 16u + kk] * bv1;
       acc2_0 = acc2_0 + sa[(lid.y * 8u + 2u) * 16u + kk] * bv0;
+      acc2_1 = acc2_1 + sa[(lid.y * 8u + 2u) * 16u + kk] * bv1;
       acc3_0 = acc3_0 + sa[(lid.y * 8u + 3u) * 16u + kk] * bv0;
+      acc3_1 = acc3_1 + sa[(lid.y * 8u + 3u) * 16u + kk] * bv1;
       acc4_0 = acc4_0 + sa[(lid.y * 8u + 4u) * 16u + kk] * bv0;
+      acc4_1 = acc4_1 + sa[(lid.y * 8u + 4u) * 16u + kk] * bv1;
       acc5_0 = acc5_0 + sa[(lid.y * 8u + 5u) * 16u + kk] * bv0;
+      acc5_1 = acc5_1 + sa[(lid.y * 8u + 5u) * 16u + kk] * bv1;
       acc6_0 = acc6_0 + sa[(lid.y * 8u + 6u) * 16u + kk] * bv0;
+      acc6_1 = acc6_1 + sa[(lid.y * 8u + 6u) * 16u + kk] * bv1;
       acc7_0 = acc7_0 + sa[(lid.y * 8u + 7u) * 16u + kk] * bv0;
+      acc7_1 = acc7_1 + sa[(lid.y * 8u + 7u) * 16u + kk] * bv1;
     }
     workgroupBarrier();
   }
-  let ocol = wid.x * 64u + lid.x * 4u;
-  let orow0 = wid.y * 64u + lid.y * 8u;
+  let ocol = wid.x * 128u + lid.x * 8u;
+  let orow0 = wid.y * 128u + lid.y * 8u;
   let orow1 = orow0 + 1u;
   let orow2 = orow0 + 2u;
   let orow3 = orow0 + 3u;
@@ -167,6 +184,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       c[obase + ocol + 3u] = acc0_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      c[obase + ocol + 4u] = acc0_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      c[obase + ocol + 5u] = acc0_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      c[obase + ocol + 6u] = acc0_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      c[obase + ocol + 7u] = acc0_1.w;
+    }
   }
   if (orow1 < dims.m) {
     let obase = cbase + orow1 * dims.n;
@@ -181,6 +210,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       c[obase + ocol + 3u] = acc1_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      c[obase + ocol + 4u] = acc1_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      c[obase + ocol + 5u] = acc1_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      c[obase + ocol + 6u] = acc1_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      c[obase + ocol + 7u] = acc1_1.w;
     }
   }
   if (orow2 < dims.m) {
@@ -197,6 +238,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       c[obase + ocol + 3u] = acc2_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      c[obase + ocol + 4u] = acc2_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      c[obase + ocol + 5u] = acc2_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      c[obase + ocol + 6u] = acc2_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      c[obase + ocol + 7u] = acc2_1.w;
+    }
   }
   if (orow3 < dims.m) {
     let obase = cbase + orow3 * dims.n;
@@ -211,6 +264,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       c[obase + ocol + 3u] = acc3_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      c[obase + ocol + 4u] = acc3_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      c[obase + ocol + 5u] = acc3_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      c[obase + ocol + 6u] = acc3_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      c[obase + ocol + 7u] = acc3_1.w;
     }
   }
   if (orow4 < dims.m) {
@@ -227,6 +292,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       c[obase + ocol + 3u] = acc4_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      c[obase + ocol + 4u] = acc4_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      c[obase + ocol + 5u] = acc4_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      c[obase + ocol + 6u] = acc4_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      c[obase + ocol + 7u] = acc4_1.w;
+    }
   }
   if (orow5 < dims.m) {
     let obase = cbase + orow5 * dims.n;
@@ -241,6 +318,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       c[obase + ocol + 3u] = acc5_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      c[obase + ocol + 4u] = acc5_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      c[obase + ocol + 5u] = acc5_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      c[obase + ocol + 6u] = acc5_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      c[obase + ocol + 7u] = acc5_1.w;
     }
   }
   if (orow6 < dims.m) {
@@ -257,6 +346,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       c[obase + ocol + 3u] = acc6_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      c[obase + ocol + 4u] = acc6_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      c[obase + ocol + 5u] = acc6_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      c[obase + ocol + 6u] = acc6_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      c[obase + ocol + 7u] = acc6_1.w;
+    }
   }
   if (orow7 < dims.m) {
     let obase = cbase + orow7 * dims.n;
@@ -271,6 +372,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       c[obase + ocol + 3u] = acc7_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      c[obase + ocol + 4u] = acc7_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      c[obase + ocol + 5u] = acc7_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      c[obase + ocol + 6u] = acc7_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      c[obase + ocol + 7u] = acc7_1.w;
     }
   }
 }

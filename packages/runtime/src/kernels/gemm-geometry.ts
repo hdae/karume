@@ -23,20 +23,23 @@
  * ## 既定の出どころ
  *
  * {@link defaultGemmGeometry} が唯一の選択点。RTX 3080 Ti の E2E 実測（ABBA 回文・冷却
- * 規約つき）で `r8×4 wg16×8`（128 スレッド）が最良で、f16-1024 が ×1.287・w8a8-s16-1024 が
- * ×1.103（いずれも PNG / WAV の sha256 門はビット同一）。旧 `r4×4 wg16×16`（256 スレッド）
- * から効いたのは **1 スレッドあたりのレジスタブロック（regM·regN = 16 → 32）**で、
- * i8a8 側の掃引が示した「レジスタブロックが第一・threads ≤ 128 が第二」と同じ順序。
+ * 規約つき — docs/research/2026-08-10-f32-geometry-probe.md）で、64×64 掃引の最良
+ * `r8×4 wg16×8` に対しタイル軸 128 の `M128N128 r8×8 wg16×16`（256 スレッド・共有 16KB）が
+ * さらに f16-1024 ×1.17（w8a8-s16-1024 は中立）。効いた順は「レジスタブロック第一
+ * （regM·regN = 32 → 64）・タイル辺第二」で i8a8 側の掃引と同じだが、最良のタイル形は
+ * i8a8（M128N64）と**一致しない** — 幾何の答えは経路ごとの実測でしか出ない。
+ * いずれの幾何でも PNG / WAV の sha256 門はビット同一（実測命題 — ADR 0022 追記）。
  */
 
 import { CodegenError } from "../codegen/errors.ts";
 
 /**
- * 既定の出力タイル辺（{@link defaultGemmGeometry} の tileM = tileN）。
+ * conv2d の m タイルヒューリスティック（`conv2dIgemmMTile`）の基準行数。既定幾何の
+ * tileM（128）とは別物 — conv2d は出力チャネル数が小さいので m タイルを 64 / 32 に抑える。
  *
  * MUST: **実タイル辺の正本は幾何**（{@link gemmTileM} / {@link gemmTileN}）。この定数は
- * 既定値とヒューリスティック（conv2d の m タイル選択）の語彙で、生成・dispatch が辺として
- * 直接読むと幾何と食い違いうる値が 2 つになる。
+ * ヒューリスティックの語彙で、生成・dispatch が辺として直接読むと幾何と食い違いうる値が
+ * 2 つになる。
  */
 export const GEMM_TILE = 64;
 
@@ -180,9 +183,10 @@ export const gemmGeometryNote = (geometry: GemmGeometry): string =>
  * （必要になったら i8a8 側（{@link "./i8a8-geometry.ts"} `defaultI8a8Geometry`）と同じ形に
  * 上げられるので、今は要らない機械を足さない）。
  *
- * `r8×4 wg16×8` の出どころはモジュール冒頭の実測。
+ * `M128N128 r8×8 wg16×16` の出どころはモジュール冒頭の実測。
+ * MUST: 既定の変更は PNG / WAV 門の再実測とセット（ADR 0022 追記 — ビット同一は実測命題）。
  */
-export const defaultGemmGeometry = (): GemmGeometry => ({ regM: 8, regN: 4, wgX: 16, wgY: 8 });
+export const defaultGemmGeometry = (): GemmGeometry => ({ regM: 8, regN: 8, wgX: 16, wgY: 16 });
 
 /**
  * f32 accumulator の初期化。**配列 1 本ではなく `acc{行}_{列 quad}` の名前付き変数**にするのは、

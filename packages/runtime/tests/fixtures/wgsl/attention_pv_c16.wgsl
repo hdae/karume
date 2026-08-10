@@ -1,4 +1,4 @@
-// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv は非実体化, f32, f16 タイル計算・S は f16, レジスタ 64x64 タイル / 1 スレッド 8x4 / wg 16x8)
+// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv は非実体化, f32, f16 タイル計算・S は f16, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16)
 enable f16;
 struct Dims {
   m: u32,
@@ -11,13 +11,13 @@ struct Dims {
 @group(0) @binding(3) var<storage, read> stats: array<f32>;
 @group(0) @binding(4) var<storage, read_write> o: array<f32>;
 
-// 共有 A タイル（64 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 16・列方向を vec4 に束ねた形）。f16 変種は共有バイトが半分
-// （8192 B → 4096 B / WG）— 期待利得はこの 1 機序に全て乗る
-var<workgroup> sa: array<f16, 1024>;
-var<workgroup> sb: array<vec4<f16>, 256>;
+// 共有 A タイル（128 行 × K 16・スカラ格納）と
+// 共有 B タイル（K 16 × 列 quad 32・列方向を vec4 に束ねた形）。f16 変種は共有バイトが半分
+// （16384 B → 8192 B / WG）— 期待利得はこの 1 機序に全て乗る
+var<workgroup> sa: array<f16, 2048>;
+var<workgroup> sb: array<vec4<f16>, 512>;
 
-@compute @workgroup_size(16, 8)
+@compute @workgroup_size(16, 16)
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
@@ -29,15 +29,15 @@ fn main(
   let bbase = wid.z * dims.k * dims.n;
   let cbase = wid.z * dims.m * dims.n;
   let rbase = wid.z * dims.m;
-  // A タイルの担当（64 行 × 4 quad を 128 スレッドで 2 巡）
+  // A タイルの担当（128 行 × 4 quad を 256 スレッドで 2 巡）
   let ar = tid / 4u;
   let aq = tid % 4u;
-  let arow0 = wid.y * 64u + ar;
+  let arow0 = wid.y * 128u + ar;
   let arow_base0 = abase + arow0 * dims.k;
   let sa_base0 = ar * 16u + aq * 4u;
-  let arow1 = arow0 + 32u;
-  let arow_base1 = arow_base0 + 32u * dims.k;
-  let sa_base1 = sa_base0 + 512u;
+  let arow1 = arow0 + 64u;
+  let arow_base1 = arow_base0 + 64u * dims.k;
+  let sa_base1 = sa_base0 + 1024u;
   // 端タイルでは arow >= m がありうるので添字を 0 へ倒す（読んだ値は arow < m の枝でしか
   // 使われない）。範囲外の stats を読むこと自体は WGSL の境界付きアクセスで安全
   let stat_at0 = select(0u, (rbase + arow0) * 2u, arow0 < dims.m);
@@ -46,22 +46,30 @@ fn main(
   let stat_at1 = select(0u, (rbase + arow1) * 2u, arow1 < dims.m);
   let row_max1 = stats[stat_at1];
   let row_inv1 = stats[stat_at1 + 1u];
-  // B タイルの担当（K 16 行 × 列 quad 16 を 128 スレッドで 2 巡）
-  let bk0 = tid / 16u;
-  let bcq = tid % 16u;
-  let bcol = wid.x * 64u + bcq * 4u;
+  // B タイルの担当（K 16 行 × 列 quad 32 を 256 スレッドで 2 巡）
+  let bk0 = tid / 32u;
+  let bcq = tid % 32u;
+  let bcol = wid.x * 128u + bcq * 4u;
   let bk1 = bk0 + 8u;
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (dims.k + 15u) / 16u;
   var acc0_0 = vec4<f32>(0.0);
+  var acc0_1 = vec4<f32>(0.0);
   var acc1_0 = vec4<f32>(0.0);
+  var acc1_1 = vec4<f32>(0.0);
   var acc2_0 = vec4<f32>(0.0);
+  var acc2_1 = vec4<f32>(0.0);
   var acc3_0 = vec4<f32>(0.0);
+  var acc3_1 = vec4<f32>(0.0);
   var acc4_0 = vec4<f32>(0.0);
+  var acc4_1 = vec4<f32>(0.0);
   var acc5_0 = vec4<f32>(0.0);
+  var acc5_1 = vec4<f32>(0.0);
   var acc6_0 = vec4<f32>(0.0);
+  var acc6_1 = vec4<f32>(0.0);
   var acc7_0 = vec4<f32>(0.0);
+  var acc7_1 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
     // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
     let ak0 = t * 16u + aq * 4u;
@@ -120,7 +128,7 @@ fn main(
         bv4_0.w = v[brow_base + bcol + 3u];
       }
     }
-    sb[bk0 * 16u + bcq] = vec4<f16>(bv4_0);
+    sb[bk0 * 32u + bcq] = vec4<f16>(bv4_0);
     let brow1 = t * 16u + bk1;
     var bv4_1 = vec4<f32>(0.0);
     if (brow1 < dims.k) {
@@ -138,29 +146,38 @@ fn main(
         bv4_1.w = v[brow_base + bcol + 3u];
       }
     }
-    sb[bk1 * 16u + bcq] = vec4<f16>(bv4_1);
+    sb[bk1 * 32u + bcq] = vec4<f16>(bv4_1);
     workgroupBarrier();
-    // 共有ロード 9 回（B の vec4 1 + A のスカラ 8）で 32 MAC。
+    // 共有ロード 10 回（B の vec4 2 + A のスカラ 8）で 64 MAC。
     // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
     // 完全に一致する。
-    // MUST: f32 への拡幅は**レジスタロード時に 1 回**（9 回 / 32 MAC）。MAC ごとに
-    // f32(av * bv) と書くと変換が 32 回に増え、しかも積が f16 精度に落ちる（ADR 0028 の丸め列 2）。
+    // MUST: f32 への拡幅は**レジスタロード時に 1 回**（10 回 / 64 MAC）。MAC ごとに
+    // f32(av * bv) と書くと変換が 64 回に増え、しかも積が f16 精度に落ちる（ADR 0028 の丸め列 2）。
     // f16 → f32 の拡幅は厳密なので、値は「入力を f16 に丸めた f32 変種」と 1 ビットも違わない。
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
-      let bv0 = vec4<f32>(sb[kk * 16u + lid.x]);
+      let bv0 = vec4<f32>(sb[kk * 32u + lid.x * 2u]);
+      let bv1 = vec4<f32>(sb[kk * 32u + lid.x * 2u + 1u]);
       acc0_0 = acc0_0 + f32(sa[(lid.y * 8u + 0u) * 16u + kk]) * bv0;
+      acc0_1 = acc0_1 + f32(sa[(lid.y * 8u + 0u) * 16u + kk]) * bv1;
       acc1_0 = acc1_0 + f32(sa[(lid.y * 8u + 1u) * 16u + kk]) * bv0;
+      acc1_1 = acc1_1 + f32(sa[(lid.y * 8u + 1u) * 16u + kk]) * bv1;
       acc2_0 = acc2_0 + f32(sa[(lid.y * 8u + 2u) * 16u + kk]) * bv0;
+      acc2_1 = acc2_1 + f32(sa[(lid.y * 8u + 2u) * 16u + kk]) * bv1;
       acc3_0 = acc3_0 + f32(sa[(lid.y * 8u + 3u) * 16u + kk]) * bv0;
+      acc3_1 = acc3_1 + f32(sa[(lid.y * 8u + 3u) * 16u + kk]) * bv1;
       acc4_0 = acc4_0 + f32(sa[(lid.y * 8u + 4u) * 16u + kk]) * bv0;
+      acc4_1 = acc4_1 + f32(sa[(lid.y * 8u + 4u) * 16u + kk]) * bv1;
       acc5_0 = acc5_0 + f32(sa[(lid.y * 8u + 5u) * 16u + kk]) * bv0;
+      acc5_1 = acc5_1 + f32(sa[(lid.y * 8u + 5u) * 16u + kk]) * bv1;
       acc6_0 = acc6_0 + f32(sa[(lid.y * 8u + 6u) * 16u + kk]) * bv0;
+      acc6_1 = acc6_1 + f32(sa[(lid.y * 8u + 6u) * 16u + kk]) * bv1;
       acc7_0 = acc7_0 + f32(sa[(lid.y * 8u + 7u) * 16u + kk]) * bv0;
+      acc7_1 = acc7_1 + f32(sa[(lid.y * 8u + 7u) * 16u + kk]) * bv1;
     }
     workgroupBarrier();
   }
-  let ocol = wid.x * 64u + lid.x * 4u;
-  let orow0 = wid.y * 64u + lid.y * 8u;
+  let ocol = wid.x * 128u + lid.x * 8u;
+  let orow0 = wid.y * 128u + lid.y * 8u;
   let orow1 = orow0 + 1u;
   let orow2 = orow0 + 2u;
   let orow3 = orow0 + 3u;
@@ -182,6 +199,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       o[obase + ocol + 3u] = acc0_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      o[obase + ocol + 4u] = acc0_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      o[obase + ocol + 5u] = acc0_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      o[obase + ocol + 6u] = acc0_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      o[obase + ocol + 7u] = acc0_1.w;
+    }
   }
   if (orow1 < dims.m) {
     let obase = cbase + orow1 * dims.n;
@@ -196,6 +225,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       o[obase + ocol + 3u] = acc1_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      o[obase + ocol + 4u] = acc1_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      o[obase + ocol + 5u] = acc1_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      o[obase + ocol + 6u] = acc1_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      o[obase + ocol + 7u] = acc1_1.w;
     }
   }
   if (orow2 < dims.m) {
@@ -212,6 +253,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       o[obase + ocol + 3u] = acc2_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      o[obase + ocol + 4u] = acc2_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      o[obase + ocol + 5u] = acc2_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      o[obase + ocol + 6u] = acc2_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      o[obase + ocol + 7u] = acc2_1.w;
+    }
   }
   if (orow3 < dims.m) {
     let obase = cbase + orow3 * dims.n;
@@ -226,6 +279,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       o[obase + ocol + 3u] = acc3_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      o[obase + ocol + 4u] = acc3_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      o[obase + ocol + 5u] = acc3_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      o[obase + ocol + 6u] = acc3_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      o[obase + ocol + 7u] = acc3_1.w;
     }
   }
   if (orow4 < dims.m) {
@@ -242,6 +307,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       o[obase + ocol + 3u] = acc4_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      o[obase + ocol + 4u] = acc4_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      o[obase + ocol + 5u] = acc4_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      o[obase + ocol + 6u] = acc4_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      o[obase + ocol + 7u] = acc4_1.w;
+    }
   }
   if (orow5 < dims.m) {
     let obase = cbase + orow5 * dims.n;
@@ -256,6 +333,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       o[obase + ocol + 3u] = acc5_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      o[obase + ocol + 4u] = acc5_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      o[obase + ocol + 5u] = acc5_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      o[obase + ocol + 6u] = acc5_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      o[obase + ocol + 7u] = acc5_1.w;
     }
   }
   if (orow6 < dims.m) {
@@ -272,6 +361,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       o[obase + ocol + 3u] = acc6_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      o[obase + ocol + 4u] = acc6_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      o[obase + ocol + 5u] = acc6_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      o[obase + ocol + 6u] = acc6_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      o[obase + ocol + 7u] = acc6_1.w;
+    }
   }
   if (orow7 < dims.m) {
     let obase = cbase + orow7 * dims.n;
@@ -286,6 +387,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       o[obase + ocol + 3u] = acc7_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      o[obase + ocol + 4u] = acc7_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      o[obase + ocol + 5u] = acc7_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      o[obase + ocol + 6u] = acc7_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      o[obase + ocol + 7u] = acc7_1.w;
     }
   }
 }

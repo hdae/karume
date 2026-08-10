@@ -556,7 +556,7 @@ Deno.test({
       const baseline = await runLinear(gpu, prepared, {});
       assertEquals(baseline.pipelineCount, 1, "既定はパイプライン 1 本（quantize_rows が出ない）");
       if (baseline.keys.length > 0) {
-        assertEquals(baseline.keys, ["linear:v2:f32:reg64x64r8x4w16:wi8"], "既定のキー");
+        assertEquals(baseline.keys, ["linear:v2:f32:reg128x128r8x8w16:wi8"], "既定のキー");
       }
       // 既定の値は w8（重みだけ量子化）なので、w8a8 の参照とは**一致しない**
       // （一致してしまうなら活性量子化が効いていない）

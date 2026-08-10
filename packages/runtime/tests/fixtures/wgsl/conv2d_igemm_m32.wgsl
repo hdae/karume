@@ -1,4 +1,4 @@
-// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin,Kh,Kw] + b[Cout], f32, implicit GEMM レジスタ 32x64 タイル / 1 スレッド 8x4 / wg 16x4)
+// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin,Kh,Kw] + b[Cout], f32, implicit GEMM レジスタ 32x128 タイル / 1 スレッド 8x8 / wg 16x4)
 struct Dims {
   m: u32,
   n: u32,
@@ -34,9 +34,9 @@ fn xcol(xc: u32, ky: i32, kx: i32, n: u32) -> f32 {
 }
 
 // 共有 A タイル（32 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 16・列方向を vec4 に束ねた形）
+// 共有 B タイル（K 16 × 列 quad 32・列方向を vec4 に束ねた形）
 var<workgroup> sa: array<f32, 512>;
-var<workgroup> sb: array<vec4<f32>, 256>;
+var<workgroup> sb: array<vec4<f32>, 512>;
 
 @compute @workgroup_size(16, 4)
 fn main(
@@ -56,13 +56,17 @@ fn main(
   // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチの出力平面 [Cout, Hout·Wout]）
   let xbase = wid.z * dims.channels_in;
   let cbase = wid.z * dims.m * dims.n;
-  // B タイルの担当（K 16 行 × 列 quad 16 を 64 スレッドで 4 巡）
-  let bk0 = tid / 16u;
-  let bcq = tid % 16u;
-  let bcol = wid.x * 64u + bcq * 4u;
-  let bk1 = bk0 + 4u;
-  let bk2 = bk0 + 8u;
-  let bk3 = bk0 + 12u;
+  // B タイルの担当（K 16 行 × 列 quad 32 を 64 スレッドで 8 巡）
+  let bk0 = tid / 32u;
+  let bcq = tid % 32u;
+  let bcol = wid.x * 128u + bcq * 4u;
+  let bk1 = bk0 + 2u;
+  let bk2 = bk0 + 4u;
+  let bk3 = bk0 + 6u;
+  let bk4 = bk0 + 8u;
+  let bk5 = bk0 + 10u;
+  let bk6 = bk0 + 12u;
+  let bk7 = bk0 + 14u;
   // K タイルループ不変（平坦 k を (ic, kh, kw) へ割るための刻み）
   let khw = dims.kernel_h * dims.kernel_w;
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
@@ -70,13 +74,21 @@ fn main(
   let tiles = (dims.k + 15u) / 16u;
   let bias0 = wid.y * 32u + lid.y * 8u;
   var acc0_0 = vec4<f32>(bias[bias0]);
+  var acc0_1 = vec4<f32>(bias[bias0]);
   var acc1_0 = vec4<f32>(bias[bias0 + 1u]);
+  var acc1_1 = vec4<f32>(bias[bias0 + 1u]);
   var acc2_0 = vec4<f32>(bias[bias0 + 2u]);
+  var acc2_1 = vec4<f32>(bias[bias0 + 2u]);
   var acc3_0 = vec4<f32>(bias[bias0 + 3u]);
+  var acc3_1 = vec4<f32>(bias[bias0 + 3u]);
   var acc4_0 = vec4<f32>(bias[bias0 + 4u]);
+  var acc4_1 = vec4<f32>(bias[bias0 + 4u]);
   var acc5_0 = vec4<f32>(bias[bias0 + 5u]);
+  var acc5_1 = vec4<f32>(bias[bias0 + 5u]);
   var acc6_0 = vec4<f32>(bias[bias0 + 6u]);
+  var acc6_1 = vec4<f32>(bias[bias0 + 6u]);
   var acc7_0 = vec4<f32>(bias[bias0 + 7u]);
+  var acc7_1 = vec4<f32>(bias[bias0 + 7u]);
   for (var t = 0u; t < tiles; t = t + 1u) {
     // 範囲外は 0 で埋める。内積に寄与しないので K 端数でも結果は変わらない
     let ak0 = t * 16u + aq * 4u;
@@ -141,7 +153,7 @@ fn main(
         bv4_0.w = xcol(xc, ky, kx, bcol + 3u);
       }
     }
-    sb[bk0 * 16u + bcq] = bv4_0;
+    sb[bk0 * 32u + bcq] = bv4_0;
     let brow1 = t * 16u + bk1;
     var bv4_1 = vec4<f32>(0.0);
     if (brow1 < dims.k) {
@@ -163,7 +175,7 @@ fn main(
         bv4_1.w = xcol(xc, ky, kx, bcol + 3u);
       }
     }
-    sb[bk1 * 16u + bcq] = bv4_1;
+    sb[bk1 * 32u + bcq] = bv4_1;
     let brow2 = t * 16u + bk2;
     var bv4_2 = vec4<f32>(0.0);
     if (brow2 < dims.k) {
@@ -185,7 +197,7 @@ fn main(
         bv4_2.w = xcol(xc, ky, kx, bcol + 3u);
       }
     }
-    sb[bk2 * 16u + bcq] = bv4_2;
+    sb[bk2 * 32u + bcq] = bv4_2;
     let brow3 = t * 16u + bk3;
     var bv4_3 = vec4<f32>(0.0);
     if (brow3 < dims.k) {
@@ -207,25 +219,122 @@ fn main(
         bv4_3.w = xcol(xc, ky, kx, bcol + 3u);
       }
     }
-    sb[bk3 * 16u + bcq] = bv4_3;
+    sb[bk3 * 32u + bcq] = bv4_3;
+    let brow4 = t * 16u + bk4;
+    var bv4_4 = vec4<f32>(0.0);
+    if (brow4 < dims.k) {
+      let ic = brow4 / khw;
+      let kr = brow4 % khw;
+      let ky = i32((kr / dims.kernel_w) * dims.dilation_h) - i32(dims.padding_h);
+      let kx = i32((kr % dims.kernel_w) * dims.dilation_w) - i32(dims.padding_w);
+      let xc = xbase + ic;
+      if (bcol < dims.n) {
+        bv4_4.x = xcol(xc, ky, kx, bcol);
+      }
+      if (bcol + 1u < dims.n) {
+        bv4_4.y = xcol(xc, ky, kx, bcol + 1u);
+      }
+      if (bcol + 2u < dims.n) {
+        bv4_4.z = xcol(xc, ky, kx, bcol + 2u);
+      }
+      if (bcol + 3u < dims.n) {
+        bv4_4.w = xcol(xc, ky, kx, bcol + 3u);
+      }
+    }
+    sb[bk4 * 32u + bcq] = bv4_4;
+    let brow5 = t * 16u + bk5;
+    var bv4_5 = vec4<f32>(0.0);
+    if (brow5 < dims.k) {
+      let ic = brow5 / khw;
+      let kr = brow5 % khw;
+      let ky = i32((kr / dims.kernel_w) * dims.dilation_h) - i32(dims.padding_h);
+      let kx = i32((kr % dims.kernel_w) * dims.dilation_w) - i32(dims.padding_w);
+      let xc = xbase + ic;
+      if (bcol < dims.n) {
+        bv4_5.x = xcol(xc, ky, kx, bcol);
+      }
+      if (bcol + 1u < dims.n) {
+        bv4_5.y = xcol(xc, ky, kx, bcol + 1u);
+      }
+      if (bcol + 2u < dims.n) {
+        bv4_5.z = xcol(xc, ky, kx, bcol + 2u);
+      }
+      if (bcol + 3u < dims.n) {
+        bv4_5.w = xcol(xc, ky, kx, bcol + 3u);
+      }
+    }
+    sb[bk5 * 32u + bcq] = bv4_5;
+    let brow6 = t * 16u + bk6;
+    var bv4_6 = vec4<f32>(0.0);
+    if (brow6 < dims.k) {
+      let ic = brow6 / khw;
+      let kr = brow6 % khw;
+      let ky = i32((kr / dims.kernel_w) * dims.dilation_h) - i32(dims.padding_h);
+      let kx = i32((kr % dims.kernel_w) * dims.dilation_w) - i32(dims.padding_w);
+      let xc = xbase + ic;
+      if (bcol < dims.n) {
+        bv4_6.x = xcol(xc, ky, kx, bcol);
+      }
+      if (bcol + 1u < dims.n) {
+        bv4_6.y = xcol(xc, ky, kx, bcol + 1u);
+      }
+      if (bcol + 2u < dims.n) {
+        bv4_6.z = xcol(xc, ky, kx, bcol + 2u);
+      }
+      if (bcol + 3u < dims.n) {
+        bv4_6.w = xcol(xc, ky, kx, bcol + 3u);
+      }
+    }
+    sb[bk6 * 32u + bcq] = bv4_6;
+    let brow7 = t * 16u + bk7;
+    var bv4_7 = vec4<f32>(0.0);
+    if (brow7 < dims.k) {
+      let ic = brow7 / khw;
+      let kr = brow7 % khw;
+      let ky = i32((kr / dims.kernel_w) * dims.dilation_h) - i32(dims.padding_h);
+      let kx = i32((kr % dims.kernel_w) * dims.dilation_w) - i32(dims.padding_w);
+      let xc = xbase + ic;
+      if (bcol < dims.n) {
+        bv4_7.x = xcol(xc, ky, kx, bcol);
+      }
+      if (bcol + 1u < dims.n) {
+        bv4_7.y = xcol(xc, ky, kx, bcol + 1u);
+      }
+      if (bcol + 2u < dims.n) {
+        bv4_7.z = xcol(xc, ky, kx, bcol + 2u);
+      }
+      if (bcol + 3u < dims.n) {
+        bv4_7.w = xcol(xc, ky, kx, bcol + 3u);
+      }
+    }
+    sb[bk7 * 32u + bcq] = bv4_7;
     workgroupBarrier();
-    // 共有ロード 9 回（B の vec4 1 + A のスカラ 8）で 32 MAC。
+    // 共有ロード 10 回（B の vec4 2 + A のスカラ 8）で 64 MAC。
     // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
     // 完全に一致する。
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
-      let bv0 = sb[kk * 16u + lid.x];
+      let bv0 = sb[kk * 32u + lid.x * 2u];
+      let bv1 = sb[kk * 32u + lid.x * 2u + 1u];
       acc0_0 = acc0_0 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv0;
+      acc0_1 = acc0_1 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv1;
       acc1_0 = acc1_0 + sa[(lid.y * 8u + 1u) * 16u + kk] * bv0;
+      acc1_1 = acc1_1 + sa[(lid.y * 8u + 1u) * 16u + kk] * bv1;
       acc2_0 = acc2_0 + sa[(lid.y * 8u + 2u) * 16u + kk] * bv0;
+      acc2_1 = acc2_1 + sa[(lid.y * 8u + 2u) * 16u + kk] * bv1;
       acc3_0 = acc3_0 + sa[(lid.y * 8u + 3u) * 16u + kk] * bv0;
+      acc3_1 = acc3_1 + sa[(lid.y * 8u + 3u) * 16u + kk] * bv1;
       acc4_0 = acc4_0 + sa[(lid.y * 8u + 4u) * 16u + kk] * bv0;
+      acc4_1 = acc4_1 + sa[(lid.y * 8u + 4u) * 16u + kk] * bv1;
       acc5_0 = acc5_0 + sa[(lid.y * 8u + 5u) * 16u + kk] * bv0;
+      acc5_1 = acc5_1 + sa[(lid.y * 8u + 5u) * 16u + kk] * bv1;
       acc6_0 = acc6_0 + sa[(lid.y * 8u + 6u) * 16u + kk] * bv0;
+      acc6_1 = acc6_1 + sa[(lid.y * 8u + 6u) * 16u + kk] * bv1;
       acc7_0 = acc7_0 + sa[(lid.y * 8u + 7u) * 16u + kk] * bv0;
+      acc7_1 = acc7_1 + sa[(lid.y * 8u + 7u) * 16u + kk] * bv1;
     }
     workgroupBarrier();
   }
-  let ocol = wid.x * 64u + lid.x * 4u;
+  let ocol = wid.x * 128u + lid.x * 8u;
   let orow0 = wid.y * 32u + lid.y * 8u;
   let orow1 = orow0 + 1u;
   let orow2 = orow0 + 2u;
@@ -248,6 +357,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       out[obase + ocol + 3u] = acc0_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      out[obase + ocol + 4u] = acc0_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      out[obase + ocol + 5u] = acc0_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      out[obase + ocol + 6u] = acc0_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      out[obase + ocol + 7u] = acc0_1.w;
+    }
   }
   if (orow1 < dims.m) {
     let obase = cbase + orow1 * dims.n;
@@ -262,6 +383,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       out[obase + ocol + 3u] = acc1_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      out[obase + ocol + 4u] = acc1_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      out[obase + ocol + 5u] = acc1_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      out[obase + ocol + 6u] = acc1_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      out[obase + ocol + 7u] = acc1_1.w;
     }
   }
   if (orow2 < dims.m) {
@@ -278,6 +411,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       out[obase + ocol + 3u] = acc2_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      out[obase + ocol + 4u] = acc2_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      out[obase + ocol + 5u] = acc2_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      out[obase + ocol + 6u] = acc2_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      out[obase + ocol + 7u] = acc2_1.w;
+    }
   }
   if (orow3 < dims.m) {
     let obase = cbase + orow3 * dims.n;
@@ -292,6 +437,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       out[obase + ocol + 3u] = acc3_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      out[obase + ocol + 4u] = acc3_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      out[obase + ocol + 5u] = acc3_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      out[obase + ocol + 6u] = acc3_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      out[obase + ocol + 7u] = acc3_1.w;
     }
   }
   if (orow4 < dims.m) {
@@ -308,6 +465,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       out[obase + ocol + 3u] = acc4_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      out[obase + ocol + 4u] = acc4_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      out[obase + ocol + 5u] = acc4_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      out[obase + ocol + 6u] = acc4_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      out[obase + ocol + 7u] = acc4_1.w;
+    }
   }
   if (orow5 < dims.m) {
     let obase = cbase + orow5 * dims.n;
@@ -322,6 +491,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       out[obase + ocol + 3u] = acc5_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      out[obase + ocol + 4u] = acc5_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      out[obase + ocol + 5u] = acc5_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      out[obase + ocol + 6u] = acc5_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      out[obase + ocol + 7u] = acc5_1.w;
     }
   }
   if (orow6 < dims.m) {
@@ -338,6 +519,18 @@ fn main(
     if (ocol + 3u < dims.n) {
       out[obase + ocol + 3u] = acc6_0.w;
     }
+    if (ocol + 4u < dims.n) {
+      out[obase + ocol + 4u] = acc6_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      out[obase + ocol + 5u] = acc6_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      out[obase + ocol + 6u] = acc6_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      out[obase + ocol + 7u] = acc6_1.w;
+    }
   }
   if (orow7 < dims.m) {
     let obase = cbase + orow7 * dims.n;
@@ -352,6 +545,18 @@ fn main(
     }
     if (ocol + 3u < dims.n) {
       out[obase + ocol + 3u] = acc7_0.w;
+    }
+    if (ocol + 4u < dims.n) {
+      out[obase + ocol + 4u] = acc7_1.x;
+    }
+    if (ocol + 5u < dims.n) {
+      out[obase + ocol + 5u] = acc7_1.y;
+    }
+    if (ocol + 6u < dims.n) {
+      out[obase + ocol + 6u] = acc7_1.z;
+    }
+    if (ocol + 7u < dims.n) {
+      out[obase + ocol + 7u] = acc7_1.w;
     }
   }
 }

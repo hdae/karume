@@ -1152,44 +1152,47 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
  * 生成物に埋まった辺と TS 定数を同じテストで突き合わせる（executor は {@link GEMM_TILE} を
  * そのまま `tiledWorkgroups` へ渡す）。
  */
-Deno.test("GEMM 骨格 6 op のタイル辺は 64 で、生成物・キー・TS 定数が一致する", () => {
+Deno.test("GEMM 骨格 6 op のタイル辺・キー・TS 定数が既定幾何と一致する", () => {
   assertEquals(GEMM_TILE, 64);
   // 既定幾何（src/kernels/gemm-geometry.ts）。**キーと生成物の両方に効く**ので、
   // 変えたつもりの無い差分がここで止まる
-  assertEquals(defaultGemmGeometry(), { regM: 8, regN: 4, wgX: 16, wgY: 8 });
+  assertEquals(defaultGemmGeometry(), { regM: 8, regN: 8, wgX: 16, wgY: 16 });
   for (const [where, key, wgsl] of GEMM_VARIANTS) {
-    // 出力タイルの原点（行 / 列）と workgroup は骨格を共有する全 op で共通
-    assertEquals(wgsl.includes(`let arow0 = wid.y * ${GEMM_TILE}u + ar;`), true, where);
-    assertEquals(wgsl.includes(`let orow0 = wid.y * ${GEMM_TILE}u + lid.y * 8u;`), true, where);
-    assertEquals(wgsl.includes("@compute @workgroup_size(16, 8)"), true, where);
-    // 1 スレッド 8×4 = レジスタ 32 本（`acc{行}_{列 quad}` の静的展開が全 op 共通）。
-    // 共有は 4,096 B + 4,096 B で幾何によらず不変
-    assertEquals(wgsl.includes("var acc7_0 = vec4<f32>("), true, where);
+    // 出力タイルの原点（行 / 列）と workgroup。conv2d だけ m タイルを 64 へ抑える
+    //（出力チャネル数が小さい — tileN とレジスタブロックは全 op 共通）
+    const conv2d = where.startsWith("conv2d");
+    const tileM = conv2d ? 64 : 128;
+    assertEquals(wgsl.includes(`let arow0 = wid.y * ${tileM}u + ar;`), true, where);
+    assertEquals(wgsl.includes(`let orow0 = wid.y * ${tileM}u + lid.y * 8u;`), true, where);
+    assertEquals(wgsl.includes(`@compute @workgroup_size(16, ${tileM / 8})`), true, where);
+    // 1 スレッド 8×8 = レジスタ 64 本（`acc{行}_{列 quad}` の静的展開が全 op 共通）。
+    // 共有は sa ${tileM}×16 f32 + sb 8,192 B（f32 の 128 行版で計 16 KB = WebGPU 既定上限）
+    assertEquals(wgsl.includes("var acc7_1 = vec4<f32>("), true, where);
     assertEquals(wgsl.includes("acc["), false, `${where}: acc の動的添字`);
-    assertEquals(wgsl.includes("var<workgroup> sa: array<f32, 1024>;"), true, where);
-    assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 256>;"), true, where);
+    assertEquals(wgsl.includes(`var<workgroup> sa: array<f32, ${tileM * 16}>;`), true, where);
+    assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 512>;"), true, where);
     // MUST: 生成パラメータはキーに載る（タイル辺**と幾何**を変えれば別キーになる）。conv2d の
     // implicit GEMM だけは判別子が `igemm`（直接カーネルと系統が違うことを名前で表す）で、
     // 幾何は workgroup 形（`wg16x8`）が同じ判別力を持つ。
-    const tilePart = where.startsWith("conv2d") ? "igemm" : "reg";
-    assertEquals(key.includes(`${tilePart}${GEMM_TILE}x${GEMM_TILE}`), true, where);
-    assertEquals(key.includes(where.startsWith("conv2d") ? "wg16x8" : "r8x4w16"), true, where);
+    const tilePart = conv2d ? "igemm" : "reg";
+    assertEquals(key.includes(`${tilePart}${tileM}x128`), true, where);
+    assertEquals(key.includes(conv2d ? "wg16x8" : "r8x8w16"), true, where);
     // 版番号は op ごと（既存 3 op は 16×16 からの改版で v2・融合 attention は新設なので v1）
     assertEquals(key.includes(where.startsWith("attention") ? ":v1:" : ":v2:"), true, where);
     // 旧 16×16 タイルの痕跡が残っていない（キーの改版と生成物の総取り替えは対）
     assertEquals(key.includes("tile16"), false, where);
   }
-  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg64x64r8x4w16v4");
-  assertEquals(attentionPvKey(false), "attention_pv:v1:f32:reg64x64r8x4w16");
+  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg128x128r8x8w16v4");
+  assertEquals(attentionPvKey(false), "attention_pv:v1:f32:reg128x128r8x8w16");
   // v4 判別子はキーに載る（形状から導いた 1 ビットがパイプラインを分ける）
-  assertEquals(matmulKey(true), "matmul:v2:f32:reg64x64r8x4w16v4");
-  assertEquals(matmulKey(false), "matmul:v2:f32:reg64x64r8x4w16");
-  assertEquals(bmmKey(true), "bmm:v2:f32:reg64x64r8x4w16v4");
-  assertEquals(linearKey("i8", true), "linear:v2:f32:reg64x64r8x4w16v4:wi8");
-  assertEquals(linearKey("f16", false), "linear:v2:f32:reg64x64r8x4w16:wf16");
+  assertEquals(matmulKey(true), "matmul:v2:f32:reg128x128r8x8w16v4");
+  assertEquals(matmulKey(false), "matmul:v2:f32:reg128x128r8x8w16");
+  assertEquals(bmmKey(true), "bmm:v2:f32:reg128x128r8x8w16v4");
+  assertEquals(linearKey("i8", true), "linear:v2:f32:reg128x128r8x8w16v4:wi8");
+  assertEquals(linearKey("f16", false), "linear:v2:f32:reg128x128r8x8w16:wf16");
   // conv2d は 2 系統（implicit GEMM / 直接カーネル）で、直接側のキーは動かさない
-  assertEquals(conv2dIgemmKey("f32", true), "conv2d:v2:f32:igemm64x64v4:wg16x8");
-  assertEquals(conv2dIgemmKey("i8", false), "conv2d:v2:f32:igemm64x64:wg16x8:wi8");
+  assertEquals(conv2dIgemmKey("f32", true), "conv2d:v2:f32:igemm64x128v4:wg16x8");
+  assertEquals(conv2dIgemmKey("i8", false), "conv2d:v2:f32:igemm64x128:wg16x8:wi8");
   assertEquals(conv2dKey("f32"), "conv2d:v1:f32:direct:wg256");
 });
 
@@ -1201,7 +1204,7 @@ Deno.test("GEMM 骨格 6 op のタイル辺は 64 で、生成物・キー・TS 
  * ここでは**タイル幾何と担当割りだけ**を固定する（数値の一致は実 GPU のビット比較が見る —
  * tests/gpu_conv2d_parity_test.ts）。
  */
-Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n タイル 64・8×4 レジスタは不変）", () => {
+Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n タイル 128・8×8 レジスタは不変）", () => {
   assertEquals(GEMM_MTILE_SMALL, 32);
   for (const weight of WEIGHT_STORAGES) {
     for (const v4 of [false, true]) {
@@ -1211,23 +1214,23 @@ Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n �
       assertEquals(wgsl.includes("let arow0 = wid.y * 32u + ar;"), true, where);
       assertEquals(wgsl.includes("let orow0 = wid.y * 32u + lid.y * 8u;"), true, where);
       assertEquals(wgsl.includes("let bias0 = wid.y * 32u + lid.y * 8u;"), true, where);
-      // n タイルは 64 のまま（2048px の n 上限の扱いを動かさない）
+      // n タイルは既定幾何と同じ 128（m 側だけの変種であることの検出器）
       assertEquals(
-        wgsl.includes(v4 ? "let bc4 = wid.x * 16u + bcq;" : "let bcol = wid.x * 64u + bcq * 4u;"),
+        wgsl.includes(v4 ? "let bc4 = wid.x * 32u + bcq;" : "let bcol = wid.x * 128u + bcq * 4u;"),
         true,
         where,
       );
-      // workgroup は 16×4 = 64 スレッド。**1 スレッド 8×4 は不変** = 内積の演算密度が
+      // workgroup は 16×4 = 64 スレッド。**1 スレッド 8×8 は不変** = 内積の演算密度が
       // 落ちない（1 スレッドの出力を削って workgroup を保つ形は密度が下がる）
       assertEquals(wgsl.includes("@compute @workgroup_size(16, 4)"), true, where);
       assertEquals(wgsl.includes("var acc7_0 = vec4<f32>(bias[bias0 + 7u]);"), true, where);
-      // 共有 A は 32 行ぶんへ縮む（sb は n タイルが同じなので 256 のまま）
+      // 共有 A は 32 行ぶんへ縮む（sb は n タイルが同じなので 512 のまま）
       assertEquals(wgsl.includes("var<workgroup> sa: array<f32, 512>;"), true, where);
-      assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 256>;"), true, where);
-      // 64 スレッドで 256 要素の B タイルを埋めるので 4 スロット。担当の k 行は 4 ずつずれる
-      assertEquals(wgsl.includes("let bk0 = tid / 16u;"), true, where);
-      assertEquals(wgsl.includes("let bk3 = bk0 + 12u;"), true, where);
-      assertEquals(wgsl.includes("let bk4 ="), false, `${where}: スロットは 4 本ちょうど`);
+      assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 512>;"), true, where);
+      // 64 スレッドで 512 quad の B タイルを埋めるので 8 スロット。担当の k 行は 2 ずつずれる
+      assertEquals(wgsl.includes("let bk0 = tid / 32u;"), true, where);
+      assertEquals(wgsl.includes("let bk7 = bk0 + 14u;"), true, where);
+      assertEquals(wgsl.includes("let bk8 ="), false, `${where}: スロットは 8 本ちょうど`);
       // 内積ループの正本は骨格 1 箇所（64 行版と 1 文字も違わない）
       assertEquals(
         wgsl.includes("acc0_0 = acc0_0 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv0;"),
@@ -1236,13 +1239,13 @@ Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n �
       );
     }
   }
-  // 64 行版は 128 スレッドで B タイルを 2 スロット（32 行版の 4 スロットが漏れ出していないこと）
-  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk1 = bk0 + 8u;"), true);
-  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk2 ="), false);
-  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk0 = tid / 16u;"), true);
+  // 64 行版は 128 スレッドで B タイルを 4 スロット（32 行版の 8 スロットが漏れ出していないこと）
+  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk3 = bk0 + 12u;"), true);
+  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk4 ="), false);
+  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk0 = tid / 32u;"), true);
   // キーは別系統（タイル形は生成パラメータなのでキーに載る）
-  assertEquals(conv2dIgemmKey("f32", true, 32), "conv2d:v2:f32:igemm32x64v4:wg16x4");
-  assertEquals(conv2dIgemmKey("i8", false, 32), "conv2d:v2:f32:igemm32x64:wg16x4:wi8");
+  assertEquals(conv2dIgemmKey("f32", true, 32), "conv2d:v2:f32:igemm32x128v4:wg16x4");
+  assertEquals(conv2dIgemmKey("i8", false, 32), "conv2d:v2:f32:igemm32x128:wg16x4:wi8");
 });
 
 /**
@@ -1931,9 +1934,9 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
         LINEAR_WGSL.includes(
           `${at === components.length - 1 ? "default" : `case ${at}u`}: {\n` +
             `        sb[sb_base${slot}].${component} = wv${slot}.x;\n` +
-            `        sb[sb_base${slot} + 16u].${component} = wv${slot}.y;\n` +
-            `        sb[sb_base${slot} + 32u].${component} = wv${slot}.z;\n` +
-            `        sb[sb_base${slot} + 48u].${component} = wv${slot}.w;\n` +
+            `        sb[sb_base${slot} + 32u].${component} = wv${slot}.y;\n` +
+            `        sb[sb_base${slot} + 64u].${component} = wv${slot}.z;\n` +
+            `        sb[sb_base${slot} + 96u].${component} = wv${slot}.w;\n` +
             `      }`,
         ),
         true,
@@ -2203,13 +2206,13 @@ Deno.test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡
     // enable はモジュール先頭（コメント 1 行の直後 = 全ての global 宣言より前）
     assertEquals(lines[0].startsWith("// karume "), true, where);
     assertEquals(lines[1], "enable f16;", where);
-    // ① 共有タイルだけが f16（バイト半減がこの変種の唯一の機序）
-    assertEquals(wgsl.includes(`var<workgroup> sa: array<f16, ${GEMM_TILE * 16}>;`), true, where);
-    assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f16>, 256>;"), true, where);
+    // ① 共有タイルだけが f16（バイト半減がこの変種の唯一の機序。辺は既定幾何 128×128）
+    assertEquals(wgsl.includes("var<workgroup> sa: array<f16, 2048>;"), true, where);
+    assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f16>, 512>;"), true, where);
     // ③ 累積は f32 のまま（k 大の桁落ちを避ける — 変えると parity と E2E が赤くなる）
     assertEquals(wgsl.includes("var acc0_0 = vec4<f32>(0.0);"), true, where);
     // ② 拡幅はレジスタロード時に 1 回。MAC ごとの積の変換（f32(av * bv)）は出さない
-    assertEquals(wgsl.includes("let bv0 = vec4<f32>(sb[kk * 16u + lid.x]);"), true, where);
+    assertEquals(wgsl.includes("let bv0 = vec4<f32>(sb[kk * 32u + lid.x * 2u]);"), true, where);
     assertEquals(
       wgsl.includes("acc0_0 = acc0_0 + f32(sa[(lid.y * 8u + 0u) * 16u + kk]) * bv0;"),
       true,
@@ -2266,15 +2269,15 @@ Deno.test("既定（f32 計算）の生成物には f16 が 1 文字も現れな
 
 Deno.test("計算変種の判別子はキーの f16 側だけに付き、格納の wf16 とは別語になる", () => {
   // 計算変種の語は幾何判別子の**後ろ**に付く（キーの語順そのものが固定対象）
-  assertEquals(linearKey("f32", false), "linear:v2:f32:reg64x64r8x4w16");
-  assertEquals(linearKey("f16", true), "linear:v2:f32:reg64x64r8x4w16v4:wf16");
-  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg64x64r8x4w16v4");
+  assertEquals(linearKey("f32", false), "linear:v2:f32:reg128x128r8x8w16");
+  assertEquals(linearKey("f16", true), "linear:v2:f32:reg128x128r8x8w16v4:wf16");
+  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg128x128r8x8w16v4");
   assertEquals(attentionStatsKey(), ATTENTION_STATS_KEY);
   // f16 計算は末尾に :c16（格納 :wf16 と重ならない語 — 両方同時に立つ組み合わせがある）
-  assertEquals(linearKey("f32", false, "f16"), "linear:v2:f32:reg64x64r8x4w16:c16");
-  assertEquals(linearKey("f16", true, "f16"), "linear:v2:f32:reg64x64r8x4w16v4:wf16:c16");
-  assertEquals(attentionQkKey(false, "f16"), "attention_qk:v1:f32:reg64x64r8x4w16:c16");
-  assertEquals(attentionPvKey(true, "f16"), "attention_pv:v1:f32:reg64x64r8x4w16v4:c16");
+  assertEquals(linearKey("f32", false, "f16"), "linear:v2:f32:reg128x128r8x8w16:c16");
+  assertEquals(linearKey("f16", true, "f16"), "linear:v2:f32:reg128x128r8x8w16v4:wf16:c16");
+  assertEquals(attentionQkKey(false, "f16"), "attention_qk:v1:f32:reg128x128r8x8w16:c16");
+  assertEquals(attentionPvKey(true, "f16"), "attention_pv:v1:f32:reg128x128r8x8w16v4:c16");
   assertEquals(attentionStatsKey("f16"), `${ATTENTION_STATS_KEY}:c16`);
 });
 
@@ -2296,8 +2299,9 @@ Deno.test("GEMM 骨格の accumulator は acc{行}_{列 quad} の静的展開で
       // 書き出しも行ごとに静的な名前を読む
       assertEquals(wgsl.includes(`orow${row} < dims.m`), true, `${where}:store${row}`);
     }
-    // 列 quad は 1 本（regN = 4 = vec4 ちょうど）— 2 本目が生えたら幾何が変わっている
-    assertEquals(wgsl.includes("acc0_1"), false, `${where}: 列 quad が 2 本ある`);
+    // 列 quad は 2 本（regN = 8 = vec4 × 2）— 3 本目が生えたら幾何が変わっている
+    assertEquals(wgsl.includes("acc0_1"), true, `${where}: 列 quad が 2 本ない`);
+    assertEquals(wgsl.includes("acc0_2"), false, `${where}: 列 quad が 3 本ある`);
   }
   // 0 初期化は bias-first の conv2d 以外の全 op（conv2d は別テストが bias 初期値を見る）
   for (const wgsl of [matmulWgsl(true), linearWgsl("f32", false), attentionPvWgsl(true)]) {
@@ -2395,8 +2399,8 @@ Deno.test("S の f16 格納変種は pack2x16float 1 点だけで丸め、shader
 
 Deno.test("格納 S の判別子 s16 はキーの末尾に付き、wf16 / c16 と別語になる", () => {
   // 既定（f32 格納）のキーは幾何判別子までで終わる
-  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg64x64r8x4w16v4");
-  assertEquals(attentionPvKey(true), "attention_pv:v1:f32:reg64x64r8x4w16v4");
+  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg128x128r8x8w16v4");
+  assertEquals(attentionPvKey(true), "attention_pv:v1:f32:reg128x128r8x8w16v4");
   assertEquals(attentionStatsKey(), ATTENTION_STATS_KEY);
   assertEquals(
     attentionQkI8a8Key(true, true),
@@ -2407,8 +2411,8 @@ Deno.test("格納 S の判別子 s16 はキーの末尾に付き、wf16 / c16 �
     "attention_pv:v3:i8a8:tile64x128r8x8w16x8k16v4:dp4aEmu",
   );
   // s16 は**末尾**（3 つの軸が同時に立ちうるので語順を 1 箇所で固定する）
-  assertEquals(attentionQkKey(true, "f32", "f16"), "attention_qk:v1:f32:reg64x64r8x4w16v4:s16");
-  assertEquals(attentionPvKey(true, "f32", "f16"), "attention_pv:v1:f32:reg64x64r8x4w16v4:s16");
+  assertEquals(attentionQkKey(true, "f32", "f16"), "attention_qk:v1:f32:reg128x128r8x8w16v4:s16");
+  assertEquals(attentionPvKey(true, "f32", "f16"), "attention_pv:v1:f32:reg128x128r8x8w16v4:s16");
   assertEquals(attentionStatsKey("f32", "f16"), `${ATTENTION_STATS_KEY}:s16`);
   assertEquals(
     attentionQkI8a8Key(true, true, "f16"),
@@ -2489,7 +2493,7 @@ Deno.test("S の f16 格納は「スカラ経路」と「c16 との併用」を�
 
 Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 キーはバイト単位で不変）", () => {
   const pairs: readonly (readonly [string, (weight: "f32" | "f16") => string])[] = [
-    ["linear:v2:f32:reg64x64r8x4w16", (weight) => linearKey(weight, false)],
+    ["linear:v2:f32:reg128x128r8x8w16", (weight) => linearKey(weight, false)],
     ["embedding:v1:f32:i32:wg256", embeddingKey],
     ["conv1d:v2:f32:direct:wg256", conv1dKey],
     ["conv2d:v1:f32:direct:wg256", conv2dKey],
@@ -2501,7 +2505,7 @@ Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 �
     assertEquals(key("f16"), `${expected}:wf16`);
   }
   // 格納判別子は v4 判別子の**後ろ**に付く（linear だけ 2 軸を持つ）
-  assertEquals(linearKey("f16", true), "linear:v2:f32:reg64x64r8x4w16v4:wf16");
+  assertEquals(linearKey("f16", true), "linear:v2:f32:reg128x128r8x8w16v4:wf16");
 });
 
 /**

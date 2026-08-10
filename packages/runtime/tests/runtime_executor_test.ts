@@ -5,7 +5,7 @@ import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { ContainerError, openModel } from "../src/format/container.ts";
 import { IrError } from "../src/format/ir.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { GEMM_TILE } from "../src/kernels/gemm.ts";
+import { defaultGemmGeometry, gemmTileN } from "../src/kernels/gemm-geometry.ts";
 import { DEFAULT_SUBMIT_POLICY } from "../src/gpu/submit.ts";
 import { allclose, compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { applyReferenceOp, refTensor } from "../src/reference/ops.ts";
@@ -608,10 +608,11 @@ Deno.test({
     const gpu = await acquireGpu();
     // 1 ノード目（relu）は dispatch が積まれ、2 ノード目（matmul）が上限超過で throw する。
     // 既定チャンクサイズ 16 なので relu のぶんは未 submit のまま残る。
-    // MUST: 上限超過の閾値は matmul の**出力タイル辺**で決まる（`ceil(n / GEMM_TILE) > 上限`）。
-    // タイル辺を定数から引かないと、辺を変えた瞬間に throw が起きず assertRejects だけが
-    // 静かに落ちる（この波で 16 → 64 になった）。
-    const n = gpu.limits.maxComputeWorkgroupsPerDimension * GEMM_TILE + GEMM_TILE;
+    // MUST: 上限超過の閾値は matmul の**出力タイル辺**で決まる（`ceil(n / tileN) > 上限`）。
+    // タイル辺は定数ではなく**既定幾何から導く**（辺を変えた瞬間に throw が起きず
+    // assertRejects だけが静かに落ちるドリフトが 16 → 64 → 128 と 2 度起きた形）。
+    const tileN = gemmTileN(defaultGemmGeometry());
+    const n = gpu.limits.maxComputeWorkgroupsPerDimension * tileN + tileN;
     const graph: GraphJson = {
       format: "karume-ir",
       version: 1,
