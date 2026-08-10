@@ -7,8 +7,9 @@
  * fail loudly にする（未対応 op / 契約外 dtype / broadcast 不可 / 未束縛シンボル / 宣言不一致）。
  *
  * MUST: 導出相は **run 寿命の状態に触れない**（{@link RunArena} の確保も dispatch の発行も
- * しない）。ここが分かれていることが、後段でレシピ列を Session に常駐させて導出を丸ごと
- * 飛ばせる条件になっている。
+ * しない）。これが成り立っているので、導出相の成果物は解決済み bindings をキーに Session へ
+ * 常駐させられる（{@link PreparedPlan}）— 同一 bindings の 2 run 目以降は計画・融合判定・
+ * レシピ導出を丸ごと飛ばし、レシピ列をそのまま実行相へ渡す。
  *
  * MUST: 初期化は明示 async ステージ（{@link createSession}）。コンストラクタ内の同期
  * アップロードループは、重み取得とアップロードのパイプライン化を構造的に不可能にする。
@@ -390,12 +391,30 @@ export type StorageDiagnostics = {
  *
  * MUST: 常設診断として出す。キャッシュが外れても値は正しいまま（毎 dispatch 確保に戻るだけ）
  * で、例外も警告も出ない — ここが唯一の観測点。
+ *
+ * NOTE: 導出済み計画がヒットした run（{@link PreparedPlanStats}）では**導出相そのものが
+ * 走らない**ため `allocCount` / `reuseCount` とも 0 になる。値の意味は変わらず、「その run が
+ * params に対して行った GPU 操作がゼロ」という事実の報告。
  */
 export type ParamsCacheStats = {
   /** この run で新規に確保 + writeBuffer した params の本数。 */
   readonly allocCount: number;
   /** この run でキャッシュから配り直した params の本数（GPU 操作ゼロ）。 */
   readonly reuseCount: number;
+};
+
+/**
+ * 導出済み実行計画（Session 常駐）の実績。同一 bindings で走り直す run は計画・融合判定・
+ * レシピ導出を丸ごと飛ばし、レシピ列をそのまま実行相へ渡す。
+ *
+ * MUST: 常設診断として出す。キャッシュが外れても値は正しいまま（毎 run 導出に戻るだけ）で、
+ * 例外も警告も出ない — 性能だけが静かに戻る。ここが唯一の観測点。
+ */
+export type PreparedPlanStats = {
+  /** この run が導出済み計画に当たったか。 */
+  readonly hit: boolean;
+  /** この run の決着時点で Session が抱えている導出済み計画の本数（上限あり）。 */
+  readonly cachedPlans: number;
 };
 
 export type SessionDiagnostics = {
@@ -429,6 +448,11 @@ export type SessionDiagnostics = {
    * 実体（バッファ）は Session 常駐なので、ここは「その run が何本作り、何本使い回したか」。
    */
   readonly lastRunParams: ParamsCacheStats | undefined;
+  /**
+   * 直近 run の導出済み計画キャッシュ実績。run の開始でリセットされ、導出相が決着した時点で
+   * 埋まる（未実行、および導出相の途中で落ちた run では undefined）。
+   */
+  readonly lastRunPrepared: PreparedPlanStats | undefined;
 };
 
 /** MUST: `queue.writeBuffer` で書くバッファはプール外（アリーナの不変条件）。 */
@@ -513,6 +537,41 @@ const assertChannelScale = (
   }
 };
 
+/**
+ * 導出相まるごとの成果物（Session 常駐 — キーは {@link Session.#preparedKey}）。
+ *
+ * MUST: 後段が実際に参照するものだけを持つ（`GraphPlan.nodes` / `GraphPlan.bindings` は
+ * レシピ導出が終われば誰も読まない）。読まれない導出物を抱えると、キャッシュの寿命が
+ * 「run の入出力に効く事実」から離れ、何を再利用しているのかが読めなくなる。
+ */
+type PreparedPlan = {
+  /** 入力・initializer・全ノード出力の解決済み shape（`#uploadInput` / `#readOutputs` が読む）。 */
+  readonly shapes: ReadonlyMap<string, readonly number[]>;
+  readonly recipes: readonly StepRecipe[];
+  /** 計画時に決まった融合回数（ヒット run もこの値を常設診断へ報告する — ADR 0040 §3）。 */
+  readonly fusions: FusionCounts;
+};
+
+/**
+ * 導出相の前半（計画 → 融合判定）だけの成果物。後半（レシピ導出）は params の writeBuffer と
+ * パイプライン生成を伴い run の errorScope 区間の内側でしか出せないので、そこまではステップ列
+ * のまま持ち越す。MUST: {@link PreparedPlan} と `recipes` の有無で判別する（`in`）。
+ */
+type PlannedSteps = {
+  readonly shapes: ReadonlyMap<string, readonly number[]>;
+  readonly fusions: FusionCounts;
+  readonly steps: readonly ExecStep[];
+};
+
+/**
+ * 導出済み計画の常駐本数の上限（LRU）。
+ *
+ * 定数で固定するのは、これが「連続する run が同じ bindings を使い回す」局所性だけを拾う
+ * 器で、増やしても効かない形（run ごとに shape が変わる）では 1 本目から効かないため —
+ * 設定ノブにすると当たらないキャッシュを太らせる調整に化ける。
+ */
+const PREPARED_PLAN_CAPACITY = 4;
+
 type SessionState = {
   readonly gpu: GpuContext;
   readonly model: KarumeModel;
@@ -528,6 +587,12 @@ type SessionState = {
    * バッファも別）。
    */
   readonly paramsCache: Map<string, GPUBuffer>;
+  /**
+   * 解決済み bindings → 導出済み実行計画（LRU・上限 {@link PREPARED_PLAN_CAPACITY}）。
+   * MUST: モジュールスコープに置かない（副作用ゼロの不変条件 — Session ごとに graph も
+   * 常駐バッファも別で、レシピはその実体を直参照で畳み込んでいる）。
+   */
+  readonly prepared: Map<string, PreparedPlan>;
   /**
    * 重みスロットの格納形（圧縮のまま常駐した initializer だけが載る）。ここに無い値は
    * f32 として読む — カーネル変種の選択はこの表 1 つで決まる。
@@ -557,6 +622,7 @@ export class Session {
   #lastRun: ArenaStats | undefined;
   #lastRunFusions: FusionCounts | undefined;
   #lastRunParams: ParamsCacheStats | undefined;
+  #lastRunPrepared: PreparedPlanStats | undefined;
   /** 進行中 run の params 実績（run の頭でリセットし、決着時に {@link #lastRunParams} へ移す）。 */
   #paramsAllocCount = 0;
   #paramsReuseCount = 0;
@@ -724,6 +790,7 @@ export class Session {
       weights,
       weightBuffers,
       paramsCache: new Map(),
+      prepared: new Map(),
       weightStorages,
       weightScaleBuffers,
       storage: { residentCompressedBytes, hostExpandedBytes },
@@ -778,6 +845,7 @@ export class Session {
       lastRunTiming: this.#state.scheduler.timing,
       lastRunFusions: this.#lastRunFusions,
       lastRunParams: this.#lastRunParams,
+      lastRunPrepared: this.#lastRunPrepared,
     };
   }
 
@@ -797,14 +865,20 @@ export class Session {
     // [[Prototype]] に化け、own property が作られないまま「入力が渡されていない」で落ちる。
     const inputShapes: Record<string, readonly number[]> = Object.create(null);
     for (const [name, tensor] of Object.entries(inputs)) inputShapes[name] = tensor.shape;
-    const plan = planGraph(graph, bindSymbols(graph, inputShapes, bindings));
-    // 融合の判定は GPU に触れない純関数（src/runtime/fusion.ts）。掴めなかったノードは素の
-    // ままステップ列に並ぶので、この段は「速くなるか」だけを決め、正しさには関与しない。
-    const fusion = planFusions(plan.nodes, {
-      useCounts: this.#state.useCounts,
-      outputNames: this.#state.outputNames,
-    });
-    this.#lastRunFusions = fusion.counts;
+    // MUST: 束縛の解決（= 入力 shape の検証）はヒット・ミスに関わらず**毎 run 走らせる**。
+    // ここが飛ぶと、キャッシュに当たった run だけ入力 shape の宣言不一致を素通りする。
+    const resolved = bindSymbols(graph, inputShapes, bindings);
+    const preparedKey = this.#preparedKey(resolved);
+    const prepared = this.#takePrepared(preparedKey);
+    // 計画（planGraph）と融合判定（planFusions）はどちらも GPU に触れない純関数で、ヒット時は
+    // 丸ごと飛ばす（根拠は {@link Session.#preparedKey}）。融合は掴めなかったノードを素のまま
+    // ステップ列に並べるので、この段は「速くなるか」だけを決め、正しさには関与しない。
+    const derived = prepared ?? this.#planSteps(resolved);
+    const shapes = derived.shapes;
+    // MUST: ヒット run も融合回数を報告する（ADR 0040 §3 の常設契約 — キャッシュの有無で
+    // 観測点が消えると、融合が外れた状態がヒット run の裏に隠れる）。
+    this.#lastRunFusions = derived.fusions;
+    this.#lastRunPrepared = undefined;
     this.#paramsAllocCount = 0;
     this.#paramsReuseCount = 0;
 
@@ -833,12 +907,26 @@ export class Session {
         let popped = false;
         try {
           for (const spec of graph.inputs) {
-            env.set(spec.name, this.#uploadInput(spec.name, inputs[spec.name], plan.shapes, arena));
+            env.set(spec.name, this.#uploadInput(spec.name, inputs[spec.name], shapes, arena));
           }
           // 導出相 → 実行相。どちらも run の errorScope 区間の内側で、間に submit を挟まない
           // （params の writeBuffer は導出相で出るので、それを読む dispatch の submit より
-          // 必ず先に発行される）。
-          const recipes = await this.#buildRecipes(fusion.steps);
+          // 必ず先に発行される）。ヒット run はこの導出相ごと飛ぶ — params の writeBuffer も
+          // パイプライン生成も出ないので、GPU 操作はレシピ実行のぶんだけになる。
+          let recipes: readonly StepRecipe[];
+          if ("recipes" in derived) {
+            recipes = derived.recipes;
+          } else {
+            recipes = await this.#buildRecipes(derived.steps);
+            // MUST: 登録は `#buildRecipes` が**完走して戻った後**だけ。途中で throw した run の
+            // 部分レシピを載せると、次の同一 bindings の run が欠けたステップ列を実行し、
+            // 例外なしで誤った値を返す。
+            this.#registerPrepared(preparedKey, { shapes, recipes, fusions: derived.fusions });
+          }
+          this.#lastRunPrepared = {
+            hit: prepared !== undefined,
+            cachedPlans: this.#state.prepared.size,
+          };
           const run = { device, scheduler, arena, env };
           for (const recipe of recipes) executeStepRecipe(recipe, run);
           arena.assertDrained();
@@ -858,7 +946,7 @@ export class Session {
           throw cause;
         }
 
-        outputs = await this.#readOutputs(env, plan.shapes, arena);
+        outputs = await this.#readOutputs(env, shapes, arena);
         this.#lastRun = arena.stats;
         this.#lastRunParams = {
           allocCount: this.#paramsAllocCount,
@@ -874,6 +962,60 @@ export class Session {
       await arena.destroy();
       return outputs;
     });
+  }
+
+  /** 導出相の前半（計画 → 融合判定）。GPU に触れない純関数だけで閉じる。 */
+  #planSteps(bindings: SymbolBindings): PlannedSteps {
+    const plan = planGraph(this.#state.model.graph, bindings);
+    const fusion = planFusions(plan.nodes, {
+      useCounts: this.#state.useCounts,
+      outputNames: this.#state.outputNames,
+    });
+    return { shapes: plan.shapes, fusions: fusion.counts, steps: fusion.steps };
+  }
+
+  /**
+   * 導出済み計画のキー — 解決済み bindings を `graph.symbols` の**宣言順**に並べた値の連結。
+   * シンボルを持たないグラフはキー `""` の 1 本になる。
+   *
+   * MUST: これが「導出相を丸ごと飛ばしてよい」根拠の全て。graph は Session 構築時に固定で、
+   * 計画・融合判定・レシピ導出は graph と bindings だけの純関数だから、**キーが解決済み
+   * bindings の完全一致なら導出結果は構造的に同一**で、planGraph の契約検査群（宣言 shape
+   * との照合・dtype 解決・未束縛シンボル）も同じ判定に落ちる。したがってヒット run が
+   * 検査を飛ばしても fail loudly が緩むことはない（同じ入力に対する同じ検査の再実行だけを
+   * 省く）。入力 shape 自体の検証は {@link bindSymbols} が毎 run 行う。
+   * MUST: 全シンボルが束縛済みであることは bindSymbols が保証する（未束縛なら例外）ので、
+   * ここで欠けを気にしなくてよい。
+   */
+  #preparedKey(bindings: SymbolBindings): string {
+    return this.#state.model.graph.symbols.map((sym) => bindings[sym]).join(",");
+  }
+
+  /** キャッシュを引き、当たったら最近使用へ回す（Map の挿入順が LRU の順序そのもの）。 */
+  #takePrepared(key: string): PreparedPlan | undefined {
+    const cached = this.#state.prepared.get(key);
+    if (cached === undefined) return undefined;
+    this.#state.prepared.delete(key);
+    this.#state.prepared.set(key, cached);
+    return cached;
+  }
+
+  /**
+   * 導出済み計画を載せ、上限を超えたら最も古いものを落とす。
+   *
+   * NOTE: 追い出しで捨てるのは**ホスト側のオブジェクトだけ**で、GPU 資源の破棄は伴わない。
+   * レシピが直参照している実体（params バッファは paramsCache が持つ weights アリーナ、
+   * pipeline / layout は {@link PipelineCache}）はいずれも Session 常駐で、寿命は
+   * `Session.dispose` に一本化されている（ADR 0004「確保と破棄を 1 箇所へ」）。ここで
+   * destroy すると、同じ実体を指す別の計画や次の導出が破棄済みバッファを掴む。
+   */
+  #registerPrepared(key: string, plan: PreparedPlan): void {
+    this.#state.prepared.set(key, plan);
+    // 1 run につき 1 本しか増えないので、超過は常にちょうど 1 本。
+    if (this.#state.prepared.size > PREPARED_PLAN_CAPACITY) {
+      const oldest = this.#state.prepared.keys().next().value;
+      if (oldest !== undefined) this.#state.prepared.delete(oldest);
+    }
   }
 
   /**

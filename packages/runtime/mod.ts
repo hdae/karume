@@ -67,6 +67,7 @@ export { createSession } from "./src/runtime/executor.ts";
 export type {
   ComputePrecision,
   ParamsCacheStats,
+  PreparedPlanStats,
   RunInputs,
   RunOutputs,
   ScoreStorage,
