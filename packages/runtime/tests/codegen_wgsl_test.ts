@@ -1425,16 +1425,23 @@ Deno.test("i8a8 attention_qk は半スケールを dequant 側に持ち、バッ
         dp4a ? 0 : 1,
         `${where}: エミュ内積の出現数`,
       );
-      const inner =
-        "        acc[i] = acc[i] + vec4<i32>(idot(a, b0), idot(a, b1), idot(a, b2), idot(a, b3));";
-      assertEquals(wgsl.split(inner).length, 2, `${where}: 内積ループが 1 箇所でない`);
+      // 内積は 4 行へ静的展開（linear の i8a8 と同じ展開）。**行ごとにちょうど 1 回**で、
+      // 行番号は codegen 時に確定する — accumulator に動的添字が残っていないことが条件。
+      for (let i = 0; i < 4; i += 1) {
+        const inner =
+          `      acc${i} = acc${i} + vec4<i32>(idot(a${i}, b0), idot(a${i}, b1), idot(a${i}, b2), idot(a${i}, b3));`;
+        assertEquals(wgsl.split(inner).length, 2, `${where}: 行 ${i} の内積が 1 箇所でない`);
+      }
+      // MUST: `acc[...]` の動的添字はアドレス可能なローカル領域を要求し、レジスタから落ちる。
+      // 展開の目的そのものなので、生成物に 1 つも残っていないことを見る。
+      assertEquals(wgsl.includes("acc["), false, `${where}: accumulator の動的添字が残っている`);
       // MUST: 半スケールは**量子化の前ではなく dequant 側**で q / k の両方へ。
       // 片側化・量子化前への移動はどちらも例外なしの誤値になる。
       assertEquals(
         wgsl.includes(
           v4
-            ? "s[sbase + orow * n4 + ocq] = vec4<f32>(acc[i]) * ((qscale[qsbase + orow] * dims.scale) * ks);"
-            : "s[obase + ocol] = f32(acc[i].x) * (qs * (kscale[ksbase + ocol] * dims.scale));",
+            ? "s[sbase + orow0 * n4 + ocq] = vec4<f32>(acc0) * ((qscale[qsbase + orow0] * dims.scale) * ks);"
+            : "s[obase + ocol] = f32(acc0.x) * (qs * (kscale[ksbase + ocol] * dims.scale));",
         ),
         true,
         `${where}: dequant の乗算順序と半スケールの位置`,
@@ -1513,9 +1520,15 @@ Deno.test("i8a8 attention_pv は P̃ を非実体化のまま作り、列 scale 
         dp4a ? 1 : 0,
         `${where}: dot4I8Packed の出現数`,
       );
-      const inner =
-        "        acc[i] = acc[i] + vec4<i32>(idot(a, b0), idot(a, b1), idot(a, b2), idot(a, b3));";
-      assertEquals(wgsl.split(inner).length, 2, `${where}: 内積ループが 1 箇所でない`);
+      // 内積は 4 行へ静的展開（①QK / linear の i8a8 と同じ展開）。**行ごとにちょうど 1 回**で、
+      // accumulator に動的添字が残っていないことが条件（下の `acc[` 検査が対）。
+      for (let i = 0; i < 4; i += 1) {
+        const inner =
+          `      acc${i} = acc${i} + vec4<i32>(idot(a${i}, b0), idot(a${i}, b1), idot(a${i}, b2), idot(a${i}, b3));`;
+        assertEquals(wgsl.split(inner).length, 2, `${where}: 行 ${i} の内積が 1 箇所でない`);
+      }
+      // MUST: `acc[...]` の動的添字はアドレス可能なローカル領域を要求し、レジスタから落ちる。
+      assertEquals(wgsl.includes("acc["), false, `${where}: accumulator の動的添字が残っている`);
       // MUST: P̃ は**成分ごとのスカラ式**でちょうど 4 本（vec4 へまとめて exp を掛けない）
       assertEquals(
         wgsl.split("round(exp(raw.").length - 1,
@@ -1526,7 +1539,7 @@ Deno.test("i8a8 attention_pv は P̃ を非実体化のまま作り、列 scale 
       // MUST: 格子は 127（128 化は分母型の退行）。scale は 1/127 の**乗算**で作る（除算禁止）
       assertEquals(wgsl.includes("- row_max) * 127.0"), true, `${where}: P̃ の格子`);
       assertEquals(
-        wgsl.includes("stats[(rbase + orow) * 2u + 1u] * 0.007874015748031496"),
+        wgsl.includes("stats[(rbase + orow0) * 2u + 1u] * 0.007874015748031496"),
         true,
         `${where}: prow = inv·(1/127) の乗算`,
       );
@@ -1541,8 +1554,8 @@ Deno.test("i8a8 attention_pv は P̃ を非実体化のまま作り、列 scale 
       assertEquals(
         wgsl.includes(
           v4
-            ? "o[obase + orow * n4 + ocq] = vec4<f32>(acc[i]) * (prow * vs);"
-            : "o[orow_base + ocol] = f32(acc[i].x) * (prow * vscale[vsbase + ocol]);",
+            ? "o[obase + orow0 * n4 + ocq] = vec4<f32>(acc0) * (prow * vs);"
+            : "o[orow_base + ocol] = f32(acc0.x) * (prow * vscale[vsbase + ocol]);",
         ),
         true,
         `${where}: dequant の乗算順序`,

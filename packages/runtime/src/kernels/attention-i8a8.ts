@@ -148,9 +148,56 @@ export const attentionQkI8a8Key = (
  */
 export const attentionQkI8a8UsesVec4 = (n: number): boolean => n % 4 === 0;
 
+/**
+ * i32 accumulator の初期化（①QK / ③PV 共通）。**配列 1 本ではなく `acc0..acc3` の名前付き
+ * 変数**にするのは、`acc[i]` の動的添字がアドレス可能な関数ローカル領域を要求し、レジスタに
+ * 載らずローカルメモリへ落ちるため（linear の i8a8 で先に確立した展開 — 機序は
+ * {@link "./linear-i8a8.ts"} の同名関数）。展開しても縮約は i32 の厳密加算のまま・行ごとに
+ * 独立なので、**返る整数は 1 ビットも変わらない**（RTX 3080 Ti の変種スイープで
+ * 幾何もキーも変えずに QK ×1.408 / PV ×1.451・出力はバイト同一 —
+ * docs/research/2026-08-10-kernel-variant-sweep.md §3.2）。
+ */
+const accumulatorInit = (): string =>
+  Array.from({ length: REG }, (_, i) => `  var acc${i} = vec4<i32>(0);`).join("\n");
+
+/**
+ * K パック内側の 4 行更新（①QK / ③PV 共通）。{@link accumulatorInit} と対で展開する。
+ * 1 出力あたりの加算順序（K タイル昇順・パック内 4 語まとめ）は展開前と同一。
+ */
+const accumulatorUpdate = (): string =>
+  Array.from(
+    { length: REG },
+    (_, i) =>
+      `      let a${i} = sa[p * ${GEMM_TILE}u + lid.y * ${REG}u + ${i}u];
+      acc${i} = acc${i} + vec4<i32>(idot(a${i}, b0), idot(a${i}, b1), idot(a${i}, b2), idot(a${i}, b3));`,
+  ).join("\n");
+
+/** 2 行目以降の行番号は展開時に確定するので、その場で let に落とす（0 行目は `orow0`）。 */
+const rowDecl = (i: number, indent: string): string =>
+  i === 0 ? "" : `${indent}let orow${i} = orow0 + ${i}u;\n`;
+
+/**
+ * ①QK の書き出し。行ループは codegen 時に展開して {@link accumulatorInit} の `acc0..acc3` を
+ * 静的に読む（`acc[i]` の動的添字を残さないための展開 — 理由は同関数の docstring）。
+ * ガードの構造・`qs'·ks'` の畳み順・半スケールの位置は展開前と同一。
+ */
 const store = (v4: boolean, score: ScoreStorage): string => {
   const rows = `  let orow0 = wid.y * ${GEMM_TILE}u + lid.y * ${REG}u;`;
   if (v4) {
+    const rowStores = Array.from(
+      { length: REG },
+      (_, i) =>
+        `${rowDecl(i, "    ")}    if (orow${i} < dims.m) {
+      ${
+          scoreStoreQuad(
+            "s",
+            score,
+            `sbase + orow${i} * n4 + ocq`,
+            `vec4<f32>(acc${i}) * ((qscale[qsbase + orow${i}] * dims.scale) * ks)`,
+          )
+        }
+    }`,
+    ).join("\n");
     return `  let ocq = wid.x * ${WG}u + lid.x;
 ${rows}
   if (ocq < n4) {
@@ -163,46 +210,36 @@ ${rows}
       kscale[ksbase + oc + 2u],
       kscale[ksbase + oc + 3u],
     ) * dims.scale;
-    for (var i = 0u; i < ${REG}u; i = i + 1u) {
-      let orow = orow0 + i;
-      if (orow < dims.m) {
-        // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
-        ${
-      scoreStoreQuad(
-        "s",
-        score,
-        "sbase + orow * n4 + ocq",
-        "vec4<f32>(acc[i]) * ((qscale[qsbase + orow] * dims.scale) * ks)",
-      )
-    }
-      }
-    }
+    // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+${rowStores}
   }`;
   }
-  const write = (component: string, offset: string): string =>
-    `s[obase + ocol${offset}] = f32(acc[i].${component}) * (qs * (kscale[ksbase + ocol${offset}] * dims.scale));`;
+  const write = (i: number, component: string, offset: string): string =>
+    `s[obase + ocol${offset}] = f32(acc${i}.${component}) * (qs * (kscale[ksbase + ocol${offset}] * dims.scale));`;
+  const rowStores = Array.from(
+    { length: REG },
+    (_, i) =>
+      `${rowDecl(i, "  ")}  if (orow${i} < dims.m) {
+    let obase = sbase + orow${i} * dims.n;
+    // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    let qs = qscale[qsbase + orow${i}] * dims.scale;
+    if (ocol < dims.n) {
+      ${write(i, "x", "")}
+    }
+    if (ocol + 1u < dims.n) {
+      ${write(i, "y", " + 1u")}
+    }
+    if (ocol + 2u < dims.n) {
+      ${write(i, "z", " + 2u")}
+    }
+    if (ocol + 3u < dims.n) {
+      ${write(i, "w", " + 3u")}
+    }
+  }`,
+  ).join("\n");
   return `  let ocol = wid.x * ${GEMM_TILE}u + lid.x * ${REG}u;
 ${rows}
-  for (var i = 0u; i < ${REG}u; i = i + 1u) {
-    let orow = orow0 + i;
-    if (orow < dims.m) {
-      let obase = sbase + orow * dims.n;
-      // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
-      let qs = qscale[qsbase + orow] * dims.scale;
-      if (ocol < dims.n) {
-        ${write("x", "")}
-      }
-      if (ocol + 1u < dims.n) {
-        ${write("y", " + 1u")}
-      }
-      if (ocol + 2u < dims.n) {
-        ${write("z", " + 2u")}
-      }
-      if (ocol + 3u < dims.n) {
-        ${write("w", " + 3u")}
-      }
-    }
-  }`;
+${rowStores}`;
 };
 
 export const attentionQkI8a8Wgsl = (
@@ -273,12 +310,7 @@ ${
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (k4 + ${K_PACKS - 1}u) / ${K_PACKS}u;
-  var acc = array<vec4<i32>, ${REG}>(
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-  );
+${accumulatorInit()}
   for (var t = 0u; t < tiles; t = t + 1u) {
     // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
     let apack = t * ${K_PACKS}u + ap;
@@ -304,10 +336,7 @@ ${
       let b1 = sb[bcol + 1u];
       let b2 = sb[bcol + 2u];
       let b3 = sb[bcol + 3u];
-      for (var i = 0u; i < ${REG}u; i = i + 1u) {
-        let a = sa[p * ${GEMM_TILE}u + lid.y * ${REG}u + i];
-        acc[i] = acc[i] + vec4<i32>(idot(a, b0), idot(a, b1), idot(a, b2), idot(a, b3));
-      }
+${accumulatorUpdate()}
     }
     workgroupBarrier();
   }
@@ -391,13 +420,26 @@ const fillPTile = (score: ScoreStorage): string => {
     sa[ap * ${GEMM_TILE}u + ar] = av;`;
 };
 
+/**
+ * ③PV の書き出し。①QK の {@link store} と同じく行ループは codegen 時に展開して
+ * `acc0..acc3` を静的に読む（理由は {@link accumulatorInit} の docstring）。ガードの構造・
+ * `prow·vs` の畳み順・`1/127` の乗算は展開前と同一。
+ */
 const pvStore = (v4: boolean): string => {
   const rows = `  let orow0 = wid.y * ${GEMM_TILE}u + lid.y * ${REG}u;`;
   // MUST: prow は**出力行**の統計（`rbase + orow`）。A タイル充填で引いた `arow` の側を
   // 流用すると、担当が違うスレッドの行 inv が乗る（B·H = M = 1 でしか一致しない）。
-  const prow = (indent: string): string =>
-    `${indent}let prow = stats[(rbase + orow) * 2u + 1u] * ${INV_P_LATTICE};`;
+  const prow = (i: number, indent: string): string =>
+    `${indent}let prow = stats[(rbase + orow${i}) * 2u + 1u] * ${INV_P_LATTICE};`;
   if (v4) {
+    const rowStores = Array.from(
+      { length: REG },
+      (_, i) =>
+        `${rowDecl(i, "    ")}    if (orow${i} < dims.m) {
+${prow(i, "      ")}
+      o[obase + orow${i} * n4 + ocq] = vec4<f32>(acc${i}) * (prow * vs);
+    }`,
+    ).join("\n");
     return `  let ocq = wid.x * ${WG}u + lid.x;
 ${rows}
   if (ocq < n4) {
@@ -411,40 +453,36 @@ ${rows}
       vscale[vsbase + oc + 2u],
       vscale[vsbase + oc + 3u],
     );
-    for (var i = 0u; i < ${REG}u; i = i + 1u) {
-      let orow = orow0 + i;
-      if (orow < dims.m) {
-        // MUST: prow·vs を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
-${prow("        ")}
-        o[obase + orow * n4 + ocq] = vec4<f32>(acc[i]) * (prow * vs);
-      }
-    }
+    // MUST: prow·vs を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+${rowStores}
   }`;
   }
-  const write = (component: string, offset: string): string =>
-    `o[orow_base + ocol${offset}] = f32(acc[i].${component}) * (prow * vscale[vsbase + ocol${offset}]);`;
+  const write = (i: number, component: string, offset: string): string =>
+    `o[orow_base + ocol${offset}] = f32(acc${i}.${component}) * (prow * vscale[vsbase + ocol${offset}]);`;
+  const rowStores = Array.from(
+    { length: REG },
+    (_, i) =>
+      `${rowDecl(i, "  ")}  if (orow${i} < dims.m) {
+    let orow_base = obase + orow${i} * dims.n;
+    // MUST: prow·vs を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+${prow(i, "    ")}
+    if (ocol < dims.n) {
+      ${write(i, "x", "")}
+    }
+    if (ocol + 1u < dims.n) {
+      ${write(i, "y", " + 1u")}
+    }
+    if (ocol + 2u < dims.n) {
+      ${write(i, "z", " + 2u")}
+    }
+    if (ocol + 3u < dims.n) {
+      ${write(i, "w", " + 3u")}
+    }
+  }`,
+  ).join("\n");
   return `  let ocol = wid.x * ${GEMM_TILE}u + lid.x * ${REG}u;
 ${rows}
-  for (var i = 0u; i < ${REG}u; i = i + 1u) {
-    let orow = orow0 + i;
-    if (orow < dims.m) {
-      let orow_base = obase + orow * dims.n;
-      // MUST: prow·vs を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
-${prow("      ")}
-      if (ocol < dims.n) {
-        ${write("x", "")}
-      }
-      if (ocol + 1u < dims.n) {
-        ${write("y", " + 1u")}
-      }
-      if (ocol + 2u < dims.n) {
-        ${write("z", " + 2u")}
-      }
-      if (ocol + 3u < dims.n) {
-        ${write("w", " + 3u")}
-      }
-    }
-  }`;
+${rowStores}`;
 };
 
 export const attentionPvI8a8Wgsl = (
@@ -516,12 +554,7 @@ ${
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (k4 + ${K_PACKS - 1}u) / ${K_PACKS}u;
-  var acc = array<vec4<i32>, ${REG}>(
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-  );
+${accumulatorInit()}
   for (var t = 0u; t < tiles; t = t + 1u) {
 ${fillPTile(score)}
     let vpack = t * ${K_PACKS}u + wp;
@@ -541,10 +574,7 @@ ${fillPTile(score)}
       let b1 = sb[bcol + 1u];
       let b2 = sb[bcol + 2u];
       let b3 = sb[bcol + 3u];
-      for (var i = 0u; i < ${REG}u; i = i + 1u) {
-        let a = sa[p * ${GEMM_TILE}u + lid.y * ${REG}u + i];
-        acc[i] = acc[i] + vec4<i32>(idot(a, b0), idot(a, b1), idot(a, b2), idot(a, b3));
-      }
+${accumulatorUpdate()}
     }
     workgroupBarrier();
   }

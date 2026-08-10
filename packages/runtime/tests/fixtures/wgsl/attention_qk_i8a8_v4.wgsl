@@ -54,12 +54,10 @@ fn main(
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (k4 + 3u) / 4u;
-  var acc = array<vec4<i32>, 4>(
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-    vec4<i32>(0),
-  );
+  var acc0 = vec4<i32>(0);
+  var acc1 = vec4<i32>(0);
+  var acc2 = vec4<i32>(0);
+  var acc3 = vec4<i32>(0);
   for (var t = 0u; t < tiles; t = t + 1u) {
     // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
     let apack = t * 4u + ap;
@@ -83,10 +81,14 @@ fn main(
       let b1 = sb[bcol + 1u];
       let b2 = sb[bcol + 2u];
       let b3 = sb[bcol + 3u];
-      for (var i = 0u; i < 4u; i = i + 1u) {
-        let a = sa[p * 64u + lid.y * 4u + i];
-        acc[i] = acc[i] + vec4<i32>(idot(a, b0), idot(a, b1), idot(a, b2), idot(a, b3));
-      }
+      let a0 = sa[p * 64u + lid.y * 4u + 0u];
+      acc0 = acc0 + vec4<i32>(idot(a0, b0), idot(a0, b1), idot(a0, b2), idot(a0, b3));
+      let a1 = sa[p * 64u + lid.y * 4u + 1u];
+      acc1 = acc1 + vec4<i32>(idot(a1, b0), idot(a1, b1), idot(a1, b2), idot(a1, b3));
+      let a2 = sa[p * 64u + lid.y * 4u + 2u];
+      acc2 = acc2 + vec4<i32>(idot(a2, b0), idot(a2, b1), idot(a2, b2), idot(a2, b3));
+      let a3 = sa[p * 64u + lid.y * 4u + 3u];
+      acc3 = acc3 + vec4<i32>(idot(a3, b0), idot(a3, b1), idot(a3, b2), idot(a3, b3));
     }
     workgroupBarrier();
   }
@@ -102,12 +104,21 @@ fn main(
       kscale[ksbase + oc + 2u],
       kscale[ksbase + oc + 3u],
     ) * dims.scale;
-    for (var i = 0u; i < 4u; i = i + 1u) {
-      let orow = orow0 + i;
-      if (orow < dims.m) {
-        // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
-        s[sbase + orow * n4 + ocq] = vec4<f32>(acc[i]) * ((qscale[qsbase + orow] * dims.scale) * ks);
-      }
+    // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    if (orow0 < dims.m) {
+      s[sbase + orow0 * n4 + ocq] = vec4<f32>(acc0) * ((qscale[qsbase + orow0] * dims.scale) * ks);
+    }
+    let orow1 = orow0 + 1u;
+    if (orow1 < dims.m) {
+      s[sbase + orow1 * n4 + ocq] = vec4<f32>(acc1) * ((qscale[qsbase + orow1] * dims.scale) * ks);
+    }
+    let orow2 = orow0 + 2u;
+    if (orow2 < dims.m) {
+      s[sbase + orow2 * n4 + ocq] = vec4<f32>(acc2) * ((qscale[qsbase + orow2] * dims.scale) * ks);
+    }
+    let orow3 = orow0 + 3u;
+    if (orow3 < dims.m) {
+      s[sbase + orow3 * n4 + ocq] = vec4<f32>(acc3) * ((qscale[qsbase + orow3] * dims.scale) * ks);
     }
   }
 }
