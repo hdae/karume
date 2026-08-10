@@ -211,13 +211,13 @@ import {
   weightChannelAxes,
 } from "./plan.ts";
 import {
+  bakeBindGroups,
   type BindingRecipe,
   type BindingSource,
   derivePlanSlots,
+  executeBakedPlan,
   executeStepRecipe,
-  executeStepRecipeBacked,
   type OutputRecipe,
-  type PlanSlots,
   type StepRecipe,
   StepRecipeBuilder,
   type TempSource,
@@ -429,7 +429,11 @@ export type PreparedPlanStats = {
  * `buildCount` が run 数に比例して伸びていないことが、その沈黙劣化の唯一の観測点。
  */
 export type PlanBackingStats = {
-  /** 活性 backing が常駐させている slot の総バイト数（未構築 / 破棄済みなら 0）。 */
+  /**
+   * 活性 backing が常駐させている **slot の**総バイト数（未構築 / 破棄済みなら 0）。
+   * MUST: 定義は「slot 表の総バイト数」— backing が併せて常駐させる入力バッファは含めない
+   * （理由と門は {@link ActiveBacking.bytes}）。
+   */
   readonly residentBytes: number;
   /** Session の生存中に backing を構築した累計回数（run ごとではなく累計）。 */
   readonly buildCount: number;
@@ -448,8 +452,8 @@ export type SessionDiagnostics = {
   /**
    * 直近 run の中間バッファ実績。未実行なら undefined。
    *
-   * NOTE: slot backing に乗った run（{@link PlanBackingStats}）では中間バッファがアリーナを
-   * 通らないため、ここに残るのは入力アップロードと readback staging のぶんだけになる
+   * NOTE: slot backing に乗った run（{@link PlanBackingStats}）では中間バッファも入力バッファも
+   * アリーナを通らないため、ここに残るのは readback staging のぶんだけになる
    * （値の意味は不変 — 「その run がアリーナで確保したもの」）。
    */
   readonly lastRun: ArenaStats | undefined;
@@ -611,13 +615,30 @@ const PREPARED_PLAN_CAPACITY = 4;
 type ActiveBacking = {
   /** この backing が属する導出済み計画のキー（{@link Session.#preparedKey}）。 */
   readonly key: string;
-  readonly slots: PlanSlots;
-  /** {@link PlanSlots.bytes} と同順・同長の常駐バッファ。 */
-  readonly buffers: readonly GPUBuffer[];
+  /**
+   * transient slot の常駐バイト数（**入力バッファは含まない**）。
+   * MUST: この定義を変えない — 「slot 表の総バイト数 = 非 backed run のプール確保」という
+   * footprint 不変の門（tests/gpu_plan_backing_test.ts）がこの値そのもので、入力ぶんを混ぜると
+   * 門が観測しているものが変わる（入力は signature ごとに固定サイズで、slot に比べれば桁が違う）。
+   */
   readonly bytes: number;
-  /** backing が所有する全 slot（readback 適格判定の分岐に使う）。 */
+  /**
+   * グラフ入力名 → backing 所有の常駐バッファ（`HOST_WRITTEN_USAGE`）。サイズは解決済み
+   * shape から確定するので、同一 signature の run では作り直す理由が無い。
+   */
+  readonly inputs: ReadonlyMap<string, GPUBuffer>;
+  /** 焼き込み済み bind group（{@link bakeBindGroups}）。backed run はこれを dispatch するだけ。 */
+  readonly groups: readonly (readonly GPUBindGroup[])[];
+  /** グラフ出力名 → 実体（読み戻し先 — 構築時に確定。backed run は env を組まない）。 */
+  readonly outputs: ReadonlyMap<string, GPUBuffer>;
+  /** backing が所有する全バッファ（slot + 入力 — 破棄と readback 適格判定の分岐に使う）。 */
   readonly owned: ReadonlySet<GPUBuffer>;
-  /** pin された slot = readback を許す唯一の集合（{@link PlanSlots.pinned}）。 */
+  /**
+   * readback を許す唯一の集合 = pin された slot + 入力バッファ。
+   * MUST: 入力を含める — グラフ出力が入力の別名になる形（reshape(入力)）では読み戻し先が
+   * 入力バッファそのものになる。非 backed 経路の入力はプール外（`allocHostWritten`）で
+   * `RunArena.isReadable` が素通しにしていたので、これはその同値の再現。
+   */
   readonly readable: ReadonlySet<GPUBuffer>;
 };
 
@@ -974,15 +995,14 @@ export class Session {
       // 活性化した slot backing（ミス run では undefined のまま）。readback の適格判定が
       // 「その実体が pin された slot か」を見るため、エンコード区間の外まで持ち越す。
       let backing: ActiveBacking | undefined;
+      // この run が backing を新規構築したか（失敗時の回復規律 — 下の catch が読む）。
+      let builtBacking = false;
       try {
         // 無効な bindGroup / dispatch は throw せず submit ごと失敗し、出力にプール残骸が
         // 残る沈黙故障になる。中間バッファの確保も同じ区間で out-of-memory を見る。
         pushFailureScopes(device);
         let popped = false;
         try {
-          for (const spec of graph.inputs) {
-            env.set(spec.name, this.#uploadInput(spec.name, inputs[spec.name], shapes, arena));
-          }
           // 導出相 → 実行相。どちらも run の errorScope 区間の内側で、間に submit を挟まない
           // （params の writeBuffer は導出相で出るので、それを読む dispatch の submit より
           // 必ず先に発行される）。ヒット run はこの導出相ごと飛ぶ — params の writeBuffer も
@@ -990,11 +1010,24 @@ export class Session {
           let recipes: readonly StepRecipe[];
           if ("recipes" in derived) {
             recipes = derived.recipes;
+            // MUST: 入力の検査（値依存 — 毎 run）は backing 構築より前。ここで落ちる run に
+            // slot（DiT で ~GiB 規模）の構築を払わせない。
+            const data = graph.inputs.map((spec) =>
+              this.#checkInput(spec.name, inputs[spec.name], shapes)
+            );
             // MUST: backing を作るのは**ヒット run だけ**。単発 run（1 回しか走らない
             // ワークロード）に slot メモリを払わせないための唯一の門で、ミス run の挙動と
             // ArenaStats はこれで完全に据え置かれる。
-            backing = this.#activateBacking(preparedKey, recipes);
+            const activated = this.#activateBacking(preparedKey, recipes, shapes);
+            backing = activated.backing;
+            builtBacking = activated.built;
+            graph.inputs.forEach((spec, index) => {
+              this.#writeInput(activated.backing, spec.name, data[index]);
+            });
           } else {
+            for (const spec of graph.inputs) {
+              env.set(spec.name, this.#uploadInput(spec.name, inputs[spec.name], shapes, arena));
+            }
             recipes = await this.#buildRecipes(derived.steps);
             // MUST: 登録は `#buildRecipes` が**完走して戻った後**だけ。途中で throw した run の
             // 部分レシピを載せると、次の同一 bindings の run が欠けたステップ列を実行し、
@@ -1012,10 +1045,8 @@ export class Session {
           } else {
             // slot 経路。積むコマンド列はアリーナ経路と同一で、bind 先の実体が run を跨いで
             // 固定されるだけ（前 run の残骸が残っていてよい根拠は full-write — ADR 0014）。
-            const run = { device, scheduler, env, buffers: backing.buffers };
-            for (let index = 0; index < recipes.length; index += 1) {
-              executeStepRecipeBacked(recipes[index], backing.slots.steps[index], run);
-            }
+            // bind group は構築時に焼き込み済みなので、ここは dispatch を積むだけ。
+            executeBakedPlan(recipes, backing.groups, scheduler);
           }
 
           await scheduler.flush();
@@ -1033,7 +1064,8 @@ export class Session {
           throw cause;
         }
 
-        outputs = await this.#readOutputs(env, shapes, arena, backing);
+        // backed run は env を組まない（読み戻し先は焼き込み時に確定した写像）。
+        outputs = await this.#readOutputs(backing?.outputs ?? env, shapes, arena, backing);
         this.#lastRun = arena.stats;
         this.#lastRunParams = {
           allocCount: this.#paramsAllocCount,
@@ -1043,6 +1075,12 @@ export class Session {
         // MUST: 後始末の失敗で本体の例外を上書きしない。原因は本体側にあり、destroy の
         // rejection（主因は device 消失）に差し替わると調査の起点が消える。
         await arena.destroy().catch(() => undefined);
+        // MUST: **この run が新規構築した** backing だけを退役させる。一過性の失敗（構築時の
+        // out-of-memory 等）は次の同一 signature ヒットでの再構築で回復し、壊れたまま常駐した
+        // backing が後続 run に居座らない。既存 backing での失敗 run は退役させない — 無関係な
+        // 失敗のたびに ~GiB 規模の再構築を強いるスラッシングになる（そちらの回復手段は
+        // signature 切替と LRU 追い出し）。
+        if (builtBacking) this.#retireBacking();
         // MUST: 破棄待ちの slot は arena.destroy（= flush / discard 済み）の**後**に返す。
         this.#destroyRetired();
         throw cause;
@@ -1119,41 +1157,70 @@ export class Session {
 
   /**
    * ヒット run の slot backing を活性化する（無ければ構築・別 signature なら作り直す）。
+   * `built` は「この run が新規構築したか」— 失敗時の回復規律（{@link Session.#runOnce}）が読む。
    *
    * MUST: 呼ぶのは run の `withScopeLock` / errorScope 区間の内側だけ。createBuffer は上限超過で
-   * 同期例外を投げずに無効バッファを返すため、囲まないと「無効な slot に dispatch が書く」
-   * 沈黙故障になる。
+   * 同期例外を投げずに無効バッファを返し、createBindGroup の validation 失敗も例外にならない
+   * ため、囲まないと「無効な slot / bind group に dispatch が書く」沈黙故障になる。
    * NOTE: レシピ列は必ず 1 度アリーナ経路で完走している（backing はヒット run でしか作らない）
    * ので、参照計数が閉じることは既に `assertDrained` が確かめ済み — slot 導出はその同じ簿記を
    * 仮想的に再生するだけで、新しい正しさの前提を持ち込まない。
    */
-  #activateBacking(key: string, recipes: readonly StepRecipe[]): ActiveBacking {
+  #activateBacking(
+    key: string,
+    recipes: readonly StepRecipe[],
+    shapes: ReadonlyMap<string, readonly number[]>,
+  ): { readonly backing: ActiveBacking; readonly built: boolean } {
     const current = this.#backing;
-    if (current !== undefined && current.key === key) return current;
+    if (current !== undefined && current.key === key) return { backing: current, built: false };
     // MUST: 旧 backing は destroy せず破棄待ちへ積む（この run の flush 後にだけ返す）。
     this.#retireBacking();
+    const graph = this.#state.model.graph;
+    const device = this.#state.gpu.device;
     const slots = derivePlanSlots(recipes);
-    const buffers = slots.bytes.map((size) =>
-      this.#state.gpu.device.createBuffer({ size, usage: STORAGE_USAGE })
+    const buffers = slots.bytes.map((size) => device.createBuffer({ size, usage: STORAGE_USAGE }));
+    // 入力バッファも backing 所有にする（run ごとの確保と writeBuffer 先の入れ替わりを消す）。
+    // MUST: 大きさはアリーナ経路の `#uploadInput` と同じ算式（4 バイト床込み — 0 要素入力で
+    // 0 サイズバッファを束縛しない）。同一 signature なら不変。
+    const inputs = new Map<string, GPUBuffer>(
+      graph.inputs.map((spec) => [
+        spec.name,
+        device.createBuffer({
+          size: Math.max(4, numel(resolvedShape(shapes, spec.name)) * 4),
+          usage: HOST_WRITTEN_USAGE,
+        }),
+      ]),
     );
+    const baked = bakeBindGroups(recipes, slots, { device, buffers, inputs });
+    // 読み戻し先はここで確定する。initializer がグラフ出力になる形（IR が許す）は値名の
+    // 写像に載らないので、`#readOutputs` 側の重みフォールバックがそのまま受け持つ。
+    const outputs = new Map<string, GPUBuffer>();
+    for (const name of graph.outputs) {
+      const buffer = baked.values.get(name);
+      if (buffer !== undefined) outputs.set(name, buffer);
+    }
     const backing: ActiveBacking = {
       key,
-      slots,
-      buffers,
       bytes: slots.bytes.reduce((total, size) => total + size, 0),
-      owned: new Set(buffers),
-      readable: new Set([...slots.pinned].map((slot) => buffers[slot])),
+      inputs,
+      groups: baked.groups,
+      outputs,
+      owned: new Set([...buffers, ...inputs.values()]),
+      readable: new Set([
+        ...[...slots.pinned].map((slot) => buffers[slot]),
+        ...inputs.values(),
+      ]),
     };
     this.#backing = backing;
     this.#backingBuilds += 1;
-    return backing;
+    return { backing, built: true };
   }
 
   /** 活性 backing を破棄待ちへ移す（実際の `destroy()` は flush 後の後始末点で 1 回だけ）。 */
   #retireBacking(): void {
     const current = this.#backing;
     if (current === undefined) return;
-    for (const buffer of current.buffers) this.#retired.push(buffer);
+    for (const buffer of current.owned) this.#retired.push(buffer);
     this.#backing = undefined;
   }
 
@@ -1219,12 +1286,15 @@ export class Session {
     return dtype;
   }
 
-  #uploadInput(
+  /**
+   * 入力テンソルの検査（**値依存なので毎 run 必要** — ヒット run でも飛ばせない）。通れば
+   * GPU へ書くホスト配列をそのまま返す。
+   */
+  #checkInput(
     name: string,
     tensor: Tensor | undefined,
     shapes: ReadonlyMap<string, readonly number[]>,
-    arena: RunArena,
-  ): GPUBuffer {
+  ): Tensor["data"] {
     // 未指定・shape 不一致は bindSymbols が済ませている。ここは dtype と要素数だけを見る。
     if (tensor === undefined) throw new ExecutionError(`入力 '${name}' が渡されていない`);
     // MUST: 判別子と実データの両方を宣言 dtype と突き合わせる。要素は全型 4 バイトなので、
@@ -1245,9 +1315,37 @@ export class Session {
         }] の ${count} と合わない`,
       );
     }
-    const buffer = arena.allocHostWritten(Math.max(4, count * 4), HOST_WRITTEN_USAGE);
-    if (count > 0) this.#state.gpu.device.queue.writeBuffer(buffer, 0, tensor.data);
+    return tensor.data;
+  }
+
+  /** アリーナ経路の入力アップロード（run 寿命のバッファを 1 本確保して書く）。 */
+  #uploadInput(
+    name: string,
+    tensor: Tensor | undefined,
+    shapes: ReadonlyMap<string, readonly number[]>,
+    arena: RunArena,
+  ): GPUBuffer {
+    const data = this.#checkInput(name, tensor, shapes);
+    const buffer = arena.allocHostWritten(Math.max(4, data.length * 4), HOST_WRITTEN_USAGE);
+    if (data.length > 0) this.#state.gpu.device.queue.writeBuffer(buffer, 0, data);
     return buffer;
+  }
+
+  /**
+   * backed run の入力書き込み（backing 所有の常駐バッファへ**上書き**する）。
+   *
+   * MUST: この `writeBuffer` が追い越せる未 submit エンコードは存在しない。根拠は 2 つ —
+   * ①同一 Session の run は {@link Session.#chain} で直列化され、各 run は flush
+   * （`onSubmittedWorkDone`）と readback の完了まで済ませてからしか返らないので、呼ばれた時点で
+   * 先行 run の未 submit エンコードは 1 つも残っていない ②run の中では入力書き込みが全
+   * エンコードに先行する。`queue.writeBuffer` は未 submit の先行エンコードを追い越す
+   * （ADR 0004 不変条件④）ため、どちらかが崩れると前 run の dispatch が新しい入力を読む
+   * 沈黙誤値になる。
+   */
+  #writeInput(backing: ActiveBacking, name: string, data: Tensor["data"]): void {
+    const buffer = backing.inputs.get(name);
+    if (buffer === undefined) throw new ExecutionError(`入力 '${name}' の常駐バッファが無い`);
+    if (data.length > 0) this.#state.gpu.device.queue.writeBuffer(buffer, 0, data);
   }
 
   /**

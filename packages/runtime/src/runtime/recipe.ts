@@ -6,16 +6,20 @@
  * 実体（{@link RunArena} のバッファ）にも触れない — Session 常駐の実体（重み・per-channel
  * scale・params）だけを直参照として畳み込む。
  *
- * MUST: レシピは `GPUBindGroup` を持たない。束ねる相手（ノード出力・一時）は run ごとに
- * プール再利用で入れ替わるため、持てるのは「どの位置に何を束ねるか」という**手順**だけ。
+ * MUST: レシピは `GPUBindGroup` を持たない。束ねる相手（ノード出力・一時）はアリーナ経路では
+ * run ごとにプール再利用で入れ替わるため、持てるのは「どの位置に何を束ねるか」という**手順**
+ * だけ。焼き込んだ bind group（{@link bakeBindGroups}）を持つのは **backing 側**で、レシピ自体は
+ * 実体に依らないまま複数の backing から共有される。
  * MUST: 一時バッファの寿命は dispatch 境界で表す（{@link TempRecipe}）。まとめて確保 /
  * まとめて解放に均すと、入れ子の生存区間を持つ形（i8a8 attention）でプール再利用と
  * `peakTransientBytes` が現行と変わる。
  *
  * 実行相は 2 つある。**アリーナ経路**（{@link executeStepRecipe}）は run ごとに
- * {@link RunArena} で確保・参照計数する従来の形。**slot 経路**
- * （{@link executeStepRecipeBacked}）は {@link derivePlanSlots} が導いた slot 表を Session 常駐
- * バッファへ割り付け、確保・retain・release・assertDrained を丸ごと省く。
+ * {@link RunArena} で確保・参照計数する従来の形。**slot 経路**は {@link derivePlanSlots} が
+ * 導いた slot 表を Session 常駐バッファへ割り付け、確保・retain・release・assertDrained を
+ * 丸ごと省く。さらに束縛先が run を跨いで固定されるので、{@link bakeBindGroups} が全 dispatch の
+ * bind group を**構築時に 1 度だけ**組み、run に残るのは {@link executeBakedPlan} の dispatch
+ * だけになる（createBindGroup も env の構築も出ない）。
  */
 
 import { type RunArena, toSizeClass } from "../gpu/arena.ts";
@@ -154,15 +158,6 @@ export type StepExecution = EncodeContext & {
   readonly arena: RunArena;
 };
 
-/**
- * slot backing での実行文脈（{@link executeStepRecipeBacked}）。値と一時の実体は
- * {@link PlanSlots} が決めた Session 常駐バッファで、run 寿命の簿記を一切持たない。
- */
-export type BackedExecution = EncodeContext & {
-  /** slot 添字 → 常駐バッファ（{@link PlanSlots.bytes} と同順・同長）。 */
-  readonly buffers: readonly GPUBuffer[];
-};
-
 const resolveValue = (source: ValueSource, env: ReadonlyMap<string, GPUBuffer>): GPUBuffer => {
   if (source.kind === "resident") return source.buffer;
   const buffer = env.get(source.name);
@@ -176,21 +171,39 @@ const resolveBinding = (
   temps: readonly GPUBuffer[],
 ): GPUBuffer => (source.kind === "temp" ? temps[source.id] : resolveValue(source, env));
 
-const encodeDispatch = (
+/**
+ * 1 dispatch ぶんの bind group を組む。
+ *
+ * MUST: アリーナ経路（{@link encodeDispatch}）と焼き込み（{@link bakeBindGroups}）は**この 1 本**
+ * を共有する。エントリの並べ方が 2 実装に分かれると、焼き込み側だけ束縛番号や params の位置が
+ * ずれても validation は通り（layout さえ満たせばよい）、値だけが静かに変わる。
+ */
+const createBindGroup = (
+  device: GPUDevice,
   recipe: DispatchRecipe,
-  run: EncodeContext,
-  temps: readonly GPUBuffer[],
-): void => {
-  const bindGroup = run.device.createBindGroup({
+  resolve: (source: BindingSource) => GPUBuffer,
+): GPUBindGroup =>
+  device.createBindGroup({
     layout: recipe.layout,
     entries: [
       { binding: 0, resource: { buffer: recipe.params } },
       ...recipe.bindings.map((entry) => ({
         binding: entry.binding,
-        resource: { buffer: resolveBinding(entry.source, run.env, temps) },
+        resource: { buffer: resolve(entry.source) },
       })),
     ],
   });
+
+const encodeDispatch = (
+  recipe: DispatchRecipe,
+  run: EncodeContext,
+  temps: readonly GPUBuffer[],
+): void => {
+  const bindGroup = createBindGroup(
+    run.device,
+    recipe,
+    (source) => resolveBinding(source, run.env, temps),
+  );
   run.scheduler.dispatch(recipe.pipeline, bindGroup, recipe.workgroups, recipe.key);
 };
 
@@ -348,23 +361,81 @@ const resolveSlot = (slot: number | undefined, buffers: readonly GPUBuffer[]): G
   return buffer;
 };
 
+/** 焼き込み済みの slot backing 実行資材（{@link bakeBindGroups}）。 */
+export type BakedPlan = {
+  /**
+   * 全ステップ × 全 dispatch の bind group。外側は {@link StepRecipe} 列と、内側は
+   * {@link StepRecipe.dispatches} と同順・同長。
+   */
+  readonly groups: readonly (readonly GPUBindGroup[])[];
+  /**
+   * 全ステップを展開し終えた時点の値名 → 実体（アリーナ経路の run 末尾の `env` と同じもの）。
+   * グラフ出力の読み戻し先を構築時に確定するのに使う。
+   */
+  readonly values: ReadonlyMap<string, GPUBuffer>;
+};
+
 /**
- * レシピ 1 ステップぶんの実行（slot 経路）。確保・retain・release を伴わず、値と一時は
- * {@link PlanSlots} が決めた常駐バッファをそのまま束ねる。
+ * slot backing の bind group を焼き込む（構築時に 1 度だけ）。
+ *
+ * 焼き込めるのは束縛先が run を跨いで固定だから: params / 重み / per-channel scale は
+ * `resident` の直参照、ノード出力・一時は {@link PlanSlots} の常駐 slot、グラフ入力は backing が
+ * 所有する常駐バッファ（`inputs`）。run ごとに変わるのは**入力バッファの中身だけ**で、
+ * bind group が指す実体は 1 つも動かない。
+ *
+ * MUST: 値名 → 実体の写像はアリーナ経路（{@link executeStepRecipe}）と**同じ順で**展開する
+ * — 出力を先に env へ載せてから当該ステップの dispatch を解決する順序が崩れると、出力を
+ * 自分の入力にも束ねるステップだけが別の実体を掴む。
+ * MUST: 呼ぶのは run の errorScope 区間の内側だけ（createBindGroup の validation 失敗は
+ * 例外にならない）。
+ */
+export const bakeBindGroups = (
+  recipes: readonly StepRecipe[],
+  slots: PlanSlots,
+  context: {
+    readonly device: GPUDevice;
+    /** slot 添字 → 常駐バッファ（{@link PlanSlots.bytes} と同順・同長）。 */
+    readonly buffers: readonly GPUBuffer[];
+    /** グラフ入力名 → backing 所有の常駐バッファ。 */
+    readonly inputs: ReadonlyMap<string, GPUBuffer>;
+  },
+): BakedPlan => {
+  const { device, buffers, inputs } = context;
+  const values = new Map<string, GPUBuffer>(inputs);
+  const groups: (readonly GPUBindGroup[])[] = [];
+  recipes.forEach((recipe, index) => {
+    const step = slots.steps[index];
+    const out = recipe.output.kind === "alias"
+      ? resolveValue(recipe.output.source, values)
+      : resolveSlot(step.output, buffers);
+    values.set(recipe.outputName, out);
+    const temps = step.temps.map((slot) => resolveSlot(slot, buffers));
+    groups.push(
+      recipe.dispatches.map((dispatch) =>
+        createBindGroup(device, dispatch, (source) => resolveBinding(source, values, temps))
+      ),
+    );
+  });
+  return { groups, values };
+};
+
+/**
+ * 焼き込み済み backing の実行（slot 経路）。run が出す GPU 操作はこの dispatch だけで、
+ * 確保・retain・release も createBindGroup も出ない。
  *
  * MUST: 積むコマンド列は {@link executeStepRecipe} と**同一**（bind 先の実体が run を跨いで
  * 同じになるだけ）。前 run の残骸が slot に残っていても正しいのは full-write（ADR 0014 —
  * 全ノードが出力の全バイトを書く）が根拠で、プール再利用の安全性と同じ 1 本の不変条件。
  */
-export const executeStepRecipeBacked = (
-  recipe: StepRecipe,
-  slots: StepSlots,
-  run: BackedExecution,
+export const executeBakedPlan = (
+  recipes: readonly StepRecipe[],
+  groups: readonly (readonly GPUBindGroup[])[],
+  scheduler: SubmitScheduler,
 ): void => {
-  const out = recipe.output.kind === "alias"
-    ? resolveValue(recipe.output.source, run.env)
-    : resolveSlot(slots.output, run.buffers);
-  run.env.set(recipe.outputName, out);
-  const temps = slots.temps.map((slot) => resolveSlot(slot, run.buffers));
-  for (const dispatch of recipe.dispatches) encodeDispatch(dispatch, run, temps);
+  recipes.forEach((recipe, index) => {
+    const stepGroups = groups[index];
+    recipe.dispatches.forEach((dispatch, id) => {
+      scheduler.dispatch(dispatch.pipeline, stepGroups[id], dispatch.workgroups, dispatch.key);
+    });
+  });
 };

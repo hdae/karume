@@ -120,6 +120,113 @@ Deno.test({
 });
 
 Deno.test({
+  name: "backed run のアリーナ確保は readback staging だけになる（入力固定の門・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await createSession(gpu, openModel(modelBytes()));
+    try {
+      await session.run({ x: input(4, 0) });
+      const miss = session.diagnostics().lastRun;
+      await session.run({ x: input(4, 1) });
+      const built = session.diagnostics().lastRun;
+      await session.run({ x: input(4, 2) });
+      const backed = session.diagnostics().lastRun;
+      assert(miss !== undefined && built !== undefined && backed !== undefined);
+
+      // グラフ出力は 1 本なので staging も 1 本。入力アップロードが 1 本でもアリーナに
+      // 残っていればここが 2 以上になる（中間は既に slot 常駐へ移っている）。
+      assertEquals(backed.allocCount, 1, "backed run の確保は readback staging の 1 本だけ");
+      assertEquals(built.allocCount, 1, "初ヒット（構築）run も同じ");
+      assertEquals(backed.transientBytes, 0, "中間はアリーナを通らない");
+      assert(
+        miss.allocCount > backed.allocCount,
+        `ミス run の確保が減っていない（${miss.allocCount} → ${backed.allocCount}）`,
+      );
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "同一 signature の並行 run は共有入力バッファでも取り違えない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await createSession(gpu, openModel(modelBytes()));
+    try {
+      // backed run の入力は backing 所有の**1 本**へ上書きされる。await せず並行発行して、
+      // 直列化（#chain）と「run は flush 完了後にしか返らない」が崩れたときに落ちる形にする
+      // — 崩れれば後続 run の writeBuffer が先行 run の未 submit dispatch を追い越し、
+      // 例外なしで前後の phase の値が混ざる。
+      const phases = [0, 1, 2, 3, 4];
+      const actual = await Promise.all(phases.map((phase) => session.run({ x: input(4, phase) })));
+      assertEquals(session.diagnostics().planBacking.buildCount, 1);
+      for (const phase of phases) {
+        const expected = await runFresh(gpu, { x: input(4, phase) });
+        assertEquals(bits(actual[phase]["y"]), bits(expected), `phase ${phase} のビット一致`);
+      }
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/** グラフ出力が入力の別名になる形（reshape）+ 実 dispatch を 1 本持つ形。 */
+const ALIAS_GRAPH: GraphJson = {
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["reshape", "sigmoid"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [4, 3] }],
+  outputs: ["y", "s"],
+  initializers: {},
+  values: {
+    y: { dtype: "f32", shape: [12] },
+    s: { dtype: "f32", shape: [4, 3] },
+  },
+  nodes: [
+    { op: "reshape", ins: ["x"], outs: ["y"], attrs: {} },
+    { op: "sigmoid", ins: ["x"], outs: ["s"], attrs: {} },
+  ],
+};
+
+Deno.test({
+  name: "グラフ出力が入力の別名でも backed run は読み戻せる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const model = graphModelBuffer(ALIAS_GRAPH);
+    const session = await createSession(gpu, openModel(model));
+    try {
+      for (const phase of [0, 1, 2]) {
+        const x = input(4, phase);
+        const outputs = await session.run({ x });
+        // 別名出力は入力バッファそのものの読み戻し。値が phase ごとに変わることが、
+        // 「常駐入力バッファに毎 run 書けている」ことの検出器になる。
+        assertEquals(outputs["y"].shape, [12]);
+        assertEquals(bits(outputs["y"]), bits(x), `phase ${phase} の別名出力`);
+
+        const reference = await createSession(gpu, openModel(model));
+        try {
+          assertEquals(bits(outputs["s"]), bits((await reference.run({ x }))["s"]));
+        } finally {
+          await reference.dispose();
+        }
+      }
+      assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
+      assertEquals(session.diagnostics().planBacking.buildCount, 1);
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "backing は活性 signature のぶんだけ常駐し、切替で作り直される（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
