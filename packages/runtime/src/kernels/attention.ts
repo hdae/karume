@@ -3,9 +3,9 @@
  *
  * | 段 | キー                                        | 役割                                              |
  * | -- | ------------------------------------------- | ------------------------------------------------- |
- * | ①  | `attention_qk:v1:f32:reg64x64{v4}`          | `S = (q·scale) @ (k·scale)ᵀ` を**実体化**         |
+ * | ①  | `attention_qk:v1:f32:reg64x64r8x4w16{v4}`   | `S = (q·scale) @ (k·scale)ᵀ` を**実体化**         |
  * | ②  | `attention_stats:v1:f32:lastdim:safe:wg256` | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`      |
- * | ③  | `attention_pv:v1:f32:reg64x64{v4}`          | `O = P @ v`（`P = exp(S−m)·inv` は**非実体化**）  |
+ * | ③  | `attention_pv:v1:f32:reg64x64r8x4w16{v4}`   | `O = P @ v`（`P = exp(S−m)·inv` は**非実体化**）  |
  *
  * ① と ③ は GEMM 骨格（src/kernels/gemm.ts）の断片共有で、内積ループの正本は 1 箇所のまま。
  * ② だけがここに実体を持つ。

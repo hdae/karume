@@ -123,8 +123,8 @@ export const assertI8a8Geometry = (geometry: I8a8Geometry, where: string): void 
 };
 
 /**
- * パイプラインキーの幾何判別子。`reg64x64v4`（f32 骨格の {@link "./gemm.ts"} `gemmKeyPart`）の
- * 流儀を保ったまま、**タイル辺だけでは幾何が決まらなくなった**ぶんを足す
+ * パイプラインキーの幾何判別子。`reg64x64r8x4w16v4`（f32 骨格の {@link "./gemm.ts"}
+ * `gemmKeyPart`）の流儀を保ったまま、**タイル辺だけでは幾何が決まらなくなった**ぶんを足す
  * （`M128N64` は `r8×8 wg8×16` とも `r16×8 wg8×8` とも組めるので、タイル辺だけのキーは
  * 別物へ衝突する）。v4 フラグの位置と綴りは従来どおり末尾。
  */

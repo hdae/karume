@@ -3,7 +3,7 @@
  *
  * | 経路                | キー                                              | 条件        |
  * | ------------------- | ------------------------------------------------- | ----------- |
- * | implicit GEMM       | `conv2d:v2:f32:igemm{64|32}x64{v4}:wg16x{16|8}{:w…}` | groups == 1 |
+ * | implicit GEMM       | `conv2d:v2:f32:igemm{64|32}x64{v4}:wg16x{8|4}{:w…}` | groups == 1 |
  * | 直接畳み込み        | `conv2d:v1:f32:direct:wg256{:w…}`                 | groups > 1  |
  *
  * implicit GEMM（ADR 0024）は `C[Cout, N] = W[Cout, K] × Xcol[K, N]` を GEMM 骨格

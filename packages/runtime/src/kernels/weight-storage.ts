@@ -55,11 +55,12 @@ export const weightNote = (storage: WeightStorage): string =>
   storage === "f32" ? "" : storage === "f16" ? ", 重み f16 格納" : ", 重み i8 格納";
 
 /**
- * i8 変種で per-channel scale を束ねる局所変数の名前。
+ * i8 変種で per-channel scale を束ねる局所変数の**既定の**名前。
  *
  * {@link weightScaleWgsl} が縮約の外で 1 度だけ束縛し、{@link weightRead} の第 4 引数として
  * 各カーネルが渡す。カーネルが束縛を忘れると WGSL のコンパイルが「未定義の識別子」で落ちる
- * （沈黙しない）。
+ * （沈黙しない）。1 スレッドが複数チャネルを担当する形（GEMM 骨格の充填スロット）では
+ * 名前が 1 本では足りないので、{@link weightScaleWgsl} の第 4 引数で別名を渡せる。
  */
 export const WEIGHT_SCALE_VAR = "wscale_v";
 
@@ -130,16 +131,22 @@ fn dequant(i: u32, scale: f32) -> f32 {
  *
  * 行末に置く前提で先頭に改行が入る（f32 / f16 では空文字になり、従来の行がそのまま残る）。
  * `indent` は挿入先の字下げをそのまま渡す。
+ *
+ * `variable` は束縛する局所変数の名前。MUST: 既定は {@link WEIGHT_SCALE_VAR} — 1 スレッド
+ * 1 チャネルの 4 カーネル（conv1d / conv2d 直接 / conv_transpose1d / embedding）の生成物を
+ * 1 バイトも動かさないための既定で、スナップショット（tests/fixtures/wgsl/）が検出器。
+ * 複数チャネルを担当する側（GEMM 骨格の充填スロット）だけがスロットごとの別名を渡す。
  */
 export const weightScaleWgsl = (
   storage: WeightStorage,
   channel: string,
   indent: string,
+  variable: string = WEIGHT_SCALE_VAR,
 ): string =>
   storage === "i8"
     ? `
 ${indent}// 出力チャネルの scale はループ不変 — 重みの要素ごとに引き直さない（ADR 0019）
-${indent}let ${WEIGHT_SCALE_VAR} = wscale[${channel}];`
+${indent}let ${variable} = wscale[${channel}];`
     : "";
 
 /**

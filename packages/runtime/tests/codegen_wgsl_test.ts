@@ -35,6 +35,7 @@ import {
 import { type IrDtype, SEMANTIC_DTYPES } from "../src/format/ir.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../src/kernels/bmm.ts";
 import { GEMM_MTILE_SMALL, GEMM_TILE, gemmUsesVec4 } from "../src/kernels/gemm.ts";
+import { defaultGemmGeometry } from "../src/kernels/gemm-geometry.ts";
 import { conv1dKey, conv1dParams, conv1dWgsl } from "../src/kernels/conv1d.ts";
 import {
   CONV2D_SCALE_BINDING,
@@ -162,28 +163,25 @@ const BMM_WGSL = bmmWgsl(false);
  * GEMM 骨格の全生成入力（6 op × 重み格納 × v4）を機械的に回すための直積。
  * 融合 attention の ①③（ADR 0023）と conv2d の implicit GEMM（ADR 0024）も同じ骨格を
  * 共有するので、内積ループ・タイル辺・キーの検査が自動でこちらにも掛かる。
- * 4 番目の要素は accumulator の持ち方（`true` = `acc0..acc3` の静的展開 = linear だけ）。
  */
-const GEMM_VARIANTS: readonly (readonly [string, string, string, boolean])[] = [false, true]
+const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, true]
   .flatMap((
     v4,
   ) => [
-    [`matmul${v4 ? " v4" : ""}`, matmulKey(v4), matmulWgsl(v4), false] as const,
-    [`bmm${v4 ? " v4" : ""}`, bmmKey(v4), bmmWgsl(v4), false] as const,
-    [`attention_qk${v4 ? " v4" : ""}`, attentionQkKey(v4), attentionQkWgsl(v4), false] as const,
-    [`attention_pv${v4 ? " v4" : ""}`, attentionPvKey(v4), attentionPvWgsl(v4), false] as const,
+    [`matmul${v4 ? " v4" : ""}`, matmulKey(v4), matmulWgsl(v4)] as const,
+    [`bmm${v4 ? " v4" : ""}`, bmmKey(v4), bmmWgsl(v4)] as const,
+    [`attention_qk${v4 ? " v4" : ""}`, attentionQkKey(v4), attentionQkWgsl(v4)] as const,
+    [`attention_pv${v4 ? " v4" : ""}`, attentionPvKey(v4), attentionPvWgsl(v4)] as const,
     ...WEIGHT_STORAGES.flatMap((weight) => [
       [
         `linear ${weight}${v4 ? " v4" : ""}`,
         linearKey(weight, v4),
         linearWgsl(weight, v4),
-        true,
       ] as const,
       [
         `conv2d igemm ${weight}${v4 ? " v4" : ""}`,
         conv2dIgemmKey(weight, v4),
         conv2dIgemmWgsl(weight, v4),
-        false,
       ] as const,
     ]),
   ]);
@@ -1025,10 +1023,11 @@ Deno.test("bmm は matmul と別カーネルで、バッチ軸のオフセット
     assertEquals(bmmWgsl(v4).includes(`let abase = wid.z * dims.m * ${unit("k")};`), true, where);
     assertEquals(bmmWgsl(v4).includes(`let bbase = wid.z * dims.k * ${unit("n")};`), true, where);
     assertEquals(bmmWgsl(v4).includes(`let cbase = wid.z * dims.m * ${unit("n")};`), true, where);
-    // 3 バッファとも base 経由で触る（片方だけ素の添字に戻る誤りを塞ぐ）
-    assertEquals(bmmWgsl(v4).includes("abase + arow *"), true, where);
-    assertEquals(bmmWgsl(v4).includes("bbase + brow *"), true, where);
-    assertEquals(bmmWgsl(v4).includes("cbase + orow *"), true, where);
+    // 3 バッファとも base 経由で触る（片方だけ素の添字に戻る誤りを塞ぐ）。添字の接尾辞は
+    // 充填スロット / 出力行の番号（1 スレッドが複数行を持つ幾何 — src/kernels/gemm-geometry.ts）
+    assertEquals(bmmWgsl(v4).includes("abase + arow0 *"), true, where);
+    assertEquals(bmmWgsl(v4).includes("bbase + brow0 *"), true, where);
+    assertEquals(bmmWgsl(v4).includes("cbase + orow0 *"), true, where);
     // matmul 側にバッチの概念が漏れていない（キー衝突も生成物の変化も無い）
     assertEquals(matmulWgsl(v4).includes("wid.z"), false, where);
     assertEquals(matmulWgsl(v4).includes("base + arow"), false, where);
@@ -1046,32 +1045,49 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
     const where = `v4=${v4}`;
     // MUST: scale は **q 側と k 側の両方**（半スケール契約）。片側だけにすると値が √ 倍ずれ、
     // 内積の後に 1 度だけ掛ける形にすると丸め列が変わってビット同一が壊れる。
-    assertEquals(qk.includes("wv = wv * dims.scale;"), true, `${where}: k 側の scale`);
+    // MUST: 充填スロット**全て**に掛かる（1 スレッドが複数列を埋める幾何なので、スロット 0
+    // だけに掛けると担当の半分が √ 倍ずれる）。スロット数は 2（既定幾何 — 下の幾何テスト）
+    assertEquals(qk.includes("wv0 = wv0 * dims.scale;"), true, `${where}: k 側の scale`);
+    assertEquals(qk.includes("wv1 = wv1 * dims.scale;"), true, `${where}: k 側の scale スロット 1`);
     assertEquals(
-      qk.includes("raw.x * dims.scale") || qk.includes("q[arow_base + ak0] * dims.scale"),
+      (qk.match(/wv(\d+) = wv\1 \* dims\.scale;/g) ?? []).length,
+      qk.split("var wv").length - 1,
+      `${where}: k 側の scale はスロットの本数ちょうど`,
+    );
+    assertEquals(
+      qk.includes("raw0.x * dims.scale") || qk.includes("q[arow_base0 + ak0] * dims.scale"),
       true,
       `${where}: q 側の scale`,
     );
     // scale は uniform の 4 語目（WGSL に焼かない — 値の種類でパイプラインが増える）
     assertEquals(qk.includes("  scale: f32,\n"), true, where);
     // k は [N,D] のまま読む（旧経路の permute(kᵀ) が消えることの生成物側の証拠）
-    assertEquals(qk.includes("let krow_base = bbase + wcol * dims.k;"), true, where);
+    assertEquals(qk.includes("let krow_base0 = bbase + wcol0 * dims.k;"), true, where);
     // MUST: 転置読みの base は v4 でも**要素単位**（quad にすると 4 分の 1 の位置を読む）
     assertEquals(qk.includes("let bbase = wid.z * dims.n * dims.k;"), true, where);
 
     const pv = attentionPvWgsl(v4);
     // MUST: A タイルは P を実体化せず `exp(S − m) · inv` を**成分ごとのスカラ式**で評価する
     // （`vec4` へまとめて `exp` を掛けない — 超越関数のベクトル版は実装依存）。
-    assertEquals(
-      pv.split("- row_max) * row_inv").length - 1,
-      4,
-      `${where}: 正規化式は 4 成分ぶんちょうど`,
-    );
+    // MUST: 統計は**充填スロットごと**（1 スレッドが埋める行が別なら行統計も別）。
+    // スロット 0 の統計を 2 行目にも使うと、2 行目だけが静かに別の行で正規化される。
+    for (const slot of [0, 1]) {
+      assertEquals(
+        pv.split(`- row_max${slot}) * row_inv${slot}`).length - 1,
+        4,
+        `${where}: 正規化式はスロット ${slot} の 4 成分ぶんちょうど`,
+      );
+    }
     assertEquals(pv.includes("exp(vec4"), false, `${where}: exp をベクトルへまとめない`);
     // MUST: 行統計の添字はバッチ base 込み（B·H ≥ 2 で全バッチが 0 番の統計を使う誤りを塞ぐ）
     assertEquals(pv.includes("let rbase = wid.z * dims.m;"), true, where);
     assertEquals(
-      pv.includes("let stat_at = select(0u, (rbase + arow) * 2u, arow < dims.m);"),
+      pv.includes("let stat_at0 = select(0u, (rbase + arow0) * 2u, arow0 < dims.m);"),
+      true,
+      where,
+    );
+    assertEquals(
+      pv.includes("let stat_at1 = select(0u, (rbase + arow1) * 2u, arow1 < dims.m);"),
       true,
       where,
     );
@@ -1138,40 +1154,42 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
  */
 Deno.test("GEMM 骨格 6 op のタイル辺は 64 で、生成物・キー・TS 定数が一致する", () => {
   assertEquals(GEMM_TILE, 64);
-  for (const [where, key, wgsl, staticAcc] of GEMM_VARIANTS) {
+  // 既定幾何（src/kernels/gemm-geometry.ts）。**キーと生成物の両方に効く**ので、
+  // 変えたつもりの無い差分がここで止まる
+  assertEquals(defaultGemmGeometry(), { regM: 8, regN: 4, wgX: 16 });
+  for (const [where, key, wgsl] of GEMM_VARIANTS) {
     // 出力タイルの原点（行 / 列）と workgroup は骨格を共有する全 op で共通
-    assertEquals(wgsl.includes(`let arow = wid.y * ${GEMM_TILE}u + ar;`), true, where);
-    assertEquals(wgsl.includes(`let orow0 = wid.y * ${GEMM_TILE}u + lid.y * 4u;`), true, where);
-    assertEquals(wgsl.includes("@compute @workgroup_size(16, 16)"), true, where);
-    // 1 スレッド 4×4 = レジスタ 16 本（linear だけ acc0..acc3 の静的展開）。
-    // 共有は 4,096 B + 4,096 B
-    assertEquals(
-      wgsl.includes(staticAcc ? "var acc3 = vec4<f32>(0.0);" : "var acc = array<vec4<f32>, 4>("),
-      true,
-      where,
-    );
+    assertEquals(wgsl.includes(`let arow0 = wid.y * ${GEMM_TILE}u + ar;`), true, where);
+    assertEquals(wgsl.includes(`let orow0 = wid.y * ${GEMM_TILE}u + lid.y * 8u;`), true, where);
+    assertEquals(wgsl.includes("@compute @workgroup_size(16, 8)"), true, where);
+    // 1 スレッド 8×4 = レジスタ 32 本（`acc{行}_{列 quad}` の静的展開が全 op 共通）。
+    // 共有は 4,096 B + 4,096 B で幾何によらず不変
+    assertEquals(wgsl.includes("var acc7_0 = vec4<f32>("), true, where);
+    assertEquals(wgsl.includes("acc["), false, `${where}: acc の動的添字`);
     assertEquals(wgsl.includes("var<workgroup> sa: array<f32, 1024>;"), true, where);
     assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 256>;"), true, where);
-    // MUST: 生成パラメータはキーに載る（タイル辺を変えれば別キーになる）。conv2d の
-    // implicit GEMM だけは判別子が `igemm`（直接カーネルと系統が違うことを名前で表す）。
+    // MUST: 生成パラメータはキーに載る（タイル辺**と幾何**を変えれば別キーになる）。conv2d の
+    // implicit GEMM だけは判別子が `igemm`（直接カーネルと系統が違うことを名前で表す）で、
+    // 幾何は workgroup 形（`wg16x8`）が同じ判別力を持つ。
     const tilePart = where.startsWith("conv2d") ? "igemm" : "reg";
     assertEquals(key.includes(`${tilePart}${GEMM_TILE}x${GEMM_TILE}`), true, where);
+    assertEquals(key.includes(where.startsWith("conv2d") ? "wg16x8" : "r8x4w16"), true, where);
     // 版番号は op ごと（既存 3 op は 16×16 からの改版で v2・融合 attention は新設なので v1）
     assertEquals(key.includes(where.startsWith("attention") ? ":v1:" : ":v2:"), true, where);
     // 旧 16×16 タイルの痕跡が残っていない（キーの改版と生成物の総取り替えは対）
     assertEquals(key.includes("tile16"), false, where);
   }
-  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg64x64v4");
-  assertEquals(attentionPvKey(false), "attention_pv:v1:f32:reg64x64");
+  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg64x64r8x4w16v4");
+  assertEquals(attentionPvKey(false), "attention_pv:v1:f32:reg64x64r8x4w16");
   // v4 判別子はキーに載る（形状から導いた 1 ビットがパイプラインを分ける）
-  assertEquals(matmulKey(true), "matmul:v2:f32:reg64x64v4");
-  assertEquals(matmulKey(false), "matmul:v2:f32:reg64x64");
-  assertEquals(bmmKey(true), "bmm:v2:f32:reg64x64v4");
-  assertEquals(linearKey("i8", true), "linear:v2:f32:reg64x64v4:wi8");
-  assertEquals(linearKey("f16", false), "linear:v2:f32:reg64x64:wf16");
+  assertEquals(matmulKey(true), "matmul:v2:f32:reg64x64r8x4w16v4");
+  assertEquals(matmulKey(false), "matmul:v2:f32:reg64x64r8x4w16");
+  assertEquals(bmmKey(true), "bmm:v2:f32:reg64x64r8x4w16v4");
+  assertEquals(linearKey("i8", true), "linear:v2:f32:reg64x64r8x4w16v4:wi8");
+  assertEquals(linearKey("f16", false), "linear:v2:f32:reg64x64r8x4w16:wf16");
   // conv2d は 2 系統（implicit GEMM / 直接カーネル）で、直接側のキーは動かさない
-  assertEquals(conv2dIgemmKey("f32", true), "conv2d:v2:f32:igemm64x64v4:wg16x16");
-  assertEquals(conv2dIgemmKey("i8", false), "conv2d:v2:f32:igemm64x64:wg16x16:wi8");
+  assertEquals(conv2dIgemmKey("f32", true), "conv2d:v2:f32:igemm64x64v4:wg16x8");
+  assertEquals(conv2dIgemmKey("i8", false), "conv2d:v2:f32:igemm64x64:wg16x8:wi8");
   assertEquals(conv2dKey("f32"), "conv2d:v1:f32:direct:wg256");
 });
 
@@ -1183,46 +1201,48 @@ Deno.test("GEMM 骨格 6 op のタイル辺は 64 で、生成物・キー・TS 
  * ここでは**タイル幾何と担当割りだけ**を固定する（数値の一致は実 GPU のビット比較が見る —
  * tests/gpu_conv2d_parity_test.ts）。
  */
-Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n タイル 64・4×4 レジスタは不変）", () => {
+Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n タイル 64・8×4 レジスタは不変）", () => {
   assertEquals(GEMM_MTILE_SMALL, 32);
   for (const weight of WEIGHT_STORAGES) {
     for (const v4 of [false, true]) {
       const wgsl = conv2dIgemmWgsl(weight, v4, GEMM_MTILE_SMALL);
       const where = `conv2d igemm m32 ${weight} v4=${v4}`;
       // m タイルは 32 行（A タイルの行原点・store の行原点・bias-first の行原点の 3 箇所）
-      assertEquals(wgsl.includes("let arow = wid.y * 32u + ar;"), true, where);
-      assertEquals(wgsl.includes("let orow0 = wid.y * 32u + lid.y * 4u;"), true, where);
-      assertEquals(wgsl.includes("let bias0 = wid.y * 32u + lid.y * 4u;"), true, where);
+      assertEquals(wgsl.includes("let arow0 = wid.y * 32u + ar;"), true, where);
+      assertEquals(wgsl.includes("let orow0 = wid.y * 32u + lid.y * 8u;"), true, where);
+      assertEquals(wgsl.includes("let bias0 = wid.y * 32u + lid.y * 8u;"), true, where);
       // n タイルは 64 のまま（2048px の n 上限の扱いを動かさない）
       assertEquals(
         wgsl.includes(v4 ? "let bc4 = wid.x * 16u + bcq;" : "let bcol = wid.x * 64u + bcq * 4u;"),
         true,
         where,
       );
-      // workgroup は 16×8 = 128 スレッド。**1 スレッド 4×4 は不変** = 内積の
-      // 「共有ロード 5 回で 16 MAC」が落ちない（16×16 のまま 2×4 に落とす形は密度が下がる）
-      assertEquals(wgsl.includes("@compute @workgroup_size(16, 8)"), true, where);
-      assertEquals(wgsl.includes("var acc = array<vec4<f32>, 4>("), true, where);
+      // workgroup は 16×4 = 64 スレッド。**1 スレッド 8×4 は不変** = 内積の演算密度が
+      // 落ちない（1 スレッドの出力を削って workgroup を保つ形は密度が下がる）
+      assertEquals(wgsl.includes("@compute @workgroup_size(16, 4)"), true, where);
+      assertEquals(wgsl.includes("var acc7_0 = vec4<f32>(bias[bias0 + 7u]);"), true, where);
       // 共有 A は 32 行ぶんへ縮む（sb は n タイルが同じなので 256 のまま）
       assertEquals(wgsl.includes("var<workgroup> sa: array<f32, 512>;"), true, where);
       assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 256>;"), true, where);
-      // 128 スレッドで 256 要素の B タイルを埋めるので 2 パス。担当の k 行は 8 ずつずれる
-      assertEquals(wgsl.includes("for (var bp = 0u; bp < 2u; bp = bp + 1u) {"), true, where);
-      assertEquals(wgsl.includes("let bk = bp * 8u + bkr;"), true, where);
+      // 64 スレッドで 256 要素の B タイルを埋めるので 4 スロット。担当の k 行は 4 ずつずれる
+      assertEquals(wgsl.includes("let bk0 = tid / 16u;"), true, where);
+      assertEquals(wgsl.includes("let bk3 = bk0 + 12u;"), true, where);
+      assertEquals(wgsl.includes("let bk4 ="), false, `${where}: スロットは 4 本ちょうど`);
       // 内積ループの正本は骨格 1 箇所（64 行版と 1 文字も違わない）
       assertEquals(
-        wgsl.includes("acc[i] = acc[i] + sa[(lid.y * 4u + i) * 16u + kk] * bv;"),
+        wgsl.includes("acc0_0 = acc0_0 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv0;"),
         true,
         where,
       );
     }
   }
-  // 64 行版は 256 スレッド 1 パスのまま（2 パス化が漏れ出していないこと）
-  assertEquals(conv2dIgemmWgsl("f32", true).includes("bp"), false);
-  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk = tid / 16u;"), true);
+  // 64 行版は 128 スレッドで B タイルを 2 スロット（32 行版の 4 スロットが漏れ出していないこと）
+  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk1 = bk0 + 8u;"), true);
+  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk2 ="), false);
+  assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk0 = tid / 16u;"), true);
   // キーは別系統（タイル形は生成パラメータなのでキーに載る）
-  assertEquals(conv2dIgemmKey("f32", true, 32), "conv2d:v2:f32:igemm32x64v4:wg16x8");
-  assertEquals(conv2dIgemmKey("i8", false, 32), "conv2d:v2:f32:igemm32x64:wg16x8:wi8");
+  assertEquals(conv2dIgemmKey("f32", true, 32), "conv2d:v2:f32:igemm32x64v4:wg16x4");
+  assertEquals(conv2dIgemmKey("i8", false, 32), "conv2d:v2:f32:igemm32x64:wg16x4:wi8");
 });
 
 /**
@@ -1264,9 +1284,9 @@ Deno.test("conv2d の implicit GEMM は bias-first / 0 埋め / 行 scale を生
     const wgsl = conv2dIgemmWgsl("f32", v4);
     const where = `conv2d igemm v4=${v4}`;
     // MUST ①: bias は acc の初期値（store 側で足す形にすると (Σ)+bias で丸めが変わる）
-    assertEquals(wgsl.includes("let bias0 = wid.y * 64u + lid.y * 4u;"), true, where);
-    assertEquals(wgsl.includes("vec4<f32>(bias[bias0 + 1u]),"), true, where);
-    assertEquals(wgsl.includes("acc[i] + biasv"), false, `${where}: store 側で bias を足している`);
+    assertEquals(wgsl.includes("let bias0 = wid.y * 64u + lid.y * 8u;"), true, where);
+    assertEquals(wgsl.includes("var acc1_0 = vec4<f32>(bias[bias0 + 1u]);"), true, where);
+    assertEquals(wgsl.includes("+ biasv"), false, `${where}: store 側で bias を足している`);
     assertEquals(wgsl.includes("+ bias[ocol"), false, `${where}: store 側で bias を足している`);
     // MUST ③: 範囲外の x は 0（クランプ添字で読まない）
     assertEquals(
@@ -1278,7 +1298,7 @@ Deno.test("conv2d の implicit GEMM は bias-first / 0 埋め / 行 scale を生
     );
     assertEquals(wgsl.includes("clamp("), false, `${where}: 添字のクランプが混ざっている`);
     // 平坦 k → (ic, kh, kw)（Kh と Kw を取り違えると正方カーネルでは数値が一致する）
-    assertEquals(wgsl.includes("let ic = brow / khw;"), true, where);
+    assertEquals(wgsl.includes("let ic = brow0 / khw;"), true, where);
     assertEquals(
       wgsl.includes("let ky = i32((kr / dims.kernel_w) * dims.dilation_h) - i32(dims.padding_h);"),
       true,
@@ -1296,18 +1316,22 @@ Deno.test("conv2d の implicit GEMM は bias-first / 0 埋め / 行 scale を生
     assertEquals(wgsl.includes("height_out"), false, `${where}: 読まれない Dims 欄がある`);
   }
   // MUST ④: i8 の scale は**行**（= 出力チャネル）。linear の `wcol`（列）流用は沈黙誤値
+  // MUST: 充填スロットごとに別名で束ねる（1 スレッドが複数チャネルを埋めるので、
+  // スロット 0 の scale を 2 本目にも使うと片方だけが静かに別チャネルの scale で dequant される）
   const i8Wgsl = conv2dIgemmWgsl("i8", true);
-  assertEquals(i8Wgsl.includes("let wscale_v = wscale[arow];"), true);
-  assertEquals(i8Wgsl.includes("wscale[wcol]"), false, "linear の列 scale を持ってきている");
+  assertEquals(i8Wgsl.includes("let wscale_v = wscale[arow0];"), true);
+  assertEquals(i8Wgsl.includes("let wscale_v1 = wscale[arow1];"), true);
+  assertEquals(i8Wgsl.includes("wscale[wcol"), false, "linear の列 scale を持ってきている");
   // 束縛番号は直接カーネルと同じ（executor は 1 本の定数で両方を束ねる）
   assertEquals(
     i8Wgsl.includes(`@group(0) @binding(${CONV2D_SCALE_BINDING}) var<storage, read> wscale:`),
     true,
   );
   // A タイルは重み（weight-storage 経由）・B タイルは x の暗黙 gather
-  assertEquals(i8Wgsl.includes("av = dequant4(arow_base + ak0, wscale_v);"), true);
-  assertEquals(conv2dIgemmWgsl("f16", false).includes("av.x = dequant(abase);"), true);
-  assertEquals(conv2dIgemmWgsl("f32", false).includes("av.x = w[abase];"), true);
+  assertEquals(i8Wgsl.includes("av0 = dequant4(arow_base0 + ak0, wscale_v);"), true);
+  assertEquals(i8Wgsl.includes("av1 = dequant4(arow_base1 + ak0, wscale_v1);"), true);
+  assertEquals(conv2dIgemmWgsl("f16", false).includes("av0.x = dequant(abase);"), true);
+  assertEquals(conv2dIgemmWgsl("f32", false).includes("av0.x = w[abase];"), true);
 });
 
 /**
@@ -1888,56 +1912,57 @@ Deno.test("gather は範囲外添字を NaN で汚染し、通常経路は行オ
 // ADR 0012 の融合 op。カーネル固有の不変条件を生成物の側から固定する。
 Deno.test("融合カーネルは既存カーネルと別物で、契約どおりの形を生成する", () => {
   // linear は重みを [n,k] の転置レイアウトのまま読む（連続方向が k なので k 連続 4 要素）
-  assertEquals(LINEAR_WGSL.includes("let wrow_base = wcol * dims.k;"), true);
-  assertEquals(LINEAR_WGSL.includes("wv.x = w[wbase];"), true);
+  assertEquals(LINEAR_WGSL.includes("let wrow_base0 = wcol0 * dims.k;"), true);
+  assertEquals(LINEAR_WGSL.includes("wv0.x = w[wbase];"), true);
   // MUST: 共有メモリ側で転置して置く（列 quad = wc / 4・成分 = wc % 4）。2 つを取り違えると
   // 1 タイル内で列が入れ替わる — 列ごとに値が違う端数形状だけが検出器になる。
-  assertEquals(LINEAR_WGSL.includes("let wsq = wc / 4u;"), true);
-  assertEquals(LINEAR_WGSL.includes("let wsl = wc % 4u;"), true);
+  assertEquals(LINEAR_WGSL.includes("let wsq0 = wc0 / 4u;"), true);
+  assertEquals(LINEAR_WGSL.includes("let wsl0 = wc0 % 4u;"), true);
   // MUST: 成分は**静的**に書く（`sb[i][wsl] = v` の動的インデックスにしない）。Metal では
   // wsl != 0 の書き込みが黙って捨てられ、4 要素中 3 要素が 0 のまま内積へ入る（機序は
   // src/kernels/gemm.ts の storeBTransposed）。4 アームぶんの転置配置を全て固定する —
   // 1 アームでも取り違えると 1 タイル内で列が入れ替わる。
   assertEquals(LINEAR_WGSL.includes("[wsl]"), false);
   const components = ["x", "y", "z", "w"] as const;
-  for (const [at, component] of components.entries()) {
-    assertEquals(
-      LINEAR_WGSL.includes(
-        `${at === components.length - 1 ? "default" : `case ${at}u`}: {\n` +
-          `        sb[sb_base].${component} = wv.x;\n` +
-          `        sb[sb_base + 16u].${component} = wv.y;\n` +
-          `        sb[sb_base + 32u].${component} = wv.z;\n` +
-          `        sb[sb_base + 48u].${component} = wv.w;\n` +
-          `      }`,
-      ),
-      true,
-      `linear の B タイル転置配置（成分 ${component}）`,
-    );
+  // 充填スロットごとに 4 アーム（1 スレッドが複数チャネルを埋める幾何）
+  for (const slot of [0, 1]) {
+    for (const [at, component] of components.entries()) {
+      assertEquals(
+        LINEAR_WGSL.includes(
+          `${at === components.length - 1 ? "default" : `case ${at}u`}: {\n` +
+            `        sb[sb_base${slot}].${component} = wv${slot}.x;\n` +
+            `        sb[sb_base${slot} + 16u].${component} = wv${slot}.y;\n` +
+            `        sb[sb_base${slot} + 32u].${component} = wv${slot}.z;\n` +
+            `        sb[sb_base${slot} + 48u].${component} = wv${slot}.w;\n` +
+            `      }`,
+        ),
+        true,
+        `linear の B タイル転置配置（スロット ${slot} 成分 ${component}）`,
+      );
+    }
   }
   // 末尾で bias を 1 度だけ足す（accumulator の初期値にはしない — 縮約順序を保つため）。
-  // linear の acc は acc0..acc3 の静的展開なので、行ごとに同じ形が 4 本並ぶ。
-  assertEquals(LINEAR_WGSL.includes("out[obase + ocol] = acc0.x + bias[ocol];"), true);
+  // acc は `acc{行}_{列 quad}` の静的展開なので、行ごとに同じ形が並ぶ。
+  assertEquals(LINEAR_WGSL.includes("out[obase + ocol] = acc0_0.x + bias[ocol];"), true);
   assertEquals(
     linearWgsl("f32", true).includes(
       "let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);",
     ),
     true,
   );
-  assertEquals(linearWgsl("f32", true).includes("out[orow0 * n4 + ocq] = acc0 + biasv;"), true);
+  assertEquals(linearWgsl("f32", true).includes("out[orow0 * n4 + ocq0] = acc0_0 + biasv;"), true);
   // MUST: matmul / bmm の生成物に融合 op の概念が漏れていない
   assertEquals(MATMUL_WGSL.includes("bias"), false);
   assertEquals(BMM_WGSL.includes("bias"), false);
   assertNotEquals(LINEAR_WGSL, MATMUL_WGSL);
-  // MUST: 3 op は同じ内積ループ（= 同じ縮約順序）を共有する。1 箇所しか無いことを
-  // 生成物の側から固定する（写し間違いが起きる余地を残さない）。
-  // linear は `acc[i]` を acc0..acc3 へ展開した形（添字と行番号が静的になるだけで、
-  // 読む共有タイルの位置も加算順序も同一）— 行ごとにちょうど 1 本ずつ。
-  const innerLoop = "        acc[i] = acc[i] + sa[(lid.y * 4u + i) * 16u + kk] * bv;";
-  const staticLoop = (i: number): string =>
-    `      acc${i} = acc${i} + sa[(lid.y * 4u + ${i}u) * 16u + kk] * bv;`;
-  for (const [where, , wgsl, staticAcc] of GEMM_VARIANTS) {
-    const lines = staticAcc ? [0, 1, 2, 3].map(staticLoop) : [innerLoop];
-    for (const line of lines) {
+  // MUST: 6 op は同じ内積ループ（= 同じ縮約順序）を共有する。1 箇所しか無いことを
+  // 生成物の側から固定する（写し間違いが起きる余地を残さない）。`acc{行}_{列 quad}` の
+  // 静的展開は添字と行番号が静的になるだけで、読む共有タイルの位置も加算順序も同一 —
+  // 行ごとにちょうど 1 本ずつ並ぶ。
+  const staticLoop = (row: number): string =>
+    `      acc${row}_0 = acc${row}_0 + sa[(lid.y * 8u + ${row}u) * 16u + kk] * bv0;`;
+  for (const [where, , wgsl] of GEMM_VARIANTS) {
+    for (const line of [0, 1, 2, 3, 4, 5, 6, 7].map(staticLoop)) {
       assertEquals(wgsl.split(line).length, 2, `${where}: 内積ループが 1 箇所でない`);
     }
     assertEquals(wgsl.includes("let tiles = (dims.k + 15u) / 16u;"), true, where);
@@ -2082,7 +2107,9 @@ Deno.test("w=f16 変種は重みだけを array<u32> + unpack2x16float で読み
       assertEquals(f32Wgsl.includes(`${name}[${index}]`), true, `${where}: f32 変種の読み出し`);
       assertEquals(f16Wgsl.includes(`dequant(${index})`), true, where);
       assertEquals(f16Wgsl.includes(`${name}[${index}]`), false, where);
-      rewound = rewound.replace(`dequant(${index})`, `${name}[${index}]`);
+      // MUST: 全出現を戻す（GEMM 骨格は 1 スレッドが複数チャネルを埋めるので、同じ添字式が
+      // 充填スロットの本数ぶん現れる）
+      rewound = rewound.replaceAll(`dequant(${index})`, `${name}[${index}]`);
     }
     // 差はこの 3 点だけ（先頭コメントの但し書き / 展開関数 / 束縛と読み出しの各 1 行）。
     // 逆写像を当てて f32 変種そのものに戻ることで「他は一切動いていない」を固定する。
@@ -2103,7 +2130,7 @@ Deno.test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4
   const f32Wgsl = linearWgsl("f32", true);
   // f32 は vec4<f32> 配列の quad 添字（平坦添字 >> 2）
   assertEquals(f32Wgsl.includes("read> w: array<vec4<f32>>;"), true);
-  assertEquals(f32Wgsl.includes("wv = w[(wrow_base + wk0) >> 2u];"), true);
+  assertEquals(f32Wgsl.includes("wv0 = w[(wrow_base0 + wk0) >> 2u];"), true);
 
   const f16Wgsl = linearWgsl("f16", true);
   // f16 は u32 2 語で 4 要素（語をまたがない）。スカラ版の dequant は出さない
@@ -2111,34 +2138,41 @@ Deno.test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4
   assertEquals(f16Wgsl.includes("let hi = unpack2x16float(w[(i >> 1u) + 1u]);"), true);
   assertEquals(f16Wgsl.includes("return vec4<f32>(lo.x, lo.y, hi.x, hi.y);"), true);
   assertEquals(f16Wgsl.includes("fn dequant(i: u32)"), false, "スカラ版は出さない");
-  assertEquals(f16Wgsl.includes("wv = dequant4(wrow_base + wk0);"), true);
+  assertEquals(f16Wgsl.includes("wv0 = dequant4(wrow_base0 + wk0);"), true);
 
   const i8Wgsl = linearWgsl("i8", true);
   // MUST: scale は**成分ごとの f32 乗算**（vec4 * scalar）— スカラ経路と同一の丸め（ADR 0019）。
   // 縮約の外へ出す形（acc * scale）は ADR 0019 の改訂と tolerance 再導出を発火させる。
   assertEquals(i8Wgsl.includes("return vec4<f32>(unpack4xI8(w[i >> 2u])) * scale;"), true);
-  assertEquals(i8Wgsl.includes("let wscale_v = wscale[wcol];"), true, "scale は K ループの外");
-  assertEquals(i8Wgsl.includes("wv = dequant4(wrow_base + wk0, wscale_v);"), true);
-  // linear の acc は acc0..acc3 の静的展開なので、縮約後に掛ける形はこの名前で見る
-  assertEquals(i8Wgsl.includes("acc0 * "), false, "縮約の外で scale を掛けていない");
+  // MUST: scale は充填スロットごとに別名で束ねる（スロット 0 の scale を 2 本目にも使うと、
+  // 担当チャネルの片方だけが別チャネルの scale で dequant される沈黙誤値になる）
+  assertEquals(i8Wgsl.includes("let wscale_v = wscale[wcol0];"), true, "scale は K ループの外");
+  assertEquals(i8Wgsl.includes("let wscale_v1 = wscale[wcol1];"), true, "スロットごとに別名");
+  assertEquals(i8Wgsl.includes("wv0 = dequant4(wrow_base0 + wk0, wscale_v);"), true);
+  assertEquals(i8Wgsl.includes("wv1 = dequant4(wrow_base1 + wk0, wscale_v1);"), true);
+  // acc は `acc{行}_{列 quad}` の静的展開なので、縮約後に掛ける形はこの名前で見る
+  assertEquals(i8Wgsl.includes("acc0_0 * "), false, "縮約の外で scale を掛けていない");
 
   // 逆写像で f32 v4 変種そのものに戻る（他は一切動いていない）
+  const scaleArg = (slot: number): string => slot === 0 ? "wscale_v" : `wscale_v${slot}`;
   for (
-    const [wgsl, call] of [[f16Wgsl, "dequant4(wrow_base + wk0)"], [
-      i8Wgsl,
-      "dequant4(wrow_base + wk0, wscale_v)",
-    ]] as const
+    const [wgsl, call] of [
+      [f16Wgsl, (slot: number) => `dequant4(wrow_base${slot} + wk0)`],
+      [i8Wgsl, (slot: number) => `dequant4(wrow_base${slot} + wk0, ${scaleArg(slot)})`],
+    ] as const
   ) {
-    const rewound = wgsl
+    let rewound = wgsl
       .replace(/\n@group\(0\) @binding\(5\) var<storage, read> wscale: array<f32>;\n/, "")
       .replace(/\/\/ (f16|i8) 格納の quad 展開:[\s\S]*?\n}\n\n/, "")
-      .replace(
-        /\n {2}\/\/ 出力チャネルの scale はループ不変[\s\S]*?\n {2}let wscale_v = wscale\[wcol\];/,
+      .replaceAll(
+        /\n {2}\/\/ 出力チャネルの scale はループ不変[\s\S]*?\n {2}let wscale_v\d* = wscale\[wcol\d\];/g,
         "",
       )
-      .replace("read> w: array<u32>;", "read> w: array<vec4<f32>>;")
-      .replace(call, "w[(wrow_base + wk0) >> 2u]");
-    assertEquals(dropHeader(rewound), dropHeader(f32Wgsl), call);
+      .replace("read> w: array<u32>;", "read> w: array<vec4<f32>>;");
+    for (const slot of [0, 1]) {
+      rewound = rewound.replace(call(slot), `w[(wrow_base${slot} + wk0) >> 2u]`);
+    }
+    assertEquals(dropHeader(rewound), dropHeader(f32Wgsl), call(0));
   }
 });
 
@@ -2149,24 +2183,22 @@ Deno.test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4
  * 1. 丸めは**共有タイルへ書く 1 箇所**（`f16(...)` / `vec4<f16>(...)`）。
  * 2. 拡幅は**レジスタロード時に 1 回**（MAC ごとの `f32(av * bv)` は禁止 — プロトタイプの
  *    負の教訓で、変換回数が倍になるうえ積が f16 精度に落ちる）。
- * 3. 累積は f32（`vec4<f32>` × 4 — linear だけ `acc0..acc3` の静的展開で、要素型は同じ）。
+ * 3. 累積は f32（`acc{行}_{列 quad}` の静的展開で、要素型は `vec4<f32>` のまま）。
  * 4. uniform は f16 にしない。
- *
- * 3 番目の要素は accumulator の持ち方（`true` = 静的展開）。
  */
-const COMPUTE_F16_VARIANTS: readonly (readonly [string, string, boolean])[] = [
-  ["attention_qk c16", attentionQkWgsl(false, "f16"), false],
-  ["attention_qk c16 v4", attentionQkWgsl(true, "f16"), false],
-  ["attention_pv c16", attentionPvWgsl(false, "f16"), false],
-  ["attention_pv c16 v4", attentionPvWgsl(true, "f16"), false],
-  ["linear c16", linearWgsl("f32", false, "f16"), true],
-  ["linear c16 v4", linearWgsl("f32", true, "f16"), true],
-  ["linear wf16 c16", linearWgsl("f16", false, "f16"), true],
-  ["linear wf16 c16 v4", linearWgsl("f16", true, "f16"), true],
+const COMPUTE_F16_VARIANTS: readonly (readonly [string, string])[] = [
+  ["attention_qk c16", attentionQkWgsl(false, "f16")],
+  ["attention_qk c16 v4", attentionQkWgsl(true, "f16")],
+  ["attention_pv c16", attentionPvWgsl(false, "f16")],
+  ["attention_pv c16 v4", attentionPvWgsl(true, "f16")],
+  ["linear c16", linearWgsl("f32", false, "f16")],
+  ["linear c16 v4", linearWgsl("f32", true, "f16")],
+  ["linear wf16 c16", linearWgsl("f16", false, "f16")],
+  ["linear wf16 c16 v4", linearWgsl("f16", true, "f16")],
 ];
 
 Deno.test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡幅の位置を 1 箇所に閉じる", () => {
-  for (const [where, wgsl, staticAcc] of COMPUTE_F16_VARIANTS) {
+  for (const [where, wgsl] of COMPUTE_F16_VARIANTS) {
     const lines = wgsl.split("\n");
     // enable はモジュール先頭（コメント 1 行の直後 = 全ての global 宣言より前）
     assertEquals(lines[0].startsWith("// karume "), true, where);
@@ -2175,19 +2207,11 @@ Deno.test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡
     assertEquals(wgsl.includes(`var<workgroup> sa: array<f16, ${GEMM_TILE * 16}>;`), true, where);
     assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f16>, 256>;"), true, where);
     // ③ 累積は f32 のまま（k 大の桁落ちを避ける — 変えると parity と E2E が赤くなる）
-    assertEquals(
-      wgsl.includes(staticAcc ? "var acc0 = vec4<f32>(0.0);" : "var acc = array<vec4<f32>, 4>("),
-      true,
-      where,
-    );
+    assertEquals(wgsl.includes("var acc0_0 = vec4<f32>(0.0);"), true, where);
     // ② 拡幅はレジスタロード時に 1 回。MAC ごとの積の変換（f32(av * bv)）は出さない
-    assertEquals(wgsl.includes("let bv = vec4<f32>(sb[kk * 16u + lid.x]);"), true, where);
+    assertEquals(wgsl.includes("let bv0 = vec4<f32>(sb[kk * 16u + lid.x]);"), true, where);
     assertEquals(
-      wgsl.includes(
-        staticAcc
-          ? "acc0 = acc0 + f32(sa[(lid.y * 4u + 0u) * 16u + kk]) * bv;"
-          : "acc[i] = acc[i] + f32(sa[(lid.y * 4u + i) * 16u + kk]) * bv;",
-      ),
+      wgsl.includes("acc0_0 = acc0_0 + f32(sa[(lid.y * 8u + 0u) * 16u + kk]) * bv0;"),
       true,
       where,
     );
@@ -2195,21 +2219,22 @@ Deno.test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡
     const code = wgsl.split("\n").filter((line) => !line.trimStart().startsWith("//")).join("\n");
     assertEquals(code.includes("f32(av"), false, `${where}: MAC ごとの変換`);
     // ① 丸めは共有タイルへの書き込みだけ（A タイルは 4 成分とも f16(...) で包む）
-    assertEquals(wgsl.includes("sa[sa_base] = f16(av.x);"), true, where);
-    assertEquals(wgsl.includes("sa[sa_base + 3u] = f16(av.w);"), true, where);
+    assertEquals(wgsl.includes("sa[sa_base0] = f16(av0.x);"), true, where);
+    assertEquals(wgsl.includes("sa[sa_base0 + 3u] = f16(av0.w);"), true, where);
+    assertEquals(wgsl.includes("sa[sa_base1] = f16(av1.x);"), true, where);
     // ④ uniform は f16 にしない（uniform の配列要素は 16B 整列で、f16 にする利得も無い）
     assertEquals(wgsl.includes("var<uniform> dims: Dims;"), true, where);
     assertEquals(/^\s+[mnk]: f16,$/m.test(wgsl), false, `${where}: uniform が f16`);
   }
   // 融合 attention の S は f16 で受け渡す（① が書き ②③ が読む = transient 半減）
   assertEquals(
-    attentionQkWgsl(true, "f16").includes("s[cbase + orow * n4 + ocq] = vec4<f16>(acc[i]);"),
+    attentionQkWgsl(true, "f16").includes("s[cbase + orow0 * n4 + ocq0] = vec4<f16>(acc0_0);"),
     true,
   );
-  assertEquals(attentionQkWgsl(false, "f16").includes("s[obase + ocol] = f16(acc[i].x);"), true);
+  assertEquals(attentionQkWgsl(false, "f16").includes("s[obase + ocol] = f16(acc0_0.x);"), true);
   assertEquals(
     attentionPvWgsl(false, "f16").includes(
-      "av.x = exp(f32(s[arow_base + ak0]) - row_max) * row_inv;",
+      "av0.x = exp(f32(s[arow_base0 + ak0]) - row_max0) * row_inv0;",
     ),
     true,
   );
@@ -2240,57 +2265,45 @@ Deno.test("既定（f32 計算）の生成物には f16 が 1 文字も現れな
 });
 
 Deno.test("計算変種の判別子はキーの f16 側だけに付き、格納の wf16 とは別語になる", () => {
-  // 既存の f32 計算キーはバイト単位で不変
-  assertEquals(linearKey("f32", false), "linear:v2:f32:reg64x64");
-  assertEquals(linearKey("f16", true), "linear:v2:f32:reg64x64v4:wf16");
-  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg64x64v4");
+  // 計算変種の語は幾何判別子の**後ろ**に付く（キーの語順そのものが固定対象）
+  assertEquals(linearKey("f32", false), "linear:v2:f32:reg64x64r8x4w16");
+  assertEquals(linearKey("f16", true), "linear:v2:f32:reg64x64r8x4w16v4:wf16");
+  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg64x64r8x4w16v4");
   assertEquals(attentionStatsKey(), ATTENTION_STATS_KEY);
   // f16 計算は末尾に :c16（格納 :wf16 と重ならない語 — 両方同時に立つ組み合わせがある）
-  assertEquals(linearKey("f32", false, "f16"), "linear:v2:f32:reg64x64:c16");
-  assertEquals(linearKey("f16", true, "f16"), "linear:v2:f32:reg64x64v4:wf16:c16");
-  assertEquals(attentionQkKey(false, "f16"), "attention_qk:v1:f32:reg64x64:c16");
-  assertEquals(attentionPvKey(true, "f16"), "attention_pv:v1:f32:reg64x64v4:c16");
+  assertEquals(linearKey("f32", false, "f16"), "linear:v2:f32:reg64x64r8x4w16:c16");
+  assertEquals(linearKey("f16", true, "f16"), "linear:v2:f32:reg64x64r8x4w16v4:wf16:c16");
+  assertEquals(attentionQkKey(false, "f16"), "attention_qk:v1:f32:reg64x64r8x4w16:c16");
+  assertEquals(attentionPvKey(true, "f16"), "attention_pv:v1:f32:reg64x64r8x4w16v4:c16");
   assertEquals(attentionStatsKey("f16"), `${ATTENTION_STATS_KEY}:c16`);
 });
 
 // `acc[i]` の動的添字はアドレス可能な関数ローカル領域を要求し、accumulator がレジスタから
-// ローカルメモリへ落ちる。linear（f32 / f16 計算 × 3 格納）は既定経路がこの静的展開になる。
-Deno.test("linear の accumulator は acc0..acc3 の静的展開で、他の GEMM op は配列のまま", () => {
-  for (const weight of WEIGHT_STORAGES) {
-    for (const v4 of [false, true]) {
-      const wgsl = linearWgsl(weight, v4);
-      const where = `linear ${weight} v4=${v4}`;
-      assertEquals(wgsl.includes("var acc = array<"), false, where);
-      // MUST: 動的添字が 1 つも残っていない（残ると展開の動機がそのまま消える）
-      assertEquals(wgsl.includes("acc["), false, where);
-      for (let i = 0; i < 4; i += 1) {
-        assertEquals(wgsl.includes(`var acc${i} = vec4<f32>(0.0);`), true, `${where}:init${i}`);
-        // 行 i の内積更新はちょうど 1 回（K タイル 16・kk 昇順・加算順序は展開前と同一）
-        assertEquals(
-          wgsl.split(`acc${i} = acc${i} + sa[(lid.y * 4u + ${i}u) * 16u + kk] * bv;`).length,
-          2,
-          `${where}:update${i}`,
-        );
-        // 書き出しも行ごとに静的な名前を読む
-        assertEquals(wgsl.includes(`orow${i} < dims.m`), true, `${where}:store${i}`);
-      }
+// ローカルメモリへ落ちる。**骨格を共有する 6 op すべて**が既定経路でこの静的展開になる。
+Deno.test("GEMM 骨格の accumulator は acc{行}_{列 quad} の静的展開で、動的添字を残さない", () => {
+  for (const [where, , wgsl] of GEMM_VARIANTS) {
+    assertEquals(wgsl.includes("var acc = array<"), false, where);
+    // MUST: 動的添字が 1 つも残っていない（残ると展開の動機がそのまま消える）
+    assertEquals(wgsl.includes("acc["), false, where);
+    for (let row = 0; row < 8; row += 1) {
+      // 行 row の内積更新はちょうど 1 回（K タイル 16・kk 昇順・加算順序は展開前と同一）
+      assertEquals(
+        wgsl.split(`acc${row}_0 = acc${row}_0 + sa[(lid.y * 8u + ${row}u) * 16u + kk] * bv0;`)
+          .length,
+        2,
+        `${where}:update${row}`,
+      );
+      // 書き出しも行ごとに静的な名前を読む
+      assertEquals(wgsl.includes(`orow${row} < dims.m`), true, `${where}:store${row}`);
     }
+    // 列 quad は 1 本（regN = 4 = vec4 ちょうど）— 2 本目が生えたら幾何が変わっている
+    assertEquals(wgsl.includes("acc0_1"), false, `${where}: 列 quad が 2 本ある`);
   }
-  // MUST: 静的展開は linear 限定。他 op へ広げると固定済みの生成バイト列が動く
-  for (
-    const [where, wgsl] of [
-      ["matmul", matmulWgsl(true)],
-      ["bmm", bmmWgsl(true)],
-      ["attention_qk", attentionQkWgsl(true)],
-      ["attention_pv", attentionPvWgsl(true)],
-      ["conv2d", conv2dIgemmWgsl("f32", true, GEMM_TILE)],
-    ] as const
-  ) {
-    assertEquals(wgsl.includes("var acc = array<vec4<f32>, 4>("), true, where);
-    assertEquals(wgsl.includes("acc[i] = acc[i] + "), true, where);
+  // 0 初期化は bias-first の conv2d 以外の全 op（conv2d は別テストが bias 初期値を見る）
+  for (const wgsl of [matmulWgsl(true), linearWgsl("f32", false), attentionPvWgsl(true)]) {
+    assertEquals(wgsl.includes("var acc0_0 = vec4<f32>(0.0);"), true);
+    assertEquals(wgsl.includes("var acc7_0 = vec4<f32>(0.0);"), true);
   }
-  // キーとシグネチャは据え置き（変種ではなく既定経路の置き換え）
-  assertEquals(linearKey("f32", false), "linear:v2:f32:reg64x64");
 });
 
 Deno.test("重み i8 格納 × f16 計算（w8a16）は生成の入口で fail loudly", () => {
@@ -2358,7 +2371,9 @@ Deno.test("S の f16 格納変種は pack2x16float 1 点だけで丸め、shader
   }
   // 読み側の添字算術は f32 変種と同じ形のまま（quad は quad・要素は要素）
   assertEquals(
-    attentionPvWgsl(true, "f32", "f16").includes("let raw = score_quad(arow_base + t * 4u + aq);"),
+    attentionPvWgsl(true, "f32", "f16").includes(
+      "let raw0 = score_quad(arow_base0 + t * 4u + aq);",
+    ),
     true,
   );
   assertEquals(
@@ -2371,15 +2386,17 @@ Deno.test("S の f16 格納変種は pack2x16float 1 点だけで丸め、shader
   );
   // 書き手は f32 変種と同じ値式のまま（丸めが値の計算へ紛れ込んでいない）
   assertEquals(
-    attentionQkWgsl(true, "f32", "f16").includes("score_store(cbase + orow * n4 + ocq, acc[i]);"),
+    attentionQkWgsl(true, "f32", "f16").includes(
+      "score_store(cbase + orow0 * n4 + ocq0, acc0_0);",
+    ),
     true,
   );
 });
 
 Deno.test("格納 S の判別子 s16 はキーの末尾に付き、wf16 / c16 と別語になる", () => {
-  // 既定（f32 格納）のキーは 1 文字も動かない
-  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg64x64v4");
-  assertEquals(attentionPvKey(true), "attention_pv:v1:f32:reg64x64v4");
+  // 既定（f32 格納）のキーは幾何判別子までで終わる
+  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg64x64r8x4w16v4");
+  assertEquals(attentionPvKey(true), "attention_pv:v1:f32:reg64x64r8x4w16v4");
   assertEquals(attentionStatsKey(), ATTENTION_STATS_KEY);
   assertEquals(
     attentionQkI8a8Key(true, true),
@@ -2390,8 +2407,8 @@ Deno.test("格納 S の判別子 s16 はキーの末尾に付き、wf16 / c16 �
     "attention_pv:v3:i8a8:tile64x128r8x8w16x8k16v4:dp4aEmu",
   );
   // s16 は**末尾**（3 つの軸が同時に立ちうるので語順を 1 箇所で固定する）
-  assertEquals(attentionQkKey(true, "f32", "f16"), "attention_qk:v1:f32:reg64x64v4:s16");
-  assertEquals(attentionPvKey(true, "f32", "f16"), "attention_pv:v1:f32:reg64x64v4:s16");
+  assertEquals(attentionQkKey(true, "f32", "f16"), "attention_qk:v1:f32:reg64x64r8x4w16v4:s16");
+  assertEquals(attentionPvKey(true, "f32", "f16"), "attention_pv:v1:f32:reg64x64r8x4w16v4:s16");
   assertEquals(attentionStatsKey("f32", "f16"), `${ATTENTION_STATS_KEY}:s16`);
   assertEquals(
     attentionQkI8a8Key(true, true, "f16"),
@@ -2472,7 +2489,7 @@ Deno.test("S の f16 格納は「スカラ経路」と「c16 との併用」を�
 
 Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 キーはバイト単位で不変）", () => {
   const pairs: readonly (readonly [string, (weight: "f32" | "f16") => string])[] = [
-    ["linear:v2:f32:reg64x64", (weight) => linearKey(weight, false)],
+    ["linear:v2:f32:reg64x64r8x4w16", (weight) => linearKey(weight, false)],
     ["embedding:v1:f32:i32:wg256", embeddingKey],
     ["conv1d:v2:f32:direct:wg256", conv1dKey],
     ["conv2d:v1:f32:direct:wg256", conv2dKey],
@@ -2484,7 +2501,7 @@ Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 �
     assertEquals(key("f16"), `${expected}:wf16`);
   }
   // 格納判別子は v4 判別子の**後ろ**に付く（linear だけ 2 軸を持つ）
-  assertEquals(linearKey("f16", true), "linear:v2:f32:reg64x64v4:wf16");
+  assertEquals(linearKey("f16", true), "linear:v2:f32:reg64x64r8x4w16v4:wf16");
 });
 
 /**
