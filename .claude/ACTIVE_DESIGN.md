@@ -36,9 +36,18 @@
 - **F 波（VRAM OOM の誤報告）— 完了**: 確保失敗が派生 validation に化けて「破棄後使用」に
   見えていた件を根治（errorScope の報告順を根因優先へ + Session 構築での staging 解放）。
   機序は [research/2026-08-08-vram-oom-misreport.md](../docs/research/2026-08-08-vram-oom-misreport.md)。
-- **配布の次手（未着手）**: HF Xet では**レイヤー分割は DL を速くしない**（分割なし + Range
-  4 並列が最速・並列は 4 で飽和）ことを実測済み。hub 側の Range 並列取得が費用対効果で勝つ。
-  [research/2026-08-08-xet-split-probe.md](../docs/research/2026-08-08-xet-split-probe.md)。
+- **配布の次手（保留中）**: DL 低速の正体は **Xet 再構成の断片化**と判明し、公開 2 リポは
+  修復済み（dedup 抑止の上げ直し — 公開時の env 4 つは
+  [assets-layout.md](../docs/assets-layout.md) の「公開」節が MUST）。hub 側 Range 並列 +
+  prefetch 追随波は**保留**（断片化オブジェクトでは並列 16 まで伸びる — 「4 で飽和」は健全物
+  限定。設計材料は
+  [research/2026-08-09-xet-fragmentation.md](../docs/research/2026-08-09-xet-fragmentation.md)）。
+- **統計波（op 別 GPU 時間内訳）— 完了（2026-08-10）**: 実測の正本は
+  [research/2026-08-10-op-timing-stats.md](../docs/research/2026-08-10-op-timing-stats.md)。
+  台帳 4 件は合計しても壁時計の 7% 台（OP-008 ≈ −1.2% / PLAN-012 ≈ −0.8% / HOST-006 上限
+  −5.1% / **PLAN-011 は既定 guidance 1 で利得ゼロ**）。**本命は DiT linear + attention
+  （GPU の 63.3%）と VAE conv2d（19.1%）のカーネル最適化**。SBV2 は逆にホスト律速
+  （壁 1.08s vs GPU 0.42s）。最適化メニューは裁定待ち。
 - **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 実装完了（2026-08-09）**:
   1 リポ複数モデル（`defaultModel` 必須）+ 語彙整理（presets → `quants`・variant → `dtype`・
   components → `weights` / `assets` 分離）。**v1 パーサは持たない**。hub v2 パーサ +
