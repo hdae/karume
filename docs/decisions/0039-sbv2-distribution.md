@@ -95,6 +95,13 @@ safetensors で配り、パイプラインが名前 → 行番号 → ベクト�
 linear は実質 0 GFLOP（ADR 0025 決定⑤）なので、`w8a8` は速度のためではなく**選択肢として**置く。
 既定を `w8` にしたのは取得量が最小（400MB）で、聴感がこれを許すため（下の Consequences）。
 
+> 精密化（2026-08-10・TS ランタイム実測）: 「conv1d 86〜90%」は GFLOP 集計（exporter 側）
+> 由来の値で、GPU 実時間では **conv1d 単体 70.2% / conv 族（+ conv_transpose1d）86.5% /
+> front+voice に限れば conv 族 96.7%**（FN4/w8）。「linear 実質 0」も front+voice では成立
+> するが、DeBERTa text_encoder（linear 87.7%・全体の 9.4%）を含めた全体では成立しない。
+> 決定への影響は無い（w8a8 を速度目的にしない根拠はむしろ強まる）。実測は
+> [research/2026-08-10-op-timing-stats.md](../research/2026-08-10-op-timing-stats.md) §3。
+
 ### 6. 日本語辞書は配布形に載せない（**暫定** — リファクタで再検討）
 
 `@hdae/yomi` の辞書はモデル資産ではなく yomi のバージョンに結びつくため、配布形に混ぜると

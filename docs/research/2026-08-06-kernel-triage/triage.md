@@ -517,5 +517,14 @@ op testも通過し、runtime全体は424 test / 0 failure。Anima w8a8-s16 / 51
 | PIPE-015   | 🟨 設計候補 | P2     | 高     | pipeline 作成は同期 API。初回コンパイルが encoding を止め、異なるキーの生成も逐次 await                 | validation の扱いを保った async pipeline 作成と、plan 全体の並列 prewarm                           |
 | CONV-016   | ⬜ 要検証   | P2     | 中–高  | Metal の conv parity に exact mismatch が 2 件。WGSL 浮動小数は再結合・融合差があり得る                 | ULP / atol / rtol と実モデル誤差を分離。大誤差なら kernel bug、最終 bit 差だけならテスト契約を修正 |
 
+> 実測による裏取り（2026-08-10 追記）: 上表のうち HOST-006 / OP-008 / PLAN-011 / PLAN-012 /
+> PIPE-013 は op 別 GPU 時間の実測で期待利得を確定した —
+> [2026-08-10-op-timing-stats.md](../2026-08-10-op-timing-stats.md)。特に **PLAN-011 は
+> 既定 guidance 1 で利得ゼロ**（uncond を計算しないため「CFG の再計算」が存在しない。
+> dispatch 772/predict = DiT の 26.6% に対し GPU 時間 0.12% というホスト:GPU = 33:1 の
+> 部分グラフであり、**dispatch/ホスト費用削減の候補**として読み替えるのが正しい）。
+> HOST-006 の旧実測（139/52ms）は現行 main でも同桁で再現し、露出 gap 89ms/step が利得の
+> 天井。OP-008 は 85 鎖 = 全 GPU の 1.77%（≈ −1.2% 壁時計）。
+
 大規模項目の境界、候補 API、プラットフォーム別の検証ゲートは
 `large-designs.md` に分離した。
