@@ -1,9 +1,14 @@
 /**
  * 最小のグラフ実行器。
  *
- * 構造: 「計画（純関数・plan.ts）→ エンコード（GPU）→ submit → グラフ出力だけ readback」。
+ * 構造: 「計画（純関数・plan.ts）→ **導出**（レシピ構築 — src/runtime/recipe.ts）→ **実行**
+ * （レシピ列を汎用ループでエンコード）→ submit → グラフ出力だけ readback」。
  * 出力 shape は 1 dispatch も出す前に全て確定し（静的形状 — ADR 0004）、想定外は全て
  * fail loudly にする（未対応 op / 契約外 dtype / broadcast 不可 / 未束縛シンボル / 宣言不一致）。
+ *
+ * MUST: 導出相は **run 寿命の状態に触れない**（{@link RunArena} の確保も dispatch の発行も
+ * しない）。ここが分かれていることが、後段でレシピ列を Session に常駐させて導出を丸ごと
+ * 飛ばせる条件になっている。
  *
  * MUST: 初期化は明示 async ステージ（{@link createSession}）。コンストラクタ内の同期
  * アップロードループは、重み取得とアップロードのパイプライン化を構造的に不可能にする。
@@ -204,6 +209,16 @@ import {
   validateGraphContracts,
   weightChannelAxes,
 } from "./plan.ts";
+import {
+  type BindingRecipe,
+  type BindingSource,
+  executeStepRecipe,
+  type OutputRecipe,
+  type StepRecipe,
+  StepRecipeBuilder,
+  type TempSource,
+  type ValueSource,
+} from "./recipe.ts";
 
 type TensorOf<D extends IrDtype, A> = {
   readonly dtype: D;
@@ -795,7 +810,10 @@ export class Session {
 
     const device = gpu.device;
     const arena = new RunArena(device, () => scheduler.flush());
-    const env = new Map<string, GPUBuffer>(this.#state.weightBuffers);
+    // MUST: env は **run 寿命の実体だけ**（グラフ入力とノード出力）。Session 常駐の重み /
+    // per-channel scale は導出相で直参照へ畳むので、run ごとに写す必要が無い — 写すと
+    // 「run の器に Session 常駐の状態が混ざる」形が残り、レシピの再利用が成り立たなくなる。
+    const env = new Map<string, GPUBuffer>();
     // MUST: **run が GPU 操作を発行するのは自分のロック区間内のみ**（エンコード〜flush〜pop〜
     // readback〜アリーナ破棄まで）。errorScope は device 単位の LIFO で、操作の失敗は発行時点
     // のスタック先頭に帰属するため、「スコープを張らない操作だからロック外でよい」は成り立た
@@ -817,7 +835,12 @@ export class Session {
           for (const spec of graph.inputs) {
             env.set(spec.name, this.#uploadInput(spec.name, inputs[spec.name], plan.shapes, arena));
           }
-          for (const step of fusion.steps) await this.#encodeStep(step, env, arena);
+          // 導出相 → 実行相。どちらも run の errorScope 区間の内側で、間に submit を挟まない
+          // （params の writeBuffer は導出相で出るので、それを読む dispatch の submit より
+          // 必ず先に発行される）。
+          const recipes = await this.#buildRecipes(fusion.steps);
+          const run = { device, scheduler, arena, env };
+          for (const recipe of recipes) executeStepRecipe(recipe, run);
           arena.assertDrained();
 
           await scheduler.flush();
@@ -875,11 +898,11 @@ export class Session {
    * MUST: 束縛番号はカーネル側の定数（`*_SCALE_BINDING`）から引く。WGSL の宣言と executor が
    * 別々に番号を持つと、変種を足したときに片方だけずれる。
    */
-  #weightScaleEntries(
+  #weightScaleBindings(
     step: NodePlan,
     storage: WeightStorage,
     binding: number,
-  ): readonly GPUBindGroupEntry[] {
+  ): readonly BindingRecipe[] {
     if (storage !== "i8") return [];
     const slot = WEIGHT_SLOTS.get(step.node.op);
     if (slot === undefined) {
@@ -890,7 +913,7 @@ export class Session {
     if (buffer === undefined) {
       throw new ExecutionError(`initializer '${name}': i8 常駐なのに scale バッファが無い`);
     }
-    return [{ binding, resource: { buffer } }];
+    return [{ binding, source: { kind: "resident", buffer } }];
   }
 
   /** 値の宣言 dtype。引けないのはランタイム内部の不変条件破れ（declaredDtypes は全値を持つ）。 */
@@ -934,194 +957,212 @@ export class Session {
   }
 
   /**
-   * 実行ステップ 1 つ（素のノード または 融合ステップ）のエンコード。
+   * 導出相 — ステップ列をレシピ列へ落とす。GPU コマンドを 1 つも出さず、run 寿命の実体
+   * （{@link RunArena} のバッファ）にも触れない（モジュール doc の MUST）。
+   */
+  async #buildRecipes(steps: readonly ExecStep[]): Promise<readonly StepRecipe[]> {
+    // 実体は実行相まで決まらないので、導出相は「その値名が既に定義済みか」だけを追う
+    // （束縛漏れを実行相へ持ち越さず、ここで fail loudly にする）。
+    const defined = new Set(this.#state.model.graph.inputs.map((spec) => spec.name));
+    const recipes: StepRecipe[] = [];
+    for (const step of steps) recipes.push(await this.#buildStep(step, defined));
+    return recipes;
+  }
+
+  /**
+   * 値名 → bind 面の出どころ。重みは Session 常駐なので実体まで解決し、それ以外
+   * （グラフ入力・ノード出力・別名）は値名のまま残す。ノード内一時にはなりえないので
+   * 戻りは {@link ValueSource}（別名元としてもそのまま使える）。
+   */
+  #bindingSource(name: string, defined: ReadonlySet<string>): ValueSource {
+    const resident = this.#state.weightBuffers.get(name);
+    if (resident !== undefined) return { kind: "resident", buffer: resident };
+    if (!defined.has(name)) throw new ExecutionError(`値 '${name}' のバッファが無い`);
+    return { kind: "value", name };
+  }
+
+  /**
+   * 実行ステップ 1 つ（素のノード または 融合ステップ）のレシピ。
    *
    * MUST: 確保 → retain → 本体 → 入力の release（延べ）→ 定義ぶんの release、という簿記は
-   * 両者で**この 1 本**に閉じる。融合ごとに手書きの解放簿記を置くと、アリーナの参照計数が
-   * 融合の本数だけ別実装になり、1 本でもずれると例外なしの沈黙誤値になる（早すぎる解放なら
-   * プール再利用で値が化け、多すぎれば peak が落ちない）。
+   * 両者で**1 本**に閉じる（実行側は {@link executeStepRecipe}）。融合ごとに手書きの解放簿記を
+   * 置くと、アリーナの参照計数が融合の本数だけ別実装になり、1 本でもずれると例外なしの
+   * 沈黙誤値になる（早すぎる解放ならプール再利用で値が化け、多すぎれば peak が落ちない）。
    */
-  async #encodeStep(
-    step: ExecStep,
-    env: Map<string, GPUBuffer>,
-    arena: RunArena,
-  ): Promise<void> {
+  async #buildStep(step: ExecStep, defined: Set<string>): Promise<StepRecipe> {
     const outputName = step.kind === "node" ? step.plan.outputName : step.outputName;
     const outputShape = step.kind === "node" ? step.plan.outputShape : step.outputShape;
     // bind 面のオペランド順（重複無し）と解放簿記の延べ列は別物。素のノードでは
     // どちらも node.ins に一致し、融合ステップだけが 2 つを別々に宣言する。
     const bindNames = step.kind === "node" ? step.plan.node.ins : step.binds;
     const consumedNames = step.kind === "node" ? step.plan.node.ins : step.ins;
-    const inputs = bindNames.map((name) => {
-      const buffer = env.get(name);
-      if (buffer === undefined) throw new ExecutionError(`値 '${name}' のバッファが無い`);
-      return buffer;
-    });
-    // MUST: 出力の確保は当該 dispatch のエンコードより前（アリーナの不変条件）。この順序が
-    // 「まだ読まれる入力が出力として配り直される」事故を構造的に防いでいる。
-    //
+    const binds = bindNames.map((name) => this.#bindingSource(name, defined));
     // reshape と恒等 expand は要素順を変えないので**入力バッファをそのまま出力の実体にする**
     // （別名 — ADR 0011）。dispatch も確保も出さない。要素数一致は planGraph が済ませているので、
     // 別名先の実バッファは宣言 shape ぶんの大きさを必ず満たす。
-    const out = step.kind === "node" && step.aliasesInput
-      ? inputs[0]
-      : arena.allocStorage(numel(outputShape) * 4);
-    // MUST: 別名でも retain は「定義ぶんの 1 + 出力値の消費回数」を**実バッファに積む**。
-    // これで実バッファの参照数が「入力側の残り消費 + 出力側の消費」の和になり、別名越しの
-    // 消費まで正確に数えられる。抜くと最終消費より早くプールへ戻り、次の確保に配り直された
-    // 実体を後続が読む沈黙誤値になる（過剰に積めばプール再利用から外れて peak が落ちない）。
-    arena.retain(out, this.#state.useCounts.get(outputName) ?? 0, {
-      pinned: this.#state.outputNames.has(outputName),
-    });
-    env.set(outputName, out);
+    // MUST: 別名元は bind 面の先頭（temp にはなりえない）。
+    const output: OutputRecipe = step.kind === "node" && step.aliasesInput
+      ? { kind: "alias", source: binds[0] }
+      : { kind: "alloc", byteLength: numel(outputShape) * 4 };
+    // 出力は「この値名」として束ねる。実行相が dispatch より前に env へ載せるので、
+    // 同一ステップ内の bind もこの 1 本で解決できる。
+    const out: BindingSource = { kind: "value", name: outputName };
 
+    const builder = new StepRecipeBuilder();
     if (step.kind === "node") {
-      await this.#encodeNode(step.plan, step.aliasesInput, inputs, out, arena);
+      await this.#buildNode(step.plan, step.aliasesInput, binds, out, builder);
     } else {
-      await this.#encodeFused(step, inputs, out);
+      await this.#buildFused(step, binds, out, builder);
     }
+    defined.add(outputName);
 
-    // MUST: 解放はステップ境界（当該ステップの全 dispatch をエンコードし終えた後）のみ。
-    for (const name of consumedNames) {
-      const buffer = env.get(name);
-      if (buffer !== undefined) arena.release(buffer);
-    }
-    // MUST: retain が積んだ定義ぶんの 1 をここで返す。消費者ゼロの中間出力（グラフ出力にも
-    // ならない到達不能な値）が解放されるのはこの 1 本だけで、抜けるとプール再利用から外れて
-    // peakTransientBytes が実際より大きく出る。
-    arena.release(out);
+    return {
+      outputName,
+      output,
+      uses: this.#state.useCounts.get(outputName) ?? 0,
+      pinned: this.#state.outputNames.has(outputName),
+      temps: builder.temps,
+      dispatches: builder.dispatches,
+      releases: consumedNames,
+    };
   }
 
   /**
    * 融合ステップの 1 dispatch。bind 面は「params, 入力…, 出力」で全ルール共通、params は
    * 16 バイトの uniform で固定（src/runtime/fusion.ts の {@link FusedDispatch}）。
    */
-  async #encodeFused(
+  async #buildFused(
     step: FusedStep,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const { key, gridItems, workgroupSize } = step.dispatch;
     const { pipeline, layout } = await this.#state.cache.get(key, step.dispatch.wgsl());
     const params = this.#writeParams(step.dispatch.params, PARAMS_UNIFORM_USAGE);
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
-        { binding: inputs.length + 1, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       gridItems,
       workgroupSize,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: binds.length + 1, source: out },
+      ],
+      workgroups: [groups, 1, 1],
+    });
   }
 
-  /** 素のノード 1 つの本体（確保・retain・解放は {@link #encodeStep} が済ませている）。 */
-  async #encodeNode(
+  /** 素のノード 1 つの本体（確保・retain・解放は {@link executeStepRecipe} が済ませる）。 */
+  async #buildNode(
     step: NodePlan,
     aliasesInput: boolean,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
-    arena: RunArena,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     switch (step.contract.kind) {
       case "unary":
       case "binary":
-        await this.#encodeElementwise(
+        await this.#buildElementwise(
           step,
           { op: step.contract.name, dtype: step.inputDtypes[0] },
-          inputs,
+          binds,
           out,
+          builder,
         );
         break;
       case "cast":
-        await this.#encodeElementwise(
+        await this.#buildElementwise(
           step,
           { op: CAST_OP, dtype: step.inputDtypes[0], to: step.outputDtype },
-          inputs,
+          binds,
           out,
+          builder,
         );
         break;
       case "where":
         // 生成入力は**値スロット**の dtype（スロット 0 は条件で常に bool）。
-        await this.#encodeElementwise(
+        await this.#buildElementwise(
           step,
           { op: WHERE_OP, dtype: step.inputDtypes[1] },
-          inputs,
+          binds,
           out,
+          builder,
         );
         break;
       case "cumsum":
-        await this.#encodeCumsum(step, inputs, out);
+        await this.#buildCumsum(step, binds, out, builder);
         break;
       case "matmul":
-        await this.#encodeMatmul(step, inputs, out);
+        await this.#buildMatmul(step, binds, out, builder);
         break;
       case "bmm":
-        await this.#encodeBmm(step, inputs, out);
+        await this.#buildBmm(step, binds, out, builder);
         break;
       case "gather":
-        await this.#encodeGather(step, inputs, out);
+        await this.#buildGather(step, binds, out, builder);
         break;
       case "rowReduce":
-        await this.#encodeRowReduce(step, step.contract.name, inputs, out);
+        await this.#buildRowReduce(step, step.contract.name, binds, out, builder);
         break;
       case "permute":
       case "slice":
       case "symPrefixSlice":
-        await this.#encodeStridedCopy(step, step.contract.kind, inputs, out);
+        await this.#buildStridedCopy(step, step.contract.kind, binds, out, builder);
         break;
       case "expand":
         // 恒等 expand は別名化済み（0 dispatch）。複製軸が 1 つでもあれば実体化コピー。
         if (!aliasesInput) {
-          await this.#encodeStridedCopy(step, step.contract.kind, inputs, out);
+          await this.#buildStridedCopy(step, step.contract.kind, binds, out, builder);
         }
         break;
       case "cat":
-        await this.#encodeCat(step, inputs, out);
+        await this.#buildCat(step, binds, out, builder);
         break;
       case "pad":
-        await this.#encodePad(step, inputs, out);
+        await this.#buildPad(step, binds, out, builder);
         break;
       case "flip":
-        await this.#encodeFlip(step, inputs, out);
+        await this.#buildFlip(step, binds, out, builder);
         break;
       case "linear":
-        await this.#encodeLinear(step, inputs, out, arena);
+        await this.#buildLinear(step, binds, out, builder);
         break;
       case "layerNorm":
-        await this.#encodeLayerNorm(step, inputs, out);
+        await this.#buildLayerNorm(step, binds, out, builder);
         break;
       case "rmsNorm":
-        await this.#encodeRmsNorm(step, inputs, out);
+        await this.#buildRmsNorm(step, binds, out, builder);
         break;
       case "softmax":
-        await this.#encodeSoftmax(step, inputs, out);
+        await this.#buildSoftmax(step, binds, out, builder);
         break;
       case "attention":
-        await this.#encodeAttention(step, inputs, out, arena);
+        await this.#buildAttention(step, binds, out, builder);
         break;
       case "embedding":
-        await this.#encodeEmbedding(step, inputs, out);
+        await this.#buildEmbedding(step, binds, out, builder);
         break;
       case "maskedFill":
-        await this.#encodeMaskedFill(step, inputs, out);
+        await this.#buildMaskedFill(step, binds, out, builder);
         break;
       case "conv1d":
-        await this.#encodeConv1d(step, inputs, out);
+        await this.#buildConv1d(step, binds, out, builder);
         break;
       case "conv2d":
-        await this.#encodeConv2d(step, inputs, out);
+        await this.#buildConv2d(step, binds, out, builder);
         break;
       case "convTranspose1d":
-        await this.#encodeConvTranspose1d(step, inputs, out);
+        await this.#buildConvTranspose1d(step, binds, out, builder);
         break;
       case "reshape":
-        // 別名化は #encodeStep で済んでいる（この op は 1 dispatch も出さない）。
+        // 別名化は #buildStep で済んでいる（この op は 1 dispatch も出さない）。
         break;
       default: {
         // MUST: 未処理の kind をここで止める。switch が素通りすると出力バッファに 1 バイトも
@@ -1134,11 +1175,12 @@ export class Session {
     }
   }
 
-  async #encodeElementwise(
+  async #buildElementwise(
     step: NodePlan,
     element: ElementwiseOp,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     // rank 0（スカラ）は codegen の rank ≥ 1 契約に合わせて長さ 1 の 1 次元に正規化する。
     const outShape = step.outputShape.length === 0 ? [1] : [...step.outputShape];
@@ -1157,20 +1199,22 @@ export class Session {
       ),
       PARAMS_STORAGE_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
-        { binding: inputs.length + 1, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       numel(outShape),
       ELEMENTWISE_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: binds.length + 1, source: out },
+      ],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /**
@@ -1183,11 +1227,12 @@ export class Session {
    * MUST: 分岐は**軸だけ**で決める。速度で選ぶ余地を作ると、最終次元でも軸変種が走る形が
    * でき、既定経路のビット不変（PNG sha256 門）が実行時条件に依存してしまう。
    */
-  async #encodeRowReduce(
+  async #buildRowReduce(
     step: NodePlan,
     op: ReduceOpName,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const inputShape = step.inputShapes[0];
     const axis = reduceDim(step.node.attrs, `nodes (${step.node.op})`);
@@ -1207,14 +1252,6 @@ export class Session {
         : axisReduceParams(outCount, inputShape[axis], inner),
       PARAMS_UNIFORM_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: out } },
-      ],
-    });
     // 行 reduce は 1 行 = 1 workgroup、軸 reduce は 1 スレッド = 1 出力。どちらも上限を
     // 超えたら縮退させ、カーネル側の grid-stride で回す。
     const groups = gridStrideWorkgroups(
@@ -1222,37 +1259,44 @@ export class Session {
       lastDim ? 1 : AXIS_REDUCE_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /**
    * cumsum（最終次元の前縁和）。**1 invocation = 1 行**の逐次走査で、行方向を grid-stride で
    * 回す（形の根拠は src/kernels/cumsum.ts）。
    */
-  async #encodeCumsum(
+  async #buildCumsum(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const { pipeline, layout } = await this.#state.cache.get(CUMSUM_KEY, CUMSUM_WGSL);
     const params = this.#writeParams(cumsumParams(rows, dim), PARAMS_UNIFORM_USAGE);
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       rows,
       CUMSUM_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], CUMSUM_KEY);
+    builder.dispatch({
+      key: CUMSUM_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /**
@@ -1261,11 +1305,12 @@ export class Session {
    * stride 0、sym_prefix_slice は **Tmax 形の入力**の連続 stride、slice は入力の連続 stride と
    * **開始位置 offset**。恒等 expand は別名化されるのでここへは来ない。
    */
-  async #encodeStridedCopy(
+  async #buildStridedCopy(
     step: NodePlan,
     kind: "permute" | "expand" | "slice" | "symPrefixSlice",
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputShape;
@@ -1295,20 +1340,19 @@ export class Session {
       stridedParams(outShape, srcStrides, offset),
       PARAMS_STORAGE_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       numel(outShape),
       STRIDED_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /**
@@ -1320,10 +1364,11 @@ export class Session {
    * 結果になる。契約の shape 規則（軸長 = 入力の軸長の総和）と同じ事実をエンコード側の
    * 積み上げからも確かめる形で、片方だけの誤りを内部矛盾として落とす。
    */
-  async #encodeCat(
+  async #buildCat(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const outShape = step.outputShape;
     const where = `nodes (${step.node.op})`;
@@ -1333,26 +1378,25 @@ export class Session {
     const key = stridedWriteKey(spec);
     const { pipeline, layout } = await this.#state.cache.get(key, stridedWriteWgsl(spec));
     let written = 0;
-    for (const [index, buffer] of inputs.entries()) {
+    for (const [index, source] of binds.entries()) {
       const srcShape = step.inputShapes[index];
       const params = this.#writeParams(
         stridedWriteParams(srcShape, outStrides, catOutOffset(outShape, dim, written)),
         PARAMS_STORAGE_USAGE,
       );
-      const bindGroup = this.#state.gpu.device.createBindGroup({
-        layout,
-        entries: [
-          { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: { buffer } },
-          { binding: 2, resource: { buffer: out } },
-        ],
-      });
       const groups = gridStrideWorkgroups(
         numel(srcShape),
         STRIDED_WRITE_WORKGROUP_SIZE,
         this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
       );
-      this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], key);
+      builder.dispatch({
+        key,
+        pipeline,
+        layout,
+        params,
+        bindings: [{ binding: 1, source }, { binding: 2, source: out }],
+        workgroups: [groups, 1, 1],
+      });
       written += srcShape[dim];
     }
     if (written !== outShape[dim]) {
@@ -1368,10 +1412,11 @@ export class Session {
    * pad（最終次元の定数 0 埋め）。**1 dispatch で出力の全バイトを書く**（範囲内は転写・
    * 範囲外は 0 — ADR 0014 の full-write）。ゼロ初期化されたバッファを前提にしない。
    */
-  async #encodePad(
+  async #buildPad(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputShape;
@@ -1381,30 +1426,30 @@ export class Session {
       padParams(numel(srcShape.slice(0, -1)), srcShape[srcShape.length - 1], left, right),
       PARAMS_UNIFORM_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       numel(outShape),
       PAD_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], PAD_KEY);
+    builder.dispatch({
+      key: PAD_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /**
    * flip（静的軸の添字反転）。軸の位置は `[outer, len, inner]` の 3 分割に畳んで渡す
    * （rank を params に載せない — src/kernels/flip.ts）。
    */
-  async #encodeFlip(
+  async #buildFlip(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = flipDim(step.node.attrs, `nodes (${step.node.op})`);
@@ -1415,63 +1460,66 @@ export class Session {
       flipParams(numel(shape.slice(0, dim)), shape[dim], numel(shape.slice(dim + 1))),
       PARAMS_UNIFORM_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       numel(shape),
       FLIP_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], FLIP_KEY);
+    builder.dispatch({
+      key: FLIP_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      workgroups: [groups, 1, 1],
+    });
   }
 
-  async #encodeMatmul(
+  async #buildMatmul(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const [a, b] = step.inputShapes;
     const [m, k] = a;
     const n = b[1];
-    // v4（vec4 の読み書き）は形状から導く 1 ビット。encode 時に評価してキーと WGSL の
+    // v4（vec4 の読み書き）は形状から導く 1 ビット。導出時に評価してキーと WGSL の
     // 両方へ渡す（同一キー ⇔ 同一バイト列は保たれる）。
     const v4 = gemmUsesVec4(k, n);
     const key = matmulKey(v4);
     const { pipeline, layout } = await this.#state.cache.get(key, matmulWgsl(v4));
     const params = this.#writeParams(matmulParams(m, n, k), PARAMS_UNIFORM_USAGE);
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: inputs[1] } },
-        { binding: 3, resource: { buffer: out } },
-      ],
-    });
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `matmul [${a.join(",")}] × [${b.join(",")}]`;
     const geometry = defaultGemmGeometry();
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, gemmTileN(geometry), limit, where),
-      tiledWorkgroups(m, gemmTileM(geometry), limit, where),
-      1,
-    ], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        { binding: 1, source: binds[0] },
+        { binding: 2, source: binds[1] },
+        { binding: 3, source: out },
+      ],
+      workgroups: [
+        tiledWorkgroups(n, gemmTileN(geometry), limit, where),
+        tiledWorkgroups(m, gemmTileM(geometry), limit, where),
+        1,
+      ],
+    });
   }
 
   /**
    * バッチ matmul（rank-3）。タイル 2 軸に加えて**バッチを z 軸**へ載せる。
    * MUST: matmul と同じ「1 workgroup = 1 タイル」なので、3 軸とも上限超過は fail loudly。
    */
-  async #encodeBmm(
+  async #buildBmm(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const [a, b] = step.inputShapes;
     const [batch, m, k] = a;
@@ -1480,34 +1528,37 @@ export class Session {
     const key = bmmKey(v4);
     const { pipeline, layout } = await this.#state.cache.get(key, bmmWgsl(v4));
     const params = this.#writeParams(bmmParams(m, n, k), PARAMS_UNIFORM_USAGE);
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: inputs[1] } },
-        { binding: 3, resource: { buffer: out } },
-      ],
-    });
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `bmm [${a.join(",")}] × [${b.join(",")}]`;
     const geometry = defaultGemmGeometry();
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, gemmTileN(geometry), limit, where),
-      tiledWorkgroups(m, gemmTileM(geometry), limit, where),
-      // バッチは 1 workgroup = 1 バッチ。ここも縮退させるとバッチが丸ごと未書き込みになる。
-      tiledWorkgroups(batch, 1, limit, where),
-    ], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        { binding: 1, source: binds[0] },
+        { binding: 2, source: binds[1] },
+        { binding: 3, source: out },
+      ],
+      workgroups: [
+        tiledWorkgroups(n, gemmTileN(geometry), limit, where),
+        tiledWorkgroups(m, gemmTileM(geometry), limit, where),
+        // バッチは 1 workgroup = 1 バッチ。ここも縮退させるとバッチが丸ごと未書き込みになる。
+        tiledWorkgroups(batch, 1, limit, where),
+      ],
+    });
   }
 
   /**
    * 最終次元の gather。出力は連続で、`row = i / J` から `src[row * D + index[i]]` を引く。
    * 範囲外添字の扱いは src/kernels/gather.ts の裁定（GPU は NaN 汚染 / CPU 参照は throw）。
    */
-  async #encodeGather(
+  async #buildGather(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputShape;
@@ -1517,21 +1568,23 @@ export class Session {
       gatherParams(count, outShape[outShape.length - 1], srcShape[srcShape.length - 1]),
       PARAMS_UNIFORM_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: inputs[1] } },
-        { binding: 3, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       count,
       GATHER_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], GATHER_KEY);
+    builder.dispatch({
+      key: GATHER_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        { binding: 1, source: binds[0] },
+        { binding: 2, source: binds[1] },
+        { binding: 3, source: out },
+      ],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /**
@@ -1539,11 +1592,11 @@ export class Session {
    * GEMM に落とす。重みは `[n,k]` の転置レイアウトのままカーネルが読む（転置コピー無し）。
    * MUST: matmul と同じ「1 workgroup = 1 タイル」なので、上限超過は fail loudly。
    */
-  async #encodeLinear(
+  async #buildLinear(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
-    arena: RunArena,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
     const n = weight[0];
@@ -1553,7 +1606,7 @@ export class Session {
     // w8a8 は **opt-in × i8 常駐 × k % 4 == 0** の 3 条件が揃ったときだけ（ADR 0025 予定）。
     // 既定の "f32" では 1 バイトも挙動が変わらない。
     if (this.#state.linearCompute === "i8a8" && weightStorage === "i8" && k % 4 === 0) {
-      await this.#encodeLinearI8a8(step, inputs, out, arena, m, n, k);
+      await this.#buildLinearI8a8(step, binds, out, builder, m, n, k);
       return;
     }
     // f16 計算変種（ADR 0028）。**i8 常駐の重みとは組めない**（w8a16 は未実装）ので、
@@ -1574,23 +1627,25 @@ export class Session {
       linearWgsl(weightStorage, v4, compute),
     );
     const params = this.#writeParams(linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
-        { binding: 4, resource: { buffer: out } },
-        ...this.#weightScaleEntries(step, weightStorage, LINEAR_SCALE_BINDING),
-      ],
-    });
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `linear [${x.join(",")}] × [${weight.join(",")}]`;
     const geometry = defaultGemmGeometry();
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, gemmTileN(geometry), limit, where),
-      tiledWorkgroups(m, gemmTileM(geometry), limit, where),
-      1,
-    ], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 4, source: out },
+        ...this.#weightScaleBindings(step, weightStorage, LINEAR_SCALE_BINDING),
+      ],
+      workgroups: [
+        tiledWorkgroups(n, gemmTileN(geometry), limit, where),
+        tiledWorkgroups(m, gemmTileM(geometry), limit, where),
+        1,
+      ],
+    });
   }
 
   /**
@@ -1600,15 +1655,15 @@ export class Session {
    * ① `quantize_rows`（活性を per-token i8 へ・行方向 grid-stride）→ ② i8a8 GEMM（整数内積・
    * 1 workgroup = 1 出力タイルなので上限超過は fail loudly）。
    *
-   * MUST: 一時バッファ（`xq` / `xs`）は `retain(…, 0)` → ノード末尾で `release` する。これで
-   * アリーナの参照計数が閉じ（`assertDrained`）、失敗経路でも `arena.destroy()` が拾う。
+   * MUST: 一時バッファ（`xq` / `xs`）は宣言 → ノード末尾で解放する。これで実行相の参照計数が
+   * 閉じ（`assertDrained`）、失敗経路でも `arena.destroy()` が拾う。
    * MUST: `k` のオーバフロー門は fail loudly。黙って通すと i32 の巻き戻りで符号ごと化ける。
    */
-  async #encodeLinearI8a8(
+  async #buildLinearI8a8(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
-    arena: RunArena,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
     m: number,
     n: number,
     k: number,
@@ -1621,38 +1676,29 @@ export class Session {
           "（linearCompute を 'f32' にするか、この linear を i8 常駐から外す）",
       );
     }
-    const device = this.#state.gpu.device;
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
     // 量子化した活性 `xq`（i8 を 4 詰め）と per-token scale `xs`。ノード内で閉じた一時領域。
-    const xq = arena.allocStorage(Math.max(4, m * (k / 4) * 4));
-    arena.retain(xq, 0);
-    const xs = arena.allocStorage(Math.max(4, m * 4));
-    arena.retain(xs, 0);
+    const xq = builder.allocTemp(Math.max(4, m * (k / 4) * 4));
+    const xs = builder.allocTemp(Math.max(4, m * 4));
 
     // ① 活性の per-token 量子化（1 行 = 1 workgroup・行方向 grid-stride）
     const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
       QUANTIZE_ROWS_KEY,
       QUANTIZE_ROWS_WGSL,
     );
-    const quantizeParams = this.#writeParams(
-      quantizeRowsParams(m, k),
-      PARAMS_UNIFORM_USAGE,
-    );
-    const quantizeBindGroup = device.createBindGroup({
+    builder.dispatch({
+      key: QUANTIZE_ROWS_KEY,
+      pipeline: quantizePipeline,
       layout: quantizeLayout,
-      entries: [
-        { binding: 0, resource: { buffer: quantizeParams } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: xq } },
-        { binding: 3, resource: { buffer: xs } },
+      params: this.#writeParams(quantizeRowsParams(m, k), PARAMS_UNIFORM_USAGE),
+      bindings: [
+        { binding: 1, source: binds[0] },
+        { binding: 2, source: xq },
+        { binding: 3, source: xs },
       ],
+      workgroups: [gridStrideWorkgroups(m, 1, limit), 1, 1],
     });
-    this.#state.scheduler.dispatch(quantizePipeline, quantizeBindGroup, [
-      gridStrideWorkgroups(m, 1, limit),
-      1,
-      1,
-    ], QUANTIZE_ROWS_KEY);
 
     // ② 整数内積の GEMM。タイル幾何は op → 幾何の純関数が決める（src/kernels/i8a8-geometry.ts）
     // — キーに載るので「同一キー → バイト同一 WGSL」は保たれる。
@@ -1663,35 +1709,37 @@ export class Session {
       key,
       linearI8a8Wgsl(v4, this.#state.i8a8Dot === "dp4a", geometry),
     );
-    const params = this.#writeParams(linearI8a8Params(m, n, k), PARAMS_UNIFORM_USAGE);
-    const bindGroup = device.createBindGroup({
+    builder.dispatch({
+      key,
+      pipeline,
       layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: xq } },
-        { binding: 2, resource: { buffer: inputs[1] } },
-        { binding: 3, resource: { buffer: inputs[2] } },
-        { binding: 4, resource: { buffer: out } },
-        ...this.#weightScaleEntries(step, "i8", LINEAR_SCALE_BINDING),
-        { binding: LINEAR_ACT_SCALE_BINDING, resource: { buffer: xs } },
+      params: this.#writeParams(linearI8a8Params(m, n, k), PARAMS_UNIFORM_USAGE),
+      bindings: [
+        { binding: 1, source: xq },
+        { binding: 2, source: binds[1] },
+        { binding: 3, source: binds[2] },
+        { binding: 4, source: out },
+        ...this.#weightScaleBindings(step, "i8", LINEAR_SCALE_BINDING),
+        { binding: LINEAR_ACT_SCALE_BINDING, source: xs },
+      ],
+      workgroups: [
+        tiledWorkgroups(n, i8a8TileN(geometry), limit, where),
+        tiledWorkgroups(m, i8a8TileM(geometry), limit, where),
+        1,
       ],
     });
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, i8a8TileN(geometry), limit, where),
-      tiledWorkgroups(m, i8a8TileM(geometry), limit, where),
-      1,
-    ], key);
 
     // MUST: ノード境界で一時バッファを返す（アリーナの不変条件）。
-    arena.release(xs);
-    arena.release(xq);
+    builder.releaseTemp(xs);
+    builder.releaseTemp(xq);
   }
 
   /** layer_norm（最終次元・affine あり）。1 行 = 1 workgroup で、行方向は grid-stride。 */
-  async #encodeLayerNorm(
+  async #buildLayerNorm(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
@@ -1702,30 +1750,33 @@ export class Session {
       layerNormParams(rows, dim, eps),
       PARAMS_UNIFORM_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
-        { binding: 4, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       rows,
       1,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], LAYER_NORM_KEY);
+    builder.dispatch({
+      key: LAYER_NORM_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 4, source: out },
+      ],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /**
    * rms_norm（最終次元・weight のみ）。layer_norm と同じ 1 行 = 1 workgroup の形で、
    * 縮約は二乗和 1 パス（ADR 0017）。
    */
-  async #encodeRmsNorm(
+  async #buildRmsNorm(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
@@ -1733,47 +1784,49 @@ export class Session {
     const eps = rmsNormEps(step.node.attrs, `nodes (${step.node.op})`);
     const { pipeline, layout } = await this.#state.cache.get(RMS_NORM_KEY, RMS_NORM_WGSL);
     const params = this.#writeParams(rmsNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
-        { binding: 3, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       rows,
       1,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], RMS_NORM_KEY);
+    builder.dispatch({
+      key: RMS_NORM_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 3, source: out },
+      ],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /** softmax（最終次元、safe-softmax）。layer_norm と同じ 1 行 = 1 workgroup の形。 */
-  async #encodeSoftmax(
+  async #buildSoftmax(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const { pipeline, layout } = await this.#state.cache.get(SOFTMAX_KEY, SOFTMAX_WGSL);
     const params = this.#writeParams(softmaxParams(rows, dim), PARAMS_UNIFORM_USAGE);
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       rows,
       1,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], SOFTMAX_KEY);
+    builder.dispatch({
+      key: SOFTMAX_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /**
@@ -1791,15 +1844,15 @@ export class Session {
    * MUST: ① と ③ は 1 workgroup = 1 タイルなので、3 軸とも上限超過は fail loudly
    * （{@link tiledWorkgroups}）。縮退させるとタイルが欠落し、例外なしに O の一部が
    * 未書き込み（プール再利用なら前の値）で残る。② だけが行方向 grid-stride。
-   * MUST: 一時バッファ（S / 行統計）は `retain(…, 0)` → ノード末尾で `release` する。
-   * これでアリーナの参照計数が閉じ（`assertDrained`）、失敗経路でも `arena.destroy()` が
-   * 拾う（確保と破棄を 1 箇所へ — ADR 0004）。
+   * MUST: 一時バッファ（S / 行統計）は宣言 → ノード末尾で解放する。これで実行相の参照計数が
+   * 閉じ（`assertDrained`）、失敗経路でも `arena.destroy()` が拾う（確保と破棄を 1 箇所へ —
+   * ADR 0004）。
    */
-  async #encodeAttention(
+  async #buildAttention(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
-    arena: RunArena,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const [q, k, v] = step.inputShapes;
     // B と H は 1 本のバッチ軸へ畳む（契約は rank-4 head-first で、3 者の B / H は一致）。
@@ -1808,7 +1861,6 @@ export class Session {
     const cols = k[2];
     const depth = q[3];
     const scale = attentionScale(step.node.attrs, `nodes (${step.node.op})`);
-    const device = this.#state.gpu.device;
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `attention [${q.join(",")}] × [${k.join(",")}] × [${v.join(",")}]`;
 
@@ -1833,22 +1885,20 @@ export class Session {
         ? "f16"
         : "f32";
 
-    // S[batch, M, N] と行統計 [batch·M, 2]。O は #encodeNode が確保済みなので、峰は
+    // S[batch, M, N] と行統計 [batch·M, 2]。O は実行相が確保済みなので、峰は
     // O + S + 統計（分解経路の S + P + 恒等 expand の 3 枚から 1 枚ぶん減る）。
     // f16 変種（`:c16` の array<f16> / s16 の pack2x16float）では S が半分のバイト数になる
     // （1024px の DiT で 1,073.7MB → 536.9MB）。
-    const scores = arena.allocStorage(
+    const scores = builder.allocTemp(
       batch * rows * cols * (compute === "f16" ? 2 : scoreStorageBytes(scoreStorage)),
     );
-    arena.retain(scores, 0);
-    const stats = arena.allocStorage(batch * rows * ATTENTION_STATS_STRIDE * 4);
-    arena.retain(stats, 0);
+    const stats = builder.allocTemp(batch * rows * ATTENTION_STATS_STRIDE * 4);
 
     // ① QK gemm — 縮約次元は D、出力の列は N。
     if (qkI8a8) {
-      await this.#encodeAttentionQkI8a8(
-        arena,
-        inputs,
+      await this.#buildAttentionQkI8a8(
+        builder,
+        binds,
         scores,
         scoreStorage,
         { batch, rows, cols, depth },
@@ -1862,25 +1912,26 @@ export class Session {
         qkKey,
         attentionQkWgsl(qkV4, compute, scoreStorage),
       );
-      const qkParams = this.#writeParams(
-        attentionQkParams(rows, cols, depth, scale),
-        PARAMS_UNIFORM_USAGE,
-      );
-      const qkBindGroup = device.createBindGroup({
+      const geometry = defaultGemmGeometry();
+      builder.dispatch({
+        key: qkKey,
+        pipeline: qkPipeline,
         layout: qkLayout,
-        entries: [
-          { binding: 0, resource: { buffer: qkParams } },
-          { binding: 1, resource: { buffer: inputs[0] } },
-          { binding: 2, resource: { buffer: inputs[1] } },
-          { binding: 3, resource: { buffer: scores } },
+        params: this.#writeParams(
+          attentionQkParams(rows, cols, depth, scale),
+          PARAMS_UNIFORM_USAGE,
+        ),
+        bindings: [
+          { binding: 1, source: binds[0] },
+          { binding: 2, source: binds[1] },
+          { binding: 3, source: scores },
+        ],
+        workgroups: [
+          tiledWorkgroups(cols, gemmTileN(geometry), limit, `${where} ①QK`),
+          tiledWorkgroups(rows, gemmTileM(geometry), limit, `${where} ①QK`),
+          tiledWorkgroups(batch, 1, limit, `${where} ①QK`),
         ],
       });
-      const geometry = defaultGemmGeometry();
-      this.#state.scheduler.dispatch(qkPipeline, qkBindGroup, [
-        tiledWorkgroups(cols, gemmTileN(geometry), limit, `${where} ①QK`),
-        tiledWorkgroups(rows, gemmTileM(geometry), limit, `${where} ①QK`),
-        tiledWorkgroups(batch, 1, limit, `${where} ①QK`),
-      ], qkKey);
     }
 
     // ② 行統計 — 1 行 = 1 workgroup で、行方向は grid-stride（softmax と同じ形）。
@@ -1892,29 +1943,23 @@ export class Session {
       statsKey,
       attentionStatsWgsl(compute, scoreStorage, statsRegCache),
     );
-    const statsParams = this.#writeParams(
-      attentionStatsParams(batch * rows, cols),
-      PARAMS_UNIFORM_USAGE,
-    );
-    const statsBindGroup = device.createBindGroup({
+    builder.dispatch({
+      key: statsKey,
+      pipeline: statsPipeline,
       layout: statsLayout,
-      entries: [
-        { binding: 0, resource: { buffer: statsParams } },
-        { binding: 1, resource: { buffer: scores } },
-        { binding: 2, resource: { buffer: stats } },
-      ],
+      params: this.#writeParams(
+        attentionStatsParams(batch * rows, cols),
+        PARAMS_UNIFORM_USAGE,
+      ),
+      bindings: [{ binding: 1, source: scores }, { binding: 2, source: stats }],
+      workgroups: [gridStrideWorkgroups(batch * rows, 1, limit), 1, 1],
     });
-    this.#state.scheduler.dispatch(statsPipeline, statsBindGroup, [
-      gridStrideWorkgroups(batch * rows, 1, limit),
-      1,
-      1,
-    ], statsKey);
 
     // ③ PV gemm — 縮約次元は N、出力の列は D。
     if (pvI8a8) {
-      await this.#encodeAttentionPvI8a8(
-        arena,
-        inputs,
+      await this.#buildAttentionPvI8a8(
+        builder,
+        binds,
         scores,
         scoreStorage,
         stats,
@@ -1929,32 +1974,30 @@ export class Session {
         pvKey,
         attentionPvWgsl(pvV4, compute, scoreStorage),
       );
-      const pvParams = this.#writeParams(
-        attentionPvParams(rows, depth, cols),
-        PARAMS_UNIFORM_USAGE,
-      );
-      const pvBindGroup = device.createBindGroup({
+      const geometry = defaultGemmGeometry();
+      builder.dispatch({
+        key: pvKey,
+        pipeline: pvPipeline,
         layout: pvLayout,
-        entries: [
-          { binding: 0, resource: { buffer: pvParams } },
-          { binding: 1, resource: { buffer: scores } },
-          { binding: 2, resource: { buffer: inputs[2] } },
-          { binding: 3, resource: { buffer: stats } },
-          { binding: 4, resource: { buffer: out } },
+        params: this.#writeParams(attentionPvParams(rows, depth, cols), PARAMS_UNIFORM_USAGE),
+        bindings: [
+          { binding: 1, source: scores },
+          { binding: 2, source: binds[2] },
+          { binding: 3, source: stats },
+          { binding: 4, source: out },
+        ],
+        workgroups: [
+          tiledWorkgroups(depth, gemmTileN(geometry), limit, `${where} ③PV`),
+          tiledWorkgroups(rows, gemmTileM(geometry), limit, `${where} ③PV`),
+          tiledWorkgroups(batch, 1, limit, `${where} ③PV`),
         ],
       });
-      const geometry = defaultGemmGeometry();
-      this.#state.scheduler.dispatch(pvPipeline, pvBindGroup, [
-        tiledWorkgroups(depth, gemmTileN(geometry), limit, `${where} ③PV`),
-        tiledWorkgroups(rows, gemmTileM(geometry), limit, `${where} ③PV`),
-        tiledWorkgroups(batch, 1, limit, `${where} ③PV`),
-      ], pvKey);
     }
 
     // MUST: ノード境界で一時バッファを返す（アリーナの不変条件 — 抜けると assertDrained で
     // 落ちるか、プール再利用から外れて peak が過大に出る）。
-    arena.release(stats);
-    arena.release(scores);
+    builder.releaseTemp(stats);
+    builder.releaseTemp(scores);
   }
 
   /**
@@ -1968,14 +2011,14 @@ export class Session {
    * D が q / k とも最内連続なので、行 = token の per-token 量子化がそのまま要求どおりの形に
    * なる）。診断では linear の活性量子化と合算されるので、内訳は E2E のキー本数検査で担保する。
    *
-   * MUST: 一時バッファ（`qq` / `qs` / `kq` / `ks`）は `retain(…, 0)` → 末尾で `release`。
+   * MUST: 一時バッファ（`qq` / `qs` / `kq` / `ks`）は宣言 → 末尾で解放する。
    * MUST: `D` のオーバフロー門は fail loudly（黙って通すと i32 の巻き戻りで符号ごと化ける。
    * 実測形の D ≤ 384 に対して門は桁で余裕があるが、置かないと退行の受け皿が消える）。
    */
-  async #encodeAttentionQkI8a8(
-    arena: RunArena,
-    inputs: readonly GPUBuffer[],
-    scores: GPUBuffer,
+  async #buildAttentionQkI8a8(
+    builder: StepRecipeBuilder,
+    binds: readonly BindingSource[],
+    scores: TempSource,
     scoreStorage: ScoreStorage,
     shape: {
       readonly batch: number;
@@ -1993,19 +2036,14 @@ export class Session {
           "（attentionCompute を 'f32' にすること）",
       );
     }
-    const device = this.#state.gpu.device;
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
     // 量子化した q / k（i8 を 4 詰め）と per-token scale。ノード内で閉じた一時領域で、
     // q 側は**行** scale・k 側は**出力列**の scale になる（同じ per-token 量子化の別の読み方）。
-    const qq = arena.allocStorage(Math.max(4, batch * rows * depth));
-    arena.retain(qq, 0);
-    const qs = arena.allocStorage(Math.max(4, batch * rows * 4));
-    arena.retain(qs, 0);
-    const kq = arena.allocStorage(Math.max(4, batch * cols * depth));
-    arena.retain(kq, 0);
-    const ks = arena.allocStorage(Math.max(4, batch * cols * 4));
-    arena.retain(ks, 0);
+    const qq = builder.allocTemp(Math.max(4, batch * rows * depth));
+    const qs = builder.allocTemp(Math.max(4, batch * rows * 4));
+    const kq = builder.allocTemp(Math.max(4, batch * cols * depth));
+    const ks = builder.allocTemp(Math.max(4, batch * cols * 4));
 
     // (a)(b) 活性の per-token 量子化（1 行 = 1 workgroup・行方向 grid-stride）
     const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
@@ -2013,32 +2051,26 @@ export class Session {
       QUANTIZE_ROWS_WGSL,
     );
     const quantize = (
-      source: GPUBuffer,
-      payload: GPUBuffer,
-      scales: GPUBuffer,
+      source: BindingSource,
+      payload: TempSource,
+      scales: TempSource,
       count: number,
     ): void => {
-      const params = this.#writeParams(
-        quantizeRowsParams(count, depth),
-        PARAMS_UNIFORM_USAGE,
-      );
-      const bindGroup = device.createBindGroup({
+      builder.dispatch({
+        key: QUANTIZE_ROWS_KEY,
+        pipeline: quantizePipeline,
         layout: quantizeLayout,
-        entries: [
-          { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: { buffer: source } },
-          { binding: 2, resource: { buffer: payload } },
-          { binding: 3, resource: { buffer: scales } },
+        params: this.#writeParams(quantizeRowsParams(count, depth), PARAMS_UNIFORM_USAGE),
+        bindings: [
+          { binding: 1, source },
+          { binding: 2, source: payload },
+          { binding: 3, source: scales },
         ],
+        workgroups: [gridStrideWorkgroups(count, 1, limit), 1, 1],
       });
-      this.#state.scheduler.dispatch(quantizePipeline, bindGroup, [
-        gridStrideWorkgroups(count, 1, limit),
-        1,
-        1,
-      ], QUANTIZE_ROWS_KEY);
     };
-    quantize(inputs[0], qq, qs, batch * rows);
-    quantize(inputs[1], kq, ks, batch * cols);
+    quantize(binds[0], qq, qs, batch * rows);
+    quantize(binds[1], kq, ks, batch * cols);
 
     // (c) 整数内積の GEMM（半スケールは dequant 側で q / k の両方へ — 設計 §2.1）。
     // 幾何は ③PV と**別に**選ぶ（③ だけ N = D の 1 タイル化が勝つ — 実測）。
@@ -2050,32 +2082,33 @@ export class Session {
       key,
       attentionQkI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
     );
-    const params = this.#writeParams(
-      attentionQkI8a8Params(rows, cols, depth, scale),
-      PARAMS_UNIFORM_USAGE,
-    );
-    const bindGroup = device.createBindGroup({
+    builder.dispatch({
+      key,
+      pipeline,
       layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: qq } },
-        { binding: 2, resource: { buffer: kq } },
-        { binding: 3, resource: { buffer: scores } },
-        { binding: ATTENTION_QK_Q_SCALE_BINDING, resource: { buffer: qs } },
-        { binding: ATTENTION_QK_K_SCALE_BINDING, resource: { buffer: ks } },
+      params: this.#writeParams(
+        attentionQkI8a8Params(rows, cols, depth, scale),
+        PARAMS_UNIFORM_USAGE,
+      ),
+      bindings: [
+        { binding: 1, source: qq },
+        { binding: 2, source: kq },
+        { binding: 3, source: scores },
+        { binding: ATTENTION_QK_Q_SCALE_BINDING, source: qs },
+        { binding: ATTENTION_QK_K_SCALE_BINDING, source: ks },
+      ],
+      workgroups: [
+        tiledWorkgroups(cols, i8a8TileN(geometry), limit, `${where} ①QK i8a8`),
+        tiledWorkgroups(rows, i8a8TileM(geometry), limit, `${where} ①QK i8a8`),
+        tiledWorkgroups(batch, 1, limit, `${where} ①QK i8a8`),
       ],
     });
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(cols, i8a8TileN(geometry), limit, `${where} ①QK i8a8`),
-      tiledWorkgroups(rows, i8a8TileM(geometry), limit, `${where} ①QK i8a8`),
-      tiledWorkgroups(batch, 1, limit, `${where} ①QK i8a8`),
-    ], key);
 
     // MUST: ノード境界で一時バッファを返す（確保と破棄を 1 箇所へ — ADR 0004）。
-    arena.release(ks);
-    arena.release(kq);
-    arena.release(qs);
-    arena.release(qq);
+    builder.releaseTemp(ks);
+    builder.releaseTemp(kq);
+    builder.releaseTemp(qs);
+    builder.releaseTemp(qq);
   }
 
   /**
@@ -2094,17 +2127,17 @@ export class Session {
    * P̃ 側は量子化カーネルを通らない（A タイル充填が `round(127·exp(S−m))` を作る）ので、
    * dispatch も一時バッファも増えない — ②行統計は f32 のまま 1 バイトも変えない。
    *
-   * MUST: 一時バッファ（`vt` / `vq` / `vs`）は `retain(…, 0)` → 末尾で `release`。
+   * MUST: 一時バッファ（`vt` / `vq` / `vs`）は宣言 → 末尾で解放する。
    * MUST: `N` のオーバフロー門は fail loudly（|acc| ≤ N·127²。実測形の最大 N = 16,384 に対し
    * 門は桁で余裕があるが、置かないと退行の受け皿が消える）。
    */
-  async #encodeAttentionPvI8a8(
-    arena: RunArena,
-    inputs: readonly GPUBuffer[],
-    scores: GPUBuffer,
+  async #buildAttentionPvI8a8(
+    builder: StepRecipeBuilder,
+    binds: readonly BindingSource[],
+    scores: TempSource,
     scoreStorage: ScoreStorage,
-    stats: GPUBuffer,
-    out: GPUBuffer,
+    stats: TempSource,
+    out: BindingSource,
     shape: {
       readonly batch: number;
       readonly rows: number;
@@ -2120,16 +2153,12 @@ export class Session {
           "（attentionCompute を 'f32' にすること）",
       );
     }
-    const device = this.#state.gpu.device;
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
     // Vᵀ（f32・permute の実体化）と、その量子化結果。どれもノード内で閉じた一時領域。
-    const vt = arena.allocStorage(Math.max(4, batch * depth * cols * 4));
-    arena.retain(vt, 0);
-    const vq = arena.allocStorage(Math.max(4, batch * depth * cols));
-    arena.retain(vq, 0);
-    const vs = arena.allocStorage(Math.max(4, batch * depth * 4));
-    arena.retain(vs, 0);
+    const vt = builder.allocTemp(Math.max(4, batch * depth * cols * 4));
+    const vq = builder.allocTemp(Math.max(4, batch * depth * cols));
+    const vs = builder.allocTemp(Math.max(4, batch * depth * 4));
 
     // (a) v[B·H,N,D] → Vᵀ[B·H,D,N]（既存の strided 読みコピー族 — permute そのもの）。
     // MUST: stride は**入力** `[B·H,N,D]` の連続 stride から組む（出力 shape から組むと
@@ -2140,51 +2169,43 @@ export class Session {
       permuteKey,
       stridedWgsl(stridedSpec),
     );
-    const permuteParams = this.#writeParams(
-      stridedParams(
-        [batch, depth, cols],
-        permuteSrcStrides([batch, cols, depth], [0, 2, 1]),
-        0,
-      ),
-      PARAMS_STORAGE_USAGE,
-    );
-    const permuteBindGroup = device.createBindGroup({
+    builder.dispatch({
+      key: permuteKey,
+      pipeline: permutePipeline,
       layout: permuteLayout,
-      entries: [
-        { binding: 0, resource: { buffer: permuteParams } },
-        { binding: 1, resource: { buffer: inputs[2] } },
-        { binding: 2, resource: { buffer: vt } },
+      params: this.#writeParams(
+        stridedParams(
+          [batch, depth, cols],
+          permuteSrcStrides([batch, cols, depth], [0, 2, 1]),
+          0,
+        ),
+        PARAMS_STORAGE_USAGE,
+      ),
+      bindings: [{ binding: 1, source: binds[2] }, { binding: 2, source: vt }],
+      workgroups: [
+        gridStrideWorkgroups(batch * depth * cols, STRIDED_WORKGROUP_SIZE, limit),
+        1,
+        1,
       ],
     });
-    this.#state.scheduler.dispatch(permutePipeline, permuteBindGroup, [
-      gridStrideWorkgroups(batch * depth * cols, STRIDED_WORKGROUP_SIZE, limit),
-      1,
-      1,
-    ], permuteKey);
 
     // (b) Vᵀ の量子化（行 = (b,h,d)・行長 N — per-column scale と N 連続パックが同時に出る）
     const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
       QUANTIZE_ROWS_KEY,
       QUANTIZE_ROWS_WGSL,
     );
-    const quantizeParams = this.#writeParams(
-      quantizeRowsParams(batch * depth, cols),
-      PARAMS_UNIFORM_USAGE,
-    );
-    const quantizeBindGroup = device.createBindGroup({
+    builder.dispatch({
+      key: QUANTIZE_ROWS_KEY,
+      pipeline: quantizePipeline,
       layout: quantizeLayout,
-      entries: [
-        { binding: 0, resource: { buffer: quantizeParams } },
-        { binding: 1, resource: { buffer: vt } },
-        { binding: 2, resource: { buffer: vq } },
-        { binding: 3, resource: { buffer: vs } },
+      params: this.#writeParams(quantizeRowsParams(batch * depth, cols), PARAMS_UNIFORM_USAGE),
+      bindings: [
+        { binding: 1, source: vt },
+        { binding: 2, source: vq },
+        { binding: 3, source: vs },
       ],
+      workgroups: [gridStrideWorkgroups(batch * depth, 1, limit), 1, 1],
     });
-    this.#state.scheduler.dispatch(quantizePipeline, quantizeBindGroup, [
-      gridStrideWorkgroups(batch * depth, 1, limit),
-      1,
-      1,
-    ], QUANTIZE_ROWS_KEY);
 
     // (c) 整数内積の GEMM（P̃ は A タイル充填で作る = 非実体化のまま）
     const v4 = attentionPvI8a8UsesVec4(depth);
@@ -2195,31 +2216,29 @@ export class Session {
       key,
       attentionPvI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
     );
-    const params = this.#writeParams(
-      attentionPvI8a8Params(rows, depth, cols),
-      PARAMS_UNIFORM_USAGE,
-    );
-    const bindGroup = device.createBindGroup({
+    builder.dispatch({
+      key,
+      pipeline,
       layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: scores } },
-        { binding: 2, resource: { buffer: vq } },
-        { binding: 3, resource: { buffer: stats } },
-        { binding: 4, resource: { buffer: out } },
-        { binding: ATTENTION_PV_V_SCALE_BINDING, resource: { buffer: vs } },
+      params: this.#writeParams(attentionPvI8a8Params(rows, depth, cols), PARAMS_UNIFORM_USAGE),
+      bindings: [
+        { binding: 1, source: scores },
+        { binding: 2, source: vq },
+        { binding: 3, source: stats },
+        { binding: 4, source: out },
+        { binding: ATTENTION_PV_V_SCALE_BINDING, source: vs },
+      ],
+      workgroups: [
+        tiledWorkgroups(depth, i8a8TileN(geometry), limit, `${where} ③PV i8a8`),
+        tiledWorkgroups(rows, i8a8TileM(geometry), limit, `${where} ③PV i8a8`),
+        tiledWorkgroups(batch, 1, limit, `${where} ③PV i8a8`),
       ],
     });
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(depth, i8a8TileN(geometry), limit, `${where} ③PV i8a8`),
-      tiledWorkgroups(rows, i8a8TileM(geometry), limit, `${where} ③PV i8a8`),
-      tiledWorkgroups(batch, 1, limit, `${where} ③PV i8a8`),
-    ], key);
 
     // MUST: ノード境界で一時バッファを返す（確保と破棄を 1 箇所へ — ADR 0004）。
-    arena.release(vs);
-    arena.release(vq);
-    arena.release(vt);
+    builder.releaseTemp(vs);
+    builder.releaseTemp(vq);
+    builder.releaseTemp(vt);
   }
 
   /**
@@ -2227,10 +2246,11 @@ export class Session {
    * （GPU は NaN 汚染 / CPU 参照は throw）。attrs の padding_idx は forward に効かないので
    * カーネルへ渡さない。
    */
-  async #encodeEmbedding(
+  async #buildEmbedding(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const weight = step.inputShapes[0];
     const count = numel(step.outputShape);
@@ -2241,32 +2261,35 @@ export class Session {
       embeddingParams(count, weight[1], weight[0]),
       PARAMS_UNIFORM_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: inputs[1] } },
-        { binding: 3, resource: { buffer: out } },
-        ...this.#weightScaleEntries(step, weightStorage, EMBEDDING_SCALE_BINDING),
-      ],
-    });
     const groups = gridStrideWorkgroups(
       count,
       EMBEDDING_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        { binding: 1, source: binds[0] },
+        { binding: 2, source: binds[1] },
+        { binding: 3, source: out },
+        ...this.#weightScaleBindings(step, weightStorage, EMBEDDING_SCALE_BINDING),
+      ],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /**
    * masked_fill。出力と x は同形・連続で、mask だけを右詰め broadcast の stride で読む。
    * stride の組み立ては strided 族の expand と同じ規則（{@link expandSrcStrides}）。
    */
-  async #encodeMaskedFill(
+  async #buildMaskedFill(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const outShape = step.outputShape;
     // 規則は expand と同一だが、診断の主語は masked_fill の側に付け替える（グラフに expand が
@@ -2284,28 +2307,31 @@ export class Session {
       maskedFillParams(outShape, maskStrides, value),
       PARAMS_STORAGE_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        { binding: 1, resource: { buffer: inputs[0] } },
-        { binding: 2, resource: { buffer: inputs[1] } },
-        { binding: 3, resource: { buffer: out } },
-      ],
-    });
     const groups = gridStrideWorkgroups(
       numel(outShape),
       MASKED_FILL_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [groups, 1, 1], MASKED_FILL_KEY);
+    builder.dispatch({
+      key: MASKED_FILL_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        { binding: 1, source: binds[0] },
+        { binding: 2, source: binds[1] },
+        { binding: 3, source: out },
+      ],
+      workgroups: [groups, 1, 1],
+    });
   }
 
   /** conv1d（直接畳み込み、groups / dilation は attrs）。1 スレッド = 1 出力要素の grid-stride。 */
-  async #encodeConv1d(
+  async #buildConv1d(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
     const outShape = step.outputShape;
@@ -2331,21 +2357,23 @@ export class Session {
       }),
       PARAMS_UNIFORM_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
-        { binding: 4, resource: { buffer: out } },
-        ...this.#weightScaleEntries(step, weightStorage, CONV1D_SCALE_BINDING),
-      ],
-    });
     const workgroups = gridStrideWorkgroups(
       numel(outShape),
       CONV1D_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [workgroups, 1, 1], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 4, source: out },
+        ...this.#weightScaleBindings(step, weightStorage, CONV1D_SCALE_BINDING),
+      ],
+      workgroups: [workgroups, 1, 1],
+    });
   }
 
   /**
@@ -2355,10 +2383,11 @@ export class Session {
    * MUST: Kh / Kw は**重みの第 3 / 第 4 軸**をこの順で読む。入れ替えても正方カーネルでは
    * 数値が一致するので、テストは Kh ≠ Kw の形で固定する（src/kernels/conv2d.ts）。
    */
-  async #encodeConv2d(
+  async #buildConv2d(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
     const outShape = step.outputShape;
@@ -2386,27 +2415,29 @@ export class Session {
     };
     const weightStorage = this.#weightStorage(step);
     if (groups === 1) {
-      await this.#encodeConv2dIgemm(step, inputs, out, dims, weightStorage);
+      await this.#buildConv2dIgemm(step, binds, out, builder, dims, weightStorage);
       return;
     }
     const key = conv2dKey(weightStorage);
     const { pipeline, layout } = await this.#state.cache.get(key, conv2dWgsl(weightStorage));
     const params = this.#writeParams(conv2dParams(dims), PARAMS_UNIFORM_USAGE);
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
-        { binding: 4, resource: { buffer: out } },
-        ...this.#weightScaleEntries(step, weightStorage, CONV2D_SCALE_BINDING),
-      ],
-    });
     const workgroups = gridStrideWorkgroups(
       numel(outShape),
       CONV2D_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [workgroups, 1, 1], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 4, source: out },
+        ...this.#weightScaleBindings(step, weightStorage, CONV2D_SCALE_BINDING),
+      ],
+      workgroups: [workgroups, 1, 1],
+    });
   }
 
   /**
@@ -2421,10 +2452,11 @@ export class Session {
    * **n タイルは常に 64**（2048px の n 上限超過の扱いを動かさない）。どちらのタイル形でも
    * 出力はビット同一なので、これは純粋な dispatch の割り直しで数値契約に触れない。
    */
-  async #encodeConv2dIgemm(
+  async #buildConv2dIgemm(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
     dims: Conv2dDims,
     weightStorage: WeightStorage,
   ): Promise<void> {
@@ -2441,22 +2473,24 @@ export class Session {
       conv2dIgemmWgsl(weightStorage, v4, mTile),
     );
     const params = this.#writeParams(conv2dIgemmParams(dims), PARAMS_UNIFORM_USAGE);
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
-        { binding: 4, resource: { buffer: out } },
-        ...this.#weightScaleEntries(step, weightStorage, CONV2D_SCALE_BINDING),
-      ],
-    });
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `conv2d [${step.inputShapes[0].join(",")}] * [${step.inputShapes[1].join(",")}]`;
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, gemmTileN(geometry), limit, where),
-      tiledWorkgroups(m, gemmTileM(geometry), limit, where),
-      tiledWorkgroups(dims.batch, 1, limit, where),
-    ], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 4, source: out },
+        ...this.#weightScaleBindings(step, weightStorage, CONV2D_SCALE_BINDING),
+      ],
+      workgroups: [
+        tiledWorkgroups(n, gemmTileN(geometry), limit, where),
+        tiledWorkgroups(m, gemmTileM(geometry), limit, where),
+        tiledWorkgroups(dims.batch, 1, limit, where),
+      ],
+    });
   }
 
   /**
@@ -2465,10 +2499,11 @@ export class Session {
    * MUST: Cin は**重みの第 1 軸**（`[Cin, Cout, K]`）。x[1] と一致することは契約検査済みだが、
    * ここで weight[0] を使うのは「転置レイアウトの正本は重み側」という読みを崩さないため。
    */
-  async #encodeConvTranspose1d(
+  async #buildConvTranspose1d(
     step: NodePlan,
-    inputs: readonly GPUBuffer[],
-    out: GPUBuffer,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
     const outShape = step.outputShape;
@@ -2492,21 +2527,23 @@ export class Session {
       }),
       PARAMS_UNIFORM_USAGE,
     );
-    const bindGroup = this.#state.gpu.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...inputs.map((buffer, index) => ({ binding: index + 1, resource: { buffer } })),
-        { binding: 4, resource: { buffer: out } },
-        ...this.#weightScaleEntries(step, weightStorage, CONV_TRANSPOSE1D_SCALE_BINDING),
-      ],
-    });
     const workgroups = gridStrideWorkgroups(
       numel(outShape),
       CONV_TRANSPOSE1D_WORKGROUP_SIZE,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.#state.scheduler.dispatch(pipeline, bindGroup, [workgroups, 1, 1], key);
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 4, source: out },
+        ...this.#weightScaleBindings(step, weightStorage, CONV_TRANSPOSE1D_SCALE_BINDING),
+      ],
+      workgroups: [workgroups, 1, 1],
+    });
   }
 
   /**
@@ -2567,7 +2604,9 @@ export class Session {
     try {
       const encoder = device.createCommandEncoder();
       for (const name of this.#state.model.graph.outputs) {
-        const buffer = env.get(name);
+        // MUST: initializer も引く。IR は graph.outputs に initializer 名を書くことを許して
+        // おり（format/ir.ts の定義済み検査）、その値は env（run 寿命）には載らない。
+        const buffer = env.get(name) ?? this.#state.weightBuffers.get(name);
         if (buffer === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
         if (!arena.isReadable(buffer)) {
           throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);

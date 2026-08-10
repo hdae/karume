@@ -602,12 +602,13 @@ Deno.test({
 });
 
 Deno.test({
-  name: "エンコード途中で落ちた run は残 pending dispatch を submit せず捨てる（実 GPU）",
+  name: "導出相で落ちた run は GPU コマンドを 1 件も積まない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    // 1 ノード目（relu）は dispatch が積まれ、2 ノード目（matmul）が上限超過で throw する。
-    // 既定チャンクサイズ 16 なので relu のぶんは未 submit のまま残る。
+    // 2 ノード目（matmul）が上限超過で throw する。dispatch の発行は**レシピ実行相**にしか
+    // 無く、そこへ入る前に導出相が落ちるので、1 ノード目（relu）のぶんも積まれない
+    // （src/runtime/recipe.ts の 2 相分離 — 失敗が確定した run は GPU の仕事をゼロにする）。
     // MUST: 上限超過の閾値は matmul の**出力タイル辺**で決まる（`ceil(n / tileN) > 上限`）。
     // タイル辺は定数ではなく**既定幾何から導く**（辺を変えた瞬間に throw が起きず
     // assertRejects だけが静かに落ちるドリフトが 16 → 64 → 128 と 2 度起きた形）。
@@ -641,11 +642,11 @@ Deno.test({
       );
 
       const stats = session.diagnostics().submit;
-      assertEquals(stats.dispatchCount, 1, "relu のぶんは実際に積まれていた");
+      assertEquals(stats.dispatchCount, 0, "先行ノードのぶんも積まれていない");
       // 残骸を後始末（arena.destroy → flush）で出すと、ロック解放後・errorScope ゼロ本の
       // submit になり、その validation エラーが並行する別 Session の区間に帰属する。
       assertEquals(stats.submitCount, 0, "失敗した run の残骸は 1 度も submit されない");
-      assertEquals(stats.discardedDispatches, 1, "捨てた件数が診断に出る");
+      assertEquals(stats.discardedDispatches, 0, "積んでいないので捨てるものも無い");
     } finally {
       await session.dispose();
       gpu.destroy();
