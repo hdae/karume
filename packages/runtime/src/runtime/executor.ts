@@ -369,10 +369,27 @@ export type StorageDiagnostics = {
   readonly hostExpandedBytes: number;
 };
 
+/**
+ * params バッファの内容アドレスキャッシュの実績（1 run ぶん）。params は実行時のテンソル値に
+ * 依存しないので、shape が変わらない限り 2 run 目以降の `allocCount` は 0 に落ちる。
+ *
+ * MUST: 常設診断として出す。キャッシュが外れても値は正しいまま（毎 dispatch 確保に戻るだけ）
+ * で、例外も警告も出ない — ここが唯一の観測点。
+ */
+export type ParamsCacheStats = {
+  /** この run で新規に確保 + writeBuffer した params の本数。 */
+  readonly allocCount: number;
+  /** この run でキャッシュから配り直した params の本数（GPU 操作ゼロ）。 */
+  readonly reuseCount: number;
+};
+
 export type SessionDiagnostics = {
   readonly pipelineCount: number;
   readonly submit: SubmitStats;
-  /** 重み（initializer）アリーナの実績。 */
+  /**
+   * 重み（initializer）アリーナの実績。**params キャッシュ（Session 常駐）の実体もここが
+   * 所有する**ので、`allocCount` は initializer 本数 + 生成済み params 本数になる。
+   */
   readonly weights: ArenaStats;
   /** 低精度格納の適格 / 適格外の内訳（ADR 0006 の常設診断）。 */
   readonly storage: StorageDiagnostics;
@@ -392,6 +409,11 @@ export type SessionDiagnostics = {
    * 外れ、値は正しいまま性能だけが戻る（例外も警告も出ない）。ここが唯一の観測点。
    */
   readonly lastRunFusions: FusionCounts | undefined;
+  /**
+   * 直近 run の params キャッシュ実績。未実行なら undefined で、run のたびに置き換わる。
+   * 実体（バッファ）は Session 常駐なので、ここは「その run が何本作り、何本使い回したか」。
+   */
+  readonly lastRunParams: ParamsCacheStats | undefined;
 };
 
 /** MUST: `queue.writeBuffer` で書くバッファはプール外（アリーナの不変条件）。 */
@@ -484,6 +506,14 @@ type SessionState = {
   readonly weights: RunArena;
   readonly weightBuffers: ReadonlyMap<string, GPUBuffer>;
   /**
+   * params バッファの内容アドレスキャッシュ（キー = usage + 全要素の連結 —
+   * {@link Session.#writeParams}）。実体は weights アリーナが所有する Session 常駐バッファで、
+   * ここは「内容 → 既に上げてあるバッファ」の索引だけを持つ。
+   * MUST: モジュールスコープに置かない（副作用ゼロの不変条件 — Session ごとに device も
+   * バッファも別）。
+   */
+  readonly paramsCache: Map<string, GPUBuffer>;
+  /**
    * 重みスロットの格納形（圧縮のまま常駐した initializer だけが載る）。ここに無い値は
    * f32 として読む — カーネル変種の選択はこの表 1 つで決まる。
    */
@@ -511,6 +541,10 @@ export class Session {
   readonly #state: SessionState;
   #lastRun: ArenaStats | undefined;
   #lastRunFusions: FusionCounts | undefined;
+  #lastRunParams: ParamsCacheStats | undefined;
+  /** 進行中 run の params 実績（run の頭でリセットし、決着時に {@link #lastRunParams} へ移す）。 */
+  #paramsAllocCount = 0;
+  #paramsReuseCount = 0;
   /**
    * 実行中 / 待機中の run と dispose の直列化チェーン。決着（成功・失敗）だけを次に渡すため
    * 自身は決して reject しない。
@@ -674,6 +708,7 @@ export class Session {
       scheduler,
       weights,
       weightBuffers,
+      paramsCache: new Map(),
       weightStorages,
       weightScaleBuffers,
       storage: { residentCompressedBytes, hostExpandedBytes },
@@ -727,6 +762,7 @@ export class Session {
       lastRun: this.#lastRun,
       lastRunTiming: this.#state.scheduler.timing,
       lastRunFusions: this.#lastRunFusions,
+      lastRunParams: this.#lastRunParams,
     };
   }
 
@@ -754,6 +790,8 @@ export class Session {
       outputNames: this.#state.outputNames,
     });
     this.#lastRunFusions = fusion.counts;
+    this.#paramsAllocCount = 0;
+    this.#paramsReuseCount = 0;
 
     const device = gpu.device;
     const arena = new RunArena(device, () => scheduler.flush());
@@ -799,6 +837,10 @@ export class Session {
 
         outputs = await this.#readOutputs(env, plan.shapes, arena);
         this.#lastRun = arena.stats;
+        this.#lastRunParams = {
+          allocCount: this.#paramsAllocCount,
+          reuseCount: this.#paramsReuseCount,
+        };
       } catch (cause) {
         // MUST: 後始末の失敗で本体の例外を上書きしない。原因は本体側にあり、destroy の
         // rejection（主因は device 消失）に差し替わると調査の起点が消える。
@@ -936,7 +978,7 @@ export class Session {
     if (step.kind === "node") {
       await this.#encodeNode(step.plan, step.aliasesInput, inputs, out, arena);
     } else {
-      await this.#encodeFused(step, inputs, out, arena);
+      await this.#encodeFused(step, inputs, out);
     }
 
     // MUST: 解放はステップ境界（当該ステップの全 dispatch をエンコードし終えた後）のみ。
@@ -958,11 +1000,10 @@ export class Session {
     step: FusedStep,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const { key, gridItems, workgroupSize } = step.dispatch;
     const pipeline = await this.#state.cache.get(key, step.dispatch.wgsl());
-    const params = this.#writeParams(arena, step.dispatch.params, PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(step.dispatch.params, PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -995,7 +1036,6 @@ export class Session {
           { op: step.contract.name, dtype: step.inputDtypes[0] },
           inputs,
           out,
-          arena,
         );
         break;
       case "cast":
@@ -1004,7 +1044,6 @@ export class Session {
           { op: CAST_OP, dtype: step.inputDtypes[0], to: step.outputDtype },
           inputs,
           out,
-          arena,
         );
         break;
       case "where":
@@ -1014,73 +1053,72 @@ export class Session {
           { op: WHERE_OP, dtype: step.inputDtypes[1] },
           inputs,
           out,
-          arena,
         );
         break;
       case "cumsum":
-        await this.#encodeCumsum(step, inputs, out, arena);
+        await this.#encodeCumsum(step, inputs, out);
         break;
       case "matmul":
-        await this.#encodeMatmul(step, inputs, out, arena);
+        await this.#encodeMatmul(step, inputs, out);
         break;
       case "bmm":
-        await this.#encodeBmm(step, inputs, out, arena);
+        await this.#encodeBmm(step, inputs, out);
         break;
       case "gather":
-        await this.#encodeGather(step, inputs, out, arena);
+        await this.#encodeGather(step, inputs, out);
         break;
       case "rowReduce":
-        await this.#encodeRowReduce(step, step.contract.name, inputs, out, arena);
+        await this.#encodeRowReduce(step, step.contract.name, inputs, out);
         break;
       case "permute":
       case "slice":
       case "symPrefixSlice":
-        await this.#encodeStridedCopy(step, step.contract.kind, inputs, out, arena);
+        await this.#encodeStridedCopy(step, step.contract.kind, inputs, out);
         break;
       case "expand":
         // 恒等 expand は別名化済み（0 dispatch）。複製軸が 1 つでもあれば実体化コピー。
         if (!aliasesInput) {
-          await this.#encodeStridedCopy(step, step.contract.kind, inputs, out, arena);
+          await this.#encodeStridedCopy(step, step.contract.kind, inputs, out);
         }
         break;
       case "cat":
-        await this.#encodeCat(step, inputs, out, arena);
+        await this.#encodeCat(step, inputs, out);
         break;
       case "pad":
-        await this.#encodePad(step, inputs, out, arena);
+        await this.#encodePad(step, inputs, out);
         break;
       case "flip":
-        await this.#encodeFlip(step, inputs, out, arena);
+        await this.#encodeFlip(step, inputs, out);
         break;
       case "linear":
         await this.#encodeLinear(step, inputs, out, arena);
         break;
       case "layerNorm":
-        await this.#encodeLayerNorm(step, inputs, out, arena);
+        await this.#encodeLayerNorm(step, inputs, out);
         break;
       case "rmsNorm":
-        await this.#encodeRmsNorm(step, inputs, out, arena);
+        await this.#encodeRmsNorm(step, inputs, out);
         break;
       case "softmax":
-        await this.#encodeSoftmax(step, inputs, out, arena);
+        await this.#encodeSoftmax(step, inputs, out);
         break;
       case "attention":
         await this.#encodeAttention(step, inputs, out, arena);
         break;
       case "embedding":
-        await this.#encodeEmbedding(step, inputs, out, arena);
+        await this.#encodeEmbedding(step, inputs, out);
         break;
       case "maskedFill":
-        await this.#encodeMaskedFill(step, inputs, out, arena);
+        await this.#encodeMaskedFill(step, inputs, out);
         break;
       case "conv1d":
-        await this.#encodeConv1d(step, inputs, out, arena);
+        await this.#encodeConv1d(step, inputs, out);
         break;
       case "conv2d":
-        await this.#encodeConv2d(step, inputs, out, arena);
+        await this.#encodeConv2d(step, inputs, out);
         break;
       case "convTranspose1d":
-        await this.#encodeConvTranspose1d(step, inputs, out, arena);
+        await this.#encodeConvTranspose1d(step, inputs, out);
         break;
       case "reshape":
         // 別名化は #encodeStep で済んでいる（この op は 1 dispatch も出さない）。
@@ -1101,7 +1139,6 @@ export class Session {
     element: ElementwiseOp,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     // rank 0（スカラ）は codegen の rank ≥ 1 契約に合わせて長さ 1 の 1 次元に正規化する。
     const outShape = step.outputShape.length === 0 ? [1] : [...step.outputShape];
@@ -1113,7 +1150,6 @@ export class Session {
     const pipeline = await this.#state.cache.get(key, elementwiseWgsl(spec));
     // attrs のスカラ（clamp の min/max など）は params の末尾に f32 で載る（並びは契約表）。
     const params = this.#writeParams(
-      arena,
       elementwiseParams(
         outShape,
         step.inputShapes,
@@ -1152,7 +1188,6 @@ export class Session {
     op: ReduceOpName,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const inputShape = step.inputShapes[0];
     const axis = reduceDim(step.node.attrs, `nodes (${step.node.op})`);
@@ -1167,7 +1202,6 @@ export class Session {
     );
     const inner = numel(inputShape.slice(axis + 1));
     const params = this.#writeParams(
-      arena,
       lastDim
         ? reduceParams(outCount, inputShape[axis])
         : axisReduceParams(outCount, inputShape[axis], inner),
@@ -1199,13 +1233,12 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const pipeline = await this.#state.cache.get(CUMSUM_KEY, CUMSUM_WGSL);
-    const params = this.#writeParams(arena, cumsumParams(rows, dim), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(cumsumParams(rows, dim), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1233,7 +1266,6 @@ export class Session {
     kind: "permute" | "expand" | "slice" | "symPrefixSlice",
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputShape;
@@ -1260,7 +1292,6 @@ export class Session {
     const key = stridedKey(spec);
     const pipeline = await this.#state.cache.get(key, stridedWgsl(spec));
     const params = this.#writeParams(
-      arena,
       stridedParams(outShape, srcStrides, offset),
       PARAMS_STORAGE_USAGE,
     );
@@ -1293,7 +1324,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const outShape = step.outputShape;
     const where = `nodes (${step.node.op})`;
@@ -1306,7 +1336,6 @@ export class Session {
     for (const [index, buffer] of inputs.entries()) {
       const srcShape = step.inputShapes[index];
       const params = this.#writeParams(
-        arena,
         stridedWriteParams(srcShape, outStrides, catOutOffset(outShape, dim, written)),
         PARAMS_STORAGE_USAGE,
       );
@@ -1343,14 +1372,12 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputShape;
     const { left, right } = padAttrs(step.node.attrs, `nodes (${step.node.op})`);
     const pipeline = await this.#state.cache.get(PAD_KEY, PAD_WGSL);
     const params = this.#writeParams(
-      arena,
       padParams(numel(srcShape.slice(0, -1)), srcShape[srcShape.length - 1], left, right),
       PARAMS_UNIFORM_USAGE,
     );
@@ -1378,13 +1405,11 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = flipDim(step.node.attrs, `nodes (${step.node.op})`);
     const pipeline = await this.#state.cache.get(FLIP_KEY, FLIP_WGSL);
     const params = this.#writeParams(
-      arena,
       // MUST: 軸の前後で分ける（`slice(0, dim)` と `slice(dim + 1)`）。境界を 1 つずらすと
       // 反転する軸が隣にずれ、shape も要素数も変わらないまま値だけが誤る。
       flipParams(numel(shape.slice(0, dim)), shape[dim], numel(shape.slice(dim + 1))),
@@ -1410,7 +1435,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const [a, b] = step.inputShapes;
     const [m, k] = a;
@@ -1420,7 +1444,7 @@ export class Session {
     const v4 = gemmUsesVec4(k, n);
     const key = matmulKey(v4);
     const pipeline = await this.#state.cache.get(key, matmulWgsl(v4));
-    const params = this.#writeParams(arena, matmulParams(m, n, k), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(matmulParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1448,7 +1472,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const [a, b] = step.inputShapes;
     const [batch, m, k] = a;
@@ -1456,7 +1479,7 @@ export class Session {
     const v4 = gemmUsesVec4(k, n);
     const key = bmmKey(v4);
     const pipeline = await this.#state.cache.get(key, bmmWgsl(v4));
-    const params = this.#writeParams(arena, bmmParams(m, n, k), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(bmmParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1485,14 +1508,12 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputShape;
     const count = numel(outShape);
     const pipeline = await this.#state.cache.get(GATHER_KEY, GATHER_WGSL);
     const params = this.#writeParams(
-      arena,
       gatherParams(count, outShape[outShape.length - 1], srcShape[srcShape.length - 1]),
       PARAMS_UNIFORM_USAGE,
     );
@@ -1549,7 +1570,7 @@ export class Session {
     const v4 = gemmUsesVec4(k, n);
     const key = linearKey(weightStorage, v4, compute);
     const pipeline = await this.#state.cache.get(key, linearWgsl(weightStorage, v4, compute));
-    const params = this.#writeParams(arena, linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1609,7 +1630,6 @@ export class Session {
     // ① 活性の per-token 量子化（1 行 = 1 workgroup・行方向 grid-stride）
     const quantizePipeline = await this.#state.cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
     const quantizeParams = this.#writeParams(
-      arena,
       quantizeRowsParams(m, k),
       PARAMS_UNIFORM_USAGE,
     );
@@ -1637,7 +1657,7 @@ export class Session {
       key,
       linearI8a8Wgsl(v4, this.#state.i8a8Dot === "dp4a", geometry),
     );
-    const params = this.#writeParams(arena, linearI8a8Params(m, n, k), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(linearI8a8Params(m, n, k), PARAMS_UNIFORM_USAGE);
     const bindGroup = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1666,7 +1686,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
@@ -1674,7 +1693,6 @@ export class Session {
     const { eps } = layerNormAttrs(step.node.attrs, `nodes (${step.node.op})`);
     const pipeline = await this.#state.cache.get(LAYER_NORM_KEY, LAYER_NORM_WGSL);
     const params = this.#writeParams(
-      arena,
       layerNormParams(rows, dim, eps),
       PARAMS_UNIFORM_USAGE,
     );
@@ -1702,14 +1720,13 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const eps = rmsNormEps(step.node.attrs, `nodes (${step.node.op})`);
     const pipeline = await this.#state.cache.get(RMS_NORM_KEY, RMS_NORM_WGSL);
-    const params = this.#writeParams(arena, rmsNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(rmsNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1731,13 +1748,12 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const pipeline = await this.#state.cache.get(SOFTMAX_KEY, SOFTMAX_WGSL);
-    const params = this.#writeParams(arena, softmaxParams(rows, dim), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(softmaxParams(rows, dim), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -1841,7 +1857,6 @@ export class Session {
         attentionQkWgsl(qkV4, compute, scoreStorage),
       );
       const qkParams = this.#writeParams(
-        arena,
         attentionQkParams(rows, cols, depth, scale),
         PARAMS_UNIFORM_USAGE,
       );
@@ -1872,7 +1887,6 @@ export class Session {
       attentionStatsWgsl(compute, scoreStorage, statsRegCache),
     );
     const statsParams = this.#writeParams(
-      arena,
       attentionStatsParams(batch * rows, cols),
       PARAMS_UNIFORM_USAGE,
     );
@@ -1910,7 +1924,6 @@ export class Session {
         attentionPvWgsl(pvV4, compute, scoreStorage),
       );
       const pvParams = this.#writeParams(
-        arena,
         attentionPvParams(rows, depth, cols),
         PARAMS_UNIFORM_USAGE,
       );
@@ -1997,7 +2010,6 @@ export class Session {
       count: number,
     ): void => {
       const params = this.#writeParams(
-        arena,
         quantizeRowsParams(count, depth),
         PARAMS_UNIFORM_USAGE,
       );
@@ -2030,7 +2042,6 @@ export class Session {
       attentionQkI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
     );
     const params = this.#writeParams(
-      arena,
       attentionQkI8a8Params(rows, cols, depth, scale),
       PARAMS_UNIFORM_USAGE,
     );
@@ -2118,7 +2129,6 @@ export class Session {
     const permuteKey = stridedKey(stridedSpec);
     const permutePipeline = await this.#state.cache.get(permuteKey, stridedWgsl(stridedSpec));
     const permuteParams = this.#writeParams(
-      arena,
       stridedParams(
         [batch, depth, cols],
         permuteSrcStrides([batch, cols, depth], [0, 2, 1]),
@@ -2143,7 +2153,6 @@ export class Session {
     // (b) Vᵀ の量子化（行 = (b,h,d)・行長 N — per-column scale と N 連続パックが同時に出る）
     const quantizePipeline = await this.#state.cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
     const quantizeParams = this.#writeParams(
-      arena,
       quantizeRowsParams(batch * depth, cols),
       PARAMS_UNIFORM_USAGE,
     );
@@ -2172,7 +2181,6 @@ export class Session {
       attentionPvI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
     );
     const params = this.#writeParams(
-      arena,
       attentionPvI8a8Params(rows, depth, cols),
       PARAMS_UNIFORM_USAGE,
     );
@@ -2208,7 +2216,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const weight = step.inputShapes[0];
     const count = numel(step.outputShape);
@@ -2216,7 +2223,6 @@ export class Session {
     const key = embeddingKey(weightStorage);
     const pipeline = await this.#state.cache.get(key, embeddingWgsl(weightStorage));
     const params = this.#writeParams(
-      arena,
       embeddingParams(count, weight[1], weight[0]),
       PARAMS_UNIFORM_USAGE,
     );
@@ -2246,7 +2252,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const outShape = step.outputShape;
     // 規則は expand と同一だが、診断の主語は masked_fill の側に付け替える（グラフに expand が
@@ -2258,7 +2263,6 @@ export class Session {
     const value = maskedFillValue(step.node.attrs, `nodes (${step.node.op})`);
     const pipeline = await this.#state.cache.get(MASKED_FILL_KEY, MASKED_FILL_WGSL);
     const params = this.#writeParams(
-      arena,
       maskedFillParams(outShape, maskStrides, value),
       PARAMS_STORAGE_USAGE,
     );
@@ -2284,7 +2288,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
     const outShape = step.outputShape;
@@ -2296,7 +2299,6 @@ export class Session {
     const key = conv1dKey(weightStorage);
     const pipeline = await this.#state.cache.get(key, conv1dWgsl(weightStorage));
     const params = this.#writeParams(
-      arena,
       conv1dParams({
         batch: outShape[0],
         channelsIn: x[1],
@@ -2339,7 +2341,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
     const outShape = step.outputShape;
@@ -2367,12 +2368,12 @@ export class Session {
     };
     const weightStorage = this.#weightStorage(step);
     if (groups === 1) {
-      await this.#encodeConv2dIgemm(step, inputs, out, arena, dims, weightStorage);
+      await this.#encodeConv2dIgemm(step, inputs, out, dims, weightStorage);
       return;
     }
     const key = conv2dKey(weightStorage);
     const pipeline = await this.#state.cache.get(key, conv2dWgsl(weightStorage));
-    const params = this.#writeParams(arena, conv2dParams(dims), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(conv2dParams(dims), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -2406,7 +2407,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
     dims: Conv2dDims,
     weightStorage: WeightStorage,
   ): Promise<void> {
@@ -2419,7 +2419,7 @@ export class Session {
     const geometry = gemmMTileGeometry(mTile);
     const key = conv2dIgemmKey(weightStorage, v4, mTile);
     const pipeline = await this.#state.cache.get(key, conv2dIgemmWgsl(weightStorage, v4, mTile));
-    const params = this.#writeParams(arena, conv2dIgemmParams(dims), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(conv2dIgemmParams(dims), PARAMS_UNIFORM_USAGE);
     const bindGroup = this.#state.gpu.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -2448,7 +2448,6 @@ export class Session {
     step: NodePlan,
     inputs: readonly GPUBuffer[],
     out: GPUBuffer,
-    arena: RunArena,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
     const outShape = step.outputShape;
@@ -2457,7 +2456,6 @@ export class Session {
     const key = convTranspose1dKey(weightStorage);
     const pipeline = await this.#state.cache.get(key, convTranspose1dWgsl(weightStorage));
     const params = this.#writeParams(
-      arena,
       convTranspose1dParams({
         batch: outShape[0],
         channelsIn: weight[0],
@@ -2487,9 +2485,37 @@ export class Session {
     this.#state.scheduler.dispatch(pipeline, bindGroup, [workgroups, 1, 1], key);
   }
 
-  #writeParams(arena: RunArena, params: Uint32Array<ArrayBuffer>, usage: number): GPUBuffer {
-    const buffer = arena.allocHostWritten(params.byteLength, usage);
+  /**
+   * dispatch の params uniform / storage を確保して書く。**内容そのものをキーにした Session
+   * 常駐キャッシュ**を通すので、同じ内容の params は Session の生涯で 1 度しか確保・転送
+   * されない（params の全バイトは グラフ・node.attrs・解決済み shape の純関数で、実行時の
+   * テンソル値に依存しない）。キーは usage と全要素を連結した文字列そのもの — ハッシュでは
+   * ないので衝突が原理的に無い。
+   *
+   * MUST: 確保先は **weights アリーナ（Session 常駐）**で、RunArena からは取らない。run ごとの
+   * アリーナは run 末尾で破棄されるため、そこから配るとキャッシュが破棄済みバッファを指す。
+   * MUST: キャッシュしたバッファは**一度書いたら二度と書き換えない**。ADR 0004 が
+   * `allocHostWritten` をプール対象外にしているのは「`queue.writeBuffer` が未 submit の先行
+   * エンコードを追い越す」ためだが、ここは同じバッファへの 2 度目の writeBuffer が存在しない
+   * ので追い越しハザードが原理的に生じない（プール再利用とは別レイヤの、内容同一性による
+   * 共有）。
+   * MUST: 破棄は weights アリーナの dispose に相乗りする（`Session.dispose` →
+   * `RunArena.destroy` の flush-before-destroy）。キャッシュ専用の破棄経路を新設すると
+   * flush の担い手が 2 つになり、どちらが先に走るかで破棄済みバッファ参照の submit が生まれる。
+   * NOTE: 失敗 run（`scheduler.discard` 経路）の後もキャッシュは有効。バッファの内容は不変で、
+   * discard が捨てるのは未 submit のエンコードだけなので、params の値は影響を受けない。
+   */
+  #writeParams(params: Uint32Array<ArrayBuffer>, usage: number): GPUBuffer {
+    const key = `u${usage}:${params.join(",")}`;
+    const cached = this.#state.paramsCache.get(key);
+    if (cached !== undefined) {
+      this.#paramsReuseCount += 1;
+      return cached;
+    }
+    const buffer = this.#state.weights.allocHostWritten(params.byteLength, usage);
     this.#state.gpu.device.queue.writeBuffer(buffer, 0, params);
+    this.#state.paramsCache.set(key, buffer);
+    this.#paramsAllocCount += 1;
     return buffer;
   }
 

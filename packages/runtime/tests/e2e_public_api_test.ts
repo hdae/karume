@@ -97,7 +97,10 @@ Deno.test({
 
       const diagnostics = session.diagnostics();
       assertEquals(diagnostics.pipelineCount, 3);
-      assertEquals(diagnostics.weights.allocCount, 2);
+      // 重みアリーナは initializer 2 本に加えて params キャッシュ（Session 常駐）の実体も
+      // 所有する。この 2 run は T が違うので params は 3 ノードぶんずつ別内容で載る。
+      assertEquals(diagnostics.weights.allocCount, 2 + 3 + 3);
+      assertEquals(diagnostics.lastRunParams, { allocCount: 3, reuseCount: 0 });
       assertEquals((diagnostics.lastRun?.allocCount ?? 0) > 0, true);
     } finally {
       await session.dispose();
