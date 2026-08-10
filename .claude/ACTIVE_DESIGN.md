@@ -4,7 +4,7 @@
 > FIRST (alongside `CLAUDE.md` / `docs/`) so they don't start cold or misread an intentional
 > migration as a defect. Update it whenever the current design context shifts.
 >
-> Last updated: 2026-08-08
+> Last updated: 2026-08-10
 
 ## Active redesigns (in flight)
 
@@ -19,7 +19,9 @@
 - **models/sbv2 — 常駐**: SBV2（テキスト → 音声）は `packages/models/src/sbv2/` に移植済みで、
   サブパス面 `@karume/models/sbv2` は `Sbv2Pipeline` だけを出す（example 111 行）。実重み e2e は
   `packages/runtime/tests/e2e_sbv2_test.ts`（3 系列 × 5 ターゲット × 5 ケース）、GPU 不要の
-  ホスト側は `packages/models/tests/sbv2_{relattn_parity,text,host,pipeline}_test.ts`。配布形
+  ホスト側は `packages/models/tests/sbv2_{relattn_parity,text,host,pipeline,style}_test.ts`。
+  **WAV sha256 門 = `packages/models/tests/e2e_sbv2_wav_test.ts`**（FN4/w8・参照 = ADR 0039 の
+  実測 digest・tolerance 化と参照差し替え禁止 — PNG 門の音声版）。配布形
   `models/karume-sbv2-fn/`（FN1〜FN10）と CLI `karume export-sbv2` まで揃っている（manifest の
   確定は ADR 0039 → v2 形は ADR 0041）。
 - **参照実装ブランチからの再実装（C 波）— 完了**: `codex/kernel-quick-fixes` の triage を
