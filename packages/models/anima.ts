@@ -16,6 +16,7 @@ export type {
   AnimaFromPretrainedOptions,
   AnimaGenerateRequest,
   AnimaPipelineOptions,
+  AnimaRunComponent,
   GeneratedImage,
 } from "./src/anima/pipeline.ts";
 

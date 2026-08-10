@@ -38,6 +38,7 @@ import {
   type KarumeModel,
   openModel,
   type Session,
+  type SessionDiagnostics,
   type SessionOptions,
   type Tensor,
 } from "@karume/runtime";
@@ -113,6 +114,13 @@ export type AnimaGenerateRequest = {
   readonly seed?: number;
 };
 
+/** {@link AnimaPipelineOptions.onRunDiagnostics} が受けるコンポーネント名（Session 1 本 = 1 名）。 */
+export type AnimaRunComponent =
+  | "text_encoder"
+  | "text_conditioner"
+  | "transformer"
+  | "vae_decoder";
+
 /** 構築オプション（{@link AnimaPipeline.fromAssets} / {@link AnimaPipeline.fromPretrained} 共通）。 */
 export type AnimaPipelineOptions = {
   /**
@@ -124,6 +132,16 @@ export type AnimaPipelineOptions = {
   readonly model?: string;
   /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
   readonly quant?: string;
+  /**
+   * `Session.run` 1 回ごとの診断を受け取る観測席（DiT は 1 step = 1 回・VAE は 1 タイル =
+   * 1 回）。op 別 GPU 時間（`lastRunTiming`）が要るときは `gpu` に
+   * `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
+   * コールバックの例外は握らない（fail loudly — 生成ごと落ちる）。
+   */
+  readonly onRunDiagnostics?: (
+    component: AnimaRunComponent,
+    diagnostics: SessionDiagnostics,
+  ) => void;
 };
 
 /** {@link AnimaPipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。 */
@@ -313,6 +331,7 @@ const withSession = async <T>(
   gpu: GpuContext,
   model: KarumeModel,
   sessionOptions: SessionOptions,
+  observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
   body: (
     run: (inputs: Record<string, Tensor>) => Promise<Tensor>,
     session: Session,
@@ -321,12 +340,24 @@ const withSession = async <T>(
   const session = await createSession(gpu, model, sessionOptions);
   try {
     const outputName = model.graph.outputs[0];
-    const run = async (inputs: Record<string, Tensor>): Promise<Tensor> =>
-      (await session.run(inputs))[outputName];
+    const run = async (inputs: Record<string, Tensor>): Promise<Tensor> => {
+      const outputs = await session.run(inputs);
+      if (observe !== undefined) observe(session.diagnostics());
+      return outputs[outputName];
+    };
     return await body(run, session);
   } finally {
     await session.dispose();
   }
+};
+
+/** 観測席（{@link AnimaPipelineOptions.onRunDiagnostics}）へコンポーネント名を焼いて渡す。 */
+const observer = (
+  state: AnimaState,
+  component: AnimaRunComponent,
+): ((diagnostics: SessionDiagnostics) => void) | undefined => {
+  const listener = state.onRunDiagnostics;
+  return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
 };
 
 /** {@link AnimaPipeline} の内部状態（コンストラクタが private なので型は公開しない）。 */
@@ -341,6 +372,10 @@ type AnimaState = {
   readonly transformer: KarumeModel;
   readonly ropeBase: RopeBase;
   readonly vaeDecoder: KarumeModel;
+  readonly onRunDiagnostics?: (
+    component: AnimaRunComponent,
+    diagnostics: SessionDiagnostics,
+  ) => void;
 };
 
 /**
@@ -388,6 +423,9 @@ export class AnimaPipeline {
     return AnimaPipeline.fromAssets({ manifest: loaded.manifest, assets }, {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...selection,
+      ...(options.onRunDiagnostics === undefined
+        ? {}
+        : { onRunDiagnostics: options.onRunDiagnostics }),
     });
   }
 
@@ -469,6 +507,9 @@ export class AnimaPipeline {
         transformer: openModel(assetBuffer(assets, TRANSFORMER)),
         ropeBase: parseRopeBase(assetBuffer(assets, TRANSFORMER_ROPE_BASE)),
         vaeDecoder: openModel(assetBuffer(assets, VAE_DECODER)),
+        ...(options.onRunDiagnostics === undefined
+          ? {}
+          : { onRunDiagnostics: options.onRunDiagnostics }),
       });
     } catch (error) {
       // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
@@ -522,21 +563,33 @@ export class AnimaPipeline {
     const sigmas = sigmaSchedule(steps, state.config.scheduler.shift);
 
     // --- ② テキスト経路（DiT ロードの前に解放する）---------------------------
-    const hidden = await withSession(state.gpu, state.textEncoder, {}, (run) =>
-      Promise.all([
-        run({ input_ids: idsTensor(positive.qwenIds) }),
-        ...(negative === undefined ? [] : [run({ input_ids: idsTensor(negative.qwenIds) })]),
-      ]));
-    const embeds = await withSession(state.gpu, state.textConditioner, {}, (run) =>
-      Promise.all([
-        run({ source_hidden_states: hidden[0], target_input_ids: idsTensor(positive.t5Ids) }),
-        ...(negative === undefined ? [] : [
-          run({
-            source_hidden_states: hidden[1],
-            target_input_ids: idsTensor(negative.t5Ids),
-          }),
+    const hidden = await withSession(
+      state.gpu,
+      state.textEncoder,
+      {},
+      observer(state, "text_encoder"),
+      (run) =>
+        Promise.all([
+          run({ input_ids: idsTensor(positive.qwenIds) }),
+          ...(negative === undefined ? [] : [run({ input_ids: idsTensor(negative.qwenIds) })]),
         ]),
-      ]));
+    );
+    const embeds = await withSession(
+      state.gpu,
+      state.textConditioner,
+      {},
+      observer(state, "text_conditioner"),
+      (run) =>
+        Promise.all([
+          run({ source_hidden_states: hidden[0], target_input_ids: idsTensor(positive.t5Ids) }),
+          ...(negative === undefined ? [] : [
+            run({
+              source_hidden_states: hidden[1],
+              target_input_ids: idsTensor(negative.t5Ids),
+            }),
+          ]),
+        ]),
+    );
 
     // --- ③ denoise（DiT を N step。VAE ロードの前に解放する）-----------------
     // 低精度計算のノブ（quant の session）は **DiT の Session にだけ**効かせる —
@@ -545,6 +598,7 @@ export class AnimaPipeline {
       state.gpu,
       state.transformer,
       state.sessionOptions,
+      observer(state, "transformer"),
       async (run) => {
         const model = state.transformer;
         const plan = planDynDit(model, state.ropeBase, resolution);
@@ -614,27 +668,33 @@ export class AnimaPipeline {
       ANIMA_LATENTS_MEAN,
       ANIMA_LATENTS_STD,
     );
-    const decoded = await withSession(state.gpu, state.vaeDecoder, {}, async (run) => {
-      const tileShape = staticInputShape(state.vaeDecoder, "latents");
-      const sampleShape = staticOutputShape(state.vaeDecoder);
-      const geometry = planVaeTiling(latentShape, tileShape, sampleShape);
-      const pixels = await decodeTiled(denormalized, geometry, async (tile, row, col) => {
-        const output = await run({ latents: { dtype: "f32", shape: tileShape, data: tile } });
-        return asF32(output, `VAE 出力（タイル ${row},${col}）`);
-      });
-      // 寸法は**幾何**が正本（latent の全長 × 縮尺）。画素数から逆算しない — 非正方では
-      // `3·H·W` の分解が一意でなく、逆算では縦横の取り違えが原理的に検出できない。
-      return {
-        pixels,
-        width: geometry.cols.extent * geometry.scale,
-        height: geometry.rows.extent * geometry.scale,
-        tiles: tileCount(geometry),
-        blend: [
-          blendExtent(geometry.rows, geometry.scale),
-          blendExtent(geometry.cols, geometry.scale),
-        ] as const,
-      };
-    });
+    const decoded = await withSession(
+      state.gpu,
+      state.vaeDecoder,
+      {},
+      observer(state, "vae_decoder"),
+      async (run) => {
+        const tileShape = staticInputShape(state.vaeDecoder, "latents");
+        const sampleShape = staticOutputShape(state.vaeDecoder);
+        const geometry = planVaeTiling(latentShape, tileShape, sampleShape);
+        const pixels = await decodeTiled(denormalized, geometry, async (tile, row, col) => {
+          const output = await run({ latents: { dtype: "f32", shape: tileShape, data: tile } });
+          return asF32(output, `VAE 出力（タイル ${row},${col}）`);
+        });
+        // 寸法は**幾何**が正本（latent の全長 × 縮尺）。画素数から逆算しない — 非正方では
+        // `3·H·W` の分解が一意でなく、逆算では縦横の取り違えが原理的に検出できない。
+        return {
+          pixels,
+          width: geometry.cols.extent * geometry.scale,
+          height: geometry.rows.extent * geometry.scale,
+          tiles: tileCount(geometry),
+          blend: [
+            blendExtent(geometry.rows, geometry.scale),
+            blendExtent(geometry.cols, geometry.scale),
+          ] as const,
+        };
+      },
+    );
 
     // MUST: 出た画像の寸法はノブではなく**資産**が決める。ここで食い違うなら開いた export が
     // 想定と違うので、黙って返さない。要素数との整合は `imageToRgba` が見る。

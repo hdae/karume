@@ -38,7 +38,7 @@
  * 入力なので、突合が割れたときのために `@hdae/yomi` の版をログに出す。
  */
 
-import { assertRejects } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { parseManifest, resolveFiles } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
 import { VERSION as YOMI_VERSION } from "@hdae/yomi";
@@ -315,5 +315,48 @@ Deno.test({
         "の列数 256 がグラフ入力の",
       );
     });
+  },
+});
+
+// --- 観測席（onRunDiagnostics）------------------------------------------------
+//
+// 1 合成 = text_encoder → front → voice の 3 run が**この順で** 1 回ずつ観測され、診断が
+// 実行実績（dispatch 数・直近 run のアリーナ実績）を運ぶことを固定する。gpuTiming を
+// 要求しない GPU では `lastRunTiming` が undefined のまま（ADR 0021/0032 — 黙って近似
+// しない）ことも門に含める。
+
+Deno.test({
+  name: "e2e(実GPU): onRunDiagnostics は run 1 回ごとに component 名付きで診断を運ぶ",
+  ignore: !RUNNABLE,
+  fn: async () => {
+    const manifest = readManifest();
+    const assets = await loadLocalAssets(manifest);
+    const seen: { component: string; dispatches: number; ran: boolean; timed: boolean }[] = [];
+    using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
+      model: MODEL,
+      quant: QUANT,
+      onRunDiagnostics: (component, diagnostics) =>
+        seen.push({
+          component,
+          dispatches: diagnostics.submit.dispatchCount,
+          ran: diagnostics.lastRun !== undefined,
+          timed: diagnostics.lastRunTiming !== undefined,
+        }),
+    });
+    await pipeline.generate({ text: TEXT, seed: SEED });
+    assertEquals(seen.map((run) => run.component), ["text_encoder", "front", "voice"]);
+    for (const run of seen) {
+      if (run.dispatches <= 0 || !run.ran) {
+        throw new Error(
+          `${run.component} の診断が実行実績を運んでいない` +
+            `（dispatch ${run.dispatches} / lastRun ${run.ran}）`,
+        );
+      }
+      // gpuTiming を要求していない GPU なので op 別時間は無いのが正
+      // （有効化は acquireGpu({ gpuTiming: true }) を options.gpu へ渡す側の責務）。
+      if (run.timed) {
+        throw new Error(`${run.component} が計測なしの GPU で lastRunTiming を返した`);
+      }
+    }
   },
 });

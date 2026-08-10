@@ -19,4 +19,5 @@ export type {
   Sbv2FromPretrainedOptions,
   Sbv2GenerateRequest,
   Sbv2PipelineOptions,
+  Sbv2RunComponent,
 } from "./src/sbv2/pipeline.ts";

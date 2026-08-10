@@ -213,14 +213,33 @@ Deno.test({
       const hubUrl = `http://127.0.0.1:${server.addr.port}`;
       // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
       const caches = new MemoryCacheStorage();
+      // 観測席（onRunDiagnostics）の run 回数もこの実生成で併せて固定する（DiT は 1 step =
+      // 1 run・text 系は各 1 run）。門の sha256 判定には一切影響しない追加観測。
+      const observed: string[] = [];
       const pipeline = await AnimaPipeline.fromPretrained({ repo: REPO, hubUrl }, {
         quant,
         caches,
+        onRunDiagnostics: (component) => observed.push(component),
       });
       try {
         await assertReferencePng("fromPretrained-512", pipeline, resolution, REFERENCE[1].sha256);
       } finally {
         pipeline.dispose();
+      }
+      const counts = new Map<string, number>();
+      for (const component of observed) counts.set(component, (counts.get(component) ?? 0) + 1);
+      const runsOf = (component: string): number => counts.get(component) ?? 0;
+      if (
+        runsOf("text_encoder") !== 1 || runsOf("text_conditioner") !== 1 ||
+        runsOf("transformer") !== STEPS || runsOf("vae_decoder") < 1
+      ) {
+        throw new Error(
+          "観測席の run 数が実行構造と合わない: " +
+            `text_encoder ${runsOf("text_encoder")}（期待 1）/ ` +
+            `text_conditioner ${runsOf("text_conditioner")}（期待 1）/ ` +
+            `transformer ${runsOf("transformer")}（期待 ${STEPS}）/ ` +
+            `vae_decoder ${runsOf("vae_decoder")}（期待 1 以上）`,
+        );
       }
       // 取得したものは全て `karume/1` 名前空間へ入る（無認証経路）。注入した側に現物があることで、
       // 注入席が末端の取得層まで届いていること（= 実キャッシュを汚していないこと）を示す。

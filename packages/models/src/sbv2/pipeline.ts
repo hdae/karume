@@ -45,6 +45,7 @@ import {
   type KarumeModel,
   openModel,
   type Session,
+  type SessionDiagnostics,
   type SessionOptions,
   type Tensor,
 } from "@karume/runtime";
@@ -125,6 +126,9 @@ export type Sbv2GenerateRequest = {
   readonly seed?: number;
 };
 
+/** {@link Sbv2PipelineOptions.onRunDiagnostics} が受けるコンポーネント名（Session 1 本 = 1 名）。 */
+export type Sbv2RunComponent = "text_encoder" | "front" | "voice";
+
 /** 構築オプション（{@link Sbv2Pipeline.fromAssets} / {@link Sbv2Pipeline.fromPretrained} 共通）。 */
 export type Sbv2PipelineOptions = {
   /**
@@ -136,6 +140,16 @@ export type Sbv2PipelineOptions = {
   readonly model?: string;
   /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
   readonly quant?: string;
+  /**
+   * `Session.run` 1 回ごとの診断を受け取る観測席（1 合成 = text_encoder → front → voice の
+   * 3 回）。op 別 GPU 時間（`lastRunTiming`）が要るときは `gpu` に
+   * `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
+   * コールバックの例外は握らない（fail loudly — 合成ごと落ちる）。
+   */
+  readonly onRunDiagnostics?: (
+    component: Sbv2RunComponent,
+    diagnostics: SessionDiagnostics,
+  ) => void;
   /**
    * 日本語辞書の注入席。省略すると初回の `generate` で `fetchDictionaryBytes` が取りに出て、
    * 以降はインスタンスが保持する（モジュール doc の NOTE）。
@@ -288,6 +302,7 @@ const withSession = async <T>(
   gpu: GpuContext,
   model: KarumeModel,
   sessionOptions: SessionOptions,
+  observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
   body: (
     run: (inputs: Record<string, Tensor>) => Promise<Record<string, Tensor>>,
     session: Session,
@@ -295,10 +310,24 @@ const withSession = async <T>(
 ): Promise<T> => {
   const session = await createSession(gpu, model, sessionOptions);
   try {
-    return await body((inputs) => session.run(inputs), session);
+    const run = async (inputs: Record<string, Tensor>): Promise<Record<string, Tensor>> => {
+      const outputs = await session.run(inputs);
+      if (observe !== undefined) observe(session.diagnostics());
+      return outputs;
+    };
+    return await body(run, session);
   } finally {
     await session.dispose();
   }
+};
+
+/** 観測席（{@link Sbv2PipelineOptions.onRunDiagnostics}）へコンポーネント名を焼いて渡す。 */
+const observer = (
+  state: Sbv2State,
+  component: Sbv2RunComponent,
+): ((diagnostics: SessionDiagnostics) => void) | undefined => {
+  const listener = state.onRunDiagnostics;
+  return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
 };
 
 const parseRanges = (raw: unknown, where: string): (readonly [number, number])[] => {
@@ -389,6 +418,10 @@ export type Sbv2State = {
   readonly front: KarumeModel;
   readonly voice: KarumeModel;
   readonly sessionOptions: SessionOptions;
+  readonly onRunDiagnostics?: (
+    component: Sbv2RunComponent,
+    diagnostics: SessionDiagnostics,
+  ) => void;
   /** 日本語辞書。初回の合成で埋まって以降は使い回す（唯一の可変欄 — インスタンス状態）。 */
   dictionary: JtdDictionary | undefined;
 };
@@ -528,6 +561,9 @@ export const openSbv2State = async (
     front,
     voice,
     sessionOptions,
+    ...(options.onRunDiagnostics === undefined
+      ? {}
+      : { onRunDiagnostics: options.onRunDiagnostics }),
     dictionary: options.dictionary,
   };
 };
@@ -575,16 +611,22 @@ export const synthesizeSbv2 = async (
 
   // --- ② text_encoder（DeBERTa・hidden_states 全出し）----------------------
   // quant の低精度ノブは渡さない（配布形の text_encoder は i8 の 1 dtype しか無い）。
-  const hidden = await withSession(state.gpu, state.textEncoder, {}, async (run) => {
-    const outputs = await run({
-      input_ids: i32(analysis.inputIds, [1, tokens]),
-      attention_mask: i32(analysis.inputIds.map(() => 1), [1, tokens]),
-    });
-    const name = bertHiddenOutput(state.textEncoder.graph.outputs, state.rules.bertHiddenFromEnd);
-    const tensor = outputs[name];
-    if (tensor === undefined) throw new Error(`text_encoder の出力 '${name}' が無い`);
-    return { name, data: asF32(tensor, `text_encoder の出力 '${name}'`) };
-  });
+  const hidden = await withSession(
+    state.gpu,
+    state.textEncoder,
+    {},
+    observer(state, "text_encoder"),
+    async (run) => {
+      const outputs = await run({
+        input_ids: i32(analysis.inputIds, [1, tokens]),
+        attention_mask: i32(analysis.inputIds.map(() => 1), [1, tokens]),
+      });
+      const name = bertHiddenOutput(state.textEncoder.graph.outputs, state.rules.bertHiddenFromEnd);
+      const tensor = outputs[name];
+      if (tensor === undefined) throw new Error(`text_encoder の出力 '${name}' が無い`);
+      return { name, data: asF32(tensor, `text_encoder の出力 '${name}'`) };
+    },
+  );
 
   // --- ③ BERT 特徴を音素レベルへ tile 展開 ---------------------------------
   const tiled = tileBertToPhoneLevel(hidden.data, tokens, analysis.word2ph);
@@ -615,6 +657,7 @@ export const synthesizeSbv2 = async (
     state.gpu,
     state.front,
     state.sessionOptions,
+    observer(state, "front"),
     async (run) => {
       const outputs = await run({
         x: i32(analysis.ids.phoneIds, [1, phonemes]),
@@ -658,16 +701,22 @@ export const synthesizeSbv2 = async (
   const tables = buildRelattnTables(plan.totalFrames);
 
   // --- ⑦ voice（flow + dec 融合）-------------------------------------------
-  const audio = await withSession(state.gpu, state.voice, state.sessionOptions, async (run) => {
-    const outputs = await run({
-      z_p: f32(zP, [1, channels, plan.totalFrames]),
-      y_mask: f32(ones(plan.totalFrames), [1, 1, plan.totalFrames]),
-      g,
-      idx_k: tables.idxK,
-      valid: tables.valid,
-    });
-    return asF32(outputAt(state.voice, outputs, 0), "voice の波形出力");
-  });
+  const audio = await withSession(
+    state.gpu,
+    state.voice,
+    state.sessionOptions,
+    observer(state, "voice"),
+    async (run) => {
+      const outputs = await run({
+        z_p: f32(zP, [1, channels, plan.totalFrames]),
+        y_mask: f32(ones(plan.totalFrames), [1, 1, plan.totalFrames]),
+        g,
+        idx_k: tables.idxK,
+        valid: tables.valid,
+      });
+      return asF32(outputAt(state.voice, outputs, 0), "voice の波形出力");
+    },
+  );
 
   const expectedSamples = plan.totalFrames * state.rules.hopLength;
   if (audio.length !== expectedSamples) {
@@ -746,6 +795,9 @@ export class Sbv2Pipeline {
     return Sbv2Pipeline.fromAssets({ manifest: loaded.manifest, assets }, {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...selection,
+      ...(options.onRunDiagnostics === undefined
+        ? {}
+        : { onRunDiagnostics: options.onRunDiagnostics }),
       ...(options.dictionary === undefined ? {} : { dictionary: options.dictionary }),
     });
   }
