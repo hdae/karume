@@ -36,8 +36,13 @@ export class ArenaError extends Error {
   override readonly name = "ArenaError";
 }
 
-/** 出力ストレージの usage。dispatch が書き、必要なら readback のため COPY_SRC を持つ。 */
-const STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+/**
+ * 出力ストレージの usage。dispatch が書き、必要なら readback のため COPY_SRC を持つ。
+ * MUST: transient slot の常駐バッファ（src/runtime/recipe.ts の slot backing）も**この定数**で
+ * 作る。別立てにすると、同じ役割のバッファが 2 つの usage を持つ形になる。
+ */
+export const STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST |
+  GPUBufferUsage.COPY_SRC;
 
 /**
  * サイズクラスは「4 バイト整列した実バイト数そのもの」とする。
@@ -45,8 +50,10 @@ const STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBuff
  * MUST: 要求より大きいバッファを配らない。runtime-sized array を束縛したときの
  * `arrayLength()` は束縛範囲のバイト数から決まるため、切り上げた大きさを配ると要素数が
  * 静かに変わり、誤った値が例外なしで出る。
+ * MUST: slot 導出（`derivePlanSlots`）も**この関数**を使う。サイズクラスの定義が 2 つに
+ * 分かれると、slot の大きさが実行時の確保とずれ、同じ理由で沈黙誤値になる。
  */
-const toSizeClass = (bytes: number): number => {
+export const toSizeClass = (bytes: number): number => {
   if (!Number.isInteger(bytes) || bytes < 0) {
     throw new ArenaError(`確保サイズは 0 以上の整数である必要がある: ${bytes}`);
   }

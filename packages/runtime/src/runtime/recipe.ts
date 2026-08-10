@@ -11,9 +11,14 @@
  * MUST: 一時バッファの寿命は dispatch 境界で表す（{@link TempRecipe}）。まとめて確保 /
  * まとめて解放に均すと、入れ子の生存区間を持つ形（i8a8 attention）でプール再利用と
  * `peakTransientBytes` が現行と変わる。
+ *
+ * 実行相は 2 つある。**アリーナ経路**（{@link executeStepRecipe}）は run ごとに
+ * {@link RunArena} で確保・参照計数する従来の形。**slot 経路**
+ * （{@link executeStepRecipeBacked}）は {@link derivePlanSlots} が導いた slot 表を Session 常駐
+ * バッファへ割り付け、確保・retain・release・assertDrained を丸ごと省く。
  */
 
-import type { RunArena } from "../gpu/arena.ts";
+import { type RunArena, toSizeClass } from "../gpu/arena.ts";
 import type { SubmitScheduler } from "../gpu/submit.ts";
 import { ExecutionError } from "./plan.ts";
 
@@ -133,16 +138,29 @@ export class StepRecipeBuilder {
   }
 }
 
-/** レシピ実行に要る run 寿命の文脈。 */
-export type StepExecution = {
+/** bind group を組んで dispatch を積むのに要る文脈（アリーナ経路と slot 経路の共通部）。 */
+type EncodeContext = {
   readonly device: GPUDevice;
   readonly scheduler: SubmitScheduler;
-  readonly arena: RunArena;
   /**
-   * 値名 → run 寿命の実体（グラフ入力とノード出力のみ）。Session 常駐の重み / scale は
-   * `resident` として畳み込み済みなので、ここには載らない。
+   * 値名 → 実体（グラフ入力とノード出力のみ）。Session 常駐の重み / scale は `resident` として
+   * 畳み込み済みなので、ここには載らない。
    */
   readonly env: Map<string, GPUBuffer>;
+};
+
+/** レシピ実行に要る run 寿命の文脈（アリーナ簿記あり — {@link executeStepRecipe}）。 */
+export type StepExecution = EncodeContext & {
+  readonly arena: RunArena;
+};
+
+/**
+ * slot backing での実行文脈（{@link executeStepRecipeBacked}）。値と一時の実体は
+ * {@link PlanSlots} が決めた Session 常駐バッファで、run 寿命の簿記を一切持たない。
+ */
+export type BackedExecution = EncodeContext & {
+  /** slot 添字 → 常駐バッファ（{@link PlanSlots.bytes} と同順・同長）。 */
+  readonly buffers: readonly GPUBuffer[];
 };
 
 const resolveValue = (source: ValueSource, env: ReadonlyMap<string, GPUBuffer>): GPUBuffer => {
@@ -160,7 +178,7 @@ const resolveBinding = (
 
 const encodeDispatch = (
   recipe: DispatchRecipe,
-  run: StepExecution,
+  run: EncodeContext,
   temps: readonly GPUBuffer[],
 ): void => {
   const bindGroup = run.device.createBindGroup({
@@ -220,4 +238,133 @@ export const executeStepRecipe = (recipe: StepRecipe, run: StepExecution): void 
   // ならない到達不能な値）が解放されるのはこの 1 本だけで、抜けるとプール再利用から外れて
   // peakTransientBytes が実際より大きく出る。
   arena.release(out);
+};
+
+/** 1 ステップぶんの slot 割当（{@link PlanSlots.steps} の要素）。 */
+export type StepSlots = {
+  /** 出力の slot 添字。別名ステップ（確保が出ない）は undefined。 */
+  readonly output: number | undefined;
+  /** {@link StepRecipe.temps} と同順・同長の slot 添字。 */
+  readonly temps: readonly number[];
+};
+
+/**
+ * レシピ列 1 本ぶんの transient slot 表（{@link derivePlanSlots}）。
+ *
+ * slot は「run の間ずっと GPU に存在する中間バッファ 1 本」で、RunArena が run ごとに
+ * createBuffer していた実体をそのまま Session 常駐へ移した形。
+ */
+export type PlanSlots = {
+  /** slot ごとのバイト数（{@link toSizeClass} 済み — RunArena が実際に確保する大きさ）。 */
+  readonly bytes: readonly number[];
+  /** {@link StepRecipe} 列と同順・同長の割当。 */
+  readonly steps: readonly StepSlots[];
+  /**
+   * グラフ出力として pin された slot（プールへ返らない = 他の値と共有されない）。
+   * MUST: readback を許してよいのはこの集合だけ — 他の slot は run 中に別の値へ配り直され、
+   * 次 run では前 run の残骸が居るため（中間値 readback 拒否の規律）。
+   */
+  readonly pinned: ReadonlySet<number>;
+};
+
+/**
+ * レシピ列から transient slot 表を導く。
+ *
+ * MUST: {@link RunArena} のサイズクラス LIFO を**仮想的に再生**して導く（独自パッキング禁止）。
+ * ここが鏡写しである限り slot の本数と総バイト数は現行 run の実確保と一致し、常駐化しても
+ * VRAM のピークは新しく生まれない。詰め直して減らそうとした瞬間、①現行の footprint 前提が
+ * 崩れ ②「別の値が同じ実体を掴んでよいか」の判断がアリーナと 2 実装に分かれる。
+ *
+ * MUST: 純関数（GPU 資源を作らず、レシピも変更しない）。
+ */
+export const derivePlanSlots = (recipes: readonly StepRecipe[]): PlanSlots => {
+  const bytes: number[] = [];
+  // サイズクラス → 空き slot（LIFO — RunArena.#pool と同じ形）。
+  const pool = new Map<number, number[]>();
+  const refs = new Map<number, number>();
+  const pinned = new Set<number>();
+  // 値名 → slot。slot を持たない値（グラフ入力・重み = プール対象外）は載せない。
+  const env = new Map<string, number>();
+  const steps: StepSlots[] = [];
+
+  const alloc = (byteLength: number): number => {
+    const sizeClass = toSizeClass(byteLength);
+    const reused = pool.get(sizeClass)?.pop();
+    if (reused !== undefined) return reused;
+    bytes.push(sizeClass);
+    return bytes.length - 1;
+  };
+  const retain = (slot: number | undefined, uses: number, isPinned: boolean): void => {
+    if (slot === undefined) return;
+    if (isPinned) pinned.add(slot);
+    refs.set(slot, (refs.get(slot) ?? 0) + uses + 1);
+  };
+  const release = (slot: number | undefined): void => {
+    if (slot === undefined) return;
+    const left = (refs.get(slot) ?? 0) - 1;
+    if (left < 0) throw new ExecutionError("slot 導出: 参照カウントが負（消費計数の誤り）");
+    refs.set(slot, left);
+    if (left > 0 || pinned.has(slot)) return;
+    const bucket = pool.get(bytes[slot]);
+    if (bucket === undefined) pool.set(bytes[slot], [slot]);
+    else bucket.push(slot);
+  };
+
+  for (const recipe of recipes) {
+    // 別名は「入力の実体をそのまま出力にする」— 元が slot でなければ（グラフ入力・重み）
+    // この値も slot を持たない。
+    const output = recipe.output.kind === "alias"
+      ? (recipe.output.source.kind === "value" ? env.get(recipe.output.source.name) : undefined)
+      : alloc(recipe.output.byteLength);
+    retain(output, recipe.uses, recipe.pinned);
+    if (output === undefined) env.delete(recipe.outputName);
+    else env.set(recipe.outputName, output);
+
+    const temps: number[] = [];
+    recipe.dispatches.forEach((_, index) => {
+      recipe.temps.forEach((temp, id) => {
+        if (temp.allocBefore !== index) return;
+        const slot = alloc(temp.byteLength);
+        retain(slot, 0, false);
+        temps[id] = slot;
+      });
+      // MUST: 同一境界の解放は確保の逆順（executeStepRecipe と同じ順で LIFO に戻す）。
+      for (let id = recipe.temps.length - 1; id >= 0; id -= 1) {
+        if (recipe.temps[id].releaseAfter === index) release(temps[id]);
+      }
+    });
+
+    for (const name of recipe.releases) release(env.get(name));
+    release(output);
+    steps.push({ output: recipe.output.kind === "alias" ? undefined : output, temps });
+  }
+  return { bytes, steps, pinned };
+};
+
+/** slot 添字 → 常駐バッファ。引けないのは slot 表とレシピ列の不整合（内部の不変条件破れ）。 */
+const resolveSlot = (slot: number | undefined, buffers: readonly GPUBuffer[]): GPUBuffer => {
+  const buffer = slot === undefined ? undefined : buffers[slot];
+  if (buffer === undefined) throw new ExecutionError(`slot ${slot} のバッファが無い`);
+  return buffer;
+};
+
+/**
+ * レシピ 1 ステップぶんの実行（slot 経路）。確保・retain・release を伴わず、値と一時は
+ * {@link PlanSlots} が決めた常駐バッファをそのまま束ねる。
+ *
+ * MUST: 積むコマンド列は {@link executeStepRecipe} と**同一**（bind 先の実体が run を跨いで
+ * 同じになるだけ）。前 run の残骸が slot に残っていても正しいのは full-write（ADR 0014 —
+ * 全ノードが出力の全バイトを書く）が根拠で、プール再利用の安全性と同じ 1 本の不変条件。
+ */
+export const executeStepRecipeBacked = (
+  recipe: StepRecipe,
+  slots: StepSlots,
+  run: BackedExecution,
+): void => {
+  const out = recipe.output.kind === "alias"
+    ? resolveValue(recipe.output.source, run.env)
+    : resolveSlot(slots.output, run.buffers);
+  run.env.set(recipe.outputName, out);
+  const temps = slots.temps.map((slot) => resolveSlot(slot, run.buffers));
+  for (const dispatch of recipe.dispatches) encodeDispatch(dispatch, run, temps);
 };

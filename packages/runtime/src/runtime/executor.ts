@@ -154,7 +154,7 @@ import { alignF16Payload, decodeF16 } from "../format/f16.ts";
 import { alignI8Payload, decodeI8 } from "../format/i8.ts";
 import type { IrDtype } from "../format/ir.ts";
 import { type SafetensorsFile, tensorBytes } from "../format/safetensors.ts";
-import { type ArenaStats, RunArena } from "../gpu/arena.ts";
+import { type ArenaStats, RunArena, STORAGE_USAGE } from "../gpu/arena.ts";
 import {
   discardFailureScopes,
   type GpuContext,
@@ -213,8 +213,11 @@ import {
 import {
   type BindingRecipe,
   type BindingSource,
+  derivePlanSlots,
   executeStepRecipe,
+  executeStepRecipeBacked,
   type OutputRecipe,
+  type PlanSlots,
   type StepRecipe,
   StepRecipeBuilder,
   type TempSource,
@@ -417,6 +420,21 @@ export type PreparedPlanStats = {
   readonly cachedPlans: number;
 };
 
+/**
+ * transient slot の GPU backing（Session 常駐バッファ群）の実績。導出済み計画にヒットした run は
+ * 中間バッファをここから配るので、アリーナの確保・参照計数・createBuffer / destroy がゼロになる。
+ *
+ * MUST: 常設診断として出す。**signature が交互に切り替わる形では毎 run 作り直しになり**、値は
+ * 正しいまま run ごとに数百 MiB の createBuffer / destroy が復活する（例外も警告も出ない）。
+ * `buildCount` が run 数に比例して伸びていないことが、その沈黙劣化の唯一の観測点。
+ */
+export type PlanBackingStats = {
+  /** 活性 backing が常駐させている slot の総バイト数（未構築 / 破棄済みなら 0）。 */
+  readonly residentBytes: number;
+  /** Session の生存中に backing を構築した累計回数（run ごとではなく累計）。 */
+  readonly buildCount: number;
+};
+
 export type SessionDiagnostics = {
   readonly pipelineCount: number;
   readonly submit: SubmitStats;
@@ -427,7 +445,13 @@ export type SessionDiagnostics = {
   readonly weights: ArenaStats;
   /** 低精度格納の適格 / 適格外の内訳（ADR 0006 の常設診断）。 */
   readonly storage: StorageDiagnostics;
-  /** 直近 run の中間バッファ実績。未実行なら undefined。 */
+  /**
+   * 直近 run の中間バッファ実績。未実行なら undefined。
+   *
+   * NOTE: slot backing に乗った run（{@link PlanBackingStats}）では中間バッファがアリーナを
+   * 通らないため、ここに残るのは入力アップロードと readback staging のぶんだけになる
+   * （値の意味は不変 — 「その run がアリーナで確保したもの」）。
+   */
   readonly lastRun: ArenaStats | undefined;
   /**
    * 直近 run の **op 別 GPU 実時間内訳**（パイプラインキー別 — ADR 0021）。
@@ -453,6 +477,11 @@ export type SessionDiagnostics = {
    * 埋まる（未実行、および導出相の途中で落ちた run では undefined）。
    */
   readonly lastRunPrepared: PreparedPlanStats | undefined;
+  /**
+   * transient slot の GPU backing の実績（run ごとではなく Session の現況 + 累計）。
+   * 未構築の Session では `{ residentBytes: 0, buildCount: 0 }`。
+   */
+  readonly planBacking: PlanBackingStats;
 };
 
 /** MUST: `queue.writeBuffer` で書くバッファはプール外（アリーナの不変条件）。 */
@@ -572,6 +601,26 @@ type PlannedSteps = {
  */
 const PREPARED_PLAN_CAPACITY = 4;
 
+/**
+ * 活性 signature の transient slot backing（**容量 1**）。
+ *
+ * 容量 1 なのは、slot は run の中間バッファそのもの（DiT で ~1GiB 規模）で、signature ごとに
+ * 抱えると VRAM が本数倍になるため — 導出済み計画（ホストのオブジェクトだけ）を 4 本持てる
+ * のとは前提が違う。
+ */
+type ActiveBacking = {
+  /** この backing が属する導出済み計画のキー（{@link Session.#preparedKey}）。 */
+  readonly key: string;
+  readonly slots: PlanSlots;
+  /** {@link PlanSlots.bytes} と同順・同長の常駐バッファ。 */
+  readonly buffers: readonly GPUBuffer[];
+  readonly bytes: number;
+  /** backing が所有する全 slot（readback 適格判定の分岐に使う）。 */
+  readonly owned: ReadonlySet<GPUBuffer>;
+  /** pin された slot = readback を許す唯一の集合（{@link PlanSlots.pinned}）。 */
+  readonly readable: ReadonlySet<GPUBuffer>;
+};
+
 type SessionState = {
   readonly gpu: GpuContext;
   readonly model: KarumeModel;
@@ -626,6 +675,14 @@ export class Session {
   /** 進行中 run の params 実績（run の頭でリセットし、決着時に {@link #lastRunParams} へ移す）。 */
   #paramsAllocCount = 0;
   #paramsReuseCount = 0;
+  /** 活性 signature の slot backing（容量 1 — {@link ActiveBacking}）。 */
+  #backing: ActiveBacking | undefined;
+  #backingBuilds = 0;
+  /**
+   * 破棄待ちの slot バッファ。切替・追い出し・dispose はここへ積むだけで、実際の `destroy()` は
+   * **flush 後の 1 箇所**（{@link Session.#destroyRetired}）でだけ起きる。
+   */
+  readonly #retired: GPUBuffer[] = [];
   /**
    * 実行中 / 待機中の run と dispose の直列化チェーン。決着（成功・失敗）だけを次に渡すため
    * 自身は決して reject しない。
@@ -831,7 +888,17 @@ export class Session {
   dispose(): Promise<void> {
     // MUST: 2 度目以降も同じ完了を返す。先に返すと呼び出し側が「破棄済み」と見なして
     // device.destroy() まで進み、flush-before-destroy が崩れる。
-    this.#disposal ??= this.#enqueue(() => this.#state.weights.destroy());
+    // MUST: slot backing の破棄も**この 1 本に相乗り**させる（破棄経路の担い手を増やさない —
+    // ADR 0004）。weights.destroy() は flush の完了まで待つので、その後の destroy は
+    // flush-before-destroy を満たす。失敗（主因は device 消失）しても破棄は必ず行う。
+    this.#disposal ??= this.#enqueue(async () => {
+      try {
+        await this.#state.weights.destroy();
+      } finally {
+        this.#retireBacking();
+        this.#destroyRetired();
+      }
+    });
     return this.#disposal;
   }
 
@@ -846,6 +913,10 @@ export class Session {
       lastRunFusions: this.#lastRunFusions,
       lastRunParams: this.#lastRunParams,
       lastRunPrepared: this.#lastRunPrepared,
+      planBacking: {
+        residentBytes: this.#backing?.bytes ?? 0,
+        buildCount: this.#backingBuilds,
+      },
     };
   }
 
@@ -900,6 +971,9 @@ export class Session {
       // 表が「今から積む run のぶんだけ」になる（先行 run の回収は既に済んでいる）。
       scheduler.resetTiming();
       let outputs: RunOutputs;
+      // 活性化した slot backing（ミス run では undefined のまま）。readback の適格判定が
+      // 「その実体が pin された slot か」を見るため、エンコード区間の外まで持ち越す。
+      let backing: ActiveBacking | undefined;
       try {
         // 無効な bindGroup / dispatch は throw せず submit ごと失敗し、出力にプール残骸が
         // 残る沈黙故障になる。中間バッファの確保も同じ区間で out-of-memory を見る。
@@ -916,6 +990,10 @@ export class Session {
           let recipes: readonly StepRecipe[];
           if ("recipes" in derived) {
             recipes = derived.recipes;
+            // MUST: backing を作るのは**ヒット run だけ**。単発 run（1 回しか走らない
+            // ワークロード）に slot メモリを払わせないための唯一の門で、ミス run の挙動と
+            // ArenaStats はこれで完全に据え置かれる。
+            backing = this.#activateBacking(preparedKey, recipes);
           } else {
             recipes = await this.#buildRecipes(derived.steps);
             // MUST: 登録は `#buildRecipes` が**完走して戻った後**だけ。途中で throw した run の
@@ -927,9 +1005,18 @@ export class Session {
             hit: prepared !== undefined,
             cachedPlans: this.#state.prepared.size,
           };
-          const run = { device, scheduler, arena, env };
-          for (const recipe of recipes) executeStepRecipe(recipe, run);
-          arena.assertDrained();
+          if (backing === undefined) {
+            const run = { device, scheduler, arena, env };
+            for (const recipe of recipes) executeStepRecipe(recipe, run);
+            arena.assertDrained();
+          } else {
+            // slot 経路。積むコマンド列はアリーナ経路と同一で、bind 先の実体が run を跨いで
+            // 固定されるだけ（前 run の残骸が残っていてよい根拠は full-write — ADR 0014）。
+            const run = { device, scheduler, env, buffers: backing.buffers };
+            for (let index = 0; index < recipes.length; index += 1) {
+              executeStepRecipeBacked(recipes[index], backing.slots.steps[index], run);
+            }
+          }
 
           await scheduler.flush();
           const pending = popFailureScopes(device, "run のエンコード");
@@ -946,7 +1033,7 @@ export class Session {
           throw cause;
         }
 
-        outputs = await this.#readOutputs(env, shapes, arena);
+        outputs = await this.#readOutputs(env, shapes, arena, backing);
         this.#lastRun = arena.stats;
         this.#lastRunParams = {
           allocCount: this.#paramsAllocCount,
@@ -956,10 +1043,16 @@ export class Session {
         // MUST: 後始末の失敗で本体の例外を上書きしない。原因は本体側にあり、destroy の
         // rejection（主因は device 消失）に差し替わると調査の起点が消える。
         await arena.destroy().catch(() => undefined);
+        // MUST: 破棄待ちの slot は arena.destroy（= flush / discard 済み）の**後**に返す。
+        this.#destroyRetired();
         throw cause;
       }
       // 本体が通ったときは後始末の失敗をそのまま伝える（flush 未完了のまま返さない）。
       await arena.destroy();
+      // 切替 / 追い出しで浮いた旧 backing を返す唯一の後始末点（flush 後 — ADR 0004 の
+      // flush-before-destroy）。dispose が同じことをするので、ここを通らずに落ちた run の
+      // 積み残しも取りこぼさない。
+      this.#destroyRetired();
       return outputs;
     });
   }
@@ -1014,8 +1107,67 @@ export class Session {
     // 1 run につき 1 本しか増えないので、超過は常にちょうど 1 本。
     if (this.#state.prepared.size > PREPARED_PLAN_CAPACITY) {
       const oldest = this.#state.prepared.keys().next().value;
-      if (oldest !== undefined) this.#state.prepared.delete(oldest);
+      if (oldest !== undefined) {
+        this.#state.prepared.delete(oldest);
+        // MUST: 追い出された計画の slot backing は宙に浮く（次にその bindings が来ても
+        // ミス run になり backing は使われない）。持ち続けると、二度と当たらない signature の
+        // 中間バッファぶんの VRAM を Session の寿命いっぱい抱え込む。
+        if (this.#backing?.key === oldest) this.#retireBacking();
+      }
     }
+  }
+
+  /**
+   * ヒット run の slot backing を活性化する（無ければ構築・別 signature なら作り直す）。
+   *
+   * MUST: 呼ぶのは run の `withScopeLock` / errorScope 区間の内側だけ。createBuffer は上限超過で
+   * 同期例外を投げずに無効バッファを返すため、囲まないと「無効な slot に dispatch が書く」
+   * 沈黙故障になる。
+   * NOTE: レシピ列は必ず 1 度アリーナ経路で完走している（backing はヒット run でしか作らない）
+   * ので、参照計数が閉じることは既に `assertDrained` が確かめ済み — slot 導出はその同じ簿記を
+   * 仮想的に再生するだけで、新しい正しさの前提を持ち込まない。
+   */
+  #activateBacking(key: string, recipes: readonly StepRecipe[]): ActiveBacking {
+    const current = this.#backing;
+    if (current !== undefined && current.key === key) return current;
+    // MUST: 旧 backing は destroy せず破棄待ちへ積む（この run の flush 後にだけ返す）。
+    this.#retireBacking();
+    const slots = derivePlanSlots(recipes);
+    const buffers = slots.bytes.map((size) =>
+      this.#state.gpu.device.createBuffer({ size, usage: STORAGE_USAGE })
+    );
+    const backing: ActiveBacking = {
+      key,
+      slots,
+      buffers,
+      bytes: slots.bytes.reduce((total, size) => total + size, 0),
+      owned: new Set(buffers),
+      readable: new Set([...slots.pinned].map((slot) => buffers[slot])),
+    };
+    this.#backing = backing;
+    this.#backingBuilds += 1;
+    return backing;
+  }
+
+  /** 活性 backing を破棄待ちへ移す（実際の `destroy()` は flush 後の後始末点で 1 回だけ）。 */
+  #retireBacking(): void {
+    const current = this.#backing;
+    if (current === undefined) return;
+    for (const buffer of current.buffers) this.#retired.push(buffer);
+    this.#backing = undefined;
+  }
+
+  /**
+   * 破棄待ちの slot バッファを実際に破棄する。
+   *
+   * MUST: 呼ぶのは flush（または discard）の完了後だけ — 破棄済みバッファを参照する
+   * エンコードを submit すると、コマンドバッファ丸ごと失敗して無関係な dispatch まで
+   * 実行されないまま誤った値が静かに残る（ADR 0004）。
+   * NOTE: device 消失後の `destroy()` は無害な no-op。
+   */
+  #destroyRetired(): void {
+    for (const buffer of this.#retired) buffer.destroy();
+    this.#retired.length = 0;
   }
 
   /**
@@ -2722,11 +2874,25 @@ export class Session {
     return buffer;
   }
 
+  /**
+   * 読み戻してよい実体か。
+   *
+   * MUST: slot backing の実体は **pin された slot だけ**（グラフ出力として確保され、プールへ
+   * 返らない slot）。他の slot は run 中に別の値へ配り直されるので、非 backed run で
+   * `RunArena.isReadable` が中間値を拒むのと同じ規律をここで保つ — backing のバッファは
+   * アリーナの所有外なので、放置すると `isReadable` が「プール対象外」として素通しにする。
+   */
+  #isReadable(buffer: GPUBuffer, arena: RunArena, backing: ActiveBacking | undefined): boolean {
+    if (backing !== undefined && backing.owned.has(buffer)) return backing.readable.has(buffer);
+    return arena.isReadable(buffer);
+  }
+
   /** MUST: 読み戻すのはグラフ出力のみ。中間値はプール再利用で内容が入れ替わっている。 */
   async #readOutputs(
     env: ReadonlyMap<string, GPUBuffer>,
     shapes: ReadonlyMap<string, readonly number[]>,
     arena: RunArena,
+    backing: ActiveBacking | undefined,
   ): Promise<RunOutputs> {
     const device = this.#state.gpu.device;
     const staged: {
@@ -2750,7 +2916,7 @@ export class Session {
         // おり（format/ir.ts の定義済み検査）、その値は env（run 寿命）には載らない。
         const buffer = env.get(name) ?? this.#state.weightBuffers.get(name);
         if (buffer === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
-        if (!arena.isReadable(buffer)) {
+        if (!this.#isReadable(buffer, arena, backing)) {
           throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
         }
         const shape = resolvedShape(shapes, name);
