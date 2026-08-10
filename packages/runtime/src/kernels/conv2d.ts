@@ -39,7 +39,8 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
-import { GEMM_MTILE_SMALL, GEMM_TILE, GEMM_WORKGROUP, gemmWgsl, gemmWorkgroupY } from "./gemm.ts";
+import { GEMM_MTILE_SMALL, GEMM_TILE, gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
+import { gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,
@@ -93,10 +94,14 @@ export const conv2dIgemmKey = (
   weight: WeightStorage,
   v4: boolean,
   mTile: number = GEMM_TILE,
-): string =>
-  `conv2d:v2:f32:igemm${mTile}x${GEMM_TILE}${v4 ? "v4" : ""}:wg${GEMM_WORKGROUP}x${
-    gemmWorkgroupY(mTile)
-  }${weightKeyPart(weight)}`;
+): string => {
+  // MUST: キーの幾何は生成と**同じ解決点**（`gemmMTileGeometry`）から導く。mTile を直に
+  // 埋めると、幾何を差し替えたときにキーだけが古い辺を名乗って別物の WGSL へ衝突する。
+  const geometry = gemmMTileGeometry(mTile);
+  return `conv2d:v2:f32:igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}${
+    v4 ? "v4" : ""
+  }:wg${geometry.wgX}x${geometry.wgY}${weightKeyPart(weight)}`;
+};
 
 export const conv2dIgemmWgsl = (
   weight: WeightStorage,

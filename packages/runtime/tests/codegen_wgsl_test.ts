@@ -1156,7 +1156,7 @@ Deno.test("GEMM 骨格 6 op のタイル辺は 64 で、生成物・キー・TS 
   assertEquals(GEMM_TILE, 64);
   // 既定幾何（src/kernels/gemm-geometry.ts）。**キーと生成物の両方に効く**ので、
   // 変えたつもりの無い差分がここで止まる
-  assertEquals(defaultGemmGeometry(), { regM: 8, regN: 4, wgX: 16 });
+  assertEquals(defaultGemmGeometry(), { regM: 8, regN: 4, wgX: 16, wgY: 8 });
   for (const [where, key, wgsl] of GEMM_VARIANTS) {
     // 出力タイルの原点（行 / 列）と workgroup は骨格を共有する全 op で共通
     assertEquals(wgsl.includes(`let arow0 = wid.y * ${GEMM_TILE}u + ar;`), true, where);

@@ -51,11 +51,10 @@ import {
   assertGemmGeometry,
   defaultGemmGeometry,
   GEMM_K_QUADS,
-  GEMM_N_QUADS,
   GEMM_QUAD,
-  GEMM_TILE,
   GEMM_TILE_K,
   gemmAccumulatorInit,
+  gemmColumnQuads,
   gemmColumnSlots,
   type GemmGeometry,
   gemmGeometryKeyPart,
@@ -66,7 +65,8 @@ import {
   gemmRowFillStride,
   gemmRowSlots,
   gemmThreads,
-  gemmWorkgroupRows,
+  gemmTileM,
+  gemmTileN,
 } from "./gemm-geometry.ts";
 import {
   assertScoreStorageSupported,
@@ -113,14 +113,17 @@ export const GEMM_MTILE_SMALL = 32;
 export const LINEAR_SCALE_BINDING = 5;
 
 /**
- * workgroup の x 辺（既定幾何で 16）。n タイル 64 を `regN` 列ずつ覆う本数で、m タイルに
- * よらず一定。conv2d の implicit GEMM がキーに載せる（src/kernels/conv2d.ts）。
+ * m タイルの行数から幾何を解決する（既定幾何の **wgY だけ**を `mTile / regM` へ差し替える）。
+ *
+ * conv2d の implicit GEMM が持つヒューリスティック（`conv2dIgemmMTile`）は「行数」で答えを
+ * 出すので、その 1 値を幾何へ吸収する唯一の点。**生成（{@link gemmWgsl}）もキーも dispatch も
+ * ここを通す** — 通さずに mTile を直に読む経路を残すと、キーの幾何と生成物の幾何が食い違う。
+ * 割り切れない mTile は {@link assertGemmGeometry} の「wgY は正整数」で落ちる。
  */
-export const GEMM_WORKGROUP = defaultGemmGeometry().wgX;
-
-/** m タイルに対応する workgroup の y 辺（1 スレッド `regM` 行なので `mTile / regM`）。 */
-export const gemmWorkgroupY = (mTile: number): number =>
-  gemmWorkgroupRows(defaultGemmGeometry(), mTile);
+export const gemmMTileGeometry = (mTile: number): GemmGeometry => {
+  const geometry = defaultGemmGeometry();
+  return { ...geometry, wgY: mTile / geometry.regM };
+};
 
 /**
  * v4 経路（vec4 の読み書き）を使えるかどうかの判定。
@@ -140,8 +143,12 @@ export const gemmUsesVec4 = (k: number, n: number): boolean => k % 4 === 0 && n 
  * MUST: タイル辺だけでなく**幾何そのもの**を載せる（{@link gemmGeometryKeyPart}）— 64×64 は
  * 複数の `regM×regN wgX` から組めるので、辺だけのキーは別の生成物へ衝突する。
  */
-export const gemmKeyPart = (v4: boolean): string =>
-  `reg${GEMM_TILE}x${GEMM_TILE}${gemmGeometryKeyPart(defaultGemmGeometry())}${v4 ? "v4" : ""}`;
+export const gemmKeyPart = (v4: boolean): string => {
+  const geometry = defaultGemmGeometry();
+  return `reg${gemmTileM(geometry)}x${gemmTileN(geometry)}${gemmGeometryKeyPart(geometry)}${
+    v4 ? "v4" : ""
+  }`;
+};
 
 /**
  * 内積の**計算**変種（ADR 0028）。`"f16"` は共有タイルを f16 に落とす形で、
@@ -319,20 +326,20 @@ ${op === "attention_pv" ? "  let rbase = wid.z * dims.m;\n" : ""}`;
  * {@link gemmRowFillStride} 行ずつ離れる（担当が重ならず、タイルに穴も空かない唯一の割り）。
  */
 const prologueA = (geometry: GemmGeometry, op: GemmSpec["op"], v4: boolean): string => {
-  const stride = gemmRowFillStride(geometry, GEMM_TILE);
+  const stride = gemmRowFillStride(geometry);
   const kUnit = v4 ? "k4" : "dims.k";
-  const rows = slots(gemmRowSlots(geometry, GEMM_TILE)).map((slot) =>
+  const rows = slots(gemmRowSlots(geometry)).map((slot) =>
     slot === 0
-      ? `  let arow0 = wid.y * ${GEMM_TILE}u + ar;
+      ? `  let arow0 = wid.y * ${gemmTileM(geometry)}u + ar;
   let arow_base0 = ${batchBase(op, "abase")}arow0 * ${kUnit};
   let sa_base0 = ar * ${GEMM_TILE_K}u + aq * ${GEMM_QUAD}u;`
       : `  let arow${slot} = arow0 + ${slot * stride}u;
   let arow_base${slot} = arow_base0 + ${slot * stride}u * ${kUnit};
   let sa_base${slot} = sa_base0 + ${slot * stride * GEMM_TILE_K}u;`
   ).join("\n");
-  return `  // A タイルの担当（${GEMM_TILE} 行 × ${GEMM_K_QUADS} quad を ${
-    gemmThreads(geometry, GEMM_TILE)
-  } スレッドで ${gemmRowSlots(geometry, GEMM_TILE)} 巡）
+  return `  // A タイルの担当（${gemmTileM(geometry)} 行 × ${GEMM_K_QUADS} quad を ${
+    gemmThreads(geometry)
+  } スレッドで ${gemmRowSlots(geometry)} 巡）
   let ar = tid / ${GEMM_K_QUADS}u;
   let aq = tid % ${GEMM_K_QUADS}u;
 ${rows}`;
@@ -359,7 +366,7 @@ const fillA = (
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
 ): string => {
-  const filled = slots(gemmRowSlots(geometry, GEMM_TILE)).map((slot) => {
+  const filled = slots(gemmRowSlots(geometry)).map((slot) => {
     const read = (expr: string): string => value === undefined ? expr : value(expr, slot);
     // s16 の quad 読みは**同じ quad 添字**を取る（f32 変種の添字算術を 1 文字も動かさない）
     const quad = scoreReadQuad(name, score, `arow_base${slot} + t * ${GEMM_K_QUADS}u + aq`);
@@ -406,18 +413,19 @@ ${filled}`;
  * 列 quad はスロット不変で、担当する k 行だけが {@link gemmQuadFillStride} ずつ進む。
  */
 const prologueBDense = (geometry: GemmGeometry, v4: boolean): string => {
-  const stride = gemmQuadFillStride(geometry, GEMM_TILE);
-  const rows = slots(gemmQuadSlots(geometry, GEMM_TILE)).slice(1)
+  const stride = gemmQuadFillStride(geometry);
+  const nQuads = gemmColumnQuads(geometry);
+  const rows = slots(gemmQuadSlots(geometry)).slice(1)
     .map((slot) => `\n  let bk${slot} = bk0 + ${slot * stride}u;`).join("");
-  return `  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${GEMM_N_QUADS} を ${
-    gemmThreads(geometry, GEMM_TILE)
-  } スレッドで ${gemmQuadSlots(geometry, GEMM_TILE)} 巡）
-  let bk0 = tid / ${GEMM_N_QUADS}u;
-  let bcq = tid % ${GEMM_N_QUADS}u;
+  return `  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${nQuads} を ${
+    gemmThreads(geometry)
+  } スレッドで ${gemmQuadSlots(geometry)} 巡）
+  let bk0 = tid / ${nQuads}u;
+  let bcq = tid % ${nQuads}u;
   ${
     v4
-      ? `let bc4 = wid.x * ${GEMM_N_QUADS}u + bcq;`
-      : `let bcol = wid.x * ${GEMM_TILE}u + bcq * ${GEMM_QUAD}u;`
+      ? `let bc4 = wid.x * ${nQuads}u + bcq;`
+      : `let bcol = wid.x * ${gemmTileN(geometry)}u + bcq * ${GEMM_QUAD}u;`
   }${rows}`;
 };
 
@@ -428,7 +436,7 @@ const fillBDense = (
   v4: boolean,
   compute: GemmCompute = "f32",
 ): string =>
-  slots(gemmQuadSlots(geometry, GEMM_TILE)).map((slot) =>
+  slots(gemmQuadSlots(geometry)).map((slot) =>
     `    let brow${slot} = t * ${GEMM_TILE_K}u + bk${slot};
     var bv4_${slot} = vec4<f32>(0.0);
 ${
@@ -452,7 +460,7 @@ ${
       }
     }`
     }
-    sb[bk${slot} * ${GEMM_N_QUADS}u + bcq] = ${tileQuad(compute, `bv4_${slot}`)};`
+    sb[bk${slot} * ${gemmColumnQuads(geometry)}u + bcq] = ${tileQuad(compute, `bv4_${slot}`)};`
   ).join("\n");
 
 /** 共有 B タイルの成分（転置後に `wsl` が指す先）。 */
@@ -474,11 +482,11 @@ const TILE_COMPONENTS = ["x", "y", "z", "w"] as const;
  * コストが乗るのは B タイル充填だけで、頻度が桁違いに高い内積ループの読み出しは `sb` を
  * vec4 のまま一括で読む（共有タイルのレイアウトを変えない選択の理由）。
  */
-const storeBTransposed = (compute: GemmCompute, slot: number): string => {
+const storeBTransposed = (geometry: GemmGeometry, compute: GemmCompute, slot: number): string => {
   const arm = (component: string): string =>
     TILE_COMPONENTS
       .map((source, quad) =>
-        `        sb[sb_base${slot}${at(quad * GEMM_N_QUADS)}].${component} = ${
+        `        sb[sb_base${slot}${at(quad * gemmColumnQuads(geometry))}].${component} = ${
           tileScalar(compute, `wv${slot}.${source}`)
         };`
       )
@@ -503,17 +511,20 @@ const storeBTransposed = (compute: GemmCompute, slot: number): string => {
  * なりうるが WGSL の境界付きアクセスで安全で、読んだ値は `wcol < n` のときしか `sb` に載らない。
  */
 const prologueBLinear = (geometry: GemmGeometry, weight: WeightStorage): string => {
-  const stride = gemmRowFillStride(geometry, GEMM_TILE);
-  const channels = slots(gemmColumnSlots(geometry, GEMM_TILE)).map((slot) =>
+  const stride = gemmRowFillStride(geometry);
+  const nQuads = gemmColumnQuads(geometry);
+  const channels = slots(gemmColumnSlots(geometry)).map((slot) =>
     slot === 0
       ? `  let wc0 = tid / ${GEMM_K_QUADS}u;
   let wq = tid % ${GEMM_K_QUADS}u;
-  let wcol0 = wid.x * ${GEMM_TILE}u + wc0;${weightScaleWgsl(weight, "wcol0", "  ", scaleVar(0))}
+  let wcol0 = wid.x * ${gemmTileN(geometry)}u + wc0;${
+        weightScaleWgsl(weight, "wcol0", "  ", scaleVar(0))
+      }
   let wrow_base0 = wcol0 * dims.k;
   // 共有メモリ側で転置して置く（列 quad = wc / ${GEMM_QUAD}・成分 = wc % ${GEMM_QUAD}）
   let wsq0 = wc0 / ${GEMM_QUAD}u;
   let wsl0 = wc0 % ${GEMM_QUAD}u;
-  let sb_base0 = (wq * ${GEMM_QUAD}u) * ${GEMM_N_QUADS}u + wsq0;`
+  let sb_base0 = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq0;`
       : `  let wc${slot} = wc0 + ${slot * stride}u;
   let wcol${slot} = wcol0 + ${slot * stride}u;${
         weightScaleWgsl(weight, `wcol${slot}`, "  ", scaleVar(slot))
@@ -521,11 +532,11 @@ const prologueBLinear = (geometry: GemmGeometry, weight: WeightStorage): string 
   let wrow_base${slot} = wcol${slot} * dims.k;
   let wsq${slot} = wc${slot} / ${GEMM_QUAD}u;
   let wsl${slot} = wc${slot} % ${GEMM_QUAD}u;
-  let sb_base${slot} = (wq * ${GEMM_QUAD}u) * ${GEMM_N_QUADS}u + wsq${slot};`
+  let sb_base${slot} = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq${slot};`
   ).join("\n");
-  return `  // W タイルの担当（${GEMM_TILE} 出力チャネル × ${GEMM_K_QUADS} quad を ${
-    gemmThreads(geometry, GEMM_TILE)
-  } スレッドで ${gemmColumnSlots(geometry, GEMM_TILE)} 巡）
+  return `  // W タイルの担当（${gemmTileN(geometry)} 出力チャネル × ${GEMM_K_QUADS} quad を ${
+    gemmThreads(geometry)
+  } スレッドで ${gemmColumnSlots(geometry)} 巡）
 ${channels}`;
 };
 
@@ -536,7 +547,7 @@ const fillBLinear = (
   v4: boolean,
   compute: GemmCompute = "f32",
 ): string => {
-  const filled = slots(gemmColumnSlots(geometry, GEMM_TILE)).map((slot) =>
+  const filled = slots(gemmColumnSlots(geometry)).map((slot) =>
     `    var wv${slot} = vec4<f32>(0.0);
 ${
       v4
@@ -559,7 +570,7 @@ ${
       }
     }`
     }
-${storeBTransposed(compute, slot)}`
+${storeBTransposed(geometry, compute, slot)}`
   ).join("\n");
   return `    let wk0 = t * ${GEMM_TILE_K}u + wq * ${GEMM_QUAD}u;
 ${filled}`;
@@ -573,26 +584,27 @@ ${filled}`;
  * この共有のおかげで、旧経路の `permute` による kᵀ 実体化がまるごと消える。
  */
 const prologueBAttentionQk = (geometry: GemmGeometry): string => {
-  const stride = gemmRowFillStride(geometry, GEMM_TILE);
-  const columns = slots(gemmColumnSlots(geometry, GEMM_TILE)).map((slot) =>
+  const stride = gemmRowFillStride(geometry);
+  const nQuads = gemmColumnQuads(geometry);
+  const columns = slots(gemmColumnSlots(geometry)).map((slot) =>
     slot === 0
       ? `  let wc0 = tid / ${GEMM_K_QUADS}u;
   let wq = tid % ${GEMM_K_QUADS}u;
-  let wcol0 = wid.x * ${GEMM_TILE}u + wc0;
+  let wcol0 = wid.x * ${gemmTileN(geometry)}u + wc0;
   let krow_base0 = bbase + wcol0 * dims.k;
   let wsq0 = wc0 / ${GEMM_QUAD}u;
   let wsl0 = wc0 % ${GEMM_QUAD}u;
-  let sb_base0 = (wq * ${GEMM_QUAD}u) * ${GEMM_N_QUADS}u + wsq0;`
+  let sb_base0 = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq0;`
       : `  let wc${slot} = wc0 + ${slot * stride}u;
   let wcol${slot} = wcol0 + ${slot * stride}u;
   let krow_base${slot} = krow_base0 + ${slot * stride}u * dims.k;
   let wsq${slot} = wc${slot} / ${GEMM_QUAD}u;
   let wsl${slot} = wc${slot} % ${GEMM_QUAD}u;
-  let sb_base${slot} = (wq * ${GEMM_QUAD}u) * ${GEMM_N_QUADS}u + wsq${slot};`
+  let sb_base${slot} = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq${slot};`
   ).join("\n");
-  return `  // k タイルの担当（${GEMM_TILE} 列（N）× ${GEMM_K_QUADS} quad を ${
-    gemmThreads(geometry, GEMM_TILE)
-  } スレッドで ${gemmColumnSlots(geometry, GEMM_TILE)} 巡）。
+  return `  // k タイルの担当（${gemmTileN(geometry)} 列（N）× ${GEMM_K_QUADS} quad を ${
+    gemmThreads(geometry)
+  } スレッドで ${gemmColumnSlots(geometry)} 巡）。
   // k は [N,D] のまま読み、**共有メモリ側で転置して置く**（linear の重み読みと同じ構造）
 ${columns}`;
 };
@@ -602,7 +614,7 @@ const fillBAttentionQk = (
   v4: boolean,
   compute: GemmCompute = "f32",
 ): string => {
-  const filled = slots(gemmColumnSlots(geometry, GEMM_TILE)).map((slot) =>
+  const filled = slots(gemmColumnSlots(geometry)).map((slot) =>
     `    var wv${slot} = vec4<f32>(0.0);
 ${
       v4
@@ -627,7 +639,7 @@ ${
     // 半スケール契約（ADR 0023）: scale は q 側と k 側の**両方**へ掛ける。範囲外は 0 のままで
     // 0 · scale = 0 なので端数タイルの結論は変わらない
     wv${slot} = wv${slot} * dims.scale;
-${storeBTransposed(compute, slot)}`
+${storeBTransposed(geometry, compute, slot)}`
   ).join("\n");
   return `    let wk0 = t * ${GEMM_TILE_K}u + wq * ${GEMM_QUAD}u;
 ${filled}`;
@@ -644,7 +656,7 @@ ${filled}`;
  * 1 スレッドは A タイルを {@link gemmRowSlots} 行ぶん埋めるので、統計もその行ごとに引く。
  */
 const prologueAttentionStats = (geometry: GemmGeometry): string => {
-  const rows = slots(gemmRowSlots(geometry, GEMM_TILE)).map((slot) =>
+  const rows = slots(gemmRowSlots(geometry)).map((slot) =>
     `  let stat_at${slot} = select(0u, (rbase + arow${slot}) * 2u, arow${slot} < dims.m);
   let row_max${slot} = stats[stat_at${slot}];
   let row_inv${slot} = stats[stat_at${slot} + 1u];`
@@ -678,7 +690,6 @@ const store = (
   op: GemmSpec["op"],
   v4: boolean,
   bias: boolean,
-  mTile = GEMM_TILE,
   outF16 = false,
   score: ScoreStorage = "f32",
 ): string => {
@@ -686,13 +697,15 @@ const store = (
   const quads = gemmQuadsPerThread(geometry);
   const rows = slots(geometry.regM).map((row) =>
     row === 0
-      ? `  let orow0 = wid.y * ${mTile}u + lid.y * ${geometry.regM}u;`
+      ? `  let orow0 = wid.y * ${gemmTileM(geometry)}u + lid.y * ${geometry.regM}u;`
       : `  let orow${row} = orow0 + ${row}u;`
   ).join("\n");
   if (v4) {
     const columns = slots(quads).map((quad) =>
       quad === 0
-        ? `  let ocq0 = wid.x * ${GEMM_N_QUADS}u + lid.x${quads === 1 ? "" : ` * ${quads}u`};`
+        ? `  let ocq0 = wid.x * ${gemmColumnQuads(geometry)}u + lid.x${
+          quads === 1 ? "" : ` * ${quads}u`
+        };`
         : `  let ocq${quad} = ocq0 + ${quad}u;`
     ).join("\n");
     const blocks = slots(quads).map((quad) => {
@@ -733,7 +746,7 @@ ${blocks}`;
 ${slots(geometry.regN).map((col) => write(row, col)).join("\n")}
   }`
   ).join("\n");
-  return `  let ocol = wid.x * ${GEMM_TILE}u + lid.x * ${geometry.regN}u;
+  return `  let ocol = wid.x * ${gemmTileN(geometry)}u + lid.x * ${geometry.regN}u;
 ${rows}
 ${rowStores}`;
 };
@@ -751,7 +764,7 @@ const accumulatorUpdate = (geometry: GemmGeometry, compute: GemmCompute): string
   const { regM } = geometry;
   const quads = gemmQuadsPerThread(geometry);
   const column = (quad: number): string =>
-    `sb[kk * ${GEMM_N_QUADS}u + lid.x${quads === 1 ? "" : ` * ${quads}u${at(quad)}`}]`;
+    `sb[kk * ${gemmColumnQuads(geometry)}u + lid.x${quads === 1 ? "" : ` * ${quads}u${at(quad)}`}]`;
   const loads = slots(quads).map((quad) =>
     `      let bv${quad} = ${compute === "f16" ? `vec4<f32>(${column(quad)})` : column(quad)};`
   ).join("\n");
@@ -784,10 +797,11 @@ const skeleton = (
   storeTile: string,
   dimsExtra = "",
   accInit = gemmAccumulatorInit(geometry),
-  mTile = GEMM_TILE,
   compute: GemmCompute = "f32",
-): string =>
-  `${header}${
+): string => {
+  const tileM = gemmTileM(geometry);
+  const nQuads = gemmColumnQuads(geometry);
+  return `${header}${
     // MUST: `enable` はモジュール先頭・全ての global 宣言より前の directive（コメントだけが
     // 前に来てよい）。f16 変種のときだけここが差し込む — f32 変種の生成物は 1 バイトも動かない。
     compute === "f16" ? "\nenable f16;" : ""}
@@ -799,19 +813,19 @@ ${dimsExtra}}
 @group(0) @binding(0) var<uniform> dims: Dims;
 ${bindings}
 ${loader}
-// 共有 A タイル（${mTile} 行 × K ${GEMM_TILE_K}・スカラ格納）と
-// 共有 B タイル（K ${GEMM_TILE_K} × 列 quad ${GEMM_N_QUADS}・列方向を vec4 に束ねた形）${
+// 共有 A タイル（${tileM} 行 × K ${GEMM_TILE_K}・スカラ格納）と
+// 共有 B タイル（K ${GEMM_TILE_K} × 列 quad ${nQuads}・列方向を vec4 に束ねた形）${
     compute === "f16"
       ? `。f16 変種は共有バイトが半分
-// （${mTile * GEMM_TILE_K * 4 + GEMM_TILE_K * GEMM_N_QUADS * 16} B → ${
-        mTile * GEMM_TILE_K * 2 + GEMM_TILE_K * GEMM_N_QUADS * 8
+// （${tileM * GEMM_TILE_K * 4 + GEMM_TILE_K * nQuads * 16} B → ${
+        tileM * GEMM_TILE_K * 2 + GEMM_TILE_K * nQuads * 8
       } B / WG）— 期待利得はこの 1 機序に全て乗る`
       : ""
   }
-var<workgroup> sa: array<${tileScalarType(compute)}, ${mTile * GEMM_TILE_K}>;
-var<workgroup> sb: array<${tileQuadType(compute)}, ${GEMM_TILE_K * GEMM_N_QUADS}>;
+var<workgroup> sa: array<${tileScalarType(compute)}, ${tileM * GEMM_TILE_K}>;
+var<workgroup> sb: array<${tileQuadType(compute)}, ${GEMM_TILE_K * nQuads}>;
 
-@compute @workgroup_size(${geometry.wgX}, ${gemmWorkgroupRows(geometry, mTile)})
+@compute @workgroup_size(${geometry.wgX}, ${geometry.wgY})
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
@@ -849,15 +863,14 @@ ${accumulatorUpdate(geometry, compute)}
 ${storeTile}
 }
 `;
+};
 
 const denseWgsl = (geometry: GemmGeometry, op: "matmul" | "bmm", v4: boolean): string => {
   const element = v4 ? "vec4<f32>" : "f32";
   const signature = op === "bmm" ? "a[b,m,k] · b[b,k,n]" : "a[m,k] · b[k,n]";
   return skeleton(
     geometry,
-    `// karume ${op} (${signature}, f32, ${gemmGeometryNote(geometry, GEMM_TILE)}${
-      v4 ? " + vec4" : ""
-    })`,
+    `// karume ${op} (${signature}, f32, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> a: array<${element}>;
 @group(0) @binding(2) var<storage, read> b: array<${element}>;
 @group(0) @binding(3) var<storage, read_write> c: array<${element}>;`,
@@ -889,7 +902,7 @@ const attentionQkWgsl = (
     geometry,
     `// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ, f32${
       f16 ? ", f16 タイル計算・S も f16" : ""
-    }${scoreNote(score)}, ${gemmGeometryNote(geometry, GEMM_TILE)}${v4 ? " + vec4" : ""})`,
+    }${scoreNote(score)}, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> q: array<${v4 ? "vec4<f32>" : "f32"}>;
 @group(0) @binding(2) var<storage, read> k: array<${v4 ? "vec4<f32>" : "f32"}>;
 @group(0) @binding(3) var<storage, read_write> s: array<${
@@ -900,10 +913,9 @@ const attentionQkWgsl = (
 ${prologueBAttentionQk(geometry)}`,
     `${fillA(geometry, "q", v4, (expr) => `${expr} * dims.scale`, compute)}
 ${fillBAttentionQk(geometry, v4, compute)}`,
-    store(geometry, "s", "attention_qk", v4, false, GEMM_TILE, f16, score),
+    store(geometry, "s", "attention_qk", v4, false, f16, score),
     "  scale: f32,\n",
     gemmAccumulatorInit(geometry),
-    GEMM_TILE,
     compute,
   );
 };
@@ -932,7 +944,7 @@ const attentionPvWgsl = (
     geometry,
     `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv は非実体化, f32${
       f16 ? ", f16 タイル計算・S は f16" : ""
-    }${scoreNote(score)}, ${gemmGeometryNote(geometry, GEMM_TILE)}${v4 ? " + vec4" : ""})`,
+    }${scoreNote(score)}, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> s: array<${
       scoreArrayType(score, v4 ? tileQuadType(compute) : tileScalarType(compute))
     }>;
@@ -948,7 +960,6 @@ ${fillBDense(geometry, "v", "attention_pv", v4, compute)}`,
     store(geometry, "o", "attention_pv", v4, false),
     "",
     gemmAccumulatorInit(geometry),
-    GEMM_TILE,
     compute,
   );
 };
@@ -973,7 +984,7 @@ const linearVariantWgsl = (
     geometry,
     `// karume linear (x[m,k] · wᵀ[k,n] + bias[n], f32${weightNote(weight)}${
       compute === "f16" ? ", f16 タイル計算" : ""
-    }, ${gemmGeometryNote(geometry, GEMM_TILE)}${v4 ? " + vec4" : ""})`,
+    }, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> x: array<${element}>;
 @group(0) @binding(2) var<storage, read> w: array<${weightArrayType(weight, v4)}>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
@@ -986,7 +997,6 @@ ${fillBLinear(geometry, "w", weight, v4, compute)}`,
     store(geometry, "out", "linear", v4, true),
     "",
     gemmAccumulatorInit(geometry),
-    GEMM_TILE,
     compute,
   );
 };
@@ -1022,8 +1032,8 @@ const CONV2D_DIMS_EXTRA = `  channels_in: u32,
  * 端タイルでは `bias0 + i >= m` を読みうるが、その行の `acc` は `store` の行ガードで捨てられる
  * （範囲外の storage 読み自体は WGSL の境界付きアクセスで安全）。
  */
-const conv2dAccInit = (geometry: GemmGeometry, mTile: number): string =>
-  `  let bias0 = wid.y * ${mTile}u + lid.y * ${geometry.regM}u;
+const conv2dAccInit = (geometry: GemmGeometry): string =>
+  `  let bias0 = wid.y * ${gemmTileM(geometry)}u + lid.y * ${geometry.regM}u;
 ${gemmAccumulatorInit(geometry, (row) => `vec4<f32>(bias[bias0${at(row)}])`)}`;
 
 /**
@@ -1060,12 +1070,13 @@ fn xcol(xc: u32, ky: i32, kx: i32, n: u32) -> f32 {
 const prologueAConv2d = (
   geometry: GemmGeometry,
   weight: WeightStorage,
-  mTile: number,
 ): string => {
-  const stride = gemmRowFillStride(geometry, mTile);
-  const rows = slots(gemmRowSlots(geometry, mTile)).map((slot) =>
+  const stride = gemmRowFillStride(geometry);
+  const rows = slots(gemmRowSlots(geometry)).map((slot) =>
     slot === 0
-      ? `  let arow0 = wid.y * ${mTile}u + ar;${weightScaleWgsl(weight, "arow0", "  ", scaleVar(0))}
+      ? `  let arow0 = wid.y * ${gemmTileM(geometry)}u + ar;${
+        weightScaleWgsl(weight, "arow0", "  ", scaleVar(0))
+      }
   let arow_base0 = arow0 * dims.k;
   let sa_base0 = ar * ${GEMM_TILE_K}u + aq * ${GEMM_QUAD}u;`
       : `  let arow${slot} = arow0 + ${slot * stride}u;${
@@ -1074,9 +1085,9 @@ const prologueAConv2d = (
   let arow_base${slot} = arow_base0 + ${slot * stride}u * dims.k;
   let sa_base${slot} = sa_base0 + ${slot * stride * GEMM_TILE_K}u;`
   ).join("\n");
-  return `  // A タイルの担当（${mTile} 行 × ${GEMM_K_QUADS} quad を ${
-    gemmThreads(geometry, mTile)
-  } スレッドで ${gemmRowSlots(geometry, mTile)} 巡）
+  return `  // A タイルの担当（${gemmTileM(geometry)} 行 × ${GEMM_K_QUADS} quad を ${
+    gemmThreads(geometry)
+  } スレッドで ${gemmRowSlots(geometry)} 巡）
   let ar = tid / ${GEMM_K_QUADS}u;
   let aq = tid % ${GEMM_K_QUADS}u;
 ${rows}`;
@@ -1088,9 +1099,8 @@ const fillAConv2d = (
   name: string,
   weight: WeightStorage,
   v4: boolean,
-  mTile: number,
 ): string => {
-  const filled = slots(gemmRowSlots(geometry, mTile)).map((slot) =>
+  const filled = slots(gemmRowSlots(geometry)).map((slot) =>
     `    var av${slot} = vec4<f32>(0.0);
 ${
       v4
@@ -1129,22 +1139,23 @@ ${filled}`;
  * MUST: バッチは `wid.z`（{@link BATCHED_OPS} の doc）。`xbase` は x の**チャネル平面**単位、
  * `cbase` は出力要素（v4 では quad）単位で数える。
  */
-const prologueBConv2d = (geometry: GemmGeometry, v4: boolean, mTile: number): string => {
-  const stride = gemmQuadFillStride(geometry, mTile);
-  const rows = slots(gemmQuadSlots(geometry, mTile)).slice(1)
+const prologueBConv2d = (geometry: GemmGeometry, v4: boolean): string => {
+  const stride = gemmQuadFillStride(geometry);
+  const nQuads = gemmColumnQuads(geometry);
+  const rows = slots(gemmQuadSlots(geometry)).slice(1)
     .map((slot) => `\n  let bk${slot} = bk0 + ${slot * stride}u;`).join("");
   return `  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチの出力平面 [Cout, Hout·Wout]）
   let xbase = wid.z * dims.channels_in;
   let cbase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
-  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${GEMM_N_QUADS} を ${
-    gemmThreads(geometry, mTile)
-  } スレッドで ${gemmQuadSlots(geometry, mTile)} 巡）
-  let bk0 = tid / ${GEMM_N_QUADS}u;
-  let bcq = tid % ${GEMM_N_QUADS}u;
+  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${nQuads} を ${
+    gemmThreads(geometry)
+  } スレッドで ${gemmQuadSlots(geometry)} 巡）
+  let bk0 = tid / ${nQuads}u;
+  let bcq = tid % ${nQuads}u;
   ${
     v4
-      ? `let bc4 = wid.x * ${GEMM_N_QUADS}u + bcq;`
-      : `let bcol = wid.x * ${GEMM_TILE}u + bcq * ${GEMM_QUAD}u;`
+      ? `let bc4 = wid.x * ${nQuads}u + bcq;`
+      : `let bcol = wid.x * ${gemmTileN(geometry)}u + bcq * ${GEMM_QUAD}u;`
   }${rows}
   // K タイルループ不変（平坦 k を (ic, kh, kw) へ割るための刻み）
   let khw = dims.kernel_h * dims.kernel_w;`;
@@ -1175,8 +1186,8 @@ const conv2dKDecode = (slot: number): string =>
  * 列は `store` の `ocq < n4` に阻まれて一度も書き出されないため。検出器は WGSL スナップ
  * ショット（tests/fixtures/wgsl/conv2d_igemm*.wgsl）だけで、これは意図した構造の固定。
  */
-const fillBConv2d = (geometry: GemmGeometry, v4: boolean, mTile: number): string =>
-  slots(gemmQuadSlots(geometry, mTile)).map((slot) =>
+const fillBConv2d = (geometry: GemmGeometry, v4: boolean): string =>
+  slots(gemmQuadSlots(geometry)).map((slot) =>
     `    let brow${slot} = t * ${GEMM_TILE_K}u + bk${slot};
     var bv4_${slot} = vec4<f32>(0.0);
 ${
@@ -1218,7 +1229,7 @@ ${conv2dKDecode(slot)}
       }
     }`
     }
-    sb[bk${slot} * ${GEMM_N_QUADS}u + bcq] = bv4_${slot};`
+    sb[bk${slot} * ${gemmColumnQuads(geometry)}u + bcq] = bv4_${slot};`
   ).join("\n");
 
 /**
@@ -1234,44 +1245,41 @@ const conv2dIgemmWgsl = (
   geometry: GemmGeometry,
   weight: WeightStorage,
   v4: boolean,
-  mTile: number,
 ): string =>
   skeleton(
     geometry,
     `// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin,Kh,Kw] + b[Cout], f32${
       weightNote(weight)
-    }, implicit GEMM ${gemmGeometryNote(geometry, mTile)}${v4 ? " + vec4" : ""})`,
+    }, implicit GEMM ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> w: array<${weightArrayType(weight, v4)}>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<${v4 ? "vec4<f32>" : "f32"}>;`,
     `${weightLoaderWgsl("w", weight, LINEAR_SCALE_BINDING, v4)}${CONV2D_XCOL_WGSL}`,
-    `${v4 ? `  let n4 = dims.n / ${GEMM_QUAD}u;\n` : ""}${prologueAConv2d(geometry, weight, mTile)}
-${prologueBConv2d(geometry, v4, mTile)}`,
-    `${fillAConv2d(geometry, "w", weight, v4, mTile)}
-${fillBConv2d(geometry, v4, mTile)}`,
-    store(geometry, "out", "conv2d", v4, false, mTile),
+    `${v4 ? `  let n4 = dims.n / ${GEMM_QUAD}u;\n` : ""}${prologueAConv2d(geometry, weight)}
+${prologueBConv2d(geometry, v4)}`,
+    `${fillAConv2d(geometry, "w", weight, v4)}
+${fillBConv2d(geometry, v4)}`,
+    store(geometry, "out", "conv2d", v4, false),
     CONV2D_DIMS_EXTRA,
-    conv2dAccInit(geometry, mTile),
-    mTile,
+    conv2dAccInit(geometry),
   );
 
 /**
  * 生成入力 1 つから WGSL 1 本。同じ入力からは常にバイト単位で同じ文字列が出る。
  *
- * タイル幾何を解決する**唯一の点**（{@link defaultGemmGeometry}）で、門
- * （{@link assertGemmGeometry}）もここ 1 箇所。断片は幾何を受け取って流すだけなので、
- * 既定を差し替えたときの影響がこの関数に閉じる。
+ * タイル幾何を解決する**唯一の点**（{@link defaultGemmGeometry} / conv2d は
+ * {@link gemmMTileGeometry}）で、門（{@link assertGemmGeometry}）もここ 1 箇所。断片は幾何を
+ * 受け取って流すだけなので、既定を差し替えたときの影響がこの関数に閉じる。
  */
 export const gemmWgsl = (spec: GemmSpec): string => {
-  const geometry = defaultGemmGeometry();
-  const mTile = spec.op === "conv2d" ? spec.mTile : GEMM_TILE;
-  assertGemmGeometry(geometry, mTile, spec.op);
+  const geometry = spec.op === "conv2d" ? gemmMTileGeometry(spec.mTile) : defaultGemmGeometry();
+  assertGemmGeometry(geometry, spec.op);
   switch (spec.op) {
     case "linear":
       return linearVariantWgsl(geometry, spec.weight, spec.v4, spec.compute);
     case "conv2d":
-      return conv2dIgemmWgsl(geometry, spec.weight, spec.v4, spec.mTile);
+      return conv2dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "attention_qk":
       return attentionQkWgsl(geometry, spec.v4, spec.compute, spec.score);
     case "attention_pv":

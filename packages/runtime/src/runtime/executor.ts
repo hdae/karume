@@ -163,7 +163,8 @@ import {
   type SubmitStats,
 } from "../gpu/submit.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../kernels/bmm.ts";
-import { GEMM_TILE, type GemmCompute, gemmUsesVec4 } from "../kernels/gemm.ts";
+import { type GemmCompute, gemmMTileGeometry, gemmUsesVec4 } from "../kernels/gemm.ts";
+import { defaultGemmGeometry, gemmTileM, gemmTileN } from "../kernels/gemm-geometry.ts";
 import { GATHER_KEY, GATHER_WGSL, GATHER_WORKGROUP_SIZE, gatherParams } from "../kernels/gather.ts";
 import { matmulKey, matmulParams, matmulWgsl } from "../kernels/matmul.ts";
 import {
@@ -1431,9 +1432,10 @@ export class Session {
     });
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `matmul [${a.join(",")}] × [${b.join(",")}]`;
+    const geometry = defaultGemmGeometry();
     this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, GEMM_TILE, limit, where),
-      tiledWorkgroups(m, GEMM_TILE, limit, where),
+      tiledWorkgroups(n, gemmTileN(geometry), limit, where),
+      tiledWorkgroups(m, gemmTileM(geometry), limit, where),
       1,
     ], key);
   }
@@ -1466,9 +1468,10 @@ export class Session {
     });
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `bmm [${a.join(",")}] × [${b.join(",")}]`;
+    const geometry = defaultGemmGeometry();
     this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, GEMM_TILE, limit, where),
-      tiledWorkgroups(m, GEMM_TILE, limit, where),
+      tiledWorkgroups(n, gemmTileN(geometry), limit, where),
+      tiledWorkgroups(m, gemmTileM(geometry), limit, where),
       // バッチは 1 workgroup = 1 バッチ。ここも縮退させるとバッチが丸ごと未書き込みになる。
       tiledWorkgroups(batch, 1, limit, where),
     ], key);
@@ -1558,9 +1561,10 @@ export class Session {
     });
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `linear [${x.join(",")}] × [${weight.join(",")}]`;
+    const geometry = defaultGemmGeometry();
     this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, GEMM_TILE, limit, where),
-      tiledWorkgroups(m, GEMM_TILE, limit, where),
+      tiledWorkgroups(n, gemmTileN(geometry), limit, where),
+      tiledWorkgroups(m, gemmTileM(geometry), limit, where),
       1,
     ], key);
   }
@@ -1850,9 +1854,10 @@ export class Session {
           { binding: 3, resource: { buffer: scores } },
         ],
       });
+      const geometry = defaultGemmGeometry();
       this.#state.scheduler.dispatch(qkPipeline, qkBindGroup, [
-        tiledWorkgroups(cols, GEMM_TILE, limit, `${where} ①QK`),
-        tiledWorkgroups(rows, GEMM_TILE, limit, `${where} ①QK`),
+        tiledWorkgroups(cols, gemmTileN(geometry), limit, `${where} ①QK`),
+        tiledWorkgroups(rows, gemmTileM(geometry), limit, `${where} ①QK`),
         tiledWorkgroups(batch, 1, limit, `${where} ①QK`),
       ], qkKey);
     }
@@ -1919,9 +1924,10 @@ export class Session {
           { binding: 4, resource: { buffer: out } },
         ],
       });
+      const geometry = defaultGemmGeometry();
       this.#state.scheduler.dispatch(pvPipeline, pvBindGroup, [
-        tiledWorkgroups(depth, GEMM_TILE, limit, `${where} ③PV`),
-        tiledWorkgroups(rows, GEMM_TILE, limit, `${where} ③PV`),
+        tiledWorkgroups(depth, gemmTileN(geometry), limit, `${where} ③PV`),
+        tiledWorkgroups(rows, gemmTileM(geometry), limit, `${where} ③PV`),
         tiledWorkgroups(batch, 1, limit, `${where} ③PV`),
       ], pvKey);
     }
@@ -2409,6 +2415,8 @@ export class Session {
     const kFlat = dims.channelsIn * dims.kernelH * dims.kernelW;
     const v4 = conv2dUsesVec4(kFlat, dims.widthOut, dims.strideW);
     const mTile = conv2dIgemmMTile(m);
+    // 生成・キーと同じ解決点から幾何を引く（dispatch のタイル辺が WGSL の辺と構造的に一致）。
+    const geometry = gemmMTileGeometry(mTile);
     const key = conv2dIgemmKey(weightStorage, v4, mTile);
     const pipeline = await this.#state.cache.get(key, conv2dIgemmWgsl(weightStorage, v4, mTile));
     const params = this.#writeParams(arena, conv2dIgemmParams(dims), PARAMS_UNIFORM_USAGE);
@@ -2424,8 +2432,8 @@ export class Session {
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `conv2d [${step.inputShapes[0].join(",")}] * [${step.inputShapes[1].join(",")}]`;
     this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, GEMM_TILE, limit, where),
-      tiledWorkgroups(m, mTile, limit, where),
+      tiledWorkgroups(n, gemmTileN(geometry), limit, where),
+      tiledWorkgroups(m, gemmTileM(geometry), limit, where),
       tiledWorkgroups(dims.batch, 1, limit, where),
     ], key);
   }
