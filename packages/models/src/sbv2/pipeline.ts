@@ -440,8 +440,9 @@ const finiteKnob = (value: number, name: string): number => {
 /**
  * manifest + 資産から実行状態を組む（{@link Sbv2Pipeline.fromAssets} の中身）。
  *
- * MUST: manifest の契約違反は **GPU を取りに行く前**に落とす。順序がずれると、GPU の無い
- * 環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+ * MUST: manifest の契約違反と**資産の解析・表の突合**は **GPU を取りに行く前**に落とす。
+ * 順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に
+ * 伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ。
  * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
  */
 export const openSbv2State = async (
@@ -483,51 +484,52 @@ export const openSbv2State = async (
   const quant = entry.quants[quantName];
   const wantsShaderF16 = quant.gpuFeatures?.shaderF16 === true;
 
+  const front = openModel(assetBuffer(assets, FRONT));
+  const voice = openModel(assetBuffer(assets, VOICE));
+  const textEncoder = openModel(assetBuffer(assets, TEXT_ENCODER));
+  const rules = parseJpExtraRules(assetJson(assets, SYMBOLS), SYMBOLS);
+  const tokenizer = parseTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER);
+  const styles = parseSbv2Table(assetBuffer(assets, STYLE_VECTORS), STYLE_TENSOR);
+  const speakers = parseSbv2Table(assetBuffer(assets, SPEAKER_EMBEDDINGS), SPEAKER_TENSOR);
+  assertTableFits(styles, config.styles, STYLE_VECTORS, featureWidth(front, "style_vec"));
+  assertTableFits(speakers, config.speakers, SPEAKER_EMBEDDINGS, featureWidth(front, "g"));
+  // front と voice は同じ `g` を受ける。幅が割れていたら片方だけ別の話者表を要求している。
+  const voiceGin = featureWidth(voice, "g");
+  if (voiceGin !== speakers.cols) {
+    throw new Error(
+      `Sbv2Pipeline: voice のグラフ入力 'g' の幅 ${voiceGin} が話者表の列数 ${speakers.cols}` +
+        " と違う（front / voice が別の話者埋め込みを要求している）",
+    );
+  }
+  // 低精度ノブは front / voice の Session にだけ効かせる（モジュール doc の MUST）。
+  const sessionOptions = toSessionOptions(quant.session);
+
   // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
   // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。
   const gpu = options.gpu ?? await acquireGpu(wantsShaderF16 ? { shaderF16: true } : {});
   const ownsGpu = options.gpu === undefined;
-  try {
-    if (wantsShaderF16 && !gpu.shaderF16Enabled) {
-      throw new Error(
-        `Sbv2Pipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +
-          " GpuContext で有効になっていない（acquireGpu({ shaderF16: true }) で取り直す）",
-      );
-    }
-    const front = openModel(assetBuffer(assets, FRONT));
-    const voice = openModel(assetBuffer(assets, VOICE));
-    const styles = parseSbv2Table(assetBuffer(assets, STYLE_VECTORS), STYLE_TENSOR);
-    const speakers = parseSbv2Table(assetBuffer(assets, SPEAKER_EMBEDDINGS), SPEAKER_TENSOR);
-    assertTableFits(styles, config.styles, STYLE_VECTORS, featureWidth(front, "style_vec"));
-    assertTableFits(speakers, config.speakers, SPEAKER_EMBEDDINGS, featureWidth(front, "g"));
-    // front と voice は同じ `g` を受ける。幅が割れていたら片方だけ別の話者表を要求している。
-    const voiceGin = featureWidth(voice, "g");
-    if (voiceGin !== speakers.cols) {
-      throw new Error(
-        `Sbv2Pipeline: voice のグラフ入力 'g' の幅 ${voiceGin} が話者表の列数 ${speakers.cols}` +
-          " と違う（front / voice が別の話者埋め込みを要求している）",
-      );
-    }
-    return {
-      gpu,
-      ownsGpu,
-      config,
-      rules: parseJpExtraRules(assetJson(assets, SYMBOLS), SYMBOLS),
-      tokenizer: parseTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER),
-      styles,
-      speakers,
-      textEncoder: openModel(assetBuffer(assets, TEXT_ENCODER)),
-      front,
-      voice,
-      // 低精度ノブは front / voice の Session にだけ効かせる（モジュール doc の MUST）。
-      sessionOptions: toSessionOptions(quant.session),
-      dictionary: options.dictionary,
-    };
-  } catch (error) {
-    // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+  if (wantsShaderF16 && !gpu.shaderF16Enabled) {
+    // 内部で取った GPU は、ここで投げると誰も解放できなくなるので返してから落とす。
     if (ownsGpu) gpu.destroy();
-    throw error;
+    throw new Error(
+      `Sbv2Pipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +
+        " GpuContext で有効になっていない（acquireGpu({ shaderF16: true }) で取り直す）",
+    );
   }
+  return {
+    gpu,
+    ownsGpu,
+    config,
+    rules,
+    tokenizer,
+    styles,
+    speakers,
+    textEncoder,
+    front,
+    voice,
+    sessionOptions,
+    dictionary: options.dictionary,
+  };
 };
 
 /** 内部で取得した GPU だけを破棄する（渡された GpuContext は呼び出し側の所有物）。 */
