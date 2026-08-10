@@ -100,6 +100,13 @@ PLAN-012 の 308 node という分類結果も台帳の静的集計と完全一�
 初回 predict は +287ms（i8 重み 1.9GiB のアップロード）。DiT の pipeline はグラフ全体で
 **14 本**しかなく、pipeline 並列 prewarm（PIPE-015）の余地は 7.6ms — 対象外にしてよい。
 
+> 訂正（2026-08-10・C 波の実 IR 精査）: ①OP-008 の鎖は隣接 3 ノードではなく **窓 7 の
+> 非隣接形**（layer_norm と mul の間に shift/scale/gate の reshape 3 本 + `1+scale` の add が
+> 挟まる）。鎖の実 dispatch は `1+scale` の add を含め **340/predict**（表の 255 は
+> layer_norm/mul/add の 3 op のみの計数）。②表の下で触れた `ew:v2:add:f32>f32:r2`
+> （680 dispatch）は adaLN 鎖の一部ではなく、変調ベクトル生成 `add[1,6144]` ×85。GPU 時間
+> 201.7ms の帰属自体は変わらない。設計評価の正本は C 波レポート（実装波の ADR に統合予定）。
+
 ## 3. SBV2 の支配 op（FN4 / w8 / seed 0 — WAV 門と同条件・sha256 参照一致）
 
 | Session                 |   GPU (ms) | dispatch |    全体比 |
