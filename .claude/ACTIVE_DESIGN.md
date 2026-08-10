@@ -54,8 +54,15 @@
   （`7b55de5`・`i8a8-geometry.ts`・stats regcache 込み）。**w8a8-1024 壁 13.9 → 11.79s
   （×1.18）**・f16 経路は無変更（A/B ×0.998）・全門 sha256 不変。実測の正本 =
   [research/2026-08-10-kernel-variant-sweep.md](../docs/research/2026-08-10-kernel-variant-sweep.md)。
-  **次手候補**: f32/f16 骨格への幾何横展開（成立すれば VAE conv2d 19.1% が対象 — PNG 門で
-  確認が先）/ m 小 linear の別幾何（m=1 ×169 本）/ Metal A/B（r8×8 の spill 懸念）。
+- **f32/f16 幾何波 — 完了（2026-08-10・v0.2.1 後）**: f32/f16 GEMM 骨格もタイル幾何を
+  パラメタ化（`src/kernels/gemm-geometry.ts`・既定 r8×4/wg16×8・全 op の accumulator
+  静的展開込み・キーに幾何判別子）。**f16-1024 30.4 → 23.7s（×1.28）・w8a8-1024
+  11.7 → 10.7s（×1.09 = VAE conv2d と attention f32 が骨格共有）**・全門 sha256 不変。
+  ビット同一は実測命題（fma 留保は Vulkan で外れた）— **f32 では実行時オートチューン
+  不可**（ADR 0022 追記が MUST）。実測の正本 =
+  [research/2026-08-10-f32-geometry-probe.md](../docs/research/2026-08-10-f32-geometry-probe.md)。
+  **次手候補**: tileM/N=128 軸の幾何探索（executor 定数へ波及 — 独立波）/ m 小 linear の
+  別幾何（m=1 ×169 本）/ Metal A/B（レジスタ 32 本/スレッドの spill 懸念）。
 - **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 実装完了（2026-08-09）**:
   1 リポ複数モデル（`defaultModel` 必須）+ 語彙整理（presets → `quants`・variant → `dtype`・
   components → `weights` / `assets` 分離）。**v1 パーサは持たない**。hub v2 パーサ +
