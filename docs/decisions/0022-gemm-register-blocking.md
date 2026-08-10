@@ -67,3 +67,12 @@
   （15.7s・96%）が相対的に浮上 — perf 次段（融合 attention / conv2d）の入力。
 - `acc` の動的添字ループはドライバの展開に依存する（実測系譜の形のまま採用）。他環境で
   性能が出ない場合の第 1 候補は codegen 時の 4 本展開（設計書 §2.7）。
+
+> 追記（2026-08-10）: 上の予言は NVIDIA でも成立していた — 動的添字はローカルメモリ退避で
+> 律速し、i8a8 系は codegen 時展開へ移行済み（linear = `4b15ec2`・attention = `3f417dc`、
+> 各 ×1.35〜1.45）。さらに **i8a8 GEMM 族はタイル幾何を f32 骨格から独立させてパラメタ化**した
+> （`src/kernels/i8a8-geometry.ts`・実測最良の既定 = linear/QK M128N64 r8×8 wg8×16 / PV
+> M64N128）。根拠は整数縮約の順序非依存（幾何を変えても出力ビット不変 —
+> [research/2026-08-10-kernel-variant-sweep.md](../research/2026-08-10-kernel-variant-sweep.md)）。
+> **決定 3 の MUST（縮約順は数値契約・変種は tolerance 再導出とセット）は f32/f16 骨格
+> （gemm.ts）に引き続き適用**され、そちらの幾何は本 ADR のまま動いていない。

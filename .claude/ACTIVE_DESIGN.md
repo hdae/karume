@@ -47,7 +47,15 @@
   台帳 4 件は合計しても壁時計の 7% 台（OP-008 ≈ −1.2% / PLAN-012 ≈ −0.8% / HOST-006 上限
   −5.1% / **PLAN-011 は既定 guidance 1 で利得ゼロ**）。**本命は DiT linear + attention
   （GPU の 63.3%）と VAE conv2d（19.1%）のカーネル最適化**。SBV2 は逆にホスト律速
-  （壁 1.08s vs GPU 0.42s）。最適化メニューは裁定待ち。
+  （壁 1.08s vs GPU 0.42s）。
+- **実行時最適化 3 波 — 完了（2026-08-10）**: ①attention i8a8 の accumulator 静的展開
+  （`3f417dc`）②adaLN 融合 = 融合パスへ**窓内 passthrough** を導入し 4 ノード → 1 dispatch
+  （`fbae6d2`・ADR 0040 追記）③i8a8 GEMM 族の**タイル幾何パラメタ化 + 実測最良の既定**
+  （`7b55de5`・`i8a8-geometry.ts`・stats regcache 込み）。**w8a8-1024 壁 13.9 → 11.79s
+  （×1.18）**・f16 経路は無変更（A/B ×0.998）・全門 sha256 不変。実測の正本 =
+  [research/2026-08-10-kernel-variant-sweep.md](../docs/research/2026-08-10-kernel-variant-sweep.md)。
+  **次手候補**: f32/f16 骨格への幾何横展開（成立すれば VAE conv2d 19.1% が対象 — PNG 門で
+  確認が先）/ m 小 linear の別幾何（m=1 ×169 本）/ Metal A/B（r8×8 の spill 懸念）。
 - **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 実装完了（2026-08-09）**:
   1 リポ複数モデル（`defaultModel` 必須）+ 語彙整理（presets → `quants`・variant → `dtype`・
   components → `weights` / `assets` 分離）。**v1 パーサは持たない**。hub v2 パーサ +
@@ -72,10 +80,11 @@
   [research/2026-08-06](../docs/research/2026-08-06-metal-silent-miscompute.md) §3。
   Metal では `gpuTiming` が使えない（dispatch 数がサンプル上限を超える）。
 - **融合 matcher は Anima の実測形への決め打ち**（`[1,H,S,128]` の RoPE、headDim 128/64、
-  upsample2x の 6 ノード列など — exact 一致のみで、掴めなければ素のノード列へ fallback）。
-  **エクスポータのノード発行順や形が変われば黙って外れ、値は正しいまま性能だけ落ちる**
-  （例外も警告も出ない）。`Diagnostics.lastRunFusions` が唯一の観測点なので、性能が戻ったら
-  まずここを見る。
+  upsample2x の 6 ノード列、adaLN の窓 6/7 など — exact 一致のみで、掴めなければ素のノード列へ
+  fallback）。**エクスポータのノード発行順や形が変われば黙って外れ、値は正しいまま性能だけ
+  落ちる**（例外も警告も出ない）。観測点は `Diagnostics.lastRunFusions` と、実配布グラフへの
+  突合門 `packages/runtime/tests/assets_fusion_counts_test.ts`（資産のあるマシンでのみ実走 —
+  性能が戻ったらまずここを見る）。
 - **RoPE / SiLU 融合カーネルの丸め障壁（workgroup memory 往復）は WGSL 仕様の保証ではなく
   実測依存** — バックエンド更新やドライバ更新で PNG 門が割れたら、まずここを疑う。
   upsample2x は u32 ビット複製なので丸めの議論自体が無い。
