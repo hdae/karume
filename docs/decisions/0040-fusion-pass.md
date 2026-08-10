@@ -209,11 +209,16 @@ rope 56×8step + 55 = 503 / silu 2×8 + 28 + 29×9tile = 305 / upsample2x 3×9ti
 identityExpand 112 + 48 = 160。**adaln は 85×8step = 680/predict**（研究ノートの「85」は
 静的な鎖の本数 = DiT の 1 run ぶん）。DiT のステップ列は 2601 → 2346（**−255/run**）。
 
-### 未確定（実 GPU 待ち）
+### 実 GPU での検証結果（2026-08-10 検収・RTX 3080 Ti / Vulkan）
 
-- 丸め障壁が実バックエンドで効いているか（`tests/gpu_adaln_fusion_test.ts` の双子グラフで
-  有限値ビット一致 / NaN 分類を見る）+ PNG sha256 門 4 本。
-- 特に `t · (scale + 1)` の**分配則**（`fma(t, scale, t)`）— `1 + scale` を staging で
-  実体化しているので理屈では起きないが、仕様保証ではないので A/B が判定点。割れた場合は
-  `1 + scale` を畳まない形（素の add を残し binds を 5 in にする）へ退避する。
-- 期待利得（帯域モデルからの逆算で GPU −135ms/8step）の直接 A/B。
+- **丸め障壁は実バックエンドで効いた**: 双子グラフ門（`tests/gpu_adaln_fusion_test.ts` —
+  subnormal・±0・Inf/NaN 行・分配則を誘発する scale を含む敵対的入力）で窓 6 / 7 とも
+  **有限値ビット一致 + NaN 分類一致・4→1 dispatch**。`t · (scale + 1)` の分配則
+  （`fma(t, scale, t)`）も staging で遮断され割れなかったので、**a2（`1 + scale` も畳む形）で
+  確定**（割れた場合の退避先 = `1 + scale` を畳まない 5 in 形、は使わずに済んだ）。
+- PNG sha256 門 4 本とも参照一致・全 740 テスト緑。
+- 直接 A/B（gpuTiming・w8a8-1024・8 step）: 鎖 3 キー計 41.5 → 28.8 ms/step
+  （`layer_norm` キーは消滅・`adaln_norm:v1` が 11.2 ms/step で出現・`ew add r3` は
+  dispatch 2032 → 672）= **GPU −12.7 ms/step ≈ −102 ms/8 step**。帯域モデルの見積り
+  （−135 ms）の 76% — 融合カーネルの実効帯域がモデル仮定（素の 3 op と同じ ≈650 GiB/s）より
+  低めに出たぶんの差で、方向と桁は一致。加えて dispatch −255/predict のホスト費用減。
