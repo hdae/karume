@@ -68,6 +68,7 @@ import {
   attentionQkParams,
   attentionQkWgsl,
   attentionStatsKey,
+  attentionStatsRegCache,
 } from "../src/kernels/attention.ts";
 import {
   ATTENTION_PV_V_SCALE_BINDING,
@@ -485,13 +486,19 @@ Deno.test({
           for (
             const key of [
               attentionQkKey(true, "f32", "f16"),
-              attentionStatsKey("f32", "f16"),
+              attentionStatsKey("f32", "f16", attentionStatsRegCache(n)),
               attentionPvKey(true, "f32", "f16"),
             ]
           ) {
             assertEquals(running.get(key), 1, `${name}: '${key}' が 1 本走っていない`);
           }
-          for (const key of [attentionQkKey(true), attentionStatsKey(), attentionPvKey(true)]) {
+          for (
+            const key of [
+              attentionQkKey(true),
+              attentionStatsKey("f32", "f32", attentionStatsRegCache(n)),
+              attentionPvKey(true),
+            ]
+          ) {
             assertEquals(running.has(key), false, `${name}: f32 格納の '${key}' が残っている`);
           }
         }
@@ -534,7 +541,11 @@ Deno.test({
           for (const key of [...keys]) {
             assertEquals(key.endsWith(":s16"), false, `${name}（${why} 側）: s16 キーが走っている`);
           }
-          assertEquals(keys.has(attentionStatsKey()), true, `${name}: f32 格納の ②行統計`);
+          assertEquals(
+            keys.has(attentionStatsKey("f32", "f32", attentionStatsRegCache(n))),
+            true,
+            `${name}: f32 格納の ②行統計`,
+          );
         }
       }
     } finally {
@@ -617,13 +628,16 @@ Deno.test({
         assertEquals(byKey.get(attentionQkI8a8Key(true, true, "f16")), 1);
         assertEquals(byKey.get(attentionPvI8a8Key(true, true, "f16")), 1);
         // ②行統計は f32 計算のまま s16 を読む
-        assertEquals(byKey.get(attentionStatsKey("f32", "f16")), 1);
+        assertEquals(
+          byKey.get(attentionStatsKey("f32", "f16", attentionStatsRegCache(shape.n))),
+          1,
+        );
         // f32 格納の変種は 1 本も残らない
         for (
           const key of [
             attentionQkI8a8Key(true, true),
             attentionPvI8a8Key(true, true),
-            attentionStatsKey(),
+            attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n)),
           ]
         ) {
           assertEquals(byKey.has(key), false, `f32 格納の '${key}' が残っている`);

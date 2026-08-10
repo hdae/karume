@@ -14,9 +14,9 @@
  * 本カーネルの縮約は `i32` の厳密加算（順序非依存）なので、その MUST が守ろうとしている
  * 性質は最初から成立している。共有 A/B タイルの要素型（`u32` の 4 詰め）・充填の割り当て・
  * 内積の形（`dot4I8Packed` の 4 要素まとめ）が f32 骨格と別物になるため、断片差し込みでは
- * かえって両方の可読性を落とす。**タイル幾何（64×64 出力 / 16×16 スレッド / 1 スレッド 4×4 /
- * K タイル 16）と `store` のガード構造は gemm.ts と揃える**（{@link GEMM_TILE} /
- * {@link GEMM_WORKGROUP} を輸入して定数の正本を 1 箇所に保つ）。
+ * かえって両方の可読性を落とす。**タイル幾何は f32 骨格から独立**（{@link
+ * "./i8a8-geometry.ts"}）で、整数縮約が順序非依存だからこそ実測で選べる自由度になっている
+ * — 幾何の算術と内積ループの正本は i8a8 側で 1 箇所（同ファイル）に保つ。
  *
  * ## 数値契約（本経路の核）
  *
@@ -46,13 +46,24 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { gemmParams, LINEAR_SCALE_BINDING } from "./gemm.ts";
 import {
-  GEMM_TILE,
-  GEMM_WORKGROUP,
-  gemmKeyPart,
-  gemmParams,
-  LINEAR_SCALE_BINDING,
-} from "./gemm.ts";
+  assertI8a8Geometry,
+  defaultI8a8Geometry,
+  I8A8_PACK,
+  i8a8AccumulatorInit,
+  i8a8ASlots,
+  i8a8BSlots,
+  i8a8FillStride,
+  type I8a8Geometry,
+  i8a8GeometryKeyPart,
+  i8a8GeometryNote,
+  i8a8InnerProductLoop,
+  i8a8KPacks,
+  i8a8Threads,
+  i8a8TileM,
+  i8a8TileN,
+} from "./i8a8-geometry.ts";
 
 export { LINEAR_SCALE_BINDING } from "./gemm.ts";
 
@@ -87,19 +98,17 @@ export const dp4aAvailable = (wgslLanguageFeatures: ReadonlySet<string>): boolea
  * ここは n だけを見る（f32 骨格の {@link gemmUsesVec4} が k と n の両方を見るのと対照的 —
  * i8a8 では k 条件が必須で、n 条件はスカラ書き出し変種へ落ちるだけ）。
  */
-export const linearI8a8UsesVec4 = (n: number): boolean => n % 4 === 0;
+export const linearI8a8UsesVec4 = (n: number): boolean => n % I8A8_PACK === 0;
 
-/** 1 スレッドが持つ出力の一辺。 */
-const REG = 4;
-/** workgroup の一辺（16×16 = 256 スレッド）。 */
-const WG = GEMM_WORKGROUP;
-/** K タイル幅（16 要素 = 4 パック）。 */
-const TILE_K = 16;
-/** K タイルあたりのパック数。A / W 充填のスレッド割当に使う。 */
-const K_PACKS = TILE_K / REG;
-
-export const linearI8a8Key = (v4: boolean, dp4a: boolean): string =>
-  `linear:v3:i8a8:${gemmKeyPart(v4)}:${dp4a ? "dp4a" : "dp4aEmu"}`;
+/**
+ * パイプラインキー。幾何がパラメタになったので**タイル辺だけでは生成物が決まらない**
+ * （{@link i8a8GeometryKeyPart}）— 世代を `v4` へ上げ、幾何判別子を丸ごと載せる。
+ */
+export const linearI8a8Key = (
+  v4: boolean,
+  dp4a: boolean,
+  geometry: I8a8Geometry = defaultI8a8Geometry("linear"),
+): string => `linear:v4:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}`;
 
 /**
  * 整数内積の 2 変種。**返す整数は完全に同じ**で、違いは速度だけ（上の docstring）。
@@ -120,91 +129,149 @@ fn idot(a: u32, b: u32) -> i32 {
   return dot(unpack4xI8(a), unpack4xI8(b));
 }`;
 
+/** 添字の加算オフセット（0 は省く — 生成物を読める形に保つ）。 */
+const at = (offset: number): string => offset === 0 ? "" : ` + ${offset}u`;
+
 /**
- * 出力の書き出し。行ループは codegen 時に展開して {@link accumulatorInit} の `acc0..acc3` を
- * 静的に読む（`acc[i]` の動的添字を残さないための展開 — 理由は同関数の docstring）。
- * ガードの構造・`fma` の単一丸め・`xs·wscale` の畳み順は展開前と同一。
+ * x タイルの担当（K タイルループ不変な行番号と行頭オフセット）。1 スレッドが
+ * {@link i8a8ASlots} 本を充填ストライド刻みで受け持つ。
  */
-const store = (v4: boolean): string => {
-  const rows = `  let orow0 = wid.y * ${GEMM_TILE}u + lid.y * ${REG}u;`;
-  // 2 行目以降の行番号は展開時に確定するので、その場で let に落とす（0 行目は上の rows）
-  const rowDecl = (i: number, indent: string): string =>
-    i === 0 ? "" : `${indent}let orow${i} = orow0 + ${i}u;\n`;
+const prologueA = (geometry: I8a8Geometry): string => {
+  const tileM = i8a8TileM(geometry);
+  const stride = i8a8FillStride(geometry);
+  const slots = Array.from(
+    { length: i8a8ASlots(geometry) },
+    (_, slot) =>
+      `  let arow${slot} = ${slot === 0 ? `wid.y * ${tileM}u + ar` : `arow0 + ${slot * stride}u`};
+  let arow_base${slot} = arow${slot} * k4;`,
+  ).join("\n");
+  return `  // x タイルの担当（${tileM} 行 × ${i8a8KPacks(geometry)} pack を ${
+    i8a8Threads(geometry)
+  } スレッドで ${i8a8ASlots(geometry)} 巡）
+  let ar = tid / ${i8a8KPacks(geometry)}u;
+  let ap = tid % ${i8a8KPacks(geometry)}u;
+  let sa_at = ap * ${tileM}u + ar;
+${slots}`;
+};
+
+/** W タイルの担当。重みは `[n,k]` のまま読む（連続方向が k = パック方向なので転置が要らない）。 */
+const prologueB = (geometry: I8a8Geometry): string => {
+  const tileN = i8a8TileN(geometry);
+  const stride = i8a8FillStride(geometry);
+  const slots = Array.from(
+    { length: i8a8BSlots(geometry) },
+    (_, slot) =>
+      `  let wcol${slot} = ${slot === 0 ? `wid.x * ${tileN}u + wc` : `wcol0 + ${slot * stride}u`};
+  let wrow_base${slot} = wcol${slot} * k4;`,
+  ).join("\n");
+  return `  // W タイルの担当（${tileN} 出力チャネル × ${i8a8KPacks(geometry)} pack を ${
+    i8a8Threads(geometry)
+  } スレッドで ${i8a8BSlots(geometry)} 巡）。
+  // 重みは [n,k] のまま読む（連続方向が k = パック方向なので**転置が要らない**）
+  let wc = tid / ${i8a8KPacks(geometry)}u;
+  let wp = tid % ${i8a8KPacks(geometry)}u;
+  let sb_at = wp * ${tileN}u + wc;
+${slots}`;
+};
+
+/** 共有タイルの充填（範囲外は 0 埋め — `idot(0, x) == 0` なので K 端数でも厳密）。 */
+const fillTiles = (geometry: I8a8Geometry): string => {
+  const kPacks = i8a8KPacks(geometry);
+  const stride = i8a8FillStride(geometry);
+  const a = Array.from({ length: i8a8ASlots(geometry) }, (_, slot) =>
+    `    var av${slot} = 0u;
+    if (arow${slot} < dims.m && apack < k4) {
+      av${slot} = xq[arow_base${slot} + apack];
+    }
+    sa[sa_at${at(slot * stride)}] = av${slot};`).join("\n");
+  const b = Array.from({ length: i8a8BSlots(geometry) }, (_, slot) =>
+    `    var wv${slot} = 0u;
+    if (wcol${slot} < dims.n && wpack < k4) {
+      wv${slot} = w[wrow_base${slot} + wpack];
+    }
+    sb[sb_at${at(slot * stride)}] = wv${slot};`).join("\n");
+  return `    // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
+    let apack = t * ${kPacks}u + ap;
+${a}
+    let wpack = t * ${kPacks}u + wp;
+${b}`;
+};
+
+/**
+ * 出力の書き出し。行・列 quad とも codegen 時に展開して `acc{行}_{列 quad}` を静的に読む
+ * （`acc[i]` の動的添字を残さないための展開 — 理由は {@link i8a8AccumulatorInit}）。
+ * ガードの構造・`fma` の単一丸め・`xs·wscale` の畳み順は幾何に依らず同一。
+ */
+const store = (geometry: I8a8Geometry, v4: boolean): string => {
+  const { regM, regN } = geometry;
+  const quads = regN / I8A8_PACK;
+  const rows = Array.from(
+    { length: regM },
+    (_, row) =>
+      row === 0
+        ? `  let orow0 = wid.y * ${i8a8TileM(geometry)}u + lid.y * ${regM}u;`
+        : `  let orow${row} = orow0 + ${row}u;`,
+  ).join("\n");
   if (v4) {
-    const rowStores = Array.from(
-      { length: REG },
-      (_, i) =>
-        `${rowDecl(i, "    ")}    if (orow${i} < dims.m) {
-      out[orow${i} * n4 + ocq] = fma(vec4<f32>(acc${i}), xscale[orow${i}] * ws, biasv);
-    }`,
+    const quadDecls = Array.from(
+      { length: quads },
+      (_, quad) =>
+        quad === 0
+          ? `  let ocq0 = wid.x * ${i8a8TileN(geometry) / I8A8_PACK}u + lid.x * ${quads}u;`
+          : `  let ocq${quad} = ocq0 + ${quad}u;`,
     ).join("\n");
-    return `  let n4 = dims.n / ${REG}u;
-  let ocq = wid.x * ${WG}u + lid.x;
-${rows}
-  if (ocq < n4) {
-    // n % ${REG} == 0 かつ ocq < n4 なので oc + ${REG - 1} < n（bias は常に f32 — ADR 0006）
-    let oc = ocq * ${REG}u;
+    const blocks = Array.from({ length: quads }, (_, quad) => {
+      const rowStores = Array.from({ length: regM }, (_, row) =>
+        `    if (orow${row} < dims.m) {
+      out[orow${row} * n4 + ocq${quad}] = fma(vec4<f32>(acc${row}_${quad}), xscale[orow${row}] * ws, biasv);
+    }`).join("\n");
+      return `  if (ocq${quad} < n4) {
+    // n % ${I8A8_PACK} == 0 かつ ocq${quad} < n4 なので oc + ${
+        I8A8_PACK - 1
+      } < n（bias は常に f32 — ADR 0006）
+    let oc = ocq${quad} * ${I8A8_PACK}u;
     let ws = vec4<f32>(wscale[oc], wscale[oc + 1u], wscale[oc + 2u], wscale[oc + 3u]);
     let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);
     // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
 ${rowStores}
   }`;
+    }).join("\n");
+    return `  let n4 = dims.n / ${I8A8_PACK}u;
+${quadDecls}
+${rows}
+${blocks}`;
   }
-  const write = (i: number, component: string, offset: string): string =>
-    `out[obase + ocol${offset}] = fma(f32(acc${i}.${component}), xs * wscale[ocol${offset}], bias[ocol${offset}]);`;
-  const rowStores = Array.from(
-    { length: REG },
-    (_, i) =>
-      `${rowDecl(i, "  ")}  if (orow${i} < dims.m) {
-    let obase = orow${i} * dims.n;
+  const lanes = ["x", "y", "z", "w"] as const;
+  const rowStores = Array.from({ length: regM }, (_, row) => {
+    const writes = Array.from({ length: regN }, (_, col) => {
+      const offset = at(col);
+      const acc = `acc${row}_${Math.floor(col / I8A8_PACK)}.${lanes[col % I8A8_PACK]}`;
+      return `    if (ocol${offset} < dims.n) {
+      out[obase + ocol${offset}] = fma(f32(${acc}), xs * wscale[ocol${offset}], bias[ocol${offset}]);
+    }`;
+    }).join("\n");
+    return `  if (orow${row} < dims.m) {
+    let obase = orow${row} * dims.n;
     // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
-    let xs = xscale[orow${i}];
-    if (ocol < dims.n) {
-      ${write(i, "x", "")}
-    }
-    if (ocol + 1u < dims.n) {
-      ${write(i, "y", " + 1u")}
-    }
-    if (ocol + 2u < dims.n) {
-      ${write(i, "z", " + 2u")}
-    }
-    if (ocol + 3u < dims.n) {
-      ${write(i, "w", " + 3u")}
-    }
-  }`,
-  ).join("\n");
-  return `  let ocol = wid.x * ${GEMM_TILE}u + lid.x * ${REG}u;
+    let xs = xscale[orow${row}];
+${writes}
+  }`;
+  }).join("\n");
+  return `  let ocol = wid.x * ${i8a8TileN(geometry)}u + lid.x * ${regN}u;
 ${rows}
 ${rowStores}`;
 };
 
-/**
- * i32 accumulator の初期化。**配列 1 本ではなく `acc0..acc3` の名前付き変数**にするのは、
- * `acc[i]` の動的添字がアドレス可能な関数ローカル領域を要求し、レジスタに載らずローカル
- * メモリへ落ちるため（Metal で顕著）。展開しても縮約は i32 の厳密加算のまま・行ごとに
- * 独立なので、**返る整数は 1 ビットも変わらない**（実測でも M2 / RTX 3080 Ti の代表 6 形状が
- * 全て bit 一致し、node 重み付きのカーネル時間は M2 で 1.175 倍・RTX で 1.429 倍）。
- */
-const accumulatorInit = (): string =>
-  Array.from({ length: REG }, (_, i) => `  var acc${i} = vec4<i32>(0);`).join("\n");
-
-/**
- * K パック内側の 4 行更新。{@link accumulatorInit} と対で展開する。
- * 1 出力あたりの加算順序（kk 昇順・パック内 4 語まとめ）は展開前と同一。
- */
-const accumulatorUpdate = (): string =>
-  Array.from(
-    { length: REG },
-    (_, i) =>
-      `      let a${i} = sa[p * ${GEMM_TILE}u + lid.y * ${REG}u + ${i}u];
-      acc${i} = acc${i} + vec4<i32>(idot(a${i}, b0), idot(a${i}, b1), idot(a${i}, b2), idot(a${i}, b3));`,
-  )
-    .join("\n");
-
-export const linearI8a8Wgsl = (v4: boolean, dp4a: boolean): string =>
-  `// karume linear (x[m,k] · wᵀ[k,n] + bias[n], 活性 per-token i8 × 重み i8 の整数内積${
+export const linearI8a8Wgsl = (
+  v4: boolean,
+  dp4a: boolean,
+  geometry: I8a8Geometry = defaultI8a8Geometry("linear"),
+): string => {
+  assertI8a8Geometry(geometry, "linear i8a8");
+  const kPacks = i8a8KPacks(geometry);
+  return `// karume linear (x[m,k] · wᵀ[k,n] + bias[n], 活性 per-token i8 × 重み i8 の整数内積${
     dp4a ? "" : "・エミュ"
-  }, レジスタ ${GEMM_TILE}x${GEMM_TILE} タイル${v4 ? " + vec4" : ""})
+  }, ${i8a8GeometryNote(geometry)}${v4 ? " + vec4" : ""})
 struct Dims {
   m: u32,
   n: u32,
@@ -221,67 +288,34 @@ struct Dims {
 ${i8a8IdotWgsl(dp4a)}
 
 // 共有タイルは **[pack][行] / [pack][列]** 配置（プロトタイプの [行][pack] からの組み替え —
-// 内側の読みが語ストライド ${REG} になりバンク衝突が 8-way から 2-way に減る）
-var<workgroup> sa: array<u32, ${K_PACKS * GEMM_TILE}>;
-var<workgroup> sb: array<u32, ${K_PACKS * GEMM_TILE}>;
+// 内側の読みが語ストライド ${I8A8_PACK} になりバンク衝突が 8-way から 2-way に減る）
+var<workgroup> sa: array<u32, ${kPacks * i8a8TileM(geometry)}>;
+var<workgroup> sb: array<u32, ${kPacks * i8a8TileN(geometry)}>;
 
-@compute @workgroup_size(${WG}, ${WG})
+@compute @workgroup_size(${geometry.wgX}, ${geometry.wgY})
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
-  let tid = lid.y * ${WG}u + lid.x;
+  let tid = lid.y * ${geometry.wgX}u + lid.x;
   // 適格条件で k % 4 == 0 なので、行頭は必ず語境界に来る（i8 ペイロードは平坦添字 4 詰め）
-  let k4 = dims.k / ${REG}u;
-  // x タイルの担当（${GEMM_TILE} 行 × ${K_PACKS} pack = ${GEMM_TILE * K_PACKS} スレッド）
-  let ar = tid / ${K_PACKS}u;
-  let ap = tid % ${K_PACKS}u;
-  let arow = wid.y * ${GEMM_TILE}u + ar;
-  let arow_base = arow * k4;
-  // W タイルの担当（${GEMM_TILE} 出力チャネル × ${K_PACKS} pack = ${
-    GEMM_TILE * K_PACKS
-  } スレッド）。
-  // 重みは [n,k] のまま読む（連続方向が k = パック方向なので**転置が要らない**）
-  let wc = tid / ${K_PACKS}u;
-  let wp = tid % ${K_PACKS}u;
-  let wcol = wid.x * ${GEMM_TILE}u + wc;
-  let wrow_base = wcol * k4;
+  let k4 = dims.k / ${I8A8_PACK}u;
+${prologueA(geometry)}
+${prologueB(geometry)}
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
-  let tiles = (k4 + ${K_PACKS - 1}u) / ${K_PACKS}u;
-${accumulatorInit()}
+  let tiles = (k4 + ${kPacks - 1}u) / ${kPacks}u;
+${i8a8AccumulatorInit(geometry)}
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
-    let apack = t * ${K_PACKS}u + ap;
-    var av = 0u;
-    if (arow < dims.m && apack < k4) {
-      av = xq[arow_base + apack];
-    }
-    sa[ap * ${GEMM_TILE}u + ar] = av;
-    let wpack = t * ${K_PACKS}u + wp;
-    var wv = 0u;
-    if (wcol < dims.n && wpack < k4) {
-      wv = w[wrow_base + wpack];
-    }
-    sb[wp * ${GEMM_TILE}u + wc] = wv;
+${fillTiles(geometry)}
     workgroupBarrier();
-    // 共有ロード 5 回（W の 4 語 + x の 1 語）で ${REG * REG} 個の整数内積 = ${
-    REG * REG * REG
-  } MAC。
-    // 縮約は i32 の厳密加算なので**順序に依存しない**（f32 骨格と違い加算順は数値契約に無い）
-    for (var p = 0u; p < ${K_PACKS}u; p = p + 1u) {
-      let bcol = p * ${GEMM_TILE}u + lid.x * ${REG}u;
-      let b0 = sb[bcol];
-      let b1 = sb[bcol + 1u];
-      let b2 = sb[bcol + 2u];
-      let b3 = sb[bcol + 3u];
-${accumulatorUpdate()}
-    }
+${i8a8InnerProductLoop(geometry)}
     workgroupBarrier();
   }
-${store(v4)}
+${store(geometry, v4)}
 }
 `;
+};
 
 /** uniform の Dims（`{m,n,k}` — f32 骨格と同じ 3 語 + 16 バイト整列）。 */
 export const linearI8a8Params = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> => {

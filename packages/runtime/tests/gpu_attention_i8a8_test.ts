@@ -48,7 +48,12 @@ import {
   attentionQkI8a8UsesVec4,
   attentionQkI8a8Wgsl,
 } from "../src/kernels/attention-i8a8.ts";
-import { attentionPvKey, attentionQkKey, attentionStatsKey } from "../src/kernels/attention.ts";
+import {
+  attentionPvKey,
+  attentionQkKey,
+  attentionStatsKey,
+  attentionStatsRegCache,
+} from "../src/kernels/attention.ts";
 import { quantizeRowsTieMargin, referenceAttentionQkI8a8 } from "../src/reference/i8a8.ts";
 import {
   createSession,
@@ -475,8 +480,13 @@ Deno.test({
         assertEquals(byKey.get(attentionQkI8a8Key(attentionQkI8a8UsesVec4(shape.n), true)), 1);
         assertEquals(byKey.has(attentionQkKey(true)), false, "f32 の attention_qk が残っている");
         assertEquals(byKey.has(attentionQkKey(false)), false, "f32 の attention_qk が残っている");
-        // ②行統計は f32 のまま（S の格納形も f32 のまま — 設計 §4.3 の分母量子化は不採用）
-        assertEquals(byKey.get(attentionStatsKey()), 1, "②行統計は f32 のまま");
+        // ②行統計は f32 のまま（S の格納形も f32 のまま — 設計 §4.3 の分母量子化は不採用）。
+        // regcache（S 1 回読み）は dim 依存の生成なので epc がキーに載る（値はビット同一）
+        assertEquals(
+          byKey.get(attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n))),
+          1,
+          "②行統計は f32 のまま",
+        );
         // ③PV も i8a8 へ移っている（N=68 % 4 == 0 で適格 — 経路と本数の検査は
         // tests/gpu_attention_pv_i8a8_test.ts が持つ）
         for (const v4 of [false, true]) {

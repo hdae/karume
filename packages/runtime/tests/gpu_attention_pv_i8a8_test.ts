@@ -59,7 +59,12 @@ import {
   attentionQkI8a8Key,
   attentionQkI8a8UsesVec4,
 } from "../src/kernels/attention-i8a8.ts";
-import { attentionPvKey, attentionQkKey, attentionStatsKey } from "../src/kernels/attention.ts";
+import {
+  attentionPvKey,
+  attentionQkKey,
+  attentionStatsKey,
+  attentionStatsRegCache,
+} from "../src/kernels/attention.ts";
 import {
   quantizeRowsReference,
   quantizeRowsTieMargin,
@@ -698,8 +703,13 @@ Deno.test({
           assertEquals(byKey.has(attentionQkKey(v4)), false, "f32 の attention_qk が残っている");
           assertEquals(byKey.has(attentionPvKey(v4)), false, "f32 の attention_pv が残っている");
         }
-        // ②行統計は f32 のまま（S の格納形も f32 のまま — 設計 §4.3 の分母量子化は不採用）
-        assertEquals(byKey.get(attentionStatsKey()), 1, "②行統計は f32 のまま");
+        // ②行統計は f32 のまま（S の格納形も f32 のまま — 設計 §4.3 の分母量子化は不採用）。
+        // regcache（S 1 回読み）は dim 依存の生成なので epc がキーに載る（値はビット同一）
+        assertEquals(
+          byKey.get(attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n))),
+          1,
+          "②行統計は f32 のまま",
+        );
         // 量子化は q / k / Vᵀ の 3 本、permute は Vᵀ の 1 本（ノード全体で 7 dispatch）
         assertEquals(byKey.get(QUANTIZE_ROWS_KEY), 3, "quantize_rows が q / k / v の 3 本でない");
         assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");

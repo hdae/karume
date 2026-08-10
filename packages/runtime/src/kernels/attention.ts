@@ -68,13 +68,36 @@ export const attentionPvKey = (
 ): string =>
   `attention_pv:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}`;
 
+/**
+ * ② の **regcache 変種**（S を 1 回だけ読んでレジスタに残す）が受け持てる 1 スレッドあたりの
+ * 要素数の上限。self（dim = 4096）は 16・cross（dim = 512）は 2 で、実測は ×1.672 / ×1.115
+ * （docs/research/2026-08-10-kernel-variant-sweep.md §3.1）。
+ *
+ * 上限を置くのは、`epc` がそのままレジスタ本数になるから — dim が大きい形（32k のような
+ * 長系列）で青天井にすると spill してレジスタ保持の意味が消える。超えた形は**現行の
+ * 2 回読みループへ落ちる**（値はどちらもビット同一なので、これは速度変種の選択であって
+ * 近似ではない）。
+ */
+export const ATTENTION_STATS_REG_CACHE_MAX = 32;
+
+/**
+ * dim から regcache 変種の 1 スレッドあたり要素数を決める**唯一の純関数**
+ * （`undefined` = 2 回読みループのまま）。executor はこれをキーと WGSL の両方へ渡すので、
+ * 「生成された `epc` と実際の dim が食い違う」状態が構造的に起こらない。
+ */
+export const attentionStatsRegCache = (dim: number): number | undefined => {
+  const perThread = Math.ceil(dim / ATTENTION_STATS_WORKGROUP_SIZE);
+  return perThread <= ATTENTION_STATS_REG_CACHE_MAX ? perThread : undefined;
+};
+
 export const attentionStatsKey = (
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
+  regCache?: number,
 ): string =>
   `attention_stats:v1:f32:lastdim:safe:wg${ATTENTION_STATS_WORKGROUP_SIZE}${
     gemmComputeKeyPart(compute)
-  }${scoreKeyPart(score)}`;
+  }${scoreKeyPart(score)}${regCache === undefined ? "" : `:rc${regCache}`}`;
 
 /** f32 変種のキー（既存の呼び出し面 — 正本は {@link attentionStatsKey}）。 */
 export const ATTENTION_STATS_KEY = attentionStatsKey();
@@ -106,6 +129,7 @@ const F32_MAX = "3.402823466e38";
 export const attentionStatsWgsl = (
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
+  regCache?: number,
 ): string => {
   const f16 = compute === "f16";
   // ② は S を**読むだけ**なので v4 の制約（書き側の RMW）は掛からない — 見るのは
@@ -115,9 +139,50 @@ export const attentionStatsWgsl = (
   // **ビット単位で同じ** m / inv が出る）。f16 のまま max / exp を取ると縮約の丸め列が
   // 変わり、ADR 0023 の「② は softmax のパス①② と逐語一致」が崩れる。
   const read = (index: string): string => f16 ? `f32(s[${index}])` : scoreReadAt("s", score, index);
+  // regcache 変種は「要素 → スレッドの割当」も「縮約の順序」も 2 回読み版と**完全に同一**で、
+  // 違いは S を 2 度読むか 1 度読んでレジスタに残すかだけ（範囲外はどちらの段でも触らない）。
+  // したがって m / inv は 1 ビットも動かない — ADR 0023 のビット同一の根拠 3 を壊さない。
+  const slots = regCache === undefined ? [] : Array.from({ length: regCache }, (_, at) => at);
+  const indexPrologue = regCache === undefined ? "" : `${
+    slots
+      .map((at) =>
+        `  let i${at} = lid${at === 0 ? "" : ` + ${at * ATTENTION_STATS_WORKGROUP_SIZE}u`};`
+      )
+      .join("\n")
+  }\n`;
+  const maxPass = regCache === undefined
+    ? `    var i = lid;
+    while (i < dim) {
+      hi = max(hi, ${read("base + i")});
+      i = i + ${ATTENTION_STATS_WORKGROUP_SIZE}u;
+    }`
+    : slots
+      .map((at) =>
+        `    var c${at} = 0.0;
+    if (i${at} < dim) {
+      c${at} = ${read(`base + i${at}`)};
+      hi = max(hi, c${at});
+    }`
+      )
+      .join("\n");
+  const sumPass = regCache === undefined
+    ? `    var j = lid;
+    while (j < dim) {
+      acc = acc + exp(${read("base + j")} - amax);
+      j = j + ${ATTENTION_STATS_WORKGROUP_SIZE}u;
+    }`
+    : slots
+      .map((at) =>
+        `    if (i${at} < dim) {
+      acc = acc + exp(c${at} - amax);
+    }`
+      )
+      .join("\n");
   return `// karume attention_stats (行ごとの m = amax(S) と inv = 1/Σexp(S - m), f32${
     f16 ? ", S は f16 格納" : ""
-  }${scoreNote(score)})${f16 ? "\nenable f16;" : ""}
+  }${scoreNote(score)}${
+    regCache === undefined ? "" : `, S は 1 回読みでレジスタ保持（1 スレッド ${regCache} 要素）`
+  })${f16 ? "\nenable f16;" : ""}
 struct Params {
   rows: u32,
   dim: u32,
@@ -136,17 +201,13 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
-  var row = wid.x;
+${indexPrologue}  var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
 
     // ① 行の最大値（safe-softmax の減算項）
     var hi = -${F32_MAX};
-    var i = lid;
-    while (i < dim) {
-      hi = max(hi, ${read("base + i")});
-      i = i + ${ATTENTION_STATS_WORKGROUP_SIZE}u;
-    }
+${maxPass}
     scratch[lid] = hi;
     workgroupBarrier();
     var stride = ${ATTENTION_STATS_WORKGROUP_SIZE / 2}u;
@@ -163,11 +224,7 @@ fn main(
 
     // ② Σ exp(S - amax)（最大要素が exp(0) = 1 を出すので分母は必ず 1 以上）
     var acc = 0.0;
-    var j = lid;
-    while (j < dim) {
-      acc = acc + exp(${read("base + j")} - amax);
-      j = j + ${ATTENTION_STATS_WORKGROUP_SIZE}u;
-    }
+${sumPass}
     scratch[lid] = acc;
     workgroupBarrier();
     var stride2 = ${ATTENTION_STATS_WORKGROUP_SIZE / 2}u;

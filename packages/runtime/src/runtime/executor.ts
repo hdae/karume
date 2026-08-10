@@ -119,8 +119,10 @@ import {
   attentionQkWgsl,
   attentionStatsKey,
   attentionStatsParams,
+  attentionStatsRegCache,
   attentionStatsWgsl,
 } from "../kernels/attention.ts";
+import { defaultI8a8Geometry, i8a8TileM, i8a8TileN } from "../kernels/i8a8-geometry.ts";
 import {
   ATTENTION_PV_V_SCALE_BINDING,
   ATTENTION_QK_K_SCALE_BINDING,
@@ -1622,12 +1624,14 @@ export class Session {
       1,
     ], QUANTIZE_ROWS_KEY);
 
-    // ② 整数内積の GEMM
+    // ② 整数内積の GEMM。タイル幾何は op → 幾何の純関数が決める（src/kernels/i8a8-geometry.ts）
+    // — キーに載るので「同一キー → バイト同一 WGSL」は保たれる。
     const v4 = linearI8a8UsesVec4(n);
-    const key = linearI8a8Key(v4, this.#state.i8a8Dot === "dp4a");
+    const geometry = defaultI8a8Geometry("linear");
+    const key = linearI8a8Key(v4, this.#state.i8a8Dot === "dp4a", geometry);
     const pipeline = await this.#state.cache.get(
       key,
-      linearI8a8Wgsl(v4, this.#state.i8a8Dot === "dp4a"),
+      linearI8a8Wgsl(v4, this.#state.i8a8Dot === "dp4a", geometry),
     );
     const params = this.#writeParams(arena, linearI8a8Params(m, n, k), PARAMS_UNIFORM_USAGE);
     const bindGroup = device.createBindGroup({
@@ -1643,8 +1647,8 @@ export class Session {
       ],
     });
     this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, GEMM_TILE, limit, where),
-      tiledWorkgroups(m, GEMM_TILE, limit, where),
+      tiledWorkgroups(n, i8a8TileN(geometry), limit, where),
+      tiledWorkgroups(m, i8a8TileM(geometry), limit, where),
       1,
     ], key);
 
@@ -1854,10 +1858,13 @@ export class Session {
     }
 
     // ② 行統計 — 1 行 = 1 workgroup で、行方向は grid-stride（softmax と同じ形）。
-    const statsKey = attentionStatsKey(compute, scoreStorage);
+    // S を 1 回だけ読む regcache 変種は dim 依存の生成なので、`epc` がキー軸に増える
+    // （値はどちらもビット同一 — src/kernels/attention.ts）。
+    const statsRegCache = attentionStatsRegCache(cols);
+    const statsKey = attentionStatsKey(compute, scoreStorage, statsRegCache);
     const statsPipeline = await this.#state.cache.get(
       statsKey,
-      attentionStatsWgsl(compute, scoreStorage),
+      attentionStatsWgsl(compute, scoreStorage, statsRegCache),
     );
     const statsParams = this.#writeParams(
       arena,
@@ -2006,11 +2013,16 @@ export class Session {
     quantize(inputs[0], qq, qs, batch * rows);
     quantize(inputs[1], kq, ks, batch * cols);
 
-    // (c) 整数内積の GEMM（半スケールは dequant 側で q / k の両方へ — 設計 §2.1）
+    // (c) 整数内積の GEMM（半スケールは dequant 側で q / k の両方へ — 設計 §2.1）。
+    // 幾何は ③PV と**別に**選ぶ（③ だけ N = D の 1 タイル化が勝つ — 実測）。
     const v4 = attentionQkI8a8UsesVec4(cols);
     const dp4a = this.#state.i8a8Dot === "dp4a";
-    const key = attentionQkI8a8Key(v4, dp4a, scoreStorage);
-    const pipeline = await this.#state.cache.get(key, attentionQkI8a8Wgsl(v4, dp4a, scoreStorage));
+    const geometry = defaultI8a8Geometry("attention_qk");
+    const key = attentionQkI8a8Key(v4, dp4a, scoreStorage, geometry);
+    const pipeline = await this.#state.cache.get(
+      key,
+      attentionQkI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
+    );
     const params = this.#writeParams(
       arena,
       attentionQkI8a8Params(rows, cols, depth, scale),
@@ -2028,8 +2040,8 @@ export class Session {
       ],
     });
     this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(cols, GEMM_TILE, limit, `${where} ①QK i8a8`),
-      tiledWorkgroups(rows, GEMM_TILE, limit, `${where} ①QK i8a8`),
+      tiledWorkgroups(cols, i8a8TileN(geometry), limit, `${where} ①QK i8a8`),
+      tiledWorkgroups(rows, i8a8TileM(geometry), limit, `${where} ①QK i8a8`),
       tiledWorkgroups(batch, 1, limit, `${where} ①QK i8a8`),
     ], key);
 
@@ -2147,8 +2159,12 @@ export class Session {
     // (c) 整数内積の GEMM（P̃ は A タイル充填で作る = 非実体化のまま）
     const v4 = attentionPvI8a8UsesVec4(depth);
     const dp4a = this.#state.i8a8Dot === "dp4a";
-    const key = attentionPvI8a8Key(v4, dp4a, scoreStorage);
-    const pipeline = await this.#state.cache.get(key, attentionPvI8a8Wgsl(v4, dp4a, scoreStorage));
+    const geometry = defaultI8a8Geometry("attention_pv");
+    const key = attentionPvI8a8Key(v4, dp4a, scoreStorage, geometry);
+    const pipeline = await this.#state.cache.get(
+      key,
+      attentionPvI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
+    );
     const params = this.#writeParams(
       arena,
       attentionPvI8a8Params(rows, depth, cols),
@@ -2166,8 +2182,8 @@ export class Session {
       ],
     });
     this.#state.scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(depth, GEMM_TILE, limit, `${where} ③PV i8a8`),
-      tiledWorkgroups(rows, GEMM_TILE, limit, `${where} ③PV i8a8`),
+      tiledWorkgroups(depth, i8a8TileN(geometry), limit, `${where} ③PV i8a8`),
+      tiledWorkgroups(rows, i8a8TileM(geometry), limit, `${where} ③PV i8a8`),
       tiledWorkgroups(batch, 1, limit, `${where} ③PV i8a8`),
     ], key);
 
