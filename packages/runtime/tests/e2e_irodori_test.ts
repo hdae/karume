@@ -1,4 +1,5 @@
-// 実重み Irodori-TTS v4-Small の**テキスト条件エンコーダ**の実 GPU golden E2E（ADR 0005 の段 3）。
+// 実重み Irodori-TTS v4-Small の**条件エンコーダ + DiT 1 step**の実 GPU golden E2E
+// （ADR 0005 の段 3）。
 //
 // tiny golden（tests/e2e_golden_test.ts）が「op 契約の被覆」を、実重み SBV2
 // （tests/e2e_sbv2_test.ts）が「音響チェーン側の実重み」を、EmbeddingGemma
@@ -8,13 +9,18 @@
 // リポジトリ管理外 — `.gitignore` の `outputs/`）。生成は `tools/exporter/export_irodori.py`
 // （コマンドは下の GENERATE_COMMAND がそのまま正本）。
 //
-// ターゲットは 5 本（recon の G1 / G1a / G1b / G2 / G3）:
+// ターゲットは 6 本（recon の G1 / G1a / G1b / G2 / G3 と、ADR 0047 の G5'）:
 //
 // - `backbone`     — 同梱 ModernBERT-ja-310m（25 層）。`[1,T]` ids → `[1,T,768]`
 // - `text-proj`    — text 側 projector。`[1,T,768]` → `[1,T,512]`
 // - `caption-proj` — caption 側 projector（同形・別重み）
 // - `speaker`      — 参照 latent エンコーダ（8 層）+ `speaker_norm`。`[1,S,128]` → `[1,S,768]`
 // - `duration`     — `text_norm` + duration predictor。`[1,T,512]` ほか 4 本 → `[1]`
+// - `dit`          — DiT 1 step（12 層・G4 畳み込み形）。6 本 → `[1,S,32]`
+//
+// `dit` だけは**実行時 bool マスク**（`[1,1,1,S+1519]`）を入力に取り、SDPA を分解経路 +
+// `safe_softmax`（ADR 0044）で通す。K/V の連結軸が記号次元になる形（ADR 0046 の `S+1519`）を
+// 実資産で踏む唯一のターゲットでもある。
 //
 // backbone を projector と融合していないのは **backbone が text / caption で共有**だから
 // （融合すると 1.26GB の重みが 2 部できる）。ホストは backbone を 2 回回して各 projector へ
@@ -23,7 +29,11 @@
 // speaker / caption のベクトルは `speaker` / `caption-proj` の torch 期待値から実装の
 // メソッドで作ったもの（生成は `export_irodori.py` の `_duration_cases`）。
 //
-// 記号次元はターゲットで違う（テキスト系と `duration` は T ≤ 512、`speaker` は S ≤ 750）。
+// `dit` の 6 本も同じ鎖で、条件 state は `text-proj` / `caption-proj` / `speaker` の torch
+// 期待値を Tmax へ右 pad したもの（生成は `export_irodori.py` の `_dit_cases`）。**uncond
+// 3 変種は cond と x_t / t / 条件 state を共有し、違うのはマスクだけ**（ADR 0047 決定 1）。
+//
+// 記号次元はターゲットで違う（テキスト系と `duration` は T ≤ 512、`speaker` / `dit` は S ≤ 750）。
 // ケース名もターゲットで違うので、期待表は**ターゲット別**に持つ（下の EXPECTED_CASES）。
 //
 // SBV2 と違い格納 dtype 系列は f32 の 1 本のみ（f16 / i8 は別系列で決める話）なので、
@@ -169,6 +179,38 @@ const SPEAKER_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 1e-6 };
  */
 const DURATION_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 1e-6 };
 
+/**
+ * DiT 1 step（12 層 JointAttention + SwiGLU + LowRankAdaLN）の許容誤差。出力は速度場
+ * `v_pred[1,S,32]`。
+ *
+ * 実測（`atol=rtol=0`、7 ケース × 出力 1 本）:
+ *
+ * | ケース             | S   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | ------------------ | --- | ------- | ------- | ------------ | ------------------ |
+ * | dit-cond-min       | 2   | 4.53e-6 | 6.57e-5 | 2.43         | 5.19e-3            |
+ * | dit-cond-1s        | 25  | 4.77e-6 | 4.41e-3 | 3.49         | 1.60e-4            |
+ * | dit-cond-late      | 25  | 7.69e-6 | 4.79e-4 | 2.87         | 1.87e-3            |
+ * | dit-uncond-text    | 25  | 4.53e-6 | 1.74e-3 | 3.42         | 5.26e-4            |
+ * | dit-uncond-speaker | 25  | 5.72e-6 | 1.79e-4 | 3.53         | 3.60e-3            |
+ * | dit-uncond-caption | 25  | 6.32e-6 | 5.24e-4 | 3.37         | 2.20e-3            |
+ * | dit-cond-max       | 750 | 8.34e-6 | 6.57e-2 | 4.56         | 1.65e-5            |
+ *
+ * 他の 5 本と同じく **atol 主役**（S=750 では最小の非ゼロ \|ref\| が 1.65e-5 まで下がり、
+ * maxRel はそこで 6.6e-2 に跳ねるが、その要素の絶対誤差は 1e-6 級でしかない）。
+ * atol 5e-5 は実測最悪 8.34e-6（dit-cond-max）の約 6.0 倍で、rtol 1e-6 の寄与は
+ * 上端 \|ref\| = 4.56 でも 4.6e-6（atol の 1/11）。
+ *
+ * **値域は O(5) と小さいのに絶対誤差は speaker と同オーダー**で、12 層ぶんの縮約誤差に
+ * 加えて条件側 1519 トークンの縮約が毎層乗る（K/V の縮約長は S + 1519 で、S=2 でも 1521）。
+ * S を 2 → 750 と 375 倍にしても maxAbs が 1.8 倍にしか伸びないのはこのため（縮約長の
+ * 支配項が条件側）。実装バグ（マスクの区間割りの取り違え・RoPE を掛ける先頭 10 head の
+ * 取り違え・条件 KV の連結順の入れ替え）の誤差は値域と同じ O(1) で、この閾値の 4〜5 桁上に
+ * 出る（export 台本の `_dit_uncond_divergence` が実測する 4 本の相互差は 0.75〜1.92）。
+ *
+ * NOTE: 他ターゲットの値を流用してはならない（同じ手順で実測し直すこと）。
+ */
+const DIT_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
+
 /** ターゲット別 tolerance。表の穴は「別ターゲットの値で突合する」沈黙誤りになる。 */
 const TOLERANCES: Readonly<Record<string, Tolerance>> = {
   "backbone": BACKBONE_TOLERANCE,
@@ -176,6 +218,7 @@ const TOLERANCES: Readonly<Record<string, Tolerance>> = {
   "caption-proj": CAPTION_PROJ_TOLERANCE,
   "speaker": SPEAKER_TOLERANCE,
   "duration": DURATION_TOLERANCE,
+  "dit": DIT_TOLERANCE,
 };
 
 const SERIES_ROOT = new URL("../../../outputs/series/irodori-v4-small/", import.meta.url);
@@ -191,9 +234,9 @@ const GENERATE_COMMAND =
  * 生成されているはずのターゲットとケース。**列挙結果ではなくここで固定する** — 列挙だけに
  * 頼ると生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
  * `tools/exporter/export_irodori.py` の TARGETS / GOLDEN_CASES / SPEAKER_CASES /
- * DURATION_CASES。
+ * DURATION_CASES / DIT_CASES。
  *
- * MUST: ターゲット（G4〜G7）を足すときはこの表と TOLERANCES を同時に伸ばす。
+ * MUST: ターゲット（G6 / G7 = codec）を足すときはこの表と TOLERANCES を同時に伸ばす。
  */
 const TEXT_CASES = [
   "caption-ja",
@@ -216,6 +259,15 @@ const EXPECTED_CASES: Readonly<Record<string, readonly string[]>> = {
     "dur-long",
     "dur-neither",
     "dur-speaker-only",
+  ],
+  "dit": [
+    "dit-cond-1s",
+    "dit-cond-late",
+    "dit-cond-max",
+    "dit-cond-min",
+    "dit-uncond-caption",
+    "dit-uncond-speaker",
+    "dit-uncond-text",
   ],
 };
 
@@ -316,11 +368,15 @@ for (const target of TARGETS) {
 
         // 記号次元は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
         // ケースごとに長さが違う（テキスト系と duration は T = 7 / 13 / 22 / 29 / 144 / 404、
-        // speaker は S = 2 / 6 / 31 / 187 / 750）ので、宣言上限（テキスト系 Tmax = 512 =
-        // export_irodori.py の SYM_MAX / speaker Smax = 750 = speaker_sym_max — 帯マスクと
-        // RoPE 表の焼き付け点）に依存した実装はここで値か shape が壊れる。両ターゲットとも
-        // **上限そのもの**を踏むケース（caption-long は 404 だが speaker の ref-max は 750）を
-        // 持たせてある。
+        // speaker は S = 2 / 6 / 31 / 187 / 750、dit は S = 2 / 25 / 750）ので、宣言上限
+        // （テキスト系 Tmax = 512 = export_irodori.py の SYM_MAX / speaker Smax = 750 =
+        // speaker_sym_max / dit Smax = 750 = dit_sym_max — 帯マスクと RoPE 表の焼き付け点）に
+        // 依存した実装はここで値か shape が壊れる。speaker と dit は**上限そのもの**を踏む
+        // ケース（ref-max / dit-cond-max）を持たせてある（テキスト系の最長は 404）。
+        //
+        // dit の `mask` は**派生次元** `S+1519`（ADR 0046）で宣言されており、束縛源は
+        // `x_t` の次元 1 だけ。bindSymbols の 2 巡目が `mask` の実 shape（S+1519）を
+        // 評価し直して照合するので、派生形の評価が壊れればここで落ちる。
         const inputs: Record<string, Tensor> = {};
         for (const spec of parsed.graph.inputs) {
           const view = io.tensors.get(`input.${spec.name}`);
