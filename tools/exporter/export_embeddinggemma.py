@@ -40,6 +40,13 @@ NOTE: `pool_mask` は全 1 で採る（マスク無しで呼ぶ以上、0 を混
     outputs/series/embeddinggemma-300m/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
+
+## batch 変種（`--batch`）
+
+既定は `--batch 1`（本節冒頭の従来動作そのまま）。`--batch N`（N>1）は torch.export の
+**静的次元**として batch を固定し、`query-en` を N 行に複製した単一 golden ケース
+（`io.batchN.safetensors`）だけを書く — linear の GPU 時間が skinny-M（M=T）に律速されて
+いる仮説を、M = batch×T を大きくして白黒つけるための資産（`--out` で置き場を明示する）。
 """
 
 from __future__ import annotations
@@ -239,6 +246,30 @@ def build_cases(
     return tuple(cases)
 
 
+def build_batch_case(
+    model_dir: Path, sym_max: int, batch: int
+) -> tuple[str, torch.Tensor, torch.Tensor]:
+    """`query-en` を `batch` 行に複製した単一ケース（M = batch×T を大きくする資産）。
+
+    linear の GPU 時間が skinny-M（M=T=4〜318 で occupancy 不足）に律速されている仮説の
+    白黒判定用。全行が同一文なので、torch 参照出力も全行同一になるはず — `_sanity_batch`
+    で行間一致を検査する。GOLDEN_CASES から名前で引く（インデックス固定に依存しない）。
+    """
+    name, prompt_key, body = next(case for case in GOLDEN_CASES if case[0] == "query-en")
+    from tokenizers import Tokenizer
+
+    tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+    prompts = load_prompts(model_dir)
+    text = prompts[prompt_key] + body
+    ids = torch.tensor([tokenizer.encode(text).ids], dtype=torch.int64)
+    length = int(ids.shape[1])
+    if not 2 <= length <= sym_max:
+        raise ValueError(f"{name}: T={length} が記号次元の範囲 [2, {sym_max}] の外")
+    batched_ids = ids.expand(batch, -1).contiguous()
+    batched_mask = torch.ones_like(batched_ids, dtype=torch.float32)
+    return f"batch{batch}", batched_ids, batched_mask
+
+
 def _write_io(
     wrapper: nn.Module,
     graph: IrGraph,
@@ -247,7 +278,8 @@ def _write_io(
 ) -> tuple[list[str], dict[str, torch.Tensor]]:
     """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。
 
-    戻り値の 2 本目は sanity 記録（ノルムと cosine）用の期待出力。
+    戻り値の 2 本目は sanity 記録用の期待出力（`[B, H]` の形のまま渡す — batch>1 の
+    行間比較に形が要る。batch=1 では `_sanity` 側で `reshape(-1)` して従来どおり扱う）。
     """
     written: list[str] = []
     embeddings: dict[str, torch.Tensor] = {}
@@ -271,23 +303,24 @@ def _write_io(
         path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
         save_file(tensors, str(path))
         written.append(path.name)
-        embeddings[name] = output.detach().reshape(-1)
+        embeddings[name] = output.detach()
     return written, embeddings
 
 
 def _sanity(embeddings: dict[str, torch.Tensor]) -> dict[str, Any]:
-    """出力が単位ベクトルで、意味の近い対の cosine が遠い対を上回ることを見る。
+    """出力が単位ベクトルで、意味の近い対の cosine が遠い対を上回ることを見る（batch=1 専用）。
 
     MUST: 順序が逆なら落とす。ノルムだけでは「正規化は効いているが埋め込みが壊れている」
     （層の取り違え・プールの軸違い）を検出できない — 恒真な sanity にしない。
     """
-    norms = {name: float(vector.norm()) for name, vector in embeddings.items()}
+    vectors = {name: output.reshape(-1) for name, output in embeddings.items()}
+    norms = {name: float(vector.norm()) for name, vector in vectors.items()}
     off = [name for name, norm in norms.items() if abs(norm - 1.0) > 1e-5]
     if off:
         raise AssertionError(f"L2 ノルムが 1 から外れたケース: {[(n, norms[n]) for n in off]}")
 
     def cosine(pair: tuple[str, str]) -> float:
-        return float(torch.dot(embeddings[pair[0]], embeddings[pair[1]]))
+        return float(torch.dot(vectors[pair[0]], vectors[pair[1]]))
 
     near, far = cosine(NEAR_PAIR), cosine(FAR_PAIR)
     if near <= far:
@@ -304,10 +337,50 @@ def _sanity(embeddings: dict[str, torch.Tensor]) -> dict[str, Any]:
     }
 
 
-def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> dict[str, Any]:
-    """IR コンテナと golden io を書き、要約を返す。"""
+#: 行間比較の許容誤差（batch 内は同一入力なので理論上は完全一致 — 浮動小数の丸め分だけ許す）。
+BATCH_ROW_ATOL = 1e-4
+
+
+def _sanity_batch(output: torch.Tensor) -> dict[str, Any]:
+    """batch 変種の sanity（batch>1 専用）: 全行が単位ベクトルで、複製元の行と一致することを見る。
+
+    MUST: 行間の不一致を見逃さない — 全行が同一入力の複製である以上、崩れていれば
+    「重みは合っているが batch 軸の扱いが壊れている」ことを意味する（`_sanity` の cosine
+    順序検査に相当する、batch 変種向けの恒真でない検査）。
+    """
+    norms = output.norm(dim=-1)
+    off = (norms - 1.0).abs() > 1e-5
+    if bool(off.any()):
+        raise AssertionError(f"L2 ノルムが 1 から外れた行あり: {norms[off].tolist()}")
+
+    max_row_diff = float((output - output[0]).abs().max())
+    if max_row_diff > BATCH_ROW_ATOL:
+        raise AssertionError(
+            f"行間の出力が一致しない（最大絶対差 {max_row_diff} > {BATCH_ROW_ATOL}）"
+            " — batch 軸の扱いが壊れている"
+        )
+    return {
+        "rows": int(output.shape[0]),
+        "l2_norms_min_max": (round(float(norms.min()), 7), round(float(norms.max()), 7)),
+        "row_max_abs_diff": round(max_row_diff, 9),
+    }
+
+
+def export_series(
+    model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX, batch: int = 1
+) -> dict[str, Any]:
+    """IR コンテナと golden io を書き、要約を返す。
+
+    `batch` は torch.export の**静的次元**（既定 1 = 従来どおり全 5 ケース）。T は
+    従来どおり動的次元のまま。`batch > 1` のときは `query-en` を `batch` 行に複製した
+    単一ケースだけを golden にする（linear の occupancy 不足仮説の検証用資産）。
+    """
     wrapper = load_wrapper(model_dir)
-    cases = build_cases(model_dir, sym_max)
+    cases = (
+        build_cases(model_dir, sym_max)
+        if batch == 1
+        else (build_batch_case(model_dir, sym_max, batch),)
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 例示入力は最長ケース（T が上限に近いほど 0/1 特殊化から遠い）。min=2 は 0/1 特殊化を
@@ -321,6 +394,7 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
         dynamic_shapes=({1: seq}, {1: seq}),
     )
     written, embeddings = _write_io(wrapper, graph, cases, out_dir)
+    sanity = _sanity(embeddings) if batch == 1 else _sanity_batch(next(iter(embeddings.values())))
     return {
         "dir": str(out_dir),
         "nodes": len(graph.nodes),
@@ -331,7 +405,8 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
         "symbols": list(graph.symbols),
         "io": written,
         "case_lengths": {name: int(ids.shape[1]) for name, ids, _ in cases},
-        "sanity": _sanity(embeddings),
+        "batch": batch,
+        "sanity": sanity,
     }
 
 
@@ -340,8 +415,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--sym-max", type=int, default=SYM_MAX)
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=1,
+        help="torch.export の静的 batch 次元（既定 1 = 従来どおり）。1 より大きいと"
+        " query-en を batch 行に複製した単一 golden ケースだけを書く。",
+    )
     args = parser.parse_args(argv)
-    summary = export_series(args.model_dir, args.out, sym_max=args.sym_max)
+    if args.batch < 1:
+        raise SystemExit(f"--batch は 1 以上を指定する（指定は {args.batch}）")
+    summary = export_series(args.model_dir, args.out, sym_max=args.sym_max, batch=args.batch)
     print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
 
 
