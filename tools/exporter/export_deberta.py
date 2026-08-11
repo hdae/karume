@@ -47,6 +47,7 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
+from karume import patch_deberta
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
@@ -68,6 +69,14 @@ DEFAULT_OUT_ROOTS: Mapping[str, Path] = {
     "i8": SERIES_ROOT / "deberta-i8",
 }
 
+#: 1 ケースぶんのグラフ入力（名前 → テンソル）。
+InputArgs = Mapping[str, torch.Tensor]
+
+#: グラフ入力の順序 = `HiddenStatesWrapper.forward` の引数順。torch.export はこの順で
+#: `graph.inputs` を並べるので、export 後に突合して**ずれていたら止める**（位置で渡す以上、
+#: 黙ってずれると golden の入力だけが入れ替わる）。
+INPUT_ORDER: tuple[str, ...] = ("input_ids", "attention_mask", "c2p_pos", "p2c_pos")
+
 MODEL_FILE = "model.safetensors"
 IO_PREFIX = "io."
 #: w8a8 鏡像 io の prefix。**`io.` で始まらない**こと MUST — Deno 側の通常ケース列挙は
@@ -80,6 +89,7 @@ OUTPUT_PREFIX = "output."
 #: 記号次元 T の上限。config の `max_position_embeddings` と一致させる（Tmax 畳み込みの
 #: 評価点はここから torch の range_constraints 経由で決まる — ADR 0010）。
 SYM_MAX = 512
+
 
 @dataclass(frozen=True)
 class Variant:
@@ -132,6 +142,11 @@ class HiddenStatesWrapper(nn.Module):
     `graph.outputs` を全部 readback するので、25 本出しのままだと 1 本しか使わない SBV2 でも
     毎 run で 25 本ぶんの staging + mapAsync を払う（ADR 0026 の「読み戻し ~52MB が支配」）。
     層を切り詰めた variant では最終層 = SBV2 が使う層なので、絞っても情報は落ちない。
+
+    MUST: `DebertaV2Model.forward` は使わず embeddings + encoder を直接呼ぶ — 前者は
+    `relative_pos` を encoder へ渡す口を持たず、相対位置の添字表を**外部供給にできない**
+    （`karume.patch_deberta` — 焼き込むと Tmax=512 で 2MiB の定数が 2 本入る）。z_steps 分岐は
+    `self.z_steps = 0` のハードコードで恒久的に死んでいるので写さない。
     """
 
     def __init__(self, model: nn.Module, *, single_output: bool = False) -> None:
@@ -139,13 +154,31 @@ class HiddenStatesWrapper(nn.Module):
         self.model = model
         self.single_output = single_output
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> tuple[Any, ...]:
-        out = self.model(
-            input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        c2p_pos: torch.Tensor,
+        p2c_pos: torch.Tensor,
+    ) -> tuple[Any, ...]:
+        model = self.model
+        embedding_output = model.embeddings(
+            input_ids=input_ids,
+            token_type_ids=torch.zeros_like(input_ids),
+            position_ids=None,
+            mask=attention_mask,
+            inputs_embeds=None,
         )
+        hidden_states = model.encoder(
+            embedding_output,
+            attention_mask,
+            output_hidden_states=True,
+            relative_pos=(c2p_pos, p2c_pos),
+            return_dict=True,
+        ).hidden_states
         if self.single_output:
-            return (out.hidden_states[-1],)
-        return out.hidden_states
+            return (hidden_states[-1],)
+        return hidden_states
 
 
 def load_model(model_id: str, num_layers: int) -> nn.Module:
@@ -169,48 +202,73 @@ def load_model(model_id: str, num_layers: int) -> nn.Module:
     return model
 
 
-def build_cases(tokenizer: Any) -> tuple[tuple[str, torch.Tensor, torch.Tensor], ...]:
-    """golden 4 ケース（3 文 + padded）の `(名前, input_ids, attention_mask)`。"""
-    cases: list[tuple[str, torch.Tensor, torch.Tensor]] = []
+def build_cases(tokenizer: Any, model: nn.Module) -> tuple[tuple[str, InputArgs], ...]:
+    """golden 4 ケース（3 文 + padded）の `(名前, グラフ入力名 → テンソル)`。
+
+    相対位置の添字表はグラフ入力なのでケースごとに実長で作る（`patch_deberta` が正本）。
+    バケット幅と最大位置は**モジュールから読む** — config の `max_relative_positions` は
+    -1 のとき `max_position_embeddings` へフォールバックする規則を持つので、写すと二重管理になる。
+    """
+    attention = model.encoder.layer[0].attention.self
+    ids_cases: list[tuple[str, torch.Tensor, torch.Tensor]] = []
     for index, text in enumerate(GOLDEN_SENTENCES):
         ids = torch.tensor([tokenizer(text)["input_ids"]], dtype=torch.int64)
-        cases.append((f"case{index}", ids, torch.ones_like(ids)))
+        ids_cases.append((f"case{index}", ids, torch.ones_like(ids)))
 
     pad_id = tokenizer.pad_token_id
     if pad_id is None:
         raise ValueError("トークナイザに pad_token_id が無い（padded ケースを作れない）")
-    base_ids = cases[0][1]
+    base_ids = ids_cases[0][1]
     pad_ids = torch.full((1, PAD_COUNT), pad_id, dtype=torch.int64)
-    cases.append(
+    ids_cases.append(
         (
             "padded",
             torch.cat([base_ids, pad_ids], dim=1),
             torch.cat([torch.ones_like(base_ids), torch.zeros_like(pad_ids)], dim=1),
         )
     )
+
+    cases: list[tuple[str, InputArgs]] = []
+    for name, ids, mask in ids_cases:
+        c2p_pos, p2c_pos = patch_deberta.build_rel_pos_tables(
+            int(ids.shape[1]),
+            position_buckets=attention.position_buckets,
+            max_position=attention.max_relative_positions,
+        )
+        cases.append(
+            (
+                name,
+                {
+                    "input_ids": ids,
+                    "attention_mask": mask,
+                    "c2p_pos": c2p_pos,
+                    "p2c_pos": p2c_pos,
+                },
+            )
+        )
     return tuple(cases)
 
 
 def _write_io(
     wrapper: nn.Module,
     graph: IrGraph,
-    cases: Sequence[tuple[str, torch.Tensor, torch.Tensor]],
+    cases: Sequence[tuple[str, InputArgs]],
     out_dir: Path,
     *,
     prefix: str = IO_PREFIX,
 ) -> list[str]:
     """各ケースの入力と torch CPU 期待出力を `<prefix><case>.safetensors` へ書く。"""
     written: list[str] = []
-    for name, ids, mask in cases:
+    for name, args in cases:
+        # 位置で渡すが並びは `graph.inputs` から引く（export 側で INPUT_ORDER と突合済み）。
         with torch.no_grad():
-            outputs = wrapper(ids, mask)
+            outputs = wrapper(*(args[declared.name] for declared in graph.inputs))
         if len(outputs) != len(graph.outputs):
             raise AssertionError(
                 f"{name}: torch 出力 {len(outputs)} 本 ≠ IR 出力 {len(graph.outputs)} 本"
             )
         # MUST: io も IR の意味論 dtype の実表現へ落とす（i64 → I32）。ランタイムが受け取る
         # 形と揃っていないと Deno 側 E2E が golden を読めない（ADR 0009 の境界正規化）。
-        args = {"input_ids": ids, "attention_mask": mask}
         tensors = {
             f"{INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
                 args[declared.name], f"{name} の入力 '{declared.name}'"
@@ -230,7 +288,7 @@ def _write_io(
 def _write_mirror_io(
     wrapper: nn.Module,
     graph: IrGraph,
-    cases: Sequence[tuple[str, torch.Tensor, torch.Tensor]],
+    cases: Sequence[tuple[str, InputArgs]],
     out_dir: Path,
 ) -> tuple[list[str], int]:
     """活性 i8 のフックを掛けた期待値（w8a8 の鏡像）を `io-i8a8.<case>` へ書く。
@@ -282,24 +340,32 @@ def export_variant(
     """1 層数ぶんの IR コンテナと golden io を書き、要約を返す。"""
     from transformers import AutoTokenizer
 
+    # MUST: 差し替えは golden を採る前（`patch_deberta` の docstring）— 後に当てると期待値だけが
+    # 元の経路（表を内部で作る形）で計算され、グラフと食い違ったまま緑になる。
     model = load_model(model_id, num_layers)
+    patch_deberta.assert_supported(model.config)
+    patch_deberta.apply_external_rel_pos_patch()
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    cases = build_cases(tokenizer)
+    cases = build_cases(tokenizer, model)
     wrapper = HiddenStatesWrapper(model, single_output=single_output)
     scales = _fake_quant(dtype, wrapper)
 
     # 例示入力は padded ケース（mask に 0 を含む実トークン列）。min=2 は 0/1 特殊化を避ける
     # ため、max は Tmax 畳み込みの評価点そのもの（ADR 0010 — 別ノブで二重管理しない）。
-    _, example_ids, example_mask = cases[-1]
+    _, example_args = cases[-1]
     seq = Dim("T", min=2, max=sym_max)
     graph = export_to_file(
         wrapper,
-        (example_ids, example_mask),
+        tuple(example_args[key] for key in INPUT_ORDER),
         out_dir / MODEL_FILE,
-        dynamic_shapes=({1: seq}, {1: seq}),
+        # 添字表は `[T, T]` — 両軸が同じ記号（正方であることを export の段で縛る）。
+        dynamic_shapes=({1: seq}, {1: seq}, {0: seq, 1: seq}, {0: seq, 1: seq}),
         weight_dtype=dtype,
         weight_scales=scales,
     )
+    declared = tuple(item.name for item in graph.inputs)
+    if declared != INPUT_ORDER:
+        raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {INPUT_ORDER} と違う")
     # MUST: 通常の golden io は**フックなし**で採る（`_write_mirror_io` の docstring）。
     written = _write_io(wrapper, graph, cases, out_dir)
     mirror: list[str] = []
@@ -321,7 +387,7 @@ def export_variant(
         "io": written,
         "act_quant_io": mirror,
         "act_quant_linears": attached,
-        "case_lengths": {name: int(ids.shape[1]) for name, ids, _ in cases},
+        "case_lengths": {name: int(args["input_ids"].shape[1]) for name, args in cases},
     }
 
 

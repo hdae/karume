@@ -41,6 +41,7 @@ from karume.dist import (
     SBV2_SPEAKER_KEY,
     SBV2_SPEAKER_TENSOR,
     SBV2_STYLE_KEY,
+    SBV2_TEXT_ENCODER_INPUTS,
     SBV2_WEIGHTS,
     SHARED_DIRNAME,
     AnimaSources,
@@ -804,8 +805,12 @@ _SBV2_GRAPH_OUTPUTS = 1
 _SBV2_BERT_FROM_END = 1
 
 
-def _fake_ir(layers: int = _SBV2_GRAPH_LAYERS, outputs: int = _SBV2_GRAPH_OUTPUTS) -> str:
-    """門が読む最小の IR メタデータ（層番号つき initializer 名と出力名だけ）。"""
+def _fake_ir(
+    layers: int = _SBV2_GRAPH_LAYERS,
+    outputs: int = _SBV2_GRAPH_OUTPUTS,
+    inputs: Iterable[str] = SBV2_TEXT_ENCODER_INPUTS,
+) -> str:
+    """門が読む最小の IR メタデータ（層番号つき initializer 名・出力名・入力名だけ）。"""
     return json.dumps(
         {
             "initializers": {
@@ -813,6 +818,7 @@ def _fake_ir(layers: int = _SBV2_GRAPH_LAYERS, outputs: int = _SBV2_GRAPH_OUTPUT
                 for index in range(layers)
             },
             "outputs": [f"layer_norm_{index}" for index in range(outputs)],
+            "inputs": [{"name": name} for name in inputs],
         }
     )
 
@@ -1239,6 +1245,19 @@ class TestSbv2BertHiddenGate:
         symbols = json.dumps({"defaults": dict(_SBV2_KNOBS), "bertHiddenFromEnd": 3})
         sources = _build_sbv2_sources(tmp_path, symbols=symbols.encode("utf-8"))
         with pytest.raises(DistError, match=r"bertHiddenFromEnd=3 が、出力 1 本のグラフで"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_it_stops_when_the_position_tables_were_baked_back_in(self, tmp_path: Path) -> None:
+        """添字表が入力から外れた資産（= 2MiB の定数が焼き戻った形）を配布経路で止める。"""
+        sources = _build_sbv2_sources(tmp_path)
+        (sources.text_encoder / "model.safetensors").write_bytes(
+            _fake_safetensors(
+                "I8",
+                b"deberta-i8-weights",
+                {IR_METADATA_KEY: _fake_ir(inputs=("input_ids", "attention_mask"))},
+            )
+        )
+        with pytest.raises(DistError, match=r"グラフ入力が \['input_ids', 'attention_mask'\]"):
             _assemble_sbv2(sources, tmp_path / "out")
 
 

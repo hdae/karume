@@ -223,7 +223,29 @@ def jp_extra_rules(hps: Any) -> dict[str, Any]:
         },
         # BERT 特徴の取り出し位置（**配布グラフの出力**を末尾から数える — 参照側の位置とは別物）。
         "bertHiddenFromEnd": BERT_GRAPH_HIDDEN_FROM_END,
+        # 相対位置の添字表をホストが作るための規則（DeBERTa の config 由来 — 写経しない）。
+        "bertRelPos": bert_rel_pos_rule(),
     }
+
+
+def bert_rel_pos_rule() -> dict[str, int]:
+    """DeBERTa の相対位置バケットの規則を config から引く（表の生成に要る 2 値）。
+
+    表そのものはグラフ入力なので、実長ぶんをホストが作る（`rel-pos-tables.ts`）。式は
+    `karume.patch_deberta.build_rel_pos_tables` が正本で、両者のバイト一致は golden io を
+    使ったパリティテストが縛る。
+
+    `max_relative_positions` が 1 未満のとき `max_position_embeddings` へ落とすのは
+    `DisentangledSelfAttention.__init__` の規則そのもの（写すと二重管理になるので、
+    ここでも同じ 1 箇所だけで解く）。
+    """
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(BERT_REPO)
+    max_position = int(config.max_relative_positions)
+    if max_position < 1:
+        max_position = int(config.max_position_embeddings)
+    return {"positionBuckets": int(config.position_buckets), "maxPosition": max_position}
 
 
 def resolve_style_and_speaker(

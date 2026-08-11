@@ -802,6 +802,16 @@ SBV2_TEXT_ENCODER_LAYERS = 22
 #: 22 本ぶんの staging + mapAsync を払う（ADR 0044 波 2 の実測 — T=512 で −10.6%）。
 SBV2_TEXT_ENCODER_OUTPUTS = 1
 
+#: 配布 text_encoder のグラフ入力の並び（`export_deberta.INPUT_ORDER` と同じ）。相対位置の
+#: 添字表 2 本が**入力に居ること**が波 3 の成果そのもので、焼き込みへ戻ると 2MiB の死荷重が
+#: 復活する（値は正しいままなので E2E では捕まらない）。
+SBV2_TEXT_ENCODER_INPUTS: tuple[str, ...] = (
+    "input_ids",
+    "attention_mask",
+    "c2p_pos",
+    "p2c_pos",
+)
+
 #: initializer 名から encoder の層番号を拾う（`p_model_encoder_layer_<i>_...` — torch.export が
 #: FQN を正規化した綴り）。層数の門はこれで数える。
 SBV2_LAYER_PATTERN = re.compile(r"layer[._](\d+)[._]")
@@ -1042,6 +1052,19 @@ def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
         raise DistError(
             f"{text_encoder} のグラフ出力が {count} 本で、配布形が要求する"
             f" {SBV2_TEXT_ENCODER_OUTPUTS} 本でない — 全層出し（検証用）の資産が混ざっている"
+        )
+
+    inputs = graph.get("inputs")
+    names = (
+        tuple(item.get("name") for item in inputs if isinstance(item, dict))
+        if isinstance(inputs, list)
+        else ()
+    )
+    if names != SBV2_TEXT_ENCODER_INPUTS:
+        raise DistError(
+            f"{text_encoder} のグラフ入力が {list(names)} で、期待の"
+            f" {list(SBV2_TEXT_ENCODER_INPUTS)} と違う — 相対位置の添字表が入力から外れると"
+            "Tmax ぶんの定数（2MiB）が焼き戻る（値は正しいままなので E2E では捕まらない）"
         )
 
     shipped = json.loads(symbols_path.read_text(encoding="utf-8"))

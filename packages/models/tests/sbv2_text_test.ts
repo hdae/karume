@@ -38,6 +38,7 @@ const TEST_RULES_JSON = {
   samplingRate: 44100,
   hopLength: 512,
   bertHiddenFromEnd: 3,
+  bertRelPos: { positionBuckets: 256, maxPosition: 512 },
   defaults: { sdpRatio: 0.2, noiseScale: 0.6, noiseScaleW: 0.8, lengthScale: 1 },
 };
 

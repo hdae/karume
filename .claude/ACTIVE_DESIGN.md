@@ -20,8 +20,11 @@
   SBV2 実用ではパイプライン全体の 0.3%。ADR 0026 の「出力を絞れば GPU 比がそのまま出る」は
   T=512 前提の話で実用 T では成立しない。組み立て門は「22 層 × 出力 1 本 ×
   `bertHiddenFromEnd` 1」の 3 点検査（層数と出力形と取り出し位置は別々の台本が持つので、
-  片方だけ動くと**別の層の声**が沈黙で出る）。**未着手**: 波 3 = `const.*` 2 本
-  （相対位置の gather 添字表・2MiB）のグラフ入力化を試行。**HF 2 リポは未アップロード**。
+  片方だけ動くと**別の層の声**が沈黙で出る）。**波 3 = 相対位置の添字表をグラフ入力へ昇格も
+  完了**（同 ADR 決定 5・−2,098,128 B・速度は中立・sha256 は 3 波とも不変）: transformers の
+  `disentangled_attention_bias` を差し替え（`karume/patch_deberta.py`）+ ホスト生成
+  （`text/rel-pos-tables.ts`）+ golden とのバイト一致パリティ門。**3 波累計で
+  334,545,336 → 307,068,768 B（−8.21%）・`w8` 取得量 −6.86%**。**HF 2 リポは未アップロード**。
 - **モデル拡充波 — EmbeddingGemma 動作確認済み（2026-08-11）**: gelu_tanh op（第 2 層 —
   **op 追加の判定手順は ADR [0043](../docs/decisions/0043-op-addition-layers.md)**）+
   exporter 対応（FOLDABLE に bitwise_or/gt・RoPE 降格の接尾一致）+ 台本

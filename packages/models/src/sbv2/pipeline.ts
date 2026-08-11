@@ -79,6 +79,7 @@ import {
 } from "./style.ts";
 import { analyzeSbv2Text, type Sbv2TextAnalysis } from "./text/analyze.ts";
 import { bertHiddenOutput, tileBertToPhoneLevel } from "./text/bert-tile.ts";
+import { buildRelPosTables } from "./text/rel-pos-tables.ts";
 import { type JpExtraRules, parseJpExtraRules, type Sbv2Knobs } from "./text/symbols.ts";
 import { type CleanRanges, DebertaTokenizer } from "./text/tokenizer.ts";
 import { durationsToFrames } from "./host/duration.ts";
@@ -617,9 +618,17 @@ export const synthesizeSbv2 = async (
     {},
     observer(state, "text_encoder"),
     async (run) => {
+      // 相対位置の添字表はグラフ入力（焼き込むと Tmax=512 で 2MiB — ADR 0044 波 3）。
+      const relPos = buildRelPosTables(
+        tokens,
+        state.rules.bertRelPos.positionBuckets,
+        state.rules.bertRelPos.maxPosition,
+      );
       const outputs = await run({
         input_ids: i32(analysis.inputIds, [1, tokens]),
         attention_mask: i32(analysis.inputIds.map(() => 1), [1, tokens]),
+        c2p_pos: relPos.c2pPos,
+        p2c_pos: relPos.p2cPos,
       });
       const name = bertHiddenOutput(state.textEncoder.graph.outputs, state.rules.bertHiddenFromEnd);
       const tensor = outputs[name];

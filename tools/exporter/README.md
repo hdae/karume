@@ -243,11 +243,18 @@ case**. There are 4 cases:
 | `case2`  | long sentence with symbols          | 35 |
 | `padded` | `case0` + `[PAD]`×5 (0 in the mask) | 16 |
 
-The wrapper is `forward(input_ids, attention_mask) -> hidden_states` (a tuple of all layers, or the
-single last one for the shipped variant). Because every layer can be compared, **how the error grows
-with depth** can be read directly off the goldens (which puts the tolerances on a measured footing).
-`padded` is the only case that mixes in `attention_mask=0` and therefore exercises the mask path
-(mul → cast → bitwise_not → masked_fill, plus the zero fill on the conv path).
+The wrapper is `forward(input_ids, attention_mask, c2p_pos, p2c_pos) -> hidden_states` (a tuple of
+all layers, or the single last one for the shipped variant). Because every layer can be compared,
+**how the error grows with depth** can be read directly off the goldens (which puts the tolerances on
+a measured footing). `padded` is the only case that mixes in `attention_mask=0` and therefore
+exercises the mask path (mul → cast → bitwise_not → masked_fill, plus the zero fill on the conv
+path).
+
+`c2p_pos` / `p2c_pos` are the disentangled-attention gather indices. They depend only on T, so the
+exporter used to constant-fold them into two `[1,512,512]` i32 tensors (2MiB of dead weight); they
+are now **graph inputs** built on the host (`karume/patch_deberta.py` is the reference
+implementation, mirrored by `packages/models/src/sbv2/text/rel-pos-tables.ts`). The mirror is pinned
+byte-for-byte by `packages/models/tests/sbv2_rel_pos_parity_test.ts`.
 
 On the Deno side: `packages/runtime/tests/e2e_deberta_test.ts` (one case = one test). **If not a
 single asset is present, everything SKIPs** (the generation command is printed in the warning); this
