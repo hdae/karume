@@ -245,6 +245,21 @@ placeholder では成立しない（`_eval_static` が fail loudly — 「単一
 max_position_embeddings は 2048）。上げる場合は帯マスク定数が Tmax² で膨らむ
 （512 → 2MB / 2048 → 32MB）ことの裁定とセットで行う。
 
+解除（実行時マスク対応）の設計は
+[decisions/0044](decisions/0044-runtime-attention-mask.md)（accepted）で確定済み —
+実装は Irodori DiT 波とセット。
+
+## Irodori テキスト系（backbone / projector）: 実行時 attention_mask 非対応・空 caption と T=1 は非表現
+
+EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める）。「右詰め pad + マスク」との
+同値は export 台本の常設門が毎 emit 実測する（`export_irodori.py` の
+`_static_scheme_evidence` — 実測 8.3e-6 以下・門 1e-3。崩れれば export ごと落ちる）。付随:
+
+- **空 caption（マスク全 0）は graph で表現しない** — eager では projector 出力が厳密に全 0
+  になる形なので、ホストがゼロを直接作る（CFG uncond と同じ扱い — ADR 0044 の管轄）。
+- **T = 1（BOS のみ）は表現できない**（記号次元は `Dim(min=2)` — 0/1 特殊化を避ける既定）。
+  空 caption 以外で T = 1 になる実入力は無い。
+
 ## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・i8a8 と非併用・ビット同一門は f32 経路
 
 `attention` の第 4 入力 mask（ADR 0023 追記 2026-08-11）は意図的に狭い:

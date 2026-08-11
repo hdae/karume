@@ -27,14 +27,24 @@
   対 ORT Web 2.5〜2.9 倍・数値忠実度は 3〜4 桁優位のまま）。**残る karume 側の桁 =
   ホスト固定費 ~38ms の分解**（Deno WebGPU の per-call 費用・同期 — Chrome/Dawn では
   ORT が ~20ms で回る事実が上限の存在証明）。batch>1 export は変換段でブロック
-  （known-issues）。次 = Irodori-TTS v4 移植波。
-  モデル候補キュー: Irodori-TTS v4（**ソース精読 recon 済み 2026-08-11** — 新規 IR op は
-  sin 1 本・export 6+2 グラフ・裁定済み: CFG マスクは実行時 bool マスク案 a〈ADR 要〉・
-  透かしは公式準拠 + フラグ・課題は codec タイル化と Unigram+byte_fallback tokenizer）→
+  （known-issues）。次 = Irodori-TTS v4 移植波（**着手済み — 次の bullet**）。
+  モデル候補キュー: Irodori-TTS v4 →
   BiRefNet_HR（torchvision deform_conv2d が blocker・grid_sample 系の ADR 前提）→
   Gemma 4 E2B（2026-04 実在・Apache 2.0・ungated。新規性は decode + KV cache の実行モデル
   設計で tokenizer / gelu_tanh は共用）。recon 詳細 =
   [research/2026-08-11-model-expansion-recon.md](../docs/research/2026-08-11-model-expansion-recon.md)。
+- **Irodori-TTS v4 移植 — 第 1 波（基盤）完了（2026-08-11）**: ①`sin` op（第 1 層・
+  Snake 活性が根拠・cos は不採用）②DACVAE 重みの safetensors 1:1 変換台本
+  （`convert_dacvae.py`・317 本バイト一致門・wm_model 9.3M の存在を確認）③**実行時
+  attention マスクの設計 = ADR [0044](../docs/decisions/0044-runtime-attention-mask.md)
+  （accepted・実装は次波）** — bool 入力 + `safe_softmax`（第 2 層・ガード証明不能時のみ）で
+  既存資産バイト不変 ④ModernBERT テキスト系 3 グラフ（backbone / text-proj / caption-proj・
+  Tmax 512 統一・静的マスク方式 — 同値は台本の常設門が毎 emit 実測）+ 実重み E2E 門 19 件
+  （`e2e_irodori_test.ts` — tolerance 導出表はテスト定数の docstring）。recon の U2 / U5 は
+  解消。**次 = 第 2 波（safe_softmax 実装 + DiT / speaker / duration export — 第 0 層 6 件と
+  `reciprocal` の除算形書き換え込み）** → ホスト側（pipeline・Unigram+byte_fallback
+  tokenizer・Euler 40 step）→ codec（G6/G7・タイル化 U4・wm_model は README 推奨バイパスに
+  従い落とす見込み・`sin` の |x|>π 精度を e2e で観測）。
 - **立ち上げロードマップ（ADR 0037）は P0〜P5 まで到達し一段落**。P3/P4 で `AnimaPipeline`
   （fromPretrained / fromAssets・`using` 対応）+ 共通 image 層 + 配布形（現 `models/karume-anima-turbo/`）
   （`karume dist`・実 hash・格納 dtype 門）+ `karume` サブコマンド CLI + **英語**モデルカード
