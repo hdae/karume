@@ -214,7 +214,10 @@ cd ../.. && deno test -A packages/runtime/tests/e2e_deberta_test.ts packages/run
 - **`sbv2-22layer` is what the SBV2 distribution ships.** SBV2 only ever reads
   `hidden_states[-3]` (= index 22 = the output of layer 21), so the last two layers are dead weight;
   the truncated model's final output is **bit-identical** to the 24-layer model's `hidden_states[-3]`
-  (measured — see `docs/research/2026-08-11-deberta-size-recon.md`).
+  (measured — see `docs/research/2026-08-11-deberta-size-recon.md`). That variant also emits **only
+  that one tensor** instead of the whole `hidden_states` tuple, because the runtime reads every
+  `graph.output` back on every run. The other variants keep the full tuple so the per-layer error
+  growth stays readable off the goldens (ADR 0026).
 
 ```
 outputs/series/deberta/dev-2layer/model.safetensors      2 layers (130 nodes / 208MB)
@@ -223,7 +226,7 @@ outputs/series/deberta/full-24layer/model.safetensors    24 layers (1230 nodes /
 outputs/series/deberta/full-24layer/io.<case>.safetensors
 
 outputs/series/deberta-i8/sbv2-22layer/model.safetensors      22 layers in i8 storage (1130 nodes /
-                                                              294.5MB / 23 outputs) — shipped
+                                                              294.5MB / 1 output) — shipped
 outputs/series/deberta-i8/full-24layer/model.safetensors      24 layers in i8 storage (319MB)
 outputs/series/deberta-i8/<variant>/io.<case>.safetensors       w8 goldens (activations in f32)
 outputs/series/deberta-i8/<variant>/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
@@ -240,11 +243,11 @@ case**. There are 4 cases:
 | `case2`  | long sentence with symbols          | 35 |
 | `padded` | `case0` + `[PAD]`×5 (0 in the mask) | 16 |
 
-The wrapper is `forward(input_ids, attention_mask) -> hidden_states` (a tuple of all layers).
-Because every layer can be compared, **how the error grows with depth** can be read directly off the
-goldens (which puts the tolerances on a measured footing). `padded` is the only case that mixes in
-`attention_mask=0` and therefore exercises the mask path (mul → cast → bitwise_not → masked_fill,
-plus the zero fill on the conv path).
+The wrapper is `forward(input_ids, attention_mask) -> hidden_states` (a tuple of all layers, or the
+single last one for the shipped variant). Because every layer can be compared, **how the error grows
+with depth** can be read directly off the goldens (which puts the tolerances on a measured footing).
+`padded` is the only case that mixes in `attention_mask=0` and therefore exercises the mask path
+(mul → cast → bitwise_not → masked_fill, plus the zero fill on the conv path).
 
 On the Deno side: `packages/runtime/tests/e2e_deberta_test.ts` (one case = one test). **If not a
 single asset is present, everything SKIPs** (the generation command is printed in the warning); this

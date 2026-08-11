@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -80,14 +81,32 @@ OUTPUT_PREFIX = "output."
 #: 評価点はここから torch の range_constraints 経由で決まる — ADR 0010）。
 SYM_MAX = 512
 
-#: 層数 → 出力ディレクトリ名。2 層は開発イテレーション用、**22 層が SBV2 の配布形**、
-#: 24 層は全層の golden 検証用。
+@dataclass(frozen=True)
+class Variant:
+    """1 つの出力ディレクトリの綴りと出力形。
+
+    出力形を層数と一緒にここへ書くのは、**配布形（1 本出し）と検証用（全層出し）を
+    取り違えると沈黙する**から — どちらも同じ shape のテンソルを出すので、間違えても
+    ロードも実行も通ってしまう。
+    """
+
+    name: str
+    #: SBV2 が使う 1 本だけを出力する（配布形）。False は全層の hidden_states を並べる。
+    single_output: bool = False
+
+
+#: 層数 → variant。2 層は開発イテレーション用、**22 層が SBV2 の配布形**、24 層は全層の
+#: golden 検証用（層別の誤差の伸びを読む — ADR 0026 決定 2 の tolerance 導出）。
 #:
 #: 22 なのは SBV2 が使うのが `hidden_states[-3]`（= 先頭から 22 番目 = layer 21 の出力）だから
 #: で、末尾 2 層は配布形で完全に死んでいる。切り詰めた 22 層モデルの最終出力が 24 層モデルの
 #: `hidden_states[-3]` と**ビット一致する**ことは実測済み（f32 / i8 / i8+a8 の 3 構成）—
 #: ADR 0044 / docs/research/2026-08-11-deberta-size-recon.md §4。
-VARIANTS: dict[int, str] = {2: "dev-2layer", 22: "sbv2-22layer", 24: "full-24layer"}
+VARIANTS: dict[int, Variant] = {
+    2: Variant("dev-2layer"),
+    22: Variant("sbv2-22layer", single_output=True),
+    24: Variant("full-24layer"),
+}
 
 #: golden の固定文（トークナイザは文字単位の BertJapaneseTokenizer）。
 #: 短文 / 長め / 記号混じり の 3 本で T を散らす。
@@ -108,16 +127,24 @@ class HiddenStatesWrapper(nn.Module):
     IR v1 のグラフ出力は位置で引く（`output.<i>`）ので、全層の hidden_states をそのまま
     出力に並べる。層ごとに突合できるため、**誤差が層数でどう伸びるか**が golden から
     直接読める（tolerance の根拠づけがこれで実測になる）。
+
+    `single_output` を立てると**最終層の 1 本だけ**を出力する（配布形）。ランタイムは
+    `graph.outputs` を全部 readback するので、25 本出しのままだと 1 本しか使わない SBV2 でも
+    毎 run で 25 本ぶんの staging + mapAsync を払う（ADR 0026 の「読み戻し ~52MB が支配」）。
+    層を切り詰めた variant では最終層 = SBV2 が使う層なので、絞っても情報は落ちない。
     """
 
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(self, model: nn.Module, *, single_output: bool = False) -> None:
         super().__init__()
         self.model = model
+        self.single_output = single_output
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> tuple[Any, ...]:
         out = self.model(
             input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True
         )
+        if self.single_output:
+            return (out.hidden_states[-1],)
         return out.hidden_states
 
 
@@ -250,6 +277,7 @@ def export_variant(
     sym_max: int = SYM_MAX,
     dtype: str = "f32",
     act_quant: bool = False,
+    single_output: bool = False,
 ) -> dict[str, Any]:
     """1 層数ぶんの IR コンテナと golden io を書き、要約を返す。"""
     from transformers import AutoTokenizer
@@ -257,7 +285,7 @@ def export_variant(
     model = load_model(model_id, num_layers)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     cases = build_cases(tokenizer)
-    wrapper = HiddenStatesWrapper(model)
+    wrapper = HiddenStatesWrapper(model, single_output=single_output)
     scales = _fake_quant(dtype, wrapper)
 
     # 例示入力は padded ケース（mask に 0 を含む実トークン列）。min=2 は 0/1 特殊化を避ける
@@ -339,15 +367,16 @@ def main() -> None:
 
     summaries = []
     for num_layers in args.layers:
-        name = VARIANTS.get(num_layers, f"{num_layers}layer")
+        variant = VARIANTS.get(num_layers, Variant(f"{num_layers}layer"))
         summaries.append(
             export_variant(
                 args.model,
                 num_layers,
-                args.out / name,
+                args.out / variant.name,
                 sym_max=args.sym_max,
                 dtype=args.dtype,
                 act_quant=args.act_quant,
+                single_output=variant.single_output,
             )
         )
     print(json.dumps({"model": args.model, "variants": summaries}, indent=1, ensure_ascii=False))

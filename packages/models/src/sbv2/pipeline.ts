@@ -609,7 +609,7 @@ export const synthesizeSbv2 = async (
   const phonemes = analysis.ids.phoneIds.length;
   const tokens = analysis.inputIds.length;
 
-  // --- ② text_encoder（DeBERTa・hidden_states 全出し）----------------------
+  // --- ② text_encoder（DeBERTa・配布形は使う 1 本だけを出す）---------------
   // quant の低精度ノブは渡さない（配布形の text_encoder は i8 の 1 dtype しか無い）。
   const hidden = await withSession(
     state.gpu,

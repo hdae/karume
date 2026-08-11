@@ -788,18 +788,23 @@ SBV2_PIPELINE = "sbv2/1"
 
 #: DeBERTa の系列とその variant ディレクトリ（`export_deberta.py` の綴り）。モデル名に依らない
 #: （ファミリー組み立てでは全モデルが同じ text_encoder を指し、`shared/` へ 1 回だけ入る）。
-#: 22 層 variant なのは末尾 2 層が SBV2 の経路で死んでいるから（{@link SBV2_BERT_HIDDEN_INDEX}）。
+#: 22 層 variant なのは末尾 2 層が SBV2 の経路で死んでいるから（{@link SBV2_TEXT_ENCODER_LAYERS}）。
 SBV2_TEXT_ENCODER_SERIES = "deberta-i8"
 SBV2_TEXT_ENCODER_VARIANT = "sbv2-22layer"
 
-#: SBV2 が使う hidden_states の**絶対位置**（先頭から数えて 22 番目）。参照実装の
-#: `res["hidden_states"][-3:-2]` を全 24 層で解いた値で、`[0]` = embedding 出力・
-#: `[i+1]` = layer i の出力なので layer 21 の出力を指す。
-#:
-#: MUST: **グラフの層数が変わってもこの位置は動かない** — 組み立て門
-#: {@link assert_bert_hidden} はこれを不変条件に使う。層数と `bertHiddenFromEnd` は別々の
-#: 台本が持つので、片方だけ動かすと配布形は「shape の合った別の層」を静かに引く。
-SBV2_BERT_HIDDEN_INDEX = 22
+#: 配布 text_encoder に残っている encoder 層の数。SBV2 が使う `hidden_states[-3]`
+#: （`[0]` = embedding 出力・`[i+1]` = layer i の出力なので先頭から 22 番目 = layer 21 の出力）を
+#: **グラフの最終出力**にするための層数で、参照実装の添字をこの 1 つの数へ解いてある。
+SBV2_TEXT_ENCODER_LAYERS = 22
+
+#: 配布 text_encoder のグラフ出力の本数。SBV2 が読むのは 1 本だけで、ランタイムは
+#: `graph.outputs` を**全部** readback するため、全層出しのまま配ると毎 run で使わない
+#: 22 本ぶんの staging + mapAsync を払う（ADR 0044 波 2 の実測 — T=512 で −10.6%）。
+SBV2_TEXT_ENCODER_OUTPUTS = 1
+
+#: initializer 名から encoder の層番号を拾う（`p_model_encoder_layer_<i>_...` — torch.export が
+#: FQN を正規化した綴り）。層数の門はこれで数える。
+SBV2_LAYER_PATTERN = re.compile(r"layer[._](\d+)[._]")
 
 #: `sbv2_demo.py assets` が書くホスト資産の置き場と綴り。系列（IR + io）ではないので
 #: `outputs/series/` の下ではない。
@@ -998,16 +1003,16 @@ def sbv2_knob_defaults(symbols_path: Path) -> dict[str, Any]:
 
 
 def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
-    """`symbols.json` の取り出し位置が text_encoder の**正しい層**を指すことを検査する。
+    """配布 text_encoder が「SBV2 が使う層の出力を 1 本だけ出す」形であることを検査する。
 
-    パイプラインは `bertHiddenFromEnd` でグラフ出力を末尾から引く（`bert-tile.ts`）。層数を
-    変えれば出力本数も変わるので両者は必ず一緒に動かす必要があるが、層数は
-    `export_deberta.py` の variant が、位置は `sbv2_demo.py` の定数が持つ**別々の台本**なので、
-    片方だけ動いた配布形が普通に組み上がってしまう。
+    正しい組み合わせは **22 層 × 出力 1 本 × `bertHiddenFromEnd` 1** の 1 通りしかないが、
+    層数と出力形は `export_deberta.py` の variant が、取り出し位置は `sbv2_demo.py` の定数が
+    持つ**別々の台本**なので、片方だけ動いた配布形が普通に組み上がってしまう。
 
     MUST: ずれても shape は合ったままロードも実行も通り、**別の層の BERT 特徴で音が出る**
-    だけで沈黙する（スタイル表・話者表の行数門と同じ機序）。絶対位置
-    {@link SBV2_BERT_HIDDEN_INDEX} は層数に依らない不変量なので、これで両者を縛る。
+    だけで沈黙する（スタイル表・話者表の行数門と同じ機序）。3 つを別々に見るのは、それぞれが
+    別の取り違えを捕まえるため — 層数は「どの層の出力か」、出力本数は「検証用の全層出し資産が
+    混ざっていないか」、位置は「symbols.json だけ古いか」。
     """
     header = safetensors_header(text_encoder)
     metadata = header.get("__metadata__")
@@ -1017,28 +1022,34 @@ def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
         graph = json.loads(metadata[IR_METADATA_KEY])
     except json.JSONDecodeError as error:
         raise DistError(f"{text_encoder}: IR メタデータが JSON として読めない") from error
-    outputs = graph.get("outputs") if isinstance(graph, dict) else None
-    if not isinstance(outputs, list) or not outputs:
-        raise DistError(f"{text_encoder}: IR メタデータに非空の outputs が無い")
+    if not isinstance(graph, dict):
+        raise DistError(f"{text_encoder}: IR メタデータが最上位オブジェクトでない")
+
+    initializers = graph.get("initializers")
+    if not isinstance(initializers, dict) or not initializers:
+        raise DistError(f"{text_encoder}: IR メタデータに非空の initializers が無い")
+    layers = {match.group(1) for name in initializers if (match := SBV2_LAYER_PATTERN.search(name))}
+    if len(layers) != SBV2_TEXT_ENCODER_LAYERS:
+        raise DistError(
+            f"{text_encoder} の encoder は {len(layers)} 層で、期待の"
+            f" {SBV2_TEXT_ENCODER_LAYERS} 層でない — SBV2 が使う hidden_states[-3] を最終出力に"
+            "するには 22 層で切り詰めた variant が要る（export_deberta.py の VARIANTS）"
+        )
+
+    outputs = graph.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) != SBV2_TEXT_ENCODER_OUTPUTS:
+        count = len(outputs) if isinstance(outputs, list) else outputs
+        raise DistError(
+            f"{text_encoder} のグラフ出力が {count} 本で、配布形が要求する"
+            f" {SBV2_TEXT_ENCODER_OUTPUTS} 本でない — 全層出し（検証用）の資産が混ざっている"
+        )
 
     shipped = json.loads(symbols_path.read_text(encoding="utf-8"))
     from_end = shipped.get("bertHiddenFromEnd") if isinstance(shipped, dict) else None
-    if not isinstance(from_end, int) or isinstance(from_end, bool) or from_end < 1:
+    if from_end != SBV2_TEXT_ENCODER_OUTPUTS:
         raise DistError(
-            f"{symbols_path}: bertHiddenFromEnd が 1 以上の整数でない（{from_end!r}）"
-        )
-    if from_end > len(outputs):
-        raise DistError(
-            f"{symbols_path} の bertHiddenFromEnd={from_end} に対し {text_encoder} の出力は"
-            f" {len(outputs)} 本しかない"
-        )
-    index = len(outputs) - from_end
-    if index != SBV2_BERT_HIDDEN_INDEX:
-        raise DistError(
-            f"{text_encoder} の出力 {len(outputs)} 本に対し {symbols_path} の"
-            f" bertHiddenFromEnd={from_end} は先頭から {index} 番目（'{outputs[index]}'）を指す"
-            f" — 期待は {SBV2_BERT_HIDDEN_INDEX} 番目（参照実装の hidden_states[-3] ="
-            " layer 21 の出力）。層数と取り出し位置は必ず一緒に動かす"
+            f"{symbols_path} の bertHiddenFromEnd={from_end!r} が、出力 1 本のグラフで唯一"
+            f" 意味を持つ値 {SBV2_TEXT_ENCODER_OUTPUTS} でない — `sbv2_demo.py assets` を採り直す"
         )
 
 

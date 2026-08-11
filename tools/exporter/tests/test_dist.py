@@ -797,25 +797,31 @@ requires_sbv2_package = pytest.mark.skipif(
     reason="sbv2 dependency-group が無い（`uv sync --group sbv2` が前提）",
 )
 
-#: 偽 text_encoder の IR グラフ出力の本数（22 層 + embedding 出力）と、`symbols.json` が持つ
-#: 取り出し位置。門 `assert_bert_hidden` が見るのは「本数 − 位置 == 22」なので、**この 2 つは
-#: 対でしか動かせない**（実資産の 23 本 / 1 と同じ組み合わせ）。
-_SBV2_GRAPH_OUTPUTS = 23
+#: 偽 text_encoder の IR の形と `symbols.json` の取り出し位置。門 `assert_bert_hidden` が
+#: 通すのは **22 層 × 出力 1 本 × 位置 1** の組み合わせだけ（実資産と同じ）。
+_SBV2_GRAPH_LAYERS = 22
+_SBV2_GRAPH_OUTPUTS = 1
 _SBV2_BERT_FROM_END = 1
+
+
+def _fake_ir(layers: int = _SBV2_GRAPH_LAYERS, outputs: int = _SBV2_GRAPH_OUTPUTS) -> str:
+    """門が読む最小の IR メタデータ（層番号つき initializer 名と出力名だけ）。"""
+    return json.dumps(
+        {
+            "initializers": {
+                f"p_model_encoder_layer_{index}_attention_self_query_proj_weight": {}
+                for index in range(layers)
+            },
+            "outputs": [f"layer_norm_{index}" for index in range(outputs)],
+        }
+    )
+
 
 #: 偽資産（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 5 役は
 #: `SBV2_STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。text_encoder だけは
-#: IR コンテナとしても読まれる（出力本数の門）ので `__metadata__` を持つ。
+#: IR コンテナとしても読まれる（層数と出力本数の門）ので `__metadata__` を持つ。
 _SBV2_PAYLOADS = {
-    "text_encoder": _fake_safetensors(
-        "I8",
-        b"deberta-i8-weights",
-        {
-            IR_METADATA_KEY: json.dumps(
-                {"outputs": [f"layer_norm_{index}" for index in range(_SBV2_GRAPH_OUTPUTS)]}
-            )
-        },
-    ),
+    "text_encoder": _fake_safetensors("I8", b"deberta-i8-weights", {IR_METADATA_KEY: _fake_ir()}),
     "front_f16": _fake_safetensors("F16", b"front-f16-weights"),
     "front_i8": _fake_safetensors("I8", b"front-i8-weights"),
     "voice_f16": _fake_safetensors("F16", b"voice-f16-weights"),
@@ -1200,33 +1206,39 @@ class TestSbv2StorageGate:
 
 
 class TestSbv2BertHiddenGate:
-    """層数と取り出し位置の対応（片方だけ動くと**別の層の声**が出るのに実行は通る）。
+    """22 層 × 出力 1 本 × 位置 1 の組み合わせだけを通す門。
 
-    層数は `export_deberta.py` の variant が、位置は `sbv2_demo.py` の定数が持つ別々の台本
-    なので、対で動かし忘れた配布形が普通に組み上がってしまう。不変量は「出力本数 − 位置 == 22」。
+    層数と出力形は `export_deberta.py` の variant が、位置は `sbv2_demo.py` の定数が持つ別々の
+    台本なので、対で動かし忘れた配布形が普通に組み上がる。ずれても shape は合ったまま実行が
+    通り、**別の層の BERT 特徴で音が出る**だけで沈黙する。
     """
 
-    def test_it_stops_when_only_the_layer_count_moved(self, tmp_path: Path) -> None:
-        """層を 22 に削ったのに `symbols.json` が旧 24 層向けの 3 を主張したまま。"""
-        symbols = json.dumps({"defaults": dict(_SBV2_KNOBS), "bertHiddenFromEnd": 3})
-        sources = _build_sbv2_sources(tmp_path, symbols=symbols.encode("utf-8"))
+    def test_it_stops_when_the_encoder_was_not_truncated(self, tmp_path: Path) -> None:
+        """切り詰め忘れの 24 層資産（出力 1 本）は、最終出力が layer 23 なので別の層になる。"""
+        sources = _build_sbv2_sources(tmp_path)
+        (sources.text_encoder / "model.safetensors").write_bytes(
+            _fake_safetensors("I8", b"deberta-i8-weights", {IR_METADATA_KEY: _fake_ir(layers=24)})
+        )
         out_dir = tmp_path / "out"
-        with pytest.raises(DistError, match=r"bertHiddenFromEnd=3 は先頭から 20 番目"):
+        with pytest.raises(DistError, match=r"encoder は 24 層で、期待の 22 層でない"):
             _assemble_sbv2(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
         assert not out_dir.exists()
 
-    def test_it_stops_when_only_the_extraction_position_moved(self, tmp_path: Path) -> None:
-        """`symbols.json` を 1 にしたのに text_encoder が全 25 本出しの 24 層のまま。"""
+    def test_it_stops_when_the_verification_variant_slipped_in(self, tmp_path: Path) -> None:
+        """全層出し（検証用）の資産が配布経路に混ざると、readback も取り出し位置も変わる。"""
         sources = _build_sbv2_sources(tmp_path)
         (sources.text_encoder / "model.safetensors").write_bytes(
-            _fake_safetensors(
-                "I8",
-                b"deberta-i8-weights",
-                {IR_METADATA_KEY: json.dumps({"outputs": [f"h{index}" for index in range(25)]})},
-            )
+            _fake_safetensors("I8", b"deberta-i8-weights", {IR_METADATA_KEY: _fake_ir(outputs=23)})
         )
-        with pytest.raises(DistError, match=r"bertHiddenFromEnd=1 は先頭から 24 番目"):
+        with pytest.raises(DistError, match=r"グラフ出力が 23 本で、配布形が要求する 1 本でない"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_it_stops_when_only_the_symbols_are_stale(self, tmp_path: Path) -> None:
+        """資産は 1 本出しなのに `symbols.json` が旧・全層出し向けの 3 を主張したまま。"""
+        symbols = json.dumps({"defaults": dict(_SBV2_KNOBS), "bertHiddenFromEnd": 3})
+        sources = _build_sbv2_sources(tmp_path, symbols=symbols.encode("utf-8"))
+        with pytest.raises(DistError, match=r"bertHiddenFromEnd=3 が、出力 1 本のグラフで"):
             _assemble_sbv2(sources, tmp_path / "out")
 
 

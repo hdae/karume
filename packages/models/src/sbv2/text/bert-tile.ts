@@ -10,8 +10,9 @@
 /**
  * BERT 特徴に使う hidden_states の出力名を、末尾からの位置で選ぶ。
  *
- * MUST: 固定 index にしない。`outputs/series/deberta/full-24layer` は埋め込み出力込み 25 本、
- * `dev-2layer` は 3 本で、固定 index は片方で別の層を静かに引く。
+ * MUST: 固定 index にしない。配布形（`sbv2-22layer`）は SBV2 が使う 1 本だけを出すが、検証用の
+ * `full-24layer` は埋め込み出力込み 25 本、`dev-2layer` は 3 本で、固定 index はどれかで別の層を
+ * 静かに引く。
  */
 export const bertHiddenOutput = (outputs: readonly string[], fromEnd: number): string => {
   if (!Number.isInteger(fromEnd) || fromEnd < 1) {
