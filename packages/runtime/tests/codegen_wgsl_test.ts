@@ -697,6 +697,14 @@ Deno.test("elementwise の生成 WGSL は補助関数を使う op にだけ注�
   assertEquals(gelu.includes("fn erf_approx"), true);
   assertEquals(gelu.includes("fn sigmoid_stable"), false);
   assertEquals(relu.includes("fn erf_approx"), false);
+  // tanh 形は組込の tanh だけで書ける — erf の近似式を巻き込まないことと、√(2/π) の
+  // リテラルをここで固定する（2 つの gelu を取り違えても shape も dtype も合ってしまう）。
+  const geluTanh = elementwiseWgsl({ op: "gelu_tanh", rank: 1, dtype: "f32" });
+  assertEquals(geluTanh.includes("fn erf_approx"), false);
+  assertEquals(
+    geluTanh.includes("tanh(0.7978845608028654 * (v0 + 0.044715 * v0 * v0 * v0))"),
+    true,
+  );
   // MUST: 素朴な 1/(1+exp(-x)) は x ≲ -88 でオーバーフローが indeterminate になる
   assertEquals(
     elementwiseWgsl({ op: "sigmoid", rank: 1, dtype: "f32" }).includes("exp(-abs(x))"),

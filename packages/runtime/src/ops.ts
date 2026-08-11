@@ -41,6 +41,10 @@ export const UNARY_OPS = [
   "sigmoid",
   "relu",
   "gelu",
+  // torch の `approximate="tanh"` 形。erf 形の `gelu` とは値が違うので別 op で表す —
+  // attrs 空の契約に近似種別を載せる欄は無く、載せると「同じ op 名で数値が変わる」分岐が
+  // 契約の外にできる。
+  "gelu_tanh",
   "bitwise_not",
   // attrs のスカラを params 末尾で運ぶ 6 本（{@link SCALAR_PARAM_ATTRS}）
   "clamp",

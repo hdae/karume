@@ -109,8 +109,21 @@ class TestUnsupportedOps:
         assert "aten.floor.default" in err.value.ops
 
 
+def _gelu_tanh_reference(x: torch.Tensor) -> torch.Tensor:
+    """`gelu_tanh` の参照実装（TS 側 packages/runtime/src/reference/ops.ts の鏡像）。
+
+    0.7978845608028654 = √(2/π)。erf 形と違いこの式そのものが定義なので、torch と別式に
+    書き換える余地は無い（突合が見るのは近似の外れではなく**式の取り違え**）。
+    """
+    return 0.5 * x * (1 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
+
+
 class TestGelu:
-    """gelu は分解を止めて 1 ノードで運ぶ（core 分解は M0 語彙の外に散る）。"""
+    """gelu は分解を止めて 1 ノードで運ぶ（core 分解は M0 語彙の外に散る）。
+
+    近似種別は attrs ではなく **op 名**で分ける（契約が attrs 空 — 同じ op 名のまま数値だけ
+    変わる分岐を契約の外に作らない）。
+    """
 
     def test_exact_gelu_stays_a_single_node(self, convert_module):
         class Gelu(nn.Module):
@@ -121,13 +134,32 @@ class TestGelu:
 
         assert node_ops(graph) == ["gelu"]
 
-    def test_tanh_approximation_is_rejected(self, convert_module):
+    def test_tanh_approximation_becomes_its_own_op(self, convert_module):
         class GeluTanh(nn.Module):
             def forward(self, x):
                 return nn.functional.gelu(x, approximate="tanh")
 
-        with pytest.raises(NotImplementedError, match="の gelu は未対応"):
-            convert_module(GeluTanh(), (torch.randn(3, 4),))
+        graph, _ = convert_module(GeluTanh(), (torch.randn(3, 4),))
+
+        assert node_ops(graph) == ["gelu_tanh"]
+
+    def test_reference_matches_torch_on_random_and_edge_values(self):
+        generator = torch.Generator().manual_seed(20260811)
+        random = torch.randn(4096, generator=generator) * 3.0
+        # ±0 / ±大値（x³ が f32 で inf へ飛ぶ域を含む）/ ±小値（x³ が 0 へ落ちる域）。
+        edges = torch.tensor(
+            [0.0, -0.0, 3.4e38, -3.4e38, 1e20, -1e20, 1e-20, -1e-20, 20.0, -20.0],
+            dtype=torch.float32,
+        )
+        for name, x in (("randn", random), ("edges", edges)):
+            expected = nn.functional.gelu(x, approximate="tanh")
+            torch.testing.assert_close(_gelu_tanh_reference(x), expected, msg=name)
+
+    def test_two_gelus_are_numerically_distinguishable(self):
+        # 同じ op へ畳めないことの根拠（畳むと 1e-3 級の誤差が黙って入る）。
+        x = torch.linspace(-3.0, 3.0, 101)
+        gap = (nn.functional.gelu(x) - _gelu_tanh_reference(x)).abs().max()
+        assert gap > 1e-4
 
 
 class TestRowReduce:

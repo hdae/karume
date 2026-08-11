@@ -90,7 +90,7 @@ class UnaryChain(nn.Module):
 
 
 class Activations(nn.Module):
-    """tanh / sigmoid / relu / gelu（gelu は分解を止めて 1 ノードのまま運ぶ）。"""
+    """tanh / sigmoid / relu / gelu / gelu_tanh（gelu 2 種は分解を止めて 1 ノードで運ぶ）。"""
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
         return (
@@ -98,6 +98,7 @@ class Activations(nn.Module):
             torch.sigmoid(x),
             torch.relu(x),
             nn.functional.gelu(x),
+            nn.functional.gelu(x, approximate="tanh"),
         )
 
 

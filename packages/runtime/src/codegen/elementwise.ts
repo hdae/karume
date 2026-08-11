@@ -304,6 +304,12 @@ const UNARY_WGSL: Readonly<
   relu: (a) => nanGuard(a, `max(${a}, 0.0)`),
   // 0.7071067811865476 = 1/√2
   gelu: (a) => `0.5 * ${a} * (1.0 + erf_approx(${a} * 0.7071067811865476))`,
+  // torch の approximate="tanh"。0.7978845608028654 = √(2/π)。tanh は WGSL 組込なので
+  // 補助関数を足さない（erf 形と違い、この式そのものが定義で、近似の精度を上げる余地が無い）。
+  // NaN の外殻（{@link nanGuard}）は掛けない — 掛ける理由は `max` / `clamp` イディオムへの
+  // 畳み込み（{@link IS_NAN_FN}）だけで、この式にはその形が無い（erf 形の gelu と同じ扱い）。
+  gelu_tanh: (a) =>
+    `0.5 * ${a} * (1.0 + tanh(0.7978845608028654 * (${a} + 0.044715 * ${a} * ${a} * ${a})))`,
   // bool は u32 の 0 / 1。`1u - x` にすると格納規約が破れたときに 0/1 の外へ出る。
   bitwise_not: (a) => `select(1u, 0u, ${a} != 0u)`,
   clamp: (a, scalar) =>

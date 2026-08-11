@@ -84,6 +84,7 @@ const UNARY_INPUTS: readonly (readonly [string, (index: number) => number])[] = 
   ["sigmoid", SIGNED],
   ["relu", SIGNED],
   ["gelu", SIGNED],
+  ["gelu_tanh", SIGNED],
 ];
 
 const UNARY_CASES: readonly OpCase[] = UNARY_INPUTS.map(([op, generator]) => ({

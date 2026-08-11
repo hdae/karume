@@ -114,7 +114,7 @@ Current models and coverage:
 | Model              | Symbolic dim | IR ops exercised                                                                                           |
 | ------------------ | ------------ | ---------------------------------------------------------------------------------------------------------- |
 | `unary_chain`      | none         | neg, abs, sqrt, log, exp                                                                                   |
-| `activations`      | none         | tanh, sigmoid, relu, gelu                                                                                  |
+| `activations`      | none         | tanh, sigmoid, relu, gelu, gelu_tanh                                                                       |
 | `broadcast_binary` | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                            |
 | `mlp`              | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                 |
 | `row_reduce`       | `T`          | sum, amax, amin                                                                                            |
@@ -1400,10 +1400,10 @@ conformance table is the correct one.
   int32 — the explicit exception of ADR 0010). An initializer's semantic dtype is f32 or i32, and
   the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8}` and `i32 × i32` (the cross products
   fail loudly).
-- There are **50** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
-  `attention`):
-  - unary `neg abs exp log log1p sqrt tanh sigmoid relu gelu` (f32) / `bitwise_not` (bool) / unary
-    with attrs `clamp` / `clamp_min` / `leaky_relu` (f32)
+- There are **51** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
+  `attention`, and `gelu_tanh` was added for EmbeddingGemma):
+  - unary `neg abs exp log log1p sqrt tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
+    (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32)
   - scalar comparison `ge_scalar le_scalar gt_scalar` (f32 → bool)
   - binary `add div` (f32) / `mul sub` (f32, i32) / `ge` (f32 → bool) / `bitwise_and` (bool) and the
     ternary `where` (cond is bool) — all with torch's right-aligned broadcast
@@ -1426,8 +1426,9 @@ conformance table is the correct one.
   `conv_transpose1d.{stride,padding}`). Every declared key is mandatory, and undeclared keys or
   out-of-range values fail loudly (ADR 0012). **Defaults are never filled in** — being able to omit
   `dilation` / `groups` on `conv1d` would silently turn a depthwise IR into an ordinary convolution
-  (ADR 0015). `gelu(approximate="tanh")` has no field to record it and is therefore not accepted
-  (never silently approximating with a different formula).
+  (ADR 0015). `gelu(approximate="tanh")` has no field to record it either, so it is carried by its
+  own op (`gelu_tanh`) rather than by an attr (never silently approximating with a different
+  formula).
 - The default set of decomposition stops (preserved) is **11 ops** (`PRESERVED_OP_PREFIXES` — the 9
   ops of ADR 0007 plus `leaky_relu` from ADR 0015 and `rms_norm` from ADR 0017): linear / layer_norm
   / rms_norm / softmax / gelu / leaky_relu / conv1d / conv2d / conv_transpose1d / embedding /

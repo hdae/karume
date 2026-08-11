@@ -986,12 +986,15 @@ def _h_binary(op: str):
     return handler
 
 
+#: `aten.gelu` の `approximate` → IR op。attrs 空の契約なので近似種別は**別 op**で表す
+#: （同じ op 名のまま近似を変えると、契約の外に「数値が静かに変わる」分岐ができる）。
+_GELU_OPS = {"none": "gelu", "tanh": "gelu_tanh"}
+
+
 def _h_gelu(node: Node) -> Emitted:
     approximate = node.kwargs.get("approximate", "none")
-    # attrs 空の契約なので近似種別を IR に載せられない。tanh 近似は別 op として
-    # 語彙に足すまで受理しない（黙って厳密形で実行すると数値が静かにずれる）。
-    _expect(approximate == "none", node, f"approximate={approximate!r} の gelu は未対応")
-    return Emitted("gelu", 1)
+    _expect(approximate in _GELU_OPS, node, f"approximate={approximate!r} の gelu は未対応")
+    return Emitted(_GELU_OPS[approximate], 1)
 
 
 def _h_sum(node: Node) -> Emitted:

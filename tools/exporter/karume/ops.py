@@ -36,6 +36,9 @@ UNARY_OPS = (
     "sigmoid",
     "relu",
     "gelu",
+    # torch の approximate="tanh" 形。erf 形の `gelu` とは値が違うので別 op で表す
+    # （attrs 空の契約に近似種別を載せる欄が無い）。
+    "gelu_tanh",
     "bitwise_not",
     "clamp",
     # 片側 clamp（ADR 0017）。既存 clamp の attrs を optional 化して兼ねる案は

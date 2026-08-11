@@ -70,6 +70,13 @@ Deno.test("unary の既知値（torch 既定の定義に一致する）", () => 
   assertAlmostEquals(at("gelu", 3), 2.9959503059051097, 1e-6);
   // |x| > 4 で erf を ±1 に丸めても f32 では区別できない
   assertAlmostEquals(at("gelu", 8), 8, 1e-6);
+  // gelu_tanh(x) = 0.5·x·(1 + tanh(√(2/π)·(x + 0.044715x³)))（approximate="tanh"）。
+  // erf 形とは x = ±1 で 3e-4 級ずれる — 同じ op に畳めないことがこの差で見える。
+  assertEquals(at("gelu_tanh", 0), 0);
+  assertAlmostEquals(at("gelu_tanh", 1), 0.8411919906082768, 1e-6);
+  assertAlmostEquals(at("gelu_tanh", -1), -0.15880800939172324, 1e-6);
+  assertAlmostEquals(at("gelu_tanh", 3), 2.996362607918227, 1e-6);
+  assertAlmostEquals(at("gelu_tanh", 8), 8, 1e-6);
 });
 
 Deno.test("binary は右詰め broadcast で評価する", () => {

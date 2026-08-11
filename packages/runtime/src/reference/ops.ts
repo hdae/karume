@@ -141,6 +141,10 @@ const UNARY_F32: Readonly<
   relu: (x) => Math.max(x, 0),
   // torch 既定の gelu（approximate="none"）= 0.5·x·(1 + erf(x/√2))
   gelu: (x) => 0.5 * x * (1 + erf(x / Math.SQRT2)),
+  // torch の approximate="tanh"。**ここは GPU 側と同じ式で書く** — erf / log1p と違い、この
+  // 式自体が torch の定義であって近似ではないので、別式にすると「別の関数」を突合すること
+  // になる（検出したいのは近似の外れではなく実装の取り違え）。0.7978845608028654 = √(2/π)。
+  gelu_tanh: (x) => 0.5 * x * (1 + Math.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x))),
   clamp: (x, [min, max]) => (x < min ? min : x > max ? max : x),
   // MUST: 分岐の向きを `x >= min ? x : min` にしない — NaN で false へ落ちて min を返し、
   // torch の `clamp(NaN, min) = NaN` から静かに外れる（この 1 本が向きの検出器）。

@@ -62,6 +62,12 @@
     { "op": "relu", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
     { "op": "gelu", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
     {
+      "op": "gelu_tanh",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": []
+    },
+    {
       "op": "bitwise_not",
       "arity": 1,
       "dtypes": { "kind": "uniform", "accept": ["bool"] },
@@ -623,6 +629,7 @@
     { "op": "sigmoid", "ins": [[7]], "out": [7] },
     { "op": "relu", "ins": [[2, 3]], "out": [2, 3] },
     { "op": "gelu", "ins": [[4, 8]], "out": [4, 8] },
+    { "op": "gelu_tanh", "ins": [[4, 8]], "out": [4, 8] },
     { "op": "bitwise_not", "ins": [[5]], "out": [5] },
     { "op": "log1p", "ins": [[3, 2]], "out": [3, 2] },
     {
