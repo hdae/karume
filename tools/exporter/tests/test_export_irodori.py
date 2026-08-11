@@ -9,6 +9,8 @@
 - `_write_io` が IR の入力名と食い違う io を書かない
 - 参照なし（マスク全 0）の speaker 出力が**厳密に 0** であることの実測が、0 でなければ落ちる
 - `duration` の `aux_features` 非依存の実測が、依存していたら落ちる
+- `dit` の cond / uncond 3 変種が**互いに違う**ことの実測が、同じなら落ちる
+- 条件 state の右 pad が宣言長を超えたら落ちる
 """
 
 from __future__ import annotations
@@ -192,6 +194,56 @@ class TestSpeakerCases:
     def test_a_case_over_the_symbolic_cap_fails_loudly(self):
         with pytest.raises(SystemExit, match="記号次元の範囲"):
             ir.build_speaker_cases(4, 8)
+
+
+def _dit_pristine(distinct: bool) -> dict[str, torch.Tensor]:
+    """全 `DIT_CASES` ぶんのダミー出力（`distinct` なら 1 本ずつ違う値）。
+
+    グループの取り方は `_dit_uncond_divergence` 自身に任せる（テスト側で写すと、
+    グループ分けの誤りが両側で同じように壊れて素通りする）。
+    """
+    return {
+        name: torch.full((1, 2, 3), float(index) if distinct else 0.0)
+        for index, (name, *_rest) in enumerate(ir.DIT_CASES)
+    }
+
+
+class TestDitUncondDivergence:
+    """MUST: 「マスクが効いている」を主張のままにしない（uncond をマスクで表す根拠）。"""
+
+    def test_distinct_outputs_are_reported_pairwise(self):
+        pairs = ir._dit_uncond_divergence(_dit_pristine(distinct=True))
+
+        # cond + uncond 3 変種の総当たり = 6 組。
+        assert len(pairs) == 6
+        assert min(pairs.values()) >= ir.DIT_UNCOND_DIVERGENCE_MIN
+
+    def test_identical_outputs_fail_loudly(self):
+        with pytest.raises(AssertionError, match="マスクの区間割り"):
+            ir._dit_uncond_divergence(_dit_pristine(distinct=False))
+
+
+class TestPristineDitReferenceOrdering:
+    def test_taking_a_reference_after_patching_fails_loudly(self, monkeypatch):
+        monkeypatch.setattr(patch_irodori, "_APPLIED", True)
+
+        with pytest.raises(AssertionError, match="パッチ適用後に参照を採ろうとした"):
+            ir._pristine_dit_outputs(AuxIgnoringPredictor(), {})
+
+
+class TestRightPad:
+    """条件 state の右 pad（ADR 0047 のホスト残置）。"""
+
+    def test_pads_with_zeros_and_keeps_the_head(self):
+        padded = ir._right_pad(torch.ones(1, 2, 3), 5, "テスト")
+
+        assert tuple(padded.shape) == (1, 5, 3)
+        assert torch.equal(padded[:, :2], torch.ones(1, 2, 3))
+        assert float(padded[:, 2:].abs().max()) == 0.0
+
+    def test_a_state_longer_than_the_declared_length_fails_loudly(self):
+        with pytest.raises(SystemExit, match="条件の宣言長"):
+            ir._right_pad(torch.ones(1, 6, 3), 5, "テスト")
 
 
 class TestSanityCatchesProjectorMixups:

@@ -1,8 +1,8 @@
 """実重み Irodori-TTS v4-Small を IR v1 コンテナ + golden io へ書き出す台本。
 
-今回のスコープは**テキスト条件エンコーダ**（recon の G1 / G1a / G1b）と **speaker encoder /
-duration predictor**（同 G2 / G3）で、DiT や codec（G4〜G7）は後続の波でこの台本に
-ターゲットとして足す。
+今回のスコープは**テキスト条件エンコーダ**（recon の G1 / G1a / G1b）・**speaker encoder /
+duration predictor**（同 G2 / G3）・**DiT 1 step**（同 G5' = G4 を畳んだ形・ADR 0047）で、
+codec（G6 / G7）は後続の波でこの台本にターゲットとして足す。
 
     cd tools/exporter
     uv run --with 'transformers==5.14.1' python export_irodori.py
@@ -18,7 +18,7 @@ transformers は **5.14.1 でピン**する（`export_embeddinggemma.py` と同�
 `irodori_tts/__init__.py` 経由になるが、そこが引く追加依存は transformers だけなので、
 限定 import の細工は要らない。
 
-## 何をグラフに載せるか（5 ターゲット・B=1・T / S は記号次元）
+## 何をグラフに載せるか（6 ターゲット・B=1・T / S は記号次元）
 
 | ターゲット     | 入力          | 出力        | 中身                                  |
 | -------------- | ------------- | ----------- | ------------------------------------- |
@@ -27,6 +27,7 @@ transformers は **5.14.1 でピン**する（`export_embeddinggemma.py` と同�
 | `caption-proj` | `[1,T,768]`   | `[1,T,512]` | caption 側 projector（同形・別重み）  |
 | `speaker`      | `[1,S,128]`   | `[1,S,768]` | `ReferenceLatentEncoder` + 出力 norm  |
 | `duration`     | 下記 5 本     | `[1]`       | `text_norm` + duration（token-sum 形）|
+| `dit`          | 下記 6 本     | `[1,S,32]`  | DiT 1 step（12 層・G4 畳み込み形）    |
 
 `duration` の入力 5 本は `text_state [1,T,512]` / `speaker_vec [1,768]` /
 `has_speaker [1,1]`（bool）/ `caption_vec [1,512]` / `has_caption [1,1]`（bool）。
@@ -70,6 +71,45 @@ recon の「系列入力なし」は**この重みでは成り立たない**: `d
   「モデルファイルから取り出してホストへ配る値」になり、参照なし / caption なしの正規経路が
   モデルファイル 1 個で閉じなくなる（ADR 0010 の代替案 2 を却下した理由と同じ）
 
+### `dit`（G5' = G4 を畳んだ形）の境界
+
+設計の正本は ADR 0047。入力 6 本は
+
+| 名前            | shape                | 中身                                                    |
+| --------------- | -------------------- | ------------------------------------------------------- |
+| `x_t`           | `[1,S,32]`           | patch 済み latent（S = 記号次元・min 2 / max 750）      |
+| `t_embed`       | `[1,512]`            | `get_timestep_embedding(t, 512)`（**ホスト昇格**）      |
+| `mask`          | `[1,1,1,S+1519]`     | bool。self / text / speaker / caption の順に連結        |
+| `text_state`    | `[1,256,512]`        | `text-proj` の出力を `max_text_len` へ右 pad            |
+| `speaker_state` | `[1,751,768]`        | `speaker` の出力 + 平均トークン前置を 750+1 へ右 pad    |
+| `caption_state` | `[1,512,512]`        | `caption-proj` の出力を `max_caption_len` へ右 pad      |
+
+MUST: **`t_embed` はグラフに入れない** — `get_timestep_embedding` は `cos` を使い、`cos` は
+IR の op 語彙に無い（`sin` だけを足した第 1 層の判断 — ADR 0043）。ホストが 3 行で作る。
+
+MUST: **`text_norm` / `caption_norm` はこのグラフが内包する**（入力は projector の生の出力）。
+`duration` が `text_norm` を内包しているのと同じ理由で、外に出すと 2 本の学習済み RMSNorm
+weight が「モデルファイルから取り出してホストへ配る値」になり、正規経路がモデルファイル
+1 個で閉じなくなる（ADR 0010 の代替案 2 を却下した理由）。pad 行は 0 で、`rms_norm(0)` は
+厳密に 0 なので、pad の位置は norm を通しても 0 のまま（かつマスクで落ちる）。
+speaker 側だけ norm が上流（`speaker` ターゲット）にあるのは、平均トークンの前置が
+ホストに残るため（G2 の境界 — 上の節）。
+
+**G4（context-KV 事前射影）は畳む**（ADR 0047 決定 3）: 各層の `project_context_kv` を
+グラフ内で毎回計算する。別グラフにすると出力 178MB を毎 run アップロードすることになり、
+再計算 59.6 GFLOP/forward を払うほうが差し引き速い。分岐点は「入力値の Session 常駐」。
+
+**uncond はマスクだけで表す**（同決定 1）: 上流の CFG は text / speaker / caption の
+各 uncond で「state を 0 にした context KV」をもう一組作るが、マスクが 0 の区間の寄与は
+`exp(−inf)=0` で厳密に 0 なので、**cond の KV のままマスクだけ 0 にした結果とビット一致**する。
+golden の uncond 3 変種は上流の uncond（state 0 + マスク 0）で参照値を採り、グラフには
+**cond の state + 区間 0 のマスク**を渡す — `EAGER_EQUIV_ATOL = 0` の同値検証が通ることが、
+そのままこの決定の実証になっている。
+
+MUST: SDPA は**保存しない**（既定の分解表 = `PRESERVED_OP_PREFIXES`）。マスクが実行時の
+bool 入力なので融合 attention の契約（マスク無し / 加算型 `[1,1,M,N]`）に載らず、分解経路 +
+`safe_softmax`（ADR 0044）で通す。ターゲット別に `preserved` を持つのはこのため。
+
 `aux_features`（14 次元）は token-sum 形では**一切読まれない**ので入力に持たない。
 恒真化しないよう `_duration_aux_is_inert` が「別の aux を渡しても出力が 1 ビットも変わらない」
 ことを毎回実測する。`_safe_attention_mask`（`model.py:429`）は全 1 マスクでは恒等
@@ -104,10 +144,11 @@ eager 出力）を採り終えるまでパッチを当てない。順序は `exp
 `patch_irodori.patches_applied()` で機械的に守る（破れば偽 PASS）。
 
 speaker / duration が要るパッチは 2 つ（complex RoPE の実数化・rank-2 weight RMSNorm の分割
-— `patch_irodori` のモジュール docstring）。RMSNorm 分割はビット一致が構造的に成り立ち、
-RoPE の実数化は**この重みの幾何（head_dim 64）で**ビット一致することが実測なので、
-`EAGER_EQUIV_ATOL = 0` の同値検証はテキスト系 3 本と同じ厳しさのまま通る（head_dim が
-変われば 1 ulp ずれうる — その時は 0 のまま落ちるので、緩める前に幾何を疑う）。
+— `patch_irodori` のモジュール docstring）で、`dit` はさらに LowRankAdaLN の weightless RMS
+畳み込みを要る。RMSNorm 分割と AdaLN 畳み込みはビット一致が構造的に成り立ち、RoPE の実数化は
+**この重みの幾何（head_dim 64）で**ビット一致することが実測なので、`EAGER_EQUIV_ATOL = 0` の
+同値検証はテキスト系 3 本と同じ厳しさのまま通る（head_dim が変われば 1 ulp ずれうる —
+その時は 0 のまま落ちるので、緩める前に幾何を疑う）。
 
 ## 出力レイアウト
 
@@ -125,7 +166,7 @@ import json
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 from safetensors import safe_open
@@ -134,7 +175,11 @@ from torch import nn
 from torch.export import Dim
 
 from karume import patch_irodori
-from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
+from karume.convert import (
+    PRESERVED_OP_PREFIXES,
+    PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+    normalize_boundary_tensor,
+)
 from karume.ir import IrGraph
 from karume.patch_anima import ROPE_BUFFER_NAMES, assert_rope_lifted
 from karume.paths import INPUTS_ROOT, SERIES_ROOT
@@ -173,15 +218,31 @@ TARGET_TEXT_PROJ = "text-proj"
 TARGET_CAPTION_PROJ = "caption-proj"
 TARGET_SPEAKER = "speaker"
 TARGET_DURATION = "duration"
+TARGET_DIT = "dit"
 #: 同じ token 列 golden ケースを共有する 3 本（backbone を 2 つの projector が食う鎖）。
 TEXT_TARGETS = (TARGET_BACKBONE, TARGET_TEXT_PROJ, TARGET_CAPTION_PROJ)
-TARGETS = (*TEXT_TARGETS, TARGET_SPEAKER, TARGET_DURATION)
+TARGETS = (*TEXT_TARGETS, TARGET_SPEAKER, TARGET_DURATION, TARGET_DIT)
 
 #: テキスト系 3 本の記号次元名（IR に載る名前）。
 TEXT_SYMBOL = "T"
 
 #: `speaker` の記号次元名。参照 latent の**patch 後**の長さで、テキストの T とは別の軸。
 SPEAKER_SYMBOL = "S"
+
+#: `dit` の記号次元名（IR に載る名前 — ADR 0047 の `x_t[1,S,32]` の S）。`speaker` の S とは
+#: 別のグラフの別の軸で、IR のシンボル名はグラフごとに閉じているので衝突しない。
+DIT_SYMBOL = "S"
+
+#: `dit` の **torch 側** `Dim` 名。IR 名（`DIT_SYMBOL`）とは別に持つ。
+#:
+#: MUST: `"S"` にしてはならない — `Dim.__add__` は派生次元の名前を `sympy.sympify(名前)` で
+#: 作るので、`"S"` は sympy の singleton レジストリに解決されて
+#: `TypeError: unsupported operand type(s) for +: 'SingletonRegistry' and 'int'` になる。
+#: `dit` は `mask` の宣言に派生次元（`S+1519` — ADR 0046）を使う唯一のターゲットなので、
+#: ここだけがこの罠を踏む（`speaker` の `Dim("S")` は派生を作らないので無事）。IR 側の名前は
+#: `export_to_file(symbol_names=…)` が torch の内部シンボル（`s27` 等）から付け替えるため、
+#: torch 名が何であっても IR には `DIT_SYMBOL` が載る。
+DIT_TORCH_DIM = "L"
 
 #: 記号次元 T の上限。**text（256）と caption（512）で 1 本に統一**する — backbone は両者で
 #: 共有なので、系列を分けると同じ 1.2GB の重みが 2 部できる。畳み込みで焼かれる定数は
@@ -198,6 +259,13 @@ CODEC_FRAME_RATE = 25
 #: 同じ理由）。
 MIN_SYM_LENGTH = 2
 
+#: `dit` の記号次元 S の上限を決める発話長（秒）。実装側の正本は
+#: `inference_runtime.SamplingRequest.max_seconds` の既定 30.0（`latent_steps` はこの秒数から
+#: `floor(max_seconds × sample_rate / hop_length)` で切られる）。チェックポイントの config には
+#: 入っていない（`ref_max_seconds` は**参照 latent** の上限で別物）ので、`CODEC_FRAME_RATE` と
+#: 同じく外部定数としてここに置く。上限を 750 に置く判断そのものは ADR 0047。
+DIT_MAX_SECONDS = 30.0
+
 
 def speaker_sym_max(model_config: Mapping[str, Any]) -> int:
     """`speaker` の記号次元 S の上限（参照 latent の patch 後の最大長）。
@@ -212,6 +280,20 @@ def speaker_sym_max(model_config: Mapping[str, Any]) -> int:
     steps = int(seconds * CODEC_FRAME_RATE) // patch
     if steps < MIN_SYM_LENGTH:
         raise SystemExit(f"参照 latent の上限長 {steps} が記号次元の最小 {MIN_SYM_LENGTH} 未満")
+    return steps
+
+
+def dit_sym_max(config: Any) -> int:
+    """`dit` の記号次元 S の上限（生成できる latent の最大長 — 30s × 25Hz ÷ patch）。
+
+    `latent_patch_size` は**チェックポイントの config から**取る（x_t の最終次元
+    `latent_dim × latent_patch_size` と同じ出どころ）。焼かれる定数は RoPE 表
+    （`[750,2,64]` f32 = 384KB）だけなので、上限に余裕を持たせてもコンテナはほとんど増えない。
+    """
+    patch = int(config.latent_patch_size)
+    steps = int(DIT_MAX_SECONDS * CODEC_FRAME_RATE) // patch
+    if steps < MIN_SYM_LENGTH:
+        raise SystemExit(f"latent の上限長 {steps} が記号次元の最小 {MIN_SYM_LENGTH} 未満")
     return steps
 
 
@@ -337,6 +419,50 @@ DURATION_CASES: tuple[tuple[str, str, bool, bool], ...] = (
 DURATION_SPEAKER_SOURCE = "ref-5s"
 DURATION_CAPTION_SOURCE = "caption-ja"
 
+#: `dit` の条件 state の供給元ケース（鎖 — 上流ターゲットの torch 期待値そのもの）。
+#: text は Tmax = 256 に対して長め（T=144）、caption は本物の Voice Design 文（T=22）、
+#: speaker は 5s 相当（S=31 → 平均トークン前置で 32）。
+DIT_TEXT_SOURCE = "text-long"
+DIT_CAPTION_SOURCE = "caption-ja"
+DIT_SPEAKER_SOURCE = "ref-5s"
+
+#: `dit` の CFG 変種名（`rf.py` の `independent_names` と同じ綴り）。`None` = cond。
+DIT_UNCOND_VARIANTS = ("text", "speaker", "caption")
+
+#: `dit` の golden ケース `(名前, latent 長 S, 乱数 seed, t, uncond 区間)`。
+#:
+#: `x_t` は決定的 seed の標準正規（推論の x_t は t=1 で純ノイズ・以降もノイズ寄りなので、
+#: 合成で値域の性格が大きく外れない。実 latent は codec 波が済むまで採れない）。
+#:
+#: ケース軸は 4 本:
+#:
+#: - **cond / uncond 3 変種** — uncond は **cond の state のままマスクの当該区間だけ 0**。
+#:   参照値は上流の uncond（state 0 + マスク 0）で採るので、`EAGER_EQUIV_ATOL = 0` の
+#:   同値がそのまま ADR 0047 決定 1 の実証になる。取り違え防止は
+#:   `_dit_uncond_divergence`（cond と実際に違う値が出ることを毎回実測）。
+#: - **t の 2 点**（0.9 / 0.3）— 上流の CFG は t ∈ [0.5, 1.0] だけに掛かるので、その内外を
+#:   1 点ずつ踏む。`t_embed` はホスト生成なので、取り違えは値としてここに出る。
+#: - **S の短長** — 記号次元の下限 2・1s 相当の 25・**宣言上限そのものの 750**。
+#:   750 は中間 `scores[1,20,750,2269]` が 130MB になる点で、実 GPU の門としても重い側。
+#: - uncond 3 変種は cond の 1s ケースと **x_t / t / 条件 state を共有**する（差はマスクだけ）。
+DIT_CASES: tuple[tuple[str, int, int, float, str | None], ...] = (
+    ("dit-cond-min", 2, 301, 0.9, None),
+    ("dit-cond-1s", 25, 302, 0.9, None),
+    ("dit-cond-late", 25, 303, 0.3, None),
+    ("dit-uncond-text", 25, 302, 0.9, "text"),
+    ("dit-uncond-speaker", 25, 302, 0.9, "speaker"),
+    ("dit-uncond-caption", 25, 302, 0.9, "caption"),
+    ("dit-cond-max", 750, 304, 0.9, None),
+)
+
+#: cond と uncond 3 変種の出力が**互いに**違うことを見る下限（`_dit_uncond_divergence`）。
+#:
+#: MUST: 恒真にしない — マスクの区間割り（self S / text 256 / speaker 751 / caption 512 の
+#: 並びとオフセット）が崩れても、ラッパと参照が**同じ**崩れ方をすれば golden は一致する
+#: （例: どの変種も既に pad だった位置しか 0 にしていない = 全変種が cond と同値／3 変種が
+#: 同じ区間を落としている）。4 本の出力の**総当たり最小差**を毎回実測して、その形を落とす。
+DIT_UNCOND_DIVERGENCE_MIN = 1e-3
+
 
 class IrodoriSource:
     """`irodori_tts` パッケージから取り出す実装（`sys.path` 追加で import する）。
@@ -363,6 +489,7 @@ class IrodoriSource:
             ReferenceLatentEncoder,
             RMSNorm,
             TextToLatentRFDiT,
+            get_timestep_embedding,
         )
         from irodori_tts.text_normalization import normalize_text
 
@@ -372,8 +499,12 @@ class IrodoriSource:
         self.duration_cls = DurationPredictor
         self.rms_norm_cls = RMSNorm
         self.model_config_cls = ModelConfig
+        self.dit_cls = TextToLatentRFDiT
         #: 平均トークンの前置は `TextToLatentRFDiT` の staticmethod。台本は式を写さずに呼ぶ。
         self.prepend_masked_mean_token = TextToLatentRFDiT._prepend_masked_mean_token
+        #: `t_embed` のホスト生成（sin/cos 3 行）。**式を写さず呼ぶ** — θ の割り方が上流で
+        #: 変われば、写した式は黙って古いまま通る。
+        self.timestep_embedding = get_timestep_embedding
         self.normalize_text = normalize_text
 
     def model_config(self, raw: Mapping[str, Any]) -> Any:
@@ -507,6 +638,32 @@ def load_duration_predictor(
     return predictor.eval()
 
 
+def load_dit(
+    source: IrodoriSource,
+    state: Mapping[str, torch.Tensor],
+    config: Any,
+    text_config: Mapping[str, Any],
+) -> nn.Module:
+    """`TextToLatentRFDiT` **丸ごと**を組み、チェックポイントの全テンソルを載せる。
+
+    DiT だけを部分的に組み直さないのは、golden の参照値を実装の
+    `forward_with_encoded_conditions`（= 上流の正本経路）から採るため。`strict=True` の
+    全件ロードが「714 本を 1 本残らず消費した」ことの門にもなる。
+
+    backbone は `load_pretrained_backbone_weights=False` で構成する（HF への接続も乱数初期化も
+    走らない — 載せる重みは全て state_dict 側から来る）。**このターゲットは backbone を
+    グラフに載せない**（`DitGraph` が持つのは DiT 本体の部分木だけ）ので、ここで構成された
+    backbone は参照の一部にもならない。
+    """
+    model = source.dit_cls(
+        config,
+        pretrained_backbone_config=dict(text_config),
+        load_pretrained_backbone_weights=False,
+    )
+    model.load_state_dict(state, strict=True)
+    return model.eval()
+
+
 class BackboneGraph(nn.Module):
     """`PretrainedTextBackbone.forward` の export 用ラッパ（マスクを実行時入力に持たない）。
 
@@ -634,6 +791,111 @@ class DurationGraph(nn.Module):
         logits = predictor.token_out_proj(predictor.token_out_norm(hidden)).squeeze(-1)
         frames = torch.nn.functional.softplus(logits.float())
         return torch.log1p(frames.sum(dim=1).clamp_min(0.0))
+
+
+class DitGraph(nn.Module):
+    """DiT 1 step（`forward_with_encoded_conditions`）の export 用ラッパ。
+
+    元の `forward_with_encoded_conditions` との差は 4 点で、いずれも入力契約（B=1・条件は
+    Tmax 右 pad・マスクは self / text / speaker / caption の順に連結）の下で厳密恒等:
+
+    - `t_embed` を**引数で受ける**（`get_timestep_embedding` はホスト — `cos` が語彙に無い）
+    - `text_norm` / `caption_norm` を**このグラフが掛ける**（入力は projector の生の出力。
+      `rms_norm` は行ごとの縮約なので、pad の前に掛けても後に掛けても先頭行は同値。
+      pad 行は 0 で、`rms_norm(0)` も厳密に 0）
+    - `JointAttention` の**マスク 4 本の連結を引数 1 本で受ける**（上流の
+      `torch.cat(context_masks, dim=1)[:, None, None, :]` と同じもの）。K/V の連結は
+      **記号軸 cat**（`S+1519` — ADR 0046）で、条件側の 3 本は静的軸 cat に畳んである
+      （`cat` は結合的で、どちらの括り方でも同じ要素が同じ順に並ぶ）
+    - `nn.Dropout(p=0.0)` を落とす（eval では厳密恒等）
+
+    K/V の射影（`project_context_kv`）は**毎 forward グラフ内で計算する**（G4 の畳み込み —
+    ADR 0047 決定 3）。射影も RoPE も q/k ノルムも実モジュールのメソッドをそのまま呼ぶので、
+    このラッパが写しているのは「連結の順序」と「residual の組み立て」だけ。
+
+    RoPE 表は `speaker` と同じく **Smax で焼いた実数形定数**（`patch_irodori` の
+    `real_pair_rope_table`）で、`[:seq_len]` の記号 prefix スライスが ADR 0010 の経路に乗る。
+    """
+
+    def __init__(self, model: nn.Module, sym_max: int) -> None:
+        super().__init__()
+        self.cond_module = model.cond_module
+        self.in_proj = model.in_proj
+        self.blocks = model.blocks
+        self.out_norm = model.out_norm
+        self.out_proj = model.out_proj
+        self.text_norm = model.text_norm
+        self.caption_norm = model.caption_norm
+        # 素の属性（lifted tensor constant）にする — SpeakerGraph と同じ理由。
+        self.rope_table = patch_irodori.real_pair_rope_table(model.head_dim, sym_max)
+
+    def forward(
+        self,
+        x_t: torch.Tensor,
+        t_embed: torch.Tensor,
+        mask: torch.Tensor,
+        text_state: torch.Tensor,
+        speaker_state: torch.Tensor,
+        caption_state: torch.Tensor,
+    ) -> torch.Tensor:
+        cond_embed = self.cond_module(t_embed)[:, None, :]
+        text = self.text_norm(text_state)
+        caption = self.caption_norm(caption_state)
+        x = self.in_proj(x_t)
+        # 上流の `_rope_freqs(x.shape[1])` と同じ長さまで切る（`JointAttention` 側の
+        # `freqs_cis[:seq_len]` は、この時点で恒等になる）。
+        freqs = self.rope_table[: x.shape[1]]
+        for block in self.blocks:
+            h, attention_gate = block.attention_adaln(x, cond_embed)
+            x = x + attention_gate * self._attention(
+                block.attention, h, text, speaker_state, caption, mask, freqs
+            )
+            h, mlp_gate = block.mlp_adaln(x, cond_embed)
+            x = x + mlp_gate * block.mlp(h)
+        return self.out_proj(self.out_norm(x))
+
+    @staticmethod
+    def _attention(
+        attention: nn.Module,
+        x: torch.Tensor,
+        text: torch.Tensor,
+        speaker: torch.Tensor,
+        caption: torch.Tensor,
+        mask: torch.Tensor,
+        freqs: torch.Tensor,
+    ) -> torch.Tensor:
+        """`JointAttention.forward` の同値実装（連結済み K/V + 連結済みマスク）。"""
+        bsz, seq_len, _ = x.shape
+        heads, head_dim = attention.heads, attention.head_dim
+        q = attention.wq(x).reshape(bsz, seq_len, heads, head_dim)
+        k_self = attention.wk(x).reshape(bsz, seq_len, heads, head_dim)
+        v_self = attention.wv(x).reshape(bsz, seq_len, heads, head_dim)
+        projected = attention.project_context_kv(
+            text_context=text, speaker_context=speaker, caption_context=caption
+        )
+        if len(projected) != 6:
+            raise AssertionError(
+                f"context KV が {len(projected)} 本（text / speaker / caption の 3 条件 = 6 本）"
+                " — この重みは 3 条件とも有効なはずで、条件の有無が config と食い違っている"
+            )
+        k_text, v_text, k_speaker, v_speaker, k_caption, v_caption = projected
+
+        q = attention.q_norm(q)
+        k_self = attention.k_norm(k_self)
+        q = attention._apply_rotary_half(q, freqs)
+        k_self = attention._apply_rotary_half(k_self, freqs)
+
+        context_k = torch.cat([k_text, k_speaker, k_caption], dim=1)
+        context_v = torch.cat([v_text, v_speaker, v_caption], dim=1)
+        k = torch.cat([k_self, context_k], dim=1)
+        v = torch.cat([v_self, context_v], dim=1)
+
+        y = torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=mask, is_causal=False
+        ).transpose(1, 2)
+        y = y.reshape(bsz, seq_len, attention.dim)
+        y = y * torch.sigmoid(attention.gate(x))
+        return attention.wo(y)
 
 
 def build_cases(
@@ -856,6 +1118,198 @@ def _duration_aux_is_inert(
     return evidence
 
 
+def _right_pad(state: torch.Tensor, length: int, where: str) -> torch.Tensor:
+    """`[1,T,D]` を `[1,length,D]` へ**右詰め 0 pad** する（ADR 0047 のホスト残置）。"""
+    used = int(state.shape[1])
+    if used > length:
+        raise SystemExit(f"{where}: 長さ {used} が条件の宣言長 {length} を超えている")
+    padded = state.new_zeros((int(state.shape[0]), length, int(state.shape[2])))
+    padded[:, :used] = state
+    return padded
+
+
+def _segment_mask(length: int, used: int) -> torch.Tensor:
+    """`[1,length]` の bool マスク（先頭 `used` 本が True）。`used=0` が uncond の区間。"""
+    mask = torch.zeros((1, length), dtype=torch.bool)
+    mask[0, :used] = True
+    return mask
+
+
+def _dit_cases(
+    source: IrodoriSource,
+    config: Any,
+    model_config: Mapping[str, Any],
+    text_norm: nn.Module,
+    caption_norm: nn.Module,
+    speaker_max: int,
+    sym_max: int,
+    text_proj: Mapping[str, torch.Tensor],
+    caption_proj: Mapping[str, torch.Tensor],
+    speaker: Mapping[str, torch.Tensor],
+) -> tuple[dict[str, dict[str, torch.Tensor]], dict[str, dict[str, torch.Tensor]]]:
+    """`dit` のグラフ入力と、**実モジュール呼び出し用**の完全な引数を組む。
+
+    戻りは `(グラフ入力, 参照呼び出しの kwargs)`。前者は 6 本のグラフ入力そのもの、後者は
+    `forward_with_encoded_conditions` の引数（**norm 済み**の条件 state と区間マスク）で、
+    参照値を採るのに使う。
+
+    MUST: 条件 state は上流ターゲットの torch 期待値から鎖にし、平均トークンの前置と
+    `t_embed` は実装の関数を**呼んで**作る（式を写さない）。
+
+    MUST: uncond 変種の参照は上流と同じ「state を 0 にしたうえでマスクも 0」で採る。
+    グラフ側は cond の state のままマスクだけ 0 にするので、両者の一致が ADR 0047 決定 1 の
+    実証になる（恒真ではない — `_dit_uncond_divergence` が 4 本の出力の相互差を実測する）。
+    """
+    for label, table, key in (
+        ("text-proj", text_proj, DIT_TEXT_SOURCE),
+        ("caption-proj", caption_proj, DIT_CAPTION_SOURCE),
+        ("speaker", speaker, DIT_SPEAKER_SOURCE),
+    ):
+        if key not in table:
+            raise SystemExit(f"dit が参照する {label} ケース '{key}' が golden に無い")
+
+    with torch.no_grad():
+        speaker_packed, _speaker_mask = source.prepend_masked_mean_token(
+            speaker[DIT_SPEAKER_SOURCE],
+            torch.ones(speaker[DIT_SPEAKER_SOURCE].shape[:2], dtype=torch.bool),
+        )
+    packed = {
+        "text": text_proj[DIT_TEXT_SOURCE],
+        # 平均トークンを前置した後の長さ（`speaker` グラフの出力 + 1）。
+        "speaker": speaker_packed,
+        "caption": caption_proj[DIT_CAPTION_SOURCE],
+    }
+    caps = {
+        "text": int(model_config["max_text_len"]),
+        "speaker": speaker_max + 1,
+        "caption": int(model_config["max_caption_len"]),
+    }
+    padded = {
+        name: _right_pad(state, caps[name], f"dit の {name} 条件") for name, state in packed.items()
+    }
+    with torch.no_grad():
+        # 参照が食うのは norm 済みの state（`encode_conditions` が掛けてから DiT へ渡す）。
+        # グラフは生の state を受けて同じ norm を内側で掛ける。
+        normed = {
+            "text": text_norm(padded["text"]),
+            "speaker": padded["speaker"],
+            "caption": caption_norm(padded["caption"]),
+        }
+
+    latent_dim = int(config.patched_latent_dim)
+    embed_dim = int(config.timestep_embed_dim)
+    inputs: dict[str, dict[str, torch.Tensor]] = {}
+    reference: dict[str, dict[str, torch.Tensor]] = {}
+    for name, length, seed, t_value, uncond in DIT_CASES:
+        if uncond is not None and uncond not in DIT_UNCOND_VARIANTS:
+            raise SystemExit(f"{name}: uncond 区間 {uncond!r} は {DIT_UNCOND_VARIANTS} に無い")
+        if not MIN_SYM_LENGTH <= length <= sym_max:
+            raise SystemExit(
+                f"{name}: S={length} が記号次元の範囲 [{MIN_SYM_LENGTH}, {sym_max}] の外"
+            )
+        generator = torch.Generator().manual_seed(seed)
+        x_t = torch.randn(1, length, latent_dim, generator=generator)
+        t = torch.tensor([t_value], dtype=torch.float32)
+        with torch.no_grad():
+            t_embed = source.timestep_embedding(t, embed_dim).to(dtype=x_t.dtype)
+        masks = {
+            segment: _segment_mask(
+                caps[segment], 0 if uncond == segment else int(packed[segment].shape[1])
+            )
+            for segment in DIT_UNCOND_VARIANTS
+        }
+        # 上流 `JointAttention.forward` の `torch.cat(context_masks, dim=1)[:, None, None, :]`
+        # そのもの（self マスクは推論の全経路で全 1 — recon §1）。**並びは
+        # `DIT_UNCOND_VARIANTS` の順を明示して取る** — グラフ側の K/V の連結順がこの順なので、
+        # dict の挿入順に暗黙で頼ると入れ替えが静かに通る。
+        mask = torch.cat(
+            [
+                torch.ones((1, length), dtype=torch.bool),
+                *(masks[segment] for segment in DIT_UNCOND_VARIANTS),
+            ],
+            dim=1,
+        )[:, None, None, :]
+        inputs[name] = {
+            "x_t": x_t,
+            "t_embed": t_embed,
+            "mask": mask,
+            "text_state": padded["text"],
+            "speaker_state": padded["speaker"],
+            "caption_state": padded["caption"],
+        }
+        reference[name] = {
+            "x_t": x_t,
+            "t": t,
+            **{
+                f"{segment}_state": (
+                    torch.zeros_like(normed[segment]) if uncond == segment else normed[segment]
+                )
+                for segment in DIT_UNCOND_VARIANTS
+            },
+            **{f"{segment}_mask": value for segment, value in masks.items()},
+        }
+    return inputs, reference
+
+
+def _call_dit(model: nn.Module, args: Mapping[str, torch.Tensor]) -> torch.Tensor:
+    """実モジュールの `forward_with_encoded_conditions` を呼ぶ（参照値の採取点）。
+
+    `latent_mask=None` は上流の推論経路そのまま（`JointAttention` が全 1 を作る）。
+    """
+    with torch.no_grad():
+        return model.forward_with_encoded_conditions(
+            x_t=args["x_t"],
+            t=args["t"],
+            text_state=args["text_state"],
+            text_mask=args["text_mask"],
+            speaker_state=args["speaker_state"],
+            speaker_mask=args["speaker_mask"],
+            caption_state=args["caption_state"],
+            caption_mask=args["caption_mask"],
+            latent_mask=None,
+        )
+
+
+def _pristine_dit_outputs(
+    model: nn.Module, reference: Mapping[str, Mapping[str, torch.Tensor]]
+) -> dict[str, torch.Tensor]:
+    """**パッチ前**の DiT 出力（`[1,S,32]` の v_pred）。"""
+    if patch_irodori.patches_applied():
+        raise AssertionError("パッチ適用後に参照を採ろうとした（同値検証が恒真化する）")
+    return {name: _call_dit(model, args) for name, args in reference.items()}
+
+
+def _dit_uncond_divergence(pristine: Mapping[str, torch.Tensor]) -> dict[str, float]:
+    """マスクだけが違う 4 本（cond + uncond 3 変種）の出力が**互いに**違うことを実測する。
+
+    MUST: 恒真にしない — 区間の割り方（self S / text / speaker / caption の並びとオフセット）が
+    崩れても、ラッパと参照が同じ崩れ方をすれば golden は一致してしまう。総当たりの最小差が
+    下限を割ったら落とす。
+    """
+    keys = {(length, seed, t) for _n, length, seed, t, uncond in DIT_CASES if uncond is not None}
+    if len(keys) != 1:
+        raise AssertionError(
+            f"uncond 変種が x_t / t を共有していない（{sorted(keys)}）— マスクだけの差にならない"
+        )
+    key = keys.pop()
+    group = [name for name, length, seed, t, _u in DIT_CASES if (length, seed, t) == key]
+    if len(group) != 1 + len(DIT_UNCOND_VARIANTS):
+        raise AssertionError(
+            f"cond + uncond 3 変種の組が {group} — 比較の基準になる cond ケースが要る"
+        )
+    pairs = {
+        f"{lhs} vs {rhs}": float((pristine[lhs] - pristine[rhs]).abs().max())
+        for index, lhs in enumerate(group)
+        for rhs in group[index + 1 :]
+    }
+    worst = min(pairs.values())
+    if worst < DIT_UNCOND_DIVERGENCE_MIN:
+        raise AssertionError(
+            f"cond / uncond の出力差の最小が {worst} — マスクの区間割りが効いていない疑い"
+        )
+    return {name: round(value, 5) for name, value in pairs.items()}
+
+
 def _pristine_outputs(
     backbone: nn.Module,
     projectors: Mapping[str, nn.Module],
@@ -987,6 +1441,33 @@ def _sanity(pristine: Mapping[str, Mapping[str, torch.Tensor]]) -> dict[str, Any
     return {name: round(value, 5) for name, value in divergence.items()}
 
 
+class TargetAxis(NamedTuple):
+    """ターゲット別の記号次元の宣言と、SDPA の扱い。
+
+    - `torch_dim` / `symbol`: torch の `Dim` 名と IR に載る名前。**別々に持つ** —
+      `dit` は torch 名に `"S"` を使えない（`DIT_TORCH_DIM` の MUST）。
+    - `dynamic`: **入力位置 → (軸, オフセット)**。オフセット 0 は素のシンボル、非 0 は
+      派生次元（`S+1519` — ADR 0046 / `dit` の `mask` だけ）。
+    - `preserved`: 分解表から外す op。融合 attention（ADR 0023）を使うのはマスクが無いか
+      加算型 `[1,1,M,N]` のターゲットだけで、`dit` は実行時 bool マスクなので分解経路
+      （+ `safe_softmax` — ADR 0044）に落とす。
+    """
+
+    torch_dim: str
+    symbol: str
+    upper: int
+    dynamic: Mapping[int, tuple[int, int]]
+    preserved: tuple[str, ...]
+
+
+def _dynamic_axis(found: tuple[int, int] | None, seq: Any) -> dict[int, Any] | None:
+    """{@link TargetAxis.dynamic} の 1 要素を `torch.export` の `dynamic_shapes` へ落とす。"""
+    if found is None:
+        return None
+    axis, offset = found
+    return {axis: seq if offset == 0 else seq + offset}
+
+
 def _graph_summary(graph: IrGraph, path: Path) -> dict[str, Any]:
     return {
         "nodes": len(graph.nodes),
@@ -1050,9 +1531,15 @@ def export_series(
         float(config.norm_eps),
     )
     duration = load_duration_predictor(source, state, config)
+    dit = load_dit(source, state, config, text_config)
     cases = build_cases(model_dir, source, text_config, sym_max)
     speaker_max = speaker_sym_max(model_config)
     speaker_cases = build_speaker_cases(int(config.speaker_patched_latent_dim), speaker_max)
+    dit_max = dit_sym_max(config)
+    #: `dit` の mask の条件側の総長（派生次元 `S+<これ>` — ADR 0047 の 1519）。
+    dit_context_total = (
+        int(model_config["max_text_len"]) + (speaker_max + 1) + int(model_config["max_caption_len"])
+    )
 
     # ---- ① パッチ前の参照（golden の期待値）と方式の実測 ----
     pristine = _pristine_outputs(backbone, projectors, cases)
@@ -1082,6 +1569,20 @@ def export_series(
     aux_inert = _duration_aux_is_inert(
         duration, duration_reference, aux_dim, pristine[TARGET_DURATION]
     )
+    dit_inputs, dit_reference = _dit_cases(
+        source,
+        config,
+        model_config,
+        text_norm,
+        caption_norm,
+        speaker_max,
+        dit_max,
+        pristine[TARGET_TEXT_PROJ],
+        pristine[TARGET_CAPTION_PROJ],
+        pristine[TARGET_SPEAKER],
+    )
+    pristine[TARGET_DIT] = _pristine_dit_outputs(dit, dit_reference)
+    dit_divergence = _dit_uncond_divergence(pristine[TARGET_DIT])
 
     # ---- ② パッチ適用（ここから先で採った eager 値は参照に使えない） ----
     rope_buffers = sorted(
@@ -1096,11 +1597,13 @@ def export_series(
         TARGET_CAPTION_PROJ: ProjectorGraph(projectors[TARGET_CAPTION_PROJ]),
         TARGET_SPEAKER: SpeakerGraph(speaker_encoder, speaker_norm, speaker_max),
         TARGET_DURATION: DurationGraph(duration, text_norm),
+        TARGET_DIT: DitGraph(dit, dit_max),
     }
     graph_args: dict[str, dict[str, dict[str, torch.Tensor]]] = {
         TARGET_BACKBONE: {name: {"input_ids": ids} for name, _kind, ids in cases},
         TARGET_SPEAKER: {name: {"latent": latent} for name, latent in speaker_cases},
         TARGET_DURATION: duration_inputs,
+        TARGET_DIT: dit_inputs,
     }
     for target in (TARGET_TEXT_PROJ, TARGET_CAPTION_PROJ):
         graph_args[target] = {
@@ -1121,34 +1624,56 @@ def export_series(
     }
 
     # ---- ④ export と golden の書き出し ----
-    # ターゲット別の `(記号次元名, 上限, 記号を持つ入力の位置)`。テキスト系 3 本と duration は
-    # T（512）で、speaker だけ S（参照 latent の patch 後上限）。duration の 2〜5 本目
-    # （条件ベクトルと bool）は記号を持たない固定 shape。
-    axes: dict[str, tuple[str, int, tuple[int, ...]]] = {
-        TARGET_BACKBONE: (TEXT_SYMBOL, sym_max, (0,)),
-        TARGET_TEXT_PROJ: (TEXT_SYMBOL, sym_max, (0,)),
-        TARGET_CAPTION_PROJ: (TEXT_SYMBOL, sym_max, (0,)),
-        TARGET_SPEAKER: (SPEAKER_SYMBOL, speaker_max, (0,)),
-        TARGET_DURATION: (TEXT_SYMBOL, sym_max, (0,)),
+    # ターゲット別の記号次元の宣言（{@link TargetAxis}）。テキスト系 3 本と duration は
+    # T（512）で、speaker は S（参照 latent の patch 後上限）、dit も S（latent 長 750 —
+    # 別グラフなので名前は衝突しない）。duration の 2〜5 本目（条件ベクトルと bool）と
+    # dit の 2 / 4〜6 本目（t_embed と条件 state）は記号を持たない固定 shape。
+    axes: dict[str, TargetAxis] = {
+        TARGET_BACKBONE: TargetAxis(
+            TEXT_SYMBOL, TEXT_SYMBOL, sym_max, {0: (1, 0)}, PRESERVED_OP_PREFIXES_WITH_ATTENTION
+        ),
+        TARGET_TEXT_PROJ: TargetAxis(
+            TEXT_SYMBOL, TEXT_SYMBOL, sym_max, {0: (1, 0)}, PRESERVED_OP_PREFIXES_WITH_ATTENTION
+        ),
+        TARGET_CAPTION_PROJ: TargetAxis(
+            TEXT_SYMBOL, TEXT_SYMBOL, sym_max, {0: (1, 0)}, PRESERVED_OP_PREFIXES_WITH_ATTENTION
+        ),
+        TARGET_SPEAKER: TargetAxis(
+            SPEAKER_SYMBOL,
+            SPEAKER_SYMBOL,
+            speaker_max,
+            {0: (1, 0)},
+            PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        ),
+        TARGET_DURATION: TargetAxis(
+            TEXT_SYMBOL, TEXT_SYMBOL, sym_max, {0: (1, 0)}, PRESERVED_OP_PREFIXES_WITH_ATTENTION
+        ),
+        TARGET_DIT: TargetAxis(
+            DIT_TORCH_DIM,
+            DIT_SYMBOL,
+            dit_max,
+            {0: (1, 0), 2: (3, dit_context_total)},
+            PRESERVED_OP_PREFIXES,
+        ),
     }
     written: dict[str, Any] = {}
     for target in targets:
-        symbol, upper, dynamic_positions = axes[target]
+        axis = axes[target]
         target_dir = out_dir / target
         target_dir.mkdir(parents=True, exist_ok=True)
         by_case = graph_args[target]
         longest = max(by_case, key=lambda name: next(iter(by_case[name].values())).shape[1])
         example = tuple(by_case[longest].values())
-        seq = Dim(symbol, min=MIN_SYM_LENGTH, max=upper)
+        seq = Dim(axis.torch_dim, min=MIN_SYM_LENGTH, max=axis.upper)
         graph = export_to_file(
             graphs[target],
             example,
             target_dir / MODEL_FILE,
             dynamic_shapes=tuple(
-                {1: seq} if index in dynamic_positions else None for index in range(len(example))
+                _dynamic_axis(axis.dynamic.get(index), seq) for index in range(len(example))
             ),
-            symbol_names=(symbol,),
-            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+            symbol_names=(axis.symbol,),
+            preserved=axis.preserved,
         )
         io_files = _write_io(graph, by_case, pristine[target], target_dir)
         written[target] = {
@@ -1161,6 +1686,10 @@ def export_series(
         "case_lengths": {name: int(ids.shape[1]) for name, _kind, ids in cases},
         "speaker_case_lengths": {name: int(latent.shape[1]) for name, latent in speaker_cases},
         "speaker_sym_max": speaker_max,
+        "dit_case_lengths": {name: int(args["x_t"].shape[1]) for name, args in dit_inputs.items()},
+        "dit_sym_max": dit_max,
+        "dit_context_total": dit_context_total,
+        "dit_uncond_divergence": dit_divergence,
         "rope_buffers_lifted": rope_buffers,
         "static_scheme_max_abs": {k: float(f"{v:.3e}") for k, v in static_evidence.items()},
         "no_reference_max_abs": no_reference_max_abs,

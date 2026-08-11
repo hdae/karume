@@ -1,8 +1,8 @@
 """Irodori-TTS v4 を torch.export 可能にするパッチ層。
 
 対象は**テキスト条件エンコーダ**（同梱 ModernBERT-ja-310m backbone）と、Irodori 自前の
-Transformer 系（speaker encoder = `ReferenceLatentEncoder` / duration predictor）。パッチは
-3 種類:
+Transformer 系（speaker encoder = `ReferenceLatentEncoder` / duration predictor / DiT）。
+パッチは 4 種類:
 
 1. **ModernBertAttention の qkv 取り出しを rank ≤ 4 に落とす** — 原実装は
    `Wqkv(x).view(B, T, 3, H, D)` の **rank 5** を作ってから `unbind(dim=-3)` で 3 本に割る。
@@ -19,9 +19,15 @@ Transformer 系（speaker encoder = `ReferenceLatentEncoder` / duration predicto
    「weight = 正規化軸長の rank-1」（ADR 0017）に入らない。正規化そのものは最終次元
    （head_dim）1 本なので、`rms_norm`（weight 無し = ones）と weight の broadcast 乗算へ
    割る。**rank-1 weight の経路（既存の全 RMSNorm）は逐語のまま**通す。
+4. **LowRankAdaLN の weightless RMS を `rms_norm` へ畳む** — `LowRankAdaLN.forward` は
+   `RMSNorm` モジュールを使わず正規化を式で直書きしており（`x * rsqrt(mean(x²)+eps)`）、
+   `normalize._fold_rms_norm` は weight つき rank-1 の形しか掴まないので `aten.mean.dim` /
+   `aten.rsqrt.default` が IR に残る。`F.rms_norm(x, (D,), None, eps)`（weight 無し =
+   ones 合成）へ差し替えると既存の畳み込み経路にそのまま乗る（下の
+   `_folded_rms_low_rank_adaln_forward`）。
 
 MUST: パッチ後のモジュールはパッチ前と **eager 同値**であること（`export_irodori.py` が
-実重み・全 golden ケースで実測し、差が出たら export ごと落とす）。3 は演算列が 1 対 1 で
+実重み・全 golden ケースで実測し、差が出たら export ごと落とす）。3 と 4 は演算列が 1 対 1 で
 **ビット一致**が構造的に成り立つ。2 は式としては厳密同値だが**ビット一致は形依存**
 （`_real_pair_apply_rotary_emb` の注記 — この重みの head_dim 64 では実測 0）。
 
@@ -194,6 +200,35 @@ def _split_weight_rms_norm_forward(self: Any, x: torch.Tensor) -> torch.Tensor:
     return (normalized * self.weight).to(x_dtype)
 
 
+def _folded_rms_low_rank_adaln_forward(
+    self: Any, x: torch.Tensor, cond_embed: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """`irodori_tts.model.LowRankAdaLN.forward` の同値実装（正規化を `rms_norm` に寄せる）。
+
+    原実装との差は**正規化 1 行だけ**で、残り（shift / scale / gate の低ランク補正・
+    変調・`tanh` ゲート）は逐語。
+
+    同値の根拠: 原実装の `x * rsqrt((x*x).mean(-1, keepdim=True) + eps)` は
+    `F.rms_norm(x, (D,), None, eps)` の定義そのもの（weight 無し = ones）で、縮約軸も
+    式も同じ。**ビット一致**が主張（`export_irodori.py` の atol 0 が実重みで実測する）。
+
+    差し替える理由は語彙の側にある: この正規化は `RMSNorm` モジュールを経由しないので
+    `normalize._fold_rms_norm`（weight つき rank-1 の形を掴む）に引っかからず、
+    `aten.mean.dim` / `aten.rsqrt.default` が IR に残ってしまう。
+    """
+    shift, scale, gate = cond_embed.chunk(3, dim=-1)
+    shift = self.shift_up(self.shift_down(torch.nn.functional.silu(shift))) + shift
+    scale = self.scale_up(self.scale_down(torch.nn.functional.silu(scale))) + scale
+    gate = self.gate_up(self.gate_down(torch.nn.functional.silu(gate))) + gate
+
+    x_dtype = x.dtype
+    x = x.float()
+    x = torch.nn.functional.rms_norm(x, (x.shape[-1],), None, self.eps)
+    x = x * (1.0 + scale) + shift
+    gate = torch.tanh(gate)
+    return x.to(x_dtype), gate
+
+
 def apply_patches() -> None:
     """ModernBERT / Irodori 本体のパッチをプロセス全域へ当てる（冪等）。
 
@@ -210,4 +245,5 @@ def apply_patches() -> None:
     # SelfAttention.forward はモジュール大域の名前で引くので、大域を差し替えれば届く。
     irodori_model.apply_rotary_emb = _real_pair_apply_rotary_emb
     irodori_model.RMSNorm.forward = _split_weight_rms_norm_forward
+    irodori_model.LowRankAdaLN.forward = _folded_rms_low_rank_adaln_forward
     _APPLIED = True

@@ -5,9 +5,10 @@
 回る単体レベルの同値だけを固定する。
 
 MUST: 主張は**ビット一致**。差し替えたのは qkv の取り出し方・RoPE の複素数を使わない書き方・
-RMSNorm の weight 分割だけで、演算順序も丸め方も変わらない — 「差が小さい」で通す形にすると、
-取り違え（q/k/v の順序違い・cos と sin の入れ替え・head ごと weight の転置）が
-「たまたま近い値」で素通りしうる。
+RMSNorm の weight 分割・AdaLN の weightless RMS の畳み込みだけで、演算順序も丸め方も
+変わらない — 「差が小さい」で通す形にすると、取り違え（q/k/v の順序違い・cos と sin の
+入れ替え・head ごと weight の転置・shift と scale の入れ替え）が「たまたま近い値」で
+素通りしうる。
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ def restore_forward():
     original = modernbert.ModernBertAttention.forward
     original_rope = irodori_model.apply_rotary_emb
     original_norm = irodori_model.RMSNorm.forward
+    original_adaln = irodori_model.LowRankAdaLN.forward
     applied = patch_irodori._APPLIED
     try:
         yield irodori_model
@@ -56,6 +58,7 @@ def restore_forward():
         modernbert.ModernBertAttention.forward = original
         irodori_model.apply_rotary_emb = original_rope
         irodori_model.RMSNorm.forward = original_norm
+        irodori_model.LowRankAdaLN.forward = original_adaln
         patch_irodori._APPLIED = applied
         patch_irodori._ORIGINAL_APPLY_ROTARY_EMB = None
 
@@ -228,3 +231,55 @@ class TestPatchedRmsNormIsBitIdentical:
             actual = norm(x)
 
         assert torch.equal(actual, expected)
+
+
+class TestPatchedLowRankAdaLnIsBitIdentical:
+    """DiT の `LowRankAdaLN` の weightless RMS を `rms_norm` へ寄せても値が変わらないこと。"""
+
+    MODEL_DIM, RANK, EPS = 12, 5, 1e-5
+
+    def _module(self, irodori_model):
+        """低ランク補正が**効いている**状態の AdaLN を作る。
+
+        MUST: `nn.init.zeros_` されている up 側の weight / bias を乱数で埋め直す — 素の
+        初期化のままだと補正項が恒等になり、写し間違い（shift と scale の入れ替え・
+        `+ shift` の落とし）が「どちらも同じ値」で素通りする。
+        """
+        torch.manual_seed(3)
+        module = irodori_model.LowRankAdaLN(
+            model_dim=self.MODEL_DIM, rank=self.RANK, eps=self.EPS
+        ).eval()
+        for parameter in module.parameters():
+            torch.nn.init.normal_(parameter)
+        x = torch.randn(1, 4, self.MODEL_DIM)
+        cond_embed = torch.randn(1, 1, 3 * self.MODEL_DIM)
+        return module, x, cond_embed
+
+    def test_the_patched_forward_reproduces_the_original(self, restore_forward):
+        irodori_model = restore_forward
+        module, x, cond_embed = self._module(irodori_model)
+        with torch.no_grad():
+            expected_x, expected_gate = module(x, cond_embed)
+
+        patch_irodori.apply_patches()
+        assert (
+            irodori_model.LowRankAdaLN.forward is patch_irodori._folded_rms_low_rank_adaln_forward
+        )
+        with torch.no_grad():
+            actual_x, actual_gate = module(x, cond_embed)
+
+        assert torch.equal(actual_x, expected_x)
+        assert torch.equal(actual_gate, expected_gate)
+
+    def test_the_low_rank_correction_is_not_inert(self, restore_forward):
+        """恒真化の門 — 補正が効いていなければ、この同値検証は何も見ていない。"""
+        irodori_model = restore_forward
+        module, x, cond_embed = self._module(irodori_model)
+        with torch.no_grad():
+            with_correction, _gate = module(x, cond_embed)
+            for name in ("shift_up", "scale_up", "gate_up"):
+                torch.nn.init.zeros_(getattr(module, name).weight)
+                torch.nn.init.zeros_(getattr(module, name).bias)
+            without_correction, _gate = module(x, cond_embed)
+
+        assert not torch.allclose(with_correction, without_correction)
