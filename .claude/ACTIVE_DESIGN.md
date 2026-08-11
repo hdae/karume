@@ -24,7 +24,8 @@
   完了**（同 ADR 決定 5・−2,098,128 B・速度は中立・sha256 は 3 波とも不変）: transformers の
   `disentangled_attention_bias` を差し替え（`karume/patch_deberta.py`）+ ホスト生成
   （`text/rel-pos-tables.ts`）+ golden とのバイト一致パリティ門。**3 波累計で
-  334,545,336 → 307,068,768 B（−8.21%）・`w8` 取得量 −6.86%**。**HF 2 リポは未アップロード**。
+  334,545,336 → 307,068,768 B（−8.21%）・`w8` 取得量 −6.86%**。**HF は `karume-sbv2-jvnv` の
+  上げ直しが未了**（fn は HF 非公開 — 2026-08-08 裁定）。
 - **モデル拡充波 — EmbeddingGemma 動作確認済み（2026-08-11）**: gelu_tanh op（第 2 層 —
   **op 追加の判定手順は ADR [0043](../docs/decisions/0043-op-addition-layers.md)**）+
   exporter 対応（FOLDABLE に bitwise_or/gt・RoPE 降格の接尾一致）+ 台本
