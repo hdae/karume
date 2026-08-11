@@ -19,8 +19,11 @@
   M≤64 幾何バケット（ADR 0022 追記）+ rope 融合の Gemma 形一般化（ADR 0040 追記）により
   bare 76.4 → 52.7ms・対 ORT Web WebGPU 2.5 倍差・残りはホスト支配 —
   [research/2026-08-11-skinny-m-geometry.md](../docs/research/2026-08-11-skinny-m-geometry.md)。
-  未裁定の伸び代 = M 65〜512 バケット（Anima/SBV2 波及込みで裁定）・融合 attention の
-  mask 対応（ADR 0023 改訂級）。batch>1 export は変換段でブロック（known-issues）。
+  **B1 = 融合 attention の mask 対応も完了（同日・ADR 0023 追記）**: attention が arity 3..4
+  になり EG は SDPA 保存で 1,273 ノード / 838 dispatch。ただし **wall は中立** — dispatch
+  削減はホスト固定費 ~38ms に効かないという負の実測を獲得（固定費の分解が open）。
+  次 = M 65〜512 バケット（Anima/SBV2 A/B 込みで裁定・T=318 の GPU ~40ms が対象）→
+  ORT 再ベンチ → Irodori。batch>1 export は変換段でブロック（known-issues）。
   モデル候補キュー: Irodori-TTS v4（**ソース精読 recon 済み 2026-08-11** — 新規 IR op は
   sin 1 本・export 6+2 グラフ・裁定済み: CFG マスクは実行時 bool マスク案 a〈ADR 要〉・
   透かしは公式準拠 + フラグ・課題は codec タイル化と Unigram+byte_fallback tokenizer）→

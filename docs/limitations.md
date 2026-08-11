@@ -245,6 +245,19 @@ placeholder では成立しない（`_eval_static` が fail loudly — 「単一
 max_position_embeddings は 2048）。上げる場合は帯マスク定数が Tmax² で膨らむ
 （512 → 2MB / 2048 → 32MB）ことの裁定とセットで行う。
 
+## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・i8a8 と非併用・ビット同一門は f32 経路
+
+`attention` の第 4 入力 mask（ADR 0023 追記 2026-08-11）は意図的に狭い:
+
+- 受理は **f32・加算型・`[1,1,M,N]` ちょうど**（B·H へ broadcast）。実行時 bool マスク・
+  `[B,1,M,N]`（バッチ別）・`[1,H,M,N]`（head 別）は fail loudly — Irodori CFG の裁定
+  「実行時 bool マスク（案 a）」の波で、ADR 0016 のガード不活性証明の再設計とセットで広げる。
+- **mask × `attentionCompute:'i8a8'` は fail loudly**（i8a8 の ①QK に epilogue が無い —
+  黙って f32 へ縮退させない）。対応するかは別波の設計判断。
+- 分解経路とのビット同一の恒久門（parity）は **f32 経路のみ**。s16 / c16 × mask は WGSL
+  生成・パイプライン作成・実 GPU 実行の確認まで（門を足すか ADR に f32 限定と明記し続けるかは
+  そのケースが実資産に現れた時に判断）。
+
 ## hub: 並行取得のキャンセル粒度は single-flight の leader 単位
 
 取得層（`@hdae/fetch-cache`）の single-flight では、同一 (cacheName, URL) への 2 本目以降の

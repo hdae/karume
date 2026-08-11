@@ -111,3 +111,38 @@
 - 将来: 案 A（flash）キー変種（D≤152・別キー + tolerance 再導出）/ conditioner・
   text_encoder（mask 契約拡張）への適用 / cross-attention K/V の step 跨ぎ再計算
   （エクスポータ側のグラフ分割 — 設計書 §7）
+
+## 追記（2026-08-11）: 加算 mask 入力（決定 4 の改訂）
+
+「mask は欄を作らない」を改訂し、**省略可能な第 4 入力 `mask`** を契約に加えた
+（EmbeddingGemma の帯マスク付き双方向 attention を融合経路に乗せるため — 将来枠 :111 の
+mask 契約拡張の実施）。受理は狭く:
+
+- **f32・rank-4・shape はちょうど `[1,1,M,N]`**（加算型 `S' = S + mask`・B·H の全バッチへ
+  broadcast）。bool / `[B,1,M,N]` / `[1,H,M,N]` は fail loudly — 実行時マスク
+  （Irodori CFG の裁定「案 a」）を入れる波で、添字算術とセットで契約を改版する。
+- 契約機構は `ContractBase.maxArity`（arity 3..4 の閉区間 — `variadic` とは別。「何本でも」
+  ではなく「決まったスロットが 1 つ増えるだけ」）。
+- **mask × `attentionCompute:'i8a8'` は fail loudly**（i8a8 の ①QK は epilogue を持たない —
+  黙って f32 へ縮退させない）。
+
+**ビット同一の保存**: 変更は ①QK の書き出し epilogue で `S' = fl(fl(Σqk) + mask[m·N+n])` を
+1 度足すだけ。分解経路の `bmm`（S を実体化）→ `add`（mask）と**丸めの位置も回数も同一**。
+②③と mask なし① の WGSL・キーは 1 バイトも動かない（スナップショット列挙で機械証明）。
+mask 付き parity（5 形状・band mask・−inf 込み・故障注入 2 件）で Uint32 完全一致を門化。
+ビット同一の門は **f32 経路のみ**（s16 / c16 × mask は生成・実 GPU 実行の確認までで、
+恒久門は未設置 — limitations に記録）。
+
+**エクスポータ**: `_h_attention` が上記契約の mask を受理。transformers（Gemma3）は bool の
+帯マスクを渡すので、`normalize._additive_attn_mask` が `where(mask, 0, −inf)` で加算型へ
+落とす — **torch 自身の bool→additive 分解と同じ op・同じ定数**で、分解経路が焼く mask
+定数と initializer バイト一致（テストで固定）。保存は従来どおりターゲット別 opt-in。
+
+**実測（EmbeddingGemma-300m・2026-08-11）**: IR 1,681 → **1,273 ノード**（bmm 48 /
+softmax 24 が消え attention 24 が入る・分解残骸の reshape −144 / expand −96 ほか）。
+実 dispatch 958 → **838**。GPU はほぼ中立（bmm+softmax+add ≈ 1.5ms ↔ attention 3 カーネル
+1.8ms）。**wall も中立（bare 52.7 → 53.7ms・T=318 79.5 → 79.2ms）** — dispatch −120 が
+壁時計に出なかったことで、「ホスト ~38ms は dispatch 数へ線形」というモデルが**反証**された
+（per-run の固定費が支配 — 分解は open。research/2026-08-11-skinny-m-geometry.md §3 の
+ホスト分解課題に接続）。本改訂の価値は wall ではなく、①メモリ（S+P+expand → S 1 枚）
+②mask 契約の開通（ModernBERT / 実行時マスク / E2B decode の土台）③ノード数 −24% にある。

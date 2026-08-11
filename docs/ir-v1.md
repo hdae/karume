@@ -27,9 +27,11 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   attrs に **`[H, W]` の 2 成分**（`conv2d` の `stride` / `padding` / `dilation`）という
   新しい値の形が入る。
 - perf-a: 融合 `attention` を追加（ADR [0023](decisions/0023-fused-attention.md)）。
-  **アリティ 3 固定・rank-4 head-first・attrs `scale` は半スケール**（q と k の両方に掛かる
-  `√scale_factor`）。mask / causal / dropout / GQA は語彙に無く、エクスポータ境界で全件
-  fail loudly。SDPA の保存は**ターゲット別**なので、既存の分解形 IR はそのまま有効。
+  **アリティ 3 か 4・rank-4 head-first・attrs `scale` は半スケール**（q と k の両方に掛かる
+  `√scale_factor`）。省略可能な第 4 入力は**加算 mask**（f32・`[1,1,M,N]` ちょうど・B·H へ
+  broadcast — 2026-08-11 の改訂・ADR 0023 追記）。bool mask / `[B,1,M,N]` 等・causal /
+  dropout / GQA は語彙に無く、エクスポータ境界で全件 fail loudly。SDPA の保存は
+  **ターゲット別**なので、既存の分解形 IR はそのまま有効。
 
 ## コンテナ
 
