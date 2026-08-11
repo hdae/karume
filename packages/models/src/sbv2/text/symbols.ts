@@ -16,6 +16,20 @@
  * - `addBlankWord2ph` = 同分岐の `word2ph[i] *= 2; word2ph[0] += 1`
  */
 
+/**
+ * 相対位置の添字表を作るためのバケット規則（DeBERTa の config 由来）。
+ *
+ * `buildRelPosTables` の引数そのもの。近傍は線形・遠方は対数で圧縮した添字を作る式で、
+ * `positionBuckets` がバケット総数（= 添字の中心オフセット）、`maxPosition` が対数圧縮の
+ * 基準になる最大距離。
+ */
+export type Sbv2BertRelPos = {
+  /** `position_buckets`（char-wwm は 256）。 */
+  readonly positionBuckets: number;
+  /** `max_relative_positions`（1 未満なら `max_position_embeddings` — char-wwm は 512）。 */
+  readonly maxPosition: number;
+};
+
 /** 実行時ノブ（`style_bert_vits2/constants.py` の既定値が資産経由で届く）。 */
 export type Sbv2Knobs = {
   /** sdp と dp の混合比（`logw = sdp·r + dp·(1−r)`）。 */
@@ -52,8 +66,16 @@ export type JpExtraRules = {
   readonly samplingRate: number;
   /** 1 フレームあたりのサンプル数（`audio 長 = hopLength × フレーム数` の検算に使う）。 */
   readonly hopLength: number;
-  /** BERT 特徴に使う hidden_states の末尾からの位置（参照実装は 3）。 */
+  /** BERT 特徴に使う hidden_states の末尾からの位置（配布グラフは 1 本出しなので 1）。 */
   readonly bertHiddenFromEnd: number;
+  /**
+   * 相対位置の添字表を作るためのバケット規則（DeBERTa の config 由来）。
+   *
+   * 表そのものはグラフ入力で、実長ぶんをホストが作る（`rel-pos-tables.ts`）。値を写経せず
+   * 資産から引くのは ADR 0039 決定 3 と同じ規律 — モデルが変われば規則も変わるのに、
+   * shape は合ったまま**別の位置埋め込みを gather する**（沈黙誤値）。
+   */
+  readonly bertRelPos: Sbv2BertRelPos;
   /**
    * 実行時ノブの既定値（**任意**）。
    *
@@ -102,6 +124,20 @@ const parseKnobs = (raw: unknown, where: string): Sbv2Knobs => {
   };
 };
 
+const parseBertRelPos = (raw: unknown, where: string): Sbv2BertRelPos => {
+  const rule = asRecord(raw, where);
+  const positionBuckets = asInteger(rule["positionBuckets"], `${where}.positionBuckets`);
+  const maxPosition = asInteger(rule["maxPosition"], `${where}.maxPosition`);
+  // 2 未満だと mid = 0 で対数の分母が壊れる（式が成立する下限をここで縛る）。
+  if (positionBuckets < 2) {
+    throw new Error(`${where}.positionBuckets: 2 以上でない（${positionBuckets}）`);
+  }
+  if (maxPosition < 2) {
+    throw new Error(`${where}.maxPosition: 2 以上でない（${maxPosition}）`);
+  }
+  return { positionBuckets, maxPosition };
+};
+
 /**
  * `symbols.json` を検査して読む。**壊れた資産を黙って使わない** — 記号表が空でも
  * ID 化は「未知の音素」で落ちるだけで、tone 基点が欠けて 0 に縮退すると別の埋め込み行を
@@ -132,6 +168,7 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
     samplingRate: asInteger(root["samplingRate"], `${where}.samplingRate`),
     hopLength: asInteger(root["hopLength"], `${where}.hopLength`),
     bertHiddenFromEnd: asInteger(root["bertHiddenFromEnd"], `${where}.bertHiddenFromEnd`),
+    bertRelPos: parseBertRelPos(root["bertRelPos"], `${where}.bertRelPos`),
     ...(root["defaults"] === undefined
       ? {}
       : { defaults: parseKnobs(root["defaults"], `${where}.defaults`) }),

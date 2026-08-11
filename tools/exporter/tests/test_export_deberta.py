@@ -37,11 +37,15 @@ class TinyText(nn.Module):
         return (self.fc(x),)
 
 
+#: `_write_io` はケースを `(名前, グラフ入力名 → テンソル)` で受ける（実物は 4 入力だが、
+#: 引く順は `graph.inputs` から来るので tiny な 2 入力でも同じ経路が通る）。
 CASES = (
     (
         "case0",
-        torch.tensor([[1, 2, 3, 4]], dtype=torch.int64),
-        torch.ones(1, 4, dtype=torch.int64),
+        {
+            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.int64),
+            "attention_mask": torch.ones(1, 4, dtype=torch.int64),
+        },
     ),
 )
 
@@ -51,7 +55,8 @@ def exported(tmp_path):
     """tiny なラッパを 1 本 export して `(wrapper, graph, out_dir)` を返す。"""
     torch.manual_seed(0)
     wrapper = TinyText()
-    graph = export_to_file(wrapper, CASES[0][1:], tmp_path / export_deberta.MODEL_FILE)
+    example = tuple(CASES[0][1].values())
+    graph = export_to_file(wrapper, example, tmp_path / export_deberta.MODEL_FILE)
     return wrapper, graph, tmp_path
 
 
@@ -156,7 +161,8 @@ class TestMirrorIo:
                 return (input_ids.to(torch.float32) + attention_mask.to(torch.float32),)
 
         wrapper = NoLinear()
-        graph = export_to_file(wrapper, CASES[0][1:], tmp_path / export_deberta.MODEL_FILE)
+        example = tuple(CASES[0][1].values())
+        graph = export_to_file(wrapper, example, tmp_path / export_deberta.MODEL_FILE)
 
         with pytest.raises(SystemExit, match="適格 linear が 0 本"):
             export_deberta._write_mirror_io(wrapper, graph, CASES, tmp_path)

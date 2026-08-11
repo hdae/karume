@@ -16,7 +16,7 @@ ADR 0025 決定⑤: w8a8 の「他モデル検証」の受け皿は DeBERTa full
 
 1. **資産系列**: `export_deberta.py --dtype {f32,i8}`（f16 は #30 SBV2 系列と一体で決める
    ため足さない）。i8 は別系列 `models/deberta-i8/{dev-2layer,full-24layer}/`
-   （24 層 334,545,936 B = f32 比 25.4%）。fake-quant は export する wrapper そのものへ・
+   （24 層 334,545,336 B = f32 比 25.4%）。fake-quant は export する wrapper そのものへ・
    golden 採取より前（quantize.py の FQN 規律）。
 2. **w8（f32 計算）の網**: `packages/runtime/tests/e2e_deberta_test.ts` を系列パラメタ化。i8 系列 tolerance は
    実測導出 atol 7e-4（素の最悪 1.23e-4 の 5.7 倍）。f32 系列の 8.32e-5 と同桁に収まること
@@ -76,6 +76,13 @@ ADR 0025 決定⑤: w8a8 の「他モデル検証」の受け皿は DeBERTa full
 - `rel_embeddings.weight` は fake-quant されるが linear の**入力**スロット消費 = 適格外で
   f32 格納（量子化済みの値・余剰 scale は emit が無視）。ConvLayer の conv1d weight は
   i8 適格（w8 実行・w8a8 対象外）。
+
+  > 訂正（2026-08-11・実資産の IR を直接読んだ実測）: 消費 op は linear ではなく **`layer_norm`
+  > の data スロット 1 箇所**（`get_rel_embedding()` が相対位置テーブルに LayerNorm を掛ける経路 —
+  > `norm_rel_ebd="layer_norm"`）。「重みスロット以外の消費 = 適格外」という結論そのものは変わらない。
+  > per-row i8 なら 512 行すべてビット一致で往復する（実測・最大差 0.0）が、適格判定を緩める
+  > blast radius に見合わないため見送り —
+  > [research/2026-08-11-deberta-size-recon.md](../research/2026-08-11-deberta-size-recon.md) §3。
 
 ## Consequences
 

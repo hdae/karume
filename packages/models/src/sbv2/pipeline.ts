@@ -79,6 +79,7 @@ import {
 } from "./style.ts";
 import { analyzeSbv2Text, type Sbv2TextAnalysis } from "./text/analyze.ts";
 import { bertHiddenOutput, tileBertToPhoneLevel } from "./text/bert-tile.ts";
+import { buildRelPosTables } from "./text/rel-pos-tables.ts";
 import { type JpExtraRules, parseJpExtraRules, type Sbv2Knobs } from "./text/symbols.ts";
 import { type CleanRanges, DebertaTokenizer } from "./text/tokenizer.ts";
 import { durationsToFrames } from "./host/duration.ts";
@@ -609,7 +610,7 @@ export const synthesizeSbv2 = async (
   const phonemes = analysis.ids.phoneIds.length;
   const tokens = analysis.inputIds.length;
 
-  // --- ② text_encoder（DeBERTa・hidden_states 全出し）----------------------
+  // --- ② text_encoder（DeBERTa・配布形は使う 1 本だけを出す）---------------
   // quant の低精度ノブは渡さない（配布形の text_encoder は i8 の 1 dtype しか無い）。
   const hidden = await withSession(
     state.gpu,
@@ -617,9 +618,17 @@ export const synthesizeSbv2 = async (
     {},
     observer(state, "text_encoder"),
     async (run) => {
+      // 相対位置の添字表はグラフ入力（焼き込むと Tmax=512 で 2MiB — ADR 0045 波 3）。
+      const relPos = buildRelPosTables(
+        tokens,
+        state.rules.bertRelPos.positionBuckets,
+        state.rules.bertRelPos.maxPosition,
+      );
       const outputs = await run({
         input_ids: i32(analysis.inputIds, [1, tokens]),
         attention_mask: i32(analysis.inputIds.map(() => 1), [1, tokens]),
+        c2p_pos: relPos.c2pPos,
+        p2c_pos: relPos.p2cPos,
       });
       const name = bertHiddenOutput(state.textEncoder.graph.outputs, state.rules.bertHiddenFromEnd);
       const tensor = outputs[name];

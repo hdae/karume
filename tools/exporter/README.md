@@ -211,7 +211,14 @@ cd ../.. && deno test -A packages/runtime/tests/e2e_deberta_test.ts packages/run
   changes). It is not added to `pyproject.toml` / `uv.lock`; `--with` brings it in temporarily.
 - The outputs go to **`outputs/series/deberta/<variant>/`** (kept out of commits by the `outputs/`
   entry in the top-level `.gitignore` — the 24-layer weights are 1.3GB). `--dtype i8` is a
-  **separate series** `outputs/series/deberta-i8/<variant>/` (24 layers, 319MB = 25.4% of f32).
+  **separate series** `outputs/series/deberta-i8/<variant>/`.
+- **`sbv2-22layer` is what the SBV2 distribution ships.** SBV2 only ever reads
+  `hidden_states[-3]` (= index 22 = the output of layer 21), so the last two layers are dead weight;
+  the truncated model's final output is **bit-identical** to the 24-layer model's `hidden_states[-3]`
+  (measured — see `docs/research/2026-08-11-deberta-size-recon.md`). That variant also emits **only
+  that one tensor** instead of the whole `hidden_states` tuple, because the runtime reads every
+  `graph.output` back on every run. The other variants keep the full tuple so the per-layer error
+  growth stays readable off the goldens (ADR 0026).
 
 ```
 outputs/series/deberta/dev-2layer/model.safetensors      2 layers (130 nodes / 208MB)
@@ -219,9 +226,11 @@ outputs/series/deberta/dev-2layer/io.<case>.safetensors
 outputs/series/deberta/full-24layer/model.safetensors    24 layers (1230 nodes / 1.32GB / 25 outputs)
 outputs/series/deberta/full-24layer/io.<case>.safetensors
 
+outputs/series/deberta-i8/sbv2-22layer/model.safetensors      22 layers in i8 storage (1130 nodes /
+                                                              294.5MB / 1 output) — shipped
 outputs/series/deberta-i8/full-24layer/model.safetensors      24 layers in i8 storage (319MB)
-outputs/series/deberta-i8/full-24layer/io.<case>.safetensors       w8 goldens (activations in f32)
-outputs/series/deberta-i8/full-24layer/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
+outputs/series/deberta-i8/<variant>/io.<case>.safetensors       w8 goldens (activations in f32)
+outputs/series/deberta-i8/<variant>/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
 ```
 
 The io tensor key naming is the same as the tiny goldens (`input.<graph input name>` /
@@ -235,11 +244,18 @@ case**. There are 4 cases:
 | `case2`  | long sentence with symbols          | 35 |
 | `padded` | `case0` + `[PAD]`×5 (0 in the mask) | 16 |
 
-The wrapper is `forward(input_ids, attention_mask) -> hidden_states` (a tuple of all layers).
-Because every layer can be compared, **how the error grows with depth** can be read directly off the
-goldens (which puts the tolerances on a measured footing). `padded` is the only case that mixes in
-`attention_mask=0` and therefore exercises the mask path (mul → cast → bitwise_not → masked_fill,
-plus the zero fill on the conv path).
+The wrapper is `forward(input_ids, attention_mask, c2p_pos, p2c_pos) -> hidden_states` (a tuple of
+all layers, or the single last one for the shipped variant). Because every layer can be compared,
+**how the error grows with depth** can be read directly off the goldens (which puts the tolerances on
+a measured footing). `padded` is the only case that mixes in `attention_mask=0` and therefore
+exercises the mask path (mul → cast → bitwise_not → masked_fill, plus the zero fill on the conv
+path).
+
+`c2p_pos` / `p2c_pos` are the disentangled-attention gather indices. They depend only on T, so the
+exporter used to constant-fold them into two `[1,512,512]` i32 tensors (2MiB of dead weight); they
+are now **graph inputs** built on the host (`karume/patch_deberta.py` is the reference
+implementation, mirrored by `packages/models/src/sbv2/text/rel-pos-tables.ts`). The mirror is pinned
+byte-for-byte by `packages/models/tests/sbv2_rel_pos_parity_test.ts`.
 
 On the Deno side: `packages/runtime/tests/e2e_deberta_test.ts` (one case = one test). **If not a
 single asset is present, everything SKIPs** (the generation command is printed in the warning); this

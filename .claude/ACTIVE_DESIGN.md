@@ -8,6 +8,24 @@
 
 ## Active redesigns (in flight)
 
+- **DeBERTa 配布サイズ削減 3 波（2026-08-11）— 波 1 着地**: 発端は SBV2 の ONNX 版
+  （hidden[-3] のみ抽出）が縮小の材料になるかという問い。実測の正本は
+  [research/2026-08-11-deberta-size-recon.md](../docs/research/2026-08-11-deberta-size-recon.md)
+  （ONNX 版は 22 層だがファイルは 1.03% しか小さくない — onnxsim が +92.3MB 焼き込んで相殺。
+  **参考にすべきは「22 層で足りる」事実だけ**）。**波 1 = 末尾 2 層カット完了（ADR
+  [0045](../docs/decisions/0045-deberta-layer-trim.md)）**: 334,545,336 → 309,167,272 B
+  （−7.59%・`w8` 取得量 −6.34%）で **WAV sha256 は不変のまま緑**（`a82f72e2…`）。
+  **波 2 = 出力を 1 本に絞るまで完了**（同 ADR 決定 3/4・sha256 は再び不変）。ただし
+  **速度の期待は外れた** — T=15 で −4.5% / T=512 で −7.7%（readback 1,380 → 60 KiB）で、
+  SBV2 実用ではパイプライン全体の 0.3%。ADR 0026 の「出力を絞れば GPU 比がそのまま出る」は
+  T=512 前提の話で実用 T では成立しない。組み立て門は「22 層 × 出力 1 本 ×
+  `bertHiddenFromEnd` 1」の 3 点検査（層数と出力形と取り出し位置は別々の台本が持つので、
+  片方だけ動くと**別の層の声**が沈黙で出る）。**波 3 = 相対位置の添字表をグラフ入力へ昇格も
+  完了**（同 ADR 決定 5・−2,098,128 B・速度は中立・sha256 は 3 波とも不変）: transformers の
+  `disentangled_attention_bias` を差し替え（`karume/patch_deberta.py`）+ ホスト生成
+  （`text/rel-pos-tables.ts`）+ golden とのバイト一致パリティ門。**3 波累計で
+  334,545,336 → 307,068,768 B（−8.21%）・`w8` 取得量 −6.86%**。**HF は `karume-sbv2-jvnv` の
+  上げ直しが未了**（fn は HF 非公開 — 2026-08-08 裁定）。
 - **モデル拡充波 — EmbeddingGemma 動作確認済み（2026-08-11）**: gelu_tanh op（第 2 層 —
   **op 追加の判定手順は ADR [0043](../docs/decisions/0043-op-addition-layers.md)**）+
   exporter 対応（FOLDABLE に bitwise_or/gt・RoPE 降格の接尾一致）+ 台本
