@@ -147,13 +147,16 @@ Deno.test({
  * cos / sin 表は θ 系統（local 1e4 / global 1e6）ごとに `sym_prefix_slice` で T へ縮められる。
  * その初出 2 箇所は鎖の隙間に落ちるので、窓内 passthrough を跨げないと 48 のうち 2 本が
  * 黙って外れる — **ヒット数 48 はそこまで含めた門**。
+ *
+ * identityExpand は **0**。SDPA を保存した資産（ADR 0023 改訂 — mask 付き attention）では
+ * 分解由来の恒等 expand が IR ごと消える（決定 6 と同じ機序。分解資産の頃は 96 だった）。
  */
 Deno.test({
   name: "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む",
   ignore: !GEMMA_AVAILABLE,
   fn: async () => {
     const graph = await readIrGraph(GEMMA_MODEL);
-    const expected: FusionCounts = { ...NONE, rope: 48, identityExpand: 96 };
+    const expected: FusionCounts = { ...NONE, rope: 48 };
     // ヒット数は T に依存しない（Tmax = 512 の内側で 2 点）。
     for (const sequence of [12, 318]) {
       assertEquals(
