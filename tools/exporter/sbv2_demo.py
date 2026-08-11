@@ -67,7 +67,7 @@ BERT_HIDDEN_FROM_END = 3
 #: SBV2 が使う層までで切り詰めてあるので最終出力の 1 本目になる。
 #:
 #: 両者が同じテンソルを指すことは組み立て時に検査される（`karume.dist.assert_bert_hidden` —
-#: 不変条件は「出力本数 − 末尾からの位置 == 22」）。
+#: 22 層 × 出力 1 本 × 位置 1 の 3 点検査。ADR 0045 決定 4）。
 BERT_GRAPH_HIDDEN_FROM_END = 1
 
 #: 資産ファイル名。`symbols.json` / `deberta-tokenizer.json` は `karume dist` が配布形へ運び、
