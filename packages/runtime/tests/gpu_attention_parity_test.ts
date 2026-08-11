@@ -16,13 +16,15 @@
 // MUST: B / H / M / N / D は複数形状（端数込み）を回す。カーネルは B と H を 1 本のバッチ軸へ
 // 畳むので、B=1 だけでは軸の取り違えが値に出ない。
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
+import { ExecutionError } from "../src/runtime/plan.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { attentionPvKey, attentionQkKey } from "../src/kernels/attention.ts";
+import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 /** 半スケール（torch math decomp の `√scale_factor`）。D から導く契約どおりの値。 */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
@@ -47,20 +49,27 @@ type Shape = {
  * `sc` は半スケールを 1 要素で渡す入力で、実グラフの `const.6953fe58410d6c34` に対応する
  * （initializer でも入力でも `mul` の右詰め broadcast は同じ）。恒等 `expand` まで含めるのは、
  * 実グラフの P 側 56 本と同じコピーを経由させて「融合で消える 1 枚」を再現するため。
+ *
+ * `masked` は加算 mask を持つ形（ADR 0023 改訂）。**S を実体化した後の `add` 1 本**として
+ * 書くのが要点で、融合側は同じ加算を ①QK の書き出し epilogue で行う（丸めの位置も回数も
+ * 同じ = ビット同一の根拠）。
  */
-const decomposedGraph = (shape: Shape): GraphJson => {
+const decomposedGraph = (shape: Shape, masked = false): GraphJson => {
   const { b, h, m, n, d } = shape;
   const heads = b * h;
   return {
     format: "karume-ir",
     version: 1,
-    requires: { ops: ["mul", "permute", "reshape", "bmm", "softmax", "expand"] },
+    requires: {
+      ops: ["mul", "permute", "reshape", "bmm", "softmax", "expand", ...(masked ? ["add"] : [])],
+    },
     symbols: [],
     inputs: [
       { name: "q", dtype: "f32", shape: [b, h, m, d] },
       { name: "k", dtype: "f32", shape: [b, h, n, d] },
       { name: "v", dtype: "f32", shape: [b, h, n, d] },
       { name: "sc", dtype: "f32", shape: [1] },
+      ...(masked ? [{ name: "mk", dtype: "f32" as const, shape: [1, 1, m, n] }] : []),
     ],
     outputs: ["y"],
     initializers: {},
@@ -72,6 +81,7 @@ const decomposedGraph = (shape: Shape): GraphJson => {
       kts3: { dtype: "f32", shape: [heads, d, n] },
       scores3: { dtype: "f32", shape: [heads, m, n] },
       scores4: { dtype: "f32", shape: [b, h, m, n] },
+      ...(masked ? { scoresMasked: { dtype: "f32" as const, shape: [b, h, m, n] } } : {}),
       probs: { dtype: "f32", shape: [b, h, m, n] },
       probsExpanded: { dtype: "f32", shape: [b, h, m, n] },
       probs3: { dtype: "f32", shape: [heads, m, n] },
@@ -91,8 +101,17 @@ const decomposedGraph = (shape: Shape): GraphJson => {
       // #67 bmm → S
       { op: "bmm", ins: ["qs3", "kts3"], outs: ["scores3"], attrs: {} },
       { op: "reshape", ins: ["scores3"], outs: ["scores4"], attrs: {} },
+      // 加算 mask（S を実体化した後の 1 加算 — [1,1,M,N] は右詰め broadcast で B·H へ広がる）
+      ...(masked ? [{ op: "add", ins: ["scores4", "mk"], outs: ["scoresMasked"], attrs: {} }] : []),
       // #69 softmax dim=-1
-      { op: "softmax", ins: ["scores4"], outs: ["probs"], attrs: { dim: 3 } },
+      {
+        op: "softmax",
+        ins: [masked ? "scoresMasked" : "scores4"],
+        outs: ["probs"],
+        attrs: {
+          dim: 3,
+        },
+      },
       // #70 恒等 expand（P のフルコピー — 融合で消える 1 枚）
       { op: "expand", ins: ["probs"], outs: ["probsExpanded"], attrs: {} },
       { op: "reshape", ins: ["probsExpanded"], outs: ["probs3"], attrs: {} },
@@ -142,6 +161,31 @@ const SHAPES: readonly Shape[] = [
   { name: "DiT 形 B1 H4 M64 N64 D128", b: 1, h: 4, m: 64, n: 64, d: 128 },
 ];
 
+/**
+ * 実測形の band mask（EmbeddingGemma の双方向 sliding window と同じ作り）。
+ *
+ * MUST: **全ての行に非マスク列が 1 本以上**あること（行が丸ごとマスクだと amax が −inf に
+ * なり、`exp(−inf − (−inf))` が NaN になる — 融合側も分解側も同じ NaN を出すので
+ * ビット比較は通るが、検証としては何も見ていない状態になる）。対称バンドは中心が必ず
+ * 非マスクなので、この条件が構造で満たされる。
+ */
+const bandMask = (
+  m: number,
+  n: number,
+  width: number,
+  blocked: number,
+): Float32Array<ArrayBuffer> => {
+  const data = new Float32Array(m * n);
+  for (let row = 0; row < m; row += 1) {
+    // M ≠ N（cross-attention 形）でも「行に対応する列」を中心に置く
+    const center = Math.floor((row * n) / m);
+    for (let col = 0; col < n; col += 1) {
+      data[row * n + col] = Math.abs(col - center) <= width ? 0 : blocked;
+    }
+  }
+  return data;
+};
+
 Deno.test({
   name: "attention 1 ノードの出力が分解経路（bmm/softmax/bmm）と**ビット単位で一致**する（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -184,6 +228,153 @@ Deno.test({
           new Set(a).size > 1,
           `${shape.name}: 出力が定数（ビット一致が恒真になっている）`,
         );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **加算 mask 版のビット同一の門**（ADR 0023 改訂）。融合側は ①QK の書き出し epilogue で
+ * `S' = fl(S + mask[m·N+n])` を足すだけなので、分解側の `bmm`（S を実体化）→ `add`（mask）と
+ * 丸めの位置も回数も一致する — 一致しなくなるのは添字（行/列・バッチ base）を取り違えたときで、
+ * それは tolerance に隠れずビット比較で必ず出る。
+ *
+ * mask の値は **0 と大きい負値の混在**（実測の band mask）で、最後の 1 形だけ `-Infinity`
+ * （エクスポータが −inf を折り込む形）を通す。
+ */
+Deno.test({
+  name:
+    "加算 mask 付き attention の出力が分解経路（bmm → add → softmax → bmm）とビット単位で一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const [index, shape] of SHAPES.entries()) {
+        const { b, h, m, n, d } = shape;
+        const q = fill([b, h, m, d], QUERY);
+        const k = fill([b, h, n, d], KEY);
+        const v = fill([b, h, n, d], VALUE);
+        const scale = halfScale(d);
+        const sc = fill([1], () => scale);
+        // 最後の形だけ −inf（残りは実測 mask の大きい負値 — masked_fill の埋め値と同じ桁）
+        const blocked = index === SHAPES.length - 1 ? -Infinity : -3.4028234663852886e38;
+        const mask = {
+          dtype: "f32" as const,
+          shape: [1, 1, m, n],
+          data: bandMask(m, n, 2, blocked),
+        };
+        const where = `${shape.name} (blocked=${blocked})`;
+
+        const fused = await run(
+          gpu,
+          singleOpGraph("attention", [q.shape, k.shape, v.shape, mask.shape], [b, h, m, d], {
+            attrs: { scale },
+          }),
+          { x0: q, x1: k, x2: v, x3: mask },
+        );
+        const split = await run(gpu, withScaleInput(decomposedGraph(shape, true)), {
+          q,
+          k,
+          v,
+          sc,
+          mk: mask,
+        });
+
+        assertEquals(fused.shape, split.shape, where);
+        const a = bits(fused);
+        const c = bits(split);
+        const mismatches: number[] = [];
+        for (let i = 0; i < a.length && mismatches.length < 4; i += 1) {
+          if (a[i] !== c[i]) mismatches.push(i);
+        }
+        assertEquals(
+          mismatches,
+          [],
+          `${where}: 分解経路とビット列が違う（最初の食い違い: ${
+            mismatches.map((i) => `[${i}] ${fused.data[i]} vs ${split.data[i]}`).join(" / ")
+          }）`,
+        );
+        // 恒真化の門 ①: 出力が定数なら「一致」は何も検証していない
+        assert(new Set(a).size > 1, `${where}: 出力が定数（ビット一致が恒真になっている）`);
+        // 恒真化の門 ②: mask が結果に効いていること（mask 無しの同じ入力と**違う**値になる）。
+        // 添字を取り違えても値は変わるが、この門が守るのは「mask が丸ごと無視されていない」形。
+        const unmasked = await run(
+          gpu,
+          singleOpGraph("attention", [q.shape, k.shape, v.shape], [b, h, m, d], {
+            attrs: { scale },
+          }),
+          { x0: q, x1: k, x2: v },
+        );
+        const plain = bits(unmasked);
+        assert(
+          a.some((word, i) => word !== plain[i]),
+          `${where}: mask 付きと mask 無しの出力が同一（mask が効いていない）`,
+        );
+        // NaN が出ていない（band mask は全行に非マスク列を残す — 上の MUST の実測確認）
+        assert(
+          fused.data.every((value) => Number.isFinite(value)),
+          `${where}: 出力に非有限値（行が丸ごとマスクされている）`,
+        );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * Session 経路の結線（ADR 0023 改訂）。mask で増えるのは **①QK の束縛 1 本とキーの 1 語**
+ * だけで、dispatch は 3 本のまま（②③ は mask の存在を知らない）。
+ *
+ * i8a8 の ①QK は別カーネルで epilogue を持たないので、組み合わせは **fail loudly**
+ * （黙って f32 へ縮退すると「i8a8 を頼んだのに効かない」沈黙になり、mask を落とすと値が壊れる）。
+ */
+Deno.test({
+  name: "加算 mask は ①QK のキーと束縛だけを増やし、i8a8 とは組めない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      const { b, h, m, n, d } = { b: 1, h: 2, m: 8, n: 8, d: 8 };
+      const q = fill([b, h, m, d], QUERY);
+      const k = fill([b, h, n, d], KEY);
+      const v = fill([b, h, n, d], VALUE);
+      const mask = { dtype: "f32" as const, shape: [1, 1, m, n], data: bandMask(m, n, 2, -1e30) };
+      const graph = singleOpGraph(
+        "attention",
+        [q.shape, k.shape, v.shape, mask.shape],
+        [b, h, m, d],
+        { attrs: { scale: halfScale(d) } },
+      );
+      const inputs = { x0: q, x1: k, x2: v, x3: mask };
+
+      const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+      try {
+        await session.run(inputs);
+        const entries = session.diagnostics().lastRunTiming?.entries ?? [];
+        if (entries.length > 0) {
+          const keys = entries.map((entry) => entry.key);
+          // 1 ノード = 3 dispatch のまま（mask で dispatch は増えない）
+          assertEquals(entries.reduce((sum, entry) => sum + entry.dispatchCount, 0), 3);
+          assertEquals(keys.includes(attentionQkKey(true, "f32", "f32", true)), true, "mask 変種");
+          assertEquals(keys.includes(attentionQkKey(true)), false, "mask 無しの ①QK が残っている");
+          // ②③ は mask なしと同じキー（生成物も同じ = スナップショットが固定）
+          assertEquals(keys.includes(attentionPvKey(true)), true, "③PV は mask で変わらない");
+        }
+      } finally {
+        await session.dispose();
+      }
+
+      // i8a8 との組み合わせは fail loudly（縮退しない）
+      const i8a8 = await createSession(gpu, openModel(graphModelBuffer(graph)), {
+        attentionCompute: "i8a8",
+      });
+      try {
+        await assertRejects(() => i8a8.run(inputs), ExecutionError, "i8a8");
+      } finally {
+        await i8a8.dispose();
       }
     } finally {
       gpu.destroy();

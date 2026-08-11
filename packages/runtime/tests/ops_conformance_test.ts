@@ -32,6 +32,8 @@ type OpEntry = {
   readonly arity: number;
   /** 入力数が可変か（true のとき arity は下限 — cat のみ）。 */
   readonly variadic: boolean;
+  /** 末尾に省略可能な入力を持つ op の上限（attention の mask のみ。無ければ undefined）。 */
+  readonly maxArity: number | undefined;
   readonly dtypes: DtypeSpec;
   /** スロット 0 の入力 dtype → 出力 dtype（恒等な op では表に無い = undefined）。 */
   readonly outDtypes: Readonly<Record<string, string>> | undefined;
@@ -121,6 +123,14 @@ const asOpEntry = (raw: unknown): OpEntry => {
   if (variadic !== undefined && variadic !== true) {
     throw new Error("fixture: variadic は true か省略のみ");
   }
+  const maxArity = raw["max_arity"];
+  if (maxArity !== undefined && typeof maxArity !== "number") {
+    throw new Error("fixture: max_arity が数値でない");
+  }
+  // 「何本でも」と「決まった 1 本が増える」は別の契約面（併記は表の作り自体の誤り）
+  if (maxArity !== undefined && variadic === true) {
+    throw new Error("fixture: variadic と max_arity は併記しない");
+  }
   const weightSlot = raw["weight_slot"];
   if (weightSlot !== undefined && typeof weightSlot !== "number") {
     throw new Error("fixture: weight_slot が数値でない");
@@ -133,6 +143,7 @@ const asOpEntry = (raw: unknown): OpEntry => {
     op: String(field(raw, "op")),
     arity,
     variadic: variadic === true,
+    maxArity,
     dtypes: asDtypeSpec(field(raw, "dtypes")),
     outDtypes: outDtypes === undefined ? undefined : Object.fromEntries(
       Object.entries(outDtypes).map(([from, to]) => {
@@ -236,8 +247,10 @@ Deno.test("適合表のアリティ / スロット dtype / attrs キーが契約
     const contract = resolveOpContract(entry.op);
     assertEquals(contract.arity, entry.arity, `${entry.op}: アリティ`);
     // 可変アリティは「入力何本まで受理するか」という契約面そのもの（片側だけ可変にすると
-    // エクスポータが書ける本数とランタイムが受理する本数が割れる）。
+    // エクスポータが書ける本数とランタイムが受理する本数が割れる）。省略可能な末尾入力
+    // （attention の mask）の上限も同じ理由で表に載る。
     assertEquals(contract.variadic === true, entry.variadic, `${entry.op}: 可変アリティ`);
+    assertEquals(contract.maxArity, entry.maxArity, `${entry.op}: 省略可能入力の上限`);
     assertEquals(
       [...attrKeysOf(contract)].sort(),
       [...entry.attrs].sort(),

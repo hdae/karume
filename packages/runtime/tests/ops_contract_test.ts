@@ -2,6 +2,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import type { OpSupport } from "../src/format/container.ts";
 import type { IrNode } from "../src/format/ir.ts";
 import {
+  arityFits,
   assertDtype,
   assertNodeContract,
   assertSlotDtype,
@@ -15,6 +16,7 @@ import {
   conv2dAttrs,
   convTranspose1dAttrs,
   cumsumDim,
+  describeArity,
   IO_DTYPES,
   layerNormAttrs,
   maskedFillValue,
@@ -170,7 +172,14 @@ Deno.test("ランタイム対応表と capability 照会は契約表から導か
   // 検査できる真の不変条件なので、全 op に対して回す。
   for (const [name, contract] of OP_CONTRACTS) {
     const found = support(name);
-    assertEquals(found.slotDtypes.length, contract.arity, `${name}: スロット数 = アリティ`);
+    // スロット数は「受理しうる入力の最大本数」= 省略可能な末尾入力（attention の mask）を
+    // 含む（可変アリティの cat だけは下限ぶん — 全スロットが同じ受理集合なので列挙門の
+    // 和の見方と結論が一致する）。
+    assertEquals(
+      found.slotDtypes.length,
+      contract.maxArity ?? contract.arity,
+      `${name}: スロット数 = 受理しうる最大アリティ`,
+    );
     const union = new Set(found.slotDtypes.flatMap((accept) => [...accept]));
     assertEquals([...union].sort(), [...found.dtypes].sort(), `${name}: 和 = スロットの合併`);
   }
@@ -1090,4 +1099,69 @@ Deno.test("strided コピー族の rank 上限（1..4）は契約層で落ちる
     OpContractError,
     "strided",
   );
+});
+
+/**
+ * 融合 attention の**省略可能な第 4 入力 = 加算 mask**（ADR 0023 改訂）。
+ *
+ * カーネルは mask を `[1,1,M,N]` としてバッチ base 抜きの平坦添字で読む（B·H 全体へ
+ * broadcast）ので、そこから外れた形は**値が静かに壊れる**（例外は出ない）。契約層が
+ * 唯一の検出器なので、受理と拒否の全面をここで固定する。
+ */
+Deno.test("attention の mask は f32・[1,1,M,N] ちょうどだけを受理する", () => {
+  const contract = resolveOpContract("attention");
+  const q = [2, 3, 5, 4];
+  const k = [2, 3, 7, 4];
+  const attrs = { scale: 0.5 };
+  const shape = (ins: readonly (readonly number[])[]) =>
+    computeOutputShape(contract, ins, "t", { attrs });
+
+  // アリティは 3 か 4（可変ではない — 「何本でも」は cat だけ）
+  assertEquals(contract.arity, 3);
+  assertEquals(contract.maxArity, 4);
+  assertEquals(contract.variadic, undefined);
+  assertEquals(describeArity(contract), "3 か 4");
+  assertEquals(arityFits(contract, 3), true);
+  assertEquals(arityFits(contract, 4), true);
+  assertEquals(arityFits(contract, 2), false);
+  assertEquals(arityFits(contract, 5), false);
+  assertEquals(
+    assertNodeContract(node("attention", ["q", "k", "v", "m"], attrs), "t").kind,
+    "attention",
+  );
+  assertThrows(
+    () => assertNodeContract(node("attention", ["q", "k", "v", "m", "m2"], attrs), "t"),
+    OpContractError,
+    "3 か 4",
+  );
+
+  // 受理: mask 無し / [1,1,M,N]（M ≠ N の非正方も）
+  assertEquals(shape([q, k, k]), q);
+  assertEquals(shape([q, k, k, [1, 1, 5, 7]]), q);
+
+  // 拒否: B / H が 1 でない（head 別・バッチ別マスクは語彙に無い）
+  assertThrows(() => shape([q, k, k, [2, 1, 5, 7]]), OpContractError, "[1,1,M,N]");
+  assertThrows(() => shape([q, k, k, [1, 3, 5, 7]]), OpContractError, "[1,1,M,N]");
+  assertThrows(() => shape([q, k, k, [2, 3, 5, 7]]), OpContractError, "[1,1,M,N]");
+  // 拒否: rank ≠ 4
+  assertThrows(() => shape([q, k, k, [5, 7]]), OpContractError, "[1,1,M,N]");
+  assertThrows(() => shape([q, k, k, [1, 5, 7]]), OpContractError, "[1,1,M,N]");
+  assertThrows(() => shape([q, k, k, [1, 1, 1, 5, 7]]), OpContractError, "[1,1,M,N]");
+  // 拒否: M / N の不一致（M と N を取り違えた形は正方 mask でだけ素通りするので両方見る）
+  assertThrows(() => shape([q, k, k, [1, 1, 4, 7]]), OpContractError, "M / N");
+  assertThrows(() => shape([q, k, k, [1, 1, 5, 5]]), OpContractError, "M / N");
+  assertThrows(() => shape([q, k, k, [1, 1, 7, 5]]), OpContractError, "M / N");
+
+  // 拒否: dtype（uniform 契約なので mask も f32 — bool マスクは masked_fill の語彙）
+  const maskNode = node("attention", ["q", "k", "v", "m"], attrs);
+  assertEquals(
+    resolveNodeDtypes(contract, maskNode, ["f32", "f32", "f32", "f32"], "f32", "t"),
+    "f32",
+  );
+  for (const dtype of ["bool", "i32"] as const) {
+    assertThrows(
+      () => resolveNodeDtypes(contract, maskNode, ["f32", "f32", "f32", dtype], "f32", "t"),
+      OpContractError,
+    );
+  }
 });

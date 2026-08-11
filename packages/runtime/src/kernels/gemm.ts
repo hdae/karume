@@ -114,6 +114,14 @@ export const GEMM_MTILE_SMALL = 32;
 export const LINEAR_SCALE_BINDING = 5;
 
 /**
+ * 融合 attention ①QK の**加算 mask** の束縛（S の次の番号 — executor の bind entries と対）。
+ *
+ * MUST: mask 変種でだけ束縛する。無い変種で番号を予約すると、束縛されていない binding を
+ * 宣言したパイプラインとして validation で落ちる。
+ */
+export const ATTENTION_QK_MASK_BINDING = 4;
+
+/**
  * m タイルの行数から幾何を解決する（既定幾何の **wgY だけ**を `mTile / regM` へ差し替える）。
  *
  * conv2d の implicit GEMM が持つヒューリスティック（`conv2dIgemmMTile`）は「行数」で答えを
@@ -219,6 +227,11 @@ export type GemmSpec =
     readonly compute?: GemmCompute;
     /** S の格納形（ADR 0023 の ①が書き ③が読むバッファ — 省略時 `"f32"`）。 */
     readonly score?: ScoreStorage;
+    /**
+     * 加算 mask の有無（①QK だけ・省略時 `false` で生成物は 1 バイトも動かない）。
+     * ③PV は mask を見ない（S は既に mask 済み）。
+     */
+    readonly mask?: boolean;
   }
   | {
     readonly op: "linear";
@@ -702,6 +715,14 @@ ${rows}`;
  * MUST: **v4 経路でしか立たない** — スカラ経路の部分書きは同じ u32 語への read-modify-write
  * になる（src/kernels/score-storage.ts）。生成の入口が `!v4` を fail loudly で落とす。
  *
+ * `mask` も融合 attention ① だけが立てる（加算型 mask — ADR 0023 改訂）。**書き出しの直前に
+ * `S' = fl(acc + mask[m·N + n])` を 1 度足すだけ**で、縮約ループには一切触れない。
+ * MUST: mask の添字に**バッチ base を足さない**（契約は `[1,1,M,N]` で B·H 全体へ broadcast
+ * する — 足すと 2 バッチ目以降が範囲外／別の行を読む）。
+ * MUST: 加算は f32 で行い、`outF16` / `score` の丸めはその**後**に来る（分解経路の
+ * `bmm → add` と丸めの位置と回数が一致することがビット同一の根拠）。
+ * MUST: `bias` とは同時に立たない（bias を持つのは linear / conv2d だけ）。
+ *
  * 行・列 quad とも codegen 時に展開して `acc{行}_{列 quad}` を静的に読む
  * （{@link gemmAccumulatorInit} の理由）。ガードの構造・bias の足し順・書き出す語の並びは
  * 幾何によらず同一。
@@ -714,6 +735,7 @@ const store = (
   bias: boolean,
   outF16 = false,
   score: ScoreStorage = "f32",
+  mask = false,
 ): string => {
   const base = batchBase(op, "cbase");
   const quads = gemmQuadsPerThread(geometry);
@@ -741,9 +763,13 @@ const store = (
         : "";
       const rowStores = slots(geometry.regM).map((row) => {
         const acc = `acc${row}_${quad}`;
-        const value = bias ? `${acc} + biasv` : outF16 ? `vec4<f16>(${acc})` : acc;
+        const summed = mask ? "sv" : acc;
+        const value = bias ? `${summed} + biasv` : outF16 ? `vec4<f16>(${summed})` : summed;
+        // 加算 mask は行 m・列 n の平坦添字（バッチ base 無し）。quad 単位で数えるのは
+        // 出力と同じ `n % 4 == 0` が v4 の条件だから（mask の行頭も quad 境界にある）。
+        const maskAdd = mask ? `      let sv = ${acc} + mask[orow${row} * n4 + ocq${quad}];\n` : "";
         return `    if (orow${row} < dims.m) {
-      ${scoreStoreQuad(name, score, `${base}orow${row} * n4 + ocq${quad}`, value)}
+${maskAdd}      ${scoreStoreQuad(name, score, `${base}orow${row} * n4 + ocq${quad}`, value)}
     }`;
       }).join("\n");
       return `  if (ocq${quad} < n4) {${biasBind}
@@ -756,8 +782,11 @@ ${blocks}`;
   }
   const write = (row: number, col: number): string => {
     const acc = `acc${row}_${Math.floor(col / GEMM_QUAD)}.${TILE_COMPONENTS[col % GEMM_QUAD]}`;
+    const summed = mask ? "sv" : acc;
+    // 加算 mask は `mbase`（バッチ base を含まない行頭）からの平坦添字で 1 要素だけ読む
+    const maskAdd = mask ? `      let sv = ${acc} + mask[mbase + ocol${at(col)}];\n` : "";
     return `    if (ocol${at(col)} < dims.n) {
-      ${name}[obase + ocol${at(col)}] = ${outF16 ? `f16(${acc})` : acc}${
+${maskAdd}      ${name}[obase + ocol${at(col)}] = ${outF16 ? `f16(${summed})` : summed}${
       bias ? ` + bias[ocol${at(col)}]` : ""
     };
     }`;
@@ -765,7 +794,9 @@ ${blocks}`;
   const rowStores = slots(geometry.regM).map((row) =>
     `  if (orow${row} < dims.m) {
     let obase = ${base}orow${row} * dims.n;
-${slots(geometry.regN).map((col) => write(row, col)).join("\n")}
+${mask ? `    let mbase = orow${row} * dims.n;\n` : ""}${
+      slots(geometry.regN).map((col) => write(row, col)).join("\n")
+    }
   }`
   ).join("\n");
   return `  let ocol = wid.x * ${gemmTileN(geometry)}u + lid.x * ${geometry.regN}u;
@@ -911,31 +942,45 @@ ${fillBDense(geometry, "b", op, v4)}`,
  * A は q（`[batch,M,D]` 連続）で dense の A 充填そのまま、B は k（`[batch,N,D]` 連続）を
  * linear の重み読みと同じ「k 連続で読んで共有側で転置」構造で読む。**縮約は K 昇順・
  * K タイル 16** で現行 bmm と 1 ビット違わない。
+ *
+ * `mask` 変種は**書き出しの epilogue で `S' = fl(S + mask[m·N+n])` を足すだけ**（束縛が
+ * 1 本増える以外は同一の生成物）。分解経路の `bmm`（S を実体化）→ `add`（mask）と丸めが
+ * 起きる位置も回数も同じなので、ビット同一が保たれる。
  */
 const attentionQkWgsl = (
   geometry: GemmGeometry,
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
+  mask = false,
 ): string => {
   const f16 = compute === "f16";
   assertScoreStorageSupported("attention_qk", score, v4, f16);
+  const element = v4 ? "vec4<f32>" : "f32";
   return skeleton(
     geometry,
-    `// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ, f32${
-      f16 ? ", f16 タイル計算・S も f16" : ""
-    }${scoreNote(score)}, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
-    `@group(0) @binding(1) var<storage, read> q: array<${v4 ? "vec4<f32>" : "f32"}>;
-@group(0) @binding(2) var<storage, read> k: array<${v4 ? "vec4<f32>" : "f32"}>;
+    `// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ${
+      mask ? " + mask[m,n]" : ""
+    }, f32${f16 ? ", f16 タイル計算・S も f16" : ""}${scoreNote(score)}, ${
+      gemmGeometryNote(geometry)
+    }${v4 ? " + vec4" : ""})`,
+    `@group(0) @binding(1) var<storage, read> q: array<${element}>;
+@group(0) @binding(2) var<storage, read> k: array<${element}>;
 @group(0) @binding(3) var<storage, read_write> s: array<${
       scoreArrayType(score, v4 ? tileQuadType(compute) : tileScalarType(compute))
-    }>;`,
+    }>;${
+      mask
+        ? `
+// 加算 mask [1,1,M,N]（B·H の全バッチへ broadcast — 添字にバッチ base は入らない）
+@group(0) @binding(${ATTENTION_QK_MASK_BINDING}) var<storage, read> mask: array<${element}>;`
+        : ""
+    }`,
     scoreStoreWgsl("s", score),
     `${quadDims(v4)}${batchPrologue("attention_qk", v4)}${prologueA(geometry, "attention_qk", v4)}
 ${prologueBAttentionQk(geometry)}`,
     `${fillA(geometry, "q", v4, (expr) => `${expr} * dims.scale`, compute)}
 ${fillBAttentionQk(geometry, v4, compute)}`,
-    store(geometry, "s", "attention_qk", v4, false, f16, score),
+    store(geometry, "s", "attention_qk", v4, false, f16, score, mask),
     "  scale: f32,\n",
     gemmAccumulatorInit(geometry),
     compute,
@@ -1317,7 +1362,7 @@ export const gemmWgsl = (spec: GemmSpec): string => {
     case "conv2d":
       return conv2dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "attention_qk":
-      return attentionQkWgsl(geometry, spec.v4, spec.compute, spec.score);
+      return attentionQkWgsl(geometry, spec.v4, spec.compute, spec.score, spec.mask);
     case "attention_pv":
       return attentionPvWgsl(geometry, spec.v4, spec.compute, spec.score);
     default:

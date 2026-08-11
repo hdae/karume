@@ -889,7 +889,10 @@ export const referenceSoftmax = (
 };
 
 /**
- * 融合 attention `out = softmax_lastdim((q·scale) @ (k·scale)ᵀ) @ v`（ADR 0023）。
+ * 融合 attention `out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v`（ADR 0023）。
+ *
+ * `mask` は省略可能な第 4 入力（`[1,1,M,N]` の加算項を B·H 全体へ broadcast — src/ops.ts）。
+ * 加算は **S を f32 へ丸めた後**（GPU 側 ①QK の書き出し epilogue と同じ位置）。
  *
  * MUST: **素直な 3 段**で書く（S を実体化 → safe-softmax で P を実体化 → PV）。GPU 側は
  * P を実体化せず A タイル充填時に `exp(S−m)·inv` を評価する（1 パスの融合）ので、参照が
@@ -905,10 +908,17 @@ export const referenceAttention = (
   k: RefTensor,
   v: RefTensor,
   attrs: Readonly<Record<string, unknown>>,
+  mask?: RefTensor,
 ): RefTensor => {
   const contract = resolveOpContract("attention");
-  for (const input of [q, k, v]) assertDtype(contract, input.dtype, "reference");
-  const shape = computeOutputShape(contract, [q.shape, k.shape, v.shape], "reference", { attrs });
+  const inputs = mask === undefined ? [q, k, v] : [q, k, v, mask];
+  for (const input of inputs) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(
+    contract,
+    inputs.map((input) => input.shape),
+    "reference",
+    { attrs },
+  );
   // GPU 側は params の f32 語で運ぶので、オラクルも f32 へ丸めた値を使う（masked_fill と同じ）。
   const scale = Math.fround(attentionScale(attrs, "reference"));
   const [batches, heads, rows, depth] = shape;
@@ -921,14 +931,18 @@ export const referenceAttention = (
     const qBase = head * rows * depth;
     const kvBase = head * cols * depth;
     for (let row = 0; row < rows; row += 1) {
-      // ① S[row, col] = Σ_d (q·scale)[row,d] · (k·scale)[col,d]
+      // ① S[row, col] = Σ_d (q·scale)[row,d] · (k·scale)[col,d]（+ mask[row,col]）
       for (let col = 0; col < cols; col += 1) {
         let acc = 0;
         for (let d = 0; d < depth; d += 1) {
           acc += (q.data[qBase + row * depth + d] * scale) *
             (k.data[kvBase + col * depth + d] * scale);
         }
-        scores[col] = Math.fround(acc);
+        // mask は S を f32 へ丸めた**後**に足す（GPU 側の書き出し epilogue と同じ位置）。
+        // mask は [1,1,M,N] なので添字にバッチが入らない = 全 head が同じ行を読む。
+        scores[col] = mask === undefined
+          ? Math.fround(acc)
+          : Math.fround(Math.fround(acc) + mask.data[row * cols + col]);
       }
       // ② safe-softmax（amax を引く形 MUST — referenceSoftmax と同じ）
       let amax = scores[0];
@@ -1232,7 +1246,7 @@ export const applyReferenceOp = (
     case "softmax":
       return referenceSoftmax(inputs[0], attrs);
     case "attention":
-      return referenceAttention(inputs[0], inputs[1], inputs[2], attrs);
+      return referenceAttention(inputs[0], inputs[1], inputs[2], attrs, inputs[3]);
     case "embedding":
       return referenceEmbedding(inputs[0], inputs[1]);
     case "maskedFill":

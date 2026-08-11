@@ -12,6 +12,9 @@
     "  **昇順**で書く（Python 側は集合なので順序を持たない — 表現の差を突合の差にしない）。",
     "  `variadic: true` は**入力数が可変**の op（cat のみ）で、そのとき arity は**下限**。",
     "  省略 = 固定アリティ（入力数がちょうど arity）。",
+    "  `max_arity` は**末尾に省略可能な入力**を持つ op（attention の mask のみ）の上限で、",
+    "  そのとき受理する入力数は arity 以上 max_arity 以下。variadic とは別の欄で、",
+    "  併記はしない（「何本でも」と「決まった 1 本が増える」は別の契約面）。",
     "  out_dtypes は「スロット 0 の入力 dtype → 出力 dtype」で、**恒等でない op にだけ**書く",
     "  （省略 = スロット 0 の受理集合上の恒等写像）。cast だけは出力が attrs.to で決まるので",
     "  この欄を持たない。",
@@ -263,6 +266,7 @@
     {
       "op": "attention",
       "arity": 3,
+      "max_arity": 4,
       "dtypes": { "kind": "uniform", "accept": ["f32"] },
       "attrs": ["scale"]
     },
@@ -1364,10 +1368,66 @@
     },
     {
       "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4], [1, 1, 5, 7]],
+      "attrs": { "scale": 0.5 },
+      "out": [2, 3, 5, 4],
+      "why": "省略可能な第 4 入力 = 加算 mask [1,1,M,N]（B·H の全バッチへ broadcast）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 12, 64], [1, 8, 12, 64], [1, 8, 12, 64], [1, 1, 12, 12]],
+      "attrs": { "scale": 0.3535533845424652 },
+      "out": [1, 8, 12, 64],
+      "why": "双方向バンドマスク付き self-attention の実測形（EmbeddingGemma の sliding window）"
+    },
+    {
+      "op": "attention",
       "ins": [[2, 3, 5, 4], [2, 3, 7, 4]],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "アリティ 3 固定（v の欠落）"
+      "why": "アリティは 3 か 4（v の欠落）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4], [1, 1, 5, 7], [1, 1, 5, 7]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "mask は 1 本だけ（上限 4 — 可変アリティではない）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4], [2, 1, 5, 7]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "mask の B が 1 でない形（[B,1,M,N] は受理しない — broadcast は B·H 全体固定）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4], [1, 3, 5, 7]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "mask の H が 1 でない形（head 別マスクは語彙に無い）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4], [5, 7]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "mask の rank が 4 でない形（rank-2 の [M,N] は受理しない）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4], [1, 1, 4, 7]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "mask の M が q と不一致"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 3, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4], [1, 1, 5, 5]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "mask の N が k と不一致（M と N を取り違えた形 — 正方 mask なら素通りする軸）"
     },
     {
       "op": "attention",

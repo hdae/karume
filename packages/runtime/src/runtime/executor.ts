@@ -169,7 +169,12 @@ import {
   type SubmitStats,
 } from "../gpu/submit.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../kernels/bmm.ts";
-import { type GemmCompute, gemmMTileGeometry, gemmUsesVec4 } from "../kernels/gemm.ts";
+import {
+  ATTENTION_QK_MASK_BINDING,
+  type GemmCompute,
+  gemmMTileGeometry,
+  gemmUsesVec4,
+} from "../kernels/gemm.ts";
 import {
   defaultGemmGeometry,
   gemmGeometryForRows,
@@ -2238,6 +2243,9 @@ export class Session {
    * ① QK gemm（S を実体化・scale はタイル充填時に q/k 両方へ）→ ② 行統計（m と 1/Σexp）→
    * ③ PV gemm（A タイル充填時に `exp(S−m)·inv` を評価 = P 非実体化）。
    *
+   * 省略可能な第 4 入力 `mask[1,1,M,N]`（加算型）は **① の束縛が 1 本増えるだけ**で、
+   * dispatch 数も ②③ の経路も変わらない（S が mask 済みで出てくる）。
+   *
    * i8a8 変種（opt-in）では ① が 3 dispatch・③ が 3 dispatch に増える（最大 7）。**適格判定は
    * 段ごとに独立**（① は `D % 4 == 0`・③ は `N % 4 == 0`）なので、片方だけ i8a8 の**混成**が
    * 起こりうる — 満たさない段だけが f32 経路へ**沈黙で**縮退する（linear の `k % 4` と同じ
@@ -2287,6 +2295,20 @@ export class Session {
         ? "f16"
         : "f32";
 
+    // 加算 mask（省略可能な第 4 入力 — 契約は src/ops.ts）。① の epilogue だけの軸で、
+    // ②③ からは「S が既に mask 済み」に見える。
+    const mask = binds[3];
+    // MUST: i8a8 の ①QK は別カーネル（src/kernels/attention-i8a8.ts）で epilogue を持たない。
+    // 黙って f32 経路へ落とすと「i8a8 を頼んだのに効かない」沈黙になり、mask を落とすと
+    // 値が壊れるので、組み合わせそのものを**一時バッファを取る前に** fail loudly にする。
+    if (mask !== undefined && qkI8a8) {
+      throw new ExecutionError(
+        `${where}: 加算 mask 付きの attention は attentionCompute 'i8a8' と組めない` +
+          "（①QK の i8a8 変種は mask の epilogue を持たない — attentionCompute を 'f32' か " +
+          "'f16' にすること）",
+      );
+    }
+
     // S[batch, M, N] と行統計 [batch·M, 2]。O は実行相が確保済みなので、峰は
     // O + S + 統計（分解経路の S + P + 恒等 expand の 3 枚から 1 枚ぶん減る）。
     // f16 変種（`:c16` の array<f16> / s16 の pack2x16float）では S が半分のバイト数になる
@@ -2309,10 +2331,11 @@ export class Session {
       );
     } else {
       const qkV4 = gemmUsesVec4(depth, cols);
-      const qkKey = attentionQkKey(qkV4, compute, scoreStorage);
+      const hasMask = mask !== undefined;
+      const qkKey = attentionQkKey(qkV4, compute, scoreStorage, hasMask);
       const { pipeline: qkPipeline, layout: qkLayout } = await this.#state.cache.get(
         qkKey,
-        attentionQkWgsl(qkV4, compute, scoreStorage),
+        attentionQkWgsl(qkV4, compute, scoreStorage, hasMask),
       );
       const geometry = defaultGemmGeometry();
       builder.dispatch({
@@ -2327,6 +2350,7 @@ export class Session {
           { binding: 1, source: binds[0] },
           { binding: 2, source: binds[1] },
           { binding: 3, source: scores },
+          ...(mask === undefined ? [] : [{ binding: ATTENTION_QK_MASK_BINDING, source: mask }]),
         ],
         workgroups: [
           tiledWorkgroups(cols, gemmTileN(geometry), limit, `${where} ①QK`),

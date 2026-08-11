@@ -27,6 +27,14 @@
  * 崩れてビット同一の門（PNG sha256 / atol=0 の実測一致）を失う。別順序の変種を入れるなら
  * **別キー + tolerance 全面再導出**とセット（ADR 0022 決定 3 の規律）。
  *
+ * ## 加算 mask は ① の epilogue だけの軸（ADR 0023 改訂）
+ *
+ * 省略可能な第 4 入力 `mask[1,1,M,N]`（src/ops.ts の契約）は、**①QK の書き出し直前で
+ * `S' = fl(S + mask[m·N+n])` を 1 度足す**形で入る。分解経路が `bmm`（S を実体化）→
+ * `add`（mask を足す）の 2 ノードで作る値と、丸めの位置も回数も同じなのでビット同一。
+ * MUST: ②③ は mask を**一切見ない**（S は既に mask 済み）。生成物もキーも 1 バイト動かない
+ * ことをスナップショットが固定する。
+ *
  * ## S の格納形は独立した軸（案 γ 波 1）
  *
  * 3 カーネルが受け渡す S の**格納形**は、計算形（{@link "./gemm.ts"} の `GemmCompute}`）とは
@@ -54,12 +62,24 @@ export const ATTENTION_STATS_WORKGROUP_SIZE = 256;
 /** 行統計 1 行あたりの語数（`[0]` = 行の最大値 / `[1]` = `1/Σexp(S−m)`）。 */
 export const ATTENTION_STATS_STRIDE = 2;
 
+/**
+ * ①QK の**加算 mask** 判別子（ADR 0023 改訂）。
+ *
+ * MUST: 無しは空文字（既存キーは 1 文字も動かない）。MUST: 語は s16 のさらに**後ろ**に置く —
+ * 計算 `:c16` / 格納 `:s16` / mask の 3 語が同時に立ちうるので、並び順をここ 1 箇所で固定
+ * しないと同一構成が 2 通りのキーを持つ。
+ */
+const maskKeyPart = (mask: boolean): string => mask ? ":mask" : "";
+
 export const attentionQkKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
+  mask = false,
 ): string =>
-  `attention_qk:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}`;
+  `attention_qk:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}${
+    maskKeyPart(mask)
+  }`;
 
 export const attentionPvKey = (
   v4: boolean,
@@ -106,7 +126,8 @@ export const attentionQkWgsl = (
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
-): string => gemmWgsl({ op: "attention_qk", v4, compute, score });
+  mask = false,
+): string => gemmWgsl({ op: "attention_qk", v4, compute, score, mask });
 
 export const attentionPvWgsl = (
   v4: boolean,

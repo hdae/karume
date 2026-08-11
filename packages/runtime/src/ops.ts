@@ -188,14 +188,17 @@ export const SYM_PREFIX_SLICE_OP = "sym_prefix_slice";
 export const LINEAR_OP = "linear";
 export const LAYER_NORM_OP = "layer_norm";
 /**
- * 融合 attention（ADR 0023）。`out = softmax_lastdim((q·scale) @ (k·scale)ᵀ) @ v`。
+ * 融合 attention（ADR 0023）。`out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v`。
  *
- * - **アリティ 3 固定**（q / k / v）。可変アリティは `cat` だけという既存規律を崩さない。
+ * - **アリティ 3 か 4**（q / k / v + 省略可能な mask）。可変アリティ（`cat`）とは別の機構で、
+ *   上限を持つ（{@link ContractBase.maxArity}）— 「何本でも」ではなく「mask 1 本だけ増える」。
  * - 入力は **rank-4 head-first**（`q[B,H,M,D]` / `k[B,H,N,D]` / `v[B,H,N,D]`）で連続。
  *   出力は `[B,H,M,D]`。**D は 3 者とも同じ**（実測の全 attention がそうで、v 側だけ
  *   別の長さを許すと「D を取り違えた IR」が shape 検査を素通りする）。
- * - mask / causal / dropout / GQA は**語彙に無い**。必要な形はエクスポータ境界で全件列挙して
- *   fail loudly にする（text_encoder の因果マスクは従来どおり分解経路 — ADR 0016 温存）。
+ * - **mask は f32・rank-4・shape はちょうど `[1,1,M,N]`**（加算型 — `S' = S + mask`）で、
+ *   B·H の全バッチへ broadcast する。`[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 は
+ *   **受理しない**（実行時マスクの需要が出た時に広げる — 欄の不存在が「語彙に無い」を構造で
+ *   表す規律）。causal / dropout / GQA は依然として語彙に無い。
  *
  * MUST: `scale` は **q と k の両方に掛かる（半スケール契約）**。torch の
  * `aten::_scaled_dot_product_attention_math` が `q *= √scale_factor; k *= √scale_factor` と
@@ -337,6 +340,17 @@ type ContractBase = {
    * 結論が一致する。
    */
   readonly variadic?: true;
+  /**
+   * **末尾に省略可能な入力**を持つ op の入力数の上限（現状 `attention` の mask だけ）。
+   * 指定時は `arity` が下限・これが上限で、受理するのはその閉区間の本数だけ。
+   *
+   * MUST: `variadic` の代わりに使わない。`variadic` は「何本でも」（cat の連結）で、こちらは
+   * 「決まったスロットが 1 つ増えるだけ」— 上限を持たない表現に潰すと、余分な入力が
+   * 黙って無視される形（カーネルが読まないスロット）を契約が受理してしまう。
+   * NOTE: capability 射影（{@link slotDtypesOf}）は**上限ぶん**のスロットを作る（省略可能な
+   * スロットも dtype 契約を持つ — uniform なら本体と同じ受理集合）。
+   */
+  readonly maxArity?: number;
 };
 
 /**
@@ -406,11 +420,13 @@ export type OpContract =
     readonly name: typeof SOFTMAX_OP;
     readonly arity: 1;
   })
-  // 融合 attention（ADR 0023）。arity 3 固定・attrs `scale` 宣言必須・rank-4 head-first。
+  // 融合 attention（ADR 0023）。arity 3〜4（4 本目は省略可能な加算 mask）・attrs `scale`
+  // 宣言必須・rank-4 head-first。
   | (ContractBase & {
     readonly kind: "attention";
     readonly name: typeof ATTENTION_OP;
     readonly arity: 3;
+    readonly maxArity: 4;
   })
   | (ContractBase & {
     readonly kind: "embedding";
@@ -1310,12 +1326,14 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     name: SOFTMAX_OP,
     arity: 1,
   }],
-  // 融合 attention（ADR 0023）。q / k / v の 3 本とも f32 で同型（uniform 契約）。
+  // 融合 attention（ADR 0023）。q / k / v と省略可能な mask の 4 本とも f32 で同型
+  // （uniform 契約）。mask は加算型なので値の側と同じ dtype で、bool は受理しない。
   [ATTENTION_OP, {
     ...contract(ATTENTION_OP, ATTENTION_ATTRS),
     kind: "attention",
     name: ATTENTION_OP,
     arity: 3,
+    maxArity: 4,
   }],
   // 値 f32 と添字 i32 のスロット別契約（gather と同型 — 出力は値の側と同型）。
   [EMBEDDING_OP, {
@@ -1357,13 +1375,14 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
 export const attrKeysOf = (found: OpContract): readonly string[] => Object.keys(found.attrs);
 
 /**
- * 入力スロット別の受理集合（capability 射影）。uniform 契約は**アリティぶん複製**する —
+ * 入力スロット別の受理集合（capability 射影）。uniform 契約は**受理しうるスロット数ぶん
+ * 複製**する（省略可能な末尾スロットを含む — {@link ContractBase.maxArity}）。
  * 消費側（列挙門）がスロット番号で引けるようにするため。
  */
 export const slotDtypesOf = (found: OpContract): readonly (readonly IrDtype[])[] => {
   const slots = found.slotDtypes;
   return slots.kind === "uniform"
-    ? Array.from({ length: found.arity }, () => slots.accept)
+    ? Array.from({ length: found.maxArity ?? found.arity }, () => slots.accept)
     : slots.slots;
 };
 
@@ -1423,11 +1442,15 @@ export const numel = (shape: readonly number[]): number =>
  * 共有するのは述語と表示だけにする。
  */
 export const arityFits = (found: OpContract, count: number): boolean =>
-  found.variadic === true ? count >= found.arity : count === found.arity;
+  found.variadic === true
+    ? count >= found.arity
+    : count >= found.arity && count <= (found.maxArity ?? found.arity);
 
-/** 契約のアリティの表示形（可変なら「N 本以上」）。 */
-export const describeArity = (found: OpContract): string =>
-  found.variadic === true ? `${found.arity} 本以上` : `${found.arity}`;
+/** 契約のアリティの表示形（可変なら「N 本以上」・省略可能な末尾があれば「N か M」）。 */
+export const describeArity = (found: OpContract): string => {
+  if (found.variadic === true) return `${found.arity} 本以上`;
+  return found.maxArity === undefined ? `${found.arity}` : `${found.arity} か ${found.maxArity}`;
+};
 
 export const assertArity = (
   found: OpContract,
@@ -2067,7 +2090,7 @@ export const computeOutputShape = (
       return [...shape];
     }
     case "attention": {
-      const [q, k, v] = inputShapes;
+      const [q, k, v, mask] = inputShapes;
       // MUST: scale はここでも引く（attrs スキーマを通らない CPU 参照の直呼びでも値域を効かせる
       // ため。rms_norm の eps / unary の scalarParamValues と同じ役割）。
       attentionScale(context.attrs ?? {}, where);
@@ -2096,6 +2119,23 @@ export const computeOutputShape = (
       // 空軸の softmax は amax の identity が定義できない（softmax / 行 reduce と同じ理由）。
       if (k[2] === 0) {
         throw new OpContractError(`${where}: attention は長さ 0 の N を縮約できない ${show}`);
+      }
+      if (mask !== undefined) {
+        // MUST: mask は **[1,1,M,N] ちょうど**。B·H へ broadcast する加算項なので、
+        // `[B,1,M,N]` / `[1,H,M,N]` のような「一部の軸だけ実体を持つ」形を通すと、
+        // カーネル（B·H を 1 軸に畳んで先頭バッチの mask を全バッチへ配る）が黙って
+        // 別のバッチの mask を適用する。広げるなら添字算術とセットで契約を改版する。
+        const shown = `${show} + mask [${mask.join(",")}]`;
+        if (mask.length !== 4 || mask[0] !== 1 || mask[1] !== 1) {
+          throw new OpContractError(
+            `${where}: attention の mask は [1,1,M,N] の rank-4 のみ（B / H は broadcast 固定）: ${shown}`,
+          );
+        }
+        if (mask[2] !== q[2] || mask[3] !== k[2]) {
+          throw new OpContractError(
+            `${where}: attention の mask の M / N が q / k と不一致 ${shown}`,
+          );
+        }
       }
       return [...q];
     }

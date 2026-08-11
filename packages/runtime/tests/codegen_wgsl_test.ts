@@ -34,7 +34,12 @@ import {
 } from "../src/codegen/strided.ts";
 import { type IrDtype, SEMANTIC_DTYPES } from "../src/format/ir.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../src/kernels/bmm.ts";
-import { GEMM_MTILE_SMALL, GEMM_TILE, gemmUsesVec4 } from "../src/kernels/gemm.ts";
+import {
+  ATTENTION_QK_MASK_BINDING,
+  GEMM_MTILE_SMALL,
+  GEMM_TILE,
+  gemmUsesVec4,
+} from "../src/kernels/gemm.ts";
 import { defaultGemmGeometry } from "../src/kernels/gemm-geometry.ts";
 import { conv1dKey, conv1dParams, conv1dWgsl } from "../src/kernels/conv1d.ts";
 import {
@@ -266,6 +271,11 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_pv.wgsl", attentionPvWgsl(false)],
     ["attention_pv_v4.wgsl", attentionPvWgsl(true)],
     ["attention_stats.wgsl", ATTENTION_STATS_WGSL],
+    // ①QK の**加算 mask 変種**（ADR 0023 改訂）。この 2 本を足すことより、**上の
+    // attention_qk*.wgsl / attention_pv*.wgsl / attention_stats*.wgsl が 1 バイトも
+    // 動かない**ことがこの列挙の主目的（②③ は mask を一切見ない）。
+    ["attention_qk_mask.wgsl", attentionQkWgsl(false, "f32", "f32", true)],
+    ["attention_qk_mask_v4.wgsl", attentionQkWgsl(true, "f32", "f32", true)],
     ["gather.wgsl", GATHER_WGSL],
     ["strided_copy_f32.wgsl", stridedWgsl({ dtype: "f32" })],
     ["strided_copy_i32.wgsl", stridedWgsl({ dtype: "i32" })],
@@ -1157,6 +1167,79 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
   assertThrows(() => attentionStatsParams(30, 0), CodegenError);
   assertThrows(() => attentionStatsParams(-1, 7), CodegenError);
   await Promise.resolve();
+});
+
+/**
+ * 加算 mask 変種（ADR 0023 改訂）。**ビット同一の根拠は「丸めが増えるのは書き出しの 1 加算
+ * だけ」**なので、生成物の側で ① epilogue の形と ②③ のバイト不変を固定する。
+ */
+Deno.test("attention の加算 mask は ①QK の epilogue だけを変え、②③ を 1 バイトも動かさない", () => {
+  for (const v4 of [false, true]) {
+    const where = `v4=${v4}`;
+    const plain = attentionQkWgsl(v4);
+    const masked = attentionQkWgsl(v4, "f32", "f32", true);
+    assertNotEquals(plain, masked, where);
+    // 束縛は S の次の 1 本だけ増える（mask 無しの変種は binding 4 を宣言しない）
+    assertEquals(plain.includes("mask"), false, `${where}: mask 無しに mask が現れない`);
+    assertEquals(
+      masked.includes(`@group(0) @binding(${ATTENTION_QK_MASK_BINDING}) var<storage, read> mask:`),
+      true,
+      where,
+    );
+    // MUST: 縮約ループも共有タイル充填も 1 文字も変わらない（差は「先頭コメント +
+    // mask の束縛 + 書き出しの加算」だけ）。行数の差＝加算行の本数になる形で固定する。
+    const addLines = masked.split("\n").filter((line) => line.includes("let sv = "));
+    assertEquals(
+      masked.split("\n").length - plain.split("\n").length,
+      addLines.length + 2 + (v4 ? 0 : 8),
+      `${where}: 増えた行は mask 加算 + 束縛 2 行（スカラは行ごとの mbase 8 行）ぶんだけ`,
+    );
+    // MUST: mask の添字に**バッチ base を足さない**（契約は [1,1,M,N] の broadcast）。
+    // 出力側は `cbase +` / `obase` を持つので、両者が同じ添字式でないことが要点。
+    for (const line of addLines) {
+      assertEquals(line.includes("cbase"), false, `${where}: mask にバッチ base: ${line}`);
+      assertEquals(line.includes("obase"), false, `${where}: mask に出力 base: ${line}`);
+    }
+    assertEquals(
+      masked.includes(
+        v4
+          ? "let sv = acc0_0 + mask[orow0 * n4 + ocq0];"
+          : "let sv = acc0_0.x + mask[mbase + ocol];",
+      ),
+      true,
+      `${where}: epilogue の形`,
+    );
+    // MUST: 加算は書き出しの直前 1 回だけ（1 出力要素 = 1 加算 — スロット数ぶん展開される）
+    assertEquals(
+      addLines.length,
+      (plain.match(/\n\s+s\[/g) ?? []).length,
+      `${where}: 加算の本数 = 書き出しの本数`,
+    );
+    // ③PV は mask を見ない（S は既に mask 済み）— キーも生成物も変わらない
+    assertEquals(attentionPvWgsl(v4), attentionPvWgsl(v4), where);
+    assertEquals(attentionPvWgsl(v4).includes("mask"), false, `${where}: ③PV に mask が無い`);
+  }
+  // ② 行統計は mask の軸をそもそも持たない（キーも WGSL も 1 本のまま）
+  assertEquals(ATTENTION_STATS_WGSL.includes("mask"), false);
+  // キーは s16 のさらに後ろに 1 語だけ足る（既存キーは 1 文字も動かない）
+  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg128x128r8x8w16v4");
+  assertEquals(
+    attentionQkKey(true, "f32", "f32", true),
+    "attention_qk:v1:f32:reg128x128r8x8w16v4:mask",
+  );
+  assertEquals(
+    attentionQkKey(true, "f32", "f16", true),
+    "attention_qk:v1:f32:reg128x128r8x8w16v4:s16:mask",
+  );
+  assertEquals(
+    attentionQkKey(false, "f16", "f32", true),
+    "attention_qk:v1:f32:reg128x128r8x8w16:c16:mask",
+  );
+  // 同一構成が 2 通りのキーを持たない（mask の有無 × v4 × 格納の全数が一意）
+  const keys = [false, true].flatMap((v4) =>
+    [false, true].map((mask) => attentionQkKey(v4, "f32", "f32", mask))
+  );
+  assertEquals(new Set(keys).size, keys.length);
 });
 
 /**

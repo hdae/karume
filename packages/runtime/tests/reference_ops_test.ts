@@ -698,6 +698,35 @@ Deno.test("attention は scale を q と k の両方へ掛け、safe-softmax で
     [...applyReferenceOp("attention", [q, key, value], { scale: 2 }).data],
     [...out.data],
   );
+
+  // 加算 mask（省略可能な第 4 入力 — ADR 0023 改訂）。S を丸めた**後**に足す。
+  // 上と同じ手計算ケースで列 1 を落とすと、出力は v の 0 行目そのものになる。
+  const masked = referenceAttention(q, key, value, { scale: 2 }, t([1, 1, 1, 2], [0, -1e30]));
+  assertAlmostEquals(masked.data[0], 10, 1e-5);
+  assertAlmostEquals(masked.data[1], 20, 1e-5);
+  // MUST: mask は B·H へ broadcast する（[1,1,M,N] の 1 枚を全 head が読む）。
+  // 2 head の入力に列 0 落としの mask を掛けると、両 head とも v の 1 行目になる。
+  const twoHeads = referenceAttention(
+    t([1, 2, 1, 2], [1, 0, 1, 0]),
+    t([1, 2, 2, 2], [1, 0, 0, 1, 1, 0, 0, 1]),
+    t([1, 2, 2, 2], [10, 20, 30, 40, 50, 60, 70, 80]),
+    { scale: 2 },
+    t([1, 1, 1, 2], [-1e30, 0]),
+  );
+  assertEquals([...twoHeads.data].map((v) => Math.round(v)), [30, 40, 70, 80]);
+  // 統一入口も 4 本目を落とさず渡す（渡し忘れると mask 無しの値が黙って返る）
+  assertEquals(
+    [
+      ...applyReferenceOp("attention", [q, key, value, t([1, 1, 1, 2], [0, -1e30])], { scale: 2 })
+        .data,
+    ],
+    [...masked.data],
+  );
+  // 契約違反の mask（[1,1,M,N] から外れる形）はオラクル側でも落ちる
+  assertThrows(
+    () => referenceAttention(q, key, value, { scale: 2 }, t([1, 1, 2, 2], [0, 0, 0, 0])),
+    OpContractError,
+  );
 });
 
 Deno.test("embedding は行を引き直し、範囲外添字を拒否する", () => {
