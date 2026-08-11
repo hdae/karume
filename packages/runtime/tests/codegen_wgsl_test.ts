@@ -280,6 +280,10 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["rope.wgsl", ROPE_WGSL],
     ["linear.wgsl", LINEAR_WGSL],
     ["linear_v4.wgsl", linearWgsl("f32", true)],
+    // skinny-M 幾何（M ≤ 64 → M16N16 — src/kernels/gemm-geometry.ts の掃引確定値）の代表
+    // 1 本。**既定側（上 2 本）と対で置く**のが条件で、バケット追加で既定のバイト列が
+    // 動くのが最大の事故。3 op は骨格共有なので代表は linear だけでよい。
+    ["linear_m16_v4.wgsl", linearWgsl("f32", true, "f32", 4)],
     ["layer_norm.wgsl", LAYER_NORM_WGSL],
     // adaLN 融合（ADR 0040 の 4 本目）。**素の layer_norm と対で置く**のが条件で、
     // 行統計と affine の文字列を共有しているぶん、片方だけバイト列が動くのが最大の事故。

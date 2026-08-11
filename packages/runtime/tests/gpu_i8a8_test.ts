@@ -51,6 +51,7 @@ import {
   type SessionOptions,
   type Tensor,
 } from "../src/runtime/executor.ts";
+import { linearKey } from "../src/kernels/linear.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { buildSafetensors, f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
@@ -556,7 +557,10 @@ Deno.test({
       const baseline = await runLinear(gpu, prepared, {});
       assertEquals(baseline.pipelineCount, 1, "既定はパイプライン 1 本（quantize_rows が出ない）");
       if (baseline.keys.length > 0) {
-        assertEquals(baseline.keys, ["linear:v2:f32:reg128x128r8x8w16:wi8"], "既定のキー");
+        // 見たいのは「i8a8 ではなく f32 linear（wi8 格納）が 1 本だけ走った」こと。キーの
+        // 綴りそのものは tests/gemm_geometry_test.ts が固定するので、ここは同じ形状
+        //（m=17 → 小 M のタイル幾何バケット / n=19 でスカラ変種）から引く。
+        assertEquals(baseline.keys, [linearKey("i8", false, "f32", 17)], "既定のキー");
       }
       // 既定の値は w8（重みだけ量子化）なので、w8a8 の参照とは**一致しない**
       // （一致してしまうなら活性量子化が効いていない）

@@ -51,8 +51,9 @@ const B = [1, -2, 0.5];
 
 /** グラフが実際に踏むパイプラインキー（executor と同じ生成関数から引く）。 */
 const EXPECTED_KEYS: ReadonlySet<string> = new Set([
-  // x[6,4] × w[4,3]: n = 3 は 4 の倍数でないのでスカラ変種を踏む
-  matmulKey(false),
+  // x[6,4] × w[4,3]: n = 3 は 4 の倍数でないのでスカラ変種を踏み、m = 6 は小 M の
+  // タイル幾何バケット（src/kernels/gemm-geometry.ts の `gemmGeometryForRows`）を踏む
+  matmulKey(false, 6),
   elementwiseKey({ op: "add", rank: 2, dtype: "f32" }),
   elementwiseKey({ op: "relu", rank: 2, dtype: "f32" }),
 ]);

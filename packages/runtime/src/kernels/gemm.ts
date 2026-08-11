@@ -57,6 +57,7 @@ import {
   gemmColumnQuads,
   gemmColumnSlots,
   type GemmGeometry,
+  gemmGeometryForRows,
   gemmGeometryKeyPart,
   gemmGeometryNote,
   gemmQuadFillStride,
@@ -138,13 +139,27 @@ export const gemmMTileGeometry = (mTile: number): GemmGeometry => {
 export const gemmUsesVec4 = (k: number, n: number): boolean => k % 4 === 0 && n % 4 === 0;
 
 /**
+ * 行数 M から幾何を解決する（matmul / bmm / linear の 3 経路）。**キーと生成の両方がここを通る**
+ * ので、片方だけ別の幾何になることが構造的に起こらない。
+ *
+ * `rows` 省略は「行数を持たない呼び出し」= 融合 attention（幾何は Anima の実測選定で固定 —
+ * {@link "./gemm-geometry.ts"} `gemmGeometryForRows` の MUST）と、既定変種だけを見る
+ * スナップショット / キー検査。
+ */
+const rowsGeometry = (rows: number | undefined): GemmGeometry =>
+  rows === undefined ? defaultGemmGeometry() : gemmGeometryForRows(rows);
+
+/**
  * パイプラインキーのタイル判別子。v4 フラグは形状から導いた 1 ビット。
  *
  * MUST: タイル辺だけでなく**幾何そのもの**を載せる（{@link gemmGeometryKeyPart}）— 64×64 は
  * 複数の `regM×regN wgX` から組めるので、辺だけのキーは別の生成物へ衝突する。
+ * MUST: `rows` は生成（{@link gemmWgsl}）へ渡すものと**同じ値**にする。片方だけ渡し忘れると
+ * キーと生成物の幾何が食い違い、キャッシュに載った別幾何の WGSL が dispatch 数と噛み合わずに
+ * 出力タイルが欠落する（例外の出ない誤値）。
  */
-export const gemmKeyPart = (v4: boolean): string => {
-  const geometry = defaultGemmGeometry();
+export const gemmKeyPart = (v4: boolean, rows?: number): string => {
+  const geometry = rowsGeometry(rows);
   return `reg${gemmTileM(geometry)}x${gemmTileN(geometry)}${gemmGeometryKeyPart(geometry)}${
     v4 ? "v4" : ""
   }`;
@@ -192,7 +207,12 @@ export const gemmComputeKeyPart = (compute: GemmCompute): string => compute === 
  * （ADR 0024）で、**groups == 1 専用**（groups > 1 は直接カーネルが受ける）。
  */
 export type GemmSpec =
-  | { readonly op: "matmul" | "bmm"; readonly v4: boolean }
+  | {
+    readonly op: "matmul" | "bmm";
+    readonly v4: boolean;
+    /** 出力の行数 M（幾何のバケット — 省略時は既定幾何）。 */
+    readonly rows?: number;
+  }
   | {
     readonly op: "attention_qk" | "attention_pv";
     readonly v4: boolean;
@@ -205,6 +225,8 @@ export type GemmSpec =
     readonly v4: boolean;
     readonly weight: WeightStorage;
     readonly compute?: GemmCompute;
+    /** 平坦化後の行数 M（幾何のバケット — 省略時は既定幾何）。 */
+    readonly rows?: number;
   }
   | {
     readonly op: "conv2d";
@@ -1265,15 +1287,29 @@ ${fillBConv2d(geometry, v4)}`,
     conv2dAccInit(geometry),
   );
 
+/** op 別の解決（conv2d = m タイル / 融合 attention = 既定固定 / 残り 3 op = 行数バケット）。 */
+const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
+  switch (spec.op) {
+    case "conv2d":
+      return gemmMTileGeometry(spec.mTile);
+    case "attention_qk":
+    case "attention_pv":
+      return defaultGemmGeometry();
+    default:
+      return rowsGeometry(spec.rows);
+  }
+};
+
 /**
  * 生成入力 1 つから WGSL 1 本。同じ入力からは常にバイト単位で同じ文字列が出る。
  *
- * タイル幾何を解決する**唯一の点**（{@link defaultGemmGeometry} / conv2d は
- * {@link gemmMTileGeometry}）で、門（{@link assertGemmGeometry}）もここ 1 箇所。断片は幾何を
- * 受け取って流すだけなので、既定を差し替えたときの影響がこの関数に閉じる。
+ * タイル幾何を解決する**唯一の点**（conv2d は {@link gemmMTileGeometry}・matmul / bmm / linear は
+ * 行数バケット {@link rowsGeometry}・融合 attention は {@link defaultGemmGeometry}）で、門
+ * （{@link assertGemmGeometry}）もここ 1 箇所。断片は幾何を受け取って流すだけなので、既定を
+ * 差し替えたときの影響がこの関数に閉じる。
  */
 export const gemmWgsl = (spec: GemmSpec): string => {
-  const geometry = spec.op === "conv2d" ? gemmMTileGeometry(spec.mTile) : defaultGemmGeometry();
+  const geometry = resolveGeometry(spec);
   assertGemmGeometry(geometry, spec.op);
   switch (spec.op) {
     case "linear":

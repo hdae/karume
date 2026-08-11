@@ -170,7 +170,12 @@ import {
 } from "../gpu/submit.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../kernels/bmm.ts";
 import { type GemmCompute, gemmMTileGeometry, gemmUsesVec4 } from "../kernels/gemm.ts";
-import { defaultGemmGeometry, gemmTileM, gemmTileN } from "../kernels/gemm-geometry.ts";
+import {
+  defaultGemmGeometry,
+  gemmGeometryForRows,
+  gemmTileM,
+  gemmTileN,
+} from "../kernels/gemm-geometry.ts";
 import { GATHER_KEY, GATHER_WGSL, GATHER_WORKGROUP_SIZE, gatherParams } from "../kernels/gather.ts";
 import { matmulKey, matmulParams, matmulWgsl } from "../kernels/matmul.ts";
 import {
@@ -1879,12 +1884,14 @@ export class Session {
     // v4（vec4 の読み書き）は形状から導く 1 ビット。導出時に評価してキーと WGSL の
     // 両方へ渡す（同一キー ⇔ 同一バイト列は保たれる）。
     const v4 = gemmUsesVec4(k, n);
-    const key = matmulKey(v4);
-    const { pipeline, layout } = await this.#state.cache.get(key, matmulWgsl(v4));
+    // MUST: タイル幾何は行数 M のバケット（src/kernels/gemm-geometry.ts）。キー・WGSL・
+    // dispatch の 3 つに**同じ m** を通す — 1 つでも渡し忘れると出力タイルが静かに欠ける。
+    const key = matmulKey(v4, m);
+    const { pipeline, layout } = await this.#state.cache.get(key, matmulWgsl(v4, m));
     const params = this.#writeParams(matmulParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `matmul [${a.join(",")}] × [${b.join(",")}]`;
-    const geometry = defaultGemmGeometry();
+    const geometry = gemmGeometryForRows(m);
     builder.dispatch({
       key,
       pipeline,
@@ -1917,12 +1924,13 @@ export class Session {
     const [batch, m, k] = a;
     const n = b[2];
     const v4 = gemmUsesVec4(k, n);
-    const key = bmmKey(v4);
-    const { pipeline, layout } = await this.#state.cache.get(key, bmmWgsl(v4));
+    // 幾何のバケットは**行列 1 枚の m**（バッチは z 軸で、タイル幾何とは独立）。
+    const key = bmmKey(v4, m);
+    const { pipeline, layout } = await this.#state.cache.get(key, bmmWgsl(v4, m));
     const params = this.#writeParams(bmmParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `bmm [${a.join(",")}] × [${b.join(",")}]`;
-    const geometry = defaultGemmGeometry();
+    const geometry = gemmGeometryForRows(m);
     builder.dispatch({
       key,
       pipeline,
@@ -2013,15 +2021,17 @@ export class Session {
       );
     }
     const v4 = gemmUsesVec4(k, n);
-    const key = linearKey(weightStorage, v4, compute);
+    // MUST: タイル幾何は平坦化後の行数 m のバケット（src/kernels/gemm-geometry.ts）。
+    // キー・WGSL・dispatch に**同じ m** を通す。
+    const key = linearKey(weightStorage, v4, compute, m);
     const { pipeline, layout } = await this.#state.cache.get(
       key,
-      linearWgsl(weightStorage, v4, compute),
+      linearWgsl(weightStorage, v4, compute, m),
     );
     const params = this.#writeParams(linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `linear [${x.join(",")}] × [${weight.join(",")}]`;
-    const geometry = defaultGemmGeometry();
+    const geometry = gemmGeometryForRows(m);
     builder.dispatch({
       key,
       pipeline,

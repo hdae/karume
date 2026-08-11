@@ -9,9 +9,13 @@
 
 import { gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
 
-export const bmmKey = (v4: boolean): string => `bmm:v2:f32:${gemmKeyPart(v4)}`;
+/**
+ * `rows` は**行列 1 枚の M**（バッチ軸は含めない — バッチは dispatch の z で、タイル幾何とは
+ * 独立）。タイル幾何のバケットは src/kernels/gemm-geometry.ts の `gemmGeometryForRows`。
+ */
+export const bmmKey = (v4: boolean, rows?: number): string => `bmm:v2:f32:${gemmKeyPart(v4, rows)}`;
 
-export const bmmWgsl = (v4: boolean): string => gemmWgsl({ op: "bmm", v4 });
+export const bmmWgsl = (v4: boolean, rows?: number): string => gemmWgsl({ op: "bmm", v4, rows });
 
 export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>
   gemmParams("bmm", m, n, k);

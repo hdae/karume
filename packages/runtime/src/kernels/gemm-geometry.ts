@@ -29,6 +29,12 @@
  * （regM·regN = 32 → 64）・タイル辺第二」で i8a8 側の掃引と同じだが、最良のタイル形は
  * i8a8（M128N64）と**一致しない** — 幾何の答えは経路ごとの実測でしか出ない。
  * いずれの幾何でも PNG / WAV の sha256 門はビット同一（実測命題 — ADR 0022 追記）。
+ *
+ * ## 形状バケット
+ *
+ * 既定は M ≥ 128 を前提にした形なので、skinny-M（M < 128）だけ {@link gemmGeometryForRows} が
+ * 別の幾何を返す。**選択は静的な shape の純関数**（実行時オートチューンは ADR 0022 で禁止）で、
+ * 返り値はそのままキーに載るため「同一キー → バイト同一 WGSL」は保たれる。
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -187,6 +193,72 @@ export const gemmGeometryNote = (geometry: GemmGeometry): string =>
  * MUST: 既定の変更は PNG / WAV 門の再実測とセット（ADR 0022 追記 — ビット同一は実測命題）。
  */
 export const defaultGemmGeometry = (): GemmGeometry => ({ regM: 8, regN: 8, wgX: 16, wgY: 16 });
+
+/**
+ * 小 M バケットの候補（{@link gemmGeometryForRows} の表）。
+ *
+ * ## なぜ M で切るか
+ *
+ * 既定 `M128N128` は 1 workgroup が 128 行 × 128 列を持つので、**M < 128 では行タイルが 1 枚しか
+ * 立たない**。dispatch 数は `ceil(n / 128)` だけになり、EmbeddingGemma（bare T=4）の実測形
+ * `M=4, N ∈ {256, 768, 1152, 3072}` では workgroup が 2〜24 個 = SM を埋め切らない
+ * （実測 170 dispatch で 41.3ms・242.6µs/本 — 重み転送量から見た所要の 2 桁上）。
+ *
+ * 行タイルが 1 枚のとき、重み `[n,k]` は**どの幾何でもちょうど 1 回ずつ**読まれる（タイルを
+ * 跨いで重複しない）ので、幾何の効き所は「同じ転送量をどれだけ並列に流せるか」だけになる。
+ * grid 全体のスレッド数は `n · wgY / regN`、workgroup 数は `n / tileN` なので、
+ * **tileM を M の直上に抑えて wgY を稼ぎ、tileN を絞って workgroup を増やす**のが方向。
+ *
+ * ## 整除の根拠（{@link assertGemmGeometry} の 5 条件）
+ *
+ * | 幾何 | tileM×tileN | threads | rowFillStride | quadFillStride | 共有 |
+ * | --- | --- | --- | --- | --- | --- |
+ * | M16N16 `r1×4 wg4×16` | 16×16 | 64 | 16 | 4 | 2,048 B |
+ * | 既定 M128N128 `r8×8 wg16×16` | 128×128 | 256 | 64 | 8 | 16,384 B |
+ *
+ * `regN % 4 == 0`・`threads % 4`（K quad 数）`== 0`・`threads % (tileN/4)`（列 quad 数）`== 0`・
+ * `tileM % rowFillStride == 0 && tileN % rowFillStride == 0`・`16 % quadFillStride == 0` を
+ * 満たす。**`tileM ≥ threads / 4` が実質の上限**（行充填ストライドがタイル辺を越えられない）で、
+ * tileM=16 なら threads ≤ 64、tileM=64 なら threads ≤ 256。
+ *
+ * ## 値の出どころ（RTX 3080 Ti・2026-08-11 掃引 — docs/research/2026-08-11-skinny-m-geometry.md）
+ *
+ * 候補 11 種 × EmbeddingGemma の実 linear 形状 × M ∈ {1,4,64,318,512} の ABBA 対計測
+ * （全候補・全形状でビット同一を同時確認）。実 run の形状構成で重み付けした結果:
+ *
+ * - M = 1 / 4 / 64 とも **M16N16 が対既定 ×3.0〜3.2** で、2 段目に置いていた
+ *   `M64N32 r4×4 wg8×16`（×2.5）を **M=64 でも**上回った — tileM を M の直上に置いて重みの
+ *   読み直しを避けるより、行タイルを 4 枚に割ってでも workgroup を増やす方が勝つ。
+ *   よってバケットは **M ≤ 64 → M16N16 の 1 段だけ**。
+ * - `M16N8`（threads 32）は M16N16 と 1% 未満差の同着（3 点とも僅差で上だが規約上は同値）。
+ *   タイの側は採らず、実装済み・検査済みの M16N16 を保持。
+ * - M = 318 / 512 は `M64N32` が ×1.67 / ×1.28 で最良だが、65〜512 のバケット追加は
+ *   Anima / SBV2 の既存キー・実測選定に波及する（下の MUST）ため**未採用**。掃引データは
+ *   research doc に恒久化済みで、採否は別裁定。
+ */
+const GEOMETRY_M16N16: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
+
+/**
+ * 行数 M から幾何を選ぶ**静的テーブル**（matmul / bmm / linear の 3 経路専用）。
+ *
+ * MUST: 純関数 = プラン時 shape だけの関数であること。実行時オートチューン（実測して選び直す）は
+ * ADR 0022 で禁じている — f32 縮約は担当割りしか自由がなく、選択が実行ごとに揺れると
+ * 「同一キー → バイト同一 WGSL」も PNG / WAV 門のビット同一もキーの意味も同時に崩れる。
+ * MUST: **M ≥ 128 は既定をそのまま返す**。Anima（DiT の S = 4096）/ SBV2 の実測選定と
+ * 既存パイプラインキーを 1 バイトも動かさないための境界で、新しいキーが出るのは M < 128 だけ。
+ * MUST: 融合 attention（①QK / ③PV）はこの表を通さない。あちらの既定は Anima の実測で選ばれた
+ * ものなので、M（= クエリ長）で勝手に振り替えると実測の前提が消える。
+ *
+ * バケット境界 64 は掃引の実測境界（M=64 まで M16N16 が最良・M=318 では逆転）を、行タイル
+ * 4 枚（64 / tileM 16）以内に収まる範囲として採ったもの。
+ */
+export const gemmGeometryForRows = (rows: number): GemmGeometry => {
+  if (!Number.isSafeInteger(rows) || rows < 0) {
+    throw new CodegenError(`幾何の選択: 行数 M は非負整数（${rows}）`);
+  }
+  if (rows <= 64) return GEOMETRY_M16N16;
+  return defaultGemmGeometry();
+};
 
 /**
  * f32 accumulator の初期化。**配列 1 本ではなく `acc{行}_{列 quad}` の名前付き変数**にするのは、

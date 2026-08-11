@@ -19,18 +19,24 @@ import { weightKeyPart, type WeightStorage } from "./weight-storage.ts";
 
 export { LINEAR_SCALE_BINDING } from "./gemm.ts";
 
+/**
+ * `rows` は平坦化後の M（先行次元の積）。タイル幾何のバケット（src/kernels/gemm-geometry.ts の
+ * `gemmGeometryForRows`）を決める形状由来の値で、MUST: キー・WGSL・dispatch に**同じ M** を通す。
+ */
 export const linearKey = (
   weight: WeightStorage,
   v4: boolean,
   compute: GemmCompute = "f32",
+  rows?: number,
 ): string =>
-  `linear:v2:f32:${gemmKeyPart(v4)}${weightKeyPart(weight)}${gemmComputeKeyPart(compute)}`;
+  `linear:v2:f32:${gemmKeyPart(v4, rows)}${weightKeyPart(weight)}${gemmComputeKeyPart(compute)}`;
 
 export const linearWgsl = (
   weight: WeightStorage,
   v4: boolean,
   compute: GemmCompute = "f32",
-): string => gemmWgsl({ op: "linear", v4, weight, compute });
+  rows?: number,
+): string => gemmWgsl({ op: "linear", v4, weight, compute, rows });
 
 export const linearParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>
   gemmParams("linear", m, n, k);
