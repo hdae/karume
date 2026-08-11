@@ -390,9 +390,16 @@ class Converter:
         # 別引数で受けると dynamic_shapes と二重管理になり、食い違ったときに「宣言より
         # 短い定数を焼いて実行時に範囲外」が黙って通る。
         self.sym_ranges: dict[str, tuple[Any, Any]] = {}
+        # MUST: キーは**素のシンボル**だけを拾う。派生次元（`Dim("S") + 1519` を入力 shape に
+        # 宣言した形 — ADR 0046）を dynamic_shapes に書くと range_constraints に sympy の
+        # `Add`（`s27 + 1519`）がキーとして並び、`.name` を持たないので走査ごと落ちる。
+        # 派生次元の値域は素のシンボルの値域から決まる冗長情報なので、除いて失うものは無い。
         self._internal_ranges: dict[str, tuple[Any, Any]] = {
             symbol.name: (value_range.lower, value_range.upper)
             for symbol, value_range in ep.range_constraints.items()
+            # sympy を直接 import しない（torch の推移依存で、宣言依存には無い）— 素の
+            # シンボルであることは sympy 自身が全式に持たせる述語で見る。
+            if getattr(symbol, "is_Symbol", False)
         }
         # 命名済みフラグ（_assign_input_symbols が立てる — 以後の新規命名は拒否）
         self.symbols_assigned = False
@@ -1115,10 +1122,10 @@ def _h_expand(node: Node) -> Emitted:
 
 
 def _static_extent(node: Node, tensor: torch.Tensor, dim: int, op: str) -> int:
-    """レイアウト第 2 群の**対象軸は静的**（ADR 0014）— 記号次元なら fail loudly。
+    """`slice` / `flip` の**対象軸は静的**（ADR 0014）— 記号次元なら fail loudly。
 
     記号軸の切り出しは `sym_prefix_slice` の担当で、`slice` は静的専業（重複させない）。
-    cat は記号長どうしの和が次元言語に載らず、flip は実測が全て静的軸。
+    flip は実測が全て静的軸。`cat` の連結軸だけは ADR 0046 で緩めた（`_cat_axis`）。
     """
     extent = tensor.shape[dim]
     _expect(
@@ -1181,11 +1188,35 @@ def _h_slice(node: Node) -> Emitted:
     return Emitted("slice", 1, {"dim": dim, "start": start, "end": end})
 
 
+def _cat_axis(node: Node, tensors: Sequence[Node], dim: int) -> None:
+    """cat の連結軸は〈定数〉または〈**同一**シンボルの一次式〉に限る（ADR 0046）。
+
+    総和 `Σ(coeff_i·sym + offset_i)` は同一シンボルなら正準文法 `coeff·sym+offset` に
+    そのまま載る（`S`+1519 → `S+1519`、`S`+`S` → `2S`）。
+    MUST: 異なるシンボルが混ざる連結は落とす — 和が 1 次元 1 シンボルの文法に載らない。
+    torch.export も複数シンボル和の宣言を拒むので、受理を広げても表現不能な形は入らないが、
+    ここで止めないと出力 shape を書く `_sym_parts` まで発覚が遅れ、原因が読めない。
+    """
+    symbols: dict[str, int] = {}
+    for index, item in enumerate(tensors):
+        extent = item.meta["val"].shape[dim]
+        if not _has_free_symbols(extent):
+            continue
+        for symbol in extent.node.expr.free_symbols:
+            symbols.setdefault(symbol.name, index)
+    _expect(
+        len(symbols) <= 1,
+        node,
+        f"連結軸 {dim} に異なるシンボルが混ざる cat は未対応"
+        f"（入力ごとのシンボル: {symbols}）— 和が次元言語 coeff·sym+offset に載らない",
+    )
+
+
 def _h_cat(node: Node) -> Emitted:
     """aten.cat.default → cat（attrs `dim`、**可変アリティ**）。
 
     MUST: 入力 1 本の cat は落とす（恒等コピーで、契約のアリティ下限 2 を割る）。
-    MUST: 記号軸の連結は落とす（次元言語に和が載らない — `_static_extent`）。
+    MUST: 連結軸のシンボルは 1 種類まで（ADR 0046 — `_cat_axis`）。
     """
     _expect(not node.kwargs, node, f"kwargs {sorted(node.kwargs)} を伴う cat は未対応")
     tensors = node.args[0]
@@ -1203,8 +1234,7 @@ def _h_cat(node: Node) -> Emitted:
         f"rank {rank} の cat は strided カーネル（rank ≤ {STRIDED_RANK}）で実行できない",
     )
     dim = _normalized_dims(node, rank, [_arg_or_kwarg(node, 1, "dim", 0)])[0]
-    for index, item in enumerate(tensors):
-        _static_extent(node, item.meta["val"], dim, f"入力 {index} の cat")
+    _cat_axis(node, tensors, dim)
     return Emitted("cat", len(tensors), {"dim": dim})
 
 

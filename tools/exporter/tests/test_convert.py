@@ -14,6 +14,7 @@ from torch.export import Dim
 
 from karume.convert import UnsupportedAtenOpsError, normalize_boundary_tensor
 from karume.ops import EMITTABLE_OPS
+from karume.pipeline import export_to_file
 
 
 class Scale(nn.Module):
@@ -1634,14 +1635,42 @@ class TestLayoutOps2:
         assert node.attrs == {"dim": 1}
         assert graph.values[node.outs[0]].shape == [1, 6, "T"]
 
-    def test_a_symbolic_axis_cat_is_rejected(self, convert_module, dyn_t):
+    def test_a_symbolic_cat_axis_sums_into_the_dimension_language(self, convert_module, dyn_t):
+        """ADR 0046 — 連結軸は〈定数〉/〈同一シンボルの一次式〉なら記号でよい。
+
+        ADR 0014 の「連結軸は静的」を改訂した。DiT の joint attention は
+        `cat([self | context], dim=1)` で self 側の軸長が記号（`S+1519`）— 記号 1 本 + 定数は
+        正準文法 `coeff·sym+offset` にそのまま載るので、拒否理由（和が載らない）が成り立たない。
+        """
+
         class JoinTime(nn.Module):
             def forward(self, a, b):
                 return torch.cat([a, b], 0)
 
-        with pytest.raises(NotImplementedError, match="記号次元"):
+        graph, _ = convert_module(
+            JoinTime(), (torch.randn(6, 4), torch.randn(3, 4)), ({0: dyn_t}, None)
+        )
+        assert graph.values[only_node(graph, "cat").outs[0]].shape == ["T+3", 4]
+
+        graph, _ = convert_module(
+            JoinTime(), (torch.randn(6, 4), torch.randn(6, 4)), ({0: dyn_t}, {0: dyn_t})
+        )
+        assert graph.values[only_node(graph, "cat").outs[0]].shape == ["2T", 4]
+
+    def test_mixing_different_symbols_on_the_cat_axis_is_rejected(self, convert_module, dyn_t):
+        """異シンボルの和は 1 次元 1 シンボルの次元言語に載らない（ADR 0046 の唯一の拒否）。"""
+
+        class JoinTime(nn.Module):
+            def forward(self, a, b):
+                return torch.cat([a, b], 0)
+
+        other = Dim("U", min=2, max=SYM_MAX)
+        with pytest.raises(NotImplementedError, match="異なるシンボル"):
             convert_module(
-                JoinTime(), (torch.randn(6, 4), torch.randn(6, 4)), ({0: dyn_t}, {0: dyn_t})
+                JoinTime(),
+                (torch.randn(6, 4), torch.randn(5, 4)),
+                ({0: dyn_t}, {0: other}),
+                symbol_names=("T", "U"),
             )
 
     def test_last_dim_zero_padding_becomes_one_node(self, convert_module, dyn_t):
@@ -1724,6 +1753,44 @@ class TestLayoutOps2:
 
         with pytest.raises(NotImplementedError, match="軸 1 本"):
             convert_module(ReverseBoth(), (torch.randn(3, 4),))
+
+
+class SymbolicCatJoin(nn.Module):
+    """記号軸 cat（self | context）+ **連結後の長さを持つ入力**（recon の DiT 形の縮小版）。
+
+    `gate` の宣言が派生次元 `T+3` になるのが肝で、この形は `Dim("T") + 3` を dynamic_shapes に
+    書いたときだけ現れる（ADR 0046 の実測で初めて出た）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = nn.Linear(4, 2, bias=False)
+
+    def forward(self, x, context, gate):
+        return self.proj(torch.cat([x, context], 1) * gate)
+
+
+class TestSymbolicCatEndToEnd:
+    """記号軸 cat のグラフが export → 書き出し → verify_model まで通る（ADR 0046）。"""
+
+    def test_a_derived_input_dimension_survives_the_range_constraint_scan(self, tmp_path, dyn_t):
+        """MUST: 派生次元は range_constraints に **sympy の `Add`** としても並ぶ。
+
+        `Dim("T") + 3` を入力 shape に宣言すると `ep.range_constraints` のキーに `s27 + 3` が
+        入る。`.name` を素で読む走査は `AttributeError: 'Add' object has no attribute 'name'`
+        で落ち、記号軸 cat のグラフは**変換に入る前に**死ぬ（ADR 0046 の同時修正）。
+        派生次元の値域は素のシンボルの値域から決まる冗長情報なので、除いて失うものは無い。
+        """
+        graph = export_to_file(
+            SymbolicCatJoin(),
+            (torch.randn(1, 6, 4), torch.randn(1, 3, 4), torch.randn(1, 9, 1)),
+            tmp_path / "model.safetensors",
+            dynamic_shapes=({1: dyn_t}, None, {1: dyn_t + 3}),
+        )
+
+        # 派生次元は入力の宣言としてそのまま残る（束縛源は素の `T` の位置だけ）
+        assert [spec.shape for spec in graph.inputs] == [[1, "T", 4], [1, 3, 4], [1, "T+3", 1]]
+        assert graph.values[only_node(graph, "cat").outs[0]].shape == [1, "T+3", 4]
 
 
 class TestRmsNorm:

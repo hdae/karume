@@ -252,10 +252,15 @@ def _graph() -> IrGraph:
 
 
 class TestLayoutAxisIsStatic:
-    """レイアウト第 2 群（slice / cat / flip）の対象軸は**静的**（ADR 0014）。
+    """レイアウト第 2 群の対象軸の記号規則。
 
-    束縛前の宣言 shape でしか判定できない規則なので適合表には書けない（TS 側は同じ規則を
-    plan.ts が持つ — 層は違うが受理集合は同じ）。
+    `slice` / `flip` は**静的軸のみ**（ADR 0014）。`cat` の連結軸だけは ADR 0046 が
+    「〈定数〉または〈**同一**シンボルの一次式〉」まで緩め、拒否は**異シンボルの混在**に
+    差し替わった。
+
+    束縛前の宣言 shape でしか判定できない**拒否**規則なので適合表には書けない（数値へ
+    解決した時点で「T と U が別シンボル」という事実が消える）。TS 側は同じ規則を plan.ts が
+    持つ — 層は違うが受理集合は同じ。受理側は適合表の shapes 節が両側で踏む。
     """
 
     def test_a_static_axis_slice_keeps_the_other_symbolic_dimensions(self):
@@ -272,9 +277,18 @@ class TestLayoutAxisIsStatic:
     def test_a_static_axis_cat_keeps_the_other_symbolic_dimensions(self):
         assert shape_of("cat", [[1, 3, "T"], [1, 5, "T"]], attrs={"dim": 1}) == [1, 8, "T"]
 
-    def test_a_symbolic_cat_axis_is_rejected(self):
-        with pytest.raises(OpContractError, match="記号次元"):
-            shape_of("cat", [["T", 4], [3, 4]], attrs={"dim": 0})
+    def test_a_symbolic_cat_axis_sums_with_a_constant(self):
+        """ADR 0046 — `S`+定数 は正準文法にそのまま載る（DiT の KV 連結と同型）。"""
+        assert shape_of("cat", [["T", 4], [3, 4]], attrs={"dim": 0}) == ["T+3", 4]
+
+    def test_the_same_symbol_on_both_sides_accumulates_the_coefficient(self):
+        assert shape_of("cat", [["T", 4], ["T", 4]], attrs={"dim": 0}) == ["2T", 4]
+        assert shape_of("cat", [["2T+1", 4], [4, 4], ["T", 4]], attrs={"dim": 0}) == ["3T+5", 4]
+
+    def test_mixing_different_symbols_on_the_cat_axis_is_rejected(self):
+        """異シンボルの和は 1 次元 1 シンボルの次元言語に載らない（ADR 0046 の唯一の拒否）。"""
+        with pytest.raises(OpContractError, match="異なるシンボル"):
+            shape_of("cat", [["T", 4], ["U", 4]], attrs={"dim": 0})
 
     def test_a_mismatched_symbolic_dimension_off_the_cat_axis_is_rejected(self):
         with pytest.raises(OpContractError, match="軸 2 で違う"):

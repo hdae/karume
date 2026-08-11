@@ -21,10 +21,11 @@ MUST: 束縛が要る判定はここでやらない — 「記号次元なら黙
 
 どちらも TS 側（plan.ts → computeOutputShape）が実行前に必ず見るので、層として穴は無い。
 
-逆向きの分担が 1 つある: **レイアウト第 2 群（slice / cat / flip）の「対象軸が静的」**
-（ADR 0014）は、ここ（宣言 shape を見る層）でしか判定できない。TS 側は束縛解決後の数値
-shape しか扱わないので、同じ規則を plan.ts の `validateGraphContracts`（宣言 shape を見る層）
-が持つ — 層は違うが受理集合は両側で同じ。
+逆向きの分担が 1 つある: **レイアウト第 2 群の対象軸の記号規則** — `slice` / `flip` は
+「静的軸のみ」（ADR 0014）、`cat` は「同一シンボルの一次和まで」（ADR 0046）— は、ここ
+（宣言 shape を見る層）でしか判定できない。TS 側は束縛解決後の数値 shape しか扱わないので、
+同じ規則を plan.ts の `validateGraphContracts`（宣言 shape を見る層）が持つ — 層は違うが
+受理集合は両側で同じ。
 """
 
 from __future__ import annotations
@@ -399,22 +400,28 @@ def _expand(
     return target
 
 
+def _axis_extent(shape: list[Extent], dim: int, op: str, where: str) -> Extent:
+    """対象軸の長さを取り出す（rank の内側であることだけを見る）。"""
+    if dim >= len(shape):
+        raise OpContractError(f"{where}: {op} の dim {dim} が入力 rank {len(shape)} の外")
+    return shape[dim]
+
+
 def _static_axis(shape: list[Extent], dim: int, op: str, where: str) -> Extent:
-    """レイアウト第 2 群（slice / cat / flip）の対象軸を取り出す（**静的軸のみ** — ADR 0014）。
+    """`slice` / `flip` の対象軸を取り出す（**静的軸のみ** — ADR 0014）。
 
     MUST: 記号軸を拒否する。理由は op ごとに違うが結論は同じ:
     - `slice` — 記号軸の切り出しは sym_prefix_slice の担当（重複させない）。加えて範囲検査
       （end <= 軸長）が記号のままでは決められない。
-    - `cat` — 記号長どうしの和は次元言語（1 次元 1 シンボルの一次式）に一般には載らない。
     - `flip` — 実測は全て静的軸（flow の 192ch / sdp の 2ch）。動的軸は要求実測が出るまで
       広げない。
+
+    `cat` の連結軸は ADR 0046 で「同一シンボルの一次和」まで緩めた（`_cat` を見よ）。
 
     NOTE: TS 側は**束縛解決後の数値 shape**しか見ないので、この判定は plan.ts
     （宣言 shape を見る層）が持つ — 層は違うが受理集合は両側で同じ。
     """
-    if dim >= len(shape):
-        raise OpContractError(f"{where}: {op} の dim {dim} が入力 rank {len(shape)} の外")
-    extent = shape[dim]
+    extent = _axis_extent(shape, dim, op, where)
     if not extent.is_const:
         raise OpContractError(
             f"{where}: {op} の軸 {dim} が記号次元 {extent.to_dim()}"
@@ -443,16 +450,30 @@ def _slice(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> lis
 
 
 def _cat(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
+    """連結軸は〈定数〉または〈**同一**シンボルの一次式〉（ADR 0046 が ADR 0014 を改訂）。
+
+    MUST: 異なるシンボルが混ざる連結は落とす — 総和が次元言語（1 次元 1 シンボルの一次式）に
+    載らない。同一シンボルなら `Σ(coeff_i·sym + offset_i)` がそのまま正準形になる。
+    """
     dim = axis_dim(attrs, where)
     first = ins[0]
     assert_strided_rank(len(first), "cat の入力", where)
-    total = 0
+    coeff = 0
+    offset = 0
+    sym: str | None = None
     for index, shape in enumerate(ins):
         if len(shape) != len(first):
             raise OpContractError(
                 f"{where}: cat の入力 {index} の rank {len(shape)} が 入力 0 の {len(first)} と違う"
             )
-        extent = _static_axis(shape, dim, "cat", where)
+        extent = _axis_extent(shape, dim, "cat", where)
+        if extent.sym is not None:
+            if sym is not None and sym != extent.sym:
+                raise OpContractError(
+                    f"{where}: cat の連結軸 {dim} に異なるシンボル（{sym} と {extent.sym}）が"
+                    "混ざる — 和が次元言語 coeff·sym+offset に載らない"
+                )
+            sym = extent.sym
         # MUST: 連結軸**以外**は全一致（torch と同じ）。緩めると出力の一部がどの入力にも
         # 書かれないまま残り、full-write 不変条件が破れる。
         for axis, other in enumerate(shape):
@@ -461,11 +482,12 @@ def _cat(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[
                     f"{where}: cat の入力 {index} [{_show(shape)}] が"
                     f" 入力 0 [{_show(first)}] と軸 {axis} で違う（連結軸は {dim}）"
                 )
-        total += extent.offset
+        coeff += extent.coeff
+        offset += extent.offset
     out = list(first)
     # 出力の軸長 = 入力の軸長の総和。この規則そのものが「全入力で出力全域を覆う」
-    # （full-write — ADR 0014）の担保になっている。
-    out[dim] = Extent(coeff=0, sym=None, offset=total)
+    # （full-write — ADR 0014）の担保になっている。定数だけなら sym=None・coeff=0 に戻る。
+    out[dim] = Extent(coeff=coeff, sym=sym, offset=offset)
     return out
 
 

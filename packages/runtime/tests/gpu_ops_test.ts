@@ -1741,3 +1741,72 @@ Deno.test({
     }
   },
 });
+
+/**
+ * 記号軸 cat（ADR 0046）— 連結軸が `T+定数` / `2T` に解決される形を実 GPU で閉じる。
+ *
+ * 緩めたのは**宣言レベルのガードだけ**で、束縛後は数値 shape なので strided 書きコピーの
+ * カーネルは無変更のはず。「はず」を実測に置き換えるのがこのテストで、書き込み offset を
+ * 静的軸の総和から組んでいる経路が残っていれば必ずずれる。
+ *
+ * MUST: 期待 shape は**リテラル**（`resolved`）で持つ。実出力の shape を参照側にも渡すと、
+ * 束縛から連結軸長を導く経路が丸ごと壊れていても恒真で通る。
+ */
+Deno.test({
+  name: "記号軸 cat（T+定数 / 2T）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const cases = [
+      {
+        name: "記号 + 定数 [1,T,4] + [1,3,4] dim=1（DiT の KV 連結と同型）",
+        inShapes: [[1, "T", 4], [1, 3, 4]] as const,
+        outShape: [1, "T+3", 4] as const,
+        bound: 5,
+        resolved: [1, 8, 4],
+        dim: 1,
+      },
+      {
+        name: "同一シンボルどうし [T,3] + [T,3] dim=0",
+        inShapes: [["T", 3], ["T", 3]] as const,
+        outShape: ["2T", 3] as const,
+        bound: 4,
+        resolved: [8, 3],
+        dim: 0,
+      },
+    ];
+    const gpu = await acquireGpu();
+    try {
+      for (const testCase of cases) {
+        const graph = singleOpGraph(
+          "cat",
+          testCase.inShapes.map((shape) => [...shape]),
+          [...testCase.outShape],
+          { symbols: ["T"], attrs: { dim: testCase.dim } },
+        );
+        // 束縛は入力 shape の次元位置から取る（'T' が素の形で現れる位置）。
+        const inputs = testCase.inShapes.map((shape) =>
+          fill(shape.map((dim) => (dim === "T" ? testCase.bound : dim as number)), SIGNED)
+        );
+        const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+        try {
+          const outputs = await session.run(
+            Object.fromEntries(inputs.map((input, index) => [`x${index}`, input])),
+          );
+          assertEquals(outputs["y"].shape, testCase.resolved, `${testCase.name}: 束縛後の shape`);
+          const expected = applyReferenceOp(
+            "cat",
+            inputs,
+            { dim: testCase.dim },
+            testCase.resolved,
+          );
+          const report = compareTensors(outputs["y"], expected);
+          assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
+        } finally {
+          await session.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});

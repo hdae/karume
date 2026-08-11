@@ -227,9 +227,10 @@ Deno.test("sym_prefix_slice の出力 shape は束縛から計算されて宣言
   assertThrows(() => planGraph(graph, bindSymbols(graph, { bind: [6] })), OpContractError);
 });
 
-// ADR 0014: slice / cat / flip の対象軸は**宣言レベルで静的**（記号軸の切り出しは
-// sym_prefix_slice の担当）。束縛後の数値 shape では見分けが付かないので、宣言の形を見られる
-// validateGraphContracts でしか検出できない。
+// ADR 0014: slice / flip の対象軸は**宣言レベルで静的**（記号軸の切り出しは sym_prefix_slice
+// の担当）。cat の連結軸だけは ADR 0046 が「同一シンボルの一次和」まで緩めた。どちらも
+// 束縛後の数値 shape では見分けが付かない（別シンボルどうしも同じ値に解決されうる）ので、
+// 宣言の形を見られる validateGraphContracts でしか検出できない。
 const layoutAxisGraph = (
   op: string,
   attrs: Record<string, unknown>,
@@ -239,8 +240,8 @@ const layoutAxisGraph = (
   format: "karume-ir",
   version: 1,
   requires: { ops: [op] },
-  // 素の形（'T'）で現れる入力次元が無いグラフは symbols を宣言できない（束縛が取れない）
-  symbols: ins.some((spec) => spec.shape.includes("T")) ? ["T"] : [],
+  // 素の形（'T' 等）で現れる入力次元だけが束縛源になる（派生形しか無いシンボルは宣言できない）
+  symbols: [...new Set(ins.flatMap((spec) => spec.shape.filter((dim) => typeof dim === "string")))],
   inputs: ins.map((spec) => ({ name: spec.name, dtype: "f32", shape: [...spec.shape] })),
   outputs: ["y"],
   initializers: {},
@@ -248,19 +249,13 @@ const layoutAxisGraph = (
   nodes: [{ op, ins: ins.map((spec) => spec.name), outs: ["y"], attrs }],
 });
 
-Deno.test("slice / cat / flip の記号軸は Session 構築時に落ちる（静的軸のみ）", () => {
+Deno.test("slice / flip の記号軸は Session 構築時に落ちる（静的軸のみ）", () => {
   // 受理: 対象軸は静的で、他の軸が記号なのは構わない
   validateGraphContracts(
     parse(layoutAxisGraph("slice", { dim: 1, start: 1, end: 3 }, [{
       name: "x",
       shape: ["T", 4],
     }], ["T", 2])),
-  );
-  validateGraphContracts(
-    parse(layoutAxisGraph("cat", { dim: 1 }, [
-      { name: "a", shape: ["T", 2] },
-      { name: "b", shape: ["T", 3] },
-    ], ["T", 5])),
   );
   validateGraphContracts(
     parse(layoutAxisGraph("flip", { dim: 1 }, [{ name: "x", shape: ["T", 4] }], ["T", 4])),
@@ -280,19 +275,50 @@ Deno.test("slice / cat / flip の記号軸は Session 構築時に落ちる（�
   assertThrows(
     () =>
       validateGraphContracts(
-        parse(layoutAxisGraph("cat", { dim: 0 }, [
-          { name: "a", shape: ["T", 2] },
-          { name: "b", shape: [3, 2] },
-        ], ["T+3", 2])),
-      ),
-    ExecutionError,
-  );
-  assertThrows(
-    () =>
-      validateGraphContracts(
         parse(layoutAxisGraph("flip", { dim: 0 }, [{ name: "x", shape: ["T", 4] }], ["T", 4])),
       ),
     ExecutionError,
+  );
+});
+
+// ADR 0046 が ADR 0014 の「連結軸は静的」を改訂した。DiT の joint attention は
+// `cat([self | context], dim=1)` で self 側の軸長が記号（`S+1519`）— 記号 1 本 + 定数は
+// 次元言語 `coeff·sym+offset` にそのまま載るので、旧規則の拒否理由（和が載らない）が
+// 成り立たない。残る拒否は**異なるシンボルの混在**だけ。
+Deno.test("cat の連結軸は同一シンボルの一次和まで受理し、異シンボルの混在で落ちる", () => {
+  // 受理: 連結軸が静的（他の軸が記号なのは構わない）
+  validateGraphContracts(
+    parse(layoutAxisGraph("cat", { dim: 1 }, [
+      { name: "a", shape: ["T", 2] },
+      { name: "b", shape: ["T", 3] },
+    ], ["T", 5])),
+  );
+  // 受理: 記号 + 定数（`S+1519` と同型）
+  validateGraphContracts(
+    parse(layoutAxisGraph("cat", { dim: 0 }, [
+      { name: "a", shape: ["T", 2] },
+      { name: "b", shape: [3, 2] },
+    ], ["T+3", 2])),
+  );
+  // 受理: 同一シンボルどうし（係数が積み上がる）
+  validateGraphContracts(
+    parse(layoutAxisGraph("cat", { dim: 0 }, [
+      { name: "a", shape: ["T", 2] },
+      { name: "b", shape: ["T", 2] },
+    ], ["2T", 2])),
+  );
+
+  // 拒否: 異なるシンボルの混在（和が 1 次元 1 シンボルの文法に載らない）
+  assertThrows(
+    () =>
+      validateGraphContracts(
+        parse(layoutAxisGraph("cat", { dim: 0 }, [
+          { name: "a", shape: ["T", 2] },
+          { name: "b", shape: ["U", 2] },
+        ], ["T", 2])),
+      ),
+    ExecutionError,
+    "異なるシンボル",
   );
 });
 

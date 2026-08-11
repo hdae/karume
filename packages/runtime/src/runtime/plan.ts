@@ -93,9 +93,10 @@ export const validateGraphContracts = (graph: IrGraph): void => {
     const contract = assertNodeContract(node, where);
     nodeDtypes(graph, node, contract, where);
     if (contract.kind === "symPrefixSlice") assertSymPrefixSlice(graph, node, where);
-    if (contract.kind === "slice" || contract.kind === "cat" || contract.kind === "flip") {
+    if (contract.kind === "slice" || contract.kind === "flip") {
       assertStaticLayoutAxis(graph, node, contract.kind, where);
     }
+    if (contract.kind === "cat") assertCatAxis(graph, node, where);
   });
   for (const spec of graph.inputs) {
     if (!IO_DTYPES.includes(spec.dtype)) {
@@ -147,7 +148,7 @@ const assertSymPrefixSlice = (graph: IrGraph, node: IrNode, where: string): void
 };
 
 /**
- * slice / cat / flip の対象軸が**宣言レベルで静的**であることを見る（ADR 0014）。
+ * slice / flip の対象軸が**宣言レベルで静的**であることを見る（ADR 0014）。
  *
  * MUST: 束縛前に落とす。束縛後の数値 shape では記号かどうかが見分けられない（T = 実長の
  * run では数値が一致してしまう）ので、宣言の形を見られるここでしか検出できない —
@@ -156,23 +157,19 @@ const assertSymPrefixSlice = (graph: IrGraph, node: IrNode, where: string): void
  * 軸ごとの理由:
  * - `slice` — 記号軸の切り出しは `sym_prefix_slice` の担当で、こちらは静的専業
  *   （ADR 0014 が「重複させない」と決めた分担）。
- * - `cat` — 記号長どうしの和は次元言語（1 次元 1 シンボルの一次式）に一般には載らない。
  * - `flip` — 実測は全て静的軸（flow の 192ch / sdp の 2ch）。動的軸の反転はカーネル上は
  *   書けるが、要求実測が出るまで語彙を広げない（softmax の dim と同じ絞り方）。
  *
- * エクスポータ側の shape 層も同じ 3 op で記号軸を拒否する（受理集合を両側で揃える）。
+ * `cat` の連結軸だけは ADR 0046 で緩めた（{@link assertCatAxis}）。エクスポータ側の shape 層も
+ * 同じ規則を持つ（受理集合を両側で揃える）。
  */
 const assertStaticLayoutAxis = (
   graph: IrGraph,
   node: IrNode,
-  kind: "slice" | "cat" | "flip",
+  kind: "slice" | "flip",
   where: string,
 ): void => {
-  const dim = kind === "slice"
-    ? sliceAttrs(node.attrs, where).dim
-    : kind === "cat"
-    ? catDim(node.attrs, where)
-    : flipDim(node.attrs, where);
+  const dim = kind === "slice" ? sliceAttrs(node.attrs, where).dim : flipDim(node.attrs, where);
   for (const name of node.ins) {
     const shape = declarationOf(graph, name).shape;
     if (dim < shape.length && typeof shape[dim] !== "number") {
@@ -182,6 +179,38 @@ const assertStaticLayoutAxis = (
         }] で記号次元（記号軸の切り出しは sym_prefix_slice の担当）`,
       );
     }
+  }
+};
+
+/**
+ * cat の連結軸は〈定数〉または〈**同一**シンボルの一次式〉（ADR 0046 が ADR 0014 を改訂）。
+ *
+ * 総和 `Σ(coeff_i·sym + offset_i)` は同一シンボルなら次元言語 `coeff·sym+offset` にそのまま
+ * 載る（`S`+1519 → `S+1519`、`S`+`S` → `2S`）。**異なるシンボルの混在**だけが表現できない。
+ *
+ * MUST: 束縛前に落とす。束縛後の数値 shape では別シンボルどうしが同じ値に解決されうるので、
+ * 宣言の形を見られるここでしか検出できない（slice / flip の静的軸検査と同じ層）。
+ * 出力の軸長が総和と一致することは planGraph が束縛後の数値で照合する — ここは「宣言だけで
+ * 表現不能な形」を止める側だけを持つ。
+ */
+const assertCatAxis = (graph: IrGraph, node: IrNode, where: string): void => {
+  const dim = catDim(node.attrs, where);
+  let sym: string | undefined;
+  for (const name of node.ins) {
+    const shape = declarationOf(graph, name).shape;
+    // rank 違い（dim が外）は束縛後に computeOutputShape が見る（ここの担当ではない）。
+    if (dim >= shape.length) continue;
+    const extent = shape[dim];
+    if (typeof extent === "number") continue;
+    const parsed = parseDim(extent);
+    if (sym !== undefined && sym !== parsed.sym) {
+      throw new ExecutionError(
+        `${where}: ${node.op} の連結軸 ${dim} に異なるシンボル（${sym} と ${parsed.sym}）が` +
+          `混ざる（入力 '${name}' の宣言 [${shape.join(",")}]）` +
+          " — 和が次元言語 coeff·sym+offset に載らない",
+      );
+    }
+    sym = parsed.sym;
   }
 };
 
