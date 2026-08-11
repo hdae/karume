@@ -42,6 +42,9 @@ EXPORT_SCRIPT = "export_anima"
 #: `karume export-sbv2` が包む台本（ADR 0013 の emit ターゲット 5 本を書き出す側）。
 EXPORT_SBV2_SCRIPT = "export_sbv2"
 
+#: `karume export-embeddinggemma` が包む台本（文埋め込み 1 系列を書き出す側）。
+EXPORT_EMBEDDINGGEMMA_SCRIPT = "export_embeddinggemma"
+
 
 def load_script(name: str) -> ModuleType:
     """リポジトリ直下の台本をパス指定で読み込む。
@@ -74,6 +77,10 @@ def run_export_sbv2(argv: Sequence[str]) -> None:
     return load_script(EXPORT_SBV2_SCRIPT).main(argv)
 
 
+def run_export_embeddinggemma(argv: Sequence[str]) -> None:
+    return load_script(EXPORT_EMBEDDINGGEMMA_SCRIPT).main(argv)
+
+
 def run_dist(argv: Sequence[str]) -> None:
     from karume import dist
 
@@ -92,6 +99,10 @@ COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     "export-sbv2": (
         run_export_sbv2,
         "SBV2 を IR v1 + golden io へ書き出す（台本 export_sbv2.py）",
+    ),
+    "export-embeddinggemma": (
+        run_export_embeddinggemma,
+        "EmbeddingGemma を IR v1 + golden io へ書き出す（台本 export_embeddinggemma.py）",
     ),
     "dist": (run_dist, "配布ディレクトリを組み立てて karume.json / README.md を書く"),
     "verify": (run_verify, "配布形 safetensors を IR v1 の全規則で検証する"),

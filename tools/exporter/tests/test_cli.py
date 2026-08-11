@@ -70,6 +70,21 @@ class TestDispatch:
         assert seen == [["--verify", "front"], ["--help"]]
         assert cli.EXPORT_SBV2_SCRIPT != cli.EXPORT_SCRIPT
 
+    def test_it_dispatches_embeddinggemma_to_its_own_script(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[list[str]] = []
+        loaded: list[str] = []
+
+        def load(name: str) -> SimpleNamespace:
+            loaded.append(name)
+            return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
+
+        monkeypatch.setattr(cli, "load_script", load)
+        cli.main(["export-embeddinggemma", "--sym-max", "512"])
+        assert loaded == [cli.EXPORT_EMBEDDINGGEMMA_SCRIPT]
+        assert seen == [["--sym-max", "512"]]
+
     def test_it_passes_help_through_to_the_body_parser(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
