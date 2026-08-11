@@ -56,3 +56,19 @@
   （known-issues 起票）。occupancy 検証としては本掃引の M=318/512 が代替を果たした。
 - 掃引は linear のみ（GPU 時間の 87% を占めた律速族）。bmm は M=4 で 39.8 → 11.8µs/disp と
   同傾向の改善を run 実測で確認済み — 単体掃引は未実施。
+
+## 4. 追記（同日・波①）: 中 M バケット 65〜512 → M64N32 の採用
+
+§3 で未裁定だった中 M バケットを、採用条件（両モデルの E2E A/B とセット）を満たして採用:
+
+- **Anima/SBV2 の ABBA**（e2e テスト時間・A=無し/B=有り の A,B,B,A）: w8a8-1024
+  14/14/14/15s・w8a8-512 7/7/7/7s・f16-1024 26/28/28/29s・fromPretrained 11×4・SBV2 1s×4。
+  f16 の単調増加は A/B と無相関の熱ドリフト（最遅が最後の A）— **バケット起因の退行なし**。
+  静的にも Anima の GEMM 3 op に M∈[65,512] の実形状はほぼ無い（text encoder は M=64 で
+  小 M バケット・DiT は S ≥ 1024）。
+- **PNG/WAV 門 sha256 全一致・verify 779/0**（ビット同一の実測命題に中 M バケットの点を追加）。
+- **EmbeddingGemma long-document (T=318): wall 79.2 → 63.8ms（×1.24）**。bare はホスト
+  固定費（§3）律速のため不変。M ≥ 513 は既定のまま（DiT の実測選定領域 — 補間しない）。
+
+最適化 3 波（skinny-M/rope 融合 → attention mask → 中 M）後の 5 ケース確定値と ORT 比較は
+[2026-08-11-embeddinggemma-ort-comparison.md](2026-08-11-embeddinggemma-ort-comparison.md) §6。

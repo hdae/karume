@@ -22,8 +22,12 @@
   **B1 = 融合 attention の mask 対応も完了（同日・ADR 0023 追記）**: attention が arity 3..4
   になり EG は SDPA 保存で 1,273 ノード / 838 dispatch。ただし **wall は中立** — dispatch
   削減はホスト固定費 ~38ms に効かないという負の実測を獲得（固定費の分解が open）。
-  次 = M 65〜512 バケット（Anima/SBV2 A/B 込みで裁定・T=318 の GPU ~40ms が対象）→
-  ORT 再ベンチ → Irodori。batch>1 export は変換段でブロック（known-issues）。
+  **中 M バケット（65〜512 → M64N32・`a81cc08`）も採用済み**（Anima/SBV2 ABBA 中立・
+  long-document 79.2 → 63.8ms）。**最終値と ORT 比較 = ORT 比較 doc §6**（bare 53.8ms・
+  対 ORT Web 2.5〜2.9 倍・数値忠実度は 3〜4 桁優位のまま）。**残る karume 側の桁 =
+  ホスト固定費 ~38ms の分解**（Deno WebGPU の per-call 費用・同期 — Chrome/Dawn では
+  ORT が ~20ms で回る事実が上限の存在証明）。batch>1 export は変換段でブロック
+  （known-issues）。次 = Irodori-TTS v4 移植波。
   モデル候補キュー: Irodori-TTS v4（**ソース精読 recon 済み 2026-08-11** — 新規 IR op は
   sin 1 本・export 6+2 グラフ・裁定済み: CFG マスクは実行時 bool マスク案 a〈ADR 要〉・
   透かしは公式準拠 + フラグ・課題は codec タイル化と Unigram+byte_fallback tokenizer）→
