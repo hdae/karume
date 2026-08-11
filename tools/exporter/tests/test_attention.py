@@ -1,11 +1,14 @@
 """融合 attention（ADR 0023）のエクスポータ側の門。
 
-見るのは 4 つ:
+見るのは 5 つ:
 
 1. **SDPA 保存はターゲット別**（既定の分解表は 11 op のまま）。
-2. `_h_attention` が mask / causal / dropout≠0 / GQA / rank≠4 / D 不一致を**全件 fail loudly**。
+2. `_h_attention` が causal / dropout≠0 / GQA / rank≠4 / D 不一致と、**契約外の mask**
+   （bool / rank≠4 / `[B,1,M,N]` / `[1,H,M,N]` / M・N 不一致）を**全件 fail loudly**。
 3. attrs の `scale` が **torch math decomp の定数とビット一致**（半スケール契約）。
 4. 保存したグラフの IR に `attention` ノードがちょうど 1 本出る。
+5. bool マスクの加算型 f32 への畳み込み（`normalize._additive_attn_mask`）が、
+   **分解経路が焼く定数とバイト一致**する。
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from karume.convert import (
     ATTENTION_OP_PREFIX,
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+    convert,
     curated_decompositions,
 )
 from karume.ops import OP_CONTRACTS, assert_node_contract
@@ -54,6 +58,21 @@ class CausalAttention(nn.Module):
 class MaskedAttention(nn.Module):
     def forward(self, q, k, v, mask):
         return nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
+
+class ConstMaskAttention(nn.Module):
+    """マスクを**持ち上げ定数**（buffer でも parameter でもない素の属性）で持つ形。
+
+    定数畳み込みの葉として適格なのはこの形だけで、Gemma3 の帯マスク（T にだけ依存する
+    定数）が IR で `sym_prefix_slice` に落ちる経路と同じ土俵に乗る。
+    """
+
+    def __init__(self, mask: torch.Tensor) -> None:
+        super().__init__()
+        self.mask = mask
+
+    def forward(self, q, k, v):
+        return nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.mask)
 
 
 class DropoutAttention(nn.Module):
@@ -207,13 +226,6 @@ class TestUnsupportedFormsFailLoudly:
         with pytest.raises(NotImplementedError, match="is_causal"):
             _preserved_attention(CausalAttention(), _args())
 
-    def test_a_masked_attention_is_rejected(self):
-        args = (*_args(), torch.zeros(2, 3, 5, 7))
-        with pytest.raises(NotImplementedError, match="attn_mask"):
-            export_and_convert(
-                MaskedAttention(), args, preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION
-            )
-
     def test_a_dropout_attention_is_rejected(self):
         with pytest.raises(NotImplementedError, match="dropout_p"):
             _preserved_attention(DropoutAttention(), _args())
@@ -252,3 +264,133 @@ class TestUnsupportedFormsFailLoudly:
                 dynamic_shapes=({3: DYN_DEPTH}, {3: DYN_DEPTH}, {3: DYN_DEPTH}),
                 preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
             )
+
+
+class TestAdditiveMaskIsAccepted:
+    """契約の mask（f32 加算型・rank-4・ちょうど `[1,1,M,N]`）だけが 4 本目に載る。"""
+
+    def test_the_mask_becomes_a_fourth_input(self):
+        args = (*_args(), torch.zeros(1, 1, 5, 7))
+        graph, _ = _preserved_attention(MaskedAttention(), args)
+
+        node = only_node(graph, "attention")
+        assert len(node.ins) == 4
+        assert declared_shape(graph, node.ins[3]) == [1, 1, 5, 7]
+        assert declared_shape(graph, node.outs[0]) == [2, 3, 5, 4]
+        # 契約（アリティ 3 か 4 / attrs キー / 値域）を Python 側の表でも通す
+        assert assert_node_contract(node, "test") is OP_CONTRACTS["attention"]
+
+    def test_the_maskless_form_keeps_arity_three(self):
+        """MUST: mask 無しの経路は 1 バイトも変わらない（省略可能スロットの意味）。"""
+        graph, _ = _preserved_attention(PlainAttention(), _args())
+
+        assert len(only_node(graph, "attention").ins) == 3
+
+    def test_a_symbolic_mask_length_is_matched_symbolically(self):
+        """M / N が記号でも、q / k と**同じ記号**であることを突き合わせる。"""
+        seq = Dim("T", min=2, max=16)
+        args = (
+            torch.randn(2, 3, 5, 4),
+            torch.randn(2, 3, 5, 4),
+            torch.randn(2, 3, 5, 4),
+            torch.zeros(1, 1, 5, 5),
+        )
+        graph, _ = export_and_convert(
+            MaskedAttention(),
+            args,
+            dynamic_shapes=({2: seq}, {2: seq}, {2: seq}, {2: seq, 3: seq}),
+            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        )
+
+        node = only_node(graph, "attention")
+        assert declared_shape(graph, node.ins[3]) == [1, 1, "T", "T"]
+
+
+class TestNonContractMasksFailLoudly:
+    """MUST: 契約外の mask は**全件列挙して落とす**（欄の不存在が「語彙に無い」を表す）。"""
+
+    @pytest.mark.parametrize(
+        ("shape", "why"),
+        [
+            ((2, 3, 5, 7), "B と H の両方を持つ形"),
+            ((2, 1, 5, 7), "[B,1,M,N]（バッチ別マスク）"),
+            ((1, 3, 5, 7), "[1,H,M,N]（ヘッド別マスク）"),
+        ],
+        ids=("bh", "batch", "head"),
+    )
+    def test_a_leading_axis_other_than_one_is_rejected(self, shape, why):
+        args = (*_args(), torch.zeros(shape))
+        with pytest.raises(NotImplementedError, match="先頭 2 軸"):
+            _preserved_attention(MaskedAttention(), args)
+        assert why  # 失敗時に形の意図が読めるようにパラメータへ残す
+
+    def test_a_broadcast_query_axis_is_rejected(self):
+        """`[1,1,1,N]`（全 query 行に同じマスク）は torch では通るが契約は M 一致を要求する。"""
+        args = (*_args(), torch.zeros(1, 1, 1, 7))
+        with pytest.raises(NotImplementedError, match="M / N"):
+            _preserved_attention(MaskedAttention(), args)
+
+    def test_a_rank3_mask_is_rejected(self):
+        args = (*_args(), torch.zeros(1, 5, 7))
+        with pytest.raises(NotImplementedError, match=r"rank 3 の attn_mask"):
+            _preserved_attention(MaskedAttention(), args)
+
+    def test_a_bool_mask_is_rejected_by_the_handler_itself(self):
+        """正規化パスを外すと bool のまま届き、ハンドラの dtype 門が落とす。
+
+        MUST: 門を正規化パスだけに置かない — パスが（形が違う等で）発火しなかったとき、
+        bool マスクが黙って initializer 化の失敗まで滑り落ちる。
+        """
+        args = (*_args(), torch.ones(1, 1, 5, 7, dtype=torch.bool))
+        exported = torch.export.export(MaskedAttention(), args, strict=False)
+        decomposed = exported.run_decompositions(
+            curated_decompositions(PRESERVED_OP_PREFIXES_WITH_ATTENTION)
+        )
+
+        with pytest.raises(NotImplementedError, match=r"dtype torch\.bool"):
+            convert(decomposed)
+
+
+class TestBoolMaskFoldsToTheDecompositionConstant:
+    """bool → 加算型 f32 の畳み込みが torch 自身の変換と**同じ定数**であることの実測。
+
+    ADR 0023 のビット同一（融合経路と分解経路が同じ値を出す）は、マスク側でも
+    「同じ 0 / −inf の f32 定数が同じ位置で足される」ことに依存している。
+    """
+
+    #: 帯マスク（対角の周りだけ True）— 全 True だと定数が縮退して比較が恒真になる。
+    MASK = torch.tril(torch.ones(5, 5, dtype=torch.bool), diagonal=1)[None, None]
+
+    def _folded_masks(self, preserved) -> list[torch.Tensor]:
+        graph, tensors = export_and_convert(
+            ConstMaskAttention(self.MASK),
+            _args(batch=2, heads=3, queries=5, keys=5),
+            preserved=preserved,
+        )
+        return [
+            tensors[init.tensor]
+            for name, init in graph.initializers.items()
+            if graph.values[name].shape == [1, 1, 5, 5]
+        ]
+
+    def test_the_preserved_path_bakes_the_same_bytes_as_the_decomposed_path(self):
+        decomposed = self._folded_masks(PRESERVED_OP_PREFIXES)
+        preserved = self._folded_masks(PRESERVED_OP_PREFIXES_WITH_ATTENTION)
+
+        assert len(decomposed) == 1, f"分解経路の mask 定数が {len(decomposed)} 本"
+        assert len(preserved) == 1, f"保存経路の mask 定数が {len(preserved)} 本"
+        assert decomposed[0].dtype is torch.float32
+        assert torch.equal(decomposed[0], preserved[0])
+        # 恒真化の防止: 定数が実際に 0 と −inf の 2 値を持つ（全 0 なら比較に意味が無い）
+        assert set(preserved[0].unique().tolist()) == {0.0, float("-inf")}
+
+    def test_the_preserved_path_carries_the_mask_as_an_initializer(self):
+        graph, _ = export_and_convert(
+            ConstMaskAttention(self.MASK),
+            _args(batch=2, heads=3, queries=5, keys=5),
+            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        )
+
+        node = only_node(graph, "attention")
+        assert len(node.ins) == 4
+        assert node.ins[3] in graph.initializers

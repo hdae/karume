@@ -9,6 +9,8 @@ convert() の前段で呼ぶ。各パスは `(graph, stats) -> None` の関数�
   （ADR 0016 / 0017。手書き RMSNorm は preserve では畳めない — FX パターンマッチが要る）。
 - `_drop_safe_softmax_guard`: SDPA の safe-softmax ガード（`eq(-inf)` / `any.dim` /
   `full_like` / `where`）の除去。**不活性証明ができた時だけ**（ADR 0016）。
+- `_additive_attn_mask`: 保存した SDPA の bool `attn_mask` を加算型 f32（0 / −inf）へ
+  （ADR 0023 の mask 契約。torch 自身の bool → additive 変換と同じ op・同じ定数）。
 - `_lower_unit_expand`: GQA repeat_kv の `unsqueeze → expand → (clone) → view` を rank≤3 へ。
 - `_lower_split_unbind`: RoPE の「最終次元 split → 幅 1 slice → squeeze」を最終次元 slice へ
   （消費者が揃わない形は書き換えずスキップ）。
@@ -503,6 +505,49 @@ def _drop_safe_softmax_guard(graph: Graph, stats: Counter, *, placeholders: _Pla
         softmax, src = parts
         stats[f"softmax_guard:{_assert_guard_inactive(src, placeholders)}"] += 1
         _replace(graph, node, softmax)
+
+
+def _additive_attn_mask(graph: Graph, stats: Counter) -> None:
+    """保存した SDPA の **bool** な `attn_mask` を加算型 f32（0 / −inf）へ置き換える。
+
+    融合 attention の mask 契約は加算型 f32 のみ（ADR 0023）。一方 transformers の
+    Gemma3 系は bool の帯マスクを SDPA に渡すので、保存すると ① `_h_attention` の dtype 門
+    ② bool 定数を initializer にできない門、の 2 つに当たる。
+
+    書き換えは `where(mask, scalar_tensor(0.0), scalar_tensor(-inf))` の 1 段で、これは
+    torch 自身の `_scaled_dot_product_attention_math` が bool マスクに対して**同じ op・
+    同じ定数**で行う変換そのもの（分解経路が実グラフに出す形と一致 — ADR 0023 の
+    ビット同一が保存経路でもそのまま成り立つ）。where / scalar_tensor はどちらも
+    `convert.FOLDABLE_OPS` にあるので、定数畳み込みで f32 の Tmax 定数 +
+    `sym_prefix_slice` に落ちる。
+
+    MUST: 同じ bool マスクには**同じ 1 本**の加算マスクを配る。SDPA ごとに複製しても値は
+    同じ（CSE と定数の重複排除で最後は 1 本に畳まれる）が、畳み込み評価を無駄に層数ぶん
+    走らせることになる。
+    """
+    additive: dict[str, Node] = {}
+    for node in list(graph.nodes):
+        if (
+            node.op != "call_function"
+            or node.target is not aten.scaled_dot_product_attention.default
+        ):
+            continue
+        mask = node.args[3] if len(node.args) > 3 else node.kwargs.get("attn_mask")
+        if not isinstance(mask, Node) or _val(mask).dtype is not torch.bool:
+            continue
+        replacement = additive.get(mask.name)
+        if replacement is None:
+            ref = _val(mask)
+            keep = _insert(
+                graph, node, aten.scalar_tensor.default, (0.0,), ref, dtype=torch.float32
+            )
+            drop = _insert(
+                graph, node, aten.scalar_tensor.default, (NEG_INF,), ref, dtype=torch.float32
+            )
+            replacement = _insert(graph, node, aten.where.self, (mask, keep, drop), ref)
+            additive[mask.name] = replacement
+        node.replace_input_with(mask, replacement)
+        stats["additive_attn_mask"] += 1
 
 
 # ---- rank 下げ 3 パス（発火は rank > STRIDED_RANK 限定 — ADR 0016）----------
@@ -1094,6 +1139,7 @@ def _passes(placeholders: _Placeholders) -> tuple[Callable[[Graph, Counter], Non
         # 高位パターンの畳み込み・除去（元パターンを他のパスが崩す前に走らせる）
         _fold_rms_norm,
         partial(_drop_safe_softmax_guard, placeholders=placeholders),
+        _additive_attn_mask,
         # rank 下げ（発火は rank > STRIDED_RANK 限定）
         _lower_unit_expand,
         _lower_split_unbind,

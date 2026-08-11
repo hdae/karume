@@ -98,6 +98,11 @@ class TestDeclaredContract:
         assert resolve_op_contract(entry["op"]).variadic == entry.get("variadic", False)
 
     @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
+    def test_max_arity_matches(self, entry):
+        """省略可能な末尾入力の上限も契約面（片側だけ広げると mask 付き IR が割れる）。"""
+        assert resolve_op_contract(entry["op"]).max_arity == entry.get("max_arity")
+
+    @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
     def test_attr_keys_match(self, entry):
         assert sorted(resolve_op_contract(entry["op"]).attr_keys) == sorted(entry["attrs"])
 

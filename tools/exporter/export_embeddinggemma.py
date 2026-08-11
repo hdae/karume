@@ -25,6 +25,12 @@ MUST: `Gemma3TextModel` は **`attention_mask` を渡さずに**呼ぶ。config 
 ADR 0010）、IR には mask 入力が 1 本も残らない。パディングを含む列を渡したいときは、呼び出し側
 が列を詰めて T を短くする（この形は torch の eager と厳密に同値）。
 
+MUST: SDPA は**保存する**（`PRESERVED_OP_PREFIXES_WITH_ATTENTION` — ADR 0023 の融合
+attention）。台本ローカルの指定で、既定の分解表には入れない（ADR 0023 決定 5）。Gemma3 が
+渡す bool の帯マスクは `normalize._additive_attn_mask` が加算型 f32 `[1,1,T,T]` へ落とし、
+定数畳み込みで Tmax 定数 + `sym_prefix_slice` になる。分解経路へ落ちる道は**残さない** —
+保存が通らなければ export ごと落ちるのが正しい（黙って別の数値経路に切り替わらない）。
+
 MUST: 語彙外へ落ちる書き方を避ける。`torch.mean(dim=)` / `keepdim=True` / `x**2` /
 `linalg_vector_norm` はいずれも IR 語彙に無い op（`mean.dim` / keepdim 付き reduce / `pow` /
 `linalg_vector_norm`）を生むので、**mul / sum(dim) / reshape / sqrt / div / clamp_min** だけで
@@ -62,7 +68,7 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.export import Dim
 
-from karume.convert import normalize_boundary_tensor
+from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.patch_anima import assert_rope_lifted
 from karume.paths import INPUTS_ROOT, SERIES_ROOT
@@ -392,6 +398,7 @@ def export_series(
         (example_ids, example_mask),
         out_dir / MODEL_FILE,
         dynamic_shapes=({1: seq}, {1: seq}),
+        preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     )
     written, embeddings = _write_io(wrapper, graph, cases, out_dir)
     sanity = _sanity(embeddings) if batch == 1 else _sanity_batch(next(iter(embeddings.values())))

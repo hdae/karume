@@ -596,12 +596,15 @@ def _softmax(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> l
 def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
     """attention の出力 shape（ADR 0023）。
 
-    `q[B,H,M,D]` / `k[B,H,N,D]` / `v[B,H,N,D]` → `[B,H,M,D]`。
+    `q[B,H,M,D]` / `k[B,H,N,D]` / `v[B,H,N,D]` （+ 省略可能な `mask[1,1,M,N]`）→ `[B,H,M,D]`。
 
     MUST: B と H を**別々に**突き合わせる（積だけを見ると取り違えが素通りする）。
     MUST: D は 3 者とも同じ（v 側だけ別の長さを許すと取り違えが要素数で捕まらない）。
+    MUST: mask の先頭 2 軸は**ちょうど 1**（B·H への broadcast 専業）。`[B,1,M,N]` を
+    通すと「B が合っている限り黙って通る」形が増え、契約の外の broadcast 規則を
+    カーネルが持たされる — 欄の不存在で拒否する（実行時マスクの需要が出た時に広げる）。
     """
-    q, k, v = ins
+    q, k, v, *rest = ins
     # MUST: scale はここでも引く（TS 側 computeOutputShape と同じ役割 — 全ノードが必ず通る
     # 共通経路はこの計算だけで、attrs スキーマはキー単位の検査しか表せない）。
     attention_scale(attrs, where)
@@ -621,6 +624,16 @@ def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) ->
     # ここで決められるのは定数次元だけ（残りはランタイム側の層 — モジュール docstring）。
     if k[2].is_value(0):
         raise OpContractError(f"{where}: attention は長さ 0 の N を縮約できない {show}")
+    if rest:
+        mask = rest[0]
+        if len(mask) != 4 or not mask[0].is_value(1) or not mask[1].is_value(1):
+            raise OpContractError(
+                f"{where}: attention の mask は [1,1,M,N] のみ（[{_show(mask)}]）"
+            )
+        if mask[2] != q[2] or mask[3] != k[2]:
+            raise OpContractError(
+                f"{where}: attention の mask [{_show(mask)}] の M / N が q / k と不一致 {show}"
+            )
     return list(q)
 
 

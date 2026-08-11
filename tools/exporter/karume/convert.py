@@ -262,14 +262,14 @@ PRESERVED_OP_PREFIXES = (
 #: 融合 attention（ADR 0023）を保存する接頭辞。
 #:
 #: MUST: 既定の {@link PRESERVED_OP_PREFIXES} には**入れない**。表はグローバルなので、足すと
-#: mask 付き SDPA（Anima text_encoder の −inf 折り込み因果マスク）まで保存対象になり、
-#: `_h_attention` の fail loudly で **export できなくなる**。有効化は
+#: 契約外のマスク（bool のまま kwargs で渡る形・`[B,1,M,N]` 等）を持つ SDPA まで保存対象に
+#: なり、`_h_attention` の fail loudly で **export できなくなる**。有効化は
 #: `curated_decompositions(preserved=…)` を通した**ターゲット別**の選択で行う
 #: （ADR 0016 の safe-softmax ガード除去パスをそのまま効かせ続けるため）。
 ATTENTION_OP_PREFIX = "aten.scaled_dot_product_attention."
 
-#: SDPA を保存する preserved 集合（DiT / VAE decoder のようにマスク無し attention だけを
-#: 持つターゲット専用）。
+#: SDPA を保存する preserved 集合（マスク無し、または加算型 `[1,1,M,N]` マスクだけを持つ
+#: ターゲット専用 — DiT / VAE decoder / EmbeddingGemma）。
 PRESERVED_OP_PREFIXES_WITH_ATTENTION = (*PRESERVED_OP_PREFIXES, ATTENTION_OP_PREFIX)
 
 
@@ -1600,11 +1600,16 @@ def _h_attention(node: Node) -> Emitted:
     """aten.scaled_dot_product_attention → attention（attrs `scale` — ADR 0023）。
 
     引数形は `(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None,
-    enable_gqa=False)`。**受理するのは「マスク無し・非因果・dropout 0・GQA 無し・rank-4」だけ**
-    で、残りは全件列挙して fail loudly にする（黙って近似しない — 横断の不変条件）。
-    text_encoder の −inf 折り込み因果マスクはこの門に当たるので、SDPA 保存は
-    **ターゲット別**に有効化する（`curated_decompositions(preserved=…)` — ADR 0016 の
-    ガード除去パスを温存するため）。
+    enable_gqa=False)`。**受理するのは「非因果・dropout 0・GQA 無し・rank-4」で、マスクは
+    無しか f32 加算型 `[1,1,M,N]` だけ**。残りは全件列挙して fail loudly にする
+    （黙って近似しない — 横断の不変条件）。SDPA 保存は依然として**ターゲット別**に
+    有効化する（`curated_decompositions(preserved=…)` — ADR 0016 のガード除去パスを
+    温存するため）。
+
+    MUST: mask は **f32 の加算型**（`S' = S + mask`）で shape はちょうど `[1,1,M,N]`。
+    bool マスクはここでは受理しない — 変換は `normalize._additive_attn_mask` が torch 自身の
+    分解（`where(mask, 0, -inf)`）と同じ op・同じ定数で済ませる。門をハンドラ側にも残すのは、
+    正規化パスが（kwargs 渡し等で）発火しなかった形が黙って通らないようにするため。
 
     MUST: attrs の `scale` は **`f32(√scale_factor)`（半スケール）**。torch の math decomp が
     `q *= math.sqrt(scale_factor); k *= math.sqrt(scale_factor)` と書く形と**同じ定数**で、
@@ -1619,10 +1624,9 @@ def _h_attention(node: Node) -> Emitted:
     _expect(not extra, node, f"kwargs {extra} を伴う scaled_dot_product_attention は未対応")
     attn_mask = _arg_or_kwarg(node, 3, "attn_mask", None)
     _expect(
-        attn_mask is None,
+        attn_mask is None or isinstance(attn_mask, Node),
         node,
-        f"attn_mask={attn_mask!r} 付きの attention は未対応"
-        "（マスクの欄が契約に無い — 該当グラフは SDPA を保存せず分解する）",
+        f"attn_mask={attn_mask!r} がテンソル値でない attention は未対応",
     )
     dropout_p = _arg_or_kwarg(node, 4, "dropout_p", 0.0)
     _expect(
@@ -1677,7 +1681,34 @@ def _h_attention(node: Node) -> Emitted:
         f"scale={scale_factor} の attention は未対応（有限の正数のみ — √ を取る）",
     )
     half = float(torch.tensor(math.sqrt(scale_factor), dtype=torch.float32).item())
-    return Emitted("attention", 3, {"scale": half})
+    if attn_mask is None:
+        return Emitted("attention", 3, {"scale": half})
+    mask = attn_mask.meta["val"]
+    _expect(
+        mask.dtype is torch.float32,
+        node,
+        f"dtype {mask.dtype} の attn_mask は未対応（加算型 f32 のみ —"
+        " bool は normalize._additive_attn_mask が where(mask, 0, -inf) へ落とす）",
+    )
+    _expect(
+        mask.dim() == 4,
+        node,
+        f"rank {mask.dim()} の attn_mask は未対応（[1,1,M,N] のみ）",
+    )
+    _expect(
+        _extent_key(mask.shape[0]) == 1 and _extent_key(mask.shape[1]) == 1,
+        node,
+        f"attn_mask の先頭 2 軸 {list(mask.shape[:2])} が 1 でない形は未対応"
+        "（B·H への broadcast 専業 — [B,1,M,N] / [1,H,M,N] は契約に無い）",
+    )
+    _expect(
+        _extent_key(mask.shape[2]) == _extent_key(shapes[0][2])
+        and _extent_key(mask.shape[3]) == _extent_key(shapes[1][2]),
+        node,
+        f"attn_mask の M / N {list(mask.shape[2:])} が q / k の"
+        f" {[shapes[0][2], shapes[1][2]]} と違う attention は未対応",
+    )
+    return Emitted("attention", 4, {"scale": half})
 
 
 def _h_embedding(node: Node) -> Emitted:

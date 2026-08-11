@@ -104,9 +104,11 @@ LAYER_NORM_OP = "layer_norm"
 #: 正規化長の正本は weight の長さ（normalized_shape の欄は作らない — 二重管理にしない）。
 RMS_NORM_OP = "rms_norm"
 SOFTMAX_OP = "softmax"
-#: 融合 attention（ADR 0023）。`out = softmax_lastdim((q·scale) @ (k·scale)ᵀ) @ v`。
-#: **アリティ 3 固定**（q / k / v）・入力は rank-4 head-first（`[B,H,M,D]` / `[B,H,N,D]` ×2）で
-#: **D は 3 者とも同じ**・出力は `[B,H,M,D]`。mask / causal / dropout / GQA は語彙に無く、
+#: 融合 attention（ADR 0023）。`out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v`。
+#: **アリティ 3 か 4**（q / k / v + 省略可能な mask）・入力は rank-4 head-first
+#: （`[B,H,M,D]` / `[B,H,N,D]` ×2）で **D は 3 者とも同じ**・出力は `[B,H,M,D]`。
+#: mask は **f32・rank-4・shape はちょうど `[1,1,M,N]`**（加算型）で B·H へ broadcast する。
+#: `[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 と causal / dropout / GQA は語彙に無く、
 #: 該当する SDPA は `convert._h_attention` が全件列挙して fail loudly にする。
 #:
 #: MUST: `scale` は **q と k の両方に掛かる（半スケール契約）** — torch の
@@ -714,6 +716,13 @@ class OpContract:
     #: MUST: 「アリティ検査を緩める」ために立てない。可変なのは cat の入力本数だけで、他の op は
     #: 本数そのものが契約（bias 常時ありのアリティ 3 固定など）。
     variadic: bool = False
+    #: **末尾に省略可能な入力**を持つ op の入力数の上限（現状 `attention` の mask だけ）。
+    #: 指定時は `arity` が下限・これが上限で、受理するのはその閉区間の本数だけ。
+    #:
+    #: MUST: `variadic` の代わりに使わない。`variadic` は「何本でも」（cat の連結）で、こちらは
+    #: 「決まったスロットが 1 つ増えるだけ」— 上限を持たない表現に潰すと、余分な入力が
+    #: 黙って無視される形（カーネルが読まないスロット）を契約が受理してしまう。
+    max_arity: int | None = None
 
     @property
     def dtypes(self) -> frozenset[str]:
@@ -800,6 +809,7 @@ def _contract(
     attrs: AttrSchema | None = None,
     *,
     variadic: bool = False,
+    max_arity: int | None = None,
 ) -> OpContract:
     return _slot_contract(
         name,
@@ -808,6 +818,7 @@ def _contract(
         UniformDtypes(accept=_DTYPES.get(name, F32_DTYPES)),
         attrs,
         variadic=variadic,
+        max_arity=max_arity,
     )
 
 
@@ -819,6 +830,7 @@ def _slot_contract(
     attrs: AttrSchema | None = None,
     *,
     variadic: bool = False,
+    max_arity: int | None = None,
 ) -> OpContract:
     return OpContract(
         name=name,
@@ -828,6 +840,7 @@ def _slot_contract(
         output_dtypes=_output_dtypes(name, slot_dtypes),
         attrs=attrs if attrs is not None else {},
         variadic=variadic,
+        max_arity=max_arity,
     )
 
 
@@ -881,8 +894,9 @@ OP_CONTRACTS: dict[str, OpContract] = {
     # アリティ 2 へ正規化する — ゼロ bias 合成（ADR 0015）と同じ手筋。
     RMS_NORM_OP: _contract(RMS_NORM_OP, "rms_norm", 2, RMS_NORM_ATTRS),
     SOFTMAX_OP: _contract(SOFTMAX_OP, "softmax", 1, SOFTMAX_ATTRS),
-    # 融合 attention（ADR 0023）。q / k / v の 3 本とも f32 で同型（uniform 契約）。
-    ATTENTION_OP: _contract(ATTENTION_OP, "attention", 3, ATTENTION_ATTRS),
+    # 融合 attention（ADR 0023）。q / k / v と省略可能な mask の 4 本とも f32 で同型
+    # （uniform 契約）。mask は加算型なので値の側と同じ dtype で、bool は受理しない。
+    ATTENTION_OP: _contract(ATTENTION_OP, "attention", 3, ATTENTION_ATTRS, max_arity=4),
     # 値 f32 と添字 i32 のスロット別契約（gather と同型 — 出力は値の側と同型）。
     EMBEDDING_OP: _slot_contract(
         EMBEDDING_OP,
@@ -939,12 +953,21 @@ def arity_fits(contract: OpContract, count: int) -> bool:
     MUST: 判定を呼び出し側に散らさない（packages/runtime/src/ops.ts の arityFits と同義）。
     「固定なら ==、可変なら >=」を契約検査と shape 計算の 2 箇所に書くと、片方だけ古い判定が残る。
     """
-    return count >= contract.arity if contract.variadic else count == contract.arity
+    if contract.variadic:
+        return count >= contract.arity
+    upper = contract.arity if contract.max_arity is None else contract.max_arity
+    return contract.arity <= count <= upper
 
 
 def describe_arity(contract: OpContract) -> str:
-    """契約のアリティの表示形（可変なら「N 本以上」）。"""
-    return f"{contract.arity} 本以上" if contract.variadic else str(contract.arity)
+    """契約のアリティの表示形（可変なら「N 本以上」・省略可能な末尾があれば「N か M」）。"""
+    if contract.variadic:
+        return f"{contract.arity} 本以上"
+    return (
+        str(contract.arity)
+        if contract.max_arity is None
+        else f"{contract.arity} か {contract.max_arity}"
+    )
 
 
 def resolve_op_contract(op: str) -> OpContract:
