@@ -27,14 +27,23 @@
  * ## 窓内 passthrough
  *
  * 鎖は**隣接しているとは限らない**。adaLN は `layer_norm` と `mul` の間にエクスポータが
- * 変調ベクトルの `reshape` を 2〜3 本挟む（実測 85 鎖すべて）。ルールは連続窓
+ * 変調ベクトルの `reshape` を 2〜3 本挟む（実測 85 鎖すべて）。RoPE は `cat` と続く `mul` の
+ * 間に cos / sin 表の `sym_prefix_slice` が挟まる形が**表の初出 1 箇所だけ**にある。
+ * ルールは連続窓
  * （{@link FusionMatch.window}）を宣言し、そのうち畳むノード（`chain`）以外を
  * **passthrough** として融合ステップの**前**に素のノードのまま並べる。並べ替えが合法なのは
  * passthrough が鎖の定義する値を 1 つも消費しない場合だけで、そこは
  * {@link passthroughIsIndependent} が機械的に見る。
  */
 
-import { catDim, LAYER_NORM_OP, layerNormAttrs, numel, sliceAttrs } from "../ops.ts";
+import {
+  catDim,
+  LAYER_NORM_OP,
+  layerNormAttrs,
+  numel,
+  sliceAttrs,
+  SYM_PREFIX_SLICE_OP,
+} from "../ops.ts";
 import { ADALN_NORM_KEY, ADALN_NORM_WGSL, adalnNormParams } from "../kernels/adaln-norm.ts";
 import { ROPE_KEY, ROPE_WGSL, ROPE_WORKGROUP_SIZE, ropeParams } from "../kernels/rope.ts";
 import {
@@ -169,8 +178,9 @@ const externalIns = (chain: readonly NodePlan[]): readonly string[] => {
  * 入れ替えが非合法になる（executor は steps を順に encode するだけなので、ここで弾かないと
  * `値 'x' のバッファが無い` か、名前が使い回されていれば沈黙誤値になる）。
  *
- * NOTE: 現行の adaln ルールに限れば、passthrough が読める鎖の値は `layer_norm` 出力だけで、
- * それは {@link internalsArePrivate}（consumer ちょうど 1 本）が先に落とす — **反例を
+ * NOTE: 窓内 passthrough を持つ現行 2 ルール（adaln / rope）に限れば、passthrough が読める
+ * 鎖の値は**内部値だけ**（最終出力は passthrough より後に定義されるので読めない）で、それは
+ * {@link internalsArePrivate}（consumer ちょうど 1 本）が先に落とす — **反例を
  * 単独では構成できない**（tests/runtime_fusion_test.ts のフォールト注入で確認済み）。
  * ここが独立に効くのは「鎖の**最終**ノードが passthrough より前に来る」窓を持つ将来の
  * ルールで、internalsArePrivate は最終出力を見ないので代替にならない。窓の仕組み側の
@@ -446,14 +456,24 @@ type RopeMatch = FusionMatch & {
 
 /**
  * half-split RoPE: エクスポータが作る**連続 7 ノード**。attention の slice-first と
- * text encoder の direct-mul-first の 2 順序だけを受理する。
+ * text encoder / Gemma 系の direct-mul-first の 2 順序だけを受理する。
  *
  * - slice-first: `slice×2, neg, cat, mul(x,cos), mul(cat,sin), add`
  * - direct-first: `mul(x,cos), slice×2, neg, cat, mul(cat,sin), add`
  *
- * MUST: 実測した `[1,H,S,128]` / table `[1,1,S,128]` / dim=3 の 0-64 / 64-128 だけを受理する。
- * 偶奇 RoPE・別 head 幅・別 broadcast を「式が似ている」で広げない — 受理集合を広げた瞬間、
- * 「掴めなければ既存経路で必ず正しい」という fallback の保証が効かなくなる。
+ * MUST: 受理するのは `[1,H,S,D]`（D は正の偶数）/ table `[1,1,S,D]` / dim=3 の
+ * `0-D/2` / `D/2-D` だけ。head 幅 D は**実測 2 種（128 と 256）**あるので slice の境界から
+ * 導くが、偶奇 RoPE（`x[0::2]` / `x[1::2]` 形）・別 broadcast・別 cat 軸は「式が似ている」で
+ * 広げない — 受理集合を広げた瞬間、「掴めなければ既存経路で必ず正しい」という fallback の
+ * 保証が効かなくなる。カーネル（kernels/rope.ts）は `head_dim` / `half_dim` を uniform で
+ * 受けるので、D の一般化に WGSL の変更は要らない。
+ *
+ * ## 窓内 passthrough
+ *
+ * `cat` と続く `mul` の間に、cos / sin 表を実行時 T へ縮める {@link SYM_PREFIX_SLICE_OP} が
+ * **1 本だけ**挟まる形が実測にある（Gemma 系。表は θ 系統ごとに 1 度作って全層で使い回すので、
+ * 挟まるのは各系統の初出 1 箇所だけ）。この 1 本は鎖の値を消費しないので融合ステップの前へ
+ * 動かせる（合法性の判定は {@link passthroughIsIndependent}）。
  *
  * 外部入力の延べ回数: x が slice×2 と direct mul で 3 回、cos / sin が各 1 回。
  */
@@ -466,26 +486,33 @@ const ROPE_RULE = defineRule<RopeMatch>({
     const leading = nodes[index];
     const directFirst = leading?.node.op === "mul";
     if (!directFirst && leading?.node.op !== "slice") return undefined;
-    const first = nodes[index + (directFirst ? 1 : 0)];
-    const second = nodes[index + (directFirst ? 2 : 1)];
-    const neg = nodes[index + (directFirst ? 3 : 2)];
-    const cat = nodes[index + (directFirst ? 4 : 3)];
-    const direct = nodes[index + (directFirst ? 0 : 4)];
-    const cross = nodes[index + 5];
-    const add = nodes[index + 6];
+    let cursor = index + (directFirst ? 1 : 0);
+    const first = nodes[cursor];
+    const second = nodes[cursor + 1];
+    const neg = nodes[cursor + 2];
+    const cat = nodes[cursor + 3];
     if (
-      first === undefined || second === undefined || neg === undefined || cat === undefined ||
-      direct === undefined || cross === undefined || add === undefined
+      first?.node.op !== "slice" || second?.node.op !== "slice" || neg?.node.op !== "neg" ||
+      cat?.node.op !== "cat"
     ) return undefined;
+    cursor += 4;
+    // 窓内 passthrough は cos / sin 表の sym_prefix_slice 1 本だけ（実測形）。ここを
+    // 「任意 op の任意本数」に広げると、鎖と無関係なノードを跨いだ並べ替えまで受理してしまう。
+    if (nodes[cursor]?.node.op === SYM_PREFIX_SLICE_OP) cursor += 1;
+    const direct = directFirst ? leading : nodes[cursor];
+    if (!directFirst) cursor += 1;
+    const cross = nodes[cursor];
+    const add = nodes[cursor + 1];
     if (
-      first.node.op !== "slice" || second.node.op !== "slice" || neg.node.op !== "neg" ||
-      cat.node.op !== "cat" ||
-      direct.node.op !== "mul" || cross.node.op !== "mul" || add.node.op !== "add"
+      direct?.node.op !== "mul" || cross?.node.op !== "mul" || add?.node.op !== "add"
     ) return undefined;
+    const windowEnd = cursor + 2;
 
     // MUST: use-count と解放簿記は**実際のノード順**で持つ。役割順に並べ替えた列を使うと
     // direct-first だけ内部値の集合がずれる。
-    const chain = nodes.slice(index, index + 7);
+    const chain = directFirst
+      ? [direct, first, second, neg, cat, cross, add]
+      : [first, second, neg, cat, direct, cross, add];
     if (!allF32(chain)) return undefined;
 
     const xName = first.node.ins[0];
@@ -496,19 +523,21 @@ const ROPE_RULE = defineRule<RopeMatch>({
       add.node.ins[0] !== direct.outputName || add.node.ins[1] !== cross.outputName
     ) return undefined;
 
+    const xShape = first.inputShapes[0];
+    if (xShape.length !== 4 || xShape[0] !== 1) return undefined;
+    const [, heads, sequence, headDim] = xShape;
+    if (heads < 1 || sequence < 1 || headDim < 2 || headDim % 2 !== 0) return undefined;
+    const halfDim = headDim / 2;
+
     const firstSlice = sliceAttrs(first.node.attrs, "RoPE first slice");
     const secondSlice = sliceAttrs(second.node.attrs, "RoPE second slice");
     if (
-      firstSlice.dim !== 3 || firstSlice.start !== 0 || firstSlice.end !== 64 ||
-      secondSlice.dim !== 3 || secondSlice.start !== 64 || secondSlice.end !== 128 ||
+      firstSlice.dim !== 3 || firstSlice.start !== 0 || firstSlice.end !== halfDim ||
+      secondSlice.dim !== 3 || secondSlice.start !== halfDim || secondSlice.end !== headDim ||
       catDim(cat.node.attrs, "RoPE cat") !== 3
     ) return undefined;
 
-    const xShape = first.inputShapes[0];
-    if (xShape.length !== 4 || xShape[0] !== 1 || xShape[3] !== 128) return undefined;
-    const [, heads, sequence, headDim] = xShape;
-    if (heads < 1 || sequence < 1) return undefined;
-    const halfShape = [1, heads, sequence, 64];
+    const halfShape = [1, heads, sequence, halfDim];
     const fullShape = [1, heads, sequence, headDim];
     if (
       !sameShape(first.outputShape, halfShape) || !sameShape(second.outputShape, halfShape) ||
@@ -525,7 +554,7 @@ const ROPE_RULE = defineRule<RopeMatch>({
     if (!internalsArePrivate(chain, context)) return undefined;
 
     return {
-      window: chain,
+      window: nodes.slice(index, windowEnd),
       chain,
       xName,
       cosName: direct.node.ins[1],

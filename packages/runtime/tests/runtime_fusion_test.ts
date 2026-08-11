@@ -248,22 +248,29 @@ type RopeOptions = {
   readonly interpose?: boolean;
   readonly internalOutput?: boolean;
   readonly extraConsumer?: boolean;
-  /** 半分割の位置をずらす（32/96 — 「式は同じだが実測形でない」反例）。 */
+  /** 半分割の位置をずらす（head 幅の 1/4 で切る — 「式は同じだが半分割でない」反例）。 */
   readonly nearSplit?: boolean;
-  /** head 幅を 64 にする（半分割の式は同じで実測形でない反例）。 */
-  readonly narrowHead?: boolean;
+  /** head 幅（実測は 128（Anima）と 256（Gemma 系）。既定 128）。 */
+  readonly headDim?: number;
   /** batch を 2 にする（受理形は B=1 決め打ち）。 */
   readonly batch2?: boolean;
   /** add の入力順を入れ替える（値は同じで結線パターンが違う反例）。 */
   readonly swappedAdd?: boolean;
   /** cos / sin の table を x と同形にする（broadcast されない反例）。 */
   readonly nearTable?: boolean;
+  /**
+   * sin 表を Tmax 定数からの `sym_prefix_slice` で作り、`cat` と cross mul の間に置く
+   * （実測形 — 表は θ 系統ごとに 1 度だけ作るので、初出の 1 箇所だけ窓内 passthrough になる）。
+   */
+  readonly prefixSlicedSin?: boolean;
+  /** 同じ隙間に `sym_prefix_slice` 以外（reshape）を挟む反例。 */
+  readonly gapReshape?: boolean;
 };
 
 const ropeGraph = (options: RopeOptions = {}): GraphJson => {
   const heads = options.heads ?? 1;
   const batch = options.batch2 ? 2 : 1;
-  const headDim = options.narrowHead ? 64 : 128;
+  const headDim = options.headDim ?? 128;
   const split = headDim / (options.nearSplit ? 4 : 2);
   const full = [batch, heads, 5, headDim];
   const low = [batch, heads, 5, split];
@@ -298,6 +305,24 @@ const ropeGraph = (options: RopeOptions = {}): GraphJson => {
     { op: "neg", ins: ["second"], outs: ["negative"], attrs: {} },
     { op: "cat", ins: ["negative", catFirst], outs: ["rotated"], attrs: { dim: 3 } },
   );
+  // 窓内 passthrough の位置は `cat` の直後（実測形）。sym_prefix_slice なら掴めたまま、
+  // それ以外の op が来れば窓が崩れて掴めなくなることを 2 つの選択肢で分ける。
+  if (options.prefixSlicedSin) {
+    // Tmax 形（S=8）の定数を実行時の T=5 へ縮める。宣言 shape が記号を含まないことが
+    // sym_prefix_slice の契約なので、表側は静的形で置く。
+    values.sin_table = { dtype: "f32", shape: [1, 1, 8, headDim] };
+    values.sin = { dtype: "f32", shape: [1, 1, "T", headDim] };
+    nodes.push({
+      op: "sym_prefix_slice",
+      ins: ["sin_table"],
+      outs: ["sin"],
+      attrs: { sym: "T", slices: [{ dim: 2, coeff: 1, offset: 0 }] },
+    });
+  }
+  if (options.gapReshape) {
+    values.cos_view = { dtype: "f32", shape: [table[0], table[1] * table[2], table[3]] };
+    nodes.push({ op: "reshape", ins: ["cos"], outs: ["cos_view"], attrs: {} });
+  }
   if (options.order !== "direct-first") nodes.push(direct);
   nodes.push(
     { op: "mul", ins: ["rotated", "sin"], outs: ["cross"], attrs: {} },
@@ -316,18 +341,24 @@ const ropeGraph = (options: RopeOptions = {}): GraphJson => {
     format: "karume-ir",
     version: 1,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
-    symbols: [],
+    // 記号は sym_prefix_slice を置く形でだけ要る（T は補助入力 `bind` から束縛する）。
+    symbols: options.prefixSlicedSin ? ["T"] : [],
     inputs: [
       { name: "x", dtype: "f32", shape: full },
       { name: "cos", dtype: "f32", shape: table },
-      { name: "sin", dtype: "f32", shape: table },
+      ...(options.prefixSlicedSin
+        ? [{ name: "bind", dtype: "f32", shape: ["T"] }]
+        : [{ name: "sin", dtype: "f32", shape: table }]),
     ],
     outputs: [
       ...(options.internalOutput ? ["first"] : []),
       "y",
+      ...(options.gapReshape ? ["cos_view"] : []),
       ...(options.extraConsumer ? ["first_copy"] : []),
     ],
-    initializers: {},
+    initializers: options.prefixSlicedSin
+      ? { sin_table: { tensor: "sin_table", storage: { dtype: "f32" } } }
+      : {},
     values,
     nodes,
   };
@@ -336,10 +367,12 @@ const ropeGraph = (options: RopeOptions = {}): GraphJson => {
 const ropeInputs = (options: RopeOptions = {}): Readonly<Record<string, readonly number[]>> => {
   const heads = options.heads ?? 1;
   const batch = options.batch2 ? 2 : 1;
-  const headDim = options.narrowHead ? 64 : 128;
+  const headDim = options.headDim ?? 128;
   const full = [batch, heads, 5, headDim];
   const table = options.nearTable ? full : [1, 1, 5, headDim];
-  return { x: full, cos: table, sin: table };
+  return options.prefixSlicedSin
+    ? { x: full, cos: table, bind: [5] }
+    : { x: full, cos: table, sin: table };
 };
 
 Deno.test("half-split RoPE は 2 順序を掴み、x を延べ 3 回・cos / sin を 1 回ずつ消費する", () => {
@@ -363,17 +396,52 @@ Deno.test("half-split RoPE は 2 順序を掴み、x を延べ 3 回・cos / sin
   }
 });
 
-Deno.test("RoPE の反例（別名 / 内部 output / 別 consumer / 分割位置 / head 幅 / batch / add 順 / table 形）は掴まない", () => {
+// 半分割の位置は head 幅から導く（カーネルは head_dim / half_dim を uniform で受けるので、
+// 幅が変わっても WGSL は 1 バイトも変わらない）。実測は Anima の 128 と Gemma 系の 256 だが、
+// 「掴める幅」が実測 2 点の決め打ちに戻っていないことは別幅の 64 で押さえる。
+Deno.test("half-split RoPE は head 幅を分割位置から導き、幅ごとに params だけが変わる", () => {
+  for (const headDim of [64, 128, 256]) {
+    const options: RopeOptions = { order: "direct-first", heads: 4, headDim };
+    const plan = fuse(ropeGraph(options), ropeInputs(options));
+    assertEquals(outline(plan.steps), ["fused:rope"], `head 幅 ${headDim}`);
+    const step = fusedAt(plan, 0);
+    assertEquals(step.dispatch.key, ROPE_KEY, `head 幅 ${headDim}: カーネルは 1 本`);
+    assertEquals(
+      [...step.dispatch.params],
+      [4 * 5 * headDim, 5, headDim, headDim / 2],
+      `head 幅 ${headDim}: params`,
+    );
+  }
+});
+
+// 実測形: cos / sin の表は θ 系統ごとに 1 度だけ Tmax 定数から切り出すので、その初出だけが
+// 鎖の隙間（cat と cross mul の間）に落ちる。窓内 passthrough として融合ステップの**前**へ
+// 動かせなければ、その 1 箇所だけ黙って融合が外れる。
+Deno.test("RoPE は cat 直後の sym_prefix_slice を窓内 passthrough として跨ぐ", () => {
+  const options: RopeOptions = { order: "direct-first", heads: 4, prefixSlicedSin: true };
+  const plan = fuse(ropeGraph(options), ropeInputs(options));
+  // MUST: passthrough が先（融合ステップは その出力 `sin` を入力に取る）。
+  assertEquals(outline(plan.steps), ["sym_prefix_slice", "fused:rope"]);
+  const step = fusedAt(plan, 1);
+  assertEquals(step.ins, ["x", "cos", "x", "x", "sin"], "外部入力の延べ列");
+  assertEquals(step.binds, ["x", "cos", "sin"], "bind 順");
+  // 畳んだのは 7 本（走査幅 8 と別物 — passthrough は素のノードのまま残る）。
+  assertEquals(step.nodeCount, 7);
+  assertEquals(plan.counts.rope, 1);
+});
+
+Deno.test("RoPE の反例（別名 / 内部 output / 別 consumer / 分割位置 / batch / add 順 / table 形 / 隙間の別 op）は掴まない", () => {
   const cases: readonly (readonly [string, RopeOptions])[] = [
     ["interposed alias", { interpose: true }],
     ["internal output", { internalOutput: true }],
     ["extra consumer", { extraConsumer: true }],
     ["32/96 split", { nearSplit: true }],
-    ["head dim 64", { narrowHead: true }],
     ["batch 2", { batch2: true }],
     ["add(cross, direct)", { swappedAdd: true }],
     // head ごとに別表を渡す形（カーネルは token*head_dim+d と引くので黙って誤値になる）
     ["per-head table", { nearTable: true, heads: 4 }],
+    // 隙間に入れるのは sym_prefix_slice だけ（「何でも 1 本なら跨ぐ」に広げない）
+    ["gap reshape", { gapReshape: true }],
   ];
   for (const [label, options] of cases) {
     const plan = fuse(ropeGraph(options), ropeInputs(options));
