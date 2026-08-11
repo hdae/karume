@@ -291,6 +291,26 @@ EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める�
 - 記号次元の上限は **S ≤ 750**（`ref_max_seconds` 120s × 25Hz ÷ patch 4 — チェックポイントの
   config から導出）。超える参照長は束縛検査で fail loudly。
 
+## Irodori DiT: S=750 の中間バッファが WebGPU 既定超・CFG は既定 2 モードのみ
+
+DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-execution.md) の実行形
+（B=1 × 記号 S × G4 の畳み込み × uncond をマスクで表現）で export してある。その帰結として
+次の 2 点は by-design の制約で、近似や無音のフォールバックはしない:
+
+- **S = 750（30s 発話）の中間 `scores[1,20,750,2269]` は 136MB で、WebGPU 既定の
+  `maxStorageBufferBindingSize`（128MiB = 134,217,728 B）を超える**。本機の実測上限は
+  2048MiB なので手元では通る（実 GPU golden の `dit-cond-max` が毎回踏む）が、**既定上限の
+  実装では S ≈ 742 で確保に失敗する**。SDPA を分解経路で通している（マスクが実行時の bool 入力
+  なので融合 attention の契約に載らない）ため、scores が実体化することが原因。配布
+  ポータビリティの課題として残す — 解の候補は ①融合 attention の実行時マスク対応
+  （ADR 0023 の将来枠。scores を実体化しない）②パイプライン層で S に上限を置く。どちらも別波。
+- **CFG は `speaker_uncond_mode="mask"`（既定）と `cfg_guidance_mode="independent"`（既定）
+  以外を表現しない**。uncond をマスクだけで表せるのは「state を 0 にした context KV の寄与が
+  マスク越しに厳密 0」だからで、`"noise"`（speaker の uncond を乱数 state にする）はこの
+  同値が成り立たない。`joint` / `alternating` は変種の組み方そのものが違う。**既定外は
+  パイプライン層で fail loudly**（グラフ側は 4 変種の差をマスク 1 本に還元してしまうので、
+  ここで拒まないと黙って別のモデルを回すことになる）。
+
 ## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・i8a8 と非併用・ビット同一門は f32 経路
 
 `attention` の第 4 入力 mask（ADR 0023 追記 2026-08-11）は意図的に狭い:

@@ -64,13 +64,18 @@
   全 -inf 静的マスクは fail loudly から書き換え受理へ〈ADR 0044 追記〉）。W2-B/C = speaker /
   duration ターゲット（E2E 29 件・参照なし = ホストゼロ供給 + 常設実測門・**recon 訂正 2 件**:
   duration は token-sum 形で系列入力必須 / RoPE 実数化のビット一致は形依存〈head_dim 64 で
-  実測 0〉）。**残 = W2-D（G4 context-KV + G5 DiT・U3 解消・実行時 bool マスクの実戦投入）**
-  — 設計事項: `text_norm` / `caption_norm` の置き場（現状 duration が text_norm を内包。
-  G4/G5 も同じ norm 済み状態を要る — 各消費側内包 vs 専用ターゲットの裁定）と
-  `speaker_state_override` 経路（speaker_norm を掛けない別系統 — パイプライン設計時に分岐）。
-  → 第 3 波ホスト（pipeline・Unigram+byte_fallback tokenizer・Euler 40 step）→ codec
-  （G6/G7・タイル化 U4・`reciprocal` 除算形書き換え・wm_model は README 推奨バイパスに従い
-  落とす見込み・`sin` の |x|>π 精度を e2e で観測）。
+  実測 0〉）。**W2-D も完了 = 第 2 波クローズ（2026-08-11）**: U3 は recon（research/
+  2026-08-11-dit-export-recon.md）→ 裁定 → ADR [0046](../docs/decisions/0046-cat-symbolic-axis.md)
+  （cat 連結軸を同一シンボル一次和へ緩和 — 宣言ガード 3 本のみ・実 GPU parity 済み）+
+  [0047](../docs/decisions/0047-irodori-dit-execution.md)（B=1×選択実行・G4 は G5 へ畳む・
+  uncond = マスク還元）で解消。`dit` ターゲット着地（E2E 36 件 — **uncond 3 変種の
+  マスク還元が 12 層実重みでビット一致** = 決定 1 の実証・S=750 の scores 136MB を毎回実走・
+  torch Dim 名は sympy S 衝突回避で L / IR 名は S）。**`text_norm` / `caption_norm` は
+  消費側内包で確定**（duration / dit とも — ADR 0010 の理由。speaker_norm だけ speaker
+  ターゲット側）。**次 = 第 3 波ホスト**（pipeline・Unigram+byte_fallback tokenizer・
+  Euler 40 step + CFG 合成・`speaker_state_override` 分岐の扱い・既定外モード fail loudly）
+  → 第 4 波 codec（G6/G7・タイル化 U4・`reciprocal` 除算形書き換え・wm_model は README
+  推奨バイパスに従い落とす見込み・`sin` の |x|>π 精度を e2e で観測）。
 - **立ち上げロードマップ（ADR 0037）は P0〜P5 まで到達し一段落**。P3/P4 で `AnimaPipeline`
   （fromPretrained / fromAssets・`using` 対応）+ 共通 image 層 + 配布形（現 `models/karume-anima-turbo/`）
   （`karume dist`・実 hash・格納 dtype 門）+ `karume` サブコマンド CLI + **英語**モデルカード
