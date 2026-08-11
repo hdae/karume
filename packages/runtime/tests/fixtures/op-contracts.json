@@ -55,6 +55,7 @@
     { "op": "log", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
     { "op": "log1p", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
     { "op": "sqrt", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
+    { "op": "sin", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
     { "op": "tanh", "arity": 1, "dtypes": { "kind": "uniform", "accept": ["f32"] }, "attrs": [] },
     {
       "op": "sigmoid",
@@ -629,6 +630,7 @@
     { "op": "exp", "ins": [["T"]], "bindings": { "T": 4 }, "out": ["T"] },
     { "op": "log", "ins": [[1, 1]], "out": [1, 1] },
     { "op": "sqrt", "ins": [[5, 6]], "out": [5, 6] },
+    { "op": "sin", "ins": [[3, 5]], "out": [3, 5] },
     { "op": "tanh", "ins": [[2, 3, 4]], "out": [2, 3, 4] },
     { "op": "sigmoid", "ins": [[7]], "out": [7] },
     { "op": "relu", "ins": [[2, 3]], "out": [2, 3] },

@@ -719,6 +719,12 @@ Deno.test("elementwise の生成 WGSL は補助関数を使う op にだけ注�
     geluTanh.includes("tanh(0.7978845608028654 * (v0 + 0.044715 * v0 * v0 * v0))"),
     true,
   );
+  // sin は WGSL 組込の素通し。多項式近似（erf 形の前例）へ差し替えられていないことと、
+  // NaN 外殻（{@link nanGuard} 由来のビット列判定）が紛れ込んでいないことを固定する。
+  const sin = elementwiseWgsl({ op: "sin", rank: 1, dtype: "f32" });
+  assertEquals(sin.includes("out[i] = sin(v0);"), true);
+  assertEquals(sin.includes("fn erf_approx"), false);
+  assertEquals(sin.includes("fn is_nan_bits"), false);
   // MUST: 素朴な 1/(1+exp(-x)) は x ≲ -88 でオーバーフローが indeterminate になる
   assertEquals(
     elementwiseWgsl({ op: "sigmoid", rank: 1, dtype: "f32" }).includes("exp(-abs(x))"),

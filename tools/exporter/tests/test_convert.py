@@ -78,16 +78,20 @@ class TestUnsupportedOps:
     """語彙外の aten op は全件列挙して落とす（部分近似も 1 件打ち切りもしない）。"""
 
     def test_every_unsupported_op_is_listed_at_once(self, convert_module):
+        """NOTE: 2 本目の見本は `sin` → `atan` に差し替えた（sin が IR 語彙に入り、
+        「語彙外」の見本でなくなったため）。検査そのもの（2 件を 1 度に列挙する）は不変。
+        """
+
         class Trigonometry(nn.Module):
             def forward(self, x):
-                return torch.cos(x) + torch.sin(x)
+                return torch.cos(x) + torch.atan(x)
 
         with pytest.raises(UnsupportedAtenOpsError) as err:
             convert_module(Trigonometry(), (torch.randn(3, 4),))
 
-        assert set(err.value.ops) == {"aten.cos.default", "aten.sin.default"}
+        assert set(err.value.ops) == {"aten.cos.default", "aten.atan.default"}
         assert "aten.cos.default" in str(err.value)
-        assert "aten.sin.default" in str(err.value)
+        assert "aten.atan.default" in str(err.value)
 
     def test_op_outside_the_fold_allowlist_stays_in_the_enumeration(self, convert_module, dyn_t):
         """畳み込み allowlist に無い op は記号依存でも畳まない（黙って近似しない）。
@@ -160,6 +164,63 @@ class TestGelu:
         x = torch.linspace(-3.0, 3.0, 101)
         gap = (nn.functional.gelu(x) - _gelu_tanh_reference(x)).abs().max()
         assert gap > 1e-4
+
+
+class TestSin:
+    """`sin` は畳み込みと発行の 2 経路を**同時に**持つ（ADR 0043 の第 1 層）。
+
+    定数部分木（RoPE の位置表）は従来どおり FOLDABLE_OPS が initializer へ畳み、実行時値を
+    取る形だけが IR ノードとして残る。片方を消すともう片方が黙って劣化する — 定数を畳まなく
+    なれば実行時の dispatch が増え、発行できなければ Snake 活性が export で落ちる。
+    """
+
+    def test_runtime_valued_sin_becomes_a_node(self, convert_module):
+        class Sin(nn.Module):
+            def forward(self, x):
+                return torch.sin(x)
+
+        graph, _ = convert_module(Sin(), (torch.randn(3, 4),))
+
+        assert node_ops(graph) == ["sin"]
+
+    def test_constant_sin_is_still_folded_into_an_initializer(self, convert_module):
+        """定数入力の `sin`（RoPE 表の形）はノードを残さず焼かれる。"""
+
+        class ConstantTable(nn.Module):
+            def forward(self, x):
+                return x + torch.sin(torch.arange(4, dtype=torch.float32))
+
+        graph, tensors = convert_module(ConstantTable(), (torch.randn(3, 4),))
+
+        assert node_ops(graph) == ["add"]
+        folded = only_node(graph, "add").ins[1]
+        torch.testing.assert_close(
+            tensors[graph.initializers[folded].tensor],
+            torch.sin(torch.arange(4, dtype=torch.float32)),
+        )
+
+    def test_snake_activation_converts_with_a_single_sin(self, convert_module):
+        """DACVAE の Snake `x + sin²(αx)/(α+1e-9)`（この op を足した動機そのもの）。
+
+        α は学習パラメータ = initializer なので `α+1e-9` も実行時ノードになる（パラメータ
+        経由の畳み込みは不適格 — `_classify_foldable`）。`sin` は実行時値 `αx` を取るため
+        1 ノードとして残り、`pow(2)` は分解で `mul` になる。
+        NOTE: 係数を `(α+1e-9).reciprocal()` と書くと `aten.reciprocal.default` に当たる
+        （FOLDABLE 専用で emit 経路が無い）。同値な除算形で書いてある。
+        """
+
+        class Snake(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.alpha = nn.Parameter(torch.full((1, 5, 1), 0.7))
+
+            def forward(self, x):
+                return x + torch.sin(self.alpha * x).pow(2) / (self.alpha + 1e-9)
+
+        graph, _ = convert_module(Snake(), (torch.randn(1, 5, 8),))
+
+        assert node_ops(graph) == ["mul", "sin", "mul", "add", "div", "add"]
+        assert set(node_ops(graph)) <= EMITTABLE_OPS
 
 
 class TestRowReduce:

@@ -299,6 +299,7 @@ const UNARY_WGSL: Readonly<
   log: (a) => `log(${a})`,
   log1p: (a) => `log1p_series(${a})`,
   sqrt: (a) => `sqrt(${a})`,
+  sin: (a) => `sin(${a})`,
   tanh: (a) => `tanh(${a})`,
   sigmoid: (a) => `sigmoid_stable(${a})`,
   relu: (a) => nanGuard(a, `max(${a}, 0.0)`),

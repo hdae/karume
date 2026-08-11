@@ -32,6 +32,10 @@ UNARY_OPS = (
     "log",
     "log1p",
     "sqrt",
+    # 三角関数は sin だけ（ADR 0043 の第 1 層）。定数の RoPE 表は FOLDABLE_OPS が畳むので、
+    # 語彙に要るのは実行時値を取る形だけ — DACVAE の Snake 活性が初出。`cos` は実測に
+    # 出るまで足さない（「対称性のための追加をしない」）。
+    "sin",
     "tanh",
     "sigmoid",
     "relu",

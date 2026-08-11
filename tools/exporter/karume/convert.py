@@ -200,7 +200,9 @@ FOLDABLE_OPS = {
     # 足す（ADR の候補表のうち add.Scalar / mul.Scalar だけは正規化パスが先に潰すため
     # frontier に現れず、足していない）。
     #
-    # - `sin` / `cos` — RoPE の位置表そのもの。IR 語彙に三角関数は無いので、畳めない = 落ちる
+    # - `sin` / `cos` — RoPE の位置表そのもの。定数のうちに潰せば実行時の 1 dispatch が丸ごと
+    #   消えるので、`sin` が IR 語彙に入った後もここから外さない（`cos` は語彙に無いため、
+    #   畳めない = 落ちるのは従来どおり）。実行時値を取る `sin` だけが `_simple` へ落ちる
     # - `reciprocal` / `pow.Scalar` — inv_freq の生成式（`1 / theta**(i/D)`）
     # - `repeat` — DiT の rope 表を patch グリッドへ配る段（葉は定数のみ・出力は 1024×128 級）
     # - `bmm` — conditioner / Qwen3 の `inv_freq[…] @ position_ids[…]`（[1,D/2,1] × [1,1,T]）
@@ -1955,6 +1957,9 @@ ATEN_HANDLERS = {
     aten.exp.default: _simple("exp", 1),
     aten.log.default: _simple("log", 1),
     aten.sqrt.default: _simple("sqrt", 1),
+    # 定数部分木の中では FOLDABLE_OPS が畳む（RoPE 表）。実行時値を取る形だけがここへ来る —
+    # DACVAE の Snake 活性 `x + (α+1e-9)⁻¹·sin²(αx)` が初出（ADR 0043 の第 1 層）。
+    aten.sin.default: _simple("sin", 1),
     aten.tanh.default: _simple("tanh", 1),
     aten.sigmoid.default: _simple("sigmoid", 1),
     aten.relu.default: _simple("relu", 1),

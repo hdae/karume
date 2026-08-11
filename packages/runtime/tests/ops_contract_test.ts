@@ -43,10 +43,10 @@ const node = (op: string, ins: readonly string[], attrs: Record<string, unknown>
 });
 
 Deno.test("契約表が docs/ir-v1.md の op セットと一致する", () => {
-  assertEquals(UNARY_OPS.length, 18);
+  assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 51);
+  assertEquals(OP_CONTRACTS.size, 52);
   assertEquals([...OP_CONTRACTS.keys()].sort(), [
     "abs",
     "add",
@@ -91,6 +91,7 @@ Deno.test("契約表が docs/ir-v1.md の op セットと一致する", () => {
     "reshape",
     "rms_norm",
     "sigmoid",
+    "sin",
     "slice",
     "softmax",
     "sqrt",
@@ -218,6 +219,7 @@ Deno.test("dtype の解禁は op ごとで、実測に出ない組み合わせ�
       "relu",
       "gelu",
       "gelu_tanh",
+      "sin",
       "matmul",
       "bmm",
       "amax",

@@ -136,6 +136,10 @@ const UNARY_F32: Readonly<
   log: (x) => Math.log(x),
   log1p: (x) => Math.log1p(x),
   sqrt: (x) => Math.sqrt(x),
+  // sqrt / tanh と同じく組込どうしで突合する（log1p / erf のように「片側が近似式」では
+  // ないので、写し間違いを検出する別式が存在しない）。NOTE: WGSL が `sin` の精度を保証
+  // するのは |x| ≤ π の範囲だけで、外側の一致は実装依存 — 突合は allclose で判定する。
+  sin: (x) => Math.sin(x),
   tanh: (x) => Math.tanh(x),
   sigmoid: (x) => 1 / (1 + Math.exp(-x)),
   relu: (x) => Math.max(x, 0),

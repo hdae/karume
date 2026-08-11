@@ -37,6 +37,10 @@ export const UNARY_OPS = [
   // WGSL に log1p 組込は無い（実装方針は src/codegen/elementwise.ts の LOG1P_FN）
   "log1p",
   "sqrt",
+  // 三角関数は sin だけ（ADR 0043 の第 1 層）。定数の RoPE 表はエクスポータが畳むので、
+  // 語彙に要るのは**実行時値**を取る形だけ — DACVAE の Snake 活性 `x + (α+1e-9)⁻¹·sin²(αx)` が
+  // 初出。`cos` は実測に出るまで足さない（「対称性のための追加をしない」）。
+  "sin",
   "tanh",
   "sigmoid",
   "relu",

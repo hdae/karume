@@ -114,7 +114,7 @@ Current models and coverage:
 | Model              | Symbolic dim | IR ops exercised                                                                                           |
 | ------------------ | ------------ | ---------------------------------------------------------------------------------------------------------- |
 | `unary_chain`      | none         | neg, abs, sqrt, log, exp                                                                                   |
-| `activations`      | none         | tanh, sigmoid, relu, gelu, gelu_tanh                                                                       |
+| `activations`      | none         | tanh, sigmoid, relu, gelu, gelu_tanh, sin                                                                  |
 | `broadcast_binary` | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                            |
 | `mlp`              | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                 |
 | `row_reduce`       | `T`          | sum, amax, amin                                                                                            |
@@ -1400,10 +1400,12 @@ conformance table is the correct one.
   int32 — the explicit exception of ADR 0010). An initializer's semantic dtype is f32 or i32, and
   the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8}` and `i32 × i32` (the cross products
   fail loudly).
-- There are **51** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
-  `attention`, and `gelu_tanh` was added for EmbeddingGemma):
-  - unary `neg abs exp log log1p sqrt tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
-    (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32)
+- There are **52** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
+  `attention`, `gelu_tanh` was added for EmbeddingGemma, and `sin` for the Snake activation):
+  - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
+    (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
+    trigonometric op: constant tables (RoPE) are still folded away at export time, so only the
+    runtime-valued form needs a kernel, and `cos` is not added for symmetry alone
   - scalar comparison `ge_scalar le_scalar gt_scalar` (f32 → bool)
   - binary `add div` (f32) / `mul sub` (f32, i32) / `ge` (f32 → bool) / `bitwise_and` (bool) and the
     ternary `where` (cond is bool) — all with torch's right-aligned broadcast

@@ -80,6 +80,7 @@ const UNARY_INPUTS: readonly (readonly [string, (index: number) => number])[] = 
   ["exp", SIGNED],
   ["log", POSITIVE],
   ["sqrt", POSITIVE],
+  ["sin", SIGNED],
   ["tanh", SIGNED],
   ["sigmoid", SIGNED],
   ["relu", SIGNED],

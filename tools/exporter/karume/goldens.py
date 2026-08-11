@@ -90,7 +90,12 @@ class UnaryChain(nn.Module):
 
 
 class Activations(nn.Module):
-    """tanh / sigmoid / relu / gelu / gelu_tanh（gelu 2 種は分解を止めて 1 ノードで運ぶ）。"""
+    """tanh / sigmoid / relu / gelu / gelu_tanh / sin（gelu 2 種は分解を止めて 1 ノードで運ぶ）。
+
+    `sin` は活性ではないが、**実行時値**を取る単項の f32 elementwise という点で同型なので
+    ここに相乗りする（定数入力の `sin` は FOLDABLE_OPS が畳んでノードを残さない — 発行経路を
+    踏ませるには placeholder 由来の値を通す必要がある）。
+    """
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
         return (
@@ -99,6 +104,7 @@ class Activations(nn.Module):
             torch.relu(x),
             nn.functional.gelu(x),
             nn.functional.gelu(x, approximate="tanh"),
+            torch.sin(x),
         )
 
 

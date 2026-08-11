@@ -58,6 +58,12 @@ Deno.test("unary の既知値（torch 既定の定義に一致する）", () => 
   assertAlmostEquals(at("exp", 1), Math.E, 1e-6);
   assertAlmostEquals(at("log", Math.E), 1, 1e-6);
   assertEquals(at("sqrt", 9), 3);
+  // sin は奇関数で π の整数倍が零点（DACVAE の Snake 活性が踏む定義域 — ADR 0043 第 1 層）。
+  assertEquals(at("sin", 0), 0);
+  assertAlmostEquals(at("sin", 1), 0.8414709848078965, 1e-6);
+  assertAlmostEquals(at("sin", -1), -0.8414709848078965, 1e-6);
+  assertAlmostEquals(at("sin", Math.PI / 2), 1, 1e-6);
+  assertAlmostEquals(at("sin", Math.PI), 0, 1e-6);
   assertAlmostEquals(at("tanh", 1), 0.7615941559557649, 1e-6);
   assertEquals(at("sigmoid", 0), 0.5);
   assertAlmostEquals(at("sigmoid", 2), 0.8807970779778823, 1e-6);
