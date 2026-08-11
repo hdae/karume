@@ -20,14 +20,14 @@ transformers は **5.14.1 でピン**する（`export_embeddinggemma.py` と同�
 
 ## 何をグラフに載せるか（6 ターゲット・B=1・T / S は記号次元）
 
-| ターゲット     | 入力          | 出力        | 中身                                  |
-| -------------- | ------------- | ----------- | ------------------------------------- |
-| `backbone`     | `[1,T]` ids   | `[1,T,768]` | ModernBERT-ja-310m（25 層・共有）     |
-| `text-proj`    | `[1,T,768]`   | `[1,T,512]` | text 側 projector（residual_mlp）     |
-| `caption-proj` | `[1,T,768]`   | `[1,T,512]` | caption 側 projector（同形・別重み）  |
-| `speaker`      | `[1,S,128]`   | `[1,S,768]` | `ReferenceLatentEncoder` + 出力 norm  |
-| `duration`     | 下記 5 本     | `[1]`       | `text_norm` + duration（token-sum 形）|
-| `dit`          | 下記 6 本     | `[1,S,32]`  | DiT 1 step（12 層・G4 畳み込み形）    |
+| ターゲット     | 入力          | 出力          | 中身                                  |
+| -------------- | ------------- | ------------- | ------------------------------------- |
+| `backbone`     | `[1,T]` ids   | `[1,T,768]`   | ModernBERT-ja-310m（25 層・共有）     |
+| `text-proj`    | `[1,T,768]`   | `[1,T,512]`   | text 側 projector（residual_mlp）     |
+| `caption-proj` | `[1,T,768]`   | `[1,T,512]`×2 | caption 側 projector（+ `caption_norm`）|
+| `speaker`      | `[1,S,128]`   | `[1,S,768]`   | `ReferenceLatentEncoder` + 出力 norm  |
+| `duration`     | 下記 5 本     | `[1]`         | `text_norm` + duration（token-sum 形）|
+| `dit`          | 下記 6 本     | `[1,S,32]`    | DiT 1 step（12 層・G4 畳み込み形）    |
 
 `duration` の入力 5 本は `text_state [1,T,512]` / `speaker_vec [1,768]` /
 `has_speaker [1,1]`（bool）/ `caption_vec [1,512]` / `has_caption [1,1]`（bool）。
@@ -35,6 +35,25 @@ transformers は **5.14.1 でピン**する（`export_embeddinggemma.py` と同�
 backbone を projector と融合しないのは、**backbone が text と caption で共有**だから
 （融合すると 1.2GB の重みが 2 系列に複製される）。ホストは backbone を 2 回回して、
 それぞれの projector へ流す。
+
+### `caption-proj`（G1b）の第 2 出力
+
+`duration`（G3）が食う `caption_vec` の契約は「**`caption_norm` を掛けた** caption 系列の
+masked mean」（`DurationPredictor._caption_vec` — pooling は `masked_mean`）だが、
+`caption_norm` の重みは `dit` グラフの**内側**にしか無い（`text_norm` / `caption_norm` は
+消費側が内包する — ADR 0010 の理由）。ホストが masked mean を採るには norm 済みの系列が要る。
+
+そこで `caption-proj` に**第 2 出力 = `caption_norm`（RMSNorm 512）適用済み系列**を足し、
+masked mean だけをホストに残す。第 1 出力（生の projector 出力）は**そのまま**で、
+`dit` の `caption_state` 入力と `duration` の鎖の両方が今までどおりこちらを食う
+（`duration` の契約と golden は不変 — 再 export 後の第 1 出力が旧 golden と**ビット一致**する
+ことが、この主張の実測になる）。
+
+代替案（却下）: ① `caption_norm` の weight をホストへ配る → 学習済みの値がモデルファイルの
+外に出て、正規経路がファイル 1 個で閉じなくなる（ADR 0010 の代替案 2 と同じ理由）
+② masked mean までグラフに載せる → mask が実行時入力になり、`caption-proj` だけ
+実行時マスクを持つターゲットになる（他 2 本のテキスト系と方式が割れる）。
+`text-proj` は `text_norm` を要らない（`duration` がグラフ内で掛ける）ので**変更しない**。
 
 ### `speaker`（G2）の境界
 
@@ -312,6 +331,10 @@ EAGER_EQUIV_ATOL = 0.0
 #: text と caption の projector が別物であることを見る下限（`_sanity`）。同じ重みを 2 回
 #: 読んでいれば差は厳密に 0 になる。実測は O(1)。
 PROJECTOR_DIVERGENCE_MIN = 1e-2
+
+#: `text_norm` と `caption_norm` が別物であることを見る下限（`_norm_divergence`）。同じ重みを
+#: 2 回読んでいれば差は厳密に 0 になる。`caption-proj` の第 2 出力の契約を守る唯一の門。
+NORM_DIVERGENCE_MIN = 1e-3
 
 #: 長文ケースの本文（1 段落 ≈ 200 トークン）。sliding_window の半幅 64 を十分に超える T で
 #: 帯マスクが**本当に帯として**効いていることを見るためのもの（T ≤ 129 では帯が全域に
@@ -719,6 +742,28 @@ class ProjectorGraph(nn.Module):
         residual = projector.residual_norm(hidden)
         residual = torch.nn.functional.silu(projector.residual_up(residual))
         return projected + projector.residual_down(residual)
+
+
+class CaptionProjectorGraph(nn.Module):
+    """caption 側 projector の export 用ラッパ（**2 出力** — モジュール docstring の G1b 節）。
+
+    第 1 出力は {@link ProjectorGraph} そのもの（生の projector 出力）で、第 2 出力は
+    そこへ `caption_norm`（RMSNorm 512）を掛けた系列。`duration` が要る `caption_vec` の
+    masked mean をホストが採れるようにするためだけに足してある。
+
+    MUST: 第 1 出力の計算は `ProjectorGraph` を**そのまま使う**（式を写さない）— 写すと
+    text 側との差が黙って入りうるし、第 1 出力のビット一致（旧 golden との突合）が
+    「同じ式を 2 箇所に書いた」ことの確認に堕ちる。
+    """
+
+    def __init__(self, projector: nn.Module, caption_norm: nn.Module) -> None:
+        super().__init__()
+        self.projection = ProjectorGraph(projector)
+        self.caption_norm = caption_norm
+
+    def forward(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        projected = self.projection(hidden)
+        return projected, self.caption_norm(projected)
 
 
 class SpeakerGraph(nn.Module):
@@ -1310,26 +1355,51 @@ def _dit_uncond_divergence(pristine: Mapping[str, torch.Tensor]) -> dict[str, fl
     return {name: round(value, 5) for name, value in pairs.items()}
 
 
+def _single(outputs: Mapping[str, torch.Tensor]) -> dict[str, tuple[torch.Tensor, ...]]:
+    """1 出力ターゲットの期待値を、位置つきの組（`_write_io` が食う形）へ揃える。"""
+    return {name: (value,) for name, value in outputs.items()}
+
+
+def _first(outputs: Mapping[str, tuple[torch.Tensor, ...]]) -> dict[str, torch.Tensor]:
+    """期待値の組から**出力 0 だけ**を取り出す。
+
+    鎖の下流（`duration` / `dit` / 静的方式の実測 / projector 取り違えの検査）が食うのは
+    常に第 1 出力で、`caption-proj` の第 2 出力（`caption_norm` 済み系列）はホストが
+    masked mean を採るためだけのもの。
+    """
+    return {name: value[0] for name, value in outputs.items()}
+
+
 def _pristine_outputs(
     backbone: nn.Module,
     projectors: Mapping[str, nn.Module],
+    caption_norm: nn.Module,
     cases: Sequence[tuple[str, str, torch.Tensor]],
-) -> dict[str, dict[str, torch.Tensor]]:
+) -> dict[str, dict[str, tuple[torch.Tensor, ...]]]:
     """**パッチ前**の eager 出力（golden の期待値そのもの）をターゲット別に採る。
 
     MUST: `patch_irodori` を当てる前に呼ぶ（当てた後だと同値検証が恒真化する）。
     実モジュールの forward をそのまま通す（全 1 マスク）— ラッパの写し間違いは
     `_check_wrapper_equivalence` がここで採った値との差として出る。
+
+    `caption-proj` だけ期待値が 2 本になる（第 2 出力 = `caption_norm` 適用済み系列）。
     """
     if patch_irodori.patches_applied():
         raise AssertionError("パッチ適用後に参照を採ろうとした（同値検証が恒真化する）")
-    outputs: dict[str, dict[str, torch.Tensor]] = {target: {} for target in TEXT_TARGETS}
+    outputs: dict[str, dict[str, tuple[torch.Tensor, ...]]] = {
+        target: {} for target in TEXT_TARGETS
+    }
     for name, _kind, ids in cases:
         mask = torch.ones_like(ids, dtype=torch.bool)
         with torch.no_grad():
-            outputs[TARGET_BACKBONE][name] = backbone(ids, mask)
+            outputs[TARGET_BACKBONE][name] = (backbone(ids, mask),)
             for target, projector in projectors.items():
-                outputs[target][name] = projector(backbone, ids, mask)
+                projected = projector(backbone, ids, mask)
+                outputs[target][name] = (
+                    (projected, caption_norm(projected))
+                    if target == TARGET_CAPTION_PROJ
+                    else (projected,)
+                )
     return outputs
 
 
@@ -1377,14 +1447,21 @@ def _static_scheme_evidence(
 def _check_wrapper_equivalence(
     wrapper: nn.Module,
     args: Sequence[torch.Tensor],
-    expected: torch.Tensor,
+    expected: Sequence[torch.Tensor],
     where: str,
     atol: float,
 ) -> float:
-    """ラッパの出力がパッチ前の実モジュール出力と一致することを見る。"""
+    """ラッパの出力がパッチ前の実モジュール出力と一致することを見る（多出力対応）。"""
     with torch.no_grad():
         actual = wrapper(*args)
-    diff = float((actual - expected).abs().max())
+    outputs = actual if isinstance(actual, tuple) else (actual,)
+    if len(outputs) != len(expected):
+        raise AssertionError(
+            f"{where}: ラッパの出力が {len(outputs)} 本で期待値 {len(expected)} 本と違う"
+        )
+    diff = max(
+        float((value - want).abs().max()) for value, want in zip(outputs, expected, strict=True)
+    )
     if diff > atol:
         raise AssertionError(f"{where}: eager 同値が崩れた（最大絶対差 {diff} > {atol}）")
     return diff
@@ -1393,12 +1470,15 @@ def _check_wrapper_equivalence(
 def _write_io(
     graph: IrGraph,
     inputs: Mapping[str, Mapping[str, torch.Tensor]],
-    expected: Mapping[str, torch.Tensor],
+    expected: Mapping[str, Sequence[torch.Tensor]],
     out_dir: Path,
 ) -> list[str]:
-    """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。"""
-    if len(graph.outputs) != 1:
-        raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（テキスト系は 1 本）")
+    """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。
+
+    期待値は**位置つきの組**で受ける（`caption-proj` だけ 2 本 — モジュール docstring の
+    G1b 節）。本数が IR の出力数と食い違う io は「読めるが 1 本ぶん検証されない」形で
+    静かに通るので、ケースごとに突き合わせる。
+    """
     declared = [spec.name for spec in graph.inputs]
     written: list[str] = []
     for name, args in inputs.items():
@@ -1406,30 +1486,38 @@ def _write_io(
             raise AssertionError(
                 f"{name}: 入力名 {sorted(args)} が IR の {sorted(declared)} と違う"
             )
+        outputs = expected[name]
+        if len(outputs) != len(graph.outputs):
+            raise AssertionError(
+                f"{name}: 期待出力 {len(outputs)} 本が IR 出力 {len(graph.outputs)} 本と違う"
+            )
         # MUST: io も IR の意味論 dtype の実表現へ落とす（i64 → i32）。ランタイムが受け取る
         # 形と揃っていないと Deno 側 E2E が golden を読めない（ADR 0009 の境界正規化）。
         tensors = {
             f"{INPUT_PREFIX}{key}": normalize_boundary_tensor(value, f"{name} の入力 '{key}'")
             for key, value in args.items()
         }
-        tensors[f"{OUTPUT_PREFIX}0"] = normalize_boundary_tensor(
-            expected[name].detach().contiguous(), f"{name} の出力 0"
-        )
+        for index, value in enumerate(outputs):
+            tensors[f"{OUTPUT_PREFIX}{index}"] = normalize_boundary_tensor(
+                value.detach().contiguous(), f"{name} の出力 {index}"
+            )
         path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
         save_file(tensors, str(path))
         written.append(path.name)
     return written
 
 
-def _sanity(pristine: Mapping[str, Mapping[str, torch.Tensor]]) -> dict[str, Any]:
-    """text 側と caption 側の projector が**別物**であることを見る。
+def _sanity(pristine: Mapping[str, Mapping[str, Sequence[torch.Tensor]]]) -> dict[str, Any]:
+    """text 側と caption 側の projector が**別物**であることを見る（比べるのは第 1 出力）。
 
     MUST: 恒真にしない — 同じ接頭辞から 2 回読む取り違えは、shape も dtype も一致するので
     ここ以外では見えない（golden も両方同じ値で焼かれて一致してしまう）。
     """
     divergence = {
         name: float(
-            (pristine[TARGET_TEXT_PROJ][name] - pristine[TARGET_CAPTION_PROJ][name]).abs().max()
+            (pristine[TARGET_TEXT_PROJ][name][0] - pristine[TARGET_CAPTION_PROJ][name][0])
+            .abs()
+            .max()
         )
         for name in pristine[TARGET_TEXT_PROJ]
     }
@@ -1439,6 +1527,23 @@ def _sanity(pristine: Mapping[str, Mapping[str, torch.Tensor]]) -> dict[str, Any
             f"text / caption projector の出力差の最小が {worst} — 同じ重みを 2 回読んでいる疑い"
         )
     return {name: round(value, 5) for name, value in divergence.items()}
+
+
+def _norm_divergence(text_norm: nn.Module, caption_norm: nn.Module) -> float:
+    """`text_norm` と `caption_norm` が**別物**であることを見る（weight の最大絶対差）。
+
+    MUST: 恒真にしない — どちらも `[512]` の RMSNorm weight なので、同じ接頭辞から 2 回
+    読む取り違えは shape も dtype も一致する。`caption-proj` の第 2 出力は
+    「`caption_norm` を掛けた系列」であることが契約の全てなのに、**参照もラッパも同じ
+    モジュールを使う**ので、取り違えても golden は自己一致して静かに通る（`_sanity` が
+    projector について塞いでいる穴の norm 版）。
+    """
+    worst = float((text_norm.weight - caption_norm.weight).detach().abs().max())
+    if worst < NORM_DIVERGENCE_MIN:
+        raise AssertionError(
+            f"text_norm / caption_norm の weight 差が {worst} — 同じ重みを 2 回読んでいる疑い"
+        )
+    return worst
 
 
 class TargetAxis(NamedTuple):
@@ -1471,6 +1576,7 @@ def _dynamic_axis(found: tuple[int, int] | None, seq: Any) -> dict[int, Any] | N
 def _graph_summary(graph: IrGraph, path: Path) -> dict[str, Any]:
     return {
         "nodes": len(graph.nodes),
+        "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
@@ -1542,13 +1648,14 @@ def export_series(
     )
 
     # ---- ① パッチ前の参照（golden の期待値）と方式の実測 ----
-    pristine = _pristine_outputs(backbone, projectors, cases)
+    pristine = _pristine_outputs(backbone, projectors, caption_norm, cases)
     static_evidence = _static_scheme_evidence(
-        backbone, text_config, model_config, cases, pristine[TARGET_BACKBONE]
+        backbone, text_config, model_config, cases, _first(pristine[TARGET_BACKBONE])
     )
     sanity = _sanity(pristine)
-    pristine[TARGET_SPEAKER] = _pristine_speaker_outputs(
-        speaker_encoder, speaker_norm, speaker_cases
+    norm_divergence = _norm_divergence(text_norm, caption_norm)
+    pristine[TARGET_SPEAKER] = _single(
+        _pristine_speaker_outputs(speaker_encoder, speaker_norm, speaker_cases)
     )
     no_reference_max_abs = _no_reference_evidence(
         speaker_encoder,
@@ -1560,15 +1667,14 @@ def export_series(
         duration,
         text_norm,
         caption_norm,
-        pristine[TARGET_TEXT_PROJ],
-        pristine[TARGET_CAPTION_PROJ],
-        pristine[TARGET_SPEAKER],
+        _first(pristine[TARGET_TEXT_PROJ]),
+        _first(pristine[TARGET_CAPTION_PROJ]),
+        _first(pristine[TARGET_SPEAKER]),
     )
     aux_dim = int(config.duration_aux_dim)
-    pristine[TARGET_DURATION] = _pristine_duration_outputs(duration, duration_reference, aux_dim)
-    aux_inert = _duration_aux_is_inert(
-        duration, duration_reference, aux_dim, pristine[TARGET_DURATION]
-    )
+    duration_pristine = _pristine_duration_outputs(duration, duration_reference, aux_dim)
+    pristine[TARGET_DURATION] = _single(duration_pristine)
+    aux_inert = _duration_aux_is_inert(duration, duration_reference, aux_dim, duration_pristine)
     dit_inputs, dit_reference = _dit_cases(
         source,
         config,
@@ -1577,12 +1683,13 @@ def export_series(
         caption_norm,
         speaker_max,
         dit_max,
-        pristine[TARGET_TEXT_PROJ],
-        pristine[TARGET_CAPTION_PROJ],
-        pristine[TARGET_SPEAKER],
+        _first(pristine[TARGET_TEXT_PROJ]),
+        _first(pristine[TARGET_CAPTION_PROJ]),
+        _first(pristine[TARGET_SPEAKER]),
     )
-    pristine[TARGET_DIT] = _pristine_dit_outputs(dit, dit_reference)
-    dit_divergence = _dit_uncond_divergence(pristine[TARGET_DIT])
+    dit_pristine = _pristine_dit_outputs(dit, dit_reference)
+    pristine[TARGET_DIT] = _single(dit_pristine)
+    dit_divergence = _dit_uncond_divergence(dit_pristine)
 
     # ---- ② パッチ適用（ここから先で採った eager 値は参照に使えない） ----
     rope_buffers = sorted(
@@ -1594,7 +1701,7 @@ def export_series(
     graphs = {
         TARGET_BACKBONE: BackboneGraph(backbone),
         TARGET_TEXT_PROJ: ProjectorGraph(projectors[TARGET_TEXT_PROJ]),
-        TARGET_CAPTION_PROJ: ProjectorGraph(projectors[TARGET_CAPTION_PROJ]),
+        TARGET_CAPTION_PROJ: CaptionProjectorGraph(projectors[TARGET_CAPTION_PROJ], caption_norm),
         TARGET_SPEAKER: SpeakerGraph(speaker_encoder, speaker_norm, speaker_max),
         TARGET_DURATION: DurationGraph(duration, text_norm),
         TARGET_DIT: DitGraph(dit, dit_max),
@@ -1607,7 +1714,7 @@ def export_series(
     }
     for target in (TARGET_TEXT_PROJ, TARGET_CAPTION_PROJ):
         graph_args[target] = {
-            name: {"hidden": pristine[TARGET_BACKBONE][name]} for name, _kind, _ids in cases
+            name: {"hidden": pristine[TARGET_BACKBONE][name][0]} for name, _kind, _ids in cases
         }
     equivalence = {
         target: max(
@@ -1696,6 +1803,7 @@ def export_series(
         "duration_aux_inert_max_abs": aux_inert,
         "eager_equivalence_max_abs": equivalence,
         "projector_divergence": sanity,
+        "norm_divergence": round(norm_divergence, 5),
     }
 
 
