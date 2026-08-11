@@ -227,6 +227,24 @@ f32 マスクで、1 ずれても shape エラーにならない沈黙誤値ク�
   `_assert_window_size`（net_g 全体を走査）、TS 側はパリティテストがコンテナに焼き込まれた
   `idx_v` の幅 `2w+1` と突き合わせて落とす。
 
+## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
+
+export 済みグラフ（台本 `tools/exporter/export_embeddinggemma.py`）は `attention_mask` を
+入力に持たない。双方向 + sliding window の帯マスクは **Tmax=512 の定数**として焼かれ
+（`sym_prefix_slice` で先頭 T を切り出す）、パディングを注意から隠す経路は無い。
+パディングを含む列は**呼び出し側が詰めて T を短くする**（単一シーケンスなら torch eager と
+厳密同値）。
+
+機序: ADR 0016 の safe-softmax ガード不活性証明はマスクの実値評価を要求し、実行時入力の
+placeholder では成立しない（`_eval_static` が fail loudly — 「単一シーケンス前提」は回避では
+なく設計帰結）。グラフ入力の `pool_mask` は **pooling 専用**で注意には配線されない
+（0 を混ぜると「モデルは見ているのにプールでは捨てる」という eager に無い形になる —
+常に全 1 で渡す）。
+
+付随: `SYM_MAX = 512` なので T > 512 は Session 構築で落ちる（config の
+max_position_embeddings は 2048）。上げる場合は帯マスク定数が Tmax² で膨らむ
+（512 → 2MB / 2048 → 32MB）ことの裁定とセットで行う。
+
 ## hub: 並行取得のキャンセル粒度は single-flight の leader 単位
 
 取得層（`@hdae/fetch-cache`）の single-flight では、同一 (cacheName, URL) への 2 本目以降の
