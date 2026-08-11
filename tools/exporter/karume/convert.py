@@ -217,6 +217,11 @@ FOLDABLE_OPS = {
     aten.eq.Tensor,
     aten.le.Tensor,
     aten.ne.Scalar,
+    # sliding-window と因果マスクの合成（Gemma3 の `create_masks_for_generate` — 2 本の
+    # 帯マスクを `|` で重ね、窓の外を `>` で判定する）。どちらも要素ごとの比較 / 論理和で、
+    # 行 t / 列 j の値が T に依らないため prefix と可換（2 点評価も通ることを実測）。
+    aten.bitwise_or.Tensor,
+    aten.gt.Tensor,
 }
 
 #: 分解を止める（融合を保つ）高位 op = **ADR 0007 の 9 op**（ADR 0012 で gelu のみから拡張）。
