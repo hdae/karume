@@ -1,11 +1,12 @@
 """`patch_irodori` の書き換えが原実装と同値であることの回帰テスト（実重み不要分）。
 
 実重みでの端から端までの同値検証は `export_irodori.py`（emit のたびに全 golden ケースで
-実測し、ビット一致でなければ落とす）。ここでは transformers があれば回る単体レベルの同値
-だけを固定する。
+実測し、ビット一致でなければ落とす）。ここでは transformers / Irodori 実装 clone があれば
+回る単体レベルの同値だけを固定する。
 
-MUST: 主張は**ビット一致**。差し替えたのは qkv の取り出し方だけで、演算順序も丸め方も
-変わらない — 「差が小さい」で通す形にすると、割り方の取り違え（q/k/v の順序違い等）が
+MUST: 主張は**ビット一致**。差し替えたのは qkv の取り出し方・RoPE の複素数を使わない書き方・
+RMSNorm の weight 分割だけで、演算順序も丸め方も変わらない — 「差が小さい」で通す形にすると、
+取り違え（q/k/v の順序違い・cos と sin の入れ替え・head ごと weight の転置）が
 「たまたま近い値」で素通りしうる。
 """
 
@@ -39,14 +40,24 @@ class TestTheSplitArgumentItself:
 
 @pytest.fixture
 def restore_forward():
-    """クラス属性の差し替えをテスト後に戻す（差し替えはプロセス全域）。"""
+    """クラス属性の差し替えをテスト後に戻す（差し替えはプロセス全域）。
+
+    `apply_patches` は `irodori_tts`（git 追跡外の clone — conftest が `sys.path` へ足す）も
+    差し替えるので、無い環境ではこのフィクスチャを使うテストだけを skip する。
+    """
+    irodori_model = pytest.importorskip("irodori_tts.model")
     original = modernbert.ModernBertAttention.forward
+    original_rope = irodori_model.apply_rotary_emb
+    original_norm = irodori_model.RMSNorm.forward
     applied = patch_irodori._APPLIED
     try:
-        yield
+        yield irodori_model
     finally:
         modernbert.ModernBertAttention.forward = original
+        irodori_model.apply_rotary_emb = original_rope
+        irodori_model.RMSNorm.forward = original_norm
         patch_irodori._APPLIED = applied
+        patch_irodori._ORIGINAL_APPLY_ROTARY_EMB = None
 
 
 def _tiny_attention(
@@ -104,3 +115,116 @@ class TestPatchedAttentionIsBitIdentical:
 
         assert modernbert.ModernBertAttention.forward is first
         assert patch_irodori.patches_applied()
+
+
+class TestPatchedRotaryEmbedding:
+    """complex 表を実数対へ開いた RoPE が原実装を再現すること。
+
+    ビット一致は**形依存**（`_real_pair_apply_rotary_emb` の NOTE）。実重みの幾何
+    （head_dim 64）はビット一致を要求し、ずれる側（head_dim 8）は **1 ulp の上限**で固定する
+    — 「差が小さければ良い」に緩めると cos/sin の入れ替えのような取り違えが素通りするので、
+    ずれる側にも境界を置く。
+    """
+
+    #: 実重みの speaker encoder / DiT と同じ head_dim（768/12 = 64・1280/20 = 64）。
+    MODEL_HEAD_DIM = 64
+    #: 丸めが割れる側の幾何（回帰の観測点）。
+    SMALL_HEAD_DIM = 8
+    HEADS, LENGTH = 3, 11
+
+    #: 値域 O(1) の入力に対する 1 ulp 相当の上限（f32 の eps = 1.19e-7）。取り違えの誤差は
+    #: O(1) なので、この上限は「丸めだけ」を通す。
+    ONE_ULP = 1.2e-7
+
+    def _inputs(self, irodori_model, head_dim: int):
+        torch.manual_seed(0)
+        x = torch.randn(1, self.LENGTH, self.HEADS, head_dim)
+        complex_table = irodori_model.precompute_freqs_cis(head_dim, self.LENGTH)
+        real_table = patch_irodori.real_pair_rope_table(head_dim, self.LENGTH)
+        return x, complex_table, real_table
+
+    def test_the_model_geometry_is_bit_identical(self, restore_forward):
+        irodori_model = restore_forward
+        x, complex_table, real_table = self._inputs(irodori_model, self.MODEL_HEAD_DIM)
+        with torch.no_grad():
+            expected = irodori_model.apply_rotary_emb(x, complex_table)
+
+        patch_irodori.apply_patches()
+        with torch.no_grad():
+            actual = irodori_model.apply_rotary_emb(x, real_table)
+
+        assert torch.equal(actual, expected)
+
+    def test_a_smaller_head_dim_stays_within_one_ulp(self, restore_forward):
+        irodori_model = restore_forward
+        x, complex_table, real_table = self._inputs(irodori_model, self.SMALL_HEAD_DIM)
+        with torch.no_grad():
+            expected = irodori_model.apply_rotary_emb(x, complex_table)
+
+        patch_irodori.apply_patches()
+        with torch.no_grad():
+            actual = irodori_model.apply_rotary_emb(x, real_table)
+
+        assert float((actual - expected).abs().max()) <= self.ONE_ULP
+
+    def test_a_complex_table_still_takes_the_original_path(self, restore_forward):
+        """MUST: 差し替えは大域なので、実数化していない呼び出し側の意味論を変えない。"""
+        irodori_model = restore_forward
+        x, complex_table, _real = self._inputs(irodori_model, self.MODEL_HEAD_DIM)
+        with torch.no_grad():
+            expected = irodori_model.apply_rotary_emb(x, complex_table)
+
+        patch_irodori.apply_patches()
+        with torch.no_grad():
+            actual = irodori_model.apply_rotary_emb(x, complex_table)
+
+        assert torch.equal(actual, expected)
+
+    def test_swapping_cos_and_sin_breaks_the_result(self, restore_forward):
+        """恒真化の門 — 表の 2 面を入れ替えたら値が変わる（= 表の向きを見ている）。"""
+        irodori_model = restore_forward
+        x, complex_table, real_table = self._inputs(irodori_model, self.MODEL_HEAD_DIM)
+        with torch.no_grad():
+            expected = irodori_model.apply_rotary_emb(x, complex_table)
+
+        patch_irodori.apply_patches()
+        with torch.no_grad():
+            actual = irodori_model.apply_rotary_emb(x, real_table.flip(1))
+
+        assert not torch.allclose(actual, expected)
+
+
+class TestPatchedRmsNormIsBitIdentical:
+    """rank-2 weight の分割が原実装と 1 ビットも違わず、rank-1 の経路は逐語のままであること。"""
+
+    HEADS, HEAD_DIM, EPS = 4, 6, 1e-5
+
+    def test_a_rank2_weight_is_split_without_changing_the_value(self, restore_forward):
+        irodori_model = restore_forward
+        torch.manual_seed(1)
+        norm = irodori_model.RMSNorm((self.HEADS, self.HEAD_DIM), eps=self.EPS)
+        torch.nn.init.normal_(norm.weight)
+        x = torch.randn(1, 5, self.HEADS, self.HEAD_DIM)
+        with torch.no_grad():
+            expected = norm(x)
+
+        patch_irodori.apply_patches()
+        with torch.no_grad():
+            actual = norm(x)
+
+        assert torch.equal(actual, expected)
+
+    def test_a_rank1_weight_takes_the_verbatim_path(self, restore_forward):
+        irodori_model = restore_forward
+        torch.manual_seed(2)
+        norm = irodori_model.RMSNorm(self.HEAD_DIM, eps=self.EPS)
+        torch.nn.init.normal_(norm.weight)
+        x = torch.randn(1, 5, self.HEAD_DIM)
+        with torch.no_grad():
+            expected = norm(x)
+
+        patch_irodori.apply_patches()
+        with torch.no_grad():
+            actual = norm(x)
+
+        assert torch.equal(actual, expected)

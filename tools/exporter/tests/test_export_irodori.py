@@ -7,6 +7,8 @@
 - 静的方式（実行時 attention_mask 非対応）の実測が、方式が崩れたときに実際に落ちる
 - text / caption projector の取り違え（同じ重みを 2 回読む）が `_sanity` で落ちる
 - `_write_io` が IR の入力名と食い違う io を書かない
+- 参照なし（マスク全 0）の speaker 出力が**厳密に 0** であることの実測が、0 でなければ落ちる
+- `duration` の `aux_features` 非依存の実測が、依存していたら落ちる
 """
 
 from __future__ import annotations
@@ -97,6 +99,99 @@ class TestStaticSchemeEvidence:
 
         with pytest.raises(SystemExit, match="上限"):
             ir._static_scheme_evidence(backbone, TEXT_CONFIG, MODEL_CONFIG, long_case, pristine)
+
+
+class MaskZeroingEncoder(nn.Module):
+    """マスクされた位置を**厳密に 0** にする参照エンコーダの代役（実物と同じ性質）。"""
+
+    def forward(self, latent: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        hidden = latent.sum(dim=-1, keepdim=True).expand(-1, -1, 3) + 1.0
+        return hidden * mask.unsqueeze(-1).to(torch.float32)
+
+
+class MaskLeakingEncoder(nn.Module):
+    """マスク全 0 でも非ゼロを返す代役（故障注入 — ホストのゼロ供給が成立しない側）。"""
+
+    def forward(self, latent: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        return MaskZeroingEncoder()(latent, mask) + 1e-3
+
+
+class TestNoReferenceEvidence:
+    """MUST: 「参照なしは 0」を主張のままにしない（ホストのゼロ供給の唯一の根拠）。"""
+
+    def test_a_mask_zeroing_encoder_measures_zero(self):
+        assert ir._no_reference_evidence(MaskZeroingEncoder(), 4, 4) == 0.0
+
+    def test_a_leaking_encoder_fails_loudly(self):
+        with pytest.raises(AssertionError, match="参照なし"):
+            ir._no_reference_evidence(MaskLeakingEncoder(), 4, 4)
+
+
+class AuxReadingPredictor(nn.Module):
+    """`aux_features` を読む duration の代役（故障注入）。"""
+
+    def forward(self, text_state: torch.Tensor, **kwargs: torch.Tensor) -> torch.Tensor:
+        return text_state.sum(dim=(1, 2)) + kwargs["aux_features"].sum(dim=1)
+
+
+class AuxIgnoringPredictor(nn.Module):
+    """`aux_features` を読まない duration の代役（token-sum 形と同じ性質）。"""
+
+    def forward(self, text_state: torch.Tensor, **kwargs: torch.Tensor) -> torch.Tensor:
+        return text_state.sum(dim=(1, 2))
+
+
+DURATION_REFERENCE = {
+    "a": {
+        "text_state": torch.ones(1, 3, 2),
+        "text_mask": torch.ones(1, 3, dtype=torch.bool),
+        "speaker_state": torch.zeros(1, 2, 2),
+        "speaker_mask": torch.ones(1, 2, dtype=torch.bool),
+        "has_speaker": torch.ones(1, dtype=torch.bool),
+        "caption_state": torch.zeros(1, 2, 2),
+        "caption_mask": torch.ones(1, 2, dtype=torch.bool),
+        "has_caption": torch.ones(1, dtype=torch.bool),
+    }
+}
+
+
+class TestDurationAuxInertness:
+    """MUST: `aux_features` をグラフ入力から落とす根拠を実測で持つ。"""
+
+    def test_an_aux_ignoring_predictor_measures_zero(self, monkeypatch):
+        monkeypatch.setattr(patch_irodori, "_APPLIED", False)
+        predictor = AuxIgnoringPredictor()
+        pristine = ir._pristine_duration_outputs(predictor, DURATION_REFERENCE, 4)
+
+        assert ir._duration_aux_is_inert(predictor, DURATION_REFERENCE, 4, pristine) == {"a": 0.0}
+
+    def test_an_aux_reading_predictor_fails_loudly(self, monkeypatch):
+        monkeypatch.setattr(patch_irodori, "_APPLIED", False)
+        predictor = AuxReadingPredictor()
+        pristine = ir._pristine_duration_outputs(predictor, DURATION_REFERENCE, 4)
+
+        with pytest.raises(AssertionError, match="aux_features"):
+            ir._duration_aux_is_inert(predictor, DURATION_REFERENCE, 4, pristine)
+
+    def test_taking_a_reference_after_patching_fails_loudly(self, monkeypatch):
+        monkeypatch.setattr(patch_irodori, "_APPLIED", True)
+
+        with pytest.raises(AssertionError, match="パッチ適用後に参照を採ろうとした"):
+            ir._pristine_duration_outputs(AuxIgnoringPredictor(), DURATION_REFERENCE, 4)
+
+
+class TestSpeakerCases:
+    def test_the_declared_lengths_are_deterministic_and_in_range(self):
+        first = ir.build_speaker_cases(4, 750)
+        second = ir.build_speaker_cases(4, 750)
+
+        assert [name for name, _ in first] == [name for name, _, _ in ir.SPEAKER_CASES]
+        for (_name, lhs), (_same, rhs) in zip(first, second, strict=True):
+            assert torch.equal(lhs, rhs)
+
+    def test_a_case_over_the_symbolic_cap_fails_loudly(self):
+        with pytest.raises(SystemExit, match="記号次元の範囲"):
+            ir.build_speaker_cases(4, 8)
 
 
 class TestSanityCatchesProjectorMixups:
