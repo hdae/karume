@@ -46,7 +46,7 @@ flow 155MB + dec 59MB がそのまま無駄になる。
 配布形 `models/sbv2-FN4/` は 11 ファイル・504MiB。取得量は preset `f16` で 462,003,393 B、
 `w8` / `w8a8` で 400,526,905 B。
 
-> 更新（2026-08-11・ADR [0044](0044-deberta-layer-trim.md)）: `text_encoder` は **22 層カット後の
+> 更新（2026-08-11・ADR [0045](0045-deberta-layer-trim.md)）: `text_encoder` は **22 層カット後の
 > 309,167,272 B** になった（SBV2 が読む `hidden_states[-3]` は layer 21 の出力なので末尾 2 層は
 > 死重み — WAV sha256 は不変のまま）。`w8` の取得量は **375,148,841 B**。この表の値は 24 層時点の
 > 記録として残す。

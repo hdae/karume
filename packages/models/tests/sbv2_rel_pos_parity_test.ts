@@ -1,5 +1,5 @@
 // DeBERTa の相対位置の添字表について、**ホスト TS 生成器と Python 側生成器のバイト一致**を
-// 実データで固定する（ADR 0044 波 3 — flow / voice の `sbv2_relattn_parity_test.ts` と同じ責務）。
+// 実データで固定する（ADR 0045 波 3 — flow / voice の `sbv2_relattn_parity_test.ts` と同じ責務）。
 //
 // text_encoder は表を焼き込まず**グラフ入力**で受ける。つまり実行時に表を作るのはホストで、
 // ゴールデンの表を作るのは Python（`patch_deberta.build_rel_pos_tables`）— 式が割れると
@@ -8,7 +8,7 @@
 // 直接突き合わせる。
 //
 // 元の式は torch が **float32** で計算するが、ホストは float64。境界の ceil が一致することは
-// 実測命題なので（ADR 0044 波 3）、ここが実データでそれを縛る唯一の場所になる。
+// 実測命題なので（ADR 0045 波 3）、ここが実データでそれを縛る唯一の場所になる。
 //
 // GPU は使わない。系列資産（`outputs/series/deberta-i8/sbv2-22layer/`）と配布形の
 // `symbols.json` が無い環境では SKIP する。

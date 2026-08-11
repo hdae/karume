@@ -13,7 +13,7 @@
   [research/2026-08-11-deberta-size-recon.md](../docs/research/2026-08-11-deberta-size-recon.md)
   （ONNX 版は 22 層だがファイルは 1.03% しか小さくない — onnxsim が +92.3MB 焼き込んで相殺。
   **参考にすべきは「22 層で足りる」事実だけ**）。**波 1 = 末尾 2 層カット完了（ADR
-  [0044](../docs/decisions/0044-deberta-layer-trim.md)）**: 334,545,336 → 309,167,272 B
+  [0045](../docs/decisions/0045-deberta-layer-trim.md)）**: 334,545,336 → 309,167,272 B
   （−7.59%・`w8` 取得量 −6.34%）で **WAV sha256 は不変のまま緑**（`a82f72e2…`）。
   **波 2 = 出力を 1 本に絞るまで完了**（同 ADR 決定 3/4・sha256 は再び不変）。ただし
   **速度の期待は外れた** — T=15 で −4.5% / T=512 で −7.7%（readback 1,380 → 60 KiB）で、

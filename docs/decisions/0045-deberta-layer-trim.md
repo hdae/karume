@@ -1,4 +1,4 @@
-# 0044: DeBERTa text_encoder は 22 層 × 出力 1 本 × 添字表は入力で配る
+# 0045: DeBERTa text_encoder は 22 層 × 出力 1 本 × 添字表は入力で配る
 
 - Status: accepted（波 1 = 層カット / 波 2 = 出力絞り / 波 3 = 相対位置の添字表をグラフ入力へ。
   **3 波とも WAV sha256 門が不変のまま緑** 2026-08-11 — 下の Consequences）

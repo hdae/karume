@@ -1,4 +1,4 @@
-"""DeBERTa-v2 の相対位置の添字表を**グラフ入力**へ出すパッチ層（ADR 0044 波 3）。
+"""DeBERTa-v2 の相対位置の添字表を**グラフ入力**へ出すパッチ層（ADR 0045 波 3）。
 
 `DisentangledSelfAttention.disentangled_attention_bias` は `relative_pos`（`[1, T, T]`）から
 `c2p_pos` / `p2c_pos` を clamp で作る。この 2 表は **T だけで決まる定数**なので、torch.export は

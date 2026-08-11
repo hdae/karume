@@ -618,7 +618,7 @@ export const synthesizeSbv2 = async (
     {},
     observer(state, "text_encoder"),
     async (run) => {
-      // 相対位置の添字表はグラフ入力（焼き込むと Tmax=512 で 2MiB — ADR 0044 波 3）。
+      // 相対位置の添字表はグラフ入力（焼き込むと Tmax=512 で 2MiB — ADR 0045 波 3）。
       const relPos = buildRelPosTables(
         tokens,
         state.rules.bertRelPos.positionBuckets,

@@ -799,7 +799,7 @@ SBV2_TEXT_ENCODER_LAYERS = 22
 
 #: 配布 text_encoder のグラフ出力の本数。SBV2 が読むのは 1 本だけで、ランタイムは
 #: `graph.outputs` を**全部** readback するため、全層出しのまま配ると毎 run で使わない
-#: 22 本ぶんの staging + mapAsync を払う（ADR 0044 波 2 の実測 — T=512 で −10.6%）。
+#: 22 本ぶんの staging + mapAsync を払う（ADR 0045 波 2 の実測 — T=512 で −10.6%）。
 SBV2_TEXT_ENCODER_OUTPUTS = 1
 
 #: 配布 text_encoder のグラフ入力の並び（`export_deberta.INPUT_ORDER` と同じ）。相対位置の

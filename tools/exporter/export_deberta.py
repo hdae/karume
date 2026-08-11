@@ -111,7 +111,7 @@ class Variant:
 #: 22 なのは SBV2 が使うのが `hidden_states[-3]`（= 先頭から 22 番目 = layer 21 の出力）だから
 #: で、末尾 2 層は配布形で完全に死んでいる。切り詰めた 22 層モデルの最終出力が 24 層モデルの
 #: `hidden_states[-3]` と**ビット一致する**ことは実測済み（f32 / i8 / i8+a8 の 3 構成）—
-#: ADR 0044 / docs/research/2026-08-11-deberta-size-recon.md §4。
+#: ADR 0045 / docs/research/2026-08-11-deberta-size-recon.md §4。
 VARIANTS: dict[int, Variant] = {
     2: Variant("dev-2layer"),
     22: Variant("sbv2-22layer", single_output=True),
