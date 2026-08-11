@@ -41,10 +41,18 @@
   既存資産バイト不変 ④ModernBERT テキスト系 3 グラフ（backbone / text-proj / caption-proj・
   Tmax 512 統一・静的マスク方式 — 同値は台本の常設門が毎 emit 実測）+ 実重み E2E 門 19 件
   （`e2e_irodori_test.ts` — tolerance 導出表はテスト定数の docstring）。recon の U2 / U5 は
-  解消。**次 = 第 2 波（safe_softmax 実装 + DiT / speaker / duration export — 第 0 層 6 件と
-  `reciprocal` の除算形書き換え込み）** → ホスト側（pipeline・Unigram+byte_fallback
-  tokenizer・Euler 40 step）→ codec（G6/G7・タイル化 U4・wm_model は README 推奨バイパスに
-  従い落とす見込み・`sin` の |x|>π 精度を e2e で観測）。
+  解消。**第 2 波は W2-A/B/C まで完了（2026-08-11）**: W2-A = `safe_softmax` op + ガード
+  証明の 2 段化（ADR 0044 実装 — 分解ガード相当との Uint32 parity・既存資産バイト不変・
+  全 -inf 静的マスクは fail loudly から書き換え受理へ〈ADR 0044 追記〉）。W2-B/C = speaker /
+  duration ターゲット（E2E 29 件・参照なし = ホストゼロ供給 + 常設実測門・**recon 訂正 2 件**:
+  duration は token-sum 形で系列入力必須 / RoPE 実数化のビット一致は形依存〈head_dim 64 で
+  実測 0〉）。**残 = W2-D（G4 context-KV + G5 DiT・U3 解消・実行時 bool マスクの実戦投入）**
+  — 設計事項: `text_norm` / `caption_norm` の置き場（現状 duration が text_norm を内包。
+  G4/G5 も同じ norm 済み状態を要る — 各消費側内包 vs 専用ターゲットの裁定）と
+  `speaker_state_override` 経路（speaker_norm を掛けない別系統 — パイプライン設計時に分岐）。
+  → 第 3 波ホスト（pipeline・Unigram+byte_fallback tokenizer・Euler 40 step）→ codec
+  （G6/G7・タイル化 U4・`reciprocal` 除算形書き換え・wm_model は README 推奨バイパスに従い
+  落とす見込み・`sin` の |x|>π 精度を e2e で観測）。
 - **立ち上げロードマップ（ADR 0037）は P0〜P5 まで到達し一段落**。P3/P4 で `AnimaPipeline`
   （fromPretrained / fromAssets・`using` 対応）+ 共通 image 層 + 配布形（現 `models/karume-anima-turbo/`）
   （`karume dist`・実 hash・格納 dtype 門）+ `karume` サブコマンド CLI + **英語**モデルカード

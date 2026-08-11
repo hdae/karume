@@ -262,6 +262,35 @@ EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める�
 - **T = 1（BOS のみ）は表現できない**（記号次元は `Dim(min=2)` — 0/1 特殊化を避ける既定）。
   空 caption 以外で T = 1 になる実入力は無い。
 
+## Irodori speaker / duration: 参照なしと平均トークン前置はホスト・条件ベクトルもホスト供給
+
+テキスト系と同じ静的方式（B=1・呼び出し側が列を詰める）を speaker encoder（`[1,S,128]` →
+`[1,S,768]`）と duration predictor（`[1,T,512]` ほか → `[1]`）にも適用した帰結。いずれも
+「グラフに載らない」という by-design の線引きで、値の近似や無音のフォールバックはしない:
+
+- **参照なし（`no_ref` — 参照マスク全 0）はグラフを呼ばない**。eager 側の出力が
+  **厳密に全 0** になる形（SDPA の safe-softmax が全マスク行に 0 を返し、末尾の `x * mask_f`
+  が全体を 0 にする）なので、ホストがゼロ行列を置けば同値。**恒真化しないよう
+  `export_irodori.py` の `_no_reference_evidence` が毎 emit 実測する**（非ゼロ latent を
+  全 0 マスクで通し、出力の最大絶対値が 0 でなければ export ごと落ちる）。
+- **平均トークンの前置（`_prepend_masked_mean_token`）はホスト**。`cat` の対象軸が記号次元 S に
+  なり、IR の `cat` は静的軸しか受けない（`aten.cat.default: 対象軸は静的でなければならない`）。
+  ホスト側の作業は軸 1 の平均と concat だけで、モデル計算（重みを使う演算）は残らない。
+- **duration の `speaker_vec` / `caption_vec` はホスト供給**。前者は上の平均トークンの
+  切り出し、後者は **caption 系列に `caption_norm`（RMSNorm 512）を掛けた masked mean** で、
+  後者だけはホストにモデル計算が 1 本残る。caption 系列をグラフ入力にすると記号次元が
+  2 本（T と caption 長）になるため採らなかった（多記号グラフは未実測 — recon の U3）。
+  **0/0 の危険は無い**（実装が `denom = clamp_min(sum, 1.0)` で割るため — recon が挙げた
+  「caption 全 0 の masked_mean」は上流で既に閉じている）。
+- 参照なし / caption なしの選択（`null_speaker` / `null_caption`）は **`has_speaker` /
+  `has_caption` の bool 入力 + グラフ内の `where`** で表現する。2 本の学習済みベクトルを
+  ホストへ配らずに済ませるため（ADR 0010 が「ホスト事前計算 + 追加入力」を却下したのと同じ理由）。
+- **S = 1 と T = 1 は表現できない**（記号次元は `Dim(min=2)`）。参照 latent は
+  `speaker_patch_size` = 4 の patch 後で、実入力が 1 トークンになるのは `no_ref` の形だけ
+  （上のとおりグラフを呼ばない）。
+- 記号次元の上限は **S ≤ 750**（`ref_max_seconds` 120s × 25Hz ÷ patch 4 — チェックポイントの
+  config から導出）。超える参照長は束縛検査で fail loudly。
+
 ## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・i8a8 と非併用・ビット同一門は f32 経路
 
 `attention` の第 4 入力 mask（ADR 0023 追記 2026-08-11）は意図的に狭い:
