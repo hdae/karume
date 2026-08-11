@@ -172,11 +172,14 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
 > attrs キー集合と値域 / 出力 shape 規則（rank 上限を含む）を両側のテストが同じ表へ
 > 突き合わせる（次元文法と `dim-grammar.json` の関係と同じ）。
 
-- unary elementwise: `neg, abs, exp, log, log1p, sqrt, tanh, sigmoid, relu, gelu, gelu_tanh`
+- unary elementwise: `neg, abs, exp, log, log1p, sqrt, sin, tanh, sigmoid, relu, gelu, gelu_tanh`
   （f32）/ `bitwise_not`（bool）
   - `gelu_tanh` は torch の `gelu(approximate="tanh")`。erf 形の `gelu` と数値が違うため
     **別 op** で運ぶ（attrs 空の契約に近似種別の欄は無い — ADR
     [0043](decisions/0043-op-addition-layers.md) の第 2 層初適用）
+  - `sin` は語彙で**唯一の三角関数**（ADR 0043 の第 1 層）。RoPE のような定数表は
+    エクスポータが initializer へ畳むので、語彙に要るのは実行時値を取る形だけ
+    （初出は DACVAE の Snake 活性）。`cos` は実測に出るまで足さない
   - `clamp`（f32、attrs `min` / `max`）— 両端とも**必須**の有限 f32 で `min <= max`
     （逆転は WGSL の `clamp` が未定義になる向き）
   - `clamp_min`（f32、attrs `min`）— **片側 clamp**（ADR

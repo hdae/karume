@@ -147,6 +147,14 @@ DECIDED: [0043](decisions/0043-op-addition-layers.md)。未対応 op が `Unsupp
 NOTE: 2026-08-11 `gelu_tanh` を第 2 層に追加（ADR 0043 の初適用 — Gemma 系の
 `approximate="tanh"`。EmbeddingGemma / Gemma 4 E2B の config で使用を確認）。
 
+NOTE: 2026-08-11 `sin`（f32 unary）を**第 1 層**に追加。根拠 = DACVAE の Snake 活性
+`x + (α+1e-9)⁻¹·sin²(αx)`（Irodori-TTS v4 の codec）。手順 1 で止まらない理由は
+**x が実行時値**だから — 定数の RoPE 表は従来どおり `FOLDABLE_OPS` の `aten.sin.default`
+が畳み、両経路が同時に成立する（畳み込みを外すと実行時 dispatch が増える）。手順 2 の
+合成も不可（`sin` を既存プリミティブで厳密に表す式が無い）。`aten.sin.default` は
+Core ATen 内なので第 1 層。**`cos` は足さない** — 実行時値を取る `cos` は実測に無く、
+「対称性のための追加をしない」が優先する。ADR は書かない（第 1 層は台帳のみ）。
+
 ## 実装順序（プロトタイプ裁定のまま引き継ぎ — Karume での再裁定は ADR にて）
 
 1. 行 reduce 族（amax/amin/max/min/argmax/argmin）
