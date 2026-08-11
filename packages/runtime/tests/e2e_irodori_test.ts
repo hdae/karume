@@ -8,15 +8,23 @@
 // リポジトリ管理外 — `.gitignore` の `outputs/`）。生成は `tools/exporter/export_irodori.py`
 // （コマンドは下の GENERATE_COMMAND がそのまま正本）。
 //
-// ターゲットは 3 本（recon の G1 / G1a / G1b）:
+// ターゲットは 5 本（recon の G1 / G1a / G1b / G2 / G3）:
 //
 // - `backbone`     — 同梱 ModernBERT-ja-310m（25 層）。`[1,T]` ids → `[1,T,768]`
 // - `text-proj`    — text 側 projector。`[1,T,768]` → `[1,T,512]`
 // - `caption-proj` — caption 側 projector（同形・別重み）
+// - `speaker`      — 参照 latent エンコーダ（8 層）+ `speaker_norm`。`[1,S,128]` → `[1,S,768]`
+// - `duration`     — `text_norm` + duration predictor。`[1,T,512]` ほか 4 本 → `[1]`
 //
 // backbone を projector と融合していないのは **backbone が text / caption で共有**だから
 // （融合すると 1.26GB の重みが 2 部できる）。ホストは backbone を 2 回回して各 projector へ
 // 流すので、この E2E も projector の入力に **backbone の torch 期待値**をそのまま食わせる。
+// `duration` も同じ鎖で、text 系列の入力は **`text-proj` の torch 期待値そのもの**、
+// speaker / caption のベクトルは `speaker` / `caption-proj` の torch 期待値から実装の
+// メソッドで作ったもの（生成は `export_irodori.py` の `_duration_cases`）。
+//
+// 記号次元はターゲットで違う（テキスト系と `duration` は T ≤ 512、`speaker` は S ≤ 750）。
+// ケース名もターゲットで違うので、期待表は**ターゲット別**に持つ（下の EXPECTED_CASES）。
 //
 // SBV2 と違い格納 dtype 系列は f32 の 1 本のみ（f16 / i8 は別系列で決める話）なので、
 // 系列パラメタ化はしない。
@@ -108,11 +116,66 @@ const TEXT_PROJ_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 1e-6 };
  */
 const CAPTION_PROJ_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 1e-6 };
 
+/**
+ * 参照 latent エンコーダ（`ReferenceLatentEncoder` 8 層 + `speaker_norm`）の許容誤差。
+ *
+ * 実測（`atol=rtol=0`、5 ケース × 出力 1 本 `[1,S,768]`）:
+ *
+ * | ケース  | S   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | ------- | --- | ------- | ------- | ------------ | ------------------ |
+ * | ref-min | 2   | 6.14e-6 | 6.87e-3 | 3.60         | 1.09e-4            |
+ * | ref-1s  | 6   | 9.80e-5 | 2.99e-2 | 3.85         | 1.22e-4            |
+ * | ref-5s  | 31  | 2.24e-5 | 3.18e-2 | 4.42         | 1.81e-4            |
+ * | ref-30s | 187 | 5.34e-5 | 1.11e-1 | 4.94         | 7.60e-6            |
+ * | ref-max | 750 | 5.83e-5 | 5.20e-1 | 5.30         | 1.70e-6            |
+ *
+ * atol 1e-3 は実測最悪 9.80e-5（ref-1s）の約 10 倍。**backbone / projector より 1 桁緩い**
+ * のは、値域が O(5) と小さいのに絶対誤差が同程度出るから — 入力の `in_proj` 出力を 6 で
+ * 割ってから 8 段の RMSNorm 付き残差を通す構造で、正規化のたびに小さな中間値の相対差が
+ * 拡大する。加えて **golden の参照 latent は合成（標準正規）**で、実音声の DACVAE latent とは
+ * 統計が違う（実 latent での誤差はこれより小さい可能性が高いが、コーデック波が済むまで
+ * 測れない — その時点で測り直す）。
+ *
+ * 誤差の伸びが S に単調でない（S=6 が最悪で S=750 が 5.8e-5）のは、層方向の縮約長が S に
+ * 依らず、S は独立な列方向にしか効かないため（backbone と同じ構造）。実装バグ
+ * （RoPE の実数化の取り違え・q/k ノルムの head ごと weight の取り違え・sigmoid ゲートの
+ * 掛け違い）の誤差は値域と同じ O(5) で、この閾値の 3〜4 桁上に出る。
+ */
+const SPEAKER_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 1e-6 };
+
+/**
+ * duration predictor（`text_norm` + token-sum 形）の許容誤差。出力は `[1]` の
+ * **log frames** 1 要素だけ。
+ *
+ * 実測（`atol=rtol=0`、5 ケース × 出力 1 本 `[1]`）:
+ *
+ * | ケース            | T   | maxAbs  | maxRel  | \|ref\|  |
+ * | ----------------- | --- | ------- | ------- | -------- |
+ * | dur-both          | 7   | 0       | 0       | 4.658    |
+ * | dur-speaker-only  | 13  | 0       | 0       | 5.312    |
+ * | dur-neither       | 22  | 4.77e-7 | 9.31e-8 | 5.120    |
+ * | dur-caption-only  | 29  | 0       | 0       | 5.365    |
+ * | dur-long          | 144 | 0       | 0       | 6.998    |
+ *
+ * **5 ケース中 4 本がビット一致**で、残る 1 本の 4.77e-7 も値域 5.12 における
+ * **1 ulp ちょうど**（f32）。`log1p(Σ softplus)` の縮約が T 個の非負値の和なので、
+ * 桁落ちの起きようが無い形になっている。
+ *
+ * atol 5e-6 は実測最悪の約 10 倍（≈ 10 ulp）。ホストはこの値を `expm1` してフレーム数に
+ * するので、意味のある単位に直すと `e^7 × 5e-6 ≈ 5.5e-3` フレーム — 四捨五入で
+ * 整数フレームに落とす下流には 1 ミリも届かない。逆に条件ベクトルの取り違え
+ * （speaker / caption の入れ替え・`null_*` 選択の反転）は、上の表で
+ * `dur-both` と `dur-neither` が 0.46 も違うことから分かるとおり **O(0.1〜1)** で出る。
+ */
+const DURATION_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 1e-6 };
+
 /** ターゲット別 tolerance。表の穴は「別ターゲットの値で突合する」沈黙誤りになる。 */
 const TOLERANCES: Readonly<Record<string, Tolerance>> = {
   "backbone": BACKBONE_TOLERANCE,
   "text-proj": TEXT_PROJ_TOLERANCE,
   "caption-proj": CAPTION_PROJ_TOLERANCE,
+  "speaker": SPEAKER_TOLERANCE,
+  "duration": DURATION_TOLERANCE,
 };
 
 const SERIES_ROOT = new URL("../../../outputs/series/irodori-v4-small/", import.meta.url);
@@ -127,12 +190,12 @@ const GENERATE_COMMAND =
 /**
  * 生成されているはずのターゲットとケース。**列挙結果ではなくここで固定する** — 列挙だけに
  * 頼ると生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
- * `tools/exporter/export_irodori.py` の TARGETS / GOLDEN_CASES。
+ * `tools/exporter/export_irodori.py` の TARGETS / GOLDEN_CASES / SPEAKER_CASES /
+ * DURATION_CASES。
  *
- * MUST: ターゲット（G2〜G7）を足すときはこの表と TOLERANCES を同時に伸ばす。
+ * MUST: ターゲット（G4〜G7）を足すときはこの表と TOLERANCES を同時に伸ばす。
  */
-const EXPECTED_TARGETS = ["backbone", "caption-proj", "text-proj"] as const;
-const EXPECTED_CASES = [
+const TEXT_CASES = [
   "caption-ja",
   "caption-long",
   "text-emoji",
@@ -140,6 +203,23 @@ const EXPECTED_CASES = [
   "text-long",
   "text-short",
 ] as const;
+
+/** ターゲット別の期待ケース（ソート済み — 列挙結果と `assertEquals` で突き合わせる）。 */
+const EXPECTED_CASES: Readonly<Record<string, readonly string[]>> = {
+  "backbone": TEXT_CASES,
+  "caption-proj": TEXT_CASES,
+  "text-proj": TEXT_CASES,
+  "speaker": ["ref-1s", "ref-30s", "ref-5s", "ref-max", "ref-min"],
+  "duration": [
+    "dur-both",
+    "dur-caption-only",
+    "dur-long",
+    "dur-neither",
+    "dur-speaker-only",
+  ],
+};
+
+const EXPECTED_TARGETS = Object.keys(EXPECTED_CASES).sort();
 
 /**
  * 資産ディレクトリの列挙。存在しない場合だけ空に縮退する。
@@ -191,16 +271,17 @@ Deno.test({
   // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
   ignore: !AVAILABLE,
   fn: () => {
-    assertEquals(TARGETS, [...EXPECTED_TARGETS], `${SERIES_ROOT.pathname} のターゲット`);
+    assertEquals(TARGETS, EXPECTED_TARGETS, `${SERIES_ROOT.pathname} のターゲット`);
     assertEquals(
       Object.keys(TOLERANCES).sort(),
-      [...EXPECTED_TARGETS].sort(),
+      EXPECTED_TARGETS,
       "ターゲット別 tolerance の表",
     );
     for (const target of TARGETS) {
+      assert(Object.hasOwn(EXPECTED_CASES, target), `${target} の期待ケース表が無い`);
       assertEquals(
         discoverCases(SERIES_ROOT, target),
-        [...EXPECTED_CASES],
+        [...EXPECTED_CASES[target]],
         `${target} の golden ケース`,
       );
       const model = new URL(`${target}/${MODEL_FILE}`, SERIES_ROOT);
@@ -233,10 +314,13 @@ for (const target of TARGETS) {
         ].sort();
         assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${ioFile} のテンソルキー`);
 
-        // 記号次元 T は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
-        // ケースごとに T が違う（7 / 13 / 22 / 29 / 144 / 404）ので、宣言上限 Tmax = 512
-        // （export_irodori.py の SYM_MAX — 帯マスクと RoPE 表の焼き付け点）に依存した実装は
-        // ここで値か shape が壊れる。
+        // 記号次元は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
+        // ケースごとに長さが違う（テキスト系と duration は T = 7 / 13 / 22 / 29 / 144 / 404、
+        // speaker は S = 2 / 6 / 31 / 187 / 750）ので、宣言上限（テキスト系 Tmax = 512 =
+        // export_irodori.py の SYM_MAX / speaker Smax = 750 = speaker_sym_max — 帯マスクと
+        // RoPE 表の焼き付け点）に依存した実装はここで値か shape が壊れる。両ターゲットとも
+        // **上限そのもの**を踏むケース（caption-long は 404 だが speaker の ref-max は 750）を
+        // 持たせてある。
         const inputs: Record<string, Tensor> = {};
         for (const spec of parsed.graph.inputs) {
           const view = io.tensors.get(`input.${spec.name}`);
