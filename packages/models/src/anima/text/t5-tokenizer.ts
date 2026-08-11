@@ -8,11 +8,12 @@
  *   → Unigram（Viterbi・unk_id=2・byte_fallback なし・fuse_unk）
  *   → TemplateProcessing（末尾に `</s>`）
  *
- * Viterbi の同点処理まで正本に合わせる: 同じ位置で終わるノードは「開始位置の昇順」に積まれ、
- * 同点なら先に積まれた方（= より長い断片）が勝つ。ここがずれると、稀にだが別の分割になり
- * id 列が静かに変わる。
+ * Unigram 本体（Viterbi・同点処理・`fuse_unk`）はファミリ非依存なので `src/text/unigram.ts`
+ * が持つ。ここが持つのは Anima 固有の前段（AddedVocabulary・正規化・Metaspace）と後段
+ * （切り詰めと `</s>`）だけ。
  */
 
+import { type UnigramModel, unigramTokenize, type UnigramVocabEntry } from "../../text/unigram.ts";
 import { type CodeRanges, inCodeRanges, toCodePoints } from "./code-ranges.ts";
 import { splitAddedTokens } from "./qwen2-tokenizer.ts";
 import { normalizeSpm, type SpmTables } from "./spm-normalizer.ts";
@@ -20,10 +21,7 @@ import { normalizeSpm, type SpmTables } from "./spm-normalizer.ts";
 /** Metaspace の置換文字（U+2581）。 */
 const METASPACE = "▁";
 
-/** 未知ノードのスコアは「語彙全体の最小スコア − 10」（正本の `K_UNK_PENALTY`）。 */
-const UNK_PENALTY = 10;
-
-export type T5VocabEntry = { readonly id: number; readonly score: number };
+export type T5VocabEntry = UnigramVocabEntry;
 
 export type T5Assets = {
   readonly vocab: ReadonlyMap<string, T5VocabEntry>;
@@ -85,9 +83,6 @@ const splitOnSpace = (text: string, space: CodeRanges): string[] => {
   return out;
 };
 
-/** Viterbi 経路のノード（開始位置とそこから始まるノードのスロット）。 */
-type Slot = { readonly pos: number; readonly slot: number };
-
 export class T5Tokenizer {
   readonly #assets: T5Assets;
   readonly #added: string[];
@@ -97,103 +92,18 @@ export class T5Tokenizer {
     this.#added = [...assets.addedTokens.keys()];
   }
 
-  /** 1 断片の最適分割（正本の `Lattice::viterbi` をコードポイント位置で写す）。 */
-  #viterbi(cps: readonly number[]): { start: number; length: number }[] {
-    const n = cps.length;
-    const unkScore = this.#assets.minScore - UNK_PENALTY;
-    // begin[pos] = そこから始まるノードの長さ（挿入順 = 長さ昇順）
-    const begin: number[][] = [];
-    const scores: number[][] = [];
-    for (let pos = 0; pos < n; pos++) {
-      const lengths: number[] = [];
-      const nodeScores: number[] = [];
-      let text = "";
-      const limit = Math.min(this.#assets.maxTokenLength, n - pos);
-      for (let length = 1; length <= limit; length++) {
-        text += String.fromCodePoint(cps[pos + length - 1]);
-        const entry = this.#assets.vocab.get(text);
-        if (entry !== undefined) {
-          lengths.push(length);
-          nodeScores.push(entry.score);
-        }
-      }
-      if (lengths[0] !== 1) {
-        lengths.unshift(1);
-        nodeScores.unshift(unkScore);
-      }
-      begin.push(lengths);
-      scores.push(nodeScores);
-    }
-    // end[e] = そこで終わるノード。begin 昇順に積む（= 同じ e なら長い方が先）。
-    const end: Slot[][] = Array.from({ length: n + 1 }, () => []);
-    for (let pos = 0; pos < n; pos++) {
-      for (const [slot, length] of begin[pos].entries()) end[pos + length].push({ pos, slot });
-    }
-    const best: number[][] = begin.map((lengths) => Array.from(lengths, () => 0));
-    const prev: (Slot | undefined)[][] = begin.map((lengths) =>
-      Array.from(lengths, (): Slot | undefined => undefined)
-    );
-
-    /** pos で終わる最良ノード。pos=0 は bos（スコア 0）。到達不能なら undefined。 */
-    const bestLeft = (pos: number): { score: number; node: Slot | undefined } | undefined => {
-      if (pos === 0) return { score: 0, node: undefined };
-      let found: { score: number; node: Slot } | undefined;
-      for (const node of end[pos]) {
-        const candidate = best[node.pos][node.slot];
-        // MUST: 厳密な `>` — 同点は先に積まれた方（より長い断片）が残る。
-        if (found === undefined || candidate > found.score) found = { score: candidate, node };
-      }
-      return found;
-    };
-
-    for (let pos = 0; pos < n; pos++) {
-      const left = bestLeft(pos);
-      if (left === undefined) return [];
-      for (let slot = 0; slot < begin[pos].length; slot++) {
-        best[pos][slot] = left.score + scores[pos][slot];
-        prev[pos][slot] = left.node;
-      }
-    }
-    const tail = bestLeft(n);
-    if (tail === undefined) return [];
-    const path: { start: number; length: number }[] = [];
-    let node = tail.node;
-    while (node !== undefined) {
-      path.push({ start: node.pos, length: begin[node.pos][node.slot] });
-      node = prev[node.pos][node.slot];
-    }
-    return path.reverse();
-  }
-
   /**
-   * 1 断片を id 列へ。連続する未知ノードは 1 トークンに融合される（`fuse_unk`）。
+   * 1 断片を id 列へ（Unigram 本体は共有モジュールへ委譲）。連続する未知ノードは 1 トークンに
+   * 融合される（`fuse_unk`）。
    *
    * NOTE: `tokenizer.json` の `fuse_unk` は `null` だが、`tokenizers` の Unigram は未指定でも
    * 融合する（Rust 側の既定）。融合しないと日本語プロンプトで unk が 1 文字ずつ並び、正本と
-   * の突合が `japanese` ケースで落ちる。byte_fallback は false なので未知はここに来る。
+   * の突合が `japanese` ケースで落ちる。byte_fallback は false なので（= `byteBaseId` を
+   * 渡さないので）未知は unk 1 個になる。
    */
   #tokenize(piece: string): number[] {
-    const cps = toCodePoints(piece);
-    const ids: number[] = [];
-    let pendingUnk = false;
-    for (const span of this.#viterbi(cps)) {
-      let text = "";
-      for (let k = span.start; k < span.start + span.length; k++) {
-        text += String.fromCodePoint(cps[k]);
-      }
-      const entry = this.#assets.vocab.get(text);
-      if (entry === undefined) {
-        pendingUnk = true;
-        continue;
-      }
-      if (pendingUnk) {
-        ids.push(this.#assets.unkId);
-        pendingUnk = false;
-      }
-      ids.push(entry.id);
-    }
-    if (pendingUnk) ids.push(this.#assets.unkId);
-    return ids;
+    // T5Assets は UnigramModel の面をそのまま満たす（byteBaseId を持たない = byte_fallback なし）。
+    return unigramTokenize(this.#assets satisfies UnigramModel, toCodePoints(piece));
   }
 
   /**
