@@ -232,11 +232,16 @@ export const defaultGemmGeometry = (): GemmGeometry => ({ regM: 8, regN: 8, wgX:
  *   よってバケットは **M ≤ 64 → M16N16 の 1 段だけ**。
  * - `M16N8`（threads 32）は M16N16 と 1% 未満差の同着（3 点とも僅差で上だが規約上は同値）。
  *   タイの側は採らず、実装済み・検査済みの M16N16 を保持。
- * - M = 318 / 512 は `M64N32` が ×1.67 / ×1.28 で最良だが、65〜512 のバケット追加は
- *   Anima / SBV2 の既存キー・実測選定に波及する（下の MUST）ため**未採用**。掃引データは
- *   research doc に恒久化済みで、採否は別裁定。
+ * - M = 318 / 512 は `M64N32 r4×4 wg8×16` が ×1.67 / ×1.28 で最良（M16N16 は ×1.35 へ落ちる —
+ *   行タイル 20〜32 枚の読み直しが効き始める）。65〜512 のバケットは当初 Anima / SBV2 への
+ *   波及を理由に見送ったが、**両モデルの E2E A/B（ABBA・PNG/WAV 門込み）とセットで採用**
+ *   （2026-08-11 波① — 実測は docs/research/2026-08-11-skinny-m-geometry.md §4）。
+ * - M ≥ 513 は既定のまま。掃引の実測点は 512 までで、DiT（S = 1024 / 4096）の領域は
+ *   2026-08-10 のタイル軸掃引で既定が選ばれている — 実測の無い区間を補間で埋めない。
  */
 const GEOMETRY_M16N16: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
+
+const GEOMETRY_M64N32: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
 
 /**
  * 行数 M から幾何を選ぶ**静的テーブル**（matmul / bmm / linear の 3 経路専用）。
@@ -244,19 +249,21 @@ const GEOMETRY_M16N16: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
  * MUST: 純関数 = プラン時 shape だけの関数であること。実行時オートチューン（実測して選び直す）は
  * ADR 0022 で禁じている — f32 縮約は担当割りしか自由がなく、選択が実行ごとに揺れると
  * 「同一キー → バイト同一 WGSL」も PNG / WAV 門のビット同一もキーの意味も同時に崩れる。
- * MUST: **M ≥ 128 は既定をそのまま返す**。Anima（DiT の S = 4096）/ SBV2 の実測選定と
- * 既存パイプラインキーを 1 バイトも動かさないための境界で、新しいキーが出るのは M < 128 だけ。
+ * MUST: **M ≥ 513 は既定をそのまま返す**。DiT（S = 1024 / 4096）の実測選定（2026-08-10
+ * タイル軸掃引）を動かさない境界で、掃引の実測点（M ≤ 512）の外側を補間で埋めない。
  * MUST: 融合 attention（①QK / ③PV）はこの表を通さない。あちらの既定は Anima の実測で選ばれた
  * ものなので、M（= クエリ長）で勝手に振り替えると実測の前提が消える。
  *
- * バケット境界 64 は掃引の実測境界（M=64 まで M16N16 が最良・M=318 では逆転）を、行タイル
- * 4 枚（64 / tileM 16）以内に収まる範囲として採ったもの。
+ * バケット境界 64 / 512 は掃引の実測境界（M=64 まで M16N16 が最良・M=318/512 は M64N32・
+ * それより上は未実測 = 既定）。65〜512 段の採用は Anima / SBV2 の E2E A/B（ABBA・門込み）で
+ * 退行なしを確認した上でのもの（research doc §4）。
  */
 export const gemmGeometryForRows = (rows: number): GemmGeometry => {
   if (!Number.isSafeInteger(rows) || rows < 0) {
     throw new CodegenError(`幾何の選択: 行数 M は非負整数（${rows}）`);
   }
   if (rows <= 64) return GEOMETRY_M16N16;
+  if (rows <= 512) return GEOMETRY_M64N32;
   return defaultGemmGeometry();
 };
 

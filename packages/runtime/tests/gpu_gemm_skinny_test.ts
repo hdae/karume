@@ -3,7 +3,8 @@
 // 幾何が決めてよいのは**担当割りだけ**（ADR 0022）。したがって見るべきは 2 つで、どちらも
 // 「小さい M でだけ別の幾何が走る」ことを前提に組んである:
 //
-// 1. **CPU 参照との一致** — 小 M バケット（M <= 64）と既定、その境界を跨ぐ形。
+// 1. **CPU 参照との一致** — 小 M（M <= 64）/ 中 M（65..512）/ 既定の 3 バケットと、
+//    その境界を跨ぐ形。
 //    タイル辺が変わると端数タイルの位置も変わるので、`m % tileM != 0` / `n % tileN != 0` /
 //    `k % 16 != 0` を混ぜる。dispatch 数と生成物の幾何が食い違えば出力タイルが丸ごと欠けるが、
 //    その欠落はここで参照との差として出る。
@@ -89,14 +90,18 @@ const SHAPE_CASES: readonly ShapeCase[] = [
   linearCase(17, 64, 33),
   linearCase(33, 16, 68),
   linearCase(64, 20, 68),
-  // 既定幾何へ落ちる側（境界の外）
+  // 中 M バケット（65..512 — tileM 64 / tileN 32）。下端 65 と上端 512
   linearCase(65, 16, 16),
   linearCase(127, 40, 132),
+  linearCase(512, 20, 36),
+  // 既定幾何へ落ちる側（境界の外）
+  linearCase(513, 16, 16),
   matmulCase(4, 20, 68),
   matmulCase(5, 37, 23),
   matmulCase(17, 16, 64),
   matmulCase(64, 132, 36),
   matmulCase(65, 20, 20),
+  matmulCase(513, 8, 12),
   // bmm はバッチ軸（dispatch の z）と幾何が独立であることも同時に見る形（B / M / K / N 全て別）
   bmmCase(3, 4, 20, 68),
   bmmCase(2, 5, 7, 9),
@@ -154,9 +159,10 @@ Deno.test({
   fn: async () => {
     const k = 132;
     const n = 68;
-    // 行数だけを変えた 3 本。128 = 既定幾何 / 33・4 = 小 M 幾何（同じ幾何でも端数タイルの
-    // 位置が違う 2 点 — どちらも既定と 1 ビットも違わないことを見る）
-    const rowCounts = [128, 33, 4] as const;
+    // 行数だけを変えた 4 本。513 = 既定幾何（基準）/ 128 = 中 M（M64N32）/ 33・4 = 小 M
+    //（M16N16 — 同じ幾何でも端数タイルの位置が違う 2 点）。全バケットが基準と
+    // 1 ビットも違わないことを見る
+    const rowCounts = [513, 128, 33, 4] as const;
     const gpu = await acquireGpu();
     try {
       for (const op of ["linear", "matmul"] as const) {
@@ -177,12 +183,12 @@ Deno.test({
             }),
           );
         }
-        const reference = outputs.get(128);
+        const reference = outputs.get(513);
         assert(reference !== undefined);
-        for (const rows of [33, 4] as const) {
+        for (const rows of [128, 33, 4] as const) {
           const actual = outputs.get(rows);
           assert(actual !== undefined);
-          assertRowsBitEqual(actual, reference, n, rows, `${op} m${rows} vs m128`);
+          assertRowsBitEqual(actual, reference, n, rows, `${op} m${rows} vs m513`);
         }
       }
     } finally {

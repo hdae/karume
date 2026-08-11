@@ -31,15 +31,18 @@ const BUCKET_ROWS = [1, 4, 16, 17, 64, 65, 128, 4096] as const;
 
 const geometryOf = (rows: number): GemmGeometry => gemmGeometryForRows(rows);
 
-Deno.test("gemmGeometryForRows のバケット境界は 64 で、M >= 65 は既定幾何へ落ちる", () => {
+Deno.test("gemmGeometryForRows のバケット境界は 64 / 512 で、M >= 513 は既定幾何へ落ちる", () => {
   // 小 M バケット（2026-08-11 掃引: M=1/4/64 とも M16N16 が対既定 ×3.0〜3.2 の最良。
   // M=64 は行タイル 4 枚 = 重みを 4 回読み直してもなお workgroup 数の勝ち）
   for (const rows of [0, 1, 2, 4, 16, 17, 32, 63, 64]) {
     assertEquals(geometryOf(rows), { regM: 1, regN: 4, wgX: 4, wgY: 16 }, `M=${rows}`);
   }
-  // MUST: ここから上は既定のまま（既存資産のパイプラインキーを 1 文字も動かさない境界。
-  // 掃引では M=318/512 に M64N32 の伸び代があるが、採否は別裁定 — gemm-geometry.ts）
-  for (const rows of [65, 127, 128, 129, 4096, 65536]) {
+  // 中 M バケット（掃引 M=318 ×1.67 / M=512 ×1.28。波①で Anima/SBV2 の E2E A/B とセット採用）
+  for (const rows of [65, 127, 128, 129, 318, 512]) {
+    assertEquals(geometryOf(rows), { regM: 4, regN: 4, wgX: 8, wgY: 16 }, `M=${rows}`);
+  }
+  // MUST: ここから上は既定のまま（掃引の実測点の外 — DiT の 2026-08-10 実測選定を動かさない）
+  for (const rows of [513, 1024, 4096, 65536]) {
     assertEquals(geometryOf(rows), defaultGemmGeometry(), `M=${rows}`);
   }
 });
@@ -75,19 +78,20 @@ Deno.test("行数はキーに載り、バケットが違えば別パイプライ
   // 幾何判別子 `r{regM}x{regN}w{wgX}` はタイル辺と併せて幾何を一意に決める（wgY は tileM/regM）
   assertEquals(linearKey("f32", true, "f32", 4), "linear:v2:f32:reg16x16r1x4w4v4");
   assertEquals(linearKey("f32", true, "f32", 64), "linear:v2:f32:reg16x16r1x4w4v4");
+  assertEquals(linearKey("f32", true, "f32", 318), "linear:v2:f32:reg64x32r4x4w8v4");
   assertEquals(matmulKey(false, 4), "matmul:v2:f32:reg16x16r1x4w4");
   assertEquals(bmmKey(true, 17), "bmm:v2:f32:reg16x16r1x4w4v4");
-  // 2 バケットのキーは互いに衝突しない
-  const keys = [4, 4096].map((rows) => linearKey("f32", true, "f32", rows));
+  // 3 バケットのキーは互いに衝突しない
+  const keys = [4, 318, 4096].map((rows) => linearKey("f32", true, "f32", rows));
   assertEquals(new Set(keys).size, keys.length, keys.join(", "));
 });
 
-Deno.test("行数を渡さない呼び出しと M >= 128 は既存のキー・生成物をバイト単位で保つ", () => {
+Deno.test("行数を渡さない呼び出しと M >= 513 は既存のキー・生成物をバイト単位で保つ", () => {
   // 融合 attention とスナップショットが通る経路（行数を持たない）
   assertEquals(linearKey("f32", true), "linear:v2:f32:reg128x128r8x8w16v4");
   assertEquals(matmulKey(true), "matmul:v2:f32:reg128x128r8x8w16v4");
   assertEquals(bmmKey(false), "bmm:v2:f32:reg128x128r8x8w16");
-  for (const rows of [128, 4096]) {
+  for (const rows of [513, 1024, 4096]) {
     assertEquals(linearKey("i8", false, "f32", rows), linearKey("i8", false));
     assertEquals(linearWgsl("f16", true, "f16", rows), linearWgsl("f16", true, "f16"));
     assertEquals(matmulWgsl(true, rows), matmulWgsl(true));
@@ -165,5 +169,7 @@ Deno.test("同じ行数からは常にバイト単位で同じ WGSL が出る（
   // バケットが違えば生成物も違い（キーだけ分かれて中身が同じ = 幾何が流れていない）、
   // 同じバケットなら行数が違っても生成物は同じ（キーの基数が M の値ぶん爆発しない）
   assertNotEquals(matmulWgsl(true, 64), matmulWgsl(true, 65));
+  assertNotEquals(matmulWgsl(true, 512), matmulWgsl(true, 513));
   assertEquals(matmulWgsl(true, 4), matmulWgsl(true, 32));
+  assertEquals(matmulWgsl(true, 65), matmulWgsl(true, 512));
 });
