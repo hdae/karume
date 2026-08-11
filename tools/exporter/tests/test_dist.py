@@ -67,14 +67,23 @@ from karume.dist import (
     sbv2_style_vectors,
     verify_dist,
 )
+from karume.ir import IR_METADATA_KEY
 
 
-def _fake_safetensors(dtype: str, payload: bytes) -> bytes:
-    """格納 dtype の門を通る最小の safetensors（8 バイト長 + ヘッダ JSON + データ節）。"""
-    header = json.dumps(
-        {"w": {"dtype": dtype, "shape": [len(payload)], "data_offsets": [0, len(payload)]}}
-    ).encode("utf-8")
-    return len(header).to_bytes(8, "little") + header + payload
+def _fake_safetensors(
+    dtype: str, payload: bytes, metadata: Mapping[str, str] | None = None
+) -> bytes:
+    """格納 dtype の門を通る最小の safetensors（8 バイト長 + ヘッダ JSON + データ節）。
+
+    `metadata` を渡すと `__metadata__` 節が付く（IR コンテナを要求する門のため）。
+    """
+    header: dict[str, Any] = {
+        "w": {"dtype": dtype, "shape": [len(payload)], "data_offsets": [0, len(payload)]}
+    }
+    if metadata is not None:
+        header["__metadata__"] = dict(metadata)
+    encoded = json.dumps(header).encode("utf-8")
+    return len(encoded).to_bytes(8, "little") + encoded + payload
 
 
 #: 偽資産の中身（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 5 役は
@@ -788,10 +797,25 @@ requires_sbv2_package = pytest.mark.skipif(
     reason="sbv2 dependency-group が無い（`uv sync --group sbv2` が前提）",
 )
 
+#: 偽 text_encoder の IR グラフ出力の本数（22 層 + embedding 出力）と、`symbols.json` が持つ
+#: 取り出し位置。門 `assert_bert_hidden` が見るのは「本数 − 位置 == 22」なので、**この 2 つは
+#: 対でしか動かせない**（実資産の 23 本 / 1 と同じ組み合わせ）。
+_SBV2_GRAPH_OUTPUTS = 23
+_SBV2_BERT_FROM_END = 1
+
 #: 偽資産（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 5 役は
-#: `SBV2_STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。
+#: `SBV2_STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。text_encoder だけは
+#: IR コンテナとしても読まれる（出力本数の門）ので `__metadata__` を持つ。
 _SBV2_PAYLOADS = {
-    "text_encoder": _fake_safetensors("I8", b"deberta-i8-weights"),
+    "text_encoder": _fake_safetensors(
+        "I8",
+        b"deberta-i8-weights",
+        {
+            IR_METADATA_KEY: json.dumps(
+                {"outputs": [f"layer_norm_{index}" for index in range(_SBV2_GRAPH_OUTPUTS)]}
+            )
+        },
+    ),
     "front_f16": _fake_safetensors("F16", b"front-f16-weights"),
     "front_i8": _fake_safetensors("I8", b"front-i8-weights"),
     "voice_f16": _fake_safetensors("F16", b"voice-f16-weights"),
@@ -810,7 +834,10 @@ _SBV2_KNOBS: Mapping[str, Any] = {
     "lengthScale": 1.25,
 }
 
-_SBV2_SYMBOLS = json.dumps({"defaults": dict(_SBV2_KNOBS)}, ensure_ascii=False).encode("utf-8")
+_SBV2_SYMBOLS = json.dumps(
+    {"defaults": dict(_SBV2_KNOBS), "bertHiddenFromEnd": _SBV2_BERT_FROM_END},
+    ensure_ascii=False,
+).encode("utf-8")
 
 #: 話者埋め込みの幅（合成 config の `model.gin_channels`。実重み FN4 は 512 だが、偽資産は
 #: 幅を縛れていることが見えれば足りる — 実値との一致は config から導出するので固定しない）。
@@ -868,7 +895,7 @@ def _build_sbv2_sources(
     sources = Sbv2Sources(
         series_f16=series / f"{stem}-f16",
         series_i8=series / f"{stem}-i8",
-        text_encoder=series / "deberta-i8" / "full-24layer",
+        text_encoder=series / "deberta-i8" / "sbv2-22layer",
         demo=root / "outputs" / "sbv2-demo",
         model=root / "inputs" / "sbv2" / model,
     )
@@ -1172,6 +1199,37 @@ class TestSbv2StorageGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
 
+class TestSbv2BertHiddenGate:
+    """層数と取り出し位置の対応（片方だけ動くと**別の層の声**が出るのに実行は通る）。
+
+    層数は `export_deberta.py` の variant が、位置は `sbv2_demo.py` の定数が持つ別々の台本
+    なので、対で動かし忘れた配布形が普通に組み上がってしまう。不変量は「出力本数 − 位置 == 22」。
+    """
+
+    def test_it_stops_when_only_the_layer_count_moved(self, tmp_path: Path) -> None:
+        """層を 22 に削ったのに `symbols.json` が旧 24 層向けの 3 を主張したまま。"""
+        symbols = json.dumps({"defaults": dict(_SBV2_KNOBS), "bertHiddenFromEnd": 3})
+        sources = _build_sbv2_sources(tmp_path, symbols=symbols.encode("utf-8"))
+        out_dir = tmp_path / "out"
+        with pytest.raises(DistError, match=r"bertHiddenFromEnd=3 は先頭から 20 番目"):
+            _assemble_sbv2(sources, out_dir)
+        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        assert not out_dir.exists()
+
+    def test_it_stops_when_only_the_extraction_position_moved(self, tmp_path: Path) -> None:
+        """`symbols.json` を 1 にしたのに text_encoder が全 25 本出しの 24 層のまま。"""
+        sources = _build_sbv2_sources(tmp_path)
+        (sources.text_encoder / "model.safetensors").write_bytes(
+            _fake_safetensors(
+                "I8",
+                b"deberta-i8-weights",
+                {IR_METADATA_KEY: json.dumps({"outputs": [f"h{index}" for index in range(25)]})},
+            )
+        )
+        with pytest.raises(DistError, match=r"bertHiddenFromEnd=1 は先頭から 24 番目"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+
 class TestSbv2Manifest:
     def test_it_writes_the_envelope_of_adr_0041(self, sbv2_assembled) -> None:
         out_dir, manifest = sbv2_assembled
@@ -1288,7 +1346,7 @@ class TestSbv2Sources:
         assert sources.series_i8 == tmp_path / "sbv2-FN7-i8"
         assert sources.model.name == "FN7"
         # DeBERTa はモデル名に依らない（ファミリーでは shared/ へ 1 本化される）。
-        assert sources.text_encoder == tmp_path / "deberta-i8" / "full-24layer"
+        assert sources.text_encoder == tmp_path / "deberta-i8" / "sbv2-22layer"
 
     def test_it_looks_outside_the_series_root_for_the_host_assets(self, tmp_path: Path) -> None:
         """デモ資産（`outputs/` 直下）と実重み（`inputs/`）は系列ではない — 綴りは paths.py。"""
@@ -1351,7 +1409,9 @@ class TestSbv2Cli:
     @staticmethod
     def _sources(tmp_path: Path, model: str, offset: float = 0.0):
         knobs = TestSbv2KnobDefaults._package_knobs()
-        symbols = json.dumps({"defaults": knobs}, ensure_ascii=False).encode("utf-8")
+        symbols = json.dumps(
+            {"defaults": knobs, "bertHiddenFromEnd": _SBV2_BERT_FROM_END}, ensure_ascii=False
+        ).encode("utf-8")
         return knobs, _build_sbv2_sources(tmp_path, model=model, symbols=symbols, offset=offset)
 
     @staticmethod

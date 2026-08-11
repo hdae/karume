@@ -210,7 +210,11 @@ cd ../.. && deno test -A packages/runtime/tests/e2e_deberta_test.ts packages/run
   changes). It is not added to `pyproject.toml` / `uv.lock`; `--with` brings it in temporarily.
 - The outputs go to **`outputs/series/deberta/<variant>/`** (kept out of commits by the `outputs/`
   entry in the top-level `.gitignore` — the 24-layer weights are 1.3GB). `--dtype i8` is a
-  **separate series** `outputs/series/deberta-i8/<variant>/` (24 layers, 319MB = 25.4% of f32).
+  **separate series** `outputs/series/deberta-i8/<variant>/`.
+- **`sbv2-22layer` is what the SBV2 distribution ships.** SBV2 only ever reads
+  `hidden_states[-3]` (= index 22 = the output of layer 21), so the last two layers are dead weight;
+  the truncated model's final output is **bit-identical** to the 24-layer model's `hidden_states[-3]`
+  (measured — see `docs/research/2026-08-11-deberta-size-recon.md`).
 
 ```
 outputs/series/deberta/dev-2layer/model.safetensors      2 layers (130 nodes / 208MB)
@@ -218,9 +222,11 @@ outputs/series/deberta/dev-2layer/io.<case>.safetensors
 outputs/series/deberta/full-24layer/model.safetensors    24 layers (1230 nodes / 1.32GB / 25 outputs)
 outputs/series/deberta/full-24layer/io.<case>.safetensors
 
+outputs/series/deberta-i8/sbv2-22layer/model.safetensors      22 layers in i8 storage (1130 nodes /
+                                                              294.5MB / 23 outputs) — shipped
 outputs/series/deberta-i8/full-24layer/model.safetensors      24 layers in i8 storage (319MB)
-outputs/series/deberta-i8/full-24layer/io.<case>.safetensors       w8 goldens (activations in f32)
-outputs/series/deberta-i8/full-24layer/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
+outputs/series/deberta-i8/<variant>/io.<case>.safetensors       w8 goldens (activations in f32)
+outputs/series/deberta-i8/<variant>/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
 ```
 
 The io tensor key naming is the same as the tiny goldens (`input.<graph input name>` /

@@ -401,7 +401,9 @@ def prepare_inputs(dump_path: Path, assets_path: Path) -> ChainInputs:
             attention_mask=tensors["attention_mask"].to(torch.int64),
             output_hidden_states=True,
         ).hidden_states
-    hidden = hidden_states[-meta["bertHiddenFromEnd"]][0]
+    # MUST: 参照は**切り詰めていない全 24 層**モデルなので位置は定数を直に使う
+    # （`meta["bertHiddenFromEnd"]` は配布グラフ側の位置 — sbv2_demo の 2 定数の使い分け）。
+    hidden = hidden_states[-sbv2_demo.BERT_HIDDEN_FROM_END][0]
     word2ph = tensors["word2ph"].reshape(-1).tolist()
     bert_feature = sbv2_demo.tile_bert(hidden, word2ph).unsqueeze(0)
     del bert, hidden_states

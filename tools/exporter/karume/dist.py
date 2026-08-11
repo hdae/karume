@@ -59,6 +59,7 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save
 
+from karume.ir import IR_METADATA_KEY
 from karume.modelcard import (
     HF_OWNER,
     SBV2_CARD_PROFILES,
@@ -109,8 +110,8 @@ class DistError(ValueError):
     """組み立ての前提が破れた（資産の欠落・rope 素表の不一致・manifest と現物の食い違い）。"""
 
 
-def storage_dtypes(path: Path) -> set[str]:
-    """safetensors ヘッダのテンソル dtype 集合（ヘッダだけ読む — 数 GB を舐めない）。"""
+def safetensors_header(path: Path) -> Mapping[str, Any]:
+    """safetensors のヘッダ JSON だけを読む（数 GB のペイロードを舐めない）。"""
     size = path.stat().st_size
     with path.open("rb") as stream:
         header_len = int.from_bytes(stream.read(8), "little")
@@ -124,6 +125,14 @@ def storage_dtypes(path: Path) -> set[str]:
             header = json.loads(stream.read(header_len))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise DistError(f"{path}: safetensors ヘッダが読めない") from error
+    if not isinstance(header, dict):
+        raise DistError(f"{path}: safetensors ヘッダが最上位オブジェクトでない")
+    return header
+
+
+def storage_dtypes(path: Path) -> set[str]:
+    """safetensors ヘッダのテンソル dtype 集合（ヘッダだけ読む — 数 GB を舐めない）。"""
+    header = safetensors_header(path)
     return {spec["dtype"] for name, spec in header.items() if name != "__metadata__"}
 
 
@@ -779,8 +788,18 @@ SBV2_PIPELINE = "sbv2/1"
 
 #: DeBERTa の系列とその variant ディレクトリ（`export_deberta.py` の綴り）。モデル名に依らない
 #: （ファミリー組み立てでは全モデルが同じ text_encoder を指し、`shared/` へ 1 回だけ入る）。
+#: 22 層 variant なのは末尾 2 層が SBV2 の経路で死んでいるから（{@link SBV2_BERT_HIDDEN_INDEX}）。
 SBV2_TEXT_ENCODER_SERIES = "deberta-i8"
-SBV2_TEXT_ENCODER_VARIANT = "full-24layer"
+SBV2_TEXT_ENCODER_VARIANT = "sbv2-22layer"
+
+#: SBV2 が使う hidden_states の**絶対位置**（先頭から数えて 22 番目）。参照実装の
+#: `res["hidden_states"][-3:-2]` を全 24 層で解いた値で、`[0]` = embedding 出力・
+#: `[i+1]` = layer i の出力なので layer 21 の出力を指す。
+#:
+#: MUST: **グラフの層数が変わってもこの位置は動かない** — 組み立て門
+#: {@link assert_bert_hidden} はこれを不変条件に使う。層数と `bertHiddenFromEnd` は別々の
+#: 台本が持つので、片方だけ動かすと配布形は「shape の合った別の層」を静かに引く。
+SBV2_BERT_HIDDEN_INDEX = 22
 
 #: `sbv2_demo.py assets` が書くホスト資産の置き場と綴り。系列（IR + io）ではないので
 #: `outputs/series/` の下ではない。
@@ -978,6 +997,51 @@ def sbv2_knob_defaults(symbols_path: Path) -> dict[str, Any]:
     return knobs
 
 
+def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
+    """`symbols.json` の取り出し位置が text_encoder の**正しい層**を指すことを検査する。
+
+    パイプラインは `bertHiddenFromEnd` でグラフ出力を末尾から引く（`bert-tile.ts`）。層数を
+    変えれば出力本数も変わるので両者は必ず一緒に動かす必要があるが、層数は
+    `export_deberta.py` の variant が、位置は `sbv2_demo.py` の定数が持つ**別々の台本**なので、
+    片方だけ動いた配布形が普通に組み上がってしまう。
+
+    MUST: ずれても shape は合ったままロードも実行も通り、**別の層の BERT 特徴で音が出る**
+    だけで沈黙する（スタイル表・話者表の行数門と同じ機序）。絶対位置
+    {@link SBV2_BERT_HIDDEN_INDEX} は層数に依らない不変量なので、これで両者を縛る。
+    """
+    header = safetensors_header(text_encoder)
+    metadata = header.get("__metadata__")
+    if not isinstance(metadata, dict) or IR_METADATA_KEY not in metadata:
+        raise DistError(f"{text_encoder}: IR メタデータ（{IR_METADATA_KEY}）が無い")
+    try:
+        graph = json.loads(metadata[IR_METADATA_KEY])
+    except json.JSONDecodeError as error:
+        raise DistError(f"{text_encoder}: IR メタデータが JSON として読めない") from error
+    outputs = graph.get("outputs") if isinstance(graph, dict) else None
+    if not isinstance(outputs, list) or not outputs:
+        raise DistError(f"{text_encoder}: IR メタデータに非空の outputs が無い")
+
+    shipped = json.loads(symbols_path.read_text(encoding="utf-8"))
+    from_end = shipped.get("bertHiddenFromEnd") if isinstance(shipped, dict) else None
+    if not isinstance(from_end, int) or isinstance(from_end, bool) or from_end < 1:
+        raise DistError(
+            f"{symbols_path}: bertHiddenFromEnd が 1 以上の整数でない（{from_end!r}）"
+        )
+    if from_end > len(outputs):
+        raise DistError(
+            f"{symbols_path} の bertHiddenFromEnd={from_end} に対し {text_encoder} の出力は"
+            f" {len(outputs)} 本しかない"
+        )
+    index = len(outputs) - from_end
+    if index != SBV2_BERT_HIDDEN_INDEX:
+        raise DistError(
+            f"{text_encoder} の出力 {len(outputs)} 本に対し {symbols_path} の"
+            f" bertHiddenFromEnd={from_end} は先頭から {index} 番目（'{outputs[index]}'）を指す"
+            f" — 期待は {SBV2_BERT_HIDDEN_INDEX} 番目（参照実装の hidden_states[-3] ="
+            " layer 21 の出力）。層数と取り出し位置は必ず一緒に動かす"
+        )
+
+
 def sbv2_config(model_dir: Path) -> Mapping[str, Any]:
     """`config.json` を読む（styles / speakers / 表の行数と列数の正本）。"""
     path = model_dir / SBV2_CONFIG_FILE
@@ -1159,6 +1223,7 @@ def sbv2_plan(
     speaker_embeddings = sbv2_speaker_embeddings(sources.model, config)
     for role, source in placements.items():
         assert_storage(role, source, SBV2_STORAGE_REQUIREMENTS)
+    assert_bert_hidden(placements["text_encoder"], placements["symbols"])
     artifacts = {
         role: Artifact(SBV2_OUTPUT_PATHS[role], source=source)
         for role, source in placements.items()

@@ -57,7 +57,18 @@ BERT_REPO = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 
 #: BERT 特徴に使う hidden_states の**末尾からの位置**。参照実装
 #: `nlp/japanese/bert_feature.py` の `res["hidden_states"][-3:-2]` そのもの。
+#:
+#: MUST: これは **torch の全 24 層モデル**に対する位置で、配布グラフの出力位置ではない
+#: （そちらは {@link BERT_GRAPH_HIDDEN_FROM_END}）。参照計算はこの定数を直に使う — 配布形の
+#: `symbols.json` から引くと、層を削った途端に参照だけが別の層を指す。
 BERT_HIDDEN_FROM_END = 3
+
+#: 配布グラフ（`export_deberta.py` の 22 層 variant）から**同じテンソル**を引く位置。グラフは
+#: SBV2 が使う層までで切り詰めてあるので最終出力の 1 本目になる。
+#:
+#: 両者が同じテンソルを指すことは組み立て時に検査される（`karume.dist.assert_bert_hidden` —
+#: 不変条件は「出力本数 − 末尾からの位置 == 22」）。
+BERT_GRAPH_HIDDEN_FROM_END = 1
 
 #: 資産ファイル名。`symbols.json` / `deberta-tokenizer.json` は `karume dist` が配布形へ運び、
 #: `assets.safetensors` は `reference` が `--assets` で読む（Deno 側は配布形から読む）。
@@ -210,8 +221,8 @@ def jp_extra_rules(hps: Any) -> dict[str, Any]:
             "style": DEFAULT_STYLE,
             "styleWeight": DEFAULT_STYLE_WEIGHT,
         },
-        # BERT 特徴の取り出し位置（末尾から数える — 層を削った variant でも同じ規則で引ける）。
-        "bertHiddenFromEnd": BERT_HIDDEN_FROM_END,
+        # BERT 特徴の取り出し位置（**配布グラフの出力**を末尾から数える — 参照側の位置とは別物）。
+        "bertHiddenFromEnd": BERT_GRAPH_HIDDEN_FROM_END,
     }
 
 
@@ -392,7 +403,9 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
             attention_mask=tensors["attention_mask"].to(torch.int64),
             output_hidden_states=True,
         ).hidden_states
-    hidden = hidden_states[-meta["bertHiddenFromEnd"]][0]
+    # MUST: 参照は**切り詰めていない全 24 層**モデルなので、位置は BERT_HIDDEN_FROM_END を直に
+    # 使う（`meta["bertHiddenFromEnd"]` は配布グラフ側の位置で、22 層グラフでは 1 になる）。
+    hidden = hidden_states[-BERT_HIDDEN_FROM_END][0]
     word2ph = tensors["word2ph"].reshape(-1).tolist()
     bert_feature = tile_bert(hidden, word2ph).unsqueeze(0)
 

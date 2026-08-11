@@ -8,6 +8,17 @@
 
 ## Active redesigns (in flight)
 
+- **DeBERTa 配布サイズ削減 3 波（2026-08-11）— 波 1 着地**: 発端は SBV2 の ONNX 版
+  （hidden[-3] のみ抽出）が縮小の材料になるかという問い。実測の正本は
+  [research/2026-08-11-deberta-size-recon.md](../docs/research/2026-08-11-deberta-size-recon.md)
+  （ONNX 版は 22 層だがファイルは 1.03% しか小さくない — onnxsim が +92.3MB 焼き込んで相殺。
+  **参考にすべきは「22 層で足りる」事実だけ**）。**波 1 = 末尾 2 層カット完了（ADR
+  [0044](../docs/decisions/0044-deberta-layer-trim.md)）**: 334,545,336 → 309,167,272 B
+  （−7.59%・`w8` 取得量 −6.34%）で **WAV sha256 は不変のまま緑**（`a82f72e2…`）。
+  組み立て門「outputs 本数 − `bertHiddenFromEnd` == 22」を新設（層数と取り出し位置は別々の
+  台本が持つので、片方だけ動くと**別の層の声**が沈黙で出る）。**未着手**: 波 2 = 出力を
+  25 → 1 本に絞る（サイズ 0・狙いは readback の固定費）/ 波 3 = `const.*` 2 本
+  （相対位置の gather 添字表・2MiB）のグラフ入力化を試行。**HF 2 リポは未アップロード**。
 - **モデル拡充波 — EmbeddingGemma 動作確認済み（2026-08-11）**: gelu_tanh op（第 2 層 —
   **op 追加の判定手順は ADR [0043](../docs/decisions/0043-op-addition-layers.md)**）+
   exporter 対応（FOLDABLE に bitwise_or/gt・RoPE 降格の接尾一致）+ 台本

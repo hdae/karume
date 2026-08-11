@@ -80,8 +80,14 @@ OUTPUT_PREFIX = "output."
 #: 評価点はここから torch の range_constraints 経由で決まる — ADR 0010）。
 SYM_MAX = 512
 
-#: 層数 → 出力ディレクトリ名。2 層は開発イテレーション用、24 層が本番。
-VARIANTS: dict[int, str] = {2: "dev-2layer", 24: "full-24layer"}
+#: 層数 → 出力ディレクトリ名。2 層は開発イテレーション用、**22 層が SBV2 の配布形**、
+#: 24 層は全層の golden 検証用。
+#:
+#: 22 なのは SBV2 が使うのが `hidden_states[-3]`（= 先頭から 22 番目 = layer 21 の出力）だから
+#: で、末尾 2 層は配布形で完全に死んでいる。切り詰めた 22 層モデルの最終出力が 24 層モデルの
+#: `hidden_states[-3]` と**ビット一致する**ことは実測済み（f32 / i8 / i8+a8 の 3 構成）—
+#: ADR 0044 / docs/research/2026-08-11-deberta-size-recon.md §4。
+VARIANTS: dict[int, str] = {2: "dev-2layer", 22: "sbv2-22layer", 24: "full-24layer"}
 
 #: golden の固定文（トークナイザは文字単位の BertJapaneseTokenizer）。
 #: 短文 / 長め / 記号混じり の 3 本で T を散らす。
