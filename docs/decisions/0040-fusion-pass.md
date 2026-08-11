@@ -66,10 +66,11 @@ executor はステップ列を受け取って encode するだけで、判定を
 「掴めなければ必ず正しい」の外側に出て、fallback が保証にならなくなる。したがって:
 
 - **op 列・結線・attrs・解決済み shape・dtype を全て突き合わせ、1 点でも外れたら
-  `undefined` を返す**。RoPE なら `[1,H,S,128]` / table `[1,1,S,128]` / dim=3 の 0-64 と
-  64-128 だけ、SiLU なら全スロット同 shape の f32 だけ、upsample2x なら f32 rank4 NCHW の
-  各空間軸ちょうど 2 倍だけを受理する。偶奇 RoPE・別 head 幅・broadcast SiLU・一般 resize へ
-  一般化しない。
+  `undefined` を返す**。RoPE なら `[1,H,S,D]`（D は正の偶数 — 実測は Anima 128 / Gemma 系
+  256）/ table `[1,1,S,D]` / dim=3 の `0-D/2` と `D/2-D` の半分割だけ（追記 2026-08-11 —
+  head 幅は分割位置から導出）、SiLU なら全スロット同 shape の f32 だけ、upsample2x なら
+  f32 rank4 NCHW の各空間軸ちょうど 2 倍だけを受理する。偶奇 RoPE・broadcast SiLU・
+  一般 resize へ一般化しない。
 - **鎖の内部値は「消費者ちょうど 1 本・graph output でない」を全ルール共通の適格条件にする**
   （`internalsArePrivate`）。融合後は内部バッファを 1 本も作らないので、外部 consumer や
   readback が 1 つでもあれば値が消える。
@@ -114,7 +115,8 @@ executor はステップ列を受け取って encode するだけで、判定を
 
 - **融合ヒット数（anima 1024 / 8step / guidance=1）**: rope **503**（transformer 448 +
   text encoder 55）/ silu **305** / upsample2x **27** / identityExpand **160**。参照実装
-  ブランチの静的集計と一致する。
+  ブランチの静的集計と一致する。NOTE: 503 / 55 は**当時の matcher の実測**。2026-08-11 の
+  一般化（下の追記）で text encoder の取りこぼし 1 箇所が拾えるようになり 504 / 56。
 - **SBV2**: sigmoid が 0 本のため融合ルールは 1 本も発火せず（identityExpand **210** のみ）。
   融合 on / off で WAV と dump が sha256 完全一致。
 - **PNG sha256 門 4 本が不変**（f32 丸め境界の保存が E2E で成立）。
@@ -200,14 +202,16 @@ add(p, shift)                -> y            [1,S,2048]
 | グラフ                                 | silu | upsample2x | rope |  adaln | identityExpand |
 | -------------------------------------- | ---: | ---------: | ---: | -----: | -------------: |
 | transformer（i8 / f16 共通・S 非依存） |    2 |          0 |   56 | **85** |              0 |
-| text encoder                           |   28 |          0 |   55 |      0 |            112 |
+| text encoder                           |   28 |          0 |   56 |      0 |            112 |
 | text conditioner                       |    0 |          0 |    0 |      0 |             48 |
 | VAE decoder（タイル 1 枚）             |   29 |          3 |    0 |      0 |              0 |
+| EmbeddingGemma-300m（T 非依存）        |    0 |          0 |   48 |      0 |             96 |
 
 上の実測欄が載せている predict 1 回ぶんの合計は、これをパイプラインの run 回数で畳んだもの:
-rope 56×8step + 55 = 503 / silu 2×8 + 28 + 29×9tile = 305 / upsample2x 3×9tile = 27 /
+rope 56×8step + 56 = 504 / silu 2×8 + 28 + 29×9tile = 305 / upsample2x 3×9tile = 27 /
 identityExpand 112 + 48 = 160。**adaln は 85×8step = 680/predict**（研究ノートの「85」は
 静的な鎖の本数 = DiT の 1 run ぶん）。DiT のステップ列は 2601 → 2346（**−255/run**）。
+text encoder の rope 56 と EmbeddingGemma 行は 2026-08-11 の一般化後の値（下の追記）。
 
 ### 実 GPU での検証結果（2026-08-10 検収・RTX 3080 Ti / Vulkan）
 
@@ -222,3 +226,22 @@ identityExpand 112 + 48 = 160。**adaln は 85×8step = 680/predict**（研究�
   dispatch 2032 → 672）= **GPU −12.7 ms/step ≈ −102 ms/8 step**。帯域モデルの見積り
   （−135 ms）の 76% — 融合カーネルの実効帯域がモデル仮定（素の 3 op と同じ ≈650 GiB/s）より
   低めに出たぶんの差で、方向と桁は一致。加えて dispatch −255/predict のホスト費用減。
+
+## 追記（2026-08-11）: rope ルールの一般化（head 幅の導出 + 窓内 passthrough）
+
+EmbeddingGemma-300m（Gemma3・head 幅 256）で rope が 0 ヒットだったため、受理集合を
+2 点だけ広げた。「式が似ている」への一般化ではなく、**同じ half-split rotate_half の
+実測形が 2 つ増えた**という位置づけ:
+
+1. **head 幅 D を分割位置から導出**（従来は 64 / 128 決め打ち）。受理は `[1,H,S,D]`
+   （D は正の偶数）・table `[1,1,S,D]`・dim=3 の `0-D/2` / `D/2-D` の**半分割のみ**。
+   カーネル（rope.ts）は head_dim / half_dim を uniform で受けるので WGSL は 1 バイトも
+   変わらず、丸め障壁の議論もそのまま生きる。
+2. **窓内 passthrough を rope にも導入**（adaln に次ぐ 2 例目）。cos / sin 表を実行時 T へ
+   縮める `sym_prefix_slice` は θ 系統ごとに 1 度だけ作られ、その**初出 1 箇所**が `cat` と
+   cross `mul` の隙間に落ちる。跨げるのは **`sym_prefix_slice` ちょうど 1 本だけ**
+   （別 op・2 本以上は不受理 — 反例テストで固定）。
+
+効果: EmbeddingGemma で rope 0 → 48（実 dispatch 1,294 → 958・−26%）、Anima text
+encoder で同型の取りこぼし解消 55 → 56（sin 表の初出が隙間に落ちる 1 箇所 — 上の実測欄の
+503 は当時の matcher の値で、以後は 504）。PNG sha256 門 3 本一致でビット同一を再確認。

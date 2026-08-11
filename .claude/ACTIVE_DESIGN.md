@@ -14,12 +14,19 @@
   `export_embeddinggemma.py`（Tmax=512・実行時 attention_mask 非対応 → limitations）+
   実 GPU golden e2e 門（5 ケース T=12〜318・maxAbs ≤ 3.9e-7・atol 1e-6）。公式 gated 重みと
   unsloth ミラーは sha256 全一致。**未着手**: models パイプライン・tokenizer（Gemma SPM
-  BPE + byte_fallback — 既存 3 実装と不一致で新規実装）・配布形・**ORT Node/Web 比較
-  （次手・進行中）**。モデル候補キュー: Irodori-TTS v4（RF-DiT + DACVAE + ModernBERT-ja —
-  着手時にソース精読 recon 必須・Web レッグの確度 medium/low）→ BiRefNet_HR
-  （torchvision deform_conv2d が blocker・grid_sample 系の ADR 前提）→ Gemma 4 E2B
-  （2026-04 実在・Apache 2.0・ungated。新規性は decode + KV cache の実行モデル設計で
-  tokenizer / gelu_tanh は共用）。recon 詳細 =
+  BPE + byte_fallback — 既存 3 実装と不一致で新規実装）・配布形。**ORT 比較 + フロア最適化
+  第 1 波は完了（2026-08-11）**: 帰属は skinny-M occupancy（linear が GPU 87%）で、
+  M≤64 幾何バケット（ADR 0022 追記）+ rope 融合の Gemma 形一般化（ADR 0040 追記）により
+  bare 76.4 → 52.7ms・対 ORT Web WebGPU 2.5 倍差・残りはホスト支配 —
+  [research/2026-08-11-skinny-m-geometry.md](../docs/research/2026-08-11-skinny-m-geometry.md)。
+  未裁定の伸び代 = M 65〜512 バケット（Anima/SBV2 波及込みで裁定）・融合 attention の
+  mask 対応（ADR 0023 改訂級）。batch>1 export は変換段でブロック（known-issues）。
+  モデル候補キュー: Irodori-TTS v4（**ソース精読 recon 済み 2026-08-11** — 新規 IR op は
+  sin 1 本・export 6+2 グラフ・裁定済み: CFG マスクは実行時 bool マスク案 a〈ADR 要〉・
+  透かしは公式準拠 + フラグ・課題は codec タイル化と Unigram+byte_fallback tokenizer）→
+  BiRefNet_HR（torchvision deform_conv2d が blocker・grid_sample 系の ADR 前提）→
+  Gemma 4 E2B（2026-04 実在・Apache 2.0・ungated。新規性は decode + KV cache の実行モデル
+  設計で tokenizer / gelu_tanh は共用）。recon 詳細 =
   [research/2026-08-11-model-expansion-recon.md](../docs/research/2026-08-11-model-expansion-recon.md)。
 - **立ち上げロードマップ（ADR 0037）は P0〜P5 まで到達し一段落**。P3/P4 で `AnimaPipeline`
   （fromPretrained / fromAssets・`using` 対応）+ 共通 image 層 + 配布形（現 `models/karume-anima-turbo/`）

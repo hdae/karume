@@ -101,6 +101,7 @@ ORT fp32 ≈ 0.36s）。int8 はスレッド既定 1 点のみ。B=1 のみ。OS
 
 - ORT fp32 の対 torch 逸脱の出所（最適化無効で開き直すと縮むか）。
 - 損益分岐 T の実測（T=32/64/128 の追加）とバッチ B>1 の挙動。
-- karume フロアの分解 — **帰属は §3a で確定**。残るは計測装置の pass 分割費を除いた
-  timing off の真の GPU 時間と、幾何・融合改善後の再計測。
+- karume フロアの分解 — **帰属は §3a で確定**。改善後の再計測は
+  [2026-08-11-skinny-m-geometry.md](2026-08-11-skinny-m-geometry.md) §2（bare 76.4 →
+  52.7ms・対 ORT Web WebGPU 3.6 → 2.5 倍差・残りはホスト支配）。
 - ORT Node webgpu EP（Dawn）がヘッドレスで adapter を取れない機序（Chrome では取れる）。

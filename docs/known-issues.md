@@ -23,6 +23,26 @@
 実運用への影響は未確定（この状態でも Mac で正常な画像が生成できている）。ブラウザ実行は
 Dawn / Tint 系で naga を通らないため、同じ症状が出るとは限らない（未検証）。
 
+## EmbeddingGemma の batch>1 export が変換段で通らない
+
+`karume export-embeddinggemma --batch N`（N>1）は `karume/convert.py` で fail loudly する
+（B=1 は従来どおり成功）。機序は 2 段:
+
+1. transformers（5.14 系）の `masking_utils.find_packed_sequence_indices` が、
+   `Gemma3TextModel` 内部の `position_ids [1,T]` と `batch_size=N` の不一致で trace 中に
+   packed-sequence 分岐へ入り、`aten.eq.Tensor` / `aten.index.Tensor` / `aten.ne.Scalar` が
+   IR まで生き残る（B=1 ではこの不一致が起きず、既存の Tmax 定数 + `sym_prefix_slice`
+   畳み込みに吸収される）。
+2. この分岐を monkeypatch で外すと、今度は帯マスクの `aten.bitwise_or.Tensor` が
+   **bool 定数を IR v1 の initializer にできない**制約（f32 / i32 のみ）に当たる。しかも
+   同 patch は **B=1 でも同じエラーを誘発する** — packed-sequence 分岐の存在自体が現行の
+   帯マスク定数畳み込みパターン成立の前提になっており、eager 同値のつもりの patch でも
+   安全ではない（実測 A/B・2026-08-11）。
+
+根治は convert/normalize 側の一般化（bool 定数の f32/i32 化 or initializer dtype の拡張 +
+batch>1 のマスク畳み込み対応）で、コア変換基盤への設計判断が要る。`--batch` フラグ自体は
+一般化が入ればそのまま使える形で維持している。
+
 ## ここから外れたもの（記録）
 
 - GPU の clamp / clamp_min / relu / amax / amin の NaN 非伝播 → **根治済み（2026-08-03・
