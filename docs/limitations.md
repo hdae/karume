@@ -236,7 +236,7 @@ export 済みグラフ（台本 `tools/exporter/export_embeddinggemma.py`）は 
 厳密同値）。
 
 機序: ADR 0016 の safe-softmax ガード不活性証明はマスクの実値評価を要求し、実行時入力の
-placeholder では成立しない（`_eval_static` が fail loudly — 「単一シーケンス前提」は回避では
+placeholder では成立しない（`_eval_static` が拒否する — 「単一シーケンス前提」は回避では
 なく設計帰結）。グラフ入力の `pool_mask` は **pooling 専用**で注意には配線されない
 （0 を混ぜると「モデルは見ているのにプールでは捨てる」という eager に無い形になる —
 常に全 1 で渡す）。
@@ -246,8 +246,10 @@ max_position_embeddings は 2048）。上げる場合は帯マスク定数が Tm
 （512 → 2MB / 2048 → 32MB）ことの裁定とセットで行う。
 
 解除（実行時マスク対応）の設計は
-[decisions/0044](decisions/0044-runtime-attention-mask.md)（accepted）で確定済み —
-実装は Irodori DiT 波とセット。
+[decisions/0044](decisions/0044-runtime-attention-mask.md)（accepted）で確定済みで、**機構は
+実装済み**（`safe_softmax` op + `_drop_safe_softmax_guard` の 2 段化 — 2026-08-11）。残るのは
+EG 台本の配線だけ（bool マスク入力を受けて帯定数と加算合成し、SDPA を保存のままにするか
+分解へ落とすかの裁定 — ADR 0044 の Consequences）。
 
 ## Irodori テキスト系（backbone / projector）: 実行時 attention_mask 非対応・空 caption と T=1 は非表現
 

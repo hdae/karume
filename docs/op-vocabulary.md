@@ -100,6 +100,11 @@ M1-P2 以降に解消する。
   | `select_scatter`/`slice_scatter` = `cat`   | 未確 | 境界（index 0 / 末尾）で長さ 0 のスライスが出て、WebGPU の storage binding が size>0 を要求するため落ちうる（未実測）。空オペランドを畳む分岐が必須                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
   | `batch_norm` の 6 ステップ展開             | 成立 | 数値は同値。ただし elementwise 融合が無い前提だと 1 ノード = 1 dispatch + フルサイズ中間 1 本になる。1024px VAE の `[1,128,1024,1024]` = 537MB では容量が問題になる                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
+  NOTE（2026-08-11）: 表の「tensor 比較」行が指す **attention の −inf ガード**は、ガード部分木を
+  op 化する案（`eq(−inf)` 等を語彙へ）を却下したまま **`safe_softmax` 1 op** で決着した — ADR
+  [0044](decisions/0044-runtime-attention-mask.md)。ガードの**意味論**（全 −inf 行 → 0）だけを
+  `softmax` の変種として持つので、非有限値を扱う比較 op は語彙に入らない。
+
 ## やらない方がよいこと
 
 - **汎用 reduce フレームワークを先に作らない。** amax は sum 用行カーネルの複製約 20 行が

@@ -76,6 +76,14 @@
   「黙って外れる」と同型の脆さを正しさ側に持ち込む）、空行が正規に出るモデル（バッチ pad・
   EG の将来形）に閉じない。safe_softmax なら意味論で閉じ、証明は不要。却下。
 
+## 追記（2026-08-11・実装時の明確化）
+
+決定 2 の「証明不能」には、証明が立って**「不活性でない」ことが確定した**形（全 −inf 行が
+実在する静的マスク）も含める。ガードは除去ではなく実装（safe_softmax）へ置き換わるので、
+どちらの系でも NaN が下流へ流れる経路は生じず torch と同値のまま。ADR 0016 下で
+fail loudly だったこの形は正規の受理形になった（実測 =
+`test_an_all_masked_row_rewrites_the_guard_to_safe_softmax` ほか 2 系）。
+
 ## Consequences
 
 - Irodori DiT export（第 2 波）が開通: 語彙追加は `safe_softmax` 1 op（第 2 層 — 契約

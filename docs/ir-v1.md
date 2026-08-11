@@ -267,6 +267,10 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
     ones を合成してアリティ 2 へ正規化する
   - `softmax`（f32、attrs `dim`）— **最終次元のみ**（`dim` は非負表記）。**safe-softmax**
     （行の最大値を引く）で計算する
+  - `safe_softmax`（f32、attrs `dim`）— `softmax` と**同一契約** + 「**行 max が −inf の行は
+    全 0**」（ADR [0044](decisions/0044-runtime-attention-mask.md) の第 2 層）。torch の SDPA
+    分解が `softmax` に被せる safe-softmax ガードと同じ意味論で、マスクが実行時値でガードの
+    不活性を証明できない形だけに現れる。有限要素を持つ行の値は `softmax` と**ビット同一**
   - `embedding`（attrs `padding_idx`）— `weight f32[V,H] × index i32[…] → f32[…,H]` の行
     gather。**入力スロットごとに dtype が違う**（weight: f32 / index: i32 → 出力 f32）。
     `padding_idx` は**受理するが forward には効かない**（勾配側の欄）。範囲外添字の扱いは
