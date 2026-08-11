@@ -32,6 +32,7 @@ import {
   referenceReshape,
   referenceRmsNorm,
   referenceRowReduce,
+  referenceSafeSoftmax,
   referenceSlice,
   referenceSoftmax,
   referenceSymPrefixSlice,
@@ -654,6 +655,33 @@ Deno.test("softmax は amax を引いて大入力でも壊れない", () => {
   assertEquals([...masked.data], [0.25, 0.25, 0.25, 0.25]);
   // 最終次元以外は語彙に無い
   assertThrows(() => referenceSoftmax(t([2, 3], [1, 2, 3, 4, 5, 6]), { dim: 0 }), OpContractError);
+});
+
+// safe_softmax（ADR 0044）— softmax の全機能 + 「行 max が −inf の行は全 0」。torch の
+// SDPA ガード（`where(¬any(¬eq(src,−inf)), 0, softmax(src))`）と同じ値になることを固定する。
+Deno.test("safe_softmax は全 −inf の行に 0 を書き、それ以外は softmax と同値", () => {
+  const attrs = { dim: 1 };
+  const neg = Number.NEGATIVE_INFINITY;
+  // 行 0 = 通常 / 行 1 = 全 −inf（torch のガードが発火する行）/ 行 2 = 一部 −inf
+  const x = t([3, 3], [1, 2, 3, neg, neg, neg, neg, 0, 1]);
+  const out = referenceSafeSoftmax(x, attrs);
+  assertEquals([...out.data.slice(3, 6)], [0, 0, 0]);
+  // 素の softmax は同じ行で 0/0 = NaN（この 1 行が「別 op である理由」そのもの）
+  assertEquals(referenceSoftmax(x, attrs).data.slice(3, 6).every(Number.isNaN), true);
+  // −inf を含まない行 / 一部だけ −inf の行は素の softmax と**ビット単位で**一致する
+  const plain = referenceSoftmax(x, attrs);
+  assertEquals([...out.data.slice(0, 3)], [...plain.data.slice(0, 3)]);
+  assertEquals([...out.data.slice(6, 9)], [...plain.data.slice(6, 9)]);
+  assertAlmostEquals(out.data[6], 0, 1e-12);
+  assertAlmostEquals(out.data[7] + out.data[8], 1, 1e-6);
+  // masked_fill の埋め値（−F32_MAX）は **有限**なので空行ではない（一様分布のまま）
+  const filled = referenceSafeSoftmax(t([1, 4], Array(4).fill(-3.4028234663852886e+38)), attrs);
+  assertEquals([...filled.data], [0.25, 0.25, 0.25, 0.25]);
+  // 契約は softmax と同一（最終次元のみ）
+  assertThrows(
+    () => referenceSafeSoftmax(t([2, 3], [1, 2, 3, 4, 5, 6]), { dim: 0 }),
+    OpContractError,
+  );
 });
 
 // 融合 attention（ADR 0023）。オラクルの規律は「素直な 3 段」で、GPU の融合形（P 非実体化）を

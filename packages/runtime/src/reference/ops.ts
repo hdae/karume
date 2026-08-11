@@ -864,16 +864,21 @@ export const referenceRmsNorm = (
 };
 
 /**
- * softmax（最終次元、safe-softmax）。
+ * softmax / safe_softmax（最終次元、safe-softmax）。
  *
  * MUST: **amax を引いた形**で書く。素朴形は台帳の反例集どおり大入力で壊れ、オラクル側が
  * 同じ壊れ方をすると「カーネルの safe 化が外れている」ことを突合が検出できなくなる。
+ *
+ * `safe` は ADR 0044 の safe_softmax（行 max が −inf の行に 0 を書く）。有限要素を持つ行の
+ * 演算列は素の softmax と**同一のまま**にする MUST — 分けて書くと「変種だけが素朴形へ
+ * 退化した」状態を突合が見逃す。
  */
-export const referenceSoftmax = (
+const softmaxLike = (
   x: RefTensor,
   attrs: Readonly<Record<string, unknown>>,
+  safe: boolean,
 ): RefTensor => {
-  const contract = resolveOpContract("softmax");
+  const contract = resolveOpContract(safe ? "safe_softmax" : "softmax");
   assertDtype(contract, x.dtype, "reference");
   const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
   const dim = shape[shape.length - 1];
@@ -883,6 +888,8 @@ export const referenceSoftmax = (
     const base = row * dim;
     let amax = x.data[base];
     for (let i = 1; i < dim; i += 1) amax = Math.max(amax, x.data[base + i]);
+    // 全要素 −inf の行（`out` は 0 初期化済みなのでそのまま次の行へ）。
+    if (safe && amax === Number.NEGATIVE_INFINITY) continue;
     let total = 0;
     for (let i = 0; i < dim; i += 1) total += Math.exp(x.data[base + i] - amax);
     for (let i = 0; i < dim; i += 1) {
@@ -891,6 +898,17 @@ export const referenceSoftmax = (
   }
   return { dtype: "f32", shape, data: out };
 };
+
+export const referenceSoftmax = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => softmaxLike(x, attrs, false);
+
+/** safe_softmax（ADR 0044）— softmax + 「行 max が −inf の行は全 0」。 */
+export const referenceSafeSoftmax = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => softmaxLike(x, attrs, true);
 
 /**
  * 融合 attention `out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v`（ADR 0023）。
@@ -1249,6 +1267,8 @@ export const applyReferenceOp = (
       return referenceRmsNorm(inputs[0], inputs[1], attrs);
     case "softmax":
       return referenceSoftmax(inputs[0], attrs);
+    case "safeSoftmax":
+      return referenceSafeSoftmax(inputs[0], attrs);
     case "attention":
       return referenceAttention(inputs[0], inputs[1], inputs[2], attrs, inputs[3]);
     case "embedding":

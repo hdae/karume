@@ -108,6 +108,10 @@ LAYER_NORM_OP = "layer_norm"
 #: 正規化長の正本は weight の長さ（normalized_shape の欄は作らない — 二重管理にしない）。
 RMS_NORM_OP = "rms_norm"
 SOFTMAX_OP = "softmax"
+#: `softmax` + 「**行 max が -inf の行は全 0 を書く**」（ADR 0044）。契約・attrs・shape 規則は
+#: softmax と同一で、違いはこの 1 行だけ。SDPA 分解の safe-softmax ガードを実値証明で
+#: 落とせない形（実行時マスク等）で `_drop_safe_softmax_guard` が発行する。
+SAFE_SOFTMAX_OP = "safe_softmax"
 #: 融合 attention（ADR 0023）。`out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v`。
 #: **アリティ 3 か 4**（q / k / v + 省略可能な mask）・入力は rank-4 head-first
 #: （`[B,H,M,D]` / `[B,H,N,D]` ×2）で **D は 3 者とも同じ**・出力は `[B,H,M,D]`。
@@ -215,6 +219,7 @@ OpKind = Literal[
     "layer_norm",
     "rms_norm",
     "softmax",
+    "safe_softmax",
     "attention",
     "embedding",
     "masked_fill",
@@ -898,6 +903,9 @@ OP_CONTRACTS: dict[str, OpContract] = {
     # アリティ 2 へ正規化する — ゼロ bias 合成（ADR 0015）と同じ手筋。
     RMS_NORM_OP: _contract(RMS_NORM_OP, "rms_norm", 2, RMS_NORM_ATTRS),
     SOFTMAX_OP: _contract(SOFTMAX_OP, "softmax", 1, SOFTMAX_ATTRS),
+    # ADR 0044。attrs スキーマは softmax と**同じ 1 本を共有**する（複製すると片方だけ
+    # 絞りが緩む形が作れる）。
+    SAFE_SOFTMAX_OP: _contract(SAFE_SOFTMAX_OP, "safe_softmax", 1, SOFTMAX_ATTRS),
     # 融合 attention（ADR 0023）。q / k / v と省略可能な mask の 4 本とも f32 で同型
     # （uniform 契約）。mask は加算型なので値の側と同じ dtype で、bool は受理しない。
     ATTENTION_OP: _contract(ATTENTION_OP, "attention", 3, ATTENTION_ATTRS, max_arity=4),

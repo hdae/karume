@@ -264,8 +264,9 @@ def _compute(
         return _layer_norm(ins, where, attrs)
     if kind == "rms_norm":
         return _rms_norm(ins, where, attrs)
-    if kind == "softmax":
-        return _softmax(ins, where, attrs)
+    # safe_softmax は shape 規則も attrs も softmax と同一（違いは空行の値だけ — ADR 0044）。
+    if kind in ("softmax", "safe_softmax"):
+        return _softmax(ins, where, attrs, contract.name)
     if kind == "attention":
         return _attention(ins, where, attrs)
     if kind == "embedding":
@@ -579,17 +580,19 @@ def _rms_norm(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> 
     return list(x)
 
 
-def _softmax(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
+def _softmax(
+    ins: list[list[Extent]], where: str, attrs: Mapping[str, Any], name: str
+) -> list[Extent]:
     shape = ins[0]
     dim = softmax_dim(attrs, where)
     # MUST: 一般 dim を「そのうち実装する」として受理しない。最終次元以外は行カーネルの
     # 前提（縮約軸が連続）が崩れ、通せば黙って別の軸を畳む。
     if len(shape) < 1 or dim != len(shape) - 1:
         raise OpContractError(
-            f"{where}: softmax は最終次元のみ（attrs.dim={dim} / 入力 [{_show(shape)}]）"
+            f"{where}: {name} は最終次元のみ（attrs.dim={dim} / 入力 [{_show(shape)}]）"
         )
     if shape[-1].is_value(0):
-        raise OpContractError(f"{where}: softmax は長さ 0 の軸を縮約できない")
+        raise OpContractError(f"{where}: {name} は長さ 0 の軸を縮約できない")
     return list(shape)
 
 

@@ -114,7 +114,13 @@ import {
   MASKED_FILL_WORKGROUP_SIZE,
   maskedFillParams,
 } from "../kernels/masked-fill.ts";
-import { SOFTMAX_KEY, SOFTMAX_WGSL, softmaxParams } from "../kernels/softmax.ts";
+import {
+  SAFE_SOFTMAX_KEY,
+  SAFE_SOFTMAX_WGSL,
+  SOFTMAX_KEY,
+  SOFTMAX_WGSL,
+  softmaxParams,
+} from "../kernels/softmax.ts";
 import {
   ATTENTION_STATS_STRIDE,
   attentionPvKey,
@@ -1543,7 +1549,10 @@ export class Session {
         await this.#buildRmsNorm(step, binds, out, builder);
         break;
       case "softmax":
-        await this.#buildSoftmax(step, binds, out, builder);
+        await this.#buildSoftmax(step, false, binds, out, builder);
+        break;
+      case "safeSoftmax":
+        await this.#buildSoftmax(step, true, binds, out, builder);
         break;
       case "attention":
         await this.#buildAttention(step, binds, out, builder);
@@ -2209,9 +2218,15 @@ export class Session {
     });
   }
 
-  /** softmax（最終次元、safe-softmax）。layer_norm と同じ 1 行 = 1 workgroup の形。 */
+  /**
+   * softmax（最終次元、safe-softmax）。layer_norm と同じ 1 行 = 1 workgroup の形。
+   *
+   * `safe` は safe_softmax 変種（行 max が −inf の行に 0 を書く — ADR 0044）。カーネルは
+   * 同じ生成関数から出た 2 本で、dispatch の形（バインド・workgroup 数）は同じ。
+   */
   async #buildSoftmax(
     step: NodePlan,
+    safe: boolean,
     binds: readonly BindingSource[],
     out: BindingSource,
     builder: StepRecipeBuilder,
@@ -2219,15 +2234,19 @@ export class Session {
     const shape = step.outputShape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
-    const { pipeline, layout } = await this.#state.cache.get(SOFTMAX_KEY, SOFTMAX_WGSL);
-    const params = this.#writeParams(softmaxParams(rows, dim), PARAMS_UNIFORM_USAGE);
+    const key = safe ? SAFE_SOFTMAX_KEY : SOFTMAX_KEY;
+    const { pipeline, layout } = await this.#state.cache.get(
+      key,
+      safe ? SAFE_SOFTMAX_WGSL : SOFTMAX_WGSL,
+    );
+    const params = this.#writeParams(softmaxParams(rows, dim, safe), PARAMS_UNIFORM_USAGE);
     const groups = gridStrideWorkgroups(
       rows,
       1,
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
     builder.dispatch({
-      key: SOFTMAX_KEY,
+      key,
       pipeline,
       layout,
       params,

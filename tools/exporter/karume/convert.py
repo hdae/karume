@@ -48,6 +48,7 @@ from karume.ir import (
     IrStorage,
     IrValue,
 )
+from karume.normalize import SAFE_SOFTMAX_META
 from karume.ops import EMITTABLE_OPS, STRIDED_RANK
 from karume.shapes import assert_graph_shapes
 
@@ -1591,10 +1592,14 @@ def _h_rms_norm(node: Node) -> Emitted:
 
 
 def _h_softmax(node: Node) -> Emitted:
-    """aten.softmax → softmax（attrs `dim`、**最終次元のみ**）。
+    """aten.softmax → softmax / safe_softmax（attrs `dim`、**最終次元のみ**）。
 
     MUST: 最終次元以外は落とす（gather と同じ絞り方 — 一般 dim は要求実測が出てから）。
     ランタイムは safe-softmax の行カーネル 1 本で、縮約軸が連続であることを前提にしている。
+
+    `normalize._drop_safe_softmax_guard` が SDPA の safe-softmax ガードを実値証明で落とせず
+    構成的に置換した softmax には {@link SAFE_SOFTMAX_META} の旗が立つ（ADR 0044）。旗を
+    ノードの meta で運ぶのは、FX グラフ層に "safe_softmax" という aten op が存在しないため。
     """
     extra = sorted(set(node.kwargs) - {"dtype"})
     _expect(not extra, node, f"kwargs {extra} を伴う softmax は未対応")
@@ -1604,7 +1609,8 @@ def _h_softmax(node: Node) -> Emitted:
     _expect(dim == rank - 1, node, f"最終次元以外（dim={dim} / rank={rank}）の softmax は未対応")
     dtype = node.args[2] if len(node.args) > 2 else node.kwargs.get("dtype")
     _expect(dtype is None, node, "dtype 指定付きの softmax は未対応")
-    return Emitted("softmax", 1, {"dim": dim})
+    op = "safe_softmax" if node.meta.get(SAFE_SOFTMAX_META) else "softmax"
+    return Emitted(op, 1, {"dim": dim})
 
 
 def _h_attention(node: Node) -> Emitted:

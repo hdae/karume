@@ -128,6 +128,7 @@ Current models and coverage:
 | `fused_attention`  | none         | attention (one node preserved from SDPA; B/H/M/N/D all distinct, last query row has logits around −190)    |
 | `embedding_lookup` | `T`          | embedding(padding_idx=0 is inactive in forward), sum                                                       |
 | `masked_scores`    | `T`          | masked_fill(−3.4e38 broadcast / 0 same-shape), softmax, cast, bitwise_not                                  |
+| `runtime_masked_attention` | none | safe_softmax, where(bool graph input → 0/−inf), add, bmm, mul, permute, reshape, expand — the ADR 0044 chain, with one query row fully masked |
 | `conv_block`       | `T`          | conv1d(kernel 3 / stride 1 / padding 1), permute                                                           |
 | `dilated_conv`     | `T`          | conv1d(depthwise g=C, dilation 1/3/9 / intermediate groups / residual), leaky_relu, add                    |
 | `conv_transpose`   | `T`          | conv_transpose1d(up 2 and up 8 / asymmetric channels), conv1d(no bias), tanh                               |
@@ -1400,8 +1401,9 @@ conformance table is the correct one.
   int32 — the explicit exception of ADR 0010). An initializer's semantic dtype is f32 or i32, and
   the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8}` and `i32 × i32` (the cross products
   fail loudly).
-- There are **52** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
-  `attention`, `gelu_tanh` was added for EmbeddingGemma, and `sin` for the Snake activation):
+- There are **53** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
+  `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake activation, and
+  `safe_softmax` for runtime attention masks — ADR 0044):
   - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
     (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
     trigonometric op: constant tables (RoPE) are still folded away at export time, so only the
@@ -1416,14 +1418,17 @@ conformance table is the correct one.
     `cat` (**the only variadic-arity op in IR v1**) / `pad` / `flip`
   - symbolic prefix slice (ADR 0010): `sym_prefix_slice`
   - fused ops (ADR 0012 / 0015 / 0017 / 0023): `linear` / `layer_norm` / **`rms_norm`** /
-    `softmax` / **`attention`** / `embedding` / `masked_fill` / `conv1d` / **`conv2d`** /
-    `conv_transpose1d`
-- **26 ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
+    `softmax` / **`safe_softmax`** / **`attention`** / `embedding` / `masked_fill` / `conv1d` /
+    **`conv2d`** / `conv_transpose1d`. `safe_softmax` is `softmax` plus “a row whose max is −inf
+    is written as all zeros”, i.e. the semantics of the safe-softmax guard that torch's SDPA
+    decomposition wraps around `softmax` (ADR 0044)
+- **27 ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
   `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `conv2d.{stride,padding,dilation,groups}` /
   `leaky_relu.negative_slope` / `ge_scalar.value` / `le_scalar.value` / `gt_scalar.value` /
   `cumsum.dim` / `cast.to` / `permute.dims` / `slice.{dim,start,end}` / `cat.dim` /
   `pad.{left,right}` / `flip.dim` / `sym_prefix_slice.{sym,slices}` /
-  `layer_norm.{normalized_shape,eps}` / `softmax.dim` / `embedding.padding_idx` /
+  `layer_norm.{normalized_shape,eps}` / `softmax.dim` / `safe_softmax.dim` /
+  `embedding.padding_idx` /
   `masked_fill.value` / `conv1d.{stride,padding,dilation,groups}` /
   `conv_transpose1d.{stride,padding}`). Every declared key is mandatory, and undeclared keys or
   out-of-range values fail loudly (ADR 0012). **Defaults are never filled in** — being able to omit
@@ -1497,7 +1502,7 @@ the attrs are placed here.
 | -------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | `_drop_metadata_asserts`   | remove `_assert_tensor_metadata`                               | always                                                                              |
 | `_fold_rms_norm`           | `x·rsqrt(mean(x²)+eps)·w` → `rms_norm`                         | weight is rank-1 of the last-dim length, eps a finite positive                      |
-| `_drop_safe_softmax_guard` | remove the safe-softmax guard of SDPA                          | **only when inactivity can be proven** (otherwise raises)                           |
+| `_drop_safe_softmax_guard` | remove the safe-softmax guard of SDPA, or rewrite it to `safe_softmax` | removed **only when inactivity can be proven**, otherwise rewritten (ADR 0044)       |
 | `_lower_unit_expand`       | `unsqueeze→expand→view` → expand of rank ≤ 3                   | rank > `STRIDED_RANK`, the replicated axes static                                   |
 | `_lower_split_unbind`      | width-1 slice+squeeze of a last-dim split → last-dim slice     | rank > `STRIDED_RANK`, the split contiguous and static                              |
 | `_lower_reshape_permute`   | rank ≥ 5 reshape→permute→reshape → a rank-4 transpose sequence | rank > `STRIDED_RANK`, endpoints of rank ≤ 4                                        |

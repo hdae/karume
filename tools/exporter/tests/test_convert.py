@@ -1146,6 +1146,55 @@ class TestFusedOps:
         with pytest.raises(NotImplementedError, match="最終次元以外"):
             convert_module(ByColumn(), (torch.randn(5, 4),))
 
+    def test_a_runtime_bool_mask_emits_safe_softmax(self, convert_module):
+        """ADR 0044 の連鎖: bool 入力 → `where(mask,0,-inf)` → add → **safe_softmax**。
+
+        マスクが実行時値だとガードの不活性証明が原理的に立たないので、正規化パスが
+        safe_softmax へ構成的に置換する。IR 境界のマスク dtype は bool（ADR 0009）。
+        """
+
+        class Masked(nn.Module):
+            def forward(self, q, k, v, mask):
+                return nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
+        graph, _ = convert_module(
+            Masked(),
+            (
+                torch.randn(1, 1, 4, 3),
+                torch.randn(1, 1, 4, 3),
+                torch.randn(1, 1, 4, 3),
+                torch.tensor([[[[True, True, False, False]]]]),
+            ),
+        )
+
+        node = only_node(graph, "safe_softmax")
+        assert node.attrs == {"dim": 3}
+        assert "softmax" not in node_ops(graph)
+        # 0 / -inf は f32 バイナリ initializer に畳まれ、where 1 本で加算型へ変換される
+        assert node_ops(graph).count("where") == 1
+        assert [spec.dtype for spec in graph.inputs] == ["f32", "f32", "f32", "bool"]
+
+    def test_a_static_finite_mask_still_emits_plain_softmax(self, convert_module):
+        """静的マスクの経路は不変（ガードは従来どおり除去され、safe_softmax にならない）。"""
+
+        class StaticMasked(nn.Module):
+            def __init__(self):
+                super().__init__()
+                bias = torch.zeros(1, 1, 4, 4)
+                bias[..., 0] = -1e4
+                self.register_buffer("bias", bias)
+
+            def forward(self, q, k, v):
+                return nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.bias)
+
+        graph, _ = convert_module(
+            StaticMasked(),
+            (torch.randn(1, 2, 4, 3), torch.randn(1, 2, 4, 3), torch.randn(1, 2, 4, 3)),
+        )
+
+        assert only_node(graph, "softmax").attrs == {"dim": 3}
+        assert "safe_softmax" not in node_ops(graph)
+
     def test_embedding_carries_the_inert_padding_idx(self, convert_module, dyn_t):
         """padding_idx は受理して attrs に載せるが forward には効かない（ADR 0012）。"""
 

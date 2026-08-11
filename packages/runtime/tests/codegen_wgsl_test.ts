@@ -115,7 +115,14 @@ import {
 import { WEIGHT_STORAGES } from "../src/kernels/weight-storage.ts";
 import { MASKED_FILL_KEY, MASKED_FILL_WGSL, maskedFillParams } from "../src/kernels/masked-fill.ts";
 import { matmulKey, matmulParams, matmulWgsl } from "../src/kernels/matmul.ts";
-import { SOFTMAX_KEY, SOFTMAX_WGSL, softmaxParams } from "../src/kernels/softmax.ts";
+import {
+  SAFE_SOFTMAX_KEY,
+  SAFE_SOFTMAX_NEG_INF_BITS,
+  SAFE_SOFTMAX_WGSL,
+  SOFTMAX_KEY,
+  SOFTMAX_WGSL,
+  softmaxParams,
+} from "../src/kernels/softmax.ts";
 import {
   ATTENTION_STATS_KEY,
   ATTENTION_STATS_REG_CACHE_MAX,
@@ -300,6 +307,9 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["adaln_norm.wgsl", ADALN_NORM_WGSL],
     ["rms_norm.wgsl", RMS_NORM_WGSL],
     ["softmax.wgsl", SOFTMAX_WGSL],
+    // safe_softmax 変種（ADR 0044）。**素の softmax と対で置く**のが条件で、両者は同じ
+    // 生成関数から出る（②③ の縮約順序が 1 語でもずれれば分解経路とのビット同一が壊れる）。
+    ["safe_softmax.wgsl", SAFE_SOFTMAX_WGSL],
     ["embedding.wgsl", EMBEDDING_WGSL],
     ["masked_fill.wgsl", MASKED_FILL_WGSL],
     ["conv1d.wgsl", CONV1D_WGSL],
@@ -475,6 +485,7 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     LAYER_NORM_KEY,
     RMS_NORM_KEY,
     SOFTMAX_KEY,
+    SAFE_SOFTMAX_KEY,
     ATTENTION_STATS_KEY,
     MASKED_FILL_KEY,
     CUMSUM_KEY,
@@ -2096,6 +2107,36 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
   assertEquals(SOFTMAX_WGSL.includes("acc = acc + exp(x[base + j] - amax);"), true);
   assertEquals(SOFTMAX_WGSL.includes("out[base + o] = exp(x[base + o] - amax) * inv;"), true);
 
+  // safe_softmax（ADR 0044）は softmax の ①②③ を**逐語で**共有し、足すのは identity の
+  // -inf 化・空行判定・書き出しの select だけ。ここが崩れると parity（分解ガード相当との
+  // ビット同一）が黙って壊れるので、共有断片を素の softmax 側と突き合わせて固定する。
+  for (
+    const shared of [
+      "      hi = max(hi, x[base + i]);",
+      "        scratch[lid] = max(scratch[lid], scratch[lid + stride]);",
+      "      acc = acc + exp(x[base + j] - amax);",
+      "        scratch[lid] = scratch[lid] + scratch[lid + stride2];",
+      "    let inv = 1.0 / scratch[0u];",
+    ]
+  ) {
+    assertEquals(SAFE_SOFTMAX_WGSL.includes(shared), true, `safe_softmax 側に無い断片: ${shared}`);
+    assertEquals(SOFTMAX_WGSL.includes(shared), true, `softmax 側に無い断片: ${shared}`);
+  }
+  // 変種が足す 3 点（-inf identity / 空行判定 / 書き出しの select）
+  assertEquals(SAFE_SOFTMAX_WGSL.includes("let neg_inf = bitcast<f32>(params.neg_inf);"), true);
+  assertEquals(SAFE_SOFTMAX_WGSL.includes("var hi = neg_inf;"), true);
+  assertEquals(SAFE_SOFTMAX_WGSL.includes("let empty = row_max == neg_inf;"), true);
+  assertEquals(
+    SAFE_SOFTMAX_WGSL.includes(
+      "out[base + o] = select(exp(x[base + o] - amax) * inv, 0.0, empty);",
+    ),
+    true,
+  );
+  // MUST: 素の softmax 側に空行の概念が 1 語も漏れていない（契約は ADR 0044 決定 3 のまま）
+  assertEquals(SOFTMAX_WGSL.includes("neg_inf"), false);
+  assertEquals(SOFTMAX_WGSL.includes("empty"), false);
+  assertNotEquals(SAFE_SOFTMAX_KEY, SOFTMAX_KEY);
+
   // embedding は範囲外添字を NaN で汚染する（gather と同じ裁定）
   assertEquals(EMBEDDING_WGSL.includes("if (pick < 0 || u32(pick) >= dims.vocab) {"), true);
   assertEquals(EMBEDDING_WGSL.includes("out[i] = bitcast<f32>(dims.oob);"), true);
@@ -2659,6 +2700,10 @@ Deno.test("融合カーネルの params は契約外の値を fail loudly にす
 
   assertEquals([...softmaxParams(4, 9)], [4, 9, 0, 0]);
   assertThrows(() => softmaxParams(4, 0), CodegenError);
+  // safe_softmax は 3 語目に -inf のビット列を載せる（WGSL に無限大リテラルが無いため）
+  assertEquals([...softmaxParams(4, 9, true)], [4, 9, SAFE_SOFTMAX_NEG_INF_BITS, 0]);
+  assertEquals(new Float32Array(softmaxParams(4, 9, true).buffer)[2], Number.NEGATIVE_INFINITY);
+  assertThrows(() => softmaxParams(4, 0, true), CodegenError);
 
   assertEquals([...embeddingParams(8, 2, 7)], [8, 2, 7, EMBEDDING_OOB_BITS]);
   assertThrows(() => embeddingParams(6, 0, 7), CodegenError);

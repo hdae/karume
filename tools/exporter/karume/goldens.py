@@ -404,6 +404,55 @@ class MaskedScores(nn.Module):
         return weights, hidden.masked_fill(gate.to(torch.bool), 0.0)
 
 
+class RuntimeMaskedAttention(nn.Module):
+    """実行時 bool マスク付き SDPA（ADR 0044）— ガードが `safe_softmax` として焼かれる形。
+
+    ADR 0044 の連鎖を丸ごと踏む: **bool のグラフ入力**（ADR 0009 — u32 0/1 で IO 可）→
+    torch の SDPA 分解が出す `where(mask, 0, -inf)` → スコアへ `add` → `softmax` +
+    safe-softmax ガード → `_drop_safe_softmax_guard` の実値証明が実行時入力で立たないので
+    `safe_softmax` 1 ノードへ構成的置換。
+
+    MUST: マスクに**全 False の行**を含める（`_masked_row_mask`）。その行は加算後に全要素
+    -inf になり、torch は 0 を返す — safe_softmax が空行を 0 で書けなければ 0/0 = NaN に
+    なって突合が赤くなる。ここが本 golden の存在理由。
+    NOTE: SDPA は保存しない（既定の `PRESERVED_OP_PREFIXES` のまま）。融合 attention の
+    mask 契約は静的 `[1,1,M,N]` の加算型 f32 だけで、実行時マスクは分解経路で実行する
+    （ADR 0044 決定 1）。
+    """
+
+    HEADS = 2
+    QUERIES = 4
+    DEPTH = 3
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        return nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=mask)
+
+
+def _runtime_masked_attention_inputs(generator: torch.Generator) -> tuple[torch.Tensor, ...]:
+    """`RuntimeMaskedAttention` の入力（q / k / v と **bool のマスク**）。
+
+    マスクは `[1,1,M,M]` で True = 残す。残す側を市松にして「全 True の行」だけにならない
+    ようにし、行 2 は**全 False**（torch のガードが発火する行）にする。
+    """
+    shape = RuntimeMaskedAttention
+    length = shape.QUERIES
+    qkv = tuple(
+        _uniform(generator, 1, shape.HEADS, length, shape.DEPTH, low=-1.0, high=1.0)
+        for _ in range(3)
+    )
+    rows = torch.arange(length).reshape(length, 1)
+    cols = torch.arange(length).reshape(1, length)
+    mask = ((rows + cols) % 3) != 2
+    mask[2] = False
+    return (*qkv, mask.reshape(1, 1, length, length))
+
+
 class ConvBlock(nn.Module):
     """conv1d の実測形（kernel 3 / stride 1 / padding 1 / groups 1 / dilation 1 / bias あり）。
 
@@ -956,6 +1005,12 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
             {1: _DYNAMIC_T},
             {1: _DYNAMIC_T},
         ),
+    ),
+    GoldenSpec(
+        name="runtime_masked_attention",
+        build=lambda _: RuntimeMaskedAttention(),
+        # mask は **bool のグラフ入力**（i64 経由にしない — ADR 0044 決定 1 の IR 境界）。
+        example_inputs=_runtime_masked_attention_inputs,
     ),
     GoldenSpec(
         name="conv_block",

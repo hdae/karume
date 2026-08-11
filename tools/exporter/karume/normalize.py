@@ -8,7 +8,8 @@ convert() の前段で呼ぶ。各パスは `(graph, stats) -> None` の関数�
 - `_fold_rms_norm`: `mul(weight, mul(x, rsqrt(mean(x²)+eps)))` → `rms_norm` 1 ノード
   （ADR 0016 / 0017。手書き RMSNorm は preserve では畳めない — FX パターンマッチが要る）。
 - `_drop_safe_softmax_guard`: SDPA の safe-softmax ガード（`eq(-inf)` / `any.dim` /
-  `full_like` / `where`）の除去。**不活性証明ができた時だけ**（ADR 0016）。
+  `full_like` / `where`）を畳む。不活性を証明できたら**除去**（ADR 0016）、できなければ
+  `safe_softmax` へ**構成的に置換**する（ADR 0044）。
 - `_additive_attn_mask`: 保存した SDPA の bool `attn_mask` を加算型 f32（0 / −inf）へ
   （ADR 0023 の mask 契約。torch 自身の bool → additive 変換と同じ op・同じ定数）。
 - `_lower_unit_expand`: GQA repeat_kv の `unsqueeze → expand → (clone) → view` を rank≤3 へ。
@@ -71,6 +72,14 @@ aten = torch.ops.aten
 GUARD_PROBE_LENGTHS = (5, 9)
 
 NEG_INF = float("-inf")
+
+#: safe-softmax ガードを構成的に置換した softmax ノードに立てる旗（ADR 0044）。
+#:
+#: FX グラフ層に "safe_softmax" という aten op は無いので、ガードを畳んだ事実は元の softmax
+#: ノードの meta で運び、`convert._h_softmax` が op 名の分岐に使う。**meta を消すパスを
+#: このパスより後ろに置かないこと** — 旗が落ちると素の softmax として焼かれ、全 -inf 行が
+#: 黙って NaN になる。
+SAFE_SOFTMAX_META = "karume_safe_softmax"
 
 #: 論理的な要素順を変えない reshape 系（rank 下げパスが自由に括り直してよい形）。
 _RESHAPE_OPS = (
@@ -465,9 +474,9 @@ def _assert_guard_inactive(src: Node, placeholders: _Placeholders) -> str:
     ② -inf が「加算マスク 1 本」からのみ入る → そのマスクを 2 つの記号長で実評価し、各行に
        有限要素が残ることを実測する（因果マスクの対角がこれで通る）
 
-    MUST: それ以外は fail loudly。ガードを消すと NaN が下流に流れる形を黙って受けない
-    （IR v1 は JSON 層で非有限値を拒否するので、ガードを op として受理する案は構造的に
-    噛み合わない — ADR 0016）。
+    MUST: それ以外は `NotImplementedError`。ガードを消すと NaN が下流に流れる形をここで
+    受理しない（呼び出し側が `safe_softmax` への構成的置換へ回す — ADR 0044。この関数が
+    返すのは**あくまで「消してよい」証明**で、判定を緩めてはならない）。
     """
     if not _can_be_neg_inf(src, placeholders):
         return "no-neg-inf"
@@ -495,7 +504,20 @@ def _assert_guard_inactive(src: Node, placeholders: _Placeholders) -> str:
 
 
 def _drop_safe_softmax_guard(graph: Graph, stats: Counter, *, placeholders: _Placeholders) -> None:
-    """SDPA の safe-softmax ガードを、不活性を証明したうえで取り除く（ADR 0016）。"""
+    """SDPA の safe-softmax ガードを畳む（ADR 0016 → ADR 0044 で 2 段化）。
+
+    ① 不活性を実値で証明できたらガードを**取り除く**（ADR 0016 の従来経路 — 既存資産の
+       出力バイト列はここで閉じたまま）。
+    ② 証明できない形（実行時マスク・スコア側の -inf 源・全 -inf 行が実在する静的マスク）は
+       fail loudly せず、ガード部分木ごと **safe_softmax 1 ノードへ書き換える**。
+       グラフ操作は ① と同じ「where → softmax」の置換で、違いは softmax に
+       {@link SAFE_SOFTMAX_META} を立てることだけ。
+
+    ② が正しいのは、スコアが有限（非有限入力は契約外）の下で「全要素 -inf ⇔ 行 max = -inf」
+    であり、safe_softmax の契約（行 max が -inf の行は全 0）が torch のガードと**厳密に**
+    同じ意味論だから（ADR 0044 決定 2）。① を先に試すのは、証明が立つ形で語彙を増やさない
+    ため（既存 IR との差分ゼロ）。
+    """
     for node in list(graph.nodes):
         if node.op != "call_function":
             continue
@@ -503,7 +525,12 @@ def _drop_safe_softmax_guard(graph: Graph, stats: Counter, *, placeholders: _Pla
         if parts is None:
             continue
         softmax, src = parts
-        stats[f"softmax_guard:{_assert_guard_inactive(src, placeholders)}"] += 1
+        try:
+            reason = _assert_guard_inactive(src, placeholders)
+        except NotImplementedError:
+            softmax.meta[SAFE_SOFTMAX_META] = True
+            reason = "rewritten-safe"
+        stats[f"softmax_guard:{reason}"] += 1
         _replace(graph, node, softmax)
 
 

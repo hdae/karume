@@ -13,7 +13,7 @@ from conftest import export_and_convert, node_ops, only_node
 from torch import nn
 
 from karume.convert import UnsupportedAtenOpsError, convert, curated_decompositions
-from karume.normalize import normalize_graph
+from karume.normalize import SAFE_SOFTMAX_META, normalize_graph
 from karume.ops import STRIDED_RANK
 
 aten = torch.ops.aten
@@ -483,7 +483,56 @@ class BufferMaskedAttention(nn.Module):
         return nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.bias)
 
 
+class RuntimeMaskedAttention(nn.Module):
+    """マスクが**実行時入力**の SDPA（ADR 0044 の主対象）。
+
+    実値が export 時に決まらないので不活性の証明が原理的に立たない。
+    """
+
+    def forward(self, q, k, v, mask):
+        return nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
+
+class NegInfScoreAttention(nn.Module):
+    """スコア**側**にも -inf 源がある形（証明不能のもう 1 系 — マスクの実評価では閉じない）。
+
+    マスクは行を空にしない有限形だが、q 側の buffer が -inf を含むので「-inf は加算マスク
+    1 本からのみ入る」という証明の前提が崩れる。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        bias = torch.zeros(1, 1, 4, 4)
+        bias[..., 0] = float("-inf")
+        self.register_buffer("bias", bias)
+        offset = torch.zeros(1, 1, 4, 3)
+        offset[..., 0, 0] = float("-inf")
+        self.register_buffer("offset", offset)
+
+    def forward(self, q, k, v):
+        return nn.functional.scaled_dot_product_attention(
+            q + self.offset, k, v, attn_mask=self.bias
+        )
+
+
 ATTENTION_ARGS = (torch.randn(1, 1, 4, 3), torch.randn(1, 1, 4, 3), torch.randn(1, 1, 4, 3))
+RUNTIME_MASK_ARGS = (*ATTENTION_ARGS, torch.tensor([[[[True, True, False, False]]]]))
+
+
+def _guard_ops_gone(decomposed) -> bool:
+    return not any(
+        node.target in (aten.any.dim, aten.full_like.default, aten.logical_not.default)
+        for node in decomposed.graph_module.graph.nodes
+        if node.op == "call_function"
+    )
+
+
+def _softmax_nodes(decomposed) -> list:
+    return [
+        node
+        for node in decomposed.graph_module.graph.nodes
+        if node.op == "call_function" and node.target is aten.softmax.int
+    ]
 
 
 class TestDropSafeSoftmaxGuard:
@@ -494,11 +543,9 @@ class TestDropSafeSoftmaxGuard:
         stats = normalize_graph(decomposed)
 
         assert stats["softmax_guard:masked-rows-nonempty"] == 1
-        assert not any(
-            node.target in (aten.any.dim, aten.full_like.default, aten.logical_not.default)
-            for node in decomposed.graph_module.graph.nodes
-            if node.op == "call_function"
-        )
+        assert _guard_ops_gone(decomposed)
+        # 証明できた形は**素の softmax のまま**（safe_softmax へ落ちない = 既存資産の不変）
+        assert not any(node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed))
 
     def test_without_the_pass_the_guard_ops_are_outside_the_vocabulary(self):
         args = (torch.randn(1, 2, 4, 3), torch.randn(1, 2, 4, 3), torch.randn(1, 2, 4, 3))
@@ -510,15 +557,32 @@ class TestDropSafeSoftmaxGuard:
         assert "aten.any.dim" in err.value.ops
         assert "aten.full_like.default" in err.value.ops
 
-    def test_an_all_masked_row_refuses_the_removal(self):
-        """不活性の証明が立たない形は fail loudly（消すと NaN が下流へ流れる）。"""
+    def test_a_runtime_mask_rewrites_the_guard_to_safe_softmax(self):
+        """実行時マスクは証明が原理的に立たない → safe_softmax へ構成的置換（ADR 0044）。"""
+        decomposed = decompose(RuntimeMaskedAttention(), RUNTIME_MASK_ARGS)
+
+        stats = normalize_graph(decomposed)
+
+        assert stats["softmax_guard:rewritten-safe"] == 1
+        assert _guard_ops_gone(decomposed)
+        assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
+
+    def test_an_all_masked_row_rewrites_the_guard_to_safe_softmax(self):
+        """全 -inf 行が実在する静的マスクも safe_softmax へ落ちる。
+
+        ADR 0016 ではここが fail loudly だった（ガードを消すと NaN が下流へ流れるため）。
+        ADR 0044 でガードと**厳密に同じ意味論**を持つ op ができたので、消すのではなく
+        置き換える — 消していないので NaN は流れない。
+        """
         decomposed = decompose(FullyMaskedAttention(), ATTENTION_ARGS)
 
-        with pytest.raises(NotImplementedError, match="不活性でない"):
-            normalize_graph(decomposed)
+        stats = normalize_graph(decomposed)
 
-    def test_an_all_masked_row_in_a_buffer_refuses_the_removal(self):
-        """-inf 源が **placeholder（buffer）** でも実値で見る。
+        assert stats["softmax_guard:rewritten-safe"] == 1
+        assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
+
+    def test_an_all_masked_row_in_a_buffer_rewrites_the_guard_to_safe_softmax(self):
+        """-inf 源が **placeholder（buffer）** でも実値で見て、証明できないので置換に回る。
 
         「placeholder は有限」と決め打つ判定はこの形を素通りさせ、ガードが消えて NaN が
         下流へ流れる（グラフ内 `torch.full` の形だけを見ていると空振りする穴）。
@@ -526,8 +590,19 @@ class TestDropSafeSoftmaxGuard:
         module = BufferMaskedAttention(torch.full((1, 1, 4, 4), float("-inf")))
         decomposed = decompose(module, ATTENTION_ARGS)
 
-        with pytest.raises(NotImplementedError, match="不活性でない"):
-            normalize_graph(decomposed)
+        stats = normalize_graph(decomposed)
+
+        assert stats["softmax_guard:rewritten-safe"] == 1
+        assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
+
+    def test_a_neg_inf_source_on_the_score_side_rewrites_to_safe_softmax(self):
+        """スコア側に -inf 源がある形（マスクの実評価では閉じないもう 1 系）も置換に回る。"""
+        decomposed = decompose(NegInfScoreAttention(), ATTENTION_ARGS)
+
+        stats = normalize_graph(decomposed)
+
+        assert stats["softmax_guard:rewritten-safe"] == 1
+        assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
 
     def test_a_finite_buffer_mask_still_lets_the_guard_go(self):
         """実値が有限な buffer マスクは従来どおり除去できる（判定が過剰にならないこと）。"""
@@ -536,6 +611,7 @@ class TestDropSafeSoftmaxGuard:
         stats = normalize_graph(decomposed)
 
         assert stats["softmax_guard:no-neg-inf"] == 1
+        assert not any(node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed))
 
 
 class IdentityPermute(nn.Module):

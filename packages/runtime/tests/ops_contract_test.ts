@@ -46,7 +46,7 @@ Deno.test("契約表が docs/ir-v1.md の op セットと一致する", () => {
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 52);
+  assertEquals(OP_CONTRACTS.size, 53);
   assertEquals([...OP_CONTRACTS.keys()].sort(), [
     "abs",
     "add",
@@ -90,6 +90,7 @@ Deno.test("契約表が docs/ir-v1.md の op セットと一致する", () => {
     "relu",
     "reshape",
     "rms_norm",
+    "safe_softmax",
     "sigmoid",
     "sin",
     "slice",
@@ -234,6 +235,7 @@ Deno.test("dtype の解禁は op ごとで、実測に出ない組み合わせ�
       "layer_norm",
       "rms_norm",
       "softmax",
+      "safe_softmax",
       "conv1d",
       "conv2d",
       "conv_transpose1d",
@@ -297,8 +299,8 @@ Deno.test("スロット別契約の出力はスロット 0 と同型で、混合
   assertEquals(resolve("bmm", ["f32", "f32"], "f32"), "f32");
 });
 
-// attrs を持つ op は 26 本。それ以外は attrs 空のままで、非空 attrs は fail loudly。
-Deno.test("attrs を持つ op は契約表が列挙する 26 本だけで、他は attrs 空・単一出力", () => {
+// attrs を持つ op は 27 本。それ以外は attrs 空のままで、非空 attrs は fail loudly。
+Deno.test("attrs を持つ op は契約表が列挙する 27 本だけで、他は attrs 空・単一出力", () => {
   const withAttrs = [...OP_CONTRACTS]
     .filter(([, contract]) => attrKeysOf(contract).length > 0)
     .map(([name]) => name)
@@ -326,6 +328,7 @@ Deno.test("attrs を持つ op は契約表が列挙する 26 本だけで、他�
     "pad",
     "permute",
     "rms_norm",
+    "safe_softmax",
     "slice",
     "softmax",
     "sum",
@@ -734,6 +737,7 @@ Deno.test("融合 op の attrs スキーマが値域まで検査する", () => {
     "normalized_shape",
   ]);
   assertEquals(attrKeysOf(resolveOpContract("softmax")), ["dim"]);
+  assertEquals(attrKeysOf(resolveOpContract("safe_softmax")), ["dim"]);
   assertEquals(attrKeysOf(resolveOpContract("embedding")), ["padding_idx"]);
   assertEquals(attrKeysOf(resolveOpContract("masked_fill")), ["value"]);
   assertEquals([...attrKeysOf(resolveOpContract("conv1d"))].sort(), [
@@ -791,6 +795,11 @@ Deno.test("融合 op の attrs スキーマが値域まで検査する", () => {
   reject("softmax", ["x"], { dim: -1 });
   reject("softmax", ["x"], { dim: 1.5 });
   reject("softmax", ["x"], {});
+
+  // safe_softmax — attrs は softmax と同一（ADR 0044。kind だけが違う）
+  assertEquals(accept("safe_softmax", ["x"], { dim: 0 }).kind, "safeSoftmax");
+  reject("safe_softmax", ["x"], { dim: -1 });
+  reject("safe_softmax", ["x"], {});
 
   // embedding — padding_idx は受理して不活性（-1 が torch の「未指定」番兵）
   assertEquals(accept("embedding", ["w", "i"], { padding_idx: -1 }).kind, "embedding");
@@ -923,6 +932,11 @@ Deno.test("融合 op の出力 shape が契約どおりに決まる", () => {
   assertThrows(() => shape("softmax", [[2, 3, 4]], { dim: 1 }), OpContractError);
   assertThrows(() => shape("softmax", [[2, 3, 4]], { dim: 3 }), OpContractError);
   assertThrows(() => shape("softmax", [[3, 0]], { dim: 1 }), OpContractError);
+
+  // safe_softmax — shape 規則は softmax と同一
+  assertEquals(shape("safe_softmax", [[4, 9]], { dim: 1 }), [4, 9]);
+  assertThrows(() => shape("safe_softmax", [[2, 3, 4]], { dim: 1 }), OpContractError);
+  assertThrows(() => shape("safe_softmax", [[3, 0]], { dim: 1 }), OpContractError);
 
   // embedding — 出力は index の形に hidden を足したもの
   assertEquals(shape("embedding", [[7, 4], [2, 3]]), [2, 3, 4]);

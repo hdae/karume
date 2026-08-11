@@ -176,6 +176,7 @@ export const SYM_PREFIX_SLICE_OP = "sym_prefix_slice";
  *   実測 16 本すべてが bias 付き（recon §5）。bias 無し形は実測が出るまで fail loudly。
  * - `layer_norm` — attrs `normalized_shape` / `eps`。affine（weight / bias）も常時あり。
  * - `softmax` — attrs `dim`。**最終次元のみ**受理（実測は −1 のみ — gather と同じ絞り方）。
+ * - `safe_softmax` — `softmax` と同一契約 + 「行 max が −inf の行は全 0」（ADR 0044）。
  * - `embedding` — `weight f32[V,H]` を `index i32[…]` で行 gather。attrs `padding_idx`。
  * - `masked_fill` — attrs `value`（f32 スカラ）。mask は bool で**右詰め broadcast**。
  * - `conv1d` — attrs `stride` / `padding` / `dilation` / `groups`（ADR 0015 で後 2 者を追加）。
@@ -213,6 +214,21 @@ export const LAYER_NORM_OP = "layer_norm";
 export const ATTENTION_OP = "attention";
 export const RMS_NORM_OP = "rms_norm";
 export const SOFTMAX_OP = "softmax";
+/**
+ * `softmax` + 「**行 max が −inf の行は全 0 を書く**」（ADR 0044）。契約・attrs・shape 規則は
+ * `softmax` と同一で、違いはこの 1 行だけ。
+ *
+ * 出所は torch の SDPA 分解が `softmax` に被せる safe-softmax ガード
+ * （`where(¬any(¬eq(src,−inf)), 0, softmax(src))`）で、マスクが実行時値だと「ガードが
+ * 発火しない」証明が原理的に立たない（エクスポータの `_drop_safe_softmax_guard`）。
+ * スコアが有限なら「全要素 −inf ⇔ 行 max = −inf」なので、この op はガードと**厳密に**
+ * 同じ意味論を持つ。
+ *
+ * MUST: `softmax` と別 op のまま保つ。素の `softmax` に空行の分岐を足すと、全 −inf 行を
+ * 契約違反として扱う既存の絞り（ADR 0044 決定 3 — 融合 attention も同じ絞り）が消え、
+ * 「NaN で表に出るはずの契約違反」が黙って 0 になる。
+ */
+export const SAFE_SOFTMAX_OP = "safe_softmax";
 export const EMBEDDING_OP = "embedding";
 export const MASKED_FILL_OP = "masked_fill";
 export const CONV1D_OP = "conv1d";
@@ -277,6 +293,7 @@ export type OpKind =
   | "layerNorm"
   | "rmsNorm"
   | "softmax"
+  | "safeSoftmax"
   | "attention"
   | "embedding"
   | "maskedFill"
@@ -422,6 +439,13 @@ export type OpContract =
   | (ContractBase & {
     readonly kind: "softmax";
     readonly name: typeof SOFTMAX_OP;
+    readonly arity: 1;
+  })
+  // softmax と同一契約の別 op（空行 → 全 0。ADR 0044）。kind を分けるのは、executor / CPU
+  // 参照の網羅 switch に「どちらの意味論で実行するか」を必ず宣言させるため。
+  | (ContractBase & {
+    readonly kind: "safeSoftmax";
+    readonly name: typeof SAFE_SOFTMAX_OP;
     readonly arity: 1;
   })
   // 融合 attention（ADR 0023）。arity 3〜4（4 本目は省略可能な加算 mask）・attrs `scale`
@@ -1330,6 +1354,14 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     name: SOFTMAX_OP,
     arity: 1,
   }],
+  // ADR 0044。attrs スキーマは softmax と**同じ 1 本を共有**する（複製すると片方だけ
+  // 絞りが緩む形が作れる）。
+  [SAFE_SOFTMAX_OP, {
+    ...contract(SAFE_SOFTMAX_OP, SOFTMAX_ATTRS),
+    kind: "safeSoftmax",
+    name: SAFE_SOFTMAX_OP,
+    arity: 1,
+  }],
   // 融合 attention（ADR 0023）。q / k / v と省略可能な mask の 4 本とも f32 で同型
   // （uniform 契約）。mask は加算型なので値の側と同じ dtype で、bool は受理しない。
   [ATTENTION_OP, {
@@ -2077,19 +2109,21 @@ export const computeOutputShape = (
       };
       return [x[0], channelsOut, spatial(0, "H"), spatial(1, "W")];
     }
-    case "softmax": {
+    // safe_softmax は shape 規則も attrs も softmax と同一（違いは空行の値だけ — ADR 0044）。
+    case "softmax":
+    case "safeSoftmax": {
       const shape = inputShapes[0];
       const dim = softmaxDim(context.attrs ?? {}, where);
       // MUST: 一般 dim を「そのうち実装する」として受理しない。最終次元以外は行カーネルの
       // 前提（縮約軸が連続）が崩れ、通せば黙って別の軸を畳む。
       if (shape.length < 1 || dim !== shape.length - 1) {
         throw new OpContractError(
-          `${where}: softmax は最終次元のみ（attrs.dim=${dim} / 入力 [${shape.join(",")}]）`,
+          `${where}: ${found.name} は最終次元のみ（attrs.dim=${dim} / 入力 [${shape.join(",")}]）`,
         );
       }
       if (shape[shape.length - 1] === 0) {
         // 空軸の softmax は amax の identity が定義できない（行 reduce と同じ理由）。
-        throw new OpContractError(`${where}: softmax は長さ 0 の軸を縮約できない`);
+        throw new OpContractError(`${where}: ${found.name} は長さ 0 の軸を縮約できない`);
       }
       return [...shape];
     }

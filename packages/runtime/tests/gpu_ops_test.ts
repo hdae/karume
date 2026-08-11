@@ -888,9 +888,20 @@ const NEG_F32_MAX = -3.4028234663852886e+38;
 const HUGE_NEGATIVE = (i: number): number => -200 + (i % 7) * 3;
 /** 0/1 の bool マスク（3 要素に 1 つ真）。 */
 const MASKED = (i: number): number => (i % 3 === 0 ? 1 : 0);
+/**
+ * safe_softmax 用の `[3,5]` スコア（ADR 0044）。**行 1 が全 -inf**（torch のガードが発火する
+ * 行）で、行 0 / 2 は -inf を混ぜた通常行。加算マスク `where(mask, 0, -inf)` を通した後の
+ * スコアがちょうどこの形になる。
+ */
+const EMPTY_ROW_SCORES = (i: number): number => {
+  const row = Math.floor(i / 5);
+  if (row === 1) return -Infinity;
+  return i % 4 === 3 ? -Infinity : SIGNED(i);
+};
 
 /**
- * 融合 op 9 本（ADR 0012 / recon §5 + ADR 0015 の conv_transpose1d + ADR 0017 の rms_norm / conv2d）。
+ * 融合 op 10 本（ADR 0012 / recon §5 + ADR 0015 の conv_transpose1d + ADR 0017 の rms_norm /
+ * conv2d + ADR 0044 の safe_softmax）。
  *
  * MUST: 各 op に「軸の長さが全て違う」ケースを 1 本持つ。linear の m/n/k、conv1d の
  * B/Cin/Cout/L/K は積で添字を組むので、2 軸が同じ長さの形では取り違えが数値に出ない。
@@ -1018,6 +1029,42 @@ const FUSED_CASES: readonly OpCase[] = [
     inputs: [fill([2, 3, 300], SIGNED)],
     outShape: [2, 3, 300],
     attrs: { dim: 2 },
+  },
+  {
+    // safe_softmax（ADR 0044）— -inf を含まない入力では素の softmax と同じ値になる。
+    name: "safe_softmax 最終次元 [4,9]（-inf 無し）",
+    op: "safe_softmax",
+    inputs: [fill([4, 9], SIGNED)],
+    outShape: [4, 9],
+    attrs: { dim: 1 },
+  },
+  {
+    // MUST: **全要素 -inf の行**を含める。この op の存在理由そのもので、素の softmax なら
+    // 0/0 = NaN になる（allclose は NaN を不合格にするので、外れれば必ず赤くなる）。
+    // 行 1 が全 -inf / 行 0 と 2 は一部だけ -inf。
+    name: "safe_softmax 全 -inf 行 [3,5]",
+    op: "safe_softmax",
+    inputs: [fill([3, 5], EMPTY_ROW_SCORES)],
+    outShape: [3, 5],
+    attrs: { dim: 1 },
+  },
+  {
+    // 行長が workgroup サイズ（256）を超える形でも空行判定が効く（① の identity は
+    // grid-stride の走査とツリー縮約の両方を通る）。行 1 が全 -inf。
+    name: "safe_softmax 行長 300 rank3 [2,3,300]（全 -inf 行つき）",
+    op: "safe_softmax",
+    inputs: [fill([2, 3, 300], (i) => (Math.floor(i / 300) === 1 ? -Infinity : SIGNED(i)))],
+    outShape: [2, 3, 300],
+    attrs: { dim: 2 },
+  },
+  {
+    // masked_fill の埋め値（-F32_MAX）は**有限**なので空行ではない — 素の softmax と同じ
+    // 一様分布になる（-inf と -F32_MAX を取り違えた実装がここで落ちる）。
+    name: "safe_softmax 全 -F32_MAX 行 [2,6]（空行ではない）",
+    op: "safe_softmax",
+    inputs: [fill([2, 6], () => NEG_F32_MAX)],
+    outShape: [2, 6],
+    attrs: { dim: 1 },
   },
   {
     // 実測は weight f32[22012,1024] × index i32[1,T]。V/H/添字数を全て違う長さにした縮小形
@@ -1526,7 +1573,7 @@ Deno.test({
 
 Deno.test({
   name:
-    "融合 op 9 種（linear / layer_norm / rms_norm / softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d）が CPU 参照と一致する（実 GPU）",
+    "融合 op 10 種（linear / layer_norm / rms_norm / softmax / safe_softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(FUSED_CASES),
 });

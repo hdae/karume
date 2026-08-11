@@ -1,5 +1,5 @@
 /**
- * softmax（最終次元、f32）の固定カーネル。
+ * softmax / safe_softmax（最終次元、f32）の固定カーネル。
  *
  * ## safe-softmax（MUST）
  *
@@ -22,6 +22,28 @@
  * workgroup 内で一様である必要がある）。
  * NOTE: WGSL の `max` は NaN 伝播を保証しない（reduce.ts と同じ既知の乖離）。入力に NaN を
  * 含む行の結果は未規定で、M1 の対象は有限値のみ。
+ *
+ * ## safe_softmax 変種（ADR 0044）
+ *
+ * 契約は softmax と同一 + 「**行 max が −inf の行は全 0 を書く**」（torch の SDPA 分解が
+ * 出す safe-softmax ガードと同じ意味論）。**同じ生成関数から両方を出す** MUST — ②③ の
+ * 縮約順序・丸め位置が softmax と 1 語でもずれると、分解経路とのビット同一（parity テスト）
+ * が壊れる。変種が足すのは次の 3 点だけ:
+ *
+ * 1. ① の identity を **−inf** にする（素の softmax は −F32_MAX）。有限要素を 1 つでも持つ
+ *    行では max がその要素に支配されるので amax は両者で**同じビット列**になり、違いが出る
+ *    のは「全要素 −inf」の行だけ — そこだけ amax が −inf になって判別できる。
+ * 2. `empty`（行 max が −inf）なら ② の減算項を 0 に差し替える。`−inf − (−inf) = NaN` を
+ *    そもそも作らないための置換で、非 empty 行では `select` が元の値をそのまま返す。
+ * 3. ③ の書き出しを `select(…, 0.0, empty)` で包む。empty 行の ② は分母 0（0 除算の結果は
+ *    WGSL では不定値）なので、**値を捨てる側で** 0 を確定させる。
+ *
+ * MUST: 分岐（`if`）で empty 行を早期に書き出さない。`amax` は workgroup メモリ由来の値で、
+ * その条件下に `workgroupBarrier` を置くと WGSL の一様性解析に掛かる。`select` なら barrier
+ * の位置が両経路で同じまま保たれる。
+ * MUST: −inf のビット列は params で運ぶ（gather / embedding の NaN と同じ理由 — 定数式の
+ * `bitcast<f32>(0xff800000u)` を「const-expression が inf」としてシェーダ生成エラーにする
+ * 実装がありうる）。
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -30,14 +52,27 @@ export const SOFTMAX_WORKGROUP_SIZE = 256;
 
 export const SOFTMAX_KEY = `softmax:v1:f32:lastdim:safe:wg${SOFTMAX_WORKGROUP_SIZE}`;
 
+export const SAFE_SOFTMAX_KEY =
+  `safe_softmax:v1:f32:lastdim:safe:emptyrow0:wg${SOFTMAX_WORKGROUP_SIZE}`;
+
 /** f32 の最大有限値。WGSL に無限大リテラルが無いため amax の identity にこれを使う。 */
 const F32_MAX = "3.402823466e38";
 
-export const SOFTMAX_WGSL: string = `// karume softmax (last dim, f32, safe-softmax: exp(x - amax))
+/** −inf の f32 ビット列（safe_softmax の params 3 語目）。 */
+export const SAFE_SOFTMAX_NEG_INF_BITS = 0xff800000;
+
+/**
+ * softmax（`safe` で safe_softmax 変種）の WGSL。正本はこの 1 本で、変種が触るのは
+ * 上の doc が列挙した 3 点だけ（共通部を 2 本に複製しない MUST）。
+ */
+const softmaxWgsl = (safe: boolean): string =>
+  `// karume ${safe ? "safe_softmax" : "softmax"} (last dim, f32, safe-softmax: exp(x - amax)${
+    safe ? ", 行 max が -inf の行は全 0" : ""
+  })
 struct Params {
   rows: u32,
   dim: u32,
-}
+${safe ? "  neg_inf: u32,\n" : ""}}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
@@ -52,12 +87,12 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
-  var row = wid.x;
+${safe ? "  let neg_inf = bitcast<f32>(params.neg_inf);\n" : ""}  var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の最大値（safe-softmax の減算項）
-    var hi = -${F32_MAX};
+    // ① 行の最大値（safe-softmax の減算項${safe ? " — identity は -inf" : ""}）
+    var hi = ${safe ? "neg_inf" : `-${F32_MAX}`};
     var i = lid;
     while (i < dim) {
       hi = max(hi, x[base + i]);
@@ -73,8 +108,15 @@ fn main(
       workgroupBarrier();
       stride = stride / 2u;
     }
-    let amax = scratch[0u];
-    // scratch の読み終わりを揃えてから ② で上書きする
+${
+    safe
+      ? `    let row_max = scratch[0u];
+    // 全要素 -inf の行（torch のガードが 0 を返す行）— 減算項を 0 にして NaN を作らない
+    let empty = row_max == neg_inf;
+    let amax = select(row_max, 0.0, empty);
+`
+      : "    let amax = scratch[0u];\n"
+  }    // scratch の読み終わりを揃えてから ② で上書きする
     workgroupBarrier();
 
     // ② Σ exp(x - amax)（最大要素が exp(0) = 1 を出すので分母は必ず 1 以上）
@@ -101,7 +143,9 @@ fn main(
     // ③ 書き出し（exp は ② と同じ引数 — 同じ値が返るので決定的）
     var o = lid;
     while (o < dim) {
-      out[base + o] = exp(x[base + o] - amax) * inv;
+      out[base + o] = ${
+    safe ? "select(exp(x[base + o] - amax) * inv, 0.0, empty)" : "exp(x[base + o] - amax) * inv"
+  };
       o = o + ${SOFTMAX_WORKGROUP_SIZE}u;
     }
     row = row + nwg.x;
@@ -109,16 +153,28 @@ fn main(
 }
 `;
 
+export const SOFTMAX_WGSL: string = softmaxWgsl(false);
+
+export const SAFE_SOFTMAX_WGSL: string = softmaxWgsl(true);
+
 /**
  * uniform の Params。WGSL の uniform アドレス空間では struct の整列が 16 バイトになるため、
  * 2 語ぶんの内容でも 16 バイト確保する MUST。
+ *
+ * `safe` のとき 3 語目に −inf のビット列を載せる（safe_softmax は WGSL 側で `bitcast` して
+ * ① の identity と空行判定に使う）。
  */
-export const softmaxParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
+export const softmaxParams = (
+  rows: number,
+  dim: number,
+  safe = false,
+): Uint32Array<ArrayBuffer> => {
   if (!Number.isSafeInteger(rows) || rows < 0 || !Number.isSafeInteger(dim) || dim < 1) {
     throw new CodegenError(`softmax params: rows は非負整数 / dim は正整数（${rows}, ${dim}）`);
   }
   const params = new Uint32Array(4);
   params[0] = rows;
   params[1] = dim;
+  if (safe) params[2] = SAFE_SOFTMAX_NEG_INF_BITS;
   return params;
 };
