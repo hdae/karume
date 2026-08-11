@@ -111,6 +111,40 @@ M1-P2 以降に解消する。
 - **`scatter_add` を `atomic<f32>` の CAS ループで安易に入れない** — 加算順が非決定になり
   「同一入力 → 同一出力」を静かに壊す。
 
+## op 追加の判定手順（第 0〜3 層）
+
+DECIDED: [0043](decisions/0043-op-addition-layers.md)。未対応 op が `UnsupportedAtenOpsError`
+に出たら、上から順に**安い層**へ落とす。3 層とも実行の実体はカーネル — 分ける軸は
+「分子の名前がどこに書かれるか」（IR ファイル = 第 2 層 / ランタイム内部のみ = 第 3 層）。
+
+| 層                                    | 置き場                                                         | コミットメント                                                            |
+| ------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **第 0 層 — export 時消滅**           | `FOLDABLE_OPS` 定数畳み込み / normalize・convert の分解パス    | なし（ランタイムに届かない）                                              |
+| **第 1 層 — 必須プリミティブ**        | IR 語彙（Core ATen 内のみ・上限 160 → 実装対象 120）           | 恒久・ただし有限収束（天井は増えない）                                    |
+| **第 2 層 — 推奨カーネル（IR 可視）** | IR 語彙 + 専用カーネル（分解禁止 12 と attr 変種の別 op 化）   | **恒久の公開コミットメント**（全資産が全将来ランタイムに要求）・ADR 必須  |
+| **第 3 層 — 推奨融合（実行時のみ）**  | `fusion.ts` の隣接 matcher（silu / rope / upsample2x / adaln） | ゼロ（撤回自由）。exact-match が外れると黙って遅くなる — **観測点が必須** |
+
+判定（上から順に）:
+
+1. **値が export 時定数か**（依存の葉が arange / lifted 定数のみ）→ 第 0 層 FOLDABLE。
+   条件: `_check_prefix_commutes` の 2 点評価を通ること・initializer にできるのは f32/i32 のみ。
+2. **既存プリミティブの合成で厳密同値か** → 第 0 層の分解パス。**torch 突合ゲート必須**
+   （上の反例集のとおり、丸め・NaN・境界で壊れる分解が多い）。
+3. 合成が数値的に不可能（log1p 型）or 容量・性能で非成立（batch_norm 537MB 型）で、
+   **Core ATen 内** → 第 1 層。契約 1 セット（`OP_CONTRACTS` + `karume/ops.py` +
+   `shapes.py` + fixtures/op-contracts.json + CPU 参照 + golden COVERAGE）。
+4. **Core ATen 外・attr 変種・融合維持が必要** → 第 2 層（**小 ADR とセット**）。入場条件は
+   いずれか: ①分解形からの実行時復元が脆い / 意味情報が落ちる（attention の有限マスク値・
+   rms_norm の weight 長）②中間実体化が容量・帯域で受け入れ不能 ③再出現率が恒久コミットを
+   正当化する ④attrs 空契約（ADR 0012）維持のため attr 変種を別 op に分ける。
+5. **正しく動く分解形が既にあり、性能だけ回収したい** → 第 3 層の融合ルール。観測点
+   （`lastRunFusions` / assets_fusion_counts_test）を持つことが入場条件（ADR 0040）。
+
+「やらない方がよいこと」（下節）は全層に優先する。
+
+NOTE: 2026-08-11 `gelu_tanh` を第 2 層に追加（ADR 0043 の初適用 — Gemma 系の
+`approximate="tanh"`。EmbeddingGemma / Gemma 4 E2B の config で使用を確認）。
+
 ## 実装順序（プロトタイプ裁定のまま引き継ぎ — Karume での再裁定は ADR にて）
 
 1. 行 reduce 族（amax/amin/max/min/argmax/argmin）
