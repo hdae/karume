@@ -1069,14 +1069,40 @@ class TestFusedOps:
         assert torch.equal(weight, torch.ones(4))
         assert torch.equal(bias, torch.zeros(4))
 
-    def test_a_half_affine_layer_norm_is_rejected(self, convert_module):
-        """weight だけ / bias だけの形は落とす（合成は末尾へ足すので滑り込みが起きる）。
+    def test_a_weight_only_layer_norm_gets_a_zero_bias(self, convert_module):
+        """weight だけの layer_norm は zeros 合成でアリティ 3 になる（`norm_bias=false` の形）。
+
+        weight が**本物のスロットに残る**ことまで見る（合成が weight 側へ滑り込むと
+        「学習済み weight を捨てて ones で正規化」という沈黙誤値になり、長さは合うので
+        shape 検査では捕まらない）。
+        """
+
+        class WeightOnly(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(4))
+
+            def forward(self, x):
+                return nn.functional.layer_norm(x, [4], self.weight, None)
+
+        module = WeightOnly()
+        graph, tensors = convert_module(module, (torch.randn(5, 4),))
+
+        node = only_node(graph, "layer_norm")
+        assert len(node.ins) == 3
+        weight = tensors[graph.initializers[node.ins[1]].tensor]
+        bias = tensors[graph.initializers[node.ins[2]].tensor]
+        assert torch.equal(weight, module.weight.detach())
+        assert torch.equal(bias, torch.zeros(4))
+
+    def test_a_bias_only_layer_norm_is_rejected(self, convert_module):
+        """bias だけの形は落とす（合成は末尾へ足すので滑り込みが起きる）。
 
         `weight=None, bias=あり` を通すと bias が weight のスロットへ入る — 長さが同じ
         なので shape 検査も素通りする沈黙誤値になる。
         """
 
-        class HalfAffine(nn.Module):
+        class BiasOnly(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.bias = nn.Parameter(torch.randn(4))
@@ -1084,8 +1110,8 @@ class TestFusedOps:
             def forward(self, x):
                 return nn.functional.layer_norm(x, [4], None, self.bias)
 
-        with pytest.raises(NotImplementedError, match="affine が片方だけ"):
-            convert_module(HalfAffine(), (torch.randn(5, 4),))
+        with pytest.raises(NotImplementedError, match="bias だけ"):
+            convert_module(BiasOnly(), (torch.randn(5, 4),))
 
     def test_multi_axis_layer_norm_is_rejected(self, convert_module):
         """実測は [H] のみ（行カーネルは最終次元の連続並びが前提）。"""

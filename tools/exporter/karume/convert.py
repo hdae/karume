@@ -224,6 +224,10 @@ FOLDABLE_OPS = {
     # 行 t / 列 j の値が T に依らないため prefix と可換（2 点評価も通ることを実測）。
     aten.bitwise_or.Tensor,
     aten.gt.Tensor,
+    # 双方向（非因果）マスクの生成（transformers の `bidirectional_mask_function` は
+    # `q_idx >= 0` を全域 true の種として使う）。比較 1 本で、行 t / 列 j の値が T に
+    # 依らないため prefix と可換。
+    aten.ge.Scalar,
 }
 
 #: 分解を止める（融合を保つ）高位 op = **ADR 0007 の 9 op**（ADR 0012 で gelu のみから拡張）。
@@ -1486,8 +1490,9 @@ def _h_layer_norm(node: Node) -> Emitted:
 
     MUST: 保存しないと native_layer_norm（3 出力）+ getitem になり、IR v1 の単一出力前提と
     衝突する（recon §5）。
-    MUST: 正規化軸は最終次元 1 本のみ・affine（weight / bias）ありのみ。実測 7 本が全て
-    `[1024]` + affine で、他の形は行カーネルの前提が崩れる。
+    MUST: 正規化軸は最終次元 1 本のみ。affine は「両方あり」「両方なし」「weight だけ」の
+    3 形を受け、足りないスロットは ones/zeros 合成で埋める（ADR 0016）。他の形は行カーネルの
+    前提が崩れる。
     """
     _expect(not node.kwargs, node, f"kwargs {sorted(node.kwargs)} を伴う layer_norm は未対応")
     src = node.args[0].meta["val"]
@@ -1516,13 +1521,17 @@ def _h_layer_norm(node: Node) -> Emitted:
     attrs = {"normalized_shape": dims, "eps": eps}
     if isinstance(weight, Node) and isinstance(bias, Node):
         return Emitted("layer_norm", 3, attrs)
-    # MUST: affine が**片方だけ**の形は落とす。合成は「末尾へ順に足す」ので、weight が
-    # 無く bias だけある形を通すと bias が weight のスロットへ滑り込む（要素数は合うので
-    # shape 検査も素通りする沈黙誤値）。実測（DiT の 85 本）は両方 None。
+    if isinstance(weight, Node):
+        # ADR 0016: bias だけ zeros 合成でアリティ 3 へ正規化する（`+0` の厳密恒等）。合成は
+        # 末尾へ足すので weight は本物のスロットに残る（ModernBERT の `norm_bias=false`）。
+        return Emitted("layer_norm", 3, attrs, synth_consts=((0.0, dims[0]),))
+    # MUST: **bias だけ**の形は落とす。合成は「末尾へ順に足す」ので、weight が無く bias だけ
+    # ある形を通すと bias が weight のスロットへ滑り込む（要素数は合うので shape 検査も
+    # 素通りする沈黙誤値）。逆向き（weight だけ）にこの危険は無い。
     _expect(
-        weight is None and bias is None,
+        bias is None,
         node,
-        f"affine が片方だけ（weight={weight!r} / bias={bias!r}）の layer_norm は未対応",
+        f"weight 無しで bias だけ（bias={bias!r}）の layer_norm は未対応",
     )
     # ADR 0016: ones/zeros 合成でアリティ 3 へ正規化する（`×1 +0` の厳密恒等）。
     return Emitted("layer_norm", 3, attrs, synth_consts=((1.0, dims[0]), (0.0, dims[0])))
