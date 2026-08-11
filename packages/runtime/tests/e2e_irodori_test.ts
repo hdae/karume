@@ -13,7 +13,9 @@
 //
 // - `backbone`     — 同梱 ModernBERT-ja-310m（25 層）。`[1,T]` ids → `[1,T,768]`
 // - `text-proj`    — text 側 projector。`[1,T,768]` → `[1,T,512]`
-// - `caption-proj` — caption 側 projector（同形・別重み）
+// - `caption-proj` — caption 側 projector（同形・別重み）。**出力 2 本** — 第 2 出力は
+//   `caption_norm` を掛けた系列で、`duration` の `caption_vec`（masked mean）をホストが
+//   採るためだけに足してある（第 1 出力は `text-proj` と同じ生の projector 出力）
 // - `speaker`      — 参照 latent エンコーダ（8 層）+ `speaker_norm`。`[1,S,128]` → `[1,S,768]`
 // - `duration`     — `text_norm` + duration predictor。`[1,T,512]` ほか 4 本 → `[1]`
 // - `dit`          — DiT 1 step（12 層・G4 畳み込み形）。6 本 → `[1,S,32]`
@@ -127,6 +129,33 @@ const TEXT_PROJ_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 1e-6 };
 const CAPTION_PROJ_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 1e-6 };
 
 /**
+ * caption 側 projector の**第 2 出力**（`caption_norm` = RMSNorm 512 を掛けた系列）の許容誤差。
+ *
+ * 実測（`atol=rtol=0`、6 ケース × 出力 1 本 `[1,T,512]`）:
+ *
+ * | ケース       | T   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | ------------ | --- | ------- | ------- | ------------ | ------------------ |
+ * | text-short   | 7   | 4.77e-6 | 1.16e-3 | 4.37         | 3.87e-4            |
+ * | text-formal  | 13  | 2.62e-6 | 3.39e-3 | 3.68         | 1.53e-4            |
+ * | caption-ja   | 22  | 3.34e-6 | 4.21e-2 | 4.24         | 7.80e-6            |
+ * | text-emoji   | 29  | 3.81e-6 | 3.25e-3 | 4.34         | 1.44e-4            |
+ * | text-long    | 144 | 3.34e-6 | 1.37e-2 | 5.36         | 1.25e-5            |
+ * | caption-long | 404 | 3.34e-6 | 7.85e-2 | 5.29         | 6.42e-6            |
+ *
+ * **第 1 出力（`CAPTION_PROJ_TOLERANCE`）の値を流用してはならない**。RMSNorm は行ごとに
+ * `rsqrt(mean(x²))` で割るので値域が 1 桁縮み（\|ref\| 上端 32.8 → 4.24）、絶対誤差も
+ * 同じ割合で縮む（3.05e-5 → 3.34e-6）。maxRel が 2 出力で**桁まで一致**している
+ * （caption-ja 4.21e-2 / caption-long 7.85e-2）のがその証拠 — 誤差は第 1 出力から相対量として
+ * 持ち越され、norm の縮約自体はほとんど誤差を足していない。
+ *
+ * atol 3e-5 は実測最悪 4.77e-6（text-short）の約 6.3 倍。rtol 1e-6 の寄与は上端
+ * \|ref\| = 5.36 でも 5.4e-6（atol の 1/5.6）で、判定を主導しない。norm の掛け違い
+ * （`text_norm` との取り違え・weight 無しの素の RMS）は値域と同じ O(1) で出る
+ * （export 台本の `_norm_divergence` が実測する weight 差は 0.318）。
+ */
+const CAPTION_NORM_TOLERANCE: Tolerance = { atol: 3e-5, rtol: 1e-6 };
+
+/**
  * 参照 latent エンコーダ（`ReferenceLatentEncoder` 8 層 + `speaker_norm`）の許容誤差。
  *
  * 実測（`atol=rtol=0`、5 ケース × 出力 1 本 `[1,S,768]`）:
@@ -211,14 +240,17 @@ const DURATION_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 1e-6 };
  */
 const DIT_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
 
-/** ターゲット別 tolerance。表の穴は「別ターゲットの値で突合する」沈黙誤りになる。 */
-const TOLERANCES: Readonly<Record<string, Tolerance>> = {
-  "backbone": BACKBONE_TOLERANCE,
-  "text-proj": TEXT_PROJ_TOLERANCE,
-  "caption-proj": CAPTION_PROJ_TOLERANCE,
-  "speaker": SPEAKER_TOLERANCE,
-  "duration": DURATION_TOLERANCE,
-  "dit": DIT_TOLERANCE,
+/**
+ * ターゲット別 tolerance（**出力位置ごとの配列**）。表の穴は「別ターゲット / 別出力の値で
+ * 突合する」沈黙誤りになるので、本数が IR の出力数と合っているかもケースごとに検査する。
+ */
+const TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
+  "backbone": [BACKBONE_TOLERANCE],
+  "text-proj": [TEXT_PROJ_TOLERANCE],
+  "caption-proj": [CAPTION_PROJ_TOLERANCE, CAPTION_NORM_TOLERANCE],
+  "speaker": [SPEAKER_TOLERANCE],
+  "duration": [DURATION_TOLERANCE],
+  "dit": [DIT_TOLERANCE],
 };
 
 const SERIES_ROOT = new URL("../../../outputs/series/irodori-v4-small/", import.meta.url);
@@ -289,8 +321,21 @@ const listDir = (url: URL): readonly Deno.DirEntry[] => {
   }
 };
 
+/**
+ * 系列ディレクトリ直下にある**グラフ以外**の生成物。ここは IR ターゲットの列挙なので、
+ * 別の台本が書くホスト側資産は除く（`irodori_tokenizer.py` のトークナイザ資産と
+ * `irodori_pipeline.py` の full-loop latent golden）。
+ *
+ * MUST: 「知らないディレクトリは無視」にしない — 除外は名前で明示する。未知の名前が
+ * 増えたらこのテストが落ちて、門の対象から漏れていることに気づける。
+ */
+const NON_GRAPH_DIRS: ReadonlySet<string> = new Set(["pipeline", "tokenizer"]);
+
 const discoverTargets = (root: URL): readonly string[] =>
-  listDir(root).filter((entry) => entry.isDirectory).map((entry) => entry.name).sort();
+  listDir(root)
+    .filter((entry) => entry.isDirectory && !NON_GRAPH_DIRS.has(entry.name))
+    .map((entry) => entry.name)
+    .sort();
 
 const discoverCases = (root: URL, target: string): readonly string[] =>
   listDir(new URL(`${target}/`, root))
@@ -357,7 +402,14 @@ for (const target of TARGETS) {
         const io = parseSafetensors(ioBytes);
         // Object.hasOwn で見る（素の `TOLERANCES[target]` はプロトタイプ由来のキーを拾う）。
         assert(Object.hasOwn(TOLERANCES, target), `${target} の tolerance が無い`);
-        const tolerance = TOLERANCES[target];
+        const tolerances = TOLERANCES[target];
+        // 出力ごとに値域が違う（caption-proj の第 2 出力は norm 済みで 1 桁小さい）ので、
+        // 本数が合っていない表は「別の出力の閾値で突合する」形で静かに通ってしまう。
+        assertEquals(
+          tolerances.length,
+          parsed.graph.outputs.length,
+          `${target} の tolerance 本数が IR 出力数と違う`,
+        );
 
         // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
         const expectedKeys = [
@@ -397,7 +449,11 @@ for (const target of TARGETS) {
             const declared = parsed.graph.values[name].dtype;
             assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
             assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-            const report = compareTensors(outputs[name], ioTensor(io, view, declared), tolerance);
+            const report = compareTensors(
+              outputs[name],
+              ioTensor(io, view, declared),
+              tolerances[index],
+            );
             assert(report.pass, `${where}: ${formatAllclose(report)}`);
           });
         } finally {
