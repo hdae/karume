@@ -111,33 +111,33 @@ as 0 / 1. Out-of-range i64 fails loudly (`convert.normalize_boundary_tensor`).
 
 Current models and coverage:
 
-| Model              | Symbolic dim | IR ops exercised                                                                                           |
-| ------------------ | ------------ | ---------------------------------------------------------------------------------------------------------- |
-| `unary_chain`      | none         | neg, abs, sqrt, log, exp                                                                                   |
-| `activations`      | none         | tanh, sigmoid, relu, gelu, gelu_tanh, sin                                                                  |
-| `broadcast_binary` | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                            |
-| `mlp`              | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                 |
-| `row_reduce`       | `T`          | sum, amax, amin                                                                                            |
-| `mask_chain`       | `T`          | mul(i32), cast, bitwise_not (has a bool output)                                                            |
-| `int_cast`         | `T`          | cast(f32→i32 truncating), sub(i32), mul(i32) (i32 output)                                                  |
-| `layout_chain`     | `T`          | permute(3-cycle), reshape ×3 (chain of aliases + coefficient dim 4T)                                       |
-| `expand_mask`      | `T`          | expand(bool / i32), cast, mul, bitwise_not                                                                 |
-| `batch_matmul`     | `T`          | bmm(B/M/K/N all distinct lengths), permute (rank-3 batched matmul)                                         |
-| `gather_last_dim`  | `T`          | gather(last dim / indices from an i32 input), sum                                                          |
-| `attention_block`  | `T`          | linear ×4, softmax ×2, layer_norm, bmm, permute, reshape, add                                              |
-| `fused_attention`  | none         | attention (one node preserved from SDPA; B/H/M/N/D all distinct, last query row has logits around −190)    |
-| `embedding_lookup` | `T`          | embedding(padding_idx=0 is inactive in forward), sum                                                       |
-| `masked_scores`    | `T`          | masked_fill(−3.4e38 broadcast / 0 same-shape), softmax, cast, bitwise_not                                  |
-| `runtime_masked_attention` | none | safe_softmax, where(bool graph input → 0/−inf), add, bmm, mul, permute, reshape, expand — the ADR 0044 chain, with one query row fully masked |
-| `conv_block`       | `T`          | conv1d(kernel 3 / stride 1 / padding 1), permute                                                           |
-| `dilated_conv`     | `T`          | conv1d(depthwise g=C, dilation 1/3/9 / intermediate groups / residual), leaky_relu, add                    |
-| `conv_transpose`   | `T`          | conv_transpose1d(up 2 and up 8 / asymmetric channels), conv1d(no bias), tanh                               |
-| `symbolic_table`   | `T`          | sym_prefix_slice(i32 on 2 axes / f32 on 1 axis), gather, add (Tmax folding)                                |
-| `scalar_operands`  | `T`          | add, sub, mul, div, cast (scalar promotion + reversed `1 − mask` used as a weight)                         |
-| `spline_pieces`    | `T`          | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape |
-| `coupling_split`   | `T`          | slice(split decomposition + slicing after pad), cat, flip(axis length 3), pad, tanh, mul                   |
-| `decoder_tail`     | `T`          | leaky_relu(slope 0.1 and the default 0.01), expand(f32), conv1d, tanh, mul                                 |
-| `i8_weights`       | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (all 5 `WEIGHT_SLOTS` ops), tanh    |
+| Model                      | Symbolic dim | IR ops exercised                                                                                                                              |
+| -------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unary_chain`              | none         | neg, abs, sqrt, log, exp                                                                                                                      |
+| `activations`              | none         | tanh, sigmoid, relu, gelu, gelu_tanh, sin                                                                                                     |
+| `broadcast_binary`         | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                                                               |
+| `mlp`                      | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                                                    |
+| `row_reduce`               | `T`          | sum, amax, amin                                                                                                                               |
+| `mask_chain`               | `T`          | mul(i32), cast, bitwise_not (has a bool output)                                                                                               |
+| `int_cast`                 | `T`          | cast(f32→i32 truncating), sub(i32), mul(i32) (i32 output)                                                                                     |
+| `layout_chain`             | `T`          | permute(3-cycle), reshape ×3 (chain of aliases + coefficient dim 4T)                                                                          |
+| `expand_mask`              | `T`          | expand(bool / i32), cast, mul, bitwise_not                                                                                                    |
+| `batch_matmul`             | `T`          | bmm(B/M/K/N all distinct lengths), permute (rank-3 batched matmul)                                                                            |
+| `gather_last_dim`          | `T`          | gather(last dim / indices from an i32 input), sum                                                                                             |
+| `attention_block`          | `T`          | linear ×4, softmax ×2, layer_norm, bmm, permute, reshape, add                                                                                 |
+| `fused_attention`          | none         | attention (one node preserved from SDPA; B/H/M/N/D all distinct, last query row has logits around −190)                                       |
+| `embedding_lookup`         | `T`          | embedding(padding_idx=0 is inactive in forward), sum                                                                                          |
+| `masked_scores`            | `T`          | masked_fill(−3.4e38 broadcast / 0 same-shape), softmax, cast, bitwise_not                                                                     |
+| `runtime_masked_attention` | none         | safe_softmax, where(bool graph input → 0/−inf), add, bmm, mul, permute, reshape, expand — the ADR 0044 chain, with one query row fully masked |
+| `conv_block`               | `T`          | conv1d(kernel 3 / stride 1 / padding 1), permute                                                                                              |
+| `dilated_conv`             | `T`          | conv1d(depthwise g=C, dilation 1/3/9 / intermediate groups / residual), leaky_relu, add                                                       |
+| `conv_transpose`           | `T`          | conv_transpose1d(up 2 and up 8 / asymmetric channels), conv1d(no bias), tanh                                                                  |
+| `symbolic_table`           | `T`          | sym_prefix_slice(i32 on 2 axes / f32 on 1 axis), gather, add (Tmax folding)                                                                   |
+| `scalar_operands`          | `T`          | add, sub, mul, div, cast (scalar promotion + reversed `1 − mask` used as a weight)                                                            |
+| `spline_pieces`            | `T`          | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape                                    |
+| `coupling_split`           | `T`          | slice(split decomposition + slicing after pad), cat, flip(axis length 3), pad, tanh, mul                                                      |
+| `decoder_tail`             | `T`          | leaky_relu(slope 0.1 and the default 0.01), expand(f32), conv1d, tanh, mul                                                                    |
+| `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (all 5 `WEIGHT_SLOTS` ops), tanh                                       |
 
 The second output of `attention_block` is a **softmax over large negative values (−205..−180)**, the
 regime where a naive form (a softmax that does not subtract amax) has `exp` collapse to 0 in f32 and
@@ -1514,22 +1514,22 @@ where a 1ulp difference at a bucket boundary becomes a 1-off gather index.
 They run in registration order. Only equivalence rewrites that grow neither the IR vocabulary nor
 the attrs are placed here.
 
-| Pass                       | Rewrite                                                        | Firing condition (untouched otherwise)                                              |
-| -------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `_drop_metadata_asserts`   | remove `_assert_tensor_metadata`                               | always                                                                              |
-| `_fold_rms_norm`           | `x·rsqrt(mean(x²)+eps)·w` → `rms_norm`                         | weight is rank-1 of the last-dim length, eps a finite positive                      |
-| `_drop_safe_softmax_guard` | remove the safe-softmax guard of SDPA, or rewrite it to `safe_softmax` | removed **only when inactivity can be proven**, otherwise rewritten (ADR 0044)       |
-| `_lower_unit_expand`       | `unsqueeze→expand→view` → expand of rank ≤ 3                   | rank > `STRIDED_RANK`, the replicated axes static                                   |
-| `_lower_split_unbind`      | width-1 slice+squeeze of a last-dim split → last-dim slice     | rank > `STRIDED_RANK`, the split contiguous and static                              |
-| `_lower_reshape_permute`   | rank ≥ 5 reshape→permute→reshape → a rank-4 transpose sequence | rank > `STRIDED_RANK`, endpoints of rank ≤ 4                                        |
-| `_collect_dead_code`       | one DCE in the middle (**the position is meaningful**)         | always                                                                              |
-| `_pow2_to_mul`             | `pow(x, 2)` → `mul(x, x)`                                      | the exponent is exactly 2                                                           |
-| `_drop_identity_repeat`    | `repeat(x, [1,…,1])` → `x`                                     | **all arguments 1 and their count = rank** (raising the rank is a different matter) |
-| `_drop_identity_add`       | `add(x, 0)` → `x`                                              | a Python scalar 0 and the dtype unchanged                                           |
-| `_promote_scalar_operands` | `add/sub/mul/div(tensor, scalar)` → binary op + constant       | dtype unchanged, rank ≥ 1, `alpha=1`, a finite scalar                               |
-| `_eq_zero_to_not_bool`     | `eq(x, 0)` → `bitwise_not(cast(x, bool))`                      | the right side is exactly 0 and the output is bool                                  |
-| `_select_to_squeeze`       | `select.int(axis of length 1, 0)` → `squeeze`                  | **statically** of length 1 (symbolic axes are excluded)                             |
-| `_split_to_slices`         | `split_with_sizes` + `getitem` → a sequence of `slice`         | the only consumers are getitem, the split axis static                               |
+| Pass                       | Rewrite                                                                | Firing condition (untouched otherwise)                                              |
+| -------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `_drop_metadata_asserts`   | remove `_assert_tensor_metadata`                                       | always                                                                              |
+| `_fold_rms_norm`           | `x·rsqrt(mean(x²)+eps)·w` → `rms_norm`                                 | weight is rank-1 of the last-dim length, eps a finite positive                      |
+| `_drop_safe_softmax_guard` | remove the safe-softmax guard of SDPA, or rewrite it to `safe_softmax` | removed **only when inactivity can be proven**, otherwise rewritten (ADR 0044)      |
+| `_lower_unit_expand`       | `unsqueeze→expand→view` → expand of rank ≤ 3                           | rank > `STRIDED_RANK`, the replicated axes static                                   |
+| `_lower_split_unbind`      | width-1 slice+squeeze of a last-dim split → last-dim slice             | rank > `STRIDED_RANK`, the split contiguous and static                              |
+| `_lower_reshape_permute`   | rank ≥ 5 reshape→permute→reshape → a rank-4 transpose sequence         | rank > `STRIDED_RANK`, endpoints of rank ≤ 4                                        |
+| `_collect_dead_code`       | one DCE in the middle (**the position is meaningful**)                 | always                                                                              |
+| `_pow2_to_mul`             | `pow(x, 2)` → `mul(x, x)`                                              | the exponent is exactly 2                                                           |
+| `_drop_identity_repeat`    | `repeat(x, [1,…,1])` → `x`                                             | **all arguments 1 and their count = rank** (raising the rank is a different matter) |
+| `_drop_identity_add`       | `add(x, 0)` → `x`                                                      | a Python scalar 0 and the dtype unchanged                                           |
+| `_promote_scalar_operands` | `add/sub/mul/div(tensor, scalar)` → binary op + constant               | dtype unchanged, rank ≥ 1, `alpha=1`, a finite scalar                               |
+| `_eq_zero_to_not_bool`     | `eq(x, 0)` → `bitwise_not(cast(x, bool))`                              | the right side is exactly 0 and the output is bool                                  |
+| `_select_to_squeeze`       | `select.int(axis of length 1, 0)` → `squeeze`                          | **statically** of length 1 (symbolic axes are excluded)                             |
+| `_split_to_slices`         | `split_with_sizes` + `getitem` → a sequence of `slice`                 | the only consumers are getitem, the split axis static                               |
 
 - **Three orderings are load-bearing**:
   - `_fold_rms_norm` comes **before** `_pow2_to_mul` / `_promote_scalar_operands` (ADR 0016). Once
