@@ -741,6 +741,7 @@ IRODORI_DEMO_CAPTION = "落ち着いた女性の声で、ゆっくりと丁寧�
 
 
 def _irodori_overview(manifest: Mapping[str, Any]) -> list[str]:
+    sample_rate = _default_model(manifest)["pipelineConfig"]["sampleRate"]
     return [
         "## What is this",
         "",
@@ -759,8 +760,12 @@ def _irodori_overview(manifest: Mapping[str, Any]) -> list[str]:
         "  rate, ready for `encodeWav`. The decoder is run in tiles so that it also fits GPUs with",
         "  the default 128MiB storage-buffer limit; the tiling is bit-exact against a single-shot",
         "  decode.",
-        "- The `codec_encoder` (waveform → latent) is shipped but **not wired up yet**: reference",
-        "  voices are passed in as DACVAE latents, not as audio files.",
+        "- **Voice cloning is wired up both ways**: a reference speaker is passed either as audio",
+        "  (mono f32 — what `decodeWav` returns), which `codec_encoder` turns into a DACVAE",
+        "  latent, or as such a latent directly. Reference audio must already be at this",
+        f"  distribution's own {sample_rate} Hz: there is no resampler, and a mismatch is refused",
+        "  rather than silently converted. Unlike the decoder, `codec_encoder` is not tiled, so a",
+        "  long reference can exceed the default 128MiB storage-buffer limit.",
         "- Not readable by the upstream implementation (it's a different container with an embedded"
         f" graph); the reader is a pipeline that implements `{IRODORI_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"

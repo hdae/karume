@@ -2120,8 +2120,15 @@ class TestIrodoriModelCard:
         assert "Text in, waveform out" in card
         # 同梱したコーデックは帰属にも `base_model` にも並ぶ（再配布しているため）。
         assert "Semantic-DACVAE-Japanese-32dim" in card
-        # 参照 wav の経路だけが未配線であることを正確に言う。
-        assert "not wired up yet" in card
+        # 参照話者は「音声」でも「latent」でも渡せる（voice cloning は配線済み）。
+        assert "Voice cloning is wired up both ways" in card
+        # 周波数は配布形と一致必須（リサンプルを持たない = 不一致は fail loudly）。この数は
+        # コーデックの metadata から manifest 経由で降りてくる。
+        rate = _IRODORI_CODEC_METADATA["kwargs"]["sample_rate"]
+        assert f"distribution's own {rate} Hz" in card
+        assert "there is no resampler" in card
+        # 非タイルの encoder は長尺参照で落ちうる（limitations 起票済みの by-design 制約）。
+        assert "`codec_encoder` is not tiled" in card
         assert 'fromPretrained("hdae/dist"' in card
 
     def test_it_derives_the_shape_section_from_the_manifest(
