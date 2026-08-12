@@ -159,27 +159,31 @@ def assert_storage(role: str, path: Path, requirements: Mapping[str, str]) -> No
         )
 
 
-def assert_storage_absent(role: str, path: Path, forbidden: Mapping[str, str]) -> None:
+def assert_storage_absent(role: str, path: Path, forbidden: Mapping[str, tuple[str, ...]]) -> None:
     """役割が**持ってはならない**格納 dtype がヘッダに無いことを検査する（無関係な役割は素通し）。
 
-    {@link assert_storage} の存在検査だけでは **f32 席に f16 資産を挿し込む取り違えが素通り
-    する** — 圧縮系列のコンテナは適格外の重み（bias / norm / グラフ定数）を F32 で持つので、
-    「F32 を含む」は f16 資産でも真になる。片方向の存在検査を両側から挟んで初めて
-    「系列 × 格納 dtype」が集合として一意に決まる（ADR 0027 / 0029 の検出限界 —
-    **系列 root の取り違えは数値網では原理的に検出できない**ので、ここが唯一の検出器）。
+    {@link assert_storage} の存在検査だけでは **f32 席に圧縮系列の資産を挿し込む取り違えが
+    素通りする** — 圧縮系列のコンテナは適格外の重み（bias / norm / グラフ定数・i8 なら
+    per-channel scale も）を F32 で持つので、「F32 を含む」は f16 / i8 資産でも真になる。
+    片方向の存在検査を両側から挟んで初めて「系列 × 格納 dtype」が集合として一意に決まる
+    （ADR 0027 / 0029 の検出限界 — **系列 root の取り違えは数値網では原理的に検出できない**
+    ので、ここが唯一の検出器）。
 
-    逆向き（f16 席に f32 資産）は {@link assert_storage} が F16 の不在で落とすので、禁止表は
-    f32 席にだけ要る。
+    MUST: 禁止は**役割ごとに集合**で持つ（1 つだけだと圧縮系列が 2 本以上あるときに、名指し
+    しなかったほうが黙って素通りする）。逆向き（圧縮席に f32 資産）は {@link assert_storage}
+    が要求 dtype の不在で落とすので、禁止表は素の席にだけ要る。
     """
     banned = forbidden.get(role)
-    if banned is None:
+    if not banned:
         return
     if not path.is_file():
         raise DistError(f"組み立ての入力が無い: {path}")
     found = storage_dtypes(path)
-    if banned in found:
+    intruders = [dtype for dtype in banned if dtype in found]
+    if intruders:
         raise DistError(
-            f"{role}: {path} の格納 dtype に {banned} がある（実際: {sorted(found)}）。"
+            f"{role}: {path} の格納 dtype に {' / '.join(intruders)} がある"
+            f"（実際: {sorted(found)}）。"
             f"素の f32 系列を指すべき席に圧縮系列の資産が混ざっている"
             "（系列 root の取り違え — 数値の門では検出できないのでここで落とす）"
         )
@@ -1379,8 +1383,8 @@ def sbv2_plan(
 #
 # 配布するのは**実行に要る 8 グラフ + tokenizer 資産 1 本**だけ。8 のうち 2 本は波形 ↔ latent の
 # コーデック（DACVAE — 上流では別リポ・別重みだが、テキストから音声まで 1 リポで完走させるため
-# ここへ同梱する）。実行形ノブは持たない — 格納形は f32 の 1 本きりで、quant は `f32` の
-# 1 席だけが並ぶ（`session` は空 = 低精度ノブなし）。
+# ここへ同梱する）。格納形は f32 / f16 / i8 の 3 系列で、quant 席は 4 つ（`f32` / `f16` /
+# `w8` / `w8a8` — 後ろの 2 つは**同じ i8 バイトを共有**し、違うのは実行形ノブだけ）。
 #
 # `pipelineConfig` は 2 系統に割れる: **モデル固有の数**（条件 state の宣言長・話者行数・
 # latent 幅・t_embed 幅）はチェックポイントの config から導出し、**実行時ノブ**（step 数・
@@ -1445,8 +1449,9 @@ IRODORI_TOKENIZER_DIR = "tokenizer"
 IRODORI_TOKENIZER_FILE = "tokenizer.json"
 
 #: 配る格納 dtype（`export_irodori.WEIGHT_DTYPES` / `export_dacvae.WEIGHT_DTYPES` と同じ集合）。
-#: 役割名は `<グラフ役割>_<dtype>` で、系列 root と 1:1 に対応する（i8 / w8a8 は後続の波）。
-IRODORI_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16")
+#: 役割名は `<グラフ役割>_<dtype>` で、系列 root と 1:1 に対応する。**quant 席の綴りとは別軸**
+#: （w8 / w8a8 はどちらも i8 系列を指す — 対応表は {@link IRODORI_QUANT_SEATS}）。
+IRODORI_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
 
 #: 圧縮していない系列の dtype（系列 root に接尾が付かない唯一の席で、quant に依存しない
 #: 資産〈tokenizer〉の置き場でもある）。
@@ -1471,9 +1476,9 @@ IRODORI_OUTPUT_PATHS: Mapping[str, str] = {
 }
 
 #: 各役割の safetensors ヘッダに**要求する**格納 dtype（Anima / SBV2 と同じ根拠 — 素の F32
-#: 資産が組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。f16 系列は
-#: fake-quant 対象だけが F16 になる（bias / norm / グラフ定数は F32 のまま）ので「F16 を
-#: 含む」を要求する。tokenizer は JSON なので載せない。
+#: 資産が組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。圧縮系列は
+#: fake-quant 対象だけが F16 / I8 になる（bias / norm / グラフ定数、i8 の per-channel scale は
+#: F32 のまま）ので「その dtype を含む」を要求する。tokenizer は JSON なので載せない。
 IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     irodori_role(role, dtype): dtype.upper()
     for role in IRODORI_GRAPH_ROLES
@@ -1481,13 +1486,18 @@ IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 }
 
 #: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
-#: f32 席は「F32 を含む」だけでは f16 資産と区別できない（圧縮系列も適格外の重みを F32 で
-#: 持つ）ので、F16 の不在を併せて要求して初めて系列 × 格納 dtype が集合として一意になる。
-IRODORI_STORAGE_FORBIDDEN: Mapping[str, str] = {
-    irodori_role(role, IRODORI_PLAIN_DTYPE): "F16" for role in IRODORI_GRAPH_ROLES
+#: f32 席は「F32 を含む」だけでは圧縮系列の資産と区別できない（圧縮系列も適格外の重み
+#: — bias / norm / グラフ定数 / i8 の per-channel scale — を F32 で持つ）ので、**圧縮側の
+#: 格納 dtype 全部**の不在を併せて要求して初めて系列 × 格納 dtype が集合として一意になる。
+#: 逆向き（圧縮席へ f32 資産）は {@link assert_storage} が要求 dtype の不在で落とす。
+IRODORI_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
+    irodori_role(role, IRODORI_PLAIN_DTYPE): tuple(
+        dtype.upper() for dtype in IRODORI_WEIGHT_DTYPES if dtype != IRODORI_PLAIN_DTYPE
+    )
+    for role in IRODORI_GRAPH_ROLES
 }
 
-#: weights の宣言（dtype ラベル → 役割名）。8 グラフとも f32 / f16 の 2 席を持つので、
+#: weights の宣言（dtype ラベル → 役割名）。8 グラフとも 3 系列ぶんの席を持つので、
 #: {@link complete_quant_weights} の自動補完は掛からず、quant 表が全役割を名指しする。
 IRODORI_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     role: {dtype: WeightFiles(irodori_role(role, dtype)) for dtype in IRODORI_WEIGHT_DTYPES}
@@ -1497,16 +1507,31 @@ IRODORI_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
 #: assets の宣言（quant 選択に依存しない無条件ファイル）。
 IRODORI_ASSETS: Mapping[str, str] = {"tokenizer": "tokenizer"}
 
-#: quant 表。実行形ノブはまだ 1 つも無い（格納 dtype の軸だけ）ので `session` は両席とも空。
-#: 混成（役割ごとに違う dtype）にしないのは、f16 では S〈フレーム数〉が動く軸が無く、
-#: 8 グラフを一律で落とせるため（混成が要るのは i8 の波 — 量子化 recon の gateDesign）。
-IRODORI_QUANTS: Mapping[str, Any] = {
-    dtype: {"weights": dict.fromkeys(IRODORI_GRAPH_ROLES, dtype), "session": {}}
-    for dtype in IRODORI_WEIGHT_DTYPES
+#: quant 席の綴り → `(8 役全部の格納 dtype, 実行形ノブ)`。**席名と系列 root の対応をここ 1 箇所
+#: だけで綴る**（`w8` / `w8a8` はどちらも `-i8` 系列を指し、バイトは 1 組を共有する — 違うのは
+#: `session` だけ）。混成（役割ごとに違う dtype）にしないのはユーザー裁定 2026-08-12
+#: （i8 も一律 — S ドリフトの実測は `measure_quant_irodori.py` が持つ）。
+#:
+#: MUST: `w8a8` の `linearCompute` は **`dit` の Session にだけ**降りる（models 側 `pipeline.ts`
+#: のモジュール doc）— DiT の linear 317 本が唯一の適格集合で、条件エンコーダ 5 本は 1 生成に
+#: 1 回しか走らない。
+IRODORI_QUANT_SEATS: Mapping[str, tuple[str, Mapping[str, str]]] = {
+    "f32": ("f32", {}),
+    "f16": ("f16", {}),
+    "w8": ("i8", {}),
+    "w8a8": ("i8", {"linearCompute": "i8a8"}),
 }
 
-#: 既定は f32 のまま（ADR 0005 — 既定は最も忠実な経路。f16 の聴感裁定はユーザーが持つ）。
-IRODORI_DEFAULT_QUANT = "f32"
+IRODORI_QUANTS: Mapping[str, Any] = {
+    seat: {"weights": dict.fromkeys(IRODORI_GRAPH_ROLES, dtype), "session": dict(session)}
+    for seat, (dtype, session) in IRODORI_QUANT_SEATS.items()
+}
+
+#: 既定は `w8a8`（ユーザー聴感裁定 2026-08-12 — DAC + ヘッドホンで f32/f16/w8/w8a8 を通しで
+#: 確認し「音質的な劣化という感じはしない」。配布 25.2% / DiT 常駐 0.37GB / wall ×1.12 が
+#: 既定で効き、最も忠実な `f32` 席は残したまま明示で選べる。数値上の帯（sim LSD 5.64・
+#: w8 golden との z maxAbs 2.97）は `e2e_irodori_w8a8_test.ts` の判別帯が持つ）。
+IRODORI_DEFAULT_QUANT = "w8a8"
 
 #: DACVAE のフレームレート（Hz）— 48kHz / hop 1920 = 25。`export_irodori.CODEC_FRAME_RATE` と
 #: 同値で、コーデックが別リポ・別重みなのでチェックポイントの config には入っていない。
