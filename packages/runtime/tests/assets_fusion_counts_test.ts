@@ -9,9 +9,9 @@
  * 出さない）。安全のため safetensors の**ヘッダだけ**を読む — 実体は合計 7GB 級で、
  * IR は `__metadata__.karume_ir` に載っている。
  *
- * MUST: 資産は `models/karume-anima-turbo/` と `outputs/series/embeddinggemma-300m/`
- * （どちらも untracked・ローカル資産）。無い環境は理由を出して**明示 SKIP** する
- * （テストを消して無音で緑にしない — ADR 0005）。
+ * MUST: 資産は `models/karume-anima-turbo/` と `outputs/series/embeddinggemma-300m/` と
+ * `models/karume-irodori-v4-small/`（いずれも untracked・ローカル資産）。無い環境は理由を
+ * 出して**明示 SKIP** する（テストを消して無音で緑にしない — ADR 0005）。
  *
  * NOTE: ここで固定するのは **run 1 回あたり**の値（`lastRunFusions` と同じ寿命）。ADR 0040 の
  * 実測欄が載せている predict 1 回ぶんの合計は、これらをパイプラインの run 回数で畳んだもの:
@@ -32,6 +32,10 @@ import { bindSymbols, countUses, planGraph } from "../src/runtime/plan.ts";
 const ASSETS_DIR = new URL("../../../models/karume-anima-turbo/anima-turbo/", import.meta.url);
 const GEMMA_MODEL = new URL(
   "../../../outputs/series/embeddinggemma-300m/model.safetensors",
+  import.meta.url,
+);
+const IRODORI_DIR = new URL(
+  "../../../models/karume-irodori-v4-small/v4-small/",
   import.meta.url,
 );
 
@@ -60,6 +64,9 @@ const readIrGraph = async (source: URL): Promise<IrGraph> => {
 const readAnimaGraph = (relative: string): Promise<IrGraph> =>
   readIrGraph(new URL(relative, ASSETS_DIR));
 
+const readIrodoriGraph = (name: string): Promise<IrGraph> =>
+  readIrGraph(new URL(`${name}/model.safetensors`, IRODORI_DIR));
+
 const exists = (url: URL): Promise<boolean> => Deno.stat(url).then(() => true).catch(() => false);
 
 const ASSETS_AVAILABLE = await exists(new URL("transformer/", ASSETS_DIR));
@@ -74,6 +81,13 @@ const GEMMA_AVAILABLE = await exists(GEMMA_MODEL);
 if (!GEMMA_AVAILABLE) {
   console.warn(
     `[karume] ${GEMMA_MODEL.pathname} が無いため EmbeddingGemma の融合ヒット数を SKIP する`,
+  );
+}
+
+const IRODORI_AVAILABLE = await exists(new URL("dit/", IRODORI_DIR));
+if (!IRODORI_AVAILABLE) {
+  console.warn(
+    `[karume] ${IRODORI_DIR.pathname} が無いため Irodori の融合ヒット数を SKIP する`,
   );
 }
 
@@ -164,6 +178,100 @@ Deno.test({
         expected,
         `T=${sequence}`,
       );
+    }
+  },
+});
+
+/** DiT の入力 shape（S = latent フレーム数。mask は `S+1519` の派生次元）。 */
+const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly number[]>> => ({
+  x_t: [1, sequence, 32],
+  t_embed: [1, 512],
+  mask: [1, 1, 1, sequence + 1519],
+  text_state: [1, 256, 512],
+  speaker_state: [1, 751, 768],
+  caption_state: [1, 512, 512],
+});
+
+/**
+ * Irodori DiT（12 ブロック）。**rope も adaln も 0** で、これは退行ではなく matcher の受理集合が
+ * この綴りを含まないことの記録:
+ *
+ * - rope 0: DiT の RoPE は**偶奇形**（`[1,S,H·D/2,2]` へ view して最終軸を slice / neg / cat し
+ *   reshape で戻す）。`runtime/fusion.ts` の ROPE_RULE は `[1,H,S,D]` の半割り形だけを受理し、
+ *   偶奇形は「式が似ている」で広げない MUST を掲げている（掴めなければ素の列で値は正しい）。
+ * - adaln 0: ADALN_RULE の先頭 op は `layer_norm` だが、DiT の正規化は `rms_norm` 87 本で
+ *   `layer_norm` は 1 本も無い。
+ * - silu 17: 前段の条件 MLP 5 本 + 12 ブロック × 1 本。残る sigmoid 12 本は
+ *   `mul(v, sigmoid(u))` のゲート（自分自身に掛からないので SiLU ではない）。
+ * - identityExpand 48: 12 ブロック × 4 本の恒等 expand が別名化される。
+ *
+ * したがってこの門が守るのは「掴めている 2 種が外れないこと」と「**受理集合を広げたとき
+ * ここが動く**こと」の両方。0 が非 0 に変わったら、まず ROPE_RULE / ADALN_RULE の受理集合が
+ * 意図せず広がっていないかを見る（広げた瞬間 fallback の正しさ保証が消える）。
+ */
+Deno.test({
+  name:
+    "実資産の Irodori DiT は run 1 回で silu 17 / identityExpand 48 を掴む（rope / adaln は綴りが違って 0）",
+  ignore: !IRODORI_AVAILABLE,
+  fn: async () => {
+    const graph = await readIrodoriGraph("dit");
+    const expected: FusionCounts = { ...NONE, silu: 17, identityExpand: 48 };
+    // ヒット数は S に依存しない（`ditSymMax` 750 の内側で 2 点）。
+    for (const sequence of [125, 750]) {
+      assertEquals(fusionCounts(graph, irodoriDitShapes(sequence)), expected, `S=${sequence}`);
+    }
+  },
+});
+
+Deno.test({
+  name: "実資産の Irodori 条件経路と codec の融合ヒット数",
+  ignore: !IRODORI_AVAILABLE,
+  fn: async () => {
+    // backbone（ModernBERT-ja 25 層）だけは半割り形の RoPE なので、25 層 × q/k = 50 を掴む。
+    // Irodori 自前のブロック（dit / speaker）が 0 なのと対になる観測点で、**片方だけ外れたら
+    // どちらの綴りが変わったのか**がここで割れる。
+    assertEquals(
+      fusionCounts(await readIrodoriGraph("backbone"), { input_ids: [1, 256] }),
+      { ...NONE, rope: 50 },
+      "backbone",
+    );
+    assertEquals(
+      fusionCounts(await readIrodoriGraph("text_proj"), { hidden: [1, 256, 768] }),
+      { ...NONE, silu: 1 },
+      "text_proj",
+    );
+    assertEquals(
+      fusionCounts(await readIrodoriGraph("caption_proj"), { hidden: [1, 512, 768] }),
+      { ...NONE, silu: 1 },
+      "caption_proj",
+    );
+    // speaker は 8 ブロック（silu 8 + ゲート 8）。RoPE は DiT と同じ偶奇形なので 0。
+    assertEquals(
+      fusionCounts(await readIrodoriGraph("speaker"), { latent: [1, 750, 128] }),
+      { ...NONE, silu: 8 },
+      "speaker",
+    );
+    assertEquals(
+      fusionCounts(await readIrodoriGraph("duration"), {
+        text_state: [1, 256, 512],
+        speaker_vec: [1, 768],
+        has_speaker: [1, 1],
+        caption_vec: [1, 512],
+        has_caption: [1, 1],
+      }),
+      { ...NONE, silu: 5 },
+      "duration",
+    );
+    // codec は Snake 活性（`sin` 29 本 — sigmoid ではない）と `conv_transpose1d` 4 本で、
+    // silu / upsample2x のどちらの形も持たない。全 0 は「掴む形が無い」の記録で、非 0 へ
+    // 変わったら受理集合が広がったということ。
+    for (
+      const [name, shapes] of [
+        ["codec_decoder", { latent: [1, 750, 32] }],
+        ["codec_encoder", { wav: [1, 750, 1920] }],
+      ] as const
+    ) {
+      assertEquals(fusionCounts(await readIrodoriGraph(name), shapes), NONE, name);
     }
   },
 });
