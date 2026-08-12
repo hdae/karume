@@ -802,24 +802,43 @@ def _irodori_base_weights() -> list[str]:
 
 
 def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
+    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
+    ので、系列が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ進める形。
+    """
     model_name = manifest["defaultModel"]
-    quant = _default_model(manifest)["defaultQuant"]
+    model = _default_model(manifest)
+    quant = model["defaultQuant"]
+    models = " / ".join(sorted(manifest["models"]))
+    quants = " / ".join(sorted(model["quants"]))
+    sample_rate = model["pipelineConfig"]["sampleRate"]
     return [
         "## Usage",
         "",
         "```ts",
-        'import { encodeWav, IrodoriPipeline } from "jsr:@karume/models";',
+        'import { decodeWav, encodeWav, IrodoriPipeline } from "jsr:@karume/models";',
         "",
-        f"// Both options may be omitted: model defaults to {model_name}, quant to {quant}.",
         f'using pipeline = await IrodoriPipeline.fromPretrained("{repo}", {{',
-        f'  model: "{model_name}",',
-        f'  quant: "{quant}",',
+        f'  // model: "{model_name}", // default — available: {models}',
+        f'  // quant: "{quant}", // default — available: {quants}',
         "});",
+        "",
         "const audio = await pipeline.generate({",
         f'  text: "{IRODORI_DEMO_TEXT}",',
-        f'  caption: "{IRODORI_DEMO_CAPTION}",',
-        "  seed: 42,",
+        "",
+        "  // Voice Design — describe the voice in Japanese prose:",
+        f'  // caption: "{IRODORI_DEMO_CAPTION}",',
+        "",
+        f"  // Voice cloning — condition on a reference speaker. The WAV must already be",
+        f"  // {sample_rate} Hz mono or stereo (there is no resampler; a mismatch is refused):",
+        '  // speaker: { audio: decodeWav(await Deno.readFile("reference.wav")) },',
+        "  // ...or pass a DACVAE latent you saved earlier instead of the audio:",
+        "  // speaker: { latent: savedLatent },",
+        "",
+        "  seed: 42, // same seed + same inputs → same audio",
+        "  // durationSeconds: 5, // override the predicted utterance length (seconds)",
         "});",
+        "",
         "await Deno.writeFile(",
         '  "out.wav",',
         "  encodeWav(audio.data, audio.sampleRate),",

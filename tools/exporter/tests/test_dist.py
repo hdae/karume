@@ -2130,6 +2130,13 @@ class TestIrodoriModelCard:
         # 非タイルの encoder は長尺参照で落ちうる（limitations 起票済みの by-design 制約）。
         assert "`codec_encoder` is not tiled" in card
         assert 'fromPretrained("hdae/dist"' in card
+        # Usage は「コメントを外すだけで次の一歩へ進める」形（裁定 2026-08-12）: voice cloning の
+        # 両形（audio / latent）と optional ノブがコメントアウトで併記され、選べる値は manifest
+        # から機械導出される（系列が増えれば列挙も追従する — ここでは f32 の 1 席）。
+        assert '// speaker: { audio: decodeWav(await Deno.readFile("reference.wav")) },' in card
+        assert "// speaker: { latent: savedLatent }," in card
+        assert '// quant: "f32", // default — available: f32' in card
+        assert "// durationSeconds: 5," in card
 
     def test_it_derives_the_shape_section_from_the_manifest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
