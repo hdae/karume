@@ -26,6 +26,7 @@ export type {
   GeneratedLatent,
   IrodoriAssets,
   IrodoriFromPretrainedOptions,
+  IrodoriGeneratedAudio,
   IrodoriGenerateRequest,
   IrodoriPipelineOptions,
   IrodoriRunComponent,

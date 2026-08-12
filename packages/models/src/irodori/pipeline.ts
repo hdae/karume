@@ -1,8 +1,12 @@
 /**
- * `IrodoriPipeline` — テキスト（+ caption + 参照話者）→ **latent** の 1 本の面。
+ * `IrodoriPipeline` — テキスト（+ caption + 参照話者）→ **波形** の 1 本の面。
  *
- * 波形へ落とす codec（DACVAE）は別波なので、この面が返すのは patch 済み latent `[S,32]` まで
- * （ADR 0047 の実行形をそのままホスト側から駆動する）。
+ * 出口は 2 つある: {@link IrodoriPipeline.generate}（波形）と
+ * {@link IrodoriPipeline.generateLatent}（patch 済み latent `[S,32]` — codec を回さない）。
+ * 後者は latent 門（`e2e_irodori_latent_test.ts`）の基盤であり、埋め込みだけが要る使い方の口。
+ *
+ * **参照音声（wav）を渡す口はまだ無い** — codec encoder は資産として要求しているが、LUFS
+ * 正規化と WAV デコードのホスト段が未配線で、参照は latent で渡す（`IrodoriSpeakerInput`）。
  *
  * パイプライン（NN は全段 Karume・torch 不使用）:
  *
@@ -13,13 +17,16 @@
  * 5. `duration` → log frames → ホストで S を決める（expm1 → 銀行家丸め → clamp）
  * 6. ホスト: 条件 state を Tmax へ右 pad + 区間マスクを組む
  * 7. `dit` を 1 セッションで 40〜100 forward（Euler + CFG independent）→ latent
+ * 8. ホスト: 末尾トリムの位置を **z 上で**決める（`host/trim.ts`）
+ * 9. `codec_decoder` を 1 セッションでタイルぶん回す（`codec.ts`）→ 全長の波形
+ * 10. ホスト: 秒指定 / 末尾トリムの短いほうでサンプル単位に切る
  *
- * ## MUST: グラフは段ごとに開いて閉じる（`dit` だけがループ全体で 1 本）
+ * ## MUST: グラフは段ごとに開いて閉じる（`dit` と `codec_decoder` だけが複数 run）
  *
  * {@link IrodoriPipeline.fromAssets} は **Session を 1 本も張らない** — 開くのはコンテナ
- * （`openModel` = ヘッダ解析のみ）までで、GPU 常駐は {@link IrodoriPipeline.generateLatent} の
+ * （`openModel` = ヘッダ解析のみ）までで、GPU 常駐は {@link IrodoriPipeline.generate} の
  * 中で段ごとに張っては畳む。`backbone` だけで 1.26GB あるので、条件エンコーダと DiT を
- * 同時に生かさない。
+ * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。
  *
  * ## MUST: 低精度ノブが効くのは `dit` だけ
  *
@@ -68,6 +75,7 @@ import {
   parseIrodoriPipelineConfig,
 } from "./config.ts";
 import { IrodoriTokenizer, parseIrodoriTokenizerAsset } from "./text/tokenizer.ts";
+import { type CodecTile, decodeTiles, DEFAULT_CODEC_TILE_FRAMES, planCodecTiles } from "./codec.ts";
 import { packIds } from "./host/pack.ts";
 import {
   buildDitMask,
@@ -78,9 +86,15 @@ import {
 import { patchReferenceLatent } from "./host/patch.ts";
 import { prependMeanToken, rowMean } from "./host/pooling.ts";
 import { Randn } from "./host/random.ts";
-import { sequenceLengthFromLogFrames, sequenceLengthFromSeconds } from "./host/round.ts";
+import {
+  type SampleBounds,
+  sequenceLengthFromLogFrames,
+  sequenceLengthFromSeconds,
+  type SequencePlan,
+} from "./host/round.ts";
 import { type CfgVariant, combineCfg, eulerStep, tSchedule } from "./host/sampler.ts";
 import { timestepEmbedding, timestepFrequencies } from "./host/t-embed.ts";
+import { findFlatteningPoint, trimmedSampleCount } from "./host/trim.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const BACKBONE = "backbone";
@@ -89,6 +103,8 @@ const CAPTION_PROJ = "caption_proj";
 const SPEAKER = "speaker";
 const DURATION = "duration";
 const DIT = "dit";
+const CODEC_DECODER = "codec_decoder";
+const CODEC_ENCODER = "codec_encoder";
 const TOKENIZER = "tokenizer";
 
 /** 生成結果。`data` は patch 済み latent `[frames × latentDim]`（行優先）。 */
@@ -100,6 +116,23 @@ export type GeneratedLatent = {
   /**
    * 実際に使った乱数 seed。`initialNoise` を渡した生成では乱数を 1 度も引かないので `undefined`。
    */
+  readonly seed?: number;
+  /** `dit` を回した回数（cond + CFG の uncond）。 */
+  readonly forwards: number;
+};
+
+/**
+ * 生成結果（波形）。`data` は**切り出し済み**のモノラル f32（`encodeWav` へそのまま渡せる）。
+ *
+ * 名前に接頭辞が付いているのは、barrel（`mod.ts`）が SBV2 の `GeneratedAudio` を既に出して
+ * いるため（あちらは `{ sampleRate, data }` の 2 欄で、こちらは latent 側の観測値も返す）。
+ */
+export type IrodoriGeneratedAudio = {
+  readonly data: Float32Array<ArrayBuffer>;
+  readonly sampleRate: number;
+  /** 生成した latent のフレーム数 S。**波形長は末尾トリムでこれより短くなりうる**。 */
+  readonly frames: number;
+  /** 実際に使った乱数 seed。`initialNoise` を渡した生成では `undefined`。 */
   readonly seed?: number;
   /** `dit` を回した回数（cond + CFG の uncond）。 */
   readonly forwards: number;
@@ -136,6 +169,13 @@ export type IrodoriGenerateRequest = {
    * 発話長の直接指定（秒）。渡すと `duration` グラフを**回さない**（上流の `manual_seconds`）。
    */
   readonly durationSeconds?: number;
+  /**
+   * codec decode を 1 回あたり何 latent フレームに割るか（既定
+   * {@link DEFAULT_CODEC_TILE_FRAMES}）。**性能とメモリのノブで、出力は変わらない** —
+   * halo を捨てた採用区間は全長 decode とビット一致する（`codec.ts` のモジュール doc）。
+   * S がこの値以下なら 1 枚に縮退する（= 単発 decode）。
+   */
+  readonly codecTileFrames?: number;
 };
 
 /** {@link IrodoriPipelineOptions.onRunDiagnostics} が受けるコンポーネント名。 */
@@ -145,7 +185,8 @@ export type IrodoriRunComponent =
   | "caption-proj"
   | "speaker"
   | "duration"
-  | "dit";
+  | "dit"
+  | "codec-decoder";
 
 /** 構築オプション（{@link IrodoriPipeline.fromAssets} / {@link IrodoriPipeline.fromPretrained} 共通）。 */
 export type IrodoriPipelineOptions = {
@@ -267,6 +308,36 @@ const assertStaticDim = (
   }
 };
 
+/**
+ * グラフ**出力**の 1 軸が「記号 × 係数」の派生次元で、その係数が宣言と一致することを見る。
+ *
+ * MUST: 落とさない。decoder の出力倍率（1 latent フレーム → `hopLength` サンプル）がずれても
+ * 出力は「それらしい長さの波形」になり、秒指定の切り出しと末尾トリムだけが別の位置を指す。
+ */
+const assertOutputScale = (
+  model: KarumeModel,
+  axis: number,
+  expected: number,
+  where: string,
+): void => {
+  const name = model.graph.outputs[0];
+  const value = model.graph.values[name];
+  if (value === undefined) {
+    throw new Error(`irodori: グラフ出力 '${name}' の宣言が無い（${where}）`);
+  }
+  const symbol = model.graph.symbols[0];
+  // 正準表記は `coeff·sym` で、**係数 1 は省略**する（`format/dims.ts` の `formatDim`）。
+  // 綴りを合わせないと、倍率 1 の正しいグラフをここが誤って拒否する。
+  const canonical = `${expected === 1 ? "" : expected}${symbol}`;
+  const dim = value.shape[axis];
+  if (symbol === undefined || dim !== canonical) {
+    throw new Error(
+      `irodori: ${where} — グラフ出力 '${name}' の軸 ${axis} が ${String(dim)}、` +
+        `pipelineConfig からの期待は '${canonical}'`,
+    );
+  }
+};
+
 const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
   if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
   return tensor.data;
@@ -359,6 +430,7 @@ type IrodoriState = {
   readonly speaker: KarumeModel;
   readonly duration: KarumeModel;
   readonly dit: KarumeModel;
+  readonly codecDecoder: KarumeModel;
   /** 低精度ノブ。**`dit` の Session にだけ**渡す（モジュール doc の MUST）。 */
   readonly ditSessionOptions: SessionOptions;
   readonly onRunDiagnostics?: (
@@ -451,6 +523,11 @@ const openIrodoriState = async (
   const speaker = openModel(assetBuffer(assets, SPEAKER));
   const duration = openModel(assetBuffer(assets, DURATION));
   const dit = openModel(assetBuffer(assets, DIT));
+  const codecDecoder = openModel(assetBuffer(assets, CODEC_DECODER));
+  // encoder は参照 wav → latent の経路で使う（未配線）。**開くだけ開く**のは、資産として
+  // 要求していることをここで示すため — 欠けた配布形が「decode だけできる」半端な状態で
+  // 通ってしまうと、参照音声を渡した瞬間に初めて落ちる。
+  openModel(assetBuffer(assets, CODEC_ENCODER));
   const tokenizer = new IrodoriTokenizer(
     parseIrodoriTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER),
   );
@@ -475,6 +552,11 @@ const openIrodoriState = async (
     config.latentDim * config.speakerPatchSize,
     "latentDim × speakerPatchSize",
   );
+  // codec decoder は latent を 1 フレーム = hopLength サンプルへ展開する。入力幅と**出力の
+  // 派生次元の係数**の両方を見る（係数だけがずれた資産は shape が合ったまま通り、切り出しと
+  // 末尾トリムのサンプル位置だけが静かに別の場所を指す）。
+  assertStaticDim(codecDecoder, "latent", 2, config.latentDim, "latentDim");
+  assertOutputScale(codecDecoder, 2, config.hopLength, "hopLength");
 
   const ditSessionOptions = toSessionOptions(quant.session);
 
@@ -501,6 +583,7 @@ const openIrodoriState = async (
     speaker,
     duration,
     dit,
+    codecDecoder,
     ditSessionOptions,
     ...(options.onRunDiagnostics === undefined
       ? {}
@@ -552,11 +635,20 @@ const encodeSpeaker = async (
   };
 };
 
+/**
+ * latent 段の結果。`plan.targetSamples` は波形の切り出しに要るので**決めた場所から持ち回る**
+ * （`GeneratedLatent` は公開の面なので混ぜない）。
+ */
+type LatentStage = {
+  readonly latent: GeneratedLatent;
+  readonly plan: SequencePlan;
+};
+
 /** テキスト 1 本（+ caption / 参照話者）から latent を作る。 */
 const generateLatent = async (
   state: IrodoriState,
   request: IrodoriGenerateRequest,
-): Promise<GeneratedLatent> => {
+): Promise<LatentStage> => {
   const { config } = state;
   const textIds = packIds(state.tokenizer, request.text, config.maxTextLen, "text");
   // caption の有無は**生の文字列**で決める（上流 `str(req.caption).strip() != ""`）。
@@ -631,15 +723,17 @@ const generateLatent = async (
   const hasSpeaker = speakerState.rows > 0;
 
   // --- ⑤ S の決定 --------------------------------------------------------
-  const bounds = {
+  const bounds: SampleBounds = {
     frameRate: config.frameRate,
     minSeconds: config.minSeconds,
     maxSeconds: config.maxSeconds,
+    sampleRate: config.sampleRate,
+    hopLength: config.hopLength,
   };
-  let frames: number;
+  let plan: SequencePlan;
   if (request.durationSeconds !== undefined) {
     // 手動指定は duration グラフを回さない（上流 `manual_seconds` 経路）。
-    frames = sequenceLengthFromSeconds(request.durationSeconds, bounds);
+    plan = sequenceLengthFromSeconds(request.durationSeconds, bounds);
   } else {
     const logFrames = await withSession(
       state.gpu,
@@ -666,8 +760,9 @@ const generateLatent = async (
         return asF32(outputAt(state.duration, outputs, 0), "duration の出力")[0];
       },
     );
-    frames = sequenceLengthFromLogFrames(logFrames, bounds);
+    plan = sequenceLengthFromLogFrames(logFrames, bounds);
   }
+  const { frames } = plan;
   if (frames > config.ditSymMax) {
     throw new Error(
       `IrodoriPipeline: 決まった latent 長 ${frames} が dit の宣言上限 ${config.ditSymMax} を超えている`,
@@ -791,16 +886,71 @@ const generateLatent = async (
   );
 
   return {
-    data: x,
-    frames,
-    latentDim: config.latentDim,
-    ...(request.initialNoise === undefined ? { seed } : {}),
-    forwards,
+    latent: {
+      data: x,
+      frames,
+      latentDim: config.latentDim,
+      ...(request.initialNoise === undefined ? { seed } : {}),
+      forwards,
+    },
+    plan,
   };
 };
 
 /**
- * Irodori-TTS v4 のテキスト → latent パイプライン。
+ * latent を波形へ落とす（タイルを 1 セッションで順に回す）。
+ *
+ * MUST: **全長ぶん**の波形を組む。末尾トリムと秒指定の切り出しは decode の**後**に波形の
+ * サンプル単位で行う（latent を切ってから decode すると境界 padding が変わり、全長 decode の
+ * 先頭部分とビット一致しない — `codec.ts` のモジュール doc）。
+ */
+const decodeWaveform = async (
+  state: IrodoriState,
+  latent: GeneratedLatent,
+  tiles: readonly CodecTile[],
+): Promise<Float32Array<ArrayBuffer>> => {
+  const { latentDim, hopLength } = state.config;
+  return await withSession(
+    state.gpu,
+    state.codecDecoder,
+    {},
+    observer(state, "codec-decoder"),
+    async (run) =>
+      await decodeTiles(latent.data, { latentDim, hopLength, tiles }, async (slice, frames) => {
+        const outputs = await run({ latent: f32(slice, [1, frames, latentDim]) });
+        return asF32(outputAt(state.codecDecoder, outputs, 0), "codec decoder の出力");
+      }),
+  );
+};
+
+/** テキスト 1 本から波形を作る（latent → 末尾トリム → decode → 切り出し）。 */
+const generateAudio = async (
+  state: IrodoriState,
+  request: IrodoriGenerateRequest,
+): Promise<IrodoriGeneratedAudio> => {
+  const { config } = state;
+  const { latent, plan } = await generateLatent(state, request);
+  // 末尾トリムの判定は z 上（decode 前）— 上流 `_synthesize` と同じ順序。
+  const flattening = findFlatteningPoint(latent.data, latent.frames, config.latentDim);
+  const samples = trimmedSampleCount(plan.targetSamples, flattening, config.hopLength);
+  const tiles = planCodecTiles(latent.frames, {
+    tileFrames: request.codecTileFrames ?? DEFAULT_CODEC_TILE_FRAMES,
+    haloFrames: config.codecHaloFrames,
+  });
+  const waveform = await decodeWaveform(state, latent, tiles);
+  return {
+    data: samples === waveform.length
+      ? waveform
+      : (waveform.slice(0, samples) as Float32Array<ArrayBuffer>),
+    sampleRate: config.sampleRate,
+    frames: latent.frames,
+    ...(latent.seed === undefined ? {} : { seed: latent.seed }),
+    forwards: latent.forwards,
+  };
+};
+
+/**
+ * Irodori-TTS v4 のテキスト → 音声パイプライン。
  *
  * 構築は {@link IrodoriPipeline.fromPretrained}（HF から取得）か
  * {@link IrodoriPipeline.fromAssets}（取得済みバイト列）だけを入口にする — コンストラクタを
@@ -862,13 +1012,23 @@ export class IrodoriPipeline {
   }
 
   /**
-   * テキストから latent 1 本を生成する。
+   * テキストから波形 1 本を生成する（`encodeWav` へそのまま渡せる f32 モノラル）。
    *
-   * 同じ seed・同じ要求なら同じ latent が出る（乱数もホストグルーも決定的 — `host/random.ts`）。
+   * 同じ seed・同じ要求なら同じ波形が出る（乱数もホストグルーも決定的 — `host/random.ts`）。
+   */
+  async generate(request: IrodoriGenerateRequest): Promise<IrodoriGeneratedAudio> {
+    if (this.#disposed) throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
+    return await generateAudio(this.#state, request);
+  }
+
+  /**
+   * テキストから latent 1 本を生成する（codec を回さない — latent 門と埋め込み用途の面）。
+   *
+   * 同じ seed・同じ要求なら同じ latent が出る。
    */
   async generateLatent(request: IrodoriGenerateRequest): Promise<GeneratedLatent> {
     if (this.#disposed) throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
-    return await generateLatent(this.#state, request);
+    return (await generateLatent(this.#state, request)).latent;
   }
 
   /**
