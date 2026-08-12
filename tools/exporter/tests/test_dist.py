@@ -28,6 +28,9 @@ from karume.dist import (
     ANIMA_PIPELINE_CONFIG,
     ANIMA_QUANTS,
     ANIMA_WEIGHTS,
+    IRODORI_CODEC_DIRS,
+    IRODORI_CODEC_HALO_FRAMES,
+    IRODORI_CODEC_NAME,
     IRODORI_DEFAULT_MODEL,
     IRODORI_OUTPUT_PATHS,
     IRODORI_SAMPLING_DEFAULTS,
@@ -1594,6 +1597,14 @@ _IRODORI_MASK_TOTAL = 10 + _IRODORI_SPEAKER_ROWS + 14
 #: backbone の hidden 幅（projector の入力 — pipelineConfig には現れない数）。
 _IRODORI_HIDDEN = 32
 
+#: 偽コーデックの `metadata.json`（`convert_dacvae.py` が書く形）。**実物とは違う数**
+#: （48kHz / hop 1920 ではない）にして、`sampleRate` / `hopLength` を焼き込んでいれば落ちるように
+#: する。`frameRate` 25 と噛み合う組み合わせを選ぶ（12,000 = 25 × 480）。
+_IRODORI_CODEC_METADATA: Mapping[str, Any] = {
+    "kwargs": {"sample_rate": 12_000, "encoder_rates": [2, 4, 60]}
+}
+_IRODORI_HOP_LENGTH = 480
+
 #: `pipelineConfig` の欄名（TS 側 `packages/models/src/irodori/config.ts` の `ROOT_KEYS` の写し）。
 #: **ロード側は未知キーも欠落も parse 時に落とす**ので、焼く側とロード側の欄名は完全一致が要る。
 #: 写しをテストが持つのは、片方だけが動いたときに落ちる席がここしか無いため。
@@ -1603,6 +1614,9 @@ _IRODORI_CONFIG_KEYS = (
     "speakerRows",
     "ditSymMax",
     "frameRate",
+    "sampleRate",
+    "hopLength",
+    "codecHaloFrames",
     "latentDim",
     "speakerPatchSize",
     "speakerDim",
@@ -1633,7 +1647,7 @@ def _irodori_graph(inputs: Sequence[tuple[str, list[Any]]], outputs: int, symbol
 
 
 def _irodori_graphs() -> dict[str, str]:
-    """6 グラフの IR メタデータ（{@link _IRODORI_CONFIG} と噛み合う形）。"""
+    """8 グラフの IR メタデータ（{@link _IRODORI_CONFIG} と噛み合う形）。"""
     latent_dim = _IRODORI_CONFIG["latent_dim"]
     speaker_dim = _IRODORI_CONFIG["speaker_dim"]
     text_dim = _IRODORI_CONFIG["text_dim"]
@@ -1667,6 +1681,9 @@ def _irodori_graphs() -> dict[str, str]:
             1,
             "S",
         ),
+        # コーデック 2 本（別系列・純畳み込み）。入力幅が latentDim / hopLength と噛み合う。
+        "codec_decoder": _irodori_graph([("latent", [1, "S", latent_dim])], 1, "S"),
+        "codec_encoder": _irodori_graph([("wav", [1, "T", _IRODORI_HOP_LENGTH])], 1),
     }
 
 
@@ -1676,25 +1693,39 @@ def _build_irodori_sources(
     model: str = IRODORI_DEFAULT_MODEL,
     config: Mapping[str, Any] = _IRODORI_CONFIG,
     graphs: Mapping[str, str] | None = None,
+    codec_metadata: Mapping[str, Any] | None = _IRODORI_CODEC_METADATA,
 ) -> IrodoriSources:
     """系列 + チェックポイントの置き場を偽資産で再現する（配布しないものの混入込み）。
 
     並びは `karume.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
-    テストが root を差し替えるだけで同じ木を指せる形。
+    テストが root を差し替えるだけで同じ木を指せる形。コーデックは**別系列・別入力素材**
+    （`dacvae-32dim`）なので、Irodori 本体とは別の 2 ディレクトリへ置く。
     """
     sources = IrodoriSources(
         series=root / "outputs" / "series" / irodori_series_name(model),
         model=root / "inputs" / "irodori" / model,
+        codec_series=root / "outputs" / "series" / IRODORI_CODEC_NAME,
+        codec_model=root / "inputs" / "irodori" / IRODORI_CODEC_NAME,
     )
+    resolved = graphs or _irodori_graphs()
     for role, directory in IRODORI_SERIES_DIRS.items():
         payload = _fake_safetensors(
-            "F32",
-            f"{role}-weights".encode(),
-            {IR_METADATA_KEY: (graphs or _irodori_graphs())[role]},
+            "F32", f"{role}-weights".encode(), {IR_METADATA_KEY: resolved[role]}
         )
         _write(sources.series / directory / "model.safetensors", payload)
         # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
         _write(sources.series / directory / "io.case0.safetensors", b"io-fixture")
+    for role, directory in IRODORI_CODEC_DIRS.items():
+        payload = _fake_safetensors(
+            "F32", f"{role}-weights".encode(), {IR_METADATA_KEY: resolved[role]}
+        )
+        _write(sources.codec_series / directory / "model.safetensors", payload)
+        _write(sources.codec_series / directory / "io.case0.safetensors", b"io-fixture")
+    if codec_metadata is not None:
+        _write(
+            sources.codec_model / "metadata.json",
+            json.dumps(codec_metadata, ensure_ascii=False).encode("utf-8"),
+        )
     _write(sources.series / "tokenizer" / "tokenizer.json", b'{"vocabText": "a"}')
     # tokenizer の golden 3 本は検証用（実行に要らないので配布形には入らない）。
     for name in ("golden.encode.json", "golden.normalize.json", "nfkc-diff.json"):
@@ -1739,13 +1770,15 @@ class TestIrodoriLayout:
         assert list(out_dir.rglob("golden.*")) == []
         assert list(out_dir.rglob("nfkc-diff.json")) == []
 
-    def test_it_declares_the_six_graphs_and_the_tokenizer(self, irodori_assembled) -> None:
+    def test_it_declares_the_eight_graphs_and_the_tokenizer(self, irodori_assembled) -> None:
         _, manifest = irodori_assembled
         model = _irodori_model(manifest)
         assert model["pipeline"] == "irodori/1"
         assert sorted(model["weights"]) == [
             "backbone",
             "caption_proj",
+            "codec_decoder",
+            "codec_encoder",
             "dit",
             "duration",
             "speaker",
@@ -1794,6 +1827,45 @@ class TestIrodoriPipelineConfig:
         # 参照 latent の patch 後の上限 + 平均トークン 1 本 / 30s × 25Hz ÷ latent patch。
         assert config["speakerRows"] == _IRODORI_SPEAKER_ROWS
         assert config["ditSymMax"] == _IRODORI_DIT_SYM_MAX
+
+    def test_it_derives_the_codec_numbers_from_the_codec_metadata(self, irodori_assembled) -> None:
+        """焼き込んでいれば実物（48kHz / hop 1920）の数が出てくる。halo だけが直書き。"""
+        _, manifest = irodori_assembled
+        config = _irodori_model(manifest)["pipelineConfig"]
+        assert config["sampleRate"] == _IRODORI_CODEC_METADATA["kwargs"]["sample_rate"]
+        # hop_length = prod(encoder_rates)（`DACVAE.__init__` の綴り）。
+        assert config["hopLength"] == _IRODORI_HOP_LENGTH
+        assert config["codecHaloFrames"] == IRODORI_CODEC_HALO_FRAMES
+        # ロード側は 3 者の整合（sampleRate == frameRate × hopLength）を parse 時に見る。
+        assert config["sampleRate"] == config["frameRate"] * config["hopLength"]
+
+    def test_it_refuses_a_codec_whose_frame_rate_does_not_match(self, tmp_path: Path) -> None:
+        """秒 → フレームと 秒 → サンプル → フレームの 2 系統が独立に動く形を作らない。"""
+        sources = _build_irodori_sources(
+            tmp_path, codec_metadata={"kwargs": {"sample_rate": 12_000, "encoder_rates": [500]}}
+        )
+        with pytest.raises(DistError, match="hop_length"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_missing_codec_metadata(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(tmp_path, codec_metadata=None)
+        with pytest.raises(DistError, match=r"metadata\.json"):
+            irodori_plan(sources)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"sample_rate": 0, "encoder_rates": [2, 4, 60]},
+            {"sample_rate": 12_000, "encoder_rates": []},
+            {"sample_rate": 12_000, "encoder_rates": [2, "4", 60]},
+        ],
+    )
+    def test_it_refuses_codec_numbers_that_are_not_positive_integers(
+        self, tmp_path: Path, kwargs: Mapping[str, Any]
+    ) -> None:
+        sources = _build_irodori_sources(tmp_path, codec_metadata={"kwargs": kwargs})
+        with pytest.raises(DistError):
+            irodori_plan(sources)
 
     def test_it_carries_the_sampler_defaults_the_upstream_declares(self, irodori_assembled) -> None:
         _, manifest = irodori_assembled
@@ -1897,6 +1969,37 @@ class TestIrodoriGraphGate:
         with pytest.raises(DistError, match="mask"):
             irodori_plan(sources)
 
+    def test_it_refuses_a_codec_decoder_for_another_latent_width(self, tmp_path: Path) -> None:
+        """別次元の DACVAE を混ぜると shape は合ったまま別の声になる。"""
+        sources = self._sources(
+            tmp_path, "codec_decoder", _irodori_graph([("latent", [1, "S", 999])], 1, "S")
+        )
+        with pytest.raises(DistError, match="latentDim"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_codec_encoder_with_another_hop(self, tmp_path: Path) -> None:
+        """入力幅 = hopLength がずれると、波形のフレーム分割だけが黙って別の格子になる。"""
+        sources = self._sources(
+            tmp_path, "codec_encoder", _irodori_graph([("wav", [1, "T", 999])], 1)
+        )
+        with pytest.raises(DistError, match="hopLength"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_codec_decoder_that_lost_its_input_name(self, tmp_path: Path) -> None:
+        sources = self._sources(
+            tmp_path, "codec_decoder", _irodori_graph([("z", [1, "S", 8])], 1, "S")
+        )
+        with pytest.raises(DistError, match="グラフ入力"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_codec_decoder_with_two_outputs(self, tmp_path: Path) -> None:
+        """検証用の別ターゲット（中間値つき）が紛れ込んでいないことの証跡。"""
+        sources = self._sources(
+            tmp_path, "codec_decoder", _irodori_graph([("latent", [1, "S", 8])], 2, "S")
+        )
+        with pytest.raises(DistError, match="グラフ出力が 2 本"):
+            irodori_plan(sources)
+
     def test_it_refuses_a_container_without_ir_metadata(self, tmp_path: Path) -> None:
         sources = _build_irodori_sources(tmp_path)
         _write(
@@ -1929,7 +2032,7 @@ class TestIrodoriModelCard:
         )
         return out_dir
 
-    def test_it_describes_the_latent_only_distribution(
+    def test_it_describes_the_text_to_audio_distribution(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
@@ -1937,8 +2040,11 @@ class TestIrodoriModelCard:
         assert "license: mit" in card
         # 格納形を変えない配布形は 4 値のどれでもない（Hub の推論に任せる）。
         assert "base_model_relation" not in card
-        assert "stops at the latent" in card
-        assert "not shipped here" in card
+        assert "Text in, waveform out" in card
+        # 同梱したコーデックは帰属にも `base_model` にも並ぶ（再配布しているため）。
+        assert "Semantic-DACVAE-Japanese-32dim" in card
+        # 参照 wav の経路だけが未配線であることを正確に言う。
+        assert "not wired up yet" in card
         assert 'fromPretrained("hdae/dist"' in card
 
     def test_it_derives_the_shape_section_from_the_manifest(

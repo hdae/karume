@@ -54,7 +54,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from safetensors import safe_open
@@ -1284,11 +1284,11 @@ def sbv2_plan(
     )
 
 
-# ---- ⑤ Irodori（text-to-speech / latent 出口）--------------------------------
+# ---- ⑤ Irodori（text-to-speech）----------------------------------------------
 #
-# 配布するのは**実行に要る 6 グラフ + tokenizer 資産 1 本**だけ。波形へ落とす codec（DACVAE）は
-# 別リポ・別重みで、この配布形が出せるのは patch 済み latent まで（ADR 0047 の実行形をホストが
-# そのまま駆動する）。実行形ノブは持たない — 格納形は f32 の 1 本きりで、quant は `f32` の
+# 配布するのは**実行に要る 8 グラフ + tokenizer 資産 1 本**だけ。8 のうち 2 本は波形 ↔ latent の
+# コーデック（DACVAE — 上流では別リポ・別重みだが、テキストから音声まで 1 リポで完走させるため
+# ここへ同梱する）。実行形ノブは持たない — 格納形は f32 の 1 本きりで、quant は `f32` の
 # 1 席だけが並ぶ（`session` は空 = 低精度ノブなし）。
 #
 # `pipelineConfig` は 2 系統に割れる: **モデル固有の数**（条件 state の宣言長・話者行数・
@@ -1326,6 +1326,28 @@ IRODORI_SERIES_DIRS: Mapping[str, str] = {
     "dit": "dit",
 }
 
+#: コーデック（DACVAE）の 1 語 — **別リポ・別重み**なので系列も入力素材も専用の名前を持つ
+#: （`outputs/series/<この名前>/` に export 済みグラフ・`inputs/irodori/<この名前>/` に
+#: `convert_dacvae.py` が書いた `metadata.json`）。Irodori のモデル名（`v4-small`）とは独立に
+#: 動くので、`--model` の軸には乗せない。
+IRODORI_CODEC_NAME = "dacvae-32dim"
+
+#: 役割名 → コーデック系列のターゲットディレクトリ名（`export_dacvae.TARGETS` の綴り）。
+IRODORI_CODEC_DIRS: Mapping[str, str] = {
+    "codec_decoder": "decoder",
+    "codec_encoder": "encoder",
+}
+
+#: グラフを持つ役割の全体（Irodori 本体 6 + コーデック 2）。
+IRODORI_GRAPH_ROLES: tuple[str, ...] = (*IRODORI_SERIES_DIRS, *IRODORI_CODEC_DIRS)
+
+#: `convert_dacvae.py` が書く構成ファイルと、そこから読む 2 つのキー。**sampleRate /
+#: hopLength を直書きしない**ための出どころ（`export_dacvae.hop_length` と同じ式
+#: — `hop_length = prod(encoder_rates)`）。
+IRODORI_CODEC_METADATA_FILE = "metadata.json"
+IRODORI_CODEC_SAMPLE_RATE_KEY = "sample_rate"
+IRODORI_CODEC_RATES_KEY = "encoder_rates"
+
 #: tokenizer 資産の出所（`irodori_tokenizer.py` が系列の下へ書く 4 ファイルのうち、配布へ入る
 #: のは資産本体だけ — golden / nfkc 表は検証用で実行に要らない）。
 IRODORI_TOKENIZER_DIR = "tokenizer"
@@ -1333,19 +1355,19 @@ IRODORI_TOKENIZER_FILE = "tokenizer.json"
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
 IRODORI_OUTPUT_PATHS: Mapping[str, str] = {
-    **{role: f"{role}/model.safetensors" for role in IRODORI_SERIES_DIRS},
+    **{role: f"{role}/model.safetensors" for role in IRODORI_GRAPH_ROLES},
     "tokenizer": f"{IRODORI_TOKENIZER_DIR}/{IRODORI_TOKENIZER_FILE}",
 }
 
 #: 格納 dtype の要求（Anima / SBV2 と同じ根拠 — 素の F32 資産が組み立て・ロード・実行を全て
-#: 通って参照一致の門まで沈黙した実測事故）。Irodori は f32 系列 1 本だけを配るので、6 グラフ
+#: 通って参照一致の門まで沈黙した実測事故）。Irodori は f32 系列 1 本だけを配るので、8 グラフ
 #: 全てに F32 を要求する（tokenizer は JSON なので載せない）。
-IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = dict.fromkeys(IRODORI_SERIES_DIRS, "F32")
+IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = dict.fromkeys(IRODORI_GRAPH_ROLES, "F32")
 
 #: weights の宣言（dtype ラベル → 役割名）。1 dtype しか無い席も**dtype キー必須**の統一形
 #: （ADR 0041 §3）。
 IRODORI_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    role: {"f32": WeightFiles(role)} for role in IRODORI_SERIES_DIRS
+    role: {"f32": WeightFiles(role)} for role in IRODORI_GRAPH_ROLES
 }
 
 #: assets の宣言（quant 選択に依存しない無条件ファイル）。
@@ -1360,7 +1382,15 @@ IRODORI_DEFAULT_QUANT = "f32"
 
 #: DACVAE のフレームレート（Hz）— 48kHz / hop 1920 = 25。`export_irodori.CODEC_FRAME_RATE` と
 #: 同値で、コーデックが別リポ・別重みなのでチェックポイントの config には入っていない。
+#: `sampleRate` / `hopLength` はコーデックの `metadata.json` から導出し、3 者の整合
+#: （`sampleRate == frameRate × hopLength`）は {@link irodori_pipeline_config} が見る。
 IRODORI_FRAME_RATE = 25
+
+#: codec decoder のタイル分割で採用区間の両側へ足す latent フレーム数。**受容野由来のモデル
+#: 定数**（片側 13,793 サンプル = 7.19 フレーム → 8 フレーム = 15,360 サンプルで覆う）で、
+#: `metadata.json` には入っていないのでここが唯一の出どころ。実測の根拠は decoder 主経路に
+#: 因果層が無く全層が対称 pad か厳密 `L·stride` の convT である（= 平行移動同変）こと。
+IRODORI_CODEC_HALO_FRAMES = 8
 
 #: 発話長 clamp の秒数（上流 `SamplingRequest.min_seconds` / `max_seconds` の既定）。
 #: `max_seconds` は **`dit` の記号次元 S の上限を決めた値でもある**
@@ -1404,6 +1434,9 @@ IRODORI_GRAPH_SHAPES: Mapping[str, tuple[tuple[str, ...], int]] = {
         1,
     ),
     "dit": (("x_t", "t_embed", "mask", "text_state", "speaker_state", "caption_state"), 1),
+    # コーデック 2 本は位置表もマスクも持たない純畳み込み網（入力 1 本 / 出力 1 本）。
+    "codec_decoder": (("latent",), 1),
+    "codec_encoder": (("wav",), 1),
 }
 
 #: `(役割, グラフ入力, 軸, pipelineConfig の欄)` — グラフの**静的**次元と宣言の突合表。
@@ -1421,6 +1454,11 @@ IRODORI_STATIC_DIMS: tuple[tuple[str, str, int, str], ...] = (
     ("duration", "text_state", 2, "textDim"),
     ("duration", "speaker_vec", 1, "speakerDim"),
     ("duration", "caption_vec", 1, "captionDim"),
+    # コーデックは**別リポ・別重み**なので、latent の幅と 1 フレームのサンプル数が Irodori 側の
+    # 宣言と噛み合っている保証がここにしか無い（別次元の DACVAE を混ぜると shape は合ったまま
+    # 別の声になる / 波形長だけが静かにずれる）。
+    ("codec_decoder", "latent", 2, "latentDim"),
+    ("codec_encoder", "wav", 2, "hopLength"),
 )
 
 
@@ -1436,14 +1474,18 @@ def irodori_repo_name(model: str) -> str:
 
 @dataclass(frozen=True)
 class IrodoriSources:
-    """組み立ての入力。系列 1 本と、チェックポイントの置き場（`inputs/` — 生成物ではない）。
+    """組み立ての入力。系列とチェックポイントの置き場（`inputs/` — 生成物ではない）が 2 組。
 
-    後者が要るのは `pipelineConfig` のモデル固有の数を**チェックポイントの config から導出**
-    するため（`__metadata__` だけを読むので 2.9GB のペイロードは舐めない）。
+    チェックポイント側が要るのは `pipelineConfig` の数を**焼き込まずに導出**するため
+    （`__metadata__` / `metadata.json` だけを読むので 2.9GB のペイロードは舐めない）。
+    コーデックが別の 2 本を持つのは**別リポ・別重み**だから — Irodori のモデル名を動かしても
+    コーデックは動かない。
     """
 
     series: Path
     model: Path
+    codec_series: Path
+    codec_model: Path
 
 
 def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> IrodoriSources:
@@ -1451,6 +1493,8 @@ def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> Iro
     return IrodoriSources(
         series=series_dir / irodori_series_name(model),
         model=INPUTS_ROOT / IRODORI_SERIES_PREFIX / model,
+        codec_series=series_dir / IRODORI_CODEC_NAME,
+        codec_model=INPUTS_ROOT / IRODORI_SERIES_PREFIX / IRODORI_CODEC_NAME,
     )
 
 
@@ -1464,6 +1508,10 @@ def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
         **{
             role: sources.series / directory / "model.safetensors"
             for role, directory in IRODORI_SERIES_DIRS.items()
+        },
+        **{
+            role: sources.codec_series / directory / "model.safetensors"
+            for role, directory in IRODORI_CODEC_DIRS.items()
         },
         "tokenizer": sources.series / IRODORI_TOKENIZER_DIR / IRODORI_TOKENIZER_FILE,
     }
@@ -1507,8 +1555,48 @@ def _irodori_float(config: Mapping[str, Any], key: str) -> float:
     return float(value)
 
 
-def irodori_pipeline_config(config: Mapping[str, Any]) -> dict[str, Any]:
-    """`pipelineConfig`（TS 側スキーマの 20 欄）をチェックポイント config から組む。
+class IrodoriCodecNumbers(NamedTuple):
+    """コーデックの `metadata.json` から導く 2 つ（秒 ↔ サンプル ↔ フレームの換算）。"""
+
+    sample_rate: int
+    hop_length: int
+
+
+def irodori_codec_numbers(codec_model_dir: Path) -> IrodoriCodecNumbers:
+    """`convert_dacvae.py` が書いた `metadata.json` から `sampleRate` / `hopLength` を導く。
+
+    MUST: 写経しない — 別次元・別 hop の DACVAE へ差し替えたときに、ホストだけが古い換算を
+    持ったまま「それらしい長さの音声」を出す（例外は出ない）。`hop_length` は
+    `export_dacvae.hop_length` と同じ式（`prod(encoder_rates)` — `DACVAE.__init__` の綴り）。
+    """
+    path = codec_model_dir / IRODORI_CODEC_METADATA_FILE
+    if not path.is_file():
+        raise DistError(f"組み立ての入力が無い: {path}（`uv run python convert_dacvae.py` で作る）")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise DistError(f"{path} が JSON として読めない") from error
+    kwargs = raw.get("kwargs") if isinstance(raw, dict) else None
+    if not isinstance(kwargs, dict):
+        raise DistError(f"{path} に 'kwargs' が無い")
+    sample_rate = kwargs.get(IRODORI_CODEC_SAMPLE_RATE_KEY)
+    if not isinstance(sample_rate, int) or isinstance(sample_rate, bool) or sample_rate <= 0:
+        raise DistError(f"{path} の {IRODORI_CODEC_SAMPLE_RATE_KEY} が正の整数でない")
+    rates = kwargs.get(IRODORI_CODEC_RATES_KEY)
+    if not isinstance(rates, list) or not rates:
+        raise DistError(f"{path} の {IRODORI_CODEC_RATES_KEY} が非空のリストでない")
+    hop_length = 1
+    for rate in rates:
+        if not isinstance(rate, int) or isinstance(rate, bool) or rate <= 0:
+            raise DistError(f"{path} の {IRODORI_CODEC_RATES_KEY} に正の整数でない要素がある")
+        hop_length *= rate
+    return IrodoriCodecNumbers(sample_rate=sample_rate, hop_length=hop_length)
+
+
+def irodori_pipeline_config(
+    config: Mapping[str, Any], codec: IrodoriCodecNumbers
+) -> dict[str, Any]:
+    """`pipelineConfig`（TS 側スキーマの 23 欄）をチェックポイント config から組む。
 
     MUST: モデル固有の数を写経しない — 重みを差し替えたときにホストだけが古い数を持つと、
     右 pad も行数計算もそのまま通って（shape は合う）**別の位置の条件を読んだ**結果が沈黙で出る。
@@ -1526,6 +1614,14 @@ def irodori_pipeline_config(config: Mapping[str, Any]) -> dict[str, Any]:
             " `dit` の x_t 幅と参照 latent の 1 フレーム幅を兼ねており、1 でなければ"
             "両者が一致しない（TS 側の欄を割る変更が要る）"
         )
+    # 秒 → フレーム（`frameRate`）と 秒 → サンプル → フレーム（コーデック由来の 2 値）が
+    # 独立に動く形を作らない。TS 側も parse 時に同じ式を見るが、**配ってから落ちる**のを
+    # 避けるためにここでも見る（別 hop のコーデックを混ぜた瞬間に気づける席）。
+    if codec.sample_rate != IRODORI_FRAME_RATE * codec.hop_length:
+        raise DistError(
+            f"コーデックの sample_rate {codec.sample_rate} が frameRate {IRODORI_FRAME_RATE}"
+            f" × hop_length {codec.hop_length} と違う"
+        )
     frames = int(_irodori_float(config, "ref_max_seconds") * IRODORI_FRAME_RATE)
     speaker_patch = _irodori_int(config, "speaker_patch_size")
     return {
@@ -1536,6 +1632,9 @@ def irodori_pipeline_config(config: Mapping[str, Any]) -> dict[str, Any]:
         # 生成できる latent の上限（`export_irodori.dit_sym_max` と同じ式）。
         "ditSymMax": int(IRODORI_MAX_SECONDS * IRODORI_FRAME_RATE) // latent_patch,
         "frameRate": IRODORI_FRAME_RATE,
+        "sampleRate": codec.sample_rate,
+        "hopLength": codec.hop_length,
+        "codecHaloFrames": IRODORI_CODEC_HALO_FRAMES,
         "latentDim": _irodori_int(config, "latent_dim"),
         "speakerPatchSize": speaker_patch,
         "speakerDim": _irodori_int(config, "speaker_dim"),
@@ -1575,14 +1674,14 @@ def _graph_inputs(graph: Mapping[str, Any], path: Path) -> dict[str, list[Any]]:
 def assert_irodori_graphs(
     placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
 ) -> None:
-    """6 グラフが**読み出せて**、入力の並び・出力本数・静的次元が宣言どおりであることを見る。
+    """8 グラフが**読み出せて**、入力の並び・出力本数・静的次元が宣言どおりであることを見る。
 
     MUST: ずれても shape は合ったままロードも実行も通る組み合わせがある（`caption_proj` の
     出力本数・条件 state の宣言長・`speaker` の patch 幅）ので、配布形を並べる前にここで落とす。
     SBV2 の {@link assert_bert_hidden} と同じ規律 — 別々の台本（`export_irodori.py` の
     ターゲットと、この manifest）が持つ数を突き合わせる席がここしか無い。
     """
-    graphs = {role: ir_graph(placements[role]) for role in IRODORI_SERIES_DIRS}
+    graphs = {role: ir_graph(placements[role]) for role in IRODORI_GRAPH_ROLES}
     for role, (expected_inputs, expected_outputs) in IRODORI_GRAPH_SHAPES.items():
         path = placements[role]
         graph = graphs[role]
@@ -1637,7 +1736,9 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
     """Irodori 1 モデルぶんの計画を組む（検査と config の読み取りをここで全部済ませる）。"""
     assert_model_name(model)
     placements = irodori_placements(sources)
-    pipeline_config = irodori_pipeline_config(irodori_model_config(sources.model))
+    pipeline_config = irodori_pipeline_config(
+        irodori_model_config(sources.model), irodori_codec_numbers(sources.codec_model)
+    )
     for role, source in placements.items():
         assert_storage(role, source, IRODORI_STORAGE_REQUIREMENTS)
     assert_irodori_graphs(placements, pipeline_config)

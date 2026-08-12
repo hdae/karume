@@ -705,7 +705,7 @@ def render_sbv2_model_card(manifest: Mapping[str, Any], repo: str, profile: Sbv2
     )
 
 
-# ---- ④ Irodori（text-to-speech / latent 出口）--------------------------------
+# ---- ④ Irodori（text-to-speech）----------------------------------------------
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
 IRODORI_SUPPORTED_PIPELINE = "irodori/1"
@@ -721,17 +721,19 @@ IRODORI_TITLE = "Irodori-TTS v4 Small — Karume"
 IRODORI_BASE_MODEL = "Aratako/Irodori-TTS-v4-Small"
 IRODORI_TEXT_BACKBONE_MODEL = "sbintuitions/modernbert-ja-310m"
 
+#: 波形へ落とすコーデック（上流では別リポ・別重み — この配布形には**同梱している**）。
+#: ライセンスは MIT（`docs/research/2026-08-11-irodori-source-recon.md` の実地確認）。
+#: 再配布しているので `base_model` にも帰属節にも並べる。
+IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
+
 IRODORI_METADATA = CardMetadata(
     pipeline_tag=IRODORI_PIPELINE_TAG,
-    base_model=(IRODORI_BASE_MODEL, IRODORI_TEXT_BACKBONE_MODEL),
+    base_model=(IRODORI_BASE_MODEL, IRODORI_TEXT_BACKBONE_MODEL, IRODORI_CODEC_MODEL),
     # `base_model_relation` は置かない — この配布形は格納形を変えず（f32 のまま）コンテナだけを
     # 移したもので、adapter / merge / quantized / finetune のどれでもない（CardMetadata の doc）。
     license="mit",
     tags=("text-to-speech", "webgpu", "japanese"),
 )
-
-#: 波形へ落とすコーデック（別リポ・別重み — この配布形には**入っていない**）。
-IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 
 #: 使い方スニペットのデモ入力（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
 IRODORI_DEMO_TEXT = "こんにちは、これはテストです。"
@@ -747,15 +749,18 @@ def _irodori_overview(manifest: Mapping[str, Any]) -> list[str]:
         "safetensors file = weights + a graph JSON embedded in `__metadata__`). Runs as-is in the",
         "browser and in Deno.",
         "",
-        "- Six graphs make up the chain: a shared Japanese ModernBERT `backbone`, the `text_proj`",
-        "  and `caption_proj` condition projectors, the reference-latent `speaker` encoder, the",
-        "  `duration` predictor and the `dit` itself (one forward per Euler step, plus one per",
-        "  classifier-free-guidance branch).",
-        "- **This repository stops at the latent.** The pipeline returns the patched DACVAE latent",
-        f"  `[frames, latentDim]`; the codec that turns it into a waveform"
+        "- Eight graphs make up the chain: a shared Japanese ModernBERT `backbone`, the",
+        "  `text_proj` and `caption_proj` condition projectors, the reference-latent `speaker`",
+        "  encoder, the `duration` predictor, the `dit` itself (one forward per Euler step, plus",
+        "  one per classifier-free-guidance branch), and the DACVAE codec"
         f" ([{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}))",
-        "  is a separate model and is **not shipped here** — nothing in this repository produces",
-        "  audio on its own yet.",
+        "  as `codec_decoder` / `codec_encoder`.",
+        "- **Text in, waveform out.** `generate()` returns f32 mono samples at the codec's sample",
+        "  rate, ready for `encodeWav`. The decoder is run in tiles so that it also fits GPUs with",
+        "  the default 128MiB storage-buffer limit; the tiling is bit-exact against a single-shot",
+        "  decode.",
+        "- The `codec_encoder` (waveform → latent) is shipped but **not wired up yet**: reference",
+        "  voices are passed in as DACVAE latents, not as audio files.",
         "- Not readable by the upstream implementation (it's a different container with an embedded"
         f" graph); the reader is a pipeline that implements `{IRODORI_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
@@ -780,6 +785,11 @@ def _irodori_base_weights() -> list[str]:
         f" [{IRODORI_TEXT_BACKBONE_MODEL}](https://huggingface.co/{IRODORI_TEXT_BACKBONE_MODEL}),",
         "  licensed **MIT** (as of retrieval). It is redistributed here in the container format as",
         "  the `backbone` component, so that license travels with this repository too.",
+        f"- **Codec**: [{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}),"
+        " licensed **MIT**",
+        "  (as of retrieval). Upstream ships it as a separate repository; it is redistributed here",
+        "  in the container format as the `codec_decoder` / `codec_encoder` components so that",
+        "  text-to-audio runs from this repository alone.",
         "- **Changes made here**: conversion into the Karume container format only. No retraining,",
         "  no fine-tuning and **no quantization** — the weights are the source checkpoint's own",
         "  f32 values, re-laid out per graph.",
@@ -793,23 +803,28 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { IrodoriPipeline } from "jsr:@karume/models";',
+        'import { encodeWav, IrodoriPipeline } from "jsr:@karume/models";',
         "",
         f"// Both options may be omitted: model defaults to {model_name}, quant to {quant}.",
         f'using pipeline = await IrodoriPipeline.fromPretrained("{repo}", {{',
         f'  model: "{model_name}",',
         f'  quant: "{quant}",',
         "});",
-        "const latent = await pipeline.generateLatent({",
+        "const audio = await pipeline.generate({",
         f'  text: "{IRODORI_DEMO_TEXT}",',
         f'  caption: "{IRODORI_DEMO_CAPTION}",',
         "  seed: 42,",
         "});",
-        "// latent.data is [latent.frames × latent.latentDim] f32, row major.",
+        "await Deno.writeFile(",
+        '  "out.wav",',
+        "  encodeWav(audio.data, audio.sampleRate),",
+        ");",
         "```",
         "",
-        "`generateLatent()` returns `{ data, frames, latentDim, seed, forwards }`. Decoding that",
-        "latent into audio needs the codec, which this repository does not ship (see above).",
+        "`generate()` returns `{ data, sampleRate, frames, seed, forwards }`, where `data` is f32",
+        "mono already trimmed to the predicted length. `generateLatent()` is the same run stopped",
+        "one stage earlier: it returns `{ data, frames, latentDim, seed, forwards }` with the",
+        "patched DACVAE latent, for callers that want the embedding rather than audio.",
         "`caption` and `speaker` are both optional: without them the voice is picked by the model",
         "alone, and the guidance branches for the missing conditions are skipped.",
         "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
@@ -837,17 +852,19 @@ def _irodori_shape(model: Mapping[str, Any]) -> list[str]:
         f" width {config['speakerDim']}",
         f"- **latent**: up to {config['ditSymMax']} frames at {frame_rate} Hz"
         f" ({config['ditSymMax'] // frame_rate}s), width {config['latentDim']}",
+        f"- **audio**: {config['sampleRate']} Hz mono, {config['hopLength']} samples per latent"
+        " frame",
     ]
 
 
 def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
-    """実行時ノブ（`generateLatent()` に渡さなかったものを埋める側）。"""
+    """実行時ノブ（`generate()` に渡さなかったものを埋める側）。"""
     config = model["pipelineConfig"]
     scales = config["cfgScales"]
     return [
         "### Defaults",
         "",
-        "The sampler knobs are fixed by the manifest — `generateLatent()` takes none of them.",
+        "The sampler knobs are fixed by the manifest — `generate()` takes none of them.",
         "",
         f"- **steps**: {config['steps']} Euler steps (`initScale` {config['initScale']})",
         "- **guidance**: "
@@ -857,7 +874,7 @@ def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
         " (the duration predictor decides within that, unless `durationSeconds` is passed)",
         "",
         "`seed` is the one knob the manifest does not carry — it defaults to `0`, and the same",
-        "seed with the same request gives the same latent.",
+        "seed with the same request gives the same audio.",
     ]
 
 
