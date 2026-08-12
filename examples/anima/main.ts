@@ -14,6 +14,15 @@ import { parseResolution } from "../../packages/models/anima.ts";
 
 const USAGE = "--source <パス|HF repo> --prompt <文字列> --resolution <WxH> --model <名前>" +
   " --quant <名前> --seed <整数> --steps <整数>";
+const KNOWN = new Set([
+  "source",
+  "model",
+  "quant",
+  "prompt",
+  "resolution",
+  "seed",
+  "steps",
+]);
 const DEFAULT_PROMPT = "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms," +
   " outdoors, smile, upper body, masterpiece, best quality";
 
@@ -24,6 +33,9 @@ for (let at = 0; at < Deno.args.length; at += 2) {
   if (!key.startsWith("--") || value === undefined || value.startsWith("--")) {
     throw new Error(`引数 ${key} が --key value の対になっていない（使い方: ${USAGE}）`);
   }
+  // MUST: 未知のキーは落とす。打ち間違えたノブが黙って既定値で走ると、出力の違いが
+  // 「モデルの揺れ」に見える。
+  if (!KNOWN.has(key.slice(2))) throw new Error(`未知のオプション ${key}（使い方: ${USAGE}）`);
   args.set(key.slice(2), value);
 }
 
