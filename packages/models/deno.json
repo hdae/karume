@@ -5,6 +5,7 @@
   "exports": {
     ".": "./mod.ts",
     "./anima": "./anima.ts",
+    "./irodori": "./irodori.ts",
     "./sbv2": "./sbv2.ts"
   },
   "imports": {

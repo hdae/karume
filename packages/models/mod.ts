@@ -1,6 +1,6 @@
 /**
- * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima` / `./sbv2`）と
- * 両建て（ADR 0037）。
+ * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima` / `./irodori` /
+ * `./sbv2`）と両建て（ADR 0037）。
  *
  * ADR 0008 の流儀で**薄い面**にする — ここに並ぶのは「パイプラインを組んで生成する」「出た
  * 画像を書き出す」という利用者ストーリーだけで、内部モジュールの素通し再輸出はしない。
@@ -20,6 +20,17 @@ export type {
   GeneratedImage,
 } from "./src/anima/pipeline.ts";
 export type { ImageSize } from "./src/anima/resolution.ts";
+
+export { IrodoriPipeline } from "./src/irodori/pipeline.ts";
+export type {
+  GeneratedLatent,
+  IrodoriAssets,
+  IrodoriFromPretrainedOptions,
+  IrodoriGenerateRequest,
+  IrodoriPipelineOptions,
+  IrodoriRunComponent,
+  IrodoriSpeakerInput,
+} from "./src/irodori/pipeline.ts";
 
 export { Sbv2Pipeline } from "./src/sbv2/pipeline.ts";
 export type {
