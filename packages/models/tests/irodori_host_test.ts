@@ -11,6 +11,7 @@ import { buildDitMask, SEGMENT_ORDER } from "../src/irodori/host/mask.ts";
 import { packIds } from "../src/irodori/host/pack.ts";
 import { patchReferenceLatent } from "../src/irodori/host/patch.ts";
 import { prependMeanToken, rowMean } from "../src/irodori/host/pooling.ts";
+import { Randn } from "../src/irodori/host/random.ts";
 import {
   bankerRound,
   type SampleBounds,
@@ -263,4 +264,46 @@ Deno.test("packIds: 正規化後に空なら落とす（BOS だけの列を通�
     Error,
     "caption が正規化後に空",
   );
+});
+
+// ---- 初期ノイズの生成器 ---------------------------------------------------
+//
+// `host/random.ts` は `sbv2/host/random.ts` の**意図的な複製**（family 間で import し合わない —
+// モジュール doc）。複製である以上、片側だけが動いても誰も気づかない席がここに要る。
+// 縛るのは sbv2 側と同じ 3 点（同 seed 同列 / 標準正規らしい統計量 / 対を持ち越さない）。
+
+Deno.test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
+  const a = new Randn(7).normals(64);
+  const b = new Randn(7).normals(64);
+  const c = new Randn(8).normals(64);
+  assertEquals([...a], [...b]);
+  assert([...a].some((value, index) => value !== c[index]), "seed を変えても同じ列");
+});
+
+Deno.test("Randn: 標準正規らしい統計量を持ち、scale が線形に効く", () => {
+  const samples = new Randn(1).normals(20000);
+  const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
+  const variance = samples.reduce((sum, value) => sum + (value - mean) ** 2, 0) / samples.length;
+  assert(Math.abs(mean) < 0.05, `平均 ${mean} が 0 から離れすぎ`);
+  assert(Math.abs(variance - 1) < 0.05, `分散 ${variance} が 1 から離れすぎ`);
+  // scale は同じ列に掛かるだけ（列そのものは seed で決まる）。この家族の呼び出しは scale を
+  // 使わないが、複製の drift はここでしか出ない。
+  const plain = new Randn(3).normals(16);
+  const scaled = new Randn(3).normals(16, 2);
+  for (const [index, value] of plain.entries()) {
+    assertEquals(scaled[index], Math.fround(value * 2));
+  }
+});
+
+Deno.test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () => {
+  // 5 要素を 1 回で引くと 3 対を消費して [cos1, sin1, cos2, sin2, cos3]。3 + 2 に割ると
+  // 1 回目が 2 対を丸ごと消費して [cos1, sin1, cos2]（sin2 は捨てる）、2 回目は 3 対目から
+  // [cos3, sin3]。持ち越す実装なら 2 回目の先頭が sin2 になるので、そこが観測点。
+  const single = new Randn(5).normals(5);
+  const split = new Randn(5);
+  const head = split.normals(3);
+  const tail = split.normals(2);
+  assertEquals([...head], [...single.slice(0, 3)], "先頭 3 要素までは同じ列");
+  assertEquals(tail[0], single[4], "2 回目は次の対の cos から始まる（= 持ち越していない）");
+  assert(tail[0] !== single[3], "2 回目の先頭が捨てたはずの sin を拾っている");
 });
