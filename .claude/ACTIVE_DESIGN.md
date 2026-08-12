@@ -15,7 +15,14 @@
   ここには書かない）。設計評価の結論: 汎用ランタイム形は合格・LLM は executor 実行モデル
   1 層のみ変更（ADR 0043 追記 = 層軸の一本化済み）・モデル独立化はユーザー方針確定
   （家族固有変種は所属のまま・単体提供は公式重み由来の別物を後日）・exporter io 共通化は
-  Gemma 直前（D3 案 b）。**並行トラック: Irodori 量子化（recon 完了 → 計画裁定待ち）**。
+  Gemma 直前（D3 案 b）。**並行トラック: Irodori 量子化 3 波（裁定済み — ADR
+  [0050](../docs/decisions/0050-irodori-quant-series.md)）。波 1 = f16 完了（2026-08-12）**:
+  配布 3.44GB → f16 系列 +1.72GB（50.1%）・レイアウトは `model.{f32,f16}.safetensors` へ
+  破壊的変更・latent 門の系列パラメタ化（F16_Z_ATOL 1.5e-3 = 実測最悪 2.1321e-4 の 7 倍・
+  **S/forwards は f32 と完全一致**）・WAV sha256 門は f32 専用のまま digest 不変・
+  系列×格納 dtype は両側検査（`assert_storage_absent` 新設 — 存在検査だけでは f32 席への
+  f16 混入が素通りする穴を波 1 で発見）。次 = 波 2（i8 + `measure_quant_irodori` — S ドリフト
+  実測 → 混成 w8 表の裁定）→ 波 3（w8a8 席・DiT の linear/bmm 比の実測が先）。
 - **DeBERTa 配布サイズ削減 3 波（2026-08-11）— 波 1 着地**: 発端は SBV2 の ONNX 版
   （hidden[-3] のみ抽出）が縮小の材料になるかという問い。実測の正本は
   [research/2026-08-11-deberta-size-recon.md](../docs/research/2026-08-11-deberta-size-recon.md)

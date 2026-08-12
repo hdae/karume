@@ -1603,6 +1603,16 @@ uv run --with descript-audiotools --with einops python export_dacvae.py  # 6. co
 uv run karume dist --pipeline irodori                                 # 7. distribution (8 graphs + tokenizer)
 ```
 
+The distribution carries an **f16 weight-storage series** next to f32 (ADR 0050), so step 7 needs
+both series. Regenerate the f16 side with the same three scripts (order caveats are identical; the
+codec / full-loop inputs stay on the f32 series on purpose — inputs are dtype-neutral):
+
+```sh
+uv run --with 'transformers==5.14.1' python export_irodori.py --dtype f16     # 2'. six graphs
+uv run --with 'transformers==5.14.1' python irodori_pipeline.py --dtype f16   # 4'. full-loop goldens
+uv run --with descript-audiotools --with einops python export_dacvae.py --dtype f16  # 6'. codec
+```
+
 Order caveats measured in practice: step 2 reads step 5's real latent for the speaker cases
 (`SPEAKER_REAL_CASES`), and step 6 reads step 4's `z` for the decoder cases — so a **full** rebuild
 from scratch runs 2 once more after 5 (2 → 3 → 4 → 5 → 2 → 6 → 7). Incremental regeneration of a
