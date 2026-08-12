@@ -1,8 +1,9 @@
 {
   "workspace": ["./packages/runtime", "./packages/hub", "./packages/models"],
   "tasks": {
-    "verify": "deno fmt --check && deno lint && deno check packages/runtime/mod.ts packages/hub/mod.ts packages/models/mod.ts examples/anima/main.ts examples/sbv2/main.ts examples/sbv2/dump.ts && deno test -A",
+    "verify": "deno fmt --check && deno lint && deno check packages/runtime/mod.ts packages/hub/mod.ts packages/models/mod.ts examples/anima/main.ts examples/sbv2/main.ts examples/sbv2/dump.ts examples/irodori/main.ts && deno test -A",
     "demo:anima": "deno run -A examples/anima/main.ts",
+    "demo:irodori": "deno run -A examples/irodori/main.ts",
     "demo:sbv2": "deno run -A examples/sbv2/main.ts",
     "dump:sbv2": "deno run -A examples/sbv2/dump.ts"
   },
