@@ -31,6 +31,7 @@ import export_irodori as ir
 from karume import patch_irodori
 from karume.ir import IrGraph, IrValue
 from karume.pipeline import export_to_file
+from karume.quantize import quantize_to_int8
 
 #: `_static_scheme_evidence` / `build_cases` が読む config の最小形。
 TEXT_CONFIG = {"pad_token_id": 3, "bos_token_id": 1}
@@ -556,12 +557,13 @@ class TestTargetCli:
     def test_the_default_out_root_is_derived_from_the_weight_directory(self, tmp_path):
         assert ir.default_out_root(tmp_path / "v4-small").name == "irodori-v4-small"
 
-    def test_the_dtype_is_forwarded(self, monkeypatch):
+    @pytest.mark.parametrize("dtype", ["f16", "i8"])
+    def test_the_dtype_is_forwarded(self, monkeypatch, dtype):
         seen: dict[str, object] = {}
         monkeypatch.setattr(ir, "export_series", lambda *_a, **kw: seen.update(kw) or {"dir": "x"})
-        ir.main(["--dtype", "f16"])
+        ir.main(["--dtype", dtype])
 
-        assert seen["dtype"] == "f16"
+        assert seen["dtype"] == dtype
 
 
 def _is_f16_exact(tensor: torch.Tensor) -> bool:
@@ -570,7 +572,7 @@ def _is_f16_exact(tensor: torch.Tensor) -> bool:
 
 
 class TestWeightDtypeSeries:
-    """格納 dtype の系列（ADR 0018 / 0027）— 壊れると**偽 PASS** になる側の規律だけを固定する。
+    """格納 dtype の系列（ADR 0018 / 0019 / 0027 / 0050）— 壊れると**偽 PASS** になる側だけ。
 
     実重みは使わない（配線の規律はモデルに依らない）。数値そのものの検証は Deno 側の E2E と
     emit の適格判定が持つ。
@@ -582,10 +584,11 @@ class TestWeightDtypeSeries:
             dtype: ir.default_out_root(tmp_path / "v4-small", dtype) for dtype in ir.WEIGHT_DTYPES
         }
 
-        assert set(roots) == {"f32", "f16"}
+        assert set(roots) == {"f32", "f16", "i8"}
         assert len(set(roots.values())) == len(roots)
         assert roots["f32"].name == "irodori-v4-small"
         assert roots["f16"].name == "irodori-v4-small-f16"
+        assert roots["i8"].name == "irodori-v4-small-i8"
 
     def test_the_series_name_carries_the_weights_directory_name(self, tmp_path):
         other = ir.default_out_root(tmp_path / "v9-large", "f16")
@@ -601,7 +604,10 @@ class TestWeightDtypeSeries:
             module = TinyResidualProjector()
             before = module.projector.weight.clone()
 
-            assert ir.fake_quant("f32", {"text-proj": module}) == {}
+            quantized = ir.fake_quant("f32", {"text-proj": module})
+
+            assert quantized.reports == {}
+            assert quantized.scales == {}
             assert torch.equal(module.projector.weight, before)
 
     def test_f16_rounds_every_module_it_is_handed(self):
@@ -613,9 +619,10 @@ class TestWeightDtypeSeries:
                 "丸め前から格子に乗っていては検出力が無い"
             )
 
-            report = ir.fake_quant("f16", modules)
+            quantized = ir.fake_quant("f16", modules)
 
-            assert sorted(report) == ["a", "b", "c"]
+            assert sorted(quantized.reports) == ["a", "b", "c"]
+            assert quantized.scales == {}
             for module in modules.values():
                 assert all(_is_f16_exact(tensor) for tensor in module.parameters())
 
@@ -623,6 +630,46 @@ class TestWeightDtypeSeries:
         """`--dtype f16` を指定したのに丸める相手が 0 本、を沈黙させない。"""
         with pytest.raises(SystemExit, match="1 本も無い"):
             ir.fake_quant("f16", {})
+
+    def test_i8_quantizes_only_the_per_channel_types(self):
+        """MUST: i8 が触るのは `QUANT_CHANNEL_AXES` の型の `weight` だけ（ADR 0019）。
+
+        norm 系まで丸めると emit の適格判定（重みスロットだけ圧縮）と食い違い、golden だけが
+        別の重みで計算した値になる。
+        """
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            module = TinyResidualProjector()
+            norm_before = module.residual_norm.weight.clone()
+
+            quantized = ir.fake_quant("i8", {"text-proj": module})
+
+            assert sorted(quantized.scales["text-proj"]) == [
+                "projector.weight",
+                "residual_down.weight",
+                "residual_up.weight",
+            ]
+            assert torch.equal(module.residual_norm.weight, norm_before)
+            for key, scale in quantized.scales["text-proj"].items():
+                weight = module.get_parameter(key)
+                restored = quantize_to_int8(weight, scale).to(torch.float32) * scale
+                assert torch.equal(restored, weight), "i8 の格子に乗っていない"
+
+    def test_i8_lets_a_norm_only_role_through(self):
+        """MUST: norm 単体の役割は i8 で素通り（`f16` と違い「0 本」が正しい状態）。"""
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            modules = {"text-proj": TinyResidualProjector(), "text_norm": ScalingNorm(1.5)}
+
+            quantized = ir.fake_quant("i8", modules)
+
+            assert sorted(quantized.reports) == ["text-proj", "text_norm"]
+            assert sorted(quantized.scales) == ["text-proj"]
+
+    def test_i8_refuses_a_set_with_nothing_quantizable(self):
+        """`--dtype i8` を指定したのに per-channel の対象が全体で 0 本、を沈黙させない。"""
+        with pytest.raises(SystemExit, match="per-channel 量子化できたモジュールが 1 本も無い"):
+            ir.fake_quant("i8", {"text_norm": ScalingNorm(1.5)})
 
     def test_every_loaded_module_reaches_the_fake_quant(self):
         """束ねる相手は `export_series` が `load_*` で組む全部（欠けは golden の食い違いになる）。
@@ -637,3 +684,150 @@ class TestWeightDtypeSeries:
             assert name in handed
         for norm in ("speaker_norm", "text_norm", "caption_norm"):
             assert f'"{norm}": {norm}' in handed
+
+
+class TinyRopeBody(nn.Module):
+    """`assert_rope_lifted` が降格できる buffer を持つ backbone 本体の代役。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embeddings = nn.Linear(4, 4, bias=False)
+        self.register_buffer("inv_freq", torch.ones(2))
+
+
+class TinyBackboneHolder(nn.Module):
+    """`BackboneGraph` が読む形（本体は `backbone` 属性の内側）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = TinyRopeBody()
+
+
+class TinyRopeEncoder(nn.Module):
+    """`SpeakerGraph` が `__init__` で読む属性（`head_dim`）を持つ encoder の代役。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.head_dim = 4
+        self.in_proj = nn.Linear(4, 4, bias=False)
+        self.blocks = nn.ModuleList([nn.Linear(4, 4, bias=False)])
+
+
+class TinyDit(nn.Module):
+    """`DitGraph` が抱える部分木 + **抱えない**枝（`load_dit` が丸ごと組む内側のコピー相当）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.head_dim = 4
+        self.cond_module = nn.Linear(4, 4, bias=False)
+        self.in_proj = nn.Linear(4, 4, bias=False)
+        self.blocks = nn.ModuleList([nn.Linear(4, 4, bias=False)])
+        self.out_norm = ScalingNorm(1.0)
+        self.out_proj = nn.Linear(4, 4, bias=False)
+        self.text_norm = ScalingNorm(1.0)
+        self.caption_norm = ScalingNorm(1.0)
+        self.pretrained_text_backbone = nn.Linear(4, 4, bias=False)
+
+
+class TestTargetScales:
+    """i8 の scale 台帳を**ラッパ内 FQN**へ張り替える表（`TARGET_SCALE_SOURCES`）。
+
+    MUST: ここが崩れると emit が「適格なのに scale が無い」で落ちる（値が壊れる形では
+    通らない）。落ちる場所が遠いので、表とラッパの対応はここで固定する。
+    """
+
+    def test_the_table_covers_every_target(self):
+        assert sorted(ir.TARGET_SCALE_SOURCES) == sorted(ir.TARGETS)
+
+    def _rebased(self, target: str, wrapper: nn.Module, module: nn.Module) -> list[str]:
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            scales = ir.fake_quant("i8", {target: module}).scales
+        return sorted(ir.target_scales(target, wrapper, scales))
+
+    def test_every_wrapper_receives_a_scale_for_each_of_its_weights(self):
+        """MUST: ラッパが持つ per-channel 対象の重みは**全て**張り替え先が見つかること。
+
+        `pytest.importorskip` は `SpeakerGraph` / `DitGraph` が実数形 RoPE 表を作るのに
+        上流実装を引くため（表そのものは張り替えに使わないが `__init__` が呼ぶ）。
+        """
+        pytest.importorskip("irodori_tts")
+        cases = {
+            ir.TARGET_BACKBONE: (TinyBackboneHolder(), ir.BackboneGraph),
+            ir.TARGET_TEXT_PROJ: (TinyResidualProjector(), ir.ProjectorGraph),
+        }
+        for target, (module, wrap) in cases.items():
+            wrapper = wrap(module)
+            expected = sorted(
+                f"{module_name}.weight"
+                for module_name, child in wrapper.named_modules()
+                if isinstance(child, nn.Linear)
+            )
+
+            assert self._rebased(target, wrapper, module) == expected
+
+    def test_the_caption_projector_is_rebased_two_levels_deep(self):
+        """`CaptionProjectorGraph` は `ProjectorGraph` を内包する（接頭辞が 2 段）。"""
+        module = TinyResidualProjector()
+        wrapper = ir.CaptionProjectorGraph(module, ScalingNorm(2.0))
+
+        assert self._rebased(ir.TARGET_CAPTION_PROJ, wrapper, module) == [
+            "projection.projector.projector.weight",
+            "projection.projector.residual_down.weight",
+            "projection.projector.residual_up.weight",
+        ]
+
+    def test_the_duration_predictor_is_rebased(self):
+        module = TinyResidualProjector()
+        wrapper = ir.DurationGraph(module, ScalingNorm(1.0))
+
+        assert self._rebased(ir.TARGET_DURATION, wrapper, module) == [
+            "predictor.projector.weight",
+            "predictor.residual_down.weight",
+            "predictor.residual_up.weight",
+        ]
+
+    def test_the_speaker_encoder_is_rebased(self):
+        pytest.importorskip("irodori_tts")
+        module = TinyRopeEncoder()
+        wrapper = ir.SpeakerGraph(module, ScalingNorm(1.0), 8)
+
+        assert self._rebased(ir.TARGET_SPEAKER, wrapper, module) == [
+            "encoder.blocks.0.weight",
+            "encoder.in_proj.weight",
+        ]
+
+    def test_weights_the_dit_wrapper_does_not_hold_are_dropped(self):
+        """`load_dit` は DiT **丸ごと**を組むので、台帳には使わない枝の scale まで載る。"""
+        pytest.importorskip("irodori_tts")
+        module = TinyDit()
+        wrapper = ir.DitGraph(module, 8)
+
+        rebased = self._rebased(ir.TARGET_DIT, wrapper, module)
+
+        assert rebased == [
+            "blocks.0.weight",
+            "cond_module.weight",
+            "in_proj.weight",
+            "out_proj.weight",
+        ]
+        assert "pretrained_text_backbone.weight" not in rebased
+
+    def test_a_stale_prefix_fails_loudly(self, monkeypatch):
+        """MUST: 1 本も当たらない張り替えを黙って空で返さない（emit まで気づけなくなる）。"""
+        module = TinyResidualProjector()
+        wrapper = ir.ProjectorGraph(module)
+        monkeypatch.setattr(
+            ir,
+            "TARGET_SCALE_SOURCES",
+            {ir.TARGET_TEXT_PROJ: ((ir.TARGET_TEXT_PROJ, "", "stale."),)},
+        )
+
+        with pytest.raises(SystemExit, match="張り替えられなかった"):
+            self._rebased(ir.TARGET_TEXT_PROJ, wrapper, module)
+
+    def test_f32_and_f16_hand_no_scales_to_emit(self):
+        """f16 は scale を持たない（台帳が空なら張り替えも空 — emit も f16 では引かない）。"""
+        wrapper = ir.ProjectorGraph(TinyResidualProjector())
+
+        assert ir.target_scales(ir.TARGET_TEXT_PROJ, wrapper, {}) == {}

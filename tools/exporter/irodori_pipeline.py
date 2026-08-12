@@ -8,12 +8,13 @@ r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop
     cd tools/exporter
     uv run --with 'transformers==5.14.1' python irodori_pipeline.py
     uv run --with 'transformers==5.14.1' python irodori_pipeline.py --dtype f16
+    uv run --with 'transformers==5.14.1' python irodori_pipeline.py --dtype i8
 
-`--dtype f16` は**別系列**（`outputs/series/irodori-v4-small-f16/pipeline/`）へ書く。丸めは
-`export_irodori.fake_quant` を load 直後に当てるので、golden も上流突合の参照も**同じ丸めた
-重み**で計算される（ADR 0018 / 0027 — 系列ごとに golden を焼き直す形）。
+`--dtype f16` / `--dtype i8` は**別系列**（`outputs/series/irodori-v4-small-{f16,i8}/pipeline/`）
+へ書く。丸めは `export_irodori.fake_quant` を load 直後に当てるので、golden も上流突合の参照も
+**同じ丸めた重み**で計算される（ADR 0018 / 0019 / 0027 / 0050 — 系列ごとに golden を焼き直す形）。
 
-出力（既定 `outputs/series/irodori-v4-small{,-f16}/pipeline/`・`.gitignore` 配下）:
+出力（既定 `outputs/series/irodori-v4-small{,-f16,-i8}/pipeline/`・`.gitignore` 配下）:
 
     meta.json                入力テキスト / caption / S / seed / CFG scale / forward 数 /
                              t スケジュール / 供給源、および常設門の実測値
@@ -103,7 +104,7 @@ MIN_SECONDS, MAX_SECONDS = 0.5, 30.0
 #: **式の取り違え**（CFG の符号・スケール・t スケジュール・マスクの区間割り）は値域と
 #: 同じ O(1) で出る — 実際、CFG の有無だけで z は 5.56 / 3.23 動く（`cfgEffectMaxAbs`）。
 #:
-#: **圧縮系列（`--dtype f16`）でも同じ閾値を掛ける**: 丸めはグラフ経路と上流経路の**両方**へ
+#: **圧縮系列（`--dtype f16` / `i8`）でも同じ閾値を掛ける**: 丸めはグラフ経路と上流経路の**両方**へ
 #: 同じ 1 回だけ当たる（`fake_quant` が丸めた `dit` を上流 `sample_euler_rf_cfg` もそのまま
 #: 使う）ので、ここで測る差は f32 系列と同じ「実装差だけ」であり、量子化誤差は両辺で相殺する。
 #: 桁が変わりうるのは丸めが条件数の悪い領域を踏んだ場合だけで、それは**実測で決着させる**
@@ -311,8 +312,18 @@ def run_case(
     model_config: Mapping[str, Any],
     config: Any,
     caps: Mapping[str, int],
+    *,
+    frames_override: int | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-    """1 ケースぶんのホスト経路を回して `(保存テンソル, meta)` を返す。"""
+    """1 ケースぶんのホスト経路を回して `(保存テンソル, meta)` を返す。
+
+    `frames_override` は **S を外から固定する**ための注入口（既定 `None` = duration の予測
+    どおり）。golden の emit は必ず `None` で呼ぶ（S も golden の一部）。使うのは
+    `measure_quant_irodori.py` で、量子化構成の間で波形長を揃えないと SNR / LSD が定義
+    できないため（`measure_quant_sbv2.py` が dump 側 `w_ceil` で時間グリッドを固定するのと
+    同じ理由）。**予測そのもの**は `meta["predictedS"]` に残す — S ドリフトはこの台本が測る
+    量ではなく、測る側が読む診断値。
+    """
     bos_id = int(text_config["bos_token_id"])
     embed_dim = int(config.timestep_embed_dim)
     latent_dim = int(config.patched_latent_dim)
@@ -385,7 +396,8 @@ def run_case(
         )
 
     # ---- ⑤ S 決定 ----
-    steps, duration_meta = sequence_length(log_frames, ex.CODEC_FRAME_RATE)
+    predicted, duration_meta = sequence_length(log_frames, ex.CODEC_FRAME_RATE)
+    steps = predicted if frames_override is None else frames_override
 
     # ---- ⑥ 条件の右 pad と区間長 ----
     # caption が空のときは state をゼロのまま置き、マスクを全 0 にする（上流
@@ -464,6 +476,9 @@ def run_case(
         ),
         "zAbsMax": float(f"{float(latent.abs().max()):.6f}"),
     }
+    if frames_override is not None:
+        # MUST: 固定したときだけ足す（golden の meta.json を系列間で動かさない）。
+        meta["predictedS"] = predicted
     return tensors, meta
 
 
@@ -748,7 +763,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
 
     meta_payload = {
         "dtype": dtype,
-        "fakeQuant": quantized,
+        "fakeQuant": quantized.reports,
         "steps": NUM_STEPS,
         "initScale": INIT_SCALE,
         "cfgRange": [CFG_MIN_T, CFG_MAX_T],
@@ -768,7 +783,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
 
 
 def default_out_dir(model_dir: Path, dtype: str = "f32") -> Path:
-    """既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16}/pipeline/`）。
+    """既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16,-i8}/pipeline/`）。
 
     系列 root の綴りは `export_irodori.default_out_root` と同一 —
     `pipeline/` はその下の 1 段（グラフのターゲットと並ぶ席）。
@@ -785,7 +800,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--dtype",
         choices=ex.WEIGHT_DTYPES,
         default="f32",
-        help="重みの格納 dtype（f16 は golden を fake-quant 後の重みで焼き直す — ADR 0018 / 0027）",
+        help="重みの格納 dtype（f16 / i8 は golden を fake-quant 後の重みで焼き直す"
+        " — ADR 0018 / 0019 / 0027 / 0050）",
     )
     args = parser.parse_args(argv)
     out_dir = default_out_dir(args.model_dir, args.dtype) if args.out is None else args.out

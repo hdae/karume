@@ -8,6 +8,7 @@ codec（G6 / G7）は後続の波でこの台本にターゲットとして足�
     uv run --with 'transformers==5.14.1' python export_irodori.py
     uv run --with 'transformers==5.14.1' python export_irodori.py --target backbone
     uv run --with 'transformers==5.14.1' python export_irodori.py --dtype f16
+    uv run --with 'transformers==5.14.1' python export_irodori.py --dtype i8
 
 transformers は **5.14.1 でピン**する（`export_embeddinggemma.py` と同じ理由 — モデリング
 コードが変わるとグラフ形が変わる。加えて `karume.patch_irodori` が
@@ -170,12 +171,15 @@ speaker / duration が要るパッチは 2 つ（complex RoPE の実数化・ran
 同値検証はテキスト系 3 本と同じ厳しさのまま通る（head_dim が変われば 1 ulp ずれうる —
 その時は 0 のまま落ちるので、緩める前に幾何を疑う）。
 
-## 格納 dtype の系列（ADR 0018 / 0027）
+## 格納 dtype の系列（ADR 0018 / 0019 / 0027 / 0050）
 
-`--dtype f16` は**別系列**（`irodori-v4-small-f16/`）へ書き出す。同居させると f32 系列の網
-（実測から導いたターゲット別 tolerance）が圧縮資産へ黙って掛かるため、系列は必ず分ける。
-丸め（fake-quant）は `load_*` の直後・**参照 / golden の採取より前**に当てる
-（`fake_quant` の順序 MUST）。
+`--dtype f16` / `--dtype i8` はそれぞれ**別系列**（`irodori-v4-small-f16/` /
+`irodori-v4-small-i8/`）へ書き出す。同居させると f32 系列の網（実測から導いたターゲット別
+tolerance）が圧縮資産へ黙って掛かるため、系列は必ず分ける。丸め（fake-quant）は `load_*` の
+直後・**参照 / golden の採取より前**に当てる（`fake_quant` の順序 MUST）。
+
+i8 は per-channel symmetric（ADR 0019）で、丸めと同時に採れる scale 台帳を emit へ渡す
+（{@link TARGET_SCALE_SOURCES} が「素のモジュール内 FQN → ラッパ内 FQN」の張り替えを持つ）。
 
 MUST: `--dtype` は emit 専用（`export_sbv2.py` の `--verify` 排他と同じ性格）。この台本は
 検証専用モードを持たないので機械的な排他は要らないが、丸めた重みで採った参照を
@@ -197,6 +201,7 @@ import json
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 import torch
@@ -215,14 +220,14 @@ from karume.ir import IrGraph
 from karume.patch_anima import ROPE_BUFFER_NAMES, assert_rope_lifted
 from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
-from karume.quantize import round_weights_to_f16
+from karume.quantize import QUANT_CHANNEL_AXES, fake_quant_int8, round_weights_to_f16
 
 #: 実重みの置き場（`hf download Aratako/Irodori-TTS-v4-Small` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "irodori" / "v4-small"
 
-#: 書き出せる格納 dtype。**i8 / w8a8 は後続の波**（S〈フレーム数〉が動くと latent 門の
-#: 「S / forwards 完全一致」が壊れるので、混成表の裁定が先 — 量子化 recon の gateDesign）。
-WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16")
+#: 書き出せる格納 dtype。`i8` は波 2（ADR 0050 決定 6 の分岐点 = S ドリフトの実測材料）で
+#: 足した。**w8a8 は後続の波**（活性量子化は dist の席と判別帯 E2E が要る）。
+WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
 
 #: モデル実装（GitHub `Aratako/Irodori-TTS` の clone）の置き場。
 DEFAULT_SOURCE_DIR = INPUTS_ROOT / "irodori" / "Irodori-TTS"
@@ -1682,11 +1687,83 @@ def _graph_summary(graph: IrGraph, path: Path) -> dict[str, Any]:
     }
 
 
-def fake_quant(dtype: str, modules: Mapping[str, nn.Module]) -> dict[str, str]:
+class FakeQuantResult(NamedTuple):
+    """{@link fake_quant} の戻り（丸めの要約と、i8 の per-channel scale 台帳）。"""
+
+    #: 役割名 → 丸めた本数の要約（`--dtype` を渡したのに 0 本、を沈黙させないための計数）。
+    reports: dict[str, str]
+    #: 役割名 → **素のモジュール内 FQN** → scale（i8 以外は空）。emit が引く**ラッパ内 FQN**
+    #: への張り替えは {@link target_scales} が行う。
+    scales: dict[str, Mapping[str, torch.Tensor]]
+
+
+#: ターゲット → そのグラフに載せる scale の出どころ `(役割, 素の FQN 接頭辞,
+#: ラッパ内 FQN 接頭辞)` の並び（i8 のみ使う）。
+#:
+#: MUST: グラフラッパのコンストラクタと同じ綴りにする — ラッパは `load_*` が返した
+#: モジュールを別の属性名で抱えるので、台帳のキー（素のモジュール内 FQN）は emit が引く
+#: キー（export したモジュール内 FQN）と一致しない。食い違えば `target_scales` か emit の
+#: どちらかが fail loudly で落ちる（黙って f32 格納に落ちる経路は無い）。
+TARGET_SCALE_SOURCES: Mapping[str, tuple[tuple[str, str, str], ...]] = MappingProxyType(
+    {
+        # `BackboneGraph` は `backbone.backbone`（ModernBERT 本体）を `model` に持つ。
+        TARGET_BACKBONE: ((TARGET_BACKBONE, "backbone.", "model."),),
+        TARGET_TEXT_PROJ: ((TARGET_TEXT_PROJ, "", "projector."),),
+        # `CaptionProjectorGraph` は `ProjectorGraph` を `projection` に内包する（2 段）。
+        TARGET_CAPTION_PROJ: ((TARGET_CAPTION_PROJ, "", "projection.projector."),),
+        TARGET_SPEAKER: ((TARGET_SPEAKER, "", "encoder."),),
+        TARGET_DURATION: ((TARGET_DURATION, "", "predictor."),),
+        # `DitGraph` は DiT 本体の部分木を**同じ属性名**で持つ（張り替え不要）。台帳には
+        # `load_dit` が丸ごと組む内側のコピー（backbone 等）も載るが、ラッパの
+        # `named_parameters` に無いので落ちる。
+        TARGET_DIT: ((TARGET_DIT, "", ""),),
+    }
+)
+
+
+def _has_quantizable_weights(module: nn.Module) -> bool:
+    """per-channel i8 の対象型（`QUANT_CHANNEL_AXES`）を 1 本でも含むか。"""
+    types = tuple(QUANT_CHANNEL_AXES)
+    return any(isinstance(child, types) for child in module.modules())
+
+
+def target_scales(
+    target: str, wrapper: nn.Module, scales: Mapping[str, Mapping[str, torch.Tensor]]
+) -> dict[str, torch.Tensor]:
+    """役割ごとの scale 台帳を、そのターゲットの**ラッパ内 FQN**へ張り替えて 1 本に束ねる。
+
+    emit は initializer のテンソルキー（= export したモジュール内 FQN）で scale を引く
+    （`karume.emit._store_i8`）ので、`load_*` が返す素のモジュール基準の台帳をそのまま
+    渡すと 1 本も当たらない。張り替え表は {@link TARGET_SCALE_SOURCES}。
+
+    ここで落とすのは**ラッパに無い重み**だけ（`dit` の台帳は使わない内側のコピーまで含む）。
+    逆向き（ラッパにあるのに台帳に無い）は emit が fail loudly で落とす — 適格な重みスロットに
+    scale が無ければ i8 格納にできないため、黙って f32 へ落ちる経路は無い。
+    """
+    if not scales:
+        return {}
+    owned = {name for name, _ in wrapper.named_parameters()}
+    picked: dict[str, torch.Tensor] = {}
+    for role, source, destination in TARGET_SCALE_SOURCES[target]:
+        for key, scale in scales.get(role, {}).items():
+            if not key.startswith(source):
+                continue
+            rebased = destination + key[len(source) :]
+            if rebased in owned:
+                picked[rebased] = scale
+    if not picked:
+        raise SystemExit(
+            f"{target}: scale 台帳が 1 本もラッパ内 FQN へ張り替えられなかった"
+            f"（{TARGET_SCALE_SOURCES[target]} の接頭辞がラッパの構成と食い違っている）"
+        )
+    return picked
+
+
+def fake_quant(dtype: str, modules: Mapping[str, nn.Module]) -> FakeQuantResult:
     """格納 dtype の表現可能値へ**実効重み**を丸める（f32 は何もしない）。
 
-    ADR 0006 / 0018 / 0027 の fake-quant。丸めた本数を役割名で引ける形にして返す
-    （`--dtype f16` を渡したのに 0 本、を沈黙させないため — 総数 0 は落とす）。
+    ADR 0006 / 0018 / 0019 / 0027 / 0050 の fake-quant。丸めた本数を役割名で引ける形にして
+    返す（`--dtype f16` を渡したのに 0 本、を沈黙させないため — 総数 0 は落とす）。
 
     MUST（順序）: ① `load_*` の**直後**に呼ぶ。この台本の重みは `convert_dacvae.py` /
     チェックポイントの時点で実効重み（`remove_weight_norm` 相当は変換時に焼き込み済み・
@@ -1700,20 +1777,35 @@ def fake_quant(dtype: str, modules: Mapping[str, nn.Module]) -> dict[str, str]:
     入力に使う形）は保たれる。1 つでも漏らすと、漏れた側だけが元の重みで計算した値を
     golden に載せる。
 
-    NOTE: 丸めるのは f32 のパラメータ / バッファだけ（`round_weights_to_f16`）。グラフ定数
-    （帯マスク・RoPE 表・`sym_prefix_slice` の添字表）はモジュールの重みではないので触らず、
+    NOTE: f16 で丸めるのは f32 のパラメータ / バッファだけ（`round_weights_to_f16`）。グラフ
+    定数（帯マスク・RoPE 表・`sym_prefix_slice` の添字表）はモジュールの重みではないので触らず、
     emit 側の適格判定でも f32 格納のまま残る。
+
+    NOTE: i8 が触るのは `QUANT_CHANNEL_AXES` の型（Linear / Conv / Embedding）の `weight` だけ
+    （ADR 0019）。bias も norm 系の weight も**丸めない** — emit の適格判定でも重みスロット
+    以外は f32 格納なので、両者は整合する。したがって 3 つの norm は i8 では素通りが正しく、
+    「対象 0 本」を役割単位では落とさない（**全体で** 0 本なら落とす）。
     """
     if dtype == "f32":
-        return {}
-    reports = {
-        name: round_weights_to_f16(module).describe() for name, module in sorted(modules.items())
-    }
+        return FakeQuantResult({}, {})
+    reports: dict[str, str] = {}
+    scales: dict[str, Mapping[str, torch.Tensor]] = {}
+    for name, module in sorted(modules.items()):
+        if dtype != "i8":
+            reports[name] = f"格納 f16 へ丸めた — {round_weights_to_f16(module).describe()}"
+        elif _has_quantizable_weights(module):
+            int8 = fake_quant_int8(module)
+            scales[name] = int8.scales
+            reports[name] = f"格納 i8 へ丸めた — {int8.describe()}"
+        else:
+            reports[name] = "格納 f32 のまま（per-channel の対象型を持たない）"
     for name, report in reports.items():
-        print(f"[fake-quant] {name}: f16 表現可能値へ丸めた — {report}", flush=True)
+        print(f"[fake-quant] {name}: {report}", flush=True)
     if not reports:
         raise SystemExit(f"格納 {dtype} を指定したが丸める対象のモジュールが 1 本も無い")
-    return reports
+    if dtype == "i8" and not scales:
+        raise SystemExit("格納 i8 を指定したが per-channel 量子化できたモジュールが 1 本も無い")
+    return FakeQuantResult(reports, scales)
 
 
 def export_series(
@@ -1939,6 +2031,7 @@ def export_series(
             symbol_names=(axis.symbol,),
             preserved=axis.preserved,
             weight_dtype=dtype,
+            weight_scales=target_scales(target, graphs[target], quantized.scales),
         )
         io_files = _write_io(graph, by_case, pristine[target], target_dir)
         written[target] = {
@@ -1948,7 +2041,7 @@ def export_series(
     return {
         "dir": str(out_dir),
         "dtype": dtype,
-        "fake_quant": quantized,
+        "fake_quant": quantized.reports,
         "targets": written,
         "case_lengths": {name: int(ids.shape[1]) for name, _kind, ids in cases},
         "speaker_case_lengths": {name: int(latent.shape[1]) for name, latent in speaker_cases},
@@ -1968,11 +2061,11 @@ def export_series(
 
 
 def default_out_root(model_dir: Path, dtype: str = "f32") -> Path:
-    """生成物の既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16}/`）。
+    """生成物の既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16,-i8}/`）。
 
     ターゲット名のサブディレクトリは `export_series` が 1 段掘る（`export_sbv2.py` と同じ形）。
 
-    MUST: dtype ごとに別ディレクトリ（ADR 0018 / 0027）— 同居させると f32 系列の網（実測から
+    MUST: dtype ごとに別ディレクトリ（ADR 0018 / 0019 / 0027）— 同居させると f32 系列の網（実測から
     導いたターゲット別 tolerance）が圧縮資産へ黙って掛かる。綴りは `karume.dist` の
     `irodori_series_name` + dtype 接尾と一致させる（書き手と読み手が同じ 1 語から組む）。
     """
@@ -1989,15 +2082,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=Path,
         default=None,
         help="出力先（既定は --dtype ごとの系列 —"
-        " outputs/series/irodori-<--model-dir のディレクトリ名>{,-f16}/）",
+        " outputs/series/irodori-<--model-dir のディレクトリ名>{,-f16,-i8}/）",
     )
     parser.add_argument("--sym-max", type=int, default=SYM_MAX)
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f32",
-        help="重みの格納 dtype（f16 は fake-quant してから適格スロットだけ圧縮格納する"
-        " — ADR 0018 / 0027。**emit 専用**）",
+        help="重みの格納 dtype（f16 / i8 は fake-quant してから適格スロットだけ圧縮格納する"
+        " — ADR 0018 / 0019 / 0027 / 0050。**emit 専用**）",
     )
     parser.add_argument(
         "--target",

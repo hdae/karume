@@ -27,6 +27,7 @@ from torch import nn
 import export_dacvae as ex
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_to_file
+from karume.quantize import quantize_to_int8
 
 
 class Scale(nn.Module):
@@ -496,7 +497,7 @@ def _is_f16_exact(tensor: torch.Tensor) -> bool:
 
 
 class TestWeightDtypeSeries:
-    """格納 dtype の系列（ADR 0018 / 0027）— 壊れると**偽 PASS** になる側の規律だけを固定する。
+    """格納 dtype の系列（ADR 0018 / 0019 / 0027 / 0050）— 壊れると**偽 PASS** になる側だけ。
 
     実重みは使わない（配線の規律はモデルに依らない）。数値そのものの検証は Deno 側の E2E と
     emit の適格判定が持つ。
@@ -508,10 +509,11 @@ class TestWeightDtypeSeries:
             dtype: ex.default_out_root(ex.DEFAULT_MODEL_DIR, dtype) for dtype in ex.WEIGHT_DTYPES
         }
 
-        assert set(roots) == {"f32", "f16"}
+        assert set(roots) == {"f32", "f16", "i8"}
         assert len(set(roots.values())) == len(roots)
         assert roots["f32"].name == "dacvae-32dim"
         assert roots["f16"].name == "dacvae-32dim-f16"
+        assert roots["i8"].name == "dacvae-32dim-i8"
 
     def test_f32_leaves_the_weights_untouched(self):
         # MUST: 種を蒔いたら元へ戻す（`fork_rng`）— 大域 RNG を置き去りにすると、後続の
@@ -521,7 +523,10 @@ class TestWeightDtypeSeries:
             model = TinyCodec(weight_norm=False)
             before = model.encoder.weight.clone()
 
-            assert ex._fake_quant("f32", model) is None
+            quantized = ex._fake_quant("f32", model)
+
+            assert quantized.report is None
+            assert quantized.scales == {}
             assert torch.equal(model.encoder.weight, before)
 
     def test_f16_rounds_every_parameter_of_the_exported_model(self):
@@ -530,10 +535,28 @@ class TestWeightDtypeSeries:
             model = TinyCodec(weight_norm=False)
             assert not _is_f16_exact(model.encoder.weight), "丸め前から格子に乗っては検出力が無い"
 
-            report = ex._fake_quant("f16", model)
+            quantized = ex._fake_quant("f16", model)
 
-            assert report is not None
+            assert quantized.report is not None
+            assert quantized.scales == {}
             assert all(_is_f16_exact(tensor) for tensor in model.parameters())
+
+    def test_i8_quantizes_the_convolutions_and_hands_out_scales(self):
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            model = TinyCodec(weight_norm=False)
+
+            quantized = ex._fake_quant("i8", model)
+
+            assert sorted(quantized.scales) == [
+                "encoder.weight",
+                "quantizer.in_proj.weight",
+                "quantizer.out_proj.weight",
+            ]
+            for key, scale in quantized.scales.items():
+                weight = model.get_parameter(key)
+                restored = quantize_to_int8(weight, scale).to(torch.float32) * scale
+                assert torch.equal(restored, weight), "i8 の格子に乗っていない"
 
     def test_a_lifted_snake_alpha_stays_f32(self):
         """降格済みの `alpha` は重みスロットではない（lifted 定数）ので**丸めない**。
@@ -554,3 +577,62 @@ class TestWeightDtypeSeries:
 
             assert torch.equal(model[0].alpha, alpha)
             assert _is_f16_exact(model[1].weight)
+
+
+class TestTargetScales:
+    """i8 の scale 台帳を**ラッパ内 FQN**へ張り替える表（`TARGET_SCALE_SOURCES`）。
+
+    MUST: ここが崩れると emit が「適格なのに scale が無い」で落ちる（値が壊れる形では
+    通らない）。落ちる場所が遠いので、表とラッパの対応はここで固定する。
+    """
+
+    def _quantized(self) -> tuple[nn.Module, dict[str, torch.Tensor]]:
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            model = TinyCodec(weight_norm=False)
+            return model, dict(ex._fake_quant("i8", model).scales)
+
+    def test_the_table_covers_every_target(self):
+        assert sorted(ex.TARGET_SCALE_SOURCES) == sorted(ex.TARGETS)
+
+    def test_the_decoder_takes_only_its_own_branch(self):
+        """`quantizer.out_proj` は `out_proj` へ張り替え、encoder / in_proj は落とす。"""
+        model, scales = self._quantized()
+        wrapper = ex.DecoderGraph(model.quantizer.out_proj, model.decoder)
+
+        picked = ex._target_scales(ex.TARGET_DECODER, wrapper, scales)
+
+        assert sorted(picked) == ["out_proj.weight"]
+        assert torch.equal(picked["out_proj.weight"], scales["quantizer.out_proj.weight"])
+
+    def test_the_encoder_gets_the_front_rows_of_the_in_proj_scale(self):
+        """MUST: 切り詰めた `in_proj` の scale は本体の**前半行そのもの**（引き直さない）。
+
+        引き直すと f32 の割り算で 1ulp 動きうるので、emit の逆変換ビット一致検査が落ちる。
+        ここでは「emit が実際にする検査」を同じ式で踏んで、通ることまで確かめる。
+        """
+        model, scales = self._quantized()
+        trimmed = ex.truncated_in_proj(model.quantizer.in_proj)
+        wrapper = ex.EncoderGraph(model.encoder, trimmed)
+
+        picked = ex._target_scales(ex.TARGET_ENCODER, wrapper, scales)
+
+        assert sorted(picked) == ["encoder.weight", "in_proj.weight"]
+        scale = picked["in_proj.weight"]
+        assert torch.equal(scale, scales["quantizer.in_proj.weight"][: trimmed.out_channels])
+        restored = quantize_to_int8(trimmed.weight, scale).to(torch.float32) * scale
+        assert torch.equal(restored, trimmed.weight), "emit の逆変換ビット一致検査に落ちる形"
+
+    def test_a_missing_in_proj_scale_fails_loudly(self):
+        model, scales = self._quantized()
+        wrapper = ex.EncoderGraph(model.encoder, ex.truncated_in_proj(model.quantizer.in_proj))
+        del scales[ex.FULL_IN_PROJ_KEY]
+
+        with pytest.raises(SystemExit, match="切り詰めの対応が取れない"):
+            ex._target_scales(ex.TARGET_ENCODER, wrapper, scales)
+
+    def test_f16_hands_no_scales_to_emit(self):
+        model = TinyCodec(weight_norm=False)
+        wrapper = ex.DecoderGraph(model.quantizer.out_proj, model.decoder)
+
+        assert ex._target_scales(ex.TARGET_DECODER, wrapper, {}) == {}
