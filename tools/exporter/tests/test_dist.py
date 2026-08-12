@@ -52,8 +52,10 @@ from karume.dist import (
     SBV2_WEIGHTS,
     SHARED_DIRNAME,
     AnimaSources,
+    Artifact,
     DistError,
     IrodoriSources,
+    ModelPlan,
     Sbv2Sources,
     WeightFiles,
     anima_plan,
@@ -177,6 +179,24 @@ def _ref(path: str) -> dict[str, Any]:
 
 def _present(out_dir: Path) -> list[str]:
     return sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
+
+
+def _synthetic_plan(name: str, rel_path: str, payload: bytes) -> ModelPlan:
+    """1 役だけを持つ最小の計画（配置と共有の畳み込みだけを観測するための合成）。
+
+    中身は生成物（`payload`）で持つ — 系列の偽資産を組まずに「どのモデルがどのバイト列を
+    主張するか」だけを作り分けられる。
+    """
+    return ModelPlan(
+        name=name,
+        pipeline="anima/1",
+        artifacts={"w": Artifact(rel_path=rel_path, payload=payload)},
+        weights={"w": {"f16": WeightFiles(file="w")}},
+        assets={},
+        quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
+        default_quant="f16",
+        pipeline_config={},
+    )
 
 
 @pytest.fixture
@@ -405,6 +425,38 @@ class TestManifestLimits:
         oversized = {"table": {f"k{index}": index for index in range(40_000)}}
         with pytest.raises(DistError, match="pipelineConfig"):
             assert_manifest_limits(self._manifest({"m": self._model(oversized)}))
+
+
+class TestPlanGates:
+    """`plans` だけから決まる検査は**最初の 1 バイトを書く前**（dist.py 冒頭の MUST）。
+
+    数 GB を並べ切ってから落ちると、`karume.json` の無い / 前回のままの中途半端なツリーが残る。
+    """
+
+    def test_it_refuses_too_many_models_before_writing_anything(self, tmp_path: Path) -> None:
+        plans = [
+            _synthetic_plan(f"m{index}", "w/model.safetensors", f"weights-{index}".encode())
+            for index in range(33)
+        ]
+        out_dir = tmp_path / "models" / "too-many"
+        with pytest.raises(DistError, match="models が 33 件"):
+            assemble_family(plans, out_dir, "m0")
+        assert not out_dir.exists()
+
+    def test_it_refuses_a_missing_input_the_storage_gate_never_looks_at(
+        self, tmp_path: Path
+    ) -> None:
+        """格納 dtype を要求しない役割（tokenizer）の欠落も**配置の前**に落ちる。
+
+        要求表に載る役割は計画段の {@link assert_storage} が実在まで見るので、素通しされる
+        役割だけが「配置の途中で落ちる」経路として残っていた。
+        """
+        sources = _build_series(tmp_path / "series")
+        (sources.tokenizers / "qwen2-tokenizer.json").unlink()
+        out_dir = tmp_path / "models" / "anima-turbo"
+        with pytest.raises(DistError, match="組み立ての入力が無い"):
+            _assemble_anima(sources, out_dir)
+        assert not out_dir.exists()
 
 
 class TestManifest:
@@ -684,6 +736,31 @@ class TestFamilyAssembly:
         after = assemble_family(plans, out_dir, "anima-turbo")
         assert before == after
         assert verify_dist(out_dir)
+
+    def test_it_never_folds_a_path_that_two_byte_strings_both_claim(self, tmp_path: Path) -> None:
+        """同じ相対 path に畳める組が 2 つあるとき、どの組も畳まない（席は path で 1 つだけ）。
+
+        畳むと後の組が先の組の `shared/` 実体を上書きし、先の組のモデルは自分の manifest が
+        宣言する sha256 とは**別のバイト列**を読む配布形になる。長さを揃えてあるので
+        `verify_dist` の size 突合も重複 path の 3 点セット突合も緑のまま = 沈黙する経路。
+        """
+        rel_path = "text_encoder/model.safetensors"
+        first, second = b"weights-D1", b"weights-D2"
+        assert len(first) == len(second)
+        plans = [
+            _synthetic_plan(name, rel_path, payload)
+            for name, payload in (("A", first), ("B", first), ("C", second), ("D", second))
+        ]
+        out_dir = tmp_path / "models" / "contested"
+        manifest = assemble_family(plans, out_dir, "A")
+
+        for name, payload in (("A", first), ("B", first), ("C", second), ("D", second)):
+            ref = manifest["models"][name]["weights"]["w"]["f16"]["file"]
+            assert (out_dir / ref["path"]).read_bytes() == payload, name
+            assert ref["sha256"] == hashlib.sha256(payload).hexdigest(), name
+            assert ref["size"] == len(payload), name
+        assert not (out_dir / SHARED_DIRNAME).exists()
+        assert sorted(verify_dist(out_dir)) == sorted(f"{name}/{rel_path}" for name in "ABCD")
 
     def test_it_refuses_a_duplicated_model_name(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")

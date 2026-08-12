@@ -50,6 +50,7 @@ import json
 import os
 import re
 import shutil
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
@@ -334,15 +335,23 @@ def _fold_shared(
     MUST: 一致の条件は **モデルサブツリー内の相対 path と sha256 の両方**（ADR 0041 §5 の
     「path の一致で共有」を、中身が同じであることまで確かめてから成立させる）。中身違いを
     同じ席へ寄せると、どちらのモデルかで別の重みが黙って読まれる。
+
+    MUST: **1 つの相対 path が持てる席は 1 つだけ**（`shared/<相対 path>` は path だけで決まる）
+    — 同じ path に畳める組が 2 つ以上あるときは、どの組も畳まない（各モデルのサブツリーに
+    独立コピーのまま残す）。畳むと後の組が先の組の実体を上書きし、先の組のモデルが**別の中身**
+    を指す manifest で配られる（{@link verify_dist} は sha256 を採り直さないので沈黙する）。
     """
     groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for plan in plans:
         for role, artifact in plan.artifacts.items():
             key = (artifact.rel_path, digests[placed[(plan.name, role)]])
             groups.setdefault(key, []).append((plan.name, role))
-    for (rel_path, digest), members in groups.items():
-        if len({model for model, _ in members}) < 2:
+    foldable = [key for key, members in groups.items() if len({model for model, _ in members}) >= 2]
+    seats = Counter(rel_path for rel_path, _ in foldable)
+    for rel_path, digest in foldable:
+        if seats[rel_path] > 1:
             continue
+        members = groups[(rel_path, digest)]
         target = f"{SHARED_DIRNAME}/{rel_path}"
         (out_dir / target).parent.mkdir(parents=True, exist_ok=True)
         (out_dir / target).unlink(missing_ok=True)
@@ -382,25 +391,76 @@ def _model_entry(plan: ModelPlan, refs: Mapping[str, dict[str, Any]]) -> dict:
     }
 
 
+def _assert_model_scale(
+    name: str,
+    *,
+    weights: int,
+    assets: int,
+    quants: int,
+    pipeline_config: Mapping[str, Any],
+) -> None:
+    """1 モデルぶんの規模上限（ADR 0041 §7）。件数だけを受けるのは、同じ規則を計画
+    （{@link ModelPlan}）と manifest の両方から掛けるため — 上限の綴りは 1 箇所に置く。
+    """
+    for key, count, limit in (
+        ("weights", weights, MAX_WEIGHTS),
+        ("assets", assets, MAX_ASSETS),
+        ("quants", quants, MAX_QUANTS),
+    ):
+        if count > limit:
+            raise DistError(f"{name}.{key} が {count} 件で上限 {limit} を超えた")
+    config_bytes = len(json.dumps(dict(pipeline_config), ensure_ascii=False).encode("utf-8"))
+    if config_bytes > MAX_PIPELINE_CONFIG_BYTES:
+        raise DistError(
+            f"{name}.pipelineConfig が {config_bytes} バイトで上限"
+            f" {MAX_PIPELINE_CONFIG_BYTES} を超えた"
+        )
+
+
+def assert_plan_limits(plans: Sequence[ModelPlan]) -> None:
+    """計画だけから決まる規模上限（ADR 0041 §7）を**配置の前**に落とす。
+
+    `MAX_MANIFEST_BYTES` はここに無い — manifest 全体の綴りは置いた現物の
+    `{path, size, sha256}` が決まるまで測れないので、{@link assert_manifest_limits} に残る。
+    """
+    if len(plans) > MAX_MODELS:
+        raise DistError(f"models が {len(plans)} 件で上限 {MAX_MODELS} を超えた")
+    for plan in plans:
+        _assert_model_scale(
+            plan.name,
+            weights=len(plan.weights),
+            assets=len(plan.assets),
+            quants=len(plan.quants),
+            pipeline_config=plan.pipeline_config,
+        )
+
+
+def assert_plan_sources(plans: Sequence[ModelPlan]) -> None:
+    """計画が指す入力ファイルが全部実在することを**配置の前**に落とす。
+
+    格納 dtype の要求表（{@link assert_storage}）は要求の無い役割を素通しするので、tokenizer の
+    ような「dtype を要求しないファイル」の欠落だけが計画段をすり抜けて配置の**途中**で出ていた。
+    出所が生成物（`payload`）の {@link Artifact} は書く中身を既に持っているので対象外。
+    """
+    for plan in plans:
+        for role, artifact in plan.artifacts.items():
+            if artifact.source is not None and not artifact.source.is_file():
+                raise DistError(f"{plan.name}.{role}: 組み立ての入力が無い: {artifact.source}")
+
+
 def assert_manifest_limits(manifest: Mapping[str, Any]) -> None:
     """規模上限（ADR 0041 §7）を焼く側で先に落とす。"""
     models = manifest["models"]
     if len(models) > MAX_MODELS:
         raise DistError(f"models が {len(models)} 件で上限 {MAX_MODELS} を超えた")
     for name, model in models.items():
-        for key, limit in (
-            ("weights", MAX_WEIGHTS),
-            ("assets", MAX_ASSETS),
-            ("quants", MAX_QUANTS),
-        ):
-            if len(model[key]) > limit:
-                raise DistError(f"{name}.{key} が {len(model[key])} 件で上限 {limit} を超えた")
-        config_bytes = len(json.dumps(model["pipelineConfig"], ensure_ascii=False).encode("utf-8"))
-        if config_bytes > MAX_PIPELINE_CONFIG_BYTES:
-            raise DistError(
-                f"{name}.pipelineConfig が {config_bytes} バイトで上限"
-                f" {MAX_PIPELINE_CONFIG_BYTES} を超えた"
-            )
+        _assert_model_scale(
+            name,
+            weights=len(model["weights"]),
+            assets=len(model["assets"]),
+            quants=len(model["quants"]),
+            pipeline_config=model["pipelineConfig"],
+        )
     total = len(manifest_text(manifest).encode("utf-8"))
     if total > MAX_MANIFEST_BYTES:
         raise DistError(f"manifest が {total} バイトで上限 {MAX_MANIFEST_BYTES} を超えた")
@@ -417,7 +477,10 @@ def assemble_family(
     """計画済みのモデル群を 1 リポへ組み立て、`karume.json` を書いて manifest を返す。
 
     ① 各モデルのサブツリーへ置く → ② 共有ファイルを `shared/` へ畳む → ③ 現物から manifest。
-    検査は計画（`plans` を組む段）で済んでいるので、ここから先は落ちない前提で書ける。
+
+    MUST: `plans` 全体に掛かる検査は**最初の 1 バイトを書く前**に全部済ませる（出力ディレクトリ
+    すら作らない）— 途中で落ちると数 GB を並べ直すことになり、`karume.json` の無い / 古いままの
+    中途半端なツリーが残る。ここから先（配置・畳み込み・manifest）は落ちない前提で書ける。
     """
     if not plans:
         raise DistError("組み立てるモデルが 1 つも無い")
@@ -426,6 +489,8 @@ def assemble_family(
         raise DistError(f"モデル名が重複している: {names}")
     if default_model not in names:
         raise DistError(f"既定モデル '{default_model}' が組み立て対象 {names} に無い")
+    assert_plan_limits(plans)
+    assert_plan_sources(plans)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     placed: dict[tuple[str, str], str] = {}
