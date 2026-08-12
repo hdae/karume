@@ -28,11 +28,13 @@ from karume.convert import (
 )
 from karume.ir import IrGraph
 from karume.ops import EMITTABLE_OPS
+from karume.paths import REPO_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8
 
-#: 生成物の既定の置き場（リポジトリ直下 packages/runtime/tests/fixtures/golden/）。
-REPO_ROOT = Path(__file__).resolve().parents[3]
+#: 生成物の既定の置き場（リポジトリ直下 packages/runtime/tests/fixtures/golden/）。リポの根は
+#: `karume.paths` から引く — 同じ式を独立に書くと、パッケージの階層を動かしたとき片方だけが
+#: 追従して golden が存在しないディレクトリへ落ちる。
 GOLDEN_ROOT = REPO_ROOT / "packages" / "runtime" / "tests" / "fixtures" / "golden"
 
 MODEL_FILE = "model.safetensors"
