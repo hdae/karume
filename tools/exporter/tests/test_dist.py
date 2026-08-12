@@ -32,9 +32,14 @@ from karume.dist import (
     IRODORI_CODEC_HALO_FRAMES,
     IRODORI_CODEC_NAME,
     IRODORI_DEFAULT_MODEL,
+    IRODORI_GRAPH_ROLES,
     IRODORI_OUTPUT_PATHS,
     IRODORI_SAMPLING_DEFAULTS,
     IRODORI_SERIES_DIRS,
+    IRODORI_STORAGE_FORBIDDEN,
+    IRODORI_STORAGE_REQUIREMENTS,
+    IRODORI_WEIGHT_DTYPES,
+    IRODORI_WEIGHTS,
     MANIFEST_FILENAME,
     MANIFEST_FORMAT,
     MODEL_CARD_FILENAME,
@@ -69,6 +74,7 @@ from karume.dist import (
     irodori_plan,
     irodori_repo_name,
     irodori_series_name,
+    irodori_sources,
     main,
     resolve_card_renderer,
     sbv2_knob_defaults,
@@ -1764,6 +1770,28 @@ def _irodori_graphs() -> dict[str, str]:
     }
 
 
+def _irodori_container(dtype: str, role: str, graph: str) -> bytes:
+    """1 ターゲットぶんの偽コンテナ（格納 dtype の集合が系列と対応する形）。
+
+    圧縮系列は**適格スロットだけ**が F16 になり、bias / norm / グラフ定数は F32 のまま残る
+    （実物の f16 コンテナのヘッダはこの 2 つが並ぶ）。この形にしておかないと、f32 席へ f16
+    資産を挿し込む取り違えが「F32 が無い」で落ちてしまい、**F16 の不在**を見る門
+    （`assert_storage_absent`）が一度も試されない。
+    """
+    payload = f"{role}-{dtype}-weights".encode()
+    dtypes = ("F32",) if dtype == "f32" else ("F16", "F32")
+    header: dict[str, Any] = {"__metadata__": {IR_METADATA_KEY: graph}}
+    for index, stored in enumerate(dtypes):
+        start = index * len(payload)
+        header[f"w{index}"] = {
+            "dtype": stored,
+            "shape": [len(payload)],
+            "data_offsets": [start, start + len(payload)],
+        }
+    encoded = json.dumps(header).encode("utf-8")
+    return len(encoded).to_bytes(8, "little") + encoded + payload * len(dtypes)
+
+
 def _build_irodori_sources(
     root: Path,
     *,
@@ -1776,28 +1804,40 @@ def _build_irodori_sources(
 
     並びは `karume.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
     テストが root を差し替えるだけで同じ木を指せる形。コーデックは**別系列・別入力素材**
-    （`dacvae-32dim`）なので、Irodori 本体とは別の 2 ディレクトリへ置く。
+    （`dacvae-32dim`）なので、Irodori 本体とは別の 2 ディレクトリへ置く。系列は格納 dtype
+    ごとに 1 本ずつ（`IRODORI_WEIGHT_DTYPES` — f32 / f16）。
     """
+    series_root = root / "outputs" / "series"
+    suffix = {dtype: "" if dtype == "f32" else f"-{dtype}" for dtype in IRODORI_WEIGHT_DTYPES}
+    by_dtype = {
+        dtype: series_root / f"{irodori_series_name(model)}{tail}" for dtype, tail in suffix.items()
+    }
+    codec_by_dtype = {
+        dtype: series_root / f"{IRODORI_CODEC_NAME}{tail}" for dtype, tail in suffix.items()
+    }
     sources = IrodoriSources(
-        series=root / "outputs" / "series" / irodori_series_name(model),
         model=root / "inputs" / "irodori" / model,
-        codec_series=root / "outputs" / "series" / IRODORI_CODEC_NAME,
         codec_model=root / "inputs" / "irodori" / IRODORI_CODEC_NAME,
+        series_by_dtype=by_dtype,
+        codec_series_by_dtype=codec_by_dtype,
     )
     resolved = graphs or _irodori_graphs()
-    for role, directory in IRODORI_SERIES_DIRS.items():
-        payload = _fake_safetensors(
-            "F32", f"{role}-weights".encode(), {IR_METADATA_KEY: resolved[role]}
-        )
-        _write(sources.series / directory / "model.safetensors", payload)
-        # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
-        _write(sources.series / directory / "io.case0.safetensors", b"io-fixture")
-    for role, directory in IRODORI_CODEC_DIRS.items():
-        payload = _fake_safetensors(
-            "F32", f"{role}-weights".encode(), {IR_METADATA_KEY: resolved[role]}
-        )
-        _write(sources.codec_series / directory / "model.safetensors", payload)
-        _write(sources.codec_series / directory / "io.case0.safetensors", b"io-fixture")
+    for dtype in IRODORI_WEIGHT_DTYPES:
+        for role, directory in IRODORI_SERIES_DIRS.items():
+            series = sources.series_by_dtype[dtype]
+            _write(
+                series / directory / "model.safetensors",
+                _irodori_container(dtype, role, resolved[role]),
+            )
+            # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
+            _write(series / directory / "io.case0.safetensors", b"io-fixture")
+        for role, directory in IRODORI_CODEC_DIRS.items():
+            codec = sources.codec_series_by_dtype[dtype]
+            _write(
+                codec / directory / "model.safetensors",
+                _irodori_container(dtype, role, resolved[role]),
+            )
+            _write(codec / directory / "io.case0.safetensors", b"io-fixture")
     if codec_metadata is not None:
         _write(
             sources.codec_model / "metadata.json",
@@ -1863,15 +1903,31 @@ class TestIrodoriLayout:
         ]
         assert sorted(model["assets"]) == ["tokenizer"]
 
-    def test_the_only_quant_is_f32_without_execution_knobs(self, irodori_assembled) -> None:
-        """低精度の軸がまだ 1 つも無い（`session` が空 = 実行形ノブなし）。"""
+    def test_the_quants_are_the_storage_series_without_execution_knobs(
+        self, irodori_assembled
+    ) -> None:
+        """席は格納 dtype の軸だけ（`session` が空 = 実行形ノブなし）。既定は f32 のまま。"""
         _, manifest = irodori_assembled
         model = _irodori_model(manifest)
         assert model["defaultQuant"] == "f32"
-        assert list(model["quants"]) == ["f32"]
-        assert model["quants"]["f32"]["session"] == {}
-        assert "gpuFeatures" not in model["quants"]["f32"]
-        assert set(model["quants"]["f32"]["weights"]) == set(model["weights"])
+        assert list(model["quants"]) == list(IRODORI_WEIGHT_DTYPES)
+        for quant in IRODORI_WEIGHT_DTYPES:
+            assert model["quants"][quant]["session"] == {}
+            assert "gpuFeatures" not in model["quants"][quant]
+            # 完全写像（hub の受理要件）— 8 役全部が 1 つの dtype ラベルを指す。
+            assert model["quants"][quant]["weights"] == dict.fromkeys(model["weights"], quant)
+
+    def test_every_quant_points_at_its_own_storage_series(self, irodori_assembled) -> None:
+        """席と現物の対応（f16 席のファイルが実際に F16 格納であることは組み立て門が見るが、
+        **宣言の側も**系列を跨がないことをここで固定する — 片方だけ動くと配布形の中で
+        「f16 と名乗る f32」が並ぶ）。"""
+        out_dir, manifest = irodori_assembled
+        model = _irodori_model(manifest)
+        for quant in IRODORI_WEIGHT_DTYPES:
+            for role, label in model["quants"][quant]["weights"].items():
+                path = model["weights"][role][label]["file"]["path"]
+                assert path.endswith(f"model.{quant}.safetensors"), (role, quant, path)
+                assert (out_dir / path).is_file()
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_irodori_sources(tmp_path)
@@ -2085,8 +2141,8 @@ class TestIrodoriGraphGate:
         with pytest.raises(DistError, match="IR メタデータ"):
             irodori_plan(sources)
 
-    def test_it_refuses_a_graph_stored_as_f16(self, tmp_path: Path) -> None:
-        """f32 の 1 本しか配らない（格納形は series 名でなくヘッダが正）。"""
+    def test_it_refuses_an_f32_seat_whose_container_has_no_f32(self, tmp_path: Path) -> None:
+        """格納形は series 名でなくヘッダが正（要求 dtype の存在検査）。"""
         sources = _build_irodori_sources(tmp_path)
         _write(
             sources.series / "dit" / "model.safetensors",
@@ -2094,6 +2150,79 @@ class TestIrodoriGraphGate:
         )
         with pytest.raises(DistError, match="F32"):
             irodori_plan(sources)
+
+
+class TestIrodoriStorageSeries:
+    """系列 × 格納 dtype の**集合等値** — 系列 root の取り違えを掴む唯一の検出器。
+
+    MUST: 数値の門（E2E の tolerance）では原理的に検出できない（ADR 0027 / 0029 の検出限界 —
+    f32 系列と f16 系列は実測が同桁なので互いの閾値を素通りする）。存在検査と不在検査を
+    両側から掛けて初めて、どちらの席にどちらの資産が来ても落ちる。
+    """
+
+    def test_it_refuses_an_f16_series_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
+        """圧縮コンテナも適格外の重みを F32 で持つので、**存在検査だけでは素通りする**形。"""
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.series / "dit" / "model.safetensors",
+            _irodori_container("f16", "dit", _irodori_graphs()["dit"]),
+        )
+
+        with pytest.raises(DistError, match="F16 がある"):
+            irodori_plan(sources)
+
+    def test_it_refuses_an_f32_series_asset_in_the_f16_seat(self, tmp_path: Path) -> None:
+        """逆向き（丸め忘れ = `--dtype f16` のつもりが素の f32）は F16 の不在で落ちる。"""
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.series_by_dtype["f16"] / "dit" / "model.safetensors",
+            _irodori_container("f32", "dit", _irodori_graphs()["dit"]),
+        )
+
+        with pytest.raises(DistError, match="F16 が無い"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_codec_series_mixup_too(self, tmp_path: Path) -> None:
+        """コーデックは別系列（`dacvae-32dim{,-f16}`）— 同じ門が 8 役全部に掛かる。"""
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.codec_series_by_dtype["f16"] / "decoder" / "model.safetensors",
+            _irodori_container("f32", "codec_decoder", _irodori_graphs()["codec_decoder"]),
+        )
+
+        with pytest.raises(DistError, match="F16 が無い"):
+            irodori_plan(sources)
+
+    def test_every_graph_role_carries_both_seats(self) -> None:
+        """要求表 / 禁止表 / 宣言が同じ 8 × 2 の席を指す。
+
+        片方だけ席が増えると、増えたほうが黙って無検査のまま配布形に並ぶ。
+        """
+        expected = {
+            f"{role}_{dtype}" for role in IRODORI_GRAPH_ROLES for dtype in IRODORI_WEIGHT_DTYPES
+        }
+
+        assert set(IRODORI_STORAGE_REQUIREMENTS) == expected
+        assert set(IRODORI_STORAGE_FORBIDDEN) == {f"{role}_f32" for role in IRODORI_GRAPH_ROLES}
+        assert {
+            files.file for labels in IRODORI_WEIGHTS.values() for files in labels.values()
+        } == expected
+
+    def test_the_series_roots_match_the_exporter_spelling(self, tmp_path: Path) -> None:
+        """系列 root の綴りは書き手（`export_*.default_out_root`）と 1 文字も違わない。"""
+        import export_dacvae
+        import export_irodori
+
+        sources = irodori_sources(tmp_path)
+        for dtype in IRODORI_WEIGHT_DTYPES:
+            assert (
+                sources.series_by_dtype[dtype].name
+                == export_irodori.default_out_root(Path(IRODORI_DEFAULT_MODEL), dtype).name
+            )
+            assert (
+                sources.codec_series_by_dtype[dtype].name
+                == export_dacvae.default_out_root(Path(IRODORI_CODEC_NAME), dtype).name
+            )
 
 
 class TestIrodoriModelCard:
@@ -2135,7 +2264,7 @@ class TestIrodoriModelCard:
         # から機械導出される（系列が増えれば列挙も追従する — ここでは f32 の 1 席）。
         assert '// speaker: { audio: decodeWav(await Deno.readFile("reference.wav")) },' in card
         assert "// speaker: { latent: savedLatent }," in card
-        assert '// quant: "f32", // default — available: f32' in card
+        assert '// quant: "f32", // default — available: f16 / f32' in card
         assert "// durationSeconds: 5," in card
 
     def test_it_derives_the_shape_section_from_the_manifest(

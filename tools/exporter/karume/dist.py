@@ -159,6 +159,32 @@ def assert_storage(role: str, path: Path, requirements: Mapping[str, str]) -> No
         )
 
 
+def assert_storage_absent(role: str, path: Path, forbidden: Mapping[str, str]) -> None:
+    """役割が**持ってはならない**格納 dtype がヘッダに無いことを検査する（無関係な役割は素通し）。
+
+    {@link assert_storage} の存在検査だけでは **f32 席に f16 資産を挿し込む取り違えが素通り
+    する** — 圧縮系列のコンテナは適格外の重み（bias / norm / グラフ定数）を F32 で持つので、
+    「F32 を含む」は f16 資産でも真になる。片方向の存在検査を両側から挟んで初めて
+    「系列 × 格納 dtype」が集合として一意に決まる（ADR 0027 / 0029 の検出限界 —
+    **系列 root の取り違えは数値網では原理的に検出できない**ので、ここが唯一の検出器）。
+
+    逆向き（f16 席に f32 資産）は {@link assert_storage} が F16 の不在で落とすので、禁止表は
+    f32 席にだけ要る。
+    """
+    banned = forbidden.get(role)
+    if banned is None:
+        return
+    if not path.is_file():
+        raise DistError(f"組み立ての入力が無い: {path}")
+    found = storage_dtypes(path)
+    if banned in found:
+        raise DistError(
+            f"{role}: {path} の格納 dtype に {banned} がある（実際: {sorted(found)}）。"
+            f"素の f32 系列を指すべき席に圧縮系列の資産が混ざっている"
+            "（系列 root の取り違え — 数値の門では検出できないのでここで落とす）"
+        )
+
+
 def sha256_file(path: Path) -> str:
     """ファイルの sha256（小文字 hex 64 桁）を streaming で採る。"""
     digest = hashlib.sha256()
@@ -1418,31 +1444,68 @@ IRODORI_CODEC_RATES_KEY = "encoder_rates"
 IRODORI_TOKENIZER_DIR = "tokenizer"
 IRODORI_TOKENIZER_FILE = "tokenizer.json"
 
+#: 配る格納 dtype（`export_irodori.WEIGHT_DTYPES` / `export_dacvae.WEIGHT_DTYPES` と同じ集合）。
+#: 役割名は `<グラフ役割>_<dtype>` で、系列 root と 1:1 に対応する（i8 / w8a8 は後続の波）。
+IRODORI_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16")
+
+#: 圧縮していない系列の dtype（系列 root に接尾が付かない唯一の席で、quant に依存しない
+#: 資産〈tokenizer〉の置き場でもある）。
+IRODORI_PLAIN_DTYPE = "f32"
+
+
+def irodori_role(role: str, dtype: str) -> str:
+    """役割名（`backbone_f16` — 配置表・出力 path・格納 dtype 要求が共有する 1 語）。"""
+    return f"{role}_{dtype}"
+
+
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
+#: 格納 dtype をファイル名に出すのは Anima / SBV2 と同じ形（`model.f16.safetensors`）で、
+#: 1 つのディレクトリに系列 2 本が並んでも取り違えようがない綴りにするため。
 IRODORI_OUTPUT_PATHS: Mapping[str, str] = {
-    **{role: f"{role}/model.safetensors" for role in IRODORI_GRAPH_ROLES},
+    **{
+        irodori_role(role, dtype): f"{role}/model.{dtype}.safetensors"
+        for role in IRODORI_GRAPH_ROLES
+        for dtype in IRODORI_WEIGHT_DTYPES
+    },
     "tokenizer": f"{IRODORI_TOKENIZER_DIR}/{IRODORI_TOKENIZER_FILE}",
 }
 
-#: 格納 dtype の要求（Anima / SBV2 と同じ根拠 — 素の F32 資産が組み立て・ロード・実行を全て
-#: 通って参照一致の門まで沈黙した実測事故）。Irodori は f32 系列 1 本だけを配るので、8 グラフ
-#: 全てに F32 を要求する（tokenizer は JSON なので載せない）。
-IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = dict.fromkeys(IRODORI_GRAPH_ROLES, "F32")
+#: 各役割の safetensors ヘッダに**要求する**格納 dtype（Anima / SBV2 と同じ根拠 — 素の F32
+#: 資産が組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。f16 系列は
+#: fake-quant 対象だけが F16 になる（bias / norm / グラフ定数は F32 のまま）ので「F16 を
+#: 含む」を要求する。tokenizer は JSON なので載せない。
+IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
+    irodori_role(role, dtype): dtype.upper()
+    for role in IRODORI_GRAPH_ROLES
+    for dtype in IRODORI_WEIGHT_DTYPES
+}
 
-#: weights の宣言（dtype ラベル → 役割名）。1 dtype しか無い席も**dtype キー必須**の統一形
-#: （ADR 0041 §3）。
+#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: f32 席は「F32 を含む」だけでは f16 資産と区別できない（圧縮系列も適格外の重みを F32 で
+#: 持つ）ので、F16 の不在を併せて要求して初めて系列 × 格納 dtype が集合として一意になる。
+IRODORI_STORAGE_FORBIDDEN: Mapping[str, str] = {
+    irodori_role(role, IRODORI_PLAIN_DTYPE): "F16" for role in IRODORI_GRAPH_ROLES
+}
+
+#: weights の宣言（dtype ラベル → 役割名）。8 グラフとも f32 / f16 の 2 席を持つので、
+#: {@link complete_quant_weights} の自動補完は掛からず、quant 表が全役割を名指しする。
 IRODORI_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    role: {"f32": WeightFiles(role)} for role in IRODORI_GRAPH_ROLES
+    role: {dtype: WeightFiles(irodori_role(role, dtype)) for dtype in IRODORI_WEIGHT_DTYPES}
+    for role in IRODORI_GRAPH_ROLES
 }
 
 #: assets の宣言（quant 選択に依存しない無条件ファイル）。
 IRODORI_ASSETS: Mapping[str, str] = {"tokenizer": "tokenizer"}
 
-#: quant 表。dtype が 1 つしかない weights は書かない（{@link complete_quant_weights} が完全
-#: 写像へ埋める）。実行形ノブがまだ 1 つも無い（f32 の素の経路だけ）ので `session` は空で、
-#: 席は 1 つきり — 低精度の軸が生えたらここに並ぶ。
-IRODORI_QUANTS: Mapping[str, Any] = {"f32": {"weights": {}, "session": {}}}
+#: quant 表。実行形ノブはまだ 1 つも無い（格納 dtype の軸だけ）ので `session` は両席とも空。
+#: 混成（役割ごとに違う dtype）にしないのは、f16 では S〈フレーム数〉が動く軸が無く、
+#: 8 グラフを一律で落とせるため（混成が要るのは i8 の波 — 量子化 recon の gateDesign）。
+IRODORI_QUANTS: Mapping[str, Any] = {
+    dtype: {"weights": dict.fromkeys(IRODORI_GRAPH_ROLES, dtype), "session": {}}
+    for dtype in IRODORI_WEIGHT_DTYPES
+}
 
+#: 既定は f32 のまま（ADR 0005 — 既定は最も忠実な経路。f16 の聴感裁定はユーザーが持つ）。
 IRODORI_DEFAULT_QUANT = "f32"
 
 #: DACVAE のフレームレート（Hz）— 48kHz / hop 1920 = 25。`export_irodori.CODEC_FRAME_RATE` と
@@ -1545,21 +1608,53 @@ class IrodoriSources:
     （`__metadata__` / `metadata.json` だけを読むので 2.9GB のペイロードは舐めない）。
     コーデックが別の 2 本を持つのは**別リポ・別重み**だから — Irodori のモデル名を動かしても
     コーデックは動かない。
+
+    系列は**格納 dtype ごとに別ディレクトリ**（`export_irodori.default_out_root` /
+    `export_dacvae.default_out_root` の dtype 接尾）。tokenizer 資産は quant に依存しないので
+    素の系列（f32）側の 1 本だけを見る。
     """
 
-    series: Path
     model: Path
-    codec_series: Path
     codec_model: Path
+    #: 格納 dtype → 系列 root（`IRODORI_WEIGHT_DTYPES` の全 dtype が必ず載る）。
+    series_by_dtype: Mapping[str, Path]
+    codec_series_by_dtype: Mapping[str, Path]
+
+    @property
+    def series(self) -> Path:
+        """素の系列 root（quant に依存しない tokenizer 資産の置き場）。
+
+        写しの欄を持たず毎回引くのは、系列 root が 2 箇所で独立に動く形を作らないため。
+        """
+        return self.series_by_dtype[IRODORI_PLAIN_DTYPE]
+
+    @property
+    def codec_series(self) -> Path:
+        """素のコーデック系列 root。"""
+        return self.codec_series_by_dtype[IRODORI_PLAIN_DTYPE]
 
 
 def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> IrodoriSources:
-    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
+    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。
+
+    dtype 接尾の綴りは `export_irodori.default_out_root` / `export_dacvae.default_out_root` と
+    同一 — 書き手と読み手が同じ 1 語から組む。
+    """
+    suffix = {
+        dtype: "" if dtype == IRODORI_PLAIN_DTYPE else f"-{dtype}"
+        for dtype in IRODORI_WEIGHT_DTYPES
+    }
+    by_dtype = {
+        dtype: series_dir / f"{irodori_series_name(model)}{tail}" for dtype, tail in suffix.items()
+    }
+    codec_by_dtype = {
+        dtype: series_dir / f"{IRODORI_CODEC_NAME}{tail}" for dtype, tail in suffix.items()
+    }
     return IrodoriSources(
-        series=series_dir / irodori_series_name(model),
         model=INPUTS_ROOT / IRODORI_SERIES_PREFIX / model,
-        codec_series=series_dir / IRODORI_CODEC_NAME,
         codec_model=INPUTS_ROOT / IRODORI_SERIES_PREFIX / IRODORI_CODEC_NAME,
+        series_by_dtype=by_dtype,
+        codec_series_by_dtype=codec_by_dtype,
     )
 
 
@@ -1571,12 +1666,18 @@ def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
     """
     return {
         **{
-            role: sources.series / directory / "model.safetensors"
+            irodori_role(role, dtype): sources.series_by_dtype[dtype]
+            / directory
+            / "model.safetensors"
             for role, directory in IRODORI_SERIES_DIRS.items()
+            for dtype in IRODORI_WEIGHT_DTYPES
         },
         **{
-            role: sources.codec_series / directory / "model.safetensors"
+            irodori_role(role, dtype): sources.codec_series_by_dtype[dtype]
+            / directory
+            / "model.safetensors"
             for role, directory in IRODORI_CODEC_DIRS.items()
+            for dtype in IRODORI_WEIGHT_DTYPES
         },
         "tokenizer": sources.series / IRODORI_TOKENIZER_DIR / IRODORI_TOKENIZER_FILE,
     }
@@ -1745,7 +1846,22 @@ def assert_irodori_graphs(
     出力本数・条件 state の宣言長・`speaker` の patch 幅）ので、配布形を並べる前にここで落とす。
     SBV2 の {@link assert_bert_hidden} と同じ規律 — 別々の台本（`export_irodori.py` の
     ターゲットと、この manifest）が持つ数を突き合わせる席がここしか無い。
+
+    MUST: **格納 dtype の系列を 1 本残らず**掛ける。f16 系列は f32 とは別プロセスの emit なので、
+    片方だけ検査すると「f32 は宣言どおりだが f16 だけ別の版」が素通りする（格納 dtype の一致は
+    {@link assert_storage} が見るが、あちらはグラフ宣言を一切見ない）。
     """
+    for dtype in IRODORI_WEIGHT_DTYPES:
+        _assert_irodori_graph_set(
+            {role: placements[irodori_role(role, dtype)] for role in IRODORI_GRAPH_ROLES},
+            pipeline_config,
+        )
+
+
+def _assert_irodori_graph_set(
+    placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
+) -> None:
+    """1 系列ぶんの 8 グラフを検査する（`placements` のキーは dtype 接尾の無いグラフ役割名）。"""
     graphs = {role: ir_graph(placements[role]) for role in IRODORI_GRAPH_ROLES}
     for role, (expected_inputs, expected_outputs) in IRODORI_GRAPH_SHAPES.items():
         path = placements[role]
@@ -1806,6 +1922,7 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
     )
     for role, source in placements.items():
         assert_storage(role, source, IRODORI_STORAGE_REQUIREMENTS)
+        assert_storage_absent(role, source, IRODORI_STORAGE_FORBIDDEN)
     assert_irodori_graphs(placements, pipeline_config)
     return ModelPlan(
         name=model,

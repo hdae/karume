@@ -481,3 +481,76 @@ class TestTargetCli:
 
     def test_the_default_out_root_is_the_weight_directory_name(self, tmp_path):
         assert ex.default_out_root(tmp_path / "dacvae-32dim").name == "dacvae-32dim"
+
+    def test_the_dtype_is_forwarded(self, monkeypatch):
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(ex, "export_series", lambda *_a, **kw: seen.update(kw) or {"dir": "x"})
+        ex.main(["--dtype", "f16"])
+
+        assert seen["dtype"] == "f16"
+
+
+def _is_f16_exact(tensor: torch.Tensor) -> bool:
+    """f16 の格子に乗っているか（emit の適格判定と同じ述語）。"""
+    return bool(torch.equal(tensor, tensor.to(torch.float16).to(torch.float32)))
+
+
+class TestWeightDtypeSeries:
+    """格納 dtype の系列（ADR 0018 / 0027）— 壊れると**偽 PASS** になる側の規律だけを固定する。
+
+    実重みは使わない（配線の規律はモデルに依らない）。数値そのものの検証は Deno 側の E2E と
+    emit の適格判定が持つ。
+    """
+
+    def test_each_dtype_gets_its_own_series_root(self):
+        """MUST: 圧縮系列は別ディレクトリ（同居させると f32 の網が圧縮資産へ掛かる）。"""
+        roots = {
+            dtype: ex.default_out_root(ex.DEFAULT_MODEL_DIR, dtype) for dtype in ex.WEIGHT_DTYPES
+        }
+
+        assert set(roots) == {"f32", "f16"}
+        assert len(set(roots.values())) == len(roots)
+        assert roots["f32"].name == "dacvae-32dim"
+        assert roots["f16"].name == "dacvae-32dim-f16"
+
+    def test_f32_leaves_the_weights_untouched(self):
+        # MUST: 種を蒔いたら元へ戻す（`fork_rng`）— 大域 RNG を置き去りにすると、後続の
+        # テストが**別の乱数**でモジュールを組むことになり、この追加が離れた場所の実測門を動かす。
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            model = TinyCodec(weight_norm=False)
+            before = model.encoder.weight.clone()
+
+            assert ex._fake_quant("f32", model) is None
+            assert torch.equal(model.encoder.weight, before)
+
+    def test_f16_rounds_every_parameter_of_the_exported_model(self):
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            model = TinyCodec(weight_norm=False)
+            assert not _is_f16_exact(model.encoder.weight), "丸め前から格子に乗っては検出力が無い"
+
+            report = ex._fake_quant("f16", model)
+
+            assert report is not None
+            assert all(_is_f16_exact(tensor) for tensor in model.parameters())
+
+    def test_a_lifted_snake_alpha_stays_f32(self):
+        """降格済みの `alpha` は重みスロットではない（lifted 定数）ので**丸めない**。
+
+        golden も f32 の alpha で計算されるので、丸めた側だけが動くと両者が食い違う。
+        """
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            model = nn.Sequential(FakeSnake(), nn.Conv1d(2, 2, 1))
+            with torch.no_grad():
+                model[0].alpha.copy_(torch.full((1, 2, 1), 1.0 + 2.0**-13))
+            source = types.SimpleNamespace(snake_cls=FakeSnake)
+            ex.lift_snake_alphas(source, model)
+            alpha = model[0].alpha.clone()
+            assert not _is_f16_exact(alpha), "丸め前から格子に乗っては検出力が無い"
+
+            ex._fake_quant("f16", model)
+
+            assert torch.equal(model[0].alpha, alpha)
+            assert _is_f16_exact(model[1].weight)

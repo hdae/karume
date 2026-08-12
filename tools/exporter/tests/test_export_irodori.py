@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -554,3 +555,85 @@ class TestTargetCli:
 
     def test_the_default_out_root_is_derived_from_the_weight_directory(self, tmp_path):
         assert ir.default_out_root(tmp_path / "v4-small").name == "irodori-v4-small"
+
+    def test_the_dtype_is_forwarded(self, monkeypatch):
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(ir, "export_series", lambda *_a, **kw: seen.update(kw) or {"dir": "x"})
+        ir.main(["--dtype", "f16"])
+
+        assert seen["dtype"] == "f16"
+
+
+def _is_f16_exact(tensor: torch.Tensor) -> bool:
+    """f16 の格子に乗っているか（emit の適格判定と同じ述語）。"""
+    return bool(torch.equal(tensor, tensor.to(torch.float16).to(torch.float32)))
+
+
+class TestWeightDtypeSeries:
+    """格納 dtype の系列（ADR 0018 / 0027）— 壊れると**偽 PASS** になる側の規律だけを固定する。
+
+    実重みは使わない（配線の規律はモデルに依らない）。数値そのものの検証は Deno 側の E2E と
+    emit の適格判定が持つ。
+    """
+
+    def test_each_dtype_gets_its_own_series_root(self, tmp_path):
+        """MUST: 圧縮系列は別ディレクトリ（同居させると f32 の網が圧縮資産へ掛かる）。"""
+        roots = {
+            dtype: ir.default_out_root(tmp_path / "v4-small", dtype) for dtype in ir.WEIGHT_DTYPES
+        }
+
+        assert set(roots) == {"f32", "f16"}
+        assert len(set(roots.values())) == len(roots)
+        assert roots["f32"].name == "irodori-v4-small"
+        assert roots["f16"].name == "irodori-v4-small-f16"
+
+    def test_the_series_name_carries_the_weights_directory_name(self, tmp_path):
+        other = ir.default_out_root(tmp_path / "v9-large", "f16")
+
+        assert other.name == "irodori-v9-large-f16"
+
+    def test_f32_leaves_the_weights_untouched(self):
+        # MUST: 種を蒔いたら元へ戻す（`fork_rng`）— 大域 RNG を置き去りにすると、後続の
+        # テストファイルが**別の乱数**でモジュールを組むことになり、こちらの追加が離れた
+        # 場所の実測門（`export_dacvae` の切り詰めビット一致）を動かす。
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            module = TinyResidualProjector()
+            before = module.projector.weight.clone()
+
+            assert ir.fake_quant("f32", {"text-proj": module}) == {}
+            assert torch.equal(module.projector.weight, before)
+
+    def test_f16_rounds_every_module_it_is_handed(self):
+        """MUST: 1 本でも漏らすと、漏れた側だけが元の重みで計算した値を golden に載せる。"""
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            modules = {name: TinyResidualProjector() for name in "abc"}
+            assert not any(_is_f16_exact(module.projector.weight) for module in modules.values()), (
+                "丸め前から格子に乗っていては検出力が無い"
+            )
+
+            report = ir.fake_quant("f16", modules)
+
+            assert sorted(report) == ["a", "b", "c"]
+            for module in modules.values():
+                assert all(_is_f16_exact(tensor) for tensor in module.parameters())
+
+    def test_it_refuses_an_empty_set_of_modules(self):
+        """`--dtype f16` を指定したのに丸める相手が 0 本、を沈黙させない。"""
+        with pytest.raises(SystemExit, match="1 本も無い"):
+            ir.fake_quant("f16", {})
+
+    def test_every_loaded_module_reaches_the_fake_quant(self):
+        """束ねる相手は `export_series` が `load_*` で組む全部（欠けは golden の食い違いになる）。
+
+        名前を数え上げるのではなく**呼び出しの実引数**を捕まえる — 表を書き写すと、
+        `export_series` 側が 1 本増やしたときに写しだけが古いまま緑になる。
+        """
+        source = inspect.getsource(ir.export_series)
+        handed = source[source.index("quantized = fake_quant(") :]
+        handed = handed[: handed.index("\n    )")]
+        for name in ("backbone", "projectors[", "speaker_encoder", "duration", "dit"):
+            assert name in handed
+        for norm in ("speaker_norm", "text_norm", "caption_norm"):
+            assert f'"{norm}": {norm}' in handed

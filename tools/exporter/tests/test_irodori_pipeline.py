@@ -150,6 +150,26 @@ class TestCli:
         assert out.name == "pipeline"
         assert out.parent.name == "irodori-v4-small"
 
+    def test_each_dtype_writes_into_its_own_series(self, tmp_path):
+        """MUST: golden も系列ごと（f32 の golden で f16 資産を突き合わせると量子化誤差が
+        tolerance に混ざり、緑のまま検出力だけが落ちる）。"""
+        dirs = {
+            dtype: ip.default_out_dir(tmp_path / "v4-small", dtype) for dtype in ex.WEIGHT_DTYPES
+        }
+
+        assert len(set(dirs.values())) == len(dirs)
+        assert dirs["f16"].parent.name == "irodori-v4-small-f16"
+        # 系列 root の綴りは export 台本と共有する 1 語（写経しない）。
+        for dtype, path in dirs.items():
+            assert path.parent == ex.default_out_root(tmp_path / "v4-small", dtype)
+
+    def test_the_dtype_is_forwarded(self, monkeypatch):
+        seen: list[object] = []
+        monkeypatch.setattr(ip, "emit", lambda *args: seen.append(args) or {"dir": "x"})
+        ip.main(["--dtype", "f16"])
+
+        assert seen[0][-1] == "f16"
+
     def test_the_case_names_are_unique(self):
         names = [case.name for case in ip.PIPELINE_CASES]
 

@@ -6,6 +6,7 @@ recon の G6（decoder）/ G7（encoder）で、Irodori-TTS v4 の**コーデッ
     cd tools/exporter
     uv run --with descript-audiotools --with einops python export_dacvae.py
     uv run --with descript-audiotools --with einops python export_dacvae.py --target decoder
+    uv run --with descript-audiotools --with einops python export_dacvae.py --dtype f16
 
 依存は `--with` で足す（pyproject.toml には入れない — 既定の sync は base deps だけで回る）。
 `descript-audiotools` は 2 つの理由で要る: ① `dacvae` パッケージが `audiotools.ml.BaseModel` を
@@ -81,6 +82,22 @@ reflect pad（`DACVAE._pad`）と LUFS 正規化・リサンプルは**ホスト
 5. **往復の妥当性**（参照音声 → encoder → decoder が有限で、入力波形と相関すること）。
    `_roundtrip_evidence` が相関の下限 {@link ROUNDTRIP_CORRELATION_MIN} を実測で守る。
 
+## 格納 dtype の系列（ADR 0018 / 0027）
+
+`--dtype f16` は**別系列**（`dacvae-32dim-f16/`）へ書き出す（同居させると f32 系列の網が
+圧縮資産へ黙って掛かる）。丸めの順序は `_fake_quant` の MUST — `fold_weight_norm` と
+`lift_snake_alphas` の**後**・参照 / golden の採取の**前**で、そのため圧縮系列では参照を
+畳み込みの後に**採り直す**（門 3 の「畳む前後のビット一致」は畳む前に採った参照で先に
+決着させてから丸める）。
+
+**`Snake1d.alpha` は丸めない** — `lift_snake_alphas` がパラメータから素の属性へ降格した
+後に丸めるので `named_parameters` に現れず、emit 側でも重みスロットではない（lifted 定数）
+ので **F32 格納のまま残る**。golden も同じ f32 alpha で計算されるので両者は整合する。
+
+golden の入力（decoder の実 latent / encoder の正規化済み波形）は**系列を跨いで同じ**にする
+（`--latent-dir` の既定は f32 系列の full-loop golden のまま）— 入力は参照と GPU が同じ
+バイト列を読む側で、格納 dtype の影響を受けない。
+
 ## 出力レイアウト
 
     outputs/series/dacvae-32dim/<target>/model.safetensors      重み・定数 + karume_ir
@@ -107,6 +124,7 @@ from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
+from karume.quantize import round_weights_to_f16
 
 #: 実重みの置き場（`hf download Aratako/Semantic-DACVAE-Japanese-32dim` の展開先を
 #: `convert_dacvae.py` で safetensors 化したもの）。
@@ -118,6 +136,10 @@ DEFAULT_SOURCE_DIR = INPUTS_ROOT / "irodori" / "dacvae-src"
 #: 実装 clone の出所と固定した版。`git clone <SOURCE_REPO> inputs/irodori/dacvae-src` で置く。
 SOURCE_REPO = "https://github.com/facebookresearch/dacvae"
 SOURCE_COMMIT = "414c20785fc3a28373073ea8ef7a1316eeeaca6e"
+
+#: 書き出せる格納 dtype。**i8 は後続の波**（conv 支配ネットの i8 品質は前例が無く、単独で
+#: 測ってから決める — 量子化 recon の risks）。
+WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16")
 
 WEIGHTS_FILE = "weights.safetensors"
 METADATA_FILE = "metadata.json"
@@ -529,7 +551,7 @@ def _pristine_outputs(
     decoder_cases: Sequence[tuple[str, torch.Tensor]],
     encoder_cases: Sequence[tuple[str, torch.Tensor]],
 ) -> dict[str, dict[str, torch.Tensor]]:
-    """**weight_norm を畳む前**の eager 出力（golden の期待値そのもの）。
+    """**weight_norm を畳む前**の eager 出力（門 3 の基準であり、f32 系列の golden そのもの）。
 
     MUST: `fold_weight_norm` の前に呼ぶ。畳んだ後で採ると `_remove_weight_norm_evidence` が
     「畳んだ後どうし」の比較になり、差 0 が自明に成立して偽 PASS する（`export_sbv2.py` の
@@ -539,6 +561,20 @@ def _pristine_outputs(
         raise AssertionError(
             "weight_norm を畳んだ後に参照を採ろうとした（畳み込みの同値検証が恒真化する）"
         )
+    return _eager_outputs(model, decoder_cases, encoder_cases)
+
+
+def _eager_outputs(
+    model: nn.Module,
+    decoder_cases: Sequence[tuple[str, torch.Tensor]],
+    encoder_cases: Sequence[tuple[str, torch.Tensor]],
+) -> dict[str, dict[str, torch.Tensor]]:
+    """上流の decode / encode 経路の eager 出力（`weight_norm` の有無を見ない素の計算）。
+
+    圧縮系列では丸めの**後**にもう一度ここを通す（{@link _fake_quant} の順序 MUST）— そちらは
+    `weight_g` が既に無いので {@link _pristine_outputs} の門は通せない。門 3（畳む前後の
+    ビット一致）は丸める前に決着済みで、この採り直しはその主張を弱めない。
+    """
     decoded = {name: _decode_reference(model, latent) for name, latent in decoder_cases}
     for name, audio in decoded.items():
         if audio.shape[1] != 1:
@@ -550,6 +586,26 @@ def _pristine_outputs(
         TARGET_DECODER: decoded,
         TARGET_ENCODER: {name: _encode_reference(model, wav) for name, wav in encoder_cases},
     }
+
+
+def _fake_quant(dtype: str, model: nn.Module) -> str | None:
+    """格納 dtype の表現可能値へ**実効重み**を丸める（f32 は何もしない・戻りは計数の要約）。
+
+    ADR 0006 / 0018 / 0027 の fake-quant。
+
+    MUST（順序）: ① `fold_weight_norm` の**後**（丸めてから畳むと `weight_g` / `weight_v` を
+    丸めることになり、そこから作られる実効重みは f16 の格子に乗らない）② `lift_snake_alphas`
+    の**後**（降格済みの `alpha` は `named_parameters` に現れないので**丸めない** — alpha は
+    lifted 定数で emit の重みスロットでもなく F32 格納のまま残るため、golden 側も f32 の
+    alpha で計算されているのが正しい対応）③ `truncated_in_proj` の**前**（切り詰めは重みを
+    コピーするので、丸める前に作ると encoder だけ元の重みを格納する）④ 参照・golden の採取の
+    **前**（`karume.quantize` の MUST）。
+    """
+    if dtype == "f32":
+        return None
+    report = round_weights_to_f16(model)
+    print(f"[fake-quant] codec: f16 表現可能値へ丸めた — {report.describe()}", flush=True)
+    return report.describe()
 
 
 def _main_path_evidence(
@@ -676,7 +732,11 @@ def _roundtrip_evidence(
 def _check_wrapper_equivalence(
     wrapper: nn.Module, argument: torch.Tensor, expected: torch.Tensor, where: str, atol: float
 ) -> float:
-    """ラッパの出力が**畳む前**の実モジュール出力と一致することを見る（門 4）。"""
+    """ラッパの出力が参照の実モジュール出力と一致することを見る（門 4）。
+
+    参照は f32 系列なら**畳む前**、圧縮系列なら**丸めた後に採り直したもの**（どちらの場合も
+    ラッパと同じ重みで計算された値なので、要求は `EAGER_EQUIV_ATOL = 0` のまま）。
+    """
     with torch.no_grad():
         actual = wrapper(argument)
     if tuple(actual.shape) != tuple(expected.shape):
@@ -767,6 +827,7 @@ def export_series(
     latent_dir: Path = DEFAULT_LATENT_DIR,
     reference_wav: Path = DEFAULT_REFERENCE_WAV,
     normalize_db: float = REFERENCE_NORMALIZE_DB,
+    dtype: str = "f32",
 ) -> dict[str, Any]:
     """IR コンテナと golden io を書き、要約を返す。"""
     source = DacvaeSource(source_dir)
@@ -787,6 +848,11 @@ def export_series(
     folded = fold_weight_norm(model)
     fold_evidence = _remove_weight_norm_evidence(model, decoder_cases, encoder_cases, pristine)
     lifted = lift_snake_alphas(source, model)
+    # MUST: 丸めは畳み込みと alpha 降格の後・切り詰めと参照採り直しの前（`_fake_quant` の順序）。
+    quantized = _fake_quant(dtype, model)
+    if quantized is not None:
+        # 圧縮系列の golden は**丸めた重み**で採り直す（丸め前の pristine は門 3 で使い切った）。
+        pristine = _eager_outputs(model, decoder_cases, encoder_cases)
     trimmed = truncated_in_proj(model.quantizer.in_proj)
     truncation_evidence = _in_proj_truncation_evidence(model, trimmed, encoder_cases)
 
@@ -831,12 +897,15 @@ def export_series(
             target_dir / MODEL_FILE,
             dynamic_shapes=({axis.axis: sequence},),
             symbol_names=(axis.symbol,),
+            weight_dtype=dtype,
         )
         assert_snake_folded(graph, target)
         io_files = _write_io(graph, by_case, pristine[target], target_dir)
         written[target] = {**_graph_summary(graph, target_dir / MODEL_FILE), "io": io_files}
     return {
         "dir": str(out_dir),
+        "dtype": dtype,
+        "fake_quant": quantized,
         "source_repo": SOURCE_REPO,
         "source_commit": SOURCE_COMMIT,
         "targets": written,
@@ -858,12 +927,16 @@ def export_series(
     }
 
 
-def default_out_root(model_dir: Path) -> Path:
-    """生成物の既定の置き場（`outputs/series/<実重みのディレクトリ名>/`）。
+def default_out_root(model_dir: Path, dtype: str = "f32") -> Path:
+    """生成物の既定の置き場（`outputs/series/<実重みのディレクトリ名>{,-f16}/`）。
 
     ターゲット名のサブディレクトリは `export_series` が 1 段掘る（他系列と同じ形）。
+
+    MUST: dtype ごとに別ディレクトリ（ADR 0018 / 0027）— 綴りは `karume.dist` の
+    `IRODORI_CODEC_NAME` + dtype 接尾と一致させる（書き手と読み手が同じ 1 語から組む）。
     """
-    return SERIES_ROOT / model_dir.name
+    suffix = "" if dtype == "f32" else f"-{dtype}"
+    return SERIES_ROOT / f"{model_dir.name}{suffix}"
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -872,7 +945,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR)
     parser.add_argument("--latent-dir", type=Path, default=DEFAULT_LATENT_DIR)
     parser.add_argument("--reference-wav", type=Path, default=DEFAULT_REFERENCE_WAV)
-    parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="出力先（既定は --dtype ごとの系列 —"
+        " outputs/series/<--model-dir のディレクトリ名>{,-f16}/）",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=WEIGHT_DTYPES,
+        default="f32",
+        help="重みの格納 dtype（f16 は fake-quant してから適格スロットだけ圧縮格納する"
+        " — ADR 0018 / 0027。**emit 専用**）",
+    )
     parser.add_argument(
         "--target",
         action="append",
@@ -880,7 +966,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="書き出すターゲット（繰り返し指定可。既定は全て）",
     )
     args = parser.parse_args(argv)
-    out_dir = default_out_root(args.model_dir) if args.out is None else args.out
+    out_dir = default_out_root(args.model_dir, args.dtype) if args.out is None else args.out
     summary = export_series(
         args.model_dir,
         args.source_dir,
@@ -888,6 +974,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         targets=tuple(args.target) if args.target else TARGETS,
         latent_dir=args.latent_dir,
         reference_wav=args.reference_wav,
+        dtype=args.dtype,
     )
     print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
 

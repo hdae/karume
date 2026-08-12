@@ -7,8 +7,13 @@ r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop
 
     cd tools/exporter
     uv run --with 'transformers==5.14.1' python irodori_pipeline.py
+    uv run --with 'transformers==5.14.1' python irodori_pipeline.py --dtype f16
 
-出力（既定 `outputs/series/irodori-v4-small/pipeline/`・`.gitignore` 配下）:
+`--dtype f16` は**別系列**（`outputs/series/irodori-v4-small-f16/pipeline/`）へ書く。丸めは
+`export_irodori.fake_quant` を load 直後に当てるので、golden も上流突合の参照も**同じ丸めた
+重み**で計算される（ADR 0018 / 0027 — 系列ごとに golden を焼き直す形）。
+
+出力（既定 `outputs/series/irodori-v4-small{,-f16}/pipeline/`・`.gitignore` 配下）:
 
     meta.json                入力テキスト / caption / S / seed / CFG scale / forward 数 /
                              t スケジュール / 供給源、および常設門の実測値
@@ -63,7 +68,6 @@ from torch import nn
 import export_irodori as ex
 from karume import patch_irodori
 from karume.convert import normalize_boundary_tensor
-from karume.paths import SERIES_ROOT
 
 META_FILE = "meta.json"
 CASE_PREFIX = "case."
@@ -98,6 +102,13 @@ MIN_SECONDS, MAX_SECONDS = 0.5, 30.0
 #: 40 step の Euler がそれを増幅した結果がこの桁で（1 step では 1.4e-5 / 4.5e-6 と実測）、
 #: **式の取り違え**（CFG の符号・スケール・t スケジュール・マスクの区間割り）は値域と
 #: 同じ O(1) で出る — 実際、CFG の有無だけで z は 5.56 / 3.23 動く（`cfgEffectMaxAbs`）。
+#:
+#: **圧縮系列（`--dtype f16`）でも同じ閾値を掛ける**: 丸めはグラフ経路と上流経路の**両方**へ
+#: 同じ 1 回だけ当たる（`fake_quant` が丸めた `dit` を上流 `sample_euler_rf_cfg` もそのまま
+#: 使う）ので、ここで測る差は f32 系列と同じ「実装差だけ」であり、量子化誤差は両辺で相殺する。
+#: 桁が変わりうるのは丸めが条件数の悪い領域を踏んだ場合だけで、それは**実測で決着させる**
+#: （閾値を系列ごとに割るのは、実測が実際に外れてからにする — 先回りして緩めると、外れた
+#: ことが分からなくなる）。f16 の実測値はまだ無い。
 EULER_REFERENCE_ATOL = 1e-3
 
 #: CFG が実際に効いていることを見る下限（cond のみで回した z との最大絶対差）。
@@ -583,7 +594,7 @@ def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) ->
     return torch.cat(rows, dim=0).contiguous()
 
 
-def emit(model_dir: Path, source_dir: Path, out_dir: Path) -> dict[str, Any]:
+def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -> dict[str, Any]:
     """full-loop golden を書き、要約を返す（検証に落ちたら 1 バイトも書かない）。"""
     from tokenizers import Tokenizer
 
@@ -620,6 +631,25 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path) -> dict[str, Any]:
     )
     duration_predictor = ex.load_duration_predictor(source, state, config)
     dit = ex.load_dit(source, state, config, text_config)
+
+    # MUST: 丸めは load の直後・golden の採取より前（`export_irodori.fake_quant` の順序 MUST）。
+    # `dit` は `TextToLatentRFDiT` **丸ごと**（backbone / projector / speaker / duration の
+    # コピーを内側に持つ）なので、上流突合（`sample_euler_rf_cfg` / `predict_duration_log_frames`）
+    # もここで丸めた重みで回る = グラフ経路と上流経路の両辺が同じ丸めを受ける。
+    quantized = ex.fake_quant(
+        dtype,
+        {
+            ex.TARGET_BACKBONE: backbone,
+            ex.TARGET_TEXT_PROJ: text_projector,
+            ex.TARGET_CAPTION_PROJ: caption_projector,
+            ex.TARGET_SPEAKER: speaker_encoder,
+            ex.TARGET_DURATION: duration_predictor,
+            ex.TARGET_DIT: dit,
+            "speaker_norm": speaker_norm,
+            "text_norm": text_norm,
+            "caption_norm": caption_norm,
+        },
+    )
 
     # MUST: グラフラッパは**パッチ後**でしか正しく動かない（実数形 RoPE 表を渡すため）。
     # このファイルは「パッチ前の参照」を採らない（採る側は export_irodori.py）ので、
@@ -717,6 +747,8 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path) -> dict[str, Any]:
     written[T_EMBED_FILE] = (out_dir / T_EMBED_FILE).stat().st_size
 
     meta_payload = {
+        "dtype": dtype,
+        "fakeQuant": quantized,
         "steps": NUM_STEPS,
         "initScale": INIT_SCALE,
         "cfgRange": [CFG_MIN_T, CFG_MAX_T],
@@ -735,9 +767,13 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path) -> dict[str, Any]:
     return {"dir": str(out_dir), "bytes": written, **meta_payload}
 
 
-def default_out_dir(model_dir: Path) -> Path:
-    """既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>/pipeline/`）。"""
-    return SERIES_ROOT / f"irodori-{model_dir.name}" / "pipeline"
+def default_out_dir(model_dir: Path, dtype: str = "f32") -> Path:
+    """既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16}/pipeline/`）。
+
+    系列 root の綴りは `export_irodori.default_out_root` と同一 —
+    `pipeline/` はその下の 1 段（グラフのターゲットと並ぶ席）。
+    """
+    return ex.default_out_root(model_dir, dtype) / "pipeline"
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -745,9 +781,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--model-dir", type=Path, default=ex.DEFAULT_MODEL_DIR)
     parser.add_argument("--source-dir", type=Path, default=ex.DEFAULT_SOURCE_DIR)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--dtype",
+        choices=ex.WEIGHT_DTYPES,
+        default="f32",
+        help="重みの格納 dtype（f16 は golden を fake-quant 後の重みで焼き直す — ADR 0018 / 0027）",
+    )
     args = parser.parse_args(argv)
-    out_dir = default_out_dir(args.model_dir) if args.out is None else args.out
-    summary = emit(args.model_dir, args.source_dir, out_dir)
+    out_dir = default_out_dir(args.model_dir, args.dtype) if args.out is None else args.out
+    summary = emit(args.model_dir, args.source_dir, out_dir, args.dtype)
     print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
 
 
