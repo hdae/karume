@@ -4,7 +4,9 @@
 **測定値が静かに嘘になる**側だけ:
 
 - 指標（SNR / LSD / relRMS）の境界値 — 一致で inf / 0、参照が全ゼロ、スケール倍の上界
-- 構成表 — `i8-all` が全役割を覆い、`i8-mixed` が duration だけ外し、直交分解が 1 役割ずつ
+- 構成表 — `i8-all` が全役割を覆い、`i8-mixed` が duration だけ外し、直交分解が 1 役割ずつ、
+  `w8a8` が `i8-all` と同じ重みで活性だけ足す
+- 活性シムの適用 — DiT の適格 `nn.Linear` に掛かること・**0 本は fail loudly**
 - 役割 → モジュールの束ね方 — 全役割で `export_series` が丸める 9 本と**同じ集合**になること
   （食い違うと「配布系列の f16 と同じもの」を測っているつもりで別物を測る）
 - 直交性の門 — z / 波形が「変わるべきところだけ変わる」の**両側**が実際に落ちること
@@ -90,6 +92,20 @@ class TestConfigTable:
         """MUST: 直交性の門の期待値そのもの（duration は S だけ・codec は波形だけ）。"""
         assert set(mq.ROLES) - {ex.TARGET_DURATION, mq.ROLE_CODEC} == mq.LATENT_ROLES
 
+    def test_w8a8_rounds_the_same_weights_as_the_weight_only_config(self):
+        """配布形の 2 席は**同じ i8 バイトを共有する** — 違いは活性側だけ。"""
+        weight_only = mq.RECIPES[mq.WEIGHT_ONLY_BASE]
+        act = mq.RECIPES["w8a8"]
+
+        assert (act.weight, act.roles) == (weight_only.weight, weight_only.roles)
+        assert act.act_quant and not weight_only.act_quant
+
+    def test_only_w8a8_carries_the_activation_sim(self):
+        """活性シムを持つ構成が増えたら、素通り検出の比較相手も増やす必要がある。"""
+        with_sim = [name for name, recipe in mq.RECIPES.items() if recipe.act_quant]
+
+        assert with_sim == ["w8a8"]
+
 
 class TinyModule(nn.Module):
     def __init__(self) -> None:
@@ -147,6 +163,53 @@ class TestRoleModules:
         assert sorted(mq.role_modules(modules, (ex.TARGET_BACKBONE,))) == [ex.TARGET_BACKBONE]
 
 
+class _DitLike(nn.Module):
+    """適格 `nn.Linear`（`in_features % 4 == 0`）を 2 本持つ DiT 代役。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.qkv = nn.Linear(4, 8)
+        self.out = nn.Linear(8, 4)
+
+
+class TestActQuantSim:
+    """MUST: 掛かった本数を出す（0 本のまま回すと `i8-all` と同じ数が w8a8 の名前で載る）。"""
+
+    def test_it_hooks_every_eligible_linear_in_the_dit(self):
+        modules = {ex.TARGET_DIT: _DitLike()}
+
+        handles, attached = mq.attach_dit_act_quant(mq.RECIPES["w8a8"], modules)
+
+        assert attached == 2
+        mq.act_quant.detach_act_quant(handles)
+
+    def test_it_actually_rounds_the_activations(self):
+        """フックの効き目そのもの（掛けた後の出力が `quantize_rows` を通した入力と一致する）。"""
+        modules = {ex.TARGET_DIT: _DitLike()}
+        linear = modules[ex.TARGET_DIT].qkv
+        x = torch.tensor([[1.0, -0.3, 0.02, 0.7]])
+        handles, _ = mq.attach_dit_act_quant(mq.RECIPES["w8a8"], modules)
+
+        with torch.no_grad():
+            hooked = linear(x)
+            mq.act_quant.detach_act_quant(handles)
+            expected = linear(mq.act_quant.quantize_rows(x))
+
+        assert torch.equal(hooked, expected)
+
+    def test_zero_eligible_linears_is_fail_loudly(self):
+        """適格 0 本で素通りさせない — 品質は「良い」側に出るので黙ると誤読しかされない。"""
+        modules = {ex.TARGET_DIT: TinyModule()}  # Linear(2, 2) は k % 4 != 0
+
+        with pytest.raises(SystemExit, match="0 本"):
+            mq.attach_dit_act_quant(mq.RECIPES["w8a8"], modules)
+
+    def test_a_weight_only_config_hooks_nothing(self):
+        handles, attached = mq.attach_dit_act_quant(mq.RECIPES[mq.WEIGHT_ONLY_BASE], {})
+
+        assert (handles, attached) == ([], 0)
+
+
 def _entry(*, z_changed: bool, wav_changed: bool) -> dict[str, object]:
     return {"vsBase": {"zBitEqual": not z_changed, "wavBitEqual": not wav_changed}}
 
@@ -199,6 +262,26 @@ class TestOrthogonalityGate:
         assert _gates("i8-codec-only", z_changed=False, wav_changed=True) == []
         assert _gates("i8-codec-only", z_changed=False, wav_changed=False) != []
         assert _gates("i8-codec-only", z_changed=True, wav_changed=True) != []
+
+
+def _act_gates(*, moved_from_weight_only: bool) -> list[str]:
+    entry = _entry(z_changed=True, wav_changed=True)
+    entry["vsWeightOnly"] = {"zBitEqual": not moved_from_weight_only}
+    gates = mq.run_gates("w8a8", mq.RECIPES["w8a8"], {}, {"full": entry}, None)
+    return gates["failures"]
+
+
+class TestActQuantPassThroughGate:
+    """MUST: 素通り検出は**重みだけの構成との差**（基準との差は重みの丸めで説明が付く）。"""
+
+    def test_a_latent_that_moved_off_the_weight_only_config_is_green(self):
+        assert _act_gates(moved_from_weight_only=True) == []
+
+    def test_a_latent_bit_identical_to_the_weight_only_config_is_red(self):
+        failures = _act_gates(moved_from_weight_only=False)
+
+        assert len(failures) == 1
+        assert mq.WEIGHT_ONLY_BASE in failures[0]
 
 
 class TestGoldenGate:

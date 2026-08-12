@@ -25,9 +25,19 @@
 | ---------------- | -------------------- | ----------------------------------------------- |
 | `f32`            | 丸めなし（**基準**） | 恒真化防止（full-loop golden の z とバイト一致）|
 | `f16`            | 全役割 f16           | ADR 0050 波 1 の系列の対応物                    |
-| `i8-all`         | 全役割 i8            | 波 2 の上界（配布 25.2%）                       |
+| `i8-all`         | 全役割 i8            | 配布 `w8` 席（配布 25.2%）                      |
 | `i8-mixed`       | duration 以外 i8     | 混成表の候補（ADR 0050 決定 6 の (i) 案）       |
+| `w8a8`           | 全役割 i8 + 活性 i8  | 配布 `w8a8` 席（DiT の Linear だけ活性も i8）   |
 | `i8-<役割>-only` | その役割だけ i8      | **直交分解 5 本**（境界 = `load_*` と 1:1）     |
+
+`w8a8` は `i8-all` と**同じ丸めの重み**に、DiT の `nn.Linear` 入力へ per-token i8 の
+fake-quant（`karume.act_quant.quantize_rows` — ランタイム `quantize-rows.ts` の数値鏡像）を
+モジュールフックで足したもの。フックで安全なのは `patch_irodori.py` が `functional` で呼ぶのが
+`rms_norm` / `silu` だけで、量子化対象の Linear が実モジュールのまま残るため（SBV2 では
+`functional.conv1d` 直呼びのせいでフックが沈黙で取りこぼした — ADR 0029 の検出限界）。
+**適用本数は毎回出力し、0 本なら fail loudly**（「w8a8 のつもりで w8 の数を採った」に気づけない
+形を作らない）。活性量子化を DiT に限るのは配布形の席と揃えるため（`session` は `dit` の
+Session にだけ降りる — models 側 `pipeline.ts`）。
 
 直交分解の 5 本は `dit` / `backbone` / `speaker` / `duration` / `codec`。**5 本の和は `i8-all`
 にならない** — projector 2 本（各 6.83MB）は単独の軸に立てていない（桁が 2 つ小さく、単独で
@@ -54,6 +64,8 @@ duration の出力は S を決めるので、量子化で銀行家丸めが 1 �
 - `speaker` は**参照のあるケースだけ** z に効く（参照なしはホストのゼロ供給短絡で encoder が
   走らない — ADR 0048）⇒ `i8-speaker-only` は full で変わり・no-ref でビット一致、が緑の条件
 - それ以外（backbone / projector / dit）は z が変わる
+- `w8a8` は**重みだけの `i8-all` とも z が違う**（活性シムの素通り検出 — 素通りしたら
+  z は `i8-all` とビット一致してしまい、基準との差だけ見ていると「効いている」と誤読する）
 
 ## 出力
 
@@ -92,7 +104,7 @@ from torch import nn
 import export_dacvae as dv
 import export_irodori as ex
 import irodori_pipeline as ip
-from karume import patch_irodori
+from karume import act_quant, patch_irodori
 from karume.paths import OUTPUTS_ROOT, SERIES_ROOT
 
 #: デモ・ベンチの生成物置き場（資産と分離する — `rm -rf outputs/demo` が系列を巻き込まない）。
@@ -138,16 +150,23 @@ class Recipe:
 
     weight: str | None
     roles: tuple[str, ...]
+    #: DiT の `nn.Linear` 入力へ per-token i8 の fake-quant を掛けるか（w8a8 の活性側）。
+    act_quant: bool = False
 
 
-#: 主要 4 構成（聴き比べと配布形の裁定に載る側）。
+#: 活性シムの比較相手（**同じ重みで活性だけ素の**構成）。素通り検出はこの 1 本との差で見る。
+WEIGHT_ONLY_BASE = "i8-all"
+
+#: 主要 5 構成（聴き比べと配布形の裁定に載る側）。
 CONFIGS: Mapping[str, Recipe] = MappingProxyType(
     {
         BASE_CONFIG: Recipe(None, ()),
         "f16": Recipe("f16", ROLES),
-        "i8-all": Recipe("i8", ROLES),
+        WEIGHT_ONLY_BASE: Recipe("i8", ROLES),
         # ADR 0050 決定 6 の (i) 案 — duration だけ f32 据え置き。
         "i8-mixed": Recipe("i8", tuple(role for role in ROLES if role != ex.TARGET_DURATION)),
+        # 配布形の `w8a8` 席 — 重みは `i8-all` と 1 バイトも変わらず、DiT の活性だけが i8。
+        "w8a8": Recipe("i8", ROLES, act_quant=True),
     }
 )
 
@@ -390,12 +409,64 @@ def base_payload(out_dir: Path, case: str) -> dict[str, torch.Tensor]:
     return load_file(str(path))
 
 
+def weight_only_path(out_dir: Path, case: str) -> Path:
+    """活性シムの比較相手（{@link WEIGHT_ONLY_BASE} — 同じ重み・活性は素）の成果物。
+
+    存在検査だけを分けてあるのは、full-loop を回す**前**に確かめるため（回し切ってから
+    「比較相手が無い」で落ちると数十分ぶんの計算が捨てになる）。
+    """
+    path = out_dir / f"{WEIGHT_ONLY_BASE}.{case}{CASE_SUFFIX}"
+    if not path.is_file():
+        raise SystemExit(
+            f"活性シムの比較相手が無い: {path}"
+            f"（先に `--config {WEIGHT_ONLY_BASE}` を回す — 素通り検出は重みだけの構成との差）"
+        )
+    return path
+
+
+def weight_only_payload(out_dir: Path, case: str) -> dict[str, torch.Tensor]:
+    """{@link weight_only_path} の z と波形。"""
+    return load_file(str(weight_only_path(out_dir, case)))
+
+
+class LatentResult(NamedTuple):
+    """{@link latent_stage} の戻り。`act_quant_linears` は活性シムを掛けた `nn.Linear` の本数。"""
+
+    metas: dict[str, dict[str, Any]]
+    latents: dict[str, torch.Tensor]
+    reports: dict[str, str]
+    act_quant_linears: int
+
+
+def attach_dit_act_quant(
+    recipe: Recipe, modules: Mapping[str, nn.Module]
+) -> tuple[list[object], int]:
+    """w8a8 構成で DiT の `nn.Linear` 入力へ per-token i8 の fake-quant を掛ける。
+
+    MUST: **0 本は fail loudly** — 掛からないまま回すと `i8-all` と同じ数が `w8a8` の名前で
+    レポートに載り、しかも品質は「良い」側に出る（活性量子化は誤差を増やすので、素通りは
+    常に緑寄りの嘘になる）。掛ける先を DiT に限るのは配布形の席と揃えるため（`session` は
+    `dit` の Session にだけ降りる）。
+    """
+    if not recipe.act_quant:
+        return [], 0
+    handles, attached = act_quant.attach_act_quant(modules[ex.TARGET_DIT])
+    if attached == 0:
+        act_quant.detach_act_quant(handles)
+        raise SystemExit(
+            "活性量子化シムを掛けた nn.Linear が 0 本"
+            f"（`{ex.TARGET_DIT}` の Linear が適格条件 k % {act_quant.PACK_ALIGN} == 0 を"
+            "満たしていない、またはモジュール構成が変わった）"
+        )
+    return handles, attached
+
+
 def latent_stage(
     name: str,
     recipe: Recipe,
     args: argparse.Namespace,
     base_frames: Mapping[str, int] | None,
-) -> tuple[dict[str, dict[str, Any]], dict[str, torch.Tensor], dict[str, str]]:
+) -> LatentResult:
     """テキスト → latent（構成ぶんの丸めを当てて full-loop を回す）。"""
     from tokenizers import Tokenizer
 
@@ -413,6 +484,11 @@ def latent_stage(
         else ex.FakeQuantResult({}, {})
     )
     patch_irodori.apply_patches()
+    # 活性シムは重みの丸めの**後**（重みは実行前に決まり、活性は実行時に決まる — 両者は独立
+    # だが、報告の順序を「重み → 活性」で揃えると素通りの切り分けが 1 本の出力で済む）。
+    handles, act_quant_linears = attach_dit_act_quant(recipe, modules)
+    if act_quant_linears:
+        print(f"[{name}] 活性量子化シム: nn.Linear {act_quant_linears} 本（dit）", flush=True)
     graphs = build_graphs(modules, config, model_config)
     speaker_max = ex.speaker_sym_max(model_config)
     caps = {
@@ -446,9 +522,10 @@ def latent_stage(
             f" forwards={meta['forwards']} {meta['elapsed']:.0f}s",
             flush=True,
         )
+    act_quant.detach_act_quant(handles)
     del graphs, modules, source
     gc.collect()
-    return metas, latents, dict(quantized.reports)
+    return LatentResult(metas, latents, dict(quantized.reports), act_quant_linears)
 
 
 def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
@@ -470,8 +547,13 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
             )
         base_meta = json.loads(base_json.read_text(encoding="utf-8"))
         base_frames = {case: entry["S"] for case, entry in base_meta["cases"].items()}
+    if recipe.act_quant:
+        # MUST: ここも**走らせる前**に確かめる（活性シムの素通り検出は重みだけの構成との差で
+        # しか出せないので、無ければこの構成を回しても答えが出ない）。
+        for case in ip.PIPELINE_CASES:
+            weight_only_path(args.out, case.name)
 
-    metas, latents, reports = latent_stage(name, recipe, args, base_frames)
+    metas, latents, reports, act_quant_linears = latent_stage(name, recipe, args, base_frames)
 
     decoder, sample_rate, codec_report = build_decoder(
         args.codec_source_dir,
@@ -530,6 +612,26 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
                 "wavRelRms": rel_rms(audio, base_audio),
                 "wavMaxAbsDiff": float((audio - base_audio).abs().max()),
             }
+        if recipe.act_quant:
+            # 素通り検出の観測（評定は {@link run_gates} が持つ）— **重みが同じ構成との差**を
+            # 見るので、ここが 0 なら活性シムが 1 本も効いていない。
+            weight_only = weight_only_payload(args.out, case)
+            other_z = weight_only["z"].to(torch.float32)
+            other_audio = weight_only["audio"].to(torch.float32)
+            if latent.shape != other_z.shape or audio.shape != other_audio.shape:
+                raise SystemExit(
+                    f"{case}: {WEIGHT_ONLY_BASE} と形が違う（z {tuple(latent.shape)} vs"
+                    f" {tuple(other_z.shape)} / 波形 {tuple(audio.shape)} vs"
+                    f" {tuple(other_audio.shape)}）— 時間グリッドの固定が効いていない"
+                )
+            entry["vsWeightOnly"] = {
+                "config": WEIGHT_ONLY_BASE,
+                "zBitEqual": bool(torch.equal(latent, other_z)),
+                "zRelRms": rel_rms(latent, other_z),
+                "zMaxAbsDiff": float((latent - other_z).abs().max()),
+                "wavSnrDb": snr_db(audio, other_audio),
+                "wavLsdDb": log_spectral_distance(audio, other_audio),
+            }
         entries[case] = entry
 
     payload = {
@@ -542,6 +644,7 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
         "frameRate": ex.CODEC_FRAME_RATE,
         "fakeQuant": reports,
         "codecFakeQuant": codec_report,
+        "actQuantLinears": act_quant_linears,
         "cases": entries,
         "gates": run_gates(name, recipe, latents, entries, goldens),
         "elapsed": round(time.perf_counter() - started, 1),
@@ -569,6 +672,8 @@ def run_gates(
     ② 各構成の z / 波形が**変わるべきところだけ変わる**（モジュール docstring の直交性の門）。
        「変わること」だけを門にすると丸めの素通りしか捕まらず、「変わらないこと」だけを
        門にすると scope 漏れしか捕まらない — 両方を期待値表から出す
+    ③ 活性シムを持つ構成は**重みだけの構成とも z が違う**（素通り検出）。基準との差だけでは
+       重みの丸めで説明が付いてしまい、活性シムが 1 本も効いていなくても緑になる
     """
     gates: dict[str, Any] = {}
     failures: list[str] = []
@@ -616,6 +721,17 @@ def run_gates(
                     f"{case}: 波形が「{'変わる' if expect_wav else '変わらない'}」期待に反した"
                     f"（役割 {list(recipe.roles)}）"
                 )
+        if recipe.act_quant:
+            moved = {
+                case: not entry["vsWeightOnly"]["zBitEqual"] for case, entry in entries.items()
+            }
+            gates["act_quant_changes_the_latent"] = {"versus": WEIGHT_ONLY_BASE, "cases": moved}
+            failures += [
+                f"{case}: z が {WEIGHT_ONLY_BASE} とビット一致した（活性シムが素通りしている"
+                " — 重みだけの構成と同じ数を w8a8 の名前で測っている）"
+                for case, ok in moved.items()
+                if not ok
+            ]
     if recipe.weight is not None:
         gates["quantized_roles"] = list(recipe.roles)
     gates["failures"] = failures
@@ -632,7 +748,7 @@ def collect(out_dir: Path) -> dict[str, dict[str, Any]]:
     コードが正本で、測定後に期待側の誤りを直したとき、保存済みの評定が古い期待のまま
     レポートへ蘇るため（実例: speaker のケース条件 — no-ref はゼロ短絡で不変が正しい）。
     基準 `f32` の golden ビット一致だけはテンソル比較（測定時にしかできない）なので保存値を
-    使う。観測（`vsBase` のビット等値）は測定の事実で、評定と違い保存してよい側。
+    使う。観測（`vsBase` / `vsWeightOnly` のビット等値）は測定の事実で、評定と違い保存してよい側。
     """
     found: dict[str, dict[str, Any]] = {}
     for name in RECIPES:
@@ -707,6 +823,9 @@ def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             "metrics": "SNR は波形の残差（位相ずれに弱い）/ LSD は対数振幅スペクトルの距離"
             f"（n_fft={STFT_N_FFT} hop={STFT_HOP}・床 −100dB・位相ずれに鈍い）。両方で読む",
             "trim": "末尾トリムと秒切り出しは通さない（構成間で長さを揃えるため）",
+            "act_quant": f"w8a8 は DiT の nn.Linear 入力へ per-token i8 の fake-quant を掛ける"
+            f"（karume.act_quant — ランタイム quantize-rows.ts の鏡像）。素通り検出は"
+            f" {WEIGHT_ONLY_BASE} との z ビット等値",
             "verdict": "最終裁定は聴感（ユーザー）— WAV は同一テキスト・同一 seed で並ぶ",
         },
         "configs": dict(collected),
