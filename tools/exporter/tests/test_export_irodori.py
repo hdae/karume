@@ -11,6 +11,7 @@
   のまま（`text-proj` と同じ式）であること
 - `text_norm` / `caption_norm` の取り違え（同じ重みを 2 回読む）が `_norm_divergence` で落ちる
 - 参照なし（マスク全 0）の speaker 出力が**厳密に 0** であることの実測が、0 でなければ落ちる
+- 実 latent 由来の speaker ケースが、資産の欠け・形の食い違いで**合成に化けずに**落ちる
 - `duration` の `aux_features` 非依存の実測が、依存していたら落ちる
 - `dit` の cond / uncond 3 変種が**互いに違う**ことの実測が、同じなら落ちる
 - 条件 state の右 pad が宣言長を超えたら落ちる
@@ -18,9 +19,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from torch import nn
 
 import export_irodori as ir
@@ -245,6 +248,68 @@ class TestSpeakerCases:
     def test_a_case_over_the_symbolic_cap_fails_loudly(self):
         with pytest.raises(SystemExit, match="記号次元の範囲"):
             ir.build_speaker_cases(4, 8)
+
+
+def _fake_patch(seq, mask, patch_size):
+    """`patch_sequence_with_mask` の代役（端を捨てて `patch_size` 本ずつ束ねる）。
+
+    実物は上流実装から注入される（`IrodoriSource.patch_sequence_with_mask`）ので、ここで
+    見るのは **`build_real_speaker_cases` 自身の振る舞い**だけ — 束ね方の正しさは上流の責任で、
+    代役で写しても意味が無い。
+    """
+    usable = (seq.shape[1] // patch_size) * patch_size
+    bundles = usable // patch_size
+    bundled = seq[:, :usable].reshape(seq.shape[0], bundles, seq.shape[2] * patch_size)
+    bundled_mask = mask[:, :usable].reshape(mask.shape[0], bundles, patch_size).all(-1)
+    return bundled, bundled_mask
+
+
+def _write_reference_latent(latent_dir: Path, latent: torch.Tensor) -> None:
+    latent_dir.mkdir(parents=True, exist_ok=True)
+    path = latent_dir / f"{ir.REFERENCE_LATENT_PREFIX}{ir.REFERENCE_LATENT_CASE}{ir.IO_SUFFIX}"
+    save_file({ir.REFERENCE_LATENT_KEY: latent}, str(path))
+
+
+class TestRealSpeakerCases:
+    """MUST: 実 latent 由来のケースは**合成で代替しない**（tolerance の根拠が値域に立つ）。"""
+
+    def test_the_cases_follow_the_table_and_share_one_prefix(self, tmp_path):
+        # 190 フレーム（参照音声 7.6 秒）→ patch 4 で 47 行、という実資産と同じ形。
+        latent = torch.arange(190 * 32, dtype=torch.float32).reshape(1, 190, 32)
+        _write_reference_latent(tmp_path, latent)
+
+        cases = ir.build_real_speaker_cases(_fake_patch, 32, 4, 128, 750, latent_dir=tmp_path)
+
+        assert [name for name, _ in cases] == [name for name, _ in ir.SPEAKER_REAL_CASES]
+        by_name = dict(cases)
+        assert by_name["ref-real-full"].shape == (1, 47, 128)
+        assert by_name["ref-real-short"].shape == (1, 6, 128)
+        # 短尺は全長の**先頭**を切り出したもの（別の乱数や別の区間に化けていない）。
+        assert torch.equal(by_name["ref-real-short"], by_name["ref-real-full"][:, :6])
+
+    def test_a_missing_latent_fails_loudly(self, tmp_path):
+        with pytest.raises(SystemExit, match="実 latent が無い"):
+            ir.build_real_speaker_cases(_fake_patch, 32, 4, 128, 750, latent_dir=tmp_path)
+
+    def test_a_latent_of_the_wrong_width_fails_loudly(self, tmp_path):
+        _write_reference_latent(tmp_path, torch.zeros((1, 190, 16)))
+
+        with pytest.raises(SystemExit, match=r"\[1,S,32\] でない"):
+            ir.build_real_speaker_cases(_fake_patch, 32, 4, 128, 750, latent_dir=tmp_path)
+
+    def test_a_patch_size_that_misses_the_speaker_input_width_fails_loudly(self, tmp_path):
+        _write_reference_latent(tmp_path, torch.zeros((1, 190, 32)))
+
+        # patch 2 なら束ねた幅は 64 で、speaker グラフの入力 128 と食い違う。
+        with pytest.raises(SystemExit, match="speaker の入力次元"):
+            ir.build_real_speaker_cases(_fake_patch, 32, 2, 128, 750, latent_dir=tmp_path)
+
+    def test_a_latent_shorter_than_the_table_fails_loudly(self, tmp_path):
+        # 20 フレーム → patch 後 5 行で、表の短尺 6 行に足りない。
+        _write_reference_latent(tmp_path, torch.zeros((1, 20, 32)))
+
+        with pytest.raises(SystemExit, match="実 latent の patch 後の長さ"):
+            ir.build_real_speaker_cases(_fake_patch, 32, 4, 128, 750, latent_dir=tmp_path)
 
 
 def _dit_pristine(distinct: bool) -> dict[str, torch.Tensor]:

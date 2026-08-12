@@ -158,29 +158,39 @@ const CAPTION_NORM_TOLERANCE: Tolerance = { atol: 3e-5, rtol: 1e-6 };
 /**
  * 参照 latent エンコーダ（`ReferenceLatentEncoder` 8 層 + `speaker_norm`）の許容誤差。
  *
- * 実測（`atol=rtol=0`、5 ケース × 出力 1 本 `[1,S,768]`）:
+ * 実測（`atol=rtol=0`、7 ケース × 出力 1 本 `[1,S,768]`）。`ref-real-*` の 2 本が**実音声の
+ * DACVAE latent 由来**（公式サンプル参照音声 7.6 秒を上流の決定的 encode に通した 190
+ * フレームを patch した 47 行 / その先頭 6 行）で、残る 5 本が合成（標準正規）:
  *
- * | ケース  | S   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
- * | ------- | --- | ------- | ------- | ------------ | ------------------ |
- * | ref-min | 2   | 6.14e-6 | 6.87e-3 | 3.60         | 1.09e-4            |
- * | ref-1s  | 6   | 9.80e-5 | 2.99e-2 | 3.85         | 1.22e-4            |
- * | ref-5s  | 31  | 2.24e-5 | 3.18e-2 | 4.42         | 1.81e-4            |
- * | ref-30s | 187 | 5.34e-5 | 1.11e-1 | 4.94         | 7.60e-6            |
- * | ref-max | 750 | 5.83e-5 | 5.20e-1 | 5.30         | 1.70e-6            |
+ * | ケース         | S   | 入力   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | -------------- | --- | ------ | ------- | ------- | ------------ | ------------------ |
+ * | ref-min        | 2   | 合成   | 6.14e-6 | 6.87e-3 | 3.60         | 1.09e-4            |
+ * | ref-1s         | 6   | 合成   | 9.80e-5 | 2.99e-2 | 3.85         | 1.22e-4            |
+ * | ref-real-short | 6   | 実     | 6.82e-6 | 3.40e-3 | 4.14         | 7.10e-4            |
+ * | ref-5s         | 31  | 合成   | 2.24e-5 | 3.18e-2 | 4.42         | 1.81e-4            |
+ * | ref-real-full  | 47  | 実     | 4.96e-5 | 7.22e-1 | 4.74         | 2.84e-6            |
+ * | ref-30s        | 187 | 合成   | 5.34e-5 | 1.11e-1 | 4.94         | 7.60e-6            |
+ * | ref-max        | 750 | 合成   | 5.83e-5 | 5.20e-1 | 5.30         | 1.70e-6            |
  *
- * atol 1e-3 は実測最悪 9.80e-5（ref-1s）の約 10 倍。**backbone / projector より 1 桁緩い**
+ * atol 7e-4 は実測最悪 9.80e-5（ref-1s）の約 7.1 倍。**backbone / projector より 1 桁緩い**
  * のは、値域が O(5) と小さいのに絶対誤差が同程度出るから — 入力の `in_proj` 出力を 6 で
  * 割ってから 8 段の RMSNorm 付き残差を通す構造で、正規化のたびに小さな中間値の相対差が
- * 拡大する。加えて **golden の参照 latent は合成（標準正規）**で、実音声の DACVAE latent とは
- * 統計が違う（実 latent での誤差はこれより小さい可能性が高いが、コーデック波が済むまで
- * 測れない — その時点で測り直す）。
+ * 拡大する。rtol 1e-6 の寄与は上端 \|ref\| = 5.30 でも 5.3e-6（atol の 1/132）で、判定を
+ * 主導しない。
+ *
+ * **実 latent は合成より緩くない**（実測最悪 4.96e-5 対 9.80e-5）ので、実 latent を入れても
+ * 閾値は緩まない。同じ S=6 で並べた ref-1s（合成 9.80e-5）と ref-real-short（実 6.82e-6）が
+ * 1 桁違うのは長さではなく**入力の値域**の差で、実 latent 側は RMS 0.68 / \|入力\| 上端 2.91、
+ * 合成側は RMS 0.95 / 同 2.92（全長の ref-real-full でも RMS 0.94 / 上端 5.31）— DACVAE の
+ * latent はほぼ単位分散に載っており、合成の標準正規が値域の性格を外していなかったことが
+ * ここで確かめられた（W2 時点の「合成前提の暫定」という留保はこの実測で解消済み）。
  *
  * 誤差の伸びが S に単調でない（S=6 が最悪で S=750 が 5.8e-5）のは、層方向の縮約長が S に
  * 依らず、S は独立な列方向にしか効かないため（backbone と同じ構造）。実装バグ
  * （RoPE の実数化の取り違え・q/k ノルムの head ごと weight の取り違え・sigmoid ゲートの
  * 掛け違い）の誤差は値域と同じ O(5) で、この閾値の 3〜4 桁上に出る。
  */
-const SPEAKER_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 1e-6 };
+const SPEAKER_TOLERANCE: Tolerance = { atol: 7e-4, rtol: 1e-6 };
 
 /**
  * duration predictor（`text_norm` + token-sum 形）の許容誤差。出力は `[1]` の
@@ -266,7 +276,7 @@ const GENERATE_COMMAND =
  * 生成されているはずのターゲットとケース。**列挙結果ではなくここで固定する** — 列挙だけに
  * 頼ると生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
  * `tools/exporter/export_irodori.py` の TARGETS / GOLDEN_CASES / SPEAKER_CASES /
- * DURATION_CASES / DIT_CASES。
+ * SPEAKER_REAL_CASES / DURATION_CASES / DIT_CASES。
  *
  * MUST: ターゲット（G6 / G7 = codec）を足すときはこの表と TOLERANCES を同時に伸ばす。
  */
@@ -284,7 +294,15 @@ const EXPECTED_CASES: Readonly<Record<string, readonly string[]>> = {
   "backbone": TEXT_CASES,
   "caption-proj": TEXT_CASES,
   "text-proj": TEXT_CASES,
-  "speaker": ["ref-1s", "ref-30s", "ref-5s", "ref-max", "ref-min"],
+  "speaker": [
+    "ref-1s",
+    "ref-30s",
+    "ref-5s",
+    "ref-max",
+    "ref-min",
+    "ref-real-full",
+    "ref-real-short",
+  ],
   "duration": [
     "dur-both",
     "dur-caption-only",
@@ -420,7 +438,7 @@ for (const target of TARGETS) {
 
         // 記号次元は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
         // ケースごとに長さが違う（テキスト系と duration は T = 7 / 13 / 22 / 29 / 144 / 404、
-        // speaker は S = 2 / 6 / 31 / 187 / 750、dit は S = 2 / 25 / 750）ので、宣言上限
+        // speaker は S = 2 / 6 / 31 / 47 / 187 / 750、dit は S = 2 / 25 / 750）ので、宣言上限
         // （テキスト系 Tmax = 512 = export_irodori.py の SYM_MAX / speaker Smax = 750 =
         // speaker_sym_max / dit Smax = 750 = dit_sym_max — 帯マスクと RoPE 表の焼き付け点）に
         // 依存した実装はここで値か shape が壊れる。speaker と dit は**上限そのもの**を踏む

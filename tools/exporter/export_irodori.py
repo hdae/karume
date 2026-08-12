@@ -210,6 +210,20 @@ DEFAULT_MODEL_DIR = INPUTS_ROOT / "irodori" / "v4-small"
 #: モデル実装（GitHub `Aratako/Irodori-TTS` の clone）の置き場。
 DEFAULT_SOURCE_DIR = INPUTS_ROOT / "irodori" / "Irodori-TTS"
 
+#: 実 latent の供給元（`dacvae_host.py` が書く参照音声のホスト前処理 golden）。**そこにある
+#: 既製ファイルを読むだけ**で、この台本は DACVAE の重みも encode 経路も引かない
+#: （`dacvae_host.py` 側が上流 `encode_waveform` とのビット一致を実測済み）。
+REFERENCE_LATENT_DIR = SERIES_ROOT / "dacvae-32dim" / "host"
+REFERENCE_LATENT_CASE = "ref-default"
+REFERENCE_LATENT_PREFIX = "case."
+REFERENCE_LATENT_KEY = "latent"
+
+#: `dacvae_host.py` を回す生成コマンド（実 latent が無いときのエラーにそのまま出す）。
+REFERENCE_LATENT_COMMAND = (
+    "uv run --with descript-audiotools --with einops --with 'transformers==5.14.1'"
+    " python dacvae_host.py"
+)
+
 MODEL_FILE = "model.safetensors"
 TOKENIZER_FILE = "tokenizer/tokenizer.json"
 IO_PREFIX = "io."
@@ -402,12 +416,11 @@ GOLDEN_CASES: tuple[tuple[str, str, str], ...] = (
     ("caption-long", "caption", LONG_PASSAGE_A + LONG_PASSAGE_B + LONG_PASSAGE_C),
 )
 
-#: `speaker` の golden ケース `(名前, patch 後トークン数 S, 乱数 seed)`。
+#: `speaker` の**合成** golden ケース `(名前, patch 後トークン数 S, 乱数 seed)`。
 #:
-#: 参照 latent は**合成**（決定的 seed の `torch.randn`）で良い — この門が見ているのは
-#: 「karume の実行が torch と一致するか」であって、実音声の再現ではない（実音声から
-#: latent を採るには別リポの DACVAE 重みが要る。それを門の前提にすると、コーデック波が
-#: 済むまで speaker の門が立たない）。
+#: 合成（決定的 seed の `torch.randn`）を残すのは、この 5 本が**長さの被覆**（S = 2 …
+#: 宣言上限 750）の担い手だから — 実 latent 1 本では 47 行しか取れず、上限も下限も踏めない。
+#: 値の性格（実音声の DACVAE latent の値域）は {@link SPEAKER_REAL_CASES} が受け持つ。
 #:
 #: 長さは秒数から採る: 25Hz ÷ `speaker_patch_size` 4 = 6.25 token/s なので 1s / 5s / 30s に
 #: 相当する 6 / 31 / 187 と、**宣言上限そのもの**（120s = 750）、および記号次元の下限 2。
@@ -418,6 +431,21 @@ SPEAKER_CASES: tuple[tuple[str, int, int], ...] = (
     ("ref-5s", 31, 103),
     ("ref-30s", 187, 104),
     ("ref-max", 750, 105),
+)
+
+#: `speaker` の**実 latent** golden ケース `(名前, patch 後トークン数 S〈None = 全長〉)`。
+#:
+#: 供給元は公式サンプルの参照音声（7.6 秒 = 190 フレーム）を上流の決定的 encode に通した
+#: {@link REFERENCE_LATENT_KEY} で、patch（`speaker_patch_size` 4・端は上流が捨てる）後は
+#: 47 行。合成の標準正規とは値域も相関構造も違うので、**tolerance の根拠を実運用の値域と
+#: 対応させる**ためにこの 2 本を足す（`export_dacvae.py` の `DECODER_CASES` と同じ理由）。
+#:
+#: 短尺側を 6 に採るのは、**合成の `ref-1s` と同じ S** で並べるため — 同じ長さで合成と実の
+#: 誤差を直接比べられる形にしておくと、tolerance が「長さ」で決まっているのか「値域」で
+#: 決まっているのかが表から読める。
+SPEAKER_REAL_CASES: tuple[tuple[str, int | None], ...] = (
+    ("ref-real-short", 6),
+    ("ref-real-full", None),
 )
 
 #: `duration` の golden ケース `(名前, text ケース名, has_speaker, has_caption)`。
@@ -513,6 +541,7 @@ class IrodoriSource:
             RMSNorm,
             TextToLatentRFDiT,
             get_timestep_embedding,
+            patch_sequence_with_mask,
         )
         from irodori_tts.text_normalization import normalize_text
 
@@ -525,6 +554,9 @@ class IrodoriSource:
         self.dit_cls = TextToLatentRFDiT
         #: 平均トークンの前置は `TextToLatentRFDiT` の staticmethod。台本は式を写さずに呼ぶ。
         self.prepend_masked_mean_token = TextToLatentRFDiT._prepend_masked_mean_token
+        #: 参照 latent の束ね（`[T,32]` → `[T//4,128]`・端は捨てる）。**式を写さず呼ぶ** —
+        #: 端の扱い（切り捨て / 切り上げ）が上流で変われば、写した式は黙って古いまま通る。
+        self.patch_sequence_with_mask = patch_sequence_with_mask
         #: `t_embed` のホスト生成（sin/cos 3 行）。**式を写さず呼ぶ** — θ の割り方が上流で
         #: 変われば、写した式は黙って古いまま通る。
         self.timestep_embedding = get_timestep_embedding
@@ -969,9 +1001,9 @@ def build_cases(
 
 
 def build_speaker_cases(latent_dim: int, sym_max: int) -> tuple[tuple[str, torch.Tensor], ...]:
-    """`speaker` の golden ケース `(名前, 合成参照 latent)`。
+    """`speaker` の**合成** golden ケース `(名前, 参照 latent)`（{@link SPEAKER_CASES} どおり）。
 
-    値は決定的 seed の標準正規（`SPEAKER_CASES` の注記 — 実音声 latent は別リポの重みが要る）。
+    値は決定的 seed の標準正規（表の注記 — 長さの被覆はこちらが担う）。
     """
     cases: list[tuple[str, torch.Tensor]] = []
     for name, length, seed in SPEAKER_CASES:
@@ -981,6 +1013,54 @@ def build_speaker_cases(latent_dim: int, sym_max: int) -> tuple[tuple[str, torch
             )
         generator = torch.Generator().manual_seed(seed)
         cases.append((name, torch.randn(1, length, latent_dim, generator=generator)))
+    return tuple(cases)
+
+
+def build_real_speaker_cases(
+    patch_sequence: Any,
+    latent_dim: int,
+    patch_size: int,
+    patched_dim: int,
+    sym_max: int,
+    *,
+    latent_dir: Path = REFERENCE_LATENT_DIR,
+) -> tuple[tuple[str, torch.Tensor], ...]:
+    """`speaker` の**実 latent** golden ケース（{@link SPEAKER_REAL_CASES} の表どおり）。
+
+    供給元は `dacvae_host.py` が書いた既製の `[1,190,32]`。patch は**上流の
+    `patch_sequence_with_mask` を呼ぶ**（`patch_sequence` に渡ってくる） — 端の切り捨ての
+    仕方を写すと、上流が変わっても台本だけ古いまま黙って通る。
+
+    MUST: 実 latent が無い環境では**落とす**（合成で代替しない） — 代替すると、この 2 本が
+    受け持っている「値域が実運用のもの」という性質が黙って消え、tolerance の根拠が壊れる。
+    """
+    path = latent_dir / f"{REFERENCE_LATENT_PREFIX}{REFERENCE_LATENT_CASE}{IO_SUFFIX}"
+    if not path.is_file():
+        raise SystemExit(f"実 latent が無い: {path}（`{REFERENCE_LATENT_COMMAND}` で作る）")
+    tensors = load_file(str(path))
+    if REFERENCE_LATENT_KEY not in tensors:
+        raise SystemExit(f"{path} に '{REFERENCE_LATENT_KEY}' が無い")
+    latent = tensors[REFERENCE_LATENT_KEY].to(torch.float32)
+    if latent.ndim != 3 or latent.shape[0] != 1 or int(latent.shape[2]) != latent_dim:
+        raise SystemExit(f"実 latent の shape {tuple(latent.shape)} が [1,S,{latent_dim}] でない")
+    mask = torch.ones(latent.shape[:2], dtype=torch.bool)
+    patched, _patched_mask = patch_sequence(latent, mask, patch_size)
+    if int(patched.shape[2]) != patched_dim:
+        raise SystemExit(
+            f"patch 後の次元 {int(patched.shape[2])} が speaker の入力次元 {patched_dim} と違う"
+        )
+    available = int(patched.shape[1])
+
+    cases: list[tuple[str, torch.Tensor]] = []
+    for name, length in SPEAKER_REAL_CASES:
+        want = available if length is None else int(length)
+        if not MIN_SYM_LENGTH <= want <= sym_max:
+            raise SystemExit(
+                f"{name}: S={want} が記号次元の範囲 [{MIN_SYM_LENGTH}, {sym_max}] の外"
+            )
+        if want > available:
+            raise SystemExit(f"{name}: S={want} が実 latent の patch 後の長さ {available} を超える")
+        cases.append((name, patched[:, :want].contiguous()))
     return tuple(cases)
 
 
@@ -1640,7 +1720,16 @@ def export_series(
     dit = load_dit(source, state, config, text_config)
     cases = build_cases(model_dir, source, text_config, sym_max)
     speaker_max = speaker_sym_max(model_config)
-    speaker_cases = build_speaker_cases(int(config.speaker_patched_latent_dim), speaker_max)
+    speaker_cases = (
+        *build_speaker_cases(int(config.speaker_patched_latent_dim), speaker_max),
+        *build_real_speaker_cases(
+            source.patch_sequence_with_mask,
+            int(config.latent_dim),
+            int(config.speaker_patch_size),
+            int(config.speaker_patched_latent_dim),
+            speaker_max,
+        ),
+    )
     dit_max = dit_sym_max(config)
     #: `dit` の mask の条件側の総長（派生次元 `S+<これ>` — ADR 0047 の 1519）。
     dit_context_total = (
