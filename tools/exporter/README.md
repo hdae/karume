@@ -1579,3 +1579,26 @@ the attrs are placed here.
   `anima_demo.py` + `examples/anima/text/`. `packages/runtime/tests/e2e_anima_test.ts` keeps using
   the fixture's `input_ids` — what it measures is the NN's numbers, and tokenization parity is held
   separately by `packages/runtime/tests/anima_tokenizer_test.ts`.)
+
+## Real-weight Irodori-TTS export and E2E (waves 1–4)
+
+Six text-side graphs plus the DACVAE codec pair, with host-side goldens. The scripts have a
+**required regeneration order** (later ones read earlier outputs):
+
+```sh
+# 0. one-time inputs: inputs/irodori/{v4-small,dacvae-32dim,Irodori-TTS,dacvae-src}/
+uv run python convert_dacvae.py                                       # 1. codec pth → safetensors
+uv run --with 'transformers==5.14.1' python export_irodori.py         # 2. six graphs + io goldens
+uv run --with 'transformers==5.14.1' python irodori_tokenizer.py      # 3. tokenizer asset + goldens + parity fixture (deno fmt it)
+uv run --with 'transformers==5.14.1' python irodori_pipeline.py       # 4. full-loop latent goldens
+uv run --with descript-audiotools --with einops \
+    --with 'transformers==5.14.1' python dacvae_host.py               # 5. host preprocessing goldens
+uv run --with descript-audiotools --with einops python export_dacvae.py  # 6. codec graphs + io goldens
+uv run karume dist --pipeline irodori                                 # 7. distribution (8 graphs + tokenizer)
+```
+
+Order caveats measured in practice: step 2 reads step 5's real latent for the speaker cases
+(`SPEAKER_REAL_CASES`), and step 6 reads step 4's `z` for the decoder cases — so a **full** rebuild
+from scratch runs 2 once more after 5 (2 → 3 → 4 → 5 → 2 → 6 → 7). Incremental regeneration of a
+single script is safe as long as its inputs above exist. Design records: ADR 0044 / 0046 / 0047
+(graphs), 0048 (host port), 0049 (codec integration).

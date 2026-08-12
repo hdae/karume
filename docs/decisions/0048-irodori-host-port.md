@@ -85,6 +85,9 @@ golden）は `IrodoriGenerateRequest.initialNoise`（再現・検証用と明記
   「秒 × frameRate が整数のすぐ上」の入力だけ最大 1 フレームずれる（`sampleRate` /
   `hopLength` が pipelineConfig に無いため）。codec 波で両値が配布形に載ったら上流の綴りへ
   寄せる（`host/round.ts` の MUST に記録）。
+  **NOTE（2026-08-12 追記）: 第 4 波で解消済み** — pipelineConfig は 23 欄になり
+  （sampleRate / hopLength / codecHaloFrames — ADR 0049）、`durationSeconds` は上流の綴り
+  （trunc でサンプル化 → ceil でフレーム化）へ寄せた。本文の「20 欄」も当時の値。
 - 空 caption / 参照なしのゼロ短絡・平均トークン前置・banker 丸めなどホスト残置の全式は
   `packages/models/src/irodori/host/`（純関数・Math.fround 逐次）に集約し、値は exporter の
   golden（`irodori_tokenizer.py` / `irodori_pipeline.py`）が固定する。

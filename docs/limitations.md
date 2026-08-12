@@ -311,27 +311,33 @@ DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-e
   パイプライン層で fail loudly**（グラフ側は 4 変種の差をマスク 1 本に還元してしまうので、
   ここで拒まないと黙って別のモデルを回すことになる）。
 
-## Irodori パイプライン（ホスト層）: 出口は latent・上流の任意ノブは既定値相当のみ
+## Irodori パイプライン（ホスト層）: 上流の任意ノブは既定値相当のみ・参照音声は 48kHz
 
-`IrodoriPipeline` は第 3 波の範囲（ADR [0048](decisions/0048-irodori-host-port.md)）で、
-以下は by-design の制約。近似や無音のフォールバックはしない:
+`IrodoriPipeline` は第 3〜4 波の範囲（ADR [0048](decisions/0048-irodori-host-port.md) /
+[0049](decisions/0049-irodori-codec-integration.md)）で、以下は by-design の制約。近似や
+無音のフォールバックはしない:
 
-- **出口は patch 済み latent `[S,32]`（`generateLatent`）** — codec（DACVAE decoder）は
-  第 4 波なので波形はまだ出ない。末尾トリム（`find_flattening_point`）と透かしも波形側の
-  処理なので同波へ送り。
 - **上流の推論ノブは既定値で死んでいるものを移植しない**: LoRA 動的ロード /
   speaker_kv_scale 系 / truncation_factor / temporal_score_rescale / sway スケジュール /
   num_candidates>1・decode_mode="batch"。CFG のモード制約（mask / independent のみ）は
   上の DiT 節のとおりで、**パイプラインは pipelineConfig のパース時に拒否**する。
-- **手動 `durationSeconds` は frameRate 経由**（`S = ceil(clamped×frameRate)`）。上流の
-  サンプル数経由（`ceil(trunc(clamped×48000)/1920)`）とは「秒 × frameRate が整数のすぐ上
-  （1 サンプル未満）」の入力だけ最大 1 フレームずれる。`sampleRate` / `hopLength` が
-  pipelineConfig に載る codec 波で上流の綴りへ寄せる（`host/round.ts` の MUST）。
+  末尾トリムのしきい値（窓 20 / std 0.05 / mean 0.1）と参照音声の目標 −16 LUFS も上流既定の
+  固定値（実行時ノブとしては持たない）。
+- **参照音声（`speaker: { audio }`）は配布形の `sampleRate`（48kHz）のみ** — リサンプルは
+  持たず fail loudly（ADR 0049 決定 6。変換は呼び出し側の責務）。`decodeWav` が受けるのは
+  PCM 16bit と IEEE float 32bit だけで、`WAVE_FORMAT_EXTENSIBLE`（0xFFFE）等は明示拒否。
+- **`codec_encoder` はタイル分割しない**（decoder と非対称 — ADR 0049 決定 1）。長い参照
+  （120 秒で中間 1.47GB×2）は `maxStorageBufferBindingSize` が既定 128MiB の機で確保に
+  失敗する。decoder 側は halo 8 のタイル分割で既定上限機でも S=750 が通る（ビット一致門付き）。
+- **生成音声に透かし（SilentCipher）は入らない**（wm 枝はバイパス形で焼かれている —
+  2026-08-11 裁定で公開前の波まで保留・ADR 0049 決定 2）。
 - **seed は上流と互換でない**（torch generator のビット再現は非目標 — ADR 0048 決定 5）。
-  同 seed → 同 latent の自己決定論のみ保証し、torch との突合は `initialNoise` 注入口で行う。
+  同 seed → 同波形の自己決定論のみ保証し、torch との突合は `initialNoise` 注入口で行う。
 - 前処理の `strip` は JS の `String.prototype.trim` で、Python `str.strip` とは空白集合の
   端（U+001C〜1F・U+0085 は Python のみ / U+FEFF は JS のみ）が違う。実用のテキスト入力では
   発生しない差として受容する（golden の normalize 33 ケースはこの領域を含まない）。
+- WAV の読み（/32768）と書き（×32767）は非対称のまま固定（それぞれ外部との一致が正 —
+  `src/audio/wav.ts` の MUST。往復は 1LSB 級でずれる）。
 
 ## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・i8a8 と非併用・ビット同一門は f32 経路
 
@@ -391,9 +397,10 @@ fail loudly で判明する（数 GB を落とし切ってから落ちる）。p
 
 ## sha256 参照門は参照環境専用 — クロスデバイスのビット同一は保証しない
 
-e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test`）は**参照環境
-（RTX 3080 Ti / Linux / Vulkan (wgpu)）で焼いた値**で、他バックエンド（Metal 等）では
-一致しない — これは仕様であり、門は参照環境での移植・退行検出器として機能する。
+e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` /
+`e2e_irodori_wav_test`）は**参照環境（RTX 3080 Ti / Linux / Vulkan (wgpu)）で焼いた値**で、
+他バックエンド（Metal 等）では一致しない — これは仕様であり、門は参照環境での移植・退行
+検出器として機能する。
 
 機序: IEEE 754 の加減乗除はデバイス間でも完全同一だが、①超越関数（`exp` 等）の実装が
 ドライバ / コンパイラ依存 ②シェーダコンパイラの fma 融合判断（積和を 1 命令に融合すると

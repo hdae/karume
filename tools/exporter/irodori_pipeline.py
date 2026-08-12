@@ -107,7 +107,10 @@ CFG_EFFECT_MIN = 1e-2
 
 
 class ReferenceSpec(NamedTuple):
-    """参照 latent の供給元（**合成** — 実音声 latent は codec 波が済むまで採れない）。
+    """参照 latent の供給元（**合成のまま維持** — 第 4 波で実音声 latent は採れるように
+    なった〈`dacvae_host.py`〉が、この golden を差し替えると突合値が全て動くので既存を守る。
+    実音声の値域は speaker 単体門の実 latent ケース〈`export_irodori.SPEAKER_REAL_CASES`〉が
+    受け持つ）。
 
     `frames` は patch 前のフレーム数で、`speaker_patch_size` で割り切れる値にする
     （割り切れない端は上流 `patch_sequence_with_mask` が捨てるので、golden の入力と
@@ -441,8 +444,8 @@ def run_case(
             if case.reference is None
             else {
                 "kind": "synthetic-standard-normal",
-                "why": "実音声由来の latent は codec 波（G6/G7）が済むまで採れない"
-                "（`export_irodori.py` の SPEAKER_CASES と同じ供給源）",
+                "why": "合成のまま維持（golden の安定のため — 実音声の値域は speaker 単体門の"
+                " SPEAKER_REAL_CASES が受け持つ。ReferenceSpec の docstring 参照）",
                 "frames": case.reference.frames,
                 "seed": case.reference.seed,
                 "patchedTokens": int(patched.shape[1]),

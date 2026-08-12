@@ -483,7 +483,8 @@ DIT_UNCOND_VARIANTS = ("text", "speaker", "caption")
 #: `dit` の golden ケース `(名前, latent 長 S, 乱数 seed, t, uncond 区間)`。
 #:
 #: `x_t` は決定的 seed の標準正規（推論の x_t は t=1 で純ノイズ・以降もノイズ寄りなので、
-#: 合成で値域の性格が大きく外れない。実 latent は codec 波が済むまで採れない）。
+#: 合成で値域の性格が大きく外れない — 実 z の値域がほぼ単位分散であることは speaker 実 latent
+#: ケースの導入時に実測済みで、この選択を裏付けている）。
 #:
 #: ケース軸は 4 本:
 #:

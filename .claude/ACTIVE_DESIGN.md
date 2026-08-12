@@ -83,9 +83,24 @@
   次元 S+1519 突合）④E2E latent 門 4 本（S/forwards 完全一致・z は Z_ATOL 5e-3 = 素実測
   7.9e-4 の 6.3 倍・実効値 drift 門付き）。ホスト経路の recon 正本 =
   [research/2026-08-11-irodori-host-recon.md](../docs/research/2026-08-11-irodori-host-recon.md)。
-  **次 = 第 4 波 codec**（G6/G7・タイル化 U4・`reciprocal` 除算形書き換え・wm_model は README
-  推奨バイパスに従い落とす見込み・`sin` の |x|>π 精度を e2e で観測・WAV sha256 門へ置換・
-  trim_tail と透かし・参照音声の LUFS 正規化の再現）。
+  **第 4 波 codec も完了 = テキスト →（参照 wav →）WAV の全経路がクローズ（2026-08-12・
+  ADR [0049](../docs/decisions/0049-irodori-codec-integration.md)・試聴確認済み）**:
+  ①G6/G7 export（ランタイム無変更 — convT 4 本は既存受理形・reciprocal は lifted 定数化で
+  第 0 層消滅・wm バイパスは README ②形で透かし非付与）②decoder タイル分割（halo 8 捨てで
+  **Uint32 ビット一致門** — 既定 128MiB 上限機でも S=750 が通る。encoder は非タイルのまま =
+  limitations）③LUFS −16 正規化のホスト移植（BS.1770-4 完全・f64・parity 門 5 ケース）+
+  `decodeWav`（/32768・書き ×32767 と非対称固定）④`generate()` = latent → z 上 trim →
+  タイル decode → 秒切り出し（durationSeconds は上流綴りへ = ADR 0048 既知差分解消・
+  pipelineConfig 23 欄）⑤E2E は **latent 門と WAV sha256 門の併存**（「置換」から改訂 —
+  ADR 0049 決定 5。digest 2 本・4 プロセス再現）+ タイル同値 + 参照前処理 parity + speaker
+  実 latent tolerance 確定（7e-4）。**`sin` の π 超え引数（〜22.7π）で誤差 5e-6 級の初観測**
+  = GPU sin の引数簡約が f32 精度を保つ（e2e_dacvae_test の docstring が正本）。生成実測:
+  full 12.5s / voice-clone 14.0s（参照 7.6s → 6.8〜7.4s の音声）。recon 正本 =
+  [research/2026-08-12-dacvae-codec-recon.md](../docs/research/2026-08-12-dacvae-codec-recon.md)。
+  **残（Irodori）**: examples/irodori 追加候補・HF 公開はリリース時（jvnv 上げ直しと同時）・
+  encoder タイル化 / resample / WAVE_FORMAT_EXTENSIBLE は需要駆動（limitations 起票済み）。
+  **次のモデル候補キュー**: BiRefNet_HR（deform_conv2d が blocker）→ Gemma 4 E2B
+  （decode + KV cache の実行モデル設計 — prepared 機構 / タスク #7 と接続）。
 - **立ち上げロードマップ（ADR 0037）は P0〜P5 まで到達し一段落**。P3/P4 で `AnimaPipeline`
   （fromPretrained / fromAssets・`using` 対応）+ 共通 image 層 + 配布形（現 `models/karume-anima-turbo/`）
   （`karume dist`・実 hash・格納 dtype 門）+ `karume` サブコマンド CLI + **英語**モデルカード
