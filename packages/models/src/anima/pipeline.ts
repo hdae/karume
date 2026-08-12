@@ -274,6 +274,39 @@ const idsTensor = (values: Int32Array<ArrayBuffer>): Tensor => ({
   data: values,
 });
 
+/**
+ * 実際に uncond 側へ渡すネガティブプロンプトを決める（{@link AnimaPipeline.generate} の入口・
+ * GPU に触れる前の純粋な検査）。
+ *
+ * MUST: 効かないノブを黙って受けない。guidance=1 は uncond 分岐を丸ごと計算しないので、
+ * ネガティブプロンプトは 1 文字も使われない（指定できたように見えるのが最悪）。逆に uncond を
+ * 計算する設定で綴りが無ければ、GPU へ入る前のここで落とす。
+ *
+ * uncond の要否は `guidance` だけの関数なので、判定は引数に取らずここで導く（呼び手の
+ * `wantsUncond` と食い違う余地を作らない）。
+ */
+export const resolveNegativePrompt = (
+  requested: string | undefined,
+  fallback: string | undefined,
+  guidance: number,
+): string | undefined => {
+  const wantsUncond = needsUncond(guidance);
+  if (!wantsUncond && requested !== undefined) {
+    throw new Error(
+      `guidanceScale ${guidance} では uncond 側を計算しないので negativePrompt は効かない` +
+        "（効かせるなら guidanceScale を 1 以外にする）",
+    );
+  }
+  const negativePrompt = requested ?? fallback;
+  if (wantsUncond && negativePrompt === undefined) {
+    throw new Error(
+      `guidanceScale ${guidance} は uncond 側を計算するので negativePrompt が要る` +
+        "（manifest の pipelineConfig.defaults.negativePrompt か request で渡す）",
+    );
+  }
+  return negativePrompt;
+};
+
 /** S 形 DiT の step 間で変わらない材料（rope 表と patch 幾何は解像度だけの関数）。 */
 type DynDitPlan = {
   readonly geometry: DitPatchGeometry;
@@ -539,21 +572,11 @@ export class AnimaPipeline {
     if (!Number.isFinite(guidance)) throw new Error(`guidanceScale ${guidance} が有限の数でない`);
 
     const wantsUncond = needsUncond(guidance);
-    // MUST: 効かないノブを黙って受けない。guidance=1 は uncond 分岐を丸ごと計算しないので、
-    // ネガティブプロンプトは 1 文字も使われない（指定できたように見えるのが最悪）。
-    if (!wantsUncond && request.negativePrompt !== undefined) {
-      throw new Error(
-        `guidanceScale ${guidance} では uncond 側を計算しないので negativePrompt は効かない` +
-          "（効かせるなら guidanceScale を 1 以外にする）",
-      );
-    }
-    const negativePrompt = request.negativePrompt ?? defaults.negativePrompt;
-    if (wantsUncond && negativePrompt === undefined) {
-      throw new Error(
-        `guidanceScale ${guidance} は uncond 側を計算するので negativePrompt が要る` +
-          "（manifest の pipelineConfig.defaults.negativePrompt か request で渡す）",
-      );
-    }
+    const negativePrompt = resolveNegativePrompt(
+      request.negativePrompt,
+      defaults.negativePrompt,
+      guidance,
+    );
 
     // --- ① プロンプト層（GPU 不要・決定的）------------------------------------
     const positive = state.tokenizers.encode(request.prompt, "プロンプト");
