@@ -33,7 +33,7 @@ import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
-import { GEMM_TILE } from "../src/kernels/gemm.ts";
+import { defaultI8a8Geometry, i8a8TileM, i8a8TileN } from "../src/kernels/i8a8-geometry.ts";
 import {
   QUANTIZE_ROWS_KEY,
   QUANTIZE_ROWS_WGSL,
@@ -281,9 +281,12 @@ const runAttentionQkI8a8 = async (
         { binding: ATTENTION_QK_K_SCALE_BINDING, resource: { buffer: key.scales } },
       ],
     });
+    // MUST: dispatch の辺は**このカーネルの幾何**から導く（キー・生成物と同じ解決点）。
+    // 定数を渡すと実タイル辺と食い違い、下回った側でタイルが欠落して沈黙誤値になる。
+    const geometry = defaultI8a8Geometry("attention_qk");
     scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, GEMM_TILE, limit, shape.name),
-      tiledWorkgroups(m, GEMM_TILE, limit, shape.name),
+      tiledWorkgroups(n, i8a8TileN(geometry), limit, shape.name),
+      tiledWorkgroups(m, i8a8TileM(geometry), limit, shape.name),
       tiledWorkgroups(batch, 1, limit, shape.name),
     ], pipelineKey);
     await scheduler.flush();

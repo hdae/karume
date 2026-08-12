@@ -34,13 +34,8 @@ import {
 } from "../src/codegen/strided.ts";
 import { type IrDtype, SEMANTIC_DTYPES } from "../src/format/ir.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../src/kernels/bmm.ts";
-import {
-  ATTENTION_QK_MASK_BINDING,
-  GEMM_MTILE_SMALL,
-  GEMM_TILE,
-  gemmUsesVec4,
-} from "../src/kernels/gemm.ts";
-import { defaultGemmGeometry } from "../src/kernels/gemm-geometry.ts";
+import { ATTENTION_QK_MASK_BINDING, GEMM_MTILE_SMALL, gemmUsesVec4 } from "../src/kernels/gemm.ts";
+import { defaultGemmGeometry, GEMM_TILE } from "../src/kernels/gemm-geometry.ts";
 import { conv1dKey, conv1dParams, conv1dWgsl } from "../src/kernels/conv1d.ts";
 import {
   CONV2D_SCALE_BINDING,
@@ -1260,11 +1255,12 @@ Deno.test("attention の加算 mask は ①QK の epilogue だけを変え、②
 });
 
 /**
- * GEMM 骨格のタイル定数。**沈黙誤値の代表格**が「WGSL 側 64 / dispatch 側 16」のずれなので、
- * 生成物に埋まった辺と TS 定数を同じテストで突き合わせる（executor は {@link GEMM_TILE} を
- * そのまま `tiledWorkgroups` へ渡す）。
+ * GEMM 骨格のタイル定数。**沈黙誤値の代表格**が「WGSL 側の辺 / dispatch 側の辺」のずれなので、
+ * 生成物に埋まった辺と幾何を同じテストで突き合わせる（executor は dispatch の辺を
+ * `gemmTileM` / `gemmTileN` で幾何から導くので、両者がずれるのは生成側の事故だけ）。
  */
 Deno.test("GEMM 骨格 6 op のタイル辺・キー・TS 定数が既定幾何と一致する", () => {
+  // conv2d の m タイルヒューリスティックの基準値（実タイル辺ではない — gemm-geometry.ts の MUST）
   assertEquals(GEMM_TILE, 64);
   // 既定幾何（src/kernels/gemm-geometry.ts）。**キーと生成物の両方に効く**ので、
   // 変えたつもりの無い差分がここで止まる

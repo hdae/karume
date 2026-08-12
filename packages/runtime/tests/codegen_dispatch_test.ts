@@ -1,9 +1,13 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
-import { GEMM_TILE } from "../src/kernels/gemm.ts";
+import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
+import { GEMM_TILE, gemmTileN } from "../src/kernels/gemm-geometry.ts";
 
 const LIMIT = 65535;
+
+/** conv2d の implicit GEMM が n 方向に使う実タイル辺（m タイル 64 / 32 の変種で共通）。 */
+const CONV2D_N_TILE = gemmTileN(gemmMTileGeometry(GEMM_TILE));
 
 Deno.test("grid-stride カーネルは上限超過を縮退させる（カーネル側が残りを回す）", () => {
   assertEquals(gridStrideWorkgroups(1024, 256, LIMIT), 4);
@@ -22,11 +26,15 @@ Deno.test("タイル分割カーネルは上限超過を fail loudly にする�
     () => tiledWorkgroups(LIMIT * 16 + 1, 16, LIMIT, "matmul"),
     DispatchLimitError,
   );
-  // conv2d の implicit GEMM（ADR 0024）も同じカテゴリ。2048px の VAE は n = Hout·Wout =
-  // 4,194,304 → 65,536 タイルで上限を 1 だけ超える（沈黙誤値ではなく例外になることの固定）。
-  assertEquals(tiledWorkgroups(1024 * 1024, GEMM_TILE, LIMIT, "conv2d"), 16_384);
+  // conv2d の implicit GEMM（ADR 0024）も同じカテゴリ。辺は**幾何から導く**ので、まず幾何が
+  // 動いていないことを期待値リテラルで固定してから、実モデル形の枚数を固定する。
+  assertEquals(CONV2D_N_TILE, 128, "n の辺が動いたら以下の枚数の前提が変わる");
+  // 2048px の VAE は n = Hout·Wout = 4,194,304（現行幾何では上限の内側に収まる）
+  assertEquals(tiledWorkgroups(2048 * 2048, CONV2D_N_TILE, LIMIT, "conv2d"), 32_768);
+  // 上限は 1 タイル超えただけで例外（沈黙誤値ではなく落ちることの固定）
+  assertEquals(tiledWorkgroups(LIMIT * CONV2D_N_TILE, CONV2D_N_TILE, LIMIT, "conv2d"), LIMIT);
   assertThrows(
-    () => tiledWorkgroups(2048 * 2048, GEMM_TILE, LIMIT, "conv2d"),
+    () => tiledWorkgroups(LIMIT * CONV2D_N_TILE + 1, CONV2D_N_TILE, LIMIT, "conv2d"),
     DispatchLimitError,
   );
 });

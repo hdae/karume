@@ -43,7 +43,8 @@ import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
-import { GEMM_TILE, gemmUsesVec4 } from "../src/kernels/gemm.ts";
+import { gemmUsesVec4 } from "../src/kernels/gemm.ts";
+import { defaultI8a8Geometry, i8a8TileM, i8a8TileN } from "../src/kernels/i8a8-geometry.ts";
 import {
   QUANTIZE_ROWS_KEY,
   QUANTIZE_ROWS_WGSL,
@@ -377,6 +378,7 @@ const runPvI8a8 = async (
     // (c) 整数内積の GEMM（P̃ は A タイル充填で作る）
     const v4 = attentionPvI8a8UsesVec4(d);
     const dp4a = dot === "dp4a";
+    const pvGeometry = defaultI8a8Geometry("attention_pv");
     const pipelineKey = attentionPvI8a8Key(v4, dp4a);
     const { pipeline, layout } = await cache.get(pipelineKey, attentionPvI8a8Wgsl(v4, dp4a));
     const params = arena.allocHostWritten(16, UNIFORM_IN);
@@ -397,8 +399,9 @@ const runPvI8a8 = async (
         ],
       }),
       [
-        tiledWorkgroups(d, GEMM_TILE, limit, where),
-        tiledWorkgroups(m, GEMM_TILE, limit, where),
+        // MUST: 辺は ③PV 自身の幾何から導く（①QK とは別の既定 — キーと生成物の解決点と同じ）
+        tiledWorkgroups(d, i8a8TileN(pvGeometry), limit, where),
+        tiledWorkgroups(m, i8a8TileM(pvGeometry), limit, where),
         tiledWorkgroups(batch, 1, limit, where),
       ],
       pipelineKey,

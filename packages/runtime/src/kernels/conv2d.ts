@@ -1,10 +1,14 @@
 /**
  * conv2d（`x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout]`、f32）の 2 カーネル。
  *
- * | 経路                | キー                                              | 条件        |
- * | ------------------- | ------------------------------------------------- | ----------- |
- * | implicit GEMM       | `conv2d:v2:f32:igemm{64|32}x64{v4}:wg16x{8|4}{:w…}` | groups == 1 |
- * | 直接畳み込み        | `conv2d:v1:f32:direct:wg256{:w…}`                 | groups > 1  |
+ * | 経路                | キー                                                | 条件        |
+ * | ------------------- | --------------------------------------------------- | ----------- |
+ * | implicit GEMM       | `conv2d:v2:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}` | groups == 1 |
+ * | 直接畳み込み        | `conv2d:v1:f32:direct:wg256{:w…}`                   | groups > 1  |
+ *
+ * implicit GEMM のキーの辺と workgroup 形は**幾何から導く**（{@link conv2dIgemmKey} —
+ * m タイル 64 / 32 の変種に対し `gemmMTileGeometry` が返す辺。具体値を書き写さないのは
+ * 幾何を差し替えたときに doc だけが古い辺を名乗るのを防ぐため）。
  *
  * implicit GEMM（ADR 0024）は `C[Cout, N] = W[Cout, K] × Xcol[K, N]` を GEMM 骨格
  * （src/kernels/gemm.ts）の断片共有で解く。**縮約順序が直接畳み込みと厳密に一致する**ので
@@ -39,8 +43,8 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
-import { GEMM_MTILE_SMALL, GEMM_TILE, gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
-import { gemmTileM, gemmTileN } from "./gemm-geometry.ts";
+import { GEMM_MTILE_SMALL, gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
+import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,

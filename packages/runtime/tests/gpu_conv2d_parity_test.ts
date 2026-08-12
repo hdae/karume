@@ -30,7 +30,8 @@ import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
-import { GEMM_MTILE_SMALL, GEMM_TILE } from "../src/kernels/gemm.ts";
+import { GEMM_MTILE_SMALL, gemmMTileGeometry } from "../src/kernels/gemm.ts";
+import { GEMM_TILE, gemmTileM, gemmTileN } from "../src/kernels/gemm-geometry.ts";
 import {
   CONV2D_SCALE_BINDING,
   CONV2D_WORKGROUP_SIZE,
@@ -277,10 +278,12 @@ const runBoth = async (
       conv2dIgemmWgsl(testCase.storage, v4, mTile),
     );
     const igemm = bind(igemmLayout, conv2dIgemmParams(dims));
+    // MUST: dispatch の辺は生成・キーと**同じ解決点**（`gemmMTileGeometry`）から導く。
+    // m タイルの変種が動かすのは行の辺だけで、n の辺は幾何の tileN（両変種で同じ）。
+    const geometry = gemmMTileGeometry(mTile);
     scheduler.dispatch(igemmPipeline, igemm.group, [
-      // MUST: n タイルは m タイルの変種に関わらず 64（2048px の n 上限の扱いを動かさない）
-      tiledWorkgroups(dims.heightOut * dims.widthOut, GEMM_TILE, limit, testCase.name),
-      tiledWorkgroups(dims.channelsOut, mTile, limit, testCase.name),
+      tiledWorkgroups(dims.heightOut * dims.widthOut, gemmTileN(geometry), limit, testCase.name),
+      tiledWorkgroups(dims.channelsOut, gemmTileM(geometry), limit, testCase.name),
       tiledWorkgroups(dims.batch, 1, limit, testCase.name),
     ], igemmKey);
 

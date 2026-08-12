@@ -1,25 +1,27 @@
 /**
  * GEMM 族（matmul / bmm / linear + 融合 attention の QK / PV + conv2d の implicit GEMM —
- * ADR 0022 / 0023 / 0024）が共有する **64×64 レジスタブロッキング + vec4** の骨格。
+ * ADR 0022 / 0023 / 0024）が共有する **レジスタブロッキング + vec4** の骨格。
  *
  * 1 スレッドが {@link GemmGeometry} の `regM`×`regN` の出力を持ち（`acc{行}_{列 quad}` の
  * 名前付き変数へ codegen 時に静的展開する — {@link gemmAccumulatorInit}）、共有 B タイルは
  * **列方向を vec4 に束ねた** `[k][列 quad]`。内側ループは共有ロード `regM + regN/4` 回
- * （A のスカラ `regM` + B の vec4 `regN/4`）で `regM · regN` MAC を回す — 1 スレッド 1 出力の
- * 16×16 タイル（2 ロード 1 MAC）に対し、共有帯域あたりの演算密度が既定幾何で 7.1 倍になる。
+ * （A のスカラ `regM` + B の vec4 `regN/4`）で `regM · regN` MAC を回す — 共有帯域あたりの
+ * 演算密度は `regM·regN / (regM + regN/4)` で、1 スレッド 1 出力の 16×16 タイル
+ * （2 ロード 1 MAC = 0.5）に対して幾何を上げるほど大きくなる。
  *
- * | 項目 | 値（{@link defaultGemmGeometry}） |
- * | --- | --- |
- * | 出力タイル | 64×64（{@link GEMM_TILE}・dispatch は `ceil(dim / 64)`） |
- * | workgroup | 16×8 = 128 スレッド |
- * | 1 スレッドの出力 | 8×4 |
- * | K タイル | 16（旧 16×16 カーネルと同じ刻み） |
- * | 共有メモリ | `sa` 4,096 B + `sb` 4,096 B = 8,192 B / WG |
+ * MUST: **具体値をここに書かない**（幾何・doc・表の 3 箇所に同じ事実が散るとドリフトする）。
+ * 既定は {@link defaultGemmGeometry}・出力タイル辺は {@link gemmTileM} / {@link gemmTileN}・
+ * K タイル幅は {@link GEMM_TILE_K}（幾何ではなく数値契約）・共有メモリのバイト数は skeleton が
+ * 生成時に計算して WGSL ヘッダへ書く（生成物とスナップショット tests/fixtures/wgsl/ が正本）。
+ * 幾何の候補表と実測の出どころは src/kernels/gemm-geometry.ts のモジュール doc。
  *
  * MUST: タイル幾何が決めてよいのは**どのスレッドがどの出力を担当するか**だけで、
  * 既定は {@link defaultGemmGeometry} の 1 箇所（src/kernels/gemm-geometry.ts に幾何の
  * 算術・門・キー断片がまとまっている）。共有タイルの容量と 1 workgroup = 1 出力タイルの
  * 対応は幾何によらず不変なので、dispatch 側（executor の `tiledWorkgroups`）は無関係。
+ * MUST: dispatch の辺は**幾何から導く**（`tiledWorkgroups(n, gemmTileN(geometry), …)`）。
+ * 辺の値を定数で持ち回ると幾何と食い違いうる値が 2 つになり、`ceil(dim / 定数)` が
+ * `ceil(dim / 実タイル辺)` を下回った瞬間に**タイルが欠落して沈黙誤値**になる。
  *
  * MUST: 全 op は**この 1 本の骨格を共有する**。内積ループの正本が 1 箇所にあることが
  * 「縮約順序が全 op で同一」という不変条件を機械的に守る唯一の手段で、括り出しを禁じると
@@ -90,11 +92,8 @@ import {
   type WeightStorage,
 } from "./weight-storage.ts";
 
-/** 出力タイルの一辺（正本は src/kernels/gemm-geometry.ts）。dispatch は `ceil(dim / GEMM_TILE)`。 */
-export { GEMM_TILE } from "./gemm-geometry.ts";
-
 /**
- * conv2d の implicit GEMM だけが持つ **32 行 m タイル**（n タイルは 64 のまま — ADR 0024 隣接）。
+ * conv2d の implicit GEMM だけが持つ **32 行 m タイル**（n タイルは幾何のまま — ADR 0024 隣接）。
  *
  * 動機は M = Cout が 64 の倍数でない層のタイル量子化の無駄（census の Cout=96 は
  * `ceil(96/64)·64/96 = 1.33×`）。**1 スレッドの出力は幾何のまま**で workgroup の y 辺だけを
@@ -245,7 +244,7 @@ export type GemmSpec =
     readonly op: "conv2d";
     readonly v4: boolean;
     readonly weight: WeightStorage;
-    /** m タイルの行数（{@link GEMM_TILE} か {@link GEMM_MTILE_SMALL}）。 */
+    /** m タイルの行数（`conv2dIgemmMTile` が返す 64 行か {@link GEMM_MTILE_SMALL} の 32 行）。 */
     readonly mTile: number;
   };
 

@@ -78,7 +78,8 @@ import {
   attentionPvI8a8Wgsl,
   attentionQkI8a8Key,
 } from "../src/kernels/attention-i8a8.ts";
-import { GEMM_TILE } from "../src/kernels/gemm.ts";
+import { defaultGemmGeometry, gemmTileM, gemmTileN } from "../src/kernels/gemm-geometry.ts";
+import { defaultI8a8Geometry, i8a8TileM, i8a8TileN } from "../src/kernels/i8a8-geometry.ts";
 import { QUANTIZE_ROWS_KEY } from "../src/kernels/quantize-rows.ts";
 import { attentionScoreUsesF16 } from "../src/kernels/score-storage.ts";
 import { referenceAttentionPvQuant } from "../src/reference/i8a8.ts";
@@ -412,8 +413,9 @@ Deno.test({
           ],
         }),
         [
-          tiledWorkgroups(n, GEMM_TILE, limit, "s16 丸めの門 ①QK"),
-          tiledWorkgroups(m, GEMM_TILE, limit, "s16 丸めの門 ①QK"),
+          // 融合 attention ①QK は行数バケットを通さない = 既定幾何固定（executor と同じ導出）
+          tiledWorkgroups(n, gemmTileN(defaultGemmGeometry()), limit, "s16 丸めの門 ①QK"),
+          tiledWorkgroups(m, gemmTileM(defaultGemmGeometry()), limit, "s16 丸めの門 ①QK"),
           1,
         ],
         key,
@@ -719,6 +721,7 @@ const observeQpS16 = async (
     const params = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(params, 0, attentionPvI8a8Params(m, n, n));
     const v4 = attentionPvI8a8UsesVec4(n);
+    const pvGeometry = defaultI8a8Geometry("attention_pv");
     const key = attentionPvI8a8Key(v4, true, "f16");
     const { pipeline, layout } = await cache.get(key, attentionPvI8a8Wgsl(v4, true, "f16"));
     scheduler.dispatch(
@@ -735,8 +738,9 @@ const observeQpS16 = async (
         ],
       }),
       [
-        tiledWorkgroups(n, GEMM_TILE, limit, `${shape.name} ③PV i8a8 s16`),
-        tiledWorkgroups(m, GEMM_TILE, limit, `${shape.name} ③PV i8a8 s16`),
+        // ③PV は i8a8 側の幾何（N = D の 1 タイル化が勝つ既定 — ①QK とは別物）
+        tiledWorkgroups(n, i8a8TileN(pvGeometry), limit, `${shape.name} ③PV i8a8 s16`),
+        tiledWorkgroups(m, i8a8TileM(pvGeometry), limit, `${shape.name} ③PV i8a8 s16`),
         tiledWorkgroups(batch, 1, limit, `${shape.name} ③PV i8a8 s16`),
       ],
       key,
