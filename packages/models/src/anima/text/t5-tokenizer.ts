@@ -13,9 +13,10 @@
  * （切り詰めと `</s>`）だけ。
  */
 
+import { splitAddedTokens } from "../../text/added-tokens.ts";
+import { toCodePoints } from "../../text/code-points.ts";
 import { type UnigramModel, unigramTokenize, type UnigramVocabEntry } from "../../text/unigram.ts";
-import { type CodeRanges, inCodeRanges, toCodePoints } from "./code-ranges.ts";
-import { splitAddedTokens } from "./qwen2-tokenizer.ts";
+import { type CodeRanges, inCodeRanges } from "./code-ranges.ts";
 import { normalizeSpm, type SpmTables } from "./spm-normalizer.ts";
 
 /** Metaspace の置換文字（U+2581）。 */

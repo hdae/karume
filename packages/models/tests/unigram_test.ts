@@ -5,7 +5,7 @@
 // （anima_tokenizer_test.ts）の担当で、ここは**規則そのもの**を落とせる形に置く。
 
 import { assertEquals } from "@std/assert";
-import { toCodePoints } from "../src/anima/text/code-ranges.ts";
+import { toCodePoints } from "../src/text/code-points.ts";
 import { type UnigramModel, unigramTokenize } from "../src/text/unigram.ts";
 
 const UNK_ID = 2;

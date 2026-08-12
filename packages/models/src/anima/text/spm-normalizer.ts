@@ -21,13 +21,8 @@
  * に畳んだものをここが引く。畳み込みの同値は emit のたびに網羅 + 乱択で検査される。
  */
 
-import {
-  type CodeRanges,
-  inCodeRanges,
-  parseCodeRanges,
-  toCodePoints,
-  utf8Length,
-} from "./code-ranges.ts";
+import { toCodePoints } from "../../text/code-points.ts";
+import { type CodeRanges, inCodeRanges, parseCodeRanges, utf8Length } from "./code-ranges.ts";
 
 /** 丸ごと置換を試みるクラスタの UTF-8 長上限（正本 spm_precompiled の `len() < 6`）。 */
 const CLUSTER_BYTE_LIMIT = 6;

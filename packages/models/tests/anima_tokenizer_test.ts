@@ -15,13 +15,12 @@
 // 参照している）。models 側へ移すのは別タスク — ここは相対参照で読む。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { parseCodeRanges, toCodePoints } from "../src/anima/text/code-ranges.ts";
+import { parseCodeRanges } from "../src/anima/text/code-ranges.ts";
 import {
   normalizeNfc,
   type Qwen2Assets,
   qwen2PreTokenize,
   Qwen2Tokenizer,
-  splitAddedTokens,
 } from "../src/anima/text/qwen2-tokenizer.ts";
 import { normalizeSpm, parseSpmTables } from "../src/anima/text/spm-normalizer.ts";
 import {
@@ -36,6 +35,8 @@ import {
   createTokenizers,
   PROMPT_MIN_TOKENS,
 } from "../src/anima/text/tokenizer.ts";
+import { splitAddedTokens } from "../src/text/added-tokens.ts";
+import { toCodePoints } from "../src/text/code-points.ts";
 
 type FixtureCase = {
   readonly id: string;

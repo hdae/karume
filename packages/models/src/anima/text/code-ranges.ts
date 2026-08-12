@@ -55,25 +55,6 @@ export const parseCodeRanges = (raw: unknown, label: string): CodeRanges => {
   return ranges;
 };
 
-/**
- * 文字列をコードポイント配列にする。
- *
- * 対になっていないサロゲートは**受け付けない** — Python / Rust の str には載らない値で
- * 正本の出力が定義されない。黙って U+FFFD に潰すと id 列が静かに変わるので落とす
- * （JS の文字列型でのみ表現できる入力なので、移植で最も忘れやすい防御）。
- */
-export const toCodePoints = (text: string): number[] => {
-  const out: number[] = [];
-  for (const ch of text) {
-    const cp = ch.codePointAt(0) as number;
-    if (cp >= 0xd800 && cp <= 0xdfff) {
-      throw new Error(`対にならないサロゲート U+${cp.toString(16).toUpperCase()} が入力にある`);
-    }
-    out.push(cp);
-  }
-  return out;
-};
-
 /** コードポイント 1 つの UTF-8 バイト長。 */
 export const utf8Length = (cp: number): number =>
   cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
