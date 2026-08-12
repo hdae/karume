@@ -4,7 +4,7 @@
 > FIRST (alongside `CLAUDE.md` / `docs/`) so they don't start cold or misread an intentional
 > migration as a defect. Update it whenever the current design context shifts.
 >
-> Last updated: 2026-08-11
+> Last updated: 2026-08-12
 
 ## Active redesigns (in flight)
 
@@ -70,12 +70,22 @@
   [0047](../docs/decisions/0047-irodori-dit-execution.md)（B=1×選択実行・G4 は G5 へ畳む・
   uncond = マスク還元）で解消。`dit` ターゲット着地（E2E 36 件 — **uncond 3 変種の
   マスク還元が 12 層実重みでビット一致** = 決定 1 の実証・S=750 の scores 136MB を毎回実走・
-  torch Dim 名は sympy S 衝突回避で L / IR 名は S）。**`text_norm` / `caption_norm` は
-  消費側内包で確定**（duration / dit とも — ADR 0010 の理由。speaker_norm だけ speaker
-  ターゲット側）。**次 = 第 3 波ホスト**（pipeline・Unigram+byte_fallback tokenizer・
-  Euler 40 step + CFG 合成・`speaker_state_override` 分岐の扱い・既定外モード fail loudly）
-  → 第 4 波 codec（G6/G7・タイル化 U4・`reciprocal` 除算形書き換え・wm_model は README
-  推奨バイパスに従い落とす見込み・`sin` の |x|>π 精度を e2e で観測）。
+  torch Dim 名は sympy S 衝突回避で L / IR 名は S）。norm の所在: `text_norm` は
+  duration / dit の消費側内包・`speaker_norm` は speaker ターゲット側・**`caption_norm` は
+  dit 内包 + caption-proj の第 2 出力**（duration の `caption_vec` をホストが採るため —
+  ADR 0048 決定 1）。**第 3 波ホストも完了 = latent までの全経路が TS で閉じた
+  （2026-08-12・ADR [0048](../docs/decisions/0048-irodori-host-port.md)）**:
+  ①irodori/text 家族（normalize 5 段 + Unigram + byte_fallback — Viterbi は `src/text/` の
+  家族中立共有層へ抽出・パリティ fixture は git 追跡・NFKC は全 cp 掃引の両方向門）
+  ②IrodoriPipeline（fromAssets 無 Session・dit のみ 1 Session 40〜100 forward・pipelineConfig
+  20 欄が数の正本で対応外モードはパース時拒否・seed 上流非互換は `initialNoise` 注入口で解決）
+  ③dist `karume-irodori-v4-small`（f32 3.07GB・組み立て門はグラフ宣言と 12 点 + mask 派生
+  次元 S+1519 突合）④E2E latent 門 4 本（S/forwards 完全一致・z は Z_ATOL 5e-3 = 素実測
+  7.9e-4 の 6.3 倍・実効値 drift 門付き）。ホスト経路の recon 正本 =
+  [research/2026-08-11-irodori-host-recon.md](../docs/research/2026-08-11-irodori-host-recon.md)。
+  **次 = 第 4 波 codec**（G6/G7・タイル化 U4・`reciprocal` 除算形書き換え・wm_model は README
+  推奨バイパスに従い落とす見込み・`sin` の |x|>π 精度を e2e で観測・WAV sha256 門へ置換・
+  trim_tail と透かし・参照音声の LUFS 正規化の再現）。
 - **立ち上げロードマップ（ADR 0037）は P0〜P5 まで到達し一段落**。P3/P4 で `AnimaPipeline`
   （fromPretrained / fromAssets・`using` 対応）+ 共通 image 層 + 配布形（現 `models/karume-anima-turbo/`）
   （`karume dist`・実 hash・格納 dtype 門）+ `karume` サブコマンド CLI + **英語**モデルカード

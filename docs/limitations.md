@@ -311,6 +311,28 @@ DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-e
   パイプライン層で fail loudly**（グラフ側は 4 変種の差をマスク 1 本に還元してしまうので、
   ここで拒まないと黙って別のモデルを回すことになる）。
 
+## Irodori パイプライン（ホスト層）: 出口は latent・上流の任意ノブは既定値相当のみ
+
+`IrodoriPipeline` は第 3 波の範囲（ADR [0048](decisions/0048-irodori-host-port.md)）で、
+以下は by-design の制約。近似や無音のフォールバックはしない:
+
+- **出口は patch 済み latent `[S,32]`（`generateLatent`）** — codec（DACVAE decoder）は
+  第 4 波なので波形はまだ出ない。末尾トリム（`find_flattening_point`）と透かしも波形側の
+  処理なので同波へ送り。
+- **上流の推論ノブは既定値で死んでいるものを移植しない**: LoRA 動的ロード /
+  speaker_kv_scale 系 / truncation_factor / temporal_score_rescale / sway スケジュール /
+  num_candidates>1・decode_mode="batch"。CFG のモード制約（mask / independent のみ）は
+  上の DiT 節のとおりで、**パイプラインは pipelineConfig のパース時に拒否**する。
+- **手動 `durationSeconds` は frameRate 経由**（`S = ceil(clamped×frameRate)`）。上流の
+  サンプル数経由（`ceil(trunc(clamped×48000)/1920)`）とは「秒 × frameRate が整数のすぐ上
+  （1 サンプル未満）」の入力だけ最大 1 フレームずれる。`sampleRate` / `hopLength` が
+  pipelineConfig に載る codec 波で上流の綴りへ寄せる（`host/round.ts` の MUST）。
+- **seed は上流と互換でない**（torch generator のビット再現は非目標 — ADR 0048 決定 5）。
+  同 seed → 同 latent の自己決定論のみ保証し、torch との突合は `initialNoise` 注入口で行う。
+- 前処理の `strip` は JS の `String.prototype.trim` で、Python `str.strip` とは空白集合の
+  端（U+001C〜1F・U+0085 は Python のみ / U+FEFF は JS のみ）が違う。実用のテキスト入力では
+  発生しない差として受容する（golden の normalize 33 ケースはこの領域を含まない）。
+
 ## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・i8a8 と非併用・ビット同一門は f32 経路
 
 `attention` の第 4 入力 mask（ADR 0023 追記 2026-08-11）は意図的に狭い:
