@@ -15,6 +15,15 @@ r"""Irodori-TTS v4 のテキスト前処理層（`normalize_text` + Unigram ト�
     golden.normalize.json  `normalize_text` の `{raw, normalized}`（各置換規則を最低 1 回発火）
     nfkc-diff.json         NFKC が**恒等でない**単一コードポイントの写像表 `{cp: 正規化後}`
 
+加えて TS 側パリティ門のフィクスチャ 1 本（**git 管理**・`.gitignore` の外）:
+
+    packages/models/tests/fixtures/irodori-text/parity.json
+        上の 4 本と同じ内容 + 語彙の**部分集合**（102,400 本を commit しないための分離。
+        格子が全語彙と同じであることは {@link check_subset_covers_lattice} が実測する）
+
+生成後は `deno fmt packages/models/tests/fixtures/irodori-text/parity.json` を掛ける
+（commit 形はフォーマッタが正 — `deno task verify` の `fmt --check` が fixtures も見る）。
+
 ## 資産の形（anima の T5 資産に倣う）
 
 `packages/models/src/anima/text/tokenizer.ts` の `parseT5Asset` と同じ畳み方: 語彙は
@@ -64,12 +73,22 @@ from pathlib import Path
 from typing import Any
 
 from export_irodori import DEFAULT_MODEL_DIR, DEFAULT_SOURCE_DIR, TOKENIZER_FILE, read_configs
-from karume.paths import SERIES_ROOT
+from karume.paths import REPO_ROOT, SERIES_ROOT
 
 ASSET_FILE = "tokenizer.json"
 ENCODE_GOLDEN_FILE = "golden.encode.json"
 NORMALIZE_GOLDEN_FILE = "golden.normalize.json"
 NFKC_DIFF_FILE = "nfkc-diff.json"
+
+#: パリティ用フィクスチャ（**git 管理**）。Deno 側
+#: `packages/models/tests/irodori_text_test.ts` が読む。
+DEFAULT_FIXTURE_PATH = (
+    REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "irodori-text" / "parity.json"
+)
+
+#: Metaspace の置換文字（U+2581）。`split=false` / `prepend_scheme=never` なので、
+#: pre-tokenize は「U+0020 をこれに置き換える」以外に何もしない。
+METASPACE = "▁"
 
 #: 資産のバイトトークンの id 起点（`<0x00>` の id）。**直書きせず毎回実測する**
 #: （{@link check_upstream_shape}）— 上流が特殊トークンを 1 本足すだけで 256 本全部がずれる。
@@ -524,8 +543,111 @@ def nfkc_diff_table() -> dict[str, str]:
     }
 
 
-def emit(model_dir: Path, source_dir: Path, out_dir: Path) -> dict[str, Any]:
-    """資産と golden を書き、要約を返す（検証に落ちたら 1 バイトも書かない）。"""
+def lattice_texts(
+    encode_cases: Sequence[Mapping[str, Any]], batch_cases: Sequence[Mapping[str, Any]]
+) -> list[str]:
+    """Viterbi の格子が実際に見る文字列（golden の `normalized` を ▁ 置換したもの）。
+
+    追加語彙の切り出しで断片に割れるが、**割った断片の部分文字列は元の文字列の部分文字列**
+    なので、割る前の全体を渡せば語彙の抽出には十分（超集合になるだけで格子は変わらない）。
+    """
+    return [case["normalized"].replace(" ", METASPACE) for case in (*encode_cases, *batch_cases)]
+
+
+def vocab_subset(
+    vocab: Sequence[Sequence[Any]], texts: Sequence[str], added: Mapping[str, int]
+) -> list[list[Any]]:
+    """フィクスチャに載せる語彙の**部分集合** `[トークン, id, スコア]`（id 昇順）。
+
+    載せるのは ①texts のいずれかの部分文字列に一致するトークン全件（= 格子が引きうる全て）
+    ②バイトトークン 256 本（byte_fallback の id 連番そのものを TS 側が検査する）③追加語彙。
+    102,400 本の語彙を丸ごと commit しないための分離で、格子が同じであることは
+    {@link check_subset_covers_lattice} が**逆向き**に実測する。
+    """
+    entry = {token: (index, score) for index, (token, score) in enumerate(vocab)}
+    width = max(len(token) for token, _score in vocab)
+    picked: set[str] = set()
+    for text in texts:
+        for start in range(len(text)):
+            for stop in range(start + 1, min(start + width, len(text)) + 1):
+                candidate = text[start:stop]
+                if candidate in entry:
+                    picked.add(candidate)
+    picked.update(token for token in entry if len(token) == 6 and token.startswith("<0x"))
+    picked.update(added)
+    return sorted(
+        ([token, entry[token][0], entry[token][1]] for token in picked), key=lambda row: row[1]
+    )
+
+
+def check_subset_covers_lattice(
+    vocab: Sequence[Sequence[Any]], texts: Sequence[str], subset: Sequence[Sequence[Any]]
+) -> int:
+    """部分集合でも Viterbi の結果が語彙全体と一致することを実測する。
+
+    格子は「その断片の部分文字列に一致する語彙エントリ」しか引かないので、**一致集合が同じ
+    なら格子も同じ**。ここは語彙**全体**を走査して「texts の部分文字列であるのに部分集合に
+    無いトークン」を数える — 抽出（部分文字列 → 語彙引き）とは向きが逆なので、抽出側の
+    取りこぼしをそのまま写す恒真検査にならない。
+    """
+    present = {row[0] for row in subset}
+    missing = [
+        token
+        for token, _score in vocab
+        if token not in present and any(token in text for text in texts)
+    ]
+    if missing:
+        raise SystemExit(
+            f"部分集合が格子の一致集合を覆えていない: {missing[:8]}（計 {len(missing)} 件）"
+        )
+    return sum(1 for token, _score in vocab if any(token in text for text in texts))
+
+
+def build_parity_fixture(
+    asset: Mapping[str, Any],
+    raw_vocab: Sequence[Sequence[Any]],
+    encode_cases: Sequence[Mapping[str, Any]],
+    batch_cases: Sequence[Mapping[str, Any]],
+    normalize_cases: Sequence[Mapping[str, Any]],
+    diff: Mapping[str, str],
+) -> dict[str, Any]:
+    """TS 側パリティ門のフィクスチャ（**git 管理**・実資産無しで走る形）。
+
+    MUST: `minScore` / `maxTokenLength` は語彙**全体**から採る。未知ノードのスコアと前方一致の
+    探索幅は全体で決まるので、部分集合から導くと別の分割になる（anima の T5 と同じ罠）。
+    """
+    texts = lattice_texts(encode_cases, batch_cases)
+    subset = vocab_subset(raw_vocab, texts, dict(asset["addedTokens"]))
+    matched = check_subset_covers_lattice(raw_vocab, texts, subset)
+    return {
+        "_doc": [
+            "Irodori-TTS v4 テキスト層のパリティ用フィクスチャ",
+            "（生成: tools/exporter/irodori_tokenizer.py）。",
+            "正本は上流 normalize_text と tokenizers / transformers で、id 列はそこから採った",
+            "実測値。語彙は全ケースの再現に要る**部分集合**（102,400 本を commit しないため）",
+            "だが、minScore / maxTokenLength は語彙**全体**の値。NFKC 差分表は全体を載せる",
+            "（TS の normalize('NFKC') と Unicode 版がずれた瞬間に正規化が静かに変わるため）。",
+        ],
+        "source": {"repo": "Aratako/Irodori-TTS", "reference": "tokenizers + transformers"},
+        "asset": {
+            "vocab": subset,
+            "minScore": min(float(score) for _token, score in raw_vocab),
+            "maxTokenLength": max(len(token) for token, _score in raw_vocab),
+            "addedTokens": asset["addedTokens"],
+            "bosId": asset["bosId"],
+            "padId": asset["padId"],
+            "unkId": asset["unkId"],
+            "byteBaseId": asset["byteBaseId"],
+        },
+        "encode": {"cases": list(encode_cases), "batch": list(batch_cases)},
+        "normalize": {"cases": list(normalize_cases)},
+        "nfkcDiff": dict(diff),
+        "stats": {"vocabTotal": len(raw_vocab), "latticeMatches": matched},
+    }
+
+
+def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -> dict[str, Any]:
+    """資産・golden・フィクスチャを書き、要約を返す（検証に落ちたら 1 バイトも書かない）。"""
     if not (source_dir / "irodori_tts" / "text_normalization.py").is_file():
         raise SystemExit(
             f"モデル実装が見つからない: {source_dir}"
@@ -547,6 +669,9 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path) -> dict[str, Any]:
     normalize_cases = build_normalize_cases(normalize_text)
     coverage = check_rule_coverage(normalize_cases)
     diff = nfkc_diff_table()
+    fixture = build_parity_fixture(
+        asset, raw["model"]["vocab"], encode_cases, batch_cases, normalize_cases, diff
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     written: dict[str, int] = {}
@@ -560,9 +685,19 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path) -> dict[str, Any]:
         text = json.dumps(payload, ensure_ascii=False, indent=indent)
         path.write_text(text if indent is None else text + "\n", encoding="utf-8")
         written[filename] = path.stat().st_size
+    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+    fixture_path.write_text(
+        json.dumps(fixture, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
+    )
     return {
         "dir": str(out_dir),
         "bytes": written,
+        "fixture": {
+            "path": str(fixture_path),
+            "bytes": fixture_path.stat().st_size,
+            "vocabSubset": len(fixture["asset"]["vocab"]),
+            "latticeMatches": fixture["stats"]["latticeMatches"],
+        },
         "upstream": shape,
         "asset": {
             "bosId": asset["bosId"],
@@ -593,9 +728,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--fixture-out", type=Path, default=DEFAULT_FIXTURE_PATH)
     args = parser.parse_args(argv)
     out_dir = default_out_dir(args.model_dir) if args.out is None else args.out
-    summary = emit(args.model_dir, args.source_dir, out_dir)
+    summary = emit(args.model_dir, args.source_dir, out_dir, args.fixture_out)
     print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
 
 

@@ -9,11 +9,14 @@
 - byte_fallback の期待 id 列が UTF-8 から独立に計算されていること
 - `normalize_text` の規則被覆の実測が、ケースを削れば実際に落ちること
 - NFKC 差分表が恒等エントリを含まず、2 回作れば同じであること
+- パリティ用フィクスチャの語彙**部分集合**が格子の一致集合を覆っていること（抽出規則の
+  故障注入 + `minScore` / `maxTokenLength` を全体から採っていること）
 """
 
 from __future__ import annotations
 
 import copy
+import json
 import unicodedata
 
 import pytest
@@ -206,6 +209,94 @@ class TestNfkcDiffTable:
     def test_the_table_is_deterministic(self, table):
         assert tok.nfkc_diff_table() == table
         assert list(tok.nfkc_diff_table()) == list(table)
+
+
+#: どのケースにも現れない、語彙**全体**の最小スコアかつ最長のトークン。`minScore` /
+#: `maxTokenLength` を部分集合から導く実装（= 未知ノードの重みと探索幅が変わる）を、
+#: 全体から採る正しい実装と見分けるための素材。
+UNREACHABLE_TOKEN = "宇宙のはて" * 5
+
+#: 半角空白を挟んだケース 1 件（Metaspace の置換を通して初めて `▁こんにちは` に一致する）。
+PARITY_CASES = [
+    {"name": "greeting", "why": "", "raw": " こんにちは世界", "normalized": " こんにちは世界"}
+]
+
+
+def _raw_with_unreachable_token() -> dict:
+    raw = _raw()
+    raw["model"]["vocab"].append([UNREACHABLE_TOKEN, -9.5])
+    return raw
+
+
+class TestParityFixture:
+    """語彙の**部分集合**でも TS 側の Viterbi が全語彙と同じ格子を張ることの実測。"""
+
+    def test_the_lattice_text_is_the_metaspace_replaced_normalized_text(self):
+        assert tok.lattice_texts(PARITY_CASES, []) == ["▁こんにちは世界"]
+
+    def test_the_subset_holds_every_token_the_lattice_can_reach(self):
+        raw = _raw_with_unreachable_token()
+
+        subset = tok.vocab_subset(
+            raw["model"]["vocab"],
+            tok.lattice_texts(PARITY_CASES, []),
+            {content: index for index, content in enumerate(SPECIALS)},
+        )
+
+        tokens = {row[0] for row in subset}
+        assert "▁こんにちは" in tokens
+        assert "世界" in tokens
+        # ケースに現れないトークンは載らない（部分集合であることそのもの）。
+        assert UNREACHABLE_TOKEN not in tokens
+        # バイト 256 本 + 追加語彙は無条件で載る。
+        assert len([row for row in subset if row[0].startswith("<0x")]) == 256
+        assert set(SPECIALS) <= tokens
+        # id 昇順（emit のバイト決定性の前提）。
+        assert [row[1] for row in subset] == sorted(row[1] for row in subset)
+
+    def test_skipping_the_metaspace_replacement_loses_a_token(self):
+        """MUST: 抽出は ▁ 置換**後**の文字列で回す — 素の normalized で回すと格子が痩せる。"""
+        raw = _raw_with_unreachable_token()
+
+        subset = tok.vocab_subset(raw["model"]["vocab"], [PARITY_CASES[0]["normalized"]], {})
+
+        assert "▁こんにちは" not in {row[0] for row in subset}
+
+    def test_a_subset_that_lost_a_reachable_token_fails_loudly(self):
+        """抽出とは**逆向き**の検査なので、抽出の取りこぼしをここで捕まえられる。"""
+        raw = _raw_with_unreachable_token()
+        texts = tok.lattice_texts(PARITY_CASES, [])
+        full = tok.vocab_subset(raw["model"]["vocab"], texts, {})
+        thinned = [row for row in full if row[0] != "世界"]
+
+        assert tok.check_subset_covers_lattice(raw["model"]["vocab"], texts, full) == 2
+        with pytest.raises(SystemExit, match="覆えていない"):
+            tok.check_subset_covers_lattice(raw["model"]["vocab"], texts, thinned)
+
+    def test_the_global_min_score_and_width_are_not_the_subset_values(self):
+        """MUST: 未知ノードの重みと探索幅は語彙**全体**から採る（部分集合から導かない）。"""
+        raw = _raw_with_unreachable_token()
+
+        fixture = tok.build_parity_fixture(
+            tok.build_asset(raw, TEXT_CONFIG), raw["model"]["vocab"], PARITY_CASES, [], [], {}
+        )
+
+        assert fixture["asset"]["minScore"] == -9.5
+        assert min(row[2] for row in fixture["asset"]["vocab"]) == -2.5
+        assert fixture["asset"]["maxTokenLength"] == len(UNREACHABLE_TOKEN)
+        assert max(len(row[0]) for row in fixture["asset"]["vocab"]) < len(UNREACHABLE_TOKEN)
+
+    def test_the_fixture_is_deterministic(self):
+        raw = _raw_with_unreachable_token()
+        asset = tok.build_asset(raw, TEXT_CONFIG)
+
+        def build() -> str:
+            fixture = tok.build_parity_fixture(
+                asset, raw["model"]["vocab"], PARITY_CASES, [], [], {"65": "A"}
+            )
+            return json.dumps(fixture, ensure_ascii=False)
+
+        assert build() == build()
 
 
 class TestCli:
