@@ -97,8 +97,9 @@
   = GPU sin の引数簡約が f32 精度を保つ（e2e_dacvae_test の docstring が正本）。生成実測:
   full 12.5s / voice-clone 14.0s（参照 7.6s → 6.8〜7.4s の音声）。recon 正本 =
   [research/2026-08-12-dacvae-codec-recon.md](../docs/research/2026-08-12-dacvae-codec-recon.md)。
-  **残（Irodori）**: examples/irodori 追加候補・HF 公開はリリース時（jvnv 上げ直しと同時）・
-  encoder タイル化 / resample / WAVE_FORMAT_EXTENSIBLE は需要駆動（limitations 起票済み）。
+  **残（Irodori）**: HF 公開はリリース時（jvnv 上げ直しと同時）・encoder タイル化 /
+  resample / WAVE_FORMAT_EXTENSIBLE は需要駆動（limitations 起票済み）。examples/irodori は
+  追加済み（`deno task demo:irodori` — --ref で voice cloning・--caption で Voice Design）。
   **次のモデル候補キュー**: BiRefNet_HR（deform_conv2d が blocker）→ Gemma 4 E2B
   （decode + KV cache の実行モデル設計 — prepared 機構 / タスク #7 と接続）。
 - **立ち上げロードマップ（ADR 0037）は P0〜P5 まで到達し一段落**。P3/P4 で `AnimaPipeline`
