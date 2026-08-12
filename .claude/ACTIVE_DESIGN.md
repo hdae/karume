@@ -8,6 +8,14 @@
 
 ## Active redesigns (in flight)
 
+- **網羅レビュー（2026-08-12・モード B・HEAD `faef828`）— レビュー完了・修正波進行中**:
+  掃引 24 + 敵対検証 13 レッグ。確定 E1 / W9 群は全て推奨案で裁定済み — 正本は
+  `.claude/reviews/2026-08-12_faef828/SUMMARY.md`（裁定記録込み）。性能候補の判断台帳は
+  [docs/perf-ledger.md](../docs/perf-ledger.md) へ昇格（**優先順位の正本はそちらの 1 本** —
+  ここには書かない）。設計評価の結論: 汎用ランタイム形は合格・LLM は executor 実行モデル
+  1 層のみ変更（ADR 0043 追記 = 層軸の一本化済み）・モデル独立化はユーザー方針確定
+  （家族固有変種は所属のまま・単体提供は公式重み由来の別物を後日）・exporter io 共通化は
+  Gemma 直前（D3 案 b）。**並行トラック: Irodori 量子化（recon 完了 → 計画裁定待ち）**。
 - **DeBERTa 配布サイズ削減 3 波（2026-08-11）— 波 1 着地**: 発端は SBV2 の ONNX 版
   （hidden[-3] のみ抽出）が縮小の材料になるかという問い。実測の正本は
   [research/2026-08-11-deberta-size-recon.md](../docs/research/2026-08-11-deberta-size-recon.md)
@@ -139,8 +147,9 @@
 - **統計波（op 別 GPU 時間内訳）— 完了（2026-08-10）**: 実測の正本は
   [research/2026-08-10-op-timing-stats.md](../docs/research/2026-08-10-op-timing-stats.md)。
   台帳 4 件は合計しても壁時計の 7% 台（OP-008 ≈ −1.2% / PLAN-012 ≈ −0.8% / HOST-006 上限
-  −5.1% / **PLAN-011 は既定 guidance 1 で利得ゼロ**）。**本命は DiT linear + attention
-  （GPU の 63.3%）と VAE conv2d（19.1%）のカーネル最適化**。SBV2 は逆にホスト律速
+  −5.1% / **PLAN-011 は既定 guidance 1 で利得ゼロ**）。**本命は DiT linear + attention と VAE conv2d の
+  カーネル最適化**（63.3% / 19.1% は**壁 13.9s 時点の按分** — 10.5s 時点の内訳は同 doc §9。
+  再測してから候補選定 = [perf-ledger](../docs/perf-ledger.md) K-1）。SBV2 は逆にホスト律速
   （壁 1.08s vs GPU 0.42s）。
 - **実行時最適化 3 波 — 完了（2026-08-10）**: ①attention i8a8 の accumulator 静的展開
   （`3f417dc`）②adaLN 融合 = 融合パスへ**窓内 passthrough** を導入し 4 ノード → 1 dispatch
@@ -177,8 +186,9 @@
   （op-timing-stats §8/§9 — 見積り訂正 2 回）。**staged execution（E / timestep stage）は
   前提消失で見送り推奨**（狙っていたホスト費用が重畳側・GPU 利得 E 0.60% / timestep 0.12% —
   ユーザー裁定待ち）。backed run に残る run 毎費用は入力 writeBuffer + flush/readback +
-  dispatch ループのみ。次の桁はカーネル（DiT linear+attention 63.3% / VAE conv2d 19.1%）か
-  ロード時間（Session 構築 — gap 実測 2.50s の主成分）。
+  dispatch ループのみ。次の桁の裁定は [perf-ledger](../docs/perf-ledger.md) へ集約
+  （カーネル比率 63.3% / 19.1% は 13.9s 時点の失効値 — 再測が先。Session 構築 gap 2.50s は
+  L-1）。
 - **manifest v2（ADR [0041](../docs/decisions/0041-manifest-v2.md)）— 実装完了（2026-08-09）**:
   1 リポ複数モデル（`defaultModel` 必須）+ 語彙整理（presets → `quants`・variant → `dtype`・
   components → `weights` / `assets` 分離）。**v1 パーサは持たない**。hub v2 パーサ +
@@ -202,8 +212,9 @@
   GEMM のタイリングが 1.21x しか効かない = Apple GPU 向け未最適化）は
   [research/2026-08-06](../docs/research/2026-08-06-metal-silent-miscompute.md) §3。
   Metal では `gpuTiming` が使えない（dispatch 数がサンプル上限を超える）。
-- **融合 matcher は Anima の実測形への決め打ち**（`[1,H,S,128]` の RoPE、headDim 128/64、
-  upsample2x の 6 ノード列、adaLN の窓 6/7 など — exact 一致のみで、掴めなければ素のノード列へ
+- **融合 matcher は実測形への決め打ち**（RoPE の 2 形 + passthrough 1 本、attention の
+  head 幅 D は slice 境界から導く一般形（正の偶数 — 実測は 128/256）、upsample2x の
+  6 ノード列、adaLN の窓 6/7 など — exact 一致のみで、掴めなければ素のノード列へ
   fallback）。**エクスポータのノード発行順や形が変われば黙って外れ、値は正しいまま性能だけ
   落ちる**（例外も警告も出ない）。観測点は `Diagnostics.lastRunFusions` と、実配布グラフへの
   突合門 `packages/runtime/tests/assets_fusion_counts_test.ts`（資産のあるマシンでのみ実走 —
