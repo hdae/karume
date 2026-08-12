@@ -40,6 +40,7 @@ from torch.export.graph_signature import OutputKind
 from torch.fx import Node
 
 from karume.dims import MAX_SAFE_INT, DimExpr, format_dim, is_symbol_name
+from karume.extents import extent_key, same_extents
 from karume.ir import (
     IrGraph,
     IrInitializer,
@@ -330,19 +331,6 @@ def _has_free_symbols(value: Any) -> bool:
     return False
 
 
-def _extent_key(dim: Any) -> Any:
-    """次元の同一性判定に使う鍵（記号は式そのもの、具体値は int）。
-
-    MUST: SymInt 同士を `==` で比較しない — guard 評価を誘発し、export 済みの制約に後付けの
-    特殊化を混ぜる。sympy の式は構造的等価で比べられるので、記号のまま突き合わせる。
-    同一と**証明できない**組は「違う」に倒す（受理範囲を広げない側の誤り）。
-    """
-    if isinstance(dim, torch.SymInt):
-        expr = dim.node.expr
-        return expr if expr.free_symbols else int(dim)
-    return int(dim)
-
-
 def _holds_node(value: Any) -> bool:
     if isinstance(value, Node):
         return True
@@ -559,28 +547,13 @@ class Converter:
                 # 畳み込みの連鎖を切る理由が無い（実測: RoPE の `inv_freq[None,:,None]
                 # .expand(batch, -1, 1)` が batch=1 でこの形になり、ここで止めると sin / cos が
                 # IR 語彙に必要になる — ADR 0016）。
-                if not self._same_extents(node.meta["val"], node.args[0].meta.get("val")):
+                if not same_extents(node.meta["val"], node.args[0].meta.get("val")):
                     continue
             elif node.target not in FOLDABLE_OPS:
                 continue
             if all(dep.name in foldable for dep in node.all_input_nodes):
                 foldable.add(node.name)
         return foldable
-
-    @staticmethod
-    def _same_extents(out: Any, src: Any) -> bool:
-        """2 つの meta が同じ shape か（記号次元は式の構造で突き合わせる）。
-
-        MUST: SymInt を `==` で比べない — guard 評価を誘発して export 済みの制約に後付けの
-        特殊化を混ぜる。同一と**証明できない**組は「違う」に倒す（受理を広げない側の誤り）。
-        """
-        if not isinstance(out, torch.Tensor) or not isinstance(src, torch.Tensor):
-            return False
-        if out.dim() != src.dim():
-            return False
-        return all(
-            _extent_key(a) == _extent_key(b) for a, b in zip(out.shape, src.shape, strict=True)
-        )
 
     def _fold_eval(self, node: Node, point: str) -> Any:
         """適格部分木を、指定の評価点（全シンボル一斉置換）で実評価する。"""
@@ -1325,7 +1298,7 @@ def _h_gather(node: Node) -> Emitted:
     )
     for axis in range(rank - 1):
         _expect(
-            _extent_key(src.shape[axis]) == _extent_key(index.shape[axis]),
+            extent_key(src.shape[axis]) == extent_key(index.shape[axis]),
             node,
             f"先行次元 {axis} が src {list(src.shape)} と index {list(index.shape)} で一致しない"
             " gather は未対応（IR 契約は完全一致 — torch の index <= src より狭い）",
@@ -1743,14 +1716,14 @@ def _h_attention(node: Node) -> Emitted:
         f"rank {mask.dim()} の attn_mask は未対応（[1,1,M,N] のみ）",
     )
     _expect(
-        _extent_key(mask.shape[0]) == 1 and _extent_key(mask.shape[1]) == 1,
+        extent_key(mask.shape[0]) == 1 and extent_key(mask.shape[1]) == 1,
         node,
         f"attn_mask の先頭 2 軸 {list(mask.shape[:2])} が 1 でない形は未対応"
         "（B·H への broadcast 専業 — [B,1,M,N] / [1,H,M,N] は契約に無い）",
     )
     _expect(
-        _extent_key(mask.shape[2]) == _extent_key(shapes[0][2])
-        and _extent_key(mask.shape[3]) == _extent_key(shapes[1][2]),
+        extent_key(mask.shape[2]) == extent_key(shapes[0][2])
+        and extent_key(mask.shape[3]) == extent_key(shapes[1][2]),
         node,
         f"attn_mask の M / N {list(mask.shape[2:])} が q / k の"
         f" {[shapes[0][2], shapes[1][2]]} と違う attention は未対応",

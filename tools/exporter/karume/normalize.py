@@ -63,6 +63,7 @@ import torch
 from torch.export import ExportedProgram
 from torch.fx import Graph, Node
 
+from karume.extents import extent_key, extent_keys
 from karume.ops import STRIDED_RANK
 
 aten = torch.ops.aten
@@ -612,7 +613,7 @@ def _lower_unit_expand(graph: Graph, stats: Counter) -> None:
         if count is None:
             raise NotImplementedError(f"記号次元の複製は未対応: {expand.name}")
         out_shape = list(_val(sink).shape)
-        if count == 1 and out_shape == src_shape:
+        if count == 1 and extent_keys(out_shape) == extent_keys(src_shape):
             _replace(graph, sink, src)
             stats["unit_expand->identity"] += 1
             continue
@@ -676,7 +677,9 @@ def _lower_split_unbind(graph: Graph, stats: Counter) -> None:
             continue
         src_shape = list(_val(src).shape)
         view_shape = list(_val(view).shape)
-        if len(view_shape) != len(src_shape) + 1 or view_shape[:-2] != src_shape[:-1]:
+        if len(view_shape) != len(src_shape) + 1 or extent_keys(view_shape[:-2]) != extent_keys(
+            src_shape[:-1]
+        ):
             continue
         inner = _static_size(view_shape[-1])
         outer = _static_size(view_shape[-2])
@@ -803,7 +806,10 @@ def _lower_reshape_permute(graph: Graph, stats: Counter) -> None:
         shape = list(_val(permute.args[0]).shape)
         order = [int(d) % len(shape) for d in permute.args[1]]
         out_shape = list(_val(sink).shape)
-        if _numel(shape) != _numel(list(_val(base).shape)) or _numel(shape) != _numel(out_shape):
+        numel = extent_key(_numel(shape))
+        if numel != extent_key(_numel(list(_val(base).shape))) or numel != extent_key(
+            _numel(out_shape)
+        ):
             raise NotImplementedError(f"要素数が食い違う reshape/permute 連鎖: {permute.name}")
 
         kept = [index for index, size in enumerate(shape) if _static_size(size) != 1]
