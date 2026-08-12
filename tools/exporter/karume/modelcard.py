@@ -829,7 +829,7 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "  // Voice Design — describe the voice in Japanese prose:",
         f'  // caption: "{IRODORI_DEMO_CAPTION}",',
         "",
-        f"  // Voice cloning — condition on a reference speaker. The WAV must already be",
+        "  // Voice cloning — condition on a reference speaker. The WAV must already be",
         f"  // {sample_rate} Hz mono or stereo (there is no resampler; a mismatch is refused):",
         '  // speaker: { audio: decodeWav(await Deno.readFile("reference.wav")) },',
         "  // ...or pass a DACVAE latent you saved earlier instead of the audio:",
