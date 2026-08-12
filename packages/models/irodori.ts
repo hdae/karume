@@ -6,7 +6,8 @@
  * {@link IrodoriPipeline.fromAssets}）/ 生成する（`generate` / `generateLatent`）/
  * 解放する（`dispose`）。
  *
- * 波形は f32 で返る（WAV に落とすのは barrel の `encodeWav` — ファミリ非依存の共通処理）。
+ * 波形は f32 で出入りする（WAV に落とす `encodeWav` と、参照音声を読む `decodeWav` は barrel
+ * 側 — どちらもファミリ非依存の共通処理）。
  *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  * barrel（`mod.ts`）経由の tree-shaking はこの不変条件の上にだけ成立する。

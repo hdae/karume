@@ -44,9 +44,10 @@ export type {
 } from "./src/sbv2/pipeline.ts";
 
 /**
- * RGBA → PNG / f32 波形 → WAV。**パイプライン非依存の共通処理**（画像生成モデルは総じて
- * 最後に PNG を、音声生成モデルは WAV を通す）なので、ファミリのサブパスではなく barrel
- * 直下に置く。
+ * RGBA → PNG / f32 波形 ↔ WAV。**パイプライン非依存の共通処理**（画像生成モデルは総じて
+ * 最後に PNG を、音声生成モデルは WAV を通し、声質の参照には WAV を読む）なので、ファミリの
+ * サブパスではなく barrel 直下に置く。
  */
 export { encodePng } from "./src/image/png.ts";
-export { encodeWav } from "./src/audio/wav.ts";
+export { decodeWav, encodeWav } from "./src/audio/wav.ts";
+export type { DecodedWav } from "./src/audio/wav.ts";

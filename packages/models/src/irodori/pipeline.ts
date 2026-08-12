@@ -5,11 +5,13 @@
  * {@link IrodoriPipeline.generateLatent}（patch 済み latent `[S,32]` — codec を回さない）。
  * 後者は latent 門（`e2e_irodori_latent_test.ts`）の基盤であり、埋め込みだけが要る使い方の口。
  *
- * **参照音声（wav）を渡す口はまだ無い** — codec encoder は資産として要求しているが、LUFS
- * 正規化と WAV デコードのホスト段が未配線で、参照は latent で渡す（`IrodoriSpeakerInput`）。
+ * 参照話者は 3 通りで渡せる（`IrodoriSpeakerInput`）— 参照音声そのもの（`audio`・下の段 0）/
+ * その DACVAE latent（`latent`）/ 出来合いの speaker state（`stateOverride`）。
  *
  * パイプライン（NN は全段 Karume・torch 不使用）:
  *
+ * 0. ホスト: 参照音声を 120 秒で切り詰め → LUFS −16 正規化 → reflect pad →
+ *    `codec_encoder` で latent へ（`audio` を渡したときだけ — `host/reference.ts`）
  * 1. ホスト: `normalize_text` → BOS 前置 → **詰めた** token 列（静的方式 — pad で呼ばない）
  * 2. `backbone`（ModernBERT）を text / caption の 2 回（**同じ 1 セッション**）
  * 3. `text-proj` → text 条件 / `caption-proj`（2 出力）→ caption 条件 + `caption_vec`
@@ -27,6 +29,14 @@
  * （`openModel` = ヘッダ解析のみ）までで、GPU 常駐は {@link IrodoriPipeline.generate} の
  * 中で段ごとに張っては畳む。`backbone` だけで 1.26GB あるので、条件エンコーダと DiT を
  * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。
+ *
+ * ## NOTE: `codec_encoder` はタイル分割しない（decoder と非対称）
+ *
+ * 参照音声は 1 回の encode で流す。encoder の中間テンソルは 120 秒（T = 3000）で 1.47GB × 2 に
+ * 達するので、**`maxStorageBufferBindingSize` が既定の 128MiB しか無い機では長い参照で確保に
+ * 失敗する**（decoder 側の {@link DEFAULT_CODEC_TILE_FRAMES} に相当するものが無い）。参照音声は
+ * 数秒〜十数秒が普通で、そこでは単発が通る。タイル化が要ると分かったら decoder と同じ形
+ * （halo 付きの平行移動同変）をもう 1 本入れる。
  *
  * ## MUST: 低精度ノブが効くのは `dit` だけ
  *
@@ -86,6 +96,7 @@ import {
 import { patchReferenceLatent } from "./host/patch.ts";
 import { prependMeanToken, rowMean } from "./host/pooling.ts";
 import { Randn } from "./host/random.ts";
+import { normalizeReference, reflectPadToHop } from "./host/reference.ts";
 import {
   type SampleBounds,
   sequenceLengthFromLogFrames,
@@ -141,6 +152,10 @@ export type IrodoriGeneratedAudio = {
 /**
  * 参照話者の与え方。
  *
+ * - `audio` — 参照音声そのもの（モノラル f32 + サンプリング周波数）。`decodeWav` の返り値を
+ *   そのまま渡せる。ホストで正規化 → `codec_encoder` を通してから `latent` と同じ経路へ合流
+ *   する。**周波数は配布形の `sampleRate` と一致していなければならない**（リサンプルは
+ *   持たない — 違えば fail loudly）。
  * - `latent` — 参照音声の DACVAE latent `[frames × latentDim]`。patch → `speaker` →
  *   平均トークン前置の**正規経路**を通る。
  * - `stateOverride` — 既に作ってある speaker state `[rows × speakerDim]`。`speaker` グラフも
@@ -148,6 +163,7 @@ export type IrodoriGeneratedAudio = {
  *   `speaker_state_override` — 埋め込みを配る運用のための口）。
  */
 export type IrodoriSpeakerInput =
+  | { readonly audio: { readonly data: Float32Array<ArrayBuffer>; readonly sampleRate: number } }
   | { readonly latent: Float32Array<ArrayBuffer> }
   | { readonly stateOverride: Float32Array<ArrayBuffer> };
 
@@ -186,6 +202,7 @@ export type IrodoriRunComponent =
   | "speaker"
   | "duration"
   | "dit"
+  | "codec-encoder"
   | "codec-decoder";
 
 /** 構築オプション（{@link IrodoriPipeline.fromAssets} / {@link IrodoriPipeline.fromPretrained} 共通）。 */
@@ -338,6 +355,33 @@ const assertOutputScale = (
   }
 };
 
+/**
+ * グラフ**出力**の 1 軸が宣言どおりの**静的**次元であることを見る。
+ *
+ * MUST: 落とさない。encoder の latent 幅が `pipelineConfig` の `latentDim` とずれても、後段の
+ * patch は「幅 × patchSize」で割り切れる限り通ってしまい、**別のチャネルを話者特徴として
+ * 読んだ**結果が沈黙で出る。
+ */
+const assertOutputDim = (
+  model: KarumeModel,
+  axis: number,
+  expected: number,
+  where: string,
+): void => {
+  const name = model.graph.outputs[0];
+  const value = model.graph.values[name];
+  if (value === undefined) {
+    throw new Error(`irodori: グラフ出力 '${name}' の宣言が無い（${where}）`);
+  }
+  const dim = value.shape[axis];
+  if (dim !== expected) {
+    throw new Error(
+      `irodori: ${where} — グラフ出力 '${name}' の軸 ${axis} が ${String(dim)}、` +
+        `pipelineConfig は ${expected}`,
+    );
+  }
+};
+
 const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
   if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
   return tensor.data;
@@ -430,6 +474,7 @@ type IrodoriState = {
   readonly speaker: KarumeModel;
   readonly duration: KarumeModel;
   readonly dit: KarumeModel;
+  readonly codecEncoder: KarumeModel;
   readonly codecDecoder: KarumeModel;
   /** 低精度ノブ。**`dit` の Session にだけ**渡す（モジュール doc の MUST）。 */
   readonly ditSessionOptions: SessionOptions;
@@ -524,10 +569,7 @@ const openIrodoriState = async (
   const duration = openModel(assetBuffer(assets, DURATION));
   const dit = openModel(assetBuffer(assets, DIT));
   const codecDecoder = openModel(assetBuffer(assets, CODEC_DECODER));
-  // encoder は参照 wav → latent の経路で使う（未配線）。**開くだけ開く**のは、資産として
-  // 要求していることをここで示すため — 欠けた配布形が「decode だけできる」半端な状態で
-  // 通ってしまうと、参照音声を渡した瞬間に初めて落ちる。
-  openModel(assetBuffer(assets, CODEC_ENCODER));
+  const codecEncoder = openModel(assetBuffer(assets, CODEC_ENCODER));
   const tokenizer = new IrodoriTokenizer(
     parseIrodoriTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER),
   );
@@ -557,6 +599,10 @@ const openIrodoriState = async (
   // 末尾トリムのサンプル位置だけが静かに別の場所を指す）。
   assertStaticDim(codecDecoder, "latent", 2, config.latentDim, "latentDim");
   assertOutputScale(codecDecoder, 2, config.hopLength, "hopLength");
+  // encoder は逆向き（`[1,T,hopLength]` の波形 → `[1,T,latentDim]`）。入力のフレーム幅が
+  // `hopLength` でないと、ホストが並べた波形が**1 フレームずつずれて**読まれる。
+  assertStaticDim(codecEncoder, "wav", 2, config.hopLength, "hopLength");
+  assertOutputDim(codecEncoder, 2, config.latentDim, "latentDim");
 
   const ditSessionOptions = toSessionOptions(quant.session);
 
@@ -583,6 +629,7 @@ const openIrodoriState = async (
     speaker,
     duration,
     dit,
+    codecEncoder,
     codecDecoder,
     ditSessionOptions,
     ...(options.onRunDiagnostics === undefined
@@ -591,7 +638,51 @@ const openIrodoriState = async (
   };
 };
 
-/** speaker 条件を組む（正規経路 / 埋め込み直接指定 / 参照なしのゼロ短絡）。 */
+/**
+ * 参照音声 → DACVAE latent（ホスト前処理 + `codec_encoder`）。
+ *
+ * 切り詰めの上限は `speakerRows` から導く — speaker 条件は「平均トークン 1 本 + patch した
+ * 参照」なので、載る参照は `(speakerRows − 1) × speakerPatchSize` フレーム（実重み v4-small で
+ * 3,000 フレーム = 120 秒）。**TS 側に秒数を定数で置かない**（config.ts の MUST — 重みを
+ * 差し替えたときにホストだけ古い上限を持つ形を作らない）。
+ *
+ * MUST: 切り詰めは正規化より**前**。後ろに回すと、捨てる区間の音量が LUFS に混ざる
+ * （上流も `wav[:, :int(max_ref_seconds·sr)]` を先に取る）。
+ */
+const encodeReferenceAudio = async (
+  state: IrodoriState,
+  audio: { readonly data: Float32Array<ArrayBuffer>; readonly sampleRate: number },
+): Promise<Float32Array<ArrayBuffer>> => {
+  const { config } = state;
+  if (audio.sampleRate !== config.sampleRate) {
+    // リサンプルは持たない（ADR 0048 の流儀 — 黙って近似せず、変換は呼び出し側の責務にする）。
+    throw new Error(
+      `IrodoriPipeline: 参照音声が ${audio.sampleRate}Hz（配布形は ${config.sampleRate}Hz）` +
+        " — リサンプルは持たないので、あらかじめ変換して渡す",
+    );
+  }
+  const maxSamples = (config.speakerRows - 1) * config.speakerPatchSize * config.hopLength;
+  const limited = audio.data.length > maxSamples
+    ? (audio.data.slice(0, maxSamples) as Float32Array<ArrayBuffer>)
+    : audio.data;
+  const padded = reflectPadToHop(
+    normalizeReference(limited, config.sampleRate).data,
+    config.hopLength,
+  );
+  const frames = padded.length / config.hopLength;
+  return await withSession(
+    state.gpu,
+    state.codecEncoder,
+    {},
+    observer(state, "codec-encoder"),
+    async (run) => {
+      const outputs = await run({ wav: f32(padded, [1, frames, config.hopLength]) });
+      return asF32(outputAt(state.codecEncoder, outputs, 0), "codec encoder の出力");
+    },
+  );
+};
+
+/** speaker 条件を組む（参照音声 / 参照 latent / 埋め込み直接指定 / 参照なしのゼロ短絡）。 */
 const encodeSpeaker = async (
   state: IrodoriState,
   input: IrodoriSpeakerInput | undefined,
@@ -615,7 +706,8 @@ const encodeSpeaker = async (
     // 二重に正規化された別のベクトルとして条件に入る。
     return { data: stateOverride, rows: stateOverride.length / config.speakerDim };
   }
-  const patched = patchReferenceLatent(input.latent, config.latentDim, config.speakerPatchSize);
+  const latent = "audio" in input ? await encodeReferenceAudio(state, input.audio) : input.latent;
+  const patched = patchReferenceLatent(latent, config.latentDim, config.speakerPatchSize);
   const encoded = await withSession(
     state.gpu,
     state.speaker,
