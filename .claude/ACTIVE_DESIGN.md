@@ -21,8 +21,13 @@
   破壊的変更・latent 門の系列パラメタ化（F16_Z_ATOL 1.5e-3 = 実測最悪 2.1321e-4 の 7 倍・
   **S/forwards は f32 と完全一致**）・WAV sha256 門は f32 専用のまま digest 不変・
   系列×格納 dtype は両側検査（`assert_storage_absent` 新設 — 存在検査だけでは f32 席への
-  f16 混入が素通りする穴を波 1 で発見）。次 = 波 2（i8 + `measure_quant_irodori` — S ドリフト
-  実測 → 混成 w8 表の裁定）→ 波 3（w8a8 席・DiT の linear/bmm 比の実測が先）。
+  f16 混入が素通りする穴を波 1 で発見）。**波 2 + 波 3 も完了 = 量子化 3 波クローズ
+  （同日・ADR 0050 追記）**: quant 席 4 つ（f32 / f16 / w8 = 全 i8 / w8a8 = バイト共有 +
+  linearCompute）・**既定 w8a8**（ユーザー聴感裁定 — DAC + ヘッドホン通しで劣化感なし。
+  sim の数値 LSD 5.64 より聴感が正）。S ドリフトは全構成で不変（混成不要）。門 = latent 門
+  w8 席（1e-2）+ `e2e_irodori_w8a8_test.ts`（判別帯 [0.1,6] + census 317/317/0）。品質台本 =
+  `measure_quant_irodori.py`（S ドリフト表・直交分解 5 軸・活性シム素通り検出）。速度は
+  wall ×1.12 — DiT の GPU 内訳再実測（perf-ledger 第 1 段の残り）は未消化のまま。
 - **DeBERTa 配布サイズ削減 3 波（2026-08-11）— 波 1 着地**: 発端は SBV2 の ONNX 版
   （hidden[-3] のみ抽出）が縮小の材料になるかという問い。実測の正本は
   [research/2026-08-11-deberta-size-recon.md](../docs/research/2026-08-11-deberta-size-recon.md)
