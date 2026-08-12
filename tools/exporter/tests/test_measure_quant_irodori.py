@@ -177,6 +177,24 @@ class TestOrthogonalityGate:
     def test_a_duration_only_config_that_moved_nothing_is_green(self):
         assert _gates("i8-duration-only", z_changed=False, wav_changed=False) == []
 
+    def test_a_speaker_only_config_is_expected_to_move_nothing_without_a_reference(self):
+        """speaker の期待は**ケース条件**（参照なしはゼロ供給短絡で encoder が走らない —
+        ADR 0048。実測 2026-08-12: no-ref はビット一致・full は変化）。"""
+        entries = {
+            "full": _entry(z_changed=True, wav_changed=True),
+            "no-ref": _entry(z_changed=False, wav_changed=False),
+        }
+        gates = mq.run_gates("i8-speaker-only", mq.RECIPES["i8-speaker-only"], {}, entries, None)
+
+        assert gates["failures"] == []
+
+    def test_a_speaker_only_config_that_moved_the_no_ref_case_is_red(self):
+        """参照なしのケースで z が動いたら、ゼロ短絡が壊れたか scope が漏れている。"""
+        entries = {"no-ref": _entry(z_changed=True, wav_changed=True)}
+        gates = mq.run_gates("i8-speaker-only", mq.RECIPES["i8-speaker-only"], {}, entries, None)
+
+        assert len(gates["failures"]) == 2
+
     def test_a_codec_only_config_must_move_the_waveform_but_not_the_latent(self):
         assert _gates("i8-codec-only", z_changed=False, wav_changed=True) == []
         assert _gates("i8-codec-only", z_changed=False, wav_changed=False) != []

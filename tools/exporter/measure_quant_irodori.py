@@ -51,7 +51,9 @@ duration の出力は S を決めるので、量子化で銀行家丸めが 1 �
 - `duration` は **S にしか効かない**（`log_frames` → 銀行家丸め → S。他の段は読まない）
   ⇒ グリッドを固定した `i8-duration-only` の z と波形は基準と**ビット一致**するのが正しい
 - `codec` は **波形にしか効かない**（latent の後段）⇒ z はビット一致・波形は変わる
-- それ以外（backbone / projector / speaker / dit）は z が変わる
+- `speaker` は**参照のあるケースだけ** z に効く（参照なしはホストのゼロ供給短絡で encoder が
+  走らない — ADR 0048）⇒ `i8-speaker-only` は full で変わり・no-ref でビット一致、が緑の条件
+- それ以外（backbone / projector / dit）は z が変わる
 
 ## 出力
 
@@ -118,6 +120,16 @@ ROLES: tuple[str, ...] = (
 #: どちらもグリッドを固定した比較では z をビット単位で動かさない（モジュール docstring の
 #: 「直交性の門」）。
 LATENT_ROLES: frozenset[str] = frozenset(ROLES) - {ex.TARGET_DURATION, ROLE_CODEC}
+
+#: **ケースに参照があるときだけ** z に効く役割。参照なしのケースでは speaker encoder が
+#: 走らない（ホストのゼロ供給短絡 — ADR 0048）ので、`speaker` を丸めても z は不変が正しい
+#: （実測 2026-08-12: `i8-speaker-only` の no-ref は z も波形も基準とビット一致）。
+REFERENCE_ONLY_ROLES: frozenset[str] = frozenset({ex.TARGET_SPEAKER})
+
+#: ケース名 → 参照音声の有無（直交性の門がケース条件で期待を割るための表）。
+CASE_HAS_REFERENCE: Mapping[str, bool] = MappingProxyType(
+    {case.name: case.reference is not None for case in ip.PIPELINE_CASES}
+)
 
 
 @dataclass(frozen=True)
@@ -571,8 +583,6 @@ def run_gates(
             if not ok
         ]
     else:
-        expect_z = bool(set(recipe.roles) & LATENT_ROLES)
-        expect_wav = expect_z or ROLE_CODEC in recipe.roles
         observed = {
             case: {
                 "zChanged": not entry["vsBase"]["zBitEqual"],
@@ -580,12 +590,22 @@ def run_gates(
             }
             for case, entry in entries.items()
         }
-        gates["orthogonality"] = {
-            "expectedZChanged": expect_z,
-            "expectedWavChanged": expect_wav,
-            "observed": observed,
-        }
+        expectations: dict[str, dict[str, bool]] = {}
+        for case in observed:
+            # 期待は**ケース条件**で割る — 参照なしのケースでは speaker 経路が走らない
+            # （{@link REFERENCE_ONLY_ROLES}）ので、その分の役割を期待から外す。
+            effective = set(recipe.roles) & LATENT_ROLES
+            if not CASE_HAS_REFERENCE[case]:
+                effective -= REFERENCE_ONLY_ROLES
+            expect_z = bool(effective)
+            expectations[case] = {
+                "zChanged": expect_z,
+                "wavChanged": expect_z or ROLE_CODEC in recipe.roles,
+            }
+        gates["orthogonality"] = {"expected": expectations, "observed": observed}
         for case, seen in observed.items():
+            expect_z = expectations[case]["zChanged"]
+            expect_wav = expectations[case]["wavChanged"]
             if seen["zChanged"] != expect_z:
                 failures.append(
                     f"{case}: z が「{'変わる' if expect_z else '変わらない'}」期待に反した"
@@ -606,12 +626,22 @@ def run_gates(
 
 
 def collect(out_dir: Path) -> dict[str, dict[str, Any]]:
-    """`--out` に残っている per-config の JSON を構成順に集める。"""
+    """`--out` に残っている per-config の JSON を構成順に集める。
+
+    MUST: 直交性の門は**ここで評定し直す**（保存 JSON の `gates` を再掲しない）— 門の期待は
+    コードが正本で、測定後に期待側の誤りを直したとき、保存済みの評定が古い期待のまま
+    レポートへ蘇るため（実例: speaker のケース条件 — no-ref はゼロ短絡で不変が正しい）。
+    基準 `f32` の golden ビット一致だけはテンソル比較（測定時にしかできない）なので保存値を
+    使う。観測（`vsBase` のビット等値）は測定の事実で、評定と違い保存してよい側。
+    """
     found: dict[str, dict[str, Any]] = {}
     for name in RECIPES:
         path = out_dir / f"{name}.json"
         if path.is_file():
-            found[name] = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if name != BASE_CONFIG:
+                payload["gates"] = run_gates(name, RECIPES[name], {}, payload["cases"], None)
+            found[name] = payload
     return found
 
 
