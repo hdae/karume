@@ -11,11 +11,21 @@
 
 const f32 = Math.fround;
 
-/** S の clamp 範囲と秒 ↔ フレーム換算（正本は manifest の `pipelineConfig`）。 */
-export type FrameBounds = {
+/** S の clamp 範囲と秒 ↔ フレーム換算（`clampRange` だけが使う内側の面）。 */
+type FrameBounds = {
   readonly frameRate: number;
   readonly minSeconds: number;
   readonly maxSeconds: number;
+};
+
+/**
+ * S の決定に要る数（正本は manifest の `pipelineConfig`）。秒 → フレームと
+ * 秒 → サンプル → フレームの両方を持つのは、経路ごとに上流の式が違うため。整合
+ * （`sampleRate == frameRate × hopLength`）は `config.ts` が parse 時に見ている。
+ */
+export type SampleBounds = FrameBounds & {
+  readonly sampleRate: number;
+  readonly hopLength: number;
 };
 
 /**
@@ -41,35 +51,59 @@ const clampRange = (bounds: FrameBounds): { readonly min: number; readonly max: 
 });
 
 /**
+ * 決まった latent 長 S と、波形をそこから切り出す長さ（サンプル）。
+ *
+ * `targetSamples` を S と一緒に返すのは、2 つの経路で式が違うため（duration 経路は
+ * `S × hopLength` ちょうど・手動秒経路は最大 `hopLength − 1` サンプル短い）。呼び出し側で
+ * 組み直すと、片方の経路だけが黙って全長を出す。
+ */
+export type SequencePlan = {
+  readonly frames: number;
+  readonly targetSamples: number;
+};
+
+/**
  * duration グラフの出力（log frames）から S を決める。
  *
  * `expm1` → 銀行家丸め → `[minFrames, maxFrames]` clamp（上流 `_synthesize`）。
  * `duration_scale` は既定 1.0 で、実行時ノブとしては持たない（配布形の既定に無い）。
+ * この経路の `targetSamples` は `S × hopLength` ちょうど（切り出しは実質 no-op）。
  */
-export const sequenceLengthFromLogFrames = (logFrames: number, bounds: FrameBounds): number => {
+export const sequenceLengthFromLogFrames = (
+  logFrames: number,
+  bounds: SampleBounds,
+): SequencePlan => {
   const frames = f32(Math.expm1(f32(logFrames)));
   if (!Number.isFinite(frames)) {
     throw new Error(`duration の出力 ${logFrames} から得たフレーム数が有限でない`);
   }
   const { min, max } = clampRange(bounds);
-  return Math.max(min, Math.min(max, bankerRound(frames)));
+  const bounded = Math.max(min, Math.min(max, bankerRound(frames)));
+  return { frames: bounded, targetSamples: bounded * bounds.hopLength };
 };
 
 /**
- * 秒の直接指定から S を決める（上流の `manual_seconds` 経路 — duration グラフを回さない）。
+ * 秒の直接指定から S と切り出し長を決める（上流の `manual_seconds` 経路 — duration グラフを
+ * 回さない）。
  *
- * 上流は `[minSeconds, maxSeconds]` へ clamp した秒を**サンプル数へ落としてから**
- * `ceil(samples / hopLength)` でフレーム化する。
+ * 上流（`_synthesize`）の綴りそのまま: `[minSeconds, maxSeconds]` へ clamp した秒を
+ * **サンプル数へ落としてから**（`max(1, trunc(clamped × sampleRate))`）フレーム化する
+ * （`ceil(targetSamples / hopLength)`）。
  *
- * MUST（既知の差分）: ここはフレームレート経由で `ceil(clamped × frameRate)` を採る。
- * `sampleRate` / `hopLength` は `pipelineConfig` が運んでいない（codec 波が入るまで配布形に
- * 無い）ためで、両者が食い違うのは「秒 × frameRate が整数のすぐ上（1 サンプル未満）」に
- * 落ちる入力だけ。差は最大 1 フレーム（= 1/frameRate 秒）で、値ではなく長さにしか出ない。
- * codec 波で `sampleRate` / `hopLength` が配布形に載ったら上流の綴りへ寄せること。
+ * MUST: `frameRate` 経由の `ceil(clamped × frameRate)` で代用しない。両者は「秒 × frameRate が
+ * 整数のすぐ上（1 サンプル未満）」で 1 フレームずれる（例: 1.000005 秒 → 上流 25 / frameRate
+ * 経由 26）。値ではなく**長さ**にしか出ないので、突合門が無ければ気づけない差になる。
+ *
+ * `targetSamples` は S × hopLength より最大 `hopLength − 1` サンプル短い — 呼び出し側は
+ * 波形をこの長さで切る（切らないと指定秒より長い音声が出る）。
  */
-export const sequenceLengthFromSeconds = (seconds: number, bounds: FrameBounds): number => {
+export const sequenceLengthFromSeconds = (
+  seconds: number,
+  bounds: SampleBounds,
+): SequencePlan => {
   if (!Number.isFinite(seconds)) throw new Error(`durationSeconds ${seconds} が有限の数でない`);
   // 上流はフレーム側の clamp を掛け直さない（秒を先に clamp してあるので範囲は自動で収まる）。
   const clamped = Math.min(bounds.maxSeconds, Math.max(bounds.minSeconds, seconds));
-  return Math.max(1, Math.ceil(clamped * bounds.frameRate));
+  const targetSamples = Math.max(1, Math.trunc(clamped * bounds.sampleRate));
+  return { frames: Math.ceil(targetSamples / bounds.hopLength), targetSamples };
 };

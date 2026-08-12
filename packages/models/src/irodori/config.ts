@@ -33,6 +33,9 @@ const ROOT_KEYS: readonly string[] = [
   "speakerRows",
   "ditSymMax",
   "frameRate",
+  "sampleRate",
+  "hopLength",
+  "codecHaloFrames",
   "latentDim",
   "speakerPatchSize",
   "speakerDim",
@@ -75,6 +78,18 @@ export type IrodoriPipelineConfig = {
   readonly ditSymMax: number;
   /** codec のフレームレート（Hz）— 秒 ↔ latent フレームの換算。 */
   readonly frameRate: number;
+  /** 波形のサンプリング周波数（Hz）。秒 → サンプル数の換算に要る。 */
+  readonly sampleRate: number;
+  /** latent 1 フレームが展開されるサンプル数（decoder の出力倍率）。 */
+  readonly hopLength: number;
+  /**
+   * codec decoder をタイル分割するときに、採用区間の両側へ足す latent フレーム数。
+   *
+   * decoder の受容野（片側 13,793 サンプル = 7.19 フレーム）に由来する**モデル定数**で、
+   * 実行時ノブではない。これだけの halo を捨てれば、タイル内部は全長 decode と**ビット一致**
+   * する（実 GPU の門 `tests/e2e_irodori_codec_test.ts` が実測する）。
+   */
+  readonly codecHaloFrames: number;
   /** patch 済み latent の幅（`x_t` の最終次元）。 */
   readonly latentDim: number;
   /** 参照 latent を speaker エンコーダへ渡すときの時間方向 patch 幅。 */
@@ -185,6 +200,9 @@ export const parseIrodoriPipelineConfig = (
     speakerRows: readNumber(raw, "speakerRows", where, isPositiveInteger, positive),
     ditSymMax: readNumber(raw, "ditSymMax", where, isPositiveInteger, positive),
     frameRate: readNumber(raw, "frameRate", where, isPositiveInteger, positive),
+    sampleRate: readNumber(raw, "sampleRate", where, isPositiveInteger, positive),
+    hopLength: readNumber(raw, "hopLength", where, isPositiveInteger, positive),
+    codecHaloFrames: readNumber(raw, "codecHaloFrames", where, isPositiveInteger, positive),
     latentDim: readNumber(raw, "latentDim", where, isPositiveInteger, positive),
     speakerPatchSize: readNumber(raw, "speakerPatchSize", where, isPositiveInteger, positive),
     speakerDim: readNumber(raw, "speakerDim", where, isPositiveInteger, positive),
@@ -229,6 +247,15 @@ export const parseIrodoriPipelineConfig = (
   if (config.minSeconds > config.maxSeconds) {
     throw new Error(
       `${where}: minSeconds ${config.minSeconds} が maxSeconds ${config.maxSeconds} より大きい`,
+    );
+  }
+  // 秒 → フレーム（`frameRate`）と 秒 → サンプル → フレーム（`sampleRate` / `hopLength`）の
+  // 2 系統が独立に動く形を作らない。ずれると S の決め方が経路ごとに変わり、切り出し長だけが
+  // 静かに食い違う（例外は出ない）。
+  if (config.sampleRate !== config.frameRate * config.hopLength) {
+    throw new Error(
+      `${where}: sampleRate ${config.sampleRate} が frameRate ${config.frameRate} × hopLength` +
+        ` ${config.hopLength} = ${config.frameRate * config.hopLength} と違う`,
     );
   }
   return config;

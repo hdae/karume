@@ -22,6 +22,9 @@ const BASE: Record<string, unknown> = {
   speakerRows: 751,
   ditSymMax: 750,
   frameRate: 25,
+  sampleRate: 48000,
+  hopLength: 1920,
+  codecHaloFrames: 8,
   latentDim: 32,
   speakerPatchSize: 4,
   speakerDim: 768,
@@ -143,6 +146,32 @@ Deno.test("parseIrodoriPipelineConfig: 秒の範囲が逆順なら落とす", ()
     () => parseIrodoriPipelineConfig(withPatch({ minSeconds: 30, maxSeconds: 0.5 })),
     Error,
     "minSeconds 30",
+  );
+});
+
+Deno.test("parseIrodoriPipelineConfig: codec の 3 欄は正の整数（0 も小数も落とす）", () => {
+  for (const key of ["sampleRate", "hopLength", "codecHaloFrames"]) {
+    for (const value of [0, -1, 1.5, "48000"]) {
+      assertThrows(
+        () => parseIrodoriPipelineConfig(withPatch({ [key]: value })),
+        Error,
+        `pipelineConfig.${key}`,
+      );
+    }
+  }
+});
+
+Deno.test("parseIrodoriPipelineConfig: sampleRate ÷ hopLength が frameRate と違えば落とす", () => {
+  // 秒 → フレームと 秒 → サンプル → フレームの 2 系統が独立に動く形を作らない。
+  assertThrows(
+    () => parseIrodoriPipelineConfig(withPatch({ hopLength: 1000 })),
+    Error,
+    "frameRate 25 × hopLength 1000",
+  );
+  assertThrows(
+    () => parseIrodoriPipelineConfig(withPatch({ frameRate: 24 })),
+    Error,
+    "sampleRate 48000",
   );
 });
 

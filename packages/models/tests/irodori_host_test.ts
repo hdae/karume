@@ -13,7 +13,7 @@ import { patchReferenceLatent } from "../src/irodori/host/patch.ts";
 import { prependMeanToken, rowMean } from "../src/irodori/host/pooling.ts";
 import {
   bankerRound,
-  type FrameBounds,
+  type SampleBounds,
   sequenceLengthFromLogFrames,
   sequenceLengthFromSeconds,
 } from "../src/irodori/host/round.ts";
@@ -21,7 +21,13 @@ import { combineCfg, eulerStep, tSchedule } from "../src/irodori/host/sampler.ts
 import { IrodoriTokenizer, type IrodoriTokenizerAssets } from "../src/irodori/text/tokenizer.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
-const BOUNDS: FrameBounds = { frameRate: 25, minSeconds: 0.5, maxSeconds: 30 };
+const BOUNDS: SampleBounds = {
+  frameRate: 25,
+  minSeconds: 0.5,
+  maxSeconds: 30,
+  sampleRate: 48000,
+  hopLength: 1920,
+};
 
 // ---- S の決定 -------------------------------------------------------------
 
@@ -41,22 +47,53 @@ Deno.test("bankerRound: 0.5 ちょうどは偶数側（Math.round との差が�
 Deno.test("sequenceLengthFromLogFrames: golden 2 ケースの log frames から同じ S が出る", () => {
   // 値は `outputs/series/irodori-v4-small/pipeline/meta.json` の `duration.logFrames`
   // （full = 161 フレーム / no-ref = 116 フレーム）。
-  assertEquals(sequenceLengthFromLogFrames(5.087219, BOUNDS), 161);
-  assertEquals(sequenceLengthFromLogFrames(4.761631, BOUNDS), 116);
+  assertEquals(sequenceLengthFromLogFrames(5.087219, BOUNDS).frames, 161);
+  assertEquals(sequenceLengthFromLogFrames(4.761631, BOUNDS).frames, 116);
 });
 
 Deno.test("sequenceLengthFromLogFrames: clamp は 13（0.5s）と 750（30s）", () => {
   // ceil(0.5×25) = 13 / floor(30×25) = 750 — 端の丸め方が非対称なのは上流の綴りどおり。
-  assertEquals(sequenceLengthFromLogFrames(0, BOUNDS), 13, "expm1(0)=0 は下限へ");
-  assertEquals(sequenceLengthFromLogFrames(10, BOUNDS), 750, "expm1(10)≈22025 は上限へ");
+  assertEquals(sequenceLengthFromLogFrames(0, BOUNDS).frames, 13, "expm1(0)=0 は下限へ");
+  assertEquals(sequenceLengthFromLogFrames(10, BOUNDS).frames, 750, "expm1(10)≈22025 は上限へ");
 });
 
-Deno.test("sequenceLengthFromSeconds: 秒指定は clamp → ceil（duration グラフを回さない経路）", () => {
-  assertEquals(sequenceLengthFromSeconds(1, BOUNDS), 25);
-  // 端数は必ず切り上げ（1 フレーム足りない発話を作らない）。
-  assertEquals(sequenceLengthFromSeconds(1.004, BOUNDS), 26);
-  assertEquals(sequenceLengthFromSeconds(0.1, BOUNDS), 13, "下限 0.5s へ clamp");
-  assertEquals(sequenceLengthFromSeconds(100, BOUNDS), 750, "上限 30s へ clamp");
+Deno.test("sequenceLengthFromLogFrames: この経路の切り出し長は S × hopLength ちょうど", () => {
+  // duration が決めた S はそのまま出力長 — 切り出しは実質 no-op になる。
+  assertEquals(sequenceLengthFromLogFrames(5.087219, BOUNDS).targetSamples, 161 * 1920);
+});
+
+Deno.test("sequenceLengthFromSeconds: 秒 → サンプル → フレーム（上流 manual_seconds の綴り）", () => {
+  assertEquals(sequenceLengthFromSeconds(1, BOUNDS), { frames: 25, targetSamples: 48000 });
+  // 端数は切り上げ（1 フレーム足りない発話を作らない）。1.004s = 48,192 サンプル → 26 フレーム。
+  assertEquals(sequenceLengthFromSeconds(1.004, BOUNDS), { frames: 26, targetSamples: 48192 });
+  assertEquals(sequenceLengthFromSeconds(0.1, BOUNDS), {
+    frames: 13,
+    targetSamples: 24000,
+  }, "下限 0.5s へ clamp");
+  assertEquals(sequenceLengthFromSeconds(100, BOUNDS), {
+    frames: 750,
+    targetSamples: 1_440_000,
+  }, "上限 30s へ clamp");
+});
+
+Deno.test("sequenceLengthFromSeconds: サンプル境界の 1 フレーム差（frameRate 経由との分かれ目）", () => {
+  // 1.000005s × 48,000 = 48,000.24 サンプル → trunc して 48,000 → 25 フレーム。
+  // frameRate 経由（ceil(1.000005×25) = 26）だと 1 フレーム長い発話になる。
+  assertEquals(sequenceLengthFromSeconds(1.000005, BOUNDS), {
+    frames: 25,
+    targetSamples: 48000,
+  });
+  // 1 サンプルでも超えれば繰り上がる（切り上げの向きが逆でないことの確認）。
+  assertEquals(sequenceLengthFromSeconds(1.0000209, BOUNDS), {
+    frames: 26,
+    targetSamples: 48001,
+  });
+});
+
+Deno.test("sequenceLengthFromSeconds: 切り出し長は S × hopLength より短くなりうる", () => {
+  // 26 フレーム = 49,920 サンプルぶん decode するが、返す波形は 48,192 サンプル。
+  const plan = sequenceLengthFromSeconds(1.004, BOUNDS);
+  assertEquals(plan.frames * BOUNDS.hopLength - plan.targetSamples, 1728);
 });
 
 // ---- 区間マスク -----------------------------------------------------------
