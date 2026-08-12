@@ -27,15 +27,21 @@
  *
  * ## 格納 dtype の系列でパラメタ化する（ADR 0018 / 0027 の型）
  *
- * 配布形の quant 席（`f32` / `f16`）と full-loop golden の系列は **1 対 1** で、系列ごとに
+ * 配布形の quant 席（`f32` / `f16` / `w8`）と full-loop golden の系列は **1 対 1** で、系列ごとに
  * ①golden を fake-quant 済みの重みで焼き直し ②tolerance を**素の実測から独立導出**する
  * （系列間で流用しない — 片方の再導出がもう片方を黙って動かす）。圧縮系列の golden も
  * 丸めた重みで採ってあるので、どの系列でも見ているのは「実装差だけ」で、量子化そのものの
  * 質は聴感ゲート（ユーザー裁定）の領分。
  *
- * **S と forward 数の完全一致は系列に依らず要求する** — f16 は duration の出力を動かす軸を
- * 持たない（重み格納だけの変更で、S を決める式もホストのまま）ので、ここが割れたら
- * tolerance ではなく経路を疑う。
+ * NOTE: 席名と系列 root の綴りは**必ずしも同じではない**（`w8` 席 ↔ `-i8` 系列 — 席名は
+ * 実行構成の名前、系列 root は格納 dtype の名前で、`w8` / `w8a8` は同じバイトを共有する）。
+ * この門が見るのは格納 dtype までの席で、活性量子化の `w8a8` 席は数値パリティ網に**できない**
+ * ため別の門が持つ（`e2e_irodori_w8a8_test.ts` — ADR 0025 決定 6 / 0026）。
+ *
+ * **S と forward 数の完全一致は系列に依らず要求する** — 格納 dtype を落としても duration の
+ * 出力を動かす軸は無い（重み格納だけの変更で、S を決める式もホストのまま）ので、ここが
+ * 割れたら tolerance ではなく経路を疑う。**i8 で S が動くかどうかは別軸の実測**
+ * （`tools/exporter/measure_quant_irodori.py` の S ドリフト表）で、割れたらそちらを先に読む。
  *
  * MUST: 資産は `models/karume-irodori-v4-small/`（untracked・実 GPU 機のローカル資産）と
  * 上の golden。どちらか欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP** する
@@ -46,22 +52,25 @@
  */
 
 import { assertEquals } from "@std/assert";
-import { parseManifest, resolveFiles } from "@karume/hub";
-import type { Manifest, ModelEntry } from "@karume/hub";
-import { parseSafetensors } from "@karume/runtime";
 import { IrodoriPipeline } from "../mod.ts";
 import { parseIrodoriPipelineConfig } from "../src/irodori/config.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-
-/** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
-const ASSETS_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
-
-/** SKIP 時にそのまま貼れる生成コマンド。 */
-const DIST_COMMAND = "cd tools/exporter && uv run karume dist --pipeline irodori";
-const GOLDEN_COMMAND =
-  "cd tools/exporter && uv run --with 'transformers==5.14.1' python irodori_pipeline.py";
-
-const MODEL = "v4-small";
+import {
+  ASSETS_DIR,
+  DIST_COMMAND,
+  GOLDEN_COMMAND,
+  type GoldenCase,
+  goldenDir,
+  type GoldenMeta,
+  hasQuantSeat,
+  loadLocalAssets,
+  manifestText,
+  MODEL,
+  modelEntry,
+  readCase,
+  readManifest,
+  worstDifference,
+} from "./helpers/irodori-assets.ts";
 
 /**
  * `z` の全要素突合に使う許容誤差（**f32 系列**）。
@@ -111,6 +120,34 @@ const Z_ATOL = 5e-3;
  */
 const F16_Z_ATOL: number | undefined = 1.5e-3;
 
+/**
+ * **w8 席**（`--dtype i8` — 適格な重みスロットだけ per-channel i8 格納・計算は f32）の `z` の
+ * 許容誤差。
+ *
+ * 実測（`atol = rtol = 0` の素の突合 — この門が毎回ログに出す値。2026-08-12 / 実 GPU）:
+ *
+ * | ケース   | S   | 要素数 | z の maxAbs 差 | \|z\| 上端 | 比      |
+ * | -------- | --- | ------ | -------------- | ---------- | ------- |
+ * | full     | 161 | 5,152  | **1.8429e-3**  | 5.11886    | 1/2,777 |
+ * | no-ref   | 116 | 3,712  | 1.6475e-4      | 4.33821    | 1/26,331 |
+ *
+ * 1e-2 = 実測最悪 1.8429e-3 の **5.4 倍**・\|z\| 上端の約 1/512。f16 より 1 桁大きい差が
+ * 出るのは i8 格子の粗さがそのまま（golden も同じ丸めた重みなので「実装差」に載る係数が
+ * 大きくなる）— S / forwards は完全一致しているので経路は同一。
+ *
+ * MUST: **f32 / f16 の値を流用しない**（ADR 0027 / 0029 の型 — 系列ごとに素の実測から独立
+ * 導出する）。再導出の手順は f16 と同じ: ①i8 系列の資産を焼く（`--dtype i8` の export 3 本 +
+ * `karume dist`）②この定数を `undefined` に戻してこの門を走らせ、ログの素の `maxAbs` を上の表へ
+ * 書く ③実測最悪の 5〜10 倍を閾値に採り、値域との比を添える。
+ *
+ * `undefined` のまま資産だけが揃った環境では、この門は**緑にならない**（実測を出してから
+ * 赤で止まる — ADR 0050 決定 4）。
+ *
+ * NOTE: **S / forwards が割れた場合は tolerance の問題ではない** ので、閾値を触る前に
+ * `measure_quant_irodori.py` の S ドリフト表を読む。
+ */
+const W8_Z_ATOL: number | undefined = 1e-2;
+
 /** 決定性の門で使う発話長（秒）。`duration` を回さず S を小さく固定して 2 回生成する。 */
 const DETERMINISM_SECONDS = 1;
 
@@ -122,7 +159,7 @@ const DETERMINISM_SECONDS = 1;
  * ので、緑のまま検出力だけが落ちる — `karume.quantize` のモジュール docstring と同じ罠）。
  */
 type IrodoriSeries = {
-  /** テスト名に出る系列名（= 配布形の quant 席の綴り）。 */
+  /** テスト名に出る名前（= 配布形の quant 席の綴り — 系列 root の綴りとは別軸）。 */
   readonly name: string;
   /** full-loop golden の置き場（`irodori_pipeline.py --dtype <name>` の既定の出力先）。 */
   readonly goldenDir: URL;
@@ -135,111 +172,25 @@ type IrodoriSeries = {
 const SERIES: readonly IrodoriSeries[] = [
   {
     name: "f32",
-    goldenDir: new URL("../../../outputs/series/irodori-v4-small/pipeline/", import.meta.url),
+    goldenDir: goldenDir("irodori-v4-small"),
     zAtol: Z_ATOL,
     generate: GOLDEN_COMMAND,
   },
   {
     name: "f16",
-    goldenDir: new URL("../../../outputs/series/irodori-v4-small-f16/pipeline/", import.meta.url),
+    goldenDir: goldenDir("irodori-v4-small-f16"),
     zAtol: F16_Z_ATOL,
     generate: `${GOLDEN_COMMAND} --dtype f16`,
   },
+  {
+    // 席の綴りは `w8`・系列 root は `-i8`（`w8a8` 席も同じバイトを指すが、あちらは活性量子化が
+    // 効くので数値パリティ網にならず、別の門が持つ）。
+    name: "w8",
+    goldenDir: goldenDir("irodori-v4-small-i8"),
+    zAtol: W8_Z_ATOL,
+    generate: `${GOLDEN_COMMAND} --dtype i8`,
+  },
 ];
-
-const manifestText = await Deno.readTextFile(new URL("karume.json", ASSETS_DIR)).catch(
-  () => undefined,
-);
-
-/** golden `meta.json` のうち、この門が読む欄だけ（形は exporter が持つ — ここは読み口）。 */
-type GoldenCase = {
-  readonly text: string;
-  readonly caption: string;
-  readonly S: number;
-  readonly forwards: number;
-  readonly zAbsMax: number;
-  readonly reference: { readonly frames: number } | null;
-};
-type GoldenMeta = {
-  readonly steps: number;
-  readonly initScale: number;
-  readonly cfgRange: readonly [number, number];
-  readonly cfgScales: { readonly text: number; readonly speaker: number; readonly caption: number };
-  readonly frameRate: number;
-  readonly tEmbedDim: number;
-  readonly caps: { readonly text: number; readonly speaker: number; readonly caption: number };
-  readonly cases: Readonly<Record<string, GoldenCase>>;
-};
-
-const readManifest = (): Manifest => parseManifest(manifestText as string);
-
-const modelEntry = (manifest: Manifest): ModelEntry => {
-  if (!Object.hasOwn(manifest.models, MODEL)) {
-    throw new Error(
-      `配布形に model '${MODEL}' が無い（あるもの: ${manifest.available.models.join(" / ")}）`,
-    );
-  }
-  return manifest.models[MODEL];
-};
-
-/** 配布形が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない）。 */
-const loadLocalAssets = async (
-  manifest: Manifest,
-  quant: string,
-): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
-  const files = resolveFiles(manifest, { model: MODEL, quant });
-  const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
-  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of Object.keys(files)) {
-    const { path } = files[key];
-    const cached = byPath.get(path);
-    const bytes = cached ?? await Deno.readFile(new URL(path, ASSETS_DIR));
-    if (cached === undefined) byPath.set(path, bytes);
-    assets = { ...assets, [key]: bytes };
-  }
-  return assets;
-};
-
-/** golden の 1 ケース（`case.<name>.safetensors`）から f32 テンソルを引く。 */
-const readCase = async (
-  series: IrodoriSeries,
-  name: string,
-): Promise<(tensor: string) => Float32Array<ArrayBuffer>> => {
-  const bytes = await Deno.readFile(new URL(`case.${name}.safetensors`, series.goldenDir));
-  const file = parseSafetensors(
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-  );
-  return (tensor: string): Float32Array<ArrayBuffer> => {
-    const spec = file.tensors.get(tensor);
-    if (spec === undefined) throw new Error(`golden case.${name} に '${tensor}' が無い`);
-    if (spec.dtype !== "F32") throw new Error(`golden '${tensor}' の dtype が ${spec.dtype}`);
-    // MUST: 写して返す（golden の buffer は 1 本を全テンソルで共有しており、`initialNoise` は
-    // パイプラインが**そのまま書き換える**配列になる — 借りたままだと 2 回目の突合が壊れる）。
-    return new Float32Array(
-      file.buffer.slice(spec.byteOffset, spec.byteOffset + spec.byteLength),
-    ) as Float32Array<ArrayBuffer>;
-  };
-};
-
-/** 全要素の最大絶対差と、その位置（差分の報告用）。 */
-const worstDifference = (
-  actual: Float32Array,
-  expected: Float32Array,
-): { readonly maxAbs: number; readonly at: number } => {
-  if (actual.length !== expected.length) {
-    throw new Error(`要素数が違う（実測 ${actual.length} / golden ${expected.length}）`);
-  }
-  let maxAbs = 0;
-  let at = 0;
-  for (let index = 0; index < actual.length; index += 1) {
-    const difference = Math.abs(actual[index] - expected[index]);
-    if (difference > maxAbs) {
-      maxAbs = difference;
-      at = index;
-    }
-  }
-  return { maxAbs, at };
-};
 
 /**
  * golden の 1 ケースを配布形で再現して突き合わせる。
@@ -254,7 +205,7 @@ const runCase = async (
   name: string,
   expected: GoldenCase,
 ): Promise<void> => {
-  const golden = await readCase(series, name);
+  const golden = await readCase(series.goldenDir, name);
   const started = performance.now();
   const latent = await pipeline.generateLatent({
     text: expected.text,
@@ -276,9 +227,9 @@ const runCase = async (
   assertEquals(latent.latentDim, z.length / expected.S, `${name}: latentDim が golden と違う`);
   if (series.zAtol === undefined) {
     throw new Error(
-      `${series.name} 系列の tolerance が未導出（実測 maxAbs ${maxAbs.toExponential(4)} / ` +
-        `|z| 上端 ${expected.zAbsMax}）— 上のログの実測を全ケースぶん集めて ` +
-        "`F16_Z_ATOL` の表を埋める（f32 の値を流用しない — ADR 0027 の型）",
+      `${series.name} 席の tolerance が未導出（実測 maxAbs ${maxAbs.toExponential(4)} / ` +
+        `|z| 上端 ${expected.zAbsMax}）— 上のログの実測を全ケースぶん集めて、この席の ` +
+        "`*_Z_ATOL` 定数の表を埋める（他の席の値を流用しない — ADR 0027 の型）",
     );
   }
   if (maxAbs > series.zAtol) {
@@ -299,9 +250,8 @@ for (const series of SERIES) {
     () => undefined,
   );
   const readMeta = (): GoldenMeta => JSON.parse(metaText as string) as GoldenMeta;
-  /** 配布形にこの系列の quant 席があるか（席の綴りと系列名は 1 対 1）。 */
-  const seated = manifestText !== undefined &&
-    Object.hasOwn(modelEntry(readManifest()).quants, series.name);
+  /** 配布形にこの席があるか（席の綴りと golden の系列は 1 対 1 だが、綴りは別軸）。 */
+  const seated = hasQuantSeat(series.name);
   const available = manifestText !== undefined && metaText !== undefined && seated;
 
   if (!available) {
