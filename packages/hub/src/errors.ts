@@ -11,7 +11,8 @@
  * MUST: 全エラーに**利用可能な model / quant / dtype ラベル一覧**（{@link AvailableLabels}）を
  * 載せる — GGUF 利用者が README の quant 表で得ている情報の代替であり、失敗時に「では何なら
  * 動くのか」を一次情報として返すのが manifest 導入の目的の一部だから（ADR 0038 §5 / 0041 §8）。
- * manifest の構造が壊れていて列挙できない場合だけ空になる。
+ * 空になるのは列挙する材料が無い 2 つの場合だけ — ①manifest の構造が壊れていて列挙できない
+ * ②manifest をまだ取得できていない（revision 解決失敗・`karume.json` の 404 等）。
  */
 
 /**

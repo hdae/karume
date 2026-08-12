@@ -178,3 +178,12 @@ using p = await Sbv2Pipeline.fromPretrained("hdae/karume-sbv2-jvnv", {
   1 リポ = N export 出力の合流（共有畳み込み・rope 同一検査・manifest は全部揃ってからしか
   書けない）と、re-export ゼロでの組み替え（本 v2 移行がその実例）を失うため。
 - **ファミリー組み立ての defaultModel は最初の `--model`**（専用フラグは置かない）。
+
+## 追記（2026-08-12）— 規模上限に構造深さを追加
+
+網羅レビュー（H1-W1）で、manifest 1MiB 上限内でも深いネスト（数百 KB の `[[[[…]]]]`）が
+禁止キー検査の再帰を V8 スタック上限で落とし、**素の RangeError が HubError 契約から漏れる**
+ことを実測確認した（Deno 実測: `JSON.parse` は配列 52 万段まで通るが、同形の再帰 walk は
+約 2,400 段で落ちる）。決定 7 の規模上限へ**構造深さ ≤ 64** を追加し、超過は
+`ManifestFormatError`（fail loudly）とする。実マニフェストの深さは数段であり、64 は
+DoS 防波堤としての値。

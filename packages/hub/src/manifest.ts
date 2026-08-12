@@ -32,6 +32,15 @@ const MAX_WEIGHTS = 32;
 const MAX_ASSETS = 32;
 const MAX_QUANTS = 32;
 const MAX_PIPELINE_CONFIG_BYTES = 256 * 1024;
+/**
+ * manifest 全域走査の深さ上限。実在の manifest は envelope → models → weights → dtype →
+ * extras → file の 6 段前後（`pipelineConfig` の入れ子を足しても十数段）で足りる。一方
+ * 深さ検査が無いと、1MiB に収まる深いネストが `assertNoForbiddenKeys` の再帰でスタックを
+ * 食い潰し、素の `RangeError` として `HubError` 契約の外へ抜ける（Deno 実測: 素の walk は
+ * 配列 2,410 段で `RangeError`）。実用の要求より十分上・実測の破綻点よりはるか下に置き、
+ * 深すぎる manifest は `ManifestFormatError` として fail loudly させる。
+ */
+const MAX_MANIFEST_DEPTH = 64;
 /** 1 ファイルの上限バイト数（ADR 0038 §2 から据え置き）。 */
 const MAX_FILE_BYTES = 16 * 2 ** 30;
 /** hub が理解する `format` の major。未知 major は fail loudly（ADR 0041 §1）。 */
@@ -179,10 +188,17 @@ const createFail = (available: AvailableLabels): Fail => ({
 /**
  * manifest 全域から禁止キーを一掃する（`pipelineConfig` の内側も含む）。素通し先の実装が
  * 素朴な代入で読み直しても事故らないことを、hub の入口で一度だけ保証する。
+ *
+ * MUST: 深さを自前で数えて上限で落とす（{@link MAX_MANIFEST_DEPTH}）。スタックが尽きるまで
+ * 潜ると `RangeError` という `HubError` 契約外の型で抜ける — 想定外は型付きで fail loudly。
+ * これが parse の最初の全域走査なので、この門が下流の走査（`JSON.stringify` 等）も守る。
  */
-const assertNoForbiddenKeys = (value: unknown, where: string): void => {
+const assertNoForbiddenKeys = (value: unknown, where: string, depth: number): void => {
+  if (depth > MAX_MANIFEST_DEPTH) {
+    throw new ManifestFormatError(`${where}: 入れ子が上限 ${MAX_MANIFEST_DEPTH} 段を超えた`);
+  }
   if (Array.isArray(value)) {
-    value.forEach((entry, index) => assertNoForbiddenKeys(entry, `${where}[${index}]`));
+    value.forEach((entry, index) => assertNoForbiddenKeys(entry, `${where}[${index}]`, depth + 1));
     return;
   }
   if (!isRecord(value)) return;
@@ -190,7 +206,7 @@ const assertNoForbiddenKeys = (value: unknown, where: string): void => {
     if (FORBIDDEN_KEYS.includes(key)) {
       throw new ManifestFormatError(`${where}: 禁止キー '${key}' が現れた`);
     }
-    assertNoForbiddenKeys(value[key], `${where}.${key}`);
+    assertNoForbiddenKeys(value[key], `${where}.${key}`, depth + 1);
   }
 };
 
@@ -596,7 +612,7 @@ export const parseManifest = (text: string): Manifest => {
     throw new ManifestFormatError(`manifest: JSON として読めない`, { cause: error });
   }
   if (!isRecord(root)) throw new ManifestFormatError("manifest: 最上位がオブジェクトでない");
-  assertNoForbiddenKeys(root, "manifest");
+  assertNoForbiddenKeys(root, "manifest", 0);
 
   const available = surveyLabels(root);
   const fail = createFail(available);

@@ -202,6 +202,34 @@ Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
   });
 });
 
+Deno.test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエラーで落とす", async (t) => {
+  // 深さは**バイト数と独立**に伸びる（開き括弧の連続だけで数千段が数 KB）。深さ検査が無いと
+  // 全域走査の再帰がスタックを食い潰し、`ManifestFormatError` ではなく素の `RangeError` が
+  // 抜けて `instanceof HubError` の分岐から漏れる。ここはその型を観測値として固定する。
+  const nested = (depth: number): string => `${"[".repeat(depth)}${"]".repeat(depth)}`;
+  /** JSON.stringify の再帰を経由せずに深い配列を埋め込む（組み立て側でスタックを使わない）。 */
+  const withDeepConfig = (depth: number): string =>
+    withModel({ pipelineConfig: { deep: "@" } }).replace('"@"', nested(depth));
+
+  await t.step("素の再帰なら RangeError になる深さでも ManifestFormatError になる", () => {
+    const text = withDeepConfig(3000);
+    assert(new TextEncoder().encode(text).length < 1024 * 1024, "1MiB 未満で組めていない");
+    const error = assertThrows(() => parseManifest(text), ManifestFormatError);
+    assert(
+      error.message.includes("入れ子"),
+      `${error.message} が深さ超過を名指ししていない`,
+    );
+  });
+
+  await t.step("実用の入れ子（pipelineConfig 数段）は通る", () => {
+    // 上限を実用要求より下に置いてしまう退行の検出器（上限値そのものの下限を縛る）。
+    const manifest = parseManifest(
+      withModel({ pipelineConfig: { a: { b: { c: [[[1, 2], [3]]] } } } }),
+    );
+    assertEquals(manifest.models["m"].defaultQuant, "q");
+  });
+});
+
 Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラベルが載る", () => {
   const error = assertThrows(
     () =>
