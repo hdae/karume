@@ -391,7 +391,7 @@ def export_variant(
     }
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=MODEL_ID)
     parser.add_argument(
@@ -420,7 +420,7 @@ def main() -> None:
         help=f"書き出す層数（既定 {sorted(VARIANTS)}）",
     )
     parser.add_argument("--sym-max", type=int, default=SYM_MAX)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     # MUST: 活性 i8 は **i8 常駐重みの linear** にしか効かない（ADR 0025 決定 1）。f32 資産に
     # 対する鏡像は「ランタイムでは絶対に再現されない期待値」なので機械的に拒否する。
     if args.act_quant and args.dtype != "i8":

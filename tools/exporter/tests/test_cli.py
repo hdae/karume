@@ -85,6 +85,34 @@ class TestDispatch:
         assert loaded == [cli.EXPORT_EMBEDDINGGEMMA_SCRIPT]
         assert seen == [["--sym-max", "512"]]
 
+    @pytest.mark.parametrize(
+        ("command", "script"),
+        [
+            ("export-irodori", "EXPORT_IRODORI_SCRIPT"),
+            ("export-dacvae", "EXPORT_DACVAE_SCRIPT"),
+            ("export-deberta", "EXPORT_DEBERTA_SCRIPT"),
+        ],
+    )
+    def test_every_export_script_has_a_subcommand_of_its_own(
+        self, monkeypatch: pytest.MonkeyPatch, command: str, script: str
+    ) -> None:
+        """台本は 1 本残らずサブコマンド名で綴れる（cli.py の DECIDED）。
+
+        載っていない台本は `uv run python export_*.py` でしか呼べず、**同じ資産を作る道が
+        2 通りある**状態になる（片方だけが規約の更新から取り残される）。
+        """
+        seen: list[list[str]] = []
+        loaded: list[str] = []
+
+        def load(name: str) -> SimpleNamespace:
+            loaded.append(name)
+            return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
+
+        monkeypatch.setattr(cli, "load_script", load)
+        cli.main([command, "--out", "/tmp/series"])
+        assert loaded == [getattr(cli, script)]
+        assert seen == [["--out", "/tmp/series"]]
+
     def test_it_passes_help_through_to_the_body_parser(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -121,7 +149,17 @@ class TestExportScript:
         module = cli.load_script(cli.EXPORT_SCRIPT)
         assert callable(module.main)
 
-    @pytest.mark.parametrize("script", ["EXPORT_SCRIPT", "EXPORT_SBV2_SCRIPT"])
+    @pytest.mark.parametrize(
+        "script",
+        [
+            "EXPORT_SCRIPT",
+            "EXPORT_SBV2_SCRIPT",
+            "EXPORT_EMBEDDINGGEMMA_SCRIPT",
+            "EXPORT_IRODORI_SCRIPT",
+            "EXPORT_DACVAE_SCRIPT",
+            "EXPORT_DEBERTA_SCRIPT",
+        ],
+    )
     def test_every_export_script_takes_argv(self, script: str) -> None:
         """台本は 1 本残らず `main(argv)` を受ける（`argv` 無しの main は CLI に載らない）。"""
         module = cli.load_script(getattr(cli, script))

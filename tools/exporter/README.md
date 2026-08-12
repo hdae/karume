@@ -19,12 +19,16 @@ everything after the subcommand name is passed straight to the body (`karume <su
 prints the usage of the body's own parser). This shape keeps a copy of the exclusivity rules
 (`--verify` × `--target` etc.) out of the CLI; dispatch is a lazy import.
 
-| Subcommand           | Wrapped body                                                                | Former invocation        |
-| -------------------- | --------------------------------------------------------------------------- | ------------------------ |
-| `karume export`      | script `export_anima.py` (the 4 emit targets of ADR 0016)                   | `python export_anima.py` |
-| `karume export-sbv2` | script `export_sbv2.py` (the 5 emit targets of ADR 0013)                    | `python export_sbv2.py`  |
-| `karume dist`        | `karume.dist` (assembles the distribution form; arguments fully compatible) | `python -m karume.dist`  |
-| `karume verify`      | `karume.verify` (validates the distribution form against every IR v1 rule)  | (new)                    |
+| Subcommand                     | Wrapped body                                                                | Former invocation                 |
+| ------------------------------ | --------------------------------------------------------------------------- | --------------------------------- |
+| `karume export`                | script `export_anima.py` (the 4 emit targets of ADR 0016)                   | `python export_anima.py`          |
+| `karume export-sbv2`           | script `export_sbv2.py` (the 5 emit targets of ADR 0013)                    | `python export_sbv2.py`           |
+| `karume export-embeddinggemma` | script `export_embeddinggemma.py` (the sentence-embedding series)           | `python export_embeddinggemma.py` |
+| `karume export-irodori`        | script `export_irodori.py` (the 6 text-side graphs of the TTS chain)        | `python export_irodori.py`        |
+| `karume export-dacvae`         | script `export_dacvae.py` (the 2 DACVAE codec graphs)                       | `python export_dacvae.py`         |
+| `karume export-deberta`        | script `export_deberta.py` (the real-weight DeBERTa-v2 series)              | `python export_deberta.py`        |
+| `karume dist`                  | `karume.dist` (assembles the distribution form; arguments fully compatible) | `python -m karume.dist`           |
+| `karume verify`                | `karume.verify` (validates the distribution form against every IR v1 rule)  | (new)                             |
 
 Which script runs is spelled in the **subcommand name**, never in a flag: `karume export --pipeline
 sbv2` would mean the CLI reads one argument of its own, and the no-copy rule above does not survive
@@ -38,9 +42,11 @@ uv run karume dist --pipeline sbv2 --card-profile jvnv --model F1 --model F2 \
 uv run karume verify ../../models/karume-anima-turbo/anima-turbo/transformer/model.f16.safetensors
 ```
 
-The scripts are **outside** the package, so they are not in the wheel — `karume export` /
-`karume export-sbv2` only run in a repository working tree (when absent they spell out where the
-script belongs and fail loudly).
+The scripts are **outside** the package, so they are not in the wheel — every `karume export…`
+subcommand only runs in a repository working tree (when absent they spell out where the script
+belongs and fail loudly). The bodies that live in the package (`dist` / `verify`) have no such
+restriction. Scripts that need extra dependencies keep taking them from `uv run --with …`, exactly
+as in the recipes further down.
 
 `--model` names the model to assemble (it moves the series it reads, the subtree it writes and the
 key it declares in the manifest). Repeating it assembles **one repository holding several models**

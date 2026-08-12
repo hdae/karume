@@ -45,6 +45,15 @@ EXPORT_SBV2_SCRIPT = "export_sbv2"
 #: `karume export-embeddinggemma` が包む台本（文埋め込み 1 系列を書き出す側）。
 EXPORT_EMBEDDINGGEMMA_SCRIPT = "export_embeddinggemma"
 
+#: `karume export-irodori` が包む台本（TTS のテキスト〜DiT 6 グラフを書き出す側）。
+EXPORT_IRODORI_SCRIPT = "export_irodori"
+
+#: `karume export-dacvae` が包む台本（Irodori のコーデック 2 グラフを書き出す側）。
+EXPORT_DACVAE_SCRIPT = "export_dacvae"
+
+#: `karume export-deberta` が包む台本（実重み DeBERTa-v2 の系列を書き出す側）。
+EXPORT_DEBERTA_SCRIPT = "export_deberta"
+
 
 def load_script(name: str) -> ModuleType:
     """リポジトリ直下の台本をパス指定で読み込む。
@@ -81,6 +90,18 @@ def run_export_embeddinggemma(argv: Sequence[str]) -> None:
     return load_script(EXPORT_EMBEDDINGGEMMA_SCRIPT).main(argv)
 
 
+def run_export_irodori(argv: Sequence[str]) -> None:
+    return load_script(EXPORT_IRODORI_SCRIPT).main(argv)
+
+
+def run_export_dacvae(argv: Sequence[str]) -> None:
+    return load_script(EXPORT_DACVAE_SCRIPT).main(argv)
+
+
+def run_export_deberta(argv: Sequence[str]) -> None:
+    return load_script(EXPORT_DEBERTA_SCRIPT).main(argv)
+
+
 def run_dist(argv: Sequence[str]) -> None:
     from karume import dist
 
@@ -103,6 +124,18 @@ COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     "export-embeddinggemma": (
         run_export_embeddinggemma,
         "EmbeddingGemma を IR v1 + golden io へ書き出す（台本 export_embeddinggemma.py）",
+    ),
+    "export-irodori": (
+        run_export_irodori,
+        "Irodori-TTS のテキスト〜DiT を IR v1 + golden io へ書き出す（台本 export_irodori.py）",
+    ),
+    "export-dacvae": (
+        run_export_dacvae,
+        "Irodori のコーデック（DACVAE）を IR v1 + golden io へ書き出す（台本 export_dacvae.py）",
+    ),
+    "export-deberta": (
+        run_export_deberta,
+        "実重み DeBERTa-v2 を IR v1 + golden io へ書き出す（台本 export_deberta.py）",
     ),
     "dist": (run_dist, "配布ディレクトリを組み立てて karume.json / README.md を書く"),
     "verify": (run_verify, "配布形 safetensors を IR v1 の全規則で検証する"),
