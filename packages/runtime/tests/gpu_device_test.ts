@@ -9,6 +9,7 @@ import {
 import {
   acquireGpu,
   assertLimitsGranted,
+  assertShaderF16Executes,
   GpuDeviceLostError,
   GpuFeatureError,
   GpuLimitError,
@@ -171,6 +172,85 @@ Deno.test({
       enabled.destroy();
     }
   },
+});
+
+/**
+ * カナリアが触る面（バッファ 2 本・パイプライン生成・1 dispatch・読み戻し）だけのフェイク
+ * device。不一致経路と消失経路は実 GPU では作れない（前者は `denoland/deno#23125` の環境が、
+ * 後者は実行中の TDR が要る）ので、この 2 つはここでしか固定できない。
+ */
+const canaryDevice = (parts: {
+  /** 読み戻しで観測させる f32 値。**未指定なら mapAsync は永久に解決しない**（消失後の実挙動）。 */
+  readonly mapped?: readonly number[];
+  /** true なら popErrorScope が解決しない（消失がパイプライン生成中に起きた形）。 */
+  readonly hangValidation?: boolean;
+  readonly lost?: Promise<GPUDeviceLostInfo>;
+} = {}): GPUDevice => {
+  const buffer = {
+    destroy: (): void => {},
+    unmap: (): void => {},
+    getMappedRange: (): ArrayBuffer => new Float32Array(parts.mapped ?? []).buffer,
+    mapAsync: (): Promise<void> =>
+      parts.mapped === undefined ? new Promise<void>(() => {}) : Promise.resolve(),
+  };
+  const pass = {
+    setPipeline: (): void => {},
+    setBindGroup: (): void => {},
+    dispatchWorkgroups: (): void => {},
+    end: (): void => {},
+  };
+  return {
+    lost: parts.lost ?? new Promise<GPUDeviceLostInfo>(() => {}),
+    createBuffer: () => buffer,
+    createShaderModule: () => ({}),
+    createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }),
+    createBindGroup: () => ({}),
+    createCommandEncoder: () => ({
+      beginComputePass: () => pass,
+      copyBufferToBuffer: (): void => {},
+      finish: () => ({}),
+    }),
+    pushErrorScope: (): void => {},
+    popErrorScope: (): Promise<GPUError | null> =>
+      parts.hangValidation === true
+        ? new Promise<GPUError | null>(() => {})
+        : Promise.resolve(null),
+    queue: { submit: (): void => {} },
+  } as unknown as GPUDevice;
+};
+
+/** カナリアの既知解（共有 f16 タイル往復の RTNE 合計 / 定数式の f16 セマンティクス）。 */
+const CANARY_SOLUTION = [4.0029296875, 1] as const;
+
+/** 決着済みの消失（`reason` はカナリアの分岐に使われないため固定値でよい）。 */
+const loss = (): Promise<GPUDeviceLostInfo> =>
+  Promise.resolve({ reason: "destroyed", message: "テストによる消失" });
+
+Deno.test("shader-f16 カナリアは既知解と一致したときだけ通る", async () => {
+  await assertShaderF16Executes(canaryDevice({ mapped: CANARY_SOLUTION }));
+
+  // denoland/deno#23125 の沈黙全 0 と、丸めが起きない実装（共有タイルの素通り）
+  for (const observed of [[0, 0], [4.00146484375, 1]]) {
+    const error = await assertRejects(
+      () => assertShaderF16Executes(canaryDevice({ mapped: observed })),
+      GpuFeatureError,
+    );
+    assert(error.message.includes("既知解と一致しない"), error.message);
+  }
+});
+
+Deno.test("shader-f16 カナリアは device 消失で待ち続けずに落ちる（acquireGpu をハングさせない）", async () => {
+  // 消失後は mapAsync も popErrorScope も解決しない（仕様が許す実挙動）。競わせていない待ちが
+  // 1 つでも残っていると、この await が永久に返らずテストがタイムアウトする。
+  const readback = assertShaderF16Executes(canaryDevice({ lost: loss() }));
+  const readbackError = await assertRejects(() => readback, GpuDeviceLostError);
+  assert(readbackError.message.includes("読み戻し"), readbackError.message);
+
+  const validation = assertShaderF16Executes(
+    canaryDevice({ mapped: CANARY_SOLUTION, hangValidation: true, lost: loss() }),
+  );
+  const validationError = await assertRejects(() => validation, GpuDeviceLostError);
+  assert(validationError.message.includes("パイプライン生成"), validationError.message);
 });
 
 Deno.test("readAdapterInfo は info を持たないアダプタでも安全な空値に正規化する", () => {

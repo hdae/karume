@@ -261,7 +261,40 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 /** カナリアの期待値（① 共有 f16 タイル経由の RTNE / ② 定数式の f16 セマンティクス）。 */
 const SHADER_F16_CANARY_EXPECTED: readonly number[] = [4.0029296875, 1];
 
-const assertShaderF16Executes = async (device: GPUDevice): Promise<void> => {
+/**
+ * カナリア区間**ローカル**の消失レース。`work` の決着と `device.lost` を競わせ、消失が先なら
+ * {@link GpuDeviceLostError} にする。
+ *
+ * MUST: カナリアの待ちは 1 つ残らずここを通す。device 消失後 `popErrorScope` / `mapAsync` は
+ * 解決しない（{@link GpuContext.raceDeviceLost} の doc と同じ事実）ので、競わせないと
+ * `acquireGpu()` が例外ではなく**ハングで返ってこない**。
+ *
+ * MUST NOT: この形を待ちの多い層へ持ち出さない。`device.lost.then(...)` は解除手段の無い
+ * reaction なので、flush / readback のような繰り返す待ちに張ると単調増加する（購読の一本化は
+ * {@link GpuContext.onLost} の責務）。カナリアは `GpuContext` 生成**前**に 1 回だけ走り、
+ * 積むのは取得 1 回あたり数本なので、ここに限って直に競わせてよい。
+ */
+const raceCanaryDeviceLost = <T>(
+  device: GPUDevice,
+  work: Promise<T>,
+  where: string,
+): Promise<T> =>
+  Promise.race([
+    work,
+    device.lost.then((): never => {
+      throw new GpuDeviceLostError(
+        `shader-f16 カナリアの${where}中に device が失われた（再構築が必要）`,
+      );
+    }),
+  ]);
+
+/**
+ * カナリア本体（{@link SHADER_F16_CANARY_WGSL} の実走と突合）。
+ *
+ * NOTE: `export` はテストのため（不一致経路と消失経路は実 GPU では作れない）。公開面は
+ * mod.ts の明示列挙なので、ここでの export は API 面を広げない（ADR 0008）。
+ */
+export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> => {
   const byteLength = SHADER_F16_CANARY_EXPECTED.length * 4;
   const out = device.createBuffer({
     size: byteLength,
@@ -272,17 +305,21 @@ const assertShaderF16Executes = async (device: GPUDevice): Promise<void> => {
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   try {
-    const pipeline = await withValidationScope(
+    const pipeline = await raceCanaryDeviceLost(
       device,
-      "shader-f16 カナリア",
-      () =>
-        device.createComputePipeline({
-          layout: "auto",
-          compute: {
-            module: device.createShaderModule({ code: SHADER_F16_CANARY_WGSL }),
-            entryPoint: "main",
-          },
-        }),
+      withValidationScope(
+        device,
+        "shader-f16 カナリア",
+        () =>
+          device.createComputePipeline({
+            layout: "auto",
+            compute: {
+              module: device.createShaderModule({ code: SHADER_F16_CANARY_WGSL }),
+              entryPoint: "main",
+            },
+          }),
+      ),
+      "パイプライン生成",
     );
     const bindGroup = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
@@ -296,7 +333,7 @@ const assertShaderF16Executes = async (device: GPUDevice): Promise<void> => {
     pass.end();
     encoder.copyBufferToBuffer(out, 0, staging, 0, byteLength);
     device.queue.submit([encoder.finish()]);
-    await staging.mapAsync(GPUMapMode.READ);
+    await raceCanaryDeviceLost(device, staging.mapAsync(GPUMapMode.READ), "読み戻し");
     const observed = [...new Float32Array(staging.getMappedRange().slice(0))];
     staging.unmap();
     const matches = SHADER_F16_CANARY_EXPECTED.every((value, index) => observed[index] === value);
