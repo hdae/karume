@@ -256,12 +256,27 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   **カーネルを持つ**（`conv2d` は Anima の VAE decoder で実測に出た）。`rms_norm` だけは
   **供給ルートが 2 系統**ある: ①diffusers `nn.RMSNorm` 由来の `aten.rms_norm` は保存リスト
   経由でそのまま 1 ノードになる ②Qwen3 / DiT の手書き分解形は保存では畳めないので、
-  エクスポータの畳み込みパス（`_fold_rms_norm`）が 1 ノードへ合成する（ADR 0016 / 0017）:
+  エクスポータの畳み込みパス（`_fold_rms_norm`）が 1 ノードへ合成する（ADR 0016 / 0017）。
+  **融合 `attention`（perf-a）は既定の 11 本に入らない**: SDPA の保存はグローバルに掛けると
+  契約外のマスクを持つ形まで拾って export できなくなるため、**ターゲット別の opt-in**にして
+  ある（ADR 0023 追記）:
   - `linear`（f32、attrs 無し、**アリティ 3 固定**）— `x[…,in] × W[out,in] + b[out]`。
     重みは `[out, in]` の転置レイアウトのまま。bias 無しの形は語彙に無い
   - `layer_norm`（f32、attrs `normalized_shape` / `eps`、**アリティ 3 固定**）— 最終次元のみ
     （`normalized_shape` は長さ 1）、affine 常時あり。分散は**母分散（correction = 0）**、
     `eps` は有限の正数
+  - `attention`（f32、attrs `scale`、**アリティ 3 か 4**）— `out = softmax_lastdim((q·scale) @
+    (k·scale)ᵀ + mask) @ v`（ADR [0023](decisions/0023-fused-attention.md)）。入力は
+    **rank-4 head-first**（`q[B,H,M,D]` / `k[B,H,N,D]` / `v[B,H,N,D]`・連続）で出力は
+    `[B,H,M,D]`。**D は 3 者とも同じ**（v 側だけ別の長さを許すと「D を取り違えた IR」が
+    shape 検査を素通りする）。**`scale` は半スケール** = q と k の**両方**に掛かる
+    `√scale_factor`（torch の `_scaled_dot_product_attention_math` と同じ形。内積の後に
+    1 度だけ掛ける形へ変えると丸め列が変わり、分解経路とのビット同一が失われる）。
+    省略可能な第 4 入力は**加算 mask**（f32・rank-4・shape はちょうど `[1,1,M,N]`）で、
+    B·H の全バッチへ broadcast する。`[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 は受理せず、
+    causal / dropout / GQA は語彙に無い。行が全て −inf になるマスクは**契約違反**（NaN 汚染 —
+    検査は入れない。その形が正規なのは `safe_softmax` を使う分解経路だけ。ADR
+    [0044](decisions/0044-runtime-attention-mask.md) 決定 3）
   - `rms_norm`（f32、attrs `eps`、**アリティ 2 固定**）—
     `y = x · rsqrt(mean(x², 最終次元) + eps) · weight`。**bias が無く、平均も引かない**
     （layer_norm との差はこの 2 点）。正規化長の正本は **weight の長さ**で、

@@ -163,10 +163,13 @@ export const FLIP_OP = "flip";
 export const SYM_PREFIX_SLICE_OP = "sym_prefix_slice";
 
 /**
- * 融合 op（ADR 0012 / ADR 0015 / ADR 0017）。ADR 0007 の「分解禁止 10 op」は全て
- * カーネルを持つ（`conv2d` は Anima の VAE decoder で実測に出た — ADR 0017）。
- * `rms_norm` は保存リストの外から入った 1 本目（Qwen3 / DiT は手書き分解形なので
- * エクスポータの畳み込みパスが作る — ADR 0016）。
+ * 融合 op（ADR 0012 / ADR 0015 / ADR 0017）。ADR 0007 起点の「分解禁止」リスト（**現行 12 op** —
+ * 台帳の正本は docs/op-vocabulary.md。`leaky_relu` で 10・`rms_norm` で 11・
+ * `scaled_dot_product_attention` で 12）は全てカーネルを持つ（`conv2d` は Anima の VAE decoder で
+ * 実測に出た — ADR 0017）。`rms_norm` は**保存だけでは供給しきれない** 1 本目で、手書き分解形
+ * （Qwen3 / DiT）はエクスポータの畳み込みパスが 1 ノードへ合成する（供給ルート 2 系統 —
+ * ADR 0016 / 0017）。12 本目の attention だけはエクスポータの**既定の保存リストに載らない**
+ * （ターゲット別の opt-in — 理由は op-vocabulary.md）。
  *
  * MUST: 受理制約は IR の語彙ではなく**この契約表 + 明確な診断**で表す（ADR 0007）。
  * 「実測に出た形しか通さない」を IR スキーマ側に彫ると、形を広げるたびに配布形の非互換

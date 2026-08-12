@@ -77,7 +77,8 @@ export type RuntimeSupport = {
  * `i32` だけが生の int32（ADR 0010 の明示的な例外）。
  *
  * NOTE: この表は「宣言と実テンソルの突合」専用で、実行できるかどうかとは別軸
- * （実行可否は {@link RuntimeSupport.storage} — 現状 f32 / f16 / i32）。
+ * （実行可否の正本は {@link RuntimeSupport.storage} の実値 = src/ops.ts の `RUNTIME_SUPPORT`。
+ * ここで数え上げると同じ事実を 2 箇所で持つことになり、増えたときに片方だけ腐る）。
  */
 const STORAGE_ENCODING: Readonly<Record<IrStorageDtype, SafetensorsDtype>> = {
   f32: "F32",
