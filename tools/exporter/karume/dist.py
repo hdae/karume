@@ -8,7 +8,7 @@
 （ADR 0041 §9）。単一モデルのリポも同じ規則で `<モデル名>/…` の下へ入る — 1 モデルだけ平置き
 という例外を作ると、2 個目のモデルを足した瞬間に既存 path が全部動く。
 
-**pipeline 別のディスパッチ**（`--pipeline anima|sbv2`）と**モデル別の軸**（`--model`）。
+**pipeline 別のディスパッチ**（`--pipeline anima|sbv2|irodori`）と**モデル別の軸**（`--model`）。
 共有するのは「置く / sha256 を採る / 共有ファイルを畳む / 宣言と現物を突き合わせる」層だけで、
 どのファイルをどの名前で並べ何を宣言するかは pipeline ごとの表が持つ（{@link PIPELINES}）。
 
@@ -32,6 +32,7 @@ MUST: 検査（格納 dtype / rope 素表のバイト同一 / スタイル表・
 
     uv run karume dist                                    # = uv run python -m karume.dist
     uv run karume dist --pipeline sbv2 --card-profile fn
+    uv run karume dist --pipeline irodori                 # → models/karume-irodori-v4-small/
     uv run karume dist --pipeline sbv2 --card-profile jvnv \\
         --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 
@@ -63,6 +64,7 @@ from karume.ir import IR_METADATA_KEY
 from karume.modelcard import (
     HF_OWNER,
     SBV2_CARD_PROFILES,
+    render_irodori_model_card,
     render_model_card,
     render_sbv2_model_card,
 )
@@ -1282,7 +1284,379 @@ def sbv2_plan(
     )
 
 
-# ---- ⑤ pipeline 別ディスパッチと CLI -----------------------------------------
+# ---- ⑤ Irodori（text-to-speech / latent 出口）--------------------------------
+#
+# 配布するのは**実行に要る 6 グラフ + tokenizer 資産 1 本**だけ。波形へ落とす codec（DACVAE）は
+# 別リポ・別重みで、この配布形が出せるのは patch 済み latent まで（ADR 0047 の実行形をホストが
+# そのまま駆動する）。実行形ノブは持たない — 格納形は f32 の 1 本きりで、quant は `f32` の
+# 1 席だけが並ぶ（`session` は空 = 低精度ノブなし）。
+#
+# `pipelineConfig` は 2 系統に割れる: **モデル固有の数**（条件 state の宣言長・話者行数・
+# latent 幅・t_embed 幅）はチェックポイントの config から導出し、**実行時ノブ**（step 数・
+# CFG の強さと区間・秒数の clamp）は上流 `SamplingRequest` の既定を定数として持つ。前者は
+# 焼き込むと重みを差し替えたときにホストだけが古い数を持って沈黙誤値になるので、必ず導出する
+# （TS 側の正本 `packages/models/src/irodori/config.ts` のモジュール doc と同じ理由）。
+
+#: 既定のモデル名 — 系列（`outputs/series/irodori-<この名前>/`）と実重みの置き場
+#: （`inputs/irodori/<この名前>/`）を束ねる 1 語。`irodori_tokenizer.default_out_dir` が
+#: `--model-dir` のディレクトリ名から系列名を作るので、読み手のこちらも同じ 1 語から組む。
+IRODORI_DEFAULT_MODEL = "v4-small"
+
+#: 系列名とリポ名の接頭辞（`irodori-<モデル名>`）。
+IRODORI_SERIES_PREFIX = "irodori"
+
+#: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
+#: `IRODORI_PIPELINE_NAME` / `IRODORI_PIPELINE_MAJOR`。
+IRODORI_PIPELINE = "irodori/1"
+
+#: チェックポイント（`inputs/irodori/<モデル名>/`）のファイル名と、`__metadata__` が持つ
+#: config の綴り。どちらも `export_irodori.py`（`MODEL_FILE` / `MODEL_CONFIG_META_KEY`）と同じ
+#: — 重みが実際に構成されたときの形の正本はチェックポイントの中にある（HF から引き直さない）。
+IRODORI_CKPT_FILE = "model.safetensors"
+IRODORI_CONFIG_META_KEY = "config_json"
+
+#: 役割名 → 系列のターゲットディレクトリ名（`export_irodori.TARGETS` の綴り）。役割名は
+#: manifest の weights / assets キーでもあるので、ハイフン綴りの系列名とはここで縁を切る。
+IRODORI_SERIES_DIRS: Mapping[str, str] = {
+    "backbone": "backbone",
+    "text_proj": "text-proj",
+    "caption_proj": "caption-proj",
+    "speaker": "speaker",
+    "duration": "duration",
+    "dit": "dit",
+}
+
+#: tokenizer 資産の出所（`irodori_tokenizer.py` が系列の下へ書く 4 ファイルのうち、配布へ入る
+#: のは資産本体だけ — golden / nfkc 表は検証用で実行に要らない）。
+IRODORI_TOKENIZER_DIR = "tokenizer"
+IRODORI_TOKENIZER_FILE = "tokenizer.json"
+
+#: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
+IRODORI_OUTPUT_PATHS: Mapping[str, str] = {
+    **{role: f"{role}/model.safetensors" for role in IRODORI_SERIES_DIRS},
+    "tokenizer": f"{IRODORI_TOKENIZER_DIR}/{IRODORI_TOKENIZER_FILE}",
+}
+
+#: 格納 dtype の要求（Anima / SBV2 と同じ根拠 — 素の F32 資産が組み立て・ロード・実行を全て
+#: 通って参照一致の門まで沈黙した実測事故）。Irodori は f32 系列 1 本だけを配るので、6 グラフ
+#: 全てに F32 を要求する（tokenizer は JSON なので載せない）。
+IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = dict.fromkeys(IRODORI_SERIES_DIRS, "F32")
+
+#: weights の宣言（dtype ラベル → 役割名）。1 dtype しか無い席も**dtype キー必須**の統一形
+#: （ADR 0041 §3）。
+IRODORI_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
+    role: {"f32": WeightFiles(role)} for role in IRODORI_SERIES_DIRS
+}
+
+#: assets の宣言（quant 選択に依存しない無条件ファイル）。
+IRODORI_ASSETS: Mapping[str, str] = {"tokenizer": "tokenizer"}
+
+#: quant 表。dtype が 1 つしかない weights は書かない（{@link complete_quant_weights} が完全
+#: 写像へ埋める）。実行形ノブがまだ 1 つも無い（f32 の素の経路だけ）ので `session` は空で、
+#: 席は 1 つきり — 低精度の軸が生えたらここに並ぶ。
+IRODORI_QUANTS: Mapping[str, Any] = {"f32": {"weights": {}, "session": {}}}
+
+IRODORI_DEFAULT_QUANT = "f32"
+
+#: DACVAE のフレームレート（Hz）— 48kHz / hop 1920 = 25。`export_irodori.CODEC_FRAME_RATE` と
+#: 同値で、コーデックが別リポ・別重みなのでチェックポイントの config には入っていない。
+IRODORI_FRAME_RATE = 25
+
+#: 発話長 clamp の秒数（上流 `SamplingRequest.min_seconds` / `max_seconds` の既定）。
+#: `max_seconds` は **`dit` の記号次元 S の上限を決めた値でもある**
+#: （`export_irodori.DIT_MAX_SECONDS` が同じ 30.0 を「実装側の正本は SamplingRequest の既定」
+#: として持つ）。1 つの定数から両方を組むのは、配布形の clamp と焼かれたグラフの上限が
+#: 独立に動くと「S は通るのに RoPE 表が足りない」形で実行時にしか出ないため。
+IRODORI_MIN_SECONDS = 0.5
+IRODORI_MAX_SECONDS = 30.0
+
+#: 実行時ノブの既定（上流 `SamplingRequest` の同名フィールドと `rf.sample_euler_rf_cfg` の
+#: `init_scale`）。**モデル固有ではない**のでチェックポイントの config には無く、ここが唯一の
+#: 出どころになる（Anima の {@link ANIMA_PIPELINE_CONFIG} と同じ性格）。
+#:
+#: MUST: `speakerUncondMode` / `cfgGuidanceMode` は分岐用ではなく**宣言**（ADR 0047 決定 1）。
+#: TS 側はこの 2 値以外を parse 時に拒否するので、別のモードで焼いた配布形は読まれる前に落ちる。
+#: full-loop golden（`irodori_pipeline.py` の `meta.json`）も同じ値で焼かれており、golden 再生成
+#: と dist 再生成がずれたら E2E 門（`e2e_irodori_latent_test.ts`）が実効値 drift として落とす。
+IRODORI_SAMPLING_DEFAULTS: Mapping[str, Any] = {
+    "steps": 40,
+    "initScale": 0.999,
+    "cfgMinT": 0.5,
+    "cfgMaxT": 1.0,
+    "cfgScales": {"text": 3.0, "speaker": 5.0, "caption": 3.0},
+    "minSeconds": IRODORI_MIN_SECONDS,
+    "maxSeconds": IRODORI_MAX_SECONDS,
+    "speakerUncondMode": "mask",
+    "cfgGuidanceMode": "independent",
+}
+
+#: 各グラフに要求する `(入力名の並び, 出力の本数)`。**入力の並びは実行時に位置で読まれる形の
+#: 正本**で、出力本数は「検証用の別資産が混ざっていないか」を見る席（SBV2 の
+#: {@link assert_bert_hidden} と同じ機序 — `caption_proj` が 1 出力の資産に差し替わると
+#: `caption_vec` を第 1 出力から採る別のベクトルで duration が回り、shape は合ったまま沈黙する）。
+IRODORI_GRAPH_SHAPES: Mapping[str, tuple[tuple[str, ...], int]] = {
+    "backbone": (("input_ids",), 1),
+    "text_proj": (("hidden",), 1),
+    "caption_proj": (("hidden",), 2),
+    "speaker": (("latent",), 1),
+    "duration": (
+        ("text_state", "speaker_vec", "has_speaker", "caption_vec", "has_caption"),
+        1,
+    ),
+    "dit": (("x_t", "t_embed", "mask", "text_state", "speaker_state", "caption_state"), 1),
+}
+
+#: `(役割, グラフ入力, 軸, pipelineConfig の欄)` — グラフの**静的**次元と宣言の突合表。
+#: TS 側 `IrodoriPipeline.fromAssets` の `assertStaticDim` と同じ組み合わせを**焼く側でも**
+#: 見る（配ってから利用者の手元で初めて落ちる形にしない）。
+IRODORI_STATIC_DIMS: tuple[tuple[str, str, int, str], ...] = (
+    ("dit", "x_t", 2, "latentDim"),
+    ("dit", "t_embed", 1, "timestepEmbedDim"),
+    ("dit", "text_state", 1, "maxTextLen"),
+    ("dit", "text_state", 2, "textDim"),
+    ("dit", "speaker_state", 1, "speakerRows"),
+    ("dit", "speaker_state", 2, "speakerDim"),
+    ("dit", "caption_state", 1, "maxCaptionLen"),
+    ("dit", "caption_state", 2, "captionDim"),
+    ("duration", "text_state", 2, "textDim"),
+    ("duration", "speaker_vec", 1, "speakerDim"),
+    ("duration", "caption_vec", 1, "captionDim"),
+)
+
+
+def irodori_series_name(model: str) -> str:
+    """系列名（`outputs/series/<この名前>/`）— `irodori_tokenizer.default_out_dir` と同じ綴り。"""
+    return f"{IRODORI_SERIES_PREFIX}-{model}"
+
+
+def irodori_repo_name(model: str) -> str:
+    """単一モデルの配布リポ名（`karume-` prefix はリポ名裁定 2026-08-09）。"""
+    return f"karume-{IRODORI_SERIES_PREFIX}-{model}"
+
+
+@dataclass(frozen=True)
+class IrodoriSources:
+    """組み立ての入力。系列 1 本と、チェックポイントの置き場（`inputs/` — 生成物ではない）。
+
+    後者が要るのは `pipelineConfig` のモデル固有の数を**チェックポイントの config から導出**
+    するため（`__metadata__` だけを読むので 2.9GB のペイロードは舐めない）。
+    """
+
+    series: Path
+    model: Path
+
+
+def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> IrodoriSources:
+    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
+    return IrodoriSources(
+        series=series_dir / irodori_series_name(model),
+        model=INPUTS_ROOT / IRODORI_SERIES_PREFIX / model,
+    )
+
+
+def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
+    """役割名 → 出所のファイル。出力の path は {@link IRODORI_OUTPUT_PATHS} が持つ。
+
+    この表に無いものは出力へ入らない（`io.*.safetensors` と tokenizer の golden 3 本は
+    これで落ちる）。
+    """
+    return {
+        **{
+            role: sources.series / directory / "model.safetensors"
+            for role, directory in IRODORI_SERIES_DIRS.items()
+        },
+        "tokenizer": sources.series / IRODORI_TOKENIZER_DIR / IRODORI_TOKENIZER_FILE,
+    }
+
+
+def irodori_model_config(model_dir: Path) -> Mapping[str, Any]:
+    """チェックポイントの `__metadata__` から `config_json` を読む（ヘッダだけ読む）。
+
+    `export_irodori.read_configs` と同じ出どころ・同じ理由（HF から config を引き直さない）。
+    こちらが torch を経由しないのは、組み立てが要るのが JSON 1 本だけだから。
+    """
+    path = model_dir / IRODORI_CKPT_FILE
+    if not path.is_file():
+        raise DistError(f"組み立ての入力が無い: {path}")
+    metadata = safetensors_header(path).get("__metadata__")
+    if not isinstance(metadata, dict) or IRODORI_CONFIG_META_KEY not in metadata:
+        raise DistError(f"{path} の __metadata__ に '{IRODORI_CONFIG_META_KEY}' が無い")
+    try:
+        config = json.loads(metadata[IRODORI_CONFIG_META_KEY])
+    except json.JSONDecodeError as error:
+        raise DistError(f"{path}: {IRODORI_CONFIG_META_KEY} が JSON として読めない") from error
+    if not isinstance(config, dict):
+        raise DistError(f"{path}: {IRODORI_CONFIG_META_KEY} が最上位オブジェクトでない")
+    return config
+
+
+def _irodori_int(config: Mapping[str, Any], key: str) -> int:
+    """チェックポイント config の整数フィールド（宣言長 / 幅）を検査して読む。"""
+    value = config.get(key)
+    # bool は int の派生。`"latent_dim": true` を 1 として通すと幅の突合が緩む。
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise DistError(f"{IRODORI_CONFIG_META_KEY} の {key} が正の整数でない（{value!r}）")
+    return value
+
+
+def _irodori_float(config: Mapping[str, Any], key: str) -> float:
+    """チェックポイント config の実数フィールド（秒数）を検査して読む。"""
+    value = config.get(key)
+    if not isinstance(value, int | float) or isinstance(value, bool) or value <= 0:
+        raise DistError(f"{IRODORI_CONFIG_META_KEY} の {key} が正の数でない（{value!r}）")
+    return float(value)
+
+
+def irodori_pipeline_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """`pipelineConfig`（TS 側スキーマの 20 欄）をチェックポイント config から組む。
+
+    MUST: モデル固有の数を写経しない — 重みを差し替えたときにホストだけが古い数を持つと、
+    右 pad も行数計算もそのまま通って（shape は合う）**別の位置の条件を読んだ**結果が沈黙で出る。
+    欄名と値域の正本は `packages/models/src/irodori/config.ts`。
+
+    `latentDim` が 2 つの役割（`dit` の `x_t` の幅 = `latent_dim × latent_patch_size` と、
+    参照 latent の 1 フレームの幅 = `latent_dim`）を兼ねているので、両者が一致する
+    `latent_patch_size == 1` でなければ組めない — 兼ねられなくなったら TS 側の欄を割る話に
+    なるので、黙って片方を選ばずここで落とす。
+    """
+    latent_patch = _irodori_int(config, "latent_patch_size")
+    if latent_patch != 1:
+        raise DistError(
+            f"latent_patch_size が {latent_patch} — pipelineConfig の latentDim は"
+            " `dit` の x_t 幅と参照 latent の 1 フレーム幅を兼ねており、1 でなければ"
+            "両者が一致しない（TS 側の欄を割る変更が要る）"
+        )
+    frames = int(_irodori_float(config, "ref_max_seconds") * IRODORI_FRAME_RATE)
+    speaker_patch = _irodori_int(config, "speaker_patch_size")
+    return {
+        "maxTextLen": _irodori_int(config, "max_text_len"),
+        "maxCaptionLen": _irodori_int(config, "max_caption_len"),
+        # 参照 latent の patch 後の上限（`export_irodori.speaker_sym_max`）+ 平均トークン 1 本。
+        "speakerRows": frames // speaker_patch + 1,
+        # 生成できる latent の上限（`export_irodori.dit_sym_max` と同じ式）。
+        "ditSymMax": int(IRODORI_MAX_SECONDS * IRODORI_FRAME_RATE) // latent_patch,
+        "frameRate": IRODORI_FRAME_RATE,
+        "latentDim": _irodori_int(config, "latent_dim"),
+        "speakerPatchSize": speaker_patch,
+        "speakerDim": _irodori_int(config, "speaker_dim"),
+        "textDim": _irodori_int(config, "text_dim"),
+        "captionDim": _irodori_int(config, "caption_dim"),
+        "timestepEmbedDim": _irodori_int(config, "timestep_embed_dim"),
+        **IRODORI_SAMPLING_DEFAULTS,
+    }
+
+
+def ir_graph(path: Path) -> Mapping[str, Any]:
+    """コンテナの `__metadata__` から IR グラフの JSON を読む（ヘッダだけ読む）。"""
+    metadata = safetensors_header(path).get("__metadata__")
+    if not isinstance(metadata, dict) or IR_METADATA_KEY not in metadata:
+        raise DistError(f"{path}: IR メタデータ（{IR_METADATA_KEY}）が無い")
+    try:
+        graph = json.loads(metadata[IR_METADATA_KEY])
+    except json.JSONDecodeError as error:
+        raise DistError(f"{path}: IR メタデータが JSON として読めない") from error
+    if not isinstance(graph, dict):
+        raise DistError(f"{path}: IR メタデータが最上位オブジェクトでない")
+    return graph
+
+
+def _graph_inputs(graph: Mapping[str, Any], path: Path) -> dict[str, list[Any]]:
+    """グラフ入力の `{名前: 形}`（並びの検査は呼び出し側 — ここは引くための表）。"""
+    inputs = graph.get("inputs")
+    if not isinstance(inputs, list):
+        raise DistError(f"{path}: IR メタデータに inputs が無い")
+    return {
+        item["name"]: item["shape"]
+        for item in inputs
+        if isinstance(item, dict) and isinstance(item.get("shape"), list)
+    }
+
+
+def assert_irodori_graphs(
+    placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
+) -> None:
+    """6 グラフが**読み出せて**、入力の並び・出力本数・静的次元が宣言どおりであることを見る。
+
+    MUST: ずれても shape は合ったままロードも実行も通る組み合わせがある（`caption_proj` の
+    出力本数・条件 state の宣言長・`speaker` の patch 幅）ので、配布形を並べる前にここで落とす。
+    SBV2 の {@link assert_bert_hidden} と同じ規律 — 別々の台本（`export_irodori.py` の
+    ターゲットと、この manifest）が持つ数を突き合わせる席がここしか無い。
+    """
+    graphs = {role: ir_graph(placements[role]) for role in IRODORI_SERIES_DIRS}
+    for role, (expected_inputs, expected_outputs) in IRODORI_GRAPH_SHAPES.items():
+        path = placements[role]
+        graph = graphs[role]
+        names = tuple(_graph_inputs(graph, path))
+        if names != expected_inputs:
+            raise DistError(
+                f"{path} のグラフ入力が {list(names)} で、期待の {list(expected_inputs)} と違う"
+                " — 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない"
+                "（並びまで見るのは export 側の宣言順が動いていないことの証跡）"
+            )
+        outputs = graph.get("outputs")
+        count = len(outputs) if isinstance(outputs, list) else outputs
+        if count != expected_outputs:
+            raise DistError(
+                f"{path} のグラフ出力が {count} 本で、配布形が要求する {expected_outputs} 本で"
+                "ない — 別のターゲットの資産が混ざっている"
+            )
+    for role, name, axis, field_name in IRODORI_STATIC_DIMS:
+        declared = _graph_inputs(graphs[role], placements[role])[name][axis]
+        expected = pipeline_config[field_name]
+        if declared != expected:
+            raise DistError(
+                f"{placements[role]} の入力 '{name}' の軸 {axis} が {declared!r}、"
+                f"pipelineConfig の {field_name} は {expected} — チェックポイントの config と"
+                "焼かれたグラフが別の版"
+            )
+    # 参照 latent は patch してから `speaker` へ渡す（ADR 0047 決定 4）ので、入力幅は 2 欄の積。
+    patched = pipeline_config["latentDim"] * pipeline_config["speakerPatchSize"]
+    width = _graph_inputs(graphs["speaker"], placements["speaker"])["latent"][2]
+    if width != patched:
+        raise DistError(
+            f"{placements['speaker']} の入力 'latent' の軸 2 が {width!r}、pipelineConfig の"
+            f" latentDim × speakerPatchSize は {patched}"
+        )
+    # `dit` の `mask` は「latent S + 条件 3 区間」の長さで宣言される（ADR 0046 の派生次元）。
+    # 区間の合計がずれると、マスクの区間割りだけが黙って別の位置を指す。
+    symbols = graphs["dit"].get("symbols")
+    if not isinstance(symbols, list) or len(symbols) != 1:
+        raise DistError(f"{placements['dit']}: 記号次元が 1 本でない（{symbols!r}）")
+    total = sum(
+        pipeline_config[field_name] for field_name in ("maxTextLen", "speakerRows", "maxCaptionLen")
+    )
+    declared_mask = _graph_inputs(graphs["dit"], placements["dit"])["mask"][3]
+    if declared_mask != f"{symbols[0]}+{total}":
+        raise DistError(
+            f"{placements['dit']} の入力 'mask' の軸 3 が {declared_mask!r}、pipelineConfig の"
+            f" 条件 3 区間の合計は {total}（期待 '{symbols[0]}+{total}'）"
+        )
+
+
+def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) -> ModelPlan:
+    """Irodori 1 モデルぶんの計画を組む（検査と config の読み取りをここで全部済ませる）。"""
+    assert_model_name(model)
+    placements = irodori_placements(sources)
+    pipeline_config = irodori_pipeline_config(irodori_model_config(sources.model))
+    for role, source in placements.items():
+        assert_storage(role, source, IRODORI_STORAGE_REQUIREMENTS)
+    assert_irodori_graphs(placements, pipeline_config)
+    return ModelPlan(
+        name=model,
+        pipeline=IRODORI_PIPELINE,
+        artifacts={
+            role: Artifact(IRODORI_OUTPUT_PATHS[role], source=source)
+            for role, source in placements.items()
+        },
+        weights=IRODORI_WEIGHTS,
+        assets=IRODORI_ASSETS,
+        quants=complete_quant_weights(IRODORI_WEIGHTS, IRODORI_QUANTS),
+        default_quant=IRODORI_DEFAULT_QUANT,
+        pipeline_config=pipeline_config,
+    )
+
+
+# ---- ⑥ pipeline 別ディスパッチと CLI -----------------------------------------
 
 
 #: モデルカードの描き手（manifest とリポ ID から本文 1 枚）。
@@ -1340,6 +1714,11 @@ def sbv2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return sbv2_plan(sources, sbv2_knob_defaults(sources.demo / SBV2_SYMBOLS_FILE), model)
 
 
+def irodori_dist_plan(series_dir: Path, model: str) -> ModelPlan:
+    """`--series` の親から Irodori 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+    return irodori_plan(irodori_sources(series_dir, model), model)
+
+
 PIPELINES: Mapping[str, Pipeline] = {
     "anima": Pipeline(
         default_model=ANIMA_MODEL_NAME,
@@ -1357,6 +1736,14 @@ PIPELINES: Mapping[str, Pipeline] = {
             name: partial(render_sbv2_model_card, profile=profile)
             for name, profile in SBV2_CARD_PROFILES.items()
         },
+    ),
+    "irodori": Pipeline(
+        default_model=IRODORI_DEFAULT_MODEL,
+        repo_name=irodori_repo_name,
+        plan=irodori_dist_plan,
+        # 帰属は 1 通りだけ（上流 1 リポの重みを格納形へ落とし直したもの）— 選択肢が無いので
+        # 省略で通る。2 つ目のファミリーが生えた瞬間に明示が要求されはじめる。
+        card_profiles={"irodori": render_irodori_model_card},
     ),
 }
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -28,6 +28,10 @@ from karume.dist import (
     ANIMA_PIPELINE_CONFIG,
     ANIMA_QUANTS,
     ANIMA_WEIGHTS,
+    IRODORI_DEFAULT_MODEL,
+    IRODORI_OUTPUT_PATHS,
+    IRODORI_SAMPLING_DEFAULTS,
+    IRODORI_SERIES_DIRS,
     MANIFEST_FILENAME,
     MANIFEST_FORMAT,
     MODEL_CARD_FILENAME,
@@ -46,6 +50,7 @@ from karume.dist import (
     SHARED_DIRNAME,
     AnimaSources,
     DistError,
+    IrodoriSources,
     Sbv2Sources,
     WeightFiles,
     anima_plan,
@@ -56,6 +61,9 @@ from karume.dist import (
     build_parser,
     complete_quant_weights,
     default_out_dir,
+    irodori_plan,
+    irodori_repo_name,
+    irodori_series_name,
     main,
     resolve_card_renderer,
     sbv2_knob_defaults,
@@ -734,10 +742,11 @@ class TestCli:
         args = build_parser().parse_args(["--model", "F1", "--model", "F2"])
         assert args.models == ["F1", "F2"]
 
-    def test_it_knows_both_pipelines(self) -> None:
-        assert sorted(PIPELINES) == ["anima", "sbv2"]
+    def test_it_knows_every_pipeline(self) -> None:
+        assert sorted(PIPELINES) == ["anima", "irodori", "sbv2"]
         assert PIPELINES["anima"].default_model == ANIMA_MODEL_NAME
         assert PIPELINES["sbv2"].default_model == SBV2_DEFAULT_MODEL
+        assert PIPELINES["irodori"].default_model == IRODORI_DEFAULT_MODEL
 
     def test_the_default_output_directory_follows_the_single_model(self) -> None:
         assert default_out_dir(PIPELINES["anima"], ["anima-turbo"]).name == "karume-anima-turbo"
@@ -1556,3 +1565,435 @@ class TestSbv2Cli:
             main(["--pipeline", "sbv2", "--series", str(sources.series_f16.parent)])
 
         assert not (tmp_path / "models").exists()
+
+
+# ---- Irodori（text-to-speech / latent 出口）-----------------------------------
+
+#: 合成チェックポイント config。**実重み v4-small とは全ての数が違う**（latent 32 / speaker 768
+#: / 参照 120s …）— pipelineConfig を焼き込んでいれば、この config で組んだ manifest が実重みの
+#: 数を名乗って落ちる。`latent_patch_size` だけは 1（TS 側の `latentDim` が 2 つの役割を兼ねる
+#: 唯一の成立条件で、値そのものが門になっている）。
+_IRODORI_CONFIG: Mapping[str, Any] = {
+    "latent_dim": 8,
+    "latent_patch_size": 1,
+    "speaker_patch_size": 2,
+    "speaker_dim": 24,
+    "text_dim": 12,
+    "caption_dim": 16,
+    "timestep_embed_dim": 6,
+    "max_text_len": 10,
+    "max_caption_len": 14,
+    "ref_max_seconds": 8.0,
+}
+
+#: 上の config から導出される数（テストが式を写さないための 1 箇所）。
+_IRODORI_SPEAKER_ROWS = 101  # int(8.0 × 25) // 2 + 1
+_IRODORI_DIT_SYM_MAX = 750  # int(30.0 × 25) // 1
+_IRODORI_MASK_TOTAL = 10 + _IRODORI_SPEAKER_ROWS + 14
+
+#: backbone の hidden 幅（projector の入力 — pipelineConfig には現れない数）。
+_IRODORI_HIDDEN = 32
+
+#: `pipelineConfig` の欄名（TS 側 `packages/models/src/irodori/config.ts` の `ROOT_KEYS` の写し）。
+#: **ロード側は未知キーも欠落も parse 時に落とす**ので、焼く側とロード側の欄名は完全一致が要る。
+#: 写しをテストが持つのは、片方だけが動いたときに落ちる席がここしか無いため。
+_IRODORI_CONFIG_KEYS = (
+    "maxTextLen",
+    "maxCaptionLen",
+    "speakerRows",
+    "ditSymMax",
+    "frameRate",
+    "latentDim",
+    "speakerPatchSize",
+    "speakerDim",
+    "textDim",
+    "captionDim",
+    "timestepEmbedDim",
+    "steps",
+    "initScale",
+    "cfgMinT",
+    "cfgMaxT",
+    "cfgScales",
+    "minSeconds",
+    "maxSeconds",
+    "speakerUncondMode",
+    "cfgGuidanceMode",
+)
+
+
+def _irodori_graph(inputs: Sequence[tuple[str, list[Any]]], outputs: int, symbol: str = "T") -> str:
+    """門が読む最小の IR メタデータ（入力の名前と形・出力名・記号次元）。"""
+    return json.dumps(
+        {
+            "inputs": [{"name": name, "shape": shape} for name, shape in inputs],
+            "outputs": [f"out_{index}" for index in range(outputs)],
+            "symbols": [symbol],
+        }
+    )
+
+
+def _irodori_graphs() -> dict[str, str]:
+    """6 グラフの IR メタデータ（{@link _IRODORI_CONFIG} と噛み合う形）。"""
+    latent_dim = _IRODORI_CONFIG["latent_dim"]
+    speaker_dim = _IRODORI_CONFIG["speaker_dim"]
+    text_dim = _IRODORI_CONFIG["text_dim"]
+    caption_dim = _IRODORI_CONFIG["caption_dim"]
+    return {
+        "backbone": _irodori_graph([("input_ids", [1, "T"])], 1),
+        "text_proj": _irodori_graph([("hidden", [1, "T", _IRODORI_HIDDEN])], 1),
+        "caption_proj": _irodori_graph([("hidden", [1, "T", _IRODORI_HIDDEN])], 2),
+        "speaker": _irodori_graph(
+            [("latent", [1, "S", latent_dim * _IRODORI_CONFIG["speaker_patch_size"]])], 1, "S"
+        ),
+        "duration": _irodori_graph(
+            [
+                ("text_state", [1, "T", text_dim]),
+                ("speaker_vec", [1, speaker_dim]),
+                ("has_speaker", [1, 1]),
+                ("caption_vec", [1, caption_dim]),
+                ("has_caption", [1, 1]),
+            ],
+            1,
+        ),
+        "dit": _irodori_graph(
+            [
+                ("x_t", [1, "S", latent_dim]),
+                ("t_embed", [1, _IRODORI_CONFIG["timestep_embed_dim"]]),
+                ("mask", [1, 1, 1, f"S+{_IRODORI_MASK_TOTAL}"]),
+                ("text_state", [1, _IRODORI_CONFIG["max_text_len"], text_dim]),
+                ("speaker_state", [1, _IRODORI_SPEAKER_ROWS, speaker_dim]),
+                ("caption_state", [1, _IRODORI_CONFIG["max_caption_len"], caption_dim]),
+            ],
+            1,
+            "S",
+        ),
+    }
+
+
+def _build_irodori_sources(
+    root: Path,
+    *,
+    model: str = IRODORI_DEFAULT_MODEL,
+    config: Mapping[str, Any] = _IRODORI_CONFIG,
+    graphs: Mapping[str, str] | None = None,
+) -> IrodoriSources:
+    """系列 + チェックポイントの置き場を偽資産で再現する（配布しないものの混入込み）。
+
+    並びは `karume.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
+    テストが root を差し替えるだけで同じ木を指せる形。
+    """
+    sources = IrodoriSources(
+        series=root / "outputs" / "series" / irodori_series_name(model),
+        model=root / "inputs" / "irodori" / model,
+    )
+    for role, directory in IRODORI_SERIES_DIRS.items():
+        payload = _fake_safetensors(
+            "F32",
+            f"{role}-weights".encode(),
+            {IR_METADATA_KEY: (graphs or _irodori_graphs())[role]},
+        )
+        _write(sources.series / directory / "model.safetensors", payload)
+        # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
+        _write(sources.series / directory / "io.case0.safetensors", b"io-fixture")
+    _write(sources.series / "tokenizer" / "tokenizer.json", b'{"vocabText": "a"}')
+    # tokenizer の golden 3 本は検証用（実行に要らないので配布形には入らない）。
+    for name in ("golden.encode.json", "golden.normalize.json", "nfkc-diff.json"):
+        _write(sources.series / "tokenizer" / name, b'{"golden": true}')
+    _write(
+        sources.model / "model.safetensors",
+        _fake_safetensors(
+            "F32", b"checkpoint", {"config_json": json.dumps(config, ensure_ascii=False)}
+        ),
+    )
+    return sources
+
+
+def _assemble_irodori(
+    sources: IrodoriSources, out_dir: Path, model: str = IRODORI_DEFAULT_MODEL
+) -> dict[str, Any]:
+    return assemble_family([irodori_plan(sources, model)], out_dir, model)
+
+
+@pytest.fixture
+def irodori_assembled(tmp_path: Path) -> tuple[Path, dict]:
+    sources = _build_irodori_sources(tmp_path)
+    out_dir = tmp_path / "models" / irodori_repo_name(IRODORI_DEFAULT_MODEL)
+    manifest = _assemble_irodori(sources, out_dir)
+    return out_dir, manifest
+
+
+def _irodori_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+    return manifest["models"][IRODORI_DEFAULT_MODEL]
+
+
+class TestIrodoriLayout:
+    def test_it_places_every_declared_path_under_the_model_subtree(self, irodori_assembled) -> None:
+        out_dir, _ = irodori_assembled
+        expected = _in_subtree(IRODORI_DEFAULT_MODEL, IRODORI_OUTPUT_PATHS.values())
+        assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
+
+    def test_it_never_carries_io_fixtures_or_tokenizer_goldens(self, irodori_assembled) -> None:
+        """配布へ入るのは実行に要る 7 本だけ（golden は検証用の資産）。"""
+        out_dir, _ = irodori_assembled
+        assert list(out_dir.rglob("io.*")) == []
+        assert list(out_dir.rglob("golden.*")) == []
+        assert list(out_dir.rglob("nfkc-diff.json")) == []
+
+    def test_it_declares_the_six_graphs_and_the_tokenizer(self, irodori_assembled) -> None:
+        _, manifest = irodori_assembled
+        model = _irodori_model(manifest)
+        assert model["pipeline"] == "irodori/1"
+        assert sorted(model["weights"]) == [
+            "backbone",
+            "caption_proj",
+            "dit",
+            "duration",
+            "speaker",
+            "text_proj",
+        ]
+        assert sorted(model["assets"]) == ["tokenizer"]
+
+    def test_the_only_quant_is_f32_without_execution_knobs(self, irodori_assembled) -> None:
+        """低精度の軸がまだ 1 つも無い（`session` が空 = 実行形ノブなし）。"""
+        _, manifest = irodori_assembled
+        model = _irodori_model(manifest)
+        assert model["defaultQuant"] == "f32"
+        assert list(model["quants"]) == ["f32"]
+        assert model["quants"]["f32"]["session"] == {}
+        assert "gpuFeatures" not in model["quants"]["f32"]
+        assert set(model["quants"]["f32"]["weights"]) == set(model["weights"])
+
+    def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(tmp_path)
+        out_dir = tmp_path / "models" / irodori_repo_name(IRODORI_DEFAULT_MODEL)
+        assert _assemble_irodori(sources, out_dir) == _assemble_irodori(sources, out_dir)
+        assert verify_dist(out_dir)
+
+
+class TestIrodoriPipelineConfig:
+    """`pipelineConfig` はロード側（`src/irodori/config.ts`）のスキーマと欄名まで一致する。"""
+
+    def test_it_declares_exactly_the_fields_the_loader_accepts(self, irodori_assembled) -> None:
+        _, manifest = irodori_assembled
+        assert tuple(_irodori_model(manifest)["pipelineConfig"]) == _IRODORI_CONFIG_KEYS
+
+    def test_it_derives_the_model_specific_numbers_from_the_checkpoint(
+        self, irodori_assembled
+    ) -> None:
+        """焼き込んでいれば実重み（latent 32 / speaker 768 / 参照 120s）の数が出てくる。"""
+        _, manifest = irodori_assembled
+        config = _irodori_model(manifest)["pipelineConfig"]
+        assert config["maxTextLen"] == _IRODORI_CONFIG["max_text_len"]
+        assert config["maxCaptionLen"] == _IRODORI_CONFIG["max_caption_len"]
+        assert config["latentDim"] == _IRODORI_CONFIG["latent_dim"]
+        assert config["speakerPatchSize"] == _IRODORI_CONFIG["speaker_patch_size"]
+        assert config["speakerDim"] == _IRODORI_CONFIG["speaker_dim"]
+        assert config["textDim"] == _IRODORI_CONFIG["text_dim"]
+        assert config["captionDim"] == _IRODORI_CONFIG["caption_dim"]
+        assert config["timestepEmbedDim"] == _IRODORI_CONFIG["timestep_embed_dim"]
+        # 参照 latent の patch 後の上限 + 平均トークン 1 本 / 30s × 25Hz ÷ latent patch。
+        assert config["speakerRows"] == _IRODORI_SPEAKER_ROWS
+        assert config["ditSymMax"] == _IRODORI_DIT_SYM_MAX
+
+    def test_it_carries_the_sampler_defaults_the_upstream_declares(self, irodori_assembled) -> None:
+        _, manifest = irodori_assembled
+        config = _irodori_model(manifest)["pipelineConfig"]
+        for key, value in IRODORI_SAMPLING_DEFAULTS.items():
+            assert config[key] == value
+        # ADR 0047 決定 1 — ロード側はこの 2 値以外を parse 時に拒否する。
+        assert config["speakerUncondMode"] == "mask"
+        assert config["cfgGuidanceMode"] == "independent"
+
+    def test_it_refuses_a_checkpoint_without_the_config_metadata(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(tmp_path)
+        _write(sources.model / "model.safetensors", _fake_safetensors("F32", b"checkpoint"))
+        with pytest.raises(DistError, match="config_json"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_checkpoint_whose_config_is_not_json(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.model / "model.safetensors",
+            _fake_safetensors("F32", b"checkpoint", {"config_json": "{"}),
+        )
+        with pytest.raises(DistError, match="JSON として読めない"):
+            irodori_plan(sources)
+
+    @pytest.mark.parametrize("value", [0, "32", True, None])
+    def test_it_refuses_a_dimension_that_is_not_a_positive_integer(
+        self, tmp_path: Path, value: Any
+    ) -> None:
+        sources = _build_irodori_sources(tmp_path, config={**_IRODORI_CONFIG, "latent_dim": value})
+        with pytest.raises(DistError, match="latent_dim"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_latent_patch_size_the_loader_schema_cannot_express(
+        self, tmp_path: Path
+    ) -> None:
+        """`latentDim` は x_t の幅と参照 latent の 1 フレーム幅を兼ねる（1 でしか両立しない）。"""
+        sources = _build_irodori_sources(
+            tmp_path, config={**_IRODORI_CONFIG, "latent_patch_size": 2}
+        )
+        with pytest.raises(DistError, match="latent_patch_size"):
+            irodori_plan(sources)
+
+
+class TestIrodoriGraphGate:
+    """組み立て門 — ずれても shape が合ったまま通る組み合わせを、配置の**前**に落とす。"""
+
+    def _sources(self, tmp_path: Path, role: str, graph: str) -> IrodoriSources:
+        return _build_irodori_sources(tmp_path, graphs={**_irodori_graphs(), role: graph})
+
+    def test_it_refuses_a_caption_projector_with_a_single_output(self, tmp_path: Path) -> None:
+        """第 2 出力（`caption_norm` 済み系列）が無いと `caption_vec` が別のベクトルになる。"""
+        sources = self._sources(
+            tmp_path,
+            "caption_proj",
+            _irodori_graph([("hidden", [1, "T", _IRODORI_HIDDEN])], 1),
+        )
+        with pytest.raises(DistError, match="グラフ出力が 1 本"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_dit_that_lost_an_input(self, tmp_path: Path) -> None:
+        graphs = _irodori_graphs()
+        trimmed = json.loads(graphs["dit"])
+        trimmed["inputs"] = trimmed["inputs"][:5]
+        sources = self._sources(tmp_path, "dit", json.dumps(trimmed))
+        with pytest.raises(DistError, match="グラフ入力"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_dit_whose_inputs_are_reordered(self, tmp_path: Path) -> None:
+        graphs = _irodori_graphs()
+        swapped = json.loads(graphs["dit"])
+        swapped["inputs"][3], swapped["inputs"][5] = swapped["inputs"][5], swapped["inputs"][3]
+        sources = self._sources(tmp_path, "dit", json.dumps(swapped))
+        with pytest.raises(DistError, match="グラフ入力"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_graph_that_declares_another_conditioning_length(
+        self, tmp_path: Path
+    ) -> None:
+        """条件 state の宣言長がずれても右 pad は通る（別の位置の条件を読んで沈黙する）。"""
+        graphs = _irodori_graphs()
+        stretched = json.loads(graphs["dit"])
+        stretched["inputs"][3]["shape"][1] = _IRODORI_CONFIG["max_text_len"] + 1
+        sources = self._sources(tmp_path, "dit", json.dumps(stretched))
+        with pytest.raises(DistError, match="maxTextLen"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_speaker_encoder_with_another_patch_width(self, tmp_path: Path) -> None:
+        sources = self._sources(
+            tmp_path, "speaker", _irodori_graph([("latent", [1, "S", 999])], 1, "S")
+        )
+        with pytest.raises(DistError, match="speakerPatchSize"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_mask_whose_segments_do_not_add_up(self, tmp_path: Path) -> None:
+        """区間の合計がずれると、マスクの区間割りだけが黙って別の位置を指す。"""
+        graphs = _irodori_graphs()
+        bent = json.loads(graphs["dit"])
+        bent["inputs"][2]["shape"][3] = f"S+{_IRODORI_MASK_TOTAL + 1}"
+        sources = self._sources(tmp_path, "dit", json.dumps(bent))
+        with pytest.raises(DistError, match="mask"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_container_without_ir_metadata(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.series / "dit" / "model.safetensors", _fake_safetensors("F32", b"dit-weights")
+        )
+        with pytest.raises(DistError, match="IR メタデータ"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_graph_stored_as_f16(self, tmp_path: Path) -> None:
+        """f32 の 1 本しか配らない（格納形は series 名でなくヘッダが正）。"""
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.series / "dit" / "model.safetensors",
+            _fake_safetensors("F16", b"dit-weights", {IR_METADATA_KEY: _irodori_graphs()["dit"]}),
+        )
+        with pytest.raises(DistError, match="F32"):
+            irodori_plan(sources)
+
+
+class TestIrodoriModelCard:
+    def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """偽資産だけで CLI を 1 周回す（チェックポイントの置き場も tmp へ寄せる）。"""
+        from karume import dist
+
+        sources = _build_irodori_sources(tmp_path)
+        monkeypatch.setattr(dist, "INPUTS_ROOT", tmp_path / "inputs")
+        out_dir = tmp_path / "dist"
+        main(
+            ["--pipeline", "irodori", "--series", str(sources.series.parent), "--out", str(out_dir)]
+        )
+        return out_dir
+
+    def test_it_describes_the_latent_only_distribution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert "pipeline_tag: text-to-speech" in card
+        assert "license: mit" in card
+        # 格納形を変えない配布形は 4 値のどれでもない（Hub の推論に任せる）。
+        assert "base_model_relation" not in card
+        assert "stops at the latent" in card
+        assert "not shipped here" in card
+        assert 'fromPretrained("hdae/dist"' in card
+
+    def test_it_derives_the_shape_section_from_the_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out_dir = self._run(tmp_path, monkeypatch)
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert f"up to {_IRODORI_CONFIG['max_text_len']} tokens" in card
+        assert f"up to {_IRODORI_DIT_SYM_MAX} frames" in card
+        # カードは**検証を通った**配布形から描かれる（表と現物が食い違ったまま説明が生えない）。
+        assert verify_dist(out_dir)
+
+
+class TestIrodoriCli:
+    def test_the_default_output_directory_follows_the_single_model(self) -> None:
+        assert (
+            default_out_dir(PIPELINES["irodori"], [IRODORI_DEFAULT_MODEL]).name
+            == "karume-irodori-v4-small"
+        )
+
+    def test_one_attribution_profile_needs_no_choice(self) -> None:
+        """上流 1 リポの重みを移しただけなので帰属は 1 通り（選びようがない）。"""
+        profiles = PIPELINES["irodori"].card_profiles
+        assert len(profiles) == 1
+        assert resolve_card_renderer(PIPELINES["irodori"], None) is next(iter(profiles.values()))
+
+    def test_it_assembles_into_the_pipeline_default_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from karume import dist
+
+        sources = _build_irodori_sources(tmp_path)
+        monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
+        monkeypatch.setattr(dist, "INPUTS_ROOT", tmp_path / "inputs")
+
+        main(["--pipeline", "irodori", "--series", str(sources.series.parent)])
+
+        out_dir = tmp_path / "models" / irodori_repo_name(IRODORI_DEFAULT_MODEL)
+        expected = _in_subtree(IRODORI_DEFAULT_MODEL, IRODORI_OUTPUT_PATHS.values())
+        assert sorted(verify_dist(out_dir)) == sorted(expected)
+
+    def test_the_model_flag_moves_the_series_and_the_default_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from karume import dist
+
+        sources = _build_irodori_sources(tmp_path, model="v9-large")
+        monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
+        monkeypatch.setattr(dist, "INPUTS_ROOT", tmp_path / "inputs")
+
+        main(
+            ["--pipeline", "irodori", "--model", "v9-large", "--series", str(sources.series.parent)]
+        )
+
+        out_dir = tmp_path / "models" / "karume-irodori-v9-large"
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        assert list(manifest["models"]) == ["v9-large"]
+        assert verify_dist(out_dir)

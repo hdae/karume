@@ -60,9 +60,11 @@ class CardMetadata:
     """frontmatter に載る **manifest に無い事実**（ADR 0038 §6 で manifest から外した領分）。
 
     実地確認: https://huggingface.co/docs/hub/model-cards 。`base_model_relation` の語彙は
-    adapter / merge / quantized / finetune の 4 値で、どちらの配布形も「base の重みを f16 と
-    i8 の格納形へ落とし直したもの」なので `quantized` を採る。merge は **Hub 上の base_model を
+    adapter / merge / quantized / finetune の 4 値で、f16 / i8 の配布形は「base の重みを別の
+    格納形へ落とし直したもの」なので `quantized` を採る。merge は **Hub 上の base_model を
     2 つ以上並べる**形に紐づいた値で、Hub にない出所（Anima の LoRA）を正しく表現できない。
+    **格納形を変えない配布形は 4 値のどれでもない**ので席ごと空ける（同じ実地確認: 未指定なら
+    Hub が推論する）— 4 値の中から一番近いものを当てると、カードが事実でない主張を持つ。
 
     `base_model` が並びなのは、**この配布形が再配布している上流を全部並べる**ため（重みの出所と
     再配布する text encoder は別リポ）。並べても関係は `quantized` のまま — 重みを融合した
@@ -71,9 +73,10 @@ class CardMetadata:
 
     pipeline_tag: str
     base_model: tuple[str, ...]
-    base_model_relation: str
     license: str
     tags: tuple[str, ...]
+    #: 4 値のどれかが**事実として当たるとき**だけ書く（当たらなければ Hub の推論に任せる）。
+    base_model_relation: str | None = None
     #: `license: other` のときだけ HF が読む 2 席。SPDX 識別子を当てられた配布形は**持たない**
     #: （空欄で並べると「名前の無い独自ライセンス」に読める）。
     license_name: str | None = None
@@ -144,7 +147,11 @@ def _frontmatter(metadata: CardMetadata) -> list[str]:
         f"library_name: {LIBRARY_NAME}",
         f"pipeline_tag: {metadata.pipeline_tag}",
         *_base_model(metadata.base_model),
-        f"base_model_relation: {metadata.base_model_relation}",
+        *(
+            []
+            if metadata.base_model_relation is None
+            else [f"base_model_relation: {metadata.base_model_relation}"]
+        ),
         f"license: {metadata.license}",
         *([f"license_name: {metadata.license_name}"] if metadata.license_name is not None else []),
         *([f"license_link: {metadata.license_link}"] if metadata.license_link is not None else []),
@@ -694,5 +701,180 @@ def render_sbv2_model_card(manifest: Mapping[str, Any], repo: str, profile: Sbv2
             *_model_sections(
                 manifest, (_files, _quants, _sbv2_styles, _sbv2_speakers, _sbv2_defaults)
             ),
+        )
+    )
+
+
+# ---- ④ Irodori（text-to-speech / latent 出口）--------------------------------
+
+#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+IRODORI_SUPPORTED_PIPELINE = "irodori/1"
+
+IRODORI_PIPELINE_TAG = "text-to-speech"
+
+IRODORI_TITLE = "Irodori-TTS v4 Small — Karume"
+
+#: 重みの出所（`inputs/irodori/<モデル名>/` に手で置く HF リポ）と、その中の text backbone の
+#: 素になった日本語 ModernBERT（チェックポイントの `config_json` が `text_tokenizer_repo` /
+#: `text_encoder_revision` で名指ししている 1 本）。**どちらも再配布している**ので両方並べる。
+#: ライセンスは実地確認（2026-08-12・HF の models API の `tags`）: どちらも `license: mit`。
+IRODORI_BASE_MODEL = "Aratako/Irodori-TTS-v4-Small"
+IRODORI_TEXT_BACKBONE_MODEL = "sbintuitions/modernbert-ja-310m"
+
+IRODORI_METADATA = CardMetadata(
+    pipeline_tag=IRODORI_PIPELINE_TAG,
+    base_model=(IRODORI_BASE_MODEL, IRODORI_TEXT_BACKBONE_MODEL),
+    # `base_model_relation` は置かない — この配布形は格納形を変えず（f32 のまま）コンテナだけを
+    # 移したもので、adapter / merge / quantized / finetune のどれでもない（CardMetadata の doc）。
+    license="mit",
+    tags=("text-to-speech", "webgpu", "japanese"),
+)
+
+#: 波形へ落とすコーデック（別リポ・別重み — この配布形には**入っていない**）。
+IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
+
+#: 使い方スニペットのデモ入力（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
+IRODORI_DEMO_TEXT = "こんにちは、これはテストです。"
+IRODORI_DEMO_CAPTION = "落ち着いた女性の声で、ゆっくりと丁寧に話している。"
+
+
+def _irodori_overview(manifest: Mapping[str, Any]) -> list[str]:
+    return [
+        "## What is this",
+        "",
+        "A Japanese text-to-speech distribution: the **Irodori-TTS v4 (Small)** rectified-flow DiT",
+        "converted into the WebGPU inference runtime **Karume**'s container format (a single",
+        "safetensors file = weights + a graph JSON embedded in `__metadata__`). Runs as-is in the",
+        "browser and in Deno.",
+        "",
+        "- Six graphs make up the chain: a shared Japanese ModernBERT `backbone`, the `text_proj`",
+        "  and `caption_proj` condition projectors, the reference-latent `speaker` encoder, the",
+        "  `duration` predictor and the `dit` itself (one forward per Euler step, plus one per",
+        "  classifier-free-guidance branch).",
+        "- **This repository stops at the latent.** The pipeline returns the patched DACVAE latent",
+        f"  `[frames, latentDim]`; the codec that turns it into a waveform"
+        f" ([{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}))",
+        "  is a separate model and is **not shipped here** — nothing in this repository produces",
+        "  audio on its own yet.",
+        "- Not readable by the upstream implementation (it's a different container with an embedded"
+        f" graph); the reader is a pipeline that implements `{IRODORI_SUPPORTED_PIPELINE}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
+        f" is `karume.json` (`{manifest['format']}`).",
+    ]
+
+
+def _irodori_base_weights() -> list[str]:
+    """帰属節。格納形を変えていないので「変換したもの」としてだけ主張する。"""
+    return [
+        "## Base weights and attribution",
+        "",
+        "Converted into the container format — the original checkpoint is not distributed here.",
+        "",
+        f"- **Weights**: [{IRODORI_BASE_MODEL}](https://huggingface.co/{IRODORI_BASE_MODEL}),"
+        " licensed **MIT**",
+        "  (as of retrieval). The training / inference implementation it comes with",
+        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is MIT as well;",
+        "  Karume's runtime contains none of that code — it is an independent implementation that",
+        "  reads these weights from its own container format.",
+        f"- **Text backbone**: fine-tuned from"
+        f" [{IRODORI_TEXT_BACKBONE_MODEL}](https://huggingface.co/{IRODORI_TEXT_BACKBONE_MODEL}),",
+        "  licensed **MIT** (as of retrieval). It is redistributed here in the container format as",
+        "  the `backbone` component, so that license travels with this repository too.",
+        "- **Changes made here**: conversion into the Karume container format only. No retraining,",
+        "  no fine-tuning and **no quantization** — the weights are the source checkpoint's own",
+        "  f32 values, re-laid out per graph.",
+    ]
+
+
+def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+    model_name = manifest["defaultModel"]
+    quant = _default_model(manifest)["defaultQuant"]
+    return [
+        "## Usage",
+        "",
+        "```ts",
+        'import { IrodoriPipeline } from "jsr:@karume/models";',
+        "",
+        f"// Both options may be omitted: model defaults to {model_name}, quant to {quant}.",
+        f'using pipeline = await IrodoriPipeline.fromPretrained("{repo}", {{',
+        f'  model: "{model_name}",',
+        f'  quant: "{quant}",',
+        "});",
+        "const latent = await pipeline.generateLatent({",
+        f'  text: "{IRODORI_DEMO_TEXT}",',
+        f'  caption: "{IRODORI_DEMO_CAPTION}",',
+        "  seed: 42,",
+        "});",
+        "// latent.data is [latent.frames × latent.latentDim] f32, row major.",
+        "```",
+        "",
+        "`generateLatent()` returns `{ data, frames, latentDim, seed, forwards }`. Decoding that",
+        "latent into audio needs the codec, which this repository does not ship (see above).",
+        "`caption` and `speaker` are both optional: without them the voice is picked by the model",
+        "alone, and the guidance branches for the missing conditions are skipped.",
+        "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
+        "You can also build from bytes you fetched yourself (`IrodoriPipeline.fromAssets`).",
+    ]
+
+
+def _irodori_shape(model: Mapping[str, Any]) -> list[str]:
+    """モデル固有の数（グラフの宣言と噛み合う側）— 利用者の入力上限がここで読める。"""
+    config = model["pipelineConfig"]
+    frame_rate = config["frameRate"]
+    return [
+        "### Shape",
+        "",
+        "Derived from the checkpoint's own config, and checked against the exported graphs when",
+        "this repository was assembled.",
+        "",
+        f"- **text**: up to {config['maxTextLen']} tokens (BOS included), width"
+        f" {config['textDim']}",
+        f"- **caption**: up to {config['maxCaptionLen']} tokens (BOS included), width"
+        f" {config['captionDim']}",
+        f"- **reference speaker**: up to {config['speakerRows'] - 1} patched rows"
+        f" ({config['speakerPatchSize']} latent frames each ="
+        f" {(config['speakerRows'] - 1) * config['speakerPatchSize'] // frame_rate}s of audio),"
+        f" width {config['speakerDim']}",
+        f"- **latent**: up to {config['ditSymMax']} frames at {frame_rate} Hz"
+        f" ({config['ditSymMax'] // frame_rate}s), width {config['latentDim']}",
+    ]
+
+
+def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
+    """実行時ノブ（`generateLatent()` に渡さなかったものを埋める側）。"""
+    config = model["pipelineConfig"]
+    scales = config["cfgScales"]
+    return [
+        "### Defaults",
+        "",
+        "The sampler knobs are fixed by the manifest — `generateLatent()` takes none of them.",
+        "",
+        f"- **steps**: {config['steps']} Euler steps (`initScale` {config['initScale']})",
+        "- **guidance**: "
+        + " / ".join(f"{name} {_knob(scale)}" for name, scale in scales.items())
+        + f", applied for t in [{config['cfgMinT']}, {config['cfgMaxT']}]",
+        f"- **duration**: clamped to [{config['minSeconds']}, {config['maxSeconds']}] seconds"
+        " (the duration predictor decides within that, unless `durationSeconds` is passed)",
+        "",
+        "`seed` is the one knob the manifest does not carry — it defaults to `0`, and the same",
+        "seed with the same request gives the same latent.",
+    ]
+
+
+def render_irodori_model_card(manifest: Mapping[str, Any], repo: str) -> str:
+    """Irodori 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+    _require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)
+    return _render(
+        (
+            _frontmatter(IRODORI_METADATA),
+            ["", f"# {IRODORI_TITLE}", ""],
+            _irodori_overview(manifest),
+            [""],
+            _irodori_base_weights(),
+            [""],
+            _models(manifest),
+            [""],
+            _irodori_usage(manifest, repo),
+            *_model_sections(manifest, (_files, _quants, _irodori_shape, _irodori_defaults)),
         )
     )
