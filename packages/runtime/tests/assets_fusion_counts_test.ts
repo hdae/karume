@@ -64,8 +64,13 @@ const readIrGraph = async (source: URL): Promise<IrGraph> => {
 const readAnimaGraph = (relative: string): Promise<IrGraph> =>
   readIrGraph(new URL(relative, ASSETS_DIR));
 
+/**
+ * 融合ヒット数は**ノード列だけ**で決まる（格納 dtype はどの initializer をどう読むかしか
+ * 変えない）ので、系列が増えても f32 の 1 本を見れば足りる — 見ているのはエクスポータの
+ * ノード発行順で、それは系列を跨いで同じ 1 回の変換から出る。
+ */
 const readIrodoriGraph = (name: string): Promise<IrGraph> =>
-  readIrGraph(new URL(`${name}/model.safetensors`, IRODORI_DIR));
+  readIrGraph(new URL(`${name}/model.f32.safetensors`, IRODORI_DIR));
 
 const exists = (url: URL): Promise<boolean> => Deno.stat(url).then(() => true).catch(() => false);
 
@@ -84,7 +89,9 @@ if (!GEMMA_AVAILABLE) {
   );
 }
 
-const IRODORI_AVAILABLE = await exists(new URL("dit/", IRODORI_DIR));
+// 見るのは**ファイル**（ディレクトリではない）— 配布形の綴りが動いたときに、空でない
+// ディレクトリだけを見て「資産あり」と判断すると、読めない path で FAIL する形になる。
+const IRODORI_AVAILABLE = await exists(new URL("dit/model.f32.safetensors", IRODORI_DIR));
 if (!IRODORI_AVAILABLE) {
   console.warn(
     `[karume] ${IRODORI_DIR.pathname} が無いため Irodori の融合ヒット数を SKIP する`,
