@@ -359,6 +359,23 @@ DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-e
 すると合流者も巻き添えで落ちる）。同一資産を並行に取る複数の `fetchAssets` では、キャンセルは
 この粒度でしか働かない（ADR 0038 §5）。単一呼び出しの abort は全ワーカーへ正しく透過する。
 
+## 0 要素次元を持つ gemm 系の形は GPU 束縛の最小サイズで落ちる（未対応の退化域）
+
+`linear` の `in=0` など 0 要素次元は op 契約上は valid だが、0 要素バッファの確保下限
+（4 バイト — arena / executor の `Math.max(4, …)`）が vec4 変種の最小束縛サイズ（16 バイト）を
+割るため、実行は `GpuValidationError`（Binding size … less than minimum）で fail loudly に
+落ちる（`linearCompute` に依らない — 2026-08-13 実測）。沈黙誤値にはならない。解除するなら
+確保下限を 16 へ統一する（全 op 共通の確保方針の変更 — 需要が出たら別波）。
+
+## GitHub CI はローカル資産（`outputs/`）依存のテストを踏まない（検証範囲の制約）
+
+`outputs/` は git 追跡外のため、実系列資産を golden に使うテスト群 — GPU e2e に加え、
+**CPU-only の upstream parity**（irodori の codec / reference / t-embed、sbv2 の rel-pos /
+relattn / demo 資産、wav の実資産 scale）— は GitHub Actions では資産不在で ignore になる。
+これらの門はローカル / self-hosted の `deno task verify`（資産あり）が担い、リリース判定は
+実資産 + 実 GPU の緑を必須とする（ADR 0005）。CI 側へ寄せるなら golden の fixture 昇格
+（リポ肥大とのトレードオフ）か release gate での資産取得が要る — リリース準備波で再訪。
+
 ## `karume dist` はディスクピークが配布形の約 2 倍（staging→swap の代償）
 
 組み立ては staging ディレクトリへ全て作ってから rename で据える（ADR 0052 — 途中の故障で

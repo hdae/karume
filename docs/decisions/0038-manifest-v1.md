@@ -458,3 +458,8 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   `CacheStorage.keys()` から `karume/1` 完全一致 + `karume/1:` 始まりを拾って全削除する
   （旧スキーム `karume/1:auth` の残骸も対象）。旧名前空間の写しは新コードから読まれず、
   gated 資産が 1 回だけ再ダウンロードになる。
+- 2026-08-13: 進捗フェーズへ終端 `complete` を追加（外部レビュー HUB-001 の消化）。従来は
+  検証（`verifying`）の後に最終イベントが `downloading` で出て phase が逆行していた。契約:
+  1 ファイルの phase は `downloading`* → `verifying` → `complete` の順にだけ進み、`complete`
+  はファイルごとに 1 回の終端。例外は破損キャッシュの self-heal（validate 拒否 → evict →
+  network 再取得）で、この 1 巡だけ最初からやり直しになる。
