@@ -12,7 +12,12 @@ from conftest import SYM_MAX, node_ops, only_node
 from torch import nn
 from torch.export import Dim
 
-from karume.convert import UnsupportedAtenOpsError, _bitwise_equal, normalize_boundary_tensor
+from karume.convert import (
+    Converter,
+    UnsupportedAtenOpsError,
+    _bitwise_equal,
+    normalize_boundary_tensor,
+)
 from karume.ops import EMITTABLE_OPS
 from karume.pipeline import export_to_file
 
@@ -490,6 +495,40 @@ class TestCommonSubexpression:
         assert node_ops(graph) == ["add", "add"]
         outer = graph.nodes[1]
         assert outer.ins == [graph.nodes[0].outs[0]] * 2
+
+
+class TestConstantDedup:
+    """定数の重複排除は full SHA-256 で突合する（名前の短縮形は表示だけ）。"""
+
+    def _converter(self) -> Converter:
+        ep = torch.export.export(Scale(), (torch.randn(3, 4),), strict=False)
+        return Converter(ep)
+
+    def test_the_dedup_key_is_the_full_digest_not_the_shortened_name(self):
+        """64bit 前置だけを突合キーにすると、衝突した 2 定数を実体比較なしで畳む。"""
+        converter = self._converter()
+
+        name = converter._add_const(torch.zeros(3), "テスト定数")
+
+        (digest,) = converter._const_by_digest
+        assert len(digest) == 64
+        # 名前・テンソルキーの綴りは従来どおり先頭 16 hex。
+        assert name == f"const_{digest[:16]}"
+        assert converter.graph.initializers[name].tensor == f"const.{digest[:16]}"
+
+    def test_a_short_name_collision_between_distinct_constants_fails_loudly(self):
+        """full が違うのに短縮名が一致した形（本物の衝突は到達不能）を作って踏む。
+
+        黙って通すと後から来た定数が先の宣言を上書きし、先の定数を参照していたノードが
+        別の値を読む（沈黙誤グラフ）。
+        """
+        converter = self._converter()
+        converter._add_const(torch.zeros(3), "テスト定数")
+        # 突合キーだけ落として「別の定数が同じ短縮名に落ちた」状況にする。
+        converter._const_by_digest.clear()
+
+        with pytest.raises(AssertionError, match="衝突"):
+            converter._add_const(torch.zeros(3), "テスト定数")
 
 
 class TestDeclarations:

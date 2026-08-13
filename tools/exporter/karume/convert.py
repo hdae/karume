@@ -683,12 +683,22 @@ class Converter:
         dtype = DTYPE_NAMES[data.dtype]
         digest = hashlib.sha256(
             json.dumps([str(data.dtype), list(data.shape)]).encode() + data.numpy().tobytes()
-        ).hexdigest()[:16]
+        ).hexdigest()
+        # MUST: 同一性キーは **full hexdigest**。名前用に短縮した 16 hex（64bit）を突合に
+        # 使うと、衝突した 2 つの定数を実体比較なしで 1 本に畳む = 黙って別の値を共用した
+        # グラフが出る。名前だけは従来どおり短縮形（IR の可読性）。
         existing = self._const_by_digest.get(digest)
         if existing is not None:
             return existing
-        name = f"const_{digest}"
-        key = f"const.{digest}"
+        short = digest[:16]
+        name = f"const_{short}"
+        key = f"const.{short}"
+        if name in self.graph.initializers or key in self.tensors:
+            # full が違うのに短縮形が一致した（= 名前衝突）。確率的に到達しないが、通せば
+            # 上書きで先の定数が消える沈黙誤グラフになるので落とす。
+            raise AssertionError(
+                f"{where}: 定数名 '{name}' が別の定数と衝突した（digest {digest}）"
+            )
         self.tensors[key] = data
         self.graph.initializers[name] = IrInitializer(tensor=key, storage=IrStorage(dtype=storage))
         self.graph.values[name] = IrValue(dtype=dtype, shape=[int(d) for d in data.shape])
