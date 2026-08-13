@@ -1750,7 +1750,7 @@ def target_scales(
     """役割ごとの scale 台帳を、そのターゲットの**ラッパ内 FQN**へ張り替えて 1 本に束ねる。
 
     emit は initializer のテンソルキー（= export したモジュール内 FQN）で scale を引く
-    （`karume.emit._store_i8`）ので、`load_*` が返す素のモジュール基準の台帳をそのまま
+    （`karume.emit._plan_i8`）ので、`load_*` が返す素のモジュール基準の台帳をそのまま
     渡すと 1 本も当たらない。張り替え表は {@link TARGET_SCALE_SOURCES}。
 
     ここで落とすのは**ラッパに無い重み**だけ（`dit` の台帳は使わない内側のコピーまで含む）。

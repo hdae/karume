@@ -422,6 +422,44 @@ class TestI8Storage:
         assert breakdown.plain_bytes == 3 * 4
 
 
+class TestFailureLeavesTheGraphUntouched:
+    """1 本でも落ちたら宣言は 1 つも書き換えない（検証 + 計画 → 一括 commit の 2 段）。
+
+    適格な重みは名前昇順（`emb` → `w`）に処理されるので、以下はどちらも「先頭は通る・
+    後続で落ちる」形。途中で書き換えながら進むと、書き出しは例外で止まっても呼び出し側の
+    `graph` には `emb` だけ圧縮宣言が残り、その graph を使い回す経路（同じ graph を別 dtype で
+    書き直す / 内訳を数える）が黙って宣言と実体の食い違った答えを出す。
+    """
+
+    def test_a_failed_f16_pass_leaves_no_partial_declaration(self, tmp_path):
+        graph, tensors = weight_graph()
+        tensors["enc.w"] = torch.full((3, 4), 1.0 / 3.0)
+        before = json.loads(graph.to_json())
+
+        with pytest.raises(EmitError, match="fake-quant"):
+            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+
+        assert graph.initializers["emb"].storage.dtype == "f32"
+        assert json.loads(graph.to_json()) == before
+
+    def test_a_failed_i8_pass_leaves_no_partial_declaration(self, tmp_path):
+        graph, tensors, scales = int8_weight_graph()
+        del scales["enc.w"]
+        before = json.loads(graph.to_json())
+
+        with pytest.raises(EmitError, match="per-channel scale が無い"):
+            write_model(
+                tmp_path / "model.safetensors",
+                graph,
+                tensors,
+                weight_dtype="i8",
+                weight_scales=scales,
+            )
+
+        assert graph.initializers["emb"].storage.dtype == "f32"
+        assert json.loads(graph.to_json()) == before
+
+
 def data_layout(path) -> list[tuple[int, str, str]]:
     """safetensors のデータ節に並ぶ順（開始 offset / 名前 / dtype）。"""
     raw = path.read_bytes()

@@ -43,7 +43,7 @@ Karume のリーダはデータ節を「隙間なく・要素サイズに整列�
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -169,26 +169,31 @@ def _unrounded(name: str, tensor_key: str, detail: str) -> EmitError:
     )
 
 
-def _store_f16(
-    graph: IrGraph, out: dict[str, torch.Tensor], name: str, tensor: torch.Tensor
-) -> None:
+def _plan_f16(
+    graph: IrGraph, name: str, tensor: torch.Tensor
+) -> tuple[dict[str, torch.Tensor], IrInitializer]:
+    """f16 格納への変換計画（格納テンソルの差分・新しい宣言）を返す — 何も書き換えない。"""
     initializer = graph.initializers[name]
     if not _is_f16_exact(tensor):
         raise _unrounded(name, initializer.tensor, "f16 で表現できない値を含む")
-    out[initializer.tensor] = tensor.to(torch.float16)
-    graph.initializers[name] = IrInitializer(
-        tensor=initializer.tensor, storage=IrStorage(dtype="f16")
+    return (
+        {initializer.tensor: tensor.to(torch.float16)},
+        IrInitializer(tensor=initializer.tensor, storage=IrStorage(dtype="f16")),
     )
 
 
-def _store_i8(
+def _plan_i8(
     graph: IrGraph,
-    out: dict[str, torch.Tensor],
+    reserved: Set[str],
     name: str,
     tensor: torch.Tensor,
     scales: Mapping[str, torch.Tensor],
     axes: Mapping[str, int],
-) -> None:
+) -> tuple[dict[str, torch.Tensor], IrInitializer]:
+    """i8 格納への変換計画（格納テンソルの差分・新しい宣言）を返す — 何も書き換えない。
+
+    `reserved` は「既に埋まっている格納テンソルキー」（入力ぶん + 先行して計画した scale）。
+    """
     initializer = graph.initializers[name]
     key = initializer.tensor
     scale = scales.get(key)
@@ -210,14 +215,13 @@ def _store_i8(
     if not torch.equal(quantized.to(torch.float32) * scale, tensor):
         raise _unrounded(name, key, "i8 × per-channel scale で逆変換してもビット一致しない")
     scale_key = _scale_key(key)
-    if scale_key in out:
+    if scale_key in reserved:
         raise EmitError(
             f"initializer '{name}': scale テンソルのキー '{scale_key}' が実テンソルと衝突する"
         )
-    out[key] = quantized
-    out[scale_key] = scale.detach().contiguous()
-    graph.initializers[name] = IrInitializer(
-        tensor=key, storage=IrStorage(dtype="i8", scale=scale_key)
+    return (
+        {key: quantized, scale_key: scale.detach().contiguous()},
+        IrInitializer(tensor=key, storage=IrStorage(dtype="i8", scale=scale_key)),
     )
 
 
@@ -227,7 +231,13 @@ def _apply_weight_dtype(
     weight_dtype: str,
     weight_scales: Mapping[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    """適格な重みを圧縮格納へ落とし、graph の宣言をそれに合わせる（宣言と実体は 1 経路）。"""
+    """適格な重みを圧縮格納へ落とし、graph の宣言をそれに合わせる（宣言と実体は 1 経路）。
+
+    MUST: 「検証 + 変換計画（非破壊）→ 全件成功後に一括 commit」の 2 段で進める。途中で
+    書き換えながら進むと、後続の 1 本が落ちたときに**一部だけ圧縮宣言に化けた graph** が
+    呼び出し側に残る（write_model は例外で書き出さないので、その graph を使い回す経路が
+    黙って宣言と実体の食い違ったモデルを作る）。
+    """
     if weight_dtype not in WEIGHT_DTYPES:
         raise EmitError(
             f"格納 dtype '{weight_dtype}' は書き出せない（{' / '.join(WEIGHT_DTYPES)}）"
@@ -236,7 +246,9 @@ def _apply_weight_dtype(
         return tensors
     eligible = eligible_compressed_initializers(graph)
     axes = weight_channel_axes(graph) if weight_dtype == "i8" else {}
-    out = dict(tensors)
+    updates: dict[str, torch.Tensor] = {}
+    declarations: dict[str, IrInitializer] = {}
+    reserved = set(tensors)
     for name in sorted(eligible):
         tensor = tensors[graph.initializers[name].tensor]
         if tensor.dtype is not torch.float32:
@@ -244,16 +256,21 @@ def _apply_weight_dtype(
             # 意味論ごと違う話なので黙って圧縮格納にしない。
             continue
         if weight_dtype == "f16":
-            _store_f16(graph, out, name, tensor)
+            planned, declaration = _plan_f16(graph, name, tensor)
         else:
-            _store_i8(graph, out, name, tensor, weight_scales, axes)
-    if not any(init.storage.dtype == weight_dtype for init in graph.initializers.values()):
+            planned, declaration = _plan_i8(graph, reserved, name, tensor, weight_scales, axes)
+        updates.update(planned)
+        reserved.update(planned)
+        declarations[name] = declaration
+    committed = {**graph.initializers, **declarations}
+    if not any(init.storage.dtype == weight_dtype for init in committed.values()):
         # ADR 0006 の「圧縮指定なのに適格 0MB を沈黙させない」をエクスポータ側でも張る。
         raise EmitError(
             f"格納 {weight_dtype} を指定したが適格な重みスロットが 1 本も無い"
             f"（融合 op の重みを持たないグラフに {weight_dtype} を指定していないか確認する）"
         )
-    return out
+    graph.initializers.update(declarations)
+    return {**tensors, **updates}
 
 
 #: 格納 dtype → 要素バイト数（IR の宣言だけからバイト数を導出するための表）。
