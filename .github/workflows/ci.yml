@@ -27,7 +27,9 @@ jobs:
       - name: Lint
         run: deno lint
       - name: Type-check
-        run: deno check packages/runtime/mod.ts packages/hub/mod.ts packages/models/mod.ts
+        # 対象は root deno.json の check タスクと共有（examples 込み — CI とローカル verify の
+        # 検査範囲を二重定義しない）。
+        run: deno task check
       - name: Test (non-GPU)
         # GPU ケースは GPU_AVAILABLE=false で ignore され、全 SKIP 門番は環境変数で抜ける。
         env:
