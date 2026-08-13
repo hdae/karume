@@ -14,10 +14,17 @@
 
 MUST: 畳み込み allowlist（{@link FOLDABLE_OPS}）は「prefix スライスと可換な op」だけ —
 `f(T)[0:T,…] == f(Tmax)[0:T,…]` が成立しない op（次元縮約、T を値として使う正規化等）を
-入れてはならない。ただし**この不変条件は宣言だけでは守れない**（allowlist 掲載 op と
-sym_size の合成で T が「値」として部分木に入りうる）ため、畳み込みのたびに Tmax と
-別の点で**2 点評価して prefix 一致を実測する**（_check_prefix_commutes）。宣言ではなく
-検査が担保する。
+入れてはならない。ただし**この不変条件は allowlist だけでは守れない**（allowlist 掲載 op と
+sym_size の合成で T が「値」として部分木に入りうる）ため、2 段で守る:
+
+1. シンボルの消費位置を見る — extent（長さ・形状）位置だけを {@link SYMBOL_EXTENT_ARGS} で
+   許し、値位置へ届いた部分木は foldable から外す（symbol-as-data の拒否）。外れた op は
+   通常の lowering へ落ち、語彙外なら未対応 op として export ごと拒否される。
+2. 畳み込みのたびに Tmax と別の点で**2 点評価して prefix 一致を実測する**
+   （_check_prefix_commutes）。
+
+2 点評価は防波堤であって証明ではない — `(scalar_tensor(T)−Tmax)(scalar_tensor(T)−(Tmax−1))`
+のように 2 点で偶然一致する反例があり、単独では silent wrong value を通す。1 が本体。
 
 シンボルは複数持てる。IR 上の名前は呼び出し側が symbol_names で与え、user 入力
 placeholder の出現順（= forward の引数順）で割り当てる — torch.export の内部シンボル名
@@ -160,7 +167,8 @@ MIN_PROBE_VALUE = 2
 #: - slice / squeeze / unsqueeze / view / permute は添字の付け替えのみ
 #: - `full` / `scalar_tensor` / `clone` / `_to_copy` は値そのものに触らない
 #:
-#: 可換でない使われ方をしたら _check_prefix_commutes が 2 点評価で落とす — **宣言ではなく
+#: 可換でない使われ方のうち「シンボルを値として消費する形」は {@link SYMBOL_EXTENT_ARGS} が
+#: foldable から外し、残りは _check_prefix_commutes が 2 点評価で落とす — **宣言ではなく
 #: 検査が担保する**。除外の理由は 3 つ: ① 実体化が爆発する op（expand。frontier で止める —
 #: ただし no-op expand だけは例外で `_classify_foldable` が通す）② 非決定な op（RNG）
 #: ③ 縮約・反転など prefix と可換でないことが自明な op。
@@ -230,6 +238,30 @@ FOLDABLE_OPS = {
     # `q_idx >= 0` を全域 true の種として使う）。比較 1 本で、行 t / 列 j の値が T に
     # 依らないため prefix と可換。
     aten.ge.Scalar,
+}
+
+#: 畳み込み対象 op で **シンボルが現れてよい引数**（= extent = 長さ・形状）の名前。
+#:
+#: MUST: ここに載らない引数へシンボルが届いたノードは、シンボルを**値**として消費した
+#: （テンソルデータへ昇格させた）ものとして foldable から外す。extent 位置なら T が動かすのは
+#: 焼いた定数の**長さ**だけで prefix 同型が保たれるが、値位置に入ると要素の**中身**が Tmax
+#: でしか正しくない定数になり、2 点評価は偶然一致しうる（`scalar_tensor(T)` から作る
+#: `(T−Tmax)(T−(Tmax−1))` が反例 — 焼けば T=Tmax, Tmax−1 以外で黙って値が変わる）。
+#:
+#: - `arange` — `end` だけ。値は start / step が決め、T は長さしか動かさない
+#: - `full` / `view` / `expand` / `repeat` — 形（size / repeats）は extent、`fill_value` は値
+#: - `slice` — `end` だけ（`start` が T 依存だと先頭以外を切り出す = prefix と可換でない）
+#:
+#: 表に無い op（`scalar_tensor` / 二項 elementwise / スカラ比較 / 軸指定の dim 等）は extent
+#: 引数を持たない — シンボルが届いた時点で値としての消費。分類が不明な位置は除外側へ倒す。
+SYMBOL_EXTENT_ARGS: dict[Any, frozenset[str]] = {
+    aten.arange.default: frozenset({"end"}),
+    aten.arange.start_step: frozenset({"end"}),
+    aten.full.default: frozenset({"size"}),
+    aten.view.default: frozenset({"size"}),
+    aten.expand.default: frozenset({"size"}),
+    aten.repeat.default: frozenset({"repeats"}),
+    aten.slice.Tensor: frozenset({"end"}),
 }
 
 #: 分解を止める（融合を保つ）高位 op = **ADR 0007 の 9 op**（ADR 0012 で gelu のみから拡張）。
@@ -329,6 +361,49 @@ def _has_free_symbols(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return any(_has_free_symbols(item) for item in value)
     return False
+
+
+def _carries_symbol(value: Any) -> bool:
+    """引数が **シンボルを値として運ぶ**か（SymInt そのもの / SymInt を運ぶノード）。
+
+    テンソル引数は False — テンソル経由の伝播は「消費したノードを foldable から外す」形で
+    部分木単位に効くので、ここで見るのは記号が新たに入ってくる口だけ。
+    """
+    if isinstance(value, Node):
+        val = value.meta.get("val")
+        return not isinstance(val, torch.Tensor) and _has_free_symbols(val)
+    if isinstance(value, (list, tuple)):
+        return any(_carries_symbol(item) for item in value)
+    if isinstance(value, torch.Tensor):
+        return False
+    return _has_free_symbols(value)
+
+
+def _uses_symbol_as_data(node: Node) -> bool:
+    """シンボルを extent 以外の引数位置（= 値）で消費するノードか（{@link SYMBOL_EXTENT_ARGS}）。
+
+    引数名は op のスキーマから引く — 位置引数と kwargs のどちらで来ても同じ判定にするため。
+    """
+    allowed = SYMBOL_EXTENT_ARGS.get(node.target, frozenset())
+    names = [argument.name for argument in node.target._schema.arguments]
+    named = [*zip(names, node.args, strict=False), *node.kwargs.items()]
+    return any(name not in allowed and _carries_symbol(value) for name, value in named)
+
+
+def _bitwise_equal(left: torch.Tensor, right: torch.Tensor) -> bool:
+    """2 つのテンソルを dtype / shape 込みで **ビット厳密**に比べる。
+
+    MUST: 畳み込みの 2 点比較を数値等価（`torch.equal`）でやると `-0.0 == 0.0` が真になり、
+    符号ビットだけ違う定数を焼く形が素通りする（initializer は signed zero をそのまま運ぶので、
+    実行時に符号が黙って変わる）。浮動小数は連続バイト列の整数 view で比べ、NaN も payload
+    まで一致した時だけ通す。
+    """
+    if left.dtype is not right.dtype or left.shape != right.shape:
+        return False
+    if left.is_floating_point():
+        left = left.contiguous().flatten().view(torch.uint8)
+        right = right.contiguous().flatten().view(torch.uint8)
+    return torch.equal(left, right)
 
 
 def _holds_node(value: Any) -> bool:
@@ -521,8 +596,10 @@ class Converter:
         不適格にする（重みは initializer のまま運ぶ）。
 
         MUST: 記号依存を許すのは「Tmax で焼いて prefix スライスで切り出す」表現が入った
-        から（ADR 0010）。可換性は allowlist ではなく _check_prefix_commutes の 2 点実測が
-        担保する — ここで記号の有無を見て通す／落とすことはしない。
+        から（ADR 0010）。ただし記号を**値**として消費した部分木は焼いた定数が Tmax でしか
+        正しくないので、{@link SYMBOL_EXTENT_ARGS} の extent 位置以外に記号が届いたノードは
+        ここで落とす（下流は依存の連鎖で自然に外れる）。残る可換性は
+        _check_prefix_commutes の 2 点実測が受け止める。
         """
         foldable: set[str] = set()
         for node in self.gm.graph.nodes:
@@ -550,6 +627,10 @@ class Converter:
                 if not same_extents(node.meta["val"], node.args[0].meta.get("val")):
                     continue
             elif node.target not in FOLDABLE_OPS:
+                continue
+            if _uses_symbol_as_data(node):
+                # 記号がテンソルデータへ昇格した部分木（`scalar_tensor(T)` 等）。焼くと Tmax
+                # でだけ正しい定数になり、2 点評価は偶然一致しうる（module docstring の反例）。
                 continue
             if all(dep.name in foldable for dep in node.all_input_nodes):
                 foldable.add(node.name)
@@ -680,8 +761,8 @@ class Converter:
         そのまま）。多シンボルでは第 2 点で全シンボルを同時に動かす（1 つずつ動かすと他を
         Tmax に固定した断面しか見ず、シンボル間の積の形を取り逃す）。
 
-        NOTE: 比較はバイト一致（`torch.equal`）。NaN を含む畳み込み定数は常に不一致になり
-        畳まれない — 保守側に倒れるだけで、黙って通ることはない。
+        NOTE: 比較は **ビット厳密**（{@link _bitwise_equal}）。数値等価だと `-0.0 == 0.0` が
+        素通りするので、符号ビットまで一致を要求する。NaN は payload まで一致した時だけ通る。
         """
         probed = self._fold_eval(node, FOLD_POINT_PROBE)
         expected = folded
@@ -693,8 +774,7 @@ class Converter:
         if (
             isinstance(probed, torch.Tensor)
             and isinstance(expected, torch.Tensor)
-            and probed.shape == expected.shape
-            and torch.equal(probed, expected)
+            and _bitwise_equal(probed, expected)
         ):
             return
         points = {

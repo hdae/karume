@@ -12,7 +12,7 @@ from conftest import SYM_MAX, node_ops, only_node
 from torch import nn
 from torch.export import Dim
 
-from karume.convert import UnsupportedAtenOpsError, normalize_boundary_tensor
+from karume.convert import UnsupportedAtenOpsError, _bitwise_equal, normalize_boundary_tensor
 from karume.ops import EMITTABLE_OPS
 from karume.pipeline import export_to_file
 
@@ -370,24 +370,68 @@ class TestSymbolicConstantFolding:
         assert node_ops(graph) == ["add"]
 
     def test_a_subtree_that_uses_the_symbol_as_a_value_is_rejected(self, convert_module, dyn_t):
-        """`arange(T) / T` は allowlist だけ見れば適格 — 2 点評価の実測だけが止められる。"""
+        """`arange(T) / T` は allowlist だけ見れば適格 — 消費位置の検査が止める。
+
+        NOTE: 期待する診断を「2 点評価の非可換」から差し替えた。除数の T は extent でなく
+        値位置なので div が畳み込みから外れ、テンソル入力 1 本の形として arity 検査が先に
+        落とす（拒否されること自体は変わらない）。
+        """
 
         class NormalizedPositions(nn.Module):
             def forward(self, x):
                 return x + torch.arange(x.shape[0], dtype=torch.float32) / x.shape[0]
 
-        with pytest.raises(NotImplementedError, match="prefix スライスと非可換"):
+        with pytest.raises(NotImplementedError, match=r"SymInt .* を値として使う形"):
             convert_module(NormalizedPositions(), (torch.randn(6),), ({0: dyn_t},))
 
     def test_a_constant_filled_with_the_symbol_is_rejected(self, convert_module, dyn_t):
-        """`full((T,), T)` — shape も値も T 依存で、prefix の値だけが食い違う形。"""
+        """`full((T,), T)` — shape も値も T 依存で、prefix の値だけが食い違う形。
+
+        NOTE: 期待する診断を「2 点評価の非可換」から差し替えた。`fill_value` の T は値位置
+        なので full が畳み込みから外れ、実行系の語彙に無い op として全件列挙へ回る。
+        """
 
         class FilledWithLength(nn.Module):
             def forward(self, x):
                 return x + torch.full((x.shape[0],), x.shape[0]).to(torch.float32)
 
-        with pytest.raises(NotImplementedError, match="prefix スライスと非可換"):
+        with pytest.raises(UnsupportedAtenOpsError) as err:
             convert_module(FilledWithLength(), (torch.randn(6),), ({0: dyn_t},))
+
+        assert "aten.full.default" in err.value.ops
+
+    def test_a_symbol_promoted_to_tensor_data_is_rejected(self, convert_module, dyn_t):
+        """`scalar_tensor(T)` でテンソルデータへ昇格したシンボルは畳まない（2 点評価の穴）。
+
+        `(T−Tmax)(T−(Tmax−1))` は 2 つの評価点で**両方 0** になるので実測はすり抜ける —
+        焼けば T=2 で 182 倍が黙って消える。消費位置（値 vs extent）で落とすため
+        scalar_tensor は畳み込みから外れ、実行系の語彙に無い op として拒否される。
+        """
+
+        class SymbolAsData(nn.Module):
+            def forward(self, x):
+                length = torch.scalar_tensor(x.shape[0], dtype=torch.float32)
+                return x * ((length - SYM_MAX) * (length - (SYM_MAX - 1)))
+
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            convert_module(SymbolAsData(), (torch.randn(6),), ({0: dyn_t},))
+
+        assert "aten.scalar_tensor.default" in err.value.ops
+
+    def test_a_symbol_free_fill_value_still_folds_under_a_symbolic_extent(
+        self, convert_module, dyn_t
+    ):
+        """落とすのは消費**位置** — 形が T 依存でも、値が T に依らなければ従来どおり畳む。"""
+
+        class ConstantRow(nn.Module):
+            def forward(self, x):
+                return x + torch.full((x.shape[0],), 3.0)
+
+        graph, tensors = convert_module(ConstantRow(), (torch.randn(6),), ({0: dyn_t},))
+
+        sliced = only_node(graph, "sym_prefix_slice")
+        baked = tensors[graph.initializers[sliced.ins[0]].tensor]
+        assert torch.equal(baked, torch.full((SYM_MAX,), 3.0))
 
     def test_an_unbounded_symbol_is_rejected(self, convert_module):
         """Tmax が無ければ焼く長さを決められない（既定値で進めない）。"""
@@ -408,6 +452,29 @@ class TestSymbolicConstantFolding:
 
         with pytest.raises(ValueError, match="2 点評価ができない"):
             convert_module(PositionIndex(), (torch.randn(2),), ({0: Dim("T", min=1, max=2)},))
+
+
+class TestFoldProbeComparison:
+    """2 点評価の比較はビット厳密（数値等価では符号ビットの差が素通りする）。
+
+    NOTE: 比較関数を直に呼ぶ。symbol-as-data を拒否した後、export 経由でこの差を作るには
+    「値が T に依るのに畳める部分木」が要る — つまり黙って通る形そのもので、テストから
+    合成できない（合成できたらそれが未修正のバグ）。
+    """
+
+    def test_negative_zero_is_not_equal_to_positive_zero(self):
+        minus = torch.tensor([-0.0])
+        plus = torch.tensor([0.0])
+
+        assert torch.equal(minus, plus)  # 数値等価は素通りする — 強化した理由そのもの
+        assert not _bitwise_equal(minus, plus)
+
+    def test_identical_bits_are_equal(self):
+        assert _bitwise_equal(torch.tensor([[1.5, -0.0]]), torch.tensor([[1.5, -0.0]]))
+
+    def test_a_shape_or_dtype_difference_is_not_equal(self):
+        assert not _bitwise_equal(torch.tensor([1.0]), torch.tensor([[1.0]]))
+        assert not _bitwise_equal(torch.tensor([1.0]), torch.tensor([1], dtype=torch.int32))
 
 
 class TestCommonSubexpression:
