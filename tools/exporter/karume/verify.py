@@ -23,6 +23,7 @@ from typing import Any
 from safetensors import safe_open
 
 from karume.dims import MAX_SAFE_INT, is_symbol_name, parse_dim, try_parse_dim
+from karume.emit import EmitError, eligible_compressed_initializers, weight_channel_axes
 from karume.ir import (
     IR_FORMAT,
     IR_METADATA_KEY,
@@ -213,6 +214,10 @@ def _parse_storage(value: Any, where: str) -> IrStorage:
         raw = obj["group_size"]
         if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
             raise IrError(f"{where}.group_size: 正整数でない")
+        # TS 側は JSON の数値として読むので 2^53−1 を超える値は整数として持てない
+        # （packages/runtime/src/format/ir.ts）。ここで受理するとランタイムだけが落ちる。
+        if raw > MAX_SAFE_INT:
+            raise IrError(f"{where}.group_size: {raw} が安全整数 2^53−1 を超える")
         group_size = raw
     return IrStorage(dtype=dtype, scale=scale, group_size=group_size)
 
@@ -582,6 +587,19 @@ READER_DTYPE_BYTES = {
 _HEADER_LENGTH_BYTES = 8
 
 
+def _as_reader_index(value: Any, where: str, what: str) -> int:
+    """TS リーダの `asIndex`（`packages/runtime/src/format/safetensors.ts`）と同じ受理集合。
+
+    MUST: 非負であることだけでなく **2^53−1 以下**も見る。ヘッダ JSON の数値は TS 側では
+    JS の number として読まれるので、これを超える値は整数として持てず必ず拒否される —
+    Python 側が要素数の積だけを見て受理すると、「verify は緑・ブラウザのリーダだけ落ちる」
+    ファイルが配布形として残る。bool は int の派生だが添字ではない。
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > MAX_SAFE_INT:
+        raise ContainerError(f"{where}: {what} {value!r} が非負整数（2^53−1 以下）でない")
+    return value
+
+
 def assert_reader_layout(path: str | Path) -> None:
     """Karume のリーダ（`packages/runtime/src/format/safetensors.ts`）が読めるレイアウトかを見る。
 
@@ -594,19 +612,26 @@ def assert_reader_layout(path: str | Path) -> None:
     MUST: この検査は `safetensors` のリーダを通さない（通すと同じ規則の再実装ではなく
     「別のリーダが読めた」だけの主張になる）。ヘッダ JSON を直に読んで規則を写す。
     """
-    with Path(path).open("rb") as handle:
+    file = Path(path)
+    file_size = file.stat().st_size
+    with file.open("rb") as handle:
         raw_length = handle.read(_HEADER_LENGTH_BYTES)
         if len(raw_length) != _HEADER_LENGTH_BYTES:
             raise ContainerError(
                 f"ファイルが短すぎる: {len(raw_length)} バイト（ヘッダ長すら無い）"
             )
         header_length = int.from_bytes(raw_length, "little")
+        # MUST: 宣言長を read へ渡す前にファイル実長で拘束する（`dist.safetensors_header` と
+        # 同型の防御）。u64 をそのまま渡すと規則違反が ContainerError ではなく
+        # OverflowError / MemoryError として漏れ、門の診断が「不正なファイル」ではなく
+        # 「エクスポータが壊れた」に見える。
+        if header_length <= 0 or header_length > file_size - _HEADER_LENGTH_BYTES:
+            raise ContainerError(
+                f"ヘッダ長 {header_length} がファイル長 {file_size} と矛盾している"
+            )
         header_bytes = handle.read(header_length)
-        if len(header_bytes) != header_length:
-            raise ContainerError(f"ヘッダ長 {header_length} がファイル長を超える")
         data_start = _HEADER_LENGTH_BYTES + header_length
-        handle.seek(0, 2)
-        data_length = handle.tell() - data_start
+        data_length = file_size - data_start
 
     try:
         header = json.loads(header_bytes)
@@ -617,16 +642,25 @@ def assert_reader_layout(path: str | Path) -> None:
     for name, entry in header.items():
         if name == "__metadata__":
             continue
+        where = f"テンソル '{name}'"
         dtype = entry["dtype"]
         if dtype not in READER_DTYPE_BYTES:
-            raise ContainerError(f"テンソル '{name}': リーダが知らない dtype '{dtype}'")
-        begin, end = entry["data_offsets"]
+            raise ContainerError(f"{where}: リーダが知らない dtype '{dtype}'")
+        offsets = entry["data_offsets"]
+        if not isinstance(offsets, list) or len(offsets) != 2:
+            raise ContainerError(f"{where}: data_offsets が 2 要素の配列でない: {offsets!r}")
+        begin = _as_reader_index(offsets[0], where, "data_offsets")
+        end = _as_reader_index(offsets[1], where, "data_offsets")
         count = 1
-        for dim in entry["shape"]:
-            count *= dim
+        for axis, dim in enumerate(entry["shape"]):
+            count *= _as_reader_index(dim, where, f"shape[{axis}] の次元")
+            # TS 側は積を 1 段ごとに安全整数で見る（elementCount）。積だけを最後に見ると
+            # 途中で精度を失った要素数がバイト長と偶然一致する形を通してしまう。
+            if count > MAX_SAFE_INT:
+                raise ContainerError(f"{where}: 要素数が安全整数 2^53−1 を超える")
         if end - begin != count * READER_DTYPE_BYTES[dtype]:
             raise ContainerError(
-                f"テンソル '{name}': サイズ不一致 offsets={end - begin} "
+                f"{where}: サイズ不一致 offsets={end - begin} "
                 f"期待={count * READER_DTYPE_BYTES[dtype]}（{dtype} {entry['shape']}）"
             )
         declared.append((begin, end, name, dtype))
@@ -658,22 +692,28 @@ def _assert_scale_tensor(
     name: str,
     scale_key: str,
     weight_shape: list[Any],
+    channel_axis: int | None,
 ) -> None:
     """量子化格納の scale テンソルを実ファイルと突き合わせる
     （`packages/runtime/src/format/container.ts` の鏡像）。
 
-    MUST: 4 点すべてを見る。scale は IR の値ではなく safetensors の**素のテンソル**なので、
+    MUST: 5 点すべてを見る。scale は IR の値ではなく safetensors の**素のテンソル**なので、
     ここを緩めるとロード時（ランタイム）まで誤りが出ない — 「書けたが読めない」ファイルを
     配布物として残さないのが `verify_model` の役目（ADR 0005）。
 
     1. **実在**する
     2. **F32**（scale を別 dtype のビット列として読むと全チャネルが桁違いの値になる）
     3. **重みと同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値）
-    4. **他 initializer の実体との名前衝突が無い**（別の重みを scale として読む形）
+    4. `channel_axis` が決まる（= 適格重み）なら、**その軸だけが伸びた keepdim 形ちょうど**
+    5. **他 initializer の実体との名前衝突が無い**（別の重みを scale として読む形）
 
-    NOTE: 「非 1 の軸が消費側 op の**チャネル軸**と一致するか」はここでは見ない（TS 側
-    container.ts と同じ切り方 — あちらは executor が見る）。書き出し側の相当物は
-    `emit._store_i8` の keepdim 形検査で、そちらは軸を知っているので厳密に見る。
+    NOTE: 3 と 4 の切り分けはランタイムの 2 経路そのもの。適格外（ホストで f32 展開 —
+    `packages/runtime/src/format/i8.ts` の decodeI8）は汎用 keepdim broadcast を stride で
+    引くので 3 まで、適格（圧縮のまま GPU 常駐）はカーネルが `wscale[出力チャネル]` と
+    平坦に読むので `packages/runtime/src/runtime/executor.ts` の assertChannelScale が 4 を
+    要求する。TS 側は container.ts が 3 まで・executor が 4 と層が分かれるが、verify は
+    配布形 1 ファイルだけで両層を通せるのでここで両方見る（軸の導出はランタイム
+    `plan.ts` の鏡像 = `emit.weight_channel_axes`）。
     """
     where = f"initializer '{name}'"
     if scale_key not in keys:
@@ -696,6 +736,14 @@ def _assert_scale_tensor(
         )
     if any(dim != 1 and dim != weight_shape[axis] for axis, dim in enumerate(shape)):
         raise ContainerError(f"{where}: scale {shape} が重み {weight_shape} へ broadcast できない")
+    if channel_axis is None:
+        return
+    expected = [dim if axis == channel_axis else 1 for axis, dim in enumerate(weight_shape)]
+    if shape != expected:
+        raise ContainerError(
+            f"{where}: scale {shape} が重み {weight_shape} のチャネル軸 {channel_axis} の"
+            f" keepdim 形 {expected} でない（適格重みの scale はカーネルが平坦に引く）"
+        )
 
 
 def verify_model(path: str | Path) -> IrGraph:
@@ -707,6 +755,15 @@ def verify_model(path: str | Path) -> IrGraph:
         if text is None:
             raise ContainerError(f"__metadata__.{IR_METADATA_KEY} が無い（Karume モデルではない）")
         graph = parse_ir_graph(text)
+        # per-channel scale の受理形は「圧縮のまま GPU 常駐するか」で 2 通りに分かれる
+        # （_assert_scale_tensor の 3 / 4）。判定も軸の導出もランタイム
+        # （packages/runtime/src/runtime/plan.ts）と同じものを使う — 別実装にすると
+        # 「verify は緑・ロードだけ落ちる」がこの 2 経路の境目で復活する。
+        eligible = eligible_compressed_initializers(graph)
+        try:
+            channel_axes = weight_channel_axes(graph)
+        except EmitError as cause:
+            raise ContainerError(str(cause)) from cause
         keys = set(handle.keys())
         for name, initializer in graph.initializers.items():
             where = f"initializer '{name}'"
@@ -725,7 +782,15 @@ def verify_model(path: str | Path) -> IrGraph:
                 raise ContainerError(f"{where}: 宣言 shape {declared} ≠ 実テンソル {actual}")
             scale = initializer.storage.scale
             if scale is not None:
-                _assert_scale_tensor(handle, graph, keys, name, scale, declared)
+                _assert_scale_tensor(
+                    handle,
+                    graph,
+                    keys,
+                    name,
+                    scale,
+                    declared,
+                    channel_axes.get(name) if name in eligible else None,
+                )
     assert_runtime_support(graph)
     assert_op_contracts(graph)
     return graph

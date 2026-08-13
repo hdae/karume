@@ -20,6 +20,7 @@ from karume.verify import (
     ContainerError,
     IrError,
     assert_op_contracts,
+    assert_reader_layout,
     assert_runtime_support,
     parse_ir_graph,
     verify_model,
@@ -310,6 +311,18 @@ class TestStorageDescriptor:
                     "w": {
                         "tensor": "enc.w",
                         "storage": {"dtype": "i8", "scale": "enc.s", "group_size": 0},
+                    }
+                }
+            )
+
+    def test_group_size_beyond_the_safe_integer_range_is_rejected(self):
+        """TS 側は JSON の数値を JS の number として読むので 2^53 以上は整数で持てない。"""
+        with pytest.raises(IrError, match="安全整数"):
+            parse(
+                initializers={
+                    "w": {
+                        "tensor": "enc.w",
+                        "storage": {"dtype": "i8", "scale": "enc.s", "group_size": 2**53},
                     }
                 }
             )
@@ -726,6 +739,79 @@ class TestContainer:
             verify_model(path)
 
 
+def write_raw_container(path, header: dict, data: bytes = b""):
+    """ヘッダ JSON を直に組んだ safetensors（`save_file` では作れない不正形の故障注入用）。
+
+    ヘッダ長は 8 の倍数へ空白で詰める（`emit._HEADER_ALIGN` と同じ規約）。詰めないと
+    データ節先頭が 4 バイト境界から外れ、整列検査が先に落ちて**添字の域の検査を踏めない**。
+    """
+    blob = json.dumps(header).encode("utf-8")
+    blob += b" " * (-len(blob) % 8)
+    path.write_bytes(len(blob).to_bytes(8, "little") + blob + data)
+    return path
+
+
+class TestReaderIndexRange:
+    """ヘッダの添字は TS リーダの `asIndex`（非負・2^53−1 以下）と同じ受理集合。
+
+    `packages/runtime/src/format/safetensors.ts` が拒否する値を verify が受理すると、
+    「エクスポータは緑・ブラウザのリーダだけ落ちる」ファイルが配布形として残る。要素数の積
+    だけを見る検査は、負の次元も安全整数超も**積が合ってしまう**形で素通りする。
+    """
+
+    def test_a_negative_dimension_is_rejected(self, tmp_path):
+        """`[0,-1]` は積 0 でバイト長 0 と一致するので、積だけの検査では素通りする。"""
+        header = {"t": {"dtype": "F32", "shape": [0, -1], "data_offsets": [0, 0]}}
+
+        with pytest.raises(ContainerError, match="非負整数"):
+            assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
+
+    def test_a_dimension_beyond_the_safe_integer_range_is_rejected(self, tmp_path):
+        header = {"t": {"dtype": "F32", "shape": [0, 2**53], "data_offsets": [0, 0]}}
+
+        with pytest.raises(ContainerError, match="非負整数"):
+            assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
+
+    def test_an_element_count_beyond_the_safe_integer_range_is_rejected(self, tmp_path):
+        """各次元は安全整数でも**積**が越える形（TS の elementCount と同じ段階で見る）。"""
+        header = {"t": {"dtype": "F32", "shape": [2**27, 2**27], "data_offsets": [0, 0]}}
+
+        with pytest.raises(ContainerError, match="要素数が安全整数"):
+            assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
+
+    def test_a_data_offset_beyond_the_safe_integer_range_is_rejected(self, tmp_path):
+        """サイズ不一致より前に添字の域で落ちる（TS は asIndex を先に通す）。"""
+        header = {"t": {"dtype": "F32", "shape": [2], "data_offsets": [0, 2**53]}}
+
+        with pytest.raises(ContainerError, match="非負整数"):
+            assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
+
+
+class TestHeaderLengthBound:
+    """ヘッダ長 u64 はファイル実長で拘束してから read へ渡す（`dist.safetensors_header` と同型）。
+
+    拘束しないと巨大値が `read` へ抜けて OverflowError / MemoryError になり、規則違反が
+    門の例外（ContainerError）として出てこない。
+    """
+
+    @pytest.mark.parametrize("header_length", [2**64 - 1, 2**40], ids=["u64-max", "1TiB"])
+    def test_an_oversized_header_length_is_reported_as_a_container_error(
+        self, tmp_path, header_length
+    ):
+        path = tmp_path / "m.safetensors"
+        path.write_bytes(header_length.to_bytes(8, "little") + b'{"__metadata__":{}}')
+
+        with pytest.raises(ContainerError, match="ファイル長"):
+            assert_reader_layout(path)
+
+    def test_a_zero_header_length_is_rejected(self, tmp_path):
+        path = tmp_path / "m.safetensors"
+        path.write_bytes((0).to_bytes(8, "little"))
+
+        with pytest.raises(ContainerError, match="ファイル長"):
+            assert_reader_layout(path)
+
+
 def i8_graph(scale_key: str = "enc.s") -> dict:
     """linear の重みを i8 + companion scale で格納する最小グラフ（ADR 0019）。"""
     graph = base_graph()
@@ -799,20 +885,22 @@ class TestQuantizedScaleTensor:
         with pytest.raises(ContainerError, match="broadcast できない"):
             verify_model(path)
 
-    def test_a_broadcastable_but_wrong_axis_scale_is_accepted_here(self, tmp_path):
-        """`[1,4]` は broadcast できるので**この層は通す**（TS 側 container.ts と同じ切り方）。
+    def test_a_broadcastable_but_wrong_axis_scale_is_rejected_for_an_eligible_weight(
+        self, tmp_path
+    ):
+        """`[1,4]` は broadcast できるが、linear のチャネル軸は 0 なので受理しない。
 
-        カーネルは scale を平坦に `wscale[出力チャネル]` としか読まないので、この形は
-        沈黙誤値になりうる。門は 2 段に分かれていて、書き出し側は `emit._store_i8`
-        （軸を知っている）、実行側は `packages/runtime/src/runtime/executor.ts` の
-        assertChannelScale が持つ。
-        ここが「読める形か」しか見ないことを、逆に固定しておく。
+        適格重み（圧縮のまま GPU 常駐）のカーネルは scale を平坦に `wscale[出力チャネル]`
+        としか読まないので、この形は**沈黙誤値**になる — 実行側の
+        `packages/runtime/src/runtime/executor.ts` assertChannelScale と同じ受理集合を
+        ここでも張る。
         """
         path = write_container(
             tmp_path / "m.safetensors", i8_graph(), i8_tensors(**{"enc.s": torch.ones(1, 4)})
         )
 
-        assert verify_model(path).initializers["w"].storage.scale == "enc.s"
+        with pytest.raises(ContainerError, match="チャネル軸 0"):
+            verify_model(path)
 
     def test_a_scale_key_colliding_with_a_real_tensor_is_rejected(self, tmp_path):
         """別の initializer の実体を scale として読むと、ロードは通って値だけが壊れる。"""
@@ -820,6 +908,118 @@ class TestQuantizedScaleTensor:
 
         with pytest.raises(ContainerError, match="の実体と同じキー"):
             verify_model(path)
+
+
+def conv_i8_graph(op: str) -> dict:
+    """conv 系の重みを i8 で格納する最小グラフ（重みは `enc.w` / scale は `enc.s`）。
+
+    重みは conv1d が `[Cout, Cin/groups, K] = [3,2,2]`、conv_transpose1d が
+    `[Cin, Cout, K] = [2,3,2]`（転置レイアウト）。どちらも Cin ≠ Cout の非対称形なので、
+    軸を取り違えた scale が「たまたま broadcast できる」形として残る。
+    """
+    weight_shape = [3, 2, 2] if op == "conv1d" else [2, 3, 2]
+    out_length = 3 if op == "conv1d" else 8
+    attrs = (
+        {"stride": 1, "padding": 0, "dilation": 1, "groups": 1}
+        if op == "conv1d"
+        else {"stride": 2, "padding": 0}
+    )
+    return {
+        "format": "karume-ir",
+        "version": 1,
+        "requires": {"ops": [op]},
+        "symbols": [],
+        "inputs": [{"name": "x", "dtype": "f32", "shape": [1, 2, 4]}],
+        "outputs": ["y"],
+        "initializers": {
+            "w": {"tensor": "enc.w", "storage": {"dtype": "i8", "scale": "enc.s"}},
+            "b": {"tensor": "enc.b", "storage": {"dtype": "f32"}},
+        },
+        "values": {
+            "w": {"dtype": "f32", "shape": weight_shape},
+            "b": {"dtype": "f32", "shape": [3]},
+            "y": {"dtype": "f32", "shape": [1, 3, out_length]},
+        },
+        "nodes": [{"op": op, "ins": ["x", "w", "b"], "outs": ["y"], "attrs": attrs}],
+    }
+
+
+def conv_i8_tensors(op: str, scale: torch.Tensor) -> dict[str, torch.Tensor]:
+    weight_shape = (3, 2, 2) if op == "conv1d" else (2, 3, 2)
+    return {
+        "enc.w": torch.ones(weight_shape, dtype=torch.int8),
+        "enc.b": torch.ones(3),
+        "enc.s": scale,
+    }
+
+
+class TestQuantizedScaleChannelAxis:
+    """適格重みの scale はチャネル軸ちょうどの keepdim 形だけ
+    （`packages/runtime/src/runtime/executor.ts` の assertChannelScale の鏡像）。
+
+    軸は消費側 op から引く（`packages/runtime/src/ops.ts` の `WEIGHT_CHANNEL_AXES` —
+    conv_transpose1d だけ転置レイアウトで 1）。重みの shape だけでは決まらないので、
+    形の検査だけでは linear の `[1,4]` と conv_transpose1d の `[1,Cout,1]` を区別できない。
+    """
+
+    def test_conv1d_takes_the_first_axis(self, tmp_path):
+        path = write_container(
+            tmp_path / "m.safetensors",
+            conv_i8_graph("conv1d"),
+            conv_i8_tensors("conv1d", torch.ones(3, 1, 1)),
+        )
+
+        assert verify_model(path).initializers["w"].storage.scale == "enc.s"
+
+    def test_conv_transpose1d_takes_the_second_axis(self, tmp_path):
+        path = write_container(
+            tmp_path / "m.safetensors",
+            conv_i8_graph("conv_transpose1d"),
+            conv_i8_tensors("conv_transpose1d", torch.ones(1, 3, 1)),
+        )
+
+        assert verify_model(path).initializers["w"].storage.scale == "enc.s"
+
+    def test_conv_transpose1d_rejects_the_first_axis(self, tmp_path):
+        """`[2,1,1]` は重み `[2,3,2]` へ broadcast できる — 軸を見なければ素通りする形。"""
+        path = write_container(
+            tmp_path / "m.safetensors",
+            conv_i8_graph("conv_transpose1d"),
+            conv_i8_tensors("conv_transpose1d", torch.ones(2, 1, 1)),
+        )
+
+        with pytest.raises(ContainerError, match="チャネル軸 1"):
+            verify_model(path)
+
+    def test_an_ineligible_weight_keeps_the_general_broadcast_rule(self, tmp_path):
+        """適格外（重みスロット以外の消費）はホストで f32 展開されるので軸の概念が無い。
+
+        展開は `packages/runtime/src/format/i8.ts` の decodeI8 で、keepdim broadcast を
+        stride で引く — 軸を要求すると**ランタイムが読めるファイルを verify が落とす**。
+        """
+        graph = {
+            "format": "karume-ir",
+            "version": 1,
+            "requires": {"ops": ["mul"]},
+            "symbols": [],
+            "inputs": [{"name": "x", "dtype": "f32", "shape": [3, 4]}],
+            "outputs": ["y"],
+            "initializers": {
+                "w": {"tensor": "enc.w", "storage": {"dtype": "i8", "scale": "enc.s"}}
+            },
+            "values": {
+                "w": {"dtype": "f32", "shape": [3, 4]},
+                "y": {"dtype": "f32", "shape": [3, 4]},
+            },
+            "nodes": [{"op": "mul", "ins": ["x", "w"], "outs": ["y"], "attrs": {}}],
+        }
+        path = write_container(
+            tmp_path / "m.safetensors",
+            graph,
+            {"enc.w": torch.ones(3, 4, dtype=torch.int8), "enc.s": torch.ones(1, 4)},
+        )
+
+        assert verify_model(path).initializers["w"].storage.scale == "enc.s"
 
 
 class TestStridedRank:
