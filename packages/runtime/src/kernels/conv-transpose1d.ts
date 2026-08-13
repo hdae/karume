@@ -1,6 +1,7 @@
 /**
  * conv_transpose1d（`x[B,Cin,L] ⊛ᵀ W[Cin,Cout,K] + b[Cout]`、f32）の固定カーネル。
- * 1 スレッド = 1 出力要素の **gather 形**（正しさ優先 — 性能マイルストーンでの置換対象）。
+ * 1 スレッド = 1 出力要素の **gather 形**（full-write 不変条件の側の要請 — 下記）。縮約の内側は
+ * **residue grouping**（perf-ledger K-10 — 有効 tap だけを O(1) の範囲で回る）。
  *
  * ## gather 形である理由（full-write 不変条件 — ADR 0014）
  *
@@ -13,7 +14,15 @@
  * 出力座標 `ox` に寄与するのは `ox = ix·stride − padding + k` を満たす `(ix, k)` の組で、
  * `t = ox + padding − k` が **stride で割り切れて** `0 <= t/stride < L` のときだけ。
  * 割り切れない `k` は「そこに入力が無い」＝寄与ゼロなので、padding 域と同じく
- * **加算せずに読み飛ばす**（0 を足すと丸めの並びが変わる）。
+ * **加算に現れない**（0 を足すと丸めの並びが変わる）。
+ *
+ * ## residue grouping（perf-ledger K-10）
+ *
+ * 割り切れ判定は `k ≡ shifted (mod stride)`（`shifted = ox + padding`）と同値なので、
+ * `shifted = q·stride + r` へ**出力要素あたり 1 回だけ**分解すれば、有効 tap は
+ * `k = r + j·stride` / `ix = q − j` と**数え上げ**で書ける。`j` の範囲は 3 本の不等式
+ * （`ix <= L−1` / `ix >= 0` / `k <= K−1`）で O(1) に閉じるので、`k` 全数の走査と剰余判定が
+ * 消える（dacvae の実測形 stride 8 / K 16 では tap の 7/8 が無効判定だった）。
  *
  * ## 契約の狭さ
  *
@@ -21,8 +30,9 @@
  *   合う形（Cin == Cout）が作れて shape 検査を素通りするため、テストは**非対称チャネル数**で
  *   固定する（ADR 0015 / recon §4）。
  * - **stride >= 1 MUST**。プロトタイプ実装は stride 0 でループが進まず **GPU ハング**（例外に
- *   ならない）だった。gather 形の本カーネルはループ境界に stride を使わないが、`t % stride` が
- *   ゼロ除算になるので {@link convTranspose1dParams} で遮断する（契約検査と二重の門）。
+ *   ならない）だった。gather 形の本カーネルはループ境界に stride を使わないが、residue 分割の
+ *   `shifted % stride` が要素あたり 1 回ゼロ除算になるので {@link convTranspose1dParams} で
+ *   遮断する（契約検査と二重の門）。
  * - bias は常時あり（アリティ 3 固定）。bias 無しはエクスポータのゼロ bias 合成で正規化される。
  * - `output_padding` / `dilation` / `groups` は attrs に無い = 実測どおりの 0 / 1 / 1 固定。
  *
@@ -53,7 +63,7 @@ export const CONV_TRANSPOSE1D_WORKGROUP_SIZE = 256;
 export const CONV_TRANSPOSE1D_SCALE_BINDING = 5;
 
 export const convTranspose1dKey = (weight: WeightStorage): string =>
-  `conv_transpose1d:v1:f32:gather:wg${CONV_TRANSPOSE1D_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
+  `conv_transpose1d:v2:f32:gather:wg${CONV_TRANSPOSE1D_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
 
 export const convTranspose1dWgsl = (weight: WeightStorage): string =>
   `// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32${
@@ -90,21 +100,30 @@ fn main(
     let oc = rest / dims.length_out;
     let ox = rest % dims.length_out;
     // ox = ix*stride - padding + k  =>  ix*stride = ox + padding - k
-    let shifted = i32(ox) + i32(dims.padding);${weightScaleWgsl(weight, "oc", "    ")}
+    // 有効 tap は k ≡ shifted (mod stride) だけ — 出力要素あたり 1 回だけ商と剰余へ分解する
+    let shifted = ox + dims.padding;
+    let q = shifted / dims.stride;
+    let r = shifted % dims.stride;
+    // 有効 tap は k = r + j*stride / ix = q - j。j の範囲は 3 本の不等式で閉じる:
+    // ix <= L-1 → j >= q+1-L / ix >= 0 → j <= q / k <= K-1 → j <= (K-1-r)/stride
+    let j_start = max(0, i32(q) + 1 - i32(dims.length_in));
+    // r > K-1（stride > K のときだけ到達）は有効 tap ゼロ。K-1-r の u32 桁借りを避けて
+    // j_end = -1 < j_start（j_start >= 0）で空ループへ倒す
+    var j_end = -1;
+    if (r < dims.kernel) {
+      j_end = min(i32((dims.kernel - 1u - r) / dims.stride), i32(q));
+    }${weightScaleWgsl(weight, "oc", "    ")}
     var acc = bias[oc];
     for (var ic = 0u; ic < dims.channels_in; ic = ic + 1u) {
       let x_base = (b * dims.channels_in + ic) * dims.length_in;
       // 重みは [Cin, Cout, K] — conv1d と転置（第 1 軸が入力チャネル）
       let w_base = (ic * dims.channels_out + oc) * dims.kernel;
-      for (var k = 0u; k < dims.kernel; k = k + 1u) {
-        let t = shifted - i32(k);
-        // stride で割り切れない位置には入力が無い（寄与ゼロ）— 加算せずに読み飛ばす
-        if (t >= 0 && u32(t) % dims.stride == 0u) {
-          let ix = u32(t) / dims.stride;
-          if (ix < dims.length_in) {
-            acc = acc + x[x_base + ix] * ${weightRead("w", weight, "w_base + k", WEIGHT_SCALE_VAR)};
-          }
-        }
+      // MUST: j 昇順 = k 昇順。tap 集合も (ic, k) 昇順の縮約順序も k 全数走査版と同一で、
+      // 同じ被演算子に同じ f32 積和が同じ順で掛かる = ビット同一（並べ替えは丸めを変える）
+      for (var j = j_start; j <= j_end; j = j + 1) {
+        let ix = q - u32(j);
+        let k = r + u32(j) * dims.stride;
+        acc = acc + x[x_base + ix] * ${weightRead("w", weight, "w_base + k", WEIGHT_SCALE_VAR)};
       }
     }
     out[i] = acc;

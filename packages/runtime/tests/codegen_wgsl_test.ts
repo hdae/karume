@@ -2192,11 +2192,24 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
   // MUST: conv1d の生成物に 2 次元の概念が漏れていない（既存スナップショットの温存）
   assertEquals(CONV1D_WGSL.includes("width"), false);
 
-  // conv_transpose1d は gather 形（出力 1 要素 = 寄与する入力の総和 — full-write）
+  // conv_transpose1d は gather 形（出力 1 要素 = 寄与する入力の総和 — full-write）で、有効 tap は
+  // residue 分割で数え上げる（perf-ledger K-10）。MUST: 剰余は出力要素あたり 1 回だけで、
+  // k 全数走査 + 割り切れ判定の形に戻っていない（tap 集合は同じでも実測形の 7/8 が無効判定）。
+  assertEquals(CONV_TRANSPOSE1D_WGSL.includes("let r = shifted % dims.stride;"), true);
+  assertEquals(CONV_TRANSPOSE1D_WGSL.includes("% dims.stride == 0u"), false);
+  // j の範囲は 3 本の不等式（ix <= L-1 / ix >= 0 / k <= K-1）で閉じる
   assertEquals(
-    CONV_TRANSPOSE1D_WGSL.includes("if (t >= 0 && u32(t) % dims.stride == 0u) {"),
+    CONV_TRANSPOSE1D_WGSL.includes("let j_start = max(0, i32(q) + 1 - i32(dims.length_in));"),
     true,
   );
+  assertEquals(
+    CONV_TRANSPOSE1D_WGSL.includes(
+      "j_end = min(i32((dims.kernel - 1u - r) / dims.stride), i32(q));",
+    ),
+    true,
+  );
+  // MUST: j 昇順 = k 昇順（縮約順序が k 全数走査版と同一 = f32 のビット同一の根拠）
+  assertEquals(CONV_TRANSPOSE1D_WGSL.includes("let k = r + u32(j) * dims.stride;"), true);
   // 重みは [Cin, Cout, K]（conv1d の [Cout, Cin, K] と転置）
   assertEquals(
     CONV_TRANSPOSE1D_WGSL.includes("let w_base = (ic * dims.channels_out + oc) * dims.kernel;"),
@@ -2635,7 +2648,7 @@ Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 �
     ["embedding:v1:f32:i32:wg256", embeddingKey],
     ["conv1d:v2:f32:direct:wg256", conv1dKey],
     ["conv2d:v1:f32:direct:wg256", conv2dKey],
-    ["conv_transpose1d:v1:f32:gather:wg256", convTranspose1dKey],
+    ["conv_transpose1d:v2:f32:gather:wg256", convTranspose1dKey],
   ];
   for (const [expected, key] of pairs) {
     // MUST: f32 のキー文字列は変種導入の前後で完全に同じ（実キーを直書きして固定する）

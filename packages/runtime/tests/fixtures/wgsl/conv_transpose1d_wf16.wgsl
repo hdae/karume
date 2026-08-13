@@ -36,21 +36,30 @@ fn main(
     let oc = rest / dims.length_out;
     let ox = rest % dims.length_out;
     // ox = ix*stride - padding + k  =>  ix*stride = ox + padding - k
-    let shifted = i32(ox) + i32(dims.padding);
+    // 有効 tap は k ≡ shifted (mod stride) だけ — 出力要素あたり 1 回だけ商と剰余へ分解する
+    let shifted = ox + dims.padding;
+    let q = shifted / dims.stride;
+    let r = shifted % dims.stride;
+    // 有効 tap は k = r + j*stride / ix = q - j。j の範囲は 3 本の不等式で閉じる:
+    // ix <= L-1 → j >= q+1-L / ix >= 0 → j <= q / k <= K-1 → j <= (K-1-r)/stride
+    let j_start = max(0, i32(q) + 1 - i32(dims.length_in));
+    // r > K-1（stride > K のときだけ到達）は有効 tap ゼロ。K-1-r の u32 桁借りを避けて
+    // j_end = -1 < j_start（j_start >= 0）で空ループへ倒す
+    var j_end = -1;
+    if (r < dims.kernel) {
+      j_end = min(i32((dims.kernel - 1u - r) / dims.stride), i32(q));
+    }
     var acc = bias[oc];
     for (var ic = 0u; ic < dims.channels_in; ic = ic + 1u) {
       let x_base = (b * dims.channels_in + ic) * dims.length_in;
       // 重みは [Cin, Cout, K] — conv1d と転置（第 1 軸が入力チャネル）
       let w_base = (ic * dims.channels_out + oc) * dims.kernel;
-      for (var k = 0u; k < dims.kernel; k = k + 1u) {
-        let t = shifted - i32(k);
-        // stride で割り切れない位置には入力が無い（寄与ゼロ）— 加算せずに読み飛ばす
-        if (t >= 0 && u32(t) % dims.stride == 0u) {
-          let ix = u32(t) / dims.stride;
-          if (ix < dims.length_in) {
-            acc = acc + x[x_base + ix] * dequant(w_base + k);
-          }
-        }
+      // MUST: j 昇順 = k 昇順。tap 集合も (ic, k) 昇順の縮約順序も k 全数走査版と同一で、
+      // 同じ被演算子に同じ f32 積和が同じ順で掛かる = ビット同一（並べ替えは丸めを変える）
+      for (var j = j_start; j <= j_end; j = j + 1) {
+        let ix = q - u32(j);
+        let k = r + u32(j) * dims.stride;
+        acc = acc + x[x_base + ix] * dequant(w_base + k);
       }
     }
     out[i] = acc;
