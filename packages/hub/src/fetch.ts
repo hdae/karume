@@ -124,8 +124,18 @@ const hfRef = (
   ...(ref.hubUrl === undefined ? {} : { hubUrl: ref.hubUrl }),
 });
 
-const isAbortError = (error: unknown): boolean =>
-  error instanceof DOMException && error.name === "AbortError";
+/**
+ * 中断（呼び出し側の `AbortSignal`）かどうか。中断は取得失敗ではないので `HubFetchError` に
+ * 包まず素通しする — 包むと呼び出し側の「自分が止めたのか落ちたのか」の判別が壊れる。
+ *
+ * MUST: 既定の `abort()` が作る DOMException だけを見ない — `abort(reason)` の custom reason
+ * では `fetch` が **reason 自体**で reject するため、任意の値が中断の正体になり得る。判定は
+ * 「実際に取得へ渡した signal が aborted で、捕まえた値がその reason と同一」に依る（合成した
+ * 場合は合成後の signal — 上流の reason はそのまま伝播する）。
+ */
+const isAborted = (error: unknown, signal?: AbortSignal): boolean =>
+  (error instanceof DOMException && error.name === "AbortError") ||
+  (signal?.aborted === true && error === signal.reason);
 
 /**
  * バイト列を小文字 hex の sha256 にする。
@@ -177,7 +187,7 @@ const resolveRevision = async (
       init: requestInit(options.headers, options.signal),
     });
   } catch (error) {
-    if (isAbortError(error)) throw error;
+    if (isAborted(error, options.signal)) throw error;
     throw new HubFetchError(
       `revision '${revision}' の解決に失敗した（repo ${ref.repo}）。可変 ref はオフラインで` +
         `起動できない — revision に commit SHA を渡すと解決要求そのものが発生しない`,
@@ -218,7 +228,7 @@ export const loadManifest = async (
       ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
     });
   } catch (error) {
-    if (error instanceof HubError || isAbortError(error)) throw error;
+    if (error instanceof HubError || isAborted(error, options.signal)) throw error;
     throw new HubFetchError(
       `${MANIFEST_FILENAME} の取得に失敗した（repo ${ref.repo} @ ${revisionSha}）`,
       { repo: ref.repo, revisionSha, path: MANIFEST_FILENAME, cause: error },
@@ -356,7 +366,7 @@ export const fetchAssets = async (
         ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
       });
     } catch (error) {
-      if (error instanceof HubError || isAbortError(error)) throw error;
+      if (error instanceof HubError || isAborted(error, signal)) throw error;
       throw new HubFetchError(`${ref.path} の取得に失敗した（repo ${repo} @ ${revisionSha}）`, {
         repo,
         revisionSha,

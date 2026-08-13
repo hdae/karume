@@ -1,5 +1,6 @@
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import {
+  type AssetPhase,
   type AssetProgress,
   type CacheDiagnostic,
   clearHubCache,
@@ -346,6 +347,37 @@ Deno.test("fetchAssets: AbortSignal は全取得へ透過する", async () => {
     })
   );
   assert(error instanceof DOMException && error.name === "AbortError", `${error} が中断でない`);
+});
+
+Deno.test("fetchAssets: abort(reason) の custom Error はそのまま伝播する（取得失敗に化けない）", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
+  const controller = new AbortController();
+  const reason = new Error("app: ユーザーがロードを取り消した");
+  const error = await assertRejects(() =>
+    fetchAssets(loaded, resolveFiles(loaded.manifest), {
+      fetch: mock.fetch,
+      caches,
+      signal: controller.signal,
+      onProgress: () => controller.abort(reason),
+    })
+  );
+  assertStrictEquals(error, reason, "呼び出し側が渡した reason が別のエラーに包まれている");
+});
+
+Deno.test("fetchAssets: abort(reason) が primitive でもそのまま伝播する", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
+  const controller = new AbortController();
+  const error = await assertRejects(() =>
+    fetchAssets(loaded, resolveFiles(loaded.manifest), {
+      fetch: mock.fetch,
+      caches,
+      signal: controller.signal,
+      onProgress: () => controller.abort("app:cancelled"),
+    })
+  );
+  assertStrictEquals(error, "app:cancelled");
 });
 
 Deno.test("fetchAssets: cache I/O の失敗はアプリへ届く診断になる（取得は落とさない）", async () => {
