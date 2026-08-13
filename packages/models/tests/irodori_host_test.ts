@@ -8,7 +8,7 @@
 
 import { assert, assertEquals, assertNotStrictEquals, assertThrows } from "@std/assert";
 import { buildDitMask, SEGMENT_ORDER } from "../src/irodori/host/mask.ts";
-import { packIds } from "../src/irodori/host/pack.ts";
+import { packCaptionIds, packIds } from "../src/irodori/host/pack.ts";
 import { patchReferenceLatent } from "../src/irodori/host/patch.ts";
 import { prependMeanToken, rowMean } from "../src/irodori/host/pooling.ts";
 import { Randn } from "../src/irodori/host/random.ts";
@@ -263,6 +263,34 @@ Deno.test("packIds: 正規化後に空なら落とす（BOS だけの列を通�
     () => packIds(tinyTokenizer(), "　 ", 8, "caption"),
     Error,
     "caption が正規化後に空",
+  );
+});
+
+/** `tinyTokenizer` の `byteBaseId` で展開したときの id 列（語彙外文字の期待値）。 */
+const byteIds = (text: string): number[] => [...new TextEncoder().encode(text)].map((b) => 100 + b);
+
+Deno.test("packCaptionIds: 正規化を掛けない（上流 `_synthesize` は caption に strip のみ）", () => {
+  // 外側括弧は `normalize_text` の剥がし対象。caption 側で剥がれてしまうと、conditioning が
+  // 例外も警告も無く別物になる（この 2 本の差がその境目そのもの）。
+  assertEquals(
+    [...packCaptionIds(tinyTokenizer(), "「あい」", 16)],
+    [1, ...byteIds("「"), 4, 5, ...byteIds("」")],
+  );
+  assertEquals([...packIds(tinyTokenizer(), "「あい」", 16, "text")], [1, 4, 5]);
+});
+
+Deno.test("packCaptionIds: 落とすのは前後の空白だけ（中の全角空白は残る）", () => {
+  assertEquals(
+    [...packCaptionIds(tinyTokenizer(), " あ　い ", 16)],
+    [1, 4, ...byteIds("　"), 5],
+  );
+});
+
+Deno.test("packCaptionIds: strip 後に空なら落とす（BOS だけの caption を条件に載せない）", () => {
+  assertThrows(
+    () => packCaptionIds(tinyTokenizer(), " \n\t ", 8),
+    Error,
+    "caption が strip 後に空",
   );
 });
 

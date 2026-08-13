@@ -11,6 +11,7 @@
 - NFKC 差分表が恒等エントリを含まず、2 回作れば同じであること
 - パリティ用フィクスチャの語彙**部分集合**が格子の一致集合を覆っていること（抽出規則の
   故障注入 + `minScore` / `maxTokenLength` を全体から採っていること）
+- caption ケースが strip だけを通り、正規化に**感受**すること（無感になれば門が落ちる）
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import json
 import unicodedata
 
 import pytest
+import torch
 
 import irodori_tokenizer as tok
 
@@ -228,18 +230,75 @@ def _raw_with_unreachable_token() -> dict:
     return raw
 
 
+class _FakePair:
+    """`build_caption_cases` が触る面（`wrapper.batch_encode`）だけの身代わり。
+
+    id はコードポイント（`[BOS, *本文]` を右 pad）で、語彙も Viterbi も持たない — ここで
+    見たいのは「caption 側に strip しか掛かっていないか」だけ。
+    """
+
+    class _Wrapper:
+        def batch_encode(self, texts, max_length: int):
+            body = [ord(char) for char in texts[0]][: max_length - 1]
+            ids = torch.full((1, max_length), 3, dtype=torch.int64)
+            mask = torch.zeros((1, max_length), dtype=torch.bool)
+            ids[0, : len(body) + 1] = torch.tensor([1, *body], dtype=torch.int64)
+            mask[0, : len(body) + 1] = True
+            return ids, mask
+
+    def __init__(self) -> None:
+        self.wrapper = _FakePair._Wrapper()
+
+
+#: `build_caption_cases` が読む config の最小形。
+CAPTION_MODEL_CONFIG = {"max_caption_len": 32}
+
+
+def _fake_normalize(body: str) -> str:
+    """`normalize_text` のうち caption ケースに効く段だけの身代わり。
+
+    実物は上流にあり実資産を要する（`TestRuleCoverage` が importorskip でそちらを見る）。
+    ここで要るのは「正規化を通すと id 列が動く」という性質だけなので、記号削除・外側括弧の
+    剥がし・NFKC の 3 段を写す。
+    """
+    stripped = body.strip()
+    for char in "①;　":
+        stripped = stripped.replace(char, "")
+    stripped = stripped.removeprefix("「").removesuffix("」")
+    return unicodedata.normalize("NFKC", stripped)
+
+
+class TestCaptionCases:
+    """MUST: caption 側は strip だけ（上流 `_synthesize` は `normalize_text` を掛けない）。"""
+
+    def test_the_packed_ids_come_from_the_stripped_text(self):
+        cases = tok.build_caption_cases(_FakePair(), _fake_normalize, CAPTION_MODEL_CONFIG)
+        by_name = {case["name"]: case for case in cases}
+        brackets = by_name["caption-brackets"]
+
+        assert brackets["stripped"] == "「若く元気な女性の声」"
+        assert brackets["idsPacked"] == [1, *(ord(char) for char in brackets["stripped"])]
+        assert brackets["normalizedIdsPacked"] == [1, *(ord(char) for char in "若く元気な女性の声")]
+        assert brackets["normalizeSensitive"] is True
+
+    def test_a_table_that_no_longer_reacts_to_normalization_fails_loudly(self):
+        """恒真化の遮断: 正規化が恒等になれば 2 経路が一致して門の検出力が消える。"""
+        with pytest.raises(SystemExit, match="正規化に感受する caption ケース"):
+            tok.build_caption_cases(_FakePair(), lambda body: body, CAPTION_MODEL_CONFIG)
+
+
 class TestParityFixture:
     """語彙の**部分集合**でも TS 側の Viterbi が全語彙と同じ格子を張ることの実測。"""
 
     def test_the_lattice_text_is_the_metaspace_replaced_normalized_text(self):
-        assert tok.lattice_texts(PARITY_CASES, []) == ["▁こんにちは世界"]
+        assert tok.lattice_texts(PARITY_CASES, [], []) == ["▁こんにちは世界"]
 
     def test_the_subset_holds_every_token_the_lattice_can_reach(self):
         raw = _raw_with_unreachable_token()
 
         subset = tok.vocab_subset(
             raw["model"]["vocab"],
-            tok.lattice_texts(PARITY_CASES, []),
+            tok.lattice_texts(PARITY_CASES, [], []),
             {content: index for index, content in enumerate(SPECIALS)},
         )
 
@@ -265,7 +324,7 @@ class TestParityFixture:
     def test_a_subset_that_lost_a_reachable_token_fails_loudly(self):
         """抽出とは**逆向き**の検査なので、抽出の取りこぼしをここで捕まえられる。"""
         raw = _raw_with_unreachable_token()
-        texts = tok.lattice_texts(PARITY_CASES, [])
+        texts = tok.lattice_texts(PARITY_CASES, [], [])
         full = tok.vocab_subset(raw["model"]["vocab"], texts, {})
         thinned = [row for row in full if row[0] != "世界"]
 
@@ -278,7 +337,7 @@ class TestParityFixture:
         raw = _raw_with_unreachable_token()
 
         fixture = tok.build_parity_fixture(
-            tok.build_asset(raw, TEXT_CONFIG), raw["model"]["vocab"], PARITY_CASES, [], [], {}
+            tok.build_asset(raw, TEXT_CONFIG), raw["model"]["vocab"], PARITY_CASES, [], [], [], {}
         )
 
         assert fixture["asset"]["minScore"] == -9.5
@@ -292,7 +351,7 @@ class TestParityFixture:
 
         def build() -> str:
             fixture = tok.build_parity_fixture(
-                asset, raw["model"]["vocab"], PARITY_CASES, [], [], {"65": "A"}
+                asset, raw["model"]["vocab"], PARITY_CASES, [], [], [], {"65": "A"}
             )
             return json.dumps(fixture, ensure_ascii=False)
 
@@ -308,7 +367,7 @@ class TestCli:
 
     def test_the_case_tables_have_unique_names(self):
         """名前が重なると golden の突合表が静かに 1 件消える。"""
-        for table in (tok.ENCODE_CASES, tok.NORMALIZE_CASES):
+        for table in (tok.ENCODE_CASES, tok.NORMALIZE_CASES, tok.CAPTION_CASES):
             names = [name for name, _why, _text in table]
             assert len(names) == len(set(names))
         batch = [name for name, _why, _text, _key in tok.BATCH_CASES]

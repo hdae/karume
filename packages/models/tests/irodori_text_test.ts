@@ -5,6 +5,8 @@
 //  ・`normalize_text` の `{raw, normalized}` 33 ケース（各置換規則を最低 1 回発火させたもの）
 //  ・トークナイザの `{raw, normalized, ids}` 14 ケースと `batch_encode` の最終形 3 ケース。
 //    **正本は tokenizers と transformers の 2 経路**で、emit 時に両者の一致まで実測してある
+//  ・caption 経路（上流は strip のみ）と text 経路（normalize）の id 列を同じ生テキストから
+//    2 通り採った 6 ケース
 //  ・その再現に要る語彙の**部分集合**（102,400 本を commit しない。格子が全語彙と同じである
 //    ことは exporter 側が語彙全体を逆向きに走査して実測する）
 //  ・NFKC が恒等でない単一コードポイントの写像表**全体**
@@ -14,7 +16,8 @@
 // 縛るのは振る舞い: 「同じ生テキストを入れたら Python と同じ id 列が出る」。表の持ち方や
 // 内部の分割の仕方は縛らない。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
+import { packCaptionIds, packIds } from "../src/irodori/host/pack.ts";
 import { normalizeText } from "../src/irodori/text/normalize.ts";
 import {
   IrodoriTokenizer,
@@ -40,6 +43,18 @@ type BatchCase = {
   readonly mask: boolean[];
 };
 
+type CaptionCase = {
+  readonly name: string;
+  readonly why: string;
+  readonly raw: string;
+  readonly stripped: string;
+  readonly normalized: string;
+  readonly maxLength: number;
+  readonly idsPacked: number[];
+  readonly normalizedIdsPacked: number[];
+  readonly normalizeSensitive: boolean;
+};
+
 type NormalizeCase = {
   readonly name: string;
   readonly why: string;
@@ -58,7 +73,11 @@ type Fixture = {
     readonly unkId: number;
     readonly byteBaseId: number;
   };
-  readonly encode: { readonly cases: EncodeCase[]; readonly batch: BatchCase[] };
+  readonly encode: {
+    readonly cases: EncodeCase[];
+    readonly batch: BatchCase[];
+    readonly caption: CaptionCase[];
+  };
   readonly normalize: { readonly cases: NormalizeCase[] };
   readonly nfkcDiff: Record<string, string>;
 };
@@ -173,6 +192,45 @@ Deno.test("組み立て: 短い入力は pad で右詰めされ、マスクが�
     short.idsPadded.slice(used),
     Array(short.maxLength - used).fill(fixture.asset.padId),
   );
+});
+
+// ---- ③' caption 経路（上流は strip のみ・normalize は text 専用）--------------
+//
+// 上流 `inference_runtime._synthesize` が caption に掛けるのは `str(...).strip()` だけで、
+// `normalize_text` は text 専用。ここが揃っていないと conditioning が例外も警告も無く別物に
+// なる（外側括弧の剥がし・NFKC・記号削除のぶん）ので、**同じ生テキストを 2 経路へ通した
+// id 列**をフィクスチャに持たせ、両方を突き合わせる。
+
+for (const testCase of fixture.encode.caption) {
+  Deno.test(`caption パリティ [${testCase.name}] ${testCase.why}`, () => {
+    assertEquals(
+      [...packCaptionIds(tokenizer, testCase.raw, testCase.maxLength)],
+      testCase.idsPacked,
+      "caption 経路（strip のみ）",
+    );
+    assertEquals(
+      [...packIds(tokenizer, testCase.raw, testCase.maxLength, "text")],
+      testCase.normalizedIdsPacked,
+      "text 経路（normalize + strip）",
+    );
+    assertEquals(normalizeText(testCase.raw).trim(), testCase.normalized, "正規化後の文字列");
+  });
+}
+
+Deno.test("caption: 2 経路の id 列が実際に割れる（門が恒真でない証拠）", () => {
+  // ケースが空だとループが 0 回になって「緑だが何も検証していない」状態が黙って成立する。
+  assertEquals(fixture.encode.caption.length, 6);
+  const sensitive = fixture.encode.caption.filter((entry) => entry.normalizeSensitive);
+  assert(sensitive.length >= 5, `正規化に感受するケースが ${sensitive.length} 件しかない`);
+  for (const entry of sensitive) {
+    assertNotEquals(entry.idsPacked, entry.normalizedIdsPacked, `${entry.name} が 2 経路で同じ`);
+  }
+  // 公式 Voice Design 文は正規化に無感 = 既存 golden（caption 系）はこの修正で動かない側。
+  const insensitive = fixture.encode.caption.filter((entry) => !entry.normalizeSensitive);
+  assertEquals(insensitive.map((entry) => entry.name), ["caption-official"]);
+  for (const entry of insensitive) {
+    assertEquals(entry.idsPacked, entry.normalizedIdsPacked);
+  }
 });
 
 // ---- ④ NFKC（正本 = Python の unicodedata / こちら = JS エンジンの ICU）-------

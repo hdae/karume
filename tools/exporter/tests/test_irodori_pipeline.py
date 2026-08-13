@@ -9,11 +9,15 @@
 - 区間マスクの割り方（self / text / speaker / caption の順とオフセット）と、uncond が
   **その区間だけ**を落とすこと
 - CFG のスケール表が uncond 変種の綴りと 1 対 1 であること
+- token 列の前処理が種別で分かれていること（text は `normalize_text` + strip・caption は
+  strip のみ）と、上流突合へ渡す caption が**上流の入口から**作られること
 """
 
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -141,6 +145,110 @@ class TestRightPadIds:
 
         assert padded[0].tolist() == [3, 3, 3, 3]
         assert not bool(mask.any())
+
+
+class _RecordingTokenizer:
+    """`tokenizers.Tokenizer` の最小の身代わり（**渡された文字列を記録する**）。
+
+    id はコードポイントそのもの — 何が渡ったかだけを見たいので、語彙は持たない。
+    """
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> Any:
+        assert add_special_tokens is False, "上流は特殊トークン無しで呼ぶ"
+        self.seen.append(text)
+        return SimpleNamespace(ids=[ord(char) for char in text])
+
+
+class TestPackedIds:
+    """MUST: 前処理は種別で違う（text = `normalize_text` + strip / caption = strip のみ）。"""
+
+    #: 正規化に感受する caption（外側括弧・記号 — どちらも `normalize_text` の削除対象）。
+    CAPTION = " 「①明るい声」 "
+
+    @staticmethod
+    def _bracket_stripper(body: str) -> str:
+        """`normalize_text` の身代わり（外側括弧を剥がし ① を消すぶんだけを写す）。"""
+        return body.strip().removeprefix("「").removesuffix("」").replace("①", "")
+
+    def test_the_text_side_goes_through_normalization(self):
+        tokenizer = _RecordingTokenizer()
+
+        ip._packed_ids(tokenizer, self.CAPTION, 1, 64, self._bracket_stripper)
+
+        assert tokenizer.seen == ["明るい声"]
+
+    def test_the_caption_side_only_strips(self):
+        """上流 `_synthesize` は caption に `str(...).strip()` しか掛けない。"""
+        tokenizer = _RecordingTokenizer()
+
+        ids = ip._packed_caption_ids(tokenizer, self.CAPTION, 1, 64)
+
+        assert tokenizer.seen == ["「①明るい声」"]
+        assert ids[0].tolist() == [1, *(ord(char) for char in "「①明るい声」")]
+
+    def test_the_caption_body_budget_leaves_room_for_the_bos(self):
+        ids = ip._packed_caption_ids(_RecordingTokenizer(), "あいうえお", 1, 3)
+
+        assert ids[0].tolist() == [1, ord("あ"), ord("い")]
+
+    def test_an_empty_caption_fails_loudly(self):
+        """BOS だけの列を条件に載せると、caption 無しとも違う別の条件になる。"""
+        with pytest.raises(SystemExit, match="strip 後の caption が空"):
+            ip._packed_caption_ids(_RecordingTokenizer(), "  \n ", 1, 64)
+
+
+class _FakeCaptionTokenizer:
+    """上流 `PretrainedTextTokenizer.batch_encode` の**呼ばれ方**だけを写した身代わり。
+
+    返す列は固定（先頭 2 本のマスクが立つ形）— ここで見たいのは「渡る文字列が strip 済みか」と
+    「空 caption でマスクが BOS ごと全 0 になるか」の 2 点だけ。
+    """
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def batch_encode(self, texts, max_length: int):
+        self.seen.extend(texts)
+        ids = torch.zeros((1, max_length), dtype=torch.int64)
+        mask = torch.zeros((1, max_length), dtype=torch.bool)
+        mask[0, :2] = True
+        return ids, mask
+
+
+class TestUpstreamCaptionCondition:
+    def test_the_caption_is_stripped_before_the_upstream_entrance(self):
+        fake = _FakeCaptionTokenizer()
+
+        _ids, mask = ip.upstream_caption_condition(fake, "  明るい声  ", 8)
+
+        assert fake.seen == ["明るい声"]
+        assert int(mask.sum()) == 2
+
+    def test_an_empty_caption_zeroes_the_whole_mask(self):
+        """上流 `_synthesize` の `caption_mask.zero_()` — BOS の列も落とす。"""
+        fake = _FakeCaptionTokenizer()
+
+        _ids, mask = ip.upstream_caption_condition(fake, "   ", 8)
+
+        assert fake.seen == [""]
+        assert not bool(mask.any())
+
+
+class TestCaptionGoldenStability:
+    def test_the_pipeline_captions_are_insensitive_to_normalization(self):
+        """MUST: 既存 golden が動かないことの実測（動くなら再 emit が要る合図）。
+
+        caption を strip-only へ直した波の前提そのもの。ここが落ちたら
+        `outputs/series/irodori-*/pipeline/` を採り直さないと TS 側の統合門が割れる。
+        """
+        pytest.importorskip("irodori_tts")
+        from irodori_tts.text_normalization import normalize_text
+
+        for case in ip.PIPELINE_CASES:
+            assert normalize_text(case.caption).strip() == case.caption.strip(), case.name
 
 
 class TestCli:

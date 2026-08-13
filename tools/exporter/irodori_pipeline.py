@@ -23,7 +23,8 @@ r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop
 
 ## ホストが担う段（このファイルが写している唯一のもの）
 
-1. `normalize_text` → strip → tokenize → BOS 前置（body は `max_*_len - 1` で切る）
+1. 前処理 → tokenize → BOS 前置（body は `max_*_len - 1` で切る）。前処理は種別で違い、
+   text は `normalize_text` → strip・caption は **strip のみ**（上流 `_synthesize` の綴り）
 2. `backbone` → `text-proj` / `caption-proj`（**列を詰めたまま**呼ぶ = 静的方式）
 3. 参照 latent を `speaker_patch_size` で patch → `speaker` → 平均トークン前置
 4. `duration` の 5 入力を組む（`speaker_vec` = 平均トークン / `caption_vec` =
@@ -224,20 +225,38 @@ def sequence_length(log_frames: torch.Tensor, frame_rate: int) -> tuple[int, dic
     }
 
 
-def _packed_ids(
-    tokenizer: Any, text: str, bos_id: int, max_length: int, normalize_text: Any
-) -> torch.Tensor:
-    """`[1,T]` の**詰めた** token 列（BOS + 本文を `max_length-1` で切ったもの）。
+def _pack_body(tokenizer: Any, body: str, bos_id: int, max_length: int) -> torch.Tensor:
+    """前処理済みの本文 → `[1,T]` の**詰めた** token 列（BOS + `max_length-1` で切ったもの）。
 
     上流 `PretrainedTextTokenizer.batch_encode` は同じ列を右 pad して返す。静的方式では
     ホストが pad を消して呼ぶので（`export_irodori.py` のモジュール docstring）、ここでは
     pad しない列を作る。
     """
+    ids = list(tokenizer.encode(body, add_special_tokens=False).ids)[: max_length - 1]
+    return torch.tensor([[bos_id, *ids]], dtype=torch.int64)
+
+
+def _packed_ids(
+    tokenizer: Any, text: str, bos_id: int, max_length: int, normalize_text: Any
+) -> torch.Tensor:
+    """**text 側**の token 列（`normalize_text` → `strip` → 詰めた列）。"""
     normalized = normalize_text(text).strip()
     if not normalized:
         raise SystemExit("正規化後の本文が空")
-    body = list(tokenizer.encode(normalized, add_special_tokens=False).ids)[: max_length - 1]
-    return torch.tensor([[bos_id, *body]], dtype=torch.int64)
+    return _pack_body(tokenizer, normalized, bos_id, max_length)
+
+
+def _packed_caption_ids(tokenizer: Any, caption: str, bos_id: int, max_length: int) -> torch.Tensor:
+    """**caption 側**の token 列（`strip` のみ → 詰めた列）。
+
+    MUST: `normalize_text` を掛けない。上流 `inference_runtime._synthesize` が caption に
+    掛けるのは `str(...).strip()` だけ（`normalize_text` は text 専用）で、正規化を足すと
+    外側括弧の剥がし・NFKC・記号削除のぶんだけ conditioning が黙って別物になる。
+    """
+    stripped = caption.strip()
+    if not stripped:
+        raise SystemExit("strip 後の caption が空")
+    return _pack_body(tokenizer, stripped, bos_id, max_length)
 
 
 class HostGraphs(NamedTuple):
@@ -341,9 +360,7 @@ def run_case(
         caption_state = torch.zeros((1, 1, int(model_config["caption_dim"])))
         caption_pooled = None
         if case.caption:
-            caption_ids = _packed_ids(
-                tokenizer, case.caption, bos_id, caps["caption"], source.normalize_text
-            )
+            caption_ids = _packed_caption_ids(tokenizer, case.caption, bos_id, caps["caption"])
             caption_state, caption_normed = graphs.caption_proj(graphs.backbone(caption_ids))
             caption_length = int(caption_state.shape[1])
             caption_pooled = duration_predictor._caption_vec(
@@ -487,7 +504,8 @@ def _right_pad_ids(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """`[1,length]` へ右詰め pad した token 列とマスク（上流 `batch_encode` の最終形）。
 
-    `ids` が `None`（caption 空）なら全 pad + マスク全 0（上流 `caption_mask.zero_()`）。
+    `ids` が `None` なら全 pad + マスク全 0（上流 `caption_mask.zero_()` と同じ形）。caption は
+    {@link upstream_caption_condition} が上流の入口から作るので、今の呼び出し元は text だけ。
     """
     padded = torch.full((1, length), pad_id, dtype=torch.int64)
     mask = torch.zeros((1, length), dtype=torch.bool)
@@ -498,11 +516,41 @@ def _right_pad_ids(
     return padded, mask
 
 
+def upstream_caption_tokenizer(model_dir: Path, add_bos: bool) -> Any:
+    """上流 `_synthesize` が caption に使うのと**同じ**トークナイザ（`caption_tokenizer`）。
+
+    `add_bos` は上流 `ModelConfig.caption_add_bos_resolved` から採る（直書きしない）。
+    """
+    from irodori_tts.tokenizer import PretrainedTextTokenizer
+    from transformers import AutoTokenizer
+
+    source = str((model_dir / ex.TOKENIZER_FILE).parent)
+    return PretrainedTextTokenizer(AutoTokenizer.from_pretrained(source), add_bos=add_bos)
+
+
+def upstream_caption_condition(
+    caption_tokenizer: Any, caption: str, max_length: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """caption の条件入力 `[1,max_caption_len]`（token 列 + マスク）を**上流の入口から**作る。
+
+    MUST: ホストが作った `caption_ids` を上流ループへ渡し直さない — 渡し直すと前処理の
+    取り違えが両辺へ同じだけ乗って突合が恒真化し、caption の綴りが割れても z が一致する。
+    ここは上流 `inference_runtime._synthesize` の caption 経路（`str(...).strip()` →
+    `caption_tokenizer.batch_encode` → 空なら `caption_mask.zero_()`）をそのまま呼ぶ。
+    """
+    caption_text = str(caption).strip()
+    ids, mask = caption_tokenizer.batch_encode([caption_text], max_length=max_length)
+    if caption_text == "":
+        mask.zero_()
+    return ids, mask
+
+
 def upstream_latent(
     model: nn.Module,
     case: PipelineCase,
     text_ids: torch.Tensor,
-    caption_ids: torch.Tensor | None,
+    caption_padded: torch.Tensor,
+    caption_mask: torch.Tensor,
     reference_latent: torch.Tensor,
     steps: int,
     text_config: Mapping[str, Any],
@@ -511,16 +559,14 @@ def upstream_latent(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """上流の正本経路（`rf.sample_euler_rf_cfg`）で同じ条件を回す。戻りは `(z, 初期ノイズ)`。
 
-    MUST: 入力は上流の呼び方に揃える — token 列は `max_*_len` へ右 pad（静的方式で
-    ホストが消した pad を戻す）、参照なしは `no_ref` と同じゼロ latent + 全 0 マスク。
+    MUST: 入力は上流の呼び方に揃える — text の token 列は `max_text_len` へ右 pad（静的方式で
+    ホストが消した pad を戻す）、caption は {@link upstream_caption_condition} が上流の入口で
+    作った列をそのまま受ける、参照なしは `no_ref` と同じゼロ latent + 全 0 マスク。
     """
     from irodori_tts.rf import sample_euler_rf_cfg
 
     pad_id = int(text_config["pad_token_id"])
     text_padded, text_mask = _right_pad_ids(text_ids, int(model_config["max_text_len"]), pad_id)
-    caption_padded, caption_mask = _right_pad_ids(
-        caption_ids, int(model_config["max_caption_len"]), pad_id
-    )
     reference_mask = torch.full(
         reference_latent.shape[:2], case.reference is not None, dtype=torch.bool
     )
@@ -553,7 +599,8 @@ def upstream_latent(
 def upstream_sequence_length(
     model: nn.Module,
     text_ids: torch.Tensor,
-    caption_ids: torch.Tensor | None,
+    caption_padded: torch.Tensor,
+    caption_mask: torch.Tensor,
     reference_latent: torch.Tensor,
     has_speaker: bool,
     text_config: Mapping[str, Any],
@@ -564,9 +611,6 @@ def upstream_sequence_length(
     reference_mask = torch.full(reference_latent.shape[:2], has_speaker, dtype=torch.bool)
     pad_id = int(text_config["pad_token_id"])
     text_padded, text_mask = _right_pad_ids(text_ids, int(model_config["max_text_len"]), pad_id)
-    caption_padded, caption_mask = _right_pad_ids(
-        caption_ids, int(model_config["max_caption_len"]), pad_id
-    )
     with torch.no_grad():
         (
             text_state,
@@ -685,6 +729,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
         "caption": int(model_config["max_caption_len"]),
     }
     tokenizer = Tokenizer.from_file(str(model_dir / ex.TOKENIZER_FILE))
+    caption_tokenizer = upstream_caption_tokenizer(model_dir, bool(config.caption_add_bos_resolved))
 
     schedule = t_schedule(NUM_STEPS)
     cases: dict[str, dict[str, Any]] = {}
@@ -703,11 +748,27 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
         )
         # ---- 常設門: S と最終 z を上流の正本経路と突き合わせる ----
         text_ids = tensors["text_ids"]
-        caption_ids = tensors.get("caption_ids")
+        # MUST: caption の条件入力は上流の入口から独立に作る（ホストの列を渡し直さない —
+        # {@link upstream_caption_condition}）。両者が同じ列になることは直下で実測する。
+        caption_padded, caption_mask = upstream_caption_condition(
+            caption_tokenizer, case.caption, caps["caption"]
+        )
+        host_caption_ids = tensors.get("caption_ids")
+        upstream_used = int(caption_mask.sum())
+        host_used = 0 if host_caption_ids is None else int(host_caption_ids.shape[1])
+        if host_used != upstream_used or (
+            host_caption_ids is not None
+            and not torch.equal(host_caption_ids[0], caption_padded[0, :upstream_used])
+        ):
+            raise SystemExit(
+                f"{case.name}: caption の token 列がホスト（{host_used} token）と"
+                f"上流（{upstream_used} token）で食い違う — 前処理の綴りが割れている"
+            )
         upstream_steps = upstream_sequence_length(
             dit,
             text_ids,
-            caption_ids,
+            caption_padded,
+            caption_mask,
             tensors["reference_latent"],
             case.reference is not None,
             text_config,
@@ -723,7 +784,8 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             dit,
             case,
             text_ids,
-            caption_ids,
+            caption_padded,
+            caption_mask,
             tensors["reference_latent"],
             meta["S"],
             text_config,

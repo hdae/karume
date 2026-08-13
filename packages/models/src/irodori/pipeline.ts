@@ -86,7 +86,7 @@ import {
 } from "./config.ts";
 import { IrodoriTokenizer, parseIrodoriTokenizerAsset } from "./text/tokenizer.ts";
 import { type CodecTile, decodeTiles, DEFAULT_CODEC_TILE_FRAMES, planCodecTiles } from "./codec.ts";
-import { packIds } from "./host/pack.ts";
+import { packCaptionIds, packIds } from "./host/pack.ts";
 import {
   buildDitMask,
   type IrodoriSegment,
@@ -747,7 +747,7 @@ const generateLatent = async (
   const captionText = request.caption ?? "";
   const captionIds = captionText.trim().length === 0
     ? undefined
-    : packIds(state.tokenizer, captionText, config.maxCaptionLen, "caption");
+    : packCaptionIds(state.tokenizer, captionText, config.maxCaptionLen);
 
   // --- ① backbone（text / caption を同じ 1 セッションで回す）---------------
   // 1.26GB の重みを 2 度アップロードしないため 1 セッション 2 run にしてある。診断は run

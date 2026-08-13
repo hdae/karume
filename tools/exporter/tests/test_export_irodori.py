@@ -364,6 +364,68 @@ class TestRightPad:
             ir._right_pad(torch.ones(1, 6, 3), 5, "テスト")
 
 
+class TestGoldenCaseBody:
+    """MUST: golden ケースの前処理は**種別で違う**（上流 `_synthesize` の綴り）。
+
+    text は `normalize_text` + strip、caption は **strip のみ**。caption へ正規化を掛けると
+    外側括弧の剥がし・NFKC・記号削除のぶんだけ conditioning が黙って別物になる。
+    """
+
+    #: 正規化に感受する綴り（外側括弧 + 記号 — どちらも `normalize_text` の削除対象）。
+    BODY = " 「①明るい声」 "
+
+    @staticmethod
+    def _spy():
+        """呼ばれたら記録して**別物**を返す `normalize_text` の身代わり。"""
+        calls: list[str] = []
+
+        def normalize_text(body: str) -> str:
+            calls.append(body)
+            return "正規化された"
+
+        return calls, normalize_text
+
+    def test_the_text_kind_goes_through_normalization(self):
+        calls, normalize_text = self._spy()
+
+        assert ir.golden_case_body("t", "text", self.BODY, normalize_text) == "正規化された"
+        assert calls == [self.BODY]
+
+    def test_the_caption_kind_never_calls_normalization(self):
+        calls, normalize_text = self._spy()
+
+        assert ir.golden_case_body("c", "caption", self.BODY, normalize_text) == "「①明るい声」"
+        assert calls == []
+
+    def test_an_unknown_kind_fails_loudly(self):
+        """種別の綴りが割れると、黙ってどちらかの前処理へ倒れる。"""
+        _calls, normalize_text = self._spy()
+
+        with pytest.raises(SystemExit, match="text / caption のどちらでもない"):
+            ir.golden_case_body("x", "Caption", self.BODY, normalize_text)
+
+    def test_an_empty_body_fails_loudly(self):
+        _calls, normalize_text = self._spy()
+
+        with pytest.raises(SystemExit, match="前処理後の本文が空"):
+            ir.golden_case_body("c", "caption", "  \n ", normalize_text)
+
+    def test_the_existing_caption_goldens_are_insensitive_to_normalization(self):
+        """MUST: 既存 golden が動かないことの実測（動くなら再 export が要る合図）。
+
+        caption を strip-only へ直した波の前提そのもの。正規化に感受する caption ケースを
+        足したときはここが落ちるので、golden の採り直しに気づける。
+        """
+        pytest.importorskip("irodori_tts")
+        from irodori_tts.text_normalization import normalize_text
+
+        captions = [(name, body) for name, kind, body in ir.GOLDEN_CASES if kind == "caption"]
+
+        assert captions, "caption 種別の golden ケースが 1 本も無い"
+        for name, body in captions:
+            assert normalize_text(body).strip() == body.strip(), name
+
+
 class TestSanityCatchesProjectorMixups:
     """MUST: 同じ重みを 2 回読む取り違えは shape も dtype も一致するので、ここでしか出ない。"""
 

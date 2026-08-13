@@ -5,7 +5,9 @@
     "正本は上流 normalize_text と tokenizers / transformers で、id 列はそこから採った",
     "実測値。語彙は全ケースの再現に要る**部分集合**（102,400 本を commit しないため）",
     "だが、minScore / maxTokenLength は語彙**全体**の値。NFKC 差分表は全体を載せる",
-    "（TS の normalize('NFKC') と Unicode 版がずれた瞬間に正規化が静かに変わるため）。"
+    "（TS の normalize('NFKC') と Unicode 版がずれた瞬間に正規化が静かに変わるため）。",
+    "encode.caption は caption 経路（上流は strip のみ）と text 経路（normalize）の",
+    "id 列を同じ生テキストから 2 通り採ったもの。"
   ],
   "source": {
     "repo": "Aratako/Irodori-TTS",
@@ -1449,9 +1451,19 @@
         -6.061629295349121
       ],
       [
+        "「",
+        313,
+        -6.1022047996521
+      ],
+      [
         "を",
         315,
         -6.127287864685059
+      ],
+      [
+        "」",
+        316,
+        -6.131433963775635
       ],
       [
         "と",
@@ -1464,9 +1476,19 @@
         -6.173007011413574
       ],
       [
+        ";",
+        322,
+        -6.3251633644104
+      ],
+      [
         "t",
         324,
         -6.356095790863037
+      ],
+      [
+        "　",
+        332,
+        -6.496720314025879
       ],
       [
         ">",
@@ -1492,6 +1514,11 @@
         "a",
         351,
         -6.832526683807373
+      ],
+      [
+        "A",
+        356,
+        -6.90564489364624
       ],
       [
         "er",
@@ -2759,6 +2786,11 @@
         -10.399333000183104
       ],
       [
+        "①",
+        3190,
+        -10.400935173034668
+      ],
+      [
         "実",
         3196,
         -10.402179718017578
@@ -2857,6 +2889,11 @@
         "のこと",
         3499,
         -10.48587131500244
+      ],
+      [
+        "Ａ",
+        3511,
+        -10.489943504333496
       ],
       [
         "ell",
@@ -3707,6 +3744,11 @@
         "▁ma",
         9687,
         -11.461219787597656
+      ],
+      [
+        "明るい",
+        9811,
+        -11.473732948303224
       ],
       [
         "書いた",
@@ -5817,6 +5859,11 @@
         "気な",
         67235,
         -13.69512176513672
+      ],
+      [
+        "るい",
+        67715,
+        -13.705044746398926
       ],
       [
         "返した",
@@ -8450,6 +8497,167 @@
           true,
           true
         ]
+      }
+    ],
+    "caption": [
+      {
+        "name": "caption-brackets",
+        "why": "外側括弧: normalize なら「」が剥がれる / caption では残る",
+        "raw": "「若く元気な女性の声」",
+        "stripped": "「若く元気な女性の声」",
+        "normalized": "若く元気な女性の声",
+        "maxLength": 512,
+        "idsPacked": [
+          1,
+          313,
+          43576,
+          23806,
+          1377,
+          8458,
+          316
+        ],
+        "normalizedIdsPacked": [
+          1,
+          43576,
+          23806,
+          1377,
+          8458
+        ],
+        "normalizeSensitive": true
+      },
+      {
+        "name": "caption-fullwidth",
+        "why": "NFKC: normalize なら Ａ が A へ落ちる / caption では全角のまま",
+        "raw": "Ａの声",
+        "stripped": "Ａの声",
+        "normalized": "Aの声",
+        "maxLength": 512,
+        "idsPacked": [
+          1,
+          3511,
+          8458
+        ],
+        "normalizedIdsPacked": [
+          1,
+          356,
+          8458
+        ],
+        "normalizeSensitive": true
+      },
+      {
+        "name": "caption-circled",
+        "why": "記号削除: normalize なら ① が消える / caption では残る",
+        "raw": "①の声",
+        "stripped": "①の声",
+        "normalized": "の声",
+        "maxLength": 512,
+        "idsPacked": [
+          1,
+          3190,
+          8458
+        ],
+        "normalizedIdsPacked": [
+          1,
+          8458
+        ],
+        "normalizeSensitive": true
+      },
+      {
+        "name": "caption-semicolon",
+        "why": "記号削除: normalize なら ; が消える / caption では残る",
+        "raw": "声;高め",
+        "stripped": "声;高め",
+        "normalized": "声高め",
+        "maxLength": 512,
+        "idsPacked": [
+          1,
+          3701,
+          322,
+          19023
+        ],
+        "normalizedIdsPacked": [
+          1,
+          3701,
+          19023
+        ],
+        "normalizeSensitive": true
+      },
+      {
+        "name": "caption-surrounding-space",
+        "why": "strip は前後の空白だけ — 中の全角空白は caption では残る（normalize なら消える）",
+        "raw": "　明るい　声　",
+        "stripped": "明るい　声",
+        "normalized": "明るい声",
+        "maxLength": 512,
+        "idsPacked": [
+          1,
+          9811,
+          332,
+          3701
+        ],
+        "normalizedIdsPacked": [
+          1,
+          9811,
+          3701
+        ],
+        "normalizeSensitive": true
+      },
+      {
+        "name": "caption-official",
+        "why": "公式モデルカードの Voice Design 文（正規化に無感 = 既存 golden と同じ側）",
+        "raw": "若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
+        "stripped": "若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
+        "normalized": "若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
+        "maxLength": 512,
+        "idsPacked": [
+          1,
+          43576,
+          23806,
+          1377,
+          8458,
+          278,
+          2599,
+          291,
+          23398,
+          1983,
+          275,
+          10821,
+          2126,
+          54618,
+          2257,
+          5492,
+          1682,
+          66256,
+          17205,
+          311,
+          57497,
+          278
+        ],
+        "normalizedIdsPacked": [
+          1,
+          43576,
+          23806,
+          1377,
+          8458,
+          278,
+          2599,
+          291,
+          23398,
+          1983,
+          275,
+          10821,
+          2126,
+          54618,
+          2257,
+          5492,
+          1682,
+          66256,
+          17205,
+          311,
+          57497,
+          278
+        ],
+        "normalizeSensitive": false
       }
     ]
   },
@@ -13623,6 +13831,6 @@
   },
   "stats": {
     "vocabTotal": 102400,
-    "latticeMatches": 940
+    "latticeMatches": 949
   }
 }

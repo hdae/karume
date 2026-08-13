@@ -998,13 +998,32 @@ class DitGraph(nn.Module):
         return attention.wo(y)
 
 
+def golden_case_body(name: str, kind: str, body: str, normalize_text: Any) -> str:
+    """golden ケースの本文へ**種別ごとの**前処理を当てる（上流 `_synthesize` と同じ）。
+
+    MUST: `normalize_text` は **text 専用**。上流 `inference_runtime._synthesize` が caption に
+    掛けるのは `str(...).strip()` だけなので、caption へ正規化を足すと外側括弧の剥がし・NFKC・
+    記号削除のぶんだけ conditioning が黙って別物になる（同じ理由で `irodori_pipeline.py` の
+    `_packed_caption_ids` も strip だけを掛ける）。
+    """
+    if kind == "text":
+        prepared = normalize_text(body).strip()
+    elif kind == "caption":
+        prepared = body.strip()
+    else:
+        raise SystemExit(f"{name}: 種別 {kind!r} は text / caption のどちらでもない")
+    if not prepared:
+        raise SystemExit(f"{name}: 前処理後の本文が空")
+    return prepared
+
+
 def build_cases(
     model_dir: Path, source: IrodoriSource, text_config: Mapping[str, Any], sym_max: int
 ) -> tuple[tuple[str, str, torch.Tensor], ...]:
     """golden ケースの `(名前, 種別, input_ids)`。
 
     前処理は実装の正本（`inference_runtime._synthesize`）と同じ順序:
-    正規化（`normalize_text` + `strip`）→ 特殊トークン無しでトークナイズ → BOS 前置。
+    種別ごとの前処理（{@link golden_case_body}）→ 特殊トークン無しでトークナイズ → BOS 前置。
     右詰め pad は**しない**（静的方式ではホストが列を詰める — モジュール docstring）。
     """
     from tokenizers import Tokenizer
@@ -1013,10 +1032,8 @@ def build_cases(
     bos_id = int(text_config["bos_token_id"])
     cases: list[tuple[str, str, torch.Tensor]] = []
     for name, kind, body in GOLDEN_CASES:
-        normalized = source.normalize_text(body).strip()
-        if not normalized:
-            raise SystemExit(f"{name}: 正規化後の本文が空")
-        ids = [bos_id, *tokenizer.encode(normalized, add_special_tokens=False).ids]
+        prepared = golden_case_body(name, kind, body, source.normalize_text)
+        ids = [bos_id, *tokenizer.encode(prepared, add_special_tokens=False).ids]
         if not 2 <= len(ids) <= sym_max:
             raise SystemExit(f"{name}: T={len(ids)} が記号次元の範囲 [2, {sym_max}] の外")
         cases.append((name, kind, torch.tensor([ids], dtype=torch.int64)))

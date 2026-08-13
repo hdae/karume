@@ -11,7 +11,8 @@ r"""Irodori-TTS v4 のテキスト前処理層（`normalize_text` + Unigram ト�
 
     tokenizer.json         実行時資産（vocabText / scores / addedTokens / bosId / padId /
                            unkId / byteBaseId）
-    golden.encode.json     `{raw, normalized, ids}` の固定ケースと batch_encode 同値ケース
+    golden.encode.json     `{raw, normalized, ids}` の固定ケース・batch_encode 同値ケース・
+                           **caption 経路**（strip のみ）のケース
     golden.normalize.json  `normalize_text` の `{raw, normalized}`（各置換規則を最低 1 回発火）
     nfkc-diff.json         NFKC が**恒等でない**単一コードポイントの写像表 `{cp: 正規化後}`
 
@@ -60,6 +61,8 @@ emit の前に全て実測し、1 つでも外れたら**何も書かない**（
 - byte_fallback ケースが**実際に**バイト展開になっていること（期待バイト id 列との一致）
 - 語彙内絵文字ケースが**実際に**語彙内であること（外れると b と c が同じ検査になる）
 - `normalize_text` の各置換規則が golden のどこかで**最低 1 回発火**すること
+- caption ケースが**正規化に感受**すること（strip 版と normalize 版の id 列が違う） — caption
+  経路は上流が strip しか掛けないので、無感なケースだけだと取り違えが門を素通りする
 """
 
 from __future__ import annotations
@@ -187,6 +190,45 @@ BATCH_CASES: tuple[tuple[str, str, str, str], ...] = (
         "caption 側の長さ（max_caption_len）で同じ手順を踏む",
         "若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
         CAPTION_MAX_LENGTH_KEY,
+    ),
+)
+
+#: **caption 側**の前処理ケース `(名前, 理由, 生テキスト)`。
+#:
+#: 上流 `inference_runtime._synthesize` は caption に `str(...).strip()` しか掛けない
+#: （`normalize_text` は text 専用）。ここに並べるのは全て**正規化に感受**する綴りで、
+#: caption 経路へ誤って `normalize_text` を掛けると id 列が変わる = {@link build_caption_cases}
+#: の「strip 版と normalize 版が違う」実測が成立する。
+CAPTION_CASES: tuple[tuple[str, str, str], ...] = (
+    (
+        "caption-brackets",
+        "外側括弧: normalize なら「」が剥がれる / caption では残る",
+        "「若く元気な女性の声」",
+    ),
+    (
+        "caption-fullwidth",
+        "NFKC: normalize なら Ａ が A へ落ちる / caption では全角のまま",
+        "Ａの声",
+    ),
+    (
+        "caption-circled",
+        "記号削除: normalize なら ① が消える / caption では残る",
+        "①の声",
+    ),
+    (
+        "caption-semicolon",
+        "記号削除: normalize なら ; が消える / caption では残る",
+        "声;高め",
+    ),
+    (
+        "caption-surrounding-space",
+        "strip は前後の空白だけ — 中の全角空白は caption では残る（normalize なら消える）",
+        "　明るい　声　",
+    ),
+    (
+        "caption-official",
+        "公式モデルカードの Voice Design 文（正規化に無感 = 既存 golden と同じ側）",
+        "若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
     ),
 )
 
@@ -476,6 +518,65 @@ def build_batch_cases(
     return cases
 
 
+def _packed_upstream_ids(pair: TokenizerPair, body: str, max_length: int) -> list[int]:
+    """上流 `batch_encode` の最終形から pad を落とした**詰めた** id 列。
+
+    マスクは必ず先頭からの連続した prefix なので、有効長は総和で取れる（静的方式で
+    ホストが作る列と同じ形 — `packages/models/src/irodori/host/pack.ts`）。
+    """
+    ids, mask = pair.wrapper.batch_encode([body], max_length=max_length)
+    used = int(mask[0].sum())
+    return [int(value) for value in ids[0, :used].tolist()]
+
+
+def build_caption_cases(
+    pair: TokenizerPair, normalize_text: Any, model_config: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """**caption 経路**（strip のみ）の詰めた id 列と、**text 経路**（normalize）の同じ列。
+
+    どちらも上流の入口（`PretrainedTextTokenizer.batch_encode`）を**呼んで**採り、pad を
+    落とした prefix だけを載せる（TS 側のホストが作るのはこの詰めた列 — `host/pack.ts`）。
+    `normalizedIdsPacked` は「もし caption にも `normalize_text` を掛けたら」の列で、TS 側の
+    門はこの 2 本が**違う**ことまで見る（一致するケースだけだと、caption の前処理を
+    取り違えても門が緑のまま通る）。
+
+    MUST: 正規化に感受するケース（2 本の列が違う）が {@link CAPTION_CASES} の大半を占める
+    こと。無感なのは公式 Voice Design 文 1 本だけで、そちらも事実を `normalizeSensitive` に
+    書き出す（既存 golden の caption がこの側だから = 前処理を直しても golden が動かない）。
+    """
+    max_length = int(model_config[CAPTION_MAX_LENGTH_KEY])
+    cases: list[dict[str, Any]] = []
+    sensitive = 0
+    for name, why, text in CAPTION_CASES:
+        stripped = text.strip()
+        if not stripped:
+            raise SystemExit(f"{name}: strip 後の caption が空")
+        normalized = normalize_text(text).strip()
+        stripped_ids = _packed_upstream_ids(pair, stripped, max_length)
+        normalized_ids = _packed_upstream_ids(pair, normalized, max_length)
+        differs = stripped_ids != normalized_ids
+        sensitive += int(differs)
+        cases.append(
+            {
+                "name": name,
+                "why": why,
+                "raw": text,
+                "stripped": stripped,
+                "normalized": normalized,
+                "maxLength": max_length,
+                "idsPacked": stripped_ids,
+                "normalizedIdsPacked": normalized_ids,
+                "normalizeSensitive": differs,
+            }
+        )
+    if sensitive < len(CAPTION_CASES) - 1:
+        raise SystemExit(
+            f"正規化に感受する caption ケースが {sensitive} 件しかない"
+            "（caption の前処理を取り違えても門が緑のまま通る）"
+        )
+    return cases
+
+
 def build_normalize_cases(normalize_text: Any) -> list[dict[str, Any]]:
     """`normalize_text` の `{raw, normalized}` golden（各置換規則を最低 1 回発火させる）。"""
     return [
@@ -544,14 +645,21 @@ def nfkc_diff_table() -> dict[str, str]:
 
 
 def lattice_texts(
-    encode_cases: Sequence[Mapping[str, Any]], batch_cases: Sequence[Mapping[str, Any]]
+    encode_cases: Sequence[Mapping[str, Any]],
+    batch_cases: Sequence[Mapping[str, Any]],
+    caption_cases: Sequence[Mapping[str, Any]],
 ) -> list[str]:
-    """Viterbi の格子が実際に見る文字列（golden の `normalized` を ▁ 置換したもの）。
+    """Viterbi の格子が実際に見る文字列（golden の本文を ▁ 置換したもの）。
+
+    caption ケースは **strip 版と normalize 版の両方**を載せる — TS 側の門が同じ生テキストを
+    2 経路へ通して id 列の違いを見るので、片方だけだと語彙の部分集合が足りなくなる。
 
     追加語彙の切り出しで断片に割れるが、**割った断片の部分文字列は元の文字列の部分文字列**
     なので、割る前の全体を渡せば語彙の抽出には十分（超集合になるだけで格子は変わらない）。
     """
-    return [case["normalized"].replace(" ", METASPACE) for case in (*encode_cases, *batch_cases)]
+    texts = [case["normalized"] for case in (*encode_cases, *batch_cases, *caption_cases)]
+    texts.extend(case["stripped"] for case in caption_cases)
+    return [text.replace(" ", METASPACE) for text in texts]
 
 
 def vocab_subset(
@@ -608,6 +716,7 @@ def build_parity_fixture(
     raw_vocab: Sequence[Sequence[Any]],
     encode_cases: Sequence[Mapping[str, Any]],
     batch_cases: Sequence[Mapping[str, Any]],
+    caption_cases: Sequence[Mapping[str, Any]],
     normalize_cases: Sequence[Mapping[str, Any]],
     diff: Mapping[str, str],
 ) -> dict[str, Any]:
@@ -616,7 +725,7 @@ def build_parity_fixture(
     MUST: `minScore` / `maxTokenLength` は語彙**全体**から採る。未知ノードのスコアと前方一致の
     探索幅は全体で決まるので、部分集合から導くと別の分割になる（anima の T5 と同じ罠）。
     """
-    texts = lattice_texts(encode_cases, batch_cases)
+    texts = lattice_texts(encode_cases, batch_cases, caption_cases)
     subset = vocab_subset(raw_vocab, texts, dict(asset["addedTokens"]))
     matched = check_subset_covers_lattice(raw_vocab, texts, subset)
     return {
@@ -627,6 +736,8 @@ def build_parity_fixture(
             "実測値。語彙は全ケースの再現に要る**部分集合**（102,400 本を commit しないため）",
             "だが、minScore / maxTokenLength は語彙**全体**の値。NFKC 差分表は全体を載せる",
             "（TS の normalize('NFKC') と Unicode 版がずれた瞬間に正規化が静かに変わるため）。",
+            "encode.caption は caption 経路（上流は strip のみ）と text 経路（normalize）の",
+            "id 列を同じ生テキストから 2 通り採ったもの。",
         ],
         "source": {"repo": "Aratako/Irodori-TTS", "reference": "tokenizers + transformers"},
         "asset": {
@@ -639,7 +750,11 @@ def build_parity_fixture(
             "unkId": asset["unkId"],
             "byteBaseId": asset["byteBaseId"],
         },
-        "encode": {"cases": list(encode_cases), "batch": list(batch_cases)},
+        "encode": {
+            "cases": list(encode_cases),
+            "batch": list(batch_cases),
+            "caption": list(caption_cases),
+        },
         "normalize": {"cases": list(normalize_cases)},
         "nfkcDiff": dict(diff),
         "stats": {"vocabTotal": len(raw_vocab), "latticeMatches": matched},
@@ -666,18 +781,29 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -
     pair = TokenizerPair(model_dir)
     encode_cases = build_encode_cases(pair, normalize_text)
     batch_cases = build_batch_cases(pair, normalize_text, model_config)
+    caption_cases = build_caption_cases(pair, normalize_text, model_config)
     normalize_cases = build_normalize_cases(normalize_text)
     coverage = check_rule_coverage(normalize_cases)
     diff = nfkc_diff_table()
     fixture = build_parity_fixture(
-        asset, raw["model"]["vocab"], encode_cases, batch_cases, normalize_cases, diff
+        asset,
+        raw["model"]["vocab"],
+        encode_cases,
+        batch_cases,
+        caption_cases,
+        normalize_cases,
+        diff,
     )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     written: dict[str, int] = {}
     for filename, payload, indent in (
         (ASSET_FILE, asset, None),
-        (ENCODE_GOLDEN_FILE, {"cases": encode_cases, "batch": batch_cases}, 1),
+        (
+            ENCODE_GOLDEN_FILE,
+            {"cases": encode_cases, "batch": batch_cases, "caption": caption_cases},
+            1,
+        ),
         (NORMALIZE_GOLDEN_FILE, {"cases": normalize_cases}, 1),
         (NFKC_DIFF_FILE, diff, 1),
     ):
@@ -711,6 +837,13 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -
         "batchCases": {
             case["name"]: {"maxLength": case["maxLength"], "used": sum(case["mask"])}
             for case in batch_cases
+        },
+        "captionCases": {
+            case["name"]: {
+                "tokens": len(case["idsPacked"]),
+                "normalizeSensitive": case["normalizeSensitive"],
+            }
+            for case in caption_cases
         },
         "normalizeCases": len(normalize_cases),
         "ruleCoverage": coverage,
