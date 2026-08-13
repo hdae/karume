@@ -581,6 +581,53 @@ Deno.test({
   },
 });
 
+/**
+ * K=0（in_features 0）の退化 shape。契約（src/ops.ts の linear）では有効な形だが、`k % 4 == 0`
+ * を満たすので選択述語が `k > 0` を見ていないと i8a8 経路へ入り、① `quantize_rows` の
+ * `dim >= 1` と衝突して **i8a8 固有の CodegenError** になる（量子化する活性がそもそも存在せず、
+ * i8a8 の門として意味を持たない例外）。
+ *
+ * 固定するのは「**opt-in が K=0 の経路を変えない**」こと — 既定 session と**同じ**失敗で
+ * 落ちる。K=0 自体は既定の f32 経路でも 0 バイト束縛の最小サイズ違反で落ちる（linearCompute
+ * とは無関係の別要因）ので、ここは 2 経路の一致だけを見る。
+ */
+Deno.test({
+  name:
+    "i8a8: K=0 の i8 常駐 linear は opt-in でも既定と同じ経路（i8a8 固有の失敗を出さない・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const m = 3;
+    const n = 8;
+    const bias = fill([n], SIGNED);
+    // 重みは 0 要素（[n,0]）。scale は per-channel の形だけ保つ（縮約が空なので読まれない）。
+    const quantized = quantizeI8(new Float32Array(0), [n, 0], 0);
+    const model = i8LinearModel(m, n, 0, quantized, bias);
+    const x = fill([m, 0], SIGNED);
+    const runK0 = async (gpu: GpuContext, options: SessionOptions): Promise<Error> => {
+      const session = await createSession(gpu, openModel(model), options);
+      try {
+        return await assertRejects(() => session.run({ x }), Error);
+      } finally {
+        await session.dispose();
+      }
+    };
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      const baseline = await runK0(gpu, {});
+      const optIn = await runK0(gpu, { linearCompute: "i8a8" });
+      assertEquals(optIn.name, baseline.name, "K=0: opt-in で例外の種類が変わっている");
+      assertEquals(optIn.message, baseline.message, "K=0: opt-in で失敗の理由が変わっている");
+      // 恒真化の門: 述語が K=0 を拾っていたときに出る ① の門とは別物であること
+      assert(
+        !optIn.message.includes("quantize_rows"),
+        `K=0: i8a8 の ① へ入っている（${optIn.message}）`,
+      );
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
 Deno.test({
   name: "i8a8: k が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
   ignore: !GPU_AVAILABLE,

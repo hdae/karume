@@ -2017,9 +2017,17 @@ export class Session {
     const k = weight[1];
     const m = numel(x.slice(0, -1));
     const weightStorage = this.#weightStorage(step);
-    // w8a8 は **opt-in × i8 常駐 × k % 4 == 0** の 3 条件が揃ったときだけ（ADR 0025 予定）。
+    // w8a8 は **opt-in × i8 常駐 × k > 0 × k % 4 == 0** の 4 条件が揃ったときだけ（ADR 0025 予定）。
     // 既定の "f32" では 1 バイトも挙動が変わらない。
-    if (this.#state.linearCompute === "i8a8" && weightStorage === "i8" && k % 4 === 0) {
+    // MUST: `k > 0` を含める。`k == 0` は契約上有効な退化 shape（src/ops.ts の linear は
+    // in=0 を許す）だが、i8a8 経路の ① `quantize_rows` は `dim >= 1` を要求するので、拾うと
+    // i8a8 固有の CodegenError になる — 縮約が空 = 量子化する活性がそもそも無く、i8a8 の門と
+    // しての意味を持たない例外なので、経路の選択で失敗の理由が変わらないよう通常経路へ落とす。
+    // NOTE: K=0 自体は通常経路でも 0 バイト束縛が最小束縛サイズを割って落ちる（この述語とは
+    // 無関係の別要因）。
+    if (
+      this.#state.linearCompute === "i8a8" && weightStorage === "i8" && k > 0 && k % 4 === 0
+    ) {
       await this.#buildLinearI8a8(step, binds, out, builder, m, n, k);
       return;
     }
@@ -2320,7 +2328,10 @@ export class Session {
     // MUST: i8a8 の ①QK は別カーネル（src/kernels/attention-i8a8.ts）で epilogue を持たない。
     // 黙って f32 経路へ落とすと「i8a8 を頼んだのに効かない」沈黙になり、mask を落とすと
     // 値が壊れるので、組み合わせそのものを**一時バッファを取る前に** fail loudly にする。
-    if (mask !== undefined && qkI8a8) {
+    // MUST: 判定は **要求されたモード**（`i8a8`）で見る — `qkI8a8`（D % 4 の適格判定込み）で
+    // 見ると D % 4 != 0 のときだけ拒否をすり抜け、f32 の ①QK と i8a8 の ③PV の混成で走って
+    // しまう。「mask × i8a8 は無条件に fail loudly」が契約（ADR 0023 / docs/limitations.md）。
+    if (mask !== undefined && i8a8) {
       throw new ExecutionError(
         `${where}: 加算 mask 付きの attention は attentionCompute 'i8a8' と組めない` +
           "（①QK の i8a8 変種は mask の epilogue を持たない — attentionCompute を 'f32' か " +

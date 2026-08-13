@@ -381,3 +381,77 @@ Deno.test({
     }
   },
 });
+
+/**
+ * mask × `attentionCompute: "i8a8"` の拒否は **D / N の 4 の倍数性に依らない**（ADR 0023 /
+ * docs/limitations.md の「無条件 fail loudly」）。段ごとの適格判定（① は `D % 4`・③ は
+ * `N % 4`）で拒否を決めると `D % 4 != 0` の形だけ素通りし、**f32 の ①QK と i8a8 の ③PV の
+ * 混成**で走ってしまう — 値は正しくても「組めない」という契約が破れる。
+ *
+ * 恒真化の門: **同じ形の mask 無し**は i8a8 で走ること（拒否の原因が mask であって
+ * 「その形が i8a8 で走らない」ではないことを固定する）。
+ */
+Deno.test({
+  name: "mask × attentionCompute 'i8a8' は D%4 / N%4 に依らず一貫して拒否される（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // ①QK 適格（D%4）× ③PV 適格（N%4）の 3 通り。真×真 は従来から拒否され、残り 2 つが
+    // 素通りしていた（偽×真 = 混成 / 偽×偽 = 全段 f32 への沈黙の縮退）。
+    const shapes: readonly Shape[] = [
+      { name: "①③とも適格 D8 N8", b: 1, h: 2, m: 8, n: 8, d: 8 },
+      { name: "③のみ適格 D13 N20", b: 1, h: 2, m: 8, n: 20, d: 13 },
+      { name: "①③とも非適格 D13 N19", b: 1, h: 2, m: 8, n: 19, d: 13 },
+    ];
+    const gpu = await acquireGpu();
+    try {
+      for (const shape of shapes) {
+        const { b, h, m, n, d } = shape;
+        const q = fill([b, h, m, d], QUERY);
+        const k = fill([b, h, n, d], KEY);
+        const v = fill([b, h, n, d], VALUE);
+        const mask = { dtype: "f32" as const, shape: [1, 1, m, n], data: bandMask(m, n, 2, -1e30) };
+        const attrs = { scale: halfScale(d) };
+
+        const masked = await createSession(
+          gpu,
+          openModel(graphModelBuffer(
+            singleOpGraph("attention", [q.shape, k.shape, v.shape, mask.shape], [b, h, m, d], {
+              attrs,
+            }),
+          )),
+          { attentionCompute: "i8a8" },
+        );
+        try {
+          // 文言・型は D%4==0 経路の拒否と同じもの（分岐ごとに別の拒否を作らない）
+          await assertRejects(
+            () => masked.run({ x0: q, x1: k, x2: v, x3: mask }),
+            ExecutionError,
+            "加算 mask 付きの attention は attentionCompute 'i8a8' と組めない",
+          );
+        } finally {
+          await masked.dispose();
+        }
+
+        const plain = await createSession(
+          gpu,
+          openModel(graphModelBuffer(
+            singleOpGraph("attention", [q.shape, k.shape, v.shape], [b, h, m, d], { attrs }),
+          )),
+          { attentionCompute: "i8a8" },
+        );
+        try {
+          const y = (await plain.run({ x0: q, x1: k, x2: v }))["y"];
+          assertEquals(y.shape, [b, h, m, d], shape.name);
+          assert(
+            y.data.every((value) => Number.isFinite(value)),
+            `${shape.name}: mask 無しの i8a8 出力に非有限値`,
+          );
+        } finally {
+          await plain.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
