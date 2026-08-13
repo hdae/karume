@@ -375,6 +375,9 @@ sbv2 = [
     { name = "huggingface-hub" },
     { name = "style-bert-vits2" },
 ]
+siglip2 = [
+    { name = "transformers" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -398,6 +401,7 @@ sbv2 = [
     { name = "huggingface-hub", specifier = ">=1.26.0" },
     { name = "style-bert-vits2", specifier = "==2.5.0" },
 ]
+siglip2 = [{ name = "transformers", specifier = "==5.14.1" }]
 
 [[package]]
 name = "llvmlite"
