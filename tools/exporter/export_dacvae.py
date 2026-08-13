@@ -45,8 +45,8 @@ transpose してから `quantizer.out_proj`（conv1d 32→1024 k=1）へ渡す�
 
 `quantizer.in_proj` は conv1d 1024→64（k=1）で、上流は出力を `chunk(2, dim=1)` して前半を
 mean・後半を scale に使う。scale は決定的経路では捨てられるので、**前半 32 行 + bias 前半 32 に
-切り詰めた conv1d** をグラフに載せる（`_in_proj_truncation_equivalence` が `chunk(2)[0]` との
-ビット一致を毎回実測する）。
+切り詰めた conv1d** をグラフに載せる（`_in_proj_truncation_evidence` が `chunk(2)[0]` との
+一致を毎回実測する — 許容は `IN_PROJ_TRUNCATION_ATOL`）。
 
 MUST: 入力は**フレーム分割済みの `[1,T,1920]`**（グラフ内で `[1,1,1920T]` へ reshape）。
 素直な `[1,1,1920T]` にできないのは、IR の束縛規則が「シンボルは少なくとも 1 つの入力 shape に
@@ -77,7 +77,8 @@ reflect pad（`DACVAE._pad`）と LUFS 正規化・リサンプルは**ホスト
    グラフに載るのは `Decoder` 本体（写しではない）で、抽出したほうは門でしか使わない —
    「decode が実際に通る層は 28 本で、透かし枝は波形ヘッド 4 本しか寄与しない」という
    構造の主張を、次波（タイル化）が前提にするため。
-2. **`in_proj` の切り詰め**が `chunk(2, dim=1)[0]` とビット一致すること。
+2. **`in_proj` の切り詰め**が `chunk(2, dim=1)[0]` と一致すること
+   （{@link IN_PROJ_TRUNCATION_ATOL} — ビット一致は conv カーネル選択に依存し保証されない）。
 3. **`remove_weight_norm` の前後**で decoder / encoder の出力がビット一致すること。
 4. **ラッパの eager 同値**（パッチ前の実モジュール出力との差 — {@link EAGER_EQUIV_ATOL} = 0）。
 5. **往復の妥当性**（参照音声 → encoder → decoder が有限で、入力波形と相関すること）。
@@ -361,7 +362,8 @@ def truncated_in_proj(in_proj: nn.Conv1d) -> nn.Conv1d:
     """`quantizer.in_proj` を**前半 32 行**へ切り詰めた conv1d を作る（mean 側だけ）。
 
     MUST: `fold_weight_norm` の**後**に呼ぶ（`in_proj.weight` が実効重みである必要がある）。
-    `_in_proj_truncation_evidence` が `chunk(2, dim=1)[0]` とのビット一致を実測する。
+    `_in_proj_truncation_evidence` が `chunk(2, dim=1)[0]` との一致を実測する
+    （許容は `IN_PROJ_TRUNCATION_ATOL`）。
     """
     if hasattr(in_proj, "weight_g"):
         raise SystemExit("in_proj の weight_norm が畳まれていない — 切り詰めが実効重みにならない")
@@ -726,13 +728,29 @@ def _main_path_evidence(
     return evidence
 
 
+#: 門 2（in_proj 切り詰め）の許容絶対差。
+#:
+#: | 系   | 素実測（max abs）       | 採用値（≈10 倍） |
+#: | ---- | ----------------------- | ---------------- |
+#: | 門 2 | 2.9802e-8（2026-08-13） | 3e-7             |
+#:
+#: MUST: ビット一致（`torch.equal`）を要求しない — 比べる 2 辺は「out_channels 2h の conv の
+#: 前半 h」と「out_channels h の conv」で、torch の conv はチャネル数・スレッド数でカーネルの
+#: ブロッキング（= 縮約順）を変えるため、ビット一致は仕様保証の無い実装挙動（実測でも
+#: スレッド数 6 で 1 ulp 差・8 で 0 と揺れる — テスト追加で global RNG 列がずれた途端に
+#: 割れた）。門の目的は mean / scale の取り違え検出で、取り違えの差は O(1) — この許容で
+#: 判別力は落ちない（取り違えが落ち続けることは `tests/test_export_dacvae.py` が固定する）。
+IN_PROJ_TRUNCATION_ATOL = 3e-7
+
+
 def _in_proj_truncation_evidence(
     model: nn.Module, trimmed: nn.Conv1d, cases: Sequence[tuple[str, torch.Tensor]]
 ) -> dict[str, float]:
-    """切り詰めた `in_proj` が `chunk(2, dim=1)[0]` とビット一致することを実測する（門 2）。
+    """切り詰めた `in_proj` が `chunk(2, dim=1)[0]` と一致することを実測する（門 2）。
 
     MUST: 恒真にしない — 切り詰めは「出力チャネルの前半 = mean」という上流の分割規約に
     乗っており、後半（scale）を取る取り違えは shape も dtype も一致するのでここでしか出ない。
+    戻り値には実測した最大絶対差をそのまま載せる（許容は {@link IN_PROJ_TRUNCATION_ATOL}）。
     """
     evidence: dict[str, float] = {}
     for name, wav in cases:
@@ -740,12 +758,13 @@ def _in_proj_truncation_evidence(
             hidden = model.encoder(wav.reshape(1, 1, -1))
             expected, _scale = model.quantizer.in_proj(hidden).chunk(2, dim=1)
             actual = trimmed(hidden)
-        if not torch.equal(expected, actual):
+        diff = float((expected - actual).abs().max())
+        if diff > IN_PROJ_TRUNCATION_ATOL:
             raise AssertionError(
                 f"{name}: 切り詰めた in_proj が chunk(2)[0] と一致しない"
-                f"（最大絶対差 {float((expected - actual).abs().max())}）"
+                f"（最大絶対差 {diff} > 許容 {IN_PROJ_TRUNCATION_ATOL}）"
             )
-        evidence[name] = 0.0
+        evidence[name] = diff
     return evidence
 
 

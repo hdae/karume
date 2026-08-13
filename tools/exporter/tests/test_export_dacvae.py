@@ -195,11 +195,17 @@ class TestMainPathEvidence:
 
 
 class TestInProjTruncation:
-    def test_the_first_half_measures_zero(self):
+    def test_the_first_half_measures_within_the_gate_tolerance(self):
+        """NOTE: 期待は 0.0 ぴったりではない — 比べる 2 辺は conv のカーネル選択が違い得て、
+        ビット一致は torch の仕様保証ではない（`IN_PROJ_TRUNCATION_ATOL` の導出表）。実測でも
+        テスト追加による global RNG 列のずれで 1 ulp 差が出た（2026-08-13）。"""
         codec = TinyCodec(weight_norm=False)
         trimmed = ex.truncated_in_proj(codec.quantizer.in_proj)
 
-        assert ex._in_proj_truncation_evidence(codec, trimmed, ENCODER_CASES) == {"b": 0.0}
+        evidence = ex._in_proj_truncation_evidence(codec, trimmed, ENCODER_CASES)
+
+        assert set(evidence) == {"b"}
+        assert 0.0 <= evidence["b"] <= ex.IN_PROJ_TRUNCATION_ATOL
 
     def test_taking_the_second_half_fails_loudly(self):
         """MUST: mean と scale の取り違えは shape も dtype も一致するのでここでしか出ない。"""
