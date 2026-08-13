@@ -8,6 +8,9 @@
 from __future__ import annotations
 
 import inspect
+import sys
+from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -164,3 +167,40 @@ class TestExportScript:
         """台本は 1 本残らず `main(argv)` を受ける（`argv` 無しの main は CLI に載らない）。"""
         module = cli.load_script(getattr(cli, script))
         assert "argv" in inspect.signature(module.main).parameters
+
+
+#: 失敗ロードの回帰で読む台本名（実在の台本と衝突しない名前）。
+_BROKEN_SCRIPT = "export_broken_for_test"
+
+
+@pytest.fixture
+def broken_script_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
+    """台本の置き場を tmp へ差し替え、テスト中に入った `sys.modules` 登録を後始末する。"""
+    monkeypatch.setattr(cli, "_SCRIPT_DIR", tmp_path)
+    sys.modules.pop(_BROKEN_SCRIPT, None)
+    yield tmp_path
+    sys.modules.pop(_BROKEN_SCRIPT, None)
+
+
+class TestScriptLoadFailure:
+    def test_a_failed_load_leaves_nothing_registered(self, broken_script_dir: Path) -> None:
+        """実行中に落ちた台本は `sys.modules` に残さない（通常 import と同じ後始末）。"""
+        (broken_script_dir / f"{_BROKEN_SCRIPT}.py").write_text(
+            "raise RuntimeError('台本が壊れている')\n", encoding="utf-8"
+        )
+
+        with pytest.raises(RuntimeError, match="台本が壊れている"):
+            cli.load_script(_BROKEN_SCRIPT)
+
+        assert _BROKEN_SCRIPT not in sys.modules
+
+    def test_a_second_load_runs_the_fixed_script(self, broken_script_dir: Path) -> None:
+        """半初期化 module を残すと、台本を直しても冒頭の早期 return がそれを返し続ける。"""
+        script = broken_script_dir / f"{_BROKEN_SCRIPT}.py"
+        script.write_text("raise RuntimeError('台本が壊れている')\n", encoding="utf-8")
+        with pytest.raises(RuntimeError):
+            cli.load_script(_BROKEN_SCRIPT)
+
+        script.write_text("def main(argv):\n    return list(argv)\n", encoding="utf-8")
+
+        assert cli.load_script(_BROKEN_SCRIPT).main(["--out", "x"]) == ["--out", "x"]

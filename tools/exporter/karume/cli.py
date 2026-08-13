@@ -74,7 +74,17 @@ def load_script(name: str) -> ModuleType:
         )
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # MUST: 実行が落ちたら登録を取り消す（通常 import と同じ後始末）。半初期化の module を
+        # 残すと、同一プロセスの次回呼び出しが冒頭の「読み込み済みならそのまま返す」で
+        # それを掴み、台本を直しても壊れたまま返り続ける。
+        # `is module` で見るのは、台本自身が sys.modules[name] を差し替えていた場合に
+        # 他人の登録を消さないため。
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
+        raise
     return module
 
 
