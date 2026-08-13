@@ -54,6 +54,9 @@ EXPORT_DACVAE_SCRIPT = "export_dacvae"
 #: `karume export-deberta` が包む台本（実重み DeBERTa-v2 の系列を書き出す側）。
 EXPORT_DEBERTA_SCRIPT = "export_deberta"
 
+#: `karume export-siglip2` が包む台本（SigLIP2 の vision tower 1 系列を書き出す側）。
+EXPORT_SIGLIP2_SCRIPT = "export_siglip2"
+
 
 def load_script(name: str) -> ModuleType:
     """リポジトリ直下の台本をパス指定で読み込む。
@@ -112,6 +115,10 @@ def run_export_deberta(argv: Sequence[str]) -> None:
     return load_script(EXPORT_DEBERTA_SCRIPT).main(argv)
 
 
+def run_export_siglip2(argv: Sequence[str]) -> None:
+    return load_script(EXPORT_SIGLIP2_SCRIPT).main(argv)
+
+
 def run_dist(argv: Sequence[str]) -> None:
     from karume import dist
 
@@ -146,6 +153,10 @@ COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     "export-deberta": (
         run_export_deberta,
         "実重み DeBERTa-v2 を IR v1 + golden io へ書き出す（台本 export_deberta.py）",
+    ),
+    "export-siglip2": (
+        run_export_siglip2,
+        "SigLIP2 の vision tower を IR v1 + golden io へ書き出す（台本 export_siglip2.py）",
     ),
     "dist": (run_dist, "配布ディレクトリを組み立てて karume.json / README.md を書く"),
     "verify": (run_verify, "配布形 safetensors を IR v1 の全規則で検証する"),

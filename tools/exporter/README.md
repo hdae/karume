@@ -27,6 +27,7 @@ prints the usage of the body's own parser). This shape keeps a copy of the exclu
 | `karume export-irodori`        | script `export_irodori.py` (the 6 text-side graphs of the TTS chain)        | `python export_irodori.py`        |
 | `karume export-dacvae`         | script `export_dacvae.py` (the 2 DACVAE codec graphs)                       | `python export_dacvae.py`         |
 | `karume export-deberta`        | script `export_deberta.py` (the real-weight DeBERTa-v2 series)              | `python export_deberta.py`        |
+| `karume export-siglip2`        | script `export_siglip2.py` (the SigLIP2 vision tower series)                | `python export_siglip2.py`        |
 | `karume dist`                  | `karume.dist` (assembles the distribution form; arguments fully compatible) | `python -m karume.dist`           |
 | `karume verify`                | `karume.verify` (validates the distribution form against every IR v1 rule)  | (new)                             |
 

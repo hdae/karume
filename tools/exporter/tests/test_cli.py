@@ -94,6 +94,7 @@ class TestDispatch:
             ("export-irodori", "EXPORT_IRODORI_SCRIPT"),
             ("export-dacvae", "EXPORT_DACVAE_SCRIPT"),
             ("export-deberta", "EXPORT_DEBERTA_SCRIPT"),
+            ("export-siglip2", "EXPORT_SIGLIP2_SCRIPT"),
         ],
     )
     def test_every_export_script_has_a_subcommand_of_its_own(
@@ -161,6 +162,7 @@ class TestExportScript:
             "EXPORT_IRODORI_SCRIPT",
             "EXPORT_DACVAE_SCRIPT",
             "EXPORT_DEBERTA_SCRIPT",
+            "EXPORT_SIGLIP2_SCRIPT",
         ],
     )
     def test_every_export_script_takes_argv(self, script: str) -> None:

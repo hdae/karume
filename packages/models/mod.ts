@@ -1,6 +1,6 @@
 /**
  * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima` / `./irodori` /
- * `./sbv2`）と両建て（ADR 0037）。
+ * `./sbv2` / `./siglip2`）と両建て（ADR 0037）。
  *
  * ADR 0008 の流儀で**薄い面**にする — ここに並ぶのは「パイプラインを組んで生成する」「出た
  * 画像を書き出す」という利用者ストーリーだけで、内部モジュールの素通し再輸出はしない。
@@ -43,11 +43,21 @@ export type {
   Sbv2RunComponent,
 } from "./src/sbv2/pipeline.ts";
 
+export { Siglip2Pipeline } from "./src/siglip2/pipeline.ts";
+export type {
+  Siglip2Assets,
+  Siglip2FromPretrainedOptions,
+  Siglip2PipelineOptions,
+} from "./src/siglip2/pipeline.ts";
+
 /**
- * RGBA → PNG / f32 波形 ↔ WAV。**パイプライン非依存の共通処理**（画像生成モデルは総じて
- * 最後に PNG を、音声生成モデルは WAV を通し、声質の参照には WAV を読む）なので、ファミリの
+ * RGBA → PNG / f32 波形 ↔ WAV / RGB8 → モデル入力。**パイプライン非依存の共通処理**
+ * （画像生成モデルは総じて最後に PNG を、音声生成モデルは WAV を通し、声質の参照には WAV を、
+ * 画像を入力に取るモデルは resize → rescale → normalize を通る）なので、ファミリの
  * サブパスではなく barrel 直下に置く。
  */
 export { encodePng } from "./src/image/png.ts";
+export { normalizeToNchw, resizeRgb8 } from "./src/image/preprocess.ts";
+export type { Rgb8Image } from "./src/image/preprocess.ts";
 export { decodeWav, encodeWav } from "./src/audio/wav.ts";
 export type { DecodedWav } from "./src/audio/wav.ts";

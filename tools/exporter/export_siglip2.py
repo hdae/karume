@@ -47,10 +47,11 @@ MUST: `--verify` は emit しない（同一プロセスでは併用できない
 ## 入力の約束（前処理はグラフに載せない）
 
 グラフ入力は **正規化済みの** `pixel_values f32 [1, 3, 解像度, 解像度]`（base 224 /
-so400m 384）。画像の decode はホストの責務、resize（`config.image_size` へ bicubic）/
-rescale（1/255）/ normalize（mean = std = 0.5 → `[-1, 1]`）は karume 側に置く予定だが
-**この段では作らない**。定数の正本は重みと同じ場所の `preprocessor_config.json`
-（2 モデルとも mean = std = 0.5・resample 2 = bicubic で、違うのは寸法だけ）。
+so400m 384）。画像の decode はホストの責務、resize（`config.image_size` へ bilinear）/
+rescale（1/255）/ normalize（mean = std = 0.5 → `[-1, 1]`）は karume 側
+（`packages/models/src/image/preprocess.ts`・パリティ台本は `siglip2_preprocess.py`）。
+定数の正本は重みと同じ場所の `preprocessor_config.json`（2 モデルとも mean = std = 0.5・
+**resample 2 = PIL の BILINEAR**〈BICUBIC は 3〉で、違うのは寸法だけ）。
 
 golden の入力も実画像ではなく**合成画像**（{@link build_cases}）— 前処理がまだ無い以上、
 実画像を通すと「どの resize 実装で作ったか」が golden の暗黙の前提になる。

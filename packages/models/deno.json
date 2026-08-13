@@ -6,7 +6,8 @@
     ".": "./mod.ts",
     "./anima": "./anima.ts",
     "./irodori": "./irodori.ts",
-    "./sbv2": "./sbv2.ts"
+    "./sbv2": "./sbv2.ts",
+    "./siglip2": "./siglip2.ts"
   },
   "imports": {
     "@karume/hub": "jsr:@karume/hub@^0.2.2",

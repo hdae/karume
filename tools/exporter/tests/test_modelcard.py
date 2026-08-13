@@ -27,10 +27,12 @@ from karume.modelcard import (
     SBV2_FN_PROFILE,
     SBV2_JVNV_PROFILE,
     SBV2_SUPPORTED_PIPELINE,
+    SIGLIP2_SUPPORTED_PIPELINE,
     SUPPORTED_PIPELINE,
     Sbv2CardProfile,
     render_model_card,
     render_sbv2_model_card,
+    render_siglip2_model_card,
 )
 
 #: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から `karume.dist` が渡す）。
@@ -718,4 +720,60 @@ class TestSbv2CardProfiles:
         manifest = _sbv2_manifest()
         before = copy.deepcopy(manifest)
         render_sbv2_model_card(manifest, REPO, SBV2_CARD_PROFILES[name])
+        assert manifest == before
+
+
+# ---- SigLIP2（image-feature-extraction）--------------------------------------
+#
+# manifest からの導出（表・数・使い方）は `tests/test_dist.py` の `TestSiglip2ModelCard` が
+# **組み立て 1 周ぶん**で見る。ここが持つのは modelcard 側にしか無い門 — テンプレートの
+# pipeline 固有性と、帰属表に無いモデルを描かないこと。
+
+
+def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
+    """SigLIP2 の最小 manifest（値は実物と重ならない偽値）。"""
+    return {
+        "format": "karume/2",
+        "generator": "karume/9.9.9",
+        "defaultModel": model,
+        "models": {
+            model: {
+                "pipeline": SIGLIP2_SUPPORTED_PIPELINE,
+                "weights": {"vision": {"f32": {"file": _ref("v/model.f32.safetensors", 11, "c")}}},
+                "assets": {},
+                "quants": {"f32": {"weights": {"vision": "f32"}, "session": {}}},
+                "defaultQuant": "f32",
+                "pipelineConfig": {
+                    "imageWidth": 64,
+                    "imageHeight": 96,
+                    "imageMean": [0.1, 0.2, 0.3],
+                    "imageStd": [0.4, 0.5, 0.6],
+                    "hiddenDim": 7,
+                    "interpolation": "bilinear",
+                },
+            }
+        },
+    }
+
+
+class TestSiglip2CardGate:
+    def test_it_refuses_a_pipeline_it_does_not_describe(self) -> None:
+        manifest = _siglip2_manifest()
+        manifest["models"]["base"]["pipeline"] = SUPPORTED_PIPELINE
+        with pytest.raises(ValueError, match=SIGLIP2_SUPPORTED_PIPELINE):
+            render_siglip2_model_card(manifest, REPO)
+
+    def test_it_refuses_a_model_it_cannot_attribute(self) -> None:
+        """帰属表に無いモデル名で描くと、`base_model` が 1 つ足りないカード（= 出所を名乗って
+        いない再配布）が黙って出る。既知の一覧を添えて落とす。
+        """
+        with pytest.raises(ValueError, match="large"):
+            render_siglip2_model_card(_siglip2_manifest("large"), REPO)
+
+    def test_it_renders_the_same_bytes_for_the_same_manifest(self) -> None:
+        manifest = _siglip2_manifest()
+        before = copy.deepcopy(manifest)
+        assert render_siglip2_model_card(manifest, REPO) == render_siglip2_model_card(
+            manifest, REPO
+        )
         assert manifest == before
