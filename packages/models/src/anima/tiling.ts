@@ -26,8 +26,9 @@
  *
  * `blend_v` / `blend_h` と同じ式・同じ順序（**上のタイルとの縦ブレンドが先・左との横ブレンドが
  * 後**）・同じ **sample 空間**で行う。上流はタイル配列を in-place に書き換えるので、隣に効くのは
- * **ブレンド済みのタイル**である — ここでも同じ（{@link assembleTiles} が写しの上で in-place に
- * 進める）。
+ * **ブレンド済みのタイル**である — ここでも同じ。in-place で進める本体は 1 本だけ持ち、
+ * {@link assembleTiles}（公開面）は写しを取ってからそれを呼び、{@link decodeTiled}（配列を
+ * 自分で所有する内部経路）は写さずに直接呼ぶ。
  *
  * ## 縮退（タイル 1 枚）は非タイル経路と**ビット同一** MUST
  *
@@ -257,32 +258,30 @@ const blendHorizontal = (
 };
 
 /**
- * decode 済みタイル（行優先）をブレンドして 1 枚の画像 `[1,C,H·s,W·s]` に貼り合わせる。
- *
- * MUST: 渡された配列を破壊しない（ブレンドは in-place で進むので写しの上で行う）。上流は
- * タイル配列そのものを書き換えるが、こちらの入力は `session.run` の出力なので、破壊すると
- * 「呼び出し側が持っている Tensor の中身が黙って変わる」形の罠になる。
+ * 貼り合わせの本体（**渡された配列の上で in-place にブレンドする** — 呼び出し側がその配列を
+ * 所有していることが前提）。形と枚数の検査もここに置くので、写しを取る公開面
+ * {@link assembleTiles} と、配列を所有する内部経路 {@link decodeTiled} が同じ検査を通る。
  */
-export const assembleTiles = (
-  decoded: readonly Float32Array[],
+const assembleOwnedTiles = (
+  working: Float32Array[],
   geometry: TileGeometry,
 ): Float32Array<ArrayBuffer> => {
   const { rows, cols, scale } = geometry;
   const rowCount = rows.starts.length;
   const colCount = cols.starts.length;
-  if (decoded.length !== rowCount * colCount) {
-    throw new Error(`タイル ${decoded.length} 枚が幾何の ${rowCount}×${colCount} と違う`);
+  if (working.length !== rowCount * colCount) {
+    throw new Error(`タイル ${working.length} 枚が幾何の ${rowCount}×${colCount} と違う`);
   }
   const tileHeight = rows.tile * scale;
   const tileWidth = cols.tile * scale;
   const tilePlane = tileHeight * tileWidth;
-  const channels = decoded[0].length / tilePlane;
+  const channels = working[0].length / tilePlane;
   if (!Number.isInteger(channels) || channels < 1) {
     throw new Error(
-      `decode 出力の要素数 ${decoded[0].length} が ${tileHeight}×${tileWidth} の平面で割り切れない`,
+      `decode 出力の要素数 ${working[0].length} が ${tileHeight}×${tileWidth} の平面で割り切れない`,
     );
   }
-  for (const [index, tile] of decoded.entries()) {
+  for (const [index, tile] of working.entries()) {
     if (tile.length !== channels * tilePlane) {
       throw new Error(
         `タイル ${index} の要素数 ${tile.length} が 1 枚目の ${channels * tilePlane} と違う`,
@@ -290,7 +289,6 @@ export const assembleTiles = (
     }
   }
 
-  const working = decoded.map((tile) => Float32Array.from(tile));
   const blendRows = blendExtent(rows, scale);
   const blendCols = blendExtent(cols, scale);
   // MUST: 縦（上）→ 横（左）の順（上流 `tiled_decode` と同じ）。順序を入れ替えると角の
@@ -356,11 +354,32 @@ export const assembleTiles = (
 };
 
 /**
+ * decode 済みタイル（行優先）をブレンドして 1 枚の画像 `[1,C,H·s,W·s]` に貼り合わせる。
+ *
+ * MUST: 渡された配列を破壊しない。ブレンドは in-place で進むので、この公開面は写しを取って
+ * から本体へ渡す — 呼び出し側が持っている Tensor の中身が黙って変わる形の罠を踏まないため。
+ * 写しは**この公開契約のためだけ**に在り、配列を自分で所有する内部経路（{@link decodeTiled}）
+ * は写さずに本体を直接呼ぶ。
+ */
+export const assembleTiles = (
+  decoded: readonly Float32Array[],
+  geometry: TileGeometry,
+): Float32Array<ArrayBuffer> =>
+  assembleOwnedTiles(decoded.map((tile) => Float32Array.from(tile)), geometry);
+
+/**
  * タイル decode の駆動（唯一の非純粋な継ぎ目 = `decode` コールバック）。
  *
  * MUST: `decode` は **1 本の session を使い回す**呼び出しにする（タイルごとに開き直すと
  * 重みのロードが枚数ぶん走り、タイル化の狙い〈メモリのピークを 512px 相当に抑える〉に対して
  * 時間だけが跳ね上がる）。
+ *
+ * MUST: `decode` が返した配列は**所有権ごと渡す** — 呼び出し側は保持も再利用もしてはならない
+ * （ここでそのまま in-place にブレンドする）。写しを 1 枚省くぶんがそのままピークの節約で、
+ * 全タイルぶん（1024px で 27MiB / 2048px で 75MiB — docs/perf-ledger.md H-6）に効く。
+ * `Session.run` の出力は readback ごとに新しく確保される（`executor.ts` が
+ * `getMappedRange().slice(0)` を `hostTensor` へ渡す）ので、anima パイプラインのコールバックは
+ * そのままこの契約を満たしている。
  */
 export const decodeTiled = async (
   latents: Float32Array,
@@ -373,5 +392,5 @@ export const decodeTiled = async (
       decoded.push(await decode(latentTile(latents, geometry, row, col), row, col));
     }
   }
-  return assembleTiles(decoded, geometry);
+  return assembleOwnedTiles(decoded, geometry);
 };

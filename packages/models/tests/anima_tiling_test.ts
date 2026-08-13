@@ -176,3 +176,38 @@ Deno.test("decodeTiled: 行優先で全タイルを 1 度ずつ回す", async ()
   });
   assertEquals(visited, ["0,0", "0,1", "0,2", "1,0", "1,1", "1,2", "2,0", "2,1", "2,2"]);
 });
+
+Deno.test("decodeTiled: decode の返り値は所有権ごと受け取り、写しを挟まず畳む", async () => {
+  const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
+  const colCount = geometry.cols.starts.length;
+  // タイルごとに・タイル内でも値が違う（重なりの両側が同値だとブレンドが恒等になり、
+  // 写しの有無も畳み方の違いも見えなくなる）。
+  const makeTiles = () =>
+    Array.from({ length: 9 }, (_, index) => {
+      const tile = new Float32Array(64);
+      for (let y = 0; y < 8; y += 1) {
+        for (let x = 0; x < 8; x += 1) tile[y * 8 + x] = index * 100 + y * 10 + x;
+      }
+      return tile;
+    });
+  const handed = makeTiles();
+  const pristine = makeTiles();
+
+  const image = await decodeTiled(
+    new Float32Array(2 * 256),
+    geometry,
+    (_tile, row, col) => Promise.resolve(handed[row * colCount + col]),
+  );
+
+  // 所有権を取っても畳み方は公開面と 1 ビットも変わらない。
+  const expected = assembleTiles(pristine, geometry);
+  assertEquals(
+    new Uint32Array(image.buffer, image.byteOffset, image.length),
+    new Uint32Array(expected.buffer, expected.byteOffset, expected.length),
+  );
+  // 渡した配列そのものが畳まれた側 = 所有権移転の契約。内部にまた写し層が戻るとここで割れる。
+  assert(
+    handed.some((tile, index) => tile.some((value, at) => value !== pristine[index][at])),
+    "decode の返り値が in-place に畳まれていない（写しが挟まっている）",
+  );
+});
