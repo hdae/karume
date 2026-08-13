@@ -13,7 +13,8 @@
  *
  * MUST: 初期化は明示 async ステージ（{@link createSession}）。コンストラクタ内の同期
  * アップロードループは、重み取得とアップロードのパイプライン化を構造的に不可能にする。
- * MUST: バッファ破棄の前に未 submit のエンコードを必ず片付ける — 成功経路は flush、失敗経路は
+ * MUST: バッファ破棄の前に未 submit のエンコードを必ず片付ける — 成功経路は submit（待ちが要る
+ * なら flush、待ちを readback の `mapAsync` へ集約した run は `submitPending`）、失敗経路は
  * discard（discard-or-flush before destroy）。破棄済みバッファを参照するエンコードを submit
  * するとコマンドバッファ丸ごと失敗し、同じスケジューラに相乗りしている無関係な dispatch まで
  * 実行されないまま誤った値が静かに残る。
@@ -742,6 +743,18 @@ type ActiveBacking = {
   readonly readable: ReadonlySet<GPUBuffer>;
 };
 
+/**
+ * 読み戻し 1 本ぶんの staging と、ホストの {@link Tensor} へ組み直すのに要る宣言情報。
+ * 積む先（run 本体のコマンド列 / readback 専用 encoder）に依らず同じ形で持つ。
+ */
+type StagedOutput = {
+  readonly name: string;
+  readonly shape: readonly number[];
+  readonly count: number;
+  /** `COPY_DST | MAP_READ`（{@link RunArena.allocHostRead}）。所有はアリーナ。 */
+  readonly staging: GPUBuffer;
+};
+
 type SessionState = {
   readonly gpu: GpuContext;
   readonly model: KarumeModel;
@@ -1095,7 +1108,32 @@ export class Session {
     this.#paramsReuseCount = 0;
 
     const device = gpu.device;
-    const arena = new RunArena(device, () => scheduler.flush());
+    /**
+     * この run のフェンスを **mapAsync の 1 本**に畳むか（H-1）。分岐はこの 1 箇所だけで、
+     * 下流（アリーナの後始末・submit の出し方・読み戻しの積み先）は全てこの真偽で決まる。
+     *
+     * 二段待ちのまま据え置く条件は 2 つ:
+     * - **gpuTiming が有効**: timestamp の回収も計測窓も `flush` の `onSubmittedWorkDone` に
+     *   ぶら下がっている（ADR 0021 — 回収は完了後でなければ mapAsync が待ちに化ける）。計測は
+     *   内訳を採る診断モードで、そこでフェンス 1 本を惜しむ理由が無い。
+     * - **グラフ出力が 0 本**: 積む copy が無い = mapAsync が 1 本も出ない。無フェンスで返すと
+     *   未完了の GPU 実行を残したまま run が戻るので、その run だけ従来の待ちへ落とす
+     *   （IR は空の `graph.outputs` を受理する — format/ir.ts）。
+     */
+    const singleFence = !gpu.gpuTimingEnabled && graph.outputs.length > 0;
+    // MUST: 単一フェンス経路の後始末は「未 submit のエンコードを残さない」までで、完了待ちは
+    // 張らない（flush-before-destroy の完了ぶんは mapAsync が済ませており、submit 済み
+    // コマンドから破棄済みバッファを参照するのは WebGPU 的に安全 — 実解放は完了まで実装が
+    // 遅延する）。既定（二段待ち）は従来どおりフェンス付き flush のまま。
+    const arena = new RunArena(
+      device,
+      singleFence
+        ? () => {
+          scheduler.submitPending();
+          return Promise.resolve();
+        }
+        : () => scheduler.flush(),
+    );
     // MUST: env は **run 寿命の実体だけ**（グラフ入力とノード出力）。Session 常駐の重み /
     // per-channel scale は導出相で直参照へ畳むので、run ごとに写す必要が無い — 写すと
     // 「run の器に Session 常駐の状態が混ざる」形が残り、レシピの再利用が成り立たなくなる。
@@ -1117,6 +1155,8 @@ export class Session {
       let backing: ActiveBacking | undefined;
       // この run が backing を新規構築したか（失敗時の回復規律 — 下の catch が読む）。
       let builtBacking = false;
+      // 単一フェンス経路で run 本体のコマンド列へ積んだ読み戻し（undefined = 二段待ち経路）。
+      let staged: readonly StagedOutput[] | undefined;
       try {
         // 無効な bindGroup / dispatch は throw せず submit ごと失敗し、出力にプール残骸が
         // 残る沈黙故障になる。中間バッファの確保も同じ区間で out-of-memory を見る。
@@ -1176,8 +1216,29 @@ export class Session {
             executeBakedPlan(recipes, backing.groups, scheduler);
           }
 
-          await scheduler.flush();
-          const pending = popFailureScopes(device, "run のエンコード");
+          if (singleFence) {
+            // MUST: 読み戻しの copy は **dispatch と同じコマンド列**へ積む（FIFO）。別 encoder の
+            // 別 submit にすると submit が 2 本に割れ、mapAsync が「先行 dispatch の完了」を
+            // 含意しなくなる（含意の根拠は同一キューでの発行順）。
+            staged = this.#stageOutputs(
+              backing?.outputs ?? env,
+              shapes,
+              arena,
+              backing,
+              (source, size, staging) => scheduler.copyBuffer(source, 0, staging, 0, size),
+            );
+            // フェンスを張らずに出し切る。待ちは下の mapAsync 1 本に集約される。
+            scheduler.submitPending();
+          } else {
+            await scheduler.flush();
+          }
+          // errorScope の網は経路で変えない（単一フェンス経路では readback の copy と staging
+          // 確保も run 本体の 2 本に相乗りする — 二段待ち経路の `#readOutputs` が張る対と同じ
+          // `out-of-memory` + `validation`）。
+          const pending = popFailureScopes(
+            device,
+            singleFence ? "run のエンコードと readback" : "run のエンコード",
+          );
           popped = true;
           const failure = await pending;
           if (failure !== undefined) throw failure;
@@ -1192,7 +1253,9 @@ export class Session {
         }
 
         // backed run は env を組まない（読み戻し先は焼き込み時に確定した写像）。
-        outputs = await this.#readOutputs(backing?.outputs ?? env, shapes, arena, backing);
+        outputs = staged === undefined
+          ? await this.#readOutputs(backing?.outputs ?? env, shapes, arena, backing)
+          : await this.#finishStagedRead(staged);
         this.#lastRun = arena.stats;
         this.#lastRunParams = {
           allocCount: this.#paramsAllocCount,
@@ -1681,10 +1744,10 @@ export class Session {
    *
    * MUST: この `writeBuffer` が追い越せる未 submit エンコードは存在しない。根拠は 3 つ —
    * ①同一 Session の run / enqueue / dispose は {@link Session.#chain} で直列化される
-   * ②先行実行は戻る時点で未 submit のエンコードを 1 つも残していない: run は flush
-   * （`onSubmittedWorkDone`）と readback の完了まで済ませてから返り、**enqueue は末尾で必ず
-   * eager submit する**（{@link SubmitScheduler.submitPending}）③実行の中では入力書き込みが
-   * 全エンコードに先行する。`queue.writeBuffer` は queue timeline へ issue 順に載るので
+   * ②先行実行は戻る時点で未 submit のエンコードを 1 つも残していない: run は readback の完了
+   * （二段待ち経路は flush の `onSubmittedWorkDone` も）まで済ませてから返り、**enqueue は
+   * 末尾で必ず eager submit する**（{@link SubmitScheduler.submitPending}）③実行の中では入力
+   * 書き込みが全エンコードに先行する。`queue.writeBuffer` は queue timeline へ issue 順に載るので
    * **submit 済み**の先行 dispatch は追い越さず、追い越すのは未 submit のエンコードだけ
    * （ADR 0004 不変条件④）。どれかが崩れると前の実行の dispatch が新しい入力を読む沈黙誤値に
    * なる。したがって「enqueue 後に submit せず pending を残す経路」を作ってはならない。
@@ -3438,7 +3501,94 @@ export class Session {
     return arena.isReadable(buffer);
   }
 
-  /** MUST: 読み戻すのはグラフ出力のみ。中間値はプール再利用で内容が入れ替わっている。 */
+  /**
+   * グラフ出力ごとに staging を確保し、そこへの copy を `copy` に積ませる（**同期**）。
+   *
+   * MUST: 読み戻すのはグラフ出力のみ。中間値はプール再利用で内容が入れ替わっている。
+   * NOTE: 積み先を引数に取るのは、単一フェンス経路（run 本体のコマンド列 —
+   * {@link SubmitScheduler.copyBuffer}）と二段待ち経路（readback 専用 encoder）で**積む先だけ**
+   * が違うため。staging の作り方と読み戻し適格の判定を経路ごとに 2 本持たない。
+   */
+  #stageOutputs(
+    env: ReadonlyMap<string, GPUBuffer>,
+    shapes: ReadonlyMap<string, readonly number[]>,
+    arena: RunArena,
+    backing: ActiveBacking | undefined,
+    copy: (source: GPUBuffer, size: number, staging: GPUBuffer) => void,
+  ): readonly StagedOutput[] {
+    const staged: StagedOutput[] = [];
+    for (const name of this.#state.model.graph.outputs) {
+      // MUST: initializer も引く。IR は graph.outputs に initializer 名を書くことを許して
+      // おり（format/ir.ts の定義済み検査）、その値は env（run 寿命）には載らない。
+      const buffer = env.get(name) ?? this.#state.weightBuffers.get(name);
+      if (buffer === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
+      if (!this.#isReadable(buffer, arena, backing)) {
+        throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
+      }
+      const shape = resolvedShape(shapes, name);
+      const count = numel(shape);
+      // MUST: 0 要素でもアリーナの最小サイズクラス（4 バイト）に合わせる。copy サイズは
+      // 両バッファの実サイズ以下でなければならず、出力側も同じ下限で確保されている。
+      const size = Math.max(4, count * 4);
+      const staging = arena.allocHostRead(size);
+      staged.push({ name, shape, count, staging });
+      copy(buffer, size, staging);
+    }
+    return staged;
+  }
+
+  /**
+   * staging の map 完了を待つ（**このバッファへの最後の使用 = 積んだ copy の完了**が解決条件）。
+   *
+   * MUST: 複数出力は**並列**に待つ。直列 await にすると待ちの固定費を出力数ぶん払う。
+   * MUST: device 消失時 mapAsync は解決しない。待ち続けるとハングになるため競わせる。
+   */
+  async #awaitStaged(staged: readonly StagedOutput[]): Promise<void> {
+    await this.#state.gpu.raceDeviceLost(
+      Promise.all(staged.map((item) => item.staging.mapAsync(GPUMapMode.READ))),
+      "readback",
+    );
+  }
+
+  /** map 済み staging をホストの {@link Tensor} へ組み直す（同期・unmap まで含む）。 */
+  #collectStaged(staged: readonly StagedOutput[]): RunOutputs {
+    // MUST: グラフ出力名由来のキーを蓄積する器は null プロトタイプ。素の `{}` では
+    // 出力名が "__proto__" のとき Tensor が [[Prototype]] に化け、その出力だけ own property
+    // として現れないまま（Object.keys から消えたまま）返る沈黙欠落になる。
+    const outputs: Record<string, Tensor> = Object.create(null);
+    for (const item of staged) {
+      const copy = item.staging.getMappedRange().slice(0);
+      item.staging.unmap();
+      // MUST: 読み戻す TypedArray は宣言 dtype から決める（要素は全型 4 バイトなので、
+      // f32 固定にすると i32 / bool の出力が黙ってビット列の読み替えになる）。
+      outputs[item.name] = hostTensor(
+        this.#declaredDtype(item.name),
+        item.shape,
+        copy,
+        item.count,
+      );
+    }
+    return outputs;
+  }
+
+  /**
+   * 単一フェンス経路の読み戻し（H-1）。run 本体のコマンド列に積んだ copy が唯一の待ち相手で、
+   * **この mapAsync が run のフェンスそのもの**になる。
+   */
+  async #finishStagedRead(staged: readonly StagedOutput[]): Promise<RunOutputs> {
+    await this.#awaitStaged(staged);
+    // MUST: 計測窓を閉じるのはフェンスの**後**（前に閉じると実測が過小に出てチャンクが膨らみ、
+    // TDR 域へ向かう危険側 — src/gpu/submit.ts）。窓にはホストの後始末まで含むので推定は過大
+    // 側に出るが、向きは安全側で据え置き。
+    this.#state.scheduler.closeMeasurementWindowAfterFence();
+    return this.#collectStaged(staged);
+  }
+
+  /**
+   * 二段待ち経路の読み戻し（gpuTiming 有効時 / グラフ出力 0 本 — {@link Session.#runOnce} の
+   * `singleFence`）。run 本体の flush とは**別 encoder の別 submit**で、フェンスは
+   * `onSubmittedWorkDone` に続く 2 本目になる。
+   */
   async #readOutputs(
     env: ReadonlyMap<string, GPUBuffer>,
     shapes: ReadonlyMap<string, readonly number[]>,
@@ -3446,12 +3596,6 @@ export class Session {
     backing: ActiveBacking | undefined,
   ): Promise<RunOutputs> {
     const device = this.#state.gpu.device;
-    const staged: {
-      readonly name: string;
-      readonly shape: readonly number[];
-      readonly count: number;
-      readonly staging: GPUBuffer;
-    }[] = [];
     // MUST: この copy → submit も errorScope に入れる（run 本体のスコープは pop 済みで、
     // ここは独自 encoder の別 submit になる）。COPY_SRC 欠落等の validation 失敗は例外に
     // ならず、読み戻しが全 0 のまま静かに返る。staging の確保が device の余力を超える形も
@@ -3462,23 +3606,13 @@ export class Session {
     let popped = false;
     try {
       const encoder = device.createCommandEncoder();
-      for (const name of this.#state.model.graph.outputs) {
-        // MUST: initializer も引く。IR は graph.outputs に initializer 名を書くことを許して
-        // おり（format/ir.ts の定義済み検査）、その値は env（run 寿命）には載らない。
-        const buffer = env.get(name) ?? this.#state.weightBuffers.get(name);
-        if (buffer === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
-        if (!this.#isReadable(buffer, arena, backing)) {
-          throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
-        }
-        const shape = resolvedShape(shapes, name);
-        const count = numel(shape);
-        // MUST: 0 要素でもアリーナの最小サイズクラス（4 バイト）に合わせる。copy サイズは
-        // 両バッファの実サイズ以下でなければならず、出力側も同じ下限で確保されている。
-        const size = Math.max(4, count * 4);
-        const staging = arena.allocHostRead(size);
-        staged.push({ name, shape, count, staging });
-        encoder.copyBufferToBuffer(buffer, 0, staging, 0, size);
-      }
+      const staged = this.#stageOutputs(
+        env,
+        shapes,
+        arena,
+        backing,
+        (source, size, staging) => encoder.copyBufferToBuffer(source, 0, staging, 0, size),
+      );
       device.queue.submit([encoder.finish()]);
 
       // MUST: mapAsync より前に pop を発行する（mapAsync 待ちの間に別の操作を吸わないため）。
@@ -3489,29 +3623,8 @@ export class Session {
       const failure = await pending;
       if (failure !== undefined) throw failure;
 
-      // MUST: device 消失時 mapAsync は解決しない。待ち続けるとハングになるため競わせる。
-      await this.#state.gpu.raceDeviceLost(
-        Promise.all(staged.map((item) => item.staging.mapAsync(GPUMapMode.READ))),
-        "readback",
-      );
-
-      // MUST: グラフ出力名由来のキーを蓄積する器は null プロトタイプ（同上）。素の `{}` では
-      // 出力名が "__proto__" のとき Tensor が [[Prototype]] に化け、その出力だけ own property
-      // として現れないまま（Object.keys から消えたまま）返る沈黙欠落になる。
-      const outputs: Record<string, Tensor> = Object.create(null);
-      for (const item of staged) {
-        const copy = item.staging.getMappedRange().slice(0);
-        item.staging.unmap();
-        // MUST: 読み戻す TypedArray は宣言 dtype から決める（要素は全型 4 バイトなので、
-        // f32 固定にすると i32 / bool の出力が黙ってビット列の読み替えになる）。
-        outputs[item.name] = hostTensor(
-          this.#declaredDtype(item.name),
-          item.shape,
-          copy,
-          item.count,
-        );
-      }
-      return outputs;
+      await this.#awaitStaged(staged);
+      return this.#collectStaged(staged);
     } finally {
       // `!popped` は本体が例外で抜けたときにだけ成立する。後始末でその例外を隠さない。
       // staging の破棄は RunArena が持つ（成功・失敗のどちらの経路でも #runOnce が

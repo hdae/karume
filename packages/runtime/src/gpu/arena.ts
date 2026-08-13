@@ -79,7 +79,15 @@ export type RetainOptions = {
   readonly pinned?: boolean;
 };
 
-/** 未 submit のエンコードを submit し、GPU 完了まで待つ手段（SubmitScheduler.flush 等）。 */
+/**
+ * 未 submit のエンコードを**出し切る**手段（`SubmitScheduler.flush` / `submitPending`）。
+ *
+ * MUST: 戻った時点で未 submit のエンコードが 1 つも残っていないこと。**GPU 完了まで待つかは
+ * 注入側の裁量** — {@link RunArena.destroy} が要求するのは「破棄済みバッファを参照する
+ * エンコードが submit に残らない」ことだけで、submit 済みコマンドからの参照は WebGPU 的に
+ * 安全（実解放は完了まで実装が遅延する）。既定は待つ側（`flush`）で、待ちを別のフェンスへ
+ * 集約した経路だけが待たない側を渡す。
+ */
 export type ArenaFlush = () => Promise<void>;
 
 export class RunArena {
@@ -241,7 +249,7 @@ export class RunArena {
    * 所有する全バッファを破棄する。
    *
    * MUST: 未 submit のエンコードを片付けてから破棄する（discard-or-flush before destroy）。
-   * ここが待つのは flush の完了だけなので、**捨てる側（失敗経路の
+   * ここが待つのは注入された {@link ArenaFlush} の決着だけなので、**捨てる側（失敗経路の
    * `SubmitScheduler.discard`）は呼び出し側の責務**。破棄済みバッファを参照するエンコードを
    * submit するとコマンドバッファ丸ごと失敗し、同じスケジューラに相乗りしている無関係な
    * dispatch まで実行されないまま、誤った値が静かに残る。

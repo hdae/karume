@@ -28,6 +28,12 @@
  * {@link SubmitScheduler.flush} の 1 回だけにする — そこの待ちは flush-before-destroy の
  * ために元から要るもので、計測のための追加コストはゼロになる。
  *
+ * NOTE（H-1 の追随）: 通常の run も `onSubmittedWorkDone` を張らなくなった（読み戻しの copy を
+ * dispatch と同じコマンド列へ積み、**readback の `mapAsync` を唯一のフェンスにする** —
+ * src/runtime/executor.ts の `singleFence`）。この経路では窓を閉じるのも
+ * {@link SubmitScheduler.closeMeasurementWindowAfterFence} で、`flush` は通らない。窓の性格
+ * （run 1 本 = 窓 1 本・ホスト時間込みで過大側）は変わらない。
+ *
  * 推定はその 1 回で閉じる**窓**から取る。窓 = 「窓で最初に submit した時刻 → flush の
  * `onSubmittedWorkDone` が解決した時刻」、仕事量 = 窓に積んだ全チャンクの workgroup 合計で、
  * 推定は **実測 ÷ 合計 workgroup 数**。チャンク単位の帰属は元々信用できない（完了通知は
@@ -373,6 +379,9 @@ export class SubmitScheduler {
   /**
    * 未 submit のエンコードを submit する（**フェンスを張らない** — {@link BatchMember}）。
    *
+   * 呼び出し元は 2 つ — `enqueue`（区間のフェンスは `BatchScope.finish` の 1 本）と、単一
+   * フェンスの run（フェンスは readback の `mapAsync` 1 本 — H-1）。
+   *
    * MUST: `enqueue` はこれを末尾で必ず呼ぶ。以後に発行する `queue.writeBuffer` は queue
    * timeline へ issue 順で載るので、**先行 dispatch を追い越さない**（追い越すのは未 submit の
    * エンコードだけ — ADR 0004 不変条件④）。「enqueue 後に pending を残す経路」を作ると
@@ -383,10 +392,11 @@ export class SubmitScheduler {
   }
 
   /**
-   * 計測窓を閉じる（{@link BatchMember} — batch のフェンス完了後にだけ呼ぶ）。
+   * 計測窓を閉じる（`flush` を通らない経路 — batch の決着と、単一フェンス run の readback）。
    *
-   * MUST: 呼び出しは `onSubmittedWorkDone` の**後**。前に呼ぶと窓が GPU 実行の途中で閉じ、
-   * 実測が過小に出てチャンクが膨らむ（TDR 域へ向かう危険側）。
+   * MUST: 呼び出しはその経路の**フェンスの後**（batch は `onSubmittedWorkDone`、単一フェンス
+   * run は readback の `mapAsync`）。前に呼ぶと窓が GPU 実行の途中で閉じ、実測が過小に出て
+   * チャンクが膨らむ（TDR 域へ向かう危険側）。
    */
   closeMeasurementWindowAfterFence(): void {
     this.#closeMeasurementWindow();
@@ -419,7 +429,9 @@ export class SubmitScheduler {
   /**
    * 未 submit のエンコードを全て submit し、GPU 側の完了まで待つ。
    *
-   * MUST: バッファを destroy する前に必ず flush する（成功経路）。未 submit のエンコードが
+   * MUST: バッファを destroy する前に未 submit のエンコードを必ず出し切る（成功経路 —
+   * 待ちが要るならここ、待ちを別のフェンスへ集約したなら
+   * {@link SubmitScheduler.submitPending}）。未 submit のエンコードが
    * 破棄済みのバッファを参照すると submit がコマンドバッファ丸ごと失敗し、同じスケジューラに
    * 相乗りしている無関係な dispatch まで実行されないまま、誤った値が静かに残る。失敗経路で
    * 残骸を出し切らずに済ませるのが {@link SubmitScheduler.discard}。

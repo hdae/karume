@@ -18,6 +18,7 @@ import {
 } from "../src/gpu/device.ts";
 import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
+import { countFences } from "./helpers/fences.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import { graphModelBuffer } from "./helpers/graph.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
@@ -78,34 +79,6 @@ const bits = (data: Tensor["data"] | ArrayBuffer): readonly number[] =>
       ? new Uint32Array(data)
       : new Uint32Array(data.buffer, data.byteOffset, data.length),
   );
-
-/**
- * `queue.onSubmittedWorkDone` の呼び出し回数を数える（フェンス数の機械検査）。
- * 実装内部の観測点を足さずに済むよう、テスト側でキューの面をラップする。
- */
-const countFences = (gpu: GpuContext): { readonly count: () => number; restore: () => void } => {
-  const queue = gpu.device.queue;
-  const original = queue.onSubmittedWorkDone.bind(queue);
-  let fences = 0;
-  Object.defineProperty(queue, "onSubmittedWorkDone", {
-    configurable: true,
-    writable: true,
-    value: () => {
-      fences += 1;
-      return original();
-    },
-  });
-  return {
-    count: () => fences,
-    restore: () => {
-      Object.defineProperty(queue, "onSubmittedWorkDone", {
-        configurable: true,
-        writable: true,
-        value: original,
-      });
-    },
-  };
-};
 
 const producerSession = (gpu: GpuContext): Promise<Session> =>
   createSession(gpu, openModel(graphModelBuffer(PRODUCER)));

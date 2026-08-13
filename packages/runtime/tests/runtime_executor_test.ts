@@ -304,7 +304,10 @@ Deno.test({
       const outputs = await session.run({ x });
       const submit = session.diagnostics().submit;
       assertEquals(submit.dispatchCount, 3);
-      assertEquals(submit.submitCount, 3, "チャンク上限 1 なので dispatch ごとに submit される");
+      // 単一フェンス経路（gpuTiming OFF・出力 1 本）では読み戻しの copy も**同じコマンド列**へ
+      // 積まれ、チャンク上限 1 の下では 1 件で 1 チャンクを占める（H-1）。したがって
+      // submit は「3 dispatch + copy 1 件」の 4 本。dispatch 数は 3 のまま。
+      assertEquals(submit.submitCount, 4, "チャンク上限 1 なのでコマンドごとに submit される");
       const report = allclose(outputs["y"].data, expectedChain(x));
       assertEquals(report.pass, true, formatAllclose(report));
     } finally {
