@@ -9,7 +9,7 @@
 という例外を作ると、2 個目のモデルを足した瞬間に既存 path が全部動く。
 
 **pipeline 別のディスパッチ**（`--pipeline anima|sbv2|irodori`）と**モデル別の軸**（`--model`）。
-共有するのは「置く / sha256 を採る / 共有ファイルを畳む / 宣言と現物を突き合わせる」層だけで、
+共有するのは「共有席を決める / 置く / sha256 を採る / 宣言と現物を突き合わせる」層だけで、
 どのファイルをどの名前で並べ何を宣言するかは pipeline ごとの表が持つ（{@link PIPELINES}）。
 
 MUST: **manifest は手書きせず資産から導出する**（ADR 0038 Context を v2 でも維持）。`size` /
@@ -71,7 +71,7 @@ from karume.modelcard import (
 )
 from karume.paths import DIST_ROOT, INPUTS_ROOT, OUTPUTS_ROOT, SERIES_ROOT
 
-# ---- ① 共有部: 置き場の綴り・配置・ハッシュ・共有の畳み込み・宣言と現物の突合 -------
+# ---- ① 共有部: 置き場の綴り・共有席の決定・配置・ハッシュ・宣言と現物の突合 -------
 
 #: manifest のファイル名（ADR 0041 §1 — リポジトリ直下の固定名）。
 MANIFEST_FILENAME = "karume.json"
@@ -352,21 +352,35 @@ def file_ref(out_dir: Path, rel_path: str, sha256: str) -> dict[str, Any]:
     }
 
 
-def _prune_empty_dirs(out_dir: Path, start: Path) -> None:
-    """`start` から `out_dir` まで、空になったディレクトリだけを畳む（共有の畳み込みの後始末）。"""
-    current = start
-    while current != out_dir and current.is_dir() and not any(current.iterdir()):
-        current.rmdir()
-        current = current.parent
+class _SharedSeat(NamedTuple):
+    """`shared/<rel_path>` へ **1 回だけ**置く席 — 代表の実体・出所の sha256・そこを指す座席群。"""
+
+    rel_path: str
+    artifact: Artifact
+    digest: str
+    #: この席を指す `(モデル名, 役割名)`。各モデルの manifest エントリが同じ path を書く。
+    members: tuple[tuple[str, str], ...]
 
 
-def _fold_shared(
-    out_dir: Path,
-    plans: Sequence[ModelPlan],
-    placed: dict[tuple[str, str], str],
-    digests: dict[str, str],
-) -> None:
-    """同じ相対 path・同じ sha256 のファイルを 2 モデル以上が持つとき `shared/` へ 1 回だけ置く。
+def _source_digest(artifact: Artifact, memo: dict[Path, str]) -> str:
+    """`Artifact` の**出所**の sha256（同じ実ファイルは 1 回しか読まない）。
+
+    共有判定を**置く前**に済ませるための唯一の読み取りなので、memo のキーは resolve 済みの
+    実 path — 同じファイルを別綴りで指す複数モデルを 1 回に畳む。生成物（`payload`）は既に
+    メモリ上に中身があるので I/O は要らない。
+    """
+    if artifact.source is None:
+        assert artifact.payload is not None  # __post_init__ の不変条件
+        return hashlib.sha256(artifact.payload).hexdigest()
+    resolved = artifact.source.resolve()
+    digest = memo.get(resolved)
+    if digest is None:
+        digest = memo[resolved] = sha256_file(resolved)
+    return digest
+
+
+def _plan_shared(plans: Sequence[ModelPlan]) -> list[_SharedSeat]:
+    """同じ相対 path・同じ sha256 のファイルを 2 モデル以上が持つ席を**配置の前**に決める。
 
     MUST: 一致の条件は **モデルサブツリー内の相対 path と sha256 の両方**（ADR 0041 §5 の
     「path の一致で共有」を、中身が同じであることまで確かめてから成立させる）。中身違いを
@@ -376,36 +390,37 @@ def _fold_shared(
     — 同じ path に畳める組が 2 つ以上あるときは、どの組も畳まない（各モデルのサブツリーに
     独立コピーのまま残す）。畳むと後の組が先の組の実体を上書きし、先の組のモデルが**別の中身**
     を指す manifest で配られる（{@link verify_dist} は sha256 を採り直さないので沈黙する）。
+
+    MUST: 判定は**席ごと**（`(モデル名, 役割名)`）で、相対 path ごとではない — 1 つの
+    相対 path に「畳める組」と「単独の中身違い」が同居するとき、畳むのは組だけで単独は
+    自分のサブツリーに残る。
+
+    出所を hash するのは **2 モデル以上が使う相対 path** の席だけ — 1 モデルしか使わない
+    ファイルは畳みようがなく、sha256 は置いた現物から採るので、ここで読む理由が無い。
     """
+    users: dict[str, set[str]] = {}
+    for plan in plans:
+        for artifact in plan.artifacts.values():
+            users.setdefault(artifact.rel_path, set()).add(plan.name)
+    memo: dict[Path, str] = {}
     groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    samples: dict[tuple[str, str], Artifact] = {}
     for plan in plans:
         for role, artifact in plan.artifacts.items():
-            key = (artifact.rel_path, digests[placed[(plan.name, role)]])
+            if len(users[artifact.rel_path]) < 2:
+                continue
+            key = (artifact.rel_path, _source_digest(artifact, memo))
             groups.setdefault(key, []).append((plan.name, role))
+            samples.setdefault(key, artifact)
     foldable = [key for key, members in groups.items() if len({model for model, _ in members}) >= 2]
     seats = Counter(rel_path for rel_path, _ in foldable)
-    for rel_path, digest in foldable:
+    shared: list[_SharedSeat] = []
+    for key in foldable:
+        rel_path, digest = key
         if seats[rel_path] > 1:
             continue
-        members = groups[(rel_path, digest)]
-        target = f"{SHARED_DIRNAME}/{rel_path}"
-        (out_dir / target).parent.mkdir(parents=True, exist_ok=True)
-        (out_dir / target).unlink(missing_ok=True)
-        moved = False
-        for model, role in members:
-            source_rel = placed[(model, role)]
-            if source_rel == target:
-                continue
-            source = out_dir / source_rel
-            if moved:
-                source.unlink(missing_ok=True)
-            else:
-                os.replace(source, out_dir / target)
-                moved = True
-            digests.pop(source_rel, None)
-            _prune_empty_dirs(out_dir, source.parent)
-            placed[(model, role)] = target
-        digests[target] = digest
+        shared.append(_SharedSeat(rel_path, samples[key], digest, tuple(groups[key])))
+    return shared
 
 
 def _model_entry(plan: ModelPlan, refs: Mapping[str, dict[str, Any]]) -> dict:
@@ -524,7 +539,12 @@ def _materialize_family(
 ) -> dict[str, Any]:
     """検査済みの計画群を `out_dir` へ並べ、`karume.json` を書いて manifest を返す。
 
-    ① 各モデルのサブツリーへ置く → ② 共有ファイルを `shared/` へ畳む → ③ 現物から manifest。
+    ① 共有席を決める（{@link _plan_shared} — 出所の sha256 だけを見る）→ ② 共有席は
+    `shared/` へ 1 回だけ・残りは各モデルのサブツリーへ置く → ③ 現物から manifest。
+
+    MUST: 共有の判定は**置く前**に済ませる — 全モデルへ複製してから畳み直す形は、共有 1 本
+    （サイズ S・M モデル）につき「複製 M 回 + hash M 回 + 移動 1 回」で ~3MS の論理 I/O を
+    払う。決めてから置けば S の複製も hash も 1 回で済む（配布の大半は共有資産）。
 
     書き先は呼び手（{@link assemble_family}）が用意する staging で、**空から作る**前提
     （配布先を直接更新しないので、途中で落ちても捨てるだけで済む）。
@@ -532,14 +552,32 @@ def _materialize_family(
     out_dir.mkdir(parents=True, exist_ok=True)
     placed: dict[tuple[str, str], str] = {}
     digests: dict[str, str] = {}
+    folded: dict[tuple[str, str], str] = {}
+    for seat in _plan_shared(plans):
+        target = f"{SHARED_DIRNAME}/{seat.rel_path}"
+        materialize(seat.artifact, out_dir / target)
+        # sha256 は**置いた現物**から採る（表と現物が食い違う失敗様式を構造的に消す）。
+        digests[target] = sha256_file(out_dir / target)
+        # MUST: 共有席だけは出所の sha256 とも突き合わせる — 1 本しか置かないので、コピーが
+        # 壊れれば**全モデルが揃って壊れた実体**を指す。宣言と現物は一致したままなので
+        # {@link verify_dist} は沈黙する（採り直さない）。
+        if digests[target] != seat.digest:
+            raise DistError(
+                f"{target}: 置いた現物の sha256 が出所と食い違う"
+                f"（出所 {seat.digest} / 現物 {digests[target]}）"
+            )
+        for member in seat.members:
+            folded[member] = target
     for plan in plans:
         for role, artifact in plan.artifacts.items():
+            target = folded.get((plan.name, role))
+            if target is not None:
+                placed[(plan.name, role)] = target
+                continue
             rel_path = f"{plan.name}/{artifact.rel_path}"
             materialize(artifact, out_dir / rel_path)
             placed[(plan.name, role)] = rel_path
-            # sha256 は**置いた現物**から採る（表と現物が食い違う失敗様式を構造的に消す）。
             digests[rel_path] = sha256_file(out_dir / rel_path)
-    _fold_shared(out_dir, plans, placed, digests)
 
     models: dict[str, Any] = {}
     for plan in plans:
@@ -567,7 +605,7 @@ def assemble_family(
 ) -> dict[str, Any]:
     """計画済みのモデル群を 1 リポへ組み立て、`out_dir` をその形へ**丸ごと差し替える**。
 
-    staging（`<出力先の名前>.staging`・同じ親）へ全部作り（配置 → 共有の畳み込み →
+    staging（`<出力先の名前>.staging`・同じ親）へ全部作り（共有席の決定 → 配置 →
     `karume.json` → {@link verify_dist} → `README.md`）、通ってから rename で据える。既存の
     `out_dir` は最後の rename まで 1 バイトも触らない — 途中で落ちれば staging だけが消えて、
     配布形は前回のまま残る（in-place で更新していた頃の「旧 manifest + 新旧混在ツリー」という

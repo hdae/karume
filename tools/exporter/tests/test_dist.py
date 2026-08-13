@@ -773,6 +773,26 @@ class TestFamilyAssembly:
         assert not (out_dir / SHARED_DIRNAME).exists()
         assert sorted(verify_dist(out_dir)) == sorted(f"{name}/{rel_path}" for name in "ABCD")
 
+    def test_it_refuses_a_shared_copy_that_did_not_land_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """共有席は 1 本しか置かないので、コピーが壊れると**全モデルが揃って**壊れた実体を指す。
+
+        宣言する sha256 は置いた現物から採るため、壊れたバイト列と宣言は一致したままになり
+        `verify_dist` は沈黙する（採り直さない）。出所の sha256 と突き合わせられるのは、
+        共有判定のために既に出所を読んでいる配置の側だけ。
+        """
+
+        def corrupt(artifact: Artifact, dest: Path) -> None:
+            materialize(artifact, dest)
+            if SHARED_DIRNAME in dest.parts:
+                dest.write_bytes(b"corrupted")
+
+        monkeypatch.setattr("karume.dist.materialize", corrupt)
+        plans = [_synthetic_plan(name, "w/model.safetensors", b"same-bytes") for name in ("A", "B")]
+        with pytest.raises(DistError, match="出所と食い違う"):
+            assemble_family(plans, tmp_path / "models" / "family", "A")
+
     def test_it_refuses_a_duplicated_model_name(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
         plan = anima_plan(sources, ANIMA_MODEL_NAME)
