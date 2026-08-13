@@ -56,8 +56,13 @@ import {
 import {
   CONV1D_SCALE_BINDING,
   CONV1D_WORKGROUP_SIZE,
+  type Conv1dDims,
+  conv1dIgemmKey,
+  conv1dIgemmParams,
+  conv1dIgemmWgsl,
   conv1dKey,
   conv1dParams,
+  conv1dUsesVec4,
   conv1dWgsl,
 } from "../kernels/conv1d.ts";
 import {
@@ -2782,7 +2787,11 @@ export class Session {
     });
   }
 
-  /** conv1d（直接畳み込み、groups / dilation は attrs）。1 スレッド = 1 出力要素の grid-stride。 */
+  /**
+   * conv1d（groups / dilation は attrs）。**groups で 2 カーネルを踏み分ける**（conv2d と同型）:
+   * `groups == 1` は implicit GEMM、`groups > 1` は直接畳み込み（1 スレッド = 1 出力要素の
+   * grid-stride）。
+   */
   async #buildConv1d(
     step: NodePlan,
     binds: readonly BindingSource[],
@@ -2795,24 +2804,26 @@ export class Session {
       step.node.attrs,
       `nodes (${step.node.op})`,
     );
+    const dims: Conv1dDims = {
+      batch: outShape[0],
+      channelsIn: x[1],
+      channelsOut: outShape[1],
+      lengthIn: x[2],
+      lengthOut: outShape[2],
+      kernel: weight[2],
+      stride,
+      padding,
+      dilation,
+      groups,
+    };
     const weightStorage = this.#weightStorage(step);
+    if (groups === 1) {
+      await this.#buildConv1dIgemm(step, binds, out, builder, dims, weightStorage);
+      return;
+    }
     const key = conv1dKey(weightStorage);
     const { pipeline, layout } = await this.#state.cache.get(key, conv1dWgsl(weightStorage));
-    const params = this.#writeParams(
-      conv1dParams({
-        batch: outShape[0],
-        channelsIn: x[1],
-        channelsOut: outShape[1],
-        lengthIn: x[2],
-        lengthOut: outShape[2],
-        kernel: weight[2],
-        stride,
-        padding,
-        dilation,
-        groups,
-      }),
-      PARAMS_UNIFORM_USAGE,
-    );
+    const params = this.#writeParams(conv1dParams(dims), PARAMS_UNIFORM_USAGE);
     const workgroups = gridStrideWorkgroups(
       numel(outShape),
       CONV1D_WORKGROUP_SIZE,
@@ -2829,6 +2840,58 @@ export class Session {
         ...this.#weightScaleBindings(step, weightStorage, CONV1D_SCALE_BINDING),
       ],
       workgroups: [workgroups, 1, 1],
+    });
+  }
+
+  /**
+   * conv1d の implicit GEMM（`C[Cout, N] = W[Cout, K] × Xcol[K, N]` — ADR 0024 の 1D 版）。
+   *
+   * MUST: GEMM 骨格と同じ「1 workgroup = 1 出力タイル」なので、dispatch 上限超過は
+   * fail loudly（grid-stride で縮退させるとタイルが欠落し、full-write が黙って壊れる）。
+   * MUST: バッチは **z 軸**（bmm / conv2d と同じ）。N 側へ畳むと出力が `[Cout][B·Lout]` に
+   * なって NCL と軸が入れ替わる — B = 1 でだけ一致するので実測形では露見しない。
+   *
+   * m タイルの述語は conv2d と**同じ 1 本**（{@link conv2dIgemmMTile} — M = Cout の関数で
+   * しかないので次元に依らない）。どちらのタイル形でも出力はビット同一なので、これは純粋な
+   * dispatch の割り直しで数値契約に触れない。
+   */
+  async #buildConv1dIgemm(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
+    dims: Conv1dDims,
+    weightStorage: WeightStorage,
+  ): Promise<void> {
+    const m = dims.channelsOut;
+    const kFlat = dims.channelsIn * dims.kernel;
+    const v4 = conv1dUsesVec4(kFlat, dims.lengthOut, dims.stride);
+    const mTile = conv2dIgemmMTile(m);
+    // 生成・キーと同じ解決点から幾何を引く（dispatch のタイル辺が WGSL の辺と構造的に一致）。
+    const geometry = gemmMTileGeometry(mTile);
+    const key = conv1dIgemmKey(weightStorage, v4, mTile);
+    const { pipeline, layout } = await this.#state.cache.get(
+      key,
+      conv1dIgemmWgsl(weightStorage, v4, mTile),
+    );
+    const params = this.#writeParams(conv1dIgemmParams(dims), PARAMS_UNIFORM_USAGE);
+    const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
+    const where = `conv1d [${step.inputShapes[0].join(",")}] * [${step.inputShapes[1].join(",")}]`;
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 4, source: out },
+        ...this.#weightScaleBindings(step, weightStorage, CONV1D_SCALE_BINDING),
+      ],
+      workgroups: [
+        tiledWorkgroups(dims.lengthOut, gemmTileN(geometry), limit, where),
+        tiledWorkgroups(m, gemmTileM(geometry), limit, where),
+        tiledWorkgroups(dims.batch, 1, limit, where),
+      ],
     });
   }
 

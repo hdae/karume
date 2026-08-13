@@ -1,6 +1,6 @@
 /**
- * GEMM 族（matmul / bmm / linear + 融合 attention の QK / PV + conv2d の implicit GEMM —
- * ADR 0022 / 0023 / 0024）が共有する **レジスタブロッキング + vec4** の骨格。
+ * GEMM 族（matmul / bmm / linear + 融合 attention の QK / PV + conv1d / conv2d の
+ * implicit GEMM — ADR 0022 / 0023 / 0024）が共有する **レジスタブロッキング + vec4** の骨格。
  *
  * 1 スレッドが {@link GemmGeometry} の `regM`×`regN` の出力を持ち（`acc{行}_{列 quad}` の
  * 名前付き変数へ codegen 時に静的展開する — {@link gemmAccumulatorInit}）、共有 B タイルは
@@ -28,7 +28,7 @@
  * 同じループを 5 回書き写すことになる。旧 16×16 実装が持っていた「共通化するな」MUST は
  * 「既存の生成バイト列とスナップショットを動かすな」が目的で、3 本とも WGSL を総取り替え
  * してキーを v2 へ改版した時点で保護対象が消えている。融合 attention（ADR 0023）が
- * **分解経路とビット同一**でいられるのも、conv2d の implicit GEMM（ADR 0024）が
+ * **分解経路とビット同一**でいられるのも、conv1d / conv2d の implicit GEMM（ADR 0024）が
  * **直接畳み込みとビット同一**でいられるのも、どちらもここの内積ループをそのまま使うため。
  * MUST: 断片を足すときは**既存 3 op の生成バイト列を 1 バイトも動かさない**（省略時の既定が
  * 従来の文字列を返す形にする）。スナップショット（tests/fixtures/wgsl/）が検出器。
@@ -93,7 +93,8 @@ import {
 } from "./weight-storage.ts";
 
 /**
- * conv2d の implicit GEMM だけが持つ **32 行 m タイル**（n タイルは幾何のまま — ADR 0024 隣接）。
+ * conv1d / conv2d の implicit GEMM だけが持つ **32 行 m タイル**（n タイルは幾何のまま —
+ * ADR 0024 隣接）。
  *
  * 動機は M = Cout が 64 の倍数でない層のタイル量子化の無駄（census の Cout=96 は
  * `ceil(96/64)·64/96 = 1.33×`）。**1 スレッドの出力は幾何のまま**で workgroup の y 辺だけを
@@ -107,8 +108,8 @@ export const GEMM_MTILE_SMALL = 32;
 /**
  * i8 変種の scale 束縛（出力束縛の次の番号 — executor の bind entries と対）。
  *
- * linear と conv2d の implicit GEMM は束縛配置が同じ（0 dims / 1 活性 / 2 重み / 3 bias /
- * 4 出力）なので、番号は 1 本で足りる。
+ * linear と conv1d / conv2d の implicit GEMM は束縛配置が同じ（0 dims / 1 活性 / 2 重み /
+ * 3 bias / 4 出力）なので、番号は 1 本で足りる。
  */
 export const LINEAR_SCALE_BINDING = 5;
 
@@ -123,7 +124,7 @@ export const ATTENTION_QK_MASK_BINDING = 4;
 /**
  * m タイルの行数から幾何を解決する（既定幾何の **wgY だけ**を `mTile / regM` へ差し替える）。
  *
- * conv2d の implicit GEMM が持つヒューリスティック（`conv2dIgemmMTile`）は「行数」で答えを
+ * conv1d / conv2d の implicit GEMM が持つヒューリスティック（`conv2dIgemmMTile`）は「行数」で答えを
  * 出すので、その 1 値を幾何へ吸収する唯一の点。**生成（{@link gemmWgsl}）もキーも dispatch も
  * ここを通す** — 通さずに mTile を直に読む経路を残すと、キーの幾何と生成物の幾何が食い違う。
  * 割り切れない mTile は {@link assertGemmGeometry} の「wgY は正整数」で落ちる。
@@ -210,8 +211,8 @@ export const gemmComputeKeyPart = (compute: GemmCompute): string => compute === 
  * 1 バイトも動かない。
  *
  * `attention_qk` / `attention_pv` は融合 attention の ① と ③（ADR 0023）。②（行統計）は
- * GEMM 骨格ではないので src/kernels/attention.ts が別に持つ。`conv2d` は implicit GEMM
- * （ADR 0024）で、**groups == 1 専用**（groups > 1 は直接カーネルが受ける）。
+ * GEMM 骨格ではないので src/kernels/attention.ts が別に持つ。`conv1d` / `conv2d` は
+ * implicit GEMM（ADR 0024）で、**groups == 1 専用**（groups > 1 は直接カーネルが受ける）。
  */
 export type GemmSpec =
   | {
@@ -241,7 +242,12 @@ export type GemmSpec =
     readonly rows?: number;
   }
   | {
-    readonly op: "conv2d";
+    /**
+     * 1D / 2D の implicit GEMM。**A タイル（重み）・bias-first・store は完全に共通**で、
+     * 違うのは B タイル（x の暗黙 gather）が平坦 k を `(ic, k)` に割るか `(ic, kh, kw)` に
+     * 割るか、と uniform の幾何欄だけ。
+     */
+    readonly op: "conv1d" | "conv2d";
     readonly v4: boolean;
     readonly weight: WeightStorage;
     /** m タイルの行数（`conv2dIgemmMTile` が返す 64 行か {@link GEMM_MTILE_SMALL} の 32 行）。 */
@@ -276,14 +282,16 @@ export const gemmParams = (
 /**
  * バッチ軸（dispatch の z）を持つ op。attention は B·H を 1 本のバッチ軸に畳んだ形。
  *
- * MUST: conv2d もここに入る。出力 NCHW は `[B][Cout][Hout·Wout]` なので、バッチを N 側へ
- * 畳むと `[Cout][B·Hout·Wout]` になって**軸の順序が入れ替わる**（B = 1 でだけ一致するため
- * 実測形では露見しない）。B を z 軸に置けば 1 タイルが `[Cout][Hout·Wout]` の平面に閉じる。
+ * MUST: conv1d / conv2d もここに入る。出力 NCHW は `[B][Cout][Hout·Wout]`（1D は `[B][Cout][Lout]`）
+ * なので、バッチを N 側へ畳むと `[Cout][B·Hout·Wout]` になって**軸の順序が入れ替わる**
+ * （B = 1 でだけ一致するため実測形では露見しない）。B を z 軸に置けば 1 タイルが
+ * `[Cout][Hout·Wout]` の平面に閉じる。
  */
 const BATCHED_OPS: ReadonlySet<GemmSpec["op"]> = new Set([
   "bmm",
   "attention_qk",
   "attention_pv",
+  "conv1d",
   "conv2d",
 ]);
 
@@ -1090,7 +1098,7 @@ const CONV2D_DIMS_EXTRA = `  channels_in: u32,
 `;
 
 /**
- * conv2d の `acc` 初期値 = **bias-first**（ADR 0024 の MUST ①）。
+ * conv1d / conv2d の `acc` 初期値 = **bias-first**（ADR 0024 の MUST ①）。
  *
  * 直接カーネルの `var acc = bias[oc];` をそのまま再現する。GEMM の「store で最後に足す」形に
  * 流用すると `(Σ) + bias` になり、丸めの並びが変わってビット同一が崩れる（本設計で最大の
@@ -1098,7 +1106,7 @@ const CONV2D_DIMS_EXTRA = `  channels_in: u32,
  * 端タイルでは `bias0 + i >= m` を読みうるが、その行の `acc` は `store` の行ガードで捨てられる
  * （範囲外の storage 読み自体は WGSL の境界付きアクセスで安全）。
  */
-const conv2dAccInit = (geometry: GemmGeometry): string =>
+const convAccInit = (geometry: GemmGeometry): string =>
   `  let bias0 = wid.y * ${gemmTileM(geometry)}u + lid.y * ${geometry.regM}u;
 ${gemmAccumulatorInit(geometry, (row) => `vec4<f32>(bias[bias0${at(row)}])`)}`;
 
@@ -1124,16 +1132,17 @@ fn xcol(xc: u32, ky: i32, kx: i32, n: u32) -> f32 {
 `;
 
 /**
- * conv2d の A タイル（重み `[Cout, K]` — 平坦化すると行優先の `[m,k]` そのもの）の担当。
+ * conv1d / conv2d の A タイル（重み `[Cout, K]` — 平坦化すると行優先の `[m,k]` そのもの）の担当。
  *
- * dense の {@link prologueA} と同じ割り当てだが、読みが weight-storage 経由になるぶん
- * **行頭は要素単位**で持つ（{@link weightRead4} が平坦添字を取り、f32 の quad 添字化は
- * 内部で行う）。
+ * 1D と 2D で**完全に共通**（平坦化した重みの形が同じで、K の割り方は B タイル側にしか
+ * 現れない）。dense の {@link prologueA} と同じ割り当てだが、読みが weight-storage 経由に
+ * なるぶん **行頭は要素単位**で持つ（{@link weightRead4} が平坦添字を取り、f32 の quad
+ * 添字化は内部で行う）。
  * MUST: i8 の scale は **行 = 出力チャネル**（ADR 0024 の MUST ④）。linear 側の `wcol`
  * （= 列）を持ってくると列 = ピクセルの scale を引く沈黙誤値になり、**m タイルが 2 枚以上
  * ある形**のテストだけが検出器になる。
  */
-const prologueAConv2d = (
+const prologueAConv = (
   geometry: GemmGeometry,
   weight: WeightStorage,
 ): string => {
@@ -1159,8 +1168,8 @@ const prologueAConv2d = (
 ${rows}`;
 };
 
-/** conv2d の A タイル充填（{@link fillA} と {@link fillBLinear} を合成した形）。 */
-const fillAConv2d = (
+/** conv1d / conv2d の A タイル充填（{@link fillA} と {@link fillBLinear} を合成した形）。 */
+const fillAConv = (
   geometry: GemmGeometry,
   name: string,
   weight: WeightStorage,
@@ -1304,7 +1313,7 @@ ${conv2dKDecode(slot)}
  * A は重み（平坦化で `[M,K]` 行優先そのもの・weight-storage 3 変種）、B は x の暗黙 gather、
  * store は 1 バッチぶんの `[Cout][Hout·Wout]` 行優先 = **NCHW の平面そのもの**なので後段の
  * レイアウト変換は要らない（バッチは z 軸 — {@link BATCHED_OPS}）。
- * bias は `acc` の初期値（{@link conv2dAccInit}）。m タイルは 64 行 / 32 行の 2 変種
+ * bias は `acc` の初期値（{@link convAccInit}）。m タイルは 64 行 / 32 行の 2 変種
  * （{@link GEMM_MTILE_SMALL} — 出力の**担当割り**だけが変わり、数値経路は共通）。
  */
 const conv2dIgemmWgsl = (
@@ -1322,18 +1331,185 @@ const conv2dIgemmWgsl = (
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<${v4 ? "vec4<f32>" : "f32"}>;`,
     `${weightLoaderWgsl("w", weight, LINEAR_SCALE_BINDING, v4)}${CONV2D_XCOL_WGSL}`,
-    `${v4 ? `  let n4 = dims.n / ${GEMM_QUAD}u;\n` : ""}${prologueAConv2d(geometry, weight)}
+    `${v4 ? `  let n4 = dims.n / ${GEMM_QUAD}u;\n` : ""}${prologueAConv(geometry, weight)}
 ${prologueBConv2d(geometry, v4)}`,
-    `${fillAConv2d(geometry, "w", weight, v4)}
+    `${fillAConv(geometry, "w", weight, v4)}
 ${fillBConv2d(geometry, v4)}`,
     store(geometry, "out", "conv2d", v4, false),
     CONV2D_DIMS_EXTRA,
-    conv2dAccInit(geometry),
+    convAccInit(geometry),
   );
 
-/** op 別の解決（conv2d = m タイル / 融合 attention = 既定固定 / 残り 3 op = 行数バケット）。 */
+/**
+ * conv1d の implicit GEMM が uniform に足す幾何 6 語（`{m,n,k}` の後ろ）。
+ *
+ * `m = Cout` / `n = Lout` / `k = Cin·K`（groups == 1・バッチは dispatch の z 軸）。
+ * MUST: 並びは src/kernels/conv1d.ts の `conv1dIgemmParams` と対。
+ * NOTE: `length_out` は載せない（**そのまま `dims.n`** なので、載せると同じ事実が 2 語に
+ * 分かれて食い違いうる — conv2d が `height_out` を落としたのと同じ規律。2D では
+ * `width_out` だけが n の内訳を割るために要る）。
+ */
+const CONV1D_DIMS_EXTRA = `  channels_in: u32,
+  length_in: u32,
+  kernel: u32,
+  stride: u32,
+  padding: u32,
+  dilation: u32,
+`;
+
+/**
+ * `Xcol[k][n]` の 1 要素（x の暗黙 gather — im2col を実体化しない）。
+ *
+ * MUST: 範囲外は **0 を返す**（ADR 0024 の MUST ③）。クランプした添字で読むと実在する別
+ * 位置が混ざり、例外の出ない誤値になる。直接カーネルの「padding 域は加算せず読み飛ばす」
+ * と値が一致するのは `a + 0.0 == a`（`a` が有限）だからで、唯一の例外は符号付きゼロ
+ * （部分和がちょうど `−0.0` のときだけ `+0.0` に転ぶ）。
+ */
+const CONV1D_XCOL_WGSL = `
+// Xcol[k][n] = x[b, ic, n·stride − padding + k·dilation]（範囲外は 0）。
+// kt = k·dilation − padding は K タイル内で不変なので呼び出し側が畳んで渡す。
+// xc = b·Cin + ic（バッチは dispatch の z 軸なので呼び出し側で足す）
+fn xcol(xc: u32, kt: i32, n: u32) -> f32 {
+  let ix = i32(n * dims.stride) + kt;
+  if (ix < 0 || u32(ix) >= dims.length_in) {
+    return 0.0;
+  }
+  return x[xc * dims.length_in + u32(ix)];
+}
+`;
+
+/**
+ * conv1d の B タイル（`Xcol[k,n]` の暗黙 gather）の担当。割り当ては dense と同じ。
+ *
+ * MUST: バッチは `wid.z`（{@link BATCHED_OPS} の doc）。`xbase` は x の**チャネル行**単位、
+ * `cbase` は出力要素（v4 では quad）単位で数える。
+ * NOTE: 2D 版が持つ `khw`（`Kh·Kw`）に当たる刻みは 1D では `dims.kernel` そのものなので、
+ * ループ不変の束ねが要らない。
+ */
+const prologueBConv1d = (geometry: GemmGeometry, v4: boolean): string => {
+  const stride = gemmQuadFillStride(geometry);
+  const nQuads = gemmColumnQuads(geometry);
+  const rows = slots(gemmQuadSlots(geometry)).slice(1)
+    .map((slot) => `\n  let bk${slot} = bk0 + ${slot * stride}u;`).join("");
+  return `  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチの出力平面 [Cout, Lout]）
+  let xbase = wid.z * dims.channels_in;
+  let cbase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
+  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${nQuads} を ${
+    gemmThreads(geometry)
+  } スレッドで ${gemmQuadSlots(geometry)} 巡）
+  let bk0 = tid / ${nQuads}u;
+  let bcq = tid % ${nQuads}u;
+  ${
+    v4
+      ? `let bc4 = wid.x * ${nQuads}u + bcq;`
+      : `let bcol = wid.x * ${gemmTileN(geometry)}u + bcq * ${GEMM_QUAD}u;`
+  }${rows}`;
+};
+
+/**
+ * 平坦 k → `(ic, k)` の分解と入力座標のオフセット。
+ *
+ * MUST: 平坦 k の昇順が直接カーネルの `(ic, k)` 二重昇順と一致することが、K タイル 16 昇順 →
+ * ビット同一の土台（ADR 0024 と同格 — {@link conv2dKDecode} の 1D 版）。`ic` を最内に取ると
+ * 同じ tap 集合のまま加算順序だけが変わり、**値は近いがビットが割れる**（tolerance 比較では
+ * 絶対に露見しない）。
+ */
+const conv1dKDecode = (slot: number): string =>
+  `      let ic = brow${slot} / dims.kernel;
+      let kt = i32((brow${slot} % dims.kernel) * dims.dilation) - i32(dims.padding);`;
+
+/**
+ * conv1d の B タイル充填（2D 版 {@link fillBConv2d} の 1 軸版）。
+ *
+ * MUST: x を読むのは `bc4 < n4`（v4）/ `bcol + j < n`（スカラ）の門の**内側**だけ。
+ * MUST: v4 の連続 4 列読みが成立する条件は `Lout % 4 == 0 && stride == 1`（判定は
+ * `conv1dUsesVec4` — src/kernels/conv1d.ts の 1 箇所）。1D では出力平面が 1 行なので
+ * 2D の「quad が出力行をまたがない」条件（`Wout % 4`）は `n % 4` と一致する。
+ */
+const fillBConv1d = (geometry: GemmGeometry, v4: boolean): string =>
+  slots(gemmQuadSlots(geometry)).map((slot) =>
+    `    let brow${slot} = t * ${GEMM_TILE_K}u + bk${slot};
+    var bv4_${slot} = vec4<f32>(0.0);
+${
+      v4
+        ? `    if (brow${slot} < dims.k && bc4 < n4) {
+${conv1dKDecode(slot)}
+      let xc = xbase + ic;
+      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      let n0 = bc4 * ${GEMM_QUAD}u;
+      let ix0 = i32(n0 * dims.stride) + kt;
+      if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
+        let base = xc * dims.length_in + u32(ix0);
+        bv4_${slot} = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
+      } else {
+        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        bv4_${slot} = vec4<f32>(
+          xcol(xc, kt, n0),
+          xcol(xc, kt, n0 + 1u),
+          xcol(xc, kt, n0 + 2u),
+          xcol(xc, kt, n0 + 3u),
+        );
+      }
+    }`
+        : `    if (brow${slot} < dims.k) {
+${conv1dKDecode(slot)}
+      let xc = xbase + ic;
+      if (bcol < dims.n) {
+        bv4_${slot}.x = xcol(xc, kt, bcol);
+      }
+      if (bcol + 1u < dims.n) {
+        bv4_${slot}.y = xcol(xc, kt, bcol + 1u);
+      }
+      if (bcol + 2u < dims.n) {
+        bv4_${slot}.z = xcol(xc, kt, bcol + 2u);
+      }
+      if (bcol + 3u < dims.n) {
+        bv4_${slot}.w = xcol(xc, kt, bcol + 3u);
+      }
+    }`
+    }
+    sb[bk${slot} * ${gemmColumnQuads(geometry)}u + bcq] = bv4_${slot};`
+  ).join("\n");
+
+/**
+ * conv1d の implicit GEMM（ADR 0024 の 1D 版）— `C[Cout, N] = W[Cout, K] × Xcol[K, N]`。
+ *
+ * A タイル（重み）・bias-first・store は 2D 版と**同じ断片**で、違うのは B タイルの k 分解
+ * （`(ic, k)` の 2 段）と uniform の幾何欄だけ。store は 1 バッチぶんの `[Cout][Lout]`
+ * 行優先 = NCL の平面そのものなので後段のレイアウト変換は要らない（バッチは z 軸 —
+ * {@link BATCHED_OPS}）。
+ */
+const conv1dIgemmWgsl = (
+  geometry: GemmGeometry,
+  weight: WeightStorage,
+  v4: boolean,
+): string =>
+  skeleton(
+    geometry,
+    `// karume conv1d (x[B,Cin,L] * W[Cout,Cin,K] + b[Cout], f32${
+      weightNote(weight)
+    }, implicit GEMM ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
+    `@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<${weightArrayType(weight, v4)}>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<${v4 ? "vec4<f32>" : "f32"}>;`,
+    `${weightLoaderWgsl("w", weight, LINEAR_SCALE_BINDING, v4)}${CONV1D_XCOL_WGSL}`,
+    `${v4 ? `  let n4 = dims.n / ${GEMM_QUAD}u;\n` : ""}${prologueAConv(geometry, weight)}
+${prologueBConv1d(geometry, v4)}`,
+    `${fillAConv(geometry, "w", weight, v4)}
+${fillBConv1d(geometry, v4)}`,
+    store(geometry, "out", "conv1d", v4, false),
+    CONV1D_DIMS_EXTRA,
+    convAccInit(geometry),
+  );
+
+/**
+ * op 別の解決（conv1d / conv2d = m タイル / 融合 attention = 既定固定 / 残り 3 op =
+ * 行数バケット）。
+ */
 const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
   switch (spec.op) {
+    case "conv1d":
     case "conv2d":
       return gemmMTileGeometry(spec.mTile);
     case "attention_qk":
@@ -1347,7 +1523,7 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
 /**
  * 生成入力 1 つから WGSL 1 本。同じ入力からは常にバイト単位で同じ文字列が出る。
  *
- * タイル幾何を解決する**唯一の点**（conv2d は {@link gemmMTileGeometry}・matmul / bmm / linear は
+ * タイル幾何を解決する**唯一の点**（conv1d / conv2d は {@link gemmMTileGeometry}・matmul / bmm / linear は
  * 行数バケット {@link rowsGeometry}・融合 attention は {@link defaultGemmGeometry}）で、門
  * （{@link assertGemmGeometry}）もここ 1 箇所。断片は幾何を受け取って流すだけなので、既定を
  * 差し替えたときの影響がこの関数に閉じる。
@@ -1358,6 +1534,8 @@ export const gemmWgsl = (spec: GemmSpec): string => {
   switch (spec.op) {
     case "linear":
       return linearVariantWgsl(geometry, spec.weight, spec.v4, spec.compute);
+    case "conv1d":
+      return conv1dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "conv2d":
       return conv2dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "attention_qk":

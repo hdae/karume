@@ -36,7 +36,16 @@ import { type IrDtype, SEMANTIC_DTYPES } from "../src/format/ir.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../src/kernels/bmm.ts";
 import { ATTENTION_QK_MASK_BINDING, GEMM_MTILE_SMALL, gemmUsesVec4 } from "../src/kernels/gemm.ts";
 import { defaultGemmGeometry, GEMM_TILE } from "../src/kernels/gemm-geometry.ts";
-import { conv1dKey, conv1dParams, conv1dWgsl } from "../src/kernels/conv1d.ts";
+import {
+  CONV1D_SCALE_BINDING,
+  conv1dIgemmKey,
+  conv1dIgemmParams,
+  conv1dIgemmWgsl,
+  conv1dKey,
+  conv1dParams,
+  conv1dUsesVec4,
+  conv1dWgsl,
+} from "../src/kernels/conv1d.ts";
 import {
   CONV2D_SCALE_BINDING,
   conv2dIgemmKey,
@@ -167,9 +176,9 @@ const LINEAR_WGSL = linearWgsl("f32", false);
 const MATMUL_WGSL = matmulWgsl(false);
 const BMM_WGSL = bmmWgsl(false);
 /**
- * GEMM 骨格の全生成入力（6 op × 重み格納 × v4）を機械的に回すための直積。
- * 融合 attention の ①③（ADR 0023）と conv2d の implicit GEMM（ADR 0024）も同じ骨格を
- * 共有するので、内積ループ・タイル辺・キーの検査が自動でこちらにも掛かる。
+ * GEMM 骨格の全生成入力（7 op × 重み格納 × v4）を機械的に回すための直積。
+ * 融合 attention の ①③（ADR 0023）と conv1d / conv2d の implicit GEMM（ADR 0024）も同じ
+ * 骨格を共有するので、内積ループ・タイル辺・キーの検査が自動でこちらにも掛かる。
  */
 const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, true]
   .flatMap((
@@ -184,6 +193,11 @@ const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, tr
         `linear ${weight}${v4 ? " v4" : ""}`,
         linearKey(weight, v4),
         linearWgsl(weight, v4),
+      ] as const,
+      [
+        `conv1d igemm ${weight}${v4 ? " v4" : ""}`,
+        conv1dIgemmKey(weight, v4),
+        conv1dIgemmWgsl(weight, v4),
       ] as const,
       [
         `conv2d igemm ${weight}${v4 ? " v4" : ""}`,
@@ -341,6 +355,21 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["conv2d_igemm_m32_wf16_v4.wgsl", conv2dIgemmWgsl("f16", true, GEMM_MTILE_SMALL)],
     ["conv2d_igemm_m32_wi8.wgsl", conv2dIgemmWgsl("i8", false, GEMM_MTILE_SMALL)],
     ["conv2d_igemm_m32_wi8_v4.wgsl", conv2dIgemmWgsl("i8", true, GEMM_MTILE_SMALL)],
+    // conv1d の implicit GEMM（ADR 0024 の 1D 版）も同じ粒度で 12 変種。**上の conv1d*.wgsl
+    // （直接カーネル）と conv2d_igemm*.wgsl の両方と対で並べる**のが条件で、断片を
+    // 1D へ一般化したときに 2D 側のバイト列が動くのが最大の事故。
+    ["conv1d_igemm.wgsl", conv1dIgemmWgsl("f32", false)],
+    ["conv1d_igemm_v4.wgsl", conv1dIgemmWgsl("f32", true)],
+    ["conv1d_igemm_wf16.wgsl", conv1dIgemmWgsl("f16", false)],
+    ["conv1d_igemm_wf16_v4.wgsl", conv1dIgemmWgsl("f16", true)],
+    ["conv1d_igemm_wi8.wgsl", conv1dIgemmWgsl("i8", false)],
+    ["conv1d_igemm_wi8_v4.wgsl", conv1dIgemmWgsl("i8", true)],
+    ["conv1d_igemm_m32.wgsl", conv1dIgemmWgsl("f32", false, GEMM_MTILE_SMALL)],
+    ["conv1d_igemm_m32_v4.wgsl", conv1dIgemmWgsl("f32", true, GEMM_MTILE_SMALL)],
+    ["conv1d_igemm_m32_wf16.wgsl", conv1dIgemmWgsl("f16", false, GEMM_MTILE_SMALL)],
+    ["conv1d_igemm_m32_wf16_v4.wgsl", conv1dIgemmWgsl("f16", true, GEMM_MTILE_SMALL)],
+    ["conv1d_igemm_m32_wi8.wgsl", conv1dIgemmWgsl("i8", false, GEMM_MTILE_SMALL)],
+    ["conv1d_igemm_m32_wi8_v4.wgsl", conv1dIgemmWgsl("i8", true, GEMM_MTILE_SMALL)],
     // w8a8（活性 i8 化 + 整数内積）。**dp4a 版とエミュ版の両方**を置くのが条件で、
     // 「数値は同じで速度だけ違う」という主張は生成物が 2 つ別々に存在することが前提になる。
     ["quantize_rows.wgsl", QUANTIZE_ROWS_WGSL],
@@ -450,6 +479,16 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
         conv2dIgemmWgsl(weight, v4, GEMM_MTILE_SMALL),
         `conv2d igemm m32:${weight}:v4=${v4}`,
       );
+      assertEquals(
+        conv1dIgemmWgsl(weight, v4),
+        conv1dIgemmWgsl(weight, v4),
+        `conv1d igemm:${weight}:v4=${v4}`,
+      );
+      assertEquals(
+        conv1dIgemmWgsl(weight, v4, GEMM_MTILE_SMALL),
+        conv1dIgemmWgsl(weight, v4, GEMM_MTILE_SMALL),
+        `conv1d igemm m32:${weight}:v4=${v4}`,
+      );
     }
     for (const dp4a of [false, true]) {
       assertEquals(
@@ -499,7 +538,10 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     // 同じキーに割り当たると片方の WGSL が他方のパイプラインで走る（workgroup 形が違うので
     // 沈黙 no-op ではなく即座に誤値になる）。
     ...WEIGHT_STORAGES.flatMap((weight) =>
-      [false, true].map((v4) => conv2dIgemmKey(weight, v4, GEMM_MTILE_SMALL))
+      [false, true].flatMap((v4) => [
+        conv2dIgemmKey(weight, v4, GEMM_MTILE_SMALL),
+        conv1dIgemmKey(weight, v4, GEMM_MTILE_SMALL),
+      ])
     ),
     // w8a8: v4 × 整数内積変種の 4 本 + 活性量子化。**dp4a とエミュを別キーにする**のが条件で、
     // 同じキーに割り当たると診断でどちらが走ったか分からなくなる（設計 §4.4-5）。
@@ -1259,17 +1301,17 @@ Deno.test("attention の加算 mask は ①QK の epilogue だけを変え、②
  * 生成物に埋まった辺と幾何を同じテストで突き合わせる（executor は dispatch の辺を
  * `gemmTileM` / `gemmTileN` で幾何から導くので、両者がずれるのは生成側の事故だけ）。
  */
-Deno.test("GEMM 骨格 6 op のタイル辺・キー・TS 定数が既定幾何と一致する", () => {
-  // conv2d の m タイルヒューリスティックの基準値（実タイル辺ではない — gemm-geometry.ts の MUST）
+Deno.test("GEMM 骨格 7 op のタイル辺・キー・TS 定数が既定幾何と一致する", () => {
+  // conv の m タイルヒューリスティックの基準値（実タイル辺ではない — gemm-geometry.ts の MUST）
   assertEquals(GEMM_TILE, 64);
   // 既定幾何（src/kernels/gemm-geometry.ts）。**キーと生成物の両方に効く**ので、
   // 変えたつもりの無い差分がここで止まる
   assertEquals(defaultGemmGeometry(), { regM: 8, regN: 8, wgX: 16, wgY: 16 });
   for (const [where, key, wgsl] of GEMM_VARIANTS) {
-    // 出力タイルの原点（行 / 列）と workgroup。conv2d だけ m タイルを 64 へ抑える
+    // 出力タイルの原点（行 / 列）と workgroup。conv1d / conv2d だけ m タイルを 64 へ抑える
     //（出力チャネル数が小さい — tileN とレジスタブロックは全 op 共通）
-    const conv2d = where.startsWith("conv2d");
-    const tileM = conv2d ? 64 : 128;
+    const conv = where.startsWith("conv");
+    const tileM = conv ? 64 : 128;
     assertEquals(wgsl.includes(`let arow0 = wid.y * ${tileM}u + ar;`), true, where);
     assertEquals(wgsl.includes(`let orow0 = wid.y * ${tileM}u + lid.y * 8u;`), true, where);
     assertEquals(wgsl.includes(`@compute @workgroup_size(16, ${tileM / 8})`), true, where);
@@ -1279,14 +1321,20 @@ Deno.test("GEMM 骨格 6 op のタイル辺・キー・TS 定数が既定幾何�
     assertEquals(wgsl.includes("acc["), false, `${where}: acc の動的添字`);
     assertEquals(wgsl.includes(`var<workgroup> sa: array<f32, ${tileM * 16}>;`), true, where);
     assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 512>;"), true, where);
-    // MUST: 生成パラメータはキーに載る（タイル辺**と幾何**を変えれば別キーになる）。conv2d の
+    // MUST: 生成パラメータはキーに載る（タイル辺**と幾何**を変えれば別キーになる）。conv の
     // implicit GEMM だけは判別子が `igemm`（直接カーネルと系統が違うことを名前で表す）で、
     // 幾何は workgroup 形（`wg16x8`）が同じ判別力を持つ。
-    const tilePart = conv2d ? "igemm" : "reg";
+    const tilePart = conv ? "igemm" : "reg";
     assertEquals(key.includes(`${tilePart}${tileM}x128`), true, where);
-    assertEquals(key.includes(conv2d ? "wg16x8" : "r8x8w16"), true, where);
-    // 版番号は op ごと（既存 3 op は 16×16 からの改版で v2・融合 attention は新設なので v1）
-    assertEquals(key.includes(where.startsWith("attention") ? ":v1:" : ":v2:"), true, where);
+    assertEquals(key.includes(conv ? "wg16x8" : "r8x8w16"), true, where);
+    // 版番号は op ごと（既存 3 op は 16×16 からの改版で v2・融合 attention は新設なので v1・
+    // conv1d の implicit GEMM は直接カーネルが既に v2 を名乗っているので v3）
+    const version = where.startsWith("attention")
+      ? ":v1:"
+      : where.startsWith("conv1d")
+      ? ":v3:"
+      : ":v2:";
+    assertEquals(key.includes(version), true, where);
     // 旧 16×16 タイルの痕跡が残っていない（キーの改版と生成物の総取り替えは対）
     assertEquals(key.includes("tile16"), false, where);
   }
@@ -1298,10 +1346,13 @@ Deno.test("GEMM 骨格 6 op のタイル辺・キー・TS 定数が既定幾何�
   assertEquals(bmmKey(true), "bmm:v2:f32:reg128x128r8x8w16v4");
   assertEquals(linearKey("i8", true), "linear:v2:f32:reg128x128r8x8w16v4:wi8");
   assertEquals(linearKey("f16", false), "linear:v2:f32:reg128x128r8x8w16:wf16");
-  // conv2d は 2 系統（implicit GEMM / 直接カーネル）で、直接側のキーは動かさない
+  // conv1d / conv2d は 2 系統（implicit GEMM / 直接カーネル）で、直接側のキーは動かさない
   assertEquals(conv2dIgemmKey("f32", true), "conv2d:v2:f32:igemm64x128v4:wg16x8");
   assertEquals(conv2dIgemmKey("i8", false), "conv2d:v2:f32:igemm64x128:wg16x8:wi8");
   assertEquals(conv2dKey("f32"), "conv2d:v1:f32:direct:wg256");
+  assertEquals(conv1dIgemmKey("f32", true), "conv1d:v3:f32:igemm64x128v4:wg16x8");
+  assertEquals(conv1dIgemmKey("i8", false), "conv1d:v3:f32:igemm64x128:wg16x8:wi8");
+  assertEquals(conv1dKey("f32"), "conv1d:v2:f32:direct:wg256");
 });
 
 /**
@@ -1458,6 +1509,128 @@ Deno.test("conv2dUsesVec4 は kFlat / Wout / strideW の 3 条件を全て見る
   assertEquals(conv2dUsesVec4(18, 8, 1), false, "kFlat=18（Cin=2 の 3×3）");
   assertEquals(conv2dUsesVec4(24, 8, 3), false, "stride_w=3（4 列の x が連続しない）");
   assertEquals(conv2dUsesVec4(4, 4, 1), true);
+});
+
+/**
+ * conv1d の implicit GEMM が骨格の断片共有で満たすべき MUST を**生成物の側から**固定する
+ * （2D 版と同じ 4 点 + 1D 固有の「2 次元の概念を持ち込まない」）。数値の一致は実 GPU の
+ * ビット比較が見る（tests/gpu_conv1d_parity_test.ts）。
+ */
+Deno.test("conv1d の implicit GEMM は bias-first / 0 埋め / 行 scale / 1 軸 Dims を生成物に持つ", () => {
+  for (const v4 of [false, true]) {
+    const wgsl = conv1dIgemmWgsl("f32", v4);
+    const where = `conv1d igemm v4=${v4}`;
+    // MUST ①: bias は acc の初期値（store 側で足す形にすると (Σ)+bias で丸めが変わる）
+    assertEquals(wgsl.includes("let bias0 = wid.y * 64u + lid.y * 8u;"), true, where);
+    assertEquals(wgsl.includes("var acc1_0 = vec4<f32>(bias[bias0 + 1u]);"), true, where);
+    assertEquals(wgsl.includes("+ biasv"), false, `${where}: store 側で bias を足している`);
+    assertEquals(wgsl.includes("+ bias[ocol"), false, `${where}: store 側で bias を足している`);
+    // MUST ③: 範囲外の x は 0（クランプ添字で読まない）
+    assertEquals(
+      wgsl.includes(
+        "  let ix = i32(n * dims.stride) + kt;\n  if (ix < 0 || u32(ix) >= dims.length_in) {\n    return 0.0;\n  }",
+      ),
+      true,
+      where,
+    );
+    assertEquals(wgsl.includes("clamp("), false, `${where}: 添字のクランプが混ざっている`);
+    // 平坦 k → (ic, k)（ic を最内に取ると同じ tap 集合のまま加算順序だけが変わる）
+    assertEquals(wgsl.includes("let ic = brow0 / dims.kernel;"), true, where);
+    assertEquals(
+      wgsl.includes(
+        "let kt = i32((brow0 % dims.kernel) * dims.dilation) - i32(dims.padding);",
+      ),
+      true,
+      where,
+    );
+    // バッチは z 軸（N 側へ畳むと出力の軸が [Cout][B·Lout] に入れ替わる）
+    assertEquals(wgsl.includes("let xbase = wid.z * dims.channels_in;"), true, where);
+    assertEquals(wgsl.includes("let cbase = wid.z * dims.m * "), true, where);
+    // MUST: 死んだ Dims 欄を持たない（length_out は dims.n そのもの）。2 次元の概念
+    // （H/W・Kh/Kw）も 1 語たりとも漏れていない — 2D 版からの写し漏れの検出器
+    for (const dead of ["length_out", "width", "height", "kernel_h", "kernel_w", "stride_h"]) {
+      assertEquals(wgsl.includes(dead), false, `${where}: ${dead} が漏れている`);
+    }
+    // A タイル・内積ループ・store は 2D 版と**同じ断片**（1 文字でも割れたら共有が壊れている）
+    const conv2d = conv2dIgemmWgsl("f32", v4);
+    for (
+      const shared of [
+        "  let ar = tid / 4u;",
+        "  let arow_base0 = arow0 * dims.k;",
+        "  let bias0 = wid.y * 64u + lid.y * 8u;",
+        "      acc0_0 = acc0_0 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv0;",
+        "  let orow0 = wid.y * 64u + lid.y * 8u;",
+      ]
+    ) {
+      assertEquals(wgsl.includes(shared), true, `${where}: ${shared}`);
+      assertEquals(conv2d.includes(shared), true, `conv2d igemm v4=${v4}: ${shared}`);
+    }
+  }
+  // MUST ④: i8 の scale は**行**（= 出力チャネル）。linear の `wcol`（列）流用は沈黙誤値で、
+  // m タイルが 2 枚以上ある形のテスト（gpu_conv1d_parity_test.ts の Cout=96）だけが検出器
+  const i8Wgsl = conv1dIgemmWgsl("i8", true);
+  assertEquals(i8Wgsl.includes("let wscale_v = wscale[arow0];"), true);
+  assertEquals(i8Wgsl.includes("let wscale_v1 = wscale[arow1];"), true);
+  assertEquals(i8Wgsl.includes("wscale[wcol"), false, "linear の列 scale を持ってきている");
+  // 束縛番号は直接カーネルと同じ（executor は 1 本の定数で両方を束ねる）
+  assertEquals(
+    i8Wgsl.includes(`@group(0) @binding(${CONV1D_SCALE_BINDING}) var<storage, read> wscale:`),
+    true,
+  );
+  // A タイルは重み（weight-storage 経由）・B タイルは x の暗黙 gather
+  assertEquals(i8Wgsl.includes("av0 = dequant4(arow_base0 + ak0, wscale_v);"), true);
+  assertEquals(conv1dIgemmWgsl("f16", false).includes("av0.x = dequant(abase);"), true);
+  assertEquals(conv1dIgemmWgsl("f32", false).includes("av0.x = w[abase];"), true);
+});
+
+/**
+ * conv1d の **32 行 m タイル変種**（述語は conv2d と共有 — {@link conv2dIgemmMTile}）。
+ *
+ * MUST: 変えるのは「どの workgroup がどの出力を担当するか」だけ。1 出力要素の K 縮約順・
+ * 丸め列・bias-first・0 埋めは 64 行版と共通の骨格が持つ。
+ */
+Deno.test("conv1d の 32 行 m タイル変種は幾何だけが変わる（n タイル 128・8×8 レジスタは不変）", () => {
+  for (const weight of WEIGHT_STORAGES) {
+    for (const v4 of [false, true]) {
+      const wgsl = conv1dIgemmWgsl(weight, v4, GEMM_MTILE_SMALL);
+      const where = `conv1d igemm m32 ${weight} v4=${v4}`;
+      assertEquals(wgsl.includes("let arow0 = wid.y * 32u + ar;"), true, where);
+      assertEquals(wgsl.includes("let orow0 = wid.y * 32u + lid.y * 8u;"), true, where);
+      assertEquals(wgsl.includes("let bias0 = wid.y * 32u + lid.y * 8u;"), true, where);
+      // n タイルは既定幾何と同じ 128（m 側だけの変種であることの検出器）
+      assertEquals(
+        wgsl.includes(v4 ? "let bc4 = wid.x * 32u + bcq;" : "let bcol = wid.x * 128u + bcq * 4u;"),
+        true,
+        where,
+      );
+      assertEquals(wgsl.includes("@compute @workgroup_size(16, 4)"), true, where);
+      assertEquals(wgsl.includes("var<workgroup> sa: array<f32, 512>;"), true, where);
+      assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 512>;"), true, where);
+      // 64 スレッドで 512 quad の B タイルを埋めるので 8 スロット
+      assertEquals(wgsl.includes("let bk7 = bk0 + 14u;"), true, where);
+      assertEquals(wgsl.includes("let bk8 ="), false, `${where}: スロットは 8 本ちょうど`);
+    }
+  }
+  // 64 行版へ 32 行版の担当割りが漏れていない
+  assertEquals(conv1dIgemmWgsl("f32", true).includes("let bk3 = bk0 + 12u;"), true);
+  assertEquals(conv1dIgemmWgsl("f32", true).includes("let bk4 ="), false);
+  // キーは別系統（タイル形は生成パラメータなのでキーに載る）
+  assertEquals(conv1dIgemmKey("f32", true, 32), "conv1d:v3:f32:igemm32x128v4:wg16x4");
+  assertEquals(conv1dIgemmKey("i8", false, 32), "conv1d:v3:f32:igemm32x128:wg16x4:wi8");
+});
+
+/**
+ * v4 判定（`kFlat % 4 == 0 && Lout % 4 == 0 && stride == 1`）。
+ *
+ * MUST: 3 条件を全て見る。1D では出力平面が 1 行なので 2D の `Wout % 4` と `N % 4` の
+ * 区別は消えるが、**`Cin % 4` で代用しない**ことと **stride を見る**ことは 2D と同じ理由で要る。
+ */
+Deno.test("conv1dUsesVec4 は kFlat / Lout / stride の 3 条件を全て見る", () => {
+  assertEquals(conv1dUsesVec4(1024, 512, 1), true, "dacvae 系の実形状");
+  assertEquals(conv1dUsesVec4(7, 8, 1), false, "kFlat=7（Cin=1 の K=7 — Cin%4 では捕まらない）");
+  assertEquals(conv1dUsesVec4(8, 170, 1), false, "Lout=170（実測形のスカラ変種）");
+  assertEquals(conv1dUsesVec4(8, 8, 2), false, "stride=2（4 列の x が連続しない）");
+  assertEquals(conv1dUsesVec4(4, 4, 1), true);
 });
 
 /**
@@ -2762,6 +2935,53 @@ Deno.test("融合カーネルの params は契約外の値を fail loudly にす
   // groups が Cin / Cout を割り切らない形は params 層でも落ちる（シェーダの除算は切り捨て）
   assertThrows(() => convParams({ groups: 3 }), CodegenError);
   assertThrows(() => convParams({ channelsOut: 6, groups: 4 }), CodegenError);
+
+  // conv1d の implicit GEMM は `{m, n, k}` + 幾何 6 語。**n は 1 バッチぶんの出力平面**
+  // （バッチは dispatch の z 軸）で、`length_out` は n と同値なので Dims に持たない。
+  const conv1Igemm = conv1dIgemmParams({
+    batch: 2,
+    channelsIn: 6,
+    channelsOut: 9,
+    lengthIn: 11,
+    lengthOut: 4,
+    kernel: 3,
+    stride: 3,
+    padding: 1,
+    dilation: 2,
+    groups: 1,
+  });
+  assertEquals([...conv1Igemm.slice(0, 9)], [
+    9, // m = Cout
+    4, // n = Lout（B は掛けない）
+    6 * 3, // k = Cin·K
+    6,
+    11,
+    3,
+    3,
+    1,
+    2,
+  ]);
+  assertEquals(conv1Igemm.byteLength % 16, 0);
+  // 契約検査は直接カーネルと共有（同じ幾何は同じ理由で落ちる）+ groups > 1 は専用の門
+  const conv1IgemmParams = (over: Partial<Parameters<typeof conv1dIgemmParams>[0]>) =>
+    conv1dIgemmParams({
+      batch: 1,
+      channelsIn: 4,
+      channelsOut: 4,
+      lengthIn: 4,
+      lengthOut: 4,
+      kernel: 3,
+      stride: 1,
+      padding: 1,
+      dilation: 1,
+      groups: 1,
+      ...over,
+    });
+  assertThrows(() => conv1IgemmParams({ stride: 0 }), CodegenError);
+  assertThrows(() => conv1IgemmParams({ dilation: 0 }), CodegenError);
+  // MUST: groups > 1 は implicit GEMM の対象外（executor は直接カーネルへ流す）
+  assertThrows(() => conv1IgemmParams({ groups: 2 }), CodegenError);
+  assertThrows(() => conv1IgemmParams({ groups: 4 }), CodegenError);
 
   // conv2d は空間 2 軸ぶんの語を持つ（H と W を取り違えていないことを並びで固定する）
   const conv2 = conv2dParams({

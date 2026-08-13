@@ -1,6 +1,19 @@
 /**
- * conv1d（`x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout]`、f32）の固定カーネル。直接畳み込みで
- * 1 スレッド = 1 出力要素（正しさ優先 — 性能マイルストーンでの置換対象）。
+ * conv1d（`x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout]`、f32）の 2 カーネル。
+ *
+ * | 経路          | キー                                                    | 条件        |
+ * | ------------- | ------------------------------------------------------- | ----------- |
+ * | implicit GEMM | `conv1d:v3:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}`  | groups == 1 |
+ * | 直接畳み込み  | `conv1d:v2:f32:direct:wg256{:w…}`                       | groups > 1  |
+ *
+ * implicit GEMM のキーの辺と workgroup 形は**幾何から導く**（{@link conv1dIgemmKey} —
+ * conv2d と同じ規律で、具体値を書き写すと幾何を差し替えたとき doc とキーだけが古い辺を名乗る）。
+ *
+ * implicit GEMM（ADR 0024 の 1D 版）は `C[Cout, N] = W[Cout, K] × Xcol[K, N]` を GEMM 骨格
+ * （src/kernels/gemm.ts）の断片共有で解く。**縮約順序が直接畳み込みと厳密に一致する**ので
+ * 出力はビット同一（唯一の例外 = 符号付きゼロ — {@link conv1dIgemmKey} の doc）。
+ * 直接畳み込み（ADR 0017）は 1 スレッド = 1 出力要素で、groups > 1 を受け持つと同時に
+ * **恒久の差分オラクル**（tests/gpu_conv1d_parity_test.ts）を兼ねる。
  *
  * ## 契約の狭さ（ADR 0007: IR ではなくランタイム capability 側に置く）
  *
@@ -32,6 +45,8 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
+import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,
@@ -51,6 +66,53 @@ export const CONV1D_SCALE_BINDING = 5;
 /** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
 export const conv1dKey = (weight: WeightStorage): string =>
   `conv1d:v2:f32:direct:wg${CONV1D_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
+
+/**
+ * implicit GEMM の v4（vec4 読み書き）判定。
+ *
+ * MUST: 判定はここ 1 箇所。3 つの条件は 2 つの理由に対応する:
+ * - `kFlat % 4 == 0` … A 側の quad 読み（f16 の `dequant4` / i8 の `unpack4xI8` は**平坦添字が
+ *   4 の倍数**であることに依存し、行頭 = `arow · kFlat` がその条件を満たす）。
+ *   **`Cin % 4` ではない**（Cin=1 の K=7 は kFlat=7）。
+ * - `lengthOut % 4 == 0 && stride == 1` … B 側の列 quad が x の連続 4 要素に落ちること、
+ *   および store 側の quad 書きに端数が出ないこと。1D では出力平面が 1 行なので
+ *   `n = Lout` で、conv2d が `Wout % 4` と `N % 4` を区別した理由（quad が出力行をまたぐ）は
+ *   ここでは消える。
+ */
+export const conv1dUsesVec4 = (kFlat: number, lengthOut: number, stride: number): boolean =>
+  kFlat % 4 === 0 && lengthOut % 4 === 0 && stride === 1;
+
+/**
+ * implicit GEMM のパイプラインキー（ADR 0024 の 1D 版）。直接カーネルの `v2` とは別系統で、
+ * v4 フラグは形状 → 1 ビットの写像（決定性は崩れない — ADR 0022 決定 2 と同じ語彙）。
+ *
+ * NOTE: 出力は直接カーネルと**ビット同一**（縮約順序が厳密一致）。唯一の例外は符号付きゼロ
+ * で、部分和がちょうど `−0.0` の位置に padding 由来の `+0.0` を足すと `+0.0` に転ぶ
+ * （直接カーネルは padding を加算しないので `−0.0` が残る）。bias が 0 でない限り到達しない
+ * （機序の固定は tests/gpu_conv1d_parity_test.ts の負ケース）。
+ *
+ * NOTE: m タイルの選択述語は `conv2dIgemmMTile`（src/kernels/conv2d.ts）を共有する。
+ * **M = Cout の関数でしかない**（無駄 = `ceil(M/tile)·tile / M`）ので次元に依らず、
+ * 1D 用に写すと同じ境界が 2 箇所に散る。
+ */
+export const conv1dIgemmKey = (
+  weight: WeightStorage,
+  v4: boolean,
+  mTile: number = GEMM_TILE,
+): string => {
+  // MUST: キーの幾何は生成と**同じ解決点**（`gemmMTileGeometry`）から導く。mTile を直に
+  // 埋めると、幾何を差し替えたときにキーだけが古い辺を名乗って別物の WGSL へ衝突する。
+  const geometry = gemmMTileGeometry(mTile);
+  return `conv1d:v3:f32:igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}${
+    v4 ? "v4" : ""
+  }:wg${geometry.wgX}x${geometry.wgY}${weightKeyPart(weight)}`;
+};
+
+export const conv1dIgemmWgsl = (
+  weight: WeightStorage,
+  v4: boolean,
+  mTile: number = GEMM_TILE,
+): string => gemmWgsl({ op: "conv1d", v4, weight, mTile });
 
 export const conv1dWgsl = (weight: WeightStorage): string =>
   `// karume conv1d (x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout], f32${
@@ -116,11 +178,8 @@ fn main(
 }
 `;
 
-/**
- * uniform の Dims。11 語なので 16 バイト整列に合わせて 12 語（48 バイト）確保する MUST
- * （uniform アドレス空間の struct 整列。不足すると binding が validation で落ちる）。
- */
-export const conv1dParams = (dims: {
+/** conv1d の幾何（2 つの params 関数が共有する唯一の入力型）。 */
+export type Conv1dDims = {
   readonly batch: number;
   readonly channelsIn: number;
   readonly channelsOut: number;
@@ -131,7 +190,15 @@ export const conv1dParams = (dims: {
   readonly padding: number;
   readonly dilation: number;
   readonly groups: number;
-}): Uint32Array<ArrayBuffer> => {
+};
+
+/**
+ * 幾何の契約検査（両カーネル共通）。直接カーネルの Dims 並び順で値を返す。
+ *
+ * MUST: stride 0 はループが進まず GPU ハング（例外にならない）— 契約検査と二重だが、
+ * カーネル直呼びの経路も塞ぐ。
+ */
+const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
   const values = [
     dims.batch,
     dims.channelsIn,
@@ -161,17 +228,50 @@ export const conv1dParams = (dims: {
       `conv1d params: groups ${dims.groups} が Cin ${dims.channelsIn} / Cout ${dims.channelsOut} を割り切らない`,
     );
   }
+  return values;
+};
+
+/**
+ * 直接カーネルの uniform Dims。11 語なので 16 バイト整列に合わせて 12 語（48 バイト）確保する
+ * MUST（uniform アドレス空間の struct 整列。不足すると binding が validation で落ちる）。
+ */
+export const conv1dParams = (dims: Conv1dDims): Uint32Array<ArrayBuffer> => {
+  const values = checkConv1dDims(dims);
   const params = new Uint32Array(12);
   params[0] = dims.batch * dims.channelsOut * dims.lengthOut;
-  params[1] = dims.batch;
-  params[2] = dims.channelsIn;
-  params[3] = dims.channelsOut;
-  params[4] = dims.lengthIn;
-  params[5] = dims.lengthOut;
-  params[6] = dims.kernel;
-  params[7] = dims.stride;
-  params[8] = dims.padding;
-  params[9] = dims.dilation;
-  params[10] = dims.groups;
+  values.forEach((value, index) => {
+    params[index + 1] = value;
+  });
+  return params;
+};
+
+/**
+ * implicit GEMM の uniform Dims（`{m, n, k}` + 幾何 6 語 = 9 語なので 12 語 = 48 バイト確保）。
+ *
+ * `m = Cout` / `n = Lout`（**1 バッチぶんの出力平面** — バッチは dispatch の z 軸）/
+ * `k = Cin·K`。
+ * MUST: 並びは gemm.ts の `CONV1D_DIMS_EXTRA` と対。`groups == 1` 専用で、それ以外は
+ * fail loudly（**縮約帯がグループごとに違うので 1 枚の m タイルが同じ B タイルを共有できない**
+ * — groups > 1 は直接カーネルへ流す）。
+ */
+export const conv1dIgemmParams = (dims: Conv1dDims): Uint32Array<ArrayBuffer> => {
+  checkConv1dDims(dims);
+  if (dims.groups !== 1) {
+    throw new CodegenError(`conv1d igemm params: groups は 1 専用（${dims.groups}）`);
+  }
+  const params = new Uint32Array(12);
+  params[0] = dims.channelsOut;
+  params[1] = dims.lengthOut;
+  params[2] = dims.channelsIn * dims.kernel;
+  [
+    dims.channelsIn,
+    dims.lengthIn,
+    dims.kernel,
+    dims.stride,
+    dims.padding,
+    dims.dilation,
+  ].forEach((value, index) => {
+    params[index + 3] = value;
+  });
   return params;
 };
