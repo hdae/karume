@@ -9,6 +9,10 @@
  * 一方で resize / rescale / normalize は**モデルカードの一部**（定数を間違えると静かに精度が
  * 落ちる）なので、利用者ではなくこちらが持つ。
  *
+ * 画素ごとの出力を持つモデル（セグメンテーションのマット）は、焼かれた解像度で出た地図を
+ * 元画像の解像度へ**戻す**段も通る。台と重みは入口と同じものなので、その 1 本
+ * （{@link resizePlaneF32}）もここが持つ。
+ *
  * ## MUST: 合わせている参照実装
  *
  * transformers 5.14.1 の **`SiglipImageProcessor`（`TorchvisionBackend`）** — v5 の
@@ -154,6 +158,73 @@ export const resizeRgb8 = (image: Rgb8Image, width: number, height: number): Rgb
     }
   }
   return { data, width, height };
+};
+
+/**
+ * **単一チャネルの f32 平面**を指定寸法へリサンプルする（{@link resizeRgb8} と同じ台・同じ
+ * 重み — {@link buildTaps} を共有する）。
+ *
+ * 画素ごとの出力を持つモデル（セグメンテーションのマット等）は、グラフが焼かれた解像度で
+ * 出した地図を**元画像の解像度へ戻す**必要がある。参照実装は
+ * `torchvision.transforms.functional.resize`（テンソル枝・bilinear・antialias 既定）で、
+ * 重みの組み方は {@link resizeRgb8} が合わせている Pillow の `ImagingResample` と同じ。
+ *
+ * MUST: {@link resizeRgb8} と違って**2 パスの間で丸めない**。あちらの `round8` は PIL /
+ * torchvision の **uint8 経路**が中間バッファを uint8 で持つことに合わせた再現で、f32 の
+ * テンソル枝には無い段。ここで真似ると参照から離れるうえ、`[0, 1]` のマットが 8bit の段に
+ * 潰れて境界の勾配が失われる。
+ *
+ * 重みは非負で総和 1 なので、入力の値域は出力でも保たれる（`[0, 1]` のマットが範囲外へ
+ * 出ることはない — clamp を置いていないのはこの理由）。
+ */
+export const resizePlaneF32 = (
+  plane: Float32Array,
+  sourceWidth: number,
+  sourceHeight: number,
+  width: number,
+  height: number,
+): Float32Array<ArrayBuffer> => {
+  for (
+    const [size, label] of [[sourceWidth, "入力幅"], [sourceHeight, "入力高さ"], [
+      width,
+      "出力幅",
+    ], [height, "出力高さ"]] as const
+  ) {
+    if (!Number.isInteger(size) || size <= 0) {
+      throw new RangeError(`${label} ${size} が正の整数でない`);
+    }
+  }
+  if (plane.length !== sourceWidth * sourceHeight) {
+    throw new Error(`平面の長さ ${plane.length} が ${sourceWidth}×${sourceHeight} と違う`);
+  }
+
+  const horizontal = buildTaps(sourceWidth, width);
+  const middle = new Float64Array(sourceHeight * width);
+  for (let y = 0; y < sourceHeight; y += 1) {
+    const sourceRow = y * sourceWidth;
+    const targetRow = y * width;
+    for (let x = 0; x < width; x += 1) {
+      const { start, weights } = horizontal[x];
+      let sum = 0;
+      for (let j = 0; j < weights.length; j += 1) sum += plane[sourceRow + start + j] * weights[j];
+      middle[targetRow + x] = sum;
+    }
+  }
+
+  const vertical = buildTaps(sourceHeight, height);
+  const out = new Float32Array(width * height) as Float32Array<ArrayBuffer>;
+  for (let y = 0; y < height; y += 1) {
+    const { start, weights } = vertical[y];
+    const targetRow = y * width;
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0;
+      for (let j = 0; j < weights.length; j += 1) {
+        sum += middle[(start + j) * width + x] * weights[j];
+      }
+      out[targetRow + x] = sum;
+    }
+  }
+  return out;
 };
 
 /**

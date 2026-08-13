@@ -67,6 +67,17 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 解消は動的解像度 recon の「固定タイル VAE」（研究記録
 [2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)）side で行う想定。
 
+## BiRefNet 系の配布形は 1024² だけ（2048² は未実測・組み立てが拒否する）
+
+`karume dist --pipeline birefnet` が受け付けるのは入力 `[1,3,1024,1024]` で焼かれた系列だけで、
+それ以外の解像度は `DistError` で落ちる（`karume/dist.py` の `BIREFNET_RESOLUTION`）。export
+段（`export_birefnet.py --resolution 2048`）は通るので、系列を作ること自体はできる。
+
+配らないのは実行段が未実測だから: ①上の conv2d の dispatch 上限（n タイル 65,536）に
+decoder の 1×1 conv が当たる見込み ②中間テンソルが `[1, 192, 2048, 2048]` = 3.22GB になる。
+本家（同梱 `handler.py` の General-HR）の推論解像度は 2048² なので、**上流と同じ設定では
+ない**点は配布形の制約として明示しておく。回避策は入れていない（実測して判断する側の話）。
+
 ## conv1d（groups==1）も同じ dispatch 上限で fail loudly になる（Lout ≈ 8.39M）
 
 conv1d の implicit GEMM（[decisions/0053](decisions/0053-conv1d-implicit-gemm.md)）も
