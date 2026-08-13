@@ -161,3 +161,60 @@ grouping へ・キー v2）。検収 A/B（同ケース・クールダウン規�
 - 壁時計は計測込みのみ（装置代 anima ≈41ms/step・irodori は §3.3 の外挿注意）。
 - クールダウン 40°C 以下・A/B 各 2 走・台本と生データ JSON は scratchpad（揮発）—
   本ドキュメントの表が写し。
+
+## 7. 追記（同日・K-7 の利得実測 — 素 RoPE / adaLN の per-dispatch 帰属）
+
+波①への相乗り指示（2026-08-13 裁定）に基づく K-7（融合 matcher 受理集合拡張）の採否材料。
+irodori voice-clone（S=170・forwards 100・w8a8）で、DiT の素 RoPE / 素 adaLN に属する
+dispatch の GPU 時間を**直接帰属**で実測した。
+
+- 手法: 計測台本（scratchpad・揮発）が `SubmitScheduler.prototype.dispatch` をラップし、
+  パイプラインキーへ run 内連番 `|#<seq>` を付加 → `GpuTimingStats.entries` が
+  1 dispatch = 1 行になる。`key` は GPU 時間内訳の帰属（timing Map のキー）にしか使われない
+  （submit.ts の doc とコード読みで確認）ため計算経路は無変更 — **WAV sha256 が既存
+  一致値 `e7846ac1…` と両走とも同一**であることを門にした。連番 → IR ノードの対応は
+  IR からの dispatch 列再構成（1,596 本/forward）で与え、op family / workgroup 数の
+  **整列不一致 0 件**を確認してから読んだ。
+- 分解ノード列（1 forward）: 素 RoPE 24 本（12 ブロック × q,k・1 本 12 dispatch =
+  slice×4 / neg / cat×2〈strided_write ×2 each〉/ mul×2 / add）= 288 dispatch。素 adaLN
+  24 本（× attention,ffn・1 本 4 dispatch = rms_norm / add / mul / add）= 96 dispatch。
+  受理集合外の機序: ROPE_RULE は `[1,H,S,D]` の半割り slice 形のみを受理し irodori の
+  偶奇形（最終軸 size 2）は構造的に落ちる。ADALN_RULE は先頭 layer_norm 固定 + reshape
+  passthrough 必須で、irodori は rms_norm ベース + passthrough 0 本。
+- 結果（A / B・dit GPU 3,798.06 / 3,788.59ms）:
+
+| 対象     | disp/fwd | ms/生成 (A/B) | DiT 比 | 全 GPU 比 |
+| :------- | -------: | ------------: | -----: | --------: |
+| 素 RoPE  |      288 |   99.0 / 98.3 |  2.61% |     1.70% |
+| 素 adaLN |       96 |   44.1 / 44.0 |  1.16% |     0.76% |
+| 合計     |      384 | 143.1 / 142.3 |  3.77% | **2.45%** |
+
+- 読み: 143ms/生成は**利得上限**（融合後も rope 24 + adaln 24 = 48 disp/forward が残り、
+  そのカーネル代を引く前）。GPU 側だけなら棄却済み K-8（79ms = 1.0%）と同格の水準。
+  **本命は dispatch 削減 336/forward = 33,600/生成（全 161,639 の 20.8%）のホスト側**
+  （露出ホスト ≈5.3s の按分で ≈1.1s 見込みだが、按分は dispatch あたり均一の仮定 —
+  素 RoPE/adaLN は binding が少ない側なので実際は低く出る公算）。採否は波②（H-2 の
+  ホスト分解計測）の後に再評価するのが妥当。
+
+## 8. 追記（同日・K-4a の着地 — conv1d implicit GEMM の検収）
+
+波①本体（[ADR 0053](../decisions/0053-conv1d-implicit-gemm.md)・実装 `7a725d7`）。
+recon（ビット同一で可能）→ **B′ スパイク**（conv1d を退化 conv2d〈H=1〉として既存 igemm へ
+流す executor 一時変更・新規 WGSL ゼロ — 実装前に利得とビット一致を実測）→ 本実装の 3 段。
+
+| 断面                        |    decoder conv1d |  encoder conv1d |                全 GPU | WAV sha256  |
+| :-------------------------- | ----------------: | --------------: | --------------------: | :---------- |
+| ベースライン（K-10 後・§5） | 1,111.57ms（27d） | 647.39ms（31d） |            5,818.05ms | `e7846ac1…` |
+| B′ スパイク                 |           68.45ms |         48.33ms |            4,212.34ms | 同一        |
+| 本実装（検収 A/B）          |   64.18 / 64.05ms | 45.87 / 46.06ms | 4,230.63 / 4,221.76ms | 同一        |
+
+- conv1d 合計 1,758.96 → 110.1ms = **16.0 倍**（decoder 17.3 倍 / encoder 14.1 倍）。
+  専用 1D カーネルはスパイク（退化 2D）より decoder −4.3ms（uniform 6 語と添字算術の差）。
+  recon の一次見積り 3.3〜4.4 倍は大幅に保守的だった（η アンカーに使った GEMM 実測
+  3,320 GFLOP/s を igemm 実効が超えた — 実測 ≈9,300 GFLOP/s）。
+- 全 GPU **−27.4%**・壁 14,523 → 13,008ms（計測込み・×1.12）。dit は 3,830ms 前後で不変
+  （±1% の熱揺れ範囲）。dispatch 161,639 / clamped 0 は不変。
+- 新しい GPU 内訳: **dit 90.7%**（うち linear i8a8 58.5% / bmm 12.9%）・codec-decoder
+  279ms（convT 184 + conv1d igemm 64）・codec-encoder 69ms — **GPU 側はほぼ DiT だけが
+  残った**。次の GPU 候補は K-1（linear i8a8）と K-5（masked online attention）。
+- ホスト律速は不変（壁 −10% に対し GPU −27%）— 波②（H-2 → H-5/H-1）の根拠を強める。

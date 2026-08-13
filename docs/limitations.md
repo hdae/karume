@@ -67,6 +67,14 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 解消は動的解像度 recon の「固定タイル VAE」（研究記録
 [2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)）side で行う想定。
 
+## conv1d（groups==1）も同じ dispatch 上限で fail loudly になる（Lout ≈ 8.39M）
+
+conv1d の implicit GEMM（[decisions/0053](decisions/0053-conv1d-implicit-gemm.md)）も
+1 workgroup = 1 出力タイルで、n = Lout のタイル数（tileN=128）が 65,535 を超える形 —
+**Lout > 8,388,480 サンプル ≈ 175 秒 @48kHz** — は `DispatchLimitError` になる。実運用では
+dacvae decoder はタイル分割（halo 8）で、SBV2 は運用上限（pipelineConfig）で先に区切られる
+ため到達しないが、カーネル直呼びの長尺形は例外で止まる（沈黙誤値ではない）。
+
 ## Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる（外部制約）
 
 Deno の WebGPU 実装は wgpu の**メモリ予算しきい値**をハードコードしている
