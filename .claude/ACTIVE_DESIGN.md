@@ -4,7 +4,7 @@
 > FIRST (alongside `CLAUDE.md` / `docs/`) so they don't start cold or misread an intentional
 > migration as a defect. Update it whenever the current design context shifts.
 >
-> Last updated: 2026-08-12
+> Last updated: 2026-08-13
 
 ## Active redesigns (in flight)
 
@@ -27,7 +27,10 @@
   sim の数値 LSD 5.64 より聴感が正）。S ドリフトは全構成で不変（混成不要）。門 = latent 門
   w8 席（1e-2）+ `e2e_irodori_w8a8_test.ts`（判別帯 [0.1,6] + census 317/317/0）。品質台本 =
   `measure_quant_irodori.py`（S ドリフト表・直交分解 5 軸・活性シム素通り検出）。速度は
-  wall ×1.12 — DiT の GPU 内訳再実測（perf-ledger 第 1 段の残り）は未消化のまま。
+  wall ×1.12。**DiT の GPU 内訳再実測は消化済み（2026-08-13 —
+  [research/2026-08-13-op-timing-restats.md](../docs/research/2026-08-13-op-timing-restats.md)**:
+  dit 51.6% / codec-decoder 38.7%〈convT 4 本だけで 23.2%〉・K-8 は同実測で棄却・
+  irodori はホスト律速側 ≈4 割）。
 - **DeBERTa 配布サイズ削減 3 波（2026-08-11）— 波 1 着地**: 発端は SBV2 の ONNX 版
   （hidden[-3] のみ抽出）が縮小の材料になるかという問い。実測の正本は
   [research/2026-08-11-deberta-size-recon.md](../docs/research/2026-08-11-deberta-size-recon.md)
