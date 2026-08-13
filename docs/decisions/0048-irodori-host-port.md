@@ -91,3 +91,15 @@ golden）は `IrodoriGenerateRequest.initialNoise`（再現・検証用と明記
 - 空 caption / 参照なしのゼロ短絡・平均トークン前置・banker 丸めなどホスト残置の全式は
   `packages/models/src/irodori/host/`（純関数・Math.fround 逐次）に集約し、値は exporter の
   golden（`irodori_tokenizer.py` / `irodori_pipeline.py`）が固定する。
+- **2026-08-13 追記: caption の前処理は strip のみ（上流契約の復元 — 外部レビュー P0-2 の
+  消化）**。上流 `_synthesize` は text にだけ `normalize_text` を掛け、caption は
+  `str(...).strip()` のみ。移植は当初 caption にも正規化を掛けており、外側括弧の剥がし・
+  NFKC・記号削除のぶん conditioning が黙って別物になっていた（TS `packCaptionIds` / Python
+  `_packed_caption_ids` へ分離して修正）。**Python parity/golden も同じ前処理を共有していた
+  ため恒真化しており検出できなかった** — 教訓として、上流突合の caption 条件は実装の作った
+  列を渡し直さず**上流の入口（`caption_tokenizer.batch_encode`）から独立生成**し、ホスト列
+  との一致を常設門で実測する形へ改めた（`irodori_pipeline.py` の caption 突合）。正規化感受
+  caption 6 ケースの parity fixture（strip 経路と normalize 経路の id 列が**違う**ことまで
+  門が見る）を追加。既存 golden の caption は全て正規化に無感（実測でバイト不変を確認済み —
+  無感でなくなったら再 export が要る、をテストが固定する）。NOTE: text 側の突合は実装の列を
+  渡す形のまま = 同型の恒真が残る（既知の非対称・独立化は後続候補）。

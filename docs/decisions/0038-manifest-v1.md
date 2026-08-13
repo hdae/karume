@@ -186,9 +186,10 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   `"<component>.<extra>"`・`FileRef = {path, size, sha256}`・path で一意化済み）—
   `fetchHfFiles` の files 引数へそのまま渡せる形。preset 省略は `defaultPreset`。
 - **キャッシュ名前空間は hub が必ず明示**する（`karume/1`）。ライブラリ既定名（他コードと
-  共有）は使わない。`Authorization` を伴う取得は別名前空間（`karume/1:auth`）へ隔離し、
-  gated 資産が無認証経路のキャッシュヒットに供されないことを契約とする。`hubUrl` は
-  manifest からは与えられない（アプリが明示指定した場合のみ有効）。
+  共有）は使わない。`Authorization` を伴う取得は **credential ごと**の別名前空間
+  （`karume/1:auth:<Authorization 値の sha256 先頭 16 hex>` — 2026-08-13 追記参照）へ隔離し、
+  gated 資産が無認証経路にも**別 credential の写し**にもキャッシュヒットで供されないことを
+  契約とする。`hubUrl` は manifest からは与えられない（アプリが明示指定した場合のみ有効）。
 - **進捗とキャンセル**: 進捗総量は content-length ではなく manifest の `size` 合計（path
   一意化後）から算出。`AbortSignal` を全取得へ透過する。キャッシュヒットの sha256 検証中
   （3.7GB で数秒）は `verifying` フェーズとして進捗イベントに出す（無言のハングにしない）。
@@ -448,3 +449,12 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   他コードの名前空間には触らない — 認証側だけ残すと gated 資産の写しが端末に残る。1 つでも
   実在して消えたら `true`。`caches` 省略時は `globalThis.caches` を使い、Cache Storage が無い
   環境（非セキュアオリジン等）は fail loudly（「消したつもり」を作らない）。
+- 2026-08-13: **認証キャッシュを credential ごとに分離**（外部レビュー HUB-004 の消化）。
+  従来の隔離は `Authorization` の**有無**だけで名前空間を選んでおり、下層（fetch-cache）の
+  キーが URL のみのため、token A で埋めた `karume/1:auth` に token B の同一 URL 要求が
+  ヒットし得た（権限の違う 2 人が同じ端末を使う場面で gated 資産が漏れる）。現行は
+  `karume/1:auth:<Authorization 値の sha256 先頭 16 hex>`（生 credential は名前に出さない —
+  CacheStorage の名前は列挙可能）。`clearHubCache` は名前が事前列挙できなくなったため
+  `CacheStorage.keys()` から `karume/1` 完全一致 + `karume/1:` 始まりを拾って全削除する
+  （旧スキーム `karume/1:auth` の残骸も対象）。旧名前空間の写しは新コードから読まれず、
+  gated 資産が 1 回だけ再ダウンロードになる。

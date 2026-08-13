@@ -359,6 +359,13 @@ DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-e
 すると合流者も巻き添えで落ちる）。同一資産を並行に取る複数の `fetchAssets` では、キャンセルは
 この粒度でしか働かない（ADR 0038 §5）。単一呼び出しの abort は全ワーカーへ正しく透過する。
 
+## `karume dist` はディスクピークが配布形の約 2 倍（staging→swap の代償）
+
+組み立ては staging ディレクトリへ全て作ってから rename で据える（ADR 0052 — 途中の故障で
+既存の配布形を壊さないための by-design）。swap の瞬間まで新旧ツリーが併存するため、出力先の
+ファイルシステムには配布形サイズの約 2 倍の空きが要る。据え替え後は `.staging` / `.old` とも
+残らない。
+
 ## exporter CLI: `karume export` はリポジトリの作業ツリー専用（インストール版では動かない）
 
 export の台本 `export_anima.py` はパッケージ外のリポ直下スクリプトで wheel に入らず
