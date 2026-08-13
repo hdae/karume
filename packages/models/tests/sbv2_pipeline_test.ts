@@ -359,3 +359,47 @@ Deno.test("toSessionOptions: 3 キーを 1 つずつ写す（未指定は欄ご�
   const mapped = toSessionOptions({ linearCompute: "i8a8" }) as Record<string, unknown>;
   assertEquals(Object.keys(mapped), ["linearCompute"]);
 });
+
+// ---- 資産 JSON の decode（不正 UTF-8 を黙って置換しない）------------------
+//
+// `assetJson` は `openSbv2State` の中で IR コンテナ 3 本を開いた**後**に来るので、
+// `fromAssets` 経由では届かない（合成 IR コンテナを組む器が `tests/helpers/` に無い）。
+// 門を直接叩く。
+
+/** JSON としては閉じているが、文字列値に不正 UTF-8（0xff）を 1 バイト混ぜた資産。 */
+const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
+  Uint8Array.from([
+    ...new TextEncoder().encode('{"unkId":'),
+    0x22,
+    0xff,
+    0x22,
+    ...new TextEncoder().encode("}"),
+  ]);
+
+Deno.test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSON 段まで進まない）", () => {
+  const broken = brokenUtf8Asset();
+  // 前提の固定: 既定の TextDecoder は 0xff を U+FFFD へ置換するので、置換して読むと
+  // **内容の違う valid JSON** が黙って通ってしまう。塞いだのはこの経路。
+  assertEquals(
+    JSON.parse(new TextDecoder().decode(broken)),
+    { unkId: "�" },
+    "置換 decode が valid JSON にならない前提が崩れた（このテストの主題が消える）",
+  );
+  assertThrows(
+    () => assetJson({ tokenizer: broken }, "tokenizer"),
+    Error,
+    "sbv2: 資産 'tokenizer' が UTF-8 として読めない",
+  );
+});
+
+Deno.test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（正常域は不変）", () => {
+  const truncated = new TextEncoder().encode('{"unkId":');
+  assertThrows(
+    () => assetJson({ symbols: truncated }, "symbols"),
+    Error,
+    "sbv2: 資産 'symbols' が JSON として読めない",
+  );
+  // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
+  const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
+  assertEquals(assetJson({ symbols: valid }, "symbols"), { unkId: 0, space: "あ" });
+});

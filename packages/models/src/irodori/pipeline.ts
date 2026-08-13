@@ -295,11 +295,25 @@ const assetBuffer = (
   return bytes.buffer;
 };
 
-const assetJson = (
+/**
+ * MUST: `fatal: true` で decode する。既定の TextDecoder は不正 UTF-8 を U+FFFD へ黙って
+ * 置換するので、壊れたバイト列が「内容の違う valid JSON」として通ってしまう（hub の
+ * manifest・anima tokenizer・safetensors ヘッダと同じ流儀で fail loudly）。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
+ * コンテナ 8 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ */
+export const assetJson = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
 ): unknown => {
-  const text = new TextDecoder().decode(assetBuffer(assets, key));
+  const buffer = assetBuffer(assets, key);
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  } catch (cause) {
+    throw new Error(`irodori: 資産 '${key}' が UTF-8 として読めない`, { cause });
+  }
   try {
     return JSON.parse(text);
   } catch (cause) {

@@ -11,10 +11,12 @@
 //    初めて資産へ触る（上の対偶）
 // の 2 つが噛み合って、門の順序そのものを縛る。グラフ宣言との 12 点突合はこの `assetBuffer` の
 // さらに後段なので、合成 IR コンテナを組む器（`tests/helpers/` に無い）が要る — ここでは扱わない。
+// 資産 JSON の decode 門（`assetJson`）も同じ理由で `fromAssets` からは届かないので、末尾の 2 本
+// だけは**門を直接叩く**。
 
-import { assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
+import { assetJson, IrodoriPipeline } from "../src/irodori/pipeline.ts";
 
 const FILE = {
   path: "dit/model.f32.safetensors",
@@ -161,4 +163,44 @@ Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触
     Error,
     "資産 'backbone' が無い",
   );
+});
+
+// ---- 資産 JSON の decode（不正 UTF-8 を黙って置換しない）------------------
+
+/** JSON としては閉じているが、文字列値に不正 UTF-8（0xff）を 1 バイト混ぜた資産。 */
+const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
+  Uint8Array.from([
+    ...new TextEncoder().encode('{"unkId":'),
+    0x22,
+    0xff,
+    0x22,
+    ...new TextEncoder().encode("}"),
+  ]);
+
+Deno.test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSON 段まで進まない）", () => {
+  const broken = brokenUtf8Asset();
+  // 前提の固定: 既定の TextDecoder は 0xff を U+FFFD へ置換するので、置換して読むと
+  // **内容の違う valid JSON** が黙って通ってしまう。塞いだのはこの経路。
+  assertEquals(
+    JSON.parse(new TextDecoder().decode(broken)),
+    { unkId: "�" },
+    "置換 decode が valid JSON にならない前提が崩れた（このテストの主題が消える）",
+  );
+  assertThrows(
+    () => assetJson({ tokenizer: broken }, "tokenizer"),
+    Error,
+    "irodori: 資産 'tokenizer' が UTF-8 として読めない",
+  );
+});
+
+Deno.test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（正常域は不変）", () => {
+  const truncated = new TextEncoder().encode('{"unkId":');
+  assertThrows(
+    () => assetJson({ tokenizer: truncated }, "tokenizer"),
+    Error,
+    "irodori: 資産 'tokenizer' が JSON として読めない",
+  );
+  // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
+  const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
+  assertEquals(assetJson({ tokenizer: valid }, "tokenizer"), { unkId: 0, space: "あ" });
 });
