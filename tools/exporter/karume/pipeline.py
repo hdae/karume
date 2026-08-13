@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import torch
 
@@ -59,7 +61,14 @@ def export_to_file(
     `weight_scales` は i8 のときの per-channel scale 台帳（`quantize.fake_quant_int8` の戻り）。
 
     MUST: 書き出しの直後に verify_model を通す — 「書けたが読めない」ファイルを
-    配布物として残さないための門（ADR 0005 の fail loudly 規律）。
+    配布物として残さないための門（ADR 0005 の fail loudly 規律）。門を実効にするため、
+    書き出しと検証は**同じディレクトリの一時ファイル**に対して行い、verify が通って
+    はじめて `os.replace` で `path` へ差し替える（同一ディレクトリなので置換は原子的）。
+    書き出しか検証が落ちたときは一時ファイルを捨て、既存の `path` は 1 バイトも変えない
+    — 直接 truncate すると「再エクスポートに失敗した」だけで手元の正常な配布物が消える。
+
+    NOTE: この原子性はここの層のもの。`emit.write_model` を直接呼ぶ経路（検証を挟まない
+    書き出し）は原子化の外で、渡された path をその場で truncate する。
     """
     graph, tensors = export_module(
         module,
@@ -68,5 +77,14 @@ def export_to_file(
         symbol_names=symbol_names,
         preserved=preserved,
     )
-    write_model(path, graph, tensors, weight_dtype=weight_dtype, weight_scales=weight_scales)
-    return verify_model(path)
+    final = Path(path)
+    # 一意 suffix — 同じ final を狙う別プロセス / 別ターゲットの一時ファイルと衝突させない。
+    staged = final.with_name(f"{final.name}.{uuid4().hex}.partial")
+    try:
+        write_model(staged, graph, tensors, weight_dtype=weight_dtype, weight_scales=weight_scales)
+        verified = verify_model(staged)
+        os.replace(staged, final)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    return verified
