@@ -6,7 +6,8 @@
  * - revision は**セッションあたり 1 回だけ**解決し、manifest も全ファイルも同一 commit SHA に
  *   固定して取得する（可変 ref のまま複数回解決すると manifest と重みが別コミットから来る）。
  * - キャッシュ名前空間は必ず明示（`karume/1`）。`Authorization` を伴う取得は
- *   `karume/1:auth` へ隔離する（gated 資産を無認証経路のヒットに供さない）。
+ *   `karume/1:auth:<credential の sha256 先頭 16 hex>` へ隔離する（gated 資産を無認証経路の
+ *   ヒットに供さず、かつ別 credential の写しにも供さない）。
  * - 同時取得は 4 本まで。`AbortSignal` は全取得へ透過。
  * - 進捗総量は content-length ではなく manifest の `size` 合計（path 一意化後）。
  */
@@ -25,8 +26,8 @@ import { type ByteBudget, createGuardedFetch } from "./transport.ts";
 
 /** 専用キャッシュ名前空間（ライブラリ既定名は他コードと共有されるため使わない）。 */
 const CACHE_NAMESPACE = "karume/1";
-/** `Authorization` 付き取得の隔離先。 */
-const AUTH_CACHE_NAMESPACE = "karume/1:auth";
+/** `Authorization` 付き取得の隔離先の前置き（この後ろに credential 由来の suffix が付く）。 */
+const AUTH_CACHE_PREFIX = `${CACHE_NAMESPACE}:auth:`;
 /** 同時取得数（数十コンポーネントの manifest で接続と RAM を破綻させない）。 */
 const CONCURRENCY = 4;
 
@@ -49,7 +50,7 @@ export type CacheDiagnostic = {
 
 export type LoadManifestOptions = {
   readonly signal?: AbortSignal;
-  /** `Authorization` 等。付けた取得は認証専用のキャッシュ名前空間へ隔離される。 */
+  /** `Authorization` 等。付けた取得は credential ごとの認証専用キャッシュ名前空間へ隔離される。 */
   readonly headers?: HeadersInit;
   /**
    * cache I/O 失敗の通知先。無指定だと「毎起動フル再 DL が黙って常態化」するため、
@@ -88,11 +89,26 @@ export type FetchAssetsOptions = LoadManifestOptions & {
   readonly onProgress?: (progress: AssetProgress) => void;
 };
 
-const hasAuthorization = (headers?: HeadersInit): boolean =>
-  headers !== undefined && new Headers(headers).has("authorization");
+/**
+ * 取得に使うキャッシュ名前空間。
+ *
+ * MUST: 認証付きは credential ごとに分ける — 下層のキャッシュキーは URL のみなので、名前が
+ * `Authorization` の**有無**だけだと token A で埋めた写しに token B の同一 URL 要求がヒットする
+ * （権限の違う 2 人が同じ端末を使う場面で gated 資産が漏れる）。名前には生の credential を出さず
+ * sha256 の先頭 16 hex だけを載せる（CacheStorage の名前は列挙可能なため）。
+ */
+const cacheNameFor = async (headers?: HeadersInit): Promise<string> => {
+  const authorization = headers === undefined
+    ? undefined
+    : new Headers(headers).get("authorization") ?? undefined;
+  if (authorization === undefined) return CACHE_NAMESPACE;
+  const digest = await sha256Hex(new TextEncoder().encode(authorization));
+  return `${AUTH_CACHE_PREFIX}${digest.slice(0, 16)}`;
+};
 
-const cacheNameFor = (headers?: HeadersInit): string =>
-  hasAuthorization(headers) ? AUTH_CACHE_NAMESPACE : CACHE_NAMESPACE;
+/** karume 自身の名前空間か（無認証本体と `karume/1:` 配下の認証隔離すべて）。 */
+const isHubCacheName = (name: string): boolean =>
+  name === CACHE_NAMESPACE || name.startsWith(`${CACHE_NAMESPACE}:`);
 
 const requestInit = (headers?: HeadersInit, signal?: AbortSignal): RequestInit => ({
   ...(headers === undefined ? {} : { headers }),
@@ -190,10 +206,12 @@ export const loadManifest = async (
           `（${where} = ${actual} — repo ${ref.repo} @ ${revisionSha}）`,
       ),
   };
+  // 名前空間の解決は headers が固定である入口で 1 回だけ（digest は非同期）。
+  const cacheName = await cacheNameFor(options.headers);
   let bytes: Uint8Array;
   try {
     bytes = await fetchHfFile(target, { path: MANIFEST_FILENAME }, {
-      cacheName: cacheNameFor(options.headers),
+      cacheName,
       init: requestInit(options.headers, options.signal),
       fetch: createGuardedFetch(options.fetch ?? globalThis.fetch, new Map([[url, budget]])),
       ...(options.caches === undefined ? {} : { caches: options.caches }),
@@ -284,7 +302,8 @@ export const fetchAssets = async (
     ? failure.signal
     : AbortSignal.any([failure.signal, options.signal]);
   const guarded = createGuardedFetch(options.fetch ?? globalThis.fetch, budgets);
-  const cacheName = cacheNameFor(options.headers);
+  // 名前空間の解決は headers が固定である入口で 1 回だけ（digest は非同期）。
+  const cacheName = await cacheNameFor(options.headers);
   const bytesByPath = new Map<string, Uint8Array<ArrayBuffer>>();
 
   const fetchOne = async (ref: FileRef): Promise<void> => {
@@ -383,10 +402,12 @@ export const fetchAssets = async (
 };
 
 /**
- * karume が使うキャッシュ名前空間を**両方**消す（無認証 `karume/1` と認証隔離 `karume/1:auth`）。
- * 「モデルを消して容量を空ける」に対応する面で、他コードの名前空間には触らない。
+ * karume が使うキャッシュ名前空間を**全て**消す（無認証 `karume/1` と、credential ごとに
+ * 分かれた認証隔離 `karume/1:auth:*`）。認証側の名前は credential 由来で事前に列挙できないため
+ * `CacheStorage.keys()` から拾う。「モデルを消して容量を空ける」に対応する面で、他コードの
+ * 名前空間には触らない。
  *
- * MUST: 認証側だけ残さない — gated 資産の写しが端末に残り続ける。
+ * MUST: 認証側を 1 つも残さない — gated 資産の写しが端末に残り続ける。
  *
  * @returns 少なくとも 1 つが実在して消えたら `true`（元から 1 つも無ければ `false`）。
  */
@@ -402,8 +423,7 @@ export const clearHubCache = async (
         "（options.caches で明示的に渡す）",
     );
   }
-  const deleted = await Promise.all(
-    [CACHE_NAMESPACE, AUTH_CACHE_NAMESPACE].map((name) => storage.delete(name)),
-  );
+  const names = (await storage.keys()).filter(isHubCacheName);
+  const deleted = await Promise.all(names.map((name) => storage.delete(name)));
   return deleted.includes(true);
 };

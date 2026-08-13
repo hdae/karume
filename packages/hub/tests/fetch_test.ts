@@ -237,8 +237,46 @@ Deno.test("fetchAssets: Authorization 付き取得は別のキャッシュ名前
     caches,
     headers: { authorization: "Bearer hf_token" },
   });
-  assertEquals([...caches.namespaces.keys()], ["karume/1", "karume/1:auth"]);
+  const names = [...caches.namespaces.keys()];
+  assertEquals(names.length, 2);
+  assertEquals(names[0], "karume/1");
+  assert(names[1].startsWith("karume/1:auth"), `${names[1]} が認証隔離の名前空間でない`);
+  assert(!names[1].includes("hf_token"), `${names[1]} に生の credential が出ている`);
   assert(authed.calls.length > 0, "無認証キャッシュのヒットに供されてはならない");
+});
+
+Deno.test("fetchAssets: credential が違えば同じ URL でもキャッシュを共有しない", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded } = await load({ files: serveAll() }, caches);
+  const files = resolveFiles(loaded.manifest);
+
+  const tokenA = createMockFetch({ files: serveAll() });
+  await fetchAssets(loaded, files, {
+    fetch: tokenA.fetch,
+    caches,
+    headers: { authorization: "Bearer token-A" },
+  });
+  assert(tokenA.calls.length > 0, "そもそも取得していない");
+
+  const tokenB = createMockFetch({ files: serveAll() });
+  await fetchAssets(loaded, files, {
+    fetch: tokenB.fetch,
+    caches,
+    headers: { authorization: "Bearer token-B" },
+  });
+  assertEquals(
+    tokenB.calls.length,
+    tokenA.calls.length,
+    "別 credential が token A の写しにヒットしてはならない",
+  );
+
+  const again = createMockFetch({ files: serveAll() });
+  await fetchAssets(loaded, files, {
+    fetch: again.fetch,
+    caches,
+    headers: { authorization: "Bearer token-A" },
+  });
+  assertEquals(again.calls, [], "同一 credential の再要求はキャッシュに当たる");
 });
 
 Deno.test("fetchAssets: sha256 の食い違いは IntegrityError（文脈と利用可能ラベルつき）", async () => {
@@ -363,6 +401,41 @@ Deno.test("clearHubCache: 認証側だけ残っていても消して true を返
   const caches = await populated("karume/1:auth");
   assertEquals(await clearHubCache({ caches }), true, "gated 資産の写しを残さない");
   assertEquals([...caches.namespaces.keys()], []);
+});
+
+Deno.test("clearHubCache: credential ごとの認証名前空間も残さず消す", async () => {
+  const caches = await populated(
+    "karume/1",
+    "karume/1:auth:0123456789abcdef",
+    "karume/1:auth:fedcba9876543210",
+    "other/1",
+  );
+  assertEquals(await clearHubCache({ caches }), true);
+  assertEquals([...caches.namespaces.keys()], ["other/1"]);
+});
+
+Deno.test("clearHubCache: 実際に埋まった無認証 / 認証の名前空間を両方消す", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll() }, caches);
+  const files = resolveFiles(loaded.manifest);
+  await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
+  await fetchAssets(loaded, files, {
+    fetch: mock.fetch,
+    caches,
+    headers: { authorization: "Bearer hf_token" },
+  });
+  assertEquals(caches.namespaces.size, 2, "無認証と認証で 2 つ埋まっている");
+
+  assertEquals(await clearHubCache({ caches }), true);
+  assertEquals([...caches.namespaces.keys()], []);
+
+  const after = createMockFetch({ files: serveAll() });
+  await fetchAssets(loaded, files, {
+    fetch: after.fetch,
+    caches,
+    headers: { authorization: "Bearer hf_token" },
+  });
+  assert(after.calls.length > 0, "消した後の認証取得が network に出ていない");
 });
 
 Deno.test("clearHubCache: 消すものが 1 つも無ければ false", async () => {
