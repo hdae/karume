@@ -72,10 +72,11 @@ export const unigramTokenize = (model: UnigramModel, cps: readonly number[]): nu
 /**
  * 融合済みの未知断片 → id 列。
  *
- * NOTE: 「融合してから断片**全体**をバイト分解する」という境界は暫定。正本（HF）の実挙動は
- * golden で確定させる予定で、もし「ノード単位に分解してから融合しない」が正なら**ここだけ**を
- * 差し替えれば済むよう、展開点を 1 関数に閉じてある（{@link unigramTokenize} 側の融合ループは
- * byte_fallback の有無に依らず同じ形）。
+ * NOTE: 「融合してから断片**全体**をバイト分解する」という境界は、実 HF tokenizer 由来の
+ * parity fixture（`fixtures/irodori-text/parity.json` の `emoji-byte-fallback-pair` —
+ * 語彙外絵文字 2 連で fuse × byte_fallback の相互作用を固定）で確定済み。将来 HF 側の挙動が
+ * 変わった場合に**ここだけ**を差し替えれば済むよう、展開点を 1 関数に閉じてある
+ * （{@link unigramTokenize} 側の融合ループは byte_fallback の有無に依らず同じ形）。
  */
 const expandUnknown = (model: UnigramModel, text: string): number[] => {
   const base = model.byteBaseId;

@@ -99,7 +99,8 @@
   家族中立共有層へ抽出・パリティ fixture は git 追跡・NFKC は全 cp 掃引の両方向門）
   ②IrodoriPipeline（fromAssets 無 Session・dit のみ 1 Session 40〜100 forward・pipelineConfig
   20 欄が数の正本で対応外モードはパース時拒否・seed 上流非互換は `initialNoise` 注入口で解決）
-  ③dist `karume-irodori-v4-small`（f32 3.07GB・組み立て門はグラフ宣言と 12 点 + mask 派生
+  ③dist `karume-irodori-v4-small`（f32 3.07GB〈codec 前 6 グラフ時点 — 現行 census は
+  3.44GB・ADR 0050〉・組み立て門はグラフ宣言と 12 点 + mask 派生
   次元 S+1519 突合）④E2E latent 門 4 本（S/forwards 完全一致・z は Z_ATOL 5e-3 = 素実測
   7.9e-4 の 6.3 倍・実効値 drift 門付き）。ホスト経路の recon 正本 =
   [research/2026-08-11-irodori-host-recon.md](../docs/research/2026-08-11-irodori-host-recon.md)。
