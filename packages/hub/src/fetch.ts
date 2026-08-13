@@ -72,8 +72,16 @@ export type LoadedManifest = {
   readonly manifest: Manifest;
 };
 
-/** 進捗のフェーズ。`verifying` は sha256 照合中（3.7GB で数秒 — 無言のハングにしない）。 */
-export type AssetPhase = "downloading" | "verifying";
+/**
+ * 進捗のフェーズ。`verifying` は sha256 照合中（3.7GB で数秒 — 無言のハングにしない）、
+ * `complete` は 1 ファイルの終端（検証を通って bytes が確定した点）。
+ *
+ * MUST: 1 ファイルの phase は `downloading`* → `verifying` → `complete` の順にだけ進み、
+ * 逆行しない（`complete` はファイルごとに 1 回だけ・以降そのファイルの通知は出ない）。
+ * 例外は破損キャッシュの self-heal で、`verifying` が拒否した後に network から取り直すため
+ * この 1 巡が最初からやり直しになる（`complete` が終端であることは変わらない）。
+ */
+export type AssetPhase = "downloading" | "verifying" | "complete";
 
 export type AssetProgress = {
   readonly phase: AssetPhase;
@@ -356,7 +364,7 @@ export const fetchAssets = async (
         cacheName,
         init: requestInit(options.headers, signal),
         fetch: guarded,
-        // network 側だけ発火する（キャッシュヒットは verifying → 完了の 2 点で進む）。
+        // network 側だけ発火する（キャッシュヒットは verifying → complete の 2 点で進む）。
         // `loaded` が `size` を超えないことは受信バイトの門（transport.ts）が保証する。
         onProgress: (progress) => {
           received.set(ref.path, progress.loaded);
@@ -377,7 +385,7 @@ export const fetchAssets = async (
     }
     bytesByPath.set(ref.path, assertTightView(bytes, ref.path));
     received.set(ref.path, ref.size);
-    emit("downloading", ref.path);
+    emit("complete", ref.path);
   };
 
   let next = 0;

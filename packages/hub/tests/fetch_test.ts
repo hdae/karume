@@ -195,6 +195,83 @@ Deno.test("fetchAssets: 進捗総量は manifest の size 合計（path 一意�
   assertEquals(events[events.length - 1].loaded, expectedTotal, "最後は総量に到達する");
 });
 
+/** phase の進む向き（大きいほど後）。 */
+const PHASE_RANK: Record<AssetPhase, number> = { downloading: 0, verifying: 1, complete: 2 };
+
+/** path ごとの phase 列（複数ファイルの進捗は交錯して届くので path で束ね直す）。 */
+const phasesByPath = (events: readonly AssetProgress[]): Map<string, AssetPhase[]> => {
+  const byPath = new Map<string, AssetPhase[]>();
+  for (const event of events) {
+    const phases = byPath.get(event.path) ?? [];
+    phases.push(event.phase);
+    byPath.set(event.path, phases);
+  }
+  return byPath;
+};
+
+const assertMonotonic = (phases: readonly AssetPhase[], path: string): void => {
+  for (let index = 1; index < phases.length; index += 1) {
+    assert(
+      PHASE_RANK[phases[index]] >= PHASE_RANK[phases[index - 1]],
+      `${path}: ${phases[index - 1]} → ${phases[index]} は phase の逆行`,
+    );
+  }
+  assertEquals(phases[phases.length - 1], "complete", `${path}: 終端が complete でない`);
+  assertEquals(
+    phases.filter((phase) => phase === "complete").length,
+    1,
+    `${path}: complete はファイルごとに 1 回だけ`,
+  );
+};
+
+Deno.test("fetchAssets: network 取得の phase は downloading → verifying → complete と単調に進む", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll() }, caches);
+  const files = resolveFiles(loaded.manifest);
+  const events: AssetProgress[] = [];
+  await fetchAssets(loaded, files, {
+    fetch: mock.fetch,
+    caches,
+    onProgress: (progress) => events.push(progress),
+  });
+
+  const byPath = phasesByPath(events);
+  assertEquals(
+    new Set(byPath.keys()),
+    new Set(Object.values(files).map((ref) => ref.path)),
+    "取得した全 path が進捗に現れる",
+  );
+  for (const [path, phases] of byPath) {
+    assert(phases.includes("downloading"), `${path}: network 取得なのに downloading が無い`);
+    assertMonotonic(phases, path);
+  }
+});
+
+Deno.test("fetchAssets: キャッシュヒットの phase 列は verifying → complete の 2 点だけ", async () => {
+  const caches = new MemoryCacheStorage();
+  const first = await load({ files: serveAll() }, caches);
+  const files = resolveFiles(first.loaded.manifest);
+  await fetchAssets(first.loaded, files, { fetch: first.mock.fetch, caches });
+
+  const second = createMockFetch({ files: serveAll() });
+  const events: AssetProgress[] = [];
+  await fetchAssets(first.loaded, files, {
+    fetch: second.fetch,
+    caches,
+    onProgress: (progress) => events.push(progress),
+  });
+  assertEquals(second.calls, [], "キャッシュヒットは network に出ない");
+  const byPath = phasesByPath(events);
+  assert(byPath.size > 0, "進捗が 1 度も出ない");
+  for (const [path, phases] of byPath) {
+    assertEquals(
+      phases,
+      ["verifying", "complete"],
+      `${path}: DL していないのに downloading が出た`,
+    );
+  }
+});
+
 Deno.test("fetchAssets: 同時取得は 4 本までに絞る", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
