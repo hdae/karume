@@ -319,6 +319,21 @@ DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-e
   パイプライン層で fail loudly**（グラフ側は 4 変種の差をマスク 1 本に還元してしまうので、
   ここで拒まないと黙って別のモデルを回すことになる）。
 
+## Irodori DiT ループの GPU 常駐経路: denormal 出力の FTZ・診断の縮退・計測時はホスト経路
+
+DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-and-fence.md) — CFG 合成
+と Euler 更新を GPU の elementwise で実行・フェンスは batch 1 本）。by-design の制約 3 点:
+
+- **最終出力がちょうど denormal（|x| < 2⁻¹²⁶）になる要素は、ホスト実装が denormal を保つのに
+  対し GPU シェーダ算術が同符号の ±0 へ潰しうる**（parity probe 実測: 差分はこの機序のみ・
+  fma 収縮 0・符号付きゼロ一致）。実データの潜在／速度場（単位分散級）では実質到達しない
+  領域で、参照ケースの WAV sha256 門 2 本は digest 完全一致 — 門が恒久の検出器。
+- **常駐経路では `lastRun`（run アリーナ実績）と `lastRunTiming` が `undefined`**（enqueue は
+  アリーナも計測窓も作らない）。`planBacking` / `submit` / `lastRunPrepared` は従来どおり。
+- **gpuTiming 有効の device では従来のホストループへ分岐**（batch と計測は非両立 —
+  `beginBatch` が拒否）。出力は同一 digest（実測）だが壁時計は倍近くになる。op 別内訳を
+  採るとき以外は計測を有効にしないこと。
+
 ## Irodori パイプライン（ホスト層）: 上流の任意ノブは既定値相当のみ・参照音声は 48kHz
 
 `IrodoriPipeline` は第 3〜4 波の範囲（ADR [0048](decisions/0048-irodori-host-port.md) /

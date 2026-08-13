@@ -91,3 +91,24 @@ pass 3 呼び出しだけのため）。EG 側も 0.673µs で同水準。
 - **H-3（入力の内容アドレスキャッシュ）**: outside writeBuffer + createBuffer 実測
   0.13s × 傾き 0.8 ≈ 0.1s — 単独では小粒。H-5 の常駐化に併合するのが妥当。
 - **K-7**: 上記 §4 — 棄却水準（裁定はユーザー — 台帳 K-7 行参照）。
+
+## 6. 追記（同日・波② H-5 + H-1 の検収）
+
+実装 = [ADR 0054](../decisions/0054-resident-loop-and-fence.md)（R1 `c90bd43` / M1
+`8ab141a` / H-1 `e339cc0`）。本ドキュメントと同一ドライバ（off モード・装置最小）・
+クールダウン規約・A/B で、§2/§3 のベースライン（`34a3e18` = K-4a 後）と同条件比較:
+
+| 対象                       | ベースライン |     波② 後（A / B） |      倍率 |
+| :------------------------- | -----------: | ------------------: | --------: |
+| EG bare per-run 壁         |      52.54ms | **28.15 / 28.60ms** | **×1.86** |
+| irodori voice-clone 生成壁 |      8,593ms | **4,896 / 4,860ms** | **×1.76** |
+
+- EG: 消えたフェンスは flush の onSubmittedWorkDone + arena 再 flush の **2 本**（予測は
+  H-1 素の価格差 12ms = 1 本ぶんだった — 実測 Δ24.2ms が床 ≈11ms/本 × 2 と整合）。
+- irodori: DiT ループ 100 forward の run 境界（フェンス 3 本/run）が batch 1 本 +
+  read 1 本へ集約。壁 4.88s に対し全 GPU ≈4.2s — **ホスト律速からほぼ GPU 律速へ転換**
+  （次の桁は K-1 = DiT linear i8a8 と K-5 = masked online attention の GPU 側）。
+- ビット同一: WAV sha256 が検収全走で既存一致値 `e7846ac1…`・verify の WAV/PNG/golden 門
+  全て digest 不変（1070/0）。
+- 本日 3 波の累計（irodori voice-clone・gpuTiming OFF 換算）: K-10 前の素の壁は未計測のため
+  GPU 側で言うと 7.36 →（K-10）5.82 →（K-4a）4.23s、壁は K-4a 後 8.59 →（波②）4.88s。
