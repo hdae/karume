@@ -17,6 +17,10 @@
  * （`openModel` = ヘッダ解析のみ）までで、GPU 常駐は {@link Sbv2Pipeline.generate} の中で
  * 段ごとに張っては畳む。3 グラフ（text_encoder 334MB / front / voice）を同時に生かさない。
  *
+ * MUST: この段取りは**公開 API 側でも**守る — `generate` は直列化鎖に載せ（並行呼び出しは
+ * 待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。載せないと、並行
+ * 呼び出し 2 本ぶんのグラフが同時常駐し、生成中の dispose が flush-before-destroy を破る。
+ *
  * ## MUST: 低精度ノブが効くのは front / voice だけ
  *
  * quant の `session` は front / voice の Session にだけ渡す。配布形の `text_encoder` は
@@ -86,6 +90,7 @@ import { durationsToFrames } from "./host/duration.ts";
 import { buildZp } from "./host/latent.ts";
 import { Randn } from "./host/random.ts";
 import { buildRelattnTables } from "./relattn-tables.ts";
+import { createOperationChain } from "../concurrency/serial.ts";
 
 /**
  * manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。
@@ -769,7 +774,13 @@ export const synthesizeSbv2 = async (
  */
 export class Sbv2Pipeline {
   readonly #state: Sbv2State;
-  #disposed = false;
+  /** generate と dispose の直列化鎖（モジュール doc の「1 本ずつ」を公開 API 側で守る）。 */
+  readonly #chain = createOperationChain();
+  /**
+   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
+   * 更新される派生状態になる）。
+   */
+  #disposal: Promise<void> | undefined;
 
   private constructor(state: Sbv2State) {
     this.#state = state;
@@ -826,26 +837,36 @@ export class Sbv2Pipeline {
    * テキストから音声 1 本を生成する。
    *
    * 同じ seed・同じノブなら同じ波形が出る（乱数もホストグルーも決定的 — `host/random.ts`）。
+   *
+   * 並行に呼ばれた場合は**待たされて順に**走る（グラフの同時常駐を作らない — モジュール doc）。
    */
   async generate(request: Sbv2GenerateRequest): Promise<GeneratedAudio> {
-    if (this.#disposed) throw new Error("Sbv2Pipeline: dispose 済みでは生成できない");
-    const { sampleRate, audio } = await synthesizeSbv2(this.#state, request);
-    return { sampleRate, data: audio };
+    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた生成まで
+    // 巻き添えで落ちる）。
+    if (this.#disposal !== undefined) {
+      throw new Error("Sbv2Pipeline: dispose 済みでは生成できない");
+    }
+    return await this.#chain(async () => {
+      const { sampleRate, audio } = await synthesizeSbv2(this.#state, request);
+      return { sampleRate, data: audio };
+    });
   }
 
   /**
    * 解放する。**内部で取得した GPU だけ**破棄する（`options.gpu` で渡された GpuContext は
-   * 呼び出し側の所有物なので触らない）。生成中の Session は段ごとに畳まれているので、
-   * ここで残っているものは無い。
+   * 呼び出し側の所有物なので触らない）。
+   *
+   * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
+   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
+   * 呼び出し側が「破棄済み」と見なして次へ進む）。
    */
-  dispose(): void {
-    if (this.#disposed) return;
-    this.#disposed = true;
-    closeSbv2State(this.#state);
+  dispose(): Promise<void> {
+    this.#disposal ??= this.#chain(() => closeSbv2State(this.#state));
+    return this.#disposal;
   }
 
-  /** `using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
-  [Symbol.dispose](): void {
-    this.dispose();
+  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.dispose();
   }
 }

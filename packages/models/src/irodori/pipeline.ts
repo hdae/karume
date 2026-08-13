@@ -30,6 +30,11 @@
  * 中で段ごとに張っては畳む。`backbone` だけで 1.26GB あるので、条件エンコーダと DiT を
  * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。
  *
+ * MUST: この段取りは**公開 API 側でも**守る — `generate` / `generateLatent` は直列化鎖に載せ
+ * （並行呼び出しは待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。
+ * 載せないと、並行呼び出し 2 本ぶんのグラフが同時常駐し、生成中の dispose が
+ * flush-before-destroy を破る。
+ *
  * ## NOTE: `codec_encoder` はタイル分割しない（decoder と非対称）
  *
  * 参照音声は 1 回の encode で流す。encoder の中間テンソルは 120 秒（T = 3000）で 1.47GB × 2 に
@@ -106,6 +111,7 @@ import {
 import { type CfgVariant, combineCfg, eulerStep, tSchedule } from "./host/sampler.ts";
 import { timestepEmbedding, timestepFrequencies } from "./host/t-embed.ts";
 import { findFlatteningPoint, trimmedSampleCount } from "./host/trim.ts";
+import { createOperationChain } from "../concurrency/serial.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const BACKBONE = "backbone";
@@ -1057,7 +1063,13 @@ const generateAudio = async (
  */
 export class IrodoriPipeline {
   readonly #state: IrodoriState;
-  #disposed = false;
+  /** generate / generateLatent と dispose の直列化鎖（「1 本ずつ」を公開 API 側で守る）。 */
+  readonly #chain = createOperationChain();
+  /**
+   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
+   * 更新される派生状態になる）。
+   */
+  #disposal: Promise<void> | undefined;
 
   private constructor(state: IrodoriState) {
     this.#state = state;
@@ -1113,35 +1125,48 @@ export class IrodoriPipeline {
    * テキストから波形 1 本を生成する（`encodeWav` へそのまま渡せる f32 モノラル）。
    *
    * 同じ seed・同じ要求なら同じ波形が出る（乱数もホストグルーも決定的 — `host/random.ts`）。
+   *
+   * 並行に呼ばれた場合は**待たされて順に**走る（グラフの同時常駐を作らない — モジュール doc）。
    */
   async generate(request: IrodoriGenerateRequest): Promise<IrodoriGeneratedAudio> {
-    if (this.#disposed) throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
-    return await generateAudio(this.#state, request);
+    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた生成まで
+    // 巻き添えで落ちる）。
+    if (this.#disposal !== undefined) {
+      throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
+    }
+    return await this.#chain(() => generateAudio(this.#state, request));
   }
 
   /**
    * テキストから latent 1 本を生成する（codec を回さない — latent 門と埋め込み用途の面）。
    *
-   * 同じ seed・同じ要求なら同じ latent が出る。
+   * 同じ seed・同じ要求なら同じ latent が出る。{@link IrodoriPipeline.generate} と**同じ鎖**に
+   * 載るので、混ぜて並行に呼んでも順に走る。
    */
   async generateLatent(request: IrodoriGenerateRequest): Promise<GeneratedLatent> {
-    if (this.#disposed) throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
-    return (await generateLatent(this.#state, request)).latent;
+    if (this.#disposal !== undefined) {
+      throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
+    }
+    return await this.#chain(async () => (await generateLatent(this.#state, request)).latent);
   }
 
   /**
    * 解放する。**内部で取得した GPU だけ**破棄する（`options.gpu` で渡された GpuContext は
-   * 呼び出し側の所有物なので触らない）。生成中の Session は段ごとに畳まれているので、
-   * ここで残っているものは無い。
+   * 呼び出し側の所有物なので触らない）。
+   *
+   * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
+   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
+   * 呼び出し側が「破棄済み」と見なして次へ進む）。
    */
-  dispose(): void {
-    if (this.#disposed) return;
-    this.#disposed = true;
-    if (this.#state.ownsGpu) this.#state.gpu.destroy();
+  dispose(): Promise<void> {
+    this.#disposal ??= this.#chain(() => {
+      if (this.#state.ownsGpu) this.#state.gpu.destroy();
+    });
+    return this.#disposal;
   }
 
-  /** `using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
-  [Symbol.dispose](): void {
-    this.dispose();
+  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.dispose();
   }
 }

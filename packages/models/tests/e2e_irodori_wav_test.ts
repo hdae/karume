@@ -355,9 +355,9 @@ Deno.test({
     // 参照音声は 48kHz mono PCM16。周波数が配布形と違えば `generate` が fail loudly（リサンプル
     // は持たない）ので、ここでは読むだけにする。
     const reference = decodeWav(referenceBytes as Uint8Array<ArrayBuffer>);
-    // `using` は [Symbol.dispose] 経由の解放をこの実 GPU 経路で検査する意図込み。3.3GB の資産を
-    // 2 度読まないよう、2 ケースは 1 本のパイプラインを共有する。
-    using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
+    // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
+    // 3.3GB の資産を 2 度読まないよう、2 ケースは 1 本のパイプラインを共有する。
+    await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
       model: MODEL,
       quant: QUANT,
     });

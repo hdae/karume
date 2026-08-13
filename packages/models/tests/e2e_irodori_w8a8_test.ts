@@ -227,7 +227,7 @@ Deno.test({
   name: `e2e(実GPU): w8a8 席の latent が w8 golden の判別帯に入る（参照 + caption あり）`,
   ignore: !RUNNABLE,
   fn: async () => {
-    using pipeline = await openPipeline();
+    await using pipeline = await openPipeline();
     await runCase(pipeline, "full", readMeta().cases["full"]);
   },
 });
@@ -236,7 +236,7 @@ Deno.test({
   name: `e2e(実GPU): 参照なし / caption 空でも w8a8 席が判別帯に入る`,
   ignore: !RUNNABLE,
   fn: async () => {
-    using pipeline = await openPipeline();
+    await using pipeline = await openPipeline();
     await runCase(pipeline, "no-ref", readMeta().cases["no-ref"]);
   },
 });
@@ -259,7 +259,7 @@ Deno.test({
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, QUANT);
       const observed: KeyCensus[] = [];
-      using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
+      await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
         gpu,
         model: MODEL,
         quant: QUANT,

@@ -91,7 +91,7 @@ console.log(
     ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}`,
 );
 const started = performance.now();
-using pipeline = await openPipeline();
+await using pipeline = await openPipeline();
 const image = await pipeline.generate({
   prompt,
   seed,

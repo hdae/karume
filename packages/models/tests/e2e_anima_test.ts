@@ -162,8 +162,8 @@ for (const { quant, resolution, sha256 } of REFERENCE) {
     fn: async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, quant);
-      // `using` は [Symbol.dispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-      using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
+      // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
+      await using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
       await assertReferencePng(label, pipeline, resolution, sha256);
     },
   });
@@ -224,7 +224,7 @@ Deno.test({
       try {
         await assertReferencePng("fromPretrained-512", pipeline, resolution, REFERENCE[1].sha256);
       } finally {
-        pipeline.dispose();
+        await pipeline.dispose();
       }
       const counts = new Map<string, number>();
       for (const component of observed) counts.set(component, (counts.get(component) ?? 0) + 1);

@@ -234,8 +234,8 @@ Deno.test({
     const defaults = assertReferenceKnobs(modelEntry(manifest));
     const assets = await loadLocalAssets(manifest);
     const started = performance.now();
-    // `using` は [Symbol.dispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-    using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
+    // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
+    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
       model: MODEL,
       quant: QUANT,
     });
@@ -285,7 +285,7 @@ Deno.test({
         }]),
       );
 
-    using pipeline = await open();
+    await using pipeline = await open();
 
     await t.step(
       "未知のスタイルは利用可能な一覧を添えて落ちる（既定へ黙って落ちない）",
@@ -339,7 +339,7 @@ Deno.test({
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest);
     const seen: { component: string; dispatches: number; ran: boolean; timed: boolean }[] = [];
-    using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
+    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
       model: MODEL,
       quant: QUANT,
       onRunDiagnostics: (component, diagnostics) =>

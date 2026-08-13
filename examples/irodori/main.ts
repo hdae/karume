@@ -116,7 +116,7 @@ console.log(
     `${caption === undefined ? "" : `\n          caption ${JSON.stringify(caption)}`}`,
 );
 const started = performance.now();
-using pipeline = await openPipeline();
+await using pipeline = await openPipeline();
 const audio = await pipeline.generate({
   text,
   seed,

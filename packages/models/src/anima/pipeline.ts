@@ -18,6 +18,11 @@
  * 開くのはコンテナ（`openModel` = ヘッダ解析のみ）までで、GPU 常駐は
  * {@link AnimaPipeline.generate} の中で段ごとに張っては畳む。
  *
+ * MUST: この段取りは**公開 API 側でも**守る — `generate` は直列化鎖に載せ（並行呼び出しは
+ * 待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。載せないと、並行
+ * 呼び出し 2 本ぶんのグラフが同時常駐して VRAM の前提が崩れ、生成中の dispose が
+ * flush-before-destroy を破る。
+ *
  * ## MUST: DiT は S 形・VAE は常時タイル（ADR 0038 §4）
  *
  * 配布される transformer は解像度を 1 つも持たない S 形だけで、VAE decoder は latent 64×64 の
@@ -82,6 +87,7 @@ import {
 import { parseRopeBase, type RopeBase, ropeWidth } from "./rope-base.ts";
 import { type AnimaTokenizers, createTokenizers } from "./text/tokenizer.ts";
 import { Randn } from "./random.ts";
+import { createOperationChain } from "../concurrency/serial.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const TEXT_ENCODER = "text_encoder";
@@ -421,7 +427,13 @@ type AnimaState = {
  */
 export class AnimaPipeline {
   readonly #state: AnimaState;
-  #disposed = false;
+  /** generate と dispose の直列化鎖（モジュール doc の「1 本ずつ」を公開 API 側で守る）。 */
+  readonly #chain = createOperationChain();
+  /**
+   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
+   * 更新される派生状態になる）。
+   */
+  #disposal: Promise<void> | undefined;
 
   private constructor(state: AnimaState) {
     this.#state = state;
@@ -556,9 +568,19 @@ export class AnimaPipeline {
    *
    * 同じ seed・同じノブなら同じ画素が出る（乱数も丸めもホスト側で決定的 — `random.ts` /
    * `sampler.ts`）。
+   *
+   * 並行に呼ばれた場合は**待たされて順に**走る（グラフの同時常駐を作らない — モジュール doc）。
    */
   async generate(request: AnimaGenerateRequest): Promise<GeneratedImage> {
-    if (this.#disposed) throw new Error("AnimaPipeline: dispose 済みでは生成できない");
+    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた生成まで
+    // 巻き添えで落ちる）。
+    if (this.#disposal !== undefined) {
+      throw new Error("AnimaPipeline: dispose 済みでは生成できない");
+    }
+    return await this.#chain(() => this.#generate(request));
+  }
+
+  async #generate(request: AnimaGenerateRequest): Promise<GeneratedImage> {
     const state = this.#state;
     const defaults = state.config.defaults;
     const steps = request.steps ?? defaults.steps;
@@ -739,17 +761,21 @@ export class AnimaPipeline {
 
   /**
    * 解放する。**内部で取得した GPU だけ**破棄する（`options.gpu` で渡された GpuContext は
-   * 呼び出し側の所有物なので触らない）。生成中の Session は段ごとに畳まれているので、
-   * ここで残っているものは無い。
+   * 呼び出し側の所有物なので触らない）。
+   *
+   * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
+   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
+   * 呼び出し側が「破棄済み」と見なして次へ進む）。
    */
-  dispose(): void {
-    if (this.#disposed) return;
-    this.#disposed = true;
-    if (this.#state.ownsGpu) this.#state.gpu.destroy();
+  dispose(): Promise<void> {
+    this.#disposal ??= this.#chain(() => {
+      if (this.#state.ownsGpu) this.#state.gpu.destroy();
+    });
+    return this.#disposal;
   }
 
-  /** `using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
-  [Symbol.dispose](): void {
-    this.dispose();
+  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.dispose();
   }
 }

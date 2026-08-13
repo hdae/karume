@@ -95,7 +95,7 @@ console.log(
     `       ${JSON.stringify(text)}`,
 );
 const started = performance.now();
-using pipeline = await openPipeline();
+await using pipeline = await openPipeline();
 const audio = await pipeline.generate({
   text,
   seed,
