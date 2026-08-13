@@ -681,9 +681,13 @@ class Converter:
                 f"（{' / '.join(sorted(set(_CONST_STORAGE.values())))} のみ）"
             )
         dtype = DTYPE_NAMES[data.dtype]
-        digest = hashlib.sha256(
-            json.dumps([str(data.dtype), list(data.shape)]).encode() + data.numpy().tobytes()
-        ).hexdigest()
+        # 逐次 update で食わせる（`tobytes()` の複製 + 連結の複製で定数 1 本ぶんの RAM を
+        # 2 度取らない）。食わせるバイト列は「宣言 JSON ‖ 生バイト」のまま**不変**なので
+        # digest は 1 ビットも変わらない。
+        hasher = hashlib.sha256()
+        hasher.update(json.dumps([str(data.dtype), list(data.shape)]).encode())
+        hasher.update(memoryview(data.numpy()).cast("B"))
+        digest = hasher.hexdigest()
         # MUST: 同一性キーは **full hexdigest**。名前用に短縮した 16 hex（64bit）を突合に
         # 使うと、衝突した 2 つの定数を実体比較なしで 1 本に畳む = 黙って別の値を共用した
         # グラフが出る。名前だけは従来どおり短縮形（IR の可読性）。
