@@ -8,6 +8,13 @@
 
 ## Active redesigns (in flight)
 
+- **性能波（2026-08-13・設計変更不要枠）— 消化完了**: 第 1 段の内訳再実測
+  （[research/2026-08-13-op-timing-restats.md](../docs/research/2026-08-13-op-timing-restats.md)
+  — **K-8 は実測で棄却**・K-10〈dacvae convT = irodori 全 GPU 23.2%〉起票）→ H-6
+  （`c950e76`・tiled VAE clone 層削除・PNG 門 4 本 sha 不変）→ L-6/L-4/L-5
+  （`e9880cc`/`de65a71`/`a9561c6`・exporter streaming 化と dist 配置前 plan — 出力バイト
+  不変を A/B + golden 27 本で証明・pytest 2625/3skip）。**裁定待ち**: K-10 採否・L-5 の
+  `(rel_path, size)` 前置フィルタ・H-5（反復状態 GPU 常駐）の API 設計案先出し。
 - **網羅レビュー（2026-08-12・モード B・HEAD `faef828`）— レビュー完了・修正波進行中**:
   掃引 24 + 敵対検証 13 レッグ。確定 E1 / W9 群は全て推奨案で裁定済み — 正本は
   `.claude/reviews/2026-08-12_faef828/SUMMARY.md`（裁定記録込み）。性能候補の判断台帳は
