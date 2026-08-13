@@ -310,11 +310,17 @@ const assertExtent = (size: number, where: string): number => {
  * 位置は束縛源にせず、束縛確定後に評価して実 shape と照合する。
  * MUST: 束縛の有無は `Object.hasOwn` のみで見る。`bindings[sym] !== undefined` は
  * Object.prototype 由来の `toString` 等が素通りし、以後の算術が黙って NaN 化する。
+ *
+ * @param deferredInputs shape を伴わない入力（常駐テンソル — バイト列と大きさしか持たない
+ *   ので、ホスト側に shape が無い）。これらは**束縛源にならず、照合もされない**: 宣言 shape は
+ *   他の入力か `seed` で決まった束縛から `planGraph` が解決し、実体の大きさとの突合は
+ *   executor が解決済み shape に対して行う。決まらないシンボルは従来どおり fail loudly。
  */
 export const bindSymbols = (
   graph: IrGraph,
   inputShapes: Readonly<Record<string, readonly number[]>>,
   seed: SymbolBindings = {},
+  deferredInputs?: ReadonlySet<string>,
 ): SymbolBindings => {
   const symbols = new Set(graph.symbols);
   // MUST: シンボル名を蓄積する器は null プロトタイプ。シンボルの文法（dims.ts の
@@ -334,11 +340,14 @@ export const bindSymbols = (
   }
 
   const declared = new Set(graph.inputs.map((spec) => spec.name));
-  for (const name of Object.keys(inputShapes)) {
+  // MUST: 遅延入力も「グラフの入力か」の検査を通す（素通りさせると、名前を間違えた常駐
+  // テンソルが黙って無視され、本来の入力は「渡されていない」で落ちる）。
+  for (const name of [...Object.keys(inputShapes), ...(deferredInputs ?? [])]) {
     if (!declared.has(name)) throw new ExecutionError(`'${name}' はグラフの入力ではない`);
   }
 
   for (const spec of graph.inputs) {
+    if (deferredInputs?.has(spec.name) === true) continue;
     if (!Object.hasOwn(inputShapes, spec.name)) {
       throw new ExecutionError(`入力 '${spec.name}' が渡されていない`);
     }
@@ -374,6 +383,7 @@ export const bindSymbols = (
 
   // 2 巡目: 数値次元も派生形も含めて宣言 shape を評価し直し、実入力と全一致を要求する。
   for (const spec of graph.inputs) {
+    if (deferredInputs?.has(spec.name) === true) continue;
     const resolved = resolveShape(spec.shape, bindings);
     const actual = inputShapes[spec.name];
     if (resolved.some((dim, index) => dim !== actual[index])) {

@@ -38,8 +38,9 @@ export class ArenaError extends Error {
 
 /**
  * 出力ストレージの usage。dispatch が書き、必要なら readback のため COPY_SRC を持つ。
- * MUST: transient slot の常駐バッファ（src/runtime/recipe.ts の slot backing）も**この定数**で
- * 作る。別立てにすると、同じ役割のバッファが 2 つの usage を持つ形になる。
+ * MUST: transient slot の常駐バッファ（src/runtime/recipe.ts の slot backing）と
+ * {@link ResidentTensor}（src/gpu/device.ts）も**この定数**で作る。別立てにすると、同じ役割の
+ * バッファが 2 つの usage を持つ形になる。
  */
 export const STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST |
   GPUBufferUsage.COPY_SRC;

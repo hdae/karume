@@ -39,6 +39,12 @@
  * 対しては安全側。細りすぎの歯止めは {@link SubmitPolicy.minChunkSize}（予算で切るのは
  * これ以上積んでから）と {@link SubmitPolicy.maxChunkSize}（硬い上限）の 2 つ。
  *
+ * NOTE（H-5 の追随）: フェンス無しの enqueue 区間（`GpuContext.beginBatch`）では窓が
+ * **run 1 本ではなく区間 1 本**になる（閉じるのは `BatchScope.finish` の 1 回 —
+ * {@link SubmitScheduler.closeMeasurementWindowAfterFence}）。窓に N 本の実行が入るぶん推定は
+ * さらに粗く・過大に出るが、向きは上と同じ安全側なので TDR の歯止めは効いたまま。適応制御が
+ * 使うのは直近の窓 1 本だけなので、区間を抜ければ次の窓が通常の粒度へ戻す。
+ *
  * ## GPU 実時間の内訳（timestamp-query — ADR 0021）
  *
  * 上の壁時計計測はチャンク粒度で、しかも帰属が信用できない（適応制御の材料にしかならない）。
@@ -193,6 +199,7 @@ export type GpuTimingStats = {
 };
 
 type PendingDispatch = {
+  readonly kind: "dispatch";
   readonly pipeline: GPUComputePipeline;
   readonly bindGroup: GPUBindGroup;
   readonly workgroups: readonly [number, number, number];
@@ -201,6 +208,26 @@ type PendingDispatch = {
   /** 内訳の帰属先（{@link PipelineCache} のキーそのもの）。 */
   readonly key: string;
 };
+
+/**
+ * バッファ間コピー（{@link SubmitScheduler.copyBuffer}）。**compute pass の外**でしか
+ * エンコードできないので、チャンクの中では pass を一旦閉じてから積む。
+ */
+type PendingCopy = {
+  readonly kind: "copy";
+  readonly source: GPUBuffer;
+  readonly sourceOffset: number;
+  readonly destination: GPUBuffer;
+  readonly destinationOffset: number;
+  readonly size: number;
+};
+
+/**
+ * 未 submit のコマンド 1 件。
+ * MUST: 積んだ順に実行される（FIFO）。copy が直前までの dispatch の結果を読めるのはこの順序
+ * だけが根拠で、並べ替える最適化を入れてはいけない。
+ */
+type PendingCommand = PendingDispatch | PendingCopy;
 
 /** timestamp 1 件のバイト数（u64 ns）。 */
 const TIMESTAMP_BYTES = 8;
@@ -243,7 +270,7 @@ export class SubmitScheduler {
   readonly #policy: SubmitPolicy;
   /** 計測用の時刻源（ms 単位・単調）。既定は `performance.now()`。 */
   readonly #now: () => number;
-  #pending: PendingDispatch[] = [];
+  #pending: PendingCommand[] = [];
   /** 未 submit のエンコードの仕事量合計（`#pending` の `work` の和）。 */
   #pendingWork = 0;
   #submitCount = 0;
@@ -305,12 +332,64 @@ export class SubmitScheduler {
     if (this.#exceedsTimeBudget(this.#pendingWork + work)) {
       this.#submitChunk();
     }
-    this.#pending.push({ pipeline, bindGroup, workgroups, work, key });
+    this.#pending.push({ kind: "dispatch", pipeline, bindGroup, workgroups, work, key });
     this.#pendingWork += work;
     this.#dispatchCount += 1;
     if (this.#pending.length >= this.#chunkSizeLimit()) {
       this.#submitChunk();
     }
+  }
+
+  /**
+   * バッファ間コピーを 1 件積む（{@link Session.enqueue} の `copyOutputs` — 出力 slot →
+   * {@link ResidentTensor}）。
+   *
+   * MUST: **dispatch と同じコマンド列**へ積む。別 encoder で先に submit すると、まだ書かれて
+   * いない slot を読む。列は FIFO なので、直前までに積んだ dispatch の結果だけがコピー元に
+   * なる。
+   * NOTE: 仕事量は 0（GPU の実行時間は無視できる）。時間予算の推定には効かず、チャンクの
+   * dispatch 数上限にだけ 1 件として数えられる。
+   */
+  copyBuffer(
+    source: GPUBuffer,
+    sourceOffset: number,
+    destination: GPUBuffer,
+    destinationOffset: number,
+    size: number,
+  ): void {
+    this.#pending.push({
+      kind: "copy",
+      source,
+      sourceOffset,
+      destination,
+      destinationOffset,
+      size,
+    });
+    if (this.#pending.length >= this.#chunkSizeLimit()) {
+      this.#submitChunk();
+    }
+  }
+
+  /**
+   * 未 submit のエンコードを submit する（**フェンスを張らない** — {@link BatchMember}）。
+   *
+   * MUST: `enqueue` はこれを末尾で必ず呼ぶ。以後に発行する `queue.writeBuffer` は queue
+   * timeline へ issue 順で載るので、**先行 dispatch を追い越さない**（追い越すのは未 submit の
+   * エンコードだけ — ADR 0004 不変条件④）。「enqueue 後に pending を残す経路」を作ると
+   * この不変条件が崩れ、次の入力書き込みが前の enqueue の dispatch に読まれる沈黙誤値になる。
+   */
+  submitPending(): void {
+    this.#submitChunk();
+  }
+
+  /**
+   * 計測窓を閉じる（{@link BatchMember} — batch のフェンス完了後にだけ呼ぶ）。
+   *
+   * MUST: 呼び出しは `onSubmittedWorkDone` の**後**。前に呼ぶと窓が GPU 実行の途中で閉じ、
+   * 実測が過小に出てチャンクが膨らむ（TDR 域へ向かう危険側）。
+   */
+  closeMeasurementWindowAfterFence(): void {
+    this.#closeMeasurementWindow();
   }
 
   /**
@@ -327,7 +406,8 @@ export class SubmitScheduler {
    * **過大**に出る — チャンクが縮む向き = 安全側で、次の窓が正しい値へ戻す。
    */
   discard(): void {
-    this.#discardedDispatches += this.#pending.length;
+    // 数えるのは dispatch だけ（copy は「実行されなかった dispatch」の記録ではない）。
+    this.#discardedDispatches += this.#pending.filter((item) => item.kind === "dispatch").length;
     this.#pending.length = 0;
     this.#pendingWork = 0;
     // MUST: 回収待ちの timestamp 資源も同じ経路で捨てる（discard-or-flush before destroy の
@@ -435,13 +515,7 @@ export class SubmitScheduler {
     if (this.#timingEnabled) {
       this.#encodeTimedChunk(encoder, chunk);
     } else {
-      const pass = encoder.beginComputePass();
-      for (const item of chunk) {
-        pass.setPipeline(item.pipeline);
-        pass.setBindGroup(0, item.bindGroup);
-        pass.dispatchWorkgroups(...item.workgroups);
-      }
-      pass.end();
+      this.#encodePlainChunk(encoder, chunk);
     }
     const submittedAt = this.#now();
     this.#device.queue.submit([encoder.finish()]);
@@ -453,17 +527,57 @@ export class SubmitScheduler {
   }
 
   /**
+   * 既定（非計測）のエンコード。**チャンク 1 本 = compute pass 1 本**のままだが、copy は
+   * pass の外にしか置けないので、copy が来たら pass を閉じ、後続の dispatch で開き直す。
+   *
+   * MUST: 開き直しても実行意味論は変わらない（同一キューでは submit 順・pass 順に実行され、
+   * storage の可視性は pass 境界を跨いでも保たれる）。並べ替えないことだけが不変条件。
+   */
+  #encodePlainChunk(encoder: GPUCommandEncoder, chunk: readonly PendingCommand[]): void {
+    let pass: GPUComputePassEncoder | undefined;
+    for (const item of chunk) {
+      if (item.kind === "copy") {
+        pass?.end();
+        pass = undefined;
+        encoder.copyBufferToBuffer(
+          item.source,
+          item.sourceOffset,
+          item.destination,
+          item.destinationOffset,
+          item.size,
+        );
+        continue;
+      }
+      pass ??= encoder.beginComputePass();
+      pass.setPipeline(item.pipeline);
+      pass.setBindGroup(0, item.bindGroup);
+      pass.dispatchWorkgroups(...item.workgroups);
+    }
+    pass?.end();
+  }
+
+  /**
    * 計測モードのエンコード（**1 dispatch = 1 pass**）。pass の begin/end を chunk 1 本ぶんの
    * querySet に書き、`resolveQuerySet` → COPY_SRC バッファ → MAP_READ バッファまでを同じ
    * command buffer に積む（回収は完了後の {@link SubmitScheduler.flush} で行う）。
    *
    * MUST: `writeTimestamp` は使わない（標準の WebGPU に無い — pass 境界だけが移植可能な計測点）。
    */
-  #encodeTimedChunk(encoder: GPUCommandEncoder, chunk: readonly PendingDispatch[]): void {
-    const count = chunk.length * 2;
+  #encodeTimedChunk(encoder: GPUCommandEncoder, chunk: readonly PendingCommand[]): void {
+    // 計測対象は dispatch だけ（copy は pass を持たないので timestamp を書く場所が無い）。
+    // NOTE: 計測が有効な device では batch を開けない（GpuContext.beginBatch の門）ため、
+    // copy が混じったチャンクはこの経路に来ない — それでも列の順序は保って積む。
+    const dispatches = chunk.filter((item): item is PendingDispatch => item.kind === "dispatch");
+    // 計測対象が 1 件も無いチャンク（copy だけ）に querySet を作らない（容量 0 の資源を
+    // 作って即回収する意味が無く、実装差のある面に触れる理由も無い）。
+    if (dispatches.length === 0) {
+      this.#encodePlainChunk(encoder, chunk);
+      return;
+    }
+    const count = dispatches.length * 2;
     if (count > MAX_TIMESTAMP_QUERIES) {
       throw new SubmitPolicyError(
-        `GPU 時間計測の querySet 容量を超えた（dispatch ${chunk.length} 件 = query ${count} 件 > ` +
+        `GPU 時間計測の querySet 容量を超えた（dispatch ${dispatches.length} 件 = query ${count} 件 > ` +
           `${MAX_TIMESTAMP_QUERIES}）。SubmitPolicy.maxChunkSize を ${
             MAX_TIMESTAMP_QUERIES / 2
           } 以下にするか、gpuTiming: false で計測を切ること`,
@@ -479,7 +593,18 @@ export class SubmitScheduler {
       size: byteLength,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
-    for (const [index, item] of chunk.entries()) {
+    let index = 0;
+    for (const item of chunk) {
+      if (item.kind === "copy") {
+        encoder.copyBufferToBuffer(
+          item.source,
+          item.sourceOffset,
+          item.destination,
+          item.destinationOffset,
+          item.size,
+        );
+        continue;
+      }
       const pass = encoder.beginComputePass({
         timestampWrites: {
           querySet,
@@ -491,6 +616,7 @@ export class SubmitScheduler {
       pass.setBindGroup(0, item.bindGroup);
       pass.dispatchWorkgroups(...item.workgroups);
       pass.end();
+      index += 1;
     }
     encoder.resolveQuerySet(querySet, 0, count, resolveBuffer, 0);
     encoder.copyBufferToBuffer(resolveBuffer, 0, readBuffer, 0, byteLength);
@@ -498,7 +624,7 @@ export class SubmitScheduler {
       querySet,
       resolveBuffer,
       readBuffer,
-      entries: chunk.map((item) => ({ key: item.key, work: item.work })),
+      entries: dispatches.map((item) => ({ key: item.key, work: item.work })),
     });
   }
 

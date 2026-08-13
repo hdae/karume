@@ -24,19 +24,33 @@ export type { SafetensorsDtype, SafetensorsFile, TensorView } from "./src/format
 
 export {
   acquireGpu,
+  BatchScopeError,
   GpuDeviceLostError,
   GpuFeatureError,
   GpuLimitError,
   GpuOutOfMemoryError,
   GpuUnavailableError,
   GpuValidationError,
+  ResidentTensorError,
 } from "./src/gpu/device.ts";
 /**
  * GpuContext の構築は {@link acquireGpu} だけを入口にするため、型としてのみ公開する
  * （Session と同じ形）。値として公開すると `new GpuContext(...)` で planRequiredLimits /
  * assertLimitsGranted を迂回した device を渡せてしまい、limits 要求漏れの検出網が抜ける。
+ *
+ * `ResidentTensor`（GpuContext 所有の第 4 の寿命クラス）と `BatchScope`（フェンス 1 本で閉じる
+ * enqueue 区間）も同じ理由で型としてのみ公開する — 入口は `GpuContext.createResident` /
+ * `GpuContext.beginBatch` だけで、直接構築すると errorScope の門（確保失敗の検出・区間ロックの
+ * 保持）を迂回できてしまう。
  */
-export type { AcquireGpuOptions, DeviceLostHandler, GpuContext } from "./src/gpu/device.ts";
+export type {
+  AcquireGpuOptions,
+  BatchScope,
+  DeviceLostHandler,
+  GpuContext,
+  ResidentData,
+  ResidentTensor,
+} from "./src/gpu/device.ts";
 
 export type { ArenaStats } from "./src/gpu/arena.ts";
 export { DEFAULT_SUBMIT_POLICY, SubmitPolicyError } from "./src/gpu/submit.ts";
@@ -66,9 +80,11 @@ export { createSession } from "./src/runtime/executor.ts";
  */
 export type {
   ComputePrecision,
+  EnqueueOptions,
   ParamsCacheStats,
   PlanBackingStats,
   PreparedPlanStats,
+  RunInput,
   RunInputs,
   RunOutputs,
   ScoreStorage,

@@ -8,7 +8,14 @@
  * （`buffer.destroy()` は 1 バイトも返さない）、解放後の続行は `acquireGpu()` からの再構築に
  * なる。device を握る層（PipelineCache / SubmitScheduler / RunArena）は全て GpuContext と
  * 同じ寿命で作り直せる構造でなければならない。
+ *
+ * この層はさらに 2 つ、**device と同じ寿命で GpuContext が所有する**器を持つ:
+ * {@link ResidentTensor}（Session を跨いで共有できる第 4 の寿命クラス）と
+ * {@link BatchScope}（フェンス 1 本で閉じる enqueue 区間）。どちらも errorScope 区間と
+ * 消失レースの規律がそのまま効くため、GPU バッファの器でありながらここに置いてある。
  */
+
+import { STORAGE_USAGE } from "./arena.ts";
 
 /** navigator.gpu が無い / アダプタを取得できない。 */
 export class GpuUnavailableError extends Error {
@@ -36,6 +43,16 @@ export class GpuOutOfMemoryError extends Error {
 /** device が失われた状態での操作。待ち続ける代わりに必ずこれを投げる。 */
 export class GpuDeviceLostError extends Error {
   override readonly name = "GpuDeviceLostError";
+}
+
+/** 常駐テンソル（{@link ResidentTensor}）の寿命規律の破れ（破棄後利用・参照中の破棄）。 */
+export class ResidentTensorError extends Error {
+  override readonly name = "ResidentTensorError";
+}
+
+/** バッチ区間（{@link BatchScope}）の使い方の破れ（決着後の enqueue・計測との併用など）。 */
+export class BatchScopeError extends Error {
+  override readonly name = "BatchScopeError";
 }
 
 /**
@@ -469,6 +486,11 @@ export class GpuContext {
    * reject しない（1 本の失敗で以後の全区間を巻き添えにしない）。
    */
   #scopeChain: Promise<void> = Promise.resolve();
+  /**
+   * {@link ResidentTensor} の識別子の発番。**モジュールスコープに置かない**（副作用ゼロの
+   * 不変条件）— GpuContext ごとに別空間で足りる（resident は device を跨がない）。
+   */
+  #residentSeq = 0;
 
   constructor(
     device: GPUDevice,
@@ -614,6 +636,74 @@ export class GpuContext {
   }
 
   /**
+   * Session を跨いで共有できる常駐バッファを作る（**第 4 の寿命クラス** — 重みアリーナ /
+   * slot backing / run アリーナのどれにも属さない）。
+   *
+   * 用途は「生成ループの間ずっと GPU に置いたままにしたい値」— 条件テンソル（ループ前に
+   * {@link ResidentTensor.write} で 1 度だけ投入）と、ステップ間で受け渡す潜在
+   * （{@link Session.enqueue} の `copyOutputs` で書き、次の enqueue の入力にする）。どちらも
+   * ホストを 1 度も経由しないので、run 境界のフェンスを消せる。
+   *
+   * MUST: async なのは errorScope で囲むため。上限超過 / 余力切れの `createBuffer` は同期
+   * 例外を投げず**無効なバッファを返す**ので、囲まないと以後の `writeBuffer` が警告すら
+   * 出さない no-op になり、空の常駐テンソルのまま生成ループが回る。
+   * MUST: `byteLength` は 4 の倍数（要素は全型 4 バイト — ADR 0009 の意味論 dtype）。
+   */
+  async createResident(byteLength: number, label = "resident"): Promise<ResidentTensor> {
+    if (!Number.isInteger(byteLength) || byteLength <= 0 || byteLength % 4 !== 0) {
+      throw new ResidentTensorError(
+        `resident '${label}': byteLength は 4 の倍数の正の整数である必要がある: ${byteLength}`,
+      );
+    }
+    // MUST: push から pop の発行までに await を挟まない（device 単位 LIFO の交錯を防ぐ根拠 —
+    // クラス冒頭「errorScope 区間の不変条件」の 3 つ目）。
+    pushFailureScopes(this.device);
+    let buffer: GPUBuffer;
+    try {
+      buffer = this.device.createBuffer({ label, size: byteLength, usage: STORAGE_USAGE });
+    } catch (cause) {
+      await discardFailureScopes(this.device);
+      throw cause;
+    }
+    const failure = await popFailureScopes(this.device, `resident '${label}' の確保`);
+    if (failure !== undefined) {
+      buffer.destroy();
+      throw failure;
+    }
+    this.#residentSeq += 1;
+    return new ResidentTensor(this, this.#residentSeq, buffer, byteLength, label);
+  }
+
+  /**
+   * フェンス無しの enqueue を束ねる区間を開く（{@link Session.enqueue} — H-5）。
+   *
+   * 区間の間 **device 単位の errorScope 区間ロックを保持し続ける**（{@link withScopeLock}）。
+   * これが「batch の内側で出した GPU 操作は全て batch の errorScope に帰属する」ことと、
+   * 「pop がスタック先頭を取り違えない」ことの根拠。
+   *
+   * MUST: 開いている間に同一 device の {@link Session.run} を await しない — run はロックを
+   * 取りに行くので {@link BatchScope.finish} まで決着せず、待ち合わせると自己デッドロックに
+   * なる（batch 中は `enqueue` と `finish` だけを使う）。
+   * MUST: 計測が有効な device では開けない。1 dispatch = 1 pass に開いた timestamp は
+   * flush でしか回収されないため、batch の間 N run 分が未回収で溜まる（内訳を取るなら
+   * 通常の run で計測すること — ADR 0021）。
+   * NOTE: 同一 device で 2 本目を開こうとすると、1 本目が {@link BatchScope.finish} で
+   * ロックを返すまでここで待つ（区間は device 単位で排他 — 入れ子にはならない）。
+   */
+  async beginBatch(): Promise<BatchScope> {
+    if (this.gpuTimingEnabled) {
+      throw new BatchScopeError(
+        "gpuTiming が有効な device では batch を開けない（1 dispatch = 1 pass に開いた " +
+          "timestamp が flush まで回収されず、batch の間 run 数ぶん溜まる）。" +
+          "GPU 時間内訳は通常の run で計測すること",
+      );
+    }
+    const batch = new BatchScope(this);
+    await batch[RUNTIME_INTERNAL].entered;
+    return batch;
+  }
+
+  /**
    * device を破棄する。VRAM を返すのはこの経路のみ。
    *
    * MUST: 未 submit のエンコードと生存中のバッファを持つ層（RunArena）を先に flush /
@@ -622,6 +712,311 @@ export class GpuContext {
   destroy(): void {
     this.#destroyRequested = true;
     this.device.destroy();
+  }
+}
+
+/**
+ * **ランタイム内部だけが触る面**の鍵（mod.ts からは輸出しない — ADR 0008 の「薄い面」を
+ * 汚さない）。{@link ResidentTensor} / {@link BatchScope} は利用者向けの数メソッドだけを
+ * 素の名前で持ち、executor が要る実体（GPUBuffer・焼き込み参照計数・メンバ登録）はこの鍵の
+ * 下に畳む。テスト専用ノブ（`I8A8_DOT`）と同じ流儀。
+ */
+export const RUNTIME_INTERNAL: unique symbol = Symbol("karume.runtimeInternal");
+
+/** {@link ResidentTensor} のランタイム内部面。 */
+export type ResidentInternals = {
+  /** 焼き込み / 別名の対象になる実体。 */
+  readonly buffer: GPUBuffer;
+  /**
+   * GpuContext 内で一意な識別子。**導出済み計画のキーと backing signature に載る**ので、
+   * resident を差し替えれば別 signature（= 焼き直し）になり、戻せば元の backing に当たる。
+   */
+  readonly id: number;
+  /** 焼き込み bind group からの参照を 1 本積む（backing の構築時）。 */
+  retainBaked(): void;
+  /** 焼き込み参照を 1 本返す（backing の退役時）。 */
+  releaseBaked(): void;
+};
+
+/** ホストから常駐テンソルへ書ける配列（要素は全型 4 バイト — ADR 0009 と同じ規約）。 */
+export type ResidentData =
+  | Float32Array<ArrayBuffer>
+  | Int32Array<ArrayBuffer>
+  | Uint32Array<ArrayBuffer>;
+
+/**
+ * GpuContext が所有する常駐バッファ（**第 4 の寿命クラス**）。
+ *
+ * 既存 3 クラス（重みアリーナ / slot backing / run アリーナ）はどれも Session の内側に閉じて
+ * いて、Session を跨いだ受け渡しは必ずホスト経由（readback → writeBuffer）になる。生成ループ
+ * のようにグラフ間で値を回す形では、その 1 往復ごとにフェンスが 2 本立つ。ここはその往復を
+ * 消すためだけの器で、**dtype も shape も持たない**（バイト列と大きさだけ）。
+ *
+ * MUST: 破棄は「参照されていないこと」を確かめてから（{@link ResidentTensor.dispose}）。
+ * flush-before-destroy（ADR 0004）は次の 2 つで満たしている — ①焼き込み bind group からの参照が
+ * 1 本でもある間は破棄を拒む ②`enqueue` は末尾で必ず eager submit するので、戻った時点で
+ * この実体を参照する**未 submit の**エンコードは存在しない（submit 済みのコマンドが参照する
+ * バッファの破棄は WebGPU 的に安全 — 実解放は完了まで実装が遅延する）。
+ */
+export class ResidentTensor {
+  /** 確保したバイト数（要求値そのもの — 4 の倍数）。 */
+  readonly byteLength: number;
+  /** 診断用の名前（GPUBuffer のラベルと同じ）。 */
+  readonly label: string;
+  /** ランタイム内部面（利用者が触る面ではない）。 */
+  readonly [RUNTIME_INTERNAL]: ResidentInternals;
+  readonly #gpu: GpuContext;
+  readonly #buffer: GPUBuffer;
+  #disposed = false;
+  #bakedRefs = 0;
+
+  /** MUST: 構築の入口は {@link GpuContext.createResident} だけ（errorScope の門を迂回させない）。 */
+  constructor(gpu: GpuContext, id: number, buffer: GPUBuffer, byteLength: number, label: string) {
+    this.#gpu = gpu;
+    this.#buffer = buffer;
+    this.byteLength = byteLength;
+    this.label = label;
+    this[RUNTIME_INTERNAL] = {
+      buffer,
+      id,
+      retainBaked: () => {
+        this.#assertUsable("焼き込み");
+        this.#bakedRefs += 1;
+      },
+      releaseBaked: () => {
+        if (this.#bakedRefs === 0) {
+          throw new ResidentTensorError(
+            `resident '${this.label}': 焼き込み参照の解放が過多（ランタイム内部の簿記の破れ）`,
+          );
+        }
+        this.#bakedRefs -= 1;
+      },
+    };
+  }
+
+  /** 破棄済みか。 */
+  get disposed(): boolean {
+    return this.#disposed;
+  }
+
+  /** 焼き込み bind group から参照されている本数（0 でなければ破棄できない）。 */
+  get bakedReferences(): number {
+    return this.#bakedRefs;
+  }
+
+  /**
+   * ホストから全域を書く（`queue.writeBuffer`）。生成ループに入る**前**の条件テンソル投入用。
+   *
+   * MUST: 大きさは厳密一致。部分書きを許すと残りのバイトが前の内容のまま残り、例外も警告も
+   * 出ないまま古い条件で回る（full-write — ADR 0014 と同じ思想）。
+   * MUST: この `writeBuffer` は issue 順で queue timeline に載るので、**先に submit 済みの
+   * dispatch を追い越さない**。追い越すのは未 submit のエンコードだけ（ADR 0004 不変条件④）
+   * で、`enqueue` はその末尾で必ず submit するため両者は競合しない。
+   */
+  write(data: ResidentData): void {
+    this.#assertUsable("write");
+    if (data.byteLength !== this.byteLength) {
+      throw new ResidentTensorError(
+        `resident '${this.label}': write のバイト数 ${data.byteLength} が確保 ${this.byteLength} と合わない`,
+      );
+    }
+    this.#gpu.device.queue.writeBuffer(this.#buffer, 0, data);
+  }
+
+  /**
+   * 全域をホストへ読み戻す（staging へ copy → `mapAsync`）。**フェンスはこの 1 本だけ**で、
+   * 生成ループの終端で潜在を 1 度取り出すために置いてある。
+   *
+   * MUST: 呼ぶのは {@link BatchScope.finish} の**後**。queue の順序は保たれるので値としては
+   * 正しいが、batch の内側で呼ぶとフェンスが 1 本増え、しかもこの submit の失敗が batch の
+   * errorScope に帰属して原因の切り分けができなくなる。
+   */
+  async read(): Promise<ArrayBuffer> {
+    this.#assertUsable("read");
+    const device = this.#gpu.device;
+    const where = `resident '${this.label}' の読み戻し`;
+    // MUST: copy → submit も errorScope の両建てで囲む。COPY_SRC 欠落等の validation 失敗も
+    // staging の確保失敗も例外にならず、読み戻しが全 0 のまま静かに返る（#readOutputs と同じ）。
+    // MUST NOT: push から pop の発行までに await を挟まない（同期区間で完結するのでロック不要）。
+    pushFailureScopes(device);
+    let popped = false;
+    let staging: GPUBuffer | undefined;
+    try {
+      staging = device.createBuffer({
+        size: this.byteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.#buffer, 0, staging, 0, this.byteLength);
+      device.queue.submit([encoder.finish()]);
+      const pending = popFailureScopes(device, where);
+      popped = true;
+      const failure = await pending;
+      if (failure !== undefined) throw failure;
+      // MUST: device 消失時 mapAsync は解決しない。待ち続けるとハングになるため競わせる。
+      await this.#gpu.raceDeviceLost(staging.mapAsync(GPUMapMode.READ), where);
+      const copy = staging.getMappedRange().slice(0);
+      staging.unmap();
+      return copy;
+    } finally {
+      if (!popped) await discardFailureScopes(device);
+      // MUST: staging は成否によらず必ず返す（destroy は暗黙 unmap を含む）。
+      staging?.destroy();
+    }
+  }
+
+  /**
+   * 破棄する（2 度目以降は no-op）。
+   *
+   * MUST: 焼き込み bind group から参照されている間は **fail loudly**。黙って破棄すると、
+   * その backing の dispatch が破棄済みバッファを束ねたまま submit され、コマンドバッファ
+   * ごと失敗して**無関係な dispatch まで実行されないまま誤った値が静かに残る**（ADR 0004）。
+   * 参照を外すには、その Session を dispose するか、別 signature の run / enqueue で backing を
+   * 切り替える。
+   */
+  dispose(): void {
+    if (this.#disposed) return;
+    if (this.#bakedRefs > 0) {
+      throw new ResidentTensorError(
+        `resident '${this.label}': 焼き込み bind group から参照中（${this.#bakedRefs} 本）のため破棄できない。` +
+          "参照している Session を dispose するか、別 signature の run / enqueue で backing を切り替えること",
+      );
+    }
+    this.#disposed = true;
+    this.#buffer.destroy();
+  }
+
+  [Symbol.dispose](): void {
+    this.dispose();
+  }
+
+  #assertUsable(where: string): void {
+    if (this.#disposed) {
+      throw new ResidentTensorError(
+        `resident '${this.label}': 破棄済みの常駐テンソルは使えない（${where}）`,
+      );
+    }
+  }
+}
+
+/**
+ * batch が決着時に取りまとめる相手（実体は {@link SubmitScheduler}）。
+ * 構造型にしてあるのは、device 層が submit 層へ依存しないため。
+ */
+export type BatchMember = {
+  /** 未 submit のエンコードを submit する（**フェンスは張らない**）。 */
+  submitPending(): void;
+  /** batch のフェンス完了後に計測窓を閉じる。 */
+  closeMeasurementWindowAfterFence(): void;
+};
+
+/** {@link BatchScope} のランタイム内部面。 */
+export type BatchInternals = {
+  /** errorScope 区間が実際に開くまでの待ち（{@link GpuContext.beginBatch} が await する）。 */
+  readonly entered: Promise<void>;
+  /** 決着時に取りまとめる相手を登録する（同じ相手の重複登録は無害）。 */
+  join(member: BatchMember): void;
+  /** enqueue の受け口として使える状態か（決着済み / 別 device は fail loudly）。 */
+  assertOpen(gpu: GpuContext): void;
+};
+
+/**
+ * フェンス無しの enqueue を束ねる区間（{@link GpuContext.beginBatch}）。
+ *
+ * 区間の間 device の errorScope 区間ロックを保持し、`out-of-memory` + `validation` の 2 本を
+ * 張り続ける。{@link BatchScope.finish} が ①全メンバの未 submit を出し切り ②
+ * `onSubmittedWorkDone` を**1 回だけ**待ち ③スコープを pop して失敗を型付き例外にする。
+ *
+ * トレードオフ（設計上の受容）:
+ *
+ * - **失敗の帰属は batch 単位**。1 区間に N 本の enqueue が相乗りするので、validation /
+ *   out-of-memory が出ても「どの enqueue か」までは絞れない。切り分けが要るときは通常の
+ *   `run` で 1 本ずつ回す（run は従来どおり run 単位で帰属する）。
+ * - **device 消失の検出は finish まで遅延する**。区間中の待ちが 1 本も無いのだから当然で、
+ *   消失は finish の `raceDeviceLost` が例外へ変換する（enqueue 側はハングしない — 待たない
+ *   から）。
+ */
+export class BatchScope {
+  /** ランタイム内部面（利用者が触る面ではない）。 */
+  readonly [RUNTIME_INTERNAL]: BatchInternals;
+  readonly #gpu: GpuContext;
+  readonly #members = new Set<BatchMember>();
+  readonly #completion: Promise<void>;
+  readonly #release: () => void;
+  #finished = false;
+
+  /** MUST: 構築の入口は {@link GpuContext.beginBatch} だけ（計測との併用の門をここに置く）。 */
+  constructor(gpu: GpuContext) {
+    this.#gpu = gpu;
+    const hold = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    this.#release = hold.resolve;
+    this.#completion = gpu.withScopeLock(async () => {
+      try {
+        pushFailureScopes(gpu.device);
+      } catch (cause) {
+        // MUST: 開けなかったことを beginBatch の待ちへ必ず伝える（伝えないとハングになる）。
+        entered.reject(cause);
+        throw cause;
+      }
+      entered.resolve();
+      await hold.promise;
+      const device = gpu.device;
+      try {
+        // enqueue は末尾で必ず submit するので通常ここは空振りする。それでも出し切るのは、
+        // 「batch が閉じた時点で未 submit のエンコードは 1 つも無い」を区間側の責務として
+        // 閉じるため（破棄経路の担い手を増やさない — ADR 0004）。
+        for (const member of this.#members) member.submitPending();
+        // MUST: device 消失時 onSubmittedWorkDone は解決しない（競わせないとハングになる）。
+        await gpu.raceDeviceLost(device.queue.onSubmittedWorkDone(), "batch の完了");
+      } catch (cause) {
+        await discardFailureScopes(device);
+        throw cause;
+      } finally {
+        // 計測窓は batch のフェンス 1 回で閉じる。窓に N 本の enqueue が入るぶん推定は粗く
+        // （過大に）出るが、過大 = チャンクが小さくなる向き = TDR に対して安全側
+        // （src/gpu/submit.ts の「計測の帰属」）。
+        for (const member of this.#members) member.closeMeasurementWindowAfterFence();
+      }
+      const failure = await popFailureScopes(device, "batch のエンコード");
+      if (failure !== undefined) throw failure;
+    });
+    // 決着を finish が受け取るまで未処理拒否にしない（拒否の中身は finish がそのまま返す）。
+    void this.#completion.catch(() => undefined);
+    this[RUNTIME_INTERNAL] = {
+      entered: entered.promise,
+      join: (member) => {
+        this.#members.add(member);
+      },
+      assertOpen: (owner) => {
+        if (owner !== this.#gpu) {
+          throw new BatchScopeError("別の GpuContext で開いた batch には enqueue できない");
+        }
+        if (this.#finished) {
+          throw new BatchScopeError("finish() 済みの batch には enqueue できない");
+        }
+      },
+    };
+  }
+
+  /** 決着済みか（{@link BatchScope.finish} を 1 度でも呼んだか）。 */
+  get finished(): boolean {
+    return this.#finished;
+  }
+
+  /**
+   * 区間を閉じる。未 submit を出し切り、**フェンス 1 本**で全 enqueue の完了を待ち、
+   * errorScope を pop して失敗を型付き例外にする。
+   *
+   * MUST: 2 度目以降も同じ完了を返す（先に返すと呼び出し側が破棄へ進み、ロックと errorScope が
+   * 開いたまま残る）。
+   */
+  finish(): Promise<void> {
+    if (!this.#finished) {
+      this.#finished = true;
+      this.#release();
+    }
+    return this.#completion;
   }
 }
 

@@ -167,10 +167,13 @@ import type { IrDtype } from "../format/ir.ts";
 import { type SafetensorsFile, tensorBytes } from "../format/safetensors.ts";
 import { type ArenaStats, RunArena, STORAGE_USAGE } from "../gpu/arena.ts";
 import {
+  type BatchScope,
   discardFailureScopes,
   type GpuContext,
   popFailureScopes,
   pushFailureScopes,
+  ResidentTensor,
+  RUNTIME_INTERNAL,
 } from "../gpu/device.ts";
 import { PipelineCache } from "../gpu/pipeline-cache.ts";
 import {
@@ -294,8 +297,37 @@ type ElementwiseOp =
   | { readonly op: UnaryOpName | BinaryOpName | typeof WHERE_OP; readonly dtype: IrDtype }
   | { readonly op: typeof CAST_OP; readonly dtype: IrDtype; readonly to: IrDtype };
 
-export type RunInputs = Readonly<Record<string, Tensor>>;
+/**
+ * 実行の入力 1 本。ホスト配列（{@link Tensor}）か、GPU 常駐のまま束ねる
+ * {@link ResidentTensor}（第 4 の寿命クラス）。
+ *
+ * MUST: 常駐入力は **`writeBuffer` を 1 度も出さない** — バッファをそのまま bind group へ
+ * 焼き込む。したがってホスト側に shape も dtype も無く、検査できるのは**大きさだけ**
+ * （宣言 shape ぶんと厳密一致）。記号次元はその常駐入力からは束縛されないので、他の入力か
+ * `bindings` で決まっていなければ fail loudly（{@link bindSymbols} の `deferredInputs`）。
+ */
+export type RunInput = Tensor | ResidentTensor;
+export type RunInputs = Readonly<Record<string, RunInput>>;
 export type RunOutputs = Readonly<Record<string, Tensor>>;
+
+/** {@link Session.enqueue} の指定。 */
+export type EnqueueOptions = {
+  /** 束ねる区間（{@link GpuContext.beginBatch}）。フェンスはこの区間の決着 1 本だけ。 */
+  readonly batch: BatchScope;
+  /**
+   * 記号次元の明示指定。常駐入力は束縛源にならないので、その入力**だけ**が持つシンボルは
+   * ここで与える（`run` の第 2 引数と同じ意味）。
+   */
+  readonly bindings?: SymbolBindings;
+  /**
+   * グラフ出力 → 書き出し先の常駐テンソル。dispatch 列の**後**に同じコマンド列へ
+   * `copyBufferToBuffer` を積む（readback もフェンスも伴わない）。
+   *
+   * MUST: 大きさは宣言 shape ぶんと厳密一致（fail loudly）。`enqueue` は readback をしないので、
+   * ここに載せなかった出力は次の同一 signature の enqueue で slot ごと上書きされて消える。
+   */
+  readonly copyOutputs?: Readonly<Record<string, ResidentTensor>>;
+};
 
 /**
  * 整数内積の変種（w8a8 経路）。**両者は同じ整数を返す**ので、これは速度の選択でしかない
@@ -516,6 +548,44 @@ const PARAMS_STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const PARAMS_UNIFORM_USAGE = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
 /**
+ * 入力の束を「ホスト配列の shape 表」と「常駐入力の表」に分ける。
+ *
+ * MUST: 利用者の inputs 由来のキーを蓄積する器は null プロトタイプ（理由は plan.ts の
+ * bindSymbols と同じ）。素の `{}` では入力名が "__proto__" のとき shape 配列が [[Prototype]] に
+ * 化け、own property が作られないまま「入力が渡されていない」で落ちる。常駐入力側は `Map` な
+ * ので同じ穴が無い。
+ */
+const splitInputs = (inputs: RunInputs): {
+  readonly inputShapes: Record<string, readonly number[]>;
+  readonly residentInputs: ReadonlyMap<string, ResidentTensor>;
+} => {
+  const inputShapes: Record<string, readonly number[]> = Object.create(null);
+  const residentInputs = new Map<string, ResidentTensor>();
+  for (const [name, value] of Object.entries(inputs)) {
+    if (value instanceof ResidentTensor) residentInputs.set(name, value);
+    else inputShapes[name] = value.shape;
+  }
+  return { inputShapes, residentInputs };
+};
+
+/** 常駐入力の名前集合（{@link bindSymbols} の `deferredInputs`）。空なら渡さない。 */
+const residentNames = (
+  residentInputs: ReadonlyMap<string, ResidentTensor>,
+): ReadonlySet<string> | undefined =>
+  residentInputs.size === 0 ? undefined : new Set(residentInputs.keys());
+
+/**
+ * 破棄済みの常駐テンソルを束ねようとしたら落とす。
+ * MUST: 破棄済みバッファの束縛は createBindGroup の validation 失敗になり、例外にならないまま
+ * dispatch が no-op 化して出力が全て 0 になる（ここが唯一の同期的な検出点）。
+ */
+const assertResidentLive = (resident: ResidentTensor, where: string): void => {
+  if (resident.disposed) {
+    throw new ExecutionError(`${where}: 破棄済みの常駐テンソル '${resident.label}' は使えない`);
+  }
+};
+
+/**
  * 実行計画から解決済み shape を引く。plan.shapes は入力・initializer・全ノード出力を漏れなく
  * 持つ（planGraph の不変条件）ため、引けないのはランタイム内部の不変条件破れ。
  * MUST: 空 shape（スカラ）へ縮退させない — 要素数 1 として素通りし、確保サイズも要素数検査も
@@ -644,15 +714,24 @@ type ActiveBacking = {
    */
   readonly bytes: number;
   /**
-   * グラフ入力名 → backing 所有の常駐バッファ（`HOST_WRITTEN_USAGE`）。サイズは解決済み
-   * shape から確定するので、同一 signature の run では作り直す理由が無い。
+   * グラフ入力名 → 束ねる実体。通常入力は backing 所有の常駐バッファ（`HOST_WRITTEN_USAGE`・
+   * サイズは解決済み shape から確定するので同一 signature では作り直す理由が無い）、常駐入力は
+   * {@link ResidentTensor} の実体そのもの（**backing の所有外**）。
    */
   readonly inputs: ReadonlyMap<string, GPUBuffer>;
+  /**
+   * この backing が焼き込みで参照している常駐入力。構築時に retain し、退役時に release する
+   * （参照中の {@link ResidentTensor.dispose} を fail loudly にする根拠）。
+   */
+  readonly residents: readonly ResidentTensor[];
   /** 焼き込み済み bind group（{@link bakeBindGroups}）。backed run はこれを dispatch するだけ。 */
   readonly groups: readonly (readonly GPUBindGroup[])[];
   /** グラフ出力名 → 実体（読み戻し先 — 構築時に確定。backed run は env を組まない）。 */
   readonly outputs: ReadonlyMap<string, GPUBuffer>;
-  /** backing が所有する全バッファ（slot + 入力 — 破棄と readback 適格判定の分岐に使う）。 */
+  /**
+   * backing が所有する全バッファ（slot + **通常入力** — 破棄と readback 適格判定の分岐に使う）。
+   * MUST: 常駐入力の実体は含めない — 所有者は GpuContext 側で、寿命は Session を跨ぐ。
+   */
   readonly owned: ReadonlySet<GPUBuffer>;
   /**
    * readback を許す唯一の集合 = pin された slot + 入力バッファ。
@@ -923,7 +1002,31 @@ export class Session {
     if (this.#disposal !== undefined) {
       return Promise.reject(new ExecutionError("dispose 済みの Session では実行できない"));
     }
-    return this.#enqueue(() => this.#runOnce(inputs, bindings));
+    return this.#serialize(() => this.#runOnce(inputs, bindings));
+  }
+
+  /**
+   * **フェンスを張らずに** 1 回ぶんの実行を積む（H-5 — 生成ループの run 境界を消す面）。
+   *
+   * `run` との違いは 3 つだけ: ①`flush` / `onSubmittedWorkDone` / readback を出さない
+   * （待ちは {@link BatchScope.finish} の 1 本に集約される）②出力はホストへ返らず、
+   * `copyOutputs` で常駐テンソルへ書き出す ③errorScope は batch が張ったものに相乗りする
+   * （run ごとの push / pop は出ない）。積むコマンド列そのものは backed run と**同一**。
+   *
+   * MUST: 通る経路は「導出済み計画 + slot backing」だけ。初回は導出と backing 構築をここで
+   * 済ませる（run と違って**初回から** backing を作る — 作らなければ次も非 backed になり、
+   * enqueue が成立しない）。アリーナ経路・readback 経路へ**黙って退避しない**のがこの面の
+   * 前提で、退避が要る形（出力をホストで受けたい等）は `run` を使うこと。
+   * MUST: 末尾で必ず eager submit する（{@link SubmitScheduler.submitPending}）。これが
+   * 「次の enqueue / `writeBuffer` が先行 dispatch を追い越さない」の根拠。
+   * MUST: 同一 Session の run / enqueue / dispose は呼び出し順に直列化される（`run` と同じ
+   * {@link Session.#chain}）。
+   */
+  enqueue(inputs: RunInputs, options: EnqueueOptions): Promise<void> {
+    if (this.#disposal !== undefined) {
+      return Promise.reject(new ExecutionError("dispose 済みの Session では実行できない"));
+    }
+    return this.#serialize(() => this.#enqueueOnce(inputs, options));
   }
 
   /** 重みバッファを解放する。実行中の run の完了を待ってから破棄し、以後の run は fail loudly。 */
@@ -933,7 +1036,7 @@ export class Session {
     // MUST: slot backing の破棄も**この 1 本に相乗り**させる（破棄経路の担い手を増やさない —
     // ADR 0004）。weights.destroy() は flush の完了まで待つので、その後の destroy は
     // flush-before-destroy を満たす。失敗（主因は device 消失）しても破棄は必ず行う。
-    this.#disposal ??= this.#enqueue(async () => {
+    this.#disposal ??= this.#serialize(async () => {
       try {
         await this.#state.weights.destroy();
       } finally {
@@ -963,7 +1066,7 @@ export class Session {
   }
 
   /** 直前の実行の決着後に `body` を走らせる。戻り値はこの呼び出し自身の結果 / 例外。 */
-  #enqueue<T>(body: () => Promise<T>): Promise<T> {
+  #serialize<T>(body: () => Promise<T>): Promise<T> {
     const result = this.#chain.then(body);
     this.#chain = result.then(() => undefined, () => undefined);
     return result;
@@ -973,15 +1076,11 @@ export class Session {
     const { gpu, model, scheduler } = this.#state;
     const graph = model.graph;
 
-    // MUST: 利用者の inputs 由来のキーを蓄積する器は null プロトタイプ（理由は plan.ts の
-    // bindSymbols と同じ）。素の `{}` では入力名が "__proto__" のとき shape 配列が
-    // [[Prototype]] に化け、own property が作られないまま「入力が渡されていない」で落ちる。
-    const inputShapes: Record<string, readonly number[]> = Object.create(null);
-    for (const [name, tensor] of Object.entries(inputs)) inputShapes[name] = tensor.shape;
+    const { inputShapes, residentInputs } = splitInputs(inputs);
     // MUST: 束縛の解決（= 入力 shape の検証）はヒット・ミスに関わらず**毎 run 走らせる**。
     // ここが飛ぶと、キャッシュに当たった run だけ入力 shape の宣言不一致を素通りする。
-    const resolved = bindSymbols(graph, inputShapes, bindings);
-    const preparedKey = this.#preparedKey(resolved);
+    const resolved = bindSymbols(graph, inputShapes, bindings, residentNames(residentInputs));
+    const preparedKey = this.#preparedKey(resolved, residentInputs);
     const prepared = this.#takePrepared(preparedKey);
     // 計画（planGraph）と融合判定（planFusions）はどちらも GPU に触れない純関数で、ヒット時は
     // 丸ごと飛ばす（根拠は {@link Session.#preparedKey}）。融合は掴めなかったノードを素のまま
@@ -1039,15 +1138,22 @@ export class Session {
             // MUST: backing を作るのは**ヒット run だけ**。単発 run（1 回しか走らない
             // ワークロード）に slot メモリを払わせないための唯一の門で、ミス run の挙動と
             // ArenaStats はこれで完全に据え置かれる。
-            const activated = this.#activateBacking(preparedKey, recipes, shapes);
+            const activated = this.#activateBacking(
+              preparedKey,
+              recipes,
+              shapes,
+              residentInputs,
+            );
             backing = activated.backing;
             builtBacking = activated.built;
             graph.inputs.forEach((spec, index) => {
-              this.#writeInput(activated.backing, spec.name, data[index]);
+              // 常駐入力は writeBuffer を出さない（実体がそのまま焼き込まれている）。
+              const values = data[index];
+              if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
             });
           } else {
             for (const spec of graph.inputs) {
-              env.set(spec.name, this.#uploadInput(spec.name, inputs[spec.name], shapes, arena));
+              env.set(spec.name, this.#bindInput(spec.name, inputs[spec.name], shapes, arena));
             }
             recipes = await this.#buildRecipes(derived.steps);
             // MUST: 登録は `#buildRecipes` が**完走して戻った後**だけ。途中で throw した run の
@@ -1116,6 +1222,149 @@ export class Session {
     });
   }
 
+  /**
+   * enqueue 1 本（{@link Session.enqueue} の本体）。
+   *
+   * 構造は backed run の中身そのままから「フェンスと readback を伴う部分」を全部落とした形:
+   *
+   * - **errorScope を張らない**。batch が `out-of-memory` + `validation` の 2 本を区間ぶん
+   *   張り続けており、ここで push すると LIFO の入れ子が enqueue の本数だけ深くなる（しかも
+   *   pop は await を跨ぐので区間ロックが要る = batch が保持中で自己デッドロック）。
+   * - **{@link GpuContext.withScopeLock} を取らない**。区間ロックは batch が握っている
+   *   （取りに行くと自己デッドロック — GpuContext の不変条件）。
+   * - **{@link RunArena} を作らない**。通る経路は slot backing だけで、run 寿命の確保が
+   *   1 バイトも出ない（readback staging すら出ない）。
+   *
+   * MUST: 初回（導出済み計画が無い）でも backing を作る。run は「ヒット run だけ backing を
+   * 作る」— 単発 run に slot メモリを払わせないため — が、enqueue は最初から繰り返し前提の面
+   * なので、この門を持ち込むと 1 本目が非 backed（= フェンスを伴うアリーナ経路）に落ちる。
+   * 黙って落とさないのがこの面の契約なので、初回はここで払う。
+   */
+  async #enqueueOnce(inputs: RunInputs, options: EnqueueOptions): Promise<void> {
+    const { gpu, model, scheduler } = this.#state;
+    const graph = model.graph;
+    const batch = options.batch[RUNTIME_INTERNAL];
+    batch.assertOpen(gpu);
+    // MUST: 区間の決着で「未 submit を出し切る」「計測窓を閉じる」の相手として登録する。
+    batch.join(scheduler);
+
+    const { inputShapes, residentInputs } = splitInputs(inputs);
+    // MUST: 束縛の解決（= 入力 shape の検証）は run と同じく毎回走らせる。
+    const resolved = bindSymbols(
+      graph,
+      inputShapes,
+      options.bindings ?? {},
+      residentNames(residentInputs),
+    );
+    const preparedKey = this.#preparedKey(resolved, residentInputs);
+    const prepared = this.#takePrepared(preparedKey);
+    const derived = prepared ?? this.#planSteps(resolved);
+    const shapes = derived.shapes;
+    this.#lastRunFusions = derived.fusions;
+    this.#lastRunPrepared = undefined;
+    this.#paramsAllocCount = 0;
+    this.#paramsReuseCount = 0;
+
+    let builtBacking = false;
+    try {
+      let recipes: readonly StepRecipe[];
+      if ("recipes" in derived) {
+        recipes = derived.recipes;
+      } else {
+        recipes = await this.#buildRecipes(derived.steps);
+        // MUST: 登録は `#buildRecipes` が完走して戻った後だけ（run と同じ理由）。
+        this.#registerPrepared(preparedKey, { shapes, recipes, fusions: derived.fusions });
+      }
+      // MUST: 入力と写し先の検査（値依存）は backing 構築より前。ここで落ちる enqueue に
+      // slot の構築を払わせない。
+      const data = graph.inputs.map((spec) =>
+        this.#checkInput(spec.name, inputs[spec.name], shapes)
+      );
+      const copies = this.#planCopyOutputs(options.copyOutputs, shapes);
+      const activated = this.#activateBacking(preparedKey, recipes, shapes, residentInputs);
+      builtBacking = activated.built;
+      graph.inputs.forEach((spec, index) => {
+        const values = data[index];
+        if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
+      });
+      this.#lastRunPrepared = {
+        hit: prepared !== undefined,
+        cachedPlans: this.#state.prepared.size,
+      };
+      executeBakedPlan(recipes, activated.backing.groups, scheduler);
+      // MUST: 写しは dispatch 列の**後**に積む（同じコマンド列の FIFO が「書き終わった slot を
+      // 読む」の根拠）。写し先が同じ enqueue の常駐入力を兼ねる形（ループの状態更新）も、
+      // 読む dispatch が全て先に積まれているので正しい。
+      for (const copy of copies) {
+        const source = activated.backing.outputs.get(copy.name);
+        // IR は graph.outputs に initializer 名を書くことを許しており、その値は焼き込みの
+        // 値写像に載らない（run 側は `#readOutputs` の重みフォールバックが受け持つ）。写しの
+        // 相手にする意味は無い（実行のたびに同じ定数を GPU 内でコピーするだけ）ので落とす。
+        if (source === undefined) {
+          throw new ExecutionError(
+            `copyOutputs '${copy.name}': ノード出力ではない（initializer をそのままグラフ出力に` +
+              "した値は写せない — その値は実行に依らず不変)",
+          );
+        }
+        scheduler.copyBuffer(source, 0, copy.target[RUNTIME_INTERNAL].buffer, 0, copy.size);
+      }
+      // MUST: 末尾で必ず submit する。以後の `queue.writeBuffer`（次の enqueue の入力書き込み）は
+      // queue timeline へ issue 順に載るので先行 dispatch を追い越さない — 追い越すのは
+      // **未 submit の**エンコードだけ（ADR 0004 不変条件④）。pending を残す経路を作ると、
+      // 次の入力が前の enqueue に読まれる沈黙誤値になる。
+      scheduler.submitPending();
+    } catch (cause) {
+      // MUST: 失敗した enqueue の残 pending は submit せずに捨てる（run と同じ規律）。
+      scheduler.discard();
+      if (builtBacking) this.#retireBacking();
+      this.#destroyRetired();
+      throw cause;
+    }
+    // MUST: 破棄待ちを返してよいのは submit / discard の**後**だけ（未 submit のエンコードが
+    // 破棄済みバッファを参照しないこと）。submit 済みコマンドからの参照は WebGPU 的に安全で、
+    // 実解放は完了まで実装が遅延する。
+    this.#destroyRetired();
+    // アリーナを 1 度も作らないので、直近 run の中間バッファ実績は「無い」が正しい
+    // （前の run のものを残すと、enqueue の後に読んだ診断が別の実行の話になる）。
+    this.#lastRun = undefined;
+    this.#lastRunParams = {
+      allocCount: this.#paramsAllocCount,
+      reuseCount: this.#paramsReuseCount,
+    };
+  }
+
+  /**
+   * `copyOutputs` の検査（**backing 構築より前**に済ませる）。グラフ出力であること・常駐先が
+   * 生きていること・大きさが宣言 shape ぶんと厳密一致であることを見る。
+   */
+  #planCopyOutputs(
+    copyOutputs: Readonly<Record<string, ResidentTensor>> | undefined,
+    shapes: ReadonlyMap<string, readonly number[]>,
+  ): readonly { readonly name: string; readonly target: ResidentTensor; readonly size: number }[] {
+    if (copyOutputs === undefined) return [];
+    return Object.entries(copyOutputs).map(([name, target]) => {
+      if (!this.#state.outputNames.has(name)) {
+        throw new ExecutionError(
+          `copyOutputs '${name}' はグラフ出力ではない（[${
+            [...this.#state.outputNames].join(", ")
+          }]）`,
+        );
+      }
+      assertResidentLive(target, `copyOutputs '${name}'`);
+      const shape = resolvedShape(shapes, name);
+      // MUST: 出力 slot の大きさと同じ算式（`#readOutputs` の staging と揃える）。
+      const size = Math.max(4, numel(shape) * 4);
+      if (target.byteLength !== size) {
+        throw new ExecutionError(
+          `copyOutputs '${name}': 常駐テンソル '${target.label}' の ${target.byteLength} バイトが shape [${
+            shape.join(",")
+          }] の ${size} バイトと合わない`,
+        );
+      }
+      return { name, target, size };
+    });
+  }
+
   /** 導出相の前半（計画 → 融合判定）。GPU に触れない純関数だけで閉じる。 */
   #planSteps(bindings: SymbolBindings): PlannedSteps {
     const plan = planGraph(this.#state.model.graph, bindings);
@@ -1138,9 +1387,22 @@ export class Session {
    * 省く）。入力 shape 自体の検証は {@link bindSymbols} が毎 run 行う。
    * MUST: 全シンボルが束縛済みであることは bindSymbols が保証する（未束縛なら例外）ので、
    * ここで欠けを気にしなくてよい。
+   * MUST: **常駐入力の識別子も載せる**。導出結果（レシピ）自体は bindings だけの関数だが、
+   * この鍵は slot backing の signature でもあり、backing は焼き込み時に常駐入力の実体を
+   * bind group へ畳み込む — 差し替えを鍵に反映しないと、**前の常駐テンソルを束ねたままの
+   * bind group** で回り続ける（例外は 1 つも出ず、値だけが古い）。区切りの `|` は bindings
+   * 側の連結（数値とカンマだけ）には現れないので、常駐入力の無い run の鍵は従来と同一のまま。
    */
-  #preparedKey(bindings: SymbolBindings): string {
-    return this.#state.model.graph.symbols.map((sym) => bindings[sym]).join(",");
+  #preparedKey(bindings: SymbolBindings, residents: ReadonlyMap<string, ResidentTensor>): string {
+    const dims = this.#state.model.graph.symbols.map((sym) => bindings[sym]).join(",");
+    if (residents.size === 0) return dims;
+    const bound = this.#state.model.graph.inputs
+      .map((spec) => {
+        const resident = residents.get(spec.name);
+        return resident === undefined ? "t" : `r${resident[RUNTIME_INTERNAL].id}`;
+      })
+      .join(",");
+    return `${dims}|${bound}`;
   }
 
   /** キャッシュを引き、当たったら最近使用へ回す（Map の挿入順が LRU の順序そのもの）。 */
@@ -1191,6 +1453,7 @@ export class Session {
     key: string,
     recipes: readonly StepRecipe[],
     shapes: ReadonlyMap<string, readonly number[]>,
+    residentInputs: ReadonlyMap<string, ResidentTensor>,
   ): { readonly backing: ActiveBacking; readonly built: boolean } {
     const current = this.#backing;
     if (current !== undefined && current.key === key) return { backing: current, built: false };
@@ -1200,17 +1463,22 @@ export class Session {
     const device = this.#state.gpu.device;
     const slots = derivePlanSlots(recipes);
     const buffers = slots.bytes.map((size) => device.createBuffer({ size, usage: STORAGE_USAGE }));
-    // 入力バッファも backing 所有にする（run ごとの確保と writeBuffer 先の入れ替わりを消す）。
-    // MUST: 大きさはアリーナ経路の `#uploadInput` と同じ算式（4 バイト床込み — 0 要素入力で
+    // 通常入力のバッファは backing 所有にする（run ごとの確保と writeBuffer 先の入れ替わりを
+    // 消す）。常駐入力は GpuContext 所有の実体をそのまま束ね、**所有しない**。
+    // MUST: 大きさはアリーナ経路の `#bindInput` と同じ算式（4 バイト床込み — 0 要素入力で
     // 0 サイズバッファを束縛しない）。同一 signature なら不変。
+    const ownedInputs: GPUBuffer[] = [];
     const inputs = new Map<string, GPUBuffer>(
-      graph.inputs.map((spec) => [
-        spec.name,
-        device.createBuffer({
+      graph.inputs.map((spec) => {
+        const resident = residentInputs.get(spec.name);
+        if (resident !== undefined) return [spec.name, resident[RUNTIME_INTERNAL].buffer];
+        const buffer = device.createBuffer({
           size: Math.max(4, numel(resolvedShape(shapes, spec.name)) * 4),
           usage: HOST_WRITTEN_USAGE,
-        }),
-      ]),
+        });
+        ownedInputs.push(buffer);
+        return [spec.name, buffer];
+      }),
     );
     const baked = bakeBindGroups(recipes, slots, { device, buffers, inputs });
     // 読み戻し先はここで確定する。initializer がグラフ出力になる形（IR が許す）は値名の
@@ -1220,13 +1488,18 @@ export class Session {
       const buffer = baked.values.get(name);
       if (buffer !== undefined) outputs.set(name, buffer);
     }
+    const residents = [...residentInputs.values()];
+    // MUST: 焼き込みの参照は backing が生きている間ずっと積んでおく（退役で返す）。これが
+    // 「参照中の ResidentTensor.dispose を fail loudly にする」唯一の根拠。
+    for (const resident of residents) resident[RUNTIME_INTERNAL].retainBaked();
     const backing: ActiveBacking = {
       key,
       bytes: slots.bytes.reduce((total, size) => total + size, 0),
       inputs,
+      residents,
       groups: baked.groups,
       outputs,
-      owned: new Set([...buffers, ...inputs.values()]),
+      owned: new Set([...buffers, ...ownedInputs]),
       readable: new Set([
         ...[...slots.pinned].map((slot) => buffers[slot]),
         ...inputs.values(),
@@ -1237,11 +1510,17 @@ export class Session {
     return { backing, built: true };
   }
 
-  /** 活性 backing を破棄待ちへ移す（実際の `destroy()` は flush 後の後始末点で 1 回だけ）。 */
+  /**
+   * 活性 backing を破棄待ちへ移す（実際の `destroy()` は flush / submit 後の後始末点で 1 回だけ）。
+   *
+   * 常駐入力の焼き込み参照はここで返す。返してよいのは、退役した backing の bind group を
+   * 使う dispatch がこれ以降 1 本も積まれないため（積むのは活性 backing だけ）。
+   */
   #retireBacking(): void {
     const current = this.#backing;
     if (current === undefined) return;
     for (const buffer of current.owned) this.#retired.push(buffer);
+    for (const resident of current.residents) resident[RUNTIME_INTERNAL].releaseBaked();
     this.#backing = undefined;
   }
 
@@ -1308,10 +1587,23 @@ export class Session {
   }
 
   /**
-   * 入力テンソルの検査（**値依存なので毎 run 必要** — ヒット run でも飛ばせない）。通れば
-   * GPU へ書くホスト配列をそのまま返す。
+   * 入力の検査（**値依存なので毎 run 必要** — ヒット run でも飛ばせない）。通れば GPU へ書く
+   * ホスト配列を返し、**常駐入力では `undefined`**（書くものが無い）を返す。
    */
   #checkInput(
+    name: string,
+    value: RunInput | undefined,
+    shapes: ReadonlyMap<string, readonly number[]>,
+  ): Tensor["data"] | undefined {
+    if (value instanceof ResidentTensor) {
+      this.#checkResidentInput(name, value, shapes);
+      return undefined;
+    }
+    return this.#checkTensorInput(name, value, shapes);
+  }
+
+  /** ホスト配列の入力検査。通れば GPU へ書く配列をそのまま返す。 */
+  #checkTensorInput(
     name: string,
     tensor: Tensor | undefined,
     shapes: ReadonlyMap<string, readonly number[]>,
@@ -1339,14 +1631,46 @@ export class Session {
     return tensor.data;
   }
 
-  /** アリーナ経路の入力アップロード（run 寿命のバッファを 1 本確保して書く）。 */
-  #uploadInput(
+  /**
+   * 常駐入力の検査。
+   *
+   * MUST: 常駐テンソルは dtype を持たない（バイト列と大きさだけの寿命クラス）ので、検査
+   * できるのは大きさだけ。**厳密一致**を要求する — 大きい常駐テンソルの先頭だけを束ねる形を
+   * 許すと、`arrayLength()` が束縛範囲のバイト数から決まる WGSL 側で要素数が静かに変わる
+   * （アリーナが「要求より大きいバッファを配らない」のと同じ理由）。
+   */
+  #checkResidentInput(
     name: string,
-    tensor: Tensor | undefined,
+    resident: ResidentTensor,
+    shapes: ReadonlyMap<string, readonly number[]>,
+  ): void {
+    assertResidentLive(resident, `入力 '${name}'`);
+    const shape = resolvedShape(shapes, name);
+    const wanted = Math.max(4, numel(shape) * 4);
+    if (resident.byteLength !== wanted) {
+      throw new ExecutionError(
+        `入力 '${name}': 常駐テンソル '${resident.label}' の ${resident.byteLength} バイトが shape [${
+          shape.join(",")
+        }] の ${wanted} バイトと合わない`,
+      );
+    }
+  }
+
+  /**
+   * アリーナ経路の入力束縛。通常入力は run 寿命のバッファを 1 本確保して書き、常駐入力は
+   * GpuContext 所有の実体をそのまま返す（**確保も writeBuffer も出ない**）。
+   */
+  #bindInput(
+    name: string,
+    value: RunInput | undefined,
     shapes: ReadonlyMap<string, readonly number[]>,
     arena: RunArena,
   ): GPUBuffer {
-    const data = this.#checkInput(name, tensor, shapes);
+    if (value instanceof ResidentTensor) {
+      this.#checkResidentInput(name, value, shapes);
+      return value[RUNTIME_INTERNAL].buffer;
+    }
+    const data = this.#checkTensorInput(name, value, shapes);
     const buffer = arena.allocHostWritten(Math.max(4, data.length * 4), HOST_WRITTEN_USAGE);
     if (data.length > 0) this.#state.gpu.device.queue.writeBuffer(buffer, 0, data);
     return buffer;
@@ -1355,13 +1679,15 @@ export class Session {
   /**
    * backed run の入力書き込み（backing 所有の常駐バッファへ**上書き**する）。
    *
-   * MUST: この `writeBuffer` が追い越せる未 submit エンコードは存在しない。根拠は 2 つ —
-   * ①同一 Session の run は {@link Session.#chain} で直列化され、各 run は flush
-   * （`onSubmittedWorkDone`）と readback の完了まで済ませてからしか返らないので、呼ばれた時点で
-   * 先行 run の未 submit エンコードは 1 つも残っていない ②run の中では入力書き込みが全
-   * エンコードに先行する。`queue.writeBuffer` は未 submit の先行エンコードを追い越す
-   * （ADR 0004 不変条件④）ため、どちらかが崩れると前 run の dispatch が新しい入力を読む
-   * 沈黙誤値になる。
+   * MUST: この `writeBuffer` が追い越せる未 submit エンコードは存在しない。根拠は 3 つ —
+   * ①同一 Session の run / enqueue / dispose は {@link Session.#chain} で直列化される
+   * ②先行実行は戻る時点で未 submit のエンコードを 1 つも残していない: run は flush
+   * （`onSubmittedWorkDone`）と readback の完了まで済ませてから返り、**enqueue は末尾で必ず
+   * eager submit する**（{@link SubmitScheduler.submitPending}）③実行の中では入力書き込みが
+   * 全エンコードに先行する。`queue.writeBuffer` は queue timeline へ issue 順に載るので
+   * **submit 済み**の先行 dispatch は追い越さず、追い越すのは未 submit のエンコードだけ
+   * （ADR 0004 不変条件④）。どれかが崩れると前の実行の dispatch が新しい入力を読む沈黙誤値に
+   * なる。したがって「enqueue 後に submit せず pending を残す経路」を作ってはならない。
    */
   #writeInput(backing: ActiveBacking, name: string, data: Tensor["data"]): void {
     const buffer = backing.inputs.get(name);
