@@ -57,6 +57,7 @@ from karume.dist import (
     SBV2_TEXT_ENCODER_INPUTS,
     SBV2_WEIGHTS,
     SHARED_DIRNAME,
+    STAGING_SUFFIX,
     AnimaSources,
     Artifact,
     DistError,
@@ -77,6 +78,7 @@ from karume.dist import (
     irodori_series_name,
     irodori_sources,
     main,
+    materialize,
     resolve_card_renderer,
     sbv2_knob_defaults,
     sbv2_pipeline_config,
@@ -779,6 +781,150 @@ class TestFamilyAssembly:
         sources = _build_series(tmp_path / "series")
         with pytest.raises(DistError, match="既定モデル 'anima-lite'"):
             assemble_family([anima_plan(sources, ANIMA_MODEL_NAME)], tmp_path / "out", "anima-lite")
+
+
+class TestAtomicReplacement:
+    """組み立ては staging へ作って rename で据える — 既存の配布形に中途の形を一度も晒さない。"""
+
+    def _snapshot(self, out_dir: Path) -> dict[str, bytes]:
+        return {rel_path: (out_dir / rel_path).read_bytes() for rel_path in _present(out_dir)}
+
+    def _siblings(self, out_dir: Path) -> list[str]:
+        """出力先の隣に残った作業ディレクトリ（staging / 退避先）— 成功でも失敗でも空。"""
+        return sorted(path.name for path in out_dir.parent.iterdir() if path.name != out_dir.name)
+
+    def _fail_at(self, monkeypatch: pytest.MonkeyPatch, nth: int) -> None:
+        """`nth` 回目の配置だけを I/O 故障にする（数 GB の途中で落ちる形の注入）。"""
+        calls = 0
+
+        def failing(artifact: Artifact, dest: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == nth:
+                raise OSError("配置の途中で落ちた")
+            materialize(artifact, dest)
+
+        monkeypatch.setattr("karume.dist.materialize", failing)
+
+    def _versioned_plans(self, version: str) -> list[ModelPlan]:
+        """3 モデル × 1 役の最小計画。版ごとに**中身だけ**が変わる（長さは同じ）。
+
+        同じ中身で組み直すと、途中まで上書きされた木も前回の木とバイト単位で見分けられない
+        （不変の主張が空振りする）— 故障注入の観測には版の違いが要る。
+        """
+        return [
+            _synthetic_plan(name, "w/model.safetensors", f"{version}-{name}".encode())
+            for name in ("A", "B", "C")
+        ]
+
+    def test_a_failure_midway_leaves_the_previous_distribution_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """in-place で更新していた頃はここで「旧 manifest + 新旧混在ツリー」が残っていた。"""
+        out_dir = tmp_path / "models" / "synthetic"
+        assemble_family(self._versioned_plans("v1"), out_dir, "A")
+        before = self._snapshot(out_dir)
+
+        self._fail_at(monkeypatch, nth=2)
+        with pytest.raises(OSError, match="配置の途中で落ちた"):
+            assemble_family(self._versioned_plans("v2"), out_dir, "A")
+
+        assert self._snapshot(out_dir) == before
+        assert self._siblings(out_dir) == []
+
+    def test_a_failure_midway_leaves_no_distribution_on_a_fresh_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sources = _build_series(tmp_path / "series")
+        out_dir = tmp_path / "models" / ANIMA_MODEL_NAME
+        self._fail_at(monkeypatch, nth=3)
+        with pytest.raises(OSError, match="配置の途中で落ちた"):
+            _assemble_anima(sources, out_dir)
+
+        assert not out_dir.exists()
+        assert list(out_dir.parent.iterdir()) == []
+
+    def test_a_failing_card_renderer_leaves_the_previous_distribution_byte_identical(
+        self, tmp_path: Path
+    ) -> None:
+        """カードも差し替えの内側 — 描けなければ据え替えごと起きない。"""
+        out_dir = tmp_path / "models" / "synthetic"
+        assemble_family(self._versioned_plans("v1"), out_dir, "A")
+        before = self._snapshot(out_dir)
+
+        def explode(manifest: Mapping[str, Any]) -> str:
+            raise DistError("カードが描けない")
+
+        with pytest.raises(DistError, match="カードが描けない"):
+            assemble_family(self._versioned_plans("v2"), out_dir, "A", render_card=explode)
+
+        assert self._snapshot(out_dir) == before
+        assert self._siblings(out_dir) == []
+
+    def test_it_writes_the_card_into_the_tree_it_swaps_in(self, tmp_path: Path) -> None:
+        """`render_card` は組み立て済みの manifest を受け取り、据わる木の中に書かれる。"""
+        sources = _build_series(tmp_path / "series")
+        out_dir = tmp_path / "models" / ANIMA_MODEL_NAME
+        assemble_family(
+            [anima_plan(sources, ANIMA_MODEL_NAME)],
+            out_dir,
+            ANIMA_MODEL_NAME,
+            render_card=lambda manifest: f"{manifest['defaultModel']}\n",
+        )
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert card == f"{ANIMA_MODEL_NAME}\n"
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(ANIMA_MODEL_NAME))
+        assert self._siblings(out_dir) == []
+
+    def test_reassembling_a_subset_replaces_the_whole_repository(self, tmp_path: Path) -> None:
+        """再組み立ては plan に無いモデルごと丸ごと置き換える（前回の残骸が生き残らない）。"""
+        series = tmp_path / "series"
+        first = _build_series(series, model="anima-turbo", mark=b"-turbo")
+        second = _build_series(series, model="anima-lite", mark=b"-lite")
+        out_dir = tmp_path / "models" / "anima-family"
+        assemble_family(
+            [anima_plan(first, "anima-turbo"), anima_plan(second, "anima-lite")],
+            out_dir,
+            "anima-turbo",
+        )
+
+        manifest = assemble_family([anima_plan(first, "anima-turbo")], out_dir, "anima-turbo")
+
+        assert list(manifest["models"]) == ["anima-turbo"]
+        assert not (out_dir / "anima-lite").exists()
+        # 1 モデルだけなら畳む相手が居ない = `shared/` も残らない（ADR 0041 §5）。
+        assert not (out_dir / SHARED_DIRNAME).exists()
+        assert _present(out_dir) == sorted([*_in_subtree("anima-turbo"), MANIFEST_FILENAME])
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree("anima-turbo"))
+
+    def test_it_discards_a_working_directory_left_by_an_interrupted_run(
+        self, tmp_path: Path
+    ) -> None:
+        """中断が残した staging は踏み直さずに捨てる（plan に無いファイルを混ぜない）。"""
+        sources = _build_series(tmp_path / "series")
+        out_dir = tmp_path / "models" / ANIMA_MODEL_NAME
+        leftover = out_dir.with_name(out_dir.name + STAGING_SUFFIX)
+        _write(leftover / "anima-lite" / "transformer" / "model.f16.safetensors", b"interrupted")
+
+        _assemble_anima(sources, out_dir)
+
+        assert _present(out_dir) == sorted([*_in_subtree(ANIMA_MODEL_NAME), MANIFEST_FILENAME])
+        assert self._siblings(out_dir) == []
+
+    def test_a_successful_reassembly_lands_the_same_tree_without_leftovers(
+        self, tmp_path: Path
+    ) -> None:
+        """成功経路は据え替えても同値 — manifest も現物も 1 回目と同じで、作業跡も残らない。"""
+        sources = _build_series(tmp_path / "series")
+        out_dir = tmp_path / "models" / ANIMA_MODEL_NAME
+        first = _assemble_anima(sources, out_dir)
+        snapshot = self._snapshot(out_dir)
+
+        again = _assemble_anima(sources, out_dir)
+
+        assert again == first
+        assert self._snapshot(out_dir) == snapshot
+        assert self._siblings(out_dir) == []
 
 
 class TestModelCard:

@@ -92,6 +92,12 @@ SHARED_DIRNAME = "shared"
 #: （{@link verify_dist} はモデルカードを書く**前**に走るので、無いまま通る必要がある）。
 META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
 
+#: 組み立て中のツリー（staging）と、差し替え直前まで残す旧ツリーの置き場 — どちらも**出力先と
+#: 同じ親**に `<出力先の名前><接尾辞>` で作る。同じ親なのは rename が同一ファイルシステム内で
+#: しか原子的でないため（`/tmp` などへ逃がすと swap が跨デバイスコピーへ落ち、原子性ごと消える）。
+STAGING_SUFFIX = ".staging"
+SUPERSEDED_SUFFIX = ".old"
+
 #: 規模上限（ADR 0041 §7）。hub が同じ値で弾くので、**焼く側で先に落とす**
 #: （配布してから利用者の手元で初めて分かる形にしない）。
 MAX_MODELS = 32
@@ -501,27 +507,28 @@ def manifest_text(manifest: Mapping[str, Any]) -> str:
     return json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
 
 
-def assemble_family(
+def _discard_tree(path: Path) -> None:
+    """`path` を（在れば）丸ごと消す — staging / 退避先の後始末。
+
+    中断が残した作業ディレクトリを踏み直すと、plan に無いファイルが新しいツリーへ黙って混ざる
+    （{@link verify_dist} が宣言外ファイルとして落とすが、数 GB を並べ切った後になる）。
+    """
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _materialize_family(
     plans: Sequence[ModelPlan], out_dir: Path, default_model: str
 ) -> dict[str, Any]:
-    """計画済みのモデル群を 1 リポへ組み立て、`karume.json` を書いて manifest を返す。
+    """検査済みの計画群を `out_dir` へ並べ、`karume.json` を書いて manifest を返す。
 
     ① 各モデルのサブツリーへ置く → ② 共有ファイルを `shared/` へ畳む → ③ 現物から manifest。
 
-    MUST: `plans` 全体に掛かる検査は**最初の 1 バイトを書く前**に全部済ませる（出力ディレクトリ
-    すら作らない）— 途中で落ちると数 GB を並べ直すことになり、`karume.json` の無い / 古いままの
-    中途半端なツリーが残る。ここから先（配置・畳み込み・manifest）は落ちない前提で書ける。
+    書き先は呼び手（{@link assemble_family}）が用意する staging で、**空から作る**前提
+    （配布先を直接更新しないので、途中で落ちても捨てるだけで済む）。
     """
-    if not plans:
-        raise DistError("組み立てるモデルが 1 つも無い")
-    names = [plan.name for plan in plans]
-    if len(set(names)) != len(names):
-        raise DistError(f"モデル名が重複している: {names}")
-    if default_model not in names:
-        raise DistError(f"既定モデル '{default_model}' が組み立て対象 {names} に無い")
-    assert_plan_limits(plans)
-    assert_plan_sources(plans)
-
     out_dir.mkdir(parents=True, exist_ok=True)
     placed: dict[tuple[str, str], str] = {}
     digests: dict[str, str] = {}
@@ -549,6 +556,59 @@ def assemble_family(
     }
     assert_manifest_limits(manifest)
     (out_dir / MANIFEST_FILENAME).write_text(manifest_text(manifest), encoding="utf-8")
+    return manifest
+
+
+def assemble_family(
+    plans: Sequence[ModelPlan],
+    out_dir: Path,
+    default_model: str,
+    render_card: Callable[[Mapping[str, Any]], str] | None = None,
+) -> dict[str, Any]:
+    """計画済みのモデル群を 1 リポへ組み立て、`out_dir` をその形へ**丸ごと差し替える**。
+
+    staging（`<出力先の名前>.staging`・同じ親）へ全部作り（配置 → 共有の畳み込み →
+    `karume.json` → {@link verify_dist} → `README.md`）、通ってから rename で据える。既存の
+    `out_dir` は最後の rename まで 1 バイトも触らない — 途中で落ちれば staging だけが消えて、
+    配布形は前回のまま残る（in-place で更新していた頃の「旧 manifest + 新旧混在ツリー」という
+    失敗様式が構造的に無くなる）。前回の中断が残した staging / 退避先は黙って捨てて作り直す。
+
+    MUST: 差し替えは**丸ごと**で、`out_dir` の元の中身は 1 つも引き継がない — `A` + `B` で
+    組んだ出力へ `A` だけを組み直すと `B` は消える（全部コピーし終えてから宣言外ファイルとして
+    見つかるのではなく、そもそも残らない）。`README.md` も staging の中で描くので、据わった
+    配布形はカードまで揃っている（`render_card` は**検証を通った** manifest を受け取る）。
+
+    MUST: `plans` 全体に掛かる検査は**最初の 1 バイトを書く前**に全部済ませる（staging すら
+    作らない）— 途中で落ちると数 GB を並べ直すことになる。
+    """
+    if not plans:
+        raise DistError("組み立てるモデルが 1 つも無い")
+    names = [plan.name for plan in plans]
+    if len(set(names)) != len(names):
+        raise DistError(f"モデル名が重複している: {names}")
+    if default_model not in names:
+        raise DistError(f"既定モデル '{default_model}' が組み立て対象 {names} に無い")
+    assert_plan_limits(plans)
+    assert_plan_sources(plans)
+
+    staging = out_dir.with_name(out_dir.name + STAGING_SUFFIX)
+    superseded = out_dir.with_name(out_dir.name + SUPERSEDED_SUFFIX)
+    _discard_tree(staging)
+    _discard_tree(superseded)
+    try:
+        manifest = _materialize_family(plans, staging, default_model)
+        verify_dist(staging)
+        if render_card is not None:
+            (staging / MODEL_CARD_FILENAME).write_text(render_card(manifest), encoding="utf-8")
+    except BaseException:
+        # 中断（Ctrl-C）も含めて staging は残さない — 既存の配布形は触っていないので不変。
+        _discard_tree(staging)
+        raise
+    # 据えるのは rename 2 回。非空ディレクトリの上へは rename できないので既存を先に退避する。
+    if out_dir.exists():
+        os.replace(out_dir, superseded)
+    os.replace(staging, out_dir)
+    _discard_tree(superseded)
     return manifest
 
 
@@ -2127,13 +2187,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     # MUST: 全モデルの計画（= 検査と読み取り）を配置の**前**に済ませる — 2 モデル目で落ちる
     # 形でも、1 モデル目だけ入った配布形を後段に見せない。
     plans = [pipeline.plan(args.series, model) for model in models]
-    manifest = assemble_family(plans, out_dir, models[0])
+    # モデルカードは組み立ての中（staging）で、**検証を通った manifest** から描く（表と現物が
+    # 食い違ったまま説明だけ生えることがない順序・カードごと 1 回で据わる）。リポ ID は組み立て
+    # 先のディレクトリ名から導く — manifest は自分の在り処を知らず、ファミリーリポの名前は
+    # pipeline の定数にもできない。
+    manifest = assemble_family(
+        plans,
+        out_dir,
+        models[0],
+        render_card=partial(render_card, repo=f"{HF_OWNER}/{out_dir.name}"),
+    )
     verified = verify_dist(out_dir)
-    # モデルカードは**検証を通った manifest** から描く（表と現物が食い違ったまま説明だけ
-    # 生えることがない順序）。リポ ID は組み立て先のディレクトリ名から導く — manifest は
-    # 自分の在り処を知らず、ファミリーリポの名前は pipeline の定数にもできない。
-    card = render_card(manifest, f"{HF_OWNER}/{out_dir.name}")
-    (out_dir / MODEL_CARD_FILENAME).write_text(card, encoding="utf-8")
     for rel_path, size in sorted(verified.items()):
         print(f"{size:>12}  {rel_path}")
     for rel_path in sorted(META_PATHS):
