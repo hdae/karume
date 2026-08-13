@@ -18,7 +18,8 @@
  * 4. ホスト: 参照 latent を patch → `speaker` → **平均トークンを前置**（グラフの外）
  * 5. `duration` → log frames → ホストで S を決める（expm1 → 銀行家丸め → clamp）
  * 6. ホスト: 条件 state を Tmax へ右 pad + 区間マスクを組む
- * 7. `dit` を 1 セッションで 40〜100 forward（Euler + CFG independent）→ latent
+ * 7. `dit` を 1 セッションで 40〜100 forward（CFG 合成と Euler は GPU 常駐の小グラフ 2 本 —
+ *    ループ全体が 1 batch で、ホストへ降りるのは最後の潜在 1 回だけ）→ latent
  * 8. ホスト: 末尾トリムの位置を **z 上で**決める（`host/trim.ts`）
  * 9. `codec_decoder` を 1 セッションでタイルぶん回す（`codec.ts`）→ 全長の波形
  * 10. ホスト: 秒指定 / 末尾トリムの短いほうでサンプル単位に切る
@@ -28,7 +29,9 @@
  * {@link IrodoriPipeline.fromAssets} は **Session を 1 本も張らない** — 開くのはコンテナ
  * （`openModel` = ヘッダ解析のみ）までで、GPU 常駐は {@link IrodoriPipeline.generate} の
  * 中で段ごとに張っては畳む。`backbone` だけで 1.26GB あるので、条件エンコーダと DiT を
- * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。
+ * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。DiT の段だけは `dit` に加えて
+ * ホストで組んだ小グラフ 2 本（{@link runDitLoopResident}）を同時に張るが、重みを持たない
+ * ノード 5 個ぶんなので VRAM の話には効かない。
  *
  * MUST: この段取りは**公開 API 側でも**守る — `generate` / `generateLatent` は直列化鎖に載せ
  * （並行呼び出しは待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。
@@ -66,6 +69,7 @@ import {
   type GpuContext,
   type KarumeModel,
   openModel,
+  type ResidentTensor,
   type Session,
   type SessionDiagnostics,
   type SessionOptions,
@@ -109,6 +113,14 @@ import {
   type SequencePlan,
 } from "./host/round.ts";
 import { type CfgVariant, combineCfg, eulerStep, tSchedule } from "./host/sampler.ts";
+import {
+  COMBINE_INPUTS,
+  COMBINE_OUTPUT,
+  combineGraph,
+  EULER_INPUTS,
+  EULER_OUTPUT,
+  eulerGraph,
+} from "./host/sampler-graph.ts";
 import { timestepEmbedding, timestepFrequencies } from "./host/t-embed.ts";
 import { findFlatteningPoint, trimmedSampleCount } from "./host/trim.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
@@ -223,9 +235,16 @@ export type IrodoriPipelineOptions = {
   /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
   readonly quant?: string;
   /**
-   * `Session.run` 1 回ごとの診断を受け取る観測席（1 生成 = 条件エンコーダ 5〜7 回 +
-   * `dit` 40〜100 回）。op 別 GPU 時間（`lastRunTiming`）が要るときは `gpu` に
+   * 実行 1 回ごとの診断を受け取る観測席（1 生成 = 条件エンコーダ 5〜7 回 + `dit` 40〜100 回）。
+   * op 別 GPU 時間（`lastRunTiming`）が要るときは `gpu` に
    * `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
+   *
+   * NOTE: 計測を有効にした device では DiT ループが**ホスト経路**（forward ごとに readback）で
+   * 回る — 常駐経路が使う batch は計測と両立しない（`beginBatch` が拒否する）。出力は同じだが
+   * 壁時計は倍近くになるので、内訳を採るとき以外は計測を有効にしない。DiT の診断は
+   * `enqueue` ごとに届き、常駐経路では `lastRun` / `lastRunTiming` が `undefined` になる
+   * （アリーナも計測窓も作らない）。
+   *
    * コールバックの例外は握らない（fail loudly — 生成ごと落ちる）。
    */
   readonly onRunDiagnostics?: (
@@ -426,16 +445,22 @@ const bool = (value: boolean): Tensor => ({
   data: Uint32Array.of(value ? 1 : 0),
 });
 
-/** グラフ出力を**位置**で引く（IR v1 の出力名は `output.<i>` — 名前を決め打ちしない）。 */
+/** グラフ出力**名**を位置で引く（IR v1 の出力名は `output.<i>` — 名前を決め打ちしない）。 */
+const outputNameAt = (model: KarumeModel, index: number): string => {
+  const name = model.graph.outputs[index];
+  if (name === undefined) {
+    throw new Error(`グラフ出力 ${index} が無い（${model.graph.outputs.length} 本しかない）`);
+  }
+  return name;
+};
+
+/** グラフ出力を**位置**で引く。 */
 const outputAt = (
   model: KarumeModel,
   outputs: Readonly<Record<string, Tensor>>,
   index: number,
 ): Tensor => {
-  const name = model.graph.outputs[index];
-  if (name === undefined) {
-    throw new Error(`グラフ出力 ${index} が無い（${model.graph.outputs.length} 本しかない）`);
-  }
+  const name = outputNameAt(model, index);
   const tensor = outputs[name];
   if (tensor === undefined) throw new Error(`グラフ出力 ${index}（'${name}'）が実行結果に無い`);
   return tensor;
@@ -756,6 +781,206 @@ type LatentStage = {
   readonly plan: SequencePlan;
 };
 
+/** CFG の 1 変種（落とす区間・強さ・その区間だけ False にしたマスク）。 */
+type UncondVariant = {
+  readonly segment: IrodoriSegment;
+  readonly scale: number;
+  readonly mask: Tensor;
+};
+
+/**
+ * DiT ループ 1 本ぶんの材料（2 つの経路が**同じもの**を読む — ホストの計算はどちらでも同一）。
+ *
+ * 条件 3 本を値と Tensor の両方で持つのは、常駐経路が {@link ResidentTensor.write} に生の
+ * 配列を要り、ホスト経路が `run` に Tensor を要るため。**同じ配列の別の見方**であって、
+ * 独立に更新される複製ではない。
+ */
+type DitLoop = {
+  readonly frames: number;
+  /** 初期ノイズ `[frames × latentDim]`。 */
+  readonly initial: Float32Array<ArrayBuffer>;
+  readonly schedule: Float32Array<ArrayBuffer>;
+  readonly frequencies: Float32Array<ArrayBuffer>;
+  /** 右 pad 済みの条件 3 本（グラフ入力名 → 値）。 */
+  readonly conditionValues: Readonly<Record<string, Float32Array<ArrayBuffer>>>;
+  readonly conditions: Readonly<Record<string, Tensor>>;
+  readonly condMask: Tensor;
+  readonly uncondVariants: readonly UncondVariant[];
+};
+
+/** ループの結果（最終潜在と `dit` を回した回数）。 */
+type DitLoopResult = {
+  readonly x: Float32Array<ArrayBuffer>;
+  readonly forwards: number;
+};
+
+/**
+ * forward ごとにホストへ降りるループ（`run` → readback → `combineCfg` + `eulerStep` →
+ * 再アップロード）。
+ *
+ * **数値の正本**であり、計測が有効な device（`gpuTiming` — 常駐経路が使う batch を開けない）
+ * での唯一の経路でもある。
+ */
+const runDitLoopOnHost = async (state: IrodoriState, loop: DitLoop): Promise<DitLoopResult> => {
+  const { config } = state;
+  let x = loop.initial;
+  let forwards = 0;
+  await withSession(
+    state.gpu,
+    state.dit,
+    state.ditSessionOptions,
+    observer(state, "dit"),
+    async (run) => {
+      for (let step = 0; step < config.steps; step += 1) {
+        const t = loop.schedule[step];
+        const tNext = loop.schedule[step + 1];
+        const tEmbed = f32(timestepEmbedding(t, loop.frequencies), [1, config.timestepEmbedDim]);
+        const xTensor = f32(x, [1, loop.frames, config.latentDim]);
+        const cond = asF32(
+          outputAt(
+            state.dit,
+            await run({ x_t: xTensor, t_embed: tEmbed, mask: loop.condMask, ...loop.conditions }),
+            0,
+          ),
+          "dit の速度場",
+        );
+        forwards += 1;
+        const variants: CfgVariant[] = [];
+        if (t >= config.cfgMinT && t <= config.cfgMaxT) {
+          // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
+          for (const variant of loop.uncondVariants) {
+            const outputs = await run({
+              x_t: xTensor,
+              t_embed: tEmbed,
+              mask: variant.mask,
+              ...loop.conditions,
+            });
+            forwards += 1;
+            variants.push({
+              scale: variant.scale,
+              velocity: asF32(
+                outputAt(state.dit, outputs, 0),
+                `dit の速度場（uncond ${variant.segment}）`,
+              ),
+            });
+          }
+        }
+        x = eulerStep(x, combineCfg(cond, variants), Math.fround(tNext - t));
+      }
+    },
+  );
+  return { x, forwards };
+};
+
+/**
+ * ループ全体を **1 batch** に束ねる GPU 常駐経路（H-5）。
+ *
+ * 潜在・速度場・CFG の途中結果・条件 3 本を全て {@link ResidentTensor} に置き、`dit` と
+ * ホストで組んだ小グラフ 2 本（{@link combineGraph} / {@link eulerGraph}）を `enqueue` で
+ * 積むだけにする。ホストへ降りるのは最後の 1 回（`x_t.read()`）だけで、フェンスは
+ * `batch.finish()` の 1 本に集約される。
+ *
+ * MUST: 区間の中で `Session.run` を待たない（自己デッドロック — `beginBatch` の doc）。
+ * MUST: 演算の積み方は {@link runDitLoopOnHost} と 1 演算ずつ同型（変種順・差の基準・
+ * 引数順）。ずれると最終桁が動き、WAV sha256 門が割れる。
+ * MUST: 常駐テンソルを返すのは Session を全て畳んだ**後**（焼き込み参照が残っていると
+ * `dispose` が fail loudly になる）。
+ */
+const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<DitLoopResult> => {
+  const { config, gpu } = state;
+  const { frames } = loop;
+  const observe = observer(state, "dit");
+  const latentBytes = frames * config.latentDim * 4;
+  // 記号次元は常駐入力から束縛できない（常駐テンソルは shape を持たない）ので毎 enqueue 明示する。
+  const symbols = state.dit.graph.symbols;
+  if (symbols.length !== 1) {
+    throw new Error(`irodori: dit の記号次元が 1 本でない（[${symbols.join(", ")}]）`);
+  }
+  const bindings = { [symbols[0]]: frames };
+  const velocity = outputNameAt(state.dit, 0);
+  const residents: ResidentTensor[] = [];
+  const sessions: Session[] = [];
+  try {
+    const createResident = async (bytes: number, label: string): Promise<ResidentTensor> => {
+      const tensor = await gpu.createResident(bytes, label);
+      residents.push(tensor);
+      return tensor;
+    };
+    const xT = await createResident(latentBytes, "irodori.x_t");
+    const vCond = await createResident(latentBytes, "irodori.v_cond");
+    const vVariant = await createResident(latentBytes, "irodori.v_variant");
+    const accumulator = await createResident(latentBytes, "irodori.cfg_acc");
+    xT.write(loop.initial);
+    const conditions: Record<string, ResidentTensor> = {};
+    for (const [name, values] of Object.entries(loop.conditionValues)) {
+      const tensor = await createResident(values.byteLength, `irodori.${name}`);
+      // ループの前に 1 度だけ投入する（毎 forward の 3.8MB writeBuffer が丸ごと消える）。
+      tensor.write(values);
+      conditions[name] = tensor;
+    }
+    const open = async (model: KarumeModel, options: SessionOptions): Promise<Session> => {
+      const session = await createSession(gpu, model, options);
+      sessions.push(session);
+      return session;
+    };
+    const dit = await open(state.dit, state.ditSessionOptions);
+    const combine = await open(openModel(combineGraph(frames, config.latentDim)), {});
+    const euler = await open(openModel(eulerGraph(frames, config.latentDim)), {});
+    // 強さは step に依らないので 1 度だけ作る。
+    const scales = loop.uncondVariants.map((variant) => f32(Float32Array.of(variant.scale), [1]));
+
+    let forwards = 0;
+    const batch = await gpu.beginBatch();
+    try {
+      for (let step = 0; step < config.steps; step += 1) {
+        const t = loop.schedule[step];
+        const tEmbed = f32(timestepEmbedding(t, loop.frequencies), [1, config.timestepEmbedDim]);
+        const forward = async (mask: Tensor, target: ResidentTensor): Promise<void> => {
+          await dit.enqueue(
+            { x_t: xT, t_embed: tEmbed, mask, ...conditions },
+            { batch, bindings, copyOutputs: { [velocity]: target } },
+          );
+          forwards += 1;
+          if (observe !== undefined) observe(dit.diagnostics());
+        };
+        await forward(loop.condMask, vCond);
+        const guided = t >= config.cfgMinT && t <= config.cfgMaxT &&
+          loop.uncondVariants.length > 0;
+        if (guided) {
+          // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
+          for (let index = 0; index < loop.uncondVariants.length; index += 1) {
+            await forward(loop.uncondVariants[index].mask, vVariant);
+            // k = 0 の被加数は cond そのもの（正本 `combineCfg` の `let value = base`）。同じ
+            // バッファを acc_in と cond の 2 口で読むだけなので WebGPU 上も合法。
+            await combine.enqueue({
+              [COMBINE_INPUTS.accumulator]: index === 0 ? vCond : accumulator,
+              [COMBINE_INPUTS.cond]: vCond,
+              [COMBINE_INPUTS.variant]: vVariant,
+              [COMBINE_INPUTS.scale]: scales[index],
+            }, { batch, copyOutputs: { [COMBINE_OUTPUT]: accumulator } });
+          }
+        }
+        await euler.enqueue({
+          [EULER_INPUTS.x]: xT,
+          [EULER_INPUTS.velocity]: guided ? accumulator : vCond,
+          [EULER_INPUTS.deltaT]: f32(
+            Float32Array.of(Math.fround(loop.schedule[step + 1] - t)),
+            [1],
+          ),
+        }, { batch, copyOutputs: { [EULER_OUTPUT]: xT } });
+      }
+    } finally {
+      // MUST: 区間は必ず閉じる（開いたままだと device 単位のロックが返らず、以後の run が
+      // 永久に待つ）。
+      await batch.finish();
+    }
+    return { x: new Float32Array(await xT.read()), forwards };
+  } finally {
+    for (const session of sessions) await session.dispose();
+    for (const tensor of residents) tensor.dispose();
+  }
+};
+
 /** テキスト 1 本（+ caption / 参照話者）から latent を作る。 */
 const generateLatent = async (
   state: IrodoriState,
@@ -892,22 +1117,15 @@ const generateLatent = async (
     speaker: speakerState.rows,
     caption: captionState.rows,
   };
+  const conditionValues = {
+    text_state: rightPad(textState, caps.text, config.textDim, "text 条件"),
+    speaker_state: rightPad(speakerState, caps.speaker, config.speakerDim, "speaker 条件"),
+    caption_state: rightPad(captionState, caps.caption, config.captionDim, "caption 条件"),
+  };
   const conditions = {
-    text_state: f32(rightPad(textState, caps.text, config.textDim, "text 条件"), [
-      1,
-      caps.text,
-      config.textDim,
-    ]),
-    speaker_state: f32(rightPad(speakerState, caps.speaker, config.speakerDim, "speaker 条件"), [
-      1,
-      caps.speaker,
-      config.speakerDim,
-    ]),
-    caption_state: f32(rightPad(captionState, caps.caption, config.captionDim, "caption 条件"), [
-      1,
-      caps.caption,
-      config.captionDim,
-    ]),
+    text_state: f32(conditionValues.text_state, [1, caps.text, config.textDim]),
+    speaker_state: f32(conditionValues.speaker_state, [1, caps.speaker, config.speakerDim]),
+    caption_state: f32(conditionValues.caption_state, [1, caps.caption, config.captionDim]),
   };
   const maskShape = [1, 1, 1, frames + caps.text + caps.speaker + caps.caption];
   const condMask: Tensor = {
@@ -918,11 +1136,7 @@ const generateLatent = async (
   // CFG が有効な条件（上流 `has_*_cfg`）: 強さが正で、かつその条件が実際に載っていること
   // （text は必ず 1 token 以上ある — 空文字は packIds が落とす）。uncond マスクは step ごとに
   // 作り直さず、ここで 1 度だけ組む。
-  const uncondVariants: readonly {
-    readonly segment: IrodoriSegment;
-    readonly scale: number;
-    readonly mask: Tensor;
-  }[] = SEGMENT_ORDER
+  const uncondVariants: readonly UncondVariant[] = SEGMENT_ORDER
     .filter((segment: IrodoriSegment) => config.cfgScales[segment] > 0 && used[segment] > 0)
     .map((segment) => ({
       segment,
@@ -937,9 +1151,9 @@ const generateLatent = async (
   // --- ⑦ Euler + CFG independent -----------------------------------------
   const noiseLength = frames * config.latentDim;
   const seed = request.seed ?? 0;
-  let x: Float32Array<ArrayBuffer>;
+  let initial: Float32Array<ArrayBuffer>;
   if (request.initialNoise === undefined) {
-    x = new Randn(seed).normals(noiseLength);
+    initial = new Randn(seed).normals(noiseLength);
   } else {
     if (request.initialNoise.length !== noiseLength) {
       throw new Error(
@@ -947,55 +1161,24 @@ const generateLatent = async (
           ` ${frames}×${config.latentDim} と違う（決まった latent 長は ${frames}）`,
       );
     }
-    x = request.initialNoise;
+    initial = request.initialNoise;
   }
-  const schedule = tSchedule(config.steps, config.initScale);
-  const frequencies = timestepFrequencies(config.timestepEmbedDim);
-  let forwards = 0;
-  await withSession(
-    state.gpu,
-    state.dit,
-    state.ditSessionOptions,
-    observer(state, "dit"),
-    async (run) => {
-      for (let step = 0; step < config.steps; step += 1) {
-        const t = schedule[step];
-        const tNext = schedule[step + 1];
-        const tEmbed = f32(timestepEmbedding(t, frequencies), [1, config.timestepEmbedDim]);
-        const xTensor = f32(x, [1, frames, config.latentDim]);
-        const cond = asF32(
-          outputAt(
-            state.dit,
-            await run({ x_t: xTensor, t_embed: tEmbed, mask: condMask, ...conditions }),
-            0,
-          ),
-          "dit の速度場",
-        );
-        forwards += 1;
-        const variants: CfgVariant[] = [];
-        if (t >= config.cfgMinT && t <= config.cfgMaxT) {
-          // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
-          for (const variant of uncondVariants) {
-            const outputs = await run({
-              x_t: xTensor,
-              t_embed: tEmbed,
-              mask: variant.mask,
-              ...conditions,
-            });
-            forwards += 1;
-            variants.push({
-              scale: variant.scale,
-              velocity: asF32(
-                outputAt(state.dit, outputs, 0),
-                `dit の速度場（uncond ${variant.segment}）`,
-              ),
-            });
-          }
-        }
-        x = eulerStep(x, combineCfg(cond, variants), Math.fround(tNext - t));
-      }
-    },
-  );
+  const loop: DitLoop = {
+    frames,
+    initial,
+    schedule: tSchedule(config.steps, config.initScale),
+    frequencies: timestepFrequencies(config.timestepEmbedDim),
+    conditionValues,
+    conditions,
+    condMask,
+    uncondVariants,
+  };
+  // MUST: 計測が有効な device では batch を開けない（ADR 0021 — 未回収の timestamp が区間ぶん
+  // 溜まる）。op 別 GPU 時間の観測席（`onRunDiagnostics` + `gpuTiming`）を残すため、その device
+  // だけは従来のホストループへ落とす。積む演算はどちらも同型で、出力は同じでなければならない。
+  const { x, forwards } = state.gpu.gpuTimingEnabled
+    ? await runDitLoopOnHost(state, loop)
+    : await runDitLoopResident(state, loop);
 
   return {
     latent: {
