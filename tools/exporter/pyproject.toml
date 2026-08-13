@@ -64,6 +64,8 @@ siglip2 = ["transformers==5.14.1"]
 # （`TorchvisionBackend`）なので、export には要らない torchvision と pillow がここでは要る
 # （pillow は `PILImageResampling` の実体 — 無いと resample の対応表が空になり、fast 側へ
 # 解決されない）。export 側の最小依存を保つため siglip2 グループには足さない。
+# `export_siglip2.py --real-images`（実画像 golden）もこのグループで回す — 実画像の前処理は
+# 同じ正本を通す必要があり、PNG を開く pillow も要る。
 siglip2-preprocess = ["pillow>=11", "torchvision>=0.28", "transformers==5.14.1"]
 
 [build-system]

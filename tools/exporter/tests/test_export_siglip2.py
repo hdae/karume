@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file
 from torch import nn
 
@@ -56,6 +57,24 @@ CASES = (
     ("case0", torch.linspace(-1.0, 1.0, 3 * 8 * 8).reshape(1, 3, 8, 8)),
     ("case1", torch.linspace(1.0, -1.0, 3 * 8 * 8).reshape(1, 3, 8, 8)),
 )
+
+#: `_sanity` の合成側を通す最小の出力（実画像側だけを動かすための土台）。
+SYNTHETIC_POOLED = {
+    "ramp": torch.tensor([[1.0, 0.0]]),
+    "ramp-dim": torch.tensor([[0.9, 0.1]]),
+    "checker": torch.tensor([[0.0, 1.0]]),
+    "noise": torch.tensor([[0.5, 0.5]]),
+}
+
+
+def _real_pooled(street: list[float]) -> dict[str, torch.Tensor]:
+    """実画像 4 ケースの出力（`photo-street` だけを動かす — 人物側が近いか風景側が近いか）。"""
+    return {
+        "photo-portrait": torch.tensor([[1.0, 0.0]]),
+        "photo-street": torch.tensor([street]),
+        "photo-landscape": torch.tensor([[0.0, 1.0]]),
+        "photo-corridor": torch.tensor([[0.1, 0.99]]),
+    }
 
 
 @pytest.fixture
@@ -124,6 +143,47 @@ class TestGoldenCases:
         assert set(sg.NEAR_PAIR) | set(sg.FAR_PAIR) <= names
 
 
+class TestRealCases:
+    def test_every_case_names_a_distinct_image(self):
+        """MUST: ケース名もファイル名も重複しない（同じ画像を 2 度使うと判別が恒真化する）。"""
+        names = [name for name, _file, _why in sg.REAL_CASES]
+        files = [file for _name, file, _why in sg.REAL_CASES]
+
+        assert len(set(names)) == len(names)
+        assert len(set(files)) == len(files)
+
+    def test_case_names_do_not_collide_with_the_synthetic_ones(self):
+        """golden は 1 ディレクトリに同居するので、綴りが衝突すると片方が黙って消える。"""
+        synthetic = {name for name, _ in sg.build_cases(Config())}
+
+        assert synthetic.isdisjoint({name for name, _file, _why in sg.REAL_CASES})
+
+    def test_the_discrimination_groups_name_existing_cases(self):
+        names = {name for name, _file, _why in sg.REAL_CASES}
+
+        assert set(sg.REAL_PERSON_CASES) | set(sg.REAL_SCENE_CASES) <= names
+
+    def test_a_missing_image_fails_loudly_before_anything_heavy(self, tmp_path):
+        """MUST: 欠けを黙って飛ばさない（golden が 3 枚で書かれると e2e 側が欠けに気づく）。"""
+        with pytest.raises(SystemExit, match="demo:eval-images"):
+            sg.build_real_cases(tmp_path, Config(), tmp_path)
+
+
+class TestIoMetadata:
+    def test_real_cases_carry_the_source_image_digest(self, exported):
+        """実画像 golden は元画像を同定できる（焼き直して採り直さない事故を落とすため）。"""
+        wrapper, graph, out_dir = exported
+        digest = "f" * 64
+        metadata = {"case0": {sg.SOURCE_IMAGE_KEY: "a.png", sg.SOURCE_SHA256_KEY: digest}}
+
+        written, _pooled = sg._write_io(wrapper, graph, CASES, out_dir, metadata)
+
+        with safe_open(str(out_dir / written[0]), framework="pt") as opened:
+            assert opened.metadata() == {sg.SOURCE_IMAGE_KEY: "a.png", sg.SOURCE_SHA256_KEY: digest}
+        with safe_open(str(out_dir / written[1]), framework="pt") as opened:
+            assert opened.metadata() is None
+
+
 class TestSanity:
     def test_passes_when_the_near_pair_is_closer(self):
         pooled = {
@@ -147,6 +207,24 @@ class TestSanity:
         }
 
         with pytest.raises(AssertionError, match="cosine の順序が構造と逆"):
+            sg._sanity(pooled)
+
+    def test_real_images_are_judged_only_when_they_are_present(self):
+        """合成 4 ケースだけの emit（既定）でも sanity は通る（実画像は追加の群）。"""
+        assert "real_cosine" not in sg._sanity(dict(SYNTHETIC_POOLED))
+
+    def test_real_images_pass_when_the_two_people_are_closest(self):
+        pooled = {**SYNTHETIC_POOLED, **_real_pooled(street=[0.99, 0.1])}
+
+        result = sg._sanity(pooled)
+
+        assert result["real_cosine"][f"{sg.REAL_PERSON_CASES[0]}×{sg.REAL_PERSON_CASES[1]}"] > 0.9
+
+    def test_real_images_fail_loudly_when_a_scene_is_closer(self):
+        """MUST: 人物どうしより人物×風景が近ければ、埋め込みは意味を捉えていない。"""
+        pooled = {**SYNTHETIC_POOLED, **_real_pooled(street=[0.1, 0.99])}
+
+        with pytest.raises(AssertionError, match="実画像の cosine の順序が逆"):
             sg._sanity(pooled)
 
     def test_fails_loudly_when_every_case_collapses_to_one_point(self):
@@ -197,7 +275,7 @@ class TestVerifyCli:
         """MUST: `--out` 未指定なら系列は `--model-dir` に追随する（固定だと上書きになる）。"""
         seen: list[Path] = []
         monkeypatch.setattr(
-            sg, "export_series", lambda _dir, out: seen.append(out) or {"dir": str(out)}
+            sg, "export_series", lambda _dir, out, **_kw: seen.append(out) or {"dir": str(out)}
         )
 
         sg.main(["--model-dir", "/tmp/siglip2-so400m-patch14-384"])
