@@ -13,8 +13,11 @@
   — **K-8 は実測で棄却**・K-10〈dacvae convT = irodori 全 GPU 23.2%〉起票）→ H-6
   （`c950e76`・tiled VAE clone 層削除・PNG 門 4 本 sha 不変）→ L-6/L-4/L-5
   （`e9880cc`/`de65a71`/`a9561c6`・exporter streaming 化と dist 配置前 plan — 出力バイト
-  不変を A/B + golden 27 本で証明・pytest 2625/3skip）。**裁定待ち**: K-10 採否・L-5 の
+  不変を A/B + golden 27 本で証明・pytest 2625/3skip）→ **K-10 も着地（`d08dd8a`・
+  convT residue grouping = 1,707 → 190ms〈9.0 倍〉・irodori 全 GPU −21%・壁 ×1.11・
+  ビット同一 = WAV sha256 同一 digest + verify 1045/0）**。**裁定待ち**: L-5 の
   `(rel_path, size)` 前置フィルタ・H-5（反復状態 GPU 常駐）の API 設計案先出し。
+  codec-decoder の新支配項は conv1d direct 1,108ms（K-4 の implicit GEMM 案）。
 - **網羅レビュー（2026-08-12・モード B・HEAD `faef828`）— レビュー完了・修正波進行中**:
   掃引 24 + 敵対検証 13 レッグ。確定 E1 / W9 群は全て推奨案で裁定済み — 正本は
   `.claude/reviews/2026-08-12_faef828/SUMMARY.md`（裁定記録込み）。性能候補の判断台帳は

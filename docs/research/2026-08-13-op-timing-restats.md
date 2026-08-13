@@ -136,7 +136,21 @@ dispatch 削減）の裏付け実測になる。無計測の壁は本波では�
   現行 HEAD での再確認（§2 の差分法の前提）。
 - i8a8 attention の効果の現在値: qk+pv 合算で f16 3,396ms → w8a8 1,329ms（2.56 倍）。
 
-## 5. 手法（前回 §5 との差分）
+## 5. 追記（同日・K-10 の着地 — convT residue grouping の検収）
+
+§3.2 の発見を受けて K-10 を実装した（`d08dd8a` — conv_transpose1d の縮約を residue
+grouping へ・キー v2）。検収 A/B（同ケース・クールダウン規約・§5 と同じドライバ）:
+
+- **convT: 1,707.1 → 189.8 / 190.2ms（9.0 倍）** — stride 8 の理論削減 8 倍 + 分岐除去分。
+- codec-decoder 段: 2,849.9 → 1,331.4ms（2.14 倍）。残りは conv1d direct 1,108ms が支配
+  （K-4 の implicit GEMM 案の対象 — 本波の外）。
+- **irodori 全 GPU: 7,364 → 5,818 / 5,791ms（−21.2%）・壁 16.08 → 14.52 / 14.50s
+  （計測込み ×1.11）**。GPU 内の新比率: dit 65% / codec-decoder 23% / encoder 11%。
+- ビット同一の証明: v1/v2 tap 列総当たり 573,839 ケース不一致 0（u32/i32 意味論模擬）・
+  verify 1045/0（実 GPU — SBV2/irodori WAV sha256 門・dacvae タイル Uint32 門込み）・
+  検収走の WAV sha256 が変更前と**同一 digest**。
+
+## 6. 手法（前回 §5 との差分）
 
 - 段の帰属は `Session.prototype.run` のラップでなく **`onRunDiagnostics`**（パイプライン
   公式席 — 前回 §6 の「観測面の恒久化」は解消済みで、e2e 門も同席を使う）。読み取り点は
