@@ -28,6 +28,8 @@ const FORMAT_IEEE_FLOAT = 3;
 const FULL_SCALE = 32767;
 /** i16 → f32 のスケール。下端 −32768 が厳密に −1.0 へ写る（上流の読み手と同じ規約）。 */
 const INT16_DIVISOR = 32768;
+/** RIFF のヘッダ欄（チャンク長 / sample rate / byte rate）が取れる最大値。 */
+const U32_MAX = 0xffff_ffff;
 
 export const encodeWav = (
   samples: Float32Array,
@@ -37,22 +39,43 @@ export const encodeWav = (
     throw new RangeError(`サンプリング周波数 ${sampleRate} が 1 以上の整数でない`);
   }
   const bytesPerSample = BITS_PER_SAMPLE / 8;
+  const frameBytes = CHANNELS * bytesPerSample;
+  // MUST: u32 域を先に見る。`setUint32` は mod 2^32 で黙って巻き戻すので、検査を欠くと
+  // 「別の周波数・別の長さを宣言した valid な WAV」が出る。byte rate は sampleRate の 2 倍
+  // なので、この 1 本で sampleRate 自身の u32 超過も覆う。
+  const byteRate = sampleRate * frameBytes;
+  if (byteRate > U32_MAX) {
+    throw new RangeError(
+      `サンプリング周波数 ${sampleRate} の byte rate ${byteRate} が u32 に収まらない` +
+        `（上限 ${Math.floor(U32_MAX / frameBytes)} Hz）`,
+    );
+  }
   const dataBytes = samples.length * bytesPerSample;
+  // RIFF チャンク長は data 長 + 36 を書くので、data 長より先にそちらが溢れる。
+  const riffBytes = HEADER_BYTES - 8 + dataBytes;
+  if (riffBytes > U32_MAX) {
+    throw new RangeError(
+      `サンプル数 ${samples.length}（data ${dataBytes} バイト）の RIFF チャンク長 ${riffBytes} が` +
+        ` u32 に収まらない（上限 ${
+          Math.floor((U32_MAX - (HEADER_BYTES - 8)) / bytesPerSample)
+        } サンプル）`,
+    );
+  }
   const out = new Uint8Array(HEADER_BYTES + dataBytes);
   const view = new DataView(out.buffer);
   const ascii = (offset: number, text: string): void => {
     for (let i = 0; i < text.length; i += 1) out[offset + i] = text.charCodeAt(i);
   };
   ascii(0, "RIFF");
-  view.setUint32(4, HEADER_BYTES - 8 + dataBytes, true);
+  view.setUint32(4, riffBytes, true);
   ascii(8, "WAVE");
   ascii(12, "fmt ");
   view.setUint32(16, 16, true); // fmt チャンク長（PCM）
   view.setUint16(20, FORMAT_PCM, true);
   view.setUint16(22, CHANNELS, true);
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * CHANNELS * bytesPerSample, true); // byte rate
-  view.setUint16(32, CHANNELS * bytesPerSample, true); // block align
+  view.setUint32(28, byteRate, true); // byte rate
+  view.setUint16(32, frameBytes, true); // block align
   view.setUint16(34, BITS_PER_SAMPLE, true);
   ascii(36, "data");
   view.setUint32(40, dataBytes, true);

@@ -280,3 +280,28 @@ Deno.test("decodeWav: フレーム境界で割り切れない data は落とす"
     "割り切れない",
   );
 });
+
+Deno.test("encodeWav: u32 に収まらない sampleRate / byte rate は落とす", () => {
+  const samples = Float32Array.of(0, 0.5);
+  // 上限ちょうど（byte rate = 0xffff_fffe）は通り、ヘッダにその値がそのまま載る。
+  const view = new DataView(encodeWav(samples, 0x7fff_ffff).buffer);
+  assertEquals(view.getUint32(24, true), 0x7fff_ffff, "sample rate");
+  assertEquals(view.getUint32(28, true), 0xffff_fffe, "byte rate");
+  // 1 つ上は sampleRate 自身は u32 に収まるが byte rate（×2）が溢れる。検査が無いと
+  // `setUint32` が mod 2^32 で巻き戻し、byte rate 0 を宣言した **valid な WAV** が出る。
+  assertThrows(() => encodeWav(samples, 0x8000_0000), RangeError, "byte rate 4294967296");
+  // sampleRate 自身が u32 を超える場合も同じ門で落ちる。
+  assertThrows(() => encodeWav(samples, 0x1_0000_0000), RangeError, "u32 に収まらない");
+});
+
+Deno.test("encodeWav: RIFF チャンク長が u32 を超えるサンプル数は落とす", () => {
+  // 上限は (0xffff_ffff − 36) / 2 = 2147483629 サンプル。実物は 8GB を超えて確保できないので、
+  // 長さだけを名乗る器で境界計算を叩く（`encodeWav` は出力を確保する**前**に長さを見る）。
+  // 上限ちょうど側は 4GB の確保が要るので置かない（通る側は既存の往復テストが押さえている）。
+  const huge = { length: 2_147_483_630 } as unknown as Float32Array;
+  assertThrows(
+    () => encodeWav(huge, 48000),
+    RangeError,
+    "RIFF チャンク長 4294967296 が u32 に収まらない",
+  );
+});
