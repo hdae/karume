@@ -28,7 +28,15 @@ export const imageToRgba = (
   const rgba = new Uint8ClampedArray(plane * 4);
   for (let index = 0; index < plane; index += 1) {
     for (let channel = 0; channel < 3; channel += 1) {
-      const value = Math.min(1, Math.max(0, image[channel * plane + index] / 2 + 0.5));
+      const raw = image[channel * plane + index];
+      // MUST: 非有限値を黙って返さない。RGBA 量子化（`Uint8ClampedArray` 代入）は NaN を 0、
+      // ±Inf を 0/255 という「正常な画素」へ変換してしまうので、ここが最後の検査点。
+      if (!Number.isFinite(raw)) {
+        const x = index % width;
+        const y = Math.floor(index / width);
+        throw new Error(`画素 (x=${x}, y=${y}) の channel ${channel} が非有限値`);
+      }
+      const value = Math.min(1, Math.max(0, raw / 2 + 0.5));
       rgba[index * 4 + channel] = Math.round(value * 255);
     }
     rgba[index * 4 + 3] = 255;

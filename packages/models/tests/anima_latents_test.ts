@@ -1,6 +1,6 @@
 // latent / 条件テンソルの整形と RGBA 化の挙動テスト。GPU も資産も要らない純関数。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   ANIMA_LATENTS_MEAN,
   ANIMA_LATENTS_STD,
@@ -84,6 +84,37 @@ Deno.test("imageToRgba: [-1,1] → [0,255]・planar から interleave・アル�
 Deno.test("imageToRgba: 要素数とサイズの食い違いを落とす", () => {
   assertThrows(() => imageToRgba(new Float32Array(5), 2, 1), Error, "要素数");
   assertThrows(() => imageToRgba(new Float32Array(6), 0, 1), RangeError);
+});
+
+Deno.test("imageToRgba: 非有限値は座標付きで落とす（黒画素へ沈黙変換しない）", () => {
+  // 2×2 の 3 面。土台は全て有限（clamp 対象の範囲外値も混ぜる）で、1 要素だけ壊す。
+  const base = new Float32Array(2 * 2 * 3);
+  base.set([-2, -1, 0, 1], 0); // R
+  base.set([1, 0, -1, -2], 4); // G
+  base.set([0, 1, -2, -1], 8); // B
+  const spoil = (offset: number, value: number): Float32Array<ArrayBuffer> => {
+    const image = base.slice();
+    image[offset] = value;
+    return image;
+  };
+  // 土台は落ちない — 検査するのは「有限か」であって「範囲内か」ではない。
+  assertEquals([...imageToRgba(base, 2, 2).slice(0, 4)], [0, 255, 128, 255]);
+
+  // 壊す位置を面ごとにずらし、座標が固定文言でなく実際の画素を指すことを見る。
+  const nan = assertThrows(() => imageToRgba(spoil(3, NaN), 2, 2), Error);
+  assertStringIncludes(nan.message, "x=1");
+  assertStringIncludes(nan.message, "y=1");
+  assertStringIncludes(nan.message, "channel 0");
+
+  const positiveInfinity = assertThrows(() => imageToRgba(spoil(5, Infinity), 2, 2), Error);
+  assertStringIncludes(positiveInfinity.message, "x=1");
+  assertStringIncludes(positiveInfinity.message, "y=0");
+  assertStringIncludes(positiveInfinity.message, "channel 1");
+
+  const negativeInfinity = assertThrows(() => imageToRgba(spoil(10, -Infinity), 2, 2), Error);
+  assertStringIncludes(negativeInfinity.message, "x=0");
+  assertStringIncludes(negativeInfinity.message, "y=1");
+  assertStringIncludes(negativeInfinity.message, "channel 2");
 });
 
 Deno.test("imageToRgba: 非正方（H≠W）でも行優先で走る", () => {

@@ -1030,10 +1030,16 @@ const generateAudio = async (
     haloFrames: config.codecHaloFrames,
   });
   const waveform = await decodeWaveform(state, latent, tiles);
+  const data = samples === waveform.length
+    ? waveform
+    : (waveform.slice(0, samples) as Float32Array<ArrayBuffer>);
+  // MUST: 非有限値を黙って返さない。WAV 化は NaN を 0 に丸め ±Inf をフルスケールへ張り付かせる
+  // ので、沈黙誤値が「一部だけ無音 / 一部だけ轟音の音声」として出てしまう。
+  for (const sample of data) {
+    if (!Number.isFinite(sample)) throw new Error("irodori: 波形に非有限値が含まれる");
+  }
   return {
-    data: samples === waveform.length
-      ? waveform
-      : (waveform.slice(0, samples) as Float32Array<ArrayBuffer>),
+    data,
     sampleRate: config.sampleRate,
     frames: latent.frames,
     ...(latent.seed === undefined ? {} : { seed: latent.seed }),

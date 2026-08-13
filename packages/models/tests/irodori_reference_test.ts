@@ -171,6 +171,33 @@ Deno.test("integratedLoudness: 空の波形と不正な周波数は落とす", (
   assertThrows(() => integratedLoudness(Float32Array.of(1), 0), RangeError, "正の整数でない");
 });
 
+Deno.test("normalizeReference: 非有限サンプルは位置付きで落とす（利得の段を素通りさせない）", () => {
+  // 検査が無いと、NaN は `magnitude > peakBeforeScale` が常に false なので peak 判定を
+  // すり抜け、+Inf は `peakGain = 1/∞ = 0` で**全サンプルを 0 に潰した**上で NaN 1 点だけを
+  // 残す。どちらも例外にならず「ほぼ無音の参照音声」として encoder まで届く。
+  for (const value of [NaN, Infinity, -Infinity]) {
+    const samples = Float32Array.from(
+      { length: SAMPLE_RATE },
+      (_, index) => (index === 7 ? value : 0.1),
+    ) as Float32Array<ArrayBuffer>;
+    assertThrows(
+      () => normalizeReference(samples, SAMPLE_RATE),
+      Error,
+      "参照音声の 7 番目のサンプルが非有限",
+    );
+  }
+});
+
+Deno.test("normalizeReference: 有限な入力は通る（検査が全部を落としていない）", () => {
+  const samples = Float32Array.from(
+    { length: SAMPLE_RATE },
+    (_, index) => Math.sin(index / 50) * 0.1,
+  ) as Float32Array<ArrayBuffer>;
+  const normalized = normalizeReference(samples, SAMPLE_RATE);
+  assertEquals(normalized.data.length, samples.length);
+  assertEquals(normalized.data.every((sample) => Number.isFinite(sample)), true);
+});
+
 // ---- reflect pad（golden 無しでも成り立つ形）------------------------------
 
 Deno.test("reflectPadToHop: 鏡像は端のサンプルを含まない（torch の reflect と同じ綴り）", () => {

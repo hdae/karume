@@ -56,6 +56,12 @@ export const normalizeReference = (
   const scaled = new Float32Array(samples.length) as Float32Array<ArrayBuffer>;
   let peakBeforeScale = 0;
   for (let i = 0; i < samples.length; i += 1) {
+    // MUST: 非有限サンプルはここで落とす。NaN は `magnitude > peakBeforeScale` が常に false
+    // なので peak 判定を素通りし、+Inf は `peakGain = 1/∞ = 0` で**全サンプルを 0 に潰す**
+    // （残るのは NaN 1 点だけ）— どちらも例外にならず「ほぼ無音の参照音声」として通る。
+    if (!Number.isFinite(samples[i])) {
+      throw new Error(`irodori: 参照音声の ${i} 番目のサンプルが非有限（${samples[i]}）`);
+    }
     // 代入した時点で f32 へ丸まる。peak は**丸めた後の値**で採る（上流も f32 テンソルの max）。
     scaled[i] = samples[i] * loudnessGain;
     const magnitude = Math.abs(scaled[i]);
