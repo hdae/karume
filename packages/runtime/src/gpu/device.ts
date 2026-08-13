@@ -496,7 +496,17 @@ export class GpuContext {
       const listeners = [...this.#lostListeners];
       this.#lostListeners.clear();
       for (const listener of listeners) {
-        listener(info);
+        // MUST: listener の例外は通知の fan-out を止めない。購読は上で clear 済みで再通知が
+        // 無いため、公開 onDeviceLost（挿入順で先）の throw で後続の内部購読
+        // （{@link GpuContext.raceDeviceLost}）へ通知が届かないと、消失が例外ではなくハングに
+        // なる。捕えた例外は握り潰さず、消失の制御経路から切り離して非同期に再 throw する。
+        try {
+          listener(info);
+        } catch (cause) {
+          queueMicrotask(() => {
+            throw cause;
+          });
+        }
       }
     });
   }

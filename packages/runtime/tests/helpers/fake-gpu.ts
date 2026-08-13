@@ -48,8 +48,11 @@ export const fakeGpuContext = (
 /**
  * 消失を後から起こせるフェイク device と、その引き金。
  * `reason` は GpuContext の分岐（意図的な破棄かどうか）に使われないため固定値でよい。
+ *
+ * `onDeviceLost` を渡せるのは、公開通知が**挿入順の先頭**に来る形（コンストラクタでの登録）
+ * を再現するため。内部購読より先に呼ばれることが、例外隔離を要求する条件そのものになる。
  */
-export const losableGpuContext = (): {
+export const losableGpuContext = (onDeviceLost?: DeviceLostHandler): {
   readonly gpu: GpuContext;
   readonly lose: () => void;
 } => {
@@ -58,7 +61,7 @@ export const losableGpuContext = (): {
     resolve = settle;
   });
   return {
-    gpu: fakeGpuContext(fakeDevice({ lost })),
+    gpu: fakeGpuContext(fakeDevice({ lost }), onDeviceLost),
     lose: (): void => resolve({ reason: "destroyed", message: "テストによる消失" }),
   };
 };

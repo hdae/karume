@@ -4,6 +4,7 @@ import {
   assertGreaterOrEqual,
   assertInstanceOf,
   assertRejects,
+  assertStrictEquals,
   assertThrows,
 } from "@std/assert";
 import {
@@ -340,6 +341,37 @@ Deno.test("raceDeviceLost は消失を例外にし、決着時に購読を解除
   const error = await assertRejects(() => hanging, GpuDeviceLostError);
   assert(error.message.includes("flush"), error.message);
   assertEquals(gpu.pendingLostListeners, 0);
+});
+
+Deno.test("消失通知は listener の例外で止まらず、その例外も握り潰さない", async () => {
+  const failure = new Error("user callback の失敗");
+  // 公開 onDeviceLost はコンストラクタが登録するため挿入順の先頭に来る。隔離が無いと、この
+  // throw で後続の内部購読（raceDeviceLost の待ち）へ通知が届かず、下の await が永久に返らずに
+  // テストがタイムアウトする — 消失がハングに化ける形そのもの。
+  const { gpu, lose } = losableGpuContext(() => {
+    throw failure;
+  });
+  const hanging = gpu.raceDeviceLost(new Promise<void>(() => {}), "flush");
+  assertEquals(gpu.pendingLostListeners, 2, "公開通知と内部購読の 2 本が並んでいる");
+
+  const rethrown: unknown[] = [];
+  const capture = (event: ErrorEvent): void => {
+    event.preventDefault();
+    rethrown.push(event.error);
+  };
+  globalThis.addEventListener("error", capture);
+  try {
+    lose();
+    const error = await assertRejects(() => hanging, GpuDeviceLostError);
+    assert(error.message.includes("flush"), error.message);
+
+    // 隔離した例外は捨てずに非同期へ逃がす（fail loudly は保つが消失の制御経路とは分離する）
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assertEquals(rethrown.length, 1);
+    assertStrictEquals(rethrown[0], failure);
+  } finally {
+    globalThis.removeEventListener("error", capture);
+  }
 });
 
 /**
