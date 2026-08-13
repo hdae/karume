@@ -239,6 +239,42 @@ export const CONV2D_OP = "conv2d";
 export const CONV_TRANSPOSE1D_OP = "conv_transpose1d";
 
 /**
+ * modulated deformable convolution v2（第 1' 層の原子 — `torchvision::deform_conv2d`。
+ * ADR 0055）。**アリティ 5 固定**で `x[B,Cin,H,W]` / `weight[Cout,Cin,Kh,Kw]` /
+ * `offset[B,2·Kh·Kw,Hout,Wout]` / `mask[B,Kh·Kw,Hout,Wout]` / `bias[Cout]` を取る。
+ *
+ * - `offset` のチャネル並びは `(kh, kw)` の入れ子で最内が 2 連、**偶数 = y / 奇数 = x**。
+ * - `mask`（modulator）は**双線形補間の後**に掛かる（`(m · v) · w`）。
+ * - 境界外は**ゼロ埋め**（中心が `(−1, in)` の外ならタップ全体 0・内側でも範囲外の隅は
+ *   その隅だけ 0 — border clamp ではない）。
+ *
+ * MUST: `stride` / `dilation` / `groups` / `offset_groups` の**欄を作らない**（= 1 固定）。
+ * 実測（BiRefNet 一族の 20 箇所）が全て 1 で、欄の不存在がそのまま「その形は語彙に無い」の
+ * 宣言になる（conv_transpose1d の `output_padding` と同じ手筋 — ADR 0023 決定 4）。
+ * MUST: `mask` はスロットとして必須 = **DCNv2 専業**。`use_mask=False`（DCNv1）を表す欄が
+ * 無いことがそのまま fail loudly になる。
+ * MUST: 出力空間は x / weight / `padding` から導き、`offset` / `mask` の空間 2 軸とは
+ * **突き合わせるだけ**（同じ事実を 2 か所から取ると形の食い違いが素通りする）。
+ */
+export const DEFORM_CONV2D_OP = "deform_conv2d";
+
+/**
+ * NCHW の空間 2 軸の双線形 resample（第 1 層の原子 — `aten.upsample_bilinear2d.vec`）。
+ * `x[B,Cin,H,W] → [B,Cin,Hout,Wout]`、attrs は `output_size`（`[Hout, Wout]`）のみ。
+ *
+ * MUST: **`align_corners = True` 専業**で、attrs に `align_corners` の欄を作らない
+ * （欄の不存在が「語彙に無い」を構造で表す規律 — ADR 0023 決定 4）。`False` は座標式
+ * （`scale·(i+0.5) − 0.5`）も端の扱いも別物なので、受理すると同じ op 名で数値が変わる。
+ * 需要が出たら `gelu` / `gelu_tanh` と同じ手筋で**別 op**として足す。
+ * MUST: `mode` の欄も作らない（nearest / bicubic / area / antialias は語彙に無い）。倍率は
+ * `output_size` と入力から**実行時に導く** — `scale_factor` を載せる欄も持たない（同じ形に
+ * 2 通りの IR ができる）。
+ * NOTE: 縮小（`Hout < H`）も同じ op・同じ式で通る（torch も同一 op）。antialias を持たない
+ * ぶん 2 タップしか読まないのは torch の仕様どおりで、`area` とは別物。
+ */
+export const UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d";
+
+/**
  * 低精度格納が**適格**になる重みスロット（op 名 → 入力スロット番号 — ADR 0018）。
  *
  * 実測でサイズが支配的な 5 スロットだけを載せる。ここに無い消費（bias / norm 系の weight /
@@ -302,7 +338,9 @@ export type OpKind =
   | "maskedFill"
   | "conv1d"
   | "conv2d"
-  | "convTranspose1d";
+  | "convTranspose1d"
+  | "deformConv2d"
+  | "upsampleBilinear2d";
 
 /**
  * attrs スキーマ = attr キー → 値の検査（ADR 0012）。
@@ -483,6 +521,20 @@ export type OpContract =
     readonly kind: "convTranspose1d";
     readonly name: typeof CONV_TRANSPOSE1D_OP;
     readonly arity: 3;
+  })
+  // DCNv2（ADR 0055）。x / weight / offset / mask / bias の 5 本固定 — mask がスロットとして
+  // 必須であることが「DCNv1 は語彙に無い」を構造で表す。
+  | (ContractBase & {
+    readonly kind: "deformConv2d";
+    readonly name: typeof DEFORM_CONV2D_OP;
+    readonly arity: 5;
+  })
+  // 双線形 resample（第 1 層）。入力は x 1 本だけ（重みも bias も無い）で、出力空間は
+  // attrs `output_size` が宣言する。
+  | (ContractBase & {
+    readonly kind: "upsampleBilinear2d";
+    readonly name: typeof UPSAMPLE_BILINEAR2D_OP;
+    readonly arity: 1;
   });
 
 /** f32 専業の op（実測グラフに i32 / bool 形が現れていない — 対称性のためには解禁しない）。 */
@@ -1198,6 +1250,67 @@ export const conv2dAttrs = (
   groups: assertIntegerAttr(attrValue(attrs, "groups"), `${where} の attrs.groups`, 1),
 });
 
+/**
+ * deform_conv2d の attrs（第 1' 層・ADR 0055）。**`padding`（`[H, W]`）の 1 キーだけ**。
+ *
+ * MUST: `stride` / `dilation` / `groups` / `offset_groups` のキーを**足さない**。実測が
+ * 全て 1 で、欄の不存在が「その形は語彙に無い」を構造で表す（エクスポータ境界の
+ * fail loudly と対）。値の形は conv2d と同じ `[H, W]` の長さ 2 の配列。
+ */
+const DEFORM_CONV2D_ATTRS: AttrSchema = {
+  padding: (value, where) => {
+    assertIntPair(value, where, 0, "deform_conv2d の padding");
+  },
+};
+
+/** deform_conv2d ノードの空間パディング（`[H, W]`）。 */
+export type DeformConv2dAttrs = {
+  readonly padding: readonly [number, number];
+};
+
+export const deformConv2dAttrs = (
+  attrs: Readonly<Record<string, unknown>>,
+  where: string,
+): DeformConv2dAttrs => ({
+  padding: assertIntPair(
+    attrValue(attrs, "padding"),
+    `${where} の attrs.padding`,
+    0,
+    "deform_conv2d の padding",
+  ),
+});
+
+/**
+ * upsample_bilinear2d の attrs（第 1 層）。**`output_size`（`[Hout, Wout]`）の 1 キーだけ**。
+ *
+ * MUST: conv2d と同じ `[H, W]` の長さ 2 の配列で、スカラ表記は受理しない（同じ resample に
+ * 2 通りの IR ができる — 正規化はエクスポータ境界の仕事）。
+ * MUST: `align_corners` / `mode` / `scale_factor` の欄を**足さない**。欄の不存在がそのまま
+ * 「その形は語彙に無い」の宣言で、エクスポータ側の fail loudly と対になっている。
+ */
+const UPSAMPLE_BILINEAR2D_ATTRS: AttrSchema = {
+  output_size: (value, where) => {
+    assertIntPair(value, where, 1, "upsample_bilinear2d の output_size");
+  },
+};
+
+/** upsample_bilinear2d ノードの出力空間長（`[Hout, Wout]`）。 */
+export type UpsampleBilinear2dAttrs = {
+  readonly outputSize: readonly [number, number];
+};
+
+export const upsampleBilinear2dAttrs = (
+  attrs: Readonly<Record<string, unknown>>,
+  where: string,
+): UpsampleBilinear2dAttrs => ({
+  outputSize: assertIntPair(
+    attrValue(attrs, "output_size"),
+    `${where} の attrs.output_size`,
+    1,
+    "upsample_bilinear2d の output_size",
+  ),
+});
+
 /** conv1d ノードの stride / padding / dilation / groups。 */
 export type Conv1dAttrs = {
   readonly stride: number;
@@ -1407,6 +1520,21 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     kind: "convTranspose1d",
     name: CONV_TRANSPOSE1D_OP,
     arity: 3,
+  }],
+  // DCNv2（第 1' 層・ADR 0055）。5 スロットとも f32 で同型（offset / mask も値の側と
+  // 同じ dtype）。重みは持つが**低精度格納の適格外**なので WEIGHT_SLOTS には載せない。
+  [DEFORM_CONV2D_OP, {
+    ...contract(DEFORM_CONV2D_OP, DEFORM_CONV2D_ATTRS),
+    kind: "deformConv2d",
+    name: DEFORM_CONV2D_OP,
+    arity: 5,
+  }],
+  // 双線形 resample（第 1 層）。重みを持たないので WEIGHT_SLOTS には載らない。
+  [UPSAMPLE_BILINEAR2D_OP, {
+    ...contract(UPSAMPLE_BILINEAR2D_OP, UPSAMPLE_BILINEAR2D_ATTRS),
+    kind: "upsampleBilinear2d",
+    name: UPSAMPLE_BILINEAR2D_OP,
+    arity: 1,
   }],
 ]);
 
@@ -2300,6 +2428,96 @@ export const computeOutputShape = (
         );
       }
       return [x[0], channelsOut, length * stride];
+    }
+    case "deformConv2d": {
+      const [x, weight, offset, mask, bias] = inputShapes;
+      const { padding } = deformConv2dAttrs(context.attrs ?? {}, where);
+      if (
+        x.length !== 4 || weight.length !== 4 || offset.length !== 4 || mask.length !== 4 ||
+        bias.length !== 1
+      ) {
+        throw new OpContractError(
+          `${where}: deform_conv2d は x[B,Cin,H,W] / W[Cout,Cin,Kh,Kw] / offset[B,2·Kh·Kw,Hout,Wout] / mask[B,Kh·Kw,Hout,Wout] / b[Cout]（rank 4/4/4/4/1）: [${
+            x.join(",")
+          }] / [${weight.join(",")}] / [${offset.join(",")}] / [${mask.join(",")}] / [${
+            bias.join(",")
+          }]`,
+        );
+      }
+      const [batch, channelsIn] = x;
+      const [channelsOut, weightIn, kernelH, kernelW] = weight;
+      // MUST: groups の欄が無い = 1 固定なので、重みの第 2 軸は Cin そのもの。取り違え
+      // （[Cin, Cout, Kh, Kw]）は要素数が合う形が作れるので、テストは Cin ≠ Cout で固定する。
+      if (weightIn !== channelsIn) {
+        throw new OpContractError(
+          `${where}: deform_conv2d の重みは [Cout, Cin, Kh, Kw]（Cin = ${channelsIn}）のはずが [${
+            weight.join(",")
+          }]（x は [${x.join(",")}]）`,
+        );
+      }
+      if (bias[0] !== channelsOut) {
+        throw new OpContractError(
+          `${where}: deform_conv2d の bias 長 ${bias[0]} が出力チャネル ${channelsOut} と違う`,
+        );
+      }
+      // 空間長は stride 1 / dilation 1 の一般形（欄が無い = 1 固定）。
+      const spatial = (axis: 0 | 1, name: string): number => {
+        const kernel = weight[2 + axis];
+        const length = x[2 + axis] + 2 * padding[axis] - (kernel - 1);
+        if (length < 1) {
+          throw new OpContractError(
+            `${where}: deform_conv2d の入力 ${name} ${x[2 + axis]}（padding ${
+              padding[axis]
+            }）がカーネル張り ${kernel} に足りない`,
+          );
+        }
+        return length;
+      };
+      const heightOut = spatial(0, "H");
+      const widthOut = spatial(1, "W");
+      const taps = kernelH * kernelW;
+      // MUST: offset / mask は**突き合わせるだけ**（出力形の正本は x + weight + attrs）。
+      // offset 側から Hout を取ると「offset だけ形が違う IR」が素通りする。
+      // offset_groups の欄が無い = 1 固定なので、チャネル長は 2·Kh·Kw / Kh·Kw ちょうど。
+      for (
+        const [name, shape, channels] of [
+          ["offset", offset, 2 * taps],
+          ["mask", mask, taps],
+        ] as const
+      ) {
+        if (
+          shape[0] !== batch || shape[1] !== channels || shape[2] !== heightOut ||
+          shape[3] !== widthOut
+        ) {
+          throw new OpContractError(
+            `${where}: deform_conv2d の ${name} は [${batch},${channels},${heightOut},${widthOut}]（offset_groups = 1）のはずが [${
+              shape.join(",")
+            }]`,
+          );
+        }
+      }
+      return [batch, channelsOut, heightOut, widthOut];
+    }
+    case "upsampleBilinear2d": {
+      const x = inputShapes[0];
+      const { outputSize } = upsampleBilinear2dAttrs(context.attrs ?? {}, where);
+      if (x.length !== 4) {
+        throw new OpContractError(
+          `${where}: upsample_bilinear2d は x[B,C,H,W]（rank 4）のみ: [${x.join(",")}]`,
+        );
+      }
+      // MUST: 長さ 0 の空間軸を通さない。scale は `(in − 1) / (out − 1)` なので in = 0 は
+      // 負の scale になり、読み出しが入力の外へ出る（GPU では例外なしに隣の値が出る）。
+      for (const [name, axis] of [["H", 2], ["W", 3]] as const) {
+        if (x[axis] === 0) {
+          throw new OpContractError(
+            `${where}: upsample_bilinear2d は長さ 0 の空間軸 ${name} を補間できない（[${
+              x.join(",")
+            }]）`,
+          );
+        }
+      }
+      return [x[0], x[1], outputSize[0], outputSize[1]];
     }
     case "permute": {
       const source = inputShapes[0];

@@ -32,6 +32,17 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   broadcast — 2026-08-11 の改訂・ADR 0023 追記）。bool mask / `[B,1,M,N]` 等・causal /
   dropout / GQA は語彙に無く、エクスポータ境界で全件 fail loudly。SDPA の保存は
   **ターゲット別**なので、既存の分解形 IR はそのまま有効。
+- モデル拡充（2026-08-13）: `upsample_bilinear2d` を**第 1 層**として追加（ADR 0043 の
+  判定手順 3 — Core ATen 内の原子。層分類の暫定運用は
+  [known-issues.md](known-issues.md)）。attrs は `output_size` の 1 本だけで、
+  **`align_corners = True` 以外は欄を持たない**。既存 IR への影響はゼロ（新しい op 名が
+  増えるだけ）。
+- モデル拡充（2026-08-13）: `deform_conv2d` を**第 1' 層**として追加（ADR
+  [0055](decisions/0055-deform-conv2d.md) — Core ATen 外の原子で、要求元は BiRefNet 一族）。
+  **アリティ 5**（x / weight / offset / mask / bias）— 固定アリティでは最多
+  （従来は `where` / conv 族の 3 と `attention` の 3〜4）。
+  attrs は `padding` の 1 本だけで、`stride` / `dilation` / `groups` / `offset_groups` は
+  欄を持たない（= 1 固定）。既存 IR への影響はゼロ。
 
 ## コンテナ
 
@@ -318,6 +329,36 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
 
   bias 無しの conv（実測は dec の `conv_post` 1 本）は**エクスポータがゼロ bias initializer を
   合成**してアリティ 3 へ正規化する — IR にも契約にもカーネルにも arity 分岐は無い。
+
+- **変形畳み込み**（第 1' 層の原子 — `torchvision::deform_conv2d`。ADR
+  [0055](decisions/0055-deform-conv2d.md)）:
+  - `deform_conv2d`（f32、attrs `padding`、**アリティ 5 固定**）—
+    `x[B,Cin,H,W]` / `W[Cout,Cin,Kh,Kw]` / `offset[B,2·Kh·Kw,Hout,Wout]` /
+    `mask[B,Kh·Kw,Hout,Wout]` / `b[Cout]` → `[B,Cout,Hout,Wout]` の DCNv2。
+    出力空間は `Hout = H + 2·padH − (Kh−1)` / `Wout = W + 2·padW − (Kw−1)` で、`offset` /
+    `mask` の空間 2 軸はこれと**一致することが契約**（出力形の正本は x + weight + attrs 側）。
+    サンプル座標は `y = (oy − padH) + kh + off_y` / `x = (ox − padW) + kw + off_x` で、
+    **offset のチャネル並びは `(kh, kw)` の入れ子・最内が偶数 = y / 奇数 = x**。
+    `mask`（modulator）は**双線形補間の後**に掛かり、境界外は **border clamp ではなく
+    ゼロ埋め**（中心が `(−1, in)` の外ならタップ全体 0・内側でも範囲外の隅はその隅だけ 0）。
+    `stride` / `dilation` / `groups` / `offset_groups` は attrs に**欄が無い = 1 固定**、
+    `mask` はスロットとして必須 = **DCNv2 専業**（`use_mask=False` の DCNv1 は表現を持たない
+    = エクスポータ境界で fail loudly）。**offset の NaN は 0 に落とさず出力へ伝播する**
+    （範囲外の 0 とは別扱い — ADR 0055 決定 5）
+
+- **空間 resample**（第 1 層の原子 — `aten.upsample_bilinear2d.vec`）:
+  - `upsample_bilinear2d`（f32、attrs `output_size`、**アリティ 1 固定**）—
+    `x[B,C,H,W] → [B,C,Hout,Wout]` の双線形補間。**`align_corners = True` 専業**で、
+    `align_corners` / `mode` / `scale_factor` は attrs に**欄が無い**（`False` も nearest /
+    bicubic / area / antialias も表現を持たない = エクスポータ境界で fail loudly。`False` の
+    需要が出たら `gelu` / `gelu_tanh` と同じ手筋で別 op として足す）。`output_size` は conv2d と
+    同じ `[Hout, Wout]` の長さ 2 の配列で、宣言必須・既定値補完なし。
+    源座標は `((in−1)/(out−1)) · 出力添字`（出力長 1 の軸は倍率 0）、タップは
+    `index0 = trunc(源座標)` と `index1 = index0 + (index0 < in−1 ? 1 : 0)`、重みは
+    `λ1 = 源座標 − index0` / `λ0 = 1 − λ1` で、**式木は H が外・W が内**の入れ子
+    （torch の `aten/src/ATen/native/UpSample.h` と同じ順）。倍率は非整数でよく、
+    **縮小（`Hout < H`）も同じ op**（2 タップしか読まないのは torch と同じ仕様で `area` とは
+    別物）。空間軸の長さ 0 は受理しない
 
 出力 dtype は「**スロット 0 の入力 dtype → 出力 dtype**」の写像で決まる（既定は恒等）。
 恒等でないのは比較 4 本（→ bool）・bool 入力の `sum`（→ i32）・`where`（bool → f32）だけで、

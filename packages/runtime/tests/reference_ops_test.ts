@@ -1054,6 +1054,144 @@ Deno.test("conv_transpose1d は [Cin,Cout,K] の重みで入力を stride 倍に
   assertEquals([...biased.data], [6, 6, 6, 6, 8, 8, 8, 8]);
 });
 
+// deform_conv2d（ADR 0055）。1×1 カーネル・単一チャネルに絞ると出力が
+// 「mask · bilinear(x, 基準 + offset)」そのものになるので、offset の 3 分岐（内側 / 隅だけ
+// 範囲外 / 中心が範囲外）を手計算で固定できる。
+Deno.test("deform_conv2d の 1×1 分岐は offset の 3 分岐を手計算どおりに踏む", () => {
+  const x = t([1, 1, 2, 2], [1, 2, 3, 4]);
+  const weight = t([1, 1, 1, 1], [1]);
+  const bias = t([1], [0]);
+  const ones = t([1, 1, 2, 2], [1, 1, 1, 1]);
+  /** offset は `[y 平面 4 要素, x 平面 4 要素]`（偶数チャネル = y / 奇数 = x）。 */
+  const offset = (shiftY: number, shiftX: number): RefTensor =>
+    t([1, 2, 2, 2], [
+      shiftY,
+      shiftY,
+      shiftY,
+      shiftY,
+      shiftX,
+      shiftX,
+      shiftX,
+      shiftX,
+    ]);
+  const run = (off: RefTensor, mask: RefTensor = ones): readonly number[] => [
+    ...applyReferenceOp("deform_conv2d", [x, weight, off, mask, bias], { padding: [0, 0] }).data,
+  ];
+  // offset 0 は素の 1×1 conv = 恒等（mask 1・bias 0）
+  assertEquals(run(offset(0, 0)), [1, 2, 3, 4]);
+  // y に +0.5: oy=0 は行 0/1 の中点、oy=1 は y=1.5 で**下側の隅だけ範囲外**（0 埋め）
+  assertEquals(run(offset(0.5, 0)), [2, 3, 1.5, 2]);
+  // y に −1.5: oy=0 は中心が −1.5 ≤ −1 で**タップ全体 0**、oy=1 は y=−0.5 で上側の隅だけ 0
+  assertEquals(run(offset(-1.5, 0)), [0, 0, 0.5, 1]);
+  // MUST: 偶数 = y / 奇数 = x。x に +1 は列方向のずらしで、y に +1 とは別の値になる
+  assertEquals(run(offset(0, 1)), [2, 0, 4, 0]);
+  assertEquals(run(offset(1, 0)), [3, 4, 0, 0]);
+  // modulator は補間の**後**に掛かる（BiRefNet の値域 [0,2] の上端）
+  assertEquals(run(offset(0.5, 0), t([1, 1, 2, 2], [2, 2, 2, 2])), [4, 6, 3, 4]);
+});
+
+// 退化ケース（offset 全 0・mask 全 1）が素の conv2d と**厳密に一致**する。新規原子の唯一の
+// A/B オラクルで、実 GPU 側（gpu_deform_conv2d_test.ts）はこれをビット一致で見る。
+// MUST: 非対称形（Cin ≠ Cout / Kh ≠ Kw / padding の H ≠ W）で固定する — 対称形では
+// 重みレイアウトと offset のチャネル順の取り違えが値に出ない。
+Deno.test("deform_conv2d は offset 0・mask 1 で conv2d と厳密に一致する", () => {
+  const series = (count: number, step: number, base: number): readonly number[] =>
+    Array.from({ length: count }, (_unused, index) => base + step * ((index % 13) - 6));
+  const x = t([1, 2, 3, 4], series(24, 0.25, 0.5));
+  const weight = t([3, 2, 2, 3], series(36, 0.125, -0.25));
+  const bias = t([3], [0.5, -0.25, 0.75]);
+  // padding [1,0] → Hout = 3 + 2 − 1 = 4 / Wout = 4 + 0 − 2 = 2
+  const offset = t([1, 12, 4, 2], new Array(96).fill(0));
+  const mask = t([1, 6, 4, 2], new Array(48).fill(1));
+  const deform = applyReferenceOp("deform_conv2d", [x, weight, offset, mask, bias], {
+    padding: [1, 0],
+  });
+  const plain = applyReferenceOp("conv2d", [x, weight, bias], {
+    stride: [1, 1],
+    padding: [1, 0],
+    dilation: [1, 1],
+    groups: 1,
+  });
+  assertEquals(deform.shape, [1, 3, 4, 2]);
+  assertEquals(deform.shape, plain.shape);
+  assertEquals([...deform.data], [...plain.data]);
+});
+
+// offset の NaN は「範囲外」ではない。正の形の範囲判定（`> −1 && < in`）だけだと NaN が
+// false 側 = 0 寄与に落ちて沈黙誤値になるので、NaN は出力へ伝播させる（ADR 0055 決定 5）。
+Deno.test("deform_conv2d は NaN の offset を 0 に落とさず伝播させる", () => {
+  const x = t([1, 1, 2, 2], [1, 2, 3, 4]);
+  const weight = t([1, 1, 1, 1], [1]);
+  const bias = t([1], [0]);
+  const mask = t([1, 1, 2, 2], [1, 1, 1, 1]);
+  // y 平面の先頭 1 要素だけ NaN（残りは 0）→ 出力の先頭要素だけ NaN
+  const offset = t([1, 2, 2, 2], [Number.NaN, 0, 0, 0, 0, 0, 0, 0]);
+  const out = applyReferenceOp("deform_conv2d", [x, weight, offset, mask, bias], {
+    padding: [0, 0],
+  });
+  assertEquals(Number.isNaN(out.data[0]), true, "NaN の offset は出力へ伝播する");
+  assertEquals([...out.data.slice(1)], [2, 3, 4], "他の要素は巻き添えにならない");
+  // ±Inf は torch と同じく「範囲外 = 0」（NaN とは別扱い）
+  const infinite = t([1, 2, 2, 2], [
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+  ]);
+  const clipped = applyReferenceOp("deform_conv2d", [x, weight, infinite, mask, bias], {
+    padding: [0, 0],
+  });
+  assertEquals([...clipped.data], [0, 0, 3, 4]);
+});
+
+// MUST: 4 近傍と重みが手計算で追える形だけで固める（新規原子は A/B オラクルが無いので、
+// 参照実装そのものが「読んで正しさが分かる」ことが門になる）。値は全て f32 で厳密。
+Deno.test("upsample_bilinear2d は align_corners の 4 近傍を手計算どおりに混ぜる", () => {
+  // 2×2 → 3×3。scale = (2−1)/(3−1) = 0.5 なので、出力の偶数位置は入力そのまま・
+  // 奇数位置は隣り合う 2 点の中点になる。
+  const up = applyReferenceOp("upsample_bilinear2d", [t([1, 1, 2, 2], [1, 2, 3, 4])], {
+    output_size: [3, 3],
+  });
+  assertEquals(up.shape, [1, 1, 3, 3]);
+  assertEquals([...up.data], [1, 1.5, 2, 2, 2.5, 3, 3, 3.5, 4]);
+
+  // 3×3 → 2×2（縮小）。scale = 2 なので λ は 0 で、**両端の 2 点しか読まない**
+  // （antialias / area とは違う torch の仕様どおりの情報落ち）。
+  const down = applyReferenceOp(
+    "upsample_bilinear2d",
+    [t([1, 1, 3, 3], [1, 2, 3, 4, 5, 6, 7, 8, 9])],
+    { output_size: [2, 2] },
+  );
+  assertEquals([...down.data], [1, 3, 7, 9]);
+
+  // 入力の高さ 1（ASPP の GAP 枝と同型）。H の scale は 0 で全行が同じ行を読み、
+  // W だけが本当に補間される。
+  const broadcast = applyReferenceOp("upsample_bilinear2d", [t([1, 1, 1, 2], [10, 20])], {
+    output_size: [2, 3],
+  });
+  assertEquals([...broadcast.data], [10, 15, 20, 10, 15, 20]);
+});
+
+// align_corners = True の定義そのもの: 出力の 4 隅は入力の 4 隅と**厳密に一致**する
+// （λ が 0 か 1 に潰れるので丸めが入らない）。H と W を別長にして軸の取り違えも同時に見る。
+Deno.test("upsample_bilinear2d は出力の 4 隅を入力の 4 隅へ厳密に一致させる", () => {
+  const x = t([1, 1, 2, 3], [1, 2, 3, 4, 5, 6]);
+  const out = applyReferenceOp("upsample_bilinear2d", [x], { output_size: [5, 7] });
+  assertEquals(out.shape, [1, 1, 5, 7]);
+  const at = (row: number, column: number): number => out.data[row * 7 + column];
+  assertEquals(at(0, 0), 1, "左上");
+  assertEquals(at(0, 6), 3, "右上");
+  assertEquals(at(4, 0), 4, "左下");
+  assertEquals(at(4, 6), 6, "右下");
+  // 端の**行と列**も入力の端の 1 次元補間になる（4 隅だけでは軸の取り違えが残る）
+  assertEquals([at(0, 0), at(0, 3), at(0, 6)], [1, 2, 3], "上端の行");
+  assertEquals([at(0, 0), at(2, 0), at(4, 0)], [1, 2.5, 4], "左端の列");
+});
+
 Deno.test("applyReferenceOp は契約表の kind で分岐し、アリティ違反を拒否する", () => {
   assertEquals([...applyReferenceOp("relu", [t([2], [-1, 2])]).data], [0, 2]);
   assertEquals([...applyReferenceOp("sum", [t([1, 2], [3, 4])], { dim: 1 }).data], [7]);

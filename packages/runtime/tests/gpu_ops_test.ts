@@ -1268,6 +1268,115 @@ const FUSED_CASES: readonly OpCase[] = [
   },
 ];
 
+// 双線形 resample（第 1 層 op）。新規原子なので A/B オラクルが無く、ここでの CPU 参照突合と
+// golden の torch 突合が主門になる。MUST: 拡大 / 縮小 / 端の潰し / scale 0 の軸を全て踏み、
+// B·C > 1 で**平面添字の畳み方**（N·C を 1 本へ潰す形）も踏む。
+const UPSAMPLE_CASES: readonly OpCase[] = [
+  {
+    // 非整数倍の拡大（H 3/6・W 4/8）。H≠W かつ Hout≠Wout で軸の取り違えが値に出る
+    name: "upsample_bilinear2d 拡大 [2,3,4,5] → 7×9",
+    op: "upsample_bilinear2d",
+    inputs: [fill([2, 3, 4, 5], SIGNED)],
+    outShape: [2, 3, 7, 9],
+    attrs: { output_size: [7, 9] },
+  },
+  {
+    // 縮小（BiRefNet の forward_enc / cxt と同型）— 2 タップしか読まないのが torch の仕様
+    name: "upsample_bilinear2d 縮小 [1,3,8,10] → 3×4",
+    op: "upsample_bilinear2d",
+    inputs: [fill([1, 3, 8, 10], POSITIVE)],
+    outShape: [1, 3, 3, 4],
+    attrs: { output_size: [3, 4] },
+  },
+  {
+    // 入力の高さ 1 → H の scale が 0（末尾特例 `index1 = index0` が全出力で発火する）。
+    // W だけ縮小させて、2 軸で別の分岐を同時に踏む
+    name: "upsample_bilinear2d 高さ 1 [1,2,1,6] → 4×3",
+    op: "upsample_bilinear2d",
+    inputs: [fill([1, 2, 1, 6], SIGNED)],
+    outShape: [1, 2, 4, 3],
+    attrs: { output_size: [4, 3] },
+  },
+  {
+    // 1×1 → N×M（ASPP の GAP 枝）— 両軸とも scale 0 で実質 broadcast
+    name: "upsample_bilinear2d 1×1 → 5×4 [2,3,1,1]",
+    op: "upsample_bilinear2d",
+    inputs: [fill([2, 3, 1, 1], NONZERO)],
+    outShape: [2, 3, 5, 4],
+    attrs: { output_size: [5, 4] },
+  },
+  {
+    // 出力 1×1（scale の out == 1 特例 = 0）。torch は左上の 1 点だけを読む
+    name: "upsample_bilinear2d 6×7 → 1×1 [1,2,6,7]",
+    op: "upsample_bilinear2d",
+    inputs: [fill([1, 2, 6, 7], SIGNED)],
+    outShape: [1, 2, 1, 1],
+    attrs: { output_size: [1, 1] },
+  },
+  {
+    // 等倍（in == out）— λ が全て 0 で恒等コピーになる形（scale がちょうど 1.0）
+    name: "upsample_bilinear2d 等倍 [1,2,5,4] → 5×4",
+    op: "upsample_bilinear2d",
+    inputs: [fill([1, 2, 5, 4], SIGNED)],
+    outShape: [1, 2, 5, 4],
+    attrs: { output_size: [5, 4] },
+  },
+];
+
+/** deform の offset（±2.5 の非整数 — 入力平面の外まで振る）。 */
+const OFFSET = (i: number): number => ((i % 11) - 5) * 0.5;
+/** deform の modulator（BiRefNet の `2·sigmoid(...)` と同じ値域 [0,2]）。 */
+const MODULATOR = (i: number): number => (i % 9) * 0.25;
+
+// DCNv2（第 1' 層 op — ADR 0055）。新規原子なので A/B オラクルが無く、ここでの CPU 参照突合と
+// golden の torch 突合が主門になる（退化ビット一致は gpu_deform_conv2d_test.ts）。
+// MUST: k の 2 形（BiRefNet の 4 分岐は k ∈ {1,1,3,7}）・B > 1・Cin ≠ Cout・Kh ≠ Kw・
+// padding の H≠W を踏む。
+const DEFORM_CASES: readonly OpCase[] = [
+  {
+    // Kh ≠ Kw / padding の H≠W（offset の y/x 順と重みの軸が同時に効く形）
+    name: "deform_conv2d [1,2,4,5] * W[3,2,3,2] padding=[1,0]",
+    op: "deform_conv2d",
+    inputs: [
+      fill([1, 2, 4, 5], SIGNED),
+      fill([3, 2, 3, 2], POSITIVE),
+      fill([1, 12, 4, 4], OFFSET),
+      fill([1, 6, 4, 4], MODULATOR),
+      fill([3], SIGNED),
+    ],
+    outShape: [1, 3, 4, 4],
+    attrs: { padding: [1, 0] },
+  },
+  {
+    // k=1（ASPP の aspp1 分岐）かつ **バッチ 2**（offset / mask のバッチ段が効く）
+    name: "deform_conv2d k=1 バッチ 2 [2,3,3,4] * W[4,3,1,1]",
+    op: "deform_conv2d",
+    inputs: [
+      fill([2, 3, 3, 4], SIGNED),
+      fill([4, 3, 1, 1], POSITIVE),
+      fill([2, 2, 3, 4], OFFSET),
+      fill([2, 1, 3, 4], MODULATOR),
+      fill([4], NONZERO),
+    ],
+    outShape: [2, 4, 3, 4],
+    attrs: { padding: [0, 0] },
+  },
+  {
+    // 同サイズ出力（BiRefNet の実形 — k=3 / padding 1）で縮約長を伸ばす
+    name: "deform_conv2d [1,4,6,7] * W[5,4,3,3] padding=[1,1]",
+    op: "deform_conv2d",
+    inputs: [
+      fill([1, 4, 6, 7], SIGNED),
+      fill([5, 4, 3, 3], POSITIVE),
+      fill([1, 18, 6, 7], OFFSET),
+      fill([1, 9, 6, 7], MODULATOR),
+      fill([5], SIGNED),
+    ],
+    outShape: [1, 5, 6, 7],
+    attrs: { padding: [1, 1] },
+  },
+];
+
 // 境界ケース。MUST: 「大きめの入力」は grid-stride の**縮退**を踏まない — 要素数から
 // 必要な workgroup 数がそのまま割り当たるためで、`stride` を定数にする誤りはここでは緑のまま
 // 通る。縮退そのものは tests/gpu_gridstride_test.ts が dispatch 数を絞って直接検証する。
@@ -1576,6 +1685,60 @@ Deno.test({
     "融合 op 10 種（linear / layer_norm / rms_norm / softmax / safe_softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(FUSED_CASES),
+});
+
+Deno.test({
+  name: "双線形 resample（拡大 / 縮小 / scale 0）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(UPSAMPLE_CASES),
+});
+
+Deno.test({
+  name: "DCNv2（k の 2 形 / バッチ 2 / 非対称形）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(DEFORM_CASES),
+});
+
+/**
+ * `align_corners = True` の**定義そのもの**を実 GPU で固定する — 出力の 1 行目 / 最終行と
+ * 1 列目 / 最終列が、入力の対応する端と**厳密に一致**する（λ が 0 か 1 に潰れるので丸めが
+ * 入らない）。
+ *
+ * MUST: allclose ではなく厳密一致で見る。`align_corners = False` の座標式へ取り違えると
+ * 端が半画素ずれるが、ずれ幅は許容差より小さいことがあり、checkAll では**両側が同じ誤りを
+ * 共有していれば緑のまま**通る（CPU 参照も GPU もこのテストの対象）。ここは参照実装を
+ * 経由せず、入力テンソルの端の値そのものと突き合わせる。
+ */
+Deno.test({
+  name: "双線形 resample は出力の端を入力の端へ厳密一致させる（align_corners — 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // H≠W / Hout≠Wout（軸の取り違えが端の値に出る）。値は全て相異なる列にする。
+    const [heightIn, widthIn] = [4, 5];
+    const [heightOut, widthOut] = [9, 7];
+    const input = fill([1, 1, heightIn, widthIn], (i) => 1 + i * 0.5);
+    const gpu = await acquireGpu();
+    try {
+      const actual = await runCase(gpu, {
+        name: "upsample_bilinear2d edges",
+        op: "upsample_bilinear2d",
+        inputs: [input],
+        outShape: [1, 1, heightOut, widthOut],
+        attrs: { output_size: [heightOut, widthOut] },
+      });
+      const at = (row: number, column: number): number => actual.data[row * widthOut + column];
+      const src = (row: number, column: number): number => input.data[row * widthIn + column];
+      assertEquals(at(0, 0), src(0, 0), "左上");
+      assertEquals(at(0, widthOut - 1), src(0, widthIn - 1), "右上");
+      assertEquals(at(heightOut - 1, 0), src(heightIn - 1, 0), "左下");
+      assertEquals(at(heightOut - 1, widthOut - 1), src(heightIn - 1, widthIn - 1), "右下");
+      // 中は補間される（端だけ見ると恒等コピーでも通ってしまう）。scale_h = 3/8 なので
+      // 出力行 4 の源座標は 1.5 = 入力行 1 と 2 の中点 — 端の厳密一致と両立する内点。
+      assertEquals(at(4, 0), Math.fround((src(1, 0) + src(2, 0)) / 2), "H の中点");
+    } finally {
+      gpu.destroy();
+    }
+  },
 });
 
 /**

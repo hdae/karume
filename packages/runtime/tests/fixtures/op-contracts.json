@@ -317,6 +317,18 @@
       "attrs": ["padding", "stride"],
       "weight_slot": 1,
       "channel_axis": 1
+    },
+    {
+      "op": "deform_conv2d",
+      "arity": 5,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["padding"]
+    },
+    {
+      "op": "upsample_bilinear2d",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["output_size"]
     }
   ],
   "attr_values": [
@@ -638,6 +650,32 @@
       "why": "非負整数",
       "accept": [0, 3, 4],
       "reject": [-1, 0.5, "0", null, true]
+    },
+    {
+      "op": "deform_conv2d",
+      "attr": "padding",
+      "why": "[H, W] の 2 成分・各成分は非負整数（BiRefNet の 4 分岐は k//2 = 0 / 0 / 1 / 3）",
+      "accept": [[0, 0], [1, 1], [3, 3], [1, 0]],
+      "reject": [[-1, 0], [0, -1], [0], [0, 0, 0], [0.5, 0], ["0", 0], [true, 0], 0, null, []]
+    },
+    {
+      "op": "upsample_bilinear2d",
+      "attr": "output_size",
+      "why": "[Hout, Wout] の 2 成分・各成分は正整数（0 長は補間できず、スカラ表記は境界で正規化する規約）",
+      "accept": [[1, 1], [7, 9], [2, 3], [2048, 2048]],
+      "reject": [
+        [0, 1],
+        [1, 0],
+        [-1, 4],
+        [7],
+        [7, 9, 3],
+        [7.5, 9],
+        ["7", 9],
+        [true, 9],
+        7,
+        null,
+        []
+      ]
     }
   ],
   "shapes": [
@@ -1945,6 +1983,128 @@
       "attrs": { "stride": 2, "padding": 0 },
       "throws": true,
       "why": "rank 3 / 3 / 1 以外は受理しない"
+    },
+
+    {
+      "op": "deform_conv2d",
+      "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [5]],
+      "attrs": { "padding": [1, 0] },
+      "out": [1, 5, 4, 4],
+      "why": "Cin != Cout・Kh != Kw・padding の H != W（軸と重みレイアウトの取り違えが shape に出る形）"
+    },
+    {
+      "op": "deform_conv2d",
+      "ins": [[1, 4, 3, 3], [6, 4, 1, 1], [1, 2, 3, 3], [1, 1, 3, 3], [6]],
+      "attrs": { "padding": [0, 0] },
+      "out": [1, 6, 3, 3],
+      "why": "k=1 分岐（ASPP の aspp1 / parallel_block_sizes 先頭）。offset は 2 チャネルだけ"
+    },
+    {
+      "op": "deform_conv2d",
+      "ins": [[1, 3, 4, 5], [3, 5, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [5]],
+      "attrs": { "padding": [1, 0] },
+      "throws": true,
+      "why": "重みを [Cin, Cout, Kh, Kw] と読む取り違え（非対称チャネルでのみ赤くなる）"
+    },
+    {
+      "op": "deform_conv2d",
+      "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 6, 4, 4], [1, 6, 4, 4], [5]],
+      "attrs": { "padding": [1, 0] },
+      "throws": true,
+      "why": "offset のチャネルが 2*Kh*Kw でない（y/x の 2 連を落とした形）"
+    },
+    {
+      "op": "deform_conv2d",
+      "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 5], [5]],
+      "attrs": { "padding": [1, 0] },
+      "throws": true,
+      "why": "mask の空間軸が出力空間と違う（出力形の正本は x + weight + padding）"
+    },
+    {
+      "op": "deform_conv2d",
+      "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [3]],
+      "attrs": { "padding": [1, 0] },
+      "throws": true,
+      "why": "bias 長が出力チャネルと違う"
+    },
+    {
+      "op": "deform_conv2d",
+      "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4]],
+      "attrs": { "padding": [1, 0] },
+      "throws": true,
+      "why": "アリティ 5 固定（mask を落とした DCNv1 は語彙に無い）"
+    },
+    {
+      "op": "deform_conv2d",
+      "ins": [[3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [5]],
+      "attrs": { "padding": [1, 0] },
+      "throws": true,
+      "why": "rank 4/4/4/4/1 以外は受理しない"
+    },
+    {
+      "op": "deform_conv2d",
+      "ins": [[1, 3, 2, 5], [5, 3, 3, 2], [1, 12, 2, 4], [1, 6, 2, 4], [5]],
+      "attrs": { "padding": [0, 0] },
+      "throws": true,
+      "why": "padding 無しで H 2 < Kh 3（カーネル張りに足りない）"
+    },
+    {
+      "op": "deform_conv2d",
+      "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [5]],
+      "attrs": {},
+      "throws": true,
+      "why": "padding の欠落（宣言必須・既定値補完なし）"
+    },
+
+    {
+      "op": "upsample_bilinear2d",
+      "ins": [[1, 3, 4, 5]],
+      "attrs": { "output_size": [7, 9] },
+      "out": [1, 3, 7, 9],
+      "why": "非整数倍の拡大（H 3/6・W 4/8）。H≠W かつ Hout≠Wout で軸の取り違えが shape に出る"
+    },
+    {
+      "op": "upsample_bilinear2d",
+      "ins": [[2, 6, 8, 10]],
+      "attrs": { "output_size": [2, 3] },
+      "out": [2, 6, 2, 3],
+      "why": "縮小も同じ op で通る（BiRefNet の forward_enc / cxt に 8 本ある形）"
+    },
+    {
+      "op": "upsample_bilinear2d",
+      "ins": [[1, 4, 1, 1]],
+      "attrs": { "output_size": [5, 6] },
+      "out": [1, 4, 5, 6],
+      "why": "1×1 → N×M（ASPP の GAP 枝）。scale は 0 で全出力が同じ 1 点を読む"
+    },
+    {
+      "op": "upsample_bilinear2d",
+      "ins": [[1, 2, "T", 5]],
+      "bindings": { "T": 4 },
+      "attrs": { "output_size": [3, 3] },
+      "out": [1, 2, 3, 3],
+      "why": "入力の空間軸が記号でも出力は attrs が決める（倍率の分母にしか効かない）"
+    },
+    {
+      "op": "upsample_bilinear2d",
+      "ins": [[1, 3, 4, 5]],
+      "attrs": {},
+      "throws": true,
+      "why": "output_size の欠落（宣言必須・既定値補完なし）"
+    },
+    {
+      "op": "upsample_bilinear2d",
+      "ins": [[3, 4, 5]],
+      "attrs": { "output_size": [7, 9] },
+      "throws": true,
+      "why": "rank 4 以外は受理しない（3D / 5D は別 aten op）"
+    },
+    {
+      "op": "upsample_bilinear2d",
+      "ins": [[1, 3, 0, 5]],
+      "attrs": { "output_size": [7, 9] },
+      "throws": true,
+      "why": "長さ 0 の空間軸は補間できない（scale が (0-1)/(out-1) で負になる）"
     }
   ]
 }

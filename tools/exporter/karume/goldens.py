@@ -20,6 +20,7 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
+from torchvision.ops import deform_conv2d
 
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
@@ -788,6 +789,83 @@ class Conv2dBlock(nn.Module):
         return hidden, channels / norm
 
 
+class DeformConvBlock(nn.Module):
+    """deform_conv2d（DCNv2・第 1' 層 — ADR 0055）の torch 突合。
+
+    新規原子には対になる既存経路が無いので、**torchvision 出力を焼いたこの golden が主門**に
+    なる（もう 1 本の門は「offset 全 0・mask 全 1 → conv2d とビット一致」で、そちらは実 GPU
+    テスト側が持つ）。踏むべき形:
+
+    MUST: **Kh ≠ Kw / Cin ≠ Cout / padding の H ≠ W**。offset のチャネル並び（偶数 = y /
+    奇数 = x）の取り違えは、正方カーネル・対称 padding では値が一致しうる。
+    MUST: **offset が入力平面の外を指す**範囲（±2.5）。ゼロ埋めの 2 段（中心が範囲外なら
+    タップ全体 0 / 内側でも範囲外の隅はその隅だけ 0）を両方踏ませる — border clamp 実装は
+    ここでしか赤くならない。
+    MUST: offset は**グラフ入力**にする（Parameter にすると initializer に落ちて「実行時値の
+    offset」という本 op の前提を踏まない）。
+    MUST: mask の値域は **[0, 2]**（BiRefNet の `2·sigmoid(...)`）。[0,1] に絞ると
+    「mask を掛け忘れても大差ない」形になりうるし、補間の**前**に掛ける誤りとも切り分かない。
+    NOTE: `point` 分岐は k=1（ASPP の `aspp1`）で **bias 無し** — torchvision の Python ラッパが
+    `aten.full([Cout], 0)` を挿し、第 0 層の定数畳み込みが initializer にする経路を踏む。
+    """
+
+    IN_CHANNELS = 3
+    WIDE_CHANNELS = 5
+    POINT_CHANNELS = 4
+
+    def __init__(self, generator: torch.Generator) -> None:
+        super().__init__()
+        # Kh=3 / Kw=2 / padding (1,0) — Cin 3 → Cout 5
+        self.weight = nn.Parameter(
+            _uniform(generator, self.WIDE_CHANNELS, self.IN_CHANNELS, 3, 2, low=-1.0, high=1.0)
+        )
+        self.bias = nn.Parameter(_uniform(generator, self.WIDE_CHANNELS, low=-0.5, high=0.5))
+        # k=1 / padding 0 / bias 無し
+        self.point = nn.Parameter(
+            _uniform(generator, self.POINT_CHANNELS, self.IN_CHANNELS, 1, 1, low=-1.0, high=1.0)
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        offset: torch.Tensor,
+        mask: torch.Tensor,
+        point_offset: torch.Tensor,
+        point_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        wide = deform_conv2d(
+            input=x, offset=offset, weight=self.weight, bias=self.bias, padding=(1, 0), mask=mask
+        )
+        point = deform_conv2d(
+            input=x, offset=point_offset, weight=self.point, padding=(0, 0), mask=point_mask
+        )
+        return wide, point
+
+
+class BilinearResize(nn.Module):
+    """upsample_bilinear2d（第 1 層・align_corners=True 専業）の torch 突合。
+
+    新規原子には対になる既存経路（分解形 / 別カーネル）が無いので、**torch 出力を焼いた
+    この golden が主門**になる。踏むべき形:
+
+    MUST: **非整数倍**（4×5 → 7×9 は scale 3/6 と 4/8 で、出力位置ごとに重みが違う）。
+    整数倍だけで固めると「重み表が周期 2 の決め打ち」でも通ってしまう。
+    MUST: **縮小**（4×5 → 2×3）。実測（BiRefNet の `forward_enc` / `cxt`）に 8 本ある形で、
+    拡大と同じ式・同じ 2 タップで通ることの固定。
+    MUST: **H ≠ W かつ Hout ≠ Wout**。正方形だと H と W の取り違えが値に出ない。
+    MUST: **入力の高さ 1**（`narrow`）。align_corners の scale は `(in−1)/(out−1)` なので
+    in = 1 の軸は scale 0 = 行の複製になる（末尾特例 `index1 = index0` が全出力で発火する
+    唯一の形）。同じテンソルの幅は縮小させて、2 軸で別の分岐を同時に踏ませる。
+    """
+
+    def forward(self, x: torch.Tensor, narrow: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        return (
+            nn.functional.interpolate(x, size=(7, 9), mode="bilinear", align_corners=True),
+            nn.functional.interpolate(x, size=(2, 3), mode="bilinear", align_corners=True),
+            nn.functional.interpolate(narrow, size=(3, 4), mode="bilinear", align_corners=True),
+        )
+
+
 class Int8Weights(nn.Module):
     """i8 格納（per-channel scale）で **`WEIGHT_SLOTS` の全 5 op** を踏む golden（ADR 0019）。
 
@@ -1103,6 +1181,28 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
         example_inputs=lambda g: (
             _uniform(g, 1, 4, 6, 5, low=-1.5, high=1.5),
             _zeroed_column(g, 1, 4, 3, 5, at=(1, 2)),
+        ),
+    ),
+    GoldenSpec(
+        name="deform_conv2d_block",
+        build=DeformConvBlock,
+        # x は H≠W（4×5）。offset は ±2.5 で入力平面の外まで振り、mask は BiRefNet と同じ
+        # [0, 2]。wide 分岐の出力空間は 4×4（H: 4+2−2 / W: 5+0−1）、point 分岐は 4×5。
+        example_inputs=lambda g: (
+            _uniform(g, 1, DeformConvBlock.IN_CHANNELS, 4, 5, low=-1.5, high=1.5),
+            _uniform(g, 1, 2 * 3 * 2, 4, 4, low=-2.5, high=2.5),
+            _uniform(g, 1, 3 * 2, 4, 4, low=0.0, high=2.0),
+            _uniform(g, 1, 2, 4, 5, low=-2.5, high=2.5),
+            _uniform(g, 1, 1, 4, 5, low=0.0, high=2.0),
+        ),
+    ),
+    GoldenSpec(
+        name="bilinear_resize",
+        build=lambda _: BilinearResize(),
+        # x は H≠W（4×5）。narrow は高さ 1（scale 0 の軸）で幅は縮小させる。
+        example_inputs=lambda g: (
+            _uniform(g, 1, 3, 4, 5, low=-1.5, high=1.5),
+            _uniform(g, 1, 2, 1, 6, low=-1.5, high=1.5),
         ),
     ),
     GoldenSpec(

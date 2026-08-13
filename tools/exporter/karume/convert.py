@@ -42,6 +42,12 @@ from types import MappingProxyType
 from typing import Any, NamedTuple
 
 import torch
+
+# MUST: `torch.ops.torchvision.*` は torchvision の C++ ライブラリを読み込まないと引けない
+# （ハンドラのキーが書けない）。条件付き import で soft 依存にすると「deform_conv2d を
+# 未対応 op として落とす env」と「通る env」が分岐するので、基本依存として素で import する
+# （ADR 0055 決定 7）。
+import torchvision  # noqa: F401  -- torch.ops.torchvision の登録が副作用
 from torch.export import ExportedProgram
 from torch.export.graph_signature import OutputKind
 from torch.fx import Node
@@ -2009,6 +2015,146 @@ def _h_conv2d(node: Node) -> Emitted:
     )
 
 
+def _h_deform_conv2d(node: Node) -> Emitted:
+    """torchvision.deform_conv2d → deform_conv2d（attrs `padding` のみ — ADR 0055）。
+
+    スキーマは `(Tensor input, Tensor weight, Tensor offset, Tensor mask, Tensor bias,
+    SymInt stride_h, SymInt stride_w, SymInt pad_h, SymInt pad_w, SymInt dilation_h,
+    SymInt dilation_w, SymInt groups, SymInt offset_groups, bool use_mask)` で、位置引数の
+    テンソル 5 本がそのまま IR の入力 5 本になる（`_tensor_args` は位置順）。
+
+    `torchvision::` 名前空間のカスタム op なので Core ATen の分解表に登録が無く、
+    `run_decompositions(curated_decompositions())` の後も 1 ノードで残る（実測）。
+
+    MUST: `use_mask=False`（DCNv1）を落とす。契約は mask をスロットとして要求する DCNv2 専業で、
+    torchvision は `mask=None` のとき **`[1,1]` のダミーテンソル**を渡してくる — 素通しすると
+    ダミーが modulator として掛かる沈黙誤値になる（shape 検査が拾う保証はない）。
+    MUST: `stride` / `dilation` / `groups` / `offset_groups` の 1 以外を落とす。契約に欄が無い
+    ので、ここが唯一の門（既定値補完に頼らず**実値**を見る）。
+    MUST: rank 4 と f32 に絞る（契約は f32 専業）。
+    NOTE: bias 無しは torchvision の Python ラッパが `aten.full([Cout], 0)` を挿すので、
+    エクスポータ側のゼロ bias 合成（conv 族の `_conv_bias`）は要らない — 合成経路を二重に
+    持たない。
+    """
+    _expect(not node.kwargs, node, f"kwargs {sorted(node.kwargs)} を伴う deform_conv2d は未対応")
+    _expect(
+        len(node.args) == 14,
+        node,
+        f"引数 {len(node.args)} 本の deform_conv2d は未対応（スキーマは 14 本）",
+    )
+    (
+        stride_h,
+        stride_w,
+        pad_h,
+        pad_w,
+        dilation_h,
+        dilation_w,
+        groups,
+        offset_groups,
+        use_mask,
+    ) = node.args[5:]
+    # MUST: use_mask を**テンソルの形より先に**見る。DCNv1 の mask スロットには [1,1] の
+    # ダミーが入っているので、順序を入れ替えると診断が「rank 2 の mask」になって
+    # 「DCNv1 が語彙に無い」ことが読み取れなくなる（ADR 0005 の診断規律）。
+    _expect(
+        use_mask is True,
+        node,
+        f"use_mask={use_mask!r} の deform_conv2d は未対応"
+        "（契約は mask 必須の DCNv2 専業 — スロットを省く表現が無い）",
+    )
+    src, weight, offset, mask = (node.args[index].meta["val"] for index in range(4))
+    for name, value in (("入力", src), ("重み", weight), ("offset", offset), ("mask", mask)):
+        _expect(value.dim() == 4, node, f"rank {value.dim()} の deform_conv2d {name} は未対応")
+        _expect(
+            value.dtype == torch.float32,
+            node,
+            f"dtype {value.dtype} の deform_conv2d {name} は未対応（f32 のみ）",
+        )
+
+    # スキーマ上は SymInt なので、まず**静的な素の int** であることを見る（記号の
+    # stride / padding は attrs に載せられない）。
+    def static_int(what: str, value: Any) -> int:
+        _expect(
+            isinstance(value, int) and not isinstance(value, bool),
+            node,
+            f"{what}={value!r} が静的な整数でない",
+        )
+        return int(value)
+
+    for what, value in (
+        ("stride_h", stride_h),
+        ("stride_w", stride_w),
+        ("dilation_h", dilation_h),
+        ("dilation_w", dilation_w),
+        ("groups", groups),
+        ("offset_groups", offset_groups),
+    ):
+        _expect(
+            static_int(what, value) == 1,
+            node,
+            f"{what}={value!r} の deform_conv2d は未対応（attrs に欄が無い = 1 固定）",
+        )
+    padding = [static_int("pad_h", pad_h), static_int("pad_w", pad_w)]
+    _expect(all(value >= 0 for value in padding), node, f"padding={padding} は未対応（非負のみ）")
+    return Emitted("deform_conv2d", 5, {"padding": padding})
+
+
+def _h_upsample_bilinear2d(node: Node) -> Emitted:
+    """aten.upsample_bilinear2d.vec → upsample_bilinear2d（attrs `output_size` のみ）。
+
+    シグネチャは `(Tensor input, SymInt[]? output_size, bool align_corners,
+    float[]? scale_factors)`。実測（BiRefNet 一族 / Depth Anything V2 本家）は全て
+    `F.interpolate(..., size=(H,W), mode="bilinear", align_corners=True)` で、
+    `scale_factors` 指定はアクティブ経路に 1 件も無い。
+
+    MUST: `align_corners=False` を落とす。座標式（`scale·(i+0.5) − 0.5`）も端の扱いも別物で、
+    受理すると**同じ op 名で数値が変わる**（gelu / gelu_tanh と同じ理由 — 需要が出たら
+    別 op として足す）。契約に欄が無いので、ここが唯一の門。
+    MUST: `scale_factors` 指定を落とす。倍率から出力長を導く形は丸めの規約
+    （`floor(in·factor)`）がもう 1 つ増え、`output_size` 形と 2 通りの IR ができる。
+    MUST: rank 4 と f32 に絞る。3D / 5D 版は別 aten op なのでここへは来ないが、f16 / f64 は
+    同じ overload で来る（契約は f32 専業）。
+    """
+    _expect(not node.kwargs, node, f"kwargs {sorted(node.kwargs)} を伴う upsample は未対応")
+    src = node.args[0].meta["val"]
+    _expect(
+        src.dim() == 4, node, f"rank {src.dim()} の upsample_bilinear2d は未対応（[B,C,H,W] のみ）"
+    )
+    _expect(
+        src.dtype == torch.float32,
+        node,
+        f"dtype {src.dtype} の upsample_bilinear2d は未対応（f32 のみ）",
+    )
+    output_size = node.args[1]
+    align_corners = node.args[2]
+    scale_factors = node.args[3] if len(node.args) > 3 else None
+    _expect(
+        align_corners is True,
+        node,
+        f"align_corners={align_corners!r} の upsample_bilinear2d は未対応"
+        "（契約は align_corners=True 専業 — 欄が無い）",
+    )
+    _expect(
+        scale_factors is None,
+        node,
+        f"scale_factors={scale_factors!r} 指定の upsample_bilinear2d は未対応"
+        "（出力長は size 指定のみ）",
+    )
+    _expect(
+        isinstance(output_size, (list, tuple)) and len(output_size) == 2,
+        node,
+        f"output_size={output_size!r} は未対応（[Hout, Wout] の 2 成分のみ）",
+    )
+    _expect(
+        not _has_free_symbols(output_size),
+        node,
+        f"記号を含む output_size={output_size!r} は未対応（attrs は静的な整数のみ）",
+    )
+    sizes = [int(size) for size in output_size]
+    _expect(all(size >= 1 for size in sizes), node, f"output_size={sizes} は未対応（正整数のみ）")
+    return Emitted("upsample_bilinear2d", 1, {"output_size": sizes})
+
+
 def _h_conv_transpose1d(node: Node) -> Emitted:
     """aten.conv_transpose1d → conv_transpose1d（attrs `stride` / `padding` — ADR 0015）。
 
@@ -2125,6 +2271,13 @@ ATEN_HANDLERS = {
     # 既存の reshape 正規化が受けるので、ここには足さない（出たら 1 行で足す）。
     aten.rms_norm.default: _h_rms_norm,
     aten.conv2d.default: _h_conv2d,
+    # 双線形 resample（第 1 層 — BiRefNet 一族 / Depth Anything V2 の共通前提）。
+    # `F.interpolate(size=…, mode="bilinear")` が落ちるのは `.vec` overload だけで、
+    # `.default`（scales_h / scales_w を個別に取る形）は実測に現れない（出たら 1 行で足す）。
+    aten.upsample_bilinear2d.vec: _h_upsample_bilinear2d,
+    # DCNv2（第 1' 層 — BiRefNet 一族の正面 blocker。ADR 0055）。`torchvision::` 名前空間の
+    # カスタム op なので Core ATen の分解表に登録が無く、curated decomp 後も 1 ノードで残る。
+    torch.ops.torchvision.deform_conv2d.default: _h_deform_conv2d,
     # perf-a（ADR 0023）— SDPA を保存したターゲットだけがこのハンドラに来る
     # （`curated_decompositions(preserved=…)` がターゲット別に選ぶ）。
     aten.scaled_dot_product_attention.default: _h_attention,

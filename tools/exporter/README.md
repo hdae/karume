@@ -12,6 +12,12 @@ JSON under the `__metadata__` key `karume_ir`.
 uv sync            # run in tools/exporter/ (pulls CPU torch from the pytorch-cpu index)
 ```
 
+`torchvision` is a **base** dependency, not an optional group: `torchvision::deform_conv2d` (the
+layer-1' op of ADR [0055](../../docs/decisions/0055-deform-conv2d.md)) is registered by importing
+the package, so both the handler key (`torch.ops.torchvision.deform_conv2d.default`) and the tiny
+golden that covers the op need it. Making it conditional would split environments into "rejects
+`deform_conv2d` as an unknown op" and "accepts it".
+
 ## CLI (`karume`)
 
 The subcommands installed by `[project.scripts]`. **The CLI does not interpret arguments** —
@@ -118,33 +124,35 @@ as 0 / 1. Out-of-range i64 fails loudly (`convert.normalize_boundary_tensor`).
 
 Current models and coverage:
 
-| Model                      | Symbolic dim | IR ops exercised                                                                                                                              |
-| -------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `unary_chain`              | none         | neg, abs, sqrt, log, exp                                                                                                                      |
-| `activations`              | none         | tanh, sigmoid, relu, gelu, gelu_tanh, sin                                                                                                     |
-| `broadcast_binary`         | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                                                               |
-| `mlp`                      | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                                                    |
-| `row_reduce`               | `T`          | sum, amax, amin                                                                                                                               |
-| `mask_chain`               | `T`          | mul(i32), cast, bitwise_not (has a bool output)                                                                                               |
-| `int_cast`                 | `T`          | cast(f32→i32 truncating), sub(i32), mul(i32) (i32 output)                                                                                     |
-| `layout_chain`             | `T`          | permute(3-cycle), reshape ×3 (chain of aliases + coefficient dim 4T)                                                                          |
-| `expand_mask`              | `T`          | expand(bool / i32), cast, mul, bitwise_not                                                                                                    |
-| `batch_matmul`             | `T`          | bmm(B/M/K/N all distinct lengths), permute (rank-3 batched matmul)                                                                            |
-| `gather_last_dim`          | `T`          | gather(last dim / indices from an i32 input), sum                                                                                             |
-| `attention_block`          | `T`          | linear ×4, softmax ×2, layer_norm, bmm, permute, reshape, add                                                                                 |
-| `fused_attention`          | none         | attention (one node preserved from SDPA; B/H/M/N/D all distinct, last query row has logits around −190)                                       |
-| `embedding_lookup`         | `T`          | embedding(padding_idx=0 is inactive in forward), sum                                                                                          |
-| `masked_scores`            | `T`          | masked_fill(−3.4e38 broadcast / 0 same-shape), softmax, cast, bitwise_not                                                                     |
-| `runtime_masked_attention` | none         | safe_softmax, where(bool graph input → 0/−inf), add, bmm, mul, permute, reshape, expand — the ADR 0044 chain, with one query row fully masked |
-| `conv_block`               | `T`          | conv1d(kernel 3 / stride 1 / padding 1), permute                                                                                              |
-| `dilated_conv`             | `T`          | conv1d(depthwise g=C, dilation 1/3/9 / intermediate groups / residual), leaky_relu, add                                                       |
-| `conv_transpose`           | `T`          | conv_transpose1d(up 2 and up 8 / asymmetric channels), conv1d(no bias), tanh                                                                  |
-| `symbolic_table`           | `T`          | sym_prefix_slice(i32 on 2 axes / f32 on 1 axis), gather, add (Tmax folding)                                                                   |
-| `scalar_operands`          | `T`          | add, sub, mul, div, cast (scalar promotion + reversed `1 − mask` used as a weight)                                                            |
-| `spline_pieces`            | `T`          | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape                                    |
-| `coupling_split`           | `T`          | slice(split decomposition + slicing after pad), cat, flip(axis length 3), pad, tanh, mul                                                      |
-| `decoder_tail`             | `T`          | leaky_relu(slope 0.1 and the default 0.01), expand(f32), conv1d, tanh, mul                                                                    |
-| `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (all 5 `WEIGHT_SLOTS` ops), tanh                                       |
+| Model                      | Symbolic dim | IR ops exercised                                                                                                                                  |
+| -------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unary_chain`              | none         | neg, abs, sqrt, log, exp                                                                                                                          |
+| `activations`              | none         | tanh, sigmoid, relu, gelu, gelu_tanh, sin                                                                                                         |
+| `broadcast_binary`         | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                                                                   |
+| `mlp`                      | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                                                        |
+| `row_reduce`               | `T`          | sum, amax, amin                                                                                                                                   |
+| `mask_chain`               | `T`          | mul(i32), cast, bitwise_not (has a bool output)                                                                                                   |
+| `int_cast`                 | `T`          | cast(f32→i32 truncating), sub(i32), mul(i32) (i32 output)                                                                                         |
+| `layout_chain`             | `T`          | permute(3-cycle), reshape ×3 (chain of aliases + coefficient dim 4T)                                                                              |
+| `expand_mask`              | `T`          | expand(bool / i32), cast, mul, bitwise_not                                                                                                        |
+| `batch_matmul`             | `T`          | bmm(B/M/K/N all distinct lengths), permute (rank-3 batched matmul)                                                                                |
+| `gather_last_dim`          | `T`          | gather(last dim / indices from an i32 input), sum                                                                                                 |
+| `attention_block`          | `T`          | linear ×4, softmax ×2, layer_norm, bmm, permute, reshape, add                                                                                     |
+| `fused_attention`          | none         | attention (one node preserved from SDPA; B/H/M/N/D all distinct, last query row has logits around −190)                                           |
+| `embedding_lookup`         | `T`          | embedding(padding_idx=0 is inactive in forward), sum                                                                                              |
+| `masked_scores`            | `T`          | masked_fill(−3.4e38 broadcast / 0 same-shape), softmax, cast, bitwise_not                                                                         |
+| `runtime_masked_attention` | none         | safe_softmax, where(bool graph input → 0/−inf), add, bmm, mul, permute, reshape, expand — the ADR 0044 chain, with one query row fully masked     |
+| `conv_block`               | `T`          | conv1d(kernel 3 / stride 1 / padding 1), permute                                                                                                  |
+| `dilated_conv`             | `T`          | conv1d(depthwise g=C, dilation 1/3/9 / intermediate groups / residual), leaky_relu, add                                                           |
+| `conv_transpose`           | `T`          | conv_transpose1d(up 2 and up 8 / asymmetric channels), conv1d(no bias), tanh                                                                      |
+| `symbolic_table`           | `T`          | sym_prefix_slice(i32 on 2 axes / f32 on 1 axis), gather, add (Tmax folding)                                                                       |
+| `scalar_operands`          | `T`          | add, sub, mul, div, cast (scalar promotion + reversed `1 − mask` used as a weight)                                                                |
+| `spline_pieces`            | `T`          | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape                                        |
+| `coupling_split`           | `T`          | slice(split decomposition + slicing after pad), cat, flip(axis length 3), pad, tanh, mul                                                          |
+| `decoder_tail`             | `T`          | leaky_relu(slope 0.1 and the default 0.01), expand(f32), conv1d, tanh, mul                                                                        |
+| `deform_conv2d_block`      | none         | deform_conv2d (DCNv2 — offsets reaching outside the input plane, modulator in [0,2], k=3×2 with asymmetric padding and a k=1 branch with no bias) |
+| `bilinear_resize`          | none         | upsample_bilinear2d (non-integer upscale 4×5→7×9, shrink 4×5→2×3, and a height-1 input whose H scale is 0)                                        |
+| `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (all 5 `WEIGHT_SLOTS` ops), tanh                                           |
 
 The second output of `attention_block` is a **softmax over large negative values (−205..−180)**, the
 regime where a naive form (a softmax that does not subtract amax) has `exp` collapse to 0 in f32 and
@@ -1424,9 +1432,10 @@ conformance table is the correct one.
   int32 — the explicit exception of ADR 0010). An initializer's semantic dtype is f32 or i32, and
   the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8}` and `i32 × i32` (the cross products
   fail loudly).
-- There are **53** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
-  `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake activation, and
-  `safe_softmax` for runtime attention masks — ADR 0044):
+- There are **55** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
+  `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake activation,
+  `safe_softmax` for runtime attention masks — ADR 0044 — `upsample_bilinear2d` for the
+  segmentation / depth family, and `deform_conv2d` for the BiRefNet family — ADR 0055):
   - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
     (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
     trigonometric op: constant tables (RoPE) are still folded away at export time, so only the
@@ -1445,7 +1454,21 @@ conformance table is the correct one.
     **`conv2d`** / `conv_transpose1d`. `safe_softmax` is `softmax` plus “a row whose max is −inf
     is written as all zeros”, i.e. the semantics of the safe-softmax guard that torch's SDPA
     decomposition wraps around `softmax` (ADR 0044)
-- **27 ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
+  - spatial resample (a layer-1 atom): **`upsample_bilinear2d`** — `x[B,C,H,W] →
+    [B,C,Hout,Wout]`, arity 1, attrs `output_size` only. **`align_corners=True` only**: there is no
+    field for `align_corners` / `mode` / `scale_factor`, so half-pixel alignment, nearest / bicubic /
+    area / antialias and factor-based sizing all fail loudly at the exporter boundary. Shrinking
+    goes through the same op (torch does too — reading only 2 taps is the specified behaviour, and
+    is not `area`)
+  - deformable convolution (a layer-1' atom, ADR 0055): **`deform_conv2d`** — DCNv2 with arity 5
+    (`x[B,Cin,H,W]` / `W[Cout,Cin,Kh,Kw]` / `offset[B,2·Kh·Kw,Hout,Wout]` /
+    `mask[B,Kh·Kw,Hout,Wout]` / `b[Cout]`), attrs `padding` only. The offset channels are nested as
+    `(kh, kw)` with the innermost pair being **even = y, odd = x**; the modulator is applied
+    **after** the bilinear interpolation; out-of-range samples are **zero-filled, not clamped**.
+    There is no field for `stride` / `dilation` / `groups` / `offset_groups` (all fixed to 1) and
+    the mask is a mandatory slot, so DCNv1 (`use_mask=False`) fails loudly at the exporter boundary.
+    A NaN offset propagates to the output instead of collapsing to a zero contribution
+- **29 ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
   `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `conv2d.{stride,padding,dilation,groups}` /
   `leaky_relu.negative_slope` / `ge_scalar.value` / `le_scalar.value` / `gt_scalar.value` /
   `cumsum.dim` / `cast.to` / `permute.dims` / `slice.{dim,start,end}` / `cat.dim` /
@@ -1453,7 +1476,9 @@ conformance table is the correct one.
   `layer_norm.{normalized_shape,eps}` / `softmax.dim` / `safe_softmax.dim` /
   `embedding.padding_idx` /
   `masked_fill.value` / `conv1d.{stride,padding,dilation,groups}` /
-  `conv_transpose1d.{stride,padding}`). Every declared key is mandatory, and undeclared keys or
+  `conv_transpose1d.{stride,padding}` / `upsample_bilinear2d.output_size` /
+  `deform_conv2d.padding`). Every declared key is
+  mandatory, and undeclared keys or
   out-of-range values fail loudly (ADR 0012). **Defaults are never filled in** — being able to omit
   `dilation` / `groups` on `conv1d` would silently turn a depthwise IR into an ordinary convolution
   (ADR 0015). `gelu(approximate="tanh")` has no field to record it either, so it is carried by its

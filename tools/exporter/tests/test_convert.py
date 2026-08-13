@@ -11,6 +11,7 @@ import torch
 from conftest import SYM_MAX, node_ops, only_node
 from torch import nn
 from torch.export import Dim
+from torchvision.ops import deform_conv2d
 
 from karume.convert import (
     Converter,
@@ -2032,3 +2033,231 @@ class TestConv2d:
         node = only_node(graph, "conv2d")
         assert node.attrs["dilation"] == [2, 1]
         assert graph.values[node.outs[0]].shape == [1, 2, 8, 4]
+
+
+class TestUpsampleBilinear2d:
+    """第 1 層 — align_corners=True 専業。受理は実測形（size 指定・rank 4・f32）だけ。"""
+
+    def test_a_size_specified_interpolate_becomes_one_node(self, convert_module):
+        """`F.interpolate(size=…, mode="bilinear")` は 1 ノードに落ちる（分解されない）。"""
+
+        class Resize(nn.Module):
+            def forward(self, x):
+                return nn.functional.interpolate(
+                    x, size=(7, 9), mode="bilinear", align_corners=True
+                )
+
+        graph, _ = convert_module(Resize(), (torch.randn(1, 3, 4, 5),))
+
+        assert node_ops(graph) == ["upsample_bilinear2d"]
+        node = only_node(graph, "upsample_bilinear2d")
+        assert node.attrs == {"output_size": [7, 9]}
+        assert graph.values[node.outs[0]].shape == [1, 3, 7, 9]
+
+    def test_shrinking_uses_the_same_op(self, convert_module):
+        """縮小も同じ op（torch も同一 op で、antialias が無いのは仕様どおり）。"""
+
+        class Shrink(nn.Module):
+            def forward(self, x):
+                return nn.functional.interpolate(
+                    x, size=(2, 3), mode="bilinear", align_corners=True
+                )
+
+        graph, _ = convert_module(Shrink(), (torch.randn(1, 3, 8, 10),))
+
+        assert only_node(graph, "upsample_bilinear2d").attrs == {"output_size": [2, 3]}
+
+    def test_align_corners_false_is_rejected(self, convert_module):
+        """MUST: 座標式も端の扱いも別物なので、黙って同じ op で実行しない。"""
+
+        class HalfPixel(nn.Module):
+            def forward(self, x):
+                return nn.functional.interpolate(
+                    x, size=(7, 9), mode="bilinear", align_corners=False
+                )
+
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(HalfPixel(), (torch.randn(1, 3, 4, 5),))
+
+        assert "align_corners" in str(err.value)
+
+    def test_a_scale_factor_is_rejected(self, convert_module):
+        """MUST: 倍率指定は出力長の丸め規約がもう 1 つ増える（同じ形に 2 通りの IR）。"""
+
+        class Doubled(nn.Module):
+            def forward(self, x):
+                return nn.functional.interpolate(
+                    x, scale_factor=2.0, mode="bilinear", align_corners=True
+                )
+
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(Doubled(), (torch.randn(1, 3, 4, 5),))
+
+        assert "scale_factors" in str(err.value)
+
+    def test_a_non_f32_input_is_rejected(self, convert_module):
+        """契約は f32 専業。同じ overload で f16 / f64 が来るので入口で落とす。"""
+
+        class Resize(nn.Module):
+            def forward(self, x):
+                return nn.functional.interpolate(
+                    x, size=(7, 9), mode="bilinear", align_corners=True
+                )
+
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(Resize(), (torch.randn(1, 3, 4, 5, dtype=torch.float64),))
+
+        assert "f32" in str(err.value)
+
+    def test_a_non_bilinear_mode_is_not_in_the_vocabulary(self, convert_module):
+        """nearest は別の aten op（`upsample_nearest2d.vec`）で、対応表に無いので落ちる。
+
+        MUST: mode を attrs に載せていないので、ここが「別の補間が黙って双線形で実行される」
+        経路の唯一の門になる。
+        """
+
+        class Nearest(nn.Module):
+            def forward(self, x):
+                return nn.functional.interpolate(x, size=(7, 9), mode="nearest")
+
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            convert_module(Nearest(), (torch.randn(1, 3, 4, 5),))
+
+        assert "upsample_nearest2d" in str(err.value)
+
+
+class TestDeformConv2d:
+    """第 1' 層 — DCNv2 専業（ADR 0055）。受理は実測形（BiRefNet の 20 箇所）だけ。"""
+
+    @staticmethod
+    def _module(padding=(1, 0), *, bias=True):
+        class Deform(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(5, 3, 3, 2))
+                self.bias = nn.Parameter(torch.randn(5)) if bias else None
+
+            def forward(self, x, offset, mask):
+                return deform_conv2d(
+                    input=x,
+                    offset=offset,
+                    weight=self.weight,
+                    bias=self.bias,
+                    padding=padding,
+                    mask=mask,
+                )
+
+        return Deform()
+
+    @staticmethod
+    def _args():
+        # padding (1, 0) → Hout = 4 + 2 - 2 = 4 / Wout = 5 + 0 - 1 = 4
+        return (torch.randn(1, 3, 4, 5), torch.randn(1, 12, 4, 4), torch.randn(1, 6, 4, 4))
+
+    def test_a_modulated_deform_conv_becomes_one_node(self, convert_module):
+        """`torchvision::deform_conv2d` は curated decomp 後も 1 ノードで残る。"""
+        graph, _ = convert_module(self._module(), self._args())
+
+        assert node_ops(graph) == ["deform_conv2d"]
+        node = only_node(graph, "deform_conv2d")
+        assert node.attrs == {"padding": [1, 0]}
+        # 入力は x / weight / offset / mask / bias の 5 本（torchvision の位置引数順）
+        assert len(node.ins) == 5
+        assert graph.values[node.outs[0]].shape == [1, 5, 4, 4]
+
+    def test_a_missing_bias_is_folded_into_an_initializer(self, convert_module):
+        """bias 無しは torchvision のラッパが `aten.full` を挿し、第 0 層が initializer にする。
+
+        MUST: エクスポータ側でゼロ bias を合成しない（合成経路を二重に持たない — ADR 0055）。
+        """
+        graph, tensors = convert_module(self._module(bias=False), self._args())
+
+        assert node_ops(graph) == ["deform_conv2d"]
+        node = only_node(graph, "deform_conv2d")
+        assert node.ins[4] in graph.initializers
+        assert tensors[graph.initializers[node.ins[4]].tensor].tolist() == [0.0] * 5
+
+    def test_an_unmodulated_deform_conv_is_rejected(self, convert_module):
+        """MUST: use_mask=False（DCNv1）は落とす。
+
+        torchvision は mask=None のとき **[1,1] のダミーテンソル**を渡してくるので、
+        素通しするとダミーが modulator として掛かる沈黙誤値になる。
+        """
+
+        class Plain(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(5, 3, 3, 2))
+
+            def forward(self, x, offset):
+                return deform_conv2d(input=x, offset=offset, weight=self.weight, padding=(1, 0))
+
+        x, offset, _mask = self._args()
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(Plain(), (x, offset))
+
+        assert "use_mask" in str(err.value)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "shapes", "what"),
+        [
+            ({"stride": (2, 2)}, (1, 12, 2, 2), "stride_h"),
+            ({"dilation": (2, 2)}, (1, 12, 2, 3), "dilation_h"),
+        ],
+    )
+    def test_values_without_a_field_are_rejected(self, convert_module, kwargs, shapes, what):
+        """MUST: attrs に欄が無い（= 1 固定）値は、既定値補完ではなく**実値**を見て落とす。"""
+
+        class Strided(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(5, 3, 3, 2))
+
+            def forward(self, x, offset, mask):
+                return deform_conv2d(
+                    input=x,
+                    offset=offset,
+                    weight=self.weight,
+                    padding=(1, 0),
+                    mask=mask,
+                    **kwargs,
+                )
+
+        offset = torch.randn(*shapes)
+        mask = torch.randn(shapes[0], shapes[1] // 2, *shapes[2:])
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(Strided(), (torch.randn(1, 3, 4, 5), offset, mask))
+
+        assert what in str(err.value)
+
+    def test_offset_groups_greater_than_one_is_rejected(self, convert_module):
+        """MUST: offset_groups は offset のチャネル数から導かれる（欄が無い = 1 固定）。"""
+
+        class Grouped(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(5, 3, 3, 2))
+
+            def forward(self, x, offset, mask):
+                return deform_conv2d(
+                    input=x, offset=offset, weight=self.weight, padding=(1, 0), mask=mask
+                )
+
+        # offset_groups = 3（offset のチャネルが 3 * 2 * Kh * Kw）
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(
+                Grouped(),
+                (torch.randn(1, 3, 4, 5), torch.randn(1, 36, 4, 4), torch.randn(1, 18, 4, 4)),
+            )
+
+        assert "offset_groups" in str(err.value)
+
+    def test_a_non_f32_input_is_rejected(self, convert_module):
+        """契約は f32 専業（同じ op で f64 が来る）。"""
+        args = tuple(tensor.to(torch.float64) for tensor in self._args())
+        module = self._module().to(torch.float64)
+
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(module, args)
+
+        assert "f32" in str(err.value)

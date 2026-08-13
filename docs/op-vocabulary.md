@@ -171,6 +171,36 @@ NOTE: 2026-08-12 判定軸を**原子/分子**へ一本化（ADR 0043 追記）�
 `leaky_relu` は分子（第 2 層・根拠 ADR 0015）/ `sym_prefix_slice` は**第 1' 層**の初例。
 導入済み op の再割当はしない（層は今後の追加手続きだけを支配する）。
 
+NOTE: 2026-08-13 `upsample_bilinear2d` を**第 1 層**に追加。根拠 = BiRefNet_HR / Lucida /
+Depth Anything V2 が共通で使う `F.interpolate(..., size=(H,W), mode="bilinear",
+align_corners=True)`（BiRefNet_HR だけで推論グラフに 22 本・`scale_factor` 指定は
+アクティブ経路に 0 件・倍率は非整数）。手順 1 で止まらない理由は **size も倍率も静的だが
+値が実行時**だから。手順 2 の合成は**書けるが成立しない** — ①定数行列 2 本の matmul
+（分離可能形）は厳密同値だが **FLOP が直接カーネルの約 184 倍**（BiRefNet_HR の最終段
+`[1,192,512,512] → [1,192,2048,2048]` で 1.03 TFLOP 対 5.6 GFLOP）②gather 形は `gather` の
+契約（index の先行次元が src と完全一致）から index を broadcast できず、**805MB〜3.22GB**
+の添字テンソルが要る（反例集の `batch_norm` 537MB 行と同型で、桁が 1 つ上）。
+`aten.upsample_bilinear2d.vec` は Core ATen 内なので第 1 層 = **台帳のみ・ADR は書かない**
+（層分類の暫定運用は下の NOTE が指す known-issues の節・ユーザー裁定 2026-08-13）。
+**`align_corners=False` は受理しない** — 座標式（`scale·(i+0.5) − 0.5`）も端の扱いも別物で、
+attrs に欄を作らないことがそのまま fail loudly になる（ADR 0023 決定 4 の規律）。需要
+（SAM / RMBG-1.4 / IS-Net / MODNet / Depth Anything V2 の HF port）が出たら
+`gelu` / `gelu_tanh` と同じ手筋で**別 op**として足す。`upsample_nearest2d` は足さない
+（Anima の nearest-exact ×2 は第 3 層の融合ルール `upsample2x` が既に持っており、
+「対称性のための追加をしない」が優先する）。
+
+NOTE: 2026-08-13 `deform_conv2d`（DCNv2）を**第 1' 層**に追加。ADR
+[0055](decisions/0055-deform-conv2d.md) が正本。根拠 = BiRefNet 一族（公式 8 + Lucida）が
+全て `dec_att='ASPPDeformable'` で、1 forward に `torchvision.ops.deform_conv2d` が **20 回**。
+手順 1 で止まらない理由は offset が学習済み conv の**実行時出力**（クランプも無効）だから。
+手順 2 の合成も不可 — `floor` が語彙に無く（`cast` は trunc）、`gather` は最終次元固定で
+2 軸の値依存 gather を書けない。`torchvision::deform_conv2d` は **Core ATen 外**（実測でも
+`run_decompositions(curated_decompositions())` 後に 1 ノードで残る）なので、下の暫定運用
+（Core ATen 外の原子 = 第 1' 層）に従い **ADR 必須**。却下案は `grid_sampler_2d` 経由の分解
+（厳密同値・Core ATen 内という手続き上の利点があるが、中間が im2col そのもので
+**k=7 / 512² で 3.29GB** — ADR 0024 が im2col を却下した 3.62GB と同水準）。**`grid_sampler_2d`
+の保留は解除していない**（下の系統 3 の箱はそのまま — 需要が出た時に独立に判断する）。
+
 NOTE: 2026-08-13 **この層表には 2 つの穴がある**（Core ATen 外だがモデル由来の原子 /
 「容量・性能で非成立」の線引きが手順 3 と ADR 0043 追記で非等価）。暫定の運用ルールと
 再分類の予定は [known-issues.md](known-issues.md) の「op 追加の層分類が一部の op で

@@ -48,6 +48,7 @@ from karume.ops import (
     conv2d_attrs,
     conv_transpose1d_attrs,
     cumsum_dim,
+    deform_conv2d_attrs,
     describe_arity,
     layer_norm_attrs,
     pad_attrs,
@@ -59,6 +60,7 @@ from karume.ops import (
     slice_attrs,
     softmax_dim,
     sym_prefix_slice_attrs,
+    upsample_bilinear2d_attrs,
 )
 
 
@@ -280,6 +282,10 @@ def _compute(
         return _conv2d(ins, where, attrs)
     if kind == "conv_transpose1d":
         return _conv_transpose1d(ins, where, attrs)
+    if kind == "deform_conv2d":
+        return _deform_conv2d(ins, where, attrs)
+    if kind == "upsample_bilinear2d":
+        return _upsample_bilinear2d(ins, where, attrs)
     raise OpContractError(f"{where}: op kind '{kind}' の shape 規則が無い")
 
 
@@ -896,6 +902,87 @@ def _conv_transpose1d(
             coeff=length.coeff * stride, sym=length.sym, offset=length.offset * stride
         )
     return [x[0], channels_out, out_length]
+
+
+def _deform_conv2d(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
+    """deform_conv2d の出力 shape（第 1' 層・ADR 0055）。
+
+    MUST: 重みは **[Cout, Cin, Kh, Kw]**（groups の欄が無い = 1 固定なので第 2 軸は Cin
+    そのもの）。取り違えは要素数が合う形が作れるので、適合表は Cin != Cout・Kh != Kw の
+    非対称形を持つ（conv2d と同じ教訓）。
+    MUST: 出力空間は x + weight + padding から**導き**、offset / mask とは突き合わせるだけ。
+    offset 側から Hout を取ると「offset だけ形が違う IR」が素通りする。
+    """
+    x, weight, offset, mask, bias = ins
+    padding = deform_conv2d_attrs(attrs, where)
+    if len(x) != 4 or len(weight) != 4 or len(offset) != 4 or len(mask) != 4 or len(bias) != 1:
+        raise OpContractError(
+            f"{where}: deform_conv2d は x[B,Cin,H,W] / W[Cout,Cin,Kh,Kw] /"
+            " offset[B,2*Kh*Kw,Hout,Wout] / mask[B,Kh*Kw,Hout,Wout] / b[Cout]"
+            f"（rank 4/4/4/4/1）: [{_show(x)}] / [{_show(weight)}] / [{_show(offset)}] /"
+            f" [{_show(mask)}] / [{_show(bias)}]"
+        )
+    channels_in = x[1]
+    channels_out, weight_in, kernel_h, kernel_w = weight
+    if weight_in != channels_in:
+        raise OpContractError(
+            f"{where}: deform_conv2d の重みは [Cout, Cin, Kh, Kw]"
+            f"（Cin = {channels_in.to_dim()}）のはずが [{_show(weight)}]（x は [{_show(x)}]）"
+        )
+    if bias[0] != channels_out:
+        raise OpContractError(
+            f"{where}: deform_conv2d の bias 長 {bias[0].to_dim()} が"
+            f" 出力チャネル {channels_out.to_dim()} と違う"
+        )
+    for name, kernel in (("Kh", kernel_h), ("Kw", kernel_w)):
+        if not kernel.is_const:
+            raise OpContractError(
+                f"{where}: deform_conv2d のカーネル長 {name} {kernel.to_dim()} が記号"
+                "（出力長を決められない）"
+            )
+    # stride / dilation の欄が無い = 1 固定なので、conv 族の一般形をその値で共有する。
+    height_out = _conv_length("deform_conv2d の H", x[2], kernel_h.offset, 1, padding[0], 1, where)
+    width_out = _conv_length("deform_conv2d の W", x[3], kernel_w.offset, 1, padding[1], 1, where)
+    taps = kernel_h.offset * kernel_w.offset
+    for name, shape, channels in (("offset", offset, 2 * taps), ("mask", mask, taps)):
+        expected = [x[0], Extent(coeff=0, sym=None, offset=channels), height_out, width_out]
+        if shape != expected:
+            raise OpContractError(
+                f"{where}: deform_conv2d の {name} は [{_show(expected)}]"
+                f"（offset_groups = 1）のはずが [{_show(shape)}]"
+            )
+    return [x[0], channels_out, height_out, width_out]
+
+
+def _upsample_bilinear2d(
+    ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]
+) -> list[Extent]:
+    """upsample_bilinear2d の出力 shape（第 1 層・align_corners=True 専業）。
+
+    出力空間は attrs `output_size` がそのまま決める（入力の H/W は倍率の分母としてしか
+    効かない）ので、**入力の空間軸は記号でもよい**。B / C は素通り。
+
+    MUST: 長さ 0 の空間軸を通さない。scale は `(in - 1) / (out - 1)` なので in = 0 は負の
+    scale になり、読み出しが入力の外へ出る（記号長は束縛次第なので TS 側が実行前に見る）。
+    """
+    x = ins[0]
+    output_size = upsample_bilinear2d_attrs(attrs, where)
+    if len(x) != 4:
+        raise OpContractError(
+            f"{where}: upsample_bilinear2d は x[B,C,H,W]（rank 4）のみ: [{_show(x)}]"
+        )
+    for name, axis in (("H", 2), ("W", 3)):
+        if x[axis].is_value(0):
+            raise OpContractError(
+                f"{where}: upsample_bilinear2d は長さ 0 の空間軸 {name} を補間できない"
+                f"（[{_show(x)}]）"
+            )
+    return [
+        x[0],
+        x[1],
+        Extent(coeff=0, sym=None, offset=output_size[0]),
+        Extent(coeff=0, sym=None, offset=output_size[1]),
+    ]
 
 
 # ---- グラフ全体の突合 ------------------------------------------------------

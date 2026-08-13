@@ -8,7 +8,9 @@
 // 「大きめの入力」を通すだけで、必要数の workgroup が実際に割り当たるため縮退経路を 1 度も
 // 踏まない — `stride` を `nwg.x * WG` ではなく定数にする誤りは、そちらでは緑のまま通る。
 // 要素方向の族（elementwise / strided 読み書き / gather / embedding / masked_fill / conv 族 /
-// pad / flip / **軸 reduce**）は `gid.x` の 1 次元 grid-stride、行方向の族（行 reduce / softmax /
+// pad / flip / upsample_bilinear2d / deform_conv2d / **軸 reduce**）は `gid.x` の 1 次元
+// grid-stride、
+// 行方向の族（行 reduce / softmax /
 // layer_norm / rms_norm）は `workgroup_id.x` を `num_workgroups.x` で送る行ループを踏ませる。
 // **reduce 族は 2 変種とも載せる**（最終次元 = 行方向 / それ以外 = 要素方向で、走らせ方が違う）。
 // cumsum は**行を単位とした
@@ -98,6 +100,18 @@ import {
   maskedFillParams,
 } from "../src/kernels/masked-fill.ts";
 import { PAD_KEY, PAD_WGSL, PAD_WORKGROUP_SIZE, padParams } from "../src/kernels/pad.ts";
+import {
+  UPSAMPLE_BILINEAR2D_KEY,
+  UPSAMPLE_BILINEAR2D_WGSL,
+  UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE,
+  upsampleBilinear2dParams,
+} from "../src/kernels/upsample-bilinear2d.ts";
+import {
+  DEFORM_CONV2D_KEY,
+  DEFORM_CONV2D_WGSL,
+  DEFORM_CONV2D_WORKGROUP_SIZE,
+  deformConv2dParams,
+} from "../src/kernels/deform-conv2d.ts";
 import { SOFTMAX_KEY, SOFTMAX_WGSL, softmaxParams } from "../src/kernels/softmax.ts";
 import {
   QUANTIZE_ROWS_KEY,
@@ -574,6 +588,90 @@ const flipCase = (): DegenerateCase => {
   };
 };
 
+const deformConv2dCase = (): DegenerateCase => {
+  const batch = 1;
+  // Cin ≠ Cout・Kh ≠ Kw（縮退経路でも重みの軸取り違えと offset の y/x 順が赤くなる形）
+  const channelsIn = 2;
+  const channelsOut = 3;
+  const heightIn = 4;
+  const widthIn = 6_000;
+  const kernelH = 3;
+  const kernelW = 2;
+  const paddingH = 1;
+  const paddingW = 0;
+  const heightOut = heightIn;
+  const widthOut = widthIn - (kernelW - 1);
+  const taps = kernelH * kernelW;
+  const x = fill([batch, channelsIn, heightIn, widthIn], SIGNED);
+  const weight = fill([channelsOut, channelsIn, kernelH, kernelW], POSITIVE);
+  // offset は ±1.5 の非整数（境界の内外を跨ぐ）・mask は BiRefNet と同じ [0,2]
+  const offset = fill([batch, 2 * taps, heightOut, widthOut], (i) => ((i % 7) - 3) * 0.5);
+  const mask = fill([batch, taps, heightOut, widthOut], (i) => (i % 5) * 0.5);
+  const bias = fill([channelsOut], SIGNED);
+  return {
+    name: "deform_conv2d",
+    key: DEFORM_CONV2D_KEY,
+    wgsl: DEFORM_CONV2D_WGSL,
+    params: deformConv2dParams({
+      batch,
+      channelsIn,
+      channelsOut,
+      heightIn,
+      widthIn,
+      heightOut,
+      widthOut,
+      kernelH,
+      kernelW,
+      paddingH,
+      paddingW,
+    }),
+    uniformParams: true,
+    inputs: [x, weight, offset, mask, bias],
+    expected: applyReferenceOp(
+      "deform_conv2d",
+      [x, weight, offset, mask, bias],
+      { padding: [paddingH, paddingW] },
+      [batch, channelsOut, heightOut, widthOut],
+    ),
+    natural: Math.ceil(
+      (batch * channelsOut * heightOut * widthOut) / DEFORM_CONV2D_WORKGROUP_SIZE,
+    ),
+    groups: 2,
+  };
+};
+
+const upsampleBilinear2dCase = (): DegenerateCase => {
+  // 実モデルの形（BiRefNet の decoder 本流は 512² → 2048²）を要素数だけ縮めた比。倍率は
+  // 非整数（H は 39/399・W は 41/419）で、出力位置ごとに重みが違う形を縮退経路で踏む。
+  const [heightIn, widthIn] = [40, 42];
+  const [heightOut, widthOut] = [400, 420];
+  const shape = [1, 1, heightIn, widthIn];
+  const outShape = [1, 1, heightOut, widthOut];
+  const x = fill(shape, SIGNED);
+  return {
+    name: "upsample_bilinear2d",
+    key: UPSAMPLE_BILINEAR2D_KEY,
+    wgsl: UPSAMPLE_BILINEAR2D_WGSL,
+    params: upsampleBilinear2dParams(
+      heightOut * widthOut,
+      heightIn,
+      widthIn,
+      heightOut,
+      widthOut,
+    ),
+    uniformParams: true,
+    inputs: [x],
+    expected: applyReferenceOp(
+      "upsample_bilinear2d",
+      [x],
+      { output_size: [heightOut, widthOut] },
+      outShape,
+    ),
+    natural: Math.ceil((heightOut * widthOut) / UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE),
+    groups: 2,
+  };
+};
+
 /**
  * cat の実行カーネル（strided **書き**族）。1 dispatch = 出力の部分領域という cat の実形は
  * 残りが未書き込みで比較できないので、**出力全域を覆う置換**（読み族の permute [1,0] の双対）
@@ -891,6 +989,8 @@ const CASES: readonly DegenerateCase[] = [
   ]),
   padCase(),
   flipCase(),
+  upsampleBilinear2dCase(),
+  deformConv2dCase(),
   stridedWriteCase(),
   cumsumCase(),
   reduceCase(),

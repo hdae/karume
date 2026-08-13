@@ -133,6 +133,28 @@ CONV2D_OP = "conv2d"
 #: attrs は stride / padding のみで、受理するのは出力長が L*stride になる形だけ。
 CONV_TRANSPOSE1D_OP = "conv_transpose1d"
 
+#: modulated deformable convolution v2（第 1' 層の原子 — `torchvision::deform_conv2d`。
+#: ADR 0055）。**アリティ 5 固定**で x[B,Cin,H,W] / weight[Cout,Cin,Kh,Kw] /
+#: offset[B,2*Kh*Kw,Hout,Wout] / mask[B,Kh*Kw,Hout,Wout] / bias[Cout] を取る。
+#: offset のチャネル並びは (kh, kw) の入れ子で最内が 2 連（**偶数 = y / 奇数 = x**）、
+#: mask（modulator）は**双線形補間の後**に掛かる。境界外はゼロ埋め（clamp ではない）。
+#:
+#: MUST: attrs は `padding` の 1 本だけ。stride / dilation / groups / offset_groups の欄を
+#: 作らない（= 1 固定）— 実測（BiRefNet 一族の 20 箇所）が全て 1 で、欄の不存在が
+#: 「その形は語彙に無い」を構造で表す。該当しない形は `convert._h_deform_conv2d` が
+#: 全件 fail loudly にする。
+#: MUST: mask はスロットとして必須 = **DCNv2 専業**（use_mask=False の DCNv1 は語彙に無い）。
+DEFORM_CONV2D_OP = "deform_conv2d"
+
+#: NCHW の空間 2 軸の双線形 resample（第 1 層の原子 — `aten.upsample_bilinear2d.vec`）。
+#: `x[B,C,H,W] -> [B,C,Hout,Wout]` で attrs は `output_size`（`[Hout, Wout]`）のみ。
+#:
+#: MUST: **align_corners=True 専業**。attrs に `align_corners` / `mode` / `scale_factor` の
+#: 欄を作らない（欄の不存在が「語彙に無い」を構造で表す — ADR 0023 決定 4）。該当しない形は
+#: `convert._h_upsample_bilinear2d` が全件 fail loudly にする。
+#: NOTE: 縮小（Hout < H）も同じ op・同じ式で通る（torch も同一 op）。
+UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d"
+
 #: 低精度格納が**適格**になる重みスロット（op 名 → 入力スロット番号 — ADR 0018）。
 #: TS 側 `packages/runtime/src/ops.ts` の `WEIGHT_SLOTS` の鏡像で、ずれは適合表
 #: （packages/runtime/tests/fixtures/op-contracts.json の `weight_slot`）が両側から
@@ -226,6 +248,8 @@ OpKind = Literal[
     "conv1d",
     "conv2d",
     "conv_transpose1d",
+    "deform_conv2d",
+    "upsample_bilinear2d",
 ]
 
 #: attr キー → 値の検査関数（ADR 0012）。宣言したキーは全て必須で、宣言外は fail loudly。
@@ -586,6 +610,26 @@ CONV_TRANSPOSE1D_ATTRS: AttrSchema = {
     "padding": lambda value, where: _assert_integer_attr(value, where, 0),
 }
 
+#: deform_conv2d の attrs（第 1' 層・ADR 0055）。**`padding`（`[H, W]`）の 1 キーだけ**。
+#:
+#: MUST: stride / dilation / groups / offset_groups のキーを足さない（= 1 固定）。値の形は
+#: conv2d と同じ [H, W] の長さ 2 のリストで、スカラ表記は境界で正規化する。
+DEFORM_CONV2D_ATTRS: AttrSchema = {
+    "padding": lambda value, where: _assert_int_pair(value, where, 0, "deform_conv2d の padding"),
+}
+
+#: upsample_bilinear2d の attrs（第 1 層）。**`output_size`（`[Hout, Wout]`）の 1 キーだけ**。
+#:
+#: MUST: conv2d と同じ [H, W] の長さ 2 のリストで、スカラ表記は受理しない（同じ resample に
+#: 2 通りの IR ができる — 正規化は境界の仕事）。
+#: MUST: `align_corners` / `mode` / `scale_factor` の欄を足さない。欄の不存在がそのまま
+#: 「その形は語彙に無い」の宣言で、ハンドラ側の fail loudly と対になっている。
+UPSAMPLE_BILINEAR2D_ATTRS: AttrSchema = {
+    "output_size": lambda value, where: _assert_int_pair(
+        value, where, 1, "upsample_bilinear2d の output_size"
+    ),
+}
+
 
 def layer_norm_attrs(attrs: Mapping[str, Any], where: str) -> tuple[list[int], float]:
     """layer_norm ノードの (normalized_shape, eps)。
@@ -676,6 +720,26 @@ def conv_transpose1d_attrs(attrs: Mapping[str, Any], where: str) -> tuple[int, i
     return (
         _assert_integer_attr(attrs.get("stride"), f"{where} の attrs.stride", 1),
         _assert_integer_attr(attrs.get("padding"), f"{where} の attrs.padding", 0),
+    )
+
+
+def deform_conv2d_attrs(attrs: Mapping[str, Any], where: str) -> tuple[int, int]:
+    """deform_conv2d ノードの padding（(H, W) の組）。"""
+    return _assert_int_pair(
+        attrs.get("padding"),
+        f"{where} の attrs.padding",
+        0,
+        "deform_conv2d の padding",
+    )
+
+
+def upsample_bilinear2d_attrs(attrs: Mapping[str, Any], where: str) -> tuple[int, int]:
+    """upsample_bilinear2d ノードの output_size（(Hout, Wout) の組）。"""
+    return _assert_int_pair(
+        attrs.get("output_size"),
+        f"{where} の attrs.output_size",
+        1,
+        "upsample_bilinear2d の output_size",
     )
 
 
@@ -931,6 +995,13 @@ OP_CONTRACTS: dict[str, OpContract] = {
     # カーネルにも契約にも arity 分岐を持ち込まない。
     CONV_TRANSPOSE1D_OP: _contract(
         CONV_TRANSPOSE1D_OP, "conv_transpose1d", 3, CONV_TRANSPOSE1D_ATTRS
+    ),
+    # DCNv2（第 1' 層・ADR 0055）。5 スロットとも f32 で同型。重みは持つが**低精度格納の
+    # 適格外**なので WEIGHT_SLOTS には載せない。
+    DEFORM_CONV2D_OP: _contract(DEFORM_CONV2D_OP, "deform_conv2d", 5, DEFORM_CONV2D_ATTRS),
+    # 双線形 resample（第 1 層）。重みを持たないので WEIGHT_SLOTS には載らない。
+    UPSAMPLE_BILINEAR2D_OP: _contract(
+        UPSAMPLE_BILINEAR2D_OP, "upsample_bilinear2d", 1, UPSAMPLE_BILINEAR2D_ATTRS
     ),
 }
 

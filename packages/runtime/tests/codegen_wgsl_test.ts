@@ -72,6 +72,18 @@ import {
   UPSAMPLE_2X_WORKGROUP_SIZE,
 } from "../src/kernels/upsample2x.ts";
 import {
+  UPSAMPLE_BILINEAR2D_KEY,
+  UPSAMPLE_BILINEAR2D_WGSL,
+  UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE,
+  upsampleBilinear2dParams,
+} from "../src/kernels/upsample-bilinear2d.ts";
+import {
+  DEFORM_CONV2D_KEY,
+  DEFORM_CONV2D_WGSL,
+  DEFORM_CONV2D_WORKGROUP_SIZE,
+  deformConv2dParams,
+} from "../src/kernels/deform-conv2d.ts";
+import {
   SILU_WORKGROUP_SIZE,
   siluKey,
   type SiluMulOrder,
@@ -300,6 +312,14 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["strided_write_f32.wgsl", stridedWriteWgsl({ dtype: "f32" })],
     ["pad.wgsl", PAD_WGSL],
     ["upsample2x.wgsl", UPSAMPLE_2X_WGSL],
+    // 双線形 resample（第 1 層 op）。第 3 層の融合ルール `upsample2x`（nearest のビット複製）
+    // とは別カーネル・別キーで、**両方を並べる**のが条件 — 片方だけを直したときに、もう
+    // 一方のバイト列が動いていないことがこの列挙で機械確認される。
+    ["upsample_bilinear2d.wgsl", UPSAMPLE_BILINEAR2D_WGSL],
+    // DCNv2（第 1' 層 op — ADR 0055）。**conv2d の直接カーネル（下の conv2d_*.wgsl）と対で
+    // 並べる**のが条件で、退化ビット一致（offset 0・mask 1 → conv2d）は両者の縮約順が
+    // 厳密に一致していることに依存する — 片方だけバイト列が動くのが最大の事故。
+    ["deform_conv2d.wgsl", DEFORM_CONV2D_WGSL],
     ["silu_x_sigmoid.wgsl", siluWgsl("x-sigmoid")],
     ["silu_sigmoid_x.wgsl", siluWgsl("sigmoid-x")],
     ["flip.wgsl", FLIP_WGSL],
@@ -525,6 +545,12 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     CUMSUM_KEY,
     PAD_KEY,
     FLIP_KEY,
+    // upsample 系 2 本は**対で載せる**（第 3 層の融合ルール `upsample2x` = nearest の
+    // ビット複製 / 第 1 層 op の `upsample_bilinear2d`）。名前が似ているぶん同じキーへ
+    // 割り当てる事故が起きやすく、起きると nearest の IR が bilinear のパイプラインで走る。
+    UPSAMPLE_2X_KEY,
+    UPSAMPLE_BILINEAR2D_KEY,
+    DEFORM_CONV2D_KEY,
     // 融合 5 カーネルは重み格納の変種ぶん（ADR 0018）。WGSL 本体が違うので、
     // 変種どうしが同じキーに割り当たると片方が黙って他方のパイプラインで走る
     // （linear は上の GEMM 直積が v4 込みで持っている）。
@@ -956,6 +982,142 @@ Deno.test("NCHW 2x upsample は入力要素ごとに 2x2 を書き、params の�
   assertThrows(() => upsample2xParams(25, 3), CodegenError, "整数行");
   assertThrows(() => upsample2xParams(0x4000_0000, 1), CodegenError, "4 * n");
   assertThrows(() => upsample2xParams(0, 0x8000_0000), CodegenError, "2 * width");
+});
+
+Deno.test("双線形 resample は出力 1 要素 = 1 スレッドで、末尾タップを整数比較で決める", () => {
+  assertEquals(
+    UPSAMPLE_BILINEAR2D_KEY,
+    `upsample_bilinear2d:v1:nchw:f32:align_corners:wg${UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE}`,
+  );
+  assertEquals(UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE, 256);
+  // MUST: scale はホストが割って params で運ぶ（WGSL の f32 除算は 2.5 ULP まで許され、
+  // 末尾の源座標が入力の末尾添字をわずかに下回ると端の厳密一致がバックエンド依存で壊れる）。
+  // シェーダ側に残る除算は u32 の添字分解だけ = f32 の除算が 1 つも無いことがその宣言。
+  assertEquals(UPSAMPLE_BILINEAR2D_WGSL.includes("  scale_h: f32,"), true);
+  assertEquals(UPSAMPLE_BILINEAR2D_WGSL.includes("params.scale_h * f32(oy)"), true);
+  assertEquals(UPSAMPLE_BILINEAR2D_WGSL.includes("params.scale_w * f32(ox)"), true);
+  assertEquals(/f32\([^)]*\) *\//.test(UPSAMPLE_BILINEAR2D_WGSL), false, "f32 の除算が残っている");
+  // MUST: 末尾タップの特例は**整数比較**（f32 の min/max は NaN を飲む — ADR 0020）
+  assertEquals(UPSAMPLE_BILINEAR2D_WGSL.includes("if (y0 + 1u < params.in_h) {"), true);
+  assertEquals(UPSAMPLE_BILINEAR2D_WGSL.includes("if (x0 + 1u < params.in_w) {"), true);
+  assertEquals(UPSAMPLE_BILINEAR2D_WGSL.includes("clamp("), false, "座標の clamp は使わない");
+  // 式木は H が外・W が内（torch の CUDA カーネルと同形 — 括弧が動くと丸め列が変わる）
+  assertEquals(
+    UPSAMPLE_BILINEAR2D_WGSL.includes(
+      "out[i] = ly0 * (lx0 * x[row0 + x0] + lx1 * x[row0 + x1])",
+    ),
+    true,
+  );
+  const params = upsampleBilinear2dParams(2 * 3 * 7 * 9, 4, 5, 7, 9);
+  assertEquals([...params.slice(0, 5)], [378, 4, 5, 7, 9]);
+  // scale = (in − 1) / (out − 1) を f32 で（4→7 も 5→9 もちょうど 0.5）
+  assertEquals([...new Float32Array(params.buffer).slice(5, 7)], [0.5, 0.5]);
+  assertEquals(params[7], 0, "予約語は 0");
+  // 出力長 1 の軸は scale 0（torch の area_pixel_compute_scale の特例）
+  assertEquals(
+    [...new Float32Array(upsampleBilinear2dParams(2, 6, 7, 1, 1).buffer).slice(5, 7)],
+    [0, 0],
+  );
+  // 入力長 1 の軸は scale 0（末尾特例が全出力で発火する形）
+  assertEquals(
+    [...new Float32Array(upsampleBilinear2dParams(12, 1, 6, 4, 3).buffer).slice(5, 7)],
+    [0, 2.5],
+  );
+  // uniform struct の整列は 16 バイト（u32 5 語 + f32 2 語 + 予約 1 語 = 32 バイト）
+  assertEquals(params.byteLength, 32);
+  assertThrows(() => upsampleBilinear2dParams(-1, 4, 5, 7, 9), CodegenError, "u32");
+  // 空間軸の 0 は WGSL 側の `in_size - 1u` が回り込む（沈黙の範囲外読み出し）
+  assertThrows(() => upsampleBilinear2dParams(63, 0, 5, 7, 9), CodegenError, "heightIn");
+  assertThrows(() => upsampleBilinear2dParams(63, 4, 0, 7, 9), CodegenError, "widthIn");
+  assertThrows(() => upsampleBilinear2dParams(0, 4, 5, 0, 9), CodegenError, "heightOut");
+  assertThrows(() => upsampleBilinear2dParams(0, 4, 5, 7, 0), CodegenError, "widthOut");
+  // 出力平面の整数倍でない n は平面の添字分解がずれる
+  assertThrows(() => upsampleBilinear2dParams(64, 4, 5, 7, 9), CodegenError, "整数倍");
+});
+
+Deno.test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分けて伝播させる", () => {
+  assertEquals(
+    DEFORM_CONV2D_KEY,
+    `deform_conv2d:v1:nchw:f32:dcnv2:wg${DEFORM_CONV2D_WORKGROUP_SIZE}`,
+  );
+  assertEquals(DEFORM_CONV2D_WORKGROUP_SIZE, 256);
+  // MUST: 範囲判定は正の形（NaN は false 側へ落ちる）。負の形（`<= -1 ||`）に書き換えると
+  // NaN が「範囲内」に落ちて i32(floor(NaN)) の未定義へ直行する。
+  assertEquals(
+    DEFORM_CONV2D_WGSL.includes(
+      "let inside = sy > -1.0 && sy < f32(dims.height_in)\n    && sx > -1.0 && sx < f32(dims.width_in);",
+    ),
+    true,
+  );
+  // MUST: NaN はビット列で判定して**伝播**させる（正の形だけだと 0 寄与に落ちる）。
+  assertEquals(
+    DEFORM_CONV2D_WGSL.includes("return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u;"),
+    true,
+  );
+  assertEquals(DEFORM_CONV2D_WGSL.includes("return bitcast<f32>(0x7fc00000u);"), true);
+  // MUST: 座標の clamp は使わない（境界外は clamp ではなくゼロ埋め）
+  assertEquals(DEFORM_CONV2D_WGSL.includes("clamp("), false, "座標の clamp は使わない");
+  // MUST: 偶数チャネル = y / 奇数 = x
+  assertEquals(
+    DEFORM_CONV2D_WGSL.includes("offsets[offset_base + 2u * tap * plane_out]"),
+    true,
+  );
+  assertEquals(
+    DEFORM_CONV2D_WGSL.includes("offsets[offset_base + (2u * tap + 1u) * plane_out]"),
+    true,
+  );
+  // MUST: mask は補間の後・重みの前（`(m · v) · w`）で、縮約順は conv2d と同じ (ic, kh, kw)
+  assertEquals(
+    DEFORM_CONV2D_WGSL.includes(
+      "acc = acc + (m * deform_sample(x_base, sy, sx)) * w[w_base + tap];",
+    ),
+    true,
+  );
+  assertEquals(
+    DEFORM_CONV2D_WGSL.indexOf("for (var ic = 0u;") <
+      DEFORM_CONV2D_WGSL.indexOf("for (var kh = 0u;"),
+    true,
+    "ic ループが kh より外（conv2d と同じ縮約順）",
+  );
+  const params = deformConv2dParams({
+    batch: 1,
+    channelsIn: 3,
+    channelsOut: 5,
+    heightIn: 4,
+    widthIn: 5,
+    heightOut: 4,
+    widthOut: 4,
+    kernelH: 3,
+    kernelW: 2,
+    paddingH: 1,
+    paddingW: 0,
+  });
+  assertEquals([...params], [80, 1, 3, 5, 4, 5, 4, 4, 3, 2, 1, 0]);
+  // uniform struct の整列は 16 バイト（12 語 = 48 バイト）
+  assertEquals(params.byteLength, 48);
+  const dims = {
+    batch: 1,
+    channelsIn: 3,
+    channelsOut: 5,
+    heightIn: 4,
+    widthIn: 5,
+    heightOut: 4,
+    widthOut: 4,
+    kernelH: 3,
+    kernelW: 2,
+    paddingH: 1,
+    paddingW: 0,
+  };
+  assertThrows(
+    () => deformConv2dParams({ ...dims, paddingH: -1 }),
+    CodegenError,
+    "非負整数",
+  );
+  // 空間長 0 は全タップが範囲外判定に落ち、出力が bias 一色になる沈黙誤値
+  assertThrows(() => deformConv2dParams({ ...dims, heightIn: 0 }), CodegenError, "height_in");
+  assertThrows(() => deformConv2dParams({ ...dims, widthIn: 0 }), CodegenError, "width_in");
+  assertThrows(() => deformConv2dParams({ ...dims, kernelW: 0 }), CodegenError, "kernel_w");
+  assertThrows(() => deformConv2dParams({ ...dims, batch: 0 }), CodegenError, "batch");
 });
 
 Deno.test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保ち、mul 順をキーへ残す", () => {

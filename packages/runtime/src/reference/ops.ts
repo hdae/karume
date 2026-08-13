@@ -26,6 +26,7 @@ import {
   conv1dAttrs,
   conv2dAttrs,
   convTranspose1dAttrs,
+  deformConv2dAttrs,
   describeArity,
   flipDim,
   layerNormAttrs,
@@ -42,6 +43,7 @@ import {
   scalarParamValues,
   sliceAttrs,
   type UnaryOpName,
+  upsampleBilinear2dAttrs,
 } from "../ops.ts";
 
 /** 参照実装に渡された値が契約に合わない（要素数と shape の食い違いなど）。 */
@@ -1199,6 +1201,179 @@ export const referenceConvTranspose1d = (
 };
 
 /**
+ * DCNv2（`torchvision::deform_conv2d`）の CPU 参照 — ADR 0055。
+ *
+ * `out[b, oc, oy, ox] = Σ_{ic,kh,kw} (m[b, kh·Kw+kw, oy, ox] · bilinear(x[b,ic], y, x)) ·
+ *   w[oc, ic, kh, kw] + bias[oc]`、`y = (oy − ph) + kh + off_y` / `x = (ox − pw) + kw + off_x`
+ * （stride / dilation / groups / offset_groups は欄が無い = 1 固定）。
+ *
+ * MUST: 縮約は `(ic, kh, kw)` 昇順で、conv2d 参照と**同じ入れ子**にする。offset を全 0・
+ * mask を全 1 にした退化ケースが conv2d と一致することが本 op の主オラクルなので、
+ * ループを組み替えると（意味論は同じでも）その門が丸め差で崩れる。
+ * MUST: offset / mask の読みを `ic` ループの外へ巻き上げない（同上）。
+ * MUST: 源座標は `Math.fround` で f32 へ丸める。**タップの採否**（`(−1, in)` の範囲判定と
+ * 4 隅個別のゼロ埋め）は丸め幅で変わりうるので、ここだけは f64 のまま進めない。
+ * MUST: 範囲判定は**正の形**（`> −1 && < in`）で書く。NaN は false 側へ落ちるので、
+ * NaN だけを先に見て**出力へ伝播**させる（0 に落とすと沈黙誤値になる — ADR 0020 の系譜）。
+ * MUST: 境界外は **border clamp ではなくゼロ埋め**（中心が範囲外ならタップ全体 0・内側でも
+ * 範囲外の隅はその隅だけ 0）。torchvision の 2 段構えを逐語で写す。
+ */
+export const referenceDeformConv2d = (
+  x: RefTensor,
+  weight: RefTensor,
+  offset: RefTensor,
+  mask: RefTensor,
+  bias: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("deform_conv2d");
+  for (const input of [x, weight, offset, mask, bias]) {
+    assertDtype(contract, input.dtype, "reference");
+  }
+  const shape = computeOutputShape(
+    contract,
+    [x.shape, weight.shape, offset.shape, mask.shape, bias.shape],
+    "reference",
+    { attrs },
+  );
+  const { padding } = deformConv2dAttrs(attrs, "reference");
+  const [batch, channelsOut, heightOut, widthOut] = shape;
+  const channelsIn = x.shape[1];
+  const heightIn = x.shape[2];
+  const widthIn = x.shape[3];
+  const kernelH = weight.shape[2];
+  const kernelW = weight.shape[3];
+  const taps = kernelH * kernelW;
+  const out = new Float32Array(numel(shape));
+  /** `x[item, channel]` 平面の双線形サンプル（範囲外は 0・NaN は伝播）。 */
+  const sample = (plane: number, sourceY: number, sourceX: number): number => {
+    if (Number.isNaN(sourceY) || Number.isNaN(sourceX)) return Number.NaN;
+    if (
+      !(sourceY > -1 && sourceY < heightIn && sourceX > -1 && sourceX < widthIn)
+    ) {
+      return 0;
+    }
+    const y0 = Math.floor(sourceY);
+    const x0 = Math.floor(sourceX);
+    const ly1 = Math.fround(sourceY - y0);
+    const lx1 = Math.fround(sourceX - x0);
+    const ly0 = 1 - ly1;
+    const lx0 = 1 - lx1;
+    // 4 隅は**個別に**範囲を見る（clamp ではない）。y0 は範囲判定の帰結で [−1, H−1]。
+    const at = (y: number, columnX: number): number =>
+      y >= 0 && y < heightIn && columnX >= 0 && columnX < widthIn
+        ? x.data[plane + y * widthIn + columnX]
+        : 0;
+    return ly0 * lx0 * at(y0, x0) + ly0 * lx1 * at(y0, x0 + 1) +
+      ly1 * lx0 * at(y0 + 1, x0) + ly1 * lx1 * at(y0 + 1, x0 + 1);
+  };
+  for (let item = 0; item < batch; item += 1) {
+    for (let oc = 0; oc < channelsOut; oc += 1) {
+      for (let oy = 0; oy < heightOut; oy += 1) {
+        for (let ox = 0; ox < widthOut; ox += 1) {
+          let acc = bias.data[oc];
+          for (let ic = 0; ic < channelsIn; ic += 1) {
+            const plane = (item * channelsIn + ic) * heightIn * widthIn;
+            for (let kh = 0; kh < kernelH; kh += 1) {
+              for (let kw = 0; kw < kernelW; kw += 1) {
+                const tap = kh * kernelW + kw;
+                const pixel = oy * widthOut + ox;
+                // offset のチャネル並びは **偶数 = y / 奇数 = x**（torchvision 逐語）。
+                const offsetBase = (item * 2 * taps + 2 * tap) * heightOut * widthOut;
+                const sourceY = Math.fround(
+                  oy - padding[0] + kh + offset.data[offsetBase + pixel],
+                );
+                const sourceX = Math.fround(
+                  ox - padding[1] + kw + offset.data[offsetBase + heightOut * widthOut + pixel],
+                );
+                // modulator は**補間の後**に掛かる（`(m · v) · w` — 括り方まで torchvision と同じ）。
+                const modulated = mask.data[(item * taps + tap) * heightOut * widthOut + pixel] *
+                  sample(plane, sourceY, sourceX);
+                acc += modulated * weight.data[
+                  ((oc * channelsIn + ic) * kernelH + kh) * kernelW +
+                  kw
+                ];
+              }
+            }
+          }
+          out[((item * channelsOut + oc) * heightOut + oy) * widthOut + ox] = Math.fround(acc);
+        }
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * 1 軸ぶんの双線形タップ表（`align_corners = True`）。
+ * torch の `area_pixel_compute_scale` + `compute_source_index_and_lambda` の直訳。
+ *
+ * MUST: scale と源座標は `Math.fround` で f32 へ丸める。**添字の決定**（`trunc` の結果と
+ * 末尾特例）は丸め幅で変わりうるので、ここだけは f64 のまま進めない — 許容差では吸収
+ * できない 1 ずれになる。
+ */
+const bilinearTaps = (
+  lengthIn: number,
+  lengthOut: number,
+): readonly { readonly low: number; readonly high: number; readonly lambda: number }[] => {
+  const scale = lengthOut > 1 ? Math.fround((lengthIn - 1) / (lengthOut - 1)) : 0;
+  return Array.from({ length: lengthOut }, (_unused, index) => {
+    const source = Math.fround(scale * index);
+    // 源座標は非負なので floor = trunc（torch の static_cast<int64_t> と同じ結果）。
+    const low = Math.floor(source);
+    return {
+      low,
+      // 末尾は 2 タップ目を持たない（`index1 = index0`）。
+      high: low + 1 < lengthIn ? low + 1 : low,
+      lambda: Math.fround(source - low),
+    };
+  });
+};
+
+/**
+ * NCHW の空間 2 軸の双線形 resample（`align_corners = True` 専業 — 第 1 層）。
+ *
+ * MUST: codegen（src/kernels/upsample-bilinear2d.ts）と添字の畳み方を共有しない。あちらは
+ * N·C を 1 本の平面添字へ畳んで平坦添字から座標を復元する形なので、こちらは **4 重ループで
+ * 座標を直に回す**（軸の取り違えと平面ずれを両側で相殺させないため）。タップ表を軸ごとに
+ * 先に作るのも意図的な別形で、あちらは 1 要素ごとに inline で計算する。
+ */
+export const referenceUpsampleBilinear2d = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("upsample_bilinear2d");
+  assertDtype(contract, x.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  upsampleBilinear2dAttrs(attrs, "reference");
+  const [batch, channels, heightOut, widthOut] = shape;
+  const heightIn = x.shape[2];
+  const widthIn = x.shape[3];
+  const rows = bilinearTaps(heightIn, heightOut);
+  const columns = bilinearTaps(widthIn, widthOut);
+  const out = new Float32Array(numel(shape));
+  let flat = 0;
+  for (let item = 0; item < batch; item += 1) {
+    for (let channel = 0; channel < channels; channel += 1) {
+      const plane = (item * channels + channel) * heightIn * widthIn;
+      for (const row of rows) {
+        for (const column of columns) {
+          const at = (y: number, index: number): number => x.data[plane + y * widthIn + index];
+          // H が外・W が内の入れ子（torch の式木と同じ組み方）。
+          const top = (1 - column.lambda) * at(row.low, column.low) +
+            column.lambda * at(row.low, column.high);
+          const bottom = (1 - column.lambda) * at(row.high, column.low) +
+            column.lambda * at(row.high, column.high);
+          out[flat] = Math.fround((1 - row.lambda) * top + row.lambda * bottom);
+          flat += 1;
+        }
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
  * 契約表の kind で分岐する統一入口（テストがグラフをそのまま辿れるようにするため）。
  *
  * `outShape` は「出力の宣言 shape が目標形」の op（reshape / expand — ADR 0011）で必須。
@@ -1281,5 +1456,16 @@ export const applyReferenceOp = (
       return referenceConv2d(inputs[0], inputs[1], inputs[2], attrs);
     case "convTranspose1d":
       return referenceConvTranspose1d(inputs[0], inputs[1], inputs[2], attrs);
+    case "deformConv2d":
+      return referenceDeformConv2d(
+        inputs[0],
+        inputs[1],
+        inputs[2],
+        inputs[3],
+        inputs[4],
+        attrs,
+      );
+    case "upsampleBilinear2d":
+      return referenceUpsampleBilinear2d(inputs[0], attrs);
   }
 };

@@ -145,6 +145,71 @@ Deno.test({
 });
 
 Deno.test({
+  name: "upsample_bilinear2d は毒値を 1 語も残さない（full-write / 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 出力 1 要素 = 1 スレッドだが、**N·C を 1 本の平面添字へ畳む**ので、平面の切り方を
+    // 誤ると特定の平面だけが丸ごと書かれない。B·C = 4 平面（`[2,2,…]`）で踏む。
+    // [2,2,2,3] → [2,2,3,2]（要素数 24 で入出力が同サイズクラス = 毒値バッファが配り直される）。
+    const graph = poisonGraph([2, 2, 3, 2], [{ name: "x", shape: [2, 2, 2, 3] }], {
+      op: "upsample_bilinear2d",
+      attrs: { output_size: [3, 2] },
+    });
+    const { output, reuseCount } = await runPoisoned(graph, {
+      x: fill([2, 2, 2, 3], (i) => 1 + i),
+    });
+    assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
+    assertEquals(output.shape, [2, 2, 3, 2]);
+    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    // 平面ごとに端が入力の端と一致する（平面添字がずれると隣の平面の値が出る）
+    for (let plane = 0; plane < 4; plane += 1) {
+      assertEquals(output.data[plane * 6], 1 + plane * 6, `平面 ${plane} の左上`);
+      assertEquals(output.data[plane * 6 + 5], 6 + plane * 6, `平面 ${plane} の右下`);
+    }
+  },
+});
+
+Deno.test({
+  name: "deform_conv2d は毒値を 1 語も残さない（full-write / 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 出力 1 要素 = 1 スレッドだが、平坦添字を B / Cout / Hout / Wout の 4 段へ分解するので、
+    // 段の切り方を誤ると特定のチャネルやバッチが丸ごと書かれない。バッチ 2 で踏む。
+    // x[2,2,3,4] * W[3,2,2,3]・padding [1,1] → Hout 4 / Wout 4 → [2,3,4,4]（96 要素）。
+    const outShape = [2, 3, 4, 4];
+    const graph = poisonGraph(
+      outShape,
+      [
+        { name: "x", shape: [2, 2, 3, 4] },
+        { name: "w", shape: [3, 2, 2, 3] },
+        { name: "off", shape: [2, 12, 4, 4] },
+        { name: "mask", shape: [2, 6, 4, 4] },
+        { name: "b", shape: [3] },
+      ],
+      { op: "deform_conv2d", attrs: { padding: [1, 1] } },
+    );
+    const { output, reuseCount } = await runPoisoned(graph, {
+      x: fill([2, 2, 3, 4], (i) => 1 + i),
+      w: fill([3, 2, 2, 3], (i) => 0.25 + i * 0.5),
+      // offset 0・mask 1 の退化形（値が素の conv2d と一致することは別テストが見る）
+      off: fill([2, 12, 4, 4], () => 0),
+      mask: fill([2, 6, 4, 4], () => 1),
+      b: fill([3], () => 0),
+    });
+    assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
+    assertEquals(output.shape, outShape);
+    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    // MUST: バッチ 2 枚が**別の値**になっている（B の段を落とすと 2 枚目が 1 枚目の複製に
+    // なり、毒値検査だけでは素通りする）。
+    assertEquals(
+      [...output.data.slice(0, 48)].every((value, index) => value === output.data[48 + index]),
+      false,
+      "バッチ 2 枚が同一（B の添字分解が効いていない）",
+    );
+  },
+});
+
+Deno.test({
   name: "conv2d 直接カーネル（groups>1）は毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

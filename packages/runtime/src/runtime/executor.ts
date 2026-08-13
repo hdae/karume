@@ -87,8 +87,20 @@ import {
   convTranspose1dWgsl,
 } from "../kernels/conv-transpose1d.ts";
 import { CUMSUM_KEY, CUMSUM_WGSL, CUMSUM_WORKGROUP_SIZE, cumsumParams } from "../kernels/cumsum.ts";
+import {
+  DEFORM_CONV2D_KEY,
+  DEFORM_CONV2D_WGSL,
+  DEFORM_CONV2D_WORKGROUP_SIZE,
+  deformConv2dParams,
+} from "../kernels/deform-conv2d.ts";
 import { FLIP_KEY, FLIP_WGSL, FLIP_WORKGROUP_SIZE, flipParams } from "../kernels/flip.ts";
 import { PAD_KEY, PAD_WGSL, PAD_WORKGROUP_SIZE, padParams } from "../kernels/pad.ts";
+import {
+  UPSAMPLE_BILINEAR2D_KEY,
+  UPSAMPLE_BILINEAR2D_WGSL,
+  UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE,
+  upsampleBilinear2dParams,
+} from "../kernels/upsample-bilinear2d.ts";
 import {
   EMBEDDING_SCALE_BINDING,
   EMBEDDING_WORKGROUP_SIZE,
@@ -206,6 +218,7 @@ import {
   conv1dAttrs,
   conv2dAttrs,
   convTranspose1dAttrs,
+  deformConv2dAttrs,
   flipDim,
   layerNormAttrs,
   maskedFillValue,
@@ -1966,6 +1979,12 @@ export class Session {
       case "convTranspose1d":
         await this.#buildConvTranspose1d(step, binds, out, builder);
         break;
+      case "deformConv2d":
+        await this.#buildDeformConv2d(step, binds, out, builder);
+        break;
+      case "upsampleBilinear2d":
+        await this.#buildUpsampleBilinear2d(step, binds, out, builder);
+        break;
       case "reshape":
         // 別名化は #buildStep で済んでいる（この op は 1 dispatch も出さない）。
         break;
@@ -2272,6 +2291,102 @@ export class Session {
     );
     builder.dispatch({
       key: FLIP_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      workgroups: [groups, 1, 1],
+    });
+  }
+
+  /**
+   * deform_conv2d（DCNv2 — ADR 0055）。出力 1 要素 = 1 invocation の grid-stride 1 本だけで、
+   * 踏み分けは無い（groups / offset_groups / stride / dilation は契約に欄が無い = 1 固定）。
+   *
+   * MUST: Kh / Kw は**重みの第 3 / 第 4 軸**をこの順で読む（conv2d と同じ教訓）。
+   * offset / mask の形は契約検査が出力空間と突き合わせ済み。
+   */
+  async #buildDeformConv2d(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
+  ): Promise<void> {
+    const [x, weight] = step.inputShapes;
+    const outShape = step.outputShape;
+    const { padding } = deformConv2dAttrs(step.node.attrs, `nodes (${step.node.op})`);
+    const { pipeline, layout } = await this.#state.cache.get(
+      DEFORM_CONV2D_KEY,
+      DEFORM_CONV2D_WGSL,
+    );
+    const params = this.#writeParams(
+      deformConv2dParams({
+        batch: outShape[0],
+        channelsIn: x[1],
+        channelsOut: outShape[1],
+        heightIn: x[2],
+        widthIn: x[3],
+        heightOut: outShape[2],
+        widthOut: outShape[3],
+        kernelH: weight[2],
+        kernelW: weight[3],
+        paddingH: padding[0],
+        paddingW: padding[1],
+      }),
+      PARAMS_UNIFORM_USAGE,
+    );
+    const workgroups = gridStrideWorkgroups(
+      numel(outShape),
+      DEFORM_CONV2D_WORKGROUP_SIZE,
+      this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
+    );
+    builder.dispatch({
+      key: DEFORM_CONV2D_KEY,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 6, source: out },
+      ],
+      workgroups: [workgroups, 1, 1],
+    });
+  }
+
+  /**
+   * upsample_bilinear2d（NCHW の空間 2 軸を双線形 resample・`align_corners = True` 専業）。
+   * 出力 1 要素 = 1 invocation の grid-stride で、params は空間 4 長だけ運ぶ
+   * （N·C はカーネル側が平面添字へ畳む — src/kernels/upsample-bilinear2d.ts）。
+   */
+  async #buildUpsampleBilinear2d(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
+  ): Promise<void> {
+    const srcShape = step.inputShapes[0];
+    const outShape = step.outputShape;
+    const { pipeline, layout } = await this.#state.cache.get(
+      UPSAMPLE_BILINEAR2D_KEY,
+      UPSAMPLE_BILINEAR2D_WGSL,
+    );
+    const params = this.#writeParams(
+      upsampleBilinear2dParams(
+        numel(outShape),
+        srcShape[2],
+        srcShape[3],
+        outShape[2],
+        outShape[3],
+      ),
+      PARAMS_UNIFORM_USAGE,
+    );
+    const groups = gridStrideWorkgroups(
+      numel(outShape),
+      UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE,
+      this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
+    );
+    builder.dispatch({
+      key: UPSAMPLE_BILINEAR2D_KEY,
       pipeline,
       layout,
       params,

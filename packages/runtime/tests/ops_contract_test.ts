@@ -45,11 +45,11 @@ const node = (op: string, ins: readonly string[], attrs: Record<string, unknown>
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
 // リテラル**で op 集合を固定するだけで、docs/ir-v1.md の一覧との同期は op 追加時の人手仕事
 // （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v1.md）。
-Deno.test("契約表の op 集合が期待値リテラル 53 本と一致する", () => {
+Deno.test("契約表の op 集合が期待値リテラル 55 本と一致する", () => {
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 53);
+  assertEquals(OP_CONTRACTS.size, 55);
   assertEquals([...OP_CONTRACTS.keys()].sort(), [
     "abs",
     "add",
@@ -67,6 +67,7 @@ Deno.test("契約表の op 集合が期待値リテラル 53 本と一致する"
     "conv2d",
     "conv_transpose1d",
     "cumsum",
+    "deform_conv2d",
     "div",
     "embedding",
     "exp",
@@ -103,6 +104,7 @@ Deno.test("契約表の op 集合が期待値リテラル 53 本と一致する"
     "sum",
     "sym_prefix_slice",
     "tanh",
+    "upsample_bilinear2d",
     "where",
   ]);
 });
@@ -302,8 +304,8 @@ Deno.test("スロット別契約の出力はスロット 0 と同型で、混合
   assertEquals(resolve("bmm", ["f32", "f32"], "f32"), "f32");
 });
 
-// attrs を持つ op は 27 本。それ以外は attrs 空のままで、非空 attrs は fail loudly。
-Deno.test("attrs を持つ op は契約表が列挙する 27 本だけで、他は attrs 空・単一出力", () => {
+// attrs を持つ op は 29 本。それ以外は attrs 空のままで、非空 attrs は fail loudly。
+Deno.test("attrs を持つ op は契約表が列挙する 29 本だけで、他は attrs 空・単一出力", () => {
   const withAttrs = [...OP_CONTRACTS]
     .filter(([, contract]) => attrKeysOf(contract).length > 0)
     .map(([name]) => name)
@@ -320,6 +322,7 @@ Deno.test("attrs を持つ op は契約表が列挙する 27 本だけで、他�
     "conv2d",
     "conv_transpose1d",
     "cumsum",
+    "deform_conv2d",
     "embedding",
     "flip",
     "ge_scalar",
@@ -336,6 +339,7 @@ Deno.test("attrs を持つ op は契約表が列挙する 27 本だけで、他�
     "softmax",
     "sum",
     "sym_prefix_slice",
+    "upsample_bilinear2d",
   ]);
   assertThrows(() => assertNodeContract(node("relu", ["a"], { alpha: 1 }), "t"), OpContractError);
   assertThrows(() => assertNodeContract(node("relu", ["a", "b"]), "t"), OpContractError);
@@ -385,6 +389,87 @@ Deno.test("attrs を持つ op は契約表が列挙する 27 本だけで、他�
   // NOTE: conv2d は ADR 0017 で契約表へ入った（M1-P2 まで「保存リストにあるがカーネルが
   // 無い op」の代表だった）。語彙にすら無い op の代表は conv_transpose2d が引き継ぐ。
   assertThrows(() => resolveOpContract("conv_transpose2d"), OpContractError);
+});
+
+// deform_conv2d は **DCNv2 専業・stride/dilation/groups/offset_groups は 1 固定**（第 1' 層・
+// ADR 0055）。どちらも値の検査ではなく**欄とスロットの不存在**で表しているので、それらが
+// 生えていないことを契約側から固定する。
+Deno.test("deform_conv2d の attrs は padding 1 本だけ・アリティ 5 固定", () => {
+  assertEquals(attrKeysOf(resolveOpContract("deform_conv2d")), ["padding"]);
+  assertEquals(
+    assertNodeContract(
+      node("deform_conv2d", ["x", "w", "off", "mask", "b"], { padding: [1, 0] }),
+      "t",
+    ).kind,
+    "deformConv2d",
+  );
+  // stride / dilation / groups / offset_groups の欄は無い = 宣言外キーとして落ちる
+  for (
+    const extra of [
+      { stride: [1, 1] },
+      { dilation: [1, 1] },
+      { groups: 1 },
+      { offset_groups: 1 },
+    ]
+  ) {
+    assertThrows(
+      () =>
+        assertNodeContract(
+          node("deform_conv2d", ["x", "w", "off", "mask", "b"], { padding: [1, 0], ...extra }),
+          "t",
+        ),
+      OpContractError,
+    );
+  }
+  // padding は宣言必須（既定値補完なし）
+  assertThrows(
+    () => assertNodeContract(node("deform_conv2d", ["x", "w", "off", "mask", "b"]), "t"),
+    OpContractError,
+  );
+  // mask を落とした DCNv1 も、余分なスロットも受理しない（アリティが絞りそのもの）
+  for (
+    const ins of [
+      ["x", "w", "off", "b"],
+      ["x", "w", "off", "mask", "b", "extra"],
+    ]
+  ) {
+    assertThrows(
+      () => assertNodeContract(node("deform_conv2d", ins, { padding: [1, 0] }), "t"),
+      OpContractError,
+    );
+  }
+});
+
+// upsample_bilinear2d は **align_corners=True 専業**（第 1 層）。「True 以外を受理しない」を
+// 値の検査ではなく**欄の不存在**で表しているので、その欄が生えていないことを契約側から固定
+// する（ADR 0023 決定 4 の規律 — 欄ができた瞬間に False も表現できてしまう）。
+Deno.test("upsample_bilinear2d の attrs は output_size 1 本だけ（align_corners の欄が無い）", () => {
+  assertEquals(attrKeysOf(resolveOpContract("upsample_bilinear2d")), ["output_size"]);
+  assertEquals(
+    assertNodeContract(node("upsample_bilinear2d", ["x"], { output_size: [7, 9] }), "t").kind,
+    "upsampleBilinear2d",
+  );
+  // align_corners / mode / scale_factor の欄は無い = 宣言外キーとして落ちる
+  for (const extra of [{ align_corners: true }, { mode: "bilinear" }, { scale_factor: [2, 2] }]) {
+    assertThrows(
+      () =>
+        assertNodeContract(
+          node("upsample_bilinear2d", ["x"], { output_size: [7, 9], ...extra }),
+          "t",
+        ),
+      OpContractError,
+    );
+  }
+  // 出力空間の宣言は必須（既定値補完なし）
+  assertThrows(
+    () => assertNodeContract(node("upsample_bilinear2d", ["x"]), "t"),
+    OpContractError,
+  );
+  // アリティ 1 固定（重みも bias も持たない）
+  assertThrows(
+    () => assertNodeContract(node("upsample_bilinear2d", ["x", "w"], { output_size: [7, 9] }), "t"),
+    OpContractError,
+  );
 });
 
 // ADR 0012: attrs スキーマは「宣言キーは全て必須・宣言外は fail loudly・値も検査する」。
