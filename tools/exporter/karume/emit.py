@@ -44,8 +44,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 
 import torch
 
@@ -62,6 +63,12 @@ _SAFETENSORS_DTYPE: Mapping[torch.dtype, tuple[str, int]] = {
     torch.float16: ("F16", 2),
     torch.int32: ("I32", 4),
     torch.int8: ("I8", 1),
+}
+
+#: 圧縮格納 dtype → torch dtype。ヘッダを**変換前**に決めるための対応（`_stored_dtype_of`）。
+_STORAGE_TORCH_DTYPE: Mapping[str, torch.dtype] = {
+    "f16": torch.float16,
+    "i8": torch.int8,
 }
 
 #: 書き出し順の第 1 キー（safetensors dtype → 群）。**4 バイト整列を必要とする群を先に**
@@ -169,17 +176,34 @@ def _unrounded(name: str, tensor_key: str, detail: str) -> EmitError:
     )
 
 
-def _plan_f16(
-    graph: IrGraph, name: str, tensor: torch.Tensor
-) -> tuple[dict[str, torch.Tensor], IrInitializer]:
-    """f16 格納への変換計画（格納テンソルの差分・新しい宣言）を返す — 何も書き換えない。"""
-    initializer = graph.initializers[name]
-    if not _is_f16_exact(tensor):
-        raise _unrounded(name, initializer.tensor, "f16 で表現できない値を含む")
-    return (
-        {initializer.tensor: tensor.to(torch.float16)},
-        IrInitializer(tensor=initializer.tensor, storage=IrStorage(dtype="f16")),
-    )
+@dataclass(frozen=True)
+class _Conversion:
+    """格納の直前に 1 本ずつ掛ける圧縮変換（計画段では**掛けない**）。
+
+    `name` は診断メッセージ用の IR 値名、`scale` は i8 のときの per-channel scale
+    （fake-quant が使った値そのまま — ADR 0019）。
+    """
+
+    dtype: str
+    name: str
+    scale: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
+class _StoragePlan:
+    """圧縮格納の計画。重み本体には 1 バイトも触らない。"""
+
+    #: IR 値名 → 新しい initializer 宣言（全バイトを書き終えてから commit する）。
+    declarations: dict[str, IrInitializer]
+    #: 追加で格納する companion scale（safetensors キー → テンソル）。scale は小さいので
+    #: 計画段で実体化してよい（重み本体と違って集合で持ってもピークに出ない）。
+    scales: dict[str, torch.Tensor]
+    #: safetensors キー → 書き出し直前に掛ける変換。
+    conversions: dict[str, _Conversion]
+
+
+#: 変換なし（素のテンソルをそのまま書く）— `_write_order` / `_save_ordered` の既定。
+_NO_CONVERSIONS: Mapping[str, _Conversion] = MappingProxyType({})
 
 
 def _plan_i8(
@@ -189,10 +213,12 @@ def _plan_i8(
     tensor: torch.Tensor,
     scales: Mapping[str, torch.Tensor],
     axes: Mapping[str, int],
-) -> tuple[dict[str, torch.Tensor], IrInitializer]:
-    """i8 格納への変換計画（格納テンソルの差分・新しい宣言）を返す — 何も書き換えない。
+) -> tuple[str, torch.Tensor, IrInitializer]:
+    """i8 格納の計画（scale のキーとテンソル・新しい宣言）を返す — 重みには触らない。
 
     `reserved` は「既に埋まっている格納テンソルキー」（入力ぶん + 先行して計画した scale）。
+    量子化そのものと逆変換のビット一致検査は、実データを読む重い側なので
+    `_convert_for_storage`（書き出し直前）へ回す。
     """
     initializer = graph.initializers[name]
     key = initializer.tensor
@@ -209,68 +235,89 @@ def _plan_i8(
             f"initializer '{name}' ({key}): scale {list(scale.shape)} が重み"
             f" {list(tensor.shape)} の軸 {axis} の keepdim 形 {expected} でない"
         )
-    quantized = quantize_to_int8(tensor, scale)
-    # MUST: scale は fake-quant が使った値**そのまま**で逆変換する（再計算禁止 — ADR 0019）。
-    # ここが一致しない = 格納値と golden を採ったときの重みが別物、という一点に集約される。
-    if not torch.equal(quantized.to(torch.float32) * scale, tensor):
-        raise _unrounded(name, key, "i8 × per-channel scale で逆変換してもビット一致しない")
     scale_key = _scale_key(key)
     if scale_key in reserved:
         raise EmitError(
             f"initializer '{name}': scale テンソルのキー '{scale_key}' が実テンソルと衝突する"
         )
     return (
-        {key: quantized, scale_key: scale.detach().contiguous()},
+        scale_key,
+        scale.detach().contiguous(),
         IrInitializer(tensor=key, storage=IrStorage(dtype="i8", scale=scale_key)),
     )
 
 
-def _apply_weight_dtype(
+def _plan_weight_dtype(
     graph: IrGraph,
-    tensors: dict[str, torch.Tensor],
+    tensors: Mapping[str, torch.Tensor],
     weight_dtype: str,
     weight_scales: Mapping[str, torch.Tensor],
-) -> dict[str, torch.Tensor]:
-    """適格な重みを圧縮格納へ落とし、graph の宣言をそれに合わせる（宣言と実体は 1 経路）。
+) -> _StoragePlan:
+    """適格な重みの圧縮格納を**計画だけ**する（宣言も実体もまだ書き換えない）。
 
-    MUST: 「検証 + 変換計画（非破壊）→ 全件成功後に一括 commit」の 2 段で進める。途中で
-    書き換えながら進むと、後続の 1 本が落ちたときに**一部だけ圧縮宣言に化けた graph** が
-    呼び出し側に残る（write_model は例外で書き出さないので、その graph を使い回す経路が
-    黙って宣言と実体の食い違ったモデルを作る）。
+    MUST: この段で圧縮テンソルを作らない。全件を先に変換すると、圧縮側の集合が呼び出し側の
+    f32 集合と**同時に**生きてピーク RAM が両者の和になる（Irodori 規模で f32 3.44GB に
+    f16 1.72GB / i8 0.87GB が重なる）。ここで済ませるのは実データを読まない検査だけ
+    （格納 dtype の妥当性・適格判定・scale の有無と keepdim 形・scale キーの衝突・
+    「適格 0 本」）で、実データを読む検査は `_convert_for_storage` が書き出し直前に
+    1 本ずつ受け持つ。
     """
     if weight_dtype not in WEIGHT_DTYPES:
         raise EmitError(
             f"格納 dtype '{weight_dtype}' は書き出せない（{' / '.join(WEIGHT_DTYPES)}）"
         )
+    plan = _StoragePlan(declarations={}, scales={}, conversions={})
     if weight_dtype == "f32":
-        return tensors
+        return plan
     eligible = eligible_compressed_initializers(graph)
     axes = weight_channel_axes(graph) if weight_dtype == "i8" else {}
-    updates: dict[str, torch.Tensor] = {}
-    declarations: dict[str, IrInitializer] = {}
     reserved = set(tensors)
     for name in sorted(eligible):
-        tensor = tensors[graph.initializers[name].tensor]
+        key = graph.initializers[name].tensor
+        tensor = tensors[key]
         if tensor.dtype is not torch.float32:
             # i32 格納（記号依存定数 — ADR 0010）が重みスロットに来ることはないが、来たなら
             # 意味論ごと違う話なので黙って圧縮格納にしない。
             continue
         if weight_dtype == "f16":
-            planned, declaration = _plan_f16(graph, name, tensor)
+            declaration = IrInitializer(tensor=key, storage=IrStorage(dtype="f16"))
+            conversion = _Conversion(dtype="f16", name=name)
         else:
-            planned, declaration = _plan_i8(graph, reserved, name, tensor, weight_scales, axes)
-        updates.update(planned)
-        reserved.update(planned)
-        declarations[name] = declaration
-    committed = {**graph.initializers, **declarations}
+            scale_key, scale, declaration = _plan_i8(
+                graph, reserved, name, tensor, weight_scales, axes
+            )
+            plan.scales[scale_key] = scale
+            reserved.add(scale_key)
+            conversion = _Conversion(dtype="i8", name=name, scale=scale)
+        plan.conversions[key] = conversion
+        plan.declarations[name] = declaration
+    committed = {**graph.initializers, **plan.declarations}
     if not any(init.storage.dtype == weight_dtype for init in committed.values()):
         # ADR 0006 の「圧縮指定なのに適格 0MB を沈黙させない」をエクスポータ側でも張る。
         raise EmitError(
             f"格納 {weight_dtype} を指定したが適格な重みスロットが 1 本も無い"
             f"（融合 op の重みを持たないグラフに {weight_dtype} を指定していないか確認する）"
         )
-    graph.initializers.update(declarations)
-    return {**tensors, **updates}
+    return plan
+
+
+def _convert_for_storage(key: str, tensor: torch.Tensor, conversion: _Conversion) -> torch.Tensor:
+    """圧縮格納への変換と、実データを読む適格性検査（重い側 — 1 本ぶんだけ生かす）。
+
+    ここで落ちるとデータ節を書きかけたファイルが残る（`write_model` の docstring）。
+    """
+    if conversion.dtype == "f16":
+        if not _is_f16_exact(tensor):
+            raise _unrounded(conversion.name, key, "f16 で表現できない値を含む")
+        return tensor.to(torch.float16)
+    quantized = quantize_to_int8(tensor, conversion.scale)
+    # MUST: scale は fake-quant が使った値**そのまま**で逆変換する（再計算禁止 — ADR 0019）。
+    # ここが一致しない = 格納値と golden を採ったときの重みが別物、という一点に集約される。
+    if not torch.equal(quantized.to(torch.float32) * conversion.scale, tensor):
+        raise _unrounded(
+            conversion.name, key, "i8 × per-channel scale で逆変換してもビット一致しない"
+        )
+    return quantized
 
 
 #: 格納 dtype → 要素バイト数（IR の宣言だけからバイト数を導出するための表）。
@@ -312,7 +359,10 @@ def storage_breakdown(graph: IrGraph) -> StorageBreakdown:
     )
 
 
-def _write_order(tensors: Mapping[str, torch.Tensor]) -> list[str]:
+def _write_order(
+    tensors: Mapping[str, torch.Tensor],
+    conversions: Mapping[str, _Conversion] = _NO_CONVERSIONS,
+) -> list[str]:
     """書き出し順（データ節に並ぶ順）。
 
     第 1 キーは dtype 群（F32 → I32 → F16 → **I8**）、F16 のうち**要素数が奇数のもの**
@@ -323,11 +373,14 @@ def _write_order(tensors: Mapping[str, torch.Tensor]) -> list[str]:
     倍数を保ち、奇数 F16 どうしは 2 バイト整列だけを要求するので偶数 offset で足りる。
     I8 は要素サイズ 1 で整列制約が無いかわりに**任意のバイト長**を作るので、群の末尾に置く
     （F16 より前に来ると 2 バイト整列すら壊す）。
+
+    `conversions` を渡すと、そのテンソルは**変換後**の dtype で並べる（変換はまだ掛けない
+    — 順序は変換前の要素数と計画だけで決まる）。
     """
 
     def key(name: str) -> tuple[int, int, str]:
         tensor = tensors[name]
-        dtype_name, item_bytes = _dtype_of(tensor, name)
+        dtype_name, item_bytes = _stored_dtype_of(name, tensor, conversions.get(name))
         # 「後ろへ寄せる」の対象は F16 だけ（I8 は既に最後の群で、群内の順序は整列に
         # 影響しない — 名前昇順のまま安定させる）。
         odd = 1 if dtype_name == "F16" and (tensor.numel() * item_bytes) % 4 != 0 else 0
@@ -346,23 +399,42 @@ def _dtype_of(tensor: torch.Tensor, name: str) -> tuple[str, int]:
     return entry
 
 
+def _stored_dtype_of(
+    name: str, tensor: torch.Tensor, conversion: _Conversion | None
+) -> tuple[str, int]:
+    """**格納後**の safetensors dtype と要素バイト数。
+
+    圧縮変換は要素数も shape も変えないので、ヘッダは変換前のテンソルと計画だけで決まる
+    （= データ節を流しながら書ける）。
+    """
+    if conversion is not None:
+        return _SAFETENSORS_DTYPE[_STORAGE_TORCH_DTYPE[conversion.dtype]]
+    return _dtype_of(tensor, name)
+
+
 def _save_ordered(
     path: Path,
     tensors: Mapping[str, torch.Tensor],
     order: Sequence[str],
     metadata: Mapping[str, str],
+    conversions: Mapping[str, _Conversion] = _NO_CONVERSIONS,
 ) -> None:
     """safetensors を**指定順で**書く（`save_file` は自前の順序で書くので使わない）。
 
     レイアウトは仕様どおり `[u64 LE ヘッダ長][ヘッダ JSON][データ節]`。ヘッダ JSON は
     `__metadata__` を先頭に、テンソルはデータ節に並ぶ順で載せる（HF のリーダはヘッダの
     宣言順にオフセットの連続性を見る）。
+
+    `conversions` に載ったテンソルは**書く直前に 1 本ずつ**圧縮格納へ変換し、書いたら
+    即座に手放す。MUST: 変換済みを次の 1 本へ持ち越さない（同時に生きる圧縮テンソルを
+    1 本に保つのがこの writer の存在理由）。変換に伴う検査が落ちるとデータ節を書きかけた
+    ファイルが残る — 配布物の原子性は `pipeline.export_to_file` の一時ファイル層が持つ。
     """
     header: dict[str, object] = {"__metadata__": dict(metadata)}
     offset = 0
     for name in order:
         tensor = tensors[name]
-        dtype_name, item_bytes = _dtype_of(tensor, name)
+        dtype_name, item_bytes = _stored_dtype_of(name, tensor, conversions.get(name))
         nbytes = tensor.numel() * item_bytes
         header[name] = {
             "dtype": dtype_name,
@@ -378,10 +450,14 @@ def _save_ordered(
         handle.write(len(blob).to_bytes(8, "little"))
         handle.write(blob)
         for name in order:
-            array = tensors[name].numpy()
+            tensor = tensors[name]
+            conversion = conversions.get(name)
+            if conversion is not None:
+                tensor = _convert_for_storage(name, tensor, conversion)
             # memoryview 経由で書く（`tobytes()` は 1 本ぶんの複製を作る — DiT の重みは
             # 1 テンソルで数百 MB あり、ピーク RAM をそのぶん押し上げる）。
-            handle.write(memoryview(array).cast("B"))
+            handle.write(memoryview(tensor.numpy()).cast("B"))
+            del tensor
 
 
 def write_model(
@@ -398,6 +474,21 @@ def write_model(
     `graph` の格納宣言を書き換える（宣言と実体が 1 経路で決まる — 別々に決めると
     「宣言 f16 / 実体 f32」の沈黙誤読が作れる）。
 
+    MUST: 「計画（実データを読まない検査）→ データ節を 1 本ずつ変換しながら流す →
+    全バイトを書き終えてから宣言を commit」の 3 段で進める。
+
+    1. 圧縮テンソルを先にまとめて作ると、呼び出し側が持つ f32 集合と同時に生きてピーク
+       RAM が両者の和になる（Irodori 規模で f32 3.44GB + f16 1.72GB / i8 0.87GB）。
+       ヘッダは「変換前の shape・要素数 + 計画の格納 dtype」だけで決まるので、データ節を
+       流しながらでも宣言は動かない。
+    2. commit を最後に置くのは、**一部だけ圧縮宣言に化けた graph** を呼び出し側へ残さない
+       ため（その graph を使い回す経路 — 同じ graph を別 dtype で書き直す / 内訳を数える —
+       が黙って宣言と実体の食い違った答えを出す）。ヘッダに載せるグラフ JSON は commit 済みの
+       **ビュー**（`dataclasses.replace`）から作り、渡された `graph` はここまで無傷で保つ。
+
+    NOTE: 書き出し中の検査（f16 の往復・i8 の逆変換）が落ちると、書きかけのファイルが残って
+    `graph` は無傷のまま — 配布物の原子性は `pipeline.export_to_file` の一時ファイル層が持つ。
+
     `weight_scales` は `quantize.fake_quant_int8` が返した **FQN → scale** の台帳
     （`"i8"` のときだけ要る）。キーは safetensors のテンソルキーと同じ空間で、
     `id(tensor)` 突合はしない（ADR 0006）。
@@ -411,6 +502,15 @@ def write_model(
         )
     out = Path(path)
     contiguous = {key: value.detach().contiguous() for key, value in tensors.items()}
-    contiguous = _apply_weight_dtype(graph, contiguous, weight_dtype, weight_scales or {})
-    _save_ordered(out, contiguous, _write_order(contiguous), {IR_METADATA_KEY: graph.to_json()})
+    plan = _plan_weight_dtype(graph, contiguous, weight_dtype, weight_scales or {})
+    source = {**contiguous, **plan.scales}
+    committed = replace(graph, initializers={**graph.initializers, **plan.declarations})
+    _save_ordered(
+        out,
+        source,
+        _write_order(source, plan.conversions),
+        {IR_METADATA_KEY: committed.to_json()},
+        plan.conversions,
+    )
+    graph.initializers.update(plan.declarations)
     return out

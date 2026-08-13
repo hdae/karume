@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import struct
+import weakref
 
 import pytest
 import torch
@@ -423,12 +424,12 @@ class TestI8Storage:
 
 
 class TestFailureLeavesTheGraphUntouched:
-    """1 本でも落ちたら宣言は 1 つも書き換えない（検証 + 計画 → 一括 commit の 2 段）。
+    """1 本でも落ちたら宣言は 1 つも書き換えない（commit は全バイトを書き終えた後）。
 
-    適格な重みは名前昇順（`emb` → `w`）に処理されるので、以下はどちらも「先頭は通る・
-    後続で落ちる」形。途中で書き換えながら進むと、書き出しは例外で止まっても呼び出し側の
-    `graph` には `emb` だけ圧縮宣言が残り、その graph を使い回す経路（同じ graph を別 dtype で
-    書き直す / 内訳を数える）が黙って宣言と実体の食い違った答えを出す。
+    適格な重みは 2 本（`emb` / `w`）あり、以下はどれも「片方は通る・もう片方で落ちる」形。
+    落ちた時点で書き換えていると、書き出しが例外で止まっても呼び出し側の `graph` に片方だけ
+    圧縮宣言が残り、その graph を使い回す経路（同じ graph を別 dtype で書き直す / 内訳を
+    数える）が黙って宣言と実体の食い違った答えを出す。
     """
 
     def test_a_failed_f16_pass_leaves_no_partial_declaration(self, tmp_path):
@@ -458,6 +459,98 @@ class TestFailureLeavesTheGraphUntouched:
 
         assert graph.initializers["emb"].storage.dtype == "f32"
         assert json.loads(graph.to_json()) == before
+
+    def test_a_failure_during_the_data_section_leaves_no_declaration(self, tmp_path):
+        """逆変換ゲートは**データ節を書きながら**踏む（他の本は既にファイルへ出ている）。
+
+        書きかけのファイルは残るが（配布物の原子性は `pipeline.export_to_file` の一時ファイル
+        層が持つ）、呼び出し側の `graph` は 1 つも書き換わっていてはいけない。
+        """
+        graph, tensors, scales = int8_weight_graph()
+        tensors["enc.w"] = torch.full((3, 4), 1.0 / 3.0)
+        before = json.loads(graph.to_json())
+        path = tmp_path / "model.safetensors"
+
+        with pytest.raises(EmitError, match="ビット一致しない"):
+            write_model(path, graph, tensors, weight_dtype="i8", weight_scales=scales)
+
+        assert path.exists()  # 書きかけ — 捨てるのは呼び出し側の層
+        assert json.loads(graph.to_json()) == before
+
+
+class TestStreamingConversion:
+    """圧縮変換は**書く直前に 1 本ずつ**掛ける（ADR 0018 / 0019 の格納そのものは不変）。
+
+    全件を先に変換すると、圧縮側の集合が呼び出し側の f32 集合と同時に生きてピーク RAM が
+    両者の和になる（Irodori 規模で f32 3.44GB に f16 1.72GB / i8 0.87GB が重なる）。
+    """
+
+    def test_only_one_converted_tensor_is_alive_at_a_time(self, tmp_path, monkeypatch):
+        """故障注入: 変換済みを溜めてから書く実装へ戻すと、前の 1 本が生き残って落ちる。"""
+        from karume import emit
+
+        alive: list[weakref.ReferenceType] = []
+        convert = emit._convert_for_storage
+
+        def spy(key, tensor, conversion):
+            # 次の 1 本へ入る時点で、前の変換済みは解放されているはず。
+            assert [ref for ref in alive if ref() is not None] == []
+            converted = convert(key, tensor, conversion)
+            alive.append(weakref.ref(converted))
+            return converted
+
+        monkeypatch.setattr(emit, "_convert_for_storage", spy)
+        graph, tensors = weight_graph()
+
+        write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+
+        assert len(alive) == 2  # enc.w / enc.emb
+
+    def test_the_streamed_f16_bytes_match_a_pre_converted_write(self, tmp_path):
+        """流しながら書いたバイト列 = 全件を先に変換してから素で書いたバイト列。
+
+        ヘッダ（dtype / shape / data_offsets）を**変換前**の形と計画だけから導いているので、
+        導出を間違えるとここで offset ごとずれる。
+        """
+        from karume.emit import _save_ordered, _write_order
+
+        graph, tensors = weight_graph()
+        compressed = {"enc.w", "enc.emb"}
+        pre = {
+            key: value.to(torch.float16) if key in compressed else value
+            for key, value in tensors.items()
+        }
+
+        streamed = write_model(
+            tmp_path / "streamed.safetensors", graph, tensors, weight_dtype="f16"
+        )
+
+        reference = tmp_path / "reference.safetensors"
+        # graph は書き出し後の commit 済み（= ヘッダに載ったのと同じ宣言）。
+        _save_ordered(reference, pre, _write_order(pre), {IR_METADATA_KEY: graph.to_json()})
+        assert streamed.read_bytes() == reference.read_bytes()
+
+    def test_the_streamed_i8_bytes_match_a_pre_converted_write(self, tmp_path):
+        """i8 も同じ（companion scale が増える形と I8 群の順序を踏む）。"""
+        from karume.emit import _save_ordered, _write_order
+
+        graph, tensors, scales = int8_weight_graph()
+        pre = dict(tensors)
+        for key, scale in scales.items():
+            pre[key] = quantize_to_int8(tensors[key], scale)
+            pre[f"karume.scale.{key}"] = scale
+
+        streamed = write_model(
+            tmp_path / "streamed.safetensors",
+            graph,
+            tensors,
+            weight_dtype="i8",
+            weight_scales=scales,
+        )
+
+        reference = tmp_path / "reference.safetensors"
+        _save_ordered(reference, pre, _write_order(pre), {IR_METADATA_KEY: graph.to_json()})
+        assert streamed.read_bytes() == reference.read_bytes()
 
 
 def data_layout(path) -> list[tuple[int, str, str]]:
