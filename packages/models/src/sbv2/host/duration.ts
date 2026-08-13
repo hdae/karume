@@ -23,6 +23,11 @@ export type DurationPlan = {
  * @param logwSdp front の出力 0（`[1,1,P]` の生データ）。
  * @param logwDp front の出力 1（同上）。
  * @param xMask front の入力 x_mask（`[1,1,P]`）。パディング列を 0 フレームに落とす。
+ * @param maxFrames 総フレーム数の上限（配布形の `pipelineConfig.maxFrames`）。
+ *
+ * MUST: 上限の検査は `expandIdx` の確保**より前**に置く。総フレーム数は logw と lengthScale
+ * の積で決まる要求依存の数で、下流の `(T, T)` 表（8·T² bytes 級）どころか長さ T の展開列
+ * すら確保できない大きさになりうる — 確保してから見ると原因の遠い OOM になる。
  */
 export const durationsToFrames = (
   logwSdp: Float32Array,
@@ -30,6 +35,7 @@ export const durationsToFrames = (
   xMask: Float32Array,
   sdpRatio: number,
   lengthScale: number,
+  maxFrames: number,
 ): DurationPlan => {
   const phonemes = logwSdp.length;
   if (logwDp.length !== phonemes || xMask.length !== phonemes) {
@@ -52,6 +58,12 @@ export const durationsToFrames = (
   }
   if (total < 1) {
     throw new Error("総フレーム数が 0（発話にならない — x_mask か front 出力を疑う）");
+  }
+  if (total > maxFrames) {
+    throw new Error(
+      `総フレーム数 ${total} が配布形の上限 maxFrames=${maxFrames} を超えている` +
+        "（text を短く分けるか lengthScale を下げる）",
+    );
   }
   const expandIdx = new Int32Array(total);
   let position = 0;

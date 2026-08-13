@@ -477,6 +477,24 @@ const finiteKnob = (value: number, name: string): number => {
 };
 
 /**
+ * トークン列の運用上限（`pipelineConfig.maxTokens`）を見る門。
+ *
+ * MUST: 相対位置表（`c2p_pos` / `p2c_pos` は各 4·T² bytes）の生成と Session の確保**より前**に
+ * 呼ぶ。上限は焼いたグラフの記号次元の上限そのもので、超えた要求はどう確保しても実行できない。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（合成経路でここへ届くには日本語辞書と実 IR
+ * コンテナ 3 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ */
+export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
+  if (tokens > maxTokens) {
+    throw new Error(
+      `Sbv2Pipeline: トークン数 ${tokens} が配布形の上限 maxTokens=${maxTokens} を超えている` +
+        "（text を短く分けて合成する）",
+    );
+  }
+};
+
+/**
  * manifest + 資産から実行状態を組む（{@link Sbv2Pipeline.fromAssets} の中身）。
  *
  * MUST: manifest の契約違反と**資産の解析・表の突合**は **GPU を取りに行く前**に落とす。
@@ -614,6 +632,8 @@ export const synthesizeSbv2 = async (
   const analysis = analyzeSbv2Text(state.dictionary, request.text, state.tokenizer, state.rules);
   const phonemes = analysis.ids.phoneIds.length;
   const tokens = analysis.inputIds.length;
+  // 表の確保も Session も張る前に落とす（{@link assertTokenLimit} の MUST）。
+  assertTokenLimit(tokens, state.config.maxTokens);
 
   // --- ② text_encoder（DeBERTa・配布形は使う 1 本だけを出す）---------------
   // quant の低精度ノブは渡さない（配布形の text_encoder は i8 の 1 dtype しか無い）。
@@ -695,12 +715,14 @@ export const synthesizeSbv2 = async (
   );
 
   // --- ⑥ ホストグルー（継続長 → フレーム展開 → z_p → 相対位置表）----------
+  // 総フレーム数の上限は `durationsToFrames` が展開列を確保する前に見る（`host/duration.ts`）。
   const plan = durationsToFrames(
     predicted.logwSdp,
     predicted.logwDp,
     xMask,
     knobs.sdpRatio,
     knobs.lengthScale,
+    state.config.maxFrames,
   );
   const channels = predicted.channels;
   const zpNoise = random.normals(channels * plan.totalFrames);

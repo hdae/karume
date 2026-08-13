@@ -49,6 +49,8 @@ from karume.dist import (
     SBV2_DEFAULT_MODEL,
     SBV2_DEFAULT_QUANT,
     SBV2_KNOB_KEYS,
+    SBV2_MAX_FRAMES,
+    SBV2_MAX_TOKENS,
     SBV2_OUTPUT_PATHS,
     SBV2_QUANTS,
     SBV2_SPEAKER_KEY,
@@ -1419,6 +1421,28 @@ class TestSbv2PipelineConfig:
     def test_it_stops_when_the_config_has_no_data_section(self) -> None:
         with pytest.raises(DistError, match="'data' 節が無い"):
             sbv2_pipeline_config({"model": {"gin_channels": 512}}, _SBV2_KNOBS)
+
+    def test_it_declares_the_operating_limits_the_loader_requires(self, sbv2_assembled) -> None:
+        """上限 2 欄は配布形にしか無い（ロード側は定数を持たず、欠けていれば読めない）。"""
+        _, manifest = sbv2_assembled
+        config = _sbv2_model(manifest)["pipelineConfig"]
+        assert config["maxTokens"] == SBV2_MAX_TOKENS
+        assert config["maxFrames"] == SBV2_MAX_FRAMES
+
+    def test_the_limits_are_the_symbolic_maxima_the_export_scripts_baked(self) -> None:
+        """配る上限と焼いた記号次元の上限が同じ 1 組であること。
+
+        ずれると「宣言は通るのにグラフの相対位置表が足りない」形になり、**配ってから利用者の
+        手元でしか出ない**（front / voice は記号次元の上限を実行時に自己申告しない）。
+        トークン列 T は DeBERTa の記号次元で、音素次元 P の上限（front）と同値であることも
+        ここで固定する — 片方だけ動いたら上限の意味が割れる。
+        """
+        import export_deberta
+        import export_sbv2
+
+        assert SBV2_MAX_TOKENS == export_deberta.SYM_MAX
+        assert SBV2_MAX_TOKENS == export_sbv2.SYM_MAX
+        assert SBV2_MAX_FRAMES == export_sbv2.FLOW_SYM_MAX
 
 
 class TestSbv2StorageGate:

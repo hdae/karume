@@ -15,6 +15,13 @@
  * 検出手段が他に無いので、値が `0..rows-1` の**順列**であることを parse 時に見る（表の行数
  * との突合は `Sbv2Pipeline.fromAssets` が実資産に対して行う）。
  *
+ * ## MUST: `maxTokens` / `maxFrames` は配布形が宣言する運用上限
+ *
+ * 窓付き相対位置注意の `(T, T)` 表は ADR 0045 でホストへ外出しされ、確保（8·T² bytes 級）が
+ * ホストの責務になった。焼いたグラフの記号次元の上限を配布形から受け、`generate` が**表を
+ * 確保する前**にこの値で落とす（正本は exporter の `dist.py`）。TS 側に定数を持たない —
+ * 別の上限で焼いた配布形が来たときに、ホストだけが古い数を持つ形を作らないため。
+ *
  * NOTE: 実行時ノブの既定は `symbols.json` にも同じ値が並ぶ（exporter 側が両者の食い違いを
  * 組み立て時に落とす）。パイプラインが読むのは**こちら**だけで、`symbols.json` の `defaults`
  * は見ない — 導出元を二重に持たないため（`text/symbols.ts` の同節は optional）。
@@ -24,7 +31,7 @@
 export const SBV2_PIPELINE_NAME = "sbv2";
 export const SBV2_PIPELINE_MAJOR = 1;
 
-const ROOT_KEYS: readonly string[] = ["styles", "speakers", "defaults"];
+const ROOT_KEYS: readonly string[] = ["styles", "speakers", "maxTokens", "maxFrames", "defaults"];
 const DEFAULTS_KEYS: readonly string[] = [
   "speaker",
   "style",
@@ -51,6 +58,10 @@ export type Sbv2PipelineConfig = {
   readonly styles: ReadonlyMap<string, number>;
   /** 話者名 → `speaker_embeddings` の行番号（`0..rows-1` の順列）。 */
   readonly speakers: ReadonlyMap<string, number>;
+  /** DeBERTa へ渡せるトークン列の上限（焼いたグラフの記号次元の上限）。 */
+  readonly maxTokens: number;
+  /** flow / voice へ渡せる総フレーム数の上限（同上）。 */
+  readonly maxFrames: number;
   readonly defaults: Sbv2Defaults;
 };
 
@@ -88,6 +99,9 @@ const readNumber = (
   }
   return value;
 };
+
+/** 確保サイズの比較に使う数なので、整数であるだけでなく**安全整数**であることまで見る。 */
+const isPositiveSafeInteger = (value: number): boolean => Number.isSafeInteger(value) && value > 0;
 
 const readString = (raw: Record<string, unknown>, key: string, where: string): string => {
   if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
@@ -184,9 +198,12 @@ export const parseSbv2PipelineConfig = (
     Object.hasOwn(raw, "speakers") ? raw["speakers"] : undefined,
     "pipelineConfig.speakers",
   );
+  const limit = "正の安全整数でない";
   return {
     styles,
     speakers,
+    maxTokens: readNumber(raw, "maxTokens", "pipelineConfig", isPositiveSafeInteger, limit),
+    maxFrames: readNumber(raw, "maxFrames", "pipelineConfig", isPositiveSafeInteger, limit),
     defaults: parseDefaults(
       Object.hasOwn(raw, "defaults") ? raw["defaults"] : undefined,
       styles,

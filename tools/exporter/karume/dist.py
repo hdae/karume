@@ -1059,6 +1059,18 @@ SBV2_KNOB_KEYS: tuple[str, ...] = (
     "lengthScale",
 )
 
+#: `pipelineConfig` に載る**運用上限**。焼いたグラフの記号次元の上限そのもので、
+#: `maxTokens` = DeBERTa のトークン列 T（`export_deberta.SYM_MAX`。front の音素次元 P の上限
+#: `export_sbv2.SYM_MAX` も同値）、`maxFrames` = flow / voice のフレーム次元 T
+#: （`export_sbv2.FLOW_SYM_MAX`）。
+#:
+#: MUST: 台本の値と一致させる（`tests/test_dist.py` が突き合わせる）。相対位置の表は
+#: ADR 0045 でホストへ外出しされ **T×T の確保はホスト側**（8·T² bytes 級）になったので、
+#: 割当上限を知る術が配布形にしか無い — ずれると「宣言は通るのにグラフの表が足りない」
+#: 形で利用者の手元でしか出ない。
+SBV2_MAX_TOKENS = 512
+SBV2_MAX_FRAMES = 4096
+
 
 def sbv2_series_name(model: str) -> str:
     """系列名の幹（`outputs/series/<この名前>-{f16,i8}/`）。
@@ -1286,6 +1298,9 @@ def sbv2_pipeline_config(config: Mapping[str, Any], knobs: Mapping[str, Any]) ->
     `defaults.speaker` は `spk2id` の先頭キー（`sbv2_demo.resolve_style_and_speaker` と同式）。
     `speakers` の名前 → 行の解決先は配布形の `speaker_embeddings`
     （{@link sbv2_speaker_embeddings}）、`styles` の解決先は `style_vectors`。
+
+    `maxTokens` / `maxFrames` は ckpt に無い**焼いたグラフ側の数**なので
+    {@link SBV2_MAX_TOKENS} / {@link SBV2_MAX_FRAMES} から載せる。
     """
     data = _sbv2_section(config, "data")
     styles = _sbv2_id_map(data, "style2id")
@@ -1301,6 +1316,8 @@ def sbv2_pipeline_config(config: Mapping[str, Any], knobs: Mapping[str, Any]) ->
     return {
         "styles": styles,
         "speakers": speakers,
+        "maxTokens": SBV2_MAX_TOKENS,
+        "maxFrames": SBV2_MAX_FRAMES,
         "defaults": {
             "speaker": next(iter(speakers)),
             **{key: knobs[key] for key in SBV2_KNOB_KEYS},

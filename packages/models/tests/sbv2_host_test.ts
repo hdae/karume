@@ -23,10 +23,13 @@ import { writeSafetensors } from "../../../examples/sbv2/host/safetensors-write.
  */
 const logwFor = (frames: readonly number[]): Float32Array => Float32Array.from(frames, Math.log);
 
+/** 上限を主題にしないテストで渡す上限（実配布形の `maxFrames` と同じ 4096）。 */
+const AMPLE_FRAMES = 4096;
+
 Deno.test("durationsToFrames: exp → ceil でフレーム数になり、展開列は単調非減少", () => {
   // sdp と dp を同じにして混合を無視できる形にし、ceil の挙動だけを見る。
   const logw = logwFor([1.2, 1.8, 0.3]);
-  const plan = durationsToFrames(logw, logw, new Float32Array([1, 1, 1]), 0.5, 1);
+  const plan = durationsToFrames(logw, logw, new Float32Array([1, 1, 1]), 0.5, 1, AMPLE_FRAMES);
   assertEquals([...plan.wCeil], [2, 2, 1]);
   assertEquals(plan.totalFrames, 5);
   assertEquals([...plan.expandIdx], [0, 0, 1, 1, 2]);
@@ -34,7 +37,7 @@ Deno.test("durationsToFrames: exp → ceil でフレーム数になり、展開�
 
 Deno.test("durationsToFrames: x_mask が 0 の音素は 0 フレームになる", () => {
   const logw = logwFor([1.2, 5.4]);
-  const plan = durationsToFrames(logw, logw, new Float32Array([1, 0]), 0, 1);
+  const plan = durationsToFrames(logw, logw, new Float32Array([1, 0]), 0, 1, AMPLE_FRAMES);
   assertEquals([...plan.wCeil], [2, 0]);
   assertEquals([...plan.expandIdx], [0, 0]);
 });
@@ -42,8 +45,8 @@ Deno.test("durationsToFrames: x_mask が 0 の音素は 0 フレームになる"
 Deno.test("durationsToFrames: length_scale はフレーム数に比例して効く", () => {
   const logw = logwFor([1.2, 1.2]);
   const mask = new Float32Array([1, 1]);
-  assertEquals([...durationsToFrames(logw, logw, mask, 0, 1).wCeil], [2, 2], "w=1.2");
-  assertEquals([...durationsToFrames(logw, logw, mask, 0, 2).wCeil], [3, 3], "w=2.4");
+  assertEquals([...durationsToFrames(logw, logw, mask, 0, 1, AMPLE_FRAMES).wCeil], [2, 2], "w=1.2");
+  assertEquals([...durationsToFrames(logw, logw, mask, 0, 2, AMPLE_FRAMES).wCeil], [3, 3], "w=2.4");
 });
 
 Deno.test("durationsToFrames: 故障注入 — sdp_ratio の混合が効いている", () => {
@@ -52,25 +55,53 @@ Deno.test("durationsToFrames: 故障注入 — sdp_ratio の混合が効いて�
   const sdp = logwFor([9.5, 9.5]);
   const dp = logwFor([1.5, 1.5]);
   const mask = new Float32Array([1, 1]);
-  assertEquals([...durationsToFrames(sdp, dp, mask, 0, 1).wCeil], [2, 2], "r=0 は dp だけ");
-  assertEquals([...durationsToFrames(sdp, dp, mask, 1, 1).wCeil], [10, 10], "r=1 は sdp だけ");
+  assertEquals(
+    [...durationsToFrames(sdp, dp, mask, 0, 1, AMPLE_FRAMES).wCeil],
+    [2, 2],
+    "r=0 は dp だけ",
+  );
+  assertEquals(
+    [...durationsToFrames(sdp, dp, mask, 1, 1, AMPLE_FRAMES).wCeil],
+    [10, 10],
+    "r=1 は sdp だけ",
+  );
   // 混合は logw（対数）側で行うので中間比は幾何平均 √(9.5·1.5) ≈ 3.775 になる。
-  const mixed = durationsToFrames(sdp, dp, mask, 0.5, 1).wCeil;
+  const mixed = durationsToFrames(sdp, dp, mask, 0.5, 1, AMPLE_FRAMES).wCeil;
   assertEquals([...mixed], [4, 4]);
 });
 
 Deno.test("durationsToFrames: 長さ不一致・全 0 フレームは落とす", () => {
   const logw = logwFor([1, 1]);
   assertThrows(
-    () => durationsToFrames(logw, logwFor([1]), new Float32Array([1, 1]), 0, 1),
+    () => durationsToFrames(logw, logwFor([1]), new Float32Array([1, 1]), 0, 1, AMPLE_FRAMES),
     Error,
     "長さ不一致",
   );
   assertThrows(
-    () => durationsToFrames(logw, logw, new Float32Array([0, 0]), 0, 1),
+    () => durationsToFrames(logw, logw, new Float32Array([0, 0]), 0, 1, AMPLE_FRAMES),
     Error,
     "総フレーム数が 0",
   );
+});
+
+Deno.test("durationsToFrames: 総フレーム数が配布形の上限を超えたら展開列を確保する前に落とす", () => {
+  // 同じ text でも lengthScale を上げれば総フレーム数はいくらでも伸びる（5 → 8）。上限を
+  // 超えた要求は、長さ Ty の展開列も下流の T×T 表（8·T² bytes 級）も確保せずにここで止まる。
+  const logw = logwFor([1.2, 1.8, 0.3]);
+  const mask = new Float32Array([1, 1, 1]);
+  assertEquals(durationsToFrames(logw, logw, mask, 0.5, 1, 7).totalFrames, 5);
+  assertThrows(
+    () => durationsToFrames(logw, logw, mask, 0.5, 2, 7),
+    Error,
+    "総フレーム数 8 が配布形の上限 maxFrames=7 を超えている",
+  );
+});
+
+Deno.test("durationsToFrames: ちょうど上限は通る（境界を 1 つ内側に取っていない）", () => {
+  const logw = logwFor([1.2, 1.8, 0.3]);
+  const plan = durationsToFrames(logw, logw, new Float32Array([1, 1, 1]), 0.5, 2, 8);
+  assertEquals(plan.totalFrames, 8);
+  assertEquals(plan.expandIdx.length, 8, "上限ちょうどの展開列が確保されている");
 });
 
 Deno.test("buildZp: m_p を展開して noise·exp(logs_p)·scale を足す", () => {
