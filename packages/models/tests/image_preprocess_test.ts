@@ -32,6 +32,16 @@
 //
 // ①と②を分けるのは、tolerance 付きの全経路比較だけだと、正規化の定数取り違え（1 LSB より
 // 小さい差にしかならない組み合わせがある）が素通りするため。
+//
+// ## bicubic（`resample: 3`）の扱い
+//
+// フィクスチャの正本は SigLIP2 = **bilinear** なので、bicubic 枝の Python 正本との突合は
+// ここには無い（実測は Depth Anything V2 の実 GPU E2E =
+// `packages/runtime/tests/e2e_depth_anything_test.ts` が持つ — 1024² の実画像を 518² へ縮小した
+// `pixel_values` が `DPTImageProcessor` と **1 LSB 以内 / 相違率 0.5%** で一致することを、
+// 資産のある環境で毎回実測する）。ここが受け持つのは資産の要らない**カーネルの署名**だけ:
+// 恒等寸法で恒等になること（台の半径 2 が正しく組めている）と、階段エッジで**入力の値域を
+// 越える overshoot** が出ること（負のローブを持つ三次カーネルでしか起きない）。
 
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { normalizeToNchw, resizeRgb8, type Rgb8Image } from "../src/image/preprocess.ts";
@@ -171,6 +181,60 @@ for (const testCase of fixture.cases) {
     }
   });
 }
+
+// ---- bicubic（DA-V2 の `resample: 3`）のカーネル署名 ------------------------
+
+Deno.test("bicubic は同寸で恒等（台の半径 2 が正しく組めている）", () => {
+  // 縮尺 1 では三次カーネルが整数位置で `[…, 0, 1, 0, …]` に落ちる。台の半径を 1 のまま
+  // （bilinear の値）にしたり、カーネルの分岐境界を取り違えたりすると、ここで高周波の
+  // 画像が滲む。
+  for (const testCase of fixture.cases) {
+    const image = imageOf(testCase);
+    const got = resizeRgb8(image, testCase.width, testCase.height, "bicubic");
+    assertEquals(Array.from(got.data), Array.from(image.data), `[${testCase.name}]`);
+  }
+});
+
+Deno.test("bicubic は階段エッジで入力の値域を越える（bilinear は越えない）", () => {
+  // 負のローブの直接の署名。フィルタ指定が黙って無視されて bilinear へ落ちると、overshoot が
+  // 消えてここが落ちる（恒等の検査だけでは 2 つのフィルタを区別できない）。
+  const low = 40;
+  const high = 200;
+  const width = 8;
+  const data = new Uint8Array(width * 3);
+  for (let x = 0; x < width; x += 1) {
+    const value = x < width / 2 ? low : high;
+    data[x * 3] = value;
+    data[x * 3 + 1] = value;
+    data[x * 3 + 2] = value;
+  }
+  const step: Rgb8Image = { data, width, height: 1 };
+
+  const bicubic = resizeRgb8(step, width * 4, 1, "bicubic");
+  const bilinear = resizeRgb8(step, width * 4, 1, "bilinear");
+
+  assert(Math.min(...bicubic.data) < low, "bicubic の undershoot が無い");
+  assert(Math.max(...bicubic.data) > high, "bicubic の overshoot が無い");
+  assertEquals(Math.min(...bilinear.data), low, "bilinear が値域を下へ外れた");
+  assertEquals(Math.max(...bilinear.data), high, "bilinear が値域を上へ外れた");
+});
+
+Deno.test("bicubic の overshoot は巻き戻らず飽和する", () => {
+  // MUST: `Uint8Array` への代入は範囲外を mod 256 で巻き戻す（黒白反転が静かに通る）。
+  // 端の値を振り切らせて、飽和側に張り付くことを直に見る。
+  const width = 8;
+  const data = new Uint8Array(width * 3);
+  for (let x = 0; x < width; x += 1) {
+    const value = x < width / 2 ? 0 : 255;
+    data[x * 3] = value;
+    data[x * 3 + 1] = value;
+    data[x * 3 + 2] = value;
+  }
+  const got = resizeRgb8({ data, width, height: 1 }, width * 4, 1, "bicubic");
+
+  assertEquals(Math.min(...got.data), 0);
+  assertEquals(Math.max(...got.data), 255);
+});
 
 // ---- 入口の契約（想定外は fail loudly）--------------------------------------
 

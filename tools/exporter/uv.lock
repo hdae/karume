@@ -385,6 +385,13 @@ birefnet = [
     { name = "timm" },
     { name = "transformers" },
 ]
+depth-anything = [
+    { name = "transformers" },
+]
+depth-anything-preprocess = [
+    { name = "pillow" },
+    { name = "transformers" },
+]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -423,6 +430,11 @@ birefnet = [
     { name = "kornia", specifier = ">=0.8" },
     { name = "pillow", specifier = ">=11" },
     { name = "timm", specifier = ">=1.0" },
+    { name = "transformers", specifier = "==5.14.1" },
+]
+depth-anything = [{ name = "transformers", specifier = "==5.14.1" }]
+depth-anything-preprocess = [
+    { name = "pillow", specifier = ">=11" },
     { name = "transformers", specifier = "==5.14.1" },
 ]
 dev = [

@@ -26,6 +26,9 @@ from karume.modelcard import (
     BIREFNET_MODELS,
     BIREFNET_SUPPORTED_PIPELINE,
     BIREFNET_UPSTREAM,
+    DEPTH_ANYTHING_LICENSE,
+    DEPTH_ANYTHING_SUPPORTED_PIPELINE,
+    DEPTH_ANYTHING_UPSTREAM,
     SBV2_CARD_PROFILES,
     SBV2_FN_PROFILE,
     SBV2_JVNV_PROFILE,
@@ -34,6 +37,7 @@ from karume.modelcard import (
     SUPPORTED_PIPELINE,
     Sbv2CardProfile,
     render_birefnet_model_card,
+    render_depth_anything_model_card,
     render_model_card,
     render_sbv2_model_card,
     render_siglip2_model_card,
@@ -847,3 +851,73 @@ class TestBirefnetCardGate:
     def test_the_upstream_table_is_the_only_source_of_the_repository_ids(self) -> None:
         """`BIREFNET_UPSTREAM` は帰属表からの導出（2 表にすると片方だけ動ける）。"""
         assert {name: entry.repo for name, entry in BIREFNET_MODELS.items()} == BIREFNET_UPSTREAM
+
+
+# ---- Depth Anything V2（depth-estimation）------------------------------------
+#
+# manifest からの導出（表・数・使い方）は `tests/test_dist.py` の `TestDepthAnythingModelCard`
+# が**組み立て 1 周ぶん**で見る。ここが持つのは modelcard 側にしか無い門 — テンプレートの
+# pipeline 固有性と、帰属表に無いサイズを描かないこと。
+
+
+def _depth_anything_manifest(model: str = "small") -> dict[str, Any]:
+    """Depth Anything V2 の最小 manifest（値は実物と重ならない偽値）。"""
+    return {
+        "format": "karume/2",
+        "generator": "karume/9.9.9",
+        "defaultModel": model,
+        "models": {
+            model: {
+                "pipeline": DEPTH_ANYTHING_SUPPORTED_PIPELINE,
+                "weights": {"depth": {"f32": {"file": _ref("d/model.f32.safetensors", 17, "e")}}},
+                "assets": {},
+                "quants": {"f32": {"weights": {"depth": "f32"}, "session": {}}},
+                "defaultQuant": "f32",
+                "pipelineConfig": {
+                    "imageWidth": 64,
+                    "imageHeight": 96,
+                    "imageMean": [0.1, 0.2, 0.3],
+                    "imageStd": [0.4, 0.5, 0.6],
+                    "interpolation": "bicubic",
+                },
+            }
+        },
+    }
+
+
+class TestDepthAnythingCardGate:
+    def test_it_refuses_a_pipeline_it_does_not_describe(self) -> None:
+        manifest = _depth_anything_manifest()
+        manifest["models"]["small"]["pipeline"] = SUPPORTED_PIPELINE
+        with pytest.raises(ValueError, match=DEPTH_ANYTHING_SUPPORTED_PIPELINE):
+            render_depth_anything_model_card(manifest, REPO)
+
+    def test_it_refuses_a_size_it_cannot_attribute(self) -> None:
+        """帰属表に無いサイズで描くと、CC BY-NC 4.0 の重みが Apache-2.0 の frontmatter を
+        まとったカードになる（`DEPTH_ANYTHING_UPSTREAM` の MUST）。既知の一覧を添えて落とす。
+        """
+        for size in ("base", "large"):
+            with pytest.raises(ValueError, match=size):
+                render_depth_anything_model_card(_depth_anything_manifest(size), REPO)
+
+    def test_it_renders_the_same_bytes_for_the_same_manifest(self) -> None:
+        manifest = _depth_anything_manifest()
+        before = copy.deepcopy(manifest)
+        assert render_depth_anything_model_card(manifest, REPO) == render_depth_anything_model_card(
+            manifest, REPO
+        )
+        assert manifest == before
+
+    def test_the_attribution_table_only_holds_apache_licensed_sizes(self) -> None:
+        """配れるサイズの表 = ライセンスの門（`karume.dist` の Depth Anything 節の MUST）。
+
+        表を広げるときは `DEPTH_ANYTHING_LICENSE`（今は 1 値）をモデル単位へ割る改修と
+        セットなので、ここが「広がったこと」を検出する席になる。
+        """
+        assert sorted(DEPTH_ANYTHING_UPSTREAM) == ["small"]
+        assert DEPTH_ANYTHING_LICENSE == "apache-2.0"
+
+    def test_the_title_comes_from_the_upstream_checkpoint_name(self) -> None:
+        """見出しのサイズは帰属表 1 本から導く（2 表にすると別サイズとして売れてしまう）。"""
+        card = render_depth_anything_model_card(_depth_anything_manifest(), REPO)
+        assert "# Depth Anything V2 Small — Karume" in card

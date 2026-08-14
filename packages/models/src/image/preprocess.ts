@@ -21,14 +21,15 @@
  * antialias 経路は Pillow の `ImagingResample` と同じ「support を縮尺で伸ばす分離型
  * リサンプリング」（{@link buildTaps}）。
  *
- * MUST: 補間は **bilinear**。SigLIP2 の `preprocessor_config.json` は `"resample": 2` で、
- * これは **PIL の定数で BILINEAR**（NEAREST=0 / LANCZOS=1 / **BILINEAR=2** / BICUBIC=3 /
- * BOX=4 / HAMMING=5）。transformers のクラス属性の既定が `PILImageResampling.BICUBIC` なので
- * 「SigLIP は bicubic」と読み違えやすいが、チェックポイントの config が既定を上書きしている。
- * bicubic を当てると実測で最大 47/255 ずれる。`resample` が 2 であることは
- * `tools/exporter/siglip2_preprocess.py` が emit のたびに実測する。後続モデル（bicubic を
- * 要求するもの）が出たら、{@link triangle} と {@link SUPPORT} を差し替え可能な形にするのは
- * そのときで足りる。
+ * MUST: 補間フィルタは**モデルカードの一部**なので呼び出し側が明示する（既定は bilinear）。
+ * `preprocessor_config.json` の `"resample"` は **PIL の定数**（NEAREST=0 / LANCZOS=1 /
+ * **BILINEAR=2** / **BICUBIC=3** / BOX=4 / HAMMING=5）で、SigLIP2 は 2 = bilinear、
+ * Depth Anything V2（`DPTImageProcessor`）は 3 = bicubic。transformers のクラス属性の既定は
+ * どちらのクラスも `PILImageResampling.BICUBIC` なので「SigLIP は bicubic」と読み違えやすいが、
+ * SigLIP2 はチェックポイントの config が既定を上書きしている。取り違えの実測は SigLIP2 側で
+ * 最大 47/255、DA-V2 側で `pixel_values` の最大 0.59（1 LSB = 0.0175 の 34 倍）。
+ * `resample` の実測は `tools/exporter/siglip2_preprocess.py` と
+ * `tools/exporter/export_depth_anything.py` が emit のたびに行う。
  *
  * MUST: 2 パスの**間**で uint8 へ丸め直す（{@link resizeRgb8}）。PIL / torchvision の uint8
  * 経路は中間バッファを uint8 で持つので、f64 のまま縦パスへ渡すと参照とずれる標本が
@@ -45,14 +46,39 @@ export type Rgb8Image = {
 /** チャネル数（RGB）。アルファは入口で受け取らない。 */
 const CHANNELS = 3;
 
-/** 三角（bilinear）フィルタ。台の半径は {@link SUPPORT}。 */
+/** リサンプルの補間フィルタ（`preprocessor_config.json` の `resample` に対応する綴り）。 */
+export type ResampleFilter = "bilinear" | "bicubic";
+
+/** 1 つのフィルタ = 重み関数とその台の半径（縮小時はここに縮尺が掛かって台が伸びる）。 */
+type Kernel = {
+  /** 台の半径（縮尺 1 のときの値）。 */
+  readonly support: number;
+  readonly weight: (x: number) => number;
+};
+
+/** 三角（bilinear）フィルタ。 */
 const triangle = (x: number): number => {
   const abs = Math.abs(x);
   return abs < 1 ? 1 - abs : 0;
 };
 
-/** {@link triangle} の台の半径。縮小時はここに縮尺が掛かって台が伸びる（= antialias）。 */
-const SUPPORT = 1;
+/**
+ * Catmull-Rom 系の三次フィルタ（PIL の `bicubic_filter` / torchvision の antialias 経路と
+ * 同じ `a = -0.5`）。`|x| ∈ [1, 2)` で**負の重み**を持つので、階段状のエッジでは入力の値域を
+ * 越えた overshoot が出る（{@link round8} の clamp が効く唯一の経路）。
+ */
+const cubic = (x: number): number => {
+  const a = -0.5;
+  const abs = Math.abs(x);
+  if (abs < 1) return ((a + 2) * abs - (a + 3)) * abs * abs + 1;
+  if (abs < 2) return (((abs - 5) * abs + 8) * abs - 4) * a;
+  return 0;
+};
+
+const KERNELS: Readonly<Record<ResampleFilter, Kernel>> = {
+  bilinear: { support: 1, weight: triangle },
+  bicubic: { support: 2, weight: cubic },
+};
 
 /** 出力 1 点ぶんの入力範囲と重み。 */
 type Tap = {
@@ -68,12 +94,13 @@ type Tap = {
  * 規約）— この切り詰めのせいで、拡大の端は近傍 1 点そのままになることがある。
  *
  * 重み和が 0 にならないことは式から出る: `center` を含む入力位置は必ず `[start, stop)` に
- * 入り、その重みは 0.5 以上ある。したがって 0 除算の分岐は要らない。
+ * 入り、その重みは（bilinear で 0.5 / bicubic で 0.75 以上）正の値を持つ。負のローブを持つ
+ * bicubic でも総和が 0 へ潰れる組み合わせは無いので、0 除算の分岐は要らない。
  */
-const buildTaps = (inSize: number, outSize: number): readonly Tap[] => {
+const buildTaps = (inSize: number, outSize: number, kernel: Kernel): readonly Tap[] => {
   const scale = inSize / outSize;
   const filterScale = Math.max(scale, 1);
-  const support = SUPPORT * filterScale;
+  const support = kernel.support * filterScale;
   const taps: Tap[] = [];
   for (let index = 0; index < outSize; index += 1) {
     const center = (index + 0.5) * scale;
@@ -82,7 +109,7 @@ const buildTaps = (inSize: number, outSize: number): readonly Tap[] => {
     const weights = new Float64Array(stop - start);
     let total = 0;
     for (let j = 0; j < weights.length; j += 1) {
-      const weight = triangle((start + j - center + 0.5) / filterScale);
+      const weight = kernel.weight((start + j - center + 0.5) / filterScale);
       weights[j] = weight;
       total += weight;
     }
@@ -96,8 +123,8 @@ const buildTaps = (inSize: number, outSize: number): readonly Tap[] => {
  * 丸めて 8bit に収める。
  *
  * MUST: clamp を外さない。`Uint8Array` への代入は範囲外を **mod 256 で巻き戻す**ので、
- * 負のローブを持つフィルタ（bicubic 等）を後から足したときに、飽和すべき画素が黒白反転した
- * まま静かに通る。bilinear の重みは非負で総和 1 なので現状は掛からない経路。
+ * 負のローブを持つ bicubic の overshoot が、飽和すべき画素の黒白反転として静かに通る
+ * （bilinear は重みが非負で総和 1 なので掛からない経路）。
  */
 const round8 = (value: number): number => Math.min(255, Math.max(0, Math.floor(value + 0.5)));
 
@@ -113,18 +140,28 @@ const assertRgb8 = (image: Rgb8Image): void => {
 };
 
 /**
- * RGB8 を指定寸法へリサンプルする（antialias 付き bilinear — モジュール docstring の参照実装）。
+ * RGB8 を指定寸法へリサンプルする（antialias 付き — モジュール docstring の参照実装）。
  *
  * アスペクト比は**保たない**（`size.height` / `size.width` へそのまま伸縮する）。SigLIP2 の
- * `preprocessor_config.json` が `size` を高さ・幅の対で持ち、crop も pad も無いため。
+ * `preprocessor_config.json` が `size` を高さ・幅の対で持ち、crop も pad も無いため。DA-V2 は
+ * `keep_aspect_ratio` を立てているが、正方入力 → 正方 `size` では恒等になる（アスペクト比を
+ * 保つ経路が要るモデルが出るまで、この関数は寸法を受けるだけに留める）。
+ *
+ * `filter` の既定が bilinear なのは既存の呼び出し側（SigLIP2 / BiRefNet）の値で、**モデル
+ * カードの一部**なので新しいファミリは必ず自分の `resample` を明示する。
  */
-export const resizeRgb8 = (image: Rgb8Image, width: number, height: number): Rgb8Image => {
+export const resizeRgb8 = (
+  image: Rgb8Image,
+  width: number,
+  height: number,
+  filter: ResampleFilter = "bilinear",
+): Rgb8Image => {
   assertRgb8(image);
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
     throw new RangeError(`出力サイズ ${width}×${height} が正の整数でない`);
   }
-
-  const horizontal = buildTaps(image.width, width);
+  const kernel = KERNELS[filter];
+  const horizontal = buildTaps(image.width, width, kernel);
   const middleStride = width * CHANNELS;
   const middle = new Uint8Array(image.height * middleStride);
   for (let y = 0; y < image.height; y += 1) {
@@ -142,7 +179,7 @@ export const resizeRgb8 = (image: Rgb8Image, width: number, height: number): Rgb
     }
   }
 
-  const vertical = buildTaps(image.height, height);
+  const vertical = buildTaps(image.height, height, kernel);
   const data = new Uint8Array(height * middleStride);
   for (let y = 0; y < height; y += 1) {
     const { start, weights } = vertical[y];
@@ -161,8 +198,8 @@ export const resizeRgb8 = (image: Rgb8Image, width: number, height: number): Rgb
 };
 
 /**
- * **単一チャネルの f32 平面**を指定寸法へリサンプルする（{@link resizeRgb8} と同じ台・同じ
- * 重み — {@link buildTaps} を共有する）。
+ * **単一チャネルの f32 平面**を指定寸法へリサンプルする（{@link buildTaps} を
+ * {@link resizeRgb8} と共有する・フィルタは bilinear 固定）。
  *
  * 画素ごとの出力を持つモデル（セグメンテーションのマット等）は、グラフが焼かれた解像度で
  * 出した地図を**元画像の解像度へ戻す**必要がある。参照実装は
@@ -198,7 +235,7 @@ export const resizePlaneF32 = (
     throw new Error(`平面の長さ ${plane.length} が ${sourceWidth}×${sourceHeight} と違う`);
   }
 
-  const horizontal = buildTaps(sourceWidth, width);
+  const horizontal = buildTaps(sourceWidth, width, KERNELS.bilinear);
   const middle = new Float64Array(sourceHeight * width);
   for (let y = 0; y < sourceHeight; y += 1) {
     const sourceRow = y * sourceWidth;
@@ -211,7 +248,7 @@ export const resizePlaneF32 = (
     }
   }
 
-  const vertical = buildTaps(sourceHeight, height);
+  const vertical = buildTaps(sourceHeight, height, KERNELS.bilinear);
   const out = new Float32Array(width * height) as Float32Array<ArrayBuffer>;
   for (let y = 0; y < height; y += 1) {
     const { start, weights } = vertical[y];

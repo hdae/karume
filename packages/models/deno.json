@@ -6,6 +6,7 @@
     ".": "./mod.ts",
     "./anima": "./anima.ts",
     "./birefnet": "./birefnet.ts",
+    "./depth-anything": "./depth-anything.ts",
     "./irodori": "./irodori.ts",
     "./sbv2": "./sbv2.ts",
     "./siglip2": "./siglip2.ts",

@@ -96,6 +96,7 @@ class TestDispatch:
             ("export-deberta", "EXPORT_DEBERTA_SCRIPT"),
             ("export-siglip2", "EXPORT_SIGLIP2_SCRIPT"),
             ("export-birefnet", "EXPORT_BIREFNET_SCRIPT"),
+            ("export-depth-anything", "EXPORT_DEPTH_ANYTHING_SCRIPT"),
             ("export-vowel-detector", "EXPORT_VOWEL_DETECTOR_SCRIPT"),
         ],
     )

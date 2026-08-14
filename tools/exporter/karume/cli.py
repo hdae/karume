@@ -60,6 +60,9 @@ EXPORT_SIGLIP2_SCRIPT = "export_siglip2"
 #: `karume export-birefnet` が包む台本（BiRefNet_HR の背景抜き 1 系列を書き出す側）。
 EXPORT_BIREFNET_SCRIPT = "export_birefnet"
 
+#: `karume export-depth-anything` が包む台本（相対深度推定 1 系列を書き出す側）。
+EXPORT_DEPTH_ANYTHING_SCRIPT = "export_depth_anything"
+
 #: `karume export-vowel-detector` が包む台本（母音認識 CRNN を長さごとに書き出す側）。
 EXPORT_VOWEL_DETECTOR_SCRIPT = "export_vowel_detector"
 
@@ -129,6 +132,10 @@ def run_export_birefnet(argv: Sequence[str]) -> None:
     return load_script(EXPORT_BIREFNET_SCRIPT).main(argv)
 
 
+def run_export_depth_anything(argv: Sequence[str]) -> None:
+    return load_script(EXPORT_DEPTH_ANYTHING_SCRIPT).main(argv)
+
+
 def run_export_vowel_detector(argv: Sequence[str]) -> None:
     return load_script(EXPORT_VOWEL_DETECTOR_SCRIPT).main(argv)
 
@@ -175,6 +182,10 @@ COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     "export-birefnet": (
         run_export_birefnet,
         "BiRefNet_HR を IR v1 + golden io へ書き出す（台本 export_birefnet.py）",
+    ),
+    "export-depth-anything": (
+        run_export_depth_anything,
+        "Depth Anything V2 を IR v1 + golden io へ書き出す（台本 export_depth_anything.py）",
     ),
     "export-vowel-detector": (
         run_export_vowel_detector,
