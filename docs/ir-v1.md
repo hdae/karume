@@ -33,8 +33,8 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   dropout / GQA は語彙に無く、エクスポータ境界で全件 fail loudly。SDPA の保存は
   **ターゲット別**なので、既存の分解形 IR はそのまま有効。
 - モデル拡充（2026-08-13）: `upsample_bilinear2d` を**第 1 層**として追加（ADR 0043 の
-  判定手順 3 — Core ATen 内の原子。層分類の暫定運用は
-  [known-issues.md](known-issues.md)）。attrs は `output_size` の 1 本だけで、
+  判定手順 3 — Core ATen 内の原子。当時の暫定運用は 2026-08-14 の入場門モデル
+  〈ADR [0059](decisions/0059-op-vocabulary-entry-doors.md)・現 Core ATen 層〉で解消）。attrs は `output_size` の 1 本だけで、
   **`align_corners = True` 以外は欄を持たない**。既存 IR への影響はゼロ（新しい op 名が
   増えるだけ）。
 - モデル拡充（2026-08-13）: `deform_conv2d` を**第 1' 層**として追加（ADR
@@ -43,7 +43,8 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   （従来は `where` / conv 族の 3 と `attention` の 3〜4）。
   attrs は `padding` の 1 本だけで、`stride` / `dilation` / `groups` / `offset_groups` は
   欄を持たない（= 1 固定）。既存 IR への影響はゼロ。
-- モデル拡充（2026-08-14）: `gru_scan` / `gru_scan_reverse` を**第 2 層**として追加（ADR
+- モデル拡充（2026-08-14）: `gru_scan` / `gru_scan_reverse` を**第 2 層**〈現 拡張分子層 —
+  ADR 0059〉として追加（ADR
   [0056](decisions/0056-gru-scan.md) — 分子だが「時間軸が実行時に決まる」意味情報が分解形で
   失われる。要求元は vowel-detector の 2 層 BiGRU）。**アリティ 4 固定・attrs 空**で、
   op が受け持つのは**隠れ側の逐次だけ**（入力側 GEMM は呼び手の `linear`）。走査方向は
@@ -195,8 +196,9 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   （f32）/ `bitwise_not`（bool）
   - `gelu_tanh` は torch の `gelu(approximate="tanh")`。erf 形の `gelu` と数値が違うため
     **別 op** で運ぶ（attrs 空の契約に近似種別の欄は無い — ADR
-    [0043](decisions/0043-op-addition-layers.md) の第 2 層初適用）
-  - `sin` は語彙で**唯一の三角関数**（ADR 0043 の第 1 層）。RoPE のような定数表は
+    [0043](decisions/0043-op-addition-layers.md) 初適用・現行の門 = Core ATen 層の
+    attr 変種〈ADR 0059〉）
+  - `sin` は語彙で**唯一の三角関数**（Core ATen 層〈旧第 1 層〉）。RoPE のような定数表は
     エクスポータが initializer へ畳むので、語彙に要るのは実行時値を取る形だけ
     （初出は DACVAE の Snake 活性）。`cos` は実測に出るまで足さない
   - `clamp`（f32、attrs `min` / `max`）— 両端とも**必須**の有限 f32 で `min <= max`
@@ -305,7 +307,8 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   - `softmax`（f32、attrs `dim`）— **最終次元のみ**（`dim` は非負表記）。**safe-softmax**
     （行の最大値を引く）で計算する
   - `safe_softmax`（f32、attrs `dim`）— `softmax` と**同一契約** + 「**行 max が −inf の行は
-    全 0**」（ADR [0044](decisions/0044-runtime-attention-mask.md) の第 2 層）。torch の SDPA
+    全 0**」（ADR [0044](decisions/0044-runtime-attention-mask.md) — 拡張分子層
+    〈旧第 2 層〉）。torch の SDPA
     分解が `softmax` に被せる safe-softmax ガードと同じ意味論で、マスクが実行時値でガードの
     不活性を証明できない形だけに現れる。有限要素を持つ行の値は `softmax` と**ビット同一**
   - `embedding`（attrs `padding_idx`）— `weight f32[V,H] × index i32[…] → f32[…,H]` の行
@@ -338,8 +341,9 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   bias 無しの conv（実測は dec の `conv_post` 1 本）は**エクスポータがゼロ bias initializer を
   合成**してアリティ 3 へ正規化する — IR にも契約にもカーネルにも arity 分岐は無い。
 
-- **変形畳み込み**（第 1' 層の原子 — `torchvision::deform_conv2d`。ADR
-  [0055](decisions/0055-deform-conv2d.md)）:
+- **変形畳み込み**（拡張原子層〈旧第 1' 層〉の原子 — `torchvision::deform_conv2d`。ADR
+  [0055](decisions/0055-deform-conv2d.md)・門の定義は
+  [0059](decisions/0059-op-vocabulary-entry-doors.md)）:
   - `deform_conv2d`（f32、attrs `padding`、**アリティ 5 固定**）—
     `x[B,Cin,H,W]` / `W[Cout,Cin,Kh,Kw]` / `offset[B,2·Kh·Kw,Hout,Wout]` /
     `mask[B,Kh·Kw,Hout,Wout]` / `b[Cout]` → `[B,Cout,Hout,Wout]` の DCNv2。
@@ -354,7 +358,7 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
     = エクスポータ境界で fail loudly）。**offset の NaN は 0 に落とさず出力へ伝播する**
     （範囲外の 0 とは別扱い — ADR 0055 決定 5）
 
-- **空間 resample**（第 1 層の原子 — `aten.upsample_bilinear2d.vec`）:
+- **空間 resample**（Core ATen 層〈旧第 1 層〉の原子 — `aten.upsample_bilinear2d.vec`）:
   - `upsample_bilinear2d`（f32、attrs `output_size`、**アリティ 1 固定**）—
     `x[B,C,H,W] → [B,C,Hout,Wout]` の双線形補間。**`align_corners = True` 専業**で、
     `align_corners` / `mode` / `scale_factor` は attrs に**欄が無い**（`False` も nearest /
@@ -368,7 +372,7 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
     **縮小（`Hout < H`）も同じ op**（2 タップしか読まないのは torch と同じ仕様で `area` とは
     別物）。空間軸の長さ 0 は受理しない
 
-- **RNN スキャン**（第 2 層の分子 — ADR [0056](decisions/0056-gru-scan.md)）:
+- **RNN スキャン**（拡張分子層〈旧第 2 層〉の分子 — ADR [0056](decisions/0056-gru-scan.md)）:
   - `gru_scan` / `gru_scan_reverse`（f32、**attrs 空**、**アリティ 4 固定**）—
     `gi[T,N,3H]` / `h0[N,H]` / `W_hh[3H,H]` / `b_hh[3H]` → `y[T,N,H]` の GRU 隠れ側スキャン。
     **時間軸 T は記号でよい**（この op の存在理由 — 分解形は T 回展開されて記号を失う）。

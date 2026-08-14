@@ -43,36 +43,14 @@ Dawn / Tint 系で naga を通らないため、同じ症状が出るとは限�
 batch>1 のマスク畳み込み対応）で、コア変換基盤への設計判断が要る。`--batch` フラグ自体は
 一般化が入ればそのまま使える形で維持している。
 
-## op 追加の層分類が一部の op で自明にならない
-
-ADR [0043](decisions/0043-op-addition-layers.md) の層定義に、実モデルの recon
-（2026-08-13・BiRefNet_HR / Depth Anything V2）で **2 つの穴**が見つかった。どちらも既存 op
-の扱いには影響しない（層は今後の追加手続きだけを支配する — 同 ADR 追記 決定 3）が、次に
-op を足すときの判定がそのままでは割れる。
-
-1. **Core ATen 外の原子で、要求元がモデルであるもの**（`torchvision::deform_conv2d`）が
-   どの層にも入らない。第 1 層は「原子 ∩ Core ATen」、第 1' 層は「Core ATen 外**かつ**
-   karume の IR / 実行モデル自体が要求するもの」（初例 `sym_prefix_slice`）と定義されており、
-   モデル由来の Core ATen 外原子はその隙間に落ちる。
-2. **「容量・性能で非成立」の線引きが 2 か所で非等価**。
-   [op-vocabulary.md](op-vocabulary.md) の判定手順 3 は「合成が数値的に不可能 **or 容量・
-   性能で非成立** = 原子（第 1 層・台帳のみ）」、ADR 0043 追記 決定 1 は「語彙内の他 op の
-   合成で厳密同値に書けるなら分子（第 2 層・ADR 必須）」。`upsample_bilinear2d` は
-   「matmul 2 本で厳密同値に書けるが FLOP 184 倍 / gather 形は index が 805MB〜3.22GB」で
-   **両方に当たる**。既存の前例も両側にある（`leaky_relu` = 中間 1.5〜2 倍で第 2 層 /
-   `batch_norm` = 537MB で原子）。
-
-**暫定の運用（2026-08-13 ユーザー裁定）**: 第 1 層 = Core ATen 内の原子 / 第 1' 層 =
-**それ以外の原子**（要求元が IR かモデルかを問わない）。`upsample_bilinear2d` は Core ATen
-内なので第 1 層（台帳のみ・ADR 不要）として扱う。線引きの明文化と ADR 0043 への反映は、
-リファクタリング / 整理のタイミングでまとめて再分類する。
-
-穴 1 を**この運用のまま通した 1 例目**が `deform_conv2d`（Core ATen 外・モデル由来の原子 →
-第 1' 層 = ADR 必須 — ADR [0055](decisions/0055-deform-conv2d.md)）。再分類のときは、
-第 1' 層の定義文（ADR 0043 追記 決定 2 の「karume の IR / 実行モデル自体が要求するもの」）を
-この運用へ合わせる作業がそのまま残っている。
-
 ## ここから外れたもの（記録）
+
+- op 追加の層分類の 2 穴（Core ATen 外・モデル由来の原子の行き場 /「容量・性能で非成立」の
+  線引きが 2 文書で非等価）→ **解消済み（2026-08-14・[decisions/0059](decisions/0059-op-vocabulary-entry-doors.md)
+  = 入場門モデル）**。ADR 要否を「Core ATen 帰属（`Tag.core` 実測）」の 1 判定へ一本化し、
+  要求元軸を廃止・非成立判定は紙の手続きを左右しない構造にした。暫定運用（2026-08-13
+  ユーザー裁定「第 1' 層 = それ以外の原子」）の結論とは遡って無矛盾。判定手順の正本は
+  [op-vocabulary.md](op-vocabulary.md) の門表。
 
 - GPU の clamp / clamp_min / relu / amax / amin の NaN 非伝播 → **根治済み（2026-08-03・
   ビット列 NaN 判定）**。裁定と機序は [decisions/0020](decisions/0020-nan-propagation-bitwise.md)。

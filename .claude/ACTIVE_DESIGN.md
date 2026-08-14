@@ -15,17 +15,19 @@
   ①**SigLIP2 vision**（base + so400m・Apache 2.0）②**BiRefNet_HR** + **Lucida**（MIT・2 系列
   別配布形）③**vowel-detector**（自作 CRNN・日本語音声 → リップシンク用 `.lab`）
   ④**Depth Anything V2 Small**（Apache 2.0 は **Small のみ** — Base/Large は CC BY-NC 4.0 と
-  実測）。**支える op 追加が 3 本**: `upsample_bilinear2d`（第 1 層・台帳のみ）/
-  `deform_conv2d`（第 1' 層・ADR [0055](../docs/decisions/0055-deform-conv2d.md)）/
-  `gru_scan` + `gru_scan_reverse`（第 2 層・ADR
+  実測）。**支える op 追加が 3 本**: `upsample_bilinear2d`（Core ATen 層〈旧第 1 層〉・
+  台帳のみ）/ `deform_conv2d`（拡張原子層〈旧第 1' 層〉・ADR
+  [0055](../docs/decisions/0055-deform-conv2d.md)）/
+  `gru_scan` + `gru_scan_reverse`（拡張分子層〈旧第 2 層〉・ADR
   [0056](../docs/decisions/0056-gru-scan.md)）+ 派生次元束縛（ADR
   [0057](../docs/decisions/0057-derived-dim-binding.md)）。新設の横断層 =
   **画像前処理**（`packages/models/src/image/preprocess.ts` — decode はホスト責務・
   resize/rescale/normalize は karume 側というユーザー裁定）。
-  - **層分類の穴が 2 つ出て暫定運用で通した**（正本は
-    [known-issues.md](../docs/known-issues.md) の該当節）: Core ATen 外・モデル由来の原子が
-    どの層にも入らない件と、「容量・性能で非成立」の線引きが 2 か所で非等価な件。暫定 =
-    第 1 層 = Core ATen 内の原子 / 第 1' 層 = それ以外の原子。**再分類は整理タイミング**。
+  - **層分類の 2 穴は解消済み（2026-08-14・ADR
+    [0059](../docs/decisions/0059-op-vocabulary-entry-doors.md) = 入場門モデル・名前制）**:
+    ADR 要否 = Core ATen 帰属（`Tag.core` 実測）の 1 判定・要求元軸は廃止・原子/分子は
+    ADR 内の証明の型へ降格。旧番号（第 0〜3・1'）は退役 — 新規記述は門名
+    （export 消滅 / Core ATen / 拡張原子 / 拡張分子 / 融合）で書く。
   - **recon の訂正が 4 件**（着手前の見立てが現物と食い違った記録）: ①BiRefNet の
     `aten.rsqrt` は出ない（BatchNorm は `_native_batch_norm_legit_no_training` のまま残る）
     ②`aten.roll` もそのままでは出ない（`index_select` へ分解されて落ちる）— 実際の blocker は

@@ -1,6 +1,7 @@
 # 0043: op 追加は第 0〜3 層の判定手順に従う（必須プリミティブと推奨カーネル/融合の分離）
 
-- Status: accepted
+- Status: superseded by [0059](0059-op-vocabulary-entry-doors.md)（2026-08-14 — 層定義・
+  判定手順は入場門モデル・名前制へ置換。本文と追記は当時の記録として保存）
 - Date: 2026-08-11
 - 関連: ADR [0012](0012-attrs-and-fused-ops.md)（attrs 空契約）/
   [0015](0015-conv-family-extension.md) / [0017](0017-rms-norm-conv2d-clamp-min.md) /
