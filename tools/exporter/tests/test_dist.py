@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar
@@ -72,6 +73,7 @@ from karume.dist import (
     SIGLIP2_OUTPUT_PATHS,
     SIGLIP2_ROLE,
     STAGING_SUFFIX,
+    SUPERSEDED_SUFFIX,
     VOWEL_DETECTOR_DEFAULT_MODEL,
     VOWEL_DETECTOR_MAX_FRAMES,
     VOWEL_DETECTOR_OUTPUT_PATHS,
@@ -869,6 +871,20 @@ class TestAtomicReplacement:
 
         monkeypatch.setattr("karume.dist.materialize", failing)
 
+    def _fail_replace_at(self, monkeypatch: pytest.MonkeyPatch, nth: int) -> None:
+        """`nth` 回目の `os.replace` だけを I/O 故障にする（据え替えの途中で落ちる形の注入）。"""
+        real = os.replace
+        calls = 0
+
+        def failing(src: Path, dst: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == nth:
+                raise OSError("据え替えの途中で落ちた")
+            real(src, dst)
+
+        monkeypatch.setattr("karume.dist.os.replace", failing)
+
     def _versioned_plans(self, version: str) -> list[ModelPlan]:
         """3 モデル × 1 役の最小計画。版ごとに**中身だけ**が変わる（長さは同じ）。
 
@@ -920,6 +936,43 @@ class TestAtomicReplacement:
 
         with pytest.raises(DistError, match="カードが描けない"):
             assemble_family(self._versioned_plans("v2"), out_dir, "A", render_card=explode)
+
+        assert self._snapshot(out_dir) == before
+        assert self._siblings(out_dir) == []
+
+    def test_a_failing_swap_puts_the_previous_distribution_back_at_the_canonical_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """据え替えの 2 回目（staging → 出力先）で落ちても、正規 path から配布形が消えない。"""
+        out_dir = tmp_path / "models" / "synthetic"
+        assemble_family(self._versioned_plans("v1"), out_dir, "A")
+        before = self._snapshot(out_dir)
+
+        self._fail_replace_at(monkeypatch, nth=2)
+        with pytest.raises(DistError, match="据え替え") as failure:
+            assemble_family(self._versioned_plans("v2"), out_dir, "A")
+
+        # 原因（I/O 故障）は連鎖で残す — 据え替えの失敗と組み立ての失敗を取り違えない。
+        assert isinstance(failure.value.__cause__, OSError)
+        assert self._snapshot(out_dir) == before
+        assert self._siblings(out_dir) == []
+
+    def test_it_restores_a_distribution_left_only_in_the_superseded_slot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """前回が rename 2 回の**間**で落ちた形 — 退避先の last-known-good を捨てずに戻す。
+
+        次の組み立てが失敗しても、正常な配布形は正規 path に戻っている（捨てていれば
+        「出力先も退避先も無い」= 手元の配布形が完全消失した状態で止まる）。
+        """
+        out_dir = tmp_path / "models" / "synthetic"
+        assemble_family(self._versioned_plans("v1"), out_dir, "A")
+        before = self._snapshot(out_dir)
+        os.replace(out_dir, out_dir.with_name(out_dir.name + SUPERSEDED_SUFFIX))
+
+        self._fail_at(monkeypatch, nth=2)
+        with pytest.raises(OSError, match="配置の途中で落ちた"):
+            assemble_family(self._versioned_plans("v2"), out_dir, "A")
 
         assert self._snapshot(out_dir) == before
         assert self._siblings(out_dir) == []
@@ -2284,6 +2337,19 @@ class TestIrodoriPipelineConfig:
     ) -> None:
         sources = _build_irodori_sources(tmp_path, config={**_IRODORI_CONFIG, "latent_dim": value})
         with pytest.raises(DistError, match="latent_dim"):
+            irodori_plan(sources)
+
+    @pytest.mark.parametrize(
+        "value", [float("nan"), float("inf"), float("-inf"), -1.0, 0.0, "8.0", True, None]
+    )
+    def test_it_refuses_a_reference_length_that_is_not_a_finite_positive_number(
+        self, tmp_path: Path, value: Any
+    ) -> None:
+        """NaN は比較が全て False で `<= 0` を素通りする — 下流の秒 → フレーム換算まで運ばない。"""
+        sources = _build_irodori_sources(
+            tmp_path, config={**_IRODORI_CONFIG, "ref_max_seconds": value}
+        )
+        with pytest.raises(DistError, match="ref_max_seconds"):
             irodori_plan(sources)
 
     def test_it_refuses_a_latent_patch_size_the_loader_schema_cannot_express(

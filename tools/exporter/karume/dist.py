@@ -51,6 +51,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import shutil
@@ -620,7 +621,8 @@ def assemble_family(
     `karume.json` → {@link verify_dist} → `README.md`）、通ってから rename で据える。既存の
     `out_dir` は最後の rename まで 1 バイトも触らない — 途中で落ちれば staging だけが消えて、
     配布形は前回のまま残る（in-place で更新していた頃の「旧 manifest + 新旧混在ツリー」という
-    失敗様式が構造的に無くなる）。前回の中断が残した staging / 退避先は黙って捨てて作り直す。
+    失敗様式が構造的に無くなる）。前回の中断が残した staging は黙って捨てて作り直し、退避先は
+    出力先が在れば捨てる・無ければ（= 前回が rename 2 回の間で落ちた形）出力先へ戻す。
 
     MUST: 差し替えは**丸ごと**で、`out_dir` の元の中身は 1 つも引き継がない — `A` + `B` で
     組んだ出力へ `A` だけを組み直すと `B` は消える（全部コピーし終えてから宣言外ファイルとして
@@ -643,6 +645,12 @@ def assemble_family(
     staging = out_dir.with_name(out_dir.name + STAGING_SUFFIX)
     superseded = out_dir.with_name(out_dir.name + SUPERSEDED_SUFFIX)
     _discard_tree(staging)
+    # 退避先だけが在って出力先が無いのは、前回が rename 2 回の**間**で落ちた形 — 退避先が
+    # last-known-good の配布形そのものなので、捨てると ADR 0052 Decision 2 の「既存配布形は
+    # 不変」が次の起動で破れる。戻してから作り直す（戻せば退避先は消えるので下は no-op・
+    # 出力先が在るときの退避先は従来どおりただの残骸）。
+    if superseded.is_dir() and not out_dir.exists():
+        os.replace(superseded, out_dir)
     _discard_tree(superseded)
     try:
         manifest = _materialize_family(plans, staging, default_model)
@@ -656,7 +664,16 @@ def assemble_family(
     # 据えるのは rename 2 回。非空ディレクトリの上へは rename できないので既存を先に退避する。
     if out_dir.exists():
         os.replace(out_dir, superseded)
-    os.replace(staging, out_dir)
+    try:
+        os.replace(staging, out_dir)
+    except OSError as error:
+        # 2 回目が落ちると、唯一の正常な配布形が退避先にしか無い状態のまま止まる — 戻し、
+        # 据わらなかった staging は捨てる（ADR 0052 Decision 2 の「失敗は staging だけを消し、
+        # 既存配布形は不変」— 他の失敗経路と同じ後片付けへ揃える）。
+        if superseded.exists():
+            os.replace(superseded, out_dir)
+        _discard_tree(staging)
+        raise DistError(f"{out_dir} への据え替え（rename）に失敗した") from error
     _discard_tree(superseded)
     return manifest
 
@@ -1867,8 +1884,15 @@ def _irodori_int(config: Mapping[str, Any], key: str) -> int:
 def _irodori_float(config: Mapping[str, Any], key: str) -> float:
     """チェックポイント config の実数フィールド（秒数）を検査して読む。"""
     value = config.get(key)
-    if not isinstance(value, int | float) or isinstance(value, bool) or value <= 0:
-        raise DistError(f"{IRODORI_CONFIG_META_KEY} の {key} が正の数でない（{value!r}）")
+    # NaN は比較が全て False なので `<= 0` を素通りし、下流の秒 → フレーム換算（int()）で
+    # 一般例外として漏れる。Inf も同じ席で落ちる — 有限性をここで要求する。
+    if (
+        not isinstance(value, int | float)
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise DistError(f"{IRODORI_CONFIG_META_KEY} の {key} が有限の正の数でない（{value!r}）")
     return float(value)
 
 
