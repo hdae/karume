@@ -37,7 +37,7 @@ async (input, init) => {
   // 上流の signal と合成する。違反時にこの controller を落とせば、上流を巻き込まずに
   // この 1 本だけを止められる。
   const controller = new AbortController();
-  const outer = init?.signal;
+  const outer = init?.signal ?? (input instanceof Request ? input.signal : undefined);
   const signal = outer === undefined || outer === null
     ? controller.signal
     : AbortSignal.any([controller.signal, outer]);
