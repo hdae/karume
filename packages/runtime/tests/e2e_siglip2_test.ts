@@ -20,22 +20,28 @@
 //
 // ## golden の 2 群（合成画像 + 実画像）— どちらも残す
 //
-// - **合成画像 4 ケース**（`ramp` / `ramp-dim` / `checker` / `noise`）: 入力は golden に
-//   焼かれた `pixel_values` そのもの（ビット同一）なので、突合に出るのは**ランタイムの
-//   数値誤差だけ**。値域の端や勾配を踏むぶん数値回帰の検出が鋭い（実測 1e-5 級）。
-// - **実画像 4 ケース**（`photo-*` — `outputs/demo/` の PNG）: TS 側は PNG を decode して
-//   `packages/models/src/image/preprocess.ts` を通し、Python 側は同じ画像を transformers の
-//   `TorchvisionBackend` に通す。つまりこの門は「**TS 前処理 + karume 推論**」対「**Python
-//   前処理 + torch 推論**」の突合で、前処理を含めた鎖が意味のある出力を出すかを見る。
-//   数値は穏やか（1 LSB の入力差が伝播するので tolerance は 3 桁緩い —
-//   {@link REAL_BASE_TOLERANCE}）で、鋭さは合成側が受け持つ。
+// 入力は**どちらの群も golden に焼かれた `pixel_values` そのもの**（ビット同一）なので、
+// 突合に出るのは**ランタイムの数値誤差だけ**。2 群に分けて持つのは、踏む分布が違うから:
 //
-// 判別（cosine の順序）は**実画像側だけ**が持つ（合成画像の ramp / checker より意味のある
-// 判別になる — {@link REAL_PERSON_CASES}）。
+// - **合成画像 4 ケース**（`ramp` / `ramp-dim` / `checker` / `noise`）: 値域の端や勾配を
+//   踏むぶん数値回帰の検出が鋭い（実測 6.4e-6〜1.05e-5）。
+// - **実画像 4 ケース**（`photo-*`）: 自然画像の分布点でのランタイム忠実度と、出力が埋め込み
+//   として意味を持つかの**判別**（cosine の順序 — {@link REAL_PERSON_CASES}）を受け持つ。
+//   誤差の桁は合成側と同じだが、tolerance は群ごと・系列ごとに独立に実測から導く
+//   （{@link REAL_BASE_TOLERANCE}）。
+//
+// ## TS 前処理を含む鎖は、2 つの門の**合成**で持つ
+//
+// 「PNG を渡したら Python と同じ埋め込みが返る」という鎖は、このテスト単独ではなく
+// `packages/models/tests/image_preprocess_real_test.ts` の**入力側 parity 門**（同じ PNG から
+// Python と同じ `pixel_values` が出る — 入力差 ≤ 7.85e-3 = uint8 の 1 LSB 級）と、本テストの
+// **golden 入力での忠実度**の合成で持つ。前処理をここで通さないのは依存方向のため
+// （runtime のテストから models の実装を相対 import するのは逆向き）。分けた副産物として、
+// 落ちたときに前処理と推論のどちらが動いたのかがテストの名前で分かる。
 //
 // 資産が無い環境では**明示 SKIP**する（系列ごとに独立 — 片方だけ生成した環境でも、ある方は
-// 実走する）。実画像の群も独立に SKIP する（`outputs/demo/` は `rm -rf` で消せる席なので、
-// 画像だけ無い環境がありうる）。ADR 0005 の「全 SKIP は明示 FAIL」門番
+// 実走する）。実画像の群も独立に SKIP する（`--real-images` を付けずに emit した資産では
+// 合成 4 ケースしか無い）。ADR 0005 の「全 SKIP は明示 FAIL」門番
 // （tests/gpu_gate_test.ts）は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。
 // 逆に資産が**中途半端に**（ケース欠け）存在する場合は SKIP ではなく FAIL にする（下の
 // 「資産の完全性」テスト）— そこは無音の見かけ成功になる。
@@ -53,11 +59,6 @@ import {
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { decodePng } from "./helpers/png-decode.ts";
-// NOTE: 実画像ケースは models パッケージの前処理層**そのもの**を通すのが主張の中身なので、
-// テストからだけ相対で読む（`preprocess.ts` は依存ゼロの純関数 2 本で、runtime の実装は
-// 何も引き込まない。publish は `tests/` を除外する — packages/runtime/deno.json）。
-import { normalizeToNchw, resizeRgb8 } from "../../models/src/image/preprocess.ts";
 
 /**
  * 実重み SigLIP2 **base**（`patch16-224`）の torch CPU 期待値との突合に使う許容誤差。
@@ -122,80 +123,63 @@ const SO400M_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
 /**
  * **実画像**ケース（`photo-*`）の突合に使う許容誤差 — SigLIP2 **base**。
  *
- * 合成画像より 3 桁緩いのは、この門が**前処理を含めた鎖**の突合だから。TS 側は
- * `resizeRgb8`（f64 で積算）、Python 側は torchvision（f32 で積算）で、丸め境界に載った標本
- * だけが **1 LSB** ずれる（実測: 差は必ず 1 LSB 以内 = 正規化後 7.8432e-3・ずれる標本は
- * 150,528 中 0.09〜0.15% — 導出は `packages/models/tests/image_preprocess_test.ts` 冒頭）。
- * その入力差が 12 層を通って増幅した量が、そのままこの tolerance の中身になる。
+ * 入力は合成画像と同じく golden に焼かれた `pixel_values` そのものなので、出るのは
+ * ランタイム誤差だけで桁も合成側と同じ。それでも {@link BASE_TOLERANCE} と**共有しない**のは、
+ * 踏む分布が違って誤差の出方も違うから（片方を測り直したときにもう片方が黙って緩む形にしない
+ * のは、系列間で共有しないのと同じ理由）。
  *
  * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,768]`）:
  *
- * | ケース          | maxAbs  | maxRel | \|ref\| 上端 | 参照入力で回した場合の maxAbs |
- * | --------------- | ------- | ------ | ------------ | ---------------------------- |
- * | photo-portrait  | 1.35e-3 | 0.74   | 5.314        | 3.34e-6                      |
- * | photo-landscape | 2.52e-2 | 16.5   | 4.550        | 1.34e-5                      |
- * | photo-corridor  | 6.89e-3 | 9.94   | 6.727        | 3.82e-6                      |
- * | photo-street    | 7.46e-4 | 1.79   | 5.319        | 5.72e-6                      |
+ * | ケース          | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | --------------- | ------- | ------- | ------------ | ------------------ |
+ * | photo-portrait  | 3.34e-6 | 2.16e-3 | 5.314        | 8.77e-5            |
+ * | photo-landscape | 1.34e-5 | 6.30e-3 | 4.550        | 1.82e-4            |
+ * | photo-corridor  | 3.82e-6 | 1.73e-2 | 6.727        | 7.22e-5            |
+ * | photo-street    | 5.72e-6 | 2.49e-3 | 5.319        | 1.55e-4            |
  *
- * 右端の列が**帰属の証拠**: golden に焼かれた Python 側の `pixel_values` をそのまま入力に
- * すると誤差は合成画像と同じ 1e-5 級に戻る（= 大きい側の 2.52e-2 は**ランタイムではなく
- * 1 LSB の入力差の増幅**）。増幅倍率はケースごとに 3 桁ばらつくので、tolerance を実測から
- * 導く以外に決めようが無い。
+ * atol 5e-5 は実測最悪 1.34e-5（photo-landscape）の約 3.7 倍。合成画像側と同じ値になったのは
+ * 実測の帰結で、共有の根拠ではない。
  *
- * atol 5e-2 は実測最悪 2.52e-2（photo-landscape）の約 2.0 倍。合成画像側より margin が薄いのは
- * 誤差の出所が**決定的**だから — 入力差は f64 の CPU 前処理で環境に依らず同じで、GPU 側の
- * 揺れは右端の列の 1e-5 級しか乗らない。
+ * rtol は **0**（合成画像側の 1e-6 も入れない）。実測最悪 1.34e-5 は atol 単独で収まり、
+ * rtol 1e-6 を足しても \|ref\| 上端 6.727 で寄与は 6.7e-6 = atol の 1/7 と判定を動かさない —
+ * 判定を動かさないものは置かない。maxRel が 1.73e-2 まで出るのは 0 近傍の要素の見かけで、
+ * その絶対誤差は 3.8e-6 でしかない（合成画像側の docstring と同じ理屈）。
  *
- * rtol は **0**。atol が 5e-2 もある以上、\|ref\| 上端 6.7 に掛けて意味を持つ rtol は 1e-2 級で、
- * それは「判定しない」に等しい。maxRel が 16.5 まで出るのも 0 近傍の要素の見かけで、その
- * 絶対誤差は 3e-3 でしかない（合成画像側の docstring と同じ理屈）。
- *
- * 実装バグ（解像度の取り違え・チャネル順の反転・補間の取り違え〈bicubic は最大 47/255〉・
- * パッチ埋め込みの誤り）の誤差は出力の値域と同じ O(1)〜O(7) で、この閾値の 2 桁以上上に出る。
- * **画像の差し替え**（生成台本を回し直して golden を採り直していない）は tolerance では
- * 吸収されず、その手前の sha256 突合が名指しで落とす（実測: 1 バイト書き換えで落ちる）。
- * 一方 **resize の 2 軸の取り違えはこの門では捕まらない**（実画像は 4 枚とも正方形で、出力も
- * 正方形）— そこは `image_preprocess_test.ts` の `mixed-axis` ケースが受け持つ。
+ * ランタイム側の実装バグ（{@link BASE_TOLERANCE} が列挙するもの）の誤差は出力の値域と同じ
+ * O(1)〜O(7) で、この閾値の 5 桁以上上に出る。一方 **TS 前処理側の誤り**（解像度の取り違え・
+ * チャネル順の反転・補間の取り違え）**はこの門では捕まらない** — 入力が golden の
+ * `pixel_values` だから。そこは
+ * `packages/models/tests/image_preprocess_real_test.ts` が受け持つ（ファイル冒頭の「2 つの門の
+ * 合成」）。
  */
-const REAL_BASE_TOLERANCE: Tolerance = { atol: 5e-2, rtol: 0 };
+const REAL_BASE_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 0 };
 
 /**
  * **実画像**ケースの許容誤差 — SigLIP2 **so400m**。MUST: base と独立に実測から導く。
  *
- * | ケース          | maxAbs  | maxRel | \|ref\| 上端 | 参照入力で回した場合の maxAbs |
- * | --------------- | ------- | ------ | ------------ | ---------------------------- |
- * | photo-portrait  | 2.64e-3 | 1.90   | 5.845        | 9.06e-6                      |
- * | photo-landscape | 1.13e-2 | 8.01   | 5.883        | 7.63e-6                      |
- * | photo-corridor  | 6.17e-3 | 9.05   | 6.584        | 9.54e-6                      |
- * | photo-street    | 8.11e-3 | 2.34   | 5.329        | 3.34e-5                      |
+ * | ケース          | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | --------------- | ------- | ------- | ------------ | ------------------ |
+ * | photo-portrait  | 9.06e-6 | 2.85e-3 | 5.845        | 3.24e-4            |
+ * | photo-landscape | 7.63e-6 | 1.20e-2 | 5.883        | 3.19e-4            |
+ * | photo-corridor  | 9.54e-6 | 1.42e-3 | 6.584        | 1.47e-4            |
+ * | photo-street    | 3.34e-5 | 3.95e-3 | 5.329        | 4.22e-4            |
  *
- * atol 2.5e-2 は実測最悪 1.13e-2（photo-landscape）の約 2.2 倍。**base より厳しい値になったのは
- * 実測の帰結**で、共有はしない。1024×1024 から 384 への縮小は 224 への縮小より丸め境界に
- * 載る標本が多い（相違率 0.79〜0.90% 対 0.09〜0.15%）のに、出力の増幅は小さい — 層が深い
- * （27 層）ほど誤差が積み上がるとは限らないという実測で、片方の値をもう片方へ流用できない
- * 理由そのもの。
+ * atol 1e-4 は実測最悪 3.34e-5（photo-street）の約 3.0 倍。**合成画像側の
+ * {@link SO400M_TOLERANCE}（5e-5）より緩いのは実測の帰結** — photo-street だけが合成 4 ケースの
+ * 最悪 1.05e-5 の 3 倍出ており、自然画像の分布点が縮約の長い経路（hidden 1152 / 27 層 /
+ * 729 パッチ）で合成画像より悪い側を踏むことがある、という実測そのもの。base（実測最悪
+ * 1.34e-5）へ流用できない理由でもある。
+ *
+ * rtol が 0 な理由は base と同じ（rtol 1e-6 の寄与は \|ref\| 上端 6.584 でも 6.6e-6 で、
+ * atol の 1/15）。
  */
-const REAL_SO400M_TOLERANCE: Tolerance = { atol: 2.5e-2, rtol: 0 };
-
-/**
- * 実画像ケースの**入力側**（TS 前処理 対 Python 前処理）の許容誤差。
- *
- * uint8 の 1 LSB は正規化後 `1 / 127.5 = 7.8431e-3` で、f32 へ写す丸めが乗って実測
- * 7.8432e-3（8 ケースとも同値 = ずれは常にちょうど 1 LSB）。
- * `packages/models/tests/image_preprocess_test.ts` の `PIXEL_ATOL` と同じ導出だが、あちらは
- * 22×33 級の合成画像・こちらは 1024×1024 の実画像で、**縮尺も画の性質も違う**ので値は
- * 共有せずここでも実測している。
- *
- * この突合を出力側と分けて持つのは、落ちたときに前処理と推論のどちらが動いたのかを
- * 分けるため（出力側だけだと、1 LSB の増幅と実装バグが同じ「大きい maxAbs」に見える）。
- */
-const REAL_PIXEL_TOLERANCE: Tolerance = { atol: 7.85e-3, rtol: 0 };
+const REAL_SO400M_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 0 };
 
 /** 系列（= モデル）1 本の宣言。系列名は exporter の `--model-dir` のディレクトリ名。 */
 type Series = {
   readonly name: string;
   readonly tolerance: Tolerance;
-  /** 実画像ケースの許容誤差（合成画像とは 3 桁違う — {@link REAL_BASE_TOLERANCE}）。 */
+  /** 実画像ケースの許容誤差（合成画像とは独立に実測から導く — {@link REAL_BASE_TOLERANCE}）。 */
   readonly realTolerance: Tolerance;
 };
 
@@ -217,7 +201,6 @@ const SERIES: readonly Series[] = [
 ];
 
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
-const DEMO_DIR = new URL("../../../outputs/demo/", import.meta.url);
 const MODEL_FILE = "model.safetensors";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
@@ -237,9 +220,6 @@ const realGenerateCommand = (series: Series): string =>
   "cd tools/exporter && uv run --group siglip2-preprocess python export_siglip2.py" +
   ` --real-images --model-dir ../../inputs/siglip2/${series.name}`;
 
-/** 実画像そのものを焼き直すコマンド（プロンプト / seed の正本は台本側）。 */
-const IMAGE_COMMAND = "deno task demo:eval-images --source <Anima 配布形のパス>";
-
 /**
  * 生成されているはずの**合成画像**ケース。**列挙結果ではなくここで固定する** — 列挙だけに
  * 頼ると生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
@@ -248,16 +228,12 @@ const IMAGE_COMMAND = "deno task demo:eval-images --source <Anima 配布形の�
 const EXPECTED_CASES = ["checker", "noise", "ramp", "ramp-dim"] as const;
 
 /**
- * **実画像**ケース（`--real-images` を付けた emit だけが持つ）。ケース名とファイル名の正本は
- * `export_siglip2.py` の `REAL_CASES`、画像そのもの（プロンプト / seed / 解像度）の正本は
- * `examples/anima/eval-images.ts`。
+ * **実画像**ケース（`--real-images` を付けた emit だけが持つ）。正本は `export_siglip2.py` の
+ * `REAL_CASES`。ここが要るのは golden のケース名だけで、元になった PNG との対応は
+ * `packages/models/tests/image_preprocess_real_test.ts` が持つ（このテストは PNG を読まない —
+ * ファイル冒頭の「2 つの門の合成」）。
  */
-const REAL_CASES = [
-  { name: "photo-portrait", file: "anima-default-1024x1024-defaultstep-seed42.png" },
-  { name: "photo-landscape", file: "anima-default-1024x1024-defaultstep-seed43.png" },
-  { name: "photo-corridor", file: "anima-default-1024x1024-defaultstep-seed44.png" },
-  { name: "photo-street", file: "anima-default-1024x1024-defaultstep-seed45.png" },
-] as const;
+const REAL_CASES = ["photo-portrait", "photo-landscape", "photo-corridor", "photo-street"] as const;
 
 /**
  * 実画像の判別で見る 2 群（人物が写っている 2 枚 / 写っていない 2 枚）。正本は
@@ -271,19 +247,6 @@ const REAL_CASES = [
  */
 const REAL_PERSON_CASES = ["photo-portrait", "photo-street"] as const;
 const REAL_SCENE_CASES = ["photo-landscape", "photo-corridor"] as const;
-
-/** 実画像 golden の `__metadata__` の欄（正本は `export_siglip2.py` の同名定数）。 */
-const SOURCE_IMAGE_KEY = "source_image";
-const SOURCE_SHA256_KEY = "source_sha256";
-
-/**
- * 前処理の正規化定数。正本は重みと同じ場所の `preprocessor_config.json` で、2 モデルとも
- * mean = std = 0.5（`siglip2_preprocess.py` の `check_processor_shape` が emit のたびに実測し、
- * 外れていたら golden が 1 バイトも書かれない）。解像度は系列ごとに違うので**グラフ入力の
- * 宣言から取る**（ここに 224 / 384 を書くともう片方で黙って別の画を作る）。
- */
-const IMAGE_MEAN: readonly [number, number, number] = [0.5, 0.5, 0.5];
-const IMAGE_STD: readonly [number, number, number] = [0.5, 0.5, 0.5];
 
 /**
  * 資産ディレクトリの列挙。存在しない場合だけ空に縮退する。
@@ -337,58 +300,17 @@ const cosine = (first: Float32Array, second: Float32Array): number => {
   return dot / Math.sqrt(firstNorm * secondNorm);
 };
 
-const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
-  Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-
-/** 実画像 1 枚のバイト列（decode 前 — sha256 の突合にも使うので生のまま持つ）。 */
-const readImage = (file: string): Promise<Uint8Array<ArrayBuffer>> =>
-  Deno.readFile(new URL(file, DEMO_DIR));
-
-/**
- * 実画像が 4 枚とも揃っているか（`outputs/demo/` は `rm -rf` で消せる席）。
- * MUST: NotFound 以外は伝播させる（`listDir` と同じ理由 — 権限エラーを「無い」と読み替えない）。
- */
-const IMAGES_PRESENT: boolean = REAL_CASES.every((entry) => {
-  try {
-    return Deno.statSync(new URL(entry.file, DEMO_DIR)).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-});
-
-/** グラフ入力の静的次元（記号次元は無い — `export_siglip2.py` の `symbol_names=()`）。 */
-const staticDim = (parsed: KarumeModel, axis: number): number => {
-  const dim = parsed.graph.inputs[0].shape[axis];
-  assert(typeof dim === "number", `pixel_values の軸 ${axis} が記号次元 '${String(dim)}'`);
-  return dim;
-};
-
-/**
- * 実画像 1 枚を **TS 側の経路**で `pixel_values` にする（PNG decode → resize → normalize）。
- * 通すのは models パッケージの前処理層そのもの — この鎖こそがこの門の主張。
- */
-const preprocessImage = async (
-  png: Uint8Array<ArrayBuffer>,
-  file: string,
-  width: number,
-  height: number,
-): Promise<Float32Array<ArrayBuffer>> =>
-  normalizeToNchw(resizeRgb8(await decodePng(png, file), width, height), IMAGE_MEAN, IMAGE_STD);
-
 for (const series of SERIES) {
   const root = seriesRoot(series);
   /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
   const discovered = discoverCases(root);
-  const realNames = new Set<string>(REAL_CASES.map((entry) => entry.name));
+  const realNames = new Set<string>(REAL_CASES);
   const cases = discovered.filter((name) => !realNames.has(name));
   const realCases = discovered.filter((name) => realNames.has(name));
   /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
   const available = discovered.length > 0;
-  /** 実画像の群。golden と画像の**両方**が揃ってはじめて実走する。 */
-  const realAvailable = available && realCases.length > 0 && IMAGES_PRESENT;
+  /** 実画像の群（`--real-images` を付けずに emit した資産には無い）。 */
+  const realAvailable = available && realCases.length > 0;
 
   if (!available) {
     console.warn(
@@ -399,8 +321,7 @@ for (const series of SERIES) {
   } else if (!realAvailable) {
     console.warn(
       `[karume] 実画像ケース (${series.name}) を SKIP する（golden ${realCases.length}/` +
-        `${REAL_CASES.length} 本・画像 ${IMAGES_PRESENT ? "有" : "無"}）。` +
-        `画像の生成: ${IMAGE_COMMAND} / golden の生成: ${realGenerateCommand(series)}`,
+        `${REAL_CASES.length} 本）。生成: ${realGenerateCommand(series)}`,
     );
   }
 
@@ -422,10 +343,30 @@ for (const series of SERIES) {
     },
   });
 
-  for (const caseName of cases) {
+  /**
+   * 突合を回すケース。合成と実画像で**入力の作り方は同じ**（どちらも golden の
+   * `pixel_values`）で、違うのは踏む分布と、そこから独立に導いた tolerance だけ。
+   */
+  const goldenCases = [
+    ...cases.map((name) => ({
+      name,
+      label: "golden 突合",
+      tolerance: series.tolerance,
+      ignore: !available,
+    })),
+    ...realCases.map((name) => ({
+      name,
+      label: "実画像 golden 突合",
+      tolerance: series.realTolerance,
+      ignore: !realAvailable,
+    })),
+  ];
+
+  for (const entry of goldenCases) {
+    const caseName = entry.name;
     Deno.test({
-      name: `SigLIP2 golden 突合: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
-      ignore: !available || !GPU_AVAILABLE,
+      name: `SigLIP2 ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
+      ignore: entry.ignore || !GPU_AVAILABLE,
       fn: async () => {
         const [modelBytes, ioBytes] = await Promise.all([
           readBuffer(root, MODEL_FILE),
@@ -459,85 +400,10 @@ for (const series of SERIES) {
             const report = compareTensors(
               outputs[name],
               ioTensor(io, view, declared),
-              series.tolerance,
+              entry.tolerance,
             );
             assert(report.pass, `${where}: ${formatAllclose(report)}`);
           });
-        } finally {
-          await session.dispose();
-          gpu.destroy();
-        }
-      },
-    });
-  }
-
-  for (const real of REAL_CASES) {
-    Deno.test({
-      name: `SigLIP2 実画像 golden 突合: ${series.name} / ${real.name}` +
-        "（TS 前処理 + 実 GPU / Python 前処理 + torch CPU）",
-      ignore: !realAvailable || !GPU_AVAILABLE,
-      fn: async () => {
-        const [modelBytes, ioBytes, png] = await Promise.all([
-          readBuffer(root, MODEL_FILE),
-          readBuffer(root, `${IO_PREFIX}${real.name}${IO_SUFFIX}`),
-          readImage(real.file),
-        ]);
-        const parsed = openModel(modelBytes);
-        const io = parseSafetensors(ioBytes);
-
-        // ① golden を採った画像と、いま読んでいる画像が同一であること。**tolerance では
-        // 吸収されない差**（生成台本を回し直して golden を採り直していない）を、実行の前に
-        // 名指しで落とす。
-        assertEquals(io.metadata.get(SOURCE_IMAGE_KEY), real.file, "golden が指す元画像");
-        assertEquals(
-          io.metadata.get(SOURCE_SHA256_KEY),
-          await sha256Hex(png),
-          `${real.file} が golden を採った画像と違う（採り直す: ${realGenerateCommand(series)}）`,
-        );
-
-        const width = staticDim(parsed, 3);
-        const height = staticDim(parsed, 2);
-        const pixels = await preprocessImage(png, real.file, width, height);
-
-        // ② 前処理の突合（TS の f64 経路 対 torchvision の f32 経路）。出力側と分けて持つ理由は
-        // REAL_PIXEL_TOLERANCE の docstring。
-        const inputView = io.tensors.get(`input.${parsed.graph.inputs[0].name}`);
-        assert(inputView !== undefined, "golden に入力が無い");
-        const inputReport = compareTensors(
-          { dtype: "f32", data: pixels },
-          ioTensor(io, inputView, "f32"),
-          REAL_PIXEL_TOLERANCE,
-        );
-        assert(
-          inputReport.pass,
-          `${series.name} / ${real.name} pixel_values: ${formatAllclose(inputReport)}`,
-        );
-
-        // ③ TS 側で作った pixel_values で回した出力を、torch の期待値と突き合わせる。
-        const inputs: Record<string, Tensor> = {
-          [parsed.graph.inputs[0].name]: {
-            dtype: "f32",
-            shape: [1, 3, height, width],
-            data: pixels,
-          },
-        };
-        const gpu = await acquireGpu();
-        const session = await createSession(gpu, parsed);
-        try {
-          const outputs = await session.run(inputs);
-          const [name] = parsed.graph.outputs;
-          const view = io.tensors.get("output.0");
-          assert(view !== undefined, "output.0 が golden に無い");
-          const where = `${series.name} / ${real.name} output.0 ('${name}')`;
-          const declared = parsed.graph.values[name].dtype;
-          assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-          assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-          const report = compareTensors(
-            outputs[name],
-            ioTensor(io, view, declared),
-            series.realTolerance,
-          );
-          assert(report.pass, `${where}: ${formatAllclose(report)}`);
         } finally {
           await session.dispose();
           gpu.destroy();
@@ -556,33 +422,27 @@ for (const series of SERIES) {
       // なって落ちる。閾値は置かない（順序そのものが検査対象 — export_siglip2.py の
       // `_real_sanity` と同じ形で、あちらは torch 側に掛かっている）。
       //
-      // 入力は**実画像を TS 前処理で通したもの**（golden の入力ではない）— 判別まで含めて
-      // 「PNG を渡したら意味のある埋め込みが返る」ことの検査にする。
+      // 入力は golden に焼かれた `pixel_values`（= 突合ケースと同じもの）。TS 前処理を通した
+      // 入力での判別ではなくなったが、主張は落ちない — 前処理側の parity は
+      // `packages/models/tests/image_preprocess_real_test.ts` が入力差 1 LSB 級で縛っており、
+      // その幅では順序が反転しないことを実測してある（2026-08-14: 人物対と最悪の交差対の差は
+      // base 0.1196 / so400m 0.0747 なのに対し、入力を TS 前処理へ差し替えたときの各 cosine の
+      // 動きは最大 1.6e-3 —— 2 桁小さい）。
       const modelBytes = await readBuffer(root, MODEL_FILE);
       const parsed = openModel(modelBytes);
       const [outputName] = parsed.graph.outputs;
-      const width = staticDim(parsed, 3);
-      const height = staticDim(parsed, 2);
-      const inputName = parsed.graph.inputs[0].name;
 
       const gpu = await acquireGpu();
       const session = await createSession(gpu, parsed);
       const pooled = new Map<string, Float32Array>();
       try {
-        // 4 枚を 1 Session で回す（重みは 350MB〜1.7GB — 画像ごとに組み直す理由が無い）。
+        // 4 ケースを 1 Session で回す（重みは 350MB〜1.7GB — ケースごとに組み直す理由が無い）。
         for (const real of REAL_CASES) {
-          const pixels = await preprocessImage(
-            await readImage(real.file),
-            real.file,
-            width,
-            height,
-          );
-          const output = (await session.run({
-            [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
-          }))[outputName];
+          const io = parseSafetensors(await readBuffer(root, `${IO_PREFIX}${real}${IO_SUFFIX}`));
+          const output = (await session.run(goldenInputs(parsed, io)))[outputName];
           // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-          assert(output.dtype === "f32", `${real.name}: pooler_output の dtype が ${output.dtype}`);
-          pooled.set(real.name, output.data);
+          assert(output.dtype === "f32", `${real}: pooler_output の dtype が ${output.dtype}`);
+          pooled.set(real, output.data);
         }
       } finally {
         await session.dispose();
