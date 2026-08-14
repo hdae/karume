@@ -347,13 +347,13 @@ DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-e
 （B=1 × 記号 S × G4 の畳み込み × uncond をマスクで表現）で export してある。その帰結として
 次の 2 点は by-design の制約で、近似や無音のフォールバックはしない:
 
-- **S = 750（30s 発話）の中間 `scores[1,20,750,2269]` は 136MB で、WebGPU 既定の
-  `maxStorageBufferBindingSize`（128MiB = 134,217,728 B）を超える**。本機の実測上限は
-  2048MiB なので手元では通る（実 GPU golden の `dit-cond-max` が毎回踏む）が、**既定上限の
-  実装では S ≈ 742 で確保に失敗する**。SDPA を分解経路で通している（マスクが実行時の bool 入力
-  なので融合 attention の契約に載らない）ため、scores が実体化することが原因。配布
-  ポータビリティの課題として残す — 解の候補は ①融合 attention の実行時マスク対応
-  （ADR 0023 の将来枠。scores を実体化しない）②パイプライン層で S に上限を置く。どちらも別波。
+- **中間 `scores` の 128MiB 束縛上限は解消済み（2026-08-14・ADR
+  [0060](decisions/0060-row-block-attention.md) = 行ブロック実行）**: 分解 attention の
+  9 ノード窓を、granted limit から静的に決めた最小枚数の行ブロックで回す（ビット同一・
+  既定経路 — 上限に余裕のある機では 1 枚 = コストゼロ）。旧記載「既定上限の実装では
+  S ≈ 742 で確保に失敗する」は現行では発生しない（門 = 128MiB 強制 device + 合成グラフの
+  実走・`gpu_row_block_attention_test.ts`）。残る by-design: クエリ **1 行**ぶんの
+  スコア（`H·C·4` バイト）が上限を超える形は行ブロックでは分割しきれず fail loudly。
 - **CFG は `speaker_uncond_mode="mask"`（既定）と `cfg_guidance_mode="independent"`（既定）
   以外を表現しない**。uncond をマスクだけで表せるのは「state を 0 にした context KV の寄与が
   マスク越しに厳密 0」だからで、`"noise"`（speaker の uncond を乱数 state にする）はこの

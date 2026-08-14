@@ -64,8 +64,11 @@
   - H-1 = 通常 run の単一フェンス化（`e339cc0`）。**検収: irodori 壁 8.59 → 4.88s
     （×1.76・ほぼ GPU 律速へ転換）・EG bare 52.5 → 28.2ms（×1.86）**。H-3 は H-5 併合で
     解消・H-4 のみ残（タスク #7 同体）。**波③進行中: 契約 ADR =
-    [0058](../docs/decisions/0058-numerics-opt-in-contract.md) accepted（2026-08-14）→
-    次 = K-5（設計裁定中）→ K-2**。
+    [0058](../docs/decisions/0058-numerics-opt-in-contract.md) accepted → K-5 は 2 段構成
+    （ユーザー裁定「ビット同一で先にチェック」）。前段 K-5a = 行ブロック実行 **済**
+    （[ADR 0060](../docs/decisions/0060-row-block-attention.md)・ビット同一・既定経路 —
+    scores 束縛 128MiB 問題を解消・n=1 の機はコストゼロ・S=170 A/B 誤差内）→
+    次 = K-5b（online attention・opt-in 席・K-5a のシャーシに載せる）→ K-2**。
     **ビット同一門は「指標であって目的ではない」**（ユーザー方針
     同日 — 数値を変える最適化は opt-in 席・既定 = 参照経路で sha 門凍結。**非保証部分の
     品質は人間レビューで管理** — 数値が大幅悪化しても生成結果は崩壊しないことが多いため。
