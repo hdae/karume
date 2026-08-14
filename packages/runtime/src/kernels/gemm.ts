@@ -71,6 +71,7 @@ import {
   gemmTileM,
   gemmTileN,
 } from "./gemm-geometry.ts";
+import { assertU32Params } from "./params.ts";
 import {
   assertScoreStorageSupported,
   scoreArrayType,
@@ -297,11 +298,7 @@ export const gemmParams = (
   n: number,
   k: number,
 ): Uint32Array<ArrayBuffer> => {
-  for (const value of [m, n, k]) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(`${op} params: m/n/k は非負整数（${m}, ${n}, ${k}）`);
-    }
-  }
+  assertU32Params(`${op} params`, { m, n, k });
   const params = new Uint32Array(4);
   params[0] = m;
   params[1] = n;

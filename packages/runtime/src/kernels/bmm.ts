@@ -13,6 +13,7 @@
 
 import { type BmmRowWindow, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export type { BmmRowWindow };
 
@@ -50,11 +51,7 @@ export const bmmRowWindowParams = (
   rowOffset: number,
   rowsFull: number,
 ): Uint32Array<ArrayBuffer> => {
-  for (const [name, value] of [["row_offset", rowOffset], ["rows_full", rowsFull]] as const) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(`bmm 行窓 params: ${name} は非負整数（${value}）`);
-    }
-  }
+  assertU32Params("bmm 行窓 params", { row_offset: rowOffset, rows_full: rowsFull });
   if (rowOffset + m > rowsFull) {
     throw new CodegenError(
       `bmm 行窓 params: 行 [${rowOffset}, ${rowOffset + m}) が全 M ${rowsFull} をはみ出す`,

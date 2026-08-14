@@ -20,6 +20,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const ROPE_WORKGROUP_SIZE = 256;
 
@@ -85,17 +86,14 @@ export const ropeParams = (
   sequence: number,
   headDim: number,
 ): Uint32Array<ArrayBuffer> => {
-  for (const [name, value] of Object.entries({ n, sequence, headDim })) {
-    if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
-      throw new CodegenError(`rope params: ${name} は u32 の非負整数（${value}）`);
-    }
-  }
+  assertU32Params("rope params", { n, sequence, headDim });
   if (sequence === 0) throw new CodegenError("rope params: sequence は 1 以上");
   if (headDim === 0 || headDim % 2 !== 0) {
     throw new CodegenError(`rope params: headDim は正の偶数（${headDim}）`);
   }
   const rowSize = sequence * headDim;
-  if (!Number.isSafeInteger(rowSize) || rowSize > 0xffff_ffff || n % rowSize !== 0) {
+  assertU32Params("rope params", { "sequence × headDim": rowSize });
+  if (n % rowSize !== 0) {
     throw new CodegenError(
       `rope params: n ${n} が sequence ${sequence} × headDim ${headDim} の整数行でない`,
     );

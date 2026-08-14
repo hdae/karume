@@ -31,6 +31,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,
@@ -97,13 +98,7 @@ export const embeddingParams = (
   hidden: number,
   vocab: number,
 ): Uint32Array<ArrayBuffer> => {
-  for (const value of [count, hidden, vocab]) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(
-        `embedding params: 要素数 / hidden / vocab は非負整数（${count}, ${hidden}, ${vocab}）`,
-      );
-    }
-  }
+  assertU32Params("embedding params", { count, hidden, vocab });
   if (hidden === 0 && count !== 0) {
     // 0 除算になる組み合わせ（要素数 > 0 なのに hidden が無い）は shape 契約上ありえない。
     throw new CodegenError(`embedding params: hidden 0 で要素数 ${count} の組み合わせは無い`);

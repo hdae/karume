@@ -22,6 +22,7 @@
 
 import { SIGMOID_STABLE_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 /** 置換元 mul の入力順（有限値では可換だが、NaN payload はバックエンド差がありうる）。 */
 export type SiluMulOrder = "x-sigmoid" | "sigmoid-x";
@@ -93,8 +94,6 @@ fn main(
 
 /** 16-byte uniform params。n は f32 input / output の要素数。 */
 export const siluParams = (n: number): Uint32Array<ArrayBuffer> => {
-  if (!Number.isSafeInteger(n) || n < 0 || n > 0xffff_ffff) {
-    throw new CodegenError(`silu params: n は u32 の非負整数（${n}）`);
-  }
+  assertU32Params("silu params", { n });
   return new Uint32Array([n, 0, 0, 0]);
 };

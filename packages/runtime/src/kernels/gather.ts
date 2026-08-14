@@ -28,6 +28,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const GATHER_WORKGROUP_SIZE = 256;
 
@@ -79,13 +80,7 @@ export const gatherParams = (
   cols: number,
   srcCols: number,
 ): Uint32Array<ArrayBuffer> => {
-  for (const value of [count, cols, srcCols]) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(
-        `gather params: 要素数 / 列数は非負整数（${count}, ${cols}, ${srcCols}）`,
-      );
-    }
-  }
+  assertU32Params("gather params", { count, cols, srcCols });
   if (cols === 0 && count !== 0) {
     // 0 除算になる組み合わせ（要素数 > 0 なのに列が無い）は shape 契約上ありえない。
     throw new CodegenError(`gather params: 列数 0 で要素数 ${count} の組み合わせは無い`);

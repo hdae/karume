@@ -13,6 +13,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const UPSAMPLE_2X_WORKGROUP_SIZE = 256;
 
@@ -58,22 +59,13 @@ fn main(
  * 次行と重なり、全要素数だけでは検出できない沈黙誤値になる。
  */
 export const upsample2xParams = (n: number, width: number): Uint32Array<ArrayBuffer> => {
-  for (const [name, value] of Object.entries({ n, width })) {
-    if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
-      throw new CodegenError(`upsample2x params: ${name} は u32 の非負整数（${value}）`);
-    }
-  }
+  assertU32Params("upsample2x params", { n, width });
   if (width === 0) throw new CodegenError("upsample2x params: width は 1 以上");
   if (n % width !== 0) {
     throw new CodegenError(`upsample2x params: n ${n} が width ${width} の整数行でない`);
   }
   const outWidth = width * 2;
   const outN = n * 4;
-  if (!Number.isSafeInteger(outWidth) || outWidth > 0xffff_ffff) {
-    throw new CodegenError(`upsample2x params: 2 * width ${width} が u32 を超える`);
-  }
-  if (!Number.isSafeInteger(outN) || outN > 0xffff_ffff) {
-    throw new CodegenError(`upsample2x params: 4 * n ${n} が u32 を超える`);
-  }
+  assertU32Params("upsample2x params", { "2 * width": outWidth, "4 * n": outN });
   return new Uint32Array([n, width, outWidth, 0]);
 };
