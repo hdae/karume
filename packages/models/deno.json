@@ -8,7 +8,8 @@
     "./birefnet": "./birefnet.ts",
     "./irodori": "./irodori.ts",
     "./sbv2": "./sbv2.ts",
-    "./siglip2": "./siglip2.ts"
+    "./siglip2": "./siglip2.ts",
+    "./vowel-detector": "./vowel-detector.ts"
   },
   "imports": {
     "@karume/hub": "jsr:@karume/hub@^0.2.2",

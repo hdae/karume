@@ -69,6 +69,9 @@ from karume.dist import (
     SIGLIP2_OUTPUT_PATHS,
     SIGLIP2_ROLE,
     STAGING_SUFFIX,
+    VOWEL_DETECTOR_DEFAULT_MODEL,
+    VOWEL_DETECTOR_FRAME_LENGTHS,
+    VOWEL_DETECTOR_OUTPUT_PATHS,
     AnimaSources,
     Artifact,
     BirefnetSources,
@@ -77,6 +80,7 @@ from karume.dist import (
     ModelPlan,
     Sbv2Sources,
     Siglip2Sources,
+    VowelDetectorSources,
     WeightFiles,
     anima_plan,
     anima_sources,
@@ -110,6 +114,9 @@ from karume.dist import (
     siglip2_repo_name,
     siglip2_sources,
     verify_dist,
+    vowel_detector_plan,
+    vowel_detector_repo_name,
+    vowel_detector_series_name,
 )
 from karume.ir import IR_METADATA_KEY
 from karume.modelcard import BIREFNET_UPSTREAM, SIGLIP2_UPSTREAM
@@ -1018,12 +1025,20 @@ class TestCli:
         assert args.models == ["F1", "F2"]
 
     def test_it_knows_every_pipeline(self) -> None:
-        assert sorted(PIPELINES) == ["anima", "birefnet", "irodori", "sbv2", "siglip2"]
+        assert sorted(PIPELINES) == [
+            "anima",
+            "birefnet",
+            "irodori",
+            "sbv2",
+            "siglip2",
+            "vowel-detector",
+        ]
         assert PIPELINES["anima"].default_model == ANIMA_MODEL_NAME
         assert PIPELINES["sbv2"].default_model == SBV2_DEFAULT_MODEL
         assert PIPELINES["irodori"].default_model == IRODORI_DEFAULT_MODEL
         assert PIPELINES["siglip2"].default_model == SIGLIP2_DEFAULT_MODEL
         assert PIPELINES["birefnet"].default_model == BIREFNET_DEFAULT_MODEL
+        assert PIPELINES["vowel-detector"].default_model == VOWEL_DETECTOR_DEFAULT_MODEL
 
     def test_the_default_output_directory_follows_the_single_model(self) -> None:
         assert default_out_dir(PIPELINES["anima"], ["anima-turbo"]).name == "karume-anima-turbo"
@@ -3250,4 +3265,389 @@ class TestBirefnetCli:
 
         out_dir = tmp_path / "models" / "karume-lucida"
         expected = _in_subtree("lucida", BIREFNET_OUTPUT_PATHS.values())
+        assert sorted(verify_dist(out_dir)) == sorted(expected)
+
+
+# ---- 母音検出（音声 → リップシンク用の母音系列）------------------------------
+#
+# 偽資産はバケット 4 本ぶんのグラフ + 上流 `feature_config.json`。長さバケットは **weights の
+# 役割軸**（`karume.dist` の母音検出節）なので、ここが見るのは「4 本とも並ぶ」「役割名の綴りと
+# 焼かれた長さが一致する」「`pipelineConfig` の 4 欄が上流 config とグラフから導かれる」の 3 つ。
+
+#: `pipelineConfig` の欄名（TS 側 `packages/models/src/vowel-detector/config.ts` の `ROOT_KEYS`
+#: の写し）。**ロード側は未知キーも欠落も parse 時に落とす**ので、焼く側とロード側の欄名は
+#: 完全一致が要る。
+_VOWEL_DETECTOR_CONFIG_KEYS = ("sampleRate", "featureDim", "classes", "frameLengths")
+
+_VOWEL_DETECTOR_N_MELS = 80
+_VOWEL_DETECTOR_N_FFT = 512
+_VOWEL_DETECTOR_CLASSES = ("a", "i", "u", "e", "o", "N", "pau", "cons")
+
+
+def _vowel_detector_feature_config(**patch: Any) -> dict[str, Any]:
+    """上流 `assets/feature_config.json` の骨格（門が読む欄だけ・mel 基底は一様な三角窓もどき）。"""
+    bins = _VOWEL_DETECTOR_N_FFT // 2 + 1
+    basis = np.zeros((_VOWEL_DETECTOR_N_MELS, bins), dtype=np.float32)
+    # 行ごとに 1 本だけ立てる（空の mel チャネルの門を通す最小の形）。
+    for row in range(_VOWEL_DETECTOR_N_MELS):
+        basis[row, row + 1] = 1.0
+    return {
+        "sample_rate": 16000,
+        "n_fft": _VOWEL_DETECTOR_N_FFT,
+        "n_mels": _VOWEL_DETECTOR_N_MELS,
+        "feature_dim": _VOWEL_DETECTOR_N_MELS + 3,
+        "classes": list(_VOWEL_DETECTOR_CLASSES),
+        "mel_basis": basis.tolist(),
+        **patch,
+    }
+
+
+def _vowel_detector_graph(
+    length: int,
+    *,
+    feature_dim: int = _VOWEL_DETECTOR_N_MELS + 3,
+    name: str = "features",
+    outputs: int = 1,
+    out_shape: Sequence[Any] | None = None,
+    symbols: Sequence[str] = (),
+) -> str:
+    """門が読む最小の IR メタデータ（入力 1 本・出力の宣言・記号次元）。"""
+    names = [f"out_{index}" for index in range(outputs)]
+    logits = (
+        list(out_shape) if out_shape is not None else [1, length // 2, len(_VOWEL_DETECTOR_CLASSES)]
+    )
+    return json.dumps(
+        {
+            "inputs": [{"name": name, "shape": [1, length, feature_dim]}],
+            "outputs": names,
+            "values": {output: {"dtype": "f32", "shape": logits} for output in names},
+            "symbols": list(symbols),
+        }
+    )
+
+
+def _build_vowel_detector_sources(
+    root: Path,
+    *,
+    model: str = VOWEL_DETECTOR_DEFAULT_MODEL,
+    graphs: Mapping[int, str] | None = None,
+    feature_config: Mapping[str, Any] | None = None,
+    omit_feature_config: bool = False,
+    dtype: str = "F32",
+) -> VowelDetectorSources:
+    """系列 4 本と上流素材を偽資産で再現する（配布しない `io.*` の混入込み）。
+
+    並びは `karume.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
+    テストが root を差し替えるだけで同じ木を指せる形。
+    """
+    sources = VowelDetectorSources(
+        series_dir=root / "outputs" / "series",
+        model=root / "inputs" / "vowel-detector",
+        model_name=model,
+    )
+    for length in VOWEL_DETECTOR_FRAME_LENGTHS:
+        graph = (graphs or {}).get(length) or _vowel_detector_graph(length)
+        _write(
+            sources.series(length) / "model.safetensors",
+            _fake_safetensors(
+                dtype, f"vowel-detector-t{length}".encode(), {IR_METADATA_KEY: graph}
+            ),
+        )
+        # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
+        _write(sources.series(length) / "io.silence.safetensors", b"io-fixture")
+    if not omit_feature_config:
+        raw = feature_config if feature_config is not None else _vowel_detector_feature_config()
+        _write(sources.model / "feature_config.json", json.dumps(raw).encode("utf-8"))
+    return sources
+
+
+@pytest.fixture
+def vowel_detector_assembled(tmp_path: Path) -> tuple[Path, dict]:
+    sources = _build_vowel_detector_sources(tmp_path)
+    out_dir = tmp_path / "models" / vowel_detector_repo_name(VOWEL_DETECTOR_DEFAULT_MODEL)
+    manifest = assemble_family(
+        [vowel_detector_plan(sources, VOWEL_DETECTOR_DEFAULT_MODEL)],
+        out_dir,
+        VOWEL_DETECTOR_DEFAULT_MODEL,
+    )
+    return out_dir, manifest
+
+
+def _vowel_detector_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+    return manifest["models"][VOWEL_DETECTOR_DEFAULT_MODEL]
+
+
+class TestVowelDetectorLayout:
+    def test_it_places_every_bucket_under_the_model_subtree(self, vowel_detector_assembled) -> None:
+        out_dir, _ = vowel_detector_assembled
+        expected = _in_subtree(VOWEL_DETECTOR_DEFAULT_MODEL, VOWEL_DETECTOR_OUTPUT_PATHS.values())
+        assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
+
+    def test_it_never_carries_the_io_fixtures(self, vowel_detector_assembled) -> None:
+        out_dir, _ = vowel_detector_assembled
+        assert list(out_dir.rglob("io.*")) == []
+
+    def test_the_buckets_are_the_weights_axis_and_the_mel_basis_is_an_asset(
+        self, vowel_detector_assembled
+    ) -> None:
+        """長さは役割軸（quant / model 軸ではない）— 選んだ quant が 4 本とも連れてくる。"""
+        _, manifest = vowel_detector_assembled
+        model = _vowel_detector_model(manifest)
+        assert model["pipeline"] == "vowel-detector/1"
+        assert list(model["weights"]) == [
+            f"crnn_t{length}" for length in VOWEL_DETECTOR_FRAME_LENGTHS
+        ]
+        assert list(model["assets"]) == ["mel_basis"]
+        assert list(model["quants"]) == ["f32"]
+        assert model["defaultQuant"] == "f32"
+        assert model["quants"]["f32"]["weights"] == {
+            f"crnn_t{length}": "f32" for length in VOWEL_DETECTOR_FRAME_LENGTHS
+        }
+
+    def test_it_writes_the_mel_basis_as_one_f32_tensor(self, vowel_detector_assembled) -> None:
+        """特徴抽出はグラフの外なので、mel 基底は資産として配らないと再現できない。"""
+        out_dir, manifest = vowel_detector_assembled
+        ref = _vowel_detector_model(manifest)["assets"]["mel_basis"]
+        tensors = load_file(str(out_dir / ref["path"]))
+        assert list(tensors) == ["mel_basis"]
+        basis = tensors["mel_basis"]
+        assert basis.dtype == np.float32
+        assert basis.shape == (_VOWEL_DETECTOR_N_MELS, _VOWEL_DETECTOR_N_FFT // 2 + 1)
+
+    def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
+        sources = _build_vowel_detector_sources(tmp_path)
+        out_dir = tmp_path / "models" / vowel_detector_repo_name(VOWEL_DETECTOR_DEFAULT_MODEL)
+        first = assemble_family(
+            [vowel_detector_plan(sources)], out_dir, VOWEL_DETECTOR_DEFAULT_MODEL
+        )
+        assert first == assemble_family(
+            [vowel_detector_plan(sources)], out_dir, VOWEL_DETECTOR_DEFAULT_MODEL
+        )
+        assert verify_dist(out_dir)
+
+    def test_it_refuses_a_compressed_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
+        """格納形は系列ディレクトリ名でなくヘッダが正（`--dtype` 付け忘れの逆向き）。"""
+        sources = _build_vowel_detector_sources(tmp_path, dtype="F16")
+        with pytest.raises(DistError, match="F32 が無い"):
+            vowel_detector_plan(sources)
+
+
+class TestVowelDetectorPipelineConfig:
+    """`pipelineConfig` はロード側（`src/vowel-detector/config.ts`）のスキーマと欄名まで一致。"""
+
+    def test_it_declares_exactly_the_fields_the_loader_accepts(
+        self, vowel_detector_assembled
+    ) -> None:
+        _, manifest = vowel_detector_assembled
+        assert (
+            tuple(_vowel_detector_model(manifest)["pipelineConfig"]) == _VOWEL_DETECTOR_CONFIG_KEYS
+        )
+
+    def test_it_takes_the_feature_contract_from_the_upstream_config(
+        self, vowel_detector_assembled
+    ) -> None:
+        _, manifest = vowel_detector_assembled
+        config = _vowel_detector_model(manifest)["pipelineConfig"]
+        assert config["sampleRate"] == 16000
+        assert config["featureDim"] == _VOWEL_DETECTOR_N_MELS + 3
+        assert config["classes"] == list(_VOWEL_DETECTOR_CLASSES)
+
+    def test_it_derives_the_buckets_from_the_exported_graphs(
+        self, vowel_detector_assembled
+    ) -> None:
+        """バケットの出どころは焼かれたグラフの入力宣言（写経しない）。"""
+        _, manifest = vowel_detector_assembled
+        config = _vowel_detector_model(manifest)["pipelineConfig"]
+        assert config["frameLengths"] == list(VOWEL_DETECTOR_FRAME_LENGTHS)
+
+    def test_it_refuses_a_feature_dim_that_is_not_mel_plus_dsp(self, tmp_path: Path) -> None:
+        """内訳が上流と食い違う config は、グラフと形が合っていても受理しない。"""
+        sources = _build_vowel_detector_sources(
+            tmp_path, feature_config=_vowel_detector_feature_config(feature_dim=90)
+        )
+        with pytest.raises(DistError, match="特徴の内訳が上流と食い違っている"):
+            vowel_detector_plan(sources)
+
+    def test_it_needs_the_upstream_feature_config(self, tmp_path: Path) -> None:
+        sources = _build_vowel_detector_sources(tmp_path, omit_feature_config=True)
+        with pytest.raises(DistError, match="組み立ての入力が無い"):
+            vowel_detector_plan(sources)
+
+
+class TestVowelDetectorMelBasis:
+    """mel 基底は数値経路の一部そのもの — 形も中身もここでしか検査されない。"""
+
+    def test_it_refuses_a_basis_shaped_for_another_n_fft(self, tmp_path: Path) -> None:
+        config = _vowel_detector_feature_config()
+        config["mel_basis"] = [row[:-1] for row in config["mel_basis"]]
+        sources = _build_vowel_detector_sources(tmp_path, feature_config=config)
+        with pytest.raises(DistError, match="n_mels / n_fft から組んだ期待"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_an_empty_mel_channel(self, tmp_path: Path) -> None:
+        """帯域外へ落ちた三角窓は、その 1 列を常に log の下駄へ張り付かせる（沈黙劣化）。"""
+        config = _vowel_detector_feature_config()
+        config["mel_basis"][7] = [0.0] * len(config["mel_basis"][7])
+        sources = _build_vowel_detector_sources(tmp_path, feature_config=config)
+        with pytest.raises(DistError, match="空の mel チャネル"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_a_non_finite_basis(self, tmp_path: Path) -> None:
+        config = _vowel_detector_feature_config()
+        config["mel_basis"][3][5] = float("nan")
+        sources = _build_vowel_detector_sources(tmp_path, feature_config=config)
+        with pytest.raises(DistError, match="有限でない要素"):
+            vowel_detector_plan(sources)
+
+
+class TestVowelDetectorGraphGate:
+    """組み立て門 — ずれても配布形としては成立してしまう組み合わせを、配置の前に落とす。"""
+
+    def test_it_refuses_a_bucket_baked_for_another_length(self, tmp_path: Path) -> None:
+        """長さ違いのグラフは名前も階数も同じ = 席を取り違えても manifest は成立する。"""
+        sources = _build_vowel_detector_sources(tmp_path, graphs={500: _vowel_detector_graph(1000)})
+        with pytest.raises(DistError, match="役割 'crnn_t500' の席には"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_a_graph_with_another_feature_dim(self, tmp_path: Path) -> None:
+        sources = _build_vowel_detector_sources(
+            tmp_path, graphs={250: _vowel_detector_graph(250, feature_dim=80)}
+        )
+        with pytest.raises(DistError, match="feature_dim"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_a_graph_whose_output_is_not_the_20ms_grid(self, tmp_path: Path) -> None:
+        """出力が 10ms 格子のまま焼かれていると、`.lab` の時間が 2 倍に伸びる。"""
+        sources = _build_vowel_detector_sources(
+            tmp_path,
+            graphs={250: _vowel_detector_graph(250, out_shape=[1, 250, 8])},
+        )
+        with pytest.raises(DistError, match="20ms 格子"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_a_graph_with_a_second_output(self, tmp_path: Path) -> None:
+        sources = _build_vowel_detector_sources(
+            tmp_path, graphs={250: _vowel_detector_graph(250, outputs=2)}
+        )
+        with pytest.raises(DistError, match="ロジット 1 本だけ"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_a_graph_with_a_symbolic_time_axis(self, tmp_path: Path) -> None:
+        """GRU は時間方向へ完全展開されるので、記号次元を名乗るグラフは別物。"""
+        sources = _build_vowel_detector_sources(
+            tmp_path, graphs={250: _vowel_detector_graph(250, symbols=("T",))}
+        )
+        with pytest.raises(DistError, match="記号次元"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_a_renamed_input(self, tmp_path: Path) -> None:
+        """実行側は名前で束ねるので、綴りが変われば束ねられない。"""
+        sources = _build_vowel_detector_sources(
+            tmp_path, graphs={250: _vowel_detector_graph(250, name="mel")}
+        )
+        with pytest.raises(DistError, match="グラフ入力"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_a_missing_bucket(self, tmp_path: Path) -> None:
+        """1 本でも欠けたら配布しない（欠けたバケットの長さの音声が実行時に落ちる）。"""
+        sources = _build_vowel_detector_sources(tmp_path)
+        (sources.series(1000) / "model.safetensors").unlink()
+        with pytest.raises(DistError, match="組み立ての入力が無い"):
+            vowel_detector_plan(sources)
+
+
+class TestVowelDetectorModelCard:
+    def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """偽資産だけで CLI を 1 周回す（上流素材の置き場も tmp へ寄せる）。"""
+        from karume import dist
+
+        sources = _build_vowel_detector_sources(tmp_path)
+        monkeypatch.setattr(dist, "INPUTS_ROOT", tmp_path / "inputs")
+        out_dir = tmp_path / "dist"
+        main(
+            [
+                "--pipeline",
+                "vowel-detector",
+                "--series",
+                str(sources.series_dir),
+                "--out",
+                str(out_dir),
+            ]
+        )
+        return out_dir
+
+    def test_it_describes_the_lip_sync_distribution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert "pipeline_tag: audio-classification" in card
+        assert "license: mit" in card
+        # 格納形を変えない配布形は 4 値のどれでもない（Hub の推論に任せる）。
+        assert "base_model_relation" not in card
+        # バケットと上限は利用者が最初に確かめたい制約そのもの。数は manifest から降りてくる。
+        assert f"**{len(VOWEL_DETECTOR_FRAME_LENGTHS)} length buckets**" in card
+        assert "longer than 20.0 s is rejected rather than silently truncated" in card
+        assert "250 (2.5 s) / 500 (5.0 s) / 1000 (10.0 s) / 2000 (20.0 s)" in card
+
+    def test_it_carries_the_upstream_training_attributions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """上流 NOTICE.txt が「配布するなら帰属を残してほしい」と明記している分。"""
+        card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        for source in (
+            "reazon-research/japanese-hubert-base-k2",
+            "ROHAN4600",
+            "ITA corpus",
+            "Common Voice ja",
+            "Style-Bert-VITS2",
+            "AivisHub",
+            "ACML 1.0",
+            "JSUT basic5000",
+        ):
+            assert source in card, source
+        # 教師モデルと合成エンジンは**同梱していない**ことまで書く（AGPL-3.0 の誤解を防ぐ）。
+        assert "the teacher is **not** part of these weights" in card
+        assert "not distributed with, and not part of, these weights" in card
+
+    def test_the_card_comes_from_a_verified_distribution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert verify_dist(self._run(tmp_path, monkeypatch))
+
+
+class TestVowelDetectorCli:
+    def test_the_repository_name_does_not_carry_the_checkpoint_generation(self) -> None:
+        """世代は manifest のキーが綴る事実で、世代が上がるたびにリポが増える形にしない。"""
+        assert (
+            default_out_dir(PIPELINES["vowel-detector"], [VOWEL_DETECTOR_DEFAULT_MODEL]).name
+            == "karume-vowel-detector"
+        )
+
+    def test_one_attribution_profile_needs_no_choice(self) -> None:
+        profiles = PIPELINES["vowel-detector"].card_profiles
+        assert len(profiles) == 1
+        assert resolve_card_renderer(PIPELINES["vowel-detector"], None) is next(
+            iter(profiles.values())
+        )
+
+    def test_the_series_name_follows_the_exporter(self) -> None:
+        """系列名は `export_vowel_detector.default_out_dir` と同じ式（表を 2 つ持たない）。"""
+        assert (
+            vowel_detector_series_name(VOWEL_DETECTOR_DEFAULT_MODEL, 500)
+            == "vowel-detector-crnn-epoch3-t500"
+        )
+
+    def test_it_assembles_into_the_pipeline_default_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from karume import dist
+
+        sources = _build_vowel_detector_sources(tmp_path)
+        monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
+        monkeypatch.setattr(dist, "INPUTS_ROOT", tmp_path / "inputs")
+
+        main(["--pipeline", "vowel-detector", "--series", str(sources.series_dir)])
+
+        out_dir = tmp_path / "models" / "karume-vowel-detector"
+        expected = _in_subtree(VOWEL_DETECTOR_DEFAULT_MODEL, VOWEL_DETECTOR_OUTPUT_PATHS.values())
         assert sorted(verify_dist(out_dir)) == sorted(expected)

@@ -25,17 +25,18 @@ everything after the subcommand name is passed straight to the body (`karume <su
 prints the usage of the body's own parser). This shape keeps a copy of the exclusivity rules
 (`--verify` × `--target` etc.) out of the CLI; dispatch is a lazy import.
 
-| Subcommand                     | Wrapped body                                                                | Former invocation                 |
-| ------------------------------ | --------------------------------------------------------------------------- | --------------------------------- |
-| `karume export`                | script `export_anima.py` (the 4 emit targets of ADR 0016)                   | `python export_anima.py`          |
-| `karume export-sbv2`           | script `export_sbv2.py` (the 5 emit targets of ADR 0013)                    | `python export_sbv2.py`           |
-| `karume export-embeddinggemma` | script `export_embeddinggemma.py` (the sentence-embedding series)           | `python export_embeddinggemma.py` |
-| `karume export-irodori`        | script `export_irodori.py` (the 6 text-side graphs of the TTS chain)        | `python export_irodori.py`        |
-| `karume export-dacvae`         | script `export_dacvae.py` (the 2 DACVAE codec graphs)                       | `python export_dacvae.py`         |
-| `karume export-deberta`        | script `export_deberta.py` (the real-weight DeBERTa-v2 series)              | `python export_deberta.py`        |
-| `karume export-siglip2`        | script `export_siglip2.py` (the SigLIP2 vision tower series)                | `python export_siglip2.py`        |
-| `karume dist`                  | `karume.dist` (assembles the distribution form; arguments fully compatible) | `python -m karume.dist`           |
-| `karume verify`                | `karume.verify` (validates the distribution form against every IR v1 rule)  | (new)                             |
+| Subcommand                     | Wrapped body                                                                      | Former invocation                 |
+| ------------------------------ | --------------------------------------------------------------------------------- | --------------------------------- |
+| `karume export`                | script `export_anima.py` (the 4 emit targets of ADR 0016)                         | `python export_anima.py`          |
+| `karume export-sbv2`           | script `export_sbv2.py` (the 5 emit targets of ADR 0013)                          | `python export_sbv2.py`           |
+| `karume export-embeddinggemma` | script `export_embeddinggemma.py` (the sentence-embedding series)                 | `python export_embeddinggemma.py` |
+| `karume export-irodori`        | script `export_irodori.py` (the 6 text-side graphs of the TTS chain)              | `python export_irodori.py`        |
+| `karume export-dacvae`         | script `export_dacvae.py` (the 2 DACVAE codec graphs)                             | `python export_dacvae.py`         |
+| `karume export-deberta`        | script `export_deberta.py` (the real-weight DeBERTa-v2 series)                    | `python export_deberta.py`        |
+| `karume export-siglip2`        | script `export_siglip2.py` (the SigLIP2 vision tower series)                      | `python export_siglip2.py`        |
+| `karume export-vowel-detector` | script `export_vowel_detector.py` (the vowel-detector CRNN, one graph per length) | `python export_vowel_detector.py` |
+| `karume dist`                  | `karume.dist` (assembles the distribution form; arguments fully compatible)       | `python -m karume.dist`           |
+| `karume verify`                | `karume.verify` (validates the distribution form against every IR v1 rule)        | (new)                             |
 
 Which script runs is spelled in the **subcommand name**, never in a flag: `karume export --pipeline
 sbv2` would mean the CLI reads one argument of its own, and the no-copy rule above does not survive
@@ -1644,3 +1645,105 @@ Order caveats measured in practice: step 2 reads step 5's real latent for the sp
 from scratch runs 2 once more after 5 (2 → 3 → 4 → 5 → 2 → 6 → 7). Incremental regeneration of a
 single script is safe as long as its inputs above exist. Design records: ADR 0044 / 0046 / 0047
 (graphs), 0048 (host port), 0049 (codec integration).
+
+## Vowel-detector CRNN export (length-bucketed)
+
+A small CRNN that turns 10 ms speech features into 8-class lip-sync logits: two Conv1d layers
+(the first with stride 2, which halves the time axis), a 2-layer bidirectional GRU with hidden
+size 128, and a linear head — 664,744 parameters in total. Feature extraction (80 log-mel bins
+plus 3 DSP dimensions) and post-processing (log-softmax, penalised Viterbi, short-segment merge,
+`.lab`) both stay on the host; only the network is a graph.
+
+```sh
+# one-time input: inputs/vowel-detector/crnn_epoch3.pt (upstream training checkpoint)
+uv run karume export-vowel-detector --length 200            # → outputs/series/vowel-detector-crnn-epoch3-t200/
+uv run karume export-vowel-detector --length 200 --verify   # decomposed graph vs eager (bit-exact)
+```
+
+No dependency group is needed — `torch` is a base dependency, and the 20-line model definition is
+**transcribed verbatim** into the script instead of importing the upstream `vowel_detector`
+package (whose import chain pulls in pyopenjtalk and librosa for G2P and feature extraction, none
+of which the export touches). `load_state_dict(strict=True)` is what keeps the transcription
+honest; `tests/test_export_vowel_detector.py` pins the 22 parameter names and shapes so a drifting
+transcription fails without the real weights present.
+
+### The length is baked into the graph
+
+`aten.gru.input` survives `torch.export` as a single node, but `run_decompositions` unrolls it
+**along time**, which specialises the graph on T — asking for a dynamic `Dim("T")` fails with
+`Specializations unexpectedly required (T)`. So `--length` (T10, the number of 10 ms input frames)
+names one graph, and the series directory carries it. The unrolled graph uses 38 IR nodes per
+input frame and no op outside the existing vocabulary.
+
+| `--length` (T10) | audio  | IR nodes | initializers | `model.safetensors` | graph JSON | weights | export |
+| ---------------- | ------ | -------- | ------------ | ------------------- | ---------- | ------- | ------ |
+| 200              | 2.0 s  | 7,620    | 23           | 3,892,256 B         | 26.7%      | 68.3%   | 8.1 s  |
+| 500              | 5.0 s  | 19,020   | 23           | 5,750,224 B         | 45.4%      | 46.3%   | 20.0 s |
+| 1000             | 10.0 s | 38,020   | 23           | 8,875,208 B         | 59.2%      | 30.0%   | 40.2 s |
+
+(Measured 2026-08-13, torch 2.13.0+cpu. The 23 initializers are the 22 checkpoint tensors plus one
+folded constant — the zero initial hidden state. The weight bytes are the same 2,658,976 B in every
+row; graph JSON grows by ~5.27 KB per input frame, i.e. ~138 B per IR node, and export time by
+~40 ms per input frame.) **The graph JSON overtakes the weights at T10 ≈ 508**, so which term
+dominates the download depends on the bucket: below ~5 s of audio the weights still do. Bucketing
+multiplies the whole container, not just the JSON — the weights sit inside the same file as the
+graph metadata, so N buckets cost N × (weights + JSON).
+
+**Right zero-padding a short utterance into a longer bucket does not work.** The backward GRU
+carries state home from the padding: padding a true length of 137 frames into a 500-frame graph
+measures a max abs diff of 5.91 and an argmax agreement of 0.971, with the error concentrated at
+the tail (0.138 at the head, 5.915 at the end); the `voiced` golden case padded from T10 = 138 to
+500 behaves the same way (5.50 max, 0.59 at the head, 5.50 at the end). A unidirectional model
+would only see the conv window edge (5.1e-03). Filling a bucket therefore needs real audio, or a
+time-recurrent op that makes the graph O(1) in T — the latter is a separate decision. The
+distribution form ships padding anyway, with the trade-off measured and written down; see the next
+section.
+
+### Gates that run on every emit
+
+- **Weight conversion**: every one of the 22 checkpoint tensors is read back out of the emitted
+  container with an independent reader and compared **byte for byte** (`assert_checkpoint_bytes`);
+  any initializer that is neither a checkpoint tensor nor a folded `const.` constant fails loudly,
+  so a weight cannot come back under another name.
+- **Sanity** (orderings only, no thresholds): the silence-like case has the highest mean P(pau)
+  of the four, and the voiced-like case the highest mean vowel mass — plus all four outputs must
+  differ from one another.
+- **`--verify`**: the decomposed graph is compared against eager on all four cases and must be
+  **bit-exact** (measured 0.0 at T10 = 8 / 108 / 200). There is no patch layer here, so the
+  decomposition itself is what the equivalence claim is about; if torch's decomposition table
+  changes, the graph silently becomes a different numeric path and this is where it shows.
+
+### Distribution form (`karume dist --pipeline vowel-detector`)
+
+```sh
+uv run karume export-vowel-detector --length 250    # repeat for 500 / 1000 / 2000
+cp <upstream>/assets/feature_config.json ../../inputs/vowel-detector/
+uv run karume dist --pipeline vowel-detector        # → models/karume-vowel-detector/
+```
+
+The repository ships **four length buckets** (250 / 500 / 1000 / 2000 frames = 2.5 / 5 / 10 / 20 s,
+33.9 MB in total) plus the mel filterbank as an `assets` entry, because feature extraction happens
+off-graph and cannot be reproduced without the exact 80 × 257 matrix the model was trained on.
+
+The buckets live on the **weights axis** of the manifest (one role each: `crnn_t250` …), not on the
+`quants` or `models` axis. Both of those are chosen once at construction time, whereas the bucket is
+chosen per call from the length of the clip — so every bucket has to be on disk, which is exactly
+what `resolveFiles` gives for the weights of the selected quant. The dtype axis stays orthogonal
+(each role carries a single `f32` label).
+
+The pipeline right zero-pads into the chosen bucket and drops the padding again before
+post-processing. That perturbs the logits, and the choice of grid is what the measurements settle:
+across four real utterances × ten padding amounts, the max abs diff over the _unpadded_ region is
+2.2–3.2 at **two** frames of padding and only 5.0–6.0 at 1024 — it saturates almost immediately and
+is neither monotone nor proportional in the padding. A finer grid therefore buys no accuracy and
+costs download size linearly (each bucket is a whole container, weights included), so the buckets
+are placed as "the fewest that cover the longest clip we accept". Anything longer than the largest
+bucket is rejected rather than truncated. Callers who need the numbers an exact-length graph would
+give can export one: that is what the real-weight E2E
+(`packages/runtime/tests/e2e_vowel_detector_test.ts`) does.
+
+`pipelineConfig` comes from two independent places and they are checked against each other before
+anything is placed: the feature contract (`sampleRate` / `featureDim` / `classes`) is read verbatim
+from the upstream `feature_config.json`, while `frameLengths` is read from the **input declarations
+of the exported graphs** — a graph baked for another length placed in a bucket's seat fails there,
+since nothing later in the chain could tell the two apart.

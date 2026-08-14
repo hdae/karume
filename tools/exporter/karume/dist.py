@@ -75,6 +75,7 @@ from karume.modelcard import (
     render_model_card,
     render_sbv2_model_card,
     render_siglip2_model_card,
+    render_vowel_detector_model_card,
 )
 from karume.paths import DIST_ROOT, INPUTS_ROOT, OUTPUTS_ROOT, SERIES_ROOT
 
@@ -2632,7 +2633,404 @@ def birefnet_plan(sources: BirefnetSources, model: str = BIREFNET_DEFAULT_MODEL)
     )
 
 
-# ---- ⑧ pipeline 別ディスパッチと CLI -----------------------------------------
+# ---- ⑧ 母音検出（音声 → リップシンク用の母音系列）-----------------------------
+#
+# 配布するのは **長さバケットごとに 1 本の CRNN グラフ**（{@link VOWEL_DETECTOR_FRAME_LENGTHS}）
+# と、特徴抽出が要る **mel 基底 1 本**（`assets` 席）。格納 dtype は f32 の 1 系列だけなので
+# quant 席も 1 つ。
+#
+# ## 長さバケットは **weights の役割軸**（dtype 軸でも quant 軸でも model 軸でもない）
+#
+# `aten.gru.input` は `run_decompositions` が時間方向へ完全展開するので T は動的軸にできず、
+# グラフは長さごとに別物になる（`export_vowel_detector.py` の docstring）。manifest v2 でこれを
+# どの軸に置くかは 3 通り考えられるが、**役割（weights のキー）以外は成立しない**:
+#
+# - **quant 軸**（`quants` の席）: quant は*利用者が構築時に選ぶ*格納形の軸で、1 つしか
+#   選べない。バケットは**入力長で実行時に決まる**ので、選んだ 1 つ以外も手元に要る。
+# - **model 軸**（`models` のキー）: 同じく構築時に 1 つを選ぶ軸で、しかも「どのモデルか」=
+#   どの重みかの軸。同じ重みの同じ経路を長さ違いで焼いたものを別モデルとして並べると、
+#   利用者が「2.5 秒のモデル」を選ぶ形になり、長い音声で黙って失敗する。
+# - **weights の役割軸**: Irodori が 8 グラフを 8 役割で並べているのと同じ形。`resolveFiles` は
+#   選んだ quant の**全役割**を返すので、4 本とも取得・キャッシュされ、パイプラインは実行時に
+#   入力長で 1 本を選べる（`src/vowel-detector/pipeline.ts`）。dtype 軸は直交したまま
+#   （各役割が `f32` の 1 ラベルを持つ）で、将来 f16 席を足しても綴りが衝突しない。
+#
+# 刻み（2.5 / 5 / 10 / 20 秒）は**実測の帰結**であって近似の細かさではない。右ゼロ pad の劣化は
+# pad 量に対して単調でも比例でもなく 2 フレーム（40ms）で飽和するので（実音声 4 本 × pad 10 段の
+# 実測）、刻みを詰めても品質は改善せず配布サイズだけが線形に増える。したがって「必要な最大長を
+# 覆う最少本数」で置く。
+#
+# `pipelineConfig` の出どころは **2 つとも独立**: 特徴の契約（`sampleRate` / `featureDim` /
+# `classes`）は上流 `feature_config.json`、`frameLengths` は**焼かれた 4 本のグラフの入力宣言**
+# から導く（どちらも写経しない）。噛み合っていることは {@link assert_vowel_detector_graphs} が
+# 実測する。
+
+#: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
+#: `VOWEL_DETECTOR_PIPELINE_NAME` / `VOWEL_DETECTOR_PIPELINE_MAJOR`。
+VOWEL_DETECTOR_PIPELINE = "vowel-detector/1"
+
+#: 既定のモデル名 = **チェックポイントの世代**（`export_vowel_detector.default_out_dir` が系列名へ
+#: 焼く綴りと同じ導出 — `crnn_epoch3.pt` → `crnn-epoch3`）。学習し直した重みは別のモデル名で
+#: 並ぶ（manifest のキーが世代の正本）。
+VOWEL_DETECTOR_DEFAULT_MODEL = "crnn-epoch3"
+
+#: 系列名の接頭辞（`vowel-detector-<モデル名>-t<長さ>` — 台本の `MODELS_ROOT.name` と同じ 1 語）。
+VOWEL_DETECTOR_PREFIX = "vowel-detector"
+
+#: 上流素材の置き場（`inputs/vowel-detector/` — `export_vowel_detector.MODELS_ROOT` と同じ）。
+VOWEL_DETECTOR_INPUTS_DIRNAME = "vowel-detector"
+
+#: 配布する長さバケット（10ms フレーム数 = 2.5 / 5 / 10 / 20 秒）。**節の冒頭の実測が根拠**。
+#: 系列は 1 本ずつ焼く（`karume export-vowel-detector --length <値>`）。
+VOWEL_DETECTOR_FRAME_LENGTHS: tuple[int, ...] = (250, 500, 1000, 2000)
+
+#: グラフ入力の名前（`export_vowel_detector.INPUT_NAME`）と、出力の時間軸の刻み（conv の
+#: stride 2 — 入力 2 フレームで出力 1 フレーム）。
+VOWEL_DETECTOR_INPUT = "features"
+VOWEL_DETECTOR_TIME_STRIDE = 2
+
+#: 特徴の契約の出どころ（上流 `assets/feature_config.json` を `inputs/vowel-detector/` へ手置き）。
+#: mel 基底もこの中にあり、配布形へは 1 テンソルの safetensors として移す。
+VOWEL_DETECTOR_FEATURE_CONFIG_FILE = "feature_config.json"
+
+#: 配布する mel 基底のテンソルキー（TS 側 `pipeline.ts` の `MEL_BASIS` と対）。
+VOWEL_DETECTOR_MEL_BASIS_KEY = "mel_basis"
+
+#: DSP 補助特徴の本数（有声性 / log エネルギー / 零交差率）。`feature_dim = n_mels + 3` の
+#: 内部整合を見るためだけに持つ（値の正本は上流の特徴抽出）。
+VOWEL_DETECTOR_DSP_DIM = 3
+
+#: 出力クラスの本数（`feature_config.json` の `classes` — 並びは配らない側の関心事で、
+#: **並びが id** であることの検査は TS 側 `config.ts` が持つ）。
+VOWEL_DETECTOR_CLASS_COUNT = 8
+
+
+def vowel_detector_role(frame_length: int) -> str:
+    """役割名（`crnn_t250` — 配置表・出力 path・weights 宣言が共有する 1 語）。"""
+    return f"crnn_t{frame_length}"
+
+
+#: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
+#: ファイル名に出すのは他ファミリと同じ形。
+VOWEL_DETECTOR_OUTPUT_PATHS: Mapping[str, str] = {
+    **{
+        vowel_detector_role(length): f"t{length}/model.f32.safetensors"
+        for length in VOWEL_DETECTOR_FRAME_LENGTHS
+    },
+    VOWEL_DETECTOR_MEL_BASIS_KEY: f"features/{VOWEL_DETECTOR_MEL_BASIS_KEY}.safetensors",
+}
+
+#: 格納 dtype の要求（他ファミリと同じ根拠 — 素の資産が組み立て・ロード・実行を全て通って
+#: 参照一致の門まで沈黙した実測事故）。mel 基底はこちらが書く F32 なので載せない。
+#:
+#: NOTE: 禁止表（{@link assert_storage_absent}）は持たない — 圧縮系列が 1 本も無いので、
+#: 「F32 を含む」で系列 × 格納 dtype が一意に決まる。f16 / i8 の席を足すときは**同時に**禁止表も
+#: 足す（圧縮系列も適格外の重みを F32 で持つので、存在検査だけでは f32 席へ混入する）。
+VOWEL_DETECTOR_STORAGE_REQUIREMENTS: Mapping[str, str] = {
+    vowel_detector_role(length): "F32" for length in VOWEL_DETECTOR_FRAME_LENGTHS
+}
+
+#: weights の宣言（dtype ラベル → 役割名）。バケット 1 本 = 1 役割で、どれも dtype が 1 つ
+#: しかないので quant 表は空でよい（{@link complete_quant_weights} が完全写像へ埋める）。
+VOWEL_DETECTOR_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
+    vowel_detector_role(length): {"f32": WeightFiles(vowel_detector_role(length))}
+    for length in VOWEL_DETECTOR_FRAME_LENGTHS
+}
+
+#: assets の宣言（quant 選択に依存しない無条件ファイル — 特徴抽出の mel 基底 1 本）。
+VOWEL_DETECTOR_ASSETS: Mapping[str, str] = {
+    VOWEL_DETECTOR_MEL_BASIS_KEY: VOWEL_DETECTOR_MEL_BASIS_KEY
+}
+
+VOWEL_DETECTOR_QUANTS: Mapping[str, Any] = {"f32": {"weights": {}, "session": {}}}
+VOWEL_DETECTOR_DEFAULT_QUANT = "f32"
+
+
+def vowel_detector_series_name(model: str, frame_length: int) -> str:
+    """モデル名 + 長さ → 系列ディレクトリ名（`export_vowel_detector.default_out_dir` と同じ式）。"""
+    return f"{VOWEL_DETECTOR_PREFIX}-{model}-t{frame_length}"
+
+
+def vowel_detector_repo_name(model: str) -> str:
+    """配布リポ名。**モデル名を含めない** — チェックポイントの世代（`crnn-epoch3`）はリポの
+    名前ではなく manifest のキーが綴る事実で、世代が上がるたびにリポが増える形にしない
+    （上流の配布も `vowel-detector` 1 リポ）。
+    """
+    return f"karume-{VOWEL_DETECTOR_PREFIX}"
+
+
+@dataclass(frozen=True)
+class VowelDetectorSources:
+    """組み立ての入力。長さバケットぶんの系列と、上流素材の置き場（`inputs/` — 生成物ではない）。
+
+    後者が要るのは特徴の契約と mel 基底を**焼き込まずに導出**するため（読むのは
+    `feature_config.json` 1 本だけ）。
+    """
+
+    #: 系列ディレクトリ群の親（`outputs/series/`）— バケットごとの系列名はここから組む。
+    series_dir: Path
+    #: 上流素材（`feature_config.json` を置いたディレクトリ）。
+    model: Path
+    #: 系列を引くモデル名（世代）。
+    model_name: str
+
+    def series(self, frame_length: int) -> Path:
+        return self.series_dir / vowel_detector_series_name(self.model_name, frame_length)
+
+
+def vowel_detector_sources(
+    series_dir: Path, model: str = VOWEL_DETECTOR_DEFAULT_MODEL
+) -> VowelDetectorSources:
+    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
+    return VowelDetectorSources(
+        series_dir=series_dir,
+        model=INPUTS_ROOT / VOWEL_DETECTOR_INPUTS_DIRNAME,
+        model_name=model,
+    )
+
+
+def vowel_detector_placements(sources: VowelDetectorSources) -> dict[str, Path]:
+    """役割名 → 出所のファイル。出力の path は {@link VOWEL_DETECTOR_OUTPUT_PATHS} が持つ。
+
+    この表に無いものは出力へ入らない（系列に並ぶ `io.*.safetensors` はこれで落ちる）。
+    mel 基底は配置ではなく変換の出力なので、ここには現れない（SBV2 の表 2 本と同じ形）。
+    """
+    return {
+        vowel_detector_role(length): sources.series(length) / "model.safetensors"
+        for length in VOWEL_DETECTOR_FRAME_LENGTHS
+    }
+
+
+def vowel_detector_feature_config(model_dir: Path) -> Mapping[str, Any]:
+    """上流の `feature_config.json` を読む（特徴の契約と mel 基底の唯一の出どころ）。"""
+    path = model_dir / VOWEL_DETECTOR_FEATURE_CONFIG_FILE
+    if not path.is_file():
+        raise DistError(
+            f"組み立ての入力が無い: {path}"
+            "（上流 vowel-detector の assets/feature_config.json をここへ置く）"
+        )
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise DistError(f"{path} が JSON として読めない") from error
+    if not isinstance(raw, dict):
+        raise DistError(f"{path}: 最上位オブジェクトでない")
+    return raw
+
+
+def _vowel_detector_int(raw: Mapping[str, Any], key: str, where: str) -> int:
+    """特徴 config の正整数フィールドを検査して読む。"""
+    value = raw.get(key)
+    # bool は int の派生。`"n_mels": true` を 1 として通すと寸法の突合が緩む。
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise DistError(f"{where} の {key} が正の整数でない（{value!r}）")
+    return value
+
+
+def vowel_detector_classes(raw: Mapping[str, Any], where: str) -> list[str]:
+    """クラス語彙を読む（**並びのまま**配る — 並びがそのままクラス id）。
+
+    NOTE: 語彙そのもの（`a`/`i`/…/`cons` の綴りと並び）はここが持たない。上流 config が唯一の
+    出どころで、それを写した 2 つ目の表をここに置くと、片方だけ動いたときに「宣言は通るのに
+    ラベルが置換されている」形が黙って作れる。**受理集合の検査はロード側**
+    （`packages/models/src/vowel-detector/config.ts`）が持ち、ここは構造だけを見る。
+    """
+    value = raw.get("classes")
+    if not isinstance(value, list) or len(value) != VOWEL_DETECTOR_CLASS_COUNT:
+        raise DistError(
+            f"{where} の classes が長さ {VOWEL_DETECTOR_CLASS_COUNT} の配列でない（{value!r}）"
+        )
+    for entry in value:
+        if not isinstance(entry, str) or not entry:
+            raise DistError(f"{where} の classes に空でない文字列でない要素がある（{value!r}）")
+    if len(set(value)) != len(value):
+        raise DistError(f"{where} の classes に重複がある（{value!r}）")
+    return list(value)
+
+
+def vowel_detector_mel_basis(raw: Mapping[str, Any], where: str) -> np.ndarray:
+    """mel 基底 `[n_mels, n_fft // 2 + 1]` を f32 の行列として読む。
+
+    MUST: 形は `n_mels` と `n_fft` の**両方**から組んだ期待と突き合わせる — 基底がずれても
+    特徴は「それらしい別の値」になるだけで、shape も値域も合ったまま最後まで通る。
+
+    MUST: 全行に正の要素があることまで見る。空の三角窓（帯域外へ落ちた mel チャネル）は
+    その列を常に `log(1e-5)` に張り付かせるが、80 本の中の 1 本なので目視でも数値でも
+    「静かにおかしい」形にしかならない。
+    """
+    n_mels = _vowel_detector_int(raw, "n_mels", where)
+    n_fft = _vowel_detector_int(raw, "n_fft", where)
+    expected = (n_mels, n_fft // 2 + 1)
+    value = raw.get(VOWEL_DETECTOR_MEL_BASIS_KEY)
+    if not isinstance(value, list):
+        raise DistError(f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} が配列でない（{type(value)}）")
+    try:
+        basis = np.asarray(value, dtype=np.float32)
+    except (TypeError, ValueError) as error:
+        raise DistError(
+            f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} が f32 行列にならない"
+        ) from error
+    if basis.shape != expected:
+        raise DistError(
+            f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} の形が {basis.shape}、"
+            f"n_mels / n_fft から組んだ期待は {expected}"
+        )
+    if not np.isfinite(basis).all():
+        raise DistError(f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} に有限でない要素がある")
+    empty = [int(row) for row in np.flatnonzero(basis.max(axis=1) <= 0)]
+    if empty:
+        raise DistError(
+            f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} に空の mel チャネルがある（行 {empty}）"
+        )
+    return basis
+
+
+def vowel_detector_pipeline_config(
+    feature_config: Mapping[str, Any], frame_lengths: Sequence[int], where: str
+) -> dict[str, Any]:
+    """`pipelineConfig`（TS 側スキーマの 4 欄）を上流 config と焼かれたグラフから組む。
+
+    `frameLengths` だけが**焼かれた資産由来**（引数で受ける — 出どころは
+    {@link vowel_detector_graph_lengths}）で、残り 3 欄は上流 config の逐語。
+    """
+    sample_rate = _vowel_detector_int(feature_config, "sample_rate", where)
+    feature_dim = _vowel_detector_int(feature_config, "feature_dim", where)
+    n_mels = _vowel_detector_int(feature_config, "n_mels", where)
+    if feature_dim != n_mels + VOWEL_DETECTOR_DSP_DIM:
+        raise DistError(
+            f"{where} の feature_dim {feature_dim} が n_mels {n_mels} +"
+            f" DSP {VOWEL_DETECTOR_DSP_DIM} と違う — 特徴の内訳が上流と食い違っている"
+        )
+    return {
+        "sampleRate": sample_rate,
+        "featureDim": feature_dim,
+        "classes": vowel_detector_classes(feature_config, where),
+        "frameLengths": list(frame_lengths),
+    }
+
+
+def vowel_detector_graph_length(graph: Mapping[str, Any], path: Path) -> int:
+    """焼かれたグラフの入力宣言から長さ（T10）を読む（写経しない）。
+
+    入力が 1 本・名前が `features`・階数 3・batch 静的 1 であることまで見るのは、別の台本で
+    焼かれたグラフ（多入力・記号次元つき）が同じ席に置かれると、**長さだけが静かに別の意味の
+    数**になるため。
+    """
+    inputs = _graph_inputs(graph, path)
+    if tuple(inputs) != (VOWEL_DETECTOR_INPUT,):
+        raise DistError(
+            f"{path} のグラフ入力が {list(inputs)} で、期待の {[VOWEL_DETECTOR_INPUT]} と違う"
+            " — 実行側は名前で束ねるので、綴りが変われば束ねられない"
+        )
+    symbols = graph.get("symbols")
+    if not isinstance(symbols, list) or symbols:
+        raise DistError(
+            f"{path}: 記号次元 {symbols!r} がある — GRU は時間方向へ完全展開されるので"
+            "長さは動的軸にできない（バケットごとに別のグラフ）"
+        )
+    shape = inputs[VOWEL_DETECTOR_INPUT]
+    if len(shape) != 3 or shape[0] != 1:
+        raise DistError(
+            f"{path} の入力 '{VOWEL_DETECTOR_INPUT}' が {shape!r}"
+            " — 期待は [1, T10, featureDim]（batch は静的 1）"
+        )
+    length = shape[1]
+    if not isinstance(length, int) or isinstance(length, bool) or length <= 0:
+        raise DistError(f"{path} の入力の T10 が正の整数でない（{length!r}）")
+    return length
+
+
+def vowel_detector_graph_lengths(placements: Mapping[str, Path]) -> list[int]:
+    """配置する 4 本のグラフから長さを読み、**役割名の綴りと一致する**ことを見る。
+
+    MUST: 落とさない。長さ違いのグラフは入出力の名前も階数も同じなので、`t500` の席に t1000 の
+    資産が置かれていても manifest は成立し、パイプラインは pad する長さを間違えたまま Session の
+    shape 検査まで進む（そのときには「どちらの数が正しいのか」が読み手に伝わらない）。
+    """
+    lengths: list[int] = []
+    for length in VOWEL_DETECTOR_FRAME_LENGTHS:
+        role = vowel_detector_role(length)
+        path = placements[role]
+        found = vowel_detector_graph_length(ir_graph(path), path)
+        if found != length:
+            raise DistError(
+                f"{path} は T10 {found} で焼かれている — 役割 '{role}' の席には"
+                f" {length} フレームのグラフが要る（系列の取り違え）"
+            )
+        lengths.append(length)
+    return lengths
+
+
+def assert_vowel_detector_graphs(
+    placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
+) -> None:
+    """4 本のグラフの入出力が `pipelineConfig` と噛み合うことを、配置の前に実測する。
+
+    MUST: 落とさない。特徴次元とクラス数は上流 config 由来、形はグラフ由来で**別々に決まる**
+    ので、別の特徴で学習された派生の重みと今の config を組み合わせても、ここまでは何も落ちない。
+    """
+    feature_dim = pipeline_config["featureDim"]
+    classes = len(pipeline_config["classes"])
+    for length in pipeline_config["frameLengths"]:
+        path = placements[vowel_detector_role(length)]
+        graph = ir_graph(path)
+        shape = _graph_inputs(graph, path)[VOWEL_DETECTOR_INPUT]
+        if shape[2] != feature_dim:
+            raise DistError(
+                f"{path} の入力の特徴次元が {shape[2]!r}、"
+                f"{VOWEL_DETECTOR_FEATURE_CONFIG_FILE} の feature_dim は {feature_dim}"
+            )
+        outputs = graph.get("outputs")
+        if not isinstance(outputs, list) or len(outputs) != 1:
+            raise DistError(f"{path}: グラフ出力が {outputs!r} — ロジット 1 本だけが要る")
+        values = graph.get("values")
+        value = values.get(outputs[0]) if isinstance(values, dict) else None
+        out_shape = value.get("shape") if isinstance(value, dict) else None
+        expected = [1, length // VOWEL_DETECTOR_TIME_STRIDE, classes]
+        if out_shape != expected:
+            raise DistError(
+                f"{path}: グラフ出力 '{outputs[0]}' の形が {out_shape!r}、期待は {expected}"
+                " — 出力は 20ms 格子（入力 2 フレームで 1 本）× クラス数"
+            )
+
+
+def vowel_detector_plan(
+    sources: VowelDetectorSources, model: str = VOWEL_DETECTOR_DEFAULT_MODEL
+) -> ModelPlan:
+    """母音検出 1 モデルぶんの計画を組む（検査と config の読み取りをここで全部済ませる）。"""
+    assert_model_name(model)
+    placements = vowel_detector_placements(sources)
+    for role, source in placements.items():
+        assert_storage(role, source, VOWEL_DETECTOR_STORAGE_REQUIREMENTS)
+    feature_config = vowel_detector_feature_config(sources.model)
+    where = str(sources.model / VOWEL_DETECTOR_FEATURE_CONFIG_FILE)
+    pipeline_config = vowel_detector_pipeline_config(
+        feature_config, vowel_detector_graph_lengths(placements), where
+    )
+    assert_vowel_detector_graphs(placements, pipeline_config)
+    artifacts = {
+        role: Artifact(VOWEL_DETECTOR_OUTPUT_PATHS[role], source=source)
+        for role, source in placements.items()
+    }
+    artifacts[VOWEL_DETECTOR_MEL_BASIS_KEY] = Artifact(
+        VOWEL_DETECTOR_OUTPUT_PATHS[VOWEL_DETECTOR_MEL_BASIS_KEY],
+        payload=_table_payload(
+            VOWEL_DETECTOR_MEL_BASIS_KEY, vowel_detector_mel_basis(feature_config, where)
+        ),
+    )
+    return ModelPlan(
+        name=model,
+        pipeline=VOWEL_DETECTOR_PIPELINE,
+        artifacts=artifacts,
+        weights=VOWEL_DETECTOR_WEIGHTS,
+        assets=VOWEL_DETECTOR_ASSETS,
+        quants=complete_quant_weights(VOWEL_DETECTOR_WEIGHTS, VOWEL_DETECTOR_QUANTS),
+        default_quant=VOWEL_DETECTOR_DEFAULT_QUANT,
+        pipeline_config=pipeline_config,
+    )
+
+
+# ---- ⑨ pipeline 別ディスパッチと CLI -----------------------------------------
 
 
 #: モデルカードの描き手（manifest とリポ ID から本文 1 枚）。
@@ -2705,6 +3103,11 @@ def birefnet_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return birefnet_plan(birefnet_sources(series_dir, model), model)
 
 
+def vowel_detector_dist_plan(series_dir: Path, model: str) -> ModelPlan:
+    """`--series` の親から母音検出 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+    return vowel_detector_plan(vowel_detector_sources(series_dir, model), model)
+
+
 PIPELINES: Mapping[str, Pipeline] = {
     "anima": Pipeline(
         default_model=ANIMA_MODEL_NAME,
@@ -2748,6 +3151,14 @@ PIPELINES: Mapping[str, Pipeline] = {
         # モデル名から一意に決まる。プロファイルを分けると「Lucida を BiRefNet_HR の帰属で
         # 配る」取り違えを操作者が起こせるようになる。
         card_profiles={"birefnet": render_birefnet_model_card},
+    ),
+    "vowel-detector": Pipeline(
+        default_model=VOWEL_DETECTOR_DEFAULT_MODEL,
+        repo_name=vowel_detector_repo_name,
+        plan=vowel_detector_dist_plan,
+        # 帰属は 1 通りだけ（上流 1 リポ・1 ライセンス — 学習素材の帰属も重みに紐づいた
+        # 1 組）。選択肢が無いので省略で通る。
+        card_profiles={"vowel-detector": render_vowel_detector_model_card},
     ),
 }
 
