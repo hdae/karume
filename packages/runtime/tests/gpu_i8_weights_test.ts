@@ -165,6 +165,15 @@ Deno.test("i8 の適格判定は f16 と同じ 1 本の判定を通る（新設�
   );
 });
 
+Deno.test("graph 出力になった i8 initializer も同じ 1 本の判定で適格外", () => {
+  // MUST: readback は semantic f32（4 バイト / 要素）を仮定して重みバッファから写すので、
+  // i8（1 バイト / 要素 + scale）のまま常駐させると copy が実バッファをはみ出す。
+  const eligible = eligibleCompressedInitializers(
+    parseIrGraph(JSON.stringify(linearGraph({ dtype: "i8", scale: "m.s" }, [], {}, ["w"]))),
+  );
+  assertEquals([...eligible], []);
+});
+
 Deno.test("チャネル軸は消費側 op から決まる（conv_transpose1d だけ 1）", () => {
   const axisOf = (op: string, ins: readonly string[]): number | undefined => {
     const graph = {
@@ -871,6 +880,55 @@ Deno.test({
       const report = compareTensors(eligible.y, expected);
       assertEquals(report.pass, true, formatAllclose(report));
     } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * initializer 自身をグラフ出力にした形（IR が許す — format/ir.ts の定義済み検査）。
+ *
+ * readback は宣言 dtype の semantic f32 を 4 バイト / 要素で重みバッファから写すので、i8 の
+ * まま常駐していると copy が実バッファ（1 バイト / 要素）をはみ出す。適格判定が
+ * `graph.outputs` を見ていれば CPU 展開へ落ち、丸め後の重みがそのまま読める。
+ */
+Deno.test({
+  name:
+    "graph 出力にした i8 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const weight = fill([3, 4], POSITIVE);
+    const quantized = quantizeI8(weight.data, [3, 4], 0);
+    const bias = fill([3], SIGNED);
+    const model = openModel(buildSafetensors([
+      { name: "m.b", dtype: "F32", shape: [3], data: new Uint8Array(bias.data.buffer.slice(0)) },
+      { name: "m.s", dtype: "F32", shape: [3, 1], data: f32Bytes(quantized.scale) },
+      { name: "m.w", dtype: "I8", shape: [3, 4], data: quantized.bytes },
+    ], {
+      karume_ir: JSON.stringify(linearGraph({ dtype: "i8", scale: "m.s" }, [], {}, ["w"])),
+    }));
+    const x = fill([2, 4], SIGNED);
+    const gpu = await acquireGpu();
+    const session = await createSession(gpu, model);
+    try {
+      const storage = session.diagnostics().storage;
+      assertEquals(storage.residentCompressedBytes, 0, "グラフ出力の重みは圧縮常駐しない");
+      assertEquals(storage.hostExpandedBytes, 48, "CPU 展開バイト数（f32 換算 12 要素）");
+      const outputs = await session.run({ x });
+      // 重みは実行に依らない定数なので、丸め後の値とビット単位で一致する
+      assertEquals(outputs["w"].shape, [3, 4]);
+      assertEquals([...outputs["w"].data], [...quantized.values]);
+      // 同じ run の計算側も従来どおり（展開経路でも値は変わらない）
+      const expected = applyReferenceOp(
+        "linear",
+        [x as RefTensor, refTensor([3, 4], quantized.values), bias as RefTensor],
+        {},
+        [2, 3],
+      );
+      const report = compareTensors(outputs["y"], expected);
+      assertEquals(report.pass, true, formatAllclose(report));
+    } finally {
+      await session.dispose();
       gpu.destroy();
     }
   },

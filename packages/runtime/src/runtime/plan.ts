@@ -269,11 +269,16 @@ export const weightChannelAxes = (graph: IrGraph): ReadonlyMap<string, number> =
  * 圧縮のまま上げるとビット列の読み替えになる（例外は出ない）。
  * MUST: 消費ゼロの initializer も適格外にする。実行に使われないバイトを「GPU 常駐圧縮」として
  * 数えると診断（ADR 0006）が実態からずれる。
+ * MUST: `graph.outputs` に載った initializer も適格外にする（IR は initializer 名をそのまま
+ * グラフ出力に書くことを許す）。readback は宣言 dtype の semantic f32（4 バイト / 要素）を
+ * 仮定して重みバッファから写すため、圧縮のまま常駐すると大半のサイズで copy が実バッファを
+ * はみ出して validation で落ち（原因を指さない誤誘導）、極小サイズではゼロ詰めまで収まって
+ * ビット列の読み替えが黙って返る。
  */
 export const eligibleCompressedInitializers = (graph: IrGraph): ReadonlySet<string> => {
   const initializers = new Set(Object.keys(graph.initializers));
   const eligible = new Set<string>();
-  const disqualified = new Set<string>();
+  const disqualified = new Set<string>(graph.outputs);
   for (const node of graph.nodes) {
     const weightSlot = WEIGHT_SLOTS.get(node.op);
     node.ins.forEach((name, slot) => {

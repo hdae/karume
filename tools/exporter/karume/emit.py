@@ -117,10 +117,13 @@ def eligible_compressed_initializers(graph: IrGraph) -> set[str]:
     MUST: 消費が 1 つでも重みスロット以外にあれば適格外（そのカーネルは f32 として読むので、
     圧縮のまま上げるとビット列の読み替えになる）。消費ゼロも適格外（実行に使われないバイトを
     「GPU 常駐圧縮」と数えると診断が実態からずれる）。
+    MUST: `graph.outputs` に載った initializer も適格外（ランタイムの readback は semantic f32
+    の 4 バイト / 要素を仮定して重みバッファから写すので、圧縮のまま常駐させると validation で
+    落ちるか、極小サイズではビット列の読み替えが黙って返る）。
     """
     initializers = set(graph.initializers)
     eligible: set[str] = set()
-    disqualified: set[str] = set()
+    disqualified: set[str] = set(graph.outputs)
     for node in graph.nodes:
         weight_slot = WEIGHT_SLOTS.get(node.op)
         for slot, name in enumerate(node.ins):

@@ -119,6 +119,29 @@ Deno.test("適格判定は 5 op それぞれの weight スロット位置を見�
   }
 });
 
+Deno.test("graph 出力になった initializer は weight スロット消費だけでも適格外", () => {
+  const eligible = (graph: GraphJson): readonly string[] =>
+    [...eligibleCompressedInitializers(parseIrGraph(JSON.stringify(graph)))].sort();
+
+  // MUST: 消費が weight スロットだけでも、値そのものがグラフ出力なら適格を失う。readback は
+  // semantic f32（4 バイト / 要素）を仮定して重みバッファから写すので、圧縮のまま常駐させると
+  // copy が実バッファをはみ出す（極小サイズではビット列の読み替えが黙って返る）。
+  assertEquals(eligible(linearGraph("f16", [], {}, ["w"])), []);
+
+  // 失格は**出力に載った名前だけ**に効く（同じグラフの別の重みは適格のまま）
+  const twoWeights = linearGraph(
+    "f16",
+    [{ op: "linear", ins: ["y", "w2", "b"], outs: ["y2"], attrs: {} }],
+    { y2: { dtype: "f32", shape: [2, 3] } },
+    ["y2", "w"],
+  );
+  // requires.ops は重複を拒む（linear 2 本ぶんの宣言は 1 つ）
+  twoWeights.requires.ops = ["linear"];
+  twoWeights.initializers["w2"] = { tensor: "m.w2", storage: { dtype: "f16" } };
+  twoWeights.values["w2"] = { dtype: "f32", shape: [3, 3] };
+  assertEquals(eligible(twoWeights), ["w2"]);
+});
+
 // ---------------------------------------------------------------------------
 // CPU 側の展開（ホスト鏡像の仕様）
 // ---------------------------------------------------------------------------
@@ -753,6 +776,56 @@ Deno.test({
         [2, 3],
       );
       const expected = applyReferenceOp("mul", [linear, scale as RefTensor], {}, [2, 3]);
+      const report = compareTensors(outputs["y"], expected);
+      assertEquals(report.pass, true, formatAllclose(report));
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * initializer 自身をグラフ出力にした形（IR が許す — format/ir.ts の定義済み検査）。
+ *
+ * readback は宣言 dtype の semantic f32 を 4 バイト / 要素で重みバッファから写すので、圧縮の
+ * まま常駐していると copy が実バッファ（2 バイト / 要素）をはみ出す。適格判定が `graph.outputs`
+ * を見ていれば CPU 展開へ落ち、丸め後の重みがそのまま読める。
+ */
+Deno.test({
+  name:
+    "graph 出力にした f16 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const weight = fill([3, 4], POSITIVE);
+    const bias = fill([3], SIGNED);
+    const quantized = quantizeF16(weight.data);
+    const model = openModel(buildSafetensors([
+      { name: "m.w", dtype: "F16", shape: [3, 4], data: quantized.bytes },
+      { name: "m.b", dtype: "F32", shape: [3], data: new Uint8Array(bias.data.buffer.slice(0)) },
+    ], { karume_ir: JSON.stringify(linearGraph("f16", [], {}, ["w"])) }));
+    const x = fill([2, 4], SIGNED);
+    const gpu = await acquireGpu();
+    const session = await createSession(gpu, model);
+    try {
+      const storage = session.diagnostics().storage;
+      assertEquals(
+        storage.residentCompressedBytes,
+        0,
+        "グラフ出力の重みは 1 バイトも圧縮常駐しない",
+      );
+      assertEquals(storage.hostExpandedBytes, quantized.values.byteLength, "CPU 展開バイト数");
+      const outputs = await session.run({ x });
+      // 重みは実行に依らない定数なので、丸め後の値とビット単位で一致する
+      assertEquals(outputs["w"].shape, [3, 4]);
+      assertEquals([...outputs["w"].data], [...quantized.values]);
+      // 同じ run の計算側も従来どおり（展開経路でも値は変わらない）
+      const expected = applyReferenceOp(
+        "linear",
+        [x as RefTensor, refTensor([3, 4], quantized.values), bias as RefTensor],
+        {},
+        [2, 3],
+      );
       const report = compareTensors(outputs["y"], expected);
       assertEquals(report.pass, true, formatAllclose(report));
     } finally {

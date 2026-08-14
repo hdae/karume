@@ -84,12 +84,14 @@ def rounded(*shape: int) -> torch.Tensor:
 
 
 def weight_graph(
-    *, share_weight: bool = False, unused: bool = False
+    *, share_weight: bool = False, unused: bool = False, output_weight: bool = False
 ) -> tuple[IrGraph, dict[str, torch.Tensor]]:
     """linear（重み偶数要素）+ embedding（重み **奇数要素**）を持つグラフ。
 
     `share_weight` は linear の重みを elementwise でも消費する形（適格外になるはず）、
-    `unused` は誰も消費しない initializer を 1 本足す（同じく適格外）。
+    `unused` は誰も消費しない initializer を 1 本足す（同じく適格外）、
+    `output_weight` は linear の重みをそのままグラフ出力にする形（同じく適格外 —
+    ランタイムの readback は semantic f32 を仮定する）。
     """
     nodes = [
         IrNode(op="linear", ins=["x", "w", "b"], outs=["h"], attrs={}),
@@ -118,6 +120,9 @@ def weight_graph(
         initializers["dead"] = IrInitializer(tensor="enc.dead", storage=IrStorage(dtype="f32"))
         values["dead"] = IrValue(dtype="f32", shape=[6])
         tensors["enc.dead"] = rounded(6)
+    if output_weight:
+        # IR は initializer 名をそのままグラフ出力に書くことを許す（値は実行に依らない定数）。
+        outputs.append("w")
     graph = IrGraph(
         symbols=["T"],
         inputs=[
@@ -154,6 +159,17 @@ class TestEligibility:
 
         assert "dead" not in eligible_compressed_initializers(graph)
 
+    def test_an_initializer_in_the_graph_outputs_is_disqualified(self):
+        """readback は semantic f32（4 バイト / 要素）を仮定して重みバッファから写す。
+
+        圧縮のまま常駐させると copy が実バッファをはみ出して validation で落ちるか、
+        極小サイズではビット列の読み替えが黙って返る。
+        """
+        graph, _ = weight_graph(output_weight=True)
+
+        # 失格は出力に載った名前だけ（同じグラフの embedding 表は適格のまま）
+        assert eligible_compressed_initializers(graph) == {"emb"}
+
 
 class TestF16Storage:
     def test_eligible_weights_are_stored_as_f16_and_bias_stays_f32(self, tmp_path):
@@ -168,6 +184,23 @@ class TestF16Storage:
         with safe_open(str(path), framework="pt") as handle:
             assert handle.get_slice("enc.w").get_dtype() == "F16"
             assert handle.get_slice("enc.b").get_dtype() == "F32"
+
+    def test_a_weight_in_the_graph_outputs_is_not_stored_compressed(self, tmp_path):
+        """グラフ出力の重みは f32 のまま書く（ランタイム側の適格判定と対）。
+
+        鏡像がずれると「exporter は f16 で書き、ランタイムは f32 として読み戻す」の
+        食い違いになり、ロードした瞬間に読めないモデルが配布形として通ってしまう。
+        """
+        graph, tensors = weight_graph(output_weight=True)
+
+        path = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+
+        assert graph.initializers["w"].storage.dtype == "f32"
+        assert graph.initializers["emb"].storage.dtype == "f16"
+        with safe_open(str(path), framework="pt") as handle:
+            assert handle.get_slice("enc.w").get_dtype() == "F32"
+            assert handle.get_slice("enc.emb").get_dtype() == "F16"
+        assert verify_model(path).to_dict() == graph.to_dict()
 
     def test_the_f16_file_passes_the_full_verification(self, tmp_path):
         graph, tensors = weight_graph()
