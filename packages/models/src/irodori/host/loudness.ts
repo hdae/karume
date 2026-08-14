@@ -150,6 +150,15 @@ export const integratedLoudness = (samples: Float32Array, sampleRate: number): n
   // pad は**フィルタを当てた後**に足す（`_unfold` の中なので、IIR の尾はここへ伸びない）。
   const kernel = Math.trunc(BLOCK_SECONDS * sampleRate);
   const stride = Math.trunc(BLOCK_SECONDS * sampleRate * (1 - BLOCK_OVERLAP));
+  // MUST: floor 導出なので、極小の周波数では窓そのものが消える — stride 0 はブロック数が
+  // Infinity（確保の不透明なエラー）、kernel 0 は `squared / kernel` が NaN。どちらも
+  // 「その周波数では測れない」ことなので、導出値の下限で明示的に落とす。
+  if (kernel < 1 || stride < 1) {
+    throw new RangeError(
+      `integratedLoudness: サンプリング周波数 ${sampleRate} では loudness 窓が導出できない` +
+        `（${BLOCK_SECONDS} 秒 = ${kernel} サンプル / stride ${stride} サンプル — 各 1 以上が要る）`,
+    );
+  }
   const blocks = Math.ceil((Math.max(filtered.length, kernel) - kernel) / stride) + 1;
   const power = new Float64Array(blocks);
   for (let block = 0; block < blocks; block += 1) {

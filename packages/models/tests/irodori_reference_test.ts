@@ -171,6 +171,24 @@ Deno.test("integratedLoudness: 空の波形と不正な周波数は落とす", (
   assertThrows(() => integratedLoudness(Float32Array.of(1), 0), RangeError, "正の整数でない");
 });
 
+Deno.test("integratedLoudness: 窓が導出できない極小の周波数は落とす（正の整数だけでは足りない）", () => {
+  // 窓は floor 導出（kernel = trunc(0.4·sr) / stride = trunc(0.1·sr)）なので、周波数が小さいと
+  // 窓そのものが消える。検査が無いと sr ≤ 9 は stride 0 でブロック数が Infinity になり
+  // 「Invalid typed array length」という無関係な顔で落ち、sr ≤ 2 は kernel も 0 になる。
+  assertThrows(
+    () => integratedLoudness(Float32Array.of(0.5, 0.5), 9),
+    RangeError,
+    "loudness 窓が導出できない",
+  );
+  assertThrows(
+    () => integratedLoudness(Float32Array.of(0.5, 0.5), 2),
+    RangeError,
+    "0.4 秒 = 0 サンプル / stride 0 サンプル",
+  );
+  // 10Hz からは窓が立つ（下限検査が正常域まで落としていない）。
+  assertEquals(integratedLoudness(new Float32Array(20), 10), -70);
+});
+
 Deno.test("normalizeReference: 非有限サンプルは位置付きで落とす（利得の段を素通りさせない）", () => {
   // 検査が無いと、NaN は `magnitude > peakBeforeScale` が常に false なので peak 判定を
   // すり抜け、+Inf は `peakGain = 1/∞ = 0` で**全サンプルを 0 に潰した**上で NaN 1 点だけを
