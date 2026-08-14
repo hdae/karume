@@ -8,7 +8,10 @@
 
 ## Active redesigns (in flight)
 
-- **モデル拡充波（2026-08-13〜14・別ワークツリー `add-models-research`）— 5 本着地**:
+- **モデル拡充波（2026-08-13〜14）— 5 本着地・2026-08-14 に main へ ff マージ済み
+  （ワークツリー撤去・siglip2 資産は再生成済み。birefnet / depth / vowel の series 資産は
+  未再生成 = 当該 e2e 門は SKIP 中。逆方向 import 宿題は siglip2 分を `f3ab358` で解消 —
+  残 3 本は別件）**:
   ①**SigLIP2 vision**（base + so400m・Apache 2.0）②**BiRefNet_HR** + **Lucida**（MIT・2 系列
   別配布形）③**vowel-detector**（自作 CRNN・日本語音声 → リップシンク用 `.lab`）
   ④**Depth Anything V2 Small**（Apache 2.0 は **Small のみ** — Base/Large は CC BY-NC 4.0 と
@@ -58,8 +61,9 @@
   irodori DiT ループを常駐化（`c90bd43`+`8ab141a`・WAV sha 完全一致 = ビット同一のまま）
   - H-1 = 通常 run の単一フェンス化（`e339cc0`）。**検収: irodori 壁 8.59 → 4.88s
     （×1.76・ほぼ GPU 律速へ転換）・EG bare 52.5 → 28.2ms（×1.86）**。H-3 は H-5 併合で
-    解消・H-4 のみ残（タスク #7 同体）。**次 = 波③（numerics opt-in ADR 起草〈案 a・一括
-    フラグは将来課題として記載〉→ K-5 → K-2）**。
+    解消・H-4 のみ残（タスク #7 同体）。**波③進行中: 契約 ADR =
+    [0058](../docs/decisions/0058-numerics-opt-in-contract.md) accepted（2026-08-14）→
+    次 = K-5（設計裁定中）→ K-2**。
     **ビット同一門は「指標であって目的ではない」**（ユーザー方針
     同日 — 数値を変える最適化は opt-in 席・既定 = 参照経路で sha 門凍結。**非保証部分の
     品質は人間レビューで管理** — 数値が大幅悪化しても生成結果は崩壊しないことが多いため。
@@ -295,8 +299,9 @@
   実測依存** — バックエンド更新やドライバ更新で PNG 門が割れたら、まずここを疑う。
   upsample2x は u32 ビット複製なので丸めの議論自体が無い。
 - **`deno task verify` は `.claude/worktrees/` が存在する間、main 作業ツリーで素に走らない**
-  （末尾の `deno test -A` がパス無しなので worktree 側のチェックアウトまで拾う）。当面は
-  test 段だけ `deno test -A packages` で代替する。**恒久策は未裁定**。
+  （末尾の `deno test -A` がパス無しなので worktree 側のチェックアウトまで拾う）。現在は
+  worktree 撤去済み（2026-08-14）で素に走るが、**worktree を再設置すると再発する**
+  （当面の回避 = test 段だけ `deno test -A packages`・恒久策 = deno.json exclude は未裁定）。
 - **Session 構築は重みアップロード後に submit を挟む**（`queue.writeBuffer` の staging は
   submit 完了まで解放されない）。この 1 回を消すと f16 preset の瞬間ピークが **+2.7GiB**
   （5,719 → 8,391MiB・確保天井 11,136〜11,264MiB に対し余裕が 2.7GiB まで縮む）。
