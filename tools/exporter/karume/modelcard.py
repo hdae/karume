@@ -1404,8 +1404,7 @@ def _vowel_detector_seconds(config: Mapping[str, Any], frames: int) -> str:
 
 def _vowel_detector_overview(manifest: Mapping[str, Any]) -> list[str]:
     config = _default_model(manifest)["pipelineConfig"]
-    lengths = config["frameLengths"]
-    longest = _vowel_detector_seconds(config, lengths[-1])
+    longest = _vowel_detector_seconds(config, config["maxFrames"])
     return [
         "## What is this",
         "",
@@ -1422,10 +1421,9 @@ def _vowel_detector_overview(manifest: Mapping[str, Any]) -> list[str]:
         "- **Decoding and resampling are yours.** The entry point is a"
         f" `Float32Array` of {config['sampleRate']} Hz mono samples; this repository ships no"
         " WAV parser and no resampler.",
-        "- Recurrent graphs cannot take a dynamic time axis (the GRU is unrolled at export"
-        f" time), so this repository ships **{len(lengths)} length buckets** and the pipeline"
-        f" picks the smallest that fits. Audio longer than {longest} s is rejected rather than"
-        " silently truncated.",
+        "- **One graph, any length.** The time axis is symbolic, so a clip of any duration runs"
+        " through the same graph with no padding and no length buckets. Audio longer than"
+        f" {longest} s is rejected rather than silently truncated — split it and call twice.",
         "- Not readable by transformers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{VOWEL_DETECTOR_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
@@ -1446,8 +1444,9 @@ def _vowel_detector_base_weights() -> list[str]:
         "  **offline** — it needs the whole utterance, not a stream.",
         "- **Changes made here**: conversion into the Karume container format. No retraining, no",
         "  fine-tuning and **no quantization** — the weights are the source checkpoint's own f32",
-        "  values, byte for byte. The graph is the upstream `forward` with the GRU unrolled along",
-        "  time by the exporter's decomposition (bit-exact against eager execution).",
+        "  values, byte for byte. The graph is the upstream `forward`, with the GRU expressed as",
+        "  one scan node per layer and direction so that the time axis stays symbolic (bit-exact",
+        "  against eager `nn.GRU`, checked on every export).",
         "",
         "The upstream project asks that the attributions below travel with the model, so they are",
         "reproduced here in full.",
@@ -1480,8 +1479,8 @@ def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         'await Deno.writeTextFile("voice.lab", lab);',
         "```",
         "",
-        "`detect()` builds a GPU session per call (the graph depends on the length of the clip)",
-        "and tears it down afterwards; concurrent calls are queued rather than run side by side.",
+        "`detect()` builds a GPU session per call and tears it down afterwards; concurrent calls",
+        "are queued rather than run side by side.",
         "Weights are fetched once and cached (verified against `karume.json`'s `size` /",
         "`sha256`). You can also build from bytes you fetched yourself",
         "(`VowelDetectorPipeline.fromAssets`).",
@@ -1489,18 +1488,15 @@ def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 
 
 def _vowel_detector_shape(model: Mapping[str, Any]) -> list[str]:
-    """入出力と長さバケット（利用者が渡すもの・受け取るものがここで読める）。"""
+    """入出力と運用上限（利用者が渡すもの・受け取るものがここで読める）。"""
     config = model["pipelineConfig"]
-    lengths = config["frameLengths"]
-    buckets = " / ".join(
-        f"{frames} ({_vowel_detector_seconds(config, frames)} s)" for frames in lengths
-    )
+    limit = config["maxFrames"]
     return [
-        "### Input, output and length buckets",
+        "### Input, output and limits",
         "",
-        "The feature contract comes from the upstream feature configuration; the buckets are the",
-        "input shapes of the exported graphs, checked against each other when this repository was",
-        "assembled.",
+        "The feature contract comes from the upstream feature configuration; the shapes are the",
+        "input and output declarations of the exported graph, checked against it when this",
+        "repository was assembled.",
         "",
         f"- **input**: `Float32Array`, {config['sampleRate']} Hz, mono, samples in [-1, 1].",
         f"- **features** (computed for you): {config['featureDim']} dimensions per 10 ms frame —"
@@ -1508,14 +1504,15 @@ def _vowel_detector_shape(model: Mapping[str, Any]) -> list[str]:
         f"- **classes**: {', '.join(f'`{name}`' for name in config['classes'])} — in this order"
         " (the order *is* the class id). `cons` is absorbed into the neighbouring vowel during",
         "  post-processing, so it never reaches the `.lab`.",
-        f"- **length buckets** (frames, 10 ms each): {buckets}. The clip is zero-padded on the",
-        "  right up to the chosen bucket and the padding is dropped again before post-processing.",
+        f"- **length**: any, up to **{limit} frames of 10 ms**"
+        f" ({_vowel_detector_seconds(config, limit)} s). The clip runs at its own length — there",
+        "  is no padding and no bucketing, so the numbers do not depend on how long the clip is.",
+        "  An odd number of frames drops the last one (the output grid is 20 ms).",
         "- **output**: one `.lab` line per run of frames, at 20 ms resolution.",
         "",
-        "Padding perturbs the logits (the backward GRU reads state back out of the padded tail),",
-        "and the effect saturates within two frames of padding, so finer buckets would cost",
-        "download size without buying accuracy. If you need the exact numbers a clip-length graph",
-        "would give, export a graph at that exact length with the Karume exporter.",
+        "The limit is the symbolic upper bound the graph was exported with, not a property of the",
+        "weights: past it the pipeline refuses the clip instead of truncating it. Split longer",
+        "recordings and call `detect` per part.",
     ]
 
 

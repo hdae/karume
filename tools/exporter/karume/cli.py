@@ -63,7 +63,7 @@ EXPORT_BIREFNET_SCRIPT = "export_birefnet"
 #: `karume export-depth-anything` が包む台本（相対深度推定 1 系列を書き出す側）。
 EXPORT_DEPTH_ANYTHING_SCRIPT = "export_depth_anything"
 
-#: `karume export-vowel-detector` が包む台本（母音認識 CRNN を長さごとに書き出す側）。
+#: `karume export-vowel-detector` が包む台本（母音認識 CRNN 1 本を書き出す側）。
 EXPORT_VOWEL_DETECTOR_SCRIPT = "export_vowel_detector"
 
 
@@ -189,7 +189,7 @@ COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     ),
     "export-vowel-detector": (
         run_export_vowel_detector,
-        "母音認識 CRNN を長さごとに IR v1 + golden io へ書き出す（台本 export_vowel_detector.py）",
+        "母音認識 CRNN を IR v1 + golden io へ書き出す（台本 export_vowel_detector.py）",
     ),
     "dist": (run_dist, "配布ディレクトリを組み立てて karume.json / README.md を書く"),
     "verify": (run_verify, "配布形 safetensors を IR v1 の全規則で検証する"),

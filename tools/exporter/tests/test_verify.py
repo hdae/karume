@@ -110,16 +110,28 @@ class TestSymbols:
                 },
             )
 
-    def test_symbol_never_appearing_bare_in_an_input_is_rejected(self):
-        """束縛は入力 shape の次元位置から取る — 素の形が無いと束縛できない。"""
-        with pytest.raises(IrError, match="で現れない"):
+    def test_symbol_never_appearing_in_an_input_is_rejected(self):
+        """束縛は入力 shape の次元位置から取る — 値にしか現れない記号は束縛できない。"""
+        with pytest.raises(IrError, match="次元位置に現れない"):
             parse(
-                inputs=[{"name": "x", "dtype": "f32", "shape": ["2T", 4]}],
+                inputs=[{"name": "x", "dtype": "f32", "shape": [8, 4]}],
                 values={
                     "w": {"dtype": "f32", "shape": [4]},
-                    "y": {"dtype": "f32", "shape": ["2T", 4]},
+                    "y": {"dtype": "f32", "shape": ["T", 4]},
                 },
             )
+
+    def test_a_derived_dim_is_a_binding_source(self):
+        """派生形（`2T`）でも解は一意なので束縛源になる（ADR 0057）。"""
+        graph = parse(
+            inputs=[{"name": "x", "dtype": "f32", "shape": ["2T", 4]}],
+            values={
+                "w": {"dtype": "f32", "shape": [4]},
+                "y": {"dtype": "f32", "shape": ["2T", 4]},
+            },
+        )
+
+        assert graph.symbols == ["T"]
 
     def test_symbol_name_outside_the_grammar_is_rejected(self):
         with pytest.raises(IrError, match="シンボル名"):

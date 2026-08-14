@@ -210,6 +210,57 @@ Deno.test({
 });
 
 Deno.test({
+  name: "gru_scan は毒値を 1 語も残さない（full-write / 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 出力 `[T,N,H]` は「時間ループ × バッチ grid-stride × lane（隠れユニット）」の 3 段で
+    // 書かれる。段のどれかが縮退すると、そのステップ / バッチ / ユニットだけが毒値のまま残る
+    // （contract 検査も CPU 参照突合も**書かれた要素しか見ない**ので、ここが唯一の門）。
+    // MUST: バッチ 2 で踏む（1 workgroup = 1 バッチ要素なので、grid-stride の打ち切りは
+    // N ≥ 2 でしか出ない）。
+    const outShape = [3, 2, 4];
+    const graph = poisonGraph(
+      outShape,
+      [
+        { name: "gi", shape: [3, 2, 12] },
+        { name: "h0", shape: [2, 4] },
+        { name: "w", shape: [12, 4] },
+        { name: "b", shape: [12] },
+      ],
+      { op: "gru_scan", attrs: {} },
+    );
+    const { output, reuseCount } = await runPoisoned(graph, {
+      gi: fill([3, 2, 12], (i) => ((i % 11) - 5) * 0.17),
+      // バッチ 2 枚で違う初期状態（h0 を読み飛ばす実装と、B の段の縮退を同時に踏む）
+      h0: fill([2, 4], (i) => (i < 4 ? 0.6 : -0.4)),
+      w: fill([12, 4], (i) => ((i % 7) - 3) * 0.09),
+      b: fill([12], (i) => ((i % 5) - 2) * 0.13),
+    });
+    assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
+    assertEquals(output.shape, outShape);
+    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    // MUST: バッチ 2 枚が**別の値**（B の段を落とすと 2 枚目が 1 枚目の複製になり、毒値検査
+    // だけでは素通りする）。h0 が枚ごとに違うので、段が効いていれば必ず割れる。
+    for (let step = 0; step < outShape[0]; step += 1) {
+      const base = step * 8;
+      assertEquals(
+        [...output.data.slice(base, base + 4)].every(
+          (value, index) => value === output.data[base + 4 + index],
+        ),
+        false,
+        `t=${step}: バッチ 2 枚が同一（B の段が効いていない）`,
+      );
+    }
+    // MUST: 時間方向にも値が動いている（時間ループが 1 ステップで打ち切られていない）。
+    assertEquals(
+      [...output.data.slice(0, 8)].every((value, index) => value === output.data[8 + index]),
+      false,
+      "t=0 と t=1 が同一（時間ループが縮退している）",
+    );
+  },
+});
+
+Deno.test({
   name: "conv2d 直接カーネル（groups>1）は毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

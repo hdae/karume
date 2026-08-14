@@ -29,6 +29,7 @@ import {
   deformConv2dAttrs,
   describeArity,
   flipDim,
+  type GruScanOpName,
   layerNormAttrs,
   maskedFillValue,
   numel,
@@ -159,6 +160,12 @@ const UNARY_F32: Readonly<
   clamp_min: (x, [min]) => (x < min ? min : x),
   leaky_relu: (x, [slope]) => (x < 0 ? slope * x : x),
 };
+
+/**
+ * {@link UNARY_F32} を attrs スカラ無しで引くときの空表（表は clamp 族と共有しているので
+ * 第 2 引数が要る — 呼び分けのために式を写さない）。
+ */
+const NO_SCALARS: readonly number[] = [];
 
 /** f32 → bool の比較（attrs のスカラと比べる）。bool は u32 の 0 / 1（ADR 0009）。 */
 const COMPARE_SCALAR: Readonly<
@@ -1374,6 +1381,86 @@ export const referenceUpsampleBilinear2d = (
 };
 
 /**
+ * GRU の隠れ側スキャン（`gru_scan` / `gru_scan_reverse` — 第 2 層・ADR 0056）。
+ *
+ * `gh = W_hh·h + b_hh` / `r = σ(gh_r + gi_r)` / `z = σ(gh_z + gi_z)` /
+ * `n = tanh(gi_n + gh_n·r)` / `h' = (h − n)·z + n`。
+ *
+ * MUST: 更新式は `(h − n)·z + n` の**逐語**（数学的に同値な `(1 − z)·n + z·h` は f32 で別の
+ * 丸め列になる — 実測で 10 万要素中 44,345 件が不一致）。ゲートの足し順と `n` の積の順も
+ * torch の分解形に合わせる（ADR 0056 決定 3）。
+ * MUST: ステップごとに `Math.fround` で f32 へ落とす。状態が T ステップ運ばれるので、f64 の
+ * まま回すと GPU 側との差が T に比例して開き、突合の許容差が形依存になる。
+ * MUST: 逆方向は**走査順だけ**を反転し、書き出しは順方向の時間添字（GPU カーネルと同じ契約）。
+ * NOTE: 逐次の縮約はカーネルと同じ `k` 昇順だが、こちらは行を GEMM のタイルに割らない素の
+ * 内積で、ゲート 3 本も**別々のループ**で回す（添字の畳み方を共有しない — 軸の取り違えを
+ * 両側で相殺させないため）。
+ */
+export const referenceGruScan = (
+  name: GruScanOpName,
+  gi: RefTensor,
+  initial: RefTensor,
+  weight: RefTensor,
+  bias: RefTensor,
+): RefTensor => {
+  const contract = resolveOpContract(name);
+  for (const input of [gi, initial, weight, bias]) {
+    assertDtype(contract, input.dtype, "reference");
+  }
+  const shape = computeOutputShape(
+    contract,
+    [gi.shape, initial.shape, weight.shape, bias.shape],
+    "reference",
+  );
+  const [time, batch, hidden] = shape;
+  const gates = 3 * hidden;
+  const out = new Float32Array(numel(shape));
+  const f32 = Math.fround;
+  /** ゲート `g`（0 = r / 1 = z / 2 = n）の隠れ側 `Σ_k W_hh[g·H + j, k]·h[k] + b_hh[g·H + j]`。 */
+  const hiddenGate = (state: Float32Array, gate: number, unit: number): number => {
+    const row = (gate * hidden + unit) * hidden;
+    let acc = 0;
+    for (let k = 0; k < hidden; k += 1) acc += weight.data[row + k] * state[k];
+    // bias は last（GEMM の epilogue 形 — conv 系の bias-first ではない）
+    return f32(acc + bias.data[gate * hidden + unit]);
+  };
+  for (let item = 0; item < batch; item += 1) {
+    const state = new Float32Array(hidden);
+    for (let unit = 0; unit < hidden; unit += 1) state[unit] = initial.data[item * hidden + unit];
+    for (let step = 0; step < time; step += 1) {
+      const t = name === "gru_scan_reverse" ? time - 1 - step : step;
+      const inputBase = (t * batch + item) * gates;
+      const next = new Float32Array(hidden);
+      for (let unit = 0; unit < hidden; unit += 1) {
+        // ゲートの足し順は**隠れ側が第 1 引数**（torch の分解形の逐語）
+        const reset = f32(UNARY_F32.sigmoid(
+          f32(hiddenGate(state, 0, unit) + gi.data[inputBase + unit]),
+          NO_SCALARS,
+        ));
+        const update = f32(UNARY_F32.sigmoid(
+          f32(hiddenGate(state, 1, unit) + gi.data[inputBase + hidden + unit]),
+          NO_SCALARS,
+        ));
+        // n = tanh(i_n + h_n·r) — 積は `h_n · r`・和は入力側が第 1 引数
+        const gated = f32(hiddenGate(state, 2, unit) * reset);
+        const candidate = f32(UNARY_F32.tanh(
+          f32(gi.data[inputBase + 2 * hidden + unit] + gated),
+          NO_SCALARS,
+        ));
+        // h' = (h − n)·z + n
+        const decayed = f32(f32(state[unit] - candidate) * update);
+        next[unit] = f32(decayed + candidate);
+      }
+      for (let unit = 0; unit < hidden; unit += 1) {
+        state[unit] = next[unit];
+        out[(t * batch + item) * hidden + unit] = next[unit];
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
  * 契約表の kind で分岐する統一入口（テストがグラフをそのまま辿れるようにするため）。
  *
  * `outShape` は「出力の宣言 shape が目標形」の op（reshape / expand — ADR 0011）で必須。
@@ -1467,5 +1554,7 @@ export const applyReferenceOp = (
       );
     case "upsampleBilinear2d":
       return referenceUpsampleBilinear2d(inputs[0], attrs);
+    case "gruScan":
+      return referenceGruScan(contract.name, inputs[0], inputs[1], inputs[2], inputs[3]);
   }
 };

@@ -1377,6 +1377,41 @@ const DEFORM_CASES: readonly OpCase[] = [
   },
 ];
 
+// GRU 隠れ側スキャン（第 2 層 op — ADR 0056）。ビット同一の A/B オラクルは
+// gpu_gru_scan_parity_test.ts が持つので、ここは **CPU 参照との独立突合**（縮約の添字と
+// 走査方向を、GEMM とも WGSL とも共有しない実装で確かめる）。
+// MUST: 逆方向も同じ列で回す（順方向だけだと `t` の写像が恒等でも緑になる）。
+
+/** GRU の隠れ側重み（H 本の縮約でゲートが飽和しない大きさに抑える）。 */
+const SMALL_WEIGHT = (i: number): number => ((i % 19) - 9) * 0.031;
+
+const GRU_SCAN_CASES: readonly OpCase[] = ["gru_scan", "gru_scan_reverse"].flatMap((op) => [
+  {
+    // 最小形（T = 2 = 状態が 1 度は運ばれる最小）・N ≠ H で軸の取り違えが値に出る
+    name: `${op} [4,1,9] h0[1,3]`,
+    op,
+    inputs: [
+      fill([4, 1, 9], SIGNED),
+      fill([1, 3], NONZERO),
+      fill([9, 3], SMALL_WEIGHT),
+      fill([9], SIGNED),
+    ],
+    outShape: [4, 1, 3],
+  },
+  {
+    // バッチ > 1（1 workgroup = 1 バッチ要素の境界。状態が混ざると値に出る）
+    name: `${op} バッチ 3 [3,3,15] h0[3,5]`,
+    op,
+    inputs: [
+      fill([3, 3, 15], SIGNED),
+      fill([3, 5], NONZERO),
+      fill([15, 5], SMALL_WEIGHT),
+      fill([15], SIGNED),
+    ],
+    outShape: [3, 3, 5],
+  },
+]);
+
 // 境界ケース。MUST: 「大きめの入力」は grid-stride の**縮退**を踏まない — 要素数から
 // 必要な workgroup 数がそのまま割り当たるためで、`stride` を定数にする誤りはここでは緑のまま
 // 通る。縮退そのものは tests/gpu_gridstride_test.ts が dispatch 数を絞って直接検証する。
@@ -1697,6 +1732,12 @@ Deno.test({
   name: "DCNv2（k の 2 形 / バッチ 2 / 非対称形）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(DEFORM_CASES),
+});
+
+Deno.test({
+  name: "GRU 隠れ側スキャン（2 方向 × バッチ 1 / 3）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(GRU_SCAN_CASES),
 });
 
 /**

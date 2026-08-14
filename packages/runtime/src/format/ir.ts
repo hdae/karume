@@ -352,7 +352,11 @@ export const parseIrGraph = (json: string): IrGraph => {
 
 /**
  * 束縛は入力 shape の次元位置から直接取る（要素数からの逆算はしない）ため、宣言された
- * シンボルは少なくとも 1 つの入力 shape に素の形（係数 1・オフセット 0）で現れる MUST。
+ * シンボルは少なくとも 1 つの入力 shape の**次元位置に現れる** MUST。
+ *
+ * 派生形（`2T` / `T+8`）でもよい — 1 次元 1 シンボルの一次式は実寸から解が一意に決まる
+ * （ADR 0057・`runtime/plan.ts` の `bindSymbols`）。素の形を要求していた頃は、時間軸に
+ * stride 2 の conv を持つグラフ（母音検出 CRNN）が記号長を宣言できなかった。
  */
 const checkSymbolBindability = (
   symbols: readonly string[],
@@ -362,14 +366,13 @@ const checkSymbolBindability = (
   for (const input of inputs) {
     for (const dim of input.shape) {
       if (typeof dim !== "string") continue;
-      const expr = parseDim(dim);
-      if (expr.coeff === 1 && expr.offset === 0) bindable.add(expr.sym);
+      bindable.add(parseDim(dim).sym);
     }
   }
   for (const symbol of symbols) {
     if (!bindable.has(symbol)) {
       throw new IrError(
-        `graph.symbols: '${symbol}' が入力 shape に素の形（'${symbol}'）で現れない — 束縛が取れない`,
+        `graph.symbols: '${symbol}' が入力 shape の次元位置に現れない — 束縛が取れない`,
       );
     }
   }

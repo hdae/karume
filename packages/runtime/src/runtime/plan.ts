@@ -6,7 +6,7 @@
  * 落ちなかったグラフだけが executor のエンコード段に進む。
  */
 
-import { evalDim, parseDim } from "../format/dims.ts";
+import { evalDim, parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrDtype, IrGraph, IrNode } from "../format/ir.ts";
 import {
   assertNodeContract,
@@ -305,9 +305,11 @@ const assertExtent = (size: number, where: string): number => {
 /**
  * 実入力の shape からシンボルを束縛する。
  *
- * MUST: 束縛は**入力 shape の次元位置**から取る（要素数からの逆算はしない — 複数シンボルや
- * 係数付き次元があると解が一意でなく、静かに誤った束縛が通る）。派生形（`2T+1` 等）の
- * 位置は束縛源にせず、束縛確定後に評価して実 shape と照合する。
+ * MUST: 束縛は**入力 shape の次元位置**から取る（要素数からの逆算はしない — 複数シンボルが
+ * 混ざると解が一意でなく、静かに誤った束縛が通る）。1 次元 1 シンボルの派生形（`2T` /
+ * `T+8` 等）は位置ごとに解が一意なので束縛源になる（{@link solveDim} — ADR 0057）。
+ * MUST: 割り切れない実寸は fail loudly。丸めて受けると、宣言 `2T` に奇数長を渡した run が
+ * 「末尾 1 要素だけ意味の違う入力」として最後まで通る。
  * MUST: 束縛の有無は `Object.hasOwn` のみで見る。`bindings[sym] !== undefined` は
  * Object.prototype 由来の `toString` 等が素通りし、以後の算術が黙って NaN 化する。
  *
@@ -362,14 +364,20 @@ export const bindSymbols = (
       const size = assertExtent(actual[index], where);
       if (typeof dim === "number") return;
       const expr = parseDim(dim);
-      if (expr.coeff !== 1 || expr.offset !== 0) return;
+      const solved = solveDim(expr, size);
+      if (solved === undefined) {
+        throw new ExecutionError(
+          `${where}: 実測 ${size} が宣言 '${dim}' の形をしていない` +
+            `（${expr.coeff} で割り切れる ${expr.offset} 以上の長さが要る）`,
+        );
+      }
       if (!Object.hasOwn(bindings, expr.sym)) {
-        bindings[expr.sym] = size;
+        bindings[expr.sym] = solved;
         return;
       }
-      if (bindings[expr.sym] !== size) {
+      if (bindings[expr.sym] !== solved) {
         throw new ExecutionError(
-          `${where}: シンボル '${expr.sym}' の束縛が衝突（${bindings[expr.sym]} と ${size}）`,
+          `${where}: シンボル '${expr.sym}' の束縛が衝突（${bindings[expr.sym]} と ${solved}）`,
         );
       }
     });

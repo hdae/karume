@@ -18,6 +18,14 @@ the package, so both the handler key (`torch.ops.torchvision.deform_conv2d.defau
 golden that covers the op need it. Making it conditional would split environments into "rejects
 `deform_conv2d` as an unknown op" and "accepts it".
 
+`karume/custom_ops.py` registers this project's own `karume::` operators (`gru_scan` /
+`gru_scan_reverse` — ADR [0056](../../docs/decisions/0056-gru-scan.md)) with
+`torch.library.custom_op`, so **importing it has a process-wide side effect**. `convert.py` imports
+it at the top for the same reason it imports `torchvision`: the handler key
+(`torch.ops.karume.gru_scan.default`) cannot be written otherwise. Hiding the body behind
+`register_fake` is what keeps the time axis symbolic — tracing never enters the Python loop, so the
+op survives `run_decompositions` as a single node instead of unrolling T times.
+
 ## CLI (`karume`)
 
 The subcommands installed by `[project.scripts]`. **The CLI does not interpret arguments** —
@@ -25,20 +33,20 @@ everything after the subcommand name is passed straight to the body (`karume <su
 prints the usage of the body's own parser). This shape keeps a copy of the exclusivity rules
 (`--verify` × `--target` etc.) out of the CLI; dispatch is a lazy import.
 
-| Subcommand                     | Wrapped body                                                                      | Former invocation                 |
-| ------------------------------ | --------------------------------------------------------------------------------- | --------------------------------- |
-| `karume export`                | script `export_anima.py` (the 4 emit targets of ADR 0016)                         | `python export_anima.py`          |
-| `karume export-sbv2`           | script `export_sbv2.py` (the 5 emit targets of ADR 0013)                          | `python export_sbv2.py`           |
-| `karume export-embeddinggemma` | script `export_embeddinggemma.py` (the sentence-embedding series)                 | `python export_embeddinggemma.py` |
-| `karume export-irodori`        | script `export_irodori.py` (the 6 text-side graphs of the TTS chain)              | `python export_irodori.py`        |
-| `karume export-dacvae`         | script `export_dacvae.py` (the 2 DACVAE codec graphs)                             | `python export_dacvae.py`         |
-| `karume export-deberta`        | script `export_deberta.py` (the real-weight DeBERTa-v2 series)                    | `python export_deberta.py`        |
-| `karume export-siglip2`        | script `export_siglip2.py` (the SigLIP2 vision tower series)                      | `python export_siglip2.py`        |
-| `karume export-birefnet`       | script `export_birefnet.py` (the BiRefNet_HR background-removal series)           | `python export_birefnet.py`       |
-| `karume export-depth-anything` | script `export_depth_anything.py` (the Depth Anything V2 relative-depth series)   | `python export_depth_anything.py` |
-| `karume export-vowel-detector` | script `export_vowel_detector.py` (the vowel-detector CRNN, one graph per length) | `python export_vowel_detector.py` |
-| `karume dist`                  | `karume.dist` (assembles the distribution form; arguments fully compatible)       | `python -m karume.dist`           |
-| `karume verify`                | `karume.verify` (validates the distribution form against every IR v1 rule)        | (new)                             |
+| Subcommand                     | Wrapped body                                                                    | Former invocation                 |
+| ------------------------------ | ------------------------------------------------------------------------------- | --------------------------------- |
+| `karume export`                | script `export_anima.py` (the 4 emit targets of ADR 0016)                       | `python export_anima.py`          |
+| `karume export-sbv2`           | script `export_sbv2.py` (the 5 emit targets of ADR 0013)                        | `python export_sbv2.py`           |
+| `karume export-embeddinggemma` | script `export_embeddinggemma.py` (the sentence-embedding series)               | `python export_embeddinggemma.py` |
+| `karume export-irodori`        | script `export_irodori.py` (the 6 text-side graphs of the TTS chain)            | `python export_irodori.py`        |
+| `karume export-dacvae`         | script `export_dacvae.py` (the 2 DACVAE codec graphs)                           | `python export_dacvae.py`         |
+| `karume export-deberta`        | script `export_deberta.py` (the real-weight DeBERTa-v2 series)                  | `python export_deberta.py`        |
+| `karume export-siglip2`        | script `export_siglip2.py` (the SigLIP2 vision tower series)                    | `python export_siglip2.py`        |
+| `karume export-birefnet`       | script `export_birefnet.py` (the BiRefNet_HR background-removal series)         | `python export_birefnet.py`       |
+| `karume export-depth-anything` | script `export_depth_anything.py` (the Depth Anything V2 relative-depth series) | `python export_depth_anything.py` |
+| `karume export-vowel-detector` | script `export_vowel_detector.py` (the vowel-detector CRNN, one graph)          | `python export_vowel_detector.py` |
+| `karume dist`                  | `karume.dist` (assembles the distribution form; arguments fully compatible)     | `python -m karume.dist`           |
+| `karume verify`                | `karume.verify` (validates the distribution form against every IR v1 rule)      | (new)                             |
 
 Which script runs is spelled in the **subcommand name**, never in a flag: `karume export --pipeline
 sbv2` would mean the CLI reads one argument of its own, and the no-copy rule above does not survive
@@ -127,35 +135,36 @@ as 0 / 1. Out-of-range i64 fails loudly (`convert.normalize_boundary_tensor`).
 
 Current models and coverage:
 
-| Model                      | Symbolic dim | IR ops exercised                                                                                                                                  |
-| -------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `unary_chain`              | none         | neg, abs, sqrt, log, exp                                                                                                                          |
-| `activations`              | none         | tanh, sigmoid, relu, gelu, gelu_tanh, sin                                                                                                         |
-| `broadcast_binary`         | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                                                                   |
-| `mlp`                      | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                                                        |
-| `row_reduce`               | `T`          | sum, amax, amin                                                                                                                                   |
-| `mask_chain`               | `T`          | mul(i32), cast, bitwise_not (has a bool output)                                                                                                   |
-| `int_cast`                 | `T`          | cast(f32→i32 truncating), sub(i32), mul(i32) (i32 output)                                                                                         |
-| `layout_chain`             | `T`          | permute(3-cycle), reshape ×3 (chain of aliases + coefficient dim 4T)                                                                              |
-| `expand_mask`              | `T`          | expand(bool / i32), cast, mul, bitwise_not                                                                                                        |
-| `batch_matmul`             | `T`          | bmm(B/M/K/N all distinct lengths), permute (rank-3 batched matmul)                                                                                |
-| `gather_last_dim`          | `T`          | gather(last dim / indices from an i32 input), sum                                                                                                 |
-| `attention_block`          | `T`          | linear ×4, softmax ×2, layer_norm, bmm, permute, reshape, add                                                                                     |
-| `fused_attention`          | none         | attention (one node preserved from SDPA; B/H/M/N/D all distinct, last query row has logits around −190)                                           |
-| `embedding_lookup`         | `T`          | embedding(padding_idx=0 is inactive in forward), sum                                                                                              |
-| `masked_scores`            | `T`          | masked_fill(−3.4e38 broadcast / 0 same-shape), softmax, cast, bitwise_not                                                                         |
-| `runtime_masked_attention` | none         | safe_softmax, where(bool graph input → 0/−inf), add, bmm, mul, permute, reshape, expand — the ADR 0044 chain, with one query row fully masked     |
-| `conv_block`               | `T`          | conv1d(kernel 3 / stride 1 / padding 1), permute                                                                                                  |
-| `dilated_conv`             | `T`          | conv1d(depthwise g=C, dilation 1/3/9 / intermediate groups / residual), leaky_relu, add                                                           |
-| `conv_transpose`           | `T`          | conv_transpose1d(up 2 and up 8 / asymmetric channels), conv1d(no bias), tanh                                                                      |
-| `symbolic_table`           | `T`          | sym_prefix_slice(i32 on 2 axes / f32 on 1 axis), gather, add (Tmax folding)                                                                       |
-| `scalar_operands`          | `T`          | add, sub, mul, div, cast (scalar promotion + reversed `1 − mask` used as a weight)                                                                |
-| `spline_pieces`            | `T`          | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape                                        |
-| `coupling_split`           | `T`          | slice(split decomposition + slicing after pad), cat, flip(axis length 3), pad, tanh, mul                                                          |
-| `decoder_tail`             | `T`          | leaky_relu(slope 0.1 and the default 0.01), expand(f32), conv1d, tanh, mul                                                                        |
-| `deform_conv2d_block`      | none         | deform_conv2d (DCNv2 — offsets reaching outside the input plane, modulator in [0,2], k=3×2 with asymmetric padding and a k=1 branch with no bias) |
-| `bilinear_resize`          | none         | upsample_bilinear2d (non-integer upscale 4×5→7×9, shrink 4×5→2×3, and a height-1 input whose H scale is 0)                                        |
-| `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (all 5 `WEIGHT_SLOTS` ops), tanh                                           |
+| Model                      | Symbolic dim | IR ops exercised                                                                                                                                                       |
+| -------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unary_chain`              | none         | neg, abs, sqrt, log, exp                                                                                                                                               |
+| `activations`              | none         | tanh, sigmoid, relu, gelu, gelu_tanh, sin                                                                                                                              |
+| `broadcast_binary`         | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                                                                                        |
+| `mlp`                      | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                                                                             |
+| `row_reduce`               | `T`          | sum, amax, amin                                                                                                                                                        |
+| `mask_chain`               | `T`          | mul(i32), cast, bitwise_not (has a bool output)                                                                                                                        |
+| `int_cast`                 | `T`          | cast(f32→i32 truncating), sub(i32), mul(i32) (i32 output)                                                                                                              |
+| `layout_chain`             | `T`          | permute(3-cycle), reshape ×3 (chain of aliases + coefficient dim 4T)                                                                                                   |
+| `expand_mask`              | `T`          | expand(bool / i32), cast, mul, bitwise_not                                                                                                                             |
+| `batch_matmul`             | `T`          | bmm(B/M/K/N all distinct lengths), permute (rank-3 batched matmul)                                                                                                     |
+| `gather_last_dim`          | `T`          | gather(last dim / indices from an i32 input), sum                                                                                                                      |
+| `attention_block`          | `T`          | linear ×4, softmax ×2, layer_norm, bmm, permute, reshape, add                                                                                                          |
+| `fused_attention`          | none         | attention (one node preserved from SDPA; B/H/M/N/D all distinct, last query row has logits around −190)                                                                |
+| `embedding_lookup`         | `T`          | embedding(padding_idx=0 is inactive in forward), sum                                                                                                                   |
+| `masked_scores`            | `T`          | masked_fill(−3.4e38 broadcast / 0 same-shape), softmax, cast, bitwise_not                                                                                              |
+| `runtime_masked_attention` | none         | safe_softmax, where(bool graph input → 0/−inf), add, bmm, mul, permute, reshape, expand — the ADR 0044 chain, with one query row fully masked                          |
+| `conv_block`               | `T`          | conv1d(kernel 3 / stride 1 / padding 1), permute                                                                                                                       |
+| `dilated_conv`             | `T`          | conv1d(depthwise g=C, dilation 1/3/9 / intermediate groups / residual), leaky_relu, add                                                                                |
+| `conv_transpose`           | `T`          | conv_transpose1d(up 2 and up 8 / asymmetric channels), conv1d(no bias), tanh                                                                                           |
+| `symbolic_table`           | `T`          | sym_prefix_slice(i32 on 2 axes / f32 on 1 axis), gather, add (Tmax folding)                                                                                            |
+| `scalar_operands`          | `T`          | add, sub, mul, div, cast (scalar promotion + reversed `1 − mask` used as a weight)                                                                                     |
+| `spline_pieces`            | `T`          | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape                                                             |
+| `coupling_split`           | `T`          | slice(split decomposition + slicing after pad), cat, flip(axis length 3), pad, tanh, mul                                                                               |
+| `decoder_tail`             | `T`          | leaky_relu(slope 0.1 and the default 0.01), expand(f32), conv1d, tanh, mul                                                                                             |
+| `deform_conv2d_block`      | none         | deform_conv2d (DCNv2 — offsets reaching outside the input plane, modulator in [0,2], k=3×2 with asymmetric padding and a k=1 branch with no bias)                      |
+| `gru_scan_block`           | `T`          | gru_scan / gru_scan_reverse (both directions over a symbolic time axis; the forward branch starts from a folded zero `h0`, the reverse one from a graph input), linear |
+| `bilinear_resize`          | none         | upsample_bilinear2d (non-integer upscale 4×5→7×9, shrink 4×5→2×3, and a height-1 input whose H scale is 0)                                                             |
+| `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (all 5 `WEIGHT_SLOTS` ops), tanh                                                                |
 
 The second output of `attention_block` is a **softmax over large negative values (−205..−180)**, the
 regime where a naive form (a softmax that does not subtract amax) has `exp` collapse to 0 in f32 and
@@ -1435,10 +1444,11 @@ conformance table is the correct one.
   int32 — the explicit exception of ADR 0010). An initializer's semantic dtype is f32 or i32, and
   the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8}` and `i32 × i32` (the cross products
   fail loudly).
-- There are **55** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
+- There are **57** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
   `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake activation,
   `safe_softmax` for runtime attention masks — ADR 0044 — `upsample_bilinear2d` for the
-  segmentation / depth family, and `deform_conv2d` for the BiRefNet family — ADR 0055):
+  segmentation / depth family, `deform_conv2d` for the BiRefNet family — ADR 0055 — and
+  `gru_scan` / `gru_scan_reverse` for recurrent models — ADR 0056):
   - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
     (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
     trigonometric op: constant tables (RoPE) are still folded away at export time, so only the
@@ -1471,6 +1481,19 @@ conformance table is the correct one.
     There is no field for `stride` / `dilation` / `groups` / `offset_groups` (all fixed to 1) and
     the mask is a mandatory slot, so DCNv1 (`use_mask=False`) fails loudly at the exporter boundary.
     A NaN offset propagates to the output instead of collapsing to a zero contribution
+  - recurrent scan (layer-2 molecules, ADR 0056): **`gru_scan`** / **`gru_scan_reverse`** — the
+    hidden-side scan of a GRU with arity 4 (`gi[T,N,3H]` / `h0[N,H]` / `W_hh[3H,H]` / `b_hh[3H]`)
+    and **no attrs**, producing `y[T,N,H]`. The **input-side GEMM is not part of the op**: the
+    caller prepares `gi` with the existing `linear`, which keeps its f16 / i8 storage eligibility.
+    The time axis may stay symbolic — that is the whole point, since decomposing `aten.gru`
+    unrolls it T times and forces `torch.export` to specialize the length. One step is
+    `gh = W_hh·h + b_hh` / `r = σ(gh_r + gi_r)` / `z = σ(gh_z + gi_z)` / `n = tanh(gi_n + gh_n·r)` /
+    `h' = (h − n)·z + n`, and **that exact operand order and grouping is the contract** (the
+    algebraically equivalent `(1 − z)·n + z·h` is a different rounding sequence). The reverse op
+    only reverses the **scan order** — its output is still in forward time order, because `flip`
+    does not accept a symbolic axis. There is no field for stacking, bidirectionality,
+    `has_biases=False`, `batch_first` or `dropout` (layers and directions are expressed by placing
+    several nodes), the op returns `y` only (no `h_n`), and the hidden width is capped at 256
 - **29 ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
   `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `conv2d.{stride,padding,dilation,groups}` /
   `leaky_relu.negative_slope` / `ge_scalar.value` / `le_scalar.value` / `gt_scalar.value` /
@@ -1648,7 +1671,7 @@ from scratch runs 2 once more after 5 (2 → 3 → 4 → 5 → 2 → 6 → 7). I
 single script is safe as long as its inputs above exist. Design records: ADR 0044 / 0046 / 0047
 (graphs), 0048 (host port), 0049 (codec integration).
 
-## Vowel-detector CRNN export (length-bucketed)
+## Vowel-detector CRNN export (one graph, symbolic length)
 
 A small CRNN that turns 10 ms speech features into 8-class lip-sync logits: two Conv1d layers
 (the first with stride 2, which halves the time axis), a 2-layer bidirectional GRU with hidden
@@ -1658,8 +1681,8 @@ plus 3 DSP dimensions) and post-processing (log-softmax, penalised Viterbi, shor
 
 ```sh
 # one-time input: inputs/vowel-detector/crnn_epoch3.pt (upstream training checkpoint)
-uv run karume export-vowel-detector --length 200            # → outputs/series/vowel-detector-crnn-epoch3-t200/
-uv run karume export-vowel-detector --length 200 --verify   # decomposed graph vs eager (bit-exact)
+uv run karume export-vowel-detector             # → outputs/series/vowel-detector-crnn-epoch3/
+uv run karume export-vowel-detector --verify    # gru_scan rewrite vs nn.GRU (bit-exact, 5 lengths)
 ```
 
 No dependency group is needed — `torch` is a base dependency, and the 20-line model definition is
@@ -1669,37 +1692,44 @@ of which the export touches). `load_state_dict(strict=True)` is what keeps the t
 honest; `tests/test_export_vowel_detector.py` pins the 22 parameter names and shapes so a drifting
 transcription fails without the real weights present.
 
-### The length is baked into the graph
+### The length is symbolic — the GRU is rewritten into scan nodes
 
 `aten.gru.input` survives `torch.export` as a single node, but `run_decompositions` unrolls it
 **along time**, which specialises the graph on T — asking for a dynamic `Dim("T")` fails with
-`Specializations unexpectedly required (T)`. So `--length` (T10, the number of 10 ms input frames)
-names one graph, and the series directory carries it. The unrolled graph uses 38 IR nodes per
-input frame and no op outside the existing vocabulary.
+`Specializations unexpectedly required (T)`, and T10 = 200 produced 8,434 nodes. So the script
+rewrites `nn.GRU` into `karume::gru_scan` / `gru_scan_reverse` calls before tracing
+(`karume/patch_vowel_detector.py`, ADR 0056): the input-side GEMM stays a plain `linear` over the
+whole time axis, and each layer and direction becomes **one scan node**, joined by `cat`.
+Everything else is the upstream `forward`.
 
-| `--length` (T10) | audio  | IR nodes | initializers | `model.safetensors` | graph JSON | weights | export |
-| ---------------- | ------ | -------- | ------------ | ------------------- | ---------- | ------- | ------ |
-| 200              | 2.0 s  | 7,620    | 23           | 3,892,256 B         | 26.7%      | 68.3%   | 8.1 s  |
-| 500              | 5.0 s  | 19,020   | 23           | 5,750,224 B         | 45.4%      | 46.3%   | 20.0 s |
-| 1000             | 10.0 s | 38,020   | 23           | 8,875,208 B         | 59.2%      | 30.0%   | 40.2 s |
+The symbol is declared on the **output** grid, as `2*Dim("T")` on the input axis. A bare `Dim("T")`
+would make the first Conv1d (kernel 5, stride 2, padding 2) produce `((T−1)//2)+1` — a floor
+division, which the dimension language (`coeff·sym+offset`) cannot express. With `2*Dim("T")` the
+conv output is exactly `T`. The consequence is a runtime contract: **the number of 10 ms input
+frames is always even** (callers drop the odd tail frame, which the 20 ms output grid has no room
+for anyway). Binding `T` from the derived `2T` axis is ADR 0057.
 
-(Measured 2026-08-13, torch 2.13.0+cpu. The 23 initializers are the 22 checkpoint tensors plus one
-folded constant — the zero initial hidden state. The weight bytes are the same 2,658,976 B in every
-row; graph JSON grows by ~5.27 KB per input frame, i.e. ~138 B per IR node, and export time by
-~40 ms per input frame.) **The graph JSON overtakes the weights at T10 ≈ 508**, so which term
-dominates the download depends on the bucket: below ~5 s of audio the weights still do. Bucketing
-multiplies the whole container, not just the JSON — the weights sit inside the same file as the
-graph metadata, so N buckets cost N × (weights + JSON).
+| what                | before (T10 = 200, unrolled) | now (symbolic)  |
+| ------------------- | ---------------------------- | --------------- |
+| IR nodes            | 8,434                        | **18**          |
+| depends on length   | yes (38 nodes per frame)     | **no**          |
+| `model.safetensors` | 3,892,256 B                  | **2,668,608 B** |
+| export time         | 8.1 s                        | **0.6 s**       |
+| initializers        | 23                           | 23              |
 
-**Right zero-padding a short utterance into a longer bucket does not work.** The backward GRU
-carries state home from the padding: padding a true length of 137 frames into a 500-frame graph
-measures a max abs diff of 5.91 and an argmax agreement of 0.971, with the error concentrated at
-the tail (0.138 at the head, 5.915 at the end); the `voiced` golden case padded from T10 = 138 to
-500 behaves the same way (5.50 max, 0.59 at the head, 5.50 at the end). A unidirectional model
-would only see the conv window edge (5.1e-03). Filling a bucket therefore needs real audio, or a
-time-recurrent op that makes the graph O(1) in T — the latter is a separate decision. The
-distribution form ships padding anyway, with the trade-off measured and written down; see the next
-section.
+(Measured 2026-08-14, torch 2.13.0+cpu, on the real checkpoint. The 23 initializers are the 22
+checkpoint tensors plus one folded constant — the zero initial hidden state. The weights are
+2,658,976 B, so the graph JSON is now under 10 KB instead of growing by ~5.27 KB per input frame.)
+
+The rewrite is **bit-exact against `nn.GRU`**, which is the whole basis for keeping the golden
+values: `--verify` compares the two eager paths at five lengths, and every emit compares them again
+per golden case before writing the expected outputs (see the gates below).
+
+**Right zero-padding a short utterance into a longer graph does not work** — which is why no part
+of this pipeline pads any more. The backward GRU carries state home from the padding: padding a
+true length of 137 frames into a 500-frame graph measures a max abs diff of 5.91 and an argmax
+agreement of 0.971, with the error concentrated at the tail (0.138 at the head, 5.915 at the end).
+A unidirectional model would only see the conv window edge (5.1e-03).
 
 ### Gates that run on every emit
 
@@ -1710,42 +1740,38 @@ section.
 - **Sanity** (orderings only, no thresholds): the silence-like case has the highest mean P(pau)
   of the four, and the voiced-like case the highest mean vowel mass — plus all four outputs must
   differ from one another.
-- **`--verify`**: the decomposed graph is compared against eager on all four cases and must be
-  **bit-exact** (measured 0.0 at T10 = 8 / 108 / 200). There is no patch layer here, so the
-  decomposition itself is what the equivalence claim is about; if torch's decomposition table
-  changes, the graph silently becomes a different numeric path and this is where it shows.
+- **Rewrite equivalence**: the expected outputs written into `io.<case>.safetensors` are taken from
+  the **reference path** (`nn.GRU` itself), and the rewritten path is compared against them with
+  `torch.equal` for every case. Taking the expected values from the rewritten path instead would
+  let an exporter bug and a runtime bug agree with each other and both stay green.
+- **`--verify`**: the same comparison at five lengths (T10 = 4 / 6 / 18 / 274 plus `--length`),
+  measured 0.0 on the real checkpoint. Length-dependent mistakes (the backward scan's boundary, the
+  order of the per-layer `cat`) do not all show up at a single length.
 
 ### Distribution form (`karume dist --pipeline vowel-detector`)
 
 ```sh
-uv run karume export-vowel-detector --length 250    # repeat for 500 / 1000 / 2000
+uv run karume export-vowel-detector                 # one graph, any length
 cp <upstream>/assets/feature_config.json ../../inputs/vowel-detector/
 uv run karume dist --pipeline vowel-detector        # → models/karume-vowel-detector/
 ```
 
-The repository ships **four length buckets** (250 / 500 / 1000 / 2000 frames = 2.5 / 5 / 10 / 20 s,
-33.9 MB in total) plus the mel filterbank as an `assets` entry, because feature extraction happens
-off-graph and cannot be reproduced without the exact 80 × 257 matrix the model was trained on.
+The repository ships **one graph** (`crnn`, 2,668,608 B) plus the mel filterbank as an `assets`
+entry, because feature extraction happens off-graph and cannot be reproduced without the exact
+80 × 257 matrix the model was trained on. **2,759,461 B in total** — the four length buckets it
+replaces were 34,088,454 B (−91.9%), since each bucket was a whole container, weights included.
 
-The buckets live on the **weights axis** of the manifest (one role each: `crnn_t250` …), not on the
-`quants` or `models` axis. Both of those are chosen once at construction time, whereas the bucket is
-chosen per call from the length of the clip — so every bucket has to be on disk, which is exactly
-what `resolveFiles` gives for the weights of the selected quant. The dtype axis stays orthogonal
-(each role carries a single `f32` label).
-
-The pipeline right zero-pads into the chosen bucket and drops the padding again before
-post-processing. That perturbs the logits, and the choice of grid is what the measurements settle:
-across four real utterances × ten padding amounts, the max abs diff over the _unpadded_ region is
-2.2–3.2 at **two** frames of padding and only 5.0–6.0 at 1024 — it saturates almost immediately and
-is neither monotone nor proportional in the padding. A finer grid therefore buys no accuracy and
-costs download size linearly (each bucket is a whole container, weights included), so the buckets
-are placed as "the fewest that cover the longest clip we accept". Anything longer than the largest
-bucket is rejected rather than truncated. Callers who need the numbers an exact-length graph would
-give can export one: that is what the real-weight E2E
-(`packages/runtime/tests/e2e_vowel_detector_test.ts`) does.
+The clip runs at its own length: no padding, no bucket, and therefore no length-dependent numbers.
+That also removes a discrepancy the bucketed form had no gate for — the padded path disagreed with
+the exact-length path on 3 of the 4 real utterances (a 20 ms boundary shift, a 40 ms `pau`
+appearing at the tail, a 40 ms `pau` appearing mid-utterance), because the backward GRU reads state
+back out of the padding. `packages/models/tests/e2e_vowel_detector_lab_test.ts` now pins the two
+paths to be byte-identical.
 
 `pipelineConfig` comes from two independent places and they are checked against each other before
 anything is placed: the feature contract (`sampleRate` / `featureDim` / `classes`) is read verbatim
-from the upstream `feature_config.json`, while `frameLengths` is read from the **input declarations
-of the exported graphs** — a graph baked for another length placed in a bucket's seat fails there,
-since nothing later in the chain could tell the two apart.
+from the upstream `feature_config.json`, while `maxFrames` is the symbolic upper bound the export
+script baked (`SYM_MAX`, in 20 ms frames, doubled). The IR carries symbol _names_ but no ranges, so
+the limit exists only in the manifest — the assembly gate checks instead that the graph really is
+symbolic (`2T` in, `T` out); a graph baked for one fixed length would otherwise assemble fine and
+fail in the user's hands for every clip but one.

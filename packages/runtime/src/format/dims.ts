@@ -85,3 +85,19 @@ export const evalDim = (expr: DimExpr, bindings: Readonly<Record<string, number>
   }
   return size;
 };
+
+/**
+ * {@link evalDim} の逆 — 実寸から `sym` の束縛を解く。**解は一意**（coeff ≥ 1・offset ≥ 0 の
+ * 一次式なので `(size − offset) / coeff` の 1 つきり）で、割り切れない実寸は「その宣言の形を
+ * していない」= 束縛が存在しないので `undefined` を返す。
+ *
+ * MUST: 割り切れない実寸を四捨五入や切り捨てで受けない。派生次元（`2T`）の入力に半端な長さが
+ * 来たとき、丸めて通すと**入力の末尾 1 要素が黙って別の意味になる**（呼び手はグラフが
+ * 受理したと見なす）。呼び手は `undefined` を fail loudly に変換する責務を負う。
+ */
+export const solveDim = (expr: DimExpr, size: number): number | undefined => {
+  if (!Number.isSafeInteger(size) || size < 0) return undefined;
+  const rest = size - expr.offset;
+  if (rest < 0 || rest % expr.coeff !== 0) return undefined;
+  return rest / expr.coeff;
+};

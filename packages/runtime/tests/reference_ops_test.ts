@@ -1,4 +1,4 @@
-import { assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
+import { assertAlmostEquals, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import {
   allclose,
   AllcloseError,
@@ -1088,6 +1088,60 @@ Deno.test("deform_conv2d の 1×1 分岐は offset の 3 分岐を手計算ど�
   assertEquals(run(offset(1, 0)), [3, 4, 0, 0]);
   // modulator は補間の**後**に掛かる（BiRefNet の値域 [0,2] の上端）
   assertEquals(run(offset(0.5, 0), t([1, 1, 2, 2], [2, 2, 2, 2])), [4, 6, 3, 4]);
+});
+
+// GRU 隠れ側スキャン（ADR 0056）。`W_hh = 0` に落とすと隠れ側の縮約が消え、残るのは
+// **ゲートの並び（r / z / n）・reset ゲートの掛かる先・時間の進み方**だけになるので、
+// そこを手計算で固定できる（縮約そのものは gpu_ops_test の CPU 参照突合が見る）。
+//
+// MUST: `b_hh` を非ゼロにする。reset ゲートは **b_hh 込みの隠れ側積**に掛かるので
+// （`n = tanh(i_n + (Σ W·h + b_n)·r)`）、bias を reset の外へ出す誤り形はここでだけ赤くなる。
+Deno.test("gru_scan は W_hh = 0 のときゲート並びと時間の進みを手計算どおりに踏む", () => {
+  const hidden = 1;
+  // gi[T=2, N=1, 3H] = [i_r, i_z, i_n] × 2 ステップ（ゲートごとに違う値 = 並びの取り違えが出る）
+  const gi = t([2, 1, 3], [0.5, -0.25, 0.75, -1.5, 0.125, -0.5]);
+  const h0 = t([1, 1], [0.4]);
+  const weight = t([3, 1], [0, 0, 0]);
+  const bias = t([3], [0.1, -0.2, 0.3]);
+  /** 契約の式をそのまま JS の f64 で解いた期待値（f32 の丸め列は参照側の仕事）。 */
+  const advance = (state: number, step: number): number => {
+    const gate = (index: number): number => gi.data[step * 3 + index];
+    const sigmoid = (x: number): number => 1 / (1 + Math.exp(-x));
+    const reset = sigmoid(bias.data[0] + gate(0));
+    const update = sigmoid(bias.data[1] + gate(1));
+    const candidate = Math.tanh(gate(2) + bias.data[2] * reset);
+    return (state - candidate) * update + candidate;
+  };
+  const first = advance(0.4, 0);
+  const second = advance(first, 1);
+
+  const forward = applyReferenceOp("gru_scan", [gi, h0, weight, bias]);
+  assertEquals(forward.shape, [2, 1, hidden]);
+  assertAlmostEquals(forward.data[0], first, 1e-6);
+  assertAlmostEquals(forward.data[1], second, 1e-6);
+
+  // 逆方向は末尾から走査するので、初期状態 h0 を受けるのは **t = 1**。書き出しは順方向の
+  // 時間順のまま（`flip` を挟まない = op が走査方向を畳んでいる形の直接の門）。
+  const reverseFirst = advance(0.4, 1);
+  const reverseSecond = advance(reverseFirst, 0);
+  const backward = applyReferenceOp("gru_scan_reverse", [gi, h0, weight, bias]);
+  assertAlmostEquals(backward.data[1], reverseFirst, 1e-6);
+  assertAlmostEquals(backward.data[0], reverseSecond, 1e-6);
+});
+
+// 状態が**バッチ間で混ざらない**ことと、`W_hh` が本当に隠れ側だけに掛かることの門。
+// バッチ 0 の h0 だけを非ゼロにすると、W_hh の寄与はそのバッチにしか現れない。
+Deno.test("gru_scan は W_hh をバッチごとの状態にだけ掛ける", () => {
+  const gi = t([1, 2, 6], [0.2, 0.3, 0.4, 0.1, 0.2, 0.3, 0.2, 0.3, 0.4, 0.1, 0.2, 0.3]);
+  const weight = t([6, 2], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+  const bias = t([6], [0, 0, 0, 0, 0, 0]);
+  // バッチ 0 の状態だけ非ゼロ（gi はバッチ間で同一なので、差は W_hh·h からしか出ない）
+  const mixed = applyReferenceOp("gru_scan", [gi, t([2, 2], [0.7, -0.3, 0, 0]), weight, bias]);
+  const zeroed = applyReferenceOp("gru_scan", [gi, t([2, 2], [0, 0, 0, 0]), weight, bias]);
+  assertEquals(mixed.shape, [1, 2, 2]);
+  // バッチ 1（後半 2 要素）は h0 = 0 なので両者で一致し、バッチ 0 は一致しない
+  assertEquals([...mixed.data.slice(2)], [...zeroed.data.slice(2)]);
+  assertNotEquals([...mixed.data.slice(0, 2)], [...zeroed.data.slice(0, 2)]);
 });
 
 // 退化ケース（offset 全 0・mask 全 1）が素の conv2d と**厳密に一致**する。新規原子の唯一の

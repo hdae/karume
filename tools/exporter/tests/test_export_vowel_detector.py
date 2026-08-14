@@ -9,9 +9,15 @@
 - emit した initializer が state_dict と**バイト一致**すること、および重み由来でない
   initializer が紛れないこと（{@link TestCheckpointBytes}）
 - 長さが 20ms 格子に乗ること（奇数長は末尾に半端フレームを作る）
+- **時間軸が記号のまま焼かれる**こと（`2T` — この台本の存在理由。ADR 0056 / 0057）
+- golden の期待値が**参照経路**（`nn.GRU`）から採られ、差し替え経路とのビット一致が
+  emit ごとに見られていること（{@link TestWriteIo}）
 - golden の合成ケースが**互いに違う**こと（同じ入力を 2 度使うと sanity が恒真）
 - `_sanity` が確率質量の**順序**を見ること（値域検査も自己一致も恒真）
 - `--verify` が emit しないこと
+
+差し替え層そのもの（`nn.GRU` とのビット一致・対応外の fail loudly）は
+`tests/test_patch_vowel_detector.py` が持つ。
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from pathlib import Path
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
+from torch.export import Dim
 
 import export_vowel_detector as vd
 from karume.paths import SERIES_ROOT
@@ -92,12 +99,22 @@ def tiny_module() -> vd.Crnn:
     return vd.Crnn(hidden=TINY_HIDDEN, gru_hidden=TINY_GRU_HIDDEN).eval()
 
 
+def _export_tiny(module: vd.Crnn, out_dir: Path):
+    """台本と**同じ宣言**（記号長 `2T`）で 1 本 export する。"""
+    example = vd.build_cases(TINY_LENGTH)[0][1]
+    return export_to_file(
+        module,
+        (example,),
+        out_dir / vd.MODEL_FILE,
+        dynamic_shapes={vd.INPUT_NAME: {1: 2 * Dim("T", min=vd.SYM_MIN, max=vd.SYM_MAX)}},
+        symbol_names=("T",),
+    )
+
+
 @pytest.fixture
 def exported(tmp_path: Path, tiny_module: vd.Crnn):
     """tiny なモジュールを 1 本 export して `(module, graph, out_dir)` を返す。"""
-    example = vd.build_cases(TINY_LENGTH)[0][1]
-    graph = export_to_file(tiny_module, (example,), tmp_path / vd.MODEL_FILE, symbol_names=())
-    return tiny_module, graph, tmp_path
+    return tiny_module, _export_tiny(tiny_module, tmp_path), tmp_path
 
 
 class TestTranscription:
@@ -129,22 +146,61 @@ class TestTranscription:
 class TestSeriesLayout:
     def test_the_default_output_dir_is_a_series(self) -> None:
         """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — karume.paths）。"""
-        assert vd.default_out_dir(vd.DEFAULT_CKPT, vd.DEFAULT_LENGTH).parent == SERIES_ROOT
+        assert vd.default_out_dir(vd.DEFAULT_CKPT).parent == SERIES_ROOT
 
-    def test_each_length_gets_its_own_series(self) -> None:
-        """MUST: 長さごとに別系列 — 綴りを共有すると先の資産が黙って上書きされる。"""
-        first = vd.default_out_dir(vd.DEFAULT_CKPT, 200)
-        second = vd.default_out_dir(vd.DEFAULT_CKPT, 500)
-
-        assert first != second
-        assert first.name.endswith("-t200")
-        assert second.name.endswith("-t500")
+    def test_the_series_name_does_not_carry_a_length(self) -> None:
+        """グラフは 1 本（時間軸は記号）— 長さを綴ると「長さごとの資産」に見える。"""
+        assert vd.default_out_dir(vd.DEFAULT_CKPT).name == "vowel-detector-crnn-epoch3"
 
     def test_each_checkpoint_gets_its_own_series(self) -> None:
-        """MUST: epoch 違いも別系列（同じ席へ書くと先の重みが消える）。"""
+        """MUST: epoch 違いは別系列（同じ席へ書くと先の重みが消える）。"""
         other = vd.MODELS_ROOT / "crnn_epoch2.pt"
 
-        assert vd.default_out_dir(other, 200) != vd.default_out_dir(vd.DEFAULT_CKPT, 200)
+        assert vd.default_out_dir(other) != vd.default_out_dir(vd.DEFAULT_CKPT)
+
+
+class TestSymbolicLength:
+    """この台本の存在理由 — 長さが**グラフの受理集合に含まれない**こと。"""
+
+    def test_the_time_axis_is_symbolic(self, exported) -> None:
+        """入力は `2T`（10ms 格子）・出力は `T`（20ms 格子）。"""
+        _module, graph, _out_dir = exported
+
+        assert graph.symbols == ["T"]
+        assert graph.inputs[0].shape == [1, "2T", vd.FEATURE_DIM]
+        assert graph.values[graph.outputs[0]].shape == [1, "T", len(vd.CLASSES)]
+
+    def test_the_graph_does_not_grow_with_the_traced_length(
+        self, exported, tmp_path: Path, tiny_module: vd.Crnn
+    ) -> None:
+        """MUST: ノード数がトレース例の長さに依存しない。
+
+        依存していたら GRU がまだ時間方向へ展開されている（= 記号が保たれていない）。
+        以前の形は入力 1 フレームあたり 38 ノードで、T10=200 で 8,434 ノードだった。
+        """
+        _module, short, _out_dir = exported
+        long_dir = tmp_path / "long"
+        long_dir.mkdir()
+        example = vd.build_cases(TINY_LENGTH * 4)[0][1]
+        long = export_to_file(
+            tiny_module,
+            (example,),
+            long_dir / vd.MODEL_FILE,
+            dynamic_shapes={vd.INPUT_NAME: {1: 2 * Dim("T", min=vd.SYM_MIN, max=vd.SYM_MAX)}},
+            symbol_names=("T",),
+        )
+
+        assert [node.op for node in long.nodes] == [node.op for node in short.nodes]
+
+    def test_the_scan_ops_are_one_node_per_layer_and_direction(self, exported) -> None:
+        """多層・双方向は**ノードを並べて**表す（ADR 0056 決定 7 — 可変アリティを使わない）。"""
+        _module, graph, _out_dir = exported
+        ops = [node.op for node in graph.nodes]
+
+        assert ops.count("gru_scan") == vd.GRU_LAYERS
+        assert ops.count("gru_scan_reverse") == vd.GRU_LAYERS
+        # 層ごとに両方向を連結する `cat` が 1 本ずつ。
+        assert ops.count("cat") == vd.GRU_LAYERS
 
 
 class TestLength:
@@ -265,6 +321,31 @@ class TestWriteIo:
         assert set(tensors) == {f"{vd.INPUT_PREFIX}{vd.INPUT_NAME}", f"{vd.OUTPUT_PREFIX}0"}
         assert tuple(logits[vd.SILENCE_CASE].shape) == (1, TINY_LENGTH // 2, len(vd.CLASSES))
 
+    def test_the_expected_values_come_from_the_reference_path(self, exported) -> None:
+        """MUST: 期待値は `nn.GRU` 経路（差し替え経路ではない）。
+
+        両者はビット一致するので値では区別できない — **どちらを呼んだか**を差し替えて見る。
+        """
+        module, graph, out_dir = exported
+        seen: list[str] = []
+        original = module.reference_forward
+        module.reference_forward = lambda features: (  # type: ignore[method-assign]
+            seen.append("reference") or original(features)
+        )
+
+        vd._write_io(module, graph, vd.build_cases(TINY_LENGTH)[:1], out_dir)
+
+        assert seen == ["reference"]
+
+    def test_a_patched_path_that_diverges_fails_loudly(self, exported) -> None:
+        """MUST: 差し替えが `nn.GRU` とビット一致しない emit を止める（常設門）。"""
+        module, graph, out_dir = exported
+        original = module.forward
+        module.forward = lambda features: original(features) + 1e-6  # type: ignore[method-assign]
+
+        with pytest.raises(AssertionError, match="ビット一致しない"):
+            vd._write_io(module, graph, vd.build_cases(TINY_LENGTH)[:1], out_dir)
+
     def test_more_than_one_graph_output_fails_loudly(self, tmp_path: Path) -> None:
         """MUST: 出力はロジット 1 本 — 2 本目が生えると io の位置規約が黙ってずれる。"""
 
@@ -275,11 +356,10 @@ class TestWriteIo:
 
         torch.manual_seed(0)
         module = TwoOutputs(hidden=TINY_HIDDEN, gru_hidden=TINY_GRU_HIDDEN).eval()
-        cases = vd.build_cases(TINY_LENGTH)
-        graph = export_to_file(module, (cases[0][1],), tmp_path / vd.MODEL_FILE, symbol_names=())
+        graph = _export_tiny(module, tmp_path)
 
         with pytest.raises(AssertionError, match="ロジットは 1 本"):
-            vd._write_io(module, graph, cases, tmp_path)
+            vd._write_io(module, graph, vd.build_cases(TINY_LENGTH), tmp_path)
 
 
 class TestSanity:
@@ -312,12 +392,12 @@ class TestCli:
         seen: list[str] = []
         monkeypatch.setattr(
             vd,
-            "verify_decomposition",
+            "verify_patch",
             lambda _ckpt, _length: (
                 seen.append("verify")
                 or [
                     {
-                        "stage": "gru-decomposition",
+                        "stage": "gru-scan-t8",
                         "claim": "bit-exact",
                         "bit_exact": True,
                         "maxdiff": {},
@@ -339,15 +419,17 @@ class TestCli:
             vd, "export_series", lambda *_a, **_kw: seen.append("emit") or {"dir": "x"}
         )
         monkeypatch.setattr(
-            vd, "verify_decomposition", lambda *_a: pytest.fail("emit で --verify が走った")
+            vd, "verify_patch", lambda *_a: pytest.fail("emit で --verify が走った")
         )
 
         vd.main([])
 
         assert seen == ["emit"]
 
-    def test_the_output_dir_follows_the_length(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """MUST: `--out` 未指定なら系列は長さに追随する（固定だと上書きになる）。"""
+    def test_the_output_dir_does_not_follow_the_golden_length(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MUST: 系列は `--length` に**追随しない** — グラフは 1 本で、長さは golden の話。"""
         seen: list[Path] = []
         monkeypatch.setattr(
             vd, "export_series", lambda _ckpt, out, _length: seen.append(out) or {"dir": str(out)}
@@ -355,4 +437,4 @@ class TestCli:
 
         vd.main(["--length", "500"])
 
-        assert seen == [vd.default_out_dir(vd.DEFAULT_CKPT, 500)]
+        assert seen == [vd.default_out_dir(vd.DEFAULT_CKPT)]

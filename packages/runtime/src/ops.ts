@@ -275,6 +275,32 @@ export const DEFORM_CONV2D_OP = "deform_conv2d";
 export const UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d";
 
 /**
+ * GRU の**隠れ側スキャン**（第 2 層 — ADR 0056）。時間方向の逐次だけを 1 ノードに畳み、
+ * **入力側 GEMM は持たない**（呼び手が既存 `linear` で `gi = x·W_ihᵀ + b_ih` を用意する）。
+ *
+ * **アリティ 4 固定**で `gi[T,N,3H]` / `h0[N,H]` / `w_hh[3H,H]` / `b_hh[3H]` を取り、
+ * 出力は `y[T,N,H]`（全ステップの `h`）。3H のゲート並びは **r / z / n** の順。
+ *
+ * ```
+ * r = sigmoid(gh_r + gi_r) / z = sigmoid(gh_z + gi_z) / n = tanh(gi_n + gh_n·r)
+ * h' = (h − n)·z + n            （gh = W_hh·h + b_hh）
+ * ```
+ *
+ * MUST: 走査方向は **op 名で分ける**（`gru_scan` / `gru_scan_reverse`）。attrs の bool 変種に
+ * しない — attrs に bool を載せる前例が無く（Python の bool は int の派生で検証機構の新設が
+ * 要る）、`gelu` / `gelu_tanh` と同じ「attr 変種は別 op」の手筋に揃える（ADR 0056 決定 2）。
+ * MUST: 逆方向 op も**出力は順方向の時間順**で書く。`flip` は記号軸を拒否する（ADR 0014 /
+ * 0046）ので、走査方向を op の中へ畳むことが記号 T を通す唯一の形。
+ * MUST: 多層 / 双方向の欄を作らない。IR v1 の可変アリティは `cat` だけで、`aten.gru` の
+ * `Tensor[16]` は構造的に載らない — 層と方向は**ノードを並べて**表す（ADR 0056 決定 7）。
+ * MUST: `h_n` を返さない（IR v1 は実質単一出力 — 出力は `y` だけ）。
+ * MUST: `has_biases=False` / `batch_first` / `dropout` の欄を作らない。欄の不存在がそのまま
+ * 「その形は語彙に無い」の宣言になる（ADR 0023 決定 4）。
+ */
+export const GRU_SCAN_OPS = ["gru_scan", "gru_scan_reverse"] as const;
+export type GruScanOpName = (typeof GRU_SCAN_OPS)[number];
+
+/**
  * 低精度格納が**適格**になる重みスロット（op 名 → 入力スロット番号 — ADR 0018）。
  *
  * 実測でサイズが支配的な 5 スロットだけを載せる。ここに無い消費（bias / norm 系の weight /
@@ -340,7 +366,8 @@ export type OpKind =
   | "conv2d"
   | "convTranspose1d"
   | "deformConv2d"
-  | "upsampleBilinear2d";
+  | "upsampleBilinear2d"
+  | "gruScan";
 
 /**
  * attrs スキーマ = attr キー → 値の検査（ADR 0012）。
@@ -535,6 +562,13 @@ export type OpContract =
     readonly kind: "upsampleBilinear2d";
     readonly name: typeof UPSAMPLE_BILINEAR2D_OP;
     readonly arity: 1;
+  })
+  // GRU の隠れ側スキャン（ADR 0056）。走査方向だけが違う 2 op を 1 kind で持つ（reduce 族や
+  // gelu / gelu_tanh と同じ扱い — 契約面は完全に同一で、消費側は `name` で方向を引く）。
+  | (ContractBase & {
+    readonly kind: "gruScan";
+    readonly name: GruScanOpName;
+    readonly arity: 4;
   });
 
 /** f32 専業の op（実測グラフに i32 / bool 形が現れていない — 対称性のためには解禁しない）。 */
@@ -1536,6 +1570,13 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     name: UPSAMPLE_BILINEAR2D_OP,
     arity: 1,
   }],
+  // GRU 隠れ側スキャン 2 方向（第 2 層・ADR 0056）。4 スロットとも f32 で同型・attrs 空。
+  // `w_hh` は op 内スロットなので**低精度格納の適格外**（WEIGHT_SLOTS に載せない）— 入力側の
+  // 重みは呼び手の `linear` が持つので、そちらは従来どおり f16 / i8 が効く。
+  ...GRU_SCAN_OPS.map((name): [string, OpContract] => [
+    name,
+    { ...contract(name), kind: "gruScan", name, arity: 4 },
+  ]),
 ]);
 
 /** 契約の attrs スキーマが宣言するキー（capability 射影と診断で使う）。 */
@@ -2518,6 +2559,45 @@ export const computeOutputShape = (
         }
       }
       return [x[0], x[1], outputSize[0], outputSize[1]];
+    }
+    case "gruScan": {
+      const [gi, initial, weight, bias] = inputShapes;
+      if (gi.length !== 3 || initial.length !== 2 || weight.length !== 2 || bias.length !== 1) {
+        throw new OpContractError(
+          `${where}: ${found.name} は gi[T,N,3H] / h0[N,H] / W_hh[3H,H] / b_hh[3H]（rank 3/2/2/1）: [${
+            gi.join(",")
+          }] / [${initial.join(",")}] / [${weight.join(",")}] / [${bias.join(",")}]`,
+        );
+      }
+      const [time, batch, gates] = gi;
+      const [initialBatch, hidden] = initial;
+      // MUST: 隠れ幅の正本は h0 の最終次元 1 か所（gi / W_hh / b_hh とは**突き合わせるだけ**）。
+      // 同じ事実を 2 か所から取ると、3H と H の取り違えが素通りする形が作れる。
+      if (batch !== initialBatch) {
+        throw new OpContractError(
+          `${where}: ${found.name} のバッチが gi [${gi.join(",")}] と h0 [${
+            initial.join(",")
+          }] で不一致`,
+        );
+      }
+      if (gates !== 3 * hidden) {
+        throw new OpContractError(
+          `${where}: ${found.name} の gi の最終次元 ${gates} が 3·H（H = ${hidden}）でない（ゲートは r / z / n の 3 本）`,
+        );
+      }
+      if (weight[0] !== 3 * hidden || weight[1] !== hidden) {
+        throw new OpContractError(
+          `${where}: ${found.name} の W_hh は [3H, H] = [${3 * hidden},${hidden}] のはずが [${
+            weight.join(",")
+          }]`,
+        );
+      }
+      if (bias[0] !== 3 * hidden) {
+        throw new OpContractError(
+          `${where}: ${found.name} の b_hh 長 ${bias[0]} が 3·H = ${3 * hidden} と違う`,
+        );
+      }
+      return [time, batch, hidden];
     }
     case "permute": {
       const source = inputShapes[0];

@@ -14,28 +14,23 @@
 //   「ロジットが動いてもラベルが変わらなかった」変更が素通りする。実測は 1e-5 級で、
 //   {@link LOGIT_TOLERANCE} がその 4.4 倍。
 //
-// ## 系列は**音声 1 本につき 1 系列**（長さがグラフを決める）
+// ## 系列は 1 本（グラフが 1 本・長さは記号）
 //
-// `aten.gru.input` は `run_decompositions` が時間方向へ完全展開するので、**T は動的軸に
-// できない**（`Dim("T")` は `Specializations unexpectedly required (T)` で落ちる）。したがって
-// グラフは長さごとに別物で、系列名も長さを綴る（`export_vowel_detector.py` の docstring）。
+// 時間軸は記号 `T`（20ms 格子）で、グラフ入力は `[1, 2T, 83]`（ADR 0056 / 0057）。したがって
+// **4 本の音声はすべて同じグラフ**を、それぞれの実長で回る。束縛は明示 seed を渡さず
+// **入力 shape から解かせる**（`2T` の派生次元からの束縛 = ADR 0057 の経路を、この門が実測で
+// 踏む唯一の席。配布形パイプラインの側は逆に明示 seed を渡す）。
 //
-// **この門は右ゼロ pad を採らない**（配布形は採る — 下）。逆方向 GRU が pad 側から状態を
-// 持ち帰るため、pad は量に関わらず末尾のロジットを O(1) 動かし、Viterbi が大域最適である以上
-// その揺れは `.lab` のどこにでも出る（実測: pad 2 フレーム = 40ms でも max abs diff 2.2〜3.2・
-// `.lab` はケースによって既に割れる）。したがってここは「その音声の長さちょうどで export した
-// 系列」を門にする — pad を挟むと、この門が固定しているのが**グラフの数値**なのか
-// **pad の効き方**なのか区別できなくなる。
-//
-// 配布形（`models/karume-vowel-detector`）は長さバケット + 右ゼロ pad を採っており、その判断と
-// 実測は `tools/exporter/karume/dist.py` の母音検出節と
-// `packages/models/src/vowel-detector/pipeline.ts` のモジュール doc が持つ。`.lab` がこの門の
-// 期待値と一致するとは限らない（pad の差はここで測ったとおり出る）。
+// **pad は 1 要素も無い**（奇数フレームの端数 1 本だけを切り捨てる）。以前は配布形だけが
+// 長さバケット + 右ゼロ pad を採っていて、pad が末尾のロジットを O(1) 動かすせいで `.lab` が
+// この門と割れていた（実測: pad 2 フレーム = 40ms でも max abs diff 2.2〜3.2）。バケットが
+// 消えた今は**配布形の `.lab` もここと完全一致**する（`packages/models/tests/
+// e2e_vowel_detector_lab_test.ts` が同じ 4 本で実測する）。
 //
 // ## 資産
 //
-// - グラフ: `outputs/series/vowel-detector-crnn-epoch3-t<長さ>/`（`.gitignore` の `outputs/`）。
-//   生成コマンドは {@link generateCommand} がそのまま正本。
+// - グラフ: `outputs/series/vowel-detector-crnn-epoch3/`（`.gitignore` の `outputs/`）。
+//   生成コマンドは {@link GENERATE_COMMAND} がそのまま正本。
 // - 実音声: `outputs/demo/vowel-<ケース>.wav`（16kHz mono）。生成台本は
 //   `examples/irodori/eval-audio.ts`（テキスト / seed / リサンプルの正本はあちら）で、日本語
 //   TTS（Irodori）が焼いた 48kHz を 1/3 に間引いたもの。**素材の同一性は sha256 で固定する** —
@@ -75,28 +70,25 @@ import { logitsToSegments, toLab } from "../../models/src/vowel-detector/postpro
 /**
  * 合成 golden（torch CPU 期待値）との突合に使う許容誤差。
  *
- * 実測（`atol=rtol=0` の素の突合・4 系列 × 4 ケース・出力 `[1, T10/2, 8]`）:
+ * 実測（`atol=rtol=0` の素の突合・golden 4 ケース @ T10=200・出力 `[1, 100, 8]`）:
  *
- * | 系列（長さ） | noise   | ramp    | silence | voiced  | \|ref\| 上端 |
- * | ------------ | ------- | ------- | ------- | ------- | ------------ |
- * | t284         | 4.17e-6 | 4.77e-6 | 7.27e-6 | 4.77e-6 | 11.345       |
- * | t344         | 4.53e-6 | 5.72e-6 | 8.11e-6 | 5.25e-6 | 11.321       |
- * | t800         | 6.20e-6 | 7.15e-6 | 1.05e-5 | 7.63e-6 | 11.201       |
- * | t1236        | 5.48e-6 | 1.03e-5 | 1.14e-5 | 7.15e-6 | 11.118       |
+ * | ケース  | maxAbs  | \|ref\| 上端 |
+ * | ------- | ------- | ------------ |
+ * | noise   | 3.82e-6 | 7.50         |
+ * | ramp    | 3.93e-6 | 9.66         |
+ * | silence | 5.01e-6 | 11.40        |
+ * | voiced  | 6.68e-6 | 11.38        |
  *
- * **系列ごとに分けず 1 本にしたのは実測の帰結**（SigLIP2 の 2 系列が独立の tolerance を持つのと
- * 違う点）: あちらは別モデルだが、こちらは**同じ重みの同じ経路を T だけ変えて展開したもの**で、
- * 誤差は T と共に単調に増える（4.17e-6 → 1.14e-5）。最長系列の実測が全系列を覆うので、系列ごとに
- * 同じ値を 4 本並べても「片方を測り直したら他方が黙って緩む」危険が減らない。MUST: **今より
- * 長い系列を足すときは測り直す**（外挿ではない）。
+ * 実音声側（`.lab` 門・T10 284〜1236）は torch 期待値を持たないが、**バケット時代の展開グラフ
+ * との差は 0**（4 本とも f32 のビット一致 — 移行時の実測）。長さを変えても数値経路は同じ
+ * `gru_scan` ノードなので、誤差が T と共に増える構造は残る（展開列だった頃の実測は t284 の
+ * 4.17e-6 → t1236 の 1.14e-5）。MUST: **今より長い golden を足すときは測り直す**（外挿ではない）。
  *
- * atol 5e-5 は実測最悪 1.14e-5（t1236 / silence）の約 4.4 倍。判定は atol が主導する
- * （rtol 1e-6 の寄与は \|ref\| 上端 11.3 でも 1.1e-5 で、atol の 1/4）。maxRel は 0 近傍の要素で
- * 4.6e-3 まで出るが、その絶対誤差は 1e-5 級でしかない。
+ * atol 5e-5 は展開列時代の実測最悪 1.14e-5（T10=1236 / silence）の約 4.4 倍で、記号長へ移った
+ * 後も同じ値を据え置いている（数値がビット一致なので、緩める理由も締める理由も無い）。判定は
+ * atol が主導する（rtol 1e-6 の寄与は \|ref\| 上端 11.4 でも 1.1e-5 で、atol の 1/4）。
  *
- * 誤差の出所は他の実重み E2E と同じ（fma 融合・縮約順序・超越関数の実装差）。GRU の展開列は
- * 1 フレームあたり 38 ノードで T に比例して深くなるが、再帰は **conv の出力 = 20ms 格子**の
- * 側にしか無いので、深さ 618 段でも 1e-5 級に収まっている。
+ * 誤差の出所は他の実重み E2E と同じ（fma 融合・縮約順序・超越関数の実装差）。
  *
  * 実装バグ（GRU のゲート順の取り違え・reset ゲートの掛け先の誤り・時間軸と特徴軸の転置）の
  * 誤差はロジットの値域と同じ O(1)〜O(10) で、この閾値の 5 桁以上上に出る（bias を外へ出す
@@ -105,10 +97,10 @@ import { logitsToSegments, toLab } from "../../models/src/vowel-detector/postpro
 const LOGIT_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
 
 /**
- * 実音声 1 本 = 系列 1 本の宣言。
+ * 実音声 1 本の宣言（グラフは 4 本で共有 — 違うのは長さだけ）。
  *
  * `frames` / `length` / `sha256` / `lab` は**全て実測値**で、音声を焼き直したら 4 つとも
- * 採り直しになる（{@link AUDIO_COMMAND} → {@link generateCommand} の順）。
+ * 採り直しになる（{@link AUDIO_COMMAND} → {@link GENERATE_COMMAND} の順）。
  */
 type Case = {
   /** 音声ケース名（`examples/irodori/eval-audio.ts` の `CASES` と 1:1）。 */
@@ -117,7 +109,7 @@ type Case = {
   readonly why: string;
   /** `extractFeatures` が返す 10ms フレーム数（波形長から決まる）。 */
   readonly frames: number;
-  /** グラフの入力長 T10（= `frames` を偶数へ落としたもの）。系列名の綴りでもある。 */
+  /** グラフへ渡す入力長 T10（= `frames` を偶数へ落としたもの）。 */
   readonly length: number;
   /** 16kHz WAV の sha256（golden を採った素材と同一であることを実行前に見る）。 */
   readonly sha256: string;
@@ -129,8 +121,9 @@ type Case = {
  * 実走するケース。**列挙ではなくここで固定する** — 生成済みのものを拾う形にすると、
  * 一部だけ生成し忘れた環境で「緑だが未検証」になる。
  *
- * 長さは 2.88s / 3.48s / 8.04s / 12.40s に散らしてある（グラフのノード数で 10,812 / 13,092 /
- * 30,420 / 46,988）。`vowels` だけは内容も検査に使う（{@link VOWEL_SEQUENCE}）。
+ * 長さは 2.88s / 3.48s / 8.04s / 12.40s に散らしてある（**同じ 18 ノードのグラフ**を 4 通りの
+ * 束縛で回す — 展開列だった頃はここが 10,812 / 13,092 / 30,420 / 46,988 ノードの別グラフ
+ * 4 本だった）。`vowels` だけは内容も検査に使う（{@link VOWEL_SEQUENCE}）。
  */
 const CASES: readonly Case[] = [
   {
@@ -211,7 +204,7 @@ const CASES: readonly Case[] = [
   },
   {
     name: "long",
-    why: "12 秒級・2 文（グラフ 46,988 ノード）",
+    why: "12 秒級・2 文（この門で最長の束縛 T=618）",
     frames: 1237,
     length: 1236,
     sha256: "28013dab4551c353d3f95e51733e69d71de43a719bf3c4f120eaa1082013f59b",
@@ -314,13 +307,12 @@ const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 const INPUT_NAME = "features";
 
-const seriesName = (entry: Case): string => `vowel-detector-crnn-epoch3-t${entry.length}`;
-const seriesRoot = (entry: Case): URL => new URL(`${seriesName(entry)}/`, SERIES_PARENT);
+const SERIES_NAME = "vowel-detector-crnn-epoch3";
+const SERIES_ROOT = new URL(`${SERIES_NAME}/`, SERIES_PARENT);
 const audioFile = (entry: Case): string => `vowel-${entry.name}.wav`;
 
-/** SKIP 時にそのまま貼れる生成コマンド（長さはケースごとに違う）。 */
-const generateCommand = (entry: Case): string =>
-  `cd tools/exporter && uv run --frozen python export_vowel_detector.py --length ${entry.length}`;
+/** SKIP 時にそのまま貼れる生成コマンド（グラフは 1 本 — 長さの指定は要らない）。 */
+const GENERATE_COMMAND = "cd tools/exporter && uv run --frozen python export_vowel_detector.py";
 
 /** 実音声そのものを焼き直すコマンド（テキスト / seed の正本は台本側）。 */
 const AUDIO_COMMAND = "deno task demo:eval-audio --source <Irodori 配布形のパス>";
@@ -374,7 +366,12 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
 
-/** golden の入力を宣言 dtype の view で組む（記号次元が無いので明示 bindings も不要）。 */
+/**
+ * golden の入力を宣言 dtype の view で組む。
+ *
+ * MUST: 明示 bindings を渡さない — この門は `2T` の派生次元から `T` を解く経路（ADR 0057）
+ * そのものを踏む席で、seed を渡すと解かせる相手が消える。
+ */
 const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, Tensor> => {
   const inputs: Record<string, Tensor> = {};
   for (const spec of parsed.graph.inputs) {
@@ -385,96 +382,109 @@ const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, 
   return inputs;
 };
 
-/** グラフが宣言している入力長 T10（記号次元は無い — `symbol_names=()`）。 */
-const declaredLength = (parsed: KarumeModel): number => {
-  const dim = parsed.graph.inputs[0].shape[1];
-  assert(typeof dim === "number", `${INPUT_NAME} の時間軸が記号次元 '${String(dim)}'`);
-  return dim;
+/**
+ * グラフの時間軸が**記号**（入力 `2T` / 出力 `T`）で焼かれていることを見る。
+ *
+ * MUST: 落とさない。長さを固定して焼いた古い形は入出力の名前も階数も同じなので、置き換わって
+ * いても「その 1 長のケースだけ」は緑のまま通る（残り 3 本が別の理由で落ちたように見える）。
+ */
+const assertSymbolicTimeAxis = (parsed: KarumeModel): void => {
+  assertEquals(parsed.graph.symbols, ["T"], `${SERIES_NAME} の記号次元`);
+  assertEquals(
+    parsed.graph.inputs[0].shape,
+    [1, "2T", FEATURE_DIM],
+    `${SERIES_NAME} の入力 '${INPUT_NAME}' の宣言`,
+  );
+  assertEquals(
+    parsed.graph.values[parsed.graph.outputs[0]].shape,
+    [1, "T", CLASS_COUNT],
+    `${SERIES_NAME} の出力の宣言`,
+  );
 };
 
+/** 登録時点で必要なので同期列挙する（`Deno.test` の ignore 判定と同じ理由）。 */
+const golden = discoverGolden(SERIES_ROOT);
+/** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
+const available = golden.length > 0;
+
+if (!available) {
+  console.warn(
+    `[karume] ${SERIES_ROOT.pathname} に export 済み資産が無いため実重み母音検出 E2E を ` +
+      `SKIP する（重みがリポジトリ管理外）。生成: ${GENERATE_COMMAND}`,
+  );
+}
+
+Deno.test({
+  name: `母音検出 資産: ${SERIES_NAME} — 期待するケースとモデル本体が揃っている`,
+  // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
+  ignore: !available,
+  fn: () => {
+    assertEquals(golden, [...EXPECTED_GOLDEN], `${SERIES_ROOT.pathname} の golden ケース`);
+    assert(exists(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
+  },
+});
+
+for (const caseName of golden) {
+  Deno.test({
+    name: `母音検出 golden 突合: ${caseName}（実 GPU / torch CPU 期待値）`,
+    ignore: !available || !GPU_AVAILABLE,
+    fn: async () => {
+      const [modelBytes, ioBytes] = await Promise.all([
+        readBuffer(SERIES_ROOT, MODEL_FILE),
+        readBuffer(SERIES_ROOT, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
+      ]);
+      const parsed = openModel(modelBytes);
+      const io = parseSafetensors(ioBytes);
+
+      // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+      const expectedKeys = [
+        ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
+        ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+      ].sort();
+      assertEquals(
+        [...io.tensors.keys()].sort(),
+        expectedKeys,
+        `${caseName} の io.safetensors のテンソルキー`,
+      );
+      assertSymbolicTimeAxis(parsed);
+
+      const gpu = await acquireGpu();
+      const session = await createSession(gpu, parsed);
+      try {
+        const outputs = await session.run(goldenInputs(parsed, io));
+        assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+
+        parsed.graph.outputs.forEach((name, index) => {
+          const view = io.tensors.get(`output.${index}`);
+          assert(view !== undefined, `output.${index} が golden に無い`);
+          const where = `${SERIES_NAME} / ${caseName} output.${index} ('${name}')`;
+          const declared = parsed.graph.values[name].dtype;
+          assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+          assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+          const report = compareTensors(
+            outputs[name],
+            ioTensor(io, view, declared),
+            LOGIT_TOLERANCE,
+          );
+          assert(report.pass, `${where}: ${formatAllclose(report)}`);
+        });
+      } finally {
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  });
+}
+
 for (const entry of CASES) {
-  const root = seriesRoot(entry);
-  /** 登録時点で必要なので同期列挙する（`Deno.test` の ignore 判定と同じ理由）。 */
-  const golden = discoverGolden(root);
-  /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
-  const available = golden.length > 0;
   /** 実音声の門。系列と WAV の**両方**が揃ってはじめて実走する。 */
   const audioAvailable = available && exists(new URL(audioFile(entry), DEMO_DIR));
 
-  if (!available) {
-    console.warn(
-      `[karume] ${root.pathname} に export 済み資産が無いため実重み母音検出 E2E ` +
-        `(${entry.name}) を SKIP する（重みがリポジトリ管理外）。生成: ${generateCommand(entry)}`,
-    );
-  } else if (!audioAvailable) {
+  if (available && !audioAvailable) {
     console.warn(
       `[karume] 実音声ケース (${entry.name}) を SKIP する（${audioFile(entry)} が無い）。` +
         `生成: ${AUDIO_COMMAND}`,
     );
-  }
-
-  Deno.test({
-    name: `母音検出 資産: ${seriesName(entry)} — 期待するケースとモデル本体が揃っている`,
-    // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-    ignore: !available,
-    fn: () => {
-      assertEquals(golden, [...EXPECTED_GOLDEN], `${root.pathname} の golden ケース`);
-      assert(exists(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
-    },
-  });
-
-  for (const caseName of golden) {
-    Deno.test({
-      name: `母音検出 golden 突合: ${seriesName(entry)} / ${caseName}（実 GPU / torch CPU 期待値）`,
-      ignore: !available || !GPU_AVAILABLE,
-      fn: async () => {
-        const [modelBytes, ioBytes] = await Promise.all([
-          readBuffer(root, MODEL_FILE),
-          readBuffer(root, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
-        ]);
-        const parsed = openModel(modelBytes);
-        const io = parseSafetensors(ioBytes);
-
-        // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
-        const expectedKeys = [
-          ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-          ...parsed.graph.outputs.map((_, index) => `output.${index}`),
-        ].sort();
-        assertEquals(
-          [...io.tensors.keys()].sort(),
-          expectedKeys,
-          `${caseName} の io.safetensors のテンソルキー`,
-        );
-        // 系列の綴りが指す長さと、グラフが宣言する長さが同じであること（別の長さの資産が
-        // 同じ名前で置かれていたら、以降の実音声ケースが黙って別のグラフを回す）。
-        assertEquals(declaredLength(parsed), entry.length, `${seriesName(entry)} の宣言長`);
-
-        const gpu = await acquireGpu();
-        const session = await createSession(gpu, parsed);
-        try {
-          const outputs = await session.run(goldenInputs(parsed, io));
-          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
-
-          parsed.graph.outputs.forEach((name, index) => {
-            const view = io.tensors.get(`output.${index}`);
-            assert(view !== undefined, `output.${index} が golden に無い`);
-            const where = `${seriesName(entry)} / ${caseName} output.${index} ('${name}')`;
-            const declared = parsed.graph.values[name].dtype;
-            assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-            assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-            const report = compareTensors(
-              outputs[name],
-              ioTensor(io, view, declared),
-              LOGIT_TOLERANCE,
-            );
-            assert(report.pass, `${where}: ${formatAllclose(report)}`);
-          });
-        } finally {
-          await session.dispose();
-          gpu.destroy();
-        }
-      },
-    });
   }
 
   Deno.test({
@@ -495,12 +505,12 @@ for (const entry of CASES) {
       const features = extractFeatures(wav.data, melBasis);
       assertEquals(features.frames, entry.frames, `${entry.name} の 10ms フレーム数`);
       // 出力は 20ms 格子なので、奇数フレームの端数 1 本は落として偶数長で回す（切り捨てで
-      // あって pad ではない — 冒頭の「右ゼロ pad を採らない」）。
+      // あって pad ではない — 冒頭の「pad は 1 要素も無い」）。
       const usable = features.frames - (features.frames % 2);
       assertEquals(usable, entry.length, `${entry.name} の偶数化フレーム数`);
 
-      const parsed = openModel(await readBuffer(root, MODEL_FILE));
-      assertEquals(declaredLength(parsed), usable, `${seriesName(entry)} の宣言長`);
+      const parsed = openModel(await readBuffer(SERIES_ROOT, MODEL_FILE));
+      assertSymbolicTimeAxis(parsed);
       const [outputName] = parsed.graph.outputs;
 
       const gpu = await acquireGpu();

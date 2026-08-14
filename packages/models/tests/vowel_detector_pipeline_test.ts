@@ -1,4 +1,4 @@
-// `VowelDetectorPipeline` の**構築ガード**と、長さバケット / mel 基底資産の結線。GPU も実資産も
+// `VowelDetectorPipeline` の**構築ガード**と、運用上限 / mel 基底資産の結線。GPU も実資産も
 // 要らない範囲だけを見る（実 GPU の突合は `packages/runtime/tests/e2e_vowel_detector_test.ts` が
 // 持つ — 重複させない。ホスト層の Python 正本とのパリティは
 // `packages/models/tests/vowel_detector_host_test.ts`）。
@@ -9,7 +9,7 @@
 //    （`src/vowel-detector/pipeline.ts` の `openVowelDetectorState` が掲げる MUST）。観測の
 //    仕掛けは SigLIP2 / BiRefNet と同じ — **全ケースで `assets` は空**にしておき、
 //     - 契約違反ケースが「その違反の文言」で落ちる = 資産解析より前に落ちている
-//     - 正しい manifest + 空 assets が `資産 'crnn_t250' が無い` で落ちる = 契約検査が全部
+//     - 正しい manifest + 空 assets が `資産 'crnn' が無い` で落ちる = 契約検査が全部
 //       済んだ後に初めて資産へ触る（上の対偶）
 //    の 2 つで門の順序そのものを縛る。
 //
@@ -17,9 +17,9 @@
 //    きりで、外れた配布形はパース時に落ちる。とくに `classes` は**並びが id** なので、
 //    置換された宣言が通ると `.lab` は成立したままラベルだけが入れ替わる。
 //
-// ③ **バケット選択**（`pickFrameLength`）— 入力長以上の最小を選び、上限超過は fail loudly。
-//    ここは「黙って切り詰めない」という配布形の約束そのもので、境界（ちょうどの長さ・
-//    1 フレーム超過）を名指しで踏む。
+// ③ **運用上限**（`assertFrameLimit`）— 上限超過は fail loudly。ここは「黙って切り詰め
+//    ない」という配布形の約束そのもので、境界（ちょうどの長さ・1 フレーム超過）を名指しで
+//    踏む。上限は配布形の宣言なので、TS 側に定数を持たない（`config.ts` の MUST）。
 //
 // ④ **mel 基底資産**（`parseMelBasis`）— テンソル名・dtype・形の 3 つを見る。基底がずれても
 //    特徴は「それらしい別の値」になるだけで、shape も値域も合ったまま最後まで通る。
@@ -31,16 +31,16 @@ import {
   type VowelDetectorPipelineConfig,
 } from "../src/vowel-detector/config.ts";
 import {
+  assertFrameLimit,
   parseMelBasis,
-  pickFrameLength,
   VowelDetectorPipeline,
 } from "../src/vowel-detector/pipeline.ts";
 import { FEATURE_DIM, MEL_BINS, N_MELS, SAMPLE_RATE } from "../src/vowel-detector/features.ts";
 import { LIPSYNC_CLASSES } from "../src/vowel-detector/postprocess.ts";
 import { writeSafetensors } from "../../../examples/sbv2/host/safetensors-write.ts";
 
-/** 配布形が持つ長さバケット（`karume/dist.py` の `VOWEL_DETECTOR_FRAME_LENGTHS` と同じ並び）。 */
-const FRAME_LENGTHS = [250, 500, 1000, 2000];
+/** 配布形が宣言する運用上限（`karume/dist.py` の `VOWEL_DETECTOR_MAX_FRAMES` と同じ数）。 */
+const MAX_FRAMES = 60_000;
 
 const fileRef = (path: string) => ({ path, size: 16, sha256: "a".repeat(64) });
 
@@ -49,7 +49,7 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
   sampleRate: SAMPLE_RATE,
   featureDim: FEATURE_DIM,
   classes: [...LIPSYNC_CLASSES],
-  frameLengths: FRAME_LENGTHS,
+  maxFrames: MAX_FRAMES,
 };
 
 /** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["crnn-epoch3"]` の中身を上書きする。 */
@@ -61,21 +61,11 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
     models: {
       "crnn-epoch3": {
         pipeline: "vowel-detector/1",
-        weights: Object.fromEntries(
-          FRAME_LENGTHS.map((length) => [
-            `crnn_t${length}`,
-            { f32: { file: fileRef(`crnn-epoch3/t${length}/model.f32.safetensors`) } },
-          ]),
-        ),
-        assets: { mel_basis: fileRef("crnn-epoch3/features/mel-basis.safetensors") },
-        quants: {
-          f32: {
-            weights: Object.fromEntries(
-              FRAME_LENGTHS.map((length) => [`crnn_t${length}`, "f32"]),
-            ),
-            session: {},
-          },
+        weights: {
+          crnn: { f32: { file: fileRef("crnn-epoch3/model.f32.safetensors") } },
         },
+        assets: { mel_basis: fileRef("crnn-epoch3/features/mel-basis.safetensors") },
+        quants: { f32: { weights: { crnn: "f32" }, session: {} } },
         defaultQuant: "f32",
         pipelineConfig: PIPELINE_CONFIG,
         ...patch,
@@ -123,29 +113,29 @@ Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添え�
 });
 
 Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
-  // 綴り違い（`frameLengths` に対する `frame_lengths`）が黙って既定へ縮退する経路を作らない。
+  // 綴り違い（`maxFrames` に対する `max_frames`）が黙って既定へ縮退する経路を作らない。
   const manifest = parseManifest(
-    manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, frame_lengths: [200] } }),
+    manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, max_frames: 200 } }),
   );
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "pipelineConfig: 未知キー 'frame_lengths'",
+    "pipelineConfig: 未知キー 'max_frames'",
   );
 });
 
 Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触る（門の順序の対偶）", async () => {
   // 上の 5 ケースが「資産が空でも manifest の文言で落ちる」ことの裏返し。正しい manifest なら
-  // 検査は資産まで進み、**最小のバケット**の不在で落ちる（= 契約検査は全て資産より前）。
+  // 検査は資産まで進み、**CRNN グラフ**の不在で落ちる（= 契約検査は全て資産より前）。
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    `資産 'crnn_t${FRAME_LENGTHS[0]}' が無い`,
+    "資産 'crnn' が無い",
   );
 });
 
-// ---- pipelineConfig のスキーマ（宣言 3 欄 + バケット）-------------------------
+// ---- pipelineConfig のスキーマ（宣言 3 欄 + 運用上限）------------------------
 
 const config = (patch: Record<string, unknown> = {}): VowelDetectorPipelineConfig =>
   parseVowelDetectorPipelineConfig({ ...PIPELINE_CONFIG, ...patch });
@@ -155,7 +145,7 @@ Deno.test("pipelineConfig: 実物の 4 欄をそのまま読める", () => {
   assertEquals(parsed.sampleRate, SAMPLE_RATE);
   assertEquals(parsed.featureDim, FEATURE_DIM);
   assertEquals([...parsed.classes], [...LIPSYNC_CLASSES]);
-  assertEquals([...parsed.frameLengths], FRAME_LENGTHS);
+  assertEquals(parsed.maxFrames, MAX_FRAMES);
 });
 
 Deno.test("pipelineConfig: 16kHz 以外の配布形は受理しない（リサンプラを持たない）", () => {
@@ -185,57 +175,41 @@ Deno.test("pipelineConfig: クラスの**並び**が違う配布形は受理し�
   );
 });
 
-Deno.test("pipelineConfig: 昇順でないバケット宣言は落とす（過大なグラフを黙って選ぶ）", () => {
-  assertThrows(
-    () => config({ frameLengths: [500, 250] }),
-    Error,
-    "pipelineConfig.frameLengths: 昇順でない",
-  );
-});
-
-Deno.test("pipelineConfig: 奇数長・空のバケット宣言は落とす", () => {
-  assertThrows(
-    () => config({ frameLengths: [251] }),
-    Error,
-    "pipelineConfig.frameLengths: 正の 2 の倍数でない",
-  );
-  assertThrows(
-    () => config({ frameLengths: [] }),
-    Error,
-    "pipelineConfig.frameLengths: 空でない配列でない",
-  );
-});
-
-// ---- バケット選択（入力長 → 回すグラフ）--------------------------------------
-
-Deno.test("バケット選択: 入力長以上の**最小**を選ぶ", () => {
-  const parsed = config();
-  assertEquals(pickFrameLength(parsed, 2), 250);
-  assertEquals(pickFrameLength(parsed, 284), 500);
-  assertEquals(pickFrameLength(parsed, 800), 1000);
-  assertEquals(pickFrameLength(parsed, 1236), 2000);
-});
-
-Deno.test("バケット選択: ちょうどの長さは pad 無しでそのバケット（境界は下側に閉じる）", () => {
-  const parsed = config();
-  for (const length of FRAME_LENGTHS) {
-    assertEquals(pickFrameLength(parsed, length), length, `t${length} ちょうど`);
-    // 1 フレーム足りない入力も同じバケット（= 境界が「以上」で閉じている側の主張。
-    // `>` で書くと、ちょうどの長さが 1 つ上のバケットへ黙って上がる）。
-    assertEquals(pickFrameLength(parsed, length - 1), length, `t${length} の 1 つ手前`);
+Deno.test("pipelineConfig: 奇数・非整数・非正の上限宣言は落とす", () => {
+  // グラフ入力は `2T` なので、奇数の上限は「その 1 本だけ通らない上限」= 意味が壊れている。
+  for (const value of [251, 0, -2, 2.5, "2000"]) {
+    assertThrows(
+      () => config({ maxFrames: value }),
+      Error,
+      "pipelineConfig.maxFrames: 正の 2 の倍数でない",
+      `maxFrames=${JSON.stringify(value)}`,
+    );
   }
 });
 
-Deno.test("バケット選択: 上限超過は fail loudly（黙って切り詰めない）", () => {
+Deno.test("pipelineConfig: 上限の欠落は落とす（既定へ縮退しない）", () => {
+  const { maxFrames: _dropped, ...rest } = PIPELINE_CONFIG;
+  assertThrows(
+    () => parseVowelDetectorPipelineConfig(rest),
+    Error,
+    "pipelineConfig.maxFrames: 無い",
+  );
+});
+
+// ---- 運用上限（入力長の門）---------------------------------------------------
+
+Deno.test("運用上限: ちょうどの長さは通り、1 フレーム超過で落ちる（境界は上側に閉じる）", () => {
   const parsed = config();
+  assertFrameLimit(parsed, 2);
+  assertFrameLimit(parsed, MAX_FRAMES);
   const error = assertThrows(
-    () => pickFrameLength(parsed, 2001),
+    () => assertFrameLimit(parsed, MAX_FRAMES + 2),
     Error,
     "音声が長すぎる",
   );
   // 何秒までなら通るのかが文言に出ていること（切り詰めの代わりに呼び出し側が区切るため）。
-  assert(error.message.includes("2000 フレーム"), error.message);
-  assert(error.message.includes("20.00 秒"), error.message);
+  assert(error.message.includes(`${MAX_FRAMES} フレーム`), error.message);
+  assert(error.message.includes("600.00 秒"), error.message);
 });
 
 // ---- mel 基底の資産 ----------------------------------------------------------

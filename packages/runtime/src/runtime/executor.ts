@@ -94,6 +94,7 @@ import {
   deformConv2dParams,
 } from "../kernels/deform-conv2d.ts";
 import { FLIP_KEY, FLIP_WGSL, FLIP_WORKGROUP_SIZE, flipParams } from "../kernels/flip.ts";
+import { gruScanKey, gruScanParams, gruScanWgsl } from "../kernels/gru-scan.ts";
 import { PAD_KEY, PAD_WGSL, PAD_WORKGROUP_SIZE, padParams } from "../kernels/pad.ts";
 import {
   UPSAMPLE_BILINEAR2D_KEY,
@@ -1985,6 +1986,9 @@ export class Session {
       case "upsampleBilinear2d":
         await this.#buildUpsampleBilinear2d(step, binds, out, builder);
         break;
+      case "gruScan":
+        await this.#buildGruScan(step, binds, out, builder);
+        break;
       case "reshape":
         // 別名化は #buildStep で済んでいる（この op は 1 dispatch も出さない）。
         break;
@@ -2350,6 +2354,46 @@ export class Session {
         { binding: 6, source: out },
       ],
       workgroups: [workgroups, 1, 1],
+    });
+  }
+
+  /**
+   * gru_scan / gru_scan_reverse（GRU の隠れ側スキャン — ADR 0056）。
+   *
+   * 1 workgroup = 1 バッチ要素（バッチ方向だけ grid-stride で dispatch 上限を跨ぐ）で、
+   * 時間ループはカーネル内。走査方向は **op 名**から引く（attrs に欄は無い）。
+   *
+   * MUST: 幾何は h0 と W_hh から取る（T は gi の先頭・N と H は h0）。gi の最終次元 3H から
+   * H を割り戻すと、契約検査が突き合わせているはずの取り違えを 1 か所で作り直すことになる。
+   */
+  async #buildGruScan(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    out: BindingSource,
+    builder: StepRecipeBuilder,
+  ): Promise<void> {
+    const direction = step.node.op === "gru_scan_reverse" ? "reverse" : "forward";
+    const key = gruScanKey(direction);
+    const { pipeline, layout } = await this.#state.cache.get(key, gruScanWgsl(direction));
+    const [time, batch, hidden] = step.outputShape;
+    const params = this.#writeParams(
+      gruScanParams({ time, batch, hidden }),
+      PARAMS_UNIFORM_USAGE,
+    );
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 5, source: out },
+      ],
+      workgroups: [
+        gridStrideWorkgroups(batch, 1, this.#state.gpu.limits.maxComputeWorkgroupsPerDimension),
+        1,
+        1,
+      ],
     });
   }
 

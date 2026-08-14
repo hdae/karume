@@ -43,6 +43,11 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   （従来は `where` / conv 族の 3 と `attention` の 3〜4）。
   attrs は `padding` の 1 本だけで、`stride` / `dilation` / `groups` / `offset_groups` は
   欄を持たない（= 1 固定）。既存 IR への影響はゼロ。
+- モデル拡充（2026-08-14）: `gru_scan` / `gru_scan_reverse` を**第 2 層**として追加（ADR
+  [0056](decisions/0056-gru-scan.md) — 分子だが「時間軸が実行時に決まる」意味情報が分解形で
+  失われる。要求元は vowel-detector の 2 層 BiGRU）。**アリティ 4 固定・attrs 空**で、
+  op が受け持つのは**隠れ側の逐次だけ**（入力側 GEMM は呼び手の `linear`）。走査方向は
+  attrs ではなく **op 名**が持つ（`gelu` / `gelu_tanh` と同じ手筋）。既存 IR への影響はゼロ。
 
 ## コンテナ
 
@@ -160,8 +165,11 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   offset は 1 以上のとき `+` 後置。`"1T"` や `"+0"` は非正準として拒否。負の係数・
   負のオフセット・複数シンボルは拒否）。
 - シンボル名は `[A-Za-z_][A-Za-z0-9_]*`。`symbols` に列挙され、かつ**少なくとも 1 つの
-  入力 shape に係数 1・オフセット 0 の素の形（`"T"`）で出現**しなければならない
-  （束縛は入力 shape の次元位置から直接取る。要素数からの逆算はしない）。
+  入力 shape の次元位置に出現**しなければならない（束縛は入力 shape の次元位置から直接取る。
+  要素数からの逆算はしない）。出現は**派生形でよい** — `"2T"` や `"T+8"` の実寸からは
+  `(size − offset) / coeff` で解が一意に決まり、割り切れない実寸は fail loudly
+  （[ADR 0057](decisions/0057-derived-dim-binding.md)。母音検出 CRNN は先頭 conv の stride 2
+  のせいで `2T` でしか長さ軸を宣言できない）。
 - 文法の正本は 1 箇所: 適合ケース表 `packages/runtime/tests/fixtures/dim-grammar.json`（valid / invalid /
   束縛評価の 3 節）。TS 実装と（M1 の）Python 実装は同じ表で検証する。
 
@@ -359,6 +367,25 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
     （torch の `aten/src/ATen/native/UpSample.h` と同じ順）。倍率は非整数でよく、
     **縮小（`Hout < H`）も同じ op**（2 タップしか読まないのは torch と同じ仕様で `area` とは
     別物）。空間軸の長さ 0 は受理しない
+
+- **RNN スキャン**（第 2 層の分子 — ADR [0056](decisions/0056-gru-scan.md)）:
+  - `gru_scan` / `gru_scan_reverse`（f32、**attrs 空**、**アリティ 4 固定**）—
+    `gi[T,N,3H]` / `h0[N,H]` / `W_hh[3H,H]` / `b_hh[3H]` → `y[T,N,H]` の GRU 隠れ側スキャン。
+    **時間軸 T は記号でよい**（この op の存在理由 — 分解形は T 回展開されて記号を失う）。
+    op が受け持つのは隠れ側の逐次だけで、**入力側 GEMM（`x·W_ihᵀ + b_ih`）は呼び手が既存
+    `linear` で用意する**（`gi` がその結果）。1 ステップの式は
+    `gh = W_hh·h + b_hh` / `r = σ(gh_r + gi_r)` / `z = σ(gh_z + gi_z)` /
+    `n = tanh(gi_n + gh_n·r)` / `h' = (h − n)·z + n` で、**この演算の並びと括り方が契約**
+    （数学的に同値な `(1 − z)·n + z·h` は別の丸め列 — f32 の 10 万要素中 44,345 件が
+    ビット不一致）。3H のゲート並びは **r / z / n**、`b_hh` は **last**（`(Σ W·h) + b`）、
+    reset ゲートは **b_hh 込みの隠れ側積**に掛かる。
+    `gru_scan_reverse` は**走査順だけ**が逆で、**出力は順方向の時間順**（`flip` を挟まない —
+    `flip` は記号軸を受理しないため）。
+    多層 / 双方向 / `has_biases=False` / `batch_first` / `dropout` は attrs に**欄が無い**
+    （層と方向は**ノードを並べて**表す — `aten.gru` の `Tensor[16]` は IR に載らない）。
+    出力は `y` だけで **`h_n` を返さない**（IR v1 の単一出力前提）。`h0` は入力スロットで
+    必須（ゼロ `h0` はエクスポータの定数畳み込みで initializer になる）。
+    隠れ幅は **`H ≤ 256`**（1 lane = 1 隠れユニットの割り当て — 超過は `CodegenError`）
 
 出力 dtype は「**スロット 0 の入力 dtype → 出力 dtype**」の写像で決まる（既定は恒等）。
 恒等でないのは比較 4 本（→ bool）・bool 入力の `sum`（→ i32）・`where`（bool → f32）だけで、

@@ -320,21 +320,16 @@ def parse_ir_graph(text: str) -> IrGraph:
 
 def _check_symbol_bindability(symbols: Sequence[str], inputs: Sequence[IrInput]) -> None:
     """束縛は入力 shape の次元位置から直接取る（要素数からの逆算はしない）ため、
-    宣言されたシンボルは少なくとも 1 つの入力 shape に素の形で現れなければならない。
+    宣言されたシンボルは少なくとも 1 つの入力 shape の**次元位置に現れ**なければならない。
+
+    派生形（`2T` / `T+8`）でもよい — 1 次元 1 シンボルの一次式は実寸から解が一意に決まる
+    （ADR 0057・TS 側は `runtime/plan.ts` の `bindSymbols` が解く）。
     """
-    bindable = {
-        expr.sym
-        for spec in inputs
-        for dim in spec.shape
-        if isinstance(dim, str)
-        for expr in [parse_dim(dim)]
-        if expr.coeff == 1 and expr.offset == 0
-    }
+    bindable = {parse_dim(dim).sym for spec in inputs for dim in spec.shape if isinstance(dim, str)}
     for symbol in symbols:
         if symbol not in bindable:
             raise IrError(
-                f"graph.symbols: '{symbol}' が入力 shape に素の形（'{symbol}'）で現れない"
-                " — 束縛が取れない"
+                f"graph.symbols: '{symbol}' が入力 shape の次元位置に現れない — 束縛が取れない"
             )
 
 

@@ -73,7 +73,7 @@ from karume.dist import (
     SIGLIP2_ROLE,
     STAGING_SUFFIX,
     VOWEL_DETECTOR_DEFAULT_MODEL,
-    VOWEL_DETECTOR_FRAME_LENGTHS,
+    VOWEL_DETECTOR_MAX_FRAMES,
     VOWEL_DETECTOR_OUTPUT_PATHS,
     AnimaSources,
     Artifact,
@@ -3286,14 +3286,14 @@ class TestBirefnetCli:
 
 # ---- 母音検出（音声 → リップシンク用の母音系列）------------------------------
 #
-# 偽資産はバケット 4 本ぶんのグラフ + 上流 `feature_config.json`。長さバケットは **weights の
-# 役割軸**（`karume.dist` の母音検出節）なので、ここが見るのは「4 本とも並ぶ」「役割名の綴りと
-# 焼かれた長さが一致する」「`pipelineConfig` の 4 欄が上流 config とグラフから導かれる」の 3 つ。
+# 偽資産は**記号長で焼かれた CRNN 1 本**（入力 `2T` / 出力 `T`）+ 上流 `feature_config.json`。
+# ここが見るのは「1 本だけが並ぶ」「時間軸が記号のまま」「`pipelineConfig` の 4 欄が上流 config
+# と台本の宣言から組まれる」の 3 つ。長さバケット 4 本の時代は ADR 0056 / 0057 で終わった。
 
 #: `pipelineConfig` の欄名（TS 側 `packages/models/src/vowel-detector/config.ts` の `ROOT_KEYS`
 #: の写し）。**ロード側は未知キーも欠落も parse 時に落とす**ので、焼く側とロード側の欄名は
 #: 完全一致が要る。
-_VOWEL_DETECTOR_CONFIG_KEYS = ("sampleRate", "featureDim", "classes", "frameLengths")
+_VOWEL_DETECTOR_CONFIG_KEYS = ("sampleRate", "featureDim", "classes", "maxFrames")
 
 _VOWEL_DETECTOR_N_MELS = 80
 _VOWEL_DETECTOR_N_FFT = 512
@@ -3319,22 +3319,21 @@ def _vowel_detector_feature_config(**patch: Any) -> dict[str, Any]:
 
 
 def _vowel_detector_graph(
-    length: int,
     *,
     feature_dim: int = _VOWEL_DETECTOR_N_MELS + 3,
     name: str = "features",
     outputs: int = 1,
+    in_shape: Sequence[Any] | None = None,
     out_shape: Sequence[Any] | None = None,
-    symbols: Sequence[str] = (),
+    symbols: Sequence[str] = ("T",),
 ) -> str:
     """門が読む最小の IR メタデータ（入力 1 本・出力の宣言・記号次元）。"""
     names = [f"out_{index}" for index in range(outputs)]
-    logits = (
-        list(out_shape) if out_shape is not None else [1, length // 2, len(_VOWEL_DETECTOR_CLASSES)]
-    )
+    logits = list(out_shape) if out_shape is not None else [1, "T", len(_VOWEL_DETECTOR_CLASSES)]
+    shape = list(in_shape) if in_shape is not None else [1, "2T", feature_dim]
     return json.dumps(
         {
-            "inputs": [{"name": name, "shape": [1, length, feature_dim]}],
+            "inputs": [{"name": name, "shape": shape}],
             "outputs": names,
             "values": {output: {"dtype": "f32", "shape": logits} for output in names},
             "symbols": list(symbols),
@@ -3346,12 +3345,13 @@ def _build_vowel_detector_sources(
     root: Path,
     *,
     model: str = VOWEL_DETECTOR_DEFAULT_MODEL,
-    graphs: Mapping[int, str] | None = None,
+    graph: str | None = None,
     feature_config: Mapping[str, Any] | None = None,
     omit_feature_config: bool = False,
+    omit_graph: bool = False,
     dtype: str = "F32",
 ) -> VowelDetectorSources:
-    """系列 4 本と上流素材を偽資産で再現する（配布しない `io.*` の混入込み）。
+    """系列 1 本と上流素材を偽資産で再現する（配布しない `io.*` の混入込み）。
 
     並びは `karume.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
     テストが root を差し替えるだけで同じ木を指せる形。
@@ -3361,16 +3361,17 @@ def _build_vowel_detector_sources(
         model=root / "inputs" / "vowel-detector",
         model_name=model,
     )
-    for length in VOWEL_DETECTOR_FRAME_LENGTHS:
-        graph = (graphs or {}).get(length) or _vowel_detector_graph(length)
+    if not omit_graph:
         _write(
-            sources.series(length) / "model.safetensors",
+            sources.series / "model.safetensors",
             _fake_safetensors(
-                dtype, f"vowel-detector-t{length}".encode(), {IR_METADATA_KEY: graph}
+                dtype,
+                b"vowel-detector",
+                {IR_METADATA_KEY: graph if graph is not None else _vowel_detector_graph()},
             ),
         )
         # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
-        _write(sources.series(length) / "io.silence.safetensors", b"io-fixture")
+        _write(sources.series / "io.silence.safetensors", b"io-fixture")
     if not omit_feature_config:
         raw = feature_config if feature_config is not None else _vowel_detector_feature_config()
         _write(sources.model / "feature_config.json", json.dumps(raw).encode("utf-8"))
@@ -3394,7 +3395,7 @@ def _vowel_detector_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 class TestVowelDetectorLayout:
-    def test_it_places_every_bucket_under_the_model_subtree(self, vowel_detector_assembled) -> None:
+    def test_it_places_the_graph_under_the_model_subtree(self, vowel_detector_assembled) -> None:
         out_dir, _ = vowel_detector_assembled
         expected = _in_subtree(VOWEL_DETECTOR_DEFAULT_MODEL, VOWEL_DETECTOR_OUTPUT_PATHS.values())
         assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
@@ -3403,22 +3404,18 @@ class TestVowelDetectorLayout:
         out_dir, _ = vowel_detector_assembled
         assert list(out_dir.rglob("io.*")) == []
 
-    def test_the_buckets_are_the_weights_axis_and_the_mel_basis_is_an_asset(
+    def test_the_graph_is_one_role_and_the_mel_basis_is_an_asset(
         self, vowel_detector_assembled
     ) -> None:
-        """長さは役割軸（quant / model 軸ではない）— 選んだ quant が 4 本とも連れてくる。"""
+        """記号長になったので CRNN は 1 役割きり（長さバケットの役割軸は消えた）。"""
         _, manifest = vowel_detector_assembled
         model = _vowel_detector_model(manifest)
         assert model["pipeline"] == "vowel-detector/1"
-        assert list(model["weights"]) == [
-            f"crnn_t{length}" for length in VOWEL_DETECTOR_FRAME_LENGTHS
-        ]
+        assert list(model["weights"]) == ["crnn"]
         assert list(model["assets"]) == ["mel_basis"]
         assert list(model["quants"]) == ["f32"]
         assert model["defaultQuant"] == "f32"
-        assert model["quants"]["f32"]["weights"] == {
-            f"crnn_t{length}": "f32" for length in VOWEL_DETECTOR_FRAME_LENGTHS
-        }
+        assert model["quants"]["f32"]["weights"] == {"crnn": "f32"}
 
     def test_it_writes_the_mel_basis_as_one_f32_tensor(self, vowel_detector_assembled) -> None:
         """特徴抽出はグラフの外なので、mel 基底は資産として配らないと再現できない。"""
@@ -3468,13 +3465,23 @@ class TestVowelDetectorPipelineConfig:
         assert config["featureDim"] == _VOWEL_DETECTOR_N_MELS + 3
         assert config["classes"] == list(_VOWEL_DETECTOR_CLASSES)
 
-    def test_it_derives_the_buckets_from_the_exported_graphs(
+    def test_it_declares_the_operating_limit_the_loader_requires(
         self, vowel_detector_assembled
     ) -> None:
-        """バケットの出どころは焼かれたグラフの入力宣言（写経しない）。"""
+        """上限は配布形にしか無い（IR は記号の値域を持たず、ロード側は定数を持たない）。"""
         _, manifest = vowel_detector_assembled
         config = _vowel_detector_model(manifest)["pipelineConfig"]
-        assert config["frameLengths"] == list(VOWEL_DETECTOR_FRAME_LENGTHS)
+        assert config["maxFrames"] == VOWEL_DETECTOR_MAX_FRAMES
+
+    def test_the_limit_is_the_symbolic_maximum_the_export_script_baked(self) -> None:
+        """配る上限と焼いた記号次元の上限が同じ 1 組であること。
+
+        `SYM_MAX` は 20ms 格子の本数、配る `maxFrames` は 10ms 格子の本数（入力は `2T`）。
+        ずれると「宣言は通るのにグラフが受けていない長さ」を利用者の手元で踏む。
+        """
+        import export_vowel_detector
+
+        assert VOWEL_DETECTOR_MAX_FRAMES == 2 * export_vowel_detector.SYM_MAX
 
     def test_it_refuses_a_feature_dim_that_is_not_mel_plus_dsp(self, tmp_path: Path) -> None:
         """内訳が上流と食い違う config は、グラフと形が合っていても受理しない。"""
@@ -3519,55 +3526,68 @@ class TestVowelDetectorMelBasis:
 class TestVowelDetectorGraphGate:
     """組み立て門 — ずれても配布形としては成立してしまう組み合わせを、配置の前に落とす。"""
 
-    def test_it_refuses_a_bucket_baked_for_another_length(self, tmp_path: Path) -> None:
-        """長さ違いのグラフは名前も階数も同じ = 席を取り違えても manifest は成立する。"""
-        sources = _build_vowel_detector_sources(tmp_path, graphs={500: _vowel_detector_graph(1000)})
-        with pytest.raises(DistError, match="役割 'crnn_t500' の席には"):
+    def test_it_refuses_a_graph_baked_for_a_fixed_length(self, tmp_path: Path) -> None:
+        """長さ固定のグラフは名前も階数も同じ = 載せても manifest は成立してしまう。
+
+        利用者の手元では**その 1 長以外の全ての音声**が実行時に落ちる（配布してから出る）。
+        """
+        sources = _build_vowel_detector_sources(
+            tmp_path,
+            graph=_vowel_detector_graph(
+                in_shape=[1, 500, _VOWEL_DETECTOR_N_MELS + 3],
+                out_shape=[1, 250, len(_VOWEL_DETECTOR_CLASSES)],
+                symbols=(),
+            ),
+        )
+        with pytest.raises(DistError, match="記号次元"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_a_graph_whose_input_is_not_twice_the_symbol(self, tmp_path: Path) -> None:
+        """入力が `T` のままだと、実行時の束縛が 2 倍ずれて `.lab` の時間が伸びる。"""
+        sources = _build_vowel_detector_sources(
+            tmp_path,
+            graph=_vowel_detector_graph(in_shape=[1, "T", _VOWEL_DETECTOR_N_MELS + 3]),
+        )
+        with pytest.raises(DistError, match="10ms 格子の長さは記号 T の 2 倍"):
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_graph_with_another_feature_dim(self, tmp_path: Path) -> None:
         sources = _build_vowel_detector_sources(
-            tmp_path, graphs={250: _vowel_detector_graph(250, feature_dim=80)}
+            tmp_path, graph=_vowel_detector_graph(feature_dim=80)
         )
-        with pytest.raises(DistError, match="feature_dim"):
+        with pytest.raises(DistError, match="期待は"):
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_graph_whose_output_is_not_the_20ms_grid(self, tmp_path: Path) -> None:
         """出力が 10ms 格子のまま焼かれていると、`.lab` の時間が 2 倍に伸びる。"""
         sources = _build_vowel_detector_sources(
             tmp_path,
-            graphs={250: _vowel_detector_graph(250, out_shape=[1, 250, 8])},
+            graph=_vowel_detector_graph(out_shape=[1, "2T", len(_VOWEL_DETECTOR_CLASSES)]),
         )
         with pytest.raises(DistError, match="20ms 格子"):
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_graph_with_a_second_output(self, tmp_path: Path) -> None:
-        sources = _build_vowel_detector_sources(
-            tmp_path, graphs={250: _vowel_detector_graph(250, outputs=2)}
-        )
+        sources = _build_vowel_detector_sources(tmp_path, graph=_vowel_detector_graph(outputs=2))
         with pytest.raises(DistError, match="ロジット 1 本だけ"):
             vowel_detector_plan(sources)
 
-    def test_it_refuses_a_graph_with_a_symbolic_time_axis(self, tmp_path: Path) -> None:
-        """GRU は時間方向へ完全展開されるので、記号次元を名乗るグラフは別物。"""
+    def test_it_refuses_a_graph_with_a_second_symbol(self, tmp_path: Path) -> None:
+        """記号は時間軸 1 本きり（2 本目はホストが束縛を渡せない）。"""
         sources = _build_vowel_detector_sources(
-            tmp_path, graphs={250: _vowel_detector_graph(250, symbols=("T",))}
+            tmp_path, graph=_vowel_detector_graph(symbols=("T", "S"))
         )
         with pytest.raises(DistError, match="記号次元"):
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_renamed_input(self, tmp_path: Path) -> None:
         """実行側は名前で束ねるので、綴りが変われば束ねられない。"""
-        sources = _build_vowel_detector_sources(
-            tmp_path, graphs={250: _vowel_detector_graph(250, name="mel")}
-        )
+        sources = _build_vowel_detector_sources(tmp_path, graph=_vowel_detector_graph(name="mel"))
         with pytest.raises(DistError, match="グラフ入力"):
             vowel_detector_plan(sources)
 
-    def test_it_refuses_a_missing_bucket(self, tmp_path: Path) -> None:
-        """1 本でも欠けたら配布しない（欠けたバケットの長さの音声が実行時に落ちる）。"""
-        sources = _build_vowel_detector_sources(tmp_path)
-        (sources.series(1000) / "model.safetensors").unlink()
+    def test_it_refuses_a_missing_graph(self, tmp_path: Path) -> None:
+        sources = _build_vowel_detector_sources(tmp_path, omit_graph=True)
         with pytest.raises(DistError, match="組み立ての入力が無い"):
             vowel_detector_plan(sources)
 
@@ -3600,10 +3620,10 @@ class TestVowelDetectorModelCard:
         assert "license: mit" in card
         # 格納形を変えない配布形は 4 値のどれでもない（Hub の推論に任せる）。
         assert "base_model_relation" not in card
-        # バケットと上限は利用者が最初に確かめたい制約そのもの。数は manifest から降りてくる。
-        assert f"**{len(VOWEL_DETECTOR_FRAME_LENGTHS)} length buckets**" in card
-        assert "longer than 20.0 s is rejected rather than silently truncated" in card
-        assert "250 (2.5 s) / 500 (5.0 s) / 1000 (10.0 s) / 2000 (20.0 s)" in card
+        # 「任意長 1 本」と上限は利用者が最初に確かめたい制約そのもの（数は manifest から）。
+        assert "**One graph, any length.**" in card
+        assert "longer than 600.0 s is rejected rather than silently truncated" in card
+        assert f"**{VOWEL_DETECTOR_MAX_FRAMES} frames of 10 ms** (600.0 s)" in card
 
     def test_it_carries_the_upstream_training_attributions(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3649,8 +3669,7 @@ class TestVowelDetectorCli:
     def test_the_series_name_follows_the_exporter(self) -> None:
         """系列名は `export_vowel_detector.default_out_dir` と同じ式（表を 2 つ持たない）。"""
         assert (
-            vowel_detector_series_name(VOWEL_DETECTOR_DEFAULT_MODEL, 500)
-            == "vowel-detector-crnn-epoch3-t500"
+            vowel_detector_series_name(VOWEL_DETECTOR_DEFAULT_MODEL) == "vowel-detector-crnn-epoch3"
         )
 
     def test_it_assembles_into_the_pipeline_default_directory(

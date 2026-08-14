@@ -45,11 +45,11 @@ const node = (op: string, ins: readonly string[], attrs: Record<string, unknown>
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
 // リテラル**で op 集合を固定するだけで、docs/ir-v1.md の一覧との同期は op 追加時の人手仕事
 // （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v1.md）。
-Deno.test("契約表の op 集合が期待値リテラル 55 本と一致する", () => {
+Deno.test("契約表の op 集合が期待値リテラル 57 本と一致する", () => {
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 55);
+  assertEquals(OP_CONTRACTS.size, 57);
   assertEquals([...OP_CONTRACTS.keys()].sort(), [
     "abs",
     "add",
@@ -78,6 +78,8 @@ Deno.test("契約表の op 集合が期待値リテラル 55 本と一致する"
     "ge_scalar",
     "gelu",
     "gelu_tanh",
+    "gru_scan",
+    "gru_scan_reverse",
     "gt_scalar",
     "layer_norm",
     "le_scalar",

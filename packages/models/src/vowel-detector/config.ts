@@ -4,11 +4,11 @@
  * hub は `pipelineConfig` を素通しする（禁止キーの一掃と規模上限だけを見る）。したがって
  * **形の正本はこのモジュール**で、手書きの検査を全て parse 時に走らせる。
  *
- * MUST: 未知キーは fail loudly（`{ frameLengths: …, frame_lengths: … }` のような綴り違いが
- * 黙って既定へ縮退すると、配布者の意図した長さバケットと実行が食い違ったまま気づけない）。
+ * MUST: 未知キーは fail loudly（`{ maxFrames: …, max_frames: … }` のような綴り違いが
+ * 黙って既定へ縮退すると、配布者の意図した上限と実行が食い違ったまま気づけない）。
  * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
  *
- * ## ここに並ぶ 4 欄のうち、**分岐に使うのは `frameLengths` だけ**
+ * ## ここに並ぶ 4 欄のうち、**実行時に効くのは `maxFrames` だけ**
  *
  * 他の 3 欄（`sampleRate` / `featureDim` / `classes`）は BiRefNet の `interpolation` と同じ
  * **宣言**で、受理集合はこの実装が持つ 1 値きり。分岐を持たせるのではなく、外れた配布形を
@@ -20,6 +20,13 @@
  * - `featureDim` — グラフ入力の最終軸と突き合わせる先（`pipeline.ts` の `assertGraph`）。
  * - `classes` — **並びが id**（`postprocess.ts` の `LIPSYNC_CLASSES`）。並びが違う配布形は
  *   ラベルが置換されるだけで、区間割りも `.lab` の書式も完全に成立する = 最も気づけない。
+ *
+ * ## MUST: `maxFrames` は配布形が宣言する運用上限（TS 側に定数を持たない）
+ *
+ * グラフの時間軸は記号なので、**IR は上限を持たない**（`docs/ir-v1.md` の `symbols` は名前の
+ * 列挙だけ）。焼くときに `Dim(max=…)` で宣言した値を配布形から受け、`detect` が特徴抽出の
+ * 直後に落とす（正本は exporter の `dist.py`）。ここに既定値や定数を置くと、別の上限で焼いた
+ * 配布形が来たときにホストだけが古い数を持つ形になる（SBV2 の `maxTokens` と同じ判断）。
  *
  * ## MUST: 後処理の定数（`switchPenalty` / `minDurationFrames` / `frameSec`）はここに無い
  *
@@ -40,10 +47,10 @@ const ROOT_KEYS: readonly string[] = [
   "sampleRate",
   "featureDim",
   "classes",
-  "frameLengths",
+  "maxFrames",
 ];
 
-/** 長さバケットの刻み（出力は 20ms 格子 = 入力 2 フレームで 1 本 — exporter の `--length`）。 */
+/** 入力長の刻み（出力は 20ms 格子 = 入力 2 フレームで 1 本 — グラフ入力は `2T`）。 */
 const LENGTH_MULTIPLE = 2;
 
 export type VowelDetectorPipelineConfig = {
@@ -54,11 +61,10 @@ export type VowelDetectorPipelineConfig = {
   /** 出力クラス（**並びが id**）。受理するのは {@link LIPSYNC_CLASSES} と同一の並びだけ。 */
   readonly classes: typeof LIPSYNC_CLASSES;
   /**
-   * 焼かれている長さバケット（10ms フレーム数）。**昇順・重複なし・2 の倍数**で、
-   * 1 本ごとに別のグラフが配布形に入っている（`aten.gru.input` が時間方向へ完全展開される
-   * ので T は動的軸にできない — `pipeline.ts` のモジュール doc）。
+   * 1 回の `detect` が受ける 10ms フレーム数の上限（= グラフを焼いたときの記号次元の上限）。
+   * **2 の倍数**（グラフ入力は `2T`）。
    */
-  readonly frameLengths: readonly number[];
+  readonly maxFrames: number;
 };
 
 const assertAllowedKeys = (
@@ -115,42 +121,28 @@ const readClasses = (
 };
 
 /**
- * 長さバケットを読む。
+ * 運用上限を読む。
  *
- * MUST: 昇順であることまで見る — バケット選択は「入力長以上の最小のバケット」を探す
- * （`pipeline.ts` の `pickFrameLength`）ので、並びが崩れた宣言は**過大なグラフを黙って選ぶ**
- * （値は出るが計算が数倍になり、pad が増えるぶん末尾の数値も変わる）。
+ * MUST: 2 の倍数であることまで見る — グラフ入力は `2T` なので、奇数の上限は「その 1 本だけは
+ * 通らない上限」という、宣言としては成立するが意味の壊れた数になる。
  */
-const readFrameLengths = (
+const readMaxFrames = (
   raw: Record<string, unknown>,
   key: string,
   where: string,
-): readonly number[] => {
+): number => {
   if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
   const value = raw[key];
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`${where}.${key}: 空でない配列でない（${JSON.stringify(value)}）`);
+  if (
+    typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 ||
+    value % LENGTH_MULTIPLE !== 0
+  ) {
+    throw new Error(
+      `${where}.${key}: 正の ${LENGTH_MULTIPLE} の倍数でない（${JSON.stringify(value)}）` +
+        "— 出力は 20ms 格子で、入力 2 フレームが 1 本になる",
+    );
   }
-  let previous = 0;
-  for (const entry of value) {
-    if (
-      typeof entry !== "number" || !Number.isInteger(entry) || entry <= 0 ||
-      entry % LENGTH_MULTIPLE !== 0
-    ) {
-      throw new Error(
-        `${where}.${key}: 正の ${LENGTH_MULTIPLE} の倍数でない要素がある` +
-          `（${JSON.stringify(value)}）— 出力は 20ms 格子で、入力 2 フレームが 1 本になる`,
-      );
-    }
-    if (entry <= previous) {
-      throw new Error(
-        `${where}.${key}: 昇順でない（${JSON.stringify(value)}）— バケット選択は` +
-          "「入力長以上の最小」を前から探すので、並びが崩れると過大なグラフを黙って選ぶ",
-      );
-    }
-    previous = entry;
-  }
-  return [...value];
+  return value;
 };
 
 /** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
@@ -175,6 +167,6 @@ export const parseVowelDetectorPipelineConfig = (
       "80 次元 log-mel + DSP 3 次元は学習時の契約そのもの（src/vowel-detector/features.ts）",
     ),
     classes: readClasses(raw, "classes", where),
-    frameLengths: readFrameLengths(raw, "frameLengths", where),
+    maxFrames: readMaxFrames(raw, "maxFrames", where),
   };
 };

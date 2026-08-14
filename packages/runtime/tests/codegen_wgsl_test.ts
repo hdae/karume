@@ -84,6 +84,14 @@ import {
   deformConv2dParams,
 } from "../src/kernels/deform-conv2d.ts";
 import {
+  GRU_SCAN_MAX_HIDDEN,
+  GRU_SCAN_WORKGROUP_SIZE,
+  type GruScanDirection,
+  gruScanKey,
+  gruScanParams,
+  gruScanWgsl,
+} from "../src/kernels/gru-scan.ts";
+import {
   SILU_WORKGROUP_SIZE,
   siluKey,
   type SiluMulOrder,
@@ -320,6 +328,11 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // 並べる**のが条件で、退化ビット一致（offset 0・mask 1 → conv2d）は両者の縮約順が
     // 厳密に一致していることに依存する — 片方だけバイト列が動くのが最大の事故。
     ["deform_conv2d.wgsl", DEFORM_CONV2D_WGSL],
+    // GRU 隠れ側スキャン（第 2 層 op — ADR 0056）。**2 方向を両方並べる**のが条件で、
+    // 走査順の 1 行以外がずれていないことがこの対でしか見えない。丸め障壁（workgroup
+    // memory 往復）が生成物に残っていることも、下の不変条件テストと合わせてここで凍結する。
+    ["gru_scan_forward.wgsl", gruScanWgsl("forward")],
+    ["gru_scan_reverse.wgsl", gruScanWgsl("reverse")],
     ["silu_x_sigmoid.wgsl", siluWgsl("x-sigmoid")],
     ["silu_sigmoid_x.wgsl", siluWgsl("sigmoid-x")],
     ["flip.wgsl", FLIP_WGSL],
@@ -1118,6 +1131,72 @@ Deno.test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で�
   assertThrows(() => deformConv2dParams({ ...dims, widthIn: 0 }), CodegenError, "width_in");
   assertThrows(() => deformConv2dParams({ ...dims, kernelW: 0 }), CodegenError, "kernel_w");
   assertThrows(() => deformConv2dParams({ ...dims, batch: 0 }), CodegenError, "batch");
+});
+
+// GRU 隠れ側スキャン（ADR 0056）。この op のビット同一門（tests/gpu_gru_scan_parity_test.ts）は
+// 「更新式が分解形の逐語であること」と「fma 縮約を丸め障壁で止めていること」に全面的に
+// 依存しているので、生成物の側でもその 2 点を固定する（実 GPU が無い環境でも赤くなる形）。
+Deno.test("gru_scan は更新式を分解形の逐語で書き、mul と add の間に丸め障壁を挟む", () => {
+  assertEquals(GRU_SCAN_WORKGROUP_SIZE, 256);
+  assertEquals(GRU_SCAN_MAX_HIDDEN, 256);
+  assertEquals(gruScanKey("forward"), "gru_scan:v1:f32:forward:wg256:h256");
+  assertEquals(gruScanKey("reverse"), "gru_scan:v1:f32:reverse:wg256:h256");
+  assertNotEquals(gruScanKey("forward"), gruScanKey("reverse"));
+  const invalid = "backward" as GruScanDirection;
+  assertThrows(() => gruScanKey(invalid), CodegenError, "走査方向が不正");
+  assertThrows(() => gruScanWgsl(invalid), CodegenError, "走査方向が不正");
+
+  const forward = gruScanWgsl("forward");
+  const reverse = gruScanWgsl("reverse");
+  for (const [where, wgsl] of [["forward", forward], ["reverse", reverse]] as const) {
+    // MUST: 縮約は k 昇順の逐次で字面も GEMM と同じ（`acc = acc + a * b`）
+    assertEquals(wgsl.includes("acc_r = acc_r + w_hh[row_r + k] * hk;"), true, where);
+    // MUST: bias は last（conv 系の bias-first を写すと linear とのビット同一が崩れる）
+    assertEquals(
+      wgsl.includes("sigmoid_stable((acc_r + b_hh[lid]) + gi[gi_base + lid])"),
+      true,
+      where,
+    );
+    // MUST: 丸め障壁 ①（n の積）と ②（更新式の積）が workgroup memory 往復で残っている
+    assertEquals(wgsl.includes("stage[lid] = bitcast<u32>(gh_n * gate_r);"), true, where);
+    assertEquals(
+      wgsl.includes("stage[lid] = bitcast<u32>((h_prev - cand) * gate_z);"),
+      true,
+      where,
+    );
+    assertEquals(wgsl.includes("let h_next = bitcast<f32>(stage[lid]) + cand;"), true, where);
+    // MUST: `(1 − z)·n + z·h` へ書き換えない（同値だが別の丸め列 — ADR 0056 決定 3）
+    assertEquals(wgsl.includes("1.0 - gate_z"), false, where);
+    assertEquals(wgsl.includes("var<workgroup> h_shared: array<f32, 256>;"), true, where);
+  }
+  // MUST: 2 方向の差は走査順の 1 行だけ（出力の時間添字は両方とも `t`）
+  assertEquals(forward.includes("let t = step;"), true);
+  assertEquals(reverse.includes("let t = dims.time - 1u - step;"), true);
+  assertEquals(
+    forward.replaceAll("let t = step;", "").replaceAll("(forward,", "(reverse,"),
+    reverse.replaceAll("let t = dims.time - 1u - step;", ""),
+    "走査順の 1 行とヘッダ以外が 2 方向で食い違う",
+  );
+
+  assertEquals([...gruScanParams({ time: 5, batch: 2, hidden: 128 })], [5, 2, 128, 0]);
+  // uniform struct の整列は 16 バイト（3 語ぶんの内容でも 4 語確保する）
+  assertEquals(gruScanParams({ time: 5, batch: 2, hidden: 128 }).byteLength, 16);
+  assertThrows(
+    () => gruScanParams({ time: -1, batch: 2, hidden: 4 }),
+    CodegenError,
+    "time は非負整数",
+  );
+  assertThrows(
+    () => gruScanParams({ time: 5, batch: 2, hidden: 0 }),
+    CodegenError,
+    "hidden は正整数",
+  );
+  // MUST: 上限超過は fail loudly（黙って縮退させると h_shared の範囲外書き込みになる）
+  assertThrows(
+    () => gruScanParams({ time: 5, batch: 2, hidden: GRU_SCAN_MAX_HIDDEN + 1 }),
+    CodegenError,
+    "上限 256 を超える",
+  );
 });
 
 Deno.test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保ち、mul 順をキーへ残す", () => {

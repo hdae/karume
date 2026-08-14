@@ -2126,6 +2126,103 @@ class TestUpsampleBilinear2d:
         assert "upsample_nearest2d" in str(err.value)
 
 
+class TestGruScan:
+    """第 2 層 — GRU 隠れ側スキャン（ADR 0056）。受理は実測形（アリティ 4・f32）だけ。"""
+
+    HIDDEN = 5
+
+    @classmethod
+    def _module(cls, *, reverse=False, hidden=None):
+        width = cls.HIDDEN if hidden is None else hidden
+
+        class Scan(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(3 * width, width) * 0.1)
+                self.bias = nn.Parameter(torch.randn(3 * width) * 0.1)
+
+            def forward(self, gates, state):
+                op = torch.ops.karume.gru_scan_reverse if reverse else torch.ops.karume.gru_scan
+                return op(gates, state, self.weight, self.bias)
+
+        return Scan()
+
+    @classmethod
+    def _args(cls, length=6):
+        return (torch.randn(length, 1, 3 * cls.HIDDEN), torch.randn(1, cls.HIDDEN))
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_a_scan_stays_one_node_with_a_symbolic_time_axis(self, convert_module, dyn_t, reverse):
+        """MUST: 時間軸は記号のまま 1 ノードで残る（この op の存在理由そのもの）。
+
+        `aten.gru.input` は分解が時間方向へ完全展開されるため長さが specialize されるが、
+        `karume::` の custom op は本体が `register_fake` の裏にあるのでトレースが入らず、
+        `run_decompositions(curated_decompositions())` を通しても展開されない。
+        """
+        graph, _ = convert_module(
+            self._module(reverse=reverse), self._args(), dynamic_shapes=({0: dyn_t}, None)
+        )
+
+        name = "gru_scan_reverse" if reverse else "gru_scan"
+        assert node_ops(graph) == [name]
+        node = only_node(graph, name)
+        # attrs 空契約（走査方向は op 名が持つ — bool attr は語彙に無い）
+        assert node.attrs == {}
+        # gi / h0 / w_hh / b_hh の 4 本（custom op の位置引数順）
+        assert len(node.ins) == 4
+        assert graph.values[node.outs[0]].shape == ["T", 1, self.HIDDEN]
+
+    def test_both_directions_are_distinct_ops(self, convert_module, dyn_t):
+        """MUST: 方向は別 op 名。同じ名前へ畳むと走査順が IR から読めなくなる。"""
+
+        class Bidirectional(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(3 * 5, 5) * 0.1)
+                self.bias = nn.Parameter(torch.randn(3 * 5) * 0.1)
+
+            def forward(self, gates, state):
+                forward = torch.ops.karume.gru_scan(gates, state, self.weight, self.bias)
+                backward = torch.ops.karume.gru_scan_reverse(gates, state, self.weight, self.bias)
+                return torch.cat([forward, backward], dim=2)
+
+        graph, _ = convert_module(Bidirectional(), self._args(), dynamic_shapes=({0: dyn_t}, None))
+
+        assert node_ops(graph) == ["gru_scan", "gru_scan_reverse", "cat"]
+        # 層間の結合は既存 cat（dim 2 は静的軸なので ADR 0046 の緩和すら要らない）
+        assert only_node(graph, "cat").attrs == {"dim": 2}
+
+    def test_a_non_f32_input_is_rejected(self, convert_module):
+        """契約は f32 専業（同じ op で f64 が来る）。"""
+        args = tuple(tensor.to(torch.float64) for tensor in self._args())
+
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(self._module().to(torch.float64), args)
+
+        assert "f32" in str(err.value)
+
+    def test_a_batch_first_layout_is_rejected(self, convert_module):
+        """MUST: `gi` は `[T,N,3H]`（time-first）固定。
+
+        `batch_first` の欄が無いので、時間軸と特徴軸を畳んだ rank-2 の `gi` は**ここで**
+        落ちる（通すと `[N,3H]` を「T = N の系列」として黙って走査する）。
+        """
+
+        class Flat(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(15, 5) * 0.1)
+                self.bias = nn.Parameter(torch.randn(15) * 0.1)
+
+            def forward(self, gates, state):
+                return torch.ops.karume.gru_scan(gates, state, self.weight, self.bias)
+
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(Flat(), (torch.randn(1, 15), torch.randn(1, 5)))
+
+        assert "rank" in str(err.value)
+
+
 class TestDeformConv2d:
     """第 1' 層 — DCNv2 専業（ADR 0055）。受理は実測形（BiRefNet の 20 箇所）だけ。"""
 

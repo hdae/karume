@@ -52,6 +52,10 @@ from torch.export import ExportedProgram
 from torch.export.graph_signature import OutputKind
 from torch.fx import Node
 
+# MUST: `torch.ops.karume.*` は custom op の登録モジュールを import しないと引けない
+# （ハンドラのキーが書けない）。登録はプロセス全域のグローバル副作用で、Python 側 exporter に
+# 「全モジュール副作用ゼロ」の不変条件は掛からない（ADR 0056 決定 6）。
+import karume.custom_ops  # noqa: F401  -- torch.ops.karume の登録が副作用
 from karume.dims import MAX_SAFE_INT, DimExpr, format_dim, is_symbol_name
 from karume.extents import extent_key, same_extents
 from karume.ir import (
@@ -63,7 +67,7 @@ from karume.ir import (
     IrValue,
 )
 from karume.normalize import SAFE_SOFTMAX_META
-from karume.ops import EMITTABLE_OPS, STRIDED_RANK
+from karume.ops import EMITTABLE_OPS, GRU_SCAN_OP, GRU_SCAN_REVERSE_OP, STRIDED_RANK
 from karume.shapes import assert_graph_shapes
 
 aten = torch.ops.aten
@@ -2099,6 +2103,57 @@ def _h_deform_conv2d(node: Node) -> Emitted:
     return Emitted("deform_conv2d", 5, {"padding": padding})
 
 
+def _gru_scan_emitted(node: Node, name: str) -> Emitted:
+    """karume.gru_scan{,_reverse} → 同名の IR op（attrs 空 — ADR 0056）。
+
+    スキーマは `(Tensor gi, Tensor h0, Tensor w_hh, Tensor b_hh) -> Tensor` で、位置引数の
+    テンソル 4 本がそのまま IR の入力 4 本になる（`_tensor_args` は位置順）。`karume::` 名前
+    空間の custom op なので Core ATen の分解表に登録が無く、`run_decompositions` の後も
+    1 ノードで残る（実測 — `karume/custom_ops.py` の docstring）。
+
+    MUST: 走査方向は **op 名**をそのまま IR op 名にする（attrs へ落とさない）。名前を 1 本に
+    畳んで attrs で分けると、契約表に bool の検査関数を新設することになる（既存の検査関数は
+    どれも `bool` を int の派生として明示的に弾いている — ops.py の `_assert_integer_attr`）。
+    名前は overload から導かず**呼び分けで渡す**（`ATEN_HANDLERS` のキーと 1 対 1 になり、
+    torch の内部表現の綴りに依存しない）。
+    MUST: rank と f32 に絞る（契約は f32 専業）。多層 / 双方向 / `h_n` の消費形は **この op に
+    到達する前**の形で表される — 呼び手が層と方向ごとにノードを並べる（ADR 0056 決定 7）ので、
+    ここで検出できるのは「1 ノードの形が契約外」だけ。
+    """
+    _expect(not node.kwargs, node, f"kwargs {sorted(node.kwargs)} を伴う gru_scan は未対応")
+    _expect(
+        len(node.args) == 4,
+        node,
+        f"引数 {len(node.args)} 本の gru_scan は未対応（スキーマは 4 本）",
+    )
+    gi, initial, weight, bias = (node.args[index].meta["val"] for index in range(4))
+    for slot, value, rank in (
+        ("gi", gi, 3),
+        ("h0", initial, 2),
+        ("w_hh", weight, 2),
+        ("b_hh", bias, 1),
+    ):
+        _expect(
+            value.dim() == rank,
+            node,
+            f"rank {value.dim()} の gru_scan {slot} は未対応（rank {rank} のみ）",
+        )
+        _expect(
+            value.dtype == torch.float32,
+            node,
+            f"dtype {value.dtype} の gru_scan {slot} は未対応（f32 のみ）",
+        )
+    return Emitted(name, 4, {})
+
+
+def _h_gru_scan(node: Node) -> Emitted:
+    return _gru_scan_emitted(node, GRU_SCAN_OP)
+
+
+def _h_gru_scan_reverse(node: Node) -> Emitted:
+    return _gru_scan_emitted(node, GRU_SCAN_REVERSE_OP)
+
+
 def _h_upsample_bilinear2d(node: Node) -> Emitted:
     """aten.upsample_bilinear2d.vec → upsample_bilinear2d（attrs `output_size` のみ）。
 
@@ -2278,6 +2333,10 @@ ATEN_HANDLERS = {
     # DCNv2（第 1' 層 — BiRefNet 一族の正面 blocker。ADR 0055）。`torchvision::` 名前空間の
     # カスタム op なので Core ATen の分解表に登録が無く、curated decomp 後も 1 ノードで残る。
     torch.ops.torchvision.deform_conv2d.default: _h_deform_conv2d,
+    # GRU 隠れ側スキャン 2 方向（第 2 層 — ADR 0056）。`karume::` 名前空間の自前 custom op で、
+    # 分解表に無いので curated decomp 後も 1 ノード = **時間軸 T が記号のまま残る**。
+    torch.ops.karume.gru_scan.default: _h_gru_scan,
+    torch.ops.karume.gru_scan_reverse.default: _h_gru_scan_reverse,
     # perf-a（ADR 0023）— SDPA を保存したターゲットだけがこのハンドラに来る
     # （`curated_decompositions(preserved=…)` がターゲット別に選ぶ）。
     aten.scaled_dot_product_attention.default: _h_attention,

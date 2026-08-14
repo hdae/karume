@@ -11,7 +11,8 @@
 // pad / flip / upsample_bilinear2d / deform_conv2d / **軸 reduce**）は `gid.x` の 1 次元
 // grid-stride、
 // 行方向の族（行 reduce / softmax /
-// layer_norm / rms_norm）は `workgroup_id.x` を `num_workgroups.x` で送る行ループを踏ませる。
+// layer_norm / rms_norm / **gru_scan**）は `workgroup_id.x` を `num_workgroups.x` で送る
+// 行ループを踏ませる（gru_scan の「行」はバッチ要素で、時間ループはカーネル内）。
 // **reduce 族は 2 変種とも載せる**（最終次元 = 行方向 / それ以外 = 要素方向で、走らせ方が違う）。
 // cumsum は**行を単位とした
 // `gid.x` の grid-stride**（1 invocation = 1 行の逐次走査）で、必要数は行数ではなく
@@ -106,6 +107,7 @@ import {
   UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE,
   upsampleBilinear2dParams,
 } from "../src/kernels/upsample-bilinear2d.ts";
+import { gruScanKey, gruScanParams, gruScanWgsl } from "../src/kernels/gru-scan.ts";
 import {
   DEFORM_CONV2D_KEY,
   DEFORM_CONV2D_WGSL,
@@ -954,6 +956,36 @@ const layerNormCase = (): DegenerateCase => {
   };
 };
 
+const gruScanCase = (): DegenerateCase => {
+  // 行方向の族と同型（1 workgroup = 1 バッチ要素を `num_workgroups.x` で送る）。時間ループは
+  // カーネル内なので縮退の対象はバッチ軸だけで、必要数は N そのもの。
+  // MUST: バッチごとに違う `h0` を渡す（全バッチ同じだと「別のバッチを走査する」誤りが値に
+  // 出ず、縮退耐性の検査が恒真化する）。
+  const time = 3;
+  const batch = 2_000;
+  const hidden = 4;
+  const gates = 3 * hidden;
+  const gi = fill([time, batch, gates], (i) => ((i * 7) % 23) * 0.13 - 1.4);
+  const initial = fill([batch, hidden], (i) => ((i * 5) % 19) * 0.09 - 0.8);
+  const weight = fill([gates, hidden], (i) => ((i % 11) - 5) * 0.07);
+  const bias = fill([gates], SIGNED);
+  return {
+    name: "gru_scan",
+    key: gruScanKey("forward"),
+    wgsl: gruScanWgsl("forward"),
+    params: gruScanParams({ time, batch, hidden }),
+    uniformParams: true,
+    inputs: [gi, initial, weight, bias],
+    expected: applyReferenceOp("gru_scan", [gi, initial, weight, bias], {}, [
+      time,
+      batch,
+      hidden,
+    ]),
+    natural: batch,
+    groups: 2,
+  };
+};
+
 const rmsNormCase = (): DegenerateCase => {
   const rows = 5_000;
   const dim = 4;
@@ -1005,6 +1037,7 @@ const CASES: readonly DegenerateCase[] = [
   quantizeRowsCase(),
   layerNormCase(),
   rmsNormCase(),
+  gruScanCase(),
 ];
 
 Deno.test({

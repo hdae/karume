@@ -5,6 +5,7 @@ import {
   formatDim,
   isSymbolName,
   parseDim,
+  solveDim,
   tryParseDim,
 } from "../src/format/dims.ts";
 
@@ -133,4 +134,25 @@ Deno.test("formatDim: 非正準な分解結果は組み立てない", () => {
 
 Deno.test("evalDim: 評価結果が安全整数を超えたら落とす", () => {
   assertThrows(() => evalDim({ coeff: 8, sym: "T", offset: 0 }, { T: 2 ** 52 }), DimError);
+});
+
+Deno.test("solveDim: 適合ケース表の eval を逆向きに回しても同じ束縛へ戻る", async () => {
+  // `evalDim` の逆関数であることを、文法の正本の表そのもので見る（第 2 の表を作らない）。
+  const fixture = await loadFixture();
+  for (const { expr: text, bindings, value } of fixture.eval) {
+    if (value === undefined) continue;
+    const expr = parseDim(text);
+    assertEquals(solveDim(expr, value), bindings[expr.sym], `${text} = ${value}`);
+  }
+});
+
+Deno.test("solveDim: 宣言の形をしていない実寸は解を持たない（丸めない）", () => {
+  // 母音検出 CRNN の「10ms フレーム数は偶数」がここで落ちる（ADR 0057 決定 2）。
+  assertEquals(solveDim(parseDim("2T"), 285), undefined);
+  assertEquals(solveDim(parseDim("2T"), 284), 142);
+  // offset を下回る実寸（`T+8` に 7）と負・非整数の実寸。
+  assertEquals(solveDim(parseDim("T+8"), 7), undefined);
+  assertEquals(solveDim(parseDim("T+8"), 8), 0);
+  assertEquals(solveDim(parseDim("T"), -1), undefined);
+  assertEquals(solveDim(parseDim("T"), 1.5), undefined);
 });

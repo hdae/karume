@@ -286,6 +286,9 @@ def _compute(
         return _deform_conv2d(ins, where, attrs)
     if kind == "upsample_bilinear2d":
         return _upsample_bilinear2d(ins, where, attrs)
+    # 走査方向は op 名が持つが、shape 規則は 2 方向で完全に同一（出力の時間順も変わらない）。
+    if kind == "gru_scan":
+        return _gru_scan(contract, ins, where)
     raise OpContractError(f"{where}: op kind '{kind}' の shape 規則が無い")
 
 
@@ -952,6 +955,52 @@ def _deform_conv2d(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]
                 f"（offset_groups = 1）のはずが [{_show(shape)}]"
             )
     return [x[0], channels_out, height_out, width_out]
+
+
+def _gru_scan(contract: OpContract, ins: list[list[Extent]], where: str) -> list[Extent]:
+    """gru_scan / gru_scan_reverse の出力 shape（第 2 層・ADR 0056）。
+
+    `gi[T,N,3H]` / `h0[N,H]` / `W_hh[3H,H]` / `b_hh[3H]` -> `y[T,N,H]`。**時間軸 T は記号の
+    まま素通りする**（この op の存在理由 — 分解形は T 回展開されて記号を失う）。
+
+    MUST: 隠れ幅の正本は **h0 の最終次元 1 か所**。gi / W_hh / b_hh とは突き合わせるだけで、
+    同じ事実を 2 か所から取ると 3H と H の取り違えが素通りする形が作れる。
+    MUST: H は静的（記号だと 3·H を次元言語で組めない — conv 族のチャネル軸と同じ絞り）。
+    バッチ N と時間 T は記号でよい（構造等値で突き合わせるだけで算術が要らない）。
+    """
+    gi, initial, weight, bias = ins
+    if len(gi) != 3 or len(initial) != 2 or len(weight) != 2 or len(bias) != 1:
+        raise OpContractError(
+            f"{where}: {contract.name} は gi[T,N,3H] / h0[N,H] / W_hh[3H,H] / b_hh[3H]"
+            f"（rank 3/2/2/1）: [{_show(gi)}] / [{_show(initial)}] / [{_show(weight)}] /"
+            f" [{_show(bias)}]"
+        )
+    hidden = initial[1]
+    if not hidden.is_const:
+        raise OpContractError(
+            f"{where}: {contract.name} の隠れ幅 {hidden.to_dim()} が記号（3·H を次元式で組めない）"
+        )
+    if gi[1] != initial[0]:
+        raise OpContractError(
+            f"{where}: {contract.name} のバッチが gi [{_show(gi)}] と"
+            f" h0 [{_show(initial)}] で不一致"
+        )
+    gates = Extent(coeff=0, sym=None, offset=3 * hidden.offset)
+    if gi[2] != gates:
+        raise OpContractError(
+            f"{where}: {contract.name} の gi の最終次元 {gi[2].to_dim()} が"
+            f" 3·H = {gates.offset} でない（ゲートは r / z / n の 3 本）"
+        )
+    if weight != [gates, hidden]:
+        raise OpContractError(
+            f"{where}: {contract.name} の W_hh は [{_show([gates, hidden])}] のはずが"
+            f" [{_show(weight)}]"
+        )
+    if bias[0] != gates:
+        raise OpContractError(
+            f"{where}: {contract.name} の b_hh 長 {bias[0].to_dim()} が 3·H = {gates.offset} と違う"
+        )
+    return [gi[0], gi[1], hidden]
 
 
 def _upsample_bilinear2d(

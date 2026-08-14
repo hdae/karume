@@ -155,6 +155,21 @@ DEFORM_CONV2D_OP = "deform_conv2d"
 #: NOTE: 縮小（Hout < H）も同じ op・同じ式で通る（torch も同一 op）。
 UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d"
 
+#: GRU の**隠れ側スキャン**（第 2 層 — ADR 0056）。時間方向の逐次だけを 1 ノードに畳み、
+#: **入力側 GEMM は持たない**（呼び手が既存 `linear` で gi = x·W_ih^T + b_ih を用意する）。
+#: **アリティ 4 固定**で gi[T,N,3H] / h0[N,H] / w_hh[3H,H] / b_hh[3H] を取り、出力は y[T,N,H]。
+#: 3H のゲート並びは **r / z / n**。
+#:
+#: MUST: 走査方向は **op 名で分ける**（attrs の bool 変種にしない — Python の bool は int の
+#: 派生で、既存の attr 検査関数はどれも bool を明示的に弾いている）。`gelu` / `gelu_tanh` と
+#: 同じ「attr 変種は別 op」の手筋（ADR 0056 決定 2）。
+#: MUST: 多層 / 双方向 / has_biases=False / batch_first / dropout の欄を作らない。IR v1 の
+#: 可変アリティは `cat` だけで `aten.gru` の Tensor[16] は載らないので、層と方向は
+#: **ノードを並べて**表す。該当しない形は `convert._h_gru_scan` が全件 fail loudly にする。
+GRU_SCAN_OP = "gru_scan"
+GRU_SCAN_REVERSE_OP = "gru_scan_reverse"
+GRU_SCAN_OPS = (GRU_SCAN_OP, GRU_SCAN_REVERSE_OP)
+
 #: 低精度格納が**適格**になる重みスロット（op 名 → 入力スロット番号 — ADR 0018）。
 #: TS 側 `packages/runtime/src/ops.ts` の `WEIGHT_SLOTS` の鏡像で、ずれは適合表
 #: （packages/runtime/tests/fixtures/op-contracts.json の `weight_slot`）が両側から
@@ -250,6 +265,7 @@ OpKind = Literal[
     "conv_transpose1d",
     "deform_conv2d",
     "upsample_bilinear2d",
+    "gru_scan",
 ]
 
 #: attr キー → 値の検査関数（ADR 0012）。宣言したキーは全て必須で、宣言外は fail loudly。
@@ -1003,6 +1019,10 @@ OP_CONTRACTS: dict[str, OpContract] = {
     UPSAMPLE_BILINEAR2D_OP: _contract(
         UPSAMPLE_BILINEAR2D_OP, "upsample_bilinear2d", 1, UPSAMPLE_BILINEAR2D_ATTRS
     ),
+    # GRU 隠れ側スキャン 2 方向（第 2 層・ADR 0056）。4 スロットとも f32 で同型・attrs 空。
+    # w_hh は op 内スロットなので**低精度格納の適格外**（WEIGHT_SLOTS に載せない）— 入力側の
+    # 重みは呼び手の linear が持つので、そちらは従来どおり f16 / i8 が効く。
+    **{name: _contract(name, "gru_scan", 4) for name in GRU_SCAN_OPS},
 }
 
 #: convert が emit しうる IR op 名の正本。語彙の増加を明示行為にするための門。

@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { DimError } from "../src/format/dims.ts";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { OpContractError } from "../src/ops.ts";
@@ -42,6 +42,35 @@ Deno.test("シンボル束縛は入力 shape の次元位置から取る", () =>
   const graph = parse(linearGraph());
   assertEquals(bindSymbols(graph, { x: [7, 4] }), { T: 7 });
   assertEquals(bindSymbols(graph, { x: [0, 4] }), { T: 0 });
+});
+
+/** 入力の時間軸が派生形 `2T` だけのグラフ（母音検出 CRNN の形 — ADR 0057）。 */
+const derivedGraph = (): GraphJson => {
+  const graph = linearGraph();
+  graph.inputs = [{ name: "x", dtype: "f32", shape: ["2T", 4] }];
+  graph.values.h = { dtype: "f32", shape: ["2T", 3] };
+  graph.values.y = { dtype: "f32", shape: ["2T", 3] };
+  return graph;
+};
+
+Deno.test("派生次元だけの入力からもシンボルを解く（解は一意 — ADR 0057）", () => {
+  const graph = parse(derivedGraph());
+  assertEquals(bindSymbols(graph, { x: [284, 4] }), { T: 142 });
+  assertEquals(bindSymbols(graph, { x: [0, 4] }), { T: 0 });
+  // 明示 seed は従来どおり優先され、解と食い違えば落ちる。
+  assertEquals(bindSymbols(graph, { x: [284, 4] }, { T: 142 }), { T: 142 });
+  assertThrows(() => bindSymbols(graph, { x: [284, 4] }, { T: 284 }), ExecutionError);
+});
+
+Deno.test("宣言の形をしていない実寸は fail loudly（丸めない）", () => {
+  // 母音検出 CRNN の「10ms フレーム数は偶数」がここで落ちる（黙って 142 や 143 に丸めない）。
+  const graph = parse(derivedGraph());
+  const error = assertThrows(
+    () => bindSymbols(graph, { x: [285, 4] }),
+    ExecutionError,
+    "宣言 '2T' の形をしていない",
+  );
+  assert(error.message.includes("実測 285"), error.message);
 });
 
 Deno.test("束縛と実 shape・宣言の食い違いは全て fail loudly", () => {
@@ -102,7 +131,7 @@ Deno.test("bindSymbols は '__proto__' というシンボル名の束縛を own 
   assertThrows(() => bindSymbols(graph, { x: [6, 4] }, { ["__proto__"]: 5 }), ExecutionError);
 });
 
-Deno.test("派生形の次元は束縛源にせず、束縛確定後に照合する", () => {
+Deno.test("素の形と派生形が同居しても束縛は 1 つ（食い違いは fail loudly）", () => {
   const source = linearGraph();
   // 入力は inputs[] だけで宣言される（values{} に置くと二重宣言で IR が落ちる）
   source.inputs = [
@@ -111,6 +140,9 @@ Deno.test("派生形の次元は束縛源にせず、束縛確定後に照合す
   ];
   const graph = parse(source);
   assertEquals(bindSymbols(graph, { x: [3, 4], m: [7] }), { T: 3 });
+  // 派生側が別の T を指す（9 → T=4）: 衝突として落ちる。
+  assertThrows(() => bindSymbols(graph, { x: [3, 4], m: [9] }), ExecutionError);
+  // 派生側がそもそも `2T+1` の形をしていない（6 は奇数長にならない）。
   assertThrows(() => bindSymbols(graph, { x: [3, 4], m: [6] }), ExecutionError);
 });
 

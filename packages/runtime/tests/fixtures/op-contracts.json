@@ -329,6 +329,18 @@
       "arity": 1,
       "dtypes": { "kind": "uniform", "accept": ["f32"] },
       "attrs": ["output_size"]
+    },
+    {
+      "op": "gru_scan",
+      "arity": 4,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": []
+    },
+    {
+      "op": "gru_scan_reverse",
+      "arity": 4,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": []
     }
   ],
   "attr_values": [
@@ -2105,6 +2117,63 @@
       "attrs": { "output_size": [7, 9] },
       "throws": true,
       "why": "長さ 0 の空間軸は補間できない（scale が (0-1)/(out-1) で負になる）"
+    },
+
+    {
+      "op": "gru_scan",
+      "ins": [[6, 2, 12], [2, 4], [12, 4], [12]],
+      "out": [6, 2, 4],
+      "why": "gi[T,N,3H] / h0[N,H] / W_hh[3H,H] / b_hh[3H] -> y[T,N,H]（3H と H の取り違えが shape に出る形）"
+    },
+    {
+      "op": "gru_scan",
+      "ins": [["T", 1, 384], [1, 128], [384, 128], [384]],
+      "bindings": { "T": 5 },
+      "out": ["T", 1, 128],
+      "why": "時間軸は記号のまま通る（この op の存在理由 — 分解形は T 回展開されて記号を失う）"
+    },
+    {
+      "op": "gru_scan_reverse",
+      "ins": [["T", 1, 384], [1, 128], [384, 128], [384]],
+      "bindings": { "T": 5 },
+      "out": ["T", 1, 128],
+      "why": "逆方向 op も契約面は順方向と同一（違いは走査順だけで、出力形も時間順も変わらない）"
+    },
+    {
+      "op": "gru_scan",
+      "ins": [[6, 2, 8], [2, 4], [12, 4], [12]],
+      "throws": true,
+      "why": "gi の最終次元が 3H でない（ゲート 3 本の束を 2 本と取り違えた形）"
+    },
+    {
+      "op": "gru_scan",
+      "ins": [[6, 3, 12], [2, 4], [12, 4], [12]],
+      "throws": true,
+      "why": "gi と h0 のバッチが不一致"
+    },
+    {
+      "op": "gru_scan",
+      "ins": [[6, 2, 12], [2, 4], [4, 12], [12]],
+      "throws": true,
+      "why": "W_hh を [H, 3H] と読む取り違え（転置レイアウトは要素数が合うので非対称形でのみ赤くなる）"
+    },
+    {
+      "op": "gru_scan",
+      "ins": [[6, 2, 12], [2, 4], [12, 4], [4]],
+      "throws": true,
+      "why": "b_hh 長が 3H でない（H 本ぶんだけ持つ形）"
+    },
+    {
+      "op": "gru_scan",
+      "ins": [[6, 2, 12], [2, 4], [12, 4]],
+      "throws": true,
+      "why": "アリティ 4 固定（bias 無し GRU は語彙に無い）"
+    },
+    {
+      "op": "gru_scan",
+      "ins": [[2, 12], [2, 4], [12, 4], [12]],
+      "throws": true,
+      "why": "rank 3/2/2/1 以外は受理しない（batch_first / 時間軸を畳んだ形は語彙に無い）"
     }
   ]
 }

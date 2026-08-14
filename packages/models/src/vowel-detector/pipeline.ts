@@ -5,53 +5,49 @@
  *
  * 1. ホスト: 波形 → 80 次元 log-mel + DSP 3 次元 = `[T10, 83]`（`features.ts`・mel 基底は
  *    配布形の `assets` 席から受け取る）
- * 2. ホスト: 長さバケットの選択と**右ゼロ pad**（下の「長さバケット」）
- * 3. `crnn_t<長さ>` を 1 回回す → ロジット `[1, 長さ/2, 8]`（20ms 格子）
- * 4. ホスト: pad ぶんを捨てて log_softmax → Viterbi → 短区間マージ → cons 吸収 → `.lab`
- *    （`postprocess.ts`）
+ * 2. ホスト: 奇数フレームの端数 1 本を落とす（出力は 20ms 格子）
+ * 3. `crnn` を 1 回回す → ロジット `[1, T10/2, 8]`（20ms 格子）
+ * 4. ホスト: log_softmax → Viterbi → 短区間マージ → cons 吸収 → `.lab`（`postprocess.ts`）
  *
  * **リサンプルは呼び出し側の責務**（上流 `@hdae/vowel-detector` の線をそのまま引く）。入口は
  * 「16kHz モノラルの `Float32Array`」で、WAV の decode も周波数変換も持たない（`decodeWav` は
  * barrel から別に出ている）。渡された配列が本当に 16kHz かは**観測できない** — 違う周波数を
  * 渡すと `detect` は最後まで走って別の母音列を出すので、そこは呼び出し側の不変条件になる。
  *
- * ## 長さバケット（グラフは長さごとに別物）
+ * ## 長さは記号軸（グラフは 1 本・pad もバケットも無い）
  *
- * `aten.gru.input` は `run_decompositions` が**時間方向へ完全展開**するので、T は動的軸に
- * できない（`Dim("T")` は `Specializations unexpectedly required (T)` で落ちる —
- * `export_vowel_detector.py` の docstring）。したがって配布形は**長さバケットごとに 1 本の
- * グラフ**を持ち、`detect` は入力長以上の最小のバケットを選んで右ゼロ pad する。
+ * グラフ入力は `features [1, 2T, 83]`、出力は `[1, T, 8]` で、**時間軸だけが記号** `T`
+ * （20ms 格子）。`detect` は音声の実長のまま 1 回回し、`T` を束縛して渡す。
+ * `nn.GRU` を `gru_scan` へ差し替えて記号長を通す形は ADR 0056、`2T` のような派生次元から
+ * シンボルを束縛する形は ADR 0057（それ以前は長さバケット 4 本 + 右ゼロ pad だった）。
  *
- * MUST: **バケット上限を超える入力は fail loudly**（黙って切り詰めない）。切り詰めは音声の
- * 末尾を無言で捨てる = `.lab` が入力より短くなるだけで、呼び出し側からは正常な結果に見える。
+ * MUST: **10ms フレーム数は偶数**（グラフが `2T` を宣言している）。奇数フレームの端数 1 本は
+ * **切り捨て**る — 半端フレームは入力 1 本分しか持たない出力になり、後処理の
+ * 「1 フレーム = 20ms」が末尾だけ崩れる。切り捨てを忘れると `bindSymbols` が
+ * 「実測 285 が宣言 '2T' の形をしていない」で落ちる（黙って丸めない）。
  *
- * MUST: pad は**特徴空間のゼロ**（波形へ無音を継ぎ足して特徴を採り直さない）。発話内 z 化の
- * 統計が pad 側へ引かれて**先頭まで**壊れる（実測: 2.9 秒の発話に 5.1 秒の無音を足すと先頭の
- * 誤差が 0.024 → 3.31・argmax 一致率 0.796）。最終フレームの複製も同様に悪い（末尾の
- * max abs diff が zero の 5.8 に対し 10.5〜11.5）。
+ * MUST: **`maxFrames` 超過は fail loudly**（黙って切り詰めない）。切り詰めは音声の末尾を
+ * 無言で捨てる = `.lab` が入力より短くなるだけで、呼び出し側からは正常な結果に見える。
+ * 上限はグラフを焼いたときの記号次元の上限そのもので、配布形の `pipelineConfig` が持つ
+ * （IR は記号の値域を持たないので、ここでしか止められない — `config.ts`）。
  *
- * ### pad が数値に与える影響（実測 — 承知した上でこの形を採っている）
+ * ### 右ゼロ pad をしない理由（実測 — バケット時代の負債の説明）
  *
  * 逆方向 GRU が pad 側から状態を持ち帰るので、pad はロジットを O(1) 動かす。**pad 量に対して
  * 単調でも比例でもなく、2 フレーム（40ms）で既に飽和する**（実音声 4 本 × pad 10 段の実測:
  * 本体区間だけを比べた max abs diff が pad 2 で 2.2〜3.2、pad 1024 で 5.0〜6.0）。振幅は
  * 末尾に集中するが `|差| > 1e-2` は全フレームに届き、Viterbi が大域最適である以上、`.lab` の
- * 差は発話のどこにでも出る（実測の差は ①20ms の境界ずれ ②末尾に 40ms の `pau` が増減
- * ③発話中間に 40ms の `pau` が入る、の 3 型）。
+ * 差は発話のどこにでも出た（実測の差は ①20ms の境界ずれ ②末尾に 40ms の `pau` が増減
+ * ③発話中間に 40ms の `pau` が入る、の 3 型）。記号長にした今、この 3 型は**消えている**:
+ * 配布形経由の `.lab` は実重み E2E（`packages/runtime/tests/e2e_vowel_detector_test.ts`）が
+ * 固定している実長経路の `.lab` と完全一致する（`tests/e2e_vowel_detector_lab_test.ts`）。
  *
- * つまり**バケットの刻みを細かくしても品質は改善しない**（配布サイズだけが線形に増える）。
- * 刻みは「必要な最大長を覆う最少本数」で決める、というのが配布形の判断で、正本は
- * `tools/exporter/karume/dist.py` の母音検出節。数値の厳密さが要る用途（オフラインで
- * exporter を持てる場合）は、その音声の長さちょうどでグラフを焼く形がある — 実重み E2E
- * （`packages/runtime/tests/e2e_vowel_detector_test.ts`）が実際にその形で回っている。
+ * ## Session は `detect` ごとに張って畳む
  *
- * ## MUST: Session は `detect` ごとに張って畳む（SigLIP2 / BiRefNet と非対称）
- *
- * あちらがグラフ 1 本を常駐させるのは、入力に依らず**同じグラフ**を回すから。こちらは入力長で
- * グラフが変わるので、常駐させるならバケットの本数だけ Session を並べるか、直前のバケットを
- * 覚えておく cache を持つことになる。重みは 1 バケット 4〜15MB（重み本体は 2.66MB で共通）で
- * 再アップロードの実測は 30〜144ms なので、**張っては畳む**を既定にする（Irodori が巨大
- * グラフを 1 本ずつ張っては畳むのと同じ形 — `src/irodori/pipeline.ts` の `withSession`）。
+ * グラフが 1 本になったので SigLIP2 / BiRefNet と同じ常駐も採れるが、この波では**張っては
+ * 畳む**を保つ（VRAM を検出の間だけに閉じる形 — Irodori が巨大グラフを 1 本ずつ張っては畳む
+ * のと同じ。`src/irodori/pipeline.ts` の `withSession`）。重みは 2.66MB で再アップロードの
+ * 実測は 30〜144ms なので、常駐化は**性能の判断**であって正しさの判断ではない。
  *
  * MUST: それでも直列化鎖には載せる — `detect` の同時実行は `dispose` が in-flight の完了を
  * 待たずに GPU を破棄する形（flush-before-destroy 違反）を作る。
@@ -109,8 +105,8 @@ const TIME_STRIDE = 2;
 /** 入力フレームの毎秒本数（hop 160 / 16kHz = 10ms 格子）— 秒で語る文言のためだけに使う。 */
 const FRAMES_PER_SECOND = SAMPLE_RATE / HOP;
 
-/** manifest の weights 表に現れる取得キー（長さバケット 1 本ぶん — `dist.py` の綴りと対）。 */
-const graphRole = (frameLength: number): string => `crnn_t${frameLength}`;
+/** manifest の weights 表に現れる取得キー（CRNN 1 本 — `dist.py` の `VOWEL_DETECTOR_GRAPH_ROLE`）。 */
+const GRAPH_ROLE = "crnn";
 
 /** {@link VowelDetectorPipeline.detect} の結果（上流 `@hdae/vowel-detector` の `DetectResult`）。 */
 export type VowelDetectorResult = {
@@ -237,76 +233,85 @@ export const parseMelBasis = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> =>
 };
 
 /**
- * バケット 1 本ぶんのグラフが、宣言どおりの静的な形で焼かれていることを見る。
+ * グラフが**記号長**で焼かれていることと、`pipelineConfig` と噛み合うことを見る。
+ * 返すのは時間軸の記号名（`detect` が束縛に使う 1 語）。
  *
- * MUST: 落とさない。長さだけが違うグラフは**入出力の名前も階数も同じ**なので、別のバケットの
- * 資産が同じ席に置かれていても、パイプラインは pad する長さを間違えたまま Session の
- * shape 検査まで進む（そのときには「どちらの数が正しいのか」が読み手に伝わらない）。
+ * MUST: 落とさない。長さを固定して焼いた古い形のグラフは**入出力の名前も階数も同じ**なので、
+ * 同じ席に置かれても構築は通り、実行時に「shape が宣言と一致しない」だけが出る（そのときには
+ * 「この配布形は 1 長でしか動かない」ことが読み手に伝わらない）。
+ * MUST: 入力の時間軸が `2·T`・出力が `T` であることまで見る。倍率が抜けた配布形は、`.lab` の
+ * 時間が 2 倍に伸びるだけで形は成立する。
  */
 const assertGraph = (
   model: KarumeModel,
   config: VowelDetectorPipelineConfig,
-  frameLength: number,
-): void => {
-  const where = `バケット t${frameLength}`;
+): string => {
   if (model.graph.inputs.length !== 1 || model.graph.outputs.length !== 1) {
     throw new Error(
-      `VowelDetectorPipeline: ${where} のグラフの入出力が ${model.graph.inputs.length} /` +
+      `VowelDetectorPipeline: グラフの入出力が ${model.graph.inputs.length} /` +
         ` ${model.graph.outputs.length} 本（どちらも 1 本の CRNN が必要）`,
     );
   }
+  if (model.graph.symbols.length !== 1) {
+    throw new Error(
+      `VowelDetectorPipeline: グラフの記号次元が [${model.graph.symbols.join(", ")}]` +
+        "（時間軸 1 本だけが記号）",
+    );
+  }
+  const [symbol] = model.graph.symbols;
   const [input] = model.graph.inputs;
   if (input.name !== INPUT_NAME) {
     throw new Error(
-      `VowelDetectorPipeline: ${where} のグラフ入力が '${input.name}'（'${INPUT_NAME}' が必要）`,
+      `VowelDetectorPipeline: グラフ入力が '${input.name}'（'${INPUT_NAME}' が必要）`,
     );
   }
-  const expectedInput = [1, frameLength, config.featureDim];
+  // 正準表記は `coeff·sym`（係数 1 は省略 — `format/dims.ts` の `formatDim`）。
+  const expectedInput = [1, `${TIME_STRIDE}${symbol}`, config.featureDim];
   if (
     input.shape.length !== expectedInput.length ||
     input.shape.some((dim, axis) => dim !== expectedInput[axis])
   ) {
     throw new Error(
-      `VowelDetectorPipeline: ${where} のグラフ入力の形が ` +
+      `VowelDetectorPipeline: グラフ入力の形が ` +
         `[${input.shape.map(String).join(", ")}]、期待は [${expectedInput.join(", ")}]`,
     );
   }
   const name = model.graph.outputs[0];
   const value = model.graph.values[name];
   if (value === undefined) {
-    throw new Error(`VowelDetectorPipeline: ${where} のグラフ出力 '${name}' の宣言が無い`);
+    throw new Error(`VowelDetectorPipeline: グラフ出力 '${name}' の宣言が無い`);
   }
-  const expectedOutput = [1, frameLength / TIME_STRIDE, config.classes.length];
+  const expectedOutput = [1, symbol, config.classes.length];
   if (
     value.shape.length !== expectedOutput.length ||
     value.shape.some((dim, axis) => dim !== expectedOutput[axis])
   ) {
     throw new Error(
-      `VowelDetectorPipeline: ${where} のグラフ出力の形が ` +
+      `VowelDetectorPipeline: グラフ出力の形が ` +
         `[${value.shape.map(String).join(", ")}]、期待は [${expectedOutput.join(", ")}]`,
     );
   }
+  return symbol;
 };
 
 /**
- * 入力長（10ms フレーム数）→ 回すバケット。
+ * 入力長（10ms フレーム数）が配布形の宣言する運用上限に収まっていることを見る。
  *
- * MUST: 上限超過は落とす（モジュール doc の MUST — 黙って切り詰めない）。
+ * MUST: 上限超過は落とす（モジュール doc の MUST — 黙って切り詰めない）。上限はグラフを
+ * 焼いたときの記号次元の上限で、IR は値域を持たないので**ここが唯一の門**。
  *
  * NOTE: `export` はテストのため（境界の振る舞いを実 GPU 無しで名指しできるように）。
  */
-export const pickFrameLength = (
+export const assertFrameLimit = (
   config: VowelDetectorPipelineConfig,
   frames: number,
-): number => {
-  for (const length of config.frameLengths) {
-    if (length >= frames) return length;
-  }
-  const max = config.frameLengths[config.frameLengths.length - 1];
+): void => {
+  if (frames <= config.maxFrames) return;
+  const seconds = (value: number): string => (value / FRAMES_PER_SECOND).toFixed(2);
   throw new Error(
     `VowelDetectorPipeline: 音声が長すぎる（10ms フレーム ${frames} 本 = ` +
-      `${(frames / FRAMES_PER_SECOND).toFixed(2)} 秒）— この配布形が持つ最大のバケットは ` +
-      `${max} フレーム（${(max / FRAMES_PER_SECOND).toFixed(2)} 秒）。` +
+      `${seconds(frames)} 秒）— この配布形が焼かれている上限は ` +
+      `${config.maxFrames} フレーム（${seconds(config.maxFrames)} 秒）。` +
       "切り詰めると末尾が黙って落ちるので、呼び出し側で区切って渡す",
   );
 };
@@ -316,8 +321,10 @@ type VowelDetectorState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: VowelDetectorPipelineConfig;
-  /** 長さバケット → 開いたグラフ（Session はここには持たない — モジュール doc の MUST）。 */
-  readonly graphs: ReadonlyMap<number, KarumeModel>;
+  /** 開いた CRNN グラフ（Session はここには持たない — モジュール doc）。 */
+  readonly graph: KarumeModel;
+  /** 時間軸の記号名（`assertGraph` がグラフから読んだもの — 束縛のキー）。 */
+  readonly symbol: string;
   readonly sessionOptions: SessionOptions;
   readonly melBasis: Float32Array<ArrayBuffer>;
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
@@ -370,12 +377,8 @@ const openVowelDetectorState = async (
   const quant = entry.quants[quantName];
   const wantsShaderF16 = quant.gpuFeatures?.shaderF16 === true;
 
-  const graphs = new Map<number, KarumeModel>();
-  for (const frameLength of config.frameLengths) {
-    const graph = openModel(assetBuffer(assets, graphRole(frameLength)));
-    assertGraph(graph, config, frameLength);
-    graphs.set(frameLength, graph);
-  }
+  const graph = openModel(assetBuffer(assets, GRAPH_ROLE));
+  const symbol = assertGraph(graph, config);
   const melBasis = parseMelBasis(assetBuffer(assets, MEL_BASIS));
 
   // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
@@ -394,7 +397,8 @@ const openVowelDetectorState = async (
     gpu,
     ownsGpu,
     config,
-    graphs,
+    graph,
+    symbol,
     sessionOptions: toSessionOptions(quant.session),
     melBasis,
     ...(options.onRunDiagnostics === undefined
@@ -410,12 +414,15 @@ const openVowelDetectorState = async (
  */
 const runGraph = async (
   state: VowelDetectorState,
-  model: KarumeModel,
   features: Tensor,
+  rows: number,
 ): Promise<Float32Array> => {
+  const model = state.graph;
   const session: Session = await createSession(state.gpu, model, state.sessionOptions);
   try {
-    const outputs = await session.run({ [INPUT_NAME]: features });
+    // 記号 `T` は 20ms 格子の本数。入力軸は `2T` の派生次元なので実 shape からも解けるが
+    // （ADR 0057）、ホストが数えた本数を明示で渡して食い違いを実行前に落とす。
+    const outputs = await session.run({ [INPUT_NAME]: features }, { [state.symbol]: rows });
     if (state.onRunDiagnostics !== undefined) state.onRunDiagnostics(session.diagnostics());
     const name = model.graph.outputs[0];
     const tensor = outputs[name];
@@ -432,7 +439,7 @@ const runGraph = async (
   }
 };
 
-/** 音声 1 本を通す（特徴 → バケット選択 → 右ゼロ pad → run → pad を捨てて後処理）。 */
+/** 音声 1 本を通す（特徴 → 端数の切り捨て → 上限検査 → 実長で run → 後処理）。 */
 const detectAudio = async (
   state: VowelDetectorState,
   audio: Float32Array,
@@ -448,30 +455,23 @@ const detectAudio = async (
         `出力 1 本を作るのに ${TIME_STRIDE} 本が要る`,
     );
   }
-  const frameLength = pickFrameLength(config, usable);
+  assertFrameLimit(config, usable);
   const rows = usable / TIME_STRIDE;
 
-  // 右ゼロ pad（モジュール doc の MUST — 特徴空間のゼロであって無音波形ではない）。
-  const padded = new Float32Array(frameLength * config.featureDim);
-  padded.set(features.data.subarray(0, usable * config.featureDim));
-  const graph = state.graphs.get(frameLength);
-  if (graph === undefined) {
-    throw new Error(`VowelDetectorPipeline: バケット t${frameLength} のグラフが無い`);
-  }
-  const logits = await runGraph(state, graph, {
+  const logits = await runGraph(state, {
     dtype: "f32",
-    shape: [1, frameLength, config.featureDim],
-    data: padded,
-  });
-  const expected = (frameLength / TIME_STRIDE) * config.classes.length;
+    shape: [1, usable, config.featureDim],
+    // 端数を落とした実長ぶんだけを渡す（pad は 1 要素も無い — モジュール doc）。
+    data: features.data.slice(0, usable * config.featureDim),
+  }, rows);
+  const expected = rows * config.classes.length;
   if (logits.length !== expected) {
     throw new Error(
       `vowel-detector: ロジットの要素数 ${logits.length} が ` +
-        `${frameLength / TIME_STRIDE}×${config.classes.length} と違う`,
+        `${rows}×${config.classes.length} と違う`,
     );
   }
-  // pad ぶんを捨ててから後処理へ渡す（`.lab` が入力より長くなるのを止める唯一の席）。
-  const segments = logitsToSegments(logits.subarray(0, rows * config.classes.length), rows);
+  const segments = logitsToSegments(logits, rows);
   return { segments, lab: toLab(segments) };
 };
 

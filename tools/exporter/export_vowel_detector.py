@@ -1,8 +1,8 @@
 """軽量な母音認識 CRNN（音声 → リップシンク用の母音クラス列）を IR v1 コンテナ +
-golden io へ書き出す台本。長さ（`--length`）ごとに 1 本のグラフを emit する。
+golden io へ書き出す台本。**長さは記号軸なので、グラフは 1 本だけ**。
 
-    uv run python export_vowel_detector.py --length 200
-    uv run python export_vowel_detector.py --length 200 --verify  # 分解グラフと eager の同値
+    uv run python export_vowel_detector.py
+    uv run python export_vowel_detector.py --verify  # nn.GRU との同値（差し替えの A/B）
 
 生成物は `outputs/series/` 配下で、リポジトリ直下の `.gitignore` によりコミット対象外。
 
@@ -18,29 +18,46 @@ golden io へ書き出す台本。長さ（`--length`）ごとに 1 本のグラ
 state_dict なので、層の並び・名前・形のどれが食い違っても読み込みが落ちる（値だけが静かに
 変わる書き換えは、モデル定義の**構造**の写しでは起こせない）。
 
-## 長さ軸（`--length` = T10）
+## 長さ軸（記号 `T` = 20ms フレーム数）
 
-グラフ入力は 10ms フレーム列 `features f32 [1, T10, 83]`、出力は 20ms フレームの
-ロジット `[1, T10//2, 8]`（conv の stride 2 が時間を半分に畳む）。
+グラフ入力は 10ms フレーム列 `features f32 [1, 2T, 83]`、出力は 20ms フレームの
+ロジット `[1, T, 8]`（conv の stride 2 が時間を半分に畳む）。
 
-**長さは系列ごとに固定**で、動的次元にはできない。`aten.gru.input` は export 直後こそ
-1 ノードだが `run_decompositions` が**時間方向へ完全展開**するため、T が展開そのものを
-特殊化する（`Dim("T")` を渡すと `Specializations unexpectedly required (T)` で落ちる）。
-IR ノード数は入力フレーム 1 本あたり 38 ノードで、T に比例して増える。
+**記号は入力側ではなく出力側の格子に置く**（`2*Dim("T")`）。素の `Dim("T")` を入力へ置くと
+conv1d(stride=2, pad=2, k=5) の出力 extent が `((T−1)//2)+1` の**床除算**になり、
+karume の次元言語（`coeff·sym+offset` — ADR 0010）に載らない。`2*Dim("T")` なら出力 extent は
+ちょうど `T` のアフィン式になる。
 
-系列名に長さを含めるのはこのため（`export_birefnet.py --resolution` と同じ持ち方）—
-同じ席へ 2 つの長さを書くと、先の資産が黙って上書きされる。
+その帰結として **グラフ入力の 10ms フレーム数は常に偶数**（= `2T`）がランタイム契約になる。
+奇数フレームは**末尾 1 本を切り捨てて**渡す（`packages/models/src/vowel-detector/pipeline.ts`
+と実重み E2E が既に採っている規約 — 半端フレームは入力 1 本分しか持たない出力になり、
+後処理の「1 フレーム = 20ms」が末尾だけ崩れる）。
 
-`--length` は **2 の倍数**だけを受ける。出力フレームは 20ms 格子（= 入力 2 本で 1 本）で、
-奇数長では最後の 1 本が入力 1 本分しか持たない半端フレームになり、後処理側の
-「1 フレーム = 20ms」という前提が末尾だけ崩れる。
+記号を通せるのは `nn.GRU` を `karume::gru_scan` へ差し替えているから（下の「差し替え層」）。
+`aten.gru.input` の分解は `run_decompositions` が**時間方向へ完全展開**するので、
+`Dim("T")` は `Specializations unexpectedly required (T)` で落ちる（T10=200 で 8,434 ノード）。
+差し替え後は **T 非依存の 19 ノード**で、長さバケットも右ゼロ pad も要らない。
+
+`--length` は emit する golden ケースと**トレースの例**の長さで、グラフの受理集合ではない
+（**2 の倍数**だけを受けるのは上と同じ理由）。
+
+## 差し替え層（`karume/patch_vowel_detector.py`）
+
+`Crnn.forward` は `nn.GRU.forward` を通さず、双方向 2 層を**単方向 1 層 × 4 本の
+`gru_scan{,_reverse}` + `cat` 2 本**へ割る（入力側 GEMM は素の `linear`）。差し替えが
+`nn.GRU` と**ビット一致**することは `tests/test_patch_vowel_detector.py` が実測で固定し、
+実重みでは `--verify`（複数長）と emit ごとの常設門（{@link _write_io}）が毎回踏む。
+
+`nn.GRU` モジュール自体は**残す** — `load_state_dict(strict=True)` が受け持つ写しの検査
+（`weight_ih_l{k}` / `bias_hh_l{k}_reverse` … の 22 本）はパラメータの所属ごと変えると
+効かなくなる。差し替えるのは forward の経路だけ。
 
 MUST: 呼び出し側は**右ゼロ pad で長さを合わせない**。逆方向 GRU が pad 側から状態を持ち
 帰るので、T_true=137 を T=500 まで右ゼロ pad した実測で max abs diff 5.91 / argmax 一致率
 0.971（誤差は末尾に集中 — 先頭 0.138 / 末尾 5.915）。{@link build_cases} の `voiced` を
 T10=138 → 500 で pad しても同型（max abs diff 5.50 / 先頭 0.59 / 末尾 5.50）。単方向なら
-conv の窓端だけで 5.1e-03 に収まるが、この形は双方向なので**成立しない**。長さバケットの
-穴を埋める方法（実音声で埋める / 時間方向 O(1) の RNN op を第 2 層に足す）は本波の対象外。
+conv の窓端だけで 5.1e-03 に収まるが、この形は双方向なので**成立しない**。記号長にした今、
+pad する理由は 1 つも残っていない（丸める先の格子が無い）。
 
 ## 何をグラフに載せるか
 
@@ -49,7 +66,7 @@ conv の窓端だけで 5.1e-03 に収まるが、この形は双方向なので
 → `.lab`）も、特徴抽出（80 次元 log-mel + DSP 3 次元）もホスト側の責務。前者はロジットの
 まま置くと golden の数値回帰の感度が落ちないため、後者はグラフに載せる理由が無いため。
 
-batch は**静的 1**。動的軸は無い（`symbol_names=()`）。
+batch は**静的 1**。動的軸は時間 `T` の 1 本だけ（`symbol_names=("T",)`）。
 
 ## 入力の約束（特徴抽出はグラフに載せない）
 
@@ -65,8 +82,9 @@ batch は**静的 1**。動的軸は無い（`symbol_names=()`）。
 
 ## 出力レイアウト
 
-系列名は `<チェックポイント名>-t<長さ>`（既定の `crnn_epoch3.pt` / `--length 200` なら
-`vowel-detector-crnn-epoch3-t200`）:
+系列名は `vowel-detector-<チェックポイント名>`（既定の `crnn_epoch3.pt` なら
+`vowel-detector-crnn-epoch3`）。**長さは綴りに入らない** — グラフが 1 本だからで、
+系列を分けるのはチェックポイントの世代だけ:
 
     outputs/series/<系列名>/model.safetensors     重み・定数 + __metadata__
     outputs/series/<系列名>/io.<case>.safetensors 入力と torch CPU 期待出力
@@ -88,9 +106,11 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
+from torch.export import Dim
 
-from karume.convert import PRESERVED_OP_PREFIXES, curated_decompositions, normalize_boundary_tensor
+from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
+from karume.patch_vowel_detector import gru_forward
 from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
 
@@ -100,7 +120,8 @@ MODELS_ROOT = INPUTS_ROOT / "vowel-detector"
 #: 既定のチェックポイント（`--ckpt` 未指定のとき）。
 DEFAULT_CKPT = MODELS_ROOT / "crnn_epoch3.pt"
 
-#: 既定の長さ（T10 = 10ms フレーム数 — 200 で 2.0 秒）。
+#: golden とトレース例の長さ（T10 = 10ms フレーム数 — 200 で 2.0 秒）。**グラフの受理集合では
+#: ない**（記号軸なので任意長が 1 本のグラフで通る）。
 DEFAULT_LENGTH = 200
 
 #: 長さの刻み（出力の 20ms 格子 — モジュール docstring の「長さ軸」）。
@@ -109,6 +130,23 @@ LENGTH_MULTIPLE = 2
 #: 最小の長さ。出力 2 フレーム = 逆方向 GRU が状態を 1 度は運ぶ最小形（1 フレームだと
 #: 時間方向の再帰が消え、展開の誤りが値に出ない）。
 MIN_LENGTH = 4
+
+#: 記号 `T`（= 20ms フレーム数）の下限。`MIN_LENGTH` と同じ事実の記号側の綴りで、
+#: 0 / 1 特殊化を避ける線でもある（convert の 2 点評価は下限 2 以上を要求する）。
+SYM_MIN = MIN_LENGTH // LENGTH_MULTIPLE
+
+#: 記号 `T` の上限 = **配布形が宣言する運用上限**（`karume/dist.py` の
+#: `VOWEL_DETECTOR_MAX_FRAMES` が 10ms フレームへ直したものを配り、パイプラインが
+#: 超過を fail loudly にする）。
+#:
+#: 30,000 × 20ms = **10 分**の音声。導出は最大中間テンソルの大きさ: conv 出力
+#: `[1, 160, 2T]` f32 = 640 B / 10ms フレームなので、10 分で 38.4MiB。WebGPU の仕様既定
+#: `maxStorageBufferBindingSize` 128MiB に対して 3.4 倍の余裕がある（karume はアダプタの
+#: 実測値を要求するので実機ではさらに広い — `gpu/device.ts`）。
+#:
+#: MUST: 上げるときは中間テンソルの上限を測り直す。宣言だけ伸ばすと、超過は配布形の門ではなく
+#: **利用者の手元の確保失敗**として出る。
+SYM_MAX = 30_000
 
 MODEL_FILE = "model.safetensors"
 IO_PREFIX = "io."
@@ -189,21 +227,36 @@ class Crnn(nn.Module):
         )
         self.head = nn.Linear(gru_hidden * 2, classes)
 
+    def _encode(self, features: torch.Tensor) -> torch.Tensor:
+        """conv 2 段（10ms → 20ms 格子）。差し替え経路と参照経路が共有する前段。"""
+        return self.conv(features.transpose(1, 2)).transpose(1, 2)
+
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """`[B, T10, feature_dim]` → `[B, T10//2, classes]` のロジット。"""
-        hidden = self.conv(features.transpose(1, 2)).transpose(1, 2)
-        hidden, _ = self.gru(hidden)
+        """`[B, T10, feature_dim]` → `[B, T10//2, classes]` のロジット。
+
+        GRU は `karume::gru_scan` の並びへ差し替えて通す（モジュール docstring の
+        「差し替え層」）— これが export される経路。
+        """
+        return self.head(gru_forward(self.gru, self._encode(features)))
+
+    def reference_forward(self, features: torch.Tensor) -> torch.Tensor:
+        """`nn.GRU` をそのまま通す参照経路（export はしない）。
+
+        {@link forward} との差はまさに差し替えぶんなので、両者の**ビット一致**が差し替えの
+        正しさの主張そのものになる（{@link _write_io} の常設門と `--verify`）。
+        """
+        hidden, _ = self.gru(self._encode(features))
         return self.head(hidden)
 
 
-def default_out_dir(ckpt: Path, length: int) -> Path:
-    """生成物の既定の置き場（`outputs/series/vowel-detector-<ckpt 名>-t<長さ>/`）。
+def default_out_dir(ckpt: Path) -> Path:
+    """生成物の既定の置き場（`outputs/series/vowel-detector-<ckpt 名>/`）。
 
-    チェックポイント名と長さの**両方**を系列の綴りへ焼く（モジュール docstring の
-    「長さ軸」）— 固定の綴りを共有すると、別の epoch や別の長さを書き出した瞬間に先の資産が
-    黙って上書きされる。系列名は既存の流儀（小文字ハイフン）へ倒す。
+    綴りへ焼くのは**チェックポイント名だけ** — 長さは記号軸なのでグラフは 1 本きりで、
+    系列を分ける軸は epoch の世代しか残っていない（別の epoch を同じ席へ書くと先の重みが
+    黙って上書きされる）。系列名は既存の流儀（小文字ハイフン）へ倒す。
     """
-    return SERIES_ROOT / f"{MODELS_ROOT.name}-{ckpt.stem.lower().replace('_', '-')}-t{length}"
+    return SERIES_ROOT / f"{MODELS_ROOT.name}-{ckpt.stem.lower().replace('_', '-')}"
 
 
 def assert_length(length: int) -> None:
@@ -287,12 +340,17 @@ def build_cases(length: int) -> tuple[tuple[str, torch.Tensor], ...]:
 
 
 def _write_io(
-    module: nn.Module,
+    module: Crnn,
     graph: IrGraph,
     cases: Sequence[tuple[str, torch.Tensor]],
     out_dir: Path,
 ) -> tuple[list[str], dict[str, torch.Tensor]]:
     """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。
+
+    MUST: 期待値は**参照経路**（`nn.GRU` そのもの — {@link Crnn.reference_forward}）から採り、
+    export される差し替え経路とのビット一致を毎ケース見る。差し替えの誤りが期待値の側へ
+    そのまま乗ると、E2E は「エクスポータとランタイムが一致して両方間違っている」状態で緑に
+    なる（`karume/custom_ops.py` の docstring と同じ罠）。
 
     戻り値の 2 本目は sanity 記録用の期待出力（`[1, T10//2, 8]` の形のまま渡す）。
     """
@@ -302,7 +360,13 @@ def _write_io(
     logits: dict[str, torch.Tensor] = {}
     for name, features in cases:
         with torch.no_grad():
-            output = module(features)
+            output = module.reference_forward(features)
+            patched = module(features)
+        if not torch.equal(patched, output):
+            raise AssertionError(
+                f"{name}: gru_scan への差し替えが nn.GRU とビット一致しない"
+                f"（maxdiff {float((patched - output).abs().max())}）"
+            )
         # MUST: io も IR の意味論 dtype の実表現へ落とす（ADR 0009 の境界正規化）。ランタイムが
         # 受け取る形と揃っていないと Deno 側 E2E が golden を読めない。
         tensors = {
@@ -402,8 +466,15 @@ def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
 
     _, example = cases[0]
     started = time.monotonic()
-    # 動的軸は無い（長さは系列ごとに固定 — モジュール docstring の「長さ軸」）。
-    graph = export_to_file(module, (example,), out_dir / MODEL_FILE, symbol_names=())
+    graph = export_to_file(
+        module,
+        (example,),
+        out_dir / MODEL_FILE,
+        # MUST: 記号は出力の 20ms 格子側に置く（`2*Dim("T")` — モジュール docstring の
+        # 「長さ軸」）。素の `Dim("T")` だと conv の出力が床除算になり次元言語に載らない。
+        dynamic_shapes={INPUT_NAME: {1: 2 * Dim("T", min=SYM_MIN, max=SYM_MAX)}},
+        symbol_names=("T",),
+    )
     elapsed = time.monotonic() - started
     declared = tuple(item.name for item in graph.inputs)
     if declared != (INPUT_NAME,):
@@ -421,8 +492,10 @@ def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,
+        "declared_input_shape": [str(dim) for dim in graph.inputs[0].shape],
         "input_shape": list(example.shape),
         "output_shape": list(logits[cases[0][0]].shape),
+        "symbol_range": [SYM_MIN, SYM_MAX],
         "checkpoint_tensors_byte_identical": matched,
         "sanity": _sanity(logits),
     }
@@ -448,34 +521,38 @@ def _diff_entry(
     }
 
 
-def verify_decomposition(ckpt: Path, length: int) -> list[dict[str, Any]]:
-    """分解後のグラフが eager と同値であることを実測する（`--verify`）。
+#: `--verify` が踏む長さ（`--length` に加えて**複数長**を見る）。差し替えの誤りの中には
+#: 長さに依存して現れるもの（逆方向の走査境界・層間の連結順）があり、1 長だけでは踏めない。
+VERIFY_LENGTHS: tuple[int, ...] = (MIN_LENGTH, 6, 18, 137 * 2)
 
-    このモデルにパッチ層は無いので、他の台本の `--verify` が見ているもの（差し替え前後の
-    同値）に相当するのは**分解そのもの**になる。`run_decompositions` は `aten.gru.input`
-    1 ノードを時間方向へ完全展開する — つまりグラフの数値経路は cuDNN 無しの native GRU
-    ではなく展開列で、両者の同値は torch の分解表が持つ性質でしかない。ここが崩れると
-    「グラフは書けるが別の数値経路になった」形になるので、**bit_exact が主張の中身**。
+
+def verify_patch(ckpt: Path, length: int) -> list[dict[str, Any]]:
+    """`gru_scan` への差し替えが `nn.GRU` と同値であることを実測する（`--verify`）。
+
+    他の台本の `--verify`（差し替え前後の eager 同値）と同じ主張で、相手は
+    {@link Crnn.reference_forward} = 上流そのままの `nn.GRU` 経路。ここが崩れると
+    「グラフは焼けるが数値が別物」になるので、**bit_exact が主張の中身**（差 0 より強い —
+    {@link _diff_entry}）。
 
     NOTE: emit しないのは他の台本と同じ形に揃えるためで、こちらにプロセス汚染の危険は無い
-    （クラス属性の差し替えを一切しない）。
+    （クラス属性の差し替えを一切しない — 差し替えは `Crnn.forward` の中だけ）。
     """
     assert_length(length)
     module = load_module(load_checkpoint(ckpt))
-    cases = build_cases(length)
-    with torch.no_grad():
-        reference = {name: module(features) for name, features in cases}
-    program = torch.export.export(module, (cases[0][1],), strict=False)
-    decomposed = program.run_decompositions(curated_decompositions(PRESERVED_OP_PREFIXES)).module()
-    with torch.no_grad():
-        got = {name: decomposed(features) for name, features in cases}
-    entry = _diff_entry("gru-decomposition", "bit-exact", got, reference)
-    if not entry["bit_exact"]:
-        raise AssertionError(
-            f"分解グラフが eager とビット同一でない: maxdiff={entry['maxdiff']} —"
-            " torch の分解表が変わって数値経路が別物になっている"
-        )
-    return [entry]
+    entries: list[dict[str, Any]] = []
+    for probe in sorted({length, *VERIFY_LENGTHS}):
+        cases = build_cases(probe)
+        with torch.no_grad():
+            reference = {name: module.reference_forward(features) for name, features in cases}
+            got = {name: module(features) for name, features in cases}
+        entry = _diff_entry(f"gru-scan-t{probe}", "bit-exact", got, reference)
+        if not entry["bit_exact"]:
+            raise AssertionError(
+                f"T10={probe}: gru_scan への差し替えが nn.GRU とビット同一でない:"
+                f" maxdiff={entry['maxdiff']}"
+            )
+        entries.append(entry)
+    return entries
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -485,29 +562,30 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--length",
         type=int,
         default=DEFAULT_LENGTH,
-        help=f"入力の 10ms フレーム数 T10（{LENGTH_MULTIPLE} の倍数・既定 {DEFAULT_LENGTH}）。"
-        "長さごとに別のグラフ（GRU が時間方向へ展開される）なので系列も別になる",
+        help=f"golden ケースの 10ms フレーム数 T10（{LENGTH_MULTIPLE} の倍数・既定"
+        f" {DEFAULT_LENGTH}）。**グラフの受理集合ではない** — 時間軸は記号なので、"
+        "焼かれる 1 本のグラフが任意長を受ける",
     )
     parser.add_argument(
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は outputs/series/vowel-detector-<ckpt 名>-t<長さ>/）",
+        help="出力先（既定は outputs/series/vowel-detector-<ckpt 名>/）",
     )
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="分解グラフと eager の同値を実測する（emit はしない）",
+        help="gru_scan への差し替えと nn.GRU の同値を実測する（emit はしない）",
     )
     args = parser.parse_args(argv)
     if args.verify:
-        for entry in verify_decomposition(args.ckpt, args.length):
+        for entry in verify_patch(args.ckpt, args.length):
             print(
                 f"{entry['stage']} ({entry['claim']}): bit_exact={entry['bit_exact']}"
                 f" maxdiff={entry['maxdiff']}"
             )
         return
-    out_dir = args.out if args.out is not None else default_out_dir(args.ckpt, args.length)
+    out_dir = args.out if args.out is not None else default_out_dir(args.ckpt)
     summary = export_series(args.ckpt, out_dir, args.length)
     print(json.dumps({"ckpt": str(args.ckpt), **summary}, indent=1, ensure_ascii=False))
 

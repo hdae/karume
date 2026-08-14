@@ -842,6 +842,47 @@ class DeformConvBlock(nn.Module):
         return wide, point
 
 
+class GruScanBlock(nn.Module):
+    """gru_scan / gru_scan_reverse（第 2 層 — ADR 0056）の torch 突合。
+
+    入力側 GEMM は素の `nn.Linear`（= IR の `linear`）で、op が受け持つのは隠れ側の逐次だけ。
+    eager の期待値は `karume/custom_ops.py` の本体が出す（`nn.GRU` の単方向 1 層と
+    `torch.equal` でビット一致することは同モジュールの docstring の実測）。踏むべき形:
+
+    MUST: **時間軸を記号にする**。この op の存在理由が「T を記号のまま通す」ことなので、
+    静的 T の golden では分解形との差が出ない（`aten.gru.input` は T 回展開されて specialize
+    される）。
+    MUST: **2 方向を両方出す**。逆方向は「走査順だけが逆で、書き出しは順方向の時間順」で、
+    出力側 `flip` を挟む誤り形はここでしか赤くならない。
+    MUST: **h0 を 2 通り踏む** — 順方向は `torch.zeros`（第 0 層の定数畳み込みで initializer に
+    落ちる経路）、逆方向は**グラフ入力**（実行時値の初期状態）。ゼロ h0 だけだと「h0 を
+    読み飛ばすカーネル」が緑のまま通る。
+    MUST: 隠れ側の重みは小さめ（縮約 H 本ぶんでゲートが飽和すると、更新式の丸め差が値に
+    出ず突合が恒真化する）。
+    """
+
+    IN_FEATURES = 4
+    HIDDEN = 5
+
+    def __init__(self, generator: torch.Generator) -> None:
+        super().__init__()
+        self.project = nn.Linear(self.IN_FEATURES, 3 * self.HIDDEN)
+        _fill_param(generator, self.project.weight, 0.4)
+        _fill_param(generator, self.project.bias, 0.2)
+        self.weight_hh = nn.Parameter(
+            _uniform(generator, 3 * self.HIDDEN, self.HIDDEN, low=-0.5, high=0.5)
+        )
+        self.bias_hh = nn.Parameter(_uniform(generator, 3 * self.HIDDEN, low=-0.3, high=0.3))
+
+    def forward(self, x: torch.Tensor, state: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        gates = self.project(x)
+        zeros = torch.zeros(x.shape[1], self.HIDDEN)
+        return (
+            torch.ops.karume.gru_scan(gates, zeros, self.weight_hh, self.bias_hh),
+            torch.ops.karume.gru_scan_reverse(gates, state, self.weight_hh, self.bias_hh),
+        )
+
+
 class BilinearResize(nn.Module):
     """upsample_bilinear2d（第 1 層・align_corners=True 専業）の torch 突合。
 
@@ -1195,6 +1236,17 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
             _uniform(g, 1, 2, 4, 5, low=-2.5, high=2.5),
             _uniform(g, 1, 1, 4, 5, low=0.0, high=2.0),
         ),
+    ),
+    GoldenSpec(
+        name="gru_scan_block",
+        build=GruScanBlock,
+        # x[T, N, IN] は時間軸だけ記号（この op の存在理由）。state は逆方向の初期状態で、
+        # 0 を含めない値域にする（`h0` を読み飛ばす実装が緑にならない形）。
+        example_inputs=lambda g: (
+            _uniform(g, GOLDEN_T, 1, GruScanBlock.IN_FEATURES, low=-1.5, high=1.5),
+            _uniform(g, 1, GruScanBlock.HIDDEN, low=0.2, high=0.9),
+        ),
+        dynamic_shapes=({0: _DYNAMIC_T}, None),
     ),
     GoldenSpec(
         name="bilinear_resize",

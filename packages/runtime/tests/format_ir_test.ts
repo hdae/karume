@@ -188,8 +188,8 @@ Deno.test("parseIrGraph: シンボルの宣言と束縛可能性", () => {
   assertRejects("未宣言シンボルの使用", (g) => {
     g.inputs[0].shape = ["S", 4];
   });
-  assertRejects("入力 shape に素の形が無い", (g) => {
-    g.inputs[0].shape = ["8T", 4];
+  assertRejects("入力 shape の次元位置に一度も現れない", (g) => {
+    g.inputs[0].shape = [8, 4];
   });
   assertRejects("symbols の重複", (g) => {
     g.symbols = ["T", "T"];
@@ -197,6 +197,12 @@ Deno.test("parseIrGraph: シンボルの宣言と束縛可能性", () => {
   assertRejects("シンボル名が不正", (g) => {
     g.symbols = ["T", "2T"];
   });
+  // 派生形だけの入力は**受理する**（実寸から解が一意 — ADR 0057）。母音検出 CRNN は
+  // 先頭 conv の stride 2 のせいで `2T` でしか長さ軸を宣言できない。
+  const derived = parseMutated((g) => {
+    g.inputs[0].shape = ["2T", 4];
+  });
+  assertEquals(derived.inputs[0].shape, ["2T", 4]);
 });
 
 Deno.test("parseIrGraph: shape 要素", () => {
