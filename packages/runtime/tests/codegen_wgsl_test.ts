@@ -301,6 +301,14 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["matmul_v4.wgsl", matmulWgsl(true)],
     ["bmm.wgsl", BMM_WGSL],
     ["bmm_v4.wgsl", bmmWgsl(true)],
+    // bmm の**行窓変種**（分解 attention の行ブロック実行 — src/runtime/fusion.ts の
+    // `rowBlockAttention`）。A 側 / C 側 × v4 の 4 本を、**素の bmm 2 本と対で置く**のが
+    // 条件で、行窓を足したことで素の bmm のバイト列が動くのが最大の事故（行ブロック 1 枚の
+    // 機は素の bmm をそのまま撃つので、そこが動けば既存の WAV / PNG 門が丸ごと動く）。
+    ["bmm_rowwin_a.wgsl", bmmWgsl(false, undefined, "a")],
+    ["bmm_rowwin_a_v4.wgsl", bmmWgsl(true, undefined, "a")],
+    ["bmm_rowwin_c.wgsl", bmmWgsl(false, undefined, "c")],
+    ["bmm_rowwin_c_v4.wgsl", bmmWgsl(true, undefined, "c")],
     // 融合 attention の 3 カーネル（ADR 0023）。①③ は GEMM 骨格の変種なので v4 と対で置く。
     ["attention_qk.wgsl", attentionQkWgsl(false)],
     ["attention_qk_v4.wgsl", attentionQkWgsl(true)],

@@ -17,12 +17,21 @@
  *   手段（workgroup memory 往復による丸め障壁）が仕様保証でないことは各カーネルの docstring に
  *   書いてある。
  *
+ * ## 畳む先は 1 dispatch とは限らない
+ *
+ * 4 ルール（silu / upsample2x / rope / adaln）は「N ノード → private カーネル 1 dispatch」だが、
+ * {@link ROW_BLOCK_ATTENTION_RULE} は**演算ではなく中間の実体化幅**を畳むので、ステップ内で
+ * 閉じた一時（{@link FusedStep.temps}）を挟んだ dispatch 列になる。どちらも
+ * {@link FusedStep} 1 つ = 実行ステップ 1 つで、解放簿記の合流点は変わらない。
+ *
  * ## 適用順
  *
- * {@link FUSION_RULES} の**宣言順**（silu → upsample2x → rope → adaln）。現行 4 ルールの先頭 op は
- * `sigmoid` / `reshape` / `mul|slice` / `layer_norm` で互いに素なので、この順序は結果に効かない
- * （順序が意味を持つのは先頭 op が重なったときだけ — 重なりが生じていないことは
- * tests/runtime_fusion_test.ts が {@link FusionRule.heads} から機械的に検査する）。
+ * {@link FUSION_RULES} の**宣言順**（silu → upsample2x → rope → adaln → rowBlockAttention）。
+ * 5 ルールの先頭 op は `sigmoid` / `reshape` / `mul|slice` / `layer_norm` / `bmm` で互いに素
+ * なので、この順序は結果に効かない（順序が意味を持つのは先頭 op が重なったときだけ —
+ * 重なりが生じていないことは tests/runtime_fusion_test.ts が {@link FusionRule.heads} から
+ * 機械的に検査する）。窓の**内側**に他ルールの先頭 op が現れる形（rowBlockAttention の窓は
+ * `reshape` / `expand` を 5 本含む）は、掴めた時点で走査が窓幅ぶん進むので発火しえない。
  *
  * ## 窓内 passthrough
  *
@@ -41,10 +50,24 @@ import {
   LAYER_NORM_OP,
   layerNormAttrs,
   numel,
+  SAFE_SOFTMAX_OP,
   sliceAttrs,
+  softmaxDim,
   SYM_PREFIX_SLICE_OP,
 } from "../ops.ts";
+import { tiledWorkgroups } from "../codegen/dispatch.ts";
+import {
+  ELEMENTWISE_WORKGROUP_SIZE,
+  elementwiseKey,
+  elementwiseParams,
+  type ElementwiseSpec,
+  elementwiseWgsl,
+} from "../codegen/elementwise.ts";
 import { ADALN_NORM_KEY, ADALN_NORM_WGSL, adalnNormParams } from "../kernels/adaln-norm.ts";
+import { bmmKey, bmmParams, bmmRowWindowParams, bmmWgsl } from "../kernels/bmm.ts";
+import { gemmUsesVec4 } from "../kernels/gemm.ts";
+import { gemmGeometryForRows, gemmTileM, gemmTileN } from "../kernels/gemm-geometry.ts";
+import { SAFE_SOFTMAX_KEY, SAFE_SOFTMAX_WGSL, softmaxParams } from "../kernels/softmax.ts";
 import { ROPE_KEY, ROPE_WGSL, ROPE_WORKGROUP_SIZE, ropeParams } from "../kernels/rope.ts";
 import {
   SILU_WORKGROUP_SIZE,
@@ -62,7 +85,7 @@ import {
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /** 融合ルールの識別子（{@link FUSION_RULES} の宣言順と 1 対 1）。 */
-export type FusionRuleName = "silu" | "upsample2x" | "rope" | "adaln";
+export type FusionRuleName = "silu" | "upsample2x" | "rope" | "adaln" | "rowBlockAttention";
 
 /**
  * 診断カウンタの見出し。融合 4 ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
@@ -74,6 +97,29 @@ export type FusionCounterName = FusionRuleName | "identityExpand";
 /** ルール別の適用回数。「融合が黙って外れて性能だけ落ちる」事故の唯一の観測点。 */
 export type FusionCounts = Readonly<Record<FusionCounterName, number>>;
 
+/**
+ * 融合ステップ内で束縛しうる実体。
+ *
+ * MUST: ステップ内一時（{@link FusedStep.temps}）を指せるのはここだけで、外部入力は
+ * {@link FusedStep.binds} の**添字**で指す（値名の再解決を executor に持たせない）。
+ */
+export type FusedOperand =
+  | { readonly kind: "bind"; readonly index: number }
+  | { readonly kind: "temp"; readonly id: number }
+  | { readonly kind: "output" };
+
+/**
+ * dispatch の workgroup 数の決め方。
+ *
+ * - `gridStride` = 要素 / 行の被覆数を割る形（elementwise・reduce・融合 4 ルール）。上限を
+ *   超えたら縮退し、カーネル側の grid-stride が残りを回す。
+ * - `tiled` = **1 workgroup = 1 出力タイル**の GEMM 族。grid-stride で縮退できないので、
+ *   上限超過は宣言側（`tiledWorkgroups`）が fail loudly にする。
+ */
+export type FusedWorkgroups =
+  | { readonly kind: "gridStride"; readonly items: number; readonly size: number }
+  | { readonly kind: "tiled"; readonly counts: readonly [number, number, number] };
+
 /** 融合カーネル 1 dispatch ぶんの生成入力（全ルール共通の形）。 */
 export type FusedDispatch = {
   readonly key: string;
@@ -83,19 +129,44 @@ export type FusedDispatch = {
    * 文字列で持つ必要が無いため。
    */
   readonly wgsl: () => string;
-  /** 16 バイトの uniform Params（融合カーネルは全て uniform で受ける）。 */
+  /** binding 0 の Params。既定は uniform（16 バイト整列の MUST は各カーネル側）。 */
   readonly params: Uint32Array<ArrayBuffer>;
-  /** grid-stride の被覆対象数（workgroup 数はここから決まる）。 */
-  readonly gridItems: number;
   /**
-   * grid-stride の割り数（workgroup 数は `ceil(gridItems / workgroupSize)`）。要素並列の
-   * カーネルは `@workgroup_size` と一致するが、「1 行 = 1 workgroup」族（adaln）は行数を
-   * そのまま workgroup 数にするので **1** を渡す（素の layer_norm の dispatch と同じ形）。
+   * params を **storage** で束ねる（可変長 params を持つ elementwise 族だけ — 素のノードの
+   * `#buildElementwise` と同じ）。省略時は uniform。
    */
-  readonly workgroupSize: number;
+  readonly paramsStorage?: boolean;
+  /**
+   * binding 1 以降のオペランド列。**省略できるのは 1 dispatch のルールだけ**で、そのときは
+   * 「{@link FusedStep.binds} を宣言順 → 末尾に出力」（融合 4 ルール共通の形）になる。
+   */
+  readonly operands?: readonly FusedOperand[];
+  readonly workgroups: FusedWorkgroups;
 };
 
-/** 融合ステップ（元の連続ノード列 1 本を private カーネル 1 dispatch へ置換したもの）。 */
+/**
+ * ステップ内一時の確保仕様。形も意味も recipe.ts の `TempRecipe` と同じで、**寿命は
+ * dispatch 境界の添字**で表す。
+ *
+ * MUST: 宣言した一時には必ず解放境界がある（`releaseAfter` が確保より前だと実行相の参照
+ * 計数が閉じず、run 末尾の `assertDrained` が落とす）。
+ */
+export type FusedTemp = {
+  readonly byteLength: number;
+  /** {@link FusedStep.dispatches} のこの添字の**直前**に確保する。 */
+  readonly allocBefore: number;
+  /** {@link FusedStep.dispatches} のこの添字の**直後**に解放する。 */
+  readonly releaseAfter: number;
+};
+
+/**
+ * 融合ステップ（元の連続ノード列 1 本を private カーネルの dispatch 列へ置換したもの）。
+ *
+ * dispatch は**複数取りうる**。畳んだ結果が 1 dispatch にならないルール
+ * （{@link ROW_BLOCK_ATTENTION_RULE}）は、ステップ内で閉じた一時（{@link FusedStep.temps}）を
+ * 挟んで数本を並べる。MUST: それでも解放簿記の根拠は {@link FusedStep.ins} の延べ列 1 本の
+ * ままで、ステップ境界の外へは一時が 1 本も漏れない。
+ */
 export type FusedStep = {
   readonly kind: "fused";
   readonly rule: FusionRuleName;
@@ -113,7 +184,9 @@ export type FusedStep = {
   readonly nodeCount: number;
   readonly outputName: string;
   readonly outputShape: readonly number[];
-  readonly dispatch: FusedDispatch;
+  /** ステップ内で閉じた一時（{@link FusedStep.dispatches} の添字で寿命を表す）。 */
+  readonly temps: readonly FusedTemp[];
+  readonly dispatches: readonly FusedDispatch[];
 };
 
 export type NodeStep = {
@@ -133,11 +206,31 @@ export type FusionPlan = {
   readonly counts: FusionCounts;
 };
 
+/**
+ * 判定に要る device の能力（**granted limit の値そのもの**）。
+ *
+ * MUST: ここに載るのは「計画を決める入力」であって計測値ではない。実行時に測って選び直す形
+ * （オートチューン）は ADR 0022 で禁じている — 同じ device・同じ束縛なら常に同じ計画が出る、
+ * が prepared plan キャッシュとキーの意味の前提。
+ */
+export type FusionLimits = {
+  /** ストレージ束縛 1 本の上限。行ブロック枚数を決める唯一の device 側入力。 */
+  readonly maxStorageBufferBindingSize: number;
+  /** 1 軸あたりの workgroup 数の上限（タイル型 dispatch の fail loudly 用）。 */
+  readonly maxComputeWorkgroupsPerDimension: number;
+};
+
 /** 判定に要るグラフ全体の事実（executor の Session 状態から渡す）。 */
 export type FusionContext = {
   /** 値名 → グラフ内の消費回数（plan.ts の countUses）。 */
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;
+  readonly limits: FusionLimits;
+  /**
+   * 行ブロック枚数の強制（**テスト専用** — executor の `ROW_BLOCK_SPLIT`）。上限に収まる
+   * 最小枚数の代わりにこの枚数で割る。上限に収まらない枚数は fail loudly。
+   */
+  readonly rowBlockSplit?: number;
 };
 
 const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
@@ -228,6 +321,33 @@ type FusionMatch = {
 };
 
 /**
+ * ステップ内一時の寿命宣言が dispatch 列の内側で閉じているか。
+ *
+ * MUST: `allocBefore ≤ releaseAfter < dispatch 数`。外れた宣言は executor の replay で
+ * 「未確保の一時を束ねる」か「解放されない一時が残る」になり、前者は bind 面が組めず、
+ * 後者は run 末尾の `assertDrained` まで気づけない。ルールの本数だけ手書きさせず、
+ * 宣言の受け口 1 箇所で落とす。
+ */
+const assertTempLifetimes = (
+  name: FusionRuleName,
+  temps: readonly FusedTemp[],
+  dispatchCount: number,
+): void => {
+  temps.forEach((temp, id) => {
+    if (
+      !Number.isSafeInteger(temp.byteLength) || temp.byteLength < 1 ||
+      temp.allocBefore < 0 || temp.releaseAfter < temp.allocBefore ||
+      temp.releaseAfter >= dispatchCount
+    ) {
+      throw new ExecutionError(
+        `融合ルール '${name}': 一時 ${id} の寿命宣言 [${temp.allocBefore}, ${temp.releaseAfter}] が` +
+          ` dispatch ${dispatchCount} 本の内側で閉じていない（${temp.byteLength}B）`,
+      );
+    }
+  });
+};
+
+/**
  * match（掴む）と build（binds / kernel key / params を宣言する）の分離を型で強制する。
  *
  * MUST: 解放簿記の根拠（`ins` の延べ列）・畳んだ本数（`nodeCount`）・走査幅（`advance`）・
@@ -261,6 +381,8 @@ const defineRule = <Matched extends FusionMatch>(rule: {
       );
     }
     if (!passthroughIsIndependent(matched.chain, passthrough)) return undefined;
+    const built = rule.build(matched);
+    assertTempLifetimes(rule.name, built.temps, built.dispatches.length);
     return {
       passthrough,
       advance: matched.window.length,
@@ -269,7 +391,7 @@ const defineRule = <Matched extends FusionMatch>(rule: {
         rule: rule.name,
         ins: externalIns(matched.chain),
         nodeCount: matched.chain.length,
-        ...rule.build(matched),
+        ...built,
       },
     };
   },
@@ -337,13 +459,13 @@ const SILU_RULE = defineRule<SiluMatch>({
       binds: [matched.xName],
       outputName: matched.outputName,
       outputShape: matched.outputShape,
-      dispatch: {
+      temps: [],
+      dispatches: [{
         key: siluKey(matched.multiplyOrder),
         wgsl: () => siluWgsl(matched.multiplyOrder),
         params: siluParams(count),
-        gridItems: count,
-        workgroupSize: SILU_WORKGROUP_SIZE,
-      },
+        workgroups: { kind: "gridStride", items: count, size: SILU_WORKGROUP_SIZE },
+      }],
     };
   },
 });
@@ -432,14 +554,18 @@ const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
       binds: [matched.inputName],
       outputName: matched.outputName,
       outputShape: matched.outputShape,
-      dispatch: {
+      temps: [],
+      dispatches: [{
         key: UPSAMPLE_2X_KEY,
         wgsl: () => UPSAMPLE_2X_WGSL,
         // 巨大 shape は GPU 確保より先に u32 添字の契約で fail loudly させる。
         params: upsample2xParams(sourceCount, matched.width),
-        gridItems: sourceCount,
-        workgroupSize: UPSAMPLE_2X_WORKGROUP_SIZE,
-      },
+        workgroups: {
+          kind: "gridStride",
+          items: sourceCount,
+          size: UPSAMPLE_2X_WORKGROUP_SIZE,
+        },
+      }],
     };
   },
 });
@@ -571,13 +697,13 @@ const ROPE_RULE = defineRule<RopeMatch>({
       binds: [matched.xName, matched.cosName, matched.sinName],
       outputName: matched.outputName,
       outputShape: matched.outputShape,
-      dispatch: {
+      temps: [],
+      dispatches: [{
         key: ROPE_KEY,
         wgsl: () => ROPE_WGSL,
         params: ropeParams(count, matched.sequence, matched.headDim),
-        gridItems: count,
-        workgroupSize: ROPE_WORKGROUP_SIZE,
-      },
+        workgroups: { kind: "gridStride", items: count, size: ROPE_WORKGROUP_SIZE },
+      }],
     };
   },
 });
@@ -702,16 +828,352 @@ const ADALN_RULE = defineRule<AdalnMatch>({
     binds: matched.binds,
     outputName: matched.outputName,
     outputShape: matched.outputShape,
-    dispatch: {
+    temps: [],
+    dispatches: [{
       key: ADALN_NORM_KEY,
       wgsl: () => ADALN_NORM_WGSL,
       params: adalnNormParams(matched.rows, matched.dim, matched.eps),
       // 1 行 = 1 workgroup（行方向 grid-stride）なので、割り数は 1 で行数がそのまま
       // workgroup 数になる。`@workgroup_size` は行内の 256 スレッドで別物。
-      gridItems: matched.rows,
-      workgroupSize: 1,
-    },
+      workgroups: { kind: "gridStride", items: matched.rows, size: 1 },
+    }],
   }),
+});
+
+/** 行ブロック 1 枚（クエリ行の半開区間 `[offset, offset + rows)`）。 */
+export type RowBlock = {
+  readonly offset: number;
+  readonly rows: number;
+};
+
+/**
+ * クエリ行を「1 枚がストレージ束縛の上限に収まる**最小枚数**」へ等分する純関数。
+ *
+ * 入力は解決済みの静的な数だけ（device の granted limit・1 行あたりのバイト数・行数）で、
+ * 実測は 1 つも混ざらない — 実行時オートチューン禁止（ADR 0022）を満たす唯一の形。
+ * したがって同じ device・同じ束縛からは常に同じ枚数が出て、prepared plan のキー
+ * （解決済み bindings）が枚数まで含意する（S が違えば別キーなので枚数も別に導かれる）。
+ *
+ * 等分にするのは、末尾だけ極端に短いブロックを作らないため（幾何のバケットが 1 枚だけ
+ * 別になり、パイプラインが 1 本余計に生える）。端数は先頭から 1 行ずつ配る。
+ *
+ * MUST: **1 行でも上限に入らない形は fail loudly**。ここで黙って分割を諦めると、確保も
+ * 束縛も失敗するグラフが「融合が外れただけ」に見える。
+ *
+ * @param forced 枚数の強制（テスト専用）。上限に収まらない枚数は同じく fail loudly。
+ */
+export const planRowBlocks = (
+  rows: number,
+  bytesPerRow: number,
+  limit: number,
+  forced?: number,
+): readonly RowBlock[] => {
+  const where = `行ブロック分割（行 ${rows} × ${bytesPerRow}B / 上限 ${limit}B）`;
+  for (const [name, value] of [["行数", rows], ["1 行のバイト数", bytesPerRow]] as const) {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new ExecutionError(`${where}: ${name} は正整数（${value}）`);
+    }
+  }
+  if (bytesPerRow > limit) {
+    throw new ExecutionError(
+      `${where}: クエリ 1 行ぶんのスコア ${bytesPerRow}B が既にストレージ束縛の上限を超える` +
+        "（行ブロックでは分割しきれない形）",
+    );
+  }
+  const count = forced ?? Math.ceil(rows / Math.floor(limit / bytesPerRow));
+  if (!Number.isSafeInteger(count) || count < 1 || count > rows) {
+    throw new ExecutionError(
+      `${where}: 枚数 ${count} は 1 以上 ${rows} 以下の整数でなければならない`,
+    );
+  }
+  const base = Math.floor(rows / count);
+  const remainder = rows % count;
+  const widest = base + (remainder > 0 ? 1 : 0);
+  if (widest * bytesPerRow > limit) {
+    throw new ExecutionError(
+      `${where}: ${count} 枚では 1 枚 ${widest * bytesPerRow}B が上限に収まらない`,
+    );
+  }
+  const blocks: RowBlock[] = [];
+  for (let index = 0, offset = 0; index < count; index += 1) {
+    const blockRows = base + (index < remainder ? 1 : 0);
+    blocks.push({ offset, rows: blockRows });
+    offset += blockRows;
+  }
+  return blocks;
+};
+
+type RowBlockAttentionMatch = FusionMatch & {
+  /** `[q, kᵀ, mask, v]`（bind 面の並び — 重複無し）。 */
+  readonly binds: readonly string[];
+  readonly outputName: string;
+  readonly outputShape: readonly number[];
+  /** B·H を畳んだバッチ軸。 */
+  readonly heads: number;
+  /** クエリ行数 M（= S）。 */
+  readonly queries: number;
+  /** キー列数 N（= C）。 */
+  readonly keys: number;
+  /** head 幅 D（q / k / v で共通）。 */
+  readonly headDim: number;
+  readonly blocks: readonly RowBlock[];
+  readonly limits: FusionLimits;
+};
+
+/**
+ * 分解 attention の**行ブロック実行**: エクスポータが出す連続 9 ノード
+ *
+ * ```
+ * bmm(q[H,M,D], kᵀ[H,D,N])   -> S     [H,M,N]
+ * reshape                     -> S4    [1,H,M,N]
+ * add(S4, mask[1,1,1,N])      -> Sm    [1,H,M,N]
+ * safe_softmax(Sm, dim=3)     -> P4    [1,H,M,N]
+ * expand（恒等）→ reshape      -> P     [H,M,N]
+ * expand（恒等）→ reshape      -> V     [H,N,D]
+ * bmm(P, V)                   -> O     [H,M,D]
+ * ```
+ *
+ * を、**クエリ行のブロックごとの同型 4 dispatch** へ置き換える。畳んでいるのは演算ではなく
+ * **中間の実体化幅**で、`S` / `Sm` / `P` はブロック 1 枚ぶんのステップ内一時になる
+ * （全 M を実体化すると `H·M·N·4` バイトがストレージ束縛の上限を越える機がある — WebGPU core
+ * 既定の `maxStorageBufferBindingSize` は 128MiB）。
+ *
+ * ## ビット同一の根拠
+ *
+ * - 2 本の bmm は**行の担当割りだけ**を変える（{@link "../kernels/gemm.ts"} `BmmRowWindow`）。
+ *   1 出力要素の K 縮約順も丸めの並びも 1 文字も動かない（src/kernels/gemm-geometry.ts の
+ *   数値契約）。ブロックごとに幾何のバケットが変わりうるが、幾何が決めるのは担当割りだけ。
+ * - `add`（mask は `[1,1,1,N]` broadcast）と `safe_softmax`（最終次元の行内縮約）はどちらも
+ *   **行内で閉じている**ので、行を切っても 1 行あたりの演算列が変わらない。したがって
+ *   ブロックバッファ相手に既存カーネルをそのまま撃てる（行オフセットは要らない）。
+ *
+ * ## 常時融合・枚数は静的
+ *
+ * 掴めた窓は**必ず**融合し、枚数 n は {@link planRowBlocks} が device の granted limit と
+ * 解決済み shape だけから決める。**n = 1 の機では素の 4 dispatch 列と完全に同一**
+ * （行窓変種を使わず `bmmKey(v4, m)` の既存キー・既存 params のまま）で、追加コストはゼロ。
+ *
+ * ## 適用順と head 衝突
+ *
+ * 先頭 op は `bmm` で、既存 4 ルールの先頭 op（`sigmoid` / `reshape` / `mul` / `slice` /
+ * `layer_norm`）と互いに素なので宣言順は結果に効かない。窓の内側には `reshape` /
+ * `expand` が 5 本あるが、掴んだ時点で走査は窓幅ぶん進むので内側で別ルールが発火する余地は
+ * 無い（掴めなかったときだけ内側の `reshape` が upsample2x の先頭として試され、6 ノードの
+ * 綴りが違うので落ちる）。
+ *
+ * 外部入力の延べ回数: q / kᵀ / mask / v が各 1 回 = 4 回。
+ */
+const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
+  name: "rowBlockAttention",
+  heads: ["bmm"],
+  match: (nodes, index, context) => {
+    const qk = nodes[index];
+    if (qk?.node.op !== "bmm") return undefined;
+    const reshapeScores = nodes[index + 1];
+    const addMask = nodes[index + 2];
+    const softmax = nodes[index + 3];
+    const expandP = nodes[index + 4];
+    const reshapeP = nodes[index + 5];
+    const expandV = nodes[index + 6];
+    const reshapeV = nodes[index + 7];
+    const pv = nodes[index + 8];
+    if (
+      reshapeScores?.node.op !== "reshape" || addMask?.node.op !== "add" ||
+      softmax?.node.op !== SAFE_SOFTMAX_OP || expandP?.node.op !== "expand" ||
+      reshapeP?.node.op !== "reshape" || expandV?.node.op !== "expand" ||
+      reshapeV?.node.op !== "reshape" || pv?.node.op !== "bmm"
+    ) return undefined;
+    const chain = [
+      qk,
+      reshapeScores,
+      addMask,
+      softmax,
+      expandP,
+      reshapeP,
+      expandV,
+      reshapeV,
+      pv,
+    ];
+    if (!allF32(chain)) return undefined;
+
+    // 結線（窓の並びだけでは「同じ形の別の鎖が隣り合っている」を排除できない）。
+    if (
+      reshapeScores.node.ins[0] !== qk.outputName ||
+      addMask.node.ins[0] !== reshapeScores.outputName ||
+      softmax.node.ins[0] !== addMask.outputName ||
+      expandP.node.ins[0] !== softmax.outputName ||
+      reshapeP.node.ins[0] !== expandP.outputName ||
+      reshapeV.node.ins[0] !== expandV.outputName ||
+      pv.node.ins[0] !== reshapeP.outputName ||
+      pv.node.ins[1] !== reshapeV.outputName
+    ) return undefined;
+
+    const [qShape, ktShape] = qk.inputShapes;
+    if (qShape.length !== 3 || ktShape.length !== 3) return undefined;
+    const [heads, queries, headDim] = qShape;
+    const keys = ktShape[2];
+    if (heads < 1 || queries < 1 || headDim < 1 || keys < 1) return undefined;
+    const scores3 = [heads, queries, keys];
+    const scores4 = [1, heads, queries, keys];
+    if (
+      !sameShape(ktShape, [heads, headDim, keys]) ||
+      !sameShape(qk.outputShape, scores3) ||
+      !sameShape(reshapeScores.outputShape, scores4) ||
+      !sameShape(addMask.inputShapes[1], [1, 1, 1, keys]) ||
+      !sameShape(addMask.outputShape, scores4) ||
+      !sameShape(softmax.outputShape, scores4) ||
+      // 恒等 expand（複製軸を持たない）でなければ、素の列は実体化コピーを 1 本出す。
+      !sameShape(expandP.inputShapes[0], scores4) ||
+      !sameShape(expandP.outputShape, scores4) ||
+      !sameShape(reshapeP.outputShape, scores3) ||
+      !sameShape(expandV.inputShapes[0], [1, heads, keys, headDim]) ||
+      !sameShape(expandV.outputShape, [1, heads, keys, headDim]) ||
+      !sameShape(reshapeV.outputShape, [heads, keys, headDim]) ||
+      !sameShape(pv.outputShape, [heads, queries, headDim])
+    ) return undefined;
+    // 縮約軸は最終次元固定（契約が既に見ているが、窓の受理集合としても明示する）。
+    if (softmaxDim(softmax.node.attrs ?? {}, "行ブロック attention の safe_softmax") !== 3) {
+      return undefined;
+    }
+    if (!internalsArePrivate(chain, context)) return undefined;
+
+    const binds = [qk.node.ins[0], qk.node.ins[1], addMask.node.ins[1], expandV.node.ins[0]];
+    if (new Set(binds).size !== binds.length) return undefined;
+
+    // ここから先は fail loudly の領域（掴めた窓は必ず融合する）。素の列へ落としても
+    // 実体化幅は増えるだけなので、「分割しきれない」を沈黙の fallback にしてはならない。
+    const blocks = planRowBlocks(
+      queries,
+      heads * keys * 4,
+      context.limits.maxStorageBufferBindingSize,
+      context.rowBlockSplit,
+    );
+    return {
+      window: chain,
+      chain,
+      binds,
+      outputName: pv.outputName,
+      outputShape: pv.outputShape,
+      heads,
+      queries,
+      keys,
+      headDim,
+      blocks,
+      limits: context.limits,
+    };
+  },
+  build: (matched) => {
+    const { heads, queries, keys, headDim, blocks, limits } = matched;
+    // n = 1 は行窓変種を使わない（既存キー・既存 params のまま = 素の 4 dispatch 列と同一）。
+    const windowed = blocks.length > 1;
+    const dispatchLimit = limits.maxComputeWorkgroupsPerDimension;
+    const temps: FusedTemp[] = [];
+    const dispatches: FusedDispatch[] = [];
+    for (const block of blocks) {
+      const first = dispatches.length;
+      const rows = block.rows;
+      const bytes = heads * rows * keys * 4;
+      // 一時は 3 本とも「次の dispatch が読み終えたら返す」— 同時生存は常に 2 本で、
+      // 3 本目はプール再利用で 1 本目の実体を掴む（ブロックを跨いでも同じ）。
+      const scores = temps.length;
+      temps.push({ byteLength: bytes, allocBefore: first, releaseAfter: first + 1 });
+      const masked = temps.length;
+      temps.push({ byteLength: bytes, allocBefore: first + 1, releaseAfter: first + 2 });
+      const probabilities = temps.length;
+      temps.push({ byteLength: bytes, allocBefore: first + 2, releaseAfter: first + 3 });
+
+      // ① QK: A（q）だけ全 M ストライド + 行オフセットで読み、S はブロックとして書く。
+      const qkV4 = gemmUsesVec4(headDim, keys);
+      const qkGeometry = gemmGeometryForRows(rows);
+      const qkWhere =
+        `行ブロック bmm(QK) [${heads},${rows},${headDim}] × [${heads},${headDim},${keys}]`;
+      dispatches.push({
+        key: bmmKey(qkV4, rows, windowed ? "a" : undefined),
+        wgsl: () => bmmWgsl(qkV4, rows, windowed ? "a" : undefined),
+        params: windowed
+          ? bmmRowWindowParams(rows, keys, headDim, block.offset, queries)
+          : bmmParams(rows, keys, headDim),
+        operands: [
+          { kind: "bind", index: 0 },
+          { kind: "bind", index: 1 },
+          { kind: "temp", id: scores },
+        ],
+        workgroups: {
+          kind: "tiled",
+          counts: [
+            tiledWorkgroups(keys, gemmTileN(qkGeometry), dispatchLimit, qkWhere),
+            tiledWorkgroups(rows, gemmTileM(qkGeometry), dispatchLimit, qkWhere),
+            tiledWorkgroups(heads, 1, dispatchLimit, qkWhere),
+          ],
+        },
+      });
+
+      // ② 加算 mask。ブロックバッファ相手なので素の elementwise がそのまま撃てる。
+      const maskedShape = [1, heads, rows, keys];
+      const elementwise: ElementwiseSpec = { op: "add", rank: 4, dtype: "f32" };
+      dispatches.push({
+        key: elementwiseKey(elementwise),
+        wgsl: () => elementwiseWgsl(elementwise),
+        params: elementwiseParams(maskedShape, [maskedShape, [1, 1, 1, keys]]),
+        paramsStorage: true,
+        operands: [
+          { kind: "temp", id: scores },
+          { kind: "bind", index: 2 },
+          { kind: "temp", id: masked },
+        ],
+        workgroups: {
+          kind: "gridStride",
+          items: numel(maskedShape),
+          size: ELEMENTWISE_WORKGROUP_SIZE,
+        },
+      });
+
+      // ③ safe_softmax（1 行 = 1 workgroup）。行内で閉じるので行を切っても値は動かない。
+      dispatches.push({
+        key: SAFE_SOFTMAX_KEY,
+        wgsl: () => SAFE_SOFTMAX_WGSL,
+        params: softmaxParams(heads * rows, keys, true),
+        operands: [
+          { kind: "temp", id: masked },
+          { kind: "temp", id: probabilities },
+        ],
+        workgroups: { kind: "gridStride", items: heads * rows, size: 1 },
+      });
+
+      // ④ PV: A（P）はブロックとして読み、出力だけ全 M ストライド + 行オフセットで書く。
+      const pvV4 = gemmUsesVec4(keys, headDim);
+      const pvGeometry = gemmGeometryForRows(rows);
+      const pvWhere =
+        `行ブロック bmm(PV) [${heads},${rows},${keys}] × [${heads},${keys},${headDim}]`;
+      dispatches.push({
+        key: bmmKey(pvV4, rows, windowed ? "c" : undefined),
+        wgsl: () => bmmWgsl(pvV4, rows, windowed ? "c" : undefined),
+        params: windowed
+          ? bmmRowWindowParams(rows, headDim, keys, block.offset, queries)
+          : bmmParams(rows, headDim, keys),
+        operands: [
+          { kind: "temp", id: probabilities },
+          { kind: "bind", index: 3 },
+          { kind: "output" },
+        ],
+        workgroups: {
+          kind: "tiled",
+          counts: [
+            tiledWorkgroups(headDim, gemmTileN(pvGeometry), dispatchLimit, pvWhere),
+            tiledWorkgroups(rows, gemmTileM(pvGeometry), dispatchLimit, pvWhere),
+            tiledWorkgroups(heads, 1, dispatchLimit, pvWhere),
+          ],
+        },
+      });
+    }
+    return {
+      binds: matched.binds,
+      outputName: matched.outputName,
+      outputShape: matched.outputShape,
+      temps,
+      dispatches,
+    };
+  },
 });
 
 /** MUST: この配列の順が適用順（冒頭「適用順」節）。 */
@@ -720,6 +1182,7 @@ export const FUSION_RULES: readonly FusionRule[] = [
   UPSAMPLE_2X_RULE,
   ROPE_RULE,
   ADALN_RULE,
+  ROW_BLOCK_ATTENTION_RULE,
 ];
 
 /** 恒等 expand の別名化条件（ADR 0011 の追記）。1 軸でも複製があれば実体化コピーへ戻す。 */
@@ -738,6 +1201,7 @@ export const planFusions = (
     upsample2x: 0,
     rope: 0,
     adaln: 0,
+    rowBlockAttention: 0,
     identityExpand: 0,
   };
   const pushNode = (plan: NodePlan): void => {

@@ -236,7 +236,13 @@ import {
   WEIGHT_SLOTS,
   WHERE_OP,
 } from "../ops.ts";
-import { type ExecStep, type FusedStep, type FusionCounts, planFusions } from "./fusion.ts";
+import {
+  type ExecStep,
+  type FusedOperand,
+  type FusedStep,
+  type FusionCounts,
+  planFusions,
+} from "./fusion.ts";
 import {
   bindSymbols,
   countUses,
@@ -362,6 +368,19 @@ export type I8a8Dot = "dp4a" | "emu";
 export const I8A8_DOT: unique symbol = Symbol("karume.i8a8Dot");
 
 /**
+ * **テスト専用の非公開面**（mod.ts からは輸出しない — {@link I8A8_DOT} と同じ流儀）。
+ *
+ * 分解 attention の行ブロック枚数（src/runtime/fusion.ts の `rowBlockAttention`）を強制する。
+ * 既定の枚数は device の `maxStorageBufferBindingSize` から静的に決まるので、**上限に余裕の
+ * ある機では常に 1 枚**になり、2 枚以上の経路（行窓カーネル・ブロック跨ぎの full-write）が
+ * 1 度も走らない。強制分割はその経路を実機で回して 1 枚実行と Uint32 一致させるための唯一の
+ * 手段で、環境変数ではなく Session 単位のノブにしてあるのは 1 プロセス内で両方を回すため。
+ *
+ * MUST: 上限に収まらない枚数は fail loudly（緩める向きには使えない）。
+ */
+export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
+
+/**
  * op 族ごとの計算精度ノブ（ADR 0028 / attention の i8a8 は設計 §9.2）。**重み格納の f16
  * （ADR 0018）とは別の軸**で、`"f16"` は共有タイルを f16 に落として内積を回す変種
  * （累積は f32）、`"i8a8"` は活性を per-token i8 へ量子化して整数内積で回す変種を選ぶ。
@@ -431,6 +450,8 @@ export type SessionOptions = {
   readonly attentionScoreStorage?: ScoreStorage;
   /** テスト専用（{@link I8A8_DOT}）。既定は wgslLanguageFeatures の列挙から決める。 */
   readonly [I8A8_DOT]?: I8a8Dot;
+  /** テスト専用（{@link ROW_BLOCK_SPLIT}）。既定は device の limit から静的に決まる枚数。 */
+  readonly [ROW_BLOCK_SPLIT]?: number;
 };
 
 /**
@@ -809,6 +830,8 @@ type SessionState = {
    * テストは {@link I8A8_DOT} で強制できる。**どちらでも数値は 1 ビットも変わらない**。
    */
   readonly i8a8Dot: I8a8Dot;
+  /** 行ブロック枚数の強制（テスト専用 — {@link ROW_BLOCK_SPLIT}）。 */
+  readonly rowBlockSplit: number | undefined;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly dtypes: ReadonlyMap<string, IrDtype>;
   readonly outputNames: ReadonlySet<string>;
@@ -1006,6 +1029,7 @@ export class Session {
       // 経路選択としてここで 1 度だけ決める（src/kernels/linear-i8a8.ts の docstring）。
       i8a8Dot: options[I8A8_DOT] ??
         (dp4aAvailable(gpu.wgslLanguageFeatures) ? "dp4a" : "emu"),
+      rowBlockSplit: options[ROW_BLOCK_SPLIT],
       useCounts: countUses(model.graph),
       dtypes: declaredDtypes(model.graph),
       outputNames: new Set(model.graph.outputs),
@@ -1442,12 +1466,24 @@ export class Session {
     });
   }
 
-  /** 導出相の前半（計画 → 融合判定）。GPU に触れない純関数だけで閉じる。 */
+  /**
+   * 導出相の前半（計画 → 融合判定）。GPU に触れない純関数だけで閉じる。
+   *
+   * device の limits は**値として**渡す（融合ルールが GPUDevice を掴まないまま、行ブロック
+   * 枚数のような「機の能力で決まる計画」を静的に決められる — src/runtime/fusion.ts の
+   * {@link FusionLimits}）。
+   */
   #planSteps(bindings: SymbolBindings): PlannedSteps {
     const plan = planGraph(this.#state.model.graph, bindings);
+    const { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension } =
+      this.#state.gpu.limits;
     const fusion = planFusions(plan.nodes, {
       useCounts: this.#state.useCounts,
       outputNames: this.#state.outputNames,
+      limits: { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension },
+      ...(this.#state.rowBlockSplit === undefined
+        ? {}
+        : { rowBlockSplit: this.#state.rowBlockSplit }),
     });
     return { shapes: plan.shapes, fusions: fusion.counts, steps: fusion.steps };
   }
@@ -1844,8 +1880,12 @@ export class Session {
   }
 
   /**
-   * 融合ステップの 1 dispatch。bind 面は「params, 入力…, 出力」で全ルール共通、params は
-   * 16 バイトの uniform で固定（src/runtime/fusion.ts の {@link FusedDispatch}）。
+   * 融合ステップの dispatch 列。
+   *
+   * bind 面の既定は「params, 入力…, 出力」（融合 4 ルール共通）で、`operands` を宣言した
+   * ルールだけがステップ内一時を混ぜた並びを取る。**一時の確保・解放は
+   * {@link StepRecipeBuilder} に replay させる**（寿命の導出点を 2 つに増やさない）ので、
+   * 実行相の簿記は素のノードと同じ 1 本（{@link executeStepRecipe}）に閉じたままになる。
    */
   async #buildFused(
     step: FusedStep,
@@ -1853,25 +1893,59 @@ export class Session {
     out: BindingSource,
     builder: StepRecipeBuilder,
   ): Promise<void> {
-    const { key, gridItems, workgroupSize } = step.dispatch;
-    const { pipeline, layout } = await this.#state.cache.get(key, step.dispatch.wgsl());
-    const params = this.#writeParams(step.dispatch.params, PARAMS_UNIFORM_USAGE);
-    const groups = gridStrideWorkgroups(
-      gridItems,
-      workgroupSize,
-      this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
-    );
-    builder.dispatch({
-      key,
-      pipeline,
-      layout,
-      params,
-      bindings: [
-        ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: binds.length + 1, source: out },
-      ],
-      workgroups: [groups, 1, 1],
-    });
+    const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
+    const temps: TempSource[] = [];
+    const resolve = (operand: FusedOperand): BindingSource => {
+      if (operand.kind === "output") return out;
+      if (operand.kind === "bind") {
+        const source = binds[operand.index];
+        if (source === undefined) {
+          throw new ExecutionError(
+            `融合ルール '${step.rule}': bind 添字 ${operand.index} が宣言 ${binds.length} 本の外`,
+          );
+        }
+        return source;
+      }
+      const temp = temps[operand.id];
+      // 未確保の一時を束ねるのは寿命宣言の破れ（確保より前の dispatch から読んでいる）。
+      if (temp === undefined) {
+        throw new ExecutionError(`融合ルール '${step.rule}': 一時 ${operand.id} が未確保`);
+      }
+      return temp;
+    };
+    for (const [index, dispatch] of step.dispatches.entries()) {
+      for (const [id, temp] of step.temps.entries()) {
+        if (temp.allocBefore === index) temps[id] = builder.allocTemp(temp.byteLength);
+      }
+      const { pipeline, layout } = await this.#state.cache.get(dispatch.key, dispatch.wgsl());
+      const params = this.#writeParams(
+        dispatch.params,
+        dispatch.paramsStorage === true ? PARAMS_STORAGE_USAGE : PARAMS_UNIFORM_USAGE,
+      );
+      const operands = dispatch.operands ??
+        [
+          ...binds.map((_, at): FusedOperand => ({ kind: "bind", index: at })),
+          { kind: "output" } as const,
+        ];
+      const { workgroups } = dispatch;
+      builder.dispatch({
+        key: dispatch.key,
+        pipeline,
+        layout,
+        params,
+        bindings: operands.map((operand, slot) => ({
+          binding: slot + 1,
+          source: resolve(operand),
+        })),
+        workgroups: workgroups.kind === "tiled"
+          ? workgroups.counts
+          : [gridStrideWorkgroups(workgroups.items, workgroups.size, limit), 1, 1],
+      });
+      // MUST: 同一境界の解放は確保の逆順（{@link executeStepRecipe} と同じ LIFO）。
+      for (let id = step.temps.length - 1; id >= 0; id -= 1) {
+        if (step.temps[id].releaseAfter === index) builder.releaseTemp(temps[id]);
+      }
+    }
   }
 
   /** 素のノード 1 つの本体（確保・retain・解放は {@link executeStepRecipe} が済ませる）。 */

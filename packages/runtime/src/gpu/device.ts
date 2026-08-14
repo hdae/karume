@@ -95,13 +95,27 @@ export type RequiredLimitKey = (typeof REQUIRED_LIMIT_KEYS)[number];
 export type RequiredLimits = Readonly<Record<RequiredLimitKey, number>>;
 
 /**
+ * requiredLimits の**上限を絞る**指定（キーごとに `min` を取る）。
+ *
+ * MUST: 絞る向きにしか使えない（アダプタ値を超える要求はアダプタ値のまま）。引き上げに使えて
+ * しまうと requestDevice が丸ごと失敗する経路が黙って生まれる。
+ */
+export type LimitCaps = Partial<Record<RequiredLimitKey, number>>;
+
+/**
  * アダプタ実測値から requestDevice に渡す requiredLimits を組み立てる。
  * 要求値がアダプタ値そのものなら requestDevice は必ず成功する。
  *
  * MUST: 仕様上 `maxStorageBufferBindingSize ≤ maxBufferSize`。片方だけ引き上げると
  * requestDevice が丸ごと失敗するため、両者は必ず同時に計画する。
+ *
+ * `caps` は**テスト専用の絞り**（{@link LIMIT_CAPS}）。要求値を下げるだけなので
+ * `maxStorageBufferBindingSize ≤ maxBufferSize` の関係は崩れない。
  */
-export const planRequiredLimits = (adapterLimits: GPUSupportedLimits): RequiredLimits => {
+export const planRequiredLimits = (
+  adapterLimits: GPUSupportedLimits,
+  caps: LimitCaps = {},
+): RequiredLimits => {
   const maxBufferSize = adapterLimits.maxBufferSize;
   // Record<RequiredLimitKey, number> の網羅性検査で、キー一覧との同期は型で保証される。
   const planned: Record<RequiredLimitKey, number> = {
@@ -117,6 +131,10 @@ export const planRequiredLimits = (adapterLimits: GPUSupportedLimits): RequiredL
     maxComputeWorkgroupSizeZ: adapterLimits.maxComputeWorkgroupSizeZ,
     maxComputeWorkgroupsPerDimension: adapterLimits.maxComputeWorkgroupsPerDimension,
   };
+  for (const key of REQUIRED_LIMIT_KEYS) {
+    const cap = caps[key];
+    if (cap !== undefined) planned[key] = Math.min(planned[key], cap);
+  }
   return planned;
 };
 
@@ -441,7 +459,19 @@ export type AcquireGpuOptions = {
    * である必要がある（Session 構築時に fail loudly）。
    */
   readonly shaderF16?: boolean;
+  /** テスト専用（{@link LIMIT_CAPS}）。requiredLimits を**絞る**方向にだけ効く。 */
+  readonly [LIMIT_CAPS]?: LimitCaps;
 };
+
+/**
+ * **テスト専用の非公開面**（mod.ts からは輸出しない — executor の `I8A8_DOT` と同じ流儀）。
+ *
+ * requiredLimits を絞った device を作る。ポータビリティの門はこれでしか張れない — 手元の
+ * アダプタは WebGPU core 既定（`maxStorageBufferBindingSize` = 128MiB）より遥かに大きい値を
+ * 出すので、「core 既定の機で確保・束縛が通るか」は**絞った device 上で実走**する以外に
+ * 確かめる手段が無い（列挙は「動く」の証拠にならない、と同じ規律）。
+ */
+export const LIMIT_CAPS: unique symbol = Symbol("karume.limitCaps");
 
 /**
  * 取得済み device と正規化済み能力の束。
@@ -1033,7 +1063,7 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
   if (adapter === null) {
     throw new GpuUnavailableError("GPUAdapter を取得できない（対応 GPU / ドライバが無い）");
   }
-  const limits = planRequiredLimits(adapter.limits);
+  const limits = planRequiredLimits(adapter.limits, options[LIMIT_CAPS]);
   // 条件付き feature の判定はここだけ（不足は例外 — 黙って能力を落とさない）。ADR 0021 / 0028。
   const timestampQuery = planTimestampFeature(adapter.features, options.gpuTiming);
   const shaderF16 = planShaderF16Feature(adapter.features, options.shaderF16);

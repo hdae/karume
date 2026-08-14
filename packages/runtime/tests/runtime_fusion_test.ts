@@ -6,22 +6,35 @@
  * 値のビット parity を見る役で、こちらは反例を GPU 抜きで細かく積む役。
  */
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
+import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { ADALN_NORM_KEY, adalnNormParams } from "../src/kernels/adaln-norm.ts";
+import { bmmKey } from "../src/kernels/bmm.ts";
 import { ROPE_KEY } from "../src/kernels/rope.ts";
 import { siluKey } from "../src/kernels/silu.ts";
+import { SAFE_SOFTMAX_KEY } from "../src/kernels/softmax.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
 import {
   type ExecStep,
   FUSION_RULES,
   type FusionPlan,
   planFusions,
+  planRowBlocks,
 } from "../src/runtime/fusion.ts";
-import { bindSymbols, countUses, planGraph } from "../src/runtime/plan.ts";
+import { bindSymbols, countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
 import type { GraphJson } from "./helpers/format.ts";
 
 const parse = (graph: GraphJson): IrGraph => parseIrGraph(JSON.stringify(graph));
+
+/**
+ * 判定に使う device の能力（WebGPU core 既定 — 128MiB / 65535）。行ブロック分割の枚数だけが
+ * これを読む（既存 4 ルールは device の能力に依らない）。
+ */
+const TEST_LIMITS = {
+  maxStorageBufferBindingSize: 128 * 1024 * 1024,
+  maxComputeWorkgroupsPerDimension: 65535,
+} as const;
 
 /** グラフ JSON → 融合済みステップ列（executor が run ごとに作るのと同じ入力）。 */
 const fuse = (
@@ -33,6 +46,7 @@ const fuse = (
   return planFusions(plan.nodes, {
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
   });
 };
 
@@ -47,7 +61,13 @@ const fusedAt = (plan: FusionPlan, index: number) => {
 };
 
 Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に効かない", () => {
-  assertEquals(FUSION_RULES.map((rule) => rule.name), ["silu", "upsample2x", "rope", "adaln"]);
+  assertEquals(FUSION_RULES.map((rule) => rule.name), [
+    "silu",
+    "upsample2x",
+    "rope",
+    "adaln",
+    "rowBlockAttention",
+  ]);
   const seen = new Set<string>();
   for (const rule of FUSION_RULES) {
     for (const head of rule.heads) {
@@ -55,7 +75,7 @@ Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に�
       seen.add(head);
     }
   }
-  assertEquals([...seen].sort(), ["layer_norm", "mul", "reshape", "sigmoid", "slice"]);
+  assertEquals([...seen].sort(), ["bmm", "layer_norm", "mul", "reshape", "sigmoid", "slice"]);
 });
 
 // ---------------------------------------------------------------- SiLU
@@ -132,7 +152,7 @@ Deno.test("SiLU は sigmoid→mul の両順を掴み、x を延べ 2 回消費�
     assertEquals(step.binds, ["x"], `${order}: bind 順`);
     assertEquals(step.nodeCount, 2, order);
     assertEquals(step.outputName, "y", order);
-    assertEquals(step.dispatch.key, siluKey(order), order);
+    assertEquals(step.dispatches[0].key, siluKey(order), order);
     assertEquals(plan.counts.silu, 1, order);
   }
 });
@@ -220,9 +240,9 @@ Deno.test("VAE nearest x2 は 6 ノード鎖を掴み、外部入力 1 本だけ
   assertEquals(step.ins, ["x"]);
   assertEquals(step.binds, ["x"]);
   assertEquals(step.nodeCount, 6);
-  assertEquals(step.dispatch.key, UPSAMPLE_2X_KEY);
+  assertEquals(step.dispatches[0].key, UPSAMPLE_2X_KEY);
   // params は [入力要素数, width, 出力 width, reserved]
-  assertEquals([...step.dispatch.params], [210, 7, 14, 0]);
+  assertEquals([...step.dispatches[0].params], [210, 7, 14, 0]);
   assertEquals(plan.counts.upsample2x, 1);
 });
 
@@ -389,9 +409,9 @@ Deno.test("half-split RoPE は 2 順序を掴み、x を延べ 3 回・cos / sin
     assertEquals(step.ins, expectedIns, `${order}: 外部入力の延べ列`);
     assertEquals(step.binds, ["x", "cos", "sin"], `${order}: bind 順`);
     assertEquals(step.nodeCount, 7, order);
-    assertEquals(step.dispatch.key, ROPE_KEY, order);
+    assertEquals(step.dispatches[0].key, ROPE_KEY, order);
     // params は [全要素数, sequence, head_dim, half_dim]
-    assertEquals([...step.dispatch.params], [1 * 4 * 5 * 128, 5, 128, 64], order);
+    assertEquals([...step.dispatches[0].params], [1 * 4 * 5 * 128, 5, 128, 64], order);
     assertEquals(plan.counts.rope, 1, order);
   }
 });
@@ -405,9 +425,9 @@ Deno.test("half-split RoPE は head 幅を分割位置から導き、幅ごと�
     const plan = fuse(ropeGraph(options), ropeInputs(options));
     assertEquals(outline(plan.steps), ["fused:rope"], `head 幅 ${headDim}`);
     const step = fusedAt(plan, 0);
-    assertEquals(step.dispatch.key, ROPE_KEY, `head 幅 ${headDim}: カーネルは 1 本`);
+    assertEquals(step.dispatches[0].key, ROPE_KEY, `head 幅 ${headDim}: カーネルは 1 本`);
     assertEquals(
-      [...step.dispatch.params],
+      [...step.dispatches[0].params],
       [4 * 5 * headDim, 5, headDim, headDim / 2],
       `head 幅 ${headDim}: params`,
     );
@@ -632,11 +652,14 @@ Deno.test("adaLN は窓 7 / 窓 6 を掴み、reshape は融合ステップの�
     assertEquals(step.nodeCount, 4, `${label}: 畳んだ本数は窓幅ではない`);
     assertEquals(step.outputName, "y", label);
     assertEquals(step.outputShape, [1, ROWS, DIM], label);
-    assertEquals(step.dispatch.key, ADALN_NORM_KEY, label);
+    assertEquals(step.dispatches[0].key, ADALN_NORM_KEY, label);
     // params は素の layer_norm と同一（rows / dim / eps のビット列）。
-    assertEquals([...step.dispatch.params], [...adalnNormParams(ROWS, DIM, 1e-6)], label);
-    assertEquals(step.dispatch.gridItems, ROWS, `${label}: 1 行 = 1 workgroup`);
-    assertEquals(step.dispatch.workgroupSize, 1, `${label}: 行数がそのまま workgroup 数`);
+    assertEquals([...step.dispatches[0].params], [...adalnNormParams(ROWS, DIM, 1e-6)], label);
+    assertEquals(
+      step.dispatches[0].workgroups,
+      { kind: "gridStride", items: ROWS, size: 1 },
+      `${label}: 1 行 = 1 workgroup・行数がそのまま workgroup 数`,
+    );
     assertEquals(plan.counts.adaln, 1, label);
   }
 });
@@ -645,7 +668,11 @@ Deno.test("adaLN の窓内 passthrough は他ルールの受理位置を潰さ�
   const graph = adalnGraph();
   const ir = parse(graph);
   const plan = planGraph(ir, bindSymbols(ir, adalnInputs(graph)));
-  const context = { useCounts: countUses(ir), outputNames: new Set(ir.outputs) };
+  const context = {
+    useCounts: countUses(ir),
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+  };
   // 窓（layer_norm + reshape×3 + add + mul + add）の**全ての開始位置**で adaln 以外が
   // 1 つも掴まないことを見る。`reshape` は upsample2x の先頭 op でもあるので、窓ごと
   // 読み飛ばすことで他ルールの機会を奪っていないかはここでしか分からない。
@@ -704,5 +731,257 @@ Deno.test("カウンタは融合が並んだグラフでルール別に積み上
 
   const plan = fuse(graph, ropeInputs({ heads: 2 }));
   assertEquals(outline(plan.steps), ["fused:rope", "fused:silu"]);
-  assertEquals(plan.counts, { silu: 1, upsample2x: 0, rope: 1, adaln: 0, identityExpand: 0 });
+  assertEquals(plan.counts, {
+    silu: 1,
+    upsample2x: 0,
+    rope: 1,
+    adaln: 0,
+    rowBlockAttention: 0,
+    identityExpand: 0,
+  });
+});
+
+// ------------------------------------------- 行ブロック attention（rowBlockAttention）
+
+type AttentionShape = {
+  readonly heads: number;
+  readonly queries: number;
+  readonly keys: number;
+  readonly headDim: number;
+};
+
+const ATTENTION: AttentionShape = { heads: 3, queries: 17, keys: 19, headDim: 13 };
+
+/** 窓の 1 点だけを壊すためのつまみ（既定は実測どおりの綴り）。 */
+type AttentionOptions = {
+  /** bmm と reshape の間に 0 dispatch の別名を 1 本挟む（隣接条件だけを外す）。 */
+  readonly interpose?: boolean;
+  /** mask を `[1,1,M,N]`（行ごと）にする。 */
+  readonly rowMask?: boolean;
+  /** safe_softmax を素の softmax にする。 */
+  readonly plainSoftmax?: boolean;
+  /** V 側の expand を**複製軸を持つ** broadcast にする（恒等でなくなる）。 */
+  readonly broadcastV?: boolean;
+  /** 最後の bmm の入力順を入れ替える。 */
+  readonly swapPv?: boolean;
+  /** 中間 S を graph output にする。 */
+  readonly scoresOutput?: boolean;
+  /** softmax 出力にもう 1 本 consumer を足す。 */
+  readonly extraConsumer?: boolean;
+  /** q と kᵀ を同じ入力にする（bind 面が重複する形 — 正方形のときだけ作れる）。 */
+  readonly sameQk?: boolean;
+};
+
+const attentionGraph = (
+  shape: AttentionShape = ATTENTION,
+  options: AttentionOptions = {},
+): GraphJson => {
+  const { heads, queries, keys, headDim } = shape;
+  const scores3 = [heads, queries, keys];
+  const scores4 = [1, heads, queries, keys];
+  const qkOut = options.interpose ? "scores3_alias" : "scores3";
+  const maskShape = options.rowMask ? [1, 1, queries, keys] : [1, 1, 1, keys];
+  // 非恒等 expand を作るには、元を 1 軸だけ 1 にして複製させる。
+  const vSource = options.broadcastV ? [1, 1, keys, headDim] : [1, heads, keys, headDim];
+  const values: GraphJson["values"] = {
+    scores3: { dtype: "f32", shape: scores3 },
+    scores4: { dtype: "f32", shape: scores4 },
+    masked: { dtype: "f32", shape: scores4 },
+    probs: { dtype: "f32", shape: scores4 },
+    probsExpanded: { dtype: "f32", shape: scores4 },
+    probs3: { dtype: "f32", shape: scores3 },
+    vExpanded: { dtype: "f32", shape: [1, heads, keys, headDim] },
+    v3: { dtype: "f32", shape: [heads, keys, headDim] },
+    y: { dtype: "f32", shape: [heads, queries, headDim] },
+  };
+  if (options.interpose) values.scores3_alias = { dtype: "f32", shape: scores3 };
+  if (options.extraConsumer) values.probsCopy = { dtype: "f32", shape: scores4 };
+  const nodes: GraphJson["nodes"] = [
+    { op: "bmm", ins: ["q", options.sameQk ? "q" : "kt"], outs: [qkOut], attrs: {} },
+    ...(options.interpose ? [{ op: "reshape", ins: [qkOut], outs: ["scores3"], attrs: {} }] : []),
+    { op: "reshape", ins: ["scores3"], outs: ["scores4"], attrs: {} },
+    { op: "add", ins: ["scores4", "mask"], outs: ["masked"], attrs: {} },
+    {
+      op: options.plainSoftmax ? "softmax" : "safe_softmax",
+      ins: ["masked"],
+      outs: ["probs"],
+      attrs: { dim: 3 },
+    },
+    { op: "expand", ins: ["probs"], outs: ["probsExpanded"], attrs: {} },
+    { op: "reshape", ins: ["probsExpanded"], outs: ["probs3"], attrs: {} },
+    { op: "expand", ins: ["v"], outs: ["vExpanded"], attrs: {} },
+    { op: "reshape", ins: ["vExpanded"], outs: ["v3"], attrs: {} },
+    {
+      op: "bmm",
+      ins: options.swapPv ? ["v3", "probs3"] : ["probs3", "v3"],
+      outs: ["y"],
+      attrs: {},
+    },
+    ...(options.extraConsumer
+      ? [{ op: "neg", ins: ["probs"], outs: ["probsCopy"], attrs: {} }]
+      : []),
+  ];
+  return {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: [],
+    inputs: [
+      { name: "q", dtype: "f32", shape: [heads, queries, headDim] },
+      ...(options.sameQk
+        ? []
+        : [{ name: "kt", dtype: "f32" as const, shape: [heads, headDim, keys] }]),
+      { name: "mask", dtype: "f32", shape: maskShape },
+      { name: "v", dtype: "f32", shape: vSource },
+    ],
+    outputs: options.scoresOutput ? ["y", "scores4"] : ["y"],
+    initializers: {},
+    values,
+    nodes,
+  };
+};
+
+const attentionInputs = (
+  shape: AttentionShape = ATTENTION,
+  options: AttentionOptions = {},
+): Readonly<Record<string, readonly number[]>> => {
+  const { heads, queries, keys, headDim } = shape;
+  return {
+    q: [heads, queries, headDim],
+    ...(options.sameQk ? {} : { kt: [heads, headDim, keys] }),
+    mask: options.rowMask ? [1, 1, queries, keys] : [1, 1, 1, keys],
+    v: options.broadcastV ? [1, 1, keys, headDim] : [1, heads, keys, headDim],
+  };
+};
+
+Deno.test("分解 attention の 9 ノード窓を 1 ステップへ畳み、外部入力を延べ 4 回だけ消費する", () => {
+  const plan = fuse(attentionGraph(), attentionInputs());
+  assertEquals(outline(plan.steps), ["fused:rowBlockAttention"]);
+  const step = fusedAt(plan, 0);
+  const operands = ["q", "kt", "mask", "v"];
+  assertEquals(step.ins, operands, "外部入力の延べ列（元 9 ノードの外部消費と厳密一致）");
+  assertEquals(step.binds, operands, "bind 面（重複無し）");
+  assertEquals(step.nodeCount, 9);
+  assertEquals(step.outputName, "y");
+  assertEquals(step.outputShape, [ATTENTION.heads, ATTENTION.queries, ATTENTION.headDim]);
+  assertEquals(plan.counts.rowBlockAttention, 1);
+  // 128MiB 上限に対して S は小さいので 1 枚 = 素の 4 dispatch 列。
+  assertEquals(step.dispatches.length, 4, "1 枚は 4 dispatch");
+  assertEquals(step.temps.length, 3, "S / mask 済み S / P の 3 本");
+  assertEquals(
+    step.dispatches.map((dispatch) => dispatch.key),
+    [
+      bmmKey(false, ATTENTION.queries),
+      elementwiseKey({ op: "add", rank: 4, dtype: "f32" }),
+      SAFE_SOFTMAX_KEY,
+      bmmKey(false, ATTENTION.queries),
+    ],
+    "1 枚のキーは素の bmm（行窓変種を使わない）",
+  );
+});
+
+Deno.test("行ブロックは上限に収まる最小枚数で等分され、一時は 1 枚ぶんまで縮む", () => {
+  const shape: AttentionShape = { heads: 2, queries: 100, keys: 64, headDim: 8 };
+  // 1 行 = 2·64·4 = 512B。上限を 1 行 30 枚ぶんに絞ると ceil(100/30) = 4 枚（25 行 × 4）。
+  const ir = parse(attentionGraph(shape));
+  const plan = planFusions(planGraph(ir, bindSymbols(ir, attentionInputs(shape))).nodes, {
+    useCounts: countUses(ir),
+    outputNames: new Set(ir.outputs),
+    limits: { maxStorageBufferBindingSize: 512 * 30, maxComputeWorkgroupsPerDimension: 65535 },
+  });
+  const step = fusedAt(plan, 0);
+  assertEquals(step.dispatches.length, 16, "4 枚 × 4 dispatch");
+  assertEquals(step.temps.length, 12, "4 枚 × 3 本");
+  assertEquals(
+    [...new Set(step.temps.map((temp) => temp.byteLength))],
+    [25 * 512],
+    "一時はブロック 1 枚ぶん（全 M ではない）",
+  );
+  assertEquals(
+    step.dispatches.map((dispatch) => dispatch.key).slice(0, 4),
+    [
+      bmmKey(true, 25, "a"),
+      elementwiseKey({ op: "add", rank: 4, dtype: "f32" }),
+      SAFE_SOFTMAX_KEY,
+      bmmKey(true, 25, "c"),
+    ],
+    "2 枚以上では bmm が行窓変種へ振り替わる",
+  );
+});
+
+Deno.test("行ブロック分割は上限に収まる最小枚数を等分で返し、収まらない形は fail loudly", () => {
+  // ちょうど上限（10 行 × 100B = 1000B）は 1 枚。
+  assertEquals(planRowBlocks(10, 100, 1000), [{ offset: 0, rows: 10 }]);
+  // 1 要素ぶん超えたら 2 枚（5 / 5）。
+  assertEquals(planRowBlocks(10, 100, 999), [{ offset: 0, rows: 5 }, { offset: 5, rows: 5 }]);
+  // 端数は先頭から 1 行ずつ配る（3 枚 = 4 / 3 / 3）。
+  assertEquals(planRowBlocks(10, 100, 400), [
+    { offset: 0, rows: 4 },
+    { offset: 4, rows: 3 },
+    { offset: 7, rows: 3 },
+  ]);
+  // 強制枚数（テスト専用の内部面）も等分。
+  assertEquals(planRowBlocks(10, 100, 1000, 3), [
+    { offset: 0, rows: 4 },
+    { offset: 4, rows: 3 },
+    { offset: 7, rows: 3 },
+  ]);
+  // 1 行でも収まらない形は fail loudly（黙って素の列へ落とすと確保が失敗するだけ）。
+  assertThrows(
+    () => planRowBlocks(10, 1001, 1000),
+    ExecutionError,
+    "クエリ 1 行ぶんのスコア",
+  );
+  // 強制枚数が上限に収まらないのも fail loudly（緩める向きには使えない）。
+  assertThrows(() => planRowBlocks(10, 100, 400, 2), ExecutionError, "2 枚では 1 枚 500B");
+  // 行数より多い枚数・0 枚は取れない。
+  assertThrows(() => planRowBlocks(10, 100, 1000, 11), ExecutionError);
+  assertThrows(() => planRowBlocks(10, 100, 1000, 0), ExecutionError);
+});
+
+Deno.test("行ブロック attention の反例（隣接 / mask 形 / op 違い / 非恒等 expand / 入力順 / 内部 output / 別 consumer / bind 重複）は掴まない", () => {
+  // 正方形（M = N = D）だけが「PV の入力順を入れ替える」「q と kᵀ を同じ入力にする」を
+  // 契約違反にせず作れる。**その土台自体が掴めること**を先に見ないと、下の 2 件が
+  // 「元から掴めない形」を見ているだけの恒真になる。
+  const square: AttentionShape = { heads: 2, queries: 4, keys: 4, headDim: 4 };
+  assertEquals(
+    fuse(attentionGraph(square), attentionInputs(square)).counts.rowBlockAttention,
+    1,
+    "正方形の土台が掴めていない（下の 2 反例が恒真になる）",
+  );
+  const cases:
+    readonly (readonly [string, GraphJson, Readonly<Record<string, readonly number[]>>])[] = [
+      ["別名を 1 本挟む", attentionGraph(ATTENTION, { interpose: true }), attentionInputs()],
+      [
+        "mask が行ごと [1,1,M,N]",
+        attentionGraph(ATTENTION, { rowMask: true }),
+        attentionInputs(ATTENTION, { rowMask: true }),
+      ],
+      ["素の softmax", attentionGraph(ATTENTION, { plainSoftmax: true }), attentionInputs()],
+      [
+        "V 側 expand が複製軸を持つ",
+        attentionGraph(ATTENTION, { broadcastV: true }),
+        attentionInputs(ATTENTION, { broadcastV: true }),
+      ],
+      ["PV の入力順が逆", attentionGraph(square, { swapPv: true }), attentionInputs(square)],
+      [
+        "中間 S が graph output",
+        attentionGraph(ATTENTION, { scoresOutput: true }),
+        attentionInputs(),
+      ],
+      ["P に別 consumer", attentionGraph(ATTENTION, { extraConsumer: true }), attentionInputs()],
+      [
+        "q と kᵀ が同じ入力（bind 重複）",
+        attentionGraph(square, { sameQk: true }),
+        attentionInputs(square, { sameQk: true }),
+      ],
+    ];
+  for (const [label, graph, inputs] of cases) {
+    const plan = fuse(graph, inputs);
+    assertEquals(
+      plan.counts.rowBlockAttention,
+      0,
+      `${label}: 掴んでいる（${outline(plan.steps).join(",")}）`,
+    );
+  }
 });

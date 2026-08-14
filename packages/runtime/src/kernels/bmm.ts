@@ -5,17 +5,65 @@
  *
  * uniform は matmul / linear と同じ 3 語 `{m,n,k}`。バッチ数はシェーダが `wid.z` から導くので
  * uniform に載せない（載せても一度も読まない死んだフィールドになる）。
+ *
+ * **行窓変種**（{@link BmmRowWindow}）だけが uniform を 5 語へ広げる。分解 attention の
+ * 行ブロック実行（src/runtime/fusion.ts）専用で、共有の `gemmParams` には 1 語も足さない
+ * — 足すと全 op の uniform レイアウトとスナップショットが総取っ替えになる。
  */
 
-import { gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
+import { type BmmRowWindow, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
+import { CodegenError } from "../codegen/errors.ts";
+
+export type { BmmRowWindow };
 
 /**
  * `rows` は**行列 1 枚の M**（バッチ軸は含めない — バッチは dispatch の z で、タイル幾何とは
  * 独立）。タイル幾何のバケットは src/kernels/gemm-geometry.ts の `gemmGeometryForRows`。
+ *
+ * `window` は行窓変種の判別子（省略時は従来のキーと 1 バイトも変わらない）。**行オフセットと
+ * 全 M は uniform 値なのでキーに載せない** — 載せるとブロックの本数だけ同じ WGSL が
+ * パイプラインへ複製される。
  */
-export const bmmKey = (v4: boolean, rows?: number): string => `bmm:v2:f32:${gemmKeyPart(v4, rows)}`;
+export const bmmKey = (v4: boolean, rows?: number, window?: BmmRowWindow): string =>
+  `bmm:v2:f32:${gemmKeyPart(v4, rows)}${window === undefined ? "" : `:rw${window}`}`;
 
-export const bmmWgsl = (v4: boolean, rows?: number): string => gemmWgsl({ op: "bmm", v4, rows });
+export const bmmWgsl = (v4: boolean, rows?: number, window?: BmmRowWindow): string =>
+  gemmWgsl({ op: "bmm", v4, rows, rowWindow: window });
 
 export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>
   gemmParams("bmm", m, n, k);
+
+/**
+ * 行窓変種の uniform（`{m,n,k}` + `{row_offset, rows_full}` の 5 語）。
+ *
+ * uniform アドレス空間の struct は 16 バイト整列なので、5 語ぶんの内容でも **32 バイト**確保
+ * する（不足すると binding が validation で落ちる）。MUST: 並びは gemm.ts の
+ * `BMM_ROW_WINDOW_DIMS_EXTRA` と対。
+ *
+ * `rowsFull` は行窓側の**元の全 M**、`rowOffset` はそのうちこのブロックが担当する先頭行。
+ * MUST: `rowOffset + m ≤ rowsFull`（超えると隣のバッチの行を読み書きする — 例外は出ない）。
+ */
+export const bmmRowWindowParams = (
+  m: number,
+  n: number,
+  k: number,
+  rowOffset: number,
+  rowsFull: number,
+): Uint32Array<ArrayBuffer> => {
+  for (const [name, value] of [["row_offset", rowOffset], ["rows_full", rowsFull]] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new CodegenError(`bmm 行窓 params: ${name} は非負整数（${value}）`);
+    }
+  }
+  if (rowOffset + m > rowsFull) {
+    throw new CodegenError(
+      `bmm 行窓 params: 行 [${rowOffset}, ${rowOffset + m}) が全 M ${rowsFull} をはみ出す`,
+    );
+  }
+  const base = gemmParams("bmm", m, n, k);
+  const params = new Uint32Array(8);
+  params.set(base.subarray(0, 3));
+  params[3] = rowOffset;
+  params[4] = rowsFull;
+  return params;
+};

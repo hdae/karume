@@ -205,6 +205,28 @@ export type GemmCompute = "f32" | "f16";
 export const gemmComputeKeyPart = (compute: GemmCompute): string => compute === "f16" ? ":c16" : "";
 
 /**
+ * **bmm 専用**の行窓変種。分解 attention の行ブロック実行（src/runtime/fusion.ts の
+ * `rowBlockAttention`）で、`[B,M,K] × [B,K,N]` の M を行ブロック 1 枚ぶんに縮めたまま、
+ * **片側だけ**を元の全 M（`rows_full`）のストライドで数えて行オフセット（`row_offset`）から
+ * 読み書きするための 1 ビット。
+ *
+ * - `"a"` = QK 側。A（q）を全 M の中の `row_offset` 行目から読み、C（scores）は
+ *   `m` 行のブロックとして 0 から書く。
+ * - `"c"` = PV 側。A（block-local な P）は 0 から読み、C（出力）を全 M の中の
+ *   `row_offset` 行目へ書く。
+ *
+ * MUST: 効くのは**バッチ base の算術 1 行だけ**（{@link batchPrologue}）。行内の K 縮約順も
+ * 積和の字面も 1 文字も動かないので、行ブロック実行は 1 枚実行と**ビット同一**になる
+ * （src/kernels/gemm-geometry.ts の数値契約）。
+ * MUST: オフセットと全 M は **uniform 値**でキーには載せない（キーに載せると同じ WGSL が
+ * ブロックの本数だけパイプラインへ複製される）。キーに載るのはこの 1 ビットだけ。
+ * MUST: 共有の {@link gemmParams}（3 語 `{m,n,k}`）には足さない — 足すと全 op の uniform
+ * レイアウトとスナップショットが総取っ替えになる。追加 2 語は bmm 専用の
+ * `bmmRowWindowParams`（src/kernels/bmm.ts）が持つ。
+ */
+export type BmmRowWindow = "a" | "c";
+
+/**
  * 生成入力。`weight` は重みスロットを持つ op（linear / conv2d）だけが取る（matmul / bmm /
  * attention は活性が f32 固定）。`compute` は f16 計算変種（ADR 0028）を結んだ op
  * （linear / attention_qk / attention_pv）だけが取る — 省略時は `"f32"` で、生成物は
@@ -216,10 +238,18 @@ export const gemmComputeKeyPart = (compute: GemmCompute): string => compute === 
  */
 export type GemmSpec =
   | {
-    readonly op: "matmul" | "bmm";
+    readonly op: "matmul";
     readonly v4: boolean;
     /** 出力の行数 M（幾何のバケット — 省略時は既定幾何）。 */
     readonly rows?: number;
+  }
+  | {
+    readonly op: "bmm";
+    readonly v4: boolean;
+    /** 出力の行数 M（幾何のバケット — 省略時は既定幾何）。 */
+    readonly rows?: number;
+    /** 行窓変種（{@link BmmRowWindow} — 省略時の生成物は 1 バイトも動かない）。 */
+    readonly rowWindow?: BmmRowWindow;
   }
   | {
     readonly op: "attention_qk" | "attention_pv";
@@ -346,20 +376,42 @@ const scaleVar = (slot: number): string =>
  * MUST: v4 では **quad 単位**で数える（`wid.z * m * k4` であって `m * k` ではない）。
  * 要素単位のまま組むと batch ≥ 2 で隣のバッチを読み書きする — 例外なしの誤値。
  */
-const batchPrologue = (op: GemmSpec["op"], v4: boolean): string =>
-  `  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチのタイル）— 内側の workgroupBarrier が
+const batchPrologue = (
+  op: GemmSpec["op"],
+  v4: boolean,
+  rowWindow?: BmmRowWindow,
+): string => {
+  const kUnit = v4 ? "k4" : "dims.k";
+  const nUnit = v4 ? "n4" : "dims.n";
+  // 行窓は「バッチ base に全 M ストライドと行オフセットを畳み込む」だけで表せる。
+  // prologueA の `abase + arow * k` も store の `cbase + orow * n` も**そのまま**で
+  // 正しい添字になるので、行窓は共有断片（fillA / store / 内積ループ）に 1 文字も触れない。
+  const aRows = rowWindow === "a" ? "dims.rows_full" : "dims.m";
+  const aOffset = rowWindow === "a" ? ` + dims.row_offset * ${kUnit}` : "";
+  const cRows = rowWindow === "c" ? "dims.rows_full" : "dims.m";
+  const cOffset = rowWindow === "c" ? ` + dims.row_offset * ${nUnit}` : "";
+  return `  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチのタイル）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすための前提${
     v4 ? "。MUST: base は quad 単位（要素単位で組むと隣のバッチを読む）" : ""
+  }${
+    rowWindow === undefined ? "" : `
+  // 行窓（${
+      rowWindow === "a"
+        ? "A = q を全 M の row_offset 行目から読む"
+        : "C = 出力を全 M の row_offset 行目へ書く"
+    }）。
+  // 反対側は m 行のブロックとして 0 から数える`
   }
-  let abase = wid.z * dims.m * ${v4 ? "k4" : "dims.k"};
+  let abase = wid.z * ${aRows} * ${kUnit}${aOffset};
 ${
     op === "attention_qk"
       // k は [B·H, N, D] のまま読む（旧経路の permute(kᵀ) が要らない）。転置読みは行頭を
       // **平坦添字**で作るので、base は v4 でも quad ではなく**要素単位**。
       ? `  let bbase = wid.z * dims.n * dims.k;\n`
-      : `  let bbase = wid.z * dims.k * ${v4 ? "n4" : "dims.n"};\n`
-  }  let cbase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
+      : `  let bbase = wid.z * dims.k * ${nUnit};\n`
+  }  let cbase = wid.z * ${cRows} * ${nUnit}${cOffset};
 ${op === "attention_pv" ? "  let rbase = wid.z * dims.m;\n" : ""}`;
+};
 
 /**
  * A タイル（`[m,k]` 行優先）の担当と行頭オフセット。どれも K タイルループ不変。
@@ -925,21 +977,43 @@ ${storeTile}
 `;
 };
 
-const denseWgsl = (geometry: GemmGeometry, op: "matmul" | "bmm", v4: boolean): string => {
+/**
+ * 行窓変種の uniform 追加欄（4〜5 語目）。MUST: 並びは `bmmRowWindowParams`
+ * （src/kernels/bmm.ts）と対。
+ */
+const BMM_ROW_WINDOW_DIMS_EXTRA = `  row_offset: u32,
+  rows_full: u32,
+`;
+
+/**
+ * `rowWindow` を立てられるのは bmm だけ（{@link BmmRowWindow}）。uniform の 4〜5 語目に
+ * `row_offset` / `rows_full` が増え、生成物の差は {@link batchPrologue} の base 2 行に閉じる。
+ */
+const denseWgsl = (
+  geometry: GemmGeometry,
+  op: "matmul" | "bmm",
+  v4: boolean,
+  rowWindow?: BmmRowWindow,
+): string => {
   const element = v4 ? "vec4<f32>" : "f32";
   const signature = op === "bmm" ? "a[b,m,k] · b[b,k,n]" : "a[m,k] · b[k,n]";
   return skeleton(
     geometry,
-    `// karume ${op} (${signature}, f32, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
+    `// karume ${op} (${signature}, f32${rowWindow === undefined ? "" : `, 行窓 ${rowWindow}`}, ${
+      gemmGeometryNote(geometry)
+    }${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> a: array<${element}>;
 @group(0) @binding(2) var<storage, read> b: array<${element}>;
 @group(0) @binding(3) var<storage, read_write> c: array<${element}>;`,
     "",
-    `${quadDims(v4)}${op === "bmm" ? batchPrologue(op, v4) : ""}${prologueA(geometry, op, v4)}
+    `${quadDims(v4)}${op === "bmm" ? batchPrologue(op, v4, rowWindow) : ""}${
+      prologueA(geometry, op, v4)
+    }
 ${prologueBDense(geometry, v4)}`,
     `${fillA(geometry, "a", v4)}
 ${fillBDense(geometry, "b", op, v4)}`,
     store(geometry, "c", op, v4, false),
+    rowWindow === undefined ? "" : BMM_ROW_WINDOW_DIMS_EXTRA,
   );
 };
 
@@ -1542,6 +1616,8 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       return attentionQkWgsl(geometry, spec.v4, spec.compute, spec.score, spec.mask);
     case "attention_pv":
       return attentionPvWgsl(geometry, spec.v4, spec.compute, spec.score);
+    case "bmm":
+      return denseWgsl(geometry, spec.op, spec.v4, spec.rowWindow);
     default:
       return denseWgsl(geometry, spec.op, spec.v4);
   }

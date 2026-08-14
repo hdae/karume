@@ -105,6 +105,12 @@ const fusionCounts = (
   planFusions(planGraph(graph, bindSymbols(graph, inputShapes)).nodes, {
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
+    // WebGPU core 既定（128MiB）を判定に使う。行ブロック枚数はヒット数に効かないが、
+    // **上限の値を機の実測から取らない**ことでこの門が機に依らない固定であり続ける。
+    limits: {
+      maxStorageBufferBindingSize: 128 * 1024 * 1024,
+      maxComputeWorkgroupsPerDimension: 65535,
+    },
   }).counts;
 
 /**
@@ -119,7 +125,14 @@ const ditShapes = (sequence: number): Readonly<Record<string, readonly number[]>
   rope_sin: [1, 1, sequence, 128],
 });
 
-const NONE: FusionCounts = { silu: 0, upsample2x: 0, rope: 0, adaln: 0, identityExpand: 0 };
+const NONE: FusionCounts = {
+  silu: 0,
+  upsample2x: 0,
+  rope: 0,
+  adaln: 0,
+  rowBlockAttention: 0,
+  identityExpand: 0,
+};
 
 Deno.test({
   name: "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一）",
@@ -210,20 +223,31 @@ const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly nu
  *   `layer_norm` は 1 本も無い。
  * - silu 17: 前段の条件 MLP 5 本 + 12 ブロック × 1 本。残る sigmoid 12 本は
  *   `mul(v, sigmoid(u))` のゲート（自分自身に掛からないので SiLU ではない）。
- * - identityExpand 48: 12 ブロック × 4 本の恒等 expand が別名化される。
+ * - **rowBlockAttention 12**: 12 ブロックの分解 attention（`bmm → reshape → add(mask) →
+ *   safe_softmax → expand → reshape → expand → reshape → bmm`）を全て掴む。この綴りを出すのは
+ *   実資産では DiT だけで、他の 7 パートは `attention` op（ADR 0023）を持つ。
+ * - identityExpand 24: 12 ブロック × 4 本のうち、窓の内側の 2 本（P 側と V 側）は融合ステップに
+ *   飲まれるので別名化として数えられなくなる。**48 → 24 は退行ではなくこの移動**で、
+ *   `rowBlockAttention` が 0 に戻れば 48 に戻る（片方だけ動いたら受理集合の事故）。
  *
- * したがってこの門が守るのは「掴めている 2 種が外れないこと」と「**受理集合を広げたとき
+ * したがってこの門が守るのは「掴めている 3 種が外れないこと」と「**受理集合を広げたとき
  * ここが動く**こと」の両方。0 が非 0 に変わったら、まず ROPE_RULE / ADALN_RULE の受理集合が
  * 意図せず広がっていないかを見る（広げた瞬間 fallback の正しさ保証が消える）。
  */
 Deno.test({
   name:
-    "実資産の Irodori DiT は run 1 回で silu 17 / identityExpand 48 を掴む（rope / adaln は綴りが違って 0）",
+    "実資産の Irodori DiT は run 1 回で rowBlockAttention 12 / silu 17 / identityExpand 24 を掴む（rope / adaln は綴りが違って 0）",
   ignore: !IRODORI_AVAILABLE,
   fn: async () => {
     const graph = await readIrodoriGraph("dit");
-    const expected: FusionCounts = { ...NONE, silu: 17, identityExpand: 48 };
-    // ヒット数は S に依存しない（`ditSymMax` 750 の内側で 2 点）。
+    const expected: FusionCounts = {
+      ...NONE,
+      silu: 17,
+      rowBlockAttention: 12,
+      identityExpand: 24,
+    };
+    // ヒット数は S に依存しない（`ditSymMax` 750 の内側で 2 点）。**行ブロック枚数は
+    // S で変わる**（128MiB 上限では S=125 が 1 枚・S=750 が 2 枚）が、ヒット数は動かない。
     for (const sequence of [125, 750]) {
       assertEquals(fusionCounts(graph, irodoriDitShapes(sequence)), expected, `S=${sequence}`);
     }
