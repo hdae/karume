@@ -184,8 +184,11 @@ align_corners=True)`（BiRefNet_HR だけで推論グラフに 22 本・`scale_f
 （層分類の暫定運用は下の NOTE が指す known-issues の節・ユーザー裁定 2026-08-13）。
 **`align_corners=False` は受理しない** — 座標式（`scale·(i+0.5) − 0.5`）も端の扱いも別物で、
 attrs に欄を作らないことがそのまま fail loudly になる（ADR 0023 決定 4 の規律）。需要
-（SAM / RMBG-1.4 / IS-Net / MODNet / Depth Anything V2 の HF port）が出たら
-`gelu` / `gelu_tanh` と同じ手筋で**別 op**として足す。`upsample_nearest2d` は足さない
+（SAM / RMBG-1.4 / IS-Net / MODNet）が出たら
+`gelu` / `gelu_tanh` と同じ手筋で**別 op**として足す。**訂正（2026-08-14）**: この一覧に
+あった Depth Anything V2 の HF port は**需要元にならない** — 移植時の実測でグラフに出る
+`upsample_bilinear2d` は 5 本とも `align_corners=True` で、`False` を使う融合層の残差 resize
+枝は構造的に到達不能だった。`upsample_nearest2d` は足さない
 （Anima の nearest-exact ×2 は第 3 層の融合ルール `upsample2x` が既に持っており、
 「対称性のための追加をしない」が優先する）。
 

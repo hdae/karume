@@ -4,9 +4,40 @@
 > FIRST (alongside `CLAUDE.md` / `docs/`) so they don't start cold or misread an intentional
 > migration as a defect. Update it whenever the current design context shifts.
 >
-> Last updated: 2026-08-13
+> Last updated: 2026-08-14
 
 ## Active redesigns (in flight)
+
+- **モデル拡充波（2026-08-13〜14・別ワークツリー `add-models-research`）— 5 本着地**:
+  ①**SigLIP2 vision**（base + so400m・Apache 2.0）②**BiRefNet_HR** + **Lucida**（MIT・2 系列
+  別配布形）③**vowel-detector**（自作 CRNN・日本語音声 → リップシンク用 `.lab`）
+  ④**Depth Anything V2 Small**（Apache 2.0 は **Small のみ** — Base/Large は CC BY-NC 4.0 と
+  実測）。**支える op 追加が 3 本**: `upsample_bilinear2d`（第 1 層・台帳のみ）/
+  `deform_conv2d`（第 1' 層・ADR [0055](../docs/decisions/0055-deform-conv2d.md)）/
+  `gru_scan` + `gru_scan_reverse`（第 2 層・ADR
+  [0056](../docs/decisions/0056-gru-scan.md)）+ 派生次元束縛（ADR
+  [0057](../docs/decisions/0057-derived-dim-binding.md)）。新設の横断層 =
+  **画像前処理**（`packages/models/src/image/preprocess.ts` — decode はホスト責務・
+  resize/rescale/normalize は karume 側というユーザー裁定）。
+  - **層分類の穴が 2 つ出て暫定運用で通した**（正本は
+    [known-issues.md](../docs/known-issues.md) の該当節）: Core ATen 外・モデル由来の原子が
+    どの層にも入らない件と、「容量・性能で非成立」の線引きが 2 か所で非等価な件。暫定 =
+    第 1 層 = Core ATen 内の原子 / 第 1' 層 = それ以外の原子。**再分類は整理タイミング**。
+  - **recon の訂正が 4 件**（着手前の見立てが現物と食い違った記録）: ①BiRefNet の
+    `aten.rsqrt` は出ない（BatchNorm は `_native_batch_norm_legit_no_training` のまま残る）
+    ②`aten.roll` もそのままでは出ない（`index_select` へ分解されて落ちる）— 実際の blocker は
+    rank≥5 の reshape/permute 連鎖ほか 4 系統 ③SigLIP2 の `resample=2` は bicubic ではなく
+    **bilinear**（PIL 定数）④DA-V2 は `align_corners=False` の需要元に**ならない**
+    （5 本とも True — op-vocabulary の 2026-08-13 NOTE を訂正済み）。
+  - **vowel-detector は 2 段で着地**: まず既存語彙 + 長さバケット（33.9MB）で通し、
+    **pad 掃引 120 通り**で「刻みを詰めれば劣化が減る」が否定された（pad 2 フレームで
+    既に飽和・末尾トリムも効かない・チャンク化はより悪い）。ユーザー裁定で第 2 層 RNN op
+    へ移行し、**IR 18 ノード（T 非依存）・配布 2.67MB・分解形との Uint32 完全一致**へ。
+    `gru_scan` の丸め障壁 2 箇所は **load-bearing**（外すと 1 ulp ずれる — 故障注入で実証・
+    workgroup memory 往復だけが 0/65,536 不一致という raw プローブが根拠）。
+  - **残**: docs/research スナップショット未作成（実測の生データは各コミット本文と ADR に
+    恒久化済み）。HF 公開は未着手。BiRefNet_HR の 2048² は未実測（配布形は 1024² のみ・
+    dist が拒否）。DA-V2 は 518² 固定（他解像度は `upsample_bicubic2d` の層判定が要る）。
 
 - **性能波（2026-08-13・設計変更不要枠）— 消化完了**: 第 1 段の内訳再実測
   （[research/2026-08-13-op-timing-restats.md](../docs/research/2026-08-13-op-timing-restats.md)
