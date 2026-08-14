@@ -195,6 +195,24 @@ Deno.test("decodeWav: 未知チャンク（LIST 等）は読み飛ばす", () =>
   assertEquals(Array.from(decoded.data), [0.5]);
 });
 
+Deno.test("decodeWav: RIFF が宣言した境界の外に余った物理バイトは走査しない", () => {
+  const complete = buildWav({
+    format: 1,
+    channels: 1,
+    sampleRate: 48000,
+    bits: 16,
+    payload: int16Payload([16384]),
+  });
+  // 論理終端（RIFF 宣言 = complete.length）の**外**に、長さが嘘のチャンクを足す。物理長で
+  // 走査を止める実装はここまで読んでしまい「残りが足りない」で落ちる。
+  const padded = new Uint8Array(complete.length + 8);
+  padded.set(complete);
+  ascii(padded, complete.length, "junk");
+  new DataView(padded.buffer).setUint32(complete.length + 4, 0xffff_ffff, true);
+  const decoded = decodeWav(padded);
+  assertEquals(Array.from(decoded.data), [0.5]);
+});
+
 // ---- fail loudly ---------------------------------------------------------
 
 Deno.test("decodeWav: RIFF/WAVE でないバイト列は落とす", () => {
@@ -258,8 +276,10 @@ Deno.test("decodeWav: 'data' が無い / 長さが宣言と食い違うファイ
   // data チャンクの宣言長だけを実体より大きくする（末尾 8 バイト = 'data' + 長さ の直後）。
   const truncated = complete.slice(0, complete.length - 2) as Uint8Array<ArrayBuffer>;
   assertThrows(() => decodeWav(truncated), Error, "残りは");
-  // fmt だけのファイル（data 無し）。
+  // fmt だけのファイル（data 無し）。RIFF の宣言サイズも 36 バイトの器に揃える — 揃えないと
+  // 「器が切り詰められている」ほうの門で先に落ち、data 欠落の門を踏まない。
   const fmtOnly = complete.slice(0, 36) as Uint8Array<ArrayBuffer>;
+  new DataView(fmtOnly.buffer).setUint32(4, 36 - 8, true);
   assertThrows(() => decodeWav(fmtOnly), Error, "'data' チャンクが無い");
 });
 
@@ -279,6 +299,79 @@ Deno.test("decodeWav: フレーム境界で割り切れない data は落とす"
     Error,
     "割り切れない",
   );
+});
+
+Deno.test("decodeWav: RIFF の宣言サイズが物理長を超える器は落とす（切り詰め）", () => {
+  const complete = buildWav({
+    format: 1,
+    channels: 1,
+    sampleRate: 48000,
+    bits: 16,
+    payload: int16Payload([1, 2]),
+  });
+  // 物理長より 16 バイト多く名乗る。チャンク側は全て整合しているので、宣言サイズを読まない
+  // 実装は最後まで問題なく読み切ってしまう。
+  new DataView(complete.buffer).setUint32(4, complete.length - 8 + 16, true);
+  assertThrows(() => decodeWav(complete), Error, `RIFF が ${complete.length + 8} バイトを宣言`);
+});
+
+Deno.test("decodeWav: data の宣言が RIFF の論理終端をはみ出すファイルは落とす", () => {
+  const complete = buildWav({
+    format: 1,
+    channels: 1,
+    sampleRate: 48000,
+    bits: 16,
+    payload: int16Payload([1, 2, 3, 4]),
+  });
+  // 物理バイトは 8 だけ余らせ、data の宣言長をその分伸ばす。物理長で境界を見る実装は通し、
+  // 容器の外にある 8 バイトを 4 サンプルとして読んでしまう。
+  const padded = new Uint8Array(complete.length + 8);
+  padded.set(complete);
+  const view = new DataView(padded.buffer);
+  view.setUint32(40, view.getUint32(40, true) + 8, true); // data チャンクの長さ欄（44 バイト定型）
+  assertThrows(() => decodeWav(padded), Error, "チャンク 'data' が 16 バイトを宣言");
+});
+
+Deno.test("decodeWav: fmt の block align / byte rate が導出値と矛盾するファイルは落とす", () => {
+  const build = () =>
+    buildWav({
+      format: 1,
+      channels: 1,
+      sampleRate: 48000,
+      bits: 16,
+      payload: int16Payload([1, 2]),
+    });
+  // block align だけを壊す（1ch × 16bit なら 2 バイト）。fmt 定型では offset 32。
+  const badAlign = build();
+  new DataView(badAlign.buffer).setUint16(32, 4, true);
+  assertThrows(
+    () => decodeWav(badAlign),
+    Error,
+    "block align 宣言 4 が、1ch × 16bit から出る 2 と食い違う",
+  );
+  // byte rate だけを壊す（48000 × 2 = 96000）。fmt 定型では offset 28。
+  const badRate = build();
+  new DataView(badRate.buffer).setUint32(28, 192000, true);
+  assertThrows(
+    () => decodeWav(badRate),
+    Error,
+    "byte rate 宣言 192000 が、48000Hz × block align 2 = 96000 と食い違う",
+  );
+});
+
+Deno.test("encodeWav: 非有限サンプルは位置と値付きで落とす（無音・クリップに化けさせない）", () => {
+  // クリップの `Math.max` / `Math.min` は NaN を素通しし、`Math.round(NaN)` → `setInt16` が
+  // 0 を書く。±Infinity はフルスケールへ張り付く。どちらも例外にならない。
+  for (
+    const [value, text] of [[NaN, "NaN"], [Infinity, "Infinity"], [-Infinity, "-Infinity"]] as const
+  ) {
+    const samples = Float32Array.of(0.1, 0.2, value, 0.3);
+    assertThrows(() => encodeWav(samples, 48000), RangeError, `2 番目のサンプル ${text} が非有限`);
+  }
+  // 値域外の有限値は今までどおりクリップして通る（検査が全部を落としていない）。
+  const clipped = new DataView(encodeWav(Float32Array.of(2, -2), 48000).buffer);
+  assertEquals(clipped.getInt16(44, true), 32767);
+  assertEquals(clipped.getInt16(46, true), -32767);
 });
 
 Deno.test("encodeWav: u32 に収まらない sampleRate / byte rate は落とす", () => {

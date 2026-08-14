@@ -61,6 +61,14 @@ export const encodeWav = (
         } サンプル）`,
     );
   }
+  // MUST: 非有限サンプルはここで落とす。下のクリップは `Math.max` / `Math.min` なので NaN を
+  // 素通しし、`Math.round(NaN)` を受けた `setInt16` は 0 を書く（±Infinity はフルスケールへ
+  // 張り付く）— どちらも例外にならず、数値破綻が「valid な無音 / クリップ WAV」に化ける。
+  for (let i = 0; i < samples.length; i += 1) {
+    if (!Number.isFinite(samples[i])) {
+      throw new RangeError(`${i} 番目のサンプル ${samples[i]} が非有限（WAV には書けない）`);
+    }
+  }
   const out = new Uint8Array(HEADER_BYTES + dataBytes);
   const view = new DataView(out.buffer);
   const ascii = (offset: number, text: string): void => {
@@ -112,6 +120,10 @@ const ascii = (view: DataView, offset: number): string =>
  * MUST: 知らないチャンク（`LIST` / `fact` / `bext` …）は**読み飛ばす**。実在の WAV は
  * メタデータチャンクを普通に挟むので、44 バイト固定ヘッダを決め打ちすると読めない。
  * チャンクは奇数長のとき 1 バイトの詰めが入る（RIFF の規約）。
+ *
+ * MUST: 走査の境界は物理長でなく **RIFF が offset 4 で宣言した論理終端**（{@link encodeWav} が
+ * 書いている欄）。宣言の外に物理バイトが余っていても、それは RIFF 容器の外なので読まない
+ * （近似ではなく仕様どおりの無視）。逆に論理終端が物理長を超えるのは切り詰められた器。
  */
 const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: RiffChunk } => {
   if (view.byteLength < 12) throw new Error(`decodeWav: ${view.byteLength} バイトしかない`);
@@ -120,17 +132,25 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
       `decodeWav: RIFF/WAVE ヘッダでない（'${ascii(view, 0)}' / '${ascii(view, 8)}'）`,
     );
   }
+  const riffSize = view.getUint32(4, true);
+  const logicalEnd = 8 + riffSize;
+  if (logicalEnd > view.byteLength) {
+    throw new Error(
+      `decodeWav: RIFF が ${riffSize} バイトを宣言しているが、` +
+        `残りは ${view.byteLength - 8} バイトしかない`,
+    );
+  }
   let fmt: RiffChunk | undefined;
   let data: RiffChunk | undefined;
   let cursor = 12;
-  while (cursor + 8 <= view.byteLength) {
+  while (cursor + 8 <= logicalEnd) {
     const id = ascii(view, cursor);
     const length = view.getUint32(cursor + 4, true);
     const offset = cursor + 8;
-    if (offset + length > view.byteLength) {
+    if (offset + length > logicalEnd) {
       throw new Error(
         `decodeWav: チャンク '${id}' が ${length} バイトを宣言しているが、` +
-          `残りは ${view.byteLength - offset} バイトしかない`,
+          `残りは ${logicalEnd - offset} バイトしかない`,
       );
     }
     if (id === "fmt ") fmt = { offset, length };
@@ -176,6 +196,23 @@ export const decodeWav = (bytes: Uint8Array): DecodedWav => {
   }
   const bytesPerSample = bits / 8;
   const frameBytes = bytesPerSample * channels;
+  // MUST: フレーム長は上の 4 欄から**独自に導出**しているので、fmt が宣言している block align /
+  // byte rate と突き合わせる。検査を欠くと、宣言と導出が食い違うヘッダが黙って通り、書き手が
+  // 意図した整列・速度と別の綴りで data を読む。
+  const blockAlign = view.getUint16(fmt.offset + 12, true);
+  const byteRate = view.getUint32(fmt.offset + 8, true);
+  if (blockAlign !== frameBytes) {
+    throw new Error(
+      `decodeWav: 'fmt ' の block align 宣言 ${blockAlign} が、` +
+        `${channels}ch × ${bits}bit から出る ${frameBytes} と食い違う`,
+    );
+  }
+  if (byteRate !== sampleRate * blockAlign) {
+    throw new Error(
+      `decodeWav: 'fmt ' の byte rate 宣言 ${byteRate} が、` +
+        `${sampleRate}Hz × block align ${blockAlign} = ${sampleRate * blockAlign} と食い違う`,
+    );
+  }
   if (data.length % frameBytes !== 0) {
     throw new Error(
       `decodeWav: 'data' が ${data.length} バイトで、` +
