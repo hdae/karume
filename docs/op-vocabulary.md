@@ -121,19 +121,22 @@ M1-P2 以降に解消する。
 ## op 追加の判定手順（入場門モデル — 名前制）
 
 DECIDED: [0059](decisions/0059-op-vocabulary-entry-doors.md)（入場門モデル・層番号の退役。
-旧 0〜3 層の定義は [0043](decisions/0043-op-addition-layers.md) — 歴史記録）。未対応 op が
+旧 0〜3 層の定義は [0043](decisions/0043-op-addition-layers.md) — 歴史記録）+
+[0064](decisions/0064-entry-door-generality-axes.md)（意味論の射程・実行モデル不変条件の
+2 軸を追加）。未対応 op が
 `UnsupportedAtenOpsError` に出たら、上から順に**安い門**へ落とす。実行の実体は全門カーネル。
-**ADR 要否を決める軸は「Core ATen 帰属」の 1 判定だけ**（入場券 = `torch.Tag.core in
-op.tags` の実測）。原子/分子は門を分ける軸ではなく、ADR 内の証明の型
+**ADR 要否を決める軸は「Core ATen 帰属」の 1 判定**（入場券 = `torch.Tag.core in
+op.tags` の実測）**+ 例外 1 本**（実行モデルの不変条件を壊す追加は core でも ADR 必須 —
+0064 軸 B）。原子/分子は門を分ける軸ではなく、ADR 内の証明の型
 （書けないことの証明 / 保存する実測根拠）。
 
-| 門（旧番号）                             | 置き場                                                              | 手続き・コミットメント                                                                    |
-| ---------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **export 消滅層**（旧第 0）              | `FOLDABLE_OPS` 定数畳み込み / normalize・convert の分解パス         | なし（ランタイムに届かない）。最優先の逃げ道                                              |
-| **Core ATen 層**（旧第 1 + 第 2 の一部） | IR 語彙。`Tag.core` の op と、その attr 変種の別 op 名（gelu_tanh） | **台帳 NOTE のみ（ADR 不要）** — NOTE に手順 1/2 却下の実測を書く。天井 = 160 + attr 面   |
-| **拡張原子層**（旧第 1'）                | IR 語彙。非 core で、語彙内合成で厳密同値に**書けない**             | **ADR 必須** = 回避不能の証明（deform_conv2d 型）。要求元（IR 機構/モデル）は門を分けない |
-| **拡張分子層**（旧第 2 の残り）          | IR 語彙。非 core で、書けるが性能・意味で**保存**する               | **ADR 必須** = 入場条件①〜④の実測（gru_scan 型）                                          |
-| **融合層**（旧第 3）                     | `fusion.ts` の隣接 matcher（silu / rope / upsample2x / adaln）      | ゼロ（撤回自由）。exact-match が外れると黙って遅くなる — **観測点が必須**                 |
+| 門（旧番号）                             | 置き場                                                                                | 手続き・コミットメント                                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| **export 消滅層**（旧第 0）              | `FOLDABLE_OPS` 定数畳み込み / normalize・convert の分解パス                           | なし（ランタイムに届かない）。最優先の逃げ道                                              |
+| **Core ATen 層**（旧第 1 + 第 2 の一部） | IR 語彙。`Tag.core` の op と、その attr 変種の別 op 名（gelu_tanh）                   | **台帳 NOTE のみ（ADR 不要）** — NOTE に手順 1/2 却下の実測を書く。天井 = 160 + attr 面   |
+| **拡張原子層**（旧第 1'）                | IR 語彙。非 core で、語彙内合成で厳密同値に**書けない**                               | **ADR 必須** = 回避不能の証明（deform_conv2d 型）。要求元（IR 機構/モデル）は門を分けない |
+| **拡張分子層**（旧第 2 の残り）          | IR 語彙。非 core で、書けるが性能・意味で**保存**する                                 | **ADR 必須** = 入場条件①〜④の実測（gru_scan 型）                                          |
+| **融合層**（旧第 3）                     | `fusion.ts` の隣接 matcher（現在の在庫の正本 = `FUSION_RULES` と融合門テスト — 0064） | ゼロ（撤回自由）。exact-match が外れると黙って遅くなる — **観測点が必須**                 |
 
 判定（上から順に）:
 
@@ -151,7 +154,10 @@ op.tags` の実測）。原子/分子は門を分ける軸ではなく、ADR 内
    print(torch.Tag.core in torch.ops.aten.<name>.<overload>.tags)"`（tools/exporter で）。
    core（+ その attr 変種の別 op 名）→ **Core ATen 層** = 台帳 NOTE のみ。契約 1 セット
    （`OP_CONTRACTS` + `karume/ops.py` + `shapes.py` + fixtures/op-contracts.json +
-   CPU 参照 + golden COVERAGE）。
+   CPU 参照 + golden COVERAGE）。**例外（0064 軸 B）**: 実行モデルの不変条件（単一出力 /
+   静的形状 / full-write / 4 バイト格納 + 意味論 dtype 3 種 / resident 全域書き）を壊す
+   追加は core でも **ADR 必須** — 影響範囲（planner / executor / recipe / IR …）の先出しが
+   必須節（`topk` / `sort` / `argmax` の 2 出力が典型）。
 4. **非 core**（非 core の aten・torchvision・karume 独自名）→ ADR とセットで:
    語彙内合成で厳密同値に**書けない** → **拡張原子層**（ADR = 回避不能の証明）。
    **書けるが保存したい** → **拡張分子層**（ADR = 入場条件のいずれかの実測:
@@ -161,7 +167,9 @@ op.tags` の実測）。原子/分子は門を分ける軸ではなく、ADR 内
    分ける〈非 core の場合〉）。**非 core の op（`Tag.core` 実測で判定 — IR 名の綴りでは
    ない。core 由来の別名 cast / ge_scalar 等は Core ATen 層）が IR に現れるのは karume が
    意図して選んだときだけ**（保存 or 発明）— 選択には記録が伴う、が門の機序
-   （ADR 0059 決定 5）。
+   （ADR 0059 決定 5）。ADR / NOTE は **semantic surface と実装済み subset を区別して書き**、
+   観測 subset を意味論として焼く場合はその旨 + 一般化の条件を 1 行残す（0064 軸 A）。
+   機構不足（bool attr 等）を op 名の分裂で埋める場合はその旨と統合条件を明記する。
 5. **正しく動く分解形が既にあり、性能だけ回収したい** → 融合層のルール。観測点
    （`lastRunFusions` / assets_fusion_counts_test）を持つことが入場条件（ADR 0040）。
 
