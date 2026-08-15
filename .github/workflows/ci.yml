@@ -4,6 +4,10 @@ name: CI
 # リリース判定は実 GPU 緑が必須）。ここでは KARUME_ALLOW_NO_GPU=1 で GPU ケースを SKIP させて
 # 非 GPU テストの回帰を捕え、加えて `deno publish --dry-run` で JSR 公開グラフ（slow types・
 # 公開 API 型出力）を検証する。実 GPU 緑の担保はローカル / self-hosted の責務。
+#
+# Python 側は ADR 0065（core / recipe 分離）の境界に合わせて 2 job に割る — PyPI へ出る
+# `exporter-core` と、リポ専用の `export-recipes`。job を分けること自体が「wheel の境界」を
+# 目に見える形にする。
 
 on:
   pull_request:
@@ -38,3 +42,78 @@ jobs:
       - name: Publish dry-run
         # 認証不要（denoland/deno#22679 修正済み）。3 パッケージの公開グラフを検証する。
         run: deno publish --dry-run
+
+  exporter-core:
+    # PyPI `karume`（汎用 exporter core）の門番。torch は pytorch-cpu index の CPU wheel なので
+    # GPU も CUDA ランナーも要らない。ADR 0065 決定 3/7 の「core wheel に family コードを
+    # 入れない」は規約ではなく検査で守る — 段 5+6 でローカル実測した wheel/sdist の内容検査を
+    # ここで常設化する。
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/exporter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10
+        with:
+          # ローカル開発機と同一にピン（lock の解決も build の出力構成もバージョンで変わり得る）。
+          version: "0.11.21"
+          # ローカル venv と同じ 3.14。requires-python は >=3.12 だが、この job の役割は
+          # バージョン matrix ではなく「ローカル verify と同じものが CI でも緑」の確認。
+          python-version: "3.14"
+          enable-cache: true
+      - name: Test (core)
+        # `--locked` は uv.lock の陳腐化も同時に検出する（CI 側での暗黙の再ロックを許さない）。
+        run: uv run --locked pytest
+      - name: Build
+        # uv workspace のメンバーなので、既定の出力先は workspace ルート（tools/dist）になる。
+        # 次の step が読む場所を固定するため out-dir を明示する。
+        run: uv build --out-dir dist
+      - name: Inspect distribution
+        # core wheel の境界検査。①karume/ と .dist-info/ 以外が入っていない ②family の
+        # `patch_*` と repo topology の `paths.py` が wheel にも sdist にも無い
+        # ③LICENSE 同梱 ④METADATA の SPDX が MIT。落ちたら違反エントリを標準出力に出す。
+        run: |
+          whl=$(echo dist/karume-*.whl)
+          names=$(unzip -Z1 "$whl")
+          if printf '%s\n' "$names" | grep -Ev '^(karume/|karume-[^/]+\.dist-info/)'; then
+            echo "::error::wheel に karume/ 以外の配布物が入っている（上が違反エントリ）"; exit 1
+          fi
+          if printf '%s\n' "$names" | grep -E '(^|/)(patch_[^/]*|paths)\.py$'; then
+            echo "::error::wheel に family コード / repo topology が入っている"; exit 1
+          fi
+          printf '%s\n' "$names" | grep -q '\.dist-info/licenses/LICENSE$' ||
+            { echo "::error::wheel に .dist-info/licenses/LICENSE が無い"; exit 1; }
+          unzip -p "$whl" '*.dist-info/METADATA' | grep -qx 'License-Expression: MIT' ||
+            { echo "::error::METADATA の License-Expression が MIT でない"; exit 1; }
+          if tar tzf dist/karume-*.tar.gz | grep -E '(^|/)(patch_[^/]*|paths)\.py$'; then
+            echo "::error::sdist に family コード / repo topology が入っている"; exit 1
+          fi
+      - name: Lint
+        run: uv run --locked ruff check
+      - name: Format
+        run: uv run --locked ruff format --check
+
+  export-recipes:
+    # モデル別 recipe（wheel 外・リポ専用）の門番。回すのは fixture ベースのテストだけで、
+    # family 依存グループ（diffusers / transformers / style-bert-vits2 …）とローカル資産
+    # （inputs/ / outputs/series/ — いずれも git 追跡外）を要するケースは既存の importorskip /
+    # skipif が SKIP する。既定 sync のまま `--all-groups` を付けないのは、追加で入るのが
+    # 「入れても SKIP が減るだけで、資産が無い CI では結局回らない」重い依存だから。
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/export-recipes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.11.21"
+          python-version: "3.14"
+          enable-cache: true
+      - name: Test (recipes)
+        run: uv run --locked pytest
+      - name: Lint
+        run: uv run --locked ruff check
+      - name: Format
+        run: uv run --locked ruff format --check
