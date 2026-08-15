@@ -557,7 +557,7 @@ def verify_patch(ckpt: Path, length: int) -> list[dict[str, Any]]:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--ckpt", type=Path, default=DEFAULT_CKPT)
     parser.add_argument(
         "--length",

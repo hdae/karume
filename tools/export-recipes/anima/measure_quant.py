@@ -1364,7 +1364,7 @@ def build_report(
 def main() -> None:
     # --until が派生テーブルごと前方部分へ差し替えるため（宣言は使用より前が文法上の要請）。
     global CONFIGS, CONFIG_NAMES, ATTN_CONFIGS
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--out", type=Path, required=True, help="レポートと画像の出力先")
     parser.add_argument("--steps", type=int, default=10, help="turbo の step 数")

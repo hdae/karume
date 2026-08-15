@@ -393,7 +393,7 @@ def export_variant(
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model", default=MODEL_ID)
     parser.add_argument(
         "--out",

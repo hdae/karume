@@ -555,7 +555,7 @@ def build_fixture(built: dict[str, Any], cases: list[dict[str, Any]]) -> dict[st
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--snapshot", type=Path, default=None, help="HF スナップショット直指定")
     parser.add_argument("--assets-out", type=Path, default=DEFAULT_ASSETS_DIR)

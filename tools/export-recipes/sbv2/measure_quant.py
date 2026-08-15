@@ -734,7 +734,7 @@ def run_gates(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model-dir", type=Path, default=export.DEFAULT_MODEL_DIR)
     parser.add_argument("--dump", type=Path, default=DEFAULT_DUMP)
     parser.add_argument("--assets", type=Path, default=demo.DEFAULT_DEMO_DIR / demo.STYLE_FILE)

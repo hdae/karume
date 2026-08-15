@@ -855,7 +855,7 @@ def default_out_dir(model_dir: Path, dtype: str = "f32") -> Path:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model-dir", type=Path, default=ex.DEFAULT_MODEL_DIR)
     parser.add_argument("--source-dir", type=Path, default=ex.DEFAULT_SOURCE_DIR)
     parser.add_argument("--out", type=Path, default=None)

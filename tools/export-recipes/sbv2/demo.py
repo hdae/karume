@@ -580,7 +580,7 @@ def run_official(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     # MUST: required=True。サブコマンド無しで走らせられると「1 プロセス 1 サブコマンド」の
     # 排他が「何も選ばない」で抜けられる形になる。

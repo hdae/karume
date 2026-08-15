@@ -344,7 +344,7 @@ def emit(model_dir: Path, models_root: Path, fixture_path: Path) -> dict[str, An
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument("--models-root", type=Path, default=MODELS_ROOT)
     parser.add_argument("--fixture-out", type=Path, default=DEFAULT_FIXTURE_PATH)

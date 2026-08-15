@@ -1345,7 +1345,7 @@ def generate_all(root: Path) -> dict[str, IrGraph]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
         "--out",
         type=Path,

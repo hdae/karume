@@ -237,7 +237,7 @@ def geometry_meta(geometry: TileGeometry) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument(
         "--out", type=Path, default=None, help="既定 outputs/series/anima-tiling-<dtype>-<解像度>/"

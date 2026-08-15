@@ -840,7 +840,7 @@ def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model-dir", type=Path, default=ex.DEFAULT_MODEL_DIR)
     parser.add_argument("--source-dir", type=Path, default=ex.DEFAULT_SOURCE_DIR)
     parser.add_argument("--codec-model-dir", type=Path, default=dv.DEFAULT_MODEL_DIR)
