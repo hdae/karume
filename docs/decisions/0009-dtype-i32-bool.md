@@ -19,6 +19,8 @@
   **bitwise_not**（bool 否定 — attention mask 反転の実行に必須）。
   `where` は現時点で実測グラフに実行対象として現れないため**追加しない**
   （語彙 allowlist 凍結 — ADR 0007。必要になった実測グラフが追加の根拠）。
+  **→ この 1 点は ADR [0015](0015-conv-family-extension.md)「語彙追加の残り」で撤回**
+  （実測グラフが出て `where` を追加 — 現行は `WHERE_OP` として実装済み）。
 - **公開 `Tensor` を dtype 判別ユニオンへ改訂**（ADR 0008 の部分改訂）:
   `data` は f32 = Float32Array / i32 = Int32Array / bool = Uint8Array ではなく
   **Uint32Array**（GPU 格納と同じ 0/1）。入出力で対称に扱う。

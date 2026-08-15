@@ -1,6 +1,13 @@
 # 0004 — 実行モデル（静的形状・submit 分割・資源管理）
 
 - Status: accepted（2026-08-01）
+- 改訂（骨格は現行・以下の 3 点が後続 ADR で置換済み。①② は本文の該当箇所にも追記がある）:
+  - ① **full-write** — ADR [0014](0014-layout-ops-full-write.md): 「全書きしない op は新品を
+    要求」からカーネル側の全域書きへ反転（バッファ管理 ⑤）。
+  - ② **submit スケジューラ** — ADR [0032](0032-deserialize-submit-and-optin-timing.md):
+    per-submit `onSubmittedWorkDone` を廃止し、適応制御の観測窓を flush 単位へ再定義。
+  - ③ **fence とバッファ寿命** — ADR [0054](0054-resident-loop-and-fence.md): ResidentTensor /
+    BatchScope を第 4 の寿命クラスとして追加し、通常 run の fence を `mapAsync` 1 本へ集約。
 - 根拠資料: recon §2/§3/§4（不変条件 14 項目は全て先行実験プロジェクト（以下プロトタイプ）
   の実測障害由来）
 

@@ -1,6 +1,10 @@
 # 0021 — GPU 時間診断（timestamp-query・op 別内訳）
 
 - Status: accepted（2026-08-03・ユーザー裁定 = 案 A + 三値 auto 既定）
+- 改訂: ADR [0028](0028-f16-compute-variants.md)（決定 4 の「シェーダ側 feature 依存ゼロ」を
+  「既定経路では」に限定）/ [0032](0032-deserialize-submit-and-optin-timing.md)（決定 1 の
+  `undefined` = 自動判定を「要求しない」へ）。以下の本文には両改訂が該当箇所に追記済み —
+  改訂前の記述と反証が同居しているので**追記まで読むこと**。
 - 目的: perf マイルストーンの前提となる **op 別の GPU 実時間内訳**。壁時計の段別計測
   （デモ側 JSON）ではチャンク・op が混在し、最適化対象の順位づけができない。
 - 前提の実測: submit は「1 チャンク = 1 pass」（packages/runtime/src/gpu/submit.ts）で、WebGPU の

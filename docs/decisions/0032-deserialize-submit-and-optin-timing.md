@@ -36,6 +36,10 @@ errorScope（0.03ms/run）・GC（mutator 0.999）・await 連鎖（残差 81ms�
 1. **submit ごとの `onSubmittedWorkDone` を廃止する**（packages/runtime/src/gpu/submit.ts）。呼ぶのは
    `flush()` の 1 回だけ — この待ちは flush-before-destroy のために元から必要で、
    計測のための追加ブロックはゼロになる。CPU エンコードは GPU 実行の裏へ重なる。
+   **再改訂（2026-08-13・ADR [0054](0054-resident-loop-and-fence.md) 決定 6）**: 通常 run
+   （gpuTiming OFF かつグラフ出力 ≥1）の完了構造は **`mapAsync` が唯一の fence** へ再設計され、
+   flush の onSWD と arena.destroy 後の再 flush は削除された。**スケジューラ側の窓設計
+   （決定 2）は引き続き有効** — 変わったのは run 完了の待ち方だけ。
 2. **適応制御の観測窓を flush 単位に再定義する**: 窓 = 「窓で最初に submit した時刻 →
    flush の onSWD 解決時刻」、推定 = 実測 ÷ 窓の合計 workgroup 数。ADR 0004 の
    不変条件①〜③は維持（実測 0 **と仕事量 0** は情報なし = 更新しない〈仕事量 0 は

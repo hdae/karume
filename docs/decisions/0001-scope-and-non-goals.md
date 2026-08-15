@@ -1,6 +1,9 @@
 # 0001 — スコープと非目標
 
 - Status: accepted（2026-08-01、ユーザー裁定）
+- 改訂: ADR [0037](0037-karume-monorepo.md) §1 が「リポジトリ構成はフラット・workspace 機構は
+  使わない」の 1 点を置換（Deno workspace の monorepo）。他の決定・非目標は現行 —
+  帰結節にも同旨の追記がある。
 - 根拠資料: [../research/2026-08-01-prototype-recon.md](../research/2026-08-01-prototype-recon.md)
 
 ## 決定

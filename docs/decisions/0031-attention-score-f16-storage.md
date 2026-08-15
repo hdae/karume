@@ -3,6 +3,11 @@
 - Status: accepted（目視ゲートも**ユーザー受理** 2026-08-04「変化はほとんど感じません、OK
   だと思います」= 品質込みで確定）
 - Date: 2026-08-04
+- 検出器の現況（2026-08-15 追記）: 下の E2E 節が指定する
+  `packages/runtime/tests/e2e_anima_s16_test.ts` は models 移行（旧構成の廃止）で**削除済み**。
+  現行の検出器は `packages/models/tests/e2e_anima_test.ts` の PNG sha256 完全一致門 +
+  `packages/runtime/tests/gpu_attention_s16_test.ts`。**旧 E2E の tolerance / 床の記録は歴史値**
+  として読むこと。
 - 関連: ADR 0006（**決定「活性 f16 は不採用」を S の格納に限定して上書き** — 本 ADR 決定 7）/
   0018（unpack2x16float 部品の先例 — ただし「無料」は継承できない: 決定 2）/ 0023（融合
   attention 3 dispatch — S の書き手と読み手）/ 0028（f16 計算変種 `:c16` — S 軸の読み替えは

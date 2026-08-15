@@ -14,6 +14,9 @@ f16 実行経路（ADR 0018）は汎用で、必要なのはエクスポータ�
 
 1. `export_sbv2.py --dtype {f32,f16}`。**i8 は足さない**（SBV2 は 5 ターゲットとも conv1d
    86〜90% 支配・linear 実質 0 GFLOP — ADR 0025 決定⑤。w8 単独の価値はサイズのみで別判断）。
+   **→ この「i8 は足さない」は ADR
+   [0029](0029-sbv2-i8-series-and-quant-quality.md) が上書き**（2026-08-04 — i8 系列
+   〈w8a32〉を正式採択）。`--dtype {f32,f16}` 以外の本決定は現行。
 2. fake-quant は共有 `round_weights_to_f16` を **remove_weight_norm / パッチ適用の後・
    参照/golden 採取の前**に export するモジュールそのものへ（順序 MUST は `_fake_quant`
    docstring）。`g` / `style_vec` はグラフ入力なので丸めない。

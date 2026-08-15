@@ -2,6 +2,11 @@
 
 - Status: accepted
 - Date: 2026-08-04
+- 検出器の現況（2026-08-15 追記）: 決定 6 が指定した
+  `packages/runtime/tests/e2e_anima_f16compute_test.ts` は models 移行（旧構成の廃止）で
+  **削除済み**。現存するのは決定 5 の micro/golden = `packages/runtime/tests/gpu_f16_compute_test.ts`
+  （atol=0）で、既定経路の非破壊は `packages/models/tests/e2e_anima_test.ts` の PNG sha256
+  完全一致門が持つ。**旧 E2E の判別帯 3 層（上限・床・キー本数）は歴史値**として読むこと。
 - 関連: ADR 0018（f16 **格納** — 完全に別の軸）/ 0021 決定 4（本 ADR が改訂 — シェーダ側
   feature 依存ゼロを「既定経路では不変」に狭めた）/ 0022 決定 3（縮約順序を変える変種は
   tolerance 再導出とセット）/ 0023（融合 attention の 3 dispatch）/ 0025（opt-in ノブ・

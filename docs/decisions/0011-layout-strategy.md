@@ -59,5 +59,7 @@
     部分木 1 本のみで、ADR 0010 の Tmax 畳み込みで消える側（語彙 allowlist — ADR 0007）。
     strided カーネルは (offset, strides[4]) の形を保っており、将来 slice を族に足す場合の
     可変点は params の offset 1 語のみ。
+    **→ この見送りは ADR [0014](0014-layout-ops-full-write.md) が撤回**（SBV2 で「Tmax
+    畳み込みで消える 1 本のみ」という前提が崩れ、`slice` を正式追加）。
 - エイリアス値の破棄規律（flush-before-destroy / discard）は実体バッファ単位で判定する。
 - perf マイルストーンで融合を入れる場合、golden E2E は同一 IR のまま回帰の網になる。

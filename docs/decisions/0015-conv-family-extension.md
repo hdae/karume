@@ -33,6 +33,9 @@
     1.5〜2 倍に膨らみ、メモリ見積の前提が崩れる。
   - WGSL は **select 形**で書く（`max(x, s·x)` は WGSL の max が NaN 伝播を保証しないため、
     torch の leaky_relu(NaN)=NaN と乖離する）。
+    **→ この見立て自体は ADR [0020](0020-nan-propagation-bitwise.md) が上書き**（select 形は
+    コンパイラが max イディオムへ畳むため NaN 伝播の根拠にならない）。`leaky_relu` の採択と
+    実際の伝播は不変 — 伝播するのは**両方の枝に x が現れる**ためであり、select 形の効能ではない。
 
 ## 語彙追加の残り（ADR 対象外）
 

@@ -3,6 +3,10 @@
 - Status: accepted（聴感ゲートまで**ユーザー受理** 2026-08-07「w8a8 までほぼ同じ音声に聞こえる /
   f16 は全く劣化を感じない」）
 - Date: 2026-08-07
+- 改訂: ADR [0041](0041-manifest-v2.md) — manifest の語彙（`karume/1` → `karume/2`・
+  `variant` → `dtype`・`weights` / `assets` / `quants`）と、多モデル / 多話者の packaging
+  （本 ADR 決定 7 の sub-manifest / speakers 展開案への回答）を置換。SBV2 固有の資産選別・
+  実行に必要な 3 グラフ・聴感裁定は現行。
 - 関連: ADR [0038](0038-manifest-v1.md)（manifest v1 — **本 ADR はその SBV2 例を実装で確定させる**）/
   [0013](0013-sbv2-chain-export.md)（チェーンの emit ターゲット）/
   [0026](0026-w8a8-deberta-deployment.md)（DeBERTa i8 の受理根拠）/

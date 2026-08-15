@@ -1,6 +1,10 @@
 # 0012 — attrs 語彙の解禁と融合 op 契約（保存リスト 9 op 化）
 
 - Status: accepted（2026-08-02）
+- 注記: 「保存（分解抑止）リスト 9 op」は**当時値** — 後続 ADR（0015 leaky_relu で 10 /
+  0017 rms_norm で 11 / 0023 SDPA で 12）で拡張されている。現在値の正本は
+  [op-vocabulary.md](../op-vocabulary.md)（本 ADR 内でリストを最新化し続けない）。
+  attrs 契約そのものは現行。
 - 根拠資料: [../research/2026-08-02-deberta-front-recon.md](../research/2026-08-02-deberta-front-recon.md)、
   ADR [0007](0007-op-vocabulary.md)（分解禁止 9 op）
 

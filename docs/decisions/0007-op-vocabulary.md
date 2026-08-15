@@ -1,6 +1,9 @@
 # 0007 — op 語彙（Core ATen 160 母集団と拡張規律）
 
 - Status: accepted（2026-08-01、台帳の引き継ぎはユーザー明示指示）
+- 記録の訂正: ADR [0043](0043-op-addition-layers.md) の「記録の訂正」節 — 下の「行 reduce 族
+  （6 本）を最初期に実装」は当初計画で、実装されたのは **sum / amax / amin の 3 本**
+  （argmax / argmin 等は LLM 波で再訪）。
 - 根拠資料: [../op-vocabulary.md](../op-vocabulary.md)（正本の台帳）、recon §5
 
 ## 決定

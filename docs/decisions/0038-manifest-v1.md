@@ -1,6 +1,9 @@
 # 0038: 配布 manifest v1 と hub の取得層
 
-- Status: accepted
+- Status: superseded by [0041](0041-manifest-v2.md)（2026-08-08 — manifest v1 は v2
+  〈`karume/2`〉が全面置換。v1 パーサは持たない。本文は「なぜ現在形へ移ったか」を説明する
+  当時の記録として保存 — §4 の Anima 配布形〈S 形のみ + 常時 tiling〉と §5 の取得層
+  〈`@hdae/fetch-cache`〉は引き続き現行の正本）
 - Date: 2026-08-05（pre-mortem 3 レンズ・44 指摘を反映した改訂版）
 - 関連: ADR [0037](0037-karume-monorepo.md)（配布形の親決定）/
   [0033](0033-vae-fixed-tile-decode.md)（タイル VAE）/

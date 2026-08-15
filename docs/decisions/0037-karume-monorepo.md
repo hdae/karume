@@ -47,6 +47,10 @@
 
 ### 3. 配布形は **HF 1 モデル 1 リポ・複数 safetensors**
 
+**Superseded by ADR [0041](0041-manifest-v2.md) §2**（2026-08-08 — family repo に複数 model を
+置く形へ。`models` + `defaultModel` が manifest v2 の正本）。本節の他の判断（1 グラフ =
+1 safetensors・`.krm` 不採用・モデルカード同梱）は現行。1 / 2 / 4 節は無改訂。
+
 - 1 グラフ = 1 safetensors。IR JSON は `__metadata__` 埋め込みの現行形を維持する
   （`docs/ir-v1.md` のコンテナ規約は不変）。
 - **独自拡張子 `.krm` は不採用** — 素の safetensors のままにして、HF のプレビューや既存

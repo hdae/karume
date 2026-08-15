@@ -3,6 +3,11 @@
 - Status: accepted（目視ゲートも**ユーザー受理** 2026-08-04「変化は誤差レベル」=
   品質込みで確定）
 - Date: 2026-08-04
+- 検出器の現況（2026-08-15 追記）: 正本に指定した
+  `packages/runtime/tests/e2e_anima_attn_i8a8_test.ts` は models 移行（旧構成の廃止）で
+  **削除済み**。現行の検出器は `packages/models/tests/e2e_anima_test.ts` の PNG sha256
+  完全一致門 + `packages/runtime/tests/gpu_attention_i8a8_test.ts` /
+  `gpu_attention_pv_i8a8_test.ts`。**旧 E2E の tolerance / 床の記録は歴史値**として読むこと。
 - 関連: ADR 0023（融合 attention — 3 dispatch 構造の土台）/ 0025（linear w8a8 — 量子化部品と
   atol=0 契約の前例）/ 0028（計算精度ノブ `ComputePrecision` の型）/ 設計 recon =
   [2026-08-04-attention-a8-design.md](../research/2026-08-04-attention-a8-design.md)（qk/stats/pv

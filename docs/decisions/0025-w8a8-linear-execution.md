@@ -2,6 +2,11 @@
 
 - Status: accepted（2026-08-03。品質はユーザー目視裁定済み —
   「別の画像になっているがプロンプトの趣旨は通っているので正しい結果」）
+- 検出器の現況（2026-08-15 追記）: 決定 6 が正本に指定した
+  `packages/runtime/tests/e2e_anima_w8a8_test.ts` は models 移行（旧構成の廃止）で**削除済み**。
+  現行の検出器は `packages/models/tests/e2e_anima_test.ts` の PNG sha256 完全一致門 +
+  `packages/runtime/tests/gpu_i8a8_test.ts`（atol=0）。**旧 E2E の tolerance / 判別帯は歴史値**
+  として読むこと。
 - 対象: `SessionOptions.linearCompute: "i8a8"`（packages/runtime/src/kernels/quantize-rows.ts /
   packages/runtime/src/kernels/linear-i8a8.ts / packages/runtime/src/reference/i8a8.ts / executor `#encodeLinearI8a8`）
 - 需要の実測: GEMM 置換（ADR 0022）後も linear が DiT GPU の 69.8%（1024px wi8）/

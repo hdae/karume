@@ -1,6 +1,9 @@
 # 0017 — 語彙拡張: rms_norm / conv2d / clamp_min
 
 - Status: accepted（2026-08-02）
+- 改訂: NaN 意味論は ADR [0020](0020-nan-propagation-bitwise.md) が置換（`clamp_min` の
+  「select 形なら伝播する」は成立せず、ビット列判定を正本化）— 本文の「訂正」がその発端の
+  実測記録。op 語彙・契約の決定そのものは現行。
 - 根拠資料: [../research/2026-08-02-anima-recon.md](../research/2026-08-02-anima-recon.md)
 - 需要の実測: RMSNorm 269 本（Qwen3 113 / conditioner 43 / DiT 113 — QK ノルム含む）、
   VAE decoder の conv2d 37 本（CausalConv3d 32 の T=1 スライス + 素の conv2d 5）、

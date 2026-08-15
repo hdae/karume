@@ -1,6 +1,8 @@
 # 0008 — 公開 API 面と SemVer
 
 - Status: accepted（2026-08-01）
+- 部分改訂: ADR [0009](0009-dtype-i32-bool.md) 決定 — 公開 `Tensor` 型を dtype 判別ユニオンへ
+  改訂（f32 = Float32Array / i32 = Int32Array / bool = Uint32Array）。
 - 根拠資料: recon §9-1（先行実験プロジェクト（以下プロトタイプ）は index.ts が内部 ≈180
   シンボルの素通し再輸出で実装と乖離、テストが src 直 import のため乖離が検出されない
   — JSR + SemVer と両立しない）
