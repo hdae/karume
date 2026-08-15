@@ -26,8 +26,6 @@ import torch
 from safetensors import safe_open
 from torch import nn
 
-import export_sbv2
-from karume import patch_sbv2
 from karume.dims import parse_dim
 from karume.ops import EMITTABLE_OPS
 from karume.paths import REPO_ROOT, SERIES_ROOT
@@ -38,6 +36,8 @@ from karume.quantize import (
     quantize_to_int8,
 )
 from karume.verify import verify_model
+from sbv2 import export as export_sbv2
+from sbv2 import patch as patch_sbv2
 
 MODEL_DIR = export_sbv2.DEFAULT_MODEL_DIR
 
@@ -725,8 +725,8 @@ def verify_report():
     def run(target: str) -> dict:
         if target not in cache:
             completed = subprocess.run(
-                [sys.executable, "export_sbv2.py", "--verify", target],
-                cwd=str(REPO_ROOT / "tools" / "exporter"),
+                [sys.executable, "-m", "sbv2.export", "--verify", target],
+                cwd=str(REPO_ROOT / "tools" / "export-recipes"),
                 capture_output=True,
                 text=True,
                 check=True,
@@ -1226,7 +1226,7 @@ class TestFlowExport:
     def test_a_shifted_table_changes_the_golden(self, exported_flow, flow_module):
         """故障注入 — 表を 1 ずらすと golden と食い違う（実重み・全 24 層での確認）。
 
-        合成注意 1 層での検出は `test_patch_sbv2.py` が持つ。ここは「グラフ入力として
+        合成注意 1 層での検出は `test_patch.py` が持つ。ここは「グラフ入力として
         運ばれた表が本当に 24 層すべての注意で使われている」ことの実測 — 表が途中で
         捨てられて in-graph 構築に落ちていたら、ずらしても値が動かない。
         """

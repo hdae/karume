@@ -395,10 +395,6 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
-sbv2 = [
-    { name = "huggingface-hub" },
-    { name = "style-bert-vits2" },
-]
 siglip2 = [
     { name = "transformers" },
 ]
@@ -434,10 +430,6 @@ dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.0" },
 ]
-sbv2 = [
-    { name = "huggingface-hub", specifier = ">=1.26.0" },
-    { name = "style-bert-vits2", specifier = "==2.5.0" },
-]
 siglip2 = [{ name = "transformers", specifier = "==5.14.1" }]
 siglip2-preprocess = [
     { name = "pillow", specifier = ">=11" },
@@ -465,6 +457,10 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+sbv2 = [
+    { name = "huggingface-hub" },
+    { name = "style-bert-vits2" },
+]
 
 [package.metadata]
 requires-dist = [{ name = "karume", editable = "exporter" }]
@@ -479,6 +475,10 @@ anima = [
 dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.0" },
+]
+sbv2 = [
+    { name = "huggingface-hub", specifier = ">=1.26.0" },
+    { name = "style-bert-vits2", specifier = "==2.5.0" },
 ]
 
 [[package]]

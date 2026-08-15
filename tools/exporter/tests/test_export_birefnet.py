@@ -1,6 +1,6 @@
 """`export_birefnet.py` の台本レベルの約束事（実重み不要分）。
 
-実重みの emit は手動（既存 `export_deberta.py` / `export_siglip2.py` のテストと同じ規律）。
+実重みの emit は手動（既存 `deberta/export.py` / `export_siglip2.py` のテストと同じ規律）。
 ここで固定するのは、壊れると**偽 PASS** になる側の規律だけ:
 
 - グラフ出力が**最終段のマット 1 本**であること（multi-scale の中間予測が混ざったら io の

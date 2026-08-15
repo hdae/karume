@@ -1,0 +1,321 @@
+"""SBV2 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+
+汎用の描画部品（frontmatter・モデル一覧・ファイル表・quant 表・節の組み立て）は
+`karume.modelcard` が持つ。ここが持つのは **SBV2 固有の事実**だけ: 帰属（声の出所・
+ライセンス・引用・再配布する text encoder）と、この pipeline のカードに何を書くか。
+
+**帰属はテンプレートと別の軸**（{@link Sbv2CardProfile}）。同じ SBV2 のテンプレートでも、
+どのファミリーの重みを配るかで出所・ライセンス・引用が丸ごと変わるので、そこだけを
+プロファイルに分けて**呼び出し側に明示させる**。
+
+MUST: **数値・ファイル一覧・quant 表・dtype ラベル・スタイル表・話者表は 1 つ残らず manifest
+から導出する**（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、
+manifest に**存在しない事実**だけ。
+
+NOTE: `_frontmatter` などの描画部品は core 側で private 名のまま — recipe から名指しで
+呼ぶのは ADR 0065 段 6（packaging）で公開名を決めるまでの形。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from karume.modelcard import (
+    CardMetadata,
+    _default_model,
+    _files,
+    _frontmatter,
+    _knob,
+    _model_sections,
+    _models,
+    _quants,
+    _render,
+    _require_pipeline,
+)
+
+#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+SBV2_SUPPORTED_PIPELINE = "sbv2/1"
+
+SBV2_PIPELINE_TAG = "text-to-speech"
+
+#: アーキテクチャ（どのファミリーも JP-Extra 系 — 違うのは重みの出所であって形ではない）。
+SBV2_ARCHITECTURE = "Style-Bert-VITS2 JP-Extra"
+
+#: `text_encoder` の素になった日本語 BERT（`deberta/export.py` の `MODEL_ID`）。manifest は
+#: 役割名しか持たないので、帰属はカード側が負う。ライセンスは実地確認（2026-08-07）。
+#: **どのファミリーでも同じ 1 本**を再配布するので、プロファイルの席ではなくここが持つ。
+SBV2_TEXT_ENCODER_MODEL = "ku-nlp/deberta-v2-large-japanese-char-wwm"
+SBV2_TEXT_ENCODER_LICENSE = "cc-by-sa-4.0"
+
+#: 使い方スニペットのデモ文（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
+SBV2_DEMO_TEXT = "こんにちは、これはテストです。"
+
+
+@dataclass(frozen=True)
+class Sbv2CardProfile:
+    """SBV2 カードの**帰属プロファイル** — 声のファミリーごとに違う「manifest に無い事実」。
+
+    SBV2 のテンプレートは 1 つでも、帰属（出所・ライセンス・再配布の条件・引用）はファミリー
+    ごとに**別の法的事実**になる。決め打ちのまま別ファミリーのリポへ描くと、表も使い方も
+    正しいのに帰属だけが前のファミリーのまま残る — 配ってからでないと誰も気づけない誤りなので、
+    ここが席として分けて持つ（選択は {@link SBV2_CARD_PROFILES} 経由で**明示**）。
+
+    `attribution` が行の並びそのものなのは、この席に入るのが導出できない散文（ライセンス条項の
+    要約・引用・再配布条件）だから。機械的に組める 2 行（Voices / Architecture）だけは
+    {@link _sbv2_base_weights} が `source_dirs` / `source_version` から組む。
+    """
+
+    metadata: CardMetadata
+    title: str
+    #: 出所リポジトリの中で、この配布形の声になったディレクトリ群。
+    source_dirs: tuple[str, ...]
+    #: 出所の `config.json` が名乗る version 文字列。
+    source_version: str
+    #: Voices / Architecture に続く帰属の箇条（Markdown の行そのもの）。
+    attribution: tuple[str, ...]
+
+
+# ---- FN 系（単一モデル） -------------------------------------------------
+
+#: ライセンス（実地確認 2026-08-07 — https://huggingface.co/rufflet17/voice_models）: 出所の
+#: リポジトリは **license を宣言しておらず、モデルカードも無い**。SPDX 識別子を当てられない
+#: ので `other` を採り、`license_link` は「実際に条件が書かれている場所」= 出所のリポジトリを
+#: 指す。公開者が改変自由としている事実は本文の帰属節に書く（HF の語彙では表せない）。
+SBV2_FN_METADATA = CardMetadata(
+    pipeline_tag=SBV2_PIPELINE_TAG,
+    base_model=("rufflet17/voice_models",),
+    base_model_relation="quantized",
+    license="other",
+    license_name="rufflet17-voice-models-terms",
+    license_link="https://huggingface.co/rufflet17/voice_models",
+    tags=("text-to-speech", "webgpu", "japanese"),
+)
+
+SBV2_FN_PROFILE = Sbv2CardProfile(
+    metadata=SBV2_FN_METADATA,
+    title="Style-Bert-VITS2 — Karume",
+    source_dirs=("FN/",),
+    source_version="2.6.1-JP-Extra",
+    attribution=(
+        "- **Terms**: the publisher declares the model free to modify. The source repository",
+        "  declares no SPDX license and carries no model card, so its page is where the",
+        f"  governing terms live — hence `license: {SBV2_FN_METADATA.license}` above,"
+        " pointed at it.",
+        f"- **Text encoder**: [{SBV2_TEXT_ENCODER_MODEL}]"
+        f"(https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}),",
+        f"  licensed **{SBV2_TEXT_ENCODER_LICENSE}** (as of retrieval). It is redistributed here",
+        "  in the container format as the `text_encoder` component, so that license travels with",
+        "  this repository too.",
+    ),
+)
+
+
+# ---- JVNV 系（ファミリー） -----------------------------------------------
+
+#: ライセンス（実地確認 2026-08-09 — https://huggingface.co/litagin/style_bert_vits2_jvnv）:
+#: 出所のリポジトリは「ライセンスは JVNV コーパスの cc-by-sa-4.0 を引き継ぐ」と明言している。
+#: SPDX 標準タグが当たるので `license_name` / `license_link` は持たない（HF が識別子から解決
+#: する席で、独自名を名乗らせると「名前の無い独自ライセンス」に読める）。
+#: `base_model` に text encoder を併記するのは、この配布形が**両方を再配布している**ため。
+#: 両者とも cc-by-sa-4.0 なので、SA（同一ライセンス継承）はリポジトリ全体で矛盾しない。
+SBV2_JVNV_METADATA = CardMetadata(
+    pipeline_tag=SBV2_PIPELINE_TAG,
+    base_model=("litagin/style_bert_vits2_jvnv", SBV2_TEXT_ENCODER_MODEL),
+    base_model_relation="quantized",
+    license="cc-by-sa-4.0",
+    tags=("text-to-speech", "webgpu", "japanese"),
+)
+
+#: CC BY-SA 4.0 の条文（BY の「ライセンス URL を示す」を、カード自身が満たすための 1 本）。
+SBV2_JVNV_LICENSE_URL = "https://creativecommons.org/licenses/by-sa/4.0/"
+
+SBV2_JVNV_PROFILE = Sbv2CardProfile(
+    metadata=SBV2_JVNV_METADATA,
+    title="Style-Bert-VITS2 JVNV — Karume",
+    source_dirs=("jvnv-F1-jp/", "jvnv-F2-jp/", "jvnv-M1-jp/", "jvnv-M2-jp/"),
+    source_version="2.0-JP-Extra",
+    attribution=(
+        f"- **Terms**: **[CC BY-SA 4.0]({SBV2_JVNV_LICENSE_URL})**, inherited from the JVNV"
+        " corpus the",
+        "  voices were trained on — the source repository states the corpus license carries over",
+        "  to the models. Redistribution here keeps it: credit the authors, name the source and",
+        "  the license URL, state that the weights were **converted to another format and"
+        " quantized**",
+        "  to i8, license any derivative work under CC BY-SA 4.0 as well, and impose no further",
+        "  restrictions. There is no NonCommercial and no NoDerivatives clause — commercial use",
+        "  and modification are both allowed.",
+        "- **Changes made here**: conversion into the Karume container format and **i8"
+        " quantization**",
+        "  of the weights. No retraining, no fine-tuning — the voices are the source checkpoints",
+        "  in a different storage form.",
+        f"- **Text encoder**: [{SBV2_TEXT_ENCODER_MODEL}]"
+        f"(https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}),",
+        f"  licensed **{SBV2_TEXT_ENCODER_LICENSE}** (as of retrieval). It is redistributed here",
+        "  in the container format as the `text_encoder` component — the same license as the",
+        "  voices, so the share-alike term is consistent across everything in this repository.",
+        "- **Training data**: the JVNV corpus, licensed CC BY-SA 4.0. Detai Xin, Junfeng Jiang,",
+        "  Shinnosuke Takamichi, Yuki Saito, Akiko Aizawa, Hiroshi Saruwatari,",
+        # 論文題は 1 行に収める（折り返すと、題での検索が本文にあるのに当たらなくなる）。
+        "  *JVNV: A Corpus of Japanese Emotional Speech with Verbal Content and"
+        " Nonverbal Expressions*,",
+        "  [arXiv:2310.06072](https://arxiv.org/abs/2310.06072). Corpus page:",
+        "  <https://sites.google.com/site/shinnosuketakamichi/research-topics/jvnv_corpus>",
+        "- **Training implementation**:"
+        " [Style-Bert-VITS2](https://github.com/litagin02/Style-Bert-VITS2)",
+        "  (AGPL-3.0). Karume's runtime contains **none of that code**: it is an independent",
+        "  implementation that reads these weights from its own container format, so the AGPL",
+        "  terms govern the training implementation, not the runtime that plays these files.",
+    ),
+)
+
+#: 選べる帰属プロファイル。**既定は置かない** — 省略時に片方を黙って選ぶと、新しいファミリーを
+#: 配るたびに前のファミリーの帰属が沈黙で再発する（`karume.dist` が明示を要求する）。
+SBV2_CARD_PROFILES: Mapping[str, Sbv2CardProfile] = {
+    "fn": SBV2_FN_PROFILE,
+    "jvnv": SBV2_JVNV_PROFILE,
+}
+
+
+def _sbv2_overview(manifest: Mapping[str, Any]) -> list[str]:
+    return [
+        "## What is this",
+        "",
+        f"A Japanese text-to-speech distribution: **{SBV2_ARCHITECTURE}** voices converted into",
+        "the WebGPU inference runtime **Karume**'s container format (a single safetensors file =",
+        "weights + a graph JSON embedded in `__metadata__`). Runs as-is in the browser and in"
+        " Deno.",
+        "",
+        "- The acoustic chain is shipped as fused graphs: `text_encoder` (a Japanese DeBERTa),",
+        "  `front` (phoneme encoder + duration predictors) and `voice` (flow + HiFi-GAN decoder).",
+        "- Style and speaker are **looked up at run time** from the shipped tables — the names in",
+        "  the tables below index the rows of `style_vectors` / `speaker_embeddings`.",
+        "- Not readable by Style-Bert-VITS2 (it's a different container with an embedded graph);"
+        f" the reader is a pipeline that implements `{SBV2_SUPPORTED_PIPELINE}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
+        f" is `karume.json` (`{manifest['format']}`).",
+    ]
+
+
+def _sbv2_base_weights(profile: Sbv2CardProfile) -> list[str]:
+    """帰属節。声の出所リポジトリは `base_model` の先頭（= 重みの出所そのもの）から引く。"""
+    base_model = profile.metadata.base_model[0]
+    dirs = " / ".join(f"`{name}`" for name in profile.source_dirs)
+    return [
+        "## Base weights and attribution",
+        "",
+        "Converted into the container format — the original checkpoints are not distributed here.",
+        "",
+        f"- **Voices**: {dirs} of [{base_model}](https://huggingface.co/{base_model})",
+        f"- **Architecture**: {SBV2_ARCHITECTURE} (`version: {profile.source_version}`)",
+        *profile.attribution,
+    ]
+
+
+def _name_id_rows(table: Mapping[str, int]) -> list[str]:
+    """`名前 → ID` の表を manifest の並びのまま行にする（ID は配る表の行番号そのもの）。"""
+    return [f"| `{name}` | {identifier} |" for name, identifier in table.items()]
+
+
+def _sbv2_styles(model: Mapping[str, Any]) -> list[str]:
+    """スタイル一覧（利用者が `style` に何を渡せるかをカードだけで知れるようにする節）。"""
+    path = model["assets"]["style_vectors"]["path"]
+    return [
+        "### Styles",
+        "",
+        "| Style | ID |",
+        "| ----- | -- |",
+        *_name_id_rows(model["pipelineConfig"]["styles"]),
+        "",
+        f"`style` takes one of these names — the ID is the row it selects in `{path}`.",
+        "`styleWeight` blends between the average style (`0`) and the named one (`1`).",
+    ]
+
+
+def _sbv2_speakers(model: Mapping[str, Any]) -> list[str]:
+    """話者一覧（`speaker` の受理集合 — スタイルと同じく行番号の対応表）。"""
+    path = model["assets"]["speaker_embeddings"]["path"]
+    return [
+        "### Speakers",
+        "",
+        "| Speaker | ID |",
+        "| ------- | -- |",
+        *_name_id_rows(model["pipelineConfig"]["speakers"]),
+        "",
+        f"`speaker` takes one of these names — the ID is the row it selects in `{path}`.",
+    ]
+
+
+def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+    model_name = manifest["defaultModel"]
+    model = _default_model(manifest)
+    quant = model["defaultQuant"]
+    style = model["pipelineConfig"]["defaults"]["style"]
+    return [
+        "## Usage",
+        "",
+        "```ts",
+        'import { encodeWav, Sbv2Pipeline } from "jsr:@karume/models";',
+        "",
+        f"// Both options may be omitted: model defaults to {model_name}, quant to {quant}.",
+        f'using pipeline = await Sbv2Pipeline.fromPretrained("{repo}", {{',
+        f'  model: "{model_name}",',
+        f'  quant: "{quant}",',
+        "});",
+        "const audio = await pipeline.generate({",
+        f'  text: "{SBV2_DEMO_TEXT}",',
+        f'  style: "{style}",',
+        "  seed: 42,",
+        "});",
+        'await Deno.writeFile("sbv2.wav", encodeWav(audio.data, audio.sampleRate));',
+        "```",
+        "",
+        "`generate()` returns `{ sampleRate, data }`, where `data` is an f32 mono waveform —",
+        "exactly what `encodeWav` takes.",
+        "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
+        "You can also build from bytes you fetched yourself (`Sbv2Pipeline.fromAssets`).",
+        "",
+        "The Japanese analyzer dictionary the text front-end needs is **not** part of this",
+        "repository: the pipeline fetches it on the first `generate()` and keeps it for the rest",
+        "of the instance's life (pass your own through the `dictionary` option to skip the fetch).",
+    ]
+
+
+def _sbv2_defaults(model: Mapping[str, Any]) -> list[str]:
+    defaults = model["pipelineConfig"]["defaults"]
+    return [
+        "### Defaults",
+        "",
+        "Any knob not passed to `generate()` is filled in from the manifest's defaults.",
+        "",
+        *(f"- **{key}**: {_knob(value)}" for key, value in defaults.items()),
+        "",
+        "`seed` is the one knob the manifest does not carry — it defaults to `0`, and the same"
+        " seed with the same knobs gives the same waveform.",
+    ]
+
+
+def render_sbv2_model_card(manifest: Mapping[str, Any], repo: str, profile: Sbv2CardProfile) -> str:
+    """SBV2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+
+    `profile` に既定を置かないのは MUST — 帰属はファミリーごとに違う事実で、既定を持たせた
+    瞬間に「別ファミリーのリポへ前のファミリーの帰属を描く」経路が黙って生える。
+    """
+    _require_pipeline(manifest, SBV2_SUPPORTED_PIPELINE)
+    return _render(
+        (
+            _frontmatter(profile.metadata),
+            ["", f"# {profile.title}", ""],
+            _sbv2_overview(manifest),
+            [""],
+            _sbv2_base_weights(profile),
+            [""],
+            _models(manifest),
+            [""],
+            _sbv2_usage(manifest, repo),
+            *_model_sections(
+                manifest, (_files, _quants, _sbv2_styles, _sbv2_speakers, _sbv2_defaults)
+            ),
+        )
+    )

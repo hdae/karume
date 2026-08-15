@@ -1,6 +1,6 @@
 """`export_embeddinggemma.py` の台本レベルの約束事（実重み不要分）。
 
-実重みの emit は手動（既存 `export_deberta.py` のテストと同じ規律）。ここで固定するのは、
+実重みの emit は手動（既存 `deberta/export.py` のテストと同じ規律）。ここで固定するのは、
 壊れると**偽 PASS** になる側の規律だけ:
 
 - `--batch` の既定が 1（従来の 5 ケース golden そのまま）で、1 未満は fail loudly

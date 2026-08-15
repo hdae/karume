@@ -8,7 +8,7 @@
 5 構成を**同一発話・同一乱数**（`outputs/demo/sbv2-dump/dump.safetensors` の離散入力・ノイズ列）で
 走らせる。**BERT は全構成 f32 固定**で、振るのは生成ネット側だけ:
 
-    (1) f32    基準。`sbv2_demo.py reference` と同じ経路（既存 reference.wav とビット一致）
+    (1) f32    基準。`sbv2.demo reference` と同じ経路（既存 reference.wav とビット一致）
     (2) f16    適格重みを f16 表現可能値へ丸め（`quantize.round_weights_to_f16`）。活性は f32
                = 実装済みの **f16 格納系列**（ADR 0027）の対応物
     (3) w8     重みを per-channel symmetric i8 へ fake-quant（`quantize.fake_quant_int8`）
@@ -16,7 +16,7 @@
     (4) w8a16  (3) + **対象 op の入力活性**を f16 へ丸め
     (5) w8a8   (3) + **対象 op の入力活性**を per-位置 symmetric i8 へ fake-quant
 
-    uv run --group sbv2 python measure_quant_sbv2.py
+    uv run --group sbv2 python -m sbv2.measure_quant
 
 出力は `outputs/demo/quant-sim/`（`<config>.wav` 5 本 + `report.json`）。
 
@@ -27,7 +27,7 @@
 なので対象外（重み側だけが量子化される）。
 
 **MUST: 差し替えは op 粒度**（`torch.nn.functional` の関数を差し替える）— モジュールの
-`forward_pre_hook` では足りない。`patch_sbv2._patched_ffn_forward` は `self.conv_1(x)` では
+`forward_pre_hook` では足りない。`sbv2.patch._patched_ffn_forward` は `self.conv_1(x)` では
 なく `functional.conv1d(x, self.conv_1.weight, …)` を直に呼ぶので、`nn.Conv1d` へ掛けた
 フックは 1 度も発火しない（この台本の初版が踏んだ穴 — enc_p 12 本 + flow 48 本の FFN conv が
 丸ごと素通りしていた。しかも「量子化しているつもりで劣化が軽く出る」向きに沈黙する）。
@@ -60,7 +60,7 @@ NOTE: `k % 4 == 0` のような i8 詰めの整列条件は模さない（パデ
 
 front の出力 `logw` は duration を決めるので、量子化で `ceil` が 1 つでも飛ぶと**フレーム数
 そのものが変わり**、波形長が構成間で食い違って SNR が定義できなくなる。そこで全構成とも
-展開には **dump 側の `w_ceil`** を使う（`sbv2_demo.run_reference` が zp_noise の形を理由に
+展開には **dump 側の `w_ceil`** を使う（`sbv2.demo.run_reference` が zp_noise の形を理由に
 そうしているのと同じ選択）。構成ごとの「自前 w_ceil なら何フレームになったか」は
 `report.json` の `w_ceil` 欄に診断として残す — こちらが割れていれば「SNR は同じ時間グリッド
 上での比較であって、実運用では発話長も変わる」と読む必要がある。
@@ -86,18 +86,17 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
-import export_sbv2
-import sbv2_demo
-from karume import patch_sbv2
 from karume.act_quant import quantize_rows
 from karume.paths import OUTPUTS_ROOT
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
-#: デモ・ベンチの生成物置き場。資産（`sbv2_demo.DEFAULT_DEMO_DIR`）と分離する —
+from . import demo, export, patch
+
+#: デモ・ベンチの生成物置き場。資産（`sbv2.demo.DEFAULT_DEMO_DIR`）と分離する —
 #: 生成物の掃除（`rm -rf outputs/demo`）が資産や系列を巻き込まないため（docs/assets-layout.md）。
 DEMO_OUT_ROOT = OUTPUTS_ROOT / "demo"
 DEFAULT_DUMP = DEMO_OUT_ROOT / "sbv2-dump" / "dump.safetensors"
-#: f32 構成の恒真化を防ぐ突合先（`sbv2_demo.py reference` が同じ dump から書いた WAV）。
+#: f32 構成の恒真化を防ぐ突合先（`sbv2.demo reference` が同じ dump から書いた WAV）。
 DEFAULT_REFERENCE_WAV = DEMO_OUT_ROOT / "sbv2-dump" / "reference.wav"
 DEFAULT_OUT = DEMO_OUT_ROOT / "quant-sim"
 
@@ -146,7 +145,7 @@ RECIPES: Mapping[str, Recipe] = MappingProxyType({**CONFIGS, **DIAGNOSTICS})
 #: 活性量子化の対象 **op**（`torch.nn.functional` の名前）→ 入力テンソルの「行」の軸。
 #:
 #: MUST: 適用点は**モジュールではなく op**。モジュールの `forward_pre_hook` で足りると
-#: 考えるのは誤りで、`patch_sbv2._patched_ffn_forward` は `self.conv_1(x)` ではなく
+#: 考えるのは誤りで、`sbv2.patch._patched_ffn_forward` は `self.conv_1(x)` ではなく
 #: `functional.conv1d(x, self.conv_1.weight, …)` を直に呼ぶため、`nn.Conv1d` へ掛けたフックは
 #: **1 度も発火しない**（実測: enc_p 12 本 + flow 48 本の FFN conv が丸ごと素通りしていた）。
 #: Karume 側も IR/カーネルは op 粒度で活性を食うので、op 粒度が意味論的にも正しい。
@@ -374,14 +373,14 @@ def prepare_inputs(dump_path: Path, assets_path: Path) -> ChainInputs:
     """dump / assets を読み、**f32 の BERT** を 1 回だけ走らせて特徴を作る。
 
     BERT を構成間で共有するのは契約（BERT=f32 固定）そのもので、5 回走らせても同じ数が
-    出る計算を 1 回に畳んでいるだけ。トークナイズの突合は `sbv2_demo.run_reference` と同じ
+    出る計算を 1 回に畳んでいるだけ。トークナイズの突合は `sbv2.demo.run_reference` と同じ
     ものを踏む（Deno 側の移植と食い違えば波形の手前で落ちる）。
     """
-    meta = sbv2_demo.dump_metadata(dump_path)
+    meta = demo.dump_metadata(dump_path)
     tensors = load_file(str(dump_path))
     assets = load_file(str(assets_path))
 
-    tokenizer = sbv2_demo.load_bert_tokenizer()
+    tokenizer = demo.load_bert_tokenizer()
     expected_ids = tokenizer(meta["bertText"])["input_ids"]
     dumped_ids = tensors["input_ids"].reshape(-1).tolist()
     if expected_ids != dumped_ids:
@@ -392,7 +391,7 @@ def prepare_inputs(dump_path: Path, assets_path: Path) -> ChainInputs:
     from transformers import DebertaV2Model
 
     bert = DebertaV2Model.from_pretrained(
-        sbv2_demo.BERT_REPO, dtype=torch.float32, attn_implementation="eager"
+        demo.BERT_REPO, dtype=torch.float32, attn_implementation="eager"
     )
     bert.eval()
     with torch.no_grad():
@@ -402,10 +401,10 @@ def prepare_inputs(dump_path: Path, assets_path: Path) -> ChainInputs:
             output_hidden_states=True,
         ).hidden_states
     # MUST: 参照は**切り詰めていない全 24 層**モデルなので位置は定数を直に使う
-    # （`meta["bertHiddenFromEnd"]` は配布グラフ側の位置 — sbv2_demo の 2 定数の使い分け）。
-    hidden = hidden_states[-sbv2_demo.BERT_HIDDEN_FROM_END][0]
+    # （`meta["bertHiddenFromEnd"]` は配布グラフ側の位置 — sbv2.demo の 2 定数の使い分け）。
+    hidden = hidden_states[-demo.BERT_HIDDEN_FROM_END][0]
     word2ph = tensors["word2ph"].reshape(-1).tolist()
-    bert_feature = sbv2_demo.tile_bert(hidden, word2ph).unsqueeze(0)
+    bert_feature = demo.tile_bert(hidden, word2ph).unsqueeze(0)
     del bert, hidden_states
     gc.collect()
 
@@ -433,11 +432,11 @@ def run_config(
     tensors = inputs.tensors
     knobs = inputs.meta["knobs"]
 
-    net_g, hps = export_sbv2.load_net_g(model_dir)
-    patch_sbv2.apply_all_patches()
-    export_sbv2.ensure_dec_plain(net_g)
-    front = patch_sbv2.Sbv2Front(net_g)
-    voice = patch_sbv2.Sbv2Voice(net_g)
+    net_g, hps = export.load_net_g(model_dir)
+    patch.apply_all_patches()
+    export.ensure_dec_plain(net_g)
+    front = patch.Sbv2Front(net_g)
+    voice = patch.Sbv2Voice(net_g)
     # front（enc_p / dp / sdp）と voice（flow / dec）は互いに素なモジュール集合。
     subgraphs = (("front", front), ("voice", voice))
     scoped = [(tag, module) for tag, module in subgraphs if tag in recipe.scope]
@@ -471,7 +470,7 @@ def run_config(
             tensors["z_noise"].to(torch.float32),
         )
 
-    # --- ホストグルー（デモ main.ts / sbv2_demo.run_reference と同式）-----------
+    # --- ホストグルー（デモ main.ts / demo.run_reference と同式）-----------
     logw = logw_sdp * knobs["sdpRatio"] + logw_dp * (1.0 - knobs["sdpRatio"])
     w = torch.exp(logw) * x_mask * knobs["lengthScale"]
     own_ceil = torch.ceil(w).to(torch.int64).reshape(-1)
@@ -485,7 +484,7 @@ def run_config(
         m_p[:, :, expand_idx] + zp_noise * torch.exp(logs_p[:, :, expand_idx]) * knobs["noiseScale"]
     )
     y_mask = torch.ones(1, 1, total_frames)
-    idx_k, valid = patch_sbv2.build_relattn_tables(total_frames, export_sbv2.EXPECTED_WINDOW_SIZE)
+    idx_k, valid = patch.build_relattn_tables(total_frames, export.EXPECTED_WINDOW_SIZE)
 
     # --- voice（flow + dec 融合）--------------------------------------------
     with torch.no_grad():
@@ -605,7 +604,7 @@ def build_report(
 
     return {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "script": "tools/exporter/measure_quant_sbv2.py",
+        "script": "tools/export-recipes/sbv2/measure_quant.py",
         "torch": torch.__version__,
         "dump": str(args.dump),
         "text": inputs.meta["text"],
@@ -736,11 +735,9 @@ def run_gates(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-dir", type=Path, default=export_sbv2.DEFAULT_MODEL_DIR)
+    parser.add_argument("--model-dir", type=Path, default=export.DEFAULT_MODEL_DIR)
     parser.add_argument("--dump", type=Path, default=DEFAULT_DUMP)
-    parser.add_argument(
-        "--assets", type=Path, default=sbv2_demo.DEFAULT_DEMO_DIR / sbv2_demo.STYLE_FILE
-    )
+    parser.add_argument("--assets", type=Path, default=demo.DEFAULT_DEMO_DIR / demo.STYLE_FILE)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--reference-wav", type=Path, default=DEFAULT_REFERENCE_WAV)
     parser.add_argument("--top", type=int, default=12, help="層グループ表に載せる本数")
@@ -777,7 +774,7 @@ def main() -> None:
         results[name] = run_config(name, args.model_dir, inputs, inject=args.inject)
         audio = results[name]["audio"]
         path = directory / f"{name}.wav"
-        path.write_bytes(sbv2_demo.wav_pcm16(audio.numpy(), inputs.meta["samplingRate"]))
+        path.write_bytes(demo.wav_pcm16(audio.numpy(), inputs.meta["samplingRate"]))
         wavs[name] = path
         diagnostics = results[name]["diagnostics"]
         print(

@@ -42,6 +42,15 @@ anima = [
   "torchvision>=0.28",
   "transformers==5.14.1",
 ]
+# SBV2 の実重み export 用（`uv sync --group sbv2`）。既定の sync には入れない — base deps
+# だけで tiny golden と pytest が回る状態を保つ。
+# MUST: style-bert-vits2 は `==` でピンする — SBV2 のエクスポータは後続の波でパッケージ内部
+# （モデリングコードのクラス属性）を monkeypatch する予定で、マイナー更新で差し替え先の
+# 名前や forward の形が変わるとグラフ形ごと黙って変わる。dp（波 1）自体は無改造で通るが、
+# ピンを緩めると「dp は通るのに後続の波だけ壊れる」形で表面化が遅れる。
+# NOTE: DeBERTa recipe（SBV2 配布形の `text_encoder` 席）は独立した席を持たない — 台本が要る
+# のは transformers だけで、それは style-bert-vits2 の依存として入る。
+sbv2 = ["style-bert-vits2==2.5.0", "huggingface-hub>=1.26.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["."]

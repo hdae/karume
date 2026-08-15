@@ -1,7 +1,7 @@
 """SBV2 パッチ層の単体テスト（M1-P3 波 6）。
 
 各パッチは「原実装と eager 同値」であることが存在条件（ADR 0013）。実重みを使う貫通検証は
-`test_export_sbv2.py` と `export_sbv2.py --verify` が受け持ち、ここは**合成の小さいモジュール**
+`test_export.py` と `sbv2.export --verify` が受け持ち、ここは**合成の小さいモジュール**
 で個別のパッチを 1 つずつ切り分ける。`style_bert_vits2` パッケージが無い環境では SKIP。
 
 MUST: クラス属性を差し替えるテストは `pristine_classes` フィクスチャを取る。差し替えは
@@ -16,7 +16,7 @@ import importlib.util
 import pytest
 import torch
 
-from karume import patch_sbv2
+from sbv2 import patch as patch_sbv2
 
 _PACKAGE_PRESENT = importlib.util.find_spec("style_bert_vits2") is not None
 
@@ -34,7 +34,7 @@ EQUIVALENCE_ATOL = 1e-5
 #: ここはどのテストも走っていない = まだ誰もパッチを当てていない時点になる。
 #:
 #: MUST: 「テスト開始時の値」を退避するだけでは足りない — 同一プロセスの別テスト
-#: （`test_export_sbv2.py` の front export）が先にパッチを当てていると、原実装のつもりで
+#: （`test_export.py` の front export）が先にパッチを当てていると、原実装のつもりで
 #: **パッチ後の実装**を掴み、同値テストが patched vs patched の**恒真な比較**になる
 #: （実際にファイル単独では緑・全体実行でも緑、という形で一度これを踏んだ）。
 if _PACKAGE_PRESENT:
@@ -494,7 +494,7 @@ class TestWrapperShapes:
     def test_the_forward_signature_is_the_ir_input_order(self):
         import inspect
 
-        import export_sbv2
+        from sbv2 import export as export_sbv2
 
         names = list(inspect.signature(patch_sbv2.Sbv2Front.forward).parameters)[1:]
 
@@ -514,7 +514,7 @@ class TestWrapperShapes:
         """flow / voice は表を**グラフ入力**で受ける（front の焼き込みと違う — ADR 0013）。"""
         import inspect
 
-        import export_sbv2
+        from sbv2 import export as export_sbv2
 
         names = list(inspect.signature(wrapper.forward).parameters)[1:]
 

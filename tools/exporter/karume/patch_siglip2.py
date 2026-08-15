@@ -24,7 +24,7 @@
      `in_proj_weight` を 3 等分した明示 linear + `scaled_dot_product_attention` に書き直すと
      両方が同時に消え、12 層のエンコーダ層と同じ分解経路（mul×2 + bmm + softmax + bmm）に揃う。
 
-MUST: パッチはどちらも fallback を持たない（`patch_deberta` と同じ規律）。前提を外した
+MUST: パッチはどちらも fallback を持たない（`deberta.patch` と同じ規律）。前提を外した
 モデルは黙って別の数値経路へ落ちるのではなく、その場で落ちる。
 
 MUST: ③ は式としては同値だが**ビット一致ではない** — `nn.MultiheadAttention` は q にだけ

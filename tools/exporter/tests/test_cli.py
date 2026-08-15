@@ -1,7 +1,7 @@
 """`karume` サブコマンド CLI（`karume.cli`）のディスパッチ。
 
 引数の解釈は各本体の parser が持つ（CLI は写しを持たない）ので、ここで固定するのは
-**どの main へ argv がそのまま渡るか**だけ。台本 `export_sbv2.py` は実重み依存が重いので、
+**どの main へ argv がそのまま渡るか**だけ。台本 `export_irodori.py` は実重み依存が重いので、
 読み込み関数を差し替えて「呼ばれ方」を見る。
 """
 
@@ -47,9 +47,9 @@ class TestDispatch:
             return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
 
         monkeypatch.setattr(cli, "load_script", load)
-        cli.main(["export-sbv2", "--dtype", "f16", "--target", "front"])
-        assert loaded == [cli.EXPORT_SBV2_SCRIPT]
-        assert seen == [["--dtype", "f16", "--target", "front"]]
+        cli.main(["export-irodori", "--dtype", "f16", "--target", "dit"])
+        assert loaded == [cli.EXPORT_IRODORI_SCRIPT]
+        assert seen == [["--dtype", "f16", "--target", "dit"]]
 
     def test_it_picks_the_export_script_by_subcommand_name(
         self, monkeypatch: pytest.MonkeyPatch
@@ -67,11 +67,11 @@ class TestDispatch:
             return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
 
         monkeypatch.setattr(cli, "load_script", load)
-        cli.main(["export-sbv2", "--verify", "front"])
-        cli.main(["export-sbv2", "--help"])
-        assert loaded == [cli.EXPORT_SBV2_SCRIPT, cli.EXPORT_SBV2_SCRIPT]
-        assert seen == [["--verify", "front"], ["--help"]]
-        assert cli.EXPORT_SBV2_SCRIPT != cli.EXPORT_EMBEDDINGGEMMA_SCRIPT
+        cli.main(["export-siglip2", "--verify"])
+        cli.main(["export-siglip2", "--help"])
+        assert loaded == [cli.EXPORT_SIGLIP2_SCRIPT, cli.EXPORT_SIGLIP2_SCRIPT]
+        assert seen == [["--verify"], ["--help"]]
+        assert cli.EXPORT_SIGLIP2_SCRIPT != cli.EXPORT_EMBEDDINGGEMMA_SCRIPT
 
     def test_it_dispatches_embeddinggemma_to_its_own_script(
         self, monkeypatch: pytest.MonkeyPatch
@@ -93,7 +93,6 @@ class TestDispatch:
         [
             ("export-irodori", "EXPORT_IRODORI_SCRIPT"),
             ("export-dacvae", "EXPORT_DACVAE_SCRIPT"),
-            ("export-deberta", "EXPORT_DEBERTA_SCRIPT"),
             ("export-siglip2", "EXPORT_SIGLIP2_SCRIPT"),
             ("export-birefnet", "EXPORT_BIREFNET_SCRIPT"),
             ("export-depth-anything", "EXPORT_DEPTH_ANYTHING_SCRIPT"),
@@ -153,17 +152,15 @@ class TestExportScript:
 
         `main(argv)` を持つところまで見る — CLI が渡す argv の受け口が消えたら落とす。
         """
-        module = cli.load_script(cli.EXPORT_SBV2_SCRIPT)
+        module = cli.load_script(cli.EXPORT_IRODORI_SCRIPT)
         assert callable(module.main)
 
     @pytest.mark.parametrize(
         "script",
         [
-            "EXPORT_SBV2_SCRIPT",
             "EXPORT_EMBEDDINGGEMMA_SCRIPT",
             "EXPORT_IRODORI_SCRIPT",
             "EXPORT_DACVAE_SCRIPT",
-            "EXPORT_DEBERTA_SCRIPT",
             "EXPORT_SIGLIP2_SCRIPT",
             "EXPORT_BIREFNET_SCRIPT",
         ],

@@ -1,4 +1,4 @@
-"""`export_deberta.py` の台本レベルの約束事（実重み不要分）。
+"""`deberta/export.py` の台本レベルの約束事（実重み不要分）。
 
 実重みの emit は手動（README 参照）。ここで固定するのは、壊れると**偽 PASS** になる側の
 規律だけ:
@@ -16,7 +16,7 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
-import export_deberta
+from deberta import export as export_deberta
 from karume.pipeline import export_to_file
 
 

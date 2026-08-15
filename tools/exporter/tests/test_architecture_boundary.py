@@ -165,11 +165,11 @@ class TestTheBoundaryCheckItself:
     実在の違反モジュールで示す。ここで挙げる 2 本は recipe 側なので core 集合には入れない。
     """
 
-    def test_it_catches_the_lazy_upstream_import_in_patch_deberta(self) -> None:
-        """`patch_deberta` は関数内で transformers を import する — 遅延 import も見えている。"""
-        violations = upstream_imports("patch_deberta")
+    def test_it_catches_the_lazy_upstream_import_in_patch_irodori(self) -> None:
+        """`patch_irodori` は関数内で transformers を import する — 遅延 import も見えている。"""
+        violations = upstream_imports("patch_irodori")
 
-        assert violations, "patch_deberta の transformers import を検出できていない"
+        assert violations, "patch_irodori の transformers import を検出できていない"
         assert all("transformers" in violation for violation in violations)
 
     def test_it_catches_the_lazy_recipe_import_in_cli(self) -> None:

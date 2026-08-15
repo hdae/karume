@@ -21,13 +21,6 @@ url = "https://download.pytorch.org/whl/cpu"
 
 [dependency-groups]
 dev = ["pytest>=9.1.1", "ruff>=0.15.0"]
-# SBV2 の実重み export 用（`uv sync --group sbv2`）。既定の sync には入れない — base deps
-# だけで tiny golden と pytest が回る状態を保つ。
-# MUST: style-bert-vits2 は `==` でピンする — SBV2 のエクスポータは後続の波でパッケージ内部
-# （モデリングコードのクラス属性）を monkeypatch する予定で、マイナー更新で差し替え先の
-# 名前や forward の形が変わるとグラフ形ごと黙って変わる。dp（波 1）自体は無改造で通るが、
-# ピンを緩めると「dp は通るのに後続の波だけ壊れる」形で表面化が遅れる。
-sbv2 = ["style-bert-vits2==2.5.0", "huggingface-hub>=1.26.0"]
 # SigLIP2 vision tower の実重み export 用（`uv sync --group siglip2`）。既定の sync には
 # 入れない。
 # MUST: transformers は `==` でピンする（anima グループと同型の理由）— `patch_siglip2` が
@@ -91,8 +84,8 @@ packages = ["karume"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# export 台本（export_deberta.py / export_sbv2.py）は配布パッケージではなくリポジトリ直下の
-# スクリプトなので、テストから import するにはこのディレクトリを import パスに載せる。
+# export 台本（export_irodori.py / export_siglip2.py など）は配布パッケージではなくリポジトリ
+# 直下のスクリプトなので、テストから import するにはこのディレクトリを import パスに載せる。
 pythonpath = ["."]
 
 [tool.ruff]

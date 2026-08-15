@@ -1,19 +1,19 @@
 """examples/sbv2 デモの資産 prep と torch 参照（3 サブコマンド）。
 
-`export_sbv2.py` / `export_deberta.py` が **グラフ**を出すのに対し、こちらが扱うのは
+`sbv2/export.py` / `deberta/export.py` が **グラフ**を出すのに対し、こちらが扱うのは
 「テキスト → front 入力」に要るホスト側の資産と、デモ出力の**数値パリティ**だけ。
 モデルグラフには一切触らない（既存の emit 経路・golden は変更しない）。
 
-    uv run --group sbv2 python sbv2_demo.py assets
-    uv run --group sbv2 python sbv2_demo.py reference \\
+    uv run --group sbv2 python -m sbv2.demo assets
+    uv run --group sbv2 python -m sbv2.demo reference \\
         --dump ../../outputs/demo/sbv2-dump/dump.safetensors
-    uv run --group sbv2 python sbv2_demo.py official --text "こんにちは。"
+    uv run --group sbv2 python -m sbv2.demo official --text "こんにちは。"
 
-MUST（1 プロセス 1 サブコマンド）: `patch_sbv2` のパッチはクラス属性のプロセス全域差し替えで、
+MUST（1 プロセス 1 サブコマンド）: `sbv2.patch` のパッチはクラス属性のプロセス全域差し替えで、
 `reference` はそれを当てる。`official` は**パッチ前の原経路**を走らせるのが主張の中身なので、
 同一プロセスで両方を走らせると official が黙ってパッチ後の経路になる。argparse の
 サブパーサは 1 プロセスにつき 1 つしか選べないため、この排他は構造的に成立する
-（`export_sbv2.py` の `--verify` が対ごとの排他表を持たないのと同じ理由づけ）。
+（`sbv2/export.py` の `--verify` が対ごとの排他表を持たないのと同じ理由づけ）。
 
 ## JP-Extra の定数は「写す」のではなく「引く」
 
@@ -42,17 +42,17 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
-import export_sbv2
-from karume import patch_sbv2
 from karume.paths import OUTPUTS_ROOT
 
-#: 実重みの置き場（`export_sbv2.py` と同じ — 綴りは向こうが持つ）。
-DEFAULT_MODEL_DIR = export_sbv2.DEFAULT_MODEL_DIR
+from . import export, patch
+
+#: 実重みの置き場（`sbv2/export.py` と同じ — 綴りは向こうが持つ）。
+DEFAULT_MODEL_DIR = export.DEFAULT_MODEL_DIR
 #: デモ資産の置き場。系列（IR + io）ではないので `outputs/series/` の下ではない。
 #: `outputs/` は `.gitignore` 済み。
 DEFAULT_DEMO_DIR = OUTPUTS_ROOT / "sbv2-demo"
 
-#: SBV2 JP-Extra の text front が使う BERT（`export_deberta.py` の MODEL_ID と同一）。
+#: SBV2 JP-Extra の text front が使う BERT（`deberta/export.py` の MODEL_ID と同一）。
 BERT_REPO = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 
 #: BERT 特徴に使う hidden_states の**末尾からの位置**。参照実装
@@ -63,7 +63,7 @@ BERT_REPO = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 #: `symbols.json` から引くと、層を削った途端に参照だけが別の層を指す。
 BERT_HIDDEN_FROM_END = 3
 
-#: 配布グラフ（`export_deberta.py` の 22 層 variant）から**同じテンソル**を引く位置。グラフは
+#: 配布グラフ（`deberta/export.py` の 22 層 variant）から**同じテンソル**を引く位置。グラフは
 #: SBV2 が使う層までで切り詰めてあるので最終出力の 1 本目になる。
 #:
 #: 両者が同じテンソルを指すことは組み立て時に検査される（`karume.dist.assert_bert_hidden` —
@@ -161,7 +161,7 @@ def jp_extra_rules(hps: Any) -> dict[str, Any]:
     NOTE: `language` は JP-Extra でも **全 0 ではない**。`infer.get_text` は
     `cleaned_text_to_sequence(..., Languages.JP)` を通すので実音素位置は
     `LANGUAGE_ID_MAP["JP"]`、add_blank の挿入位置だけが 0 になる。
-    `export_sbv2.make_language` が全 0 なのは golden の合成入力としての選択で、
+    `sbv2.export.make_language` が全 0 なのは golden の合成入力としての選択で、
     推論規則ではない（合成 golden はどんな値でも成立する）。
     """
     from style_bert_vits2.constants import (
@@ -232,7 +232,7 @@ def bert_rel_pos_rule() -> dict[str, int]:
     """DeBERTa の相対位置バケットの規則を config から引く（表の生成に要る 2 値）。
 
     表そのものはグラフ入力なので、実長ぶんをホストが作る（`rel-pos-tables.ts`）。式は
-    `karume.patch_deberta.build_rel_pos_tables` が正本で、両者のバイト一致は golden io を
+    `deberta.patch.build_rel_pos_tables` が正本で、両者のバイト一致は golden io を
     使ったパリティテストが縛る。
 
     `max_relative_positions` が 1 未満のとき `max_position_embeddings` へ落とすのは
@@ -263,7 +263,7 @@ def resolve_style_and_speaker(
 
 def style_vector(model_dir: Path, hps: Any, style: str, weight: float) -> np.ndarray:
     """`TTSModel.__get_style_vector` と同式のスタイルベクトル `[256]`。"""
-    table = np.load(model_dir / export_sbv2.STYLE_FILE)
+    table = np.load(model_dir / export.STYLE_FILE)
     if table.ndim != 2:
         raise ValueError(f"style_vectors.npy の形 {table.shape} が 2 次元でない")
     style2id: dict[str, int] = hps.data.style2id
@@ -283,7 +283,7 @@ def emit_assets(
     speaker: str | None,
 ) -> dict[str, Any]:
     """デモの実行時資産 3 本を書く。"""
-    net_g, hps = export_sbv2.load_net_g(model_dir)
+    net_g, hps = export.load_net_g(model_dir)
     style, weight, speaker = resolve_style_and_speaker(hps, style, style_weight, speaker)
     spk2id: dict[str, int] = hps.data.spk2id
     if speaker not in spk2id:
@@ -325,7 +325,7 @@ def emit_assets(
     )
 
     style_vec = style_vector(model_dir, hps, style, weight)
-    g = export_sbv2.speaker_embedding(net_g, speaker_id)
+    g = export.speaker_embedding(net_g, speaker_id)
     save_file(
         {"style_vec": torch.from_numpy(style_vec).reshape(1, -1), "g": g.contiguous()},
         str(out_dir / STYLE_FILE),
@@ -388,10 +388,10 @@ def tile_bert(hidden: torch.Tensor, word2ph: list[int]) -> torch.Tensor:
 def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path: Path) -> dict:
     """dump の離散入力・乱数列から torch でチェーンを再実行し、reference.wav を書く。
 
-    実行するのは **`patch_sbv2` のモジュール群**（`Sbv2Front` / `Sbv2Voice`）と、デモと
+    実行するのは **`sbv2.patch` のモジュール群**（`Sbv2Front` / `Sbv2Voice`）と、デモと
     同じホストグルー。つまりこの突合が測るのは「同じ計算グラフを Karume が実 GPU で
     走らせた値 vs torch CPU で走らせた値」で、パッチ前の原実装との同値は
-    `export_sbv2.py --verify` が別に受け持つ（層を混ぜない）。
+    `sbv2.export --verify` が別に受け持つ（層を混ぜない）。
     """
     started = time.perf_counter()
     meta = dump_metadata(dump_path)
@@ -432,9 +432,9 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
     bert_feature = tile_bert(hidden, word2ph).unsqueeze(0)
 
     # --- front（パッチ後の融合グラフ）----------------------------------------
-    net_g, hps = export_sbv2.load_net_g(model_dir)
-    patch_sbv2.apply_all_patches()
-    front = patch_sbv2.Sbv2Front(net_g)
+    net_g, hps = export.load_net_g(model_dir)
+    patch.apply_all_patches()
+    front = patch.Sbv2Front(net_g)
     x_mask = tensors["x_mask"].to(torch.float32)
     with torch.no_grad():
         logw_sdp, logw_dp, m_p, logs_p = front(
@@ -475,11 +475,11 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
         m_p[:, :, expand_idx] + zp_noise * torch.exp(logs_p[:, :, expand_idx]) * knobs["noiseScale"]
     )
     y_mask = torch.ones(1, 1, total_frames)
-    idx_k, valid = patch_sbv2.build_relattn_tables(total_frames, export_sbv2.EXPECTED_WINDOW_SIZE)
+    idx_k, valid = patch.build_relattn_tables(total_frames, export.EXPECTED_WINDOW_SIZE)
 
     # --- voice（flow + dec 融合）--------------------------------------------
-    export_sbv2.ensure_dec_plain(net_g)
-    voice = patch_sbv2.Sbv2Voice(net_g)
+    export.ensure_dec_plain(net_g)
+    voice = patch.Sbv2Voice(net_g)
     with torch.no_grad():
         audio = voice(z_p, y_mask, g, idx_k, valid).reshape(-1)
 
@@ -534,7 +534,7 @@ def run_official(
     経路になる（モジュール冒頭の 1 プロセス 1 サブコマンド）。
     """
     started = time.perf_counter()
-    if patch_sbv2.patches_applied():
+    if patch.patches_applied():
         raise RuntimeError("official はパッチ未適用のプロセスでのみ走らせる")
 
     from style_bert_vits2.constants import Languages
@@ -547,7 +547,7 @@ def run_official(
     # デモ 3 本の wav を同じ精度で比べるためにも f32 に固定する。
     bert_models.load_model(Languages.JP, BERT_REPO).float()
 
-    net_g, hps = export_sbv2.load_net_g(model_dir)
+    net_g, hps = export.load_net_g(model_dir)
     style, weight, speaker = resolve_style_and_speaker(hps, style, style_weight, speaker)
     style_vec = style_vector(model_dir, hps, style, weight)
     knobs = jp_extra_rules(hps)["defaults"]

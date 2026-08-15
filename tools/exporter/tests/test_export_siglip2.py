@@ -1,6 +1,6 @@
 """`export_siglip2.py` の台本レベルの約束事（実重み不要分）。
 
-実重みの emit は手動（既存 `export_deberta.py` / `export_embeddinggemma.py` のテストと同じ
+実重みの emit は手動（既存 `deberta/export.py` / `export_embeddinggemma.py` のテストと同じ
 規律）。ここで固定するのは、壊れると**偽 PASS** になる側の規律だけ:
 
 - グラフ出力が **pooler_output 1 本**であること（2 本目が生えたら io の位置規約が黙ってずれる）

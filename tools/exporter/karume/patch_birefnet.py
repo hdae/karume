@@ -36,7 +36,7 @@
 ・両方当てるのが {@link apply}）— 一括でしか当てられないと、①〜⑥ のビット同一を単体で
 実測できない。
 
-MUST: どのパッチも fallback を持たない（`patch_siglip2` / `patch_deberta` と同じ規律）。
+MUST: どのパッチも fallback を持たない（`patch_siglip2` / `deberta.patch` と同じ規律）。
 前提（B = 1 / 偶数解像度 / `dec_att='ASPPDeformable'` 等）を外したモデルは黙って別の数値
 経路へ落ちるのではなく、その場で落ちる。
 

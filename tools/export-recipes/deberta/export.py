@@ -4,9 +4,9 @@
 **実重み・実トークン列での数値一致**を受け持つ（M1-P2 波 5）。生成物は `outputs/series/`
 配下で、リポジトリ直下の `.gitignore` によりコミット対象外（重み 1.3GB 級）。
 
-    uv run --with 'transformers==5.14.1' python export_deberta.py
-    uv run --with 'transformers==5.14.1' python export_deberta.py --layers 2
-    uv run --with 'transformers==5.14.1' python export_deberta.py --dtype i8 --act-quant
+    uv run --with 'transformers==5.14.1' python -m deberta.export
+    uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2
+    uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i8 --act-quant
 
 transformers は **5.14.1 でピン**する（recon §6-5 — モデリングコードが変わるとグラフ形が
 変わる）。pyproject.toml / uv.lock には入れず `--with` で一時的に足す。
@@ -47,13 +47,14 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
-from karume import patch_deberta
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8
+
+from . import patch
 
 #: SBV2 text front が使う BERT そのもの（recon §1）。
 MODEL_ID = "ku-nlp/deberta-v2-large-japanese-char-wwm"
@@ -145,7 +146,7 @@ class HiddenStatesWrapper(nn.Module):
 
     MUST: `DebertaV2Model.forward` は使わず embeddings + encoder を直接呼ぶ — 前者は
     `relative_pos` を encoder へ渡す口を持たず、相対位置の添字表を**外部供給にできない**
-    （`karume.patch_deberta` — 焼き込むと Tmax=512 で 2MiB の定数が 2 本入る）。z_steps 分岐は
+    （`deberta.patch` — 焼き込むと Tmax=512 で 2MiB の定数が 2 本入る）。z_steps 分岐は
     `self.z_steps = 0` のハードコードで恒久的に死んでいるので写さない。
     """
 
@@ -205,7 +206,7 @@ def load_model(model_id: str, num_layers: int) -> nn.Module:
 def build_cases(tokenizer: Any, model: nn.Module) -> tuple[tuple[str, InputArgs], ...]:
     """golden 4 ケース（3 文 + padded）の `(名前, グラフ入力名 → テンソル)`。
 
-    相対位置の添字表はグラフ入力なのでケースごとに実長で作る（`patch_deberta` が正本）。
+    相対位置の添字表はグラフ入力なのでケースごとに実長で作る（`deberta.patch` が正本）。
     バケット幅と最大位置は**モジュールから読む** — config の `max_relative_positions` は
     -1 のとき `max_position_embeddings` へフォールバックする規則を持つので、写すと二重管理になる。
     """
@@ -230,7 +231,7 @@ def build_cases(tokenizer: Any, model: nn.Module) -> tuple[tuple[str, InputArgs]
 
     cases: list[tuple[str, InputArgs]] = []
     for name, ids, mask in ids_cases:
-        c2p_pos, p2c_pos = patch_deberta.build_rel_pos_tables(
+        c2p_pos, p2c_pos = patch.build_rel_pos_tables(
             int(ids.shape[1]),
             position_buckets=attention.position_buckets,
             max_position=attention.max_relative_positions,
@@ -340,11 +341,11 @@ def export_variant(
     """1 層数ぶんの IR コンテナと golden io を書き、要約を返す。"""
     from transformers import AutoTokenizer
 
-    # MUST: 差し替えは golden を採る前（`patch_deberta` の docstring）— 後に当てると期待値だけが
+    # MUST: 差し替えは golden を採る前（`deberta.patch` の docstring）— 後に当てると期待値だけが
     # 元の経路（表を内部で作る形）で計算され、グラフと食い違ったまま緑になる。
     model = load_model(model_id, num_layers)
-    patch_deberta.assert_supported(model.config)
-    patch_deberta.apply_external_rel_pos_patch()
+    patch.assert_supported(model.config)
+    patch.apply_external_rel_pos_patch()
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     cases = build_cases(tokenizer, model)
     wrapper = HiddenStatesWrapper(model, single_output=single_output)

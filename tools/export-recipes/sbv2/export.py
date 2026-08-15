@@ -5,7 +5,7 @@
 - **`dp`**（M1-P3 波 1）— DurationPredictor 単体。パッチ層も語彙拡張も要らず、「実重み →
   export → 実 GPU E2E」の貫通を先に取るための足場。
 - **`front`**（波 6）— enc_p + dp + sdp(reverse) の融合 1 グラフ。動的 `P`（音素数）で、
-  `karume.patch_sbv2` のパッチ層（spline 分岐フリー化 / 相対位置注意の gather 化 /
+  `sbv2.patch` のパッチ層（spline 分岐フリー化 / 相対位置注意の gather 化 /
   FFN の pad 畳み込み）を当てて初めて export できる。
 - **`flow`**（波 7）— TransformerCouplingBlock の reverse。動的 `T`（フレーム数）で、相対
   位置注意の `(T,T)` 表は**グラフ入力**（焼き込みは 134MB — ADR 0013）。
@@ -14,17 +14,17 @@
   全チェーンが成立する**。
 
     uv sync --group sbv2                                    # tools/exporter/ で 1 回
-    uv run --group sbv2 python export_sbv2.py               # 全ターゲットを emit
-    uv run --group sbv2 python export_sbv2.py --target front
-    uv run --group sbv2 python export_sbv2.py --dtype f16   # → outputs/series/sbv2-FN4-f16/
-    uv run --group sbv2 python export_sbv2.py --dtype i8    # → outputs/series/sbv2-FN4-i8/
-    uv run --group sbv2 python export_sbv2.py --verify flow  # 参照実装との eager 同値検証
+    uv run --group sbv2 python -m sbv2.export               # 全ターゲットを emit
+    uv run --group sbv2 python -m sbv2.export --target front
+    uv run --group sbv2 python -m sbv2.export --dtype f16   # → outputs/series/sbv2-FN4-f16/
+    uv run --group sbv2 python -m sbv2.export --dtype i8    # → outputs/series/sbv2-FN4-i8/
+    uv run --group sbv2 python -m sbv2.export --verify flow  # 参照実装との eager 同値検証
 
 MUST: `--verify` と emit は**同一プロセスで併用できない**（CLI が機械的に拒否する）。
 パッチはクラス属性のプロセス全域差し替えなので、emit 側が先にパッチを当てると「パッチ前の
 参照」が採れなくなり、同値検証が恒真化して偽 PASS する（ADR 0013）。検証自体も
 「全ケースの参照値を確定 → 変更 → 比較」の順序を守り、順序が破れていれば参照採取の直前で
-落とす — front / flow / voice は `patch_sbv2.patches_applied()`、**dec は逆向き**に
+落とす — front / flow / voice は `sbv2.patch.patches_applied()`、**dec は逆向き**に
 「weight_norm 由来のパラメータがまだ残っていること」を見る（汚染源が remove だから）。
 
 MUST: `--verify` は**ターゲットを 1 つだけ取る**（`--verify front` / `--verify dec` …）。
@@ -72,13 +72,14 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
-from karume import patch_sbv2
 from karume.convert import normalize_boundary_tensor
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
 from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
+
+from . import patch
 
 #: 実重みの置き場。リポジトリ管理外（`.gitignore` の `inputs/`）で、手で配置する。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "sbv2" / "FN4"
@@ -346,7 +347,7 @@ def _assert_patches_not_applied(where: str) -> None:
     値そのものになり、同値検証が恒真化して偽 PASS する。**差が常に 0 になる**方向の
     壊れ方なので、検証が緑であること自体は何の証拠にもならない — 門でしか塞げない。
     """
-    if patch_sbv2.patches_applied():
+    if patch.patches_applied():
         raise RuntimeError(
             f"{where}: パッチ適用後に参照値を採ろうとした — 同値検証が恒真化する"
             "（順序は「全ケースの参照を確定 → パッチ適用 → 比較」）"
@@ -524,9 +525,9 @@ def flow_inputs(length: int, pad: int, g: torch.Tensor) -> dict[str, torch.Tenso
 
     `z_p` は**パディング列にも値を入れる**（dp / front と同じ理由 — `y_mask` 乗算が効いて
     いれば出力の末尾は厳密に 0 になり、外れれば値が漏れる）。表 `idx_k` / `valid` は
-    `patch_sbv2.build_relattn_tables`（ホスト TS 鏡像の Python 側正本）から採る。
+    `sbv2.patch.build_relattn_tables`（ホスト TS 鏡像の Python 側正本）から採る。
     """
-    idx_k, valid = patch_sbv2.build_relattn_tables(length, EXPECTED_WINDOW_SIZE)
+    idx_k, valid = patch.build_relattn_tables(length, EXPECTED_WINDOW_SIZE)
     return {
         "z_p": make_latent(length, salt=4),
         "y_mask": make_mask(length, pad),
@@ -642,7 +643,7 @@ def _fake_quant(dtype: str, module: nn.Module, target: str) -> Mapping[str, torc
     漏れることはない。voice は flow と dec を 1 つのラッパで束ねるためここ 1 回で両方に
     掛かる（丸めは f16 / i8 とも冪等 — i8 は ±127 に閉じた量子化が f32 の不動点になる
     〈ADR 0019〉。ただし依存しているのは冪等性ではなく「実効重みが確定した後に呼ぶ」という
-    上の順序で、実重みでの冪等性は `tests/test_export_sbv2.py` が固定する）。
+    上の順序で、実重みでの冪等性は `sbv2/tests/test_export.py` が固定する）。
 
     NOTE: `g`（`emb_g` の話者埋め込み）と `style_vec` は export 対象のモジュールに含まれない
     **グラフ入力**なので丸めない — 入力は参照と GPU が同じバイト列を読む側で、格納 dtype の
@@ -761,8 +762,8 @@ def export_front(
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
-    patch_sbv2.apply_all_patches()
-    module = patch_sbv2.Sbv2Front(net_g)
+    patch.apply_all_patches()
+    module = patch.Sbv2Front(net_g)
     scales = _fake_quant(dtype, module, TARGET_FRONT)
     built = build_front_cases(speaker_embedding(net_g), style_vector(model_dir), cases)
 
@@ -840,8 +841,8 @@ def export_flow(
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
-    patch_sbv2.apply_all_patches()
-    module = patch_sbv2.FlowReverse(net_g)
+    patch.apply_all_patches()
+    module = patch.FlowReverse(net_g)
     scales = _fake_quant(dtype, module, TARGET_FLOW)
     built = build_flow_cases(speaker_embedding(net_g), cases)
 
@@ -942,9 +943,9 @@ def export_voice(
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
-    patch_sbv2.apply_all_patches()
+    patch.apply_all_patches()
     ensure_dec_plain(net_g)
-    module = patch_sbv2.Sbv2Voice(net_g)
+    module = patch.Sbv2Voice(net_g)
     # MUST: remove_weight_norm の**後**（dec を内包するので dec 単体と同じ順序制約）。
     scales = _fake_quant(dtype, module, TARGET_VOICE)
     built = build_flow_cases(speaker_embedding(net_g), cases)
@@ -1052,8 +1053,8 @@ def verify_front(
         for length, pad in cases
     }
 
-    patch_sbv2.apply_all_patches()
-    front = patch_sbv2.Sbv2Front(net_g)
+    patch.apply_all_patches()
+    front = patch.Sbv2Front(net_g)
 
     report: list[dict[str, Any]] = []
     for length, pad in cases:
@@ -1086,8 +1087,8 @@ def verify_flow(
                 inputs["z_p"], inputs["y_mask"], g=inputs["g"], reverse=True
             )
 
-    patch_sbv2.apply_all_patches()
-    flow_rev = patch_sbv2.FlowReverse(net_g)
+    patch.apply_all_patches()
+    flow_rev = patch.FlowReverse(net_g)
 
     report: list[dict[str, Any]] = []
     for length, pad in cases:
@@ -1153,9 +1154,9 @@ def verify_voice(
             z = net_g.flow(inputs["z_p"], inputs["y_mask"], g=inputs["g"], reverse=True)
             references[(length, pad)] = net_g.dec(z * inputs["y_mask"], g=inputs["g"])
 
-    patch_sbv2.apply_all_patches()
+    patch.apply_all_patches()
     ensure_dec_plain(net_g)
-    voice = patch_sbv2.Sbv2Voice(net_g)
+    voice = patch.Sbv2Voice(net_g)
 
     report: list[dict[str, Any]] = []
     for length, pad in cases:

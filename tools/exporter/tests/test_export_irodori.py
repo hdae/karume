@@ -1,6 +1,6 @@
 """`export_irodori.py` の台本レベルの約束事（実重み不要分）。
 
-実重みの emit は手動（既存 `export_deberta.py` / `export_embeddinggemma.py` のテストと同じ
+実重みの emit は手動（既存 `deberta/export.py` / `export_embeddinggemma.py` のテストと同じ
 規律）。ここで固定するのは、壊れると**偽 PASS** になる側の規律だけ:
 
 - 参照（golden の期待値）は**パッチ前**にしか採れない（採れてしまうと同値検証が恒真化する）

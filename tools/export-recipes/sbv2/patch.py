@@ -18,11 +18,11 @@ import 済みクラスの属性差し替え（monkeypatch）とラッパで行�
    かつ非 causal のときだけ厳密に等価 — 下の `_patched_ffn_forward` を参照）。
 
 MUST: パッチ後のモジュールはパッチ前と **eager 同値**であること。同値でない変更をここに
-置いてはならない（`export_sbv2.py --verify` が実重み・複数 P で実測する）。
+置いてはならない（`sbv2.export --verify` が実重み・複数 P で実測する）。
 
 MUST: パッチはクラス属性の**プロセス全域**差し替えなので、「パッチ前の参照」を採れるのは
 1 プロセスにつき 1 回だけ。適用済みかどうかは {@link patches_applied} が答え、順序違反は
-呼び出し側（`export_sbv2.py`）が fail loudly で拒否する（恒真化 = 偽 PASS の遮断）。
+呼び出し側（`sbv2.export`）が fail loudly で拒否する（恒真化 = 偽 PASS の遮断）。
 """
 
 from __future__ import annotations
@@ -695,7 +695,7 @@ class Sbv2Voice(nn.Module):
     `o = dec((z * y_mask)[:, :, :max_len], g=g)`）と同順。`max_len` は推論経路で常に
     `None`（＝恒等スライス）なのでグラフには持ち込まない。
 
-    MUST: `dec` は **`remove_weight_norm` 済み**であること（`export_sbv2.ensure_dec_plain`）。
+    MUST: `dec` は **`remove_weight_norm` 済み**であること（`sbv2.export.ensure_dec_plain`）。
     weight_norm が残っていると `dec.weight` は実効重みではなく、そのまま IR へ書けば
     別のモデルになる。将来の f16/i8 丸めは remove **後**の実効重みに当てる（ADR 0013）。
     """
