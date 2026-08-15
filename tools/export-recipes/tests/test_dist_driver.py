@@ -12,6 +12,7 @@ import pytest
 
 import dist
 from anima.distribution import PIPELINE as ANIMA_PIPELINE
+from irodori.distribution import PIPELINE as IRODORI_PIPELINE
 from karume.dist import PIPELINES as CORE_PIPELINES
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 
@@ -24,11 +25,13 @@ class TestRegistry:
     def test_it_adds_the_recipe_pipelines(self) -> None:
         assert dist.PIPELINES["anima"] is ANIMA_PIPELINE
         assert dist.PIPELINES["sbv2"] is SBV2_PIPELINE
+        assert dist.PIPELINES["irodori"] is IRODORI_PIPELINE
 
     def test_the_core_table_no_longer_carries_a_migrated_family(self) -> None:
         """移行済み family が core 側に残っていれば、合成で 2 つの表が同じ名前を主張する。"""
         assert "anima" not in CORE_PIPELINES
         assert "sbv2" not in CORE_PIPELINES
+        assert "irodori" not in CORE_PIPELINES
 
     def test_the_default_is_anima(self) -> None:
         """旧 `karume dist`（引数なし）の UX をドライバ側で維持する。"""

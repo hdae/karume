@@ -84,21 +84,31 @@ RECIPE_GATED_MODULES = tuple(name for name in CORE_MODULES if name not in RECIPE
 UPSTREAM_GATED_MODULES = tuple(name for name in CORE_MODULES if name not in UPSTREAM_CHECK_EXEMPT)
 
 
-def imported_modules(module_name: str) -> list[tuple[int, str]]:
-    """`karume.<module_name>` が import する完全修飾モジュール名を行番号付きで全部採る。
+def core_module(module_name: str) -> Path:
+    """core モジュール名 → ソースの場所。
+
+    検査を **path 越し**にしてあるのは、下の故障注入が合成ソースを**同じ走査コード**へ
+    掛けられるようにするため（被験体を実在モジュールに預けると、その family が recipe 側へ
+    出た瞬間に門が黙って恒真化する — {@link TestTheBoundaryCheckItself}）。
+    """
+    return KARUME_ROOT / f"{module_name}.py"
+
+
+def imported_modules(path: Path) -> list[tuple[int, str]]:
+    """`path` のソースが import する完全修飾モジュール名を行番号付きで全部採る。
 
     `ast.walk` なので関数内・条件内の遅延 import も拾う。`from karume import dist` の形は
     「`karume`」と「`karume.dist`」の両方を返す（後者が実体としての依存で、シンボル名か
     サブモジュール名かは AST からは区別できない — 禁止名と衝突したら違反として扱う）。
     """
-    source = (KARUME_ROOT / f"{module_name}.py").read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=f"karume/{module_name}.py")
+    label = _label(path)
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=label)
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.extend((node.lineno, alias.name) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            base = _resolve_import_from_base(node, module_name)
+            base = _resolve_import_from_base(node, label)
             if base:
                 found.append((node.lineno, base))
             found.extend(
@@ -108,35 +118,40 @@ def imported_modules(module_name: str) -> list[tuple[int, str]]:
     return found
 
 
-def _resolve_import_from_base(node: ast.ImportFrom, module_name: str) -> str:
+def _label(path: Path) -> str:
+    """違反報告の見出し。走査対象は `karume` 直下のモジュールとして読む（相対 import の起点）。"""
+    return f"karume/{path.name}"
+
+
+def _resolve_import_from_base(node: ast.ImportFrom, label: str) -> str:
     """`from ... import` の起点を完全修飾名にする（相対 import を絶対化する）。"""
     if node.level == 0:
         return node.module or ""
     # core モジュールは全て `karume` 直下なので、相対 1 段の起点は `karume`。
     # 2 段以上はパッケージの外へ出る形で、core には現れない（現れたら fail loudly）。
     if node.level > 1:
-        raise ValueError(f"karume/{module_name}.py:{node.lineno}: パッケージ外への相対 import")
+        raise ValueError(f"{label}:{node.lineno}: パッケージ外への相対 import")
     return f"karume.{node.module}" if node.module else "karume"
 
 
-def recipe_imports(module_name: str) -> list[str]:
+def recipe_imports(path: Path) -> list[str]:
     """recipe 側モジュールへの import を「行:import 名」の一覧で返す（無ければ空）。"""
     violations = []
-    for lineno, dotted in imported_modules(module_name):
+    for lineno, dotted in imported_modules(path):
         parts = dotted.split(".")
         if parts[0] != "karume" or len(parts) < 2:
             continue
         submodule = parts[1]
         if submodule.startswith(RECIPE_MODULE_PREFIXES) or submodule in RECIPE_MODULES:
-            violations.append(f"karume/{module_name}.py:{lineno} -> {dotted}")
+            violations.append(f"{_label(path)}:{lineno} -> {dotted}")
     return violations
 
 
-def upstream_imports(module_name: str) -> list[str]:
+def upstream_imports(path: Path) -> list[str]:
     """上流モデル系パッケージへの import を「行:import 名」の一覧で返す（無ければ空）。"""
     return [
-        f"karume/{module_name}.py:{lineno} -> {dotted}"
-        for lineno, dotted in imported_modules(module_name)
+        f"{_label(path)}:{lineno} -> {dotted}"
+        for lineno, dotted in imported_modules(path)
         if dotted.split(".")[0] in UPSTREAM_MODEL_PACKAGES
     ]
 
@@ -148,32 +163,68 @@ class TestCoreDoesNotImportRecipeModules:
 
         逆流すると wheel の物理境界（`karume/` ディレクトリ全体）に family 知識が入る。
         """
-        assert recipe_imports(module_name) == []
+        assert recipe_imports(core_module(module_name)) == []
 
 
 class TestCoreDoesNotImportUpstreamModelPackages:
     @pytest.mark.parametrize("module_name", UPSTREAM_GATED_MODULES)
     def test_a_core_module_imports_no_upstream_model_package(self, module_name: str) -> None:
         """core wheel は上流モデル実装（とその provenance 義務）を引き込まない。"""
-        assert upstream_imports(module_name) == []
+        assert upstream_imports(core_module(module_name)) == []
 
 
 class TestTheBoundaryCheckItself:
     """検査が本当に違反を検出できるかの故障注入（恒真化の門）。
 
     core 集合が緑なのは「違反が無いから」であって「検査が何も見ていないから」ではない、を
-    実在の違反モジュールで示す。ここで挙げる 2 本は recipe 側なので core 集合には入れない。
+    **合成ソース**で示す。被験体を実在の違反モジュールに預けない理由は、ADR 0065 段 4 が
+    その形を 2 便続けて壊したから — 指し先の family が recipe 側へ出るたびに被験体が枯れ、
+    最後の 1 本が出た時点では**差し替え先が 1 つも残らない**（Irodori 便の時点で、`karume/` に
+    残る `patch_*` に上流 import は 1 つも無くなった）。門が黙って恒真化する形をここで閉じる。
+
+    走査は本物と同じ {@link imported_modules}（`karume/` の core モジュールに掛かるのと
+    1 バイトも違わない経路）— 合成なのは**被験体だけ**で、検査そのものは共有する。
     """
 
-    def test_it_catches_the_lazy_upstream_import_in_patch_irodori(self) -> None:
-        """`patch_irodori` は関数内で transformers を import する — 遅延 import も見えている。"""
-        violations = upstream_imports("patch_irodori")
+    @staticmethod
+    def _violator(tmp_path: Path, name: str, source: str) -> Path:
+        """`karume/<name>.py` のつもりの合成ソースを置く（走査は path しか見ない）。"""
+        path = tmp_path / f"{name}.py"
+        path.write_text(source, encoding="utf-8")
+        return path
 
-        assert violations, "patch_irodori の transformers import を検出できていない"
-        assert all("transformers" in violation for violation in violations)
+    def test_it_catches_a_lazy_upstream_import(self, tmp_path: Path) -> None:
+        """関数の中に隠した上流 import も見えている（段階移行の逃げ道にしない）。"""
+        path = self._violator(
+            tmp_path,
+            "sneaky",
+            "def build():\n    from transformers import AutoModel\n\n    return AutoModel\n",
+        )
 
-    def test_it_catches_the_lazy_recipe_import_in_cli(self) -> None:
-        """`cli` は関数内で `from karume import dist` する — `from X import <submodule>` も見る。"""
-        violations = recipe_imports("cli")
+        assert upstream_imports(path) == [
+            "karume/sneaky.py:2 -> transformers",
+            "karume/sneaky.py:2 -> transformers.AutoModel",
+        ]
 
-        assert any(violation.endswith("-> karume.dist") for violation in violations)
+    def test_it_stays_quiet_on_a_module_that_imports_nothing_forbidden(
+        self, tmp_path: Path
+    ) -> None:
+        """検出側が「何にでも反応する」のではないことの対（上の主張の裏側）。"""
+        path = self._violator(tmp_path, "clean", "import json\n\nfrom karume.ir import IrGraph\n")
+
+        assert upstream_imports(path) == []
+        assert recipe_imports(path) == []
+
+    def test_it_catches_a_lazy_recipe_import(self, tmp_path: Path) -> None:
+        """`from karume import dist` の形も見る（シンボル名かサブモジュール名かは区別しない）。"""
+        path = self._violator(
+            tmp_path, "leaky", "def run(argv):\n    from karume import dist\n\n    return dist\n"
+        )
+
+        assert recipe_imports(path) == ["karume/leaky.py:2 -> karume.dist"]
+
+    def test_it_catches_a_relative_recipe_import(self, tmp_path: Path) -> None:
+        """相対 1 段も絶対化して見る（`from . import dist` で門をすり抜けさせない）。"""
+        path = self._violator(tmp_path, "relative", "from . import modelcard\n")
+
+        assert recipe_imports(path) == ["karume/relative.py:1 -> karume.modelcard"]

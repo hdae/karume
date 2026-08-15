@@ -1,6 +1,6 @@
 """`siglip2_preprocess.py` の台本レベルの約束事（実重み不要分）。
 
-フィクスチャの emit は手動（`irodori_tokenizer.py` と同じ規律）。ここで固定するのは、壊れると
+フィクスチャの emit は手動（`irodori/tokenizer_ref.py` と同じ規律）。ここで固定するのは、壊れると
 **沈黙のパリティ不一致**になる側の規律だけ:
 
 - `resample` の門が **2（PIL BILINEAR）以外を拒む**こと — 3（BICUBIC）を素通しすると、

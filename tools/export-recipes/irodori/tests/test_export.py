@@ -1,4 +1,4 @@
-"""`export_irodori.py` の台本レベルの約束事（実重み不要分）。
+"""`irodori/export.py` の台本レベルの約束事（実重み不要分）。
 
 実重みの emit は手動（既存 `deberta/export.py` / `export_embeddinggemma.py` のテストと同じ
 規律）。ここで固定するのは、壊れると**偽 PASS** になる側の規律だけ:
@@ -27,8 +27,8 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
-import export_irodori as ir
-from karume import patch_irodori
+from irodori import export as ir
+from irodori import patch as patch_irodori
 from karume.ir import IrGraph, IrValue
 from karume.pipeline import export_to_file
 from karume.quantize import quantize_to_int8
@@ -660,7 +660,7 @@ class TestWeightDtypeSeries:
     def test_f32_leaves_the_weights_untouched(self):
         # MUST: 種を蒔いたら元へ戻す（`fork_rng`）— 大域 RNG を置き去りにすると、後続の
         # テストファイルが**別の乱数**でモジュールを組むことになり、こちらの追加が離れた
-        # 場所の実測門（`export_dacvae` の切り詰めビット一致）を動かす。
+        # 場所の実測門（`irodori.dacvae.export` の切り詰めビット一致）を動かす。
         with torch.random.fork_rng():
             torch.manual_seed(0)
             module = TinyResidualProjector()

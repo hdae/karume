@@ -1,6 +1,6 @@
 """DACVAE の PyTorch チェックポイント（`weights.pth`）を safetensors へ **1:1 変換**する台本。
 
-    uv run python convert_dacvae.py
+    uv run python -m irodori.dacvae.convert
 
 `inputs/<family>/<name>/` に手で置いた実重み（生成物ではない — docs/assets-layout.md）を、
 IR export の入力素材として扱える形に**中身を変えずに**詰め替えるだけの一回性ユーティリティ。

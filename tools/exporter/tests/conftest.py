@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -34,14 +33,6 @@ DIM_GRAMMAR = json.loads(DIM_GRAMMAR_PATH.read_text(encoding="utf-8"))
 #: （片側だけ動かすと両方赤になる）。
 OP_CONTRACT_TABLE_PATH = RUNTIME_FIXTURES / "op-contracts.json"
 OP_CONTRACT_TABLE = json.loads(OP_CONTRACT_TABLE_PATH.read_text(encoding="utf-8"))
-
-#: Irodori のモデル実装 clone（`export_irodori.py` の `--source-dir` 既定）。**在れば**
-#: import 可能にする — `patch_irodori` の Irodori 側パッチは `irodori_tts` を差し替えるので、
-#: 同値テストにはこの clone が要る。git 追跡外なので無い環境ではテスト側が skip する
-#: （`pytest.importorskip("irodori_tts")`）。
-IRODORI_SOURCE_DIR = REPO_ROOT / "inputs" / "irodori" / "Irodori-TTS"
-if IRODORI_SOURCE_DIR.is_dir() and str(IRODORI_SOURCE_DIR) not in sys.path:
-    sys.path.insert(0, str(IRODORI_SOURCE_DIR))
 
 #: 合成テストの動的軸の上限。
 SYM_MAX = 16

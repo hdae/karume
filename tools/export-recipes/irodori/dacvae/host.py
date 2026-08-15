@@ -1,14 +1,14 @@
 r"""DACVAE を挟む**ホスト側前処理**の数の正（参照音声の正規化・reflect pad・末尾トリム）。
 
-`export_dacvae.py` がグラフ（G6 decoder / G7 encoder）を出すのに対し、こちらが出すのは
+`irodori/dacvae/export.py` がグラフ（G6 decoder / G7 encoder）を出すのに対し、こちらが出すのは
 グラフの**外側**に残る段の参照値。W4 のホスト実装（TS の codec 統合）が突き合わせる材料で、
 値は上流実装（`irodori_tts.codec` / `irodori_tts.inference_runtime`）を**呼んで**採る。
 
     cd tools/exporter
     uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' \
-        python dacvae_host.py
+        python -m irodori.dacvae.host
 
-`irodori_tts` を import するので transformers のピンが要る（`export_irodori.py` と同じ理由）。
+`irodori_tts` を import するので transformers のピンが要る（`irodori/export.py` と同じ理由）。
 `descript-audiotools` は LUFS 測定の実経路（ITU-R BS.1770-4 の K-weighting IIR）、`einops` は
 `dacvae/__init__.py` が引くためだけに要る。
 
@@ -62,10 +62,11 @@ from typing import Any, NamedTuple
 import torch
 from safetensors.torch import load_file, save_file
 
-import export_dacvae as ex
-import export_irodori as ir
 from karume.convert import normalize_boundary_tensor
 from karume.paths import SERIES_ROOT
+
+from .. import export as ir
+from . import export as ex
 
 META_FILE = "meta.json"
 CASE_PREFIX = "case."
@@ -307,7 +308,7 @@ def _trim_latents(latent_dir: Path) -> dict[str, torch.Tensor]:
         if not path.is_file():
             raise SystemExit(
                 f"実 latent が無い: {path}"
-                "（`uv run --with 'transformers==5.14.1' python irodori_pipeline.py` で作る）"
+                "（`uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref` で作る）"
             )
         sources[name] = load_file(str(path))[ex.LATENT_KEY].to(torch.float32)
     latents: dict[str, torch.Tensor] = {}
@@ -348,7 +349,8 @@ def emit(
     wav_scale = _wav_scale_evidence(sample_rate)
 
     # 上流の正本経路（`encode_waveform`）は **weight_norm を畳む前**に通す — 畳んだ後で採ると
-    # 「畳んだ後どうし」の比較になり、latent の突合が恒真化する（`export_dacvae` と同じ規律）。
+    # 「畳んだ後どうし」の比較になり、latent の突合が恒真化する
+    # （`irodori.dacvae.export` と同じ規律）。
     codec = DACVAECodec(
         model=model,
         sample_rate=sample_rate,

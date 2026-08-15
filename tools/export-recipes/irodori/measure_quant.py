@@ -10,9 +10,9 @@
 
     cd tools/exporter
     uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' \
-        python measure_quant_irodori.py --config f32
-    uv run ... python measure_quant_irodori.py --config i8-all
-    uv run ... python measure_quant_irodori.py          # 実測はせずレポートだけ組み直す
+        python -m irodori.measure_quant --config f32
+    uv run ... python -m irodori.measure_quant --config i8-all
+    uv run ... python -m irodori.measure_quant          # 実測はせずレポートだけ組み直す
 
 **1 実行 = 1 構成**（`--config`）。full-loop は DiT を 1 ケースあたり 240 forward 回す torch CPU
 実行なので、9 構成を 1 プロセスに詰めると数時間の不可分な塊になる。構成ごとに独立に呼べる形に
@@ -32,7 +32,7 @@
 
 `w8a8` は `i8-all` と**同じ丸めの重み**に、DiT の `nn.Linear` 入力へ per-token i8 の
 fake-quant（`karume.act_quant.quantize_rows` — ランタイム `quantize-rows.ts` の数値鏡像）を
-モジュールフックで足したもの。フックで安全なのは `patch_irodori.py` が `functional` で呼ぶのが
+モジュールフックで足したもの。フックで安全なのは `patch.py` が `functional` で呼ぶのが
 `rms_norm` / `silu` だけで、量子化対象の Linear が実モジュールのまま残るため（SBV2 では
 `functional.conv1d` 直呼びのせいでフックが沈黙で取りこぼした — ADR 0029 の検出限界）。
 **適用本数は毎回出力し、0 本なら fail loudly**（「w8a8 のつもりで w8 の数を採った」に気づけない
@@ -47,7 +47,7 @@ Session にだけ降りる — models 側 `pipeline.ts`）。
 
 duration の出力は S を決めるので、量子化で銀行家丸めが 1 つ飛ぶだけで **latent 長そのものが
 変わり**、波形長が構成間で食い違って SNR が定義できなくなる。そこで基準以外の構成は
-**`f32` の S を外から固定して**回す（`irodori_pipeline.run_case(frames_override=…)` —
+**`f32` の S を外から固定して**回す（`irodori.pipeline_ref.run_case(frames_override=…)` —
 `measure_quant_sbv2.py` が dump 側 `w_ceil` で時間グリッドを固定するのと同じ選択）。
 
 **構成が自分で予測した S** は `predictedS` として別に残す。これが**この台本の主成果**で、
@@ -101,22 +101,24 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
-import export_dacvae as dv
-import export_irodori as ex
-import irodori_pipeline as ip
-from karume import act_quant, patch_irodori
+from karume import act_quant
 from karume.paths import OUTPUTS_ROOT, SERIES_ROOT
+
+from . import export as ex
+from . import patch
+from . import pipeline_ref as ip
+from .dacvae import export as dv
 
 #: デモ・ベンチの生成物置き場（資産と分離する — `rm -rf outputs/demo` が系列を巻き込まない）。
 DEFAULT_OUT = OUTPUTS_ROOT / "demo" / "irodori-quant-sim"
 
-#: 恒真化防止の突合先（`irodori_pipeline.py` が f32 系列へ書く full-loop golden）。
+#: 恒真化防止の突合先（`irodori/pipeline_ref.py` が f32 系列へ書く full-loop golden）。
 DEFAULT_GOLDEN_DIR = SERIES_ROOT / "irodori-v4-small" / "pipeline"
 
 #: 基準構成の綴り（他構成はこの成果物を読んで比較する）。
 BASE_CONFIG = "f32"
 
-#: 役割 = グラフ境界（`export_irodori.load_*` と 1:1）+ コーデック。
+#: 役割 = グラフ境界（`irodori.export.load_*` と 1:1）+ コーデック。
 ROLE_CODEC = "codec"
 ROLES: tuple[str, ...] = (
     ex.TARGET_BACKBONE,
@@ -255,12 +257,12 @@ def write_wav(path: Path, audio: torch.Tensor, sample_rate: int) -> None:
 
 
 def role_modules(modules: Mapping[str, nn.Module], roles: Sequence[str]) -> dict[str, nn.Module]:
-    """役割 → その役割の丸め対象モジュール（`export_irodori.fake_quant` へ渡す形）。
+    """役割 → その役割の丸め対象モジュール（`irodori.export.fake_quant` へ渡す形）。
 
     MUST: 3 つの norm を**消費側の役割**へ束ねる（`speaker_norm` は speaker グラフ・
     `text_norm` は duration グラフ・`caption_norm` は caption-proj グラフの内側 — 所在は
-    ADR 0048 決定 1）。全役割を選ぶと `export_irodori.export_series` /
-    `irodori_pipeline.emit` が丸める 9 本と**同じ集合**になり、f16 構成が配布系列の
+    ADR 0048 決定 1）。全役割を選ぶと `irodori.export.export_series` /
+    `irodori.pipeline_ref.emit` が丸める 9 本と**同じ集合**になり、f16 構成が配布系列の
     対応物であることが集合として保証される。
     """
     grouped: dict[str, dict[str, nn.Module]] = {
@@ -297,7 +299,7 @@ class Loaded(NamedTuple):
 
 
 def load_modules(model_dir: Path, source_dir: Path) -> Loaded:
-    """`irodori_pipeline.emit` と同じ 9 本を組む（丸めはまだ当てない）。"""
+    """`irodori.pipeline_ref.emit` と同じ 9 本を組む（丸めはまだ当てない）。"""
     source = ex.IrodoriSource(source_dir)
     text_config, model_config = ex.read_configs(model_dir)
     state = load_file(str(model_dir / ex.MODEL_FILE))
@@ -345,7 +347,7 @@ def load_modules(model_dir: Path, source_dir: Path) -> Loaded:
 def build_graphs(
     modules: Mapping[str, nn.Module], config: Any, model_config: Mapping[str, Any]
 ) -> ip.HostGraphs:
-    """`irodori_pipeline.emit` と同じ 6 本のグラフラッパ。
+    """`irodori.pipeline_ref.emit` と同じ 6 本のグラフラッパ。
 
     MUST: **パッチ適用後**でしか正しく動かない（実数形 RoPE 表を渡すため）。
     """
@@ -367,7 +369,7 @@ def build_decoder(
 ) -> tuple[nn.Module, int, str | None]:
     """コーデックの decode 経路（`DecoderGraph`）とサンプリング周波数・丸めの要約を返す。
 
-    MUST（順序）: 丸めは `fold_weight_norm` / `lift_snake_alphas` の**後**（`export_dacvae`
+    MUST（順序）: 丸めは `fold_weight_norm` / `lift_snake_alphas` の**後**（`irodori.dacvae.export`
     の `_fake_quant` の順序 MUST — ここは同じ前処理を同じ順で通してから同じ関数を呼ぶ）。
     切り詰めた `in_proj` は decode 経路に出てこないので組まない。
     """
@@ -393,7 +395,7 @@ def golden_z(golden_dir: Path, case: str) -> torch.Tensor:
     if not path.is_file():
         raise SystemExit(
             f"full-loop golden が無い: {path}"
-            "（`uv run --with 'transformers==5.14.1' python irodori_pipeline.py` で作る）"
+            "（`uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref` で作る）"
         )
     return load_file(str(path))["z"].to(torch.float32)
 
@@ -473,7 +475,7 @@ def latent_stage(
     source, modules, config, text_config, model_config = load_modules(
         args.model_dir, args.source_dir
     )
-    # MUST: 丸めは load の直後・golden の採取より前（`export_irodori.fake_quant` の順序 MUST）。
+    # MUST: 丸めは load の直後・golden の採取より前（`irodori.export.fake_quant` の順序 MUST）。
     # 対象が空になるのは `i8-codec-only`（latent 側の役割を 1 つも含まない）だけで、そのときは
     # 丸めそのものを呼ばない — `fake_quant` の「0 本は fail loudly」は正しい規律なので、
     # ここで例外にせず**呼ばない**ことで満たす。
@@ -483,7 +485,7 @@ def latent_stage(
         if recipe.weight is not None and scoped
         else ex.FakeQuantResult({}, {})
     )
-    patch_irodori.apply_patches()
+    patch.apply_patches()
     # 活性シムは重みの丸めの**後**（重みは実行前に決まり、活性は実行時に決まる — 両者は独立
     # だが、報告の順序を「重み → 活性」で揃えると素通りの切り分けが 1 本の出力で済む）。
     handles, act_quant_linears = attach_dit_act_quant(recipe, modules)
@@ -812,7 +814,7 @@ def quality_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
 def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "script": "tools/exporter/measure_quant_irodori.py",
+        "script": "tools/exporter/irodori/measure_quant.py",
         "torch": torch.__version__,
         "base": BASE_CONFIG,
         "method": {

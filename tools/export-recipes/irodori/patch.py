@@ -26,17 +26,17 @@ Transformer 系（speaker encoder = `ReferenceLatentEncoder` / duration predicto
    ones 合成）へ差し替えると既存の畳み込み経路にそのまま乗る（下の
    `_folded_rms_low_rank_adaln_forward`）。
 
-MUST: パッチ後のモジュールはパッチ前と **eager 同値**であること（`export_irodori.py` が
+MUST: パッチ後のモジュールはパッチ前と **eager 同値**であること（`irodori/export.py` が
 実重み・全 golden ケースで実測し、差が出たら export ごと落とす）。3 と 4 は演算列が 1 対 1 で
 **ビット一致**が構造的に成り立つ。2 は式としては厳密同値だが**ビット一致は形依存**
 （`_real_pair_apply_rotary_emb` の注記 — この重みの head_dim 64 では実測 0）。
 
 MUST: パッチはクラス属性の**プロセス全域**差し替えなので、「パッチ前の参照」を採れるのは
 1 プロセスにつき 1 回だけ。適用済みかどうかは {@link patches_applied} が答え、順序違反は
-呼び出し側（`export_irodori.py`）が fail loudly で拒否する（恒真化 = 偽 PASS の遮断）。
+呼び出し側（`irodori/export.py`）が fail loudly で拒否する（恒真化 = 偽 PASS の遮断）。
 
 NOTE: transformers のモデリングコードを差し替えるので、版は `transformers==5.14.1` に
-ピンして使う（`export_irodori.py` の docstring）。
+ピンして使う（`irodori/export.py` の docstring）。
 """
 
 from __future__ import annotations
@@ -156,11 +156,12 @@ def _real_pair_apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> tor
     置き換えても f32 の丸めは変わらない（乗算は正確丸めなので `(−b)·d == −(b·d)`）。
 
     NOTE: **ビット一致は形依存**。head_dim 64（この重みの全 8 層）では実測 0 だが、
-    head_dim 8 では 1 ulp ずれる（`test_patch_irodori` が両方を固定している）。_推測_: torch の
+    head_dim 8 では 1 ulp ずれる（`irodori/tests/test_patch.py` が両方を固定している）。
+    _推測_: torch の
     complex 乗算が最終次元長ごとに別カーネルを選び、積和が FMA へ縮約される形がある —
     倍精度参照からの誤差は両者同オーダーで、どちらが正しいという差ではない。したがって
     「式として厳密同値・丸めは実測で確認」が主張の正確な形で、実重みの門
-    （`export_irodori.py` の atol 0）はこの幾何での実測として立っている。
+    （`irodori/export.py` の atol 0）はこの幾何での実測として立っている。
 
     MUST: 中間を rank 5（`[B,S,H,D/2,2]`）にしない — strided カーネルの rank 上限
     （`ops.STRIDED_RANK` = 4）に当たる。head 軸を潰した `[B,S,H·D/2,2]` で入れ替えてから
@@ -210,7 +211,7 @@ def _folded_rms_low_rank_adaln_forward(
 
     同値の根拠: 原実装の `x * rsqrt((x*x).mean(-1, keepdim=True) + eps)` は
     `F.rms_norm(x, (D,), None, eps)` の定義そのもの（weight 無し = ones）で、縮約軸も
-    式も同じ。**ビット一致**が主張（`export_irodori.py` の atol 0 が実重みで実測する）。
+    式も同じ。**ビット一致**が主張（`irodori/export.py` の atol 0 が実重みで実測する）。
 
     差し替える理由は語彙の側にある: この正規化は `RMSNorm` モジュールを経由しないので
     `normalize._fold_rms_norm`（weight つき rank-1 の形を掴む）に引っかからず、

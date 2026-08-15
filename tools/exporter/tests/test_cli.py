@@ -1,7 +1,7 @@
 """`karume` サブコマンド CLI（`karume.cli`）のディスパッチ。
 
 引数の解釈は各本体の parser が持つ（CLI は写しを持たない）ので、ここで固定するのは
-**どの main へ argv がそのまま渡るか**だけ。台本 `export_irodori.py` は実重み依存が重いので、
+**どの main へ argv がそのまま渡るか**だけ。台本 `export_siglip2.py` は実重み依存が重いので、
 読み込み関数を差し替えて「呼ばれ方」を見る。
 """
 
@@ -47,9 +47,9 @@ class TestDispatch:
             return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
 
         monkeypatch.setattr(cli, "load_script", load)
-        cli.main(["export-irodori", "--dtype", "f16", "--target", "dit"])
-        assert loaded == [cli.EXPORT_IRODORI_SCRIPT]
-        assert seen == [["--dtype", "f16", "--target", "dit"]]
+        cli.main(["export-birefnet", "--dtype", "f16", "--target", "matte"])
+        assert loaded == [cli.EXPORT_BIREFNET_SCRIPT]
+        assert seen == [["--dtype", "f16", "--target", "matte"]]
 
     def test_it_picks_the_export_script_by_subcommand_name(
         self, monkeypatch: pytest.MonkeyPatch
@@ -91,8 +91,6 @@ class TestDispatch:
     @pytest.mark.parametrize(
         ("command", "script"),
         [
-            ("export-irodori", "EXPORT_IRODORI_SCRIPT"),
-            ("export-dacvae", "EXPORT_DACVAE_SCRIPT"),
             ("export-siglip2", "EXPORT_SIGLIP2_SCRIPT"),
             ("export-birefnet", "EXPORT_BIREFNET_SCRIPT"),
             ("export-depth-anything", "EXPORT_DEPTH_ANYTHING_SCRIPT"),
@@ -152,15 +150,13 @@ class TestExportScript:
 
         `main(argv)` を持つところまで見る — CLI が渡す argv の受け口が消えたら落とす。
         """
-        module = cli.load_script(cli.EXPORT_IRODORI_SCRIPT)
+        module = cli.load_script(cli.EXPORT_SIGLIP2_SCRIPT)
         assert callable(module.main)
 
     @pytest.mark.parametrize(
         "script",
         [
             "EXPORT_EMBEDDINGGEMMA_SCRIPT",
-            "EXPORT_IRODORI_SCRIPT",
-            "EXPORT_DACVAE_SCRIPT",
             "EXPORT_SIGLIP2_SCRIPT",
             "EXPORT_BIREFNET_SCRIPT",
         ],

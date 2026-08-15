@@ -1,4 +1,4 @@
-"""`export_dacvae.py` の台本レベルの約束事（実重み不要分）。
+"""`irodori/dacvae/export.py` の台本レベルの約束事（実重み不要分）。
 
 実重みの emit は手動（既存の export 台本のテストと同じ規律）。ここで固定するのは、壊れると
 **偽 PASS** になる側の規律だけ:
@@ -24,7 +24,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
-import export_dacvae as ex
+from irodori.dacvae import export as ex
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_to_file
 from karume.quantize import quantize_to_int8

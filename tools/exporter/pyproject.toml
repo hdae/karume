@@ -84,7 +84,7 @@ packages = ["karume"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# export 台本（export_irodori.py / export_siglip2.py など）は配布パッケージではなくリポジトリ
+# export 台本（export_siglip2.py / export_birefnet.py など）は配布パッケージではなくリポジトリ
 # 直下のスクリプトなので、テストから import するにはこのディレクトリを import パスに載せる。
 pythonpath = ["."]
 

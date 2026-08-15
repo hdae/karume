@@ -1,4 +1,4 @@
-"""`dacvae_host.py` の台本レベルの約束事（実重み・音声ライブラリ不要分）。
+"""`irodori/dacvae/host.py` の台本レベルの約束事（実重み・音声ライブラリ不要分）。
 
 LUFS 測定と WAV の読み書きは audiotools / soundfile の実経路なのでここでは回さない
 （実測は emit のたびに走る常設門が受け持つ）。ここで固定するのは、壊れると**偽 PASS** に
@@ -15,8 +15,8 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-import dacvae_host as host
-import export_dacvae as ex
+from irodori.dacvae import export as ex
+from irodori.dacvae import host
 
 
 def _cases(**overrides: dict[str, float]) -> dict[str, dict[str, float]]:

@@ -1,0 +1,248 @@
+"""Irodori 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+
+汎用の描画部品（frontmatter・モデル一覧・ファイル表・quant 表・節の組み立て）は
+`karume.modelcard` が持つ。ここが持つのは **Irodori 固有の事実**だけ: 帰属（重みの出所・
+同梱するコーデックと text backbone・ライセンス）と、この pipeline のカードに何を書くか。
+
+帰属プロファイルは 1 つだけ（上流 1 リポの重みを格納形へ落とし直したもの）— SBV2 のように
+声のファミリーで出所が割れる軸を持たないので、{@link irodori.distribution.PIPELINE} は
+`card_profiles` に 1 席しか置かない。
+
+MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
+（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
+**存在しない事実**だけ。
+
+NOTE: `_frontmatter` などの描画部品は core 側で private 名のまま — recipe から名指しで
+呼ぶのは ADR 0065 段 6（packaging）で公開名を決めるまでの形。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from karume.modelcard import (
+    CardMetadata,
+    _default_model,
+    _files,
+    _frontmatter,
+    _knob,
+    _model_sections,
+    _models,
+    _quants,
+    _render,
+    _require_pipeline,
+)
+
+#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+IRODORI_SUPPORTED_PIPELINE = "irodori/1"
+
+IRODORI_PIPELINE_TAG = "text-to-speech"
+
+IRODORI_TITLE = "Irodori-TTS v4 Small — Karume"
+
+#: 重みの出所（`inputs/irodori/<モデル名>/` に手で置く HF リポ）と、その中の text backbone の
+#: 素になった日本語 ModernBERT（チェックポイントの `config_json` が `text_tokenizer_repo` /
+#: `text_encoder_revision` で名指ししている 1 本）。**どちらも再配布している**ので両方並べる。
+#: ライセンスは実地確認（2026-08-12・HF の models API の `tags`）: どちらも `license: mit`。
+IRODORI_BASE_MODEL = "Aratako/Irodori-TTS-v4-Small"
+IRODORI_TEXT_BACKBONE_MODEL = "sbintuitions/modernbert-ja-310m"
+
+#: 波形へ落とすコーデック（上流では別リポ・別重み — この配布形には**同梱している**）。
+#: ライセンスは MIT（`docs/research/2026-08-11-irodori-source-recon.md` の実地確認）。
+#: 再配布しているので `base_model` にも帰属節にも並べる。
+IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
+
+IRODORI_METADATA = CardMetadata(
+    pipeline_tag=IRODORI_PIPELINE_TAG,
+    base_model=(IRODORI_BASE_MODEL, IRODORI_TEXT_BACKBONE_MODEL, IRODORI_CODEC_MODEL),
+    # `base_model_relation` は置かない — この配布形は格納形を変えず（f32 のまま）コンテナだけを
+    # 移したもので、adapter / merge / quantized / finetune のどれでもない（CardMetadata の doc）。
+    license="mit",
+    tags=("text-to-speech", "webgpu", "japanese"),
+)
+
+#: 使い方スニペットのデモ入力（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
+IRODORI_DEMO_TEXT = "こんにちは、これはテストです。"
+IRODORI_DEMO_CAPTION = "落ち着いた女性の声で、ゆっくりと丁寧に話している。"
+
+
+def _irodori_overview(manifest: Mapping[str, Any]) -> list[str]:
+    sample_rate = _default_model(manifest)["pipelineConfig"]["sampleRate"]
+    return [
+        "## What is this",
+        "",
+        "A Japanese text-to-speech distribution: the **Irodori-TTS v4 (Small)** rectified-flow DiT",
+        "converted into the WebGPU inference runtime **Karume**'s container format (a single",
+        "safetensors file = weights + a graph JSON embedded in `__metadata__`). Runs as-is in the",
+        "browser and in Deno.",
+        "",
+        "- Eight graphs make up the chain: a shared Japanese ModernBERT `backbone`, the",
+        "  `text_proj` and `caption_proj` condition projectors, the reference-latent `speaker`",
+        "  encoder, the `duration` predictor, the `dit` itself (one forward per Euler step, plus",
+        "  one per classifier-free-guidance branch), and the DACVAE codec"
+        f" ([{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}))",
+        "  as `codec_decoder` / `codec_encoder`.",
+        "- **Text in, waveform out.** `generate()` returns f32 mono samples at the codec's sample",
+        "  rate, ready for `encodeWav`. The decoder is run in tiles so that it also fits GPUs with",
+        "  the default 128MiB storage-buffer limit; the tiling is bit-exact against a single-shot",
+        "  decode.",
+        "- **Voice cloning is wired up both ways**: a reference speaker is passed either as audio",
+        "  (mono f32 — what `decodeWav` returns), which `codec_encoder` turns into a DACVAE",
+        "  latent, or as such a latent directly. Reference audio must already be at this",
+        f"  distribution's own {sample_rate} Hz: there is no resampler, and a mismatch is refused",
+        "  rather than silently converted. Unlike the decoder, `codec_encoder` is not tiled, so a",
+        "  long reference can exceed the default 128MiB storage-buffer limit.",
+        "- Not readable by the upstream implementation (it's a different container with an embedded"
+        f" graph); the reader is a pipeline that implements `{IRODORI_SUPPORTED_PIPELINE}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
+        f" is `karume.json` (`{manifest['format']}`).",
+    ]
+
+
+def _irodori_base_weights() -> list[str]:
+    """帰属節。格納形を変えていないので「変換したもの」としてだけ主張する。"""
+    return [
+        "## Base weights and attribution",
+        "",
+        "Converted into the container format — the original checkpoint is not distributed here.",
+        "",
+        f"- **Weights**: [{IRODORI_BASE_MODEL}](https://huggingface.co/{IRODORI_BASE_MODEL}),"
+        " licensed **MIT**",
+        "  (as of retrieval). The training / inference implementation it comes with",
+        "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is MIT as well;",
+        "  Karume's runtime contains none of that code — it is an independent implementation that",
+        "  reads these weights from its own container format.",
+        f"- **Text backbone**: fine-tuned from"
+        f" [{IRODORI_TEXT_BACKBONE_MODEL}](https://huggingface.co/{IRODORI_TEXT_BACKBONE_MODEL}),",
+        "  licensed **MIT** (as of retrieval). It is redistributed here in the container format as",
+        "  the `backbone` component, so that license travels with this repository too.",
+        f"- **Codec**: [{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}),"
+        " licensed **MIT**",
+        "  (as of retrieval). Upstream ships it as a separate repository; it is redistributed here",
+        "  in the container format as the `codec_decoder` / `codec_encoder` components so that",
+        "  text-to-audio runs from this repository alone.",
+        "- **Changes made here**: conversion into the Karume container format only. No retraining,",
+        "  no fine-tuning and **no quantization** — the weights are the source checkpoint's own",
+        "  f32 values, re-laid out per graph.",
+    ]
+
+
+def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
+    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
+    ので、系列が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ進める形。
+    """
+    model_name = manifest["defaultModel"]
+    model = _default_model(manifest)
+    quant = model["defaultQuant"]
+    models = " / ".join(sorted(manifest["models"]))
+    quants = " / ".join(sorted(model["quants"]))
+    sample_rate = model["pipelineConfig"]["sampleRate"]
+    return [
+        "## Usage",
+        "",
+        "```ts",
+        'import { decodeWav, encodeWav, IrodoriPipeline } from "jsr:@karume/models";',
+        "",
+        f'using pipeline = await IrodoriPipeline.fromPretrained("{repo}", {{',
+        f'  // model: "{model_name}", // default — available: {models}',
+        f'  // quant: "{quant}", // default — available: {quants}',
+        "});",
+        "",
+        "const audio = await pipeline.generate({",
+        f'  text: "{IRODORI_DEMO_TEXT}",',
+        "",
+        "  // Voice Design — describe the voice in Japanese prose:",
+        f'  // caption: "{IRODORI_DEMO_CAPTION}",',
+        "",
+        "  // Voice cloning — condition on a reference speaker. The WAV must already be",
+        f"  // {sample_rate} Hz mono or stereo (there is no resampler; a mismatch is refused):",
+        '  // speaker: { audio: decodeWav(await Deno.readFile("reference.wav")) },',
+        "  // ...or pass a DACVAE latent you saved earlier instead of the audio:",
+        "  // speaker: { latent: savedLatent },",
+        "",
+        "  seed: 42, // same seed + same inputs → same audio",
+        "  // durationSeconds: 5, // override the predicted utterance length (seconds)",
+        "});",
+        "",
+        "await Deno.writeFile(",
+        '  "out.wav",',
+        "  encodeWav(audio.data, audio.sampleRate),",
+        ");",
+        "```",
+        "",
+        "`generate()` returns `{ data, sampleRate, frames, seed, forwards }`, where `data` is f32",
+        "mono already trimmed to the predicted length. `generateLatent()` is the same run stopped",
+        "one stage earlier: it returns `{ data, frames, latentDim, seed, forwards }` with the",
+        "patched DACVAE latent, for callers that want the embedding rather than audio.",
+        "`caption` and `speaker` are both optional: without them the voice is picked by the model",
+        "alone, and the guidance branches for the missing conditions are skipped.",
+        "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
+        "You can also build from bytes you fetched yourself (`IrodoriPipeline.fromAssets`).",
+    ]
+
+
+def _irodori_shape(model: Mapping[str, Any]) -> list[str]:
+    """モデル固有の数（グラフの宣言と噛み合う側）— 利用者の入力上限がここで読める。"""
+    config = model["pipelineConfig"]
+    frame_rate = config["frameRate"]
+    return [
+        "### Shape",
+        "",
+        "Derived from the checkpoint's own config, and checked against the exported graphs when",
+        "this repository was assembled.",
+        "",
+        f"- **text**: up to {config['maxTextLen']} tokens (BOS included), width"
+        f" {config['textDim']}",
+        f"- **caption**: up to {config['maxCaptionLen']} tokens (BOS included), width"
+        f" {config['captionDim']}",
+        f"- **reference speaker**: up to {config['speakerRows'] - 1} patched rows"
+        f" ({config['speakerPatchSize']} latent frames each ="
+        f" {(config['speakerRows'] - 1) * config['speakerPatchSize'] // frame_rate}s of audio),"
+        f" width {config['speakerDim']}",
+        f"- **latent**: up to {config['ditSymMax']} frames at {frame_rate} Hz"
+        f" ({config['ditSymMax'] // frame_rate}s), width {config['latentDim']}",
+        f"- **audio**: {config['sampleRate']} Hz mono, {config['hopLength']} samples per latent"
+        " frame",
+    ]
+
+
+def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
+    """実行時ノブ（`generate()` に渡さなかったものを埋める側）。"""
+    config = model["pipelineConfig"]
+    scales = config["cfgScales"]
+    return [
+        "### Defaults",
+        "",
+        "The sampler knobs are fixed by the manifest — `generate()` takes none of them.",
+        "",
+        f"- **steps**: {config['steps']} Euler steps (`initScale` {config['initScale']})",
+        "- **guidance**: "
+        + " / ".join(f"{name} {_knob(scale)}" for name, scale in scales.items())
+        + f", applied for t in [{config['cfgMinT']}, {config['cfgMaxT']}]",
+        f"- **duration**: clamped to [{config['minSeconds']}, {config['maxSeconds']}] seconds"
+        " (the duration predictor decides within that, unless `durationSeconds` is passed)",
+        "",
+        "`seed` is the one knob the manifest does not carry — it defaults to `0`, and the same",
+        "seed with the same request gives the same audio.",
+    ]
+
+
+def render_irodori_model_card(manifest: Mapping[str, Any], repo: str) -> str:
+    """Irodori 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+    _require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)
+    return _render(
+        (
+            _frontmatter(IRODORI_METADATA),
+            ["", f"# {IRODORI_TITLE}", ""],
+            _irodori_overview(manifest),
+            [""],
+            _irodori_base_weights(),
+            [""],
+            _models(manifest),
+            [""],
+            _irodori_usage(manifest, repo),
+            *_model_sections(manifest, (_files, _quants, _irodori_shape, _irodori_defaults)),
+        )
+    )

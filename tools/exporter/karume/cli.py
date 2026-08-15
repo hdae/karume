@@ -1,7 +1,7 @@
 """`karume` コマンド — export-* / dist / verify のサブコマンド式ディスパッチ。
 
-    karume export-irodori --dtype i8 --target dit                       # 台本 export_irodori.py
-    karume dist --pipeline irodori                                      # karume.dist
+    karume export-siglip2 --model so400m                                # 台本 export_siglip2.py
+    karume dist --pipeline siglip2                                      # karume.dist
     karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
 
 MUST: CLI は**引数を解釈しない**。先頭の 1 語でディスパッチし、残りはそのまま対応する
@@ -9,19 +9,21 @@ MUST: CLI は**引数を解釈しない**。先頭の 1 語でディスパッチ
 引数の写しを持つと、台本が持つ排他規則（`--verify` × `--target` のような**沈黙誤値の門**）が
 CLI 側の写しでは抜けたまま通る形が生まれ、しかも片方だけ古くなっても誰も落ちない。
 
-DECIDED: 台本の選択も**サブコマンド名**で綴る（`karume export-irodori`）— `karume export
---pipeline irodori` にすると CLI がフラグを 1 つ読んで素通しから外すことになり、上の MUST が
+DECIDED: 台本の選択も**サブコマンド名**で綴る（`karume export-siglip2`）— `karume export
+--pipeline siglip2` にすると CLI がフラグを 1 つ読んで素通しから外すことになり、上の MUST が
 「1 つだけなら」で崩れる。
 
-NOTE: 素の `karume export`（Anima）と `karume export-sbv2` / `karume export-deberta` は
-**この名簿から降りた** — 台本が `tools/export-recipes/<family>/` へ出てリポ直下にも wheel にも
-無い（ADR 0065 段 3+4）。起動は `uv run python -m <family>.export`（export-recipes ルートから）。
+NOTE: 素の `karume export`（Anima）・`karume export-sbv2` / `karume export-deberta`・
+`karume export-irodori` / `karume export-dacvae` は**この名簿から降りた** — 台本が
+`tools/export-recipes/<family>/` へ出てリポ直下にも wheel にも無い（ADR 0065 段 3+4）。
+起動は `uv run python -m <family>.export`（export-recipes ルートから）。コーデックは
+`uv run python -m irodori.dacvae.export`。
 
 MUST: ディスパッチは遅延 import — `karume dist` / `karume verify` を、export 台本
 （diffusers / style_bert_vits2 / モデル定義の重い import）を 1 つも読まずに起動できる形に
 保つ。台本の読み込みは {@link load_script} の中でだけ起きる。
 
-NOTE: 台本（`export_irodori.py` など）は**パッケージ外のリポジトリ直下
+NOTE: 台本（`export_siglip2.py` など）は**パッケージ外のリポジトリ直下
 スクリプト**なので、import 経路ではなくパス指定で読む。wheel には入らない — 無ければ
 fail loudly で置き場を示す。
 """
@@ -40,12 +42,6 @@ _SCRIPT_DIR = Path(__file__).resolve().parents[1]
 
 #: `karume export-embeddinggemma` が包む台本（文埋め込み 1 系列を書き出す側）。
 EXPORT_EMBEDDINGGEMMA_SCRIPT = "export_embeddinggemma"
-
-#: `karume export-irodori` が包む台本（TTS のテキスト〜DiT 6 グラフを書き出す側）。
-EXPORT_IRODORI_SCRIPT = "export_irodori"
-
-#: `karume export-dacvae` が包む台本（Irodori のコーデック 2 グラフを書き出す側）。
-EXPORT_DACVAE_SCRIPT = "export_dacvae"
 
 #: `karume export-siglip2` が包む台本（SigLIP2 の vision tower 1 系列を書き出す側）。
 EXPORT_SIGLIP2_SCRIPT = "export_siglip2"
@@ -97,14 +93,6 @@ def run_export_embeddinggemma(argv: Sequence[str]) -> None:
     return load_script(EXPORT_EMBEDDINGGEMMA_SCRIPT).main(argv)
 
 
-def run_export_irodori(argv: Sequence[str]) -> None:
-    return load_script(EXPORT_IRODORI_SCRIPT).main(argv)
-
-
-def run_export_dacvae(argv: Sequence[str]) -> None:
-    return load_script(EXPORT_DACVAE_SCRIPT).main(argv)
-
-
 def run_export_siglip2(argv: Sequence[str]) -> None:
     return load_script(EXPORT_SIGLIP2_SCRIPT).main(argv)
 
@@ -138,14 +126,6 @@ COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     "export-embeddinggemma": (
         run_export_embeddinggemma,
         "EmbeddingGemma を IR v1 + golden io へ書き出す（台本 export_embeddinggemma.py）",
-    ),
-    "export-irodori": (
-        run_export_irodori,
-        "Irodori-TTS のテキスト〜DiT を IR v1 + golden io へ書き出す（台本 export_irodori.py）",
-    ),
-    "export-dacvae": (
-        run_export_dacvae,
-        "Irodori のコーデック（DACVAE）を IR v1 + golden io へ書き出す（台本 export_dacvae.py）",
     ),
     "export-siglip2": (
         run_export_siglip2,

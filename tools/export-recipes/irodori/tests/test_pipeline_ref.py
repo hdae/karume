@@ -1,6 +1,6 @@
-"""`irodori_pipeline.py` の台本レベルの約束事（実重み不要分）。
+"""`irodori/pipeline_ref.py` の台本レベルの約束事（実重み不要分）。
 
-実重みの emit は手動（`export_irodori.py` と同じ規律）。ここで固定するのは、**ホストが
+実重みの emit は手動（`irodori/export.py` と同じ規律）。ここで固定するのは、**ホストが
 写している 2 段**（S 決定と Euler の組み立て）の細部で、壊れると golden が静かに別物になる側:
 
 - t スケジュールが上流の式（`(1 - linspace) * 0.999`）で、単調減少であること
@@ -22,8 +22,8 @@ from typing import Any
 import pytest
 import torch
 
-import export_irodori as ex
-import irodori_pipeline as ip
+from irodori import export as ex
+from irodori import pipeline_ref as ip
 
 
 class TestTSchedule:

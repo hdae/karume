@@ -1,13 +1,14 @@
 """実重み DACVAE（Semantic-DACVAE-Japanese-32dim）を IR v1 コンテナ + golden io へ書き出す台本。
 
 recon の G6（decoder）/ G7（encoder）で、Irodori-TTS v4 の**コーデック段**にあたる。テキスト側
-6 ターゲットは `export_irodori.py`、ホスト側の latent までの経路は `irodori_pipeline.py` が持つ。
+6 ターゲットは `irodori/export.py`、ホスト側の latent までの経路は
+`irodori/pipeline_ref.py` が持つ。
 
     cd tools/exporter
-    uv run --with descript-audiotools --with einops python export_dacvae.py
-    uv run --with descript-audiotools --with einops python export_dacvae.py --target decoder
-    uv run --with descript-audiotools --with einops python export_dacvae.py --dtype f16
-    uv run --with descript-audiotools --with einops python export_dacvae.py --dtype i8
+    uv run --with descript-audiotools --with einops python -m irodori.dacvae.export
+    uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --target decoder
+    uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype f16
+    uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype i8
 
 依存は `--with` で足す（pyproject.toml には入れない — 既定の sync は base deps だけで回る）。
 `descript-audiotools` は 2 つの理由で要る: ① `dacvae` パッケージが `audiotools.ml.BaseModel` を
@@ -56,7 +57,7 @@ MUST: 入力は**フレーム分割済みの `[1,T,1920]`**（グラフ内で `[
 連続バッファをそのまま渡せる。同時に「グラフは 1920 の倍数だけ受ける」契約が shape に出る。
 
 reflect pad（`DACVAE._pad`）と LUFS 正規化・リサンプルは**ホスト責務**でグラフに載せない。
-その 2 段の参照値は `dacvae_host.py` が別に出す。
+その 2 段の参照値は `irodori/dacvae/host.py` が別に出す。
 
 ## 前処理（export の前に必ず通す 2 つ）
 
@@ -133,7 +134,7 @@ from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
 #: 実重みの置き場（`hf download Aratako/Semantic-DACVAE-Japanese-32dim` の展開先を
-#: `convert_dacvae.py` で safetensors 化したもの）。
+#: `irodori/dacvae/convert.py` で safetensors 化したもの）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "irodori" / "dacvae-32dim"
 
 #: モデル実装（GitHub `facebookresearch/dacvae` の clone）の置き場。
@@ -144,7 +145,7 @@ SOURCE_REPO = "https://github.com/facebookresearch/dacvae"
 SOURCE_COMMIT = "414c20785fc3a28373073ea8ef7a1316eeeaca6e"
 
 #: 書き出せる格納 dtype。`i8` は波 2 で足した（conv 支配ネットの i8 品質は前例が無いので、
-#: 配布形の席に載せる前に `measure_quant_irodori.py` の `i8-codec-only` が単独で測る —
+#: 配布形の席に載せる前に `irodori/measure_quant.py` の `i8-codec-only` が単独で測る —
 #: ADR 0050 決定 6 / 量子化 recon の risks）。
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
 
@@ -168,7 +169,7 @@ ENCODER_SYMBOL = "T"
 MIN_SYM_LENGTH = 2
 
 #: `decoder` の記号次元 S の上限を決める発話長（秒）。生成できる latent の上限そのもの
-#: （`export_irodori.DIT_MAX_SECONDS` と同じ 30 秒 — ADR 0047）。**この台本には位置表も
+#: （`irodori.export.DIT_MAX_SECONDS` と同じ 30 秒 — ADR 0047）。**この台本には位置表も
 #: マスクも無い**（純粋な畳み込み網）ので、上限を上げてもコンテナは 1 バイトも増えない。
 DECODER_MAX_SECONDS = 30.0
 
@@ -182,7 +183,7 @@ DEFAULT_REFERENCE_WAV = INPUTS_ROOT / "irodori" / "v4-small" / "samples" / "clon
 #: 参照音声の LUFS 正規化の目標（`inference_runtime.SamplingRequest.ref_normalize_db` の既定）。
 REFERENCE_NORMALIZE_DB = -16.0
 
-#: 実 latent の供給元（`irodori_pipeline.py` が書く full-loop golden の最終 z）。
+#: 実 latent の供給元（`irodori/pipeline_ref.py` が書く full-loop golden の最終 z）。
 DEFAULT_LATENT_DIR = SERIES_ROOT / "irodori-v4-small" / "pipeline"
 LATENT_CASE_PREFIX = "case."
 LATENT_KEY = "z"
@@ -204,7 +205,7 @@ ROUNDTRIP_CORRELATION_MIN = 0.8
 
 #: `decoder` の golden ケース `(名前, latent の供給元ケース, 長さ)`。長さ `None` は供給元そのまま。
 #:
-#: 実 latent は `irodori_pipeline.py` の full-loop golden（`case.full` = 参照音声あり 161
+#: 実 latent は `irodori/pipeline_ref.py` の full-loop golden（`case.full` = 参照音声あり 161
 #: フレーム / `case.no-ref` = 参照なし 116 フレーム）から採る。**合成乱数を使わない**のは、
 #: Snake の `sin(αx)` が入力の値域に強く効くためで、tolerance の根拠を実運用の値域と
 #: 対応させるための選択（`export_sbv2.py` の話者埋め込みと同じ理由）。
@@ -253,14 +254,14 @@ class DacvaeSource:
 
 
 def read_kwargs(model_dir: Path) -> dict[str, Any]:
-    """`convert_dacvae.py` が書いた `metadata.json` から構成値を読む。
+    """`irodori/dacvae/convert.py` が書いた `metadata.json` から構成値を読む。
 
     MUST: HF から config を引き直さない — チェックポイントに埋まっていた `kwargs` が、この
     重みが実際に構成されたときの形の正本。
     """
     path = model_dir / METADATA_FILE
     if not path.is_file():
-        raise SystemExit(f"{path} が無い（`uv run python convert_dacvae.py` で作る）")
+        raise SystemExit(f"{path} が無い（`uv run python -m irodori.dacvae.convert` で作る）")
     raw = json.loads(path.read_text(encoding="utf-8"))
     if "kwargs" not in raw:
         raise SystemExit(f"{path} に 'kwargs' が無い")
@@ -275,7 +276,7 @@ def load_codec(source: DacvaeSource, model_dir: Path) -> nn.Module:
     """
     weights = model_dir / WEIGHTS_FILE
     if not weights.is_file():
-        raise SystemExit(f"{weights} が無い（`uv run python convert_dacvae.py` で作る）")
+        raise SystemExit(f"{weights} が無い（`uv run python -m irodori.dacvae.convert` で作る）")
     model = source.dacvae_cls(**read_kwargs(model_dir))
     model.load_state_dict(load_file(str(weights)), strict=True)
     return model.eval()
@@ -444,7 +445,7 @@ def read_wav(path: Path) -> tuple[torch.Tensor, int]:
     """WAV を mono の `[N]` f32 として読む（`(波形, サンプリング周波数)`）。
 
     読み手は soundfile。int16 PCM の正規化は **/32768**（int16 の下端 −32768 が厳密に −1.0
-    へ写る）で、`dacvae_host.py` がこの規約を合成 WAV で実測して golden の meta へ記録する。
+    へ写る）で、`irodori/dacvae/host.py` がこの規約を合成 WAV で実測して golden の meta へ記録する。
     """
     import soundfile as sf
 
@@ -462,7 +463,8 @@ def normalize_reference_wav(wav: torch.Tensor, sample_rate: int, target_db: floa
     `AudioSignal.normalize(db)` が ITU-R BS.1770-4 の integrated loudness を測って利得を掛け、
     `ensure_max_of_audio()` が peak > 1 のときだけ縮める。**式を持たずライブラリを呼ぶ**のは、
     K-weighting の IIR 係数とゲーティングを写さないため。上流の staticmethod との
-    ビット一致は `dacvae_host.py` が毎回実測する（そちらは `irodori_tts` を import できる）。
+    ビット一致は `irodori/dacvae/host.py` が毎回実測する（そちらは `irodori_tts` を
+    import できる）。
     """
     from audiotools import AudioSignal
 
@@ -475,7 +477,7 @@ def normalize_reference_wav(wav: torch.Tensor, sample_rate: int, target_db: floa
 def build_decoder_cases(latent_dir: Path, sym_max: int) -> tuple[tuple[str, torch.Tensor], ...]:
     """`decoder` の golden ケース `(名前, latent [1,S,32])`（{@link DECODER_CASES} の表どおり）。
 
-    供給元は `irodori_pipeline.py` の full-loop golden。**足りない長さはフレーム方向の反復**で
+    供給元は `irodori/pipeline_ref.py` の full-loop golden。**足りない長さはフレーム方向の反復**で
     作る（値域を実 latent のまま伸ばすため — 乱数で埋めると Snake の値域が変わる）。
     """
     sources: dict[str, torch.Tensor] = {}
@@ -484,7 +486,7 @@ def build_decoder_cases(latent_dir: Path, sym_max: int) -> tuple[tuple[str, torc
         if not path.is_file():
             raise SystemExit(
                 f"実 latent が無い: {path}"
-                "（`uv run --with 'transformers==5.14.1' python irodori_pipeline.py` で作る）"
+                "（`uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref` で作る）"
             )
         tensors = load_file(str(path))
         if LATENT_KEY not in tensors:
@@ -739,7 +741,7 @@ def _main_path_evidence(
 #: ブロッキング（= 縮約順）を変えるため、ビット一致は仕様保証の無い実装挙動（実測でも
 #: スレッド数 6 で 1 ulp 差・8 で 0 と揺れる — テスト追加で global RNG 列がずれた途端に
 #: 割れた）。門の目的は mean / scale の取り違え検出で、取り違えの差は O(1) — この許容で
-#: 判別力は落ちない（取り違えが落ち続けることは `tests/test_export_dacvae.py` が固定する）。
+#: 判別力は落ちない（取り違えが落ち続けることは `tests/test_irodori/dacvae/export.py` が固定する）。
 IN_PROJ_TRUNCATION_ATOL = 3e-7
 
 

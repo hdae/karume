@@ -4,7 +4,7 @@
 （＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
 組んだほうが検出力が高い。
 
-NOTE: Anima / SBV2 のカードテンプレートは wheel の外へ出た（ADR 0065 段 3+4）ので、その
+NOTE: Anima / SBV2 / Irodori のカードテンプレートは wheel の外へ出た（ADR 0065 段 3+4）ので、その
 依存ケースは `tools/export-recipes/<family>/tests/test_card.py` に居る。ここに残るのは
 core の描画部品と、まだ core に居る family のテンプレート。
 """
@@ -23,7 +23,6 @@ from karume.modelcard import (
     DEPTH_ANYTHING_LICENSE,
     DEPTH_ANYTHING_SUPPORTED_PIPELINE,
     DEPTH_ANYTHING_UPSTREAM,
-    IRODORI_SUPPORTED_PIPELINE,
     SIGLIP2_SUPPORTED_PIPELINE,
     CardMetadata,
     _frontmatter,
@@ -119,7 +118,7 @@ def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
 class TestSiglip2CardGate:
     def test_it_refuses_a_pipeline_it_does_not_describe(self) -> None:
         manifest = _siglip2_manifest()
-        manifest["models"]["base"]["pipeline"] = IRODORI_SUPPORTED_PIPELINE
+        manifest["models"]["base"]["pipeline"] = BIREFNET_SUPPORTED_PIPELINE
         with pytest.raises(ValueError, match=SIGLIP2_SUPPORTED_PIPELINE):
             render_siglip2_model_card(manifest, REPO)
 
@@ -174,7 +173,7 @@ def _birefnet_manifest(model: str = "hr") -> dict[str, Any]:
 class TestBirefnetCardGate:
     def test_it_refuses_a_pipeline_it_does_not_describe(self) -> None:
         manifest = _birefnet_manifest()
-        manifest["models"]["hr"]["pipeline"] = IRODORI_SUPPORTED_PIPELINE
+        manifest["models"]["hr"]["pipeline"] = SIGLIP2_SUPPORTED_PIPELINE
         with pytest.raises(ValueError, match=BIREFNET_SUPPORTED_PIPELINE):
             render_birefnet_model_card(manifest, REPO)
 
@@ -240,7 +239,7 @@ def _depth_anything_manifest(model: str = "small") -> dict[str, Any]:
 class TestDepthAnythingCardGate:
     def test_it_refuses_a_pipeline_it_does_not_describe(self) -> None:
         manifest = _depth_anything_manifest()
-        manifest["models"]["small"]["pipeline"] = IRODORI_SUPPORTED_PIPELINE
+        manifest["models"]["small"]["pipeline"] = SIGLIP2_SUPPORTED_PIPELINE
         with pytest.raises(ValueError, match=DEPTH_ANYTHING_SUPPORTED_PIPELINE):
             render_depth_anything_model_card(manifest, REPO)
 

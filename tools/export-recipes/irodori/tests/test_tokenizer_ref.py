@@ -1,6 +1,6 @@
-"""`irodori_tokenizer.py` の台本レベルの約束事（実資産不要分）。
+"""`irodori/tokenizer_ref.py` の台本レベルの約束事（実資産不要分）。
 
-実資産の emit は手動（`export_irodori.py` と同じ規律）。ここで固定するのは、壊れると
+実資産の emit は手動（`irodori/export.py` と同じ規律）。ここで固定するのは、壊れると
 **沈黙の id 列不一致**になる側の規律だけ:
 
 - 上流 `tokenizer.json` の形の門（model 種別 / unk_id / byte_fallback / normalizer /
@@ -23,7 +23,7 @@ import unicodedata
 import pytest
 import torch
 
-import irodori_tokenizer as tok
+from irodori import tokenizer_ref as tok
 
 TEXT_CONFIG = {"bos_token_id": 1, "pad_token_id": 3}
 

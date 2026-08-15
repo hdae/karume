@@ -1,17 +1,17 @@
 r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop latent golden）。
 
-`export_irodori.py` がグラフを、`irodori_tokenizer.py` がテキスト前処理の資産を出すのに対し、
+`irodori/export.py` がグラフを、`irodori/tokenizer_ref.py` がテキスト前処理の資産を出すのに対し、
 こちらが出すのは「グラフを 6 本回して latent を作るまで」の**最終値**。W3 のホスト実装
 （TS のパイプライン）が突き合わせる統合門の参照値そのもので、値は
-**export したグラフ基準**（= `export_irodori.py` の Graph ラッパ = eager 同値実装）で採る。
+**export したグラフ基準**（= `irodori/export.py` の Graph ラッパ = eager 同値実装）で採る。
 
     cd tools/exporter
-    uv run --with 'transformers==5.14.1' python irodori_pipeline.py
-    uv run --with 'transformers==5.14.1' python irodori_pipeline.py --dtype f16
-    uv run --with 'transformers==5.14.1' python irodori_pipeline.py --dtype i8
+    uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref
+    uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype f16
+    uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i8
 
 `--dtype f16` / `--dtype i8` は**別系列**（`outputs/series/irodori-v4-small-{f16,i8}/pipeline/`）
-へ書く。丸めは `export_irodori.fake_quant` を load 直後に当てるので、golden も上流突合の参照も
+へ書く。丸めは `irodori.export.fake_quant` を load 直後に当てるので、golden も上流突合の参照も
 **同じ丸めた重み**で計算される（ADR 0018 / 0019 / 0027 / 0050 — 系列ごとに golden を焼き直す形）。
 
 出力（既定 `outputs/series/irodori-v4-small{,-f16,-i8}/pipeline/`・`.gitignore` 配下）:
@@ -67,9 +67,10 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
-import export_irodori as ex
-from karume import patch_irodori
 from karume.convert import normalize_boundary_tensor
+
+from . import export as ex
+from . import patch
 
 META_FILE = "meta.json"
 CASE_PREFIX = "case."
@@ -121,8 +122,8 @@ CFG_EFFECT_MIN = 1e-2
 
 class ReferenceSpec(NamedTuple):
     """参照 latent の供給元（**合成のまま維持** — 第 4 波で実音声 latent は採れるように
-    なった〈`dacvae_host.py`〉が、この golden を差し替えると突合値が全て動くので既存を守る。
-    実音声の値域は speaker 単体門の実 latent ケース〈`export_irodori.SPEAKER_REAL_CASES`〉が
+    なった〈`irodori/dacvae/host.py`〉が、この golden を差し替えると突合値が全て動くので既存を守る。
+    実音声の値域は speaker 単体門の実 latent ケース〈`irodori.export.SPEAKER_REAL_CASES`〉が
     受け持つ）。
 
     `frames` は patch 前のフレーム数で、`speaker_patch_size` で割り切れる値にする
@@ -229,7 +230,7 @@ def _pack_body(tokenizer: Any, body: str, bos_id: int, max_length: int) -> torch
     """前処理済みの本文 → `[1,T]` の**詰めた** token 列（BOS + `max_length-1` で切ったもの）。
 
     上流 `PretrainedTextTokenizer.batch_encode` は同じ列を右 pad して返す。静的方式では
-    ホストが pad を消して呼ぶので（`export_irodori.py` のモジュール docstring）、ここでは
+    ホストが pad を消して呼ぶので（`irodori/export.py` のモジュール docstring）、ここでは
     pad しない列を作る。
     """
     ids = list(tokenizer.encode(body, add_special_tokens=False).ids)[: max_length - 1]
@@ -260,7 +261,7 @@ def _packed_caption_ids(tokenizer: Any, caption: str, bos_id: int, max_length: i
 
 
 class HostGraphs(NamedTuple):
-    """ホストが回す 5 本のグラフ（`export_irodori.py` の eager 同値ラッパそのもの）。"""
+    """ホストが回す 5 本のグラフ（`irodori/export.py` の eager 同値ラッパそのもの）。"""
 
     backbone: nn.Module
     text_proj: nn.Module
@@ -338,7 +339,7 @@ def run_case(
 
     `frames_override` は **S を外から固定する**ための注入口（既定 `None` = duration の予測
     どおり）。golden の emit は必ず `None` で呼ぶ（S も golden の一部）。使うのは
-    `measure_quant_irodori.py` で、量子化構成の間で波形長を揃えないと SNR / LSD が定義
+    `irodori/measure_quant.py` で、量子化構成の間で波形長を揃えないと SNR / LSD が定義
     できないため（`measure_quant_sbv2.py` が dump 側 `w_ceil` で時間グリッドを固定するのと
     同じ理由）。**予測そのもの**は `meta["predictedS"]` に残す — S ドリフトはこの台本が測る
     量ではなく、測る側が読む診断値。
@@ -691,7 +692,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     duration_predictor = ex.load_duration_predictor(source, state, config)
     dit = ex.load_dit(source, state, config, text_config)
 
-    # MUST: 丸めは load の直後・golden の採取より前（`export_irodori.fake_quant` の順序 MUST）。
+    # MUST: 丸めは load の直後・golden の採取より前（`irodori.export.fake_quant` の順序 MUST）。
     # `dit` は `TextToLatentRFDiT` **丸ごと**（backbone / projector / speaker / duration の
     # コピーを内側に持つ）なので、上流突合（`sample_euler_rf_cfg` / `predict_duration_log_frames`）
     # もここで丸めた重みで回る = グラフ経路と上流経路の両辺が同じ丸めを受ける。
@@ -711,9 +712,9 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     )
 
     # MUST: グラフラッパは**パッチ後**でしか正しく動かない（実数形 RoPE 表を渡すため）。
-    # このファイルは「パッチ前の参照」を採らない（採る側は export_irodori.py）ので、
+    # このファイルは「パッチ前の参照」を採らない（採る側は irodori/export.py）ので、
     # ここで当てて構わない。
-    patch_irodori.apply_patches()
+    patch.apply_patches()
     speaker_max = ex.speaker_sym_max(model_config)
     graphs = HostGraphs(
         backbone=ex.BackboneGraph(backbone),
@@ -847,7 +848,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
 def default_out_dir(model_dir: Path, dtype: str = "f32") -> Path:
     """既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16,-i8}/pipeline/`）。
 
-    系列 root の綴りは `export_irodori.default_out_root` と同一 —
+    系列 root の綴りは `irodori.export.default_out_root` と同一 —
     `pipeline/` はその下の 1 段（グラフのターゲットと並ぶ席）。
     """
     return ex.default_out_root(model_dir, dtype) / "pipeline"

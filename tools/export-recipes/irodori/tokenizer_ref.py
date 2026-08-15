@@ -1,11 +1,11 @@
 r"""Irodori-TTS v4 のテキスト前処理層（`normalize_text` + Unigram トークナイザ）の資産と golden。
 
-`export_irodori.py` が**グラフ**を出すのに対し、こちらが扱うのは「生テキスト → トークン id 列」
+`irodori/export.py` が**グラフ**を出すのに対し、こちらが扱うのは「生テキスト → トークン id 列」
 だけ。モデルグラフにも重みにも触らない（読むのはチェックポイントの `__metadata__` の
 `bos_token_id` / `pad_token_id` だけ）。
 
     cd tools/exporter
-    uv run --with 'transformers==5.14.1' python irodori_tokenizer.py
+    uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref
 
 出力は 4 本（既定 `outputs/series/irodori-v4-small/tokenizer/`・`.gitignore` 配下）:
 
@@ -55,7 +55,7 @@ emit の前に全て実測し、1 つでも外れたら**何も書かない**（
   added_tokens のフラグ / 256 本のバイトトークンの id）
 - 語彙に改行・タブ・生空白を含むトークンが無いこと（行区切りの前提）
 - `bos_token_id` / `pad_token_id` が**チェックポイントの config と added_tokens で一致**すること
-- **2 つの呼び出し経路が同じ id 列を出すこと** — `tokenizers.Tokenizer`（`export_irodori.py` の
+- **2 つの呼び出し経路が同じ id 列を出すこと** — `tokenizers.Tokenizer`（`irodori/export.py` の
   `build_cases` が使う）と `transformers.AutoTokenizer`（上流 `PretrainedTextTokenizer` が
   使う）。片方だけが正しくても golden は自己一致するので、ここで突き合わせる
 - byte_fallback ケースが**実際に**バイト展開になっていること（期待バイト id 列との一致）
@@ -75,8 +75,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from export_irodori import DEFAULT_MODEL_DIR, DEFAULT_SOURCE_DIR, TOKENIZER_FILE, read_configs
 from karume.paths import REPO_ROOT, SERIES_ROOT
+
+from .export import DEFAULT_MODEL_DIR, DEFAULT_SOURCE_DIR, TOKENIZER_FILE, read_configs
 
 ASSET_FILE = "tokenizer.json"
 ENCODE_GOLDEN_FILE = "golden.encode.json"
@@ -232,7 +233,7 @@ CAPTION_CASES: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
-#: 長文（`batch-truncated` の本文）。`export_irodori.py` の `LONG_PASSAGE_A` と同じ文体で、
+#: 長文（`batch-truncated` の本文）。`irodori/export.py` の `LONG_PASSAGE_A` と同じ文体で、
 #: **1 段落では足りない**（T=144）ので 3 段落ぶんの長さを持たせる — `max_text_len` = 256 の
 #: truncation を実際に踏ませるのが目的。
 TRUNCATING_PASSAGE = (
@@ -409,7 +410,7 @@ def byte_fallback_ids(text: str) -> list[int]:
 class TokenizerPair:
     """id 列の**2 経路**（`tokenizers` 生 / `transformers` 経由）を束ねて突き合わせる。
 
-    `export_irodori.py` の `build_cases` は前者を、上流の `PretrainedTextTokenizer` は
+    `irodori/export.py` の `build_cases` は前者を、上流の `PretrainedTextTokenizer` は
     後者を使う。golden はどちらか一方から採るしかないので、**両方が同じ列を出すこと**を
     ケースごとに実測してから採る（片方だけ壊れても golden は自己一致してしまう）。
     """
@@ -731,7 +732,7 @@ def build_parity_fixture(
     return {
         "_doc": [
             "Irodori-TTS v4 テキスト層のパリティ用フィクスチャ",
-            "（生成: tools/exporter/irodori_tokenizer.py）。",
+            "（生成: tools/exporter/irodori/tokenizer_ref.py）。",
             "正本は上流 normalize_text と tokenizers / transformers で、id 列はそこから採った",
             "実測値。語彙は全ケースの再現に要る**部分集合**（102,400 本を commit しないため）",
             "だが、minScore / maxTokenLength は語彙**全体**の値。NFKC 差分表は全体を載せる",

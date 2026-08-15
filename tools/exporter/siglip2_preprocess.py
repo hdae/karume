@@ -2,7 +2,7 @@ r"""SigLIP2 の画像前処理（resize → rescale → normalize）の**パリ�
 
 `export_siglip2.py` が**グラフ**を出すのに対し、こちらが扱うのはグラフの手前
 （生の RGB8 画素 → 正規化済み `pixel_values`）だけ。モデルの重みにも触らない
-（読むのは `preprocessor_config.json` だけ）。`irodori_tokenizer.py` と同じ役割の台本を、
+（読むのは `preprocessor_config.json` だけ）。`irodori/tokenizer_ref.py` と同じ役割の台本を、
 テキストではなく画像で持つ。
 
     cd tools/exporter
@@ -123,7 +123,7 @@ def _smooth(height: int, width: int) -> np.ndarray:
 def build_cases() -> tuple[dict[str, Any], ...]:
     """フィクスチャのケース `(名前, 理由, 画像, 出力寸法)`。
 
-    網羅ではなく「素朴な移植が落ちる境界」を 1 件ずつ置く設計（`irodori_tokenizer.py` の
+    網羅ではなく「素朴な移植が落ちる境界」を 1 件ずつ置く設計（`irodori/tokenizer_ref.py` の
     `ENCODE_CASES` と同じ規律）。寸法を実運用の 224 / 384 まで上げないのは、1 ケースだけで
     f32 が 150,528 本になりフィクスチャが git に載らないため — resize は寸法に対して一様な
     コードで、境界の場合分けは**縮尺**（`scale >= 1` かどうか）と**端の切り詰め**にしか無い

@@ -1,6 +1,6 @@
-"""`patch_irodori` の書き換えが原実装と同値であることの回帰テスト（実重み不要分）。
+"""`irodori.patch` の書き換えが原実装と同値であることの回帰テスト（実重み不要分）。
 
-実重みでの端から端までの同値検証は `export_irodori.py`（emit のたびに全 golden ケースで
+実重みでの端から端までの同値検証は `irodori/export.py`（emit のたびに全 golden ケースで
 実測し、ビット一致でなければ落とす）。ここでは transformers / Irodori 実装 clone があれば
 回る単体レベルの同値だけを固定する。
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from karume import patch_irodori
+from irodori import patch as patch_irodori
 
 modernbert = pytest.importorskip("transformers.models.modernbert.modeling_modernbert")
 

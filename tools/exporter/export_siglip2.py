@@ -13,7 +13,7 @@ transformers は **5.14.1 でピン**する（`karume.patch_siglip2` がモデ�
 ## モデル軸
 
 対象は `--model-dir` の 1 軸で、系列名はそのディレクトリ名から導く（`export_sbv2.py` /
-`export_irodori.py` と同じ持ち方）— 出力先を固定にすると、別のモデルを書き出した瞬間に先の
+`irodori/export.py` と同じ持ち方）— 出力先を固定にすると、別のモデルを書き出した瞬間に先の
 系列が黙って上書きされる。
 
     uv run --group siglip2 python export_siglip2.py \

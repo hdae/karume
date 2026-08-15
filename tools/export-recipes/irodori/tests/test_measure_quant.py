@@ -1,4 +1,4 @@
-"""`measure_quant_irodori.py` の pure 部分（実重み不要分）。
+"""`irodori/measure_quant.py` の pure 部分（実重み不要分）。
 
 実測そのものは手動（full-loop は torch CPU で数十分かかる）。ここで固定するのは、壊れると
 **測定値が静かに嘘になる**側だけ:
@@ -21,9 +21,9 @@ import pytest
 import torch
 from torch import nn
 
-import export_irodori as ex
-import irodori_pipeline as ip
-import measure_quant_irodori as mq
+from irodori import export as ex
+from irodori import measure_quant as mq
+from irodori import pipeline_ref as ip
 
 
 class TestMetrics:
@@ -383,7 +383,7 @@ class TestReportTables:
 
 
 class TestFramesOverride:
-    """`irodori_pipeline.run_case` の注入口（S を外から固定する）— 既定は素の予測。"""
+    """`irodori.pipeline_ref.run_case` の注入口（S を外から固定する）— 既定は素の予測。"""
 
     def test_the_golden_path_keeps_the_predicted_length(self):
         signature = ip.run_case.__kwdefaults__

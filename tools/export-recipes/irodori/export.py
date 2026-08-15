@@ -5,13 +5,13 @@ duration predictor**（同 G2 / G3）・**DiT 1 step**（同 G5' = G4 を畳ん�
 codec（G6 / G7）は後続の波でこの台本にターゲットとして足す。
 
     cd tools/exporter
-    uv run --with 'transformers==5.14.1' python export_irodori.py
-    uv run --with 'transformers==5.14.1' python export_irodori.py --target backbone
-    uv run --with 'transformers==5.14.1' python export_irodori.py --dtype f16
-    uv run --with 'transformers==5.14.1' python export_irodori.py --dtype i8
+    uv run --with 'transformers==5.14.1' python -m irodori.export
+    uv run --with 'transformers==5.14.1' python -m irodori.export --target backbone
+    uv run --with 'transformers==5.14.1' python -m irodori.export --dtype f16
+    uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i8
 
 transformers は **5.14.1 でピン**する（`export_embeddinggemma.py` と同じ理由 — モデリング
-コードが変わるとグラフ形が変わる。加えて `karume.patch_irodori` が
+コードが変わるとグラフ形が変わる。加えて `karume.irodori.patch` が
 `ModernBertAttention.forward` をクラス属性ごと差し替える）。pyproject.toml / uv.lock には
 入れず `--with` で一時的に足す。
 
@@ -160,12 +160,12 @@ attention）。台本ローカルの指定で、既定の分解表には入れ�
 
 ## パッチと参照の順序
 
-`karume.patch_irodori` の差し替えは**プロセス全域**なので、golden の期待値（= パッチ前の
+`karume.irodori.patch` の差し替えは**プロセス全域**なので、golden の期待値（= パッチ前の
 eager 出力）を採り終えるまでパッチを当てない。順序は `export_series` が
-`patch_irodori.patches_applied()` で機械的に守る（破れば偽 PASS）。
+`patch.patches_applied()` で機械的に守る（破れば偽 PASS）。
 
 speaker / duration が要るパッチは 2 つ（complex RoPE の実数化・rank-2 weight RMSNorm の分割
-— `patch_irodori` のモジュール docstring）で、`dit` はさらに LowRankAdaLN の weightless RMS
+— `irodori.patch` のモジュール docstring）で、`dit` はさらに LowRankAdaLN の weightless RMS
 畳み込みを要る。RMSNorm 分割と AdaLN 畳み込みはビット一致が構造的に成り立ち、RoPE の実数化は
 **この重みの幾何（head_dim 64）で**ビット一致することが実測なので、`EAGER_EQUIV_ATOL = 0` の
 同値検証はテキスト系 3 本と同じ厳しさのまま通る（head_dim が変われば 1 ulp ずれうる —
@@ -210,7 +210,6 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.export import Dim
 
-from karume import patch_irodori
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -222,6 +221,8 @@ from karume.pipeline import export_to_file
 from karume.quantize import QUANT_CHANNEL_AXES, fake_quant_int8, round_weights_to_f16
 from karume.rope import ROPE_BUFFER_NAMES, assert_rope_lifted
 
+from . import patch
+
 #: 実重みの置き場（`hf download Aratako/Irodori-TTS-v4-Small` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "irodori" / "v4-small"
 
@@ -232,18 +233,18 @@ WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
 #: モデル実装（GitHub `Aratako/Irodori-TTS` の clone）の置き場。
 DEFAULT_SOURCE_DIR = INPUTS_ROOT / "irodori" / "Irodori-TTS"
 
-#: 実 latent の供給元（`dacvae_host.py` が書く参照音声のホスト前処理 golden）。**そこにある
+#: 実 latent の供給元（`irodori/dacvae/host.py` が書く参照音声のホスト前処理 golden）。**そこにある
 #: 既製ファイルを読むだけ**で、この台本は DACVAE の重みも encode 経路も引かない
-#: （`dacvae_host.py` 側が上流 `encode_waveform` とのビット一致を実測済み）。
+#: （`irodori/dacvae/host.py` 側が上流 `encode_waveform` とのビット一致を実測済み）。
 REFERENCE_LATENT_DIR = SERIES_ROOT / "dacvae-32dim" / "host"
 REFERENCE_LATENT_CASE = "ref-default"
 REFERENCE_LATENT_PREFIX = "case."
 REFERENCE_LATENT_KEY = "latent"
 
-#: `dacvae_host.py` を回す生成コマンド（実 latent が無いときのエラーにそのまま出す）。
+#: `irodori/dacvae/host.py` を回す生成コマンド（実 latent が無いときのエラーにそのまま出す）。
 REFERENCE_LATENT_COMMAND = (
     "uv run --with descript-audiotools --with einops --with 'transformers==5.14.1'"
-    " python dacvae_host.py"
+    " python -m irodori.dacvae.host"
 )
 
 MODEL_FILE = "model.safetensors"
@@ -460,7 +461,7 @@ SPEAKER_CASES: tuple[tuple[str, int, int], ...] = (
 #: 供給元は公式サンプルの参照音声（7.6 秒 = 190 フレーム）を上流の決定的 encode に通した
 #: {@link REFERENCE_LATENT_KEY} で、patch（`speaker_patch_size` 4・端は上流が捨てる）後は
 #: 47 行。合成の標準正規とは値域も相関構造も違うので、**tolerance の根拠を実運用の値域と
-#: 対応させる**ためにこの 2 本を足す（`export_dacvae.py` の `DECODER_CASES` と同じ理由）。
+#: 対応させる**ためにこの 2 本を足す（`irodori/dacvae/export.py` の `DECODER_CASES` と同じ理由）。
 #:
 #: 短尺側を 6 に採るのは、**合成の `ref-1s` と同じ S** で並べるため — 同じ長さで合成と実の
 #: 誤差を直接比べられる形にしておくと、tolerance が「長さ」で決まっているのか「値域」で
@@ -830,7 +831,7 @@ class SpeakerGraph(nn.Module):
     - `SelfAttention` の `key_mask` を `None` にする（全 1 マスクの SDPA は加算バイアスが
       全 0 なので `scores + 0` の恒等）
 
-    RoPE 表は **Tmax（= S の宣言上限）で焼いた実数形定数**を渡す（`patch_irodori` の
+    RoPE 表は **Tmax（= S の宣言上限）で焼いた実数形定数**を渡す（`irodori.patch` の
     `real_pair_rope_table`）。`SelfAttention` 側の `freqs_cis[:seq_len]` が記号 prefix
     スライスになり、定数畳み込みは ADR 0010 の経路にそのまま乗る（backbone の帯マスク /
     RoPE 表と同じ扱い）。**グラフ入力へ昇格しない**のは、表が 384KB しかなく、
@@ -843,7 +844,7 @@ class SpeakerGraph(nn.Module):
         self.speaker_norm = speaker_norm
         # 素の属性（lifted tensor constant）にする。バッファ/パラメータは定数畳み込みの葉に
         # ならず、cos / sin がそのまま IR に残る（karume.rope.lift_rope_buffers と同じ理由）。
-        self.rope_table = patch_irodori.real_pair_rope_table(encoder.head_dim, sym_max)
+        self.rope_table = patch.real_pair_rope_table(encoder.head_dim, sym_max)
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         encoder = self.encoder
@@ -913,7 +914,7 @@ class DitGraph(nn.Module):
     ADR 0047 決定 3）。射影も RoPE も q/k ノルムも実モジュールのメソッドをそのまま呼ぶので、
     このラッパが写しているのは「連結の順序」と「residual の組み立て」だけ。
 
-    RoPE 表は `speaker` と同じく **Smax で焼いた実数形定数**（`patch_irodori` の
+    RoPE 表は `speaker` と同じく **Smax で焼いた実数形定数**（`irodori.patch` の
     `real_pair_rope_table`）で、`[:seq_len]` の記号 prefix スライスが ADR 0010 の経路に乗る。
     """
 
@@ -927,7 +928,7 @@ class DitGraph(nn.Module):
         self.text_norm = model.text_norm
         self.caption_norm = model.caption_norm
         # 素の属性（lifted tensor constant）にする — SpeakerGraph と同じ理由。
-        self.rope_table = patch_irodori.real_pair_rope_table(model.head_dim, sym_max)
+        self.rope_table = patch.real_pair_rope_table(model.head_dim, sym_max)
 
     def forward(
         self,
@@ -1003,7 +1004,7 @@ def golden_case_body(name: str, kind: str, body: str, normalize_text: Any) -> st
 
     MUST: `normalize_text` は **text 専用**。上流 `inference_runtime._synthesize` が caption に
     掛けるのは `str(...).strip()` だけなので、caption へ正規化を足すと外側括弧の剥がし・NFKC・
-    記号削除のぶんだけ conditioning が黙って別物になる（同じ理由で `irodori_pipeline.py` の
+    記号削除のぶんだけ conditioning が黙って別物になる（同じ理由で `irodori/pipeline_ref.py` の
     `_packed_caption_ids` も strip だけを掛ける）。
     """
     if kind == "text":
@@ -1067,7 +1068,7 @@ def build_real_speaker_cases(
 ) -> tuple[tuple[str, torch.Tensor], ...]:
     """`speaker` の**実 latent** golden ケース（{@link SPEAKER_REAL_CASES} の表どおり）。
 
-    供給元は `dacvae_host.py` が書いた既製の `[1,190,32]`。patch は**上流の
+    供給元は `irodori/dacvae/host.py` が書いた既製の `[1,190,32]`。patch は**上流の
     `patch_sequence_with_mask` を呼ぶ**（`patch_sequence` に渡ってくる） — 端の切り捨ての
     仕方を写すと、上流が変わっても台本だけ古いまま黙って通る。
 
@@ -1110,7 +1111,7 @@ def _pristine_speaker_outputs(
     cases: Sequence[tuple[str, torch.Tensor]],
 ) -> dict[str, torch.Tensor]:
     """**パッチ前**の speaker 側 eager 出力（`speaker_norm` まで掛けた `[1,S,768]`）。"""
-    if patch_irodori.patches_applied():
+    if patch.patches_applied():
         raise AssertionError("パッチ適用後に参照を採ろうとした（同値検証が恒真化する）")
     outputs: dict[str, torch.Tensor] = {}
     for name, latent in cases:
@@ -1253,7 +1254,7 @@ def _pristine_duration_outputs(
     aux_dim: int,
 ) -> dict[str, torch.Tensor]:
     """**パッチ前**の duration 出力（`[1]` の log frames）。"""
-    if patch_irodori.patches_applied():
+    if patch.patches_applied():
         raise AssertionError("パッチ適用後に参照を採ろうとした（同値検証が恒真化する）")
     aux = torch.zeros((1, aux_dim), dtype=torch.float32)
     return {name: _call_duration(predictor, args, aux) for name, args in reference.items()}
@@ -1439,7 +1440,7 @@ def _pristine_dit_outputs(
     model: nn.Module, reference: Mapping[str, Mapping[str, torch.Tensor]]
 ) -> dict[str, torch.Tensor]:
     """**パッチ前**の DiT 出力（`[1,S,32]` の v_pred）。"""
-    if patch_irodori.patches_applied():
+    if patch.patches_applied():
         raise AssertionError("パッチ適用後に参照を採ろうとした（同値検証が恒真化する）")
     return {name: _call_dit(model, args) for name, args in reference.items()}
 
@@ -1498,13 +1499,13 @@ def _pristine_outputs(
 ) -> dict[str, dict[str, tuple[torch.Tensor, ...]]]:
     """**パッチ前**の eager 出力（golden の期待値そのもの）をターゲット別に採る。
 
-    MUST: `patch_irodori` を当てる前に呼ぶ（当てた後だと同値検証が恒真化する）。
+    MUST: `irodori.patch` を当てる前に呼ぶ（当てた後だと同値検証が恒真化する）。
     実モジュールの forward をそのまま通す（全 1 マスク）— ラッパの写し間違いは
     `_check_wrapper_equivalence` がここで採った値との差として出る。
 
     `caption-proj` だけ期待値が 2 本になる（第 2 出力 = `caption_norm` 適用済み系列）。
     """
-    if patch_irodori.patches_applied():
+    if patch.patches_applied():
         raise AssertionError("パッチ適用後に参照を採ろうとした（同値検証が恒真化する）")
     outputs: dict[str, dict[str, tuple[torch.Tensor, ...]]] = {
         target: {} for target in TEXT_TARGETS
@@ -1782,7 +1783,7 @@ def fake_quant(dtype: str, modules: Mapping[str, nn.Module]) -> FakeQuantResult:
     ADR 0006 / 0018 / 0019 / 0027 / 0050 の fake-quant。丸めた本数を役割名で引ける形にして
     返す（`--dtype f16` を渡したのに 0 本、を沈黙させないため — 総数 0 は落とす）。
 
-    MUST（順序）: ① `load_*` の**直後**に呼ぶ。この台本の重みは `convert_dacvae.py` /
+    MUST（順序）: ① `load_*` の**直後**に呼ぶ。この台本の重みは `irodori/dacvae/convert.py` /
     チェックポイントの時点で実効重み（`remove_weight_norm` 相当は変換時に焼き込み済み・
     LoRA も無い）なので、SBV2 の「remove の後」に相当する時点が load 直後まで前倒しになる。
     ② 参照・golden の採取の**前**に呼ぶ（`karume.quantize` の MUST — 後に当てると golden
@@ -1961,7 +1962,7 @@ def export_series(
     rope_buffers = sorted(
         name for name, _ in backbone.backbone.named_buffers() if name.endswith(ROPE_BUFFER_NAMES)
     )
-    patch_irodori.apply_patches()
+    patch.apply_patches()
 
     # ---- ③ ラッパの eager 同値（パッチ + マスク落としの両方をここで実測する） ----
     graphs = {
