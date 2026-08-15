@@ -1,4 +1,4 @@
-"""`anima_demo.py` / `karume.anima_text` の約束事。
+"""`anima/demo.py` / `anima.text` の約束事。
 
 この層が壊れると **id 列だけが静かに別物**になる（shape は合ったまま画が変わる）。ここで
 固定するのは 2 系統:
@@ -24,11 +24,11 @@ from typing import Any
 
 import pytest
 
-import anima_demo
-import anima_pipeline
-from karume import anima_text as at
+from anima import demo as anima_demo
+from anima import pipeline_ref as anima_pipeline
+from anima import text as at
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 FIXTURE_PATH = (
     REPO_ROOT / "packages" / "runtime" / "tests" / "fixtures" / "anima-text" / "parity.json"
 )
@@ -244,7 +244,7 @@ QWEN_JSON = _cached("tokenizer/tokenizer.json")
 T5_JSON = _cached("t5_tokenizer/tokenizer.json")
 needs_tokenizers = pytest.mark.skipif(
     QWEN_JSON is None or T5_JSON is None,
-    reason=f"{REPO} の tokenizer.json が HF キャッシュに無い（再生成: README の anima_demo.py）",
+    reason=f"{REPO} の tokenizer.json が HF キャッシュに無い（再生成: README の anima/demo.py）",
 )
 
 

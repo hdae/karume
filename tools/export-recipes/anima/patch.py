@@ -33,12 +33,12 @@
 6. **DiT トークン形ラッパ**（#21 波 T2） — patchify / unpatchify / rope 表をホストへ出した
    **追加系列**。3 の逐語ラッパは 1 行も動かさない（静的系列は既存資産のまま）。
 
-MUST: パッチ適用後のモジュールは適用前と **eager 同値**であること（`export_anima.py --verify` が
+MUST: パッチ適用後のモジュールは適用前と **eager 同値**であること（`anima/export.py --verify` が
 実重みで実測する）。同値でない変更をここに置いてはならない。
 
 MUST: VAE パッチは**クラス属性のプロセス全域差し替え**なので、「パッチ前の参照」を採れるのは
 1 プロセスにつき 1 回だけ。適用済みかどうかは {@link vae_patches_applied} が答え、順序違反は
-呼び出し側（`export_anima.py`）が fail loudly で拒否する（恒真化 = 偽 PASS の遮断 —
+呼び出し側（`anima/export.py`）が fail loudly で拒否する（恒真化 = 偽 PASS の遮断 —
 ADR 0013 の規律をそのまま踏襲）。
 """
 

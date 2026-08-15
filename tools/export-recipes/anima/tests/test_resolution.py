@@ -1,4 +1,4 @@
-"""`karume.resolution` — 解像度の綴り（#23）。
+"""`anima.resolution` — 解像度の綴り（#23）。
 
 参照台本の入口でしか使わない小さな関数だが、**壊れても実行時に例外が出ず数だけが静かに
 ずれる**側の性質を持つ: `1344x768` を `768x1344` と読む誤りは、要素数も型も合ったまま
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from karume.resolution import (
+from anima.resolution import (
     GRANULARITY,
     format_resolution,
     parse_resolution,

@@ -7,7 +7,7 @@ IR 語彙に必要になる。素の属性（lifted tensor constant）へ降格�
 
 対象は transformers 系の RoPE バッファ命名（接尾一致）で**特定のモデル / ファミリに依存
 しない** — Anima の Qwen3 / EmbeddingGemma の Gemma3 / Irodori の text backbone が同じ形で
-使う（ADR 0065 段 2 で `patch_anima` から回収）。
+使う（ADR 0065 段 2 で Anima の patch 層から回収）。
 """
 
 from __future__ import annotations

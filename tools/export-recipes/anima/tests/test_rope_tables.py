@@ -21,7 +21,7 @@ import pytest
 import torch
 from torch import nn
 
-from karume.patch_anima import dit_rope_base_tables, dit_rope_tables
+from anima.patch import dit_rope_base_tables, dit_rope_tables
 
 transformer_cosmos = pytest.importorskip("diffusers.models.transformers.transformer_cosmos")
 CosmosRotaryPosEmbed = transformer_cosmos.CosmosRotaryPosEmbed

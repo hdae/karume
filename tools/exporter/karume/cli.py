@@ -1,6 +1,5 @@
-"""`karume` コマンド — export / export-sbv2 / dist / verify のサブコマンド式ディスパッチ。
+"""`karume` コマンド — export-* / dist / verify のサブコマンド式ディスパッチ。
 
-    karume export --dtype f16 --dit-graph dyn --lora turbo.safetensors  # 台本 export_anima.py
     karume export-sbv2 --dtype i8 --target front                        # 台本 export_sbv2.py
     karume dist --pipeline sbv2                                         # karume.dist
     karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
@@ -12,14 +11,17 @@ CLI 側の写しでは抜けたまま通る形が生まれ、しかも片方だ�
 
 DECIDED: 台本の選択も**サブコマンド名**で綴る（`karume export-sbv2`）— `karume export
 --pipeline sbv2` にすると CLI がフラグを 1 つ読んで素通しから外すことになり、上の MUST が
-「1 つだけなら」で崩れる。素の `karume export` は Anima のまま据え置く（既存の綴りを動かすと
-呼び出し側が黙って別の台本に届く）。
+「1 つだけなら」で崩れる。
+
+NOTE: 素の `karume export`（Anima）は**この名簿から降りた** — 台本が
+`tools/export-recipes/anima/` へ出てリポ直下にも wheel にも無い（ADR 0065 段 3+4）。
+起動は `uv run python -m anima.export`（export-recipes ルートから）。
 
 MUST: ディスパッチは遅延 import — `karume dist` / `karume verify` を、export 台本
 （diffusers / style_bert_vits2 / モデル定義の重い import）を 1 つも読まずに起動できる形に
 保つ。台本の読み込みは {@link load_script} の中でだけ起きる。
 
-NOTE: 台本（`export_anima.py` / `export_sbv2.py`）は**パッケージ外のリポジトリ直下
+NOTE: 台本（`export_sbv2.py` など）は**パッケージ外のリポジトリ直下
 スクリプト**なので、import 経路ではなくパス指定で読む。wheel には入らない — 無ければ
 fail loudly で置き場を示す。
 """
@@ -35,9 +37,6 @@ from types import ModuleType
 
 #: 台本の置き場（karume/cli.py → karume → tools/exporter）。
 _SCRIPT_DIR = Path(__file__).resolve().parents[1]
-
-#: `karume export` が包む台本（ADR 0016 の emit ターゲット 4 本を書き出す側）。
-EXPORT_SCRIPT = "export_anima"
 
 #: `karume export-sbv2` が包む台本（ADR 0013 の emit ターゲット 5 本を書き出す側）。
 EXPORT_SBV2_SCRIPT = "export_sbv2"
@@ -81,7 +80,7 @@ def load_script(name: str) -> ModuleType:
     if spec is None or spec.loader is None:
         raise SystemExit(
             f"export 台本が読めない: {path}"
-            "（台本はパッケージ外のスクリプトで wheel に入らない — `karume export` は"
+            "（台本はパッケージ外のスクリプトで wheel に入らない — `karume export-*` は"
             "リポジトリの作業ツリーでだけ動く）"
         )
     module = importlib.util.module_from_spec(spec)
@@ -98,10 +97,6 @@ def load_script(name: str) -> ModuleType:
             del sys.modules[name]
         raise
     return module
-
-
-def run_export(argv: Sequence[str]) -> None:
-    return load_script(EXPORT_SCRIPT).main(argv)
 
 
 def run_export_sbv2(argv: Sequence[str]) -> None:
@@ -154,7 +149,6 @@ def run_verify(argv: Sequence[str]) -> None:
 
 #: サブコマンド名 → （ハンドラ, 一覧に出す 1 行）。順序がそのまま `--help` の並び。
 COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
-    "export": (run_export, "Anima を IR v1 + golden io へ書き出す（台本 export_anima.py）"),
     "export-sbv2": (
         run_export_sbv2,
         "SBV2 を IR v1 + golden io へ書き出す（台本 export_sbv2.py）",

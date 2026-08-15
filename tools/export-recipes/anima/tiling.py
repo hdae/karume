@@ -12,10 +12,10 @@ MUST: `vae.enable_tiling()` を**呼ばない**。上流（`autoencoder_kl_qweni
 食えない。走査は「最後のタイルの開始位置を `extent − tile` にスナップする等間隔配置」へ
 変えてある（recon §4.2 が予告した意図的逸脱）— したがって幾何は**自前実装**でなければ
 TS 側と一致しない。**ブレンドの式**は上流の `blend_v` / `blend_h` の逐語移植で、同値は
-`tests/test_anima_tiling.py` が本物のメソッドとの突合で固定する。
+`anima/tests/test_tiling.py` が本物のメソッドとの突合で固定する。
 
 MUST: 重みは資産系列と同じ dtype へ fake-quant してから参照を採る（ADR 0006 —
-`anima_pipeline.py` と同じ規律）。`--dtype f16` が既定なのは、TS 側が
+`anima/pipeline_ref.py` と同じ規律）。`--dtype f16` が既定なのは、TS 側が
 `outputs/series/anima-f16/vae_decoder`（= f16 系列）をタイル decoder として開くから。
 
 出力（既定 `<repo>/outputs/series/anima-tiling-f16-1024/`）:
@@ -23,9 +23,9 @@ MUST: 重みは資産系列と同じ dtype へ fake-quant してから参照を�
     tiling.safetensors   latents_denorm（タイル decode の入力）/ image_tiled（出力）
     tiling.json          タイル幾何（開始位置列・stride・ブレンド幅）とメタ
 
-    uv run --group anima python anima_tiling.py
-    uv run --group anima python anima_tiling.py --dtype f16 --resolution 1024
-    uv run --group anima python anima_tiling.py --resolution 1344x768 \
+    uv run python -m anima.tiling
+    uv run python -m anima.tiling --dtype f16 --resolution 1024
+    uv run python -m anima.tiling --resolution 1344x768 \
         --latents ../../outputs/series/anima-pipeline-turbo-f16-1344x768/pipeline.safetensors
 
 `--resolution` は **WxH**（正方は略記できる）。非正方では VAE の静的資産が無いので、
@@ -50,11 +50,13 @@ import torch
 
 from karume.paths import SERIES_ROOT
 from karume.quantize import round_weights_to_f16
-from karume.resolution import format_resolution, parse_resolution, resolution_meta
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from .resolution import format_resolution, parse_resolution, resolution_meta
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-#: 入力 latent を借りる参照フィクスチャ（`anima_pipeline.py --dtype f16 --resolution 1024`）。
+#: 入力 latent を借りる参照フィクスチャ
+#: （`python -m anima.pipeline_ref --dtype f16 --resolution 1024`）。
 DEFAULT_LATENTS = SERIES_ROOT / "anima-pipeline-turbo-f16-1024" / "pipeline.safetensors"
 #: タイル decoder の latent 幅（= 512px 用資産の入力 `[1,16,64,64]`）。
 TILE_LATENT = 64
@@ -262,7 +264,7 @@ def main() -> None:
 
     if not args.latents.is_file():
         raise SystemExit(
-            f"入力 latent {args.latents} が無い — 先に `anima_pipeline.py --dtype f16 "
+            f"入力 latent {args.latents} が無い — 先に `python -m anima.pipeline_ref --dtype f16 "
             f"--resolution {args.resolution} …` でパイプライン参照を採る"
             "（examples/anima/README.md の資産表）"
         )

@@ -14,7 +14,7 @@ r"""Anima のプロンプト用トークナイザ（Qwen2 BPE / T5 Unigram）を
   ② **参照実装** — TS 実装の鏡像（`Qwen2Reference` / `T5Reference`）。①で焼いた表だけを
      入力に `AutoTokenizer` と同じ id 列を出す。これが緑であることが「表に必要な情報が
      揃っている」ことの機械証明で、TS 側はこの写経になる（突合は
-     `tests/test_anima_demo.py`）。
+     `anima/tests/test_demo.py`）。
 
   ③ **検証** — ①の畳み込みが正本と同値であることの網羅 + 乱択試験。畳めた根拠そのもの
      なので emit のたびに必ず通し、外れたら emit しない（ADR 0005 の fail loudly）。
@@ -1074,7 +1074,7 @@ class T5Reference:
 
         NOTE: `tokenizer.json` の `fuse_unk` は `null` だが、`tokenizers` の Unigram は
         **未指定でも融合する**（Rust 側の既定）。融合しない実装にすると日本語プロンプトで
-        unk が 1 文字ずつ並び、`AutoTokenizer` との突合（`tests/test_anima_demo.py`）が
+        unk が 1 文字ずつ並び、`AutoTokenizer` との突合（`anima/tests/test_demo.py`）が
         `japanese` ケースで落ちる。
         """
         out: list[int] = []

@@ -1,4 +1,4 @@
-"""`anima_tiling.py` の幾何とブレンドの約束事（実重み不要分）。
+"""`anima/tiling.py` の幾何とブレンドの約束事（実重み不要分）。
 
 ここで固定するのは、壊れても例外が出ず**数だけが静かにずれる**側:
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-import anima_tiling
+from anima import tiling as anima_tiling
 
 
 class TestPlanTileAxis:

@@ -1,6 +1,6 @@
-"""patch_anima の各書き換えが原実装と同値であることの回帰テスト（実重み不要分）。
+"""anima.patch の各書き換えが原実装と同値であることの回帰テスト（実重み不要分）。
 
-実モデルでの端から端までの同値検証は `export_anima.py --verify`（手動・実重み）。ここでは
+実モデルでの端から端までの同値検証は `anima/export.py --verify`（手動・実重み）。ここでは
 diffusers があれば回る純関数 / 小モジュールレベルの同値だけを固定する。`--group anima` 無しの
 pytest 実行では skip される。
 
@@ -18,7 +18,7 @@ from torch.nn import functional
 
 qwenimage = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_qwenimage")
 
-from karume import patch_anima  # noqa: E402
+from anima import patch as patch_anima  # noqa: E402
 
 
 class TestCausalConv3dToConv2d:

@@ -763,7 +763,7 @@ class Conv2dBlock(nn.Module):
     ゼロにする）。`clamp_min` の床が外れると 0/0 = NaN になり、golden 突合がそこで赤くなる —
     床が効いていることを恒真でない形で固定できる唯一の点。
 
-    NOTE: チャネル L2 は `patch_anima._l2_normalize_channels` の鏡像で、**permute 無しの
+    NOTE: チャネル L2 は `anima.patch._l2_normalize_channels` の鏡像で、**permute 無しの
     軸 sum**（attrs `dim=1`）。実 GPU golden で**軸 reduce 変種**を torch 参照つきで踏む
     唯一の経路でもある（他の golden の `sum` は全て最終次元 = 行カーネル）。
     """

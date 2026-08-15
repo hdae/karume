@@ -9,7 +9,7 @@ S 形の DiT（`--dit-graph dyn` — ADR 0034）はホストが rope の cos / s
 
 **非正方では位置の取り違えが割れる**（H'≠W' だと `[h の位置 i]` と `[w の位置 i]` が別の行を
 指す）。そこで上流の `model.rope` が出す表を 4 幾何ぶん焼き、TS 側（`ropeTables`）の再構成と
-**Uint32 完全一致**で突き合わせる。焼くのは `patch_anima.dit_rope_tables` の出力そのもの
+**Uint32 完全一致**で突き合わせる。焼くのは `anima.patch.dit_rope_tables` の出力そのもの
 （式は写さない — 素表と同じ規律）。
 
 出力（既定 `<repo>/outputs/series/anima-rope-nonsquare/`）:
@@ -17,7 +17,7 @@ S 形の DiT（`--dit-graph dyn` — ADR 0034）はホストが rope の cos / s
     rope.safetensors   幾何ごとの `cos_<WxH>` / `sin_<WxH>`（各 `[1,1,S,head_dim]`）
     rope.json          幾何の索引（latent 寸法・トークン格子・S・素表の行数）
 
-    uv run --group anima python anima_rope.py
+    uv run python -m anima.rope_tables
 
 **重みは要らない**（`CosmosRotaryPosEmbed` はパラメータもバッファも持たない純計算）ので、
 モデルは `meta` デバイス上に config から組む — 7.3GiB のロードを 1 バイトも行わない。
@@ -32,11 +32,12 @@ from typing import Any
 
 import torch
 
-from karume import patch_anima
 from karume.paths import SERIES_ROOT
-from karume.resolution import format_resolution
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from .patch import dit_rope_tables
+from .resolution import format_resolution
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 DEFAULT_OUT = SERIES_ROOT / "anima-rope-nonsquare"
 SPATIAL_COMPRESSION = 8
@@ -84,7 +85,7 @@ def main() -> None:
         label = format_resolution(width, height)
         latent_height = height // SPATIAL_COMPRESSION
         latent_width = width // SPATIAL_COMPRESSION
-        cos, sin = patch_anima.dit_rope_tables(model, latent_height, latent_width)
+        cos, sin = dit_rope_tables(model, latent_height, latent_width)
         tensors[f"cos_{label}"] = cos.contiguous()
         tensors[f"sin_{label}"] = sin.contiguous()
         entries.append(

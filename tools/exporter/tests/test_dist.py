@@ -7,6 +7,11 @@
 
 manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
 `shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
+
+NOTE: Anima の配布 recipe は wheel の外へ出た（ADR 0065 段 3+4）ので、その依存ケースは
+`tools/export-recipes/anima/tests/test_distribution.py` に居る。ここに残るのは core だけで
+観測できる層（合成計画で足りる規模上限・quant 完全写像・staging/swap の不変条件）と、
+まだ core に居る family の recipe。
 """
 
 from __future__ import annotations
@@ -24,11 +29,6 @@ import pytest
 from safetensors.numpy import load_file, save_file
 
 from karume.dist import (
-    ANIMA_DEFAULT_QUANT,
-    ANIMA_MODEL_NAME,
-    ANIMA_PIPELINE_CONFIG,
-    ANIMA_QUANTS,
-    ANIMA_WEIGHTS,
     BIREFNET_DEFAULT_MODEL,
     BIREFNET_IMAGE_MEAN,
     BIREFNET_IMAGE_STD,
@@ -54,7 +54,6 @@ from karume.dist import (
     MANIFEST_FILENAME,
     MANIFEST_FORMAT,
     MODEL_CARD_FILENAME,
-    OUTPUT_PATHS,
     PIPELINES,
     SBV2_DEFAULT_MODEL,
     SBV2_DEFAULT_QUANT,
@@ -72,12 +71,10 @@ from karume.dist import (
     SIGLIP2_DEFAULT_MODEL,
     SIGLIP2_OUTPUT_PATHS,
     SIGLIP2_ROLE,
-    STAGING_SUFFIX,
     SUPERSEDED_SUFFIX,
     VOWEL_DETECTOR_DEFAULT_MODEL,
     VOWEL_DETECTOR_MAX_FRAMES,
     VOWEL_DETECTOR_OUTPUT_PATHS,
-    AnimaSources,
     Artifact,
     BirefnetSources,
     DepthAnythingSources,
@@ -88,8 +85,6 @@ from karume.dist import (
     Siglip2Sources,
     VowelDetectorSources,
     WeightFiles,
-    anima_plan,
-    anima_sources,
     assemble_family,
     assert_manifest_limits,
     assert_model_name,
@@ -154,76 +149,14 @@ def _fake_safetensors(
     return len(encoded).to_bytes(8, "little") + encoded + payload
 
 
-#: 偽資産の中身（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 5 役は
-#: `STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。rope_base はヘッダ検査の対象外
-#: だが、実物同様に正規形にしておく。
-_PAYLOADS = {
-    "text_encoder": _fake_safetensors("F16", b"text-encoder-weights"),
-    "text_conditioner": _fake_safetensors("F16", b"text-conditioner-weights"),
-    "transformer_f16": _fake_safetensors("F16", b"transformer-f16-weights"),
-    "transformer_i8": _fake_safetensors("I8", b"transformer-i8-weights"),
-    "rope_base": _fake_safetensors("F32", b"rope-base-table"),
-    "vae_decoder": _fake_safetensors("F16", b"vae-decoder-weights"),
-    "tokenizer": b'{"qwen2": true}',
-    "tokenizer_2": b'{"t5": true}',
-}
-
-
 def _write(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
 
 
-def _build_series(
-    series_dir: Path,
-    *,
-    model: str = ANIMA_MODEL_NAME,
-    i8_rope: bytes | None = None,
-    mark: bytes = b"",
-) -> AnimaSources:
-    """系列レイアウト（`outputs/series/` 相当）を偽資産で再現する（`io.*` の混入込み）。
-
-    `mark` は transformer 系列だけに混ぜる差分 — ファミリー組み立てで「モデルごとに違う重み」と
-    「モデル間で同一の base 資産」を作り分けるための軸。
-    """
-    sources = anima_sources(series_dir, model)
-    _write(sources.base / "text_encoder" / "model.safetensors", _PAYLOADS["text_encoder"])
-    _write(sources.base / "text_conditioner" / "model.safetensors", _PAYLOADS["text_conditioner"])
-    _write(sources.base / "vae_decoder" / "model.safetensors", _PAYLOADS["vae_decoder"])
-    # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
-    _write(sources.base / "text_encoder" / "io.t005.safetensors", b"io-fixture")
-    _write(sources.base / "vae_decoder" / "io.case0.safetensors", b"io-fixture")
-    for series, role, dtype in (
-        (sources.transformer_f16, "transformer_f16", "F16"),
-        (sources.transformer_i8, "transformer_i8", "I8"),
-    ):
-        payload = (
-            _PAYLOADS[role] if not mark else _fake_safetensors(dtype, role.encode("utf-8") + mark)
-        )
-        _write(series / "transformer" / "model.safetensors", payload)
-        _write(series / "transformer" / "io.s01024t0699.safetensors", b"io-fixture")
-    _write(
-        sources.transformer_f16 / "transformer" / "rope_base.safetensors", _PAYLOADS["rope_base"]
-    )
-    _write(
-        sources.transformer_i8 / "transformer" / "rope_base.safetensors",
-        _PAYLOADS["rope_base"] if i8_rope is None else i8_rope,
-    )
-    _write(sources.tokenizers / "qwen2-tokenizer.json", _PAYLOADS["tokenizer"])
-    _write(sources.tokenizers / "t5-tokenizer.json", _PAYLOADS["tokenizer_2"])
-    return sources
-
-
-def _assemble_anima(
-    sources: AnimaSources, out_dir: Path, model: str = ANIMA_MODEL_NAME
-) -> dict[str, Any]:
-    """単一モデルの組み立て（計画 → 実体化）を 1 行で回すテスト用の糊。"""
-    return assemble_family([anima_plan(sources, model)], out_dir, model)
-
-
-def _in_subtree(model: str, paths: Iterable[str] | None = None) -> list[str]:
+def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
     """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。"""
-    return [f"{model}/{rel}" for rel in (OUTPUT_PATHS.values() if paths is None else paths)]
+    return [f"{model}/{rel}" for rel in paths]
 
 
 def _ref(path: str) -> dict[str, Any]:
@@ -253,129 +186,6 @@ def _synthetic_plan(name: str, rel_path: str, payload: bytes) -> ModelPlan:
     )
 
 
-@pytest.fixture
-def assembled(tmp_path: Path) -> tuple[Path, dict]:
-    sources = _build_series(tmp_path / "series")
-    out_dir = tmp_path / "models" / "anima-turbo"
-    manifest = _assemble_anima(sources, out_dir)
-    return out_dir, manifest
-
-
-class TestLayout:
-    def test_it_places_every_declared_path_under_the_model_subtree(self, assembled) -> None:
-        out_dir, _ = assembled
-        assert _present(out_dir) == sorted([*_in_subtree(ANIMA_MODEL_NAME), MANIFEST_FILENAME])
-
-    def test_it_never_carries_io_fixtures_into_the_distribution(self, assembled) -> None:
-        out_dir, _ = assembled
-        assert list(out_dir.rglob("io.*")) == []
-
-    def test_it_renames_the_two_transformer_series_into_dtype_files(self, assembled) -> None:
-        out_dir, _ = assembled
-        subtree = out_dir / ANIMA_MODEL_NAME / "transformer"
-        assert (subtree / "model.f16.safetensors").read_bytes() == _PAYLOADS["transformer_f16"]
-        assert (subtree / "model.i8.safetensors").read_bytes() == _PAYLOADS["transformer_i8"]
-
-    def test_a_single_model_repository_has_no_shared_directory(self, assembled) -> None:
-        """`shared/` は 2 モデル以上が同じ中身を持ったときだけ現れる席（ADR 0041 §5）。"""
-        out_dir, _ = assembled
-        assert not (out_dir / SHARED_DIRNAME).exists()
-
-    def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series")
-        out_dir = tmp_path / "models" / "anima-turbo"
-        _assemble_anima(sources, out_dir)
-        _assemble_anima(sources, out_dir)  # 既存リンクがあっても落ちない
-        assert verify_dist(out_dir)
-
-    def test_the_model_name_moves_the_whole_subtree(self, tmp_path: Path) -> None:
-        """`--model` はサブツリー名・系列名・manifest のキーを 1 語で動かす。"""
-        sources = _build_series(tmp_path / "series", model="anima-lite")
-        out_dir = tmp_path / "models" / "anima-lite"
-        manifest = _assemble_anima(sources, out_dir, "anima-lite")
-        assert list(manifest["models"]) == ["anima-lite"]
-        assert manifest["defaultModel"] == "anima-lite"
-        assert _present(out_dir) == sorted([*_in_subtree("anima-lite"), MANIFEST_FILENAME])
-
-
-class TestPlacementStrategy:
-    def test_it_places_independent_copies(self, assembled) -> None:
-        """配布形はハードリンクを持たない（系列から独立した自己完結スナップショット）。"""
-        out_dir, _ = assembled
-        placed = out_dir / ANIMA_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
-        assert placed.read_bytes() == _PAYLOADS["text_encoder"]
-        assert placed.stat().st_nlink == 1
-
-    def test_a_series_rewrite_does_not_reach_the_dist(self, tmp_path: Path) -> None:
-        """系列の再 export（truncate 上書き）が組み立て済み配布形へ波及しないこと。
-
-        リンク方式ではここが破れていた — 同じ inode を共有するため、系列の書き直しが
-        manifest の sha256 と現物を黙って食い違わせる。
-        """
-        sources = _build_series(tmp_path / "series")
-        out_dir = tmp_path / "models" / "anima-turbo"
-        _assemble_anima(sources, out_dir)
-        source = sources.base / "text_encoder" / "model.safetensors"
-        with source.open("wb") as handle:
-            handle.write(_fake_safetensors("F16", b"rewritten-after-assembly"))
-        placed = out_dir / ANIMA_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
-        assert placed.read_bytes() == _PAYLOADS["text_encoder"]
-
-    def test_it_stops_when_an_input_is_missing(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series")
-        (sources.base / "vae_decoder" / "model.safetensors").unlink()
-        with pytest.raises(DistError, match="組み立ての入力が無い"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
-
-
-class TestRopeBase:
-    def test_it_collapses_the_two_series_into_one_file(self, assembled) -> None:
-        out_dir, manifest = assembled
-        entry = manifest["models"][ANIMA_MODEL_NAME]["weights"]["transformer"]
-        f16_extra = entry["f16"]["extras"]["rope_base"]
-        i8_extra = entry["i8"]["extras"]["rope_base"]
-        assert f16_extra == i8_extra
-        assert f16_extra["path"] == f"{ANIMA_MODEL_NAME}/{OUTPUT_PATHS['rope_base']}"
-        assert (out_dir / f16_extra["path"]).read_bytes() == _PAYLOADS["rope_base"]
-
-    def test_it_refuses_to_pick_a_side_when_the_series_disagree(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series", i8_rope=b"rope-base-table-DIFFERENT")
-        out_dir = tmp_path / "models" / "anima-turbo"
-        with pytest.raises(DistError, match="バイト同一でない"):
-            _assemble_anima(sources, out_dir)
-        # 止めた以上、途中の配布形を残さない（片方だけ入った出力を後段に見せない）。
-        assert not (out_dir / MANIFEST_FILENAME).exists()
-
-
-class TestStorageGate:
-    """格納 dtype の門（実測の事故が根拠 — `--dtype` 付け忘れの素 F32 は PNG 門まで沈黙した）。"""
-
-    def test_it_stops_when_an_f16_component_is_stored_as_raw_f32(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series")
-        (sources.base / "text_encoder" / "model.safetensors").write_bytes(
-            _fake_safetensors("F32", b"text-encoder-weights")
-        )
-        out_dir = tmp_path / "models" / "anima-turbo"
-        with pytest.raises(DistError, match=r"text_encoder: .* F16 が無い"):
-            _assemble_anima(sources, out_dir)
-        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない（rope 不一致と同じ規律）。
-        assert not out_dir.exists()
-
-    def test_it_stops_when_the_i8_transformer_lacks_i8_storage(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series")
-        (sources.transformer_i8 / "transformer" / "model.safetensors").write_bytes(
-            _fake_safetensors("F16", b"transformer-i8-weights")
-        )
-        with pytest.raises(DistError, match=r"transformer_i8: .* I8 が無い"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
-
-    def test_it_stops_when_a_header_is_not_safetensors(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series")
-        (sources.base / "vae_decoder" / "model.safetensors").write_bytes(b"not-a-safetensors")
-        with pytest.raises(DistError, match="ヘッダが読めない"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
-
-
 class TestModelName:
     """モデル名は manifest のキーであると同時にリポ内のディレクトリ名（ADR 0041 §6 / §9）。"""
 
@@ -389,7 +199,7 @@ class TestModelName:
             assert_model_name(SHARED_DIRNAME)
 
     def test_it_accepts_the_names_the_distributions_actually_use(self) -> None:
-        for name in (ANIMA_MODEL_NAME, SBV2_DEFAULT_MODEL, "jvnv-F1"):
+        for name in (SBV2_DEFAULT_MODEL, IRODORI_DEFAULT_MODEL, "jvnv-F1"):
             assert assert_model_name(name) == name
 
 
@@ -497,299 +307,9 @@ class TestPlanGates:
             assemble_family(plans, out_dir, "m0")
         assert not out_dir.exists()
 
-    def test_it_refuses_a_missing_input_the_storage_gate_never_looks_at(
-        self, tmp_path: Path
-    ) -> None:
-        """格納 dtype を要求しない役割（tokenizer）の欠落も**配置の前**に落ちる。
-
-        要求表に載る役割は計画段の {@link assert_storage} が実在まで見るので、素通しされる
-        役割だけが「配置の途中で落ちる」経路として残っていた。
-        """
-        sources = _build_series(tmp_path / "series")
-        (sources.tokenizers / "qwen2-tokenizer.json").unlink()
-        out_dir = tmp_path / "models" / "anima-turbo"
-        with pytest.raises(DistError, match="組み立ての入力が無い"):
-            _assemble_anima(sources, out_dir)
-        assert not out_dir.exists()
-
-
-class TestManifest:
-    def test_it_writes_the_envelope_of_adr_0041(self, assembled) -> None:
-        out_dir, manifest = assembled
-        on_disk = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-        assert on_disk == manifest
-        assert manifest["format"] == MANIFEST_FORMAT
-        assert manifest["generator"].startswith("karume/")
-        assert manifest["defaultModel"] == ANIMA_MODEL_NAME
-        assert list(manifest["models"]) == [ANIMA_MODEL_NAME]
-        assert manifest["models"][ANIMA_MODEL_NAME]["pipeline"] == "anima/1"
-
-    def test_every_weights_entry_is_keyed_by_dtype(self, assembled) -> None:
-        """v1 の `{file}` / `{variants}` の 2 形は消えた — i8 単体も dtype キーを持つ（§3）。"""
-        _, manifest = assembled
-        weights = manifest["models"][ANIMA_MODEL_NAME]["weights"]
-        assert sorted(weights) == sorted(ANIMA_WEIGHTS)
-        for name, entry in weights.items():
-            assert sorted(entry) == sorted(ANIMA_WEIGHTS[name]), name
-            for files in entry.values():
-                assert sorted(files) in (["file"], ["extras", "file"])
-
-    def test_the_unconditional_files_live_in_assets(self, assembled) -> None:
-        _, manifest = assembled
-        assets = manifest["models"][ANIMA_MODEL_NAME]["assets"]
-        assert sorted(assets) == ["tokenizer", "tokenizer_2"]
-        for ref in assets.values():
-            assert sorted(ref) == ["path", "sha256", "size"]
-
-    def test_it_derives_size_and_sha256_from_the_placed_files(self, assembled) -> None:
-        out_dir, manifest = assembled
-        ref = manifest["models"][ANIMA_MODEL_NAME]["weights"]["text_encoder"]["f16"]["file"]
-        payload = _PAYLOADS["text_encoder"]
-        assert ref["size"] == len(payload)
-        assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
-        assert (out_dir / ref["path"]).read_bytes() == payload
-
-    def test_it_carries_the_quant_table_and_pipeline_config(self, assembled) -> None:
-        _, manifest = assembled
-        model = manifest["models"][ANIMA_MODEL_NAME]
-        assert sorted(model["quants"]) == sorted(ANIMA_QUANTS)
-        assert model["defaultQuant"] == ANIMA_DEFAULT_QUANT
-        assert model["defaultQuant"] in model["quants"]
-        assert model["pipelineConfig"] == dict(ANIMA_PIPELINE_CONFIG)
-
-    def test_every_quant_maps_every_weights_entry(self, assembled) -> None:
-        """hub は写像の完全性を実行時にも検査する — 埋め漏れは配布してから落ちる。"""
-        _, manifest = assembled
-        model = manifest["models"][ANIMA_MODEL_NAME]
-        for name, quant in model["quants"].items():
-            assert set(quant["weights"]) == set(model["weights"]), name
-            for weight, label in quant["weights"].items():
-                assert label in model["weights"][weight]
-
-
-class TestVerifyDist:
-    def test_it_passes_on_a_freshly_assembled_tree(self, assembled) -> None:
-        out_dir, _ = assembled
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(ANIMA_MODEL_NAME))
-
-    def test_it_catches_a_file_that_no_longer_matches_its_declared_size(self, assembled) -> None:
-        out_dir, _ = assembled
-        target = out_dir / ANIMA_MODEL_NAME / OUTPUT_PATHS["vae_decoder"]
-        target.unlink()  # ハードリンクを外してから書く（源の系列を壊さない）
-        target.write_bytes(b"shorter")
-        with pytest.raises(DistError, match="size が manifest と違う"):
-            verify_dist(out_dir)
-
-    def test_it_catches_a_missing_file(self, assembled) -> None:
-        out_dir, _ = assembled
-        (out_dir / ANIMA_MODEL_NAME / OUTPUT_PATHS["tokenizer"]).unlink()
-        with pytest.raises(DistError, match="参照するファイルが無い"):
-            verify_dist(out_dir)
-
-    def test_it_catches_an_undeclared_file(self, assembled) -> None:
-        out_dir, _ = assembled
-        (out_dir / ANIMA_MODEL_NAME / "transformer" / "io.s01024t0699.safetensors").write_bytes(
-            b"stale"
-        )
-        with pytest.raises(DistError, match="宣言していないファイル"):
-            verify_dist(out_dir)
-
-    def test_it_admits_the_model_card_as_a_meta_file(self, assembled) -> None:
-        """`README.md` は karume.json と同格のメタファイル（前回の組み立ての残りでも通す）。"""
-        out_dir, _ = assembled
-        (out_dir / MODEL_CARD_FILENAME).write_text("前回のモデルカード", encoding="utf-8")
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(ANIMA_MODEL_NAME))
-
-    def test_it_still_refuses_a_meta_name_in_a_subdirectory(self, assembled) -> None:
-        """例外は直下の 2 つだけ — 下位ディレクトリの同名は宣言外のまま。"""
-        out_dir, _ = assembled
-        (out_dir / ANIMA_MODEL_NAME / MODEL_CARD_FILENAME).write_text("紛れ込み", encoding="utf-8")
-        with pytest.raises(DistError, match="宣言していないファイル"):
-            verify_dist(out_dir)
-
-
-def _rewrite(out_dir: Path, mutate) -> None:
-    """`karume.json` を書き換える（verify_dist の反例を作るための唯一の手段）。"""
-    path = out_dir / MANIFEST_FILENAME
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    mutate(manifest)
-    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
-class TestVerifyDistStructure:
-    """v2 manifest が**自分で閉じている**ことの検査（hub が受理する形かを焼いた側でも見る）。"""
-
-    def test_it_refuses_a_manifest_that_is_not_karume_2(self, assembled) -> None:
-        out_dir, _ = assembled
-        _rewrite(out_dir, lambda m: m.update(format="karume/1"))
-        with pytest.raises(DistError, match=MANIFEST_FORMAT):
-            verify_dist(out_dir)
-
-    def test_it_refuses_a_default_model_that_is_not_declared(self, assembled) -> None:
-        out_dir, _ = assembled
-        _rewrite(out_dir, lambda m: m.update(defaultModel="anima-lite"))
-        with pytest.raises(DistError, match="defaultModel 'anima-lite'"):
-            verify_dist(out_dir)
-
-    def test_it_refuses_a_default_quant_that_is_not_declared(self, assembled) -> None:
-        out_dir, _ = assembled
-
-        def drop_default(manifest: dict) -> None:
-            manifest["models"][ANIMA_MODEL_NAME]["defaultQuant"] = "nonexistent"
-
-        _rewrite(out_dir, drop_default)
-        with pytest.raises(DistError, match="defaultQuant 'nonexistent'"):
-            verify_dist(out_dir)
-
-    def test_it_refuses_a_quant_that_leaves_a_weights_entry_unmapped(self, assembled) -> None:
-        out_dir, _ = assembled
-
-        def unmap(manifest: dict) -> None:
-            del manifest["models"][ANIMA_MODEL_NAME]["quants"]["f16"]["weights"]["vae_decoder"]
-
-        _rewrite(out_dir, unmap)
-        with pytest.raises(DistError, match="完全写像でない"):
-            verify_dist(out_dir)
-
-    def test_it_refuses_a_quant_that_names_a_dtype_the_weights_lack(self, assembled) -> None:
-        out_dir, _ = assembled
-
-        def retype(manifest: dict) -> None:
-            manifest["models"][ANIMA_MODEL_NAME]["quants"]["f16"]["weights"]["vae_decoder"] = "i8"
-
-        _rewrite(out_dir, retype)
-        with pytest.raises(DistError, match="dtype 'i8' が無い"):
-            verify_dist(out_dir)
-
-    def test_it_refuses_a_path_outside_the_model_subtree_and_shared(self, assembled) -> None:
-        """レイアウトは一律「モデル別サブツリー + shared/」（ADR 0041 §9）。"""
-        out_dir, _ = assembled
-
-        def flatten(manifest: dict) -> None:
-            ref = manifest["models"][ANIMA_MODEL_NAME]["assets"]["tokenizer"]
-            ref["path"] = OUTPUT_PATHS["tokenizer"]
-
-        _rewrite(out_dir, flatten)
-        with pytest.raises(DistError, match="レイアウトはモデル別サブツリー"):
-            verify_dist(out_dir)
-
-    def test_it_refuses_two_references_to_one_path_that_disagree(self, assembled) -> None:
-        """同一 path の共有は合法だが、{size, sha256} の食い違いは取得層を振動させる。"""
-        out_dir, _ = assembled
-
-        def bend(manifest: dict) -> None:
-            entry = manifest["models"][ANIMA_MODEL_NAME]["weights"]["transformer"]
-            entry["i8"]["extras"]["rope_base"]["size"] += 1
-
-        _rewrite(out_dir, bend)
-        with pytest.raises(DistError, match="食い違う"):
-            verify_dist(out_dir)
-
 
 class TestFamilyAssembly:
     """1 リポに複数モデル（ADR 0041 §2）+ 共有ファイルは `shared/` に 1 回だけ（§5）。"""
-
-    @pytest.fixture
-    def family(self, tmp_path: Path) -> tuple[Path, dict]:
-        series = tmp_path / "series"
-        # base（text 経路 / VAE / tokenizer）は共通、transformer だけモデルごとに違う中身。
-        first = _build_series(series, model="anima-turbo", mark=b"-turbo")
-        second = _build_series(series, model="anima-lite", mark=b"-lite")
-        out_dir = tmp_path / "models" / "anima-family"
-        manifest = assemble_family(
-            [anima_plan(first, "anima-turbo"), anima_plan(second, "anima-lite")],
-            out_dir,
-            "anima-turbo",
-        )
-        return out_dir, manifest
-
-    def test_it_declares_every_model_with_the_first_as_default(self, family) -> None:
-        _, manifest = family
-        assert list(manifest["models"]) == ["anima-turbo", "anima-lite"]
-        assert manifest["defaultModel"] == "anima-turbo"
-
-    def test_it_places_a_byte_identical_file_once_under_shared(self, family) -> None:
-        out_dir, manifest = family
-        shared_path = f"{SHARED_DIRNAME}/{OUTPUT_PATHS['text_encoder']}"
-        for name in manifest["models"]:
-            ref = manifest["models"][name]["weights"]["text_encoder"]["f16"]["file"]
-            assert ref["path"] == shared_path
-        assert (out_dir / shared_path).read_bytes() == _PAYLOADS["text_encoder"]
-        # 各モデルのサブツリーには残らない（1 回だけ置く = 重複を配らない）。
-        for name in manifest["models"]:
-            assert not (out_dir / name / OUTPUT_PATHS["text_encoder"]).exists()
-
-    def test_it_keeps_the_files_that_differ_inside_each_model_subtree(self, family) -> None:
-        out_dir, manifest = family
-        paths = {
-            name: manifest["models"][name]["weights"]["transformer"]["i8"]["file"]["path"]
-            for name in manifest["models"]
-        }
-        assert paths == {
-            "anima-turbo": f"anima-turbo/{OUTPUT_PATHS['transformer_i8']}",
-            "anima-lite": f"anima-lite/{OUTPUT_PATHS['transformer_i8']}",
-        }
-        assert (out_dir / paths["anima-turbo"]).read_bytes() != (
-            out_dir / paths["anima-lite"]
-        ).read_bytes()
-
-    def test_the_shared_and_the_private_files_together_cover_the_tree(self, family) -> None:
-        out_dir, _ = family
-        # rope 素表は幾何だけで決まるのでモデル間でもバイト同一 — 付帯資産（extras）も
-        # 同じ規則で畳まれる。
-        shared_roles = (
-            "text_encoder",
-            "text_conditioner",
-            "vae_decoder",
-            "tokenizer",
-            "tokenizer_2",
-            "rope_base",
-        )
-        private_roles = ("transformer_f16", "transformer_i8")
-        expected = [f"{SHARED_DIRNAME}/{OUTPUT_PATHS[role]}" for role in shared_roles]
-        expected += [
-            f"{model}/{OUTPUT_PATHS[role]}"
-            for model in ("anima-turbo", "anima-lite")
-            for role in private_roles
-        ]
-        assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
-
-    def test_a_shared_extra_is_referenced_from_every_dtype_of_every_model(self, family) -> None:
-        """付帯資産（extras）も同じ規則で畳まれる — 参照側は 4 箇所とも同じ path を書く。"""
-        _, manifest = family
-        paths = {
-            entry["extras"]["rope_base"]["path"]
-            for model in manifest["models"].values()
-            for entry in model["weights"]["transformer"].values()
-        }
-        assert paths == {f"{SHARED_DIRNAME}/{OUTPUT_PATHS['rope_base']}"}
-
-    def test_it_leaves_no_empty_directory_behind_after_folding(self, family) -> None:
-        out_dir, _ = family
-        empty = [
-            str(path.relative_to(out_dir))
-            for path in out_dir.rglob("*")
-            if path.is_dir() and not any(path.iterdir())
-        ]
-        assert empty == []
-
-    def test_the_assembled_family_verifies(self, family) -> None:
-        out_dir, manifest = family
-        declared = verify_dist(out_dir)
-        # 共有ぶんは 1 本に畳まれるので、宣言 path は「モデル数 × 役割数」より少ない。
-        assert len(declared) < len(OUTPUT_PATHS) * len(manifest["models"])
-
-    def test_it_reassembles_a_family_over_a_previous_run(self, tmp_path: Path) -> None:
-        """畳んだ後の木をもう一度組んでも落ちない（`shared/` の既存ファイルを踏み直す経路）。"""
-        series = tmp_path / "series"
-        first = _build_series(series, model="anima-turbo", mark=b"-turbo")
-        second = _build_series(series, model="anima-lite", mark=b"-lite")
-        out_dir = tmp_path / "models" / "anima-family"
-        plans = [anima_plan(first, "anima-turbo"), anima_plan(second, "anima-lite")]
-        before = assemble_family(plans, out_dir, "anima-turbo")
-        after = assemble_family(plans, out_dir, "anima-turbo")
-        assert before == after
-        assert verify_dist(out_dir)
 
     def test_it_never_folds_a_path_that_two_byte_strings_both_claim(self, tmp_path: Path) -> None:
         """同じ相対 path に畳める組が 2 つあるとき、どの組も畳まない（席は path で 1 つだけ）。
@@ -835,17 +355,6 @@ class TestFamilyAssembly:
         plans = [_synthetic_plan(name, "w/model.safetensors", b"same-bytes") for name in ("A", "B")]
         with pytest.raises(DistError, match="出所と食い違う"):
             assemble_family(plans, tmp_path / "models" / "family", "A")
-
-    def test_it_refuses_a_duplicated_model_name(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series")
-        plan = anima_plan(sources, ANIMA_MODEL_NAME)
-        with pytest.raises(DistError, match="モデル名が重複"):
-            assemble_family([plan, plan], tmp_path / "out", ANIMA_MODEL_NAME)
-
-    def test_it_refuses_a_default_model_it_is_not_assembling(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series")
-        with pytest.raises(DistError, match="既定モデル 'anima-lite'"):
-            assemble_family([anima_plan(sources, ANIMA_MODEL_NAME)], tmp_path / "out", "anima-lite")
 
 
 class TestAtomicReplacement:
@@ -911,18 +420,6 @@ class TestAtomicReplacement:
         assert self._snapshot(out_dir) == before
         assert self._siblings(out_dir) == []
 
-    def test_a_failure_midway_leaves_no_distribution_on_a_fresh_target(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        sources = _build_series(tmp_path / "series")
-        out_dir = tmp_path / "models" / ANIMA_MODEL_NAME
-        self._fail_at(monkeypatch, nth=3)
-        with pytest.raises(OSError, match="配置の途中で落ちた"):
-            _assemble_anima(sources, out_dir)
-
-        assert not out_dir.exists()
-        assert list(out_dir.parent.iterdir()) == []
-
     def test_a_failing_card_renderer_leaves_the_previous_distribution_byte_identical(
         self, tmp_path: Path
     ) -> None:
@@ -977,115 +474,25 @@ class TestAtomicReplacement:
         assert self._snapshot(out_dir) == before
         assert self._siblings(out_dir) == []
 
-    def test_it_writes_the_card_into_the_tree_it_swaps_in(self, tmp_path: Path) -> None:
-        """`render_card` は組み立て済みの manifest を受け取り、据わる木の中に書かれる。"""
-        sources = _build_series(tmp_path / "series")
-        out_dir = tmp_path / "models" / ANIMA_MODEL_NAME
-        assemble_family(
-            [anima_plan(sources, ANIMA_MODEL_NAME)],
-            out_dir,
-            ANIMA_MODEL_NAME,
-            render_card=lambda manifest: f"{manifest['defaultModel']}\n",
-        )
-        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert card == f"{ANIMA_MODEL_NAME}\n"
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(ANIMA_MODEL_NAME))
-        assert self._siblings(out_dir) == []
-
-    def test_reassembling_a_subset_replaces_the_whole_repository(self, tmp_path: Path) -> None:
-        """再組み立ては plan に無いモデルごと丸ごと置き換える（前回の残骸が生き残らない）。"""
-        series = tmp_path / "series"
-        first = _build_series(series, model="anima-turbo", mark=b"-turbo")
-        second = _build_series(series, model="anima-lite", mark=b"-lite")
-        out_dir = tmp_path / "models" / "anima-family"
-        assemble_family(
-            [anima_plan(first, "anima-turbo"), anima_plan(second, "anima-lite")],
-            out_dir,
-            "anima-turbo",
-        )
-
-        manifest = assemble_family([anima_plan(first, "anima-turbo")], out_dir, "anima-turbo")
-
-        assert list(manifest["models"]) == ["anima-turbo"]
-        assert not (out_dir / "anima-lite").exists()
-        # 1 モデルだけなら畳む相手が居ない = `shared/` も残らない（ADR 0041 §5）。
-        assert not (out_dir / SHARED_DIRNAME).exists()
-        assert _present(out_dir) == sorted([*_in_subtree("anima-turbo"), MANIFEST_FILENAME])
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree("anima-turbo"))
-
-    def test_it_discards_a_working_directory_left_by_an_interrupted_run(
-        self, tmp_path: Path
-    ) -> None:
-        """中断が残した staging は踏み直さずに捨てる（plan に無いファイルを混ぜない）。"""
-        sources = _build_series(tmp_path / "series")
-        out_dir = tmp_path / "models" / ANIMA_MODEL_NAME
-        leftover = out_dir.with_name(out_dir.name + STAGING_SUFFIX)
-        _write(leftover / "anima-lite" / "transformer" / "model.f16.safetensors", b"interrupted")
-
-        _assemble_anima(sources, out_dir)
-
-        assert _present(out_dir) == sorted([*_in_subtree(ANIMA_MODEL_NAME), MANIFEST_FILENAME])
-        assert self._siblings(out_dir) == []
-
-    def test_a_successful_reassembly_lands_the_same_tree_without_leftovers(
-        self, tmp_path: Path
-    ) -> None:
-        """成功経路は据え替えても同値 — manifest も現物も 1 回目と同じで、作業跡も残らない。"""
-        sources = _build_series(tmp_path / "series")
-        out_dir = tmp_path / "models" / ANIMA_MODEL_NAME
-        first = _assemble_anima(sources, out_dir)
-        snapshot = self._snapshot(out_dir)
-
-        again = _assemble_anima(sources, out_dir)
-
-        assert again == first
-        assert self._snapshot(out_dir) == snapshot
-        assert self._siblings(out_dir) == []
-
-
-class TestModelCard:
-    """`karume dist` は組み立て + 検証の**後**にモデルカードを書く。"""
-
-    def _run(self, tmp_path: Path, *argv: str) -> Path:
-        _build_series(tmp_path / "series")
-        out_dir = tmp_path / "dist"
-        main(["--series", str(tmp_path / "series"), "--out", str(out_dir), *argv])
-        return out_dir
-
-    def test_it_writes_a_model_card_next_to_the_manifest(self, tmp_path: Path) -> None:
-        card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert card.startswith("---\n")
-        assert "base_model: circlestone-labs/Anima-Base-v1.0-Diffusers" in card
-
-    def test_it_derives_the_file_table_from_the_assembled_tree(self, tmp_path: Path) -> None:
-        out_dir = self._run(tmp_path)
-        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        for rel_path in _in_subtree(ANIMA_MODEL_NAME):
-            assert f"`{rel_path}`" in card
-        size = (out_dir / ANIMA_MODEL_NAME / OUTPUT_PATHS["transformer_i8"]).stat().st_size
-        assert f"{size:,} B" in card
-
-    def test_it_names_the_repository_after_the_assembled_directory(self, tmp_path: Path) -> None:
-        """ファミリーリポの ID は pipeline の定数にできない — 組み立て先から引く。"""
-        card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert 'fromPretrained("hdae/dist"' in card
-
-    def test_it_leaves_the_tree_verifiable_after_writing_the_card(self, tmp_path: Path) -> None:
-        out_dir = self._run(tmp_path)
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(ANIMA_MODEL_NAME))
-
-    def test_it_reassembles_over_a_previous_card(self, tmp_path: Path) -> None:
-        out_dir = self._run(tmp_path)
-        first = (out_dir / MODEL_CARD_FILENAME).read_bytes()
-        main(["--series", str(tmp_path / "series"), "--out", str(out_dir)])
-        assert (out_dir / MODEL_CARD_FILENAME).read_bytes() == first
-
 
 class TestCli:
-    def test_it_defaults_to_anima_with_its_default_model(self) -> None:
+    def test_it_has_no_default_pipeline_of_its_own(self) -> None:
+        """既定を core に焼かない（受理集合は呼び出し側が渡す — ADR 0065 決定 2）。"""
         args = build_parser().parse_args([])
-        assert args.pipeline == "anima"
+        assert args.pipeline is None
         assert args.models is None  # 解決は main（pipeline ごとの既定を引くため）
+
+    def test_it_lists_the_choices_when_the_pipeline_is_omitted(self) -> None:
+        """黙って 1 つ選ばない — 表が呼び出し側で変わる以上、既定は当てずっぽうになる。"""
+        with pytest.raises(DistError, match="--pipeline が要る") as error:
+            main([])
+        for name in PIPELINES:
+            assert name in str(error.value)
+
+    def test_a_caller_supplied_registry_carries_its_own_default(self) -> None:
+        """リポの dist ドライバは recipe を足した表と既定を渡す（受理集合はそちらが正）。"""
+        args = build_parser(PIPELINES, "sbv2").parse_args([])
+        assert args.pipeline == "sbv2"
 
     def test_the_model_flag_accumulates_into_a_family(self) -> None:
         args = build_parser().parse_args(["--model", "F1", "--model", "F2"])
@@ -1093,7 +500,6 @@ class TestCli:
 
     def test_it_knows_every_pipeline(self) -> None:
         assert sorted(PIPELINES) == [
-            "anima",
             "birefnet",
             "depth-anything",
             "irodori",
@@ -1101,7 +507,6 @@ class TestCli:
             "siglip2",
             "vowel-detector",
         ]
-        assert PIPELINES["anima"].default_model == ANIMA_MODEL_NAME
         assert PIPELINES["sbv2"].default_model == SBV2_DEFAULT_MODEL
         assert PIPELINES["irodori"].default_model == IRODORI_DEFAULT_MODEL
         assert PIPELINES["siglip2"].default_model == SIGLIP2_DEFAULT_MODEL
@@ -1110,7 +515,6 @@ class TestCli:
         assert PIPELINES["depth-anything"].default_model == DEPTH_ANYTHING_DEFAULT_MODEL
 
     def test_the_default_output_directory_follows_the_single_model(self) -> None:
-        assert default_out_dir(PIPELINES["anima"], ["anima-turbo"]).name == "karume-anima-turbo"
         assert default_out_dir(PIPELINES["sbv2"], ["FN4"]).name == "karume-sbv2-FN4"
 
     def test_it_refuses_to_invent_a_family_repository_name(self) -> None:
@@ -1135,10 +539,10 @@ class TestCardProfile:
         assert build_parser().parse_args(["--card-profile", "jvnv"]).card_profile == "jvnv"
 
     def test_a_pipeline_with_one_profile_needs_no_choice(self) -> None:
-        """anima の帰属は 1 通りしかない（選びようがないものを聞かない）。"""
-        profiles = PIPELINES["anima"].card_profiles
+        """irodori の帰属は 1 通りしかない（選びようがないものを聞かない）。"""
+        profiles = PIPELINES["irodori"].card_profiles
         assert len(profiles) == 1
-        assert resolve_card_renderer(PIPELINES["anima"], None) is next(iter(profiles.values()))
+        assert resolve_card_renderer(PIPELINES["irodori"], None) is next(iter(profiles.values()))
 
     def test_it_refuses_to_pick_an_attribution_when_several_exist(self) -> None:
         """既定を黙って選ぶと、新しいファミリーへ前のファミリーの帰属がそのまま残る。"""

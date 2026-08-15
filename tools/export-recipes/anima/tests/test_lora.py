@@ -14,7 +14,7 @@ import pytest
 import torch
 from torch import nn
 
-from karume.lora import fuse_lora
+from anima.lora import fuse_lora
 
 
 class Target(nn.Module):

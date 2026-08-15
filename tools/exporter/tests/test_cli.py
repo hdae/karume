@@ -1,7 +1,7 @@
 """`karume` サブコマンド CLI（`karume.cli`）のディスパッチ。
 
 引数の解釈は各本体の parser が持つ（CLI は写しを持たない）ので、ここで固定するのは
-**どの main へ argv がそのまま渡るか**だけ。台本 `export_anima.py` は実重み依存が重いので、
+**どの main へ argv がそのまま渡るか**だけ。台本 `export_sbv2.py` は実重み依存が重いので、
 読み込み関数を差し替えて「呼ばれ方」を見る。
 """
 
@@ -47,14 +47,14 @@ class TestDispatch:
             return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
 
         monkeypatch.setattr(cli, "load_script", load)
-        cli.main(["export", "--dtype", "f16", "--target", "transformer"])
-        assert loaded == [cli.EXPORT_SCRIPT]
-        assert seen == [["--dtype", "f16", "--target", "transformer"]]
+        cli.main(["export-sbv2", "--dtype", "f16", "--target", "front"])
+        assert loaded == [cli.EXPORT_SBV2_SCRIPT]
+        assert seen == [["--dtype", "f16", "--target", "front"]]
 
     def test_it_picks_the_export_script_by_subcommand_name(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """台本の選択はサブコマンド名だけ — 素の `export` は Anima のまま動かさない。
+        """台本の選択はサブコマンド名だけ — 名前ごとに別の台本へ届く。
 
         `--verify` × `--target` のような台本側の排他規則は、CLI が argv を 1 語も
         読まないことでだけ抜けなく効く（`--pipeline` を CLI が食う形にしない根拠）。
@@ -71,7 +71,7 @@ class TestDispatch:
         cli.main(["export-sbv2", "--help"])
         assert loaded == [cli.EXPORT_SBV2_SCRIPT, cli.EXPORT_SBV2_SCRIPT]
         assert seen == [["--verify", "front"], ["--help"]]
-        assert cli.EXPORT_SBV2_SCRIPT != cli.EXPORT_SCRIPT
+        assert cli.EXPORT_SBV2_SCRIPT != cli.EXPORT_EMBEDDINGGEMMA_SCRIPT
 
     def test_it_dispatches_embeddinggemma_to_its_own_script(
         self, monkeypatch: pytest.MonkeyPatch
@@ -153,13 +153,12 @@ class TestExportScript:
 
         `main(argv)` を持つところまで見る — CLI が渡す argv の受け口が消えたら落とす。
         """
-        module = cli.load_script(cli.EXPORT_SCRIPT)
+        module = cli.load_script(cli.EXPORT_SBV2_SCRIPT)
         assert callable(module.main)
 
     @pytest.mark.parametrize(
         "script",
         [
-            "EXPORT_SCRIPT",
             "EXPORT_SBV2_SCRIPT",
             "EXPORT_EMBEDDINGGEMMA_SCRIPT",
             "EXPORT_IRODORI_SCRIPT",

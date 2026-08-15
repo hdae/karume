@@ -1,9 +1,9 @@
 r"""examples/anima デモのプロンプト層（トークナイザ）の資産 prep（表焼き + フィクスチャ）。
 
-`export_anima.py` が**グラフ**を、`anima_pipeline.py` が**ホスト側の数の正**を出すのに対し、
+`anima/export.py` が**グラフ**を、`anima/pipeline_ref.py` が**ホスト側の数の正**を出すのに対し、
 こちらが扱うのは「プロンプト文字列 → トークン id 列」だけ。モデルグラフには触らない。
 
-    uv run --group anima python anima_demo.py
+    uv run python -m anima.demo
 
 出力は 2 系統（**1 回の実行で必ず両方**出す — 同じ表から作らないと、実行時資産と
 フィクスチャが別々に古びて「テストは緑だがデモだけ別の id 列」になる）:
@@ -20,7 +20,7 @@ MUST: 資産を `models/anima-turbo/`（配布形）直下に置かない。あ�
 ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
 止まる（`outputs/sbv2-demo/` / 系列 `anima-pipeline/` を分けたのと同じ理由）。
 
-畳み方の根拠と検証は `karume/anima_text.py` の docstring が正本。要点だけ:
+畳み方の根拠と検証は `anima/text.py` の docstring が正本。要点だけ:
 **Unicode 判定は TS で再実装しないし標準 API にも委ねない** — 正本（Rust の `tokenizers` /
 その正規表現エンジン / `unicode-normalization`）を Python から全コードポイントに当てて
 閉区間表・写像表へ畳む。畳み込みの同値は emit のたびに網羅 + 乱択で検査し、加えて参照実装と
@@ -38,10 +38,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from karume import anima_text as at
 from karume.paths import SERIES_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from . import text as at
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 
 #: 実行時資産の置き場（`outputs/` は `.gitignore` 済み）。Deno 側 `examples/anima/text/tokenizer.ts`
@@ -56,7 +57,7 @@ DEFAULT_FIXTURE_PATH = (
     REPO_ROOT / "packages" / "runtime" / "tests" / "fixtures" / "anima-text" / "parity.json"
 )
 
-#: 正本の呼び出しに合わせた切り詰め長。`anima_pipeline.py` の `--max-sequence-length` の既定
+#: 正本の呼び出しに合わせた切り詰め長。`anima/pipeline_ref.py` の `--max-sequence-length` の既定
 #: （両トークナイザ共通で `max_length=512, truncation=True` として渡される）。
 MAX_LENGTH = 512
 
@@ -389,7 +390,7 @@ def references(built: dict[str, Any]) -> tuple[at.Qwen2Reference, at.T5Reference
 
 
 def reference_ids(tokenizer: Any, text: str) -> list[int]:
-    """`anima_pipeline.encode_text` と**同じ呼び方**で正本の id 列を取る。
+    """`anima.pipeline_ref.encode_text` と**同じ呼び方**で正本の id 列を取る。
 
     MUST: chat template を通さない（素の `__call__`）。`tokenizer/chat_template.jinja` は
     同梱されているが Anima の経路では使わず、`apply_chat_template` を通すと `<|im_start|>`
@@ -405,7 +406,7 @@ def build_cases(repo: str, built: dict[str, Any]) -> list[dict[str, Any]]:
     正本は `transformers` の `AutoTokenizer`。ここが緑であることが「焼いた表に必要な情報が
     全部入っている」ことの機械証明で、TS 実装はこの写経になる。1 件でも違えば **emit しない**
     （フィクスチャに「参照実装では再現できない id 列」を焼き付けない）。同じ突合を
-    `tests/test_anima_demo.py` が**commit 済みフィクスチャ**に対しても走らせる（上流の
+    `anima/tests/test_demo.py` が**commit 済みフィクスチャ**に対しても走らせる（上流の
     tokenizer.json が動いたときに、再生成しなくても気づけるようにするため）。
     """
     from transformers import AutoTokenizer
@@ -512,7 +513,8 @@ def build_fixture(built: dict[str, Any], cases: list[dict[str, Any]]) -> dict[st
     t5_vocab = {token: (i, score) for i, (token, score) in enumerate(built["t5Vocab"])}
     return {
         "_doc": [
-            "Anima プロンプト層のパリティ用フィクスチャ（生成: tools/exporter/anima_demo.py）。",
+            "Anima プロンプト層のパリティ用フィクスチャ"
+            "（生成: tools/export-recipes/anima/demo.py）。",
             "正本は transformers の AutoTokenizer で、id 列はそこから採った実測値。語彙と",
             "merges は全ケースの再現に要る**部分集合**だけを載せる（151k / 32k を commit",
             "しないため）。正規化表・文字クラス表は畳み込みの成果物そのものなので全体を載せる。",

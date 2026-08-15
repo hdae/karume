@@ -1,6 +1,6 @@
 """Anima の**ホスト側**パイプラインの参照フィクスチャを作る（M1-P4 波 3 / ADR 0016 の段②）。
 
-IR に載るのは `export_anima.py` が書き出す 4 グラフだけで、その外側 — トークナイズ /
+IR に載るのは `anima/export.py` が書き出す 4 グラフだけで、その外側 — トークナイズ /
 スケジューラ（sigmas）/ timestep 埋め込み表 / CFG / Euler 更新 / latent 逆正規化 / 512
 パディング — は全てホストコードになる。**そのホスト側の「数の正」がここ**で、Deno 側の
 通しチェーン E2E（`packages/runtime/tests/e2e_anima_test.ts`）は TS で書いたグルーを
@@ -8,8 +8,8 @@ IR に載るのは `export_anima.py` が書き出す 4 グラフだけで、そ�
 
 正本は diffusers 0.39 の `modular_pipelines/anima/`（encoders.py / before_denoise.py /
 denoise.py / decoders.py）。この台本はその 4 ブロックの逐語的な書き下しで、**パッチ層を
-通さない素の diffusers 経路**で参照を採る（`karume.patch_anima` の同値は
-`export_anima.py --verify` が別に測る — 検証網を独立に保つ。パッチ層をここでも通すと、
+通さない素の diffusers 経路**で参照を採る（`anima.patch` の同値は
+`anima/export.py --verify` が別に測る — 検証網を独立に保つ。パッチ層をここでも通すと、
 パッチのバグが参照とテスト対象の両方に同じ形で乗り、差 0 のまま素通りする）。
 
 出力（既定 `<repo>/outputs/series/anima-pipeline/`、`--dtype f16` ならその `-f16` 版）:
@@ -31,11 +31,11 @@ MUST: `--dtype i8` は **DiT だけ i8・他 3 つは f16**（`COMPONENT_DTYPES`
 という構成（ADR 0019）なので、フィクスチャの丸めもその構成と 1 対 1 に対応させる。全部を
 i8 にすると text 経路の参照だけが実行される資産と別のモデルの数になる。
 
-    uv run --group anima python anima_pipeline.py
-    uv run --group anima python anima_pipeline.py --steps 32 --ref-steps 2
-    uv run --group anima python anima_pipeline.py --dtype f16
-    uv run --group anima python anima_pipeline.py --dtype i8
-    uv run --group anima python anima_pipeline.py --dtype f16 --steps 10 --ref-steps 10 \
+    uv run python -m anima.pipeline_ref
+    uv run python -m anima.pipeline_ref --steps 32 --ref-steps 2
+    uv run python -m anima.pipeline_ref --dtype f16
+    uv run python -m anima.pipeline_ref --dtype i8
+    uv run python -m anima.pipeline_ref --dtype f16 --steps 10 --ref-steps 10 \
         --guidance-scale 1.0 --lora ../../models/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-f16
 
@@ -43,7 +43,7 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
 `nn.Linear` の入力を per-token i8 へ fake-quant してから参照を採る（数値仕様の正本は
 `karume.act_quant`）。重み側の i8 と対なので `--dtype i8` との併用を強制する:
 
-    uv run --group anima python anima_pipeline.py --dtype i8 --act-quant --steps 10 \
+    uv run python -m anima.pipeline_ref --dtype i8 --act-quant --steps 10 \
         --ref-steps 10 --guidance-scale 1.0 \
         --lora ../../models/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-i8a8
@@ -51,7 +51,7 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
 `--resolution` は **WxH**（正方は略記できる）。非正方の参照は `--dit-graph dyn` の DiT と
 `--vae-tiling` の VAE を突き合わせる先で（#23）、綴りはデモの `--resolution` と同じ:
 
-    uv run --group anima python anima_pipeline.py --dtype f16 --steps 10 --ref-steps 2 \
+    uv run python -m anima.pipeline_ref --dtype f16 --steps 10 --ref-steps 2 \
         --guidance-scale 1.0 --resolution 1344x768 \
         --lora ../../models/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-f16-1344x768
@@ -77,9 +77,10 @@ from karume.convert import normalize_boundary_tensor
 from karume.emit import WEIGHT_DTYPES
 from karume.paths import SERIES_ROOT
 from karume.quantize import fake_quant_int8, round_weights_to_f16
-from karume.resolution import parse_resolution, resolution_meta
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from .resolution import parse_resolution, resolution_meta
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 #: 生成物の既定の置き場（格納 dtype 別）。**配布形 `models/` とは別の系列側**（上の MUST）。
 DEFAULT_OUTS = {
@@ -114,7 +115,7 @@ def _fake_quant(dtype: str, model: torch.nn.Module, label: str) -> None:
 
 
 def _apply_lora(path: Path | None, scale: float, model: torch.nn.Module, prefix: str) -> None:
-    """turbo 等の蒸留 LoRA を export 前に焼き込む（`export_anima.py` と同じ規律）。
+    """turbo 等の蒸留 LoRA を export 前に焼き込む（`anima/export.py` と同じ規律）。
 
     MUST: `_fake_quant` より前に呼ぶ（ADR 0016 と同じ順序制約 — 丸め後に焼くと ΔW が丸めの
     格子を外れ、格納時の再丸めが参照と食い違う）。text_conditioner 側は実測で lora_B が
@@ -122,7 +123,7 @@ def _apply_lora(path: Path | None, scale: float, model: torch.nn.Module, prefix:
     """
     if path is None:
         return
-    from karume.lora import fuse_lora, load_lora_state_dict
+    from .lora import fuse_lora, load_lora_state_dict
 
     state = load_lora_state_dict(path)
     report = fuse_lora(model, state, prefix, scale)
@@ -189,7 +190,7 @@ def encode_text(repo: str, max_len: int, dtype: str) -> dict[str, torch.Tensor]:
 
     トークナイザは repo 同梱の `tokenizer.json`（Qwen2 BPE / T5 Unigram）。`padding="longest"`・
     単一プロンプトなのでマスクは**全 1** になり、`prompt_embeds * mask` も conditioner の
-    マスク乗算もどちらも恒等 — ラッパ（`patch_anima`）がマスクを持たない根拠がここ。
+    マスク乗算もどちらも恒等 — ラッパ（`anima.patch`）がマスクを持たない根拠がここ。
     """
     from diffusers import AnimaTextConditioner
     from transformers import AutoTokenizer, Qwen3Model
@@ -243,7 +244,7 @@ def timesteps_proj_table(
 ) -> tuple[torch.Tensor, torch.nn.Module]:
     """全 step 分の timestep 埋め込み表 `[steps, 2048]` と、ロード済み DiT を返す。
 
-    表は `AnimaDit` の入力 2 本目そのもの（`patch_anima` が timestep 埋め込みをグラフ入力へ
+    表は `AnimaDit` の入力 2 本目そのもの（`anima.patch` が timestep 埋め込みをグラフ入力へ
     昇格させた先）。DiT を一緒に返すのは、直後の参照 denoise で同じインスタンスを使い回して
     7.29GiB のロードを 1 回で済ませるため。
 
@@ -259,7 +260,7 @@ def timesteps_proj_table(
 
     model = CosmosTransformer3DModel.from_pretrained(repo, subfolder="transformer")
     model.to(torch.float32).eval()
-    # MUST: LoRA は丸めより前に焼く（export_anima.py と同じ順序制約 — ADR 0016）。
+    # MUST: LoRA は丸めより前に焼く（anima/export.py と同じ順序制約 — ADR 0016）。
     _apply_lora(lora, lora_scale, model, "transformer")
     # MUST: 表を作る**前**に丸める。time_proj は素の正弦波で重みを持たないが、順序を
     # 「参照より前」に統一しておかないと、将来 time_embed 側に重みが増えた時に黙ってずれる。
@@ -285,7 +286,7 @@ def reference_steps(
     """`AnimaDenoiseStep` を `ref_steps` 回。CFG は `uncond + scale·(cond − uncond)`。
 
     latent は素の経路では `(B,C,1,h,w)`。`padding_mask` はピクセル解像度のゼロ
-    （パイプライン既定）で、Karume 側は `patch_anima.AnimaDit` がゼロ定数チャネルへ畳む。
+    （パイプライン既定）で、Karume 側は `anima.patch.AnimaDit` がゼロ定数チャネルへ畳む。
 
     cond / uncond の生の DiT 出力も残す — これが無いと Deno 側で CFG と Euler の
     ホストグルーを**単体でパリティ検査できず**、DiT の誤差と混ざった形でしか見られない。

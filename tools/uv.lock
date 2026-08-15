@@ -377,13 +377,6 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
-anima = [
-    { name = "accelerate" },
-    { name = "diffusers" },
-    { name = "torchvision", version = "0.28.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torchvision", version = "0.28.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
-    { name = "transformers" },
-]
 birefnet = [
     { name = "einops" },
     { name = "kornia" },
@@ -425,12 +418,6 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-anima = [
-    { name = "accelerate", specifier = ">=1.0" },
-    { name = "diffusers", specifier = "==0.39.0" },
-    { name = "torchvision", specifier = ">=0.28" },
-    { name = "transformers", specifier = "==5.14.1" },
-]
 birefnet = [
     { name = "einops", specifier = ">=0.8" },
     { name = "kornia", specifier = ">=0.8" },
@@ -467,6 +454,13 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+anima = [
+    { name = "accelerate" },
+    { name = "diffusers" },
+    { name = "torchvision", version = "0.28.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torchvision", version = "0.28.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "transformers" },
+]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -476,6 +470,12 @@ dev = [
 requires-dist = [{ name = "karume", editable = "exporter" }]
 
 [package.metadata.requires-dev]
+anima = [
+    { name = "accelerate", specifier = ">=1.0" },
+    { name = "diffusers", specifier = "==0.39.0" },
+    { name = "torchvision", specifier = ">=0.28" },
+    { name = "transformers", specifier = "==5.14.1" },
+]
 dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.0" },

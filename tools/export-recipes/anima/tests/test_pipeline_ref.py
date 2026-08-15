@@ -1,4 +1,4 @@
-"""`anima_pipeline.py` のうち**実重みが要らない**部分の約束事。
+"""`anima/pipeline_ref.py` のうち**実重みが要らない**部分の約束事。
 
 ここで固定するのは、壊れても実行時に例外が出ず**数だけが静かにずれる**側だけ:
 
@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import torch
 
-import anima_pipeline
+from anima import pipeline_ref as anima_pipeline
 
 
 class TestSigmaSchedule:

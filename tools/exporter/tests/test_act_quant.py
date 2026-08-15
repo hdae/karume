@@ -3,7 +3,7 @@
 正本は `packages/runtime/src/kernels/quantize-rows.ts` と
 `packages/runtime/src/reference/i8a8.ts`。ここが固定するのは
 「torch 側がその仕様と同じ格子・同じ丸め・同じ NaN 伝播を持つ」ことで、E2E の参照
-フィクスチャ（`anima_pipeline.py --act-quant`）の数値がここに掛かっている。
+フィクスチャ（`anima/pipeline_ref.py --act-quant`）の数値がここに掛かっている。
 """
 
 from __future__ import annotations

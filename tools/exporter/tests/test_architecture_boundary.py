@@ -7,8 +7,8 @@ exporter は「汎用 exporter core（PyPI 配布物）」と「モデル別 rec
 
 検査は 2 本:
 
-1. core が **recipe 側モジュール**（`karume.patch_*` / `anima_text` / `dist` / `modelcard` /
-   `cli` / `paths`）を import しない
+1. core が **recipe 側モジュール**（`karume.patch_*` / `dist` / `modelcard` / `cli` /
+   `paths`）を import しない
 2. core が **上流モデル系パッケージ**（`style_bert_vits2` / `transformers` / `diffusers` /
    `torchvision`）を import しない — core wheel に上流実装の provenance 義務を引き込まない
    ための門（ADR 0065 決定 7）
@@ -31,9 +31,9 @@ KARUME_ROOT = Path(__file__).resolve().parents[1] / "karume"
 #:
 #: MUST: **明示リストで持つ**。`karume/` を舐めて対象を決めると、新しいモジュールが増えたとき
 #: 「core なのか recipe なのか」の判断を素通りして黙って gate に入る（または入らない）。
-#: NOTE: このリスト外の `karume.*`（`patch_*` / `anima_text` / `dist` / `modelcard` / `cli` /
-#: `paths` / `lora` / `resolution`）は **境界検査の対象外** — 段階移行中で、recipe 側へ出る
-#: ものと core に昇格するものが未分離だから。段が進むたびにここへ足していく（ADR 0065 段階）。
+#: NOTE: このリスト外の `karume.*`（`patch_*` / `dist` / `modelcard` / `cli` / `paths`）は
+#: **境界検査の対象外** — 段階移行中で、recipe 側へ出るものと core に昇格するものが未分離
+#: だから。段が進むたびにここへ足していく（ADR 0065 段階）。
 CORE_MODULES: tuple[str, ...] = (
     "__init__",
     "ir",
@@ -50,7 +50,7 @@ CORE_MODULES: tuple[str, ...] = (
     "pipeline",
     "goldens",
     "custom_ops",
-    # 段 2 で patch_anima から回収したモデル非依存の export 検証ヘルパ。
+    # 段 2 で Anima の patch 層から回収したモデル非依存の export 検証ヘルパ。
     "rope",
 )
 
@@ -58,7 +58,7 @@ CORE_MODULES: tuple[str, ...] = (
 RECIPE_MODULE_PREFIXES = ("patch_",)
 
 #: recipe 側（core から import してはならない）モジュール名。
-RECIPE_MODULES = frozenset({"anima_text", "cli", "dist", "modelcard", "paths"})
+RECIPE_MODULES = frozenset({"cli", "dist", "modelcard", "paths"})
 
 #: core wheel に持ち込まない上流モデル系パッケージ。
 UPSTREAM_MODEL_PACKAGES = frozenset(
@@ -165,12 +165,12 @@ class TestTheBoundaryCheckItself:
     実在の違反モジュールで示す。ここで挙げる 2 本は recipe 側なので core 集合には入れない。
     """
 
-    def test_it_catches_the_lazy_upstream_import_in_patch_anima(self) -> None:
-        """`patch_anima` は関数内で diffusers を import する — 遅延 import も見えている。"""
-        violations = upstream_imports("patch_anima")
+    def test_it_catches_the_lazy_upstream_import_in_patch_deberta(self) -> None:
+        """`patch_deberta` は関数内で transformers を import する — 遅延 import も見えている。"""
+        violations = upstream_imports("patch_deberta")
 
-        assert violations, "patch_anima の diffusers import を検出できていない"
-        assert all("diffusers" in violation for violation in violations)
+        assert violations, "patch_deberta の transformers import を検出できていない"
+        assert all("transformers" in violation for violation in violations)
 
     def test_it_catches_the_lazy_recipe_import_in_cli(self) -> None:
         """`cli` は関数内で `from karume import dist` する — `from X import <submodule>` も見る。"""

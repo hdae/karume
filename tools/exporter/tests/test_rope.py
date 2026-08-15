@@ -1,7 +1,7 @@
 """RoPE バッファの降格と、その空振りを落とす門の回帰テスト（`karume.rope`）。
 
 対象はモデル非依存の走査なので合成 nn.Module だけで固定する（上流パッケージ不要 —
-ADR 0065 段 2 で `patch_anima` から回収した）。
+ADR 0065 段 2 で Anima の patch 層から回収した）。
 """
 
 from __future__ import annotations

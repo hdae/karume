@@ -1,4 +1,4 @@
-"""`export_anima.py` の台本レベルの約束事（実重み不要分）。
+"""`anima/export.py` の台本レベルの約束事（実重み不要分）。
 
 実重みを要する emit / verify は手動（README 参照）。ここで固定するのは、壊れると**偽 PASS**
 になる側の規律だけ:
@@ -16,8 +16,8 @@ import pytest
 import torch
 from torch import nn
 
-import export_anima
-from karume import patch_anima
+from anima import export as export_anima
+from anima import patch as patch_anima
 
 
 class TestTargets:

@@ -46,7 +46,7 @@ f32 重みを潰すので順序が逆にできない）。7.29GiB のロード�
     dit_out.safetensors    全構成の step 別 latent（生データ — 追加の分析用）
     layers.csv             層別の生表（454 本ぶん — report.md には要約だけ載る）
 
-    uv run --group anima python measure_quant_anima.py --out /path/to/q0
+    uv run python -m anima.measure_quant --out /path/to/q0
 
 NOTE: 非 DiT（text_encoder / text_conditioner / VAE）は全構成とも **f32 のまま**にする。
 比較軸を DiT の量子化 1 本に絞るため（資産系列 `outputs/series/anima-i8/` は他 3 つが f16 だが、
@@ -72,7 +72,16 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
-from anima_pipeline import (
+from karume.act_quant import (
+    attach_act_quant,
+    detach_act_quant,
+    is_eligible,
+    quantize_rows,
+    quantize_rows_parts,
+)
+from karume.quantize import INT8_MAX, fake_quant_int8
+
+from .pipeline_ref import (
     LATENT_CHANNELS,
     PROMPT,
     SEED,
@@ -84,20 +93,12 @@ from anima_pipeline import (
     sigma_schedule,
     timesteps_proj_table,
 )
-from karume.act_quant import (
-    attach_act_quant,
-    detach_act_quant,
-    is_eligible,
-    quantize_rows,
-    quantize_rows_parts,
-)
-from karume.quantize import INT8_MAX, fake_quant_int8
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 DEFAULT_LORA = REPO_ROOT / "models" / "anima-turbo-lora-v0.2.safetensors"
 
-#: turbo 運用値（CFG=1 は uncond 分岐を計算しない — anima_pipeline の MUST と同じ形）。
+#: turbo 運用値（CFG=1 は uncond 分岐を計算しない — anima/pipeline_ref.py の MUST と同じ形）。
 GUIDANCE = 1.0
 
 #: 差し替え前の SDPA 実体（復元検査の正本 — import 時に 1 度だけ捕まえる）。
@@ -167,7 +168,7 @@ ATTN_CONFIGS = attn_config_names(CONFIGS)
 # ---- 活性の per-token fake-quant -------------------------------------------
 #
 # 数値仕様（`quantize_rows`）と適格判定（`is_eligible`）の正本は
-# `karume.act_quant`（`anima_pipeline.py` の鏡像フィクスチャと共有 — 2 箇所に
+# `karume.act_quant`（`anima/pipeline_ref.py` の鏡像フィクスチャと共有 — 2 箇所に
 # 書き写すと片方だけが仕様から外れる）。ここはその上に**層別の誤差集計**を足したフック。
 
 
@@ -988,7 +989,7 @@ def build_report(
     lines.append("# Q0 — Anima DiT の w8 / w8a8 / attention a8 量子化品質（torch CPU 実測）")
     lines.append("")
     lines.append(
-        f"- 日付: {time.strftime('%Y-%m-%d')} / 計測: `tools/exporter/measure_quant_anima.py`"
+        f"- 日付: {time.strftime('%Y-%m-%d')} / 計測: `tools/export-recipes/anima/measure_quant.py`"
     )
     lines.append(
         f"- 条件: Anima turbo {args.steps} step・{args.resolution}px・CFG={GUIDANCE:g}"

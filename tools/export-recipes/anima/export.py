@@ -2,7 +2,7 @@
 
 起点は diffusers 版 `circlestone-labs/Anima-Base-v1.0-Diffusers`（recon は
 docs/research/2026-08-02-anima-recon.md）。素の diffusers モジュールは rank5〜8・feat_cache・
-ホストへ出すべき埋め込みを含むので、キュレーションは `karume.patch_anima`
+ホストへ出すべき埋め込みを含むので、キュレーションは `anima.patch`
 （パッチ層 + ラッパ）が担う。
 
 ターゲットは 4 本（ADR 0016 の全量。融合ターゲットは作らない — コンポーネント間にホスト処理が
@@ -15,14 +15,13 @@ docs/research/2026-08-02-anima-recon.md）。素の diffusers モジュールは
   `--dit-graph dyn` で**トークン長 1 シンボル `S` の追加系列**（#21 波 T2）。
 - **`vae_decoder`** — T=1 の画像 decode。**静的**（既定 512px）。
 
-    uv sync --group anima                                       # tools/exporter/ で 1 回
-    uv run --group anima python export_anima.py --out /path/to/out
-    uv run --group anima python export_anima.py --target vae_decoder --out /path/to/out
-    uv run --group anima python export_anima.py --verify vae_decoder
-    uv run --group anima python export_anima.py --dtype f16   # → outputs/series/anima-f16/
-    uv run --group anima python export_anima.py --dtype i8    # → …/anima-i8/（DiT のみ）
-    uv run --group anima python export_anima.py --dtype f16 --dit-graph dyn  # → …-f16-dyn/
-    uv run --group anima karume export --dtype f16 --dit-graph dyn           # CLI 経由（同じ）
+    uv sync --all-groups                                        # tools/ で 1 回
+    uv run python -m anima.export --out /path/to/out
+    uv run python -m anima.export --target vae_decoder --out /path/to/out
+    uv run python -m anima.export --verify vae_decoder
+    uv run python -m anima.export --dtype f16   # → outputs/series/anima-f16/
+    uv run python -m anima.export --dtype i8    # → …/anima-i8/（DiT のみ）
+    uv run python -m anima.export --dtype f16 --dit-graph dyn  # → …-f16-dyn/
 
 MUST: `--dit-graph dyn` は **transformer 専用の追加系列**で、静的系列を置き換えない
 （既存資産・E2E・tolerance を 1 つも動かさないのが波 T2 の前提）。patchify /
@@ -73,7 +72,6 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
-from karume import patch_anima
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -85,7 +83,9 @@ from karume.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from . import patch
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 #: 実重みの取得元（HF Hub。ローカルキャッシュ済み — recon §7）。
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 #: 生成物の既定の置き場（格納 dtype 別の**系列**）。ターゲット名のサブディレクトリを 1 段掘る。
@@ -138,7 +138,7 @@ SYM_MAX = 512
 
 #: DiT が受け取る `encoder_hidden_states` の行数。**`SYM_MAX` とは別の量**で、由来は
 #: `AnimaTextConditioner.config.min_sequence_length`（conditioner の出力をホスト側で
-#: ここまでゼロ詰めする — ADR 0016 / anima_pipeline.MIN_SEQUENCE_LENGTH と同じ値）。
+#: ここまでゼロ詰めする — ADR 0016 / anima.pipeline_ref.MIN_SEQUENCE_LENGTH と同じ値）。
 #: 記号次元の上限に相乗りさせると、`--sym-max` を動かした瞬間に DiT の**静的な**グラフ形が
 #: 黙って変わる（そちらは記号ではないので、束縛では吸収されない）。
 MIN_SEQUENCE_LENGTH = 512
@@ -246,7 +246,7 @@ def build_text_encoder(args: argparse.Namespace, verify: bool) -> Component:
         )
     length = Dim("T", min=2, max=args.sym_max)
     return Component(
-        module=patch_anima.AnimaTextEncoder(model),
+        module=patch.AnimaTextEncoder(model),
         dynamic_shapes=({1: length},),
         input_names=("input_ids",),
         cases=cases,
@@ -280,12 +280,12 @@ def build_text_conditioner(args: argparse.Namespace, verify: bool) -> Component:
     reference = None
     if verify:
         reference = _eval_cases(
-            lambda source, target: patch_anima.reference_conditioner(model, source, target), cases
+            lambda source, target: patch.reference_conditioner(model, source, target), cases
         )
     source_length = Dim("Tsrc", min=2, max=args.sym_max)
     target_length = Dim("Ttgt", min=2, max=args.sym_max)
     return Component(
-        module=patch_anima.AnimaConditioner(model),
+        module=patch.AnimaConditioner(model),
         dynamic_shapes=({1: source_length}, {1: target_length}),
         input_names=("source_hidden_states", "target_input_ids"),
         cases=cases,
@@ -314,7 +314,7 @@ def build_transformer(args: argparse.Namespace, verify: bool) -> Component:
     # ラッパは同じ Parameter を参照するので、下の参照採取（生の `model`）にも同じ丸めが効く。
     # 丸めは切り詰めの後で足りる（切った層は export にも参照にも現れない）。LoRA と違い
     # 「全層ぶんの取りこぼしを検査する」性質が無いので、順序の MUST は無い。
-    module = patch_anima.AnimaDit(model, latent, latent)
+    module = patch.AnimaDit(model, latent, latent)
     scales = _fake_quant(args, module, TARGET_TRANSFORMER)
     generator = _generator(2)
     # timestep は 0〜1 の連続値（FlowMatch の sigma スケール）。2 点とも別の値にして、
@@ -330,11 +330,11 @@ def build_transformer(args: argparse.Namespace, verify: bool) -> Component:
     reference = None
     if verify:
         with torch.no_grad():
-            reference = tuple((patch_anima.reference_dit(model, *inputs),) for inputs in raw)
+            reference = tuple((patch.reference_dit(model, *inputs),) for inputs in raw)
     cases = tuple(
         (
             f"t{int(step.item() * 1000):04d}",
-            (latents, patch_anima.dit_timesteps_proj(model, step), encoder_hidden_states),
+            (latents, patch.dit_timesteps_proj(model, step), encoder_hidden_states),
         )
         for latents, step, encoder_hidden_states in raw
     )
@@ -353,7 +353,7 @@ def _build_transformer_tokens(
 ) -> Component:
     """S 形（トークン長 1 シンボル）の DiT — **追加系列**（#21 波 T2）。
 
-    静的形との差は入口と出口だけ（`patch_anima.AnimaDitTokens` の doc）。ここで決めるのは
+    静的形との差は入口と出口だけ（`anima.patch.AnimaDitTokens` の doc）。ここで決めるのは
     ケースの取り方 3 点:
 
     - **2 点評価は解像度 × timestep の両方を変える**（`DIT_DYN_RESOLUTIONS`）。同じ S を
@@ -367,7 +367,7 @@ def _build_transformer_tokens(
       検証が 1 段浅くなる。
     """
     patch_size = tuple(int(size) for size in model.config.patch_size)
-    module = patch_anima.AnimaDitTokens(model)
+    module = patch.AnimaDitTokens(model)
     scales = _fake_quant(args, module, TARGET_TRANSFORMER)
     generator = _generator(2)
     latents = [
@@ -389,7 +389,7 @@ def _build_transformer_tokens(
     if verify:
         with torch.no_grad():
             reference = tuple(
-                (patch_anima.reference_dit(model, latent, step, embeds),)
+                (patch.reference_dit(model, latent, step, embeds),)
                 for _, latent, step, embeds in latents
             )
     cases = tuple(
@@ -397,10 +397,10 @@ def _build_transformer_tokens(
             f"s{(side // patch_size[1]) * (side // patch_size[2]):05d}"
             f"t{int(step.item() * 1000):04d}",
             (
-                patch_anima.dit_patchify(latent, patch_size),
-                patch_anima.dit_timesteps_proj(model, step),
+                patch.dit_patchify(latent, patch_size),
+                patch.dit_timesteps_proj(model, step),
                 embeds,
-                *patch_anima.dit_rope_tables(model, side, side),
+                *patch.dit_rope_tables(model, side, side),
             ),
         )
         for side, latent, step, embeds in latents
@@ -417,10 +417,10 @@ def _build_transformer_tokens(
         reference=reference,
         symbol_names=("S",),
         weight_scales=scales,
-        verify_adapter=lambda output, index: patch_anima.dit_unpatchify(
+        verify_adapter=lambda output, index: patch.dit_unpatchify(
             output, sides[index], sides[index], patch_size
         ),
-        host_tables=patch_anima.dit_rope_base_tables(model),
+        host_tables=patch.dit_rope_base_tables(model),
     )
 
 
@@ -443,12 +443,10 @@ def build_vae_decoder(args: argparse.Namespace, verify: bool) -> Component:
     if verify:
         # MUST: パッチはクラス属性のプロセス全域差し替え — 参照はパッチ前に採る。
         _assert_vae_unpatched("vae_decoder の参照採取")
-        reference = _eval_cases(
-            lambda latents: patch_anima.reference_vae_decode(vae, latents), cases
-        )
-    patch_anima.apply_vae_decoder_patch(vae)
+        reference = _eval_cases(lambda latents: patch.reference_vae_decode(vae, latents), cases)
+    patch.apply_vae_decoder_patch(vae)
     return Component(
-        module=patch_anima.AnimaVaeDecoder(vae),
+        module=patch.AnimaVaeDecoder(vae),
         dynamic_shapes=None,
         input_names=("latents",),
         cases=cases,
@@ -494,7 +492,7 @@ def _assert_vae_unpatched(where: str) -> None:
     パッチ後に採った「参照」はパッチ後の値そのものになり、同値検証が恒真化して偽 PASS する。
     **差が常に 0 になる**方向の壊れ方なので、検証が緑であること自体は何の証拠にもならない。
     """
-    if patch_anima.vae_patches_applied():
+    if patch.vae_patches_applied():
         raise RuntimeError(
             f"{where}: VAE パッチ適用後に参照値を採ろうとした — 同値検証が恒真化する"
             "（順序は「全ケースの参照を確定 → パッチ適用 → 比較」）"
@@ -528,7 +526,7 @@ def _fake_quant(
 def _apply_lora(args: argparse.Namespace, model: nn.Module, target: str) -> None:
     if args.lora is None:
         return
-    from karume.lora import fuse_lora, load_lora_state_dict
+    from .lora import fuse_lora, load_lora_state_dict
 
     state = load_lora_state_dict(args.lora)
     report = fuse_lora(model, state, LORA_PREFIXES[target], args.lora_scale)
