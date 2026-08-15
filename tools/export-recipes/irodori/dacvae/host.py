@@ -4,7 +4,7 @@ r"""DACVAE を挟む**ホスト側前処理**の数の正（参照音声の正�
 グラフの**外側**に残る段の参照値。W4 のホスト実装（TS の codec 統合）が突き合わせる材料で、
 値は上流実装（`irodori_tts.codec` / `irodori_tts.inference_runtime`）を**呼んで**採る。
 
-    cd tools/exporter
+    cd tools/export-recipes
     uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' \
         python -m irodori.dacvae.host
 
@@ -62,8 +62,8 @@ from typing import Any, NamedTuple
 import torch
 from safetensors.torch import load_file, save_file
 
+from _shared.paths import SERIES_ROOT
 from karume.convert import normalize_boundary_tensor
-from karume.paths import SERIES_ROOT
 
 from .. import export as ir
 from . import export as ex

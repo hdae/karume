@@ -9,9 +9,6 @@
 MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
 （`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
 **存在しない事実**だけ。
-
-NOTE: `_frontmatter` などの描画部品は core 側で private 名のまま — recipe から名指しで
-呼ぶのは ADR 0065 段 6（packaging）で公開名を決めるまでの形。
 """
 
 from __future__ import annotations
@@ -21,14 +18,14 @@ from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
-    _default_model,
-    _files,
-    _frontmatter,
-    _model_sections,
-    _models,
-    _quants,
-    _render,
-    _require_pipeline,
+    default_model,
+    files,
+    frontmatter,
+    model_sections,
+    models,
+    quants,
+    render,
+    require_pipeline,
 )
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
@@ -99,7 +96,7 @@ def _vowel_detector_seconds(config: Mapping[str, Any], frames: int) -> str:
 
 
 def _vowel_detector_overview(manifest: Mapping[str, Any]) -> list[str]:
-    config = _default_model(manifest)["pipelineConfig"]
+    config = default_model(manifest)["pipelineConfig"]
     longest = _vowel_detector_seconds(config, config["maxFrames"])
     return [
         "## What is this",
@@ -153,7 +150,7 @@ def _vowel_detector_base_weights() -> list[str]:
 
 def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     model_name = manifest["defaultModel"]
-    model = _default_model(manifest)
+    model = default_model(manifest)
     config = model["pipelineConfig"]
     return [
         "## Usage",
@@ -214,18 +211,18 @@ def _vowel_detector_shape(model: Mapping[str, Any]) -> list[str]:
 
 def render_vowel_detector_model_card(manifest: Mapping[str, Any], repo: str) -> str:
     """母音検出配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
-    _require_pipeline(manifest, VOWEL_DETECTOR_SUPPORTED_PIPELINE)
-    return _render(
+    require_pipeline(manifest, VOWEL_DETECTOR_SUPPORTED_PIPELINE)
+    return render(
         (
-            _frontmatter(_vowel_detector_metadata()),
+            frontmatter(_vowel_detector_metadata()),
             ["", f"# {VOWEL_DETECTOR_TITLE}", ""],
             _vowel_detector_overview(manifest),
             [""],
             _vowel_detector_base_weights(),
             [""],
-            _models(manifest),
+            models(manifest),
             [""],
             _vowel_detector_usage(manifest, repo),
-            *_model_sections(manifest, (_files, _quants, _vowel_detector_shape)),
+            *model_sections(manifest, (files, quants, _vowel_detector_shape)),
         )
     )

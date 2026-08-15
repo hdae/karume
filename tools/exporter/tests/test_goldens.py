@@ -6,13 +6,14 @@ README どおり ③固定 seed で再生成しても同じバイト列になる
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 from safetensors import safe_open
 
 from karume.dims import eval_dim, parse_dim
 from karume.goldens import (
-    GOLDEN_ROOT,
     GOLDEN_SPECS,
     GOLDEN_T,
     INPUT_PREFIX,
@@ -24,6 +25,12 @@ from karume.goldens import (
 from karume.ir import IrGraph
 from karume.ops import EMITTABLE_OPS
 from karume.verify import verify_model
+
+#: コミット済み golden の置き場。**リポの綴りはテスト側が持つ** — 生成側（`karume.goldens`）は
+#: 置き場を引数で受けるだけで repo topology を知らない（ADR 0065 Consequences）。
+GOLDEN_ROOT = (
+    Path(__file__).resolve().parents[3] / "packages" / "runtime" / "tests" / "fixtures" / "golden"
+)
 
 #: 後段テストが読む配布物なので、リポジトリに置ける大きさに留める。
 MAX_FILE_BYTES = 16 * 1024

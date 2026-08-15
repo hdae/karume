@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
     DistError,
@@ -44,7 +45,6 @@ from karume.dist import (
     preprocessor_channels,
     preprocessor_int,
 )
-from karume.paths import INPUTS_ROOT
 
 from .card import SIGLIP2_UPSTREAM, render_siglip2_model_card
 
@@ -146,7 +146,7 @@ class Siglip2Sources:
 
 
 def siglip2_sources(series_dir: Path, model: str = SIGLIP2_DEFAULT_MODEL) -> Siglip2Sources:
-    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
+    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。"""
     checkpoint = siglip2_checkpoint(model)
     return Siglip2Sources(
         series=series_dir / checkpoint,

@@ -19,7 +19,7 @@ from safetensors import safe_open
 from safetensors.torch import load_file
 from torch import nn
 
-from karume.paths import SERIES_ROOT
+from _shared.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 from siglip2 import export as sg
 
@@ -88,7 +88,7 @@ def exported(tmp_path):
 
 class TestSeriesLayout:
     def test_the_default_output_dir_is_a_series(self):
-        """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — karume.paths）。"""
+        """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — _shared.paths）。"""
         assert sg.default_out_dir(sg.DEFAULT_MODEL_DIR).parent == SERIES_ROOT
 
     def test_each_model_gets_its_own_series(self):

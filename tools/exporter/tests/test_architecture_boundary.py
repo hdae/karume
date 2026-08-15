@@ -7,8 +7,8 @@ exporter は「汎用 exporter core（PyPI 配布物）」と「モデル別 rec
 
 検査は 2 本:
 
-1. core が **recipe 側モジュール**（`karume.patch_*` — 今は 1 本も無いが再発防止で残す門 —
-   と `dist` / `modelcard` / `cli` / `paths`）を import しない
+1. core が **recipe 側モジュール**（`karume.patch_*` / `karume.paths` — どちらも今は 1 本も
+   無いが再発防止で残す門）を import しない
 2. core が **上流モデル系パッケージ**（`style_bert_vits2` / `transformers` / `diffusers` /
    `torchvision`）を import しない — core wheel に上流実装の provenance 義務を引き込まない
    ための門（ADR 0065 決定 7）
@@ -24,17 +24,15 @@ from pathlib import Path
 
 import pytest
 
-#: 検査対象パッケージのソース置き場。
-KARUME_ROOT = Path(__file__).resolve().parents[1] / "karume"
+#: 検査対象パッケージのソース置き場（`src/` layout — ADR 0065 決定 5）。
+KARUME_ROOT = Path(__file__).resolve().parents[1] / "src" / "karume"
 
 #: 汎用 exporter core として残す集合（ADR 0065 決定 1 の一覧）。
 #:
-#: MUST: **明示リストで持つ**。`karume/` を舐めて対象を決めると、新しいモジュールが増えたとき
-#: 「core なのか recipe なのか」の判断を素通りして黙って gate に入る（または入らない）。
-#: NOTE: このリスト外の `karume.*`（`dist` / `modelcard` / `cli` / `paths`）は**境界検査の
-#: 対象外**。`dist` / `modelcard` から family 知識は 1 つも残らず出た（ADR 0065 段 3+4 完了）が、
-#: `dist` が `karume.paths`（repo topology 依存）を import しているので、ここへ足すのは段 5 の
-#: paths 決着の後（`paths` が recipe 側の関心事へ回る — 同 ADR Consequences）。
+#: MUST: **明示リストで持つ**。`src/karume/` を舐めて対象を決めると、新しいモジュールが増えた
+#: とき「core なのか recipe なのか」の判断を素通りして黙って gate に入る（または入らない）。
+#: NOTE: `dist` / `modelcard` / `cli` も段 5 で門に入った — family 知識（段 3+4）に続いて
+#: repo topology（`paths`）も出たので、core wheel の中身は全部この 1 リストで見る。
 CORE_MODULES: tuple[str, ...] = (
     "__init__",
     "ir",
@@ -53,6 +51,10 @@ CORE_MODULES: tuple[str, ...] = (
     "custom_ops",
     # 段 2 で Anima の patch 層から回収したモデル非依存の export 検証ヘルパ。
     "rope",
+    # 段 5 で純化した組み立てエンジンとカード描画・CLI（family 知識も repo topology も無い）。
+    "dist",
+    "modelcard",
+    "cli",
 )
 
 #: recipe 側（core から import してはならない）モジュール名の接頭辞。
@@ -65,7 +67,15 @@ CORE_MODULES: tuple[str, ...] = (
 RECIPE_MODULE_PREFIXES = ("patch_",)
 
 #: recipe 側（core から import してはならない）モジュール名。
-RECIPE_MODULES = frozenset({"cli", "dist", "modelcard", "paths"})
+#:
+#: NOTE: `karume/paths.py` も**もう無い**（ADR 0065 段 5 で `tools/export-recipes/_shared/`
+#: へ出た）。`patch_*` と同じ**再発防止の名簿**としてここに残す — repo topology（リポの
+#: `models/` / `outputs/` の綴り）を core wheel へ書き戻す最短の道がこの綴りで、消すと
+#: 「気づいたら `karume/paths.py` が生えていた」を止める門が無くなる。恒真化していないことは
+#: {@link TestTheBoundaryCheckItself} の合成故障注入が示す。
+#: 逆に `dist` / `modelcard` / `cli` はここから降りた — family 知識も repo topology も無い
+#: core の一部になったので、**禁止側ではなく検査される側**（{@link CORE_MODULES}）にいる。
+RECIPE_MODULES = frozenset({"paths"})
 
 #: core wheel に持ち込まない上流モデル系パッケージ。
 UPSTREAM_MODEL_PACKAGES = frozenset(
@@ -80,12 +90,11 @@ UPSTREAM_MODEL_PACKAGES = frozenset(
 #: ないが、core wheel の依存として妥当かは ADR 0065 段 6（packaging / provenance）の裁定事項。
 UPSTREAM_CHECK_EXEMPT = frozenset({"convert", "goldens"})
 
-#: 検査 1 の一時除外。同じく既知の違反を明示して残す。
+#: 検査 1 の一時除外。**空** — core は 1 本残らず検査 1 に掛かる（ADR 0065 段 5 完了）。
 #:
-#: NOTE: `goldens` は生成先（リポ直下 `packages/runtime/tests/fixtures/golden/`）を
-#: `karume.paths.REPO_ROOT` から引く。`paths` は repo topology 依存で recipe 側の関心事へ回る
-#: 予定（ADR 0065 Consequences）なので、goldens が Path を受け取る形へ変わるまでの除外。
-RECIPE_CHECK_EXEMPT = frozenset({"goldens"})
+#: NOTE: 席を残すのは検査 2 の {@link UPSTREAM_CHECK_EXEMPT} と形を揃えるため。除外を足すのは
+#: 「既知の違反を明示して残す」ときだけで、緑にするための逃げ道にはしない。
+RECIPE_CHECK_EXEMPT: frozenset[str] = frozenset()
 
 RECIPE_GATED_MODULES = tuple(name for name in CORE_MODULES if name not in RECIPE_CHECK_EXEMPT)
 UPSTREAM_GATED_MODULES = tuple(name for name in CORE_MODULES if name not in UPSTREAM_CHECK_EXEMPT)
@@ -223,18 +232,18 @@ class TestTheBoundaryCheckItself:
         assert recipe_imports(path) == []
 
     def test_it_catches_a_lazy_recipe_import(self, tmp_path: Path) -> None:
-        """`from karume import dist` の形も見る（シンボル名かサブモジュール名かは区別しない）。"""
+        """`from karume import paths` の形も見る（シンボル名かサブモジュール名かは区別しない）。"""
         path = self._violator(
-            tmp_path, "leaky", "def run(argv):\n    from karume import dist\n\n    return dist\n"
+            tmp_path, "leaky", "def run(argv):\n    from karume import paths\n\n    return paths\n"
         )
 
-        assert recipe_imports(path) == ["karume/leaky.py:2 -> karume.dist"]
+        assert recipe_imports(path) == ["karume/leaky.py:2 -> karume.paths"]
 
     def test_it_catches_a_relative_recipe_import(self, tmp_path: Path) -> None:
-        """相対 1 段も絶対化して見る（`from . import dist` で門をすり抜けさせない）。"""
-        path = self._violator(tmp_path, "relative", "from . import modelcard\n")
+        """相対 1 段も絶対化して見る（`from . import paths` で門をすり抜けさせない）。"""
+        path = self._violator(tmp_path, "relative", "from . import paths\n")
 
-        assert recipe_imports(path) == ["karume/relative.py:1 -> karume.modelcard"]
+        assert recipe_imports(path) == ["karume/relative.py:1 -> karume.paths"]
 
     def test_it_catches_a_patch_module_by_prefix(self, tmp_path: Path) -> None:
         """接頭辞の門（{@link RECIPE_MODULE_PREFIXES}）は名指しの表と独立に効く。

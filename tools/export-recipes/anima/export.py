@@ -72,6 +72,7 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
+from _shared.paths import SERIES_ROOT
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -79,7 +80,6 @@ from karume.convert import (
 )
 from karume.emit import WEIGHT_DTYPES, storage_breakdown
 from karume.ir import IrGraph
-from karume.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
@@ -89,7 +89,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 #: 実重みの取得元（HF Hub。ローカルキャッシュ済み — recon §7）。
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 #: 生成物の既定の置き場（格納 dtype 別の**系列**）。ターゲット名のサブディレクトリを 1 段掘る。
-#: 親は `SERIES_ROOT`（= outputs/series/）— models/ は配布形だけの場所（karume.paths）。
+#: 親は `SERIES_ROOT`（= outputs/series/）— models/ は配布形だけの場所（_shared.paths）。
 #:
 #: MUST: f16 系列は**別ディレクトリ**（ADR 0018）。f32 系列（`anima/`）は
 #: 「量子化なしの実装誤差」を測る網として独立に残り、f16 系列がその上へ量子化の実装誤差を

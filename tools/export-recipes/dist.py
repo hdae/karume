@@ -10,6 +10,9 @@
     uv run python dist.py --pipeline sbv2 --card-profile jvnv \\
         --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 
+置き場の既定（`--series` / `--out`）もここが渡す — リポの `outputs/series/` と `models/` は
+repo topology で、core は綴りを持たない（ADR 0065 Consequences・`karume.dist` の同 MUST）。
+
 NOTE: `**CORE_PIPELINES` の展開は残す — core が「表を受け取る側」であって「表を持たない側」で
 はないことは変わっておらず、core wheel だけで組める pipeline が将来生えたら黙って合流する。
 """
@@ -17,13 +20,15 @@ NOTE: `**CORE_PIPELINES` の展開は残す — core が「表を受け取る側
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
+from _shared.paths import DIST_ROOT, SERIES_ROOT
 from anima import distribution as anima_distribution
 from birefnet import distribution as birefnet_distribution
 from depth_anything import distribution as depth_anything_distribution
 from irodori import distribution as irodori_distribution
 from karume.dist import PIPELINES as CORE_PIPELINES
-from karume.dist import Pipeline
+from karume.dist import DistError, Pipeline
 from karume.dist import main as dist_main
 from sbv2 import distribution as sbv2_distribution
 from siglip2 import distribution as siglip2_distribution
@@ -45,8 +50,27 @@ PIPELINES: Mapping[str, Pipeline] = {
 DEFAULT_PIPELINE = "anima"
 
 
+def default_out_dir(pipeline: Pipeline, models: Sequence[str]) -> Path:
+    """`--out` 省略時の出力先（`models/<リポ名>/` = 1 ディレクトリ 1 HF リポ）。
+
+    複数モデルのリポ名は**導出できない**（`karume-sbv2-jvnv` のようなファミリー名は命名の
+    決定であって、モデル名の並びからは決まらない）ので、明示を求めて落とす。
+    """
+    if len(models) != 1:
+        raise DistError(
+            f"モデルを {len(models)} 個組む場合はリポ名を導出できない — --out で出力先を指定する"
+        )
+    return DIST_ROOT / pipeline.repo_name(models[0])
+
+
 def main(argv: Sequence[str] | None = None) -> None:
-    dist_main(argv, pipelines=PIPELINES, default_pipeline=DEFAULT_PIPELINE)
+    dist_main(
+        argv,
+        pipelines=PIPELINES,
+        default_pipeline=DEFAULT_PIPELINE,
+        default_out_dir=default_out_dir,
+        default_series=SERIES_ROOT,
+    )
 
 
 if __name__ == "__main__":

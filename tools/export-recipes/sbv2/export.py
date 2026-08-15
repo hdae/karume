@@ -13,12 +13,15 @@
 - **`voice`**（波 7）— flow + dec の融合 1 グラフ。**この E2E が緑になった時点で SBV2 の
   全チェーンが成立する**。
 
-    uv sync --group sbv2                                    # tools/exporter/ で 1 回
+    uv sync --all-groups                                    # tools/export-recipes/ で 1 回
     uv run --group sbv2 python -m sbv2.export               # 全ターゲットを emit
     uv run --group sbv2 python -m sbv2.export --target front
     uv run --group sbv2 python -m sbv2.export --dtype f16   # → outputs/series/sbv2-FN4-f16/
     uv run --group sbv2 python -m sbv2.export --dtype i8    # → outputs/series/sbv2-FN4-i8/
     uv run --group sbv2 python -m sbv2.export --verify flow  # 参照実装との eager 同値検証
+
+NOTE: sync が `--all-groups` なのは workspace の venv が 1 つだからで（`tools/pyproject.toml`）、
+`--group sbv2` だけを sync すると他 family のグループが**外れる**（実測）。
 
 MUST: `--verify` と emit は**同一プロセスで併用できない**（CLI が機械的に拒否する）。
 パッチはクラス属性のプロセス全域差し替えなので、emit 側が先にパッチを当てると「パッチ前の
@@ -72,10 +75,10 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
+from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.convert import normalize_boundary_tensor
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
-from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 

@@ -72,10 +72,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from _shared.paths import SERIES_ROOT
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
 from karume.emit import WEIGHT_DTYPES
-from karume.paths import SERIES_ROOT
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
 from .resolution import parse_resolution, resolution_meta

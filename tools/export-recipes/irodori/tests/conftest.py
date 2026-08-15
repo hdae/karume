@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 
-from karume.paths import REPO_ROOT
+from _shared.paths import REPO_ROOT
 
 #: `irodori.export.DEFAULT_SOURCE_DIR` と同じ置き場（綴りが割れると片方だけ空振りする）。
 IRODORI_SOURCE_DIR = REPO_ROOT / "inputs" / "irodori" / "Irodori-TTS"

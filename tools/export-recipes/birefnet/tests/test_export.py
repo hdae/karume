@@ -28,8 +28,8 @@ from safetensors import safe_open
 from safetensors.torch import load_file
 from torch import nn
 
+from _shared.paths import SERIES_ROOT
 from birefnet import export as bn
-from karume.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 
 #: tiny な合成モデルの解像度（`disc_mask` が 2×2 の円内を持つ最小の形）。
@@ -147,7 +147,7 @@ def exported(tmp_path):
 
 class TestSeriesLayout:
     def test_the_default_output_dir_is_a_series(self):
-        """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — karume.paths）。"""
+        """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — _shared.paths）。"""
         assert bn.default_out_dir(bn.DEFAULT_MODEL_DIR, bn.DEFAULT_RESOLUTION).parent == SERIES_ROOT
 
     def test_each_resolution_gets_its_own_series(self):

@@ -4,7 +4,7 @@ r"""Irodori-TTS v4 のテキスト前処理層（`normalize_text` + Unigram ト�
 だけ。モデルグラフにも重みにも触らない（読むのはチェックポイントの `__metadata__` の
 `bos_token_id` / `pad_token_id` だけ）。
 
-    cd tools/exporter
+    cd tools/export-recipes
     uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref
 
 出力は 4 本（既定 `outputs/series/irodori-v4-small/tokenizer/`・`.gitignore` 配下）:
@@ -75,7 +75,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from karume.paths import REPO_ROOT, SERIES_ROOT
+from _shared.paths import REPO_ROOT, SERIES_ROOT
 
 from .export import DEFAULT_MODEL_DIR, DEFAULT_SOURCE_DIR, TOKENIZER_FILE, read_configs
 

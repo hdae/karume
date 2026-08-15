@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from karume.modelcard import CardMetadata, _frontmatter
+from karume.modelcard import CardMetadata, frontmatter
 
 # ---- frontmatter の任意席 -----------------------------------------------------
 #
@@ -41,12 +41,12 @@ class TestFrontmatterOptionalFields:
         )
 
     def test_it_omits_every_optional_field_that_is_unset(self) -> None:
-        lines = _frontmatter(self._metadata())
+        lines = frontmatter(self._metadata())
         for absent in ("base_model_relation", "license_name", "license_link"):
             assert not any(line.startswith(absent) for line in lines), absent
 
     def test_it_writes_each_optional_field_that_is_set(self) -> None:
-        lines = _frontmatter(
+        lines = frontmatter(
             self._metadata(
                 base_model_relation="quantized",
                 license_name="owner-terms",

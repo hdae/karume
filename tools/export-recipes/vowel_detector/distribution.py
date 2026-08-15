@@ -41,6 +41,7 @@ from typing import Any
 
 import numpy as np
 
+from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
     DistError,
@@ -54,7 +55,6 @@ from karume.dist import (
     ir_graph,
     table_payload,
 )
-from karume.paths import INPUTS_ROOT
 
 from .card import render_vowel_detector_model_card
 
@@ -176,7 +176,7 @@ class VowelDetectorSources:
 def vowel_detector_sources(
     series_dir: Path, model: str = VOWEL_DETECTOR_DEFAULT_MODEL
 ) -> VowelDetectorSources:
-    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
+    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。"""
     return VowelDetectorSources(
         series_dir=series_dir,
         model=INPUTS_ROOT / VOWEL_DETECTOR_INPUTS_DIRNAME,

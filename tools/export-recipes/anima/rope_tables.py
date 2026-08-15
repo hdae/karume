@@ -32,7 +32,7 @@ from typing import Any
 
 import torch
 
-from karume.paths import SERIES_ROOT
+from _shared.paths import SERIES_ROOT
 
 from .patch import dit_rope_tables
 from .resolution import format_resolution

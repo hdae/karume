@@ -26,9 +26,9 @@ import torch
 from safetensors import safe_open
 from torch import nn
 
+from _shared.paths import REPO_ROOT, SERIES_ROOT
 from karume.dims import parse_dim
 from karume.ops import EMITTABLE_OPS
-from karume.paths import REPO_ROOT, SERIES_ROOT
 from karume.quantize import (
     QUANT_CHANNEL_AXES,
     channel_scale,

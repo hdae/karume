@@ -42,7 +42,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
-from karume.paths import OUTPUTS_ROOT
+from _shared.paths import OUTPUTS_ROOT
 
 from . import export, patch
 

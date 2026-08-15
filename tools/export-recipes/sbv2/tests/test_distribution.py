@@ -200,7 +200,7 @@ def _build_sbv2_sources(
 ) -> Sbv2Sources:
     """系列 + デモ資産 + 実重みの置き場を偽資産で再現する（配布しないものの混入込み）。
 
-    3 つの置き場の並びは `karume.paths` の実レイアウト（`outputs/series/` / `outputs/` 直下 /
+    3 つの置き場の並びは `_shared.paths` の実レイアウト（`outputs/series/` / `outputs/` 直下 /
     `inputs/`）に揃える — CLI 経路のテストが root を差し替えるだけで同じ木を指せる形。
     `offset` は表と重みにモデルごとの差を入れる軸（ファミリー組み立ての共有判定を見るため）。
     """
@@ -771,10 +771,10 @@ class TestSbv2Cli:
 
     @staticmethod
     def _reroot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from karume import dist
+        import dist
         from sbv2 import distribution
 
-        # `DIST_ROOT` は既定の出力先を決める core 側（`default_out_dir`）、`OUTPUTS_ROOT` /
+        # `DIST_ROOT` は既定の出力先を決めるドライバ側（`dist.default_out_dir`）、`OUTPUTS_ROOT` /
         # `INPUTS_ROOT` は系列の外の入力を引く recipe 側 — 別モジュールの束縛を別々に外す。
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
         monkeypatch.setattr(distribution, "OUTPUTS_ROOT", tmp_path / "outputs")

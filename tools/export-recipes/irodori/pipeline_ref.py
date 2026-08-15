@@ -5,7 +5,7 @@ r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop
 （TS のパイプライン）が突き合わせる統合門の参照値そのもので、値は
 **export したグラフ基準**（= `irodori/export.py` の Graph ラッパ = eager 同値実装）で採る。
 
-    cd tools/exporter
+    cd tools/export-recipes
     uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref
     uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype f16
     uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i8

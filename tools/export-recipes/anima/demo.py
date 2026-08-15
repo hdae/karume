@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from karume.paths import SERIES_ROOT
+from _shared.paths import SERIES_ROOT
 
 from . import text as at
 

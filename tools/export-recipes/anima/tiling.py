@@ -48,7 +48,7 @@ from typing import Any
 
 import torch
 
-from karume.paths import SERIES_ROOT
+from _shared.paths import SERIES_ROOT
 from karume.quantize import round_weights_to_f16
 
 from .resolution import format_resolution, parse_resolution, resolution_meta

@@ -11,9 +11,6 @@
 MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
 （`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
 **存在しない事実**だけ。
-
-NOTE: `_frontmatter` などの描画部品は core 側で private 名のまま — recipe から名指しで
-呼ぶのは ADR 0065 段 6（packaging）で公開名を決めるまでの形。
 """
 
 from __future__ import annotations
@@ -23,15 +20,15 @@ from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
-    _default_model,
-    _files,
-    _frontmatter,
-    _knob,
-    _model_sections,
-    _models,
-    _quants,
-    _render,
-    _require_pipeline,
+    default_model,
+    files,
+    frontmatter,
+    knob,
+    model_sections,
+    models,
+    quants,
+    render,
+    require_pipeline,
 )
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
@@ -68,7 +65,7 @@ IRODORI_DEMO_CAPTION = "落ち着いた女性の声で、ゆっくりと丁寧�
 
 
 def _irodori_overview(manifest: Mapping[str, Any]) -> list[str]:
-    sample_rate = _default_model(manifest)["pipelineConfig"]["sampleRate"]
+    sample_rate = default_model(manifest)["pipelineConfig"]["sampleRate"]
     return [
         "## What is this",
         "",
@@ -134,10 +131,10 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     ので、系列が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ進める形。
     """
     model_name = manifest["defaultModel"]
-    model = _default_model(manifest)
+    model = default_model(manifest)
     quant = model["defaultQuant"]
-    models = " / ".join(sorted(manifest["models"]))
-    quants = " / ".join(sorted(model["quants"]))
+    model_names = " / ".join(sorted(manifest["models"]))
+    quant_names = " / ".join(sorted(model["quants"]))
     sample_rate = model["pipelineConfig"]["sampleRate"]
     return [
         "## Usage",
@@ -146,8 +143,8 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         'import { decodeWav, encodeWav, IrodoriPipeline } from "jsr:@karume/models";',
         "",
         f'using pipeline = await IrodoriPipeline.fromPretrained("{repo}", {{',
-        f'  // model: "{model_name}", // default — available: {models}',
-        f'  // quant: "{quant}", // default — available: {quants}',
+        f'  // model: "{model_name}", // default — available: {model_names}',
+        f'  // quant: "{quant}", // default — available: {quant_names}',
         "});",
         "",
         "const audio = await pipeline.generate({",
@@ -219,7 +216,7 @@ def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
         "",
         f"- **steps**: {config['steps']} Euler steps (`initScale` {config['initScale']})",
         "- **guidance**: "
-        + " / ".join(f"{name} {_knob(scale)}" for name, scale in scales.items())
+        + " / ".join(f"{name} {knob(scale)}" for name, scale in scales.items())
         + f", applied for t in [{config['cfgMinT']}, {config['cfgMaxT']}]",
         f"- **duration**: clamped to [{config['minSeconds']}, {config['maxSeconds']}] seconds"
         " (the duration predictor decides within that, unless `durationSeconds` is passed)",
@@ -231,18 +228,18 @@ def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
 
 def render_irodori_model_card(manifest: Mapping[str, Any], repo: str) -> str:
     """Irodori 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
-    _require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)
-    return _render(
+    require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)
+    return render(
         (
-            _frontmatter(IRODORI_METADATA),
+            frontmatter(IRODORI_METADATA),
             ["", f"# {IRODORI_TITLE}", ""],
             _irodori_overview(manifest),
             [""],
             _irodori_base_weights(),
             [""],
-            _models(manifest),
+            models(manifest),
             [""],
             _irodori_usage(manifest, repo),
-            *_model_sections(manifest, (_files, _quants, _irodori_shape, _irodori_defaults)),
+            *model_sections(manifest, (files, quants, _irodori_shape, _irodori_defaults)),
         )
     )

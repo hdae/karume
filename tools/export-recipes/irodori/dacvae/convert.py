@@ -54,8 +54,8 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 
+from _shared.paths import INPUTS_ROOT
 from karume.emit import _save_ordered, _write_order
-from karume.paths import INPUTS_ROOT
 from karume.verify import assert_reader_layout
 
 #: 既定の入力（手置きの実重み — `inputs/<family>/<name>/`）。

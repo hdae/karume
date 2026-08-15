@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from dist import main
+from dist import default_out_dir, main
 from irodori.distribution import (
     IRODORI_CODEC_DIRS,
     IRODORI_CODEC_HALO_FRAMES,
@@ -51,7 +51,6 @@ from karume.dist import (
     MODEL_CARD_FILENAME,
     DistError,
     assemble_family,
-    default_out_dir,
     resolve_card_renderer,
     verify_dist,
 )
@@ -235,7 +234,7 @@ def _build_irodori_sources(
 ) -> IrodoriSources:
     """系列 + チェックポイントの置き場を偽資産で再現する（配布しないものの混入込み）。
 
-    並びは `karume.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
+    並びは `_shared.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
     テストが root を差し替えるだけで同じ木を指せる形。コーデックは**別系列・別入力素材**
     （`dacvae-32dim`）なので、Irodori 本体とは別の 2 ディレクトリへ置く。系列は格納 dtype
     ごとに 1 本ずつ（`IRODORI_WEIGHT_DTYPES` — f32 / f16 / i8）。
@@ -744,8 +743,8 @@ class TestIrodoriModelCard:
         from irodori import distribution
 
         sources = _build_irodori_sources(tmp_path)
-        # `INPUTS_ROOT`（系列の外にあるチェックポイント）を引くのは recipe 側 — core の
-        # `karume.dist` ではなくこちらの束縛を外す（`DIST_ROOT` は逆で core 側）。
+        # `INPUTS_ROOT`（系列の外にあるチェックポイント）を引くのは recipe 側 — ドライバの
+        # `dist` ではなくこちらの束縛を外す（`DIST_ROOT` は逆でドライバ側）。
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
         out_dir = tmp_path / "dist"
         main(
@@ -796,10 +795,10 @@ class TestIrodoriModelCard:
 class TestIrodoriCli:
     @staticmethod
     def _reroot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import dist
         from irodori import distribution
-        from karume import dist
 
-        # `DIST_ROOT` は既定の出力先を決める core 側（`default_out_dir`）、`INPUTS_ROOT` は
+        # `DIST_ROOT` は既定の出力先を決めるドライバ側（`dist.default_out_dir`）、`INPUTS_ROOT` は
         # 系列の外の入力を引く recipe 側 — 別モジュールの束縛を別々に外す。
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")

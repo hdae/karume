@@ -68,9 +68,9 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.export import Dim
 
+from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
-from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.rope import assert_rope_lifted
 

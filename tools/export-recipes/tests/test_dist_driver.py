@@ -1,9 +1,12 @@
-"""リポの dist ドライバ（`tools/export-recipes/dist.py`）— 受理集合の合成。
+"""リポの dist ドライバ（`tools/export-recipes/dist.py`）— 受理集合と置き場の既定の合成。
 
 core の {@link karume.dist.PIPELINES} は wheel だけで組める分しか持たない（ADR 0065 決定 2）。
 ここで固定するのは「recipe 側の family が 1 つ残らず表に載り、旧 UX の既定が保たれる」こと —
 載せ忘れは `--pipeline <family>` が「そんな pipeline は無い」で落ちる形でしか表面化せず、
 資産を作り終えた後に初めて気づく。
+
+置き場の既定（`models/` / `outputs/series/`）もドライバの持ち物（ADR 0065 Consequences）—
+core は綴りを持たないので、{@link dist.default_out_dir} の規則はここが見る。
 """
 
 from __future__ import annotations
@@ -11,11 +14,13 @@ from __future__ import annotations
 import pytest
 
 import dist
+from _shared.paths import DIST_ROOT, SERIES_ROOT
 from anima.distribution import PIPELINE as ANIMA_PIPELINE
 from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
 from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
 from karume.dist import PIPELINES as CORE_PIPELINES
+from karume.dist import DistError
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
 from vowel_detector.distribution import PIPELINE as VOWEL_DETECTOR_PIPELINE
@@ -65,3 +70,20 @@ class TestRegistry:
             for render_card in spec.card_profiles.values():
                 with pytest.raises(ValueError):
                     render_card(manifest, "hdae/x")
+
+
+class TestDefaultPlaces:
+    """`--series` / `--out` の既定 — repo topology を知っているのはドライバだけ。"""
+
+    def test_the_series_default_is_the_repository_series_root(self) -> None:
+        """`--series` を省いた起動が読むのはリポの `outputs/series/`。"""
+        assert dist.SERIES_ROOT is SERIES_ROOT
+
+    def test_the_default_output_directory_follows_the_single_model(self) -> None:
+        assert dist.default_out_dir(SBV2_PIPELINE, ["jvnv-F1"]).parent == DIST_ROOT
+        assert dist.default_out_dir(SIGLIP2_PIPELINE, ["base"]).name == "karume-siglip2-base"
+
+    def test_it_refuses_to_invent_a_family_repository_name(self) -> None:
+        """ファミリーリポの名前（例 `karume-sbv2-jvnv`）はモデル名の並びからは決まらない。"""
+        with pytest.raises(DistError, match="--out"):
+            dist.default_out_dir(SBV2_PIPELINE, ["jvnv-F1", "jvnv-F2"])

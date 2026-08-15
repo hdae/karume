@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
     DistError,
@@ -45,7 +46,6 @@ from karume.dist import (
     ir_graph,
     safetensors_header,
 )
-from karume.paths import INPUTS_ROOT
 
 from .card import render_irodori_model_card
 
@@ -321,7 +321,7 @@ class IrodoriSources:
 
 
 def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> IrodoriSources:
-    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。
+    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。
 
     dtype 接尾の綴りは `irodori.export.default_out_root` /
     `irodori.dacvae.export.default_out_root` と同一 — 書き手と読み手が同じ 1 語から組む。

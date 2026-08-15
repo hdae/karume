@@ -8,7 +8,7 @@
     w_ceil 198→196 と同じ軸・ADR 0029）。latent 門の「S / forwards 完全一致」が壊れるなら、
     配布形の w8 席は混成（duration だけ据え置き）にする必要がある（ADR 0050 決定 6）。
 
-    cd tools/exporter
+    cd tools/export-recipes
     uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' \
         python -m irodori.measure_quant --config f32
     uv run ... python -m irodori.measure_quant --config i8-all
@@ -101,8 +101,8 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
+from _shared.paths import OUTPUTS_ROOT, SERIES_ROOT
 from karume import act_quant
-from karume.paths import OUTPUTS_ROOT, SERIES_ROOT
 
 from . import export as ex
 from . import patch

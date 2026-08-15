@@ -7,9 +7,6 @@
 MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
 （`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
 **存在しない事実**だけ。
-
-NOTE: `_frontmatter` などの描画部品は core 側で private 名のまま — recipe から名指しで
-呼ぶのは ADR 0065 段 6（packaging）で公開名を決めるまでの形。
 """
 
 from __future__ import annotations
@@ -19,14 +16,14 @@ from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
-    _default_model,
-    _files,
-    _frontmatter,
-    _model_sections,
-    _models,
-    _quants,
-    _render,
-    _require_pipeline,
+    default_model,
+    files,
+    frontmatter,
+    model_sections,
+    models,
+    quants,
+    render,
+    require_pipeline,
 )
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
@@ -64,7 +61,7 @@ LORA_PERMISSIONS = (
 
 
 def _overview(manifest: Mapping[str, Any]) -> list[str]:
-    defaults = _default_model(manifest)["pipelineConfig"]["defaults"]
+    defaults = default_model(manifest)["pipelineConfig"]["defaults"]
     base_model = ANIMA_METADATA.base_model[0]
     return [
         "## What is this",
@@ -103,7 +100,7 @@ def _merged_lora() -> list[str]:
 
 def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     model = manifest["defaultModel"]
-    quant = _default_model(manifest)["defaultQuant"]
+    quant = default_model(manifest)["defaultQuant"]
     return [
         "## Usage",
         "",
@@ -154,18 +151,18 @@ def _defaults(model: Mapping[str, Any]) -> list[str]:
 
 def render_model_card(manifest: Mapping[str, Any], repo: str) -> str:
     """Anima 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
-    _require_pipeline(manifest, SUPPORTED_PIPELINE)
-    return _render(
+    require_pipeline(manifest, SUPPORTED_PIPELINE)
+    return render(
         (
-            _frontmatter(ANIMA_METADATA),
+            frontmatter(ANIMA_METADATA),
             ["", f"# {ANIMA_TITLE}", ""],
             _overview(manifest),
             [""],
             _merged_lora(),
             [""],
-            _models(manifest),
+            models(manifest),
             [""],
             _usage(manifest, repo),
-            *_model_sections(manifest, (_files, _quants, _defaults)),
+            *model_sections(manifest, (files, quants, _defaults)),
         )
     )

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -37,7 +37,6 @@ from karume.dist import (
     assert_model_name,
     build_parser,
     complete_quant_weights,
-    default_out_dir,
     main,
     materialize,
     resolve_card_renderer,
@@ -448,13 +447,41 @@ class TestCli:
         args = build_parser().parse_args(["--model", "F1", "--model", "F2"])
         assert args.models == ["F1", "F2"]
 
-    def test_the_default_output_directory_follows_the_single_model(self) -> None:
-        assert default_out_dir(_ONE_PROFILE_PIPELINE, ["x"]).name == "karume-solo-x"
+    def test_it_has_no_place_of_its_own_to_write_into(self) -> None:
+        """置き場の既定も呼び出し側が渡す（`models/` / `outputs/series/` は repo topology）。"""
+        args = build_parser().parse_args([])
+        assert args.out is None
+        assert args.series is None
 
-    def test_it_refuses_to_invent_a_family_repository_name(self) -> None:
-        """ファミリーリポの名前（例 `karume-sbv2-jvnv`）はモデル名の並びからは決まらない。"""
-        with pytest.raises(DistError, match="--out"):
-            default_out_dir(_ONE_PROFILE_PIPELINE, ["x", "y"])
+    def test_it_refuses_to_assemble_without_a_series_root(self) -> None:
+        """MUST: 渡されなければ落ちる — 黙って cwd 相対のどこかを系列として読まない。"""
+        with pytest.raises(DistError, match="--series が要る"):
+            main(["--pipeline", "solo"], pipelines=_CALLER_REGISTRY)
+
+    def test_it_refuses_to_assemble_without_an_output_directory(self, tmp_path: Path) -> None:
+        """`--out` の既定を作る hook を渡さない呼び出しは、資産を触る前にここで落ちる。"""
+        with pytest.raises(DistError, match="--out が要る"):
+            main(["--pipeline", "solo", "--series", str(tmp_path)], pipelines=_CALLER_REGISTRY)
+
+    def test_a_caller_supplied_hook_decides_where_the_default_lands(self, tmp_path: Path) -> None:
+        """hook を渡した呼び出しは `--out` 省略で通り、**hook が返した場所**へ組み上がる。
+
+        hook が受け取るのは解決済みの pipeline とモデル名の並び（リポ名を綴るのに要る全部）。
+        """
+        seen: list[tuple[Pipeline, list[str]]] = []
+
+        def hook(pipeline: Pipeline, models: Sequence[str]) -> Path:
+            seen.append((pipeline, list(models)))
+            return tmp_path / "models" / "karume-solo-m"
+
+        main(
+            ["--pipeline", "solo", "--series", str(tmp_path)],
+            pipelines=_CALLER_REGISTRY,
+            default_out_dir=hook,
+        )
+
+        assert seen == [(_ONE_PROFILE_PIPELINE, ["m"])]
+        assert verify_dist(tmp_path / "models" / "karume-solo-m")
 
 
 class TestCardProfile:

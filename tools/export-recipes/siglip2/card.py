@@ -10,9 +10,6 @@
 MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
 （`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
 **存在しない事実**だけ。
-
-NOTE: `_frontmatter` などの描画部品は core 側で private 名のまま — recipe から名指しで
-呼ぶのは ADR 0065 段 6（packaging）で公開名を決めるまでの形。
 """
 
 from __future__ import annotations
@@ -22,14 +19,14 @@ from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
-    _default_model,
-    _files,
-    _frontmatter,
-    _model_sections,
-    _models,
-    _quants,
-    _render,
-    _require_pipeline,
+    default_model,
+    files,
+    frontmatter,
+    model_sections,
+    models,
+    quants,
+    render,
+    require_pipeline,
 )
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
@@ -85,7 +82,7 @@ def _siglip2_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
 
 
 def _siglip2_overview(manifest: Mapping[str, Any]) -> list[str]:
-    config = _default_model(manifest)["pipelineConfig"]
+    config = default_model(manifest)["pipelineConfig"]
     return [
         "## What is this",
         "",
@@ -139,9 +136,9 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
 
 def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     model_name = manifest["defaultModel"]
-    model = _default_model(manifest)
+    model = default_model(manifest)
     quant = model["defaultQuant"]
-    models = " / ".join(sorted(manifest["models"]))
+    model_names = " / ".join(sorted(manifest["models"]))
     return [
         "## Usage",
         "",
@@ -149,7 +146,7 @@ def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         'import { Siglip2Pipeline } from "jsr:@karume/models";',
         "",
         f'await using pipeline = await Siglip2Pipeline.fromPretrained("{repo}", {{',
-        f'  // model: "{model_name}", // default — available: {models}',
+        f'  // model: "{model_name}", // default — available: {model_names}',
         f'  // quant: "{quant}", // the only one this repository ships',
         "});",
         "",
@@ -190,18 +187,18 @@ def _siglip2_shape(model: Mapping[str, Any]) -> list[str]:
 
 def render_siglip2_model_card(manifest: Mapping[str, Any], repo: str) -> str:
     """SigLIP2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
-    _require_pipeline(manifest, SIGLIP2_SUPPORTED_PIPELINE)
-    return _render(
+    require_pipeline(manifest, SIGLIP2_SUPPORTED_PIPELINE)
+    return render(
         (
-            _frontmatter(_siglip2_metadata(manifest)),
+            frontmatter(_siglip2_metadata(manifest)),
             ["", f"# {SIGLIP2_TITLE}", ""],
             _siglip2_overview(manifest),
             [""],
             _siglip2_base_weights(manifest),
             [""],
-            _models(manifest),
+            models(manifest),
             [""],
             _siglip2_usage(manifest, repo),
-            *_model_sections(manifest, (_files, _quants, _siglip2_shape)),
+            *model_sections(manifest, (files, quants, _siglip2_shape)),
         )
     )

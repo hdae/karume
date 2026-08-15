@@ -9,6 +9,12 @@ HF は `README.md` の YAML frontmatter をモデルの機械可読メタデー�
 何を使い方に綴るかは family 固有の事実なので、`tools/export-recipes/<family>/card.py` が持つ
 （ADR 0065 決定 1・2）。`karume.dist` と同じ層分け。
 
+NOTE: 描画部品（{@link frontmatter} / {@link models} / {@link files} / {@link quants} /
+{@link model_sections} / {@link render} / {@link require_pipeline} / {@link default_model} /
+{@link knob}）は **recipe 向けの公開面**（ADR 0065 段 6）。wheel の外にある `card.py` が名指しで
+呼ぶ以上、private 名のままにしておくと「private を跨いで呼ぶ」形が既定になる。`_` 始まりで
+残しているのはこのモジュールの中だけで閉じる部品（{@link _base_model} など）。
+
 **帰属はテンプレートと別の軸**（{@link sbv2.card.Sbv2CardProfile}）。同じテンプレートでも、
 どのファミリーの重みを配るかで出所・ライセンス・引用が丸ごと変わる pipeline があるので、
 そこだけをプロファイルに分けて**呼び出し側に明示させる**（選ばせる規則は
@@ -109,17 +115,17 @@ def file_rows(model: Mapping[str, Any]) -> list[tuple[str, list[str], Mapping[st
             labels.append(label)
 
     for name, entry in model["weights"].items():
-        for label, files in entry.items():
-            add(name, label, files["file"])
-        for label, files in entry.items():
-            for extra, ref in files.get("extras", {}).items():
+        for label, weight_files in entry.items():
+            add(name, label, weight_files["file"])
+        for label, weight_files in entry.items():
+            for extra, ref in weight_files.get("extras", {}).items():
                 add(f"{name}.{extra}", label, ref)
     for name, ref in model["assets"].items():
         add(name, None, ref)
     return list(rows.values())
 
 
-def _require_pipeline(manifest: Mapping[str, Any], supported: str) -> None:
+def require_pipeline(manifest: Mapping[str, Any], supported: str) -> None:
     """全モデルが本文の前提にしている pipeline 契約であることを確かめる（違えば描かない）。
 
     テンプレートは pipeline 固有なので、別契約の manifest を食わせると「表は合っているのに
@@ -134,14 +140,14 @@ def _require_pipeline(manifest: Mapping[str, Any], supported: str) -> None:
             )
 
 
-def _base_model(models: Sequence[str]) -> list[str]:
+def _base_model(base_models: Sequence[str]) -> list[str]:
     """`base_model`（1 本なら scalar・複数なら YAML の並び — HF はどちらも読む）。"""
-    if len(models) == 1:
-        return [f"base_model: {models[0]}"]
-    return ["base_model:", *(f"  - {model}" for model in models)]
+    if len(base_models) == 1:
+        return [f"base_model: {base_models[0]}"]
+    return ["base_model:", *(f"  - {model}" for model in base_models)]
 
 
-def _frontmatter(metadata: CardMetadata) -> list[str]:
+def frontmatter(metadata: CardMetadata) -> list[str]:
     return [
         "---",
         f"library_name: {LIBRARY_NAME}",
@@ -161,7 +167,7 @@ def _frontmatter(metadata: CardMetadata) -> list[str]:
     ]
 
 
-def _models(manifest: Mapping[str, Any]) -> list[str]:
+def models(manifest: Mapping[str, Any]) -> list[str]:
     """リポが載せているモデルの一覧（v2 で初めて機械可読になった軸 — ADR 0041 §2）。"""
     default = manifest["defaultModel"]
     lines = [
@@ -184,7 +190,7 @@ def _models(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _files(model: Mapping[str, Any]) -> list[str]:
+def files(model: Mapping[str, Any]) -> list[str]:
     lines = [
         "### Files",
         "",
@@ -217,7 +223,7 @@ def _session(quant: Mapping[str, Any]) -> str:
     return " / ".join(parts) if parts else "—"
 
 
-def _quants(model: Mapping[str, Any]) -> list[str]:
+def quants(model: Mapping[str, Any]) -> list[str]:
     default = model["defaultQuant"]
     lines = [
         "### Quants",
@@ -238,22 +244,22 @@ def _quants(model: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _default_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+def default_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     """既定モデルのエントリ（リポ全体を 1 つ紹介するときの代表 — 使い方の既定でもある）。"""
     return manifest["models"][manifest["defaultModel"]]
 
 
-def _knob(value: Any) -> str:
+def knob(value: Any) -> str:
     """`defaults` の 1 値を綴る（文字列だけコード体 — 数値と名前を見分けられるように）。"""
     return f"`{value}`" if isinstance(value, str) else f"{value}"
 
 
-def _render(sections: Sequence[Sequence[str]]) -> str:
+def render(sections: Sequence[Sequence[str]]) -> str:
     """節の並びを 1 本の本文にする（末尾改行つき）。"""
     return "\n".join(line for section in sections for line in section) + "\n"
 
 
-def _model_sections(
+def model_sections(
     manifest: Mapping[str, Any],
     per_model: Sequence[ModelSection],
 ) -> list[Sequence[str]]:
@@ -266,8 +272,8 @@ def _model_sections(
     for name, model in manifest["models"].items():
         sections.append([""])
         sections.append([f"## Model: {name}", ""])
-        for index, render in enumerate(per_model):
+        for index, render_section in enumerate(per_model):
             if index:
                 sections.append([""])
-            sections.append(render(model))
+            sections.append(render_section(model))
     return sections

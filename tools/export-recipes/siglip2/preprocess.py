@@ -73,7 +73,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from karume.paths import REPO_ROOT
+from _shared.paths import REPO_ROOT
 
 from .export import DEFAULT_MODEL_DIR, MODELS_ROOT
 

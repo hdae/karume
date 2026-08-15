@@ -35,13 +35,12 @@ from birefnet.distribution import (
     birefnet_series_name,
     birefnet_sources,
 )
-from dist import main
+from dist import default_out_dir, main
 from karume.dist import (
     MANIFEST_FILENAME,
     MODEL_CARD_FILENAME,
     DistError,
     assemble_family,
-    default_out_dir,
     resolve_card_renderer,
     verify_dist,
 )
@@ -126,7 +125,7 @@ def _build_birefnet_sources(
 ) -> BirefnetSources:
     """系列を偽資産で再現する（配布しない `io.*` の混入込み）。
 
-    並びは `karume.paths` の実レイアウト（`outputs/series/`）に揃える — CLI 経路のテストが
+    並びは `_shared.paths` の実レイアウト（`outputs/series/`）に揃える — CLI 経路のテストが
     root を差し替えるだけで同じ木を指せる形。
     """
     sources = BirefnetSources(series=root / "outputs" / "series" / birefnet_series_name(model))
@@ -350,7 +349,7 @@ class TestBirefnetCli:
     def test_it_assembles_into_the_pipeline_default_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from karume import dist
+        import dist
 
         sources = _build_birefnet_sources(tmp_path, model="lucida")
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")

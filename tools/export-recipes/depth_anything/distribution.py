@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
     DistError,
@@ -49,7 +50,6 @@ from karume.dist import (
     preprocessor_channels,
     preprocessor_int,
 )
-from karume.paths import INPUTS_ROOT
 
 from .card import DEPTH_ANYTHING_UPSTREAM, render_depth_anything_model_card
 
@@ -168,7 +168,7 @@ class DepthAnythingSources:
 def depth_anything_sources(
     series_dir: Path, model: str = DEPTH_ANYTHING_DEFAULT_MODEL
 ) -> DepthAnythingSources:
-    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
+    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。"""
     checkpoint = depth_anything_checkpoint(model)
     return DepthAnythingSources(
         series=series_dir / depth_anything_series_name(model),

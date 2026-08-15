@@ -4,7 +4,7 @@
 duration predictor**（同 G2 / G3）・**DiT 1 step**（同 G5' = G4 を畳んだ形・ADR 0047）で、
 codec（G6 / G7）は後続の波でこの台本にターゲットとして足す。
 
-    cd tools/exporter
+    cd tools/export-recipes
     uv run --with 'transformers==5.14.1' python -m irodori.export
     uv run --with 'transformers==5.14.1' python -m irodori.export --target backbone
     uv run --with 'transformers==5.14.1' python -m irodori.export --dtype f16
@@ -210,13 +210,13 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.export import Dim
 
+from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     normalize_boundary_tensor,
 )
 from karume.ir import IrGraph
-from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import QUANT_CHANNEL_AXES, fake_quant_int8, round_weights_to_f16
 from karume.rope import ROPE_BUFFER_NAMES, assert_rope_lifted

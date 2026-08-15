@@ -21,13 +21,12 @@ from typing import Any
 
 import pytest
 
-from dist import main
+from dist import default_out_dir, main
 from karume.dist import (
     MANIFEST_FILENAME,
     MODEL_CARD_FILENAME,
     DistError,
     assemble_family,
-    default_out_dir,
     resolve_card_renderer,
     verify_dist,
 )
@@ -141,7 +140,7 @@ def _build_siglip2_sources(
 ) -> Siglip2Sources:
     """系列 + 実重みの置き場を偽資産で再現する（配布しない `io.*` の混入込み）。
 
-    並びは `karume.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
+    並びは `_shared.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
     テストが root を差し替えるだけで同じ木を指せる形。
     """
     checkpoint = siglip2_checkpoint(model)
@@ -350,8 +349,8 @@ class TestSiglip2ModelCard:
         from siglip2 import distribution
 
         sources = _build_siglip2_sources(tmp_path, model=model)
-        # `INPUTS_ROOT`（系列の外にある実重み）を引くのは recipe 側 — core の `karume.dist`
-        # ではなくこちらの束縛を外す（`DIST_ROOT` は逆で core 側）。
+        # `INPUTS_ROOT`（系列の外にある実重み）を引くのは recipe 側 — ドライバの `dist`
+        # ではなくこちらの束縛を外す（`DIST_ROOT` は逆でドライバ側）。
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
         out_dir = tmp_path / "dist"
         main(
@@ -421,11 +420,11 @@ class TestSiglip2Cli:
     def test_it_assembles_into_the_pipeline_default_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from karume import dist
+        import dist
         from siglip2 import distribution
 
         sources = _build_siglip2_sources(tmp_path)
-        # `DIST_ROOT` は既定の出力先を決める core 側（`default_out_dir`）、`INPUTS_ROOT` は
+        # `DIST_ROOT` は既定の出力先を決めるドライバ側（`dist.default_out_dir`）、`INPUTS_ROOT` は
         # 系列の外の入力を引く recipe 側 — 別モジュールの束縛を別々に外す。
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")

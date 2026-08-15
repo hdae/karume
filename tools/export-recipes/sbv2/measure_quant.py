@@ -86,8 +86,8 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
+from _shared.paths import OUTPUTS_ROOT
 from karume.act_quant import quantize_rows
-from karume.paths import OUTPUTS_ROOT
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
 from . import demo, export, patch

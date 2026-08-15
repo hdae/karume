@@ -27,8 +27,8 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
+from _shared.paths import SERIES_ROOT
 from depth_anything import export as da
-from karume.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 
 #: 合成 golden の解像度（実重みの 518 は重いので、性格だけを見るここでは小さく取る）。

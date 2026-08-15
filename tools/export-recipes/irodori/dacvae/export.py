@@ -4,7 +4,7 @@ recon の G6（decoder）/ G7（encoder）で、Irodori-TTS v4 の**コーデッ
 6 ターゲットは `irodori/export.py`、ホスト側の latent までの経路は
 `irodori/pipeline_ref.py` が持つ。
 
-    cd tools/exporter
+    cd tools/export-recipes
     uv run --with descript-audiotools --with einops python -m irodori.dacvae.export
     uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --target decoder
     uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype f16
@@ -127,9 +127,9 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.export import Dim
 
+from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
-from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 

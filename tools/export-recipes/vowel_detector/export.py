@@ -108,9 +108,9 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
+from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
-from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
 
 from .patch import gru_forward

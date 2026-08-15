@@ -19,6 +19,12 @@ recipe（`tools/export-recipes/<family>/`）は wheel の外にあるので、�
 持たないのも同じ理由 — 表が呼び出し側で変わる以上、既定を焼くと「渡していない pipeline を
 既定で組む」形が生まれる（ADR 0065 決定 2）。
 
+MUST: **置き場の既定も呼び出し側が渡す**（{@link main} の `default_out_dir` / `default_series`）
+— リポの `models/` や `outputs/series/` は repo topology であって汎用 exporter の知識ではない
+（ADR 0065 Consequences — 綴りは `tools/export-recipes/_shared/paths.py` が 1 箇所で持つ）。
+渡されなければ core 単体でも `--out` / `--series` を必須にして落とす（黙って cwd 相対の
+どこかへ組まない）。
+
 MUST: **manifest は手書きせず資産から導出する**（ADR 0038 Context を v2 でも維持）。`size` /
 `sha256` は組み立て後の実ファイルから streaming で採る — 数 GB を丸読みしないことと、「表と
 現物が食い違う」失敗様式を構造的に起こさないことの両方がここに掛かっている。
@@ -70,7 +76,6 @@ from safetensors.numpy import save
 
 from karume.ir import IR_METADATA_KEY
 from karume.modelcard import HF_OWNER
-from karume.paths import DIST_ROOT, SERIES_ROOT
 
 # ---- ① 共有部: 置き場の綴り・共有席の決定・配置・ハッシュ・宣言と現物の突合 -------
 
@@ -909,26 +914,23 @@ def resolve_card_renderer(pipeline: Pipeline, profile: str | None) -> CardRender
 PIPELINES: Mapping[str, Pipeline] = {}
 
 
-def default_out_dir(pipeline: Pipeline, models: Sequence[str]) -> Path:
-    """`--out` 省略時の出力先。
-
-    複数モデルのリポ名は**導出できない**（`karume-sbv2-jvnv` のようなファミリー名は命名の
-    決定であって、モデル名の並びからは決まらない）ので、明示を求めて落とす。
-    """
-    if len(models) != 1:
-        raise DistError(
-            f"モデルを {len(models)} 個組む場合はリポ名を導出できない — --out で出力先を指定する"
-        )
-    return DIST_ROOT / pipeline.repo_name(models[0])
+#: `--out` 省略時の出力先を作る hook（{@link main} が受ける）。リポの `models/<リポ名>/` を
+#: 綴れるのは repo topology を知っている呼び出し側だけなので、core は形だけ持つ。
+DefaultOutDir = Callable[[Pipeline, Sequence[str]], Path]
 
 
 def build_parser(
-    pipelines: Mapping[str, Pipeline] = PIPELINES, default_pipeline: str | None = None
+    pipelines: Mapping[str, Pipeline] = PIPELINES,
+    default_pipeline: str | None = None,
+    *,
+    default_series: Path | None = None,
+    has_default_out_dir: bool = False,
 ) -> argparse.ArgumentParser:
     """`--pipeline` の受理集合を**引数で**受ける（ドライバが recipe を足した表を渡す）。
 
     `default_pipeline` を渡さない呼び出し（= core 単体）は `--pipeline` を必須にする
-    （{@link main} が選択肢を並べて落とす）。
+    （{@link main} が選択肢を並べて落とす）。`--series` / `--out` の既定も同じ扱いで、
+    置き場を渡されていなければ help でそう名乗り、{@link main} が落とす。
     """
     parser = argparse.ArgumentParser(description="配布ディレクトリ（HF アップ可能形）の組み立て")
     default_note = "必須" if default_pipeline is None else f"既定: {default_pipeline}"
@@ -962,15 +964,22 @@ def build_parser(
     parser.add_argument(
         "--series",
         type=Path,
-        default=SERIES_ROOT,
-        help="系列ディレクトリ群の親（既定: リポの outputs/series/）",
+        default=default_series,
+        help="系列ディレクトリ群の親（"
+        + (f"既定: {default_series}" if default_series is not None else "必須")
+        + "）",
     )
     parser.add_argument(
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は単一モデルのときだけ models/<リポ名>/ — 1 ディレクトリ = 1 HF リポ。"
-        "複数モデルを組むときは必須）",
+        help="出力先 = 1 ディレクトリ 1 HF リポ（"
+        + (
+            "省略時は呼び出し側の既定。複数モデルを組むときは必須"
+            if has_default_out_dir
+            else "必須"
+        )
+        + "）",
     )
     return parser
 
@@ -980,17 +989,32 @@ def main(
     *,
     pipelines: Mapping[str, Pipeline] = PIPELINES,
     default_pipeline: str | None = None,
+    default_out_dir: DefaultOutDir | None = None,
+    default_series: Path | None = None,
 ) -> None:
-    args = build_parser(pipelines, default_pipeline).parse_args(argv)
+    args = build_parser(
+        pipelines,
+        default_pipeline,
+        default_series=default_series,
+        has_default_out_dir=default_out_dir is not None,
+    ).parse_args(argv)
     if args.pipeline is None:
         # MUST: 既定を core に焼かない（モジュール doc の MUST）— 表が呼び出し側で変わる。
         raise DistError(
             f"--pipeline が要る（選択肢: {', '.join(sorted(pipelines))}）— "
             "リポ専用 recipe まで含めた表は tools/export-recipes/dist.py が持つ"
         )
+    if args.series is None:
+        # MUST: repo topology を core に焼かない（モジュール doc の MUST）。
+        raise DistError("--series が要る（系列ディレクトリ群の親）— 呼び出し側が既定を渡していない")
     pipeline = pipelines[args.pipeline]
     models = args.models if args.models else [pipeline.default_model]
-    out_dir = args.out if args.out is not None else default_out_dir(pipeline, models)
+    if args.out is not None:
+        out_dir = args.out
+    elif default_out_dir is not None:
+        out_dir = default_out_dir(pipeline, models)
+    else:
+        raise DistError("--out が要る（配布形の出力先）— 呼び出し側が既定を渡していない")
     # 帰属プロファイルは**組み立ての前**に解決する — 誤った / 足りない指定で数 GB を並べてから
     # 最後の 1 枚で落ちる形にしない。
     render_card = resolve_card_renderer(pipeline, args.card_profile)

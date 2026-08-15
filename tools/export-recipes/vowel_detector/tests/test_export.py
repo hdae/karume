@@ -29,7 +29,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch.export import Dim
 
-from karume.paths import SERIES_ROOT
+from _shared.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 from vowel_detector import export as vd
 
@@ -145,7 +145,7 @@ class TestTranscription:
 
 class TestSeriesLayout:
     def test_the_default_output_dir_is_a_series(self) -> None:
-        """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — karume.paths）。"""
+        """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — _shared.paths）。"""
         assert vd.default_out_dir(vd.DEFAULT_CKPT).parent == SERIES_ROOT
 
     def test_the_series_name_does_not_carry_a_length(self) -> None:

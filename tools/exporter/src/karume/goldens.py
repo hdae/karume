@@ -3,7 +3,11 @@
 固定 seed の小モデルを torch.export → IR v1 コンテナ化し、torch CPU での期待出力を
 同じディレクトリに置く。契約表の全 op を全モデル合計で必ず被覆する（COVERAGE 検査）。
 
-    uv run python -m karume.goldens
+    uv run python -m karume.goldens --out ../../packages/runtime/tests/fixtures/golden
+
+置き場は**必ず引数で受ける**（`--out` 必須）— どのリポの `packages/runtime/tests/fixtures/`
+へ落とすかは repo topology で、汎用 exporter の知識ではない（ADR 0065 Consequences）。
+上の起動例は `tools/exporter/` から走らせたときの相対 path。
 
 レイアウトとテンソルキー命名は README.md「golden レイアウト」に明記。
 """
@@ -29,14 +33,8 @@ from karume.convert import (
 )
 from karume.ir import IrGraph
 from karume.ops import EMITTABLE_OPS
-from karume.paths import REPO_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8
-
-#: 生成物の既定の置き場（リポジトリ直下 packages/runtime/tests/fixtures/golden/）。リポの根は
-#: `karume.paths` から引く — 同じ式を独立に書くと、パッケージの階層を動かしたとき片方だけが
-#: 追従して golden が存在しないディレクトリへ落ちる。
-GOLDEN_ROOT = REPO_ROOT / "packages" / "runtime" / "tests" / "fixtures" / "golden"
 
 MODEL_FILE = "model.safetensors"
 IO_FILE = "io.safetensors"
@@ -1332,7 +1330,7 @@ def generate_golden(spec: GoldenSpec, root: Path) -> IrGraph:
     return graph
 
 
-def generate_all(root: Path = GOLDEN_ROOT) -> dict[str, IrGraph]:
+def generate_all(root: Path) -> dict[str, IrGraph]:
     """全 golden を生成し、契約表の op 被覆を検査する。
 
     被覆検査を生成側に置くのは、op を 1 個足すたびに golden を足す実装契約
@@ -1348,7 +1346,12 @@ def generate_all(root: Path = GOLDEN_ROOT) -> dict[str, IrGraph]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=GOLDEN_ROOT)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="生成先ディレクトリ（必須 — 例: ../../packages/runtime/tests/fixtures/golden）",
+    )
     args = parser.parse_args()
     for name, graph in generate_all(args.out).items():
         print(f"{name}: ops={graph.required_ops} symbols={graph.symbols}")

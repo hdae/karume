@@ -34,6 +34,7 @@ from typing import Any
 import numpy as np
 from safetensors import safe_open
 
+from _shared.paths import INPUTS_ROOT, OUTPUTS_ROOT
 from karume.dist import (
     Artifact,
     DistError,
@@ -47,7 +48,6 @@ from karume.dist import (
     table_payload,
 )
 from karume.ir import IR_METADATA_KEY
-from karume.paths import INPUTS_ROOT, OUTPUTS_ROOT
 from sbv2.card import SBV2_CARD_PROFILES, render_sbv2_model_card
 
 #: 既定のモデル名 — 系列の綴り（`sbv2-FN4{,-f16,-i8}`）と実重みの置き場を束ねる 1 語。
@@ -224,7 +224,7 @@ class Sbv2Sources:
 
 
 def sbv2_sources(series_dir: Path, model: str = SBV2_DEFAULT_MODEL) -> Sbv2Sources:
-    """系列の親ディレクトリ（`outputs/series/`）と `karume.paths` の綴りから入力を引く。"""
+    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。"""
     return Sbv2Sources(
         series_f16=series_dir / f"{sbv2_series_name(model)}-f16",
         series_i8=series_dir / f"{sbv2_series_name(model)}-i8",

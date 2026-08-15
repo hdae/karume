@@ -47,10 +47,10 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
+from _shared.paths import SERIES_ROOT
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
-from karume.paths import SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8
 
@@ -63,7 +63,7 @@ MODEL_ID = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "i8")
 
 #: 生成物の既定の置き場（格納 dtype 別の**系列**）。親は `SERIES_ROOT`（= outputs/series/）—
-#: models/ は配布形だけの場所（karume.paths）。`.gitignore` の `outputs/` でコミット対象外。
+#: models/ は配布形だけの場所（_shared.paths）。`.gitignore` の `outputs/` でコミット対象外。
 #: MUST: dtype ごとに別ディレクトリ（ADR 0019）— 同居させると f32 系列の網が i8 資産に掛かる。
 DEFAULT_OUT_ROOTS: Mapping[str, Path] = {
     "f32": SERIES_ROOT / "deberta",
