@@ -5,8 +5,8 @@
 > recon 5 レッグ（トークナイザ / デモパイプライン / Turbo LoRA / i8 / perf 技法）と、
 > 画像デモ実装波（D1 Turbo 資産 / D2 トークナイザ / D3 デモ本体）の要点。設計裁定の正本は
 > ADR [0019](../decisions/0019-i8-weight-execution.md)（w8）、デモの使い方と実測は
-> [examples/anima/README.md](../../examples/anima/README.md)、トークナイザの機構は
-> `tools/exporter/karume/anima_text.py` の docstring。ここには**他に置き場の無い
+> 当時の `examples/anima/README.md`（現在は `packages/models/src/anima/` へ移設済み）、
+> トークナイザの機構は `tools/exporter/karume/anima_text.py` の docstring。ここには**他に置き場の無い
 > 恒久情報**（perf 材料・recon の反証記録・隣接観測）だけを残す。
 
 ## perf 材料（プロトタイプ実測の棚卸し — perf マイルストーンの入力）

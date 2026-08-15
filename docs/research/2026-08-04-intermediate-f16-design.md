@@ -713,7 +713,7 @@ transient の 512MiB が単独で取れる）。波 2 → 3 の順は、**stride
 [attention-a8-design](2026-08-04-attention-a8-design.md) /
 [dynres-vae-tiling](2026-08-03-dynres-vae-tiling.md) /
 [wgpu-memory-ceiling](2026-08-03-wgpu-memory-ceiling.md) /
-[demo README](../../examples/anima/README.md):126-215。
+当時の `examples/anima/README.md`:126-215（現在は `packages/models/src/anima/` へ移設済み）。
 
 **プロトタイプ（相対パス — 固有名は書かない）**: `docs/quantization.md:22-30`（方式一覧の
 「活性 f16 / 中間バッファも F16 / **未計画**」行）/ `docs/decisions.md:59-77`（0006 の

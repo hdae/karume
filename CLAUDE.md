@@ -1,8 +1,8 @@
 # Karume — プロジェクト規約（1画面）
 
 WebGPU 汎用 NN 推論スタックの monorepo（Deno + ブラウザ両対応・純 TS + WGSL・ランタイム
-依存ゼロ）。JSR `@karume/runtime`（IR 実行）/ `@karume/hub`（HF resolve・DL・cache・variant
-解決）/ `@karume/models`（パイプライン・tokenizer）+ PyPI `karume`（tools/exporter —
+依存ゼロ）。JSR `@karume/runtime`（IR 実行）/ `@karume/hub`（HF revision resolve・DL・cache・
+model / quant 解決）/ `@karume/models`（パイプライン・tokenizer）+ PyPI `karume`（tools/exporter —
 torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](docs/decisions/)。現在の
 焦点と落とし穴は [.claude/ACTIVE_DESIGN.md](.claude/ACTIVE_DESIGN.md)
 （レビュー・計画タスクは必読）。

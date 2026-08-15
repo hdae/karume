@@ -42,19 +42,3 @@ Dawn / Tint 系で naga を通らないため、同じ症状が出るとは限�
 根治は convert/normalize 側の一般化（bool 定数の f32/i32 化 or initializer dtype の拡張 +
 batch>1 のマスク畳み込み対応）で、コア変換基盤への設計判断が要る。`--batch` フラグ自体は
 一般化が入ればそのまま使える形で維持している。
-
-## ここから外れたもの（記録）
-
-- op 追加の層分類の 2 穴（Core ATen 外・モデル由来の原子の行き場 /「容量・性能で非成立」の
-  線引きが 2 文書で非等価）→ **解消済み（2026-08-14・[decisions/0059](decisions/0059-op-vocabulary-entry-doors.md)
-  = 入場門モデル）**。ADR 要否を「Core ATen 帰属（`Tag.core` 実測）」の 1 判定へ一本化し、
-  要求元軸を廃止・非成立判定は紙の手続きを左右しない構造にした。暫定運用（2026-08-13
-  ユーザー裁定「第 1' 層 = それ以外の原子」）の結論とは遡って無矛盾。判定手順の正本は
-  [op-vocabulary.md](op-vocabulary.md) の門表。
-
-- GPU の clamp / clamp_min / relu / amax / amin の NaN 非伝播 → **根治済み（2026-08-03・
-  ビット列 NaN 判定）**。裁定と機序は [decisions/0020](decisions/0020-nan-propagation-bitwise.md)。
-- GPUBuffer 総確保量の天井（VRAM の約 59%）→ **出所特定済み・by-design の外部制約として
-  [limitations.md](limitations.md) へ移設（2026-08-03）**。Karume 側では回避不能
-  （Deno がハードコードする wgpu メモリ予算しきい値）。調査記録は
-  [research/2026-08-03-wgpu-memory-ceiling.md](research/2026-08-03-wgpu-memory-ceiling.md)。

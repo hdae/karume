@@ -194,9 +194,11 @@ WebGPU のストレージバッファに 1bit 型が無いため、bool は GPU 
 
 `STRIDED_RANK = 4` を契約層で検査する（DeBERTa front は全値 rank ≤ 4 — ADR 0011。
 slice / cat は読み族・書き族としてこの上限を共有する — ADR 0014）。
-rank ≥ 5 のモデルはエクスポータの rank 下げ正規化（**M1-P4（Anima）で導入予定**）で先に潰す
-前提で、それまでは export 時に fail loudly。**SBV2 全チェーン（front / flow / dec / voice）に
-rank ≥ 5 は 1 本も出現しない**と実測で確定したため、M1-P3 では導入していない。
+rank ≥ 5 を落とすのは**エクスポータ側の仕事**で、`_lower_unit_expand` /
+`_lower_split_unbind` / `_lower_reshape_permute` の鎖 3 パスが**実装済み**
+（`karume/normalize.py`・発火は rank > `STRIDED_RANK` の値を含む形に限る — ADR 0016）。
+受理したパターンは rank ≤ 4 の列へ落とし、これらで正規化できない高 rank 形は export 時に
+fail loudly（実行上限そのものは緩めない）。
 
 ## レイアウト第 2 群は実測形だけを受理する（slice / cat / pad / flip — ADR 0014）
 
@@ -207,8 +209,10 @@ rank ≥ 5 は 1 本も出現しない**と実測で確定したため、M1-P3 �
 - `slice`: **step は 1 固定**（飛ばし読みは strided 族の可変点 1 語では表せない）。切り出す軸は
   **静的**（記号軸は `sym_prefix_slice` の担当 — 重複させない）。負の添字と省略された `end` は
   エクスポータ境界で軸長へ詰める。
-- `cat`: 連結軸は**静的**（記号長どうしの和は次元言語の一次式に一般には載らない）。入力は
-  2 本以上（1 本の cat は恒等コピーで語彙に無い）。
+- `cat`: 連結軸は〈定数〉または〈**同一シンボルの一次式**〉。総和が次元言語 `coeff·sym+offset`
+  に載る形（`S`+1 → `S+1`、`S`+`S` → `2S`）を受理し、異なるシンボルの混在は fail loudly
+  （ADR [0046](decisions/0046-cat-symbolic-axis.md)）。入力は 2 本以上（1 本の cat は恒等
+  コピーで語彙に無い）。
 - `pad`: **最終次元・定数 0・非負幅**のみ。埋め値の欄を持たないので「0 以外を黙って 0 で
   実行する」経路が構造的に無い。負幅（切り詰め）は slice の意味なので受理しない。
 - `flip`: **静的軸 1 本**のみ（多軸 flip はエクスポータ境界で落とす。動的軸の反転はカーネル上は
@@ -323,9 +327,10 @@ EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める�
   が全体を 0 にする）なので、ホストがゼロ行列を置けば同値。**恒真化しないよう
   `export_irodori.py` の `_no_reference_evidence` が毎 emit 実測する**（非ゼロ latent を
   全 0 マスクで通し、出力の最大絶対値が 0 でなければ export ごと落ちる）。
-- **平均トークンの前置（`_prepend_masked_mean_token`）はホスト**。`cat` の対象軸が記号次元 S に
-  なり、IR の `cat` は静的軸しか受けない（`aten.cat.default: 対象軸は静的でなければならない`）。
-  ホスト側の作業は軸 1 の平均と concat だけで、モデル計算（重みを使う演算）は残らない。
+- **平均トークンの前置（`_prepend_masked_mean_token`）は現行パイプラインではホスト**。IR v1 の
+  `cat` は `1 + S → S+1` を受理する（ADR [0046](decisions/0046-cat-symbolic-axis.md)）ので、
+  残置の理由を「記号軸 `cat` 非対応」とはしない。ホスト側の作業は軸 1 の平均と concat だけで、
+  モデル計算（重みを使う演算）は残らない。GPU 側へ移すかは別途の設計判断。
 - **duration の `speaker_vec` / `caption_vec` はホスト供給**。前者は上の平均トークンの
   切り出し、後者は **caption 系列に `caption_norm`（RMSNorm 512）を掛けた masked mean** で、
   後者だけはホストにモデル計算が 1 本残る。caption 系列をグラフ入力にすると記号次元が
@@ -341,19 +346,17 @@ EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める�
 - 記号次元の上限は **S ≤ 750**（`ref_max_seconds` 120s × 25Hz ÷ patch 4 — チェックポイントの
   config から導出）。超える参照長は束縛検査で fail loudly。
 
-## Irodori DiT: S=750 の中間バッファが WebGPU 既定超・CFG は既定 2 モードのみ
+## Irodori DiT: 行ブロックでも分割不能な 1 クエリ行上限・CFG は既定 2 モードのみ
 
 DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-execution.md) の実行形
 （B=1 × 記号 S × G4 の畳み込み × uncond をマスクで表現）で export してある。その帰結として
 次の 2 点は by-design の制約で、近似や無音のフォールバックはしない:
 
-- **中間 `scores` の 128MiB 束縛上限は解消済み（2026-08-14・ADR
-  [0060](decisions/0060-row-block-attention.md) = 行ブロック実行）**: 分解 attention の
-  9 ノード窓を、granted limit から静的に決めた最小枚数の行ブロックで回す（ビット同一・
-  既定経路 — 上限に余裕のある機では 1 枚 = コストゼロ）。旧記載「既定上限の実装では
-  S ≈ 742 で確保に失敗する」は現行では発生しない（門 = 128MiB 強制 device + 合成グラフの
-  実走・`gpu_row_block_attention_test.ts`）。残る by-design: クエリ **1 行**ぶんの
-  スコア（`H·C·4` バイト）が上限を超える形は行ブロックでは分割しきれず fail loudly。
+- **クエリ 1 行ぶんのスコア（`H·C·4` バイト）が束縛上限を超える形は fail loudly**。分解
+  attention は 9 ノード窓を、granted limit から静的に決めた最小枚数の行ブロックで回す
+  （ADR [0060](decisions/0060-row-block-attention.md) = 行ブロック実行。ビット同一・既定経路
+  — 上限に余裕のある機では 1 枚 = コストゼロ）ので、S=750 の中間 `scores` が 128MiB を超える
+  かつての制約は解消済みだが、1 行すら上限に入らない形は行ブロックでは分割しきれない。
 - **CFG は `speaker_uncond_mode="mask"`（既定）と `cfg_guidance_mode="independent"`（既定）
   以外を表現しない**。uncond をマスクだけで表せるのは「state を 0 にした context KV の寄与が
   マスク越しに厳密 0」だからで、`"noise"`（speaker の uncond を乱数 state にする）はこの
@@ -479,10 +482,10 @@ wgpu-hal metal の `check_if_oom()` は `Ok(())` を返す no-op（[wgpu#7460](h
 
 ## hub: DL 前の適合チェックは GPU feature 軸のみ（limits は DL 後に fail loudly）
 
-preset が宣言できる GPU 前提は `gpuFeatures`（v1 は `shaderF16`）だけで、`maxBufferSize` /
+quant が宣言できる GPU 前提は `gpuFeatures`（現行は `shaderF16`）だけで、`maxBufferSize` /
 `maxStorageBufferBindingSize` 等の limits 不足は**ダウンロード後**の device / Session 構築時に
-fail loudly で判明する（数 GB を落とし切ってから落ちる）。preset の optional `requiredLimits`
-は ADR 0038 §7 の拡張席（解除予定はそこに従う）。
+fail loudly で判明する（数 GB を落とし切ってから落ちる）。`requiredLimits` は**現行の
+manifest v2 schema には存在しない将来拡張候補**（ADR 0038 §7 の拡張席）。
 
 ## sha256 参照門は参照環境専用 — クロスデバイスのビット同一は保証しない
 

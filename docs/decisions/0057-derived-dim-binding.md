@@ -2,7 +2,7 @@
 
 - Status: accepted（2026-08-14）
 - 関連: ADR [0010](0010-symbolic-constant-folding.md)（次元言語 `coeff·sym+offset`）/
-  [0014](0014-dynamic-resolution.md)（記号軸を要求実測が出るまで広げない規律）/
+  [0014](0014-layout-ops-full-write.md)（記号軸を要求実測が出るまで広げない規律）/
   [0046](0046-cat-symbolic-axis.md)（同じ規律で `cat` の連結軸だけを緩めた前例。`slice` /
   `flip` は静的専業のまま据え置くと明記）/ [0056](0056-gru-scan.md)（`gru_scan` — 本 ADR の
   要求元）。仕様の正本は [ir-v1.md](../ir-v1.md) の「shape と次元言語」。

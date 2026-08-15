@@ -61,9 +61,9 @@ masked mean だけをホストに残す。第 1 出力（生の projector 出力
 
 `ReferenceLatentEncoder` の直後に来る `speaker_norm`（RMSNorm 768）まで**載せる** —
 `encode_conditions` はこの 2 つを必ず続けて掛けるので、切ると RMSNorm がホスト側の
-モデル計算の写しになる。逆に、その次の `_prepend_masked_mean_token`（時間平均トークンの
-前置）は**載せられない**: `cat` の対象軸が記号次元 S になり、IR の `cat` は静的軸しか
-受けない（実測 — `aten.cat.default: 対象軸は静的でなければならない`）。したがって
+モデル計算の写しになる。その次の `_prepend_masked_mean_token`（時間平均トークンの前置）は
+**現行パイプラインではホストに残す**: IR v1 の `cat` は記号軸の `1 + S → S+1` を受理する
+（ADR 0046）ので語彙の制約ではなく、実装上の線引きである。したがって
 
 - 平均トークンの生成と前置は**ホスト**（`[1,S,768]` の軸 1 平均 + concat — 純粋な配列操作）
 - `duration` が要る `speaker_state[:,0]` は、その平均トークンそのもの
