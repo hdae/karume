@@ -51,8 +51,10 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 ## docs の置き場（what-goes-where）
 
 - `docs/decisions/` — ADR（MADR-lite）。インライン `DECIDED:` の指し先
+- `docs/backlog.md` — **波順・作業項目・状態の正本**（now / next / later / release / parked）
 - `docs/ir-v1.md` — IR フォーマット仕様 / `docs/op-vocabulary.md` — op 語彙台帳
 - `docs/assets-layout.md` — ローカル資産 3 根（models / outputs / inputs — 全て git 追跡外）の規約
 - `docs/research/` — 調査・実測記録（**時点スナップショット** — 冒頭に性格を示す注記 1 行）
-- `docs/perf-ledger.md` — 性能候補の判断台帳（数値の正本は research・台帳は判断と順序のみ）
+- `docs/perf-ledger.md` — 性能候補の起票・採否・kill 基準の台帳（数値の正本は research・
+  全体の波順は backlog）
 - `docs/known-issues.md` / `docs/limitations.md` — 未解決バグ / by-design 制約
