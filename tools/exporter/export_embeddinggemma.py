@@ -70,9 +70,9 @@ from torch.export import Dim
 
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
-from karume.patch_anima import assert_rope_lifted
 from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
+from karume.rope import assert_rope_lifted
 
 #: 公式重みの置き場（`hf download google/embeddinggemma-300m` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "embeddinggemma" / "google-300m"

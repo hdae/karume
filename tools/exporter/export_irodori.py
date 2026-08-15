@@ -217,10 +217,10 @@ from karume.convert import (
     normalize_boundary_tensor,
 )
 from karume.ir import IrGraph
-from karume.patch_anima import ROPE_BUFFER_NAMES, assert_rope_lifted
 from karume.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.pipeline import export_to_file
 from karume.quantize import QUANT_CHANNEL_AXES, fake_quant_int8, round_weights_to_f16
+from karume.rope import ROPE_BUFFER_NAMES, assert_rope_lifted
 
 #: 実重みの置き場（`hf download Aratako/Irodori-TTS-v4-Small` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "irodori" / "v4-small"
@@ -842,7 +842,7 @@ class SpeakerGraph(nn.Module):
         self.encoder = encoder
         self.speaker_norm = speaker_norm
         # 素の属性（lifted tensor constant）にする。バッファ/パラメータは定数畳み込みの葉に
-        # ならず、cos / sin がそのまま IR に残る（patch_anima.lift_rope_buffers と同じ理由）。
+        # ならず、cos / sin がそのまま IR に残る（karume.rope.lift_rope_buffers と同じ理由）。
         self.rope_table = patch_irodori.real_pair_rope_table(encoder.head_dim, sym_max)
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:

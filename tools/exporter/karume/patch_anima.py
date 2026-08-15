@@ -48,17 +48,10 @@ import torch
 from torch import nn
 from torch.nn import functional
 
+from karume.rope import assert_rope_lifted
+
 #: nearest-exact アップサンプルの倍率。**整数倍のときだけ** reshape/expand と厳密一致する。
 UPSAMPLE_SCALE = 2
-
-#: RoPE の周波数種の**バッファ名接尾辞**。バッファのままだと定数畳み込みの葉にならず、
-#: sin / cos が IR に残る。
-#:
-#: 完全一致ではなく接尾一致で見るのは、layer_type ごとに RoPE を分ける実装が接頭辞付きの
-#: 名前を使うため（transformers 5.14.1 の Gemma3 は `sliding_attention_inv_freq` /
-#: `full_attention_inv_freq` とその `original_*`）。既存の裸の名前は自身の接尾辞なので
-#: 受理集合は真に広がるだけで、従来のモデルでのヒット本数は変わらない。
-ROPE_BUFFER_NAMES = ("inv_freq", "original_inv_freq")
 
 #: VAE パッチ適用済みフラグ。プロセス全域差し替えの副作用を可視化するためだけに持つ
 #: （パッチ後に「パッチ前の参照」を採ると同値検証が恒真化する — ADR 0013 / 0016）。
@@ -71,44 +64,6 @@ def vae_patches_applied() -> bool:
     参照値を採る側（同値検証）が「まだ当てていない」ことを assert するための門。
     """
     return _VAE_APPLIED
-
-
-def lift_rope_buffers(root: nn.Module) -> int:
-    """RoPE の `inv_freq` バッファを素の属性（lifted tensor constant）へ降格する。
-
-    畳み込みの葉をパラメータ/バッファへ広げないのは巨大定数の焼き込みを避けるためだが
-    （convert._classify_foldable）、`inv_freq` は head_dim/2 要素の位置表の種で、畳んだ結果
-    （cos/sin 表）も Tmax × head_dim に収まる。降格しないと sin / cos が IR 語彙に必要になる
-    （recon §2-3）。
-
-    MUST: 1 本も降格できなければ呼び出し側が落とす（属性名が上流で変われば走査は静かに
-    空振りし、以後どのモデルでも sin/cos が IR に残る — 恒真化の門は呼ぶ側に置く）。
-
-    走査は {@link ROPE_BUFFER_NAMES} の**接尾一致**（layer_type 接頭辞付きの名前を持つ実装が
-    ある）。`_buffers` を走査中に書き換えるので名前は先に採り切る。
-    """
-    lifted = 0
-    for module in root.modules():
-        for name in [key for key in module._buffers if key.endswith(ROPE_BUFFER_NAMES)]:
-            tensor = module._buffers.pop(name)
-            setattr(module, name, tensor.detach().clone())
-            lifted += 1
-    return lifted
-
-
-def assert_rope_lifted(root: nn.Module, where: str) -> None:
-    """{@link lift_rope_buffers} を掛け、1 本も降格できなければ落とす（恒真化の門）。
-
-    このモジュールの外（RoPE を持つ他ファミリの台本）からも呼ぶので公開している —
-    降格そのものはモデル非依存で、Anima 固有なのは呼び出し側の文脈だけ。
-    """
-    lifted = lift_rope_buffers(root)
-    if lifted == 0:
-        raise ValueError(
-            f"{where}: RoPE バッファ {ROPE_BUFFER_NAMES} が 1 本も見つからない"
-            " — 降格の走査が空振りしている（上流で属性名が変わった可能性）。"
-            "このまま export すると sin / cos が IR に残る"
-        )
 
 
 # ---- ④ VAE decoder を rank4 化するパッチ -----------------------------------
