@@ -1,112 +1,31 @@
-"""`karume` コマンド — export-* / dist / verify のサブコマンド式ディスパッチ。
+"""`karume` コマンド — dist / verify のサブコマンド式ディスパッチ。
 
-    karume export-siglip2 --model so400m                                # 台本 export_siglip2.py
-    karume dist --pipeline siglip2                                      # karume.dist
+    karume dist --pipeline siglip2   # 受理集合が空の core 単体では落ちる（下の NOTE）
     karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
 
 MUST: CLI は**引数を解釈しない**。先頭の 1 語でディスパッチし、残りはそのまま対応する
 `main(argv)` へ渡す（`--help` も素通しするので、使い方は各本体の parser が出す）。ここに
-引数の写しを持つと、台本が持つ排他規則（`--verify` × `--target` のような**沈黙誤値の門**）が
-CLI 側の写しでは抜けたまま通る形が生まれ、しかも片方だけ古くなっても誰も落ちない。
+引数の写しを持つと、本体が持つ排他規則（**沈黙誤値の門**）が CLI 側の写しでは抜けたまま通る
+形が生まれ、しかも片方だけ古くなっても誰も落ちない。
 
-DECIDED: 台本の選択も**サブコマンド名**で綴る（`karume export-siglip2`）— `karume export
---pipeline siglip2` にすると CLI がフラグを 1 つ読んで素通しから外すことになり、上の MUST が
-「1 つだけなら」で崩れる。
+NOTE: `export-*` サブコマンドは**この名簿から全部降りた** — export 台本は 1 本残らず
+`tools/export-recipes/<family>/` へ出て、リポ直下にも wheel にも無い（ADR 0065 段 3+4）。
+起動は `uv run python -m <family>.export`（export-recipes ルートから）。台本をパス指定で
+読み込む機構（旧 `load_script`）も使い手が消えたので撤去した — 半端に残すと「wheel に無い
+ものを wheel の CLI が読む」逆流の足場が残る。
 
-NOTE: 素の `karume export`（Anima）・`karume export-sbv2` / `karume export-deberta`・
-`karume export-irodori` / `karume export-dacvae` は**この名簿から降りた** — 台本が
-`tools/export-recipes/<family>/` へ出てリポ直下にも wheel にも無い（ADR 0065 段 3+4）。
-起動は `uv run python -m <family>.export`（export-recipes ルートから）。コーデックは
-`uv run python -m irodori.dacvae.export`。
+NOTE: `karume dist` は core の受理集合（{@link karume.dist.PIPELINES} — 今は**空**）で走るので、
+family を組むには repo driver（`tools/export-recipes/dist.py`）を使う。この席を残すのは
+組み立てエンジン自体が core の責務だから（ADR 0065 決定 1）。
 
-MUST: ディスパッチは遅延 import — `karume dist` / `karume verify` を、export 台本
-（diffusers / style_bert_vits2 / モデル定義の重い import）を 1 つも読まずに起動できる形に
-保つ。台本の読み込みは {@link load_script} の中でだけ起きる。
-
-NOTE: 台本（`export_siglip2.py` など）は**パッケージ外のリポジトリ直下
-スクリプト**なので、import 経路ではなくパス指定で読む。wheel には入らない — 無ければ
-fail loudly で置き場を示す。
+MUST: ディスパッチは遅延 import — `karume verify` を `karume.dist` の import 抜きで起動できる
+形に保つ（逆も同じ）。
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib.util
-import sys
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
-from types import ModuleType
-
-#: 台本の置き場（karume/cli.py → karume → tools/exporter）。
-_SCRIPT_DIR = Path(__file__).resolve().parents[1]
-
-#: `karume export-embeddinggemma` が包む台本（文埋め込み 1 系列を書き出す側）。
-EXPORT_EMBEDDINGGEMMA_SCRIPT = "export_embeddinggemma"
-
-#: `karume export-siglip2` が包む台本（SigLIP2 の vision tower 1 系列を書き出す側）。
-EXPORT_SIGLIP2_SCRIPT = "export_siglip2"
-
-#: `karume export-birefnet` が包む台本（BiRefNet_HR の背景抜き 1 系列を書き出す側）。
-EXPORT_BIREFNET_SCRIPT = "export_birefnet"
-
-#: `karume export-depth-anything` が包む台本（相対深度推定 1 系列を書き出す側）。
-EXPORT_DEPTH_ANYTHING_SCRIPT = "export_depth_anything"
-
-#: `karume export-vowel-detector` が包む台本（母音認識 CRNN 1 本を書き出す側）。
-EXPORT_VOWEL_DETECTOR_SCRIPT = "export_vowel_detector"
-
-
-def load_script(name: str) -> ModuleType:
-    """リポジトリ直下の台本をパス指定で読み込む。
-
-    MUST: 実行の**前**に `sys.modules` へ登録する（未登録のままだと台本の `@dataclass` が
-    `sys.modules[cls.__module__]` を引けずに AttributeError で落ちる — 実測）。読み込み済みの
-    名前はそのまま返す（import 経路で先に入っている実行文脈で二重ロードにしない）。
-    """
-    if (loaded := sys.modules.get(name)) is not None:
-        return loaded
-    path = _SCRIPT_DIR / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path) if path.is_file() else None
-    if spec is None or spec.loader is None:
-        raise SystemExit(
-            f"export 台本が読めない: {path}"
-            "（台本はパッケージ外のスクリプトで wheel に入らない — `karume export-*` は"
-            "リポジトリの作業ツリーでだけ動く）"
-        )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        # MUST: 実行が落ちたら登録を取り消す（通常 import と同じ後始末）。半初期化の module を
-        # 残すと、同一プロセスの次回呼び出しが冒頭の「読み込み済みならそのまま返す」で
-        # それを掴み、台本を直しても壊れたまま返り続ける。
-        # `is module` で見るのは、台本自身が sys.modules[name] を差し替えていた場合に
-        # 他人の登録を消さないため。
-        if sys.modules.get(name) is module:
-            del sys.modules[name]
-        raise
-    return module
-
-
-def run_export_embeddinggemma(argv: Sequence[str]) -> None:
-    return load_script(EXPORT_EMBEDDINGGEMMA_SCRIPT).main(argv)
-
-
-def run_export_siglip2(argv: Sequence[str]) -> None:
-    return load_script(EXPORT_SIGLIP2_SCRIPT).main(argv)
-
-
-def run_export_birefnet(argv: Sequence[str]) -> None:
-    return load_script(EXPORT_BIREFNET_SCRIPT).main(argv)
-
-
-def run_export_depth_anything(argv: Sequence[str]) -> None:
-    return load_script(EXPORT_DEPTH_ANYTHING_SCRIPT).main(argv)
-
-
-def run_export_vowel_detector(argv: Sequence[str]) -> None:
-    return load_script(EXPORT_VOWEL_DETECTOR_SCRIPT).main(argv)
 
 
 def run_dist(argv: Sequence[str]) -> None:
@@ -123,26 +42,6 @@ def run_verify(argv: Sequence[str]) -> None:
 
 #: サブコマンド名 → （ハンドラ, 一覧に出す 1 行）。順序がそのまま `--help` の並び。
 COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
-    "export-embeddinggemma": (
-        run_export_embeddinggemma,
-        "EmbeddingGemma を IR v1 + golden io へ書き出す（台本 export_embeddinggemma.py）",
-    ),
-    "export-siglip2": (
-        run_export_siglip2,
-        "SigLIP2 の vision tower を IR v1 + golden io へ書き出す（台本 export_siglip2.py）",
-    ),
-    "export-birefnet": (
-        run_export_birefnet,
-        "BiRefNet_HR を IR v1 + golden io へ書き出す（台本 export_birefnet.py）",
-    ),
-    "export-depth-anything": (
-        run_export_depth_anything,
-        "Depth Anything V2 を IR v1 + golden io へ書き出す（台本 export_depth_anything.py）",
-    ),
-    "export-vowel-detector": (
-        run_export_vowel_detector,
-        "母音認識 CRNN を IR v1 + golden io へ書き出す（台本 export_vowel_detector.py）",
-    ),
     "dist": (run_dist, "配布ディレクトリを組み立てて karume.json / README.md を書く"),
     "verify": (run_verify, "配布形 safetensors を IR v1 の全規則で検証する"),
 }

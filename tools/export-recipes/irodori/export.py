@@ -10,7 +10,7 @@ codec（G6 / G7）は後続の波でこの台本にターゲットとして足�
     uv run --with 'transformers==5.14.1' python -m irodori.export --dtype f16
     uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i8
 
-transformers は **5.14.1 でピン**する（`export_embeddinggemma.py` と同じ理由 — モデリング
+transformers は **5.14.1 でピン**する（`embeddinggemma/export.py` と同じ理由 — モデリング
 コードが変わるとグラフ形が変わる。加えて `karume.irodori.patch` が
 `ModernBertAttention.forward` をクラス属性ごと差し替える）。pyproject.toml / uv.lock には
 入れず `--with` で一時的に足す。

@@ -377,32 +377,9 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
-birefnet = [
-    { name = "einops" },
-    { name = "kornia" },
-    { name = "pillow" },
-    { name = "timm" },
-    { name = "transformers" },
-]
-depth-anything = [
-    { name = "transformers" },
-]
-depth-anything-preprocess = [
-    { name = "pillow" },
-    { name = "transformers" },
-]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
-]
-siglip2 = [
-    { name = "transformers" },
-]
-siglip2-preprocess = [
-    { name = "pillow" },
-    { name = "torchvision", version = "0.28.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torchvision", version = "0.28.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
-    { name = "transformers" },
 ]
 
 [package.metadata]
@@ -414,27 +391,9 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-birefnet = [
-    { name = "einops", specifier = ">=0.8" },
-    { name = "kornia", specifier = ">=0.8" },
-    { name = "pillow", specifier = ">=11" },
-    { name = "timm", specifier = ">=1.0" },
-    { name = "transformers", specifier = "==5.14.1" },
-]
-depth-anything = [{ name = "transformers", specifier = "==5.14.1" }]
-depth-anything-preprocess = [
-    { name = "pillow", specifier = ">=11" },
-    { name = "transformers", specifier = "==5.14.1" },
-]
 dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.0" },
-]
-siglip2 = [{ name = "transformers", specifier = "==5.14.1" }]
-siglip2-preprocess = [
-    { name = "pillow", specifier = ">=11" },
-    { name = "torchvision", specifier = ">=0.28" },
-    { name = "transformers", specifier = "==5.14.1" },
 ]
 
 [[package]]
@@ -453,6 +412,20 @@ anima = [
     { name = "torchvision", version = "0.28.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
     { name = "transformers" },
 ]
+birefnet = [
+    { name = "einops" },
+    { name = "kornia" },
+    { name = "pillow" },
+    { name = "timm" },
+    { name = "transformers" },
+]
+depth-anything = [
+    { name = "transformers" },
+]
+depth-anything-preprocess = [
+    { name = "pillow" },
+    { name = "transformers" },
+]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -460,6 +433,15 @@ dev = [
 sbv2 = [
     { name = "huggingface-hub" },
     { name = "style-bert-vits2" },
+]
+siglip2 = [
+    { name = "transformers" },
+]
+siglip2-preprocess = [
+    { name = "pillow" },
+    { name = "torchvision", version = "0.28.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torchvision", version = "0.28.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "transformers" },
 ]
 
 [package.metadata]
@@ -472,6 +454,18 @@ anima = [
     { name = "torchvision", specifier = ">=0.28" },
     { name = "transformers", specifier = "==5.14.1" },
 ]
+birefnet = [
+    { name = "einops", specifier = ">=0.8" },
+    { name = "kornia", specifier = ">=0.8" },
+    { name = "pillow", specifier = ">=11" },
+    { name = "timm", specifier = ">=1.0" },
+    { name = "transformers", specifier = "==5.14.1" },
+]
+depth-anything = [{ name = "transformers", specifier = "==5.14.1" }]
+depth-anything-preprocess = [
+    { name = "pillow", specifier = ">=11" },
+    { name = "transformers", specifier = "==5.14.1" },
+]
 dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.0" },
@@ -479,6 +473,12 @@ dev = [
 sbv2 = [
     { name = "huggingface-hub", specifier = ">=1.26.0" },
     { name = "style-bert-vits2", specifier = "==2.5.0" },
+]
+siglip2 = [{ name = "transformers", specifier = "==5.14.1" }]
+siglip2-preprocess = [
+    { name = "pillow", specifier = ">=11" },
+    { name = "torchvision", specifier = ">=0.28" },
+    { name = "transformers", specifier = "==5.14.1" },
 ]
 
 [[package]]

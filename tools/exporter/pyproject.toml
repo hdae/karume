@@ -21,59 +21,6 @@ url = "https://download.pytorch.org/whl/cpu"
 
 [dependency-groups]
 dev = ["pytest>=9.1.1", "ruff>=0.15.0"]
-# SigLIP2 vision tower の実重み export 用（`uv sync --group siglip2`）。既定の sync には
-# 入れない。
-# MUST: transformers は `==` でピンする（anima グループと同型の理由）— `patch_siglip2` が
-# `SiglipVisionEmbeddings` / `SiglipMultiheadAttentionPoolingHead` の forward をクラス属性
-# ごと差し替え、MAP head の `nn.MultiheadAttention` を q/k/v の明示 linear へ割り直す。
-# マイナー更新で差し替え先の名前や forward の形が変わると、グラフ形（や eager 同値の前提）が
-# 黙って変わる。
-# torchvision / pillow は入れない — 画像の前処理はグラフに載せないので、vision tower の
-# export には一切要らない（両方外した実行で同一結果を実測）。
-siglip2 = ["transformers==5.14.1"]
-# 画像前処理のパリティ用フィクスチャ生成用（`uv sync --group siglip2-preprocess`）。
-# `siglip2_preprocess.py` の正本は `AutoImageProcessor` が既定で返す fast 側
-# （`TorchvisionBackend`）なので、export には要らない torchvision と pillow がここでは要る
-# （pillow は `PILImageResampling` の実体 — 無いと resample の対応表が空になり、fast 側へ
-# 解決されない）。export 側の最小依存を保つため siglip2 グループには足さない。
-# `export_siglip2.py --real-images`（実画像 golden）もこのグループで回す — 実画像の前処理は
-# 同じ正本を通す必要があり、PNG を開く pillow も要る。
-siglip2-preprocess = ["pillow>=11", "torchvision>=0.28", "transformers==5.14.1"]
-# BiRefNet_HR の実重み export 用（`uv sync --group birefnet`）。既定の sync には入れない。
-# 内訳と根拠（同梱 `birefnet.py` が **import 時**に要求するもの — 実測で確定）:
-#   timm — Swin / PVTv2 の `DropPath` / `to_2tuple` / `trunc_normal_`。
-#   einops — Decoder の `image2patches`（`rearrange`）。
-#   kornia — `from kornia.filters import laplacian`（使うのは学習経路の out_ref だけだが、
-#     import はモジュール先頭なので推論 export でも通る）。
-#   transformers — `PretrainedConfig` / `PreTrainedModel` と、同梱コードを読む
-#     `trust_remote_code=True` の動的モジュール機構。
-#   pillow — `export_birefnet.py --real-images` が実画像 PNG を開く（同梱 `handler.py` の
-#     `ImagePreprocessor` が PIL 経路なので、前処理の正本ごと PIL で通す）。torchvision の
-#     依存としても入るが、**直接 import するものは宣言する**（あちらが落としたら黙って
-#     欠ける）。
-# torchvision（`torchvision.ops.deform_conv2d`）は基本依存にあるのでここには書かない。
-# MUST: transformers は `==` でピンする（anima / siglip2 グループと同型の理由）—
-# `patch_birefnet` は `trust_remote_code` が読み込んだ動的モジュールのクラス属性を差し替える
-# ので、動的モジュールの解決規約（キャッシュ先・相対 import の張り方）が変わると差し替え先を
-# 見失う。timm / einops / kornia は差し替え対象を持たないので `>=` のまま。
-birefnet = ["einops>=0.8", "kornia>=0.8", "pillow>=11", "timm>=1.0", "transformers==5.14.1"]
-# Depth Anything V2（単一画像の相対深度推定）の実重み export 用（`uv sync --group
-# depth-anything`）。既定の sync には入れない。
-# 内訳と根拠: 対象は transformers 移植版（`depth-anything/Depth-Anything-V2-Small-hf` —
-# `DepthAnythingForDepthEstimation` + `Dinov2Backbone`）なので、要るのは transformers だけ。
-#   timm は要らない（`use_pretrained_backbone=false` で backbone も transformers 実装・
-#   前処理はグラフに載せない）。pillow も入れない（合成画像 golden は PNG を開かない）。
-# MUST: transformers は `==` でピンする（anima / siglip2 / birefnet グループと同型の理由）—
-# `patch_depth_anything` が `DepthAnythingReassembleLayer` / `DepthAnythingFeatureFusionLayer` の
-# forward をクラス属性ごと差し替える。マイナー更新で差し替え先の名前や forward の形が変わると、
-# グラフ形（や eager 同値の前提）が黙って変わる。
-depth-anything = ["transformers==5.14.1"]
-# `export_depth_anything.py --real-images`（実画像 golden）用（`uv sync --group
-# depth-anything-preprocess`）。siglip2 / siglip2-preprocess と同じ分け方で、export 側の
-# 最小依存を保つために depth-anything グループへは足さない。
-# 足すのは PNG を開く pillow だけ — 前処理の正本 `DPTImageProcessor`（fast 側）が要求する
-# torchvision は既に基本依存にある（`deform_conv2d` の op 登録用）。
-depth-anything-preprocess = ["pillow>=11", "transformers==5.14.1"]
 
 [build-system]
 requires = ["hatchling"]
@@ -84,9 +31,6 @@ packages = ["karume"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# export 台本（export_siglip2.py / export_birefnet.py など）は配布パッケージではなくリポジトリ
-# 直下のスクリプトなので、テストから import するにはこのディレクトリを import パスに載せる。
-pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

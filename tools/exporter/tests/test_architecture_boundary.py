@@ -7,8 +7,8 @@ exporter は「汎用 exporter core（PyPI 配布物）」と「モデル別 rec
 
 検査は 2 本:
 
-1. core が **recipe 側モジュール**（`karume.patch_*` / `dist` / `modelcard` / `cli` /
-   `paths`）を import しない
+1. core が **recipe 側モジュール**（`karume.patch_*` — 今は 1 本も無いが再発防止で残す門 —
+   と `dist` / `modelcard` / `cli` / `paths`）を import しない
 2. core が **上流モデル系パッケージ**（`style_bert_vits2` / `transformers` / `diffusers` /
    `torchvision`）を import しない — core wheel に上流実装の provenance 義務を引き込まない
    ための門（ADR 0065 決定 7）
@@ -31,9 +31,10 @@ KARUME_ROOT = Path(__file__).resolve().parents[1] / "karume"
 #:
 #: MUST: **明示リストで持つ**。`karume/` を舐めて対象を決めると、新しいモジュールが増えたとき
 #: 「core なのか recipe なのか」の判断を素通りして黙って gate に入る（または入らない）。
-#: NOTE: このリスト外の `karume.*`（`patch_*` / `dist` / `modelcard` / `cli` / `paths`）は
-#: **境界検査の対象外** — 段階移行中で、recipe 側へ出るものと core に昇格するものが未分離
-#: だから。段が進むたびにここへ足していく（ADR 0065 段階）。
+#: NOTE: このリスト外の `karume.*`（`dist` / `modelcard` / `cli` / `paths`）は**境界検査の
+#: 対象外**。`dist` / `modelcard` から family 知識は 1 つも残らず出た（ADR 0065 段 3+4 完了）が、
+#: `dist` が `karume.paths`（repo topology 依存）を import しているので、ここへ足すのは段 5 の
+#: paths 決着の後（`paths` が recipe 側の関心事へ回る — 同 ADR Consequences）。
 CORE_MODULES: tuple[str, ...] = (
     "__init__",
     "ir",
@@ -55,6 +56,12 @@ CORE_MODULES: tuple[str, ...] = (
 )
 
 #: recipe 側（core から import してはならない）モジュール名の接頭辞。
+#:
+#: NOTE: `karume/patch_*.py` は**もう 1 本も無い**（ADR 0065 段 3+4 で全 family が
+#: `tools/export-recipes/<family>/patch.py` へ出た）。それでも禁止リストに残すのは**再発防止**
+#: — 上流モデル由来のパッチ層を core へ書き戻す最短の道がこの綴りで、消すと「気づいたら
+#: `karume/patch_foo.py` が生えていた」を止める門が無くなる。恒真化していないことは
+#: {@link TestTheBoundaryCheckItself} の合成故障注入が示す。
 RECIPE_MODULE_PREFIXES = ("patch_",)
 
 #: recipe 側（core から import してはならない）モジュール名。
@@ -179,8 +186,8 @@ class TestTheBoundaryCheckItself:
     core 集合が緑なのは「違反が無いから」であって「検査が何も見ていないから」ではない、を
     **合成ソース**で示す。被験体を実在の違反モジュールに預けない理由は、ADR 0065 段 4 が
     その形を 2 便続けて壊したから — 指し先の family が recipe 側へ出るたびに被験体が枯れ、
-    最後の 1 本が出た時点では**差し替え先が 1 つも残らない**（Irodori 便の時点で、`karume/` に
-    残る `patch_*` に上流 import は 1 つも無くなった）。門が黙って恒真化する形をここで閉じる。
+    最後の 1 本が出た時点では**差し替え先が 1 つも残らない**（最終便で `karume/patch_*.py` は
+    1 本も無くなった）。門が黙って恒真化する形をここで閉じる。
 
     走査は本物と同じ {@link imported_modules}（`karume/` の core モジュールに掛かるのと
     1 バイトも違わない経路）— 合成なのは**被験体だけ**で、検査そのものは共有する。
@@ -228,3 +235,19 @@ class TestTheBoundaryCheckItself:
         path = self._violator(tmp_path, "relative", "from . import modelcard\n")
 
         assert recipe_imports(path) == ["karume/relative.py:1 -> karume.modelcard"]
+
+    def test_it_catches_a_patch_module_by_prefix(self, tmp_path: Path) -> None:
+        """接頭辞の門（{@link RECIPE_MODULE_PREFIXES}）は名指しの表と独立に効く。
+
+        `karume/patch_*.py` は 1 本も残っていないので、この枝を踏む実在モジュールはもう無い
+        （= 名簿だけ残して検査が恒真、になりうる席）。**再発防止の門はここで踏み続ける** —
+        上流モデル由来のパッチ層が core へ書き戻される最短の道がこの綴り。
+        """
+        path = self._violator(
+            tmp_path, "regressed", "from karume.patch_newmodel import apply_all_patches\n"
+        )
+
+        assert recipe_imports(path) == [
+            "karume/regressed.py:1 -> karume.patch_newmodel",
+            "karume/regressed.py:1 -> karume.patch_newmodel.apply_all_patches",
+        ]

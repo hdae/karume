@@ -12,9 +12,25 @@ import pytest
 
 import dist
 from anima.distribution import PIPELINE as ANIMA_PIPELINE
+from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
+from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
 from karume.dist import PIPELINES as CORE_PIPELINES
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
+from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
+from vowel_detector.distribution import PIPELINE as VOWEL_DETECTOR_PIPELINE
+
+#: 配布 recipe を持つ family の全量（名前 → その family が公開する `PIPELINE`）。
+#: **ここが受理集合の期待値**で、`dist.PIPELINES` の載せ忘れも余剰も 1 つの表で検出する。
+RECIPE_PIPELINES = {
+    "anima": ANIMA_PIPELINE,
+    "sbv2": SBV2_PIPELINE,
+    "irodori": IRODORI_PIPELINE,
+    "siglip2": SIGLIP2_PIPELINE,
+    "birefnet": BIREFNET_PIPELINE,
+    "depth-anything": DEPTH_ANYTHING_PIPELINE,
+    "vowel-detector": VOWEL_DETECTOR_PIPELINE,
+}
 
 
 class TestRegistry:
@@ -22,16 +38,20 @@ class TestRegistry:
         for name, spec in CORE_PIPELINES.items():
             assert dist.PIPELINES[name] is spec
 
-    def test_it_adds_the_recipe_pipelines(self) -> None:
-        assert dist.PIPELINES["anima"] is ANIMA_PIPELINE
-        assert dist.PIPELINES["sbv2"] is SBV2_PIPELINE
-        assert dist.PIPELINES["irodori"] is IRODORI_PIPELINE
+    def test_it_adds_every_recipe_pipeline(self) -> None:
+        for name, spec in RECIPE_PIPELINES.items():
+            assert dist.PIPELINES[name] is spec
 
-    def test_the_core_table_no_longer_carries_a_migrated_family(self) -> None:
-        """移行済み family が core 側に残っていれば、合成で 2 つの表が同じ名前を主張する。"""
-        assert "anima" not in CORE_PIPELINES
-        assert "sbv2" not in CORE_PIPELINES
-        assert "irodori" not in CORE_PIPELINES
+    def test_the_table_holds_nothing_else(self) -> None:
+        """余剰の席は「どの family の表でもない pipeline」— 名前だけで組める形にしない。"""
+        assert sorted(dist.PIPELINES) == sorted({**RECIPE_PIPELINES, **CORE_PIPELINES})
+
+    def test_the_core_table_is_empty_now_that_every_family_has_moved(self) -> None:
+        """移行済み family が core 側に残っていれば、合成で 2 つの表が同じ名前を主張する。
+
+        ADR 0065 段 3+4 の完了条件そのもの — core wheel に family 知識が 1 つも残っていない。
+        """
+        assert CORE_PIPELINES == {}
 
     def test_the_default_is_anima(self) -> None:
         """旧 `karume dist`（引数なし）の UX をドライバ側で維持する。"""

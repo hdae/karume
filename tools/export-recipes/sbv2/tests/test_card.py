@@ -12,6 +12,11 @@ manifest v2（`karume/2` — ADR 0041）以降、カードは 1 リポの複数�
 帰属はファミリー別プロファイル（`fn` / `jvnv`）。manifest からの導出を見る節は `fn` 1 本で
 足りる（プロファイルは帰属節と frontmatter にしか掛からない）ので、プロファイル固有の事実と
 取り違えの検出は末尾の `TestSbv2CardProfiles` にまとめてある。
+
+NOTE: このテストだけ `siglip2.card` を import する（recipe 間で唯一のコード結合）—
+{@link TestSbv2PipelineGate.test_the_two_templates_do_not_answer_for_each_other} は「2 つの
+**実在テンプレート**が互いの manifest を拒む」ことの主張で、相手を合成に置き換えると主張が
+割れる。SigLIP2 のテンプレートが core にあった頃から同じ被験体で、移設で指し先が変わっただけ。
 """
 
 from __future__ import annotations
@@ -22,7 +27,6 @@ from typing import Any
 
 import pytest
 
-from karume.modelcard import SIGLIP2_SUPPORTED_PIPELINE, render_siglip2_model_card
 from sbv2.card import (
     SBV2_CARD_PROFILES,
     SBV2_FN_PROFILE,
@@ -31,6 +35,7 @@ from sbv2.card import (
     Sbv2CardProfile,
     render_sbv2_model_card,
 )
+from siglip2.card import SIGLIP2_SUPPORTED_PIPELINE, render_siglip2_model_card
 
 #: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
 REPO = "hdae/fake-repo"

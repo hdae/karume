@@ -1,17 +1,14 @@
 """`karume` サブコマンド CLI（`karume.cli`）のディスパッチ。
 
 引数の解釈は各本体の parser が持つ（CLI は写しを持たない）ので、ここで固定するのは
-**どの main へ argv がそのまま渡るか**だけ。台本 `export_siglip2.py` は実重み依存が重いので、
-読み込み関数を差し替えて「呼ばれ方」を見る。
+**どの main へ argv がそのまま渡るか**だけ。
+
+NOTE: `export-*` サブコマンドと台本ローダ（旧 `load_script`）は名簿ごと消えた
+（ADR 0065 段 3+4 完了 — 台本は `tools/export-recipes/<family>/` へ出た）ので、その主張は
+このファイルから**被験体ごと**居なくなった。残るのは dist / verify の 2 コマンド。
 """
 
 from __future__ import annotations
-
-import inspect
-import sys
-from collections.abc import Iterator
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -35,87 +32,6 @@ class TestDispatch:
         seen = _spy(monkeypatch, verify, "main")
         cli.main(["verify", "a/model.safetensors", "b/model.safetensors"])
         assert seen == [["a/model.safetensors", "b/model.safetensors"]]
-
-    def test_it_forwards_the_rest_of_argv_to_the_export_script(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        seen: list[list[str]] = []
-        loaded: list[str] = []
-
-        def load(name: str) -> SimpleNamespace:
-            loaded.append(name)
-            return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
-
-        monkeypatch.setattr(cli, "load_script", load)
-        cli.main(["export-birefnet", "--dtype", "f16", "--target", "matte"])
-        assert loaded == [cli.EXPORT_BIREFNET_SCRIPT]
-        assert seen == [["--dtype", "f16", "--target", "matte"]]
-
-    def test_it_picks_the_export_script_by_subcommand_name(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """台本の選択はサブコマンド名だけ — 名前ごとに別の台本へ届く。
-
-        `--verify` × `--target` のような台本側の排他規則は、CLI が argv を 1 語も
-        読まないことでだけ抜けなく効く（`--pipeline` を CLI が食う形にしない根拠）。
-        """
-        seen: list[list[str]] = []
-        loaded: list[str] = []
-
-        def load(name: str) -> SimpleNamespace:
-            loaded.append(name)
-            return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
-
-        monkeypatch.setattr(cli, "load_script", load)
-        cli.main(["export-siglip2", "--verify"])
-        cli.main(["export-siglip2", "--help"])
-        assert loaded == [cli.EXPORT_SIGLIP2_SCRIPT, cli.EXPORT_SIGLIP2_SCRIPT]
-        assert seen == [["--verify"], ["--help"]]
-        assert cli.EXPORT_SIGLIP2_SCRIPT != cli.EXPORT_EMBEDDINGGEMMA_SCRIPT
-
-    def test_it_dispatches_embeddinggemma_to_its_own_script(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        seen: list[list[str]] = []
-        loaded: list[str] = []
-
-        def load(name: str) -> SimpleNamespace:
-            loaded.append(name)
-            return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
-
-        monkeypatch.setattr(cli, "load_script", load)
-        cli.main(["export-embeddinggemma", "--sym-max", "512"])
-        assert loaded == [cli.EXPORT_EMBEDDINGGEMMA_SCRIPT]
-        assert seen == [["--sym-max", "512"]]
-
-    @pytest.mark.parametrize(
-        ("command", "script"),
-        [
-            ("export-siglip2", "EXPORT_SIGLIP2_SCRIPT"),
-            ("export-birefnet", "EXPORT_BIREFNET_SCRIPT"),
-            ("export-depth-anything", "EXPORT_DEPTH_ANYTHING_SCRIPT"),
-            ("export-vowel-detector", "EXPORT_VOWEL_DETECTOR_SCRIPT"),
-        ],
-    )
-    def test_every_export_script_has_a_subcommand_of_its_own(
-        self, monkeypatch: pytest.MonkeyPatch, command: str, script: str
-    ) -> None:
-        """台本は 1 本残らずサブコマンド名で綴れる（cli.py の DECIDED）。
-
-        載っていない台本は `uv run python export_*.py` でしか呼べず、**同じ資産を作る道が
-        2 通りある**状態になる（片方だけが規約の更新から取り残される）。
-        """
-        seen: list[list[str]] = []
-        loaded: list[str] = []
-
-        def load(name: str) -> SimpleNamespace:
-            loaded.append(name)
-            return SimpleNamespace(main=lambda argv: seen.append(list(argv)))
-
-        monkeypatch.setattr(cli, "load_script", load)
-        cli.main([command, "--out", "/tmp/series"])
-        assert loaded == [getattr(cli, script)]
-        assert seen == [["--out", "/tmp/series"]]
 
     def test_it_passes_help_through_to_the_body_parser(
         self, monkeypatch: pytest.MonkeyPatch
@@ -143,62 +59,10 @@ class TestUsage:
             cli.main(["publish"])
         assert raised.value.code == 2
 
+    def test_the_export_commands_are_gone(self) -> None:
+        """名簿は dist / verify の 2 つだけ — 台本は wheel の外（ADR 0065 段 3+4）。
 
-class TestExportScript:
-    def test_it_reaches_the_script_that_lives_outside_the_package(self) -> None:
-        """台本はパッケージ外なので、パスの綴りが腐っても import エラーにならない。
-
-        `main(argv)` を持つところまで見る — CLI が渡す argv の受け口が消えたら落とす。
+        `karume export-siglip2` が残っていると、wheel に無い台本を wheel の CLI が読む形が
+        「たまたま作業ツリーでだけ動く」経路として復活する。
         """
-        module = cli.load_script(cli.EXPORT_SIGLIP2_SCRIPT)
-        assert callable(module.main)
-
-    @pytest.mark.parametrize(
-        "script",
-        [
-            "EXPORT_EMBEDDINGGEMMA_SCRIPT",
-            "EXPORT_SIGLIP2_SCRIPT",
-            "EXPORT_BIREFNET_SCRIPT",
-        ],
-    )
-    def test_every_export_script_takes_argv(self, script: str) -> None:
-        """台本は 1 本残らず `main(argv)` を受ける（`argv` 無しの main は CLI に載らない）。"""
-        module = cli.load_script(getattr(cli, script))
-        assert "argv" in inspect.signature(module.main).parameters
-
-
-#: 失敗ロードの回帰で読む台本名（実在の台本と衝突しない名前）。
-_BROKEN_SCRIPT = "export_broken_for_test"
-
-
-@pytest.fixture
-def broken_script_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
-    """台本の置き場を tmp へ差し替え、テスト中に入った `sys.modules` 登録を後始末する。"""
-    monkeypatch.setattr(cli, "_SCRIPT_DIR", tmp_path)
-    sys.modules.pop(_BROKEN_SCRIPT, None)
-    yield tmp_path
-    sys.modules.pop(_BROKEN_SCRIPT, None)
-
-
-class TestScriptLoadFailure:
-    def test_a_failed_load_leaves_nothing_registered(self, broken_script_dir: Path) -> None:
-        """実行中に落ちた台本は `sys.modules` に残さない（通常 import と同じ後始末）。"""
-        (broken_script_dir / f"{_BROKEN_SCRIPT}.py").write_text(
-            "raise RuntimeError('台本が壊れている')\n", encoding="utf-8"
-        )
-
-        with pytest.raises(RuntimeError, match="台本が壊れている"):
-            cli.load_script(_BROKEN_SCRIPT)
-
-        assert _BROKEN_SCRIPT not in sys.modules
-
-    def test_a_second_load_runs_the_fixed_script(self, broken_script_dir: Path) -> None:
-        """半初期化 module を残すと、台本を直しても冒頭の早期 return がそれを返し続ける。"""
-        script = broken_script_dir / f"{_BROKEN_SCRIPT}.py"
-        script.write_text("raise RuntimeError('台本が壊れている')\n", encoding="utf-8")
-        with pytest.raises(RuntimeError):
-            cli.load_script(_BROKEN_SCRIPT)
-
-        script.write_text("def main(argv):\n    return list(argv)\n", encoding="utf-8")
-
-        assert cli.load_script(_BROKEN_SCRIPT).main(["--out", "x"]) == ["--out", "x"]
+        assert sorted(cli.COMMANDS) == ["dist", "verify"]
