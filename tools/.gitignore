@@ -1,0 +1,5 @@
+# uv workspace（tools/pyproject.toml）の共有 venv とキャッシュ。
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/

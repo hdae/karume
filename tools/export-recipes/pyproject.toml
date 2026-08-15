@@ -1,0 +1,24 @@
+# モデル別 export recipe の置き場（ADR 0065 決定 2）。**PyPI へは公開しない** — wheel に
+# しない仮想プロジェクトで、上流モデル由来コード（patch / 参照 pipeline / dist recipe /
+# card template）とその依存グループを core（PyPI karume）の外で管理する。
+# 依存方向は recipe → core の一方向のみ（tools/exporter/tests/test_architecture_boundary.py）。
+[project]
+name = "karume-export-recipes"
+version = "0.0.0"
+description = "Model-specific export recipes for the Karume exporter (repo-only, never published)"
+requires-python = ">=3.12"
+dependencies = ["karume"]
+classifiers = ["Private :: Do Not Upload"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+karume = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=9.1.1", "ruff>=0.15.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+pythonpath = ["."]

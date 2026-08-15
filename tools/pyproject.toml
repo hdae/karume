@@ -1,0 +1,12 @@
+# uv workspace の仮想ルート（ADR 0065 決定 4）。
+# exporter（PyPI karume = 汎用 core）と export-recipes（リポ専用のモデル別 recipe）が
+# 1 つの lock / venv を共有する — recipe 側だけのために torch 一式を二重に持たない。
+# 依存の宣言は各メンバーの pyproject が持ち、ここは束ねるだけ。
+[tool.uv.workspace]
+members = ["exporter", "export-recipes"]
+
+# torch の CPU index はメンバー横断の解決に効くためルートで宣言する
+# （メンバー側の [tool.uv.sources] torch 指定はこの index を指す）。
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
