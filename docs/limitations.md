@@ -144,37 +144,22 @@ broadcast できない形・実テンソルとの名前衝突・チャネル軸�
 
 ## 要素数が奇数の f16 テンソル・I8 テンソルは safetensors 上の並び順に制約がある
 
-Karume のリーダはデータ節を「隙間なく・要素サイズに整列して」覆うことを要求する
-（`packages/runtime/src/format/safetensors.ts`）。要素数が奇数の F16 テンソル（バイト長 ≡ 2 mod 4）の**直後**に
-F32 / I32 テンソルを置くと絶対 offset が 4 の倍数から外れ、ロードが
-`SafetensorsError`（整列違反）で落ちる。**奇数要素の F16 はファイル末尾側へ寄せる**か、
-偶数要素のテンソルを間に挟む必要がある — 並べ替えはエクスポータ側の責務。
-**I8 は 1 バイト要素なので自身の整列制約は無い**が、要素数が 4 の倍数でなければ後続テンソルの
-整列を同じように崩すため、規則は同じ（並び順は末尾側 — ADR 0019）。なお GPU 常駐時のゼロ詰め
-（ADR 0018 / 0019）はバッファ内の話で、ファイル上のバイト列は詰めない。
-
-Karume のエクスポータ側の対処は `tools/exporter/karume/emit.py`（書き出し順を
-「F32 → I32 → 偶数要素 F16 → 奇数要素 F16 → **I8**」に固定し、`safetensors.torch.save_file` は
-使わない）
-と `verify.assert_reader_layout`（書いた直後にリーダ規則を写した検査を通す）。HF の
-`safe_open` は整列違反のファイルを**読めてしまう**ので、そちらを通すだけでは検出できない。
+裁定の正本は ADR [0063](decisions/0063-safetensors-physical-layout.md)。リーダはデータ節の
+「隙間なし・要素サイズ整列」を要求し（違反は `SafetensorsError`）、エクスポータは書き出し順
+「F32 → I32 → 偶数要素 F16 → 奇数要素 F16 → I8」+ `verify.assert_reader_layout` で保証する。
+HF の `safe_open` は整列違反を読めてしまうので、そちらを通すだけでは検出できない。
 
 ## gather / embedding の範囲外添字は GPU で NaN 汚染になる（例外にならない）
 
-契約は「添字は範囲内」。違反時、GPU カーネルは該当要素（embedding は該当行）にだけ
-quiet NaN を書き、実行は継続する。無検査だと WebGPU の境界付きアクセスが「0 または別の
-正常値」を静かに返して痕跡が残らないため、NaN 伝播で必ず表に出す裁定（根拠は
-`packages/runtime/src/kernels/gather.ts` の doc）。CPU 参照は範囲外で throw する意図的非対称。カーネルから
-host への例外化には「run 単位のフォールト旗 + readback」という新しい診断チャネルが要り、
-必要になった時点で独立に設計する。実運用の添字は export 時に clamp 済みの定数由来
-（ADR 0010）で、違反はモデル側の誤りに限られる。
+裁定の正本は ADR [0061](decisions/0061-index-oob-semantics.md)。契約は「添字は範囲内」。
+違反時、GPU カーネルは該当要素（embedding は該当行）にだけ quiet NaN を書いて実行を継続し、
+NaN 伝播（ADR 0020）で必ず表面化する。CPU 参照は範囲外で throw（意図的非対称）。
 
 ## f32 → i32 cast の値域外・NaN は未定義
 
-WGSL の `i32(f32)` も torch の `.to(int)` も値域外・NaN の結果は実装依存。要素ごとの
-値域検査は cast をメモリ律速から演算律速へ変えるため入れない。値域内は torch 準拠の
-truncate（0 方向切り捨て）で一致保証。範囲外になりうる値は呼び出し側・モデル側で先に
-clamp すること。
+裁定の正本は ADR [0062](decisions/0062-f32-i32-cast-contract.md)。値域内は torch 準拠の
+truncate（0 方向切り捨て）で一致保証・値域外と NaN は未定義。要素ごとの値域検査は意図的に
+入れない — 範囲外になりうる値は呼び出し側・モデル側で先に clamp すること。
 
 ## 意味論 dtype の実行可否は op ごと（一括解禁しない）
 
