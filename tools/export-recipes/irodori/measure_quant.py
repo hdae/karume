@@ -814,7 +814,7 @@ def quality_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
 def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "script": "tools/exporter/irodori/measure_quant.py",
+        "script": "tools/export-recipes/irodori/measure_quant.py",
         "torch": torch.__version__,
         "base": BASE_CONFIG,
         "method": {

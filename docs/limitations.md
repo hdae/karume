@@ -436,14 +436,15 @@ relattn / demo 資産、wav の実資産 scale）— は GitHub Actions では�
 ファイルシステムには配布形サイズの約 2 倍の空きが要る。据え替え後は `.staging` / `.old` とも
 残らない。
 
-## exporter CLI: `karume export` はリポジトリの作業ツリー専用（インストール版では動かない）
+## exporter: モデル別 recipe はリポ専用（wheel に入るのは汎用 core だけ）
 
-export の台本 `export_anima.py` はパッケージ外のリポ直下スクリプトで wheel に入らず
-（ADR 0023 / 0034 が生きた決定として台本名を参照しているため、パッケージへ移動しない）、
-実重み export の依存（diffusers 等）も PyPI extras ではなく uv の dependency-groups にある。
-このため PyPI インストール版の `karume export` は台本の置き場を綴って fail loudly する。
-`karume dist` / `karume verify` はインストール版でも動く。解除するなら台本のパッケージ化と
-extras 化を 1 セットで行う（公開後の需要を見て判断）。
+PyPI `karume` は汎用 exporter core のみ（ADR
+[0065](decisions/0065-exporter-core-recipe-split.md) — 配布境界とライセンス境界を一致させる
+ための by-design）。既知モデルの export 台本・dist recipe・カードテンプレートは
+`tools/export-recipes/`（uv workspace・wheel 外）にあり、実重み export の依存
+（diffusers 等）も同プロジェクトの dependency-groups が持つ。このためインストール版の
+`karume dist` は pipeline 表が空で fail loudly する（受理集合の正本はリポの
+`tools/export-recipes/dist.py`）。`karume verify` はインストール版でも動く。
 
 ## Metal（Apple GPU）では GPU 側 timestamp 計測が実用にならない（外部制約）
 

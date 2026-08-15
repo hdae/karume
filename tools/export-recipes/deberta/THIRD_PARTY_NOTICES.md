@@ -9,7 +9,7 @@ the recipe that needs it so its provenance travels with the code.
 
 `Unverified` marks a field nobody has checked against the upstream revision actually used.
 Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in *is* that review, and this file only lays out the
+(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
 questions it has to answer.
 
 ## Upstream sources
@@ -27,22 +27,22 @@ published.
 
 ### ku-nlp/deberta-v2-large-japanese-char-wwm
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://huggingface.co/ku-nlp/deberta-v2-large-japanese-char-wwm> |
-| Revision used | Unverified |
-| Form of copy | Loaded, not copied. Re-distributed in converted storage form. |
-| Code license | n/a (weights only) |
-| Weights license | `../sbv2/card.py` records `cc-by-sa-4.0` (checked 2026-08-07). Unverified against the revision used. |
-| Attribution requirements | Unverified |
+| Item                     | Value                                                                                                |
+| ------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/ku-nlp/deberta-v2-large-japanese-char-wwm>                                   |
+| Revision used            | Unverified                                                                                           |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                        |
+| Code license             | n/a (weights only)                                                                                   |
+| Weights license          | `../sbv2/card.py` records `cc-by-sa-4.0` (checked 2026-08-07). Unverified against the revision used. |
+| Attribution requirements | Unverified                                                                                           |
 
 ### transformers (model implementation)
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://github.com/huggingface/transformers> |
-| Revision used | `transformers==5.14.1` (via the `sbv2` dependency group) |
-| Form of copy | Monkeypatch of imported classes; no copy in this directory. |
-| Code license | Unverified |
-| Weights license | n/a |
-| Attribution requirements | Unverified |
+| Item                     | Value                                                       |
+| ------------------------ | ----------------------------------------------------------- |
+| Upstream repository      | <https://github.com/huggingface/transformers>               |
+| Revision used            | `transformers==5.14.1` (via the `sbv2` dependency group)    |
+| Form of copy             | Monkeypatch of imported classes; no copy in this directory. |
+| Code license             | Unverified                                                  |
+| Weights license          | n/a                                                         |
+| Attribution requirements | Unverified                                                  |

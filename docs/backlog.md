@@ -9,14 +9,12 @@
 
 ## now — 整理整頓波（2026-08-14〜）
 
-外部レビュー 6 本の TRIAGE・docs 事実修正・ADR 注記・planning SoT 再編（本ファイル新設）は消化済み。
-残り:
+外部レビュー 6 本の TRIAGE・docs 事実修正・ADR 注記・planning SoT 再編（本ファイル新設）・
+**exporter 構造再編（案 A・ADR 0065 — 全 8 段）**は消化済み。残り:
 
-- **exporter 構造再編（案 A）**: PyPI `karume` を汎用 core へ絞り、モデル別 recipe を
-  `tools/export-recipes/<family>/` へ外出し。dist.py / modelcard.py の engine/recipe 分割・
-  CLI の family command 削除・src/ layout・境界の machine gate。段階手順は 8 段
-  （boundary test 先行 → 横断 utility 回収 → dist 分割 → family 移動 → core 純化 →
-  packaging → CI 分離 → docs 同期）。
+- **exporter 再編の後始末（小粒）**: Python CI の初回実行観測（wheel gate / recipes の
+  資産不在 skip が想定どおりか）・pytorch-cpu index の explicit 化（hatchling 1.27+ /
+  PEP 639 の license-files リスト形が解禁される — 現状は既定グロブで同結果のため急がない）。
 - **housekeeping 一括（小粒）**:
   - series 資産の再生成（birefnet / depth / vowel — e2e 門 SKIP の解消）
   - テスト逆方向 import の残り 3 本（e2e_birefnet / e2e_depth_anything / e2e_vowel_detector）

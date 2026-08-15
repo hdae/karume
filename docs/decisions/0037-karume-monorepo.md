@@ -45,6 +45,12 @@
 - HF の素の safetensors を直接動かす **TS ネイティブなモデル定義**は本プロジェクトの
   スコープ外（将来の別プロジェクト = `Zarame`）。
 
+### 2.5 PyPI `karume` の性格 — ADR 0065 が改訂
+
+**改訂（2026-08-15・ADR [0065](0065-exporter-core-recipe-split.md)）**: 「エクスポータ CLI」
+としていた PyPI `karume` は**汎用 exporter / IR tooling** へ — モデル別 recipe（patch /
+台本 / dist recipe / カード）は wheel の外（`tools/export-recipes/`）に住む。
+
 ### 3. 配布形は **HF 1 モデル 1 リポ・複数 safetensors**
 
 **Superseded by ADR [0041](0041-manifest-v2.md) §2**（2026-08-08 — family repo に複数 model を

@@ -9,7 +9,7 @@ the recipe that needs it so its provenance travels with the code.
 
 `Unverified` marks a field nobody has checked against the upstream revision actually used.
 Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in *is* that review, and this file only lays out the
+(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
 questions it has to answer.
 
 ## Upstream sources
@@ -33,33 +33,33 @@ published.
 
 ### circlestone-labs/Anima-Base-v1.0-Diffusers (weights)
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://huggingface.co/circlestone-labs/Anima-Base-v1.0-Diffusers> |
-| Revision used | Unverified |
-| Form of copy | Loaded, not copied. Re-distributed in converted storage form. |
-| Code license | n/a (weights only) |
-| Weights license | `card.py` records `license: other` / `circlestone-labs-non-commercial-license`, pointing at <https://huggingface.co/circlestone-labs/Anima/blob/main/LICENSE.md>. Unverified against the revision used. |
-| Attribution requirements | Unverified |
+| Item                     | Value                                                                                                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/circlestone-labs/Anima-Base-v1.0-Diffusers>                                                                                                                                     |
+| Revision used            | Unverified                                                                                                                                                                                              |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                                                                                                                           |
+| Code license             | n/a (weights only)                                                                                                                                                                                      |
+| Weights license          | `card.py` records `license: other` / `circlestone-labs-non-commercial-license`, pointing at <https://huggingface.co/circlestone-labs/Anima/blob/main/LICENSE.md>. Unverified against the revision used. |
+| Attribution requirements | Unverified                                                                                                                                                                                              |
 
 ### diffusers / transformers (model implementation)
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://github.com/huggingface/diffusers> / <https://github.com/huggingface/transformers> |
-| Revision used | `diffusers==0.39.0` / `transformers==5.14.1` (pinned in `pyproject.toml`) |
-| Form of copy | Monkeypatch of imported classes, plus verbatim-derived wrappers self-reported in `patch.py` / `tiling.py` / `pipeline_ref.py`. |
-| Code license | Unverified |
-| Weights license | n/a |
-| Attribution requirements | Unverified |
+| Item                     | Value                                                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Upstream repository      | <https://github.com/huggingface/diffusers> / <https://github.com/huggingface/transformers>                                     |
+| Revision used            | `diffusers==0.39.0` / `transformers==5.14.1` (pinned in `pyproject.toml`)                                                      |
+| Form of copy             | Monkeypatch of imported classes, plus verbatim-derived wrappers self-reported in `patch.py` / `tiling.py` / `pipeline_ref.py`. |
+| Code license             | Unverified                                                                                                                     |
+| Weights license          | n/a                                                                                                                            |
+| Attribution requirements | Unverified                                                                                                                     |
 
 ### Distilled LoRA (baked in at export time)
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | Unverified |
-| Revision used | Unverified |
-| Form of copy | Merged into the exported weights (`lora.py`). |
-| Code license | n/a (weights only) |
-| Weights license | Unverified |
-| Attribution requirements | Unverified |
+| Item                     | Value                                         |
+| ------------------------ | --------------------------------------------- |
+| Upstream repository      | Unverified                                    |
+| Revision used            | Unverified                                    |
+| Form of copy             | Merged into the exported weights (`lora.py`). |
+| Code license             | n/a (weights only)                            |
+| Weights license          | Unverified                                    |
+| Attribution requirements | Unverified                                    |

@@ -9,7 +9,7 @@ the recipe that needs it so its provenance travels with the code.
 
 `Unverified` marks a field nobody has checked against the upstream revision actually used.
 Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in *is* that review, and this file only lays out the
+(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
 questions it has to answer.
 
 ## Upstream sources
@@ -30,22 +30,22 @@ published.
 
 ### google/siglip2-base-patch16-224 and google/siglip2-so400m-patch14-384
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://huggingface.co/google/siglip2-base-patch16-224> / <https://huggingface.co/google/siglip2-so400m-patch14-384> |
-| Revision used | Unverified |
-| Form of copy | Loaded, not copied. The vision tower is re-distributed in converted storage form. |
-| Code license | n/a (weights only) |
-| Weights license | `card.py` records `apache-2.0` (checked on the model page, 2026-08-13). Unverified against the revision used. |
-| Attribution requirements | Unverified |
+| Item                     | Value                                                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/google/siglip2-base-patch16-224> / <https://huggingface.co/google/siglip2-so400m-patch14-384> |
+| Revision used            | Unverified                                                                                                            |
+| Form of copy             | Loaded, not copied. The vision tower is re-distributed in converted storage form.                                     |
+| Code license             | n/a (weights only)                                                                                                    |
+| Weights license          | `card.py` records `apache-2.0` (checked on the model page, 2026-08-13). Unverified against the revision used.         |
+| Attribution requirements | Unverified                                                                                                            |
 
 ### transformers (model implementation)
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://github.com/huggingface/transformers> |
-| Revision used | `transformers==5.14.1` (pinned in `pyproject.toml`) |
-| Form of copy | Monkeypatch of imported classes; `patch.py` follows `_in_projection_packed` verbatim for the packed-projection split. |
-| Code license | Unverified |
-| Weights license | n/a |
-| Attribution requirements | Unverified |
+| Item                     | Value                                                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/huggingface/transformers>                                                                         |
+| Revision used            | `transformers==5.14.1` (pinned in `pyproject.toml`)                                                                   |
+| Form of copy             | Monkeypatch of imported classes; `patch.py` follows `_in_projection_packed` verbatim for the packed-projection split. |
+| Code license             | Unverified                                                                                                            |
+| Weights license          | n/a                                                                                                                   |
+| Attribution requirements | Unverified                                                                                                            |

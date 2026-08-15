@@ -11,10 +11,11 @@
 
 ## Now
 
-- **整理整頓波（2026-08-14〜）**: 外部レビュー 6 本（ADR 棚卸し / docs 事実相違 / 汎用性監査 /
-  構造・ライセンス / 予定整理 / 量子化資料批評）の TRIAGE 消化 → docs 事実修正・ADR 注記・
-  planning SoT 再編（backlog.md 新設）まで完了。残り = **exporter 構造再編（案 A — PyPI core と
-  `tools/export-recipes/` の分離）** + housekeeping 一括（backlog now 節）。
+- **整理整頓波（2026-08-14〜）**: 外部レビュー 6 本の TRIAGE 消化 → docs 事実修正・ADR 注記・
+  planning SoT 再編（backlog.md 新設）→ **exporter 構造再編（案 A・ADR 0065）全 8 段完了**
+  （PyPI karume = 純 core〈src layout・境界 gate・license 同梱〉/ recipe は
+  `tools/export-recipes/<family>/`・uv workspace 共有 venv・dist は repo driver）。残り =
+  housekeeping 一括 + Python CI 初回観測（backlog now 節）。
 - 次の大波 = **autoregressive-ready 基盤波**（backlog next 節）。主語は「Gemma 対応」ではなく
   IR / loader / state 実行モデルの器づくり — ADR 5 本を実装より先行させる。検収モデル =
   Gemma 4 E2B / MiniCPM5-1B。
@@ -38,9 +39,10 @@
   （現在は撤去済み・再設置で再発 — exclude 裁定は backlog now）。
 - **Session 構築の重みアップロード後 submit 1 回は瞬間ピーク +2.7GiB を抑えている** — 消さない。
 - **資産の置き場**: `models/` = HF へそのまま上げる配布形のみ・系列出力は `outputs/series/`・
-  入力素材は `inputs/<ファミリ>/<名前>/` — 綴りの正本は `karume/paths.py` と
-  [assets-layout](../docs/assets-layout.md)。格納 dtype はヘッダが正（dist の門が検査）。
-  旧識別子以前の資産は開けない（互換シム無し）。turbo LoRA だけ未移行（backlog now）。
+  入力素材は `inputs/<ファミリ>/<名前>/` — 綴りの正本は
+  `tools/export-recipes/_shared/paths.py` と [assets-layout](../docs/assets-layout.md)。
+  格納 dtype はヘッダが正（dist の門が検査）。旧識別子以前の資産は開けない（互換シム無し）。
+  turbo LoRA だけ未移行（backlog now）。
 - **birefnet / depth / vowel の series 資産は未再生成** = 当該 e2e 門 SKIP 中（backlog now）。
   DeBERTa 実重み e2e も未移植 — 回帰網は WAV sha256 門 + rel-pos parity（backlog now）。
 - models パッケージの tree-shaking は「全モジュール副作用ゼロ」不変条件が前提。JSR npm 互換層の

@@ -27,13 +27,15 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
   （gpu / codegen / kernels / format / reference / runtime）
 - `packages/hub/` — manifest 解決・fetch・cache（仕様の正本は ADR 0038）
 - `packages/models/` — **barrel（mod.ts）+ ファミリ別サブパス export の両建て**
-- `tools/exporter/` — Python（uv）。`examples/` は整備予定
+- `tools/exporter/` — PyPI `karume` = **汎用 core のみ**（src layout・境界は machine gate —
+  ADR 0065）/ `tools/export-recipes/` — モデル別 recipe（wheel 外・uv workspace 共有 venv・
+  起動は `python -m <family>.<mod>`・dist は `export-recipes/dist.py`）。`examples/` は整備予定
 
 ## 検証コマンド（変更後は全て）
 
 - `deno task verify`（= fmt --check + lint + check + test）。GPU テストは実 GPU で実行、
   アダプタ無し環境は明示 SKIP（リリース判定は緑必須 — ADR 0005）
-- exporter: `uv run pytest`（tools/exporter で）
+- exporter: `uv run pytest`（**tools/exporter と tools/export-recipes の両方で** — ADR 0065）
 
 ## 横断の不変条件
 

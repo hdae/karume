@@ -9,7 +9,7 @@ the recipe that needs it so its provenance travels with the code.
 
 `Unverified` marks a field nobody has checked against the upstream revision actually used.
 Checking license compatibility per revision is a human review scheduled before release
-(ADR 0065 decision 7); filling this table in *is* that review, and this file only lays out the
+(ADR 0065 decision 7); filling this table in _is_ that review, and this file only lays out the
 questions it has to answer.
 
 ## Upstream sources
@@ -36,44 +36,44 @@ published.
 
 ### rufflet17/voice_models (FN voice family)
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://huggingface.co/rufflet17/voice_models> |
-| Revision used | Unverified |
-| Form of copy | Loaded, not copied. Re-distributed in converted storage form. |
-| Code license | n/a (weights only) |
-| Weights license | `card.py` records `license: other` / `rufflet17-voice-models-terms`, pointing at the repository page (checked 2026-08-07). Unverified against the revision used. |
-| Attribution requirements | Unverified |
+| Item                     | Value                                                                                                                                                            |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/rufflet17/voice_models>                                                                                                                  |
+| Revision used            | Unverified                                                                                                                                                       |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                                                                                    |
+| Code license             | n/a (weights only)                                                                                                                                               |
+| Weights license          | `card.py` records `license: other` / `rufflet17-voice-models-terms`, pointing at the repository page (checked 2026-08-07). Unverified against the revision used. |
+| Attribution requirements | Unverified                                                                                                                                                       |
 
 ### litagin/style_bert_vits2_jvnv (JVNV voice family)
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://huggingface.co/litagin/style_bert_vits2_jvnv> |
-| Revision used | Unverified |
-| Form of copy | Loaded, not copied. Re-distributed in converted storage form. |
-| Code license | n/a (weights only) |
-| Weights license | `card.py` records `cc-by-sa-4.0` (checked 2026-08-09). Unverified against the revision used. |
+| Item                     | Value                                                                                        |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/litagin/style_bert_vits2_jvnv>                                       |
+| Revision used            | Unverified                                                                                   |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                |
+| Code license             | n/a (weights only)                                                                           |
+| Weights license          | `card.py` records `cc-by-sa-4.0` (checked 2026-08-09). Unverified against the revision used. |
 | Attribution requirements | CC-BY-SA attribution and the JVNV corpus citation are carried by the model card. Unverified. |
 
 ### ku-nlp/deberta-v2-large-japanese-char-wwm (text encoder)
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://huggingface.co/ku-nlp/deberta-v2-large-japanese-char-wwm> |
-| Revision used | Unverified |
-| Form of copy | Re-distributed in every SBV2 repository (see `../deberta/`). |
-| Code license | n/a (weights only) |
-| Weights license | `card.py` records `cc-by-sa-4.0` (checked 2026-08-07). Unverified against the revision used. |
-| Attribution requirements | Unverified |
+| Item                     | Value                                                                                        |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/ku-nlp/deberta-v2-large-japanese-char-wwm>                           |
+| Revision used            | Unverified                                                                                   |
+| Form of copy             | Re-distributed in every SBV2 repository (see `../deberta/`).                                 |
+| Code license             | n/a (weights only)                                                                           |
+| Weights license          | `card.py` records `cc-by-sa-4.0` (checked 2026-08-07). Unverified against the revision used. |
+| Attribution requirements | Unverified                                                                                   |
 
 ### style-bert-vits2 (model implementation)
 
-| Item | Value |
-| ---- | ----- |
-| Upstream repository | <https://github.com/litagin02/Style-Bert-VITS2> |
-| Revision used | `style-bert-vits2==2.5.0` (pinned in `pyproject.toml`) |
-| Form of copy | Monkeypatch of imported classes plus a branch-free re-implementation of `transforms.py`'s spline in `patch.py`. No file copied into this directory. |
-| Code license | Recorded as AGPL-3.0 in `../vowel_detector/card.py`. Unverified against the revision used, and the implication for the derived re-implementation is undecided. |
-| Weights license | n/a |
-| Attribution requirements | Unverified |
+| Item                     | Value                                                                                                                                                          |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/litagin02/Style-Bert-VITS2>                                                                                                                |
+| Revision used            | `style-bert-vits2==2.5.0` (pinned in `pyproject.toml`)                                                                                                         |
+| Form of copy             | Monkeypatch of imported classes plus a branch-free re-implementation of `transforms.py`'s spline in `patch.py`. No file copied into this directory.            |
+| Code license             | Recorded as AGPL-3.0 in `../vowel_detector/card.py`. Unverified against the revision used, and the implication for the derived re-implementation is undecided. |
+| Weights license          | n/a                                                                                                                                                            |
+| Attribution requirements | Unverified                                                                                                                                                     |

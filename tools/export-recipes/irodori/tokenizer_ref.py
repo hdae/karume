@@ -732,7 +732,7 @@ def build_parity_fixture(
     return {
         "_doc": [
             "Irodori-TTS v4 テキスト層のパリティ用フィクスチャ",
-            "（生成: tools/exporter/irodori/tokenizer_ref.py）。",
+            "（生成: tools/export-recipes/irodori/tokenizer_ref.py）。",
             "正本は上流 normalize_text と tokenizers / transformers で、id 列はそこから採った",
             "実測値。語彙は全ケースの再現に要る**部分集合**（102,400 本を commit しないため）",
             "だが、minScore / maxTokenLength は語彙**全体**の値。NFKC 差分表は全体を載せる",

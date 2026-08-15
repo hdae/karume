@@ -1,6 +1,6 @@
 # 資産の置き場（models / outputs / inputs）
 
-ローカル資産 3 根の規約。綴りの正本は `tools/exporter/karume/paths.py`（`DIST_ROOT` /
+ローカル資産 3 根の規約。綴りの正本は `tools/export-recipes/_shared/paths.py`（`DIST_ROOT` /
 `SERIES_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。**3 根とも git 追跡しない**（全て再生成
 可能な生成物か手置きの実重みで、リポジトリが持つのは作り方だけ）。
 

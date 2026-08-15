@@ -52,7 +52,7 @@ requires_weights = pytest.mark.skipif(
     not (_WEIGHTS_PRESENT and _PACKAGE_PRESENT),
     reason=(
         f"実重み（{MODEL_DIR}）か sbv2 dependency-group が無い"
-        "（`uv sync --group sbv2` と重みの配置が前提 — tools/exporter/README.md）"
+        "（`uv sync --all-groups` と重みの配置が前提 — tools/export-recipes/sbv2/README.md）"
     ),
 )
 
