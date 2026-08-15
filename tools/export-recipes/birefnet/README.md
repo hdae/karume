@@ -1,0 +1,34 @@
+# BiRefNet export recipe
+
+**Outside the wheel** — this recipe is repo-only (ADR
+[0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)) and the authoritative model card
+is the exemplary `README.md` that `dist` generates into the distribution directory.
+
+Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The authority for the design
+decisions is the module docstrings (`export.py` / `patch.py` / `distribution.py`); this file is the
+entry point only.
+
+## What it emits
+
+One graph per model × resolution — the **matte logits** (`preds[-1]`, before the sigmoid) of the
+BiRefNet family, with batch static at 1 and no symbolic axis. The series name is the `--model-dir`
+directory name plus `--resolution` (default `birefnet-hr-1024`), because a BiRefNet graph is a
+different graph per resolution: window masks and padding constants are baked per resolution.
+`--resolution` accepts multiples of 64 only. Two models share the recipe (BiRefNet_HR and its
+fine-tune Lucida — identical structure, different weights and attribution), so they are one
+`--model` axis rather than two recipes.
+
+## Running
+
+```sh
+cd tools/export-recipes
+uv run --group birefnet python -m birefnet.export
+uv run --group birefnet python -m birefnet.export --verify     # eager equivalence vs the unpatched model
+uv run --group birefnet python -m birefnet.export --resolution 2048
+uv run --group birefnet python -m birefnet.export --model-dir ../../inputs/birefnet/lucida
+uv run --group birefnet python -m birefnet.export --real-images
+uv run python dist.py --pipeline birefnet                      # distribution
+```
+
+`transformers` is pinned with `==` (the patch layer replaces class attributes of the module the
+`trust_remote_code` loader produced); the group is declared in [`../pyproject.toml`](../pyproject.toml).

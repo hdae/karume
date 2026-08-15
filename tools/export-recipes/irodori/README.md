@@ -1,0 +1,45 @@
+# Irodori-TTS export recipe (with the DACVAE codec)
+
+**Outside the wheel** — this recipe is repo-only (ADR
+[0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)) and the authoritative model card
+is the exemplary `README.md` that `dist` generates into the distribution directory.
+
+Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) — the codec
+(`irodori/dacvae/`) is a **different upstream repository under a different license**, kept in one
+directory with the family it ships with. Scripts are started as modules from
+`tools/export-recipes/` (`uv run --with 'transformers==5.14.1' python -m irodori.export …`); the
+generic emit, verify and dist
+contracts live in [`../../exporter/README.md`](../../exporter/README.md).
+
+## Real-weight Irodori-TTS export and E2E (waves 1–4)
+
+Six text-side graphs plus the DACVAE codec pair, with host-side goldens. The scripts have a
+**required regeneration order** (later ones read earlier outputs):
+
+```sh
+# 0. one-time inputs: inputs/irodori/{v4-small,dacvae-32dim,Irodori-TTS,dacvae-src}/
+uv run python -m irodori.dacvae.convert                                  # 1. codec pth → safetensors
+uv run --with 'transformers==5.14.1' python -m irodori.export            # 2. six graphs + io goldens
+uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref     # 3. tokenizer asset + goldens + parity fixture (deno fmt it)
+uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref      # 4. full-loop latent goldens
+uv run --with descript-audiotools --with einops \
+    --with 'transformers==5.14.1' python -m irodori.dacvae.host          # 5. host preprocessing goldens
+uv run --with descript-audiotools --with einops python -m irodori.dacvae.export  # 6. codec graphs + io goldens
+uv run python dist.py --pipeline irodori                                 # 7. distribution (8 graphs + tokenizer)
+```
+
+The distribution carries an **f16 weight-storage series** next to f32 (ADR 0050), so step 7 needs
+both series. Regenerate the f16 side with the same three scripts (order caveats are identical; the
+codec / full-loop inputs stay on the f32 series on purpose — inputs are dtype-neutral):
+
+```sh
+uv run --with 'transformers==5.14.1' python -m irodori.export --dtype f16     # 2'. six graphs
+uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype f16   # 4'. full-loop goldens
+uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype f16  # 6'. codec
+```
+
+Order caveats measured in practice: step 2 reads step 5's real latent for the speaker cases
+(`SPEAKER_REAL_CASES`), and step 6 reads step 4's `z` for the decoder cases — so a **full** rebuild
+from scratch runs 2 once more after 5 (2 → 3 → 4 → 5 → 2 → 6 → 7). Incremental regeneration of a
+single script is safe as long as its inputs above exist. Design records: ADR 0044 / 0046 / 0047
+(graphs), 0048 (host port), 0049 (codec integration).
