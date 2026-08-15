@@ -54,7 +54,7 @@ jobs:
         working-directory: tools/exporter
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v7
         with:
           # ローカル開発機と同一にピン（lock の解決も build の出力構成もバージョンで変わり得る）。
           version: "0.11.21"
@@ -106,7 +106,7 @@ jobs:
         working-directory: tools/export-recipes
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "0.11.21"
           python-version: "3.14"
