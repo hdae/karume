@@ -230,8 +230,7 @@ uv run --with 'transformers==5.14.1' python export_deberta.py --layers 2 # 2 lay
 # 1b. i8 series (ADR 0019 storage + ADR 0025 w8a8 mirror goldens)
 uv run --with 'transformers==5.14.1' python export_deberta.py --dtype i8 --act-quant
 
-# 2. real-GPU comparison (every case SKIPs when the assets are absent)
-cd ../.. && deno test -A packages/runtime/tests/e2e_deberta_test.ts packages/runtime/tests/e2e_deberta_w8a8_test.ts
+# 2. real-GPU comparison: not available in this repository yet (see the note below)
 ```
 
 - **transformers is pinned to 5.14.1** (recon §6-5 — the graph shape changes when the modeling code
@@ -284,25 +283,25 @@ are now **graph inputs** built on the host (`karume/patch_deberta.py` is the ref
 implementation, mirrored by `packages/models/src/sbv2/text/rel-pos-tables.ts`). The mirror is pinned
 byte-for-byte by `packages/models/tests/sbv2_rel_pos_parity_test.ts`.
 
-On the Deno side: `packages/runtime/tests/e2e_deberta_test.ts` (one case = one test). **If not a
-single asset is present, everything SKIPs** (the generation command is printed in the warning); this
-is independent of the ADR 0005 "all-SKIP is an explicit FAIL" gate
-(`packages/runtime/tests/gpu_gate_test.ts`) — the gate only looks at whether a GPU adapter exists,
-and the tiny-golden real-GPU tests run even without the assets. When the assets are **partially**
-present (only one variant / a missing case) it is a FAIL, not a SKIP. The tolerance is a dedicated
-value matched to the error accumulation of 24 layers and is separate from the tiny goldens'
-`GOLDEN_TOLERANCE` (the derivation is authoritative in the `DEBERTA_TOLERANCE` comment in
-`packages/runtime/tests/e2e_deberta_test.ts`). **The f32 and i8 series run through the same
-structure, with the tolerance alone derived from measurements per series** (no reuse across series).
+On the Deno side: the real-weight DeBERTa E2E has **not been ported into this repository yet**. The
+exporter still emits the regular `io.<case>` and `io-i8a8.<case>` series, but there is currently no
+in-repository `e2e_deberta*_test.ts` gate consuming them.
+`packages/models/tests/sbv2_rel_pos_parity_test.ts` only pins the host-side relative-position tables
+and is not a replacement for the missing full numerical E2E.
 
 The `io-i8a8.<case>` files written by `--act-quant` are the **w8a8** (`linearCompute: "i8a8"`)
-mirror, used by `packages/runtime/tests/e2e_deberta_w8a8_test.ts`. The regular `io.<case>` MUST be
-taken **without the hook** (taking it with the hook still applied would contaminate the w8-side E2E
-expectations with activation quantization). The prefix is kept apart from `io.` so that the
-Deno-side enumeration of regular cases (startsWith `io.`) does not pick up the mirror. The w8a8 E2E
-is **not a numerical parity net** (activation quantization is discontinuous, so after a few layers
-the GPU and torch become "different samples of the same distribution") — the design of its detection
-power is authoritative in the comment at the top of that test.
+mirror. The regular `io.<case>` MUST be taken **without the hook** (taking it with the hook still
+applied would contaminate the w8-side E2E expectations with activation quantization). The prefix is
+kept apart from `io.` so that a Deno-side enumeration of regular cases (startsWith `io.`) does not
+pick up the mirror.
+
+Historical measurement (from the pre-migration numerical E2E, kept here only as background for
+whoever ports the gate back): the w8 tolerance was a dedicated value matched to the error
+accumulation of 24 layers and separate from the tiny goldens' `GOLDEN_TOLERANCE`, with **the f32 and
+i8 series running through the same structure and the tolerance alone derived from measurements per
+series** (no reuse across series); the w8a8 mirror was **not a numerical parity net** (activation
+quantization is discontinuous, so after a few layers the GPU and torch become "different samples of
+the same distribution").
 
 ## Real-weight SBV2 export and E2E (M1-P3 wave 1: dp / wave 6: front / wave 7: flow, dec, voice)
 
@@ -614,7 +613,7 @@ through.
 
 Real weights for the image generation side. `export_anima.py` writes out the 4 emit targets of ADR
 [0016](../../docs/decisions/0016-anima-chain-export.md). The full emit (`outputs/series/anima/`) and the
-Deno-side E2E (`packages/runtime/tests/e2e_anima_test.ts`) were completed in M1-P4.
+Deno-side E2E (`packages/models/tests/e2e_anima_test.ts`) were completed in M1-P4.
 
 ### Dependencies and obtaining the weights
 
@@ -673,8 +672,8 @@ and the rope tables). The design rationale is in
   rejected** too — the golden resolutions are fixed at `DIT_DYN_RESOLUTIONS = (512, 1024)` and the
   graph itself carries no resolution.
 - Alongside `model.safetensors` / `io.*`, the series directory holds **`rope_base.safetensors`**
-  (64KiB). It is the **per-axis base table** the host (`examples/anima/host/dit-tokens.ts`) uses to
-  assemble the rope tables, cut out of the `model.rope` output. **Why it is needed**: torch's f32
+  (64KiB). It is the **per-axis base table** the host (`packages/models/src/anima/dit-tokens.ts`)
+  uses to assemble the rope tables, cut out of the `model.rope` output. **Why it is needed**: torch's f32
   trigonometric functions can be 1 ulp off from the correctly rounded value (measured: over 8,192
   position × frequency combinations, cos 472 and sin 231 cases), and JS's `Math.cos` cannot
   reproduce them. The static graph has torch's values baked in, so bit identity is only achievable
@@ -684,8 +683,9 @@ and the rope tables). The design rationale is in
 - `--verify transformer --dit-graph dyn` compares "host patchify → S form → host unpatchify" against
   the **pre-patch diffusers path**. Measured (with the turbo LoRA fused and f16 rounding applied):
   **`bit_exact=True` / maxdiff 0.000e+00 in both cases** (S=1,024 and S=4,096).
-- The main real-GPU gate is `packages/runtime/tests/e2e_anima_dyn_test.ts` (S form ≡ static graph,
-  exact Uint32 equality).
+- The "S form ≡ static graph, exact Uint32 equality" real-GPU gate was a dedicated E2E of the
+  pre-migration tree; it has **not been ported into this repository yet**. The current in-repository
+  Anima gate is `packages/models/tests/e2e_anima_test.ts` (exact PNG SHA-256 equality).
 
 ### Measurements (as of wave 2; DiT / Qwen3 with `--num-layers 2`, the rest full)
 
@@ -730,8 +730,10 @@ implementation in all 4, so it is stated explicitly that the confirmation covers
 
 ### Measurements (wave 3; the `--verify` eager equivalence is unchanged at full depth)
 
-The Deno-side real-GPU comparison results are authoritative in the tolerance comments of
-`packages/runtime/tests/e2e_anima_test.ts`. In summary:
+The current in-repository Anima migration gate is `packages/models/tests/e2e_anima_test.ts`. It
+requires **exact PNG SHA-256 equality and explicitly forbids tolerance-based acceptance** (replacing
+the reference values is forbidden too). The per-target `maxAbs` figures below are **historical
+measurements** from the pre-migration numerical E2E; they are not the current acceptance authority.
 
 | Target             | Real-GPU golden          | Notes                                                               |
 | ------------------ | ------------------------ | ------------------------------------------------------------------- |
@@ -851,9 +853,11 @@ path is never entered (that path itself is reachable with hand-written IR, and
 
 **This is what put the full 28-layer DiT on a real GPU**: the 7,465MiB of f32 exceeded the GPUBuffer
 ceiling of 7,280MiB (`docs/known-issues.md`) and could not be loaded, whereas f16 is 3,731.5MiB,
-half the ceiling. The real-GPU golden and the stage-② measurements of the end-to-end chain are
-authoritative in the tolerance comments of `packages/runtime/tests/e2e_anima_test.ts` (DiT golden
-maxAbs 6.68e-5, stage ② raw DiT output 3.03e-5, stage ③ end-to-end 6.41e-6).
+half the ceiling. The real-GPU golden and the stage-② numbers of the end-to-end chain (DiT golden
+maxAbs 6.68e-5, stage ② raw DiT output 3.03e-5, stage ③ end-to-end 6.41e-6) are **historical
+measurements** from the pre-migration numerical E2E. The current gate is
+`packages/models/tests/e2e_anima_test.ts` (exact PNG SHA-256 equality; tolerance-based acceptance
+and reference-value replacement are forbidden).
 
 `anima_pipeline.py --dtype f16` fake-quants **all 4** components before taking the references (if
 even one were left unrounded, that stage alone would be the numbers of a different model). The
@@ -978,11 +982,13 @@ everything i8 would make the text-path references the numbers of a different mod
 actually being executed. The output is `outputs/series/anima-pipeline-i8/` (21 tensors, 9,873,808 B),
 measured at 14.1s / 14.4s per DiT step.
 
-The real-GPU E2E measurements are authoritative in the tolerance comments of
-`packages/runtime/tests/e2e_anima_i8_test.ts` (DiT golden maxAbs 8.59e-5 / stage ② raw DiT output
-5.34e-5 / stage ② latents 1.19e-6). **The f16-series values are not reused** — i8 rounding produces
-different weights, so even the implementation error stemming from reduction order is a different
-quantity.
+The real-GPU E2E numbers (DiT golden maxAbs 8.59e-5 / stage ② raw DiT output 5.34e-5 / stage ②
+latents 1.19e-6) are **historical measurements** from the pre-migration numerical E2E; the i8
+variant of that test has not been ported into this repository, and the current gate is
+`packages/models/tests/e2e_anima_test.ts` (exact PNG SHA-256 equality; tolerance-based acceptance
+and reference-value replacement are forbidden). **The f16-series values were not reused** — i8
+rounding produces different weights, so even the implementation error stemming from reduction order
+is a different quantity.
 
 #### Fault injection results (2026-08-03, pytest + tiny golden regeneration)
 
@@ -1082,9 +1088,10 @@ Measured (`--steps 32 --ref-steps 2`, 512px): **44.0s, peak RAM 12,918MiB** (4 D
 2 steps × cond/uncond; 13.5s per step). On the text side, qwen 29 and t5 30 tokens (negative 13 /
 21).
 
-The Deno-side host glue implementation (`sigmaSchedule` / `cfgEulerStep` / `denormalizeLatents` /
-`padSequence` in `packages/runtime/tests/e2e_anima_test.ts`) is **bit-identical to this fixture in
-all 4** (rounding to f32 one operation at a time with `Math.fround`).
+The Deno-side host glue implementation (`sigmaSchedule` / `cfgEulerStep` in
+`packages/models/src/anima/sampler.ts`, `denormalizeLatents` / `padSequence` in
+`packages/models/src/anima/latents.ts`) is **bit-identical to this fixture in all 4** (rounding to
+f32 one operation at a time with `Math.fround`).
 
 ### Fusing the Turbo LoRA and the turbo reference fixture
 
@@ -1118,12 +1125,13 @@ treats the missing keys as the "do not compute uncond" branch).
 
 ## VAE decode fixed-tiling reference fixture (`anima_tiling.py`)
 
-The **authoritative host-side numbers** for `--vae-tiling` in `examples/anima` (splitting the VAE
+The **authoritative host-side numbers** for the host-side VAE decode tiling (splitting the VAE
 decode into fixed latent 64×64 tiles). The VAE decoder graph is **structurally invariant with
 respect to resolution** (the `model.safetensors` for 512px and for 1024px agree exactly, down to the
 node sequence and the weight bytes — recon `docs/research/2026-08-03-dynres-vae-tiling.md` §1.2), so
 the 512px assets can be used directly as the tile decoder. **Nothing is added to the IR or the
-runtime**; only cutting, blending and pasting live on the host (`examples/anima/host/tiling.ts`).
+runtime**; only cutting, blending and pasting live on the host
+(`packages/models/src/anima/tiling.ts`).
 
 ```sh
 uv run --group anima python anima_tiling.py     # into outputs/series/anima-tiling-f16-1024/
@@ -1137,10 +1145,10 @@ uv run --group anima python anima_tiling.py --resolution 1344x768 \
   pipeline latent is used rather than randn because how the seams show depends on the actual values.
 - The outputs are `tiling.safetensors` (`latents_denorm` / `image_tiled`, 13.0MB) and `tiling.json`
   (**the tile geometry** = per-axis start positions, stride and blend width, plus observations of
-  the difference against a non-tiled decode). The Deno side
-  (`packages/runtime/tests/e2e_anima_tiling_test.ts`) checks **against this geometry metadata** as
-  well as the numbers — numbers alone cannot rule out "a different geometry that also lands inside
-  the tolerance".
+  the difference against a non-tiled decode). The pre-migration Deno-side tiling E2E checked
+  **against this geometry metadata** as well as the numbers — numbers alone cannot rule out "a
+  different geometry that also lands inside the tolerance". That test has **not been ported into
+  this repository yet**.
 - **`vae.enable_tiling()` is not used.** The upstream `tiled_decode` scans with `range(0, H,
   stride)`, which makes the last tile shorter — something a fixed-shape tile decoder cannot digest.
   The scan is changed to "evenly spaced placement that snaps the last tile's start to `extent −
@@ -1161,10 +1169,11 @@ uv run --group anima python anima_tiling.py --resolution 1344x768 \
 Measured (1024px, CPU f32, 9 tiles): the difference against a non-tiled decode is **maxAbs 5.07e-2 /
 mean 9.82e-4**. Tiling is an **approximation** that confines the receptive field of the decoder's
 attention to within a tile (the same approximation as upstream `tiled_decode`), so **this difference
-being non-zero is correct**. The implementation error is a separate matter: real GPU vs torch is
-maxAbs 1.642e-5 (the tolerance derivation in `packages/runtime/tests/e2e_anima_tiling_test.ts`). The
-same observation for 1344×768 (6 tiles) is **maxAbs 9.97e-2**, with real GPU vs torch at **8.02e-6**
-(`packages/runtime/tests/e2e_anima_nonsquare_test.ts`).
+being non-zero is correct**. The implementation error is a separate matter: real GPU vs torch was
+maxAbs 1.642e-5, and the same observation for 1344×768 (6 tiles) is **maxAbs 9.97e-2** with real GPU
+vs torch at **8.02e-6**. Both GPU-vs-torch figures are **historical measurements** from the
+pre-migration numerical E2E; the current gate is `packages/models/tests/e2e_anima_test.ts` (exact
+PNG SHA-256 equality; tolerance-based acceptance and reference-value replacement are forbidden).
 
 ## Non-square rope table reference fixture (`anima_rope.py`)
 
@@ -1195,9 +1204,9 @@ uv run --group anima python anima_rope.py       # into outputs/series/anima-rope
 
 ## Prompt layer of the image demo (`anima_demo.py`)
 
-The script that produces the **runtime assets** required by `examples/anima/text/` (the Deno
-implementation of prompt string → token id sequence) and the **parity fixture** for it. It does not
-touch the model graphs.
+The script that produces the **runtime assets** required by `packages/models/src/anima/text/` (the
+Deno implementation of prompt string → token id sequence) and the **parity fixture** for it. It does
+not touch the model graphs.
 
 ```sh
 # assets (2 files into outputs/series/anima-demo/text/) + fixture (packages/runtime/tests/fixtures/anima-text/)
@@ -1272,11 +1281,11 @@ regional indicators and emoji ZWJ sequences need no boundary rules implemented.
 
 ### Three stages of verification (nothing is emitted if any one of them comes off)
 
-| Stage                                         | Where                                            | Scale (measured)                                                                                                                                                          |
-| --------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ① equivalence of the folding                  | `anima_demo.py` (the emit gate)                  | all 1,112,064 cp + 5,512 rule keys + 200,000 randomized (fixed seed) / the pre-token scan and the NFC segmentation each cover **all cp × 11 contexts = 12,232,704 cases** |
-| ② reference implementation vs `AutoTokenizer` | `anima_demo.py` + `tests/test_anima_demo.py`     | 28 cases (`padding="longest"` / `max_length=512` / `truncation=True` — the same call as `anima_pipeline.encode_text`) + **2,000 randomized prompts** (fixed seed)         |
-| ③ TS implementation vs the fixture            | `packages/runtime/tests/anima_tokenizer_test.ts` | 28 cases × 2 tokenizers + 251 NFC pairs + property tests + a cross-check against the pipeline reference                                                                   |
+| Stage                                         | Where                                           | Scale (measured)                                                                                                                                                          |
+| --------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ① equivalence of the folding                  | `anima_demo.py` (the emit gate)                 | all 1,112,064 cp + 5,512 rule keys + 200,000 randomized (fixed seed) / the pre-token scan and the NFC segmentation each cover **all cp × 11 contexts = 12,232,704 cases** |
+| ② reference implementation vs `AutoTokenizer` | `anima_demo.py` + `tests/test_anima_demo.py`    | 28 cases (`padding="longest"` / `max_length=512` / `truncation=True` — the same call as `anima_pipeline.encode_text`) + **2,000 randomized prompts** (fixed seed)         |
+| ③ TS implementation vs the fixture            | `packages/models/tests/anima_tokenizer_test.ts` | 28 cases × 2 tokenizers + 251 NFC pairs + property tests + a cross-check against the pipeline reference                                                                   |
 
 - ① **only runs on regeneration** (it takes minutes). The pytest side (②) redoes the same comparison
   against the committed fixture, so **a change in the upstream tokenizer.json is noticed even
@@ -1632,11 +1641,10 @@ the attrs are placed here.
   (1,872.8MiB).
 - Host implementations of the runtime pipelines (SBV2: text → durations → assembling y_mask → voice
   / Anima: tokenization → scheduler → CFG → denormalization). The layer that connects the emitted
-  targets is outside the exporter's scope (for Anima there is a TS implementation for testing in
-  `packages/runtime/tests/e2e_anima_test.ts`). (The **TS port of Anima's tokenizer** is complete, in
-  `anima_demo.py` + `examples/anima/text/`. `packages/runtime/tests/e2e_anima_test.ts` keeps using
-  the fixture's `input_ids` — what it measures is the NN's numbers, and tokenization parity is held
-  separately by `packages/runtime/tests/anima_tokenizer_test.ts`.)
+  targets is outside the exporter's scope (for Anima the host implementation lives in
+  `packages/models/src/anima/pipeline.ts`). (The **TS port of Anima's tokenizer** is complete, in
+  `anima_demo.py` + `packages/models/src/anima/text/`, and tokenization parity is held separately by
+  `packages/models/tests/anima_tokenizer_test.ts`.)
 
 ## Real-weight Irodori-TTS export and E2E (waves 1–4)
 
