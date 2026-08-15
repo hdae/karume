@@ -497,3 +497,11 @@ e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` /
 
 別バックエンドでの健全性検証は参照 sha との一致ではなく**自己 A/B**（同一入力・幾何 2 種
 または新旧 2 版の出力 sha が互いに一致するか）で行う。
+
+**CPU 側にも同じ原則が掛かる**: tiny golden の io（torch CPU の期待出力）のバイト一致検査
+（`tools/exporter/tests/test_goldens.py` の再生成突合）も参照環境専用 — oneDNN が CPU の
+ISA で gemm / conv の kernel を出し分けるため、計算結果の最終 bit はマシン依存になる
+（実測 2026-08-16: GitHub CI runner で 30 spec 中 activations / conv2d_block の 2 spec だけ
+±1〜2 ulp）。CI では io のバイト突合を明示 SKIP し、model（グラフ + 固定 seed の重み —
+torch の CPU RNG はクロスマシンで決定的）のバイト突合だけを要求する。golden を消費する
+Deno 側の実 GPU テストはもともと tolerance 判定なので影響しない。

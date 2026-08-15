@@ -12,9 +12,11 @@
 外部レビュー 6 本の TRIAGE・docs 事実修正・ADR 注記・planning SoT 再編（本ファイル新設）・
 **exporter 構造再編（案 A・ADR 0065 — 全 8 段）**は消化済み。残り:
 
-- **exporter 再編の後始末（小粒）**: Python CI の初回実行観測（wheel gate / recipes の
-  資産不在 skip が想定どおりか）・pytorch-cpu index の explicit 化（hatchling 1.27+ /
-  PEP 639 の license-files リスト形が解禁される — 現状は既定グロブで同結果のため急がない）。
+- **exporter 再編の後始末（小粒）**: Python CI の 2 回目観測（初回 2026-08-16 は
+  setup-uv タグと golden io のマシン依存を検出・修正済み — 期待値: core 2005 passed /
+  30 skipped・recipes 985 passed / 233 skipped）・pytorch-cpu index の explicit 化
+  （hatchling 1.27+ / PEP 639 の license-files リスト形が解禁される — 現状は既定グロブで
+  同結果のため急がない）。
 - **housekeeping 一括（小粒）**:
   - series 資産の再生成（birefnet / depth / vowel — e2e 門 SKIP の解消）
   - テスト逆方向 import の残り 3 本（e2e_birefnet / e2e_depth_anything / e2e_vowel_detector）

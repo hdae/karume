@@ -64,6 +64,8 @@ jobs:
           enable-cache: true
       - name: Test (core)
         # `--locked` は uv.lock の陳腐化も同時に検出する（CI 側での暗黙の再ロックを許さない）。
+        # golden io のバイト突合（30 件）は参照環境専用のため CI では SKIP される
+        # （torch CPU の最終 bit はマシン依存 — docs/limitations.md の参照環境節）。
         run: uv run --locked pytest
       - name: Build
         # uv workspace のメンバーなので、既定の出力先は workspace ルート（tools/dist）になる。
