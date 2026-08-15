@@ -85,6 +85,11 @@ Session 常駐と device-loss lifecycle（perf H-4 と同体）・sampling/RNG �
 
 ## parked（復活条件つき）
 
+- **export-recipes の別リポジトリ分離**（ユーザー意向 2026-08-15 — 現時点では何もしない）。
+  ADR 0065 案 B〈別配布物化〉のリポ版。切り出し時の論点 = `_shared/paths.py` の REPO_ROOT
+  導出・runtime 適合 fixture（packages/runtime/tests/fixtures/）の共有・goldens の出力先・
+  uv workspace の解体。復活 = ユーザー裁定。
+
 - hub Range 並列 + prefetch — 復活 = 断片化リポの再来（perf L-3）
 - params / bind group キャッシュ（ADR 0032 案 2）・GPU timestamp 推定源化・全面 f16（案γ）・
   Vᵀ+列量子化融合・2048px DiT attention メモリ工事・SBV2 NFC チップ・f32 anima 系列再生成

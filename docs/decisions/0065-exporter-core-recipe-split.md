@@ -76,6 +76,11 @@
 
 ## Consequences / 非目標
 
+- **将来案（記録のみ・2026-08-15 ユーザー意向）**: export-recipes は最終的に**別リポジトリ**へ
+  分離する可能性がある（案 B〈別配布物〉のリポ版）。現時点では非目標 — ただしリポ内の
+  相対結合（`_shared/paths.py` の REPO_ROOT・runtime 適合 fixture の共有・goldens 出力先）を
+  これ以上深くしない判断材料として記録する。
+
 - JSR 3 パッケージ（runtime / hub / models）・ルート `models/`（配布形置き場）・`examples/`
   は**本再編の対象外**（境界は既に直交している）。
 - IR 適合 fixture（`packages/runtime/tests/fixtures/`）の中立位置への移動は**保留**
