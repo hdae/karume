@@ -405,6 +405,22 @@ DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-a
   生成・パイプライン作成・実 GPU 実行の確認まで（門を足すか ADR に f32 限定と明記し続けるかは
   そのケースが実資産に現れた時に判断）。
 
+## ストリーミング慣習の WAV（riffSize プレースホルダ）は受理しない
+
+`decodeWav`（`packages/models/src/audio/wav.ts`）の走査境界は RIFF が offset 4 で宣言する
+論理終端で、宣言の外の物理バイトは読まない（仕様どおりの無視 — `encodeWav` が書く欄が正）。
+このため、ストリーミング書き出しの慣習である riffSize プレースホルダ宣言は by-design で
+受理しない:
+
+- `riffSize=0` は論理終端がヘッダ直後になりチャンク走査が 1 つも回らず、
+  `decodeWav: 'fmt ' チャンクが無い` で落ちる。
+- `riffSize=0xFFFFFFFF` は切り詰められた器として
+  `decodeWav: RIFF が 4294967295 バイトを宣言しているが、残りは … バイトしかない` で落ちる。
+
+入力は完全なファイルとしての WAV 前提（参照音声・検出器入力とも）。ストリーミング WAV を
+食わせる実需が出たら受理形をその時に裁定する（黙って物理長へフォールバックしない — fail
+loudly の横断規約）。
+
 ## hub: 並行取得のキャンセル粒度は single-flight の leader 単位
 
 取得層（`@hdae/fetch-cache`）の single-flight では、同一 (cacheName, URL) への 2 本目以降の

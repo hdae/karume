@@ -22,8 +22,6 @@
   - テスト逆方向 import の残り 3 本（e2e_birefnet / e2e_depth_anything / e2e_vowel_detector）
   - Anima 参照フィクスチャ系テストの復元・tokenizer parity fixture の models 側への移設
   - DeBERTa 実重み e2e の移植（現行の回帰網は WAV sha256 門 + rel-pos parity のみ）
-  - staged execution（timestep stage）の見送りを正式記録して ACTIVE から退役
-  - `deno task verify` の worktree 誤拾い — deno.json exclude の裁定
   - turbo LoRA の置き場移行（配布形の親に入力素材が混在）
   - perf-ledger K-1 の曖昧 bucket を分割 or 再定義
   - dist の (rel_path, size) 前置フィルタ（perf L-5 の残作業）
@@ -31,7 +29,6 @@
   - u32 uniform 検査の一本化の残り（conv1d/conv2d/deform-conv2d/gru-scan/pad/flip/cumsum の
     params ビルダ + upsample-bilinear2d の同型インライン）
   - transport.ts の到達不能 `outer === null` 分岐の掃除
-  - ストリーミング WAV 慣習（riffSize=0/0xFFFFFFFF）拒否を limitations へ起票
   - hack マーカー掃引（rg TODO/FIXME/HACK/workaround）+ knip（未使用 export / 依存）
   - モデルカード親切化の横展開・P 音素門 / text parity 恒真の解消・exporter ops.py の整理
 
