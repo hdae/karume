@@ -345,6 +345,24 @@ class TestAtomicReplacement:
         assert self._snapshot(out_dir) == before
         assert self._siblings(out_dir) == []
 
+    def test_a_failing_evacuation_leaves_the_previous_distribution_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """据え替えの 1 回目（出力先 → 退避先）で落ちても、os.replace は原子的なので出力先は
+        無傷のまま残る。"""
+        out_dir = tmp_path / "models" / "synthetic"
+        assemble_family(self._versioned_plans("v1"), out_dir, "A")
+        before = self._snapshot(out_dir)
+
+        self._fail_replace_at(monkeypatch, nth=1)
+        with pytest.raises(DistError, match="退避") as failure:
+            assemble_family(self._versioned_plans("v2"), out_dir, "A")
+
+        # 原因（I/O 故障）は連鎖で残す — 退避の失敗と組み立ての失敗を取り違えない。
+        assert isinstance(failure.value.__cause__, OSError)
+        assert self._snapshot(out_dir) == before
+        assert self._siblings(out_dir) == []
+
     def test_it_restores_a_distribution_left_only_in_the_superseded_slot(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

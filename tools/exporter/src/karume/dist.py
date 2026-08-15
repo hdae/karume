@@ -216,14 +216,10 @@ def place_file(source: Path, dest: Path) -> None:
     MUST: ハードリンクは使わない — 系列の書き手（`emit` の `open("wb")`）は既存ファイルを
     truncate で上書きするため、リンクで置いた配布形は系列の再 export で黙って書き換わり、
     manifest の sha256 と現物が食い違う（verify_dist は sha256 を採り直さないので沈黙する）。
-
-    既存の `dest` は先に外す — リンク方式だった頃の配布形の上へ再組み立てするとき、unlink が
-    先にリンクを切る（外さず開くと系列側の実ファイルを書き換える）。
     """
     if not source.is_file():
         raise DistError(f"組み立ての入力が無い: {source}")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.unlink(missing_ok=True)
     shutil.copyfile(source, dest)
 
 
@@ -247,17 +243,12 @@ class Artifact:
 
 
 def materialize(artifact: Artifact, dest: Path) -> None:
-    """`Artifact` の実体を `dest` に作る（配置 or 書き出し）。
-
-    MUST: 生成物も既存 `dest` を先に外してから書く — リンク方式だった頃の配布形が残っている
-    場合、外さず開いて書いた瞬間に系列側の実ファイルを書き換えることになる。
-    """
+    """`Artifact` の実体を `dest` に作る（配置 or 書き出し）。"""
     if artifact.source is not None:
         place_file(artifact.source, dest)
         return
     assert artifact.payload is not None  # __post_init__ の不変条件
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.unlink(missing_ok=True)
     dest.write_bytes(artifact.payload)
 
 
@@ -724,7 +715,13 @@ def assemble_family(
         raise
     # 据えるのは rename 2 回。非空ディレクトリの上へは rename できないので既存を先に退避する。
     if out_dir.exists():
-        os.replace(out_dir, superseded)
+        try:
+            os.replace(out_dir, superseded)
+        except OSError as error:
+            # os.replace は原子的 — 失敗しても out_dir は無傷のまま残る（既存配布形は不変）。
+            # 据わらなかった staging だけを捨てる（2 回目の失敗経路と同じ後片付けの規律）。
+            _discard_tree(staging)
+            raise DistError(f"{out_dir} の退避（rename）に失敗した") from error
     try:
         os.replace(staging, out_dir)
     except OSError as error:

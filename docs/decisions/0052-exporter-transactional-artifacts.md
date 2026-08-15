@@ -38,4 +38,4 @@ in-place 更新（unlink → copy・`karume.json` は最後）しており、I/O
   （docs/limitations.md に記載 — by-design のトレードオフ）。
 - 出力先の親に一時的に `<名前>.staging` / `<名前>.old` が現れる（models/ は git 追跡外）。
 - `place_file` 等の `dest.unlink(missing_ok=True)` は staging が常に空から作られるため
-  実質到達しない防御になった（撤去は別コミット候補）。
+  実質到達しない防御になった（撤去は別コミット候補）（2026-08-16 撤去済み）。
