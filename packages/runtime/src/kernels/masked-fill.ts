@@ -19,6 +19,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { STRIDED_RANK } from "../codegen/strided.ts";
+import { assertU32Params } from "./params.ts";
 
 export const MASKED_FILL_WORKGROUP_SIZE = 256;
 
@@ -95,9 +96,15 @@ export const maskedFillParams = (
   if (!Number.isFinite(value)) {
     throw new CodegenError(`masked_fill params: 埋め値が有限でない（${value}）`);
   }
+  const n = outShape.reduce((count, dim) => count * dim, 1);
+  assertU32Params("masked_fill params", {
+    ...Object.fromEntries(outShape.map((dim, d) => [`out_dims[${d}]`, dim])),
+    ...Object.fromEntries(maskStrides.map((stride, d) => [`mask_strides[${d}]`, stride])),
+    n,
+  });
   const pad = STRIDED_RANK - outShape.length;
   const params = new Uint32Array(2 + 2 * STRIDED_RANK);
-  params[0] = outShape.reduce((count, dim) => count * dim, 1);
+  params[0] = n;
   for (let d = 0; d < STRIDED_RANK; d += 1) {
     params[dimAt(d)] = d < pad ? 1 : outShape[d - pad];
     params[strideAt(d)] = d < pad ? 0 : maskStrides[d - pad];

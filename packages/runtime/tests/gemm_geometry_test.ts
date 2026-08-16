@@ -70,7 +70,7 @@ Deno.test("バケットの幾何は全て充填の整除条件を満たす（穴
 
 Deno.test("gemmGeometryForRows は非負整数以外を fail loudly にする", () => {
   for (const rows of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-    assertThrows(() => gemmGeometryForRows(rows), CodegenError, "行数 M は非負整数");
+    assertThrows(() => gemmGeometryForRows(rows), CodegenError, "行数 M は u32 の非負整数");
   }
 });
 

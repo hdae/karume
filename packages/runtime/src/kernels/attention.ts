@@ -46,6 +46,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { type GemmCompute, gemmComputeKeyPart, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
+import { assertU32Params } from "./params.ts";
 import {
   assertScoreStorageSupported,
   scoreArrayType,
@@ -308,10 +309,9 @@ export const attentionStatsParams = (
   rows: number,
   dim: number,
 ): Uint32Array<ArrayBuffer> => {
-  if (!Number.isSafeInteger(rows) || rows < 0 || !Number.isSafeInteger(dim) || dim < 1) {
-    throw new CodegenError(
-      `attention_stats params: rows は非負整数 / dim は正整数（${rows}, ${dim}）`,
-    );
+  assertU32Params("attention_stats params", { rows, dim });
+  if (dim < 1) {
+    throw new CodegenError(`attention_stats params: dim は正整数（${dim}）`);
   }
   const params = new Uint32Array(4);
   params[0] = rows;

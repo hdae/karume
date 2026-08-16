@@ -47,6 +47,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const SOFTMAX_WORKGROUP_SIZE = 256;
 
@@ -169,8 +170,9 @@ export const softmaxParams = (
   dim: number,
   safe = false,
 ): Uint32Array<ArrayBuffer> => {
-  if (!Number.isSafeInteger(rows) || rows < 0 || !Number.isSafeInteger(dim) || dim < 1) {
-    throw new CodegenError(`softmax params: rows は非負整数 / dim は正整数（${rows}, ${dim}）`);
+  assertU32Params("softmax params", { rows, dim });
+  if (dim < 1) {
+    throw new CodegenError(`softmax params: dim は正整数（${dim}）`);
   }
   const params = new Uint32Array(4);
   params[0] = rows;

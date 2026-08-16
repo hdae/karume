@@ -60,8 +60,10 @@ export const flipParams = (
   inner: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("flip params", { outer, len: length, inner });
+  const n = outer * length * inner;
+  assertU32Params("flip params", { n });
   const params = new Uint32Array(4);
-  params[0] = outer * length * inner;
+  params[0] = n;
   params[1] = length;
   params[2] = inner;
   return params;

@@ -64,8 +64,10 @@ export const padParams = (
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("pad params", { rows, in_len: lengthIn, left, right });
   const lengthOut = left + lengthIn + right;
+  const n = rows * lengthOut;
+  assertU32Params("pad params", { out_len: lengthOut, n });
   const params = new Uint32Array(4);
-  params[0] = rows * lengthOut;
+  params[0] = n;
   params[1] = lengthOut;
   params[2] = lengthIn;
   params[3] = left;

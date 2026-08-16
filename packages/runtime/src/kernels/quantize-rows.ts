@@ -51,6 +51,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 /** 1 行を畳む workgroup の幅（行 reduce / softmax と同じ 256）。 */
 export const QUANTIZE_ROWS_WORKGROUP_SIZE = 256;
@@ -158,10 +159,9 @@ fn main(
  * 16 バイトになるため、2 語ぶんの内容でも 16 バイト確保する MUST（softmax / reduce と同じ）。
  */
 export const quantizeRowsParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
-  if (!Number.isSafeInteger(rows) || rows < 0 || !Number.isSafeInteger(dim) || dim < 1) {
-    throw new CodegenError(
-      `quantize_rows params: rows は非負整数 / dim は正整数（${rows}, ${dim}）`,
-    );
+  assertU32Params("quantize_rows params", { rows, dim });
+  if (dim < 1) {
+    throw new CodegenError(`quantize_rows params: dim は正整数（${dim}）`);
   }
   if (dim % 4 !== 0) {
     throw new CodegenError(`quantize_rows params: dim は 4 の倍数（${dim}）`);

@@ -46,6 +46,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,
@@ -146,23 +147,19 @@ export const convTranspose1dParams = (dims: {
   readonly stride: number;
   readonly padding: number;
 }): Uint32Array<ArrayBuffer> => {
-  const values = [
-    dims.batch,
-    dims.channelsIn,
-    dims.channelsOut,
-    dims.lengthIn,
-    dims.lengthOut,
-    dims.kernel,
-    dims.stride,
-    dims.padding,
-  ];
-  for (const value of values) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(
-        `conv_transpose1d params: 全ての次元は非負整数（${values.join(", ")}）`,
-      );
-    }
-  }
+  // 名前は WGSL の Dims 欄名（`n` の次から）と対。並びがそのまま uniform の語順になる。
+  const dimensions = {
+    batch: dims.batch,
+    channels_in: dims.channelsIn,
+    channels_out: dims.channelsOut,
+    length_in: dims.lengthIn,
+    length_out: dims.lengthOut,
+    kernel: dims.kernel,
+    stride: dims.stride,
+    padding: dims.padding,
+  };
+  assertU32Params("conv_transpose1d params", dimensions);
+  const values = Object.values(dimensions);
   // MUST: stride 0 は WGSL の `% dims.stride` がゼロ除算になる（結果は未定義で、実装に
   // よっては例外にならないまま沈黙誤値・ハングになる — recon §4 の前例）。
   if (dims.stride < 1 || dims.kernel < 1) {
@@ -170,15 +167,12 @@ export const convTranspose1dParams = (dims: {
       `conv_transpose1d params: stride / kernel は正整数（${dims.stride}, ${dims.kernel}）`,
     );
   }
+  const n = dims.batch * dims.channelsOut * dims.lengthOut;
+  assertU32Params("conv_transpose1d params", { n });
   const params = new Uint32Array(12);
-  params[0] = dims.batch * dims.channelsOut * dims.lengthOut;
-  params[1] = dims.batch;
-  params[2] = dims.channelsIn;
-  params[3] = dims.channelsOut;
-  params[4] = dims.lengthIn;
-  params[5] = dims.lengthOut;
-  params[6] = dims.kernel;
-  params[7] = dims.stride;
-  params[8] = dims.padding;
+  params[0] = n;
+  values.forEach((value, index) => {
+    params[index + 1] = value;
+  });
   return params;
 };

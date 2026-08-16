@@ -38,6 +38,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 /**
  * conv2d の m タイルヒューリスティック（`conv2dIgemmMTile`）の基準行数。既定幾何の
@@ -259,9 +260,7 @@ const GEOMETRY_M64N32: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
  * 退行なしを確認した上でのもの（research doc §4）。
  */
 export const gemmGeometryForRows = (rows: number): GemmGeometry => {
-  if (!Number.isSafeInteger(rows) || rows < 0) {
-    throw new CodegenError(`幾何の選択: 行数 M は非負整数（${rows}）`);
-  }
+  assertU32Params("幾何の選択", { "行数 M": rows });
   if (rows <= 64) return GEOMETRY_M16N16;
   if (rows <= 512) return GEOMETRY_M64N32;
   return defaultGemmGeometry();

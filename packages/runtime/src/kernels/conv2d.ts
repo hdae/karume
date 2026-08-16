@@ -290,8 +290,10 @@ const checkConv2dDims = (dims: Conv2dDims): readonly number[] => {
  */
 export const conv2dParams = (dims: Conv2dDims): Uint32Array<ArrayBuffer> => {
   const values = checkConv2dDims(dims);
+  const n = dims.batch * dims.channelsOut * dims.heightOut * dims.widthOut;
+  assertU32Params("conv2d params", { n });
   const params = new Uint32Array(20);
-  params[0] = dims.batch * dims.channelsOut * dims.heightOut * dims.widthOut;
+  params[0] = n;
   values.forEach((value, index) => {
     params[index + 1] = value;
   });
@@ -312,10 +314,13 @@ export const conv2dIgemmParams = (dims: Conv2dDims): Uint32Array<ArrayBuffer> =>
   if (dims.groups !== 1) {
     throw new CodegenError(`conv2d igemm params: groups は 1 専用（${dims.groups}）`);
   }
+  const n = dims.heightOut * dims.widthOut;
+  const k = dims.channelsIn * dims.kernelH * dims.kernelW;
+  assertU32Params("conv2d igemm params", { n, k });
   const params = new Uint32Array(16);
   params[0] = dims.channelsOut;
-  params[1] = dims.heightOut * dims.widthOut;
-  params[2] = dims.channelsIn * dims.kernelH * dims.kernelW;
+  params[1] = n;
+  params[2] = k;
   [
     dims.channelsIn,
     dims.heightIn,

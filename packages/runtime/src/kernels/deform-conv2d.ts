@@ -216,8 +216,10 @@ export const deformConv2dParams = (dims: DeformConv2dDims): Uint32Array<ArrayBuf
   for (const [name, value] of positive) {
     if (value < 1) throw new CodegenError(`deform_conv2d params: ${name} は正整数（${value}）`);
   }
+  const n = dims.batch * dims.channelsOut * dims.heightOut * dims.widthOut;
+  assertU32Params("deform_conv2d params", { n });
   const params = new Uint32Array(12);
-  params[0] = dims.batch * dims.channelsOut * dims.heightOut * dims.widthOut;
+  params[0] = n;
   values.forEach((value, index) => {
     params[index + 1] = value;
   });

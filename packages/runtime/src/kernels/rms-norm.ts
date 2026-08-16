@@ -25,6 +25,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const RMS_NORM_WORKGROUP_SIZE = 256;
 
@@ -101,8 +102,9 @@ export const rmsNormParams = (
   dim: number,
   eps: number,
 ): Uint32Array<ArrayBuffer> => {
-  if (!Number.isSafeInteger(rows) || rows < 0 || !Number.isSafeInteger(dim) || dim < 1) {
-    throw new CodegenError(`rms_norm params: rows は非負整数 / dim は正整数（${rows}, ${dim}）`);
+  assertU32Params("rms_norm params", { rows, dim });
+  if (dim < 1) {
+    throw new CodegenError(`rms_norm params: dim は正整数（${dim}）`);
   }
   if (!Number.isFinite(eps) || eps <= 0) {
     throw new CodegenError(`rms_norm params: eps は有限の正数（${eps}）`);
