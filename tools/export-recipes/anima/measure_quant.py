@@ -917,7 +917,7 @@ def main() -> None:
         encoding="utf-8",
     )
     print()
-    for key, value in summary["gates"].items():  # type: ignore[union-attr]
+    for key, value in summary["gates"].items():
         print(f"[gate] {key}: {value}", flush=True)
     print(f"report OK → {args.out / 'report.md'}", flush=True)
 

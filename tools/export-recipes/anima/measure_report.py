@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
     from pathlib import Path
+    from typing import TypedDict
 
     from .measure_quant import AttnStat, DitRun, LayerStat
 
@@ -30,6 +31,51 @@ if TYPE_CHECKING:
     Psnr = Callable[[torch.Tensor, torch.Tensor, float], float]
     ToUint8 = Callable[[torch.Tensor], torch.Tensor]
     HistQuantile = Callable[[torch.Tensor, float], float]
+
+    class PtGroupSummary(TypedDict):
+        """`pt.by_group` の値（層グループ 1 本ぶんの P̃ 集計）。"""
+
+        nodes: int
+        median: float
+        p99: float
+        max: float
+
+    class PtSummary(TypedDict):
+        """`build_summary` の `pt` キー（P̃ 行 peak/rms の全体集計）。"""
+
+        rows: int
+        nodes: int
+        median: float
+        p90: float
+        p99: float
+        max: float
+        mean: float
+        by_group: dict[str, PtGroupSummary]
+
+    class ConfigSummary(TypedDict):
+        """`build_summary` の `configs` の値（構成 1 本ぶんの集計）。"""
+
+        diagnostics: dict[str, object]
+        latent_rel_rms_vs_f32: list[float]
+        latent_rel_rms_vs_baseline: list[float]
+        latent_rel_rms_vs_w8: list[float]
+        latent_ratio_vs_w8: list[float]
+        latent_ratio_vs_baseline: list[float]
+        latent_ratio_final: float
+        latent_ratio_max: float
+        psnr_vs_baseline: float
+        psnr_vs_f32: float
+        attn_s_rel_rms_max: float
+        attn_o_rel_rms_max: float
+        attn_o_worst_node: str | None
+
+    class Summary(TypedDict):
+        """`build_summary` の戻り値（`attn.json` と report ⑥ の共通の出どころ）。"""
+
+        pt: PtSummary
+        configs: dict[str, ConfigSummary]
+        gates: dict[str, str]
+        inject: str | None
 
 
 #: 層名の連番を潰して役割でまとめる（`transformer_blocks.7.attn1.to_q` → `transformer_blocks.*.…`）
@@ -89,7 +135,7 @@ def build_summary(
     rel_rms: RelRms,
     psnr: Psnr,
     hist_quantile: HistQuantile,
-) -> dict[str, object]:
+) -> Summary:
     """機械可読の集計と門の判定（`attn.json` と report ⑥ の共通の出どころ）。"""
     keys = [f"latents_step{index:04d}" for index in range(1, args.steps + 1)]
     base_vs_f32 = [rel_rms(latents[f"{baseline}/{key}"], latents[f"f32/{key}"]) for key in keys]
@@ -102,7 +148,7 @@ def build_summary(
         else torch.zeros(pt_hist_bins, dtype=torch.int64)
     )
     rows = sum(stat.pt_rows for stat in pt_stats.values())
-    pt = {
+    pt: PtSummary = {
         "rows": rows,
         "nodes": len(pt_stats),
         "median": hist_quantile(merged, 0.5),
@@ -117,13 +163,11 @@ def build_summary(
                 "p99": hist_quantile(torch.stack([m.pt_hist for m in members]).sum(0), 0.99),
                 "max": max(m.pt_max for m in members),
             }
-            for group, members in sorted(
-                _group_by(pt_stats, layer_group).items()  # type: ignore[arg-type]
-            )
+            for group, members in sorted(_group_by(pt_stats, layer_group).items())
         },
     }
 
-    configs: dict[str, dict[str, object]] = {}
+    configs: dict[str, ConfigSummary] = {}
     for name in config_names:
         vs_f32 = [rel_rms(latents[f"{name}/{key}"], latents[f"f32/{key}"]) for key in keys]
         vs_base = [rel_rms(latents[f"{name}/{key}"], latents[f"{baseline}/{key}"]) for key in keys]
@@ -166,17 +210,17 @@ def build_summary(
         # linear 活性を量子化しない (g) は**門の対象外**（`w8` 基準の参考値として出す）。
         if run.diagnostics[name]["linear_act_i8"]:
             series = configs[name]["latent_ratio_vs_baseline"]
-            ratio = max(series)  # type: ignore[arg-type]
+            ratio = max(series)
             gates[f"`{name}` の latent relRMS ≤ {LATENT_RATIO_GATE:g}× (vs {baseline})"] = (
-                f"最大 {ratio:.3f}× (step {1 + series.index(ratio)})"  # type: ignore[union-attr]
+                f"最大 {ratio:.3f}× (step {1 + series.index(ratio)})"
                 f" → {'OK' if ratio <= LATENT_RATIO_GATE else 'NG'}"
             )
         else:
             series = configs[name]["latent_ratio_vs_w8"]
-            ratio = max(series)  # type: ignore[arg-type]
+            ratio = max(series)
             gates[f"`{name}` の latent relRMS（参考・門の対象外）"] = (
                 f"`w8` 比 最大 {ratio:.3f}×"
-                f" (step {1 + series.index(ratio)})"  # type: ignore[union-attr]
+                f" (step {1 + series.index(ratio)})"
                 " — linear 活性 f32 運用での attention 単独寄与"
             )
     for name in config_names:
@@ -220,7 +264,7 @@ def build_report(
     latents: dict[str, torch.Tensor],
     images: dict[str, torch.Tensor],
     image_note: str,
-    summary: dict[str, object],
+    summary: Summary,
     *,
     config_names: tuple[str, ...],
     attn_configs: tuple[str, ...],
@@ -360,18 +404,18 @@ def build_report(
             "倍率（最終 step・`f32` 比 relRMS を `w8a8` のそれで割った値）: "
             + " / ".join(
                 f"`{name}` {value['latent_ratio_final']:.2f}×"
-                for name, value in summary["configs"].items()  # type: ignore[index]
+                for name, value in summary["configs"].items()
                 if name in attn_configs
             )
         )
         lines.append("")
-    if "w8-qkpv" in summary["configs"]:  # type: ignore[operator]
+    if "w8-qkpv" in summary["configs"]:
         lines.append(
             "**`w8-qkpv` だけは基準が違う**（linear 活性が f32 なので `w8a8` より良くて当然）。"
             "attention 単独の寄与は `w8` 比で読む: 最終 step で "
-            f"vs `w8` relRMS {summary['configs']['w8-qkpv']['latent_rel_rms_vs_w8'][-1]:.4e}"  # type: ignore[index]
+            f"vs `w8` relRMS {summary['configs']['w8-qkpv']['latent_rel_rms_vs_w8'][-1]:.4e}"
             f"・`w8` の f32 比に対する倍率 "
-            f"{summary['configs']['w8-qkpv']['latent_ratio_vs_w8'][-1]:.2f}×。"  # type: ignore[index]
+            f"{summary['configs']['w8-qkpv']['latent_ratio_vs_w8'][-1]:.2f}×。"
         )
         lines.append("")
 
@@ -523,9 +567,9 @@ def build_report(
         )
     )
     lines.append("")
-    overall = summary["pt"]  # type: ignore[index]
+    overall = summary["pt"]
     lines.append(
-        f"**全体（{overall['rows']:,} 行）: median {overall['median']:.2f} / "  # type: ignore[index]
+        f"**全体（{overall['rows']:,} 行）: median {overall['median']:.2f} / "
         f"p90 {overall['p90']:.2f} / p99 {overall['p99']:.2f} / max {overall['max']:.2f} / "
         f"mean {overall['mean']:.2f}**"
     )
@@ -598,10 +642,10 @@ def build_report(
         "（恒真化の防止 — 丸めが恒等でも数値にも所要時間にも出ないため）。"
     )
     lines.append("")
-    verdicts = summary["gates"]  # type: ignore[index]
+    verdicts = summary["gates"]
     lines.append(
         _table(
-            [[str(key), str(value)] for key, value in verdicts.items()],  # type: ignore[union-attr]
+            [[str(key), str(value)] for key, value in verdicts.items()],
             ["門", "判定"],
         )
     )
