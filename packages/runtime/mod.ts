@@ -81,6 +81,7 @@ export { createSession } from "./src/runtime/executor.ts";
 export type {
   ComputePrecision,
   EnqueueOptions,
+  FusionCounts,
   ParamsCacheStats,
   PlanBackingStats,
   PreparedPlanStats,

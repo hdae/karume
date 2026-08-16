@@ -23,6 +23,7 @@ import {
   readAdapterInfo,
   REQUIRED_LIMIT_KEYS,
   type RequiredLimits,
+  RUNTIME_INTERNAL,
   SHADER_F16_FEATURE,
 } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
@@ -181,9 +182,9 @@ Deno.test({
  * 後者は実行中の TDR が要る）ので、この 2 つはここでしか固定できない。
  */
 const canaryDevice = (parts: {
-  /** 読み戻しで観測させる f32 値。**未指定なら mapAsync は永久に解決しない**（消失後の実挙動）。 */
+  /** 読み戻しで観測させる f32 値。**未指定なら mapAsync は永久に解決しない**（作り物の窓）。 */
   readonly mapped?: readonly number[];
-  /** true なら popErrorScope が解決しない（消失がパイプライン生成中に起きた形）。 */
+  /** true なら popErrorScope が解決しない（作り物の窓 — 下のテストのコメントを参照）。 */
   readonly hangValidation?: boolean;
   readonly lost?: Promise<GPUDeviceLostInfo>;
 } = {}): GPUDevice => {
@@ -241,8 +242,11 @@ Deno.test("shader-f16 カナリアは既知解と一致したときだけ通る"
 });
 
 Deno.test("shader-f16 カナリアは device 消失で待ち続けずに落ちる（acquireGpu をハングさせない）", async () => {
-  // 消失後は mapAsync も popErrorScope も解決しない（仕様が許す実挙動）。競わせていない待ちが
-  // 1 つでも残っていると、この await が永久に返らずテストがタイムアウトする。
+  // このフェイク device は「解決しない待ち」を**作って**いる。実測（Deno + wgpu / NVIDIA・
+  // 2026-08-16）では destroy 由来の消失後も popErrorScope は null で resolve し mapAsync は
+  // reject するので、これは実挙動の再現ではなく「未検証の実装（実 TDR / ブラウザ）が解決を
+  // 返さなかった場合」の窓。競わせていない待ちが 1 つでも残っていると、その環境ではこの
+  // await が永久に返らず acquireGpu がハングする — それをここで固定する。
   const readback = assertShaderF16Executes(canaryDevice({ lost: loss() }));
   const readbackError = await assertRejects(() => readback, GpuDeviceLostError);
   assert(readbackError.message.includes("読み戻し"), readbackError.message);
@@ -285,9 +289,9 @@ Deno.test("withScopeLock は errorScope 区間を device 単位で直列化す�
   };
 
   const results = await Promise.all([
-    gpu.withScopeLock(body("a", 6)),
-    gpu.withScopeLock(body("b", 1)),
-    gpu.withScopeLock(body("c", 3)),
+    gpu[RUNTIME_INTERNAL].withScopeLock(body("a", 6)),
+    gpu[RUNTIME_INTERNAL].withScopeLock(body("b", 1)),
+    gpu[RUNTIME_INTERNAL].withScopeLock(body("c", 3)),
   ]);
 
   assertEquals(maxActive, 1, "2 つの区間が同時に走っていない");
@@ -299,8 +303,8 @@ Deno.test("withScopeLock は 1 本の区間の失敗を後続に伝播しない"
   const gpu = fakeGpuContext(fakeDevice());
   const failure = new Error("区間内の失敗");
 
-  const failed = gpu.withScopeLock(() => Promise.reject(failure));
-  const following = gpu.withScopeLock(() => Promise.resolve("ok"));
+  const failed = gpu[RUNTIME_INTERNAL].withScopeLock(() => Promise.reject(failure));
+  const following = gpu[RUNTIME_INTERNAL].withScopeLock(() => Promise.resolve("ok"));
 
   assertEquals(await assertRejects(() => failed), failure);
   assertEquals(await following, "ok", "チェーンは決着だけを繋ぐので後続は巻き添えにならない");
@@ -330,12 +334,12 @@ Deno.test("raceDeviceLost は消失を例外にし、決着時に購読を解除
   // work が先に決着すれば購読は残らない（flush / readback ごとに reaction が積み残ると、
   // 長寿命 Session で単調増加するリークになる — 挙動には現れないので件数で固定する）
   for (let i = 0; i < 3; i += 1) {
-    assertEquals(await gpu.raceDeviceLost(Promise.resolve(7), "work"), 7);
+    assertEquals(await gpu[RUNTIME_INTERNAL].raceDeviceLost(Promise.resolve(7), "work"), 7);
   }
   assertEquals(gpu.pendingLostListeners, 0, "決着した待機の購読は 1 本も残らない");
 
   // 解決しない待機は消失で例外になる（ハングにしない）
-  const hanging = gpu.raceDeviceLost(new Promise<void>(() => {}), "flush");
+  const hanging = gpu[RUNTIME_INTERNAL].raceDeviceLost(new Promise<void>(() => {}), "flush");
   assertEquals(gpu.pendingLostListeners, 1, "待機中は購読が立っている（数えられている根拠）");
   lose();
   const error = await assertRejects(() => hanging, GpuDeviceLostError);
@@ -351,7 +355,7 @@ Deno.test("消失通知は listener の例外で止まらず、その例外も�
   const { gpu, lose } = losableGpuContext(() => {
     throw failure;
   });
-  const hanging = gpu.raceDeviceLost(new Promise<void>(() => {}), "flush");
+  const hanging = gpu[RUNTIME_INTERNAL].raceDeviceLost(new Promise<void>(() => {}), "flush");
   assertEquals(gpu.pendingLostListeners, 2, "公開通知と内部購読の 2 本が並んでいる");
 
   const rethrown: unknown[] = [];
@@ -437,7 +441,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
        * innocent が faulty のエラーを拾う。
        */
       const scoped = (faulty: boolean, ticks: number): Promise<Error | undefined> =>
-        gpu.withScopeLock(async () => {
+        gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
           pushFailureScopes(gpu.device);
           // binding 0 が欠落した bindGroup は同期例外にならず errorScope にだけ現れる
           if (faulty) gpu.device.createBindGroup({ layout, entries: [] });

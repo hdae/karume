@@ -5,6 +5,7 @@ import {
   GpuValidationError,
   popFailureScopes,
   pushFailureScopes,
+  RUNTIME_INTERNAL,
   withValidationScope,
 } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
@@ -144,7 +145,7 @@ Deno.test({
       // MUST: faulty 側を**先に**開かせる。pop はスタック先頭を無条件に取るので、誤帰属は
       // 「faulty が先に push し先に pop する」重なりでのみ起きる（run 先行だと両者とも正しい
       // 側に帰属し、ロックが外れても緑になってしまう）。
-      const faulty = gpu.withScopeLock(async () => {
+      const faulty = gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
         pushFailureScopes(gpu.device);
         // binding 0 が欠落した bindGroup は同期例外にならず errorScope にだけ現れる
         gpu.device.createBindGroup({ layout, entries: [] });

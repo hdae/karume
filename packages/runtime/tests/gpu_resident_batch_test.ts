@@ -15,6 +15,7 @@ import {
   BatchScopeError,
   type GpuContext,
   ResidentTensorError,
+  RUNTIME_INTERNAL,
 } from "../src/gpu/device.ts";
 import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
@@ -435,6 +436,181 @@ Deno.test({
       await session.dispose();
       owner.destroy();
       other.destroy();
+    }
+  },
+});
+
+/** y = reshape(x)（[ROWS,COLS] → [COUNT]）。出力が入力の**別名**になる縮退グラフ。 */
+const ALIAS: GraphJson = {
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["reshape"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [ROWS, COLS] }],
+  outputs: ["y"],
+  initializers: {},
+  values: { y: { dtype: "f32", shape: [COUNT] } },
+  nodes: [{ op: "reshape", ins: ["x"], outs: ["y"], attrs: {} }],
+};
+
+Deno.test({
+  name: "未 await の enqueue を積んだ直後の finish() でも全て区間に入る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await producerSession(gpu);
+    const sink = await gpu.createResident(BYTES, "sink");
+    try {
+      const batch = await gpu.beginBatch();
+      // MUST: 1 本も await しない。in-flight リースが無いと finish() が先に決着し、
+      // ①3 本とも BatchScopeError で reject ②sink は全 0（0 dispatch）③それでも finish は
+      // 成功で返る、という沈黙の空振りになる。
+      // NOTE: phase は 3 周期（`input` の式）なので、値が割れる範囲で 3 本積む。
+      const pending = [0, 1, 2].map((phase) =>
+        session.enqueue({ x: input(phase) }, { batch, copyOutputs: { y: sink } })
+      );
+      await batch.finish();
+      await Promise.all(pending);
+
+      const doubled = (phase: number): Float32Array<ArrayBuffer> => {
+        const x = input(phase).data;
+        return Float32Array.from({ length: COUNT }, (_, i) => Math.fround(x[i] + x[i]));
+      };
+      // 恒真化の門: 先頭と末尾の期待値が同じなら「最後の 1 本が入った」ことを確かめられない。
+      assert(
+        JSON.stringify(bits(doubled(0))) !== JSON.stringify(bits(doubled(2))),
+        "phase ごとに期待値が変わっていない（検出器として空振る）",
+      );
+      assertEquals(bits(await sink.read()), bits(doubled(2)), "最後の enqueue まで実行されている");
+      assertEquals(session.diagnostics().planBacking.buildCount, 1);
+    } finally {
+      await session.dispose();
+      sink.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "別 GpuContext の常駐テンソルはヒット経路でも fail loudly（ID 衝突の門・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const owner = await acquireGpu();
+    const other = await acquireGpu();
+    const session = await producerSession(owner);
+    const mine = await owner.createResident(BYTES, "mine");
+    const foreign = await other.createResident(BYTES, "foreign");
+    try {
+      // 前提の確認: 採番は GpuContext ごとに独立なので識別子が衝突する（衝突しないなら
+      // 導出済み計画のキーが分かれてしまい、この門は何も検出していないことになる）。
+      assertEquals(
+        mine[RUNTIME_INTERNAL].id,
+        foreign[RUNTIME_INTERNAL].id,
+        "別 context の 1 本目どうしは同じ識別子（この門が塞ぐ前提）",
+      );
+      assertEquals(mine.byteLength, foreign.byteLength, "サイズ検査では区別できない");
+
+      mine.write(input(0).data);
+      await session.run({ x: mine }); // 1 run 目 = ミス（アリーナ経路）
+      await session.run({ x: mine }); // 2 run 目 = ヒット。backing が mine を焼き込む
+      assertEquals(session.diagnostics().planBacking.buildCount, 1);
+
+      // 焼き込み済み backing はキー一致でそのまま再利用されるため、検査が無いと foreign は
+      // 1 バイトも読まれないまま mine の古い値が返る（例外ゼロ・警告ゼロ）。
+      await assertRejects(
+        () => session.run({ x: foreign }),
+        ResidentTensorError,
+        "別の GpuContext",
+      );
+      assertEquals(
+        session.diagnostics().planBacking.buildCount,
+        1,
+        "拒否した run は backing を作り直さない",
+      );
+    } finally {
+      await session.dispose();
+      mine.dispose();
+      foreign.dispose();
+      owner.destroy();
+      other.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "copyOutputs の写し元と写し先が同一バッファなら enqueue 時点で落ちる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await createSession(gpu, openModel(graphModelBuffer(ALIAS)));
+    const state = await gpu.createResident(BYTES, "state");
+    try {
+      const batch = await gpu.beginBatch();
+      try {
+        // y は x の別名（reshape）なので、写し元の実体は state そのもの。検査が無いと
+        // 自己コピーが積まれ、validation 失敗は batch.finish() まで遅れる（= 同じ区間の
+        // 無関係な enqueue まで巻き添えになり、原因の enqueue が特定できない）。
+        await assertRejects(
+          () => session.enqueue({ x: state }, { batch, copyOutputs: { y: state } }),
+          ExecutionError,
+          "写し元と写し先が同じバッファ",
+        );
+      } finally {
+        await batch.finish();
+      }
+    } finally {
+      await session.dispose();
+      state.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "進行中の run が束ねている常駐テンソルは破棄できない（故障注入・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await producerSession(gpu);
+    const bound = await gpu.createResident(BYTES, "bound");
+    const device = gpu.device;
+    const original = device.createComputePipeline.bind(device);
+    let injected = 0;
+    try {
+      bound.write(input(0).data);
+      // ミス run は「env へ実体を束縛 → パイプライン生成を await → エンコード」の順で進む。
+      // その await 窓（= パイプライン生成中）で dispose を試すのがこの注入。焼き込み参照は
+      // まだ 0 本なので、束縛予約が無ければここは素通りしてしまう。
+      device.createComputePipeline = ((
+        descriptor: GPUComputePipelineDescriptor,
+      ): GPUComputePipeline => {
+        if (injected === 0) {
+          injected += 1;
+          assertEquals(bound.bakedReferences, 0, "焼き込み参照はまだ立っていない窓");
+          assertEquals(bound.boundReferences, 1, "束縛予約が立っている");
+          assertThrows(() => bound.dispose(), ResidentTensorError, "束縛中");
+        }
+        return original(descriptor);
+      }) as typeof device.createComputePipeline;
+
+      const outputs = await session.run({ x: bound });
+      assertEquals(injected, 1, "注入が 1 度も走っていない（窓を踏めていない）");
+      const x = input(0).data;
+      assertEquals(
+        bits(outputs["y"].data),
+        bits(Float32Array.from({ length: COUNT }, (_, i) => Math.fround(x[i] + x[i]))),
+        "拒否された dispose は run の値を壊さない",
+      );
+
+      // run が完了すれば予約は返っている（返し損ねると以後ずっと破棄できなくなる）。
+      assertEquals(bound.boundReferences, 0);
+      assertEquals(bound.disposed, false, "拒否した破棄で状態を壊さない");
+      bound.dispose();
+      assertEquals(bound.disposed, true);
+    } finally {
+      device.createComputePipeline = original;
+      await session.dispose();
+      gpu.destroy();
     }
   },
 });

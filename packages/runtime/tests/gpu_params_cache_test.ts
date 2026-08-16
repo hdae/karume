@@ -145,3 +145,51 @@ Deno.test({
     }
   },
 });
+
+/**
+ * params キャッシュが **Session 寿命で無界**であること（by-design — docs/limitations.md）を
+ * 固定する。追い出し機構が入れば赤くなるので、入れるときはこの門ごと裁定し直すこと。
+ *
+ * 同範囲の他キャッシュ（`SubmitScheduler.MEASURED_HISTORY` / `PREPARED_PLAN_CAPACITY`）は
+ * 「MUST: 有界」を明示しており、ここだけが規律の外にある。数値で固定しておかないと、
+ * 「可変 shape を長時間回すと GPU バッファが単調増加する」という制約が挙動からは見えない
+ * （例外も警告も出ず、`diagnostics().weights.allocCount` が伸びるだけ）。
+ */
+Deno.test({
+  name: "params キャッシュは Session 寿命で無界（可変 shape の run ごとに単調増加・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await createSession(gpu, openModel(modelBytes()));
+    try {
+      // initializer 2 本ぶんだけが載った状態から始まる。
+      assertEquals(session.diagnostics().weights.allocCount, 2);
+
+      // 記号次元 T を毎回変える = params の内容が毎回変わる = 1 度も当たらない。
+      // 導出済み計画（LRU 上限 4）からは追い出されるが、params の実体は 1 本も返らない。
+      const RUNS = 5;
+      for (let i = 0; i < RUNS; i += 1) {
+        await session.run({ x: input(2 + i) });
+        assertEquals(
+          session.diagnostics().lastRunParams,
+          { allocCount: 3, reuseCount: 1 },
+          `run ${i}: 3 種の params を新規生成（同形 add の 2 本目だけ run 内再利用）`,
+        );
+      }
+
+      assertEquals(
+        session.diagnostics().weights.allocCount,
+        2 + RUNS * 3,
+        "追い出しは 1 つも無い（initializer 2 本 + run 数 × ノード種 3）",
+      );
+      assertEquals(
+        session.diagnostics().lastRunPrepared?.cachedPlans,
+        4,
+        "導出済み計画だけが上限で頭打ちになる（params キャッシュとは寿命が独立）",
+      );
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});

@@ -32,6 +32,7 @@ import {
   popFailureScopes,
   pushFailureScopes,
   ResidentTensor,
+  ResidentTensorError,
   RUNTIME_INTERNAL,
 } from "../gpu/device.ts";
 import { PipelineCache } from "../gpu/pipeline-cache.ts";
@@ -43,6 +44,16 @@ export type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { type ExecStep, type FusionCounts, planFusions } from "./fusion.ts";
+/**
+ * ルール別の融合適用回数（{@link SessionDiagnostics.lastRunFusions} の型 — 公開面で名前を
+ * 持てるように再輸出。`ScoreStorage` と同じ扱いで、素通し再輸出ではなく**既に公開している型の
+ * 構成要素**を面に載せるだけ）。
+ *
+ * NOTE: キー集合は融合ルールそのものなので、ルールを 1 本足せばキーが増える（型としては
+ * 破壊的変更になりうる）。現状でも `SessionDiagnostics` 経由で構造的に露出しているため、
+ * 名前が付くことで実質的な互換性の面は変わらない。
+ */
+export type { FusionCounts } from "./fusion.ts";
 import {
   bindSymbols,
   countUses,
@@ -153,14 +164,42 @@ const residentNames = (
   residentInputs.size === 0 ? undefined : new Set(residentInputs.keys());
 
 /**
- * 破棄済みの常駐テンソルを束ねようとしたら落とす。
+ * 常駐テンソルを束ねてよいかの門（破棄済み / 所有 GpuContext 違い）。
+ *
  * MUST: 破棄済みバッファの束縛は createBindGroup の validation 失敗になり、例外にならないまま
  * dispatch が no-op 化して出力が全て 0 になる（ここが唯一の同期的な検出点）。
+ * MUST: 所有 GpuContext も照合する。resident の識別子は GpuContext ごとの独立採番で、
+ * 導出済み計画のキー / backing signature に載るのはその数値だけなので、別 context の同 id・
+ * 同サイズな resident は**キーが衝突する**。ヒット run（焼き込み済み backing）は渡された実体を
+ * 一切参照しないため、例外も警告も無く前の context の古い値を読む（ミス経路だけが device
+ * 不一致の validation で偶然落ちる = キャッシュが当たった瞬間に検出が消える）。
+ * `BatchScope` が owner を検査しているのと同じ門をここに置く。
  */
-const assertResidentLive = (resident: ResidentTensor, where: string): void => {
+const assertResidentUsable = (
+  resident: ResidentTensor,
+  gpu: GpuContext,
+  where: string,
+): void => {
   if (resident.disposed) {
     throw new ExecutionError(`${where}: 破棄済みの常駐テンソル '${resident.label}' は使えない`);
   }
+  if (resident[RUNTIME_INTERNAL].owner !== gpu) {
+    throw new ResidentTensorError(
+      `${where}: 常駐テンソル '${resident.label}' は別の GpuContext が所有している` +
+        "（識別子は GpuContext ごとの独立採番なので、跨いで渡すと導出済み計画のキーが衝突する）",
+    );
+  }
+};
+
+/**
+ * 進行中 run の常駐入力束縛を全て返す（{@link ResidentTensor.dispose} の予約を解く）。
+ *
+ * MUST: 成功・失敗のどちらの経路でも必ず 1 度呼ぶ。返し損ねるとその常駐テンソルは
+ * Session の寿命いっぱい破棄できなくなり、二度返すと簿記の破れとして fail loudly になる。
+ */
+const releaseBoundResidents = (bound: ResidentTensor[]): void => {
+  for (const resident of bound) resident[RUNTIME_INTERNAL].releaseBound();
+  bound.length = 0;
 };
 
 /**
@@ -330,6 +369,20 @@ type StagedOutput = {
   readonly count: number;
   /** `COPY_DST | MAP_READ`（{@link RunArena.allocHostRead}）。所有はアリーナ。 */
   readonly staging: GPUBuffer;
+};
+
+/** 検査済みの `copyOutputs` 1 件（{@link Session.#planCopyOutputs} — 実体はまだ解決していない）。 */
+type PlannedCopy = {
+  readonly name: string;
+  readonly target: ResidentTensor;
+  readonly size: number;
+};
+
+/** 写し元まで解決した `copyOutputs` 1 件（{@link Session.#resolveCopyOutputs}）。 */
+type ResolvedCopy = {
+  readonly source: GPUBuffer;
+  readonly target: GPUBuffer;
+  readonly size: number;
 };
 
 type SessionState = {
@@ -548,8 +601,12 @@ export class Session {
     // 失敗を誤帰属させる口になる。
     try {
       gpu.device.queue.submit([]);
-      // MUST: device 消失時 onSubmittedWorkDone は解決しない（ハングにしないため競わせる）。
-      await gpu.raceDeviceLost(gpu.device.queue.onSubmittedWorkDone(), "重みのアップロード");
+      // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
+      // raceCanaryDeviceLost の doc）ため競わせる — ハングを失敗に変換する保険。
+      await gpu[RUNTIME_INTERNAL].raceDeviceLost(
+        gpu.device.queue.onSubmittedWorkDone(),
+        "重みのアップロード",
+      );
     } catch (cause) {
       await weights.destroy().catch(() => undefined);
       throw cause;
@@ -617,12 +674,32 @@ export class Session {
    * 「次の enqueue / `writeBuffer` が先行 dispatch を追い越さない」の根拠。
    * MUST: 同一 Session の run / enqueue / dispose は呼び出し順に直列化される（`run` と同じ
    * {@link Session.#chain}）。
+   * NOTE: 戻り Promise を await せずに {@link BatchScope.finish} を呼んでも取りこぼさない。
+   * batch の in-flight リースをこの**同期区間**で取り、finish は未返却リースが全て返るまで
+   * フェンスへ進まない（機構は `BatchInternals.enter`）。
    */
   enqueue(inputs: RunInputs, options: EnqueueOptions): Promise<void> {
     if (this.#disposal !== undefined) {
       return Promise.reject(new ExecutionError("dispose 済みの Session では実行できない"));
     }
-    return this.#serialize(() => this.#enqueueOnce(inputs, options));
+    const batch = options.batch[RUNTIME_INTERNAL];
+    // MUST: 受け口の検査とリース取得は `#serialize` に積む**前**に済ませる。本体はマイクロ
+    // タスクを 1 段挟むので、本体で取ると「未 await の enqueue を積んだ直後に finish()」で
+    // finish が先に決着し、積んだぶんが 1 本も dispatch されないまま区間が成功で終わる。
+    // 検査の失敗は従来どおり戻り Promise の reject で返す（同期 throw に変えない）。
+    try {
+      batch.enter(this.#state.gpu);
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+    return this.#serialize(async () => {
+      try {
+        await this.#enqueueOnce(inputs, options);
+      } finally {
+        // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると finish がハングする）。
+        batch.leave();
+      }
+    });
   }
 
   /** 重みバッファを解放する。実行中の run の完了を待ってから破棄し、以後の run は fail loudly。 */
@@ -720,6 +797,9 @@ export class Session {
     // per-channel scale は導出相で直参照へ畳むので、run ごとに写す必要が無い — 写すと
     // 「run の器に Session 常駐の状態が混ざる」形が残り、レシピの再利用が成り立たなくなる。
     const env = new Map<string, GPUBuffer>();
+    // この run が束縛予約を積んだ常駐入力（{@link Session.#bindInput}）。エンコードと submit が
+    // 済んだ時点で必ず返す（成功経路・失敗経路の 2 箇所だけで、どちらか一方が必ず走る）。
+    const boundResidents: ResidentTensor[] = [];
     // MUST: **run が GPU 操作を発行するのは自分のロック区間内のみ**（エンコード〜flush〜pop〜
     // readback〜アリーナ破棄まで）。errorScope は device 単位の LIFO で、操作の失敗は発行時点
     // のスタック先頭に帰属するため、「スコープを張らない操作だからロック外でよい」は成り立た
@@ -727,7 +807,7 @@ export class Session {
     // が、同一 device 上の**別 Session** の run とは重なりうる（GpuContext の不変条件を参照）。
     // MUST NOT: この区間の内側からロックを再取得しない（自己デッドロック — 内側の層は同期
     // 区間で完結するスコープのみを使う）。
-    return await gpu.withScopeLock(async () => {
+    return await gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
       // GPU 時間内訳の寿命は **直近 run**（ADR 0021）。ロックを取ってから捨てることで、
       // 表が「今から積む run のぶんだけ」になる（先行 run の回収は既に済んでいる）。
       scheduler.resetTiming();
@@ -775,7 +855,10 @@ export class Session {
             });
           } else {
             for (const spec of graph.inputs) {
-              env.set(spec.name, this.#bindInput(spec.name, inputs[spec.name], shapes, arena));
+              env.set(
+                spec.name,
+                this.#bindInput(spec.name, inputs[spec.name], shapes, arena, boundResidents),
+              );
             }
             recipes = await this.#recipeBuilder.buildRecipes(derived.steps);
             // MUST: 登録は `RecipeBuilder.buildRecipes` が**完走して戻った後**だけ。途中で throw した run の
@@ -853,6 +936,12 @@ export class Session {
         // MUST: 破棄待ちの slot は arena.destroy（= flush / discard 済み）の**後**に返す。
         this.#destroyRetired();
         throw cause;
+      } finally {
+        // MUST: 束縛予約は成功・失敗のどちらの経路でも必ずここで返す（返し損ねるとその常駐
+        // テンソルは Session の寿命いっぱい破棄できなくなる）。この時点では読み戻しまで含めて
+        // 全ての GPU 操作が submit 済みなので、以後の `dispose()` は「submit 済みコマンドが
+        // 参照するバッファの破棄」= WebGPU 的に安全（実解放は完了まで実装が遅延する）。
+        releaseBoundResidents(boundResidents);
       }
       // 本体が通ったときは後始末の失敗をそのまま伝える（flush 未完了のまま返さない）。
       await arena.destroy();
@@ -872,7 +961,7 @@ export class Session {
    * - **errorScope を張らない**。batch が `out-of-memory` + `validation` の 2 本を区間ぶん
    *   張り続けており、ここで push すると LIFO の入れ子が enqueue の本数だけ深くなる（しかも
    *   pop は await を跨ぐので区間ロックが要る = batch が保持中で自己デッドロック）。
-   * - **{@link GpuContext.withScopeLock} を取らない**。区間ロックは batch が握っている
+   * - **`GpuContext` の `withScopeLock` を取らない**。区間ロックは batch が握っている
    *   （取りに行くと自己デッドロック — GpuContext の不変条件）。
    * - **{@link RunArena} を作らない**。通る経路は slot backing だけで、run 寿命の確保が
    *   1 バイトも出ない（readback staging すら出ない）。
@@ -883,12 +972,12 @@ export class Session {
    * 黙って落とさないのがこの面の契約なので、初回はここで払う。
    */
   async #enqueueOnce(inputs: RunInputs, options: EnqueueOptions): Promise<void> {
-    const { gpu, model, scheduler } = this.#state;
+    const { model, scheduler } = this.#state;
     const graph = model.graph;
-    const batch = options.batch[RUNTIME_INTERNAL];
-    batch.assertOpen(gpu);
+    // 受け口の検査とリース取得は {@link Session.enqueue} の同期区間で済んでいる（本体で
+    // やると finish との競走が閉じない）。ここは決着の相手として登録するだけ。
     // MUST: 区間の決着で「未 submit を出し切る」「計測窓を閉じる」の相手として登録する。
-    batch.join(scheduler);
+    options.batch[RUNTIME_INTERNAL].join(scheduler);
 
     const { inputShapes, residentInputs } = splitInputs(inputs);
     // MUST: 束縛の解決（= 入力 shape の検証）は run と同じく毎回走らせる。
@@ -924,6 +1013,8 @@ export class Session {
       const copies = this.#planCopyOutputs(options.copyOutputs, shapes);
       const activated = this.#activateBacking(preparedKey, recipes, shapes, residentInputs);
       builtBacking = activated.built;
+      // MUST: 写し元の解決（実体に依存する検査）は dispatch を 1 本も積む前に済ませる。
+      const writes = this.#resolveCopyOutputs(copies, activated.backing);
       graph.inputs.forEach((spec, index) => {
         const values = data[index];
         if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
@@ -936,18 +1027,8 @@ export class Session {
       // MUST: 写しは dispatch 列の**後**に積む（同じコマンド列の FIFO が「書き終わった slot を
       // 読む」の根拠）。写し先が同じ enqueue の常駐入力を兼ねる形（ループの状態更新）も、
       // 読む dispatch が全て先に積まれているので正しい。
-      for (const copy of copies) {
-        const source = activated.backing.outputs.get(copy.name);
-        // IR は graph.outputs に initializer 名を書くことを許しており、その値は焼き込みの
-        // 値写像に載らない（run 側は `#readOutputs` の重みフォールバックが受け持つ）。写しの
-        // 相手にする意味は無い（実行のたびに同じ定数を GPU 内でコピーするだけ）ので落とす。
-        if (source === undefined) {
-          throw new ExecutionError(
-            `copyOutputs '${copy.name}': ノード出力ではない（initializer をそのままグラフ出力に` +
-              "した値は写せない — その値は実行に依らず不変)",
-          );
-        }
-        scheduler.copyBuffer(source, 0, copy.target[RUNTIME_INTERNAL].buffer, 0, copy.size);
+      for (const write of writes) {
+        scheduler.copyBuffer(write.source, 0, write.target, 0, write.size);
       }
       // MUST: 末尾で必ず submit する。以後の `queue.writeBuffer`（次の enqueue の入力書き込み）は
       // queue timeline へ issue 順に載るので先行 dispatch を追い越さない — 追い越すのは
@@ -978,7 +1059,7 @@ export class Session {
   #planCopyOutputs(
     copyOutputs: Readonly<Record<string, ResidentTensor>> | undefined,
     shapes: ReadonlyMap<string, readonly number[]>,
-  ): readonly { readonly name: string; readonly target: ResidentTensor; readonly size: number }[] {
+  ): readonly PlannedCopy[] {
     if (copyOutputs === undefined) return [];
     return Object.entries(copyOutputs).map(([name, target]) => {
       if (!this.#state.outputNames.has(name)) {
@@ -988,7 +1069,7 @@ export class Session {
           }]）`,
         );
       }
-      assertResidentLive(target, `copyOutputs '${name}'`);
+      assertResidentUsable(target, this.#state.gpu, `copyOutputs '${name}'`);
       const shape = resolvedShape(shapes, name);
       // MUST: 出力 slot の大きさと同じ算式（`#readOutputs` の staging と揃える）。
       const size = Math.max(4, numel(shape) * 4);
@@ -1000,6 +1081,44 @@ export class Session {
         );
       }
       return { name, target, size };
+    });
+  }
+
+  /**
+   * `copyOutputs` の写し元（グラフ出力の実体）を解決する。実体に依存する検査なので backing の
+   * 活性化より後だが、**dispatch を 1 本も積む前**に済ませる。
+   *
+   * MUST: 写し元と写し先が同一バッファになる形はここで落とす。グラフ出力が入力の別名
+   * （`reshape` / 恒等 `expand`）になる縮退グラフでは、出力の実体が常駐入力そのものになり、
+   * 自己コピーが積まれる。これは WebGPU の validation に捕まるが、**捕まるのは
+   * `batch.finish()`** なので ①原因の enqueue が特定できず ②同じ区間の無関係な enqueue まで
+   * 巻き添えで落ちる（失敗の帰属は batch 単位 — BatchScope の設計上の受容）。真因を名指しで
+   * enqueue の呼び出し点へ返すために、ここで 1 行検査する。
+   */
+  #resolveCopyOutputs(
+    copies: readonly PlannedCopy[],
+    backing: ActiveBacking,
+  ): readonly ResolvedCopy[] {
+    return copies.map((copy) => {
+      const source = backing.outputs.get(copy.name);
+      // IR は graph.outputs に initializer 名を書くことを許しており、その値は焼き込みの
+      // 値写像に載らない（run 側は `#readOutputs` の重みフォールバックが受け持つ）。写しの
+      // 相手にする意味は無い（実行のたびに同じ定数を GPU 内でコピーするだけ）ので落とす。
+      if (source === undefined) {
+        throw new ExecutionError(
+          `copyOutputs '${copy.name}': ノード出力ではない（initializer をそのままグラフ出力に` +
+            "した値は写せない — その値は実行に依らず不変)",
+        );
+      }
+      const target = copy.target[RUNTIME_INTERNAL].buffer;
+      if (source === target) {
+        throw new ExecutionError(
+          `copyOutputs '${copy.name}': 写し元と写し先が同じバッファ（常駐テンソル ` +
+            `'${copy.target.label}'）— グラフ出力がその常駐入力の別名（reshape / 恒等 expand）に` +
+            "なっているため、写しは自己コピーになる（計算内容がゼロの構成）",
+        );
+      }
+      return { source, target, size: copy.size };
     });
   }
 
@@ -1095,9 +1214,14 @@ export class Session {
    * MUST: 呼ぶのは run の `withScopeLock` / errorScope 区間の内側だけ。createBuffer は上限超過で
    * 同期例外を投げずに無効バッファを返し、createBindGroup の validation 失敗も例外にならない
    * ため、囲まないと「無効な slot / bind group に dispatch が書く」沈黙故障になる。
-   * NOTE: レシピ列は必ず 1 度アリーナ経路で完走している（backing はヒット run でしか作らない）
-   * ので、参照計数が閉じることは既に `assertDrained` が確かめ済み — slot 導出はその同じ簿記を
-   * 仮想的に再生するだけで、新しい正しさの前提を持ち込まない。
+   * MUST: 確保から `this.#backing` への代入（= 所有権の確立）までを try/catch で囲み、途中の
+   * 同期例外では確保済みを `#retired` へ回す。この窓で漏れた実体は `#retireBacking()` からも
+   * `Session.dispose()` からも到達できず、しかも量はこの Session で最大（slot 表の総バイト）に
+   * なる（ADR 0004「確保と破棄を 1 箇所へ」は失敗経路でも保つ）。
+   * NOTE: run 経路のレシピ列は必ず 1 度アリーナ経路で完走している（run は**ヒット run でしか**
+   * backing を作らない）ので、参照計数が閉じることは `assertDrained` が確かめ済み。
+   * `#enqueueOnce` は MUST として**初回から** backing を作るのでその前提は成り立たないが、
+   * 破れは `derivePlanSlots` 自身の参照計数検査（負値で即 throw）が受け持つ。
    */
   #activateBacking(
     key: string,
@@ -1112,52 +1236,72 @@ export class Session {
     const graph = this.#state.model.graph;
     const device = this.#state.gpu.device;
     const slots = derivePlanSlots(recipes);
-    const buffers = slots.bytes.map((size) => device.createBuffer({ size, usage: STORAGE_USAGE }));
-    // 通常入力のバッファは backing 所有にする（run ごとの確保と writeBuffer 先の入れ替わりを
-    // 消す）。常駐入力は GpuContext 所有の実体をそのまま束ね、**所有しない**。
-    // MUST: 大きさはアリーナ経路の `#bindInput` と同じ算式（4 バイト床込み — 0 要素入力で
-    // 0 サイズバッファを束縛しない）。同一 signature なら不変。
+    // 所有権が確立する（`this.#backing` への代入）までの確保物と retain 済み常駐入力。
+    // 途中で同期例外が出たら catch がここから回収する。
+    const buffers: GPUBuffer[] = [];
     const ownedInputs: GPUBuffer[] = [];
-    const inputs = new Map<string, GPUBuffer>(
-      graph.inputs.map((spec) => {
-        const resident = residentInputs.get(spec.name);
-        if (resident !== undefined) return [spec.name, resident[RUNTIME_INTERNAL].buffer];
-        const buffer = device.createBuffer({
-          size: Math.max(4, numel(resolvedShape(shapes, spec.name)) * 4),
-          usage: HOST_WRITTEN_USAGE,
-        });
-        ownedInputs.push(buffer);
-        return [spec.name, buffer];
-      }),
-    );
-    const baked = bakeBindGroups(recipes, slots, { device, buffers, inputs });
-    // 読み戻し先はここで確定する。initializer がグラフ出力になる形（IR が許す）は値名の
-    // 写像に載らないので、`#readOutputs` 側の重みフォールバックがそのまま受け持つ。
-    const outputs = new Map<string, GPUBuffer>();
-    for (const name of graph.outputs) {
-      const buffer = baked.values.get(name);
-      if (buffer !== undefined) outputs.set(name, buffer);
+    const retained: ResidentTensor[] = [];
+    try {
+      for (const size of slots.bytes) {
+        buffers.push(device.createBuffer({ size, usage: STORAGE_USAGE }));
+      }
+      // 通常入力のバッファは backing 所有にする（run ごとの確保と writeBuffer 先の入れ替わりを
+      // 消す）。常駐入力は GpuContext 所有の実体をそのまま束ね、**所有しない**。
+      // MUST: 大きさはアリーナ経路の `#bindInput` と同じ算式（4 バイト床込み — 0 要素入力で
+      // 0 サイズバッファを束縛しない）。同一 signature なら不変。
+      const inputs = new Map<string, GPUBuffer>(
+        graph.inputs.map((spec) => {
+          const resident = residentInputs.get(spec.name);
+          if (resident !== undefined) return [spec.name, resident[RUNTIME_INTERNAL].buffer];
+          const buffer = device.createBuffer({
+            size: Math.max(4, numel(resolvedShape(shapes, spec.name)) * 4),
+            usage: HOST_WRITTEN_USAGE,
+          });
+          ownedInputs.push(buffer);
+          return [spec.name, buffer];
+        }),
+      );
+      const baked = bakeBindGroups(recipes, slots, { device, buffers, inputs });
+      // 読み戻し先はここで確定する。initializer がグラフ出力になる形（IR が許す）は値名の
+      // 写像に載らないので、`#readOutputs` 側の重みフォールバックがそのまま受け持つ。
+      const outputs = new Map<string, GPUBuffer>();
+      for (const name of graph.outputs) {
+        const buffer = baked.values.get(name);
+        if (buffer !== undefined) outputs.set(name, buffer);
+      }
+      const residents = [...residentInputs.values()];
+      // MUST: 焼き込みの参照は backing が生きている間ずっと積んでおく（退役で返す）。これが
+      // 「参照中の ResidentTensor.dispose を fail loudly にする」唯一の根拠。
+      for (const resident of residents) {
+        resident[RUNTIME_INTERNAL].retainBaked();
+        retained.push(resident);
+      }
+      const backing: ActiveBacking = {
+        key,
+        bytes: slots.bytes.reduce((total, size) => total + size, 0),
+        inputs,
+        residents,
+        groups: baked.groups,
+        outputs,
+        owned: new Set([...buffers, ...ownedInputs]),
+        readable: new Set([
+          ...[...slots.pinned].map((slot) => buffers[slot]),
+          ...inputs.values(),
+        ]),
+      };
+      this.#backing = backing;
+      this.#backingBuilds += 1;
+      return { backing, built: true };
+    } catch (cause) {
+      // MUST: 確保物は既存の破棄経路（`#retired` → `#destroyRetired`）へ載せるだけにする。
+      // ここで destroy すると破棄の担い手が 2 つになる（ADR 0004）。この時点では bind group を
+      // 使う dispatch が 1 本も積まれていない（`#activateBacking` は dispatch より前）ので、
+      // 後始末点での破棄が submit 済みコマンドを壊すことはない。
+      for (const buffer of buffers) this.#retired.push(buffer);
+      for (const buffer of ownedInputs) this.#retired.push(buffer);
+      for (const resident of retained) resident[RUNTIME_INTERNAL].releaseBaked();
+      throw cause;
     }
-    const residents = [...residentInputs.values()];
-    // MUST: 焼き込みの参照は backing が生きている間ずっと積んでおく（退役で返す）。これが
-    // 「参照中の ResidentTensor.dispose を fail loudly にする」唯一の根拠。
-    for (const resident of residents) resident[RUNTIME_INTERNAL].retainBaked();
-    const backing: ActiveBacking = {
-      key,
-      bytes: slots.bytes.reduce((total, size) => total + size, 0),
-      inputs,
-      residents,
-      groups: baked.groups,
-      outputs,
-      owned: new Set([...buffers, ...ownedInputs]),
-      readable: new Set([
-        ...[...slots.pinned].map((slot) => buffers[slot]),
-        ...inputs.values(),
-      ]),
-    };
-    this.#backing = backing;
-    this.#backingBuilds += 1;
-    return { backing, built: true };
   }
 
   /**
@@ -1254,7 +1398,7 @@ export class Session {
     resident: ResidentTensor,
     shapes: ReadonlyMap<string, readonly number[]>,
   ): void {
-    assertResidentLive(resident, `入力 '${name}'`);
+    assertResidentUsable(resident, this.#state.gpu, `入力 '${name}'`);
     const shape = resolvedShape(shapes, name);
     const wanted = Math.max(4, numel(shape) * 4);
     if (resident.byteLength !== wanted) {
@@ -1269,15 +1413,24 @@ export class Session {
   /**
    * アリーナ経路の入力束縛。通常入力は run 寿命のバッファを 1 本確保して書き、常駐入力は
    * GpuContext 所有の実体をそのまま返す（**確保も writeBuffer も出ない**）。
+   *
+   * MUST: 常駐入力は束縛と同時に予約を 1 本積み、`bound` へ載せる。この経路（ミス run）は
+   * 「env へ生バッファを束縛 → `buildRecipes` を await → エンコード」の順で進み、焼き込み参照は
+   * まだ 1 本も無い。await の窓で `dispose()` が来ると素通りしてしまい、再開したエンコードが
+   * 破棄済みバッファを掴む（run は errorScope に捕まって落ちるが、真因から遠い）。予約が
+   * あれば誤りは dispose の呼び出し点で {@link ResidentTensorError} として即座に落ちる。
    */
   #bindInput(
     name: string,
     value: RunInput | undefined,
     shapes: ReadonlyMap<string, readonly number[]>,
     arena: RunArena,
+    bound: ResidentTensor[],
   ): GPUBuffer {
     if (value instanceof ResidentTensor) {
       this.#checkResidentInput(name, value, shapes);
+      value[RUNTIME_INTERNAL].retainBound();
+      bound.push(value);
       return value[RUNTIME_INTERNAL].buffer;
     }
     const data = this.#checkTensorInput(name, value, shapes);
@@ -1358,10 +1511,11 @@ export class Session {
    * staging の map 完了を待つ（**このバッファへの最後の使用 = 積んだ copy の完了**が解決条件）。
    *
    * MUST: 複数出力は**並列**に待つ。直列 await にすると待ちの固定費を出力数ぶん払う。
-   * MUST: device 消失時 mapAsync は解決しない。待ち続けるとハングになるため競わせる。
+   * MUST: 消失後の mapAsync が解決しない実装がありうる（実測は raceCanaryDeviceLost の doc）
+   * ため競わせる — ハングを失敗に変換する保険。
    */
   async #awaitStaged(staged: readonly StagedOutput[]): Promise<void> {
-    await this.#state.gpu.raceDeviceLost(
+    await this.#state.gpu[RUNTIME_INTERNAL].raceDeviceLost(
       Promise.all(staged.map((item) => item.staging.mapAsync(GPUMapMode.READ))),
       "readback",
     );

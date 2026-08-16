@@ -12,7 +12,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
-import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
+import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import { RunArena, STORAGE_USAGE } from "../src/gpu/arena.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
 import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
@@ -191,7 +191,7 @@ Deno.test({
         "破棄済みバッファを参照したまま submit している（submit が destroy の後に回っている）",
       );
 
-      await gpu.raceDeviceLost(staging.mapAsync(GPUMapMode.READ), "検算");
+      await gpu[RUNTIME_INTERNAL].raceDeviceLost(staging.mapAsync(GPUMapMode.READ), "検算");
       assertEquals(
         bits(new Float32Array(staging.getMappedRange().slice(0))),
         bits(values),

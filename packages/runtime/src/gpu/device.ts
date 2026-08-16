@@ -300,9 +300,13 @@ const SHADER_F16_CANARY_EXPECTED: readonly number[] = [4.0029296875, 1];
  * カナリア区間**ローカル**の消失レース。`work` の決着と `device.lost` を競わせ、消失が先なら
  * {@link GpuDeviceLostError} にする。
  *
- * MUST: カナリアの待ちは 1 つ残らずここを通す。device 消失後 `popErrorScope` / `mapAsync` は
- * 解決しない（{@link GpuContext.raceDeviceLost} の doc と同じ事実）ので、競わせないと
- * `acquireGpu()` が例外ではなく**ハングで返ってこない**。
+ * MUST: カナリアの待ちは 1 つ残らずここを通す。ただし根拠は「消失後の待ちが必ずハングする」
+ * ことではない —— 実測（Deno + wgpu / NVIDIA・2026-08-16）では `device.destroy()` 由来の消失後、
+ * `popErrorScope` は **null で resolve**（空スタックでも同じ）し、`mapAsync` は `OperationError`
+ * で reject し、消失前に発行して in-flight だった待ちも全て決着した
+ * （`docs/research/2026-08-01-m0-review.md` の実測記録と同じ側）。競わせ続けるのは
+ * **destroy 以外の消失（実 TDR / ドライバリセット / ブラウザ実装）が未検証**だからで、
+ * ここは「解決しない実装に当たったとき `acquireGpu()` がハングで返ってこない」ための保険。
  *
  * MUST NOT: この形を待ちの多い層へ持ち出さない。`device.lost.then(...)` は解除手段の無い
  * reaction なので、flush / readback のような繰り返す待ちに張ると単調増加する（購読の一本化は
@@ -474,6 +478,45 @@ export type AcquireGpuOptions = {
 export const LIMIT_CAPS: unique symbol = Symbol("karume.limitCaps");
 
 /**
+ * **ランタイム内部だけが触る面**の鍵（mod.ts からは輸出しない — ADR 0008 の「薄い面」を
+ * 汚さない）。{@link GpuContext} / {@link ResidentTensor} / {@link BatchScope} は利用者向けの
+ * 数メソッドだけを素の名前で持ち、executor が要る実体（直列化プリミティブ・GPUBuffer・
+ * 焼き込み参照計数・メンバ登録）はこの鍵の下に畳む。テスト専用ノブ（`I8A8_DOT`）と同じ流儀。
+ *
+ * MUST: 宣言は {@link GpuContext} より**前**に置く。クラス本体の計算プロパティ名は
+ * クラス定義時に評価されるので、後ろに置くと TDZ で落ちる。
+ */
+export const RUNTIME_INTERNAL: unique symbol = Symbol("karume.runtimeInternal");
+
+/** {@link GpuContext} のランタイム内部面（利用者ストーリーに対応しない直列化プリミティブ）。 */
+type GpuContextInternals = {
+  /**
+   * `work` の決着と device 消失を競わせ、消失が先なら {@link GpuDeviceLostError} にする。
+   *
+   * MUST: 待ちは失敗ではなくハングになりうる（`onSubmittedWorkDone` / `mapAsync` が消失後に
+   * 解決するかは実装差のある面 — {@link raceCanaryDeviceLost} の doc に実測を記録）。
+   * 決着時は購読を必ず解除する（reaction を積み残さない）。
+   */
+  raceDeviceLost<T>(work: Promise<T>, where: string): Promise<T>;
+  /**
+   * `await` を跨いで errorScope を張る区間を、device 単位で直列化して実行する。
+   * 規則の全体は {@link GpuContext} 冒頭「errorScope 区間の不変条件」を参照。
+   *
+   * トレードオフ: 保持区間は run 1 本の GPU 操作全体（エンコード〜`flush()` の完了待ち〜
+   * readback〜アリーナ破棄）に及ぶため、同一 device 上の複数 Session の run は丸ごと
+   * 直列化される。区間を狭めない理由は「run が GPU 操作を発行するのは自分のロック区間内
+   * のみ」という不変条件を単純に保つため（executor の #runOnce を参照）。それでもこの設計を
+   * 採るのは、誤帰属の帰結が「無関係な run が落ち、本来落ちるべき run が全 0 を静かに返す」
+   * ことだから — 沈黙した誤値は検出手段が無く、失うスループットとは釣り合わない。
+   *
+   * MUST: 利用者の面に出さない。素の名前で公開すると
+   * `gpu.withScopeLock(() => session.run(...))` が書けてしまい、run が同じロックを取りに行って
+   * **診断も例外も出ないまま自己デッドロック**する（再入検出器は置けない — 下記 doc）。
+   */
+  withScopeLock<T>(body: () => Promise<T>): Promise<T>;
+};
+
+/**
  * 取得済み device と正規化済み能力の束。
  *
  * `device.lost` の購読はコンストラクタで**無条件に、かつ 1 回だけ**行う。消失を未処理の
@@ -486,9 +529,10 @@ export const LIMIT_CAPS: unique symbol = Symbol("karume.limitCaps");
  * errorScope は **device 単位の LIFO スタック**で、`popErrorScope()` は呼んだ時点のスタック
  * 先頭を無条件に取る。つまり「誰のスコープか」という概念が無い。ここから 3 つの規則が出る:
  *
- * - MUST: `await` を跨いで errorScope を張る区間は {@link GpuContext.withScopeLock} の中で
- *   実行する。重なると①自分のエラーが他人のスコープに入り②自分の pop が他人のスコープを
- *   取るため、失敗が無関係な呼び出しに帰属し、本来落ちるべき呼び出しは沈黙のまま全 0 を返す。
+ * - MUST: `await` を跨いで errorScope を張る区間は `withScopeLock`
+ *   （{@link GpuContextInternals}）の中で実行する。重なると①自分のエラーが他人のスコープに
+ *   入り②自分の pop が他人のスコープを取るため、失敗が無関係な呼び出しに帰属し、本来
+ *   落ちるべき呼び出しは沈黙のまま全 0 を返す。
  * - MUST NOT: `withScopeLock` の中で `withScopeLock` を再取得する（自己デッドロック）。
  *   ロックは再入可能ではない。検出器は置かない — 「保持中」フラグでは**正当な待ち行列**
  *   （別 Session が先行区間の完了を待って並ぶ形）と再入が区別できず、区別するには async
@@ -501,6 +545,8 @@ export const LIMIT_CAPS: unique symbol = Symbol("karume.limitCaps");
  *   はこの形でなければならない。
  */
 export class GpuContext {
+  /** ランタイム内部面（利用者が触る面ではない）。 */
+  readonly [RUNTIME_INTERNAL]: GpuContextInternals;
   readonly device: GPUDevice;
   readonly adapterInfo: GPUAdapterInfo;
   /** device が実際に有効化した feature（アダプタが持つだけの feature は含まない）。 */
@@ -534,6 +580,11 @@ export class GpuContext {
     this.limits = limits;
     this.features = new Set(device.features);
     this.wgslLanguageFeatures = wgslLanguageFeatures;
+    this[RUNTIME_INTERNAL] = {
+      raceDeviceLost: <T>(work: Promise<T>, where: string): Promise<T> =>
+        this.#raceDeviceLost(work, where),
+      withScopeLock: <T>(body: () => Promise<T>): Promise<T> => this.#withScopeLock(body),
+    };
     if (onDeviceLost !== undefined) {
       this.onLost((info) => {
         if (!this.#destroyRequested) {
@@ -550,8 +601,8 @@ export class GpuContext {
       for (const listener of listeners) {
         // MUST: listener の例外は通知の fan-out を止めない。購読は上で clear 済みで再通知が
         // 無いため、公開 onDeviceLost（挿入順で先）の throw で後続の内部購読
-        // （{@link GpuContext.raceDeviceLost}）へ通知が届かないと、消失が例外ではなくハングに
-        // なる。捕えた例外は握り潰さず、消失の制御経路から切り離して非同期に再 throw する。
+        // （`raceDeviceLost`）へ通知が届かないと、消失が例外ではなくハングになる。捕えた例外は
+        // 握り潰さず、消失の制御経路から切り離して非同期に再 throw する。
         try {
           listener(info);
         } catch (cause) {
@@ -598,9 +649,10 @@ export class GpuContext {
   /**
    * 未解除の消失購読の本数（診断）。
    *
-   * {@link GpuContext.raceDeviceLost} は決着時に必ず解除するので、待機が全て決着していれば
-   * 0 に戻る。0 に戻らないことが「flush / readback ごとに reaction が積み残る」リークの姿で、
-   * 挙動からは観測できない（ハングも誤値も起こさず、長寿命 Session で単調増加するだけ）。
+   * `raceDeviceLost`（{@link GpuContextInternals}）は決着時に必ず解除するので、待機が全て
+   * 決着していれば 0 に戻る。0 に戻らないことが「flush / readback ごとに reaction が積み残る」
+   * リークの姿で、挙動からは観測できない（ハングも誤値も起こさず、長寿命 Session で単調増加
+   * するだけ）。
    * 見えない残留を正直に数値で出すためだけの面。
    */
   get pendingLostListeners(): number {
@@ -614,7 +666,7 @@ export class GpuContext {
    * MUST: 待機のたびに `device.lost.then(...)` を新しく張らない。`lost` は device の寿命の間
    * 未解決のままなので、`.then` は解除手段の無い reaction として promise に積まれ続け、
    * flush / readback ごとに単調増加する（長寿命 Session でのリーク）。購読はここに一本化し、
-   * 待機側は {@link GpuContext.raceDeviceLost} を使って決着時に必ず解除する。
+   * 待機側は `raceDeviceLost`（{@link GpuContextInternals}）を使って決着時に必ず解除する。
    */
   onLost(listener: DeviceLostHandler): () => void {
     const info = this.#lost;
@@ -628,13 +680,8 @@ export class GpuContext {
     };
   }
 
-  /**
-   * `work` の決着と device 消失を競わせ、消失が先なら {@link GpuDeviceLostError} にする。
-   *
-   * MUST: device 消失後 `onSubmittedWorkDone` / `mapAsync` は解決しない。競わせないと失敗
-   * ではなくハングになる。決着時は購読を必ず解除する（reaction を積み残さない）。
-   */
-  async raceDeviceLost<T>(work: Promise<T>, where: string): Promise<T> {
+  /** {@link GpuContextInternals.raceDeviceLost} の実体（面は `RUNTIME_INTERNAL` の下だけ）。 */
+  async #raceDeviceLost<T>(work: Promise<T>, where: string): Promise<T> {
     let unsubscribe: () => void = () => {};
     const lost = new Promise<never>((_resolve, reject) => {
       unsubscribe = this.onLost(() => {
@@ -648,18 +695,8 @@ export class GpuContext {
     }
   }
 
-  /**
-   * `await` を跨いで errorScope を張る区間を、device 単位で直列化して実行する。
-   * 規則の全体はクラス冒頭「errorScope 区間の不変条件」を参照。
-   *
-   * トレードオフ: 保持区間は run 1 本の GPU 操作全体（エンコード〜`flush()` の完了待ち〜
-   * readback〜アリーナ破棄）に及ぶため、同一 device 上の複数 Session の run は丸ごと
-   * 直列化される。区間を狭めない理由は「run が GPU 操作を発行するのは自分のロック区間内
-   * のみ」という不変条件を単純に保つため（executor の #runOnce を参照）。それでもこの設計を
-   * 採るのは、誤帰属の帰結が「無関係な run が落ち、本来落ちるべき run が全 0 を静かに返す」
-   * ことだから — 沈黙した誤値は検出手段が無く、失うスループットとは釣り合わない。
-   */
-  withScopeLock<T>(body: () => Promise<T>): Promise<T> {
+  /** {@link GpuContextInternals.withScopeLock} の実体（面は `RUNTIME_INTERNAL` の下だけ）。 */
+  #withScopeLock<T>(body: () => Promise<T>): Promise<T> {
     const result = this.#scopeChain.then(body);
     this.#scopeChain = result.then(() => undefined, () => undefined);
     return result;
@@ -707,9 +744,9 @@ export class GpuContext {
   /**
    * フェンス無しの enqueue を束ねる区間を開く（{@link Session.enqueue} — H-5）。
    *
-   * 区間の間 **device 単位の errorScope 区間ロックを保持し続ける**（{@link withScopeLock}）。
-   * これが「batch の内側で出した GPU 操作は全て batch の errorScope に帰属する」ことと、
-   * 「pop がスタック先頭を取り違えない」ことの根拠。
+   * 区間の間 **device 単位の errorScope 区間ロックを保持し続ける**
+   * （`withScopeLock` — {@link GpuContextInternals}）。これが「batch の内側で出した GPU 操作は
+   * 全て batch の errorScope に帰属する」ことと、「pop がスタック先頭を取り違えない」ことの根拠。
    *
    * MUST: 開いている間に同一 device の {@link Session.run} を await しない — run はロックを
    * 取りに行くので {@link BatchScope.finish} まで決着せず、待ち合わせると自己デッドロックに
@@ -745,14 +782,6 @@ export class GpuContext {
   }
 }
 
-/**
- * **ランタイム内部だけが触る面**の鍵（mod.ts からは輸出しない — ADR 0008 の「薄い面」を
- * 汚さない）。{@link ResidentTensor} / {@link BatchScope} は利用者向けの数メソッドだけを
- * 素の名前で持ち、executor が要る実体（GPUBuffer・焼き込み参照計数・メンバ登録）はこの鍵の
- * 下に畳む。テスト専用ノブ（`I8A8_DOT`）と同じ流儀。
- */
-export const RUNTIME_INTERNAL: unique symbol = Symbol("karume.runtimeInternal");
-
 /** {@link ResidentTensor} のランタイム内部面。 */
 type ResidentInternals = {
   /** 焼き込み / 別名の対象になる実体。 */
@@ -762,10 +791,31 @@ type ResidentInternals = {
    * resident を差し替えれば別 signature（= 焼き直し）になり、戻せば元の backing に当たる。
    */
   readonly id: number;
+  /**
+   * この実体を確保した GpuContext。
+   *
+   * MUST: 束縛する側（executor）が「自分の device の resident か」を照合するために載せる。
+   * {@link id} は GpuContext ごとの独立採番なので、別 context の同 id・同サイズな resident は
+   * 導出済み計画のキーが衝突する — ヒット run（焼き込み済み backing）では渡された実体が
+   * 一切参照されないため、**例外も警告も無く前の context の古い値を読む**。ミス経路だけは
+   * device 不一致の validation で偶然落ちるが、キャッシュが当たった瞬間に検出が消える。
+   * {@link BatchScope} が owner を検査しているのと同じ門をここにも置く。
+   */
+  readonly owner: GpuContext;
   /** 焼き込み bind group からの参照を 1 本積む（backing の構築時）。 */
   retainBaked(): void;
   /** 焼き込み参照を 1 本返す（backing の退役時）。 */
   releaseBaked(): void;
+  /**
+   * **進行中の run が入力として束ねた**ことを 1 本積む（焼き込み参照とは別枠）。
+   *
+   * 焼き込み参照は backing が生きている間の静的な参照だが、こちらはミス run の
+   * 「env へ生バッファを束縛 → パイプライン生成を await → エンコード」という窓を塞ぐための
+   * 予約。この窓では焼き込みがまだ 1 本も無いため、参照計数だけでは dispose が素通りする。
+   */
+  retainBound(): void;
+  /** 進行中 run の束縛予約を 1 本返す（run のエンコードと submit が済んだ時点）。 */
+  releaseBound(): void;
 };
 
 /** ホストから常駐テンソルへ書ける配列（要素は全型 4 バイト — ADR 0009 と同じ規約）。 */
@@ -799,6 +849,7 @@ export class ResidentTensor {
   readonly #buffer: GPUBuffer;
   #disposed = false;
   #bakedRefs = 0;
+  #boundRefs = 0;
 
   /** MUST: 構築の入口は {@link GpuContext.createResident} だけ（errorScope の門を迂回させない）。 */
   constructor(gpu: GpuContext, id: number, buffer: GPUBuffer, byteLength: number, label: string) {
@@ -809,6 +860,7 @@ export class ResidentTensor {
     this[RUNTIME_INTERNAL] = {
       buffer,
       id,
+      owner: gpu,
       retainBaked: () => {
         this.#assertUsable("焼き込み");
         this.#bakedRefs += 1;
@@ -821,6 +873,18 @@ export class ResidentTensor {
         }
         this.#bakedRefs -= 1;
       },
+      retainBound: () => {
+        this.#assertUsable("束縛");
+        this.#boundRefs += 1;
+      },
+      releaseBound: () => {
+        if (this.#boundRefs === 0) {
+          throw new ResidentTensorError(
+            `resident '${this.label}': 束縛予約の解放が過多（ランタイム内部の簿記の破れ）`,
+          );
+        }
+        this.#boundRefs -= 1;
+      },
     };
   }
 
@@ -832,6 +896,11 @@ export class ResidentTensor {
   /** 焼き込み bind group から参照されている本数（0 でなければ破棄できない）。 */
   get bakedReferences(): number {
     return this.#bakedRefs;
+  }
+
+  /** 進行中の run が入力として束ねている本数（0 でなければ破棄できない）。 */
+  get boundReferences(): number {
+    return this.#boundRefs;
   }
 
   /**
@@ -883,8 +952,9 @@ export class ResidentTensor {
       popped = true;
       const failure = await pending;
       if (failure !== undefined) throw failure;
-      // MUST: device 消失時 mapAsync は解決しない。待ち続けるとハングになるため競わせる。
-      await this.#gpu.raceDeviceLost(staging.mapAsync(GPUMapMode.READ), where);
+      // MUST: 消失後の mapAsync が解決しない実装がありうる（実測は raceCanaryDeviceLost の
+      // doc）ため競わせる — ハングを失敗に変換する保険。
+      await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(staging.mapAsync(GPUMapMode.READ), where);
       const copy = staging.getMappedRange().slice(0);
       staging.unmap();
       return copy;
@@ -903,6 +973,11 @@ export class ResidentTensor {
    * ごと失敗して**無関係な dispatch まで実行されないまま誤った値が静かに残る**（ADR 0004）。
    * 参照を外すには、その Session を dispose するか、別 signature の run / enqueue で backing を
    * 切り替える。
+   * MUST: **進行中の run が入力として束ねている間**も同じく fail loudly。焼き込みが立つのは
+   * backing 構築（= ヒット run 以降）なので、ミス run の「束縛 → パイプライン生成の await →
+   * エンコード」の窓は焼き込み参照だけでは守れない（その窓で破棄すると、再開したエンコードが
+   * 破棄済みバッファを掴んで run が validation で落ちる）。この予約があると、誤りは
+   * dispose の呼び出し点で真因のまま落ちる。
    */
   dispose(): void {
     if (this.#disposed) return;
@@ -910,6 +985,12 @@ export class ResidentTensor {
       throw new ResidentTensorError(
         `resident '${this.label}': 焼き込み bind group から参照中（${this.#bakedRefs} 本）のため破棄できない。` +
           "参照している Session を dispose するか、別 signature の run / enqueue で backing を切り替えること",
+      );
+    }
+    if (this.#boundRefs > 0) {
+      throw new ResidentTensorError(
+        `resident '${this.label}': 進行中の run が入力として束縛中（${this.#boundRefs} 本）のため破棄できない。` +
+          "その run の完了を await してから破棄すること",
       );
     }
     this.#disposed = true;
@@ -946,8 +1027,18 @@ type BatchInternals = {
   readonly entered: Promise<void>;
   /** 決着時に取りまとめる相手を登録する（同じ相手の重複登録は無害）。 */
   join(member: BatchMember): void;
-  /** enqueue の受け口として使える状態か（決着済み / 別 device は fail loudly）。 */
-  assertOpen(gpu: GpuContext): void;
+  /**
+   * enqueue の受け口として使える状態か検査し、**in-flight リースを 1 本取る**
+   * （決着済み / 別 device は fail loudly で、リースは取らない）。
+   *
+   * MUST: 呼ぶのは `Session.enqueue` の**同期区間**（`#chain` に積む前）。enqueue の本体は
+   * マイクロタスクを 1 段挟むので、本体でリースを取ると「未 await の enqueue を積んだ直後に
+   * `finish()`」で finish が先に決着し、積んだ enqueue が 1 本も dispatch されないまま区間が
+   * 正常終了に見える（沈黙の空振り）。
+   */
+  enter(owner: GpuContext): void;
+  /** in-flight リースを 1 本返す（enqueue 本体の成功・失敗どちらの経路でも必ず）。 */
+  leave(): void;
 };
 
 /**
@@ -973,6 +1064,9 @@ export class BatchScope {
   readonly #members = new Set<BatchMember>();
   readonly #completion: Promise<void>;
   readonly #release: () => void;
+  /** 未返却の in-flight リースが全て返ったことの通知（{@link BatchInternals.enter}）。 */
+  readonly #drained = Promise.withResolvers<void>();
+  #leases = 0;
   #finished = false;
 
   /** MUST: 構築の入口は {@link GpuContext.beginBatch} だけ（計測との併用の門をここに置く）。 */
@@ -981,7 +1075,7 @@ export class BatchScope {
     const hold = Promise.withResolvers<void>();
     const entered = Promise.withResolvers<void>();
     this.#release = hold.resolve;
-    this.#completion = gpu.withScopeLock(async () => {
+    this.#completion = gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
       try {
         pushFailureScopes(gpu.device);
       } catch (cause) {
@@ -991,14 +1085,24 @@ export class BatchScope {
       }
       entered.resolve();
       await hold.promise;
+      // MUST: フェンスを張る前に in-flight の enqueue を全て決着させる。`finish()` は同期で
+      // `#finished` を立てるだけなので、これが無いと「未 await の enqueue を積んだ直後の
+      // finish()」で ①まだ本体が走っていない enqueue が全て reject し、区間は 0 dispatch の
+      // まま**成功で決着する** ②走り出していた enqueue はフェンスと pop の後に submit し、
+      // 未完了の GPU 実行を残したまま finish が返る（直後の read が古い値を返す）。
+      await this.#drained.promise;
       const device = gpu.device;
       try {
         // enqueue は末尾で必ず submit するので通常ここは空振りする。それでも出し切るのは、
         // 「batch が閉じた時点で未 submit のエンコードは 1 つも無い」を区間側の責務として
         // 閉じるため（破棄経路の担い手を増やさない — ADR 0004）。
         for (const member of this.#members) member.submitPending();
-        // MUST: device 消失時 onSubmittedWorkDone は解決しない（競わせないとハングになる）。
-        await gpu.raceDeviceLost(device.queue.onSubmittedWorkDone(), "batch の完了");
+        // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
+        // raceCanaryDeviceLost の doc）ため競わせる。
+        await gpu[RUNTIME_INTERNAL].raceDeviceLost(
+          device.queue.onSubmittedWorkDone(),
+          "batch の完了",
+        );
       } catch (cause) {
         await discardFailureScopes(device);
         throw cause;
@@ -1018,13 +1122,21 @@ export class BatchScope {
       join: (member) => {
         this.#members.add(member);
       },
-      assertOpen: (owner) => {
+      enter: (owner) => {
         if (owner !== this.#gpu) {
           throw new BatchScopeError("別の GpuContext で開いた batch には enqueue できない");
         }
         if (this.#finished) {
           throw new BatchScopeError("finish() 済みの batch には enqueue できない");
         }
+        this.#leases += 1;
+      },
+      leave: () => {
+        if (this.#leases === 0) {
+          throw new BatchScopeError("batch の in-flight リースの返却が過多（内部の簿記の破れ）");
+        }
+        this.#leases -= 1;
+        if (this.#leases === 0 && this.#finished) this.#drained.resolve();
       },
     };
   }
@@ -1035,15 +1147,21 @@ export class BatchScope {
   }
 
   /**
-   * 区間を閉じる。未 submit を出し切り、**フェンス 1 本**で全 enqueue の完了を待ち、
-   * errorScope を pop して失敗を型付き例外にする。
+   * 区間を閉じる。**新規 enqueue を拒否 → in-flight の enqueue が全て決着するのを待つ →
+   * 未 submit を出し切る → フェンス 1 本で全 enqueue の完了を待つ → errorScope を pop して
+   * 失敗を型付き例外にする**、の順で進む。
    *
    * MUST: 2 度目以降も同じ完了を返す（先に返すと呼び出し側が破棄へ進み、ロックと errorScope が
    * 開いたまま残る）。
+   * NOTE: in-flight を待つので、`enqueue()` の戻り Promise を await せずに `finish()` を
+   * 呼んでも積んだぶんは必ず区間に入って完了する（リースの機構は {@link BatchInternals.enter}）。
    */
   finish(): Promise<void> {
     if (!this.#finished) {
       this.#finished = true;
+      // in-flight が 1 本も無ければここで決着させる（enqueue を 1 本も出していない区間・
+      // 全て await 済みの区間は従来どおり待ちが増えない）。
+      if (this.#leases === 0) this.#drained.resolve();
       this.#release();
     }
     return this.#completion;

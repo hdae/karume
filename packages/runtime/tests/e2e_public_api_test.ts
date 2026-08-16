@@ -6,8 +6,11 @@ import {
   acquireGpu,
   capabilities,
   createSession,
+  type FusionCounts,
+  type GpuContext,
   openModel,
   SafetensorsError,
+  type SessionDiagnostics,
   type Tensor,
 } from "../mod.ts";
 import { f32Bytes, type GraphJson } from "./helpers/format.ts";
@@ -95,7 +98,20 @@ Deno.test({
         assertAlmostEquals(outputs2["y"].data[row], expected2[row], 1e-5, `wide row ${row}`);
       }
 
-      const diagnostics = session.diagnostics();
+      // MUST: 診断は**型付きで**受ける。`SessionDiagnostics` が参照する型のどれかが mod.ts の
+      // 列挙から落ちていても構造的には代入できてしまうので、名前で書く下の 1 行が輸出漏れの
+      // 機械検出になる（`FusionCounts` が非公開だった間はここが書けなかった）。
+      const diagnostics: SessionDiagnostics = session.diagnostics();
+      const fusions: FusionCounts | undefined = diagnostics.lastRunFusions;
+      // このグラフ（matmul / add / sum）はどのルールにも掛からない = 全カウンタ 0。
+      assertEquals(fusions, {
+        silu: 0,
+        upsample2x: 0,
+        rope: 0,
+        adaln: 0,
+        rowBlockAttention: 0,
+        identityExpand: 0,
+      });
       assertEquals(diagnostics.pipelineCount, 3);
       // 重みアリーナは initializer 2 本に加えて params キャッシュ（Session 常駐）の実体も
       // 所有する。この 2 run は T が違うので params は 3 ノードぶんずつ別内容で載る。
@@ -144,6 +160,15 @@ Deno.test({
       gpu.destroy();
     }
   },
+});
+
+Deno.test("ランタイム内部の直列化プリミティブは公開型面に現れない（ADR 0008）", () => {
+  // 型レベルの門。`withScopeLock` / `raceDeviceLost` が素の名前で GpuContext に載っていると
+  // 下の代入が型エラーになる（実行時の assert は恒真で、検出するのは deno check）。
+  // 素で見えると `gpu.withScopeLock(() => session.run(...))` が書けてしまい、run が同じロックを
+  // 取りに行って**例外も診断も出ないまま自己デッドロック**する（再入検出器は置けない）。
+  const hidden: ("withScopeLock" | "raceDeviceLost") extends keyof GpuContext ? false : true = true;
+  assertEquals(hidden, true);
 });
 
 Deno.test("公開面が capability 照会とモデル解析の失敗型を提供する", () => {

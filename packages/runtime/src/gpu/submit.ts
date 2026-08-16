@@ -62,7 +62,7 @@
  * MUST: 計測が無効なときはこの経路のコードを 1 行も通らない（1 チャンク = 1 pass のまま）。
  */
 
-import type { GpuContext } from "./device.ts";
+import { type GpuContext, RUNTIME_INTERNAL } from "./device.ts";
 
 /** SubmitPolicy の値が実行不能（ハングを含む）な構成である。 */
 export class SubmitPolicyError extends Error {
@@ -443,9 +443,13 @@ export class SubmitScheduler {
   async flush(): Promise<void> {
     // 残りは常に予算と上限の内側（切れ目は dispatch 時に決まっている）なので 1 回で出し切る。
     this.#submitChunk();
-    // MUST: device 消失時 onSubmittedWorkDone は解決しない。待ち続けるとハングになるため
-    // 消失を競わせて例外に変換する（購読は決着時に必ず解除される — GpuContext 側の責務）。
-    await this.#gpu.raceDeviceLost(this.#device.queue.onSubmittedWorkDone(), "flush");
+    // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
+    // raceCanaryDeviceLost の doc）ため消失を競わせて例外に変換する（購読は決着時に必ず
+    // 解除される — GpuContext 側の責務）。
+    await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
+      this.#device.queue.onSubmittedWorkDone(),
+      "flush",
+    );
     this.#closeMeasurementWindow();
     await this.#collectTimings();
   }
@@ -653,8 +657,8 @@ export class SubmitScheduler {
     const pending = this.#pendingTimings;
     this.#pendingTimings = [];
     try {
-      // MUST: device 消失時 mapAsync は解決しない（readback と同じ理由で競わせる）。
-      await this.#gpu.raceDeviceLost(
+      // MUST: 消失後の mapAsync が解決しない実装がありうる（readback と同じ理由で競わせる）。
+      await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
         Promise.all(pending.map((item) => item.readBuffer.mapAsync(GPUMapMode.READ))),
         "timestamp の回収",
       );
