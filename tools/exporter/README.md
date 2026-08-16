@@ -7,8 +7,8 @@ The distribution form is a single safetensors file — tensors (weights and cons
 JSON under the `__metadata__` key `karume_ir`.
 
 The PyPI distribution `karume` is the **generic exporter core only**: dims / ir / ops / shapes /
-convert / normalize / quantize / act_quant / emit / verify / pipeline / goldens, plus the generic
-dist engine and the generic model-card renderer. Model-specific recipes — patch layers, export
+convert / aten_handlers / normalize / quantize / act_quant / emit / verify / pipeline / goldens /
+golden_models, plus the generic dist engine and the generic model-card renderer. Model-specific recipes — patch layers, export
 scripts, reference pipelines, dist recipes, card templates and their provenance — live outside the
 wheel in [`../export-recipes/`](../export-recipes/README.md), and the dependency direction is
 **recipe → core only** (ADR
