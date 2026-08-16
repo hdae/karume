@@ -13,8 +13,9 @@
 **exporter 構造再編（案 A・ADR 0065 — 全 8 段）**は消化済み。残り:
 
 - **exporter 再編の後始末（小粒）**: Python CI の 2 回目観測（初回 2026-08-16 は
-  setup-uv タグと golden io のマシン依存を検出・修正済み — 期待値: core 2005 passed /
-  30 skipped・recipes 985 passed / 233 skipped）・pytorch-cpu index の explicit 化
+  setup-uv タグと golden io のマシン依存を検出・修正済み — 期待値: core 2010 passed /
+  30 skipped〈分割波で +5: dist テスト 1 + 境界 gate 4〉・recipes 985 passed /
+  233 skipped）・pytorch-cpu index の explicit 化
   （hatchling 1.27+ / PEP 639 の license-files リスト形が解禁される — 現状は既定グロブで
   同結果のため急がない）。
 - **housekeeping 一括（小粒）**:
