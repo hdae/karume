@@ -118,7 +118,12 @@ import {
   ADALN_NORM_WORKGROUP_SIZE,
   adalnNormParams,
 } from "../src/kernels/adaln-norm.ts";
-import { RMS_NORM_KEY, RMS_NORM_WGSL, rmsNormParams } from "../src/kernels/rms-norm.ts";
+import {
+  RMS_NORM_KEY,
+  RMS_NORM_WGSL,
+  RMS_NORM_WORKGROUP_SIZE,
+  rmsNormParams,
+} from "../src/kernels/rms-norm.ts";
 import { ROPE_KEY, ROPE_WGSL, ROPE_WORKGROUP_SIZE, ropeParams } from "../src/kernels/rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
@@ -134,6 +139,7 @@ import {
 import {
   QUANTIZE_ROWS_KEY,
   QUANTIZE_ROWS_WGSL,
+  QUANTIZE_ROWS_WORKGROUP_SIZE,
   quantizeRowsParams,
 } from "../src/kernels/quantize-rows.ts";
 import { WEIGHT_STORAGES } from "../src/kernels/weight-storage.ts";
@@ -145,12 +151,14 @@ import {
   SAFE_SOFTMAX_WGSL,
   SOFTMAX_KEY,
   SOFTMAX_WGSL,
+  SOFTMAX_WORKGROUP_SIZE,
   softmaxParams,
 } from "../src/kernels/softmax.ts";
 import {
   ATTENTION_STATS_KEY,
   ATTENTION_STATS_REG_CACHE_MAX,
   ATTENTION_STATS_WGSL,
+  ATTENTION_STATS_WORKGROUP_SIZE,
   attentionPvKey,
   attentionPvParams,
   attentionPvWgsl,
@@ -1456,6 +1464,11 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
   assertEquals(ATTENTION_STATS_WGSL.includes("stats[row * 2u + 1u] = inv;"), true);
   // 行方向は grid-stride（縮退ハーネスの対象 — tests/gpu_gridstride_test.ts）
   assertEquals(ATTENTION_STATS_WGSL.includes("row = row + nwg.x;"), true);
+  assertEquals(
+    ATTENTION_STATS_KEY,
+    `attention_stats:v1:f32:lastdim:safe:wg${ATTENTION_STATS_WORKGROUP_SIZE}`,
+  );
+  assertEquals(ATTENTION_STATS_WORKGROUP_SIZE, 256);
 
   // params: ① だけが 4 語目に f32 の scale を載せる
   const qkParams = attentionQkParams(5, 7, 4, 0.2973017692565918);
@@ -1938,7 +1951,11 @@ Deno.test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を
   );
   // 行方向は grid-stride（縮退ハーネスの対象 — tests/gpu_gridstride_test.ts）
   assertEquals(QUANTIZE_ROWS_WGSL.includes("row = row + nwg.x;"), true);
-  assertEquals(QUANTIZE_ROWS_KEY, "quantize_rows:v1:f32>i8:pertoken:wg256");
+  assertEquals(
+    QUANTIZE_ROWS_KEY,
+    `quantize_rows:v1:f32>i8:pertoken:wg${QUANTIZE_ROWS_WORKGROUP_SIZE}`,
+  );
+  assertEquals(QUANTIZE_ROWS_WORKGROUP_SIZE, 256);
   assertEquals([...quantizeRowsParams(30, 8)], [30, 8, 0, 0]);
   assertEquals(quantizeRowsParams(30, 8).byteLength, 16, "uniform struct の 16 バイト整列");
   assertThrows(() => quantizeRowsParams(30, 6), CodegenError, "4 の倍数");
@@ -2517,6 +2534,8 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
   assertEquals(RMS_NORM_WGSL.includes("out[base + o] = x[base + o] * inv * weight[o];"), true);
   assertNotEquals(RMS_NORM_WGSL, LAYER_NORM_WGSL);
   assertNotEquals(RMS_NORM_KEY, LAYER_NORM_KEY);
+  assertEquals(RMS_NORM_KEY, `rms_norm:v1:f32:lastdim:wg${RMS_NORM_WORKGROUP_SIZE}`);
+  assertEquals(RMS_NORM_WORKGROUP_SIZE, 256);
   // MUST: layer_norm の生成物に rms_norm の概念が漏れていない（決定性スナップショットの前提）
   assertEquals(LAYER_NORM_WGSL.includes("inverseSqrt"), false);
 
@@ -2554,6 +2573,12 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
   assertEquals(SOFTMAX_WGSL.includes("neg_inf"), false);
   assertEquals(SOFTMAX_WGSL.includes("empty"), false);
   assertNotEquals(SAFE_SOFTMAX_KEY, SOFTMAX_KEY);
+  assertEquals(SOFTMAX_KEY, `softmax:v1:f32:lastdim:safe:wg${SOFTMAX_WORKGROUP_SIZE}`);
+  assertEquals(
+    SAFE_SOFTMAX_KEY,
+    `safe_softmax:v1:f32:lastdim:safe:emptyrow0:wg${SOFTMAX_WORKGROUP_SIZE}`,
+  );
+  assertEquals(SOFTMAX_WORKGROUP_SIZE, 256);
 
   // embedding は範囲外添字を NaN で汚染する（gather と同じ裁定）
   assertEquals(EMBEDDING_WGSL.includes("if (pick < 0 || u32(pick) >= dims.vocab) {"), true);
