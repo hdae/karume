@@ -24,7 +24,7 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 ## 構成
 
 - `packages/runtime/` — 公開 API は mod.ts の**薄い面のみ**（ADR 0008）。`src/` が本体
-  （gpu / codegen / kernels / format / reference / runtime）
+  （gpu / codegen / kernels / format / ops / reference / runtime）
 - `packages/hub/` — manifest 解決・fetch・cache（仕様の正本は ADR 0038）
 - `packages/models/` — **barrel（mod.ts）+ ファミリ別サブパス export の両建て**
 - `tools/exporter/` — PyPI `karume` = **汎用 core のみ**（src layout・境界は machine gate —

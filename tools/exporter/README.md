@@ -29,8 +29,8 @@ golden that covers the op need it. Making it conditional would split environment
 
 `src/karume/custom_ops.py` registers this project's own `karume::` operators (`gru_scan` /
 `gru_scan_reverse` — ADR [0056](../../docs/decisions/0056-gru-scan.md)) with
-`torch.library.custom_op`, so **importing it has a process-wide side effect**. `convert.py` imports
-it at the top for the same reason it imports `torchvision`: the handler key
+`torch.library.custom_op`, so **importing it has a process-wide side effect**. `aten_handlers.py`
+imports it at the top for the same reason it imports `torchvision`: the handler key
 (`torch.ops.karume.gru_scan.default`) cannot be written otherwise. Hiding the body behind
 `register_fake` is what keeps the time axis symbolic — tracing never enters the Python loop, so the
 op survives `run_decompositions` as a single node instead of unrolling T times.
@@ -306,26 +306,28 @@ injection in `test_emit.py` demonstrates this — HF's `safe_open` can still rea
 
 ## Module structure
 
-| Module       | Role                                                                                                                          |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `dims`       | dimension language `coeff·sym+offset`. The grammar is authoritative in `packages/runtime/tests/fixtures/dim-grammar.json`     |
-| `ir`         | IR v1 graph representation and JSON serialization (`allow_nan=False`)                                                         |
-| `ops`        | op contract table (the counterpart of TS-side `packages/runtime/src/ops.ts`)                                                  |
-| `shapes`     | output shape rules (the counterpart of TS-side `computeOutputShape`; declared shapes are compared on every node)              |
-| `convert`    | ExportedProgram → IR graph (constant folding, aten mapping table, CSE)                                                        |
-| `normalize`  | FX equivalence rewrites that do not grow the vocabulary (pass registration)                                                   |
-| `emit`       | writing to safetensors                                                                                                        |
-| `verify`     | all IR v1 rules + distribution-form comparison + runtime capability comparison                                                |
-| `pipeline`   | `export_module` / `export_to_file`, the above laid out as one straight path                                                   |
-| `goldens`    | definition and generation of the tiny golden fixtures                                                                         |
-| `quantize`   | weight fake-quant for the storage dtypes (f16 rounding / per-channel symmetric i8)                                            |
-| `act_quant`  | per-token symmetric i8 fake-quant for activations (the torch mirror of the w8a8 execution path)                               |
-| `extents`    | identity of dimension lengths — the one place symbolic (`SymInt`) lengths are compared without a guard                        |
-| `rope`       | model-independent export check that RoPE frequency buffers were lifted out to constant-folding leaves                         |
-| `custom_ops` | the `karume::` operators (`gru_scan` / `gru_scan_reverse`) registered with `torch.library`                                    |
-| `dist`       | generic assembly engine: series directories → one distribution directory (ADR 0041 / 0052; the pipeline registry is injected) |
-| `modelcard`  | generic model-card rendering — pure functions deriving the card from the manifest (ADR 0037 §3 frontmatter)                   |
-| `cli`        | the `karume` entry point (`dist` / `verify`, lazy dispatch)                                                                   |
+| Module          | Role                                                                                                                          |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `dims`          | dimension language `coeff·sym+offset`. The grammar is authoritative in `packages/runtime/tests/fixtures/dim-grammar.json`     |
+| `ir`            | IR v1 graph representation and JSON serialization (`allow_nan=False`)                                                         |
+| `ops`           | op contract table (the counterpart of TS-side `packages/runtime/src/ops.ts`)                                                  |
+| `shapes`        | output shape rules (the counterpart of TS-side `computeOutputShape`; declared shapes are compared on every node)              |
+| `convert`       | ExportedProgram → IR graph engine (graph traversal, constant folding, CSE — dispatches to the handler table)                  |
+| `aten_handlers` | the aten op → IR mapping table (per-op handlers + fused ops; the growth point when a model family is added)                   |
+| `normalize`     | FX equivalence rewrites that do not grow the vocabulary (pass registration)                                                   |
+| `emit`          | writing to safetensors                                                                                                        |
+| `verify`        | all IR v1 rules + distribution-form comparison + runtime capability comparison                                                |
+| `pipeline`      | `export_module` / `export_to_file`, the above laid out as one straight path                                                   |
+| `goldens`       | the golden spec table and generation driver                                                                                   |
+| `golden_models` | the tiny golden fixtures themselves — `nn.Module` definitions and input generators                                            |
+| `quantize`      | weight fake-quant for the storage dtypes (f16 rounding / per-channel symmetric i8)                                            |
+| `act_quant`     | per-token symmetric i8 fake-quant for activations (the torch mirror of the w8a8 execution path)                               |
+| `extents`       | identity of dimension lengths — the one place symbolic (`SymInt`) lengths are compared without a guard                        |
+| `rope`          | model-independent export check that RoPE frequency buffers were lifted out to constant-folding leaves                         |
+| `custom_ops`    | the `karume::` operators (`gru_scan` / `gru_scan_reverse`) registered with `torch.library`                                    |
+| `dist`          | generic assembly engine: series directories → one distribution directory (ADR 0041 / 0052; the pipeline registry is injected) |
+| `modelcard`     | generic model-card rendering — pure functions deriving the card from the manifest (ADR 0037 §3 frontmatter)                   |
+| `cli`           | the `karume` entry point (`dist` / `verify`, lazy dispatch)                                                                   |
 
 No module here is model-specific: the wheel carries no `patch_*`, no export script and no family
 name table. That is a machine gate, not a convention — `tests/test_architecture_boundary.py` fails
