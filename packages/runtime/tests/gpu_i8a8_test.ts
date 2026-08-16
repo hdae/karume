@@ -14,6 +14,10 @@
 // MUST: 比較は `compareTensors` ではなく {@link assertExact}（`===` の全数比較）で行う。
 // allclose は非有限を全て不合格にするので、NaN 行の伝播（設計の一部）を検証できない。
 //
+// NOTE: 参照オラクル（src/reference/i8a8.ts）そのものの既知値門は tests/i8a8_reference_test.ts
+// が **CPU 単独**で持つ。ここの突合は「参照と GPU が同じ向きに壊れた」形を通してしまうので、
+// 参照の性質はアダプタ無しでも走る側に置く（そちらが落ちれば突合の土台が崩れている）。
+//
 // ## 非有限値の扱い（契約の外側）
 //
 // NaN 行は `xs[row] = NaN` 経由で**行全体が NaN**になる（f32 経路と同じ粒度）。Inf 行は
@@ -299,8 +303,9 @@ Deno.test({
       gpu.destroy();
     }
     const expected = quantizeRowsReference(x, rows, dim);
+    // 非有限行も含めた全数突合（assertExact は参照が NaN の位置だけ「実測も NaN」で見る）
+    assertExact(actual.scale, expected.scale, "quantize_rows scale");
     assertEquals(Number.isFinite(actual.scale[0]), true, "通常行の scale は有限");
-    assertEquals(actual.scale[0], expected.scale[0], "通常行の scale");
     // MUST: NaN は行 scale へ（素の max だと NaN が飲まれて有限の scale になる）
     assertEquals(Number.isNaN(actual.scale[1]), true, "NaN 行の scale");
     assertEquals(actual.scale[2], Number.POSITIVE_INFINITY, "+Inf 行の scale");

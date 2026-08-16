@@ -92,7 +92,10 @@ export const BMM_OP = "bmm";
  *
  * MUST: 軸は**最終次元固定**で attrs を持たない（実測は dim = −1 のみ — softmax と同じ絞り方。
  * 一般 dim は要求実測が出てから広げる）。
- * MUST: 入力スロットで dtype が違う唯一の op（src=f32 / index=i32 → out=f32）。
+ * MUST: **最初**のスロット別 dtype 契約（src=f32 / index=i32 → out=f32）。同型は embedding /
+ * masked_fill / where で、一覧の正本は契約表（ops/contracts.ts の `SlotDtypes` doc と
+ * `kind: "perSlot"` の実値）— 本数はここに数え上げない（op 追加のたびに動く導出可能な事実で、
+ * op 名定数の側に置くと必ず腐る）。
  */
 export const GATHER_OP = "gather";
 /** 意味論 dtype 変換（attrs `to` が変換先 — ADR 0009）。 */

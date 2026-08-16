@@ -83,6 +83,37 @@ Deno.test("openModel: scale テンソルの欠落を拒否する", () => {
   assertThrows(() => openModel(buffer), ContainerError, "scale テンソル");
 });
 
+// 逆向き（実体 → 宣言）の検査。宣言側の走査だけでは「使われなくなった重みが配布形に残って
+// いる」形が素通りし、黙って太った配布形がロード時に検出されないまま公開されうる。
+Deno.test("openModel: どの initializer からも参照されない余剰テンソルを全件列挙して拒否する", () => {
+  const buffer = baseModelBuffer(baseGraph(), [
+    { name: "enc.w", dtype: "F32", shape: [4, 3], data: f32Bytes(new Array(12).fill(0.5)) },
+    { name: "enc.w_old", dtype: "F32", shape: [4, 3], data: f32Bytes(new Array(12).fill(1)) },
+    { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+    { name: "enc.dead", dtype: "F32", shape: [2], data: f32Bytes([1, 2]) },
+  ]);
+  const error = assertThrows(
+    () => openModel(buffer),
+    ContainerError,
+    "参照されないテンソル (2)",
+  );
+  // 列挙は名前順（1 件ずつ落とすと、削る側が何本余っているのか分からない）
+  assertEquals(error.message.includes("enc.dead, enc.w_old"), true, error.message);
+});
+
+// scale は IR の値ではなく safetensors の**素のテンソル**なので、参照集合は initializer の
+// tensor だけでは足りない（storage.scale を数え落とすと量子化モデルが全て余剰判定で落ちる）。
+Deno.test("openModel: 量子化 initializer の scale テンソルは余剰扱いしない", () => {
+  const graph = baseGraph();
+  graph.initializers["w"].storage = { dtype: "i8", scale: "enc.w.scale" };
+  const buffer = baseModelBuffer(graph, [
+    { name: "enc.w", dtype: "I8", shape: [4, 3], data: i8Bytes(12) },
+    { name: "enc.w.scale", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
+    { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+  ]);
+  assertEquals(openModel(buffer).file.tensors.size, 3);
+});
+
 Deno.test("assertRuntimeSupport: 非対応 op を列挙して落とす", () => {
   const graph = baseGraph();
   graph.requires.ops = ["matmul", "gelu", "tanh"];

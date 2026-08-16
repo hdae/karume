@@ -129,8 +129,35 @@ const openModelFile = (file: SafetensorsFile): KarumeModel => {
     const scaleKey = initializer.storage.scale;
     if (scaleKey !== undefined) assertScaleTensor(graph, file, name, scaleKey, declared.shape);
   }
+  assertNoSurplusTensors(graph, file);
 
   return { graph, file };
+};
+
+/**
+ * ファイル中の全テンソルがどこかから参照されていることを検査する（宣言 → 実体の逆向き）。
+ *
+ * MUST: fail loudly（黙って受理しない）。宣言側の走査だけでは「使われなくなった重みが
+ * 配布形に残っている」形が素通りし、配布物が数十 MB〜GB 級であることを踏まえると
+ * 「黙って太った配布形」がロード時に検出されないまま公開されうる。参照集合は
+ * initializer の `tensor` と `storage.scale` の 2 経路だけ（scale は IR の値ではないので
+ * 別に集める必要がある — {@link assertScaleTensor} が持つのと同じ関係）。
+ *
+ * NOTE: 余剰は**全件列挙**する（1 件ずつ落とすと、削る側が何本余っているのか分からない —
+ * {@link assertRuntimeSupport} と同じ型）。
+ */
+const assertNoSurplusTensors = (graph: IrGraph, file: SafetensorsFile): void => {
+  const referenced = new Set<string>();
+  for (const initializer of Object.values(graph.initializers)) {
+    referenced.add(initializer.tensor);
+    if (initializer.storage.scale !== undefined) referenced.add(initializer.storage.scale);
+  }
+  const surplus = [...file.tensors.keys()].filter((name) => !referenced.has(name)).sort();
+  if (surplus.length > 0) {
+    throw new ContainerError(
+      `どの initializer からも参照されないテンソル (${surplus.length}): ${surplus.join(", ")}`,
+    );
+  }
 };
 
 /**
