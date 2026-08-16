@@ -7,23 +7,36 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 整理整頓波（2026-08-14〜2026-08-16・全消化）
+## now — 全体レビュー波（2026-08-16・修正消化済み）
 
-外部レビュー 6 本の TRIAGE・docs 事実修正・ADR 注記・planning SoT 再編（本ファイル新設）・
-**exporter 構造再編（案 A・ADR 0065 — 全 8 段）**・分割波・housekeeping・上流入力再取得 +
-全系列/配布形の再生成・pytorch-cpu index explicit 化 + license-files 明示まで消化済み。
-**残り: なし** — next の開始はユーザー裁定。
+sop-review 網羅（17 レッグ + 反証 7 レッグ + Codex 独立レンズ）→ blocker 0 → 修正 35 項目を
+7 コミットで消化（runtime 契約機構化 / codegen 二重門 / exporter 堅牢化 / models 写像 1 本化 /
+onEvent コールバック / mypy 常設 / docs 同期）。勢力図・ポジショニング検証は
+[research/2026-08-16-runtime-landscape.md](research/2026-08-16-runtime-landscape.md)。
+**残り: 4 パッケージ lockstep 0.2.2 → 0.3.0 の bump とリリース（裁定 1 = 承認済み）**。
 
 ## next — autoregressive-ready 基盤波
 
 「Gemma 4 対応」ではなく **IR / loader / state 実行モデルを autoregressive-ready にする波**。
-検収モデル = Gemma 4 E2B / MiniCPM5-1B。**実装前に ADR を先行**させる（順序も設計判断）:
+検収モデル = Gemma 4 E2B / MiniCPM5-1B（MiniMax-M3 は非目標で裁定済み 2026-08-16 — ADR 0001 へ
+1 行はこの波で）。**実装前に ADR を先行**させる（順序も設計判断）。ADR 着手前に sop-research で
+参照資料を収集する（llama.cpp の KV レイアウト / vLLM paged KV / ORT・WebLLM・transformers.js の
+実装 — 2026-08-16 裁定・根拠節に引用する）。前提の宣言として **R2（shape 不変条件）を最初の
+ADR に含める**: 恒久不変条件は「静的物理格納・固定 rank・計画キャッシュの鍵は常に容量」まで —
+「全論理形状がホスト既知」は恒久にせず、**有界論理 extent の席**（compact-prefix 軸 1 本・
+DDS op は payload + extent の複数出力・extent は計画鍵に入れない・admission は容量課金）を
+IR スキーマに予約する。実装は最初の実需モデルまで先送り・上限超えと動的 rank はホスト介在の
+グラフ分割のまま（根拠 = [runtime-landscape §3](research/2026-08-16-runtime-landscape.md)・
+2026-08-16 裁定）:
 
 1. **KV state / GenerationContext**: KV を Session の普通の入出力にしない。寿命分離
    （Session = immutable weights / GenerationContext = 1 生成の mutable state）・
    fixed-capacity physical + logical `pastLength`・prefill と decode は別 execution shape・
    device loss 時の再開契約。`pastLength` は shape symbol にしない（PreparedPlan/backing が
-   毎 token 再構築になる — ADR 0042 の key 契約）。
+   毎 token 再構築になる — ADR 0042 の key 契約）。**state の単位は「層 × 均一 KV」ではなく
+   名前付き state スロット（per-slot shape・別名可）で定義する**（R3・2026-08-16 裁定 —
+   検収モデルの Gemma 4 E2B が sliding 固定長 512 / keys-as-values / 20 層 cache 共有の
+   3 種混在で、均一前提だと 5 ADR 全部の改訂になる）。
 2. **packed weight storage + sharded loading**: int4 級の logical shape / physical payload 分離
    （1 要素 = 1 payload 要素の現契約を破る初の格納形）+ safetensors shard + 全量 ArrayBuffer
    保持の廃止（shard 単位 fetch → verify → upload → 解放）。ADR 0019 の「w4 再測しない」は
@@ -36,6 +49,11 @@
 5. **autoregressive attention**: causal / GQA / logical prefix length / KV state access /
    mask 表現 / empty-row 意味論。**row-block matcher の portability 依存はここで正面解決**
    （exact-match が唯一の 128MiB 級ポータビリティ経路である現状を op 側の席へ）。
+   **G3 = kv_heads > 1 の GQA が現行レイアウト語彙で書けない問題をここで解く**（attention は
+   q/k/v の H 同一・bmm は broadcast 無し・rank-5 迂回は STRIDED_RANK=4 で不可 —
+   ADR 0023 決定 4「GQA は欄を作らない」の reopen。検収モデルの MiniCPM5-1B が 16:2 で該当）。
+   mask は causal / sliding の attrs 化を含めて裁定（131K context の `[1,1,M,N]` 実体化は
+   68GB 級で物理的に不成立）。
 
 付随: bool initializer / storage の設計（mask 素材 — ⑤と同席で裁定）・pipeline 単位の
 Session 常駐と device-loss lifecycle（perf H-4 と同体）・sampling/RNG はホスト維持
@@ -57,11 +75,23 @@ Session 常駐と device-loss lifecycle（perf H-4 と同体）・sampling/RNG �
   `padSequence` の「fixture と全 4 実装 bit 同一」は recipe README に実測記録として残るだけで、
   `outputs/series/anima-pipeline*` を読む常設テストは Deno / pytest のどちらにも存在しない
   （2026-08-16 判明 — fixture 4 変種は再エミット済みで前提は解消済み）。
+- **ORT Web 対比ベンチ慣行**（2026-08-16 ユーザー裁定）: 両対応モデル（EmbeddingGemma —
+  models 側の完成が前提 / Irodori — ONNX 変換の前段が要る）で定期測定し、遅すぎないか・
+  ボトルネックはどこかを調査する。測定条件の規範（graph capture ON / freeDimensionOverrides /
+  IO binding / EP 分断確認・native EP か JSEP かの記録）は
+  [runtime-landscape §4](research/2026-08-16-runtime-landscape.md) が正本。
+- **生成イベントの横展開（需要待ち）**: sbv2 / birefnet / depth / siglip2 / vowel への stage
+  イベント（step ループが無く提供できるのは段遷移のみ）と、AbortSignal による中断席
+  （現状は onEvent の throw が step 粒度の中断手段 — 席は温存）。
 - Metal 数値差の原因確定（known-issues）・resident 経路の診断/計測制約の解消。
 - MoE の seam（fixed-k routing は静的形で表現可 — dense API に expert 非存在を焼かない）。
 
 ## release — リリース準備波（しばらく先）
 
+- **R1: manifest v2 の shard（複数ファイル）/ 1 コンポーネント内混成 dtype の席の ADR**
+  （ADR 0041 / 0063 reopen・2026-08-16 裁定で追加 OK）。**HF 公開前が締切** — hub は v2 のみを
+  読み 2 形パースをしない（ADR 0041）ので、公開後に必要になると全リポ再アップになる。
+  今なら席を空けるだけで既存 manifest は 1 要素として書ける。
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）
 - HF 公開一式: karume-sbv2-jvnv 上げ直し・新規 5 モデル・Irodori
 - リポ直下 README の書き上げ・JSR npm 互換層の sideEffects 検証

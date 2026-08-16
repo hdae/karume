@@ -64,3 +64,28 @@
   [research/2026-08-13-host-cost-decomposition.md](../research/2026-08-13-host-cost-decomposition.md) §6。
 - コミット列: R1 = `c90bd43`（runtime 基盤）→ M1 = `8ab141a`（irodori ループ）→ H-1 =
   `e339cc0`（単一フェンス run）。
+
+## 追記（2026-08-16・レビュー修正波 B1: in-flight リース）
+
+`BatchScope` に **in-flight リース**を導入した。`Session.enqueue` の**同期区間**（`#chain` に
+積む前）でリースを 1 本取り、enqueue 本体の `finally` で返す。`finish()` は「新規 enqueue の
+拒否 → 未返却リースの全返却を待つ → 未 submit を出し切る → フェンス 1 本」の順で進む。
+
+理由: `enqueue()` はマイクロタスクを 1 段挟んでから本体が走るのに対し `finish()` は同期で決着
+フラグを立てるため、**戻り Promise を await せずに finish を呼ぶと** ①まだ本体が走っていない
+enqueue が全て `BatchScopeError` で reject し、区間は 0 dispatch のまま「成功」で決着する
+（未 await の reject は unhandled へ流れ、観測点が無い）②走り出していた enqueue はフェンスと
+errorScope pop の後に submit し、未完了の GPU 実行を残したまま finish が返る。①は実 GPU で
+完全再現済み（レビュー Pass2 V-1）。
+
+このリポは同種の順序契約を全て機構で閉じている（`Session.#chain` / errorScope 区間ロック /
+焼き込み参照計数）ので、ここも散文契約にせず機構で閉じた。外形は不変・リース 0 の通常経路
+（リポ内の全利用は await 済み）では待ちが 1 マイクロタスクも増えない。irodori 常駐経路の
+WAV sha256 は不変を確認済み。
+
+## 追記（2026-08-16・同修正波: onEvent はホスト経路）
+
+生成イベント購読（`onEvent`）は本 ADR の常駐経路と構造的に非両立（1 batch + 単一フェンスの
+区間は step の完了をホストから観測できない）。購読時は gpuTiming と同じ機構でホストループへ
+分岐する — 出力はビット同一・壁時計の実測は生成全体で 7.2 → 8.6 秒（S 170）。
+[limitations](../limitations.md) の該当節を参照。

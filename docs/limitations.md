@@ -13,6 +13,23 @@ GPU 操作全体（エンコード〜readback〜アリーナ破棄）を device 
 device（= `acquireGpu()`）を分けること。解除は WebGPU 側に「スコープ付き submit」相当が
 入らない限り予定なし。
 
+## params キャッシュは Session 寿命で無界（by-design）
+
+params バッファの内容アドレスキャッシュ（`RecipeBuilder.#writeParams`）には追い出しが無く、
+解放は `Session.dispose()` だけ。記号次元を持つグラフを「run ごとに違う束縛」で回すと、run の
+たびに（ノード種ぶんの）小バッファが新規確保され、二度と当たらないまま Session の寿命
+いっぱい積み上がる（例外も警告も出ず、`diagnostics().weights.allocCount` が単調増加するだけ）。
+1 本は数十バイト程度なので、可変長 TTS / 系列長可変の埋め込みでも実害の記録は無いが、上限は
+無い。
+
+- 追い出しを LRU 化しない理由: params の実体は生きている導出済み計画（prepared plan）が
+  **直参照で畳み込んでいる**ため、追い出し = 破棄にすると破棄済みバッファを掴む。安全にやるには
+  参照計数という別の簿記が要る（実需が出るまで作らない）。
+- 回避策: 可変 shape を長時間回す用途では `diagnostics().weights.allocCount` の伸びを見て
+  Session を切り直すこと。
+- 無界であること自体は `packages/runtime/tests/gpu_params_cache_test.ts` が門にしている
+  （追い出しを入れるとこの門が赤くなる）。
+
 ## `__proto__` という名前をオブジェクトリテラルで渡せない（JS の記法の制約）
 
 Karume 側の Record は null プロトタイプで `"__proto__"` キーを保全するが、**呼び出し側**が
@@ -161,6 +178,28 @@ NaN 伝播（ADR 0020）で必ず表面化する。CPU 参照は範囲外で thr
 truncate（0 方向切り捨て）で一致保証・値域外と NaN は未定義。要素ごとの値域検査は意図的に
 入れない — 範囲外になりうる値は呼び出し側・モデル側で先に clamp すること。
 
+## IR の i32 算術は 2 の補数ラップ（int64 中間の縮小は未防護）
+
+exporter は torch の int64 を境界（グラフ入出力・具体境界テンソル）で値域検査つきの i32 へ
+正規化する（ADR 0009）が、**emit された i32 演算（mul / sub）の中間値には防護が無い** —
+2³¹ を跨ぐ中間は例外にならず 2 の補数でラップする（実測: int64 x=50000 の `(x*x).float()` は
+診断ゼロで export され、参照実装の `Math.imul` が −1794967296 を返す）。実配布 10 ファミリの
+i32 算術 99 本は全て mask 由来の構造的有界値で該当ゼロ（189 コンテナ走査・2026-08-16）。
+中間値域の静的証明は一般に不可能なので境界検査 + golden 突合（実入力に対する事実上の門）を
+契約とし、i64 級の中間演算が要るモデルは export 時の設計（値域を保つ分解）で対処する。
+
+## exporter: `x + 0` の恒等除去は −0 入力で torch と乖離しうる（div / sqrt の下流）
+
+`normalize._drop_identity_add` は `add(x, 0)`（加数が Python スカラの 0）を x へ畳む。f32 で
+値が変わるのは x = −0.0 のときだけで、`x + 0.0` は +0.0 を返す。IR v1 には**符号付きゼロを
+区別する op が実在する** — `div` は `1/(+0) = +∞` / `1/(−0) = −∞`、`sqrt` は `sqrt(±0) = ±0`
+（参照実装も素の除算と `Math.sqrt`）— ので、消した add の下流が div の分母や sqrt の引数へ
+届く形では torch と符号が反転しうる（最小反例は 2026-08-16 レビューで実証済み:
+`num / (x + 0.0)` が torch +∞ / IR −∞）。実測 10 ファミリでは到達経路が無く、消費側を見て
+書き換えを制限する形は全系列の再エクスポートを誘発するため、乖離の可能性を**受容**して
+書き換えを残している。消費側に −0.0 が出うる形を足すときは、このパスの適用条件を先に
+見直すこと（`karume/normalize.py` の `_drop_identity_add` docstring に同じ注記）。
+
 ## 意味論 dtype の実行可否は op ごと（一括解禁しない）
 
 契約表（`packages/runtime/src/ops.ts` / `karume/ops.py`）が正本。i32 / bool を実行できるのは実測
@@ -218,6 +257,20 @@ fail loudly（実行上限そのものは緩めない）。
   正規化する（カーネルと契約に arity 分岐を持ち込まないため）。bias 無しを落とすのは
   `linear` だけ（実測が全て bias 付き）。
 
+## upsample_bilinear2d（align_corners=True）の端点は「厳密一致」を保証しない
+
+`align_corners = True` でも、出力の端が入力の端と**ビット単位で一致するとは限らない**。源座標は
+ホストで f32 に丸めた `scale = fl((in−1)/(out−1))` に出力添字を掛けて作るので、
+`fl(scale · (out−1))` が `in−1` をわずかに下回る形が実在する（実測: in=2 → out=42 の末尾は
+0.9999999403953552）。
+
+これは by-design で、**torch 自身が同じ値を出す**（`area_pixel_compute_scale` を float で評価し
+`scale · dst_index` を float で掛ける）。カーネルの数値契約は「torch の `UpSample.h` に合わせる」
+なので、端点をクランプして厳密化すると逆に torch とビットが割れる（ADR 0058 の opt-in 契約に
+照らして既定経路では不可）。発火範囲の実測（2026-08-16）: `2 ≤ I ≤ 64` × `2 ≤ O ≤ 2048` の
+128,961 組のうち 11.6% が非厳密。ただし `O = 2I` / `O = 2I−1`（I ≤ 4096）は 0 件で、配布モデルの
+実形状 47 サイトは H・W とも全て厳密成立側にある。
+
 ## GRU スキャンは隠れ幅 256 まで・入力側 GEMM を含まない・`h_n` を返さない（ADR 0056）
 
 - `gru_scan` / `gru_scan_reverse` の隠れ幅は **`H ≤ 256`**（1 lane = 1 隠れユニットの割り当て。
@@ -265,6 +318,34 @@ f32 マスクで、1 ずれても shape エラーにならない沈黙誤値ク�
 - 窓幅（実測 4）の食い違いも同じ沈黙誤値クラスなので、Python 側は ckpt ロード時の
   `_assert_window_size`（net_g 全体を走査）、TS 側はパリティテストがコンテナに焼き込まれた
   `idx_v` の幅 `2w+1` と突き合わせて落とす。
+
+## SBV2 ホスト糊は f64 で評価する — `w_ceil` は torch とビット同一でない
+
+`durationsToFrames` / `buildZp`（`packages/models/src/sbv2/host/`）は式全体を JS の f64 で評価し、
+`Int32Array` / `Float32Array` 代入で 1 度だけ丸める（同ディレクトリの `random.ts` と同じ家風）。
+参照側は f32 逐次なので、以下は by-design の既知差:
+
+- **`w_ceil` の 1 フレームずれ**: `f32(exp_f32(x))` と `exp_f64(x)` の f32 半 ulp（相対 6e-8）が
+  `ceil` の閾値を跨ぐと 1 フレーム動く（実測: 音素あたり 5.5e-7・229 音素の 1 発話で
+  P ≈ 1.3e-4）。`Math.fround` 逐次へ揃えても **torch 一致は決定的にならない** — front 出力
+  自体の GPU/CPU 差 1e-5 が同じ閾値跨ぎを 2 桁以上高い率で起こし、支配項は上流に残る
+  （`tools/export-recipes/sbv2/README.md` が設計として許容し、割れた位置を `w_ceil_diffs` に
+  載せる）。
+- **`z_p` の 1 ulp 差**: 要素の約 4 割で常に生じる。この経路を測る波形突合の実測
+  maxAbs 5.16e-5 に対して 3 桁下で、離散化を挟まないので形状には増幅しない。
+
+どちらも karume 単体の再現性（WAV sha256 門・段 1 / 段 2 経路の一致）には影響しない — f64 経路は
+決定的で、差は torch 参照との相対でのみ現れる。
+
+## Anima: 生成中のプレビュー画像は出せない（途中結果は生 latent のみ）
+
+`AnimaGenerateRequest.onEvent` の `denoise-step` が渡せる途中結果は **latent の写し**
+（`copyLatents()`）だけで、毎 step のプレビュー画像は by-design で提供しない。VAE decoder は
+DiT を解放した**後**にしかロードできない（4 本同時常駐は VRAM で不成立 — ADR 0016 /
+`anima/pipeline.ts` のモジュール doc）ため、denoise ループの途中で VAE を回す経路が構造的に
+存在しない。プレビューが要る消費側は latent から近似する（線形近似で足りる用途を想定）。
+`stage` イベント（段の Session 構築前 / 解放後）と `vae-tile` イベント（タイル 1 枚ごと）で
+GB 級ロードとタイル decode の進捗は観測できる。
 
 ## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
 
@@ -349,7 +430,7 @@ DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-e
   パイプライン層で fail loudly**（グラフ側は 4 変種の差をマスク 1 本に還元してしまうので、
   ここで拒まないと黙って別のモデルを回すことになる）。
 
-## Irodori DiT ループの GPU 常駐経路: denormal 出力の FTZ・診断の縮退・計測時はホスト経路
+## Irodori DiT ループの GPU 常駐経路: denormal 出力の FTZ・診断の縮退・計測 / onEvent 時はホスト経路
 
 DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-and-fence.md) — CFG 合成
 と Euler 更新を GPU の elementwise で実行・フェンスは batch 1 本）。by-design の制約 3 点:
@@ -360,9 +441,13 @@ DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-a
   領域で、参照ケースの WAV sha256 門 2 本は digest 完全一致 — 門が恒久の検出器。
 - **常駐経路では `lastRun`（run アリーナ実績）と `lastRunTiming` が `undefined`**（enqueue は
   アリーナも計測窓も作らない）。`planBacking` / `submit` / `lastRunPrepared` は従来どおり。
-- **gpuTiming 有効の device では従来のホストループへ分岐**（batch と計測は非両立 —
-  `beginBatch` が拒否）。出力は同一 digest（実測）だが壁時計は倍近くになる。op 別内訳を
-  採るとき以外は計測を有効にしないこと。
+- **gpuTiming 有効の device、および `generate` / `generateLatent` へ `onEvent` を渡した生成は
+  従来のホストループへ分岐**（計測: batch と非両立で `beginBatch` が拒否 / onEvent: 1 batch +
+  単一フェンスの区間は step の完了そのものをホストから観測できず、`enqueue` 時点の発火は
+  「進捗」として嘘になる）。出力は同一 digest（`e2e_irodori_wav_test.ts` の onEvent 段が
+  voice-clone と同じ sha256 で常設の門にしている）だが壁時計は伸びる（同一ケースの実測
+  7.2 → 8.6 秒 / S 170・参照環境 2026-08-16）。op 別内訳を採るとき・進捗を出すとき以外は
+  既定（常駐経路）のまま使うこと。
 
 ## Irodori パイプライン（ホスト層）: 上流の任意ノブは既定値相当のみ・参照音声は 48kHz
 
@@ -376,6 +461,11 @@ DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-a
   上の DiT 節のとおりで、**パイプラインは pipelineConfig のパース時に拒否**する。
   末尾トリムのしきい値（窓 20 / std 0.05 / mean 0.1）と参照音声の目標 −16 LUFS も上流既定の
   固定値（実行時ノブとしては持たない）。
+- **`cfgScales` は f32 で厳密に表せる値だけを受理する**（非厳密値は `pipelineConfig` の
+  パース時に fail loudly）。DiT ループはホスト経路（f64 のまま乗算）と GPU 常駐経路（f32 へ
+  丸めてから乗算）の 2 本があり、強さが f32 非厳密だと同じ入力で最終桁が 1〜2 ulp 割れる
+  （実測: s=1.3 で分岐）。「2 経路の出力は同じ」という MUST を配布形に依らず無条件に成立
+  させるため、宣言側で落とす。実配布の 3.0 / 5.0 / 3.0 は全て f32 厳密で影響なし。
 - **参照音声（`speaker: { audio }`）は配布形の `sampleRate`（48kHz）のみ** — リサンプルは
   持たず fail loudly（ADR 0049 決定 6。変換は呼び出し側の責務）。`decodeWav` が受けるのは
   PCM 16bit と IEEE float 32bit だけで、`WAVE_FORMAT_EXTENSIBLE`（0xFFFE）等は明示拒否。

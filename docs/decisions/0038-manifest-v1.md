@@ -466,3 +466,10 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   1 ファイルの phase は `downloading`* → `verifying` → `complete` の順にだけ進み、`complete`
   はファイルごとに 1 回の終端。例外は破損キャッシュの self-heal（validate 拒否 → evict →
   network 再取得）で、この 1 巡だけ最初からやり直しになる。
+- 2026-08-16: §3 の写像 `toSessionOptions` は 7 家族の `pipeline.ts` へバイト単位で複製されて
+  いたが、`packages/models/src/session/options.ts` へ 1 本化した（barrel には出さない内部機構）。
+  複製は「綴りの改名」こそ型検査で落ちる一方、「`SessionSpec` へのキー追加」は写像が書いて
+  いないキーを黙って落とすだけで全家族の型検査を通り、追随を忘れた家族が沈黙劣化した
+  （門を持つのは 2 家族だけだった — レビュー MD-1 C-1）。1 本化後は写像を
+  `Required<SessionSpec>` の網羅レコードから組むため、キー追加はコンパイルエラーになる。
+  門も `packages/models/tests/session_options_test.ts` の 1 本へ集約。
