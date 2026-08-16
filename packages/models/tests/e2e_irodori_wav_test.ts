@@ -56,17 +56,22 @@
  * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
  */
 
+import { assertEquals, assertFalse, assertRejects } from "@std/assert";
 import { parseManifest, resolveFiles } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
+import type { SessionDiagnostics } from "@karume/runtime";
 import {
   type DecodedWav,
   decodeWav,
   encodeWav,
   type IrodoriGeneratedAudio,
+  type IrodoriGenerateEvent,
   type IrodoriGenerateRequest,
   IrodoriPipeline,
+  type IrodoriRunComponent,
 } from "../mod.ts";
 import { type IrodoriPipelineConfig, parseIrodoriPipelineConfig } from "../src/irodori/config.ts";
+import { tSchedule } from "../src/irodori/host/sampler.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
@@ -315,19 +320,27 @@ const mismatchReport = async (
     `  実物 ${dumped.pathname}`;
 };
 
-/** 1 ケースを生成して digest を突き合わせる。 */
+/**
+ * 1 ケースを生成して digest を突き合わせる。
+ *
+ * `onEvent` を渡した呼びも**同じ参照値**で突き合わせる — 観測席が数値に 1 ビットも触って
+ * いないこと、そして常駐経路 / ホスト経路の出力が同一であることの直接証拠になる
+ * （下の onEvent 門）。
+ */
 const runCase = async (
   pipeline: IrodoriPipeline,
   config: IrodoriPipelineConfig,
   item: WavCase,
   reference: DecodedWav,
-): Promise<void> => {
+  onEvent?: (event: IrodoriGenerateEvent) => void,
+): Promise<IrodoriGeneratedAudio> => {
   // `initialNoise` もノブも渡さない — 内部 `Randn` と `pipelineConfig` の既定ごと縛る。
   const request: IrodoriGenerateRequest = {
     text: item.text,
     ...(item.caption === undefined ? {} : { caption: item.caption }),
     ...(item.withReference ? { speaker: { audio: reference } } : {}),
     seed: item.seed,
+    ...(onEvent === undefined ? {} : { onEvent }),
   };
   const started = performance.now();
   const audio = await pipeline.generate(request);
@@ -335,13 +348,16 @@ const runCase = async (
   const actual = await sha256Hex(wav);
   const elapsed = ((performance.now() - started) / 1000).toFixed(1);
   console.log(
-    `[e2e] irodori ${MODEL}/${QUANT} ${item.name}: ${elapsed}s / S ${audio.frames} / ` +
+    `[e2e] irodori ${MODEL}/${QUANT} ${item.name}${
+      onEvent === undefined ? "" : "(onEvent)"
+    }: ${elapsed}s / S ${audio.frames} / ` +
       `forwards ${audio.forwards} / WAV ${wav.length}B / ` +
       `${(audio.data.length / audio.sampleRate).toFixed(2)}s / sha256 ${actual}`,
   );
   if (actual !== item.sha256) {
     throw new Error(await mismatchReport(item, config, audio, wav, actual));
   }
+  return audio;
 };
 
 Deno.test({
@@ -355,14 +371,146 @@ Deno.test({
     // 参照音声は 48kHz mono PCM16。周波数が配布形と違えば `generate` が fail loudly（リサンプル
     // は持たない）ので、ここでは読むだけにする。
     const reference = decodeWav(referenceBytes as Uint8Array<ArrayBuffer>);
+    // run 1 回ごとの観測。`lastRun`（アリーナ実績）の有無が「ホスト経路か常駐経路か」の
+    // **独立な証拠**になる — 常駐経路の `enqueue` はアリーナも計測窓も作らないので undefined。
+    const runs: { component: IrodoriRunComponent; hasArena: boolean }[] = [];
     // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-    // 3.3GB の資産を 2 度読まないよう、2 ケースは 1 本のパイプラインを共有する。
+    // 3.3GB の資産を 2 度読まないよう、全ケースは 1 本のパイプラインを共有する。
     await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
       model: MODEL,
       quant: QUANT,
+      onRunDiagnostics: (component: IrodoriRunComponent, diagnostics: SessionDiagnostics) =>
+        runs.push({ component, hasArena: diagnostics.lastRun !== undefined }),
     });
     for (const item of CASES) {
-      await t.step(`${item.name}: ${item.why}`, () => runCase(pipeline, config, item, reference));
+      await t.step(`${item.name}: ${item.why}`, async () => {
+        await runCase(pipeline, config, item, reference);
+      });
     }
+
+    // --- onEvent（生成イベントの観測席）------------------------------------
+    //
+    // 押さえるのは 4 点:
+    //  ① `onEvent` を渡すと DiT ループが**ホスト経路**へ切り替わる（常駐経路は 1 batch +
+    //     単一フェンスで途中を観測できない — ADR 0054）。証拠は診断側の `lastRun` の有無で、
+    //     イベントが届いたこと自体とは独立に採る。
+    //  ② それでも **WAV の sha256 は上の voice-clone と同じ値**（2 経路ビット同一の MUST が
+    //     公開 API から観測できる唯一の場所）。購読側は毎 step 写しを NaN で壊してすらいる。
+    //  ③ `denoise-step` は **step 単位**で `config.steps` 回（CFG の内側の forward 数ではない）。
+    //  ④ コールバックの throw が生成ごと落とす（step 粒度の中断手段）。
+    const withEvents = CASES[0];
+    await t.step(
+      `onEvent: ホスト経路でも WAV sha が同一（step ${REFERENCE_KNOBS.steps} 回の発火）`,
+      async () => {
+        const log: string[] = [];
+        const shapes = new Set<string>();
+        const lengths = new Set<number>();
+        let firstStep: (() => { data: Float32Array<ArrayBuffer> }) | undefined;
+        let firstStepHead: number[] = [];
+        const before = runs.length;
+        const audio = await runCase(pipeline, config, withEvents, reference, (event) => {
+          if (event.kind === "stage") {
+            log.push(`stage:${event.component}:${event.at}`);
+            return;
+          }
+          log.push(`step:${event.step}/${event.steps}@${event.t}`);
+          const snapshot = event.copyLatents();
+          shapes.add(snapshot.shape.join("x"));
+          lengths.add(snapshot.data.length);
+          // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、WAV sha が割れる
+          // （波形の非有限検査が先に落とす）。
+          snapshot.data.fill(Number.NaN);
+          if (event.step === 1) {
+            firstStep = event.copyLatents;
+            firstStepHead = Array.from(event.copyLatents().data.slice(0, 8));
+          }
+        });
+
+        // ① ホスト経路の証拠（dit の run が全てアリーナを通っている = `enqueue` ではない）。
+        const ditRuns = runs.slice(before).filter((run) => run.component === "dit");
+        assertEquals(ditRuns.length, audio.forwards, "dit の run 数と forwards が合わない");
+        assertFalse(
+          ditRuns.some((run) => !run.hasArena),
+          "dit の run に lastRun が無い = 常駐経路のまま（onEvent でホスト経路へ切り替わっていない）",
+        );
+
+        // ③ イベント列が実行構造と完全一致する（段の前後 + step 単位の発火）。
+        const schedule = tSchedule(config.steps, config.initScale);
+        assertEquals(
+          log,
+          [
+            "stage:backbone:start",
+            "stage:backbone:end",
+            "stage:text-proj:start",
+            "stage:text-proj:end",
+            "stage:caption-proj:start",
+            "stage:caption-proj:end",
+            "stage:codec-encoder:start",
+            "stage:codec-encoder:end",
+            "stage:speaker:start",
+            "stage:speaker:end",
+            "stage:duration:start",
+            "stage:duration:end",
+            "stage:dit:start",
+            ...Array.from(
+              { length: config.steps },
+              (_, at) => `step:${at + 1}/${config.steps}@${schedule[at]}`,
+            ),
+            "stage:dit:end",
+            "stage:codec-decoder:start",
+            "stage:codec-decoder:end",
+          ],
+          "イベント列が実行構造と合わない（段の前後 / step 数 / t の値）",
+        );
+        // CFG の内側は 1 step で 3 forward 走る — 発火は step 単位であって forward 単位ではない。
+        assertFalse(
+          audio.forwards <= config.steps,
+          `forwards ${audio.forwards} が steps ${config.steps} 以下（CFG が立っていない条件では` +
+            "「step 単位である」ことの証明にならない)",
+        );
+
+        // ② 途中潜在の形は `[frames, latentDim]`。
+        assertEquals(shapes, new Set([`${audio.frames}x${config.latentDim}`]));
+        assertEquals(lengths, new Set([audio.frames * config.latentDim]));
+        // 生成が終わった後に呼んでも step 1 の値が返る（lazy だが束縛は作った時点）。
+        assertEquals(
+          Array.from((firstStep as () => { data: Float32Array<ArrayBuffer> })().data.slice(0, 8)),
+          firstStepHead,
+          "生成後に呼んだ copyLatents が step 1 の値を返さない",
+        );
+      },
+    );
+
+    await t.step("onEvent: コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
+      const seen: string[] = [];
+      const abortAt = 2;
+      await assertRejects(
+        () =>
+          pipeline.generate({
+            text: CASES[1].text,
+            seed: CASES[1].seed,
+            onEvent: (event) => {
+              seen.push(
+                event.kind === "stage"
+                  ? `stage:${event.component}:${event.at}`
+                  : `step:${event.step}`,
+              );
+              if (event.kind === "denoise-step" && event.step === abortAt) {
+                throw new Error("購読側で中断");
+              }
+            },
+          }),
+        Error,
+        "購読側で中断",
+      );
+      // 例外を握らないので DiT の段で止まる — codec は 1 度も開かない。
+      assertEquals(seen.at(-1), `step:${abortAt}`, "中断した step が最後のイベントでない");
+      assertFalse(seen.includes("stage:dit:end"), "中断したのに段が正常終了している");
+      assertFalse(
+        seen.some((entry) => entry.startsWith("stage:codec-decoder")),
+        "中断したのに codec decode へ入っている",
+      );
+      // この後の `await using` の解放が、中断した生成の後でも正常に効くことの検査になる。
+    });
   },
 });

@@ -4,7 +4,7 @@
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
  * 面は利用者ストーリーに対応する — 組む（{@link IrodoriPipeline.fromPretrained} /
  * {@link IrodoriPipeline.fromAssets}）/ 生成する（`generate` / `generateLatent`）/
- * 解放する（`dispose`）。
+ * 生成の途中経過を購読する（`onEvent` — {@link IrodoriGenerateEvent}）/ 解放する（`dispose`）。
  *
  * 波形は f32 で出入りする（WAV に落とす `encodeWav` と、参照音声を読む `decodeWav` は barrel
  * 側 — どちらもファミリ非依存の共通処理）。
@@ -19,7 +19,9 @@ export type {
   IrodoriAssets,
   IrodoriFromPretrainedOptions,
   IrodoriGeneratedAudio,
+  IrodoriGenerateEvent,
   IrodoriGenerateRequest,
+  IrodoriLatentSnapshot,
   IrodoriPipelineOptions,
   IrodoriRunComponent,
   IrodoriSpeakerInput,

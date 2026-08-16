@@ -1,19 +1,22 @@
 // `AnimaPipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る
 // （実 GPU の E2E は P3 波 2）。
 //
-// ここで押さえるのは 2 つ:
+// ここで押さえるのは 3 つ:
 //  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反と資産の解析を落とす
 //     （未知 model / pipeline 名 / 未知 major / 未知 quant / 資産の不在）。落とす位置が
 //     ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
 //  ② `generate` の入口ガード（`resolveNegativePrompt`）が「効かないノブを黙って受けない」。
 //     回帰しても実 GPU の PNG 門は緑のままなので、純関数として直接縛る。
+//  ③ `denoise-step` の `copyLatents`（`latentSnapshot`）が「作った時点の latent の写し」を
+//     返す。ここが壊れると購読側には**別 step の latent が黙って**届く（実 GPU の PNG 門は
+//     観測席を通らないので緑のまま）。
 //
 // NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
 // `session_options_test.ts` にある。
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assertEquals, assertNotStrictEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import { AnimaPipeline, resolveNegativePrompt } from "../src/anima/pipeline.ts";
+import { AnimaPipeline, latentSnapshot, resolveNegativePrompt } from "../src/anima/pipeline.ts";
 
 const FILE = {
   path: "transformer/model.f16.safetensors",
@@ -144,4 +147,29 @@ Deno.test("resolveNegativePrompt: uncond を計算する設定で negativePrompt
   // 供給元は request > defaults の順。どちらかがあれば通る。
   assertEquals(resolveNegativePrompt(undefined, "既定のネガ", 7), "既定のネガ");
   assertEquals(resolveNegativePrompt("要求のネガ", "既定のネガ", 7), "要求のネガ");
+});
+
+Deno.test("latentSnapshot: 束縛した時点の latent を写す（step を進めても写しは変わらない）", () => {
+  const shape = [1, 2, 1, 1];
+  // denoise ループの再現: `cfgEulerStep` は純関数なので `current` は step ごとに**新しい
+  // 配列**へ差し替わる。イベントの口は step ごとに作って渡す。
+  const step1 = Float32Array.from([1, 2]);
+  const first = latentSnapshot(step1, shape);
+  const step2 = Float32Array.from([3, 4]);
+  const second = latentSnapshot(step2, shape);
+
+  // 生成が全部終わってから呼んでも「作った時点」の値が返る。ループ変数を閉じ込める実装だと
+  // ここが両方 [3, 4] になる（購読側からは検出できない取り違え）。
+  assertEquals(Array.from(first().data), [1, 2]);
+  assertEquals(Array.from(second().data), [3, 4]);
+  assertEquals(first().shape, shape);
+
+  // 返すのは毎回**別の写し**。購読側が受け取った配列を書き換えても、次の写しにも
+  // パイプライン側の配列にも波及しない（参照を握られる事故の構造的な排除）。
+  const copy = first();
+  assertNotStrictEquals(copy.data, step1);
+  copy.data[0] = 99;
+  assertEquals(Array.from(first().data), [1, 2]);
+  assertEquals(Array.from(step1), [1, 2]);
+  assertNotStrictEquals(copy.data, first().data);
 });

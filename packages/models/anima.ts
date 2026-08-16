@@ -3,8 +3,9 @@
  *
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
  * 面は利用者ストーリーに対応する — 組む（{@link AnimaPipeline.fromPretrained} /
- * {@link AnimaPipeline.fromAssets}）/ 生成する（`generate`）/ 解放する（`dispose`）/
- * 解像度の綴りを扱う（{@link parseResolution} / {@link formatResolution}）。
+ * {@link AnimaPipeline.fromAssets}）/ 生成する（`generate`）/ 生成の途中経過を購読する
+ * （`onEvent` — {@link AnimaGenerateEvent}）/ 解放する（`dispose`）/ 解像度の綴りを扱う
+ * （{@link parseResolution} / {@link formatResolution}）。
  *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  * barrel（`mod.ts`）経由の tree-shaking はこの不変条件の上にだけ成立する。
@@ -14,7 +15,9 @@ export { AnimaPipeline } from "./src/anima/pipeline.ts";
 export type {
   AnimaAssets,
   AnimaFromPretrainedOptions,
+  AnimaGenerateEvent,
   AnimaGenerateRequest,
+  AnimaLatentSnapshot,
   AnimaPipelineOptions,
   AnimaRunComponent,
   GeneratedImage,

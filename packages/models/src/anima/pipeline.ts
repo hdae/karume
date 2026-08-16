@@ -118,14 +118,74 @@ export type AnimaGenerateRequest = {
   readonly resolution?: ImageSize;
   /** 初期ノイズの seed（既定 0 — 同じ seed なら同じ画像）。 */
   readonly seed?: number;
+  /**
+   * 生成イベントの観測席（{@link AnimaGenerateEvent}）— 段の開始 / 終了・denoise の 1 step
+   * 完了・VAE タイル 1 枚の完了ごとに呼ばれる。
+   *
+   * **await する**（発火の順序が決定的になり、消費側で間引き / スロットリングができる）。
+   * **例外は握らない**（`onRunDiagnostics` と同じ流儀 = fail loudly）— 副産物として
+   * **throw が step 粒度の中断手段**になる（生成は reject し、Session は `withSession` の
+   * `finally` で解放される）。
+   *
+   * NOTE: 毎 step の VAE プレビューは提供しない。VAE は DiT を解放した**後**にしかロード
+   * できない（VRAM の MUST — モジュール doc）ので、途中結果として渡せるのは生 latent
+   * （`copyLatents`）だけ。プレビューが要るなら latent から消費側で近似する。
+   */
+  readonly onEvent?: (event: AnimaGenerateEvent) => void | Promise<void>;
 };
 
-/** {@link AnimaPipelineOptions.onRunDiagnostics} が受けるコンポーネント名（Session 1 本 = 1 名）。 */
+/**
+ * {@link AnimaPipelineOptions.onRunDiagnostics} が受けるコンポーネント名（Session 1 本 = 1 名）。
+ * `stage` イベント（{@link AnimaGenerateEvent}）の段名も同じ 4 名。
+ */
 export type AnimaRunComponent =
   | "text_encoder"
   | "text_conditioner"
   | "transformer"
   | "vae_decoder";
+
+/** `denoise-step` の `copyLatents()` が返す途中 latent の写し。 */
+export type AnimaLatentSnapshot = {
+  readonly data: Float32Array<ArrayBuffer>;
+  /** latent の形 `[1,C,H,W]`（DiT の plan が決めた値）。 */
+  readonly shape: readonly number[];
+};
+
+/** {@link AnimaGenerateRequest.onEvent} が受ける生成イベント。 */
+export type AnimaGenerateEvent =
+  /** 段の Session 構築の**前**（`start`）と解放の**後**（`end`）— GB 級ロードの進捗が見える。 */
+  | { readonly kind: "stage"; readonly component: AnimaRunComponent; readonly at: "start" | "end" }
+  | {
+    readonly kind: "denoise-step";
+    /** 完了した step 数（1-based）。 */
+    readonly step: number;
+    readonly steps: number;
+    /** その step で消費した sigma。 */
+    readonly sigma: number;
+    /** 呼んだときだけ途中 latent を写して返す（{@link latentSnapshot}）。 */
+    readonly copyLatents: () => AnimaLatentSnapshot;
+  }
+  /** VAE タイル 1 枚の decode 完了（`tile` は 1-based）。 */
+  | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number };
+
+/**
+ * 途中 latent を返す口を作る（**lazy copy** — 呼ばれたときだけ写す）。
+ *
+ * 進捗だけを購読する消費側にコピー費用が一切かからず、内部の配列を渡さないので「次 step の
+ * 入力を購読側に握られる」事故も構造的に起きない。
+ *
+ * MUST: 呼ばれた時点ではなく**作った時点**の配列を写す（引数で束縛する）。denoise ループの
+ * `current` は step ごとに**新しい配列へ差し替わる**ので、この束縛がそのまま「その step の
+ * latent」になる。ループ変数を閉じ込めると、後から呼んだ購読側に別 step の latent が返る。
+ *
+ * NOTE: `export` は GPU 無しで独立性を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
+ */
+export const latentSnapshot = (
+  latents: Float32Array<ArrayBuffer>,
+  shape: readonly number[],
+): () => AnimaLatentSnapshot =>
+(): AnimaLatentSnapshot => ({ data: new Float32Array(latents), shape });
 
 /** 構築オプション（{@link AnimaPipeline.fromAssets} / {@link AnimaPipeline.fromPretrained} 共通）。 */
 export type AnimaPipelineOptions = {
@@ -594,6 +654,35 @@ export class AnimaPipeline {
       guidance,
     );
 
+    // 生成イベントの発火口。未購読なら何もしない 1 本に畳んで、発火点に分岐を置かない。
+    const { onEvent } = request;
+    const emit: (event: AnimaGenerateEvent) => Promise<void> = onEvent === undefined
+      ? () => Promise.resolve()
+      : async (event) => {
+        await onEvent(event);
+      };
+    /** 段 1 本を回す（`stage` を Session 構築の前と解放の後に挟む — 途中で落ちたら `end` は出ない）。 */
+    const withStage = async <T>(
+      component: AnimaRunComponent,
+      model: KarumeModel,
+      sessionOptions: SessionOptions,
+      body: (
+        run: (inputs: Record<string, Tensor>) => Promise<Tensor>,
+        session: Session,
+      ) => Promise<T>,
+    ): Promise<T> => {
+      await emit({ kind: "stage", component, at: "start" });
+      const result = await withSession(
+        state.gpu,
+        model,
+        sessionOptions,
+        observer(state, component),
+        body,
+      );
+      await emit({ kind: "stage", component, at: "end" });
+      return result;
+    };
+
     // --- ① プロンプト層（GPU 不要・決定的）------------------------------------
     const positive = state.tokenizers.encode(request.prompt, "プロンプト");
     const negative = wantsUncond
@@ -602,22 +691,20 @@ export class AnimaPipeline {
     const sigmas = sigmaSchedule(steps, state.config.scheduler.shift);
 
     // --- ② テキスト経路（DiT ロードの前に解放する）---------------------------
-    const hidden = await withSession(
-      state.gpu,
+    const hidden = await withStage(
+      "text_encoder",
       state.textEncoder,
       {},
-      observer(state, "text_encoder"),
       (run) =>
         Promise.all([
           run({ input_ids: idsTensor(positive.qwenIds) }),
           ...(negative === undefined ? [] : [run({ input_ids: idsTensor(negative.qwenIds) })]),
         ]),
     );
-    const embeds = await withSession(
-      state.gpu,
+    const embeds = await withStage(
+      "text_conditioner",
       state.textConditioner,
       {},
-      observer(state, "text_conditioner"),
       (run) =>
         Promise.all([
           run({ source_hidden_states: hidden[0], target_input_ids: idsTensor(positive.t5Ids) }),
@@ -633,11 +720,10 @@ export class AnimaPipeline {
     // --- ③ denoise（DiT を N step。VAE ロードの前に解放する）-----------------
     // 低精度計算のノブ（quant の session）は **DiT の Session にだけ**効かせる —
     // text 系 / VAE は対象外（比較の軸を DiT 1 本に保つ）。
-    const { latents, latentShape } = await withSession(
-      state.gpu,
+    const { latents, latentShape } = await withStage(
+      "transformer",
       state.transformer,
       state.sessionOptions,
-      observer(state, "transformer"),
       async (run) => {
         const model = state.transformer;
         const plan = planDynDit(model, state.ropeBase, resolution);
@@ -695,6 +781,13 @@ export class AnimaPipeline {
             Math.fround(sigmas[index + 1] - sigmas[index]),
             guidance,
           );
+          await emit({
+            kind: "denoise-step",
+            step: index + 1,
+            steps,
+            sigma: sigmas[index],
+            copyLatents: latentSnapshot(current, plan.latentShape),
+          });
         }
         return { latents: current, latentShape: plan.latentShape };
       },
@@ -707,18 +800,22 @@ export class AnimaPipeline {
       ANIMA_LATENTS_MEAN,
       ANIMA_LATENTS_STD,
     );
-    const decoded = await withSession(
-      state.gpu,
+    const decoded = await withStage(
+      "vae_decoder",
       state.vaeDecoder,
       {},
-      observer(state, "vae_decoder"),
       async (run) => {
         const tileShape = staticInputShape(state.vaeDecoder, "latents");
         const sampleShape = staticOutputShape(state.vaeDecoder);
         const geometry = planVaeTiling(latentShape, tileShape, sampleShape);
+        const tiles = tileCount(geometry);
+        let decodedTiles = 0;
         const pixels = await decodeTiled(denormalized, geometry, async (tile, row, col) => {
           const output = await run({ latents: { dtype: "f32", shape: tileShape, data: tile } });
-          return asF32(output, `VAE 出力（タイル ${row},${col}）`);
+          const sample = asF32(output, `VAE 出力（タイル ${row},${col}）`);
+          decodedTiles += 1;
+          await emit({ kind: "vae-tile", tile: decodedTiles, tiles });
+          return sample;
         });
         // 寸法は**幾何**が正本（latent の全長 × 縮尺）。画素数から逆算しない — 非正方では
         // `3·H·W` の分解が一意でなく、逆算では縦横の取り違えが原理的に検出できない。
@@ -726,7 +823,7 @@ export class AnimaPipeline {
           pixels,
           width: geometry.cols.extent * geometry.scale,
           height: geometry.rows.extent * geometry.scale,
-          tiles: tileCount(geometry),
+          tiles,
           blend: [
             blendExtent(geometry.rows, geometry.scale),
             blendExtent(geometry.cols, geometry.scale),

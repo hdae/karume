@@ -210,9 +210,29 @@ export type IrodoriGenerateRequest = {
    * S がこの値以下なら 1 枚に縮退する（= 単発 decode）。
    */
   readonly codecTileFrames?: number;
+  /**
+   * 生成イベントの観測席（{@link IrodoriGenerateEvent}）— 段の開始 / 終了と DiT の 1 step
+   * 完了ごとに呼ばれる。
+   *
+   * **await する**（発火の順序が決定的になり、消費側で間引き / スロットリングができる）。
+   * **例外は握らない**（`onRunDiagnostics` と同じ流儀 = fail loudly）— 副産物として
+   * **throw が step 粒度の中断手段**になる（生成は reject し、Session は `withSession` の
+   * `finally` で解放される）。
+   *
+   * MUST: 指定すると DiT ループは**ホスト経路**で回る（`gpuTiming` と同じ選択機構）。常駐経路
+   * （ADR 0054）は全 step を 1 batch + 単一フェンスに束ねる設計なので途中の観測が構造的に
+   * 不可能で、`enqueue` 時点の発火は「進捗」として嘘になる。**代償は壁時計だけ** — ADR 0054 が
+   * DiT ループに与えた 1.76 倍を放棄する（生成全体では実測 7.2 → 8.6 秒 / S 170・参照環境
+   * 2026-08-16）。2 経路の出力はビット同一（`runDitLoopResident` の MUST）なので**波形は
+   * 1 ビットも変わらない**（`e2e_irodori_wav_test.ts` の onEvent 段が同じ sha256 で門にしている）。
+   */
+  readonly onEvent?: (event: IrodoriGenerateEvent) => void | Promise<void>;
 };
 
-/** {@link IrodoriPipelineOptions.onRunDiagnostics} が受けるコンポーネント名。 */
+/**
+ * {@link IrodoriPipelineOptions.onRunDiagnostics} が受けるコンポーネント名。
+ * `stage` イベント（{@link IrodoriGenerateEvent}）の段名も同じ 8 名。
+ */
 export type IrodoriRunComponent =
   | "backbone"
   | "text-proj"
@@ -222,6 +242,71 @@ export type IrodoriRunComponent =
   | "dit"
   | "codec-encoder"
   | "codec-decoder";
+
+/** `denoise-step` の `copyLatents()` が返す途中潜在の写し。 */
+export type IrodoriLatentSnapshot = {
+  readonly data: Float32Array<ArrayBuffer>;
+  /** 潜在の形 `[frames, latentDim]`。 */
+  readonly shape: readonly number[];
+};
+
+/**
+ * {@link IrodoriGenerateRequest.onEvent} が受ける生成イベント。
+ *
+ * NOTE: anima の `AnimaGenerateEvent` と同型だが `vae-tile` に当たる席は無い — codec decode の
+ * タイルは**性能とメモリのノブ**（`codecTileFrames`）で、段としては `codec-decoder` の
+ * `stage` が覆う。
+ */
+export type IrodoriGenerateEvent =
+  /** 段の Session 構築の**前**（`start`）と解放の**後**（`end`）— GB 級ロードの進捗が見える。 */
+  | {
+    readonly kind: "stage";
+    readonly component: IrodoriRunComponent;
+    readonly at: "start" | "end";
+  }
+  | {
+    readonly kind: "denoise-step";
+    /** 完了した step 数（1-based）。**CFG の内側の forward 数ではない**。 */
+    readonly step: number;
+    readonly steps: number;
+    /** その step で消費した時刻 `t`（flow matching のスケジュール — anima の sigma に当たる）。 */
+    readonly t: number;
+    /** 呼んだときだけ途中潜在を写して返す（{@link latentSnapshot}）。 */
+    readonly copyLatents: () => IrodoriLatentSnapshot;
+  };
+
+/** 生成イベントの発火口（未購読なら何もしない 1 本に畳んで、発火点に分岐を置かない）。 */
+type EmitEvent = (event: IrodoriGenerateEvent) => Promise<void>;
+
+/** 未購読のときの発火口。 */
+const NO_EVENTS: EmitEvent = () => Promise.resolve();
+
+/** 要求の `onEvent` を発火口に畳む（await して例外は握らない — {@link IrodoriGenerateRequest.onEvent}）。 */
+const emitter = (
+  onEvent: ((event: IrodoriGenerateEvent) => void | Promise<void>) | undefined,
+): EmitEvent =>
+  onEvent === undefined ? NO_EVENTS : async (event: IrodoriGenerateEvent) => {
+    await onEvent(event);
+  };
+
+/**
+ * 途中潜在を返す口を作る（**lazy copy** — 呼ばれたときだけ写す）。
+ *
+ * 進捗だけを購読する消費側にコピー費用が一切かからず、内部の配列を渡さないので「次 step の
+ * 入力を購読側に握られる」事故も構造的に起きない。
+ *
+ * MUST: 呼ばれた時点ではなく**作った時点**の配列を写す（引数で束縛する）。DiT ループの `x` は
+ * step ごとに**新しい配列へ差し替わる**ので、この束縛がそのまま「その step の潜在」になる。
+ * ループ変数を閉じ込めると、後から呼んだ購読側に別 step の潜在が返る。
+ *
+ * NOTE: `export` は GPU 無しで独立性を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
+ */
+export const latentSnapshot = (
+  latent: Float32Array<ArrayBuffer>,
+  shape: readonly number[],
+): () => IrodoriLatentSnapshot =>
+(): IrodoriLatentSnapshot => ({ data: new Float32Array(latent), shape });
 
 /** 構築オプション（{@link IrodoriPipeline.fromAssets} / {@link IrodoriPipeline.fromPretrained} 共通）。 */
 export type IrodoriPipelineOptions = {
@@ -492,6 +577,33 @@ const observer = (
   return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
 };
 
+/**
+ * 段 1 本を回す（`stage` イベントを Session 構築の前と解放の後に挟む）。
+ * 途中で落ちたら `end` は出ない（生成ごと reject する — `onEvent` の doc）。
+ */
+const withStageSession = async <T>(
+  state: IrodoriState,
+  emit: EmitEvent,
+  component: IrodoriRunComponent,
+  model: KarumeModel,
+  sessionOptions: SessionOptions,
+  body: (
+    run: (inputs: Record<string, Tensor>) => Promise<Record<string, Tensor>>,
+    session: Session,
+  ) => Promise<T>,
+): Promise<T> => {
+  await emit({ kind: "stage", component, at: "start" });
+  const result = await withSession(
+    state.gpu,
+    model,
+    sessionOptions,
+    observer(state, component),
+    body,
+  );
+  await emit({ kind: "stage", component, at: "end" });
+  return result;
+};
+
 /** {@link IrodoriPipeline} の内部状態（公開面には出さない）。 */
 type IrodoriState = {
   readonly gpu: GpuContext;
@@ -681,6 +793,7 @@ const openIrodoriState = async (
  */
 const encodeReferenceAudio = async (
   state: IrodoriState,
+  emit: EmitEvent,
   audio: { readonly data: Float32Array<ArrayBuffer>; readonly sampleRate: number },
 ): Promise<Float32Array<ArrayBuffer>> => {
   const { config } = state;
@@ -700,11 +813,12 @@ const encodeReferenceAudio = async (
     config.hopLength,
   );
   const frames = padded.length / config.hopLength;
-  return await withSession(
-    state.gpu,
+  return await withStageSession(
+    state,
+    emit,
+    "codec-encoder",
     state.codecEncoder,
     {},
-    observer(state, "codec-encoder"),
     async (run) => {
       const outputs = await run({ wav: f32(padded, [1, frames, config.hopLength]) });
       return asF32(outputAt(state.codecEncoder, outputs, 0), "codec encoder の出力");
@@ -715,6 +829,7 @@ const encodeReferenceAudio = async (
 /** speaker 条件を組む（参照音声 / 参照 latent / 埋め込み直接指定 / 参照なしのゼロ短絡）。 */
 const encodeSpeaker = async (
   state: IrodoriState,
+  emit: EmitEvent,
   input: IrodoriSpeakerInput | undefined,
 ): Promise<ConditionState> => {
   const { config } = state;
@@ -736,13 +851,16 @@ const encodeSpeaker = async (
     // 二重に正規化された別のベクトルとして条件に入る。
     return { data: stateOverride, rows: stateOverride.length / config.speakerDim };
   }
-  const latent = "audio" in input ? await encodeReferenceAudio(state, input.audio) : input.latent;
+  const latent = "audio" in input
+    ? await encodeReferenceAudio(state, emit, input.audio)
+    : input.latent;
   const patched = patchReferenceLatent(latent, config.latentDim, config.speakerPatchSize);
-  const encoded = await withSession(
-    state.gpu,
+  const encoded = await withStageSession(
+    state,
+    emit,
+    "speaker",
     state.speaker,
     {},
-    observer(state, "speaker"),
     async (run) => {
       const outputs = await run({
         latent: f32(patched.data, [1, patched.tokens, patched.width]),
@@ -804,17 +922,22 @@ type DitLoopResult = {
  * 再アップロード）。
  *
  * **数値の正本**であり、計測が有効な device（`gpuTiming` — 常駐経路が使う batch を開けない）
- * での唯一の経路でもある。
+ * と生成イベントの購読（`onEvent` — 1 batch の途中は観測できない）での唯一の経路でもある。
  */
-const runDitLoopOnHost = async (state: IrodoriState, loop: DitLoop): Promise<DitLoopResult> => {
+const runDitLoopOnHost = async (
+  state: IrodoriState,
+  emit: EmitEvent,
+  loop: DitLoop,
+): Promise<DitLoopResult> => {
   const { config } = state;
   let x = loop.initial;
   let forwards = 0;
-  await withSession(
-    state.gpu,
+  await withStageSession(
+    state,
+    emit,
+    "dit",
     state.dit,
     state.ditSessionOptions,
-    observer(state, "dit"),
     async (run) => {
       for (let step = 0; step < config.steps; step += 1) {
         const t = loop.schedule[step];
@@ -851,6 +974,13 @@ const runDitLoopOnHost = async (state: IrodoriState, loop: DitLoop): Promise<Dit
           }
         }
         x = eulerStep(x, combineCfg(cond, variants), Math.fround(tNext - t));
+        await emit({
+          kind: "denoise-step",
+          step: step + 1,
+          steps: config.steps,
+          t,
+          copyLatents: latentSnapshot(x, [loop.frames, config.latentDim]),
+        });
       }
     },
   );
@@ -971,6 +1101,7 @@ const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<D
 /** テキスト 1 本（+ caption / 参照話者）から latent を作る。 */
 const generateLatent = async (
   state: IrodoriState,
+  emit: EmitEvent,
   request: IrodoriGenerateRequest,
 ): Promise<LatentStage> => {
   const { config } = state;
@@ -984,11 +1115,12 @@ const generateLatent = async (
   // --- ① backbone（text / caption を同じ 1 セッションで回す）---------------
   // 1.26GB の重みを 2 度アップロードしないため 1 セッション 2 run にしてある。診断は run
   // ごとに "backbone" として届く。
-  const hidden = await withSession(
-    state.gpu,
+  const hidden = await withStageSession(
+    state,
+    emit,
+    "backbone",
     state.backbone,
     {},
-    observer(state, "backbone"),
     async (run) => {
       const text = outputAt(
         state.backbone,
@@ -1006,11 +1138,12 @@ const generateLatent = async (
   );
 
   // --- ② text-proj -------------------------------------------------------
-  const textState = await withSession(
-    state.gpu,
+  const textState = await withStageSession(
+    state,
+    emit,
+    "text-proj",
     state.textProj,
     {},
-    observer(state, "text-proj"),
     async (run) => {
       const output = outputAt(state.textProj, await run({ hidden: hidden.text }), 0);
       return { data: asF32(output, "text-proj の出力"), rows: output.shape[1] };
@@ -1022,11 +1155,12 @@ const generateLatent = async (
   let captionVec: Float32Array<ArrayBuffer> | undefined;
   if (hidden.caption !== undefined) {
     const captionHidden = hidden.caption;
-    const encoded = await withSession(
-      state.gpu,
+    const encoded = await withStageSession(
+      state,
+      emit,
+      "caption-proj",
       state.captionProj,
       {},
-      observer(state, "caption-proj"),
       async (run) => {
         const outputs = await run({ hidden: captionHidden });
         const raw = outputAt(state.captionProj, outputs, 0);
@@ -1043,7 +1177,7 @@ const generateLatent = async (
   }
 
   // --- ④ speaker ---------------------------------------------------------
-  const speakerState = await encodeSpeaker(state, request.speaker);
+  const speakerState = await encodeSpeaker(state, emit, request.speaker);
   const hasSpeaker = speakerState.rows > 0;
 
   // --- ⑤ S の決定 --------------------------------------------------------
@@ -1059,11 +1193,12 @@ const generateLatent = async (
     // 手動指定は duration グラフを回さない（上流 `manual_seconds` 経路）。
     plan = sequenceLengthFromSeconds(request.durationSeconds, bounds);
   } else {
-    const logFrames = await withSession(
-      state.gpu,
+    const logFrames = await withStageSession(
+      state,
+      emit,
+      "duration",
       state.duration,
       {},
-      observer(state, "duration"),
       async (run) => {
         const outputs = await run({
           text_state: f32(textState.data, [1, textState.rows, config.textDim]),
@@ -1167,8 +1302,10 @@ const generateLatent = async (
   // MUST: 計測が有効な device では batch を開けない（ADR 0021 — 未回収の timestamp が区間ぶん
   // 溜まる）。op 別 GPU 時間の観測席（`onRunDiagnostics` + `gpuTiming`）を残すため、その device
   // だけは従来のホストループへ落とす。積む演算はどちらも同型で、出力は同じでなければならない。
-  const { x, forwards } = state.gpu.gpuTimingEnabled
-    ? await runDitLoopOnHost(state, loop)
+  // 生成イベントの購読（`onEvent`）も同じ理由でホスト経路を選ぶ — 1 batch + 単一フェンスの
+  // 常駐経路は step の完了そのものがホストから観測できない（`onEvent` の doc の MUST）。
+  const { x, forwards } = state.gpu.gpuTimingEnabled || request.onEvent !== undefined
+    ? await runDitLoopOnHost(state, emit, loop)
     : await runDitLoopResident(state, loop);
 
   return {
@@ -1192,15 +1329,17 @@ const generateLatent = async (
  */
 const decodeWaveform = async (
   state: IrodoriState,
+  emit: EmitEvent,
   latent: GeneratedLatent,
   tiles: readonly CodecTile[],
 ): Promise<Float32Array<ArrayBuffer>> => {
   const { latentDim, hopLength } = state.config;
-  return await withSession(
-    state.gpu,
+  return await withStageSession(
+    state,
+    emit,
+    "codec-decoder",
     state.codecDecoder,
     {},
-    observer(state, "codec-decoder"),
     async (run) =>
       await decodeTiles(latent.data, { latentDim, hopLength, tiles }, async (slice, frames) => {
         const outputs = await run({ latent: f32(slice, [1, frames, latentDim]) });
@@ -1212,10 +1351,11 @@ const decodeWaveform = async (
 /** テキスト 1 本から波形を作る（latent → 末尾トリム → decode → 切り出し）。 */
 const generateAudio = async (
   state: IrodoriState,
+  emit: EmitEvent,
   request: IrodoriGenerateRequest,
 ): Promise<IrodoriGeneratedAudio> => {
   const { config } = state;
-  const { latent, plan } = await generateLatent(state, request);
+  const { latent, plan } = await generateLatent(state, emit, request);
   // 末尾トリムの判定は z 上（decode 前）— 上流 `_synthesize` と同じ順序。
   const flattening = findFlatteningPoint(latent.data, latent.frames, config.latentDim);
   const samples = trimmedSampleCount(plan.targetSamples, flattening, config.hopLength);
@@ -1223,7 +1363,7 @@ const generateAudio = async (
     tileFrames: request.codecTileFrames ?? DEFAULT_CODEC_TILE_FRAMES,
     haloFrames: config.codecHaloFrames,
   });
-  const waveform = await decodeWaveform(state, latent, tiles);
+  const waveform = await decodeWaveform(state, emit, latent, tiles);
   const data = samples === waveform.length
     ? waveform
     : (waveform.slice(0, samples) as Float32Array<ArrayBuffer>);
@@ -1322,7 +1462,7 @@ export class IrodoriPipeline {
     if (this.#disposal !== undefined) {
       throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
     }
-    return await this.#chain(() => generateAudio(this.#state, request));
+    return await this.#chain(() => generateAudio(this.#state, emitter(request.onEvent), request));
   }
 
   /**
@@ -1335,7 +1475,9 @@ export class IrodoriPipeline {
     if (this.#disposal !== undefined) {
       throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
     }
-    return await this.#chain(async () => (await generateLatent(this.#state, request)).latent);
+    return await this.#chain(async () =>
+      (await generateLatent(this.#state, emitter(request.onEvent), request)).latent
+    );
   }
 
   /**

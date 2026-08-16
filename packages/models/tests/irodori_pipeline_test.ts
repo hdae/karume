@@ -12,11 +12,13 @@
 // の 2 つが噛み合って、門の順序そのものを縛る。グラフ宣言との 12 点突合はこの `assetBuffer` の
 // さらに後段なので、合成 IR コンテナを組む器（`tests/helpers/` に無い）が要る — ここでは扱わない。
 // 資産 JSON の decode 門（`assetJson`）も同じ理由で `fromAssets` からは届かないので、末尾の 2 本
-// だけは**門を直接叩く**。
+// だけは**門を直接叩く**。`denoise-step` の `copyLatents`（`latentSnapshot`）も GPU 無しで
+// 縛れる純関数なので、最後の 1 本で同じく直接叩く — ここが壊れると購読側へ**別 step の潜在が
+// 黙って**届き、実 GPU の WAV 門は観測席を通らないので緑のままになる。
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assertEquals, assertNotStrictEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import { assetJson, IrodoriPipeline } from "../src/irodori/pipeline.ts";
+import { assetJson, IrodoriPipeline, latentSnapshot } from "../src/irodori/pipeline.ts";
 
 const FILE = {
   path: "dit/model.f32.safetensors",
@@ -203,4 +205,29 @@ Deno.test("assetJson: JSON 構文違反は decode とは別の文言で落ちる
   // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
   const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
   assertEquals(assetJson({ tokenizer: valid }, "tokenizer"), { unkId: 0, space: "あ" });
+});
+
+Deno.test("latentSnapshot: 束縛した時点の潜在を写す（step を進めても写しは変わらない）", () => {
+  const shape = [2, 2];
+  // DiT ループの再現: `eulerStep` は純関数なので `x` は step ごとに**新しい配列**へ
+  // 差し替わる。イベントの口は step ごとに作って渡す。
+  const step1 = Float32Array.from([1, 2, 3, 4]);
+  const first = latentSnapshot(step1, shape);
+  const step2 = Float32Array.from([5, 6, 7, 8]);
+  const second = latentSnapshot(step2, shape);
+
+  // 生成が全部終わってから呼んでも「作った時点」の値が返る。ループ変数を閉じ込める実装だと
+  // ここが両方 [5, 6, 7, 8] になる（購読側からは検出できない取り違え）。
+  assertEquals(Array.from(first().data), [1, 2, 3, 4]);
+  assertEquals(Array.from(second().data), [5, 6, 7, 8]);
+  assertEquals(first().shape, shape);
+
+  // 返すのは毎回**別の写し**。購読側が受け取った配列を書き換えても、次の写しにも
+  // パイプライン側の配列にも波及しない（参照を握られる事故の構造的な排除）。
+  const copy = first();
+  assertNotStrictEquals(copy.data, step1);
+  copy.data[0] = 99;
+  assertEquals(Array.from(first().data), [1, 2, 3, 4]);
+  assertEquals(Array.from(step1), [1, 2, 3, 4]);
+  assertNotStrictEquals(copy.data, first().data);
 });

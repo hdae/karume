@@ -14,10 +14,20 @@
  * のみ（fs を持ち込まない — 横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
  */
 
+import { assertEquals, assertFalse, assertRejects } from "@std/assert";
 import { parseManifest, resolveFiles } from "@karume/hub";
 import type { Manifest } from "@karume/hub";
-import { AnimaPipeline, encodePng, type GeneratedImage, type ImageSize } from "../mod.ts";
+import {
+  type AnimaGenerateEvent,
+  AnimaPipeline,
+  encodePng,
+  type GeneratedImage,
+  type ImageSize,
+} from "../mod.ts";
 import { formatResolution } from "../anima.ts";
+import { parseAnimaPipelineConfig } from "../src/anima/config.ts";
+import { sigmaSchedule } from "../src/anima/sampler.ts";
+import { ANIMA_SPATIAL_COMPRESSION } from "../src/anima/dit-tokens.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
@@ -135,15 +145,27 @@ const mismatchReport = async (
     `  実物 ${dumped.pathname}（参照はバイト列ではなく sha256 のみなので先頭差分位置は出せない）`;
 };
 
-/** 生成 → PNG → sha 突合。一致しない場合は緩めず、診断を付けて落とす。 */
+/**
+ * 生成 → PNG → sha 突合。一致しない場合は緩めず、診断を付けて落とす。
+ *
+ * `onEvent` を渡した呼びも**同じ参照値**で突き合わせる — 観測席が数値に 1 ビットも触って
+ * いないことの直接証拠になる（下の onEvent 門）。
+ */
 const assertReferencePng = async (
   label: string,
   pipeline: AnimaPipeline,
   resolution: ImageSize,
   expected: string,
+  onEvent?: (event: AnimaGenerateEvent) => void,
 ): Promise<void> => {
   const started = performance.now();
-  const image = await pipeline.generate({ prompt: PROMPT, resolution, steps: STEPS, seed: SEED });
+  const image = await pipeline.generate({
+    prompt: PROMPT,
+    resolution,
+    steps: STEPS,
+    seed: SEED,
+    ...(onEvent === undefined ? {} : { onEvent }),
+  });
   const png = await encodePng(image.data, image.width, image.height);
   const actual = await sha256Hex(png);
   const elapsed = ((performance.now() - started) / 1000).toFixed(1);
@@ -253,5 +275,153 @@ Deno.test({
     } finally {
       await server.shutdown();
     }
+  },
+});
+
+// --- onEvent（生成イベントの観測席）------------------------------------------
+//
+// 観測席そのものの門。押さえるのは 4 点:
+//  ① イベント列が実行構造と**完全一致**する（段 4 本 × start/end / denoise が steps 回 /
+//     VAE タイルが枚数ぶん）。枚数は `onRunDiagnostics` の `vae_decoder` run 数から採る
+//     （タイル幾何を再実装せず、独立な 2 つの観測を突き合わせる）。
+//  ② `copyLatents()` の形が latent の形（解像度 ÷ 空間圧縮率）と一致し、要素数も合う。
+//  ③ **PNG の sha256 が観測なしの参照値と同一**。購読側は毎 step 写しを受け取り、その写しを
+//     NaN で壊してすらいる — それでも絵が 1 ビットも動かないことが「観測に副作用が無い」の
+//     直接証拠になる（写しでなく内部配列を渡していたら、ここが必ず割れる）。
+//  ④ コールバックの throw が生成を落とし、その後の `dispose` が正常に効く（例外を握らない
+//     流儀の副産物 = step 粒度の中断手段）。
+
+Deno.test({
+  name: "e2e(実GPU): onEvent の観測は数値に触らない（イベント列 / 途中 latent / 中断）",
+  ignore: !RUNNABLE,
+  fn: async (t) => {
+    const quant = "w8a8-s16";
+    const resolution: ImageSize = { width: 1024, height: 1024 };
+    const manifest = readManifest();
+    const { scheduler } = parseAnimaPipelineConfig(
+      manifest.models[manifest.defaultModel].pipelineConfig,
+    );
+    const assets = await loadLocalAssets(manifest, quant);
+    const runs: string[] = [];
+    const pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, {
+      quant,
+      onRunDiagnostics: (component) => runs.push(component),
+    });
+    try {
+      await t.step("イベント列と途中 latent を固定し、PNG は参照 sha256 のまま", async () => {
+        const log: string[] = [];
+        const shapes: string[] = [];
+        const lengths: number[] = [];
+        let firstStep: (() => { data: Float32Array<ArrayBuffer> }) | undefined;
+        let firstStepData: Float32Array | undefined;
+        await assertReferencePng("onEvent-1024", pipeline, resolution, REFERENCE[0].sha256, (
+          event,
+        ) => {
+          if (event.kind === "stage") {
+            log.push(`stage:${event.component}:${event.at}`);
+            return;
+          }
+          if (event.kind === "vae-tile") {
+            log.push(`tile:${event.tile}/${event.tiles}`);
+            return;
+          }
+          log.push(`step:${event.step}/${event.steps}@${event.sigma}`);
+          const snapshot = event.copyLatents();
+          shapes.push(snapshot.shape.join("x"));
+          lengths.push(snapshot.data.length);
+          // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、PNG の sha が割れる。
+          snapshot.data.fill(Number.NaN);
+          if (event.step === 1) {
+            firstStep = event.copyLatents;
+            firstStepData = event.copyLatents().data;
+          }
+        });
+
+        // ① 実行構造との完全一致。VAE タイル数は診断側の run 数から採る（独立な観測）。
+        const tiles = runs.filter((component) => component === "vae_decoder").length;
+        const sigmas = sigmaSchedule(STEPS, scheduler.shift);
+        assertEquals(
+          log,
+          [
+            "stage:text_encoder:start",
+            "stage:text_encoder:end",
+            "stage:text_conditioner:start",
+            "stage:text_conditioner:end",
+            "stage:transformer:start",
+            ...Array.from({ length: STEPS }, (_, at) => `step:${at + 1}/${STEPS}@${sigmas[at]}`),
+            "stage:transformer:end",
+            "stage:vae_decoder:start",
+            ...Array.from({ length: tiles }, (_, at) => `tile:${at + 1}/${tiles}`),
+            "stage:vae_decoder:end",
+          ],
+          "イベント列が実行構造と合わない（段の前後 / step 数 / タイル数）",
+        );
+
+        // ② 途中 latent の形。解像度から導く（テストに 128 を書かない）。
+        const latentHeight = resolution.height / ANIMA_SPATIAL_COMPRESSION;
+        const latentWidth = resolution.width / ANIMA_SPATIAL_COMPRESSION;
+        const channels = lengths[0] / (latentHeight * latentWidth);
+        assertEquals(
+          new Set(shapes),
+          new Set([`1x${channels}x${latentHeight}x${latentWidth}`]),
+          `途中 latent の形が [1,C,${latentHeight},${latentWidth}] でない`,
+        );
+        assertEquals(
+          new Set(lengths),
+          new Set([channels * latentHeight * latentWidth]),
+          "途中 latent の要素数が形と合わない",
+        );
+
+        // ③ 生成が終わった後に呼んでも step 1 の値が返る（lazy だが束縛は作った時点）。
+        assertEquals(
+          Array.from((firstStep as () => { data: Float32Array<ArrayBuffer> })().data.slice(0, 8)),
+          Array.from((firstStepData as Float32Array).slice(0, 8)),
+          "生成後に呼んだ copyLatents が step 1 の値を返さない",
+        );
+      });
+
+      await t.step("コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
+        const seen: string[] = [];
+        const abortAt = 2;
+        await assertRejects(
+          () =>
+            pipeline.generate({
+              prompt: PROMPT,
+              resolution: { width: 512, height: 512 },
+              steps: abortAt,
+              seed: SEED,
+              onEvent: (event) => {
+                seen.push(
+                  event.kind === "stage"
+                    ? `stage:${event.component}:${event.at}`
+                    : event.kind === "denoise-step"
+                    ? `step:${event.step}`
+                    : `tile:${event.tile}`,
+                );
+                if (event.kind === "denoise-step" && event.step === abortAt) {
+                  throw new Error("購読側で中断");
+                }
+              },
+            }),
+          Error,
+          "購読側で中断",
+        );
+        // 例外を握らないので DiT の段で止まる — VAE 段は 1 度も開かない。
+        assertEquals(seen.at(-1), `step:${abortAt}`, "中断した step が最後のイベントでない");
+        assertFalse(seen.includes("stage:transformer:end"), "中断したのに段が正常終了している");
+        assertFalse(
+          seen.some((entry) => entry.startsWith("stage:vae_decoder")),
+          "中断したのに VAE 段へ入っている",
+        );
+      });
+    } finally {
+      // 中断した生成の後でも解放は正常に効く（直列化鎖は失敗を次へ持ち越さない）。
+      await pipeline.dispose();
+    }
+    await assertRejects(
+      () => pipeline.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
+      Error,
+      "dispose 済み",
+    );
   },
 });
