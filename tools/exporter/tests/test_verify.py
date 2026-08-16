@@ -15,7 +15,7 @@ import torch
 from safetensors.torch import save_file
 
 from karume.ir import IR_METADATA_KEY
-from karume.ops import IO_DTYPES, SEMANTIC_DTYPES, OpContractError
+from karume.ops import OpContractError
 from karume.verify import (
     ContainerError,
     IrError,
@@ -416,10 +416,8 @@ class TestRuntimeSupport:
         """転送層の軸は意味論 dtype 全語彙を受理する（ADR 0009 で i32 / bool を解禁）。
 
         どのノードも消費しない入力にも転送層の制約は実在する（実行器は全 graph.inputs を
-        転送する）ので、軸自体は残す — 受理集合が IO_DTYPES から導かれることを固定する。
+        転送する）ので、軸自体は残す。
         """
-        assert IO_DTYPES == SEMANTIC_DTYPES
-
         graph = parse(
             inputs=[
                 {"name": "x", "dtype": "f32", "shape": ["T", 4]},
@@ -429,6 +427,16 @@ class TestRuntimeSupport:
         )
 
         assert_runtime_support(graph)
+
+    def test_a_storage_only_dtype_cannot_be_a_graph_input(self):
+        """反対側 — 転送できるのは意味論 dtype だけで、格納 dtype は入力に置けない。
+
+        `f16` は initializer の格納としては valid（TestDeclarationCompleteness の
+        f32-as-f16）なので、「格納できる dtype」と「転送できる dtype」が別語彙であることは
+        こちらからしか固定できない。
+        """
+        with pytest.raises(IrError, match="意味論 dtype 'f16'"):
+            parse(inputs=[{"name": "x", "dtype": "f16", "shape": ["T", 4]}])
 
     def test_an_op_that_does_not_accept_the_input_dtype_is_reported(self):
         """転送できても op が受理しない dtype はここで落ちる（軸が 2 本ある理由）。"""

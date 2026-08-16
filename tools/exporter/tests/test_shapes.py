@@ -11,7 +11,12 @@ from __future__ import annotations
 import pytest
 
 from karume.ir import IrGraph, IrInput, IrNode, IrValue
-from karume.ops import OpContractError, resolve_op_contract
+from karume.ops import (
+    _UNARY_ATTRS,
+    SCALAR_PARAM_ATTRS,
+    OpContractError,
+    resolve_op_contract,
+)
 from karume.shapes import assert_graph_shapes, compute_output_shape
 
 
@@ -84,6 +89,16 @@ class TestScalarAttrInvariants:
     def test_a_missing_scalar_attr_is_rejected_by_the_shape_layer_too(self):
         with pytest.raises(OpContractError):
             shape_of("leaky_relu", [[4]], attrs={})
+
+    def test_the_params_table_and_the_attrs_schema_cover_the_same_unary_ops(self):
+        """スカラ attr を宣言した単項 op は必ず params 表にも載る（逆も）。
+
+        attrs スキーマ（`_UNARY_ATTRS`）と params のレイアウト（`SCALAR_PARAM_ATTRS`）は
+        別々に書かれた 2 表で、片方だけに op を足しても**例外は出ない**:
+        params 表に無い側は `scalar_param_values` が空リストを返して attr の値が黙って
+        カーネルへ届かず、attrs スキーマに無い側は宣言そのものが契約外 attrs 扱いになる。
+        """
+        assert set(SCALAR_PARAM_ATTRS) == set(_UNARY_ATTRS)
 
     def test_symbolic_shapes_pass_through_unary_ops(self):
         assert shape_of("leaky_relu", [[1, "T", 4]], attrs={"negative_slope": 0.1}) == [

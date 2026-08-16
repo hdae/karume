@@ -98,9 +98,10 @@ FLIP_OP = "flip"
 #: 実体化コピーの流用（新カーネル 0）。
 SYM_PREFIX_SLICE_OP = "sym_prefix_slice"
 
-#: 融合 op（ADR 0012 / ADR 0015 / ADR 0017）。ADR 0007 の「分解禁止 10 op」は全て
-#: カーネルを持つ（conv2d は Anima の VAE decoder で実測に出た — ADR 0017）。
-#: bias / affine を持つ 4 本は**アリティ固定**で、bias 無しの conv はエクスポータの
+#: 融合 op（ADR 0012 / ADR 0015 / ADR 0017）。ADR 0007 起点の「分解禁止」リスト
+#: （**現行 12 op** — 台帳の正本は docs/op-vocabulary.md）は全てカーネルを持つ
+#: （conv2d は Anima の VAE decoder で実測に出た — ADR 0017）。
+#: bias / affine を持つ融合 op は**アリティ固定**で、bias 無しの conv はエクスポータの
 #: ゼロ bias 合成でアリティ 3 へ正規化される（arity 分岐を語彙に持ち込まない — ADR 0015）。
 LINEAR_OP = "linear"
 LAYER_NORM_OP = "layer_norm"
@@ -217,11 +218,13 @@ STRIDED_RANK = 4
 SEMANTIC_DTYPES = frozenset({"f32", "i32", "bool"})
 #: f32 専業（実測グラフに i32 / bool 形が現れていない — 対称性のためには解禁しない）。
 F32_DTYPES = frozenset({"f32"})
-#: mask 外積 mul(i64,i64) と `1 - attention_mask` の sub（recon §3-8）。入力値依存で
+#: mask 外積 mul(i64,i64) と `1 - attention_mask` の sub
+#: （docs/research/2026-08-02-deberta-front-recon.md §3-8）。入力値依存で
 #: 定数畳み込みできないため実行系に要る。
 F32_I32_DTYPES = frozenset({"f32", "i32"})
 BOOL_DTYPES = frozenset({"bool"})
-#: bool の行 sum（真の個数 — 出力は i32）。sdp の searchsorted（recon §2）。
+#: bool の行 sum（真の個数 — 出力は i32）。sdp の searchsorted
+#: （docs/research/2026-08-02-sbv2-chain-recon.md §2）。
 F32_BOOL_DTYPES = frozenset({"f32", "bool"})
 #: 整数添字専業（gather の index スロット — 実測は i32[16,T,T]）。
 I32_DTYPES = frozenset({"i32"})
@@ -318,6 +321,23 @@ PERMUTE_ATTRS: AttrSchema = {"dims": lambda value, where: _assert_permute_dims(v
 def permute_dims(attrs: Mapping[str, Any], where: str) -> list[int]:
     """permute ノードの軸並べ替え表（検査は assert_node_contract が済ませている前提）。"""
     return _assert_permute_dims(attrs.get("dims"), f"{where} の attrs.dims")
+
+
+def _assert_integer_attr(value: Any, where: str, minimum: int) -> int:
+    """`minimum` 以上の整数 attr。
+
+    MUST: `bool` を除く（Python の bool は int の派生で、`True` が 1 として素通りする）。
+    MUST: 安全整数の上限も見る（TS 側は `Number.isSafeInteger` で暗黙にこの上限を持つ）。
+    Python の int は任意精度なので、上限を書かないと「エクスポータは書けるがランタイムが
+    受理しない attr 値」が作れる — 受理集合は両側で同じでなければならない。
+    """
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= MAX_SAFE_INT
+    ):
+        raise OpContractError(f"{where}: {minimum} 以上の整数でない: {value!r}")
+    return value
 
 
 #: slice の切り出し指定（ADR 0014）。`dim` 軸を `[start, end)` に縮める。
@@ -432,28 +452,12 @@ def sym_prefix_slice_attrs(
     )
 
 
-def _assert_integer_attr(value: Any, where: str, minimum: int) -> int:
-    """`minimum` 以上の整数 attr。
-
-    MUST: `bool` を除く（Python の bool は int の派生で、`True` が 1 として素通りする）。
-    MUST: 安全整数の上限も見る（TS 側は `Number.isSafeInteger` で暗黙にこの上限を持つ）。
-    Python の int は任意精度なので、上限を書かないと「エクスポータは書けるがランタイムが
-    受理しない attr 値」が作れる — 受理集合は両側で同じでなければならない。
-    """
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not minimum <= value <= MAX_SAFE_INT
-    ):
-        raise OpContractError(f"{where}: {minimum} 以上の整数でない: {value!r}")
-    return value
-
-
 def _assert_normalized_shape(value: Any, where: str) -> list[int]:
     """layer_norm の正規化軸。**長さ 1（= 最終次元）のみ**受理する。
 
     MUST: 多軸正規化を「対称性のため」受け入れない（ADR 0007 の語彙 allowlist 凍結）。
-    実測は全 7 本が [1024]（recon §5）で、行カーネルは最終次元の連続並びが前提。
+    実測は全 7 本が [1024]（docs/research/2026-08-02-deberta-front-recon.md §5）で、
+    行カーネルは最終次元の連続並びが前提。
     """
     if not isinstance(value, list) or len(value) != 1:
         raise OpContractError(
@@ -618,7 +622,8 @@ CONV2D_ATTRS: AttrSchema = {
 
 #: conv_transpose1d の attrs（ADR 0015）。
 #:
-#: MUST: stride >= 1（stride 0 はカーネルのゼロ除算・GPU ハング — recon §4）。
+#: MUST: stride >= 1（stride 0 はカーネルのゼロ除算・GPU ハング —
+#: docs/research/2026-08-02-sbv2-chain-recon.md §4）。
 #: MUST: output_padding / dilation / groups の欄を作らない。実測は全て 0 / 1 / 1 で、欄を
 #: 持たないことが「実測外の値を黙って既定値で実行する」経路を構造的に潰す。
 CONV_TRANSPOSE1D_ATTRS: AttrSchema = {
@@ -854,14 +859,17 @@ _DTYPES: dict[str, frozenset[str]] = {
     "mul": F32_I32_DTYPES,
     "sub": F32_I32_DTYPES,
     "bitwise_not": BOOL_DTYPES,
-    # spline の `inside = (x >= -b) & (x <= b)`（recon §2）— bool の論理積。
+    # spline の `inside = (x >= -b) & (x <= b)`
+    # （docs/research/2026-08-02-sbv2-chain-recon.md §2）— bool の論理積。
     "bitwise_and": BOOL_DTYPES,
     "sum": F32_BOOL_DTYPES,
     # reshape は要素を 1 つも読み書きしない（別名化のみ）ので全語彙。実測も f32 の view と
-    # i32 mask の squeeze/unsqueeze、bool マスクの unsqueeze が全て出る（recon §2）。
+    # i32 mask の squeeze/unsqueeze、bool マスクの unsqueeze が全て出る
+    # （docs/research/2026-08-02-deberta-front-recon.md §2）。
     RESHAPE_OP: frozenset(SEMANTIC_DTYPES),
-    # gather 添字（i32）・conv 経路の bool マスクに加え、相対位置埋め込みの 4D 化（f32 —
-    # recon §2 の enc_p / flow 行）。strided コピー族は dtype パラメトリックなので共用のまま。
+    # gather 添字（i32）・conv 経路の bool マスクに加え、相対位置埋め込みの 4D 化
+    # （f32 — docs/research/2026-08-02-sbv2-chain-recon.md §2 の enc_p / flow 行）。
+    # strided コピー族は dtype パラメトリックなので共用のまま。
     EXPAND_OP: frozenset(SEMANTIC_DTYPES),
     # 焼いた定数は相対位置バケット表（i32）と位置テーブル（f32）の 2 系統。bool の
     # initializer は語彙に無いので解禁しない。
@@ -966,7 +974,8 @@ OP_CONTRACTS: dict[str, OpContract] = {
     PERMUTE_OP: _contract(PERMUTE_OP, "permute", 1, PERMUTE_ATTRS),
     EXPAND_OP: _contract(EXPAND_OP, "expand", 1),
     # レイアウト第 2 群（ADR 0014）。実測は全て f32（enc_p の m_p/logs_p 分割・coupling の
-    # 96/96 分割と cat・相対位置 value 側の pad・flow/sdp の Flip — recon §2）。
+    # 96/96 分割と cat・相対位置 value 側の pad・flow/sdp の Flip —
+    # docs/research/2026-08-02-sbv2-chain-recon.md §2）。
     SLICE_OP: _contract(SLICE_OP, "slice", 1, SLICE_ATTRS),
     # 唯一の可変アリティ op。arity は**下限** 2（1 本の cat は恒等コピーで実測にも出ない）。
     CAT_OP: _contract(CAT_OP, "cat", 2, AXIS_ATTRS, variadic=True),
@@ -975,7 +984,7 @@ OP_CONTRACTS: dict[str, OpContract] = {
     SYM_PREFIX_SLICE_OP: _contract(
         SYM_PREFIX_SLICE_OP, "sym_prefix_slice", 1, SYM_PREFIX_SLICE_ATTRS
     ),
-    # 融合 op（ADR 0012）。bias / affine を持つ 3 本はアリティ 3 固定 — 実測が bias 常時
+    # 融合 op（ADR 0012）。bias / affine を持つ融合 op はアリティ 3 固定 — 実測が bias 常時
     # ありで、「bias 無し」を表す欄を作らないことがそのまま fail loudly になる。
     LINEAR_OP: _contract(LINEAR_OP, "linear", 3),
     LAYER_NORM_OP: _contract(LAYER_NORM_OP, "layer_norm", 3, LAYER_NORM_ATTRS),
@@ -1030,7 +1039,8 @@ EMITTABLE_OPS = frozenset(OP_CONTRACTS)
 
 
 #: rank 上限が効く op（strided コピー族 — カーネルの params は rank 固定）。
-#: MUST: TS 側（packages/runtime/src/ops.ts の computeOutputShape）と同じ集合。片方だけに置くと
+#: MUST: TS 側（packages/runtime/src/ops/shapes.ts の computeOutputShape が非公開の
+#: assertStridedRank を呼ぶ op）と同じ集合。片方だけに置くと
 #: 「export は緑、ブラウザだけ落ちる」が rank 軸で復活する。
 STRIDED_RANK_OPS = frozenset(
     {PERMUTE_OP, EXPAND_OP, SLICE_OP, CAT_OP, SYM_PREFIX_SLICE_OP, MASKED_FILL_OP}
@@ -1039,7 +1049,8 @@ STRIDED_RANK_OPS = frozenset(
 
 def assert_strided_rank(rank: int, what: str, where: str) -> None:
     """strided コピー族が実行できる rank
-    （packages/runtime/src/ops.ts の assertStridedRank と同義）。
+    （packages/runtime/src/ops/shapes.ts の非公開 assertStridedRank と同義 —
+    バレルの ops.ts には出ない）。
 
     MUST: 契約層で見る。超過を codegen まで落とすと「契約検査は通ったのに実行段で内部
     エラー」になり、どの op のどの値が悪いのか診断に出ない。

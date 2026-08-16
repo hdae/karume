@@ -62,12 +62,13 @@ class TestFixtureShape:
         """MUST: `minScore` / `maxTokenLength` は語彙**全体**の値（部分集合から導かない）。
 
         部分集合（実測 124 件）から計算すると未知ノードの重みと探索幅が変わり、別の分割に
-        なる。全体由来なら部分集合の最小 / 最長を必ず超える。
+        なる。全体由来なら部分集合の最小 / 最長を**狭義に**超える（等号を許すと「emit が
+        部分集合から算出する」誤りでも緑になる）。
         """
         subset = FIXTURE["t5"]["vocab"]
 
-        assert FIXTURE["t5"]["minScore"] <= min(score for _, _, score in subset)
-        assert FIXTURE["t5"]["maxTokenLength"] >= max(len(token) for token, _, _ in subset)
+        assert FIXTURE["t5"]["minScore"] < min(score for _, _, score in subset)
+        assert FIXTURE["t5"]["maxTokenLength"] > max(len(token) for token, _, _ in subset)
 
     def test_the_pipeline_prompts_are_covered_by_the_cases(self):
         """`anima_pipeline` の 2 本は Deno 側のクロスチェックが語彙部分集合で引く対象。
@@ -81,7 +82,11 @@ class TestFixtureShape:
 
 
 class TestNormalizerTables:
-    """焼いた表の引き方（Precompiled の最短接頭辞勝ち）。"""
+    """焼いた表の引き方（Precompiled の最短接頭辞勝ち）。
+
+    NOTE: 独立した正本との突合ではなく、commit 済みの凍結値への回帰門（表とケースを
+    再生成すると両辺が同時に動くので、再生成手順を踏むと本クラスは常に緑）。
+    """
 
     def test_every_case_reproduces_the_recorded_normalization(self):
         for case in FIXTURE["cases"]:
@@ -284,6 +289,18 @@ class TestReferenceParity:
                 "id"
             ]
             assert t5_ref.encode(case["text"], anima_demo.MAX_LENGTH) == case["t5Ids"], case["id"]
+
+    def test_the_search_width_is_recomputed_from_the_whole_vocabulary(self, built):
+        """探索幅を実 tokenizer.json の**全語彙**から引き直して等値で突き合わせる。
+
+        フィクスチャ内の部分集合に対する不等号門（`TestFixtureShape`）が押さえるのは
+        必要条件だけで、「全体の一部（上位 N 件など）から算出した値」も通してしまう。
+        資産があるときだけは正本そのものから引き直せる。
+        """
+        vocab = built["t5Vocab"]
+
+        assert FIXTURE["t5"]["minScore"] == min(score for _, score in vocab)
+        assert FIXTURE["t5"]["maxTokenLength"] == max(len(token) for token, _ in vocab)
 
     def test_the_fixture_still_matches_the_upstream_tokenizers(self):
         """正本（AutoTokenizer）が動いていないこと。動いたらフィクスチャの再生成が要る。"""
