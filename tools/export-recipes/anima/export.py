@@ -55,6 +55,7 @@ MUST: `--lora` は **DiT の層切り詰め（`--num-layers`）より前**に焼
 
     <out>/<target>/model.safetensors      重み・定数 + __metadata__.karume_ir
     <out>/<target>/io.<case>.safetensors  入力と torch CPU での期待出力
+    <out>/<target>/lora_provenance.json   焼き込んだ LoRA の帰属（`--lora` を焼いた対象のみ）
 """
 
 from __future__ import annotations
@@ -73,11 +74,13 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import SERIES_ROOT
+from anima.distribution import LORA_PROVENANCE_FILE
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     normalize_boundary_tensor,
 )
+from karume.dist import sha256_file
 from karume.emit import WEIGHT_DTYPES, storage_breakdown
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
@@ -523,6 +526,26 @@ def _fake_quant(
     return {}
 
 
+def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path) -> str | None:
+    """焼き込んだ LoRA の帰属（ファイル名 + sha256）を系列へ書き、ファイル名を返す。
+
+    融合後の重みからは「どの LoRA を焼いたか」が復元できないので、**焼いた側が事実を書き残す**
+    のが唯一の道。配布 README が印字する帰属（`anima/card.py` の `LORA_SHA256`）は
+    `anima/distribution.py` の `assert_lora_provenance` がこの記録と突き合わせる。
+
+    書くのは実際に焼いたターゲットだけ（`LORA_PREFIXES` に無いターゲットの系列に置くと
+    「このモデルにも焼いた」という事実でない主張になる）。配布形には入らない —
+    `anima/distribution.py` の配置表が許可した役割だけが出力へ渡る。
+    """
+    if args.lora is None or target not in LORA_PREFIXES:
+        return None
+    record = {"file": args.lora.name, "sha256": sha256_file(args.lora)}
+    (out_dir / LORA_PROVENANCE_FILE).write_text(
+        json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return LORA_PROVENANCE_FILE
+
+
 def _apply_lora(args: argparse.Namespace, model: nn.Module, target: str) -> None:
     if args.lora is None:
         return
@@ -593,6 +616,9 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
         # 混ぜると、initializer とテンソルキーの 1:1 検査〈verify_model〉が壊れる）。
         save_file(dict(component.host_tables), str(out_dir / ROPE_BASE_FILE))
         written.append(ROPE_BASE_FILE)
+    provenance = _write_lora_provenance(args, target, out_dir)
+    if provenance is not None:
+        written.append(provenance)
     breakdown = storage_breakdown(graph)
     return {
         "target": target,

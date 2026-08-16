@@ -21,12 +21,14 @@ from typing import Any
 
 import pytest
 
+from anima.card import LORA_SHA256
 from anima.distribution import (
     ANIMA_DEFAULT_QUANT,
     ANIMA_MODEL_NAME,
     ANIMA_PIPELINE_CONFIG,
     ANIMA_QUANTS,
     ANIMA_WEIGHTS,
+    LORA_PROVENANCE_FILE,
     OUTPUT_PATHS,
     PIPELINE,
     AnimaSources,
@@ -86,17 +88,26 @@ def _write(path: Path, payload: bytes) -> None:
     path.write_bytes(payload)
 
 
+def _lora_record(sha256: str) -> bytes:
+    """`anima/export.py` が焼き込み時に残す帰属の記録（実物と同じ形）。"""
+    return json.dumps({"file": "anima-turbo-lora-v0.2.safetensors", "sha256": sha256}).encode(
+        "utf-8"
+    )
+
+
 def _build_series(
     series_dir: Path,
     *,
     model: str = ANIMA_MODEL_NAME,
     i8_rope: bytes | None = None,
     mark: bytes = b"",
+    lora_sha256: str | None = None,
 ) -> AnimaSources:
     """系列レイアウト（`outputs/series/` 相当）を偽資産で再現する（`io.*` の混入込み）。
 
     `mark` は transformer 系列だけに混ぜる差分 — ファミリー組み立てで「モデルごとに違う重み」と
-    「モデル間で同一の base 資産」を作り分けるための軸。
+    「モデル間で同一の base 資産」を作り分けるための軸。`lora_sha256` は帰属の記録を
+    カードの宣言からずらす軸（既定は一致する値）。
     """
     sources = anima_sources(series_dir, model)
     _write(sources.base / "text_encoder" / "model.safetensors", _PAYLOADS["text_encoder"])
@@ -114,6 +125,10 @@ def _build_series(
         )
         _write(series / "transformer" / "model.safetensors", payload)
         _write(series / "transformer" / "io.s01024t0699.safetensors", b"io-fixture")
+        _write(
+            series / "transformer" / LORA_PROVENANCE_FILE,
+            _lora_record(LORA_SHA256 if lora_sha256 is None else lora_sha256),
+        )
     _write(
         sources.transformer_f16 / "transformer" / "rope_base.safetensors", _PAYLOADS["rope_base"]
     )
@@ -234,6 +249,48 @@ class TestRopeBase:
             _assemble_anima(sources, out_dir)
         # 止めた以上、途中の配布形を残さない（片方だけ入った出力を後段に見せない）。
         assert not (out_dir / MANIFEST_FILENAME).exists()
+
+
+class TestLoraProvenance:
+    """カードが印字する LoRA の帰属は、系列に残った記録と組み立て時に突き合わせる。
+
+    融合後の重みからは焼いた LoRA を復元できないので、突き合わせが無いと差し替え後も古い
+    sha256 が公開される — 値は 64 桁 hex として形式が妥当なので `verify_dist` の構造検査も
+    通り、配布 README の帰属だけが黙って嘘になる。
+    """
+
+    def test_it_stops_when_the_recorded_lora_is_not_the_one_the_card_declares(
+        self, tmp_path: Path
+    ) -> None:
+        sources = _build_series(tmp_path / "series", lora_sha256="9" * 64)
+        out_dir = tmp_path / "models" / "anima-turbo"
+
+        with pytest.raises(DistError, match="カードの宣言と違う"):
+            _assemble_anima(sources, out_dir)
+
+        # 計画段の検査なので配布形は 1 ファイルも生えない。
+        assert not out_dir.exists()
+
+    def test_it_stops_when_the_series_carries_no_record_at_all(self, tmp_path: Path) -> None:
+        """記録の無い系列（帰属を突き合わせられない）も緑にしない。"""
+        sources = _build_series(tmp_path / "series")
+        (sources.transformer_i8 / "transformer" / LORA_PROVENANCE_FILE).unlink()
+
+        with pytest.raises(DistError, match="焼き込んだ LoRA の記録が無い"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+    def test_it_stops_when_the_record_is_not_readable_json(self, tmp_path: Path) -> None:
+        sources = _build_series(tmp_path / "series")
+        (sources.transformer_f16 / "transformer" / LORA_PROVENANCE_FILE).write_bytes(b"{oops")
+
+        with pytest.raises(DistError, match="LoRA の記録を解析できない"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+    def test_the_record_never_reaches_the_distribution(self, assembled) -> None:
+        """記録は系列側の事実 — 配布形（HF リポ）には持ち出さない。"""
+        out_dir, _ = assembled
+
+        assert not any(name.endswith(LORA_PROVENANCE_FILE) for name in _present(out_dir))
 
 
 class TestStorageGate:

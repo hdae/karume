@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 
 import pytest
 import torch
@@ -18,6 +20,7 @@ from torch import nn
 
 from anima import export as export_anima
 from anima import patch as patch_anima
+from anima.distribution import LORA_PROVENANCE_FILE
 
 
 class TestTargets:
@@ -28,6 +31,46 @@ class TestTargets:
         """LoRA の対象は DiT と conditioner だけ（recon §1）— 綴り誤りは黙って空振りする。"""
         assert set(export_anima.LORA_PREFIXES) <= set(export_anima.TARGETS)
         assert set(export_anima.LORA_PREFIXES) == {"transformer", "text_conditioner"}
+
+
+class TestLoraProvenance:
+    """焼いた LoRA の帰属は系列に残す（融合後の重みからは復元できない唯一の事実）。"""
+
+    @staticmethod
+    def _args(lora, **overrides):
+        return argparse.Namespace(lora=lora, lora_scale=1.0, **overrides)
+
+    def test_it_records_the_digest_of_the_file_that_was_fused(self, tmp_path):
+        lora = tmp_path / "anima-turbo-lora-v0.2.safetensors"
+        lora.write_bytes(b"lora-bytes")
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        written = export_anima._write_lora_provenance(self._args(lora), "transformer", out_dir)
+
+        assert written == LORA_PROVENANCE_FILE
+        record = json.loads((out_dir / LORA_PROVENANCE_FILE).read_text(encoding="utf-8"))
+        assert record == {
+            "file": lora.name,
+            "sha256": hashlib.sha256(b"lora-bytes").hexdigest(),
+        }
+
+    def test_it_writes_nothing_for_a_target_the_lora_never_touched(self, tmp_path):
+        """焼いていない系列に記録を置くと「このモデルにも焼いた」という嘘の主張になる。"""
+        lora = tmp_path / "lora.safetensors"
+        lora.write_bytes(b"lora-bytes")
+        out_dir = tmp_path / "vae_decoder"
+        out_dir.mkdir()
+
+        assert export_anima._write_lora_provenance(self._args(lora), "vae_decoder", out_dir) is None
+        assert list(out_dir.iterdir()) == []
+
+    def test_it_writes_nothing_without_the_flag(self, tmp_path):
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        assert export_anima._write_lora_provenance(self._args(None), "transformer", out_dir) is None
+        assert list(out_dir.iterdir()) == []
 
 
 class TestFakeQuant:

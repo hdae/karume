@@ -386,6 +386,16 @@ table). There are 4 fail-loudly conditions: `lora_B` being all zeros for the who
 matched / one of `lora_A`, `lora_B` missing / a shape mismatch. A per-component ΔW=0 can
 legitimately happen, so that is reported through `FuseReport.is_noop` instead (not raised).
 
+Every target the LoRA is actually fused into also gets a **`lora_provenance.json`** next to its
+`model.safetensors` (the fused file name and its sha256). The fused weights cannot tell you which
+LoRA went in, so the side that fuses it is the only one that can record the fact; at assembly time
+`anima/distribution.py` compares that record against the sha256 the card prints (`LORA_SHA256` in
+`anima/card.py`) and refuses to build on a mismatch or a missing record. Without the comparison,
+swapping the LoRA and re-exporting would publish the old digest in the distributed README — a
+64-hex-digit value passes every structural check in `verify_dist`, so nothing else would notice.
+The record stays in the series: the distribution only ever receives the roles the placement table
+names.
+
 ## Anima host pipeline reference fixture (`anima/pipeline_ref.py`)
 
 Only 4 graphs go into the IR; everything outside them — tokenization / sigma schedule / timestep

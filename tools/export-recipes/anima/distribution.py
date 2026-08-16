@@ -10,12 +10,13 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from anima.card import render_model_card
+from anima.card import LORA_SHA256, render_model_card
 from karume.dist import (
     Artifact,
     DistError,
@@ -38,6 +39,10 @@ ANIMA_PIPELINE = "anima/1"
 #: モデル名に依らない系列（base の text 経路 / VAE と、tokenizer を書く台本の出力）。
 ANIMA_BASE_SERIES = "anima-f16"
 ANIMA_TOKENIZER_SERIES = "anima-demo"
+
+#: 焼き込んだ LoRA の帰属を残すファイル（系列のターゲット直下）。系列レイアウトの綴りは
+#: 読み手（ここ）が持ち、書き手（`anima/export.py`）はここから引く — 2 箇所で独立に動かさない。
+LORA_PROVENANCE_FILE = "lora_provenance.json"
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
 #: 役割名でだけ引くので、綴りが 2 箇所で独立に動くことは起きない。
@@ -180,6 +185,34 @@ def shared_rope_base(sources: AnimaSources) -> Path:
     return candidates[0]
 
 
+def assert_lora_provenance(sources: AnimaSources) -> None:
+    """transformer 系列が記録した LoRA の sha256 が、カードの宣言と一致することを確かめる。
+
+    MUST: カードの帰属節（`anima/card.py` の `LORA_SHA256`）は HF に公開される事実なのに、
+    融合後の重みからは焼いた LoRA を復元できない。突き合わせが無いと、LoRA を差し替えて
+    再エクスポートしても古い / 誤った sha256 がそのまま印字される — 値は 64 桁 hex として
+    形式が妥当なので `verify_dist` の構造検査も通り、**沈黙する**。「別々の台本が持つ同じ
+    事実は組み立て時に必ず突き合わせる」（rope_base のバイト同一検査と同じ規律）。
+    """
+    for series in (sources.transformer_f16, sources.transformer_i8):
+        path = series / "transformer" / LORA_PROVENANCE_FILE
+        if not path.is_file():
+            raise DistError(
+                f"焼き込んだ LoRA の記録が無い: {path}"
+                "（`python -m anima.export --lora …` で再エクスポートすると書かれる）"
+            )
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as cause:
+            raise DistError(f"LoRA の記録を解析できない: {path} — {cause}") from cause
+        digest = record.get("sha256") if isinstance(record, dict) else None
+        if digest != LORA_SHA256:
+            raise DistError(
+                f"焼き込んだ LoRA がカードの宣言と違う: {path} は {digest!r}、"
+                f"anima/card.py は {LORA_SHA256!r} — どちらが正かはここでは決められない"
+            )
+
+
 def anima_placements(sources: AnimaSources) -> dict[str, Path]:
     """役割名 → 出所のファイル。出力の path は {@link OUTPUT_PATHS} が持つ。
 
@@ -200,6 +233,7 @@ def anima_placements(sources: AnimaSources) -> dict[str, Path]:
 def anima_plan(sources: AnimaSources, model: str = ANIMA_MODEL_NAME) -> ModelPlan:
     """Anima 1 モデルぶんの計画を組む（検査はここで全部済ませる — 1 バイトも書かない）。"""
     assert_model_name(model)
+    assert_lora_provenance(sources)
     placements = anima_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, STORAGE_REQUIREMENTS)
