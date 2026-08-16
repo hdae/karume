@@ -38,7 +38,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "./params.ts";
+import { assertU32Params } from "../codegen/params.ts";
 
 /**
  * conv2d の m タイルヒューリスティック（`conv2dIgemmMTile`）の基準行数。既定幾何の

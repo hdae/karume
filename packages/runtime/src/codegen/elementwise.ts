@@ -31,6 +31,7 @@ import {
   WHERE_OP,
 } from "../ops.ts";
 import { CodegenError } from "./errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const ELEMENTWISE_WORKGROUP_SIZE = 256;
 
@@ -476,8 +477,13 @@ export const elementwiseParams = (
 ): Uint32Array<ArrayBuffer> => {
   const rank = outShape.length;
   if (rank < 1) throw new CodegenError("elementwise params: 出力 rank は 1 以上");
+  const n = outShape.reduce((count, dim) => count * dim, 1);
+  assertU32Params("elementwise params", {
+    ...Object.fromEntries(outShape.map((dim, d) => [`out_dims[${d}]`, dim])),
+    n,
+  });
   const params = new Uint32Array(1 + rank + inputShapes.length * rank + scalars.length);
-  params[0] = outShape.reduce((count, dim) => count * dim, 1);
+  params[0] = n;
   for (let d = 0; d < rank; d += 1) params[1 + d] = outShape[d];
   inputShapes.forEach((shape, k) => {
     const padded = padShape(shape, rank);
@@ -488,6 +494,11 @@ export const elementwiseParams = (
       strides[d] = padded[d] === 1 ? 0 : running;
       running *= padded[d];
     }
+    // 長さ 0 の軸を挟むと n が 0 でも左側の stride だけ u32 を超えうる（積は 0 に潰れない）。
+    assertU32Params(
+      "elementwise params",
+      Object.fromEntries(strides.map((stride, d) => [`in${k}_strides[${d}]`, stride])),
+    );
     for (let d = 0; d < rank; d += 1) params[1 + rank + k * rank + d] = strides[d];
   });
   const floats = new Float32Array(params.buffer);

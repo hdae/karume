@@ -23,6 +23,7 @@
 
 import { type IrDtype, SEMANTIC_DTYPES } from "../format/ir.ts";
 import { CodegenError } from "./errors.ts";
+import { assertU32Params } from "./params.ts";
 
 /** DeBERTa front の値は全て rank ≤ 4（ADR 0011）。rank ≥ 5 は rank 下げ正規化で先に潰す。 */
 export const STRIDED_RANK = 4;
@@ -251,12 +252,16 @@ const packStridedParams = (
       `strided params: stride 本数 ${strides.length} が${labels.rank} rank ${dims.length} と違う`,
     );
   }
-  if (!Number.isSafeInteger(offset) || offset < 0) {
-    throw new CodegenError(`strided params: offset は非負整数（${offset}）`);
-  }
+  const n = dims.reduce((count, dim) => count * dim, 1);
+  assertU32Params("strided params", {
+    ...Object.fromEntries(dims.map((dim, d) => [`dims[${d}]`, dim])),
+    ...Object.fromEntries(strides.map((stride, d) => [`strides[${d}]`, stride])),
+    n,
+    offset,
+  });
   const pad = STRIDED_RANK - dims.length;
   const params = new Uint32Array(2 + 2 * STRIDED_RANK);
-  params[0] = dims.reduce((count, dim) => count * dim, 1);
+  params[0] = n;
   for (let d = 0; d < STRIDED_RANK; d += 1) {
     params[1 + d] = d < pad ? 1 : dims[d - pad];
     params[1 + STRIDED_RANK + d] = d < pad ? 0 : strides[d - pad];

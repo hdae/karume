@@ -33,7 +33,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "./params.ts";
+import { assertU32Params } from "../codegen/params.ts";
 
 export const DEFORM_CONV2D_WORKGROUP_SIZE = 256;
 

@@ -18,7 +18,7 @@
  * 非対称な列で固定する）。
  */
 
-import { assertU32Params } from "./params.ts";
+import { assertU32Params } from "../codegen/params.ts";
 
 export const CUMSUM_WORKGROUP_SIZE = 256;
 

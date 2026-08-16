@@ -25,7 +25,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "./params.ts";
+import { assertU32Params } from "../codegen/params.ts";
 
 export const RMS_NORM_WORKGROUP_SIZE = 256;
 

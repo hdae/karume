@@ -47,7 +47,7 @@
 
 import { SIGMOID_STABLE_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "./params.ts";
+import { assertU32Params } from "../codegen/params.ts";
 
 export const GRU_SCAN_WORKGROUP_SIZE = 256;
 

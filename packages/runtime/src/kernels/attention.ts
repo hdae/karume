@@ -45,8 +45,8 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "../codegen/params.ts";
 import { type GemmCompute, gemmComputeKeyPart, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
-import { assertU32Params } from "./params.ts";
 import {
   assertScoreStorageSupported,
   scoreArrayType,

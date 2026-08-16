@@ -22,7 +22,7 @@
 
 import { SIGMOID_STABLE_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "./params.ts";
+import { assertU32Params } from "../codegen/params.ts";
 
 /** 置換元 mul の入力順（有限値では可換だが、NaN payload はバックエンド差がありうる）。 */
 export type SiluMulOrder = "x-sigmoid" | "sigmoid-x";

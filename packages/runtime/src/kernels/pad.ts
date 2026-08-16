@@ -12,7 +12,7 @@
  * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える。
  */
 
-import { assertU32Params } from "./params.ts";
+import { assertU32Params } from "../codegen/params.ts";
 
 export const PAD_WORKGROUP_SIZE = 256;
 

@@ -1,4 +1,4 @@
-// uniform の u32 域検査（src/kernels/params.ts の `assertU32Params`）と、それを通した
+// uniform の u32 域検査（src/codegen/params.ts の `assertU32Params`）と、それを通した
 // カーネル params の入口（GPU 不要）。
 //
 // 検証の眼目は 2 点:
@@ -14,8 +14,8 @@
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
+import { assertU32Params } from "../src/codegen/params.ts";
 import { GATHER_OOB_BITS, gatherParams } from "../src/kernels/gather.ts";
-import { assertU32Params } from "../src/kernels/params.ts";
 
 const U32_MAX = 0xffff_ffff;
 

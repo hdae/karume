@@ -51,7 +51,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "./params.ts";
+import { assertU32Params } from "../codegen/params.ts";
 
 /** 1 行を畳む workgroup の幅（行 reduce / softmax と同じ 256）。 */
 export const QUANTIZE_ROWS_WORKGROUP_SIZE = 256;

@@ -28,6 +28,7 @@
 import type { IrDtype } from "../format/ir.ts";
 import { outputDtypeOf, REDUCE_OPS, type ReduceOpName, resolveOpContract } from "../ops.ts";
 import { CodegenError } from "./errors.ts";
+import { assertU32Params } from "./params.ts";
 
 const REDUCE_WORKGROUP_SIZE = 256;
 
@@ -190,9 +191,7 @@ export const reduceWgsl = (spec: ReduceSpec): string => {
  * 2 語ぶんの内容でも 16 バイト確保する MUST（不足すると binding が validation で落ちる）。
  */
 export const reduceParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
-  if (!Number.isSafeInteger(rows) || rows < 0 || !Number.isSafeInteger(dim) || dim < 0) {
-    throw new CodegenError(`reduce params: rows/dim は非負整数（${rows}, ${dim}）`);
-  }
+  assertU32Params("reduce params", { rows, dim });
   const params = new Uint32Array(4);
   params[0] = rows;
   params[1] = dim;
@@ -307,12 +306,11 @@ export const axisReduceParams = (
   axisLen: number,
   inner: number,
 ): Uint32Array<ArrayBuffer> => {
-  const ok = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
-  if (!ok(outCount) || !ok(axisLen) || !ok(inner)) {
-    throw new CodegenError(
-      `axis reduce params: out_count/axis_len/inner は非負整数（${outCount}, ${axisLen}, ${inner}）`,
-    );
-  }
+  assertU32Params("axis reduce params", {
+    out_count: outCount,
+    axis_len: axisLen,
+    inner,
+  });
   const params = new Uint32Array(4);
   params[0] = outCount;
   params[1] = axisLen;

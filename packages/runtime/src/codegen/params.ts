@@ -1,12 +1,12 @@
-// カーネル uniform の u32 域検査（1 本）。
+// uniform の u32 域検査（1 本）。
 //
 // uniform の各欄は WGSL 側で `u32` として読まれる一方、ホストの値は f64 なので、
-// `Uint32Array` への代入は 2^32 の剰余を黙って取る。検査をカーネルごとに書くと
+// `Uint32Array` への代入は 2^32 の剰余を黙って取る。検査を params ビルダごとに書くと
 // 「safe-integer だけ見る / 上限も見る / 何も見ない」の流儀に割れ、割れた側で超過値が
 // narrowing されたまま dispatch まで通る（要素数だけ別物になる沈黙誤値）ため、判定は
 // ここ 1 箇所に置く。
 
-import { CodegenError } from "../codegen/errors.ts";
+import { CodegenError } from "./errors.ts";
 
 /**
  * uniform に載せる値（および載せる値の導出に使う中間値）が u32 の域に収まることを確かめる。

@@ -18,8 +18,8 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "../codegen/params.ts";
 import { STRIDED_RANK } from "../codegen/strided.ts";
-import { assertU32Params } from "./params.ts";
 
 export const MASKED_FILL_WORKGROUP_SIZE = 256;
 

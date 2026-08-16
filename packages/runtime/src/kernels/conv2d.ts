@@ -43,9 +43,9 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "../codegen/params.ts";
 import { GEMM_MTILE_SMALL, gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
 import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
-import { assertU32Params } from "./params.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,

@@ -49,6 +49,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "../codegen/params.ts";
 import {
   assertGemmGeometry,
   defaultGemmGeometry,
@@ -71,7 +72,6 @@ import {
   gemmTileM,
   gemmTileN,
 } from "./gemm-geometry.ts";
-import { assertU32Params } from "./params.ts";
 import {
   assertScoreStorageSupported,
   scoreArrayType,
