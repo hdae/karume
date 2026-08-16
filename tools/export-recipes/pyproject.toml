@@ -20,7 +20,7 @@ karume = { workspace = true }
 torchvision = { index = "pytorch-cpu" }
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "ruff>=0.15.0"]
+dev = ["mypy>=1.15", "pytest>=9.1.1", "ruff>=0.15.0"]
 # Anima の実重み export 用（`uv sync --group anima`）。sbv2 と同じく既定の sync には入れない。
 # 内訳と根拠（4 コンポーネントの素の export に必要なハード依存）:
 #   diffusers — AnimaTextConditioner / AutoencoderKLQwenImage が本体にマージされたのが 0.39
@@ -114,6 +114,15 @@ depth-anything-preprocess = ["pillow>=11", "transformers==5.14.1"]
 [tool.pytest.ini_options]
 testpaths = ["."]
 pythonpath = ["."]
+
+# mypy は CI に入れない（uv run mypy の手動実行のみ）。対象は「数値計測レポート系の自前
+# ロジック」に明示的に絞る — recipe 全域へ広げると torch / diffusers 等の型欠落が主語になり、
+# 検査の主眼（自前コードの整合）が薄まる。残指摘の件数と内訳はコミット本文が台帳
+# （2026-08-16 レビュー B15 の裁定で常設）。
+[tool.mypy]
+python_version = "3.12"
+files = ["anima/measure_report.py", "anima/measure_quant.py", "anima/pipeline_ref.py"]
+ignore_missing_imports = true
 
 # core（tools/exporter/pyproject.toml）と同じ設定 — 台本は core と行き来するので、
 # 片方だけ別の整形規則にすると移動のたびに無関係な差分が出る。
