@@ -14,6 +14,7 @@ from torch import nn
 from torch.export import Dim
 from torchvision.ops import deform_conv2d
 
+from karume.aten_handlers import ATEN_HANDLERS
 from karume.convert import UnsupportedAtenOpsError
 from karume.ops import EMITTABLE_OPS
 
@@ -173,6 +174,71 @@ class TestRowReduce:
 
         with pytest.raises(NotImplementedError, match=why):
             convert_module(Reduce(), (torch.randn(3, 5),))
+
+
+def _reduce_node(target, args=(), kwargs=None, shape=(3, 5)):
+    """reduce ハンドラへ直接食わせる FX ノードを 1 本組む。
+
+    torch 2.13 の分解は reduce の `dim` を必ず位置引数で出すので、**kwargs 形は export
+    からは作れない**（overload の呼び分け次第で来うる形）。ハンドラは純関数なので、
+    グラフを組む代わりにノード 1 本を手で組んで直接呼ぶ。
+    """
+    graph = torch.fx.Graph()
+    src = graph.placeholder("x")
+    src.meta["val"] = torch.zeros(shape)
+    return graph.call_function(target, (src, *args), dict(kwargs or {}))
+
+
+class TestReduceArgumentsInKwargs:
+    """reduce 族は `dim` / `keepdim` / `dtype` が kwargs で来ても同じ欄として読む。
+
+    位置引数を素で添字すると `IndexError` になり、ADR 0005 の「未対応は診断つきで落とす」
+    規律の外へ落ちる（診断が「エクスポータが壊れた」に化ける）。
+    """
+
+    @pytest.mark.parametrize(
+        ("target", "op"),
+        [
+            (torch.ops.aten.sum.dim_IntList, "sum"),
+            (torch.ops.aten.amax.default, "amax"),
+            (torch.ops.aten.amin.default, "amin"),
+        ],
+    )
+    def test_a_kwarg_dim_is_read_as_the_same_slot(self, target, op):
+        node = _reduce_node(target, kwargs={"dim": [-1]})
+
+        assert ATEN_HANDLERS[target](node) == (op, 1, {"dim": 1}, ())
+
+    @pytest.mark.parametrize(
+        ("target", "kwargs", "why"),
+        [
+            (torch.ops.aten.sum.dim_IntList, {"dim": None}, "全次元 sum は未対応"),
+            (torch.ops.aten.sum.dim_IntList, {"dim": [0, 1]}, r"複数軸 \[0, 1\] の sum は未対応"),
+            (torch.ops.aten.sum.dim_IntList, {"dim": [-1], "keepdim": True}, "keepdim=True の sum"),
+            (
+                torch.ops.aten.sum.dim_IntList,
+                {"dim": [-1], "dtype": torch.float32},
+                "dtype 指定付きの sum は未対応",
+            ),
+            (torch.ops.aten.amax.default, {}, "全次元 amax は未対応"),
+            (torch.ops.aten.amax.default, {"dim": [0, 1]}, r"複数軸 \[0, 1\] の amax は未対応"),
+            (torch.ops.aten.amin.default, {"dim": [-1], "keepdim": True}, "keepdim=True の amin"),
+        ],
+        ids=[
+            "sum-all-dims",
+            "sum-multi-axis",
+            "sum-keepdim",
+            "sum-dtype",
+            "amax-dim-omitted",
+            "amax-multi-axis",
+            "amin-keepdim",
+        ],
+    )
+    def test_unsupported_kwarg_forms_keep_their_diagnostic(self, target, kwargs, why):
+        node = _reduce_node(target, kwargs=kwargs)
+
+        with pytest.raises(NotImplementedError, match=why):
+            ATEN_HANDLERS[target](node)
 
 
 class TestCastAndBitwiseNot:

@@ -468,6 +468,15 @@ def _guard_parts(node: Node) -> tuple[Node, Node] | None:
     return (softmax, src) if equality.args[0] is src else None
 
 
+class _UnprovenGuardError(NotImplementedError):
+    """不活性の判定そのものが実評価の例外で立たなかった形（`safe_softmax` へ回す）。
+
+    `NotImplementedError` の派生にしてあるので呼び出し側の受け口は 1 つのまま。統計だけ
+    分けるのは、**例外を黙って吸収する経路を作らない**ため（本物の実装バグがここへ紛れ込んだ
+    ときに件数として見える）。
+    """
+
+
 def _assert_guard_inactive(src: Node, placeholders: _Placeholders) -> str:
     """ガードが発火し得ない（全要素 -inf の行が存在しない）ことを示し、根拠名を返す。
 
@@ -495,8 +504,22 @@ def _assert_guard_inactive(src: Node, placeholders: _Placeholders) -> str:
             f"safe-softmax ガード: スコア側にも -inf 源がある（{scores.name}）"
         )
     for length in GUARD_PROBE_LENGTHS:
-        evaluated = _eval_static(mask, length, {}, placeholders)
-        if not bool(torch.isfinite(evaluated).any(dim=-1).all()):
+        try:
+            evaluated = _eval_static(mask, length, {}, placeholders)
+            rows_have_finite = bool(torch.isfinite(evaluated).any(dim=-1).all())
+        except NotImplementedError:
+            # 判定関数が構造で下した「証明できない」— そのまま呼び出し側へ返す。
+            raise
+        except Exception as cause:
+            # 実評価は placeholder を**実値**へ解決する一方、記号は probe 長へ置換するので、
+            # 両者が同じ式で出会うと torch が例外を投げる（shape 不一致・非テンソル）。
+            # これは判定の失敗であってエクスポータの故障ではない — 例外の型名簿を呼び出し側へ
+            # 漏らさないよう、判定結果（`NotImplementedError`）へ正規化する MUST。
+            raise _UnprovenGuardError(
+                f"safe-softmax ガードの不活性を判定できない: マスク {mask.name} の記号長"
+                f" {length} での実評価が {type(cause).__name__} で落ちた"
+            ) from cause
+        if not rows_have_finite:
             raise NotImplementedError(
                 f"safe-softmax ガードは不活性でない: マスク {mask.name} は記号長 {length} で"
                 " 全要素 -inf の行を持つ"
@@ -528,6 +551,11 @@ def _drop_safe_softmax_guard(graph: Graph, stats: Counter, *, placeholders: _Pla
         softmax, src = parts
         try:
             reason = _assert_guard_inactive(src, placeholders)
+        except _UnprovenGuardError:
+            # 判定が実評価の例外で立たなかった形（構造で「証明できない」と言われた形と
+            # 区別して数える）。置換そのものは同じ。
+            softmax.meta[SAFE_SOFTMAX_META] = True
+            reason = "rewritten-unproven"
         except NotImplementedError:
             softmax.meta[SAFE_SOFTMAX_META] = True
             reason = "rewritten-safe"
@@ -911,8 +939,12 @@ def _drop_identity_repeat(graph: Graph, stats: Counter) -> None:
 def _drop_identity_add(graph: Graph, stats: Counter) -> None:
     """`aten.add(x, 0)` → x（**Python スカラの 0** のときだけ）。
 
-    NOTE: f32 では `x + 0.0` が x = −0.0 のときだけ +0.0 を返す（唯一の差）。下流で符号付き
-    ゼロを区別する op（IR 語彙には無い）が現れたらこのパスは見直すこと。
+    NOTE: f32 では `x + 0.0` が x = −0.0 のときだけ +0.0 を返す（唯一の差）。IR 語彙には
+    **符号付きゼロを区別する op が実在する** — `div` と `sqrt` がそれで、x = −0.0 なら
+    `1 / (x + 0.0)` は torch で +∞、書き換え後の `1 / x` は −∞ になる（`sqrt(±0) = ±0` も
+    同じ向きの差）。実測 10 ファミリでは消える add の下流が div の分母 / sqrt の引数に
+    到達しないため、乖離の可能性を受容してこの書き換えを残している（docs/limitations.md）。
+    消費側で −0.0 が出うる形を足すときは、このパスの適用条件を先に見直すこと。
     MUST: 型昇格を伴う形（`add(i64, 0.0)` → f32）は書き換えない。恒等ではなく cast なので、
     畳み込みか未対応 op の列挙に回す。
     """

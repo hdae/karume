@@ -595,6 +595,28 @@ def _as_reader_index(value: Any, where: str, what: str) -> int:
     return value
 
 
+#: ヘッダ 1 項目が必ず持つキー（TS リーダが読む欄）。
+_READER_ENTRY_KEYS = ("dtype", "shape", "data_offsets")
+
+
+def _as_reader_entry(value: Any, where: str) -> dict[str, Any]:
+    """ヘッダ 1 項目の構造を検査する（`_as_reader_index` と同じ流儀の受理集合）。
+
+    MUST: 素で添字しない。3 キーの欠落・項目がオブジェクトでない形・shape が配列でない形は
+    `KeyError` / `TypeError` として漏れ、門の診断が「不正なファイル」ではなく「エクスポータが
+    壊れた」に見える（ヘッダ長をファイル実長で拘束するのと同じ理由）。`karume verify` は
+    外部で作られた safetensors も食う公開 CLI なので、到達経路が実在する。
+    """
+    if not isinstance(value, dict):
+        raise ContainerError(f"{where}: ヘッダ項目がオブジェクトでない: {value!r}")
+    missing = [key for key in _READER_ENTRY_KEYS if key not in value]
+    if missing:
+        raise ContainerError(f"{where}: ヘッダ項目に {missing} が無い")
+    if not isinstance(value["shape"], list):
+        raise ContainerError(f"{where}: shape が配列でない: {value['shape']!r}")
+    return value
+
+
 def assert_reader_layout(path: str | Path) -> None:
     """Karume のリーダ（`packages/runtime/src/format/safetensors.ts`）が読めるレイアウトかを見る。
 
@@ -638,6 +660,7 @@ def assert_reader_layout(path: str | Path) -> None:
         if name == "__metadata__":
             continue
         where = f"テンソル '{name}'"
+        entry = _as_reader_entry(entry, where)
         dtype = entry["dtype"]
         if dtype not in READER_DTYPE_BYTES:
             raise ContainerError(f"{where}: リーダが知らない dtype '{dtype}'")

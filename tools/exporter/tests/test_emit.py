@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import struct
 import weakref
+from dataclasses import replace
 
 import pytest
 import torch
@@ -137,6 +138,20 @@ def weight_graph(
     return graph, tensors
 
 
+def compressed_view(graph: IrGraph, dtypes: dict[str, str]) -> IrGraph:
+    """`write_model` がヘッダへ載せるはずの宣言ビュー（呼び手の graph は書き換わらない）。
+
+    companion scale のキー規則（`karume.scale.<テンソルキー>`）は実装を呼ばずテスト側で
+    書き下す — 実装から引くと突合が恒真になる。
+    """
+    initializers = dict(graph.initializers)
+    for name, dtype in dtypes.items():
+        key = initializers[name].tensor
+        scale = f"karume.scale.{key}" if dtype == "i8" else None
+        initializers[name] = IrInitializer(tensor=key, storage=IrStorage(dtype=dtype, scale=scale))
+    return replace(graph, initializers=initializers)
+
+
 class TestEligibility:
     """適格判定は `packages/runtime/src/runtime/plan.ts` の鏡像 —
     ずれると VRAM 削減が黙って消える。
@@ -177,10 +192,12 @@ class TestF16Storage:
 
         path = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
-        assert graph.initializers["w"].storage.dtype == "f16"
-        assert graph.initializers["emb"].storage.dtype == "f16"
+        # 宣言の観測点はファイル側（`write_model` は呼び手の graph を書き換えない）。
+        declared = verify_model(path).initializers
+        assert declared["w"].storage.dtype == "f16"
+        assert declared["emb"].storage.dtype == "f16"
         # MUST: bias は常に f32（プロトタイプの f16 降格バグの根治形 — ADR 0006）。
-        assert graph.initializers["b"].storage.dtype == "f32"
+        assert declared["b"].storage.dtype == "f32"
         with safe_open(str(path), framework="pt") as handle:
             assert handle.get_slice("enc.w").get_dtype() == "F16"
             assert handle.get_slice("enc.b").get_dtype() == "F32"
@@ -195,19 +212,21 @@ class TestF16Storage:
 
         path = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
-        assert graph.initializers["w"].storage.dtype == "f32"
-        assert graph.initializers["emb"].storage.dtype == "f16"
+        declared = verify_model(path).initializers
+        assert declared["w"].storage.dtype == "f32"
+        assert declared["emb"].storage.dtype == "f16"
         with safe_open(str(path), framework="pt") as handle:
             assert handle.get_slice("enc.w").get_dtype() == "F32"
             assert handle.get_slice("enc.emb").get_dtype() == "F16"
-        assert verify_model(path).to_dict() == graph.to_dict()
+        assert verify_model(path).to_dict() == compressed_view(graph, {"emb": "f16"}).to_dict()
 
     def test_the_f16_file_passes_the_full_verification(self, tmp_path):
         graph, tensors = weight_graph()
 
         path = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
-        assert verify_model(path).to_dict() == graph.to_dict()
+        expected = compressed_view(graph, {"w": "f16", "emb": "f16"})
+        assert verify_model(path).to_dict() == expected.to_dict()
 
     def test_the_stored_values_match_the_rounded_weights_bit_for_bit(self, tmp_path):
         graph, tensors = weight_graph()
@@ -248,13 +267,32 @@ class TestF16Storage:
     def test_the_breakdown_counts_eligible_and_plain_bytes(self, tmp_path):
         graph, tensors = weight_graph()
 
-        write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
-        breakdown = storage_breakdown(graph)
+        path = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        # 内訳は**書いたファイルの宣言**から数える（呼び手の graph は圧縮宣言を持たない）。
+        breakdown = storage_breakdown(verify_model(path))
 
         assert breakdown.compressed_tensors == 2
         assert breakdown.compressed_bytes == (3 * 4 + 3 * 5) * 2
         assert breakdown.plain_tensors == 1
         assert breakdown.plain_bytes == 3 * 4
+
+    def test_the_breakdown_counts_a_declared_bf16_initializer(self):
+        """bf16 は「宣言だけ受理」の格納 dtype（実行可否は verify が単独で持つ）。
+
+        内訳はバイト数を数えるだけの層なので、**読めるグラフを数えられない**状態
+        （語彙にある dtype で KeyError）を作らない。エクスポータは bf16 を書かないので、
+        到達経路は `parse_ir_graph` で読んだグラフと手組みグラフ。
+        """
+        graph, _ = weight_graph()
+        graph.initializers["w"] = IrInitializer(tensor="enc.w", storage=IrStorage(dtype="bf16"))
+
+        breakdown = storage_breakdown(graph)
+
+        assert breakdown.compressed_tensors == 1
+        assert breakdown.compressed_bytes == 3 * 4 * 2
+        assert breakdown.plain_tensors == 2
+        assert breakdown.plain_bytes == (3 + 3 * 5) * 4
+        assert breakdown.scale_bytes == 0
 
 
 def int8_weight_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -307,11 +345,12 @@ class TestI8Storage:
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
-        assert graph.initializers["w"].storage.dtype == "i8"
-        assert graph.initializers["w"].storage.scale == "karume.scale.enc.w"
-        assert graph.initializers["emb"].storage.dtype == "i8"
+        declared = verify_model(path).initializers
+        assert declared["w"].storage.dtype == "i8"
+        assert declared["w"].storage.scale == "karume.scale.enc.w"
+        assert declared["emb"].storage.dtype == "i8"
         # MUST: bias は常に f32（プロトタイプの降格バグの根治形 — ADR 0006）。
-        assert graph.initializers["b"].storage.dtype == "f32"
+        assert declared["b"].storage.dtype == "f32"
         with safe_open(str(path), framework="pt") as handle:
             assert handle.get_slice("enc.w").get_dtype() == "I8"
             assert handle.get_slice("enc.b").get_dtype() == "F32"
@@ -325,7 +364,8 @@ class TestI8Storage:
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
-        assert verify_model(path).to_dict() == graph.to_dict()
+        expected = compressed_view(graph, {"w": "i8", "emb": "i8"})
+        assert verify_model(path).to_dict() == expected.to_dict()
 
     def test_the_stored_values_reconstruct_the_weights_bit_for_bit(self, tmp_path):
         """`q8·scale` が fake-quant 済みの重みと**ビット一致**する（格納の意味そのもの）。"""
@@ -389,6 +429,26 @@ class TestI8Storage:
         for key, scale in scales.items():
             assert torch.equal(channel_scale(tensors[key], 0), scale), key
 
+    def test_a_scale_that_is_not_f32_fails_loudly(self, tmp_path):
+        """companion scale は F32 固定（ADR 0019）。writer は F16 もそのまま直列化できる。
+
+        逆変換の等値検査は「同じ f16 scale で fake-quant 済み」なら通ってしまうので、
+        検出は計画段の dtype 検査でしか掛からない（後段の `verify_model` は書いた後）。
+        """
+        graph, tensors, scales = int8_weight_graph()
+        half = {key: value.to(torch.float16) for key, value in scales.items()}
+        for key, scale in half.items():
+            tensors[key] = quantize_to_int8(tensors[key], scale).to(torch.float32) * scale
+
+        with pytest.raises(EmitError, match="scale の dtype"):
+            write_model(
+                tmp_path / "model.safetensors",
+                graph,
+                tensors,
+                weight_dtype="i8",
+                weight_scales=half,
+            )
+
     def test_a_missing_scale_fails_loudly(self, tmp_path):
         """適格なのに scale が無い = fake-quant が届いていない重み（f32 へ落とさない）。"""
         graph, tensors, scales = int8_weight_graph()
@@ -443,10 +503,11 @@ class TestI8Storage:
     def test_the_breakdown_counts_i8_bytes_and_the_scale_overhead(self, tmp_path):
         graph, tensors, scales = int8_weight_graph()
 
-        write_model(
+        path = write_model(
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
-        breakdown = storage_breakdown(graph)
+        # 内訳は**書いたファイルの宣言**から数える（呼び手の graph は圧縮宣言を持たない）。
+        breakdown = storage_breakdown(verify_model(path))
 
         assert breakdown.compressed_tensors == 2
         assert breakdown.compressed_bytes == 3 * 4 + 3 * 5  # i8 = 1 バイト/要素
@@ -511,6 +572,35 @@ class TestFailureLeavesTheGraphUntouched:
         assert json.loads(graph.to_json()) == before
 
 
+class TestSuccessLeavesTheGraphUntouched:
+    """書き出しが成功しても呼び出し側の `graph` は 1 バイトも変わらない。
+
+    commit を呼び手の graph へ書き戻していると、同じ graph を別 dtype で書き直す経路
+    （`write_model` の docstring が再利用経路として名指ししている形）で前回の圧縮宣言が
+    残る — f32 の計画は空プランで宣言を**復元しない**ので、2 本目は「宣言 f16 / 実体 F32」の
+    壊れたコンテナになる。
+    """
+
+    def test_a_successful_f16_write_leaves_the_declarations_alone(self, tmp_path):
+        graph, tensors = weight_graph()
+        before = json.loads(graph.to_json())
+
+        write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+
+        assert json.loads(graph.to_json()) == before
+
+    def test_writing_the_same_graph_as_f32_after_f16_stays_readable(self, tmp_path):
+        graph, tensors = weight_graph()
+
+        write_model(tmp_path / "half.safetensors", graph, tensors, weight_dtype="f16")
+        plain = write_model(tmp_path / "plain.safetensors", graph, tensors)
+
+        with safe_open(str(plain), framework="pt") as handle:
+            assert handle.get_slice("enc.w").get_dtype() == "F32"
+        # 宣言と実体が食い違っていれば verify_model がここで落ちる。
+        assert verify_model(plain).to_dict() == graph.to_dict()
+
+
 class TestStreamingConversion:
     """圧縮変換は**書く直前に 1 本ずつ**掛ける（ADR 0018 / 0019 の格納そのものは不変）。
 
@@ -559,8 +649,9 @@ class TestStreamingConversion:
         )
 
         reference = tmp_path / "reference.safetensors"
-        # graph は書き出し後の commit 済み（= ヘッダに載ったのと同じ宣言）。
-        _save_ordered(reference, pre, _write_order(pre), {IR_METADATA_KEY: graph.to_json()})
+        # ヘッダに載るのは commit 済みの宣言ビュー（呼び手の graph は f32 のまま）。
+        committed = compressed_view(graph, {"w": "f16", "emb": "f16"})
+        _save_ordered(reference, pre, _write_order(pre), {IR_METADATA_KEY: committed.to_json()})
         assert streamed.read_bytes() == reference.read_bytes()
 
     def test_the_streamed_i8_bytes_match_a_pre_converted_write(self, tmp_path):
@@ -582,7 +673,8 @@ class TestStreamingConversion:
         )
 
         reference = tmp_path / "reference.safetensors"
-        _save_ordered(reference, pre, _write_order(pre), {IR_METADATA_KEY: graph.to_json()})
+        committed = compressed_view(graph, {"w": "i8", "emb": "i8"})
+        _save_ordered(reference, pre, _write_order(pre), {IR_METADATA_KEY: committed.to_json()})
         assert streamed.read_bytes() == reference.read_bytes()
 
 

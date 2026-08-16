@@ -124,10 +124,12 @@ def _h_gelu(node: Node) -> Emitted:
 
 def _h_sum(node: Node) -> Emitted:
     src = node.args[0].meta["val"]
-    dims = node.args[1]
+    # 欄の取得は `_arg_or_kwarg` に揃える — overload の呼び分けで `dim` が kwargs 側に来た形でも
+    # 素の添字（IndexError）に落とさず、下の診断規律（ADR 0005）へ合流させる MUST。
+    dims = _arg_or_kwarg(node, 1, "dim", None)
     _expect(dims is not None, node, "全次元 sum は未対応（reduce は 1 軸のみ）")
-    keepdim = bool(node.args[2]) if len(node.args) > 2 else bool(node.kwargs.get("keepdim", False))
-    dtype = node.args[3] if len(node.args) > 3 else node.kwargs.get("dtype")
+    keepdim = bool(_arg_or_kwarg(node, 2, "keepdim", False))
+    dtype = _arg_or_kwarg(node, 3, "dtype", None)
     # 軸は 1 本だけ受理する（複数軸を 1 ノードへ畳むと縮約順序が IR から読めなくなる —
     # 実行側は 1 軸ずつの縮約しか持たない）。keepdim / dtype 指定は従来どおり未対応。
     _expect(len(dims) == 1, node, f"複数軸 {list(dims)} の sum は未対応（1 軸ずつ）")
@@ -582,12 +584,13 @@ def _h_row_reduce(op: str):
 
     def handler(node: Node) -> Emitted:
         src = node.args[0].meta["val"]
-        dims = list(node.args[1]) if len(node.args) > 1 else []
-        keepdim = (
-            bool(node.args[2]) if len(node.args) > 2 else bool(node.kwargs.get("keepdim", False))
-        )
+        # `_h_sum` と同じく `_arg_or_kwarg` で引く — 軸が省略された形を `[]` に落とすと
+        # 「複数軸 [] は未対応」という**事実と食い違う診断**になるので、全次元縮約として弾く。
+        dims = _arg_or_kwarg(node, 1, "dim", None)
+        _expect(dims is not None, node, f"全次元 {op} は未対応（reduce は 1 軸のみ）")
+        keepdim = bool(_arg_or_kwarg(node, 2, "keepdim", False))
         # 軸は 1 本だけ（sum と同じ絞り方 — 実行側は 1 軸ずつの縮約しか持たない）。
-        _expect(len(dims) == 1, node, f"複数軸 {dims} の {op} は未対応（1 軸ずつ）")
+        _expect(len(dims) == 1, node, f"複数軸 {list(dims)} の {op} は未対応（1 軸ずつ）")
         _expect(not keepdim, node, f"keepdim=True の {op} は未対応")
         return Emitted(op, 1, {"dim": _normalized_dims(node, src.dim(), dims)[0]})
 

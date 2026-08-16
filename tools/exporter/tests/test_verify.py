@@ -807,6 +807,32 @@ class TestReaderIndexRange:
             assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
 
 
+class TestReaderEntryStructure:
+    """ヘッダ 1 項目の構造も門の診断で落とす（素の添字は KeyError / TypeError で漏れる）。
+
+    エクスポータが書いたファイルでは到達しない（`_save_ordered` が必ず 3 キーを書く）が、
+    `karume verify` は外部で作られた safetensors も食う公開 CLI なので経路は実在する。
+    診断の主語が「不正なファイル」から「エクスポータが壊れた」に化けるのを防ぐ。
+    """
+
+    @pytest.mark.parametrize(
+        ("entry", "why"),
+        [
+            ({"shape": [2], "data_offsets": [0, 8]}, r"\['dtype'\] が無い"),
+            ({"dtype": "F32", "data_offsets": [0, 8]}, r"\['shape'\] が無い"),
+            ({"dtype": "F32", "shape": [2]}, r"\['data_offsets'\] が無い"),
+            ("F32", "オブジェクトでない"),
+            ({"dtype": "F32", "shape": 2, "data_offsets": [0, 8]}, "shape が配列でない"),
+        ],
+        ids=["no-dtype", "no-shape", "no-offsets", "not-an-object", "shape-not-a-list"],
+    )
+    def test_a_malformed_entry_is_reported_as_a_container_error(self, tmp_path, entry, why):
+        path = write_raw_container(tmp_path / "m.safetensors", {"t": entry}, b"\0" * 8)
+
+        with pytest.raises(ContainerError, match=why):
+            assert_reader_layout(path)
+
+
 class TestHeaderLengthBound:
     """ヘッダ長 u64 はファイル実長で拘束してから read へ渡す（`dist.safetensors_header` と同型）。
 

@@ -6,7 +6,9 @@ README どおり ③固定 seed で再生成しても同じバイト列になる
 
 from __future__ import annotations
 
+import itertools
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -67,7 +69,33 @@ def _bindings(graph: IrGraph, io: dict[str, torch.Tensor]) -> dict[str, int]:
     return bindings
 
 
+#: README の golden 台帳の目印（この行の後ろの最初の表が「モデル名 | 記号次元 | IR ops」）。
+COVERAGE_MARKER = "Current models and coverage:"
+#: coverage 表の 1 行（見出し行と区切り行は名前を持たないので落ちる）。
+COVERAGE_ROW = re.compile(r"^\| `([a-z0-9_]+)`\s+\|")
+
+
+def _readme_coverage_names() -> list[str]:
+    """README の coverage 表に並ぶモデル名（Module 表など他の表と混ざらないよう位置で切る）。"""
+    text = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    _, marker, after = text.partition(COVERAGE_MARKER)
+    assert marker, f"README に '{COVERAGE_MARKER}' が無い（表の位置を決められない）"
+    rows = itertools.takewhile(
+        lambda line: line.startswith("|"),
+        itertools.dropwhile(lambda line: not line.startswith("|"), after.splitlines()),
+    )
+    return [match.group(1) for match in map(COVERAGE_ROW.match, rows) if match]
+
+
 class TestCoverage:
+    def test_the_readme_ledger_lists_exactly_the_generated_models(self):
+        """台帳と現物のズレを門にする（op を足したら golden を足す契約の可視面 — ADR 0005）。
+
+        表は recipe 作者の一次資料なので、人手更新に任せると op 追加のたびに同じ経路で
+        遅れる（実際に ADR 0017 の 2 本ぶん遅れていた）。
+        """
+        assert set(_readme_coverage_names()) == {spec.name for spec in GOLDEN_SPECS}
+
     def test_every_contract_op_is_exercised_by_some_model(self, generated):
         _, graphs = generated
         covered = {op for graph in graphs.values() for op in graph.required_ops}

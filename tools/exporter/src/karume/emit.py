@@ -231,6 +231,13 @@ def _plan_i8(
         # スロットへ流れた / 対象モジュール型の取りこぼし）。f32 のまま落とすと VRAM 削減が
         # 黙って減るだけなので、i8 指定では受理しない。
         raise _unrounded(name, key, "per-channel scale が無い")
+    if scale.dtype is not torch.float32:
+        # companion scale は F32 固定（ADR 0019 / docs/ir-v1.md）。writer は F16 もそのまま
+        # 直列化でき、逆変換の等値検査も「同じ f16 scale で fake-quant 済み」なら通ってしまう
+        # ので、計画段で落とす（診断が「書いた後の verify」から前倒しになる）。
+        raise EmitError(
+            f"initializer '{name}' ({key}): scale の dtype が {scale.dtype} — F32 のみ受理する"
+        )
     axis = axes.get(name)
     expected = [dim if index == axis else 1 for index, dim in enumerate(tensor.shape)]
     if list(scale.shape) != expected:
@@ -324,7 +331,14 @@ def _convert_for_storage(key: str, tensor: torch.Tensor, conversion: _Conversion
 
 
 #: 格納 dtype → 要素バイト数（IR の宣言だけからバイト数を導出するための表）。
-_STORAGE_BYTES = {"f32": 4, "f16": 2, "i8": 1, "i32": 4}
+#:
+#: 語彙は verify の `STORAGE_DTYPES` に揃える（`bf16` は宣言だけ受理する格納 dtype で、
+#: 実行可否は `verify.assert_runtime_support` が単独で持つ）— ここは**バイト数を数えるだけ**の
+#: 層なので、読めるグラフを数えられない状態を作らない。
+_STORAGE_BYTES = {"f32": 4, "f16": 2, "bf16": 2, "i8": 1, "i32": 4}
+#: 圧縮に数えない格納 dtype（= 素の 4 バイト表現）。圧縮側を列挙すると格納 dtype を足すたびに
+#: 2 箇所直す形になるので、**否定形**で書く。
+_PLAIN_STORAGE_DTYPES = ("f32", "i32")
 #: companion scale の要素バイト数（F32 固定 — ADR 0019）。
 _SCALE_BYTES = 4
 
@@ -345,7 +359,7 @@ def storage_breakdown(graph: IrGraph) -> StorageBreakdown:
             count *= dim
         dtype = initializer.storage.dtype
         nbytes = count * _STORAGE_BYTES[dtype]
-        if dtype in ("f16", "i8"):
+        if dtype not in _PLAIN_STORAGE_DTYPES:
             compressed_tensors += 1
             compressed_bytes += nbytes
             if dtype == "i8":
@@ -473,9 +487,8 @@ def write_model(
 ) -> Path:
     """グラフと格納テンソルを 1 ファイルに書き、書いたパスを返す。
 
-    `weight_dtype` が `"f16"` / `"i8"` のとき、**適格な重みスロットだけ**を圧縮格納にして
-    `graph` の格納宣言を書き換える（宣言と実体が 1 経路で決まる — 別々に決めると
-    「宣言 f16 / 実体 f32」の沈黙誤読が作れる）。
+    `weight_dtype` が `"f16"` / `"i8"` のとき、**適格な重みスロットだけ**が圧縮格納になる
+    （宣言と実体が 1 経路で決まる — 別々に決めると「宣言 f16 / 実体 f32」の沈黙誤読が作れる）。
 
     MUST: 「計画（実データを読まない検査）→ データ節を 1 本ずつ変換しながら流す →
     全バイトを書き終えてから宣言を commit」の 3 段で進める。
@@ -484,13 +497,15 @@ def write_model(
        RAM が両者の和になる（Irodori 規模で f32 3.44GB + f16 1.72GB / i8 0.87GB）。
        ヘッダは「変換前の shape・要素数 + 計画の格納 dtype」だけで決まるので、データ節を
        流しながらでも宣言は動かない。
-    2. commit を最後に置くのは、**一部だけ圧縮宣言に化けた graph** を呼び出し側へ残さない
-       ため（その graph を使い回す経路 — 同じ graph を別 dtype で書き直す / 内訳を数える —
-       が黙って宣言と実体の食い違った答えを出す）。ヘッダに載せるグラフ JSON は commit 済みの
-       **ビュー**（`dataclasses.replace`）から作り、渡された `graph` はここまで無傷で保つ。
+    2. MUST: commit は `dataclasses.replace` の**ビューの中だけ**に閉じ、渡された `graph` は
+       1 バイトも変えない。呼び出し側の宣言を書き換えると、同じ graph を使い回す経路
+       （別 dtype で書き直す / 内訳を数える）が前回の圧縮宣言を引きずる — f32 の計画は
+       空プランで宣言を**復元しない**ので、f16 → f32 の順に書くと「宣言 f16 / 実体 f32」の
+       壊れたコンテナがそのまま出る。書いた後の宣言が要る呼び手は `verify_model` の戻り
+       （= ファイルから読み直したグラフ）を使う。
 
-    NOTE: 書き出し中の検査（f16 の往復・i8 の逆変換）が落ちると、書きかけのファイルが残って
-    `graph` は無傷のまま — 配布物の原子性は `pipeline.export_to_file` の一時ファイル層が持つ。
+    NOTE: 書き出し中の検査（f16 の往復・i8 の逆変換）が落ちると書きかけのファイルが残る
+    — 配布物の原子性は `pipeline.export_to_file` の一時ファイル層が持つ。
 
     `weight_scales` は `quantize.fake_quant_int8` が返した **FQN → scale** の台帳
     （`"i8"` のときだけ要る）。キーは safetensors のテンソルキーと同じ空間で、
@@ -515,5 +530,4 @@ def write_model(
         {IR_METADATA_KEY: committed.to_json()},
         plan.conversions,
     )
-    graph.initializers.update(plan.declarations)
     return out

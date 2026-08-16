@@ -51,8 +51,10 @@ so the path is never branched.
 
 The subcommands installed by `[project.scripts]`. **The CLI does not interpret arguments** —
 everything after the subcommand name is passed straight to the body (`karume <subcommand> --help`
-prints the usage of the body's own parser). This shape keeps a copy of the exclusivity rules
-(`--verify` × `--target` etc.) out of the CLI; dispatch is a lazy import.
+prints the usage of the body's own parser). This shape keeps a copy of the argument rules out of
+the CLI — for example `karume dist --card-profile`, which is required only when the chosen pipeline
+offers more than one attribution profile, a rule the body derives from the registry it is handed.
+Dispatch is a lazy import.
 
 | Subcommand      | Wrapped body                                                                            |
 | --------------- | --------------------------------------------------------------------------------------- |
@@ -172,6 +174,8 @@ Current models and coverage:
 | `spline_pieces`            | `T`          | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape                                                             |
 | `coupling_split`           | `T`          | slice(split decomposition + slicing after pad), cat, flip(axis length 3), pad, tanh, mul                                                                               |
 | `decoder_tail`             | `T`          | leaky_relu(slope 0.1 and the default 0.01), expand(f32), conv1d, tanh, mul                                                                                             |
+| `rms_norm_block`           | `T`          | rms_norm ×3 (hand-written `x·rsqrt(mean(x²)+eps)·w` folded into one node + `nn.RMSNorm` with and without affine), layer_norm(no affine), linear(no bias)               |
+| `conv2d_block`             | none         | conv2d ×3 (Kh≠Kw / asymmetric stride, padding and dilation / groups 3 / one branch with no bias), sum(channel axis), sqrt, clamp_min, div, mul, reshape                |
 | `deform_conv2d_block`      | none         | deform_conv2d (DCNv2 — offsets reaching outside the input plane, modulator in [0,2], k=3×2 with asymmetric padding and a k=1 branch with no bias)                      |
 | `gru_scan_block`           | `T`          | gru_scan / gru_scan_reverse (both directions over a symbolic time axis; the forward branch starts from a folded zero `h0`, the reverse one from a graph input), linear |
 | `bilinear_resize`          | none         | upsample_bilinear2d (non-integer upscale 4×5→7×9, shrink 4×5→2×3, and a height-1 input whose H scale is 0)                                                             |
@@ -201,6 +205,24 @@ an axis of length 3 — reversing 2ch makes off-by-one errors cancel symmetrical
 mixes **two leaky_relu slopes** (0.1 and torch's default 0.01 with the positional argument omitted)
 into one graph, so a design that does not carry the slope in attrs is caught by the golden instead
 of silently getting one of them wrong.
+
+`rms_norm_block` covers the **two supply routes** of `rms_norm` (ADR 0017) in one graph: the
+hand-written `x · rsqrt(mean(x²) + eps) · weight`, which only becomes one node because
+`normalize._fold_rms_norm` matches it, and `nn.RMSNorm`, which survives as `aten.rms_norm` because
+it is preserved. The affine-free `nn.RMSNorm` and the affine-free `LayerNorm` are the goldens for
+the **synthesized optional slots** (ones / ones+zeros — ADR 0016), and the `bias=False` linear is
+the second zero-bias synthesis after `conv_transpose`. All three eps values are **different**
+(1e-6 / 1e-5 / 1e-7): with one shared eps, dropping eps from attrs and falling back to a default
+does not show up in the values at all.
+
+`conv2d_block` makes every axis of the 2-D weight layout distinguishable, because reading
+`[Cout,Cin,Kh,Kw]` with H and W swapped still gives a matching element count and passes the shape
+check (the same failure mode as `conv_transpose`): **Kh ≠ Kw, stride / padding / dilation
+asymmetric between H and W, Cin ≠ Cout and both above 1**, with the input plane H ≠ W as well. It
+also carries the only **axis reduction** (`sum` with `dim=1`, the channel L2 of the Anima host
+mirror) among the goldens — every other `sum` here is over the last dimension — and the
+`example_inputs` zero out one channel column so that the `clamp_min` floor is what keeps the
+division off `0/0`.
 
 The point of `symbolic_table` is baking at **T (= 6) < Tmax (= 24)** — the mistake of building the
 read stride from the post-binding shape only agrees when T = Tmax, so only a golden with a shorter
@@ -265,8 +287,8 @@ writing, `verify_model` runs a **check that transcribes Karume's reader rules**
 (`assert_reader_layout`) — HF's `safe_open` **can still read** files with alignment violations, so
 going through it alone would not detect the problem (the fault injection in `tests/test_emit.py`
 demonstrates this). For a file that contains no f16 / i8 at all, this ordering is **byte-identical**
-to the output of `save_file` (confirmed on the 24 f32 tiny goldens — the f32-series assets do not
-move by a single byte when the writer is swapped; only the 25th, `i8_weights`, uses compressed
+to the output of `save_file` (confirmed on the 29 f32 tiny goldens — the f32-series assets do not
+move by a single byte when the writer is swapped; only `i8_weights`, the 30th, uses compressed
 storage).
 
 ### Per-channel int8 (`--dtype i8`)
@@ -541,8 +563,8 @@ the attrs are placed here.
 - **bf16 storage** (it is in the IR vocabulary but has no execution path — ADR 0006). f16 is
   implemented in ADR 0018 and i8 + per-channel scale in ADR 0019. w4 (group quantization) is
   confirmed as not adopted.
-- **Mixed storage** (mixing i8 and f16 within one target). `_apply_weight_dtype` applies a single
-  `weight_dtype` to everything.
+- **Mixed storage** (mixing i8 and f16 within one target). `emit._plan_weight_dtype` applies a
+  single `weight_dtype` to everything.
 - Host implementations of the runtime pipelines (SBV2: text → durations → assembling y_mask → voice
   / Anima: tokenization → scheduler → CFG → denormalization). The layer that connects the emitted
   targets is outside the exporter's scope (for Anima the host implementation lives in

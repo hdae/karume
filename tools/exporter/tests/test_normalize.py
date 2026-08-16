@@ -11,7 +11,9 @@ import pytest
 import torch
 from conftest import export_and_convert, node_ops, only_node
 from torch import nn
+from torch.export import Dim
 
+from karume import normalize
 from karume.convert import UnsupportedAtenOpsError, convert, curated_decompositions
 from karume.normalize import SAFE_SOFTMAX_META, normalize_graph
 from karume.ops import STRIDED_RANK
@@ -19,8 +21,8 @@ from karume.ops import STRIDED_RANK
 aten = torch.ops.aten
 
 
-def decompose(module: nn.Module, args: tuple):
-    ep = torch.export.export(module, args, strict=False)
+def decompose(module: nn.Module, args: tuple, dynamic_shapes=None):
+    ep = torch.export.export(module, args, dynamic_shapes=dynamic_shapes, strict=False)
     return ep.run_decompositions(curated_decompositions())
 
 
@@ -515,8 +517,31 @@ class NegInfScoreAttention(nn.Module):
         )
 
 
+class GatheredMaskAttention(nn.Module):
+    """マスクを buffer からの `index_select` で作る形（不活性判定の実評価が例外で落ちる系）。
+
+    実評価は buffer（placeholder）を**実値**（最終軸 4）へ解決する一方、記号長は probe 値
+    （5 / 9）へ置換するので、両者が同じ式で出会うと torch が `IndexError` を投げる。
+    判定の失敗であってエクスポータの故障ではないので、export ごと落としてはいけない。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        bias = torch.zeros(1, 1, 1, 4)
+        bias[..., 0] = float("-inf")
+        self.register_buffer("bias", bias)
+
+    def forward(self, q, k, v):
+        index = torch.arange(k.shape[-2], device=k.device)
+        return nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=torch.index_select(self.bias, -1, index)
+        )
+
+
 ATTENTION_ARGS = (torch.randn(1, 1, 4, 3), torch.randn(1, 1, 4, 3), torch.randn(1, 1, 4, 3))
 RUNTIME_MASK_ARGS = (*ATTENTION_ARGS, torch.tensor([[[[True, True, False, False]]]]))
+#: `GatheredMaskAttention` を記号長つきで export するための軸指定（q / k / v の系列軸）。
+SYMBOLIC_LENGTH_SHAPES = ({2: Dim("T", max=16)},) * 3
 
 
 def _guard_ops_gone(decomposed) -> bool:
@@ -603,6 +628,41 @@ class TestDropSafeSoftmaxGuard:
 
         assert stats["softmax_guard:rewritten-safe"] == 1
         assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
+
+    def test_a_probe_that_raises_rewrites_the_guard_instead_of_killing_the_export(self):
+        """実評価が torch の例外で落ちる形も置換に回る（ADR 0044 が閉じたはずの穴）。
+
+        `NotImplementedError` しか捕まえていないと、この形だけ「証明できない = export 不能」
+        に戻る。統計キーは構造で証明できなかった形（`rewritten-safe`）と分けて数える —
+        例外を黙って吸収する経路を作らないため。
+        """
+        decomposed = decompose(
+            GatheredMaskAttention(), ATTENTION_ARGS, dynamic_shapes=SYMBOLIC_LENGTH_SHAPES
+        )
+
+        stats = normalize_graph(decomposed)
+
+        assert stats["softmax_guard:rewritten-unproven"] == 1
+        assert "softmax_guard:rewritten-safe" not in stats
+        assert _guard_ops_gone(decomposed)
+        assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
+
+    def test_the_probe_failure_keeps_the_original_exception_as_its_cause(self):
+        """正規化した判定結果に原因を必ず連鎖させる（本物の実装バグを追える形で残す）。"""
+        decomposed = decompose(
+            GatheredMaskAttention(), ATTENTION_ARGS, dynamic_shapes=SYMBOLIC_LENGTH_SHAPES
+        )
+        guard = next(
+            node
+            for node in decomposed.graph_module.graph.nodes
+            if node.op == "call_function" and node.target is aten.where.self
+        )
+        _, src = normalize._guard_parts(guard)
+
+        with pytest.raises(NotImplementedError, match="不活性を判定できない") as err:
+            normalize._assert_guard_inactive(src, normalize._Placeholders(decomposed))
+
+        assert isinstance(err.value.__cause__, IndexError)
 
     def test_a_finite_buffer_mask_still_lets_the_guard_go(self):
         """実値が有限な buffer マスクは従来どおり除去できる（判定が過剰にならないこと）。"""
