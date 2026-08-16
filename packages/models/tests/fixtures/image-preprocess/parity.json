@@ -1,7 +1,7 @@
 {
   "_doc": [
     "SigLIP2 の画像前処理（resize → rescale → normalize）のパリティ用フィクスチャ",
-    "（生成: tools/exporter/siglip2_preprocess.py）。",
+    "（生成: tools/export-recipes/siglip2/preprocess.py）。",
     "正本は transformers 5.14.1 の SiglipImageProcessor（TorchvisionBackend）で、",
     "resize は torchvision の antialias 経路（PIL と同じ分離型リサンプリング）。",
     "**resample 2 は PIL の定数で BILINEAR**（BICUBIC は 3）— クラス属性の既定が",

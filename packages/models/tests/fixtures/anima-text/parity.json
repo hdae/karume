@@ -1,6 +1,6 @@
 {
   "_doc": [
-    "Anima プロンプト層のパリティ用フィクスチャ（生成: tools/exporter/anima_demo.py）。",
+    "Anima プロンプト層のパリティ用フィクスチャ（生成: tools/export-recipes/anima/demo.py）。",
     "正本は transformers の AutoTokenizer で、id 列はそこから採った実測値。語彙と",
     "merges は全ケースの再現に要る**部分集合**だけを載せる（151k / 32k を commit",
     "しないため）。正規化表・文字クラス表は畳み込みの成果物そのものなので全体を載せる。"
