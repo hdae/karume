@@ -96,7 +96,7 @@ from .pipeline_ref import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-DEFAULT_LORA = REPO_ROOT / "models" / "anima-turbo-lora-v0.2.safetensors"
+DEFAULT_LORA = REPO_ROOT / "inputs" / "anima" / "anima-turbo-lora-v0.2.safetensors"
 
 #: turbo 運用値（CFG=1 は uncond 分岐を計算しない — anima/pipeline_ref.py の MUST と同じ形）。
 GUIDANCE = 1.0

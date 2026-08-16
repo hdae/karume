@@ -40,13 +40,15 @@ uv run --group anima python -m anima.export --verify text_encoder
 uv run --group anima python -m anima.export --verify vae_decoder
 
 # fuse a LoRA before emitting (applies to transformer / text_conditioner)
-uv run --group anima python -m anima.export --target transformer --lora turbo.safetensors
+uv run --group anima python -m anima.export --target transformer \
+  --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors
 
 # S form (one symbol for the token length), an additional series — transformer only; the default out gets -dyn
-uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn --lora turbo.safetensors \
+uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn \
+  --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
   --out ../../outputs/series/anima-turbo-f16-dyn
 uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn --verify transformer \
-  --lora turbo.safetensors
+  --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors
 ```
 
 - **`--verify` and `--target` cannot be combined in the same process.** The VAE patches replace
@@ -438,14 +440,14 @@ f32 one operation at a time with `Math.fround`).
 ### Fusing the Turbo LoRA and the turbo reference fixture
 
 Passing a few-step distilled Turbo LoRA to `--lora` (e.g.
-`models/anima-turbo-lora-v0.2.safetensors`; the real weights are not in the repository — place them
-by hand) fuses it into the weights before the export. This LoRA has been **measured to have an
-all-zero (noop) `lora_B` on the text_conditioner side**, so **emitting the transformer target alone
-is enough** (the other 3 targets share the existing `outputs/series/anima-f16/`):
+`inputs/anima/anima-turbo-lora-v0.2.safetensors`; the real weights are not in the repository —
+place them by hand) fuses it into the weights before the export. This LoRA has been **measured to
+have an all-zero (noop) `lora_B` on the text_conditioner side**, so **emitting the transformer
+target alone is enough** (the other 3 targets share the existing `outputs/series/anima-f16/`):
 
 ```sh
 uv run --group anima python -m anima.export --dtype f16 --target transformer \
-  --lora ../../models/anima-turbo-lora-v0.2.safetensors --out ../../outputs/series/anima-turbo-f16
+  --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors --out ../../outputs/series/anima-turbo-f16
 ```
 
 `--verify transformer --lora <path>` becomes an eager equivalence check against the post-LoRA
@@ -456,7 +458,7 @@ Reference fixture for turbo operation (steps=10 / CFG=1):
 
 ```sh
 uv run --group anima python -m anima.pipeline_ref --dtype f16 --steps 10 --ref-steps 10 \
-  --guidance-scale 1.0 --lora ../../models/anima-turbo-lora-v0.2.safetensors \
+  --guidance-scale 1.0 --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
   --out ../../outputs/series/anima-pipeline-turbo-f16
 ```
 

@@ -36,7 +36,7 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
     uv run python -m anima.pipeline_ref --dtype f16
     uv run python -m anima.pipeline_ref --dtype i8
     uv run python -m anima.pipeline_ref --dtype f16 --steps 10 --ref-steps 10 \
-        --guidance-scale 1.0 --lora ../../models/anima-turbo-lora-v0.2.safetensors \
+        --guidance-scale 1.0 --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-f16
 
 `--act-quant` は **w8a8**（`SessionOptions.linearCompute: "i8a8"`）の鏡像で、DiT の適格
@@ -45,7 +45,7 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
 
     uv run python -m anima.pipeline_ref --dtype i8 --act-quant --steps 10 \
         --ref-steps 10 --guidance-scale 1.0 \
-        --lora ../../models/anima-turbo-lora-v0.2.safetensors \
+        --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-i8a8
 
 `--resolution` は **WxH**（正方は略記できる）。非正方の参照は `--dit-graph dyn` の DiT と
@@ -53,7 +53,7 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
 
     uv run python -m anima.pipeline_ref --dtype f16 --steps 10 --ref-steps 2 \
         --guidance-scale 1.0 --resolution 1344x768 \
-        --lora ../../models/anima-turbo-lora-v0.2.safetensors \
+        --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-f16-1344x768
 
 DiT の forward は既定で 4 回（2 step × cond/uncond）、CFG=1 の turbo 系列では uncond を
