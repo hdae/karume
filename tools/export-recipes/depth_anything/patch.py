@@ -11,7 +11,7 @@ transformers のクラス属性と、モデル内の `nn.ConvTranspose2d` イン
   ① `DepthAnythingFeatureFusionStage.forward` の**最終段だけ** `size=None` になり、
      融合層が `F.interpolate(..., scale_factor=2, align_corners=True)` を呼ぶ
      （`aten.upsample_bilinear2d.vec` の `scale_factors` 指定形 = 変換段が受理しない —
-     出力長の丸め規約が 2 通りになるため。`convert._h_upsample_bilinear2d`）。静的形なので
+     出力長の丸め規約が 2 通りになるため。`aten_handlers._h_upsample_bilinear2d`）。静的形なので
      出力寸法を先に計算して `size=` へ倒す。**align_corners=True では倍率が使われない**
      （aten の `area_pixel_compute_scale` は `(in−1)/(out−1)` を作る）ので、値はビット同一。
   ② `Dinov2Embeddings.interpolate_pos_encoding` を**恒等 or 落とす**へ。原実装は

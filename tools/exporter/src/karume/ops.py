@@ -117,7 +117,7 @@ SAFE_SOFTMAX_OP = "safe_softmax"
 #: （`[B,H,M,D]` / `[B,H,N,D]` ×2）で **D は 3 者とも同じ**・出力は `[B,H,M,D]`。
 #: mask は **f32・rank-4・shape はちょうど `[1,1,M,N]`**（加算型）で B·H へ broadcast する。
 #: `[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 と causal / dropout / GQA は語彙に無く、
-#: 該当する SDPA は `convert._h_attention` が全件列挙して fail loudly にする。
+#: 該当する SDPA は `aten_handlers._h_attention` が全件列挙して fail loudly にする。
 #:
 #: MUST: `scale` は **q と k の両方に掛かる（半スケール契約）** — torch の
 #: `_scaled_dot_product_attention_math` の `√scale_factor` と同義。エクスポータは SDPA の
@@ -141,7 +141,7 @@ CONV_TRANSPOSE1D_OP = "conv_transpose1d"
 #:
 #: MUST: attrs は `padding` の 1 本だけ。stride / dilation / groups / offset_groups の欄を
 #: 作らない（= 1 固定）— 実測（BiRefNet 一族の 20 箇所）が全て 1 で、欄の不存在が
-#: 「その形は語彙に無い」を構造で表す。該当しない形は `convert._h_deform_conv2d` が
+#: 「その形は語彙に無い」を構造で表す。該当しない形は `aten_handlers._h_deform_conv2d` が
 #: 全件 fail loudly にする。
 #: MUST: mask はスロットとして必須 = **DCNv2 専業**（use_mask=False の DCNv1 は語彙に無い）。
 DEFORM_CONV2D_OP = "deform_conv2d"
@@ -151,7 +151,7 @@ DEFORM_CONV2D_OP = "deform_conv2d"
 #:
 #: MUST: **align_corners=True 専業**。attrs に `align_corners` / `mode` / `scale_factor` の
 #: 欄を作らない（欄の不存在が「語彙に無い」を構造で表す — ADR 0023 決定 4）。該当しない形は
-#: `convert._h_upsample_bilinear2d` が全件 fail loudly にする。
+#: `aten_handlers._h_upsample_bilinear2d` が全件 fail loudly にする。
 #: NOTE: 縮小（Hout < H）も同じ op・同じ式で通る（torch も同一 op）。
 UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d"
 
@@ -165,7 +165,7 @@ UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d"
 #: 同じ「attr 変種は別 op」の手筋（ADR 0056 決定 2）。
 #: MUST: 多層 / 双方向 / has_biases=False / batch_first / dropout の欄を作らない。IR v1 の
 #: 可変アリティは `cat` だけで `aten.gru` の Tensor[16] は載らないので、層と方向は
-#: **ノードを並べて**表す。該当しない形は `convert._h_gru_scan` が全件 fail loudly にする。
+#: **ノードを並べて**表す。該当しない形は `aten_handlers._h_gru_scan` が全件 fail loudly にする。
 GRU_SCAN_OP = "gru_scan"
 GRU_SCAN_REVERSE_OP = "gru_scan_reverse"
 GRU_SCAN_OPS = (GRU_SCAN_OP, GRU_SCAN_REVERSE_OP)

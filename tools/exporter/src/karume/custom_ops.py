@@ -16,7 +16,7 @@ eager で回して採るので、ここがずれると「エクスポータと�
 
 NOTE: `torch.library.custom_op` はプロセス全域のグローバル登録なので、この import は
 **副作用を持つ**（`packages/*` の「全モジュール副作用ゼロ」は TS 側の tree-shaking 不変条件で、
-Python 側 exporter には掛からない）。`convert.py` はハンドラのキー
+Python 側 exporter には掛からない）。`aten_handlers.py` はハンドラのキー
 （`torch.ops.karume.gru_scan.default`）を書くためにこのモジュールを import する。
 """
 

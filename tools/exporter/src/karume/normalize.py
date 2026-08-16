@@ -77,7 +77,7 @@ NEG_INF = float("-inf")
 #: safe-softmax ガードを構成的に置換した softmax ノードに立てる旗（ADR 0044）。
 #:
 #: FX グラフ層に "safe_softmax" という aten op は無いので、ガードを畳んだ事実は元の softmax
-#: ノードの meta で運び、`convert._h_softmax` が op 名の分岐に使う。**meta を消すパスを
+#: ノードの meta で運び、`aten_handlers._h_softmax` が op 名の分岐に使う。**meta を消すパスを
 #: このパスより後ろに置かないこと** — 旗が落ちると素の softmax として焼かれ、全 -inf 行が
 #: 黙って NaN になる。
 SAFE_SOFTMAX_META = "karume_safe_softmax"
