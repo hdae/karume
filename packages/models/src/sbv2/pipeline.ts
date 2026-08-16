@@ -82,7 +82,7 @@ import {
   styleVector,
 } from "./style.ts";
 import { analyzeSbv2Text, type Sbv2TextAnalysis } from "./text/analyze.ts";
-import { bertHiddenOutput, tileBertToPhoneLevel } from "./text/bert-tile.ts";
+import { bertHiddenOutput, tileBertToPhoneLevel, type TiledBert } from "./text/bert-tile.ts";
 import { buildRelPosTables } from "./text/rel-pos-tables.ts";
 import { type JpExtraRules, parseJpExtraRules, type Sbv2Knobs } from "./text/symbols.ts";
 import { type CleanRanges, DebertaTokenizer } from "./text/tokenizer.ts";
@@ -509,6 +509,50 @@ export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
 };
 
 /**
+ * 音素列（front の記号次元 P）の運用上限を見る門。
+ *
+ * MUST: {@link assertTokenLimit} と**別に**要る。P = 2·sum(baseWord2ph)+1 で、base の各要素は
+ * 1 以上・その本数が T なので **P >= 2·T+1 > T** が常に成り立つ。T 側の門だけでは P の超過を
+ * 一度も捕まえられない（T <= 上限のまま P > 上限になる長文が実在する）。
+ * MUST: DeBERTa を回す**前**に呼ぶ。後ろに置くと、超過が確定している要求に対して
+ * text_encoder（334MB）を張って回し切ってから front の記号次元で落ちる。
+ *
+ * NOTE: 上限は T と P で同じ 1 つ（`pipelineConfig.maxTokens`）— 焼いた記号次元の上限が
+ * 1 組であることは配布側が固定している（`tools/export-recipes/sbv2/tests/test_distribution.py`
+ * の `the_limits_are_the_symbolic_maxima_the_export_scripts_baked`）ので、欄は増やさない。
+ * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ */
+export const assertPhonemeLimit = (phonemes: number, maxTokens: number): void => {
+  if (phonemes > maxTokens) {
+    throw new Error(
+      `Sbv2Pipeline: 音素数 ${phonemes} が配布形の上限 maxTokens=${maxTokens} を超えている` +
+        "（text を短く分けて合成する）",
+    );
+  }
+};
+
+/**
+ * tile 展開の結果を front へ渡す前に検める門。
+ *
+ * MUST: **書いた列数**（{@link TiledBert.columns}）を確保サイズと記号次元の両方に突き合わせる。
+ * 「展開長 === 音素数」の 1 本だけでは、両辺が同じ `analysis` から導かれる定理になって恒真
+ * （`sum(word2ph) === P` は `buildBaseWord2ph` が既に強制済み）で、走査が壊れても緑のまま通る。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ */
+export const assertTiledBert = (tiled: TiledBert, phonemes: number): void => {
+  if (tiled.data.length !== tiled.dim * tiled.columns) {
+    throw new Error(
+      `BERT 展開が書いた ${tiled.columns} 列 × dim ${tiled.dim} が確保した` +
+        ` ${tiled.data.length} 要素と合わない（tile 走査の破れ）`,
+    );
+  }
+  if (tiled.columns !== phonemes) {
+    throw new Error(`BERT 展開長 ${tiled.columns} が音素数 ${phonemes} と違う`);
+  }
+};
+
+/**
  * manifest + 資産から実行状態を組む（{@link Sbv2Pipeline.fromAssets} の中身）。
  *
  * MUST: manifest の契約違反と**資産の解析・表の突合**は **GPU を取りに行く前**に落とす。
@@ -646,8 +690,10 @@ export const synthesizeSbv2 = async (
   const analysis = analyzeSbv2Text(state.dictionary, request.text, state.tokenizer, state.rules);
   const phonemes = analysis.ids.phoneIds.length;
   const tokens = analysis.inputIds.length;
-  // 表の確保も Session も張る前に落とす（{@link assertTokenLimit} の MUST）。
+  // 表の確保も Session も張る前に落とす（{@link assertTokenLimit} の MUST）。上限は T と P で
+  // 同じ 1 つだが、P > T なので**両方**見ないと P の超過だけが門を素通りする。
   assertTokenLimit(tokens, state.config.maxTokens);
+  assertPhonemeLimit(phonemes, state.config.maxTokens);
 
   // --- ② text_encoder（DeBERTa・配布形は使う 1 本だけを出す）---------------
   // quant の低精度ノブは渡さない（配布形の text_encoder は i8 の 1 dtype しか無い）。
@@ -678,9 +724,7 @@ export const synthesizeSbv2 = async (
 
   // --- ③ BERT 特徴を音素レベルへ tile 展開 ---------------------------------
   const tiled = tileBertToPhoneLevel(hidden.data, tokens, analysis.word2ph);
-  if (tiled.length !== phonemes) {
-    throw new Error(`BERT 展開長 ${tiled.length} が音素数 ${phonemes} と違う`);
-  }
+  assertTiledBert(tiled, phonemes);
 
   // --- ④ style_vec / g を表から引く ----------------------------------------
   const styleVec = styleVector(

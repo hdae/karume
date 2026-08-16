@@ -207,8 +207,9 @@ Deno.test("tileBertToPhoneLevel: トークンを word2ph 回だけ複製し、�
   // 2 トークン × dim 3。値はトークンと次元の両方で違う（転置の取り違えを踏むため
   // dim ≠ P かつ非対称にする — 対称な入力では軸を入れ替えても同じ答えが出てしまう）。
   const hidden = new Float32Array([1, 2, 3, 10, 20, 30]);
-  const { data, length } = tileBertToPhoneLevel(hidden, 2, [1, 2]);
-  assertEquals(length, 3);
+  const { data, dim, columns } = tileBertToPhoneLevel(hidden, 2, [1, 2]);
+  assertEquals(columns, 3);
+  assertEquals(dim, 3);
   // 期待: 列は [t0, t1, t1]、行は dim。row-major で [dim=3][P=3]。
   assertEquals([...data], [1, 10, 10, 2, 20, 20, 3, 30, 30]);
 });
@@ -218,7 +219,7 @@ Deno.test("tileBertToPhoneLevel: 故障注入 — word2ph の配分が変わる�
   const hidden = new Float32Array([1, 2, 3, 10, 20, 30]);
   const a = tileBertToPhoneLevel(hidden, 2, [1, 2]);
   const b = tileBertToPhoneLevel(hidden, 2, [2, 1]);
-  assertEquals(a.length, b.length, "合計は同じ（= 長さでは検出できない形）");
+  assertEquals(a.columns, b.columns, "合計は同じ（= 長さでは検出できない形）");
   assert([...a.data].some((value, index) => value !== b.data[index]), "配分を変えても同じ値");
 });
 

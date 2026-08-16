@@ -15,12 +15,15 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import {
+  assertPhonemeLimit,
+  assertTiledBert,
   assertTokenLimit,
   assetJson,
   Sbv2Pipeline,
   toSessionOptions,
 } from "../src/sbv2/pipeline.ts";
 import { parseSbv2PipelineConfig } from "../src/sbv2/config.ts";
+import { tileBertToPhoneLevel, type TiledBert } from "../src/sbv2/text/bert-tile.ts";
 
 const FILE = {
   path: "front/model.i8.safetensors",
@@ -341,6 +344,61 @@ Deno.test("assertTokenLimit: 上限超過は落とし、ちょうど上限は通
     Error,
     "Sbv2Pipeline: トークン数 513 が配布形の上限 maxTokens=512 を超えている",
   );
+});
+
+Deno.test("assertPhonemeLimit: 上限超過は落とし、ちょうど上限は通る", () => {
+  // 音素次元 P は front の記号次元で、上限は T と同じ 1 つ（`maxTokens`）。P >= 2·T+1 > T が
+  // 常に成り立つので、T 側の門はこの超過を一度も捕まえない — 別の門として要る。
+  assertPhonemeLimit(512, 512);
+  assertThrows(
+    () => assertPhonemeLimit(513, 512),
+    Error,
+    "Sbv2Pipeline: 音素数 513 が配布形の上限 maxTokens=512 を超えている",
+  );
+  // 文言は T 側と別（診断でどちらの門か分かる形）。
+  assertThrows(() => assertTokenLimit(513, 512), Error, "トークン数 513");
+});
+
+/**
+ * 故障注入シム: 各トークンの複製を 1 回ぶん取りこぼす tile。
+ *
+ * 確保サイズは正しい `sum(word2ph)` のままで、**書いた列だけ**が足りない — `tileBertToPhoneLevel`
+ * の repeat 上限を 1 ずらすと出る形で、`data.length` しか見ない門はこれを通す。
+ */
+const tileWithShortRepeat = (
+  hidden: Float32Array,
+  tokenCount: number,
+  word2ph: readonly number[],
+): TiledBert => {
+  const dim = hidden.length / tokenCount;
+  const total = word2ph.reduce((sum, count) => sum + count, 0);
+  const out = new Float32Array(dim * total);
+  let column = 0;
+  for (let token = 0; token < tokenCount; token += 1) {
+    for (let repeat = 0; repeat < word2ph[token] - 1; repeat += 1) {
+      for (let d = 0; d < dim; d += 1) out[d * total + column] = hidden[token * dim + d];
+      column += 1;
+    }
+  }
+  return { data: out, dim, columns: column };
+};
+
+Deno.test("assertTiledBert: 故障注入 — 走査が取りこぼした tile を確保サイズとの差で捕まえる", () => {
+  const hidden = new Float32Array([1, 2, 3, 10, 20, 30]);
+  const word2ph = [1, 2];
+  const good = tileBertToPhoneLevel(hidden, 2, word2ph);
+  assertTiledBert(good, 3);
+
+  const broken = tileWithShortRepeat(hidden, 2, word2ph);
+  // 前提の固定: 確保サイズは正しいまま（= 旧「展開長 === 音素数」の 1 本では緑で通る形）。
+  assertEquals(broken.data.length, good.data.length, "確保サイズが違うなら別の門の話になる");
+  assertThrows(
+    () => assertTiledBert(broken, 3),
+    Error,
+    "BERT 展開が書いた 1 列 × dim 3 が確保した 9 要素と合わない",
+  );
+  // 音素数との不一致（analysis と tile の齟齬）は従来どおり別の文言で落ちる。
+  assertThrows(() => assertTiledBert(good, 4), Error, "BERT 展開長 3 が音素数 4 と違う");
 });
 
 Deno.test("toSessionOptions: 3 キーを 1 つずつ写す（未指定は欄ごと作らない）", () => {

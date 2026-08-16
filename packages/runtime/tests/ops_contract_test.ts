@@ -28,6 +28,7 @@ import {
   resolveOpContract,
   rmsNormEps,
   RUNTIME_SUPPORT,
+  SCALAR_PARAM_ATTRS,
   scalarParamValues,
   softmaxDim,
   UNARY_OPS,
@@ -637,6 +638,20 @@ Deno.test("clamp / leaky_relu / 比較の attrs スキーマが値域まで検�
     scalarParamValues(resolveOpContract("leaky_relu"), { negative_slope: 0.1 }, "t"),
     [0.1],
   );
+});
+
+// exporter 側の対称形（`tools/exporter/tests/test_shapes.py` の
+// `the_params_table_and_the_attrs_schema_cover_the_same_unary_ops`）。
+Deno.test("スカラ params の並び表と単項 attrs スキーマが同じ op を覆う", () => {
+  // attrs スキーマ（契約表の単項 op）と params のレイアウト（SCALAR_PARAM_ATTRS）は別々に
+  // 書かれた 2 表で、片方だけに op を足しても**例外は出ない**: params 表に無い側は
+  // `scalarParamValues` が空リストを返して attr の値が黙ってカーネルへ届かず、attrs スキーマに
+  // 無い側は宣言そのものが契約外 attrs 扱いになる。
+  const unaryWithAttrs = [...OP_CONTRACTS]
+    .filter(([, contract]) => contract.kind === "unary" && attrKeysOf(contract).length > 0)
+    .map(([name]) => name)
+    .sort();
+  assertEquals([...SCALAR_PARAM_ATTRS.keys()].sort(), unaryWithAttrs);
 });
 
 // cumsum は softmax と同じ絞り方（attrs.dim を持ち、最終次元だけを受理する）。

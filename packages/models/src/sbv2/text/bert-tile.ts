@@ -25,6 +25,21 @@ export const bertHiddenOutput = (outputs: readonly string[], fromEnd: number): s
 };
 
 /**
+ * {@link tileBertToPhoneLevel} の結果。
+ *
+ * MUST: `columns` は**走査が実際に進めた列数**で、`data` の確保サイズ（`dim · sum(word2ph)`）
+ * とは別の観測値。両者を突き合わせる門（`pipeline.ts` の `assertTiledBert`）はこの独立性の
+ * 上にだけ成立する — `sum(word2ph)` から算出し直した値を入れると、門は恒真に戻る。
+ */
+export type TiledBert = {
+  readonly data: Float32Array<ArrayBuffer>;
+  /** BERT 特徴の次元（`hidden` の行長）。 */
+  readonly dim: number;
+  /** 走査が書いた列数（正しく回れば `sum(word2ph)` = 音素数 P）。 */
+  readonly columns: number;
+};
+
+/**
  * トークンごと隠れ状態 `[tokenCount, dim]`（行優先）を word2ph で音素レベルへ tile 展開し、
  * 転置して `[dim, P]`（P = sum(word2ph)）にする。
  *
@@ -36,7 +51,7 @@ export const tileBertToPhoneLevel = (
   hidden: Float32Array,
   tokenCount: number,
   word2ph: readonly number[],
-): { readonly data: Float32Array<ArrayBuffer>; readonly length: number } => {
+): TiledBert => {
   if (tokenCount <= 0 || hidden.length % tokenCount !== 0) {
     throw new Error(`hidden 長 ${hidden.length} が tokenCount ${tokenCount} で割り切れない`);
   }
@@ -58,5 +73,5 @@ export const tileBertToPhoneLevel = (
       column += 1;
     }
   }
-  return { data: out, length: total };
+  return { data: out, dim, columns: column };
 };
