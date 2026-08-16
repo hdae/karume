@@ -15,18 +15,20 @@
 - **exporter 再編の後始末（小粒）**: pytorch-cpu index の explicit 化
   （hatchling 1.27+ / PEP 639 の license-files リスト形が解禁される — 現状は既定グロブで
   同結果のため急がない）。
-- **housekeeping 一括（小粒）**:
-  - series 資産の再生成（birefnet / depth / vowel — e2e 門 SKIP の解消）
-  - Anima 参照フィクスチャ系テストの復元・tokenizer parity fixture の models 側への移設
-  - turbo LoRA の置き場移行（配布形の親に入力素材が混在）
-  - dist.py の到達しない防御 2 箇所の撤去・1 回目 rename の失敗も DistError 化
-  - u32 uniform 検査の一本化・第 3 便（第 2 便 2026-08-16 の実測で発見した残存サイト:
-    conv-transpose1d / layer-norm / softmax / rms-norm / quantize-rows / attention /
-    gemm-geometry / codegen の reduce・strided — いずれも上限検査なしの旧形。あわせて
-    pad / flip 等の**導出値**（`rows*lengthOut` などの積）が検査対象に入っているかの点検）
-  - transport.ts の到達不能 `outer === null` 分岐の掃除
-  - hack マーカー掃引（rg TODO/FIXME/HACK/workaround）+ knip（未使用 export / 依存）
-  - モデルカード親切化の横展開・P 音素門 / text parity 恒真の解消・exporter ops.py の整理
+- **housekeeping 残り（いずれも上流入力素材の不在でブロック — 2026-08-16 判明）**:
+  - series 資産再生成の残り = birefnet / depth（手置きの HF スナップショットが `inputs/` に
+    不在・trust_remote_code 前提のため勝手に再取得しない。vowel は再生成済みで e2e 門活性）
+  - Anima 参照フィクスチャ系テストの復元（anima-pipeline 系列の再エミットが前提 — anima の
+    上流入力も `inputs/` に不在）
+  - turbo LoRA の正規置き場の規定 + 素材再配置（`turbo.safetensors` がワークスペースに不在・
+    README の綴りは cwd 相対の裸名のまま）
+- **掃引の裁定待ち（2026-08-16 起票）**:
+  - `*_WORKGROUP_SIZE` 4 本（rms-norm / quantize-rows / attention_stats / softmax）—
+    スナップショット門から参照する慣行が半分だけ適用されている。門の横展開 or 非 export 化
+  - reference の deform_conv2d / upsample_bilinear2d / gru_scan — 直接呼び出し門の欠落疑い
+    （非 export 化より門追加が先かの裁定）
+  - 非 export 化した型のうち `*Options` / `*Channels` 系 — サブパス公開の意図があったなら
+    barrel 掲載漏れという別欠陥の可能性（公開意図の裁定）
 
 ## next — autoregressive-ready 基盤波
 
