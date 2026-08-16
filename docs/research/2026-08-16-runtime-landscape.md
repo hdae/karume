@@ -111,6 +111,61 @@ graph capture の**合成物**である（CX-4「Contrast with Karume」）。ka
 packed int4 級格納と shard 単位ロード、メモリ admission 見積り、汎用 multi-output・GPU argmax・
 静的 k の top-k、causal/GQA attention。
 
+### 2.5 native WebGPU EP との収斂とポジショニング検証（同日追補・W-3 / W-4）
+
+「karume の機構は ORT が次期採用する native WebGPU EP と部分的に同型では？」という指摘
+（2026-08-16）を受けた一次ソース検証。結論: **実行機構（軸 3）の収斂は確定。ポジショニングの
+重心は フットプリント / i64 集約 / 決定性 / 可変形状 に置くのが実証に耐える形**。
+
+**収斂が確定した点** — program cache キーは uniform の**値**を含めない
+（`onnxruntime/core/providers/webgpu/program_cache_key.cc` **[一次]**）・graph capture の
+bind group は capture 時に 1 度だけ生成し replay で使い回す（`webgpu_context.cc` **[一次]** =
+karume の焼き込みと同型）・BufferManager は 26 段の bucketed pool。JSEP 比の「実行機構が良い」
+という優位は移行完了後に消える前提で戦略を立てる。
+
+**収斂しない点（一次ソース）**:
+
+- capture の成立条件は「静的形状 + 全計算カーネルが同一 EP」・違反は**モデル初期化エラー**
+  （env-flags 公式 docs **[一次]**）。可変形状ワークロード（可変長 TTS 等）は capture の外。
+- replay は 16 dispatch ごとに submit を分割（`webgpu_context.h:419`）。karume の batch も
+  submit は enqueue ごとに出すためフェンス**待ち**の比較は要実測 — ここは優劣を断定しない。
+- **capture と int64 の OR 結線**: `enable_int64_ = enable_graph_capture || enable_int64` —
+  capture を有効化すると int64 演算が強制的に GPU（= i32 切り詰め）実行になり 2^31 超で精度を
+  失う。migration doc §6 が「既定 parity からの明示的例外」として文書化 **[一次]**。
+  つまり ORT では**高速経路と i64 正しさがトレードオフ**になっている。
+
+**フットプリント実測**（W-4 の unpkg 実測 + 本リポの esbuild 実測・いずれも 2026-08-16）:
+
+| 対象                                                                                          | raw     | gzip        |
+| --------------------------------------------------------------------------------------------- | ------- | ----------- |
+| karume engine（`@karume/runtime` mod.ts 丸ごと・esbuild --bundle --minify）                   | 251.9KB | **67.8KB**  |
+| karume フルスタック（runtime+hub+models barrel 全部・`@hdae/{fetch-cache,yomi}` は external） | ~400KB  | **112.3KB** |
+| onnxruntime-web@1.27.0 WebGPU 経路（ort.webgpu.min.js + ort-wasm-simd-threaded.jsep.wasm）    | 26.9MB  | **6.33MB**  |
+| transformers.js v4.2.0（JS 層のみ・ORT wasm は別途）                                          | —       | 118〜210KB  |
+| WebLLM 0.2.84（index.js 単体・モデル別 wasm 別途）                                            | —       | 2.13MB      |
+| LiteRT.js core 2.5.3（wasm 合算）                                                             | 8.93MB  | 2.72MB      |
+
+gzip 比で **フルスタックでも約 56 倍・engine 単体なら約 93 倍**。wasm が大きい理由は ORT
+メンテナ自身が「CPU 全 op 実装の同梱」と明言（Discussion #24161 **[一次]**）— native EP 化で
+縮む性質のものではない（なお「Dawn 同梱で肥大する」という向きの推測も根拠なし — ブラウザ向け
+配布物にその形は存在しない・#26216 は node 向け未実装要望）。付随する独立のデプロイ優位:
+①wasm 不使用 = CSP の `'wasm-unsafe-eval'` 不要 ②threaded wasm の SharedArrayBuffer =
+COOP/COEP 強制が無い ③全部読める TS + 副作用ゼロ = tree-shaking と監査。
+
+**i64 主張の正確な形** — WGSL に 64bit 整数が無いのは仕様事実（W3C TR・拡張提案
+gpuweb#5152 未採用 **[一次]**）。ただしこれは **WebGPU を使う全ランタイム共通の制約**であり、
+「WebGPU 単独だから i64 問題が無い」という言い方は不正確。正確な差別化はこう:
+
+> **i64 の潰し込みを実行時に散在させず、エクスポータ境界 1 箇所へ値域検査つきで集約し、
+> ランタイムと IR に i64 をそもそも存在させない**（ADR 0009。i32 中間演算のラップは
+> limitations に明文化 — 検査は境界のみ）。
+
+対照の実証: ORT WebGPU EP は shape/indices の i64→u32 キャストが**カーネルに散在**し、その
+一般化を求める issue #28029 が open のまま・v1.28.0 では int64/int32 切り詰めによる
+out-of-bounds read（Gather 系）の修正実績・そして上記の「capture = 切り詰め強制」の結線。
+wonnx も README で同じ制約とオーバーフローリスクを自認。WebNN は仕様に int64 があるが
+CoreML バックエンドが非対応（#21401）で逃げ道にならない **[一次]**。
+
 ---
 
 ## 3. 動的形状の実設計（R2 の根拠資料）
