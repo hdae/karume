@@ -30,7 +30,7 @@ from anima import text as at
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FIXTURE_PATH = (
-    REPO_ROOT / "packages" / "runtime" / "tests" / "fixtures" / "anima-text" / "parity.json"
+    REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "anima-text" / "parity.json"
 )
 FIXTURE: dict[str, Any] = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 

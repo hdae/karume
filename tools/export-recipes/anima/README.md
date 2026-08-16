@@ -551,11 +551,11 @@ Deno implementation of prompt string → token id sequence) and the **parity fix
 not touch the model graphs.
 
 ```sh
-# assets (2 files into outputs/series/anima-demo/text/) + fixture (packages/runtime/tests/fixtures/anima-text/)
+# assets (2 files into outputs/series/anima-demo/text/) + fixture (packages/models/tests/fixtures/anima-text/)
 cd tools/export-recipes
 uv run --group anima python -m anima.demo
 # always format afterwards (the committed form is what the formatter produces — verify's fmt --check covers fixtures too)
-cd ../.. && deno fmt packages/runtime/tests/fixtures/anima-text/parity.json
+cd ../.. && deno fmt packages/models/tests/fixtures/anima-text/parity.json
 ```
 
 **A single run always produces both** (if they are not built from the same table, the runtime
@@ -567,7 +567,7 @@ below).
 | -------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------- |
 | `outputs/series/anima-demo/text/qwen2-tokenizer.json`    | 3,514,619 B                    | vocabulary 151,643 / merges 151,387 / character class tables / NFC segmentation table / 26 added tokens |
 | `outputs/series/anima-demo/text/t5-tokenizer.json`       | 1,093,419 B                    | vocabulary 32,100 + scores / normalization table / 103 added tokens                                     |
-| `packages/runtime/tests/fixtures/anima-text/parity.json` | 474KB (formatted, git-tracked) | reference id sequences for 28 cases + 251 NFC pairs + a **subset** of the vocabularies                  |
+| `packages/models/tests/fixtures/anima-text/parity.json` | 474KB (formatted, git-tracked) | reference id sequences for 28 cases + 251 NFC pairs + a **subset** of the vocabularies                  |
 
 - The runtime assets (4.6MB in total) live under **`outputs/` = `.gitignore`**. They keep only the
   information execution needs out of the raw `tokenizer.json` files (13.8MB in total), so that

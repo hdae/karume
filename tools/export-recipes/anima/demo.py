@@ -11,7 +11,7 @@ r"""examples/anima デモのプロンプト層（トークナイザ）の資産 
   ① 実行時資産 `outputs/series/anima-demo/text/`（`.gitignore` 配下・計 4.6MB 級）
        qwen2-tokenizer.json   語彙 / merges / 文字クラス表 / NFC 分節表 / 追加語彙
        t5-tokenizer.json      語彙 / スコア / 正規化表（Precompiled の畳み込み）/ 追加語彙
-  ② パリティ用フィクスチャ `packages/runtime/tests/fixtures/anima-text/parity.json`
+  ② パリティ用フィクスチャ `packages/models/tests/fixtures/anima-text/parity.json`
      （**git 管理**・470KB 級）
        全ケース（PROMPT_CASES）の参照 id 列と、その再現に要る語彙の**部分集合**
        （151k / 32k の語彙を commit しないための分離）、および NFC の実測対
@@ -26,7 +26,7 @@ MUST: 資産を `models/anima-turbo/`（配布形）直下に置かない。あ�
 閉区間表・写像表へ畳む。畳み込みの同値は emit のたびに網羅 + 乱択で検査し、加えて参照実装と
 `AutoTokenizer` の id 列を乱択 2,000 件で突き合わせる。外れたら**何も書かない**（ADR 0005）。
 
-生成後は `deno fmt packages/runtime/tests/fixtures/anima-text/parity.json` を掛ける
+生成後は `deno fmt packages/models/tests/fixtures/anima-text/parity.json` を掛ける
 （commit 形はフォーマッタが正 — `deno task verify` の `fmt --check` が fixtures も見る）。
 """
 
@@ -54,7 +54,7 @@ T5_ASSET_FILE = "t5-tokenizer.json"
 #: パリティ用フィクスチャ（**git 管理**）。Deno 側
 #: `packages/runtime/tests/anima_tokenizer_test.ts` が読む。
 DEFAULT_FIXTURE_PATH = (
-    REPO_ROOT / "packages" / "runtime" / "tests" / "fixtures" / "anima-text" / "parity.json"
+    REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "anima-text" / "parity.json"
 )
 
 #: 正本の呼び出しに合わせた切り詰め長。`anima/pipeline_ref.py` の `--max-sequence-length` の既定

@@ -11,8 +11,8 @@
 // 縛らない（実装を変えても意味が変わらなければ緑のまま）。**例外は数本の直叩き**で、
 // そこは id 列に出ない規則（故障注入で実測）を分割・正規化そのもので固定している。
 //
-// NOTE: フィクスチャの置き場は暫定で `packages/runtime/tests/fixtures/`（exporter のテストが
-// 参照している）。models 側へ移すのは別タスク — ここは相対参照で読む。
+// NOTE: フィクスチャの置き場は `packages/models/tests/fixtures/anima-text/`（消費者が本テスト
+// なので models 側が正 — 2026-08-16 移設済み）。exporter 側の生成・参照も同じ path を指す。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseCodeRanges } from "../src/anima/text/code-ranges.ts";
@@ -72,7 +72,7 @@ type Fixture = {
 };
 
 const FIXTURE_PATH = new URL(
-  "../../runtime/tests/fixtures/anima-text/parity.json",
+  "./fixtures/anima-text/parity.json",
   import.meta.url,
 );
 const fixture = JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as Fixture;
