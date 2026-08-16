@@ -15,20 +15,6 @@
 - **exporter 再編の後始末（小粒）**: pytorch-cpu index の explicit 化
   （hatchling 1.27+ / PEP 639 の license-files リスト形が解禁される — 現状は既定グロブで
   同結果のため急がない）。
-- **housekeeping 残り（いずれも上流入力素材の不在でブロック — 2026-08-16 判明）**:
-  - series 資産再生成の残り = birefnet / depth（手置きの HF スナップショットが `inputs/` に
-    不在・trust_remote_code 前提のため勝手に再取得しない。vowel は再生成済みで e2e 門活性）
-  - Anima 参照フィクスチャ系テストの復元（anima-pipeline 系列の再エミットが前提 — anima の
-    上流入力も `inputs/` に不在）
-  - turbo LoRA の正規置き場の規定 + 素材再配置（`turbo.safetensors` がワークスペースに不在・
-    README の綴りは cwd 相対の裸名のまま）
-- **掃引の裁定待ち（2026-08-16 起票）**:
-  - `*_WORKGROUP_SIZE` 4 本（rms-norm / quantize-rows / attention_stats / softmax）—
-    スナップショット門から参照する慣行が半分だけ適用されている。門の横展開 or 非 export 化
-  - reference の deform_conv2d / upsample_bilinear2d / gru_scan — 直接呼び出し門の欠落疑い
-    （非 export 化より門追加が先かの裁定）
-  - 非 export 化した型のうち `*Options` / `*Channels` 系 — サブパス公開の意図があったなら
-    barrel 掲載漏れという別欠陥の可能性（公開意図の裁定）
 
 ## next — autoregressive-ready 基盤波
 
@@ -66,6 +52,13 @@ Session 常駐と device-loss lifecycle（perf H-4 と同体）・sampling/RNG �
   K-9 relattn / L-1 cold-load 分解 / L-2 EG 低精度）— 採否・順序は perf-ledger。
 - EmbeddingGemma の完成（models pipeline / tokenizer〈Gemma SPM BPE + byte_fallback 新規実装〉/
   配布形・batch>1 export・runtime attention_mask 配線）。
+- **w8a8 鏡像門の設置**: `e2e_deberta_w8a8_test.ts`（ADR
+  [0026](decisions/0026-w8a8-deberta-deployment.md) 決定 3 — `e2e_deberta_test.ts` は移植済み・
+  鏡像側だけ未設置。2026-08-16 裁定で起票）。
+- **Anima ホスト糊 parity の常設門化**: `sigmaSchedule` / `cfgEulerStep` / `denormalizeLatents` /
+  `padSequence` の「fixture と全 4 実装 bit 同一」は recipe README に実測記録として残るだけで、
+  `outputs/series/anima-pipeline*` を読む常設テストは Deno / pytest のどちらにも存在しない
+  （2026-08-16 判明 — fixture 4 変種は再エミット済みで前提は解消済み）。
 - Metal 数値差の原因確定（known-issues）・resident 経路の診断/計測制約の解消。
 - MoE の seam（fixed-k routing は静的形で表現可 — dense API に expert 非存在を焼かない）。
 

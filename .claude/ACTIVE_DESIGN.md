@@ -35,15 +35,12 @@
   device で resource-limit failure に戻る（正面解決は backlog next の attention ADR）。
 - **RoPE / SiLU 融合の丸め障壁（workgroup memory 往復）は実測依存** — バックエンド更新で
   PNG 門が割れたらまずここを疑う。
-- **`deno task verify` は `.claude/worktrees/` が存在すると worktree 側まで test を拾う**
-  （現在は撤去済み・再設置で再発 — exclude 裁定は backlog now）。
+- **`deno task verify` はリポ内に worktree を置くと worktree 側まで test を拾う** — worktree は
+  リポ外に作る（CLAUDE.md 検証コマンド節。deno.json に exclude は設けない — 2026-08-16 裁定）。
 - **Session 構築の重みアップロード後 submit 1 回は瞬間ピーク +2.7GiB を抑えている** — 消さない。
 - **資産の置き場**: `models/` = HF へそのまま上げる配布形のみ・系列出力は `outputs/series/`・
   入力素材は `inputs/<ファミリ>/<名前>/` — 綴りの正本は
   `tools/export-recipes/_shared/paths.py` と [assets-layout](../docs/assets-layout.md)。
   格納 dtype はヘッダが正（dist の門が検査）。旧識別子以前の資産は開けない（互換シム無し）。
-  turbo LoRA だけ未移行（backlog now）。
-- **birefnet / depth / vowel の series 資産は未再生成** = 当該 e2e 門 SKIP 中（backlog now）。
-  DeBERTa 実重み e2e も未移植 — 回帰網は WAV sha256 門 + rel-pos parity（backlog now）。
 - models パッケージの tree-shaking は「全モジュール副作用ゼロ」不変条件が前提。JSR npm 互換層の
   `sideEffects: false` 出力は未検証（backlog release）。
