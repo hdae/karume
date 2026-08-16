@@ -49,6 +49,7 @@ CORE_MODULES: tuple[str, ...] = (
     "verify",
     "pipeline",
     "goldens",
+    "golden_models",
     "custom_ops",
     # 段 2 で Anima の patch 層から回収したモデル非依存の export 検証ヘルパ。
     "rope",
@@ -86,10 +87,10 @@ UPSTREAM_MODEL_PACKAGES = frozenset(
 #: 検査 2 の一時除外。**検査を弱めるのではなく、既知の違反を明示して残す**。
 #:
 #: NOTE: `aten_handlers` は `torch.ops.torchvision.*`（deform_conv2d）のハンドラキーを引くために
-#: torchvision を基本依存として素で import する（ADR 0055 決定 7）。`goldens` は同 op の
+#: torchvision を基本依存として素で import する（ADR 0055 決定 7）。`golden_models` は同 op の
 #: torch 突合に `torchvision.ops.deform_conv2d` を呼ぶ。どちらも「上流モデル実装のコピー」では
 #: ないが、core wheel の依存として妥当かは ADR 0065 段 6（packaging / provenance）の裁定事項。
-UPSTREAM_CHECK_EXEMPT = frozenset({"aten_handlers", "goldens"})
+UPSTREAM_CHECK_EXEMPT = frozenset({"aten_handlers", "golden_models"})
 
 #: 検査 1 の一時除外。**空** — core は 1 本残らず検査 1 に掛かる（ADR 0065 段 5 完了）。
 #:
