@@ -443,6 +443,18 @@ def _source_digest(artifact: Artifact, memo: dict[Path, str]) -> str:
     return digest
 
 
+def _artifact_size(artifact: Artifact) -> int:
+    """`Artifact` の実体のバイト数（**中身は読まない** — 出所は stat 1 回だけ）。
+
+    共有判定の前置フィルタ（{@link _plan_shared}）のためだけの寸法。sha256 と違って
+    「違えば中身も必ず違う」方向にしか使えないので、一致しても畳む根拠にはならない。
+    """
+    if artifact.source is None:
+        assert artifact.payload is not None  # __post_init__ の不変条件
+        return len(artifact.payload)
+    return artifact.source.stat().st_size
+
+
 def _plan_shared(plans: Sequence[ModelPlan]) -> list[_SharedSeat]:
     """同じ相対 path・同じ sha256 のファイルを 2 モデル以上が持つ席を**配置の前**に決める。
 
@@ -459,19 +471,25 @@ def _plan_shared(plans: Sequence[ModelPlan]) -> list[_SharedSeat]:
     相対 path に「畳める組」と「単独の中身違い」が同居するとき、畳むのは組だけで単独は
     自分のサブツリーに残る。
 
-    出所を hash するのは **2 モデル以上が使う相対 path** の席だけ — 1 モデルしか使わない
-    ファイルは畳みようがなく、sha256 は置いた現物から採るので、ここで読む理由が無い。
+    出所を hash するのは **2 モデル以上が使う (相対 path, サイズ)** の席だけ — 相対 path が
+    1 モデルにしか使われていなければ畳みようがなく、サイズが違えば hash も必ず違うので、
+    どちらも読む理由が無い（sha256 は置いた現物から採る）。サイズは畳む根拠ではなく
+    **落とす根拠**にしか使わない: 同じサイズの席は従来どおり hash で弁別されるので、畳む席の
+    集合は前置の有無で完全に同じ（同じ相対 path に「畳める組」と「サイズ違いの単独」が
+    同居しても、落ちるのは単独の側だけ）。
     """
-    users: dict[str, set[str]] = {}
+    sizes: dict[tuple[str, str], int] = {}
+    users: dict[tuple[str, int], set[str]] = {}
     for plan in plans:
-        for artifact in plan.artifacts.values():
-            users.setdefault(artifact.rel_path, set()).add(plan.name)
+        for role, artifact in plan.artifacts.items():
+            size = sizes[(plan.name, role)] = _artifact_size(artifact)
+            users.setdefault((artifact.rel_path, size), set()).add(plan.name)
     memo: dict[Path, str] = {}
     groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
     samples: dict[tuple[str, str], Artifact] = {}
     for plan in plans:
         for role, artifact in plan.artifacts.items():
-            if len(users[artifact.rel_path]) < 2:
+            if len(users[(artifact.rel_path, sizes[(plan.name, role)])]) < 2:
                 continue
             key = (artifact.rel_path, _source_digest(artifact, memo))
             groups.setdefault(key, []).append((plan.name, role))

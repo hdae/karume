@@ -22,6 +22,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from karume import dist
 from karume.dist import (
     MANIFEST_FORMAT,
     PIPELINES,
@@ -226,6 +227,98 @@ class TestFamilyAssembly:
             assert ref["size"] == len(payload), name
         assert not (out_dir / SHARED_DIRNAME).exists()
         assert sorted(verify_dist(out_dir)) == sorted(f"{name}/{rel_path}" for name in "ABCD")
+
+    @staticmethod
+    def _record_source_digests(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """出所 hash を採った席の `(モデル名, 相対 path)` を記録する。
+
+        「読まれなかった」は現物を並べただけでは観測できない（結果のツリーは読んでも読まなくても
+        同じ）ので、共有判定が使う唯一の読み口を計装して回数で見る。
+        """
+        real = dist._source_digest
+        taken: list[str] = []
+
+        def recording(artifact: Artifact, memo: dict[Path, str]) -> str:
+            taken.append(artifact.rel_path)
+            return real(artifact, memo)
+
+        monkeypatch.setattr("karume.dist._source_digest", recording)
+        return taken
+
+    def test_it_settles_a_path_two_sizes_claim_without_reading_either(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """同じ相対 path でもサイズが違えば中身も必ず違う — hash を採る前に非共有が決まる。"""
+        rel_path = "text_encoder/model.safetensors"
+        short, long = b"weights-A", b"weights-BB"
+        assert len(short) != len(long)
+        taken = self._record_source_digests(monkeypatch)
+        plans = [
+            _synthetic_plan(name, rel_path, payload)
+            for name, payload in (("A", short), ("B", long))
+        ]
+        out_dir = tmp_path / "models" / "sized"
+        manifest = assemble_family(plans, out_dir, "A")
+
+        assert taken == []
+        for name, payload in (("A", short), ("B", long)):
+            ref = manifest["models"][name]["weights"]["w"]["f16"]["file"]
+            assert ref["path"] == f"{name}/{rel_path}", name
+            assert (out_dir / ref["path"]).read_bytes() == payload, name
+        assert not (out_dir / SHARED_DIRNAME).exists()
+
+    def test_it_still_reads_the_source_to_separate_two_equal_sized_byte_strings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """サイズが同じ中身違いは前置では落とせない — 従来どおり出所 sha256 が弁別する。"""
+        rel_path = "text_encoder/model.safetensors"
+        first, second = b"weights-D1", b"weights-D2"
+        assert len(first) == len(second)
+        taken = self._record_source_digests(monkeypatch)
+        plans = [
+            _synthetic_plan(name, rel_path, payload)
+            for name, payload in (("A", first), ("B", second))
+        ]
+        out_dir = tmp_path / "models" / "equal-sized"
+        manifest = assemble_family(plans, out_dir, "A")
+
+        assert taken == [rel_path, rel_path]
+        for name, payload in (("A", first), ("B", second)):
+            ref = manifest["models"][name]["weights"]["w"]["f16"]["file"]
+            assert ref["path"] == f"{name}/{rel_path}", name
+            assert (out_dir / ref["path"]).read_bytes() == payload, name
+        assert not (out_dir / SHARED_DIRNAME).exists()
+
+    def test_it_folds_the_matching_pair_while_a_differently_sized_seat_looks_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """前置フィルタは**畳める組**に一切触らない — 落ちるのはサイズ違いの単独だけ。
+
+        同じ相対 path に「畳める組」と「サイズ違いの単独」が同居する形が、前置を相対 path
+        ごとに掛けてしまった場合（= 組まで巻き添えに落ちる）と結果が割れる唯一の形。
+        """
+        rel_path = "text_encoder/model.safetensors"
+        shared_bytes, odd = b"same-bytes", b"a-longer-byte-string"
+        assert len(shared_bytes) != len(odd)
+        taken = self._record_source_digests(monkeypatch)
+        plans = [
+            _synthetic_plan(name, rel_path, payload)
+            for name, payload in (("A", shared_bytes), ("B", shared_bytes), ("C", odd))
+        ]
+        out_dir = tmp_path / "models" / "mixed"
+        manifest = assemble_family(plans, out_dir, "A")
+
+        assert taken == [rel_path, rel_path]
+        target = f"{SHARED_DIRNAME}/{rel_path}"
+        for name in ("A", "B"):
+            ref = manifest["models"][name]["weights"]["w"]["f16"]["file"]
+            assert ref["path"] == target, name
+            assert ref["sha256"] == hashlib.sha256(shared_bytes).hexdigest(), name
+        loner = manifest["models"]["C"]["weights"]["w"]["f16"]["file"]
+        assert loner["path"] == f"C/{rel_path}"
+        assert (out_dir / loner["path"]).read_bytes() == odd
+        assert (out_dir / target).read_bytes() == shared_bytes
+        assert sorted(verify_dist(out_dir)) == sorted([target, f"C/{rel_path}"])
 
     def test_it_refuses_a_shared_copy_that_did_not_land_byte_identical(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

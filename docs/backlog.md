@@ -12,10 +12,7 @@
 外部レビュー 6 本の TRIAGE・docs 事実修正・ADR 注記・planning SoT 再編（本ファイル新設）・
 **exporter 構造再編（案 A・ADR 0065 — 全 8 段）**は消化済み。残り:
 
-- **exporter 再編の後始末（小粒）**: Python CI の 2 回目観測（初回 2026-08-16 は
-  setup-uv タグと golden io のマシン依存を検出・修正済み — 期待値: core 2010 passed /
-  30 skipped〈分割波で +5: dist テスト 1 + 境界 gate 4〉・recipes 985 passed /
-  233 skipped）・pytorch-cpu index の explicit 化
+- **exporter 再編の後始末（小粒）**: pytorch-cpu index の explicit 化
   （hatchling 1.27+ / PEP 639 の license-files リスト形が解禁される — 現状は既定グロブで
   同結果のため急がない）。
 - **housekeeping 一括（小粒）**:
@@ -25,7 +22,6 @@
   - DeBERTa 実重み e2e の移植（現行の回帰網は WAV sha256 門 + rel-pos parity のみ）
   - turbo LoRA の置き場移行（配布形の親に入力素材が混在）
   - perf-ledger K-1 の曖昧 bucket を分割 or 再定義
-  - dist の (rel_path, size) 前置フィルタ（perf L-5 の残作業）
   - dist.py の到達しない防御 2 箇所の撤去・1 回目 rename の失敗も DistError 化
   - u32 uniform 検査の一本化・第 3 便（第 2 便 2026-08-16 の実測で発見した残存サイト:
     conv-transpose1d / layer-norm / softmax / rms-norm / quantize-rows / attention /
