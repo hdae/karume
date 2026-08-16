@@ -37,8 +37,10 @@ async (input, init) => {
   // 上流の signal と合成する。違反時にこの controller を落とせば、上流を巻き込まずに
   // この 1 本だけを止められる。
   const controller = new AbortController();
+  // `??` が null を落とすので outer は AbortSignal | undefined（明示 `signal: null` は
+  // Request 側の signal へフォールバックする — 従来挙動のまま）。
   const outer = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-  const signal = outer === undefined || outer === null
+  const signal = outer === undefined
     ? controller.signal
     : AbortSignal.any([controller.signal, outer]);
   const response = await base(input, { ...init, signal });
