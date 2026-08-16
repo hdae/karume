@@ -18,10 +18,12 @@ import {
   referenceConv2d,
   referenceConvTranspose1d,
   referenceCumsum,
+  referenceDeformConv2d,
   referenceEmbedding,
   referenceExpand,
   referenceFlip,
   referenceGather,
+  referenceGruScan,
   referenceLayerNorm,
   referenceLinear,
   referenceMaskedFill,
@@ -37,6 +39,7 @@ import {
   referenceSoftmax,
   referenceSymPrefixSlice,
   referenceUnary,
+  referenceUpsampleBilinear2d,
   referenceWhere,
   type RefTensor,
   refTensor,
@@ -1244,6 +1247,188 @@ Deno.test("upsample_bilinear2d は出力の 4 隅を入力の 4 隅へ厳密に�
   // 端の**行と列**も入力の端の 1 次元補間になる（4 隅だけでは軸の取り違えが残る）
   assertEquals([at(0, 0), at(0, 3), at(0, 6)], [1, 2, 3], "上端の行");
   assertEquals([at(0, 0), at(2, 0), at(4, 0)], [1, 2.5, 4], "左端の列");
+});
+
+// ここから 3 本（deform_conv2d / upsample_bilinear2d / gru_scan）は **applyReferenceOp を
+// 経由しない直接呼びの門**。上の入口経由の門と違い、export された関数そのものを呼ぶ経路を
+// 固定する（結線を差し替えても関数側の契約が独立に赤くなる）。
+
+// MUST: オラクルは referenceConv2d（独立の実装）に取る。offset を一様な整数にすると
+// 源座標は `oy − ph + kh + dy` = 「padding を `ph − dy` に付け替えた conv2d」になるので、
+// deform 側の双線形タップを再計算せずに ① タップの整数位置 ② offset のチャネル並び
+// （偶数 = y / 奇数 = x）③ 範囲外のゼロ埋め を conv2d の値で縛れる。
+// MUST: dy ≠ dx にする。同じずらし量だと y / x 平面を取り違えた読みが値でも一致する。
+Deno.test("deform_conv2d は一様な整数 offset を conv2d の窓ずらしとして踏む（直接呼び）", () => {
+  // 1/8 刻みの決め打ち列（f32 で厳密・0 も対称性も持たない）
+  const series = (count: number, seed: number): readonly number[] =>
+    Array.from({ length: count }, (_unused, index) => (((index * 7 + seed) % 17) - 8) / 8);
+  // Cin 2 ≠ Cout 3 / Kh 2 ≠ Kw 3（重みレイアウトの取り違えが値に出る形）
+  const x = t([1, 2, 4, 5], series(40, 0));
+  const weight = t([3, 2, 2, 3], series(36, 5));
+  const bias = t([3], [0.5, -0.25, 0.75]);
+  // padding [2,2] → Hout = 4 + 4 − 1 = 7 / Wout = 5 + 4 − 2 = 7
+  const attrs = { padding: [2, 2] } as const;
+  const mask = t([1, 6, 7, 7], new Array(6 * 49).fill(1));
+  /** 全タップ・全画素で同じずらし量を持つ offset（偶数チャネル = y / 奇数 = x）。 */
+  const uniformOffset = (shiftY: number, shiftX: number): RefTensor =>
+    t(
+      [1, 12, 7, 7],
+      Array.from(
+        { length: 12 * 49 },
+        (_unused, index) => Math.floor(index / 49) % 2 === 0 ? shiftY : shiftX,
+      ),
+    );
+
+  // ① 退化ケース（offset 0・mask 1）は素の conv2d と厳密一致
+  const degenerate = referenceDeformConv2d(x, weight, uniformOffset(0, 0), mask, bias, attrs);
+  const plain = referenceConv2d(x, weight, bias, { ...CONV2D, padding: [2, 2] });
+  assertEquals(degenerate.shape, [1, 3, 7, 7]);
+  assertEquals(degenerate.shape, plain.shape);
+  assertEquals([...degenerate.data], [...plain.data]);
+
+  // ② dy = 2 / dx = 1 → 源座標は `oy + kh` と `ox − 1 + kw` = padding [0,1] の conv2d。
+  // conv2d 側の出力（3×5）は deform 側（7×7）の左上の窓にそのまま埋まっているはず。
+  const shifted = referenceDeformConv2d(x, weight, uniformOffset(2, 1), mask, bias, attrs);
+  const window = referenceConv2d(x, weight, bias, { ...CONV2D, padding: [0, 1] });
+  assertEquals(window.shape, [1, 3, 3, 5]);
+  const cropped: number[] = [];
+  for (let channel = 0; channel < 3; channel += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      for (let column = 0; column < 5; column += 1) {
+        cropped.push(shifted.data[(channel * 7 + row) * 7 + column]);
+      }
+    }
+  }
+  // y / x を取り違えると padding [1,0] の conv2d になり、この窓は一致しない
+  assertEquals(cropped, [...window.data]);
+});
+
+// MUST: λ は 1/4 刻みにする。既存の 1/2 ずらしのケースは `(1 − λ)` と `λ` が同値なので、
+// 4 隅の重みを左右／上下で取り違えた実装が緑のまま通る。
+// MUST: 入力は平面（座標に線形）にしない。平面だと双線形の交差項が消えて、重みの配り方が
+// 間違っていても値が一致する（ここは 4 点を 1,2,3,7 = 非平面に取る）。
+Deno.test("deform_conv2d の 4 隅の重みは 1/4 刻みの λ で手計算どおり（直接呼び）", () => {
+  // x[0,0] = [[1,2],[3,7]] / 1×1 カーネル w = 2 / mask = 3 / bias = 0.5・padding 0
+  const x = t([1, 1, 2, 2], [1, 2, 3, 7]);
+  const weight = t([1, 1, 1, 1], [2]);
+  const bias = t([1], [0.5]);
+  const mask = t([1, 1, 2, 2], [3, 3, 3, 3]);
+  const attrs = { padding: [0, 0] } as const;
+  /** 出力 (0,0) だけをずらす offset（`[y 平面 4 要素, x 平面 4 要素]`）。 */
+  const corner = (shiftY: number, shiftX: number): RefTensor =>
+    t([1, 2, 2, 2], [shiftY, 0, 0, 0, shiftX, 0, 0, 0]);
+
+  // 源 (0.25, 0.5): 4 隅の重みは (1−λy)(1−λx), (1−λy)λx, λy(1−λx), λyλx = 0.375, 0.375,
+  //   0.125, 0.125 → 補間値 = 0.375·1 + 0.375·2 + 0.125·3 + 0.125·7 = 2.375
+  //   → 0.5 + (3 · 2.375) · 2 = 14.75（mask は補間の後・weight はさらに後・bias は 1 度だけ）
+  // ずらさない 3 画素は素のサンプル: 0.5 + 3·x·2 = 12.5 / 18.5 / 42.5
+  const tilted = referenceDeformConv2d(x, weight, corner(0.25, 0.5), mask, bias, attrs);
+  assertEquals(tilted.shape, [1, 1, 2, 2]);
+  assertEquals([...tilted.data], [14.75, 12.5, 18.5, 42.5]);
+
+  // 源 (0.5, 0.25) は上と λ が入れ替わるだけだが、非平面な入力では別の値になる:
+  //   0.375·1 + 0.125·2 + 0.375·3 + 0.125·7 = 2.625 → 0.5 + (3 · 2.625) · 2 = 16.25
+  const mirrored = referenceDeformConv2d(x, weight, corner(0.5, 0.25), mask, bias, attrs);
+  assertEquals([...mirrored.data], [16.25, 12.5, 18.5, 42.5]);
+});
+
+// align_corners = True の定義（源座標 `s = i·(In − 1)/(Out − 1)`）を、**座標に線形な入力**で
+// 縛る。双線形補間は線形関数を厳密に再現する（1 軸で `(1 − λ)·f(k) + λ·f(k+1) = f(k + λ)`、
+// 2 軸目も同じ）ので、期待値は「源座標を線形式へ代入した値」— 実装の畳み方とは独立に出る。
+// align_corners = False（`s = (i + 0.5)·In/Out − 0.5`）なら源座標がずれて必ず赤くなる。
+// MUST: N と C を**どちらも 2** にして平面ごとに違う切片を持たせる（平面添字 `n·C + c` の
+// 取り違えは片方が 1 だと現れない）。H と W で傾きを変えて軸の取り違えも同時に見る。
+Deno.test("upsample_bilinear2d は align_corners の源座標で線形入力を再現する（直接呼び）", () => {
+  const heightIn = 3;
+  const widthIn = 4;
+  /** f(n,c,y,x) = (0.5·n + 0.25·c) + 0.75·y − 0.5·x（座標に線形 = 双線形の不動点）。 */
+  const value = (item: number, channel: number, y: number, x: number): number =>
+    0.5 * item + 0.25 * channel + 0.75 * y - 0.5 * x;
+  const input: number[] = [];
+  for (let item = 0; item < 2; item += 1) {
+    for (let channel = 0; channel < 2; channel += 1) {
+      for (let row = 0; row < heightIn; row += 1) {
+        for (let column = 0; column < widthIn; column += 1) {
+          input.push(value(item, channel, row, column));
+        }
+      }
+    }
+  }
+  const x = t([2, 2, heightIn, widthIn], input);
+  /** align_corners = True の源座標（Out = 1 は 0 固定）。 */
+  const source = (index: number, lengthIn: number, lengthOut: number): number =>
+    lengthOut > 1 ? index * ((lengthIn - 1) / (lengthOut - 1)) : 0;
+  const check = (heightOut: number, widthOut: number): void => {
+    const up = referenceUpsampleBilinear2d(x, { output_size: [heightOut, widthOut] });
+    assertEquals(up.shape, [2, 2, heightOut, widthOut]);
+    for (let item = 0; item < 2; item += 1) {
+      for (let channel = 0; channel < 2; channel += 1) {
+        for (let row = 0; row < heightOut; row += 1) {
+          for (let column = 0; column < widthOut; column += 1) {
+            const expected = value(
+              item,
+              channel,
+              source(row, heightIn, heightOut),
+              source(column, widthIn, widthOut),
+            );
+            const flat = ((item * 2 + channel) * heightOut + row) * widthOut + column;
+            assertAlmostEquals(
+              up.data[flat],
+              expected,
+              1e-6,
+              `[${item},${channel},${row},${column}] @ ${heightOut}×${widthOut}`,
+            );
+          }
+        }
+      }
+    }
+  };
+  // 整数倍（scale = 0.5 ちょうど）と非整数倍（scale = 2/3 と 0.6）の両方
+  check(5, 7);
+  check(4, 6);
+});
+
+// W_hh の縮約まで含めた直接門。gi を「隠れ側の値をちょうど打ち消す」ように置くと、
+// r = σ(0) = 0.5 / z = σ(0) = 0.5 / n = tanh(0) = 0 になり、更新式は `h' = h·0.5` へ潰れる。
+// 打ち消しの成立自体が ① 行の並び（gate 主・`(g·H + j)` 行）② 列 `k` の並び ③ b_hh が
+// reset の**内側**に入ること ④ 状態がステップ間で運ばれること を全部要求するので、どれか 1 つ
+// でも崩れると σ / tanh の引数が 0 から外れて値が一致しなくなる（全て f32 で厳密な値）。
+//
+// 手計算（h = [2,1]・W と b は下のリテラル）:
+//   gh_r = [1·2 − 2·1 + 0.5, 0.5·2 + 1·1 − 1] = [0.5, 1]
+//   gh_z = [−1·2 + 3·1 + 0.25, 2·2 − 0.5·1 + 0] = [1.25, 3.5]
+//   gh_n = [3·2 + 1·1 − 1, −2·2 + 2·1 + 0.5]   = [6, −1.5]
+//   → i_r = −gh_r / i_z = −gh_z / i_n = −gh_n·0.5 と置けば h' = [2,1]·0.5 = [1, 0.5]
+//   次のステップは h = [1, 0.5] に対して同じ置き方: gh_r = [0.5, 0] / gh_z = [0.75, 1.75] /
+//   gh_n = [2.5, −0.5] → h'' = [0.5, 0.25]
+Deno.test("gru_scan は W_hh の縮約と状態の引き回しを手計算どおりに踏む（直接呼び）", () => {
+  const weight = t([6, 2], [1, -2, 0.5, 1, -1, 3, 2, -0.5, 3, 1, -2, 2]);
+  const bias = t([6], [0.5, -1, 0.25, 0, -1, 0.5]);
+  const h0 = t([1, 2], [2, 1]);
+  // 各ステップの gi は [i_r(2), i_z(2), i_n(2)]
+  const firstStep = [-0.5, -1, -1.25, -3.5, -3, 0.75] as const;
+  const secondStep = [-0.5, 0, -0.75, -1.75, -1.25, 0.25] as const;
+
+  const forward = referenceGruScan(
+    "gru_scan",
+    t([2, 1, 6], [...firstStep, ...secondStep]),
+    h0,
+    weight,
+    bias,
+  );
+  assertEquals(forward.shape, [2, 1, 2]);
+  assertEquals([...forward.data], [1, 0.5, 0.5, 0.25]);
+
+  // 逆方向は**走査順だけ**が反転する。時間を入れ替えて同じ列を与えれば、h0 を受けるのは
+  // t = 1 側で、書き出しは順方向の時間添字のまま（t=1 に第 1 ステップ・t=0 に第 2 ステップ）。
+  const backward = referenceGruScan(
+    "gru_scan_reverse",
+    t([2, 1, 6], [...secondStep, ...firstStep]),
+    h0,
+    weight,
+    bias,
+  );
+  assertEquals([...backward.data], [0.5, 0.25, 1, 0.5]);
 });
 
 Deno.test("applyReferenceOp は契約表の kind で分岐し、アリティ違反を拒否する", () => {
