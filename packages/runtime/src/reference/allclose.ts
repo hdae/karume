@@ -32,7 +32,7 @@ export const DEFAULT_TOLERANCE: Tolerance = { atol: 1e-5, rtol: 1e-3 };
  */
 export const EXACT_TOLERANCE: Tolerance = { atol: 0, rtol: 0 };
 
-export type AllcloseReport = {
+type AllcloseReport = {
   readonly pass: boolean;
   /** 許容誤差を破った要素数。 */
   readonly failCount: number;
@@ -82,7 +82,7 @@ export const allclose = (
 };
 
 /** 突合の対象（公開 Tensor と CPU 参照 RefTensor の両方が構造的に当てはまる最小の面）。 */
-export type NumericTensor = {
+type NumericTensor = {
   readonly dtype: IrDtype;
   readonly data: ArrayLike<number>;
 };

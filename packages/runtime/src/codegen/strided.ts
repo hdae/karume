@@ -150,7 +150,7 @@ export const permuteSrcStrides = (
 };
 
 /** {@link expandSrcStrides} の診断の主語（既定は expand そのもの）。 */
-export type BroadcastLabels = {
+type BroadcastLabels = {
   readonly src: string;
   readonly out: string;
 };

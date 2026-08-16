@@ -57,7 +57,7 @@ const INTERPOLATION = "bicubic";
 const CHANNELS = 3;
 
 /** 正規化の定数（`[0, 1]` 尺度 — 上流 `preprocessor_config.json` の綴りのまま）。 */
-export type DepthAnythingChannels = readonly [number, number, number];
+type DepthAnythingChannels = readonly [number, number, number];
 
 export type DepthAnythingPipelineConfig = {
   /** 前処理の resize 先（= 焼かれたグラフの入力幅）。 */

@@ -80,7 +80,7 @@ const STD_EPSILON = 1e-5;
 const LOG_ENERGY_SCALE = 10;
 
 /** {@link extractFeatures} の結果。 */
-export type VowelFeatures = {
+type VowelFeatures = {
   /** `[frames, FEATURE_DIM]` の行優先。グラフ入力 `features` にそのまま渡せる。 */
   readonly data: Float32Array<ArrayBuffer>;
   /** 10ms グリッドのフレーム数（グラフの出力は stride 2 でこの半分になる）。 */

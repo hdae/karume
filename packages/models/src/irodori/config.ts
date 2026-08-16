@@ -61,7 +61,7 @@ const SPEAKER_UNCOND_MODE = "mask";
 const CFG_GUIDANCE_MODE = "independent";
 
 /** CFG の強さ（条件ごと）。合成順は text → speaker → caption で固定（ADR 0047）。 */
-export type IrodoriCfgScales = {
+type IrodoriCfgScales = {
   readonly text: number;
   readonly speaker: number;
   readonly caption: number;

@@ -22,7 +22,7 @@ import { parseSpmTables } from "./spm-normalizer.ts";
 import { type T5Assets, T5Tokenizer, type T5VocabEntry } from "./t5-tokenizer.ts";
 
 /** プロンプト 1 本の符号化結果（グラフ入力は i32 — ADR 0009）。 */
-export type AnimaPromptIds = {
+type AnimaPromptIds = {
   readonly qwenIds: Int32Array<ArrayBuffer>;
   readonly t5Ids: Int32Array<ArrayBuffer>;
 };
@@ -172,7 +172,7 @@ const parseLines = (
 };
 
 /** Qwen2 の資産 JSON を資産表に変換する（外部境界なので構造を検査してから使う）。 */
-export const parseQwen2Asset = (raw: unknown, label: string = "tokenizer"): Qwen2Assets => {
+const parseQwen2Asset = (raw: unknown, label: string = "tokenizer"): Qwen2Assets => {
   const obj = asRecord(raw, label);
   // 行番号 0-origin = id / rank。byte-level 語彙は改行も空白も含まない（emit 時に検査済み）。
   const vocab = new Map<string, number>();
@@ -209,7 +209,7 @@ export const parseQwen2Asset = (raw: unknown, label: string = "tokenizer"): Qwen
 };
 
 /** T5 の資産 JSON を資産表に変換する。 */
-export const parseT5Asset = (raw: unknown, label: string = "tokenizer_2"): T5Assets => {
+const parseT5Asset = (raw: unknown, label: string = "tokenizer_2"): T5Assets => {
   const obj = asRecord(raw, label);
   const tokens = asString(obj["vocabText"], `${label}.vocabText`).split("\n");
   const rawScores = obj["scores"];

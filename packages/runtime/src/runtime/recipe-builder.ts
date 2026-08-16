@@ -239,7 +239,7 @@ const PARAMS_UNIFORM_USAGE = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
  * 載せた時点で「導出相は run 寿命の状態に触れない」がモジュール doc の宣言だけになり、
  * 導出済み計画を Session へ常駐させる根拠が型の上から消える。
  */
-export type RecipeBuilderContext = {
+type RecipeBuilderContext = {
   readonly gpu: GpuContext;
   readonly model: KarumeModel;
   readonly cache: PipelineCache;

@@ -74,7 +74,7 @@ export type ArenaStats = {
   readonly peakTransientBytes: number;
 };
 
-export type RetainOptions = {
+type RetainOptions = {
   /** グラフ出力。参照が尽きてもプールに返さず、readback 可能なまま保つ。 */
   readonly pinned?: boolean;
 };

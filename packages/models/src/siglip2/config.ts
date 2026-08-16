@@ -50,7 +50,7 @@ const INTERPOLATION = "bilinear";
 const CHANNELS = 3;
 
 /** 正規化の定数（`[0, 1]` 尺度 — `preprocessor_config.json` の綴りのまま）。 */
-export type Siglip2Channels = readonly [number, number, number];
+type Siglip2Channels = readonly [number, number, number];
 
 export type Siglip2PipelineConfig = {
   /** 前処理の resize 先（`preprocessor_config.json` の `size.width`）。 */

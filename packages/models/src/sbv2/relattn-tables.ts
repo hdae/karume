@@ -39,7 +39,7 @@ import type { Tensor } from "@karume/runtime";
 export const RELATTN_WINDOW_SIZE = 4;
 
 /** `buildRelattnTables` の返り値（グラフ入力 `idx_k` / `valid` にそのまま渡せる形）。 */
-export type RelattnTables = {
+type RelattnTables = {
   /** `idx_k[i][j] = clamp(w + j − i, 0, 2w)` — key 側の埋め込み添字。 */
   readonly idxK: Tensor;
   /** `valid[i][j] = |j − i| ≤ w ? 1 : 0` — 窓外を落とす 0/1 マスク。 */

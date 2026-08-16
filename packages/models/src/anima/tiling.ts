@@ -47,10 +47,10 @@ const f32 = Math.fround;
  * オーダーに合わせてある。decoder は 3×3 conv 12 本 + upsample 3 段で sample 空間の実効
  * 受容野が数十 px なので、これを下回ると継ぎ目がランプで隠しきれなくなる。
  */
-export const MIN_TILE_OVERLAP_LATENT = 8;
+const MIN_TILE_OVERLAP_LATENT = 8;
 
 /** latent の 1 軸ぶんのタイル配置。 */
-export type TileAxis = {
+type TileAxis = {
   /** この軸の latent 全長。 */
   readonly extent: number;
   /** タイル 1 枚の latent 幅（= タイル decoder の入力形）。 */
@@ -62,7 +62,7 @@ export type TileAxis = {
 };
 
 /** 2 軸ぶんのタイル配置と、latent ↔ sample の縮尺。 */
-export type TileGeometry = {
+type TileGeometry = {
   /** latent 1 あたりの sample 画素数。 */
   readonly scale: number;
   /** latent のチャネル数（切り出しの平面幅を決める）。 */

@@ -45,7 +45,7 @@ export const MIN_RESOLUTION_SIDE = 512;
  * latent の各辺の上限。rope の**軸別素表の行数**（Anima では 128 行 = トークン 128 =
  * latent 256 = 2048px 相当）がモデル側の位置表の天井そのもので、超えると上流でも組めない。
  */
-export const MAX_LATENT_SIDE = 256;
+const MAX_LATENT_SIDE = 256;
 
 /** 各辺の上限（ピクセル）。素表の天井を解像度へ写したもの。 */
 export const MAX_RESOLUTION_SIDE = MAX_LATENT_SIDE * ANIMA_SPATIAL_COMPRESSION;
@@ -54,7 +54,7 @@ export const MAX_RESOLUTION_SIDE = MAX_LATENT_SIDE * ANIMA_SPATIAL_COMPRESSION;
 export const MAX_DIT_TOKENS = 16384;
 
 /** 正方か。 */
-export const isSquare = (size: ImageSize): boolean => size.width === size.height;
+const isSquare = (size: ImageSize): boolean => size.width === size.height;
 
 /**
  * 綴り → 寸法。`1344x768` と、正方の略記 `512`（= `512x512`）を受ける。

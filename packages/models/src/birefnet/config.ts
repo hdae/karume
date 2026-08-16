@@ -56,7 +56,7 @@ const INTERPOLATION = "bilinear";
 const CHANNELS = 3;
 
 /** 正規化の定数（`[0, 1]` 尺度 — 上流 `handler.py` の綴りのまま）。 */
-export type BirefnetChannels = readonly [number, number, number];
+type BirefnetChannels = readonly [number, number, number];
 
 export type BirefnetPipelineConfig = {
   /** 前処理の resize 先（= 焼かれたグラフの入力幅）。 */

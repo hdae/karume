@@ -34,7 +34,7 @@ export type CleanRanges = {
 };
 
 /** `[CLS]` / `[SEP]` / `[UNK]` の語彙 ID。 */
-export type SpecialTokens = {
+type SpecialTokens = {
   readonly clsId: number;
   readonly sepId: number;
   readonly unkId: number;

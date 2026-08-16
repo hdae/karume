@@ -8,7 +8,7 @@
  * 続く m_p / logs_p の展開は行列積ではなく gather になる（ADR 0013 のホスト責務）。
  */
 
-export type DurationPlan = {
+type DurationPlan = {
   /** 音素ごとのフレーム数（ceil 済み・マスク適用済み）。 */
   readonly wCeil: Int32Array<ArrayBuffer>;
   /** 総フレーム数 Ty。 */

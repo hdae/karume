@@ -50,7 +50,7 @@ export type CodecTile = {
 };
 
 /** {@link planCodecTiles} の入力（どちらも latent フレーム単位）。 */
-export type CodecTilePlanOptions = {
+type CodecTilePlanOptions = {
   /** 1 回の decode に流す最大フレーム数。 */
   readonly tileFrames: number;
   /** 採用区間の両側へ足す文脈（{@link IrodoriPipelineConfig.codecHaloFrames}）。 */
@@ -102,13 +102,13 @@ export const planCodecTiles = (
 };
 
 /** タイル 1 枚を decode する（`[1,length,latentDim]` → `[1,1,hopLength·length]` の生波形）。 */
-export type CodecTileRunner = (
+type CodecTileRunner = (
   latent: Float32Array<ArrayBuffer>,
   frames: number,
 ) => Promise<Float32Array>;
 
 /** {@link decodeTiles} が要る幾何（`pipelineConfig` の 2 欄 + 計画）。 */
-export type CodecDecodeOptions = {
+type CodecDecodeOptions = {
   readonly latentDim: number;
   readonly hopLength: number;
   readonly tiles: readonly CodecTile[];

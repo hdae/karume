@@ -245,7 +245,7 @@ const TIMESTAMP_BYTES = 8;
  * `maxChunkSize` 1,024 なら 2,048 で収まるが、政策で上限を上げると**静かに** validation で
  * 落ちる（= その submit の全 pass が実行されない）ため、エンコード前に明示的に落とす。
  */
-export const MAX_TIMESTAMP_QUERIES = 2048;
+const MAX_TIMESTAMP_QUERIES = 2048;
 
 /** submit 済み・未回収の timestamp 資源（1 チャンク 1 件）。 */
 type PendingTiming = {

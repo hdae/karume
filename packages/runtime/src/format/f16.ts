@@ -11,7 +11,7 @@
  */
 
 /** f16 の 1 要素あたりのバイト数。 */
-export const F16_BYTES = 2;
+const F16_BYTES = 2;
 
 /**
  * f16 の 16bit パターン → f32 の数値（下位 16bit だけを見る）。

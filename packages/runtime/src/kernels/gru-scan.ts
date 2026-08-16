@@ -166,7 +166,7 @@ fn main(
 };
 
 /** gru_scan の幾何（params の唯一の入力型）。 */
-export type GruScanDims = {
+type GruScanDims = {
   /** 時間長 T（記号次元が束縛された後の実長）。 */
   readonly time: number;
   /** バッチ N。 */

@@ -422,11 +422,12 @@ const assertTableFits = (
 /**
  * {@link Sbv2Pipeline} の内部状態。
  *
- * NOTE: 公開面（`mod.ts` / `sbv2.ts`）には出さない。`export` しているのは、torch 参照突合の
- * dump 経路（`examples/sbv2/dump.ts`）が {@link synthesizeSbv2} を直に呼ぶため — チェーンの
- * 実装を 2 本持たずに中間値を観測するための唯一の口で、利用者ストーリーではない。
+ * NOTE: 公開面（`mod.ts` / `sbv2.ts`）には出さない。torch 参照突合の dump 経路
+ * （`examples/sbv2/dump.ts`）が {@link synthesizeSbv2} を直に呼ぶため関数だけを `export` して
+ * いる — チェーンの実装を 2 本持たずに中間値を観測するための唯一の口で、利用者ストーリーでは
+ * ない。この型自体は呼び出し側で推論に載るので、モジュール内に閉じる。
  */
-export type Sbv2State = {
+type Sbv2State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: Sbv2PipelineConfig;
@@ -447,7 +448,7 @@ export type Sbv2State = {
 };
 
 /** 合成 1 回ぶんの中間値（dump 経路と診断だけが読む）。 */
-export type Sbv2Trace = {
+type Sbv2Trace = {
   readonly analysis: Sbv2TextAnalysis;
   readonly speaker: string;
   readonly style: string;
@@ -465,7 +466,7 @@ export type Sbv2Trace = {
 };
 
 /** {@link synthesizeSbv2} の返り値。{@link Sbv2Pipeline.generate} はここから音だけを採る。 */
-export type Sbv2Synthesis = {
+type Sbv2Synthesis = {
   readonly sampleRate: number;
   readonly audio: Float32Array<ArrayBuffer>;
   readonly trace: Sbv2Trace;

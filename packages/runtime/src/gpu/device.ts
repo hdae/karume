@@ -90,7 +90,7 @@ export const REQUIRED_LIMIT_KEYS = [
   "maxComputeWorkgroupsPerDimension",
 ] as const;
 
-export type RequiredLimitKey = (typeof REQUIRED_LIMIT_KEYS)[number];
+type RequiredLimitKey = (typeof REQUIRED_LIMIT_KEYS)[number];
 
 export type RequiredLimits = Readonly<Record<RequiredLimitKey, number>>;
 
@@ -100,7 +100,7 @@ export type RequiredLimits = Readonly<Record<RequiredLimitKey, number>>;
  * MUST: 絞る向きにしか使えない（アダプタ値を超える要求はアダプタ値のまま）。引き上げに使えて
  * しまうと requestDevice が丸ごと失敗する経路が黙って生まれる。
  */
-export type LimitCaps = Partial<Record<RequiredLimitKey, number>>;
+type LimitCaps = Partial<Record<RequiredLimitKey, number>>;
 
 /**
  * アダプタ実測値から requestDevice に渡す requiredLimits を組み立てる。
@@ -168,7 +168,7 @@ export const assertLimitsGranted = (
 const REQUIRED_FEATURES: readonly GPUFeatureName[] = [];
 
 /** GPU 側時間計測（pass 境界の timestamp）に要る feature — ADR 0021。 */
-export const TIMESTAMP_QUERY_FEATURE: GPUFeatureName = "timestamp-query";
+const TIMESTAMP_QUERY_FEATURE: GPUFeatureName = "timestamp-query";
 
 /**
  * f16 **計算**変種（共有タイルを f16 にする GEMM — `enable f16`）に要る feature。
@@ -184,7 +184,7 @@ export const SHADER_F16_FEATURE: GPUFeatureName = "shader-f16";
  * （`ReadonlySet<GPUFeatureName>`）と素の `Set<string>` の**両方**を受けるために要る
  * （前者は要素型が狭く、後者は `ReadonlySet<GPUFeatureName>` を満たさない）。
  */
-export type GpuFeatureSet = Iterable<string> & { has(feature: string): boolean };
+type GpuFeatureSet = Iterable<string> & { has(feature: string): boolean };
 
 /**
  * {@link AcquireGpuOptions.gpuTiming} の三値から「timestamp-query を要求するか」を決める。
@@ -754,7 +754,7 @@ export class GpuContext {
 export const RUNTIME_INTERNAL: unique symbol = Symbol("karume.runtimeInternal");
 
 /** {@link ResidentTensor} のランタイム内部面。 */
-export type ResidentInternals = {
+type ResidentInternals = {
   /** 焼き込み / 別名の対象になる実体。 */
   readonly buffer: GPUBuffer;
   /**
@@ -941,7 +941,7 @@ export type BatchMember = {
 };
 
 /** {@link BatchScope} のランタイム内部面。 */
-export type BatchInternals = {
+type BatchInternals = {
   /** errorScope 区間が実際に開くまでの待ち（{@link GpuContext.beginBatch} が await する）。 */
   readonly entered: Promise<void>;
   /** 決着時に取りまとめる相手を登録する（同じ相手の重複登録は無害）。 */

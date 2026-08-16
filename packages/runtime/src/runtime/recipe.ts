@@ -52,7 +52,7 @@ export type BindingRecipe = {
  * MUST: `params` は**全カーネル共通で binding 0**（31 箇所の bind group が例外なくこの形）
  * なので、{@link BindingRecipe} の列とは別枠で持つ。
  */
-export type DispatchRecipe = {
+type DispatchRecipe = {
   /** パイプラインキー（GPU 時間内訳の帰属先 — ADR 0021）。 */
   readonly key: string;
   readonly pipeline: GPUComputePipeline;
@@ -154,7 +154,7 @@ type EncodeContext = {
 };
 
 /** レシピ実行に要る run 寿命の文脈（アリーナ簿記あり — {@link executeStepRecipe}）。 */
-export type StepExecution = EncodeContext & {
+type StepExecution = EncodeContext & {
   readonly arena: RunArena;
 };
 
@@ -254,7 +254,7 @@ export const executeStepRecipe = (recipe: StepRecipe, run: StepExecution): void 
 };
 
 /** 1 ステップぶんの slot 割当（{@link PlanSlots.steps} の要素）。 */
-export type StepSlots = {
+type StepSlots = {
   /** 出力の slot 添字。別名ステップ（確保が出ない）は undefined。 */
   readonly output: number | undefined;
   /** {@link StepRecipe.temps} と同順・同長の slot 添字。 */
@@ -267,7 +267,7 @@ export type StepSlots = {
  * slot は「run の間ずっと GPU に存在する中間バッファ 1 本」で、RunArena が run ごとに
  * createBuffer していた実体をそのまま Session 常駐へ移した形。
  */
-export type PlanSlots = {
+type PlanSlots = {
   /** slot ごとのバイト数（{@link toSizeClass} 済み — RunArena が実際に確保する大きさ）。 */
   readonly bytes: readonly number[];
   /** {@link StepRecipe} 列と同順・同長の割当。 */
@@ -362,7 +362,7 @@ const resolveSlot = (slot: number | undefined, buffers: readonly GPUBuffer[]): G
 };
 
 /** 焼き込み済みの slot backing 実行資材（{@link bakeBindGroups}）。 */
-export type BakedPlan = {
+type BakedPlan = {
   /**
    * 全ステップ × 全 dispatch の bind group。外側は {@link StepRecipe} 列と、内側は
    * {@link StepRecipe.dispatches} と同順・同長。

@@ -20,7 +20,7 @@
 
 import { type FrontendResult, moraTones, moraToPhones } from "@hdae/yomi";
 
-export type Sbv2PhoneTone = {
+type Sbv2PhoneTone = {
   /** given_phone（両端 PAD 込み、add_blank 前）。 */
   readonly phones: readonly string[];
   /** given_tone（0/1、phones と同長）。 */

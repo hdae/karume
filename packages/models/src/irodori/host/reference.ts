@@ -29,7 +29,7 @@ const TARGET_DB = -16;
 const GAIN_FACTOR = Math.LN10 / 20;
 
 /** {@link normalizeReference} の結果。スカラーは golden 突合の観測点として返す。 */
-export type NormalizedReference = {
+type NormalizedReference = {
   readonly data: Float32Array<ArrayBuffer>;
   /** 測った integrated loudness（LUFS）。 */
   readonly refDb: number;

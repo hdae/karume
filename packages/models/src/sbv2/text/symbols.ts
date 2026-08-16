@@ -23,7 +23,7 @@
  * `positionBuckets` がバケット総数（= 添字の中心オフセット）、`maxPosition` が対数圧縮の
  * 基準になる最大距離。
  */
-export type Sbv2BertRelPos = {
+type Sbv2BertRelPos = {
   /** `position_buckets`（char-wwm は 256）。 */
   readonly positionBuckets: number;
   /** `max_relative_positions`（1 未満なら `max_position_embeddings` — char-wwm は 512）。 */

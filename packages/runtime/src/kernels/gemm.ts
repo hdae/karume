@@ -237,7 +237,7 @@ export type BmmRowWindow = "a" | "c";
  * GEMM 骨格ではないので src/kernels/attention.ts が別に持つ。`conv1d` / `conv2d` は
  * implicit GEMM（ADR 0024）で、**groups == 1 専用**（groups > 1 は直接カーネルが受ける）。
  */
-export type GemmSpec =
+type GemmSpec =
   | {
     readonly op: "matmul";
     readonly v4: boolean;

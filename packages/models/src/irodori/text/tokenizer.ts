@@ -38,7 +38,7 @@ export type IrodoriTokenizerAssets = {
 };
 
 /** 上流 `batch_encode` の最終形（グラフ入力の dtype — i32 と bool = u32・ADR 0009）。 */
-export type IrodoriPaddedIds = {
+type IrodoriPaddedIds = {
   readonly ids: Int32Array<ArrayBuffer>;
   readonly mask: Uint32Array<ArrayBuffer>;
 };

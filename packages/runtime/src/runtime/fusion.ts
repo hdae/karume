@@ -85,14 +85,14 @@ import {
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /** 融合ルールの識別子（{@link FUSION_RULES} の宣言順と 1 対 1）。 */
-export type FusionRuleName = "silu" | "upsample2x" | "rope" | "adaln" | "rowBlockAttention";
+type FusionRuleName = "silu" | "upsample2x" | "rope" | "adaln" | "rowBlockAttention";
 
 /**
  * 診断カウンタの見出し。融合 4 ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
  * 恒等 expand（{@link ExecStep} の `aliasesInput`）を数える。reshape の別名化は無条件なので
  * 数えない（外れようがない = 観測する意味がない）。
  */
-export type FusionCounterName = FusionRuleName | "identityExpand";
+type FusionCounterName = FusionRuleName | "identityExpand";
 
 /** ルール別の適用回数。「融合が黙って外れて性能だけ落ちる」事故の唯一の観測点。 */
 export type FusionCounts = Readonly<Record<FusionCounterName, number>>;
@@ -116,12 +116,12 @@ export type FusedOperand =
  * - `tiled` = **1 workgroup = 1 出力タイル**の GEMM 族。grid-stride で縮退できないので、
  *   上限超過は宣言側（`tiledWorkgroups`）が fail loudly にする。
  */
-export type FusedWorkgroups =
+type FusedWorkgroups =
   | { readonly kind: "gridStride"; readonly items: number; readonly size: number }
   | { readonly kind: "tiled"; readonly counts: readonly [number, number, number] };
 
 /** 融合カーネル 1 dispatch ぶんの生成入力（全ルール共通の形）。 */
-export type FusedDispatch = {
+type FusedDispatch = {
   readonly key: string;
   /**
    * MUST: 同一キーには常にバイト単位で同一の WGSL（PipelineCache の決定性契約）。
@@ -151,7 +151,7 @@ export type FusedDispatch = {
  * MUST: 宣言した一時には必ず解放境界がある（`releaseAfter` が確保より前だと実行相の参照
  * 計数が閉じず、run 末尾の `assertDrained` が落とす）。
  */
-export type FusedTemp = {
+type FusedTemp = {
   readonly byteLength: number;
   /** {@link FusedStep.dispatches} のこの添字の**直前**に確保する。 */
   readonly allocBefore: number;
@@ -189,7 +189,7 @@ export type FusedStep = {
   readonly dispatches: readonly FusedDispatch[];
 };
 
-export type NodeStep = {
+type NodeStep = {
   readonly kind: "node";
   readonly plan: NodePlan;
   /**
@@ -221,7 +221,7 @@ export type FusionLimits = {
 };
 
 /** 判定に要るグラフ全体の事実（executor の Session 状態から渡す）。 */
-export type FusionContext = {
+type FusionContext = {
   /** 値名 → グラフ内の消費回数（plan.ts の countUses）。 */
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;
@@ -289,7 +289,7 @@ const passthroughIsIndependent = (
 };
 
 /** 融合ルール 1 件の適用結果（融合ステップ + 窓内 passthrough + 走査幅）。 */
-export type FusionHit = {
+type FusionHit = {
   /** 融合ステップより**前**に素のまま並べる窓内ノード（元のノード順）。 */
   readonly passthrough: readonly NodePlan[];
   readonly step: FusedStep;
@@ -841,7 +841,7 @@ const ADALN_RULE = defineRule<AdalnMatch>({
 });
 
 /** 行ブロック 1 枚（クエリ行の半開区間 `[offset, offset + rows)`）。 */
-export type RowBlock = {
+type RowBlock = {
   readonly offset: number;
   readonly rows: number;
 };

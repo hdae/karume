@@ -18,7 +18,7 @@
  * 直前までに積まれた操作の決着後に `operation` を走らせ、その結果 / 例外をそのまま返す。
  * 同期の操作（破棄など）も積める — 順番待ちに載ることだけが要件で、非同期である必要は無い。
  */
-export type OperationChain = <T>(operation: () => T | Promise<T>) => Promise<T>;
+type OperationChain = <T>(operation: () => T | Promise<T>) => Promise<T>;
 
 /** 空の（何も積まれていない）直列化鎖を作る。 */
 export const createOperationChain = (): OperationChain => {

@@ -18,18 +18,18 @@ export type IrStorageDtype = "f32" | "f16" | "bf16" | "i8" | "i32";
 /** 非負整数、または `coeff·sym+offset` の正準表記（dims.ts）。 */
 export type IrDim = number | string;
 
-export type IrValueInfo = {
+type IrValueInfo = {
   readonly dtype: IrDtype;
   readonly shape: readonly IrDim[];
 };
 
-export type IrInput = {
+type IrInput = {
   readonly name: string;
   readonly dtype: IrDtype;
   readonly shape: readonly IrDim[];
 };
 
-export type IrStorage = {
+type IrStorage = {
   readonly dtype: IrStorageDtype;
   /**
    * 量子化格納の scale テンソルの safetensors キー（`dtype: "i8"` では**必須** — ADR 0019）。
@@ -39,7 +39,7 @@ export type IrStorage = {
   readonly groupSize?: number;
 };
 
-export type IrInitializer = {
+type IrInitializer = {
   /** safetensors のテンソルキー。 */
   readonly tensor: string;
   readonly storage: IrStorage;
@@ -71,8 +71,8 @@ export class IrError extends Error {
   }
 }
 
-export const IR_FORMAT = "karume-ir";
-export const IR_VERSION = 1;
+const IR_FORMAT = "karume-ir";
+const IR_VERSION = 1;
 
 const TOP_LEVEL_KEYS = [
   "format",

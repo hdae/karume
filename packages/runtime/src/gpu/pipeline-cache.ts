@@ -22,7 +22,7 @@ export class PipelineKeyConflictError extends Error {
  * パイプライン生成解決時に `getBindGroupLayout(0)` を 1 回だけ呼んで保持する（毎 dispatch の
  * bind group 生成で呼び直さない）。
  */
-export type CachedPipeline = {
+type CachedPipeline = {
   readonly pipeline: GPUComputePipeline;
   readonly layout: GPUBindGroupLayout;
 };

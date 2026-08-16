@@ -164,7 +164,7 @@ fn main(
 `;
 
 /** deform_conv2d の幾何（params の唯一の入力型）。 */
-export type DeformConv2dDims = {
+type DeformConv2dDims = {
   readonly batch: number;
   readonly channelsIn: number;
   readonly channelsOut: number;

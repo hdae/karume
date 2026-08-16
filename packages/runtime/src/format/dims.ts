@@ -3,7 +3,7 @@
 // TS 実装と将来の Python 実装は同じ表で検証する（実装を正本にすると同期が人手の規律になる）。
 
 /** `coeff·sym + offset`。coeff ≥ 1・offset ≥ 0 の非負一次式のみ。 */
-export type DimExpr = {
+type DimExpr = {
   readonly coeff: number;
   readonly sym: string;
   readonly offset: number;

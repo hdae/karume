@@ -28,7 +28,7 @@
  */
 
 /** biquad 1 段（分母は `a[0] = 1` に正規化済み）。 */
-export type Biquad = {
+type Biquad = {
   readonly b: readonly [number, number, number];
   readonly a: readonly [number, number, number];
 };

@@ -66,7 +66,7 @@ export const roundTiesToEven = (value: number): number => {
   return floor % 2 === 0 ? floor : floor + 1;
 };
 
-export type QuantizedRows = {
+type QuantizedRows = {
   /**
    * 量子化した活性（`[rows, dim]` の平坦 i8 — GPU の `xq` を 4 詰めから展開した形）。
    *
@@ -136,7 +136,7 @@ export const quantizeRowsTieMargin = (
   return margin;
 };
 
-export type LinearI8a8Input = {
+type LinearI8a8Input = {
   /** 活性 `[m, k]`（f32・量子化前）。 */
   readonly x: ArrayLike<number>;
   /** 重み `[n, k]` の**量子化済み整数値**（±127）。 */
@@ -209,7 +209,7 @@ export const referenceAttentionPvQuant = (
   return qp;
 };
 
-export type AttentionPvI8a8CoreInput = {
+type AttentionPvI8a8CoreInput = {
   /** `qP`（`[batch, m, n]` の平坦・0..127 の整数）。GPU が A タイルで作った列そのもの。 */
   readonly qp: ArrayLike<number>;
   /** Vᵀ の量子化値（`[batch, d, n]` の平坦・±127 の整数 — **N 連続**）。 */
@@ -259,7 +259,7 @@ export const referenceAttentionPvI8a8Core = (
   return out;
 };
 
-export type AttentionQkI8a8Input = {
+type AttentionQkI8a8Input = {
   /** q `[batch, m, d]`（f32・量子化前。batch は B·H を畳んだ 1 軸）。 */
   readonly q: ArrayLike<number>;
   /** k `[batch, n, d]`（f32・量子化前）。 */

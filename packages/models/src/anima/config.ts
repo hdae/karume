@@ -26,13 +26,13 @@ const DEFAULTS_KEYS: readonly string[] = [
 const RESOLUTION_KEYS: readonly string[] = ["width", "height"];
 
 /** `FlowMatchEulerDiscreteScheduler` の構成（配布物ごとに変わりうるので manifest が持つ）。 */
-export type AnimaScheduler = {
+type AnimaScheduler = {
   readonly shift: number;
   readonly numTrainTimesteps: number;
 };
 
 /** 配布者の推奨既定（`generate` の未指定欄を埋める）。 */
-export type AnimaDefaults = {
+type AnimaDefaults = {
   readonly steps: number;
   readonly guidanceScale: number;
   readonly resolution: ImageSize;

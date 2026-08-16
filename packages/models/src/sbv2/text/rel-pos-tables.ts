@@ -24,7 +24,7 @@
 import type { Tensor } from "@karume/runtime";
 
 /** {@link buildRelPosTables} の返り値（グラフ入力 `c2p_pos` / `p2c_pos` にそのまま渡せる形）。 */
-export type RelPosTables = {
+type RelPosTables = {
   /** content→position の gather 添字。`c2p[i][j] = clamp(bucket(i − j) + span, 0, 2·span − 1)`。 */
   readonly c2pPos: Tensor;
   /** position→content の gather 添字。**`c2p` の転置**（バケット化が奇関数なので厳密に成立）。 */

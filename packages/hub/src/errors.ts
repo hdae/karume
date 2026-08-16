@@ -34,7 +34,7 @@ export type AvailableLabels = {
 /** manifest の構造が壊れていてラベルを列挙できないときの値。 */
 export const NO_LABELS: AvailableLabels = { models: [], quants: [], dtypes: {} };
 
-export type HubErrorOptions = {
+type HubErrorOptions = {
   readonly available?: AvailableLabels;
   readonly cause?: unknown;
 };
@@ -73,7 +73,7 @@ export class ManifestReferenceError extends HubError {
   }
 }
 
-export type ManifestPathErrorOptions = HubErrorOptions & { readonly path: string };
+type ManifestPathErrorOptions = HubErrorOptions & { readonly path: string };
 
 /** path 許可リスト違反（ADR 0038 §2）。 */
 export class ManifestPathError extends HubError {
@@ -90,7 +90,7 @@ export class ManifestPathError extends HubError {
 /** 完全性検証の失敗元（キャッシュ読出し / network 取得）。 */
 export type IntegritySource = "cache" | "network";
 
-export type IntegrityErrorOptions = HubErrorOptions & {
+type IntegrityErrorOptions = HubErrorOptions & {
   readonly repo: string;
   readonly revisionSha: string;
   readonly path: string;
@@ -128,7 +128,7 @@ export class IntegrityError extends HubError {
   }
 }
 
-export type HubFetchErrorOptions = HubErrorOptions & {
+type HubFetchErrorOptions = HubErrorOptions & {
   readonly repo: string;
   readonly revisionSha?: string;
   readonly path?: string;

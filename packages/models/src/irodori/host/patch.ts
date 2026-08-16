@@ -6,7 +6,7 @@
  */
 
 /** patch 後の参照 latent。 */
-export type PatchedReference = {
+type PatchedReference = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly tokens: number;
   /** `latentDim × patchSize`。 */

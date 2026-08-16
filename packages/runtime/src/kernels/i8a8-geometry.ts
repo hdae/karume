@@ -37,7 +37,7 @@ import { CodegenError } from "../codegen/errors.ts";
 export const I8A8_PACK = 4;
 
 /** 幾何を選ぶ単位。**キーの op 欄と一致させる**（診断で読み手が対応を取れる形にする）。 */
-export type I8a8GemmOp = "linear" | "attention_qk" | "attention_pv";
+type I8a8GemmOp = "linear" | "attention_qk" | "attention_pv";
 
 /**
  * 生成パラメタ。出力タイル辺は `regM · wgY` × `regN · wgX` で**導出**する
