@@ -569,6 +569,7 @@ export class RecipeBuilder {
     // attrs のスカラ（clamp の min/max など）は params の末尾に f32 で載る（並びは契約表）。
     const params = this.#writeParams(
       elementwiseParams(
+        spec,
         outShape,
         step.inputShapes,
         scalarParamValues(step.contract, step.node.attrs, `nodes (${step.node.op})`),
@@ -1505,7 +1506,7 @@ export class RecipeBuilder {
       pipeline: statsPipeline,
       layout: statsLayout,
       params: this.#writeParams(
-        attentionStatsParams(batch * rows, cols),
+        attentionStatsParams(batch * rows, cols, statsRegCache),
         PARAMS_UNIFORM_USAGE,
       ),
       bindings: [{ binding: 1, source: scores }, { binding: 2, source: stats }],
@@ -2220,6 +2221,14 @@ export class RecipeBuilder {
    * flush の担い手が 2 つになり、どちらが先に走るかで破棄済みバッファ参照の submit が生まれる。
    * NOTE: 失敗 run（`scheduler.discard` 経路）の後もキャッシュは有効。バッファの内容は不変で、
    * discard が捨てるのは未 submit のエンコードだけなので、params の値は影響を受けない。
+   * NOTE: **このキャッシュは Session 寿命で無界**（by-design — `docs/limitations.md`）。
+   * 同範囲の他キャッシュ（`SubmitScheduler.MEASURED_HISTORY` /
+   * `PREPARED_PLAN_CAPACITY`）が上限を持つのに対し、ここは追い出しを持たない —— params を
+   * 追い出す = 破棄することになるが、生きている導出済み計画がその実体を**直参照で畳み込んで
+   * いる**ため、安全にやるには参照計数という別の簿記が要る。可変 shape を同一 Session で
+   * 多数回回す用途（可変長 TTS / 系列長可変の埋め込み）では 1 run につきノード種ぶんの小
+   * バッファが積み上がるので、`diagnostics().weights.allocCount` の伸びを見て Session を
+   * 切り直すこと。無界であること自体は tests/gpu_params_cache_test.ts が門にしている。
    */
   #writeParams(params: Uint32Array<ArrayBuffer>, usage: number): GPUBuffer {
     const key = `u${usage}:${params.join(",")}`;

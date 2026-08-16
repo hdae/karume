@@ -304,14 +304,33 @@ export const attentionPvParams = (
 /**
  * ② の uniform。WGSL の uniform アドレス空間では struct の整列が 16 バイトになるため、
  * 2 語ぶんの内容でも 16 バイト確保する MUST（softmax と同じ）。
+ *
+ * MUST: regcache 変種を使うなら、その `regCache` をここにも渡して幾何を見る（生成側と二重だが、
+ * カーネル直呼びの経路も通る門 — gru_scan の hidden 上限と同型）。`epc` は生成時に焼かれる
+ * 一方 `dim` は実行時値なので、`dim > epc · 256` になると余った要素が max にも Σ にも
+ * 入らず、確率が黙ってずれる（例外も NaN も出ない沈黙誤値）。
  */
 export const attentionStatsParams = (
   rows: number,
   dim: number,
+  regCache?: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("attention_stats params", { rows, dim });
   if (dim < 1) {
     throw new CodegenError(`attention_stats params: dim は正整数（${dim}）`);
+  }
+  if (regCache !== undefined) {
+    if (regCache > ATTENTION_STATS_REG_CACHE_MAX) {
+      throw new CodegenError(
+        `attention_stats params: regCache ${regCache} が上限 ${ATTENTION_STATS_REG_CACHE_MAX} を超える`,
+      );
+    }
+    const covered = regCache * ATTENTION_STATS_WORKGROUP_SIZE;
+    if (dim > covered) {
+      throw new CodegenError(
+        `attention_stats params: dim ${dim} が regcache 変種の担当範囲 ${covered}（${regCache} × ${ATTENTION_STATS_WORKGROUP_SIZE}）を超える`,
+      );
+    }
   }
   const params = new Uint32Array(4);
   params[0] = rows;

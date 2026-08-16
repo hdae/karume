@@ -27,6 +27,9 @@
  * `i32(floor(NaN))` の未定義（docs/limitations.md）へ直行し、正の形だけだと NaN が黙って
  * 0 寄与になる（沈黙誤値）。`clamp` に流す案は ADR 0020 が根治した「ドライバの max が
  * NaN を飲む」の再演なので採らない。
+ * MUST: NaN のビット列は params で運ぶ。WGSL には NaN リテラルが無く、`bitcast<f32>(...)` を
+ * 定数式で書くと「const-expression が NaN」としてシェーダ生成エラーになりうる実装がある
+ * （gather / embedding と同じ規律 — src/kernels/gather.ts）。
  * MUST: grid-stride を使う。実モデル（BiRefNet_HR の `decoder_block1`）の出力は
  * `[1,256,512,512]` = 6,710 万要素で、必要な workgroup 数が 1 次元 dispatch 上限
  * （既定 65535）を 3 桁超える。
@@ -36,6 +39,14 @@ import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
 export const DEFORM_CONV2D_WORKGROUP_SIZE = 256;
+
+/**
+ * NaN 座標のサンプルが返す quiet NaN のビット列（f32）。
+ *
+ * NOTE: 欄名は gather / embedding の `oob` と鏡像だが、この op の**範囲外はゼロ埋め**で
+ * NaN 汚染ではない（上の MUST 参照）— ここで運ぶのは「offset が NaN のときに伝播させる値」。
+ */
+export const DEFORM_CONV2D_OOB_BITS = 0x7fc00000;
 
 /** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
 export const DEFORM_CONV2D_KEY =
@@ -56,6 +67,7 @@ struct Dims {
   kernel_w: u32,
   padding_h: u32,
   padding_w: u32,
+  oob: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
@@ -74,7 +86,7 @@ fn is_nan(v: f32) -> bool {
 // 入力平面 \`plane\` の双線形サンプル。範囲外はゼロ埋め（4 隅個別）・NaN は伝播。
 fn deform_sample(plane: u32, sy: f32, sx: f32) -> f32 {
   if (is_nan(sy) || is_nan(sx)) {
-    return bitcast<f32>(0x7fc00000u);
+    return bitcast<f32>(dims.oob);
   }
   // 正の形の範囲判定。これを通れば floor(sy) は [-1, H-1] なので i32 変換は必ず定義される。
   let inside = sy > -1.0 && sy < f32(dims.height_in)
@@ -179,7 +191,8 @@ type DeformConv2dDims = {
 };
 
 /**
- * 12 語（48 バイト）の uniform Dims。先頭は出力の全要素数。
+ * uniform Dims（13 語ぶんの内容を **16 語 = 64 バイト**確保する — WGSL の uniform struct は
+ * 16 バイト整列 MUST）。先頭は出力の全要素数・末尾の欄が {@link DEFORM_CONV2D_OOB_BITS}。
  *
  * MUST: カーネル直呼びの経路でも幾何を見る（契約検査と二重だが、conv_transpose1d / conv2d と
  * 同じ二重の門）。空間長 0 の入力は `f32(dims.height_in)` が 0 になり、範囲判定が全タップで
@@ -218,10 +231,11 @@ export const deformConv2dParams = (dims: DeformConv2dDims): Uint32Array<ArrayBuf
   }
   const n = dims.batch * dims.channelsOut * dims.heightOut * dims.widthOut;
   assertU32Params("deform_conv2d params", { n });
-  const params = new Uint32Array(12);
+  const params = new Uint32Array(16);
   params[0] = n;
   values.forEach((value, index) => {
     params[index + 1] = value;
   });
+  params[values.length + 1] = DEFORM_CONV2D_OOB_BITS;
   return params;
 };

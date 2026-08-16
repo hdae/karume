@@ -1233,8 +1233,10 @@ Deno.test("upsample_bilinear2d は align_corners の 4 近傍を手計算どお�
   assertEquals([...broadcast.data], [10, 15, 20, 10, 15, 20]);
 });
 
-// align_corners = True の定義そのもの: 出力の 4 隅は入力の 4 隅と**厳密に一致**する
-// （λ が 0 か 1 に潰れるので丸めが入らない）。H と W を別長にして軸の取り違えも同時に見る。
+// align_corners = True の定義: 出力の 4 隅は入力の 4 隅と一致する。ただし厳密一致するのは
+// `fl(fl((in−1)/(out−1)) · (out−1))` が `in−1` へ往復する形に限られる（λ は一般には 0 / 1 に
+// 潰れず、2→42 のような形では末尾の λ が 0.99999994 になる — torch も同じ値）。ここで固定する
+// 2→5 / 3→7 は往復が成立する側。H と W を別長にして軸の取り違えも同時に見る。
 Deno.test("upsample_bilinear2d は出力の 4 隅を入力の 4 隅へ厳密に一致させる", () => {
   const x = t([1, 1, 2, 3], [1, 2, 3, 4, 5, 6]);
   const out = applyReferenceOp("upsample_bilinear2d", [x], { output_size: [5, 7] });

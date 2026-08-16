@@ -464,19 +464,38 @@ const padShape = (shape: readonly number[], rank: number): number[] => {
 };
 
 /**
- * params バッファの中身を組み立てる。
- * 出力 shape の rank が生成時の rank と一致していること（呼び出し側の責務）。
+ * params バッファの中身を組み立てる。**生成に使った spec を渡す**のが条件で、rank / 入力の
+ * 本数 / スカラの本数の 3 点を同じ正準化（{@link canonicalize}）と照合する。
  *
+ * MUST: 3 点照合を外さない。スカラ attr の読み出し位置は WGSL 側が**生成時の `arity`** から
+ * `1 + rank + arity·rank + index` で焼くので、ここで書く位置（入力の本数から導く）と食い違うと
+ * params 配列の範囲外を読む — WebGPU の境界付きアクセスは例外を出さず、
+ * `clamp_min(x, 1e-12)` が別の値の clamp に化けるような沈黙誤値になる。
  * MUST: スカラは f32 へ丸めて載せる。IR の attrs は JSON の f64 なので、丸めずに扱うと
  * CPU 参照（`Math.fround`）と GPU（params の f32 語）で違う値になりうる。
  */
 export const elementwiseParams = (
+  spec: ElementwiseSpec,
   outShape: readonly number[],
   inputShapes: readonly (readonly number[])[],
   scalars: readonly number[] = [],
 ): Uint32Array<ArrayBuffer> => {
-  const rank = outShape.length;
-  if (rank < 1) throw new CodegenError("elementwise params: 出力 rank は 1 以上");
+  const { rank, arity, scalars: scalarCount } = canonicalize(spec);
+  if (outShape.length !== rank) {
+    throw new CodegenError(
+      `elementwise params: 出力 rank ${outShape.length} が生成時の rank ${rank} と違う`,
+    );
+  }
+  if (inputShapes.length !== arity) {
+    throw new CodegenError(
+      `elementwise params: 入力 ${inputShapes.length} 本が op '${spec.op}' のアリティ ${arity} と違う`,
+    );
+  }
+  if (scalars.length !== scalarCount) {
+    throw new CodegenError(
+      `elementwise params: スカラ ${scalars.length} 本が op '${spec.op}' の ${scalarCount} 本と違う`,
+    );
+  }
   const n = outShape.reduce((count, dim) => count * dim, 1);
   assertU32Params("elementwise params", {
     ...Object.fromEntries(outShape.map((dim, d) => [`out_dims[${d}]`, dim])),

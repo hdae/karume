@@ -160,7 +160,7 @@ export const elementwiseCase = (): DegenerateCase => {
     name: "elementwise neg",
     key: elementwiseKey(spec),
     wgsl: elementwiseWgsl(spec),
-    params: elementwiseParams([count], [[count]]),
+    params: elementwiseParams(spec, [count], [[count]]),
     uniformParams: false,
     inputs: [input],
     expected: applyReferenceOp("neg", [input], {}, [count]),

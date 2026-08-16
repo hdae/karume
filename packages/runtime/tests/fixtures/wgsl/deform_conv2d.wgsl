@@ -12,6 +12,7 @@ struct Dims {
   kernel_w: u32,
   padding_h: u32,
   padding_w: u32,
+  oob: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
@@ -30,7 +31,7 @@ fn is_nan(v: f32) -> bool {
 // 入力平面 `plane` の双線形サンプル。範囲外はゼロ埋め（4 隅個別）・NaN は伝播。
 fn deform_sample(plane: u32, sy: f32, sx: f32) -> f32 {
   if (is_nan(sy) || is_nan(sx)) {
-    return bitcast<f32>(0x7fc00000u);
+    return bitcast<f32>(dims.oob);
   }
   // 正の形の範囲判定。これを通れば floor(sy) は [-1, H-1] なので i32 変換は必ず定義される。
   let inside = sy > -1.0 && sy < f32(dims.height_in)

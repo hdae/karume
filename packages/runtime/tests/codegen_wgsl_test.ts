@@ -79,6 +79,7 @@ import {
 } from "../src/kernels/upsample-bilinear2d.ts";
 import {
   DEFORM_CONV2D_KEY,
+  DEFORM_CONV2D_OOB_BITS,
   DEFORM_CONV2D_WGSL,
   DEFORM_CONV2D_WORKGROUP_SIZE,
   deformConv2dParams,
@@ -110,6 +111,7 @@ import {
   LAYER_NORM_KEY,
   LAYER_NORM_ROW_STATS_WGSL,
   LAYER_NORM_WGSL,
+  LAYER_NORM_WORKGROUP_SIZE,
   layerNormParams,
 } from "../src/kernels/layer-norm.ts";
 import {
@@ -557,7 +559,6 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
       );
     }
   }
-  assertEquals(QUANTIZE_ROWS_WGSL, QUANTIZE_ROWS_WGSL);
 });
 
 Deno.test("パイプラインキーは生成入力ごとに一意（別カーネルが同じキーに割り当たらない）", () => {
@@ -1083,7 +1084,14 @@ Deno.test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で�
     DEFORM_CONV2D_WGSL.includes("return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u;"),
     true,
   );
-  assertEquals(DEFORM_CONV2D_WGSL.includes("return bitcast<f32>(0x7fc00000u);"), true);
+  assertEquals(DEFORM_CONV2D_WGSL.includes("return bitcast<f32>(dims.oob);"), true);
+  // MUST: NaN のビット列は params で運ぶ（定数式の `bitcast<f32>(0x…)` は「const-expression が
+  // NaN」としてシェーダ生成エラーにする実装がありうる — gather / embedding と同じ規律）。
+  assertEquals(
+    DEFORM_CONV2D_WGSL.includes("bitcast<f32>(0x"),
+    false,
+    "NaN を定数式で作っている（params 経由にする）",
+  );
   // MUST: 座標の clamp は使わない（境界外は clamp ではなくゼロ埋め）
   assertEquals(DEFORM_CONV2D_WGSL.includes("clamp("), false, "座標の clamp は使わない");
   // MUST: 偶数チャネル = y / 奇数 = x
@@ -1121,9 +1129,12 @@ Deno.test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で�
     paddingH: 1,
     paddingW: 0,
   });
-  assertEquals([...params], [80, 1, 3, 5, 4, 5, 4, 4, 3, 2, 1, 0]);
-  // uniform struct の整列は 16 バイト（12 語 = 48 バイト）
-  assertEquals(params.byteLength, 48);
+  assertEquals(
+    [...params],
+    [80, 1, 3, 5, 4, 5, 4, 4, 3, 2, 1, 0, DEFORM_CONV2D_OOB_BITS, 0, 0, 0],
+  );
+  // uniform struct の整列は 16 バイト（13 語ぶんの内容を 16 語 = 64 バイト確保する）
+  assertEquals(params.byteLength, 64);
   const dims = {
     batch: 1,
     channelsIn: 3,
@@ -1155,8 +1166,14 @@ Deno.test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で�
 Deno.test("gru_scan は更新式を分解形の逐語で書き、mul と add の間に丸め障壁を挟む", () => {
   assertEquals(GRU_SCAN_WORKGROUP_SIZE, 256);
   assertEquals(GRU_SCAN_MAX_HIDDEN, 256);
-  assertEquals(gruScanKey("forward"), "gru_scan:v1:f32:forward:wg256:h256");
-  assertEquals(gruScanKey("reverse"), "gru_scan:v1:f32:reverse:wg256:h256");
+  assertEquals(
+    gruScanKey("forward"),
+    `gru_scan:v1:f32:forward:wg${GRU_SCAN_WORKGROUP_SIZE}:h${GRU_SCAN_MAX_HIDDEN}`,
+  );
+  assertEquals(
+    gruScanKey("reverse"),
+    `gru_scan:v1:f32:reverse:wg${GRU_SCAN_WORKGROUP_SIZE}:h${GRU_SCAN_MAX_HIDDEN}`,
+  );
   assertNotEquals(gruScanKey("forward"), gruScanKey("reverse"));
   const invalid = "backward" as GruScanDirection;
   assertThrows(() => gruScanKey(invalid), CodegenError, "走査方向が不正");
@@ -1217,8 +1234,8 @@ Deno.test("gru_scan は更新式を分解形の逐語で書き、mul と add の
 
 Deno.test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保ち、mul 順をキーへ残す", () => {
   assertEquals(SILU_WORKGROUP_SIZE, 256);
-  assertEquals(siluKey("x-sigmoid"), "silu:v1:x-sigmoid:f32:wg256");
-  assertEquals(siluKey("sigmoid-x"), "silu:v1:sigmoid-x:f32:wg256");
+  assertEquals(siluKey("x-sigmoid"), `silu:v1:x-sigmoid:f32:wg${SILU_WORKGROUP_SIZE}`);
+  assertEquals(siluKey("sigmoid-x"), `silu:v1:sigmoid-x:f32:wg${SILU_WORKGROUP_SIZE}`);
   assertNotEquals(siluKey("x-sigmoid"), siluKey("sigmoid-x"));
   const invalid = "foreign-order" as SiluMulOrder;
   assertThrows(() => siluKey(invalid), CodegenError, "入力順が不正");
@@ -1258,7 +1275,10 @@ Deno.test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保
 
 Deno.test("adaLN は正規化本体を素の layer_norm と共有し、変調と積を u32 staging で 2 段に区切る", () => {
   assertEquals(ADALN_NORM_WORKGROUP_SIZE, 256);
-  assertEquals(ADALN_NORM_KEY, "adaln_norm:v1:lastdim:f32:wg256");
+  // MUST: 素の layer_norm と同じ幅（本文を共有している以上、片方だけ動かすと WGSL が壊れる —
+  // src/kernels/adaln-norm.ts の MUST）。導出関係を門に出す。
+  assertEquals(ADALN_NORM_WORKGROUP_SIZE, LAYER_NORM_WORKGROUP_SIZE);
+  assertEquals(ADALN_NORM_KEY, `adaln_norm:v1:lastdim:f32:wg${ADALN_NORM_WORKGROUP_SIZE}`);
   assertNotEquals(ADALN_NORM_KEY, LAYER_NORM_KEY);
 
   // MUST: 行統計（2 パス / 母分散）と affine は**同一文字列**。別々に書くと素の列と
@@ -1297,27 +1317,52 @@ Deno.test("adaLN は正規化本体を素の layer_norm と共有し、変調と
 
 Deno.test("elementwise params はスカラ attr を末尾に f32 のビット列で載せる", () => {
   // 出力 [2,3]（rank2）+ 入力 1 本 → dims 2 語・strides 2 語のあとにスカラが並ぶ
-  const params = elementwiseParams([2, 3], [[2, 3]], [-1.5, 2.25]);
+  const clamp: ElementwiseSpec = { op: "clamp", rank: 2, dtype: "f32" };
+  const params = elementwiseParams(clamp, [2, 3], [[2, 3]], [-1.5, 2.25]);
   assertEquals(params.length, 1 + 2 + 2 + 2);
   assertEquals([...params.slice(0, 5)], [6, 2, 3, 3, 1]);
   const floats = new Float32Array(params.buffer);
   assertEquals(floats[5], -1.5);
   assertEquals(floats[6], 2.25);
   // 既定は 0 本（既存 op の params レイアウトは変わらない）
-  assertEquals(elementwiseParams([2, 3], [[2, 3]]).length, 5);
-  assertThrows(() => elementwiseParams([2], [[2]], [Number.NaN]), CodegenError);
+  assertEquals(
+    elementwiseParams({ op: "neg", rank: 2, dtype: "f32" }, [2, 3], [[2, 3]]).length,
+    5,
+  );
+  assertThrows(
+    () => elementwiseParams({ op: "clamp_min", rank: 1, dtype: "f32" }, [2], [[2]], [Number.NaN]),
+    CodegenError,
+  );
+  // MUST: 入力の本数は生成時のアリティと照合する。食い違うと WGSL 側の
+  // `1 + rank + arity·rank + index` とスカラの書き込み位置がずれ、範囲外読みの沈黙誤値になる。
+  assertThrows(
+    () => elementwiseParams({ op: "clamp", rank: 1, dtype: "f32" }, [4], [[4], [4]], [0, 1]),
+    CodegenError,
+    "アリティ",
+  );
+  // スカラの本数も同じ 1 箇所で見る（多すぎるぶんは黙って捨てられていた）
+  assertThrows(
+    () => elementwiseParams(clamp, [2, 3], [[2, 3]], [-1.5]),
+    CodegenError,
+    "スカラ",
+  );
+  // rank も spec 側が正本（出力 shape だけから導かない）
+  assertThrows(() => elementwiseParams(clamp, [6], [[6]], [-1.5, 2.25]), CodegenError, "rank");
 });
 
 Deno.test("elementwise params は右詰め broadcast の stride を 0 にする", () => {
   // 出力 [2,3,4] に対し in0=[2,3,4]（連続）、in1=[3,1]（右詰めで [1,3,1]）
-  const params = elementwiseParams([2, 3, 4], [[2, 3, 4], [3, 1]]);
+  const params = elementwiseParams({ op: "add", rank: 3, dtype: "f32" }, [2, 3, 4], [
+    [2, 3, 4],
+    [3, 1],
+  ]);
   assertEquals([...params.slice(0, 4)], [24, 2, 3, 4]);
   assertEquals([...params.slice(4, 7)], [12, 4, 1]);
   assertEquals([...params.slice(7, 10)], [0, 1, 0]);
 });
 
 Deno.test("elementwise params はスカラ入力を右詰めで吸収する", () => {
-  const params = elementwiseParams([5], [[5], [1]]);
+  const params = elementwiseParams({ op: "add", rank: 1, dtype: "f32" }, [5], [[5], [1]]);
   assertEquals([...params], [5, 5, 1, 0]);
 });
 
@@ -1482,6 +1527,15 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
   assertThrows(() => attentionQkParams(-1, 7, 4, 1), CodegenError);
   assertThrows(() => attentionStatsParams(30, 0), CodegenError);
   assertThrows(() => attentionStatsParams(-1, 7), CodegenError);
+  // MUST: regcache 変種は `dim <= epc · 256` をここでも見る（生成側と二重だが、カーネル
+  // 直呼びの経路も塞ぐ門）。超えた要素は max にも Σ にも入らず沈黙誤値になる。
+  assertEquals([...attentionStatsParams(4, 4096, 16)], [4, 4096, 0, 0]);
+  assertThrows(() => attentionStatsParams(4, 8192, 16), CodegenError, "担当範囲");
+  assertThrows(
+    () => attentionStatsParams(4, 4096, ATTENTION_STATS_REG_CACHE_MAX + 1),
+    CodegenError,
+    "上限",
+  );
   await Promise.resolve();
 });
 
@@ -2453,6 +2507,13 @@ Deno.test("attention_stats の regcache 変種は割当と縮約順を変えず�
 Deno.test("gather は範囲外添字を NaN で汚染し、通常経路は行オフセットで読む", () => {
   assertEquals(GATHER_WGSL.includes("if (pick < 0 || u32(pick) >= dims.src_cols) {"), true);
   assertEquals(GATHER_WGSL.includes("out[i] = bitcast<f32>(dims.oob);"), true);
+  // MUST: NaN のビット列は params で運ぶ（定数式の `bitcast<f32>(0x…)` は「const-expression が
+  // NaN」としてシェーダ生成エラーにする実装がありうる — カーネル doc の MUST）。
+  assertEquals(
+    GATHER_WGSL.includes("bitcast<f32>(0x"),
+    false,
+    "NaN を定数式で作っている（params 経由にする）",
+  );
   assertEquals(GATHER_WGSL.includes("out[i] = src[row * dims.src_cols + u32(pick)];"), true);
   // 出力は連続なので行は平坦添字から割る（grid-stride 前提）
   assertEquals(GATHER_WGSL.includes("let row = i / dims.cols;"), true);
@@ -2583,6 +2644,12 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
   // embedding は範囲外添字を NaN で汚染する（gather と同じ裁定）
   assertEquals(EMBEDDING_WGSL.includes("if (pick < 0 || u32(pick) >= dims.vocab) {"), true);
   assertEquals(EMBEDDING_WGSL.includes("out[i] = bitcast<f32>(dims.oob);"), true);
+  // MUST: NaN のビット列は params で運ぶ（gather / deform_conv2d と同じ規律）。
+  assertEquals(
+    EMBEDDING_WGSL.includes("bitcast<f32>(0x"),
+    false,
+    "NaN を定数式で作っている（params 経由にする）",
+  );
   assertEquals(EMBEDDING_WGSL.includes("weight[u32(pick) * dims.hidden + col]"), true);
 
   // masked_fill は x を連続で読み、mask だけ stride 経由（右詰め broadcast）
@@ -3453,8 +3520,9 @@ Deno.test("codegen は契約外の生成入力を fail loudly にする", () => 
   // 行 reduce の dtype 解禁は op ごと（bool を数えられるのは sum だけ）
   assertThrows(() => reduceWgsl({ op: "amax", dtype: "bool" }), CodegenError);
   assertThrows(() => reduceWgsl({ op: "sum", dtype: "i32" }), CodegenError);
-  assertThrows(() => elementwiseParams([], []), CodegenError);
-  assertThrows(() => elementwiseParams([4], [[2, 2]]), CodegenError);
+  const negR1: ElementwiseSpec = { op: "neg", rank: 1, dtype: "f32" };
+  assertThrows(() => elementwiseParams(negR1, [], []), CodegenError);
+  assertThrows(() => elementwiseParams(negR1, [4], [[2, 2]]), CodegenError);
   assertThrows(() => matmulParams(-1, 2, 3), CodegenError);
   assertThrows(() => reduceParams(1.5, 2), CodegenError);
   // 軸変種も同じ語彙・同じ dtype 規律（別 codegen へ複製した際の緩みを塞ぐ）

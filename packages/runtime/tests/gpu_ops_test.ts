@@ -387,7 +387,8 @@ Deno.test({
  * 経由せず、入力テンソルの端の値そのものと突き合わせる。
  */
 Deno.test({
-  name: "双線形 resample は出力の端を入力の端へ厳密一致させる（align_corners — 実 GPU）",
+  name:
+    "双線形 resample は (in−1)/(out−1) が f32 で往復する形で出力の端を入力の端へ厳密一致させる（align_corners — 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // H≠W / Hout≠Wout（軸の取り違えが端の値に出る）。値は全て相異なる列にする。

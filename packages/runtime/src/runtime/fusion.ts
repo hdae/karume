@@ -1114,7 +1114,7 @@ const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       dispatches.push({
         key: elementwiseKey(elementwise),
         wgsl: () => elementwiseWgsl(elementwise),
-        params: elementwiseParams(maskedShape, [maskedShape, [1, 1, 1, keys]]),
+        params: elementwiseParams(elementwise, maskedShape, [maskedShape, [1, 1, 1, keys]]),
         paramsStorage: true,
         operands: [
           { kind: "temp", id: scores },
