@@ -7,6 +7,9 @@
   text_encoder の回帰を捉える現行の網は SBV2 の WAV sha256 門 +
   `packages/models/tests/sbv2_rel_pos_parity_test.ts` の 2 本で、原因の局在はできない
   （この認識は ADR [0045](0045-deberta-layer-trim.md) の Consequences にも記録済み）。
+  （2026-08-16 追記: `e2e_deberta_test.ts` は移植済み — 3 variant × 4 ケース・tolerance は
+  実測導出で歴史値〈f32 8.32e-5 / i8 1.23e-4 / atol 7e-4〉と一致。`e2e_deberta_w8a8_test.ts`
+  = 決定 3 の鏡像門は未設置のまま。）
   **本 ADR の tolerance / 判別帯は歴史値**として読むこと。
 - 関連: ADR 0019（i8 格納）/ ADR 0025（w8a8 実行 — 決定⑤が本 ADR の親）/
   [dp4a-w8a8-design](../research/2026-08-03-dp4a-w8a8-design.md) §7

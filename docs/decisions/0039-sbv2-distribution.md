@@ -202,4 +202,6 @@ frontmatter の単一 `license` 欄でどう表すかを含めて公開前にユ
 - `symbols.json` には exporter が焼いた `style` / `speaker` の**選択結果**も残っており、こちらは門の
   対象外（決定 4 で表配布にしたため、選択結果は記録以上の意味を持たない）。
 - DeBERTa の実重み e2e（`e2e_deberta_test.ts`）は未移植のまま。`export_deberta.py` の `main()` も
-  `argv` を取らず、`karume` CLI から届かない。
+  `argv` を取らず、`karume` CLI から届かない。（2026-08-16 追記: e2e は移植済み。export 側は
+  ADR 0065 で `tools/export-recipes/deberta/export.py` の `-m` 起動へ再編され、CLI 非搭載は
+  by-design になった。）

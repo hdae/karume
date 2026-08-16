@@ -196,3 +196,5 @@ torch 段では f32 / i8 fake-quant / i8+a8 の 3 構成で `max abs diff 0.0` �
   まま持ち越し。
 - DeBERTa の数値 golden 門（`e2e_deberta_test.ts`）は依然としてリポに無い。text_encoder の
   回帰を捉える網は WAV sha256 の 1 本だけで、原因の局在ができない状態が続く。
+  （2026-08-16 解消: `e2e_deberta_test.ts` を移植 — `i8/sbv2-22layer` の門も持ち、本 ADR の
+  層カットのビット一致がランタイム側でも保たれていることを 4 ケースの maxAbs 一致で傍証。）

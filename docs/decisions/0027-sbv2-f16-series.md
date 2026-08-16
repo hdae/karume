@@ -44,7 +44,8 @@ f16 実行経路（ADR 0018）は汎用で、必要なのはエクスポータ�
 - **検出限界の新記録: 系列 root の取り違えは数値網では原理的に検出できない** — 両系列の
   実測が同桁のため、互いの tolerance を素通りする（故障注入で 52 passed を実測）。唯一の
   検出器は「系列と格納宣言の一致」検査（本波で追加）。**同じ穴が e2e_anima_test.ts /
-  e2e_deberta_test.ts にもある**（隣接タスク）。
+  e2e_deberta_test.ts にもある**（隣接タスク）（2026-08-16: deberta 側は移植した
+  `e2e_deberta_test.ts` が格納宣言一致検査を持ち解消 — anima 側は未対応のまま）。
 - --verify（f32・4 ターゲット）は配線変更後も過去記録と一致（dec は bit_exact 全 True 維持）。
 - verify 601/0/2・pytest 1,869・ruff 緑。
 

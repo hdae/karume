@@ -78,11 +78,12 @@ are now **graph inputs** built on the host (`deberta/patch.py` is the reference
 implementation, mirrored by `packages/models/src/sbv2/text/rel-pos-tables.ts`). The mirror is pinned
 byte-for-byte by `packages/models/tests/sbv2_rel_pos_parity_test.ts`.
 
-On the Deno side: the real-weight DeBERTa E2E has **not been ported into this repository yet**. The
-exporter still emits the regular `io.<case>` and `io-i8a8.<case>` series, but there is currently no
-in-repository `e2e_deberta*_test.ts` gate consuming them.
-`packages/models/tests/sbv2_rel_pos_parity_test.ts` only pins the host-side relative-position tables
-and is not a replacement for the missing full numerical E2E.
+On the Deno side: the real-weight DeBERTa E2E is `packages/runtime/tests/e2e_deberta_test.ts`
+(ported 2026-08-16 — 3 variants × 4 cases against the regular `io.<case>` series, with per-variant
+measured tolerances and the storage-declaration check that catches a series-root mix-up). The
+`io-i8a8.<case>` mirror series still has no consumer: `e2e_deberta_w8a8_test.ts` (ADR 0026
+decision 3) remains unported, so the mirror is only guarded against leaking into the regular
+enumeration.
 
 The `io-i8a8.<case>` files written by `--act-quant` are the **w8a8** (`linearCompute: "i8a8"`)
 mirror. The regular `io.<case>` MUST be taken **without the hook** (taking it with the hook still
