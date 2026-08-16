@@ -15,6 +15,9 @@ package = false
 
 [tool.uv.sources]
 karume = { workspace = true }
+# 依存グループ（anima / siglip2-preprocess）の torchvision も CPU index へ明示ピン —
+# exporter 側と同じ理由（explicit な index はピンした対象にしか使われない）。
+torchvision = { index = "pytorch-cpu" }
 
 [dependency-groups]
 dev = ["pytest>=9.1.1", "ruff>=0.15.0"]

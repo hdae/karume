@@ -6,7 +6,11 @@
 members = ["exporter", "export-recipes"]
 
 # torch の CPU index はメンバー横断の解決に効くためルートで宣言する
-# （メンバー側の [tool.uv.sources] torch 指定はこの index を指す）。
+# （メンバー側の [tool.uv.sources] torch / torchvision 指定はこの index を指す）。
+# MUST: `explicit = true` を外さない — 外すとこの index が PyPI を影に隠し、index 側の
+# 古い在庫（packaging 24.1 / requests 2.28 など）に汎用依存が固定される（2026-08-16 実測。
+# hatchling>=1.27 が要求する packaging>=24.2 が引けなくなるのが実害）。
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
