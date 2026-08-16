@@ -15,10 +15,14 @@
 ## 組み立て（系列 → 配布形）
 
 ```sh
-cd tools/exporter
-uv run karume dist                                   # anima → models/karume-anima-turbo/
-uv run karume dist --pipeline sbv2 --card-profile jvnv \
+cd tools/export-recipes
+uv run python dist.py                                # anima → models/karume-anima-turbo/
+uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/
+uv run python dist.py --pipeline sbv2 --card-profile jvnv \
     --model F1 --model F2 --model M1 --model M2 --out ../../models/karume-sbv2-jvnv
+uv run python dist.py --pipeline sbv2 --card-profile fn \
+    --model FN1 --model FN2 --model FN3 --model FN4 --model FN5 --model FN6 \
+    --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
 ```
 
 - 仕様の正本は ADR [0041](decisions/0041-manifest-v2.md)（manifest v2・リポ内レイアウト =
@@ -27,8 +31,9 @@ uv run karume dist --pipeline sbv2 --card-profile jvnv \
 - 組み立ては冪等（再実行で置き換え）。`verify_dist` が宣言と現物の突合・宣言外ファイル検査まで
   行い、モデルカード `README.md` は検証済み manifest から機械生成される（帰属は
   `--card-profile` — exporter の README 参照）。
-- 系列を消しても配布形は壊れない（独立コピー）。逆に配布形は `karume dist` でいつでも系列から
-  再生成できる。
+- 系列を消しても配布形は壊れない（独立コピー）。逆に配布形は `dist.py` でいつでも系列から
+  再生成できる。core 単体の `karume dist` は受理集合が空で落ちる設計（ADR 0065）— family を
+  組むのは常にこのリポ driver の `dist.py`。
 
 ## 公開（HF へのアップロード）
 
