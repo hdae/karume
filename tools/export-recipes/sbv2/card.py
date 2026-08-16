@@ -244,26 +244,62 @@ def _sbv2_speakers(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _sbv2_knob(defaults: Mapping[str, Any], key: str, note: str) -> list[str]:
+    """`generate()` の optional ノブ 1 つをコメント行にする（既定が manifest に在るものだけ）。
+
+    manifest が持たないキーは**綴らない** — `defaults` に無いノブを勧めると、カードが
+    「この配布形で選べる値」を超えて喋る（`### Defaults` が同じ理由で `defaults` の写しを
+    持たないのと同じ判断）。
+    """
+    if key not in defaults:
+        return []
+    value = defaults[key]
+    literal = f'"{value}"' if isinstance(value, str) else f"{value}"
+    return [f"  // {key}: {literal}, // default — {note}"]
+
+
 def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
+    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
+    ので、声 / スタイル / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の
+    一歩へ進める形。
+    """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
     quant = model["defaultQuant"]
-    style = model["pipelineConfig"]["defaults"]["style"]
+    config = model["pipelineConfig"]
+    defaults = config["defaults"]
+    model_names = " / ".join(sorted(manifest["models"]))
+    quant_names = " / ".join(sorted(model["quants"]))
+    style_names = " / ".join(sorted(config["styles"]))
+    speaker_names = " / ".join(sorted(config["speakers"]))
     return [
         "## Usage",
         "",
         "```ts",
         'import { encodeWav, Sbv2Pipeline } from "jsr:@karume/models";',
         "",
-        f"// Both options may be omitted: model defaults to {model_name}, quant to {quant}.",
         f'using pipeline = await Sbv2Pipeline.fromPretrained("{repo}", {{',
-        f'  model: "{model_name}",',
-        f'  quant: "{quant}",',
+        f'  // model: "{model_name}", // default — available: {model_names}',
+        f'  // quant: "{quant}", // default — available: {quant_names}',
         "});",
+        "",
         "const audio = await pipeline.generate({",
         f'  text: "{SBV2_DEMO_TEXT}",',
-        f'  style: "{style}",',
-        "  seed: 42,",
+        "",
+        "  // Voice — the names below come from the tables further down; every model in",
+        "  // this repository brings its own set:",
+        *_sbv2_knob(defaults, "style", f"available: {style_names}"),
+        *_sbv2_knob(defaults, "styleWeight", "0 = the average style, 1 = the named one"),
+        *_sbv2_knob(defaults, "speaker", f"available: {speaker_names}"),
+        "",
+        "  // Delivery:",
+        *_sbv2_knob(defaults, "lengthScale", "larger is slower"),
+        *_sbv2_knob(defaults, "sdpRatio", "1 = stochastic duration, 0 = deterministic"),
+        *_sbv2_knob(defaults, "noiseScale", "sampling noise on z_p"),
+        *_sbv2_knob(defaults, "noiseScaleW", "sampling noise inside the stochastic predictor"),
+        "",
+        "  seed: 42, // same seed + same knobs → same waveform",
         "});",
         'await Deno.writeFile("sbv2.wav", encodeWav(audio.data, audio.sampleRate));',
         "```",

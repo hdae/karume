@@ -168,8 +168,20 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _depth_anything_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
+    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
+    ので、サイズ / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ
+    進める形。
+
+    `estimate()` は画像 1 枚しか受けない（解像度は事前学習の正方形でグラフに焼かれていて実行時
+    に選べない — `DepthAnythingPipeline` の公開面）ので、この pipeline の optional ノブは
+    model / quant の 2 つだけである。
+    """
     model_name = manifest["defaultModel"]
-    quant = default_model(manifest)["defaultQuant"]
+    model = default_model(manifest)
+    quant = model["defaultQuant"]
+    model_names = " / ".join(sorted(manifest["models"]))
+    quant_names = " / ".join(sorted(model["quants"]))
     return [
         "## Usage",
         "",
@@ -177,8 +189,8 @@ def _depth_anything_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         'import { DepthAnythingPipeline } from "jsr:@karume/models";',
         "",
         f'await using pipeline = await DepthAnythingPipeline.fromPretrained("{repo}", {{',
-        f'  // model: "{model_name}", // default — the only one this repository ships',
-        f'  // quant: "{quant}", // the only one this repository ships',
+        f'  // model: "{model_name}", // default — available: {model_names}',
+        f'  // quant: "{quant}", // default — available: {quant_names}',
         "});",
         "",
         "// RGB8, row-major, 3 bytes per pixel. Decoding is the caller's job.",

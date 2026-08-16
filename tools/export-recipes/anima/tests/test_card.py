@@ -169,6 +169,16 @@ class TestSections:
         assert "@karume/models" in card
         assert "using pipeline" in card
 
+    def test_the_usage_snippet_carries_the_optional_knobs_commented_out(self, card: str) -> None:
+        """裁定 2026-08-12 の形: 動く最小形 + `generate()` の optional をコメントで併記する
+        （値は manifest 由来 — steps も解像度もこの偽 manifest の値がそのまま出る）。
+        """
+        assert "  // steps: 7, //" in card
+        assert "  // resolution: { width: 640, height: 384 }, // default" in card
+        # guidance と negativePrompt は**対**で意味を持つ（guidanceScale 1 では後者が拒まれる）。
+        assert "  // guidanceScale: 5," in card
+        assert '  // negativePrompt: "ネガティブの偽値",' in card
+
 
 class TestModelSelection:
     """v2 で初めて機械可読になった軸（ADR 0041 §2）— 一覧・既定・使い方の 3 箇所に出る。"""
@@ -183,15 +193,18 @@ class TestModelSelection:
         ]
 
     def test_the_usage_snippet_names_the_default_model_and_its_quant(self, card: str) -> None:
-        assert '  model: "turbo",' in card
-        assert '  quant: "w8a8",' in card
+        """既定は綴られたうえで**コメントアウト**（裁定 2026-08-12 の「コメントを外すだけ」形）
+        で、選べる値は同じ行に manifest から列挙される（モデル / quant が増えれば追従する）。
+        """
+        assert '  // model: "turbo", // default — available: lite / turbo' in card
+        assert '  // quant: "w8a8", // default — available: f16 / f16-c16 / w8a8' in card
 
     def test_it_follows_the_manifest_when_the_default_moves(self) -> None:
         manifest = _manifest()
         manifest["defaultModel"] = "lite"
         card = render_model_card(manifest, REPO)
-        assert '  model: "lite",' in card
-        assert '  quant: "w8",' in card
+        assert '  // model: "lite", // default — available: lite / turbo' in card
+        assert '  // quant: "w8", // default — available: w8' in card
         assert "| `lite` (default) |" in card
 
 

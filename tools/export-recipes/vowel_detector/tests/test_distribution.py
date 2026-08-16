@@ -419,6 +419,23 @@ class TestVowelDetectorModelCard:
         assert "longer than 600.0 s is rejected rather than silently truncated" in card
         assert f"**{VOWEL_DETECTOR_MAX_FRAMES} frames of 10 ms** (600.0 s)" in card
 
+    def test_the_usage_snippet_enumerates_the_choices_from_the_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """裁定 2026-08-12 の形: optional はコメント併記で、選べる値は manifest 由来の列挙。
+
+        `detect()` に実行時ノブは無いので、この pipeline の optional は model / quant だけ。
+        1 席しか無くても「available:」で綴るのは、席が増えたときに文面が自動で追従するため
+        （「the only one this repository ships」のような焼き込みは、増えた瞬間に嘘になる）。
+        """
+        card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert (
+            f'  // model: "{VOWEL_DETECTOR_DEFAULT_MODEL}",'
+            f" // default — available: {VOWEL_DETECTOR_DEFAULT_MODEL}" in card
+        )
+        assert '  // quant: "f32", // default — available: f32' in card
+        assert "the only one this repository ships" not in card
+
     def test_it_carries_the_upstream_training_attributions(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

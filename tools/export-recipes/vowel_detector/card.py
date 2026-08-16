@@ -149,9 +149,20 @@ def _vowel_detector_base_weights() -> list[str]:
 
 
 def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
+    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
+    ので、モデル / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ
+    進める形。
+
+    `detect()` は波形 1 本しか受けない（後処理の閾値も含めて実行時に選べる欄が無い —
+    `VowelDetectorPipeline` の公開面）ので、この pipeline の optional ノブは model / quant の
+    2 つだけである。
+    """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
     config = model["pipelineConfig"]
+    model_names = " / ".join(sorted(manifest["models"]))
+    quant_names = " / ".join(sorted(model["quants"]))
     return [
         "## Usage",
         "",
@@ -159,8 +170,8 @@ def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         'import { VowelDetectorPipeline } from "jsr:@karume/models";',
         "",
         f'await using pipeline = await VowelDetectorPipeline.fromPretrained("{repo}", {{',
-        f'  // model: "{model_name}", // default — the only one this repository ships',
-        f'  // quant: "{model["defaultQuant"]}", // the only one this repository ships',
+        f'  // model: "{model_name}", // default — available: {model_names}',
+        f'  // quant: "{model["defaultQuant"]}", // default — available: {quant_names}',
         "});",
         "",
         f"// {config['sampleRate']} Hz mono samples in [-1, 1]. Decoding and resampling are the",

@@ -45,6 +45,14 @@ ANIMA_METADATA = CardMetadata(
 
 ANIMA_TITLE = "Anima Turbo — Karume"
 
+#: `resolution` ノブの受理集合を 1 行で言ったもの（**manifest に無い事実** — 受理集合の正本は
+#: `packages/models/src/anima/resolution.ts` で、ADR 0038 §2 により manifest には書かない）。
+#: 刻み = 空間圧縮 8 × patch 2、下限は VAE タイル decoder の latent 64（= 512px）、上限は
+#: rope 素表の 128 行（= 2048px）。向こうが動いたらここも追随する写しである。
+RESOLUTION_NOTE = (
+    "Resolution — non-square is fine; each side on a 16 px grid, between 512 and 2048 px:"
+)
+
 #: 焼き込んだ LoRA（manifest には現れない — 重みの中に畳まれているため）。
 LORA_NAME = "Anima Turbo LoRA v0.2"
 LORA_AUTHOR = "circlestone_labs"
@@ -99,23 +107,47 @@ def _merged_lora() -> list[str]:
 
 
 def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
-    model = manifest["defaultModel"]
-    quant = default_model(manifest)["defaultQuant"]
+    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
+    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
+    ので、モデル / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ
+    進める形。
+    """
+    model_name = manifest["defaultModel"]
+    model = default_model(manifest)
+    quant = model["defaultQuant"]
+    model_names = " / ".join(sorted(manifest["models"]))
+    quant_names = " / ".join(sorted(model["quants"]))
+    defaults = model["pipelineConfig"]["defaults"]
+    resolution = defaults["resolution"]
     return [
         "## Usage",
         "",
         "```ts",
         'import { AnimaPipeline, encodePng } from "jsr:@karume/models";',
         "",
-        f"// Both options may be omitted: model defaults to {model}, quant to {quant}.",
         f'using pipeline = await AnimaPipeline.fromPretrained("{repo}", {{',
-        f'  model: "{model}",',
-        f'  quant: "{quant}",',
+        f'  // model: "{model_name}", // default — available: {model_names}',
+        f'  // quant: "{quant}", // default — available: {quant_names}',
         "});",
+        "",
         "const image = await pipeline.generate({",
         '  prompt: "1girl, solo, long hair, blue eyes, school uniform, masterpiece",',
-        "  seed: 42,",
+        "",
+        f"  // steps: {defaults['steps']}, // default — the baked-in LoRA is distilled for"
+        " few-step sampling",
+        f"  // {RESOLUTION_NOTE}",
+        f"  // resolution: {{ width: {resolution['width']},"
+        f" height: {resolution['height']} }}, // default",
+        "",
+        "  // Classifier-free guidance runs a second (uncond) branch — twice the work per step.",
+        "  // It is skipped at guidanceScale 1, where a negativePrompt is refused rather than",
+        "  // silently ignored, so the two lines below only make sense together:",
+        "  // guidanceScale: 5,",
+        f'  // negativePrompt: "{defaults["negativePrompt"]}",',
+        "",
+        "  seed: 42, // same seed + same request → same image",
         "});",
+        "",
         "const png = await encodePng(image.data, image.width, image.height);",
         'await Deno.writeFile("anima.png", png);',
         "```",

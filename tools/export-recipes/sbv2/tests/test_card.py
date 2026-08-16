@@ -332,10 +332,39 @@ class TestSbv2Derivation:
         assert "noiseScaleW" not in second
 
     def test_the_usage_snippet_follows_the_manifest(self, sbv2_card: str) -> None:
-        """スニペットの model / quant / スタイルも manifest 由来（存在しない綴りを勧めない）。"""
-        assert '  model: "ZA",' in sbv2_card
-        assert '  quant: "w8a8",' in sbv2_card
-        assert '  style: "Whisper",' in sbv2_card
+        """スニペットの model / quant / スタイルも manifest 由来（存在しない綴りを勧めない）。
+
+        既定は綴られたうえで**コメントアウト**（裁定 2026-08-12 の「コメントを外すだけ」形）
+        で、選べる値は同じ行に manifest から列挙される（声 / スタイル / quant が増えれば
+        列挙も追従する）。
+        """
+        assert '  // model: "ZA", // default — available: ZA / ZB' in sbv2_card
+        assert '  // quant: "w8a8", // default — available: f16 / w8 / w8a8' in sbv2_card
+        assert '  // style: "Whisper", // default — available: Calm / Shout / Whisper' in sbv2_card
+        assert '  // speaker: "ZZ8", // default — available: ZZ8 / ZZ9' in sbv2_card
+
+    def test_the_usage_snippet_carries_every_delivery_knob_the_manifest_defines(
+        self, sbv2_card: str
+    ) -> None:
+        """`generate()` の残りの optional も既定つきでコメント併記する（値は manifest 由来）。"""
+        for line in (
+            "  // styleWeight: 0.75, //",
+            "  // lengthScale: 1.5, //",
+            "  // sdpRatio: 0.25, //",
+            "  // noiseScale: 0.65, //",
+            "  // noiseScaleW: 0.85, //",
+        ):
+            assert line in sbv2_card, line
+
+    def test_the_usage_snippet_skips_a_knob_the_manifest_left_out(self) -> None:
+        """`defaults` に無いノブは綴らない（`### Defaults` と同じ判断 — 値を捏造しない）。"""
+        manifest = _sbv2_manifest()
+        manifest["defaultModel"] = "ZB"  # noiseScaleW 等を持たないモデル
+        usage = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE).partition("## Usage")[2]
+        snippet = usage.partition("## Model:")[0]
+        assert "  // lengthScale: 1.0, //" in snippet
+        for absent in ("styleWeight", "sdpRatio", "noiseScale"):
+            assert absent not in snippet, absent
 
 
 class TestSbv2Determinism:

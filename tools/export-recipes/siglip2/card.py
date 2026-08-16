@@ -135,10 +135,18 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
+    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
+    ので、系列 / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ進める形。
+
+    `embed()` は画像 1 枚しか受けない（前処理は配布形の定数で固定 — `Siglip2Pipeline` の
+    公開面）ので、この pipeline の optional ノブは model / quant の 2 つだけである。
+    """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
     quant = model["defaultQuant"]
     model_names = " / ".join(sorted(manifest["models"]))
+    quant_names = " / ".join(sorted(model["quants"]))
     return [
         "## Usage",
         "",
@@ -147,7 +155,7 @@ def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "",
         f'await using pipeline = await Siglip2Pipeline.fromPretrained("{repo}", {{',
         f'  // model: "{model_name}", // default — available: {model_names}',
-        f'  // quant: "{quant}", // the only one this repository ships',
+        f'  // quant: "{quant}", // default — available: {quant_names}',
         "});",
         "",
         "// RGB8, row-major, 3 bytes per pixel. Decoding is the caller's job.",
