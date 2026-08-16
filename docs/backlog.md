@@ -17,7 +17,6 @@
   同結果のため急がない）。
 - **housekeeping 一括（小粒）**:
   - series 資産の再生成（birefnet / depth / vowel — e2e 門 SKIP の解消）
-  - テスト逆方向 import の残り 3 本（e2e_birefnet / e2e_depth_anything / e2e_vowel_detector）
   - Anima 参照フィクスチャ系テストの復元・tokenizer parity fixture の models 側への移設
   - DeBERTa 実重み e2e の移植（現行の回帰網は WAV sha256 門 + rel-pos parity のみ）
   - turbo LoRA の置き場移行（配布形の親に入力素材が混在）

@@ -1,5 +1,6 @@
 // `VowelDetectorPipeline` の**構築ガード**と、運用上限 / mel 基底資産の結線。GPU も実資産も
-// 要らない範囲だけを見る（実 GPU の突合は `packages/runtime/tests/e2e_vowel_detector_test.ts` が
+// 要らない範囲だけを見る（実 GPU の突合は `packages/runtime/tests/e2e_vowel_detector_test.ts`
+//〈合成 golden のロジット〉と `e2e_vowel_detector_chain_test.ts`〈実音声の全鎖 → `.lab`〉が
 // 持つ — 重複させない。ホスト層の Python 正本とのパリティは
 // `packages/models/tests/vowel_detector_host_test.ts`）。
 //

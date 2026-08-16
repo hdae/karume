@@ -39,7 +39,7 @@
  * 末尾に集中するが `|差| > 1e-2` は全フレームに届き、Viterbi が大域最適である以上、`.lab` の
  * 差は発話のどこにでも出た（実測の差は ①20ms の境界ずれ ②末尾に 40ms の `pau` が増減
  * ③発話中間に 40ms の `pau` が入る、の 3 型）。記号長にした今、この 3 型は**消えている**:
- * 配布形経由の `.lab` は実重み E2E（`packages/runtime/tests/e2e_vowel_detector_test.ts`）が
+ * 配布形経由の `.lab` は実重み E2E（`packages/models/tests/e2e_vowel_detector_chain_test.ts`）が
  * 固定している実長経路の `.lab` と完全一致する（`tests/e2e_vowel_detector_lab_test.ts`）。
  *
  * ## Session は `detect` ごとに張って畳む
@@ -54,8 +54,9 @@
  *
  * ## MUST: 数値の正はここでは担保されない
  *
- * 正は実重み E2E（`packages/runtime/tests/e2e_vowel_detector_test.ts` — 実音声 4 本の全鎖
- * `.lab` 完全一致 + 合成 golden 4 ケース × 4 系列のロジット突合）と、ホスト層のパリティ門
+ * 正は実重み E2E（合成 golden 4 ケース × 4 系列のロジット突合 =
+ * `packages/runtime/tests/e2e_vowel_detector_test.ts`・実音声 4 本の全鎖 `.lab` 完全一致 =
+ * `packages/models/tests/e2e_vowel_detector_chain_test.ts`）と、ホスト層のパリティ門
  * （`packages/models/tests/vowel_detector_host_test.ts` — Python 正本との突合）が担保する。
  */
 

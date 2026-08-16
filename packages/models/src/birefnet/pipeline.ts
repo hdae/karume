@@ -55,7 +55,8 @@
  *
  * 正はグラフ単位の golden E2E（`packages/runtime/tests/e2e_birefnet_test.ts` — 実重み 2 系列 ×
  * 合成 4 + 実画像 4 ケース）と、前処理のパリティ門
- * （`packages/models/tests/image_preprocess_test.ts`）が担保する。
+ * （`packages/models/tests/image_preprocess_test.ts` / 実画像は
+ * `packages/models/tests/e2e_birefnet_real_test.ts`）が担保する。
  */
 
 import {

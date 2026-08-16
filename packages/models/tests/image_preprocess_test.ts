@@ -36,8 +36,8 @@
 // ## bicubic（`resample: 3`）の扱い
 //
 // フィクスチャの正本は SigLIP2 = **bilinear** なので、bicubic 枝の Python 正本との突合は
-// ここには無い（実測は Depth Anything V2 の実 GPU E2E =
-// `packages/runtime/tests/e2e_depth_anything_test.ts` が持つ — 1024² の実画像を 518² へ縮小した
+// ここには無い（実測は Depth Anything V2 の実画像パリティ門 =
+// `e2e_depth_anything_real_test.ts` が持つ — 1024² の実画像を 518² へ縮小した
 // `pixel_values` が `DPTImageProcessor` と **1 LSB 以内 / 相違率 0.5%** で一致することを、
 // 資産のある環境で毎回実測する）。ここが受け持つのは資産の要らない**カーネルの署名**だけ:
 // 恒等寸法で恒等になること（台の半径 2 が正しく組めている）と、階段エッジで**入力の値域を

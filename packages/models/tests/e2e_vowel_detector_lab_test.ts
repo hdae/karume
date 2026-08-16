@@ -19,7 +19,7 @@
  * ## 絶対値の正本はここではない
  *
  * `.lab` の**中身**（どの音素がどこに出るか）を固定しているのは
- * `packages/runtime/tests/e2e_vowel_detector_test.ts`（実音声 4 本の全文 + WAV の sha256）。
+ * `e2e_vowel_detector_chain_test.ts`（実音声 4 本の全文 + WAV の sha256）。
  * ここは「2 経路が同じものを出す」だけを主張する — 期待 `.lab` の表を 2 か所に持つと、
  * 片方だけ採り直したときに黙ってずれる。`vowels` ケースだけは意味の側からも見る
  * （5 母音が順に出る = 両経路が揃って壊れている形の検出）。
@@ -48,7 +48,7 @@ const SERIES_DIR = new URL(
 );
 const DEMO_DIR = new URL("../../../outputs/demo/", import.meta.url);
 
-/** 実音声（`packages/runtime/tests/e2e_vowel_detector_test.ts` の `CASES` と同じ 4 本）。 */
+/** 実音声（`e2e_vowel_detector_chain_test.ts` の `CASES` と同じ 4 本）。 */
 const CASES = ["short", "vowels", "mid", "long"] as const;
 
 /** `vowels` の意味の門（実重み E2E の `VOWEL_SEQUENCE` と同じ主張）。 */

@@ -191,5 +191,5 @@ for (const entry of CASES) {
 
 console.log(
   `[eval-audio] ${CASES.length} 本。長さが変わったら母音検出 e2e の期待 \`.lab\` と sha256 を` +
-    "採り直す（packages/runtime/tests/e2e_vowel_detector_test.ts）",
+    "採り直す（packages/models/tests/e2e_vowel_detector_chain_test.ts）",
 );

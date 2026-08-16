@@ -1,5 +1,6 @@
 // `BirefnetPipeline` の**構築ガード**と**前後処理の結線**。GPU も実資産も要らない範囲だけを
-// 見る（実 GPU の突合は `packages/runtime/tests/e2e_birefnet_test.ts` が持つ — 重複させない）。
+// 見る（実 GPU の突合は `packages/runtime/tests/e2e_birefnet_test.ts`〈golden 入力〉と
+// `e2e_birefnet_real_test.ts`〈実画像の前処理パリティと判別〉が持つ — 重複させない）。
 //
 // 押さえるのは 3 点:
 //

@@ -217,7 +217,7 @@ REAL_CASES: tuple[tuple[str, str, str], ...] = (
 
 #: 実画像の判別で見る 2 群（顕著物体 = 人物が写っている 2 枚 / 写っていない 2 枚）。
 #: {@link _real_sanity} が**前景比の順序**を見る。TS 側の
-#: `packages/runtime/tests/e2e_birefnet_test.ts` が同じ群を実 GPU 出力に掛ける。
+#: `packages/models/tests/e2e_birefnet_real_test.ts` が同じ群を実 GPU 出力に掛ける。
 REAL_PERSON_CASES = ("photo-portrait", "photo-street")
 REAL_SCENE_CASES = ("photo-landscape", "photo-corridor")
 

@@ -173,7 +173,7 @@ REAL_CASES: tuple[tuple[str, str, str], ...] = (
 #:
 #: MUST: 構図から一意に言える対だけを置く（「人物 > 空」「手前の床 > 消失点」）。深度は
 #: 相対値なので絶対量には意味が無く、この**順序**だけが構図から演繹できる主張。TS 側の
-#: `packages/runtime/tests/e2e_depth_anything_test.ts` が同じ矩形を実 GPU 出力に掛ける
+#: `packages/models/tests/e2e_depth_anything_real_test.ts` が同じ矩形を実 GPU 出力に掛ける
 #: （矩形を変えるなら両方 — 片方だけ動かすと「両者一致」の主張が黙って別物になる）。
 REAL_REGIONS: Mapping[str, tuple[tuple[str, float, float, float, float], ...]] = {
     "photo-portrait": (
