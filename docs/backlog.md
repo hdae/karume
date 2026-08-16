@@ -7,13 +7,14 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 全体レビュー波（2026-08-16・修正消化済み）
+## now — （空 — 次波の開始はユーザー裁定）
 
-sop-review 網羅（17 レッグ + 反証 7 レッグ + Codex 独立レンズ）→ blocker 0 → 修正 35 項目を
-7 コミットで消化（runtime 契約機構化 / codegen 二重門 / exporter 堅牢化 / models 写像 1 本化 /
-onEvent コールバック / mypy 常設 / docs 同期）。勢力図・ポジショニング検証は
-[research/2026-08-16-runtime-landscape.md](research/2026-08-16-runtime-landscape.md)。
-**残り: 4 パッケージ lockstep 0.2.2 → 0.3.0 の bump とリリース（裁定 1 = 承認済み）**。
+全体レビュー波は **0.3.0 の JSR / PyPI リリース（2026-08-16）まで含めて全消化**。
+勢力図・ポジショニング検証は
+[research/2026-08-16-runtime-landscape.md](research/2026-08-16-runtime-landscape.md)、
+リリース時点の実測は
+[research/2026-08-11-embeddinggemma-ort-comparison.md](research/2026-08-11-embeddinggemma-ort-comparison.md)
+§7（EG bare 28.11ms — レビュー波の門追加は性能コストゼロを確認）。
 
 ## next — autoregressive-ready 基盤波
 
@@ -75,10 +76,13 @@ Session 常駐と device-loss lifecycle（perf H-4 と同体）・sampling/RNG �
   `padSequence` の「fixture と全 4 実装 bit 同一」は recipe README に実測記録として残るだけで、
   `outputs/series/anima-pipeline*` を読む常設テストは Deno / pytest のどちらにも存在しない
   （2026-08-16 判明 — fixture 4 変種は再エミット済みで前提は解消済み）。
-- **ORT Web 対比ベンチ慣行**（2026-08-16 ユーザー裁定）: 両対応モデル（EmbeddingGemma —
-  models 側の完成が前提 / Irodori — ONNX 変換の前段が要る）で定期測定し、遅すぎないか・
-  ボトルネックはどこかを調査する。測定条件の規範（graph capture ON / freeDimensionOverrides /
-  IO binding / EP 分断確認・native EP か JSEP かの記録）は
+- **ORT Web 対比ベンチ慣行**（2026-08-16 ユーザー裁定）: 両対応モデルで定期測定し、
+  遅すぎないか・ボトルネックはどこかを調査する。対象 = EmbeddingGemma（models 側の完成が
+  前提）と **KokoroTTS**（2026-08-16 訂正 — 当初の Irodori は打ち間違い。Kokoro は
+  Transformers 系で動くため比較しやすい・karume 側は Kokoro-82M 対応が前提 = 上のモデル拡充
+  候補・LSTM multi-output 待ち）。将来はブラウザ ONNX + PyTorch ネイティブ込みの比較
+  マトリクスへ広げる（当面は不要の裁定）。測定条件の規範（graph capture ON /
+  freeDimensionOverrides / IO binding / EP 分断確認・native EP か JSEP かの記録）は
   [runtime-landscape §4](research/2026-08-16-runtime-landscape.md) が正本。
 - **生成イベントの横展開（需要待ち）**: sbv2 / birefnet / depth / siglip2 / vowel への stage
   イベント（step ループが無く提供できるのは段遷移のみ）と、AbortSignal による中断席
