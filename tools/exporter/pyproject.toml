@@ -3,15 +3,14 @@ name = "karume"
 version = "0.2.2"
 description = "torch.export -> Karume IR v1 exporter"
 requires-python = ">=3.12"
-# SPDX 式（PEP 639）— 実測でメタデータは `License-Expression: MIT`。同梱する `LICENSE` は
-# リポジトリ直下の同文コピーで、hatchling 既定の license-files グロブが拾って wheel の
-# `.dist-info/licenses/LICENSE` に入る（実測）。
-# NOTE: PEP 639 の `license-files = [...]`（リスト形）を明示するには hatchling>=1.27 が要るが、
-# pytorch-cpu index が先に並ぶ現構成では `packaging>=24.2` が引けず解決できない（実測）。
-# 明示しなくても既定グロブで同じ結果になるので、index 構成を触るまでは既定に任せる。
+# SPDX 式（PEP 639）— 実測でメタデータは `License-Expression: MIT` + `License-File: LICENSE`。
+# 同梱する `LICENSE` はリポジトリ直下の同文コピーで、`license-files` のリスト形明示は
+# hatchling>=1.27 が要る（pytorch-cpu index の explicit 化で解決可能になった — 2026-08-16。
+# それ以前は index が PyPI を影に隠し packaging>=24.2 が引けなかった）。
 # この wheel が配るのは汎用 exporter core だけで、上流モデル実装のコピーは 1 本も入らない
 # （ADR 0065 決定 7）— 上流由来コードの provenance は recipe 側が負う。
 license = "MIT"
+license-files = ["LICENSE"]
 # numpy は safetensors.torch の save/load が内部で要求する（torch 経由では入らない）。
 # torchvision は `torchvision::deform_conv2d`（DCNv2 = 第 1' 層 op・ADR 0055）の op 登録に
 # 要る — ハンドラのキー（`torch.ops.torchvision.deform_conv2d.default`）と golden 生成の
@@ -36,7 +35,8 @@ explicit = true
 dev = ["pytest>=9.1.1", "ruff>=0.15.0"]
 
 [build-system]
-requires = ["hatchling"]
+# >=1.27: PEP 639 の `license-files` リスト形の下限（上の NOTE）。
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
