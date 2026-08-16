@@ -36,7 +36,7 @@ published.
 | Item                     | Value                                                                                                                                                                                 |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/ZhengPeng7/BiRefNet_HR>                                                                                                                                       |
-| Revision used            | Unverified                                                                                                                                                                            |
+| Revision used            | `a7a562f6fd16021180f2f4348f4de003a2d3d1e1` (fetched 2026-08-16 into `inputs/birefnet/BiRefNet_HR`)                                                                                    |
 | Form of copy             | Weights loaded and re-distributed in converted storage form; the bundled `birefnet.py` / `handler.py` are executed via `trust_remote_code` and partially ported verbatim (see above). |
 | Code license             | Unverified (bundled remote code)                                                                                                                                                      |
 | Weights license          | `card.py` records `mit` (checked on the HF model API, 2026-08-13). Unverified against the revision used.                                                                              |
@@ -47,7 +47,7 @@ published.
 | Item                     | Value                                                                                                                                        |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/egeorcun/lucida>                                                                                                     |
-| Revision used            | Unverified                                                                                                                                   |
+| Revision used            | `6cbedc9722652dc9a3df91dd871f0c4f3334e922` (fetched 2026-08-16 into `inputs/birefnet/lucida`)                                                |
 | Form of copy             | Weights loaded and re-distributed in converted storage form.                                                                                 |
 | Code license             | Unverified (bundled remote code)                                                                                                             |
 | Weights license          | `card.py` records `mit` (checked on the HF model API, 2026-08-13), on top of BiRefNet_HR's own notice. Unverified against the revision used. |
