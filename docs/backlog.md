@@ -7,14 +7,12 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 整理整頓波（2026-08-14〜）
+## now — 整理整頓波（2026-08-14〜2026-08-16・全消化）
 
 外部レビュー 6 本の TRIAGE・docs 事実修正・ADR 注記・planning SoT 再編（本ファイル新設）・
-**exporter 構造再編（案 A・ADR 0065 — 全 8 段）**は消化済み。残り:
-
-- **exporter 再編の後始末（小粒）**: pytorch-cpu index の explicit 化
-  （hatchling 1.27+ / PEP 639 の license-files リスト形が解禁される — 現状は既定グロブで
-  同結果のため急がない）。
+**exporter 構造再編（案 A・ADR 0065 — 全 8 段）**・分割波・housekeeping・上流入力再取得 +
+全系列/配布形の再生成・pytorch-cpu index explicit 化 + license-files 明示まで消化済み。
+**残り: なし** — next の開始はユーザー裁定。
 
 ## next — autoregressive-ready 基盤波
 
