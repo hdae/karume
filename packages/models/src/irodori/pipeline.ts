@@ -84,7 +84,6 @@ import {
   type Manifest,
   type ModelEntry,
   resolveFiles,
-  type SessionSpec,
 } from "@karume/hub";
 
 import {
@@ -124,6 +123,7 @@ import {
 import { timestepEmbedding, timestepFrequencies } from "./host/t-embed.ts";
 import { findFlatteningPoint, trimmedSampleCount } from "./host/trim.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { toSessionOptions } from "../session/options.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const BACKBONE = "backbone";
@@ -271,21 +271,6 @@ export type IrodoriAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
-
-/**
- * manifest の `session`（3 キー固定の manifest 所有語彙）を runtime の `SessionOptions` へ
- * **1 キーずつ**写す。
- *
- * MUST: スプレッドで丸投げしない（ADR 0038 §3 — 素通しにすると綴りが変わった瞬間に runtime が
- * 未知キーを黙って無視して沈黙劣化する。写像を明示すると型検査が落ちる）。
- */
-const toSessionOptions = (spec: SessionSpec): SessionOptions => ({
-  ...(spec.linearCompute === undefined ? {} : { linearCompute: spec.linearCompute }),
-  ...(spec.attentionCompute === undefined ? {} : { attentionCompute: spec.attentionCompute }),
-  ...(spec.attentionScoreStorage === undefined
-    ? {}
-    : { attentionScoreStorage: spec.attentionScoreStorage }),
-});
 
 /**
  * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。
@@ -882,7 +867,9 @@ const runDitLoopOnHost = async (state: IrodoriState, loop: DitLoop): Promise<Dit
  *
  * MUST: 区間の中で `Session.run` を待たない（自己デッドロック — `beginBatch` の doc）。
  * MUST: 演算の積み方は {@link runDitLoopOnHost} と 1 演算ずつ同型（変種順・差の基準・
- * 引数順）。ずれると最終桁が動き、WAV sha256 門が割れる。
+ * 引数順）。ずれると最終桁が動き、WAV sha256 門が割れる。強さ `scale` はこちらが GPU へ
+ * 渡す前に f32 へ丸めるのに対しホスト経路は JS の f64 で乗算するが、`parseCfgScales` が
+ * f32 厳密な値しか受理しないので、2 経路の出力一致は**配布形に依らず無条件で**成立する。
  * MUST: 常駐テンソルを返すのは Session を全て畳んだ**後**（焼き込み参照が残っていると
  * `dispose` が fail loudly になる）。
  */
@@ -1140,7 +1127,11 @@ const generateLatent = async (
     .filter((segment: IrodoriSegment) => config.cfgScales[segment] > 0 && used[segment] > 0)
     .map((segment) => ({
       segment,
-      scale: config.cfgScales[segment],
+      // MUST: 強さは f32 で持つ — ホスト経路の `combineCfg` は f64 のまま乗算に入れ、常駐経路は
+      // GPU へ渡す前に f32 へ丸めるので、値が f32 非厳密だと 2 経路が 1〜2 ulp 割れる。
+      // `parseCfgScales` が f32 厳密しか受理しないので現物では恒等だが、ここで丸めておくと
+      // 「ホスト側が見るのは f32」が局所で読める（数値の正本は `host/sampler.ts`）。
+      scale: Math.fround(config.cfgScales[segment]),
       mask: {
         dtype: "bool",
         shape: maskShape,

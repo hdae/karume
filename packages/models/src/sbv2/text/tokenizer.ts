@@ -65,7 +65,12 @@ export class DebertaTokenizer {
     this.#special = special;
   }
 
-  /** `vocab.txt` 相当（1 行 = 1 トークン、行番号 0-origin = ID）から構築する。 */
+  /**
+   * `vocab.txt` 相当（1 行 = 1 トークン、行番号 0-origin = ID）から構築する。
+   *
+   * MUST: 特殊 ID が語彙表の行を指すことを検査する。範囲外の ID は id 列へそのまま乗り、
+   * グラフの embedding gather が範囲外添字を引く（GPU では NaN 汚染）まで表面化しない。
+   */
   static fromVocabText(
     vocabText: string,
     clean: CleanRanges,
@@ -75,10 +80,15 @@ export class DebertaTokenizer {
     // CRLF 混在で split("\n") だけにすると全トークン末尾に "\r" が残り、全 lookup が
     // [UNK] に落ちる（エラーは出ず BERT 特徴だけ静かに壊れる）。
     const lines = vocabText.split(/\r?\n/);
+    let size = 0;
     for (const [id, line] of lines.entries()) {
       // 末尾改行由来の空行はトークンではない。行内に空トークンは存在しない。
       if (line === "" && id === lines.length - 1) break;
       vocab.set(line, id);
+      size = id + 1;
+    }
+    for (const [name, id] of Object.entries(special)) {
+      if (id >= size) throw new Error(`${name} ${id} が語彙の行数 ${size} 以上`);
     }
     return new DebertaTokenizer(vocab, clean, special);
   }

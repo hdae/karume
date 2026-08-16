@@ -1,19 +1,19 @@
-// `AnimaPipeline` の**構築ガード**と session 写像。GPU も実資産も要らない範囲だけを見る
+// `AnimaPipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る
 // （実 GPU の E2E は P3 波 2）。
 //
-// ここで押さえるのは 3 つ:
-//  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反を落とす（未知 model /
-//     pipeline 名 / 未知 major / 未知 quant）。落とす位置がずれると、GPU の無い環境では
-//     別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
-//  ② manifest の `session`（3 キー固定）→ runtime `SessionOptions` の写像が 1 キーずつ通る。
-//     ADR 0038 §3 の綴りの契約そのもので、抜けは**沈黙劣化**（未知キーは runtime が黙って
-//     無視する）になる。
-//  ③ `generate` の入口ガード（`resolveNegativePrompt`）が「効かないノブを黙って受けない」。
+// ここで押さえるのは 2 つ:
+//  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反と資産の解析を落とす
+//     （未知 model / pipeline 名 / 未知 major / 未知 quant / 資産の不在）。落とす位置が
+//     ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+//  ② `generate` の入口ガード（`resolveNegativePrompt`）が「効かないノブを黙って受けない」。
 //     回帰しても実 GPU の PNG 門は緑のままなので、純関数として直接縛る。
+//
+// NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
+// `session_options_test.ts` にある。
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import { AnimaPipeline, resolveNegativePrompt, toSessionOptions } from "../src/anima/pipeline.ts";
+import { AnimaPipeline, resolveNegativePrompt } from "../src/anima/pipeline.ts";
 
 const FILE = {
   path: "transformer/model.f16.safetensors",
@@ -98,6 +98,18 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   );
 });
 
+Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触る（門の順序の対偶）", async () => {
+  // 上のケースが「資産が空でも manifest の文言で落ちる」ことの裏返し。正しい manifest なら
+  // 検査は資産まで進み、`tokenizer` の不在で落ちる（= 契約検査も資産の解析も GPU より前）。
+  // GPU の無い環境で `acquireGpu` の失敗に化けたらこの門が赤くなる。
+  const manifest = parseManifest(manifestText());
+  await assertRejects(
+    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    Error,
+    "資産 'tokenizer' が無い",
+  );
+});
+
 Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら落とす", () => {
   // 効かないノブを黙って受けると、ユーザーは指定したつもりで実際は 1 文字も使われない
   // （guidance=1 は uncond 分岐を丸ごと計算しない — `sampler.ts` の `needsUncond`）。
@@ -107,7 +119,12 @@ Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡し�
     "negativePrompt は効かない",
   );
   // 落とすのは **request での明示指定**だけ。manifest の既定が埋まっているだけの状態は
-  // 「効かないノブを渡した」ことにならないので、guidance=1 でも通る。
+  // 「効かないノブを渡した」ことにならないので、guidance=1 でも通る。これは配布形
+  // `anima-turbo` の**既定経路そのもの**（defaults.guidanceScale = 1 + defaults.negativePrompt）
+  // で、ここを締めるリファクタが入ると turbo の既定生成が丸ごと throw する。
+  assertEquals(resolveNegativePrompt(undefined, "既定のネガ", 1), "既定のネガ");
+  // fallback があっても requested があれば落ちる = 落とす / 落とさないの分岐は
+  // **requested の有無だけ**で決まり、fallback の有無では変わらない。
   assertThrows(
     () => resolveNegativePrompt("worst quality", "既定のネガ", 1),
     Error,
@@ -127,35 +144,4 @@ Deno.test("resolveNegativePrompt: uncond を計算する設定で negativePrompt
   // 供給元は request > defaults の順。どちらかがあれば通る。
   assertEquals(resolveNegativePrompt(undefined, "既定のネガ", 7), "既定のネガ");
   assertEquals(resolveNegativePrompt("要求のネガ", "既定のネガ", 7), "要求のネガ");
-});
-
-Deno.test("toSessionOptions: 3 キーを 1 つずつ写す（未指定は欄ごと作らない）", () => {
-  assertEquals(toSessionOptions({}), {});
-  assertEquals(toSessionOptions({ linearCompute: "i8a8" }), { linearCompute: "i8a8" });
-  assertEquals(toSessionOptions({ attentionCompute: "f16" }), { attentionCompute: "f16" });
-  assertEquals(toSessionOptions({ attentionScoreStorage: "f16" }), {
-    attentionScoreStorage: "f16",
-  });
-  // 配布物の既定 quant（w8a8-s16）の 3 キーが全て通ること。1 キーでも落とすと
-  // 「名前だけ s16」の沈黙劣化になる。
-  assertEquals(
-    toSessionOptions({
-      linearCompute: "i8a8",
-      attentionCompute: "i8a8",
-      attentionScoreStorage: "f16",
-    }),
-    {
-      linearCompute: "i8a8",
-      attentionCompute: "i8a8",
-      attentionScoreStorage: "f16",
-    },
-  );
-});
-
-Deno.test("toSessionOptions: manifest 側に無いノブ（submitPolicy）は写さない", () => {
-  // `SessionOptions.submitPolicy` は TDR 予算 = **ホスト政策**なので配布者に書かせない
-  // （ADR 0038 §3 の理由 ③）。スプレッド素通しに書き換えるとここが素通りしうる。
-  const mapped = toSessionOptions({ linearCompute: "i8a8" }) as Record<string, unknown>;
-  assertEquals(Object.hasOwn(mapped, "submitPolicy"), false);
-  assertEquals(Object.keys(mapped), ["linearCompute"]);
 });

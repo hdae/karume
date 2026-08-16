@@ -425,4 +425,36 @@ Deno.test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2
     Error,
     "JSON として読めない",
   );
+
+  // id は `Int32Array` へ写るので、非整数は切り捨て・範囲外は wrap で「別のトークン」に
+  // 化ける。数値であることだけで通すと embedding gather まで表面化しない。
+  assertThrows(
+    () => createTokenizers(encode(qwen2Json), encode({ ...t5Json, unkId: 1.5 })),
+    Error,
+    "tokenizer_2.unkId: トークン id が 0..2147483647 の整数でない（1.5）",
+  );
+  assertThrows(
+    () => createTokenizers(encode(qwen2Json), encode({ ...t5Json, eosId: -1 })),
+    Error,
+    "tokenizer_2.eosId: トークン id が 0..2147483647 の整数でない（-1）",
+  );
+  assertThrows(
+    () => createTokenizers(encode(qwen2Json), encode({ ...t5Json, eosId: 6 })),
+    Error,
+    "tokenizer_2.eosId: トークン id 6 が語彙の行数 6 以上",
+  );
+  // 追加語彙の id は語彙表の**外**を指してよい（Qwen2 の実資産がそう）ので、上限では
+  // 縛らない — 整数性と i32 範囲だけを見る。
+  assertThrows(
+    () =>
+      createTokenizers(encode({ ...qwen2Json, addedTokens: [["<|x|>", 2 ** 31]] }), encode(t5Json)),
+    Error,
+    "トークン id が 0..2147483647 の整数でない（2147483648）",
+  );
+  assertEquals(
+    createTokenizers(encode({ ...qwen2Json, addedTokens: [["<|x|>", 3]] }), encode(t5Json))
+      .maxLength,
+    8,
+    "語彙の行数（3）と同じ id の追加語彙は通る",
+  );
 });

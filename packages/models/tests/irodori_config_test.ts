@@ -181,3 +181,19 @@ Deno.test("parseIrodoriPipelineConfig: cfgScales 0 は正規の値（その条�
   );
   assertEquals(config.cfgScales.speaker, 0);
 });
+
+Deno.test("parseIrodoriPipelineConfig: f32 で厳密に表せない cfgScale は宣言段で落とす", () => {
+  // 1.3 は f64 と f32 で値が違う。ホスト経路（f64 乗算）と常駐経路（f32 乗算）が 1〜2 ulp
+  // 割れ、「2 経路の出力は同じ」MUST が条件付きになるので、配布形の宣言側で落とす。
+  assertThrows(
+    () =>
+      parseIrodoriPipelineConfig(withPatch({ cfgScales: { text: 1.3, speaker: 5, caption: 3 } })),
+    Error,
+    "f32 で厳密に表せない",
+  );
+  // 実配布の 3 / 5 / 3 と、f32 厳密な非整数（2 の冪の和）は通る。
+  const config = parseIrodoriPipelineConfig(
+    withPatch({ cfgScales: { text: 1.25, speaker: 5, caption: 3 } }),
+  );
+  assertEquals(config.cfgScales.text, 1.25);
+});

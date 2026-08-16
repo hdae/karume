@@ -19,8 +19,8 @@ import {
   assertTiledBert,
   assertTokenLimit,
   assetJson,
+  parseTokenizerAsset,
   Sbv2Pipeline,
-  toSessionOptions,
 } from "../src/sbv2/pipeline.ts";
 import { parseSbv2PipelineConfig } from "../src/sbv2/config.ts";
 import { tileBertToPhoneLevel, type TiledBert } from "../src/sbv2/text/bert-tile.ts";
@@ -401,23 +401,6 @@ Deno.test("assertTiledBert: 故障注入 — 走査が取りこぼした tile �
   assertThrows(() => assertTiledBert(good, 4), Error, "BERT 展開長 3 が音素数 4 と違う");
 });
 
-Deno.test("toSessionOptions: 3 キーを 1 つずつ写す（未指定は欄ごと作らない）", () => {
-  // ADR 0038 §3 の綴りの契約。抜けは**沈黙劣化**（未知キーは runtime が黙って無視する）。
-  assertEquals(toSessionOptions({}), {});
-  assertEquals(toSessionOptions({ linearCompute: "i8a8" }), { linearCompute: "i8a8" });
-  assertEquals(
-    toSessionOptions({
-      linearCompute: "i8a8",
-      attentionCompute: "i8a8",
-      attentionScoreStorage: "f16",
-    }),
-    { linearCompute: "i8a8", attentionCompute: "i8a8", attentionScoreStorage: "f16" },
-  );
-  // `submitPolicy`（TDR 予算 = ホスト政策）は manifest 側に無いので写さない。
-  const mapped = toSessionOptions({ linearCompute: "i8a8" }) as Record<string, unknown>;
-  assertEquals(Object.keys(mapped), ["linearCompute"]);
-});
-
 // ---- 資産 JSON の decode（不正 UTF-8 を黙って置換しない）------------------
 //
 // `assetJson` は `openSbv2State` の中で IR コンテナ 3 本を開いた**後**に来るので、
@@ -460,4 +443,36 @@ Deno.test("assetJson: JSON 構文違反は decode とは別の文言で落ちる
   // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
   const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
   assertEquals(assetJson({ symbols: valid }, "symbols"), { unkId: 0, space: "あ" });
+});
+
+// ---- トークナイザ資産の特殊 id（Int32Array で沈黙切り捨てになる前に落とす）--------
+
+/** `deberta-tokenizer.json` の骨格（`patch` が `special` を上書きする）。 */
+const tokenizerAsset = (special: Record<string, unknown>): Record<string, unknown> => ({
+  special: { clsId: 1, sepId: 2, unkId: 3, ...special },
+  vocabText: "[PAD]\n[CLS]\n[SEP]\n[UNK]\nあ",
+  cleanRanges: { removed: [], spaced: [] },
+});
+
+Deno.test("parseTokenizerAsset: 特殊 id は整数かつ語彙の行数未満", () => {
+  // 正常系（この形が通ることを先に固定 — 下の 3 本が「常に落ちる」門にならないように）。
+  parseTokenizerAsset(tokenizerAsset({}), "tokenizer");
+  // 非整数は `Int32Array` 代入で切り捨てられ、範囲外は wrap する。どちらも「別のトークンを
+  // 指す」沈黙誤値で、BERT 特徴が静かに無意味になるまで表面化しない。
+  assertThrows(
+    () => parseTokenizerAsset(tokenizerAsset({ clsId: 1.5 }), "tokenizer"),
+    Error,
+    "tokenizer.special.clsId: 0..2147483647 の整数でない（1.5）",
+  );
+  assertThrows(
+    () => parseTokenizerAsset(tokenizerAsset({ sepId: -1 }), "tokenizer"),
+    Error,
+    "tokenizer.special.sepId: 0..2147483647 の整数でない（-1）",
+  );
+  // 語彙 5 行に対する id 5 = 1 つ外側（gather が範囲外添字を引く）。
+  assertThrows(
+    () => parseTokenizerAsset(tokenizerAsset({ unkId: 5 }), "tokenizer"),
+    Error,
+    "unkId 5 が語彙の行数 5 以上",
+  );
 });

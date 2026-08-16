@@ -28,6 +28,12 @@ export const tSchedule = (steps: number, initScale: number): Float32Array<ArrayB
 
 /** CFG の 1 変種（uncond forward の結果とその強さ）。 */
 export type CfgVariant = {
+  /**
+   * 強さ。
+   * MUST: **f32 で厳密に表せる値**であること — ここは f64 のまま乗算に入るので、f32 非厳密な
+   * 値だと同じ演算を f32 で積む常駐経路と 1〜2 ulp 割れる（配布形の宣言段で
+   * `parseCfgScales` が落とす）。
+   */
   readonly scale: number;
   /** その条件だけを落としたマスクで回した速度場。 */
   readonly velocity: Float32Array<ArrayBuffer>;

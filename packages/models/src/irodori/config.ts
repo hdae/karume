@@ -153,6 +153,18 @@ const readNumber = (
 const isPositiveInteger = (value: number): boolean => Number.isInteger(value) && value > 0;
 const isPositiveFinite = (value: number): boolean => Number.isFinite(value) && value > 0;
 const isNonNegativeFinite = (value: number): boolean => Number.isFinite(value) && value >= 0;
+/**
+ * CFG 強さの受理条件 — 非負の有限数で、かつ **f32 で厳密に表せる**こと。
+ *
+ * MUST: 宣言段で f32 厳密を要求する。JS の数値は f64 で、ホスト経路の `combineCfg` は
+ * `f32(scale * f32(base − v))` と f64 の scale をそのまま乗算に入れる一方、常駐経路は
+ * scale を f32 へ丸めてから GPU が f32 乗算する。f32 非厳密な値（例 1.3）ではこの 2 つが
+ * 1〜2 ulp 割れ、「2 経路の出力は同じ」という MUST（`pipeline.ts` の DiT ループ分岐）が
+ * 条件付きにしか成立しなくなる。配布形の宣言側で落とせば、ホスト側に f64 が入る余地が
+ * そもそも消える（実配布の 3.0 / 5.0 / 3.0 は全て f32 厳密）。
+ */
+const isNonNegativeF32 = (value: number): boolean =>
+  isNonNegativeFinite(value) && value === Math.fround(value);
 
 /** 受理集合が 1 値しかない欄（ADR 0047 決定 1）。綴り違いも対応外も同じ文言で落とす。 */
 const readOnly = <T extends string>(
@@ -177,11 +189,11 @@ const parseCfgScales = (raw: unknown): IrodoriCfgScales => {
   const record = readRecord(raw, where);
   assertAllowedKeys(record, CFG_SCALE_KEYS, where);
   // 0 は「その条件の CFG を回さない」を意味する正規の値（上流 `has_*_cfg = scale > 0`）。
-  const requirement = "非負の有限数でない";
+  const requirement = "非負の有限数でない、または f32 で厳密に表せない";
   return {
-    text: readNumber(record, "text", where, isNonNegativeFinite, requirement),
-    speaker: readNumber(record, "speaker", where, isNonNegativeFinite, requirement),
-    caption: readNumber(record, "caption", where, isNonNegativeFinite, requirement),
+    text: readNumber(record, "text", where, isNonNegativeF32, requirement),
+    speaker: readNumber(record, "speaker", where, isNonNegativeF32, requirement),
+    caption: readNumber(record, "caption", where, isNonNegativeF32, requirement),
   };
 };
 

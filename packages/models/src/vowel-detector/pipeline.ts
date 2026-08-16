@@ -14,12 +14,12 @@
  * barrel から別に出ている）。渡された配列が本当に 16kHz かは**観測できない** — 違う周波数を
  * 渡すと `detect` は最後まで走って別の母音列を出すので、そこは呼び出し側の不変条件になる。
  *
- * ## 長さは記号軸（グラフは 1 本・pad もバケットも無い）
+ * ## 長さは記号軸（グラフは 1 本・pad も長さ別の変種も無い）
  *
  * グラフ入力は `features [1, 2T, 83]`、出力は `[1, T, 8]` で、**時間軸だけが記号** `T`
  * （20ms 格子）。`detect` は音声の実長のまま 1 回回し、`T` を束縛して渡す。
  * `nn.GRU` を `gru_scan` へ差し替えて記号長を通す形は ADR 0056、`2T` のような派生次元から
- * シンボルを束縛する形は ADR 0057（それ以前は長さバケット 4 本 + 右ゼロ pad だった）。
+ * シンボルを束縛する形は ADR 0057（それ以前の長さ別グラフ + 右ゼロ pad は同 ADR に経緯がある）。
  *
  * MUST: **10ms フレーム数は偶数**（グラフが `2T` を宣言している）。奇数フレームの端数 1 本は
  * **切り捨て**る — 半端フレームは入力 1 本分しか持たない出力になり、後処理の
@@ -31,7 +31,7 @@
  * 上限はグラフを焼いたときの記号次元の上限そのもので、配布形の `pipelineConfig` が持つ
  * （IR は記号の値域を持たないので、ここでしか止められない — `config.ts`）。
  *
- * ### 右ゼロ pad をしない理由（実測 — バケット時代の負債の説明）
+ * ### 右ゼロ pad をしない理由（実測 — ADR 0057 以前の形が抱えていた負債）
  *
  * 逆方向 GRU が pad 側から状態を持ち帰るので、pad はロジットを O(1) 動かす。**pad 量に対して
  * 単調でも比例でもなく、2 フレーム（40ms）で既に飽和する**（実音声 4 本 × pad 10 段の実測:
@@ -81,7 +81,6 @@ import {
   type Manifest,
   type ModelEntry,
   resolveFiles,
-  type SessionSpec,
 } from "@karume/hub";
 
 import {
@@ -93,6 +92,7 @@ import {
 import { extractFeatures, HOP, MEL_BINS, N_MELS, SAMPLE_RATE } from "./features.ts";
 import { type LabSegment, logitsToSegments, toLab } from "./postprocess.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { toSessionOptions } from "../session/options.ts";
 
 /** manifest の assets 表に現れる取得キーと、その safetensors のテンソル名（`dist.py` と対）。 */
 const MEL_BASIS = "mel_basis";
@@ -130,7 +130,7 @@ export type VowelDetectorPipelineOptions = {
   /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
   readonly quant?: string;
   /**
-   * 実行 1 回ごとの診断を受け取る観測席（1 detect = 選ばれたバケット 1 本の run）。op 別 GPU
+   * 実行 1 回ごとの診断を受け取る観測席（1 detect = CRNN 1 回の run）。op 別 GPU
    * 時間（`lastRunTiming`）が要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す
    * （ADR 0021 — 既定は計測しない）。
    *
@@ -160,21 +160,6 @@ export type VowelDetectorAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
-
-/**
- * manifest の `session`（3 キー固定の manifest 所有語彙）を runtime の `SessionOptions` へ
- * **1 キーずつ**写す。
- *
- * MUST: スプレッドで丸投げしない（ADR 0038 §3 — 素通しにすると綴りが変わった瞬間に runtime が
- * 未知キーを黙って無視して沈黙劣化する。写像を明示すると型検査が落ちる）。
- */
-const toSessionOptions = (spec: SessionSpec): SessionOptions => ({
-  ...(spec.linearCompute === undefined ? {} : { linearCompute: spec.linearCompute }),
-  ...(spec.attentionCompute === undefined ? {} : { attentionCompute: spec.attentionCompute }),
-  ...(spec.attentionScoreStorage === undefined
-    ? {}
-    : { attentionScoreStorage: spec.attentionScoreStorage }),
-});
 
 /**
  * 取得済みバイト列を `openModel` / `parseSafetensors` へ渡せる ArrayBuffer にする。
@@ -409,7 +394,7 @@ const openVowelDetectorState = async (
 };
 
 /**
- * 選ばれたバケットの Session を張り、使い終わったら必ず解放する。
+ * 1 検出ぶんの Session を張り、使い終わったら必ず解放する。
  * MUST: `finally` で dispose する — 途中で落ちたときに VRAM が残ると、後続の検出が確保に
  * 失敗して「最初の失敗とは別の場所」で落ちる。
  */
@@ -551,7 +536,8 @@ export class VowelDetectorPipeline {
    * 入力は **16kHz モノラル**の `Float32Array`（`[-1, 1]` 尺度）。リサンプルは呼び出し側の
    * 責務で、周波数が違っても**この関数は落ちない**（モジュール doc）。
    *
-   * 長さは配布形のバケットへ右ゼロ pad で丸められ、上限を超える入力は落ちる（同）。
+   * 長さは実長のまま記号次元 `T` に束縛される（pad は 1 要素も入らない）。10ms フレーム数が
+   * 奇数なら端数 1 本を**切り捨てる**。`maxFrames` 超過は fail loudly で落ちる（同）。
    *
    * 並行に呼ばれた場合は**待たされて順に**走る（GPU の破棄と in-flight の run を交差させない）。
    */

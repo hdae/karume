@@ -297,3 +297,24 @@ Deno.test("後処理: α は 8bit の全域を使う（飽和側が 1 LSB で潰
   assert(matte.data[1] > 0 && matte.data[1] < 128 - ALPHA_LSB, "σ(−2) が中間に来ていない");
   assert(matte.data[2] > 128 + ALPHA_LSB && matte.data[2] < 255, "σ(2) が中間に来ていない");
 });
+
+Deno.test("後処理: 非有限の logit は画素座標つきで落ちる（NaN が透明画素に化けない）", () => {
+  // `Uint8Array` 代入は NaN を 0 = 完全に透明な画素へ黙って丸めるので、検査が無いと
+  // 「正常に見えるマット」が返る。±Inf は σ を通れば 0/1 に落ちるが、そこまで来ている時点で
+  // グラフが壊れているので同じく落とす（他 3 家族の量子化出口と同じ綴り）。
+  assertThrows(
+    () => matteFromLogits(Float32Array.of(0, NaN, 0, 0), 2, 2, 2, 2),
+    Error,
+    "マットの logit (x=1, y=0) が非有限値",
+  );
+  assertThrows(
+    () => matteFromLogits(Float32Array.of(0, 0, 0, Infinity), 2, 2, 2, 2),
+    Error,
+    "マットの logit (x=1, y=1) が非有限値",
+  );
+  assertThrows(
+    () => matteFromLogits(Float32Array.of(-Infinity, 0, 0, 0), 2, 2, 2, 2),
+    Error,
+    "マットの logit (x=0, y=0) が非有限値",
+  );
+});

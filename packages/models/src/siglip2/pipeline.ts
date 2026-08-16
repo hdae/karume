@@ -53,7 +53,6 @@ import {
   openModel,
   type Session,
   type SessionDiagnostics,
-  type SessionOptions,
   type Tensor,
 } from "@karume/runtime";
 import {
@@ -65,7 +64,6 @@ import {
   type Manifest,
   type ModelEntry,
   resolveFiles,
-  type SessionSpec,
 } from "@karume/hub";
 
 import {
@@ -76,6 +74,7 @@ import {
 } from "./config.ts";
 import { normalizeToNchw, resizeRgb8, type Rgb8Image } from "../image/preprocess.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { toSessionOptions } from "../session/options.ts";
 
 /** manifest の weights 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const VISION = "vision";
@@ -128,21 +127,6 @@ export type Siglip2Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
-
-/**
- * manifest の `session`（3 キー固定の manifest 所有語彙）を runtime の `SessionOptions` へ
- * **1 キーずつ**写す。
- *
- * MUST: スプレッドで丸投げしない（ADR 0038 §3 — 素通しにすると綴りが変わった瞬間に runtime が
- * 未知キーを黙って無視して沈黙劣化する。写像を明示すると型検査が落ちる）。
- */
-const toSessionOptions = (spec: SessionSpec): SessionOptions => ({
-  ...(spec.linearCompute === undefined ? {} : { linearCompute: spec.linearCompute }),
-  ...(spec.attentionCompute === undefined ? {} : { attentionCompute: spec.attentionCompute }),
-  ...(spec.attentionScoreStorage === undefined
-    ? {}
-    : { attentionScoreStorage: spec.attentionScoreStorage }),
-});
 
 /**
  * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。

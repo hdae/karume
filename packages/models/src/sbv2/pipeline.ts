@@ -62,7 +62,6 @@ import {
   type Manifest,
   type ModelEntry,
   resolveFiles,
-  type SessionSpec,
 } from "@karume/hub";
 import { JtdDictionary } from "@hdae/yomi";
 import { fetchDictionaryBytes } from "@hdae/yomi/loader";
@@ -91,6 +90,7 @@ import { buildZp } from "./host/latent.ts";
 import { Randn } from "./host/random.ts";
 import { buildRelattnTables } from "./relattn-tables.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { toSessionOptions } from "../session/options.ts";
 
 /**
  * manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。
@@ -181,24 +181,6 @@ export type Sbv2Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
-
-/**
- * manifest の `session`（3 キー固定の manifest 所有語彙）を runtime の `SessionOptions` へ
- * **1 キーずつ**写す。
- *
- * MUST: スプレッドで丸投げしない。ADR 0038 §3 の要点は「配布済み manifest を runtime 内部の
- * 綴りに釘付けしない」ことで、素通しにすると綴りが変わった瞬間に **runtime が未知キーを
- * 黙って無視して沈黙劣化する**。写像を明示的に書くと、綴りが割れた時点で型検査が落ちる。
- *
- * NOTE: barrel には出さない（`export` はパッケージ内テストが写像そのものを叩くため）。
- */
-export const toSessionOptions = (spec: SessionSpec): SessionOptions => ({
-  ...(spec.linearCompute === undefined ? {} : { linearCompute: spec.linearCompute }),
-  ...(spec.attentionCompute === undefined ? {} : { attentionCompute: spec.attentionCompute }),
-  ...(spec.attentionScoreStorage === undefined
-    ? {}
-    : { attentionScoreStorage: spec.attentionScoreStorage }),
-});
 
 /**
  * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。
@@ -366,19 +348,32 @@ const parseRanges = (raw: unknown, where: string): (readonly [number, number])[]
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** i32 の上限（トークン id は最終的に `Int32Array` へ書かれる）。 */
+const MAX_TOKEN_ID = 2147483647;
+
 /**
  * 実行時資産のトークナイザ JSON（`karume dist` が配る形）を検査して読む。
  *
  * MUST: 構造を検査してから使う。壊れた語彙表は「読めない」ではなく**全トークンが `[UNK]`**
  * という形で沈黙し、BERT 特徴だけが静かに無意味になる（`text/tokenizer.ts` の doc）。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（{@link assetJson} と同じ理由）。
  */
-const parseTokenizerAsset = (raw: unknown, where: string): DebertaTokenizer => {
+export const parseTokenizerAsset = (raw: unknown, where: string): DebertaTokenizer => {
   if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない`);
   const special = raw["special"];
   if (!isRecord(special)) throw new Error(`${where}.special: オブジェクトでない`);
   const [clsId, sepId, unkId] = [special["clsId"], special["sepId"], special["unkId"]];
   if (typeof clsId !== "number" || typeof sepId !== "number" || typeof unkId !== "number") {
     throw new Error(`${where}.special: clsId / sepId / unkId が数値でない`);
+  }
+  // MUST: 整数かつ i32 の範囲。id は `Int32Array` へ書かれるので、非整数は**黙って切り捨て
+  // られ**、範囲外は wrap する — どちらも「別のトークンを指す」沈黙誤値になる（語彙の行数に
+  // 収まることは `fromVocabText` が語彙表を持つ側で見る）。
+  for (const [name, id] of [["clsId", clsId], ["sepId", sepId], ["unkId", unkId]] as const) {
+    if (!Number.isInteger(id) || id < 0 || id > MAX_TOKEN_ID) {
+      throw new Error(`${where}.special.${name}: 0..${MAX_TOKEN_ID} の整数でない（${id}）`);
+    }
   }
   const vocabText = raw["vocabText"];
   if (typeof vocabText !== "string" || vocabText.length === 0) {

@@ -14,7 +14,13 @@
  * @param logsP front の出力 3（同形）。
  * @param expandIdx フレーム → 音素の添字（長さ Ty）。
  * @param channels C（front のグラフ出力 shape から採る — ここで決め打ちしない）。
- * @param noise 標準正規列（長さ `C·Ty`。dump してパリティ検証に使うため外から渡す）。
+ * @param noise 標準正規列（長さ `C·Ty`）。**利用者が供給する面ではない** — 常に内部の
+ * `random.normals` から来る。引数にしてあるのは `examples/sbv2/dump.ts` が同じ列を
+ * `zp_noise` として書き出し、参照側（`demo.py`）がそれを読んで突き合わせるため。
+ *
+ * NOTE: 式は f64 で通して `Float32Array` 代入で 1 度だけ丸める（同ディレクトリの
+ * `random.ts` と同じ家風）。参照は f32 逐次なので要素の 4 割が 1 ulp 割れるが、この経路を
+ * 測る波形突合の実測 maxAbs 5.16e-5 に対して 3 桁下で、ceil のような離散化も挟まらない。
  */
 export const buildZp = (
   mP: Float32Array,

@@ -114,6 +114,33 @@ const asNumber = (value: unknown, label: string): number => {
   return value;
 };
 
+/** i32 の上限（id は最終的に `Int32Array` へ書かれる）。 */
+const MAX_ID = 2147483647;
+
+/**
+ * トークン id として受ける数値。
+ *
+ * MUST: `typeof number` だけで通さない。id は `encodePadded` が `Int32Array` へ書くので、
+ * 非整数は**黙って切り捨てられ**、i32 の範囲外は wrap する — どちらも「別のトークンを指す」
+ * 沈黙誤値になり、グラフ側の embedding gather まで表面化しない。
+ */
+const asId = (value: unknown, label: string): number => {
+  const id = asNumber(value, label);
+  if (!Number.isInteger(id) || id < 0 || id > MAX_ID) {
+    throw new Error(`${label}: トークン id が 0..${MAX_ID} の整数でない（${id}）`);
+  }
+  return id;
+};
+
+/** 語彙表の行を指す id（{@link asId} に加えて語彙の行数未満であること）。 */
+const asVocabId = (value: unknown, label: string, vocabSize: number): number => {
+  const id = asId(value, label);
+  if (id >= vocabSize) {
+    throw new Error(`${label}: トークン id ${id} が語彙の行数 ${vocabSize} 以上`);
+  }
+  return id;
+};
+
 const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
   if (!Array.isArray(raw)) throw new Error(`${label}: 配列でない`);
   const out = new Map<string, number>();
@@ -121,7 +148,9 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
     if (!Array.isArray(entry) || entry.length !== 2) {
       throw new Error(`${label}: [文字列, id] でない`);
     }
-    out.set(asString(entry[0], label), asNumber(entry[1], label));
+    // NOTE: 語彙の行数では縛らない — 追加トークンは語彙表の外へ採番される形もある
+    // （anima の Qwen2 が実際にそれ）。ここで見るのは i32 として健全なことだけ。
+    out.set(asString(entry[0], label), asId(entry[1], label));
   }
   return out;
 };
@@ -131,6 +160,7 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
  *
  * MUST: 語彙の行数と `scores` の本数を突き合わせる。ずれたまま通すと id が総ずれするが、
  * Viterbi は落ちない（語彙に無い断片はバイト展開へ逃げる）ので**沈黙誤値**になる。
+ * MUST: 特殊 id は整数かつ語彙の行数未満（{@link asVocabId} — 理由は同 doc）。
  */
 export const parseIrodoriTokenizerAsset = (
   raw: unknown,
@@ -156,10 +186,10 @@ export const parseIrodoriTokenizerAsset = (
     vocab,
     minScore,
     maxTokenLength,
-    unkId: asNumber(obj["unkId"], `${label}.unkId`),
-    byteBaseId: asNumber(obj["byteBaseId"], `${label}.byteBaseId`),
-    bosId: asNumber(obj["bosId"], `${label}.bosId`),
-    padId: asNumber(obj["padId"], `${label}.padId`),
+    unkId: asVocabId(obj["unkId"], `${label}.unkId`, tokens.length),
+    byteBaseId: asVocabId(obj["byteBaseId"], `${label}.byteBaseId`, tokens.length),
+    bosId: asVocabId(obj["bosId"], `${label}.bosId`, tokens.length),
+    padId: asVocabId(obj["padId"], `${label}.padId`, tokens.length),
     addedTokens: parseAddedTokens(obj["addedTokens"], `${label}.addedTokens`),
   };
 };

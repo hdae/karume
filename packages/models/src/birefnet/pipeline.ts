@@ -67,7 +67,6 @@ import {
   openModel,
   type Session,
   type SessionDiagnostics,
-  type SessionOptions,
   type Tensor,
 } from "@karume/runtime";
 import {
@@ -79,7 +78,6 @@ import {
   type Manifest,
   type ModelEntry,
   resolveFiles,
-  type SessionSpec,
 } from "@karume/hub";
 
 import {
@@ -95,6 +93,7 @@ import {
   type Rgb8Image,
 } from "../image/preprocess.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { toSessionOptions } from "../session/options.ts";
 
 /** manifest の weights 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const MATTE = "matte";
@@ -160,21 +159,6 @@ export type BirefnetAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
-
-/**
- * manifest の `session`（3 キー固定の manifest 所有語彙）を runtime の `SessionOptions` へ
- * **1 キーずつ**写す。
- *
- * MUST: スプレッドで丸投げしない（ADR 0038 §3 — 素通しにすると綴りが変わった瞬間に runtime が
- * 未知キーを黙って無視して沈黙劣化する。写像を明示すると型検査が落ちる）。
- */
-const toSessionOptions = (spec: SessionSpec): SessionOptions => ({
-  ...(spec.linearCompute === undefined ? {} : { linearCompute: spec.linearCompute }),
-  ...(spec.attentionCompute === undefined ? {} : { attentionCompute: spec.attentionCompute }),
-  ...(spec.attentionScoreStorage === undefined
-    ? {}
-    : { attentionScoreStorage: spec.attentionScoreStorage }),
-});
 
 /**
  * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。
@@ -303,7 +287,16 @@ export const matteFromLogits = (
 ): AlphaMatte => {
   const alpha = new Float32Array(logits.length);
   for (let index = 0; index < logits.length; index += 1) {
-    alpha[index] = 1 / (1 + Math.exp(-logits[index]));
+    const raw = logits[index];
+    // MUST: 非有限値を黙って返さない。α の量子化（`Uint8Array` 代入）は NaN を 0 =
+    // 「完全に透明な画素」という**正常に見えるマット**へ変換してしまう。resize は重み付き和で
+    // NaN を伝播するだけなので、発生源に一番近いここで落とす（`anima/image.ts` と同じ検査点）。
+    if (!Number.isFinite(raw)) {
+      const x = index % sourceWidth;
+      const y = Math.floor(index / sourceWidth);
+      throw new Error(`birefnet: マットの logit (x=${x}, y=${y}) が非有限値`);
+    }
+    alpha[index] = 1 / (1 + Math.exp(-raw));
   }
   const scaled = resizePlaneF32(alpha, sourceWidth, sourceHeight, width, height);
   const data = new Uint8Array(scaled.length) as Uint8Array<ArrayBuffer>;

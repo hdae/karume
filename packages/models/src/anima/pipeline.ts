@@ -56,7 +56,6 @@ import {
   type Manifest,
   type ModelEntry,
   resolveFiles,
-  type SessionSpec,
 } from "@karume/hub";
 
 import {
@@ -88,6 +87,7 @@ import { parseRopeBase, type RopeBase, ropeWidth } from "./rope-base.ts";
 import { type AnimaTokenizers, createTokenizers } from "./text/tokenizer.ts";
 import { Randn } from "./random.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { toSessionOptions } from "../session/options.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const TEXT_ENCODER = "text_encoder";
@@ -168,26 +168,6 @@ export type AnimaAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
-
-/**
- * manifest の `session`（3 キー固定の manifest 所有語彙）を runtime の `SessionOptions` へ
- * **1 キーずつ**写す。
- *
- * MUST: スプレッドで丸投げしない。ADR 0038 §3 の要点は「配布済み manifest を runtime 内部の
- * 綴りに釘付けしない」ことで、素通しにすると綴りが変わった瞬間に **runtime が未知キーを
- * 黙って無視して沈黙劣化する**（`s16` が名前だけになる）。写像を明示的に書くと、綴りが
- * 割れた時点で型検査が落ちる。
- *
- * NOTE: barrel には出さない（`export` はパッケージ内テストが写像そのものを叩くため — 綴りの
- * 契約は ADR 0038 §3 が正本で、写像の抜けは GPU を回さないと露見しない位置にある）。
- */
-export const toSessionOptions = (spec: SessionSpec): SessionOptions => ({
-  ...(spec.linearCompute === undefined ? {} : { linearCompute: spec.linearCompute }),
-  ...(spec.attentionCompute === undefined ? {} : { attentionCompute: spec.attentionCompute }),
-  ...(spec.attentionScoreStorage === undefined
-    ? {}
-    : { attentionScoreStorage: spec.attentionScoreStorage }),
-});
 
 /**
  * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。
@@ -484,6 +464,9 @@ export class AnimaPipeline {
    * - quant の `session` → runtime `SessionOptions` の**明示写像**と `gpuFeatures` の解釈
    * - 全 weights / assets の `openModel` / rope 素表 / トークナイザ 2 本の解釈
    *
+   * MUST: manifest の契約違反と**資産の解析**は **GPU を取りに行く前**に落とす（他 6 家族と
+   * 同じ順序）。順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が
+   * 読み手に伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ。
    * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
    */
   static async fromAssets(
@@ -524,6 +507,20 @@ export class AnimaPipeline {
     }
     const quant = entry.quants[quantName];
     const wantsShaderF16 = quant.gpuFeatures?.shaderF16 === true;
+    const sessionOptions = toSessionOptions(quant.session);
+
+    // 資産の解析は GPU より前（docstring の順序 MUST）。3.7GiB の DiT を開くほうが device 生成
+    // より重いが、壊れた配布形の真因を消さないほうを採る — GPU 無し環境では acquireGpu 自体が
+    // 落ちるので、後ろに置くと「資産が無い」が永久に見えない。
+    const tokenizers = createTokenizers(
+      assetBytes(assets, TOKENIZER),
+      assetBytes(assets, TOKENIZER_2),
+    );
+    const textEncoder = openModel(assetBuffer(assets, TEXT_ENCODER));
+    const textConditioner = openModel(assetBuffer(assets, TEXT_CONDITIONER));
+    const transformer = openModel(assetBuffer(assets, TRANSFORMER));
+    const ropeBase = parseRopeBase(assetBuffer(assets, TRANSFORMER_ROPE_BASE));
+    const vaeDecoder = openModel(assetBuffer(assets, VAE_DECODER));
 
     // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
     // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす — 通すと
@@ -542,16 +539,13 @@ export class AnimaPipeline {
         gpu,
         ownsGpu,
         config,
-        sessionOptions: toSessionOptions(quant.session),
-        tokenizers: createTokenizers(
-          assetBytes(assets, TOKENIZER),
-          assetBytes(assets, TOKENIZER_2),
-        ),
-        textEncoder: openModel(assetBuffer(assets, TEXT_ENCODER)),
-        textConditioner: openModel(assetBuffer(assets, TEXT_CONDITIONER)),
-        transformer: openModel(assetBuffer(assets, TRANSFORMER)),
-        ropeBase: parseRopeBase(assetBuffer(assets, TRANSFORMER_ROPE_BASE)),
-        vaeDecoder: openModel(assetBuffer(assets, VAE_DECODER)),
+        sessionOptions,
+        tokenizers,
+        textEncoder,
+        textConditioner,
+        transformer,
+        ropeBase,
+        vaeDecoder,
         ...(options.onRunDiagnostics === undefined
           ? {}
           : { onRunDiagnostics: options.onRunDiagnostics }),

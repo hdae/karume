@@ -3,9 +3,21 @@
  *
  * 参照実装 `SynthesizerTrnJPExtra.infer` の
  * `logw = sdp(...)·r + dp(...)·(1−r)` → `w = exp(logw)·x_mask·length_scale` →
- * `w_ceil = ceil(w)` → `attn = generate_path(w_ceil, ...)` と同義。**attn 行列（Ty×P）は
+ * `w_ceil = ceil(w)` → `attn = generate_path(w_ceil, ...)` を写したもの。**attn 行列（Ty×P）は
  * 作らない** — 単調パスなので `expandIdx`（長さ Ty の音素添字列）で同じ情報を持てる。
  * 続く m_p / logs_p の展開は行列積ではなく gather になる（ADR 0013 のホスト責務）。
+ *
+ * ## 既知差: `w_ceil` は torch とビット同一ではない（ADR 0048 と同じ形式の注記）
+ *
+ * ここは式全体を JS の f64 で評価してから `Math.ceil` を掛けるのに対し、参照は f32 テンソル
+ * 演算のまま `torch.ceil` する。`f32(exp_f32(x))` と `exp_f64(x)` の f32 半 ulp（相対 6e-8）が
+ * ceil の閾値を跨ぐと **1 フレームずれる**（実測: 音素あたり 5.5e-7・229 音素の 1 発話で
+ * P ≈ 1.3e-4）。
+ *
+ * MUST: これを `Math.fround` 逐次へ揃えても torch 一致は**決定的にならない** — front 出力
+ * 自体の GPU/CPU 差 1e-5 が同じ閾値跨ぎを 2 桁以上高い率で起こし、支配項は上流に残る
+ * （`tools/export-recipes/sbv2/README.md` が設計として明示的に許容し、割れた位置を
+ * `w_ceil_diffs` に載せる）。karume 単体の再現性（WAV sha256 門）は f64 経路が決定的なので無傷。
  */
 
 type DurationPlan = {

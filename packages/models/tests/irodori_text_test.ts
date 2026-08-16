@@ -280,7 +280,8 @@ Deno.test("資産パーサ: 行数不一致と必須キー欠落は fail loudly"
     bosId: 1,
     padId: 2,
     unkId: 0,
-    byteBaseId: 3,
+    // 3 行の語彙なので特殊 id は 0..2（範囲そのものは下の専用テストが見る）。
+    byteBaseId: 2,
   };
   // スコアが 1 本欠けても Viterbi は落ちない（語彙に無い断片はバイト展開へ逃げる）ので、
   // ここで落とさないと id が総ずれしたまま沈黙で流れる。
@@ -301,6 +302,41 @@ Deno.test("資産パーサ: 行数不一致と必須キー欠落は fail loudly"
     );
   }
   assertThrows(() => parseIrodoriTokenizerAsset(undefined), Error, "オブジェクトでない");
+});
+
+Deno.test("資産パーサ: 特殊 id は整数かつ語彙の行数未満（Int32Array で沈黙切り捨てになる前に落とす）", () => {
+  const base = {
+    vocabText: "<unk>\n<s>\n<pad>",
+    scores: [0, 0, 0],
+    addedTokens: [["<unk>", 0]],
+    bosId: 1,
+    padId: 2,
+    unkId: 0,
+    byteBaseId: 0,
+  };
+  // 非整数は `Int32Array` 代入で切り捨てられ、範囲外は wrap する — どちらも「別のトークンを
+  // 指す」沈黙誤値で、グラフの embedding gather まで表面化しない。
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, unkId: 1.5 }),
+    Error,
+    "tokenizer.unkId: トークン id が 0..2147483647 の整数でない（1.5）",
+  );
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, byteBaseId: -1 }),
+    Error,
+    "tokenizer.byteBaseId: トークン id が 0..2147483647 の整数でない（-1）",
+  );
+  // 語彙の行数ちょうど = 1 つ外側。
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, bosId: 3 }),
+    Error,
+    "tokenizer.bosId: トークン id 3 が語彙の行数 3 以上",
+  );
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["<unk>", 0.5]] }),
+    Error,
+    "トークン id が 0..2147483647 の整数でない（0.5）",
+  );
 });
 
 // ---- 境界（golden のケースが実際に叩いているもの）----------------------------
