@@ -47,6 +47,7 @@
 import { CodegenError } from "../codegen/errors.ts";
 import { gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
 import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
+import { assertU32Params } from "./params.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,
@@ -199,23 +200,21 @@ export type Conv1dDims = {
  * カーネル直呼びの経路も塞ぐ。
  */
 const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
-  const values = [
-    dims.batch,
-    dims.channelsIn,
-    dims.channelsOut,
-    dims.lengthIn,
-    dims.lengthOut,
-    dims.kernel,
-    dims.stride,
-    dims.padding,
-    dims.dilation,
-    dims.groups,
-  ];
-  for (const value of values) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(`conv1d params: 全ての次元は非負整数（${values.join(", ")}）`);
-    }
-  }
+  // 名前は WGSL の Dims 欄名（`n` の次から）と対。並びがそのまま uniform の語順になる。
+  const dimensions = {
+    batch: dims.batch,
+    channels_in: dims.channelsIn,
+    channels_out: dims.channelsOut,
+    length_in: dims.lengthIn,
+    length_out: dims.lengthOut,
+    kernel: dims.kernel,
+    stride: dims.stride,
+    padding: dims.padding,
+    dilation: dims.dilation,
+    groups: dims.groups,
+  };
+  assertU32Params("conv1d params", dimensions);
+  const values = Object.values(dimensions);
   if (dims.stride < 1 || dims.kernel < 1 || dims.dilation < 1 || dims.groups < 1) {
     throw new CodegenError(
       `conv1d params: stride / kernel / dilation / groups は正整数（${dims.stride}, ${dims.kernel}, ${dims.dilation}, ${dims.groups}）`,

@@ -18,7 +18,7 @@
  * 非対称な列で固定する）。
  */
 
-import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const CUMSUM_WORKGROUP_SIZE = 256;
 
@@ -61,9 +61,7 @@ export const CUMSUM_WGSL: string = [
  * 16 バイトになるため、2 語ぶんの内容でも 16 バイト確保する MUST。
  */
 export const cumsumParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
-  if (!Number.isSafeInteger(rows) || rows < 0 || !Number.isSafeInteger(dim) || dim < 0) {
-    throw new CodegenError(`cumsum params: rows/dim は非負整数（${rows}, ${dim}）`);
-  }
+  assertU32Params("cumsum params", { rows, dim });
   const params = new Uint32Array(4);
   params[0] = rows;
   params[1] = dim;

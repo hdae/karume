@@ -1192,7 +1192,7 @@ Deno.test("gru_scan は更新式を分解形の逐語で書き、mul と add の
   assertThrows(
     () => gruScanParams({ time: -1, batch: 2, hidden: 4 }),
     CodegenError,
-    "time は非負整数",
+    "time は u32 の非負整数",
   );
   assertThrows(
     () => gruScanParams({ time: 5, batch: 2, hidden: 0 }),

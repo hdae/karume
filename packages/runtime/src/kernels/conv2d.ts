@@ -45,6 +45,7 @@
 import { CodegenError } from "../codegen/errors.ts";
 import { GEMM_MTILE_SMALL, gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
 import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
+import { assertU32Params } from "./params.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,
@@ -240,29 +241,27 @@ export type Conv2dDims = {
  * カーネル直呼びの経路も塞ぐ（conv_transpose1d と同じ二重の門）。
  */
 const checkConv2dDims = (dims: Conv2dDims): readonly number[] => {
-  const values = [
-    dims.batch,
-    dims.channelsIn,
-    dims.channelsOut,
-    dims.heightIn,
-    dims.widthIn,
-    dims.heightOut,
-    dims.widthOut,
-    dims.kernelH,
-    dims.kernelW,
-    dims.strideH,
-    dims.strideW,
-    dims.paddingH,
-    dims.paddingW,
-    dims.dilationH,
-    dims.dilationW,
-    dims.groups,
-  ];
-  for (const value of values) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(`conv2d params: 全ての次元は非負整数（${values.join(", ")}）`);
-    }
-  }
+  // 名前は WGSL の Dims 欄名（`n` の次から）と対。並びがそのまま uniform の語順になる。
+  const dimensions = {
+    batch: dims.batch,
+    channels_in: dims.channelsIn,
+    channels_out: dims.channelsOut,
+    height_in: dims.heightIn,
+    width_in: dims.widthIn,
+    height_out: dims.heightOut,
+    width_out: dims.widthOut,
+    kernel_h: dims.kernelH,
+    kernel_w: dims.kernelW,
+    stride_h: dims.strideH,
+    stride_w: dims.strideW,
+    padding_h: dims.paddingH,
+    padding_w: dims.paddingW,
+    dilation_h: dims.dilationH,
+    dilation_w: dims.dilationW,
+    groups: dims.groups,
+  };
+  assertU32Params("conv2d params", dimensions);
+  const values = Object.values(dimensions);
   const positive: readonly (readonly [string, number])[] = [
     ["stride_h", dims.strideH],
     ["stride_w", dims.strideW],

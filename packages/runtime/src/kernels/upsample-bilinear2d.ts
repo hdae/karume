@@ -29,6 +29,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE = 256;
 
@@ -122,11 +123,7 @@ export const upsampleBilinear2dParams = (
   heightOut: number,
   widthOut: number,
 ): Uint32Array<ArrayBuffer> => {
-  for (const [name, value] of Object.entries({ n, heightIn, widthIn, heightOut, widthOut })) {
-    if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
-      throw new CodegenError(`upsample_bilinear2d params: ${name} は u32 の非負整数（${value}）`);
-    }
-  }
+  assertU32Params("upsample_bilinear2d params", { n, heightIn, widthIn, heightOut, widthOut });
   for (const [name, value] of Object.entries({ heightIn, widthIn, heightOut, widthOut })) {
     if (value === 0) {
       throw new CodegenError(`upsample_bilinear2d params: ${name} は 1 以上`);

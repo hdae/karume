@@ -26,8 +26,10 @@
   - perf-ledger K-1 の曖昧 bucket を分割 or 再定義
   - dist の (rel_path, size) 前置フィルタ（perf L-5 の残作業）
   - dist.py の到達しない防御 2 箇所の撤去・1 回目 rename の失敗も DistError 化
-  - u32 uniform 検査の一本化の残り（conv1d/conv2d/deform-conv2d/gru-scan/pad/flip/cumsum の
-    params ビルダ + upsample-bilinear2d の同型インライン）
+  - u32 uniform 検査の一本化・第 3 便（第 2 便 2026-08-16 の実測で発見した残存サイト:
+    conv-transpose1d / layer-norm / softmax / rms-norm / quantize-rows / attention /
+    gemm-geometry / codegen の reduce・strided — いずれも上限検査なしの旧形。あわせて
+    pad / flip 等の**導出値**（`rows*lengthOut` などの積）が検査対象に入っているかの点検）
   - transport.ts の到達不能 `outer === null` 分岐の掃除
   - hack マーカー掃引（rg TODO/FIXME/HACK/workaround）+ knip（未使用 export / 依存）
   - モデルカード親切化の横展開・P 音素門 / text parity 恒真の解消・exporter ops.py の整理

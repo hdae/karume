@@ -47,6 +47,7 @@
 
 import { SIGMOID_STABLE_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const GRU_SCAN_WORKGROUP_SIZE = 256;
 
@@ -183,11 +184,7 @@ export type GruScanDims = {
  */
 export const gruScanParams = (dims: GruScanDims): Uint32Array<ArrayBuffer> => {
   const { time, batch, hidden } = dims;
-  for (const [name, value] of [["time", time], ["batch", batch]] as const) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(`gru_scan params: ${name} は非負整数（${value}）`);
-    }
-  }
+  assertU32Params("gru_scan params", { time, batch });
   if (!Number.isSafeInteger(hidden) || hidden < 1) {
     throw new CodegenError(`gru_scan params: hidden は正整数（${hidden}）`);
   }

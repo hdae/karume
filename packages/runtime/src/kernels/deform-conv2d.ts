@@ -33,6 +33,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const DEFORM_CONV2D_WORKGROUP_SIZE = 256;
 
@@ -185,24 +186,22 @@ export type DeformConv2dDims = {
  * false = 出力が bias 一色になる沈黙誤値を作る。
  */
 export const deformConv2dParams = (dims: DeformConv2dDims): Uint32Array<ArrayBuffer> => {
-  const values = [
-    dims.batch,
-    dims.channelsIn,
-    dims.channelsOut,
-    dims.heightIn,
-    dims.widthIn,
-    dims.heightOut,
-    dims.widthOut,
-    dims.kernelH,
-    dims.kernelW,
-    dims.paddingH,
-    dims.paddingW,
-  ];
-  for (const value of values) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(`deform_conv2d params: 全ての次元は非負整数（${values.join(", ")}）`);
-    }
-  }
+  // 名前は WGSL の Dims 欄名（`n` の次から）と対。並びがそのまま uniform の語順になる。
+  const dimensions = {
+    batch: dims.batch,
+    channels_in: dims.channelsIn,
+    channels_out: dims.channelsOut,
+    height_in: dims.heightIn,
+    width_in: dims.widthIn,
+    height_out: dims.heightOut,
+    width_out: dims.widthOut,
+    kernel_h: dims.kernelH,
+    kernel_w: dims.kernelW,
+    padding_h: dims.paddingH,
+    padding_w: dims.paddingW,
+  };
+  assertU32Params("deform_conv2d params", dimensions);
+  const values = Object.values(dimensions);
   const positive: readonly (readonly [string, number])[] = [
     ["batch", dims.batch],
     ["channels_in", dims.channelsIn],

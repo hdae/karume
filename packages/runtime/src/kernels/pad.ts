@@ -12,7 +12,7 @@
  * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える。
  */
 
-import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const PAD_WORKGROUP_SIZE = 256;
 
@@ -62,11 +62,7 @@ export const padParams = (
   left: number,
   right: number,
 ): Uint32Array<ArrayBuffer> => {
-  for (const [name, value] of Object.entries({ rows, in_len: lengthIn, left, right })) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(`pad params: ${name} は非負整数（${value}）`);
-    }
-  }
+  assertU32Params("pad params", { rows, in_len: lengthIn, left, right });
   const lengthOut = left + lengthIn + right;
   const params = new Uint32Array(4);
   params[0] = rows * lengthOut;

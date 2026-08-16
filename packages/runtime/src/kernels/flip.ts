@@ -13,7 +13,7 @@
  * 変わらないので値でしか検出できない（tests/gpu_ops_test.ts が非対称な列で固定する）。
  */
 
-import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "./params.ts";
 
 export const FLIP_WORKGROUP_SIZE = 256;
 
@@ -59,11 +59,7 @@ export const flipParams = (
   length: number,
   inner: number,
 ): Uint32Array<ArrayBuffer> => {
-  for (const [name, value] of Object.entries({ outer, len: length, inner })) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new CodegenError(`flip params: ${name} は非負整数（${value}）`);
-    }
-  }
+  assertU32Params("flip params", { outer, len: length, inner });
   const params = new Uint32Array(4);
   params[0] = outer * length * inner;
   params[1] = length;
