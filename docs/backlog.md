@@ -20,7 +20,6 @@
   - Anima 参照フィクスチャ系テストの復元・tokenizer parity fixture の models 側への移設
   - DeBERTa 実重み e2e の移植（現行の回帰網は WAV sha256 門 + rel-pos parity のみ）
   - turbo LoRA の置き場移行（配布形の親に入力素材が混在）
-  - perf-ledger K-1 の曖昧 bucket を分割 or 再定義
   - dist.py の到達しない防御 2 箇所の撤去・1 回目 rename の失敗も DistError 化
   - u32 uniform 検査の一本化・第 3 便（第 2 便 2026-08-16 の実測で発見した残存サイト:
     conv-transpose1d / layer-norm / softmax / rms-norm / quantize-rows / attention /
