@@ -505,6 +505,15 @@ GQA 形は**縮退せず fail loudly**（黙って f32 へ落とすと性能が�
 V/scale 基底のみ kv-head 写像 + recipe-builder の Hkv 化。検証は f32 経路の repeat_kv
 parity 資産を流用）。
 
+## topk の k 実装上限は device 依存（WebGPU 既定 limits で k ≤ 63）
+
+`topk`（ADR [0068](decisions/0068-decode-exit-multi-output.md) 決定 3）の scratch は
+workgroup storage に閉じるため、k の上限は `8·32·(k+1) ≤ maxComputeWorkgroupStorageSize`
+で決まる（`src/kernels/topk.ts` の `topkMaxK`）。WebGPU 既定の 16384B では **k ≤ 63**・
+本開発機（49152B）では 191。超過は上限値つきで fail loudly（縮退しない — ADR 0058
+決定 3）。top-k sampling の実用域（k ≤ 50 級)は既定の機でも収まる。上限を上げる設計
+（多段 merge 等）は実需が出た時の perf-ledger 起票。
+
 ## ストリーミング慣習の WAV（riffSize プレースホルダ）は受理しない
 
 `decodeWav`（`packages/models/src/audio/wav.ts`）の走査境界は RIFF が offset 4 で宣言する

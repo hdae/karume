@@ -32,7 +32,10 @@
 [0070](decisions/0070-shard-loading-admission.md)（shard 2 相 + admission）— 全て
 accepted（裁定 A〜C + Codex 6 巡収束）。**実装波の波割りは裁定済み**（2026-08-17・
 案 X = 検収足場先行）: **A = GQA + MiniCPM5 検収足場（済 2026-08-17 — `b78b0c1` 実装・
-`3f072cb` recipe・e2e 門）** → B = 多出力 + argmax / topk → C = GenerationContext +
+`3f072cb` recipe・e2e 門）** → **B = 多出力 + argmax / topk（済 2026-08-17 —
+`3a31544`/`9a795a7` 出力列化・`cbe093a` argmax・topk と docs は後続コミット。0 本席は
+波 D へ・topk exporter 側〈getitem 結線〉は sampling 実需まで先送り）** →
+C = GenerationContext +
 states{} → D = states 形 attention + state_append → E = decode 台本 + greedy 検収 →
 F = w4（Phase 0 sweep は A 完了後から並行可）→ G = shard + admission → H = Gemma 4 E2B
 検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで

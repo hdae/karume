@@ -99,6 +99,24 @@ IR スキーマは `outs` 長さ 1 以上を既に許可しており**仕様改�
   ③故障注入（index ずれ・merge 境界・k 端数）④multi-output の寿命検証（片方だけ消費される
   グラフで uses / release が正しいこと）。
 
+## 追記 2（2026-08-17・実装波 B での実測訂正 3 点）
+
+1. **決定 3 の括弧書き「同値要素の順序も torch と一致させる」は実測で不成立**
+   （torch 2.13.0+cpu）: torch の `topk` は tie の順序を保証せず、`topk([5,5,5,5],1)` は
+   index 2・`argmax` は 0 で **torch 自身が同一リポ内で食い違う**（多値 tie では降順
+   index も観測）。採った規律 — **値の列は torch とビット一致**（降順・多重度が同じなので
+   一意）・**添字の列は karume が最小 index に規定**（決定 2 の argmax と同族・決定的。
+   k=1 が argmax と一致することを門が突き合わせる）。
+2. **実装上限の具体形**: scratch を workgroup storage に閉じる実装（temps 不使用 —
+   決定 3 の条件付き記述は不発動）を採った結果、上限は `8·W·(k+1) ≤
+   maxComputeWorkgroupStorageSize`（W=32）で **WebGPU 既定 16384B では k ≤ 63**。
+   超過は上限値・必要バイト数つきで fail loudly（縮退しない）。device 依存の段差は
+   limitations に起票。
+3. **exporter 多出力の停止点は `operator.getitem`**（実測）: aten handler を足しても
+   torch.export がタプル返しへ挟む getitem で変換が止まる — 「タプル meta + getitem
+   スロット結線が新機構」（追記 1）の裏付け。topk の aten handler は sampling 実需まで
+   先送り（2026-08-17 裁定）で、契約表・kernel・検証門のみ先行実装。
+
 ## 追記（2026-08-17・実装波スカウトの補正）
 
 決定 1 の「実装 6 面」は現物では **8 面**: 列挙した 6 面に加えて **fusion**

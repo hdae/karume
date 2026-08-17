@@ -19,8 +19,11 @@
   （正本 = [backlog](../docs/backlog.md) next 節）。**波 A 済（2026-08-17）**: GQA 整除
   broadcast（`b78b0c1` — r=1 バイト同一・repeat_kv parity・i8a8×GQA fail loudly）+
   MiniCPM5-1B 1-shot recipe（`3f072cb` — 真の GQA 形 24 層・sanity greedy）+
-  `e2e_minicpm5_test.ts`（tolerance 1e-3・greedy・census 全 `:gqa`）。
-  **次 = 波 B（多出力 8 面 + argmax / topk — ADR 0068）**。
+  `e2e_minicpm5_test.ts`（tolerance 1e-3・greedy・census 全 `:gqa`）。**波 B 済
+  （2026-08-17）**: 出力列化 2 段（`3a31544`/`9a795a7` — バイト不変）+ argmax（`cbe093a`）+
+  topk（多出力の最初の入居者・値列 = torch ビット一致・添字列 = 最小 index 規範〈ADR 0068
+  追記 2 の実測訂正〉・k ≤ 63 既定上限）。**次 = 波 C（GenerationContext + states{} —
+  ADR 0066）**。0 本席と ir.ts outs 改訂は波 D（state_append と同時）。
 
 ## Open decisions
 
