@@ -66,6 +66,8 @@ export type GraphJson = {
   outputs: string[];
   initializers: Record<string, { tensor: string; storage: Record<string, unknown> }>;
   values: Record<string, { dtype: string; shape: (number | string)[] }>;
+  /** 省略可能な state スロット節（ADR 0066 決定 2）— 既定のグラフは持たない。 */
+  states?: Record<string, { dtype: string; shape: (number | string)[] }>;
   nodes: { op: string; ins: string[]; outs: string[]; attrs: unknown }[];
 };
 

@@ -57,6 +57,21 @@ class IrValue:
 
 
 @dataclass(frozen=True)
+class IrState:
+    """名前付き state スロット（ADR 0066 決定 2）。
+
+    shape は容量込みの具体形（rank ≤ 4・数値次元は正整数）。値ではないので `values` に宣言を
+    持たず、ノードの `ins` / `outs` からも参照されない（参照の欄は ADR 0067 の担当）。
+    """
+
+    dtype: str
+    shape: list[IrDim]
+
+    def to_dict(self) -> dict:
+        return {"dtype": self.dtype, "shape": list(self.shape)}
+
+
+@dataclass(frozen=True)
 class IrInput:
     name: str
     dtype: str
@@ -89,6 +104,8 @@ class IrGraph:
     outputs: list[str] = field(default_factory=list)
     initializers: dict[str, IrInitializer] = field(default_factory=dict)
     values: dict[str, IrValue] = field(default_factory=dict)
+    #: state スロット宣言（ADR 0066 決定 2）。エクスポータはまだ出さない — 読む側だけが先。
+    states: dict[str, IrState] = field(default_factory=dict)
     nodes: list[IrNode] = field(default_factory=list)
 
     @property
@@ -111,6 +128,14 @@ class IrGraph:
             "outputs": list(self.outputs),
             "initializers": {name: init.to_dict() for name, init in self.initializers.items()},
             "values": {name: value.to_dict() for name, value in self.values.items()},
+            # MUST: 空の states は**書かない**。常に出すと states を 1 本も持たない既存モデルの
+            # グラフ JSON がバイト単位で変わり、配布物の sha 門が全部動く（ADR 0066 決定 2 の
+            # 「states を出す最初のモデルまで無風」）。
+            **(
+                {"states": {name: slot.to_dict() for name, slot in self.states.items()}}
+                if self.states
+                else {}
+            ),
             "nodes": [node.to_dict() for node in self.nodes],
         }
 

@@ -32,6 +32,7 @@ from karume.ir import (
     IrInitializer,
     IrInput,
     IrNode,
+    IrState,
     IrStorage,
     IrValue,
 )
@@ -68,8 +69,21 @@ TOP_LEVEL_KEYS = (
     "nodes",
 )
 
+#: 省略可能なトップレベル節。`states` を持たないグラフ（= 既存の全モデル）は無風
+#: （ADR 0066 決定 2 の「states を出す最初のモデルまで無風」）。
+OPTIONAL_TOP_LEVEL_KEYS = ("states",)
+
 SEMANTIC_DTYPES = ("f32", "i32", "bool")
 STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i32")
+
+#: state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。
+STATE_DTYPES = ("f32",)
+#: 席だけが予約されている state スロットの dtype（ADR 0066 追記 5）。f16 格納は数値契約が
+#: 変わるので ADR 0058 流儀の opt-in が要る — それが無いうちは「語彙外」ではなく**未対応**。
+RESERVED_STATE_DTYPES = ("f16",)
+#: state スロットの rank 上限（ADR 0066 決定 2 の「固定 rank（rank ≤ 4）」）。strided カーネルの
+#: 上限（ops.STRIDED_RANK）と同じ数値だが理由が別なので定数を共有しない。
+MAX_STATE_RANK = 4
 
 #: 格納 dtype → safetensors dtype。f32/f16/bf16/i8 は意味論 f32 の符号化で、`i32` だけが
 #: 生の int32（ADR 0010 の明示的な例外）。
@@ -192,6 +206,43 @@ def _parse_shape(value: Any, symbols: set[str], where: str) -> list[int | str]:
     return shape
 
 
+def _as_state_dtype(value: Any, where: str) -> str:
+    dtype = _as_nonempty_str(value, where)
+    if dtype in RESERVED_STATE_DTYPES:
+        raise IrError(
+            f"{where}: state スロットの dtype '{dtype}' は未対応"
+            "（ADR 0066 追記 5 の席予約 — 数値契約の opt-in が要る）"
+        )
+    if dtype not in STATE_DTYPES:
+        raise IrError(
+            f"{where}: state スロットの dtype '{dtype}' は語彙外（{' / '.join(STATE_DTYPES)}）"
+        )
+    return dtype
+
+
+def _parse_state(value: Any, symbols: set[str], where: str) -> IrState:
+    """state スロット 1 本の宣言（ADR 0066 決定 2・TS 側 parseStateSlot の鏡像）。
+
+    MUST: shape は**容量込みの具体形**なので数値次元は正整数（`values` の非負とは違う — 容量 0 の
+    スロットは束縛できる実体を持たない）。rank は 1..MAX_STATE_RANK（容量軸を持たない rank 0 は
+    「容量込み」を満たせない）。記号次元は `symbols` 宣言済みならよく、束縛は従来どおり入力 shape の
+    次元位置から取る（_check_symbol_bindability — states は束縛源にならない）。
+    """
+    obj = _as_object(value, where)
+    _check_keys(obj, ["dtype", "shape"], [], where)
+    dtype = _as_state_dtype(obj["dtype"], f"{where}.dtype")
+    shape = _parse_shape(obj["shape"], symbols, f"{where}.shape")
+    if not 1 <= len(shape) <= MAX_STATE_RANK:
+        raise IrError(
+            f"{where}.shape: rank {len(shape)} は 1..{MAX_STATE_RANK} の外"
+            "（固定 rank の容量込み具体形 MUST）"
+        )
+    for index, dim in enumerate(shape):
+        if isinstance(dim, int) and dim < 1:
+            raise IrError(f"{where}.shape[{index}]: 次元 {dim} が正整数でない（容量が取れない）")
+    return IrState(dtype=dtype, shape=shape)
+
+
 def _parse_storage(value: Any, where: str) -> IrStorage:
     obj = _as_object(value, where)
     _check_keys(obj, ["dtype"], ["scale", "group_size"], where)
@@ -228,7 +279,7 @@ def _parse_storage(value: Any, where: str) -> IrStorage:
 def parse_ir_graph(text: str) -> IrGraph:
     """グラフ JSON を検証しつつ読む（packages/runtime/src/format/ir.ts parseIrGraph と同義）。"""
     root = _as_object(parse_graph_json(text), "graph")
-    _check_keys(root, TOP_LEVEL_KEYS, [], "graph")
+    _check_keys(root, TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, "graph")
 
     if root["format"] != IR_FORMAT:
         raise IrError(f"graph.format が '{IR_FORMAT}' でない: {root['format']!r}")
@@ -280,6 +331,15 @@ def parse_ir_graph(text: str) -> IrGraph:
             storage=_parse_storage(obj["storage"], f"{where}.storage"),
         )
 
+    # 省略は空スロット集合として扱う（節を持たないグラフが無風 — ADR 0066 決定 2）。
+    states: dict[str, IrState] = {}
+    for name, raw in _as_object(root.get("states", {}), "graph.states").items():
+        # 空のスロット名は拒否する — 参照側の欄（ADR 0067）は空でない文字列だけを受理するので、
+        # 通すと「宣言はできるが原理的に参照できないスロット」になる（values は孤立宣言検査が
+        # 同じ穴を塞いでいる）。
+        _as_nonempty_str(name, "graph.states のスロット名")
+        states[name] = _parse_state(raw, symbol_set, f"graph.states['{name}']")
+
     nodes: list[IrNode] = []
     for index, raw in enumerate(_as_array(root["nodes"], "graph.nodes")):
         where = f"graph.nodes[{index}]"
@@ -306,6 +366,7 @@ def parse_ir_graph(text: str) -> IrGraph:
     _check_symbol_bindability(symbols, inputs)
     defined = _check_definitions(inputs, initializers, nodes, outputs)
     _check_declarations(inputs, initializers, values, nodes, defined)
+    _check_state_slots(states, values, defined)
     _check_required_ops(required_ops, nodes)
 
     return IrGraph(
@@ -314,6 +375,7 @@ def parse_ir_graph(text: str) -> IrGraph:
         outputs=outputs,
         initializers=initializers,
         values=values,
+        states=states,
         nodes=nodes,
     )
 
@@ -406,6 +468,28 @@ def _check_declarations(
         for out in node.outs:
             if out not in values:
                 raise IrError(f"graph.values: ノード出力 '{out}' の dtype/shape 宣言が無い")
+
+
+def _check_state_slots(
+    states: Mapping[str, IrState], values: Mapping[str, IrValue], defined: set[str]
+) -> None:
+    """state スロット名の検査（TS 側 checkStateSlots の鏡像）。
+
+    スロットは値ではない（`ins` / `outs` で参照されず、ノードからは別の欄で名前参照する —
+    ADR 0066 決定 1・0067 決定 4）ので**値名前空間とは別**だが、**同名は拒否する**: 別名前空間の
+    同名は「スロット名を書くべき欄に値名を書いた / その逆」を検出できなくするだけで、表現力を
+    何も足さない。scale テンソルのキーを他 initializer の実体と衝突させない規則（ADR 0019）と
+    同じ流儀。
+
+    NOTE: 「誰も参照しないスロット」は values の孤立宣言に相当するが、参照側の欄（ADR 0067 の
+    states 欄 / `state_append`）が未実装なので今は検出できない — 参照完全性の検査はその追加と同時。
+    """
+    for name in states:
+        if name in defined or name in values:
+            raise IrError(
+                f"graph.states['{name}']: 値名と同名"
+                "（state スロットは値名前空間と別 — 取り違えを拒否する）"
+            )
 
 
 def _check_required_ops(required_ops: Sequence[str], nodes: Sequence[IrNode]) -> None:

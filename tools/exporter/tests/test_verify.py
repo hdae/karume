@@ -362,6 +362,115 @@ class TestStorageDescriptor:
             parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "i4"}}})
 
 
+class TestStateSlots:
+    """名前付き state スロット（ADR 0066 決定 2）— 宣言と検査だけ。
+
+    ノードからスロットを参照する欄（ADR 0067 の states 欄 / `state_append`）はまだ無いので、
+    「誰も参照しないスロット」の検出はここには無い（参照完全性はその改訂と同時に入る）。
+    """
+
+    def test_a_graph_without_the_section_has_no_slots(self):
+        """節を持たないグラフ（= 既存の全モデル）は無風。"""
+        graph = parse()
+
+        assert graph.states == {}
+        # MUST: 空の states は書き戻さない — 出すと既存モデルのグラフ JSON がバイト単位で変わる。
+        assert "states" not in graph.to_dict()
+
+    def test_an_empty_section_is_accepted(self):
+        graph = parse(states={})
+
+        assert graph.states == {}
+        assert "states" not in graph.to_dict()
+
+    def test_slots_with_different_capacities_are_accepted(self):
+        """sliding 層と full 層は容量の違う別スロット（層 × 均一 KV の前提を作らない）。"""
+        graph = parse(
+            states={
+                "layer0.k": {"dtype": "f32", "shape": [1, 2, 512, 128]},
+                "layer0.v": {"dtype": "f32", "shape": [1, 2, 512, 128]},
+                "layer1.k": {"dtype": "f32", "shape": [1, 2, 131072, 128]},
+            }
+        )
+
+        assert list(graph.states) == ["layer0.k", "layer0.v", "layer1.k"]
+        assert graph.states["layer0.k"].shape == [1, 2, 512, 128]
+        assert graph.states["layer1.k"].shape == [1, 2, 131072, 128]
+
+    @pytest.mark.parametrize("shape", [[8], [1, 2, 3, 4], ["T", 4]])
+    def test_accepted_shapes(self, shape):
+        """rank 1..4 の両端と記号次元（束縛源は従来どおり入力 shape の次元位置）。"""
+        graph = parse(states={"cache": {"dtype": "f32", "shape": shape}})
+
+        assert graph.states["cache"].shape == shape
+
+    def test_the_section_round_trips_in_place(self):
+        """宣言節なので `values` の直後・`nodes` の前に戻す（TS 側の並びと同じ）。"""
+        slot = {"dtype": "f32", "shape": [1, 2, 512, 128]}
+        graph = parse(states={"layer0.k": slot})
+        keys = list(graph.to_dict())
+
+        assert graph.to_dict()["states"] == {"layer0.k": slot}
+        assert keys.index("states") == keys.index("values") + 1
+        assert keys.index("nodes") == keys.index("states") + 1
+
+    def test_the_reserved_f16_storage_is_rejected_as_unsupported(self):
+        """f16 は席の予約だけ（ADR 0066 追記 5）— 「語彙外」ではなく「未対応」で落とす。"""
+        with pytest.raises(IrError, match="は未対応"):
+            parse(states={"cache": {"dtype": "f16", "shape": [4]}})
+
+    @pytest.mark.parametrize("dtype", ["i32", "bool", "bf16", "i8", "f64"])
+    def test_other_dtypes_are_outside_the_vocabulary(self, dtype):
+        with pytest.raises(IrError, match=re.escape("は語彙外（f32）")):
+            parse(states={"cache": {"dtype": dtype, "shape": [4]}})
+
+    @pytest.mark.parametrize("shape", [[1, 1, 1, 1, 1], []])
+    def test_rank_outside_one_to_four_is_rejected(self, shape):
+        with pytest.raises(IrError, match=re.escape("は 1..4 の外")):
+            parse(states={"cache": {"dtype": "f32", "shape": shape}})
+
+    def test_zero_capacity_is_rejected(self):
+        """容量込みの具体形なので数値次元は正整数（`values` の非負とは違う）。"""
+        with pytest.raises(IrError, match="正整数でない"):
+            parse(states={"cache": {"dtype": "f32", "shape": [1, 0, 4]}})
+
+    def test_negative_dimension_is_rejected(self):
+        with pytest.raises(IrError, match="非負整数でない"):
+            parse(states={"cache": {"dtype": "f32", "shape": [-4]}})
+
+    def test_undeclared_symbol_is_rejected(self):
+        with pytest.raises(IrError, match=re.escape("graph.symbols で宣言されていない")):
+            parse(states={"cache": {"dtype": "f32", "shape": ["S", 4]}})
+
+    def test_non_canonical_dim_spelling_is_rejected(self):
+        with pytest.raises(IrError, match="正準文法"):
+            parse(states={"cache": {"dtype": "f32", "shape": ["1T", 4]}})
+
+    @pytest.mark.parametrize(
+        ("states", "message"),
+        [
+            ([], "graph.states: オブジェクトでない"),
+            ({"cache": 4}, "graph.states['cache']: オブジェクトでない"),
+            ({"cache": {"dtype": "f32", "shape": 4}}, "shape: 配列でない"),
+            ({"cache": {"shape": [4]}}, "必須キー 'dtype' が無い"),
+            ({"cache": {"dtype": "f32", "shape": [4], "window": 512}}, "未知のキー 'window'"),
+            # 空のスロット名は参照側の欄（ADR 0067）が受理しない = 参照できない宣言になる。
+            ({"": {"dtype": "f32", "shape": [4]}}, "スロット名: 空でない文字列でない"),
+        ],
+    )
+    def test_malformed_sections_are_rejected(self, states, message):
+        with pytest.raises(IrError, match=re.escape(message)):
+            parse(states=states)
+
+    @pytest.mark.parametrize("name", ["x", "w", "y"])
+    def test_a_slot_named_after_a_value_is_rejected(self, name):
+        """スロット名は値名前空間と別だが、同名は取り違えの検出線として拒否する
+        （入力 / initializer / ノード出力の 3 役）。
+        """
+        with pytest.raises(IrError, match=re.escape(f"graph.states['{name}']: 値名と同名")):
+            parse(states={name: {"dtype": "f32", "shape": [4]}})
+
+
 class TestJsonLiterals:
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
     def test_non_standard_literals_are_rejected(self, literal):

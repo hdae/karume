@@ -23,6 +23,16 @@ type IrValueInfo = {
   readonly shape: readonly IrDim[];
 };
 
+/**
+ * 名前付き state スロット（ADR 0066 決定 2）。shape は**容量込みの具体形**で、`values` と違い
+ * スロットは値ではない — グラフの通常 input / output にはならず、実体の確保と寿命は
+ * GenerationContext が持つ。
+ */
+type IrStateSlot = {
+  readonly dtype: IrStateDtype;
+  readonly shape: readonly IrDim[];
+};
+
 type IrInput = {
   readonly name: string;
   readonly dtype: IrDtype;
@@ -61,6 +71,8 @@ export type IrGraph = {
   readonly outputs: readonly string[];
   readonly initializers: Readonly<Record<string, IrInitializer>>;
   readonly values: Readonly<Record<string, IrValueInfo>>;
+  /** state スロット宣言（省略時は空 — 出さないグラフは無風）。 */
+  readonly states: Readonly<Record<string, IrStateSlot>>;
   readonly nodes: readonly IrNode[];
 };
 
@@ -86,9 +98,32 @@ const TOP_LEVEL_KEYS = [
   "nodes",
 ] as const;
 
+/**
+ * 省略可能なトップレベル節。`states` を持たないグラフ（= 既存の全モデル）が無風であることは
+ * ADR 0066 決定 2 の「エクスポータは states を出す最初のモデルまで無風」の裏返し。
+ */
+const OPTIONAL_TOP_LEVEL_KEYS = ["states"] as const;
+
 /** 意味論 dtype の全語彙（宣言としての受理集合 — 実行可否は契約表 src/ops.ts が持つ）。 */
 export const SEMANTIC_DTYPES = ["f32", "i32", "bool"] as const;
 const STORAGE_DTYPES = ["f32", "f16", "bf16", "i8", "i32"] as const;
+
+/** state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。 */
+const STATE_DTYPES = ["f32"] as const;
+type IrStateDtype = typeof STATE_DTYPES[number];
+
+/**
+ * 席だけが予約されている state スロットの dtype（ADR 0066 追記 5）。格納を f16 にすると
+ * 数値契約が変わるので ADR 0058 流儀の opt-in が要る — それが無いうちは「語彙外」ではなく
+ * **未対応**として落とす（後から来る形だと分かる診断を残す）。
+ */
+const RESERVED_STATE_DTYPES = ["f16"] as const;
+
+/**
+ * state スロットの rank 上限（ADR 0066 決定 2 の「固定 rank（rank ≤ 4）」）。strided カーネルの
+ * 上限（codegen/strided.ts）と同じ数値だが理由が別なので定数を共有しない。
+ */
+const MAX_STATE_RANK = 4;
 
 /**
  * initializer の意味論 dtype → 許される格納 dtype（docs/ir-v1.md「値と型」）。
@@ -108,6 +143,9 @@ export const isSemanticDtype = (value: unknown): value is IrDtype =>
 
 const isStorageDtype = (value: string): value is IrStorageDtype =>
   STORAGE_DTYPES.some((dtype) => dtype === value);
+
+const isStateDtype = (value: string): value is IrStateDtype =>
+  STATE_DTYPES.some((dtype) => dtype === value);
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -228,6 +266,52 @@ const parseStorage = (value: unknown, where: string): IrStorage => {
   return storage;
 };
 
+const asStateDtype = (value: unknown, where: string): IrStateDtype => {
+  const dtype = asNonEmptyString(value, where);
+  if (RESERVED_STATE_DTYPES.some((reserved) => reserved === dtype)) {
+    throw new IrError(
+      `${where}: state スロットの dtype '${dtype}' は未対応（ADR 0066 追記 5 の席予約 — ` +
+        `数値契約の opt-in が要る）`,
+    );
+  }
+  if (!isStateDtype(dtype)) {
+    throw new IrError(
+      `${where}: state スロットの dtype '${dtype}' は語彙外（${STATE_DTYPES.join(" / ")}）`,
+    );
+  }
+  return dtype;
+};
+
+/**
+ * state スロット 1 本の宣言（ADR 0066 決定 2）。
+ *
+ * MUST: shape は**容量込みの具体形**なので数値次元は正整数（`values` の非負とは違う — 容量 0 の
+ * スロットは束縛できる実体を持たない）。rank は 1..{@link MAX_STATE_RANK}（容量軸を持たない
+ * rank 0 は「容量込み」を満たせない）。記号次元は `symbols` 宣言済みならよく、束縛は従来どおり
+ * 入力 shape の次元位置から取る（checkSymbolBindability — states は束縛源にならない）。
+ */
+const parseStateSlot = (
+  value: unknown,
+  symbols: ReadonlySet<string>,
+  where: string,
+): IrStateSlot => {
+  const obj = asPlainObject(value, where);
+  checkKeys(obj, ["dtype", "shape"], [], where);
+  const dtype = asStateDtype(obj["dtype"], `${where}.dtype`);
+  const shape = parseShape(obj["shape"], symbols, `${where}.shape`);
+  if (shape.length < 1 || shape.length > MAX_STATE_RANK) {
+    throw new IrError(
+      `${where}.shape: rank ${shape.length} は 1..${MAX_STATE_RANK} の外（固定 rank の容量込み具体形 MUST）`,
+    );
+  }
+  shape.forEach((dim, index) => {
+    if (typeof dim === "number" && dim < 1) {
+      throw new IrError(`${where}.shape[${index}]: 次元 ${dim} が正整数でない（容量が取れない）`);
+    }
+  });
+  return { dtype, shape };
+};
+
 /**
  * NaN / Infinity は JSON リテラルに無いが、`1e999` のような指数は Infinity へ丸まる。
  * 受理集合をブラウザ JSON.parse に揃える契約（docs/ir-v1.md）を保つため、非有限数を含む
@@ -249,7 +333,7 @@ const parseJson = (json: string): unknown => {
 
 export const parseIrGraph = (json: string): IrGraph => {
   const root = asPlainObject(parseJson(json), "graph");
-  checkKeys(root, TOP_LEVEL_KEYS, [], "graph");
+  checkKeys(root, TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, "graph");
 
   const format = root["format"];
   if (format !== IR_FORMAT) {
@@ -312,6 +396,19 @@ export const parseIrGraph = (json: string): IrGraph => {
     };
   }
 
+  // MUST: values と同じ理由で null プロトタイプ（上のコメント参照）。省略は空スロット集合として
+  // 扱う（節を持たないグラフが無風 — ADR 0066 決定 2）。
+  const states: Record<string, IrStateSlot> = Object.create(null);
+  if (Object.hasOwn(root, "states")) {
+    for (const [name, raw] of Object.entries(asPlainObject(root["states"], "graph.states"))) {
+      // 空のスロット名は拒否する — 参照側の欄（ADR 0067）は空でない文字列だけを受理するので、
+      // 通すと「宣言はできるが原理的に参照できないスロット」になる（values は孤立宣言検査が
+      // 同じ穴を塞いでいる）。
+      asNonEmptyString(name, "graph.states のスロット名");
+      states[name] = parseStateSlot(raw, symbolSet, `graph.states['${name}']`);
+    }
+  }
+
   const nodes: IrNode[] = asArray(root["nodes"], "graph.nodes").map((raw, index) => {
     const where = `graph.nodes[${index}]`;
     const obj = asPlainObject(raw, where);
@@ -335,6 +432,7 @@ export const parseIrGraph = (json: string): IrGraph => {
   checkSymbolBindability(symbols, inputs);
   const defined = checkDefinitions(inputs, initializers, nodes, outputs);
   checkDeclarations(inputs, initializers, values, nodes, defined);
+  checkStateSlots(states, values, defined);
   checkRequiredOps(requiredOps, nodes);
 
   return {
@@ -346,6 +444,7 @@ export const parseIrGraph = (json: string): IrGraph => {
     outputs,
     initializers,
     values,
+    states,
     nodes,
   };
 };
@@ -464,6 +563,30 @@ const checkDeclarations = (
       if (!Object.hasOwn(values, out)) {
         throw new IrError(`graph.values: ノード出力 '${out}' の dtype/shape 宣言が無い`);
       }
+    }
+  }
+};
+
+/**
+ * state スロット名の検査。スロットは値ではない（`ins` / `outs` で参照されず、ノードからは別の欄で
+ * 名前参照する — ADR 0066 決定 1・0067 決定 4）ので**値名前空間とは別**だが、**同名は拒否する**:
+ * 別名前空間の同名は「スロット名を書くべき欄に値名を書いた / その逆」を検出できなくするだけで、
+ * 表現力を何も足さない。scale テンソルのキーを他 initializer の実体と衝突させない規則
+ * （format/container.ts・ADR 0019）と同じ流儀。
+ *
+ * NOTE: 「誰も参照しないスロット」は values の孤立宣言に相当するが、参照側の欄（ADR 0067 の
+ * states 欄 / `state_append`）が未実装なので今は検出できない — 参照完全性の検査はその追加と同時。
+ */
+const checkStateSlots = (
+  states: Readonly<Record<string, IrStateSlot>>,
+  values: Readonly<Record<string, IrValueInfo>>,
+  defined: ReadonlySet<string>,
+): void => {
+  for (const name of Object.keys(states)) {
+    if (defined.has(name) || Object.hasOwn(values, name)) {
+      throw new IrError(
+        `graph.states['${name}']: 値名と同名（state スロットは値名前空間と別 — 取り違えを拒否する）`,
+      );
     }
   }
 };

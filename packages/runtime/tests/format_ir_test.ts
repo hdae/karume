@@ -285,6 +285,128 @@ Deno.test("parseIrGraph: '__proto__' という名前でも孤立宣言は黙っ�
   assertThrows(() => parseIrGraph(orphan), IrError, "どのノードでも定義されない宣言");
 });
 
+// ADR 0066 決定 2: 生成 1 本ぶんの可変 state を置く名前付きスロット。宣言と検査だけがここに入り、
+// ノードからの参照（ADR 0067 の states 欄 / state_append）はまだ無い。
+Deno.test("parseIrGraph: states 節を持たないグラフは空のスロット集合になる", () => {
+  const graph = parseIrGraph(JSON.stringify(baseGraph()));
+
+  assertEquals(Object.keys(graph.states), []);
+  // 名前がパース入力由来の器は null プロトタイプ（values / initializers と同じ MUST）。
+  assertEquals(Object.getPrototypeOf(graph.states), null);
+});
+
+Deno.test("parseIrGraph: state スロットの宣言を受理する", () => {
+  const empty = parseMutated((g) => {
+    g.states = {};
+  });
+  assertEquals(Object.keys(empty.states), []);
+
+  // 容量の違うスロットが混在する形（sliding 層 / full 層は別スロット — 層 × 均一 KV の
+  // 前提を作らない）。
+  const slots = parseMutated((g) => {
+    g.states = {
+      "layer0.k": { dtype: "f32", shape: [1, 2, 512, 128] },
+      "layer0.v": { dtype: "f32", shape: [1, 2, 512, 128] },
+      "layer1.k": { dtype: "f32", shape: [1, 2, 131072, 128] },
+    };
+  });
+  assertEquals(Object.keys(slots.states), ["layer0.k", "layer0.v", "layer1.k"]);
+  assertEquals(slots.states["layer0.k"], { dtype: "f32", shape: [1, 2, 512, 128] });
+  assertEquals(slots.states["layer1.k"].shape, [1, 2, 131072, 128]);
+
+  // 記号次元は Session の symbols で解決する（束縛源は従来どおり入力 shape の次元位置）。
+  const symbolic = parseMutated((g) => {
+    g.states = { cache: { dtype: "f32", shape: ["T", 4] } };
+  });
+  assertEquals(symbolic.states["cache"].shape, ["T", 4]);
+
+  // rank 1..4 の両端（容量軸 1 本だけの汎用スロットも valid）。
+  const ranks = parseMutated((g) => {
+    g.states = {
+      flat: { dtype: "f32", shape: [8] },
+      full: { dtype: "f32", shape: [1, 2, 3, 4] },
+    };
+  });
+  assertEquals(ranks.states["flat"].shape, [8]);
+  assertEquals(ranks.states["full"].shape, [1, 2, 3, 4]);
+});
+
+/**
+ * states 節だけを差し替えて拒否を見る。**診断文言まで見る MUST** — 節そのものが未対応へ退行すると
+ * 「未知のキー 'states'」で落ちるので、`IrError` だけの検査では規則が効いている証拠にならない。
+ */
+const assertStatesReject = (states: unknown, includes: string): void => {
+  assertThrows(
+    () =>
+      parseMutated((graph) => {
+        (graph as { states: unknown }).states = states;
+      }),
+    IrError,
+    includes,
+  );
+};
+
+Deno.test("parseIrGraph: state スロットの dtype は f32 のみ", () => {
+  // f16 は席の予約だけ（ADR 0066 追記 5）— 「語彙外」ではなく「未対応」として落ちる。
+  assertStatesReject({ cache: { dtype: "f16", shape: [4] } }, "は未対応");
+  for (const dtype of ["i32", "bool", "bf16", "i8"]) {
+    assertStatesReject({ cache: { dtype, shape: [4] } }, "は語彙外（f32）");
+  }
+});
+
+Deno.test("parseIrGraph: state スロットの shape は容量込みの具体形", () => {
+  assertStatesReject({ cache: { dtype: "f32", shape: [1, 1, 1, 1, 1] } }, "rank 5 は 1..4 の外");
+  assertStatesReject({ cache: { dtype: "f32", shape: [] } }, "rank 0 は 1..4 の外");
+  assertStatesReject({ cache: { dtype: "f32", shape: [1, 0, 4] } }, "正整数でない");
+  assertStatesReject({ cache: { dtype: "f32", shape: [-4] } }, "非負整数でない");
+  assertStatesReject({ cache: { dtype: "f32", shape: ["S", 4] } }, "宣言されていない");
+  assertStatesReject({ cache: { dtype: "f32", shape: ["1T", 4] } }, "正準文法");
+});
+
+Deno.test("parseIrGraph: states の構造", () => {
+  assertStatesReject([], "graph.states: オブジェクトでない");
+  assertStatesReject({ cache: 4 }, "graph.states['cache']: オブジェクトでない");
+  assertStatesReject({ cache: { dtype: "f32", shape: 4 } }, "shape: 配列でない");
+  assertStatesReject({ cache: { shape: [4] } }, "必須キー 'dtype' が無い");
+  assertStatesReject({ cache: { dtype: "f32", shape: [4], window: 512 } }, "未知のキー 'window'");
+  // 空のスロット名は参照側の欄（ADR 0067）が受理しない = 参照できない宣言になる。
+  assertStatesReject({ "": { dtype: "f32", shape: [4] } }, "スロット名: 空でない文字列でない");
+});
+
+// スロット名は値名前空間と別（ins / outs で参照されない）だが、同名は「スロット名の欄に値名を
+// 書いた / その逆」を検出できなくするだけなので拒否する。
+Deno.test("parseIrGraph: state スロット名は値名と衝突できない", () => {
+  // 入力 / initializer / 中間値 / グラフ出力の 4 役すべて。
+  for (const name of ["x", "w", "h", "y"]) {
+    assertStatesReject(
+      { [name]: { dtype: "f32", shape: [4] } },
+      `graph.states['${name}']: 値名と同名`,
+    );
+  }
+});
+
+Deno.test("parseIrGraph: '__proto__' という名前の state スロットを own property として保全する", () => {
+  const graph = parseIrGraph(`{
+    "format": "karume-ir",
+    "version": 1,
+    "requires": { "ops": ["matmul"] },
+    "symbols": ["T"],
+    "inputs": [{ "name": "x", "dtype": "f32", "shape": ["T", 4] }],
+    "outputs": ["y"],
+    "initializers": { "w": { "tensor": "enc.w", "storage": { "dtype": "f32" } } },
+    "values": {
+      "w": { "dtype": "f32", "shape": [4, 3] },
+      "y": { "dtype": "f32", "shape": ["T", 3] }
+    },
+    "states": { "__proto__": { "dtype": "f32", "shape": [4] } },
+    "nodes": [{ "op": "matmul", "ins": ["x", "w"], "outs": ["y"], "attrs": {} }]
+  }`);
+
+  assertEquals(Object.getPrototypeOf(graph.states), null);
+  assertEquals(Object.hasOwn(graph.states, "__proto__"), true);
+  assertEquals(graph.states["__proto__"], { dtype: "f32", shape: [4] });
+});
+
 Deno.test("parseIrGraph: JSON の受理集合", () => {
   assertThrows(() => parseIrGraph("{"), IrError, "解析できない");
   assertThrows(
