@@ -40,7 +40,7 @@ bound of 512; the golden cases are four fixed prompts (two English, two Japanese
 and 87. Each case stores `T × 522 KB` of logits (86 MB for the four), which is why they stay short.
 
 The sanity check is not a tautology: for every case the greedy token at the **last** position has to
-equal a specific expected continuation (` Paris` / `東京`), and the export fails if all four cases
+equal a specific expected continuation (`Paris` / `東京`), and the export fails if all four cases
 agree on one token (a constant output).
 
 ## Requirements

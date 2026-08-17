@@ -19,7 +19,7 @@ questions it has to answer.
   `inputs/minicpm5/MiniCPM5-1B/`.
 - **Model implementation** — the `transformers` package (`LlamaForCausalLM`), added ad hoc with
   `uv run --with 'transformers==5.14.1'`. This recipe has no patch layer: nothing is
-  monkeypatched and nothing is copied. It only *adds* one entry to the public attention registry
+  monkeypatched and nothing is copied. It only _adds_ one entry to the public attention registry
   (`AttentionInterface.register`), which keeps the grouped-query shape instead of materializing
   `repeat_kv`; the upstream `sdpa` entry is left untouched.
 - **Tokenizer** — read verbatim at run time from the checkpoint's `tokenizer.json`; this
@@ -36,22 +36,22 @@ published.
 
 ### openbmb/MiniCPM5-1B
 
-| Item                     | Value                                                                                       |
-| ------------------------ | ------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://huggingface.co/openbmb/MiniCPM5-1B>                                                |
+| Item                     | Value                                                                                              |
+| ------------------------ | -------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/openbmb/MiniCPM5-1B>                                                       |
 | Revision used            | `4e9de7a0778dc1c362e983e6858f0e77542cbdca` (fetched 2026-08-17 into `inputs/minicpm5/MiniCPM5-1B`) |
-| Form of copy             | Loaded, not copied. Not distributed from this repository today.                              |
-| Code license             | n/a (weights only)                                                                          |
-| Weights license          | Unverified (the model card states apache-2.0; not checked against the revision used)        |
-| Attribution requirements | Unverified                                                                                  |
+| Form of copy             | Loaded, not copied. Not distributed from this repository today.                                    |
+| Code license             | n/a (weights only)                                                                                 |
+| Weights license          | Unverified (the model card states apache-2.0; not checked against the revision used)               |
+| Attribution requirements | Unverified                                                                                         |
 
 ### transformers (model implementation)
 
-| Item                     | Value                                                                                    |
-| ------------------------ | ---------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://github.com/huggingface/transformers>                                            |
-| Revision used            | `transformers==5.14.1` (ad hoc `--with`, not in `pyproject.toml`)                         |
-| Form of copy             | Imported and used as-is; one added registry entry, no patch of upstream code, no copy.    |
-| Code license             | Unverified                                                                               |
-| Weights license          | n/a                                                                                      |
-| Attribution requirements | Unverified                                                                               |
+| Item                     | Value                                                                                  |
+| ------------------------ | -------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/huggingface/transformers>                                          |
+| Revision used            | `transformers==5.14.1` (ad hoc `--with`, not in `pyproject.toml`)                      |
+| Form of copy             | Imported and used as-is; one added registry entry, no patch of upstream code, no copy. |
+| Code license             | Unverified                                                                             |
+| Weights license          | n/a                                                                                    |
+| Attribution requirements | Unverified                                                                             |
