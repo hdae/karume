@@ -107,9 +107,9 @@ depth-anything = ["transformers==5.14.1"]
 # 足すのは PNG を開く pillow だけ — 前処理の正本 `DPTImageProcessor`（fast 側）が要求する
 # torchvision は既に core の基本依存にある（`deform_conv2d` の op 登録用）。
 depth-anything-preprocess = ["pillow>=11", "transformers==5.14.1"]
-# NOTE: EmbeddingGemma / 母音検出 recipe は依存グループを持たない — 前者は
-# `uv run --with 'transformers==5.14.1' python -m embeddinggemma.export` の一時足し
-# （台本の docstring）、後者は core の基本依存（torch / numpy / safetensors）だけで回る。
+# NOTE: EmbeddingGemma / MiniCPM5 / 母音検出 recipe は依存グループを持たない — 前 2 者は
+# `uv run --with 'transformers==5.14.1' python -m <family>.export` の一時足し
+# （各台本の docstring）、母音検出は core の基本依存（torch / numpy / safetensors）だけで回る。
 
 [tool.pytest.ini_options]
 testpaths = ["."]
