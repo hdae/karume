@@ -30,8 +30,14 @@
 [0068](decisions/0068-decode-exit-multi-output.md)（multi-output + argmax / topk）・
 [0069](decisions/0069-packed-w4-storage.md)（0019 reopen + i4 格納）・
 [0070](decisions/0070-shard-loading-admission.md)（shard 2 相 + admission）— 全て
-accepted（裁定 A〜C + Codex 6 巡収束）。**以下の番号項目は実装波の作業台帳として残る
-（設計の正本は各 ADR — 実装の波割りは次の提案で裁定）**。前提の宣言として **R2（shape 不変条件）を最初の
+accepted（裁定 A〜C + Codex 6 巡収束）。**実装波の波割りは裁定済み**（2026-08-17・
+案 X = 検収足場先行）: **A = GQA + MiniCPM5 検収足場（済 2026-08-17 — `b78b0c1` 実装・
+`3f072cb` recipe・e2e 門）** → B = 多出力 + argmax / topk → C = GenerationContext +
+states{} → D = states 形 attention + state_append → E = decode 台本 + greedy 検収 →
+F = w4（Phase 0 sweep は A 完了後から並行可）→ G = shard + admission → H = Gemma 4 E2B
+検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで
+先送り / 検収は固定 token id 列の parity（tokenizer・models パイプライン本格化は波外）。
+**以下の番号項目は実装波の作業台帳として残る（設計の正本は各 ADR）**。前提の宣言として **R2（shape 不変条件）を最初の
 ADR に含める**: 恒久不変条件は「静的物理格納・固定 rank・計画キャッシュの鍵は常に容量」まで —
 「全論理形状がホスト既知」は恒久にせず、**有界論理 extent の席**（compact-prefix 軸 1 本・
 DDS op は payload + extent の複数出力・extent は計画鍵に入れない・admission は容量課金）を
@@ -59,9 +65,9 @@ IR スキーマに予約する。実装は最初の実需モデルまで先送�
 5. **autoregressive attention**: causal / GQA / logical prefix length / KV state access /
    mask 表現 / empty-row 意味論。**row-block matcher の portability 依存はここで正面解決**
    （exact-match が唯一の 128MiB 級ポータビリティ経路である現状を op 側の席へ）。
-   **G3 = kv_heads > 1 の GQA が現行レイアウト語彙で書けない問題をここで解く**（attention は
-   q/k/v の H 同一・bmm は broadcast 無し・rank-5 迂回は STRIDED_RANK=4 で不可 —
-   ADR 0023 決定 4「GQA は欄を作らない」の reopen。検収モデルの MiniCPM5-1B が 16:2 で該当）。
+   **G3 = kv_heads > 1 の GQA は波 A で解決済み**（2026-08-17 — ADR 0067 決定 1〜3 実装・
+   r=1 バイト同一・repeat_kv parity・GQA×i8a8 は fail loudly。実モデル検収 =
+   `e2e_minicpm5_test.ts`〈logits tolerance + greedy + census〉）。
    mask は causal / sliding の attrs 化を含めて裁定（131K context の `[1,1,M,N]` 実体化は
    68GB 級で物理的に不成立）。
 

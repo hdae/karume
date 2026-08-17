@@ -13,15 +13,14 @@
 
 - **0.3.0 リリース済み**（2026-08-16・JSR 3 + PyPI・CI 緑）。ポジショニングの正本 =
   [research/2026-08-16-runtime-landscape.md](../docs/research/2026-08-16-runtime-landscape.md)。
-- **autoregressive-ready 基盤波: 設計フェーズ完了（2026-08-17）** — ADR
+- **autoregressive-ready 実装波: 進行中** — ADR
   [0066](../docs/decisions/0066-generation-context-state-slots.md)〜
-  [0070](../docs/decisions/0070-shard-loading-admission.md) が accepted
-  （GenerationContext / state スロット・attention 語彙〈GQA 整除 broadcast + states 形〉・
-  multi-output・packed i4・shard 2 相 + admission）。根拠 =
-  [research/2026-08-17-autoregressive-references.md](../docs/research/2026-08-17-autoregressive-references.md)
-  （参照実装 8 リポ・敵対検証 2 巡）+ Codex レビュー 6 巡（指摘 15 → 5 → 2 → 0 収束・
-  最終 go）。検収 = Gemma 4 E2B / MiniCPM5-1B。**次 = 実装波の計画（波割り・ゲート・
-  委任方針）を提案 → ユーザー裁定**。作業台帳は backlog next 節。
+  [0070](../docs/decisions/0070-shard-loading-admission.md) accepted・波割り A〜H 裁定済み
+  （正本 = [backlog](../docs/backlog.md) next 節）。**波 A 済（2026-08-17）**: GQA 整除
+  broadcast（`b78b0c1` — r=1 バイト同一・repeat_kv parity・i8a8×GQA fail loudly）+
+  MiniCPM5-1B 1-shot recipe（`3f072cb` — 真の GQA 形 24 層・sanity greedy）+
+  `e2e_minicpm5_test.ts`（tolerance 1e-3・greedy・census 全 `:gqa`）。
+  **次 = 波 B（多出力 8 面 + argmax / topk — ADR 0068）**。
 
 ## Open decisions
 
@@ -36,7 +35,7 @@
 - **融合 matcher は実測形 exact-match** — exporter の発行順・形が変わると黙って外れ、値は
   正しいまま性能だけ落ちる。観測 = `Diagnostics.lastRunFusions` +
   `assets_fusion_counts_test.ts`。**row-block だけは外れ方が性能でなく資源** — 128MiB 級
-  device で resource-limit failure に戻る（正面解決は backlog next の attention ADR）。
+  device で resource-limit failure に戻る（正面解決 = ADR 0067 決定 7・実装は波 D）。
 - **RoPE / SiLU 融合の丸め障壁（workgroup memory 往復）は実測依存** — バックエンド更新で
   PNG 門が割れたらまずここを疑う。
 - **`deno task verify` はリポ内に worktree を置くと worktree 側まで test を拾う** — worktree は
