@@ -1,0 +1,112 @@
+# 0070: shard ロードの 2 相契約とメモリ admission
+
+- Status: draft（2026-08-17 一括起草。Codex 漏れチェック待ち — 大域裁定は無し）
+- 関連: ADR [0038](0038-manifest-v1.md)（manifest と hub 取得層 — FileRef 3 点セットと
+  fetch-cache 接続契約を継承）/ [0041](0041-manifest-v2.md) / [0063](0063-safetensors-physical-layout.md)
+  （shard の欄の確定 = release 波の R1 と同席）/ [0004](0004-execution-model.md)（errorScope
+  常設 — 決定 4 が同期区間を再設計）/ [0066](0066-generation-context-state-slots.md)
+  （state 容量 = admission の新カテゴリ）/ [0069](0069-packed-w4-storage.md)（i4 格納 —
+  配布サイズの前提）
+- 根拠:
+  [research/2026-08-17-autoregressive-references.md](../research/2026-08-17-autoregressive-references.md)
+  §5（以下「調査 §n」）
+
+## Context
+
+現行は「全ファイルを `Uint8Array` で保持 → 単一 `ArrayBuffer` を `openModel` へ」の全量
+ホスト保持で、**hub と runtime の両側に焼かれている**（fetch.ts:411-421 /
+container.ts:91 — 調査 §5.1）。検収モデル級（i4 でも 1GiB 級・f16 なら 4GiB 級）では
+「配布ファイル全量 + GPU 常駐」の RAM 二重持ちが成立しない。ブラウザ実装の先行例は
+tvmjs の 2 相ロードのみで、**重みの整合性検証はブラウザ勢の誰もやっていない**
+（karume の sha256 全数照合が差分価値 — 調査 §5.1）。
+
+## Decision
+
+### 1. 配布形: 重みの shard 化（欄の確定は R1 と同席・ローダ契約はここで固定）
+
+- 1 コンポーネントの safetensors を**グラフ shard（`karume_ir` JSON + 小テンソル）+
+  重み shard 群**に分割できる形にする。各 shard は独立に整合な safetensors
+  （ヘッダにテンソル名を持つ）で、**振り分け表は manifest が正本**（HF の
+  `model.safetensors.index.json` 形式は採らない — karume.json が既にファイル表を持つ）。
+- 各 shard は従来どおり `{path, size, sha256}` の 3 点セット（ADR 0038 決定 2 の検証規則
+  そのまま）。manifest の欄名・混成 dtype の席は **R1（ADR 0041/0063 reopen・HF 公開前
+  締切）で確定**し、本 ADR は「shard 列であること + ローダ側契約」を先に固定する。
+- **宣言完全性は全 shard 読了後に検査**: 突合する集合は **`initializer.tensor` と
+  `storage.scale` が指す名前の和集合**（第 3 巡で補正 — scale companion は
+  `graph.initializers` の要素ではないため、initializer 集合だけを正本にすると i8 / i4
+  資産の scale が全て「余剰」になる。現行 container 検査〈container.ts:137-160〉と同一
+  集合の shard 横断版）。欠け・重複・余剰いずれも fail loudly。
+- **weight と companion scale は同一 shard に置く MUST**（co-shard — 第 3 巡指摘の閉鎖）:
+  逐次消費（決定 3）は weight と scale を同時に必要とするため、shard を跨ぐと「参照を
+  手放す」契約と両立しない。エクスポータの shard 分割規則に載せ、リーダは違反を
+  fail loudly（RAM O(最大 shard) の保証条件）。
+
+### 2. hub: 2 相ロードと逐次引き渡し面
+
+tvmjs 型の 2 相（調査 §5.1）を fetch-cache 接続契約（ADR 0038 決定 5）の上に載せる:
+
+- **相 1**: 全 shard を fetch-cache（永続キャッシュ）へ落とす（並列可・RAM に載せない）。
+- **相 2**: shard を**逐次** 1 本ずつ「キャッシュから取得 → **sha256 照合**（キャッシュ
+  ヒット側も走らせる — 現行 validate フックの維持。**非交渉条件**）→ 呼び手へ渡す →
+  参照を手放す」。
+- 公開面: 既存の全量 Record 面は**温存**し（小モデルは従来どおり）、**shard 逐次面**
+  （`AsyncIterable` 型 — shard 名 + bytes）を追加する。RAM ピーク目標 = O(最大 shard)。
+
+### 3. runtime: shard 消費の Session 構築面
+
+`createSession` に shard 逐次面を受ける形を追加する（既存の単一 buffer 面は温存）。
+グラフ shard を最初に受けて**構造契約・適格判定・重み受け入れ準備**を確定し（第 3 巡で
+精密化 — PreparedPlan は従来どおり初回 run で確定する。計画は実行時の SymbolBindings を
+要するため、グラフ shard 時点で確定できるのは graph 単体で決まる検査まで）、重み shard は
+**届いた順に「CPU 展開（適格外のみ）→ GPU upload → 解放」**する。転送完了前に CPU 側を
+解放しない（フェンス後解放 — tvmjs の `await device.sync()` → `dispose()` と同じ順序契約・
+調査 §5.1）。
+
+**失敗の transaction 境界**（第 3 巡指摘の閉鎖）: 途中の shard で失敗した場合（sha 不一致・
+宣言違反・GPU エラー）、構築済みの GPU 資源（アップロード済み重み・weights アリーナ）を
+**全て破棄して部分 Session を公開しない** — 現行の一括構築が例外時に weights アリーナを
+destroy するのと同じ境界を shard ビルダが持つ（pending discard・CPU 参照解放を含む。
+shard 単位 errorScope〈決定 4〉は検出器であって後始末はこの境界が持つ）。
+
+### 4. アップロードの errorScope 同期区間を shard 単位へ再設計
+
+現行の「重みアップロードループ内 await 禁止」（executor.ts:512-517 — errorScope LIFO の
+交錯防止が根拠）は shard 逐次化と両立しない。**push / pop を shard 単位の同期区間に
+張り直す**: 1 shard ぶんの writeBuffer 列を 1 つの errorScope 区間（同期）で囲み、
+区間の外で await（次 shard の取得・フェンス）する。LIFO 交錯の不変条件は「区間内に
+await が無い」ことで従来どおり保たれ、区間が短くなるだけ（安全ガードの撤去ではなく
+粒度の変更 — 失敗 shard の特定が細かくなる副次利得）。
+
+### 5. admission: 必要側 estimator + 診断（絶対保証にしない）
+
+- **estimator は「必要側」のカテゴリ別合計のみ**を出す: resident weights（圧縮 + 展開）/
+  state スロット（ADR 0066 の容量）/ prepared backing / transients（計画から導出）/
+  staging。**空き側との比較はしない** — WebGPU は総 / 空き VRAM を露出しない
+  （調査 §5.2。「予算が取れない環境で当て推量しない」は llama.cpp の 0/0 デバイス除外と
+  同型の前例）。
+- 診断に **unaccounted 相当の欄**を持たせる（llama.cpp fit の出力形 — 「見積りが絶対保証で
+  ない」ことを形式が認める・調査 §5.2）。
+- **判定の最終門は既存の out-of-memory errorScope**（gpu/device.ts の 2 本組 — 新設なし）。
+  estimator は `createGenerationContext` / Session 構築の**事前診断**であり、超えていても
+  実行は止めない（警告 + 診断）。
+- 公開面は薄く（ADR 0008）: 見積り関数 1 本 + `SessionDiagnostics` への欄追加まで。
+
+### 6. 席（明示予約・実装先送り）
+
+- ストリーミング fake 展開（i4 → f32 の CPU 展開を shard 単位で行う適格外経路）は
+  決定 3 に内包（追加設計不要）。
+- 大型 DL 前の limits preflight（backlog release 項）は本 ADR の estimator を土台に
+  release 波で。hub Range 並列 + prefetch（perf L-3・parked）は相 1 の内側の最適化として
+  席が残る（契約は不変）。
+
+## Consequences
+
+- hub / runtime の公開面がそれぞれ 1 面増える（既存面は不変 — 既存利用コード・既存門は
+  無風）。全量面と shard 面で**同一資産 → 同一 GPU 常駐バイト列**が受入条件（A/B 門）。
+- manifest v2 の shard 欄（R1）が入るまで、shard 面の消費者はローカル実験に限られる
+  （HF 公開資産は単一ファイルのまま）。R1 確定が HF 公開前 MUST である理由は不変
+  （hub は 2 形パースをしない — ADR 0041）。
+- 受入条件: ①全量面との GPU 常駐バイト A/B 一致 ②sha256 照合がキャッシュヒット側でも
+  走る門（既存門の shard 版）③RAM ピーク実測（全量比で O(最大 shard) に落ちること）
+  ④errorScope 区間の再設計後も無効バッファ / 整列違反の注入が検出されること（0004 門の
+  shard 版）⑤宣言完全性の shard 横断検査（欠け・余剰の注入）。
