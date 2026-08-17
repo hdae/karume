@@ -1,8 +1,8 @@
 # 0069: packed 4bit 格納（ADR 0019 の w4 棄却を reopen）
 
-- Status: draft（2026-08-17 一括起草 → 第 3 巡 Codex 指摘反映 → 裁定 B〈zero-point 欄なし・
-  予約つき〉/ C〈scale f32 開始・f16 両対応を将来目標〉反映済み。第 4 巡チェック後に
-  accepted 化予定）
+- Status: accepted（2026-08-17 — ユーザー裁定 B〈zero-point 欄なし・予約つき〉/
+  C〈scale f32 開始・f16 両対応を将来目標〉+ 委任チェック方式。Codex レビュー第 3〜5 巡を
+  反映〈3 面分離・group scale 形・clamp tiny・f16 admission〉し第 6 巡で go）
 - 関連: ADR [0019](0019-i8-weight-execution.md)（i8 経路 — 本 ADR が「w4 再測しない」を
   supersede し、実装規律は延長する）/ [0006](0006-quantization.md)（格納のみ量子化・
   fake-quant 正）/ [0063](0063-safetensors-physical-layout.md)（物理配置 — 本 ADR とセットで

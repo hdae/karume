@@ -23,7 +23,15 @@
 1 行はこの波で）。**実装前に ADR を先行**させる（順序も設計判断）。参照資料は収集済み
 （[research/2026-08-17-autoregressive-references.md](research/2026-08-17-autoregressive-references.md)
 — 掃引 8 + 深掘り 3 + 敵対検証 3・検収モデル config 一次確定込み。ADR の根拠節はここを
-引用する）。前提の宣言として **R2（shape 不変条件）を最初の
+引用する）。**ADR 先行は完了**（2026-08-17）:
+[0066](decisions/0066-generation-context-state-slots.md)（GenerationContext / state
+スロット・R2/R3）・[0067](decisions/0067-autoregressive-attention-vocabulary.md)（attention
+語彙 = G3 / states 形 / state_append）・
+[0068](decisions/0068-decode-exit-multi-output.md)（multi-output + argmax / topk）・
+[0069](decisions/0069-packed-w4-storage.md)（0019 reopen + i4 格納）・
+[0070](decisions/0070-shard-loading-admission.md)（shard 2 相 + admission）— 全て
+accepted（裁定 A〜C + Codex 6 巡収束）。**以下の番号項目は実装波の作業台帳として残る
+（設計の正本は各 ADR — 実装の波割りは次の提案で裁定）**。前提の宣言として **R2（shape 不変条件）を最初の
 ADR に含める**: 恒久不変条件は「静的物理格納・固定 rank・計画キャッシュの鍵は常に容量」まで —
 「全論理形状がホスト既知」は恒久にせず、**有界論理 extent の席**（compact-prefix 軸 1 本・
 DDS op は payload + extent の複数出力・extent は計画鍵に入れない・admission は容量課金）を

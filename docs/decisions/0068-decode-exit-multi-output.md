@@ -1,7 +1,7 @@
 # 0068: decode 出口 — ノードレベル multi-output と argmax / static-k topk
 
-- Status: draft（2026-08-17 一括起草 → 第 3 巡 Codex 指摘反映済み。大域裁定なし・
-  第 4 巡チェック後に accepted 化予定）
+- Status: accepted（2026-08-17 — 委任チェック方式・大域裁定なし。Codex レビュー
+  第 3〜5 巡を反映〈出力 0 本の定義域・ir-v1 改訂要件・topk 受理領域〉し第 6 巡で go）
 - 関連: ADR [0066](0066-generation-context-state-slots.md)（DDS 席の前提 = 複数出力）/
   [0059](0059-op-vocabulary-entry-doors.md)（op 追加の入場門）/
   [0058](0058-numerics-opt-in-contract.md)（検証門 3 点セットの流儀）

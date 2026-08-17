@@ -1,7 +1,8 @@
 # 0067: attention の autoregressive 語彙 — GQA 整除 broadcast と state 参照つき契約
 
-- Status: draft（2026-08-17 一括起草 → 第 3 巡 Codex 指摘反映 → 裁定 A〈GQA × i8a8 は
-  fail loudly 開始・後日サポート前提〉反映済み。第 4 巡チェック後に accepted 化予定）
+- Status: accepted（2026-08-17 — ユーザー裁定 A〈GQA × i8a8 は fail loudly 開始・後日
+  サポート前提〉+ 委任チェック方式。Codex レビュー第 3〜6 巡を反映し第 6 巡で go —
+  states 形は第 4 巡指摘で 1 種へ再設計・第 5 巡で sliding 両側述語と物理 shape を接続）
 - 関連: ADR [0023](0023-fused-attention.md)（融合 attention — 決定 4 の**一部**を supersede）/
   [0044](0044-runtime-attention-mask.md)（safe_softmax 意味論）/
   [0060](0060-row-block-attention.md)（行ブロック実行 — 保存経路への接続が本 ADR の受入条件）/

@@ -7,20 +7,21 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-16
+> Last updated: 2026-08-17
 
 ## Now
 
-- **全体レビュー波（2026-08-16）消化済み**: sop-review 網羅 + Codex 独立レンズ + 反証 7 レッグ
-  → blocker 0 → 修正 35 項目 + onEvent コールバック（anima/irodori — 観測の副作用ゼロを
-  sha 門で常設証明）を 7 コミットで消化。**残り = 4 パッケージ lockstep 0.2.2 → 0.3.0 の
-  bump とリリース（裁定済み）**。勢力図とポジショニング検証（フットプリント 56〜93 倍・
-  i64 は「境界 1 箇所集約」が正確な主張）=
+- **0.3.0 リリース済み**（2026-08-16・JSR 3 + PyPI・CI 緑）。ポジショニングの正本 =
   [research/2026-08-16-runtime-landscape.md](../docs/research/2026-08-16-runtime-landscape.md)。
-- 次の大波 = **autoregressive-ready 基盤波**（backlog next 節）。ADR 5 本を実装より先行・
-  着手前に sop-research で参照資料収集。R2（shape 不変条件 = 静的物理格納 + 有界論理 extent の
-  席予約）/ R3（KV は名前付き state スロット）/ G3（GQA kv_heads>1 — ADR 0023 reopen）を
-  ADR ①⑤ へ編入済み（backlog が正本）。検収 = Gemma 4 E2B / MiniCPM5-1B（M3 は非目標裁定）。
+- **autoregressive-ready 基盤波: 設計フェーズ完了（2026-08-17）** — ADR
+  [0066](../docs/decisions/0066-generation-context-state-slots.md)〜
+  [0070](../docs/decisions/0070-shard-loading-admission.md) が accepted
+  （GenerationContext / state スロット・attention 語彙〈GQA 整除 broadcast + states 形〉・
+  multi-output・packed i4・shard 2 相 + admission）。根拠 =
+  [research/2026-08-17-autoregressive-references.md](../docs/research/2026-08-17-autoregressive-references.md)
+  （参照実装 8 リポ・敵対検証 2 巡）+ Codex レビュー 6 巡（指摘 15 → 5 → 2 → 0 収束・
+  最終 go）。検収 = Gemma 4 E2B / MiniCPM5-1B。**次 = 実装波の計画（波割り・ゲート・
+  委任方針）を提案 → ユーザー裁定**。作業台帳は backlog next 節。
 
 ## Open decisions
 
