@@ -116,8 +116,8 @@ SAFE_SOFTMAX_OP = "safe_softmax"
 #: 融合 attention（ADR 0023）。`out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v`。
 #: **アリティ 3 か 4**（q / k / v + 省略可能な mask）・入力は rank-4 head-first
 #: （`[B,H,M,D]` / `[B,Hkv,N,D]` ×2）で **D は 3 者とも同じ**・出力は `[B,H,M,D]`。
-#: H と Hkv は**整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv ≥ 1` — GQA / MQA。ADR 0067 決定 1）で、
-#: 比 `r = H / Hkv` は導出値なので attrs 欄を持たない。
+#: H と Hkv は**整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv ≥ 1` — GQA / MQA。
+#: ADR 0067 決定 1）で、比 `r = H / Hkv` は導出値なので attrs 欄を持たない。
 #: mask は **f32・rank-4・shape はちょうど `[1,1,M,N]`**（加算型）で B·H へ broadcast する。
 #: `[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 と causal / dropout は語彙に無く、
 #: 該当する SDPA は `aten_handlers._h_attention` が全件列挙して fail loudly にする。
