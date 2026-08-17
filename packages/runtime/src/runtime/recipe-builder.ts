@@ -214,7 +214,7 @@ import { ExecutionError, type NodePlan } from "./plan.ts";
 import {
   type BindingRecipe,
   type BindingSource,
-  type OutputRecipe,
+  type StepOutput,
   type StepRecipe,
   StepRecipeBuilder,
   type TempSource,
@@ -314,10 +314,15 @@ export class RecipeBuilder {
    * 両者で**1 本**に閉じる（実行側は {@link executeStepRecipe}）。融合ごとに手書きの解放簿記を
    * 置くと、アリーナの参照計数が融合の本数だけ別実装になり、1 本でもずれると例外なしの
    * 沈黙誤値になる（早すぎる解放ならプール再利用で値が化け、多すぎれば peak が落ちない）。
+   * MUST: 出力列は**出力 slot 昇順**で組む（{@link StepRecipe.outputs} の順序規約 — 実行・
+   * slot 導出・焼き込みと共有する 1 本）。融合ステップは単一出力（fusion.ts の窓ガード）。
    */
   async #buildStep(step: ExecStep, defined: Set<string>): Promise<StepRecipe> {
-    const outputName = step.kind === "node" ? step.plan.outputName : step.outputName;
-    const outputShape = step.kind === "node" ? step.plan.outputShape : step.outputShape;
+    // 素のノードの出力列は `node.outs` と同順・同長（plan.ts の {@link NodePlan.outputs}）。
+    const outSlots: readonly { readonly name: string; readonly shape: readonly number[] }[] =
+      step.kind === "node"
+        ? step.plan.outputs
+        : [{ name: step.outputName, shape: step.outputShape }];
     // bind 面のオペランド順（重複無し）と解放簿記の延べ列は別物。素のノードでは
     // どちらも node.ins に一致し、融合ステップだけが 2 つを別々に宣言する。
     const bindNames = step.kind === "node" ? step.plan.node.ins : step.binds;
@@ -327,26 +332,37 @@ export class RecipeBuilder {
     // （別名 — ADR 0011）。dispatch も確保も出さない。要素数一致は planGraph が済ませているので、
     // 別名先の実バッファは宣言 shape ぶんの大きさを必ず満たす。
     // MUST: 別名元は bind 面の先頭（temp にはなりえない）。
-    const output: OutputRecipe = step.kind === "node" && step.aliasesInput
-      ? { kind: "alias", source: binds[0] }
-      : { kind: "alloc", byteLength: numel(outputShape) * 4 };
-    // 出力は「この値名」として束ねる。実行相が dispatch より前に env へ載せるので、
-    // 同一ステップ内の bind もこの 1 本で解決できる。
-    const out: BindingSource = { kind: "value", name: outputName };
+    // MUST: 別名化しうる 2 op（reshape / 恒等 expand）は**単一出力**なので、別名の出力列は
+    // 常に 1 本きり。多出力 op を別名化する形はここでは表せない（増やすときは alias の
+    // 「どの入力を」まで slot ごとに宣言することになる）。
+    const aliasesInput = step.kind === "node" && step.aliasesInput;
+    const outputs: readonly StepOutput[] = outSlots.map(({ name, shape }): StepOutput => {
+      const bookkeeping = {
+        name,
+        uses: this.#state.useCounts.get(name) ?? 0,
+        pinned: this.#state.outputNames.has(name),
+      };
+      return aliasesInput
+        ? { ...bookkeeping, kind: "alias", source: binds[0] }
+        : { ...bookkeeping, kind: "alloc", byteLength: numel(shape) * 4 };
+    });
+    // 出力は「その値名」として束ねる。実行相が dispatch より前に env へ載せるので、
+    // 同一ステップ内の bind もこの列で解決できる。
+    const outs: readonly BindingSource[] = outputs.map((output) => ({
+      kind: "value",
+      name: output.name,
+    }));
 
     const builder = new StepRecipeBuilder();
     if (step.kind === "node") {
-      await this.#buildNode(step.plan, step.aliasesInput, binds, out, builder);
+      await this.#buildNode(step.plan, step.aliasesInput, binds, outs, builder);
     } else {
-      await this.#buildFused(step, binds, out, builder);
+      await this.#buildFused(step, binds, outs, builder);
     }
-    defined.add(outputName);
+    for (const output of outputs) defined.add(output.name);
 
     return {
-      outputName,
-      output,
-      uses: this.#state.useCounts.get(outputName) ?? 0,
-      pinned: this.#state.outputNames.has(outputName),
+      outputs,
       temps: builder.temps,
       dispatches: builder.dispatches,
       releases: consumedNames,
@@ -360,17 +376,21 @@ export class RecipeBuilder {
    * ルールだけがステップ内一時を混ぜた並びを取る。**一時の確保・解放は
    * {@link StepRecipeBuilder} に replay させる**（寿命の導出点を 2 つに増やさない）ので、
    * 実行相の簿記は素のノードと同じ 1 本（{@link executeStepRecipe}）に閉じたままになる。
+   *
+   * MUST: {@link FusedStep} は**単一出力**（fusion.ts の窓ガードが契約の出力数 1 を要求する）
+   * なので、`{ kind: "output" }` が指すのは常に `outs[0]`。多出力の融合を入れるなら、
+   * オペランドが出力 slot を持つ形（`{ kind: "output", slot }`）から設計し直す。
    */
   async #buildFused(
     step: FusedStep,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const temps: TempSource[] = [];
     const resolve = (operand: FusedOperand): BindingSource => {
-      if (operand.kind === "output") return out;
+      if (operand.kind === "output") return outs[0];
       if (operand.kind === "bind") {
         const source = binds[operand.index];
         if (source === undefined) {
@@ -422,12 +442,19 @@ export class RecipeBuilder {
     }
   }
 
-  /** 素のノード 1 つの本体（確保・retain・解放は {@link executeStepRecipe} が済ませる）。 */
+  /**
+   * 素のノード 1 つの本体（確保・retain・解放は {@link executeStepRecipe} が済ませる）。
+   *
+   * MUST: op 別ビルダは**出力列**（`outs` — 出力 slot 昇順）を受け、単一出力のカーネルは
+   * `outs[0]` だけを書く（ADR 0068 決定 1）。多出力 op はスロットを明示して自分の列を書く。
+   * 出力の**確保**の順序は列の昇順で、実行・slot 導出・焼き込みと共有の 1 本
+   * （{@link StepRecipe.outputs} の順序規約）。
+   */
   async #buildNode(
     step: NodePlan,
     aliasesInput: boolean,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     switch (step.contract.kind) {
@@ -437,16 +464,16 @@ export class RecipeBuilder {
           step,
           { op: step.contract.name, dtype: step.inputDtypes[0] },
           binds,
-          out,
+          outs,
           builder,
         );
         break;
       case "cast":
         await this.#buildElementwise(
           step,
-          { op: CAST_OP, dtype: step.inputDtypes[0], to: step.outputDtype },
+          { op: CAST_OP, dtype: step.inputDtypes[0], to: step.outputs[0].dtype },
           binds,
-          out,
+          outs,
           builder,
         );
         break;
@@ -456,86 +483,86 @@ export class RecipeBuilder {
           step,
           { op: WHERE_OP, dtype: step.inputDtypes[1] },
           binds,
-          out,
+          outs,
           builder,
         );
         break;
       case "cumsum":
-        await this.#buildCumsum(step, binds, out, builder);
+        await this.#buildCumsum(step, binds, outs, builder);
         break;
       case "matmul":
-        await this.#buildMatmul(step, binds, out, builder);
+        await this.#buildMatmul(step, binds, outs, builder);
         break;
       case "bmm":
-        await this.#buildBmm(step, binds, out, builder);
+        await this.#buildBmm(step, binds, outs, builder);
         break;
       case "gather":
-        await this.#buildGather(step, binds, out, builder);
+        await this.#buildGather(step, binds, outs, builder);
         break;
       case "rowReduce":
-        await this.#buildRowReduce(step, step.contract.name, binds, out, builder);
+        await this.#buildRowReduce(step, step.contract.name, binds, outs, builder);
         break;
       case "permute":
       case "slice":
       case "symPrefixSlice":
-        await this.#buildStridedCopy(step, step.contract.kind, binds, out, builder);
+        await this.#buildStridedCopy(step, step.contract.kind, binds, outs, builder);
         break;
       case "expand":
         // 恒等 expand は別名化済み（0 dispatch）。複製軸が 1 つでもあれば実体化コピー。
         if (!aliasesInput) {
-          await this.#buildStridedCopy(step, step.contract.kind, binds, out, builder);
+          await this.#buildStridedCopy(step, step.contract.kind, binds, outs, builder);
         }
         break;
       case "cat":
-        await this.#buildCat(step, binds, out, builder);
+        await this.#buildCat(step, binds, outs, builder);
         break;
       case "pad":
-        await this.#buildPad(step, binds, out, builder);
+        await this.#buildPad(step, binds, outs, builder);
         break;
       case "flip":
-        await this.#buildFlip(step, binds, out, builder);
+        await this.#buildFlip(step, binds, outs, builder);
         break;
       case "linear":
-        await this.#buildLinear(step, binds, out, builder);
+        await this.#buildLinear(step, binds, outs, builder);
         break;
       case "layerNorm":
-        await this.#buildLayerNorm(step, binds, out, builder);
+        await this.#buildLayerNorm(step, binds, outs, builder);
         break;
       case "rmsNorm":
-        await this.#buildRmsNorm(step, binds, out, builder);
+        await this.#buildRmsNorm(step, binds, outs, builder);
         break;
       case "softmax":
-        await this.#buildSoftmax(step, false, binds, out, builder);
+        await this.#buildSoftmax(step, false, binds, outs, builder);
         break;
       case "safeSoftmax":
-        await this.#buildSoftmax(step, true, binds, out, builder);
+        await this.#buildSoftmax(step, true, binds, outs, builder);
         break;
       case "attention":
-        await this.#buildAttention(step, binds, out, builder);
+        await this.#buildAttention(step, binds, outs, builder);
         break;
       case "embedding":
-        await this.#buildEmbedding(step, binds, out, builder);
+        await this.#buildEmbedding(step, binds, outs, builder);
         break;
       case "maskedFill":
-        await this.#buildMaskedFill(step, binds, out, builder);
+        await this.#buildMaskedFill(step, binds, outs, builder);
         break;
       case "conv1d":
-        await this.#buildConv1d(step, binds, out, builder);
+        await this.#buildConv1d(step, binds, outs, builder);
         break;
       case "conv2d":
-        await this.#buildConv2d(step, binds, out, builder);
+        await this.#buildConv2d(step, binds, outs, builder);
         break;
       case "convTranspose1d":
-        await this.#buildConvTranspose1d(step, binds, out, builder);
+        await this.#buildConvTranspose1d(step, binds, outs, builder);
         break;
       case "deformConv2d":
-        await this.#buildDeformConv2d(step, binds, out, builder);
+        await this.#buildDeformConv2d(step, binds, outs, builder);
         break;
       case "upsampleBilinear2d":
-        await this.#buildUpsampleBilinear2d(step, binds, out, builder);
+        await this.#buildUpsampleBilinear2d(step, binds, outs, builder);
         break;
       case "gruScan":
-        await this.#buildGruScan(step, binds, out, builder);
+        await this.#buildGruScan(step, binds, outs, builder);
         break;
       case "reshape":
         // 別名化は #buildStep で済んでいる（この op は 1 dispatch も出さない）。
@@ -555,11 +582,11 @@ export class RecipeBuilder {
     step: NodePlan,
     element: ElementwiseOp,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     // rank 0（スカラ）は codegen の rank ≥ 1 契約に合わせて長さ 1 の 1 次元に正規化する。
-    const outShape = step.outputShape.length === 0 ? [1] : [...step.outputShape];
+    const outShape = step.outputs[0].shape.length === 0 ? [1] : [...step.outputs[0].shape];
     const rank = outShape.length;
     const spec: ElementwiseSpec = element.op === CAST_OP
       ? { op: CAST_OP, rank, dtype: element.dtype, to: element.to }
@@ -588,7 +615,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: binds.length + 1, source: out },
+        { binding: binds.length + 1, source: outs[0] },
       ],
       workgroups: [groups, 1, 1],
     });
@@ -608,7 +635,7 @@ export class RecipeBuilder {
     step: NodePlan,
     op: ReduceOpName,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const inputShape = step.inputShapes[0];
@@ -616,7 +643,7 @@ export class RecipeBuilder {
     // 要素型はキーに載る（bool の sum は u32 を読んで i32 の個数を書く — ADR 0009）。
     const spec = { op, dtype: step.inputDtypes[0] };
     const lastDim = axis === inputShape.length - 1;
-    const outCount = numel(step.outputShape);
+    const outCount = numel(step.outputs[0].shape);
     const key = lastDim ? reduceKey(spec) : axisReduceKey(spec);
     const { pipeline, layout } = await this.#state.cache.get(
       key,
@@ -641,7 +668,7 @@ export class RecipeBuilder {
       pipeline,
       layout,
       params,
-      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
     });
   }
@@ -653,10 +680,10 @@ export class RecipeBuilder {
   async #buildCumsum(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
-    const shape = step.outputShape;
+    const shape = step.outputs[0].shape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const { pipeline, layout } = await this.#state.cache.get(CUMSUM_KEY, CUMSUM_WGSL);
@@ -671,7 +698,7 @@ export class RecipeBuilder {
       pipeline,
       layout,
       params,
-      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
     });
   }
@@ -686,11 +713,11 @@ export class RecipeBuilder {
     step: NodePlan,
     kind: "permute" | "expand" | "slice" | "symPrefixSlice",
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     const where = `nodes (${step.node.op})`;
     const srcStrides = kind === "permute"
       ? permuteSrcStrides(srcShape, permuteDims(step.node.attrs, where))
@@ -710,7 +737,7 @@ export class RecipeBuilder {
       offset = sliceSrcOffset(srcShape, dim, start);
     }
     // 要素型はキーに載る（bool マスク / i32 添字の expand が実測にある — ADR 0009）。
-    const spec = { dtype: step.outputDtype };
+    const spec = { dtype: step.outputs[0].dtype };
     const key = stridedKey(spec);
     const { pipeline, layout } = await this.#state.cache.get(key, stridedWgsl(spec));
     const params = this.#writeParams(
@@ -727,7 +754,7 @@ export class RecipeBuilder {
       pipeline,
       layout,
       params,
-      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
     });
   }
@@ -744,14 +771,14 @@ export class RecipeBuilder {
   async #buildCat(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     const where = `nodes (${step.node.op})`;
     const dim = catDim(step.node.attrs, where);
     const outStrides = catOutStrides(outShape);
-    const spec = { dtype: step.outputDtype };
+    const spec = { dtype: step.outputs[0].dtype };
     const key = stridedWriteKey(spec);
     const { pipeline, layout } = await this.#state.cache.get(key, stridedWriteWgsl(spec));
     let written = 0;
@@ -771,7 +798,7 @@ export class RecipeBuilder {
         pipeline,
         layout,
         params,
-        bindings: [{ binding: 1, source }, { binding: 2, source: out }],
+        bindings: [{ binding: 1, source }, { binding: 2, source: outs[0] }],
         workgroups: [groups, 1, 1],
       });
       written += srcShape[dim];
@@ -792,11 +819,11 @@ export class RecipeBuilder {
   async #buildPad(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     const { left, right } = padAttrs(step.node.attrs, `nodes (${step.node.op})`);
     const { pipeline, layout } = await this.#state.cache.get(PAD_KEY, PAD_WGSL);
     const params = this.#writeParams(
@@ -813,7 +840,7 @@ export class RecipeBuilder {
       pipeline,
       layout,
       params,
-      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
     });
   }
@@ -825,10 +852,10 @@ export class RecipeBuilder {
   async #buildFlip(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
-    const shape = step.outputShape;
+    const shape = step.outputs[0].shape;
     const dim = flipDim(step.node.attrs, `nodes (${step.node.op})`);
     const { pipeline, layout } = await this.#state.cache.get(FLIP_KEY, FLIP_WGSL);
     const params = this.#writeParams(
@@ -847,7 +874,7 @@ export class RecipeBuilder {
       pipeline,
       layout,
       params,
-      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
     });
   }
@@ -862,11 +889,11 @@ export class RecipeBuilder {
   async #buildDeformConv2d(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     const { padding } = deformConv2dAttrs(step.node.attrs, `nodes (${step.node.op})`);
     const { pipeline, layout } = await this.#state.cache.get(
       DEFORM_CONV2D_KEY,
@@ -900,7 +927,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 6, source: out },
+        { binding: 6, source: outs[0] },
       ],
       workgroups: [workgroups, 1, 1],
     });
@@ -918,13 +945,13 @@ export class RecipeBuilder {
   async #buildGruScan(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const direction = step.node.op === "gru_scan_reverse" ? "reverse" : "forward";
     const key = gruScanKey(direction);
     const { pipeline, layout } = await this.#state.cache.get(key, gruScanWgsl(direction));
-    const [time, batch, hidden] = step.outputShape;
+    const [time, batch, hidden] = step.outputs[0].shape;
     const params = this.#writeParams(
       gruScanParams({ time, batch, hidden }),
       PARAMS_UNIFORM_USAGE,
@@ -936,7 +963,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 5, source: out },
+        { binding: 5, source: outs[0] },
       ],
       workgroups: [
         gridStrideWorkgroups(batch, 1, this.#state.gpu.limits.maxComputeWorkgroupsPerDimension),
@@ -954,11 +981,11 @@ export class RecipeBuilder {
   async #buildUpsampleBilinear2d(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     const { pipeline, layout } = await this.#state.cache.get(
       UPSAMPLE_BILINEAR2D_KEY,
       UPSAMPLE_BILINEAR2D_WGSL,
@@ -983,7 +1010,7 @@ export class RecipeBuilder {
       pipeline,
       layout,
       params,
-      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
     });
   }
@@ -991,7 +1018,7 @@ export class RecipeBuilder {
   async #buildMatmul(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const [a, b] = step.inputShapes;
@@ -1016,7 +1043,7 @@ export class RecipeBuilder {
       bindings: [
         { binding: 1, source: binds[0] },
         { binding: 2, source: binds[1] },
-        { binding: 3, source: out },
+        { binding: 3, source: outs[0] },
       ],
       workgroups: [
         tiledWorkgroups(n, gemmTileN(geometry), limit, where),
@@ -1033,7 +1060,7 @@ export class RecipeBuilder {
   async #buildBmm(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const [a, b] = step.inputShapes;
@@ -1055,7 +1082,7 @@ export class RecipeBuilder {
       bindings: [
         { binding: 1, source: binds[0] },
         { binding: 2, source: binds[1] },
-        { binding: 3, source: out },
+        { binding: 3, source: outs[0] },
       ],
       workgroups: [
         tiledWorkgroups(n, gemmTileN(geometry), limit, where),
@@ -1073,11 +1100,11 @@ export class RecipeBuilder {
   async #buildGather(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     const count = numel(outShape);
     const { pipeline, layout } = await this.#state.cache.get(GATHER_KEY, GATHER_WGSL);
     const params = this.#writeParams(
@@ -1097,7 +1124,7 @@ export class RecipeBuilder {
       bindings: [
         { binding: 1, source: binds[0] },
         { binding: 2, source: binds[1] },
-        { binding: 3, source: out },
+        { binding: 3, source: outs[0] },
       ],
       workgroups: [groups, 1, 1],
     });
@@ -1111,7 +1138,7 @@ export class RecipeBuilder {
   async #buildLinear(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
@@ -1130,7 +1157,7 @@ export class RecipeBuilder {
     if (
       this.#state.linearCompute === "i8a8" && weightStorage === "i8" && k > 0 && k % 4 === 0
     ) {
-      await this.#buildLinearI8a8(step, binds, out, builder, m, n, k);
+      await this.#buildLinearI8a8(step, binds, outs, builder, m, n, k);
       return;
     }
     // f16 計算変種（ADR 0028）。**i8 常駐の重みとは組めない**（w8a16 は未実装）ので、
@@ -1163,7 +1190,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 4, source: out },
+        { binding: 4, source: outs[0] },
         ...this.#weightScaleBindings(step, weightStorage, LINEAR_SCALE_BINDING),
       ],
       workgroups: [
@@ -1188,7 +1215,7 @@ export class RecipeBuilder {
   async #buildLinearI8a8(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
     m: number,
     n: number,
@@ -1244,7 +1271,7 @@ export class RecipeBuilder {
         { binding: 1, source: xq },
         { binding: 2, source: binds[1] },
         { binding: 3, source: binds[2] },
-        { binding: 4, source: out },
+        { binding: 4, source: outs[0] },
         ...this.#weightScaleBindings(step, "i8", LINEAR_SCALE_BINDING),
         { binding: LINEAR_ACT_SCALE_BINDING, source: xs },
       ],
@@ -1264,10 +1291,10 @@ export class RecipeBuilder {
   async #buildLayerNorm(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
-    const shape = step.outputShape;
+    const shape = step.outputs[0].shape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const { eps } = layerNormAttrs(step.node.attrs, `nodes (${step.node.op})`);
@@ -1288,7 +1315,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 4, source: out },
+        { binding: 4, source: outs[0] },
       ],
       workgroups: [groups, 1, 1],
     });
@@ -1301,10 +1328,10 @@ export class RecipeBuilder {
   async #buildRmsNorm(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
-    const shape = step.outputShape;
+    const shape = step.outputs[0].shape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const eps = rmsNormEps(step.node.attrs, `nodes (${step.node.op})`);
@@ -1322,7 +1349,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 3, source: out },
+        { binding: 3, source: outs[0] },
       ],
       workgroups: [groups, 1, 1],
     });
@@ -1338,10 +1365,10 @@ export class RecipeBuilder {
     step: NodePlan,
     safe: boolean,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
-    const shape = step.outputShape;
+    const shape = step.outputs[0].shape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const key = safe ? SAFE_SOFTMAX_KEY : SOFTMAX_KEY;
@@ -1360,7 +1387,7 @@ export class RecipeBuilder {
       pipeline,
       layout,
       params,
-      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: out }],
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
     });
   }
@@ -1394,7 +1421,7 @@ export class RecipeBuilder {
   async #buildAttention(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const [q, k, v] = step.inputShapes;
@@ -1545,7 +1572,7 @@ export class RecipeBuilder {
         scores,
         scoreStorage,
         stats,
-        out,
+        outs,
         { batch, rows, cols, depth },
         where,
       );
@@ -1569,7 +1596,7 @@ export class RecipeBuilder {
           { binding: 1, source: scores },
           { binding: 2, source: binds[2] },
           { binding: 3, source: stats },
-          { binding: 4, source: out },
+          { binding: 4, source: outs[0] },
         ],
         workgroups: [
           tiledWorkgroups(depth, gemmTileN(geometry), limit, `${where} ③PV`),
@@ -1722,7 +1749,7 @@ export class RecipeBuilder {
     scores: TempSource,
     scoreStorage: ScoreStorage,
     stats: TempSource,
-    out: BindingSource,
+    outs: readonly BindingSource[],
     shape: {
       readonly batch: number;
       readonly rows: number;
@@ -1810,7 +1837,7 @@ export class RecipeBuilder {
         { binding: 1, source: scores },
         { binding: 2, source: vq },
         { binding: 3, source: stats },
-        { binding: 4, source: out },
+        { binding: 4, source: outs[0] },
         { binding: ATTENTION_PV_V_SCALE_BINDING, source: vs },
       ],
       workgroups: [
@@ -1834,11 +1861,11 @@ export class RecipeBuilder {
   async #buildEmbedding(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const weight = step.inputShapes[0];
-    const count = numel(step.outputShape);
+    const count = numel(step.outputs[0].shape);
     const weightStorage = this.#weightStorage(step);
     const key = embeddingKey(weightStorage);
     const { pipeline, layout } = await this.#state.cache.get(key, embeddingWgsl(weightStorage));
@@ -1859,7 +1886,7 @@ export class RecipeBuilder {
       bindings: [
         { binding: 1, source: binds[0] },
         { binding: 2, source: binds[1] },
-        { binding: 3, source: out },
+        { binding: 3, source: outs[0] },
         ...this.#weightScaleBindings(step, weightStorage, EMBEDDING_SCALE_BINDING),
       ],
       workgroups: [groups, 1, 1],
@@ -1873,10 +1900,10 @@ export class RecipeBuilder {
   async #buildMaskedFill(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     // 規則は expand と同一だが、診断の主語は masked_fill の側に付け替える（グラフに expand が
     // 無いのに「expand の入力」と出ると原因の当たりを外す）。
     const maskStrides = expandSrcStrides(step.inputShapes[1], outShape, {
@@ -1905,7 +1932,7 @@ export class RecipeBuilder {
       bindings: [
         { binding: 1, source: binds[0] },
         { binding: 2, source: binds[1] },
-        { binding: 3, source: out },
+        { binding: 3, source: outs[0] },
       ],
       workgroups: [groups, 1, 1],
     });
@@ -1919,11 +1946,11 @@ export class RecipeBuilder {
   async #buildConv1d(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     const { stride, padding, dilation, groups } = conv1dAttrs(
       step.node.attrs,
       `nodes (${step.node.op})`,
@@ -1942,7 +1969,7 @@ export class RecipeBuilder {
     };
     const weightStorage = this.#weightStorage(step);
     if (groups === 1) {
-      await this.#buildConv1dIgemm(step, binds, out, builder, dims, weightStorage);
+      await this.#buildConv1dIgemm(step, binds, outs, builder, dims, weightStorage);
       return;
     }
     const key = conv1dKey(weightStorage);
@@ -1960,7 +1987,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 4, source: out },
+        { binding: 4, source: outs[0] },
         ...this.#weightScaleBindings(step, weightStorage, CONV1D_SCALE_BINDING),
       ],
       workgroups: [workgroups, 1, 1],
@@ -1982,7 +2009,7 @@ export class RecipeBuilder {
   async #buildConv1dIgemm(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
     dims: Conv1dDims,
     weightStorage: WeightStorage,
@@ -2008,7 +2035,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 4, source: out },
+        { binding: 4, source: outs[0] },
         ...this.#weightScaleBindings(step, weightStorage, CONV1D_SCALE_BINDING),
       ],
       workgroups: [
@@ -2029,11 +2056,11 @@ export class RecipeBuilder {
   async #buildConv2d(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     const { stride, padding, dilation, groups } = conv2dAttrs(
       step.node.attrs,
       `nodes (${step.node.op})`,
@@ -2058,7 +2085,7 @@ export class RecipeBuilder {
     };
     const weightStorage = this.#weightStorage(step);
     if (groups === 1) {
-      await this.#buildConv2dIgemm(step, binds, out, builder, dims, weightStorage);
+      await this.#buildConv2dIgemm(step, binds, outs, builder, dims, weightStorage);
       return;
     }
     const key = conv2dKey(weightStorage);
@@ -2076,7 +2103,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 4, source: out },
+        { binding: 4, source: outs[0] },
         ...this.#weightScaleBindings(step, weightStorage, CONV2D_SCALE_BINDING),
       ],
       workgroups: [workgroups, 1, 1],
@@ -2098,7 +2125,7 @@ export class RecipeBuilder {
   async #buildConv2dIgemm(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
     dims: Conv2dDims,
     weightStorage: WeightStorage,
@@ -2125,7 +2152,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 4, source: out },
+        { binding: 4, source: outs[0] },
         ...this.#weightScaleBindings(step, weightStorage, CONV2D_SCALE_BINDING),
       ],
       workgroups: [
@@ -2145,11 +2172,11 @@ export class RecipeBuilder {
   async #buildConvTranspose1d(
     step: NodePlan,
     binds: readonly BindingSource[],
-    out: BindingSource,
+    outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
-    const outShape = step.outputShape;
+    const outShape = step.outputs[0].shape;
     const { stride, padding } = convTranspose1dAttrs(step.node.attrs, `nodes (${step.node.op})`);
     const weightStorage = this.#weightStorage(step);
     const key = convTranspose1dKey(weightStorage);
@@ -2182,7 +2209,7 @@ export class RecipeBuilder {
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
-        { binding: 4, source: out },
+        { binding: 4, source: outs[0] },
         ...this.#weightScaleBindings(step, weightStorage, CONV_TRANSPOSE1D_SCALE_BINDING),
       ],
       workgroups: [workgroups, 1, 1],

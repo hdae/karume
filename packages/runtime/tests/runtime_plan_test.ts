@@ -153,7 +153,7 @@ Deno.test("planGraph が全値の shape を解決し、ノード出力を契約�
   assertEquals(plan.shapes.get("w"), [4, 3]);
   assertEquals(plan.shapes.get("h"), [5, 3]);
   assertEquals(plan.nodes.length, 2);
-  assertEquals(plan.nodes[0].outputShape, [5, 3]);
+  assertEquals(plan.nodes[0].outputs, [{ name: "h", shape: [5, 3], dtype: "f32" }]);
   assertEquals(plan.nodes[1].contract.kind, "binary");
 });
 
@@ -253,7 +253,7 @@ Deno.test("sym_prefix_slice のグラフ文脈の契約は Session 構築時に�
 Deno.test("sym_prefix_slice の出力 shape は束縛から計算されて宣言と突合される", () => {
   const graph = parse(prefixSliceGraph());
   const plan = planGraph(graph, bindSymbols(graph, { bind: [3] }));
-  assertEquals(plan.nodes[0].outputShape, [3, 3]);
+  assertEquals(plan.nodes[0].outputs[0].shape, [3, 3]);
 
   // Tmax 超過（定数バッファの範囲外読み出しになる）は束縛時点で落ちる
   assertThrows(() => planGraph(graph, bindSymbols(graph, { bind: [6] })), OpContractError);

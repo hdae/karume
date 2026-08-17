@@ -79,20 +79,35 @@ export type TempRecipe = {
 
 /**
  * ステップ出力の確保仕様。`alias` は入力実体をそのまま出力の実体にする形（reshape と
- * 恒等 expand — ADR 0011）で、確保も dispatch も出ない。
+ * 恒等 expand — ADR 0011）で、確保も dispatch も出ない。簿記と組んだ
+ * {@link StepOutput} が外向きの形（この判別ユニオン単体では消費者が居ない）。
  */
-export type OutputRecipe =
+type OutputRecipe =
   | { readonly kind: "alloc"; readonly byteLength: number }
   | { readonly kind: "alias"; readonly source: ValueSource };
 
-/** 実行ステップ 1 つ（素のノード または 融合ステップ）のレシピ。 */
-export type StepRecipe = {
-  readonly outputName: string;
-  readonly output: OutputRecipe;
+/** ステップ出力 1 本ぶんの確保仕様と簿記（{@link StepRecipe.outputs} の要素）。 */
+export type StepOutput = OutputRecipe & {
+  readonly name: string;
   /** 出力値の将来の消費回数（`retain` の `uses`）。 */
   readonly uses: number;
   /** グラフ出力（プールへ返さず readback 可能に保つ）。 */
   readonly pinned: boolean;
+};
+
+/** 実行ステップ 1 つ（素のノード または 融合ステップ）のレシピ。 */
+export type StepRecipe = {
+  /**
+   * 出力 slot 昇順の確保仕様と簿記（ADR 0068 決定 1 — 素のノードでは `node.outs` と同順・同長、
+   * 融合ステップは常に 1 本）。
+   *
+   * MUST: **確保 → retain → env 登録 → 定義ぶんの解放を、この列の昇順で**行う。順序を共有する
+   * のは 4 箇所 — 実行（{@link executeStepRecipe}）・slot 導出（{@link derivePlanSlots}）・
+   * 焼き込み（{@link bakeBindGroups}）・列の組み立て（recipe-builder の `#buildStep`）。1 箇所でも
+   * 順序が割れると例外は出ず、プール再利用の相手（= slot の本数と総バイト数、別名判定）だけが
+   * 実行と導出で食い違う。
+   */
+  readonly outputs: readonly StepOutput[];
   readonly temps: readonly TempRecipe[];
   readonly dispatches: readonly DispatchRecipe[];
   /** ステップ末尾に解放する入力の**延べ列**（現行簿記と同一順）。 */
@@ -216,16 +231,21 @@ const encodeDispatch = (
  * 分かれ、1 本でもずれると例外なしの沈黙誤値になる。
  * MUST: 出力の確保は当該ステップのどの dispatch のエンコードよりも前（ADR 0004 の不変条件）。
  * この順序が「まだ読まれる入力が出力として配り直される」事故を構造的に防いでいる。
+ * MUST: 出力は**出力 slot 昇順**で確保・retain・env 登録し、定義ぶんの解放も同じ昇順で返す
+ * （{@link StepRecipe.outputs} の順序規約 — 導出・焼き込みと共有する 1 本）。
  */
 export const executeStepRecipe = (recipe: StepRecipe, run: StepExecution): void => {
   const { arena, env } = run;
-  const out = recipe.output.kind === "alias"
-    ? resolveValue(recipe.output.source, env)
-    : arena.allocStorage(recipe.output.byteLength);
-  // MUST: 別名でも retain は「定義ぶんの 1 + 出力値の消費回数」を**実バッファに積む**
-  // （別名越しの消費まで数えるため — アリーナのエイリアス節）。
-  arena.retain(out, recipe.uses, { pinned: recipe.pinned });
-  env.set(recipe.outputName, out);
+  const outs = recipe.outputs.map((output) => {
+    const buffer = output.kind === "alias"
+      ? resolveValue(output.source, env)
+      : arena.allocStorage(output.byteLength);
+    // MUST: 別名でも retain は「定義ぶんの 1 + 出力値の消費回数」を**実バッファに積む**
+    // （別名越しの消費まで数えるため — アリーナのエイリアス節）。
+    arena.retain(buffer, output.uses, { pinned: output.pinned });
+    env.set(output.name, buffer);
+    return buffer;
+  });
 
   const temps: GPUBuffer[] = [];
   recipe.dispatches.forEach((dispatch, index) => {
@@ -250,13 +270,16 @@ export const executeStepRecipe = (recipe: StepRecipe, run: StepExecution): void 
   // MUST: retain が積んだ定義ぶんの 1 をここで返す。消費者ゼロの中間出力（グラフ出力にも
   // ならない到達不能な値）が解放されるのはこの 1 本だけで、抜けるとプール再利用から外れて
   // peakTransientBytes が実際より大きく出る。
-  arena.release(out);
+  for (const buffer of outs) arena.release(buffer);
 };
 
 /** 1 ステップぶんの slot 割当（{@link PlanSlots.steps} の要素）。 */
 type StepSlots = {
-  /** 出力の slot 添字。別名ステップ（確保が出ない）は undefined。 */
-  readonly output: number | undefined;
+  /**
+   * {@link StepRecipe.outputs} と同順・同長の slot 添字。別名の出力（確保が出ない）は
+   * undefined。
+   */
+  readonly outputs: readonly (number | undefined)[];
   /** {@link StepRecipe.temps} と同順・同長の slot 添字。 */
   readonly temps: readonly number[];
 };
@@ -324,14 +347,18 @@ export const derivePlanSlots = (recipes: readonly StepRecipe[]): PlanSlots => {
   };
 
   for (const recipe of recipes) {
-    // 別名は「入力の実体をそのまま出力にする」— 元が slot でなければ（グラフ入力・重み）
-    // この値も slot を持たない。
-    const output = recipe.output.kind === "alias"
-      ? (recipe.output.source.kind === "value" ? env.get(recipe.output.source.name) : undefined)
-      : alloc(recipe.output.byteLength);
-    retain(output, recipe.uses, recipe.pinned);
-    if (output === undefined) env.delete(recipe.outputName);
-    else env.set(recipe.outputName, output);
+    // MUST: 出力 slot 昇順（{@link StepRecipe.outputs} の順序規約 — 実行相と同順）。
+    const outputs = recipe.outputs.map((output) => {
+      // 別名は「入力の実体をそのまま出力にする」— 元が slot でなければ（グラフ入力・重み）
+      // この値も slot を持たない。
+      const slot = output.kind === "alias"
+        ? (output.source.kind === "value" ? env.get(output.source.name) : undefined)
+        : alloc(output.byteLength);
+      retain(slot, output.uses, output.pinned);
+      if (slot === undefined) env.delete(output.name);
+      else env.set(output.name, slot);
+      return slot;
+    });
 
     const temps: number[] = [];
     recipe.dispatches.forEach((_, index) => {
@@ -348,8 +375,13 @@ export const derivePlanSlots = (recipes: readonly StepRecipe[]): PlanSlots => {
     });
 
     for (const name of recipe.releases) release(env.get(name));
-    release(output);
-    steps.push({ output: recipe.output.kind === "alias" ? undefined : output, temps });
+    for (const slot of outputs) release(slot);
+    steps.push({
+      outputs: recipe.outputs.map((output, slot) =>
+        output.kind === "alias" ? undefined : outputs[slot]
+      ),
+      temps,
+    });
   }
   return { bytes, steps, pinned };
 };
@@ -385,7 +417,8 @@ type BakedPlan = {
  *
  * MUST: 値名 → 実体の写像はアリーナ経路（{@link executeStepRecipe}）と**同じ順で**展開する
  * — 出力を先に env へ載せてから当該ステップの dispatch を解決する順序が崩れると、出力を
- * 自分の入力にも束ねるステップだけが別の実体を掴む。
+ * 自分の入力にも束ねるステップだけが別の実体を掴む。出力が複数ある形では**出力 slot 昇順**まで
+ * 揃える（{@link StepRecipe.outputs} の順序規約）。
  * MUST: 呼ぶのは run の errorScope 区間の内側だけ（createBindGroup の validation 失敗は
  * 例外にならない）。
  */
@@ -405,10 +438,14 @@ export const bakeBindGroups = (
   const groups: (readonly GPUBindGroup[])[] = [];
   recipes.forEach((recipe, index) => {
     const step = slots.steps[index];
-    const out = recipe.output.kind === "alias"
-      ? resolveValue(recipe.output.source, values)
-      : resolveSlot(step.output, buffers);
-    values.set(recipe.outputName, out);
+    recipe.outputs.forEach((output, slot) => {
+      values.set(
+        output.name,
+        output.kind === "alias"
+          ? resolveValue(output.source, values)
+          : resolveSlot(step.outputs[slot], buffers),
+      );
+    });
     const temps = step.temps.map((slot) => resolveSlot(slot, buffers));
     groups.push(
       recipe.dispatches.map((dispatch) =>

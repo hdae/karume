@@ -30,16 +30,27 @@ export class ExecutionError extends Error {
 /** 記号次元 → 実行時の具体値。 */
 export type SymbolBindings = Readonly<Record<string, number>>;
 
+/** ノード出力 1 本ぶんの計画（{@link NodePlan.outputs} に**出力 slot 昇順**で並ぶ）。 */
+export type NodeOutputPlan = {
+  readonly name: string;
+  readonly shape: readonly number[];
+  /** 出力の意味論 dtype（契約から導き宣言と照合済み — {@link resolveNodeDtypes}）。 */
+  readonly dtype: IrDtype;
+};
+
 export type NodePlan = {
   readonly node: IrNode;
   readonly contract: OpContract;
   readonly inputShapes: readonly (readonly number[])[];
   /** 入力の意味論 dtype（宣言由来）。カーネルの要素型はここから決まる。 */
   readonly inputDtypes: readonly IrDtype[];
-  readonly outputName: string;
-  readonly outputShape: readonly number[];
-  /** 出力の意味論 dtype（契約から導き宣言と照合済み — {@link resolveNodeDtypes}）。 */
-  readonly outputDtype: IrDtype;
+  /**
+   * 出力 slot 昇順の計画（`node.outs` と同順・同長 — ADR 0068 決定 1）。
+   *
+   * MUST: 名前・shape・dtype を別々の列で持たない。3 本の並列配列は「長さが揃っている」
+   * という不変条件を型で表せず、slot をずらして読む誤りが shape 検査を素通りする。
+   */
+  readonly outputs: readonly NodeOutputPlan[];
 };
 
 export type GraphPlan = {
@@ -70,20 +81,18 @@ const declarationOf = (
   return { dtype: value.dtype, shape: value.shape };
 };
 
-/** ノードの入出力 dtype を宣言から集めて契約と照合し、出力 dtype を返す。 */
+/** ノードの入出力 dtype を宣言から集めて契約と照合し、**出力 slot 順の dtype 列**を返す。 */
 const nodeDtypes = (
   graph: IrGraph,
   node: IrNode,
   contract: OpContract,
   where: string,
-): { readonly inputs: readonly IrDtype[]; readonly output: IrDtype } => {
+): { readonly inputs: readonly IrDtype[]; readonly outputs: readonly IrDtype[] } => {
   const inputs = node.ins.map((name) => declarationOf(graph, name).dtype);
   const declaredOutputs = node.outs.map((name) => declarationOf(graph, name).dtype);
-  // 実行層（NodePlan）の出力列対応は ADR 0068 の次段。ここは契約層が返す列から
-  // 単一出力を取り出すだけに留める（現状の op は全て 1 本）。
   return {
     inputs,
-    output: resolveNodeDtypes(contract, node, inputs, declaredOutputs, where)[0],
+    outputs: resolveNodeDtypes(contract, node, inputs, declaredOutputs, where),
   };
 };
 
@@ -296,7 +305,13 @@ export const eligibleCompressedInitializers = (graph: IrGraph): ReadonlySet<stri
   return eligible;
 };
 
-/** 値名 → グラフ内での消費回数。MUST: `node.ins` の厳密な延べ計数（同じ値を 2 回取れば 2）。 */
+/**
+ * 値名 → グラフ内での消費回数。MUST: `node.ins` の厳密な延べ計数（同じ値を 2 回取れば 2）。
+ *
+ * NOTE: 多出力ノード（ADR 0068 決定 1）でも数え方は 1 文字も変わらない — 数えるのは**消費側**
+ * だけで、定義側が 1 本か複数本かに依らない。出力ごとの `uses` は「その値名の消費回数」を
+ * この表から引くだけ（recipe-builder の `#buildStep`）。
+ */
 export const countUses = (graph: IrGraph): ReadonlyMap<string, number> => {
   const counts = new Map<string, number>();
   for (const node of graph.nodes) {
@@ -433,39 +448,55 @@ export const planGraph = (graph: IrGraph, bindings: SymbolBindings): GraphPlan =
       }
       return shape;
     });
-    const outputName = node.outs[0];
-    const declaredShape = shapes.get(outputName);
-    if (declaredShape === undefined) {
-      throw new ExecutionError(`${where}: 出力 '${outputName}' の宣言が無い`);
-    }
+    const declaredShapes = node.outs.map((name) => {
+      const shape = shapes.get(name);
+      if (shape === undefined) {
+        throw new ExecutionError(`${where}: 出力 '${name}' の宣言が無い`);
+      }
+      return shape;
+    });
     // reshape / expand は「宣言 shape が目標形」、permute は attrs が要る（ADR 0011）。
     // 宣言を渡しても照合は下で必ず行う — 目標形として使う op だけが自明に一致するだけで、
     // 他の op は従来どおり計算 shape と宣言の食い違いで落ちる。
-    // 出力列対応は ADR 0068 の次段（ここは列から単一出力の shape を取り出すだけ）。
-    const [computed] = computeOutputShape(contract, inputShapes, where, {
-      declared: declaredShape,
+    // NOTE: 目標形を要求する 2 op（reshape / expand）は単一出力なので、{@link ShapeContext} は
+    // 宣言 shape を 1 本しか受けない（slot 0）。多出力 op の shape は入力から導く。
+    const computed = computeOutputShape(contract, inputShapes, where, {
+      declared: declaredShapes[0],
       attrs: node.attrs,
       bindings,
     });
-    if (
-      declaredShape.length !== computed.length ||
-      declaredShape.some((dim, i) => dim !== computed[i])
-    ) {
+    // MUST: 列長の一致をここで見る。契約が宣言する出力数（`node.outs` の本数 —
+    // assertNodeContract が済ませている）と shape 計算が返した列の長さがずれると、以下の
+    // 照合が undefined を触って TypeError になり、どの op のどの slot が欠けたのか出ない。
+    if (computed.length !== declaredShapes.length) {
       throw new ExecutionError(
-        `${where}: 出力 '${outputName}' の計算 shape [${computed.join(",")}] が宣言 [${
-          declaredShape.join(",")
-        }] と一致しない`,
+        `${where}: 出力 shape の計算が ${computed.length} 本（宣言は ${declaredShapes.length} 本）`,
       );
     }
+    declaredShapes.forEach((declaredShape, slot) => {
+      const shape = computed[slot];
+      if (
+        declaredShape.length !== shape.length ||
+        declaredShape.some((dim, i) => dim !== shape[i])
+      ) {
+        throw new ExecutionError(
+          `${where}: 出力 '${node.outs[slot]}' の計算 shape [${shape.join(",")}] が宣言 [${
+            declaredShape.join(",")
+          }] と一致しない`,
+        );
+      }
+    });
     const dtypes = nodeDtypes(graph, node, contract, where);
     return {
       node,
       contract,
       inputShapes,
       inputDtypes: dtypes.inputs,
-      outputName,
-      outputShape: computed,
-      outputDtype: dtypes.output,
+      outputs: node.outs.map((name, slot): NodeOutputPlan => ({
+        name,
+        shape: computed[slot],
+        dtype: dtypes.outputs[slot],
+      })),
     };
   });
 

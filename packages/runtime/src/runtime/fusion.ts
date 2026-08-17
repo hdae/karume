@@ -16,6 +16,9 @@
  * - MUST: 融合は演算列を潰すが**値は変えない**。丸め位置の保存はカーネル側の責務で、その
  *   手段（workgroup memory 往復による丸め障壁）が仕様保証でないことは各カーネルの docstring に
  *   書いてある。
+ * - MUST: 掴むのは**契約の出力数が 1 本**のノードだけ（{@link windowIsSingleOutput} —
+ *   ADR 0068 決定 1）。{@link FusedStep} は単一出力のままで、鎖のノードの出力は常に
+ *   `outputs[0]`（多出力 op の融合は語彙に入れていない）。
  *
  * ## 畳む先は 1 dispatch とは限らない
  *
@@ -50,6 +53,7 @@ import {
   LAYER_NORM_OP,
   layerNormAttrs,
   numel,
+  outputCountOf,
   SAFE_SOFTMAX_OP,
   sliceAttrs,
   softmaxDim,
@@ -236,10 +240,26 @@ type FusionContext = {
 const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
   a.length === b.length && a.every((dim, index) => dim === b[index]);
 
+/**
+ * 融合が扱えるのは**契約の出力数が 1 本**のノードだけ（ADR 0068 決定 1）。
+ *
+ * MUST: 判定は窓の全ノードで行い、1 本でも外れたら窓ごと諦める（掴めなければ既存の素の
+ * ノード列が必ず正しい）。{@link FusedStep} は単一出力で、内部値の畳み込み
+ * （{@link externalIns} / {@link internalsArePrivate}）も末尾出力の引き継ぎ
+ * （`build` の `outputName`）も「ノード 1 本 = 値 1 本」から導いている。多出力ノードが鎖に
+ * 入ると畳まれなかった出力を誰も定義しないまま消え、窓内 passthrough に入ると素のノードとして
+ * 前へ動かす対象になるので、どちらも matcher の綴りだけでは防げない。
+ * MUST: ここが唯一の判定点（{@link defineRule} が全ルールを通す）。ルール側の match に
+ * 書かせると、将来 topk / argmax の綴りに一致する窓を持つルールだけが黙って誤融合する。
+ */
+const windowIsSingleOutput = (window: readonly NodePlan[]): boolean =>
+  window.every((step) => outputCountOf(step.contract) === 1);
+
 /** 鎖の全ノードが f32 専業か（融合カーネルは全て f32 固定）。 */
 const allF32 = (chain: readonly NodePlan[]): boolean =>
   chain.every((step) =>
-    step.outputDtype === "f32" && step.inputDtypes.every((dtype) => dtype === "f32")
+    step.outputs.every((out) => out.dtype === "f32") &&
+    step.inputDtypes.every((dtype) => dtype === "f32")
   );
 
 /**
@@ -247,19 +267,24 @@ const allF32 = (chain: readonly NodePlan[]): boolean =>
  *
  * MUST: 融合後は内部値のバッファを 1 本も作らないので、外部 consumer や readback が 1 つでも
  * あれば値が消える。ここが全ルール共通の適格条件。
+ * MUST: ノードの**全出力**を見る（{@link windowIsSingleOutput} が多出力を先に落とすかどうかに
+ * 依らせない — 判定の順序を変えても結論が動かない形にしておく）。
  */
 const internalsArePrivate = (chain: readonly NodePlan[], context: FusionContext): boolean =>
   chain.slice(0, -1).every((step) =>
-    (context.useCounts.get(step.outputName) ?? 0) === 1 &&
-    !context.outputNames.has(step.outputName)
+    step.outputs.every((out) =>
+      (context.useCounts.get(out.name) ?? 0) === 1 && !context.outputNames.has(out.name)
+    )
   );
 
 /**
  * 鎖が消費した外部入力の延べ列（重複込み・元の node.ins の並び順）。
- * 内部値は畳まれて消えるので除く。
+ * 内部値は畳まれて消えるので除く（ノードの全出力が内部値）。
  */
 const externalIns = (chain: readonly NodePlan[]): readonly string[] => {
-  const internal = new Set(chain.slice(0, -1).map((step) => step.outputName));
+  const internal = new Set(
+    chain.slice(0, -1).flatMap((step) => step.outputs.map((out) => out.name)),
+  );
   return chain.flatMap((step) => step.node.ins.filter((name) => !internal.has(name)));
 };
 
@@ -284,7 +309,7 @@ const passthroughIsIndependent = (
   passthrough: readonly NodePlan[],
 ): boolean => {
   if (passthrough.length === 0) return true;
-  const defined = new Set(chain.map((step) => step.outputName));
+  const defined = new Set(chain.flatMap((step) => step.outputs.map((out) => out.name)));
   return passthrough.every((step) => step.node.ins.every((name) => !defined.has(name)));
 };
 
@@ -353,6 +378,7 @@ const assertTempLifetimes = (
  * MUST: 解放簿記の根拠（`ins` の延べ列）・畳んだ本数（`nodeCount`）・走査幅（`advance`）・
  * passthrough は**掴んだ窓と鎖から導く**。ルール側に宣言させると、同じ事実がルールの
  * 本数だけ複製され、1 本ずれても例外は出ない。
+ * MUST: 多出力ノードを含む窓は全ルールでここが落とす（{@link windowIsSingleOutput}）。
  */
 const defineRule = <Matched extends FusionMatch>(rule: {
   readonly name: FusionRuleName;
@@ -371,6 +397,9 @@ const defineRule = <Matched extends FusionMatch>(rule: {
   apply: (nodes, index, context) => {
     const matched = rule.match(nodes, index, context);
     if (matched === undefined) return undefined;
+    // 多出力ノード（ADR 0068 決定 1）は融合候補にしない。matcher の op 名の綴りは受理集合を
+    // 狭めるだけで「出力が 1 本」を保証しないので、窓の全ノードを契約から見る 1 箇所を置く。
+    if (!windowIsSingleOutput(matched.window)) return undefined;
     const folded = new Set(matched.chain);
     const passthrough = matched.window.filter((step) => !folded.has(step));
     // MUST: 鎖は窓の部分列。外れていれば窓外のノードを畳んだ（= 走査幅が足りず二重実行）か
@@ -425,7 +454,7 @@ const SILU_RULE = defineRule<SiluMatch>({
     if (!allF32(chain)) return undefined;
 
     const xName = sigmoid.node.ins[0];
-    const intermediateName = sigmoid.outputName;
+    const intermediateName = sigmoid.outputs[0].name;
     let multiplyOrder: SiluMulOrder;
     if (mul.node.ins[0] === xName && mul.node.ins[1] === intermediateName) {
       multiplyOrder = "x-sigmoid";
@@ -438,9 +467,9 @@ const SILU_RULE = defineRule<SiluMatch>({
     const shape = sigmoid.inputShapes[0];
     if (shape.length < 1 || shape.some((dim) => dim < 1)) return undefined;
     if (
-      !sameShape(sigmoid.outputShape, shape) ||
+      !sameShape(sigmoid.outputs[0].shape, shape) ||
       mul.inputShapes.some((inputShape) => !sameShape(inputShape, shape)) ||
-      !sameShape(mul.outputShape, shape)
+      !sameShape(mul.outputs[0].shape, shape)
     ) return undefined;
     if (!internalsArePrivate(chain, context)) return undefined;
 
@@ -448,8 +477,8 @@ const SILU_RULE = defineRule<SiluMatch>({
       window: chain,
       chain,
       xName,
-      outputName: mul.outputName,
-      outputShape: mul.outputShape,
+      outputName: mul.outputs[0].name,
+      outputShape: mul.outputs[0].shape,
       multiplyOrder,
     };
   },
@@ -510,11 +539,11 @@ const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
 
     const inputName = first.node.ins[0];
     if (
-      horizontal.node.ins[0] !== first.outputName ||
-      flatten.node.ins[0] !== horizontal.outputName ||
-      addHeightAxis.node.ins[0] !== flatten.outputName ||
-      vertical.node.ins[0] !== addHeightAxis.outputName ||
-      output.node.ins[0] !== vertical.outputName
+      horizontal.node.ins[0] !== first.outputs[0].name ||
+      flatten.node.ins[0] !== horizontal.outputs[0].name ||
+      addHeightAxis.node.ins[0] !== flatten.outputs[0].name ||
+      vertical.node.ins[0] !== addHeightAxis.outputs[0].name ||
+      output.node.ins[0] !== vertical.outputs[0].name
     ) return undefined;
 
     const inputShape = first.inputShapes[0];
@@ -529,12 +558,12 @@ const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
     ) return undefined;
 
     if (
-      !sameShape(first.outputShape, [flatRows, width, 1]) ||
-      !sameShape(horizontal.outputShape, [flatRows, width, 2]) ||
-      !sameShape(flatten.outputShape, [batchChannels, height, outWidth]) ||
-      !sameShape(addHeightAxis.outputShape, [batchChannels, height, 1, outWidth]) ||
-      !sameShape(vertical.outputShape, [batchChannels, height, 2, outWidth]) ||
-      !sameShape(output.outputShape, [batch, channels, outHeight, outWidth])
+      !sameShape(first.outputs[0].shape, [flatRows, width, 1]) ||
+      !sameShape(horizontal.outputs[0].shape, [flatRows, width, 2]) ||
+      !sameShape(flatten.outputs[0].shape, [batchChannels, height, outWidth]) ||
+      !sameShape(addHeightAxis.outputs[0].shape, [batchChannels, height, 1, outWidth]) ||
+      !sameShape(vertical.outputs[0].shape, [batchChannels, height, 2, outWidth]) ||
+      !sameShape(output.outputs[0].shape, [batch, channels, outHeight, outWidth])
     ) return undefined;
     if (!internalsArePrivate(chain, context)) return undefined;
 
@@ -543,8 +572,8 @@ const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
       chain,
       inputName,
       inputShape,
-      outputName: output.outputName,
-      outputShape: output.outputShape,
+      outputName: output.outputs[0].name,
+      outputShape: output.outputs[0].shape,
       width,
     };
   },
@@ -643,10 +672,10 @@ const ROPE_RULE = defineRule<RopeMatch>({
 
     const xName = first.node.ins[0];
     if (
-      second.node.ins[0] !== xName || neg.node.ins[0] !== second.outputName ||
-      cat.node.ins[0] !== neg.outputName || cat.node.ins[1] !== first.outputName ||
-      direct.node.ins[0] !== xName || cross.node.ins[0] !== cat.outputName ||
-      add.node.ins[0] !== direct.outputName || add.node.ins[1] !== cross.outputName
+      second.node.ins[0] !== xName || neg.node.ins[0] !== second.outputs[0].name ||
+      cat.node.ins[0] !== neg.outputs[0].name || cat.node.ins[1] !== first.outputs[0].name ||
+      direct.node.ins[0] !== xName || cross.node.ins[0] !== cat.outputs[0].name ||
+      add.node.ins[0] !== direct.outputs[0].name || add.node.ins[1] !== cross.outputs[0].name
     ) return undefined;
 
     const xShape = first.inputShapes[0];
@@ -666,10 +695,12 @@ const ROPE_RULE = defineRule<RopeMatch>({
     const halfShape = [1, heads, sequence, halfDim];
     const fullShape = [1, heads, sequence, headDim];
     if (
-      !sameShape(first.outputShape, halfShape) || !sameShape(second.outputShape, halfShape) ||
-      !sameShape(neg.outputShape, halfShape) || !sameShape(cat.outputShape, fullShape) ||
-      !sameShape(direct.outputShape, fullShape) || !sameShape(cross.outputShape, fullShape) ||
-      !sameShape(add.outputShape, fullShape)
+      !sameShape(first.outputs[0].shape, halfShape) ||
+      !sameShape(second.outputs[0].shape, halfShape) ||
+      !sameShape(neg.outputs[0].shape, halfShape) || !sameShape(cat.outputs[0].shape, fullShape) ||
+      !sameShape(direct.outputs[0].shape, fullShape) ||
+      !sameShape(cross.outputs[0].shape, fullShape) ||
+      !sameShape(add.outputs[0].shape, fullShape)
     ) return undefined;
 
     const tableShape = [1, 1, sequence, headDim];
@@ -685,8 +716,8 @@ const ROPE_RULE = defineRule<RopeMatch>({
       xName,
       cosName: direct.node.ins[1],
       sinName: cross.node.ins[1],
-      outputName: add.outputName,
-      outputShape: add.outputShape,
+      outputName: add.outputs[0].name,
+      outputShape: add.outputs[0].shape,
       sequence,
       headDim,
     };
@@ -773,9 +804,9 @@ const ADALN_RULE = defineRule<AdalnMatch>({
     if (!allF32(chain)) return undefined;
 
     if (
-      multiply.node.ins[0] !== norm.outputName ||
-      multiply.node.ins[1] !== modulate.outputName ||
-      offset.node.ins[0] !== multiply.outputName
+      multiply.node.ins[0] !== norm.outputs[0].name ||
+      multiply.node.ins[1] !== modulate.outputs[0].name ||
+      offset.node.ins[0] !== multiply.outputs[0].name
     ) return undefined;
 
     const rowShape = norm.inputShapes[0];
@@ -785,18 +816,18 @@ const ADALN_RULE = defineRule<AdalnMatch>({
     const affineShape = [dim];
     const modShape = modulationShape(rowShape, dim);
     if (
-      !sameShape(norm.outputShape, rowShape) ||
+      !sameShape(norm.outputs[0].shape, rowShape) ||
       !sameShape(norm.inputShapes[1], affineShape) ||
       !sameShape(norm.inputShapes[2], affineShape) ||
       !sameShape(modulate.inputShapes[0], modShape) ||
       !sameShape(modulate.inputShapes[1], [1]) ||
-      !sameShape(modulate.outputShape, modShape) ||
+      !sameShape(modulate.outputs[0].shape, modShape) ||
       !sameShape(multiply.inputShapes[0], rowShape) ||
       !sameShape(multiply.inputShapes[1], modShape) ||
-      !sameShape(multiply.outputShape, rowShape) ||
+      !sameShape(multiply.outputs[0].shape, rowShape) ||
       !sameShape(offset.inputShapes[0], rowShape) ||
       !sameShape(offset.inputShapes[1], modShape) ||
-      !sameShape(offset.outputShape, rowShape)
+      !sameShape(offset.outputs[0].shape, rowShape)
     ) return undefined;
     if (!internalsArePrivate(chain, context)) return undefined;
 
@@ -817,8 +848,8 @@ const ADALN_RULE = defineRule<AdalnMatch>({
       window: nodes.slice(index, cursor + 3),
       chain,
       binds,
-      outputName: offset.outputName,
-      outputShape: offset.outputShape,
+      outputName: offset.outputs[0].name,
+      outputShape: offset.outputs[0].shape,
       rows,
       dim,
       eps,
@@ -998,14 +1029,14 @@ const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
 
     // 結線（窓の並びだけでは「同じ形の別の鎖が隣り合っている」を排除できない）。
     if (
-      reshapeScores.node.ins[0] !== qk.outputName ||
-      addMask.node.ins[0] !== reshapeScores.outputName ||
-      softmax.node.ins[0] !== addMask.outputName ||
-      expandP.node.ins[0] !== softmax.outputName ||
-      reshapeP.node.ins[0] !== expandP.outputName ||
-      reshapeV.node.ins[0] !== expandV.outputName ||
-      pv.node.ins[0] !== reshapeP.outputName ||
-      pv.node.ins[1] !== reshapeV.outputName
+      reshapeScores.node.ins[0] !== qk.outputs[0].name ||
+      addMask.node.ins[0] !== reshapeScores.outputs[0].name ||
+      softmax.node.ins[0] !== addMask.outputs[0].name ||
+      expandP.node.ins[0] !== softmax.outputs[0].name ||
+      reshapeP.node.ins[0] !== expandP.outputs[0].name ||
+      reshapeV.node.ins[0] !== expandV.outputs[0].name ||
+      pv.node.ins[0] !== reshapeP.outputs[0].name ||
+      pv.node.ins[1] !== reshapeV.outputs[0].name
     ) return undefined;
 
     const [qShape, ktShape] = qk.inputShapes;
@@ -1017,19 +1048,19 @@ const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
     const scores4 = [1, heads, queries, keys];
     if (
       !sameShape(ktShape, [heads, headDim, keys]) ||
-      !sameShape(qk.outputShape, scores3) ||
-      !sameShape(reshapeScores.outputShape, scores4) ||
+      !sameShape(qk.outputs[0].shape, scores3) ||
+      !sameShape(reshapeScores.outputs[0].shape, scores4) ||
       !sameShape(addMask.inputShapes[1], [1, 1, 1, keys]) ||
-      !sameShape(addMask.outputShape, scores4) ||
-      !sameShape(softmax.outputShape, scores4) ||
+      !sameShape(addMask.outputs[0].shape, scores4) ||
+      !sameShape(softmax.outputs[0].shape, scores4) ||
       // 恒等 expand（複製軸を持たない）でなければ、素の列は実体化コピーを 1 本出す。
       !sameShape(expandP.inputShapes[0], scores4) ||
-      !sameShape(expandP.outputShape, scores4) ||
-      !sameShape(reshapeP.outputShape, scores3) ||
+      !sameShape(expandP.outputs[0].shape, scores4) ||
+      !sameShape(reshapeP.outputs[0].shape, scores3) ||
       !sameShape(expandV.inputShapes[0], [1, heads, keys, headDim]) ||
-      !sameShape(expandV.outputShape, [1, heads, keys, headDim]) ||
-      !sameShape(reshapeV.outputShape, [heads, keys, headDim]) ||
-      !sameShape(pv.outputShape, [heads, queries, headDim])
+      !sameShape(expandV.outputs[0].shape, [1, heads, keys, headDim]) ||
+      !sameShape(reshapeV.outputs[0].shape, [heads, keys, headDim]) ||
+      !sameShape(pv.outputs[0].shape, [heads, queries, headDim])
     ) return undefined;
     // 縮約軸は最終次元固定（契約が既に見ているが、窓の受理集合としても明示する）。
     if (softmaxDim(softmax.node.attrs ?? {}, "行ブロック attention の safe_softmax") !== 3) {
@@ -1052,8 +1083,8 @@ const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       window: chain,
       chain,
       binds,
-      outputName: pv.outputName,
-      outputShape: pv.outputShape,
+      outputName: pv.outputs[0].name,
+      outputShape: pv.outputs[0].shape,
       heads,
       queries,
       keys,
@@ -1188,7 +1219,7 @@ export const FUSION_RULES: readonly FusionRule[] = [
 /** 恒等 expand の別名化条件（ADR 0011 の追記）。1 軸でも複製があれば実体化コピーへ戻す。 */
 const aliasesInput = (plan: NodePlan): boolean =>
   plan.contract.kind === "reshape" ||
-  (plan.contract.kind === "expand" && sameShape(plan.inputShapes[0], plan.outputShape));
+  (plan.contract.kind === "expand" && sameShape(plan.inputShapes[0], plan.outputs[0].shape));
 
 /** ノード列を走査して融合ステップへ畳む。掴めなかったノードは素のまま並ぶ。 */
 export const planFusions = (
