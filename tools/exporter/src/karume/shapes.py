@@ -633,7 +633,7 @@ def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) ->
     `q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]` （+ 省略可能な `mask[1,1,M,N]`）→ `[B,H,M,D]`。
 
     MUST: B は q / k / v で**完全一致**（積だけを見ると取り違えが素通りする）。
-    MUST: H と Hkv は**整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv` — ADR 0067 決定 1）。
+    MUST: H と Hkv は**整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv ≥ 1` — ADR 0067 決定 1）。
     `r = H / Hkv` は導出値で attrs 欄を作らない。Hkv=1 の MQA も同じ式で表す。k / v 間の
     Hkv 一致・D 3 者同一・N=0 拒否は**取り違え検出線としてそのまま維持**する。
     MUST: D は 3 者とも同じ（v 側だけ別の長さを許すと取り違えが要素数で捕まらない）。
@@ -655,12 +655,22 @@ def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) ->
     # MUST: k / v の Hkv は**完全一致**（GQA で緩めるのは q との関係だけ — ADR 0067 決定 1）。
     if k[1] != v[1]:
         raise OpContractError(f"{where}: attention の Hkv（k / v の軸 1）が不一致 {show}")
+    # MUST: `Hkv ≥ 1` は下の等値短絡より**前**に見る — `(H,Hkv) = (0,0)` は構造等値なので整除枝に
+    # 落ちず、「head 軸を丸ごと落とした IR」が素通りする。`H = 0` 単独は `Hkv ≥ 1` とのペアになる
+    # ので下の `H ≥ Hkv` 枝が落とす（TS 側 computeOutputShape と鏡像）。記号次元は現行どおり
+    # 「宣言だけでは決められない」側（下の枝）に任せるので、定数の Hkv だけを見る。
+    if k[1].is_const and k[1].offset < 1:
+        raise OpContractError(
+            f"{where}: attention の Hkv {k[1].offset} が正でない（H は Hkv の正の整数倍 —"
+            f" GQA は H % Hkv == 0 かつ H ≥ Hkv ≥ 1・ADR 0067 決定 1）{show}"
+        )
     # GQA = **整除 broadcast**（ADR 0067 決定 1）。構造等値（記号のままの r=1 を含む）か、
     # 両方が定数で `H % Hkv == 0` かつ `H ≥ Hkv` だけを受理する。
     # MUST: `H ≥ Hkv` を整除と**別条件**で見る — `H = 0` は `0 % Hkv == 0` を満たすので、整除
     # だけだと「H を丸ごと落とした IR」が素通りする。broadcast の向きは常に kv → q。
-    # MUST: `Hkv == 0` を剰余より**先**に見る — Python の `%` は ZeroDivisionError を投げるので、
-    # TS 側（`4 % 0` が NaN で条件が真になる）と同じ契約エラーで落ちなくなる。
+    # MUST: `Hkv == 0` は上の `Hkv ≥ 1` 枝が剰余より**先**に落とす — Python の `%` は
+    # ZeroDivisionError を投げるので、条件順が崩れると TS 側（`4 % 0` が NaN で条件が真になる）と
+    # 同じ契約エラーで落ちなくなる（ここで `%` を書けるのはその順序が保たれているから）。
     if q[1] != k[1]:
         # 記号次元は「宣言だけでは決められない」として落とす（broadcast_extents と同じ規律 —
         # 黙って通すと実行してみないと分からない IR が書ける。head 数に記号の実測は無い）。
@@ -669,7 +679,7 @@ def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) ->
                 f"{where}: attention の H {q[1].to_dim()} と Hkv {k[1].to_dim()} は"
                 f"宣言だけでは整除 broadcast の可否を決められない {show}"
             )
-        if k[1].offset == 0 or q[1].offset < k[1].offset or q[1].offset % k[1].offset != 0:
+        if q[1].offset < k[1].offset or q[1].offset % k[1].offset != 0:
             raise OpContractError(
                 f"{where}: attention の H {q[1].offset} が Hkv {k[1].offset} の正の整数倍でない"
                 f"（GQA は H % Hkv == 0 かつ H ≥ Hkv — ADR 0067 決定 1）{show}"

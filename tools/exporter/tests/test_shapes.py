@@ -254,16 +254,16 @@ _ATTENTION = {"scale": 0.5}
 class TestAttentionGqaBroadcast:
     """GQA の整除 broadcast（ADR 0067 決定 1）— 適合表に書けない 2 面。
 
-    受理 / 拒否の集合そのものは適合表（op-contracts.json の GQA 8 ケース）が TS 側と
+    受理 / 拒否の集合そのものは適合表（op-contracts.json の GQA 9 ケース）が TS 側と
     突き合わせる。表では押さえられないのは:
 
-    1. **`Hkv = 0`** — TS は `H % 0` が NaN で条件が真になり契約エラーへ落ちるが、Python の
-       `%` は ZeroDivisionError を投げる。剰余より**先**に 0 を見る条件順が崩れると、同じ
-       入力で例外の型だけが両側で割れる（表が書けるのは「throws」までで型は書けない）。
+    1. **`Hkv = 0`** — 両実装とも剰余より**先**に `Hkv ≥ 1` を見るが、その順序が崩れたときの
+       壊れ方が違う: TS は `H % 0` が NaN で条件が真になり契約エラーへ落ちるのに対し、Python の
+       `%` は ZeroDivisionError を投げる（表が書けるのは「throws」までで例外の型は書けない）。
     2. **記号次元の H / Hkv** — 束縛前の宣言 shape でしか現れない（数値へ解決した時点で
        記号だった事実が消える）。
 
-    整数形の拒否 3 件は表と重なるが、条件の枝が 1 箇所に並ぶと「順序が崩れたときどの枝が
+    整数形の拒否 4 件は表と重なるが、条件の枝が 1 箇所に並ぶと「順序が崩れたときどの枝が
     壊れたか」がここで読めるので、GQA の枝の回帰として同じクラスに置く。
     """
 
@@ -296,10 +296,11 @@ class TestAttentionGqaBroadcast:
         ("heads", "kv_heads", "why"),
         [
             (0, 2, "H = 0（`0 % Hkv == 0` は整除を満たすので H ≥ Hkv を別条件で見る）"),
+            (0, 0, "(H,Hkv) = (0,0)（H = Hkv は等値で整除枝を短絡するので Hkv ≥ 1 を先に見る）"),
             (4, 3, "H が Hkv の整数倍でない"),
             (2, 4, "Hkv > H（broadcast の向きが逆 — q 側を増やす形は語彙に無い）"),
         ],
-        ids=("zero-h", "indivisible", "reversed"),
+        ids=("zero-h", "zero-both", "indivisible", "reversed"),
     )
     def test_a_head_count_that_is_not_a_positive_multiple_is_rejected(self, heads, kv_heads, why):
         with pytest.raises(OpContractError, match="正の整数倍"):

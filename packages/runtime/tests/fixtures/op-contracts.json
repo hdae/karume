@@ -1636,6 +1636,13 @@
     },
     {
       "op": "attention",
+      "ins": [[2, 0, 5, 4], [2, 0, 7, 4], [2, 0, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "(H,Hkv) = (0,0)（H = Hkv は等値で整除枝を短絡するので Hkv ≥ 1 を先に見る）"
+    },
+    {
+      "op": "attention",
       "ins": [[2, 4, 5, 4], [2, 2, 7, 4], [2, 4, 7, 4]],
       "attrs": { "scale": 0.5 },
       "throws": true,

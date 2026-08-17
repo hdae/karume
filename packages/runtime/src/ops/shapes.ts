@@ -528,11 +528,20 @@ export const computeOutputShape = (
       if (k[1] !== v[1]) {
         throw new OpContractError(`${where}: attention の Hkv（k / v の軸 1）が不一致 ${show}`);
       }
+      // MUST: `Hkv ≥ 1` は下の等値短絡より**前**に見る — `(H,Hkv) = (0,0)` は `q[1] !== k[1]` を
+      // 満たさないので整除枝に落ちず、「head 軸を丸ごと落とした IR」が素通りする。`H = 0` 単独は
+      // `Hkv ≥ 1` とのペアになるので下の `H ≥ Hkv` 枝が落とす（Python 側 `_attention` と鏡像）。
+      if (k[1] < 1) {
+        throw new OpContractError(
+          `${where}: attention の Hkv ${k[1]} が正でない（H は Hkv の正の整数倍 — GQA は` +
+            ` H % Hkv == 0 かつ H ≥ Hkv ≥ 1・ADR 0067 決定 1）${show}`,
+        );
+      }
       // GQA = **整除 broadcast**（ADR 0067 決定 1）。`H % Hkv == 0` かつ `H ≥ Hkv` だけを受理し、
       // `r = H / Hkv` は導出値（attrs 欄を作らない）。Hkv = 1 の MQA も同式で表す。
       // MUST: `H < Hkv` を別条件で弾く — `H = 0` は `0 % Hkv == 0` を満たすので、整除だけを見ると
-      // 「H を丸ごと落とした IR」が素通りする（Hkv = 0 も同じ枝で落ちる）。broadcast の向きは
-      // 常に kv → q で、q 側を増やす形は語彙に無い。
+      // 「H を丸ごと落とした IR」が素通りする（`Hkv = 0` は上の `Hkv ≥ 1` 枝が先に落とす）。
+      // broadcast の向きは常に kv → q で、q 側を増やす形は語彙に無い。
       if (q[1] !== k[1] && (q[1] < k[1] || q[1] % k[1] !== 0)) {
         throw new OpContractError(
           `${where}: attention の H ${q[1]} が Hkv ${k[1]} の正の整数倍でない（GQA は` +

@@ -228,6 +228,10 @@ Deno.test({
     assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
     const outputName = parsed.graph.outputs[0];
     const declared = parsed.graph.values[outputName].dtype;
+    // MUST: 形の検査は数値門でも独立に持つ — 下の census は timestamp-query が無い device で
+    // SKIP するので、そこに結線しておくと `repeat_kv` 実体化形（Hkv=16）へ再エクスポートした
+    // 資産が数値だけ通って GQA の検収でなくなる（数値は実体化形と完全に同じ）。
+    assertGqaForm(parsed);
 
     const gpu = await acquireGpu();
     const session = await createSession(gpu, parsed);

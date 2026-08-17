@@ -290,7 +290,7 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   - `attention`（f32、attrs `scale`、**アリティ 3 か 4**）— `out = softmax_lastdim((q·scale) @
     (k·scale)ᵀ + mask) @ v`（ADR [0023](decisions/0023-fused-attention.md)）。入力は
     **rank-4 head-first**（`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`・連続）で出力は
-    `[B,H,M,D]`。**H と Hkv は整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv` — GQA / MQA・
+    `[B,H,M,D]`。**H と Hkv は整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv ≥ 1` — GQA / MQA・
     ADR [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 1。
     `r = H / Hkv` は導出値で attrs 欄を持たない。B は完全一致・k/v 間の Hkv も完全一致）。
     **D は 3 者とも同じ**（v 側だけ別の長さを許すと「D を取り違えた IR」が

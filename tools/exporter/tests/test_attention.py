@@ -266,7 +266,7 @@ class TestUnsupportedFormsFailLoudly:
 class TestGqaIsAcceptedAsDivisibleBroadcast:
     """`enable_gqa=True` は保存ノードとして通る（ADR 0067 決定 1 の整除 broadcast）。
 
-    ハンドラは `enable_gqa` を**読まない** — 形の妥当性（`H % Hkv == 0` かつ `H ≥ Hkv`・
+    ハンドラは `enable_gqa` を**読まない** — 形の妥当性（`H % Hkv == 0` かつ `H ≥ Hkv ≥ 1`・
     k / v 間の Hkv 一致）を見るのは shapes 層の 1 箇所（convert の出口の
     `assert_graph_shapes` が全ノードを必ず通す）で、二重に検査すると受理集合が 2 箇所へ
     分かれる。**非整除の形はここでは踏めない** — torch 自身が「Number of heads in key and

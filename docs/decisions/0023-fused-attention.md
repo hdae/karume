@@ -40,7 +40,7 @@
    N=0 拒否。mask / causal / dropout / GQA は**欄を作らない**（欄の不存在が「語彙に無い」を
    構造で表す）。**→ このうち「q/k/v の H 完全一致」の 1 句のみ ADR
    [0067](0067-autoregressive-attention-vocabulary.md) 決定 1 が supersede**（2026-08-17 —
-   GQA / MQA は `H % Hkv == 0` かつ `H ≥ Hkv` の整除 broadcast で受理。`r = H / Hkv` は
+   GQA / MQA は `H % Hkv == 0` かつ `H ≥ Hkv ≥ 1` の整除 broadcast で受理。`r = H / Hkv` は
    導出値のままで「欄を作らない」は維持。B 完全一致・k/v 間 Hkv 一致・D 3 者同一・
    N=0 拒否も維持）。
 5. **エクスポータはターゲット別 preserved**: `export_module(…, preserved=…)` を通し、

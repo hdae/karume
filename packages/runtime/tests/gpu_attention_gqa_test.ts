@@ -27,7 +27,7 @@ import { attentionScoreUsesF16 } from "../src/kernels/score-storage.ts";
 import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 /** 半スケール（torch math decomp の `√scale_factor`）。D から導く契約どおりの値。 */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
@@ -81,6 +81,28 @@ const SHAPES: readonly GqaShape[] = [
 
 /** 故障注入で使う「r=4 を跨ぐ形」（head ごとにデータが違うので写像の誤りが値に出る）。 */
 const INJECT_SHAPE: GqaShape = SHAPES[3];
+
+/**
+ * i8a8 の**段別適格判定**（①QK は `D % 4`・③PV は `N % 4` — src/runtime/recipe-builder.ts）を
+ * 跨いだ GQA 形。GQA × i8a8 の拒否は**要求されたモード**で決まる（ADR 0067 決定 3）ので、
+ * 段が片方だけ非適格でも両方非適格でも**同じ 1 本のエラー**で落ちる。
+ *
+ * MUST: 適格形（SHAPES[2] は D=8 / N=8 で ①③ とも適格）だけを被験体にしない — 拒否条件を段別
+ * 適格判定へ誤用する退行（`gqa && qkI8a8 && pvI8a8` 等）は、**非適格形だけが黙って f32 / 混成へ
+ * 縮退する**形で出るので、適格形しか踏まない門は緑のまま通す。
+ */
+const I8A8_INELIGIBLE: readonly GqaShape[] = [
+  { name: "r2 D%4≠0（①QK 非適格・③PV 適格）", b: 2, h: 4, kv: 2, m: 5, n: 8, d: 6 },
+  { name: "r2 N%4≠0（①QK 適格・③PV 非適格）", b: 2, h: 4, kv: 2, m: 5, n: 7, d: 4 },
+  { name: "r2 D%4≠0 かつ N%4≠0（①③ とも非適格）", b: 2, h: 4, kv: 2, m: 5, n: 7, d: 6 },
+];
+
+/** 拒否理由の**不変部分**（形ごとに変わるのは `${where}` と `H / Hkv / r` の表示だけ）。 */
+const rejectionReason = (message: string, where: string): string => {
+  const at = message.indexOf("× i8a8");
+  assert(at >= 0, `${where}: GQA × i8a8 の拒否の文言が変わっている: ${message}`);
+  return message.slice(at);
+};
 
 /**
  * kv-head を H 本へ**実体化**する（repeat_kv）。
@@ -344,17 +366,21 @@ Deno.test({
  *
  * MUST: `TIMING_ACQUIRE_OPTIONS` を渡す（素の `acquireGpu()` では `lastRunTiming` が
  * undefined になり、キー検査が黙って空振りする）。
+ * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、走る
+ * ときは空の内訳を無条件に FAIL にする（`TIMING_ACQUIRE_OPTIONS` は feature 不在で
+ * `gpuTiming: false` に落ちるので、「entries が空なら次の形へ」で守ると全ケースが無検査のまま
+ * 緑になる — e2e_minicpm5_test.ts の census と同じ形）。
  */
 Deno.test({
-  name: "GQA のキーは r > 1 でだけ立つ（r=1 は従来キーのまま・実 GPU）",
-  ignore: !GPU_AVAILABLE,
+  name: "GQA のキーは r > 1 でだけ立つ（r=1 は従来キーのまま・実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       for (const shape of SHAPES) {
         const { q, k, v } = inputsFor(shape);
         const { keys } = await runAttention(gpu, q, k, v);
-        if (keys.length === 0) continue;
+        assert(keys.length > 0, `${shape.name}: 内訳が空（キー検査が空振りしている）`);
         const gqa = shape.h !== shape.kv;
         const attention = keys.filter((key) =>
           key.startsWith("attention_qk") || key.startsWith("attention_pv")
@@ -389,9 +415,13 @@ Deno.test({
  *
  * 恒真化の門: **同じ形の非 GQA（H = Hkv）は i8a8 で走る**こと（拒否の原因が GQA であって
  * 「その形が i8a8 で走らない」ではないことを固定する）。
+ *
+ * MUST: 段別適格判定を跨いだ非適格形（{@link I8A8_INELIGIBLE}）も**同じ**エラーで落ちること
+ * まで見る — 拒否が要求モードではなく段の適格性で決まる実装では、そこだけが沈黙で縮退する。
  */
 Deno.test({
-  name: "GQA × attentionCompute 'i8a8' は fail loudly（同形の非 GQA は走る・実 GPU）",
+  name:
+    "GQA × attentionCompute 'i8a8' は fail loudly（段別適格性に依らず・同形の非 GQA は走る・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const shape = SHAPES[2];
@@ -405,6 +435,27 @@ Deno.test({
         "GQA",
       );
       assert(error.message.includes("ADR 0067"), `案内が足りない: ${error.message}`);
+      // ①③ とも i8a8 適格な形（D=8 / N=8）での拒否理由。以下の非適格形はこれと**同一**の理由で
+      // 落ちる（形ごとに変わるのは H / Hkv / r の表示だけ）。
+      const reason = rejectionReason(error.message, shape.name);
+      for (const ineligible of I8A8_INELIGIBLE) {
+        // 被験体が本当に非適格であることを先に固定する（適格形が紛れ込むと被覆が消える）
+        assert(
+          ineligible.d % 4 !== 0 || ineligible.n % 4 !== 0,
+          `${ineligible.name}: ①③ とも i8a8 適格 = 非適格形の被覆になっていない`,
+        );
+        const inputs = inputsFor(ineligible);
+        const rejected = await assertRejects(
+          () => runAttention(gpu, inputs.q, inputs.k, inputs.v, undefined, options),
+          ExecutionError,
+          "GQA",
+        );
+        assertEquals(
+          rejectionReason(rejected.message, ineligible.name),
+          reason,
+          `${ineligible.name}: 適格形と拒否理由が違う（段別適格判定が拒否条件へ漏れている）`,
+        );
+      }
       // 非 GQA（実体化して H = Hkv にした同じ値）は i8a8 で走る
       const plain = await runAttention(gpu, q, kFull, vFull, undefined, options);
       assertEquals(plain.output.shape, [shape.b, shape.h, shape.m, shape.d], shape.name);
