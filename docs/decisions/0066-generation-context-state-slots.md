@@ -144,6 +144,36 @@ sampling / RNG（ホスト維持 — op-vocabulary 裁定済み）。
   独立の実行時スカラとして実装されること ②padding 行 no-op が機械検証されること
   （pad あり / なしで KV バイト同一 + 出力同一）③context 切替で「stale 読みゼロ +
   レシピ再導出ゼロ」が同時に成立すること（切替 A/B テスト）④仕事量合格条件
-  （∝ pastLength × queryLength）が attention 実装（ADR ⑤）で満たされること。
+  （追記 1 の訂正式）が attention 実装（ADR ⑤）で満たされること。
 - 「鍵は容量」の反例（llama.cpp の量子化 extent）を明記したことで、将来 decode 性能が
   容量鍵で頭打ちになった場合の転換先が記録に残る（その時は本 ADR の supersede）。
+
+## 追記（2026-08-17・第 3 巡レビュー反映 — 訂正 2 点・補強 3 点）
+
+accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）で確定した訂正と未決の閉鎖。
+いずれも一次ソースで再確認済み（調査 doc §7 に台帳追記）。
+
+1. **決定 3 の仕事量式を訂正**: 「∝ pastLength × queryLength」は pastLength=0 の causal
+   三角（chunk 内自己参照）が非ゼロであるため誤り。正 = **∝ queryLength ×
+   （有効 pastLength + queryLength）**（sliding は有効 past を窓で制限）。受入条件④は
+   この式で読む。
+2. **決定 6 の rewind 契約を差し替え**: sliding スロットは「エビクト済み範囲のみ拒否」では
+   足りない — エビクト発生後は **resident な位置への rewind も物理配置と論理範囲が一致
+   しない**（ORT GenAI は同理由で current 未満への rewind を全拒否 —
+   windowed_kv_cache.cpp:67-80 のコメントが一次根拠。左詰め compaction は持たない）。
+   契約: **sliding スロットを含む context の位置指定 rewind は fail loudly**（全スロット
+   非 sliding の context でのみ有効）。緩和は compaction 実装時の本 ADR 改訂。
+3. **失敗の原子性（決定 6 の補強）**: state 変更 dispatch（`state_append` を含む run）を
+   提出した後に run が失敗した場合、論理長は進まないが物理 ring は上書きされ得る —
+   **context は poison（無効化・以後の全操作 fail loudly）**とする。rollback / staging は
+   持たない（復旧 = 新 context + ホスト側再構築）。
+4. **論理長スカラの搬送路（決定 3 の補強）**: `pastLength` / `queryLength` は params
+   （内容アドレスキャッシュ — ADR 0042）に**載せない**。毎 step 値が変わるものを内容
+   アドレスに載せると「キャッシュ無界成長（limitations 既知）」と「PreparedPlan ヒット時に
+   導出相が走らず更新不能」の両方を踏む。搬送は **context 所有の可変 uniform バッファ
+   1 本**（毎 run の encode 前に writeBuffer・レシピからは固定束縛で参照）。
+5. **容量と binding 上限（決定 1 / 6 の補強）**: スロット単体の binding バイト数が
+   `maxStorageBufferBindingSize` を超える容量指定は `createGenerationContext` で
+   fail loudly（Gemma 4 E2B の full 層 131K 容量 × f32 は既定 128MiB を超えうる —
+   実用容量の診断は ADR ③ の estimator）。state 格納の f16 席（数値契約が変わるため
+   ADR 0058 流儀の opt-in）は**予約のみ**。

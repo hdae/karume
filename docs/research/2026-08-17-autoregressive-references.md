@@ -462,6 +462,32 @@ matcher の未接続（§3.3・high）④ multi-output の slot 別契約（§2�
 R2 の席の合格条件（workgroup 数 / 総反復 ∝ pastLength × queryLength）は §1.1 へ、
 safetensors F4 = MXF4 の精密化は §4.2 へ編入。
 
+### 第 3 巡 — Codex 5 本セット照合（2026-08-17・ADR 0066 追記 + 0067〜0070 へ反映済み）
+
+ADR 5 本（0066〜0070）を実コード + 参照 clone に対して照合。**漏れ 7（high 4）・
+矛盾 3（全 high）・反証 4 + uncertain 1** — 全てメインセッションが一次ソースで確認のうえ
+反映した:
+
+- 漏れ high: ①論理長スカラの GPU 搬送路（params 内容アドレスと非両立 → context 所有の
+  可変 uniform — 0066 追記 4）②sliding ring の論理→物理写像と state effect の順序規則
+  （→ 0067 決定 5b・nodes 配列順契約）③state 変更 run の失敗原子性（→ poison —
+  0066 追記 3）④Gemma 4 E2B full 層 KV の 128MiB binding 超過（→ 容量ゲート + f16 席 —
+  0066 追記 5）。medium: scale の co-shard（→ 0070）・shard 構築の transaction 境界
+  （→ 0070）・topk の受理領域（→ 0068）。
+- 矛盾: ①`state_append`（出力 0 本）× IR の outs 空拒否〈format/ir.ts:322-324 実測〉
+  （→ 0068 決定 1 で 0 本を契約宣言可へ）②group scale × ADR 0019 の keepdim broadcast
+  検査〈weight-storage.ts:140-150 実測〉（→ 0069 に scale 形 `[O, I/g]` を明文化）
+  ③shard 完全性集合に `storage.scale` が抜ける（→ 0070 で和集合へ補正）。
+- 反証: ①仕事量式「∝ past × query」は past=0 の causal 三角で誤り（正 =
+  `∝ query × (有効 past + query)` — 0066 追記 1）②`scale = amax/7` は全ゼロ group の
+  0 除算（→ clamp f32 tiny — 0019 と同文）③DTYPE_BYTES の bit 単純置換は不成立
+  （サイズ表 / 整列表 / view 型の 3 面分離 — 0069）④sliding の rewind は「エビクト済み
+  範囲のみ拒否」では足りず**エビクト後は全拒否**〈ORT windowed_kv_cache.cpp:67-80 の
+  コメント実測 — resident 位置でも論理範囲と物理配置が乖離〉（→ 0066 追記 2）。
+  uncertain: グラフ shard 先行で確定できるのは構造契約まで（→ 0070 で精密化）。
+- 副産物: vLLM に Gemma4 の KV 共有実装が実在（gemma4.py:462-488 —
+  `num_kv_shared_layers` の解決規則が §6.1 の config 事実と一致する第 3 の独立裏付け）。
+
 ## 8. 一次ソース
 
 shallow clone（2026-08-17 取得・commit 固定）:
