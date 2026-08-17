@@ -10,8 +10,9 @@
 
 - 構成: 掃引 8 レッグ（broad-shallow）→ 深掘り 3 レッグ（ADR 軸別・narrow-deep）→
   敵対検証 3 レッグ（深掘りの load-bearing 主張 18 本を独立反証）。
-- 検証結果: **holds 15 / refuted 3**（§7 台帳）。refuted 3 本（GQA 実装の過剰一般化・
-  「shape 等式を必ず破る」・「上流総意は物理 shape」）は**本文に訂正済みの形で反映した**。
+- 検証結果: 第 1 巡（ワークフロー内）**holds 15 / refuted 3**・第 2 巡（Codex 独立レビュー・
+  決定案込み）**新規 refuted 4 + 見落とし 4**（§7 台帳）。refuted は全て一次ソースで再確認の
+  うえ**本文に訂正済みの形で反映した**。
 - 掃引 1 本（検収モデル構造）は構造化出力の失敗で欠落 → 単発レッグで補充（§6）。
 - 引用形式は「リポ/相対パス:行 @commit」。カルメ側の要所引用（container.ts / executor.ts /
   ir-v1.md）はメインセッションが現物再確認済み。
@@ -53,7 +54,10 @@
 実在の反例であり、「計画鍵は常に容量」は業界の既定ではなく**トレードオフの選択**として
 ADR に書く。容量ぶん常に計算する素朴案は 131K 容量 / 100 token 使用時に 3 桁の無駄となり
 成立しないため、「extent を鍵に入れない」を守るなら **attention の仕事量を論理長に比例
-させる機構（indirect dispatch もしくはデータ駆動 early-exit）の席が同じ ADR に要る**。
+させる機構の席が同じ ADR に要る**。合格条件は「**workgroup 数または総反復回数が
+pastLength × queryLength に比例する**」こと（第 2 巡で精密化 — スレッド内の early-exit
+だけでは容量ぶんの dispatch / スケジューリングコストが残る。ORT の indirect dispatch は
+これを GPU 側で満たす実装）。
 
 ### 1.2 Session = 不変重み / GenerationContext = 可変 state の寿命分離
 
@@ -79,12 +83,19 @@ ADR に書く。容量ぶん常に計算する素朴案は 131K 容量 / 100 tok
 ### 1.3 prefill / decode の 2 実行形と chunked prefill
 
 - 別グラフ（MLC: prefill = seq_len 記号 / decode = 定数 1）が WebGPU 出荷経路の実例。
-- **chunked prefill は全実装にある**: web-llm は `prefill_chunk_size` がコンパイル時定数
-  （llm_chat.ts:353-356,865-878）、ORT GenAI は固定 window_size に切って pad token 埋め
-  （input_ids.cpp:118-200）、vLLM は capture 済みバケットへパディング
+- **chunked prefill は広く存在するが、chunk の実行形は割れる**（第 2 巡で訂正 — §7）:
+  ORT GenAI の**既定は全 prompt 一括**（DefaultInputIDs — input_ids.h:46-52 のコメントが
+  「In contrast, DefaultInputIDs processes all prompt tokens at once」と明記）で、固定
+  window + pad token 埋めは **WindowedInputIDs = 特定モデル向けの設定**
+  （input_ids.cpp:118-200 @f6a871d）。web-llm / MLC は `prefill_chunk_size` を**上限**と
+  する可変長 chunk（末尾 chunk は実長のまま実行 — llm_chat.ts:859-883・prefill は
+  seq_len 記号の別関数なので pad 不要）。vLLM は capture 済みバケットへパディング
   （vllm/v1/worker/gpu/model_runner.py:1109-1116,1638-1647 @7ea4b40）。
-  → **prefill 実行形は「1 種の固定長 chunk」へ畳める**（実行形は prefill-chunk と decode の
-  2 本だけになる）。
+- → 「**固定長 chunk 1 種 + pad**」は ORT Windowed 型・vLLM バケット型が採る**選択肢の
+  一つ**であって業界形ではない。カルメが固定 shape（PreparedPlan 再利用）を保つ目的で
+  この型を選ぶ場合、**queryLength（今回の実 chunk 長）を pastLength と独立の実行時スカラ
+  として持ち、padding 行の no-op 契約（KV 書込み・出力・仕事量の抑止）を ADR① で先に
+  固定する**ことが前提になる（第 2 巡の見落とし指摘② — high）。
 
 ### 1.4 R2 との突合で確定した分岐点
 
@@ -115,6 +126,16 @@ ADR に書く。容量ぶん常に計算する素朴案は 131K 容量 / 100 tok
   → **検収モデルの 3 種混在（sliding / 層間共有 / GQA）は既存実装で現実に起きている**。
   「層 × 均一 KV」前提は最初から捨て、名前付きスロット（per-slot shape・別名共有可）が正。
 
+### 1.6 カルメ固有の裁定点: GenerationContext × PreparedPlan の所有権（第 2 巡）
+
+prepared 鍵は**常駐入力の実体 ID を含み**、backing は焼き込み時に常駐テンソルを bind
+group へ畳み込む（executor.ts:1159-1174 — resident ID 衝突対策で入れた設計）。KV state を
+常駐入力と同型で扱うと、**context の識別子を鍵に入れれば** context 切替のたびに巨大
+backing が退役・再構築され、**入れなければ**別 context の KV を読む（例外なしの stale
+読み）。→ ADR① は「レシピ（bindings の純関数）の共有」と「backing / bind group（物理
+実体）の所有」を分離し、GenerationContext ごとの物理 state binding の帰属を裁定すること
+（第 2 巡の見落とし指摘① — high）。
+
 ## 2. decode 出口（ADR④ の根拠）
 
 - **全語彙 logits の readback を出さない形が主流**:
@@ -142,8 +163,15 @@ ADR に書く。容量ぶん常に計算する素朴案は 131K 容量 / 100 tok
 - カルメ側の正確な差分: **グラフ出力レベルの multi-output は既に動く**
   （executor.ts:1512-1521 の並列 mapAsync）。未実装は**ノードレベル多出力**で、
   `assertNodeContract` が `outs.length !== 1` を拒否（ops/contracts.ts:705-709）、
-  plan.ts:81,431 が `outs[0]` 前提。IR スキーマは複数 outs を許可済み（ir-v1.md）→
-  **ADR④ が触るのは contracts / plan / executor の 3 点で、IR 仕様改訂は不要**。
+  plan.ts:81,431 が `outs[0]` 前提。**加えて recipe 層（StepRecipe が単一
+  outputName / output / uses — recipe.ts:84-100）・recipe-builder（#buildStep が単一出力を
+  型・確保・retain で前提 — recipe-builder.ts:318-353）・エクスポータの契約門
+  （`len(node.outs) != 1` を明示拒否 — tools/exporter/src/karume/ops.py:1107-1110）にも
+  同じ前提が焼かれている**（第 2 巡で判明 — §7）。IR スキーマは複数 outs を許可済み
+  （ir-v1.md）で **IR 仕様改訂が不要な点は維持**だが、変更範囲は contracts / plan /
+  executor / recipe / recipe-builder / exporter の **6 点**で「独立小粒」ではない。
+  出力 slot ごとに dtype / shape が異なる契約（top-k = 値 f32 + index i32）の設計も
+  ADR④ の範囲（第 2 巡の見落とし指摘④ — medium）。
 
 ## 3. autoregressive attention / GQA / mask の語彙（ADR⑤ = G3 の根拠）
 
@@ -155,10 +183,13 @@ ADR に書く。容量ぶん常に計算する素朴案は 131K 容量 / 100 tok
 | ORT GQA   | **attrs + 値入力（mask tensor なし）**          | attrs `causal` / `local_window_size`、入力 `seqlens_k`（1D (batch)・= total−1）+ `total_sequence_length`（scalar）（docs/ContribOperators.md:2717,2725,2727,2762,2764 @dd64c8a） |
 | TVM / MLC | **述語計算（kernel 内・mask tensor 皆無）**     | `col < kv_len - qo_len + row + 1`、`causal` は実行時 int32 スカラ（\_kernel_common.py:130-144 / \_prefill_kernels.py:83,249 @27c2e01）                                           |
 
-- 「[M,N] 全体を実体化する」実装は皆無。llama.cpp 型でも decode（M=1・N=131072・f16）は
-  256KiB で足りるが、**prefill は破綻する**（n_kv=131072・chunk 512・f32 で 268MB >
-  maxStorageBufferBindingSize 128MiB — ADR 0060 の実測門）。→ **decode 専用の実体化 mask 枠は
-  残してよいが、長 context prefill は述語計算が必須**という非対称が確定。
+- 皆無なのは「**容量 × 容量（全系列 × 全系列）の常時実体化**」であり、現 step 行 × n_kv の
+  実体化は llama.cpp が実際に行う（prefill の M=ubatch でも二重ループで全セルを埋める —
+  llama-kv-cache.cpp:1613-1681。native には束縛上限が無いので成立する。第 2 巡で表現を
+  精密化 — §7）。WebGPU 側では decode（M=1・N=131072・f16 で 256KiB）は実体化で足りるが、
+  **prefill は破綻する**（n_kv=131072・chunk 512・f32 で 268MB >
+  maxStorageBufferBindingSize 128MiB — ADR 0060 の実測門）。→ **decode 専用の実体化 mask
+  枠は残してよいが、長 context prefill は述語計算が必須**という非対称が確定。
 - 一般化の注意（検証で付いた限定）: 「WebGPU 実装は mask tensor を持たない」ではない —
   ORT WebGPU も加算 bias `attention_bias`（S = 現 step 長）を実体化 tensor で受けられる。
   正確には「**TVM/MLC（WebGPU 出荷経路）が mask tensor 皆無**・他も行数を現 step 長に圧縮」。
@@ -182,11 +213,17 @@ ADR に書く。容量ぶん常に計算する素朴案は 131K 容量 / 100 tok
 - KV の確保は全実装が kv_heads 分のみ（llama.cpp/src/llama-kv-cache.cpp:207-232 ほか）。
   **repeat_kv 実体化を実行経路の既定に置く実装は無い**（フォールバック枠のみ）。
 - カルメへの写像: `wid.z = b*H + h` に対し `H = Hkv*r` なら `wid.z / r = b*Hkv + h/r` が
-  整数除算で厳密に成立（ORT と同一構成）。**変更点は gemm.ts の bbase 算術 — attention_qk
-  枝（:407）と attention_pv が使う共有枝（:408・linear と同居のため op 分岐が要る）の
-  2 箇所**。ADR 0060 決定 3 の行窓変種（base 算術のみ差分・K 縮約順の字面不変）と同型で、
-  ビット同一の論証が再利用できる（**論証であって実測ではない** — 実装時に A/B 証明が要る）。
-  r=1 の生成物バイト同一化は ORT JSEP の特殊化が先例。
+  整数除算で厳密に成立（ORT と同一構成）。**f32 融合経路の変更点は gemm.ts の bbase 算術 —
+  attention_qk 枝（:407）と attention_pv が使う共有枝（:408・linear と同居のため op 分岐が
+  要る）の 2 箇所**。ADR 0060 決定 3 の行窓変種（base 算術のみ差分・K 縮約順の字面不変）と
+  同型で、ビット同一の論証が再利用できる（**論証であって実測ではない** — 実装時に A/B
+  証明が要る）。r=1 の生成物バイト同一化は ORT JSEP の特殊化が先例。
+- **ただし i8a8 attention は別 WGSL で第 3 の変更面**（第 2 巡で判明 — §7）: head 基底が
+  qbase / kbase / qsbase / ksbase / sbase の 5 本あり（attention-i8a8.ts:378-382 —
+  K/scale・V/scale 側だけを kv-head へ写し、Q / S / O 側は q-head のままにする必要がある。
+  取り違えは「例外なしの誤値」と当該コメント自身が警告）、recipe-builder の K/V 量子化・
+  確保も `B*H` 前提（recipe-builder.ts:1396-1404 ほか）。ADR⑤ は **GQA × i8a8 を
+  「実装する」か「明示拒否する」かを裁定項目に含める**こと。
 
 ### 3.3 G3 の解決候補（op 語彙の最小変更）
 
@@ -195,6 +232,10 @@ ADR に書く。容量ぶん常に計算する素朴案は 131K 容量 / 100 tok
   supersede は ADR 0023 決定 4 のうち「H 完全一致」の 1 句のみ（「GQA は欄を作らない」は
   むしろ維持）。弱点: 分解経路は救えず **GQA モデルは SDPA 保存が事実上必須** —
   エクスポータの `enable_gqa` 全件拒否（aten_handlers.py:800-804）を条件付き受理へ改める。
+- **案 A の受入条件（第 2 巡の見落とし指摘③ — high）**: SDPA 保存が必須になると、現行唯一の
+  128MiB 回避である行ブロック matcher（fusion.ts:923-966 — **9 ノード分解 bmm 鎖専用**）を
+  **通らない**。保存 `attention` 経路への行ブロック実行（または述語 mask）と論理長 mask の
+  実装を ADR⑤ の受入条件に含めること（ADR 0060「残余・接続」の宿題と同体）。
 - 案 B — `bmm` にバッチ整除 broadcast（先例 = ggml の `t1->ne[2] % t0->ne[2] == 0`）:
   分解経路も開通するが、bmm の「バッチ完全一致」という意図的な取り違え検出線
   （ADR 0022/0023）を薄める。blast radius が案 A より大きい。
@@ -257,7 +298,12 @@ ADR に書く。容量ぶん常に計算する素朴案は 131K 容量 / 100 tok
 - **shape = 論理のまま、バイト数を型から導出**（GGUF/ggml）: テンソルは論理要素数 ne[] を
   保持し、`nbytes` は type の (blck_size, type_size) から導出（ggml/src/ggml.c:1296-1341 /
   gguf.cpp:668-733 — `ne[0] % blck_size == 0` を要求）。**safetensors 本家も同じ配置**で、
-  sub-byte dtype（F4 等）を持ち検証は `nelements * bitsize / 8`（safetensors/src/tensor.rs）。
+  sub-byte dtype を持ち検証は `nelements * bitsize / 8`（safetensors/src/tensor.rs）。
+  精密化（第 2 巡）: 本家の `F4` は **MXF4 系の float であって任意 int4 ではなく**、GGUF の
+  Q4 系は block scale 込みの複合 dtype — 「同配置」と言えるのは**論理 shape の扱いに限る**。
+  カルメが bit 幅一般化を採る場合は、総 bit 数 8 の倍数制約・pack 順・行 / group 境界・
+  scale テンソル形を**独自 dtype の契約として明文で固定**し、ADR 0063 の reader / writer /
+  verify を同時改訂することが条件。
 - **shape = 物理、論理は attrs / フィールドへ**（ORT / MLC）: MatMulNBits の
   `(N, k_blocks, blob_size)` + attrs K/N。
 - カルメ側の実際の制約は「宣言 shape = 実テンソル shape」等式そのものではなく
@@ -395,6 +441,26 @@ ADR に書く。容量ぶん常に計算する素朴案は 131K 容量 / 100 tok
 
 （refuted 4 本という数え方をしないこと — wt LB-1 と LB-2 は同じ訂正の 2 面。**本文
 §1〜§5 は全て verdict 反映後の記述**である。）
+
+### 第 2 巡 — Codex 独立レビュー（2026-08-17・全件を一次ソースで再確認済み）
+
+第 1 巡反映後の本文と ADR 決定案 4 件（執筆順 / G3 案 A / packed bit 幅一般化 /
+1 本ずつ裁定）へ独立レンズで反証を依頼した結果。**新規 refuted 4**（全て confirmed →
+本文訂正済み）+ **見落とし 4**（本文編入済み）。決定案 4 件はいずれも
+**go-with-condition**（方向維持・条件は各節に記載）。
+
+| 対象 | 指摘                                                                                              | 帰結                                                                   |
+| ---- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| §1.3 | 「固定長 chunk 1 種に畳める」は過剰一般化（ORT GenAI 既定は全量一括・web-llm は可変長 chunk）     | §1.3 訂正。queryLength 独立スカラ + padding no-op 契約を ADR① の前提へ |
+| §2   | ADR④ の変更範囲は 3 点でなく 6 点（recipe / recipe-builder / exporter 契約門も単一出力前提）      | §2 訂正。slot 別 dtype/shape 契約も範囲へ                              |
+| §3.1 | 「[M,N] 実体化は皆無」は不正確（llama.cpp は現 step 行 × n_kv を prefill でも実体化）             | §3.1 の表現を精密化                                                    |
+| §3.2 | 「変更 2 箇所」は f32 融合経路限定（i8a8 attention の head 基底 5 本 + recipe-builder が第 3 面） | §3.2 訂正。GQA × i8a8 の実装 / 明示拒否を ADR⑤ 裁定項目へ              |
+
+見落とし（編入先）: ① GenerationContext × PreparedPlan の所有権分離（§1.6・high）
+② queryLength の実行時スカラ化と padding no-op（§1.3・high）③ 保存 SDPA と行ブロック
+matcher の未接続（§3.3・high）④ multi-output の slot 別契約（§2・medium）。
+R2 の席の合格条件（workgroup 数 / 総反復 ∝ pastLength × queryLength）は §1.1 へ、
+safetensors F4 = MXF4 の精密化は §4.2 へ編入。
 
 ## 8. 一次ソース
 
