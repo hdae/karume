@@ -245,7 +245,7 @@ export const referenceUnary = (
   const scalars = scalarParamValues(contract, attrs, "reference").map((value) =>
     Math.fround(value)
   );
-  const outDtype = outputDtypeOf(contract, x.dtype, "reference");
+  const outDtype = outputDtypeOf(contract, 0, x.dtype, "reference");
   if (op === "ge_scalar" || op === "le_scalar" || op === "gt_scalar") {
     const compare = COMPARE_SCALAR[op];
     for (let i = 0; i < values.length; i += 1) values[i] = compare(x.data[i], scalars[0]) ? 1 : 0;
@@ -298,7 +298,7 @@ export const referenceBinary = (op: BinaryOpName, a: RefTensor, b: RefTensor): R
   if (a.dtype !== b.dtype) {
     throw new ReferenceOpError(`op '${op}' の入力 dtype が混在（${a.dtype} / ${b.dtype}）`);
   }
-  const shape = computeOutputShape(contract, [a.shape, b.shape], "reference");
+  const shape = computeOutputShape(contract, [a.shape, b.shape], "reference")[0];
   const evaluate = binaryEvaluator(op, a.dtype);
   const values = new Array<number>(numel(shape));
   for (let i = 0; i < values.length; i += 1) {
@@ -306,7 +306,7 @@ export const referenceBinary = (op: BinaryOpName, a: RefTensor, b: RefTensor): R
     const vb = b.data[broadcastIndex(i, shape, b.shape)];
     values[i] = evaluate(va, vb);
   }
-  return materialize(outputDtypeOf(contract, a.dtype, "reference"), shape, values);
+  return materialize(outputDtypeOf(contract, 0, a.dtype, "reference"), shape, values);
 };
 
 /**
@@ -322,14 +322,14 @@ export const referenceWhere = (cond: RefTensor, a: RefTensor, b: RefTensor): Ref
   assertSlotDtype(contract, 0, cond.dtype, "reference");
   assertSlotDtype(contract, 1, a.dtype, "reference");
   assertSlotDtype(contract, 2, b.dtype, "reference");
-  const shape = computeOutputShape(contract, [cond.shape, a.shape, b.shape], "reference");
+  const shape = computeOutputShape(contract, [cond.shape, a.shape, b.shape], "reference")[0];
   const values = new Array<number>(numel(shape));
   for (let i = 0; i < values.length; i += 1) {
     values[i] = cond.data[broadcastIndex(i, shape, cond.shape)] !== 0
       ? a.data[broadcastIndex(i, shape, a.shape)]
       : b.data[broadcastIndex(i, shape, b.shape)];
   }
-  return materialize(outputDtypeOf(contract, cond.dtype, "reference"), shape, values);
+  return materialize(outputDtypeOf(contract, 0, cond.dtype, "reference"), shape, values);
 };
 
 /**
@@ -351,7 +351,7 @@ export const referenceCumsum = (
 ): RefTensor => {
   const contract = resolveOpContract("cumsum");
   assertDtype(contract, x.dtype, "reference");
-  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs })[0];
   const dim = shape[shape.length - 1];
   const rows = numel(shape.slice(0, -1));
   const out = new Float32Array(numel(shape));
@@ -385,7 +385,7 @@ export const referenceMatmul = (a: RefTensor, b: RefTensor): RefTensor => {
   const contract = resolveOpContract("matmul");
   assertDtype(contract, a.dtype, "reference");
   assertDtype(contract, b.dtype, "reference");
-  const shape = computeOutputShape(contract, [a.shape, b.shape], "reference");
+  const shape = computeOutputShape(contract, [a.shape, b.shape], "reference")[0];
   const [m, n] = shape;
   const k = a.shape[1];
   const out = new Float32Array(m * n);
@@ -411,7 +411,7 @@ export const referenceBmm = (a: RefTensor, b: RefTensor): RefTensor => {
   const contract = resolveOpContract("bmm");
   assertDtype(contract, a.dtype, "reference");
   assertDtype(contract, b.dtype, "reference");
-  const shape = computeOutputShape(contract, [a.shape, b.shape], "reference");
+  const shape = computeOutputShape(contract, [a.shape, b.shape], "reference")[0];
   const [batch, m, n] = shape;
   const k = a.shape[2];
   const out = new Float32Array(batch * m * n);
@@ -445,7 +445,7 @@ export const referenceGather = (src: RefTensor, index: RefTensor): RefTensor => 
   const contract = resolveOpContract("gather");
   assertSlotDtype(contract, 0, src.dtype, "reference");
   assertSlotDtype(contract, 1, index.dtype, "reference");
-  const shape = computeOutputShape(contract, [src.shape, index.shape], "reference");
+  const shape = computeOutputShape(contract, [src.shape, index.shape], "reference")[0];
   const cols = shape[shape.length - 1];
   const srcCols = src.shape[src.shape.length - 1];
   const rows = numel(shape.slice(0, -1));
@@ -483,8 +483,8 @@ export const referenceRowReduce = (
   const contract = resolveOpContract(op);
   assertDtype(contract, x.dtype, "reference");
   const attrs = { dim: axis };
-  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
-  const outDtype = outputDtypeOf(contract, x.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs })[0];
+  const outDtype = outputDtypeOf(contract, 0, x.dtype, "reference");
   const dim = x.shape[axis];
   const inner = numel(x.shape.slice(axis + 1));
   const count = numel(shape);
@@ -605,7 +605,7 @@ export const referenceSlice = (
 ): RefTensor => {
   const contract = resolveOpContract("slice");
   assertDtype(contract, x.dtype, "reference");
-  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs })[0];
   const { dim, start } = sliceAttrs(attrs, "reference");
   const rank = x.shape.length;
   const values = new Array<number>(numel(shape));
@@ -642,7 +642,7 @@ export const referenceCat = (
   for (const input of inputs) assertDtype(contract, input.dtype, "reference");
   const shape = computeOutputShape(contract, inputs.map((input) => input.shape), "reference", {
     attrs,
-  });
+  })[0];
   const dim = catDim(attrs, "reference");
   const rank = shape.length;
   const values = new Array<number | undefined>(numel(shape)).fill(undefined);
@@ -683,7 +683,7 @@ export const referencePad = (
 ): RefTensor => {
   const contract = resolveOpContract("pad");
   assertDtype(contract, x.dtype, "reference");
-  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs })[0];
   const { left } = padAttrs(attrs, "reference");
   const lengthIn = x.shape[x.shape.length - 1];
   const lengthOut = shape[shape.length - 1];
@@ -709,7 +709,7 @@ export const referenceFlip = (
 ): RefTensor => {
   const contract = resolveOpContract("flip");
   assertDtype(contract, x.dtype, "reference");
-  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs })[0];
   const dim = flipDim(attrs, "reference");
   const rank = shape.length;
   const values = new Array<number>(x.data.length);
@@ -782,7 +782,7 @@ export const referenceSymPrefixSlice = (x: RefTensor, shape: readonly number[]):
 export const referenceLinear = (x: RefTensor, weight: RefTensor, bias: RefTensor): RefTensor => {
   const contract = resolveOpContract("linear");
   for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
-  const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference");
+  const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference")[0];
   const outFeatures = weight.shape[0];
   const inFeatures = weight.shape[1];
   const rows = numel(shape.slice(0, -1));
@@ -816,7 +816,7 @@ export const referenceLayerNorm = (
   for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
   const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
     attrs,
-  });
+  })[0];
   const { eps } = layerNormAttrs(attrs, "reference");
   const dim = shape[shape.length - 1];
   const rows = numel(shape.slice(0, -1));
@@ -855,7 +855,7 @@ export const referenceRmsNorm = (
 ): RefTensor => {
   const contract = resolveOpContract("rms_norm");
   for (const input of [x, weight]) assertDtype(contract, input.dtype, "reference");
-  const shape = computeOutputShape(contract, [x.shape, weight.shape], "reference", { attrs });
+  const shape = computeOutputShape(contract, [x.shape, weight.shape], "reference", { attrs })[0];
   const eps = rmsNormEps(attrs, "reference");
   const dim = shape[shape.length - 1];
   const rows = numel(shape.slice(0, -1));
@@ -889,7 +889,7 @@ const softmaxLike = (
 ): RefTensor => {
   const contract = resolveOpContract(safe ? "safe_softmax" : "softmax");
   assertDtype(contract, x.dtype, "reference");
-  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs })[0];
   const dim = shape[shape.length - 1];
   const rows = numel(shape.slice(0, -1));
   const out = new Float32Array(numel(shape));
@@ -949,7 +949,7 @@ export const referenceAttention = (
     inputs.map((input) => input.shape),
     "reference",
     { attrs },
-  );
+  )[0];
   // GPU 側は params の f32 語で運ぶので、オラクルも f32 へ丸めた値を使う（masked_fill と同じ）。
   const scale = Math.fround(attentionScale(attrs, "reference"));
   const [batches, heads, rows, depth] = shape;
@@ -1014,7 +1014,7 @@ export const referenceEmbedding = (weight: RefTensor, index: RefTensor): RefTens
   const contract = resolveOpContract("embedding");
   assertSlotDtype(contract, 0, weight.dtype, "reference");
   assertSlotDtype(contract, 1, index.dtype, "reference");
-  const shape = computeOutputShape(contract, [weight.shape, index.shape], "reference");
+  const shape = computeOutputShape(contract, [weight.shape, index.shape], "reference")[0];
   const vocab = weight.shape[0];
   const hidden = weight.shape[1];
   const out = new Float32Array(numel(shape));
@@ -1047,7 +1047,7 @@ export const referenceMaskedFill = (
   const contract = resolveOpContract("masked_fill");
   assertSlotDtype(contract, 0, x.dtype, "reference");
   assertSlotDtype(contract, 1, mask.dtype, "reference");
-  const shape = computeOutputShape(contract, [x.shape, mask.shape], "reference");
+  const shape = computeOutputShape(contract, [x.shape, mask.shape], "reference")[0];
   const fill = Math.fround(maskedFillValue(attrs, "reference"));
   const out = new Float32Array(numel(shape));
   for (let i = 0; i < out.length; i += 1) {
@@ -1073,7 +1073,7 @@ export const referenceConv1d = (
   for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
   const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
     attrs,
-  });
+  })[0];
   const { stride, padding, dilation, groups } = conv1dAttrs(attrs, "reference");
   const [batch, channelsOut, lengthOut] = shape;
   const channelsIn = x.shape[1];
@@ -1126,7 +1126,7 @@ export const referenceConv2d = (
   for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
   const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
     attrs,
-  });
+  })[0];
   const { stride, padding, dilation, groups } = conv2dAttrs(attrs, "reference");
   const [batch, channelsOut, heightOut, widthOut] = shape;
   const channelsIn = x.shape[1];
@@ -1185,7 +1185,7 @@ export const referenceConvTranspose1d = (
   for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
   const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
     attrs,
-  });
+  })[0];
   const { stride, padding } = convTranspose1dAttrs(attrs, "reference");
   const [batch, channelsOut, lengthOut] = shape;
   const channelsIn = x.shape[1];
@@ -1248,7 +1248,7 @@ export const referenceDeformConv2d = (
     [x.shape, weight.shape, offset.shape, mask.shape, bias.shape],
     "reference",
     { attrs },
-  );
+  )[0];
   const { padding } = deformConv2dAttrs(attrs, "reference");
   const [batch, channelsOut, heightOut, widthOut] = shape;
   const channelsIn = x.shape[1];
@@ -1357,7 +1357,7 @@ export const referenceUpsampleBilinear2d = (
 ): RefTensor => {
   const contract = resolveOpContract("upsample_bilinear2d");
   assertDtype(contract, x.dtype, "reference");
-  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs })[0];
   upsampleBilinear2dAttrs(attrs, "reference");
   const [batch, channels, heightOut, widthOut] = shape;
   const heightIn = x.shape[2];
@@ -1417,7 +1417,7 @@ export const referenceGruScan = (
     contract,
     [gi.shape, initial.shape, weight.shape, bias.shape],
     "reference",
-  );
+  )[0];
   const [time, batch, hidden] = shape;
   const gates = 3 * hidden;
   const out = new Float32Array(numel(shape));

@@ -96,9 +96,9 @@ const assertSlotDtype = (op: string, slot: number, dtype: IrDtype): void => {
   }
 };
 
-/** 出力 dtype は契約表の写像から取る（codegen が独自に決めない）。 */
+/** 出力 dtype は契約表の写像から取る（codegen が独自に決めない）— elementwise は単一出力。 */
 const outputDtype = (op: string, slotZeroDtype: IrDtype): IrDtype =>
-  outputDtypeOf(resolveOpContract(op), slotZeroDtype, "elementwise codegen");
+  outputDtypeOf(resolveOpContract(op), 0, slotZeroDtype, "elementwise codegen");
 
 const canonicalize = (spec: ElementwiseSpec): CanonicalSpec => {
   if (!Number.isSafeInteger(spec.rank) || spec.rank < 1) {

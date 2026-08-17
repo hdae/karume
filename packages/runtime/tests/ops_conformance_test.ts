@@ -6,8 +6,9 @@
 // （tests/fixtures/dim-grammar.json と同じ規律）。
 //
 // ここが見るのは「両実装で沈黙のうちに割れうる契約面」だけ:
-// op 名の全集合 / アリティ / スロット dtype / attrs キー集合 / attrs の値域 / 出力 shape 規則
-// （strided コピー族の rank 上限を含む）/ 低精度格納の適格スロット（ADR 0018）。
+// op 名の全集合 / アリティ / スロット dtype / attrs キー集合 / attrs の値域 / 出力数と
+// 出力 slot 別の dtype 写像（ADR 0068 決定 1）/ 出力 shape 規則（strided コピー族の rank
+// 上限を含む）/ 低精度格納の適格スロット（ADR 0018）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { STRIDED_RANK } from "../src/codegen/strided.ts";
@@ -18,6 +19,7 @@ import {
   computeOutputShape,
   OP_CONTRACTS,
   OpContractError,
+  outputCountOf,
   resolveOpContract,
   WEIGHT_CHANNEL_AXES,
   WEIGHT_SLOTS,
@@ -35,8 +37,11 @@ type OpEntry = {
   /** 末尾に省略可能な入力を持つ op の上限（attention の mask のみ。無ければ undefined）。 */
   readonly maxArity: number | undefined;
   readonly dtypes: DtypeSpec;
-  /** スロット 0 の入力 dtype → 出力 dtype（恒等な op では表に無い = undefined）。 */
-  readonly outDtypes: Readonly<Record<string, string>> | undefined;
+  /**
+   * **出力 slot 別**の「スロット 0 の入力 dtype → その出力の dtype」写像の列（ADR 0068 決定 1）。
+   * 恒等な単一出力 op では表に無い = undefined（= 長さ 1 の恒等列）。
+   */
+  readonly outDtypes: readonly Readonly<Record<string, string>>[] | undefined;
   readonly attrs: readonly string[];
   /** 低精度格納が適格になる重みスロット（ADR 0018。持たない op では undefined）。 */
   readonly weightSlot: number | undefined;
@@ -57,7 +62,8 @@ type ShapeCase = {
   readonly attrs?: Readonly<Record<string, unknown>>;
   readonly declared?: readonly IrDim[];
   readonly bindings: Readonly<Record<string, number>>;
-  readonly out?: readonly IrDim[];
+  /** **出力 slot 別**の shape の列（ADR 0068 決定 1 — 現状の op は全て長さ 1）。 */
+  readonly outs?: readonly (readonly IrDim[])[];
   readonly throws: boolean;
   readonly why: string;
 };
@@ -116,8 +122,8 @@ const asOpEntry = (raw: unknown): OpEntry => {
   const arity = field(raw, "arity");
   if (typeof arity !== "number") throw new Error("fixture: arity が数値でない");
   const outDtypes = raw["out_dtypes"];
-  if (outDtypes !== undefined && !isRecord(outDtypes)) {
-    throw new Error("fixture: out_dtypes が表でない");
+  if (outDtypes !== undefined && !Array.isArray(outDtypes)) {
+    throw new Error("fixture: out_dtypes が出力 slot 別の列でない");
   }
   const variadic = raw["variadic"];
   if (variadic !== undefined && variadic !== true) {
@@ -145,12 +151,17 @@ const asOpEntry = (raw: unknown): OpEntry => {
     variadic: variadic === true,
     maxArity,
     dtypes: asDtypeSpec(field(raw, "dtypes")),
-    outDtypes: outDtypes === undefined ? undefined : Object.fromEntries(
-      Object.entries(outDtypes).map(([from, to]) => {
-        if (typeof to !== "string") throw new Error(`fixture: out_dtypes[${from}] が文字列でない`);
-        return [from, to];
-      }),
-    ),
+    outDtypes: outDtypes?.map((slot, index) => {
+      if (!isRecord(slot)) throw new Error(`fixture: out_dtypes[${index}] が表でない`);
+      return Object.fromEntries(
+        Object.entries(slot).map(([from, to]) => {
+          if (typeof to !== "string") {
+            throw new Error(`fixture: out_dtypes[${index}][${from}] が文字列でない`);
+          }
+          return [from, to];
+        }),
+      );
+    }),
     attrs: strings(field(raw, "attrs"), "attrs"),
     weightSlot,
     channelAxis,
@@ -172,7 +183,7 @@ const asShapeCase = (raw: unknown): ShapeCase => {
   const op = String(field(raw, "op"));
   const attrs = raw["attrs"];
   const declared = raw["declared"];
-  const out = raw["out"];
+  const outs = raw["outs"];
   const bindings: Record<string, number> = {};
   if (raw["bindings"] !== undefined) {
     if (!isRecord(raw["bindings"])) throw new Error(`fixture: ${op} の bindings が表でない`);
@@ -182,8 +193,10 @@ const asShapeCase = (raw: unknown): ShapeCase => {
     }
   }
   const throws = raw["throws"] === true;
-  if (throws === (out !== undefined)) {
-    throw new Error(`fixture: shapes ケースは out か throws のどちらか一方 ${JSON.stringify(raw)}`);
+  if (throws === (outs !== undefined)) {
+    throw new Error(
+      `fixture: shapes ケースは outs か throws のどちらか一方 ${JSON.stringify(raw)}`,
+    );
   }
   if (attrs !== undefined && !isRecord(attrs)) {
     throw new Error(`fixture: ${op} の attrs がオブジェクトでない`);
@@ -196,7 +209,9 @@ const asShapeCase = (raw: unknown): ShapeCase => {
     attrs: attrs === undefined ? undefined : attrs,
     declared: declared === undefined ? undefined : dims(declared, `${op}.declared`),
     bindings,
-    out: out === undefined ? undefined : dims(out, `${op}.out`),
+    outs: outs === undefined
+      ? undefined
+      : array(outs, `${op}.outs`).map((shape, index) => dims(shape, `${op}.outs[${index}]`)),
     throws,
     why: typeof raw["why"] === "string" ? raw["why"] : "",
   };
@@ -289,14 +304,23 @@ Deno.test("適合表の出力 dtype 写像が契約表と一致する", async ()
     const contract = resolveOpContract(entry.op);
     const slots = contract.slotDtypes;
     const domain = slots.kind === "uniform" ? slots.accept : slots.slots[0];
-    // 省略された op は「スロット 0 の受理集合上の恒等写像」が期待値。
-    const expected = Object.fromEntries(
-      [...domain].sort().map((dtype) => [dtype, entry.outDtypes?.[dtype] ?? dtype]),
+    // 省略された op は「出力 1 本・スロット 0 の受理集合上の恒等写像」が期待値。
+    const expected = (entry.outDtypes ?? [{}]).map((slot) =>
+      Object.fromEntries([...domain].sort().map((dtype) => [dtype, slot[dtype] ?? dtype]))
     );
     assertEquals(
-      Object.fromEntries([...contract.outputDtypes].sort(([a], [b]) => a.localeCompare(b))),
+      contract.outputDtypes.map((slot) =>
+        Object.fromEntries([...slot].sort(([a], [b]) => a.localeCompare(b)))
+      ),
       expected,
-      `${entry.op}: 出力 dtype 写像`,
+      `${entry.op}: 出力 slot 別の dtype 写像`,
+    );
+    // 出力数は写像の列長そのもの（表と実装で本数が割れると、2 本目の出力の dtype が
+    // 誰にも照合されない状態になる）。
+    assertEquals(
+      outputCountOf(contract),
+      expected.length,
+      `${entry.op}: 契約が宣言する出力数`,
     );
   }
 });
@@ -397,11 +421,15 @@ Deno.test("適合表の出力 shape 規則を computeOutputShape がそのとお
       );
       continue;
     }
+    const computed = computeOutputShape(contract, ins, "t", context);
     assertEquals(
-      computeOutputShape(contract, ins, "t", context),
-      resolveDims(testCase.out ?? [], testCase.bindings),
+      computed,
+      (testCase.outs ?? []).map((shape) => resolveDims(shape, testCase.bindings)),
       label(testCase),
     );
+    // shape 列の長さが契約の宣言出力数と一致する（表の outs と ops 節の out_dtypes 列が
+    // 別々に育つと、shape だけ 2 本・dtype だけ 1 本という契約が書けてしまう）。
+    assertEquals(computed.length, outputCountOf(contract), `${label(testCase)}: 出力数`);
   }
 });
 

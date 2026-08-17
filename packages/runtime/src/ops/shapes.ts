@@ -102,13 +102,22 @@ const requireDeclared = (
   return context.declared;
 };
 
-/** 束縛解決済みの入力 shape から出力 shape を計算する。 */
+/**
+ * 単一出力 op の出力列（出力が 1 本であることをアームごとに明示する — ADR 0068 決定 1）。
+ * 多出力 op のアームは列を直接組んで返す。
+ */
+const sole = (shape: number[]): number[][] => [shape];
+
+/**
+ * 束縛解決済みの入力 shape から**出力 slot 順の shape 列**を計算する（ADR 0068 決定 1）。
+ * 列の長さは契約が宣言する出力数（出力 dtype 写像の列長）と一致する — 現状の op は全て 1 本。
+ */
 export const computeOutputShape = (
   found: OpContract,
   inputShapes: readonly (readonly number[])[],
   where: string,
   context: ShapeContext = {},
-): number[] => {
+): number[][] => {
   assertArity(found, inputShapes.length, "入力 shape 数", where);
   switch (found.kind) {
     case "unary":
@@ -116,16 +125,16 @@ export const computeOutputShape = (
       // 全ノードが必ず通る共通経路はこの計算だけで、attrs スキーマはキー単位の検査しか
       // 表せない（src/runtime/plan.ts の planGraph が全ノードでここを呼ぶ）。
       scalarParamValues(found, context.attrs ?? {}, where);
-      return [...inputShapes[0]];
+      return sole([...inputShapes[0]]);
     case "cast":
-      return [...inputShapes[0]];
+      return sole([...inputShapes[0]]);
     case "binary":
-      return broadcastShapes(inputShapes[0], inputShapes[1], `${where} (${found.name})`);
+      return sole(broadcastShapes(inputShapes[0], inputShapes[1], `${where} (${found.name})`));
     case "where": {
       // torch と同じく 3 者を右詰め broadcast する（条件も値と同じ規則で広がる）。
       const [cond, a, b] = inputShapes;
       const label = `${where} (${found.name})`;
-      return broadcastShapes(broadcastShapes(cond, a, label), b, label);
+      return sole(broadcastShapes(broadcastShapes(cond, a, label), b, label));
     }
     case "cumsum": {
       const shape = inputShapes[0];
@@ -138,7 +147,7 @@ export const computeOutputShape = (
         );
       }
       // 長さ 0 の軸は素通し（前縁和の identity は 0 で、空行は空行のまま）。
-      return [...shape];
+      return sole([...shape]);
     }
     case "matmul": {
       const [a, b] = inputShapes;
@@ -152,7 +161,7 @@ export const computeOutputShape = (
           `${where}: matmul の縮約次元が不一致 [${a.join(",")}] × [${b.join(",")}]`,
         );
       }
-      return [a[0], b[1]];
+      return sole([a[0], b[1]]);
     }
     case "bmm": {
       const [a, b] = inputShapes;
@@ -175,7 +184,7 @@ export const computeOutputShape = (
           `${where}: bmm の縮約次元が不一致 [${a.join(",")}] × [${b.join(",")}]`,
         );
       }
-      return [a[0], a[1], b[2]];
+      return sole([a[0], a[1], b[2]]);
     }
     case "gather": {
       const [src, index] = inputShapes;
@@ -198,7 +207,7 @@ export const computeOutputShape = (
       }
       // 出力は index と同形（値は src から引く）。添字の値域は実行時データ依存なので
       // shape 契約では見ない（方針は src/kernels/gather.ts と reference/ops.ts）。
-      return [...index];
+      return sole([...index]);
     }
     case "rowReduce": {
       const shape = inputShapes[0];
@@ -219,7 +228,7 @@ export const computeOutputShape = (
       if (shape[dim] === 0 && found.name !== "sum") {
         throw new OpContractError(`${where}: op '${found.name}' は長さ 0 の軸を縮約できない`);
       }
-      return [...shape.slice(0, dim), ...shape.slice(dim + 1)];
+      return sole([...shape.slice(0, dim), ...shape.slice(dim + 1)]);
     }
     case "reshape": {
       const target = requireDeclared(context, found, where);
@@ -231,7 +240,7 @@ export const computeOutputShape = (
           `${where}: reshape の要素数が合わない [${source.join(",")}] → [${target.join(",")}]`,
         );
       }
-      return [...target];
+      return sole([...target]);
     }
     case "expand": {
       const target = requireDeclared(context, found, where);
@@ -254,7 +263,7 @@ export const computeOutputShape = (
           );
         }
       });
-      return [...target];
+      return sole([...target]);
     }
     case "slice": {
       const source = inputShapes[0];
@@ -280,7 +289,7 @@ export const computeOutputShape = (
       }
       const out = [...source];
       out[dim] = end - start;
-      return out;
+      return sole(out);
     }
     case "cat": {
       const dim = catDim(context.attrs ?? {}, where);
@@ -315,7 +324,7 @@ export const computeOutputShape = (
       // 出力の軸長 = 入力の軸長の総和。この規則そのものが「全入力で出力全域を覆う」
       // （full-write — ADR 0014）の担保で、executor 側は書き出し位置の総和をこれと突き合わせる。
       out[dim] = total;
-      return out;
+      return sole(out);
     }
     case "pad": {
       const source = inputShapes[0];
@@ -325,7 +334,7 @@ export const computeOutputShape = (
       const { left, right } = padAttrs(context.attrs ?? {}, where);
       const out = [...source];
       out[out.length - 1] = source[source.length - 1] + left + right;
-      return out;
+      return sole(out);
     }
     case "flip": {
       const source = inputShapes[0];
@@ -336,7 +345,7 @@ export const computeOutputShape = (
         );
       }
       // 反転は shape を変えない（恒等 shape 規則）。
-      return [...source];
+      return sole([...source]);
     }
     case "symPrefixSlice": {
       const source = inputShapes[0];
@@ -369,7 +378,7 @@ export const computeOutputShape = (
         }
         out[slice.dim] = length;
       }
-      return out;
+      return sole(out);
     }
     case "linear": {
       const [x, weight, bias] = inputShapes;
@@ -391,7 +400,7 @@ export const computeOutputShape = (
           `${where}: linear の bias 長 ${bias[0]} が出力特徴数 ${out} と違う`,
         );
       }
-      return [...x.slice(0, -1), out];
+      return sole([...x.slice(0, -1), out]);
     }
     case "layerNorm": {
       const [x, weight, bias] = inputShapes;
@@ -413,7 +422,7 @@ export const computeOutputShape = (
           );
         }
       }
-      return [...x];
+      return sole([...x]);
     }
     case "rmsNorm": {
       const [x, weight] = inputShapes;
@@ -437,7 +446,7 @@ export const computeOutputShape = (
           }] の最終次元長 ${dim} の rank1 でない`,
         );
       }
-      return [...x];
+      return sole([...x]);
     }
     case "conv2d": {
       const [x, weight, bias] = inputShapes;
@@ -487,7 +496,7 @@ export const computeOutputShape = (
         }
         return Math.floor(span / stride[axis]) + 1;
       };
-      return [x[0], channelsOut, spatial(0, "H"), spatial(1, "W")];
+      return sole([x[0], channelsOut, spatial(0, "H"), spatial(1, "W")]);
     }
     // safe_softmax は shape 規則も attrs も softmax と同一（違いは空行の値だけ — ADR 0044）。
     case "softmax":
@@ -505,7 +514,7 @@ export const computeOutputShape = (
         // 空軸の softmax は amax の identity が定義できない（行 reduce と同じ理由）。
         throw new OpContractError(`${where}: ${found.name} は長さ 0 の軸を縮約できない`);
       }
-      return [...shape];
+      return sole([...shape]);
     }
     case "attention": {
       const [q, k, v, mask] = inputShapes;
@@ -576,7 +585,7 @@ export const computeOutputShape = (
           );
         }
       }
-      return [...q];
+      return sole([...q]);
     }
     case "embedding": {
       const [weight, index] = inputShapes;
@@ -592,7 +601,7 @@ export const computeOutputShape = (
       }
       // 添字の値域 0 <= index < V は実行時データ依存なので shape 契約では見ない
       // （範囲外の扱いは src/kernels/embedding.ts の裁定 — GPU は NaN 汚染 / CPU 参照は throw）。
-      return [...index, weight[1]];
+      return sole([...index, weight[1]]);
     }
     case "maskedFill": {
       const [x, mask] = inputShapes;
@@ -618,7 +627,7 @@ export const computeOutputShape = (
           );
         }
       });
-      return [...x];
+      return sole([...x]);
     }
     case "conv1d": {
       const [x, weight, bias] = inputShapes;
@@ -661,7 +670,7 @@ export const computeOutputShape = (
           } に足りない`,
         );
       }
-      return [x[0], channelsOut, Math.floor(span / stride) + 1];
+      return sole([x[0], channelsOut, Math.floor(span / stride) + 1]);
     }
     case "convTranspose1d": {
       const [x, weight, bias] = inputShapes;
@@ -697,7 +706,7 @@ export const computeOutputShape = (
           `${where}: conv_transpose1d は 2·padding == K − stride の形のみ受理（K ${kernel} / stride ${stride} / padding ${padding} — 出力長が L·stride にならない）`,
         );
       }
-      return [x[0], channelsOut, length * stride];
+      return sole([x[0], channelsOut, length * stride]);
     }
     case "deformConv2d": {
       const [x, weight, offset, mask, bias] = inputShapes;
@@ -766,7 +775,7 @@ export const computeOutputShape = (
           );
         }
       }
-      return [batch, channelsOut, heightOut, widthOut];
+      return sole([batch, channelsOut, heightOut, widthOut]);
     }
     case "upsampleBilinear2d": {
       const x = inputShapes[0];
@@ -787,7 +796,7 @@ export const computeOutputShape = (
           );
         }
       }
-      return [x[0], x[1], outputSize[0], outputSize[1]];
+      return sole([x[0], x[1], outputSize[0], outputSize[1]]);
     }
     case "gruScan": {
       const [gi, initial, weight, bias] = inputShapes;
@@ -826,7 +835,7 @@ export const computeOutputShape = (
           `${where}: ${found.name} の b_hh 長 ${bias[0]} が 3·H = ${3 * hidden} と違う`,
         );
       }
-      return [time, batch, hidden];
+      return sole([time, batch, hidden]);
     }
     case "permute": {
       const source = inputShapes[0];
@@ -838,14 +847,14 @@ export const computeOutputShape = (
           `${where}: permute の dims [${dims.join(",")}] が入力 rank ${source.length} と違う`,
         );
       }
-      return dims.map((dim) => {
+      return sole(dims.map((dim) => {
         if (dim >= source.length) {
           throw new OpContractError(
             `${where}: permute の dims に入力 rank ${source.length} 外の軸 ${dim} がある`,
           );
         }
         return source[dim];
-      });
+      }));
     }
   }
 };

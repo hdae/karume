@@ -6,8 +6,8 @@
 同じ規律）。
 
 見るのは両実装で沈黙のうちに割れうる契約面だけ: op 名の全集合 / アリティ /
-スロット dtype / attrs キー集合 / attrs の値域 / 出力 shape 規則（rank 上限を含む）/
-低精度格納の適格スロット（ADR 0018）。
+スロット dtype / attrs キー集合 / attrs の値域 / 出力数と出力 slot 別の dtype 写像
+（ADR 0068 決定 1）/ 出力 shape 規則（rank 上限を含む）/ 低精度格納の適格スロット（ADR 0018）。
 """
 
 from __future__ import annotations
@@ -108,10 +108,11 @@ class TestDeclaredContract:
 
     @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
     def test_output_dtypes_match(self, entry):
-        """出力 dtype 写像（省略時はスロット 0 の受理集合上の恒等）。
+        """出力 slot 別の dtype 写像の列（省略時は出力 1 本・スロット 0 の受理集合上の恒等）。
 
         比較（f32 → bool）・bool の sum（→ i32）・where（bool → f32）が両側で揃っていない
         と、「エクスポータが書けるのにランタイムが別 TypedArray として読む」が生える。
+        列の長さ = 契約が宣言する出力数（ADR 0068 決定 1）も同じ表で突き合わせる。
         cast だけは出力が attrs.to で決まるのでこの欄を持たない。
         """
         contract = resolve_op_contract(entry["op"])
@@ -120,9 +121,12 @@ class TestDeclaredContract:
             return
         slots = contract.slot_dtypes
         domain = slots.accept if isinstance(slots, UniformDtypes) else slots.slots[0]
-        declared = entry.get("out_dtypes", {})
+        declared = entry.get("out_dtypes", [{}])
 
-        assert contract.output_dtypes == {dtype: declared.get(dtype, dtype) for dtype in domain}
+        assert contract.output_dtypes == tuple(
+            {dtype: slot.get(dtype, dtype) for dtype in domain} for slot in declared
+        )
+        assert contract.output_count == len(declared)
 
     @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
     def test_weight_slot_matches(self, entry):
@@ -211,7 +215,10 @@ class TestOutputShapes:
                 _compute(case)
             return
 
-        assert _compute(case) == case["out"]
+        # 表の outs は出力 slot 別の列（ADR 0068 決定 1）。エクスポータ側の
+        # compute_output_shape は単一出力のみを計算する層なので、列へ包んで突き合わせる
+        # （多出力 op を表に載せた時点でここが落ちる = shapes.py の列化が要るという合図）。
+        assert [_compute(case)] == case["outs"]
 
     @pytest.mark.parametrize("case", SHAPES, ids=_shape_id)
     def test_the_numeric_reading_agrees_with_the_symbolic_one(self, case):
@@ -231,7 +238,7 @@ class TestOutputShapes:
             assert _compute(case, bindings) == _compute(case)
             return
 
-        assert _compute(case, bindings) == _resolve(case["out"], bindings)
+        assert [_compute(case, bindings)] == [_resolve(shape, bindings) for shape in case["outs"]]
 
     def test_every_op_is_exercised_by_an_accepting_case(self):
         """shape 規則が表で踏まれていない op を残さない。"""

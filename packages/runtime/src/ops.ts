@@ -96,6 +96,7 @@ export {
   describeArity,
   IO_DTYPES,
   OP_CONTRACTS,
+  outputCountOf,
   outputDtypeOf,
   resolveNodeDtypes,
   resolveOpContract,

@@ -133,15 +133,18 @@ type ContractBase = {
   /** スロット別の受理集合と出力導出の正本。 */
   readonly slotDtypes: SlotDtypes;
   /**
-   * **スロット 0 の入力 dtype → 出力 dtype**。既定は恒等（入力と同型）で、違うのは実測に
-   * 出た 3 系統だけ: 比較（f32 → bool）/ bool 入力の `sum`（→ i32 のカウント）/
-   * `where`（条件 bool → 値の f32）。
+   * **出力 slot 別**の「スロット 0 の入力 dtype → その出力の dtype」写像の**列**（ADR 0068
+   * 決定 1）。列の長さがその op の出力数で、現状の op は全て長さ 1（= 単一出力の明示化）。
+   * 各写像の既定は恒等（入力と同型）で、違うのは実測に出た 3 系統だけ: 比較（f32 → bool）/
+   * bool 入力の `sum`（→ i32 のカウント）/ `where`（条件 bool → 値の f32）。
    *
-   * MUST: 定義域はスロット 0 の受理集合と**完全一致**させる（{@link slotContract} が恒等で
-   * 埋める）。部分写像にすると、スロット検査を通った dtype の出力が決まらない穴ができる。
+   * MUST: 出力数はこの列の長さから導く（{@link outputCountOf}）— 出力数の欄を別に持たせると
+   * 「dtype 列は 2 本なのに宣言出力数は 1 本」という食い違いが書けてしまう。
+   * MUST: 各写像の定義域はスロット 0 の受理集合と**完全一致**させる（{@link slotContract} が
+   * 恒等で埋める）。部分写像にすると、スロット検査を通った dtype の出力が決まらない穴ができる。
    * NOTE: `cast` だけはこの写像を使わない（出力は attrs.to — {@link resolveNodeDtypes}）。
    */
-  readonly outputDtypes: ReadonlyMap<IrDtype, IrDtype>;
+  readonly outputDtypes: readonly ReadonlyMap<IrDtype, IrDtype>[];
   readonly attrs: AttrSchema;
   /**
    * 入力数が可変の op（現状 `cat` のみ）。true のとき {@link OpContract} の `arity` は
@@ -170,7 +173,8 @@ type ContractBase = {
 /**
  * kind と op 名を判別可能ユニオンで結ぶ。消費側（codegen 選択・CPU 参照）が
  * `op as UnaryOpName` のような取り違えの効かないキャストを書かずに済むようにするため。
- * `arity` は入力の個数（現状の op は全て単一出力）。
+ * `arity` は入力の個数で、出力の個数は {@link ContractBase.outputDtypes} の列長
+ * （現状の op は全て 1 本）。
  */
 export type OpContract =
   | (ContractBase & { readonly kind: "unary"; readonly name: UnaryOpName; readonly arity: 1 })
@@ -343,7 +347,9 @@ const DTYPES: ReadonlyMap<string, readonly IrDtype[]> = new Map([
 const dtypesOf = (name: string): readonly IrDtype[] => DTYPES.get(name) ?? F32;
 
 /**
- * 入力（スロット 0）と出力で dtype が違う op の写像。ここに無い op は恒等（入力と同型）。
+ * 出力 slot 別の dtype 写像の**列**を宣言する表。ここに無い op は「出力 1 本・恒等（入力と
+ * 同型）」（{@link SINGLE_IDENTITY_OUTPUT}）。列の要素は「スロット 0 の入力 dtype → その
+ * 出力の dtype」で、恒等な dtype は書かなくてよい（{@link slotContract} が埋める）。
  *
  * MUST: 写像の値域は実測に出た形だけ（ADR 0009 の「op ごと実測ベース」）。
  * - 比較 4 本 — spline の `inside` 判定と searchsorted（recon §2）。真偽値なので bool。
@@ -351,14 +357,19 @@ const dtypesOf = (name: string): readonly IrDtype[] => DTYPES.get(name) ?? F32;
  *   2^24 を超えた時点で静かに丸まる）。f32 入力は従来どおり f32。
  * - `where` — 条件が先頭スロットなので、写像だけが「出力は値の側」を表せる。
  */
-const OUTPUT_DTYPES: ReadonlyMap<string, ReadonlyMap<IrDtype, IrDtype>> = new Map([
-  ["ge", new Map<IrDtype, IrDtype>([["f32", "bool"]])],
-  ["ge_scalar", new Map<IrDtype, IrDtype>([["f32", "bool"]])],
-  ["le_scalar", new Map<IrDtype, IrDtype>([["f32", "bool"]])],
-  ["gt_scalar", new Map<IrDtype, IrDtype>([["f32", "bool"]])],
-  ["sum", new Map<IrDtype, IrDtype>([["f32", "f32"], ["bool", "i32"]])],
-  [WHERE_OP, new Map<IrDtype, IrDtype>([["bool", "f32"]])],
+const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[]> = new Map([
+  ["ge", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
+  ["ge_scalar", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
+  ["le_scalar", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
+  ["gt_scalar", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
+  ["sum", [new Map<IrDtype, IrDtype>([["f32", "f32"], ["bool", "i32"]])]],
+  [WHERE_OP, [new Map<IrDtype, IrDtype>([["bool", "f32"]])]],
 ]);
+
+/** 宣言が無い op の既定 = **出力 1 本・恒等**（空の写像は定義域全体が恒等で埋まる）。 */
+const SINGLE_IDENTITY_OUTPUT: readonly ReadonlyMap<IrDtype, IrDtype>[] = [
+  new Map<IrDtype, IrDtype>(),
+];
 
 /**
  * スカラ attr を params の並び順で取り出す（検査は {@link assertNodeContract} が済ませている
@@ -409,11 +420,11 @@ const slotContract = (
   slotDtypes: SlotDtypes,
   attrs: AttrSchema = NO_ATTRS,
 ): ContractBase => {
-  const declared = OUTPUT_DTYPES.get(name);
-  // 宣言が無い op は恒等写像で埋める（定義域 = スロット 0 の受理集合という不変条件を
-  // 構造で満たす — 表の書き忘れが「出力が決まらない dtype」にならない）。
-  const outputDtypes = new Map<IrDtype, IrDtype>(
-    firstSlotAccept(slotDtypes).map((dtype) => [dtype, declared?.get(dtype) ?? dtype]),
+  const domain = firstSlotAccept(slotDtypes);
+  // 宣言が無い dtype は恒等写像で埋める（定義域 = スロット 0 の受理集合という不変条件を
+  // 出力 slot ごとに構造で満たす — 表の書き忘れが「出力が決まらない dtype」にならない）。
+  const outputDtypes = (OUTPUT_DTYPES.get(name) ?? SINGLE_IDENTITY_OUTPUT).map((slot) =>
+    new Map<IrDtype, IrDtype>(domain.map((dtype) => [dtype, slot.get(dtype) ?? dtype]))
   );
   return { dtypes: unionDtypes(slotDtypes), slotDtypes, outputDtypes, attrs };
 };
@@ -599,6 +610,14 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
 export const attrKeysOf = (found: OpContract): readonly string[] => Object.keys(found.attrs);
 
 /**
+ * 契約が宣言する**出力の本数**。出力 dtype 写像の列長そのもの（ADR 0068 決定 1）。
+ *
+ * MUST: 本数を独立した欄で持たない — 派生できる事実を二重に持つと、dtype 列だけ増やした
+ * 契約が「宣言 1 本・写像 2 本」で通り、2 本目の出力の dtype が誰にも照合されなくなる。
+ */
+export const outputCountOf = (found: OpContract): number => found.outputDtypes.length;
+
+/**
  * 入力スロット別の受理集合（capability 射影）。uniform 契約は**受理しうるスロット数ぶん
  * 複製**する（省略可能な末尾スロットを含む — {@link ContractBase.maxArity}）。
  * 消費側（列挙門）がスロット番号で引けるようにするため。
@@ -628,10 +647,10 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
       dtypes: new Set(found.dtypes),
       slotDtypes: slotDtypesOf(found).map((accept) => new Set(accept)),
       // cast の出力は attrs.to で決まる（写像は恒等で埋まっているが値域が狭すぎる）ので、
-      // 列挙門には語彙全体を渡す。それ以外は写像の値域そのもの。
+      // 列挙門には語彙全体を渡す。それ以外は出力 slot ごとの写像の値域そのもの。
       outDtypes: found.kind === "cast"
-        ? new Set(SEMANTIC_DTYPES)
-        : new Set(found.outputDtypes.values()),
+        ? [new Set(SEMANTIC_DTYPES)]
+        : found.outputDtypes.map((slot) => new Set(slot.values())),
       attrKeys: new Set(attrKeysOf(found)),
     }]),
   ),
@@ -702,9 +721,9 @@ export const resolveOpContract = (op: string): OpContract => {
 export const assertNodeContract = (node: IrNode, where: string): OpContract => {
   const found = resolveOpContract(node.op);
   assertArity(found, node.ins.length, "入力数", where);
-  if (node.outs.length !== 1) {
+  if (node.outs.length !== outputCountOf(found)) {
     throw new OpContractError(
-      `${where}: op '${node.op}' の出力数が ${node.outs.length}（現状の op は全て単一出力）`,
+      `${where}: op '${node.op}' の出力数が ${node.outs.length}（契約は ${outputCountOf(found)}）`,
     );
   }
   const unknown = Object.keys(node.attrs).filter((key) => !Object.hasOwn(found.attrs, key));
@@ -723,17 +742,23 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
 };
 
 /**
- * スロット 0 の入力 dtype から出力 dtype を導く（{@link ContractBase.outputDtypes}）。
+ * スロット 0 の入力 dtype から**出力 slot `slot` の** dtype を導く
+ * （{@link ContractBase.outputDtypes}）。
  *
  * 写像の定義域はスロット 0 の受理集合と一致する（{@link slotContract} が恒等で埋める）ので、
  * スロット検査を通った dtype は必ず引ける — 引けないのはランタイム内部の不変条件破れ。
  */
 export const outputDtypeOf = (
   found: OpContract,
+  slot: number,
   inputDtype: IrDtype,
   where: string,
 ): IrDtype => {
-  const mapped = found.outputDtypes.get(inputDtype);
+  const column = found.outputDtypes[slot];
+  if (column === undefined) {
+    throw new OpContractError(`${where}: op '${found.name}' に出力スロット ${slot} は無い`);
+  }
+  const mapped = column.get(inputDtype);
   if (mapped === undefined) {
     throw new OpContractError(
       `${where}: op '${found.name}' の出力 dtype 写像に入力 '${inputDtype}' が無い`,
@@ -784,28 +809,28 @@ export const assertSlotDtype = (
 };
 
 /**
- * ノードの意味論 dtype を検査して**出力 dtype を返す**。
+ * ノードの意味論 dtype を検査して**出力 dtype の列を返す**（出力 slot 順）。
  *
  * MUST: 出力 dtype は宣言を鵜呑みにせず契約から導き、宣言と突き合わせる。宣言をそのまま
  * 信じると、`cast` の attrs.to と values{} の宣言が食い違ったグラフが「宣言どおり」に
  * 通ってしまい、readback で別の TypedArray として読まれる沈黙誤値になる。
- * 出力の導出は 2 通りだけ: cast は attrs.to、それ以外は**スロット 0 の dtype を契約の写像に
- * 通す**（{@link ContractBase.outputDtypes} — 既定は恒等）。uniform 契約では加えて
- * スロット間の同型も要求する（混合型の演算は語彙に無い）。
+ * 出力の導出は 2 通りだけ: cast は attrs.to、それ以外は**スロット 0 の dtype を出力 slot
+ * ごとの写像に通す**（{@link ContractBase.outputDtypes} — 既定は恒等）。uniform 契約では
+ * 加えてスロット間の同型も要求する（混合型の演算は語彙に無い）。
  */
 export const resolveNodeDtypes = (
   found: OpContract,
   node: IrNode,
   inputDtypes: readonly IrDtype[],
-  declaredOutput: IrDtype,
+  declaredOutputs: readonly IrDtype[],
   where: string,
-): IrDtype => {
+): readonly IrDtype[] => {
   inputDtypes.forEach((dtype, index) => {
     assertSlotDtype(found, index, dtype, `${where} の入力 '${node.ins[index]}'`);
   });
-  let expected: IrDtype;
+  let expected: readonly IrDtype[];
   if (found.kind === "cast") {
-    expected = castTargetDtype(node.attrs, where);
+    expected = [castTargetDtype(node.attrs, where)];
   } else {
     // スロットごとに受理集合が違う op は、スロット間の同型を要求しない（それが perSlot の
     // 意味）。uniform 契約だけが混在を拒否する。
@@ -817,14 +842,23 @@ export const resolveNodeDtypes = (
         );
       }
     }
-    expected = outputDtypeOf(found, inputDtypes[0], where);
-  }
-  if (declaredOutput !== expected) {
-    throw new OpContractError(
-      `${where}: 出力 '${
-        node.outs[0]
-      }' の宣言 dtype '${declaredOutput}' が契約の '${expected}' と違う`,
+    expected = found.outputDtypes.map((_, slot) =>
+      outputDtypeOf(found, slot, inputDtypes[0], where)
     );
   }
+  if (declaredOutputs.length !== expected.length) {
+    throw new OpContractError(
+      `${where}: op '${found.name}' の出力の宣言が ${declaredOutputs.length} 本（契約は ${expected.length} 本）`,
+    );
+  }
+  expected.forEach((dtype, slot) => {
+    if (declaredOutputs[slot] !== dtype) {
+      throw new OpContractError(
+        `${where}: 出力 '${node.outs[slot]}' の宣言 dtype '${
+          declaredOutputs[slot]
+        }' が契約の '${dtype}' と違う`,
+      );
+    }
+  });
   return expected;
 };

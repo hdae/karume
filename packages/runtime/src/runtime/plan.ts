@@ -78,8 +78,13 @@ const nodeDtypes = (
   where: string,
 ): { readonly inputs: readonly IrDtype[]; readonly output: IrDtype } => {
   const inputs = node.ins.map((name) => declarationOf(graph, name).dtype);
-  const declaredOutput = declarationOf(graph, node.outs[0]).dtype;
-  return { inputs, output: resolveNodeDtypes(contract, node, inputs, declaredOutput, where) };
+  const declaredOutputs = node.outs.map((name) => declarationOf(graph, name).dtype);
+  // 実行層（NodePlan）の出力列対応は ADR 0068 の次段。ここは契約層が返す列から
+  // 単一出力を取り出すだけに留める（現状の op は全て 1 本）。
+  return {
+    inputs,
+    output: resolveNodeDtypes(contract, node, inputs, declaredOutputs, where)[0],
+  };
 };
 
 /**
@@ -436,7 +441,8 @@ export const planGraph = (graph: IrGraph, bindings: SymbolBindings): GraphPlan =
     // reshape / expand は「宣言 shape が目標形」、permute は attrs が要る（ADR 0011）。
     // 宣言を渡しても照合は下で必ず行う — 目標形として使う op だけが自明に一致するだけで、
     // 他の op は従来どおり計算 shape と宣言の食い違いで落ちる。
-    const computed = computeOutputShape(contract, inputShapes, where, {
+    // 出力列対応は ADR 0068 の次段（ここは列から単一出力の shape を取り出すだけ）。
+    const [computed] = computeOutputShape(contract, inputShapes, where, {
       declared: declaredShape,
       attrs: node.attrs,
       bindings,

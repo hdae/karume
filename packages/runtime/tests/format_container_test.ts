@@ -11,11 +11,11 @@ import { type IrDtype, IrError, type IrStorageDtype } from "../src/format/ir.ts"
 import { RUNTIME_SUPPORT } from "../src/ops.ts";
 import { baseGraph, baseModelBuffer, buildSafetensors, f32Bytes } from "./helpers/format.ts";
 
-/** M0 と同形（f32 のみ・attrs 無し・二項）の最小対応表。 */
+/** M0 と同形（f32 のみ・attrs 無し・二項・単一出力）の最小対応表。 */
 const f32Only: OpSupport = {
   dtypes: new Set<IrDtype>(["f32"]),
   slotDtypes: [new Set<IrDtype>(["f32"]), new Set<IrDtype>(["f32"])],
-  outDtypes: new Set<IrDtype>(["f32"]),
+  outDtypes: [new Set<IrDtype>(["f32"])],
   attrKeys: new Set<string>(),
 };
 

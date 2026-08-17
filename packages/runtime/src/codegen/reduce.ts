@@ -53,7 +53,8 @@ const canonicalize = (spec: ReduceSpec): CanonicalSpec => {
   if (!contract.dtypes.includes(spec.dtype)) {
     throw new CodegenError(`reduce codegen: op '${op}' は dtype '${spec.dtype}' を実行できない`);
   }
-  return { op, from: spec.dtype, to: outputDtypeOf(contract, spec.dtype, "reduce codegen") };
+  // 行 reduce は単一出力なので出力 slot 0。
+  return { op, from: spec.dtype, to: outputDtypeOf(contract, 0, spec.dtype, "reduce codegen") };
 };
 
 /** 意味論 dtype → WGSL のスカラ型。bool の格納は u32 の 0 / 1（ADR 0009）。 */

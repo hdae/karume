@@ -292,9 +292,9 @@ Deno.test("スロット別契約の出力はスロット 0 と同型で、混合
       resolveOpContract(op),
       node(op, inputDtypes.map((_, index) => `x${index}`)),
       inputDtypes,
-      declared,
+      [declared],
       "t",
-    );
+    )[0];
 
   // gather は f32 と i32 が混ざるのが正しい形（uniform の「混在は拒否」を適用しない）
   assertEquals(resolve("gather", ["f32", "i32"], "f32"), "f32");
@@ -535,7 +535,8 @@ Deno.test("出力 dtype は契約から導かれ、宣言との食い違いを�
     inputDtypes: readonly ("f32" | "i32" | "bool")[],
     declared: "f32" | "i32" | "bool",
     attrs: Record<string, unknown> = {},
-  ) => resolveNodeDtypes(resolveOpContract(op), node(op, ins, attrs), inputDtypes, declared, "t");
+  ) =>
+    resolveNodeDtypes(resolveOpContract(op), node(op, ins, attrs), inputDtypes, [declared], "t")[0];
 
   assertEquals(resolve("mul", ["a", "b"], ["i32", "i32"], "i32"), "i32");
   assertEquals(resolve("cast", ["a"], ["i32"], "bool", { to: "bool" }), "bool");
@@ -581,16 +582,20 @@ Deno.test("出力 dtype 写像の定義域がスロット 0 の受理集合と�
   for (const [name, contract] of OP_CONTRACTS) {
     const slots = contract.slotDtypes;
     const domain = slots.kind === "uniform" ? slots.accept : slots.slots[0];
-    assertEquals(
-      [...contract.outputDtypes.keys()].sort(),
-      [...domain].sort(),
-      `${name}: 出力 dtype 写像の定義域`,
-    );
+    // 定義域の一致は**出力 slot ごと**に要求する（列のどれか 1 本だけ穴があっても落とす）
+    contract.outputDtypes.forEach((slot, index) => {
+      assertEquals(
+        [...slot.keys()].sort(),
+        [...domain].sort(),
+        `${name}: 出力 ${index} の dtype 写像の定義域`,
+      );
+    });
   }
   // 恒等でないのは実測に出た 3 系統だけ
   const nonIdentity = [...OP_CONTRACTS]
     .filter(([name, contract]) =>
-      name !== "cast" && [...contract.outputDtypes].some(([from, to]) => from !== to)
+      name !== "cast" &&
+      contract.outputDtypes.some((slot) => [...slot].some(([from, to]) => from !== to))
     )
     .map(([name]) => name)
     .sort();
@@ -662,7 +667,7 @@ Deno.test("cumsum は最終次元固定で、shape を素通しにする", () =>
   assertThrows(() => cumsumDim({}, "t"), OpContractError);
   assertThrows(() => cumsumDim({ dim: -1 }, "t"), OpContractError);
   const shape = (ins: readonly number[], dim: number) =>
-    computeOutputShape(contract, [ins], "t", { attrs: { dim } });
+    computeOutputShape(contract, [ins], "t", { attrs: { dim } })[0];
   assertEquals(shape([2, 5], 1), [2, 5]);
   assertEquals(shape([1, 3, 4], 2), [1, 3, 4]);
   // 長さ 0 の軸は素通し（前縁和の identity は 0 — amax / softmax と違って定義できる）
@@ -673,7 +678,7 @@ Deno.test("cumsum は最終次元固定で、shape を素通しにする", () =>
 
 Deno.test("where は三者を右詰め broadcast し、出力は値の側と同形になる", () => {
   const shape = (ins: readonly (readonly number[])[]) =>
-    computeOutputShape(resolveOpContract("where"), ins, "t");
+    computeOutputShape(resolveOpContract("where"), ins, "t")[0];
   assertEquals(shape([[1, 4], [3, 4], [3, 1]]), [3, 4]);
   // 条件が値より低い rank（spline の inside 判定の形）
   assertEquals(shape([[5], [2, 3, 5], [1]]), [2, 3, 5]);
@@ -699,7 +704,7 @@ Deno.test("出力 shape 計算が op ごとの契約どおりに決まる", () =
     op: string,
     ins: readonly (readonly number[])[],
     attrs?: Readonly<Record<string, unknown>>,
-  ) => computeOutputShape(resolveOpContract(op), ins, "t", { attrs });
+  ) => computeOutputShape(resolveOpContract(op), ins, "t", { attrs })[0];
   assertEquals(shape("relu", [[2, 3]]), [2, 3]);
   assertEquals(shape("add", [[4, 1], [1, 5]]), [4, 5]);
   assertEquals(shape("matmul", [[7, 5], [5, 3]]), [7, 3]);
@@ -718,7 +723,7 @@ Deno.test("出力 shape 計算が op ごとの契約どおりに決まる", () =
 // MUST: B / M / K / N を全て違う長さで確かめる — 軸の取り違えは正方形では見えない。
 Deno.test("bmm は rank-3 のバッチ一致・縮約一致だけを受理する", () => {
   const shape = (ins: readonly (readonly number[])[]) =>
-    computeOutputShape(resolveOpContract("bmm"), ins, "t");
+    computeOutputShape(resolveOpContract("bmm"), ins, "t")[0];
   assertEquals(shape([[2, 6, 3], [2, 3, 5]]), [2, 6, 5]);
   assertEquals(shape([[7, 1, 4], [7, 4, 9]]), [7, 1, 9]);
   // rank-2 は matmul の担当（兼用にしない）
@@ -734,7 +739,7 @@ Deno.test("bmm は rank-3 のバッチ一致・縮約一致だけを受理する
 
 Deno.test("gather は先行次元一致を要求し、出力は index と同形になる", () => {
   const shape = (ins: readonly (readonly number[])[]) =>
-    computeOutputShape(resolveOpContract("gather"), ins, "t");
+    computeOutputShape(resolveOpContract("gather"), ins, "t")[0];
   // 実測形（src f32[16,T,512] / index i32[16,T,T]）と同型 — 最終次元だけが違う
   assertEquals(shape([[4, 6, 9], [4, 6, 6]]), [4, 6, 6]);
   // 出力の最終次元は src より長くてもよい（同じ添字を何度引いてもよい）
@@ -755,7 +760,7 @@ Deno.test("sym_prefix_slice は attrs と束縛から prefix 長を決める", (
     ins: readonly (readonly number[])[],
     attrs: Record<string, unknown>,
     bindings?: Record<string, number>,
-  ) => computeOutputShape(resolveOpContract("sym_prefix_slice"), ins, "t", { attrs, bindings });
+  ) => computeOutputShape(resolveOpContract("sym_prefix_slice"), ins, "t", { attrs, bindings })[0];
   const slice = (dim: number, coeff = 1, offset = 0) => ({ dim, coeff, offset });
 
   assertEquals([...attrKeysOf(resolveOpContract("sym_prefix_slice"))].sort(), ["slices", "sym"]);
@@ -812,7 +817,7 @@ Deno.test("reshape / expand は宣言 shape を目標形に取り、permute は 
     op: string,
     ins: readonly (readonly number[])[],
     context: { declared?: readonly number[]; attrs?: Record<string, unknown> },
-  ) => computeOutputShape(resolveOpContract(op), ins, "t", context);
+  ) => computeOutputShape(resolveOpContract(op), ins, "t", context)[0];
 
   assertEquals(shape("reshape", [[2, 3, 4]], { declared: [6, 4] }), [6, 4]);
   assertEquals(shape("reshape", [[6]], { declared: [1, 6, 1] }), [1, 6, 1]);
@@ -1013,7 +1018,7 @@ Deno.test("融合 op の出力 shape が契約どおりに決まる", () => {
     op: string,
     ins: readonly (readonly number[])[],
     attrs: Record<string, unknown> = {},
-  ) => computeOutputShape(resolveOpContract(op), ins, "t", { attrs });
+  ) => computeOutputShape(resolveOpContract(op), ins, "t", { attrs })[0];
 
   // linear — 先行次元はそのまま、最終次元が out へ差し替わる
   assertEquals(shape("linear", [[5, 7], [3, 7], [3]]), [5, 3]);
@@ -1146,7 +1151,7 @@ Deno.test("契約に合わない shape は全て fail loudly", () => {
     op: string,
     ins: readonly (readonly number[])[],
     attrs?: Readonly<Record<string, unknown>>,
-  ) => computeOutputShape(resolveOpContract(op), ins, "t", { attrs });
+  ) => computeOutputShape(resolveOpContract(op), ins, "t", { attrs })[0];
   assertThrows(() => shape("matmul", [[7, 5], [4, 3]]), OpContractError);
   assertThrows(() => shape("matmul", [[2, 3, 4], [4, 3]]), OpContractError);
   assertThrows(() => shape("sum", [[]], { dim: 0 }), OpContractError);
@@ -1171,7 +1176,7 @@ Deno.test("strided コピー族の rank 上限（1..4）は契約層で落ちる
       attrs?: Record<string, unknown>;
       bindings?: Record<string, number>;
     } = {},
-  ) => computeOutputShape(resolveOpContract(op), ins, "t", context);
+  ) => computeOutputShape(resolveOpContract(op), ins, "t", context)[0];
   const rank4 = [2, 2, 2, 2];
   const rank5 = [2, 2, 2, 2, 2];
 
@@ -1235,7 +1240,7 @@ Deno.test("attention の mask は f32・[1,1,M,N] ちょうどだけを受理す
   const k = [2, 3, 7, 4];
   const attrs = { scale: 0.5 };
   const shape = (ins: readonly (readonly number[])[]) =>
-    computeOutputShape(contract, ins, "t", { attrs });
+    computeOutputShape(contract, ins, "t", { attrs })[0];
 
   // アリティは 3 か 4（可変ではない — 「何本でも」は cat だけ）
   assertEquals(contract.arity, 3);
@@ -1276,12 +1281,12 @@ Deno.test("attention の mask は f32・[1,1,M,N] ちょうどだけを受理す
   // 拒否: dtype（uniform 契約なので mask も f32 — bool マスクは masked_fill の語彙）
   const maskNode = node("attention", ["q", "k", "v", "m"], attrs);
   assertEquals(
-    resolveNodeDtypes(contract, maskNode, ["f32", "f32", "f32", "f32"], "f32", "t"),
-    "f32",
+    resolveNodeDtypes(contract, maskNode, ["f32", "f32", "f32", "f32"], ["f32"], "t"),
+    ["f32"],
   );
   for (const dtype of ["bool", "i32"] as const) {
     assertThrows(
-      () => resolveNodeDtypes(contract, maskNode, ["f32", "f32", "f32", dtype], "f32", "t"),
+      () => resolveNodeDtypes(contract, maskNode, ["f32", "f32", "f32", dtype], ["f32"], "t"),
       OpContractError,
     );
   }

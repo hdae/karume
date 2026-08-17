@@ -797,14 +797,19 @@ SlotDtypes = UniformDtypes | PerSlotDtypes
 class OpContract:
     name: str
     kind: OpKind
-    #: 入力の個数（現状の op は全て単一出力）。
+    #: 入力の個数（出力の個数は output_dtypes の列長 — 現状の op は全て 1 本）。
     arity: int
     #: スロット別の受理集合と出力導出の正本（cast だけ出力 dtype が attrs.to で決まる）。
     slot_dtypes: SlotDtypes
-    #: **スロット 0 の入力 dtype → 出力 dtype**。既定は恒等で、違うのは実測に出た 3 系統だけ
-    #: （比較 → bool / bool の sum → i32 / where → 値の側）。定義域はスロット 0 の受理集合と
-    #: 完全一致する（_contract / _slot_contract が恒等で埋める）。
-    output_dtypes: Mapping[str, str]
+    #: **出力 slot 別**の「スロット 0 の入力 dtype → その出力の dtype」写像の**列**
+    #: （ADR 0068 決定 1）。列の長さがその op の出力数で、現状の op は全て 1（単一出力の
+    #: 明示化）。各写像の既定は恒等で、違うのは実測に出た 3 系統だけ（比較 → bool /
+    #: bool の sum → i32 / where → 値の側）。定義域はスロット 0 の受理集合と完全一致する
+    #: （_contract / _slot_contract が恒等で埋める）。
+    #:
+    #: MUST: 出力数は列長から導く（output_count）— 別欄に持たせると「写像 2 本・宣言 1 本」が
+    #: 書けてしまい、2 本目の出力の dtype が誰にも照合されなくなる。
+    output_dtypes: tuple[Mapping[str, str], ...]
     #: attrs スキーマ。空なら非空 attrs は fail loudly。
     attrs: AttrSchema
     #: 入力数が可変の op（現状 `cat` のみ）。True のとき `arity` は**下限**（arity_fits）。
@@ -844,11 +849,18 @@ class OpContract:
         """スキーマが宣言するキー（対応表突合の射影 — 二重管理しない）。"""
         return frozenset(self.attrs)
 
-    def output_dtype(self, input_dtype: str) -> str:
-        """スロット 0 の入力 dtype から出力 dtype を導く
+    @property
+    def output_count(self) -> int:
+        """契約が宣言する出力の本数（出力 dtype 写像の列長そのもの — ADR 0068 決定 1）。"""
+        return len(self.output_dtypes)
+
+    def output_dtype(self, slot: int, input_dtype: str) -> str:
+        """スロット 0 の入力 dtype から**出力 slot `slot` の** dtype を導く
         （packages/runtime/src/ops.ts の outputDtypeOf と同義）。
         """
-        mapped = self.output_dtypes.get(input_dtype)
+        if not 0 <= slot < len(self.output_dtypes):
+            raise OpContractError(f"op '{self.name}' に出力スロット {slot} は無い")
+        mapped = self.output_dtypes[slot].get(input_dtype)
         if mapped is None:
             raise OpContractError(
                 f"op '{self.name}' の出力 dtype 写像に入力 '{input_dtype}' が無い"
@@ -878,27 +890,31 @@ _DTYPES: dict[str, frozenset[str]] = {
     SYM_PREFIX_SLICE_OP: F32_I32_DTYPES,
 }
 
-#: 入力（スロット 0）と出力で dtype が違う op の写像。ここに無い op は恒等。
-#: 比較 4 本（f32 → bool）/ bool 入力の sum（→ i32 のカウント）/ where（bool → f32）だけ。
-_OUTPUT_DTYPES: dict[str, dict[str, str]] = {
-    "ge": {"f32": "bool"},
-    "ge_scalar": {"f32": "bool"},
-    "le_scalar": {"f32": "bool"},
-    "gt_scalar": {"f32": "bool"},
-    "sum": {"f32": "f32", "bool": "i32"},
-    WHERE_OP: {"bool": "f32"},
+#: 出力 slot 別の dtype 写像の**列**を宣言する表（ADR 0068 決定 1）。ここに無い op は
+#: 「出力 1 本・恒等」。恒等でないのは比較 4 本（f32 → bool）/ bool 入力の sum
+#: （→ i32 のカウント）/ where（bool → f32）だけ。
+_OUTPUT_DTYPES: dict[str, tuple[dict[str, str], ...]] = {
+    "ge": ({"f32": "bool"},),
+    "ge_scalar": ({"f32": "bool"},),
+    "le_scalar": ({"f32": "bool"},),
+    "gt_scalar": ({"f32": "bool"},),
+    "sum": ({"f32": "f32", "bool": "i32"},),
+    WHERE_OP: ({"bool": "f32"},),
 }
 
+#: 宣言が無い op の既定 = **出力 1 本・恒等**（空の写像は定義域全体が恒等で埋まる）。
+_SINGLE_IDENTITY_OUTPUT: tuple[dict[str, str], ...] = ({},)
 
-def _output_dtypes(name: str, slot_dtypes: SlotDtypes) -> dict[str, str]:
-    """スロット 0 の受理集合上の写像（宣言が無い dtype は恒等で埋める）。
 
-    MUST: 定義域をスロット 0 の受理集合と一致させる — 部分写像にすると「スロット検査は
+def _output_dtypes(name: str, slot_dtypes: SlotDtypes) -> tuple[Mapping[str, str], ...]:
+    """出力 slot ごとの写像の列（宣言が無い dtype は恒等で埋める）。
+
+    MUST: 各写像の定義域をスロット 0 の受理集合と一致させる — 部分写像にすると「スロット検査は
     通ったのに出力 dtype が決まらない」穴ができる。
     """
-    declared = _OUTPUT_DTYPES.get(name, {})
+    declared = _OUTPUT_DTYPES.get(name, _SINGLE_IDENTITY_OUTPUT)
     domain = slot_dtypes.accept if isinstance(slot_dtypes, UniformDtypes) else slot_dtypes.slots[0]
-    return {dtype: declared.get(dtype, dtype) for dtype in domain}
+    return tuple({dtype: slot.get(dtype, dtype) for dtype in domain} for slot in declared)
 
 
 def _contract(
@@ -1106,9 +1122,9 @@ def assert_node_contract(node: IrNode, where: str) -> OpContract:
             f"{where}: op '{node.op}' の入力数が {len(node.ins)}"
             f"（契約は {describe_arity(contract)}）"
         )
-    if len(node.outs) != 1:
+    if len(node.outs) != contract.output_count:
         raise OpContractError(
-            f"{where}: op '{node.op}' の出力数が {len(node.outs)}（現状の op は全て単一出力）"
+            f"{where}: op '{node.op}' の出力数が {len(node.outs)}（契約は {contract.output_count}）"
         )
     unknown = sorted(key for key in node.attrs if key not in contract.attrs)
     if unknown:
@@ -1124,15 +1140,16 @@ def resolve_node_dtypes(
     contract: OpContract,
     node: IrNode,
     input_dtypes: list[str],
-    declared_output: str,
+    declared_outputs: list[str],
     where: str,
-) -> str:
-    """ノードの意味論 dtype を検査して出力 dtype を返す（packages/runtime/src/ops.ts と同義）。
+) -> list[str]:
+    """ノードの意味論 dtype を検査して**出力 dtype の列**を返す（出力 slot 順 —
+    packages/runtime/src/ops.ts と同義）。
 
     MUST: 出力 dtype は宣言を鵜呑みにせず契約から導く。導出は 2 通りだけ — cast は attrs.to、
-    それ以外は**スロット 0 の dtype を契約の写像に通す**（既定は恒等）。uniform 契約では加えて
-    スロット間の同型も要求する。宣言と食い違ったグラフはランタイム側で別 TypedArray として
-    読まれる沈黙誤値になる。
+    それ以外は**スロット 0 の dtype を出力 slot ごとの写像に通す**（既定は恒等）。uniform 契約
+    では加えてスロット間の同型も要求する。宣言と食い違ったグラフはランタイム側で別 TypedArray
+    として読まれる沈黙誤値になる。
     """
     for slot, (name, dtype) in enumerate(zip(node.ins, input_dtypes, strict=True)):
         accept = contract.slot_accept(slot)
@@ -1143,8 +1160,9 @@ def resolve_node_dtypes(
                 f"{where} の入力 '{name}': op '{contract.name}' は{slot_note}"
                 f"意味論 dtype '{dtype}' を実行できない（対応: {', '.join(sorted(accept))}）"
             )
+    expected: list[str]
     if contract.kind == "cast":
-        expected = cast_target_dtype(node.attrs, where)
+        expected = [cast_target_dtype(node.attrs, where)]
     else:
         # スロットごとに受理集合が違う op は、スロット間の同型を要求しない（それが per-slot の
         # 意味）。uniform 契約だけが混在を拒否する。
@@ -1154,10 +1172,18 @@ def resolve_node_dtypes(
             raise OpContractError(
                 f"{where}: op '{contract.name}' の入力 dtype が混在（{', '.join(input_dtypes)}）"
             )
-        expected = contract.output_dtype(input_dtypes[0])
-    if declared_output != expected:
+        expected = [
+            contract.output_dtype(slot, input_dtypes[0]) for slot in range(contract.output_count)
+        ]
+    if len(declared_outputs) != len(expected):
         raise OpContractError(
-            f"{where}: 出力 '{node.outs[0]}' の宣言 dtype '{declared_output}' が"
-            f" 契約の '{expected}' と違う"
+            f"{where}: op '{contract.name}' の出力の宣言が {len(declared_outputs)} 本"
+            f"（契約は {len(expected)} 本）"
         )
+    for slot, (declared, dtype) in enumerate(zip(declared_outputs, expected, strict=True)):
+        if declared != dtype:
+            raise OpContractError(
+                f"{where}: 出力 '{node.outs[slot]}' の宣言 dtype '{declared}' が"
+                f" 契約の '{dtype}' と違う"
+            )
     return expected

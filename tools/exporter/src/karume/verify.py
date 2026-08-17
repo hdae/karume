@@ -492,17 +492,20 @@ def assert_runtime_support(graph: IrGraph) -> None:
             dtype = _declared_dtype(graph, name)
             if dtype not in accept:
                 bad_dtypes[name] = dtype
-        # MUST: 出力は契約表の**写像の値域**で見る（cast は attrs.to で決まるので語彙全体）。
-        # 入力側の受理集合で代用すると、比較（f32 → bool）や bool の sum（→ i32）のように
-        # dtype が変わる op で**正しいグラフが列挙門で落ちる**。
-        out_accept = (
-            SEMANTIC_DTYPES
+        # MUST: 出力は契約表の**写像の値域**を**出力 slot 別に**見る（cast は attrs.to で
+        # 決まるので語彙全体）。入力側の受理集合で代用すると、比較（f32 → bool）や bool の
+        # sum（→ i32）のように dtype が変わる op で**正しいグラフが列挙門で落ちる**。
+        out_accept: tuple[frozenset[str], ...] = (
+            (frozenset(SEMANTIC_DTYPES),)
             if contract.kind == "cast"
-            else frozenset(contract.output_dtypes.values())
+            else tuple(frozenset(slot.values()) for slot in contract.output_dtypes)
         )
-        for name in node.outs:
+        for slot, name in enumerate(node.outs):
+            # 契約より出力が多い形（出力数違反）は入力側と同様に契約検査の担当。ここは列挙門
+            # なので、余ったぶんは全 slot の和で見て 1 件でも多く拾う。
+            accept = out_accept[slot] if slot < len(out_accept) else frozenset().union(*out_accept)
             dtype = _declared_dtype(graph, name)
-            if dtype not in out_accept:
+            if dtype not in accept:
                 bad_dtypes[name] = dtype
         unknown = sorted(key for key in node.attrs if key not in contract.attrs)
         if unknown:
@@ -532,7 +535,7 @@ def assert_runtime_support(graph: IrGraph) -> None:
 
 
 def assert_op_contracts(graph: IrGraph) -> None:
-    """毎ノードの契約検査（アリティ / 単一出力 / attrs スキーマ / 入出力 dtype 規則 / shape）。
+    """毎ノードの契約検査（アリティ / 宣言出力数 / attrs スキーマ / 入出力 dtype 規則 / shape）。
 
     NOTE: attrs と dtype は assert_runtime_support も見るが層が違う — あちらは「モデル作者へ
     capability 不足を一度に列挙する門」、こちらは「対応表に載っている op が契約どおりに
@@ -545,7 +548,7 @@ def assert_op_contracts(graph: IrGraph) -> None:
             contract,
             node,
             [_declared_dtype(graph, name) for name in node.ins],
-            _declared_dtype(graph, node.outs[0]),
+            [_declared_dtype(graph, name) for name in node.outs],
             where,
         )
         # strided コピー族の rank 上限（束縛に依らず宣言 shape の長さだけで決まる）。

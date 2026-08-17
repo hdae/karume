@@ -38,14 +38,15 @@ export type OpSupport = {
    */
   readonly slotDtypes: readonly ReadonlySet<IrDtype>[];
   /**
-   * **出力**として現れうる意味論 dtype（契約表の出力 dtype 写像の値域）。
+   * **出力 slot 別**に現れうる意味論 dtype（契約表の出力 dtype 写像の値域 — 並びは契約が
+   * 宣言する出力数ぶん。ADR 0068 決定 1）。
    *
    * MUST: 入力スロット 0 の受理集合で代用しない。比較（f32 → bool）・bool の `sum`（→ i32）・
    * `where`（bool → f32）は入力と出力の dtype が違うため、スロット 0 で突き合わせると
    * **正しいグラフが列挙門で落ちる**。逆に恒等な op では両者が一致するので、専用の欄を
    * 持たせても既存の判定は変わらない。
    */
-  readonly outDtypes: ReadonlySet<IrDtype>;
+  readonly outDtypes: readonly ReadonlySet<IrDtype>[];
   /** 実装済みの attr キー（契約表の attrs スキーマが宣言するキーそのもの）。 */
   readonly attrKeys: ReadonlySet<string>;
 };
@@ -264,13 +265,16 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
       const dtype = declaredDtype(graph, name);
       if (!accept.has(dtype)) badDtypes.set(name, dtype);
     });
-    for (const name of node.outs) {
-      // 出力は契約表の写像の値域で見る（cast は attrs.to で決まるので語彙全体）。
-      // 入力側の集合で代用すると、比較や bool の sum のように dtype が変わる op で
-      // 正しいグラフが落ちる。
+    node.outs.forEach((name, slot) => {
+      // 出力は契約表の写像の値域を**出力 slot 別に**見る（cast は attrs.to で決まるので
+      // 語彙全体）。入力側の集合で代用すると、比較や bool の sum のように dtype が変わる op で
+      // 正しいグラフが落ちる。契約より出力が多い形（出力数違反）は入力側と同様に契約検査の
+      // 担当で、余ったぶんは全 slot の和で見て 1 件でも多く拾う。
+      const accept = op.outDtypes[slot] ??
+        new Set(op.outDtypes.flatMap((slotAccept) => [...slotAccept]));
       const dtype = declaredDtype(graph, name);
-      if (!op.outDtypes.has(dtype)) badDtypes.set(name, dtype);
-    }
+      if (!accept.has(dtype)) badDtypes.set(name, dtype);
+    });
     const unknown = Object.keys(node.attrs).filter((key) => !op.attrKeys.has(key)).sort();
     if (unknown.length > 0) badAttrs.push(`${where}: ${unknown.join(", ")}`);
   });
