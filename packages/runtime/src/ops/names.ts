@@ -59,6 +59,20 @@ export const REDUCE_OPS = ["sum", "amax", "amin"] as const;
 export type ReduceOpName = (typeof REDUCE_OPS)[number];
 
 /**
+ * 最終次元の argmax（ADR 0068 決定 2）。入力 f32 → 出力 **i32** で、**rank 保存**
+ * （最終次元を 1 に潰す固定形）。
+ *
+ * MUST: `attrs` を持たない。軸は最終次元固定（`dim` の欄が無いことがそのまま「他の軸は
+ * 語彙に無い」の宣言 — gather と同じ絞り方）で、`keepdim` の欄も作らない（rank 保存の
+ * 1 形だけを表す）。needs が出たら別 op で足す規律は `gelu` / `gelu_tanh` と同じ。
+ * MUST: reduce 族（{@link REDUCE_OPS}）に入れない。attrs も出力 dtype も rank の扱いも
+ * 違い、カーネルも別族（identity が −inf・(値, index) 対を運ぶ — src/kernels/argmax.ts）。
+ * MUST: タイブレークは**最小 index**・NaN は**最大**・全 −inf 行は **index 0**（いずれも
+ * torch 準拠。実装契約の正本は src/kernels/argmax.ts と reference/ops.ts）。
+ */
+export const ARGMAX_OP = "argmax";
+
+/**
  * 三項 elementwise `out = cond ? a : b`（torch の `where`）。
  *
  * MUST: 3 者とも右詰め broadcast（torch と同じ）。条件スロットが先頭なのは torch の

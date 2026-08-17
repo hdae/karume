@@ -597,6 +597,39 @@ def _h_row_reduce(op: str):
     return handler
 
 
+def _h_argmax(node: Node) -> Emitted:
+    """aten.argmax → argmax（**最終次元 + keepdim=True の固定形のみ** — ADR 0068 決定 2）。
+
+    torch の schema は `argmax(Tensor self, int? dim=None, bool keepdim=False)` で、`dim` は
+    reduce 族と違い**単一の int**（省略可能）。負の軸表記は境界で非負へ正規化する
+    （IR の attrs は非負のみ — ここでは attrs を載せないが、最終次元との突合に使う）。
+
+    MUST: 受理しない形は全件 fail loudly（黙って近似しない）:
+
+    - `dim` 省略（全次元 argmax）— 出力が rank 0 のスカラで、rank 保存の契約と別物。
+    - `keepdim=False` — 出力 rank が 1 下がる形。契約に `keepdim` の欄が無いことがそのまま
+      「その形は語彙に無い」の宣言（ADR 0023 決定 4 の規律）。needs が出たら reshape との
+      合成、または別 op で足す。
+    - 最終次元以外 — 行カーネルは縮約軸が連続であることを前提にしている（softmax / cumsum /
+      gather と同じ絞り方）。
+    """
+    src = node.args[0].meta["val"]
+    rank = src.dim()
+    # 欄の取得は `_arg_or_kwarg` に揃える（overload の呼び分けで kwargs 側に来た形でも素の
+    # 添字 IndexError に落とさず、診断規律へ合流させる — reduce 族と同じ MUST）。
+    dim = _arg_or_kwarg(node, 1, "dim", None)
+    _expect(dim is not None, node, "全次元 argmax は未対応（最終次元のみ）")
+    keepdim = bool(_arg_or_kwarg(node, 2, "keepdim", False))
+    _expect(keepdim, node, "keepdim=False の argmax は未対応（rank 保存の固定形のみ）")
+    axis = _normalized_dims(node, rank, [dim])[0]
+    _expect(
+        axis == rank - 1,
+        node,
+        f"最終次元以外（dim={axis} / rank={rank}）の argmax は未対応",
+    )
+    return Emitted("argmax", 1)
+
+
 # ---- 融合 op（ADR 0012 / ADR 0007 の保存リスト） --------------------------
 
 
@@ -1319,6 +1352,10 @@ ATEN_HANDLERS = {
     aten.sum.dim_IntList: _h_sum,
     aten.amax.default: _h_row_reduce("amax"),
     aten.amin.default: _h_row_reduce("amin"),
+    # greedy デコードの出口（ADR 0068 決定 2）。`aten.argmax.default` は Core ATen 内
+    # （`torch.Tag.core` 実測 2026-08-17）で default_decompositions にも載っていないので、
+    # curated decomp 後も 1 ノードで残る。
+    aten.argmax.default: _h_argmax,
     aten._to_copy.default: _h_to_copy,
     aten.bitwise_not.default: _h_bitwise_not,
     # 波3 の数理 op（sdp の spline / dec の leaky_relu — recon §2）

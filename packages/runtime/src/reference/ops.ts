@@ -15,6 +15,7 @@
 
 import type { IrDtype } from "../format/ir.ts";
 import {
+  ARGMAX_OP,
   arityFits,
   assertDtype,
   assertSlotDtype,
@@ -509,6 +510,45 @@ export const referenceRowReduce = (
     values[index] = acc;
   }
   return materialize(outDtype, shape, values);
+};
+
+/**
+ * 最終次元の argmax（ADR 0068 決定 2）。出力は **i32 の添字**で、shape は入力の最終次元を
+ * 1 に潰した形（rank 保存）。
+ *
+ * 固定挙動（torch 準拠 — 実測 2026-08-17）:
+ *
+ * - **同値は最小 index**（`[1,3,3,2]` → 1）。
+ * - **全 −inf 行は index 0**（`amax` と違い identity が値ではなく添字なので、−inf の行でも
+ *   答えが定義される）。
+ * - **NaN は最大**（`[1,NaN,3,NaN]` → 1）。NaN が複数あれば最小 index。
+ *
+ * MUST: GPU 側（src/kernels/argmax.ts）の式を写さない。あちらは「(値, index) 対の辞書式
+ * 最大元を木で畳む」形なので、こちらは**先頭から 1 要素ずつ走査して更新する素朴形**で書く
+ * （NaN 判定も `Number.isNaN` で、ビット列判定を写さない）。同じ式を書くと木の結合順の
+ * 誤りや NaN 判定の抜けが両側で相殺する。
+ */
+export const referenceArgmax = (x: RefTensor): RefTensor => {
+  const contract = resolveOpContract(ARGMAX_OP);
+  assertDtype(contract, x.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape], "reference")[0];
+  const dim = x.shape[x.shape.length - 1];
+  const rows = numel(shape);
+  const values = new Array<number>(rows);
+  for (let row = 0; row < rows; row += 1) {
+    const base = row * dim;
+    let bestAt = 0;
+    for (let i = 1; i < dim; i += 1) {
+      const candidate = x.data[base + i];
+      const best = x.data[base + bestAt];
+      // NaN は最大（比較演算は NaN で全て false になるので、NaN 側を明示的に拾う）。
+      // 既に NaN を掴んでいるなら後続では絶対に更新しない = NaN も最小 index になる。
+      if (Number.isNaN(best)) continue;
+      if (Number.isNaN(candidate) || candidate > best) bestAt = i;
+    }
+    values[row] = bestAt;
+  }
+  return materialize(outputDtypeOf(contract, 0, x.dtype, "reference"), shape, values);
 };
 
 /**
@@ -1507,6 +1547,8 @@ export const applyReferenceOp = (
       return referenceGather(inputs[0], inputs[1]);
     case "rowReduce":
       return referenceRowReduce(contract.name, inputs[0], reduceDim(attrs, "reference"));
+    case "argmax":
+      return referenceArgmax(inputs[0]);
     case "cast":
       return referenceCast(inputs[0], castTargetDtype(attrs, "reference"));
     case "reshape":

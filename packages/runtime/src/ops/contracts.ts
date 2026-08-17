@@ -31,6 +31,7 @@ import {
   UPSAMPLE_BILINEAR2D_ATTRS,
 } from "./attrs.ts";
 import {
+  ARGMAX_OP,
   ATTENTION_OP,
   BINARY_OPS,
   type BinaryOpName,
@@ -78,6 +79,7 @@ export type OpKind =
   | "bmm"
   | "gather"
   | "rowReduce"
+  | "argmax"
   | "cast"
   | "reshape"
   | "permute"
@@ -189,6 +191,11 @@ export type OpContract =
     readonly arity: 2;
   })
   | (ContractBase & { readonly kind: "rowReduce"; readonly name: ReduceOpName; readonly arity: 1 })
+  // 最終次元の argmax（ADR 0068 決定 2）。reduce 族と kind を分けるのは、attrs（無し）・
+  // 出力 dtype（i32）・rank の扱い（保存）・カーネル族（identity −inf + index 追跡）の
+  // 4 面が全て違い、消費側の網羅 switch に「どちらの意味論で実行するか」を必ず宣言させる
+  // ため（safe_softmax を softmax と別 kind にしたのと同じ理由）。
+  | (ContractBase & { readonly kind: "argmax"; readonly name: typeof ARGMAX_OP; readonly arity: 1 })
   | (ContractBase & { readonly kind: "cast"; readonly name: typeof CAST_OP; readonly arity: 1 })
   | (ContractBase & {
     readonly kind: "reshape";
@@ -356,6 +363,8 @@ const dtypesOf = (name: string): readonly IrDtype[] => DTYPES.get(name) ?? F32;
  * - `sum` の bool 入力 — `sum(x >= bl, dim=-1)` は**真の個数**なので i32（f32 で数えると
  *   2^24 を超えた時点で静かに丸まる）。f32 入力は従来どおり f32。
  * - `where` — 条件が先頭スロットなので、写像だけが「出力は値の側」を表せる。
+ * - `argmax` — 出力は**添字**なので i32（ADR 0068 決定 2）。f32 で返すと語彙 2^24 を超えた
+ *   時点で隣の token に丸まる（bool の `sum` と同型の理由）。
  */
 const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[]> = new Map([
   ["ge", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
@@ -364,6 +373,7 @@ const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[
   ["gt_scalar", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
   ["sum", [new Map<IrDtype, IrDtype>([["f32", "f32"], ["bool", "i32"]])]],
   [WHERE_OP, [new Map<IrDtype, IrDtype>([["bool", "f32"]])]],
+  [ARGMAX_OP, [new Map<IrDtype, IrDtype>([["f32", "i32"]])]],
 ]);
 
 /** 宣言が無い op の既定 = **出力 1 本・恒等**（空の写像は定義域全体が恒等で埋まる）。 */
@@ -475,6 +485,9 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     name: GATHER_OP,
     arity: 2,
   }],
+  // 最終次元の argmax（ADR 0068 決定 2）。attrs 空・入力 f32 → 出力 i32（写像は
+  // OUTPUT_DTYPES）で、rank 保存は shape 規則が持つ。
+  [ARGMAX_OP, { ...contract(ARGMAX_OP), kind: "argmax", name: ARGMAX_OP, arity: 1 }],
   [CAST_OP, {
     ...slotContract(CAST_OP, { kind: "uniform", accept: ANY_DTYPE }, CAST_ATTRS),
     kind: "cast",

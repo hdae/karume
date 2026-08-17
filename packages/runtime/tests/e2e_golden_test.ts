@@ -18,8 +18,9 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 /**
  * torch CPU 期待値との突合に使う許容誤差。
  *
- * 実測（**全 29 モデル 69 出力**のうち f32 が 62 本。i32 / bool の 7 本は差 0 の厳密一致で、
- * この値の対象外 — ADR 0009）の最悪値は **maxAbs 4.77e-7**（deform_conv2d_block output.0）/
+ * 実測（**全 31 モデル 73 出力**のうち f32 が 64 本。i32 / bool の 9 本は差 0 の厳密一致で、
+ * この値の対象外 — ADR 0009。`argmax_pick` の 2 出力は添字なのでこちら側）の最悪値は
+ * **maxAbs 4.77e-7**（deform_conv2d_block output.0）/
  * **maxRel 1.77e-5**（batch_matmul output.0）。前者は**その要素の値が 4.82 と他の golden より
  * 大きいだけで、ulp で測れば 1 ulp ちょうど**（ulp(4.82) = 2² · 2⁻²³ = 4.77e-7）。後者は
  * ゼロ近傍の要素で相対誤差が伸びたもので、その要素の絶対誤差は 1.19e-7（= 1 ulp）にすぎない。

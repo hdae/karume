@@ -58,6 +58,17 @@ BINARY_OPS = ("add", "sub", "mul", "div", "ge", "bitwise_and")
 #: 1 軸の reduce（attrs `dim`・keepdim 無し）。最終次元は行カーネル、それ以外は軸変種で
 #: 実行する（docs/research/2026-08-04-vae-axis-reduce-recon.md §5）。
 REDUCE_OPS = ("sum", "amax", "amin")
+#: 最終次元の argmax（ADR 0068 決定 2）。入力 f32 → 出力 **i32**（添字）で、**rank 保存**
+#: （最終次元を 1 に潰す固定形）。
+#:
+#: MUST: attrs を持たない。軸は最終次元固定（`dim` の欄が無いことがそのまま「他の軸は語彙に
+#: 無い」の宣言 — gather と同じ絞り方）で、`keepdim` の欄も作らない（rank 保存の 1 形だけ）。
+#: MUST: reduce 族（REDUCE_OPS）に入れない。attrs も出力 dtype も rank の扱いも違い、
+#: カーネルも別族（identity が -inf・(値, index) 対を運ぶ）。
+#: MUST: タイブレークは**最小 index**・NaN は**最大**・全 -inf 行は **index 0**（いずれも
+#: torch 準拠の実測 2026-08-17）。該当しない形（keepdim=False / 中間次元 / 全次元）は
+#: `aten_handlers._h_argmax` が全件 fail loudly にする。
+ARGMAX_OP = "argmax"
 #: 三項 elementwise `out = cond ? a : b`（torch の where）。3 者とも右詰め broadcast で、
 #: 条件が先頭スロットでも**出力は値の側**（写像 bool → f32 — _OUTPUT_DTYPES）。
 WHERE_OP = "where"
@@ -248,6 +259,7 @@ OpKind = Literal[
     "bmm",
     "gather",
     "row_reduce",
+    "argmax",
     "cast",
     "reshape",
     "permute",
@@ -892,7 +904,7 @@ _DTYPES: dict[str, frozenset[str]] = {
 
 #: 出力 slot 別の dtype 写像の**列**を宣言する表（ADR 0068 決定 1）。ここに無い op は
 #: 「出力 1 本・恒等」。恒等でないのは比較 4 本（f32 → bool）/ bool 入力の sum
-#: （→ i32 のカウント）/ where（bool → f32）だけ。
+#: （→ i32 のカウント）/ where（bool → f32）/ argmax（→ 添字の i32）だけ。
 _OUTPUT_DTYPES: dict[str, tuple[dict[str, str], ...]] = {
     "ge": ({"f32": "bool"},),
     "ge_scalar": ({"f32": "bool"},),
@@ -900,6 +912,7 @@ _OUTPUT_DTYPES: dict[str, tuple[dict[str, str], ...]] = {
     "gt_scalar": ({"f32": "bool"},),
     "sum": ({"f32": "f32", "bool": "i32"},),
     WHERE_OP: ({"bool": "f32"},),
+    ARGMAX_OP: ({"f32": "i32"},),
 }
 
 #: 宣言が無い op の既定 = **出力 1 本・恒等**（空の写像は定義域全体が恒等で埋まる）。
@@ -985,6 +998,9 @@ OP_CONTRACTS: dict[str, OpContract] = {
     GATHER_OP: _slot_contract(
         GATHER_OP, "gather", 2, PerSlotDtypes(slots=(F32_DTYPES, I32_DTYPES))
     ),
+    # 最終次元の argmax（ADR 0068 決定 2）。attrs 空・入力 f32 → 出力 i32（写像は
+    # _OUTPUT_DTYPES）で、rank 保存は shape 規則が持つ。
+    ARGMAX_OP: _contract(ARGMAX_OP, "argmax", 1),
     CAST_OP: _slot_contract(
         CAST_OP, "cast", 1, UniformDtypes(accept=frozenset(SEMANTIC_DTYPES)), CAST_ATTRS
     ),

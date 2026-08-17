@@ -245,6 +245,8 @@ def _compute(
         return _gather(ins, where)
     if kind == "row_reduce":
         return _row_reduce(contract, ins, where, attrs)
+    if kind == "argmax":
+        return _argmax(ins, where)
     if kind == "reshape":
         return _reshape(contract, ins, where, declared)
     if kind == "permute":
@@ -354,6 +356,22 @@ def _row_reduce(
     if shape[dim].is_value(0) and contract.name != "sum":
         raise OpContractError(f"{where}: op '{contract.name}' は長さ 0 の軸を縮約できない")
     return shape[:dim] + shape[dim + 1 :]
+
+
+def _argmax(ins: list[list[Extent]], where: str) -> list[Extent]:
+    """argmax の出力 shape（ADR 0068 決定 2）— **最終次元を 1 に潰す rank 保存**。
+
+    reduce 族と違い軸は attrs ではなく最終次元固定（欄の不存在が「他の軸は語彙に無い」の
+    宣言）で、`keepdim` の欄も無いので出力 rank は入力と同じ。
+    """
+    shape = ins[0]
+    if not shape:
+        raise OpContractError(f"{where}: argmax の入力は rank 1 以上（スカラは縮約できない）")
+    # 長さ 0 の軸に「最大値の添字」は無い（torch も拒否）。記号次元が 0 になるかは束縛次第
+    # なので、ここで決められるのは定数次元だけ（残りはランタイム側の層 — amax と同じ分担）。
+    if shape[-1].is_value(0):
+        raise OpContractError(f"{where}: argmax は長さ 0 の最終次元を縮約できない")
+    return [*shape[:-1], _ONE]
 
 
 def _reshape(

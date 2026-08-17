@@ -10,7 +10,7 @@
 // 要素方向の族（elementwise / strided 読み書き / gather / embedding / masked_fill / conv 族 /
 // pad / flip / upsample_bilinear2d / deform_conv2d / **軸 reduce**）は `gid.x` の 1 次元
 // grid-stride、
-// 行方向の族（行 reduce / softmax /
+// 行方向の族（行 reduce / **argmax** / softmax /
 // layer_norm / rms_norm / **gru_scan**）は `workgroup_id.x` を `num_workgroups.x` で送る
 // 行ループを踏ませる（gru_scan の「行」はバッチ要素で、時間ループはカーネル内）。
 // **reduce 族は 2 変種とも載せる**（最終次元 = 行方向 / それ以外 = 要素方向で、走らせ方が違う）。
@@ -28,6 +28,7 @@
 // 「今の実測形では超えない」だけなので、上限を踏むかどうかで載せる・載せないを決めない。
 
 import { assertEquals } from "@std/assert";
+import type { IrDtype } from "../src/format/ir.ts";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
@@ -36,6 +37,7 @@ import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { refTensor } from "../src/reference/ops.ts";
 import { WEIGHT_STORAGES } from "../src/kernels/weight-storage.ts";
 import {
+  argmaxCase,
   attentionStatsCase,
   attentionStatsF16Case,
   attentionStatsS16Case,
@@ -67,11 +69,19 @@ import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
+/**
+ * 出力バッファを**期待値の意味論 dtype で**読む（ADR 0009 の実表現 — bool は u32 の 0/1）。
+ *
+ * MUST: dtype を固定で f32 にしない。`argmax` は i32（添字）を書くので、f32 として読むと
+ * ビット列の読み替えになって突合が丸ごと無意味になる（比較は必ず落ちるが、落ち方が
+ * 「縮退耐性の欠陥」に見えて原因を隠す）。
+ */
 const readback = async (
   device: GPUDevice,
   buffer: GPUBuffer,
   count: number,
-): Promise<Float32Array<ArrayBuffer>> => {
+  dtype: IrDtype,
+): Promise<Float32Array<ArrayBuffer> | Int32Array<ArrayBuffer> | Uint32Array<ArrayBuffer>> => {
   const size = Math.max(4, count * 4);
   const staging = device.createBuffer({
     size,
@@ -84,7 +94,14 @@ const readback = async (
   const copy = staging.getMappedRange().slice(0);
   staging.unmap();
   staging.destroy();
-  return new Float32Array(copy, 0, count);
+  switch (dtype) {
+    case "f32":
+      return new Float32Array(copy, 0, count);
+    case "i32":
+      return new Int32Array(copy, 0, count);
+    case "bool":
+      return new Uint32Array(copy, 0, count);
+  }
 };
 
 const runDegenerate = async (gpu: GpuContext, testCase: DegenerateCase): Promise<void> => {
@@ -128,7 +145,7 @@ const runDegenerate = async (gpu: GpuContext, testCase: DegenerateCase): Promise
     scheduler.dispatch(pipeline, bindGroup, [testCase.groups, 1, 1], testCase.key);
     await scheduler.flush();
 
-    const actual = await readback(gpu.device, dst, count);
+    const actual = await readback(gpu.device, dst, count, testCase.expected.dtype);
     const report = compareTensors(
       refTensor(testCase.expected.shape, actual),
       testCase.expected,
@@ -160,6 +177,9 @@ const CASES: readonly DegenerateCase[] = [
   cumsumCase(),
   reduceCase(),
   axisReduceCase(),
+  // argmax は行 reduce と同じ行方向 grid-stride の**別族**（identity −inf + index 追跡）。
+  // 出力が i32 なので readback は期待値の dtype で view を張る。
+  argmaxCase(),
   softmaxCase(),
   // 融合 attention の 3 カーネルのうち行方向 grid-stride なのは ② だけ（①③ はタイル系で
   // カテゴリ違い — 安全網は tiledWorkgroups の fail loudly + full-write テスト）。

@@ -630,6 +630,53 @@ export const REDUCE_CASES: readonly OpCase[] = [
 ];
 
 /**
+ * argmax（最終次元・rank 保存・出力 i32 — ADR 0068 決定 2）。突合は i32 の**厳密一致**
+ * （添字に丸め差は無い）。タイブレーク / NaN / 全 −inf 行の固定挙動は期待値リテラルを持つ
+ * 専用門（gpu_ops_test.ts）が見るので、ここは shape と経路の被覆を担う。
+ */
+export const ARGMAX_CASES: readonly OpCase[] = [
+  {
+    name: "argmax [6,10]",
+    op: "argmax",
+    inputs: [fill([6, 10], SIGNED)],
+    outShape: [6, 1],
+    outDtype: "i32",
+  },
+  {
+    // 行長が workgroup サイズ（256）を超える → 1 スレッドが複数要素を畳み、レーンを跨いだ
+    // 木の簡約で index が運ばれる経路。最大値は**行ごとに違う位置**の 2 周目（添字 ≥ 256）に
+    // 置く（全行で同じ添字が正解だと「別の行を読む」誤りが値に出ない）。
+    name: "argmax [3,700]（走査ループ 2 周目に最大値・行ごとに別位置）",
+    op: "argmax",
+    inputs: [fill([3, 700], (i) => (i % 700 === 300 + Math.floor(i / 700) * 100 ? 99 : SIGNED(i)))],
+    outShape: [3, 1],
+    outDtype: "i32",
+  },
+  {
+    name: "argmax rank3 [2,3,7]",
+    op: "argmax",
+    inputs: [fill([2, 3, 7], SIGNED)],
+    outShape: [2, 3, 1],
+    outDtype: "i32",
+  },
+  {
+    // rank 1 → [1]（reduce 族はここでスカラへ落ちる — rank 保存との違いが出る形）
+    name: "argmax [4] → [1]",
+    op: "argmax",
+    inputs: [fill([4], (i) => [-1.5, 0.25, 3.5, 3.5][i])],
+    outShape: [1],
+    outDtype: "i32",
+  },
+  {
+    name: "argmax 最終次元が 1 [5,1]",
+    op: "argmax",
+    inputs: [fill([5, 1], SIGNED)],
+    outShape: [5, 1],
+    outDtype: "i32",
+  },
+];
+
+/**
  * レイアウト op（ADR 0011）。reshape はバッファ別名なので dispatch を 1 本も出さず、
  * permute / expand は strided 実体化コピー 1 カーネル族で実行する。
  * 解禁 dtype は実測どおり（permute は f32、expand は i32 / bool）。

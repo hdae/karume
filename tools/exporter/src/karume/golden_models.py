@@ -214,6 +214,36 @@ def _fill_param(generator: torch.Generator, tensor: torch.Tensor, scale: float) 
         tensor.copy_(torch.randn(tensor.shape, generator=generator) * scale)
 
 
+class ArgmaxPick(nn.Module):
+    """greedy デコードの出口（ADR 0068 決定 2）— 最終次元 = 語彙軸の argmax・**rank 保存**。
+
+    1 本目は実形（`linear` = lm_head 相当の logits に argmax を掛ける・位置軸は記号 T）。
+    2 本目は **同値タイ**への argmax で、`cat([t, t], dim=-1)` が対称位置に必ず同値を作るので
+    「最小 index」が偶然ではなく**構造で**要求される — 最大 index を返す実装なら答えが
+    `argmax(t) + n` になり、golden 突合がその場で赤くなる（llama.cpp が GPU / CPU で
+    食い違っていた軸 — 調査 §2）。
+
+    MUST: タイの入力は**グラフ入力**から作る（定数だと FOLDABLE_OPS が畳んでノードが消える）。
+    """
+
+    HIDDEN = 5
+    VOCAB = 7
+
+    def __init__(self, generator: torch.Generator) -> None:
+        super().__init__()
+        self.head = nn.Linear(self.HIDDEN, self.VOCAB)
+        _fill_param(generator, self.head.weight, 0.7)
+        _fill_param(generator, self.head.bias, 0.3)
+
+    def forward(self, x: torch.Tensor, tied: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = self.head(x)
+        doubled = torch.cat([tied, tied], dim=-1)
+        return (
+            torch.argmax(logits, dim=-1, keepdim=True),
+            torch.argmax(doubled, dim=-1, keepdim=True),
+        )
+
+
 class AttentionBlock(nn.Module):
     """linear → bmm → softmax → bmm → linear → 残差 + layer_norm（recon §2 の並びの縮小形）。
 

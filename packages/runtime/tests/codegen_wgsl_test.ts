@@ -33,6 +33,13 @@ import {
   stridedWriteWgsl,
 } from "../src/codegen/strided.ts";
 import { type IrDtype, SEMANTIC_DTYPES } from "../src/format/ir.ts";
+import {
+  ARGMAX_KEY,
+  ARGMAX_NEG_INF_BITS,
+  ARGMAX_WGSL,
+  ARGMAX_WORKGROUP_SIZE,
+  argmaxParams,
+} from "../src/kernels/argmax.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../src/kernels/bmm.ts";
 import { ATTENTION_QK_MASK_BINDING, GEMM_MTILE_SMALL, gemmUsesVec4 } from "../src/kernels/gemm.ts";
 import { defaultGemmGeometry, GEMM_TILE } from "../src/kernels/gemm-geometry.ts";
@@ -305,6 +312,10 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["reduce_axis_sum_bool.wgsl", axisReduceWgsl({ op: "sum", dtype: "bool" })],
     ["reduce_axis_amax.wgsl", axisReduceWgsl({ op: "amax", dtype: "f32" })],
     ["cumsum.wgsl", CUMSUM_WGSL],
+    // argmax（ADR 0068 決定 2）。**reduce 3 本と対で置く**のが条件で、行 reduce と同型の
+    // 骨格を持つぶん「新族を足したら既存 reduce のバイト列が動いた」が最大の事故
+    // （既存 3 本 + 軸変種 3 本がその検出器）。
+    ["argmax.wgsl", ARGMAX_WGSL],
     // GEMM 3 op は形状由来の v4 フラグで 2 変種（スカラ / vec4）を持つ。**両側を並べる**のが
     // 条件で、片方だけ固定すると端数形状のフォールバックが黙って壊れても気づけない。
     ["matmul.wgsl", MATMUL_WGSL],
@@ -580,6 +591,10 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     ATTENTION_STATS_KEY,
     MASKED_FILL_KEY,
     CUMSUM_KEY,
+    // argmax は reduce 族と**別のパイプライン**（identity が −inf・(値, index) 対を運ぶ）。
+    // 衝突すると片方の WGSL が他方の dispatch へ割り当たり、bind 面（出力 i32）が違うので
+    // 例外なしに別のビット列が読まれる。
+    ARGMAX_KEY,
     PAD_KEY,
     FLIP_KEY,
     // upsample 系 2 本は**対で載せる**（第 3 層の融合ルール `upsample2x` = nearest の
@@ -975,6 +990,54 @@ Deno.test("cumsum は 1 invocation = 1 行の前縁和で、行方向を grid-st
   assertEquals(cumsumParams(7, 3).byteLength, 16);
   assertThrows(() => cumsumParams(-1, 3), CodegenError);
   assertThrows(() => cumsumParams(1.5, 3), CodegenError);
+});
+
+/**
+ * argmax（ADR 0068 決定 2）。**値では検出できない**契約が 3 つあるので、生成物の側から固定する:
+ *
+ * 1. **タイブレークの向き** — `ib < ia`（最小 index）を `>` に書き換えても shape も dtype も
+ *    合ってしまう。木の両子で同じ述語を使っていることも同時に見る（片方だけ向きが違うと
+ *    「木の形に依存して勝者が変わる」= 実行結果が dispatch 数で揺れる）。
+ * 2. **identity が −inf** — 有限 sentinel（reduce 族の `-F32_MAX`）に戻っていないこと。
+ *    ビット列は params 3 語目で運ぶ（const-expression の inf を避ける — softmax と同じ規律）。
+ * 3. **NaN 判定がビット列** — 素の比較に戻すと NaN が黙って負け、`amax` は NaN・`argmax` は
+ *    別要素という族内の食い違いになる。
+ */
+Deno.test("argmax は最小 index を保存する比較式・−inf identity・ビット列 NaN 判定を持つ", () => {
+  assertEquals(ARGMAX_KEY, `argmax:v1:f32>i32:lastdim:minindex:wg${ARGMAX_WORKGROUP_SIZE}`);
+  assertEquals(ARGMAX_WORKGROUP_SIZE, 256);
+  // ① タイブレーク: 同値なら小さい index が勝つ（辞書式順序の 1 本の述語）
+  assertEquals(ARGMAX_WGSL.includes("return vb > va || (vb == va && ib < ia);"), true);
+  // 述語は 1 箇所定義で、走査・木の両方が同じ関数を呼ぶ（向きの取り違えを構造で潰す）
+  assertEquals(ARGMAX_WGSL.includes("fn argmax_beats(vb: f32, ib: u32, va: f32, ia: u32)"), true);
+  assertEquals(ARGMAX_WGSL.includes("if (argmax_beats(v, i, best, best_at)) {"), true);
+  assertEquals(
+    ARGMAX_WGSL.includes(
+      "if (argmax_beats(other, other_at, scratch_value[lid], scratch_index[lid])) {",
+    ),
+    true,
+  );
+  // ② identity は −inf（params 経由）+ index の番兵は dim（全 −inf 行が index 0 になる根拠）
+  assertEquals(ARGMAX_WGSL.includes("let neg_inf = bitcast<f32>(params.neg_inf);"), true);
+  assertEquals(ARGMAX_WGSL.includes("var best = neg_inf;"), true);
+  assertEquals(ARGMAX_WGSL.includes("var best_at = dim;"), true);
+  // MUST: reduce 族の有限 sentinel が紛れ込んでいない
+  assertEquals(ARGMAX_WGSL.includes("3.402823466e38"), false);
+  // ③ NaN はビット列で判定して「最大」として扱う（両方 NaN なら最小 index）
+  assertEquals(ARGMAX_WGSL.includes("fn is_nan_bits(x: f32) -> bool {"), true);
+  assertEquals(ARGMAX_WGSL.includes("  if (na != nb) {\n    return nb;\n  }"), true);
+  assertEquals(ARGMAX_WGSL.includes("  if (na) {\n    return ib < ia;\n  }"), true);
+  // 出力は i32 の添字（f32 で書くと語彙 2^24 超で隣の token に丸まる）
+  assertEquals(ARGMAX_WGSL.includes("read_write> out: array<i32>;"), true);
+  assertEquals(ARGMAX_WGSL.includes("out[row] = i32(scratch_index[0u]);"), true);
+  // 行ループは grid-stride（行 reduce と同じ workgroup_id × num_workgroups の送り）
+  assertEquals(ARGMAX_WGSL.includes("var row = wid.x;"), true);
+  assertEquals(ARGMAX_WGSL.includes("row = row + nwg.x;"), true);
+  assertEquals([...argmaxParams(7, 3)], [7, 3, ARGMAX_NEG_INF_BITS, 0]);
+  assertEquals(argmaxParams(7, 3).byteLength, 16, "uniform struct の 16 バイト整列");
+  assertThrows(() => argmaxParams(7, 0), CodegenError, "dim は正整数");
+  assertThrows(() => argmaxParams(-1, 3), CodegenError);
+  assertThrows(() => argmaxParams(7, 1.5), CodegenError);
 });
 
 Deno.test("half-split RoPE は積を workgroup u32 へ丸め、一様 barrier 後に加算する", () => {

@@ -29,6 +29,7 @@ import {
   stridedWriteParams,
   stridedWriteWgsl,
 } from "../../src/codegen/strided.ts";
+import { ARGMAX_KEY, ARGMAX_WGSL, argmaxParams } from "../../src/kernels/argmax.ts";
 import {
   CONV1D_WORKGROUP_SIZE,
   conv1dKey,
@@ -143,7 +144,10 @@ export type DegenerateCase = {
    * 後に足す（カーネル側の `*_SCALE_BINDING` と同じ位置になる）。
    */
   readonly weightScale?: Float32Array<ArrayBuffer>;
-  /** CPU 参照が出した期待出力（f32 の族のみ載せる）。 */
+  /**
+   * CPU 参照が出した期待出力。読み出しは**この dtype で** view を張る（f32 の族と、添字を
+   * 書く i32 の族〈argmax〉— 突合できない格納形は {@link sideOutputBytes} 側に置く）。
+   */
   readonly expected: RefTensor;
   /** 素直に割ったときの必要 workgroup 数（縮退していることの証拠として固定する）。 */
   readonly natural: number;
@@ -625,6 +629,33 @@ export const reduceCase = (): DegenerateCase => {
     uniformParams: true,
     inputs: [input],
     expected: applyReferenceOp("sum", [input], { dim: 1 }, [rows]),
+    // 1 行 = 1 workgroup（行長は workgroup 内で畳む）ので必要数は行数そのもの。
+    natural: rows,
+    groups: 2,
+  };
+};
+
+/**
+ * argmax（ADR 0068 決定 2）。行 reduce と同じ行方向 grid-stride だが**別族**（identity が
+ * −inf・(値, index) 対を運ぶ）なので独立に載せる。期待値は i32 の添字。
+ *
+ * 行ごとに最大値の位置が変わる列にする MUST — 全行で同じ添字が正解だと「別の行を読む」誤りも
+ * 「行ループが 1 周で止まる」誤りも値に出ない（未書き込みの毒値だけが検出器になり、
+ * ゼロ埋めのバッファを引いた回では添字 0 が偶然正解になる行が出る）。
+ */
+export const argmaxCase = (): DegenerateCase => {
+  const rows = 5_000;
+  const dim = 3;
+  // 行 r の最大値の位置は r % 3（POSITIVE の周期 17 と dim 3 が互いに素なので巡回する）。
+  const input = fill([rows, dim], (i) => (i % dim === Math.floor(i / dim) % dim ? 9 : POSITIVE(i)));
+  return {
+    name: "argmax",
+    key: ARGMAX_KEY,
+    wgsl: ARGMAX_WGSL,
+    params: argmaxParams(rows, dim),
+    uniformParams: true,
+    inputs: [input],
+    expected: applyReferenceOp("argmax", [input], {}, [rows, 1]),
     // 1 行 = 1 workgroup（行長は workgroup 内で畳む）ので必要数は行数そのもの。
     natural: rows,
     groups: 2,

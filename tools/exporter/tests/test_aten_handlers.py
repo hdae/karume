@@ -176,6 +176,74 @@ class TestRowReduce:
             convert_module(Reduce(), (torch.randn(3, 5),))
 
 
+class TestArgmax:
+    """argmax は**最終次元 + keepdim=True** の固定形のみ（ADR 0068 決定 2）。
+
+    reduce 族と違い attrs を持たない（軸は最終次元固定・rank 保存）ので、絞りは全て
+    ハンドラの受理判定が担う。出力は torch の i64 → 境界で **i32** へ正規化される
+    （ADR 0009）。
+    """
+
+    def test_last_dim_with_keepdim_becomes_one_node(self, convert_module):
+        class Argmax(nn.Module):
+            def forward(self, x):
+                return torch.argmax(x, dim=-1, keepdim=True)
+
+        graph, _ = convert_module(Argmax(), (torch.randn(3, 5),))
+
+        assert node_ops(graph) == ["argmax"]
+        # attrs 空（`dim` / `keepdim` の欄が無いことがそのまま「他の形は語彙に無い」の宣言）
+        assert only_node(graph, "argmax").attrs == {}
+        # rank 保存 = 最終次元を 1 に潰した形・dtype は i32
+        assert [graph.values[name].shape for name in graph.outputs] == [[3, 1]]
+        assert [graph.values[name].dtype for name in graph.outputs] == ["i32"]
+
+    def test_a_symbolic_leading_dimension_survives(self, convert_module, dyn_t):
+        """decode の出口形（`[B, T, V]` の最終次元 = 語彙軸）。先行次元は記号のまま残る。"""
+
+        class Argmax(nn.Module):
+            def forward(self, x):
+                return torch.argmax(x, dim=2, keepdim=True)
+
+        graph, _ = convert_module(Argmax(), (torch.randn(1, 4, 7),), dynamic_shapes=({1: dyn_t},))
+
+        assert node_ops(graph) == ["argmax"]
+        assert [graph.values[name].shape for name in graph.outputs] == [[1, "T", 1]]
+
+    @pytest.mark.parametrize(
+        ("build", "why"),
+        [
+            (lambda x: torch.argmax(x, dim=-1), "keepdim=False の argmax は未対応"),
+            (lambda x: torch.argmax(x), "全次元 argmax は未対応"),
+            (lambda x: torch.argmax(x, dim=0, keepdim=True), "最終次元以外（dim=0 / rank=2）"),
+        ],
+        ids=["no-keepdim", "all-dims", "non-last-axis"],
+    )
+    def test_other_forms_are_rejected(self, convert_module, build, why):
+        class Argmax(nn.Module):
+            def forward(self, x):
+                return build(x)
+
+        with pytest.raises(NotImplementedError, match=why):
+            convert_module(Argmax(), (torch.randn(3, 5),))
+
+    def test_kwarg_forms_read_the_same_slots(self):
+        """`dim` / `keepdim` が kwargs で来ても同じ欄として読む（reduce 族と同じ規律）。
+
+        位置引数を素で添字すると `IndexError` になり、ADR 0005 の「未対応は診断つきで落とす」
+        規律の外へ落ちる（診断が「エクスポータが壊れた」に化ける）。
+        """
+        target = torch.ops.aten.argmax.default
+        node = _reduce_node(target, kwargs={"dim": -1, "keepdim": True})
+
+        assert ATEN_HANDLERS[target](node) == ("argmax", 1, {}, ())
+
+        with pytest.raises(NotImplementedError, match="keepdim=False の argmax は未対応"):
+            ATEN_HANDLERS[target](_reduce_node(target, kwargs={"dim": -1}))
+        with pytest.raises(NotImplementedError, match="全次元 argmax は未対応"):
+            ATEN_HANDLERS[target](_reduce_node(target, kwargs={"keepdim": True}))
+
+
 def _reduce_node(target, args=(), kwargs=None, shape=(3, 5)):
     """reduce ハンドラへ直接食わせる FX ノードを 1 本組む。
 

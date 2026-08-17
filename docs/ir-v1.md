@@ -50,6 +50,11 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   失われる。要求元は vowel-detector の 2 層 BiGRU）。**アリティ 4 固定・attrs 空**で、
   op が受け持つのは**隠れ側の逐次だけ**（入力側 GEMM は呼び手の `linear`）。走査方向は
   attrs ではなく **op 名**が持つ（`gelu` / `gelu_tanh` と同じ手筋）。既存 IR への影響はゼロ。
+- autoregressive（2026-08-17）: `argmax` を **Core ATen 層**として追加（ADR
+  [0068](decisions/0068-decode-exit-multi-output.md) 決定 2 — greedy デコードの出口。
+  `torch.Tag.core` の実測で core・台帳 NOTE のみが要件〈ADR 0059〉だが、決定 2 は
+  多出力解禁と同じ ADR に載っている）。**attrs 空・アリティ 1・入力 f32 → 出力 i32**（添字）で、
+  **rank 保存**（最終次元を 1 に潰す）は shape 規則が持つ。既存 IR への影響はゼロ。
 
 ## コンテナ
 
@@ -234,6 +239,14 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   チャネル軸の縮約を書いたつもりの IR が黙って最終次元を畳んだ別の計算として実行される）。
   最終次元は行カーネル、それ以外は軸変種で実行するが、**縮約順序は両変種で厳密に一致**する
   （設計と記号検証は research/2026-08-04-vae-axis-reduce-recon.md §5.2）
+- `argmax`（f32 → **i32**、**attrs 無し** — ADR
+  [0068](decisions/0068-decode-exit-multi-output.md) 決定 2）— 最終次元の argmax で、出力は
+  **rank 保存**（最終次元を 1 に潰した固定形）。reduce 族とは別の契約: 軸は最終次元固定
+  （`dim` の欄が無い）・`keepdim` の欄も無い（rank が下がる形は語彙に無い）・長さ 0 の最終
+  次元は拒否。固定挙動は 3 点とも torch 準拠で、**タイブレークは最小 index** / **NaN は最大**
+  （複数なら最小 index）/ **全 −inf 行は index 0**（行 max の identity は −inf MUST — 有限
+  sentinel だと番兵 index が出力へ漏れる）。llama.cpp は GPU 側 = 最大 index・CPU sampler =
+  最小 index で同一リポ内でも食い違っており、明文化しないと greedy の再現性が実装差で割れる
 - レイアウト（ADR [0011](decisions/0011-layout-strategy.md)）— いずれも単項:
   - `reshape`（f32 / i32 / bool）— **出力の宣言 shape が目標形**。契約は要素数一致のみで、
     要素順は変えない。attrs 無し（目標形を attrs に持たせると宣言と二重管理になる）

@@ -38,6 +38,7 @@ from karume.convert import (
 # import は goldens → golden_models の一方向のみ（逆辺を張るとモデル定義が台帳へ食い込む）。
 from karume.golden_models import (
     Activations,
+    ArgmaxPick,
     AttentionBlock,
     BatchMatmul,
     BilinearResize,
@@ -147,6 +148,17 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
         build=lambda _: RowReduce(),
         example_inputs=lambda g: (_uniform(g, GOLDEN_T, 5, low=-2.0, high=2.0),),
         dynamic_shapes=({0: _DYNAMIC_T},),
+    ),
+    GoldenSpec(
+        name="argmax_pick",
+        build=ArgmaxPick,
+        # x[1,T,HIDDEN] は位置軸だけ記号（decode 出口の実形）。tied は**同値タイを作る種**で、
+        # 行ごとに最大値の位置が変わる列にする（全行同じだと「別の行を読む」誤りが値に出ない）。
+        example_inputs=lambda g: (
+            _uniform(g, 1, GOLDEN_T, ArgmaxPick.HIDDEN, low=-1.5, high=1.5),
+            torch.tensor([[0.5, 2.0, -1.0, 0.25], [1.0, -0.5, 3.0, 0.75], [4.0, 1.5, 0.0, -2.0]]),
+        ),
+        dynamic_shapes=({1: _DYNAMIC_T}, None),
     ),
     GoldenSpec(
         name="mask_chain",

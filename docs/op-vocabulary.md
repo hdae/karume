@@ -63,7 +63,10 @@ M1-P2 以降に解消する。
 - **最大の穴 = 値の max reduce 族**: amax / amin / max / min / argmax / argmin が皆無
   だった。これが無いと safe-softmax・max-pool・logsumexp・greedy デコードが組めず、
   Transformers 系を汎用に扱えない。実装は sum 用の行カーネルと同型の複製 ≈20 行で済む
-  ため最初期に実装する。
+  ため最初期に実装する。**訂正（2026-08-17）**: 「≈20 行の複製」は値だけを畳む 2 本
+  （amax / amin）には当たったが、**argmax には当たらない** — (値, index) 対を運ぶぶん
+  identity・比較式・scratch が別物になり、既存 reduce 族への相乗りは既定経路のキーを動かす
+  （実装は別族 = src/kernels/argmax.ts。下の argmax の NOTE）。
 - **分解禁止（融合維持）12 op**: linear, layer_norm, rms_norm, softmax, gelu, leaky_relu,
   conv1d, conv2d, conv_transpose1d, embedding, masked_fill, **scaled_dot_product_attention**
   （`leaky_relu` は ADR 0015 で 9 → 10。分解形 `gt_scalar + mul + where` は中間バッファが
@@ -243,6 +246,33 @@ bool ではなく別 op 名**（`gelu` / `gelu_tanh` と同じ手筋 — 既存�
 明示的に弾いており、受理には検証機構の新設が要る）。**LSTM は足さない**（「対称性のための
 追加をしない」— 拡張時の論点は ADR 0056 決定 8）。
 
+NOTE: 2026-08-17 `argmax` を **Core ATen 層**に追加。契約の正本は ADR
+[0068](decisions/0068-decode-exit-multi-output.md) 決定 2（多出力解禁と同じ ADR に載っているが、
+**argmax 自体は単一出力**なので 0064 軸 B の例外〈実行モデル不変条件を壊す追加〉には当たらない
+— 門としては台帳 NOTE のみで足りる）。根拠 = greedy デコードの出口。全語彙 logits をホストへ
+readback する形は参照実装で既に少数派で（調査 §2）、GPU 側に greedy を置くには本 op が要る。
+入場券の実測（2026-08-17 / torch 2.13・tools/exporter で実行）:
+
+```sh
+uv run python -c "import torch; print(torch.Tag.core in torch.ops.aten.argmax.default.tags)"
+# → True
+```
+
+手順 1 で止まらない理由は **logits が実行時値**だから。手順 2 の合成も不可 — 語彙に「値と添字を
+同時に畳む縮約」も `arange` 相当の実行時添字生成も無く、`amax` + `ge` + `where` 系で書こうとすると
+①最大値と一致する要素が複数ある行で複数の添字が残り「最小 index」を選ぶ縮約がもう 1 段要る
+②その段が結局 argmax そのもの、という循環になる（添字 min の reduce が語彙に無い）。
+`sum` を使う数え上げ形も、bool の行 sum は個数しか返さないので添字にならない。
+
+契約は**最終次元固定・attrs 空・rank 保存**（`keepdim` の欄を作らない — 欄の不存在がそのまま
+「rank が下がる形は語彙に無い」の宣言。ADR 0023 決定 4 の規律）。**reduce 族には入れない** —
+attrs（無し）・出力 dtype（i32）・rank の扱い（保存）・カーネル族（identity が −inf で
+(値, index) 対を運ぶ）の 4 面が全て違い、相乗りさせると既存 3 本のキー版数が動いて WAV / PNG 門が
+丸ごと動く。固定挙動 3 点は torch 準拠の実測（同上）: **タイブレーク = 最小 index** /
+**NaN は最大**（複数なら最小 index — `amax` の NaN 伝播と族内で整合する側）/ **全 −inf 行は
+index 0**。**`argmin` は足さない**（「対称性のための追加をしない」— greedy に要らない）。
+`max` / `min`（値と添字の 2 出力）も依然として未実装で、多出力機構が入ってからの別判断。
+
 NOTE: 2026-08-13 に起票した層表の 2 穴（Core ATen 外・モデル由来の原子の行き場 /
 「容量・性能で非成立」の線引きの非等価）は、**2026-08-14 の入場門モデルへの改訂
 （[ADR 0059](decisions/0059-op-vocabulary-entry-doors.md)）で解消済み** — 要求元軸の廃止と
@@ -251,10 +281,12 @@ NOTE: 2026-08-13 に起票した層表の 2 穴（Core ATen 外・モデル由�
 
 ## 実装順序（プロトタイプ裁定のまま引き継ぎ — Karume での再裁定は ADR にて）
 
-1. 行 reduce 族（amax/amin/max/min/argmax/argmin）— **部分消化（2026-08-12 註）**:
-   実装済みは sum / amax / amin の 3 本（safe-softmax の前提分のみ。ADR 0007 決定 3 の
-   「6 本を最初期に」は未充足のまま）。max / min / argmax / argmin は未実装 — argmax は
-   LLM 波（greedy デコードの出口）で再訪（ADR 0043 追記 決定 4）。
+1. 行 reduce 族（amax/amin/max/min/argmax/argmin）— **部分消化（2026-08-17 更新）**:
+   実装済みは sum / amax / amin（safe-softmax の前提分）+ **argmax**（greedy デコードの出口 —
+   ADR 0068 決定 2。予告どおり LLM 波で再訪した）の 4 本。max / min（値と添字の 2 出力）と
+   argmin は未実装 — 前 2 者は多出力機構が入ってからの別判断で、argmin は「対称性のための
+   追加をしない」が優先する。**argmax は reduce 族の席ではない**（別 kind・別カーネル族 —
+   上の NOTE）。
 2. elementwise 一括（WGSL 組込みパススルー）
 3. tensor-tensor 比較の一般化
 4. 軸の一般化（slice の step、pad 任意軸、~~sum/amax の dim~~ → **実装済み（2026-08-04）**:

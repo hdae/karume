@@ -46,16 +46,18 @@ const node = (op: string, ins: readonly string[], attrs: Record<string, unknown>
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
 // リテラル**で op 集合を固定するだけで、docs/ir-v1.md の一覧との同期は op 追加時の人手仕事
 // （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v1.md）。
-Deno.test("契約表の op 集合が期待値リテラル 57 本と一致する", () => {
+Deno.test("契約表の op 集合が期待値リテラル 58 本と一致する", () => {
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
+  // argmax は reduce 族に**入らない**（attrs も出力 dtype も rank の扱いも別 — ADR 0068 決定 2）
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 57);
+  assertEquals(OP_CONTRACTS.size, 58);
   assertEquals([...OP_CONTRACTS.keys()].sort(), [
     "abs",
     "add",
     "amax",
     "amin",
+    "argmax",
     "attention",
     "bitwise_and",
     "bitwise_not",
@@ -591,7 +593,8 @@ Deno.test("出力 dtype 写像の定義域がスロット 0 の受理集合と�
       );
     });
   }
-  // 恒等でないのは実測に出た 3 系統だけ
+  // 恒等でないのは実測に出た 4 系統だけ（比較 4 本 / bool の sum → i32 / where → 値の側 /
+  // argmax → 添字 i32）
   const nonIdentity = [...OP_CONTRACTS]
     .filter(([name, contract]) =>
       name !== "cast" &&
@@ -599,7 +602,15 @@ Deno.test("出力 dtype 写像の定義域がスロット 0 の受理集合と�
     )
     .map(([name]) => name)
     .sort();
-  assertEquals(nonIdentity, ["ge", "ge_scalar", "gt_scalar", "le_scalar", "sum", "where"]);
+  assertEquals(nonIdentity, [
+    "argmax",
+    "ge",
+    "ge_scalar",
+    "gt_scalar",
+    "le_scalar",
+    "sum",
+    "where",
+  ]);
 });
 
 // 波3 の数理 op。attrs の値域とキーを跨ぐ不変条件（clamp の min <= max）を固定する。
@@ -674,6 +685,40 @@ Deno.test("cumsum は最終次元固定で、shape を素通しにする", () =>
   assertEquals(shape([3, 0], 1), [3, 0]);
   assertThrows(() => shape([2, 5], 0), OpContractError);
   assertThrows(() => shape([], 0), OpContractError);
+});
+
+// argmax は reduce 族と**別の契約**（ADR 0068 決定 2）。絞りを「値の検査」ではなく
+// **欄の不存在**で表しているので、欄が生えていないことを契約側から固定する。
+Deno.test("argmax は attrs 空・最終次元固定・rank 保存で、出力は i32", () => {
+  const contract = resolveOpContract("argmax");
+  // MUST: `dim` の欄が無い = 他の軸は語彙に無い / `keepdim` の欄が無い = rank 保存の 1 形だけ
+  assertEquals(attrKeysOf(contract), []);
+  assertEquals(contract.arity, 1);
+  assertEquals(contract.kind, "argmax");
+  // 出力は添字なので i32（1 本・写像 f32 → i32）
+  assertEquals(contract.outputDtypes.length, 1);
+  assertEquals(resolveNodeDtypes(contract, node("argmax", ["x"]), ["f32"], ["i32"], "t"), ["i32"]);
+  // 宣言が f32 のグラフは拒否する（readback が別の TypedArray として読む沈黙誤値になる）
+  assertThrows(
+    () => resolveNodeDtypes(contract, node("argmax", ["x"]), ["f32"], ["f32"], "t"),
+    OpContractError,
+  );
+  // i32 / bool 入力は語彙に無い（f32 専業 — 実測は logits だけ）
+  assertThrows(() => assertDtype(contract, "i32", "t"), OpContractError);
+  const shape = (ins: readonly number[]) => computeOutputShape(contract, [ins], "t")[0];
+  assertEquals(shape([7]), [1]);
+  assertEquals(shape([6, 10]), [6, 1]);
+  assertEquals(shape([2, 3, 4]), [2, 3, 1]);
+  // 長さ 0 なのが最終次元でなければ受理（出力が空になるだけ）
+  assertEquals(shape([0, 3]), [0, 1]);
+  // 契約外 attrs は fail loudly（attrs 空契約 — ADR 0012）
+  assertThrows(
+    () => assertNodeContract(node("argmax", ["x"], { dim: 1 }), "t"),
+    OpContractError,
+  );
+  assertThrows(() => shape([]), OpContractError);
+  // 長さ 0 の最終次元に「最大値の添字」は無い（amax / amin と同じ絞り）
+  assertThrows(() => shape([3, 0]), OpContractError);
 });
 
 Deno.test("where は三者を右詰め broadcast し、出力は値の側と同形になる", () => {

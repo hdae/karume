@@ -230,6 +230,24 @@ export const computeOutputShape = (
       }
       return sole([...shape.slice(0, dim), ...shape.slice(dim + 1)]);
     }
+    case "argmax": {
+      const shape = inputShapes[0];
+      // reduce 族と違い軸は attrs ではなく**最終次元固定**（欄の不存在が「他の軸は語彙に
+      // 無い」の宣言 — ADR 0068 決定 2）。
+      if (shape.length === 0) {
+        throw new OpContractError(
+          `${where}: argmax の入力は rank 1 以上（スカラは縮約できない）`,
+        );
+      }
+      const last = shape.length - 1;
+      // 長さ 0 の軸に「最大値の添字」は無い（torch も拒否する）。amax / amin と同じ絞りで、
+      // カーネルの番兵 index が出力へ漏れる形を契約側で止める。
+      if (shape[last] === 0) {
+        throw new OpContractError(`${where}: argmax は長さ 0 の最終次元を縮約できない`);
+      }
+      // **rank 保存**（`keepdim` 相当の欄が無い固定形 — 最終次元を 1 に潰す）。
+      return sole([...shape.slice(0, last), 1]);
+    }
     case "reshape": {
       const target = requireDeclared(context, found, where);
       const source = inputShapes[0];

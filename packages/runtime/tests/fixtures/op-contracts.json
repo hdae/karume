@@ -191,6 +191,13 @@
       "attrs": []
     },
     {
+      "op": "argmax",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "out_dtypes": [{ "f32": "i32" }],
+      "attrs": []
+    },
+    {
       "op": "cast",
       "arity": 1,
       "dtypes": { "kind": "uniform", "accept": ["bool", "f32", "i32"] },
@@ -962,6 +969,52 @@
       "bindings": { "T": 4 },
       "outs": [[5]],
       "why": "記号次元そのものを縮約する形"
+    },
+
+    { "op": "argmax", "ins": [[6, 10]], "outs": [[6, 1]] },
+    {
+      "op": "argmax",
+      "ins": [[7]],
+      "outs": [[1]],
+      "why": "rank 1 でも rank 保存（reduce 族はここでスカラへ落ちる — 別の契約）"
+    },
+    {
+      "op": "argmax",
+      "ins": [["T", 2, 3, 5]],
+      "bindings": { "T": 4 },
+      "outs": [["T", 2, 3, 1]],
+      "why": "rank 4 — 先行次元はそのまま（記号次元も素通し）"
+    },
+    {
+      "op": "argmax",
+      "ins": [[2, "T"]],
+      "bindings": { "T": 4 },
+      "outs": [[2, 1]],
+      "why": "記号の最終次元を潰す形（長さ 0 になるかは束縛次第 — 判定はランタイム側の層）"
+    },
+    {
+      "op": "argmax",
+      "ins": [[3, 1]],
+      "outs": [[3, 1]],
+      "why": "既に長さ 1 の最終次元でも恒等（唯一の添字 0 が返る）"
+    },
+    {
+      "op": "argmax",
+      "ins": [[0, 3]],
+      "outs": [[0, 1]],
+      "why": "長さ 0 なのが最終次元でなければ受理（出力が空になるだけ）"
+    },
+    {
+      "op": "argmax",
+      "ins": [[]],
+      "throws": true,
+      "why": "スカラは縮約できない"
+    },
+    {
+      "op": "argmax",
+      "ins": [[3, 0]],
+      "throws": true,
+      "why": "長さ 0 の最終次元に「最大値の添字」は無い（torch も拒否する）"
     },
 
     { "op": "matmul", "ins": [[7, 5], [5, 3]], "outs": [[7, 3]] },

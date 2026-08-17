@@ -15,6 +15,7 @@
 // contracts = 契約表と照会 / shapes = shape 計算）。この面は再輸出のみで、公開名は分割前と同一。
 
 export {
+  ARGMAX_OP,
   ATTENTION_OP,
   BINARY_OPS,
   BMM_OP,

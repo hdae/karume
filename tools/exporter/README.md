@@ -155,6 +155,7 @@ Current models and coverage:
 | `broadcast_binary`         | `T`          | add, sub, mul, div (right-aligned broadcast + lifted constants)                                                                                                        |
 | `mlp`                      | `T`          | matmul, add, relu (rank-2 MLP through weight initializers)                                                                                                             |
 | `row_reduce`               | `T`          | sum, amax, amin                                                                                                                                                        |
+| `argmax_pick`              | `T`          | argmax (greedy exit: rank-preserving over the last dim, i32 output), linear, cat — `cat([t, t])` forces the minimum-index tie-break                                    |
 | `mask_chain`               | `T`          | mul(i32), cast, bitwise_not (has a bool output)                                                                                                                        |
 | `int_cast`                 | `T`          | cast(f32→i32 truncating), sub(i32), mul(i32) (i32 output)                                                                                                              |
 | `layout_chain`             | `T`          | permute(3-cycle), reshape ×3 (chain of aliases + coefficient dim 4T)                                                                                                   |

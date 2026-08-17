@@ -48,6 +48,7 @@ import {
   stridedWriteParams,
   stridedWriteWgsl,
 } from "../codegen/strided.ts";
+import { ARGMAX_KEY, ARGMAX_WGSL, argmaxParams } from "../kernels/argmax.ts";
 import {
   CONV1D_SCALE_BINDING,
   CONV1D_WORKGROUP_SIZE,
@@ -502,6 +503,9 @@ export class RecipeBuilder {
       case "rowReduce":
         await this.#buildRowReduce(step, step.contract.name, binds, outs, builder);
         break;
+      case "argmax":
+        await this.#buildArgmax(step, binds, outs, builder);
+        break;
       case "permute":
       case "slice":
       case "symPrefixSlice":
@@ -665,6 +669,42 @@ export class RecipeBuilder {
     );
     builder.dispatch({
       key,
+      pipeline,
+      layout,
+      params,
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+      workgroups: [groups, 1, 1],
+    });
+  }
+
+  /**
+   * argmax（最終次元・rank 保存・出力 i32 — ADR 0068 決定 2）。**1 dispatch**で、行 reduce と
+   * 同じ「1 行 = 1 workgroup + 行方向 grid-stride」（形とタイブレークの根拠は
+   * src/kernels/argmax.ts）。
+   *
+   * MUST: 軸で踏み分けない（reduce 族と違い最終次元専業 — 契約に `dim` の欄が無い）。
+   * 行数は**入力の先行次元の積**から取る（出力の要素数と一致するが、カーネルが読む量は
+   * 入力側の形で決まる）。
+   */
+  async #buildArgmax(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    outs: readonly BindingSource[],
+    builder: StepRecipeBuilder,
+  ): Promise<void> {
+    const inputShape = step.inputShapes[0];
+    const dim = inputShape[inputShape.length - 1];
+    const rows = numel(inputShape.slice(0, -1));
+    const { pipeline, layout } = await this.#state.cache.get(ARGMAX_KEY, ARGMAX_WGSL);
+    const params = this.#writeParams(argmaxParams(rows, dim), PARAMS_UNIFORM_USAGE);
+    // 1 行 = 1 workgroup。上限を超えたら縮退させ、カーネル側の行 grid-stride で回す。
+    const groups = gridStrideWorkgroups(
+      rows,
+      1,
+      this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
+    );
+    builder.dispatch({
+      key: ARGMAX_KEY,
       pipeline,
       layout,
       params,
