@@ -38,13 +38,18 @@
    head_dim を許すが、広げると D の取り違えが shape 検査を素通りする）・**B と H は別々に
    突合**（カーネルは B·H を 1 本のバッチ軸に畳むため、積だけ見ると取り違えが値に出ない）・
    N=0 拒否。mask / causal / dropout / GQA は**欄を作らない**（欄の不存在が「語彙に無い」を
-   構造で表す）。
+   構造で表す）。**→ このうち「q/k/v の H 完全一致」の 1 句のみ ADR
+   [0067](0067-autoregressive-attention-vocabulary.md) 決定 1 が supersede**（2026-08-17 —
+   GQA / MQA は `H % Hkv == 0` かつ `H ≥ Hkv` の整除 broadcast で受理。`r = H / Hkv` は
+   導出値のままで「欄を作らない」は維持。B 完全一致・k/v 間 Hkv 一致・D 3 者同一・
+   N=0 拒否も維持）。
 5. **エクスポータはターゲット別 preserved**: `export_module(…, preserved=…)` を通し、
    **Anima の transformer / vae_decoder だけ** SDPA を保存（`export_anima.TARGET_PRESERVED`）。
    既定の `PRESERVED_OP_PREFIXES` には**入れない** — グローバルに足すと text_encoder
    （−inf 折り込み因果マスク）が `_h_attention` の fail loudly で export 不能になり、
    ADR 0016 の safe-softmax ガード除去パスも死ぬ。`_h_attention` は mask / is_causal /
-   dropout≠0 / enable_gqa / rank≠4 / D 不一致 / 記号 D / 非有限 scale を全件列挙で拒否。
+   dropout≠0 / enable_gqa / rank≠4 / D 不一致 / 記号 D / 非有限 scale を全件列挙で拒否
+   （**→ `enable_gqa` は ADR 0067 決定 1 で受理へ反転** — 2026-08-17）。
    text_conditioner は融合可能だが GPU 時間が測定限界以下（0.10ms/18.7ms）で v1 対象外。
    SBV2 は softmax 出力が 2 回消費される構造（相対位置 value 側）で融合不能（設計書 §1.3）。
 6. **波0（恒等コピー掃除）は独立させない**: SDPA 保存で decomp 由来の恒等 expand 224 本・

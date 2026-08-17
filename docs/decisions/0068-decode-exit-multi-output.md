@@ -98,3 +98,13 @@ IR スキーマは `outs` 長さ 1 以上を既に許可しており**仕様改�
   無風）②argmax / topk の CPU 参照オラクル一致 + タイブレーク直接門（同値要素・全 −inf 行）
   ③故障注入（index ずれ・merge 境界・k 端数）④multi-output の寿命検証（片方だけ消費される
   グラフで uses / release が正しいこと）。
+
+## 追記（2026-08-17・実装波スカウトの補正）
+
+決定 1 の「実装 6 面」は現物では **8 面**: 列挙した 6 面に加えて **fusion**
+（`fusion.ts` — FusedStep の単一出力前提と適格条件 3 本）と**契約適合表 fixture**
+（`packages/runtime/tests/fixtures/op-contracts.json` — TS / Python 両実装が読む唯一の
+正本 schema）が独立の改訂面として立つ。executor は逆にほぼ無風（グラフ出力レベルの
+multi-output は実装済み）。exporter 側は「多出力 aten を通す道が現状ゼロ」で、converter の
+タプル meta + `operator.getitem` スロット結線が新機構になる（argmax は単一出力なので
+この機構を要しない — 段階分割の自然な切れ目）。

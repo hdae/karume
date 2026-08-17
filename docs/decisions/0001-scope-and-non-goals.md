@@ -28,6 +28,9 @@ JSR に `@karume/runtime` として公開する。モデルは PyTorch（`torch.
   量子化の論理表現保持 / op 粒度を細かく / 初期化の非同期許容）を守り、将来の
   後付けバックエンド（NPU 入口）の余地を残す。
 - `navigator.gpu` が得られない環境（素の Node 等）のサポート。
+- MiniMax-M3 級（428B/23B MoE・ブロックスパース MSA）のブラウザ実行 — メモリ規模的に
+  現行スコープ外（2026-08-16 裁定。autoregressive 波の検収は Gemma 4 E2B /
+  MiniCPM5-1B — [backlog](../backlog.md) next 節）。
 
 ## 帰結
 

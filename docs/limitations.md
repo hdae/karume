@@ -495,6 +495,16 @@ DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-a
   生成・パイプライン作成・実 GPU 実行の確認まで（門を足すか ADR に f32 限定と明記し続けるかは
   そのケースが実資産に現れた時に判断）。
 
+## 融合 attention の GQA × `attentionCompute:'i8a8'` は fail loudly（暫定）
+
+GQA / MQA 形（`H % Hkv == 0`・ADR
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 1）は f32 / f16 経路のみ。
+i8a8 は head 基底が 5 本（`attention-i8a8.ts`）で K / V の量子化・確保も `B·H` 前提のため、
+GQA 形は**縮退せず fail loudly**（黙って f32 へ落とすと性能が静かに変わる — ADR 0058
+決定 3）。**拒否は暫定で後日サポート前提**（ADR 0067 決定 3 — 追補面は確定済み: K/scale・
+V/scale 基底のみ kv-head 写像 + recipe-builder の Hkv 化。検証は f32 経路の repeat_kv
+parity 資産を流用）。
+
 ## ストリーミング慣習の WAV（riffSize プレースホルダ）は受理しない
 
 `decodeWav`（`packages/models/src/audio/wav.ts`）の走査境界は RIFF が offset 4 で宣言する

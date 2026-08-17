@@ -30,7 +30,8 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   **アリティ 3 か 4・rank-4 head-first・attrs `scale` は半スケール**（q と k の両方に掛かる
   `√scale_factor`）。省略可能な第 4 入力は**加算 mask**（f32・`[1,1,M,N]` ちょうど・B·H へ
   broadcast — 2026-08-11 の改訂・ADR 0023 追記）。bool mask / `[B,1,M,N]` 等・causal /
-  dropout / GQA は語彙に無く、エクスポータ境界で全件 fail loudly。SDPA の保存は
+  dropout は語彙に無く、エクスポータ境界で全件 fail loudly（GQA / MQA は 2026-08-17 の改訂
+  〈ADR 0067 決定 1〉で整除 broadcast として受理 — 下の `attention` 項）。SDPA の保存は
   **ターゲット別**なので、既存の分解形 IR はそのまま有効。
 - モデル拡充（2026-08-13）: `upsample_bilinear2d` を**第 1 層**として追加（ADR 0043 の
   判定手順 3 — Core ATen 内の原子。当時の暫定運用は 2026-08-14 の入場門モデル
@@ -288,14 +289,17 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
     `eps` は有限の正数
   - `attention`（f32、attrs `scale`、**アリティ 3 か 4**）— `out = softmax_lastdim((q·scale) @
     (k·scale)ᵀ + mask) @ v`（ADR [0023](decisions/0023-fused-attention.md)）。入力は
-    **rank-4 head-first**（`q[B,H,M,D]` / `k[B,H,N,D]` / `v[B,H,N,D]`・連続）で出力は
-    `[B,H,M,D]`。**D は 3 者とも同じ**（v 側だけ別の長さを許すと「D を取り違えた IR」が
+    **rank-4 head-first**（`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`・連続）で出力は
+    `[B,H,M,D]`。**H と Hkv は整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv` — GQA / MQA・
+    ADR [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 1。
+    `r = H / Hkv` は導出値で attrs 欄を持たない。B は完全一致・k/v 間の Hkv も完全一致）。
+    **D は 3 者とも同じ**（v 側だけ別の長さを許すと「D を取り違えた IR」が
     shape 検査を素通りする）。**`scale` は半スケール** = q と k の**両方**に掛かる
     `√scale_factor`（torch の `_scaled_dot_product_attention_math` と同じ形。内積の後に
     1 度だけ掛ける形へ変えると丸め列が変わり、分解経路とのビット同一が失われる）。
     省略可能な第 4 入力は**加算 mask**（f32・rank-4・shape はちょうど `[1,1,M,N]`）で、
     B·H の全バッチへ broadcast する。`[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 は受理せず、
-    causal / dropout / GQA は語彙に無い。行が全て −inf になるマスクは**契約違反**（NaN 汚染 —
+    causal / dropout は語彙に無い。行が全て −inf になるマスクは**契約違反**（NaN 汚染 —
     検査は入れない。その形が正規なのは `safe_softmax` を使う分解経路だけ。ADR
     [0044](decisions/0044-runtime-attention-mask.md) 決定 3）
   - `rms_norm`（f32、attrs `eps`、**アリティ 2 固定**）—

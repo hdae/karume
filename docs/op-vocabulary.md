@@ -71,7 +71,7 @@ M1-P2 以降に解消する。
   手書き分解形を拾う畳み込みパスと 2 系統で供給する。`scaled_dot_product_attention` は
   ADR 0023 で 11 → 12）。
   **12 本目だけは既定の保存リストに載らない**（`PRESERVED_OP_PREFIXES` は 11 本のまま）—
-  SDPA は mask / causal / GQA を引数で表せてしまい、グローバルに保存すると契約外の形
+  SDPA は mask / causal を引数で表せてしまい、グローバルに保存すると契約外の形
   （kwargs 渡しの bool mask・`[B,1,M,N]` 等）が `_h_attention` の fail loudly に当たって
   export できなくなる。加算型 f32 `[1,1,M,N]` の mask だけは 2026-08-11 の改訂（ADR 0023
   追記）で語彙に入った。保存は `curated_decompositions(preserved=…)` を通した
