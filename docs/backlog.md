@@ -20,9 +20,10 @@
 
 「Gemma 4 対応」ではなく **IR / loader / state 実行モデルを autoregressive-ready にする波**。
 検収モデル = Gemma 4 E2B / MiniCPM5-1B（MiniMax-M3 は非目標で裁定済み 2026-08-16 — ADR 0001 へ
-1 行はこの波で）。**実装前に ADR を先行**させる（順序も設計判断）。ADR 着手前に sop-research で
-参照資料を収集する（llama.cpp の KV レイアウト / vLLM paged KV / ORT・WebLLM・transformers.js の
-実装 — 2026-08-16 裁定・根拠節に引用する）。前提の宣言として **R2（shape 不変条件）を最初の
+1 行はこの波で）。**実装前に ADR を先行**させる（順序も設計判断）。参照資料は収集済み
+（[research/2026-08-17-autoregressive-references.md](research/2026-08-17-autoregressive-references.md)
+— 掃引 8 + 深掘り 3 + 敵対検証 3・検収モデル config 一次確定込み。ADR の根拠節はここを
+引用する）。前提の宣言として **R2（shape 不変条件）を最初の
 ADR に含める**: 恒久不変条件は「静的物理格納・固定 rank・計画キャッシュの鍵は常に容量」まで —
 「全論理形状がホスト既知」は恒久にせず、**有界論理 extent の席**（compact-prefix 軸 1 本・
 DDS op は payload + extent の複数出力・extent は計画鍵に入れない・admission は容量課金）を
