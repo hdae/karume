@@ -165,7 +165,7 @@ Deno.test({
 
         const safe = await run(
           gpu,
-          singleOpGraph("safe_softmax", [[rows, dim]], [rows, dim], { attrs: { dim: 1 } }),
+          singleOpGraph("safe_softmax", [[rows, dim]], [[rows, dim]], { attrs: { dim: 1 } }),
           { x0: x },
         );
         const guarded = await run(gpu, guardedGraph(rows, dim), { x });
@@ -219,12 +219,12 @@ Deno.test({
         const x = fill([rows, dim], SCORE);
         const safe = await run(
           gpu,
-          singleOpGraph("safe_softmax", [[rows, dim]], [rows, dim], { attrs: { dim: 1 } }),
+          singleOpGraph("safe_softmax", [[rows, dim]], [[rows, dim]], { attrs: { dim: 1 } }),
           { x0: x },
         );
         const plain = await run(
           gpu,
-          singleOpGraph("softmax", [[rows, dim]], [rows, dim], { attrs: { dim: 1 } }),
+          singleOpGraph("softmax", [[rows, dim]], [[rows, dim]], { attrs: { dim: 1 } }),
           { x0: x },
         );
         assertEquals([...bits(safe)], [...bits(plain)], `[${rows},${dim}]`);

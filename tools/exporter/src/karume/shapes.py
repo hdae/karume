@@ -60,6 +60,7 @@ from karume.ops import (
     slice_attrs,
     softmax_dim,
     sym_prefix_slice_attrs,
+    topk_k,
     upsample_bilinear2d_attrs,
 )
 
@@ -196,12 +197,13 @@ def compute_output_shape(
     *,
     declared: Sequence[IrDim] | None = None,
     attrs: Mapping[str, Any] | None = None,
-) -> list[IrDim]:
-    """宣言 shape から出力 shape を計算する
-    （packages/runtime/src/ops.ts `computeOutputShape` と同義）。
+) -> list[list[IrDim]]:
+    """宣言 shape から**出力 slot 昇順の shape 列**を計算する
+    （packages/runtime/src/ops.ts `computeOutputShape` と同義 — ADR 0068 決定 1）。
 
+    2 本を返すのは `topk`（値 + 添字 — ADR 0068 決定 3）だけで、他は全て 1 本。
     `declared` は「出力の宣言 shape が目標形」の op（reshape / expand — ADR 0011）でだけ
-    必須。`attrs` は permute / layer_norm / softmax / conv1d / sym_prefix_slice で必須。
+    必須。`attrs` は permute / layer_norm / softmax / conv1d / sym_prefix_slice / topk で必須。
     """
     if not arity_fits(contract, len(input_shapes)):
         raise OpContractError(
@@ -210,7 +212,15 @@ def compute_output_shape(
         )
     ins = [extents(shape, f"{where} の入力 {index}") for index, shape in enumerate(input_shapes)]
     node_attrs: Mapping[str, Any] = attrs if attrs is not None else {}
-    return [extent.to_dim() for extent in _compute(contract, ins, where, declared, node_attrs)]
+    return [
+        [extent.to_dim() for extent in slot]
+        for slot in _compute(contract, ins, where, declared, node_attrs)
+    ]
+
+
+def _sole(shape: list[Extent]) -> list[list[Extent]]:
+    """単一出力 op のアーム（出力が 1 本であることをアームごとに明示する — ADR 0068 決定 1）。"""
+    return [shape]
 
 
 def _compute(
@@ -219,78 +229,82 @@ def _compute(
     where: str,
     declared: Sequence[IrDim] | None,
     attrs: Mapping[str, Any],
-) -> list[Extent]:
+) -> list[list[Extent]]:
     kind = contract.kind
     if kind == "unary":
         # MUST: スカラ attr の値域と**キーを跨ぐ不変条件**（clamp の min <= max）をここで見る。
         # 全ノードが必ず通る共通経路はこの計算だけで、attrs スキーマはキー単位の検査しか
         # 表せない（assert_graph_shapes が全ノードでここを呼ぶ）。
         scalar_param_values(contract, attrs, where)
-        return list(ins[0])
+        return _sole(list(ins[0]))
     if kind == "cast":
-        return list(ins[0])
+        return _sole(list(ins[0]))
     if kind == "binary":
-        return broadcast_extents(ins[0], ins[1], f"{where} ({contract.name})")
+        return _sole(broadcast_extents(ins[0], ins[1], f"{where} ({contract.name})"))
     if kind == "where":
         # torch と同じく 3 者を右詰め broadcast する（条件も値と同じ規則で広がる）。
         label = f"{where} ({contract.name})"
-        return broadcast_extents(broadcast_extents(ins[0], ins[1], label), ins[2], label)
+        return _sole(broadcast_extents(broadcast_extents(ins[0], ins[1], label), ins[2], label))
     if kind == "cumsum":
-        return _cumsum(ins, where, attrs)
+        return _sole(_cumsum(ins, where, attrs))
     if kind == "matmul":
-        return _matmul(ins, where)
+        return _sole(_matmul(ins, where))
     if kind == "bmm":
-        return _bmm(ins, where)
+        return _sole(_bmm(ins, where))
     if kind == "gather":
-        return _gather(ins, where)
+        return _sole(_gather(ins, where))
     if kind == "row_reduce":
-        return _row_reduce(contract, ins, where, attrs)
+        return _sole(_row_reduce(contract, ins, where, attrs))
     if kind == "argmax":
-        return _argmax(ins, where)
+        return _sole(_argmax(ins, where))
+    # 唯一の多出力アーム（値 + 添字 — ADR 0068 決定 3）。_sole を通らないことがそのまま
+    # 「出力が 2 本」の宣言になる。
+    if kind == "topk":
+        return _topk(ins, where, attrs)
     if kind == "reshape":
-        return _reshape(contract, ins, where, declared)
+        return _sole(_reshape(contract, ins, where, declared))
     if kind == "permute":
-        return _permute(ins, where, attrs)
+        return _sole(_permute(ins, where, attrs))
     if kind == "expand":
-        return _expand(contract, ins, where, declared)
+        return _sole(_expand(contract, ins, where, declared))
     if kind == "slice":
-        return _slice(ins, where, attrs)
+        return _sole(_slice(ins, where, attrs))
     if kind == "cat":
-        return _cat(ins, where, attrs)
+        return _sole(_cat(ins, where, attrs))
     if kind == "pad":
-        return _pad(ins, where, attrs)
+        return _sole(_pad(ins, where, attrs))
     if kind == "flip":
-        return _flip(ins, where, attrs)
+        return _sole(_flip(ins, where, attrs))
     if kind == "sym_prefix_slice":
-        return _sym_prefix_slice(ins, where, attrs)
+        return _sole(_sym_prefix_slice(ins, where, attrs))
     if kind == "linear":
-        return _linear(ins, where)
+        return _sole(_linear(ins, where))
     if kind == "layer_norm":
-        return _layer_norm(ins, where, attrs)
+        return _sole(_layer_norm(ins, where, attrs))
     if kind == "rms_norm":
-        return _rms_norm(ins, where, attrs)
+        return _sole(_rms_norm(ins, where, attrs))
     # safe_softmax は shape 規則も attrs も softmax と同一（違いは空行の値だけ — ADR 0044）。
     if kind in ("softmax", "safe_softmax"):
-        return _softmax(ins, where, attrs, contract.name)
+        return _sole(_softmax(ins, where, attrs, contract.name))
     if kind == "attention":
-        return _attention(ins, where, attrs)
+        return _sole(_attention(ins, where, attrs))
     if kind == "embedding":
-        return _embedding(ins, where)
+        return _sole(_embedding(ins, where))
     if kind == "masked_fill":
-        return _masked_fill(ins, where)
+        return _sole(_masked_fill(ins, where))
     if kind == "conv1d":
-        return _conv1d(ins, where, attrs)
+        return _sole(_conv1d(ins, where, attrs))
     if kind == "conv2d":
-        return _conv2d(ins, where, attrs)
+        return _sole(_conv2d(ins, where, attrs))
     if kind == "conv_transpose1d":
-        return _conv_transpose1d(ins, where, attrs)
+        return _sole(_conv_transpose1d(ins, where, attrs))
     if kind == "deform_conv2d":
-        return _deform_conv2d(ins, where, attrs)
+        return _sole(_deform_conv2d(ins, where, attrs))
     if kind == "upsample_bilinear2d":
-        return _upsample_bilinear2d(ins, where, attrs)
+        return _sole(_upsample_bilinear2d(ins, where, attrs))
     # 走査方向は op 名が持つが、shape 規則は 2 方向で完全に同一（出力の時間順も変わらない）。
     if kind == "gru_scan":
-        return _gru_scan(contract, ins, where)
+        return _sole(_gru_scan(contract, ins, where))
     raise OpContractError(f"{where}: op kind '{kind}' の shape 規則が無い")
 
 
@@ -372,6 +386,28 @@ def _argmax(ins: list[list[Extent]], where: str) -> list[Extent]:
     if shape[-1].is_value(0):
         raise OpContractError(f"{where}: argmax は長さ 0 の最終次元を縮約できない")
     return [*shape[:-1], _ONE]
+
+
+def _topk(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[list[Extent]]:
+    """topk の出力 shape 列（ADR 0068 決定 3）— **値と添字の 2 本**とも `[..., k]`。
+
+    軸は最終次元固定（argmax と同じ絞り）で rank は保存される。受理領域は
+    `1 <= k <= 最終次元` で、下限は attrs スキーマ（TOPK_ATTRS）が、上限はここが見る。
+    """
+    shape = ins[0]
+    if not shape:
+        raise OpContractError(f"{where}: topk の入力は rank 1 以上（スカラは縮約できない）")
+    k = topk_k(attrs, where)
+    last = shape[-1]
+    # 記号次元の最終次元では k との突合を**保留する**（束縛次第なので断定しない — 判定は
+    # ランタイム側の層。amax の長さ 0 判定と同じ分担）。長さ 0 は k >= 1 との突合で落ちる。
+    if last.is_const and k > last.offset:
+        raise OpContractError(
+            f"{where}: topk の attrs.k={k} が最終次元 {last.offset} を超える"
+            f"（入力 [{_show(shape)}]）"
+        )
+    out = [*shape[:-1], Extent(coeff=0, sym=None, offset=k)]
+    return [out, list(out)]
 
 
 def _reshape(
@@ -1111,12 +1147,22 @@ def assert_graph_shapes(graph: IrGraph) -> None:
         where = f"graph.nodes[{index}] ({node.op})"
         contract = resolve_op_contract(node.op)
         ins = [declared_shape(graph, name) for name in node.ins]
-        out_name = node.outs[0]
-        declared = declared_shape(graph, out_name)
-        computed = compute_output_shape(contract, ins, where, declared=declared, attrs=node.attrs)
-        if extents(computed, where) != extents(declared, where):
+        declared_outputs = [declared_shape(graph, name) for name in node.outs]
+        # NOTE: 目標形を要求する 2 op（reshape / expand）は単一出力なので、`declared` は
+        # slot 0 だけを渡す（多出力 op の shape は入力と attrs から導く — TS 側 plan.ts と同じ）。
+        computed = compute_output_shape(
+            contract, ins, where, declared=declared_outputs[0], attrs=node.attrs
+        )
+        # MUST: 列長の一致をここで見る（本数が割れると 2 本目の出力が誰にも突き合わされない）。
+        if len(computed) != len(declared_outputs):
             raise OpContractError(
-                f"{where}: 出力 '{out_name}' の計算 shape"
-                f" [{','.join(str(dim) for dim in computed)}] が"
-                f" 宣言 [{','.join(str(dim) for dim in declared)}] と一致しない"
+                f"{where}: 出力 shape の計算が {len(computed)} 本"
+                f"（宣言は {len(declared_outputs)} 本）"
             )
+        for slot, declared in enumerate(declared_outputs):
+            if extents(computed[slot], where) != extents(declared, where):
+                raise OpContractError(
+                    f"{where}: 出力 '{node.outs[slot]}' の計算 shape"
+                    f" [{','.join(str(dim) for dim in computed[slot])}] が"
+                    f" 宣言 [{','.join(str(dim) for dim in declared)}] と一致しない"
+                )

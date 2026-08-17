@@ -172,7 +172,7 @@ const runAttention = async (
   const shapes = mask === undefined
     ? [q.shape, k.shape, v.shape]
     : [q.shape, k.shape, v.shape, mask.shape];
-  const graph = singleOpGraph("attention", shapes, out, {
+  const graph = singleOpGraph("attention", shapes, [out], {
     attrs: { scale: halfScale(q.shape[3]) },
   });
   const inputs: Record<string, F32Tensor> = { x0: q, x1: k, x2: v };

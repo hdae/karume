@@ -8,7 +8,7 @@ import { acquireGpu } from "../src/gpu/device.ts";
 import { defaultGemmGeometry, gemmTileN } from "../src/kernels/gemm-geometry.ts";
 import { DEFAULT_SUBMIT_POLICY } from "../src/gpu/submit.ts";
 import { allclose, compareTensors, formatAllclose } from "../src/reference/allclose.ts";
-import { applyReferenceOp, refTensor } from "../src/reference/ops.ts";
+import { applyReferenceOp, applyReferenceOpOutputs, refTensor } from "../src/reference/ops.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { f32Bytes, type GraphJson } from "./helpers/format.ts";
@@ -232,6 +232,100 @@ for (
     },
   });
 }
+
+/**
+ * 多出力ノードの寿命（ADR 0068 受入条件 ④ — `topk` が最初の入居者）。
+ *
+ * `topk` の 2 本は**寿命が違う**:
+ *
+ * - `v`（値）は `neg` に 1 度だけ消費される中間値 → そのステップの後でプールへ返る
+ * - `i`（添字）はグラフ出力 → **ピン留めされてプールへ返らない**
+ * - `e = exp(neg(v))` の確保は `v` の実体を掴んでよい（`v` は消費済み）が、`i` の実体を
+ *   掴んではいけない
+ *
+ * slot ごとの `uses` / `pinned` を 1 でも取り違えると、`e` の確保がプールから `i` の
+ * バッファを受け取り、**添字の readback が静かに exp の f32 ビット列に化ける**（例外は
+ * 出ない — 別名テストと同じ形の沈黙故障）。逆に `v` を解放し損ねれば `e` が新しい実体を
+ * 掴み、生存ピークが 1 本ぶん増える。
+ *
+ * 2 本目のグラフは**片方の出力が誰にも消費されない**形（`uses = 0` かつグラフ出力でもない
+ * 到達不能な値）。定義ぶんの retain が解放されないと run 末尾の `assertDrained` が落ちる。
+ */
+const topkLifetimeGraph = (pinIndices: boolean): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["topk", "neg", "exp"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [3, 8] }],
+  outputs: pinIndices ? ["e", "i"] : ["e"],
+  initializers: {},
+  values: {
+    v: { dtype: "f32", shape: [3, 2] },
+    i: { dtype: "i32", shape: [3, 2] },
+    nv: { dtype: "f32", shape: [3, 2] },
+    e: { dtype: "f32", shape: [3, 2] },
+  },
+  nodes: [
+    { op: "topk", ins: ["x"], outs: ["v", "i"], attrs: { k: 2 } },
+    { op: "neg", ins: ["v"], outs: ["nv"], attrs: {} },
+    { op: "exp", ins: ["nv"], outs: ["e"], attrs: {} },
+  ],
+});
+
+Deno.test({
+  name:
+    "多出力ノードの slot ごとの uses / pin が正しく、片方だけ消費する形でも値が壊れない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      const x = fill([3, 8], (i) => ((i % 7) - 3) * 0.5 + (i % 3) * 0.25);
+      const expected = applyReferenceOpOutputs("topk", [x], { k: 2 });
+      const negated = applyReferenceOp("neg", [expected[0]]);
+      const exponent = applyReferenceOp("exp", [negated]);
+
+      // ① 添字をグラフ出力にする形（ピン留めが多出力の slot 1 に効くこと）
+      const session = await createSession(
+        gpu,
+        openModel(graphModelBuffer(topkLifetimeGraph(true))),
+      );
+      try {
+        const outputs = await session.run({ x });
+        assertEquals(Object.keys(outputs).sort(), ["e", "i"]);
+        assertEquals(outputs["i"].dtype, "i32");
+        // 添字は 1 語も化けていない（プールから配り直されていれば f32 のビット列が出る）
+        assertEquals([...outputs["i"].data], [...expected[1].data], "添字の readback");
+        assertEquals(allclose(outputs["e"].data, exponent.data).pass, true, "値側を消費した先");
+        // プール管理下の生存ピークは v / i / nv の 3 本ぶん（各 24 バイト）= 72。
+        // `e` は消費済みの `v` の実体を再利用するので上乗せは無く、`i` を掴むこともない。
+        assertEquals(session.diagnostics().lastRun?.peakTransientBytes, 72);
+        // dispatch は topk / neg / exp の 3 本（topk は 1 dispatch で 2 本書く）
+        assertEquals(session.diagnostics().submit.dispatchCount, 3);
+      } finally {
+        await session.dispose();
+      }
+
+      // ② 添字が誰にも消費されない形（到達不能な値 — 定義ぶんの解放が閉じることの確認。
+      // 閉じていなければ run 末尾の assertDrained が落ちる）
+      const orphan = await createSession(
+        gpu,
+        openModel(graphModelBuffer(topkLifetimeGraph(false))),
+      );
+      try {
+        const outputs = await orphan.run({ x });
+        assertEquals(Object.keys(outputs), ["e"]);
+        assertEquals(allclose(outputs["e"].data, exponent.data).pass, true, "値側は不変");
+        // 消費者ゼロの添字はそのステップの末尾でプールへ戻るので、`nv` がその実体を掴む
+        // （生存ピークは v / i の 2 本ぶん = 48）。
+        assertEquals(orphan.diagnostics().lastRun?.peakTransientBytes, 48);
+      } finally {
+        await orphan.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
 
 Deno.test({
   name: "同一 Session への並行 run は直列化され、全件が CPU 参照と一致する（実 GPU）",

@@ -30,6 +30,7 @@ import {
   stridedWriteWgsl,
 } from "../../src/codegen/strided.ts";
 import { ARGMAX_KEY, ARGMAX_WGSL, argmaxParams } from "../../src/kernels/argmax.ts";
+import { topkKey, topkParams, topkWgsl } from "../../src/kernels/topk.ts";
 import {
   CONV1D_WORKGROUP_SIZE,
   conv1dKey,
@@ -104,7 +105,12 @@ import {
   attentionStatsParams,
   attentionStatsWgsl,
 } from "../../src/kernels/attention.ts";
-import { applyReferenceOp, type RefTensor, refTensor } from "../../src/reference/ops.ts";
+import {
+  applyReferenceOp,
+  applyReferenceOpOutputs,
+  type RefTensor,
+  refTensor,
+} from "../../src/reference/ops.ts";
 import { alignF16Payload, roundToF16 } from "../../src/format/f16.ts";
 import { alignI8Payload } from "../../src/format/i8.ts";
 import type { WeightStorage } from "../../src/kernels/weight-storage.ts";
@@ -137,6 +143,11 @@ export type DegenerateCase = {
    * `quantize_rows` のように 1 dispatch が 2 本書く族のためのもので、こちらの中身は f32 では
    * 表せない（i8 の 4 詰め）ので突合の対象にしない — 縮退耐性は行方向のループが担うので、
    * 行ごとに 1 語書く `xs` 側を比較すれば同じ経路を踏める。
+   *
+   * `topk`（ADR 0068 決定 3）も 1 dispatch が 2 本書く族で、こちらには**値の列**を置いて
+   * **添字の列**を突合する（値側も f32 で表せるが、縮退耐性の検出力は添字側が高い — 同じ
+   * ループが両方を書くので、行ループが 1 周で止まる誤りは添字側に必ず出るうえ、i32 の
+   * 厳密一致は allclose より締まっている）。
    */
   readonly sideOutputBytes?: number;
   /**
@@ -657,6 +668,45 @@ export const argmaxCase = (): DegenerateCase => {
     inputs: [input],
     expected: applyReferenceOp("argmax", [input], {}, [rows, 1]),
     // 1 行 = 1 workgroup（行長は workgroup 内で畳む）ので必要数は行数そのもの。
+    natural: rows,
+    groups: 2,
+  };
+};
+
+/**
+ * topk（ADR 0068 決定 3）。argmax と同じ行方向 grid-stride だが**別族**（レーン局所 top-k →
+ * k ラウンドのトーナメント merge・出力 2 本）なので独立に載せる。
+ *
+ * 突合するのは**添字の列**（i32 の厳密一致）で、値の列は {@link DegenerateCase.sideOutputBytes}
+ * 側に置く（束縛は values = 入力の次・indices = その次で、カーネルの宣言と一致する）。
+ * 行ごとに上位の位置が変わる列にする MUST — 全行で同じ添字が正解だと「別の行を読む」誤りも
+ * 「行ループが 1 周で止まる」誤りも値に出ない。
+ */
+export const topkCase = (): DegenerateCase => {
+  const rows = 5_000;
+  const dim = 5;
+  const k = 2;
+  // 行 r の最大は列 (r % 5)・2 番目は列 ((r+1) % 5)（POSITIVE の周期 17 と dim 5 が互いに素
+  // なので、素の値の並びも行ごとに回る）。
+  const input = fill([rows, dim], (i) => {
+    const row = Math.floor(i / dim);
+    const col = i % dim;
+    if (col === row % dim) return 90;
+    if (col === (row + 1) % dim) return 80;
+    return POSITIVE(i);
+  });
+  const outputs = applyReferenceOpOutputs("topk", [input], { k });
+  return {
+    name: "topk",
+    key: topkKey(k),
+    wgsl: topkWgsl(k),
+    params: topkParams(rows, dim),
+    uniformParams: true,
+    inputs: [input],
+    // 値の列（比較しない側）— 添字の列と同じ大きさ（どちらも rows·k 語の 4 バイト要素）。
+    sideOutputBytes: rows * k * 4,
+    expected: outputs[1],
+    // 1 行 = 1 workgroup（行内は 32 レーンで畳む）ので必要数は行数そのもの。
     natural: rows,
     groups: 2,
   };

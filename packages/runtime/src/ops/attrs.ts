@@ -456,6 +456,23 @@ export const REDUCE_ATTRS: AttrSchema = {
 };
 
 /**
+ * topk の本数 `k`（ADR 0068 決定 3）。
+ *
+ * MUST: **宣言必須の正整数**（= static-k）。k=0 は torch なら受理される形（空の出力）だが、
+ * 「大きい順の 0 本」を返すノードは値を定義しないのと同じなので語彙に入れない。記号 k
+ * （次元式の文字列）も `typeof value !== "number"` でここが弾く — 実行時に決まる k は静的形状
+ * の前提（ADR 0004）に載らず、出力 shape も確保バイト数も計画時に決まらなくなる。
+ * MUST: 上限は**ここでは見ない**。`k ≤ 最終次元` は入力 rank が要るので shape 計算側、
+ * **実装上限**（workgroup storage 由来）は device limit が要るのでレシピ組み立て側
+ * （src/kernels/topk.ts の `assertTopkK`）— 層の分担は clamp の min/max と同じ。
+ */
+export const TOPK_ATTRS: AttrSchema = {
+  k: (value, where) => {
+    assertIntegerAttr(value, where, 1);
+  },
+};
+
+/**
  * conv1d の attrs（ADR 0015 で `dilation` / `groups` を追加）。
  *
  * MUST: 4 つとも**宣言必須**（{@link assertNodeContract} が全キーの存在を要求する）。
@@ -526,6 +543,10 @@ export const cumsumDim = (attrs: Readonly<Record<string, unknown>>, where: strin
 /** reduce 族ノードの縮約軸（非負の軸番号 — 既定値補完はしない）。 */
 export const reduceDim = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
   assertIntegerAttr(attrValue(attrs, "dim"), `${where} の attrs.dim`, 0);
+
+/** topk ノードの本数 k（正整数 — 既定値補完はしない）。 */
+export const topkK = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
+  assertIntegerAttr(attrValue(attrs, "k"), `${where} の attrs.k`, 1);
 
 /**
  * elementwise カーネルへ **params の末尾で** f32 として渡す attr（並びがそのまま params の

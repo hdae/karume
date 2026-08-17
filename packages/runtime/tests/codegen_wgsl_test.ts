@@ -41,6 +41,17 @@ import {
   argmaxParams,
 } from "../src/kernels/argmax.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../src/kernels/bmm.ts";
+import {
+  assertTopkK,
+  TOPK_CORE_LIMIT_MAX_K,
+  TOPK_NEG_INF_BITS,
+  TOPK_WORKGROUP_SIZE,
+  topkKey,
+  topkMaxK,
+  topkParams,
+  topkWgsl,
+  topkWorkgroupStorageBytes,
+} from "../src/kernels/topk.ts";
 import { ATTENTION_QK_MASK_BINDING, GEMM_MTILE_SMALL, gemmUsesVec4 } from "../src/kernels/gemm.ts";
 import { defaultGemmGeometry, GEMM_TILE } from "../src/kernels/gemm-geometry.ts";
 import {
@@ -316,6 +327,12 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // 骨格を持つぶん「新族を足したら既存 reduce のバイト列が動いた」が最大の事故
     // （既存 3 本 + 軸変種 3 本がその検出器）。
     ["argmax.wgsl", ARGMAX_WGSL],
+    // topk（ADR 0068 決定 3）。**k=1 と一般形を対で置く**のが条件 — k=1 ではブロックの末尾
+    // （最弱）と先頭が同じ語になり、挿入ループが 1 度も回らない縮退形なので、一般形だけを
+    // 固定すると `k-1` の焼き込みが 1 ずれても気づけない（k=1 は argmax と同じ答えを返す
+    // 突合門の相手でもある）。
+    ["topk_k1.wgsl", topkWgsl(1)],
+    ["topk_k4.wgsl", topkWgsl(4)],
     // GEMM 3 op は形状由来の v4 フラグで 2 変種（スカラ / vec4）を持つ。**両側を並べる**のが
     // 条件で、片方だけ固定すると端数形状のフォールバックが黙って壊れても気づけない。
     ["matmul.wgsl", MATMUL_WGSL],
@@ -595,6 +612,11 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     // 衝突すると片方の WGSL が他方の dispatch へ割り当たり、bind 面（出力 i32）が違うので
     // 例外なしに別のビット列が読まれる。
     ARGMAX_KEY,
+    // topk は **k ごとに別パイプライン**（k を WGSL に焼くので配列長とラウンド数が変わる）。
+    // k を含めないと最初に組んだ k のパイプラインが別の k の dispatch に配られ、例外なしに
+    // 別の本数だけが書かれた出力（残りは前 run の残骸）が読まれる。argmax とも衝突しない。
+    topkKey(1),
+    topkKey(4),
     PAD_KEY,
     FLIP_KEY,
     // upsample 系 2 本は**対で載せる**（第 3 層の融合ルール `upsample2x` = nearest の
@@ -1038,6 +1060,108 @@ Deno.test("argmax は最小 index を保存する比較式・−inf identity・�
   assertThrows(() => argmaxParams(7, 0), CodegenError, "dim は正整数");
   assertThrows(() => argmaxParams(-1, 3), CodegenError);
   assertThrows(() => argmaxParams(7, 1.5), CodegenError);
+});
+
+/**
+ * topk（ADR 0068 決定 3）。**値では検出できない**契約を生成物の側から固定する:
+ *
+ * 1. **2 相の形**（レーン局所 top-k → k ラウンドのトーナメント merge）— 全語彙 argsort でも
+ *    「k 回の行 reduce」でもないこと。後者は行を k 回読むので ADR が避けている高コスト側。
+ * 2. **タイブレークの向きと述語の共有** — `ib < ia`（最小 index）を `>` に書き換えても shape も
+ *    dtype も合ってしまう。走査・木・ラウンド跨ぎが**同じ 1 本の述語**を呼ぶことが、結合順に
+ *    依らず「値降順・同値なら index 昇順」になる根拠。
+ * 3. **identity が −inf + 番兵 index = dim** — 有限 sentinel（reduce 族の `-F32_MAX`）に
+ *    戻っていないこと。ビット列は params 3 語目で運ぶ。
+ * 4. **NaN 判定がビット列** — 素の比較に戻すと NaN が黙って負ける。
+ * 5. **カーソルを進めるのは勝った要素の持ち主だけ**（`won % W == lid`）— ここが壊れると同じ
+ *    要素が k 回出る / 別の要素が飛ばされるが、shape も dtype も合ったままになる。
+ * 6. **k の実装上限が workgroup storage から静的に決まる**こと（縮退しない）。
+ */
+Deno.test("topk は 2 相（レーン局所 top-k → トーナメント merge）で、最小 index を保存する述語を共有する", () => {
+  assertEquals(TOPK_WORKGROUP_SIZE, 32);
+  assertEquals(topkKey(4), `topk:v1:f32+i32:lastdim:desc:minindex:k4:wg${TOPK_WORKGROUP_SIZE}`);
+  // キーは k を含む（k ごとに別 WGSL）
+  assertEquals(topkKey(1) === topkKey(2), false);
+  const wgsl = topkWgsl(4);
+  // ① 出力 2 本（値 f32 + 添字 i32）を別の束縛で書く
+  assertEquals(wgsl.includes("@binding(2) var<storage, read_write> values: array<f32>;"), true);
+  assertEquals(wgsl.includes("@binding(3) var<storage, read_write> indices: array<i32>;"), true);
+  // ① 相 1 = レーンごとの候補ブロック（k 語 × W レーン）/ 相 2 = W 者トーナメントの先頭
+  assertEquals(wgsl.includes("var<workgroup> cand_value: array<f32, 128>;"), true);
+  assertEquals(wgsl.includes("var<workgroup> cand_index: array<u32, 128>;"), true);
+  assertEquals(wgsl.includes("var<workgroup> head_value: array<f32, 32>;"), true);
+  assertEquals(wgsl.includes("var<workgroup> head_index: array<u32, 32>;"), true);
+  // ① 行の読み出しは 1 回だけ（走査ループは 1 本・k のループは merge 側にしかない）
+  assertEquals((wgsl.match(/let v = x\[base \+ i\];/g) ?? []).length, 1);
+  assertEquals(wgsl.includes("let block = lid * 4u;"), true);
+  // ② 述語は 1 箇所定義で、走査・木の両方が同じ関数を呼ぶ（向きの取り違えを構造で潰す）
+  assertEquals(wgsl.includes("fn topk_beats(vb: f32, ib: u32, va: f32, ia: u32)"), true);
+  assertEquals(wgsl.includes("return vb > va || (vb == va && ib < ia);"), true);
+  assertEquals(
+    wgsl.includes("if (topk_beats(v, i, cand_value[block + 3u], cand_index[block + 3u])) {"),
+    true,
+  );
+  assertEquals(
+    wgsl.includes(
+      "while (s > 0u && topk_beats(v, i, cand_value[block + s - 1u], cand_index[block + s - 1u])) {",
+    ),
+    true,
+  );
+  assertEquals(
+    wgsl.includes("if (topk_beats(other, other_at, head_value[lid], head_index[lid])) {"),
+    true,
+  );
+  // ③ identity は −inf（params 経由）+ 番兵 index = dim（全 −inf 行でも答えが定義される根拠）
+  assertEquals(wgsl.includes("let neg_inf = bitcast<f32>(params.neg_inf);"), true);
+  assertEquals(wgsl.includes("cand_value[block + s] = neg_inf;"), true);
+  assertEquals(wgsl.includes("cand_index[block + s] = dim;"), true);
+  // MUST: reduce 族の有限 sentinel が紛れ込んでいない
+  assertEquals(wgsl.includes("3.402823466e38"), false);
+  // ④ NaN はビット列で判定して「最大」として扱う（argmax と同一本文）
+  assertEquals(wgsl.includes("fn is_nan_bits(x: f32) -> bool {"), true);
+  assertEquals(wgsl.includes("  if (na != nb) {\n    return nb;\n  }"), true);
+  assertEquals(wgsl.includes("  if (na) {\n    return ib < ia;\n  }"), true);
+  assertEquals(
+    ARGMAX_WGSL.includes("return vb > va || (vb == va && ib < ia);"),
+    true,
+    "argmax と同じ述語本文（k=1 が argmax と一致することの前提）",
+  );
+  // ⑤ 出力は行ごとに k 語・カーソルを進めるのは勝った要素の持ち主だけ
+  assertEquals(wgsl.includes("values[row * 4u + r] = head_value[0u];"), true);
+  assertEquals(wgsl.includes("indices[row * 4u + r] = i32(won);"), true);
+  assertEquals(wgsl.includes("if (won % 32u == lid) {"), true);
+  assertEquals(wgsl.includes("cursor = cursor + 1u;"), true);
+  // 行ループは grid-stride（argmax / 行 reduce と同じ workgroup_id × num_workgroups の送り）
+  assertEquals(wgsl.includes("var row = wid.x;"), true);
+  assertEquals(wgsl.includes("row = row + nwg.x;"), true);
+  // k=1 の縮退形: ブロックの末尾（最弱）と先頭が同じ語になり、挿入ループは 1 度も回らない
+  assertEquals(
+    topkWgsl(1).includes("if (topk_beats(v, i, cand_value[block + 0u], cand_index[block + 0u])) {"),
+    true,
+  );
+
+  // ⑥ 実装上限は workgroup storage から静的に決まる（8·W·(k+1) バイト）
+  assertEquals(topkWorkgroupStorageBytes(1), 8 * 32 * 2);
+  assertEquals(topkWorkgroupStorageBytes(63), 16384);
+  assertEquals(topkMaxK(16384), TOPK_CORE_LIMIT_MAX_K);
+  assertEquals(TOPK_CORE_LIMIT_MAX_K, 63);
+  // 上限が device limit で動く（要求した limit がそのまま上限になる）
+  assertEquals(topkMaxK(32768), 127);
+  assertEquals(topkMaxK(1024), 3);
+  assertTopkK(63, 16384, "t");
+  // MUST: 超過は縮退させず、**上限値つきで** fail loudly（利用者が k をどこまで下げれば
+  // よいか診断だけで分かる形）
+  assertThrows(() => assertTopkK(64, 16384, "t"), CodegenError, "実装上限 63 を超える");
+  assertThrows(() => assertTopkK(4, 1024, "t"), CodegenError, "実装上限 3 を超える");
+  assertThrows(() => assertTopkK(0, 16384, "t"), CodegenError, "k は正整数");
+  assertThrows(() => assertTopkK(1.5, 16384, "t"), CodegenError);
+
+  assertEquals([...topkParams(7, 3)], [7, 3, TOPK_NEG_INF_BITS, 0]);
+  assertEquals(topkParams(7, 3).byteLength, 16, "uniform struct の 16 バイト整列");
+  // MUST: params に k を載せない（WGSL に焼いてある — 二重管理を構造で禁じる）
+  assertEquals(topkParams(7, 3).length, 4);
+  assertThrows(() => topkParams(7, 0), CodegenError, "dim は正整数");
+  assertThrows(() => topkParams(-1, 3), CodegenError);
 });
 
 Deno.test("half-split RoPE は積を workgroup u32 へ丸め、一様 barrier 後に加算する", () => {

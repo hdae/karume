@@ -658,7 +658,7 @@ const conv1dKeysUsed = async (
   const graph = singleOpGraph(
     "conv1d",
     [[1, channels, 8], [channels, channels / groups, 3], [channels]],
-    [1, channels, 8],
+    [[1, channels, 8]],
     { attrs: { stride: 1, padding: 1, dilation: 1, groups } },
   );
   const session = await createSession(gpu, openModel(graphModelBuffer(graph)));

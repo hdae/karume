@@ -53,6 +53,10 @@ M1-P2 以降のエクスポート実測（未対応 op の全件列挙）で確�
    なら「固定上限形状 + マスク」か、実行モデル自体の設計裁定が要る。
 3. **値依存の並べ替え・その他（sort / topk / grid_sampler_2d / _cdist_forward /
    _pdist_forward / _fft_r2c / _fft_c2r）** — 保留。`topk` は k=1 なら `argmax` で代替できる。
+   **訂正（2026-08-17）**: `topk` は**保留を解いた**（ADR 0068 決定 3 — static-k・出力 2 本。
+   下の `topk` の NOTE）。解けた条件は 2 つで、①k が attrs の**計画時定数**なので出力形が
+   静的に決まる（値依存なのは中身だけ）②「レーン局所 top-k → トーナメント merge」で全語彙
+   argsort を経由しない。`sort`（全語彙の並べ替え）と `grid_sampler_2d` / fft 系は保留のまま。
 
 NOTE: 個別列挙の合計は 16（6+3+7）で箱の計 15 と 1 件合わない。この不整合はプロトタイプ
 原本由来（どの op が二重計上かは原本にも記録が無い）。per-op 割当を実測で確定する
@@ -160,7 +164,9 @@ op.tags` の実測）**+ 例外 1 本**（実行モデルの不変条件を壊�
    CPU 参照 + golden COVERAGE）。**例外（0064 軸 B）**: 実行モデルの不変条件（単一出力 /
    静的形状 / full-write / 4 バイト格納 + 意味論 dtype 3 種 / resident 全域書き）を壊す
    追加は core でも **ADR 必須** — 影響範囲（planner / executor / recipe / IR …）の先出しが
-   必須節（`topk` / `sort` / `argmax` の 2 出力が典型）。
+   必須節（`topk` / `sort` / `argmax` の 2 出力が典型 — **`topk` はこの経路で消化済み**:
+   ADR [0068](decisions/0068-decode-exit-multi-output.md) が多出力の影響範囲を 8 面で先出しし、
+   決定 3 で入居した。`argmax` は単一出力なのでこの例外には当たらず台帳 NOTE のみ）。
 4. **非 core**（非 core の aten・torchvision・karume 独自名）→ ADR とセットで:
    語彙内合成で厳密同値に**書けない** → **拡張原子層**（ADR = 回避不能の証明）。
    **書けるが保存したい** → **拡張分子層**（ADR = 入場条件のいずれかの実測:
@@ -271,7 +277,46 @@ attrs（無し）・出力 dtype（i32）・rank の扱い（保存）・カー�
 丸ごと動く。固定挙動 3 点は torch 準拠の実測（同上）: **タイブレーク = 最小 index** /
 **NaN は最大**（複数なら最小 index — `amax` の NaN 伝播と族内で整合する側）/ **全 −inf 行は
 index 0**。**`argmin` は足さない**（「対称性のための追加をしない」— greedy に要らない）。
-`max` / `min`（値と添字の 2 出力）も依然として未実装で、多出力機構が入ってからの別判断。
+`max` / `min`（値と添字の 2 出力）も依然として未実装だが、**多出力機構は入った**（下の
+`topk` の NOTE）ので判断材料は揃っている — 足すかどうかは実測の要求が出てから。
+
+NOTE: 2026-08-17 `topk` を **Core ATen 層**に追加。契約の正本は ADR
+[0068](decisions/0068-decode-exit-multi-output.md) 決定 3（**ノードレベル多出力の最初の入居者** —
+実行モデルの不変条件「単一出力」を壊す追加なので 0064 軸 B の例外に当たり、**ADR 必須**の側。
+影響範囲の先出しは ADR 0068 決定 1 が持つ）。根拠 = top-k sampling の出口（温度・top-p・乱数は
+ホスト維持なので、GPU 側は topk までで足りる — 決定 4）。入場券の実測（2026-08-17 / torch 2.13・
+tools/exporter で実行）:
+
+```sh
+uv run python -c "import torch; print(torch.Tag.core in torch.ops.aten.topk.default.tags)"
+# → True（core decomposition にも載らない = curated decomp 後も 1 ノードで残る）
+```
+
+手順 1 で止まらない理由は **logits が実行時値**だから。手順 2 の合成も不可 — 語彙に「値と添字を
+同時に畳む縮約」が無く、`argmax` の反復で書こうとすると①選んだ要素を除いて次を探す機構
+（masked_fill 相当の実行時マスク更新）が要り②その反復が k 回の行 reduce = 行を k 回読む形で、
+ADR が避けている高コスト側そのものになる。
+
+契約は**最終次元固定・attrs `k` 宣言必須（static-k）・出力 2 本**（値 f32 の降順 + 添字 i32・
+2 本とも `[…, k]`）。受理領域は **`1 ≤ k ≤ 最終次元`** で、k=0（torch は受理する）・
+k > 最終次元・記号 k は全て fail loudly。`largest` / `sorted` の欄は作らない（降順の最大側 1 形
+だけ — `keepdim` の欄を作らなかった argmax と同じ規律）。**実装上限**は workgroup storage の
+device limit から静的に決まり（1 行 32 レーン × `8·W·(k+1)` バイト → WebGPU 既定 16384 で
+**k ≤ 63**）、超えたら縮退させず上限値つきで落ちる。
+
+固定挙動: **タイブレーク = 最小 index**（argmax と同族の述語）/ **NaN は最大**（複数なら最小
+index）/ 全 −inf 行も最小 index から k 本。**値の列は torch とビット一致**（降順・多重度が同じ）
+だが、**添字の列は torch 準拠ではなく karume の規定**である点が argmax と違う — 実測
+（2026-08-17 / torch 2.13.0+cpu）で torch の `topk` は同値要素の順序を保証せず、
+`topk([5,5,5,5], 1)` が index **2** を返すのに `argmax([5,5,5,5])` は **0** を返す（同一リポ内の
+自己矛盾。7 行のタイ表で k=1 の 3 行が食い違う）。karume は argmax と揃えて最小 index に規定し、
+**k=1 の topk が argmax と一致すること**を門で突き合わせている。
+
+**`sort` は足さない**（全語彙の並べ替えは k 幅に絞れず、保留の理由がそのまま残る）。
+**エクスポータ側の aten ハンドラは無い** — 多出力 aten のタプル meta + `operator.getitem` の
+スロット結線が新機構で、sampling の実需まで先送りした（ADR 0068 追記）。実測で止まるのは
+`aten.topk.default` ではなく **`operator.getitem`** なので、ハンドラだけ足しても道は開かない。
+現状の topk ノードは**ランタイム側の手書き IR / 将来の decode 台本**からのみ現れる。
 
 NOTE: 2026-08-13 に起票した層表の 2 穴（Core ATen 外・モデル由来の原子の行き場 /
 「容量・性能で非成立」の線引きの非等価）は、**2026-08-14 の入場門モデルへの改訂
@@ -298,7 +343,8 @@ NOTE: 2026-08-13 に起票した層表の 2 穴（Core ATen 外・モデル由�
 7. conv 契約拡張（B=1 等の緩和）
 8. pooling / upsample
 9. scatter_add（ADR 前提）
-10. 保留（sort/topk/fft/データ依存形状）
+10. 保留（sort/fft/データ依存形状）— **`topk` は 2026-08-17 に消化**（ADR 0068 決定 3・
+    static-k の多出力 op）
 
 ## 未決・未検証（着手前に潰す）
 

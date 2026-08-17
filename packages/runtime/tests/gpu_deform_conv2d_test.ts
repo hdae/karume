@@ -300,7 +300,7 @@ const runDeform = async (
   const graph = singleOpGraph(
     "deform_conv2d",
     inputs.map((input) => input.shape),
-    outShape,
+    [outShape],
     { attrs: { padding: [...padding] } },
   );
   const session = await createSession(gpu, openModel(graphModelBuffer(graph)));

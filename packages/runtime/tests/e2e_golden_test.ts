@@ -68,6 +68,17 @@ Deno.test("golden fixtures が 1 件以上あり、全件がテストとして�
 // 足したのに golden を足していない状態は、fixture を触らないので生成側では検出できない。
 // ここは**実行できる op（capabilities()）が golden に 1 本も現れていない**ことを、
 // 配布形そのものを読んで固定する（GPU アダプタ非依存 — 突合ではなく宣言の集合演算）。
+/**
+ * golden を持てない op（Python 側 `NON_EMITTABLE_OPS` の鏡像 — 理由つき列挙 MUST）。
+ *
+ * `topk` は契約表にあるが **torch から出せない**（ADR 0068 追記）: aten ハンドラが無く、
+ * 多出力 aten のタプル meta + `operator.getitem` のスロット結線が新機構として残っている
+ * （sampling の実需まで先送り — 実測で止まるのは `aten.topk.default` ではなく getitem）。
+ * MUST: 下の突合は**両方向**（この列挙と実際の未被覆集合が完全一致）で見る。golden が topk を
+ * 踏み始めた日にもここが赤くなり、席を外すことを強制する。
+ */
+const OPS_WITHOUT_GOLDEN: readonly string[] = ["topk"];
+
 Deno.test("全 golden の requires.ops が実行可能な op 集合を覆う", async () => {
   const covered = new Set<string>();
   for (const model of MODELS) {
@@ -75,7 +86,11 @@ Deno.test("全 golden の requires.ops が実行可能な op 集合を覆う", a
     for (const op of graph.requires.ops) covered.add(op);
   }
   const uncovered = capabilities().ops.filter((op) => !covered.has(op));
-  assertEquals(uncovered, [], "golden が 1 本も踏んでいない op（op を足したら golden も足す）");
+  assertEquals(
+    uncovered,
+    OPS_WITHOUT_GOLDEN,
+    "golden が 1 本も踏んでいない op（op を足したら golden も足す / 出せない op は理由つきで OPS_WITHOUT_GOLDEN へ）",
+  );
 });
 
 for (const model of MODELS) {

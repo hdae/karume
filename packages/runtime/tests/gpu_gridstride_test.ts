@@ -10,7 +10,7 @@
 // 要素方向の族（elementwise / strided 読み書き / gather / embedding / masked_fill / conv 族 /
 // pad / flip / upsample_bilinear2d / deform_conv2d / **軸 reduce**）は `gid.x` の 1 次元
 // grid-stride、
-// 行方向の族（行 reduce / **argmax** / softmax /
+// 行方向の族（行 reduce / **argmax** / **topk** / softmax /
 // layer_norm / rms_norm / **gru_scan**）は `workgroup_id.x` を `num_workgroups.x` で送る
 // 行ループを踏ませる（gru_scan の「行」はバッチ要素で、時間ループはカーネル内）。
 // **reduce 族は 2 変種とも載せる**（最終次元 = 行方向 / それ以外 = 要素方向で、走らせ方が違う）。
@@ -62,6 +62,7 @@ import {
   softmaxCase,
   stridedCase,
   stridedWriteCase,
+  topkCase,
   upsampleBilinear2dCase,
 } from "./helpers/gridstride_cases.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
@@ -180,6 +181,9 @@ const CASES: readonly DegenerateCase[] = [
   // argmax は行 reduce と同じ行方向 grid-stride の**別族**（identity −inf + index 追跡）。
   // 出力が i32 なので readback は期待値の dtype で view を張る。
   argmaxCase(),
+  // topk も同じ行方向 grid-stride の別族（レーン局所 top-k → トーナメント merge・出力 2 本）。
+  // 突合は添字の列で、値の列は sideOutputBytes 側（helpers/gridstride_cases.ts の doc）。
+  topkCase(),
   softmaxCase(),
   // 融合 attention の 3 カーネルのうち行方向 grid-stride なのは ② だけ（①③ はタイル系で
   // カテゴリ違い — 安全網は tiledWorkgroups の fail loudly + full-write テスト）。

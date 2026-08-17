@@ -214,7 +214,7 @@ const scanGraph = (op: string, geometry: Geometry): GraphJson => {
   return singleOpGraph(
     op,
     [[time, batch, gates], [batch, hidden], [gates, hidden], [gates]],
-    [time, batch, hidden],
+    [[time, batch, hidden]],
   );
 };
 

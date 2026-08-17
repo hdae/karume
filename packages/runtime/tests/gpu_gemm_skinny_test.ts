@@ -39,7 +39,7 @@ const runCase = async (gpu: GpuContext, testCase: ShapeCase): Promise<Tensor> =>
   const graph = singleOpGraph(
     testCase.op,
     testCase.inputs.map((input) => input.shape),
-    testCase.outShape,
+    [testCase.outShape],
   );
   const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
   try {

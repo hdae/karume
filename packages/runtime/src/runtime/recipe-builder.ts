@@ -186,6 +186,7 @@ import {
 } from "../kernels/gemm-geometry.ts";
 import { GATHER_KEY, GATHER_WGSL, GATHER_WORKGROUP_SIZE, gatherParams } from "../kernels/gather.ts";
 import { matmulKey, matmulParams, matmulWgsl } from "../kernels/matmul.ts";
+import { assertTopkK, topkKey, topkParams, topkWgsl } from "../kernels/topk.ts";
 import {
   attentionScale,
   type BinaryOpName,
@@ -206,6 +207,7 @@ import {
   rmsNormEps,
   scalarParamValues,
   sliceAttrs,
+  topkK,
   type UnaryOpName,
   WEIGHT_SLOTS,
   WHERE_OP,
@@ -506,6 +508,9 @@ export class RecipeBuilder {
       case "argmax":
         await this.#buildArgmax(step, binds, outs, builder);
         break;
+      case "topk":
+        await this.#buildTopk(step, binds, outs, builder);
+        break;
       case "permute":
       case "slice":
       case "symPrefixSlice":
@@ -709,6 +714,56 @@ export class RecipeBuilder {
       layout,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+      workgroups: [groups, 1, 1],
+    });
+  }
+
+  /**
+   * topk（最終次元・static-k・**出力 2 本** — ADR 0068 決定 3）。**1 dispatch**で、argmax と
+   * 同じ「1 行 = 1 workgroup + 行方向 grid-stride」（レーン局所 top-k → トーナメント merge の
+   * 根拠は src/kernels/topk.ts）。
+   *
+   * MUST: 出力は**列で受ける**（`outs[0]` = 値 f32・`outs[1]` = 添字 i32）。順序は
+   * {@link StepRecipe.outputs} と同じ出力 slot 昇順で、`node.outs` の並びがそのまま bind 面の
+   * 束縛番号 2 / 3 に対応する。取り違えると shape も byteLength も同じ（どちらも `[…, k]` の
+   * 4 バイト要素）なので**例外なしに値と添字が入れ替わる**。
+   * MUST: 一時バッファを持たない（scratch は workgroup storage に閉じる — 決定 3 の
+   * 「出力バッファへの同居は採らない」を、そもそも scratch を外に出さない形で満たす）。
+   * 代わりに k の実装上限を device limit から判定する（{@link assertTopkK} — 縮退しない）。
+   */
+  async #buildTopk(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    outs: readonly BindingSource[],
+    builder: StepRecipeBuilder,
+  ): Promise<void> {
+    const inputShape = step.inputShapes[0];
+    const dim = inputShape[inputShape.length - 1];
+    const rows = numel(inputShape.slice(0, -1));
+    const where = `nodes (${step.node.op})`;
+    // `1 ≤ k ≤ 最終次元` は契約層（attrs スキーマ + shape 規則）が済ませている。ここで見るのは
+    // **device 依存の実装上限**だけ（workgroup storage — 上限値つきで fail loudly）。
+    const k = topkK(step.node.attrs, where);
+    assertTopkK(k, this.#state.gpu.limits.maxComputeWorkgroupStorageSize, where);
+    const key = topkKey(k);
+    const { pipeline, layout } = await this.#state.cache.get(key, topkWgsl(k));
+    const params = this.#writeParams(topkParams(rows, dim), PARAMS_UNIFORM_USAGE);
+    // 1 行 = 1 workgroup。上限を超えたら縮退させ、カーネル側の行 grid-stride で回す。
+    const groups = gridStrideWorkgroups(
+      rows,
+      1,
+      this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
+    );
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        { binding: 1, source: binds[0] },
+        { binding: 2, source: outs[0] },
+        { binding: 3, source: outs[1] },
+      ],
       workgroups: [groups, 1, 1],
     });
   }

@@ -1,11 +1,12 @@
 // 実 GPU 実行 vs CPU 参照の数値突合（ADR 0005 の段 2）。M0 の全 op を代表 shape で回す。
 // MUST: 乱数を使わない — 失敗が再現しないと原因の切り分けができない。
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { CodegenError } from "../src/codegen/errors.ts";
 import { openModel } from "../src/format/container.ts";
-import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
+import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
-import { applyReferenceOp } from "../src/reference/ops.ts";
+import { applyReferenceOp, applyReferenceOpOutputs } from "../src/reference/ops.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import {
@@ -28,20 +29,27 @@ import {
   POSITIVE,
   REDUCE_CASES,
   SIGNED,
+  TOPK_CASES,
   UNARY_CASES,
   UPSAMPLE_CASES,
 } from "./helpers/gpu_op_cases.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { fill, graphModelBuffer, outputName, singleOpGraph } from "./helpers/graph.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-const runCase = async (gpu: GpuContext, testCase: OpCase): Promise<Tensor> => {
+/**
+ * 1 ケースを実 GPU で走らせ、**出力 slot 昇順の列**を返す（ADR 0068 決定 1）。単一出力 op では
+ * 長さ 1 の列で、`topk` だけが 2 本になる。
+ */
+const runOutputs = async (gpu: GpuContext, testCase: OpCase): Promise<readonly Tensor[]> => {
   const graph = singleOpGraph(
     testCase.op,
     testCase.inputs.map((input) => input.shape),
-    testCase.outShape,
+    testCase.outShapes,
     {
       inDtypes: testCase.inputs.map((input) => input.dtype),
-      outDtype: testCase.outDtype ?? testCase.inputs[0].dtype,
+      outDtypes: testCase.outShapes.map((_, slot) =>
+        testCase.outDtypes?.[slot] ?? testCase.inputs[0].dtype
+      ),
       attrs: testCase.attrs,
     },
   );
@@ -52,28 +60,40 @@ const runCase = async (gpu: GpuContext, testCase: OpCase): Promise<Tensor> => {
       named[`x${index}`] = input;
     });
     const outputs = await session.run(named);
-    return outputs["y"];
+    return testCase.outShapes.map((_, slot) => outputs[outputName(slot)]);
   } finally {
     await session.dispose();
   }
+};
+
+/** 単一出力ケースの実行（多出力 op は {@link runOutputs} で受ける）。 */
+const runCase = async (gpu: GpuContext, testCase: OpCase): Promise<Tensor> => {
+  const outputs = await runOutputs(gpu, testCase);
+  assertEquals(outputs.length, 1, `${testCase.name}: 単一出力ケース`);
+  return outputs[0];
 };
 
 const checkAll = async (cases: readonly OpCase[]): Promise<void> => {
   const gpu = await acquireGpu();
   try {
     for (const testCase of cases) {
-      const actual = await runCase(gpu, testCase);
-      const expected = applyReferenceOp(
+      const actual = await runOutputs(gpu, testCase);
+      const expected = applyReferenceOpOutputs(
         testCase.op,
         testCase.inputs,
         testCase.attrs ?? {},
-        testCase.outShape,
+        testCase.outShapes[0],
       );
-      assertEquals(actual.shape, expected.shape, testCase.name);
-      assertEquals(actual.dtype, expected.dtype, `${testCase.name}: dtype`);
-      // f32 は allclose、i32 / bool は厳密一致（整数演算に丸め差は無い — ADR 0009）
-      const report = compareTensors(actual, expected);
-      assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
+      // MUST: 本数から突き合わせる（多出力 op で片方を読み飛ばした形が緑になるのを防ぐ）
+      assertEquals(actual.length, expected.length, `${testCase.name}: 出力本数`);
+      actual.forEach((tensor, slot) => {
+        const label = expected.length === 1 ? testCase.name : `${testCase.name} 出力 ${slot}`;
+        assertEquals(tensor.shape, expected[slot].shape, label);
+        assertEquals(tensor.dtype, expected[slot].dtype, `${label}: dtype`);
+        // f32 は allclose、i32 / bool は厳密一致（整数演算に丸め差は無い — ADR 0009）
+        const report = compareTensors(tensor, expected[slot]);
+        assertEquals(report.pass, true, `${label}: ${formatAllclose(report)}`);
+      });
     }
   } finally {
     gpu.destroy();
@@ -123,7 +143,7 @@ Deno.test({
         name: "leaky_relu NaN",
         op: "leaky_relu",
         inputs: [fill([4], (i) => [Number.NaN, -2, 0, 3][i])],
-        outShape: [4],
+        outShapes: [[4]],
         attrs: { negative_slope: 0.1 },
       });
       const values = [...actual.data];
@@ -149,14 +169,14 @@ const nanUnaryCases = (op: string, attrs?: Record<string, unknown>): readonly Op
     name: `${op} NaN@${position}`,
     op,
     inputs: [fill([4], (i) => (i === position ? Number.NaN : NAN_BASE[i]))],
-    outShape: [4],
+    outShapes: [[4]],
     attrs,
   })),
   {
     name: `${op} NaN 無し（対照）`,
     op,
     inputs: [fill([4], (i) => NAN_BASE[i])],
-    outShape: [4],
+    outShapes: [[4]],
     attrs,
   },
 ];
@@ -178,7 +198,7 @@ const NAN_CASES: readonly OpCase[] = [
       name: `${op} 行内の位置を変えた NaN [4,4]`,
       op,
       inputs: [fill([4, 4], NAN_REDUCE_ROWS)],
-      outShape: [4],
+      outShapes: [[4]],
       attrs: { dim: 1 },
     },
     {
@@ -188,7 +208,7 @@ const NAN_CASES: readonly OpCase[] = [
       name: `${op} 走査ループ 2 周目の NaN [2,300]`,
       op,
       inputs: [fill([2, 300], (i) => (i === 299 ? Number.NaN : SIGNED(i)))],
-      outShape: [2],
+      outShapes: [[2]],
       attrs: { dim: 1 },
     },
   ]),
@@ -215,7 +235,7 @@ Deno.test({
           testCase.op,
           testCase.inputs,
           testCase.attrs ?? {},
-          testCase.outShape,
+          testCase.outShapes[0],
         );
         const actualValues = [...actual.data];
         const expectedValues = [...expected.data];
@@ -260,7 +280,7 @@ Deno.test({
         name: "log1p small",
         op: "log1p",
         inputs: [fill([smalls.length], (i) => smalls[i])],
-        outShape: [smalls.length],
+        outShapes: [[smalls.length]],
       });
       smalls.forEach((x, index) => {
         const expected = Math.log1p(Math.fround(x));
@@ -320,7 +340,7 @@ Deno.test({
         name: "gather oob",
         op: "gather",
         inputs: [src, index],
-        outShape: [2, 3],
+        outShapes: [[2, 3]],
       });
       const values = [...actual.data];
       assertEquals(values.map((v) => Number.isNaN(v)), [false, true, false, false, true, false]);
@@ -385,8 +405,8 @@ Deno.test({
         name: "argmax tie-break",
         op: "argmax",
         inputs: [input],
-        outShape: [rows.length, 1],
-        outDtype: "i32",
+        outShapes: [[rows.length, 1]],
+        outDtypes: ["i32"],
       });
       assertEquals([...actual.data], TORCH, "GPU の argmax が torch の実測値と違う");
     } finally {
@@ -394,6 +414,204 @@ Deno.test({
     }
     const expected = applyReferenceOp("argmax", [input], {}, [rows.length, 1]);
     assertEquals([...expected.data], TORCH, "CPU 参照の argmax が torch の実測値と違う");
+  },
+});
+
+Deno.test({
+  name: "topk（最終次元・static-k・値 + 添字の 2 出力）が CPU 参照と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(TOPK_CASES),
+});
+
+/** NaN を "NaN" に潰した表示形（allclose も assertEquals も NaN 同士を一致と見ないため）。 */
+const nanSafe = (values: Iterable<number>): readonly (number | "NaN")[] =>
+  [...values].map((value) => (Number.isNaN(value) ? "NaN" : value));
+
+/**
+ * topk の同値 tie / NaN / 全 −inf 行（ADR 0068 決定 3 の固定挙動を**期待値リテラル**で固定）。
+ *
+ * MUST: CPU 参照との突合（checkAll）では代替できない。両側が同じ向きに間違えれば緑になる軸
+ * （タイブレークの向き・NaN の扱い・全 −inf 行の答え）なので、リテラルで置く。
+ *
+ * **torch との関係（実測 2026-08-17 / torch 2.13.0+cpu）**:
+ *
+ * - **値の列は torch とビット一致**（`VALUES` は torch の実測値そのもの）。降順で同値の
+ *   多重度も同じなので、重複だらけの行でも一致する（`torch.topk` の values 列を
+ *   (値降順, index昇順) 実装と 200×4 ケースで突合した結果も全一致）。
+ * - **添字の列は torch と一致しない**（`INDICES` は karume の規定）。torch の topk は同値
+ *   要素の順序を保証せず、`[5,5,5,5]` の k=1 で index **2** を返すのに `argmax` は **0** を
+ *   返す（同一リポ内の自己矛盾）。karume は argmax と同族の**最小 index 優先**に規定した。
+ *   下表で torch と割れるのは行 1 / 2 / 4 / 5 / 6（torch は順に [2,3,0,1] / [2,3,0,1] /
+ *   [2,3,0,1] / [1,3,2,0] / [0,2,3,1]）。
+ *
+ * 行の意味:
+ * 0. 同値が 2 つ（3.0 が index 1,2）→ 最小 index が先（torch も同じ）
+ * 1. 全要素が同値 → index 昇順（「最後の最大値」実装なら降順になる）
+ * 2. 全要素 −inf → index 昇順（有限 sentinel の identity だと番兵 index が漏れる）
+ * 3. NaN が 2 つ（index 1,3）→ **NaN は最大**・NaN 同士は最小 index（torch も同じ）
+ * 4. 全要素 NaN → index 昇順
+ * 5. −inf と同値の最大が混在 → 2.0 が先・−inf は index 昇順
+ * 6. 同値が 2 組 → 2.0 の組が先、その中は index 昇順
+ */
+Deno.test({
+  name: "topk の同値 tie / NaN / 全 −inf 行が固定挙動どおり（値は torch とビット一致 — 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const NEG = Number.NEGATIVE_INFINITY;
+    const NAN = Number.NaN;
+    const rows = [
+      [1, 3, 3, 2],
+      [5, 5, 5, 5],
+      [NEG, NEG, NEG, NEG],
+      [1, NAN, 3, NAN],
+      [NAN, NAN, NAN, NAN],
+      [NEG, 2, NEG, 2],
+      [2, 1, 2, 1],
+    ];
+    // torch 実測の values 列（k = 4 = 最終次元 = 行全体の降順）
+    const VALUES = [
+      [3, 3, 2, 1],
+      [5, 5, 5, 5],
+      [NEG, NEG, NEG, NEG],
+      [NAN, NAN, 3, 1],
+      [NAN, NAN, NAN, NAN],
+      [2, 2, NEG, NEG],
+      [2, 2, 1, 1],
+    ];
+    // karume の規定（最小 index 優先 — torch は同値の順序を保証しない）
+    const INDICES = [
+      [1, 2, 3, 0],
+      [0, 1, 2, 3],
+      [0, 1, 2, 3],
+      [1, 3, 2, 0],
+      [0, 1, 2, 3],
+      [1, 3, 0, 2],
+      [0, 2, 1, 3],
+    ];
+    const input = fill([rows.length, 4], (i) => rows[Math.floor(i / 4)][i % 4]);
+    const testCase: OpCase = {
+      name: "topk tie-break",
+      op: "topk",
+      inputs: [input],
+      outShapes: [[rows.length, 4], [rows.length, 4]],
+      outDtypes: ["f32", "i32"],
+      attrs: { k: 4 },
+    };
+    const gpu = await acquireGpu();
+    try {
+      const actual = await runOutputs(gpu, testCase);
+      assertEquals(nanSafe(actual[0].data), nanSafe(VALUES.flat()), "GPU の topk 値列");
+      assertEquals([...actual[1].data], INDICES.flat(), "GPU の topk 添字列");
+    } finally {
+      gpu.destroy();
+    }
+    // 同じ表を CPU 参照にも当てて、オラクル側の向きも同時に固定する
+    const expected = applyReferenceOpOutputs("topk", [input], { k: 4 });
+    assertEquals(nanSafe(expected[0].data), nanSafe(VALUES.flat()), "CPU 参照の topk 値列");
+    assertEquals([...expected[1].data], INDICES.flat(), "CPU 参照の topk 添字列");
+  },
+});
+
+/**
+ * k=1 の topk が argmax と一致する（族間の食い違い検出）。
+ *
+ * MUST: 同じ入力で 2 つの op を実走させて突き合わせる。両者はカーネルもキーも別なので、
+ * 述語の本文を片方だけ書き換えても shape も dtype も合ったまま答えだけが割れる。
+ * 入力は**タイと NaN と全 −inf 行**を含む形（一意な最大値だけの入力では、どちらの
+ * タイブレーク規律でも同じ答えになって検出器にならない）。
+ */
+Deno.test({
+  name: "k=1 の topk の添字が argmax と一致する（タイ / NaN / 全 −inf 行込み・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const NEG = Number.NEGATIVE_INFINITY;
+    const NAN = Number.NaN;
+    const rows = [
+      [1, 3, 3, 2],
+      [5, 5, 5, 5],
+      [NEG, NEG, NEG, NEG],
+      [1, NAN, 3, NAN],
+      [NEG, 2, NEG, 2],
+    ];
+    const input = fill([rows.length, 4], (i) => rows[Math.floor(i / 4)][i % 4]);
+    const gpu = await acquireGpu();
+    try {
+      const topk = await runOutputs(gpu, {
+        name: "topk k=1",
+        op: "topk",
+        inputs: [input],
+        outShapes: [[rows.length, 1], [rows.length, 1]],
+        outDtypes: ["f32", "i32"],
+        attrs: { k: 1 },
+      });
+      const argmax = await runCase(gpu, {
+        name: "argmax",
+        op: "argmax",
+        inputs: [input],
+        outShapes: [[rows.length, 1]],
+        outDtypes: ["i32"],
+      });
+      assertEquals([...topk[1].data], [...argmax.data], "k=1 の topk が argmax と食い違う");
+      // 値の側も amax と同じ要素を返している（添字だけ合っていて値が別の要素という形を潰す）
+      assertEquals(
+        nanSafe(topk[0].data),
+        nanSafe([...argmax.data].map((at, row) => rows[row][at])),
+        "k=1 の topk 値が添字の指す要素と違う",
+      );
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * topk の **k の実装上限**（ADR 0068 決定 3 — 縮退しない・上限値つきで fail loudly）。
+ *
+ * MUST: **絞った device**（`LIMIT_CAPS`）で見る。手元のアダプタは workgroup storage を
+ * 49152 バイト出すので上限 k は 191 になり、既定の機（16384 → 上限 63）で落ちる k を
+ * 実走で確かめる手段が他に無い（列挙は「動く」の証拠にならない、と同じ規律）。
+ * 上限の内側（k=2）が**同じ絞った device で緑**であることも対で見る — 全部落ちる実装でも
+ * 拒否側の門だけなら通ってしまう。
+ */
+Deno.test({
+  name:
+    "topk は workgroup storage 由来の k 上限を超えたら上限値つきで落ちる（絞った device / 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 8·W·(k+1) ≤ 1024 → 上限 k = 3
+    const gpu = await acquireGpu({ [LIMIT_CAPS]: { maxComputeWorkgroupStorageSize: 1024 } });
+    try {
+      assertEquals(gpu.limits.maxComputeWorkgroupStorageSize, 1024);
+      const input = fill([2, 8], SIGNED);
+      const outputs = await runOutputs(gpu, {
+        name: "topk k=2（上限の内側）",
+        op: "topk",
+        inputs: [input],
+        outShapes: [[2, 2], [2, 2]],
+        outDtypes: ["f32", "i32"],
+        attrs: { k: 2 },
+      });
+      const expected = applyReferenceOpOutputs("topk", [input], { k: 2 });
+      assertEquals([...outputs[0].data], [...expected[0].data]);
+      assertEquals([...outputs[1].data], [...expected[1].data]);
+      // 上限超過は縮退せず落ちる（診断に上限値 3 が出る）
+      const graph = singleOpGraph("topk", [[2, 8]], [[2, 4], [2, 4]], {
+        outDtypes: ["f32", "i32"],
+        attrs: { k: 4 },
+      });
+      const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+      try {
+        await assertRejects(
+          () => session.run({ x0: input }),
+          CodegenError,
+          "実装上限 3 を超える",
+        );
+      } finally {
+        await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
   },
 });
 
@@ -459,7 +677,7 @@ Deno.test({
         name: "upsample_bilinear2d edges",
         op: "upsample_bilinear2d",
         inputs: [input],
-        outShape: [1, 1, heightOut, widthOut],
+        outShapes: [[1, 1, heightOut, widthOut]],
         attrs: { output_size: [heightOut, widthOut] },
       });
       const at = (row: number, column: number): number => actual.data[row * widthOut + column];
@@ -494,7 +712,7 @@ Deno.test({
         name: "embedding oob",
         op: "embedding",
         inputs: [weight, index],
-        outShape: [4, 2],
+        outShapes: [[4, 2]],
         attrs: { padding_idx: -1 },
       });
       const values = [...actual.data];
@@ -679,7 +897,7 @@ Deno.test({
         const graph = singleOpGraph(
           "cat",
           testCase.inShapes.map((shape) => [...shape]),
-          [...testCase.outShape],
+          [[...testCase.outShape]],
           { symbols: ["T"], attrs: { dim: testCase.dim } },
         );
         // 束縛は入力 shape の次元位置から取る（'T' が素の形で現れる位置）。

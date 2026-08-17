@@ -73,6 +73,23 @@ export type ReduceOpName = (typeof REDUCE_OPS)[number];
 export const ARGMAX_OP = "argmax";
 
 /**
+ * 最終次元の top-k（ADR 0068 決定 3 — **ノード多出力の最初の入居者**）。入力 f32 →
+ * **出力 2 本**（slot 0 = 値 f32 の**降順**・slot 1 = 添字 i32）で、2 本とも `[…, k]`。
+ *
+ * MUST: `k` は **attrs で宣言必須**（計画時定数 = static-k）。記号 k・k=0・最終次元超過は
+ * 全て fail loudly（受理領域は `1 ≤ k ≤ 最終次元`）。torch の schema は `k` が SymInt だが、
+ * 実行時に決まる k は静的形状の前提（ADR 0004）に載らないので受理しない。
+ * MUST: 軸は最終次元固定（`dim` の欄が無いことがそのまま「他の軸は語彙に無い」の宣言）で、
+ * `largest` / `sorted` の欄も作らない（**降順ソート済みの最大側だけ**が語彙 — 最小側が要れば
+ * 別 op、順序無しは要求が出てから）。
+ * MUST: タイブレークは**最小 index**（argmax と同族の述語）・NaN は**最大**・全 −inf 行も
+ * 最小 index から k 本。**値の列は torch とビット一致**する一方、**添字の列は torch の
+ * 未規定部分を karume が規定した**側（torch は同値要素の順序を保証せず、`argmax` と
+ * `topk(k=1)` が同一リポ内で食い違う — 実測は src/kernels/topk.ts の NOTE）。
+ */
+export const TOPK_OP = "topk";
+
+/**
  * 三項 elementwise `out = cond ? a : b`（torch の `where`）。
  *
  * MUST: 3 者とも右詰め broadcast（torch と同じ）。条件スロットが先頭なのは torch の

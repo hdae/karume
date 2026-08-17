@@ -104,7 +104,7 @@ Deno.test({
     // ハングせず完走すること自体が回帰の対象になる。
     const sessions = await Promise.all(
       (["relu", "neg"] as const).map((op) =>
-        createSession(gpu, openModel(graphModelBuffer(singleOpGraph(op, [[8, 8]], [8, 8]))))
+        createSession(gpu, openModel(graphModelBuffer(singleOpGraph(op, [[8, 8]], [[8, 8]]))))
       ),
     );
     try {
@@ -133,7 +133,7 @@ Deno.test({
     const gpu = await acquireGpu();
     const session = await createSession(
       gpu,
-      openModel(graphModelBuffer(singleOpGraph("relu", [[8, 8]], [8, 8]))),
+      openModel(graphModelBuffer(singleOpGraph("relu", [[8, 8]], [[8, 8]]))),
     );
     try {
       const { layout } = await new PipelineCache(gpu.device).get(

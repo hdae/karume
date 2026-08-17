@@ -28,6 +28,7 @@ import {
   SLICE_ATTRS,
   SOFTMAX_ATTRS,
   SYM_PREFIX_SLICE_ATTRS,
+  TOPK_ATTRS,
   UPSAMPLE_BILINEAR2D_ATTRS,
 } from "./attrs.ts";
 import {
@@ -64,6 +65,7 @@ import {
   SLICE_OP,
   SOFTMAX_OP,
   SYM_PREFIX_SLICE_OP,
+  TOPK_OP,
   UNARY_OPS,
   type UnaryOpName,
   UPSAMPLE_BILINEAR2D_OP,
@@ -80,6 +82,7 @@ export type OpKind =
   | "gather"
   | "rowReduce"
   | "argmax"
+  | "topk"
   | "cast"
   | "reshape"
   | "permute"
@@ -196,6 +199,10 @@ export type OpContract =
   // 4 面が全て違い、消費側の網羅 switch に「どちらの意味論で実行するか」を必ず宣言させる
   // ため（safe_softmax を softmax と別 kind にしたのと同じ理由）。
   | (ContractBase & { readonly kind: "argmax"; readonly name: typeof ARGMAX_OP; readonly arity: 1 })
+  // 最終次元の top-k（ADR 0068 決定 3）。**唯一の多出力 op**（値 f32 + 添字 i32）で、出力数は
+  // 出力 dtype 写像の列長から導く（{@link outputCountOf}）。argmax と kind を分けるのは
+  // 出力本数・attrs（`k` 宣言必須）・shape 規則（最終次元 → k）が全て違うため。
+  | (ContractBase & { readonly kind: "topk"; readonly name: typeof TOPK_OP; readonly arity: 1 })
   | (ContractBase & { readonly kind: "cast"; readonly name: typeof CAST_OP; readonly arity: 1 })
   | (ContractBase & {
     readonly kind: "reshape";
@@ -365,6 +372,9 @@ const dtypesOf = (name: string): readonly IrDtype[] => DTYPES.get(name) ?? F32;
  * - `where` — 条件が先頭スロットなので、写像だけが「出力は値の側」を表せる。
  * - `argmax` — 出力は**添字**なので i32（ADR 0068 決定 2）。f32 で返すと語彙 2^24 を超えた
  *   時点で隣の token に丸まる（bool の `sum` と同型の理由）。
+ * - `topk` — **列の長さが 2**（ADR 0068 決定 3）。slot 0 は値なので恒等（f32 → f32・空の写像が
+ *   埋める）、slot 1 は添字なので i32。**列の長さがそのまま出力数**なので、この 1 行が
+ *   「topk は 2 本出す」の宣言そのものになる。
  */
 const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[]> = new Map([
   ["ge", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
@@ -374,6 +384,7 @@ const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[
   ["sum", [new Map<IrDtype, IrDtype>([["f32", "f32"], ["bool", "i32"]])]],
   [WHERE_OP, [new Map<IrDtype, IrDtype>([["bool", "f32"]])]],
   [ARGMAX_OP, [new Map<IrDtype, IrDtype>([["f32", "i32"]])]],
+  [TOPK_OP, [new Map<IrDtype, IrDtype>(), new Map<IrDtype, IrDtype>([["f32", "i32"]])]],
 ]);
 
 /** 宣言が無い op の既定 = **出力 1 本・恒等**（空の写像は定義域全体が恒等で埋まる）。 */
@@ -488,6 +499,9 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
   // 最終次元の argmax（ADR 0068 決定 2）。attrs 空・入力 f32 → 出力 i32（写像は
   // OUTPUT_DTYPES）で、rank 保存は shape 規則が持つ。
   [ARGMAX_OP, { ...contract(ARGMAX_OP), kind: "argmax", name: ARGMAX_OP, arity: 1 }],
+  // 最終次元の top-k（ADR 0068 決定 3）。attrs `k` 宣言必須・出力 2 本（値 f32 + 添字 i32 —
+  // 写像は OUTPUT_DTYPES）で、`[…, k]` の shape 規則と受理領域は shape 計算側が持つ。
+  [TOPK_OP, { ...contract(TOPK_OP, TOPK_ATTRS), kind: "topk", name: TOPK_OP, arity: 1 }],
   [CAST_OP, {
     ...slotContract(CAST_OP, { kind: "uniform", accept: ANY_DTYPE }, CAST_ATTRS),
     kind: "cast",

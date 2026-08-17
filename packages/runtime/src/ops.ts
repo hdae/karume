@@ -44,6 +44,7 @@ export {
   SLICE_OP,
   SOFTMAX_OP,
   SYM_PREFIX_SLICE_OP,
+  TOPK_OP,
   UNARY_OPS,
   UPSAMPLE_BILINEAR2D_OP,
   WEIGHT_CHANNEL_AXES,
@@ -73,6 +74,7 @@ export {
   sliceAttrs,
   softmaxDim,
   symPrefixSliceAttrs,
+  topkK,
   upsampleBilinear2dAttrs,
 } from "./ops/attrs.ts";
 export type {

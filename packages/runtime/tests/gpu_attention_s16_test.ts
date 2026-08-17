@@ -216,7 +216,7 @@ const runAttention = async (
   const q = fill([b, h, m, d], QUERY);
   const k = fill([b, h, n, d], KEY);
   const v = fill([b, h, n, d], VALUE);
-  const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [b, h, m, d], {
+  const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
     attrs: { scale: halfScale(d) },
   });
   const session = await createSession(gpu, openModel(graphModelBuffer(graph)), options);
@@ -277,18 +277,18 @@ const s16Oracle = async (
   }
   const scores = await runGraph(
     gpu,
-    singleOpGraph("bmm", [[heads, m, d], [heads, d, n]], [heads, m, n]),
+    singleOpGraph("bmm", [[heads, m, d], [heads, d, n]], [[heads, m, n]]),
     { x0: tensorOf([heads, m, d], qs), x1: tensorOf([heads, d, n], kt) },
   );
   // ここが唯一の丸め（①QK の書き出し = pack2x16float に対応する）
   const probs = await runGraph(
     gpu,
-    singleOpGraph("softmax", [[heads, m, n]], [heads, m, n], { attrs: { dim: 2 } }),
+    singleOpGraph("softmax", [[heads, m, n]], [[heads, m, n]], { attrs: { dim: 2 } }),
     { x0: tensorOf([heads, m, n], roundedCopy(scores)) },
   );
   return await runGraph(
     gpu,
-    singleOpGraph("bmm", [[heads, m, n], [heads, n, d]], [heads, m, d]),
+    singleOpGraph("bmm", [[heads, m, n], [heads, n, d]], [[heads, m, d]]),
     {
       x0: tensorOf([heads, m, n], probs),
       x1: tensorOf([heads, n, d], v as Float32Array<ArrayBuffer>),
@@ -566,12 +566,12 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      const graph = singleOpGraph("attention", [[1, 1, 4, 4], [1, 1, 4, 4], [1, 1, 4, 4]], [
+      const graph = singleOpGraph("attention", [[1, 1, 4, 4], [1, 1, 4, 4], [1, 1, 4, 4]], [[
         1,
         1,
         4,
         4,
-      ], { attrs: { scale: halfScale(4) } });
+      ]], { attrs: { scale: halfScale(4) } });
       const buffer = graphModelBuffer(graph);
       const error = await assertRejects(
         () =>
@@ -854,7 +854,7 @@ Deno.test({
     const v = fill([b, h, n, d], VALUE);
     // head 1 の行 3 だけを NaN にする（S の 1 行が丸ごと NaN になる）
     (q.data as Float32Array)[(1 * m + 3) * d] = Number.NaN;
-    const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [b, h, m, d], {
+    const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
       attrs: { scale: halfScale(d) },
     });
     const gpu = await acquireGpu();

@@ -19,7 +19,7 @@ from karume.convert import (
     _bitwise_equal,
     normalize_boundary_tensor,
 )
-from karume.ops import EMITTABLE_OPS
+from karume.ops import EMITTABLE_OPS, NON_EMITTABLE_OPS, TOPK_OP
 from karume.pipeline import export_to_file
 
 
@@ -118,6 +118,33 @@ class TestUnsupportedOps:
             convert_module(Stepped(), (torch.randn(6, 4),), ({0: dyn_t},))
 
         assert "aten.floor.default" in err.value.ops
+
+    def test_topk_is_declared_non_emittable_and_really_cannot_be_exported(self, convert_module):
+        """`topk` は契約表にあるが **torch から出せない**（ADR 0068 追記）。
+
+        多出力 aten のタプル meta + `operator.getitem` スロット結線は新機構で、sampling の
+        実需まで先送りした（裁定済み）。`NON_EMITTABLE_OPS` に席があるだけでは「ハンドラを
+        足したのに golden 被覆の門から外れたまま」を防げないので、**落ちること自体**を門に
+        する（ハンドラと getitem 結線を入れた日にここが赤くなり、そのとき
+        `NON_EMITTABLE_OPS` から外して golden を足す）。
+
+        実測（2026-08-17）: 止まるのは `aten.topk.default` ではなく **`operator.getitem`**。
+        torch.export はタプル返しをそのまま返す形でも getitem ノードを挟むので、aten
+        ハンドラだけを足しても道は開かない（結線が新機構だという ADR 追記の裏付け）。
+        """
+
+        class Topk(nn.Module):
+            def forward(self, x):
+                values, indices = torch.topk(x, 2, dim=-1)
+                return values, indices.float()
+
+        assert TOPK_OP in NON_EMITTABLE_OPS
+        assert TOPK_OP not in EMITTABLE_OPS
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            convert_module(Topk(), (torch.randn(3, 5),))
+
+        assert [key for key in err.value.ops if "getitem" in key], err.value.ops
+        assert "getitem" in str(err.value)
 
 
 class TestConstantFolding:

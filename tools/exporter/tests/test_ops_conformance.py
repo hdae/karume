@@ -215,10 +215,9 @@ class TestOutputShapes:
                 _compute(case)
             return
 
-        # 表の outs は出力 slot 別の列（ADR 0068 決定 1）。エクスポータ側の
-        # compute_output_shape は単一出力のみを計算する層なので、列へ包んで突き合わせる
-        # （多出力 op を表に載せた時点でここが落ちる = shapes.py の列化が要るという合図）。
-        assert [_compute(case)] == case["outs"]
+        # 表の outs は出力 slot 別の列（ADR 0068 決定 1）。compute_output_shape も列を返す
+        # ので、列どうしで突き合わせる（本数が割れた時点でここが落ちる）。
+        assert _compute(case) == case["outs"]
 
     @pytest.mark.parametrize("case", SHAPES, ids=_shape_id)
     def test_the_numeric_reading_agrees_with_the_symbolic_one(self, case):
@@ -238,7 +237,7 @@ class TestOutputShapes:
             assert _compute(case, bindings) == _compute(case)
             return
 
-        assert [_compute(case, bindings)] == [_resolve(shape, bindings) for shape in case["outs"]]
+        assert _compute(case, bindings) == [_resolve(shape, bindings) for shape in case["outs"]]
 
     def test_every_op_is_exercised_by_an_accepting_case(self):
         """shape 規則が表で踏まれていない op を残さない。"""

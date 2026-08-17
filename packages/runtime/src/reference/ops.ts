@@ -44,6 +44,8 @@ import {
   rmsNormEps,
   scalarParamValues,
   sliceAttrs,
+  TOPK_OP,
+  topkK,
   type UnaryOpName,
   upsampleBilinear2dAttrs,
 } from "../ops.ts";
@@ -549,6 +551,61 @@ export const referenceArgmax = (x: RefTensor): RefTensor => {
     values[row] = bestAt;
   }
   return materialize(outputDtypeOf(contract, 0, x.dtype, "reference"), shape, values);
+};
+
+/**
+ * 最終次元の top-k（ADR 0068 決定 3）。返りは **2 本**（slot 0 = 値 f32 の降順・
+ * slot 1 = 添字 i32）で、どちらも `[…, k]`。
+ *
+ * 固定挙動（実測 2026-08-17 / torch 2.13.0+cpu）:
+ *
+ * - **値の列は torch とビット一致**（降順・同値の多重度が同じなので、重複だらけの行でも
+ *   一致する）。
+ * - **添字の列は同値要素で最小 index 優先**。これは torch **準拠ではなく karume の規定**
+ *   （torch は同値の順序を保証せず、`topk([5,5,5,5],1)` = 2 に対し `argmax` = 0 で
+ *   自己矛盾している — 詳細は src/kernels/topk.ts の NOTE）。k=1 は argmax と同じ答え。
+ * - **NaN は最大**（torch も先頭へ出す）。複数あれば最小 index。
+ * - **全 −inf 行**でも答えは定義される（identity が値ではなく順位なので、最小 index から
+ *   k 本）。
+ *
+ * MUST: GPU 側（src/kernels/topk.ts）の式を写さない。あちらは「レーン局所 top-k → k ラウンドの
+ * トーナメント」なので、こちらは**添字を辞書式順序で並べ替えて先頭 k 本を取る素朴形**で書く
+ * （NaN 判定も `Number.isNaN`）。同じ形を書くとマージ境界の誤りや NaN の抜けが両側で相殺する。
+ */
+export const referenceTopk = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): readonly RefTensor[] => {
+  const contract = resolveOpContract(TOPK_OP);
+  assertDtype(contract, x.dtype, "reference");
+  const shapes = computeOutputShape(contract, [x.shape], "reference", { attrs });
+  const k = topkK(attrs, "reference");
+  const dim = x.shape[x.shape.length - 1];
+  const rows = numel(x.shape) / dim;
+  const values = new Array<number>(rows * k);
+  const indices = new Array<number>(rows * k);
+  for (let row = 0; row < rows; row += 1) {
+    const base = row * dim;
+    // 添字を「値の降順・同値なら添字の昇順」で並べ替える（NaN は最大なので、比較の前に
+    // NaN 同士 / NaN 対数値を先に決める）。
+    const order = Array.from({ length: dim }, (_, i) => i).sort((a, b) => {
+      const va = x.data[base + a];
+      const vb = x.data[base + b];
+      const na = Number.isNaN(va);
+      const nb = Number.isNaN(vb);
+      if (na !== nb) return na ? -1 : 1;
+      if (!na && va !== vb) return va > vb ? -1 : 1;
+      return a - b;
+    });
+    for (let slot = 0; slot < k; slot += 1) {
+      values[row * k + slot] = x.data[base + order[slot]];
+      indices[row * k + slot] = order[slot];
+    }
+  }
+  return [
+    materialize(outputDtypeOf(contract, 0, x.dtype, "reference"), shapes[0], values),
+    materialize(outputDtypeOf(contract, 1, x.dtype, "reference"), shapes[1], indices),
+  ];
 };
 
 /**
@@ -1506,18 +1563,22 @@ export const referenceGruScan = (
   return { dtype: "f32", shape, data: out };
 };
 
+/** 単一出力 op のアーム（出力が 1 本であることをアームごとに明示する — ADR 0068 決定 1）。 */
+const sole = (tensor: RefTensor): readonly RefTensor[] => [tensor];
+
 /**
  * 契約表の kind で分岐する統一入口（テストがグラフをそのまま辿れるようにするため）。
+ * 返りは**出力 slot 昇順の列**で、2 本返すのは `topk`（ADR 0068 決定 3）だけ。
  *
  * `outShape` は「出力の宣言 shape が目標形」の op（reshape / expand — ADR 0011）で必須。
  * 入力からは導けないので、省略されたら黙って推測せず落とす。
  */
-export const applyReferenceOp = (
+export const applyReferenceOpOutputs = (
   op: string,
   inputs: readonly RefTensor[],
   attrs: Readonly<Record<string, unknown>> = {},
   outShape?: readonly number[],
-): RefTensor => {
+): readonly RefTensor[] => {
   const contract: OpContract = resolveOpContract(op);
   if (!arityFits(contract, inputs.length)) {
     throw new ReferenceOpError(
@@ -1532,77 +1593,103 @@ export const applyReferenceOp = (
   };
   switch (contract.kind) {
     case "unary":
-      return referenceUnary(contract.name, inputs[0], attrs);
+      return sole(referenceUnary(contract.name, inputs[0], attrs));
     case "binary":
-      return referenceBinary(contract.name, inputs[0], inputs[1]);
+      return sole(referenceBinary(contract.name, inputs[0], inputs[1]));
     case "where":
-      return referenceWhere(inputs[0], inputs[1], inputs[2]);
+      return sole(referenceWhere(inputs[0], inputs[1], inputs[2]));
     case "cumsum":
-      return referenceCumsum(inputs[0], attrs);
+      return sole(referenceCumsum(inputs[0], attrs));
     case "matmul":
-      return referenceMatmul(inputs[0], inputs[1]);
+      return sole(referenceMatmul(inputs[0], inputs[1]));
     case "bmm":
-      return referenceBmm(inputs[0], inputs[1]);
+      return sole(referenceBmm(inputs[0], inputs[1]));
     case "gather":
-      return referenceGather(inputs[0], inputs[1]);
+      return sole(referenceGather(inputs[0], inputs[1]));
     case "rowReduce":
-      return referenceRowReduce(contract.name, inputs[0], reduceDim(attrs, "reference"));
+      return sole(referenceRowReduce(contract.name, inputs[0], reduceDim(attrs, "reference")));
     case "argmax":
-      return referenceArgmax(inputs[0]);
+      return sole(referenceArgmax(inputs[0]));
+    // 唯一の多出力アーム（値 + 添字 — ADR 0068 決定 3）。ここが `sole` を通らないことが
+    // そのまま「出力が 2 本」の宣言になる。
+    case "topk":
+      return referenceTopk(inputs[0], attrs);
     case "cast":
-      return referenceCast(inputs[0], castTargetDtype(attrs, "reference"));
+      return sole(referenceCast(inputs[0], castTargetDtype(attrs, "reference")));
     case "reshape":
-      return referenceReshape(inputs[0], declared());
+      return sole(referenceReshape(inputs[0], declared()));
     case "permute":
-      return referencePermute(inputs[0], permuteDims(attrs, "reference"));
+      return sole(referencePermute(inputs[0], permuteDims(attrs, "reference")));
     case "expand":
-      return referenceExpand(inputs[0], declared());
+      return sole(referenceExpand(inputs[0], declared()));
     case "slice":
-      return referenceSlice(inputs[0], attrs);
+      return sole(referenceSlice(inputs[0], attrs));
     case "cat":
-      return referenceCat(inputs, attrs);
+      return sole(referenceCat(inputs, attrs));
     case "pad":
-      return referencePad(inputs[0], attrs);
+      return sole(referencePad(inputs[0], attrs));
     case "flip":
-      return referenceFlip(inputs[0], attrs);
+      return sole(referenceFlip(inputs[0], attrs));
     case "symPrefixSlice":
       // prefix 長は束縛（`coeff·sym+offset`）から決まる — 入力からは導けないので、
       // reshape / expand と同じく呼び出し側が解決済みの出力 shape を渡す。
-      return referenceSymPrefixSlice(inputs[0], declared());
+      return sole(referenceSymPrefixSlice(inputs[0], declared()));
     case "linear":
-      return referenceLinear(inputs[0], inputs[1], inputs[2]);
+      return sole(referenceLinear(inputs[0], inputs[1], inputs[2]));
     case "layerNorm":
-      return referenceLayerNorm(inputs[0], inputs[1], inputs[2], attrs);
+      return sole(referenceLayerNorm(inputs[0], inputs[1], inputs[2], attrs));
     case "rmsNorm":
-      return referenceRmsNorm(inputs[0], inputs[1], attrs);
+      return sole(referenceRmsNorm(inputs[0], inputs[1], attrs));
     case "softmax":
-      return referenceSoftmax(inputs[0], attrs);
+      return sole(referenceSoftmax(inputs[0], attrs));
     case "safeSoftmax":
-      return referenceSafeSoftmax(inputs[0], attrs);
+      return sole(referenceSafeSoftmax(inputs[0], attrs));
     case "attention":
-      return referenceAttention(inputs[0], inputs[1], inputs[2], attrs, inputs[3]);
+      return sole(referenceAttention(inputs[0], inputs[1], inputs[2], attrs, inputs[3]));
     case "embedding":
-      return referenceEmbedding(inputs[0], inputs[1]);
+      return sole(referenceEmbedding(inputs[0], inputs[1]));
     case "maskedFill":
-      return referenceMaskedFill(inputs[0], inputs[1], attrs);
+      return sole(referenceMaskedFill(inputs[0], inputs[1], attrs));
     case "conv1d":
-      return referenceConv1d(inputs[0], inputs[1], inputs[2], attrs);
+      return sole(referenceConv1d(inputs[0], inputs[1], inputs[2], attrs));
     case "conv2d":
-      return referenceConv2d(inputs[0], inputs[1], inputs[2], attrs);
+      return sole(referenceConv2d(inputs[0], inputs[1], inputs[2], attrs));
     case "convTranspose1d":
-      return referenceConvTranspose1d(inputs[0], inputs[1], inputs[2], attrs);
+      return sole(referenceConvTranspose1d(inputs[0], inputs[1], inputs[2], attrs));
     case "deformConv2d":
-      return referenceDeformConv2d(
+      return sole(referenceDeformConv2d(
         inputs[0],
         inputs[1],
         inputs[2],
         inputs[3],
         inputs[4],
         attrs,
-      );
+      ));
     case "upsampleBilinear2d":
-      return referenceUpsampleBilinear2d(inputs[0], attrs);
+      return sole(referenceUpsampleBilinear2d(inputs[0], attrs));
     case "gruScan":
-      return referenceGruScan(contract.name, inputs[0], inputs[1], inputs[2], inputs[3]);
+      return sole(referenceGruScan(contract.name, inputs[0], inputs[1], inputs[2], inputs[3]));
   }
+};
+
+/**
+ * 単一出力 op の統一入口（{@link applyReferenceOpOutputs} の slot 0）。
+ *
+ * MUST: 多出力 op を黙って slot 0 だけ返す形にしない。`topk` を `applyReferenceOp` で呼ぶと
+ * 「値だけが合っていて添字は誰も突き合わせていない」テストが書けてしまうので、本数が違えば
+ * 落として複数形の入口へ誘導する。
+ */
+export const applyReferenceOp = (
+  op: string,
+  inputs: readonly RefTensor[],
+  attrs: Readonly<Record<string, unknown>> = {},
+  outShape?: readonly number[],
+): RefTensor => {
+  const outputs = applyReferenceOpOutputs(op, inputs, attrs, outShape);
+  if (outputs.length !== 1) {
+    throw new ReferenceOpError(
+      `op '${op}' は出力 ${outputs.length} 本（多出力は applyReferenceOpOutputs で受ける）`,
+    );
+  }
+  return outputs[0];
 };

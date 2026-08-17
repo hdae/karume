@@ -652,7 +652,7 @@ const runAttention = async (
   const q = fill([b, h, m, d], QUERY);
   const k = fill([b, h, n, d], KEY);
   const v = fill([b, h, n, d], VALUE);
-  const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [b, h, m, d], {
+  const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
     attrs: { scale: halfScale(d) },
   });
   const session = await createSession(gpu, openModel(graphModelBuffer(graph)), options);

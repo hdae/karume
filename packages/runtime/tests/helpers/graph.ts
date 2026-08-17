@@ -11,16 +11,27 @@ export const graphModelBuffer = (
 /** 単一ノードグラフの dtype / attrs 指定（既定は全て f32・attrs 空）。 */
 export type SingleOpOptions = {
   readonly inDtypes?: readonly string[];
-  readonly outDtype?: string;
+  /** 出力 slot 昇順の dtype（既定は全 slot f32 — {@link singleOpGraph}）。 */
+  readonly outDtypes?: readonly string[];
   readonly attrs?: Record<string, unknown>;
   readonly symbols?: readonly string[];
 };
 
-/** 入力だけを取る単一ノードのグラフ（op 単位の数値検証用）。 */
+/**
+ * 出力 slot の値名。slot 0 は `y`（既存テストがそのまま `outputs["y"]` を読む）で、
+ * slot 1 以降は `y1`, `y2`, …（多出力 op — ADR 0068 決定 1）。
+ */
+export const outputName = (slot: number): string => (slot === 0 ? "y" : `y${slot}`);
+
+/**
+ * 入力だけを取る単一ノードのグラフ（op 単位の数値検証用）。
+ *
+ * `outShapes` は**出力 slot 昇順の列**（ADR 0068 決定 1 — 単一出力 op では長さ 1）。
+ */
 export const singleOpGraph = (
   op: string,
   inputShapes: readonly (readonly (number | string)[])[],
-  outShape: readonly (number | string)[],
+  outShapes: readonly (readonly (number | string)[])[],
   options: SingleOpOptions = {},
 ): GraphJson => ({
   format: "karume-ir",
@@ -32,14 +43,17 @@ export const singleOpGraph = (
     dtype: options.inDtypes?.[index] ?? "f32",
     shape: [...shape],
   })),
-  outputs: ["y"],
+  outputs: outShapes.map((_, slot) => outputName(slot)),
   initializers: {},
-  values: { y: { dtype: options.outDtype ?? "f32", shape: [...outShape] } },
+  values: Object.fromEntries(outShapes.map((shape, slot) => [
+    outputName(slot),
+    { dtype: options.outDtypes?.[slot] ?? "f32", shape: [...shape] },
+  ])),
   nodes: [
     {
       op,
       ins: inputShapes.map((_, index) => `x${index}`),
-      outs: ["y"],
+      outs: outShapes.map((_, slot) => outputName(slot)),
       attrs: { ...options.attrs },
     },
   ],

@@ -387,7 +387,7 @@ const reduceKeysUsed = async (
 ): Promise<ReadonlySet<string>> => {
   const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
   const outShape = [...shape.slice(0, axis), ...shape.slice(axis + 1)];
-  const graph = singleOpGraph("sum", [shape], outShape, { attrs: { dim: axis } });
+  const graph = singleOpGraph("sum", [shape], [outShape], { attrs: { dim: axis } });
   const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
   try {
     await session.run({ x0: fill(shape, SIGNED) });

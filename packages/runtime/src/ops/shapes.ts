@@ -16,6 +16,7 @@ import {
   sliceAttrs,
   softmaxDim,
   symPrefixSliceAttrs,
+  topkK,
   upsampleBilinear2dAttrs,
 } from "./attrs.ts";
 import { assertArity, type OpContract, scalarParamValues } from "./contracts.ts";
@@ -110,7 +111,8 @@ const sole = (shape: number[]): number[][] => [shape];
 
 /**
  * 束縛解決済みの入力 shape から**出力 slot 順の shape 列**を計算する（ADR 0068 決定 1）。
- * 列の長さは契約が宣言する出力数（出力 dtype 写像の列長）と一致する — 現状の op は全て 1 本。
+ * 列の長さは契約が宣言する出力数（出力 dtype 写像の列長）と一致する — 2 本を返すのは
+ * `topk`（値 + 添字 — ADR 0068 決定 3）だけで、他は全て 1 本。
  */
 export const computeOutputShape = (
   found: OpContract,
@@ -247,6 +249,30 @@ export const computeOutputShape = (
       }
       // **rank 保存**（`keepdim` 相当の欄が無い固定形 — 最終次元を 1 に潰す）。
       return sole([...shape.slice(0, last), 1]);
+    }
+    case "topk": {
+      const shape = inputShapes[0];
+      // 軸は最終次元固定（argmax と同じ絞り）。多出力なので**列を直接組んで返す**唯一のアーム。
+      if (shape.length === 0) {
+        throw new OpContractError(
+          `${where}: topk の入力は rank 1 以上（スカラは縮約できない）`,
+        );
+      }
+      const last = shape.length - 1;
+      const k = topkK(context.attrs ?? {}, where);
+      // MUST: 受理領域は `1 ≤ k ≤ 最終次元`（ADR 0068 決定 3）。下限は attrs スキーマが、
+      // 上限はここが見る（入力 rank が無いと判定できない）。長さ 0 の最終次元は k ≥ 1 との
+      // 突合でそのまま落ちる — 「大きい順の k 本」が定義できない形を 1 本の述語で拒否する。
+      if (k > shape[last]) {
+        throw new OpContractError(
+          `${where}: topk の attrs.k=${k} が最終次元 ${shape[last]} を超える（入力 [${
+            shape.join(",")
+          }]）`,
+        );
+      }
+      // 値と添字は同形（`[…, k]`）。rank は保存され、最終次元だけが k になる。
+      const outShape = [...shape.slice(0, last), k];
+      return [outShape, [...outShape]];
     }
     case "reshape": {
       const target = requireDeclared(context, found, where);

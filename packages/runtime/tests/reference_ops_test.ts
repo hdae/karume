@@ -9,6 +9,7 @@ import {
 } from "../src/reference/allclose.ts";
 import {
   applyReferenceOp,
+  applyReferenceOpOutputs,
   referenceAttention,
   referenceBinary,
   referenceBmm,
@@ -340,6 +341,43 @@ Deno.test("reduce は attrs.dim の軸だけを畳む（軸ごとに答えが割
   // 宣言必須（既定値補完をしない）
   assertThrows(() => applyReferenceOp("sum", [x]), OpContractError);
   assertThrows(() => applyReferenceOp("sum", [x], { dim: 3 }), OpContractError);
+});
+
+/**
+ * topk の CPU 参照（ADR 0068 決定 3）— **多出力の統一入口**の結線と受理領域。
+ *
+ * 値の列と添字の列そのものは実 GPU 側の専用門（tests/gpu_ops_test.ts）が torch の実測値
+ * リテラルと突き合わせるので、ここは「参照実装が 2 本返すこと」「単数形の入口では受けられない
+ * こと」「受理領域の外は落ちること」を固定する。
+ */
+Deno.test("topk の CPU 参照は値と添字の 2 本を返し、単数形の入口では受けられない", () => {
+  const x = t([2, 4], [1, 3, 3, 2, -1, -1, 5, 0]);
+  const outputs = applyReferenceOpOutputs("topk", [x], { k: 2 });
+  assertEquals(outputs.length, 2);
+  assertEquals(outputs[0].dtype, "f32");
+  assertEquals(outputs[1].dtype, "i32");
+  assertEquals(outputs[0].shape, [2, 2]);
+  assertEquals(outputs[1].shape, [2, 2]);
+  // 値は降順・同値は最小 index 優先（行 0 は 3.0 が 2 つ）
+  assertEquals([...outputs[0].data], [3, 3, 5, 0]);
+  assertEquals([...outputs[1].data], [1, 2, 2, 3]);
+  // MUST: 単数形の入口は多出力を黙って slot 0 だけ返さない（添字が誰にも突き合わされない
+  // テストが書けてしまう）
+  assertThrows(
+    () => applyReferenceOp("topk", [x], { k: 2 }),
+    ReferenceOpError,
+    "出力 2 本",
+  );
+  // 受理領域の外（k=0 / k > 最終次元 / k 欠落 / 記号 k）は全て fail loudly
+  assertThrows(() => applyReferenceOpOutputs("topk", [x], { k: 0 }), OpContractError);
+  assertThrows(() => applyReferenceOpOutputs("topk", [x], { k: 5 }), OpContractError);
+  assertThrows(() => applyReferenceOpOutputs("topk", [x], {}), OpContractError);
+  assertThrows(() => applyReferenceOpOutputs("topk", [x], { k: "T" }), OpContractError);
+  // i32 入力は語彙に無い（f32 専業）
+  assertThrows(
+    () => applyReferenceOpOutputs("topk", [i32([2], [1, 2])], { k: 1 }),
+    OpContractError,
+  );
 });
 
 // 契約（src/ops.ts）: f32 → i32 は torch 準拠の truncate（0 方向切り捨て）。

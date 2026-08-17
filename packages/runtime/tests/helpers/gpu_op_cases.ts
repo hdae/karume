@@ -9,9 +9,10 @@ export type OpCase = {
   readonly name: string;
   readonly op: string;
   readonly inputs: readonly RefTensor[];
-  readonly outShape: readonly number[];
-  /** 既定は入力と同型（cast だけ出力 dtype が変わる）。 */
-  readonly outDtype?: "f32" | "i32" | "bool";
+  /** 出力 slot 昇順の shape 列（ADR 0068 決定 1 — 2 本になるのは topk だけ）。 */
+  readonly outShapes: readonly (readonly number[])[];
+  /** 出力 slot 昇順の dtype（既定は入力と同型 — cast / argmax / topk の添字側だけが違う）。 */
+  readonly outDtypes?: readonly ("f32" | "i32" | "bool")[];
   readonly attrs?: Record<string, unknown>;
 };
 
@@ -40,7 +41,7 @@ export const UNARY_CASES: readonly OpCase[] = UNARY_INPUTS.map(([op, generator])
   name: `unary ${op} [3,5]`,
   op,
   inputs: [fill([3, 5], generator)],
-  outShape: [3, 5],
+  outShapes: [[3, 5]],
 }));
 
 export const BINARY_CASES: readonly OpCase[] = [
@@ -48,31 +49,31 @@ export const BINARY_CASES: readonly OpCase[] = [
     name: "add 同形 [4,3]",
     op: "add",
     inputs: [fill([4, 3], SIGNED), fill([4, 3], POSITIVE)],
-    outShape: [4, 3],
+    outShapes: [[4, 3]],
   },
   {
     name: "sub 右詰め broadcast [4,3] - [3]",
     op: "sub",
     inputs: [fill([4, 3], SIGNED), fill([3], POSITIVE)],
-    outShape: [4, 3],
+    outShapes: [[4, 3]],
   },
   {
     name: "mul 両側 broadcast [4,1] * [1,3]",
     op: "mul",
     inputs: [fill([4, 1], SIGNED), fill([1, 3], POSITIVE)],
-    outShape: [4, 3],
+    outShapes: [[4, 3]],
   },
   {
     name: "div rank3 broadcast [2,3,4] / [3,1]",
     op: "div",
     inputs: [fill([2, 3, 4], SIGNED), fill([3, 1], NONZERO)],
-    outShape: [2, 3, 4],
+    outShapes: [[2, 3, 4]],
   },
   {
     name: "add スカラ broadcast [5] + []",
     op: "add",
     inputs: [fill([5], SIGNED), fill([], () => 2.5)],
-    outShape: [5],
+    outShapes: [[5]],
   },
 ];
 
@@ -93,58 +94,58 @@ export const DTYPE_CASES: readonly OpCase[] = [
     name: "mul i32 の外積 broadcast [4,1] * [1,4]",
     op: "mul",
     inputs: [fill([4, 1], MASK, "i32"), fill([1, 4], MASK, "i32")],
-    outShape: [4, 4],
+    outShapes: [[4, 4]],
   },
   {
     name: "sub i32 同形 [3,5]",
     op: "sub",
     inputs: [fill([3, 5], INTEGERS, "i32"), fill([3, 5], MASK, "i32")],
-    outShape: [3, 5],
+    outShapes: [[3, 5]],
   },
   {
     name: "bitwise_not bool [2,6]",
     op: "bitwise_not",
     inputs: [fill([2, 6], MASK, "bool")],
-    outShape: [2, 6],
+    outShapes: [[2, 6]],
   },
   {
     name: "cast f32 → i32（0 方向切り捨て）[3,3]",
     op: "cast",
     inputs: [fill([3, 3], FRACTIONS)],
-    outShape: [3, 3],
-    outDtype: "i32",
+    outShapes: [[3, 3]],
+    outDtypes: ["i32"],
     attrs: { to: "i32" },
   },
   {
     name: "cast i32 → bool（x != 0）[3,4]",
     op: "cast",
     inputs: [fill([3, 4], INTEGERS, "i32")],
-    outShape: [3, 4],
-    outDtype: "bool",
+    outShapes: [[3, 4]],
+    outDtypes: ["bool"],
     attrs: { to: "bool" },
   },
   {
     name: "cast bool → f32（0/1 の重み化）[2,5]",
     op: "cast",
     inputs: [fill([2, 5], MASK, "bool")],
-    outShape: [2, 5],
-    outDtype: "f32",
+    outShapes: [[2, 5]],
+    outDtypes: ["f32"],
     attrs: { to: "f32" },
   },
   {
     name: "cast i32 → f32 [7]",
     op: "cast",
     inputs: [fill([7], INTEGERS, "i32")],
-    outShape: [7],
-    outDtype: "f32",
+    outShapes: [[7]],
+    outDtypes: ["f32"],
     attrs: { to: "f32" },
   },
   {
     name: "cast f32 → bool（x != 0）[6]",
     op: "cast",
     inputs: [fill([6], FRACTIONS)],
-    outShape: [6],
-    outDtype: "bool",
+    outShapes: [[6]],
+    outDtypes: ["bool"],
     attrs: { to: "bool" },
   },
 ];
@@ -161,21 +162,21 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "log1p [3,5]",
     op: "log1p",
     inputs: [fill([3, 5], POSITIVE)],
-    outShape: [3, 5],
+    outShapes: [[3, 5]],
   },
   {
     // SIGNED は ±4.5 を跨ぐので、下側 / 内側 / 上側の 3 分岐を全て踏む
     name: "clamp [3,5] min=-1.5 max=2.25",
     op: "clamp",
     inputs: [fill([3, 5], SIGNED)],
-    outShape: [3, 5],
+    outShapes: [[3, 5]],
     attrs: { min: -1.5, max: 2.25 },
   },
   {
     name: "clamp 潰す形 min == max",
     op: "clamp",
     inputs: [fill([6], SIGNED)],
-    outShape: [6],
+    outShapes: [[6]],
     attrs: { min: 1.5, max: 1.5 },
   },
   {
@@ -183,7 +184,7 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "clamp_min [3,5] min=-1.5",
     op: "clamp_min",
     inputs: [fill([3, 5], SIGNED)],
-    outShape: [3, 5],
+    outShapes: [[3, 5]],
     attrs: { min: -1.5 },
   },
   {
@@ -191,7 +192,7 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "clamp_min [4] min=1e-12（実測の eps 形）",
     op: "clamp_min",
     inputs: [fill([4], (i) => [0, -1, 1e-20, 2][i])],
-    outShape: [4],
+    outShapes: [[4]],
     attrs: { min: 1e-12 },
   },
   {
@@ -199,14 +200,14 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "leaky_relu slope=0.1 [3,5]",
     op: "leaky_relu",
     inputs: [fill([3, 5], SIGNED)],
-    outShape: [3, 5],
+    outShapes: [[3, 5]],
     attrs: { negative_slope: 0.1 },
   },
   {
     name: "leaky_relu slope=0.01 [3,5]",
     op: "leaky_relu",
     inputs: [fill([3, 5], SIGNED)],
-    outShape: [3, 5],
+    outShapes: [[3, 5]],
     attrs: { negative_slope: 0.01 },
   },
   {
@@ -214,24 +215,24 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "ge_scalar value=0（等値点を含む）",
     op: "ge_scalar",
     inputs: [fill([3, 5], SIGNED)],
-    outShape: [3, 5],
-    outDtype: "bool",
+    outShapes: [[3, 5]],
+    outDtypes: ["bool"],
     attrs: { value: 0 },
   },
   {
     name: "gt_scalar value=0（等値点を含む）",
     op: "gt_scalar",
     inputs: [fill([3, 5], SIGNED)],
-    outShape: [3, 5],
-    outDtype: "bool",
+    outShapes: [[3, 5]],
+    outDtypes: ["bool"],
     attrs: { value: 0 },
   },
   {
     name: "le_scalar value=0（等値点を含む）",
     op: "le_scalar",
     inputs: [fill([3, 5], SIGNED)],
-    outShape: [3, 5],
-    outDtype: "bool",
+    outShapes: [[3, 5]],
+    outDtypes: ["bool"],
     attrs: { value: 0 },
   },
   {
@@ -239,15 +240,15 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "ge [4,1] >= [3]（右詰め broadcast）",
     op: "ge",
     inputs: [fill([4, 1], SIGNED), fill([3], (i) => (i - 1) * 0.75)],
-    outShape: [4, 3],
-    outDtype: "bool",
+    outShapes: [[4, 3]],
+    outDtypes: ["bool"],
   },
   {
     name: "bitwise_and bool [2,6] & [6]",
     op: "bitwise_and",
     inputs: [fill([2, 6], MASK, "bool"), fill([6], (i) => (i % 2 === 0 ? 1 : 0), "bool")],
-    outShape: [2, 6],
-    outDtype: "bool",
+    outShapes: [[2, 6]],
+    outDtypes: ["bool"],
   },
   {
     // 分岐の取り違えが値に出るよう、a は正・b は負の値域で埋める
@@ -258,9 +259,9 @@ export const MATH_CASES: readonly OpCase[] = [
       fill([3, 4], POSITIVE),
       fill([3, 1], (i) => -10 - i),
     ],
-    outShape: [3, 4],
+    outShapes: [[3, 4]],
     // 出力は条件（スロット 0）ではなく**値の側**と同型（契約表の写像 bool → f32）
-    outDtype: "f32",
+    outDtypes: ["f32"],
   },
   {
     name: "where 同形 [2,3,4]",
@@ -270,16 +271,16 @@ export const MATH_CASES: readonly OpCase[] = [
       fill([2, 3, 4], SIGNED),
       fill([2, 3, 4], POSITIVE),
     ],
-    outShape: [2, 3, 4],
-    outDtype: "f32",
+    outShapes: [[2, 3, 4]],
+    outDtypes: ["f32"],
   },
   {
     // bool の sum は**真の個数**（出力 i32 — 契約表の写像）
     name: "sum bool [6,10] → i32 のカウント",
     op: "sum",
     inputs: [fill([6, 10], MASK, "bool")],
-    outShape: [6],
-    outDtype: "i32",
+    outShapes: [[6]],
+    outDtypes: ["i32"],
     attrs: { dim: 1 },
   },
   {
@@ -287,8 +288,8 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "sum bool [3,700] → i32",
     op: "sum",
     inputs: [fill([3, 700], MASK, "bool")],
-    outShape: [3],
-    outDtype: "i32",
+    outShapes: [[3]],
+    outDtypes: ["i32"],
     attrs: { dim: 1 },
   },
   {
@@ -296,14 +297,14 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "cumsum [4,7]",
     op: "cumsum",
     inputs: [fill([4, 7], SIGNED)],
-    outShape: [4, 7],
+    outShapes: [[4, 7]],
     attrs: { dim: 1 },
   },
   {
     name: "cumsum rank1 [10]",
     op: "cumsum",
     inputs: [fill([10], POSITIVE)],
-    outShape: [10],
+    outShapes: [[10]],
     attrs: { dim: 0 },
   },
   {
@@ -311,7 +312,7 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "cumsum 行長 300 rank3 [2,3,300]",
     op: "cumsum",
     inputs: [fill([2, 3, 300], SIGNED)],
-    outShape: [2, 3, 300],
+    outShapes: [[2, 3, 300]],
     attrs: { dim: 2 },
   },
   {
@@ -319,13 +320,13 @@ export const MATH_CASES: readonly OpCase[] = [
     name: "expand f32 [1,4,1] → [1,4,3]",
     op: "expand",
     inputs: [fill([1, 4, 1], SIGNED)],
-    outShape: [1, 4, 3],
+    outShapes: [[1, 4, 3]],
   },
   {
     name: "expand f32 rank 増 [3] → [2,4,3]",
     op: "expand",
     inputs: [fill([3], POSITIVE)],
-    outShape: [2, 4, 3],
+    outShapes: [[2, 4, 3]],
   },
 ];
 
@@ -343,19 +344,19 @@ export const MATMUL_CASES: readonly OpCase[] = [
     name: "matmul [7,5] × [5,3]",
     op: "matmul",
     inputs: [fill([7, 5], SIGNED), fill([5, 3], POSITIVE)],
-    outShape: [7, 3],
+    outShapes: [[7, 3]],
   },
   {
     name: "matmul [32,16] × [16,32]",
     op: "matmul",
     inputs: [fill([32, 16], SIGNED), fill([16, 32], POSITIVE)],
-    outShape: [32, 32],
+    outShapes: [[32, 32]],
   },
   {
     name: "matmul [1,64] × [64,1]",
     op: "matmul",
     inputs: [fill([1, 64], SIGNED), fill([64, 1], POSITIVE)],
-    outShape: [1, 1],
+    outShapes: [[1, 1]],
   },
   {
     // v4 経路のタイル境界: n=68 は最終タイルの有効 quad が 16 中 1（quad ガードを外すと
@@ -364,14 +365,14 @@ export const MATMUL_CASES: readonly OpCase[] = [
     name: "matmul v4 タイル境界 [65,20] × [20,68]",
     op: "matmul",
     inputs: [fill([65, 20], SIGNED), fill([20, 68], POSITIVE)],
-    outShape: [65, 68],
+    outShapes: [[65, 68]],
   },
   {
     // スカラ変種のタイル境界（k=19 / n=23 が 4 の倍数でない・m=70 は行タイル 2 枚）
     name: "matmul スカラ変種 タイル境界 [70,19] × [19,23]",
     op: "matmul",
     inputs: [fill([70, 19], SIGNED), fill([19, 23], NONZERO)],
-    outShape: [70, 23],
+    outShapes: [[70, 23]],
   },
   {
     // MUST: v4 判定は k と n の**両方**を見る。片方だけの判定が素通りすると、vec4 束縛と
@@ -379,13 +380,13 @@ export const MATMUL_CASES: readonly OpCase[] = [
     name: "matmul k のみ 4 の倍数 [66,20] × [20,19]",
     op: "matmul",
     inputs: [fill([66, 20], SIGNED), fill([20, 19], POSITIVE)],
-    outShape: [66, 19],
+    outShapes: [[66, 19]],
   },
   {
     name: "matmul n のみ 4 の倍数 [66,19] × [19,20]",
     op: "matmul",
     inputs: [fill([66, 19], SIGNED), fill([19, 20], POSITIVE)],
-    outShape: [66, 20],
+    outShapes: [[66, 20]],
   },
 ];
 
@@ -401,27 +402,27 @@ export const BMM_CASES: readonly OpCase[] = [
     name: "bmm 非対称 [3,5,7] × [3,7,2]",
     op: "bmm",
     inputs: [fill([3, 5, 7], SIGNED), fill([3, 7, 2], POSITIVE)],
-    outShape: [3, 5, 2],
+    outShapes: [[3, 5, 2]],
   },
   {
     // タイル 16 の端数をバッチ 2 枚で踏む（M / N / K いずれもタイル境界に揃わない）
     name: "bmm タイル端数 [2,17,19] × [2,19,23]",
     op: "bmm",
     inputs: [fill([2, 17, 19], SIGNED), fill([2, 19, 23], NONZERO)],
-    outShape: [2, 17, 23],
+    outShapes: [[2, 17, 23]],
   },
   {
     // 1 タイルを跨ぐ K（縮約が複数タイルに割れる経路）とバッチ 4 枚
     name: "bmm 縮約が複数タイル [4,3,40] × [4,40,5]",
     op: "bmm",
     inputs: [fill([4, 3, 40], SIGNED), fill([4, 40, 5], POSITIVE)],
-    outShape: [4, 3, 5],
+    outShapes: [[4, 3, 5]],
   },
   {
     name: "bmm バッチ 1 枚 [1,4,6] × [1,6,3]",
     op: "bmm",
     inputs: [fill([1, 4, 6], SIGNED), fill([1, 6, 3], POSITIVE)],
-    outShape: [1, 4, 3],
+    outShapes: [[1, 4, 3]],
   },
   {
     // MUST: v4 経路のバッチ base は **quad 単位**（`m * k4`）。要素単位のまま組む誤りは
@@ -430,14 +431,14 @@ export const BMM_CASES: readonly OpCase[] = [
     name: "bmm v4 タイル境界 [3,68,20] × [3,20,12]",
     op: "bmm",
     inputs: [fill([3, 68, 20], SIGNED), fill([3, 20, 12], POSITIVE)],
-    outShape: [3, 68, 12],
+    outShapes: [[3, 68, 12]],
   },
   {
     // スカラ変種でも同じ罠を踏む（base が要素単位なのは正しいが、3 本とも base 経由か）
     name: "bmm スカラ変種 タイル境界 [2,70,19] × [2,19,23]",
     op: "bmm",
     inputs: [fill([2, 70, 19], SIGNED), fill([2, 19, 23], NONZERO)],
-    outShape: [2, 70, 23],
+    outShapes: [[2, 70, 23]],
   },
 ];
 
@@ -471,7 +472,7 @@ const attentionCase = (
       fill([b, kvHeads, n, d], options.key ?? POSITIVE),
       fill([b, kvHeads, n, d], NONZERO),
     ],
-    outShape: [b, h, m, d],
+    outShapes: [[b, h, m, d]],
     // 既定は契約どおりの半スケール（torch の `√(1/√D)`）。
     attrs: { scale: options.scale ?? Math.fround(Math.sqrt(1 / Math.sqrt(d))) },
   };
@@ -524,20 +525,20 @@ export const GATHER_CASES: readonly OpCase[] = [
     name: "gather rank3 src [4,5,9] / index [4,5,6]",
     op: "gather",
     inputs: [fill([4, 5, 9], SIGNED), fill([4, 5, 6], PICKS, "i32")],
-    outShape: [4, 5, 6],
+    outShapes: [[4, 5, 6]],
   },
   {
     // 出力の最終次元が src より長い（同じ添字を何度引いてもよい）
     name: "gather 列が増える src [3,4] / index [3,7]",
     op: "gather",
     inputs: [fill([3, 4], POSITIVE), fill([3, 7], PICKS4, "i32")],
-    outShape: [3, 7],
+    outShapes: [[3, 7]],
   },
   {
     name: "gather rank1 src [9] / index [5]",
     op: "gather",
     inputs: [fill([9], SIGNED), fill([5], PICKS, "i32")],
-    outShape: [5],
+    outShapes: [[5]],
   },
   {
     // 1 workgroup（256 要素）では覆えない大きさ。**grid-stride の縮退はここでは踏まない**
@@ -546,7 +547,7 @@ export const GATHER_CASES: readonly OpCase[] = [
     name: "gather 大きめ src [4096,9] / index [4096,64]",
     op: "gather",
     inputs: [fill([4096, 9], SIGNED), fill([4096, 64], PICKS, "i32")],
-    outShape: [4096, 64],
+    outShapes: [[4096, 64]],
   },
 ];
 
@@ -555,21 +556,21 @@ export const REDUCE_CASES: readonly OpCase[] = [
     name: "sum [6,10]",
     op: "sum",
     inputs: [fill([6, 10], SIGNED)],
-    outShape: [6],
+    outShapes: [[6]],
     attrs: { dim: 1 },
   },
   {
     name: "amax [6,10]",
     op: "amax",
     inputs: [fill([6, 10], SIGNED)],
-    outShape: [6],
+    outShapes: [[6]],
     attrs: { dim: 1 },
   },
   {
     name: "amin [6,10]",
     op: "amin",
     inputs: [fill([6, 10], SIGNED)],
-    outShape: [6],
+    outShapes: [[6]],
     attrs: { dim: 1 },
   },
   // 行長が workgroup サイズ（256）を超える → 1 スレッドが複数要素を畳む経路
@@ -577,14 +578,14 @@ export const REDUCE_CASES: readonly OpCase[] = [
     name: "sum [3,700]",
     op: "sum",
     inputs: [fill([3, 700], SIGNED)],
-    outShape: [3],
+    outShapes: [[3]],
     attrs: { dim: 1 },
   },
   {
     name: "amax rank3 [2,3,7]",
     op: "amax",
     inputs: [fill([2, 3, 7], SIGNED)],
-    outShape: [2, 3],
+    outShapes: [[2, 3]],
     attrs: { dim: 2 },
   },
   // rank 1 → rank 0（スカラ出力）
@@ -592,7 +593,7 @@ export const REDUCE_CASES: readonly OpCase[] = [
     name: "sum [4] → スカラ",
     op: "sum",
     inputs: [fill([4], SIGNED)],
-    outShape: [],
+    outShapes: [[]],
     attrs: { dim: 0 },
   },
   // 最終次元以外の軸（軸 reduce 変種 — 実行カーネルが別物になる）
@@ -600,14 +601,14 @@ export const REDUCE_CASES: readonly OpCase[] = [
     name: "sum 軸 1 [5,9,11]",
     op: "sum",
     inputs: [fill([5, 9, 11], SIGNED)],
-    outShape: [5, 11],
+    outShapes: [[5, 11]],
     attrs: { dim: 1 },
   },
   {
     name: "amax 軸 0 [7,13]",
     op: "amax",
     inputs: [fill([7, 13], SIGNED)],
-    outShape: [13],
+    outShapes: [[13]],
     attrs: { dim: 0 },
   },
   {
@@ -615,7 +616,7 @@ export const REDUCE_CASES: readonly OpCase[] = [
     name: "sum 軸 1 の縮約長 300 [2,300,5]",
     op: "sum",
     inputs: [fill([2, 300, 5], SIGNED)],
-    outShape: [2, 5],
+    outShapes: [[2, 5]],
     attrs: { dim: 1 },
   },
   {
@@ -623,8 +624,8 @@ export const REDUCE_CASES: readonly OpCase[] = [
     name: "sum bool 軸 1 [3,13,5] → i32",
     op: "sum",
     inputs: [fill([3, 13, 5], MASK, "bool")],
-    outShape: [3, 5],
-    outDtype: "i32",
+    outShapes: [[3, 5]],
+    outDtypes: ["i32"],
     attrs: { dim: 1 },
   },
 ];
@@ -639,8 +640,8 @@ export const ARGMAX_CASES: readonly OpCase[] = [
     name: "argmax [6,10]",
     op: "argmax",
     inputs: [fill([6, 10], SIGNED)],
-    outShape: [6, 1],
-    outDtype: "i32",
+    outShapes: [[6, 1]],
+    outDtypes: ["i32"],
   },
   {
     // 行長が workgroup サイズ（256）を超える → 1 スレッドが複数要素を畳み、レーンを跨いだ
@@ -649,30 +650,112 @@ export const ARGMAX_CASES: readonly OpCase[] = [
     name: "argmax [3,700]（走査ループ 2 周目に最大値・行ごとに別位置）",
     op: "argmax",
     inputs: [fill([3, 700], (i) => (i % 700 === 300 + Math.floor(i / 700) * 100 ? 99 : SIGNED(i)))],
-    outShape: [3, 1],
-    outDtype: "i32",
+    outShapes: [[3, 1]],
+    outDtypes: ["i32"],
   },
   {
     name: "argmax rank3 [2,3,7]",
     op: "argmax",
     inputs: [fill([2, 3, 7], SIGNED)],
-    outShape: [2, 3, 1],
-    outDtype: "i32",
+    outShapes: [[2, 3, 1]],
+    outDtypes: ["i32"],
   },
   {
     // rank 1 → [1]（reduce 族はここでスカラへ落ちる — rank 保存との違いが出る形）
     name: "argmax [4] → [1]",
     op: "argmax",
     inputs: [fill([4], (i) => [-1.5, 0.25, 3.5, 3.5][i])],
-    outShape: [1],
-    outDtype: "i32",
+    outShapes: [[1]],
+    outDtypes: ["i32"],
   },
   {
     name: "argmax 最終次元が 1 [5,1]",
     op: "argmax",
     inputs: [fill([5, 1], SIGNED)],
-    outShape: [5, 1],
-    outDtype: "i32",
+    outShapes: [[5, 1]],
+    outDtypes: ["i32"],
+  },
+];
+
+/**
+ * topk（最終次元・static-k・**出力 2 本** — ADR 0068 決定 3）。突合は値が f32 の allclose・
+ * 添字が i32 の厳密一致で、**2 本とも** CPU 参照と突き合わせる（`checkAll` が本数から見る）。
+ * タイブレーク / NaN / 全 −inf 行の固定挙動は期待値リテラルを持つ専用門（gpu_ops_test.ts）が
+ * 見るので、ここは shape と経路（レーン局所 top-k → トーナメント merge）の被覆を担う。
+ */
+export const TOPK_CASES: readonly OpCase[] = [
+  {
+    name: "topk [6,10] k=3",
+    op: "topk",
+    inputs: [fill([6, 10], SIGNED)],
+    outShapes: [[6, 3], [6, 3]],
+    outDtypes: ["f32", "i32"],
+    attrs: { k: 3 },
+  },
+  {
+    // 行長が 1 レーンの担当を超える（700 / 32 = 21.9 周）→ レーン局所リストへの挿入が
+    // 何度も起きる経路。上位は**行ごとに違う位置**に置く（全行で同じ添字が正解だと
+    // 「別の行を読む」誤りも「行ループが 1 周で止まる」誤りも値に出ない）。
+    name: "topk [3,700] k=4（レーン局所リストへの挿入が繰り返される・行ごとに別位置）",
+    op: "topk",
+    inputs: [fill([3, 700], (i) => {
+      const row = Math.floor(i / 700);
+      const col = i % 700;
+      // 行 r の上位 4 本は 300+100r から 7 飛びの 4 点（レーンも跨ぐ）
+      const rank = (col - (300 + row * 100)) / 7;
+      return Number.isInteger(rank) && rank >= 0 && rank < 4 ? 90 - rank : SIGNED(i);
+    })],
+    outShapes: [[3, 4], [3, 4]],
+    outDtypes: ["f32", "i32"],
+    attrs: { k: 4 },
+  },
+  {
+    // **上位 k 本が全て同じレーンに載る**形（添字が全て 32 の倍数）。1 レーンのカーソルが
+    // k 回連続で進む経路で、トーナメントが「勝った要素の持ち主だけ」を進めていないと
+    // 同じ要素が k 回出る。
+    name: "topk [2,320] k=5（上位 5 本が全てレーン 0）",
+    op: "topk",
+    inputs: [fill([2, 320], (i) => {
+      const col = i % 320;
+      return col % 32 === 0 && col / 32 < 5 ? 100 - col / 32 : SIGNED(i);
+    })],
+    outShapes: [[2, 5], [2, 5]],
+    outDtypes: ["f32", "i32"],
+    attrs: { k: 5 },
+  },
+  {
+    name: "topk rank3 [2,3,7] k=2",
+    op: "topk",
+    inputs: [fill([2, 3, 7], SIGNED)],
+    outShapes: [[2, 3, 2], [2, 3, 2]],
+    outDtypes: ["f32", "i32"],
+    attrs: { k: 2 },
+  },
+  {
+    // k = 最終次元（受理領域の上端 = 行全体の降順ソート）。rank 1 の形も同時に踏む。
+    name: "topk [4] k=4（k = 最終次元・rank 1）",
+    op: "topk",
+    inputs: [fill([4], (i) => [-1.5, 0.25, 3.5, 3.5][i])],
+    outShapes: [[4], [4]],
+    outDtypes: ["f32", "i32"],
+    attrs: { k: 4 },
+  },
+  {
+    // k > レーン数（33 > 32）— レーンごとのブロックが 33 語になる形。
+    name: "topk [2,64] k=33（k > レーン数）",
+    op: "topk",
+    inputs: [fill([2, 64], (i) => SIGNED(i) + (i % 64) * 0.01)],
+    outShapes: [[2, 33], [2, 33]],
+    outDtypes: ["f32", "i32"],
+    attrs: { k: 33 },
+  },
+  {
+    name: "topk 最終次元が 1 [5,1] k=1",
+    op: "topk",
+    inputs: [fill([5, 1], SIGNED)],
+    outShapes: [[5, 1], [5, 1]],
+    outDtypes: ["f32", "i32"],
+    attrs: { k: 1 },
   },
 ];
 
@@ -686,26 +769,26 @@ export const LAYOUT_CASES: readonly OpCase[] = [
     name: "reshape [2,3,4] → [6,4]（別名）",
     op: "reshape",
     inputs: [fill([2, 3, 4], SIGNED)],
-    outShape: [6, 4],
+    outShapes: [[6, 4]],
   },
   {
     name: "reshape i32 [6] → [1,6,1]（軸の挿入）",
     op: "reshape",
     inputs: [fill([6], INTEGERS, "i32")],
-    outShape: [1, 6, 1],
+    outShapes: [[1, 6, 1]],
   },
   {
     name: "reshape bool [2,3] → [6]（軸の削除）",
     op: "reshape",
     inputs: [fill([2, 3], MASK, "bool")],
-    outShape: [6],
+    outShapes: [[6]],
   },
   {
     // 実測形 [0,2,1,3]（attention の head 整形）
     name: "permute rank4 [1,5,3,4] dims=[0,2,1,3]",
     op: "permute",
     inputs: [fill([1, 5, 3, 4], SIGNED)],
-    outShape: [1, 3, 5, 4],
+    outShapes: [[1, 3, 5, 4]],
     attrs: { dims: [0, 2, 1, 3] },
   },
   {
@@ -713,14 +796,14 @@ export const LAYOUT_CASES: readonly OpCase[] = [
     name: "permute rank3 [3,5,7] dims=[0,2,1]",
     op: "permute",
     inputs: [fill([3, 5, 7], POSITIVE)],
-    outShape: [3, 7, 5],
+    outShapes: [[3, 7, 5]],
     attrs: { dims: [0, 2, 1] },
   },
   {
     name: "permute rank2 転置 [4,6] dims=[1,0]",
     op: "permute",
     inputs: [fill([4, 6], SIGNED)],
-    outShape: [6, 4],
+    outShapes: [[6, 4]],
     attrs: { dims: [1, 0] },
   },
   {
@@ -729,14 +812,14 @@ export const LAYOUT_CASES: readonly OpCase[] = [
     name: "permute rank3 の 3 巡回 [2,3,5] dims=[1,2,0]",
     op: "permute",
     inputs: [fill([2, 3, 5], SIGNED)],
-    outShape: [3, 5, 2],
+    outShapes: [[3, 5, 2]],
     attrs: { dims: [1, 2, 0] },
   },
   {
     name: "permute rank4 の 4 巡回 [2,3,4,5] dims=[1,2,3,0]",
     op: "permute",
     inputs: [fill([2, 3, 4, 5], POSITIVE)],
-    outShape: [3, 4, 5, 2],
+    outShapes: [[3, 4, 5, 2]],
     attrs: { dims: [1, 2, 3, 0] },
   },
   {
@@ -744,20 +827,20 @@ export const LAYOUT_CASES: readonly OpCase[] = [
     name: "expand i32 [1,4,4] → [5,4,4]（先頭軸の複製）",
     op: "expand",
     inputs: [fill([1, 4, 4], INTEGERS, "i32")],
-    outShape: [5, 4, 4],
+    outShapes: [[5, 4, 4]],
   },
   {
     // conv 経路の bool マスク [1,T,1] → [1,T,C]
     name: "expand bool [1,6,1] → [1,6,9]（最終軸の複製）",
     op: "expand",
     inputs: [fill([1, 6, 1], MASK, "bool")],
-    outShape: [1, 6, 9],
+    outShapes: [[1, 6, 9]],
   },
   {
     name: "expand i32 rank 増 [3] → [2,4,3]",
     op: "expand",
     inputs: [fill([3], INTEGERS, "i32")],
-    outShape: [2, 4, 3],
+    outShapes: [[2, 4, 3]],
   },
 ];
 
@@ -775,7 +858,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "slice 中間軸の後半 [1,6,5] dim=1 [3,6)",
     op: "slice",
     inputs: [fill([1, 6, 5], SIGNED)],
-    outShape: [1, 3, 5],
+    outShapes: [[1, 3, 5]],
     attrs: { dim: 1, start: 3, end: 6 },
   },
   {
@@ -783,7 +866,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "slice 最終次元 [4,7] dim=1 [1,6)",
     op: "slice",
     inputs: [fill([4, 7], POSITIVE)],
-    outShape: [4, 5],
+    outShapes: [[4, 5]],
     attrs: { dim: 1, start: 1, end: 6 },
   },
   {
@@ -791,7 +874,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "slice 先頭軸 [5,3] dim=0 [2,4)",
     op: "slice",
     inputs: [fill([5, 3], SIGNED)],
-    outShape: [2, 3],
+    outShapes: [[2, 3]],
     attrs: { dim: 0, start: 2, end: 4 },
   },
   {
@@ -799,7 +882,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "slice rank4 [2,5,3,4] dim=1 [1,4)",
     op: "slice",
     inputs: [fill([2, 5, 3, 4], SIGNED)],
-    outShape: [2, 3, 3, 4],
+    outShapes: [[2, 3, 3, 4]],
     attrs: { dim: 1, start: 1, end: 4 },
   },
   {
@@ -807,7 +890,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "cat チャネル軸 [1,3,5] + [1,2,5] dim=1",
     op: "cat",
     inputs: [fill([1, 3, 5], SIGNED), fill([1, 2, 5], POSITIVE)],
-    outShape: [1, 5, 5],
+    outShapes: [[1, 5, 5]],
     attrs: { dim: 1 },
   },
   {
@@ -815,7 +898,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "cat 最終次元 [3,1] + [3,4] dim=1",
     op: "cat",
     inputs: [fill([3, 1], NONZERO), fill([3, 4], SIGNED)],
-    outShape: [3, 5],
+    outShapes: [[3, 5]],
     attrs: { dim: 1 },
   },
   {
@@ -823,7 +906,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "cat 3 入力 [2,1]+[2,3]+[2,2] dim=1",
     op: "cat",
     inputs: [fill([2, 1], POSITIVE), fill([2, 3], SIGNED), fill([2, 2], NONZERO)],
-    outShape: [2, 6],
+    outShapes: [[2, 6]],
     attrs: { dim: 1 },
   },
   {
@@ -831,7 +914,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "cat 先頭軸 [2,4] + [3,4] dim=0",
     op: "cat",
     inputs: [fill([2, 4], SIGNED), fill([3, 4], POSITIVE)],
-    outShape: [5, 4],
+    outShapes: [[5, 4]],
     attrs: { dim: 0 },
   },
   {
@@ -839,21 +922,21 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "pad 対称 [1,2,3,5] [4,4]",
     op: "pad",
     inputs: [fill([1, 2, 3, 5], SIGNED)],
-    outShape: [1, 2, 3, 13],
+    outShapes: [[1, 2, 3, 13]],
     attrs: { left: 4, right: 4 },
   },
   {
     name: "pad 非対称 [3,4] [2,1]",
     op: "pad",
     inputs: [fill([3, 4], POSITIVE)],
-    outShape: [3, 7],
+    outShapes: [[3, 7]],
     attrs: { left: 2, right: 1 },
   },
   {
     name: "pad 片側 0 [2,3] [0,3]",
     op: "pad",
     inputs: [fill([2, 3], SIGNED)],
-    outShape: [2, 6],
+    outShapes: [[2, 6]],
     attrs: { left: 0, right: 3 },
   },
   {
@@ -861,7 +944,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "flip 中間軸 [2,5,3] dim=1",
     op: "flip",
     inputs: [fill([2, 5, 3], SIGNED)],
-    outShape: [2, 5, 3],
+    outShapes: [[2, 5, 3]],
     attrs: { dim: 1 },
   },
   {
@@ -869,21 +952,21 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
     name: "flip 2ch [1,2,6] dim=1",
     op: "flip",
     inputs: [fill([1, 2, 6], POSITIVE)],
-    outShape: [1, 2, 6],
+    outShapes: [[1, 2, 6]],
     attrs: { dim: 1 },
   },
   {
     name: "flip 最終次元 [3,4] dim=1",
     op: "flip",
     inputs: [fill([3, 4], SIGNED)],
-    outShape: [3, 4],
+    outShapes: [[3, 4]],
     attrs: { dim: 1 },
   },
   {
     name: "flip 先頭軸 rank4 [4,2,3,2] dim=0",
     op: "flip",
     inputs: [fill([4, 2, 3, 2], SIGNED)],
-    outShape: [4, 2, 3, 2],
+    outShapes: [[4, 2, 3, 2]],
     attrs: { dim: 0 },
   },
 ];
@@ -918,14 +1001,14 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "linear rank2 [5,7] × W[3,7] + b[3]",
     op: "linear",
     inputs: [fill([5, 7], SIGNED), fill([3, 7], POSITIVE), fill([3], NONZERO)],
-    outShape: [5, 3],
+    outShapes: [[5, 3]],
   },
   {
     // 先行次元が 2 本（平坦化して GEMM に落とす経路）
     name: "linear rank3 [2,4,6] × W[5,6] + b[5]",
     op: "linear",
     inputs: [fill([2, 4, 6], SIGNED), fill([5, 6], NONZERO), fill([5], SIGNED)],
-    outShape: [2, 4, 5],
+    outShapes: [[2, 4, 5]],
   },
   {
     // タイル 16 の端数（m/n/k いずれもタイル境界に揃わない）+ 縮約が複数タイルに割れる。
@@ -934,7 +1017,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "linear タイル端数 [17,40] × W[19,40] + b[19]",
     op: "linear",
     inputs: [fill([17, 40], SIGNED), fill([19, 40], POSITIVE), fill([19], NONZERO)],
-    outShape: [17, 19],
+    outShapes: [[17, 19]],
   },
   {
     // v4 経路のタイル境界: n=68（最終タイルの有効 quad が 16 中 1・共有転置も quad を跨ぐ）/
@@ -942,20 +1025,20 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "linear v4 タイル境界 [65,20] × W[68,20] + b[68]",
     op: "linear",
     inputs: [fill([65, 20], SIGNED), fill([68, 20], POSITIVE), fill([68], SIGNED)],
-    outShape: [65, 68],
+    outShapes: [[65, 68]],
   },
   {
     // スカラ変種でタイル辺 64 を跨ぐ（k=37 は 4 の倍数でも 2 の倍数でもない）
     name: "linear スカラ変種 タイル境界 [70,37] × W[23,37] + b[23]",
     op: "linear",
     inputs: [fill([70, 37], SIGNED), fill([23, 37], NONZERO), fill([23], SIGNED)],
-    outShape: [70, 23],
+    outShapes: [[70, 23]],
   },
   {
     name: "layer_norm [4,10] affine",
     op: "layer_norm",
     inputs: [fill([4, 10], SIGNED), fill([10], POSITIVE), fill([10], SIGNED)],
-    outShape: [4, 10],
+    outShapes: [[4, 10]],
     attrs: { normalized_shape: [10], eps: 1e-5 },
   },
   {
@@ -963,7 +1046,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "layer_norm 行長 300 rank3 [2,3,300]",
     op: "layer_norm",
     inputs: [fill([2, 3, 300], SIGNED), fill([300], NONZERO), fill([300], SIGNED)],
-    outShape: [2, 3, 300],
+    outShapes: [[2, 3, 300]],
     attrs: { normalized_shape: [300], eps: 1e-7 },
   },
   {
@@ -976,7 +1059,7 @@ export const FUSED_CASES: readonly OpCase[] = [
       fill([8], POSITIVE),
       fill([8], SIGNED),
     ],
-    outShape: [3, 8],
+    outShapes: [[3, 8]],
     attrs: { normalized_shape: [8], eps: 1e-7 },
   },
   {
@@ -985,7 +1068,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "rms_norm [4,10] weight",
     op: "rms_norm",
     inputs: [fill([4, 10], SIGNED), fill([10], POSITIVE)],
-    outShape: [4, 10],
+    outShapes: [[4, 10]],
     attrs: { eps: 1e-6 },
   },
   {
@@ -993,7 +1076,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "rms_norm 行長 300 rank3 [2,3,300]",
     op: "rms_norm",
     inputs: [fill([2, 3, 300], SIGNED), fill([300], NONZERO)],
-    outShape: [2, 3, 300],
+    outShapes: [[2, 3, 300]],
     attrs: { eps: 1e-6 },
   },
   {
@@ -1002,14 +1085,14 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "rms_norm 全要素 0 の行 [3,8] eps=1e-6",
     op: "rms_norm",
     inputs: [fill([3, 8], () => 0), fill([8], POSITIVE)],
-    outShape: [3, 8],
+    outShapes: [[3, 8]],
     attrs: { eps: 1e-6 },
   },
   {
     name: "softmax 最終次元 [4,9]",
     op: "softmax",
     inputs: [fill([4, 9], SIGNED)],
-    outShape: [4, 9],
+    outShapes: [[4, 9]],
     attrs: { dim: 1 },
   },
   {
@@ -1018,7 +1101,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "softmax 大きい負値 [3,11]（素朴形は underflow）",
     op: "softmax",
     inputs: [fill([3, 11], HUGE_NEGATIVE)],
-    outShape: [3, 11],
+    outShapes: [[3, 11]],
     attrs: { dim: 1 },
   },
   {
@@ -1026,14 +1109,14 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "softmax 全要素同値 [2,6]",
     op: "softmax",
     inputs: [fill([2, 6], () => NEG_F32_MAX)],
-    outShape: [2, 6],
+    outShapes: [[2, 6]],
     attrs: { dim: 1 },
   },
   {
     name: "softmax 行長 300 rank3 [2,3,300]",
     op: "softmax",
     inputs: [fill([2, 3, 300], SIGNED)],
-    outShape: [2, 3, 300],
+    outShapes: [[2, 3, 300]],
     attrs: { dim: 2 },
   },
   {
@@ -1041,7 +1124,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "safe_softmax 最終次元 [4,9]（-inf 無し）",
     op: "safe_softmax",
     inputs: [fill([4, 9], SIGNED)],
-    outShape: [4, 9],
+    outShapes: [[4, 9]],
     attrs: { dim: 1 },
   },
   {
@@ -1051,7 +1134,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "safe_softmax 全 -inf 行 [3,5]",
     op: "safe_softmax",
     inputs: [fill([3, 5], EMPTY_ROW_SCORES)],
-    outShape: [3, 5],
+    outShapes: [[3, 5]],
     attrs: { dim: 1 },
   },
   {
@@ -1060,7 +1143,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "safe_softmax 行長 300 rank3 [2,3,300]（全 -inf 行つき）",
     op: "safe_softmax",
     inputs: [fill([2, 3, 300], (i) => (Math.floor(i / 300) === 1 ? -Infinity : SIGNED(i)))],
-    outShape: [2, 3, 300],
+    outShapes: [[2, 3, 300]],
     attrs: { dim: 2 },
   },
   {
@@ -1069,7 +1152,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "safe_softmax 全 -F32_MAX 行 [2,6]（空行ではない）",
     op: "safe_softmax",
     inputs: [fill([2, 6], () => NEG_F32_MAX)],
-    outShape: [2, 6],
+    outShapes: [[2, 6]],
     attrs: { dim: 1 },
   },
   {
@@ -1077,7 +1160,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "embedding weight [7,4] × index [2,3]",
     op: "embedding",
     inputs: [fill([7, 4], SIGNED), fill([2, 3], (i) => (i * 3 + 1) % 7, "i32")],
-    outShape: [2, 3, 4],
+    outShapes: [[2, 3, 4]],
     attrs: { padding_idx: -1 },
   },
   {
@@ -1086,7 +1169,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "embedding padding_idx=0 は forward に効かない",
     op: "embedding",
     inputs: [fill([5, 3], POSITIVE), fill([4], (i) => i % 5, "i32")],
-    outShape: [4, 3],
+    outShapes: [[4, 3]],
     attrs: { padding_idx: 0 },
   },
   {
@@ -1094,7 +1177,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "masked_fill rank4 broadcast x[1,3,4,5] mask[1,1,4,5]",
     op: "masked_fill",
     inputs: [fill([1, 3, 4, 5], SIGNED), fill([1, 1, 4, 5], MASKED, "bool")],
-    outShape: [1, 3, 4, 5],
+    outShapes: [[1, 3, 4, 5]],
     attrs: { value: NEG_F32_MAX },
   },
   {
@@ -1102,7 +1185,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "masked_fill 同形 x[2,3,4] mask[2,3,4] value=0",
     op: "masked_fill",
     inputs: [fill([2, 3, 4], SIGNED), fill([2, 3, 4], MASKED, "bool")],
-    outShape: [2, 3, 4],
+    outShapes: [[2, 3, 4]],
     attrs: { value: 0 },
   },
   {
@@ -1110,7 +1193,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "masked_fill rank 違い x[3,4,5] mask[5]",
     op: "masked_fill",
     inputs: [fill([3, 4, 5], SIGNED), fill([5], MASKED, "bool")],
-    outShape: [3, 4, 5],
+    outShapes: [[3, 4, 5]],
     attrs: { value: -1.5 },
   },
   {
@@ -1118,7 +1201,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv1d [2,3,9] * W[4,3,3] stride=1 padding=1",
     op: "conv1d",
     inputs: [fill([2, 3, 9], SIGNED), fill([4, 3, 3], POSITIVE), fill([4], NONZERO)],
-    outShape: [2, 4, 9],
+    outShapes: [[2, 4, 9]],
     attrs: { stride: 1, padding: 1, dilation: 1, groups: 1 },
   },
   {
@@ -1126,7 +1209,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv1d [1,2,11] * W[3,2,4] stride=2 padding=0",
     op: "conv1d",
     inputs: [fill([1, 2, 11], SIGNED), fill([3, 2, 4], NONZERO), fill([3], SIGNED)],
-    outShape: [1, 3, 4],
+    outShapes: [[1, 3, 4]],
     attrs: { stride: 2, padding: 0, dilation: 1, groups: 1 },
   },
   {
@@ -1134,7 +1217,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv1d [1,1,3] * W[2,1,3] stride=1 padding=2",
     op: "conv1d",
     inputs: [fill([1, 1, 3], SIGNED), fill([2, 1, 3], POSITIVE), fill([2], NONZERO)],
-    outShape: [1, 2, 5],
+    outShapes: [[1, 2, 5]],
     attrs: { stride: 1, padding: 2, dilation: 1, groups: 1 },
   },
   // ---- conv 族の拡張（ADR 0015）--------------------------------------------
@@ -1144,7 +1227,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv1d depthwise [1,6,17] * W[6,1,5] dilation=3 groups=6",
     op: "conv1d",
     inputs: [fill([1, 6, 17], SIGNED), fill([6, 1, 5], POSITIVE), fill([6], NONZERO)],
-    outShape: [1, 6, 17],
+    outShapes: [[1, 6, 17]],
     attrs: { stride: 1, padding: 6, dilation: 3, groups: 6 },
   },
   {
@@ -1152,7 +1235,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv1d depthwise [1,4,13] * W[4,1,5] dilation=9 groups=4",
     op: "conv1d",
     inputs: [fill([1, 4, 13], SIGNED), fill([4, 1, 5], NONZERO), fill([4], SIGNED)],
-    outShape: [1, 4, 13],
+    outShapes: [[1, 4, 13]],
     attrs: { stride: 1, padding: 18, dilation: 9, groups: 4 },
   },
   {
@@ -1161,7 +1244,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv1d grouped [1,6,11] * W[9,2,3] groups=3",
     op: "conv1d",
     inputs: [fill([1, 6, 11], SIGNED), fill([9, 2, 3], POSITIVE), fill([9], NONZERO)],
-    outShape: [1, 9, 11],
+    outShapes: [[1, 9, 11]],
     attrs: { stride: 1, padding: 1, dilation: 1, groups: 3 },
   },
   {
@@ -1169,7 +1252,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv1d dilated [1,3,15] * W[5,3,3] dilation=5",
     op: "conv1d",
     inputs: [fill([1, 3, 15], SIGNED), fill([5, 3, 3], NONZERO), fill([5], SIGNED)],
-    outShape: [1, 5, 15],
+    outShapes: [[1, 5, 15]],
     attrs: { stride: 1, padding: 5, dilation: 5, groups: 1 },
   },
   // ---- conv2d（ADR 0017）------------------------------------------------------
@@ -1181,7 +1264,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv2d [2,3,7,9] * W[5,3,3,3] stride=1 padding=1",
     op: "conv2d",
     inputs: [fill([2, 3, 7, 9], SIGNED), fill([5, 3, 3, 3], POSITIVE), fill([5], NONZERO)],
-    outShape: [2, 5, 7, 9],
+    outShapes: [[2, 5, 7, 9]],
     attrs: { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 1 },
   },
   {
@@ -1190,7 +1273,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv2d [1,2,9,11] * W[4,2,2,4] stride=[2,3] padding=[1,0]",
     op: "conv2d",
     inputs: [fill([1, 2, 9, 11], SIGNED), fill([4, 2, 2, 4], NONZERO), fill([4], SIGNED)],
-    outShape: [1, 4, 5, 3],
+    outShapes: [[1, 4, 5, 3]],
     attrs: { stride: [2, 3], padding: [1, 0], dilation: [1, 1], groups: 1 },
   },
   {
@@ -1198,7 +1281,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv2d [1,2,12,10] * W[3,2,3,2] dilation=[3,2]",
     op: "conv2d",
     inputs: [fill([1, 2, 12, 10], SIGNED), fill([3, 2, 3, 2], POSITIVE), fill([3], NONZERO)],
-    outShape: [1, 3, 6, 8],
+    outShapes: [[1, 3, 6, 8]],
     attrs: { stride: [1, 1], padding: [0, 0], dilation: [3, 2], groups: 1 },
   },
   {
@@ -1207,7 +1290,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv2d depthwise [1,6,5,7] * W[6,1,3,3] groups=6",
     op: "conv2d",
     inputs: [fill([1, 6, 5, 7], SIGNED), fill([6, 1, 3, 3], POSITIVE), fill([6], NONZERO)],
-    outShape: [1, 6, 5, 7],
+    outShapes: [[1, 6, 5, 7]],
     attrs: { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 6 },
   },
   {
@@ -1216,7 +1299,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv2d grouped [1,6,6,8] * W[9,2,3,1] groups=3",
     op: "conv2d",
     inputs: [fill([1, 6, 6, 8], SIGNED), fill([9, 2, 3, 1], NONZERO), fill([9], SIGNED)],
-    outShape: [1, 9, 4, 8],
+    outShapes: [[1, 9, 4, 8]],
     attrs: { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 3 },
   },
   {
@@ -1226,7 +1309,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv2d igemm v4 タイル境界 [1,8,9,8] * W[70,8,3,3] padding=1",
     op: "conv2d",
     inputs: [fill([1, 8, 9, 8], SIGNED), fill([70, 8, 3, 3], POSITIVE), fill([70], NONZERO)],
-    outShape: [1, 70, 9, 8],
+    outShapes: [[1, 70, 9, 8]],
     attrs: { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 1 },
   },
   {
@@ -1237,7 +1320,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv2d igemm Hout=Wout=2（N%4==0 だが Wout%4≠0）[1,4,2,6] * W[3,4,1,5]",
     op: "conv2d",
     inputs: [fill([1, 4, 2, 6], SIGNED), fill([3, 4, 1, 5], POSITIVE), fill([3], NONZERO)],
-    outShape: [1, 3, 2, 2],
+    outShapes: [[1, 3, 2, 2]],
     attrs: { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 1 },
   },
   {
@@ -1245,7 +1328,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv2d [1,1,2,3] * W[2,1,3,1] padding=[2,0]",
     op: "conv2d",
     inputs: [fill([1, 1, 2, 3], SIGNED), fill([2, 1, 3, 1], POSITIVE), fill([2], NONZERO)],
-    outShape: [1, 2, 4, 3],
+    outShapes: [[1, 2, 4, 3]],
     attrs: { stride: [1, 1], padding: [2, 0], dilation: [1, 1], groups: 1 },
   },
   {
@@ -1253,7 +1336,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv_transpose1d [1,5,7] * W[5,3,2] stride=2 padding=0",
     op: "conv_transpose1d",
     inputs: [fill([1, 5, 7], SIGNED), fill([5, 3, 2], POSITIVE), fill([3], NONZERO)],
-    outShape: [1, 3, 14],
+    outShapes: [[1, 3, 14]],
     attrs: { stride: 2, padding: 0 },
   },
   {
@@ -1261,7 +1344,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv_transpose1d [1,3,5] * W[3,2,16] stride=8 padding=4",
     op: "conv_transpose1d",
     inputs: [fill([1, 3, 5], SIGNED), fill([3, 2, 16], NONZERO), fill([2], SIGNED)],
-    outShape: [1, 2, 40],
+    outShapes: [[1, 2, 40]],
     attrs: { stride: 8, padding: 4 },
   },
   {
@@ -1269,7 +1352,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     name: "conv_transpose1d [1,2,6] * W[2,4,4] stride=4 padding=0",
     op: "conv_transpose1d",
     inputs: [fill([1, 2, 6], SIGNED), fill([2, 4, 4], POSITIVE), fill([4], NONZERO)],
-    outShape: [1, 4, 24],
+    outShapes: [[1, 4, 24]],
     attrs: { stride: 4, padding: 0 },
   },
 ];
@@ -1283,7 +1366,7 @@ export const UPSAMPLE_CASES: readonly OpCase[] = [
     name: "upsample_bilinear2d 拡大 [2,3,4,5] → 7×9",
     op: "upsample_bilinear2d",
     inputs: [fill([2, 3, 4, 5], SIGNED)],
-    outShape: [2, 3, 7, 9],
+    outShapes: [[2, 3, 7, 9]],
     attrs: { output_size: [7, 9] },
   },
   {
@@ -1291,7 +1374,7 @@ export const UPSAMPLE_CASES: readonly OpCase[] = [
     name: "upsample_bilinear2d 縮小 [1,3,8,10] → 3×4",
     op: "upsample_bilinear2d",
     inputs: [fill([1, 3, 8, 10], POSITIVE)],
-    outShape: [1, 3, 3, 4],
+    outShapes: [[1, 3, 3, 4]],
     attrs: { output_size: [3, 4] },
   },
   {
@@ -1300,7 +1383,7 @@ export const UPSAMPLE_CASES: readonly OpCase[] = [
     name: "upsample_bilinear2d 高さ 1 [1,2,1,6] → 4×3",
     op: "upsample_bilinear2d",
     inputs: [fill([1, 2, 1, 6], SIGNED)],
-    outShape: [1, 2, 4, 3],
+    outShapes: [[1, 2, 4, 3]],
     attrs: { output_size: [4, 3] },
   },
   {
@@ -1308,7 +1391,7 @@ export const UPSAMPLE_CASES: readonly OpCase[] = [
     name: "upsample_bilinear2d 1×1 → 5×4 [2,3,1,1]",
     op: "upsample_bilinear2d",
     inputs: [fill([2, 3, 1, 1], NONZERO)],
-    outShape: [2, 3, 5, 4],
+    outShapes: [[2, 3, 5, 4]],
     attrs: { output_size: [5, 4] },
   },
   {
@@ -1316,7 +1399,7 @@ export const UPSAMPLE_CASES: readonly OpCase[] = [
     name: "upsample_bilinear2d 6×7 → 1×1 [1,2,6,7]",
     op: "upsample_bilinear2d",
     inputs: [fill([1, 2, 6, 7], SIGNED)],
-    outShape: [1, 2, 1, 1],
+    outShapes: [[1, 2, 1, 1]],
     attrs: { output_size: [1, 1] },
   },
   {
@@ -1324,7 +1407,7 @@ export const UPSAMPLE_CASES: readonly OpCase[] = [
     name: "upsample_bilinear2d 等倍 [1,2,5,4] → 5×4",
     op: "upsample_bilinear2d",
     inputs: [fill([1, 2, 5, 4], SIGNED)],
-    outShape: [1, 2, 5, 4],
+    outShapes: [[1, 2, 5, 4]],
     attrs: { output_size: [5, 4] },
   },
 ];
@@ -1350,7 +1433,7 @@ export const DEFORM_CASES: readonly OpCase[] = [
       fill([1, 6, 4, 4], MODULATOR),
       fill([3], SIGNED),
     ],
-    outShape: [1, 3, 4, 4],
+    outShapes: [[1, 3, 4, 4]],
     attrs: { padding: [1, 0] },
   },
   {
@@ -1364,7 +1447,7 @@ export const DEFORM_CASES: readonly OpCase[] = [
       fill([2, 1, 3, 4], MODULATOR),
       fill([4], NONZERO),
     ],
-    outShape: [2, 4, 3, 4],
+    outShapes: [[2, 4, 3, 4]],
     attrs: { padding: [0, 0] },
   },
   {
@@ -1378,7 +1461,7 @@ export const DEFORM_CASES: readonly OpCase[] = [
       fill([1, 9, 6, 7], MODULATOR),
       fill([5], SIGNED),
     ],
-    outShape: [1, 5, 6, 7],
+    outShapes: [[1, 5, 6, 7]],
     attrs: { padding: [1, 1] },
   },
 ];
@@ -1402,7 +1485,7 @@ export const GRU_SCAN_CASES: readonly OpCase[] = ["gru_scan", "gru_scan_reverse"
       fill([9, 3], SMALL_WEIGHT),
       fill([9], SIGNED),
     ],
-    outShape: [4, 1, 3],
+    outShapes: [[4, 1, 3]],
   },
   {
     // バッチ > 1（1 workgroup = 1 バッチ要素の境界。状態が混ざると値に出る）
@@ -1414,7 +1497,7 @@ export const GRU_SCAN_CASES: readonly OpCase[] = ["gru_scan", "gru_scan_reverse"
       fill([15, 5], SMALL_WEIGHT),
       fill([15], SIGNED),
     ],
-    outShape: [3, 3, 5],
+    outShapes: [[3, 3, 5]],
   },
 ]);
 
@@ -1428,14 +1511,14 @@ export const BOUNDARY_CASES: readonly OpCase[] = [
     name: "relu 大きめ 1 本 [1048576]",
     op: "relu",
     inputs: [fill([1 << 20], SIGNED)],
-    outShape: [1 << 20],
+    outShapes: [[1 << 20]],
   },
   {
     // strided copy も同じ大きさで踏む（出力 1048576 要素 = 4096 workgroup）
     name: "permute 大きめ [512,2048] dims=[1,0]",
     op: "permute",
     inputs: [fill([512, 2048], SIGNED)],
-    outShape: [2048, 512],
+    outShapes: [[2048, 512]],
     attrs: { dims: [1, 0] },
   },
   {
@@ -1444,7 +1527,7 @@ export const BOUNDARY_CASES: readonly OpCase[] = [
     name: "sum 行数多め [70000,4]",
     op: "sum",
     inputs: [fill([70000, 4], SIGNED)],
-    outShape: [70000],
+    outShapes: [[70000]],
     attrs: { dim: 1 },
   },
 ];

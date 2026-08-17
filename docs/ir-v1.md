@@ -55,6 +55,13 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   `torch.Tag.core` の実測で core・台帳 NOTE のみが要件〈ADR 0059〉だが、決定 2 は
   多出力解禁と同じ ADR に載っている）。**attrs 空・アリティ 1・入力 f32 → 出力 i32**（添字）で、
   **rank 保存**（最終次元を 1 に潰す）は shape 規則が持つ。既存 IR への影響はゼロ。
+- autoregressive（2026-08-17）: `topk` を **Core ATen 層**として追加（ADR
+  [0068](decisions/0068-decode-exit-multi-output.md) 決定 3 — top-k sampling の出口。
+  `torch.Tag.core` の実測で core・core decomposition にも載らない）。**ノードレベル
+  多出力の最初の入居者**で、`outs` が 2 本（値 f32 + 添字 i32）の IR が初めて実在する
+  — スキーマは元から `outs` 長さ 1 以上を許可しているので**仕様は無改訂**（ADR 0068
+  決定 1。0 本の解禁は別波）。**attrs `k` 宣言必須・アリティ 1**で、受理領域
+  `1 ≤ k ≤ 最終次元`。既存 IR への影響はゼロ。
 
 ## コンテナ
 
@@ -184,8 +191,10 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
 
 - SSA・単一代入: 各値名は inputs / initializers / いずれかのノードの `outs` のうち
   **ちょうど 1 箇所**で定義される。`ins` は定義済みの名前のみ参照。`outputs` は定義済み
-  名の部分集合。`outs` は長さ 1 以上の配列（複数出力はスキーマ上有効。M0 の op は全て
-  単一出力）。
+  名の部分集合。`outs` は長さ 1 以上の配列（**複数出力が実在する** — `topk` が値 f32 と
+  添字 i32 の 2 本を定義する唯一の op〈ADR
+  [0068](decisions/0068-decode-exit-multi-output.md) 決定 3〉。他の op は全て単一出力で、
+  0 本〈値を定義しない effect op〉は**まだ語彙に無い**）。
 - `nodes` は**トポロジカル順**で格納される（パーサが検証。前方参照は fail loudly）。
 - `attrs` は op ごとの契約テーブルで検証する。未知の attr・契約外の値は fail loudly
   （近似実行しない）。
@@ -247,6 +256,20 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   （複数なら最小 index）/ **全 −inf 行は index 0**（行 max の identity は −inf MUST — 有限
   sentinel だと番兵 index が出力へ漏れる）。llama.cpp は GPU 側 = 最大 index・CPU sampler =
   最小 index で同一リポ内でも食い違っており、明文化しないと greedy の再現性が実装差で割れる
+- `topk`（f32 → **値 f32 + 添字 i32 の 2 出力**、attrs `k` — ADR
+  [0068](decisions/0068-decode-exit-multi-output.md) 決定 3）— 最終次元の top-k で、出力は
+  2 本とも `[…, k]`（rank 保存）。**唯一の多出力 op**。`k` は**計画時定数**（attrs 宣言必須 =
+  static-k。torch の schema は SymInt だが実行時に決まる k は静的形状の前提に載らない）で、
+  受理領域は **`1 ≤ k ≤ 最終次元`** — k=0（torch は受理する）・k > 最終次元・記号 k は
+  全て fail loudly。軸は最終次元固定（`dim` の欄が無い）・`largest` / `sorted` の欄も無い
+  （**降順ソート済みの最大側**の 1 形だけが語彙）。固定挙動は **タイブレーク = 最小 index** /
+  **NaN は最大**（複数なら最小 index）/ 全 −inf 行も最小 index から k 本。**値の列は torch と
+  ビット一致**する一方、**添字の列は torch の未規定部分を karume が規定した**側（torch は
+  同値要素の順序を保証せず、`topk([5,5,5,5],1)` = 2 に対し `argmax` = 0 で自己矛盾している —
+  実測 2026-08-17。k=1 は karume では argmax と一致する）。実装は「レーン局所 top-k →
+  トーナメント merge」で全語彙 argsort を経由せず、**k の実装上限**が workgroup storage の
+  device limit から静的に決まる（WebGPU 既定 16384 バイトで **k ≤ 63**。超過は縮退させず
+  上限値つきで `CodegenError`）
 - レイアウト（ADR [0011](decisions/0011-layout-strategy.md)）— いずれも単項:
   - `reshape`（f32 / i32 / bool）— **出力の宣言 shape が目標形**。契約は要素数一致のみで、
     要素順は変えない。attrs 無し（目標形を attrs に持たせると宣言と二重管理になる）
@@ -408,9 +431,11 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
     必須（ゼロ `h0` はエクスポータの定数畳み込みで initializer になる）。
     隠れ幅は **`H ≤ 256`**（1 lane = 1 隠れユニットの割り当て — 超過は `CodegenError`）
 
-出力 dtype は「**スロット 0 の入力 dtype → 出力 dtype**」の写像で決まる（既定は恒等）。
-恒等でないのは比較 4 本（→ bool）・bool 入力の `sum`（→ i32）・`where`（bool → f32）だけで、
-`cast` だけが例外的に attrs.to で決まる。
+出力 dtype は「**スロット 0 の入力 dtype → 出力 dtype**」の写像で決まる（既定は恒等）。写像は
+**出力 slot 別の列**で、列の長さがその op の出力数（ADR 0068 決定 1）。恒等でないのは比較 4 本
+（→ bool）・bool 入力の `sum`（→ i32）・`where`（bool → f32）・`argmax`（→ 添字の i32）・
+`topk` の slot 1（→ 添字の i32・slot 0 の値は恒等）だけで、`cast` だけが例外的に attrs.to で
+決まる。
 
 dtype ごとの受理集合（**入力スロット別**の受理集合と出力 dtype の導出を含む）・attrs の値域
 （`cast` の丸め規約・`permute` の `dims`・融合 op の各 attr を含む）は契約テーブルが正本。

@@ -198,6 +198,13 @@
       "attrs": []
     },
     {
+      "op": "topk",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "out_dtypes": [{}, { "f32": "i32" }],
+      "attrs": ["k"]
+    },
+    {
       "op": "cast",
       "arity": 1,
       "dtypes": { "kind": "uniform", "accept": ["bool", "f32", "i32"] },
@@ -570,6 +577,13 @@
       "why": "非負の軸番号のみ（最終次元との突合は shape 側 — softmax の dim と同じ）",
       "accept": [0, 1, 3],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
+    },
+    {
+      "op": "topk",
+      "attr": "k",
+      "why": "正整数のみ（static-k）。k=0 は torch では受理される形だが「大きい順の 0 本」は語彙に無く、記号 k は静的形状の前提に載らない。最終次元との突合は shape 側・実装上限は device limit 側",
+      "accept": [1, 2, 64],
+      "reject": [0, -1, 1.5, "1", "K", null, true, 1000000000000000000]
     },
     {
       "op": "sum",
@@ -1010,6 +1024,93 @@
       "throws": true,
       "why": "スカラは縮約できない"
     },
+    {
+      "op": "topk",
+      "ins": [[6, 10]],
+      "attrs": { "k": 3 },
+      "outs": [[6, 3], [6, 3]],
+      "why": "2 出力とも [..., k]（値 f32 + 添字 i32 — 唯一の多出力 op）"
+    },
+    {
+      "op": "topk",
+      "ins": [[6, 10]],
+      "attrs": { "k": 1 },
+      "outs": [[6, 1], [6, 1]],
+      "why": "k=1 は argmax と同じ形（値も返る点だけが違う）"
+    },
+    {
+      "op": "topk",
+      "ins": [[4]],
+      "attrs": { "k": 4 },
+      "outs": [[4], [4]],
+      "why": "k = 最終次元は受理領域の上端（rank 1 でも rank 保存）"
+    },
+    {
+      "op": "topk",
+      "ins": [["T", 2, 3, 5]],
+      "attrs": { "k": 2 },
+      "bindings": { "T": 4 },
+      "outs": [["T", 2, 3, 2], ["T", 2, 3, 2]],
+      "why": "rank 4 — 先行次元はそのまま（記号次元も素通し）"
+    },
+    {
+      "op": "topk",
+      "ins": [[2, "T"]],
+      "attrs": { "k": 2 },
+      "bindings": { "T": 4 },
+      "outs": [[2, 2], [2, 2]],
+      "why": "記号の最終次元では k との突合を保留する（束縛後に判定するのはランタイム側の層）"
+    },
+    {
+      "op": "topk",
+      "ins": [[0, 3]],
+      "attrs": { "k": 2 },
+      "outs": [[0, 2], [0, 2]],
+      "why": "長さ 0 なのが最終次元でなければ受理（出力が空になるだけ — argmax と同じ絞り）"
+    },
+    {
+      "op": "topk",
+      "ins": [[6, 10]],
+      "attrs": { "k": 0 },
+      "throws": true,
+      "why": "k=0 は語彙に無い（torch は受理するが「大きい順の 0 本」は値を定義しない）"
+    },
+    {
+      "op": "topk",
+      "ins": [[6, 10]],
+      "attrs": { "k": 11 },
+      "throws": true,
+      "why": "k > 最終次元（torch も selected index k out of range で拒否する）"
+    },
+    {
+      "op": "topk",
+      "ins": [[6, 10]],
+      "attrs": {},
+      "throws": true,
+      "why": "k は宣言必須（既定値補完をしない — static-k）"
+    },
+    {
+      "op": "topk",
+      "ins": [[6, 10]],
+      "attrs": { "k": "T" },
+      "throws": true,
+      "why": "記号 k は静的形状の前提に載らない（確保バイト数が計画時に決まらない）"
+    },
+    {
+      "op": "topk",
+      "ins": [[]],
+      "attrs": { "k": 1 },
+      "throws": true,
+      "why": "スカラは縮約できない"
+    },
+    {
+      "op": "topk",
+      "ins": [[3, 0]],
+      "attrs": { "k": 1 },
+      "throws": true,
+      "why": "長さ 0 の最終次元は k >= 1 との突合でそのまま落ちる"
+    },
+
     {
       "op": "argmax",
       "ins": [[3, 0]],

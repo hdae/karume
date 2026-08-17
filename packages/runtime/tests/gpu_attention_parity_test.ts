@@ -202,7 +202,7 @@ Deno.test({
 
         const fused = await run(
           gpu,
-          singleOpGraph("attention", [q.shape, k.shape, v.shape], [b, h, m, d], {
+          singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
             attrs: { scale },
           }),
           { x0: q, x1: k, x2: v },
@@ -269,7 +269,7 @@ Deno.test({
 
         const fused = await run(
           gpu,
-          singleOpGraph("attention", [q.shape, k.shape, v.shape, mask.shape], [b, h, m, d], {
+          singleOpGraph("attention", [q.shape, k.shape, v.shape, mask.shape], [[b, h, m, d]], {
             attrs: { scale },
           }),
           { x0: q, x1: k, x2: v, x3: mask },
@@ -302,7 +302,7 @@ Deno.test({
         // 添字を取り違えても値は変わるが、この門が守るのは「mask が丸ごと無視されていない」形。
         const unmasked = await run(
           gpu,
-          singleOpGraph("attention", [q.shape, k.shape, v.shape], [b, h, m, d], {
+          singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
             attrs: { scale },
           }),
           { x0: q, x1: k, x2: v },
@@ -345,7 +345,7 @@ Deno.test({
       const graph = singleOpGraph(
         "attention",
         [q.shape, k.shape, v.shape, mask.shape],
-        [b, h, m, d],
+        [[b, h, m, d]],
         { attrs: { scale: halfScale(d) } },
       );
       const inputs = { x0: q, x1: k, x2: v, x3: mask };
@@ -415,7 +415,7 @@ Deno.test({
         const masked = await createSession(
           gpu,
           openModel(graphModelBuffer(
-            singleOpGraph("attention", [q.shape, k.shape, v.shape, mask.shape], [b, h, m, d], {
+            singleOpGraph("attention", [q.shape, k.shape, v.shape, mask.shape], [[b, h, m, d]], {
               attrs,
             }),
           )),
@@ -435,7 +435,7 @@ Deno.test({
         const plain = await createSession(
           gpu,
           openModel(graphModelBuffer(
-            singleOpGraph("attention", [q.shape, k.shape, v.shape], [b, h, m, d], { attrs }),
+            singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], { attrs }),
           )),
           { attentionCompute: "i8a8" },
         );

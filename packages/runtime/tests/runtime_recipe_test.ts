@@ -68,6 +68,42 @@ Deno.test("単一出力ステップの slot 割当は alloc / alias / pin / LIFO
  * 純関数で固定する）。**出力 slot 昇順**の確保と、slot ごとに独立した `uses` / `pinned` の
  * 簿記が要点。
  */
+/**
+ * `topk` の実形（ADR 0068 決定 3 の最初の入居者）。実 GPU 側の寿命門
+ * （tests/runtime_executor_test.ts の「多出力ノードの slot ごとの uses / pin」）と**同じグラフ**
+ * の slot 割当を、GPU に触らない純関数の側から手計算で固定する:
+ *
+ * ```
+ * topk(x[3,8], k=2) → v[3,2] f32（neg が 1 度消費）+ i[3,2] i32（グラフ出力）
+ * neg(v) → nv[3,2]（exp が 1 度消費）
+ * exp(nv) → e[3,2]（グラフ出力）
+ * ```
+ *
+ * MUST: 2 本の出力は**同じバイト数**（どちらも 3·2 語の 4 バイト要素 = 24）— サイズクラスが
+ * 同じなので、slot を取り違えても総バイト数では気づけない。だから **どの slot が再利用されるか**
+ * まで期待値に置く（`e` が掴むのは消費済みの `v` の slot 0 で、pin された添字の slot 1 では
+ * ない）。
+ */
+Deno.test("topk の実形（値 + 添字・同一サイズクラス）の slot 割当が手計算どおり", () => {
+  // rows·k·4 = 3·2·4（実 GPU 側の門と同じ形から導く）
+  const bytes = 3 * 2 * 4;
+  const slots = derivePlanSlots([
+    // topk: 値（消費者 1 本）+ 添字（グラフ出力 = pin）を出力 slot 昇順で
+    step([alloc("v", bytes, 1), alloc("i", bytes, 0, true)]),
+    // neg: `v` を消費し、`nv`（消費者 1 本）を定義する。確保の時点でプールは空
+    // （`v` は refs 1・`i` は pin）なので新しい slot が生える
+    step([alloc("nv", bytes, 1)], ["v"]),
+    // exp: `nv` を消費し、`e`（グラフ出力）を定義する。ここで掴むのは**返ってきた `v` の
+    // slot 0**（LIFO の頂点）— pin された添字の slot 1 は候補にならない
+    step([alloc("e", bytes, 0, true)], ["nv"]),
+  ]);
+
+  assertEquals(slots.bytes, [bytes, bytes, bytes]);
+  assertEquals(slots.steps.map((assigned) => assigned.outputs), [[0, 1], [2], [0]]);
+  // pin は添字（slot 1）と `e`（slot 0）。実 GPU 側の生存ピーク 72 バイト = 3 slot ぶんと一致する。
+  assertEquals(slots.pinned, new Set([1, 0]));
+});
+
 Deno.test("多出力ステップは出力 slot 昇順に確保し、slot ごとに独立して retain / pin する", () => {
   const slots = derivePlanSlots([
     // 値 [64B・消費者 1 本] と添字 [32B・グラフ出力] の 2 本を 1 ステップで定義する形。

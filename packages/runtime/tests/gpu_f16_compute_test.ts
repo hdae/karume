@@ -409,21 +409,21 @@ const attentionOracle = async (
   }
   const scores = await runGraph(
     gpu,
-    singleOpGraph("bmm", [[heads, m, d], [heads, d, n]], [heads, m, n]),
+    singleOpGraph("bmm", [[heads, m, d], [heads, d, n]], [[heads, m, n]]),
     { x0: tensorOf([heads, m, d], qs), x1: tensorOf([heads, d, n], kt) },
   );
 
   // ② S を f16 へ（① の書き出しの丸め）→ 行統計と P は softmax がそのまま作る
   const probs = await runGraph(
     gpu,
-    singleOpGraph("softmax", [[heads, m, n]], [heads, m, n], { attrs: { dim: 2 } }),
+    singleOpGraph("softmax", [[heads, m, n]], [[heads, m, n]], { attrs: { dim: 2 } }),
     { x0: tensorOf([heads, m, n], roundedCopy(scores.output)) },
   );
 
   // ③ P と v を f16 へ（③ のタイル充填の丸め）
   const out = await runGraph(
     gpu,
-    singleOpGraph("bmm", [[heads, m, n], [heads, n, d]], [heads, m, d]),
+    singleOpGraph("bmm", [[heads, m, n], [heads, n, d]], [[heads, m, d]]),
     {
       x0: tensorOf([heads, m, n], roundedCopy(probs.output)),
       x1: tensorOf([heads, n, d], roundedCopy(v as Float32Array<ArrayBuffer>)),
@@ -444,7 +444,7 @@ Deno.test({
         const k = fill([b, h, n, d], KEY);
         const v = fill([b, h, n, d], VALUE);
         const scale = halfScale(d);
-        const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [b, h, m, d], {
+        const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
           attrs: { scale },
         });
 

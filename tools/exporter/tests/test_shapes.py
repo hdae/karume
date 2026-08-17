@@ -20,8 +20,20 @@ from karume.ops import (
 from karume.shapes import assert_graph_shapes, compute_output_shape
 
 
-def shape_of(op, ins, **kwargs):
+def shapes_of(op, ins, **kwargs):
+    """出力 slot 昇順の shape 列（ADR 0068 決定 1 — 2 本を返すのは topk だけ）。"""
     return compute_output_shape(resolve_op_contract(op), ins, "t", **kwargs)
+
+
+def shape_of(op, ins, **kwargs):
+    """単一出力 op の出力 shape（多出力 op は shapes_of を使う）。
+
+    MUST: 本数を見てから slot 0 を返す。多出力 op を黙って slot 0 だけ返すと、2 本目の
+    shape が誰にも突き合わされないテストが書けてしまう。
+    """
+    outs = shapes_of(op, ins, **kwargs)
+    assert len(outs) == 1, f"op '{op}' は出力 {len(outs)} 本（shapes_of で受ける）"
+    return outs[0]
 
 
 class TestSymbolicDimensions:
@@ -399,6 +411,99 @@ class TestLayoutAxisIsStatic:
 
     def test_pad_keeps_the_coefficient_of_a_symbolic_last_dimension(self):
         assert shape_of("pad", [["2T+1"]], attrs={"left": 1, "right": 2}) == ["2T+4"]
+
+
+class TestTopk:
+    """topk は**唯一の多出力 op**（ADR 0068 決定 3）— 2 本とも `[..., k]`。
+
+    受理領域（`1 <= k <= 最終次元`）の下限は attrs スキーマ、上限は shape 規則が見る。
+    記号の最終次元では上限判定を**保留する**（束縛次第 — 判定はランタイム側の層）。
+    """
+
+    def test_both_outputs_take_the_last_dimension_to_k(self):
+        assert shapes_of("topk", [[6, 10]], attrs={"k": 3}) == [[6, 3], [6, 3]]
+
+    def test_k_equal_to_the_last_dimension_is_the_upper_end(self):
+        assert shapes_of("topk", [[4]], attrs={"k": 4}) == [[4], [4]]
+
+    def test_leading_symbolic_dimensions_pass_through(self):
+        assert shapes_of("topk", [[1, "T", 5]], attrs={"k": 2}) == [[1, "T", 2], [1, "T", 2]]
+
+    def test_a_symbolic_last_dimension_defers_the_upper_bound(self):
+        # 記号のままでは k <= dim を断定できない（束縛後にランタイムが判定する）。
+        assert shapes_of("topk", [[2, "T"]], attrs={"k": 9}) == [[2, 9], [2, 9]]
+
+    def test_the_single_output_helper_refuses_a_multi_output_op(self):
+        # 多出力 op を黙って slot 0 だけ返さない（2 本目が無検証になる形を潰す）。
+        with pytest.raises(AssertionError, match="出力 2 本"):
+            shape_of("topk", [[6, 10]], attrs={"k": 2})
+
+    @pytest.mark.parametrize(
+        ("attrs", "why"),
+        [
+            ({"k": 0}, "k=0 は語彙に無い（torch は受理するが値を定義しない）"),
+            ({"k": 11}, "k > 最終次元"),
+            ({}, "k は宣言必須（static-k）"),
+            ({"k": "T"}, "記号 k は静的形状の前提に載らない"),
+            ({"k": 1.5}, "整数でない k"),
+            ({"k": True}, "bool は int の派生だが k ではない"),
+        ],
+    )
+    def test_values_outside_the_accepting_region_are_rejected(self, attrs, why):
+        with pytest.raises(OpContractError):
+            shapes_of("topk", [[6, 10]], attrs=attrs)
+
+    def test_a_zero_length_last_dimension_is_rejected(self):
+        with pytest.raises(OpContractError):
+            shapes_of("topk", [[3, 0]], attrs={"k": 1})
+
+    def test_a_scalar_input_is_rejected(self):
+        with pytest.raises(OpContractError, match="rank 1 以上"):
+            shapes_of("topk", [[]], attrs={"k": 1})
+
+
+def _topk_graph() -> IrGraph:
+    """topk の 2 出力を持つ最小グラフ（多出力ノードを `assert_graph_shapes` に通す形）。
+
+    エクスポータは topk を emit しないが（aten ハンドラ不在 — ADR 0068 追記）、契約の鏡像
+    としての shape 突合は多出力でも閉じていなければならない。
+    """
+    return IrGraph(
+        symbols=["T"],
+        inputs=[IrInput(name="x", dtype="f32", shape=["T", 8])],
+        outputs=["v", "i"],
+        values={
+            "v": IrValue(dtype="f32", shape=["T", 3]),
+            "i": IrValue(dtype="i32", shape=["T", 3]),
+        },
+        nodes=[IrNode(op="topk", ins=["x"], outs=["v", "i"], attrs={"k": 3})],
+    )
+
+
+class TestMultiOutputGraphAgreement:
+    """多出力ノードの shape 突合（ADR 0068 決定 1 — slot ごとに宣言と突き合わせる）。"""
+
+    def test_a_consistent_multi_output_graph_passes(self):
+        assert assert_graph_shapes(_topk_graph()) is None
+
+    def test_a_contradicting_second_output_is_rejected(self):
+        """**slot 1 だけ**が契約と食い違う形（slot 0 の突合だけでは素通りする）。"""
+        graph = _topk_graph()
+        graph.values["i"] = IrValue(dtype="i32", shape=["T", 2])
+
+        with pytest.raises(OpContractError, match="出力 'i' の計算 shape"):
+            assert_graph_shapes(graph)
+
+    def test_a_missing_output_slot_is_rejected(self):
+        """出力を 1 本に削った形は本数の突合で落ちる（列長の門）。"""
+        graph = _topk_graph()
+        graph.outputs = ["v"]
+        # IrNode は frozen なので差し替えで組み直す（宣言も 1 本に揃える）。
+        graph.nodes[0] = IrNode(op="topk", ins=["x"], outs=["v"], attrs={"k": 3})
+        del graph.values["i"]
+
+        with pytest.raises(OpContractError, match="出力 shape の計算が 2 本"):
+            assert_graph_shapes(graph)
 
 
 class TestGraphAgreement:

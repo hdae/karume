@@ -69,6 +69,22 @@ REDUCE_OPS = ("sum", "amax", "amin")
 #: torch 準拠の実測 2026-08-17）。該当しない形（keepdim=False / 中間次元 / 全次元）は
 #: `aten_handlers._h_argmax` が全件 fail loudly にする。
 ARGMAX_OP = "argmax"
+#: 最終次元の top-k（ADR 0068 決定 3 — **ノード多出力の最初の入居者**）。入力 f32 →
+#: **出力 2 本**（slot 0 = 値 f32 の**降順**・slot 1 = 添字 i32）で、2 本とも `[..., k]`。
+#:
+#: MUST: `k` は **attrs で宣言必須**（計画時定数 = static-k）。torch の schema は
+#: `topk(Tensor self, SymInt k, int dim=-1, bool largest=True, bool sorted=True)` で k が
+#: SymInt だが、実行時に決まる k は静的形状の前提（ADR 0004）に載らないので受理しない。
+#: 受理領域は `1 <= k <= 最終次元`（k=0 は torch では受理される形だが語彙に入れない）。
+#: MUST: 軸は最終次元固定（`dim` の欄が無い）で、`largest` / `sorted` の欄も作らない
+#: （降順ソート済みの最大側 1 形だけが語彙）。
+#: MUST: タイブレークは**最小 index**（argmax と同族）・NaN は**最大**。**値の列は torch と
+#: ビット一致**する一方、**添字の列は torch の未規定部分を karume が規定した**側
+#: （torch は同値要素の順序を保証せず、`argmax` と `topk(k=1)` が同一リポ内で食い違う —
+#: 実測は packages/runtime/src/kernels/topk.ts の NOTE）。
+#: NOTE: aten ハンドラは**まだ無い**（多出力 aten の getitem 結線は sampling の実需まで
+#: 先送り — ADR 0068 追記）。torch から出せないことは正常で、NON_EMITTABLE_OPS がその席。
+TOPK_OP = "topk"
 #: 三項 elementwise `out = cond ? a : b`（torch の where）。3 者とも右詰め broadcast で、
 #: 条件が先頭スロットでも**出力は値の側**（写像 bool → f32 — _OUTPUT_DTYPES）。
 WHERE_OP = "where"
@@ -260,6 +276,7 @@ OpKind = Literal[
     "gather",
     "row_reduce",
     "argmax",
+    "topk",
     "cast",
     "reshape",
     "permute",
@@ -580,6 +597,16 @@ CUMSUM_ATTRS: AttrSchema = {"dim": lambda value, where: _assert_integer_attr(val
 #: 計算として実行される（conv1d の dilation / groups と同じ理由 — ADR 0015）。
 REDUCE_ATTRS: AttrSchema = {"dim": lambda value, where: _assert_integer_attr(value, where, 0)}
 
+#: topk の本数 `k`（ADR 0068 決定 3）。**宣言必須の正整数**（= static-k）。
+#:
+#: MUST: k=0 を受理しない（torch は受理するが「大きい順の 0 本」は値を定義しない）。記号 k
+#: （SymInt / 次元式）も `_assert_integer_attr` が弾く — 実行時に決まる k は静的形状の前提
+#: （ADR 0004）に載らず、出力 shape も確保バイト数も計画時に決まらなくなる。
+#: MUST: 上限はここでは見ない。`k <= 最終次元` は入力 shape が要るので shapes.py 側、
+#: **実装上限**（workgroup storage 由来）は device limit が要るのでランタイム側
+#: （packages/runtime/src/kernels/topk.ts の `assertTopkK`）。
+TOPK_ATTRS: AttrSchema = {"k": lambda value, where: _assert_integer_attr(value, where, 1)}
+
 #: elementwise カーネルへ **params の末尾で** f32 として渡す attr（並びがそのまま params の
 #: レイアウト）。エクスポータ側で持つのは、キーを跨ぐ不変条件（clamp の min <= max）を
 #: shape 層で検査するため（TS 側 packages/runtime/src/ops.ts の SCALAR_PARAM_ATTRS と同義）。
@@ -702,6 +729,11 @@ def cumsum_dim(attrs: Mapping[str, Any], where: str) -> int:
 def reduce_dim(attrs: Mapping[str, Any], where: str) -> int:
     """reduce 族ノードの縮約軸（非負の軸番号 — 既定値補完はしない）。"""
     return _assert_integer_attr(attrs.get("dim"), f"{where} の attrs.dim", 0)
+
+
+def topk_k(attrs: Mapping[str, Any], where: str) -> int:
+    """topk ノードの本数 k（正整数 — 既定値補完はしない）。"""
+    return _assert_integer_attr(attrs.get("k"), f"{where} の attrs.k", 1)
 
 
 def scalar_param_values(contract: OpContract, attrs: Mapping[str, Any], where: str) -> list[float]:
@@ -904,7 +936,8 @@ _DTYPES: dict[str, frozenset[str]] = {
 
 #: 出力 slot 別の dtype 写像の**列**を宣言する表（ADR 0068 決定 1）。ここに無い op は
 #: 「出力 1 本・恒等」。恒等でないのは比較 4 本（f32 → bool）/ bool 入力の sum
-#: （→ i32 のカウント）/ where（bool → f32）/ argmax（→ 添字の i32）だけ。
+#: （→ i32 のカウント）/ where（bool → f32）/ argmax（→ 添字の i32）/ topk（列の長さ 2 —
+#: slot 0 の値は恒等・slot 1 が添字の i32）だけ。
 _OUTPUT_DTYPES: dict[str, tuple[dict[str, str], ...]] = {
     "ge": ({"f32": "bool"},),
     "ge_scalar": ({"f32": "bool"},),
@@ -913,6 +946,8 @@ _OUTPUT_DTYPES: dict[str, tuple[dict[str, str], ...]] = {
     "sum": ({"f32": "f32", "bool": "i32"},),
     WHERE_OP: ({"bool": "f32"},),
     ARGMAX_OP: ({"f32": "i32"},),
+    # 列の長さがそのまま出力数（ADR 0068 決定 3 — topk は 2 本出す）。
+    TOPK_OP: ({}, {"f32": "i32"}),
 }
 
 #: 宣言が無い op の既定 = **出力 1 本・恒等**（空の写像は定義域全体が恒等で埋まる）。
@@ -1001,6 +1036,9 @@ OP_CONTRACTS: dict[str, OpContract] = {
     # 最終次元の argmax（ADR 0068 決定 2）。attrs 空・入力 f32 → 出力 i32（写像は
     # _OUTPUT_DTYPES）で、rank 保存は shape 規則が持つ。
     ARGMAX_OP: _contract(ARGMAX_OP, "argmax", 1),
+    # 最終次元の top-k（ADR 0068 決定 3）。attrs `k` 宣言必須・出力 2 本（値 f32 + 添字 i32 —
+    # 写像は _OUTPUT_DTYPES）で、`[..., k]` の shape 規則と受理領域は shapes.py が持つ。
+    TOPK_OP: _contract(TOPK_OP, "topk", 1, TOPK_ATTRS),
     CAST_OP: _slot_contract(
         CAST_OP, "cast", 1, UniformDtypes(accept=frozenset(SEMANTIC_DTYPES)), CAST_ATTRS
     ),
@@ -1068,8 +1106,16 @@ OP_CONTRACTS: dict[str, OpContract] = {
     **{name: _contract(name, "gru_scan", 4) for name in GRU_SCAN_OPS},
 }
 
+#: 契約表にあるが convert が **emit できない** op（aten ハンドラを持たない = torch から
+#: 出せない）。
+#:
+#: MUST: 理由つきで列挙する。golden 被覆の門（goldens.generate_all）は EMITTABLE_OPS を
+#: 見るので、ここへ入れた op は「golden の無い op」として通ってしまう — 空集合が既定で、
+#: 増やすときは「torch から出せないこと」自体を門にする（tests/test_convert.py が
+#: `torch.topk` の変換が UnsupportedAtenOpsError になることを固定している）。
+NON_EMITTABLE_OPS = frozenset({TOPK_OP})
 #: convert が emit しうる IR op 名の正本。語彙の増加を明示行為にするための門。
-EMITTABLE_OPS = frozenset(OP_CONTRACTS)
+EMITTABLE_OPS = frozenset(OP_CONTRACTS) - NON_EMITTABLE_OPS
 
 
 #: rank 上限が効く op（strided コピー族 — カーネルの params は rank 固定）。
