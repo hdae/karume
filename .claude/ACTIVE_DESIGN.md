@@ -21,9 +21,12 @@
   MiniCPM5-1B 1-shot recipe（`3f072cb` — 真の GQA 形 24 層・sanity greedy）+
   `e2e_minicpm5_test.ts`（tolerance 1e-3・greedy・census 全 `:gqa`）。**波 B 済
   （2026-08-17）**: 出力列化 2 段（`3a31544`/`9a795a7` — バイト不変）+ argmax（`cbe093a`）+
-  topk（多出力の最初の入居者・値列 = torch ビット一致・添字列 = 最小 index 規範〈ADR 0068
-  追記 2 の実測訂正〉・k ≤ 63 既定上限）。**次 = 波 C（GenerationContext + states{} —
-  ADR 0066）**。0 本席と ir.ts outs 改訂は波 D（state_append と同時）。
+  topk（多出力の最初の入居者・値列 = torch と数値同値・添字列 = 最小 index 規範〈ADR 0068
+  追記 2〉・k ≤ 63 既定上限）。**波 C 済（2026-08-17）**: states{} パーサ（`1d7bdbb`）+
+  GenerationContext（第 5 寿命クラス・可変 uniform・poison/rewind/device-loss・診断席・
+  計画鍵不変条件）。**次 = 波 D（states 形 attention + state_append — ADR 0067 決定 4〜7）**。
+  波 D 同時消化: 0 本席 / states 専用記号の束縛（ADR 0066 追記 7）/ C-2 の結線点
+  （ActiveBacking 分離・sliding rewind 拒否・poison トリガ・full 容量実行時検査）。
 
 ## Open decisions
 

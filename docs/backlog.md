@@ -35,10 +35,14 @@ accepted（裁定 A〜C + Codex 6 巡収束）。**実装波の波割りは裁�
 `3f072cb` recipe・e2e 門）** → **B = 多出力 + argmax / topk（済 2026-08-17 —
 `3a31544`/`9a795a7` 出力列化・`cbe093a` argmax・topk と docs は後続コミット。0 本席は
 波 D へ・topk exporter 側〈getitem 結線〉は sampling 実需まで先送り）** →
-C = GenerationContext +
-states{} → D = states 形 attention + state_append（0 本席 = ir.ts / verify.py の outs
+**C = GenerationContext + states{}（済 2026-08-17 — `1d7bdbb` states{} パーサ・`(C-2)`
+GenerationContext = 第 5 寿命クラス + 可変 uniform + poison/rewind/device-loss + 診断席）**
+→ D = states 形 attention + state_append（0 本席 = ir.ts / verify.py の outs
 改訂と**shapes.py の本数検査前 `declared_outputs[0]` 参照の解消**も同時 — 第 2 巡レビュー
-指摘）→ E = decode 台本 + greedy 検収 →
+指摘。**states 専用記号の束縛可能性も同時**〈ADR 0066 追記 7 — checkSymbolBindability を
+入力 ∪ states へ緩める〉。C-2 が残した結線点 = ActiveBacking 分離・sliding rewind 拒否・
+poison トリガ・full スロット実行時容量検査・uniform 固定束縛）→ E = decode 台本 +
+greedy 検収 →
 F = w4（Phase 0 sweep は A 完了後から並行可）→ G = shard + admission → H = Gemma 4 E2B
 検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで
 先送り / 検収は固定 token id 列の parity（tokenizer・models パイプライン本格化は波外）。

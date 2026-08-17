@@ -191,3 +191,12 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
    書込みが queryLength 行に限られるのは **state スロットだけ**（context 所有バッファで、
    transient slot の full-write 対象外 — 残骸は次 step の append が同じ式で上書きし、
    読者は resident 範囲外を読まない）。
+
+7. **states 専用記号の束縛可能性（決定 2 の補強・実装波 C で判明 — 2026-08-17）**: 現行の
+   `checkSymbolBindability`（format/ir.ts）は「全 symbols が**入力 shape の次元位置**に
+   現れる」ことを要求するため、**states にしか現れない記号（KV 容量 `C` 等）が宣言できない**。
+   容量は context 生成時にユーザーが決める値（決定 3 の R2 — 静的物理格納）なので、export 時
+   定数に焼く形は本 ADR の前提と矛盾する。契約: **states の shape に現れる記号は
+   `createGenerationContext(spec.bindings)` を束縛点とする有効な宣言**とし、束縛可能性検査は
+   「入力 shape ∪ states shape のどこかに現れる」へ緩める（値 shape の解決には従来どおり
+   入力由来の束縛だけが効く — states 専用記号は計画にも値にも現れない）。実装は波 D。
