@@ -226,6 +226,35 @@ Deno.test("assertRuntimeSupport: perSlot op の出力 dtype も値の側の受�
   assertEquals(error.message.includes("値 'y': i32"), true, error.message);
 });
 
+// 多出力 op（topk）の出力宣言を slot 間で**入れ替えた**形。全出力を slot 0 の受理集合で見る
+// 退行（= 出力 slot 別の列を潰した実装）だと、値の側の f32 と添字の側の i32 がどちらも「slot 0 の
+// 集合」に照らして判定され、片方しか列挙されない（あるいは両方素通りする）。
+// MUST: tools/exporter/tests/test_verify.py の
+// `test_swapped_output_slots_of_a_multi_output_op_are_enumerated` と**同形**に保つ（同じ退行を
+// 両側で検出できることがこの門の対称性）。
+Deno.test("assertRuntimeSupport: 多出力 op の出力 slot を取り違えた形を両宣言とも列挙する", () => {
+  const graph = baseGraph();
+  graph.requires = { ops: ["topk"] };
+  graph.inputs = [{ name: "x", dtype: "f32", shape: ["T", 4] }];
+  graph.outputs = ["v", "i"];
+  graph.initializers = {};
+  // slot 0 は値（f32）・slot 1 は添字（i32）なので、この 2 本は**どちらも**非対応
+  graph.values = {
+    v: { dtype: "i32", shape: ["T", 2] },
+    i: { dtype: "f32", shape: ["T", 2] },
+  };
+  graph.nodes = [{ op: "topk", ins: ["x"], outs: ["v", "i"], attrs: { k: 2 } }];
+  const model = openModel(baseModelBuffer(graph, []));
+
+  const error = assertThrows(
+    () => assertRuntimeSupport(model.graph, RUNTIME_SUPPORT),
+    ContainerError,
+    "非対応 意味論 dtype (2)",
+  );
+  assertEquals(error.message.includes("値 'v': i32"), true, error.message);
+  assertEquals(error.message.includes("値 'i': f32"), true, error.message);
+});
+
 Deno.test("assertRuntimeSupport: 対応 op に付いた未実装 attrs をノードごとに列挙する", () => {
   const graph = baseGraph();
   graph.nodes[1].attrs = { alpha: 1, approximate: "tanh" };

@@ -250,6 +250,10 @@ for (
  *
  * 2 本目のグラフは**片方の出力が誰にも消費されない**形（`uses = 0` かつグラフ出力でもない
  * 到達不能な値）。定義ぶんの retain が解放されないと run 末尾の `assertDrained` が落ちる。
+ *
+ * MUST: どちらの形も**同一 Session で 2 回**走らせる。slot backing はヒット run でしか活性化
+ * しないので（`Session.#activateBacking`）、1 回ずつでは `bakeBindGroups` の slot 1 束縛・
+ * pin 済み出力写像・backed readback の欠落や入れ替わりがアリーナ経路の緑の裏に隠れる。
  */
 const topkLifetimeGraph = (pinIndices: boolean): GraphJson => ({
   format: "karume-ir",
@@ -301,6 +305,20 @@ Deno.test({
         assertEquals(session.diagnostics().lastRun?.peakTransientBytes, 72);
         // dispatch は topk / neg / exp の 3 本（topk は 1 dispatch で 2 本書く）
         assertEquals(session.diagnostics().submit.dispatchCount, 3);
+
+        // 同じ Session の 2 回目 = 導出済み計画にヒットして **slot backing 経路**へ入る
+        // （bind group は構築時に焼き込み済みで、読み戻し先も構築時に確定した写像）。多出力の
+        // slot 1 の束縛・pin 済み出力写像・backed readback のどれが欠けても・入れ替わっても、
+        // アリーナ経路の 1 回目だけなら緑のまま通る。
+        const again = await session.run({ x });
+        assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "2 run 目は導出済み計画");
+        assertEquals(session.diagnostics().planBacking.buildCount, 1, "backing を構築した");
+        assertEquals(Object.keys(again).sort(), ["e", "i"]);
+        assertEquals(again["i"].dtype, "i32");
+        assertEquals([...again["i"].data], [...expected[1].data], "backed 経路の添字 readback");
+        assertEquals(allclose(again["e"].data, exponent.data).pass, true, "backed 経路の値側");
+        // 積むコマンド列はアリーナ経路と同一（3 本 → 累計 6 本）
+        assertEquals(session.diagnostics().submit.dispatchCount, 6);
       } finally {
         await session.dispose();
       }
@@ -318,6 +336,15 @@ Deno.test({
         // 消費者ゼロの添字はそのステップの末尾でプールへ戻るので、`nv` がその実体を掴む
         // （生存ピークは v / i の 2 本ぶん = 48）。
         assertEquals(orphan.diagnostics().lastRun?.peakTransientBytes, 48);
+
+        // orphan 形の 2 回目も backing 経路。読み戻し先の写像が slot を取り違えれば、`e` が
+        // pin されていない実体を掴む（`Session.#isReadable` が pin 済み slot だけを許すので
+        // 多くは例外で落ち、通ってしまう形はここの値突合が拾う）。
+        const again = await orphan.run({ x });
+        assertEquals(orphan.diagnostics().lastRunPrepared?.hit, true, "2 run 目は導出済み計画");
+        assertEquals(orphan.diagnostics().planBacking.buildCount, 1, "backing を構築した");
+        assertEquals(Object.keys(again), ["e"]);
+        assertEquals(allclose(again["e"].data, exponent.data).pass, true, "backed 経路でも不変");
       } finally {
         await orphan.dispose();
       }

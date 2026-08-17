@@ -487,6 +487,32 @@ class TestRuntimeSupport:
         with pytest.raises(ContainerError, match="値 'y': i32"):
             assert_runtime_support(graph)
 
+    def test_swapped_output_slots_of_a_multi_output_op_are_enumerated(self):
+        """多出力 op（topk）の出力宣言を slot 間で**入れ替えた**形
+        （packages/runtime/tests/format_container_test.ts の同形テストと対）。
+
+        全出力を slot 0 の受理集合で見る退行だと、値の側（f32）と添字の側（i32）がどちらも
+        同じ集合に照らして判定され、片方しか列挙されない（あるいは両方素通りする）。
+        """
+        graph = parse(
+            requires={"ops": ["topk"]},
+            outputs=["v", "i"],
+            initializers={},
+            # slot 0 は値（f32）・slot 1 は添字（i32）なので、この 2 本は**どちらも**非対応
+            values={
+                "v": {"dtype": "i32", "shape": ["T", 2]},
+                "i": {"dtype": "f32", "shape": ["T", 2]},
+            },
+            nodes=[{"op": "topk", "ins": ["x"], "outs": ["v", "i"], "attrs": {"k": 2}}],
+        )
+
+        with pytest.raises(ContainerError) as err:
+            assert_runtime_support(graph)
+
+        message = str(err.value)
+        assert "非対応 意味論 dtype (2)" in message
+        assert "値 'v': i32" in message and "値 'i': f32" in message
+
     def test_unsupported_storage_dtype_is_reported(self):
         graph = parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "bf16"}}})
 

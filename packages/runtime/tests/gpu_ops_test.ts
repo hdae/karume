@@ -6,7 +6,7 @@ import { CodegenError } from "../src/codegen/errors.ts";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
-import { applyReferenceOp, applyReferenceOpOutputs } from "../src/reference/ops.ts";
+import { applyReferenceOp, applyReferenceOpOutputs, type RefTensor } from "../src/reference/ops.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import {
@@ -561,6 +561,74 @@ Deno.test({
     } finally {
       gpu.destroy();
     }
+  },
+});
+
+/** f32 テンソルの**ビット列**（±0.0 は数値としては同値なので、符号ビットはここでしか見えない）。 */
+const f32Bits = (tensor: Tensor | RefTensor): readonly number[] => {
+  if (tensor.dtype !== "f32") throw new Error(`f32 でない dtype: ${tensor.dtype}`);
+  return [...new Uint32Array(tensor.data.slice().buffer)];
+};
+
+/**
+ * `+0.0` と `-0.0` が混じる tie 行（**選ばれた添字の要素のビットがそのまま出る**こと）。
+ *
+ * MUST: 期待値は **karume の規範**（同値類は最小 index 優先・値は選ばれた要素のビットそのもの）
+ * で、torch 突合ではない。`±0.0` は比較上同値なので、どちらの符号を書いても数値の突合
+ * （allclose も assertEquals も `-0 === +0`）は緑になる — 符号ビットは **Uint32 のビット列**
+ * でしか見えない。ここが緩むと、比較を `max` イディオムへ畳んだ実装（ドライバの
+ * `max(-0.0, +0.0)` は `+0.0` を返しうる）や、値を添字から引き直さず正規化して書く実装が
+ * 黙って通る。
+ *
+ * NOTE: NaN payload の差（同じ NaN でも仮数部のビットが違う形）は対象外 — WGSL / ドライバは
+ * payload の保存を保証しないので、規範として固定できない。
+ *
+ * 行の意味:
+ * 0. 全要素が ±0.0 の tie → 添字昇順・値は各添字の符号がそのまま
+ * 1. 有限値 1 本 + ±0.0 の tie → 1.0 が先頭、零は添字昇順
+ * 2. ±0.0 の tie + 負値 → 零 3 本が先（添字昇順）、−1.0 が最後
+ */
+Deno.test({
+  name: "topk は ±0.0 の tie でも選択添字どおりのビットを書く（値をビット列で固定・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const rows = [
+      [-0, 0, -0, 0],
+      [0, -0, 1, -0],
+      [-0, 0, -1, -0],
+    ];
+    // 値のビット列（0x80000000 = −0.0 / 0x00000000 = +0.0 / 0x3f800000 = 1.0 / 0xbf800000 = −1.0）
+    const VALUE_BITS = [
+      [0x80000000, 0x00000000, 0x80000000, 0x00000000],
+      [0x3f800000, 0x00000000, 0x80000000, 0x80000000],
+      [0x80000000, 0x00000000, 0x80000000, 0xbf800000],
+    ];
+    const INDICES = [
+      [0, 1, 2, 3],
+      [2, 0, 1, 3],
+      [0, 1, 3, 2],
+    ];
+    const input = fill([rows.length, 4], (i) => rows[Math.floor(i / 4)][i % 4]);
+    const testCase: OpCase = {
+      name: "topk signed-zero tie",
+      op: "topk",
+      inputs: [input],
+      outShapes: [[rows.length, 4], [rows.length, 4]],
+      outDtypes: ["f32", "i32"],
+      attrs: { k: 4 },
+    };
+    const gpu = await acquireGpu();
+    try {
+      const actual = await runOutputs(gpu, testCase);
+      assertEquals(f32Bits(actual[0]), VALUE_BITS.flat(), "GPU の topk 値ビット列");
+      assertEquals([...actual[1].data], INDICES.flat(), "GPU の topk 添字列");
+    } finally {
+      gpu.destroy();
+    }
+    // 同じ表を CPU 参照にも当てて、オラクル側の符号も同時に固定する
+    const expected = applyReferenceOpOutputs("topk", [input], { k: 4 });
+    assertEquals(f32Bits(expected[0]), VALUE_BITS.flat(), "CPU 参照の topk 値ビット列");
+    assertEquals([...expected[1].data], INDICES.flat(), "CPU 参照の topk 添字列");
   },
 });
 
