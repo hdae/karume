@@ -77,11 +77,17 @@ export { createSession } from "./src/runtime/executor.ts";
  * `Tensor` は意味論 dtype の判別ユニオン（ADR 0009 による ADR 0008 の部分改訂）:
  * `{ dtype: "f32", data: Float32Array }` / `{ dtype: "i32", data: Int32Array }` /
  * `{ dtype: "bool", data: Uint32Array }`（bool は u32 の 0 / 1）。入出力で対称。
+ *
+ * `GenerationContext`（1 生成ぶんの可変 state の所有者 — ADR 0066）も同じ理由で型のみ:
+ * 入口は `Session.createGenerationContext` だけで、直接構築すると確保の errorScope と容量
+ * ゲートを迂回できてしまう（`ResidentTensor` / `BatchScope` と同じ流儀）。
  */
 export type {
   ComputePrecision,
   EnqueueOptions,
   FusionCounts,
+  GenerationContext,
+  GenerationContextSpec,
   ParamsCacheStats,
   PlanBackingStats,
   PreparedPlanStats,
@@ -92,6 +98,7 @@ export type {
   Session,
   SessionDiagnostics,
   SessionOptions,
+  StateBackingStats,
   StorageDiagnostics,
   Tensor,
 } from "./src/runtime/executor.ts";

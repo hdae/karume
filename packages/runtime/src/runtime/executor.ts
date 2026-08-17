@@ -44,6 +44,13 @@ export type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { type ExecStep, type FusionCounts, planFusions } from "./fusion.ts";
+import { GenerationContext, type GenerationContextHost } from "./generation-context.ts";
+/**
+ * 1 生成ぶんの可変 state の所有者（ADR 0066 決定 1）。**型としてのみ**公開する — 入口は
+ * {@link Session.createGenerationContext} だけで、直接構築すると errorScope の門（確保失敗の
+ * 検出）と容量ゲート（追記 5）を迂回できてしまう（`GpuContext` / `ResidentTensor` と同じ流儀）。
+ */
+export type { GenerationContext } from "./generation-context.ts";
 /**
  * ルール別の融合適用回数（{@link SessionDiagnostics.lastRunFusions} の型 — 公開面で名前を
  * 持てるように再輸出。`ScoreStorage` と同じ扱いで、素通し再輸出ではなく**既に公開している型の
@@ -76,6 +83,7 @@ import { RecipeBuilder } from "./recipe-builder.ts";
 import {
   type ComputePrecision,
   type EnqueueOptions,
+  type GenerationContextSpec,
   I8A8_DOT,
   type I8a8Dot,
   type ParamsCacheStats,
@@ -92,6 +100,7 @@ import {
 export type {
   ComputePrecision,
   EnqueueOptions,
+  GenerationContextSpec,
   I8a8Dot,
   ParamsCacheStats,
   PlanBackingStats,
@@ -101,6 +110,7 @@ export type {
   RunOutputs,
   SessionDiagnostics,
   SessionOptions,
+  StateBackingStats,
   StorageDiagnostics,
   Tensor,
 } from "./session-types.ts";
@@ -452,6 +462,14 @@ export class Session {
    */
   readonly #retired: GPUBuffer[] = [];
   /**
+   * 生存中の {@link GenerationContext}（診断 `stateBacking.residentBytes` の**導出元**）。
+   *
+   * MUST: 常駐バイト数を独立に更新するカウンタで持たない — 生成と dispose の 2 経路が別々に
+   * 足し引きする形にすると、片方を通らない失敗経路（確保途中の例外）で恒久的にずれる。
+   */
+  readonly #contexts = new Set<GenerationContext>();
+  #contextCount = 0;
+  /**
    * 実行中 / 待機中の run と dispose の直列化チェーン。決着（成功・失敗）だけを次に渡すため
    * 自身は決して reject しない。
    */
@@ -702,6 +720,54 @@ export class Session {
     });
   }
 
+  /**
+   * 1 生成ぶんの可変 state を所有する {@link GenerationContext} を作る（ADR 0066 決定 1 / 6）。
+   *
+   * `graph.states` のスロット容量（記号次元は `spec.bindings` で解決）と `spec.chunkLength` を
+   * 確定して物理確保する。Session 側（不変重み・計画キャッシュ・slot backing）は**何も変わらない**
+   * — 決定 5 の所有権分離により、レシピと計画鍵は context を知らない。
+   *
+   * MUST: state スロットは Session のアリーナにも {@link ResidentTensor} にも載せない（寿命の
+   * 粒度が違う — 詳細は generation-context.ts のモジュール doc）。
+   * MUST: 確保は out-of-memory / validation の errorScope 区間で行い、失敗は fail loudly
+   * （決定 6）。容量が `maxStorageBufferBindingSize` を超えるスロットは確保の前に落とす（追記 5）。
+   * NOTE: context は Session より長生きできる（`dispose` は注入した flush と自分のバッファだけを
+   * 触る）。ただし state を使う run は Session 経由なので、実際の用途は Session の生存中に閉じる。
+   * NOTE（波 D）: prefill / decode の呼び出し形（メソッド名・入出力型）は ADR 0066 決定 6 が
+   * 実装設計へ委ねた部分で、`states` 欄つき attention / `state_append` と同時に生える。
+   */
+  createGenerationContext(spec: GenerationContextSpec): Promise<GenerationContext> {
+    // dispose 済みの判定は呼び出し時点で行う（run / enqueue と同じ規律）。
+    if (this.#disposal !== undefined) {
+      return Promise.reject(
+        new ExecutionError("dispose 済みの Session では GenerationContext を作れない"),
+      );
+    }
+    return this.#createGenerationContext(spec);
+  }
+
+  /**
+   * {@link Session.createGenerationContext} の本体（借りる面の組み立てと生存集合の登録）。
+   *
+   * MUST: 生存集合への登録は**確保が決着した後**（失敗した context を数えると、診断の常駐
+   * バイト数が実体の無いぶんを主張し続ける）。
+   */
+  async #createGenerationContext(spec: GenerationContextSpec): Promise<GenerationContext> {
+    const host: GenerationContextHost = {
+      gpu: this.#state.gpu,
+      graph: this.#state.model.graph,
+      flush: () => this.#state.scheduler.flush(),
+      serialize: <T>(body: () => Promise<T>): Promise<T> => this.#serialize(body),
+      forget: (context: GenerationContext): void => {
+        this.#contexts.delete(context);
+      },
+    };
+    const context = await GenerationContext.create(host, spec);
+    this.#contexts.add(context);
+    this.#contextCount += 1;
+    return context;
+  }
+
   /** 重みバッファを解放する。実行中の run の完了を待ってから破棄し、以後の run は fail loudly。 */
   dispose(): Promise<void> {
     // MUST: 2 度目以降も同じ完了を返す。先に返すと呼び出し側が「破棄済み」と見なして
@@ -734,6 +800,15 @@ export class Session {
       planBacking: {
         residentBytes: this.#backing?.bytes ?? 0,
         buildCount: this.#backingBuilds,
+      },
+      stateBacking: {
+        // MUST: 生存集合から毎回導出する（{@link Session.#contexts} の doc）。
+        residentBytes: [...this.#contexts]
+          .reduce((total, context) => total + context[RUNTIME_INTERNAL].bytes, 0),
+        contextCount: this.#contextCount,
+        // 波 D: state を含む bind group の焼き直し回数（ADR 0066 決定 5 の焼き込み単位の分離を
+        // 実装した時点で埋まる）。state を束ねる dispatch が 1 本も無い本波では 0 が正しい値。
+        rebindCount: 0,
       },
     };
   }
@@ -1161,6 +1236,13 @@ export class Session {
    * bind group へ畳み込む — 差し替えを鍵に反映しないと、**前の常駐テンソルを束ねたままの
    * bind group** で回り続ける（例外は 1 つも出ず、値だけが古い）。区切りの `|` は bindings
    * 側の連結（数値とカンマだけ）には現れないので、常駐入力の無い run の鍵は従来と同一のまま。
+   * MUST: **{@link GenerationContext} の識別子は載せない**（ADR 0066 決定 5）。載せると context を
+   * 切り替えるたびに計画・融合判定・レシピ導出と slot backing 構築が全滅する（decode の
+   * ホットパスで毎シーケンス再導出になる）。常駐入力と逆の扱いになるのは、context 所有の実体
+   * （state スロットと論理長 uniform）を Session 所有の bind group へ焼き込まないため — 分離の
+   * 代償として「state を含む bind group」だけを context 側で束ね直す（決定 5・実装は波 D）。
+   * この不変条件は tests/gpu_generation_context_test.ts が「context を 2 本作っても導出済み計画と
+   * params キャッシュが増えない」形で門にしている。
    */
   #preparedKey(bindings: SymbolBindings, residents: ReadonlyMap<string, ResidentTensor>): string {
     const dims = this.#state.model.graph.symbols.map((sym) => bindings[sym]).join(",");

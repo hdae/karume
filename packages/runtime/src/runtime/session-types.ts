@@ -63,6 +63,26 @@ export type EnqueueOptions = {
 };
 
 /**
+ * {@link Session.createGenerationContext} の指定（ADR 0066 決定 6）。
+ *
+ * スロット容量（`graph.states` の記号次元）と `chunkLength` を確定して物理確保する。context は
+ * 入力を 1 本も持たないので、記号次元は**ここで与えた束縛だけ**で決まる（states は束縛源に
+ * ならない — ADR 0066 決定 2）。
+ */
+export type GenerationContextSpec = {
+  /**
+   * state スロットの shape に現れる記号次元の値。`graph.symbols` に無い名前は fail loudly。
+   * 数値次元だけで容量が決まるグラフでは省略できる。
+   */
+  readonly bindings?: SymbolBindings;
+  /**
+   * 固定長 prefill chunk の行数（ADR 0066 決定 4 — 計画時定数で、末尾 chunk は pad で埋める）。
+   * decode は `queryLength = 1` 固定形なので、この値とは独立に走る。
+   */
+  readonly chunkLength: number;
+};
+
+/**
  * 整数内積の変種（w8a8 経路）。**両者は同じ整数を返す**ので、これは速度の選択でしかない
  * （src/kernels/linear-i8a8.ts）。
  */
@@ -240,6 +260,35 @@ export type PlanBackingStats = {
   readonly buildCount: number;
 };
 
+/**
+ * state backing（{@link GenerationContext} 所有バッファ群）の実績。ADR 0066 決定 5 が
+ * {@link PlanBackingStats} と同格で置くよう定めた診断席で、KV の常駐量と焼き直しの沈黙劣化に
+ * 対する唯一の観測点になる。
+ *
+ * MUST: 常設診断として出す。**context の識別子は計画鍵に入らない**（決定 5 の MUST）ので、
+ * context を切り替えてもレシピ再導出は起きない — その代わり「state を含む bind group の焼き直し」
+ * だけが起きる形になっており、そこが暴走しても例外も警告も出ない。
+ */
+export type StateBackingStats = {
+  /**
+   * 生存中の context が常駐させている総バイト数（未生成 / 全て dispose 済みなら 0）。
+   * MUST: 定義は「state スロットの総バイト数 + 論理長 uniform」= context が実際に GPU 上で
+   * 抱えるバイト数（{@link StorageDiagnostics.residentCompressedBytes} が scale ぶんを数えるのと
+   * 同じ規律）。生存集合から毎回導出し、独立に更新するカウンタは持たない。
+   */
+  readonly residentBytes: number;
+  /** Session の生存中に生成した context の累計本数（現存数ではなく累計）。 */
+  readonly contextCount: number;
+  /**
+   * state を含む bind group を焼き直した累計回数。
+   *
+   * NOTE: 波 C の時点では **0 固定**（state を束ねる dispatch がまだ無い — ノードの `states` 欄 /
+   * `state_append` / attention 統合は波 D）。波 D で ADR 0066 決定 5 の「焼き込み単位の分離」を
+   * 実装した時点でここが埋まる。
+   */
+  readonly rebindCount: number;
+};
+
 export type SessionDiagnostics = {
   readonly pipelineCount: number;
   readonly submit: SubmitStats;
@@ -287,4 +336,10 @@ export type SessionDiagnostics = {
    * 未構築の Session では `{ residentBytes: 0, buildCount: 0 }`。
    */
   readonly planBacking: PlanBackingStats;
+  /**
+   * state backing（{@link GenerationContext} 所有）の実績（Session の現況 + 累計 —
+   * ADR 0066 決定 5）。context を 1 本も作っていない Session では
+   * `{ residentBytes: 0, contextCount: 0, rebindCount: 0 }`。
+   */
+  readonly stateBacking: StateBackingStats;
 };

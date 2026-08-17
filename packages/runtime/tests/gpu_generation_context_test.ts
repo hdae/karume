@@ -1,0 +1,576 @@
+// GenerationContext（1 生成ぶんの可変 state の所有者 — ADR 0066）の門。
+//
+// 波 C の時点では **state を読み書きする dispatch がまだ無い**（ノードの states 欄・
+// state_append・attention 統合は波 D）。したがってここが固定するのは値ではなく契約:
+// ①所有権と寿命（確保 → dispose・二重 dispose・Session との順序独立）②受け口のゲート
+// （states 無しグラフ・chunkLength・記号容量・容量の束縛上限）③確保失敗が errorScope で
+// fail loudly になること ④論理長の進行と巻き戻しの境界 ⑤汚染と device 消失の拒否
+// ⑥論理長 uniform が**実際に GPU 上へ載っている**こと ⑦context が計画鍵に一切効かないこと。
+//
+// ⑥ が無いと writeBuffer の no-op（無効バッファ・整列違反では警告すら出ない）を検出できない。
+// ⑦ が無いと、波 D で context を鍵に混ぜる実装が「値は正しいまま decode が毎 step 再導出」と
+// いう形で通ってしまう（例外も警告も出ない）。
+
+import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
+import { openModel } from "../src/format/container.ts";
+import {
+  acquireGpu,
+  type GpuContext,
+  GpuDeviceLostError,
+  GpuOutOfMemoryError,
+  LIMIT_CAPS,
+  RUNTIME_INTERNAL,
+} from "../src/gpu/device.ts";
+import {
+  createSession,
+  type GenerationContext,
+  type Session,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import { ExecutionError } from "../src/runtime/plan.ts";
+import { baseGraph, f32Bytes, type GraphJson } from "./helpers/format.ts";
+import { graphModelBuffer } from "./helpers/graph.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+
+/** WebGPU core 既定のストレージ束縛上限（容量ゲートの門はここを再現する）。 */
+const CORE_STORAGE_BINDING_LIMIT = 128 * 1024 * 1024;
+
+/** 論理長 uniform のバイト数（pastLength / queryLength の 2 語 — ADR 0066 追記 4）。 */
+const LENGTHS_BYTES = 8;
+
+/** 数値容量の state スロット 2 本（k / v = [1,2,C,4]）を持つグラフ。y = x·w。 */
+const STATE_CAPACITY = 16;
+const SLOT_BYTES = 1 * 2 * STATE_CAPACITY * 4 * 4;
+
+const stateGraph = (
+  states: GraphJson["states"],
+  extra: Partial<GraphJson> = {},
+): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["matmul"] },
+  symbols: ["T"],
+  inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
+  outputs: ["y"],
+  initializers: { w: { tensor: "proj.weight", storage: { dtype: "f32" } } },
+  values: {
+    w: { dtype: "f32", shape: [4, 3] },
+    y: { dtype: "f32", shape: ["T", 3] },
+  },
+  states,
+  nodes: [{ op: "matmul", ins: ["x", "w"], outs: ["y"], attrs: {} }],
+  ...extra,
+});
+
+const NUMERIC_STATES: GraphJson["states"] = {
+  k: { dtype: "f32", shape: [1, 2, STATE_CAPACITY, 4] },
+  v: { dtype: "f32", shape: [1, 2, STATE_CAPACITY, 4] },
+};
+
+/**
+ * 記号容量のグラフ。**入力 `cap` は容量記号 `C` を束縛可能にするためだけに居る** — IR は
+ * 「symbols は入力 shape の次元位置に現れる」ことを要求する（format/ir.ts の
+ * checkSymbolBindability）ので、states だけに現れる記号は宣言できない。context 生成は入力を
+ * 取らないため、この入力を渡さなくても `spec.bindings` だけで容量が決まることをこの形で示す。
+ */
+const symbolicGraph = (): GraphJson =>
+  stateGraph({ k: { dtype: "f32", shape: [1, 2, "C", 4] } }, {
+    symbols: ["T", "C"],
+    inputs: [
+      { name: "x", dtype: "f32", shape: ["T", 4] },
+      { name: "cap", dtype: "f32", shape: ["C"] },
+    ],
+  });
+
+const modelBytes = (graph: GraphJson): ArrayBuffer =>
+  graphModelBuffer(graph, [
+    {
+      name: "proj.weight",
+      dtype: "F32",
+      shape: [4, 3],
+      data: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1, 0.125, -0.25, 1.5, 2, -1, 0.75]),
+    },
+  ]);
+
+const stateSession = (
+  gpu: GpuContext,
+  graph: GraphJson = stateGraph(NUMERIC_STATES),
+): Promise<Session> => createSession(gpu, openModel(modelBytes(graph)));
+
+/** 内部面（波 D の実行統合が呼ぶ進行・汚染・搬送路）をテストから駆動する。 */
+const internals = (context: GenerationContext) => context[RUNTIME_INTERNAL];
+
+Deno.test({
+  name: "createGenerationContext はスロットごとに物理確保し、dispose で返す（診断つき・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    try {
+      assertEquals(
+        session.diagnostics().stateBacking,
+        { residentBytes: 0, contextCount: 0, rebindCount: 0 },
+        "context を作っていない Session は state バイトを 1 つも払わない",
+      );
+
+      const context = await session.createGenerationContext({ chunkLength: 4 });
+      assertEquals(context.chunkLength, 4);
+      assertEquals(context.pastLength, 0, "生成直後の論理長は 0");
+      assertEquals(
+        session.diagnostics().stateBacking,
+        {
+          residentBytes: SLOT_BYTES * 2 + LENGTHS_BYTES,
+          contextCount: 1,
+          rebindCount: 0,
+        },
+        "スロット 2 本 + 論理長 uniform ぶんが常駐する",
+      );
+      // 宣言 shape が束縛解決済みの容量として実体に載っていること（サイズは GPUBuffer 側で確認 —
+      // 4 バイト床や切り上げが混ざると arrayLength() が黙って変わる）。
+      assertEquals([...internals(context).slots.keys()].sort(), ["k", "v"]);
+      for (const [name, slot] of internals(context).slots) {
+        assertEquals(slot.shape, [1, 2, STATE_CAPACITY, 4], name);
+        assertEquals(slot.byteLength, SLOT_BYTES, name);
+        assertEquals(slot.buffer.size, SLOT_BYTES, name);
+      }
+      assertEquals(internals(context).lengths.size, LENGTHS_BYTES);
+
+      // 2 本目の context は独立の実体を持つ（1 本目の実体を共有しない）。
+      const second = await session.createGenerationContext({ chunkLength: 1 });
+      assertEquals(session.diagnostics().stateBacking.contextCount, 2);
+      assertEquals(
+        session.diagnostics().stateBacking.residentBytes,
+        (SLOT_BYTES * 2 + LENGTHS_BYTES) * 2,
+      );
+      assert(
+        internals(second).slots.get("k")?.buffer !== internals(context).slots.get("k")?.buffer,
+        "context ごとに別のバッファでなければ 2 本目が 1 本目の KV を上書きする",
+      );
+
+      // 二重 dispose は無害（同じ完了を返す — Session.dispose と同じ規律）。
+      const disposal = context.dispose();
+      assertEquals(await Promise.all([disposal, context.dispose()]), [undefined, undefined]);
+      assertEquals(
+        session.diagnostics().stateBacking,
+        {
+          residentBytes: SLOT_BYTES * 2 + LENGTHS_BYTES,
+          contextCount: 2,
+          rebindCount: 0,
+        },
+        "常駐バイト数は生存集合から導出（累計本数は減らない）",
+      );
+
+      // dispose 済み context の操作は fail loudly（読みも含む — 実体はもう無い）。
+      assertThrows(() => context.pastLength, ExecutionError, "dispose 済み");
+      assertThrows(() => context.rewind(0), ExecutionError, "dispose 済み");
+      assertThrows(() => internals(context).advance(1), ExecutionError, "dispose 済み");
+
+      // context は Session より長生きできる（dispose の順序に依存を作らない）。
+      await session.dispose();
+      await second.dispose();
+      assertEquals(session.diagnostics().stateBacking.residentBytes, 0);
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "states 宣言を持たないグラフでは GenerationContext を作れない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await createSession(
+      gpu,
+      openModel(graphModelBuffer(baseGraph(), [
+        { name: "enc.w", dtype: "F32", shape: [4, 3], data: f32Bytes(new Array(12).fill(0.5)) },
+        { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+      ])),
+    );
+    try {
+      const error = await assertRejects(
+        () => session.createGenerationContext({ chunkLength: 1 }),
+        ExecutionError,
+      );
+      assert(error.message.includes("states 宣言を持たない"), error.message);
+      assertEquals(session.diagnostics().stateBacking.contextCount, 0);
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "spec の検査: chunkLength は 1 以上の整数・記号容量は bindings だけで決まる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const symbolic = await stateSession(gpu, symbolicGraph());
+    try {
+      for (const chunkLength of [0, -1, 1.5, Number.NaN]) {
+        const error = await assertRejects(
+          () => session.createGenerationContext({ chunkLength }),
+          ExecutionError,
+        );
+        assert(error.message.includes("chunkLength"), error.message);
+      }
+
+      // 未束縛の記号容量は fail loudly（0 や 1 で埋めない）。
+      const unbound = await assertRejects(
+        () => symbolic.createGenerationContext({ chunkLength: 2 }),
+        ExecutionError,
+      );
+      assert(unbound.message.includes("'C' が束縛されていない"), unbound.message);
+
+      // symbols に無い束縛も fail loudly（綴り違いが黙って無視されない）。
+      const unknown = await assertRejects(
+        () => symbolic.createGenerationContext({ chunkLength: 2, bindings: { D: 8 } }),
+        ExecutionError,
+      );
+      assert(unknown.message.includes("束縛 'D'"), unknown.message);
+
+      // 容量 0 の束縛は「実体を持てないスロット」なので拒否。
+      const empty = await assertRejects(
+        () => symbolic.createGenerationContext({ chunkLength: 2, bindings: { C: 0 } }),
+        ExecutionError,
+      );
+      assert(empty.message.includes("容量 0"), empty.message);
+
+      // 解決できた記号容量はそのまま物理容量になる（入力 `cap` は 1 度も渡していない）。
+      const context = await symbolic.createGenerationContext({
+        chunkLength: 2,
+        bindings: { C: 8 },
+      });
+      try {
+        const slot = internals(context).slots.get("k");
+        assertEquals(slot?.shape, [1, 2, 8, 4]);
+        assertEquals(slot?.byteLength, 1 * 2 * 8 * 4 * 4);
+      } finally {
+        await context.dispose();
+      }
+    } finally {
+      await session.dispose();
+      await symbolic.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "スロット単体が maxStorageBufferBindingSize を超える容量は fail loudly（絞った device・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // Gemma 4 E2B の full 層（131K 容量 × f32）と同型の 1GiB スロット。core 既定 128MiB の機では
+    // 束縛できない = ADR 0066 追記 5 が拒否を要求する形。
+    const capacity = 131072;
+    const heads = 8;
+    const headDim = 256;
+    const slotBytes = heads * capacity * headDim * 4;
+    assert(
+      slotBytes > CORE_STORAGE_BINDING_LIMIT,
+      `合成スロットの ${slotBytes}B が core 既定の上限を超えていない（門が空振りする）`,
+    );
+    const gpu = await acquireGpu({
+      [LIMIT_CAPS]: { maxStorageBufferBindingSize: CORE_STORAGE_BINDING_LIMIT },
+    });
+    try {
+      assertEquals(
+        gpu.limits.maxStorageBufferBindingSize,
+        CORE_STORAGE_BINDING_LIMIT,
+        "requiredLimits が絞られていない（絞れていなければ門は何も見ていない）",
+      );
+      const session = await stateSession(
+        gpu,
+        stateGraph({ big: { dtype: "f32", shape: [1, heads, capacity, headDim] } }),
+      );
+      try {
+        const error = await assertRejects(
+          () => session.createGenerationContext({ chunkLength: 1 }),
+          ExecutionError,
+        );
+        assert(error.message.includes(`${slotBytes} バイト`), error.message);
+        assert(
+          error.message.includes(`${CORE_STORAGE_BINDING_LIMIT} バイト`),
+          error.message,
+        );
+        assertEquals(
+          session.diagnostics().stateBacking.contextCount,
+          0,
+          "拒否された context は数えない（診断が実体の無いぶんを主張しない）",
+        );
+      } finally {
+        await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * OOM 門の前提: スロット 1 本（1GiB）を束縛できるアダプタで、**合計 64GiB** の要求が device の
+ * 余力を超えること。前者は絞れない（`LIMIT_CAPS` は上限を下げる向きだけ）ので、束縛上限が
+ * 1GiB 未満のアダプタでは容量ゲート側が先に落ちて OOM 経路を見られない = 明示 SKIP する。
+ * 後者を満たさない機（64GiB 超の VRAM）ではこの門は**赤くなる**（黙って通らない）。
+ */
+const OOM_SLOT_BYTES = 1024 * 1024 * 1024;
+const OOM_SLOT_COUNT = 64;
+const detectBindingLimit = async (): Promise<number> => {
+  const adapter = await navigator.gpu?.requestAdapter();
+  return adapter === null || adapter === undefined ? 0 : adapter.limits.maxStorageBufferBindingSize;
+};
+const BINDING_LIMIT: number = GPU_AVAILABLE ? await detectBindingLimit() : 0;
+if (GPU_AVAILABLE && BINDING_LIMIT < OOM_SLOT_BYTES) {
+  console.warn(
+    "[karume] maxStorageBufferBindingSize が 1GiB 未満のアダプタでは GenerationContext の " +
+      "OOM 門を SKIP する（容量ゲートが先に落ちるため確保失敗の経路を通れない）",
+  );
+}
+
+Deno.test({
+  name: "state 確保の失敗は out-of-memory errorScope で fail loudly（実 GPU）",
+  ignore: !GPU_AVAILABLE || BINDING_LIMIT < OOM_SLOT_BYTES,
+  fn: async () => {
+    const elements = OOM_SLOT_BYTES / 4;
+    const states: GraphJson["states"] = {};
+    for (let i = 0; i < OOM_SLOT_COUNT; i += 1) {
+      states[`kv${i}`] = { dtype: "f32", shape: [1, 1, elements / 1024, 1024] };
+    }
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, stateGraph(states));
+    // 失敗経路の後始末の検出器: OOM は「余力を使い切った」状態なので、確保済みを返し損ねていれば
+    // この 1GiB は取れない（漏れた実体は dispose からも到達できず、量はこの Session で最大になる）。
+    const survivor = await stateSession(
+      gpu,
+      stateGraph({ kv: { dtype: "f32", shape: [1, 1, elements / 1024, 1024] } }),
+    );
+    try {
+      const error = await assertRejects(
+        () => session.createGenerationContext({ chunkLength: 1 }),
+        GpuOutOfMemoryError,
+      );
+      assert(error.message.startsWith("GenerationContext の state 確保: "), error.message);
+      assertEquals(session.diagnostics().stateBacking.contextCount, 0);
+      const context = await survivor.createGenerationContext({ chunkLength: 1 });
+      assertEquals(context.pastLength, 0);
+      await context.dispose();
+    } finally {
+      await session.dispose();
+      await survivor.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "論理長は run の成功で進み、rewind は 0..pastLength の整数だけを受ける（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    try {
+      // prefill chunk（queryLength ≤ chunkLength）と decode（1）の両方で進む。
+      internals(context).advance(4);
+      internals(context).advance(1);
+      assertEquals(context.pastLength, 5);
+
+      for (const queryLength of [0, -1, 1.5, 5]) {
+        assertThrows(
+          () => internals(context).advance(queryLength),
+          ExecutionError,
+          "queryLength",
+        );
+      }
+      assertEquals(context.pastLength, 5, "拒否された進行は論理長を動かさない");
+
+      context.rewind(2);
+      assertEquals(context.pastLength, 2);
+      context.rewind(2);
+      assertEquals(context.pastLength, 2, "同じ位置への rewind は no-op");
+      context.rewind(0);
+      assertEquals(context.pastLength, 0);
+
+      internals(context).advance(3);
+      for (const position of [-1, 4, 1.5, Number.NaN]) {
+        assertThrows(() => context.rewind(position), ExecutionError, "rewind");
+      }
+      assertEquals(context.pastLength, 3, "拒否された rewind は論理長を動かさない");
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "汚染後は pastLength 読み以外の全操作を拒否し、dispose だけは通る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 2 });
+    try {
+      internals(context).advance(2);
+      internals(context).poison("state 変更 dispatch を含む run が失敗した");
+      // 2 度目の汚染は真因を上書きしない。
+      internals(context).poison("後続の別の失敗");
+
+      assertEquals(context.pastLength, 2, "どこまで進んだかという事実は残る");
+      for (
+        const operation of [
+          () => context.rewind(0),
+          () => internals(context).advance(1),
+          () => internals(context).writeLengths(1),
+        ]
+      ) {
+        const error = assertThrows(operation, ExecutionError);
+        assert(error.message.includes("汚染された"), error.message);
+        assert(
+          error.message.includes("state 変更 dispatch を含む run が失敗した"),
+          `真因が残っていない: ${error.message}`,
+        );
+      }
+    } finally {
+      // 汚染された context も dispose は通る（物理バッファは返せる）。
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "device 消失後の GenerationContext は全操作が GpuDeviceLostError（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // この case は device を壊すので専用の GpuContext を取る。
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 2 });
+    internals(context).advance(1);
+
+    gpu.destroy();
+    await gpu.device.lost;
+    assert(gpu.lost !== undefined, "消失が記録されていない（門が空振りする）");
+
+    assertThrows(() => context.pastLength, GpuDeviceLostError, "device が失われた");
+    assertThrows(() => context.rewind(0), GpuDeviceLostError);
+    assertThrows(() => internals(context).advance(1), GpuDeviceLostError);
+    assertThrows(() => internals(context).writeLengths(1), GpuDeviceLostError);
+
+    // dispose は「バッファを返してから flush の失敗を伝播させる」（RunArena と同じ規律）。
+    const failure = await assertRejects(() => context.dispose(), GpuDeviceLostError);
+    const again = await assertRejects(() => context.dispose(), GpuDeviceLostError);
+    assertStrictEquals(again, failure, "2 度目以降も同じ完了（同じ失敗）を返す");
+    await session.dispose().catch(() => undefined);
+  },
+});
+
+Deno.test({
+  name: "論理長 uniform は毎回全域が書き直され、書いた値が GPU 上に載る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    /** 論理長 uniform を staging 経由で読み戻す（writeBuffer の no-op を検出する唯一の観測点）。 */
+    const readLengths = async (): Promise<readonly number[]> => {
+      const staging = gpu.device.createBuffer({
+        size: LENGTHS_BYTES,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      try {
+        const encoder = gpu.device.createCommandEncoder();
+        encoder.copyBufferToBuffer(internals(context).lengths, 0, staging, 0, LENGTHS_BYTES);
+        gpu.device.queue.submit([encoder.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);
+        const words = Array.from(new Uint32Array(staging.getMappedRange().slice(0)));
+        staging.unmap();
+        return words;
+      } finally {
+        staging.destroy();
+      }
+    };
+    try {
+      internals(context).writeLengths(4);
+      assertEquals(await readLengths(), [0, 4], "prefill 1 本目は past 0 / query 4");
+
+      internals(context).advance(4);
+      internals(context).writeLengths(3);
+      assertEquals(await readLengths(), [4, 3], "past と query は独立のスカラ");
+
+      // decode 形（queryLength=1）へ移ると query 語だけが変わる = 全域を書き直している証拠。
+      internals(context).advance(3);
+      internals(context).writeLengths(1);
+      assertEquals(await readLengths(), [7, 1]);
+
+      // rewind は次の writeLengths からそのまま効く（論理長は context が所有する）。
+      context.rewind(2);
+      internals(context).writeLengths(1);
+      assertEquals(await readLengths(), [2, 1]);
+
+      for (const queryLength of [0, 5, 1.5]) {
+        assertThrows(() => internals(context).writeLengths(queryLength), ExecutionError);
+      }
+      assertEquals(await readLengths(), [2, 1], "拒否された書き出しは uniform を触らない");
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "context は導出済み計画と params キャッシュに一切効かない（計画鍵の不変条件・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const input: Tensor = {
+      dtype: "f32",
+      shape: [2, 4],
+      data: Float32Array.from([1, 2, 3, 4, 5, 6, 7, 8]),
+    };
+    try {
+      const first = await session.run({ x: input });
+      const baseline = session.diagnostics();
+      assertEquals(baseline.lastRunPrepared, { hit: false, cachedPlans: 1 });
+
+      // context を 2 本作っても、導出済み計画の本数も params キャッシュの実績も動かない
+      // （context の識別子が鍵に載っていればここで再導出 = hit: false になる）。
+      const contexts: GenerationContext[] = [
+        await session.createGenerationContext({ chunkLength: 4 }),
+        await session.createGenerationContext({ chunkLength: 1 }),
+      ];
+      try {
+        const second = await session.run({ x: input });
+        const after = session.diagnostics();
+        assertEquals(after.lastRunPrepared, { hit: true, cachedPlans: 1 }, "同じ鍵に当たる");
+        assertEquals(
+          after.lastRunParams,
+          { allocCount: 0, reuseCount: 0 },
+          "ヒット run は導出相を通らない（params の新規確保はゼロ）",
+        );
+        assertEquals(after.planBacking.buildCount, 1, "slot backing の焼き直しも起きない");
+        assertEquals(
+          Array.from(second["y"].data),
+          Array.from(first["y"].data),
+          "context の存在は出力を 1 ビットも変えない",
+        );
+        assertEquals(after.stateBacking.contextCount, 2, "診断だけが context を数える");
+      } finally {
+        for (const context of contexts) await context.dispose();
+      }
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
