@@ -185,4 +185,9 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
    pad 行が valid 行を汚染しないことは**行局所性**で保証する: linear / pointwise / norm は
    行内で閉じ、attention は causal 述語により valid 行が pad 列（`col ≥ pastLength +
    queryLength` 相当）を見ず、`state_append` は queryLength 行しか書かず、出口（ADR ④）は
-   実末尾行しか読まない。pad 行自身の中間値は不定でよい（誰も消費しない）。
+   実末尾行しか読まない。**full-write 不変条件との整合（第 5 巡で明確化）**: pad 行も
+   通常出力としては**書かれる**（各カーネルは宣言 shape の全バイトを書く — ADR 0014 系の
+   不変条件は不変。「不定」は**値が契約上無意味**という意味であって未書込みではない）。
+   書込みが queryLength 行に限られるのは **state スロットだけ**（context 所有バッファで、
+   transient slot の full-write 対象外 — 残骸は次 step の append が同じ式で上書きし、
+   読者は resident 範囲外を読まない）。

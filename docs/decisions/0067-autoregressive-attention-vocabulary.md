@@ -70,7 +70,10 @@ i8a8 版へそのまま流用できる形で作っておく。
 - **形は 1 種のみ**（第 4 巡で単純化 — 当初案の「共有形 = ins なし」は sliding ring で
   append 先行が必須になり、Q>1 で共有層の窓が欠ける〈満杯 ring へ Q 行 append すると
   row 0 の要る過去 W−1 行のうち Q−1 行が消える〉ため廃止）: **ins の k/v = 今 step の
-  新規 k/v（`[B,Hkv,queryLength,D]`）・スロット = 過去分のみ**。KV 共有層
+  新規 k/v・スロット = 過去分のみ**。ins の宣言 shape は **`[B,Hkv,M,D]`（M = 物理 chunk
+  次元 — prefill は chunkLength・decode は 1）**で、有効データは先頭 queryLength 行の
+  compact-prefix（ADR 0066 追記 6 — queryLength は shape でなく実行時スカラ。第 5 巡で
+  物理 / 論理の表記を接続）。KV 共有層
   （Gemma 4 E2B の末尾 20 層）は自層で projection を計算せず、**所有層の k/v 値テンソルを
   ins にそのまま配線**する（グラフ配線 + 同一スロット名参照で共有を表す — 解決規則は
   vLLM の kv_sharing_target_layer_name と同じ「同種 attention の直近非共有層」・
@@ -84,7 +87,11 @@ i8a8 版へそのまま流用できる形で作っておく。
   スロット取り違えを OOB / 沈黙誤読の前で止める。
 - **causal 固定**（欄を作らない — 非 causal + state の実在需要が無い。双方向 prefill は
   states 無し形で表す）。判定は述語 `col ≤ pastLength + row`（論理座標・TVM 型・調査 §3.1
-  — mask tensor は実体化しない）。
+  — mask tensor は実体化しない）。**sliding 時は下限述語を AND する MUST**（第 5 巡 high の
+  閉鎖）: `max(0, pastLength + row − window + 1) ≤ col ≤ pastLength + row` の**両側**。
+  上限（causal）だけだと row > 0 が resident 全体を走査して**窓外 key を row ぶん余計に
+  沈黙混入**する（W=4 で row 1 は正しい 4 個でなく 5 個を見る）。一次実装 = vLLM の
+  `(q_abs − key_pos) < W` AND（triton_attention_helpers.py:197-229 @7ea4b40）。
 - **sliding window は省略可能 attrs `window`**（正の int・欄の不存在 = 全 context）。
   層別混在（Gemma 4 E2B の 28/7）はノードごとに違う attrs で表す — 別 op・別 kernel を
   作らない（調査 §3.4 の全実装一致）。**論理 col → 物理 row の写像は読み書き同式 MUST**:
@@ -106,8 +113,10 @@ i8a8 版へそのまま流用できる形で作っておく。
 ### 5. KV の書き込みは別 op `state_append`
 
 「今 step の k/v をスロットへ書く」のは attention ではなく**単機能 op `state_append`**
-（slot 名 + 入力 `[B,Hkv,queryLength,D]` + 論理位置スカラ。sliding スロットは
-`position % window` のリング書込みもここが持つ）。
+（slot 名 + 入力 `[B,Hkv,M,D]`〈宣言 shape — attention の ins と同じ物理 chunk 次元〉+
+論理位置スカラ。**書くのは先頭 queryLength 行のみ**〈pad 行は書かない — スロットは
+full-write 対象外・ADR 0066 追記 6〉。sliding スロットは `position % window` のリング
+書込みもここが持つ）。
 
 - why-not（attention 内蔵 = TVM 型）: dispatch は 1 本増えるが、①full-write / padding 行
   no-op（queryLength が切る — ADR 0066 決定 4）の検証が単機能 op に閉じる ②attention 側は
