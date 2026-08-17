@@ -190,6 +190,15 @@ def _parse_shape(value: Any, symbols: set[str], where: str) -> list[int | str]:
         # bool は int の派生だが次元ではない。
         if isinstance(dim, bool):
             raise IrError(f"{at}: 次元が数値でも文字列でもない")
+        # MUST: JSON の `1.0` / `1e0` は int へ正規化する。TS 側は JSON.parse が単一の number を
+        # 返すので整数値の float という区別が無く（`Number.isSafeInteger(1.0)` は true）、Python が
+        # float を丸ごと拒むと**ランタイムが読める graph をエクスポータの検証だけが読めない**
+        # 乖離になる（受理集合はどちらの向きにもずれてはいけない）。非整数値の float は
+        # `is_integer()` が False なので下の「数値でも文字列でもない」で従来どおり落ち、非有限値は
+        # そもそも parse_graph_json が JSON 読みの時点で弾く。safe range 超過も int 側の検査
+        # （`> MAX_SAFE_INT`）に載る = TS の `Number.isSafeInteger` と同じ受理集合になる。
+        if isinstance(dim, float) and dim.is_integer():
+            dim = int(dim)
         if isinstance(dim, int):
             if dim < 0 or dim > MAX_SAFE_INT:
                 raise IrError(f"{at}: 次元 {dim} が非負整数でない")

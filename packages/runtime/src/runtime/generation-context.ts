@@ -52,6 +52,32 @@ const LENGTHS_USAGE = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBuff
 /** state スロットの dtype は f32 のみ（`STATE_DTYPES` — f16 席は ADR 0066 追記 5 の予約）。 */
 const STATE_ELEMENT_BYTES = 4;
 
+/**
+ * 論理長の上限（搬送先が `Uint32Array` / WGSL `u32` — ADR 0066 追記 4）。
+ *
+ * MUST: safe integer だけでは足りない。`Uint32Array` への代入は範囲外を**黙って切り詰める**ので、
+ * `queryLength = 2**32` は uniform 上で 0 になり、ホストが持つ論理長と GPU が見る値が例外も警告も
+ * 無いまま分裂する（`writeBuffer` は値を検査しない）。
+ */
+const MAX_LOGICAL_LENGTH = 0xffffffff;
+
+/**
+ * device が使える状態かの同期判定（ADR 0066 決定 7 の遮断面 — 判定はここ 1 箇所）。
+ *
+ * MUST: `lost` だけでなく `destroyRequested` も見る。`destroy()` はフラグを同期に立てるのに
+ * `device.lost` の reaction が走るのは以後のタスクなので、`lost` だけだとその窓で操作が通り、
+ * 特に `writeLengths` が破棄済みバッファへの**沈黙 no-op**（警告すら出ない）になる。
+ * MUST: 型は {@link GpuDeviceLostError}（lost device 由来の GPU 資源は WebGPU 仕様上回復不能で、
+ * 生成は失われる）。意図的な破棄と予期しない消失で復旧手段は変わらないので型は分けない。
+ */
+const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
+  if (gpu.destroyRequested || gpu.lost !== undefined) {
+    throw new GpuDeviceLostError(
+      `${where}: device が失われた（生成は失われる — device を取り直して作り直すこと）`,
+    );
+  }
+};
+
 /** state スロット 1 本の物理実体（束縛解決済み — 実行中に再確保しない = 静的物理格納）。 */
 export type StateSlotBacking = {
   readonly buffer: GPUBuffer;
@@ -179,7 +205,7 @@ export class GenerationContext {
    */
   readonly #lengthValues = new Uint32Array(2);
   #pastLength = 0;
-  /** 汚染の理由（追記 3）。立つと `pastLength` 読みと `dispose` 以外の全操作を拒否する。 */
+  /** 汚染の理由（追記 3）。立つと `dispose` 以外の全操作を拒否する（読みも含む）。 */
   #poisoned: string | undefined;
   #disposal: Promise<void> | undefined;
 
@@ -220,6 +246,10 @@ export class GenerationContext {
     spec: GenerationContextSpec,
   ): Promise<GenerationContext> {
     const { gpu, graph } = host;
+    // MUST: 確保を始める前に device の使用可否を見る（決定 7）。失われた device 上の
+    // createBuffer は無効なバッファを返すだけなので、通すと「空の KV を持つ context」が
+    // 出来上がる（errorScope も device 消失後は失敗を報告しない）。
+    assertDeviceUsable(gpu, "createGenerationContext");
     const names = Object.keys(graph.states);
     // MUST: state の無いグラフでは作らせない。context は「1 生成ぶんの可変 state の所有者」
     // なので、states 宣言が 0 本のモデルに対しては器そのものが無意味 — 取り違え（別モデルの
@@ -230,10 +260,15 @@ export class GenerationContext {
           "state の無いモデルでは作れない — 1-shot 実行は Session.run / enqueue をそのまま使う）",
       );
     }
-    if (!Number.isSafeInteger(spec.chunkLength) || spec.chunkLength < 1) {
+    // MUST: 上限は u32（`queryLength ≤ chunkLength` の門を通じて論理長の上限もここで決まる —
+    // {@link MAX_LOGICAL_LENGTH}）。
+    if (
+      !Number.isSafeInteger(spec.chunkLength) || spec.chunkLength < 1 ||
+      spec.chunkLength > MAX_LOGICAL_LENGTH
+    ) {
       throw new ExecutionError(
-        `chunkLength ${spec.chunkLength} が 1 以上の整数でない` +
-          "（固定長 prefill chunk の行数 — ADR 0066 決定 4）",
+        `chunkLength ${spec.chunkLength} が 1..${MAX_LOGICAL_LENGTH} の整数でない` +
+          "（固定長 prefill chunk の行数・搬送先は u32 — ADR 0066 決定 4 / 追記 4）",
       );
     }
     const bindings = resolveBindings(graph, spec.bindings);
@@ -257,9 +292,11 @@ export class GenerationContext {
     // MUST: push から pop の**発行**までに await を挟まない（device 単位 LIFO の交錯を防ぐ根拠 —
     // GpuContext 冒頭「errorScope 区間の不変条件」の 3 つ目。同期区間で完結するのでロック不要）。
     pushFailureScopes(gpu.device);
+    const where = "GenerationContext の state 確保";
     const created: GPUBuffer[] = [];
     const slots = new Map<string, StateSlotBacking>();
-    let lengths: GPUBuffer;
+    let popped = false;
+    let context: GenerationContext | undefined;
     try {
       for (const { name, shape, byteLength } of planned) {
         const buffer = gpu.device.createBuffer({
@@ -270,38 +307,45 @@ export class GenerationContext {
         created.push(buffer);
         slots.set(name, { buffer, shape, byteLength });
       }
-      lengths = gpu.device.createBuffer({
+      const lengths = gpu.device.createBuffer({
         label: "generation lengths",
         size: LENGTHS_BYTES,
         usage: LENGTHS_USAGE,
       });
       created.push(lengths);
-    } catch (cause) {
+      const pending = popFailureScopes(gpu.device, where);
+      popped = true;
+      // MUST: 消失後の popErrorScope が解決しない実装がありうる（ResidentTensor.read の
+      // mapAsync と同じ理由）ため競わせる — ハングを失敗に変換し、消失を
+      // GpuDeviceLostError へ正規化する。
+      const failure = await gpu[RUNTIME_INTERNAL].raceDeviceLost(pending, where);
+      if (failure !== undefined) throw failure;
+      context = new GenerationContext(host, slots, lengths, spec.chunkLength);
+      return context;
+    } finally {
       // MUST: 後始末の失敗で本体の例外を上書きしない（Session.create と同じ規律）。push した
-      // 2 本は必ず pop し、確保済みは 1 本残らず返す（この窓で漏れた実体は dispose からも
-      // 到達できない）。
-      await discardFailureScopes(gpu.device);
-      for (const buffer of created) buffer.destroy();
-      throw cause;
+      // 2 本は必ず pop する（pop 発行前に抜けた場合だけ — 二重 pop は他所のスコープを取る）。
+      if (!popped) await discardFailureScopes(gpu.device);
+      // MUST: context を返す場合**以外**は確保済みを 1 本残らず返す（同期 throw・pop の
+      // reject・device 消失のいずれでも漏らさない。この窓で漏れた実体は dispose からも
+      // 到達できない）。destroy はこの finally 1 回きりなので二重呼び出しにならない。
+      if (context === undefined) {
+        for (const buffer of created) buffer.destroy();
+      }
     }
-    const failure = await popFailureScopes(gpu.device, "GenerationContext の state 確保");
-    if (failure !== undefined) {
-      for (const buffer of created) buffer.destroy();
-      throw failure;
-    }
-    return new GenerationContext(host, slots, lengths, spec.chunkLength);
   }
 
   /**
    * 確定済み KV の論理長（ADR 0066 決定 6）。
    *
    * 進行は **run の成功でのみ**起きる（ホスト側の手動加算は API にしない — 二重簿記の禁止）。
-   * 汚染後も読める（追記 3 — 失われるのは物理 state で、「どこまで進んだか」という事実は残る）。
-   * device 消失後は読めない（決定 7 — 背後の物理 state は回復不能なので、この数値を
-   * 「ここから再開できる」と読ませない）。
+   * 汚染後・device 消失後は読めない（追記 3 の「以後の全操作 fail loudly」と決定 7 — どちらも
+   * 背後の物理 state は回復不能なので、この数値を「ここから再開できる」と読ませない。読めるのは
+   * 「どこまで進んだか」であって「そこから続けられるか」ではなく、区別できない形で返すと
+   * ホストは必ず後者として使う）。
    */
   get pastLength(): number {
-    this.#assertReadable("pastLength");
+    this.#assertUsable("pastLength");
     return this.#pastLength;
   }
 
@@ -379,7 +423,17 @@ export class GenerationContext {
   #advance(queryLength: number): void {
     this.#assertUsable("advance");
     this.#assertQueryLength(queryLength, "advance");
-    this.#pastLength += queryLength;
+    const next = this.#pastLength + queryLength;
+    // MUST: 加算後の論理長も u32 に収まること。両項が u32 以下でも和は溢れるので、ここが
+    // 唯一の検査点になる（超えたまま代入すると、次の writeLengths が切り詰めた past を
+    // 沈黙のまま GPU に載せる — {@link MAX_LOGICAL_LENGTH}）。
+    if (next > MAX_LOGICAL_LENGTH) {
+      throw new ExecutionError(
+        `advance: pastLength ${this.#pastLength} + queryLength ${queryLength} = ${next} が ` +
+          `u32 の上限 ${MAX_LOGICAL_LENGTH} を超える（論理長の搬送先は u32 — ADR 0066 追記 4）`,
+      );
+    }
+    this.#pastLength = next;
   }
 
   /**
@@ -396,26 +450,18 @@ export class GenerationContext {
   }
 
   /**
-   * 読み取り（`pastLength`）だけを許す条件。破棄済みと device 消失をここで落とす。
+   * 使用可否の条件（**読み取りを含む全操作** — 例外は後始末の {@link GenerationContext.dispose}
+   * だけ）。破棄済み・device 消失・汚染をここで落とす。
    *
-   * MUST: device 消失は {@link GpuDeviceLostError}（決定 7 — lost device 由来の GPU 資源は
-   * WebGPU 仕様上回復不能で、生成は失われる）。
+   * MUST: 読みと書きで条件を分けない。汚染も device 消失も「背後の物理 state が失われた」状態で、
+   * そこで論理長だけを返せるようにすると復旧不能な context が正常値を持つ器に見える
+   * （追記 3 の「以後の全操作 fail loudly」）。
    */
-  #assertReadable(where: string): void {
+  #assertUsable(where: string): void {
     if (this.#disposal !== undefined) {
       throw new ExecutionError(`${where}: dispose 済みの GenerationContext は使えない`);
     }
-    if (this.#host.gpu.lost !== undefined) {
-      throw new GpuDeviceLostError(
-        `${where}: device が失われた GenerationContext は使えない` +
-          "（生成は失われる — device を取り直して作り直すこと）",
-      );
-    }
-  }
-
-  /** 状態を変える操作の条件（読み取りの条件 + 汚染の拒否 — 追記 3）。 */
-  #assertUsable(where: string): void {
-    this.#assertReadable(where);
+    assertDeviceUsable(this.#host.gpu, where);
     if (this.#poisoned !== undefined) {
       throw new ExecutionError(
         `${where}: 汚染された GenerationContext は使えない（${this.#poisoned}）。` +
@@ -430,6 +476,10 @@ export class GenerationContext {
    * prefill-chunk は `queryLength ≤ chunkLength`（超えた行は物理 shape に載らない）、decode は
    * `queryLength = 1`。0 を許さないのは「何も進めない run」が state の書き込み範囲を空にして、
    * 進行と物理内容の対応が観測できなくなるため。
+   *
+   * NOTE: u32 の上限（{@link MAX_LOGICAL_LENGTH}）はここで重ねて見ない — `chunkLength` が
+   * create で u32 以下に絞られているので `queryLength ≤ chunkLength` がそのまま上限になる
+   * （`rewind` の `position ≤ pastLength` も同じ形で上限が伝わる）。
    */
   #assertQueryLength(queryLength: number, where: string): void {
     if (!Number.isSafeInteger(queryLength) || queryLength < 1) {

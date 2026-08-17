@@ -13,6 +13,7 @@
 
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import {
   acquireGpu,
   type GpuContext,
@@ -21,12 +22,11 @@ import {
   LIMIT_CAPS,
   RUNTIME_INTERNAL,
 } from "../src/gpu/device.ts";
+import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
 import {
-  createSession,
-  type GenerationContext,
-  type Session,
-  type Tensor,
-} from "../src/runtime/executor.ts";
+  GenerationContext,
+  type GenerationContextHost,
+} from "../src/runtime/generation-context.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { baseGraph, f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { graphModelBuffer } from "./helpers/graph.ts";
@@ -100,6 +100,91 @@ const stateSession = (
 /** 内部面（波 D の実行統合が呼ぶ進行・汚染・搬送路）をテストから駆動する。 */
 const internals = (context: GenerationContext) => context[RUNTIME_INTERNAL];
 
+/** 論理長の上限（搬送先が Uint32Array / WGSL u32 — ADR 0066 追記 4）。 */
+const U32_MAX = 0xffffffff;
+
+/** 注入する故障（確保途中の同期 throw / pop の reject / pop が決着しない窓）。 */
+type Fault = {
+  readonly failCreateAt?: number;
+  readonly popError?: Error;
+  readonly hangPop?: boolean;
+};
+
+/**
+ * 実 device に proxy を被せて確保経路へ故障を注入し、**返したバッファの destroy 回数を確保順に
+ * 数える**（漏れ = 0 回・二重 destroy = 2 回として同じ観測点で見える）。
+ *
+ * 注入面を生産コードに開けないための代替。OOM 門（下の 64GiB）は「余力を使い切って取れなくなる」
+ * ことでしか漏れを検出できず、1GiB 未満の機では丸ごと SKIP される上に、途中の N 本目・pop の
+ * reject・消失を撃ち分けられない。
+ */
+const injectFaults = (
+  gpu: GpuContext,
+  fault: Fault,
+): { readonly gpu: GpuContext; readonly destroyCounts: number[] } => {
+  const destroyCounts: number[] = [];
+  let creations = 0;
+  const device = new Proxy(gpu.device, {
+    get(target, prop): unknown {
+      if (prop === "createBuffer") {
+        return (descriptor: GPUBufferDescriptor): GPUBuffer => {
+          creations += 1;
+          if (creations === fault.failCreateAt) {
+            throw new Error(`注入: ${creations} 本目の createBuffer が同期 throw`);
+          }
+          const buffer = target.createBuffer(descriptor);
+          const index = destroyCounts.push(0) - 1;
+          return new Proxy(buffer, {
+            get(inner, innerProp): unknown {
+              if (innerProp === "destroy") {
+                return (): void => {
+                  destroyCounts[index] += 1;
+                  inner.destroy();
+                };
+              }
+              const value: unknown = Reflect.get(inner, innerProp);
+              return typeof value === "function" ? value.bind(inner) : value;
+            },
+          });
+        };
+      }
+      if (prop === "popErrorScope" && (fault.popError !== undefined || fault.hangPop === true)) {
+        return (): Promise<GPUError | null> => {
+          if (fault.hangPop === true) {
+            // MUST: 決着しない窓は**実 pop を出さずに**作る。この case は直後に device を
+            // 破棄するので LIFO の均衡は問われない（スタックごと消える）一方、消失後に
+            // 決着しない実 op を残すと待ちの正体がテスト側の op になる。
+            return new Promise<GPUError | null>(() => {});
+          }
+          // MUST: reject を注入する側は**実 pop を必ず発行する**。握り潰すと push した 2 本が
+          // device の LIFO に残り、以後のテストの失敗が誤ったスコープに吸われる。
+          void target.popErrorScope().catch(() => null);
+          return Promise.reject(fault.popError);
+        };
+      }
+      const value: unknown = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const proxied = new Proxy(gpu, {
+    get(target, prop): unknown {
+      if (prop === "device") return device;
+      const value: unknown = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { gpu: proxied, destroyCounts };
+};
+
+/** 注入した gpu の上へ context を直に建てる面（Session を通さない — 借りるのは数欄だけ）。 */
+const injectedHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost => ({
+  gpu,
+  graph,
+  flush: () => Promise.resolve(),
+  serialize: <T>(body: () => Promise<T>): Promise<T> => body(),
+  forget: () => {},
+});
+
 Deno.test({
   name: "createGenerationContext はスロットごとに物理確保し、dispose で返す（診断つき・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -147,9 +232,12 @@ Deno.test({
         "context ごとに別のバッファでなければ 2 本目が 1 本目の KV を上書きする",
       );
 
-      // 二重 dispose は無害（同じ完了を返す — Session.dispose と同じ規律）。
+      // 二重 dispose は無害（**同一の Promise** を返す — Session.dispose と同じ規律。別の
+      // Promise を返す実装は「2 度目だけが flush の決着前に resolve する」形で退行しうる）。
       const disposal = context.dispose();
-      assertEquals(await Promise.all([disposal, context.dispose()]), [undefined, undefined]);
+      const again = context.dispose();
+      assertStrictEquals(again, disposal, "2 度目以降は最初の完了そのものを返す");
+      assertEquals(await Promise.all([disposal, again]), [undefined, undefined]);
       assertEquals(
         session.diagnostics().stateBacking,
         {
@@ -367,6 +455,66 @@ Deno.test({
 });
 
 Deno.test({
+  name: "確保途中の失敗は確保済みバッファをちょうど 1 回ずつ返す（故障注入・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const graph = openModel(modelBytes(stateGraph(NUMERIC_STATES))).graph;
+    const create = (host: GenerationContextHost): Promise<GenerationContext> =>
+      GenerationContext.create(host, { chunkLength: 1 });
+    try {
+      // 成功経路は 1 本も destroy しない（所有者は返した context — 返るのは dispose だけ）。
+      const ok = injectFaults(gpu, {});
+      const context = await create(injectedHost(ok.gpu, graph));
+      assertEquals(ok.destroyCounts, [0, 0, 0], "スロット 2 本 + 論理長 uniform を確保した");
+      await context.dispose();
+      assertEquals(ok.destroyCounts, [1, 1, 1], "dispose でちょうど 1 回ずつ返る");
+
+      // ① 途中の同期 throw: 2 本目で落ちても 1 本目がちょうど 1 回返る。
+      const midway = injectFaults(gpu, { failCreateAt: 2 });
+      await assertRejects(
+        () => create(injectedHost(midway.gpu, graph)),
+        Error,
+        "注入: 2 本目の createBuffer",
+      );
+      assertEquals(midway.destroyCounts, [1], "確保済みの 1 本が漏れない");
+
+      // ② pop の reject: 全確保物がちょうど 1 回返る（pop を try/finally の外に置いた形では
+      // ここで 3 本とも到達不能になり、dispose からも返せない）。
+      const rejected = injectFaults(gpu, { popError: new Error("注入: popErrorScope の reject") });
+      await assertRejects(
+        () => create(injectedHost(rejected.gpu, graph)),
+        Error,
+        "注入: popErrorScope の reject",
+      );
+      assertEquals(rejected.destroyCounts, [1, 1, 1]);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "確保中の device 消失は GpuDeviceLostError にして全確保物を返す（故障注入・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // この case は device を壊すので専用の GpuContext を取る。
+    const gpu = await acquireGpu();
+    const graph = openModel(modelBytes(stateGraph(NUMERIC_STATES))).graph;
+    // pop が決着しない窓を作る。待機を raceDeviceLost に通していなければ、この case は
+    // 「失敗」ではなく**ハング**になる（消失後の popErrorScope が解決しない実装がありうる）。
+    const injected = injectFaults(gpu, { hangPop: true });
+    const pending = GenerationContext.create(injectedHost(injected.gpu, graph), { chunkLength: 1 });
+    assertEquals(injected.destroyCounts, [0, 0, 0], "確保は create の同期区間で終わっている");
+
+    gpu.destroy();
+    const error = await assertRejects(() => pending, GpuDeviceLostError);
+    assert(error.message.includes("GenerationContext の state 確保"), error.message);
+    assertEquals(injected.destroyCounts, [1, 1, 1], "消失でも確保物は 1 本残らず返る");
+  },
+});
+
+Deno.test({
   name: "論理長は run の成功で進み、rewind は 0..pastLength の整数だけを受ける（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -409,7 +557,49 @@ Deno.test({
 });
 
 Deno.test({
-  name: "汚染後は pastLength 読み以外の全操作を拒否し、dispose だけは通る（実 GPU）",
+  name: "論理長は u32 の上限で fail loudly（Uint32Array への沈黙切り詰めの遮断・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    try {
+      // 上限ちょうどは受理（chunkLength は計画時定数で、物理確保はスロット容量だけが決める）。
+      const context = await session.createGenerationContext({ chunkLength: U32_MAX });
+      try {
+        assertEquals(context.chunkLength, U32_MAX);
+        // u32 を超える queryLength は chunkLength の門で落ちる（0 に切り詰めて書かない）。
+        assertThrows(
+          () => internals(context).writeLengths(U32_MAX + 1),
+          ExecutionError,
+          "chunkLength",
+        );
+        // 加算後の overflow はここでしか見られない（両項が u32 以下でも和は溢れる）。
+        internals(context).advance(U32_MAX);
+        assertEquals(context.pastLength, U32_MAX);
+        const overflow = assertThrows(() => internals(context).advance(1), ExecutionError);
+        assert(overflow.message.includes("u32 の上限"), overflow.message);
+        assertEquals(context.pastLength, U32_MAX, "拒否された進行は論理長を動かさない");
+        // rewind の位置も pastLength を上限に持つので u32 を超えられない。
+        assertThrows(() => context.rewind(U32_MAX + 1), ExecutionError, "rewind");
+      } finally {
+        await context.dispose();
+      }
+
+      // 上限 +1 の chunkLength は拒否（受理すると queryLength の門が u32 を超えて開く）。
+      const rejected = await assertRejects(
+        () => session.createGenerationContext({ chunkLength: U32_MAX + 1 }),
+        ExecutionError,
+      );
+      assert(rejected.message.includes("chunkLength"), rejected.message);
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "汚染後は dispose 以外の全操作を拒否する（読みも含む・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -421,9 +611,12 @@ Deno.test({
       // 2 度目の汚染は真因を上書きしない。
       internals(context).poison("後続の別の失敗");
 
-      assertEquals(context.pastLength, 2, "どこまで進んだかという事実は残る");
+      // ADR 0066 追記 3 の「以後の全操作 fail loudly」— `pastLength` の読みも遮断面に入る
+      // （復旧不能な context の論理長を正常値として返すと、ホストは必ず「ここから再開できる」
+      // と読む）。
       for (
         const operation of [
+          () => context.pastLength,
           () => context.rewind(0),
           () => internals(context).advance(1),
           () => internals(context).writeLengths(1),
@@ -468,6 +661,38 @@ Deno.test({
     const failure = await assertRejects(() => context.dispose(), GpuDeviceLostError);
     const again = await assertRejects(() => context.dispose(), GpuDeviceLostError);
     assertStrictEquals(again, failure, "2 度目以降も同じ完了（同じ失敗）を返す");
+    await session.dispose().catch(() => undefined);
+  },
+});
+
+Deno.test({
+  name: "device.destroy() 直後（lost の反応前）から全操作を拒否する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // この case は device を壊すので専用の GpuContext を取る。
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 2 });
+    internals(context).advance(1);
+
+    gpu.destroy();
+    // MUST: ここで lost が**未記録**であること。記録済みなら既存の lost 判定だけで通ってしまい、
+    // 「destroy の同期フラグを見ている」ことの証拠にならない（門が恒真になる）。
+    assertStrictEquals(gpu.lost, undefined, "destroy 直後に lost の reaction が走っている");
+    assert(gpu.destroyRequested, "destroy 要求が同期に立っていない");
+
+    assertThrows(() => context.pastLength, GpuDeviceLostError, "device が失われた");
+    assertThrows(() => context.rewind(0), GpuDeviceLostError);
+    assertThrows(() => internals(context).advance(1), GpuDeviceLostError);
+    // writeLengths が最も危険な穴（破棄済みバッファへの writeBuffer は警告すら出ない no-op で、
+    // ホストの論理長と GPU が見る値が黙って分裂する）。
+    assertThrows(() => internals(context).writeLengths(1), GpuDeviceLostError);
+    // 生成の入口も同じ判定（空の KV を持つ context を作らせない）。
+    await assertRejects(
+      () => session.createGenerationContext({ chunkLength: 1 }),
+      GpuDeviceLostError,
+    );
+
     await session.dispose().catch(() => undefined);
   },
 });

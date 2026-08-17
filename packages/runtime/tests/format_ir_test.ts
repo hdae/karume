@@ -363,6 +363,60 @@ Deno.test("parseIrGraph: state スロットの shape は容量込みの具体形
   assertStatesReject({ cache: { dtype: "f32", shape: ["1T", 4] } }, "正準文法");
 });
 
+/**
+ * 次元 1 個だけを**生の JSON テキスト**で差し込む（`JSON.stringify` は `1.0` を `1` に畳むので、
+ * 整数値 float の受理はオブジェクト経由では観測できない）。
+ */
+const parseRawDim = (raw: string, mutate: (graph: GraphJson, dim: string) => void): IrGraph => {
+  const graph = baseGraph();
+  mutate(graph, "__DIM__");
+  return parseIrGraph(JSON.stringify(graph).replaceAll('"__DIM__"', raw));
+};
+
+// JSON の `4.0` / `4e0` は JSON.parse が単一の number にするので整数として通る。Python 側
+// （tools/exporter/src/karume/verify.py の _parse_shape）は int / float が別型なので、この形が
+// **両側で同じ受理集合**であることを固定しないと「ランタイムは読めるが exporter の検証が落ちる」
+// 乖離になる（鏡像は tools/exporter/tests/test_verify.py の TestIntegralFloatDimensions）。
+Deno.test("parseIrGraph: JSON の整数値 float 次元を受理し、非整数は拒否する", () => {
+  for (const raw of ["4.0", "4e0", "0.4e1"]) {
+    const values = parseRawDim(raw, (g, dim) => {
+      g.values["w"].shape = [dim];
+    });
+    assertEquals(values.values["w"].shape, [4], raw);
+    const states = parseRawDim(raw, (g, dim) => {
+      g.states = { cache: { dtype: "f32", shape: [1, dim] } };
+    });
+    assertEquals(states.states["cache"].shape, [1, 4], raw);
+  }
+  for (const raw of ["1.5", "15e-1"]) {
+    assertThrows(
+      () =>
+        parseRawDim(raw, (g, dim) => {
+          g.values["w"].shape = [dim];
+        }),
+      IrError,
+      "非負整数でない",
+    );
+    assertThrows(
+      () =>
+        parseRawDim(raw, (g, dim) => {
+          g.states = { cache: { dtype: "f32", shape: [1, dim] } };
+        }),
+      IrError,
+      "非負整数でない",
+    );
+  }
+  // safe range 超過は Python 側（> 2^53−1）と同じ点で落ちる。
+  assertThrows(
+    () =>
+      parseRawDim("1e300", (g, dim) => {
+        g.values["w"].shape = [dim];
+      }),
+    IrError,
+    "非負整数でない",
+  );
+});
+
 Deno.test("parseIrGraph: states の構造", () => {
   assertStatesReject([], "graph.states: オブジェクトでない");
   assertStatesReject({ cache: 4 }, "graph.states['cache']: オブジェクトでない");

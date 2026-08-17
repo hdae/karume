@@ -198,5 +198,9 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
    容量は context 生成時にユーザーが決める値（決定 3 の R2 — 静的物理格納）なので、export 時
    定数に焼く形は本 ADR の前提と矛盾する。契約: **states の shape に現れる記号は
    `createGenerationContext(spec.bindings)` を束縛点とする有効な宣言**とし、束縛可能性検査は
-   「入力 shape ∪ states shape のどこかに現れる」へ緩める（値 shape の解決には従来どおり
-   入力由来の束縛だけが効く — states 専用記号は計画にも値にも現れない）。実装は波 D。
+   「入力 shape ∪ states shape のどこかに現れる」へ緩める。効く範囲の分担（第 2 巡指摘で
+   精密化 — 決定 3 との整合）: **通常値 shape の解決には従来どおり入力由来の束縛だけが効く**
+   （states 専用記号は値 shape に現れない）が、**state を参照する PreparedPlan の鍵には
+   解決済み容量が入る**（決定 3 の「鍵は容量」そのもの — context の識別子ではなく容量の値。
+   同一 Session で C=512 と C=131072 の context を作れば、state 参照計画は容量ごとに別鍵に
+   なるのが正しい）。実装は波 D。

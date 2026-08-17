@@ -471,6 +471,67 @@ class TestStateSlots:
             parse(states={name: {"dtype": "f32", "shape": [4]}})
 
 
+class TestIntegralFloatDimensions:
+    """JSON の整数値 float（`1.0` / `1e0`）を TS と同じく受理する。
+
+    TS は JSON.parse が単一の number を返すので `4` と `4.0` を区別できない（どちらも
+    `Number.isSafeInteger` が true）。ここが float を丸ごと拒むと「ランタイムは読めるのに
+    エクスポータの検証だけが落ちる」乖離になるので、両側で同じ受理集合を固定する。
+    """
+
+    @staticmethod
+    def parse_raw_dim(raw: str, **overrides):
+        """次元 1 個だけを生の JSON テキストで差し込む（json.dumps は `1e0` を `1.0` に畳む）。"""
+        text = json.dumps({**base_graph(), **overrides})
+        assert '"__DIM__"' in text
+        return parse_ir_graph(text.replace('"__DIM__"', raw))
+
+    @pytest.mark.parametrize("raw", ["4.0", "4e0", "0.4e1"])
+    def test_integral_float_value_dims_are_accepted_as_int(self, raw):
+        graph = self.parse_raw_dim(
+            raw,
+            values={
+                "w": {"dtype": "f32", "shape": ["__DIM__"]},
+                "y": {"dtype": "f32", "shape": ["T", 4]},
+            },
+        )
+
+        assert graph.values["w"].shape == [4]
+        # 正規化の結果は int（float のまま持つと to_dict が `4.0` を書き戻して往復が壊れる）。
+        assert all(isinstance(dim, int) for dim in graph.values["w"].shape)
+
+    @pytest.mark.parametrize("raw", ["4.0", "4e0"])
+    def test_integral_float_state_dims_are_accepted_as_int(self, raw):
+        graph = self.parse_raw_dim(raw, states={"cache": {"dtype": "f32", "shape": [1, "__DIM__"]}})
+
+        assert graph.states["cache"].shape == [1, 4]
+        assert graph.to_dict()["states"]["cache"]["shape"] == [1, 4]
+
+    @pytest.mark.parametrize("raw", ["1.5", "15e-1"])
+    def test_non_integral_float_dims_are_rejected(self, raw):
+        with pytest.raises(IrError, match="数値でも文字列でもない"):
+            self.parse_raw_dim(
+                raw,
+                values={
+                    "w": {"dtype": "f32", "shape": ["__DIM__"]},
+                    "y": {"dtype": "f32", "shape": ["T", 4]},
+                },
+            )
+        with pytest.raises(IrError, match="数値でも文字列でもない"):
+            self.parse_raw_dim(raw, states={"cache": {"dtype": "f32", "shape": [1, "__DIM__"]}})
+
+    def test_integral_float_beyond_the_safe_range_is_rejected(self):
+        """`Number.isSafeInteger` と同じ上限で落ちる（TS だけが読めない値を通さない）。"""
+        with pytest.raises(IrError, match="非負整数でない"):
+            self.parse_raw_dim(
+                "1e300",
+                values={
+                    "w": {"dtype": "f32", "shape": ["__DIM__"]},
+                    "y": {"dtype": "f32", "shape": ["T", 4]},
+                },
+            )
+
+
 class TestJsonLiterals:
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
     def test_non_standard_literals_are_rejected(self, literal):
