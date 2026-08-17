@@ -1,7 +1,7 @@
 # 0067: attention の autoregressive 語彙 — GQA 整除 broadcast と state 参照つき契約
 
-- Status: draft（2026-08-17 一括起草。方向〈G3 = 案 A〉は同日の裁定 2 で承認済み。
-  Codex 漏れチェックと〔裁定 A〕の大域判断待ち）
+- Status: draft（2026-08-17 一括起草 → 第 3 巡 Codex 指摘反映 → 裁定 A〈GQA × i8a8 は
+  fail loudly 開始・後日サポート前提〉反映済み。第 4 巡チェック後に accepted 化予定）
 - 関連: ADR [0023](0023-fused-attention.md)（融合 attention — 決定 4 の**一部**を supersede）/
   [0044](0044-runtime-attention-mask.md)（safe_softmax 意味論）/
   [0060](0060-row-block-attention.md)（行ブロック実行 — 保存経路への接続が本 ADR の受入条件）/
@@ -47,13 +47,19 @@ head 写像は `wid.z / r`（`wid.z = b*H + h` に対し `H = Hkv·r` なら
   故障注入〈r 誤り・pv 側写像漏れ〉）。ADR 0060 決定 3 と同型の「base 算術のみ差分」論証は
   実測で確認するまで主張しない（調査 §7 attn LB-6）。
 
-### 3. GQA × i8a8 は fail loudly で開始〔裁定 A〕
+### 3. GQA × i8a8 は fail loudly で開始（裁定済み 2026-08-17 — 後日サポート前提）
 
 i8a8 attention は別 WGSL で head 基底が 5 本（attention-i8a8.ts:378-382 — K/scale・V/scale
 のみ kv-head へ写し Q/S/O は q-head のまま）、recipe-builder の K/V 量子化・確保も `B*H`
 前提（調査 §3.2）。**初期実装は `attentionCompute: "i8a8"` × GQA 形を fail loudly で拒否**
 する（ADR 0058 決定 3 —「未実装の組は縮退でなく fail loudly」。黙って f32 へ落とすと
-性能が静かに変わる）。i8a8 側の GQA 対応は需要（検収モデルの性能実測）が出た時の追補。
+性能が静かに変わる）。
+
+**拒否は暫定で、後日サポートを前提とする**（ユーザー裁定）。追補時の対象面は確定済み:
+①head 基底 5 本のうち kbase / ksbase（と PV 側の V/scale 基底）だけを kv-head 写像
+（`wid.z / r`）に変え、qbase / qsbase / sbase は q-head のまま ②recipe-builder の K/V
+量子化・確保を Hkv 形へ。検証は f32 経路の GQA parity 資産（決定 2 の repeat_kv 突合）を
+i8a8 版へそのまま流用できる形で作っておく。
 
 ### 4. state 参照つき attention（同一 op 名の契約拡張・欄の有無が形を判別）
 

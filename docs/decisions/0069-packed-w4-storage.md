@@ -1,6 +1,8 @@
 # 0069: packed 4bit 格納（ADR 0019 の w4 棄却を reopen）
 
-- Status: draft（2026-08-17 一括起草。Codex 漏れチェックと〔裁定 B / C〕の大域判断待ち）
+- Status: draft（2026-08-17 一括起草 → 第 3 巡 Codex 指摘反映 → 裁定 B〈zero-point 欄なし・
+  予約つき〉/ C〈scale f32 開始・f16 両対応を将来目標〉反映済み。第 4 巡チェック後に
+  accepted 化予定）
 - 関連: ADR [0019](0019-i8-weight-execution.md)（i8 経路 — 本 ADR が「w4 再測しない」を
   supersede し、実装規律は延長する）/ [0006](0006-quantization.md)（格納のみ量子化・
   fake-quant 正）/ [0063](0063-safetensors-physical-layout.md)（物理配置 — 本 ADR とセットで
@@ -56,7 +58,7 @@ safetensors ヘッダ）は論理形のまま**で、バイト数だけ bit 幅�
 - ADR 0063 改訂（セット）: 書き出し順は I8 の後ろ末尾に I4 を足す・リーダ / ライタ /
   `assert_reader_layout` を対で改訂。
 
-### 3. 量子化形 = K 方向 group・対称 15 準位・scale f32〔裁定 B / C〕
+### 3. 量子化形 = K 方向 group・対称 15 準位・scale f32（裁定 B / C 反映済み）
 
 - **group 対称量子化**: `scale = clamp(amax / 7, f32 tiny)`（group ごと — clamp は全ゼロ
   group の 0 除算を閉じる。ADR 0019 の `clamp(amax/127, f32 tiny)` と同文・第 3 巡で
@@ -70,13 +72,24 @@ safetensors ヘッダ）は論理形のまま**で、バイト数だけ bit 幅�
   出力チャネルあたり 1 値の `wscale[channel]` — weight-storage.ts:140-150）は **group 版の
   別分岐**として拡張する（添字 = `(row, k / group_size)`・タイル読み込み時に group 境界で
   引き直す）。CPU 展開経路も同じ添字式でビット一致を保つ。
-- **zero-point 欄は作らない**〔裁定 B〕: 対称のみ。非対称（ORT の optional zero_points）が
-  要る資産が実測で出たら本 ADR の改訂で欄を足す（欄の不存在が「語彙に無い」を表す流儀）。
-- **scale は f32 companion**（既存 `storage.scale` + `storage.group_size` の解禁）〔裁定 C〕:
-  ADR 0019 と同じく GPU dequant と CPU 展開のビット一致を保つ。f16 scale（MLC・GGUF）との
-  トレードオフはサイズ表参照 — 帯域が問題になったら group_size を上げる側で調整する
-  （bit 幅あたりのオーバヘッド: group 32 で f32 = +25% / f16 = +12.5%、group 128 で
-  f32 = +6.25%）。既定 group_size は Phase 0 sweep（決定 6）で決める。
+- **zero-point 欄は作らない**（裁定済み 2026-08-17 — 対称のみで開始）。**後日追加で
+  困らないための予約 3 点**: ①欄名と形をここで予告する — 追加時は `storage.zero_point`
+  （scale と同形の companion `[O, I/group_size]`）で、既存資産・既存検査に影響しない
+  **追加欄**になる ②dequant 式は `(u − 8) · scale` を「zero_point 省略時の既定 = 8」と
+  読める形で規定する（ORT と同じ規約 — 非対称化は定数 8 を zero_point 読みへ差し替える
+  だけで、pack 形式・pack 順・15 準位の値域は不変）③Phase 0 sweep（決定 6）に非対称の
+  測定列を含め、対称の品質不足を**実装前に**検知する。
+- **scale は f32 companion で開始・f16 受理を将来目標**（裁定済み 2026-08-17 — 最終的に
+  両対応）。開始形は既存 `storage.scale` + `storage.group_size` の解禁で、ADR 0019 と
+  同じく GPU dequant と CPU 展開のビット一致を保つ。**f16 scale の追加はビット一致体制を
+  捨てずにできる**: f16 → f32 変換は厳密（拡張は無損失）なので、「f16 へ丸めた scale を
+  CPU / GPU の両方が同じ f32 値として使う」形で検証規律がそのまま成立する（丸めは emit の
+  1 回だけ・読みは厳密 — スコア格納 s16 と同じ手筋）。追加時は scale companion の dtype
+  受理を F32 | F16 へ広げ、emit 側は fake-quant が f16 丸め済み scale で参照採取する。
+  f16 scale（MLC・GGUF の選択）とのサイズ差はサイズ試算表参照 — 帯域が問題になったら
+  group_size を上げる側でも調整できる（bit 幅あたりのオーバヘッド: group 32 で
+  f32 = +25% / f16 = +12.5%、group 128 で f32 = +6.25%）。既定 group_size は
+  Phase 0 sweep（決定 6）で決める。
 
 ### 4. pack 順の明文固定 + 検出器
 

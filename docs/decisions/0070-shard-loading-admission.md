@@ -1,6 +1,7 @@
 # 0070: shard ロードの 2 相契約とメモリ admission
 
-- Status: draft（2026-08-17 一括起草。Codex 漏れチェック待ち — 大域裁定は無し）
+- Status: draft（2026-08-17 一括起草 → 第 3 巡 Codex 指摘反映済み。大域裁定なし・
+  第 4 巡チェック後に accepted 化予定）
 - 関連: ADR [0038](0038-manifest-v1.md)（manifest と hub 取得層 — FileRef 3 点セットと
   fetch-cache 接続契約を継承）/ [0041](0041-manifest-v2.md) / [0063](0063-safetensors-physical-layout.md)
   （shard の欄の確定 = release 波の R1 と同席）/ [0004](0004-execution-model.md)（errorScope
