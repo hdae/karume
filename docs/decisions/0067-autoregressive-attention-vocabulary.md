@@ -67,14 +67,21 @@ i8a8 版へそのまま流用できる形で作っておく。
 足す: `{ "k": <slot 名>, "v": <slot 名> }`。欄が**無い**ノードは従来契約そのまま
 （既存資産・既存門は無風 — mask 第 4 入力〈maxArity〉と同じ拡張手筋）。欄が**ある**形:
 
-- **2 つの下位形**（第 3 巡で確定 — KV 共有層は ins に k/v を持たない）:
-  - **所有形**: ins の k/v = **今 step の新規 k/v**（`[B,Hkv,queryLength,D]`）+ スロット =
-    過去分。自層で K/V projection を計算する層（MiniCPM5 の全 24 層・Gemma 4 E2B の
-    非共有 15 層）。
-  - **共有形**: ins に k/v を**持たず**、スロットから過去 + 今 step の両方を読む
-    （Gemma 4 E2B の末尾 20 層 — 同種 attention の直近非共有層のスロットを名前参照。
-    vLLM の kv_sharing_target_layer_name と同じ解決規則が一次実装 —
-    refs/vllm gemma4.py:462-488）。成立条件は決定 5b の順序規則（所有層の append が先行）。
+- **形は 1 種のみ**（第 4 巡で単純化 — 当初案の「共有形 = ins なし」は sliding ring で
+  append 先行が必須になり、Q>1 で共有層の窓が欠ける〈満杯 ring へ Q 行 append すると
+  row 0 の要る過去 W−1 行のうち Q−1 行が消える〉ため廃止）: **ins の k/v = 今 step の
+  新規 k/v（`[B,Hkv,queryLength,D]`）・スロット = 過去分のみ**。KV 共有層
+  （Gemma 4 E2B の末尾 20 層）は自層で projection を計算せず、**所有層の k/v 値テンソルを
+  ins にそのまま配線**する（グラフ配線 + 同一スロット名参照で共有を表す — 解決規則は
+  vLLM の kv_sharing_target_layer_name と同じ「同種 attention の直近非共有層」・
+  refs/vllm gemma4.py:462-488）。全読者が past を読み終えた後に append する（決定 5b）
+  ので、ring 容量 = window のままで staging も slack も不要。
+- **スロットの物理形と検査**（第 4 巡で追加）: states 形が参照するスロットは
+  **`[B, Hkv, C, D]` 固定**（C = 容量・dtype は f32〈f16 は ADR 0066 追記 5 の席〉）。
+  contracts は ①k/v スロットの同形 ②ins との B / Hkv / D 一致 ③`window ≤ C`（sliding）
+  ④full スロットは実行時に `pastLength + queryLength ≤ C`（context 側検査）を
+  fail loudly で課す — 通常値のみ見る現行 shape 検査（shapes.ts:510-540）の state 延長で、
+  スロット取り違えを OOB / 沈黙誤読の前で止める。
 - **causal 固定**（欄を作らない — 非 causal + state の実在需要が無い。双方向 prefill は
   states 無し形で表す）。判定は述語 `col ≤ pastLength + row`（論理座標・TVM 型・調査 §3.1
   — mask tensor は実体化しない）。
@@ -82,9 +89,10 @@ i8a8 版へそのまま流用できる形で作っておく。
   層別混在（Gemma 4 E2B の 28/7）はノードごとに違う attrs で表す — 別 op・別 kernel を
   作らない（調査 §3.4 の全実装一致）。**論理 col → 物理 row の写像は読み書き同式 MUST**:
   sliding スロットの物理 row = `col % window`（`state_append` の書き込み式と同一 —
-  読み側だけ別式にすると沈黙誤読になる）。resident 範囲は
-  `[pastLength − min(pastLength, window−queryLength), pastLength)` + 今 step 分で、
-  カーネルは論理座標で述語を評価してから写像する。
+  読み側だけ別式にすると沈黙誤読になる）。読者が参照する past の resident 範囲は
+  `[pastLength − min(pastLength, window − 1), pastLength)`（append 前なので row 0 の窓まで
+  全行 resident — 形 1 種化の成立根拠）。current 部分（`col ≥ pastLength`）は ins から
+  読む。カーネルは論理座標で述語を評価してから写像する。
 - 論理長（pastLength / queryLength）は**実行時スカラ**として **context 所有の可変
   uniform**（ADR 0066 追記 4 — params 内容アドレスキャッシュに載せない）で渡し、dispatch
   数は**ホストが論理長から算出**する（karume は graph capture を持たず毎 run エンコード
@@ -106,6 +114,10 @@ i8a8 版へそのまま流用できる形で作っておく。
   読み取り専用のままビット同一検証が単純 ③KV 共有層（append を持たない層）が
   「`state_append` ノードが無い」だけで表せる。ORT の kv_empty（present 出力なし）と同じ
   表現力を op の不在で得る。
+- why-not（staging / ring slack = ORT の WindowedKvCache 型）: 共有層のために append を
+  読者より先に置く設計なら ring に `window + Q − 1` の slack か staging バッファが要る
+  （refs/onnxruntime GQA cpu 実装が同種の staging 切替を持つ）。決定 4 の「全読者が ins で
+  current を受ける」形なら append は常に最後で、容量 = window のまま済む — 採らない。
 - **出力は 0 本**（値を定義しない effect op）。IR パーサの「outs 空は拒否」
   （format/ir.ts:322-324）は「**契約が effect を宣言する op に限り 0 本を許す**」へ改訂し、
   実装 6 面の出力数一般化は ADR 0068 決定 1 が受け持つ（第 3 巡の矛盾指摘の解消）。
@@ -117,13 +129,12 @@ state 参照（読み・書き）は**テンソルのデータ辺を張らない
 保存する MUST**（plan / recipe は state を触るステップの相対順を並べ替えない —
 融合 matcher も state 跨ぎの並べ替えをしない）。エクスポータの発行規約:
 
-1. **所有層の attention（読み）→ `state_append`（書き）→ 共有層の attention（読み）**の
-   順に発行する。所有層は append 前に読むので「今 step の ring wrap が自分の過去行を
-   潰す」ことがなく、共有層は append 後に読むので過去 + 今 step をスロットだけで見る
-   （sliding の窓意味論は append 後の最新 window = current 込みで正しい）。
-2. 検査: plan は「同一スロットへの append は 1 step に 1 回まで」「共有形 attention より
-   前に当該スロットの append がある」を fail loudly で検査する（発行順の誤りを沈黙誤値に
-   しない — 第 3 巡 high 指摘の閉鎖）。
+1. **当該スロットの全読者（所有層 + 共有層の attention）→ `state_append`（書き）**の順に
+   発行する（第 4 巡で単純化 — 全読者は past をスロットから・current を ins から読むので、
+   append は常に最後の 1 回。ring wrap が今 step の読者の過去行を潰す経路が構造的に無い）。
+2. 検査: plan は「同一スロットへの append は 1 step に 1 回まで」「append より後に当該
+   スロットの読者が居ない」を fail loudly で検査する（発行順の誤りを沈黙誤値にしない —
+   第 3 / 4 巡 high 指摘の閉鎖）。
 
 ### 6. 空行 → 0 の意味論を states 形に内蔵（safe_softmax 系）
 

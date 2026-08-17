@@ -61,7 +61,10 @@ tvmjs 型の 2 相（調査 §5.1）を fetch-cache 接続契約（ADR 0038 決�
 要するため、グラフ shard 時点で確定できるのは graph 単体で決まる検査まで）、重み shard は
 **届いた順に「CPU 展開（適格外のみ）→ GPU upload → 解放」**する。転送完了前に CPU 側を
 解放しない（フェンス後解放 — tvmjs の `await device.sync()` → `dispose()` と同じ順序契約・
-調査 §5.1）。
+調査 §5.1）。**フェンスの前に shard ごとの明示 submit を挟む MUST**（第 4 巡）:
+writeBuffer だけの区間は pending dispatch が無く、submit しないと実装の staging が
+解放されない（Session 構築後の「submit 1 回が瞬間ピーク +2.7GiB を抑えている」と同根の
+既知要件 — これを落とすと RAM ピーク O(最大 shard) の目標を実装が満たさない）。
 
 **失敗の transaction 境界**（第 3 巡指摘の閉鎖）: 途中の shard で失敗した場合（sha 不一致・
 宣言違反・GPU エラー）、構築済みの GPU 資源（アップロード済み重み・weights アリーナ）を

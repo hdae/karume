@@ -177,3 +177,12 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
    fail loudly（Gemma 4 E2B の full 層 131K 容量 × f32 は既定 128MiB を超えうる —
    実用容量の診断は ADR ③ の estimator）。state 格納の f16 席（数値契約が変わるため
    ADR 0058 流儀の opt-in）は**予約のみ**。
+6. **固定 chunk の物理 shape と pad の値契約（決定 4 の補強・第 4 巡）**: prefill-chunk 系の
+   テンソル宣言 shape は **chunkLength 固定**（plan / prepared backing は従来どおり宣言
+   shape の全量確保 + full-write — 機構は不変）。有効データは**先頭 queryLength 行の
+   compact-prefix**。**pad 領域の入力値は 0 埋め MUST**（ホストが埋める — pad 行の k/v が
+   NaN / 非有限だと「−inf 加算 + exp」経路で valid 行へ NaN が漏れるため、値契約で遮断）。
+   pad 行が valid 行を汚染しないことは**行局所性**で保証する: linear / pointwise / norm は
+   行内で閉じ、attention は causal 述語により valid 行が pad 列（`col ≥ pastLength +
+   queryLength` 相当）を見ず、`state_append` は queryLength 行しか書かず、出口（ADR ④）は
+   実末尾行しか読まない。pad 行自身の中間値は不定でよい（誰も消費しない）。

@@ -488,6 +488,22 @@ ADR 5 本（0066〜0070）を実コード + 参照 clone に対して照合。**
 - 副産物: vLLM に Gemma4 の KV 共有実装が実在（gemma4.py:462-488 —
   `num_kv_shared_layers` の解決規則が §6.1 の config 事実と一致する第 3 の独立裏付け）。
 
+### 第 4 巡 — 閉鎖確認（2026-08-17・反映済み）
+
+第 3 巡指摘 15 項目の閉鎖確認 = **closed 13 / partially 2** + 新規 high 3・medium 2:
+
+- **共有層の append 先行は Q>1 で窓が欠ける**（high）→ states 形を 1 種へ単純化
+  （全読者が current を ins で受け・slot は past のみ・append は常に最後 — ring 容量 =
+  window のままで staging / slack 不要。ADR 0067 決定 4 / 5b 改訂）。
+- **固定 chunk の物理 shape と queryLength の未接続**（high）→ 宣言 shape = chunkLength
+  固定・compact-prefix・**pad 入力 0 埋め MUST** + 行局所性による非汚染論証
+  （ADR 0066 追記 6）。
+- **state スロットの物理形検査の不在**（high）→ `[B,Hkv,C,D]` 固定 + 4 点検査
+  （ADR 0067 決定 4）。
+- medium: f16 scale の丸めで tiny → 0 / inf（→ 0069 に有限非ゼロ admission）・shard
+  フェンス前の明示 submit 要件（→ 0070 決定 3）。partially の残り =
+  「0 本 outs は ir-v1.md 改訂を要する」の明示（→ 0068 決定 1 精密化）。
+
 ## 8. 一次ソース
 
 shallow clone（2026-08-17 取得・commit 固定）:

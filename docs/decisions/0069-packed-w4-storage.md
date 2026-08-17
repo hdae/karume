@@ -86,6 +86,10 @@ safetensors ヘッダ）は論理形のまま**で、バイト数だけ bit 幅�
   CPU / GPU の両方が同じ f32 値として使う」形で検証規律がそのまま成立する（丸めは emit の
   1 回だけ・読みは厳密 — スコア格納 s16 と同じ手筋）。追加時は scale companion の dtype
   受理を F32 | F16 へ広げ、emit 側は fake-quant が f16 丸め済み scale で参照採取する。
+  **f16 受理時の追加条件（第 4 巡）**: f32 → f16 の**丸めは**厳密でない — `f32 tiny` は
+  f16 で 0 に、大きい scale は inf になり得る。emit 側 admission で「f16 丸め後の scale が
+  **有限かつ非ゼロ**」を全 group で検査し（既存 f16 emit の inf 拒否と同族）、全ゼロ group
+  の clamp 下限は **f16 の最小正規値**へ置き換える。
   f16 scale（MLC・GGUF の選択）とのサイズ差はサイズ試算表参照 — 帯域が問題になったら
   group_size を上げる側でも調整できる（bit 幅あたりのオーバヘッド: group 32 で
   f32 = +25% / f16 = +12.5%、group 128 で f32 = +6.25%）。既定 group_size は
