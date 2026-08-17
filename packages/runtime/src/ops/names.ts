@@ -185,13 +185,16 @@ export const LAYER_NORM_OP = "layer_norm";
  *
  * - **アリティ 3 か 4**（q / k / v + 省略可能な mask）。可変アリティ（`cat`）とは別の機構で、
  *   上限を持つ（{@link ContractBase.maxArity}）— 「何本でも」ではなく「mask 1 本だけ増える」。
- * - 入力は **rank-4 head-first**（`q[B,H,M,D]` / `k[B,H,N,D]` / `v[B,H,N,D]`）で連続。
+ * - 入力は **rank-4 head-first**（`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`）で連続。
  *   出力は `[B,H,M,D]`。**D は 3 者とも同じ**（実測の全 attention がそうで、v 側だけ
  *   別の長さを許すと「D を取り違えた IR」が shape 検査を素通りする）。
+ * - **GQA / MQA は整除 broadcast**（ADR 0067 決定 1）。`H % Hkv == 0` を満たす形だけを受理し、
+ *   `r = H / Hkv` は**導出値**（attrs 欄を作らない）。B の完全一致・k/v 間の Hkv 一致・
+ *   D 3 者同一・N=0 拒否は取り違えの検出線としてそのまま残る。
  * - **mask は f32・rank-4・shape はちょうど `[1,1,M,N]`**（加算型 — `S' = S + mask`）で、
  *   B·H の全バッチへ broadcast する。`[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 は
  *   **受理しない**（実行時マスクの需要が出た時に広げる — 欄の不存在が「語彙に無い」を構造で
- *   表す規律）。causal / dropout / GQA は依然として語彙に無い。
+ *   表す規律）。causal / dropout は依然として語彙に無い。
  *
  * MUST: `scale` は **q と k の両方に掛かる（半スケール契約）**。torch の
  * `aten::_scaled_dot_product_attention_math` が `q *= √scale_factor; k *= √scale_factor` と

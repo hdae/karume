@@ -756,8 +756,9 @@ def _h_attention(node: Node) -> Emitted:
     """aten.scaled_dot_product_attention → attention（attrs `scale` — ADR 0023）。
 
     引数形は `(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None,
-    enable_gqa=False)`。**受理するのは「非因果・dropout 0・GQA 無し・rank-4」で、マスクは
-    無しか f32 加算型 `[1,1,M,N]` だけ**。残りは全件列挙して fail loudly にする
+    enable_gqa=False)`。**受理するのは「非因果・dropout 0・rank-4」で、マスクは無しか f32
+    加算型 `[1,1,M,N]` だけ**（GQA は ADR 0067 決定 1 で整除 broadcast として受理 — 下記）。
+    残りは全件列挙して fail loudly にする
     （黙って近似しない — 横断の不変条件）。SDPA 保存は依然として**ターゲット別**に
     有効化する（`curated_decompositions(preserved=…)` — ADR 0016 のガード除去パスを
     温存するため）。
@@ -797,12 +798,11 @@ def _h_attention(node: Node) -> Emitted:
     _expect(
         is_causal is False, node, "is_causal=True の attention は未対応（因果マスクの欄が無い）"
     )
-    enable_gqa = _arg_or_kwarg(node, 7, "enable_gqa", False)
-    _expect(
-        enable_gqa is False,
-        node,
-        "enable_gqa=True の attention は未対応（KV head の複製は契約に無い）",
-    )
+    # `enable_gqa` は**読まない**（ADR 0067 決定 1 — H 突合が整除 broadcast へ緩んだので、
+    # True / False のどちらでも同じ保存ノードを発行する）。形の妥当性（`H % Hkv == 0` かつ
+    # `H ≥ Hkv`・k / v 間の Hkv 一致）を見るのは shapes 層の 1 箇所で、convert の出口の
+    # `assert_graph_shapes` が全ノードを必ず通す — ここで二重に検査すると受理集合が 2 箇所へ
+    # 分かれる。torch 自身も非整除の enable_gqa を RuntimeError で落とす。
     shapes = []
     for index, name in enumerate(("q", "k", "v")):
         value = node.args[index].meta["val"]

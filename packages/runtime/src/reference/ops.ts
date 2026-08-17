@@ -954,13 +954,19 @@ export const referenceAttention = (
   const scale = Math.fround(attentionScale(attrs, "reference"));
   const [batches, heads, rows, depth] = shape;
   const cols = k.shape[2];
+  // GQA の繰り返し数 `r = H / Hkv`（ADR 0067 決定 1 の導出値 — 整除は shape 検査が保証する）。
+  const repeat = heads / k.shape[1];
   const out = new Float32Array(numel(shape));
   // f32 の中間（S と P）は「実体化された 3 段」を素直に表す — 段ごとに丸めが 1 回入る。
   const scores = new Float32Array(cols);
   const weights = new Float32Array(cols);
   for (let head = 0; head < batches * heads; head += 1) {
     const qBase = head * rows * depth;
-    const kvBase = head * cols * depth;
+    // MUST: kv-head は**整数除算**で写す（GPU 側 `wid.z / r` と同一の恒等式 — ADR 0067 決定 2。
+    // `head = b·H + h` に対し `H = Hkv·r` なら `⌊head/r⌋ = b·Hkv + ⌊h/r⌋` が厳密に成立する）。
+    // 剰余（`head % Hkv`）は「Hkv = H かつ B = 1」でだけ一致する別写像で、head 対応も b 項も
+    // 壊れる（検出器は tests/helpers/gpu_op_cases.ts の GQA / MQA ケース）。
+    const kvBase = Math.floor(head / repeat) * cols * depth;
     for (let row = 0; row < rows; row += 1) {
       // ① S[row, col] = Σ_d (q·scale)[row,d] · (k·scale)[col,d]（+ mask[row,col]）
       for (let col = 0; col < cols; col += 1) {

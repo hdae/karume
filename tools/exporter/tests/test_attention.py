@@ -1,13 +1,15 @@
-"""融合 attention（ADR 0023）のエクスポータ側の門。
+"""融合 attention（ADR 0023 + 0067 決定 1）のエクスポータ側の門。
 
-見るのは 5 つ:
+見るのは 6 つ:
 
 1. **SDPA 保存はターゲット別**（既定の分解表は 11 op のまま）。
-2. `_h_attention` が causal / dropout≠0 / GQA / rank≠4 / D 不一致と、**契約外の mask**
+2. `_h_attention` が causal / dropout≠0 / rank≠4 / D 不一致と、**契約外の mask**
    （bool / rank≠4 / `[B,1,M,N]` / `[1,H,M,N]` / M・N 不一致）を**全件 fail loudly**。
 3. attrs の `scale` が **torch math decomp の定数とビット一致**（半スケール契約）。
 4. 保存したグラフの IR に `attention` ノードがちょうど 1 本出る。
-5. bool マスクの加算型 f32 への畳み込み（`normalize._additive_attn_mask`）が、
+5. `enable_gqa=True` が**保存ノードとして通る**（GQA / MQA — ADR 0067 決定 1。形の妥当性は
+   shapes 層が見る）。
+6. bool マスクの加算型 f32 への畳み込み（`normalize._additive_attn_mask`）が、
    **分解経路が焼く定数とバイト一致**する。
 """
 
@@ -81,6 +83,8 @@ class DropoutAttention(nn.Module):
 
 
 class GqaAttention(nn.Module):
+    """`enable_gqa=True` の SDPA（KV head を q head へ整除 broadcast する形）。"""
+
     def forward(self, q, k, v):
         return nn.functional.scaled_dot_product_attention(q, k, v, enable_gqa=True)
 
@@ -90,11 +94,13 @@ class Rank3Attention(nn.Module):
         return nn.functional.scaled_dot_product_attention(q, k, v)
 
 
-def _args(batch=2, heads=3, queries=5, keys=7, depth=4):
+def _args(batch=2, heads=3, queries=5, keys=7, depth=4, kv_heads=None):
+    """q / k / v の実引数（`kv_heads` 省略時は H = Hkv の従来形）。"""
+    kv = heads if kv_heads is None else kv_heads
     return (
         torch.randn(batch, heads, queries, depth),
-        torch.randn(batch, heads, keys, depth),
-        torch.randn(batch, heads, keys, depth),
+        torch.randn(batch, kv, keys, depth),
+        torch.randn(batch, kv, keys, depth),
     )
 
 
@@ -230,15 +236,6 @@ class TestUnsupportedFormsFailLoudly:
         with pytest.raises(NotImplementedError, match="dropout_p"):
             _preserved_attention(DropoutAttention(), _args())
 
-    def test_a_gqa_attention_is_rejected(self):
-        args = (
-            torch.randn(2, 4, 5, 4),
-            torch.randn(2, 2, 7, 4),
-            torch.randn(2, 2, 7, 4),
-        )
-        with pytest.raises(NotImplementedError, match="enable_gqa"):
-            _preserved_attention(GqaAttention(), args)
-
     def test_a_rank3_attention_is_rejected(self):
         args = (torch.randn(2, 5, 4), torch.randn(2, 7, 4), torch.randn(2, 7, 4))
         with pytest.raises(NotImplementedError, match="rank-4"):
@@ -264,6 +261,64 @@ class TestUnsupportedFormsFailLoudly:
                 dynamic_shapes=({3: DYN_DEPTH}, {3: DYN_DEPTH}, {3: DYN_DEPTH}),
                 preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
             )
+
+
+class TestGqaIsAcceptedAsDivisibleBroadcast:
+    """`enable_gqa=True` は保存ノードとして通る（ADR 0067 決定 1 の整除 broadcast）。
+
+    ハンドラは `enable_gqa` を**読まない** — 形の妥当性（`H % Hkv == 0` かつ `H ≥ Hkv`・
+    k / v 間の Hkv 一致）を見るのは shapes 層の 1 箇所（convert の出口の
+    `assert_graph_shapes` が全ノードを必ず通す）で、二重に検査すると受理集合が 2 箇所へ
+    分かれる。**非整除の形はここでは踏めない** — torch 自身が「Number of heads in key and
+    value must divide the number of heads in query」で落とすので、拒否側は test_shapes.py と
+    適合表（op-contracts.json）が押さえる。
+
+    分解経路（既定の表）の GQA は救わない（ADR 0067 決定 1 後半 — `bmm` のバッチ突合は
+    意図的な検出線）。そちらは従来どおり repeat_kv が expand / reshape で実体化される。
+    """
+
+    def test_a_gqa_sdpa_becomes_a_single_attention_node(self):
+        graph, _ = _preserved_attention(GqaAttention(), _args(heads=4, kv_heads=2))
+
+        assert [node.op for node in graph.nodes] == ["attention"]
+        node = only_node(graph, "attention")
+        assert len(node.ins) == 3
+        assert [declared_shape(graph, name) for name in node.ins] == [
+            [2, 4, 5, 4],
+            [2, 2, 7, 4],
+            [2, 2, 7, 4],
+        ]
+        # 出力は **q 側の H**（kv 側へ縮まない）
+        assert declared_shape(graph, node.outs[0]) == [2, 4, 5, 4]
+        # 契約（アリティ / attrs キー / 値域）を Python 側の表でも通す
+        assert assert_node_contract(node, "test") is OP_CONTRACTS["attention"]
+
+    def test_the_mqa_form_carries_the_single_kv_head(self):
+        """Hkv=1 も同じ整除式で表す — 別 op を作らない。
+
+        形は適合表の MQA ケース（8:1・head_dim 256）と同じ比・同じ D で踏む。
+        """
+        graph, _ = _preserved_attention(
+            GqaAttention(), _args(batch=1, heads=8, depth=256, kv_heads=1)
+        )
+        node = only_node(graph, "attention")
+
+        assert [declared_shape(graph, name) for name in node.ins] == [
+            [1, 8, 5, 256],
+            [1, 1, 7, 256],
+            [1, 1, 7, 256],
+        ]
+        assert declared_shape(graph, node.outs[0]) == [1, 8, 5, 256]
+
+    def test_enable_gqa_with_equal_head_counts_emits_the_same_node(self):
+        """r=1 の形は `enable_gqa` の有無で IR が変わらない（比の欄を作らない趣旨）。"""
+        args = _args()
+        gqa, _ = _preserved_attention(GqaAttention(), args)
+        plain, _ = _preserved_attention(PlainAttention(), args)
+
+        assert [node.op for node in gqa.nodes] == ["attention"]
+        assert only_node(gqa, "attention") == only_node(plain, "attention")
+        assert gqa.values == plain.values
 
 
 class TestAdditiveMaskIsAccepted:

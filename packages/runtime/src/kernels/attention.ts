@@ -72,22 +72,37 @@ export const ATTENTION_STATS_STRIDE = 2;
  */
 const maskKeyPart = (mask: boolean): string => mask ? ":mask" : "";
 
+/**
+ * **GQA**（整除 broadcast — ADR 0067 決定 1 / 2）の判別子。
+ *
+ * MUST: 無しは空文字（`r = 1` の既存キーは 1 文字も動かない — ADR 0067 決定 2 の
+ * 「r=1 はバイト同一」がキー側にも掛かる）。MUST: 語は mask の**さらに後ろ**（並び順を
+ * ここ 1 箇所で固定する — 同一構成が 2 通りのキーを持たないための規律）。
+ * MUST: `r` の値そのものは載せない（uniform で運ぶ — 載せると r の種類ぶんパイプラインが
+ * 増える。scale / row_offset と同じ規律）。
+ */
+const gqaKeyPart = (gqa: boolean): string => gqa ? ":gqa" : "";
+
 export const attentionQkKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
   mask = false,
+  gqa = false,
 ): string =>
   `attention_qk:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}${
     maskKeyPart(mask)
-  }`;
+  }${gqaKeyPart(gqa)}`;
 
 export const attentionPvKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
+  gqa = false,
 ): string =>
-  `attention_pv:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}`;
+  `attention_pv:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}${
+    gqaKeyPart(gqa)
+  }`;
 
 /**
  * ② の **regcache 変種**（S を 1 回だけ読んでレジスタに残す）が受け持てる 1 スレッドあたりの
@@ -128,13 +143,15 @@ export const attentionQkWgsl = (
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
   mask = false,
-): string => gemmWgsl({ op: "attention_qk", v4, compute, score, mask });
+  gqa = false,
+): string => gemmWgsl({ op: "attention_qk", v4, compute, score, mask, gqa });
 
 export const attentionPvWgsl = (
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
-): string => gemmWgsl({ op: "attention_pv", v4, compute, score });
+  gqa = false,
+): string => gemmWgsl({ op: "attention_pv", v4, compute, score, gqa });
 
 /** f32 の最大有限値。WGSL に無限大リテラルが無いため amax の identity にこれを使う（softmax と同じ）。 */
 const F32_MAX = "3.402823466e38";
@@ -275,31 +292,71 @@ ${sumPass}
 export const ATTENTION_STATS_WGSL: string = attentionStatsWgsl();
 
 /**
+ * GQA の繰り返し数 `r = H / Hkv`（uniform に載る導出値 — ADR 0067 決定 2）の値域門。
+ *
+ * MUST: 0 を通さない。WGSL の u32 ゼロ除算は trap せず実装依存の値を返すので、`r = 0` は
+ * 例外も NaN も出ないまま K / V の base が化ける（沈黙誤値）。
+ */
+const assertKvRepeat = (where: string, kvRepeat: number): void => {
+  assertU32Params(where, { kv_repeat: kvRepeat });
+  if (kvRepeat < 1) {
+    throw new CodegenError(`${where}: kv_repeat は正整数（${kvRepeat}）`);
+  }
+};
+
+/**
  * ① の uniform（`{m, n, k, scale}`）。4 語目が**半スケール**の f32 ビット列。
  *
  * MUST: scale を WGSL に焼かない（値の種類だけパイプラインが増える — masked_fill の
  * 埋め値と同じ理由）。
+ *
+ * `kvRepeat` は **GQA 変種だけ**が渡す 5 語目（ADR 0067 決定 2）。uniform struct の整列で
+ * 32 バイトに伸びる（bmm の行窓変種と同じ形）。MUST: 省略時のバイト列は従来どおり 16 バイト
+ * ちょうど — `r = 1` の既存経路が 1 バイトも動かないことがこの分岐の目的。
  */
 export const attentionQkParams = (
   m: number,
   n: number,
   k: number,
   scale: number,
+  kvRepeat?: number,
 ): Uint32Array<ArrayBuffer> => {
   if (!Number.isFinite(scale)) {
     throw new CodegenError(`attention_qk params: scale は有限の数値（${scale}）`);
   }
-  const params = gemmParams("attention_qk", m, n, k);
+  const base = gemmParams("attention_qk", m, n, k);
+  if (kvRepeat === undefined) {
+    new Float32Array(base.buffer)[3] = scale;
+    return base;
+  }
+  assertKvRepeat("attention_qk params", kvRepeat);
+  const params = new Uint32Array(8);
+  params.set(base.subarray(0, 3));
   new Float32Array(params.buffer)[3] = scale;
+  params[4] = kvRepeat;
   return params;
 };
 
-/** ③ の uniform（`{m, n, k}` — bmm と同じ 3 語）。 */
+/**
+ * ③ の uniform（`{m, n, k}` — bmm と同じ 3 語）。
+ *
+ * `kvRepeat` は **GQA 変種だけ**が渡す 4 語目（ADR 0067 決定 2）。16 バイト整列の余りに収まる
+ * ので、GQA でもバイト数は変わらない（省略時は従来どおり 4 語目が 0）。
+ */
 export const attentionPvParams = (
   m: number,
   n: number,
   k: number,
-): Uint32Array<ArrayBuffer> => gemmParams("attention_pv", m, n, k);
+  kvRepeat?: number,
+): Uint32Array<ArrayBuffer> => {
+  const params = gemmParams("attention_pv", m, n, k);
+  if (kvRepeat === undefined) {
+    return params;
+  }
+  assertKvRepeat("attention_pv params", kvRepeat);
+  params[3] = kvRepeat;
+  return params;
+};
 
 /**
  * ② の uniform。WGSL の uniform アドレス空間では struct の整列が 16 バイトになるため、

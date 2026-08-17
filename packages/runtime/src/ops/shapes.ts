@@ -515,17 +515,29 @@ export const computeOutputShape = (
       const show = `[${q.join(",")}] / [${k.join(",")}] / [${v.join(",")}]`;
       if (q.length !== 4 || k.length !== 4 || v.length !== 4) {
         throw new OpContractError(
-          `${where}: attention は q[B,H,M,D] / k[B,H,N,D] / v[B,H,N,D] の rank-4 のみ: ${show}`,
+          `${where}: attention は q[B,H,M,D] / k[B,Hkv,N,D] / v[B,Hkv,N,D] の rank-4 のみ: ${show}`,
         );
       }
-      // MUST: B と H を**別々に**突き合わせる（積だけを見ると B/H の取り違えが素通りする —
-      // カーネルは B·H を 1 本の軸に畳むので、値にも出ない形が作れる）。
-      for (const axis of [0, 1] as const) {
-        if (q[axis] !== k[axis] || q[axis] !== v[axis]) {
-          throw new OpContractError(
-            `${where}: attention の軸 ${axis}（${axis === 0 ? "B" : "H"}）が不一致 ${show}`,
-          );
-        }
+      // MUST: B は**完全一致**（積だけを見ると B/H の取り違えが素通りする — カーネルは B·H を
+      // 1 本の軸に畳むので、値にも出ない形が作れる）。
+      if (q[0] !== k[0] || q[0] !== v[0]) {
+        throw new OpContractError(`${where}: attention の軸 0（B）が不一致 ${show}`);
+      }
+      // MUST: k / v の Hkv も**完全一致**（GQA で緩めるのは q との関係だけ — ADR 0067 決定 1 は
+      // 「k/v 間の Hkv 一致・D 3 者同一・N=0 拒否は取り違え検出線としてそのまま維持」）。
+      if (k[1] !== v[1]) {
+        throw new OpContractError(`${where}: attention の Hkv（k / v の軸 1）が不一致 ${show}`);
+      }
+      // GQA = **整除 broadcast**（ADR 0067 決定 1）。`H % Hkv == 0` かつ `H ≥ Hkv` だけを受理し、
+      // `r = H / Hkv` は導出値（attrs 欄を作らない）。Hkv = 1 の MQA も同式で表す。
+      // MUST: `H < Hkv` を別条件で弾く — `H = 0` は `0 % Hkv == 0` を満たすので、整除だけを見ると
+      // 「H を丸ごと落とした IR」が素通りする（Hkv = 0 も同じ枝で落ちる）。broadcast の向きは
+      // 常に kv → q で、q 側を増やす形は語彙に無い。
+      if (q[1] !== k[1] && (q[1] < k[1] || q[1] % k[1] !== 0)) {
+        throw new OpContractError(
+          `${where}: attention の H ${q[1]} が Hkv ${k[1]} の正の整数倍でない（GQA は` +
+            ` H % Hkv == 0 かつ H ≥ Hkv — ADR 0067 決定 1）${show}`,
+        );
       }
       // MUST: D は 3 者とも同じ（v 側だけ別の長さを許すと、取り違えが要素数で捕まらない）。
       if (q[3] !== k[3] || q[3] !== v[3]) {

@@ -628,11 +628,14 @@ def _softmax(
 
 
 def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
-    """attention の出力 shape（ADR 0023）。
+    """attention の出力 shape（ADR 0023 + 0067 決定 1）。
 
-    `q[B,H,M,D]` / `k[B,H,N,D]` / `v[B,H,N,D]` （+ 省略可能な `mask[1,1,M,N]`）→ `[B,H,M,D]`。
+    `q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]` （+ 省略可能な `mask[1,1,M,N]`）→ `[B,H,M,D]`。
 
-    MUST: B と H を**別々に**突き合わせる（積だけを見ると取り違えが素通りする）。
+    MUST: B は q / k / v で**完全一致**（積だけを見ると取り違えが素通りする）。
+    MUST: H と Hkv は**整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv` — ADR 0067 決定 1）。
+    `r = H / Hkv` は導出値で attrs 欄を作らない。Hkv=1 の MQA も同じ式で表す。k / v 間の
+    Hkv 一致・D 3 者同一・N=0 拒否は**取り違え検出線としてそのまま維持**する。
     MUST: D は 3 者とも同じ（v 側だけ別の長さを許すと取り違えが要素数で捕まらない）。
     MUST: mask の先頭 2 軸は**ちょうど 1**（B·H への broadcast 専業）。`[B,1,M,N]` を
     通すと「B が合っている限り黙って通る」形が増え、契約の外の broadcast 規則を
@@ -645,11 +648,32 @@ def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) ->
     show = f"[{_show(q)}] / [{_show(k)}] / [{_show(v)}]"
     if len(q) != 4 or len(k) != 4 or len(v) != 4:
         raise OpContractError(
-            f"{where}: attention は q[B,H,M,D] / k[B,H,N,D] / v[B,H,N,D] の rank-4 のみ: {show}"
+            f"{where}: attention は q[B,H,M,D] / k[B,Hkv,N,D] / v[B,Hkv,N,D] の rank-4 のみ: {show}"
         )
-    for axis, name in ((0, "B"), (1, "H")):
-        if q[axis] != k[axis] or q[axis] != v[axis]:
-            raise OpContractError(f"{where}: attention の軸 {axis}（{name}）が不一致 {show}")
+    if q[0] != k[0] or q[0] != v[0]:
+        raise OpContractError(f"{where}: attention の軸 0（B）が不一致 {show}")
+    # MUST: k / v の Hkv は**完全一致**（GQA で緩めるのは q との関係だけ — ADR 0067 決定 1）。
+    if k[1] != v[1]:
+        raise OpContractError(f"{where}: attention の Hkv（k / v の軸 1）が不一致 {show}")
+    # GQA = **整除 broadcast**（ADR 0067 決定 1）。構造等値（記号のままの r=1 を含む）か、
+    # 両方が定数で `H % Hkv == 0` かつ `H ≥ Hkv` だけを受理する。
+    # MUST: `H ≥ Hkv` を整除と**別条件**で見る — `H = 0` は `0 % Hkv == 0` を満たすので、整除
+    # だけだと「H を丸ごと落とした IR」が素通りする。broadcast の向きは常に kv → q。
+    # MUST: `Hkv == 0` を剰余より**先**に見る — Python の `%` は ZeroDivisionError を投げるので、
+    # TS 側（`4 % 0` が NaN で条件が真になる）と同じ契約エラーで落ちなくなる。
+    if q[1] != k[1]:
+        # 記号次元は「宣言だけでは決められない」として落とす（broadcast_extents と同じ規律 —
+        # 黙って通すと実行してみないと分からない IR が書ける。head 数に記号の実測は無い）。
+        if not q[1].is_const or not k[1].is_const:
+            raise OpContractError(
+                f"{where}: attention の H {q[1].to_dim()} と Hkv {k[1].to_dim()} は"
+                f"宣言だけでは整除 broadcast の可否を決められない {show}"
+            )
+        if k[1].offset == 0 or q[1].offset < k[1].offset or q[1].offset % k[1].offset != 0:
+            raise OpContractError(
+                f"{where}: attention の H {q[1].offset} が Hkv {k[1].offset} の正の整数倍でない"
+                f"（GQA は H % Hkv == 0 かつ H ≥ Hkv — ADR 0067 決定 1）{show}"
+            )
     if q[3] != k[3] or q[3] != v[3]:
         raise OpContractError(f"{where}: attention の D（軸 3）が不一致 {show}")
     if k[2] != v[2]:

@@ -330,6 +330,13 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // 動かない**ことがこの列挙の主目的（②③ は mask を一切見ない）。
     ["attention_qk_mask.wgsl", attentionQkWgsl(false, "f32", "f32", true)],
     ["attention_qk_mask_v4.wgsl", attentionQkWgsl(true, "f32", "f32", true)],
+    // **GQA 変種**（整除 broadcast — ADR 0067 決定 1 / 2）。①③ を **v4 と対で 4 本**置くのが
+    // 条件で、この 4 本を足すことより **上の attention_qk*.wgsl / attention_pv*.wgsl が
+    // 1 バイトも動かない**（= `r = 1` はバイト同一という決定 2 の MUST）が列挙の主目的。
+    ["attention_qk_gqa.wgsl", attentionQkWgsl(false, "f32", "f32", false, true)],
+    ["attention_qk_gqa_v4.wgsl", attentionQkWgsl(true, "f32", "f32", false, true)],
+    ["attention_pv_gqa.wgsl", attentionPvWgsl(false, "f32", "f32", true)],
+    ["attention_pv_gqa_v4.wgsl", attentionPvWgsl(true, "f32", "f32", true)],
     ["gather.wgsl", GATHER_WGSL],
     ["strided_copy_f32.wgsl", stridedWgsl({ dtype: "f32" })],
     ["strided_copy_i32.wgsl", stridedWgsl({ dtype: "i32" })],
@@ -1610,6 +1617,167 @@ Deno.test("attention の加算 mask は ①QK の epilogue だけを変え、②
     [false, true].map((mask) => attentionQkKey(v4, "f32", "f32", mask))
   );
   assertEquals(new Set(keys).size, keys.length);
+});
+
+/**
+ * GQA 変種の差分を**打ち消して**素の変種へ戻す（ADR 0067 決定 2 の「差分は base 算術のみ」）。
+ *
+ * 差分は ①uniform の `kv_repeat` 1 語 ②GQA の説明コメント 2 行 ③K / V の base 1 行
+ * ④先頭コメントの 1 語 だけ。**戻せることで固定する**のが要点で、行数の一致だけを見る形に
+ * すると縮約ループの中身が入れ替わっても通る。
+ */
+const undoGqa = (text: string, side: "k" | "v", mapped: string, plain: string): string =>
+  text
+    .split("\n")
+    .filter((line) =>
+      line !== "  kv_repeat: u32," &&
+      !line.includes("GQA（ADR 0067 決定 2）") &&
+      !line.includes("q / S / O / 行統計は q-head のまま")
+    )
+    .map((line) => line === mapped ? plain : line)
+    .join("\n")
+    .replace(`, GQA（${side} は kv-head へ整数除算で写す）`, "");
+
+/**
+ * GQA（整除 broadcast — ADR 0067 決定 1 / 2）。**`r = 1` の生成物とキーがバイト同一**であること
+ * （既存スナップショット 133 本とビット同一門を凍結したまま席を足す MUST）と、GQA 変種の差分が
+ * 「K / V の base 1 行 + uniform 1 語」に閉じていることを生成物の側で固定する。
+ */
+Deno.test("attention の GQA 変種は K / V の base 1 行と uniform 1 語だけを変える", () => {
+  for (const v4 of [false, true]) {
+    // 格納 / 計算 / mask の他の軸と**同時に立ちうる**ので、組み合わせごとに差分を見る
+    // （s16 は v4 側しか存在しない — src/kernels/score-storage.ts）。
+    const qkVariants = [
+      ["素", (gqa: boolean) => attentionQkWgsl(v4, "f32", "f32", false, gqa)] as const,
+      ["mask", (gqa: boolean) => attentionQkWgsl(v4, "f32", "f32", true, gqa)] as const,
+      ["c16", (gqa: boolean) => attentionQkWgsl(v4, "f16", "f32", false, gqa)] as const,
+      ...(v4
+        ? [["s16", (gqa: boolean) => attentionQkWgsl(v4, "f32", "f16", false, gqa)] as const]
+        : []),
+    ];
+    for (const [label, generate] of qkVariants) {
+      const where = `①QK ${label} v4=${v4}`;
+      const plain = generate(false);
+      const gqa = generate(true);
+      assertNotEquals(plain, gqa, where);
+      // 素の変種に GQA の痕跡が 1 文字も無い（= r=1 経路は 1 バイトも動いていない）
+      assertEquals(plain.includes("kv_repeat"), false, `${where}: 素に kv_repeat`);
+      assertEquals(plain.includes("GQA"), false, `${where}: 素に GQA`);
+      // 差分は k の base 1 行（+ uniform 1 語 + コメント）だけ
+      assertEquals(
+        gqa.includes("  let bbase = (wid.z / dims.kv_repeat) * dims.n * dims.k;"),
+        true,
+        `${where}: k の base が kv-head へ写っていない`,
+      );
+      assertEquals(
+        undoGqa(
+          gqa,
+          "k",
+          "  let bbase = (wid.z / dims.kv_repeat) * dims.n * dims.k;",
+          "  let bbase = wid.z * dims.n * dims.k;",
+        ),
+        plain,
+        `${where}: 差分が base 算術 + uniform 1 語を超えている`,
+      );
+      // MUST: q（A）と S（C）は q-head のまま（写すのは K / V だけ — ADR 0067 決定 2）
+      for (const line of gqa.split("\n")) {
+        if (line.includes("let abase") || line.includes("let cbase")) {
+          assertEquals(
+            line.includes("kv_repeat"),
+            false,
+            `${where}: q / S 側が写っている: ${line}`,
+          );
+        }
+      }
+      // uniform は scale の**次**（並びは attentionQkParams と対）
+      assertEquals(gqa.includes("  scale: f32,\n  kv_repeat: u32,\n}"), true, `${where}: 欄の並び`);
+    }
+    const pvVariants = [
+      ["素", (gqa: boolean) => attentionPvWgsl(v4, "f32", "f32", gqa)] as const,
+      ["c16", (gqa: boolean) => attentionPvWgsl(v4, "f16", "f32", gqa)] as const,
+      ...(v4 ? [["s16", (gqa: boolean) => attentionPvWgsl(v4, "f32", "f16", gqa)] as const] : []),
+    ];
+    for (const [label, generate] of pvVariants) {
+      const where = `③PV ${label} v4=${v4}`;
+      const plain = generate(false);
+      const gqa = generate(true);
+      assertNotEquals(plain, gqa, where);
+      assertEquals(plain.includes("kv_repeat"), false, `${where}: 素に kv_repeat`);
+      // MUST: base は v4 で **quad 単位**（要素単位のままだと 4 分の 1 の位置を読む）
+      const nUnit = v4 ? "n4" : "dims.n";
+      assertEquals(
+        gqa.includes(`  let bbase = (wid.z / dims.kv_repeat) * dims.k * ${nUnit};`),
+        true,
+        `${where}: v の base が kv-head へ写っていない`,
+      );
+      assertEquals(
+        undoGqa(
+          gqa,
+          "v",
+          `  let bbase = (wid.z / dims.kv_repeat) * dims.k * ${nUnit};`,
+          `  let bbase = wid.z * dims.k * ${nUnit};`,
+        ),
+        plain,
+        `${where}: 差分が base 算術 + uniform 1 語を超えている`,
+      );
+      // MUST: 行統計（rbase）も出力（cbase）も q-head のまま（S は [B·H,M,N] のまま）
+      for (const line of gqa.split("\n")) {
+        if (
+          line.includes("let rbase") || line.includes("let cbase") || line.includes("let abase")
+        ) {
+          assertEquals(line.includes("kv_repeat"), false, `${where}: q 側が写っている: ${line}`);
+        }
+      }
+    }
+    // bmm は GQA の軸を持たない（③PV の base 式と同居しているので、漏れると
+    // 「バッチ完全一致」の契約〈ADR 0022 / 0023〉が黙って割れる）
+    assertEquals(bmmWgsl(v4).includes("kv_repeat"), false, `bmm v4=${v4}`);
+    assertEquals(matmulWgsl(v4).includes("kv_repeat"), false, `matmul v4=${v4}`);
+    assertEquals(linearWgsl("f32", v4).includes("kv_repeat"), false, `linear v4=${v4}`);
+  }
+  // ② 行統計は GQA の軸をそもそも持たない（S は q-head の [B·H, M, N] のまま）
+  assertEquals(ATTENTION_STATS_WGSL.includes("kv_repeat"), false);
+
+  // キーは mask のさらに後ろに 1 語だけ足る（r=1 の既存キーは 1 文字も動かない）
+  assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg128x128r8x8w16v4");
+  assertEquals(
+    attentionQkKey(true, "f32", "f32", false, true),
+    "attention_qk:v1:f32:reg128x128r8x8w16v4:gqa",
+  );
+  assertEquals(
+    attentionQkKey(true, "f32", "f16", true, true),
+    "attention_qk:v1:f32:reg128x128r8x8w16v4:s16:mask:gqa",
+  );
+  assertEquals(attentionPvKey(true), "attention_pv:v1:f32:reg128x128r8x8w16v4");
+  assertEquals(
+    attentionPvKey(true, "f32", "f32", true),
+    "attention_pv:v1:f32:reg128x128r8x8w16v4:gqa",
+  );
+  // 同一構成が 2 通りのキーを持たない（v4 × mask × 格納 × GQA の全数が一意）
+  const allKeys = [false, true].flatMap((v4) =>
+    [false, true].flatMap((mask) =>
+      [false, true].flatMap((gqa) => [
+        attentionQkKey(v4, "f32", "f32", mask, gqa),
+        attentionPvKey(v4, "f32", "f32", gqa),
+      ])
+    )
+  );
+  assertEquals(new Set(allKeys).size, 2 * 2 * 2 + 2 * 2, "①は mask×gqa×v4 / ③は gqa×v4 で一意");
+
+  // params: `r` は uniform（キーには載らない）。①は 5 語目（整列で 32 B へ伸びる）・
+  // ③は 4 語目（16 B のまま）で、**省略時のバイト列は従来どおり**。
+  assertEquals(attentionQkParams(5, 7, 4, 0.5).byteLength, 16);
+  const qkGqa = attentionQkParams(5, 7, 4, 0.5, 8);
+  assertEquals(qkGqa.byteLength, 32);
+  assertEquals([...qkGqa.slice(0, 3)], [5, 7, 4]);
+  assertEquals(new Float32Array(qkGqa.buffer)[3], 0.5);
+  assertEquals(qkGqa[4], 8);
+  assertEquals([...attentionPvParams(5, 4, 7, 8)], [5, 4, 7, 8]);
+  assertEquals(attentionPvParams(5, 4, 7, 8).byteLength, 16);
+  // MUST: r = 0 は fail loudly（WGSL の u32 ゼロ除算は trap せず沈黙誤値になる）
+  assertThrows(() => attentionQkParams(5, 7, 4, 0.5, 0), CodegenError, "kv_repeat");
+  assertThrows(() => attentionPvParams(5, 4, 7, 0), CodegenError, "kv_repeat");
+  assertThrows(() => attentionQkParams(5, 7, 4, 0.5, 1.5), CodegenError, "kv_repeat");
 });
 
 /**

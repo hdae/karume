@@ -458,19 +458,24 @@ const attentionCase = (
     readonly query?: (index: number) => number;
     readonly key?: (index: number) => number;
     readonly scale?: number;
+    /** k / v の head 数（GQA — 省略時は H = Hkv の従来形。ADR 0067 決定 1）。 */
+    readonly kvHeads?: number;
   } = {},
-): OpCase => ({
-  name,
-  op: "attention",
-  inputs: [
-    fill([b, h, m, d], options.query ?? SIGNED),
-    fill([b, h, n, d], options.key ?? POSITIVE),
-    fill([b, h, n, d], NONZERO),
-  ],
-  outShape: [b, h, m, d],
-  // 既定は契約どおりの半スケール（torch の `√(1/√D)`）。
-  attrs: { scale: options.scale ?? Math.fround(Math.sqrt(1 / Math.sqrt(d))) },
-});
+): OpCase => {
+  const kvHeads = options.kvHeads ?? h;
+  return {
+    name,
+    op: "attention",
+    inputs: [
+      fill([b, h, m, d], options.query ?? SIGNED),
+      fill([b, kvHeads, n, d], options.key ?? POSITIVE),
+      fill([b, kvHeads, n, d], NONZERO),
+    ],
+    outShape: [b, h, m, d],
+    // 既定は契約どおりの半スケール（torch の `√(1/√D)`）。
+    attrs: { scale: options.scale ?? Math.fround(Math.sqrt(1 / Math.sqrt(d))) },
+  };
+};
 
 export const ATTENTION_CASES: readonly OpCase[] = [
   // B=2 / H=3 / M=5 / N=11 / D=7 — 5 軸とも違う長さ（軸の取り違えが必ず値に出る）
@@ -497,6 +502,12 @@ export const ATTENTION_CASES: readonly OpCase[] = [
   },
   // 明示 scale（SDPA の `scale` 引数を指定した形 — 既定 1/√D 以外も契約どおり通る）
   attentionCase("attention 明示 scale [2,2,5,4]", [2, 2, 5, 7, 4], { scale: 0.25 }),
+  // GQA / MQA（整除 broadcast — ADR 0067 決定 1）。**CPU 参照との突合**で見るのがここの役目で、
+  // repeat_kv 実体化との突合（tests/gpu_attention_gqa_test.ts）とは別の検出器
+  // （実体化側とカーネルが同じ写像を共有しているぶん、参照実装が独立の証人になる）。
+  // MUST: B ≥ 2 の GQA を持つ（`⌊(b·H + h)/r⌋ = b·Hkv + ⌊h/r⌋` の b 項は B=1 では検証されない）。
+  attentionCase("attention GQA r=4 [2,8,5,4] × [2,2,7,4]", [2, 8, 5, 7, 4], { kvHeads: 2 }),
+  attentionCase("attention MQA r=8 [1,8,3,8] × [1,1,5,8]", [1, 8, 3, 5, 8], { kvHeads: 1 }),
 ];
 
 /** src の最終次元 D=9 に収まる決定的な添字（恒等でも単調でもない列）。 */

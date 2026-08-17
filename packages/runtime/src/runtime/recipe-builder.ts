@@ -1375,6 +1375,10 @@ export class RecipeBuilder {
    * 省略可能な第 4 入力 `mask[1,1,M,N]`（加算型）は **① の束縛が 1 本増えるだけ**で、
    * dispatch 数も ②③ の経路も変わらない（S が mask 済みで出てくる）。
    *
+   * GQA（`H % Hkv == 0` — ADR 0067）は **①③ のキー 1 語と uniform 1 語だけ**の軸で、dispatch 数も
+   * 確保も変わらない（K / V の base だけが `wid.z / r` で kv-head へ写る）。i8a8 との組は
+   * 未対応で fail loudly（決定 3）。
+   *
    * i8a8 変種（opt-in）では ① が 3 dispatch・③ が 3 dispatch に増える（最大 7）。**適格判定は
    * 段ごとに独立**（① は `D % 4 == 0`・③ は `N % 4 == 0`）なので、片方だけ i8a8 の**混成**が
    * 起こりうる — 満たさない段だけが f32 経路へ**沈黙で**縮退する（linear の `k % 4` と同じ
@@ -1394,7 +1398,7 @@ export class RecipeBuilder {
     builder: StepRecipeBuilder,
   ): Promise<void> {
     const [q, k, v] = step.inputShapes;
-    // B と H は 1 本のバッチ軸へ畳む（契約は rank-4 head-first で、3 者の B / H は一致）。
+    // B と H は 1 本のバッチ軸へ畳む（契約は rank-4 head-first で、B は 3 者一致・H は q 側）。
     const batch = q[0] * q[1];
     const rows = q[2];
     const cols = k[2];
@@ -1402,6 +1406,14 @@ export class RecipeBuilder {
     const scale = attentionScale(step.node.attrs, `nodes (${step.node.op})`);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `attention [${q.join(",")}] × [${k.join(",")}] × [${v.join(",")}]`;
+
+    // GQA（整除 broadcast — ADR 0067 決定 1 / 2）。`r = H / Hkv` は**導出値**（attrs 欄は無い）で、
+    // 整除は shape 検査（src/ops/shapes.ts）が保証する。確保・dispatch・S / O / 行統計は
+    // すべて q 側の `B·H` のままで、**K / V の読みだけ**が kv-head へ写る。
+    // MUST: `r = 1` では GQA ビットを立てない（キーも生成 WGSL もバイト同一 — ADR 0067 決定 2）。
+    const kvHeads = k[1];
+    const kvRepeat = q[1] / kvHeads;
+    const gqa = kvRepeat > 1;
 
     // f16 計算変種（ADR 0028）。3 カーネルが**同時に**切り替わる — S の格納形が ① の書き手と
     // ②③ の読み手で一致していなければならないので、段ごとの混成はあり得ない。
@@ -1440,6 +1452,18 @@ export class RecipeBuilder {
           "'f16' にすること）",
       );
     }
+    // DECIDED: GQA × i8a8 は fail loudly で開始する（docs/decisions/0067 決定 3）。i8a8 は
+    // head 基底が 5 本（src/kernels/attention-i8a8.ts）で、K / V の量子化・確保も `B·H` 前提
+    // なので、GQA 形をそのまま流すと量子化バッファの取り違えになる。
+    // MUST: 判定は **要求されたモード**（`i8a8`）で見る — 段ごとの適格判定（`qkI8a8` /
+    // `pvI8a8`）で見ると D%4 / N%4 を満たさない形だけ拒否をすり抜ける（mask と同じ規律）。
+    // MUST: 黙って f32 経路へ落とさない（ADR 0058 決定 3 — 性能が静かに変わる）。
+    if (gqa && i8a8) {
+      throw new ExecutionError(
+        `${where}: GQA（H=${q[1]} / Hkv=${kvHeads} → r=${kvRepeat}）× i8a8 は未対応` +
+          "（ADR 0067 決定 3・後日サポート予定 — attentionCompute を 'f32' か 'f16' にすること）",
+      );
+    }
 
     // S[batch, M, N] と行統計 [batch·M, 2]。O は実行相が確保済みなので、峰は
     // O + S + 統計（分解経路の S + P + 恒等 expand の 3 枚から 1 枚ぶん減る）。
@@ -1464,10 +1488,10 @@ export class RecipeBuilder {
     } else {
       const qkV4 = gemmUsesVec4(depth, cols);
       const hasMask = mask !== undefined;
-      const qkKey = attentionQkKey(qkV4, compute, scoreStorage, hasMask);
+      const qkKey = attentionQkKey(qkV4, compute, scoreStorage, hasMask, gqa);
       const { pipeline: qkPipeline, layout: qkLayout } = await this.#state.cache.get(
         qkKey,
-        attentionQkWgsl(qkV4, compute, scoreStorage, hasMask),
+        attentionQkWgsl(qkV4, compute, scoreStorage, hasMask, gqa),
       );
       const geometry = defaultGemmGeometry();
       builder.dispatch({
@@ -1475,7 +1499,7 @@ export class RecipeBuilder {
         pipeline: qkPipeline,
         layout: qkLayout,
         params: this.#writeParams(
-          attentionQkParams(rows, cols, depth, scale),
+          attentionQkParams(rows, cols, depth, scale, gqa ? kvRepeat : undefined),
           PARAMS_UNIFORM_USAGE,
         ),
         bindings: [
@@ -1527,17 +1551,20 @@ export class RecipeBuilder {
       );
     } else {
       const pvV4 = gemmUsesVec4(cols, depth);
-      const pvKey = attentionPvKey(pvV4, compute, scoreStorage);
+      const pvKey = attentionPvKey(pvV4, compute, scoreStorage, gqa);
       const { pipeline: pvPipeline, layout: pvLayout } = await this.#state.cache.get(
         pvKey,
-        attentionPvWgsl(pvV4, compute, scoreStorage),
+        attentionPvWgsl(pvV4, compute, scoreStorage, gqa),
       );
       const geometry = defaultGemmGeometry();
       builder.dispatch({
         key: pvKey,
         pipeline: pvPipeline,
         layout: pvLayout,
-        params: this.#writeParams(attentionPvParams(rows, depth, cols), PARAMS_UNIFORM_USAGE),
+        params: this.#writeParams(
+          attentionPvParams(rows, depth, cols, gqa ? kvRepeat : undefined),
+          PARAMS_UNIFORM_USAGE,
+        ),
         bindings: [
           { binding: 1, source: scores },
           { binding: 2, source: binds[2] },

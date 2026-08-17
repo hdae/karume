@@ -1503,6 +1503,34 @@
     },
     {
       "op": "attention",
+      "ins": [[2, 4, 5, 4], [2, 2, 7, 4], [2, 2, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "out": [2, 4, 5, 4],
+      "why": "GQA の整除 broadcast r=2（ADR 0067 決定 1 — 出力は q 側の H）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 16, 4, 128], [1, 2, 6, 128], [1, 2, 6, 128]],
+      "attrs": { "scale": 0.2973017692565918 },
+      "out": [1, 16, 4, 128],
+      "why": "素の GQA 16:2 の実測形（MiniCPM5-1B — head_dim は独立フィールド）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 3, 256], [1, 1, 7, 256], [1, 1, 7, 256]],
+      "attrs": { "scale": 0.25 },
+      "out": [1, 8, 3, 256],
+      "why": "MQA 8:1 の実測形（Gemma 4 E2B — Hkv=1 も同じ整除式で表す）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 4, 5, 4], [2, 2, 7, 4], [2, 2, 7, 4], [1, 1, 5, 7]],
+      "attrs": { "scale": 0.5 },
+      "out": [2, 4, 5, 4],
+      "why": "GQA × 加算 mask（mask は [1,1,M,N] のまま — Hkv とは独立の軸）"
+    },
+    {
+      "op": "attention",
       "ins": [[2, 3, 5, 4], [2, 3, 7, 4]],
       "attrs": { "scale": 0.5 },
       "throws": true,
@@ -1584,6 +1612,34 @@
       "attrs": { "scale": 0.5 },
       "throws": true,
       "why": "k と v の N が違う形"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 4, 5, 4], [2, 3, 7, 4], [2, 3, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "H が Hkv の整数倍でない形（GQA は H % Hkv == 0 だけ — ADR 0067 決定 1）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 2, 5, 4], [2, 4, 7, 4], [2, 4, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "Hkv > H（broadcast の向きが逆 — q 側を増やす形は語彙に無い）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 0, 5, 4], [2, 2, 7, 4], [2, 2, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "H = 0（`0 % Hkv == 0` は整除を満たすので H ≥ Hkv を別条件で見る）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 4, 5, 4], [2, 2, 7, 4], [2, 4, 7, 4]],
+      "attrs": { "scale": 0.5 },
+      "throws": true,
+      "why": "k と v の Hkv が違う形（GQA でも k/v 間は完全一致が検出線）"
     },
     {
       "op": "attention",

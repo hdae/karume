@@ -247,6 +247,85 @@ class TestSymPrefixSlice:
             shape_of("sym_prefix_slice", [["T", 4]], attrs=attrs)
 
 
+#: shape 層は attrs の scale も必ず引く（値域の検査を通すための最小の attrs）。
+_ATTENTION = {"scale": 0.5}
+
+
+class TestAttentionGqaBroadcast:
+    """GQA の整除 broadcast（ADR 0067 決定 1）— 適合表に書けない 2 面。
+
+    受理 / 拒否の集合そのものは適合表（op-contracts.json の GQA 8 ケース）が TS 側と
+    突き合わせる。表では押さえられないのは:
+
+    1. **`Hkv = 0`** — TS は `H % 0` が NaN で条件が真になり契約エラーへ落ちるが、Python の
+       `%` は ZeroDivisionError を投げる。剰余より**先**に 0 を見る条件順が崩れると、同じ
+       入力で例外の型だけが両側で割れる（表が書けるのは「throws」までで型は書けない）。
+    2. **記号次元の H / Hkv** — 束縛前の宣言 shape でしか現れない（数値へ解決した時点で
+       記号だった事実が消える）。
+
+    整数形の拒否 3 件は表と重なるが、条件の枝が 1 箇所に並ぶと「順序が崩れたときどの枝が
+    壊れたか」がここで読めるので、GQA の枝の回帰として同じクラスに置く。
+    """
+
+    def _shape_of(self, heads, kv_heads, value_heads=None):
+        return shape_of(
+            "attention",
+            [
+                [2, heads, 5, 4],
+                [2, kv_heads, 7, 4],
+                [2, kv_heads if value_heads is None else value_heads, 7, 4],
+            ],
+            attrs=_ATTENTION,
+        )
+
+    def test_a_divisible_head_count_broadcasts_to_the_query_heads(self):
+        assert self._shape_of(4, 2) == [2, 4, 5, 4]
+
+    def test_a_single_kv_head_is_the_mqa_form(self):
+        assert self._shape_of(8, 1) == [2, 8, 5, 4]
+
+    def test_equal_head_counts_stay_accepted(self):
+        assert self._shape_of(3, 3) == [2, 3, 5, 4]
+
+    def test_a_zero_kv_head_count_raises_the_contract_error_not_a_division_error(self):
+        """MUST: 剰余より先に `Hkv == 0` を見る（ZeroDivisionError は契約エラーではない）。"""
+        with pytest.raises(OpContractError, match="正の整数倍"):
+            self._shape_of(4, 0)
+
+    @pytest.mark.parametrize(
+        ("heads", "kv_heads", "why"),
+        [
+            (0, 2, "H = 0（`0 % Hkv == 0` は整除を満たすので H ≥ Hkv を別条件で見る）"),
+            (4, 3, "H が Hkv の整数倍でない"),
+            (2, 4, "Hkv > H（broadcast の向きが逆 — q 側を増やす形は語彙に無い）"),
+        ],
+        ids=("zero-h", "indivisible", "reversed"),
+    )
+    def test_a_head_count_that_is_not_a_positive_multiple_is_rejected(self, heads, kv_heads, why):
+        with pytest.raises(OpContractError, match="正の整数倍"):
+            self._shape_of(heads, kv_heads)
+        assert why  # 失敗時に形の意図が読めるようにパラメータへ残す
+
+    def test_a_kv_head_mismatch_between_k_and_v_is_rejected(self):
+        """GQA でも k / v 間の Hkv は完全一致（緩めたのは q との関係だけ）。"""
+        with pytest.raises(OpContractError, match=r"Hkv（k / v の軸 1）"):
+            self._shape_of(4, 2, value_heads=4)
+
+    def test_a_symbolic_head_count_that_matches_structurally_is_accepted(self):
+        """同じ式なら r=1 として通る（記号のまま「同じ長さか」は判定できる）。"""
+        assert self._shape_of("T", "T") == [2, "T", 5, 4]
+
+    @pytest.mark.parametrize(
+        ("heads", "kv_heads"),
+        [("T", 2), (4, "T"), ("2T", "T")],
+        ids=("symbolic-h", "symbolic-hkv", "both-symbolic"),
+    )
+    def test_head_counts_that_need_a_binding_to_divide_are_rejected(self, heads, kv_heads):
+        """束縛次第で整除しうる形は黙って通さない（broadcast 可否と同じ規律）。"""
+        with pytest.raises(OpContractError, match="宣言だけでは"):
+            self._shape_of(heads, kv_heads)
+
+
 def _graph() -> IrGraph:
     """入力 → linear → relu の最小グラフ（宣言はすべて正しい）。"""
     return IrGraph(

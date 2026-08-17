@@ -263,6 +263,12 @@ type GemmSpec =
      * ③PV は mask を見ない（S は既に mask 済み）。
      */
     readonly mask?: boolean;
+    /**
+     * GQA（整除 broadcast — ADR 0067 決定 1 / 2）の 1 ビット。立つと K / V 側の**バッチ base
+     * だけ**が kv-head へ写る（{@link batchPrologue}）。省略時（= `r` が 1）の生成物は
+     * 1 バイトも動かない MUST — 既存スナップショットとビット同一門がその検出器。
+     */
+    readonly gqa?: boolean;
   }
   | {
     readonly op: "linear";
@@ -372,11 +378,19 @@ const scaleVar = (slot: number): string =>
  *
  * MUST: v4 では **quad 単位**で数える（`wid.z * m * k4` であって `m * k` ではない）。
  * 要素単位のまま組むと batch ≥ 2 で隣のバッチを読み書きする — 例外なしの誤値。
+ *
+ * `gqa` は融合 attention の GQA 変種（ADR 0067 決定 2）で、**B 側（K / V）の base だけ**を
+ * kv-head へ写す。A（q）・C（S / O）・行統計（`rbase`）は q-head のままで、写すのは
+ * この 1 行に閉じる。
+ * MUST: 立てるのは attention の 2 op だけ（型で `GemmSpec` の attention 枝にしか無い）。
+ * ③PV の base 式は bmm と同居しているので、`gqa` を bmm 側から立てられる形にすると
+ * バッチ完全一致の契約（ADR 0022 / 0023）を黙って割れる。
  */
 const batchPrologue = (
   op: GemmSpec["op"],
   v4: boolean,
   rowWindow?: BmmRowWindow,
+  gqa = false,
 ): string => {
   const kUnit = v4 ? "k4" : "dims.k";
   const nUnit = v4 ? "n4" : "dims.n";
@@ -387,6 +401,10 @@ const batchPrologue = (
   const aOffset = rowWindow === "a" ? ` + dims.row_offset * ${kUnit}` : "";
   const cRows = rowWindow === "c" ? "dims.rows_full" : "dims.m";
   const cOffset = rowWindow === "c" ? ` + dims.row_offset * ${nUnit}` : "";
+  // GQA: `wid.z = b·H + h` に対し `H = Hkv·r` なら整数除算 `wid.z / r = b·Hkv + h/r` が
+  // 厳密に成立する（ORT WebGPU と同一構成 — ADR 0067 決定 2）。`r` は uniform でキーには
+  // 載らない（値の種類ぶんパイプラインが増える — scale / row_offset と同じ規律）。
+  const bZ = gqa ? "(wid.z / dims.kv_repeat)" : "wid.z";
   return `  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチのタイル）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすための前提${
     v4 ? "。MUST: base は quad 単位（要素単位で組むと隣のバッチを読む）" : ""
@@ -398,14 +416,20 @@ const batchPrologue = (
         : "C = 出力を全 M の row_offset 行目へ書く"
     }）。
   // 反対側は m 行のブロックとして 0 から数える`
+  }${
+    gqa
+      ? `
+  // GQA（ADR 0067 決定 2）: K / V だけ kv-head へ写す（wid.z / r = b·Hkv + h/r）。
+  // q / S / O / 行統計は q-head のまま`
+      : ""
   }
   let abase = wid.z * ${aRows} * ${kUnit}${aOffset};
 ${
     op === "attention_qk"
       // k は [B·H, N, D] のまま読む（旧経路の permute(kᵀ) が要らない）。転置読みは行頭を
       // **平坦添字**で作るので、base は v4 でも quad ではなく**要素単位**。
-      ? `  let bbase = wid.z * dims.n * dims.k;\n`
-      : `  let bbase = wid.z * dims.k * ${nUnit};\n`
+      ? `  let bbase = ${bZ} * dims.n * dims.k;\n`
+      : `  let bbase = ${bZ} * dims.k * ${nUnit};\n`
   }  let cbase = wid.z * ${cRows} * ${nUnit}${cOffset};
 ${op === "attention_pv" ? "  let rbase = wid.z * dims.m;\n" : ""}`;
 };
@@ -983,6 +1007,16 @@ const BMM_ROW_WINDOW_DIMS_EXTRA = `  row_offset: u32,
 `;
 
 /**
+ * GQA 変種の uniform 追加欄（`r = H / Hkv` — ADR 0067 決定 2）。
+ *
+ * MUST: 並びは `attentionQkParams` / `attentionPvParams`（src/kernels/attention.ts）と対。
+ * ①QK では `scale` の次（5 語目 = struct 32 バイト）・③PV では 4 語目（16 バイトのまま）。
+ * MUST: `r` は uniform に置く（WGSL に焼くと r の値ごとにパイプラインが増える）。
+ */
+const GQA_DIMS_EXTRA = `  kv_repeat: u32,
+`;
+
+/**
  * `rowWindow` を立てられるのは bmm だけ（{@link BmmRowWindow}）。uniform の 4〜5 語目に
  * `row_offset` / `rows_full` が増え、生成物の差は {@link batchPrologue} の base 2 行に閉じる。
  */
@@ -1024,6 +1058,9 @@ ${fillBDense(geometry, "b", op, v4)}`,
  * `mask` 変種は**書き出しの epilogue で `S' = fl(S + mask[m·N+n])` を足すだけ**（束縛が
  * 1 本増える以外は同一の生成物）。分解経路の `bmm`（S を実体化）→ `add`（mask）と丸めが
  * 起きる位置も回数も同じなので、ビット同一が保たれる。
+ *
+ * `gqa` 変種は **k の base 1 行と uniform 1 語**だけが違う（ADR 0067 決定 2）。共有タイル充填も
+ * 縮約ループも 1 文字も動かないので、同じ k を実体化（repeat_kv）した非 GQA 形とビット同一。
  */
 const attentionQkWgsl = (
   geometry: GemmGeometry,
@@ -1031,6 +1068,7 @@ const attentionQkWgsl = (
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
   mask = false,
+  gqa = false,
 ): string => {
   const f16 = compute === "f16";
   assertScoreStorageSupported("attention_qk", score, v4, f16);
@@ -1039,9 +1077,9 @@ const attentionQkWgsl = (
     geometry,
     `// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ${
       mask ? " + mask[m,n]" : ""
-    }, f32${f16 ? ", f16 タイル計算・S も f16" : ""}${scoreNote(score)}, ${
-      gemmGeometryNote(geometry)
-    }${v4 ? " + vec4" : ""})`,
+    }, f32${f16 ? ", f16 タイル計算・S も f16" : ""}${scoreNote(score)}${
+      gqa ? ", GQA（k は kv-head へ整数除算で写す）" : ""
+    }, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> q: array<${element}>;
 @group(0) @binding(2) var<storage, read> k: array<${element}>;
 @group(0) @binding(3) var<storage, read_write> s: array<${
@@ -1054,12 +1092,14 @@ const attentionQkWgsl = (
         : ""
     }`,
     scoreStoreWgsl("s", score),
-    `${quadDims(v4)}${batchPrologue("attention_qk", v4)}${prologueA(geometry, "attention_qk", v4)}
+    `${quadDims(v4)}${batchPrologue("attention_qk", v4, undefined, gqa)}${
+      prologueA(geometry, "attention_qk", v4)
+    }
 ${prologueBAttentionQk(geometry)}`,
     `${fillA(geometry, "q", v4, (expr) => `${expr} * dims.scale`, compute)}
 ${fillBAttentionQk(geometry, v4, compute)}`,
     store(geometry, "s", "attention_qk", v4, false, f16, score, mask),
-    "  scale: f32,\n",
+    `  scale: f32,\n${gqa ? GQA_DIMS_EXTRA : ""}`,
     gemmAccumulatorInit(geometry),
     compute,
   );
@@ -1072,12 +1112,17 @@ ${fillBAttentionQk(geometry, v4, compute)}`,
  * P を作る**ことだけ。P を実体化しないので、旧経路の softmax 出力（+ 恒等 expand）1 枚ぶんの
  * バッファと dispatch が消える。値は現行 softmax のパス③（`exp(x−amax)·inv`）と同じ式・
  * 同じ演算順なので**ビット同一**。
+ *
+ * `gqa` 変種は **v の base 1 行と uniform 1 語**だけが違う（ADR 0067 決定 2）。①QK 側だけを
+ * 写して ③PV を写し忘れると、P は正しいのに V だけ別 head を読む沈黙誤値になる
+ * （検出器は tests/gpu_attention_gqa_test.ts の故障注入 ②）。
  */
 const attentionPvWgsl = (
   geometry: GemmGeometry,
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
+  gqa = false,
 ): string => {
   const f16 = compute === "f16";
   assertScoreStorageSupported("attention_pv", score, v4, f16);
@@ -1089,7 +1134,9 @@ const attentionPvWgsl = (
     geometry,
     `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv は非実体化, f32${
       f16 ? ", f16 タイル計算・S は f16" : ""
-    }${scoreNote(score)}, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
+    }${scoreNote(score)}${gqa ? ", GQA（v は kv-head へ整数除算で写す）" : ""}, ${
+      gemmGeometryNote(geometry)
+    }${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> s: array<${
       scoreArrayType(score, v4 ? tileQuadType(compute) : tileScalarType(compute))
     }>;
@@ -1097,13 +1144,15 @@ const attentionPvWgsl = (
 @group(0) @binding(3) var<storage, read> stats: array<f32>;
 @group(0) @binding(4) var<storage, read_write> o: array<${v4 ? "vec4<f32>" : "f32"}>;`,
     scoreQuadLoaderWgsl("s", score),
-    `${quadDims(v4)}${batchPrologue("attention_pv", v4)}${prologueA(geometry, "attention_pv", v4)}
+    `${quadDims(v4)}${batchPrologue("attention_pv", v4, undefined, gqa)}${
+      prologueA(geometry, "attention_pv", v4)
+    }
 ${prologueAttentionStats(geometry)}
 ${prologueBDense(geometry, v4)}`,
     `${fillA(geometry, "s", v4, probability, compute, score)}
 ${fillBDense(geometry, "v", "attention_pv", v4, compute)}`,
     store(geometry, "o", "attention_pv", v4, false),
-    "",
+    gqa ? GQA_DIMS_EXTRA : "",
     gemmAccumulatorInit(geometry),
     compute,
   );
@@ -1610,9 +1659,9 @@ export const gemmWgsl = (spec: GemmSpec): string => {
     case "conv2d":
       return conv2dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "attention_qk":
-      return attentionQkWgsl(geometry, spec.v4, spec.compute, spec.score, spec.mask);
+      return attentionQkWgsl(geometry, spec.v4, spec.compute, spec.score, spec.mask, spec.gqa);
     case "attention_pv":
-      return attentionPvWgsl(geometry, spec.v4, spec.compute, spec.score);
+      return attentionPvWgsl(geometry, spec.v4, spec.compute, spec.score, spec.gqa);
     case "bmm":
       return denseWgsl(geometry, spec.op, spec.v4, spec.rowWindow);
     default:
