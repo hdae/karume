@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import type { OpSupport } from "../src/format/container.ts";
 import type { IrNode } from "../src/format/ir.ts";
 import {
@@ -22,6 +22,7 @@ import {
   maskedFillValue,
   OP_CONTRACTS,
   OpContractError,
+  optionalAttrKeysOf,
   outputCountOf,
   permuteDims,
   REDUCE_OPS,
@@ -37,22 +38,28 @@ import {
   WEIGHT_SLOTS,
 } from "../src/ops.ts";
 
-const node = (op: string, ins: readonly string[], attrs: Record<string, unknown> = {}): IrNode => ({
+const node = (
+  op: string,
+  ins: readonly string[],
+  attrs: Record<string, unknown> = {},
+  states: Record<string, string> = {},
+): IrNode => ({
   op,
   ins: [...ins],
   outs: ["y"],
   attrs,
+  states,
 });
 
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
 // リテラル**で op 集合を固定するだけで、docs/ir-v1.md の一覧との同期は op 追加時の人手仕事
 // （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v1.md）。
-Deno.test("契約表の op 集合が期待値リテラル 59 本と一致する", () => {
+Deno.test("契約表の op 集合が期待値リテラル 60 本と一致する", () => {
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   // argmax は reduce 族に**入らない**（attrs も出力 dtype も rank の扱いも別 — ADR 0068 決定 2）
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 59);
+  assertEquals(OP_CONTRACTS.size, 60);
   assertEquals([...OP_CONTRACTS.keys()].sort(), [
     "abs",
     "add",
@@ -106,6 +113,7 @@ Deno.test("契約表の op 集合が期待値リテラル 59 本と一致する"
     "slice",
     "softmax",
     "sqrt",
+    "state_append",
     "sub",
     "sum",
     "sym_prefix_slice",
@@ -1406,4 +1414,147 @@ Deno.test("attention の mask は f32・[1,1,M,N] ちょうどだけを受理す
       OpContractError,
     );
   }
+});
+
+// ---- states 欄と effect op（ADR 0067 決定 4 / 5） --------------------------
+
+/** `state_append` の最小ノード（出力 0 本・states 欄 `{ slot }` ちょうど）。 */
+const appendNode = (
+  attrs: Record<string, unknown> = {},
+  states: Record<string, string> = { slot: "kv.k" },
+): IrNode => ({ op: "state_append", ins: ["chunk"], outs: [], attrs, states });
+
+Deno.test("state_append は出力 0 本の effect op で、states 欄が必須", () => {
+  const contract = resolveOpContract("state_append");
+  assertEquals(contract.kind, "stateAppend");
+  assertEquals(contract.arity, 1);
+  // 出力数は dtype 写像の列長そのもの（空列 = 0 本の宣言 — ADR 0067 決定 5）
+  assertEquals(outputCountOf(contract), 0);
+  assertEquals(contract.outputDtypes, []);
+  assertEquals(attrKeysOf(contract), []);
+
+  assertStrictEquals(assertNodeContract(appendNode(), "t"), contract);
+  // 出力を書いた形は「値を定義しない op」の契約に反する
+  assertThrows(
+    () => assertNodeContract({ ...appendNode(), outs: ["y"] }, "t"),
+    OpContractError,
+    "出力数が 1（契約は 0）",
+  );
+  // states 欄そのものが必須（required: true）
+  assertThrows(
+    () => assertNodeContract({ ...appendNode(), states: {} }, "t"),
+    OpContractError,
+    "states 欄が無い",
+  );
+  // キー集合はちょうど { slot }
+  assertThrows(
+    () => assertNodeContract(appendNode({}, { slot: "kv.k", extra: "kv.v" }), "t"),
+    OpContractError,
+    "states 欄のキーが",
+  );
+  assertThrows(
+    () => assertNodeContract(appendNode({}, { k: "kv.k" }), "t"),
+    OpContractError,
+    "states 欄のキーが",
+  );
+});
+
+// 0 本を許すのは契約が effect を宣言する op **だけ**（パーサは本数に意味を与えない）。
+Deno.test("effect でない op の outs 空は契約層が落とす", () => {
+  for (const [op, ins] of [["relu", ["a"]], ["add", ["a", "b"]], ["topk", ["a"]]] as const) {
+    assertThrows(
+      () => assertNodeContract({ ...node(op, ins, op === "topk" ? { k: 2 } : {}), outs: [] }, "t"),
+      OpContractError,
+      "出力数が 0",
+    );
+  }
+});
+
+Deno.test("states 欄を持たない op に states を書けない", () => {
+  assertThrows(
+    () => assertNodeContract(node("relu", ["a"], {}, { slot: "kv.k" }), "t"),
+    OpContractError,
+    "states 欄を持たない",
+  );
+  // topk（多出力 op）も同じ — states 欄は attention / state_append の 2 本だけの契約面
+  assertThrows(
+    () =>
+      assertNodeContract(
+        { ...node("topk", ["a"], { k: 2 }, { slot: "kv.k" }), outs: ["v", "i"] },
+        "t",
+      ),
+    OpContractError,
+    "states 欄を持たない",
+  );
+});
+
+Deno.test("attention の states 形は欄の有無で判別され、従来形の受理集合は動かない", () => {
+  const contract = resolveOpContract("attention");
+  const states = { k: "kv.k", v: "kv.v" };
+  // 従来形（欄なし）は 3 本でも 4 本でも通る — 1 バイトも動かさない
+  assertStrictEquals(
+    assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5 }), "t"),
+    contract,
+  );
+  assertNodeContract(node("attention", ["q", "k", "v", "m"], { scale: 0.5 }), "t");
+  // states 形は 3 本ちょうど（mask は causal 固定なので取らない — ADR 0067 決定 4）
+  assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5 }, states), "t");
+  assertThrows(
+    () => assertNodeContract(node("attention", ["q", "k", "v", "m"], { scale: 0.5 }, states), "t"),
+    OpContractError,
+    "states 形は入力 3 本ちょうど",
+  );
+  // キー集合はちょうど { k, v }
+  assertThrows(
+    () =>
+      assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5 }, { k: "kv.k" }), "t"),
+    OpContractError,
+    "states 欄のキーが",
+  );
+  // k と v に同じスロットを書いた取り違えは shape では捕まらない（k/v スロットは同形）
+  assertThrows(
+    () =>
+      assertNodeContract(
+        node("attention", ["q", "k", "v"], { scale: 0.5 }, { k: "kv.k", v: "kv.k" }),
+        "t",
+      ),
+    OpContractError,
+    "同じスロット 'kv.k' を複数の欄から参照",
+  );
+});
+
+Deno.test("省略可能 attr `window` は states 欄を持つノードでのみ宣言できる", () => {
+  const states = { k: "kv.k", v: "kv.v" };
+  // 必須 attrs には出ない（宣言必須の欄と混ざらない）
+  assertEquals(attrKeysOf(resolveOpContract("attention")), ["scale"]);
+  assertEquals(optionalAttrKeysOf(resolveOpContract("attention")), ["window"]);
+  assertEquals(optionalAttrKeysOf(resolveOpContract("state_append")), ["window"]);
+  assertEquals(optionalAttrKeysOf(resolveOpContract("relu")), []);
+
+  // states 形では宣言でき、省略もできる（欄の不存在 = 全 context）
+  assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5, window: 512 }, states), "t");
+  assertNodeContract(appendNode({ window: 512 }), "t");
+  assertNodeContract(appendNode({}), "t");
+  // 従来形に書くと「誰も読まない attr」になるので拒否する（受理集合の対称性）
+  assertThrows(
+    () => assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5, window: 512 }), "t"),
+    OpContractError,
+    "states 欄を持つノードでのみ宣言できる",
+  );
+  // 値域は必須 attr と同じ厳しさ（0・負・非整数は落ちる）
+  for (const window of [0, -1, 1.5, "512", null, true]) {
+    assertThrows(() => assertNodeContract(appendNode({ window }), "t"), OpContractError);
+  }
+  // capability 射影には必須と省略可能の**和**が載る（列挙門が states 形を拒否しないため）
+  assertEquals(
+    [...RUNTIME_SUPPORT.ops.get("attention")?.attrKeys ?? []].sort(),
+    ["scale", "window"],
+  );
+  assertEquals([...RUNTIME_SUPPORT.ops.get("state_append")?.attrKeys ?? []], ["window"]);
+  // 契約外 attrs の判定は従来どおり（省略可能の受理は window 1 本だけを広げる）
+  assertThrows(
+    () => assertNodeContract(appendNode({ windows: 512 }), "t"),
+    OpContractError,
+    "契約外 attrs [windows]",
+  );
 });

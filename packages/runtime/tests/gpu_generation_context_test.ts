@@ -27,6 +27,7 @@ import {
   GenerationContext,
   type GenerationContextHost,
 } from "../src/runtime/generation-context.ts";
+import { OpContractError } from "../src/ops.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { baseGraph, f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { graphModelBuffer } from "./helpers/graph.ts";
@@ -42,25 +43,52 @@ const LENGTHS_BYTES = 8;
 const STATE_CAPACITY = 16;
 const SLOT_BYTES = 1 * 2 * STATE_CAPACITY * 4 * 4;
 
+/**
+ * `state_append` の入力（今 step の chunk — 宣言 shape は `[B,Hkv,M,D]` の rank-4 MUST）。
+ * スロット `[1,2,C,4]` と B / Hkv / D が一致する形（ADR 0067 決定 4 の②）。
+ */
+const CHUNK_SHAPE: readonly number[] = [1, 2, 4, 4];
+
+/**
+ * 宣言したスロットは**必ずノードから参照される**（参照完全性 — ADR 0067 決定 4 / 5）ので、
+ * スロット 1 本につき最小の `state_append` を 1 本置く。波 C の時点では「宣言だけのグラフ」で
+ * 足りていたが、参照側の欄が入った今それは孤立宣言として拒否される。
+ */
 const stateGraph = (
   states: GraphJson["states"],
   extra: Partial<GraphJson> = {},
-): GraphJson => ({
-  format: "karume-ir",
-  version: 1,
-  requires: { ops: ["matmul"] },
-  symbols: ["T"],
-  inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
-  outputs: ["y"],
-  initializers: { w: { tensor: "proj.weight", storage: { dtype: "f32" } } },
-  values: {
-    w: { dtype: "f32", shape: [4, 3] },
-    y: { dtype: "f32", shape: ["T", 3] },
-  },
-  states,
-  nodes: [{ op: "matmul", ins: ["x", "w"], outs: ["y"], attrs: {} }],
-  ...extra,
-});
+): GraphJson => {
+  const slots = Object.keys(states ?? {});
+  return {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: slots.length > 0 ? ["matmul", "state_append"] : ["matmul"] },
+    symbols: ["T"],
+    inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
+    outputs: ["y"],
+    initializers: {
+      w: { tensor: "proj.weight", storage: { dtype: "f32" } },
+      chunk: { tensor: "kv.chunk", storage: { dtype: "f32" } },
+    },
+    values: {
+      w: { dtype: "f32", shape: [4, 3] },
+      y: { dtype: "f32", shape: ["T", 3] },
+      chunk: { dtype: "f32", shape: [...CHUNK_SHAPE] },
+    },
+    states,
+    nodes: [
+      { op: "matmul", ins: ["x", "w"], outs: ["y"], attrs: {} },
+      ...slots.map((slot) => ({
+        op: "state_append",
+        ins: ["chunk"],
+        outs: [],
+        attrs: {},
+        states: { slot },
+      })),
+    ],
+    ...extra,
+  };
+};
 
 const NUMERIC_STATES: GraphJson["states"] = {
   k: { dtype: "f32", shape: [1, 2, STATE_CAPACITY, 4] },
@@ -68,19 +96,13 @@ const NUMERIC_STATES: GraphJson["states"] = {
 };
 
 /**
- * 記号容量のグラフ。**入力 `cap` は容量記号 `C` を束縛可能にするためだけに居る** — IR は
- * 「symbols は入力 shape の次元位置に現れる」ことを要求する（format/ir.ts の
- * checkSymbolBindability）ので、states だけに現れる記号は宣言できない。context 生成は入力を
- * 取らないため、この入力を渡さなくても `spec.bindings` だけで容量が決まることをこの形で示す。
+ * 記号容量のグラフ。容量記号 `C` は**どの入力にも現れない** — 束縛点は
+ * `createGenerationContext(spec.bindings)` の側で（ADR 0066 追記 7 の束縛点 2）、値 shape の
+ * 解決に使われることも無い。波 C では入力 `cap` を置いて束縛可能性を満たしていたが、波 D-1 で
+ * 検査が「入力 shape ∪ states shape」へ緩んだので**素の states 専用記号**として書ける。
  */
 const symbolicGraph = (): GraphJson =>
-  stateGraph({ k: { dtype: "f32", shape: [1, 2, "C", 4] } }, {
-    symbols: ["T", "C"],
-    inputs: [
-      { name: "x", dtype: "f32", shape: ["T", 4] },
-      { name: "cap", dtype: "f32", shape: ["C"] },
-    ],
-  });
+  stateGraph({ k: { dtype: "f32", shape: [1, 2, "C", 4] } }, { symbols: ["T", "C"] });
 
 const modelBytes = (graph: GraphJson): ArrayBuffer =>
   graphModelBuffer(graph, [
@@ -89,6 +111,12 @@ const modelBytes = (graph: GraphJson): ArrayBuffer =>
       dtype: "F32",
       shape: [4, 3],
       data: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1, 0.125, -0.25, 1.5, 2, -1, 0.75]),
+    },
+    {
+      name: "kv.chunk",
+      dtype: "F32",
+      shape: [...CHUNK_SHAPE],
+      data: f32Bytes(new Array(1 * 2 * 4 * 4).fill(0)),
     },
   ]);
 
@@ -752,8 +780,16 @@ Deno.test({
   },
 });
 
+// 波 C ではここが「context を 2 本作っても 2 回目の run が同じ計画鍵に当たる」を見ていた。
+// 波 D-1 で参照完全性が入り、**states を宣言するグラフは必ず state 参照ノードを持つ**ように
+// なったため、1-shot の `run` はもう成立しない（スロットの実体を持つのは GenerationContext で、
+// 実行経路の結線は波 D-3）。ここが固定するのは 2 点へ組み替えた:
+// ①context 生成そのものが計画導出を 1 回も走らせない（鍵に context が載っていれば導出が動く）
+// ②state 参照ノードを持つグラフの 1-shot 実行は fail loudly（黙って state 抜きで走らない）
+// NOTE: 「同じ鍵に当たる（hit: true）」= ADR 0066 受入条件③の run 側は、波 D-3 で
+// GenerationContext から run へスロット shape が渡るようになった時に復活させる。
 Deno.test({
-  name: "context は導出済み計画と params キャッシュに一切効かない（計画鍵の不変条件・実 GPU）",
+  name: "context 生成は計画導出を走らせず、state 参照グラフの 1-shot 実行は拒否される（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -764,32 +800,28 @@ Deno.test({
       data: Float32Array.from([1, 2, 3, 4, 5, 6, 7, 8]),
     };
     try {
-      const first = await session.run({ x: input });
       const baseline = session.diagnostics();
-      assertEquals(baseline.lastRunPrepared, { hit: false, cachedPlans: 1 });
+      assertEquals(baseline.lastRunPrepared, undefined, "run 前は計画の実績が無い");
 
-      // context を 2 本作っても、導出済み計画の本数も params キャッシュの実績も動かない
-      // （context の識別子が鍵に載っていればここで再導出 = hit: false になる）。
       const contexts: GenerationContext[] = [
         await session.createGenerationContext({ chunkLength: 4 }),
         await session.createGenerationContext({ chunkLength: 1 }),
       ];
       try {
-        const second = await session.run({ x: input });
         const after = session.diagnostics();
-        assertEquals(after.lastRunPrepared, { hit: true, cachedPlans: 1 }, "同じ鍵に当たる");
-        assertEquals(
-          after.lastRunParams,
-          { allocCount: 0, reuseCount: 0 },
-          "ヒット run は導出相を通らない（params の新規確保はゼロ）",
-        );
-        assertEquals(after.planBacking.buildCount, 1, "slot backing の焼き直しも起きない");
-        assertEquals(
-          Array.from(second["y"].data),
-          Array.from(first["y"].data),
-          "context の存在は出力を 1 ビットも変えない",
-        );
+        assertEquals(after.lastRunPrepared, undefined, "context 生成は計画導出を走らせない");
+        assertEquals(after.planBacking.buildCount, 0, "slot backing も焼かれない");
         assertEquals(after.stateBacking.contextCount, 2, "診断だけが context を数える");
+
+        // 落ちるのは shape 計算層（OpContractError）— スロットの解決済み shape が無い run は
+        // そこまで進めない。
+        const error = await assertRejects(() => session.run({ x: input }), OpContractError);
+        assert(error.message.includes("GenerationContext"), error.message);
+        assertEquals(
+          session.diagnostics().lastRunPrepared,
+          undefined,
+          "拒否された run は計画キャッシュを汚さない",
+        );
       } finally {
         for (const context of contexts) await context.dispose();
       }

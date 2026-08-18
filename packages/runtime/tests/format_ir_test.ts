@@ -1,6 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { IrError, type IrGraph, parseIrGraph } from "../src/format/ir.ts";
-import { baseGraph, type GraphJson } from "./helpers/format.ts";
+import { baseGraph, type GraphJson, withStateReaders } from "./helpers/format.ts";
 
 const parseMutated = (mutate: (graph: GraphJson) => void): IrGraph => {
   const graph = baseGraph();
@@ -220,15 +220,38 @@ Deno.test("parseIrGraph: shape 要素", () => {
 });
 
 Deno.test("parseIrGraph: ノードの構造", () => {
-  assertRejects("outs が空", (g) => {
-    g.nodes[0].outs = [];
-  });
   assertRejects("attrs がオブジェクトでない", (g) => {
     g.nodes[0].attrs = 5;
   });
   assertRejects("op が空文字列", (g) => {
     g.nodes[0].op = "";
   });
+  assertRejects("outs の要素が空文字列", (g) => {
+    g.nodes[0].outs = [""];
+  });
+});
+
+// ADR 0067 決定 5: `outs` の本数に意味を与えるのは**契約層**（0 本を許すのは契約が effect を
+// 宣言する op だけ）。パーサは本数を見ない — ここで見るのは「見ていないこと」そのもので、
+// 非 effect op の `outs: []` が落ちるのは**別の規則**（出力の宣言が孤立する）による。
+Deno.test("parseIrGraph: outs の本数はパーサの担当ではない", () => {
+  // 出力宣言ごと消せばパーサは通る（本数の執行は tests/ops_contract_test.ts が固定する）
+  const graph = parseMutated((g) => {
+    g.nodes[1].outs = [];
+    delete g.values["y"];
+    g.outputs = ["h"];
+  });
+  assertEquals(graph.nodes[1].outs, []);
+  // 宣言だけ残せば「孤立した values 宣言」で落ちる（出力数違反としてではない）
+  assertThrows(
+    () =>
+      parseMutated((g) => {
+        g.nodes[1].outs = [];
+        g.outputs = ["h"];
+      }),
+    IrError,
+    "どのノードでも定義されない宣言",
+  );
 });
 
 // "__proto__" を名前に持つグラフ。フィクスチャは生の JSON 文字列から組む MUST — JS の
@@ -285,8 +308,9 @@ Deno.test("parseIrGraph: '__proto__' という名前でも孤立宣言は黙っ�
   assertThrows(() => parseIrGraph(orphan), IrError, "どのノードでも定義されない宣言");
 });
 
-// ADR 0066 決定 2: 生成 1 本ぶんの可変 state を置く名前付きスロット。宣言と検査だけがここに入り、
-// ノードからの参照（ADR 0067 の states 欄 / state_append）はまだ無い。
+// ADR 0066 決定 2: 生成 1 本ぶんの可変 state を置く名前付きスロット。参照側の欄（ADR 0067 の
+// states 欄 / state_append）が入ったので、**宣言だけのグラフは参照完全性で落ちる** —
+// 宣言そのものを見るテストは withStateReaders で参照側を用意する。
 Deno.test("parseIrGraph: states 節を持たないグラフは空のスロット集合になる", () => {
   const graph = parseIrGraph(JSON.stringify(baseGraph()));
 
@@ -309,14 +333,17 @@ Deno.test("parseIrGraph: state スロットの宣言を受理する", () => {
       "layer0.v": { dtype: "f32", shape: [1, 2, 512, 128] },
       "layer1.k": { dtype: "f32", shape: [1, 2, 131072, 128] },
     };
+    withStateReaders(g);
   });
   assertEquals(Object.keys(slots.states), ["layer0.k", "layer0.v", "layer1.k"]);
   assertEquals(slots.states["layer0.k"], { dtype: "f32", shape: [1, 2, 512, 128] });
   assertEquals(slots.states["layer1.k"].shape, [1, 2, 131072, 128]);
 
-  // 記号次元は Session の symbols で解決する（束縛源は従来どおり入力 shape の次元位置）。
+  // 記号次元は Session の symbols で解決する（入力にも現れる記号なので、束縛点は従来どおり
+  // 入力 shape の次元位置 — states 専用記号は別テストが持つ）。
   const symbolic = parseMutated((g) => {
     g.states = { cache: { dtype: "f32", shape: ["T", 4] } };
+    withStateReaders(g);
   });
   assertEquals(symbolic.states["cache"].shape, ["T", 4]);
 
@@ -326,6 +353,7 @@ Deno.test("parseIrGraph: state スロットの宣言を受理する", () => {
       flat: { dtype: "f32", shape: [8] },
       full: { dtype: "f32", shape: [1, 2, 3, 4] },
     };
+    withStateReaders(g);
   });
   assertEquals(ranks.states["flat"].shape, [8]);
   assertEquals(ranks.states["full"].shape, [1, 2, 3, 4]);
@@ -385,6 +413,7 @@ Deno.test("parseIrGraph: JSON の整数値 float 次元を受理し、非整数�
     assertEquals(values.values["w"].shape, [4], raw);
     const states = parseRawDim(raw, (g, dim) => {
       g.states = { cache: { dtype: "f32", shape: [1, dim] } };
+      withStateReaders(g);
     });
     assertEquals(states.states["cache"].shape, [1, 4], raw);
   }
@@ -401,6 +430,7 @@ Deno.test("parseIrGraph: JSON の整数値 float 次元を受理し、非整数�
       () =>
         parseRawDim(raw, (g, dim) => {
           g.states = { cache: { dtype: "f32", shape: [1, dim] } };
+          withStateReaders(g);
         }),
       IrError,
       "非負整数でない",
@@ -443,7 +473,7 @@ Deno.test("parseIrGraph: '__proto__' という名前の state スロットを ow
   const graph = parseIrGraph(`{
     "format": "karume-ir",
     "version": 1,
-    "requires": { "ops": ["matmul"] },
+    "requires": { "ops": ["matmul", "state_append"] },
     "symbols": ["T"],
     "inputs": [{ "name": "x", "dtype": "f32", "shape": ["T", 4] }],
     "outputs": ["y"],
@@ -453,12 +483,175 @@ Deno.test("parseIrGraph: '__proto__' という名前の state スロットを ow
       "y": { "dtype": "f32", "shape": ["T", 3] }
     },
     "states": { "__proto__": { "dtype": "f32", "shape": [4] } },
-    "nodes": [{ "op": "matmul", "ins": ["x", "w"], "outs": ["y"], "attrs": {} }]
+    "nodes": [
+      { "op": "matmul", "ins": ["x", "w"], "outs": ["y"], "attrs": {} },
+      {
+        "op": "state_append",
+        "ins": ["x"],
+        "outs": [],
+        "attrs": {},
+        "states": { "slot": "__proto__" }
+      }
+    ]
   }`);
 
   assertEquals(Object.getPrototypeOf(graph.states), null);
   assertEquals(Object.hasOwn(graph.states, "__proto__"), true);
   assertEquals(graph.states["__proto__"], { dtype: "f32", shape: [4] });
+  // 参照側の欄も同じ理由で null プロトタイプ（素の `{}` では代入が [[Prototype]] 設定に
+  // 化けて欄が黙って消え、参照完全性検査も契約のキー集合検査も素通りする形が作れる）。
+  const referring = graph.nodes[1].states;
+  assertEquals(Object.getPrototypeOf(referring), null);
+  assertEquals(referring["slot"], "__proto__");
+});
+
+/**
+ * state を読む層（states 形 attention）と書く層（`state_append`）が 1 本ずつ並んだ最小形
+ * （ADR 0067 決定 4 / 5・発行順は決定 5b の「読者 → append」）。**パーサ層の**テストなので
+ * shape も契約も見られない — ここで固定するのは欄の構造と参照の完全性だけ。
+ */
+const statefulGraph = (): GraphJson => {
+  const graph = baseGraph();
+  graph.states = {
+    "kv.k": { dtype: "f32", shape: [1, 2, 512, 8] },
+    "kv.v": { dtype: "f32", shape: [1, 2, 512, 8] },
+  };
+  graph.requires.ops.push("attention", "state_append");
+  graph.values["att"] = { dtype: "f32", shape: ["T", 3] };
+  graph.nodes.push(
+    {
+      op: "attention",
+      ins: ["h", "h", "h"],
+      outs: ["att"],
+      attrs: { scale: 0.5, window: 512 },
+      states: { k: "kv.k", v: "kv.v" },
+    },
+    { op: "state_append", ins: ["h"], outs: [], attrs: { window: 512 }, states: { slot: "kv.k" } },
+    { op: "state_append", ins: ["h"], outs: [], attrs: { window: 512 }, states: { slot: "kv.v" } },
+  );
+  return graph;
+};
+
+const parseStateful = (mutate: (graph: GraphJson) => void = () => {}): IrGraph => {
+  const graph = statefulGraph();
+  mutate(graph);
+  return parseIrGraph(JSON.stringify(graph));
+};
+
+// ADR 0067 決定 4: ノードは `ins` / `outs` と**別の欄**でスロットを名前参照する。
+Deno.test("parseIrGraph: ノードの states 欄を読む", () => {
+  const graph = parseStateful();
+
+  assertEquals(graph.nodes.map((node) => node.op), [
+    "matmul",
+    "add",
+    "attention",
+    "state_append",
+    "state_append",
+  ]);
+  // 欄を持たないノードは空表（常在欄 — 消費側が `?? {}` を書かずに済む）
+  assertEquals(Object.keys(graph.nodes[0].states), []);
+  assertEquals(Object.entries(graph.nodes[2].states), [["k", "kv.k"], ["v", "kv.v"]]);
+  assertEquals(graph.nodes[3].states["slot"], "kv.k");
+  // 0 出力ノードはパーサを通る（本数の執行点は契約層 — ADR 0067 決定 5）
+  assertEquals(graph.nodes[3].outs, []);
+});
+
+Deno.test("parseIrGraph: states 欄は宣言済みスロットしか参照できない", () => {
+  assertThrows(
+    () =>
+      parseStateful((g) => {
+        g.nodes[3].states = { slot: "kv.missing" };
+      }),
+    IrError,
+    "state スロット 'kv.missing' が graph.states で宣言されていない",
+  );
+  // 値名を書いた取り違え（スロット名前空間と値名前空間は別 — 値名は参照できない）
+  assertThrows(
+    () =>
+      parseStateful((g) => {
+        g.nodes[3].states = { slot: "h" };
+      }),
+    IrError,
+    "graph.states で宣言されていない",
+  );
+});
+
+Deno.test("parseIrGraph: 誰も参照しない state スロットを拒否する", () => {
+  assertThrows(
+    () =>
+      parseStateful((g) => {
+        g.states!["kv.orphan"] = { dtype: "f32", shape: [1, 2, 512, 8] };
+      }),
+    IrError,
+    "graph.states['kv.orphan']: どのノードからも参照されない宣言",
+  );
+  // 参照が 1 本でもあれば足りる（読者だけ / 書き手だけの層はどちらも実在する —
+  // KV 共有層は append を持たない）
+  const readerOnly = parseStateful((g) => {
+    g.nodes.splice(3, 2);
+    g.requires.ops = ["matmul", "add", "attention"];
+  });
+  assertEquals(Object.keys(readerOnly.states), ["kv.k", "kv.v"]);
+});
+
+Deno.test("parseIrGraph: states 欄の構造", () => {
+  const reject = (states: unknown, includes: string): void => {
+    assertThrows(
+      () =>
+        parseStateful((g) => {
+          (g.nodes[3] as { states: unknown }).states = states;
+        }),
+      IrError,
+      includes,
+    );
+  };
+  reject([], "graph.nodes[3].states: オブジェクトでない");
+  reject({ slot: 4 }, "graph.nodes[3].states['slot']: 空でない文字列でない");
+  reject({ slot: "" }, "graph.nodes[3].states['slot']: 空でない文字列でない");
+  reject({ "": "kv.k" }, "graph.nodes[3].states のキー: 空でない文字列でない");
+});
+
+// ADR 0066 追記 7: 束縛点は 2 つ（入力 shape / states shape）だが、**効く範囲は非対称**。
+Deno.test("parseIrGraph: states 専用記号は宣言できるが値 shape には現れない", () => {
+  // 容量記号 C は入力のどこにも現れない（context 生成時に決まる）— それでも宣言できる
+  const graph = parseStateful((g) => {
+    g.symbols.push("C");
+    g.states!["kv.k"].shape = [1, 2, "C", 8];
+    g.states!["kv.v"].shape = [1, 2, "C", 8];
+  });
+  assertEquals(graph.states["kv.k"].shape, [1, 2, "C", 8]);
+
+  // 値 shape に現れたら fail loudly（通常値の解決に効くのは入力由来の束縛だけなので、
+  // 実行時に必ず束縛不能になる — 宣言の時点で落とす）
+  assertThrows(
+    () =>
+      parseStateful((g) => {
+        g.symbols.push("C");
+        g.states!["kv.k"].shape = [1, 2, "C", 8];
+        g.states!["kv.v"].shape = [1, 2, "C", 8];
+        g.values["att"].shape = ["C", 3];
+      }),
+    IrError,
+    "states 専用記号 'C' が値 shape に現れる",
+  );
+
+  // 入力にも states にも現れない記号は従来どおり束縛が取れない
+  assertThrows(
+    () =>
+      parseStateful((g) => {
+        g.symbols.push("C");
+      }),
+    IrError,
+    "'C' が入力 shape / states shape の次元位置に現れない",
+  );
+
+  // 入力**と** states の両方に現れる記号は「states 専用」ではない（値 shape に現れてよい）
+  const shared = parseStateful((g) => {
+    g.states!["kv.k"].shape = [1, 2, "T", 8];
+    g.states!["kv.v"].shape = [1, 2, "T", 8];
+  });
+  assertEquals(shared.values["att"].shape, ["T", 3]);
 });
 
 Deno.test("parseIrGraph: JSON の受理集合", () => {

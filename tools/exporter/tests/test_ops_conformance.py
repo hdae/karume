@@ -6,7 +6,8 @@
 同じ規律）。
 
 見るのは両実装で沈黙のうちに割れうる契約面だけ: op 名の全集合 / アリティ /
-スロット dtype / attrs キー集合 / attrs の値域 / 出力数と出力 slot 別の dtype 写像
+スロット dtype / attrs キー集合（必須と**省略可能**の両方 — ADR 0067 決定 4）/ attrs の値域 /
+`states` 欄の契約（キー集合と必須性 — ADR 0067 決定 4 / 5）/ 出力数と出力 slot 別の dtype 写像
 （ADR 0068 決定 1）/ 出力 shape 規則（rank 上限を含む）/ 低精度格納の適格スロット（ADR 0018）。
 """
 
@@ -32,7 +33,9 @@ OPS = OP_CONTRACT_TABLE["ops"]
 ATTR_VALUES = OP_CONTRACT_TABLE["attr_values"]
 SHAPES = OP_CONTRACT_TABLE["shapes"]
 
-ATTR_KEYS = {entry["op"]: entry["attrs"] for entry in OPS}
+#: 値域を持つ attr の全集合（必須 + 省略可能）。省略可能だからといって値域が緩んでよい理由は
+#: 無いので、attr_values 節は同じ土俵で両方を引く（TS 側 ops_conformance_test.ts と同じ分担）。
+ATTR_KEYS = {entry["op"]: [*entry["attrs"], *entry.get("optional_attrs", [])] for entry in OPS}
 
 #: 出力次元を入力から伝播させず **attrs から作る** op。束縛を代入しても記号のまま出るのが
 #: 正しい（prefix 長 coeff·sym+offset — ADR 0010）ので、下の代入テストだけ扱いが違う。
@@ -57,13 +60,28 @@ def _shape_of(shape, bindings):
 
 def _compute(case, bindings=None):
     declared = case.get("declared")
+    state_shapes = case.get("state_shapes")
     return compute_output_shape(
         resolve_op_contract(case["op"]),
         [_shape_of(shape, bindings) for shape in case["ins"]],
         "t",
         declared=None if declared is None else _shape_of(declared, bindings),
         attrs=case.get("attrs"),
+        # states / state_shapes は対で渡す（ADR 0067 決定 4）— 表が states だけ書いたケースは
+        # 「解決済みスロット shape が無い」の拒否ケースそのもの。
+        states=case.get("states"),
+        state_shapes=None
+        if state_shapes is None
+        else {slot: _shape_of(shape, bindings) for slot, shape in state_shapes.items()},
     )
+
+
+def _attr_check(entry):
+    """attr_values 節の 1 行に対応する検査関数（必須 / 省略可能のどちらの欄から来てもよい）。"""
+    contract = resolve_op_contract(entry["op"])
+    check = contract.attrs.get(entry["attr"]) or contract.optional_attrs.get(entry["attr"])
+    assert check is not None, f"{entry['op']}: attr '{entry['attr']}' の検査関数が契約表に無い"
+    return check
 
 
 class TestFixtureTable:
@@ -105,6 +123,34 @@ class TestDeclaredContract:
     @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
     def test_attr_keys_match(self, entry):
         assert sorted(resolve_op_contract(entry["op"]).attr_keys) == sorted(entry["attrs"])
+
+    @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
+    def test_optional_attr_keys_match(self, entry):
+        """省略可能 attrs（ADR 0067 の `window`）も契約面そのもの。
+
+        片側だけ動くと「エクスポータが書ける形をランタイムが拒否する」に直結する。必須欄と
+        混ぜて 1 つの集合にしないのは、「不存在それ自体が別の宣言になる欄」だけがこちらに
+        載る（既定値補完はしない — ADR 0012）という区別が消えるため。
+        """
+        contract = resolve_op_contract(entry["op"])
+
+        assert sorted(contract.optional_attr_keys) == sorted(entry.get("optional_attrs", []))
+
+    @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
+    def test_states_field_contract_matches(self, entry):
+        """`states` 欄の契約（ADR 0067 決定 4 / 5 — キー集合ちょうど + 欄の必須性）。
+
+        欄を持てる op と持てない op の区別も含めて突き合わせる（`None` = 欄を持てない）。
+        """
+        contract = resolve_op_contract(entry["op"])
+        declared = entry.get("states")
+        if declared is None:
+            assert contract.states is None, entry["op"]
+            return
+
+        assert contract.states is not None, entry["op"]
+        assert sorted(contract.states.keys) == sorted(declared["keys"])
+        assert contract.states.required == declared["required"]
 
     @pytest.mark.parametrize("entry", OPS, ids=lambda e: e["op"])
     def test_output_dtypes_match(self, entry):
@@ -180,13 +226,13 @@ class TestAttrValues:
 
     @pytest.mark.parametrize("entry", ATTR_VALUES, ids=lambda e: f"{e['op']}.{e['attr']}")
     def test_accepted_values_pass_the_schema(self, entry):
-        check = resolve_op_contract(entry["op"]).attrs[entry["attr"]]
+        check = _attr_check(entry)
         for value in entry["accept"]:
             check(value, f"{entry['op']}.{entry['attr']}")
 
     @pytest.mark.parametrize("entry", ATTR_VALUES, ids=lambda e: f"{e['op']}.{e['attr']}")
     def test_rejected_values_fail_loudly(self, entry):
-        check = resolve_op_contract(entry["op"]).attrs[entry["attr"]]
+        check = _attr_check(entry)
         for value in entry["reject"]:
             with pytest.raises(OpContractError):
                 check(value, f"{entry['op']}.{entry['attr']}")

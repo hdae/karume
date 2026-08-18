@@ -576,6 +576,13 @@ export class RecipeBuilder {
       case "reshape":
         // 別名化は #buildStep で済んでいる（この op は 1 dispatch も出さない）。
         break;
+      case "stateAppend":
+        // 契約と shape 規則だけが先に入った段階（ADR 0067 決定 5 — 実行結線は state を所有する
+        // GenerationContext 側と同じ波で入る）。MUST: 素通りさせない — state への書き込みが
+        // 出ないまま次のノードへ進むと、読者が前 step の残骸を過去 KV として読む。
+        throw new ExecutionError(
+          `op '${step.contract.name}' の実行はまだ結線されていない（state 参照ノード）`,
+        );
       default: {
         // MUST: 未処理の kind をここで止める。switch が素通りすると出力バッファに 1 バイトも
         // 書かれないまま次のノードへ進み、プール再利用の残骸がそのまま値になる

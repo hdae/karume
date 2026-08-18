@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -149,10 +149,33 @@ SAFE_SOFTMAX_OP = "safe_softmax"
 #: `[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 と causal / dropout は語彙に無く、
 #: 該当する SDPA は `aten_handlers._h_attention` が全件列挙して fail loudly にする。
 #:
+#: **states 形**（ADR 0067 決定 4 — 同一 op 名の契約拡張で、**欄の有無が形を判別する**）:
+#: `states` 欄が `{ k, v }` のとき「過去分はスロットから・今 step の k/v は `ins` から」読む
+#: autoregressive 形になる。ins は `[B,Hkv,M,D]`（M = q と共有する物理 chunk 次元）で、
+#: **mask 入力は取らない**（causal 固定・述語計算で表す）。sliding は省略可能な attrs
+#: `window`（欄の不存在 = 全 context）。欄が**無い**ノードは従来契約そのままで、既存資産・
+#: 既存門は 1 バイトも動かない。
+#:
 #: MUST: `scale` は **q と k の両方に掛かる（半スケール契約）** — torch の
 #: `_scaled_dot_product_attention_math` の `√scale_factor` と同義。エクスポータは SDPA の
 #: `scale` 引数（省略時 `1/√D`）から `f32(math.sqrt(scale_factor))` を計算して載せる。
 ATTENTION_OP = "attention"
+#: 今 step の k / v を state スロットへ書く**単機能 effect op**（ADR 0067 決定 5）。
+#: `ins` は `[B,Hkv,M,D]` の 1 本・`states` 欄は `{ slot }` ちょうど・**出力は 0 本**
+#: （値を定義しない — ノード多出力一般化〈ADR 0068 決定 1〉の 0 本席の最初の入居者）。
+#:
+#: MUST: attention に内蔵しない（TVM 型を採らない）。単機能 op に閉じるからこそ
+#: ①full-write / padding 行 no-op（queryLength が切る — ADR 0066 決定 4）の検証が 1 op で済み
+#: ②attention 側は読み取り専用のままビット同一検証が単純で ③KV 共有層は「`state_append`
+#: ノードが無い」だけで表せる（ORT の kv_empty と同じ表現力を op の不在で得る）。
+#: MUST: `window` は**省略可能**（欄の不存在 = 全 context）。同一スロットに触れる全ノードで
+#: 値が一致することは宣言層（verify._assert_state_order）が見る — 論理 col → 物理 row の
+#: 写像は読み書き同式 MUST（ADR 0067 決定 4）で、読み側だけ別式にすると沈黙誤読になる。
+#: MUST: 論理位置（pastLength / queryLength）を attrs に持たない。毎 step 変わる実行時スカラは
+#: context 所有の可変 uniform が運ぶ（ADR 0066 追記 4）。
+#: NOTE: aten ハンドラは**持たない**（torch から出せない — 発行はデコードグラフ台本の担当）。
+#: NON_EMITTABLE_OPS がその席。
+STATE_APPEND_OP = "state_append"
 EMBEDDING_OP = "embedding"
 MASKED_FILL_OP = "masked_fill"
 CONV1D_OP = "conv1d"
@@ -292,6 +315,7 @@ OpKind = Literal[
     "softmax",
     "safe_softmax",
     "attention",
+    "state_append",
     "embedding",
     "masked_fill",
     "conv1d",
@@ -554,6 +578,17 @@ ATTENTION_ATTRS: AttrSchema = {
     "scale": lambda value, where: _assert_finite_attr(value, where, "attention の scale")
 }
 
+#: state 参照ノードの sliding window（ADR 0067 決定 4 / 5）。**省略可能な attr** で、
+#: 欄の不存在が「全 context」を意味する。宣言されたら 1 以上の整数。
+#:
+#: MUST: 既定値で補完しない。「欄が無い = 全 context」と「window = 容量」は別の宣言で、
+#: 補完すると sliding 層（Gemma 4 E2B の 28 層）と full 層（7 層）の取り違えが値にしか出ない。
+#: MUST: 同一スロットに触れる全ノードで**存在有無も値も一致**する（読み書き同式 MUST —
+#: 検査は verify._assert_state_order。読み側だけ別式にすると沈黙誤読）。
+STATE_WINDOW_ATTRS: AttrSchema = {
+    "window": lambda value, where: _assert_integer_attr(value, where, 1)
+}
+
 #: torch の padding_idx は**受理するが forward には効かない**（勾配で padding 行を更新しない
 #: ための欄で、順伝播は素の行 gather と同じ）。無視するために契約から落とすと「未知 attr は
 #: fail loudly」の規律に穴が開くので、値域（-1 = 未指定の番兵）だけ検査して運ぶ。
@@ -721,6 +756,13 @@ def attention_scale(attrs: Mapping[str, Any], where: str) -> float:
     return _assert_finite_attr(attrs.get("scale"), f"{where} の attrs.scale", "attention の scale")
 
 
+def state_window(attrs: Mapping[str, Any], where: str) -> int | None:
+    """state 参照ノードの `window`（宣言が無ければ `None` = 全 context）。"""
+    if "window" not in attrs:
+        return None
+    return _assert_integer_attr(attrs["window"], f"{where} の attrs.window", 1)
+
+
 def cumsum_dim(attrs: Mapping[str, Any], where: str) -> int:
     """cumsum ノードの累積軸（非負の軸番号）。"""
     return _assert_integer_attr(attrs.get("dim"), f"{where} の attrs.dim", 0)
@@ -838,16 +880,31 @@ SlotDtypes = UniformDtypes | PerSlotDtypes
 
 
 @dataclass(frozen=True)
+class StateFieldContract:
+    """`states` 欄のキー集合と必須性（ADR 0067 決定 4 / 5 — TS 側 StateFieldContract の鏡像）。
+
+    `keys` は欄が非空のときのキー集合**ちょうど**で、`required` は「欄そのものが必須か」。
+    `attention` は `(("k", "v"), required=False)` — 欄の有無が従来形 / states 形を判別する。
+    `state_append` は `(("slot",), required=True)`。
+    """
+
+    keys: tuple[str, ...]
+    required: bool
+
+
+@dataclass(frozen=True)
 class OpContract:
     name: str
     kind: OpKind
-    #: 入力の個数（出力の個数は output_dtypes の列長 — 現状の op は全て 1 本）。
+    #: 入力の個数（出力の個数は output_dtypes の列長 — `topk` が 2 本・`state_append` が
+    #: 0 本で、他は全て 1 本）。
     arity: int
     #: スロット別の受理集合と出力導出の正本（cast だけ出力 dtype が attrs.to で決まる）。
     slot_dtypes: SlotDtypes
     #: **出力 slot 別**の「スロット 0 の入力 dtype → その出力の dtype」写像の**列**
-    #: （ADR 0068 決定 1）。列の長さがその op の出力数で、現状の op は全て 1（単一出力の
-    #: 明示化）。各写像の既定は恒等で、違うのは実測に出た 3 系統だけ（比較 → bool /
+    #: （ADR 0068 決定 1）。列の長さがその op の出力数で、長さ 1 以外は `topk`（2 本）と
+    #: `state_append`（**0 本** — 値を定義しない effect op・ADR 0067 決定 5）だけ。
+    #: 各写像の既定は恒等で、違うのは実測に出た 3 系統だけ（比較 → bool /
     #: bool の sum → i32 / where → 値の側）。定義域はスロット 0 の受理集合と完全一致する
     #: （_contract / _slot_contract が恒等で埋める）。
     #:
@@ -868,6 +925,18 @@ class OpContract:
     #: 「決まったスロットが 1 つ増えるだけ」— 上限を持たない表現に潰すと、余分な入力が
     #: 黙って無視される形（カーネルが読まないスロット）を契約が受理してしまう。
     max_arity: int | None = None
+    #: **省略可能な attrs**（現状 `window` の 1 本 — ADR 0067 決定 4 / 5）。宣言されていれば
+    #: 値域検査を通り、無ければ「欄の不存在」がそのまま意味を持つ。
+    #:
+    #: MUST: 必須 attrs（`attrs`）を optional 化するために使わない。「宣言済み attrs の既定値
+    #: 補完はしない」（ADR 0012）は不変で、ここに載るのは**不存在それ自体が別の宣言になる欄**
+    #: だけ（`window` 不在 = 全 context）。
+    #: MUST: 省略可能 attrs は **states 形専用**（assert_node_contract）。sliding の窓は
+    #: 「論理 col → 物理 row の写像」の一部で、state を参照しないノードには意味が無い —
+    #: 従来形に書けると「受理はされるが誰も読まない attr」ができる。
+    optional_attrs: AttrSchema = field(default_factory=dict)
+    #: `states` 欄の契約（None = **states 欄を持てない op**）。
+    states: StateFieldContract | None = None
 
     @property
     def dtypes(self) -> frozenset[str]:
@@ -890,8 +959,18 @@ class OpContract:
 
     @property
     def attr_keys(self) -> frozenset[str]:
-        """スキーマが宣言するキー（対応表突合の射影 — 二重管理しない）。"""
+        """スキーマが**必須**として宣言するキー（対応表突合の射影 — 二重管理しない）。"""
         return frozenset(self.attrs)
+
+    @property
+    def optional_attr_keys(self) -> frozenset[str]:
+        """スキーマが**省略可能**として宣言するキー（`optional_attrs`）。
+
+        MUST: capability 突合（verify.assert_runtime_support）には必須と省略可能の**和**を
+        載せる — 列挙門は「実装済みの attr キー」との差を「未実装 attrs」として並べるので、
+        省略可能なぶんを落とすと states 形の正しいグラフが capability 不足で拒否される。
+        """
+        return frozenset(self.optional_attrs)
 
     @property
     def output_count(self) -> int:
@@ -937,7 +1016,8 @@ _DTYPES: dict[str, frozenset[str]] = {
 #: 出力 slot 別の dtype 写像の**列**を宣言する表（ADR 0068 決定 1）。ここに無い op は
 #: 「出力 1 本・恒等」。恒等でないのは比較 4 本（f32 → bool）/ bool 入力の sum
 #: （→ i32 のカウント）/ where（bool → f32）/ argmax（→ 添字の i32）/ topk（列の長さ 2 —
-#: slot 0 の値は恒等・slot 1 が添字の i32）だけ。
+#: slot 0 の値は恒等・slot 1 が添字の i32）/ state_append（**列が空** = 値を定義しない
+#: effect op・ADR 0067 決定 5）だけ。
 _OUTPUT_DTYPES: dict[str, tuple[dict[str, str], ...]] = {
     "ge": ({"f32": "bool"},),
     "ge_scalar": ({"f32": "bool"},),
@@ -948,6 +1028,9 @@ _OUTPUT_DTYPES: dict[str, tuple[dict[str, str], ...]] = {
     ARGMAX_OP: ({"f32": "i32"},),
     # 列の長さがそのまま出力数（ADR 0068 決定 3 — topk は 2 本出す）。
     TOPK_OP: ({}, {"f32": "i32"}),
+    # 空列 = 出力 0 本（ADR 0067 決定 5）。この 1 行が「値を定義しない effect op」の宣言
+    # そのもので、`outs: []` を許すのは契約がこう宣言する op だけ。
+    STATE_APPEND_OP: (),
 }
 
 #: 宣言が無い op の既定 = **出力 1 本・恒等**（空の写像は定義域全体が恒等で埋まる）。
@@ -973,6 +1056,8 @@ def _contract(
     *,
     variadic: bool = False,
     max_arity: int | None = None,
+    optional_attrs: AttrSchema | None = None,
+    states: StateFieldContract | None = None,
 ) -> OpContract:
     return _slot_contract(
         name,
@@ -982,6 +1067,8 @@ def _contract(
         attrs,
         variadic=variadic,
         max_arity=max_arity,
+        optional_attrs=optional_attrs,
+        states=states,
     )
 
 
@@ -994,6 +1081,8 @@ def _slot_contract(
     *,
     variadic: bool = False,
     max_arity: int | None = None,
+    optional_attrs: AttrSchema | None = None,
+    states: StateFieldContract | None = None,
 ) -> OpContract:
     return OpContract(
         name=name,
@@ -1004,6 +1093,8 @@ def _slot_contract(
         attrs=attrs if attrs is not None else {},
         variadic=variadic,
         max_arity=max_arity,
+        optional_attrs=optional_attrs if optional_attrs is not None else {},
+        states=states,
     )
 
 
@@ -1069,7 +1160,26 @@ OP_CONTRACTS: dict[str, OpContract] = {
     SAFE_SOFTMAX_OP: _contract(SAFE_SOFTMAX_OP, "safe_softmax", 1, SOFTMAX_ATTRS),
     # 融合 attention（ADR 0023）。q / k / v と省略可能な mask の 4 本とも f32 で同型
     # （uniform 契約）。mask は加算型なので値の側と同じ dtype で、bool は受理しない。
-    ATTENTION_OP: _contract(ATTENTION_OP, "attention", 3, ATTENTION_ATTRS, max_arity=4),
+    # states 欄（ADR 0067 決定 4）は**省略可能** — 欄の有無が従来形 / states 形を判別し、
+    # 欄がある形だけが `window` を宣言できる（従来形の受理集合は 1 バイトも動かない）。
+    ATTENTION_OP: _contract(
+        ATTENTION_OP,
+        "attention",
+        3,
+        ATTENTION_ATTRS,
+        max_arity=4,
+        optional_attrs=STATE_WINDOW_ATTRS,
+        states=StateFieldContract(keys=("k", "v"), required=False),
+    ),
+    # state スロットへの書き込み（ADR 0067 決定 5）。入力 1 本・**出力 0 本**（_OUTPUT_DTYPES の
+    # 空列がその宣言）・states 欄必須。
+    STATE_APPEND_OP: _contract(
+        STATE_APPEND_OP,
+        "state_append",
+        1,
+        optional_attrs=STATE_WINDOW_ATTRS,
+        states=StateFieldContract(keys=("slot",), required=True),
+    ),
     # 値 f32 と添字 i32 のスロット別契約（gather と同型 — 出力は値の側と同型）。
     EMBEDDING_OP: _slot_contract(
         EMBEDDING_OP,
@@ -1113,7 +1223,11 @@ OP_CONTRACTS: dict[str, OpContract] = {
 #: 見るので、ここへ入れた op は「golden の無い op」として通ってしまう — 空集合が既定で、
 #: 増やすときは「torch から出せないこと」自体を門にする（tests/test_convert.py が
 #: `torch.topk` の変換が UnsupportedAtenOpsError になることを固定している）。
-NON_EMITTABLE_OPS = frozenset({TOPK_OP})
+#:
+#: - `topk` — 多出力 aten の getitem 結線が sampling の実需まで先送り（ADR 0068 追記）。
+#: - `state_append` — 対応する aten が**存在しない**（ADR 0067 決定 5 の effect op で、
+#:   発行はデコードグラフ台本の担当）。torch.export の経路からは原理的に出てこない。
+NON_EMITTABLE_OPS = frozenset({TOPK_OP, STATE_APPEND_OP})
 #: convert が emit しうる IR op 名の正本。語彙の増加を明示行為にするための門。
 EMITTABLE_OPS = frozenset(OP_CONTRACTS) - NON_EMITTABLE_OPS
 
@@ -1176,9 +1290,56 @@ def cast_target_dtype(attrs: Mapping[str, Any], where: str) -> str:
     return _assert_cast_target(attrs.get("to"), f"{where} の attrs.to")
 
 
+def _assert_state_field(contract: OpContract, node: IrNode, keys: list[str], where: str) -> None:
+    """`states` 欄が契約に適合するか（ADR 0067 決定 4 / 5 — TS 側 assertStateField の鏡像）。
+
+    MUST: キー集合は契約の宣言と**完全一致**（部分集合を許すと、`v` を書き忘れた states 形
+    attention が「k だけ状態から読む」形として通る）。
+    MUST: 同一ノードが 2 つの欄から**同じスロット**を参照する形を拒否する — `k` と `v` に
+    同じスロット名を書いた取り違えは、shape 検査を全て通ったうえで「V を K として読む」
+    沈黙誤値になる（k/v スロットは同形なので shape では捕まらない）。
+    """
+    declared = contract.states
+    if declared is None:
+        if keys:
+            raise OpContractError(
+                f"{where}: op '{contract.name}' は states 欄を持たない（{sorted(keys)}）"
+            )
+        return
+    if not keys:
+        if declared.required:
+            raise OpContractError(
+                f"{where}: op '{contract.name}' の states 欄が無い"
+                f"（契約は {list(declared.keys)} ちょうど）"
+            )
+        return
+    if sorted(keys) != sorted(declared.keys):
+        raise OpContractError(
+            f"{where}: op '{contract.name}' の states 欄のキーが {sorted(keys)}"
+            f"（契約は {sorted(declared.keys)} ちょうど）"
+        )
+    slots = [node.states[key] for key in declared.keys]
+    for index, slot in enumerate(slots):
+        if slots.index(slot) != index:
+            raise OpContractError(
+                f"{where}: op '{contract.name}' の states 欄が同じスロット '{slot}' を"
+                "複数の欄から参照している（取り違えの検出線）"
+            )
+
+
 def assert_node_contract(node: IrNode, where: str) -> OpContract:
     """ノードが契約に適合することを検査して契約を返す（shape は含まない）。"""
     contract = resolve_op_contract(node.op)
+    state_keys = list(node.states)
+    _assert_state_field(contract, node, state_keys, where)
+    # MUST: states 形は**省略可能な末尾入力を取らない**（ADR 0067 決定 4 —「causal 固定・
+    # mask tensor は実体化しない」）。上限を絞らないと、mask 付き states 形 attention が
+    # 「mask を誰も読まない形」として受理される。
+    if state_keys and contract.max_arity is not None and len(node.ins) > contract.arity:
+        raise OpContractError(
+            f"{where}: op '{node.op}' の states 形は入力 {contract.arity} 本ちょうど"
+            f"（{len(node.ins)} 本 — 省略可能な末尾入力は取らない・ADR 0067 決定 4）"
+        )
     if not arity_fits(contract, len(node.ins)):
         raise OpContractError(
             f"{where}: op '{node.op}' の入力数が {len(node.ins)}"
@@ -1188,12 +1349,25 @@ def assert_node_contract(node: IrNode, where: str) -> OpContract:
         raise OpContractError(
             f"{where}: op '{node.op}' の出力数が {len(node.outs)}（契約は {contract.output_count}）"
         )
-    unknown = sorted(key for key in node.attrs if key not in contract.attrs)
+    unknown = sorted(
+        key
+        for key in node.attrs
+        if key not in contract.attrs and key not in contract.optional_attrs
+    )
     if unknown:
         raise OpContractError(f"{where}: op '{node.op}' の契約外 attrs {unknown}")
     for key, check in contract.attrs.items():
         if key not in node.attrs:
             raise OpContractError(f"{where}: op '{node.op}' の必須 attr '{key}' が無い")
+        check(node.attrs[key], f"{where} の attrs.{key}")
+    for key, check in contract.optional_attrs.items():
+        if key not in node.attrs:
+            continue
+        # MUST: 省略可能 attrs は states 形専用（OpContract.optional_attrs）。
+        if not state_keys:
+            raise OpContractError(
+                f"{where}: op '{node.op}' の attrs.{key} は states 欄を持つノードでのみ宣言できる"
+            )
         check(node.attrs[key], f"{where} の attrs.{key}")
     return contract
 

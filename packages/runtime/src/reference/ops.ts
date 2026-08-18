@@ -1646,6 +1646,14 @@ export const applyReferenceOpOutputs = (
       return sole(referenceSafeSoftmax(inputs[0], attrs));
     case "attention":
       return sole(referenceAttention(inputs[0], inputs[1], inputs[2], attrs, inputs[3]));
+    // state を触る op は CPU 参照を持たない（値ではなく context 所有バッファへの effect で、
+    // RefTensor の入出力だけでは意味論を表せない — 実装は実行層〈波 D〉が持つ）。
+    // MUST: 素通りさせない。0 本の出力列を黙って返すと「参照と GPU が一致した」と見なす
+    // parity テストが書けてしまう。
+    case "stateAppend":
+      throw new ReferenceOpError(
+        `op '${op}' は CPU 参照を持たない（state への effect は GenerationContext の担当）`,
+      );
     case "embedding":
       return sole(referenceEmbedding(inputs[0], inputs[1]));
     case "maskedFill":

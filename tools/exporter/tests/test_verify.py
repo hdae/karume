@@ -190,9 +190,20 @@ class TestSsaAndTopologicalOrder:
         with pytest.raises(IrError, match="重複"):
             parse(outputs=["y", "y"])
 
-    def test_empty_outs_is_rejected(self):
-        with pytest.raises(IrError, match="outs が空"):
-            parse(nodes=[{"op": "add", "ins": ["x", "w"], "outs": [], "attrs": {}}])
+    def test_empty_outs_is_rejected_by_the_contract_layer(self):
+        """0 本席（ADR 0067 決定 5）— パーサは `outs` の本数に意味を与えない。
+
+        「0 本を許すのは契約が effect を宣言する op だけ」の執行点は契約層の出力数突合。
+        パーサ側で本数を見ていた頃の拒否は、この 1 本に置き換わっている。
+        """
+        graph = parse(
+            outputs=[],
+            values={"w": {"dtype": "f32", "shape": [4]}},
+            nodes=[{"op": "add", "ins": ["x", "w"], "outs": [], "attrs": {}}],
+        )
+
+        with pytest.raises(OpContractError, match="出力数が 0"):
+            assert_op_contracts(graph)
 
 
 class TestDeclarationCompleteness:
@@ -362,11 +373,35 @@ class TestStorageDescriptor:
             parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "i4"}}})
 
 
-class TestStateSlots:
-    """名前付き state スロット（ADR 0066 決定 2）— 宣言と検査だけ。
+def declared_states(states: dict, *, referenced: list[str] | None = None) -> dict:
+    """スロットを参照する `state_append` を足したグラフの上書き集合。
 
-    ノードからスロットを参照する欄（ADR 0067 の states 欄 / `state_append`）はまだ無いので、
-    「誰も参照しないスロット」の検出はここには無い（参照完全性はその改訂と同時に入る）。
+    参照完全性（ADR 0067 決定 4 / 5 — 宣言されたスロットは 1 つ以上のノードから参照される
+    MUST）が入ったので、「宣言だけして誰も参照しない」グラフはもう受理されない。スロット宣言
+    そのものの受理集合を見るテストは、この足場の上で 1 点だけを動かす。
+
+    `referenced` を渡すと参照するスロットを絞れる（孤立スロットの検出線を踏むため）。
+    """
+    names = list(states) if referenced is None else referenced
+    nodes = [
+        *base_graph()["nodes"],
+        *(
+            {"op": "state_append", "ins": ["x"], "outs": [], "attrs": {}, "states": {"slot": name}}
+            for name in names
+        ),
+    ]
+    return {
+        "requires": {"ops": ["add", "state_append"] if names else ["add"]},
+        "states": states,
+        "nodes": nodes,
+    }
+
+
+class TestStateSlots:
+    """名前付き state スロット（ADR 0066 決定 2）— 宣言側の受理集合。
+
+    ノードからの参照（ADR 0067 の states 欄 / `state_append`）は TestNodeStates が持つ。ここは
+    「参照は最小の足場で満たしたうえで、宣言 1 点だけを動かす」形に揃える。
     """
 
     def test_a_graph_without_the_section_has_no_slots(self):
@@ -386,11 +421,13 @@ class TestStateSlots:
     def test_slots_with_different_capacities_are_accepted(self):
         """sliding 層と full 層は容量の違う別スロット（層 × 均一 KV の前提を作らない）。"""
         graph = parse(
-            states={
-                "layer0.k": {"dtype": "f32", "shape": [1, 2, 512, 128]},
-                "layer0.v": {"dtype": "f32", "shape": [1, 2, 512, 128]},
-                "layer1.k": {"dtype": "f32", "shape": [1, 2, 131072, 128]},
-            }
+            **declared_states(
+                {
+                    "layer0.k": {"dtype": "f32", "shape": [1, 2, 512, 128]},
+                    "layer0.v": {"dtype": "f32", "shape": [1, 2, 512, 128]},
+                    "layer1.k": {"dtype": "f32", "shape": [1, 2, 131072, 128]},
+                }
+            )
         )
 
         assert list(graph.states) == ["layer0.k", "layer0.v", "layer1.k"]
@@ -399,20 +436,37 @@ class TestStateSlots:
 
     @pytest.mark.parametrize("shape", [[8], [1, 2, 3, 4], ["T", 4]])
     def test_accepted_shapes(self, shape):
-        """rank 1..4 の両端と記号次元（束縛源は従来どおり入力 shape の次元位置）。"""
-        graph = parse(states={"cache": {"dtype": "f32", "shape": shape}})
+        """rank 1..4 の両端と記号次元（束縛源は入力 shape または states shape の次元位置）。"""
+        graph = parse(**declared_states({"cache": {"dtype": "f32", "shape": shape}}))
 
         assert graph.states["cache"].shape == shape
 
     def test_the_section_round_trips_in_place(self):
         """宣言節なので `values` の直後・`nodes` の前に戻す（TS 側の並びと同じ）。"""
         slot = {"dtype": "f32", "shape": [1, 2, 512, 128]}
-        graph = parse(states={"layer0.k": slot})
+        graph = parse(**declared_states({"layer0.k": slot}))
         keys = list(graph.to_dict())
 
         assert graph.to_dict()["states"] == {"layer0.k": slot}
         assert keys.index("states") == keys.index("values") + 1
         assert keys.index("nodes") == keys.index("states") + 1
+
+    def test_a_slot_that_no_node_references_is_rejected(self):
+        """参照完全性（ADR 0067 決定 4 / 5）— values の孤立宣言と同じ穴を塞ぐ。
+
+        誰も参照しないスロットは GenerationContext が確保だけして誰も読まない容量
+        （KV なら数十 MiB 単位）が黙って残る。
+        """
+        with pytest.raises(IrError, match=re.escape("graph.states['orphan']: どのノードからも")):
+            parse(
+                **declared_states(
+                    {
+                        "used": {"dtype": "f32", "shape": [4]},
+                        "orphan": {"dtype": "f32", "shape": [4]},
+                    },
+                    referenced=["used"],
+                )
+            )
 
     def test_the_reserved_f16_storage_is_rejected_as_unsupported(self):
         """f16 は席の予約だけ（ADR 0066 追記 5）— 「語彙外」ではなく「未対応」で落とす。"""
@@ -471,6 +525,356 @@ class TestStateSlots:
             parse(states={name: {"dtype": "f32", "shape": [4]}})
 
 
+def kv_graph(**overrides) -> dict:
+    """states 形 attention + `state_append` の最小グラフ（decode 1 step・1 層ぶん）。
+
+    `q[1,8,1,16]` / `k`・`v[1,2,1,16]`（GQA 4:1）と容量 64 のスロット 2 本。ins は**今 step の
+    chunk だけ**で、過去はスロットが持つ（ADR 0067 決定 4）。発行順は「全読者 → append」
+    （決定 5b）。
+    """
+    graph = {
+        "format": "karume-ir",
+        "version": 1,
+        "requires": {"ops": ["attention", "state_append"]},
+        "symbols": [],
+        "inputs": [
+            {"name": "q", "dtype": "f32", "shape": [1, 8, 1, 16]},
+            {"name": "k", "dtype": "f32", "shape": [1, 2, 1, 16]},
+            {"name": "v", "dtype": "f32", "shape": [1, 2, 1, 16]},
+        ],
+        "outputs": ["o"],
+        "initializers": {},
+        "values": {"o": {"dtype": "f32", "shape": [1, 8, 1, 16]}},
+        "states": {
+            "l0.k": {"dtype": "f32", "shape": [1, 2, 64, 16]},
+            "l0.v": {"dtype": "f32", "shape": [1, 2, 64, 16]},
+        },
+        "nodes": [
+            {
+                "op": "attention",
+                "ins": ["q", "k", "v"],
+                "outs": ["o"],
+                "attrs": {"scale": 0.25},
+                "states": {"k": "l0.k", "v": "l0.v"},
+            },
+            {
+                "op": "state_append",
+                "ins": ["k"],
+                "outs": [],
+                "attrs": {},
+                "states": {"slot": "l0.k"},
+            },
+            {
+                "op": "state_append",
+                "ins": ["v"],
+                "outs": [],
+                "attrs": {},
+                "states": {"slot": "l0.v"},
+            },
+        ],
+    }
+    graph.update(overrides)
+    # requires.ops ≡ 使用 op 集合（明示指定が無ければノード列から導く — ノードを差し替える
+    # テストごとに宣言を書き直さないため）。
+    if "requires" not in overrides:
+        graph["requires"] = {"ops": sorted({node["op"] for node in graph["nodes"]})}
+    return graph
+
+
+def parse_kv(**overrides):
+    return parse_ir_graph(json.dumps(kv_graph(**overrides)))
+
+
+def check_kv(**overrides):
+    """パース → 契約検査（アリティ / states 欄 / 順序 / shape）まで通す。"""
+    graph = parse_kv(**overrides)
+    assert_op_contracts(graph)
+    return graph
+
+
+def kv_windows(*windows: int | None) -> list[dict]:
+    """3 ノード（attention / append k / append v）の `window` だけを差し替えたノード列。"""
+    nodes = [dict(node) for node in kv_graph()["nodes"]]
+    for node, window in zip(nodes, windows, strict=True):
+        node["attrs"] = dict(node["attrs"])
+        if window is not None:
+            node["attrs"]["window"] = window
+    return nodes
+
+
+def plain_attention_graph(attrs: dict) -> dict:
+    """states 欄を持たない**従来形** attention の最小グラフ（欄の有無で分かれる契約の対照）。"""
+    graph = kv_graph()
+    del graph["states"]
+    graph["requires"] = {"ops": ["attention"]}
+    graph["nodes"] = [{"op": "attention", "ins": ["q", "k", "v"], "outs": ["o"], "attrs": attrs}]
+    return graph
+
+
+class TestNodeStates:
+    """ノードの `states` 欄と `state_append`（ADR 0067 決定 4 / 5 / 5b）。
+
+    TS 側（format/ir.ts の parseNodeStates・ops/contracts.ts の assertStateField・
+    runtime/plan.ts の assertStateOrder・ops/shapes.ts の assertStateSlotForm）と**同じ
+    受理集合・同じ拒否集合**であることがここの仕様。層が違うだけで、片側だけ緩むと
+    「export は緑・ブラウザだけ落ちる」が state 軸で復活する。
+    """
+
+    def test_a_decode_step_graph_is_accepted(self):
+        graph = check_kv()
+
+        assert graph.nodes[0].states == {"k": "l0.k", "v": "l0.v"}
+        assert graph.nodes[1].states == {"slot": "l0.k"}
+        assert assert_runtime_support(graph) is None
+
+    def test_the_field_round_trips_only_when_present(self):
+        """欄の有無がそのまま形の判別（ADR 0067 決定 4）— 空欄は書き戻さない。"""
+        node = parse_kv().nodes[0].to_dict()
+
+        assert list(node) == ["op", "ins", "outs", "attrs", "states"]
+        assert node["states"] == {"k": "l0.k", "v": "l0.v"}
+        assert "states" not in parse().nodes[0].to_dict()
+
+    def test_a_layer_without_an_append_is_accepted(self):
+        """KV 共有層は「`state_append` ノードが無い」だけで表せる（ORT の kv_empty 相当）。"""
+        graph = check_kv(nodes=kv_graph()["nodes"][:1])
+
+        assert [node.op for node in graph.nodes] == ["attention"]
+
+    def test_a_sliding_layer_is_accepted(self):
+        """省略可能 attrs `window`（欄の不存在 = 全 context）。読み書きで同じ値を宣言する。"""
+        graph = check_kv(nodes=kv_windows(64, 64, 64))
+
+        assert graph.nodes[0].attrs["window"] == 64
+        # 列挙門（capability 突合）も必須と省略可能の**和**で見る — 落とすと states 形の
+        # 正しいグラフが「未実装 attrs」として拒否される。
+        assert assert_runtime_support(graph) is None
+
+    def test_an_undeclared_slot_reference_is_rejected(self):
+        """未宣言スロットは実体を持たない名前 — 確保も束縛もされないまま実行段へ抜ける。"""
+        nodes = [dict(node) for node in kv_graph()["nodes"]]
+        nodes[0] = {**nodes[0], "states": {"k": "ghost", "v": "l0.v"}}
+
+        with pytest.raises(IrError, match=re.escape("state スロット 'ghost' が graph.states")):
+            parse_kv(nodes=nodes)
+
+    def test_an_effect_op_with_outputs_is_rejected(self):
+        """`state_append` は**値を定義しない**（出力 0 本の宣言は契約表の空列そのもの）。"""
+        nodes = [dict(node) for node in kv_graph()["nodes"]]
+        nodes[1] = {**nodes[1], "outs": ["z"]}
+        values = {**kv_graph()["values"], "z": {"dtype": "f32", "shape": [1, 2, 1, 16]}}
+
+        with pytest.raises(OpContractError, match="出力数が 1"):
+            check_kv(nodes=nodes, values=values)
+
+    def test_the_same_slot_in_two_fields_is_rejected(self):
+        """`k` と `v` に同じスロットを書いた取り違えは shape では捕まらない（同形だから）。"""
+        nodes = [dict(node) for node in kv_graph()["nodes"][:2]]
+        nodes[0] = {**nodes[0], "states": {"k": "l0.k", "v": "l0.k"}}
+
+        with pytest.raises(OpContractError, match="複数の欄から参照している"):
+            check_kv(nodes=nodes, states={"l0.k": kv_graph()["states"]["l0.k"]})
+
+    def test_a_states_form_attention_with_a_mask_is_rejected(self):
+        """states 形は causal 固定で mask tensor を実体化しない（省略可能な末尾入力を取らない）。"""
+        nodes = [dict(node) for node in kv_graph()["nodes"]]
+        nodes[0] = {**nodes[0], "ins": ["q", "k", "v", "m"]}
+        inputs = [*kv_graph()["inputs"], {"name": "m", "dtype": "f32", "shape": [1, 1, 1, 64]}]
+
+        with pytest.raises(OpContractError, match="states 形は入力 3 本ちょうど"):
+            check_kv(nodes=nodes, inputs=inputs)
+
+    @pytest.mark.parametrize("window", [0, -1, 1.5, "64", True])
+    def test_window_outside_the_value_range_is_rejected(self, window):
+        with pytest.raises(OpContractError, match="1 以上の整数でない"):
+            check_kv(nodes=kv_windows(window, window, window))
+
+    def test_window_on_a_plain_attention_is_rejected(self):
+        """省略可能 attrs は states 形専用 — 従来形に書けると誰も読まない attr ができる。"""
+        with pytest.raises(OpContractError, match="states 欄を持つノードでのみ"):
+            assert_op_contracts(
+                parse_ir_graph(json.dumps(plain_attention_graph({"scale": 0.25, "window": 8})))
+            )
+
+    def test_a_plain_attention_is_untouched(self):
+        """欄が無いノードは従来契約そのまま（既存資産・既存門は無風）。"""
+        graph = parse_ir_graph(json.dumps(plain_attention_graph({"scale": 0.25})))
+
+        assert assert_op_contracts(graph) is None
+        assert graph.nodes[0].states == {}
+
+    def test_a_reader_after_the_append_is_rejected(self):
+        """append より後の読者は「今 step の k/v を過去として二重に読む」（決定 5b の②）。"""
+        nodes = kv_graph()["nodes"]
+
+        with pytest.raises(IrError, match="より後に読者"):
+            check_kv(nodes=[nodes[1], nodes[2], nodes[0]])
+
+    def test_two_appends_to_one_slot_are_rejected(self):
+        """1 step に 2 回書くと ring の位置式が二重に進む（決定 5b の①）。"""
+        nodes = kv_graph()["nodes"]
+
+        with pytest.raises(IrError, match=re.escape("state_append が 2 本")):
+            check_kv(nodes=[nodes[0], nodes[1], nodes[2], nodes[1]])
+
+    @pytest.mark.parametrize(
+        ("windows", "why"),
+        [
+            ((64, 32, 64), "読み側と書き側で値が違う"),
+            ((None, 64, 64), "読み側だけ宣言が無い（全 context と ring の取り違え）"),
+            ((64, None, 64), "書き側だけ宣言が無い"),
+        ],
+    )
+    def test_a_window_mismatch_on_one_slot_is_rejected(self, windows, why):
+        """論理 col → 物理 row の写像は読み書き同式 MUST（決定 4）— 存在有無も値も一致する。"""
+        with pytest.raises(IrError, match=re.escape("attrs.window が食い違う")):
+            check_kv(nodes=kv_windows(*windows))
+
+    def test_a_state_append_input_that_is_not_rank_four_is_rejected(self):
+        """入力の宣言 shape は `[B,Hkv,M,D]` 固定（attention の ins と同じ物理 chunk 次元）。
+
+        rank 5 は B / Hkv / D が**偶然そろう**（軸 3 が D のまま）ので、rank 検査だけが
+        検出線になる形。
+        """
+        inputs = [*kv_graph()["inputs"], {"name": "k5", "dtype": "f32", "shape": [1, 2, 1, 16, 1]}]
+        nodes = [dict(node) for node in kv_graph()["nodes"]]
+        nodes[1] = {**nodes[1], "ins": ["k5"]}
+
+        with pytest.raises(OpContractError, match=re.escape("[B,Hkv,M,D] の rank-4 のみ")):
+            check_kv(inputs=inputs, nodes=nodes)
+
+    def test_a_zero_length_chunk_is_rejected(self):
+        """空軸の softmax は amax の identity が定義できない（従来形の N=0 拒否と同じ理由）。"""
+        inputs = [
+            {"name": "q", "dtype": "f32", "shape": [1, 8, 0, 16]},
+            {"name": "k", "dtype": "f32", "shape": [1, 2, 0, 16]},
+            {"name": "v", "dtype": "f32", "shape": [1, 2, 0, 16]},
+        ]
+
+        with pytest.raises(OpContractError, match="M が 0 の chunk"):
+            check_kv(inputs=inputs, values={"o": {"dtype": "f32", "shape": [1, 8, 0, 16]}})
+
+    def test_a_slot_that_is_not_rank_four_is_rejected(self):
+        """スロットの物理形は `[B,Hkv,C,D]` 固定（ADR 0067 決定 4 の②）。"""
+        slot = {"dtype": "f32", "shape": [1, 2, 64]}
+
+        with pytest.raises(OpContractError, match=re.escape("[B,Hkv,C,D] の rank-4 のみ")):
+            check_kv(states={"l0.k": slot, "l0.v": slot})
+
+    def test_a_slot_whose_head_count_differs_from_the_input_is_rejected(self):
+        """別の層のスロットを参照した形 — 容量が同じだと沈黙誤読になる。"""
+        slot = {"dtype": "f32", "shape": [1, 4, 64, 16]}
+
+        with pytest.raises(OpContractError, match="B / Hkv / D が不一致"):
+            check_kv(states={"l0.k": slot, "l0.v": slot})
+
+    def test_slots_of_different_capacity_for_k_and_v_are_rejected(self):
+        """片方だけ先に wrap する ring は値が静かにずれる。"""
+        with pytest.raises(OpContractError, match="同形でない"):
+            check_kv(
+                states={
+                    "l0.k": {"dtype": "f32", "shape": [1, 2, 64, 16]},
+                    "l0.v": {"dtype": "f32", "shape": [1, 2, 32, 16]},
+                }
+            )
+
+    def test_a_window_larger_than_the_capacity_is_rejected(self):
+        """ring 幅が容量を超えると、書いた行が同 step 中に自分で潰れる。"""
+        with pytest.raises(OpContractError, match="スロット容量 64 を超える"):
+            check_kv(nodes=kv_windows(65, 65, 65))
+
+    def test_a_symbolic_capacity_defers_the_window_bound(self):
+        """記号容量では `window <= C` を判定しない（束縛は `createGenerationContext` の層）。
+
+        TS 側は束縛解決後の数値しか扱わないので常に判定できる — この 1 点だけが片側で保留に
+        なる非対称で、「宣言だけでは決められないものを決めたことにしない」という既存の規律
+        （broadcast 可否・整除 broadcast と同じ）に揃えた結果。
+        """
+        slot = {"dtype": "f32", "shape": [1, 2, "C", 16]}
+        graph = check_kv(
+            symbols=["C"],
+            nodes=kv_windows(9999, 9999, 9999),
+            states={
+                "l0.k": slot,
+                "l0.v": slot,
+            },
+        )
+
+        assert graph.symbols == ["C"]
+
+    def test_a_states_only_symbol_is_bindable(self):
+        """states にしか現れない記号（KV 容量）も束縛点を持つ（ADR 0066 追記 7）。"""
+        slot = {"dtype": "f32", "shape": [1, 2, "C", 16]}
+
+        assert check_kv(symbols=["C"], states={"l0.k": slot, "l0.v": slot}).symbols == ["C"]
+
+    def test_a_states_only_symbol_in_a_value_shape_is_rejected(self):
+        """値 shape の解決に効くのは入力由来の束縛だけ — 現れると実行時に必ず束縛不能。"""
+        slot = {"dtype": "f32", "shape": [1, 2, "C", 16]}
+
+        with pytest.raises(IrError, match=re.escape("states 専用記号 'C' が値 shape に現れる")):
+            parse_kv(
+                symbols=["C"],
+                states={"l0.k": slot, "l0.v": slot},
+                values={"o": {"dtype": "f32", "shape": [1, 8, "C", 16]}},
+            )
+
+    def test_a_symbol_bound_nowhere_is_still_rejected(self):
+        """束縛点は「入力 shape ∪ states shape」— どちらにも無い記号は従来どおり落とす。"""
+        with pytest.raises(IrError, match="次元位置に現れない"):
+            parse_kv(symbols=["C"])
+
+    @pytest.mark.parametrize(
+        ("states", "message"),
+        [
+            ([], "states: オブジェクトでない"),
+            ({"k": 4}, "states['k']: 空でない文字列でない"),
+            ({"k": ""}, "states['k']: 空でない文字列でない"),
+            ({"": "l0.k"}, "states のキー: 空でない文字列でない"),
+        ],
+    )
+    def test_malformed_fields_are_rejected(self, states, message):
+        nodes = [dict(node) for node in kv_graph()["nodes"]]
+        nodes[0] = {**nodes[0], "states": states}
+
+        with pytest.raises(IrError, match=re.escape(message)):
+            parse_kv(nodes=nodes)
+
+    @pytest.mark.parametrize(
+        ("states", "message"),
+        [
+            ({"k": "l0.k"}, "states 欄のキーが ['k']"),
+            ({"k": "l0.k", "v": "l0.v", "extra": "l0.k"}, "states 欄のキーが ['extra', 'k', 'v']"),
+        ],
+    )
+    def test_a_key_set_other_than_the_contract_is_rejected(self, states, message):
+        """キー集合は契約の宣言と完全一致 — 部分集合を許すと `v` 書き忘れが通る。"""
+        nodes = [dict(node) for node in kv_graph()["nodes"]]
+        nodes[0] = {**nodes[0], "states": states}
+
+        with pytest.raises(OpContractError, match=re.escape(message)):
+            check_kv(nodes=nodes)
+
+    def test_a_state_append_without_the_field_is_rejected(self):
+        """`state_append` の states 欄は必須（書き先の無い書き込み op は存在しない）。"""
+        nodes = [dict(node) for node in kv_graph()["nodes"]]
+        del nodes[1]["states"]
+
+        with pytest.raises(OpContractError, match="states 欄が無い"):
+            check_kv(nodes=nodes)
+
+    def test_an_op_without_a_states_contract_is_rejected(self):
+        """欄を持てない op に欄を書いた形（契約が `None` = 持てない、の執行）。"""
+        nodes = [
+            *kv_graph()["nodes"],
+            {"op": "relu", "ins": ["o"], "outs": ["r"], "attrs": {}, "states": {"k": "l0.k"}},
+        ]
+        values = {**kv_graph()["values"], "r": {"dtype": "f32", "shape": [1, 8, 1, 16]}}
+
+        with pytest.raises(OpContractError, match="states 欄を持たない"):
+            check_kv(nodes=nodes, values=values)
+
+
 class TestIntegralFloatDimensions:
     """JSON の整数値 float（`1.0` / `1e0`）を TS と同じく受理する。
 
@@ -502,7 +906,9 @@ class TestIntegralFloatDimensions:
 
     @pytest.mark.parametrize("raw", ["4.0", "4e0"])
     def test_integral_float_state_dims_are_accepted_as_int(self, raw):
-        graph = self.parse_raw_dim(raw, states={"cache": {"dtype": "f32", "shape": [1, "__DIM__"]}})
+        graph = self.parse_raw_dim(
+            raw, **declared_states({"cache": {"dtype": "f32", "shape": [1, "__DIM__"]}})
+        )
 
         assert graph.states["cache"].shape == [1, 4]
         assert graph.to_dict()["states"]["cache"]["shape"] == [1, 4]

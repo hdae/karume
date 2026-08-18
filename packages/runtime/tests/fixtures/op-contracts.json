@@ -15,6 +15,10 @@
     "  `max_arity` は**末尾に省略可能な入力**を持つ op（attention の mask のみ）の上限で、",
     "  そのとき受理する入力数は arity 以上 max_arity 以下。variadic とは別の欄で、",
     "  併記はしない（「何本でも」と「決まった 1 本が増える」は別の契約面）。",
+    "  `optional_attrs` は**省略可能な attrs**（ADR 0067 の `window` — 欄の不存在それ自体が",
+    "  「全 context」という別の宣言になる欄だけが載る）。必須 attrs（`attrs`）と同じく",
+    "  attr_values 節が値域を持つ。`states` は **states 欄の契約**（`keys` = 欄が非空のときの",
+    "  キー集合ちょうど / `required` = 欄そのものの必須性）で、省略 = states 欄を持てない op。",
     "  out_dtypes は**出力 slot 別**の「スロット 0 の入力 dtype → その出力の dtype」写像の**列**",
     "  （ADR 0068 決定 1）。列の長さがその op の出力数で、**恒等でない op にだけ**書く",
     "  （省略 = 出力 1 本・スロット 0 の受理集合上の恒等写像）。要素の写像も恒等な dtype は",
@@ -33,7 +37,12 @@
     "  拒否するので載せない（各実装の単体テストが個別に固定している）。",
     "- shapes: 出力 shape 規則の適合ケース。ins / declared / outs の次元は整数か次元言語",
     "  （coeff·sym+offset）で書く。outs は**出力 slot 別**の shape の列（ADR 0068 決定 1 —",
-    "  現状の op は全て長さ 1）。TS 側は bindings で数値へ解決してから computeOutputShape に",
+    "  `topk` だけ長さ 2・`state_append` は**空列**〈値を定義しない effect op〉で、他は長さ 1）。",
+    "  `states` はノードの states 欄（契約が固定するキー → スロット名）、`state_shapes` は",
+    "  そのスロットの**容量込み具体形**（ADR 0067 決定 4 — スロットの物理形と window ≤ C の",
+    "  検査に要る）。2 つは対で書く（states 参照ノードは解決済みスロット shape が無いと",
+    "  fail loudly する — GenerationContext の不在が黙って従来形に落ちないため）。",
+    "  TS 側は bindings で数値へ解決してから computeOutputShape に",
     "  渡し、Python 側は記号のまま compute_output_shape に渡す — 同じ表が両方の定義域で",
     "  同じ結論になることを要求する。rank 上限（strided コピー族）もこの節が担う:",
     "  rank 4 の受理と rank 5 / rank 0 の拒否をケースとして持つ。",
@@ -296,7 +305,18 @@
       "arity": 3,
       "max_arity": 4,
       "dtypes": { "kind": "uniform", "accept": ["f32"] },
-      "attrs": ["scale"]
+      "attrs": ["scale"],
+      "optional_attrs": ["window"],
+      "states": { "keys": ["k", "v"], "required": false }
+    },
+    {
+      "op": "state_append",
+      "arity": 1,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": [],
+      "optional_attrs": ["window"],
+      "states": { "keys": ["slot"], "required": true },
+      "out_dtypes": []
     },
     {
       "op": "embedding",
@@ -507,6 +527,20 @@
       "why": "有限の f32 スカラ（**半スケール** = q と k の両方に掛かる √scale_factor — ADR 0023）。実測は f32(128^-0.25)",
       "accept": [0.2973017692565918, 0.7071067811865476, 1, 0.25],
       "reject": ["0.29", null, true, [0.5]]
+    },
+    {
+      "op": "attention",
+      "attr": "window",
+      "why": "sliding window の幅（ADR 0067 決定 4）。**省略可能**で、欄の不存在 = 全 context。宣言されたら 1 以上の整数（Gemma 4 E2B の sliding 層は 512）",
+      "accept": [1, 512, 4096],
+      "reject": [0, -1, 1.5, "512", null, true, 1000000000000000000]
+    },
+    {
+      "op": "state_append",
+      "attr": "window",
+      "why": "書き側の ring 幅（ADR 0067 決定 5）。読み側（attention）と**同一の値域**でなければ、同じスロットに読み書き同式（決定 4）を課せない",
+      "accept": [1, 512, 4096],
+      "reject": [0, -1, 1.5, "512", null, true, 1000000000000000000]
     },
     {
       "op": "embedding",
@@ -1818,6 +1852,150 @@
       "attrs": { "scale": 0.5 },
       "throws": true,
       "why": "N が 0 の attention は amax の identity が定義できない（softmax と同じ理由）"
+    },
+
+    {
+      "op": "attention",
+      "ins": [[1, 8, 4, 128], [1, 1, 4, 128], [1, 1, 4, 128]],
+      "attrs": { "scale": 0.2973017692565918 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 1, 4096, 128], "layer0.v": [1, 1, 4096, 128] },
+      "outs": [[1, 8, 4, 128]],
+      "why": "states 形の full 層（Gemma 4 E2B の MQA 8:1 — ins は今 step の chunk だけで、過去は容量 4096 のスロットが持つ）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 1, 128], [1, 1, 1, 128], [1, 1, 1, 128]],
+      "attrs": { "scale": 0.2973017692565918, "window": 512 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 1, 512, 128], "layer0.v": [1, 1, 512, 128] },
+      "outs": [[1, 8, 1, 128]],
+      "why": "states 形の sliding 層 × decode（queryLength=1 の M=1・window = 容量ちょうど）"
+    },
+    {
+      "op": "attention",
+      "ins": [[2, 4, 3, 8], [2, 2, 3, 8], [2, 2, 3, 8]],
+      "attrs": { "scale": 0.5 },
+      "states": { "k": "kv.k", "v": "kv.v" },
+      "state_shapes": { "kv.k": [2, 2, 16, 8], "kv.v": [2, 2, 16, 8] },
+      "outs": [[2, 4, 3, 8]],
+      "why": "states 形 × GQA 2:1 × B>1（B / Hkv / D がスロットと一致し、M だけが chunk 側）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 4, 128], [1, 1, 4, 128], [1, 1, 4, 128]],
+      "attrs": { "scale": 0.5 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "throws": true,
+      "why": "解決済みスロット shape が無い（state 参照ノードの実行には GenerationContext が要る — 黙って従来形に落ちない）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 4, 128], [1, 1, 4, 128], [1, 1, 4, 128], [1, 1, 4, 4]],
+      "attrs": { "scale": 0.5 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 1, 4096, 128], "layer0.v": [1, 1, 4096, 128] },
+      "throws": true,
+      "why": "states 形 + mask（causal 固定で mask tensor は実体化しない — ADR 0067 決定 4）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 4, 128], [1, 1, 7, 128], [1, 1, 7, 128]],
+      "attrs": { "scale": 0.5 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 1, 4096, 128], "layer0.v": [1, 1, 4096, 128] },
+      "throws": true,
+      "why": "states 形で M が q と k/v で違う（従来形の自由な N と違い、今 step の chunk は 3 者共有）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 4, 128], [1, 1, 4, 128], [1, 1, 4, 128]],
+      "attrs": { "scale": 0.5 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 1, 4096, 128], "layer0.v": [1, 1, 2048, 128] },
+      "throws": true,
+      "why": "k / v スロットが同形でない（片方だけ先に wrap する ring は値が静かにずれる）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 4, 128], [1, 1, 4, 128], [1, 1, 4, 128]],
+      "attrs": { "scale": 0.5 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 2, 4096, 128], "layer0.v": [1, 2, 4096, 128] },
+      "throws": true,
+      "why": "スロットの Hkv が ins と不一致（別の層のスロットを参照した形 — 容量が同じだと沈黙誤読になる）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 4, 128], [1, 1, 4, 128], [1, 1, 4, 128]],
+      "attrs": { "scale": 0.5 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 4096, 128], "layer0.v": [1, 4096, 128] },
+      "throws": true,
+      "why": "スロットが rank-4 でない（物理形は [B,Hkv,C,D] 固定）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 1, 128], [1, 1, 1, 128], [1, 1, 1, 128]],
+      "attrs": { "scale": 0.5, "window": 513 },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 1, 512, 128], "layer0.v": [1, 1, 512, 128] },
+      "throws": true,
+      "why": "window > C（ring 幅が容量を超えると、書いた行が同 step 中に自分で潰れる）"
+    },
+
+    {
+      "op": "state_append",
+      "ins": [[1, 1, 4, 128]],
+      "attrs": {},
+      "states": { "slot": "layer0.k" },
+      "state_shapes": { "layer0.k": [1, 1, 4096, 128] },
+      "outs": [],
+      "why": "full スロットへの append（出力 0 本 = 値を定義しない effect op — ADR 0067 決定 5）"
+    },
+    {
+      "op": "state_append",
+      "ins": [[2, 2, 3, 8]],
+      "attrs": { "window": 16 },
+      "states": { "slot": "kv.k" },
+      "state_shapes": { "kv.k": [2, 2, 16, 8] },
+      "outs": [],
+      "why": "sliding スロットへの ring 書込み（window = 容量ちょうど）"
+    },
+    {
+      "op": "state_append",
+      "ins": [[1, 1, 4, 128]],
+      "attrs": {},
+      "states": { "slot": "layer0.k" },
+      "throws": true,
+      "why": "解決済みスロット shape が無い（attention の states 形と同じ診断 — GenerationContext が要る）"
+    },
+    {
+      "op": "state_append",
+      "ins": [[1, 4, 128]],
+      "attrs": {},
+      "states": { "slot": "layer0.k" },
+      "state_shapes": { "layer0.k": [1, 1, 4096, 128] },
+      "throws": true,
+      "why": "入力が rank-4 でない（宣言 shape は [B,Hkv,M,D] 固定 — attention の ins と同じ物理 chunk 次元）"
+    },
+    {
+      "op": "state_append",
+      "ins": [[1, 2, 4, 128]],
+      "attrs": {},
+      "states": { "slot": "layer0.k" },
+      "state_shapes": { "layer0.k": [1, 1, 4096, 128] },
+      "throws": true,
+      "why": "入力とスロットの Hkv が不一致（読み側 attention と同じ検出線を書き側にも課す）"
+    },
+    {
+      "op": "state_append",
+      "ins": [[1, 1, 4, 128]],
+      "attrs": { "window": 4097 },
+      "states": { "slot": "layer0.k" },
+      "state_shapes": { "layer0.k": [1, 1, 4096, 128] },
+      "throws": true,
+      "why": "window > C（書き側でも同じ上限 — 読み書き同式 MUST の一部）"
     },
 
     {

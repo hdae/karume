@@ -60,6 +60,15 @@ export type IrNode = {
   readonly ins: readonly string[];
   readonly outs: readonly string[];
   readonly attrs: Readonly<Record<string, unknown>>;
+  /**
+   * state スロットの名前参照（ADR 0067 決定 4 — `ins` / `outs` と**別の欄**）。キーは op 契約が
+   * 固定する固定語（`attention` の `k` / `v`・`state_append` の `slot`）で、値は
+   * `graph.states` で宣言済みのスロット名。欄を持たないノードは空表。
+   *
+   * MUST: 常在欄にする（省略時は空表）。`?:` にすると消費側が毎回 `?? {}` を書くことになり、
+   * 1 箇所でも書き忘れると「states 欄を無視した従来形として実行」という沈黙誤りになる。
+   */
+  readonly states: Readonly<Record<string, string>>;
 };
 
 export type IrGraph = {
@@ -287,8 +296,9 @@ const asStateDtype = (value: unknown, where: string): IrStateDtype => {
  *
  * MUST: shape は**容量込みの具体形**なので数値次元は正整数（`values` の非負とは違う — 容量 0 の
  * スロットは束縛できる実体を持たない）。rank は 1..{@link MAX_STATE_RANK}（容量軸を持たない
- * rank 0 は「容量込み」を満たせない）。記号次元は `symbols` 宣言済みならよく、束縛は従来どおり
- * 入力 shape の次元位置から取る（checkSymbolBindability — states は束縛源にならない）。
+ * rank 0 は「容量込み」を満たせない）。記号次元は `symbols` 宣言済みならよく、**states の
+ * shape も束縛点になる**（`createGenerationContext` が決める容量 — ADR 0066 追記 7。
+ * checkSymbolBindability）。
  */
 const parseStateSlot = (
   value: unknown,
@@ -310,6 +320,41 @@ const parseStateSlot = (
     }
   });
   return { dtype, shape };
+};
+
+/**
+ * ノードの `states` 欄（ADR 0067 決定 4）。ここで見るのは**グラフ単体で決まる 3 点**だけ:
+ * plain object であること・キーと値が空でない文字列であること・値が `graph.states` で
+ * 宣言済みのスロット名であること。
+ *
+ * MUST: 未宣言スロットの参照は fail loudly。通すと「実体を持たない名前を読む」ノードが
+ * Session 構築を抜け、確保も束縛もされないまま実行段で初めて落ちる（値側の前方参照拒否と
+ * 同じ層の規則）。
+ * MUST: 器は null プロトタイプ。キーはパース入力由来で、素の `{}` では `"__proto__"` の
+ * 代入が [[Prototype]] 設定に化けて欄が黙って消える — 消えた参照が別ノードの参照で
+ * 覆われると、参照完全性検査も契約のキー集合検査も素通りする形が作れる。
+ *
+ * NOTE: キー集合そのもの（`{k,v}` ちょうど / `{slot}` ちょうど）は op 契約の担当
+ * （`assertNodeContract`）— パーサは op 語彙を知らない。
+ */
+const parseNodeStates = (
+  obj: Record<string, unknown>,
+  slots: Readonly<Record<string, IrStateSlot>>,
+  where: string,
+): Record<string, string> => {
+  const states: Record<string, string> = Object.create(null);
+  if (!Object.hasOwn(obj, "states")) return states;
+  for (const [key, value] of Object.entries(asPlainObject(obj["states"], `${where}.states`))) {
+    asNonEmptyString(key, `${where}.states のキー`);
+    const slot = asNonEmptyString(value, `${where}.states['${key}']`);
+    if (!Object.hasOwn(slots, slot)) {
+      throw new IrError(
+        `${where}.states['${key}']: state スロット '${slot}' が graph.states で宣言されていない`,
+      );
+    }
+    states[key] = slot;
+  }
+  return states;
 };
 
 /**
@@ -412,27 +457,27 @@ export const parseIrGraph = (json: string): IrGraph => {
   const nodes: IrNode[] = asArray(root["nodes"], "graph.nodes").map((raw, index) => {
     const where = `graph.nodes[${index}]`;
     const obj = asPlainObject(raw, where);
-    checkKeys(obj, ["op", "ins", "outs", "attrs"], [], where);
-    const outs = asArray(obj["outs"], `${where}.outs`).map((out, i) =>
-      asNonEmptyString(out, `${where}.outs[${i}]`)
-    );
-    if (outs.length === 0) {
-      throw new IrError(`${where}: outs が空（値を定義しないノードは静的 DAG に置けない）`);
-    }
+    checkKeys(obj, ["op", "ins", "outs", "attrs"], ["states"], where);
+    // NOTE: `outs` の本数はここでは見ない（0 本 = 値を定義しない effect op が語彙に入った —
+    // ADR 0067 決定 5）。「0 本を許すのは契約が effect を宣言する op だけ」の執行点は契約層
+    // （assertNodeContract の出力数突合）で、パーサは本数に意味を与えない。
     return {
       op: asNonEmptyString(obj["op"], `${where}.op`),
       ins: asArray(obj["ins"], `${where}.ins`).map((input, i) =>
         asNonEmptyString(input, `${where}.ins[${i}]`)
       ),
-      outs,
+      outs: asArray(obj["outs"], `${where}.outs`).map((out, i) =>
+        asNonEmptyString(out, `${where}.outs[${i}]`)
+      ),
       attrs: asPlainObject(obj["attrs"], `${where}.attrs`),
+      states: parseNodeStates(obj, states, where),
     };
   });
 
-  checkSymbolBindability(symbols, inputs);
+  checkSymbolBindability(symbols, inputs, states, values);
   const defined = checkDefinitions(inputs, initializers, nodes, outputs);
   checkDeclarations(inputs, initializers, values, nodes, defined);
-  checkStateSlots(states, values, defined);
+  checkStateSlots(states, values, defined, nodes);
   checkRequiredOps(requiredOps, nodes);
 
   return {
@@ -449,29 +494,54 @@ export const parseIrGraph = (json: string): IrGraph => {
   };
 };
 
+/** shape に現れるシンボル名を集める（次元位置の出現のみ — 要素数からの逆算はしない）。 */
+const symbolsIn = (shape: readonly IrDim[], into: Set<string>): void => {
+  for (const dim of shape) {
+    if (typeof dim !== "string") continue;
+    into.add(parseDim(dim).sym);
+  }
+};
+
 /**
- * 束縛は入力 shape の次元位置から直接取る（要素数からの逆算はしない）ため、宣言された
- * シンボルは少なくとも 1 つの入力 shape の**次元位置に現れる** MUST。
+ * 宣言されたシンボルは**束縛点を持つ** MUST。束縛点は 2 つ（ADR 0066 追記 7）:
  *
- * 派生形（`2T` / `T+8`）でもよい — 1 次元 1 シンボルの一次式は実寸から解が一意に決まる
- * （ADR 0057・`runtime/plan.ts` の `bindSymbols`）。素の形を要求していた頃は、時間軸に
- * stride 2 の conv を持つグラフ（母音検出 CRNN）が記号長を宣言できなかった。
+ * 1. **入力 shape の次元位置**（run ごとの実寸から解く — `runtime/plan.ts` の `bindSymbols`）。
+ *    派生形（`2T` / `T+8`）でもよい — 1 次元 1 シンボルの一次式は実寸から解が一意に決まる
+ *    （ADR 0057）。素の形を要求していた頃は、時間軸に stride 2 の conv を持つグラフ
+ *    （母音検出 CRNN）が記号長を宣言できなかった。
+ * 2. **states の shape の次元位置**（`createGenerationContext(spec.bindings)` が決める KV 容量 —
+ *    context 生成時にユーザーが決める値なので、export 時定数に焼く形は ADR 0066 決定 3
+ *    〈静的物理格納〉と矛盾する）。
+ *
+ * MUST: **states 専用記号（states にしか現れない記号）は値 shape に現れてはならない**
+ * （追記 7）。通常値 shape の解決に効くのは入力由来の束縛だけなので、現れると実行時に必ず
+ * 束縛不能になる — 宣言の時点で落とす。
  */
 const checkSymbolBindability = (
   symbols: readonly string[],
   inputs: readonly IrInput[],
+  states: Readonly<Record<string, IrStateSlot>>,
+  values: Readonly<Record<string, IrValueInfo>>,
 ): void => {
-  const bindable = new Set<string>();
-  for (const input of inputs) {
-    for (const dim of input.shape) {
-      if (typeof dim !== "string") continue;
-      bindable.add(parseDim(dim).sym);
+  const fromInputs = new Set<string>();
+  for (const input of inputs) symbolsIn(input.shape, fromInputs);
+  const fromStates = new Set<string>();
+  for (const slot of Object.values(states)) symbolsIn(slot.shape, fromStates);
+  for (const symbol of symbols) {
+    if (!fromInputs.has(symbol) && !fromStates.has(symbol)) {
+      throw new IrError(
+        `graph.symbols: '${symbol}' が入力 shape / states shape の次元位置に現れない — 束縛が取れない`,
+      );
     }
   }
-  for (const symbol of symbols) {
-    if (!bindable.has(symbol)) {
+  for (const [name, value] of Object.entries(values)) {
+    const used = new Set<string>();
+    symbolsIn(value.shape, used);
+    for (const symbol of used) {
+      if (!fromStates.has(symbol) || fromInputs.has(symbol)) continue;
       throw new IrError(
-        `graph.symbols: '${symbol}' が入力 shape の次元位置に現れない — 束縛が取れない`,
+        `graph.values['${name}']: states 専用記号 '${symbol}' が値 shape に現れる` +
+          `（値 shape の解決に効くのは入力由来の束縛だけ — ADR 0066 追記 7）`,
       );
     }
   }
@@ -574,19 +644,30 @@ const checkDeclarations = (
  * 表現力を何も足さない。scale テンソルのキーを他 initializer の実体と衝突させない規則
  * （format/container.ts・ADR 0019）と同じ流儀。
  *
- * NOTE: 「誰も参照しないスロット」は values の孤立宣言に相当するが、参照側の欄（ADR 0067 の
- * states 欄 / `state_append`）が未実装なので今は検出できない — 参照完全性の検査はその追加と同時。
+ * **参照完全性**（ADR 0067 決定 4 / 5）: 宣言されたスロットは少なくとも 1 つのノードの
+ * `states` 欄から参照される MUST。誰も参照しないスロットは values の孤立宣言と同じ穴で、
+ * GenerationContext が確保だけして誰も読まない容量（KV なら数十 MiB 単位）が黙って残る。
  */
 const checkStateSlots = (
   states: Readonly<Record<string, IrStateSlot>>,
   values: Readonly<Record<string, IrValueInfo>>,
   defined: ReadonlySet<string>,
+  nodes: readonly IrNode[],
 ): void => {
   for (const name of Object.keys(states)) {
     if (defined.has(name) || Object.hasOwn(values, name)) {
       throw new IrError(
         `graph.states['${name}']: 値名と同名（state スロットは値名前空間と別 — 取り違えを拒否する）`,
       );
+    }
+  }
+  const referenced = new Set<string>();
+  for (const node of nodes) {
+    for (const slot of Object.values(node.states)) referenced.add(slot);
+  }
+  for (const name of Object.keys(states)) {
+    if (!referenced.has(name)) {
+      throw new IrError(`graph.states['${name}']: どのノードからも参照されない宣言`);
     }
   }
 };

@@ -67,6 +67,14 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   持つ名前付きスロット）。**節を持たないグラフは無風**（既存 IR への影響はゼロ・エクスポータは
   まだ出さない）。**ノードからスロットを参照する欄（`states` 欄 / `state_append`）はまだ無い** —
   この改訂で入るのは宣言と検査だけ（下の「state スロット」節）。
+- autoregressive（2026-08-18）: **ノードの省略可能な `states` 欄**と effect op
+  `state_append`、省略可能な attrs `window` を追加（ADR
+  [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 / 5 / 5b）。同時に 3 点が
+  緩む / 締まる: ①`outs` の**長さ 0 を許可**（値を定義しない effect op — 許すのは契約が
+  そう宣言する op だけで、執行点はパーサでなく契約テーブル）②記号の**束縛点が 2 つ**になる
+  （入力 shape ∪ states shape — ADR 0066 追記 7。states 専用記号が値 shape に現れたら
+  fail loudly）③**参照完全性**（宣言したスロットは 1 つ以上のノードから参照される MUST）。
+  `states` 欄を持たないグラフ（= 既存の全モデル）の受理集合は 1 バイトも動かない。
 
 ## コンテナ
 
@@ -218,8 +226,11 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   持てない）。次元式は値と同じ次元言語で、`symbols` に宣言済みの記号なら使える。**記号の
   束縛点は 2 つ**（ADR 0066 追記 7）: 入力 shape の次元位置（従来どおり — 値 shape の解決に
   効くのはこちらだけ）と、**states の shape に現れる記号は
-  `createGenerationContext(spec.bindings)`**（KV 容量のように context 生成時に決める値 —
-  現行実装の束縛可能性検査はまだ入力出現を要求しており、緩和は state 参照実行と同波で入る）。
+  `createGenerationContext(spec.bindings)`**（KV 容量のように context 生成時に決める値）。
+  束縛可能性検査は「入力 shape **∪** states shape のどこかに現れる」で、**states 専用記号
+  （states にしか現れない記号）が `values{}` の宣言 shape に現れたら fail loudly** — 通常値の
+  解決に効くのは入力由来の束縛だけなので、現れれば実行時に必ず束縛不能になる（宣言の時点で
+  落とす）。
 - `dtype` は **`f32` のみ**。`f16` は**席の予約だけ**があり（ADR 0066 追記 5 — state 格納の
   低精度化は数値契約が変わるので ADR [0058](decisions/0058-numerics-opt-in-contract.md) 流儀の
   opt-in が要る）、宣言されたら「**未対応**」として fail loudly する（「語彙外」とは別の診断）。
@@ -234,23 +245,88 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
 - **「層 × 均一 KV」の前提は無い**: スロットは「KV」を知らない汎用の器で、sliding 層と full 層は
   容量の違う別スロット、KV 共有層は**同一スロット名の参照**で表す（層数・レイアウトの欄は
   作らない）。
-- **ノードからスロットを参照する手段はまだ無い**（この節は宣言と検査だけ）。読み書きの欄は
-  ADR [0067](decisions/0067-autoregressive-attention-vocabulary.md) の担当 — `attention` の
-  省略可能な `states` 欄（決定 4）と effect op `state_append`（決定 5）が入る改訂で、
-  スロットの物理形（`[B, Hkv, C, D]`）・`window ≤ C`・参照完全性（誰も参照しないスロットの拒否）の
-  検査も同時に入る。
+- **参照完全性**: 宣言したスロットは**少なくとも 1 つのノードの `states` 欄から参照される**
+  MUST（`values` の孤立宣言と同じ穴 — 誰も読まないスロットは GenerationContext が確保だけして
+  黙って容量を食う）。読者だけ / 書き手だけのスロットはどちらも正規（KV 共有層は
+  `state_append` を持たない — ADR 0067 決定 5）。
+- ノードからの参照は下の「state 参照ノード」節（`attention` の states 形 / `state_append`）。
+  スロットの物理形（`[B, Hkv, C, D]`）と `window ≤ C` はそちらが持つ。
 
 ## ノード
 
 - SSA・単一代入: 各値名は inputs / initializers / いずれかのノードの `outs` のうち
   **ちょうど 1 箇所**で定義される。`ins` は定義済みの名前のみ参照。`outputs` は定義済み
-  名の部分集合。`outs` は長さ 1 以上の配列（**複数出力が実在する** — `topk` が値 f32 と
-  添字 i32 の 2 本を定義する唯一の op〈ADR
-  [0068](decisions/0068-decode-exit-multi-output.md) 決定 3〉。他の op は全て単一出力で、
-  0 本〈値を定義しない effect op〉は**まだ語彙に無い**）。
+  名の部分集合。`outs` の本数は **op 契約が決める**（**複数出力**は `topk` の 2 本〈値 f32 +
+  添字 i32・ADR [0068](decisions/0068-decode-exit-multi-output.md) 決定 3〉、**0 本**は
+  `state_append`〈値を定義しない effect op・ADR
+  [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 5〉で、他は全て単一出力）。
+  **0 本を許すのは契約が effect を宣言する op だけ** — パーサは本数に意味を与えず、執行点は
+  契約テーブルの出力数突合（他の op に `outs: []` を書くと本数不一致で落ちる）。
 - `nodes` は**トポロジカル順**で格納される（パーサが検証。前方参照は fail loudly）。
 - `attrs` は op ごとの契約テーブルで検証する。未知の attr・契約外の値は fail loudly
-  （近似実行しない）。
+  （近似実行しない）。**省略可能な attrs は `window` の 1 本だけ**（下の「state 参照ノード」）—
+  欄の不存在それ自体が別の宣言（= 全 context）になる欄で、他の attrs は従来どおり
+  「宣言済みキーは全て必須・既定値補完なし」。
+- **`states` 欄**（省略可能・下の「state 参照ノード」）: `ins` / `outs` と別の欄で state
+  スロットを名前参照する。キーは op 契約が固定し、値は `states{}` で宣言済みのスロット名
+  （未宣言参照は fail loudly）。
+
+## state 参照ノード（`attention` の states 形 / `state_append`）
+
+state スロットを読み書きするノードの契約（ADR
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 / 5 / 5b）。
+
+```jsonc
+{
+  "nodes": [
+    {
+      "op": "attention",
+      "ins": ["q", "k_cur", "v_cur"],
+      "outs": ["o"],
+      "attrs": { "scale": 0.088, "window": 512 },
+      "states": { "k": "layer0.k", "v": "layer0.v" }
+    },
+    {
+      "op": "state_append",
+      "ins": ["k_cur"],
+      "outs": [],
+      "attrs": { "window": 512 },
+      "states": { "slot": "layer0.k" }
+    },
+    {
+      "op": "state_append",
+      "ins": ["v_cur"],
+      "outs": [],
+      "attrs": { "window": 512 },
+      "states": { "slot": "layer0.v" }
+    }
+  ]
+}
+```
+
+- **欄の有無が形を判別する**: `states` 欄を持たない `attention` は従来契約そのまま。欄が
+  `{ k, v }`（**キーはちょうどこの 2 つ**・k と v に**同じスロット名は書けない**）のとき
+  states 形になり、`ins` の k / v は**今 step の chunk**（`[B,Hkv,M,D]`・M は q と共有）、
+  過去分はスロットが持つ。states 形は **mask 入力を取らない**（causal 固定 — 述語で表し
+  mask tensor は実体化しない）。
+- `state_append`（f32・**アリティ 1**・**出力 0 本**・`states` 欄は `{ slot }` ちょうど・
+  必須 attrs 無し）— 今 step の k / v をスロットへ書く単機能 effect op。入力は
+  `[B,Hkv,M,D]`。KV 共有層は「このノードが無い」だけで表せる（ORT の kv_empty と同じ表現力を
+  op の不在で得る）。
+- **スロットの物理形は `[B, Hkv, C, D]` 固定**（C = 容量）。参照するノードの `ins` と
+  **B / Hkv / D が一致**し、`attention` の k / v スロットは**互いに同形**でなければならない。
+- 省略可能 attrs **`window`**（正の整数・欄の不存在 = 全 context）= sliding window の幅。
+  **`window ≤ C`** MUST。**同一スロットに触れる全ノードで存在有無も値も一致**する MUST
+  （論理 col → 物理 row の写像は読み書き同式 — 読み側だけ別式にすると沈黙誤読になる）。
+  `window` は **states 欄を持つノードでのみ宣言できる**（従来形に書くと「受理はされるが
+  誰も読まない attr」になる）。
+- **順序は `nodes` 配列順**（決定 5b）: state 参照はテンソルのデータ辺を張らないので
+  トポロジ順では決まらない。①`state_append` は 1 スロットにつき 1 本まで ②append があるなら
+  **そのスロットに触れる最後のノード**（append より後に読者を置けない）。エクスポータは
+  「全読者 → append」の順で発行する。
+- 論理長（`pastLength` / `queryLength`）は attrs にも shape にも載らない — 毎 step 変わる
+  実行時スカラで、GenerationContext 所有の可変 uniform が運ぶ（ADR 0066 決定 3・追記 4）。
+  full スロットの `pastLength + queryLength ≤ C` は実行時検査（context 側）。
 
 ## op セット（契約は実装の契約テーブルが正本、ここは一覧のみ）
 
@@ -390,7 +466,14 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
     B·H の全バッチへ broadcast する。`[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 は受理せず、
     causal / dropout は語彙に無い。行が全て −inf になるマスクは**契約違反**（NaN 汚染 —
     検査は入れない。その形が正規なのは `safe_softmax` を使う分解経路だけ。ADR
-    [0044](decisions/0044-runtime-attention-mask.md) 決定 3）
+    [0044](decisions/0044-runtime-attention-mask.md) 決定 3）。
+    省略可能な **`states` 欄**を持つと autoregressive の states 形になる（上の
+    「state 参照ノード」節 — 同一 op 名の契約拡張で、欄の有無が形を判別する）
+  - `state_append`（f32、**アリティ 1・出力 0 本**、省略可能 attrs `window`、`states` 欄
+    `{ slot }` 必須 — ADR
+    [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 5）— 今 step の k / v を
+    state スロットへ書く effect op（上の「state 参照ノード」節）。**値を定義しない唯一の op**で、
+    torch から出す経路は持たない（aten に対応物が無く、発行するのは decode グラフ台本だけ）
   - `rms_norm`（f32、attrs `eps`、**アリティ 2 固定**）—
     `y = x · rsqrt(mean(x², 最終次元) + eps) · weight`。**bias が無く、平均も引かない**
     （layer_norm との差はこの 2 点）。正規化長の正本は **weight の長さ**で、

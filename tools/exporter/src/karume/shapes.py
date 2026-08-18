@@ -59,6 +59,7 @@ from karume.ops import (
     scalar_param_values,
     slice_attrs,
     softmax_dim,
+    state_window,
     sym_prefix_slice_attrs,
     topk_k,
     upsample_bilinear2d_attrs,
@@ -190,6 +191,40 @@ def _require_declared(
     return extents(declared, f"{where} の宣言 shape")
 
 
+@dataclass(frozen=True)
+class _StateContext:
+    """ノードの `states` 欄と、それが指すスロットの宣言 shape（ADR 0067 決定 4）。
+
+    TS 側は ShapeContext の 2 フィールド（`states` / `stateShapes`）で同じものを運ぶ。
+    """
+
+    states: Mapping[str, str]
+    shapes: Mapping[str, Sequence[IrDim]]
+
+    @property
+    def referenced(self) -> bool:
+        """states 形か（欄の有無が形を判別する — ADR 0067 決定 4）。"""
+        return bool(self.states)
+
+    def slot(self, key: str, where: str) -> tuple[str, list[Extent]]:
+        """`states` 欄のキーが指すスロットの (名前, 宣言 shape)。
+
+        MUST: 解決済み shape が無い経路は fail loudly。スロットの実体を確保するのは
+        GenerationContext（ADR 0066 決定 1）なので、これが無い経路 = 1-shot 実行では state
+        参照ノードを実行できない。
+        """
+        name = self.states.get(key)
+        if name is None:
+            raise OpContractError(f"{where}: states 欄に '{key}' が無い")
+        shape = self.shapes.get(name)
+        if shape is None:
+            raise OpContractError(
+                f"{where}: state スロット '{name}' の shape が解決されていない"
+                "（state 参照ノードの実行には GenerationContext が要る — ADR 0066 決定 1）"
+            )
+        return name, extents(shape, f"{where} の state スロット '{name}'")
+
+
 def compute_output_shape(
     contract: OpContract,
     input_shapes: Sequence[Sequence[IrDim]],
@@ -197,13 +232,21 @@ def compute_output_shape(
     *,
     declared: Sequence[IrDim] | None = None,
     attrs: Mapping[str, Any] | None = None,
+    states: Mapping[str, str] | None = None,
+    state_shapes: Mapping[str, Sequence[IrDim]] | None = None,
 ) -> list[list[IrDim]]:
     """宣言 shape から**出力 slot 昇順の shape 列**を計算する
     （packages/runtime/src/ops.ts `computeOutputShape` と同義 — ADR 0068 決定 1）。
 
-    2 本を返すのは `topk`（値 + 添字 — ADR 0068 決定 3）だけで、他は全て 1 本。
+    2 本を返すのは `topk`（値 + 添字 — ADR 0068 決定 3）だけ、**空列**は `state_append`
+    （値を定義しない effect op — ADR 0067 決定 5）だけで、他は全て 1 本。
     `declared` は「出力の宣言 shape が目標形」の op（reshape / expand — ADR 0011）でだけ
     必須。`attrs` は permute / layer_norm / softmax / conv1d / sym_prefix_slice / topk で必須。
+
+    `states` はノードの `states` 欄（**非空であることが「states 形」の判別そのもの** —
+    ADR 0067 決定 4）、`state_shapes` は `graph.states` 由来のスロット shape（容量込み具体形）。
+    2 つは対で渡す MUST — states 参照ノードに解決済みスロット shape が無ければ fail loudly で、
+    黙って従来形として計算すると「過去 KV を読まない別の計算」になる。
     """
     if not arity_fits(contract, len(input_shapes)):
         raise OpContractError(
@@ -212,9 +255,10 @@ def compute_output_shape(
         )
     ins = [extents(shape, f"{where} の入力 {index}") for index, shape in enumerate(input_shapes)]
     node_attrs: Mapping[str, Any] = attrs if attrs is not None else {}
+    slots = _StateContext(states or {}, state_shapes or {})
     return [
         [extent.to_dim() for extent in slot]
-        for slot in _compute(contract, ins, where, declared, node_attrs)
+        for slot in _compute(contract, ins, where, declared, node_attrs, slots)
     ]
 
 
@@ -229,6 +273,7 @@ def _compute(
     where: str,
     declared: Sequence[IrDim] | None,
     attrs: Mapping[str, Any],
+    slots: _StateContext,
 ) -> list[list[Extent]]:
     kind = contract.kind
     if kind == "unary":
@@ -287,7 +332,11 @@ def _compute(
     if kind in ("softmax", "safe_softmax"):
         return _sole(_softmax(ins, where, attrs, contract.name))
     if kind == "attention":
-        return _sole(_attention(ins, where, attrs))
+        return _sole(_attention(ins, where, attrs, slots))
+    # 値を定義しない effect op（ADR 0067 決定 5）。`_sole` を通らず**空列**を返すことが
+    # そのまま「出力 0 本」の宣言になる（多出力アームが列を組んで返すのと同じ流儀）。
+    if kind == "state_append":
+        return _state_append(ins, where, attrs, slots)
     if kind == "embedding":
         return _sole(_embedding(ins, where))
     if kind == "masked_fill":
@@ -681,8 +730,107 @@ def _softmax(
     return list(shape)
 
 
-def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
-    """attention の出力 shape（ADR 0023 + 0067 決定 1）。
+def _assert_state_slot_form(
+    name: str,
+    slot: list[Extent],
+    ins: list[Extent],
+    window: int | None,
+    where: str,
+) -> None:
+    """state スロットの物理形（ADR 0067 決定 4 の①②③・TS 側 assertStateSlotForm の鏡像）。
+
+    スロットは **`[B, Hkv, C, D]` 固定**で、今 step の chunk（`ins`）と B / Hkv / D が一致し、
+    sliding（attrs `window`）では `window ≤ C` でなければならない。
+
+    MUST: 通常値だけを見る shape 検査の**state 延長**としてここで落とす。スロット取り違え
+    （別の層のスロットを参照した形）は容量が違えば OOB、同容量なら沈黙誤読になる。
+    NOTE: `window ≤ C` は **C が定数のときだけ**判定する（記号容量は
+    `createGenerationContext` の束縛次第 — 宣言だけでは決められないものを決めたことにしない）。
+    TS 側は束縛解決後の数値しか扱わないので常に判定できる = ここだけが片側で保留になる。
+    NOTE: full スロットの `pastLength + queryLength ≤ C` は実行時の論理長が要るので context 側
+    （ADR 0067 決定 4 の④）— ここでは見られない。
+    """
+    show = f"state スロット '{name}' [{_show(slot)}] / 入力 [{_show(ins)}]"
+    if len(slot) != 4:
+        raise OpContractError(f"{where}: {show} — スロットは [B,Hkv,C,D] の rank-4 のみ")
+    if slot[0] != ins[0] or slot[1] != ins[1] or slot[3] != ins[3]:
+        raise OpContractError(f"{where}: {show} — スロットと入力の B / Hkv / D が不一致")
+    if window is not None and slot[2].is_const and window > slot[2].offset:
+        raise OpContractError(
+            f"{where}: {show} — attrs.window {window} がスロット容量 {slot[2].offset} を超える"
+        )
+
+
+def _state_append(
+    ins: list[list[Extent]], where: str, attrs: Mapping[str, Any], slots: _StateContext
+) -> list[list[Extent]]:
+    """`state_append` の出力 shape 列 = **空列**（ADR 0067 決定 5 — 値を定義しない effect op）。
+
+    入力は `[B,Hkv,M,D]` の rank-4 ちょうど（attention の ins と同じ物理 chunk 次元）で、
+    参照するスロットとの整合は読み側 attention と**同じ検出線**を課す（読み書き同式 MUST）。
+    """
+    x = ins[0]
+    if len(x) != 4:
+        raise OpContractError(
+            f"{where}: state_append の入力は [B,Hkv,M,D] の rank-4 のみ: [{_show(x)}]"
+        )
+    window = state_window(attrs, where)
+    name, slot = slots.slot("slot", where)
+    _assert_state_slot_form(name, slot, x, window, where)
+    return []
+
+
+def _attention_states(
+    q: list[Extent],
+    k: list[Extent],
+    v: list[Extent],
+    rest: list[list[Extent]],
+    where: str,
+    attrs: Mapping[str, Any],
+    slots: _StateContext,
+    show: str,
+) -> list[Extent]:
+    """states 形 attention の分岐（ADR 0067 決定 4 — `_attention` から head / D 検査の後に入る）。
+
+    MUST: mask は取らない（causal 固定・述語計算 — mask tensor は実体化しない）。契約層でも
+    落ちるが、適合表からの直呼びはここを通る。
+    MUST: M は q / k / v で**完全一致**（今 step の chunk を共有する — 従来形の自由な N と違い、
+    ここがずれた形は「別の step の k/v を混ぜた」IR にほかならない）。
+    MUST: k / v スロットは**同形**（容量の違うスロットを組にすると、片方だけ先に wrap する
+    ring になって値が静かにずれる）。
+    """
+    if rest:
+        raise OpContractError(
+            f"{where}: states 形の attention は mask を取らない（causal 固定 —"
+            f" ADR 0067 決定 4） {show} + mask [{_show(rest[0])}]"
+        )
+    if k[2] != q[2] or v[2] != q[2]:
+        raise OpContractError(
+            f"{where}: states 形の attention は M（軸 2）が q / k / v で一致する {show}"
+        )
+    # 空軸の softmax は amax の identity が定義できない（従来形の N=0 拒否と同じ理由）。
+    # 記号次元が 0 になるかは束縛次第なので、ここで決められるのは定数次元だけ。
+    if q[2].is_value(0):
+        raise OpContractError(
+            f"{where}: states 形の attention は M が 0 の chunk を扱えない {show}"
+        )
+    window = state_window(attrs, where)
+    k_name, k_slot = slots.slot("k", where)
+    v_name, v_slot = slots.slot("v", where)
+    if k_slot != v_slot:
+        raise OpContractError(
+            f"{where}: attention の k / v スロットが同形でない"
+            f"（'{k_name}' [{_show(k_slot)}] / '{v_name}' [{_show(v_slot)}]）"
+        )
+    _assert_state_slot_form(k_name, k_slot, k, window, where)
+    _assert_state_slot_form(v_name, v_slot, v, window, where)
+    return list(q)
+
+
+def _attention(
+    ins: list[list[Extent]], where: str, attrs: Mapping[str, Any], slots: _StateContext
+) -> list[Extent]:
+    """attention の出力 shape（ADR 0023 + 0067 決定 1 / 決定 4）。
 
     `q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]` （+ 省略可能な `mask[1,1,M,N]`）→ `[B,H,M,D]`。
 
@@ -694,6 +842,11 @@ def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) ->
     MUST: mask の先頭 2 軸は**ちょうど 1**（B·H への broadcast 専業）。`[B,1,M,N]` を
     通すと「B が合っている限り黙って通る」形が増え、契約の外の broadcast 規則を
     カーネルが持たされる — 欄の不存在で拒否する（実行時マスクの需要が出た時に広げる）。
+
+    **states 形**（ADR 0067 決定 4）: `states` 欄があるノードは「過去分はスロット・今 step の
+    k/v は `ins`」を読む形になり、head / D 規則は 2 形で共通のまま**以降が分岐する** —
+    従来形は k/v の N（過去 + 現在の全長）を見るが、states 形の ins は今 step の chunk だけ
+    なので **M が 3 者一致**し、過去分はスロットの容量 C が持つ。
     """
     q, k, v, *rest = ins
     # MUST: scale はここでも引く（TS 側 computeOutputShape と同じ役割 — 全ノードが必ず通る
@@ -740,6 +893,8 @@ def _attention(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) ->
             )
     if q[3] != k[3] or q[3] != v[3]:
         raise OpContractError(f"{where}: attention の D（軸 3）が不一致 {show}")
+    if slots.referenced:
+        return _attention_states(q, k, v, rest, where, attrs, slots, show)
     if k[2] != v[2]:
         raise OpContractError(f"{where}: attention の N（k / v の軸 2）が不一致 {show}")
     # 空軸の softmax は amax の identity が定義できない。記号次元が 0 になるかは束縛次第なので、
@@ -1143,6 +1298,9 @@ def assert_graph_shapes(graph: IrGraph) -> None:
     （gather の先行次元一致・conv1d の出力長・reshape の要素数など）と食い違う IR が
     「宣言どおり」に書き出され、ランタイムの Session 構築まで表面化しない。
     """
+    # スロットの容量込み具体形は宣言 1 箇所（graph.states）から配る — TS 側は
+    # GenerationContext が解決した shape を渡す層に当たる（ADR 0067 決定 4）。
+    state_shapes = {name: slot.shape for name, slot in graph.states.items()}
     for index, node in enumerate(graph.nodes):
         where = f"graph.nodes[{index}] ({node.op})"
         contract = resolve_op_contract(node.op)
@@ -1150,8 +1308,15 @@ def assert_graph_shapes(graph: IrGraph) -> None:
         declared_outputs = [declared_shape(graph, name) for name in node.outs]
         # NOTE: 目標形を要求する 2 op（reshape / expand）は単一出力なので、`declared` は
         # slot 0 だけを渡す（多出力 op の shape は入力と attrs から導く — TS 側 plan.ts と同じ）。
+        # 出力 0 本の effect op（ADR 0067 決定 5）には slot 0 が無いので None を渡す。
         computed = compute_output_shape(
-            contract, ins, where, declared=declared_outputs[0], attrs=node.attrs
+            contract,
+            ins,
+            where,
+            declared=declared_outputs[0] if declared_outputs else None,
+            attrs=node.attrs,
+            states=node.states,
+            state_shapes=state_shapes,
         )
         # MUST: 列長の一致をここで見る（本数が割れると 2 本目の出力が誰にも突き合わされない）。
         if len(computed) != len(declared_outputs):

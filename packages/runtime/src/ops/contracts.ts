@@ -27,6 +27,7 @@ import {
   SCALAR_PARAM_ATTRS,
   SLICE_ATTRS,
   SOFTMAX_ATTRS,
+  STATE_WINDOW_ATTRS,
   SYM_PREFIX_SLICE_ATTRS,
   TOPK_ATTRS,
   UPSAMPLE_BILINEAR2D_ATTRS,
@@ -64,6 +65,7 @@ import {
   SAFE_SOFTMAX_OP,
   SLICE_OP,
   SOFTMAX_OP,
+  STATE_APPEND_OP,
   SYM_PREFIX_SLICE_OP,
   TOPK_OP,
   UNARY_OPS,
@@ -98,6 +100,7 @@ export type OpKind =
   | "softmax"
   | "safeSoftmax"
   | "attention"
+  | "stateAppend"
   | "embedding"
   | "maskedFill"
   | "conv1d"
@@ -139,7 +142,8 @@ type ContractBase = {
   readonly slotDtypes: SlotDtypes;
   /**
    * **出力 slot 別**の「スロット 0 の入力 dtype → その出力の dtype」写像の**列**（ADR 0068
-   * 決定 1）。列の長さがその op の出力数で、現状の op は全て長さ 1（= 単一出力の明示化）。
+   * 決定 1）。列の長さがその op の出力数で、長さ 1 以外は `topk`（2 本）と `state_append`
+   * （**0 本** — 値を定義しない effect op・ADR 0067 決定 5）だけ。
    * 各写像の既定は恒等（入力と同型）で、違うのは実測に出た 3 系統だけ: 比較（f32 → bool）/
    * bool 入力の `sum`（→ i32 のカウント）/ `where`（条件 bool → 値の f32）。
    *
@@ -173,13 +177,39 @@ type ContractBase = {
    * スロットも dtype 契約を持つ — uniform なら本体と同じ受理集合）。
    */
   readonly maxArity?: number;
+  /**
+   * **省略可能な attrs**（現状 `window` の 1 本 — ADR 0067 決定 4 / 5）。宣言されていれば
+   * 値域検査を通り、無ければ「欄の不存在」がそのまま意味を持つ。
+   *
+   * MUST: 必須 attrs（{@link ContractBase.attrs}）を optional 化するために使わない。
+   * 「宣言済み attrs の既定値補完はしない」（ADR 0012）は不変で、ここに載るのは
+   * **不存在それ自体が別の宣言になる欄**だけ（`window` 不在 = 全 context）。
+   * MUST: 省略可能 attrs は **states 形専用**（{@link assertNodeContract}）。sliding の窓は
+   * 「論理 col → 物理 row の写像」の一部で、state を参照しないノードには意味が無い —
+   * 従来形に書けると「受理はされるが誰も読まない attr」ができる。
+   */
+  readonly optionalAttrs?: AttrSchema;
+  /**
+   * `states` 欄の契約（省略 = **states 欄を持てない op**）。`keys` は欄が非空のときの
+   * キー集合**ちょうど**で、`required` は「欄そのものが必須か」。
+   *
+   * `attention` は `{ keys: ["k","v"], required: false }` — 欄の有無が従来形 / states 形を
+   * 判別する（ADR 0067 決定 4）。`state_append` は `{ keys: ["slot"], required: true }`。
+   */
+  readonly states?: StateFieldContract;
+};
+
+/** {@link ContractBase.states} — states 欄のキー集合と必須性。 */
+export type StateFieldContract = {
+  readonly keys: readonly string[];
+  readonly required: boolean;
 };
 
 /**
  * kind と op 名を判別可能ユニオンで結ぶ。消費側（codegen 選択・CPU 参照）が
  * `op as UnaryOpName` のような取り違えの効かないキャストを書かずに済むようにするため。
  * `arity` は入力の個数で、出力の個数は {@link ContractBase.outputDtypes} の列長
- * （現状の op は全て 1 本）。
+ * （`topk` が 2 本・`state_append` が 0 本で、他は全て 1 本）。
  */
 export type OpContract =
   | (ContractBase & { readonly kind: "unary"; readonly name: UnaryOpName; readonly arity: 1 })
@@ -266,6 +296,14 @@ export type OpContract =
     readonly name: typeof ATTENTION_OP;
     readonly arity: 3;
     readonly maxArity: 4;
+  })
+  // 今 step の k/v を state スロットへ書く effect op（ADR 0067 決定 5）。**出力 0 本**の
+  // 最初の入居者で、`states` 欄が必須（`{ slot }` ちょうど）。kind を attention と分けるのは、
+  // 出力本数・states 欄のキー・カーネル族（ring 書込み）が全て別だから。
+  | (ContractBase & {
+    readonly kind: "stateAppend";
+    readonly name: typeof STATE_APPEND_OP;
+    readonly arity: 1;
   })
   | (ContractBase & {
     readonly kind: "embedding";
@@ -375,6 +413,8 @@ const dtypesOf = (name: string): readonly IrDtype[] => DTYPES.get(name) ?? F32;
  * - `topk` — **列の長さが 2**（ADR 0068 決定 3）。slot 0 は値なので恒等（f32 → f32・空の写像が
  *   埋める）、slot 1 は添字なので i32。**列の長さがそのまま出力数**なので、この 1 行が
  *   「topk は 2 本出す」の宣言そのものになる。
+ * - `state_append` — **列が空**（ADR 0067 決定 5）。値を定義しない effect op で、この 1 行が
+ *   「出力 0 本」の宣言そのもの（`outs: []` を許すのは契約がこう宣言する op だけ）。
  */
 const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[]> = new Map([
   ["ge", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
@@ -385,6 +425,7 @@ const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[
   [WHERE_OP, [new Map<IrDtype, IrDtype>([["bool", "f32"]])]],
   [ARGMAX_OP, [new Map<IrDtype, IrDtype>([["f32", "i32"]])]],
   [TOPK_OP, [new Map<IrDtype, IrDtype>(), new Map<IrDtype, IrDtype>([["f32", "i32"]])]],
+  [STATE_APPEND_OP, []],
 ]);
 
 /** 宣言が無い op の既定 = **出力 1 本・恒等**（空の写像は定義域全体が恒等で埋まる）。 */
@@ -568,12 +609,26 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
   }],
   // 融合 attention（ADR 0023）。q / k / v と省略可能な mask の 4 本とも f32 で同型
   // （uniform 契約）。mask は加算型なので値の側と同じ dtype で、bool は受理しない。
+  // states 欄（ADR 0067 決定 4）は**省略可能** — 欄の有無が従来形 / states 形を判別し、
+  // 欄がある形だけが `window` を宣言できる（従来形の受理集合は 1 バイトも動かない）。
   [ATTENTION_OP, {
     ...contract(ATTENTION_OP, ATTENTION_ATTRS),
     kind: "attention",
     name: ATTENTION_OP,
     arity: 3,
     maxArity: 4,
+    optionalAttrs: STATE_WINDOW_ATTRS,
+    states: { keys: ["k", "v"], required: false },
+  }],
+  // state スロットへの書き込み（ADR 0067 決定 5）。入力 1 本・**出力 0 本**（OUTPUT_DTYPES の
+  // 空列がその宣言）・states 欄必須。
+  [STATE_APPEND_OP, {
+    ...contract(STATE_APPEND_OP),
+    kind: "stateAppend",
+    name: STATE_APPEND_OP,
+    arity: 1,
+    optionalAttrs: STATE_WINDOW_ATTRS,
+    states: { keys: ["slot"], required: true },
   }],
   // 値 f32 と添字 i32 のスロット別契約（gather と同型 — 出力は値の側と同型）。
   [EMBEDDING_OP, {
@@ -633,8 +688,18 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
   ]),
 ]);
 
-/** 契約の attrs スキーマが宣言するキー（capability 射影と診断で使う）。 */
+/** 契約が**必須**として宣言する attrs キー（全ノードが持たなければならない欄）。 */
 export const attrKeysOf = (found: OpContract): readonly string[] => Object.keys(found.attrs);
+
+/**
+ * 契約が**省略可能**として宣言する attrs キー（{@link ContractBase.optionalAttrs}）。
+ *
+ * MUST: capability 射影（{@link RUNTIME_SUPPORT}）には必須と省略可能の**和**を載せる —
+ * 列挙門（container.ts）は「実装済みの attr キー」との差を「未実装 attrs」として並べるので、
+ * 省略可能なぶんを落とすと states 形の正しいグラフが capability 不足で拒否される。
+ */
+export const optionalAttrKeysOf = (found: OpContract): readonly string[] =>
+  found.optionalAttrs === undefined ? [] : Object.keys(found.optionalAttrs);
 
 /**
  * 契約が宣言する**出力の本数**。出力 dtype 写像の列長そのもの（ADR 0068 決定 1）。
@@ -678,7 +743,7 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
       outDtypes: found.kind === "cast"
         ? [new Set(SEMANTIC_DTYPES)]
         : found.outputDtypes.map((slot) => new Set(slot.values())),
-      attrKeys: new Set(attrKeysOf(found)),
+      attrKeys: new Set([...attrKeysOf(found), ...optionalAttrKeysOf(found)]),
     }]),
   ),
   // 生の int32 格納（ADR 0010）は記号依存定数の焼き込み先として実行対象。f16（ADR 0018）と
@@ -747,13 +812,27 @@ export const resolveOpContract = (op: string): OpContract => {
  */
 export const assertNodeContract = (node: IrNode, where: string): OpContract => {
   const found = resolveOpContract(node.op);
+  const stateKeys = Object.keys(node.states);
+  assertStateField(found, node, stateKeys, where);
+  // MUST: states 形は**省略可能な末尾入力を取らない**（ADR 0067 決定 4 —「causal 固定・
+  // mask tensor は実体化しない」）。上限を絞らないと、mask 付き states 形 attention が
+  // 「mask を誰も読まない形」として受理される。
+  if (stateKeys.length > 0 && found.maxArity !== undefined && node.ins.length > found.arity) {
+    throw new OpContractError(
+      `${where}: op '${node.op}' の states 形は入力 ${found.arity} 本ちょうど` +
+        `（${node.ins.length} 本 — 省略可能な末尾入力は取らない・ADR 0067 決定 4）`,
+    );
+  }
   assertArity(found, node.ins.length, "入力数", where);
   if (node.outs.length !== outputCountOf(found)) {
     throw new OpContractError(
       `${where}: op '${node.op}' の出力数が ${node.outs.length}（契約は ${outputCountOf(found)}）`,
     );
   }
-  const unknown = Object.keys(node.attrs).filter((key) => !Object.hasOwn(found.attrs, key));
+  const optional = found.optionalAttrs;
+  const unknown = Object.keys(node.attrs).filter((key) =>
+    !Object.hasOwn(found.attrs, key) && (optional === undefined || !Object.hasOwn(optional, key))
+  );
   if (unknown.length > 0) {
     throw new OpContractError(
       `${where}: op '${node.op}' の契約外 attrs [${unknown.sort().join(", ")}]`,
@@ -765,7 +844,73 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
     }
     found.attrs[key](node.attrs[key], `${where} の attrs.${key}`);
   }
+  if (optional !== undefined) {
+    for (const key of Object.keys(optional)) {
+      if (!Object.hasOwn(node.attrs, key)) continue;
+      // MUST: 省略可能 attrs は states 形専用（{@link ContractBase.optionalAttrs}）。
+      if (stateKeys.length === 0) {
+        throw new OpContractError(
+          `${where}: op '${node.op}' の attrs.${key} は states 欄を持つノードでのみ宣言できる`,
+        );
+      }
+      optional[key](node.attrs[key], `${where} の attrs.${key}`);
+    }
+  }
   return found;
+};
+
+/**
+ * `states` 欄が契約に適合するか（ADR 0067 決定 4 / 5）。
+ *
+ * MUST: キー集合は契約の宣言と**完全一致**（部分集合を許すと、`v` を書き忘れた states 形
+ * attention が「k だけ状態から読む」形として通る）。
+ * MUST: 同一ノードが 2 つの欄から**同じスロット**を参照する形を拒否する — `k` と `v` に
+ * 同じスロット名を書いた取り違えは、shape 検査を全て通ったうえで「V を K として読む」
+ * 沈黙誤値になる（k/v スロットは同形なので shape では捕まらない）。
+ */
+const assertStateField = (
+  found: OpContract,
+  node: IrNode,
+  keys: readonly string[],
+  where: string,
+): void => {
+  const declared = found.states;
+  if (declared === undefined) {
+    if (keys.length > 0) {
+      throw new OpContractError(
+        `${where}: op '${found.name}' は states 欄を持たない（[${[...keys].sort().join(", ")}]）`,
+      );
+    }
+    return;
+  }
+  if (keys.length === 0) {
+    if (declared.required) {
+      throw new OpContractError(
+        `${where}: op '${found.name}' の states 欄が無い（契約は [${
+          declared.keys.join(", ")
+        }] ちょうど）`,
+      );
+    }
+    return;
+  }
+  const expected = [...declared.keys].sort();
+  const actual = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new OpContractError(
+      `${where}: op '${found.name}' の states 欄のキーが [${actual.join(", ")}]（契約は [${
+        expected.join(", ")
+      }] ちょうど）`,
+    );
+  }
+  const slots = declared.keys.map((key) => node.states[key]);
+  const aliased = slots.findIndex((slot, index) => slots.indexOf(slot) !== index);
+  if (aliased >= 0) {
+    throw new OpContractError(
+      `${where}: op '${found.name}' の states 欄が同じスロット '${
+        slots[aliased]
+      }' を複数の欄から参照している（取り違えの検出線）`,
+    );
+  }
 };
 
 /**

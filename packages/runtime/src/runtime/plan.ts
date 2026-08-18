@@ -17,6 +17,8 @@ import {
   type OpContract,
   resolveNodeDtypes,
   sliceAttrs,
+  STATE_APPEND_OP,
+  stateWindow,
   symPrefixSliceAttrs,
   WEIGHT_CHANNEL_AXES,
   WEIGHT_SLOTS,
@@ -112,12 +114,80 @@ export const validateGraphContracts = (graph: IrGraph): void => {
     }
     if (contract.kind === "cat") assertCatAxis(graph, node, where);
   });
+  assertStateOrder(graph);
   for (const spec of graph.inputs) {
     if (!IO_DTYPES.includes(spec.dtype)) {
       throw new ExecutionError(
         `入力 '${spec.name}' の意味論 dtype '${spec.dtype}' は転送できない（${
           IO_DTYPES.join(" / ")
         } のみ）`,
+      );
+    }
+  }
+};
+
+/** 1 スロットに触れたノード 1 本ぶんの記録（{@link assertStateOrder}）。 */
+type StateTouch = {
+  readonly index: number;
+  readonly op: string;
+  readonly appends: boolean;
+  readonly window: number | undefined;
+};
+
+/**
+ * state effect の順序（ADR 0067 決定 5b の②）。state 参照は**テンソルのデータ辺を張らない**
+ * ため DAG のトポロジ順では順序が決まらず、契約は `nodes` **配列順**そのもの。束縛に依存
+ * しないので Session 構築時に 1 回、スロットごとに 3 点を見る:
+ *
+ * 1. `state_append` は 1 スロットにつき**1 本まで**（1 step に 2 回書く形は ring の位置式が
+ *    二重に進み、読者が見る過去が step の途中で変わる）
+ * 2. append が在るなら**そのスロットに触れる最後のノード**（append より後に読者が居ると、
+ *    その読者は「今 step の k/v を過去として二重に読む」— 第 3 / 4 巡 high 指摘の閉鎖）
+ * 3. 同一スロットに触れる全ノードの `window` は**存在有無も値も一致**（論理 col → 物理 row の
+ *    写像は読み書き同式 MUST — ADR 0067 決定 4。読み側だけ別式にすると沈黙誤読）
+ *
+ * MUST: fail loudly。3 点とも「順序 / 宣言の誤り」が例外ではなく**別の値**として出る種類の
+ * 破れなので、実行前のここでしか止められない。
+ */
+const assertStateOrder = (graph: IrGraph): void => {
+  const touches = new Map<string, StateTouch[]>();
+  graph.nodes.forEach((node, index) => {
+    const slots = Object.values(node.states);
+    if (slots.length === 0) return;
+    // attrs の値域検査は assertNodeContract が済ませている（ここは引き直すだけ）。
+    const window = stateWindow(node.attrs, `nodes[${index}] (${node.op})`);
+    for (const slot of slots) {
+      const list = touches.get(slot) ?? [];
+      list.push({ index, op: node.op, appends: node.op === STATE_APPEND_OP, window });
+      touches.set(slot, list);
+    }
+  });
+  for (const [slot, list] of touches) {
+    const appends = list.filter((touch) => touch.appends);
+    if (appends.length > 1) {
+      throw new ExecutionError(
+        `state スロット '${slot}': ${STATE_APPEND_OP} が ${appends.length} 本（nodes[${
+          appends.map((touch) => touch.index).join("], nodes[")
+        }]）— 1 step に 1 回まで（ADR 0067 決定 5b）`,
+      );
+    }
+    const last = list[list.length - 1];
+    if (appends.length === 1 && !last.appends) {
+      throw new ExecutionError(
+        `state スロット '${slot}': ${STATE_APPEND_OP}（nodes[${
+          appends[0].index
+        }]）より後に読者 nodes[${last.index}] (${last.op}) が居る` +
+          `（append は当該スロットに触れる最後のノード MUST — ADR 0067 決定 5b）`,
+      );
+    }
+    const first = list[0];
+    const mismatch = list.find((touch) => touch.window !== first.window);
+    if (mismatch !== undefined) {
+      const show = (touch: StateTouch): string =>
+        `nodes[${touch.index}] (${touch.op}) は ${touch.window ?? "宣言なし"}`;
+      throw new ExecutionError(
+        `state スロット '${slot}': attrs.window が食い違う（${show(first)} / ${show(mismatch)}）` +
+          ` — 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）`,
       );
     }
   }
@@ -430,8 +500,18 @@ export const bindSymbols = (
   return bindings;
 };
 
-/** 束縛済みの shape を全値に配り、各ノードの出力 shape を契約から計算して宣言と照合する。 */
-export const planGraph = (graph: IrGraph, bindings: SymbolBindings): GraphPlan => {
+/**
+ * 束縛済みの shape を全値に配り、各ノードの出力 shape を契約から計算して宣言と照合する。
+ *
+ * @param stateShapes 束縛解決済みの state スロット shape（スロット名 → 容量込みの具体形）。
+ *   実体を確保する GenerationContext（ADR 0066 決定 1）が渡す — 省略した計画では state 参照
+ *   ノードが fail loudly する（黙って従来形として計算しない）。
+ */
+export const planGraph = (
+  graph: IrGraph,
+  bindings: SymbolBindings,
+  stateShapes?: ReadonlyMap<string, readonly number[]>,
+): GraphPlan => {
   const shapes = new Map<string, readonly number[]>();
   for (const spec of graph.inputs) shapes.set(spec.name, resolveShape(spec.shape, bindings));
   for (const [name, value] of Object.entries(graph.values)) {
@@ -464,6 +544,8 @@ export const planGraph = (graph: IrGraph, bindings: SymbolBindings): GraphPlan =
       declared: declaredShapes[0],
       attrs: node.attrs,
       bindings,
+      states: node.states,
+      stateShapes,
     });
     // MUST: 列長の一致をここで見る。契約が宣言する出力数（`node.outs` の本数 —
     // assertNodeContract が済ませている）と shape 計算が返した列の長さがずれると、以下の

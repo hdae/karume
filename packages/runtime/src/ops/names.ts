@@ -226,6 +226,12 @@ export const LAYER_NORM_OP = "layer_norm";
  *   B·H の全バッチへ broadcast する。`[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 は
  *   **受理しない**（実行時マスクの需要が出た時に広げる — 欄の不存在が「語彙に無い」を構造で
  *   表す規律）。causal / dropout は依然として語彙に無い。
+ * - **states 形**（ADR 0067 決定 4 — 同一 op 名の契約拡張で、**欄の有無が形を判別する**）:
+ *   `states` 欄が `{ k, v }` のとき「過去分はスロットから・今 step の k/v は `ins` から」
+ *   読む autoregressive 形になる。ins は `[B,Hkv,M,D]`（M = q と共有する物理 chunk 次元）で、
+ *   **mask 入力は取らない**（causal 固定・述語計算で表す）。sliding は省略可能な attrs
+ *   `window`（欄の不存在 = 全 context）。欄が**無い**ノードは従来契約そのままで、既存資産・
+ *   既存門は 1 バイトも動かない。
  *
  * MUST: `scale` は **q と k の両方に掛かる（半スケール契約）**。torch の
  * `aten::_scaled_dot_product_attention_math` が `q *= √scale_factor; k *= √scale_factor` と
@@ -234,6 +240,23 @@ export const LAYER_NORM_OP = "layer_norm";
  * softmax → expand → bmm）とのビット同一が失われる（ADR 0023 の設計の核）。
  */
 export const ATTENTION_OP = "attention";
+/**
+ * 今 step の k / v を state スロットへ書く**単機能 effect op**（ADR 0067 決定 5）。
+ * `ins` は `[B,Hkv,M,D]` の 1 本・`states` 欄は `{ slot }` ちょうど・**出力は 0 本**
+ * （値を定義しない — ノード多出力一般化〈ADR 0068 決定 1〉の 0 本席の最初の入居者）。
+ *
+ * MUST: attention に内蔵しない（TVM 型を採らない）。単機能 op に閉じるからこそ
+ * ①full-write / padding 行 no-op（queryLength が切る — ADR 0066 決定 4）の検証が 1 op で済み
+ * ②attention 側は読み取り専用のままビット同一検証が単純で ③KV 共有層は「`state_append`
+ * ノードが無い」だけで表せる（ORT の kv_empty と同じ表現力を op の不在で得る）。
+ * MUST: `window` は**省略可能**（欄の不存在 = 全 context）。同一スロットに触れる全ノードで
+ * 値が一致することは宣言層（`validateGraphContracts`）が見る — 論理 col → 物理 row の写像は
+ * 読み書き同式 MUST（ADR 0067 決定 4）で、読み側だけ別式にすると沈黙誤読になる。
+ * MUST: 論理位置（pastLength / queryLength）を attrs に持たない。毎 step 変わる実行時スカラは
+ * context 所有の可変 uniform が運ぶ（ADR 0066 追記 4）。
+ */
+export const STATE_APPEND_OP = "state_append";
+
 export const RMS_NORM_OP = "rms_norm";
 export const SOFTMAX_OP = "softmax";
 /**

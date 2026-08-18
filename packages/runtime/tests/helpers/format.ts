@@ -68,7 +68,14 @@ export type GraphJson = {
   values: Record<string, { dtype: string; shape: (number | string)[] }>;
   /** 省略可能な state スロット節（ADR 0066 決定 2）— 既定のグラフは持たない。 */
   states?: Record<string, { dtype: string; shape: (number | string)[] }>;
-  nodes: { op: string; ins: string[]; outs: string[]; attrs: unknown }[];
+  nodes: {
+    op: string;
+    ins: string[];
+    outs: string[];
+    attrs: unknown;
+    /** state スロットの名前参照（ADR 0067 決定 4）— 既定のノードは持たない。 */
+    states?: Record<string, string>;
+  }[];
 };
 
 /** 最小の正常系グラフ: y = x·w + b（x: T×4 → y: T×3）。 */
@@ -94,6 +101,24 @@ export const baseGraph = (): GraphJson => ({
     { op: "add", ins: ["h", "b"], outs: ["y"], attrs: {} },
   ],
 });
+
+/**
+ * 宣言済みの各 state スロットへ、それを参照する最小の `state_append` ノードを足す
+ * （参照完全性 — ADR 0067 決定 4 / 5）。
+ *
+ * 宣言だけのグラフは「どのノードからも参照されない宣言」で落ちるので、**スロット宣言そのもの**
+ * を見たいテストはこれで参照側を用意する。パーサは shape も契約も見ない層なので、`ins` に
+ * 何を置くかは「定義済みの値名であること」しか効かない（形の検査は shape 計算 / 契約層の担当）。
+ */
+export const withStateReaders = (graph: GraphJson): GraphJson => {
+  const slots = Object.keys(graph.states ?? {});
+  if (slots.length === 0) return graph;
+  for (const slot of slots) {
+    graph.nodes.push({ op: "state_append", ins: ["x"], outs: [], attrs: {}, states: { slot } });
+  }
+  if (!graph.requires.ops.includes("state_append")) graph.requires.ops.push("state_append");
+  return graph;
+};
 
 /** baseGraph に対応する重みを積んだ正常系ファイル。 */
 export const baseModelBuffer = (

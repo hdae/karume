@@ -28,6 +28,7 @@ from karume.ir import (
     IR_FORMAT,
     IR_METADATA_KEY,
     IR_VERSION,
+    IrDim,
     IrGraph,
     IrInitializer,
     IrInput,
@@ -40,10 +41,12 @@ from karume.ops import (
     IO_DTYPES,
     M0_STORAGE_DTYPES,
     OP_CONTRACTS,
+    STATE_APPEND_OP,
     STRIDED_RANK_OPS,
     assert_node_contract,
     assert_strided_rank,
     resolve_node_dtypes,
+    state_window,
     sym_prefix_slice_attrs,
 )
 from karume.shapes import assert_graph_shapes, declared_shape
@@ -234,8 +237,9 @@ def _parse_state(value: Any, symbols: set[str], where: str) -> IrState:
 
     MUST: shape は**容量込みの具体形**なので数値次元は正整数（`values` の非負とは違う — 容量 0 の
     スロットは束縛できる実体を持たない）。rank は 1..MAX_STATE_RANK（容量軸を持たない rank 0 は
-    「容量込み」を満たせない）。記号次元は `symbols` 宣言済みならよく、束縛は従来どおり入力 shape の
-    次元位置から取る（_check_symbol_bindability — states は束縛源にならない）。
+    「容量込み」を満たせない）。記号次元は `symbols` 宣言済みならよく、**states の shape も
+    束縛点になる**（`createGenerationContext` が決める容量 — ADR 0066 追記 7。
+    _check_symbol_bindability）。
     """
     obj = _as_object(value, where)
     _check_keys(obj, ["dtype", "shape"], [], where)
@@ -280,6 +284,36 @@ def _parse_storage(value: Any, where: str) -> IrStorage:
             raise IrError(f"{where}.group_size: {raw} が安全整数 2^53−1 を超える")
         group_size = raw
     return IrStorage(dtype=dtype, scale=scale, group_size=group_size)
+
+
+def _parse_node_states(
+    obj: Mapping[str, Any], slots: Mapping[str, IrState], where: str
+) -> dict[str, str]:
+    """ノードの `states` 欄（ADR 0067 決定 4・TS 側 parseNodeStates の鏡像）。
+
+    ここで見るのは**グラフ単体で決まる 3 点**だけ: plain object であること・キーと値が空でない
+    文字列であること・値が `graph.states` で宣言済みのスロット名であること。
+
+    MUST: 未宣言スロットの参照は fail loudly。通すと「実体を持たない名前を読む」ノードが
+    Session 構築を抜け、確保も束縛もされないまま実行段で初めて落ちる（値側の前方参照拒否と
+    同じ層の規則）。
+
+    NOTE: キー集合そのもの（`{k,v}` ちょうど / `{slot}` ちょうど）は op 契約の担当
+    （ops.assert_node_contract）— パーサは op 語彙を知らない。
+    """
+    states: dict[str, str] = {}
+    if "states" not in obj:
+        return states
+    for key, value in _as_object(obj["states"], f"{where}.states").items():
+        _as_nonempty_str(key, f"{where}.states のキー")
+        slot = _as_nonempty_str(value, f"{where}.states['{key}']")
+        if slot not in slots:
+            raise IrError(
+                f"{where}.states['{key}']: state スロット '{slot}' が graph.states で"
+                "宣言されていない"
+            )
+        states[key] = slot
+    return states
 
 
 # ---- グラフ単体の規則 -----------------------------------------------------
@@ -353,13 +387,10 @@ def parse_ir_graph(text: str) -> IrGraph:
     for index, raw in enumerate(_as_array(root["nodes"], "graph.nodes")):
         where = f"graph.nodes[{index}]"
         obj = _as_object(raw, where)
-        _check_keys(obj, ["op", "ins", "outs", "attrs"], [], where)
-        outs = [
-            _as_nonempty_str(out, f"{where}.outs[{i}]")
-            for i, out in enumerate(_as_array(obj["outs"], f"{where}.outs"))
-        ]
-        if not outs:
-            raise IrError(f"{where}: outs が空（値を定義しないノードは静的 DAG に置けない）")
+        _check_keys(obj, ["op", "ins", "outs", "attrs"], ["states"], where)
+        # NOTE: `outs` の本数はここでは見ない（0 本 = 値を定義しない effect op が語彙に入った —
+        # ADR 0067 決定 5）。「0 本を許すのは契約が effect を宣言する op だけ」の執行点は契約層
+        # （assert_node_contract の出力数突合）で、パーサは本数に意味を与えない。
         nodes.append(
             IrNode(
                 op=_as_nonempty_str(obj["op"], f"{where}.op"),
@@ -367,15 +398,19 @@ def parse_ir_graph(text: str) -> IrGraph:
                     _as_nonempty_str(item, f"{where}.ins[{i}]")
                     for i, item in enumerate(_as_array(obj["ins"], f"{where}.ins"))
                 ],
-                outs=outs,
+                outs=[
+                    _as_nonempty_str(out, f"{where}.outs[{i}]")
+                    for i, out in enumerate(_as_array(obj["outs"], f"{where}.outs"))
+                ],
                 attrs=_as_object(obj["attrs"], f"{where}.attrs"),
+                states=_parse_node_states(obj, states, where),
             )
         )
 
-    _check_symbol_bindability(symbols, inputs)
+    _check_symbol_bindability(symbols, inputs, states, values)
     defined = _check_definitions(inputs, initializers, nodes, outputs)
     _check_declarations(inputs, initializers, values, nodes, defined)
-    _check_state_slots(states, values, defined)
+    _check_state_slots(states, values, defined, nodes)
     _check_required_ops(required_ops, nodes)
 
     return IrGraph(
@@ -389,18 +424,49 @@ def parse_ir_graph(text: str) -> IrGraph:
     )
 
 
-def _check_symbol_bindability(symbols: Sequence[str], inputs: Sequence[IrInput]) -> None:
-    """束縛は入力 shape の次元位置から直接取る（要素数からの逆算はしない）ため、
-    宣言されたシンボルは少なくとも 1 つの入力 shape の**次元位置に現れ**なければならない。
+def _symbols_in(shape: Sequence[IrDim]) -> set[str]:
+    """shape に現れるシンボル名（次元位置の出現のみ — 要素数からの逆算はしない）。"""
+    return {parse_dim(dim).sym for dim in shape if isinstance(dim, str)}
 
-    派生形（`2T` / `T+8`）でもよい — 1 次元 1 シンボルの一次式は実寸から解が一意に決まる
-    （ADR 0057・TS 側は `runtime/plan.ts` の `bindSymbols` が解く）。
+
+def _check_symbol_bindability(
+    symbols: Sequence[str],
+    inputs: Sequence[IrInput],
+    states: Mapping[str, IrState],
+    values: Mapping[str, IrValue],
+) -> None:
+    """宣言されたシンボルは**束縛点を持つ** MUST。束縛点は 2 つ（ADR 0066 追記 7）:
+
+    1. **入力 shape の次元位置**（run ごとの実寸から解く — TS 側 `runtime/plan.ts` の
+       `bindSymbols`）。派生形（`2T` / `T+8`）でもよい — 1 次元 1 シンボルの一次式は実寸から
+       解が一意に決まる（ADR 0057）。
+    2. **states の shape の次元位置**（`createGenerationContext(spec.bindings)` が決める KV 容量 —
+       context 生成時にユーザーが決める値なので、export 時定数に焼く形は ADR 0066 決定 3
+       〈静的物理格納〉と矛盾する）。
+
+    MUST: **states 専用記号（states にしか現れない記号）は値 shape に現れてはならない**
+    （追記 7）。通常値 shape の解決に効くのは入力由来の束縛だけなので、現れると実行時に必ず
+    束縛不能になる — 宣言の時点で落とす。
     """
-    bindable = {parse_dim(dim).sym for spec in inputs for dim in spec.shape if isinstance(dim, str)}
+    from_inputs: set[str] = set()
+    for spec in inputs:
+        from_inputs |= _symbols_in(spec.shape)
+    from_states: set[str] = set()
+    for slot in states.values():
+        from_states |= _symbols_in(slot.shape)
     for symbol in symbols:
-        if symbol not in bindable:
+        if symbol not in from_inputs and symbol not in from_states:
             raise IrError(
-                f"graph.symbols: '{symbol}' が入力 shape の次元位置に現れない — 束縛が取れない"
+                f"graph.symbols: '{symbol}' が入力 shape / states shape の次元位置に現れない"
+                " — 束縛が取れない"
+            )
+    for name, value in values.items():
+        for symbol in sorted(_symbols_in(value.shape)):
+            if symbol not in from_states or symbol in from_inputs:
+                continue
+            raise IrError(
+                f"graph.values['{name}']: states 専用記号 '{symbol}' が値 shape に現れる"
+                "（値 shape の解決に効くのは入力由来の束縛だけ — ADR 0066 追記 7）"
             )
 
 
@@ -480,7 +546,10 @@ def _check_declarations(
 
 
 def _check_state_slots(
-    states: Mapping[str, IrState], values: Mapping[str, IrValue], defined: set[str]
+    states: Mapping[str, IrState],
+    values: Mapping[str, IrValue],
+    defined: set[str],
+    nodes: Sequence[IrNode],
 ) -> None:
     """state スロット名の検査（TS 側 checkStateSlots の鏡像）。
 
@@ -490,8 +559,12 @@ def _check_state_slots(
     何も足さない。scale テンソルのキーを他 initializer の実体と衝突させない規則（ADR 0019）と
     同じ流儀。
 
-    NOTE: 「誰も参照しないスロット」は values の孤立宣言に相当するが、参照側の欄（ADR 0067 の
-    states 欄 / `state_append`）が未実装なので今は検出できない — 参照完全性の検査はその追加と同時。
+    **参照完全性**（ADR 0067 決定 4 / 5）: 宣言されたスロットは少なくとも 1 つのノードの
+    `states` 欄から参照される MUST。誰も参照しないスロットは values の孤立宣言と同じ穴で、
+    GenerationContext が確保だけして誰も読まない容量（KV なら数十 MiB 単位）が黙って残る。
+
+    MUST: 衝突検査を**先**に置く（値名と同名のスロットは参照の有無に関わらず取り違えなので、
+    「参照されていない」という別の診断に化けさせない）。
     """
     for name in states:
         if name in defined or name in values:
@@ -499,6 +572,10 @@ def _check_state_slots(
                 f"graph.states['{name}']: 値名と同名"
                 "（state スロットは値名前空間と別 — 取り違えを拒否する）"
             )
+    referenced = {slot for node in nodes for slot in node.states.values()}
+    for name in states:
+        if name not in referenced:
+            raise IrError(f"graph.states['{name}']: どのノードからも参照されない宣言")
 
 
 def _check_required_ops(required_ops: Sequence[str], nodes: Sequence[IrNode]) -> None:
@@ -552,6 +629,62 @@ def _assert_sym_prefix_slice(graph: IrGraph, node: IrNode, where: str) -> None:
             )
 
 
+def _show_window(touch: tuple[int, str, int | None]) -> str:
+    """`_assert_state_order` の診断片（`(nodes 添字, op 名, window)` → 表示形）。"""
+    index, op, window = touch
+    return f"nodes[{index}] ({op}) は {'宣言なし' if window is None else window}"
+
+
+def _assert_state_order(graph: IrGraph) -> None:
+    """state effect の順序（ADR 0067 決定 5b の②・TS 側 `runtime/plan.ts` の assertStateOrder の
+    鏡像）。
+
+    state 参照は**テンソルのデータ辺を張らない**ため DAG のトポロジ順では順序が決まらず、
+    契約は `nodes` **配列順**そのもの。束縛に依存しないので、スロットごとに 3 点を見る:
+
+    1. `state_append` は 1 スロットにつき**1 本まで**（1 step に 2 回書く形は ring の位置式が
+       二重に進み、読者が見る過去が step の途中で変わる）
+    2. append が在るなら**そのスロットに触れる最後のノード**（append より後に読者が居ると、
+       その読者は「今 step の k/v を過去として二重に読む」）
+    3. 同一スロットに触れる全ノードの `window` は**存在有無も値も一致**（論理 col → 物理 row の
+       写像は読み書き同式 MUST — ADR 0067 決定 4。読み側だけ別式にすると沈黙誤読）
+
+    MUST: fail loudly。3 点とも「順序 / 宣言の誤り」が例外ではなく**別の値**として出る種類の
+    破れなので、書き出しの時点でしか止められない。
+    """
+    touches: dict[str, list[tuple[int, str, int | None]]] = {}
+    for index, node in enumerate(graph.nodes):
+        if not node.states:
+            continue
+        # attrs の値域検査は assert_node_contract が済ませている（ここは引き直すだけ）。
+        window = state_window(node.attrs, f"nodes[{index}] ({node.op})")
+        for slot in node.states.values():
+            touches.setdefault(slot, []).append((index, node.op, window))
+    for slot, touched in touches.items():
+        appends = [entry for entry in touched if entry[1] == STATE_APPEND_OP]
+        if len(appends) > 1:
+            listed = ", ".join(f"nodes[{index}]" for index, _, _ in appends)
+            raise IrError(
+                f"state スロット '{slot}': {STATE_APPEND_OP} が {len(appends)} 本（{listed}）"
+                " — 1 step に 1 回まで（ADR 0067 決定 5b）"
+            )
+        last = touched[-1]
+        if len(appends) == 1 and last[1] != STATE_APPEND_OP:
+            raise IrError(
+                f"state スロット '{slot}': {STATE_APPEND_OP}（nodes[{appends[0][0]}]）より後に"
+                f"読者 nodes[{last[0]}] ({last[1]}) が居る"
+                "（append は当該スロットに触れる最後のノード MUST — ADR 0067 決定 5b）"
+            )
+        first = touched[0]
+        mismatch = next((entry for entry in touched if entry[2] != first[2]), None)
+        if mismatch is not None:
+            raise IrError(
+                f"state スロット '{slot}': attrs.window が食い違う"
+                f"（{_show_window(first)} / {_show_window(mismatch)}）"
+                " — 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）"
+            )
+
+
 def assert_runtime_support(graph: IrGraph) -> None:
     """M0 ランタイムが実行できる形かを突合する（packages/runtime/src/format/container.ts と同義）。
 
@@ -600,7 +733,14 @@ def assert_runtime_support(graph: IrGraph) -> None:
             dtype = _declared_dtype(graph, name)
             if dtype not in accept:
                 bad_dtypes[name] = dtype
-        unknown = sorted(key for key in node.attrs if key not in contract.attrs)
+        # MUST: 必須と省略可能の**和**で見る（ADR 0067 の `window`）。省略可能なぶんを落とすと、
+        # states 形の正しいグラフが「未実装 attrs」として capability 不足で拒否される
+        # （TS 側 RUNTIME_SUPPORT.attrKeys の和と同じ射影）。
+        unknown = sorted(
+            key
+            for key in node.attrs
+            if key not in contract.attrs and key not in contract.optional_attrs
+        )
         if unknown:
             bad_attrs.append(f"{where}: {', '.join(unknown)}")
 
@@ -628,7 +768,8 @@ def assert_runtime_support(graph: IrGraph) -> None:
 
 
 def assert_op_contracts(graph: IrGraph) -> None:
-    """毎ノードの契約検査（アリティ / 宣言出力数 / attrs スキーマ / 入出力 dtype 規則 / shape）。
+    """毎ノードの契約検査（アリティ / 宣言出力数 / attrs スキーマ / 入出力 dtype 規則 / shape）と、
+    ノード単体では決まらない規則（state effect の順序 — ADR 0067 決定 5b）。
 
     NOTE: attrs と dtype は assert_runtime_support も見るが層が違う — あちらは「モデル作者へ
     capability 不足を一度に列挙する門」、こちらは「対応表に載っている op が契約どおりに
@@ -654,6 +795,9 @@ def assert_op_contracts(graph: IrGraph) -> None:
             assert_strided_rank(len(declared_shape(graph, out)), f"出力 '{out}'", where)
         if contract.kind == "sym_prefix_slice":
             _assert_sym_prefix_slice(graph, node, where)
+    # state effect の順序は「ノード単体では決まらない」規則なので、全ノードの契約検査の後に
+    # 1 回だけ見る（TS 側 validateGraphContracts の並びと同じ）。
+    _assert_state_order(graph)
     # 出力 shape の突合は全ノードの宣言が揃ってから（shapes.py が契約の規則から独立に
     # 計算し、torch の meta 由来の宣言と食い違えば落とす）。
     assert_graph_shapes(graph)

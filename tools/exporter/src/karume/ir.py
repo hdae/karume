@@ -87,6 +87,10 @@ class IrNode:
     ins: list[str]
     outs: list[str]
     attrs: dict
+    #: state スロットの名前参照（ADR 0067 決定 4 — `ins` / `outs` と**別の欄**）。キーは op 契約が
+    #: 固定する固定語（`attention` の `k` / `v`・`state_append` の `slot`）で、値は
+    #: `graph.states` で宣言済みのスロット名。欄を持たないノードは空表。
+    states: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -94,6 +98,10 @@ class IrNode:
             "ins": list(self.ins),
             "outs": list(self.outs),
             "attrs": dict(self.attrs),
+            # MUST: 空の states は**書かない**（IrGraph.to_dict の states 節と同じ理由）。
+            # 常に出すと states を 1 本も持たない既存モデルのグラフ JSON がバイト単位で変わり、
+            # 配布物の sha 門が全部動く。
+            **({"states": dict(self.states)} if self.states else {}),
         }
 
 

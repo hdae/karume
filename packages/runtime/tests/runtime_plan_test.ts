@@ -371,3 +371,140 @@ Deno.test("cat の入力は 2 本以上で、3 本以上も契約検査を通る
     OpContractError,
   );
 });
+
+// ---- state 参照ノード（ADR 0067 決定 4 / 5 / 5b） --------------------------
+
+/**
+ * `kv` スロットを読む attention 1 本と書く `state_append` 1 本（発行順は決定 5b の
+ * 「全読者 → append」）。`extra` でノード列だけを差し替えて順序検査の変異を作る。
+ */
+const stateGraph = (
+  nodes?: GraphJson["nodes"],
+  states?: GraphJson["states"],
+): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["attention", "state_append"] },
+  symbols: ["M", "C"],
+  inputs: [
+    { name: "q", dtype: "f32", shape: [1, 8, "M", 4] },
+    { name: "k", dtype: "f32", shape: [1, 2, "M", 4] },
+    { name: "v", dtype: "f32", shape: [1, 2, "M", 4] },
+  ],
+  outputs: ["o"],
+  initializers: {},
+  values: { o: { dtype: "f32", shape: [1, 8, "M", 4] } },
+  states: states ?? {
+    "kv.k": { dtype: "f32", shape: [1, 2, "C", 4] },
+    "kv.v": { dtype: "f32", shape: [1, 2, "C", 4] },
+  },
+  nodes: nodes ?? [
+    {
+      op: "attention",
+      ins: ["q", "k", "v"],
+      outs: ["o"],
+      attrs: { scale: 0.5 },
+      states: { k: "kv.k", v: "kv.v" },
+    },
+    { op: "state_append", ins: ["k"], outs: [], attrs: {}, states: { slot: "kv.k" } },
+    { op: "state_append", ins: ["v"], outs: [], attrs: {}, states: { slot: "kv.v" } },
+  ],
+});
+
+/** 容量記号 `C` は入力に現れない（束縛点は createGenerationContext — ADR 0066 追記 7）。 */
+const stateShapes = (capacity = 16): ReadonlyMap<string, readonly number[]> =>
+  new Map([["kv.k", [1, 2, capacity, 4]], ["kv.v", [1, 2, capacity, 4]]]);
+
+Deno.test("state 参照グラフは契約検査を通り、スロット shape を渡せば計画できる", () => {
+  const graph = parse(stateGraph());
+  validateGraphContracts(graph);
+
+  const plan = planGraph(graph, { M: 3, C: 16 }, stateShapes());
+  assertEquals(plan.nodes[0].outputs.map((out) => out.name), ["o"]);
+  assertEquals(plan.nodes[0].outputs[0].shape, [1, 8, 3, 4]);
+  // effect op は出力列が空（`outs` が 0 本であることが計画にもそのまま出る）
+  assertEquals(plan.nodes[1].outputs, []);
+  assertEquals(plan.nodes[2].outputs, []);
+});
+
+Deno.test("スロット shape を渡さない計画は state 参照ノードで fail loudly", () => {
+  const graph = parse(stateGraph());
+  const error = assertThrows(
+    () => planGraph(graph, { M: 3, C: 16 }),
+    OpContractError,
+    "GenerationContext",
+  );
+  assert(error.message.includes("kv.k"), error.message);
+});
+
+// ADR 0067 決定 5b: state 参照はデータ辺を張らないので、順序の契約は nodes 配列順そのもの。
+Deno.test("同一スロットへの state_append は 1 step に 1 本まで", () => {
+  const nodes = stateGraph().nodes;
+  assertThrows(
+    () =>
+      validateGraphContracts(parse(stateGraph([
+        nodes[0],
+        nodes[1],
+        { op: "state_append", ins: ["v"], outs: [], attrs: {}, states: { slot: "kv.k" } },
+        nodes[2],
+      ]))),
+    ExecutionError,
+    "state_append が 2 本",
+  );
+});
+
+Deno.test("state_append より後に同じスロットの読者を置けない", () => {
+  const nodes = stateGraph().nodes;
+  const error = assertThrows(
+    () => validateGraphContracts(parse(stateGraph([nodes[1], nodes[2], nodes[0]]))),
+    ExecutionError,
+    "より後に読者",
+  );
+  // 「append より後に読者が居る」は**そのスロットに触れる並び**だけの話（他スロットの
+  // ノードが間に挟まっても順序は変わらない）
+  assert(error.message.includes("kv.k") || error.message.includes("kv.v"), error.message);
+});
+
+Deno.test("同一スロットに触れるノードの window は存在有無も値も一致する", () => {
+  const nodes = stateGraph().nodes;
+  const windowed = (window: number | undefined): GraphJson["nodes"] => [
+    {
+      ...nodes[0],
+      attrs: window === undefined ? { scale: 0.5 } : { scale: 0.5, window },
+    },
+    { op: "state_append", ins: ["k"], outs: [], attrs: { window: 8 }, states: { slot: "kv.k" } },
+    { op: "state_append", ins: ["v"], outs: [], attrs: { window: 8 }, states: { slot: "kv.v" } },
+  ];
+  // 読み側だけ window 宣言が無い（= 全 context を走査する）形は沈黙誤読になる
+  assertThrows(
+    () => validateGraphContracts(parse(stateGraph(windowed(undefined)))),
+    ExecutionError,
+    "attrs.window が食い違う",
+  );
+  // 値が違う形も同じ
+  assertThrows(
+    () => validateGraphContracts(parse(stateGraph(windowed(4)))),
+    ExecutionError,
+    "attrs.window が食い違う",
+  );
+  // 一致していれば通る
+  validateGraphContracts(parse(stateGraph(windowed(8))));
+});
+
+Deno.test("sliding の window はスロット容量を超えられない（読み書きの両側）", () => {
+  const nodes = stateGraph().nodes;
+  const windowed: GraphJson["nodes"] = [
+    { ...nodes[0], attrs: { scale: 0.5, window: 32 } },
+    { op: "state_append", ins: ["k"], outs: [], attrs: { window: 32 }, states: { slot: "kv.k" } },
+    { op: "state_append", ins: ["v"], outs: [], attrs: { window: 32 }, states: { slot: "kv.v" } },
+  ];
+  const graph = parse(stateGraph(windowed));
+  validateGraphContracts(graph);
+  // 容量 32 なら通り、16 では落ちる（宣言だけでは決まらない = 容量は context が決める）
+  planGraph(graph, { M: 3, C: 32 }, stateShapes(32));
+  assertThrows(
+    () => planGraph(graph, { M: 3, C: 16 }, stateShapes(16)),
+    OpContractError,
+    "スロット容量 16 を超える",
+  );
+});

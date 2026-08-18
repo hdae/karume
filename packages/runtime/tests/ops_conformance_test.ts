@@ -19,6 +19,7 @@ import {
   computeOutputShape,
   OP_CONTRACTS,
   OpContractError,
+  optionalAttrKeysOf,
   outputCountOf,
   resolveOpContract,
   WEIGHT_CHANNEL_AXES,
@@ -43,6 +44,10 @@ type OpEntry = {
    */
   readonly outDtypes: readonly Readonly<Record<string, string>>[] | undefined;
   readonly attrs: readonly string[];
+  /** 省略可能な attrs（ADR 0067 の `window`。持たない op では空）。 */
+  readonly optionalAttrs: readonly string[];
+  /** states 欄の契約（ADR 0067 決定 4 / 5。欄を持てない op では undefined）。 */
+  readonly states: { readonly keys: readonly string[]; readonly required: boolean } | undefined;
   /** 低精度格納が適格になる重みスロット（ADR 0018。持たない op では undefined）。 */
   readonly weightSlot: number | undefined;
   /** i8 の per-channel scale が乗る重みの軸（ADR 0019。持たない op では undefined）。 */
@@ -62,7 +67,11 @@ type ShapeCase = {
   readonly attrs?: Readonly<Record<string, unknown>>;
   readonly declared?: readonly IrDim[];
   readonly bindings: Readonly<Record<string, number>>;
-  /** **出力 slot 別**の shape の列（ADR 0068 決定 1 — 現状の op は全て長さ 1）。 */
+  /** ノードの states 欄（契約が固定するキー → スロット名。ADR 0067 決定 4）。 */
+  readonly states?: Readonly<Record<string, string>>;
+  /** 参照するスロットの容量込み具体形（スロット名 → shape）。 */
+  readonly stateShapes?: Readonly<Record<string, readonly IrDim[]>>;
+  /** **出力 slot 別**の shape の列（ADR 0068 決定 1 — `state_append` だけ空列）。 */
   readonly outs?: readonly (readonly IrDim[])[];
   readonly throws: boolean;
   readonly why: string;
@@ -145,6 +154,12 @@ const asOpEntry = (raw: unknown): OpEntry => {
   if (channelAxis !== undefined && typeof channelAxis !== "number") {
     throw new Error("fixture: channel_axis が数値でない");
   }
+  const states = raw["states"];
+  if (states !== undefined && !isRecord(states)) throw new Error("fixture: states が表でない");
+  const required = states === undefined ? undefined : states["required"];
+  if (states !== undefined && typeof required !== "boolean") {
+    throw new Error("fixture: states.required が真偽値でない");
+  }
   return {
     op: String(field(raw, "op")),
     arity,
@@ -163,6 +178,13 @@ const asOpEntry = (raw: unknown): OpEntry => {
       );
     }),
     attrs: strings(field(raw, "attrs"), "attrs"),
+    optionalAttrs: raw["optional_attrs"] === undefined
+      ? []
+      : strings(raw["optional_attrs"], "optional_attrs"),
+    states: states === undefined || typeof required !== "boolean" ? undefined : {
+      keys: strings(field(states, "keys"), "states.keys"),
+      required,
+    },
     weightSlot,
     channelAxis,
   };
@@ -201,6 +223,14 @@ const asShapeCase = (raw: unknown): ShapeCase => {
   if (attrs !== undefined && !isRecord(attrs)) {
     throw new Error(`fixture: ${op} の attrs がオブジェクトでない`);
   }
+  const states = raw["states"];
+  if (states !== undefined && !isRecord(states)) {
+    throw new Error(`fixture: ${op} の states が表でない`);
+  }
+  const stateShapes = raw["state_shapes"];
+  if (stateShapes !== undefined && !isRecord(stateShapes)) {
+    throw new Error(`fixture: ${op} の state_shapes が表でない`);
+  }
   return {
     op,
     ins: array(field(raw, "ins"), `${op}.ins`).map((shape, index) =>
@@ -209,6 +239,19 @@ const asShapeCase = (raw: unknown): ShapeCase => {
     attrs: attrs === undefined ? undefined : attrs,
     declared: declared === undefined ? undefined : dims(declared, `${op}.declared`),
     bindings,
+    states: states === undefined ? undefined : Object.fromEntries(
+      Object.entries(states).map(([key, slot]) => {
+        if (typeof slot !== "string") {
+          throw new Error(`fixture: ${op}.states[${key}] が文字列でない`);
+        }
+        return [key, slot];
+      }),
+    ),
+    stateShapes: stateShapes === undefined ? undefined : Object.fromEntries(
+      Object.entries(stateShapes).map((
+        [slot, shape],
+      ) => [slot, dims(shape, `${op}.state_shapes['${slot}']`)]),
+    ),
     outs: outs === undefined
       ? undefined
       : array(outs, `${op}.outs`).map((shape, index) => dims(shape, `${op}.outs[${index}]`)),
@@ -270,6 +313,23 @@ Deno.test("適合表のアリティ / スロット dtype / attrs キーが契約
       [...attrKeysOf(contract)].sort(),
       [...entry.attrs].sort(),
       `${entry.op}: attrs キー集合`,
+    );
+    // 省略可能 attrs（ADR 0067 の `window`）と states 欄の契約も片側だけ動くと
+    // 「エクスポータが書ける形をランタイムが拒否する」に直結するので表で固定する。
+    assertEquals(
+      [...optionalAttrKeysOf(contract)].sort(),
+      [...entry.optionalAttrs].sort(),
+      `${entry.op}: 省略可能 attrs キー集合`,
+    );
+    assertEquals(
+      contract.states === undefined ? undefined : {
+        keys: [...contract.states.keys].sort(),
+        required: contract.states.required,
+      },
+      entry.states === undefined
+        ? undefined
+        : { keys: [...entry.states.keys].sort(), required: entry.states.required },
+      `${entry.op}: states 欄の契約`,
     );
     const slots = contract.slotDtypes;
     assertEquals(slots.kind, entry.dtypes.kind, `${entry.op}: dtype 契約の種別`);
@@ -371,14 +431,19 @@ Deno.test("適合表の channel_axis が WEIGHT_CHANNEL_AXES と一致する", a
 
 Deno.test("適合表の attrs 値域を契約表の検査関数がそのとおりに判定する", async () => {
   const fixture = await loadFixture();
-  const declared = new Map(fixture.ops.map((entry) => [entry.op, entry.attrs]));
+  // 必須と省略可能を同じ土俵で見る（値域の正本は 1 本 — 省略可能だからといって値域が
+  // 緩んでよい理由は無い）。
+  const declared = new Map(
+    fixture.ops.map((entry) => [entry.op, [...entry.attrs, ...entry.optionalAttrs]]),
+  );
   for (const entry of fixture.attrValues) {
     const contract = resolveOpContract(entry.op);
     assert(
       declared.get(entry.op)?.includes(entry.attr) === true,
       `${entry.op}: attr '${entry.attr}' が ops 節に無い`,
     );
-    const check = contract.attrs[entry.attr];
+    const check = contract.attrs[entry.attr] ?? contract.optionalAttrs?.[entry.attr];
+    assert(check !== undefined, `${entry.op}: attr '${entry.attr}' の検査関数が契約表に無い`);
     for (const value of entry.accept) {
       check(value, `${entry.op}.${entry.attr}`);
     }
@@ -394,7 +459,7 @@ Deno.test("適合表の attrs 値域を契約表の検査関数がそのとお�
   // 値域を持つ attr は全て表に載っている（載せ忘れた attr は値域が無検証のまま残る）
   const covered = new Set(fixture.attrValues.map((entry) => `${entry.op}.${entry.attr}`));
   for (const entry of fixture.ops) {
-    for (const attr of entry.attrs) {
+    for (const attr of [...entry.attrs, ...entry.optionalAttrs]) {
       assert(covered.has(`${entry.op}.${attr}`), `${entry.op}.${attr} の値域が表に無い`);
     }
   }
@@ -411,6 +476,12 @@ Deno.test("適合表の出力 shape 規則を computeOutputShape がそのとお
         : resolveDims(testCase.declared, testCase.bindings),
       attrs: testCase.attrs,
       bindings: testCase.bindings,
+      states: testCase.states,
+      stateShapes: testCase.stateShapes === undefined ? undefined : new Map(
+        Object.entries(testCase.stateShapes).map((
+          [slot, shape],
+        ) => [slot, resolveDims(shape, testCase.bindings)]),
+      ),
     };
     if (testCase.throws) {
       assertThrows(

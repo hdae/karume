@@ -15,6 +15,7 @@ import {
   rmsNormEps,
   sliceAttrs,
   softmaxDim,
+  stateWindow,
   symPrefixSliceAttrs,
   topkK,
   upsampleBilinear2dAttrs,
@@ -71,6 +72,20 @@ export type ShapeContext = {
    * `toString` 等が素通りして以後の算術が NaN 化する — 横断の不変条件）。
    */
   readonly bindings?: Readonly<Record<string, number>>;
+  /**
+   * ノードの `states` 欄（{@link IrNode.states} — 契約が固定するキー → スロット名）。
+   * **非空であることが「states 形」の判別そのもの**（ADR 0067 決定 4 —「欄の有無が形を
+   * 判別する」）で、`attrs` と同じく「ノードの欄をそのまま渡す」側の文脈。
+   */
+  readonly states?: Readonly<Record<string, string>>;
+  /**
+   * 束縛解決済みのスロット shape（スロット名 → 容量込みの具体形）。
+   *
+   * MUST: states 参照ノードでは必須（無ければ fail loudly）。スロットの実体を確保するのは
+   * GenerationContext（ADR 0066 決定 1）なので、これが無い経路 = 1-shot 実行では state 参照
+   * ノードを実行できない — 黙って従来形として計算すると、過去 KV を読まない別の計算になる。
+   */
+  readonly stateShapes?: ReadonlyMap<string, readonly number[]>;
 };
 
 /**
@@ -109,10 +124,70 @@ const requireDeclared = (
  */
 const sole = (shape: number[]): number[][] => [shape];
 
+/** ノードが state スロットを参照しているか（欄の有無が形を判別する — ADR 0067 決定 4）。 */
+const referencesStates = (context: ShapeContext): boolean =>
+  context.states !== undefined && Object.keys(context.states).length > 0;
+
+/**
+ * `states` 欄のキーが指すスロットの**解決済み shape**を引く（ADR 0067 決定 4）。
+ *
+ * MUST: 解決済み shape が無い経路は fail loudly（{@link ShapeContext.stateShapes}）。
+ */
+const stateSlotShape = (
+  context: ShapeContext,
+  key: string,
+  where: string,
+): { readonly name: string; readonly shape: readonly number[] } => {
+  const states = context.states;
+  if (states === undefined || !Object.hasOwn(states, key)) {
+    throw new OpContractError(`${where}: states 欄に '${key}' が無い`);
+  }
+  const name = states[key];
+  const shape = context.stateShapes?.get(name);
+  if (shape === undefined) {
+    throw new OpContractError(
+      `${where}: state スロット '${name}' の shape が解決されていない` +
+        `（state 参照ノードの実行には GenerationContext が要る — ADR 0066 決定 1）`,
+    );
+  }
+  return { name, shape };
+};
+
+/**
+ * state スロットの物理形（ADR 0067 決定 4 の①②③）。スロットは **`[B, Hkv, C, D]` 固定**で、
+ * 今 step の chunk（`ins`）と B / Hkv / D が一致し、sliding（attrs `window`）では
+ * `window ≤ C` でなければならない。
+ *
+ * MUST: 通常値だけを見る shape 検査の**state 延長**としてここで落とす。スロット取り違え
+ * （別の層のスロットを参照した形）は容量が違えば OOB、同容量なら沈黙誤読になる。
+ * NOTE: full スロットの `pastLength + queryLength ≤ C` は実行時の論理長が要るので context 側
+ * （ADR 0067 決定 4 の④）— ここでは見られない。
+ */
+const assertStateSlotForm = (
+  slot: { readonly name: string; readonly shape: readonly number[] },
+  ins: readonly number[],
+  window: number | undefined,
+  where: string,
+): void => {
+  const show = `state スロット '${slot.name}' [${slot.shape.join(",")}] / 入力 [${ins.join(",")}]`;
+  if (slot.shape.length !== 4) {
+    throw new OpContractError(`${where}: ${show} — スロットは [B,Hkv,C,D] の rank-4 のみ`);
+  }
+  if (slot.shape[0] !== ins[0] || slot.shape[1] !== ins[1] || slot.shape[3] !== ins[3]) {
+    throw new OpContractError(`${where}: ${show} — スロットと入力の B / Hkv / D が不一致`);
+  }
+  if (window !== undefined && window > slot.shape[2]) {
+    throw new OpContractError(
+      `${where}: ${show} — attrs.window ${window} がスロット容量 ${slot.shape[2]} を超える`,
+    );
+  }
+};
+
 /**
  * 束縛解決済みの入力 shape から**出力 slot 順の shape 列**を計算する（ADR 0068 決定 1）。
  * 列の長さは契約が宣言する出力数（出力 dtype 写像の列長）と一致する — 2 本を返すのは
- * `topk`（値 + 添字 — ADR 0068 決定 3）だけで、他は全て 1 本。
+ * `topk`（値 + 添字 — ADR 0068 決定 3）だけ、**空列**は `state_append`（値を定義しない
+ * effect op — ADR 0067 決定 5）だけで、他は全て 1 本。
  */
 export const computeOutputShape = (
   found: OpContract,
@@ -605,6 +680,50 @@ export const computeOutputShape = (
       if (q[3] !== k[3] || q[3] !== v[3]) {
         throw new OpContractError(`${where}: attention の D（軸 3）が不一致 ${show}`);
       }
+      // states 形（ADR 0067 決定 4）。ここまでの head / D 規則は 2 形で共通で、以降が分岐する:
+      // 従来形は k/v の N（過去 + 現在の全長）を見る一方、states 形の ins は**今 step の
+      // chunk だけ**なので M が 3 者一致し、過去分はスロットの容量 C が持つ。
+      if (referencesStates(context)) {
+        // MUST: mask は取らない（causal 固定・述語計算 — mask tensor は実体化しない）。
+        // 契約層でも落ちるが、CPU 参照や適合表からの直呼びはここを通る。
+        if (mask !== undefined) {
+          throw new OpContractError(
+            `${where}: states 形の attention は mask を取らない（causal 固定 — ADR 0067 決定 4）` +
+              ` ${show} + mask [${mask.join(",")}]`,
+          );
+        }
+        // MUST: M は q / k / v で**完全一致**（今 step の chunk を共有する — 従来形の自由な
+        // N と違い、ここがずれた形は「別の step の k/v を混ぜた」IR にほかならない）。
+        if (k[2] !== q[2] || v[2] !== q[2]) {
+          throw new OpContractError(
+            `${where}: states 形の attention は M（軸 2）が q / k / v で一致する ${show}`,
+          );
+        }
+        // 空軸の softmax は amax の identity が定義できない（従来形の N=0 拒否と同じ理由）。
+        if (q[2] < 1) {
+          throw new OpContractError(
+            `${where}: states 形の attention は M が 0 の chunk を扱えない ${show}`,
+          );
+        }
+        const window = stateWindow(context.attrs ?? {}, where);
+        const kSlot = stateSlotShape(context, "k", where);
+        const vSlot = stateSlotShape(context, "v", where);
+        // MUST: k / v スロットは**同形**（容量の違うスロットを組にすると、片方だけ先に
+        // wrap する ring になって値が静かにずれる）。
+        if (
+          kSlot.shape.length !== vSlot.shape.length ||
+          kSlot.shape.some((dim, axis) => dim !== vSlot.shape[axis])
+        ) {
+          throw new OpContractError(
+            `${where}: attention の k / v スロットが同形でない（'${kSlot.name}' [${
+              kSlot.shape.join(",")
+            }] / '${vSlot.name}' [${vSlot.shape.join(",")}]）`,
+          );
+        }
+        assertStateSlotForm(kSlot, k, window, where);
+        assertStateSlotForm(vSlot, v, window, where);
+        return sole([...q]);
+      }
       if (k[2] !== v[2]) {
         throw new OpContractError(`${where}: attention の N（k / v の軸 2）が不一致 ${show}`);
       }
@@ -630,6 +749,19 @@ export const computeOutputShape = (
         }
       }
       return sole([...q]);
+    }
+    // 値を定義しない effect op（ADR 0067 決定 5）。`sole` を通らず**空列**を返すことが
+    // そのまま「出力 0 本」の宣言になる（多出力アームが列を組んで返すのと同じ流儀）。
+    case "stateAppend": {
+      const x = inputShapes[0];
+      if (x.length !== 4) {
+        throw new OpContractError(
+          `${where}: state_append の入力は [B,Hkv,M,D] の rank-4 のみ: [${x.join(",")}]`,
+        );
+      }
+      const window = stateWindow(context.attrs ?? {}, where);
+      assertStateSlotForm(stateSlotShape(context, "slot", where), x, window, where);
+      return [];
     }
     case "embedding": {
       const [weight, index] = inputShapes;

@@ -43,6 +43,7 @@ export {
   SAFE_SOFTMAX_OP,
   SLICE_OP,
   SOFTMAX_OP,
+  STATE_APPEND_OP,
   SYM_PREFIX_SLICE_OP,
   TOPK_OP,
   UNARY_OPS,
@@ -73,6 +74,7 @@ export {
   scalarParamCount,
   sliceAttrs,
   softmaxDim,
+  stateWindow,
   symPrefixSliceAttrs,
   topkK,
   upsampleBilinear2dAttrs,
@@ -99,6 +101,7 @@ export {
   describeArity,
   IO_DTYPES,
   OP_CONTRACTS,
+  optionalAttrKeysOf,
   outputCountOf,
   outputDtypeOf,
   resolveNodeDtypes,
@@ -107,7 +110,13 @@ export {
   scalarParamValues,
   slotDtypesOf,
 } from "./ops/contracts.ts";
-export type { OpContract, OpKind, RuntimeCapabilities, SlotDtypes } from "./ops/contracts.ts";
+export type {
+  OpContract,
+  OpKind,
+  RuntimeCapabilities,
+  SlotDtypes,
+  StateFieldContract,
+} from "./ops/contracts.ts";
 
 export { broadcastShapes, computeOutputShape, numel } from "./ops/shapes.ts";
 export type { ShapeContext } from "./ops/shapes.ts";

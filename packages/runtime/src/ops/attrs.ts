@@ -372,6 +372,30 @@ export const attentionScale = (
 ): number =>
   assertFiniteAttr(attrValue(attrs, "scale"), `${where} の attrs.scale`, "attention の scale");
 
+/**
+ * state 参照ノードの sliding window（ADR 0067 決定 4 / 5）。**省略可能な attr** で、
+ * 欄の不存在が「全 context」を意味する。宣言されたら 1 以上の整数。
+ *
+ * MUST: 既定値で補完しない。「欄が無い = 全 context」と「window = 容量」は別の宣言で、
+ * 補完すると sliding 層（Gemma 4 E2B の 28 層）と full 層（7 層）の取り違えが値にしか出ない。
+ * MUST: 同一スロットに触れる全ノードで**存在有無も値も一致**する（読み書き同式 MUST —
+ * 検査は `runtime/plan.ts` の `validateGraphContracts`。読み側だけ別式にすると沈黙誤読）。
+ */
+export const STATE_WINDOW_ATTRS: AttrSchema = {
+  window: (value, where) => {
+    assertIntegerAttr(value, where, 1);
+  },
+};
+
+/** state 参照ノードの `window`（宣言が無ければ `undefined` = 全 context）。 */
+export const stateWindow = (
+  attrs: Readonly<Record<string, unknown>>,
+  where: string,
+): number | undefined =>
+  Object.hasOwn(attrs, "window")
+    ? assertIntegerAttr(attrs["window"], `${where} の attrs.window`, 1)
+    : undefined;
+
 export const EMBEDDING_ATTRS: AttrSchema = {
   /**
    * torch の `padding_idx`。**受理するが forward には効かない**（勾配で padding 行を更新

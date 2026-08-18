@@ -74,10 +74,13 @@ Deno.test("golden fixtures が 1 件以上あり、全件がテストとして�
  * `topk` は契約表にあるが **torch から出せない**（ADR 0068 追記）: aten ハンドラが無く、
  * 多出力 aten のタプル meta + `operator.getitem` のスロット結線が新機構として残っている
  * （sampling の実需まで先送り — 実測で止まるのは `aten.topk.default` ではなく getitem）。
+ * `state_append` も torch から出せない（ADR 0067 決定 5）: **aten に対応物が無い** effect op で、
+ * 発行するのは decode グラフ台本（実装波）だけ。加えて state スロットの実体は
+ * GenerationContext が持つので、1-shot の golden 配布形では実行そのものが成立しない。
  * MUST: 下の突合は**両方向**（この列挙と実際の未被覆集合が完全一致）で見る。golden が topk を
  * 踏み始めた日にもここが赤くなり、席を外すことを強制する。
  */
-const OPS_WITHOUT_GOLDEN: readonly string[] = ["topk"];
+const OPS_WITHOUT_GOLDEN: readonly string[] = ["state_append", "topk"];
 
 Deno.test("全 golden の requires.ops が実行可能な op 集合を覆う", async () => {
   const covered = new Set<string>();
