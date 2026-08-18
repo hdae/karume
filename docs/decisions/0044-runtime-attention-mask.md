@@ -103,7 +103,8 @@ fail loudly だったこの形は正規の受理形になった（実測 =
 
 決定 3 の「融合 attention へ全 −inf 行を与えるのは契約違反」は **states 形（ADR
 [0067](0067-autoregressive-attention-vocabulary.md) 決定 4 — `states` 欄つき attention）には
-適用されない**。states 形では padding 行が窓から落ちる空行が**正規に**出るため、行統計は
-「identity −inf + 空行は `(0, 0)` を書く」構成で空行 → 出力厳密 0 を構造的に保証する
-（決定 6 — 有限 sentinel での代用は MUST NOT）。2 つの契約は同一 op 名の別形として並立し、
+適用されない**。states 形では padding 行が窓から落ちる空行が**正規に**出るため、空行 →
+出力厳密 0 を構造的に保証する（決定 6 — 有限 sentinel での代用は MUST NOT。保証の実体は
+「空行 ⊂ pad 行」に対する pad 行の 0 書き — ADR 0066 追記 8。行統計の「identity −inf +
+空行 `(0,0)`」ガードは防御専用）。2 つの契約は同一 op 名の別形として並立し、
 欄の有無が形を判別する。
