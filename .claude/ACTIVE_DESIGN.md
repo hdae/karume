@@ -28,8 +28,14 @@
   attention + `state_append`（ADR 0067 決定 4〜7）— 契約層 TS/Py・カーネル族 4 本・実行統合
   （`run` 第 3 引数 generation）・分離焼き込み（ADR 0066 決定 5）・受入テスト群（帯 mask
   交差オラクル・0066 受入②・0067 受入⑤）。0 本席 / states 専用記号束縛 / C-2 結線点 5 件も
-  全消化。**次 = 波 E（decode 台本 + MiniCPM5 greedy 検収）**。送り: `enqueue` の generation
-  面は波 E 判断・L8 fake-device 注入面は保留継続。
+  全消化。**波 E 済（2026-08-18・4 コミット `4c0a587`..`ca15c06`）**: core 手術ヘルパ
+  `karume/states.py`（export 後の attention→states 形書換 — Gemma 4 でも使う汎用機構）+
+  models `generateGreedy`（固定 chunk prefill / decode M=1）+ MiniCPM5 decode 台本
+  （RoPE 表引き swap・`outputs/series/minicpm5-1b-decode/` 実走済み・絶対位置上限 = 表 512 行）+
+  実 GPU 検収門（**greedy 3 ケース × K=16 の token id 列が torch と厳密一致**・prefill logits
+  maxAbs 7.439e-5 = 1-shot 門と同値・census 全 :gqa）。`enqueue` の generation 面は
+  **設けない**裁定で確定（limitations — speculative 実需で再訪）。**次 = 波 F（w4 —
+  ADR 0069・Phase 0 fake-quant sweep から）**。送り: L8 fake-device 注入面は保留継続。
 
 ## Open decisions
 

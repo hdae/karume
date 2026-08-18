@@ -44,8 +44,16 @@ GenerationContext = 第 5 寿命クラス + 可変 uniform + poison/rewind/devic
 bindSymbols 免除・`22b5f64` 分離焼き込み〈ADR 0066 決定 5 = 世代識別子 + rebind 診断〉・
 `2d1cc60` 受入テスト群〈帯 mask 交差オラクル・0066 受入②・0067 受入⑤・容量非依存・
 KV 共有層〉。C-2 の結線点 5 件と 0 本席は全消化。**送り**: `enqueue` の generation 面は
-波 E 判断・L8 fake-device 注入面は保留継続）** → E = decode 台本 +
-greedy 検収 →
+波 E 判断・L8 fake-device 注入面は保留継続）** → **E = decode 台本 + greedy 検収（済 2026-08-18 — `4c0a587` core 手術ヘルパ
+`karume/states.py`〈attention→states 形書換 + append 挿入 + 残骸刈り・sliding / KV 共有 /
+数値容量まで被覆〉・`75afc26` models `generateGreedy`〈固定 chunk prefill + decode M=1・
+narrow interface DI〉・`40b9475` decode 台本〈RoPE 表引き swap・greedy golden K=16 +
+margin 門 1e-2 — capital-ja は 0.0077 で除外・series 実走済み〉・`ca15c06` 検収門
+〈token id 列厳密一致 3 ケース・prefill maxAbs 7.439e-5 = 1-shot 門と同値・census
+QK/PV 全数 :gqa・cachedPlans=2 安定〉。**送りの裁定**: `enqueue` の generation 面は
+**設けない**〈limitations に理由 — token feedback の逐次律速でフェンス束ねの利得が
+立たない。speculative の実需で再訪〉・decode 系列の絶対位置上限 = RoPE 表 512 行
+〈series README〉）** →
 F = w4（Phase 0 sweep は A 完了後から並行可）→ G = shard + admission → H = Gemma 4 E2B
 検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで
 先送り / 検収は固定 token id 列の parity（tokenizer・models パイプライン本格化は波外）。

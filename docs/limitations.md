@@ -642,7 +642,9 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 - **sliding スロットを 1 本でも含む GenerationContext の `rewind` は全拒否**（ADR
   [0066](decisions/0066-generation-context-state-slots.md) 追記 2 — ring はエビクト後に物理配置と
   論理範囲が一致せず、左詰め compaction を持たない。緩和は compaction 実装と対）。
-- **`enqueue` は generation 面を持たない**（state 参照グラフは導出で fail loudly）。decode
-  ループの enqueue 化は実需（波 E 以降）での判断。
+- **`enqueue` は generation 面を持たない**（state 参照グラフは導出で fail loudly）。裁定済み
+  （2026-08-18 波 E）: decode ループは前 step の token 読み戻しが次 step の入力になる逐次律速で、
+  フェンスを束ねる利得が原理的に立たない（1 step 内の dispatch 束ねは `run` の submit 区間が
+  既に持つ）。speculative decoding 等の「読み戻し無しで複数 step を積める」実需が出た時に再訪。
 - state スロットの dtype は f32 のみ（f16 は席予約 — ADR 0066 追記 5）・複数シーケンス /
   batch>1 の生成・paged KV は ADR 0066 決定 8 のスコープ外。
