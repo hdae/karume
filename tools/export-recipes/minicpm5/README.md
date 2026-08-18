@@ -10,6 +10,7 @@ only.
 
 Two scripts read the same checkpoint: `export.py` emits the 1-shot (prefill-equivalent) graph, and
 `export_decode.py` emits the states-form chunk graph that the generation path is accepted against.
+A third, `sweep_w4.py`, is a measurement harness rather than an exporter — it emits no series.
 
 ## What `export.py` emits
 
@@ -99,6 +100,17 @@ sequence; `capital-ja` is excluded from the greedy cases because its step 5 marg
 (measured 2026-08-18). The first continuation token is additionally checked against the 1-shot
 recipe's expectation table, which is what ties the two graphs together.
 
+## What `sweep_w4.py` measures
+
+The Phase 0 fake-quant sweep for ADR
+[0069](../../../docs/decisions/0069-packed-w4-storage.md) (packed 4-bit storage): quality under
+`group_size` {32, 64, 128} × symmetric / asymmetric on this checkpoint. The reference sequences are
+the wave-E greedy records (`greedy.<case>.safetensors`), so no tokenizer is involved, and the
+baseline run has to reproduce them exactly before any quantized configuration is measured. It
+touches no runtime code and writes no files — stdout is two markdown tables meant to be pasted into
+`docs/research/`. The asymmetric column keeps its zero-point continuous, so it is the upper bound
+of what a stored `zero_point` companion could recover, not a storable form (ADR 0069 decision 3).
+
 ## Requirements
 
 The weights go under `inputs/minicpm5/MiniCPM5-1B/` (see
@@ -112,6 +124,7 @@ container of roughly the same multiple.
 cd tools/export-recipes
 uv run --with 'transformers==5.14.1' python -m minicpm5.export
 uv run --with 'transformers==5.14.1' python -m minicpm5.export_decode
+uv run --with 'transformers==5.14.1' python -m minicpm5.sweep_w4
 ```
 
 `transformers` is pinned to 5.14.1 for the same reason as DeBERTa and EmbeddingGemma (a change in
