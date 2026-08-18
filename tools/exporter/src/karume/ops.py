@@ -385,7 +385,15 @@ def _assert_integer_attr(value: Any, where: str, minimum: int) -> int:
     MUST: 安全整数の上限も見る（TS 側は `Number.isSafeInteger` で暗黙にこの上限を持つ）。
     Python の int は任意精度なので、上限を書かないと「エクスポータは書けるがランタイムが
     受理しない attr 値」が作れる — 受理集合は両側で同じでなければならない。
+    MUST: JSON の `1.0` / `1e0` は int へ正規化する（`verify._parse_shape` の次元と同族の
+    非対称）。TS 側は JSON.parse が単一の number を返すので「整数値の float」という区別が
+    無く（`Number.isSafeInteger(1.0)` は true）、Python が float を丸ごと拒むと
+    **ランタイムが読める graph をエクスポータの検証だけが読めない**乖離になる。非整数値・
+    非有限値の float は `is_integer()` が False（`inf.is_integer()` / `nan.is_integer()` とも
+    False）なので、下の共通の判定でそのまま落ちる。
     """
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
     if (
         isinstance(value, bool)
         or not isinstance(value, int)

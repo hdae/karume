@@ -61,8 +61,12 @@ type StateModel = {
   readonly heads: number;
   readonly kvHeads: number;
   readonly depth: number;
-  /** スロットの行容量。記号 `"C"` にすると `createGenerationContext(bindings)` が決める。 */
-  readonly capacity: number | "C";
+  /**
+   * スロットの行容量。記号 `"C"`（states 専用記号）にすると `createGenerationContext(bindings)`
+   * だけが決める。記号 `"M"` は**入力 shape にも現れる記号**で、束縛点が 2 つある形になる
+   * （ADR 0066 追記 7 — 2 つの束縛点が割れていないことを実行時に照合する）。
+   */
+  readonly capacity: number | "C" | "M";
   /** `W`（省略 = 全 context）。 */
   readonly window?: number;
 };
@@ -484,6 +488,106 @@ Deno.test({
 });
 
 /**
+ * **進行中 run のリース**（波 D-7）。
+ *
+ * run は頭で捕捉した `pastLength` で uniform を書き・dispatch 数を算出し・成功時にその値を
+ * 基準に進める。途中で `rewind` が論理長を動かすと「GPU が読んだ P」と「進行の基準にした P」が
+ * 分裂し、例外も NaN も出ないまま KV の論理位置だけがずれる。リースは `Session.run` の
+ * **同期区間**で立つので、`run()` を await しない並びでも捕まえられる（本体でリースを取ると
+ * マイクロタスク 1 段のぶんだけ窓が開く）。
+ */
+Deno.test({
+  name: "進行中の generation run がある間の rewind は fail loudly（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    const context = await session.createGenerationContext({ chunkLength: 1 });
+    const state = newOracle(FULL, 8);
+    try {
+      await assertStep(session, context, FULL, 8, state, 1, 1, 0, "decode 1");
+      await assertStep(session, context, FULL, 8, state, 1, 1, 17, "decode 2");
+      assertEquals(context.pastLength, 2);
+
+      // **await しない**まま rewind を撃つ（本体でリースを取る実装ではここが素通りする）。
+      const inputs = stepInputs(FULL, 1, 29);
+      const running = runStep(session, context, FULL, inputs, 1, 1);
+      const rejected = assertThrows(() => context.rewind(0), ExecutionError);
+      assert(rejected.message.includes("進行中の generation run"), rejected.message);
+
+      // run 自体は無傷（rewind の拒否が run を巻き添えにしない）。
+      const actual = await running;
+      const expected = advanceOracle(FULL, 8, state, inputs, 1, 1);
+      const report = compareTensors(
+        { dtype: "f32", data: actual },
+        { dtype: "f32", data: expected },
+        STATE_TOLERANCE,
+      );
+      assertEquals(report.pass, true, `リース中の run: ${formatAllclose(report)}`);
+      assertEquals(context.pastLength, 3);
+
+      // 対照: 決着後の rewind は通る（リースがちゃんと返っている = 永久拒否になっていない）。
+      context.rewind(1);
+      assertEquals(context.pastLength, 1);
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **dispose の 2 段化**（波 D-7）。
+ *
+ * 同期に立つのは 1 段目（新規受付の終了）だけで、内部面の遮断は Session チェーンに積んだ破棄
+ * 本体が走る 2 段目。破棄本体は先行 run の**後**に走るので、`run(); context.dispose();` の
+ * 非 await 並びは Session の `run(); session.dispose();` と同じ意味論になる（受理済み run は
+ * 完走し、その後で実体が返る）。1 段で閉じる実装ではここで run が「dispose 済み」で落ちる。
+ */
+Deno.test({
+  name: "dispose は新規受付だけを同期に閉じ、受理済み run は完走する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    const context = await session.createGenerationContext({ chunkLength: 1 });
+    const state = newOracle(FULL, 8);
+    try {
+      await assertStep(session, context, FULL, 8, state, 1, 1, 0, "decode 1");
+      await assertStep(session, context, FULL, 8, state, 1, 1, 11, "decode 2");
+      assertEquals(context.pastLength, 2);
+
+      // **await しない**まま dispose。受理済み run は past=2 の形で最後まで走り切る。
+      const inputs = stepInputs(FULL, 1, 23);
+      const running = runStep(session, context, FULL, inputs, 1, 1);
+      const disposing = context.dispose();
+      const actual = await running;
+      const expected = advanceOracle(FULL, 8, state, inputs, 1, 1);
+      const report = compareTensors(
+        { dtype: "f32", data: actual },
+        { dtype: "f32", data: expected },
+        STATE_TOLERANCE,
+      );
+      assertEquals(report.pass, true, `dispose と並んだ run: ${formatAllclose(report)}`);
+      await disposing;
+
+      // 1 段目の効き: 利用者面は dispose の**呼び出し時点**から閉じている。
+      assertThrows(() => context.pastLength, ExecutionError, "dispose 済み");
+      // 新規 run は admission で拒否（チェーンへ積む前 = 同期区間の判定）。
+      const rejected = await assertRejects(
+        () => runStep(session, context, FULL, stepInputs(FULL, 1, 41), 1, 1),
+        ExecutionError,
+      );
+      assert(rejected.message.includes("dispose 済み"), rejected.message);
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
  * 行ブロックの**強制分割 parity**（ADR 0067 決定 7 / ADR 0060 と同じ流儀）。
  *
  * 既定の枚数は device の `maxStorageBufferBindingSize` から静的に決まるので、上限に余裕のある
@@ -596,36 +700,89 @@ Deno.test({
   },
 });
 
+/**
+ * 実行形の門（ADR 0066 決定 4 — 固定長 chunk / decode の 2 本だけ）。
+ *
+ * `M ∈ {chunkLength, 1}` を実行時に課すようになった（波 D-7）ので、`queryLength` の上限は
+ * `Q ≤ M` の 1 本に**畳まれている**: `M = chunkLength` なら `Q ≤ M` が `Q ≤ chunkLength` を
+ * 含意し、`M = 1` なら `Q = 1` を含意する。つまり `Session.run` 経由で `Q > chunkLength` だけを
+ * 単独で踏む形は**構造的に作れない**（作るには M ∉ {chunkLength, 1} が要り、それは先に落ちる）。
+ * `GenerationContext` 側の `queryLength ≤ chunkLength` 検査は内部面の防波堤として残っており、
+ * 直接駆動する門は tests/gpu_generation_context_test.ts が持つ（二重簿記にしない）。
+ */
 Deno.test({
-  name: "queryLength は M / chunkLength / 正整数の 3 つで拒否される（実 GPU）",
+  name: "実行形は固定長 chunk と decode の 2 本だけ・queryLength は M / 正整数で拒否（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
-    // chunkLength=2 に対し M=4 の chunk を渡せるので、2 つの上限を別々に踏める。
+    // chunkLength=2 に対し M=2（prefill 形）と M=1（decode 形）の 2 本だけが通る。
     const context = await session.createGenerationContext({ chunkLength: 2 });
     try {
-      // ① Q > M（宣言 shape の外 — 導出相が集めた chunkRows が見る）
+      // ① Q > M（decode 形の宣言 shape の外 — 導出相が集めた chunkRows が見る）
       const overRows = await assertRejects(
         () => runStep(session, context, FULL, stepInputs(FULL, 1, 0), 1, 2),
         ExecutionError,
       );
       assert(overRows.message.includes("物理 chunk 行数"), overRows.message);
 
-      // ② Q > chunkLength（context の計画時定数 — writeLengths が見る）
+      // ② Q > M（prefill 形 — chunkLength の上限もこの 1 本に畳まれている）
       const overChunk = await assertRejects(
-        () => runStep(session, context, FULL, stepInputs(FULL, 4, 0), 4, 3),
+        () => runStep(session, context, FULL, stepInputs(FULL, 2, 0), 2, 3),
         ExecutionError,
       );
-      assert(overChunk.message.includes("chunkLength"), overChunk.message);
+      assert(overChunk.message.includes("物理 chunk 行数"), overChunk.message);
 
       // ③ Q = 0（「何も進めない run」— 進行と物理内容の対応が観測できなくなる）
       const zero = await assertRejects(
-        () => runStep(session, context, FULL, stepInputs(FULL, 4, 0), 4, 0),
+        () => runStep(session, context, FULL, stepInputs(FULL, 2, 0), 2, 0),
         ExecutionError,
       );
       assert(zero.message.includes("queryLength"), zero.message);
 
+      // ④ M ∉ {chunkLength, 1}: 任意の M を通すと M の種類ぶん別鍵の計画が増え、LRU 4 を
+      //    汚して decode のホットパスが静かに再導出へ落ちる（ADR 0066 決定 4 の
+      //    「PreparedPlan は 2 本が定常」）。
+      for (const chunkRows of [3, 4]) {
+        const wrongForm = await assertRejects(
+          () => runStep(session, context, FULL, stepInputs(FULL, chunkRows, 0), chunkRows, 1),
+          ExecutionError,
+        );
+        assert(wrongForm.message.includes("固定 chunk 契約"), wrongForm.message);
+      }
+
+      assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
+
+      // 対照: 2 本の実行形はそのまま通る（門が「何でも赤くする」形になっていない裏）。
+      const state = newOracle(FULL, 8);
+      await assertStep(session, context, FULL, 8, state, 2, 2, 71, "prefill 形（M=chunkLength）");
+      await assertStep(session, context, FULL, 8, state, 1, 1, 83, "decode 形（M=1）");
+      assertEquals(context.pastLength, 3);
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/** 新規の拒否形の追加検査（chunkLength=4 に M=2 / M=3 — decode 形の 1 とも一致しない）。 */
+Deno.test({
+  name: "chunkLength と 1 のどちらでもない M は fail loudly（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    try {
+      for (const chunkRows of [2, 3]) {
+        const error = await assertRejects(
+          () => runStep(session, context, FULL, stepInputs(FULL, chunkRows, 0), chunkRows, 1),
+          ExecutionError,
+        );
+        assert(error.message.includes(`物理 chunk 行数 ${chunkRows}`), error.message);
+        assert(error.message.includes("chunkLength 4"), error.message);
+      }
       assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
     } finally {
       await context.dispose();
@@ -699,6 +856,45 @@ Deno.test({
   },
 });
 
+/**
+ * **両方に現れる記号**の照合（ADR 0066 追記 7 の「効く範囲の分担」の実行時執行）。
+ *
+ * スロット容量に入力と同じ記号 `M` を使うと、束縛点が 2 つになる: 入力 shape（run —
+ * `bindSymbols`）と `spec.bindings`（context）。割れたまま走ると「確保容量は 4・計画と dispatch は
+ * 3」のような分裂が例外も警告も無く成立するので、エンコード前に落とす。
+ */
+Deno.test({
+  name: "states と入力の両方に現れる記号は 2 つの束縛点で一致しないと fail loudly（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const shared: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: "M" };
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, shared);
+    // 容量 M=4 で確保した context（chunkLength も 4 = prefill 形の M）。
+    const context = await session.createGenerationContext({ chunkLength: 4, bindings: { M: 4 } });
+    try {
+      // 割れた形: run の入力 shape が M=3 を解決する（context は 4 で確保済み）。
+      const split = await assertRejects(
+        () => runStep(session, context, shared, stepInputs(shared, 3, 0), 3, 3),
+        ExecutionError,
+      );
+      assert(split.message.includes("記号 'M'"), split.message);
+      assert(split.message.includes("4"), split.message);
+      assert(split.message.includes("3"), split.message);
+      assertEquals(context.pastLength, 0, "拒否された run は進めない");
+
+      // 対照: 一致していれば通る（門が「常に赤い」形になっていない裏）。
+      const state = newOracle(shared, 4);
+      await assertStep(session, context, shared, 4, state, 4, 4, 13, "M=4 で一致");
+      assertEquals(context.pastLength, 4);
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
 Deno.test({
   name: "state 参照グラフを generation 無しで run すると fail loudly（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -734,11 +930,13 @@ const internals = (context: GenerationContext) => context[RUNTIME_INTERNAL];
 /**
  * poison の結線（ADR 0066 追記 3）。
  *
- * 決定的な失敗注入として、**論理長を u32 上限の直前まで進めてから** state を書く run を 1 本
- * 通す。dispatch は全て成功して submit されるが、成功後の `advance` が u32 の上限で落ちるので、
+ * 決定的な失敗注入として、**論理長を u32 上限まで進めてから** state を書く decode 形の run を
+ * 1 本通す。dispatch は全て成功して submit されるが、成功後の `advance` が u32 の上限で落ちるので、
  * 「state を submit した run が例外で終わる」形になる — スナップショット比較が働けば context は
  * poison され、働かなければ「物理 ring だけ進んだ context」が正常値を返し続ける。
  *
+ * NOTE: 走らせるのは **M=1 の decode 形**（固定 chunk 契約で `M ∈ {chunkLength, 1}` — 大きな
+ * `chunkLength` は「手動 advance の 1 回で u32 上限まで飛ばす」ために要るだけ）。
  * NOTE: これが踏むのは判定の結線であって、GPU 側の失敗（device 消失・validation）そのものでは
  * ない。そちらの注入面は波 C の保留（L8 fake device）待ち。
  */
@@ -752,12 +950,12 @@ Deno.test({
     const session = await stateSession(gpu, SLIDING);
     const context = await session.createGenerationContext({ chunkLength: 0xffffffff });
     try {
-      internals(context).advance(0xffffffff - 1);
-      assertEquals(context.pastLength, 0xfffffffe);
+      internals(context).advance(0, 0xffffffff);
+      assertEquals(context.pastLength, 0xffffffff);
 
-      const inputs = stepInputs(SLIDING, 2, 0);
+      const inputs = stepInputs(SLIDING, 1, 0);
       const error = await assertRejects(
-        () => runStep(session, context, SLIDING, inputs, 2, 2),
+        () => runStep(session, context, SLIDING, inputs, 1, 1),
         ExecutionError,
       );
       assert(error.message.includes("u32 の上限"), error.message);

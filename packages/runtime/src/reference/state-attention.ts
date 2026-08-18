@@ -14,9 +14,10 @@
  *
  * MUST: 空行（述語を満たす col が 1 本も無い行）と述語外の寄与は**厳密 0**（tolerance ではなく
  * 厳密比較で見る門の相手 — ADR 0067 決定 6）。
- * MUST: pad 行（`row ≥ queryLength`）も**計算して返す**（値は契約上無意味だが、出力は
- * full-write される — ADR 0066 追記 6）。逆に `state_append` は先頭 `queryLength` 行しか
- * 書かない（スロットは full-write 対象外）。
+ * MUST: pad 行（`row ≥ queryLength`）は**厳密 0 を書く**（出力は full-write されるが、
+ * ADR 0066 追記 6 の「値が契約上無意味」を 0 で固定した — GPU 側は pad 行の live 走査を
+ * 丸ごと省く形でこれを満たす。空行 ⊂ pad 行なので、空行 → 0 はこの規約が包含する）。逆に
+ * `state_append` は先頭 `queryLength` 行しか書かない（スロットは full-write 対象外）。
  */
 
 import { stateColumnBase, stateLiveColumns, stateSliding } from "../kernels/state-attention.ts";
@@ -104,6 +105,7 @@ const slotRow = (window: number, col: number): number => stateSliding(window) ? 
  *
  * 述語は**両側**（causal `col ≤ P + row` AND sliding `col ≥ max(0, P + row − W + 1)`）。
  * 空行は出力が厳密 0（行 max が −inf のときの構造的な 0 — ADR 0067 決定 6）。
+ * pad 行（`row ≥ query`）も厳密 0（`out` の 0 初期化のまま — モジュール doc の値契約）。
  */
 export const referenceStateAttention = (input: StateAttentionRefInput): RefTensor => {
   assertShape(input);
@@ -124,14 +126,16 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
   for (let plane = 0; plane < batch * heads; plane += 1) {
     // kv 平面は**整数除算**（`z / r = b·Hkv + h/r` — GPU の `wid.z / r` と同じ恒等式）
     const kvPlane = Math.floor(plane / repeat);
-    for (let row = 0; row < chunkRows; row += 1) {
+    // MUST: 走るのは有効行だけ（pad 行は 0 初期化のまま = GPU の ③ が書く厳密 0 と同じ値）。
+    for (let row = 0; row < query; row += 1) {
       const qBase = (plane * chunkRows + row) * depth;
       const limit = past + row;
       // ① S（述語外は −inf。live の全列を埋める = GPU が S へ書く範囲と同じ）
       for (let cl = 0; cl < live; cl += 1) {
         const col = base + cl;
+        // 下限は GPU 側（`in_window`）と同じ `limit − col < W` の形（u32 の巻き戻り安全形）
         const inWindow = col <= limit &&
-          (!stateSliding(window) || col + window > limit);
+          (!stateSliding(window) || limit - col < window);
         if (!inWindow) {
           scores[cl] = Number.NEGATIVE_INFINITY;
           continue;

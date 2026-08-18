@@ -356,22 +356,16 @@ const oneShotSession = (gpu: GpuContext, model: StateModel): Promise<Session> =>
  * 実証する。実測の効きは 0.054〜2.12 で、この幅の 1.8e4〜7e5 倍。
  *
  * NOTE: 幅の値そのものは**余裕でしかない**。参照機の実測は 4 系列 20 step すべて
- * `maxAbs = 0`（= 両経路がビット同一）で、丸め差は 1 度も観測されていない
- * （{@link CROSS_OBSERVED_ABS}）。「縮約順が違うから誤差が出るはず」という着手時の想定は実測に
- * 反証された — 遮蔽列の寄与が厳密 0（`exp(-3e38 − max)` も `0 · v` も）で、有効列の並びと
- * D 方向の縮約順が両族で一致しているため。
+ * `maxAbs = 0`（= 両経路がビット同一）で、丸め差は 1 度も観測されていない。「縮約順が違うから
+ * 誤差が出るはず」という着手時の想定は実測に反証された — 遮蔽列の寄与が厳密 0
+ * （`exp(-3e38 − max)` も `0 · v` も）で、有効列の並びと D 方向の縮約順が両族で一致しているため。
+ * MUST: その「ビット同一」を**門に焼かない**（波 D-7 で `worstAbs <= 0` の assert を撤去し、
+ * 実測最悪値は stdout へ出すだけにした）。fma の使い方はドライバ依存で、別機では正常に丸め差が
+ * 出る — 機材依存のビット挙動を可搬な門にすると、正しい実装がその機でだけ赤くなる
+ * （golden io のバイト突合を参照環境専用に分けた 2026-08-16 の裁定と同じ教訓）。判定は
+ * {@link CROSS_TOLERANCE} + 故障注入の検出力マージンに一本化する。
  */
 const CROSS_TOLERANCE: Tolerance = { atol: 3e-6, rtol: 0 };
-
-/**
- * 実測の最悪 abs（参照機・4 系列 20 step の全数）。
- *
- * **回帰ガード**であって受入判定ではない: 判定は {@link CROSS_TOLERANCE} の側で、こちらは
- * 「幅の内側で誤差が育っていないか」を見る。ここだけが赤くなったら、どちらかの族の縮約構造が
- * 変わった合図なので、**値を上げる前に幅の根拠を導出し直す**こと（他機で丸め差が出るのは
- * 正常 — この門が走るのは実 GPU のある環境だけで、そこでの前後比較として意味がある）。
- */
-const CROSS_OBSERVED_ABS = 0;
 
 type CrossSeries = {
   readonly name: string;
@@ -500,15 +494,12 @@ Deno.test({
           worstAbs = Math.max(worstAbs, report.maxAbsError);
         });
       }
-      // 許容幅の根拠（{@link CROSS_TOLERANCE}）が実測から乖離していないこと。緩む方向へ動いたら
-      // 「幅の中に隠れる誤り」の余地が広がっているので、幅ごと見直す。
-      assert(
-        worstAbs <= CROSS_OBSERVED_ABS,
-        `交差突合の実測最悪 abs ${worstAbs} が根拠値 ${CROSS_OBSERVED_ABS} を超えた（幅の再導出が要る）`,
-      );
     } finally {
       gpu.destroy();
     }
+    // 実測最悪値は**診断として出すだけ**（判定は CROSS_TOLERANCE 側 — 上の doc）。参照機では
+    // 0（両族ビット同一）が出るが、fma の使い方はドライバ依存なので他機の非ゼロは正常。
+    console.log(`[states cross-oracle] maxAbs=${worstAbs}`);
   },
 });
 
@@ -554,6 +545,8 @@ const PAD_CAPACITY = 8;
 const PAD_MODEL: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: PAD_CAPACITY };
 /** pad ありの物理 chunk 行数（`M = 8` — 有効は先頭 Q 行だけ）。 */
 const PAD_WIDE_ROWS = 8;
+/** pad なし側の prefill 形の物理 chunk 行数（`M = Q = 3`）。 */
+const PAD_TIGHT_ROWS = 3;
 
 /**
  * `M` 行の入力を作る（先頭 `query` 行は「論理内容」・残りは pad）。
@@ -596,16 +589,20 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, PAD_MODEL);
-    // 3 本の context を同じ Session で回す。chunkLength は 3 本とも同じ（pad の有無は物理 chunk
-    // 行数 M の違いであって、context の計画時定数の違いではない）。
+    // 3 本の context を同じ Session で回す。pad の有無は物理 chunk 行数 M の違いなので、
+    // 固定 chunk 契約（`M ∈ {chunkLength, 1}` — ADR 0066 決定 4）の下では **chunkLength も
+    // 別**になる（`tight` は M=Q=3 の prefill 形 = chunkLength 3）。主張（KV バイト同一）は
+    // 同じ Session を跨いだ context 間の比較なので、そのまま成立する。
     const [wide, tight, garbage] = await Promise.all([
       session.createGenerationContext({ chunkLength: PAD_WIDE_ROWS }),
-      session.createGenerationContext({ chunkLength: PAD_WIDE_ROWS }),
+      session.createGenerationContext({ chunkLength: PAD_TIGHT_ROWS }),
       session.createGenerationContext({ chunkLength: PAD_WIDE_ROWS }),
     ]);
     try {
       // 2 step 回す（2 本目は過去ありの形 — 論理長が進んだ後も同じ 2 点が成り立つこと）。
-      for (const [index, query] of [3, 2].entries()) {
+      // 1 本目は prefill 形（tight は M=Q=3）・2 本目は decode 形（tight は M=Q=1）で、
+      // どちらの実行形でも同じ 2 点が成り立つことを併せて見る。
+      for (const [index, query] of [PAD_TIGHT_ROWS, 1].entries()) {
         const salt = 11 + index * 37;
         const wideOut = (await runStep(
           session,
@@ -681,7 +678,7 @@ Deno.test({
         assertBitsEqual(valid(garbageOut, PAD_WIDE_ROWS), tightBits, `${label}: 出力 / pad にゴミ`);
         assertEquals(wide.pastLength, tight.pastLength, `${label}: 論理長が pad の有無で違う`);
       }
-      assertEquals(tight.pastLength, 5);
+      assertEquals(tight.pastLength, PAD_TIGHT_ROWS + 1);
     } finally {
       for (const context of [wide, tight, garbage]) await context.dispose();
       await session.dispose();
@@ -735,29 +732,28 @@ Deno.test({
           .filter((row) => isEmptyRow(past, 1, window ?? 0, row));
         // MUST: 空行が実在すること（この形で 0 本なら門ごと空振り）。
         assertEquals(empties, [2, 3], `step ${index}: 空行の想定が崩れている`);
+        // MUST: 空行は pad 行（`row ≥ Q`）の**部分集合**（Q=1 なので pad は 1,2,3）。波 D-7 で
+        // 「空行 → 厳密 0」は「pad 行 → 厳密 0」が構造的に包含する形になったので、包含が崩れて
+        // いないことも併せて見る（valid 行は causal 自己参照で必ず非空）。
+        assertEquals(empties.filter((row) => row < 1), [], `step ${index}: 空行が valid 行に出た`);
         for (let head = 0; head < heads; head += 1) {
-          for (const row of empties) {
+          // pad 行（空行を含む）は厳密 0（ADR 0067 受入条件⑤ / ADR 0066 追記 6 の値契約）。
+          for (let row = 1; row < chunkRows; row += 1) {
             for (let d = 0; d < depth; d += 1) {
               const value = out[(head * chunkRows + row) * depth + d];
               assertEquals(
                 Object.is(value, 0),
                 true,
-                `step ${index}: 空行 (head ${head}, row ${row}, d ${d}) が厳密 0 でない（${value}）`,
+                `step ${index}: pad 行 (head ${head}, row ${row}, d ${d}) が厳密 0 でない（${value}）`,
               );
             }
           }
-          // 対照: 空でない行は非ゼロ（「全部 0 を書く実装」がこの門を通らないことの裏）。
-          for (let row = 0; row < chunkRows; row += 1) {
-            if (empties.includes(row)) continue;
-            const slice = out.subarray(
-              (head * chunkRows + row) * depth,
-              (head * chunkRows + row + 1) * depth,
-            );
-            assert(
-              slice.some((value) => Math.abs(value) > 1e-3),
-              `step ${index}: 非空行 (head ${head}, row ${row}) まで ~0`,
-            );
-          }
+          // 対照: **valid 行**は非ゼロ（「全部 0 を書く実装」がこの門を通らないことの裏）。
+          const slice = out.subarray(head * chunkRows * depth, (head * chunkRows + 1) * depth);
+          assert(
+            slice.some((value) => Math.abs(value) > 1e-3),
+            `step ${index}: valid 行 (head ${head}, row 0) まで ~0`,
+          );
         }
         // 全出力に NaN が 1 つも無い（空行の構成が「0 ガード」で、`exp(-inf − (-inf))` へ
         // 落ちていないことの直接の裏 — ADR 0067 決定 6）。

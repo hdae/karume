@@ -160,8 +160,15 @@ const bind = (
     entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })),
   });
 
-/** ①QK が S へ書く前に埋める毒値（読者が live の外を読んだら amax がこれに支配される）。 */
-export const STATE_S_POISON = 1e30;
+/**
+ * ①QK が S へ書く前に埋める毒値（読者が live の外を読んだら amax がこれに支配される）。
+ *
+ * MUST: **f32 で厳密に表せる値**（2 の冪）。`1e30` のような十進リテラルは Float32Array へ
+ * 入れた時点で丸められ、読み戻した値との `===` 比較が**常に false** になる — 「毒値が残って
+ * いないこと」を見る門が丸ごと空振りする（値の大きさは tolerance を軽く超えれば足りるので、
+ * 厳密比較できる側を採る）。
+ */
+export const STATE_S_POISON = 2 ** 100;
 
 export type StateRunResult = {
   /** `[B,H,M,D]`。 */
@@ -233,13 +240,17 @@ export const runStateAttention = async (
       const dispatchGeometry = {
         batchHeads,
         rowsBlock: block,
+        rowOffset,
         depth: spec.depth,
         window: spec.window,
       };
       const limit = device.limits.maxComputeWorkgroupsPerDimension;
       const params = track(uniformBuffer(device, stateAttentionParams(geometry)));
       const statsParams = track(
-        uniformBuffer(device, stateStatsParams(batchHeads * block, colCap, spec.window)),
+        uniformBuffer(
+          device,
+          stateStatsParams(batchHeads, block, rowOffset, colCap, spec.window),
+        ),
       );
       // MUST: ブロックごとに毒値へ戻す（前ブロックの S が残っていると、live 範囲を書き切らない
       // 誤りが「前ブロックの値」で塗り潰されて検出できない）
@@ -259,7 +270,7 @@ export const runStateAttention = async (
       pass.dispatchWorkgroups(qkGroups[0], qkGroups[1], qkGroups[2]);
       pass.setPipeline(st);
       pass.setBindGroup(0, bind(device, st, [statsParams, scores, stats, lengths]));
-      const statsGroups = stateStatsWorkgroups(dispatchGeometry, limit, spec.name);
+      const statsGroups = stateStatsWorkgroups(dispatchGeometry, spec.query, limit, spec.name);
       pass.dispatchWorkgroups(statsGroups[0], statsGroups[1], statsGroups[2]);
       pass.setPipeline(pv);
       pass.setBindGroup(0, bind(device, pv, [params, scores, stats, insV, slotV, out, lengths]));

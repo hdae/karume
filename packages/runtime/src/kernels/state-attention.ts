@@ -52,8 +52,24 @@
  *
  * 出力行 `row`（= `row_offset` + 局所行）に対し `col ≤ P + row`（causal）AND sliding のとき
  * `col ≥ max(0, P + row − W + 1)`。**上限だけの実装は禁止** — W=4 で row 1 が 5 個の key を
- * 見る沈黙混入になる。下限は u32 の引き算を避けて `col + W > P + row` の形で持つ
- * （{@link stateWindowFn} — 同値変形: `col ≥ P+row−W+1 ⟺ col+W−1 ≥ P+row ⟺ col+W > P+row`）。
+ * 見る沈黙混入になる。下限は `(P + row) − col < W` の形で持つ（{@link stateWindowFn} —
+ * 同値変形: `col ≥ limit−W+1 ⟺ limit−col ≤ W−1 ⟺ limit−col < W`。引き算は causal 上限
+ * `col ≤ limit` が**短絡してから**評価されるので u32 で巻き戻らない）。
+ *
+ * ## 有効行と pad 行（仕事量は Q に比例する — ADR 0066 決定 3 / 追記 1 の訂正式）
+ *
+ * 物理 chunk は `M` 行だが、有効データは先頭 `Q` 行の compact-prefix（ADR 0066 追記 6）。
+ * 行ブロック `[row_offset, row_offset + rows_block)` の**有効行数**は
+ * `clamp(Q − row_offset, 0, rows_block)`（{@link stateEffectiveRows}）で、
+ *
+ * - **①QK / ②stats は有効行だけを覆う**（dispatch 数もカーネルの行範囲も同じ 1 つの式から出る —
+ *   ホスト側が幾何の純関数・WGSL 側が {@link stateEffectiveRowsWgsl} の写し）。有効行 0 の
+ *   ブロックはホスト算出が 0 を返し、dispatch そのものが積まれない。
+ * - **③PV は宣言 shape の全 M 行を書く**（full-write 不変条件は不変）が、**pad 行は live を
+ *   1 列も走査せず全 D に厳密 `0.0` を書いて返す**。空行（述語を満たす col が 1 本も無い行）は
+ *   **pad 行の部分集合**（valid 行は causal 自己参照 `col = P + row` を必ず含むので非空）なので、
+ *   この 0 書きが空行 → 0（ADR 0067 決定 6）を**構造的に包含**し、同時に「非有限な V が
+ *   `0 · NaN` で空行出力を NaN 化する」残穴も閉じる。② の空行ガードは**防御として残す**。
  *
  * ## 空行 → 0 の構成（ADR 0067 決定 6）
  *
@@ -206,12 +222,34 @@ fn live_columns(past: u32, query: u32) -> u32 {
 /**
  * 述語（`limit = P + row`）。causal 上限に sliding の下限を **AND する MUST**。
  *
- * 下限は `col + W > limit`（`col ≥ limit − W + 1` の u32 安全形）。`limit − W + 1` を直接
- * 計算すると `limit < W−1` でアンダーフローし、巨大な下限になって全列が落ちる。
+ * 下限は `limit − col < W`（`col ≥ limit − W + 1` の u32 安全形）。
+ *
+ * MUST: **引き算は `limit − col` の側**（`col + W > limit` にしない）。WGSL の `&&` は短絡なので
+ * 先行する `col <= limit` が真のときしか評価されず、`limit − col` は決して巻き戻らない。逆に
+ * `col + W` は **P が u32 の上限近くまで進んだ生成で加算が巻き戻り**、causal 対角（`col = limit`）
+ * まで窓外と判定して行が静かに空になる。`limit − W + 1` を直接計算する形も
+ * `limit < W−1` でアンダーフローするので採らない。
  */
 const stateWindowFn = (sliding: boolean): string =>
   `fn in_window(col: u32, limit: u32) -> bool {
-  return col <= limit${sliding ? " && col + params.window > limit" : ""};
+  return col <= limit${sliding ? " && (limit - col) < params.window" : ""};
+}`;
+
+/**
+ * 行ブロック内の**有効行数**を論理長から出す（{@link stateEffectiveRows} の WGSL 側の写し）。
+ *
+ * MUST: ホスト（dispatch 数の算出）と WGSL（行範囲の切り方）は**同じ 1 つの式**から出る。
+ * ずれると ①② が書く行と ③ が pad と見なす行が食い違い、未書込みの S / stats を読む沈黙誤値に
+ * なる（例外も NaN も出ない）。
+ * MUST: 引き算はアンダーフローを避けて分岐で切る（`query - row_offset` は u32 で巻き戻る）。
+ * NOTE: 3 カーネルとも params の欄名を `rows_block` / `row_offset` で揃えてあるので、この
+ * 1 文字列をそのまま共有できる。
+ */
+const stateEffectiveRowsWgsl = `fn effective_rows(query: u32) -> u32 {
+  if (query <= params.row_offset) {
+    return 0u;
+  }
+  return min(params.rows_block, query - params.row_offset);
 }`;
 
 /**
@@ -273,6 +311,8 @@ ${stateLiveWgsl(sliding)}
 
 ${stateWindowFn(sliding)}
 
+${stateEffectiveRowsWgsl}
+
 ${stateScoreFn("score_slot", "slot_k")}
 
 ${stateScoreFn("score_ins", "ins_k")}
@@ -284,8 +324,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let local_row = gid.y;
   let cl = gid.x;
   // 端数タイルの空振り。live より右（[live, col_cap)）は残骸のまま残すのが正で、
-  // 読者（②③）が live で切ることと対になっている
-  if (local_row >= params.rows_block || cl >= live) {
+  // 読者（②③）が live で切ることと対になっている。行は**有効行まで**（pad 行の S は
+  // 誰も読まない — ③ が 0 を書いて返す）ので、仕事量が Q に比例する
+  if (local_row >= effective_rows(lengths.query) || cl >= live) {
     return;
   }
   let z = gid.z;
@@ -316,12 +357,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
  *
  * | binding | 資源                                        |
  * | ------- | ------------------------------------------- |
- * | 0       | `Params`（uniform — 下の 4 語だけの別 struct）|
+ * | 0       | `Params`（uniform — 下の 6 語だけの別 struct）|
  * | 1       | `s`（読み）                                 |
- * | 2       | `stats` `[rows, 2]`（書き）                 |
+ * | 2       | `stats` `[B·H·rows_block, 2]`（書き）       |
  * | 3       | `Lengths`（uniform）                        |
  *
- * MUST: `rows` は `B·H·rows_block`（S の行数）。`col_cap` は**ストライド**で、走査は live まで。
+ * MUST: 覆うのは**有効行だけ**（`B·H × effective_rows` 本）。統計の書き先は S と同じ
+ * `z · rows_block + 局所行` で、pad 行のぶんは書かれないまま残る（読者が居ない — ③ は pad 行で
+ * `stats` を 1 語も読まずに 0 を書く）。
+ * MUST: `col_cap` は**ストライド**で、走査は live まで。
  * NOTE: `max` は NaN 伝播を保証しない（softmax / reduce.ts と同じ既知の乖離）。
  */
 export const stateStatsWgsl = (sliding: boolean): string =>
@@ -329,7 +373,9 @@ export const stateStatsWgsl = (sliding: boolean): string =>
     sliding ? ", sliding window" : ""
   })
 struct Params {
-  rows: u32,
+  batch_heads: u32,
+  rows_block: u32,
+  row_offset: u32,
   col_cap: u32,
   window: u32,
   neg_inf: u32,
@@ -342,6 +388,8 @@ ${STATE_LENGTHS_STRUCT}
 
 ${stateLiveWgsl(sliding)}
 
+${stateEffectiveRowsWgsl}
+
 var<workgroup> scratch: array<f32, ${STATE_STATS_WORKGROUP_SIZE}>;
 
 @compute @workgroup_size(${STATE_STATS_WORKGROUP_SIZE})
@@ -353,8 +401,13 @@ fn main(
   let lid = lid3.x;
   let neg_inf = bitcast<f32>(params.neg_inf);
   let live = live_columns(lengths.past, lengths.query);
-  var row = wid.x;
-  while (row < params.rows) {
+  // 有効行は各 z 平面の**前詰め** rows 本。total = 0 ならループへ入らないので rows での
+  // 除算・剰余は 0 除算にならない（ホストも 0 なら dispatch を積まない）
+  let rows = effective_rows(lengths.query);
+  let total = params.batch_heads * rows;
+  var index = wid.x;
+  while (index < total) {
+    let row = (index / rows) * params.rows_block + index % rows;
     let base = row * params.col_cap;
 
     // ① 行の最大値。identity は **-inf**（有限 sentinel は MUST NOT — ADR 0067 決定 6）
@@ -412,7 +465,7 @@ fn main(
     }
     // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
     workgroupBarrier();
-    row = row + nwg.x;
+    index = index + nwg.x;
   }
 }
 `;
@@ -434,7 +487,8 @@ fn main(
  *
  * MUST: 出力は `row_offset` からの `rows_block` 行**全て**を書く（pad 行〈`row ≥ Q`〉も
  * 通常出力としては書かれる — ADR 0066 追記 6 の「不定 = 値が契約上無意味」であって未書込み
- * ではない）。
+ * ではない）。ただし pad 行は **live を 1 列も走査せず厳密 `0.0`** を書く（① ② が有効行しか
+ * 覆わないので S / stats が居ない + 仕事量を Q に比例させる + 空行 → 0 を構造的に包含する）。
  */
 export const statePvWgsl = (sliding: boolean, gqa: boolean): string =>
   `// karume attention_state_pv (states 形の O = P @ V, f32${sliding ? ", sliding window" : ""}${
@@ -454,6 +508,8 @@ ${stateSlotRowWgsl(sliding)}
 
 ${stateLiveWgsl(sliding)}
 
+${stateEffectiveRowsWgsl}
+
 @compute @workgroup_size(${STATE_ATTENTION_TILE_X}, ${STATE_ATTENTION_TILE_M})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let d = gid.x;
@@ -461,10 +517,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (d >= params.depth || local_row >= params.rows_block) {
     return;
   }
+  let z = gid.z;
+  let at = (z * params.chunk_rows + params.row_offset + local_row) * params.depth + d;
+  // pad 行（row ≥ Q）: live を走査せず**厳密 0** を書いて返す（full-write は保つ = ADR 0066
+  // 追記 6 の「値が契約上無意味」を 0 で固定）。空行 ⊂ pad 行なので ADR 0067 決定 6 の
+  // 「空行 → 厳密 0」はこの分岐が構造的に包含し、非有限 V による 0·NaN の穴も同時に閉じる
+  if (local_row >= effective_rows(lengths.query)) {
+    out[at] = 0.0;
+    return;
+  }
   let past = lengths.past;
   let live = live_columns(past, lengths.query);
   let base_col = column_base(past);
-  let z = gid.z;
   let kv_plane = ${kvPlaneWgsl(gqa)};
   let s_row = z * params.rows_block + local_row;
   let s_base = s_row * params.col_cap;
@@ -483,7 +547,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     acc = acc + p * value;
   }
-  out[(z * params.chunk_rows + params.row_offset + local_row) * params.depth + d] = acc;
+  out[at] = acc;
 }
 `;
 
@@ -594,27 +658,39 @@ export const stateAttentionParams = (
 };
 
 /**
- * ② の uniform（`{rows, col_cap, window, neg_inf}` — 16 バイトちょうど）。
+ * ② の uniform（`{batch_heads, rows_block, row_offset, col_cap, window, neg_inf}` の 6 語 —
+ * uniform struct の整列で 32 バイト確保する）。
  *
- * MUST: `rows` は S の行数（`B·H·rows_block`）そのもの。①③ の `rows_block` から導けるが、
- * ② は z 軸を持たない（行方向 1 次元の grid-stride）ので、畳んだ値をここで受ける。
+ * MUST: `B·H` と `rows_block` を**畳まずに**受ける（① ③ と同じ 2 軸）。畳んだ 1 語では
+ * `z · rows_block + 局所行` へ戻せず、有効行の前詰めから S / stats の行を引けない。
  */
 export const stateStatsParams = (
-  rows: number,
+  batchHeads: number,
+  rowsBlock: number,
+  rowOffset: number,
   colCap: number,
   window: number,
 ): Uint32Array<ArrayBuffer> => {
-  assertU32Params("attention_state_stats params", { rows, col_cap: colCap, window });
-  if (rows < 1 || colCap < 1) {
+  assertU32Params("attention_state_stats params", {
+    batch_heads: batchHeads,
+    rows_block: rowsBlock,
+    row_offset: rowOffset,
+    col_cap: colCap,
+    window,
+  });
+  if (batchHeads < 1 || rowsBlock < 1 || colCap < 1) {
     throw new CodegenError(
-      `attention_state_stats params: rows / col_cap は正整数（${rows} / ${colCap}）`,
+      `attention_state_stats params: batch_heads / rows_block / col_cap は正整数` +
+        `（${batchHeads} / ${rowsBlock} / ${colCap}）`,
     );
   }
-  const params = new Uint32Array(4);
-  params[0] = rows;
-  params[1] = colCap;
-  params[2] = window;
-  params[3] = STATE_NEG_INF_BITS;
+  const params = new Uint32Array(8);
+  params[0] = batchHeads;
+  params[1] = rowsBlock;
+  params[2] = rowOffset;
+  params[3] = colCap;
+  params[4] = window;
+  params[5] = STATE_NEG_INF_BITS;
   return params;
 };
 
@@ -631,12 +707,32 @@ export const stateColumnBase = (window: number, past: number): number =>
 export const stateLiveColumns = (window: number, past: number, query: number): number =>
   past - stateColumnBase(window, past) + query;
 
-/** 論理長の値域門（搬送先は u32・`Q ≥ 1` は `GenerationContext` の契約と同じ）。 */
-const assertLengths = (where: string, past: number, query: number): void => {
-  assertU32Params(where, { past, query });
+/**
+ * 行ブロック `[rowOffset, rowOffset + rowsBlock)` の**有効行数**（`row < Q` の局所行の本数）。
+ *
+ * MUST: ①QK / ②stats の dispatch 数はこの 1 関数から出す（ADR 0066 決定 3 の仕事量合格条件 —
+ * 物理 chunk 行数 `M` に比例させると、`Q = 1` の decode が `M` 倍の行を回す）。
+ * MUST: WGSL 側（{@link stateEffectiveRowsWgsl}）と**同じ式**。ホストが幾何の純関数で、
+ * カーネルはその写し。
+ */
+export const stateEffectiveRows = (
+  rowsBlock: number,
+  rowOffset: number,
+  query: number,
+): number => Math.min(rowsBlock, Math.max(0, query - rowOffset));
+
+/** `queryLength` の値域門（搬送先は u32・`Q ≥ 1` は `GenerationContext` の契約と同じ）。 */
+const assertQueryLength = (where: string, query: number): void => {
+  assertU32Params(where, { query });
   if (query < 1) {
     throw new CodegenError(`${where}: queryLength は 1 以上（${query}）`);
   }
+};
+
+/** 論理長の値域門（搬送先は u32・`Q ≥ 1` は `GenerationContext` の契約と同じ）。 */
+const assertLengths = (where: string, past: number, query: number): void => {
+  assertU32Params(where, { past });
+  assertQueryLength(where, query);
 };
 
 /**
@@ -649,17 +745,20 @@ export type StateDispatchGeometry = {
   /** `B·H`（z 軸 — 1 workgroup = 1 (b, h)）。 */
   readonly batchHeads: number;
   readonly rowsBlock: number;
+  /** chunk 内の先頭行（有効行数 `clamp(Q − rowOffset, 0, rowsBlock)` の算出に要る）。 */
+  readonly rowOffset: number;
   readonly depth: number;
   /** `W`（`0` = full — live 列数が `min(P, W−1) + Q` で頭打ちになる）。 */
   readonly window: number;
 };
 
-/** dispatch 幾何の値域門（3 軸とも正整数）。 */
+/** dispatch 幾何の値域門（3 軸とも正整数・`rowOffset` は 0 可）。 */
 const assertDispatchGeometry = (where: string, geometry: StateDispatchGeometry): void => {
-  const { batchHeads, rowsBlock, depth, window } = geometry;
+  const { batchHeads, rowsBlock, rowOffset, depth, window } = geometry;
   assertU32Params(where, {
     batch_heads: batchHeads,
     rows_block: rowsBlock,
+    row_offset: rowOffset,
     depth,
     window,
   });
@@ -671,13 +770,15 @@ const assertDispatchGeometry = (where: string, geometry: StateDispatchGeometry):
 };
 
 /**
- * ①QK の workgroup 数 `[live 列, 行, B·H]`。
+ * ①QK の workgroup 数 `[live 列, 有効行, B·H]`。
  *
- * MUST: 列軸は **live 列数**（`colCap` でも `C` でもない）。ここが仕事量合格条件
- * （∝ `Q × (有効 past + Q)`）の機構そのもので、容量を渡せないよう
- * {@link StateDispatchGeometry} から容量を外してある。
+ * MUST: 列軸は **live 列数**（`colCap` でも `C` でもない）・行軸は**有効行数**
+ * （`rowsBlock` でも `M` でもない）。この 2 軸が仕事量合格条件（∝ `Q × (有効 past + Q)`）の
+ * 機構そのもので、容量を渡せないよう {@link StateDispatchGeometry} から容量を外してある。
  * MUST: 上限超過は fail loudly（タイル系 — 縮退させると S のタイルが欠落し、②③ が残骸を
  * 読んだまま例外なしに進む）。
+ * NOTE: 有効行 0 のブロック（`rowOffset ≥ Q`）は行軸が 0 になり、呼び手は dispatch そのものを
+ * 積まない（{@link stateEffectiveRows} の doc）。
  */
 export const stateQkWorkgroups = (
   geometry: StateDispatchGeometry,
@@ -689,32 +790,38 @@ export const stateQkWorkgroups = (
   assertDispatchGeometry(`${where} ①QK`, geometry);
   assertLengths(`${where} ①QK`, past, query);
   const live = stateLiveColumns(geometry.window, past, query);
+  const rows = stateEffectiveRows(geometry.rowsBlock, geometry.rowOffset, query);
   return [
     tiledWorkgroups(live, STATE_ATTENTION_TILE_X, limit, `${where} ①QK`),
-    tiledWorkgroups(geometry.rowsBlock, STATE_ATTENTION_TILE_M, limit, `${where} ①QK`),
+    tiledWorkgroups(rows, STATE_ATTENTION_TILE_M, limit, `${where} ①QK`),
     tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ①QK`),
   ];
 };
 
 /**
- * ② の workgroup 数 `[行数, 1, 1]`（行方向 grid-stride なので上限超過は**縮退**）。
+ * ② の workgroup 数 `[B·H × 有効行, 1, 1]`（行方向 grid-stride なので上限超過は**縮退**）。
  *
- * 論理長に依らない（1 行 = 1 workgroup で、live の走査は行ループの内側）。総反復回数は
- * `行数 × live` なので、仕事量の合格条件は反復回数の側で満たす。
+ * 覆うのは有効行だけ（pad 行の統計は誰も読まない）。live の走査は行ループの内側なので、
+ * 総反復回数は `B·H × 有効行 × live` = 仕事量合格条件どおり `Q × (有効 past + Q)` に比例する。
  */
 export const stateStatsWorkgroups = (
   geometry: StateDispatchGeometry,
+  query: number,
   limit: number,
   where: string,
 ): [number, number, number] => {
   assertDispatchGeometry(`${where} ②stats`, geometry);
-  return [gridStrideWorkgroups(geometry.batchHeads * geometry.rowsBlock, 1, limit), 1, 1];
+  assertQueryLength(`${where} ②stats`, query);
+  const rows = stateEffectiveRows(geometry.rowsBlock, geometry.rowOffset, query);
+  return [gridStrideWorkgroups(geometry.batchHeads * rows, 1, limit), 1, 1];
 };
 
 /**
  * ③PV の workgroup 数 `[D, 行, B·H]`。
  *
- * 論理長に依らない（1 invocation = 出力 1 要素で、live 列の縮約は invocation の内側）。
+ * MUST: 行軸は **`rows_block` 全て**（① ② と違って有効行で切らない — pad 行も書くのが
+ * full-write 不変条件）。仕事量が Q に比例するのはカーネル側で、pad 行の invocation は
+ * live を 1 列も回さず `0.0` を 1 語書いて返る。
  * MUST: 上限超過は fail loudly（タイル系 — 縮退させると O の一部が未書き込みのまま残り、
  * full-write 不変条件が黙って崩れる）。
  */

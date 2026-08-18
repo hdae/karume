@@ -38,6 +38,13 @@ fn in_window(col: u32, limit: u32) -> bool {
   return col <= limit;
 }
 
+fn effective_rows(query: u32) -> u32 {
+  if (query <= params.row_offset) {
+    return 0u;
+  }
+  return min(params.rows_block, query - params.row_offset);
+}
+
 fn score_slot(q_base: u32, k_base: u32) -> f32 {
   var acc = 0.0;
   for (var d = 0u; d < params.depth; d = d + 1u) {
@@ -61,8 +68,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let local_row = gid.y;
   let cl = gid.x;
   // 端数タイルの空振り。live より右（[live, col_cap)）は残骸のまま残すのが正で、
-  // 読者（②③）が live で切ることと対になっている
-  if (local_row >= params.rows_block || cl >= live) {
+  // 読者（②③）が live で切ることと対になっている。行は**有効行まで**（pad 行の S は
+  // 誰も読まない — ③ が 0 を書いて返す）ので、仕事量が Q に比例する
+  if (local_row >= effective_rows(lengths.query) || cl >= live) {
     return;
   }
   let z = gid.z;

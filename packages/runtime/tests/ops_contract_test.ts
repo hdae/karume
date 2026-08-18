@@ -33,6 +33,7 @@ import {
   SCALAR_PARAM_ATTRS,
   scalarParamValues,
   softmaxDim,
+  stateWindow,
   UNARY_OPS,
   WEIGHT_CHANNEL_AXES,
   WEIGHT_SLOTS,
@@ -1544,6 +1545,16 @@ Deno.test("省略可能 attr `window` は states 欄を持つノードでのみ�
   // 値域は必須 attr と同じ厳しさ（0・負・非整数は落ちる）
   for (const window of [0, -1, 1.5, "512", null, true]) {
     assertThrows(() => assertNodeContract(appendNode({ window }), "t"), OpContractError);
+  }
+  // MUST: JSON の `512.0` / `5.12e2` は受理する（JSON.parse は整数値の float を単一の number へ
+  // 潰すので TS 側にはそもそも区別が無い）。Python の `_assert_integer_attr` はこの受理集合へ
+  // 合わせて整数値 float を int へ正規化する — 片側だけが拒むと「ランタイムが読める graph を
+  // エクスポータの検証だけが読めない」乖離になるので、両側の受理集合をここで明示しておく。
+  for (const text of ["512.0", "5.12e2"]) {
+    const window: unknown = JSON.parse(text);
+    assertEquals(window, 512, `${text}: JSON.parse が整数へ潰していない`);
+    assertNodeContract(appendNode({ window }), "t");
+    assertEquals(stateWindow({ window }, "t"), 512);
   }
   // capability 射影には必須と省略可能の**和**が載る（列挙門が states 形を拒否しないため）
   assertEquals(

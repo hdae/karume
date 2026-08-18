@@ -15,7 +15,7 @@ import torch
 from safetensors.torch import save_file
 
 from karume.ir import IR_METADATA_KEY
-from karume.ops import OpContractError
+from karume.ops import OpContractError, state_window
 from karume.verify import (
     ContainerError,
     IrError,
@@ -688,6 +688,35 @@ class TestNodeStates:
     def test_window_outside_the_value_range_is_rejected(self, window):
         with pytest.raises(OpContractError, match="1 以上の整数でない"):
             check_kv(nodes=kv_windows(window, window, window))
+
+    @pytest.mark.parametrize("window", [8.0, 8e0, 64.0])
+    def test_an_integral_float_window_is_accepted(self, window):
+        """JSON の `8.0` / `8e0` は int 扱い（TS 側の受理集合と揃える）。
+
+        TS は JSON.parse が単一の number を返すので「整数値の float」という区別が無く
+        （`Number.isSafeInteger(8.0)` は true）、Python が float を丸ごと拒むと**ランタイムが
+        読める graph をエクスポータの検証だけが読めない**乖離になる（受理集合はどちらの向きにも
+        ずれてはいけない）。
+        """
+        graph = check_kv(nodes=kv_windows(window, window, window))
+
+        for node in graph.nodes:
+            assert isinstance(node.attrs["window"], float), "float を渡していない（空振り）"
+            assert state_window(node.attrs, "t") == int(window)
+            assert isinstance(state_window(node.attrs, "t"), int), "int へ正規化されていない"
+
+    @pytest.mark.parametrize(
+        "window",
+        [1.5, float(2**53), float("inf"), float("-inf"), float("nan")],
+    )
+    def test_a_non_integral_or_out_of_range_float_window_is_rejected(self, window):
+        """整数値でない / safe range 外の float は従来どおり拒否（正規化は受理集合を広げない）。
+
+        非有限値は JSON 読み（`parse_graph_json` の非標準リテラル拒否）でも止まるので、ここは
+        直接呼びで attrs 層そのものを踏む。
+        """
+        with pytest.raises(OpContractError, match="1 以上の整数でない"):
+            state_window({"window": window}, "t")
 
     def test_window_on_a_plain_attention_is_rejected(self):
         """省略可能 attrs は states 形専用 — 従来形に書けると誰も読まない attr ができる。"""

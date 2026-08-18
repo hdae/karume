@@ -241,15 +241,28 @@ export type GenerationLimits = {
  * 読み書きする形で、`pastLength + queryLength > C` の full スロットは `state_append` の書きが
  * 範囲外へ落ちる（robustness で捨てられる = **静かに書かれない**）— どちらも例外も警告も
  * 出ないまま、次 step の読者が残骸を過去 KV として食う。
+ * MUST: **物理 chunk 行数 `M` は `chunkLength`（prefill 形）か `1`（decode 形）だけ**
+ * （ADR 0066 決定 4 の「実行形は 2 本」+「PreparedPlan は 2 本が定常」の実行時執行）。任意の
+ * `M` を通すと、`M` の種類ぶん別鍵の計画が増えて LRU 4 を汚し、decode のホットパスが静かに
+ * 再導出へ落ちる。`chunkLength` は context の計画時定数なので、判定はこの 1 箇所で足りる。
  * MUST: `queryLength ≤ chunkLength` と u32 値域はここで重ねて見ない（`GenerationContext` の
- * `writeLengths` / `advance` が持つ — 二重簿記の禁止）。
+ * `writeLengths` / `advance` が持つ — 二重簿記の禁止）。`M = 1` では `Q ≤ M` が `Q = 1` を
+ * 含意するので、decode 形の `Q` 検査も別途は要らない。
  */
 export const assertGenerationRun = (
   limits: GenerationLimits,
+  chunkLength: number,
   pastLength: number,
   queryLength: number,
 ): void => {
   for (const rows of limits.chunkRows) {
+    if (rows !== chunkLength && rows !== 1) {
+      throw new ExecutionError(
+        `state ノードの物理 chunk 行数 ${rows} が固定 chunk 契約に合わない` +
+          `（許されるのは prefill 形の chunkLength ${chunkLength} か decode 形の 1 だけ — ` +
+          "ADR 0066 決定 4）",
+      );
+    }
     if (queryLength > rows) {
       throw new ExecutionError(
         `queryLength ${queryLength} が state ノードの物理 chunk 行数 ${rows} を超える` +
@@ -356,6 +369,31 @@ const resolveWorkgroups = (
 };
 
 /**
+ * dispatch を 1 本積む。**論理長から算出した workgroup 数が 0 の軸を持つときだけ積まない**。
+ *
+ * 動的形の 0 は「この行ブロックが丸ごと pad 行 = 今 step の有効行が 1 つも無い」を意味する
+ * （states 形 — src/kernels/state-attention.ts の `stateEffectiveRows`）。WebGPU 的には 0 も
+ * 合法な no-op だが、積むと診断（GPU 時間内訳・submit 数）に仕事量ゼロの dispatch が並び、
+ * 「仕事量が queryLength に比例する」の観測が濁る。
+ *
+ * MUST: **静的な 3 つ組は 0 でも積む**（既存契約 — 0 要素テンソルの経路は要素数 0 の dispatch を
+ * 「黙って飛ばさない」形で通っており、tests/e2e_public_api_test.ts がその dispatch 数を固定して
+ * いる）。省く条件を「値が 0」にすると、非 generation 経路の挙動まで巻き添えで変わる。
+ * MUST: 2 経路（アリーナ / 焼き込み）で**この 1 本**を共有する。片方だけ省くと、同じレシピが
+ * 経路で違う dispatch 列を積む。
+ */
+const dispatchWithWork = (
+  scheduler: SubmitScheduler,
+  recipe: DispatchRecipe,
+  bindGroup: GPUBindGroup,
+  workgroups: readonly [number, number, number],
+): void => {
+  const derived = typeof recipe.workgroups === "function";
+  if (derived && (workgroups[0] === 0 || workgroups[1] === 0 || workgroups[2] === 0)) return;
+  scheduler.dispatch(recipe.pipeline, bindGroup, workgroups, recipe.key);
+};
+
+/**
  * この dispatch が {@link GenerationContext} 所有の実体を束ねるか — **焼き込み単位の判別 1 本**
  * （ADR 0066 決定 5）。
  *
@@ -406,12 +444,7 @@ const encodeDispatch = (
     recipe,
     (source) => resolveBinding(source, run.env, temps, run.generation),
   );
-  run.scheduler.dispatch(
-    recipe.pipeline,
-    bindGroup,
-    resolveWorkgroups(recipe, run.generation),
-    recipe.key,
-  );
+  dispatchWithWork(run.scheduler, recipe, bindGroup, resolveWorkgroups(recipe, run.generation));
 };
 
 /**
@@ -751,11 +784,11 @@ export const executeBakedPlan = (
             "焼き込み経路へ来た）",
         );
       }
-      scheduler.dispatch(
-        dispatch.pipeline,
+      dispatchWithWork(
+        scheduler,
+        dispatch,
         bindGroup,
         resolveWorkgroups(dispatch, generation?.encoding),
-        dispatch.key,
       );
     });
   });

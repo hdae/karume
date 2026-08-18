@@ -122,6 +122,29 @@ type GenerationContextInternals = {
   /** この context が常駐させている GPU バイト数（診断 `stateBacking.residentBytes` の元）。 */
   readonly bytes: number;
   /**
+   * 容量記号の解決済み束縛（`spec.bindings` の検査済みの写し — ADR 0066 追記 7）。
+   *
+   * states と入力の**両方**に現れる記号は、context 側（容量）と run 側（入力 shape）の 2 箇所で
+   * 独立に決まる。実行統合はこの表と run の解決済み束縛を照合して分裂を fail loudly にする
+   * （割れたまま走ると、確保容量と計画が別の値で組まれた state を沈黙で読む）。
+   */
+  readonly bindings: SymbolBindings;
+  /**
+   * 進行中の generation run を 1 本受け付ける（**`Session.run` の同期区間で**取り、run の決着で
+   * 必ず返す）。取れなければ fail loudly（dispose 要求後・汚染後・device 消失後）。
+   */
+  acquireRun(): void;
+  /** 進行中の generation run を返す（成功・失敗の両経路で必ず 1 度）。 */
+  releaseRun(): void;
+  /**
+   * 論理長の内部読み（run の頭で 1 度だけ — 遮断面は**破棄本体の実行後**）。
+   *
+   * MUST: 利用者面の `pastLength` を run から読まない。dispose は 2 段（受付終了 → chained な
+   * 破棄本体）で、受理済み run は 1 段目と 2 段目の間で走るため、利用者面の判定では
+   * 「`run(); dispose()` の非 await 並び」が受理済み run を殺す。
+   */
+  pastLength(): number;
+  /**
    * `token` の backing に対して焼いてある context 側 bind group（無ければ undefined = 焼き直し）。
    *
    * MUST: 引くときに必ず `token` を照合する（**引ける形を token 無しで作らない**）。束は
@@ -132,10 +155,13 @@ type GenerationContextInternals = {
   bakedGroups(token: number): BakedGroups | undefined;
   /** 焼き直した束を預ける（前の束は捨てる — 退役した backing への参照を残さない）。 */
   setBakedGroups(token: number, groups: BakedGroups): void;
-  /** 論理長を書き出す（毎 run の encode 前 — {@link GenerationContext} の doc）。 */
-  writeLengths(queryLength: number): void;
-  /** 論理長を進める（**run の成功でのみ** — 決定 6）。 */
-  advance(queryLength: number): void;
+  /**
+   * 論理長を書き出す（毎 run の encode 前 — {@link GenerationContext} の doc）。
+   * `pastLength` は**呼び出し側が run の頭で捕捉した値**（内部の現在値との一致を照合する）。
+   */
+  writeLengths(pastLength: number, queryLength: number): void;
+  /** 論理長を進める（**run の成功でのみ** — 決定 6）。捕捉 P の照合は `writeLengths` と同じ。 */
+  advance(pastLength: number, queryLength: number): void;
   /** 汚染する（state 変更 dispatch を含む run の失敗 — 追記 3）。 */
   poison(reason: string): void;
 };
@@ -247,6 +273,18 @@ export class GenerationContext {
   #baked: { readonly token: number; readonly groups: BakedGroups } | undefined;
   /** 汚染の理由（追記 3）。立つと `dispose` 以外の全操作を拒否する（読みも含む）。 */
   #poisoned: string | undefined;
+  /**
+   * 進行中の generation run の本数（**リース**）。`Session.run` の同期区間で取り、run の決着で
+   * 返す。0 でない間は {@link GenerationContext.rewind} を拒否する。
+   */
+  #runs = 0;
+  /**
+   * dispose の 1 段目 — **新規受付の終了**（同期に立つ）。以後の run admission と利用者面の
+   * 読み書きを拒否するが、受理済み run の内部面（論理長の搬送・進行）は**まだ通す**。
+   */
+  #disposeRequested = false;
+  /** dispose の 2 段目 — 破棄本体が走り出したこと（内部面もここで閉じる）。 */
+  #disposed = false;
   #disposal: Promise<void> | undefined;
 
   /** MUST: 構築の入口は {@link GenerationContext.create} だけ（errorScope の門を迂回させない）。 */
@@ -256,6 +294,7 @@ export class GenerationContext {
     slidingSlots: ReadonlySet<string>,
     lengths: GPUBuffer,
     chunkLength: number,
+    bindings: SymbolBindings,
   ) {
     this.#host = host;
     this.#slots = slots;
@@ -268,13 +307,32 @@ export class GenerationContext {
       // 容量は確定済み（静的物理格納 — ADR 0066 決定 3）なので、ここで 1 度畳んで持つ。
       bytes: [...slots.values()].reduce((total, slot) => total + slot.byteLength, 0) +
         LENGTHS_BYTES,
+      bindings,
+      acquireRun: (): void => {
+        this.#assertUsable("run");
+        this.#runs += 1;
+      },
+      releaseRun: (): void => {
+        if (this.#runs < 1) {
+          throw new ExecutionError(
+            "releaseRun: 進行中の generation run が居ないのにリースを返した（簿記の破れ）",
+          );
+        }
+        this.#runs -= 1;
+      },
+      pastLength: (): number => {
+        this.#assertInternalUsable("pastLength");
+        return this.#pastLength;
+      },
       bakedGroups: (token: number): BakedGroups | undefined =>
         this.#baked?.token === token ? this.#baked.groups : undefined,
       setBakedGroups: (token: number, groups: BakedGroups): void => {
         this.#baked = { token, groups };
       },
-      writeLengths: (queryLength: number): void => this.#writeLengths(queryLength),
-      advance: (queryLength: number): void => this.#advance(queryLength),
+      writeLengths: (pastLength: number, queryLength: number): void =>
+        this.#writeLengths(pastLength, queryLength),
+      advance: (pastLength: number, queryLength: number): void =>
+        this.#advance(pastLength, queryLength),
       poison: (reason: string): void => this.#poison(reason),
     };
   }
@@ -373,6 +431,7 @@ export class GenerationContext {
         slidingSlotNames(graph),
         lengths,
         spec.chunkLength,
+        bindings,
       );
       return context;
     } finally {
@@ -405,6 +464,11 @@ export class GenerationContext {
   /**
    * 論理位置を切り詰める（ADR 0066 決定 6）。`0 ≤ position ≤ pastLength` の整数のみ。
    *
+   * MUST: **進行中の generation run が居る間は fail loudly**。run は頭で捕捉した `P` で
+   * uniform を書き・dispatch 数を算出し・成功時に `advance` するので、その途中で論理長を横から
+   * 動かすと「GPU が読んだ P」と「進行の基準にした P」が分裂する（例外は出ず、KV の論理位置
+   * だけが静かにずれる）。リースは `Session.run` の**同期区間**で立つので、`run()` を await せず
+   * 直後に呼んだ形も捕まる。
    * MUST: **sliding スロットを 1 本でも含む context は全拒否**（ADR 0066 追記 2）。ring は
    * エビクトが起きた後、resident な位置への巻き戻しでも物理配置と論理範囲が一致しない
    * （左詰め compaction を持たないため）。ORT GenAI が同じ理由で current 未満への rewind を
@@ -412,6 +476,13 @@ export class GenerationContext {
    */
   rewind(position: number): void {
     this.#assertUsable("rewind");
+    if (this.#runs > 0) {
+      throw new ExecutionError(
+        `rewind: 進行中の generation run が ${this.#runs} 本ある間は巻き戻せない` +
+          "（run は頭で捕捉した pastLength で uniform と dispatch 数を決めるので、横から動かすと" +
+          "GPU が見た論理長と進行の基準が分裂する）。run の決着を await してから呼ぶこと",
+      );
+    }
     if (this.#slidingSlots.size > 0) {
       throw new ExecutionError(
         `rewind: sliding スロット [${[...this.#slidingSlots].join(", ")}] を含む context は` +
@@ -434,6 +505,12 @@ export class GenerationContext {
   /**
    * state スロットと論理長 uniform を返す（ADR 0066 決定 6 — flush-before-destroy）。
    *
+   * MUST: **2 段**にする。同期に立つのは 1 段目（新規受付の終了 — 以後の run admission と
+   * 利用者面の読み書きを拒否）だけで、内部面（論理長の搬送・進行）の遮断は Session チェーンに
+   * 積んだ破棄本体が走り出した 2 段目。dispose 本体は先行 run の**後**に走るので、既に受理された
+   * run はここで殺されず完走する（`run(); context.dispose();` の非 await 並びが Session の
+   * `run(); session.dispose();` と同じ意味論になる）。1 段で閉じると、受理済み run の
+   * `writeLengths` / `advance` が「dispose 済み」で落ちる。
    * MUST: 2 度目以降も同じ完了を返す（`Session.dispose` と同じ理由 — 先に返すと呼び手が
    * 「破棄済み」と見なして `device.destroy()` まで進み、flush-before-destroy が崩れる）。
    * MUST: flush が失敗（主因は device 消失）してもバッファ破棄と簿記の返却は必ず行い、失敗
@@ -442,7 +519,9 @@ export class GenerationContext {
    * Session の重み・計画キャッシュには手を出さない（順序の依存を作らない）。
    */
   dispose(): Promise<void> {
+    this.#disposeRequested = true;
     this.#disposal ??= this.#host.serialize(async () => {
+      this.#disposed = true;
       try {
         await this.#host.flush();
       } finally {
@@ -468,8 +547,9 @@ export class GenerationContext {
    * MUST: 呼ぶのは**毎 run の encode 前**（`queue.writeBuffer` は issue 順で queue timeline に
    * 載るので、submit 済みの dispatch を追い越さない — ADR 0004 不変条件④）。
    */
-  #writeLengths(queryLength: number): void {
-    this.#assertUsable("writeLengths");
+  #writeLengths(pastLength: number, queryLength: number): void {
+    this.#assertInternalUsable("writeLengths");
+    this.#assertCapturedPast(pastLength, "writeLengths");
     this.#assertQueryLength(queryLength, "writeLengths");
     this.#lengthValues[0] = this.#pastLength;
     this.#lengthValues[1] = queryLength;
@@ -484,8 +564,9 @@ export class GenerationContext {
    * 次元かを決めるのは op 契約なので、導出相が集めた {@link GenerationLimits} が正本で、
    * ここでは重ねて見ない（進行の時点で検査しても、既に書かれた後で手遅れになる）。
    */
-  #advance(queryLength: number): void {
-    this.#assertUsable("advance");
+  #advance(pastLength: number, queryLength: number): void {
+    this.#assertInternalUsable("advance");
+    this.#assertCapturedPast(pastLength, "advance");
     this.#assertQueryLength(queryLength, "advance");
     const next = this.#pastLength + queryLength;
     // MUST: 加算後の論理長も u32 に収まること。両項が u32 以下でも和は溢れるので、ここが
@@ -514,22 +595,56 @@ export class GenerationContext {
   }
 
   /**
-   * 使用可否の条件（**読み取りを含む全操作** — 例外は後始末の {@link GenerationContext.dispose}
-   * だけ）。破棄済み・device 消失・汚染をここで落とす。
+   * **利用者面**の使用可否（読み取りを含む全操作 — 例外は後始末の
+   * {@link GenerationContext.dispose} だけ）。dispose 要求・device 消失・汚染をここで落とす。
    *
    * MUST: 読みと書きで条件を分けない。汚染も device 消失も「背後の物理 state が失われた」状態で、
    * そこで論理長だけを返せるようにすると復旧不能な context が正常値を持つ器に見える
    * （追記 3 の「以後の全操作 fail loudly」）。
+   * MUST: 見るのは dispose の**1 段目**（受付終了）。run admission もこの面なので、
+   * `dispose()` の後に発行された run はここで拒否される。
    */
   #assertUsable(where: string): void {
-    if (this.#disposal !== undefined) {
+    if (this.#disposeRequested) {
       throw new ExecutionError(`${where}: dispose 済みの GenerationContext は使えない`);
     }
+    this.#assertLive(where);
+  }
+
+  /**
+   * **内部面**（論理長の搬送・進行・読み）の使用可否。見るのは dispose の**2 段目**（破棄本体が
+   * 走り出したか）で、1 段目と 2 段目の間に居る受理済み run は通す。
+   */
+  #assertInternalUsable(where: string): void {
+    if (this.#disposed) {
+      throw new ExecutionError(`${where}: dispose 済みの GenerationContext は使えない`);
+    }
+    this.#assertLive(where);
+  }
+
+  /** 2 つの遮断面が共有する「背後の物理 state が生きているか」。 */
+  #assertLive(where: string): void {
     assertDeviceUsable(this.#host.gpu, where);
     if (this.#poisoned !== undefined) {
       throw new ExecutionError(
         `${where}: 汚染された GenerationContext は使えない（${this.#poisoned}）。` +
           "復旧は新しい context + ホスト側の state 再構築",
+      );
+    }
+  }
+
+  /**
+   * run が頭で捕捉した `pastLength` が今の論理長と一致すること。
+   *
+   * MUST: uniform へ書く値・dispatch 数の算出・容量の検査・進行が**同じ 1 つの P** から出るのが
+   * states 形の前提（ADR 0066 決定 3 / 追記 4）。リースがあれば横から動く経路は塞がっているので、
+   * ここが割れたら実装の不変条件破れ — 沈黙で続けさせず即死させる。
+   */
+  #assertCapturedPast(pastLength: number, where: string): void {
+    if (pastLength !== this.#pastLength) {
+      throw new ExecutionError(
+        `${where}: run が捕捉した pastLength ${pastLength} が context の現在値 ` +
+          `${this.#pastLength} と食い違う（進行中 run の論理長が横から動いた — 内部の不変条件破れ）`,
       );
     }
   }

@@ -16,6 +16,7 @@ import {
   STATE_STATS_WORKGROUP_SIZE,
   stateAttentionParams,
   stateColumnBase,
+  stateEffectiveRows,
   stateLiveColumns,
   statePvKey,
   statePvWgsl,
@@ -116,11 +117,42 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（states �
 
 Deno.test("sliding 変種は causal 上限に**下限**を AND する（上限だけの実装を文字列で拒む）", () => {
   // ADR 0067 決定 4 の第 5 巡 high: 上限だけだと row > 0 が窓外 key を row ぶん沈黙混入する
-  assertEquals(stateQkWgsl(true, false).includes("col + params.window > limit"), true);
-  assertEquals(stateQkWgsl(false, false).includes("col + params.window > limit"), false);
+  assertEquals(stateQkWgsl(true, false).includes("(limit - col) < params.window"), true);
+  assertEquals(stateQkWgsl(false, false).includes("(limit - col) < params.window"), false);
+  // MUST: 下限の引き算は `limit − col` の側（`col + W` は P が u32 上限近くで巻き戻り、
+  // causal 対角まで窓外にして行を静かに空にする）。短絡する `col <= limit` が先に立つので
+  // `limit − col` はアンダーフローしない
+  for (const [sliding, gqa] of VARIANTS) {
+    assertEquals(
+      stateQkWgsl(sliding, gqa).includes("col + params.window"),
+      false,
+      `sliding=${sliding} gqa=${gqa}: u32 で巻き戻る加算形が残っている`,
+    );
+  }
   // 空行ガード（②）— 有限 sentinel でなく -inf identity + 分母ガードの構成
   assertEquals(stateStatsWgsl(false).includes("let empty = amax == neg_inf;"), true);
   assertEquals(STATE_NEG_INF_BITS, 0xff800000);
+});
+
+Deno.test("有効行の式は ①②③ の WGSL とホストで 1 本（pad 行の扱いが 3 者で割れない）", () => {
+  // ホスト（dispatch 数）: `clamp(Q − rowOffset, 0, rowsBlock)`
+  assertEquals(stateEffectiveRows(4, 0, 1), 1, "decode は 1 行だけ");
+  assertEquals(stateEffectiveRows(4, 0, 4), 4, "pad 無しの prefill は全行");
+  assertEquals(stateEffectiveRows(4, 0, 9), 4, "Q > rowsBlock はブロックで頭打ち");
+  assertEquals(stateEffectiveRows(4, 4, 6), 2, "ブロック途中で pad が始まる形");
+  assertEquals(stateEffectiveRows(4, 4, 4), 0, "丸ごと pad のブロックは 0");
+  assertEquals(stateEffectiveRows(4, 8, 4), 0, "アンダーフローで巨大値にならない");
+  // WGSL（行範囲）: 3 カーネルとも**同一文字列**を持つ（片方だけ直す形を文字列で拒む）
+  const fragment = "fn effective_rows(query: u32) -> u32 {";
+  for (const [sliding, gqa] of VARIANTS) {
+    assertEquals(stateQkWgsl(sliding, gqa).includes(fragment), true, "qk");
+    assertEquals(statePvWgsl(sliding, gqa).includes(fragment), true, "pv");
+  }
+  for (const sliding of [false, true]) {
+    assertEquals(stateStatsWgsl(sliding).includes(fragment), true, "stats");
+  }
+  // ③PV は pad 行を **0 で書いて返す**（full-write を保ったまま live を走査しない）
+  assertEquals(statePvWgsl(false, false).includes("out[at] = 0.0;"), true);
 });
 
 const GEOMETRY = {
@@ -140,10 +172,10 @@ Deno.test("①③ の params は語順どおりに詰まる（同じ幾何を 2 
   assertEquals(params.length, 12, "uniform struct の整列で 48 バイト");
   assertEquals([...params.subarray(0, 9)], [4, 4, 8, 6, 2, 0, 32, 32, STATE_NEG_INF_BITS]);
   assertEquals(new Float32Array(params.buffer)[9], 0.5);
-  // ② は別 struct（rows / col_cap / window / neg_inf の 4 語ちょうど）
-  const stats = stateStatsParams(24, 32, 0);
-  assertEquals(stats.length, 4);
-  assertEquals([...stats], [24, 32, 0, STATE_NEG_INF_BITS]);
+  // ② は別 struct（batch_heads / rows_block / row_offset / col_cap / window / neg_inf の 6 語）
+  const stats = stateStatsParams(6, 4, 4, 32, 0);
+  assertEquals(stats.length, 8, "uniform struct の整列で 32 バイト");
+  assertEquals([...stats.subarray(0, 6)], [6, 4, 4, 32, 0, STATE_NEG_INF_BITS]);
 });
 
 Deno.test("①③ の params 門が沈黙誤値になる幾何を全て拒否する", () => {
@@ -189,7 +221,8 @@ Deno.test("①③ の params 門が沈黙誤値になる幾何を全て拒否す
     CodegenError,
     "depth",
   );
-  assertThrows(() => stateStatsParams(0, 32, 0), CodegenError, "rows");
+  assertThrows(() => stateStatsParams(0, 4, 0, 32, 0), CodegenError, "batch_heads");
+  assertThrows(() => stateStatsParams(6, 0, 0, 32, 0), CodegenError, "rows_block");
 });
 
 Deno.test("state_append の params 門（容量・正整数・u32 域）", () => {
@@ -205,7 +238,7 @@ Deno.test("state_append の params 門（容量・正整数・u32 域）", () =>
   assertThrows(() => stateAppendParams({ ...base, capacity: -1 }), CodegenError, "capacity");
 });
 
-const DISPATCH = { batchHeads: 6, rowsBlock: 4, depth: 32, window: 0 };
+const DISPATCH = { batchHeads: 6, rowsBlock: 4, rowOffset: 0, depth: 32, window: 0 };
 const LIMIT = 65535;
 
 Deno.test("dispatch 幾何は live 列に比例し、容量には依らない（ADR 0066 決定 3 の機構）", () => {
@@ -225,13 +258,35 @@ Deno.test("dispatch 幾何は live 列に比例し、容量には依らない（
   const cap = stateQkWorkgroups(sliding, 63, 16, LIMIT, "t")[0];
   assertEquals(stateQkWorkgroups(sliding, 512, 16, LIMIT, "t")[0], cap);
   assertEquals(stateQkWorkgroups(sliding, 131072, 16, LIMIT, "t")[0], cap);
-  // 行 / z 軸は静的幾何そのもの
-  assertEquals(stateQkWorkgroups(DISPATCH, 100, 4, LIMIT, "t").slice(1), [1, 6]);
-  // ②③ は論理長に依らない（走査は invocation の内側 — 総反復回数の側で仕事量条件を満たす）
-  assertEquals(stateStatsWorkgroups(DISPATCH, LIMIT, "t"), [24, 1, 1]);
+  // z 軸は静的幾何そのもの（行軸は下の仕事量門が見る）
+  assertEquals(stateQkWorkgroups(DISPATCH, 100, 4, LIMIT, "t")[2], 6);
+  // ③ は論理長に依らない（pad 行も書く = full-write。走査を切るのはカーネル側）
   assertEquals(statePvWorkgroups(DISPATCH, LIMIT, "t"), [2, 1, 6]);
   // ② は grid-stride なので上限超過は**縮退**（②③ の別扱いが崩れていないこと）
-  assertEquals(stateStatsWorkgroups({ ...DISPATCH, batchHeads: 4096 }, 100, "t"), [100, 1, 1]);
+  assertEquals(
+    stateStatsWorkgroups({ ...DISPATCH, batchHeads: 4096 }, 4, 100, "t"),
+    [100, 1, 1],
+  );
+});
+
+Deno.test("①② の行方向 dispatch は M ではなく Q に比例する（pad だけのブロックは 0）", () => {
+  // 固定 M=8 を 4 行 × 2 ブロックに割り、Q だけを動かす（容量も colCap も 1 語も動かない）
+  const first = { ...DISPATCH, rowsBlock: 4, rowOffset: 0 };
+  const second = { ...DISPATCH, rowsBlock: 4, rowOffset: 4 };
+  // ①QK の y 軸 = ⌈有効行 / 4⌉
+  assertEquals(stateQkWorkgroups(first, 0, 1, LIMIT, "t")[1], 1, "Q=1 は 1 タイル");
+  assertEquals(stateQkWorkgroups(first, 0, 4, LIMIT, "t")[1], 1);
+  assertEquals(stateQkWorkgroups(second, 0, 4, LIMIT, "t")[1], 0, "pad だけのブロックは 0");
+  assertEquals(stateQkWorkgroups(second, 0, 6, LIMIT, "t")[1], 1, "半分だけ有効なブロック");
+  assertEquals(stateQkWorkgroups(second, 0, 8, LIMIT, "t")[1], 1);
+  // ② は 1 行 = 1 workgroup なので、行数がそのまま出る（B·H = 6）
+  assertEquals(stateStatsWorkgroups(first, 1, LIMIT, "t"), [6, 1, 1], "Q=1 は 1 行 × B·H");
+  assertEquals(stateStatsWorkgroups(first, 4, LIMIT, "t"), [24, 1, 1], "Q=M は 4 行 × B·H");
+  assertEquals(stateStatsWorkgroups(second, 4, LIMIT, "t"), [0, 1, 1], "pad だけのブロックは 0");
+  assertEquals(stateStatsWorkgroups(second, 6, LIMIT, "t"), [12, 1, 1]);
+  // MUST: ③PV だけは M に比例したまま（pad 行も書くのが full-write 不変条件）
+  assertEquals(statePvWorkgroups(first, LIMIT, "t")[1], 1);
+  assertEquals(statePvWorkgroups(second, LIMIT, "t")[1], 1);
 });
 
 Deno.test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 → 65536 でも同一）", () => {
@@ -248,6 +303,7 @@ Deno.test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 �
   }
   assertEquals(Object.keys(DISPATCH).includes("capacity"), false);
   assertEquals(Object.keys(DISPATCH).includes("colCap"), false);
+  assertEquals(Object.keys(DISPATCH).includes("chunkRows"), false, "M も渡らない");
 });
 
 Deno.test("dispatch の上限超過はタイル系が fail loudly・grid-stride 系が縮退", () => {
@@ -352,11 +408,11 @@ Deno.test("CPU 参照: sliding の窓は両側で切られる（手計算 — �
   assertAlmostEquals(out.data[0], 3.5, 1e-6);
 });
 
-Deno.test("CPU 参照: full は先頭から causal 上限まで（pad 行も計算される）", () => {
+Deno.test("CPU 参照: full は先頭から causal 上限まで（pad 行は厳密 0）", () => {
   // P=3 / Q=2 / M=3: 論理 col 空間は [0, P+Q) = {0..4}（pad 行の key は**論理 col 空間に
   // 入らない** — 足されるのは Q 本だけ）。row 0 → 上限 3 で {0,1,2,3}（平均 1.5）・
-  // row 1 → 上限 4 で {0..4}（平均 2）・row 2 は pad 行で上限 5 だが live が {0..4} で
-  // 尽きるので同じ {0..4}（平均 2 — 値は契約上無意味だが **書かれる**）
+  // row 1 → 上限 4 で {0..4}（平均 2）・row 2 は pad 行なので**厳密 0**
+  // （書かれはする = full-write だが、値は 0 に固定 — ADR 0066 追記 6 の値契約）
   const probe = windowProbe({
     window: 0,
     past: 3,
@@ -368,7 +424,7 @@ Deno.test("CPU 参照: full は先頭から causal 上限まで（pad 行も計�
   const out = referenceStateAttention(probe);
   assertAlmostEquals(out.data[0], 1.5, 1e-6);
   assertAlmostEquals(out.data[1], 2, 1e-6);
-  assertAlmostEquals(out.data[2], 2, 1e-6);
+  assertEquals(Object.is(out.data[2], 0), true, "pad 行は厳密 0（−0 でも NaN でもない）");
 });
 
 Deno.test("CPU 参照: 空行（述語を満たす col が無い pad 行）の出力は厳密 0", () => {

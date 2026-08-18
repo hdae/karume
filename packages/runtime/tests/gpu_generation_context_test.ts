@@ -279,7 +279,10 @@ Deno.test({
       // dispose 済み context の操作は fail loudly（読みも含む — 実体はもう無い）。
       assertThrows(() => context.pastLength, ExecutionError, "dispose 済み");
       assertThrows(() => context.rewind(0), ExecutionError, "dispose 済み");
-      assertThrows(() => internals(context).advance(1), ExecutionError, "dispose 済み");
+      // 内部面は dispose の**2 段目**（破棄本体が走った後）で閉じる — ここは await 済みなので
+      // 2 段目まで済んでいる。
+      assertThrows(() => internals(context).advance(0, 1), ExecutionError, "dispose 済み");
+      assertThrows(() => internals(context).pastLength(), ExecutionError, "dispose 済み");
 
       // context は Session より長生きできる（dispose の順序に依存を作らない）。
       await session.dispose();
@@ -551,17 +554,29 @@ Deno.test({
     const context = await session.createGenerationContext({ chunkLength: 4 });
     try {
       // prefill chunk（queryLength ≤ chunkLength）と decode（1）の両方で進む。
-      internals(context).advance(4);
-      internals(context).advance(1);
+      // 第 1 引数は run が頭で捕捉した pastLength（context の現在値と照合される）。
+      internals(context).advance(0, 4);
+      internals(context).advance(4, 1);
       assertEquals(context.pastLength, 5);
 
       for (const queryLength of [0, -1, 1.5, 5]) {
         assertThrows(
-          () => internals(context).advance(queryLength),
+          () => internals(context).advance(5, queryLength),
           ExecutionError,
           "queryLength",
         );
       }
+      assertEquals(context.pastLength, 5, "拒否された進行は論理長を動かさない");
+
+      // 捕捉 P が現在値と割れた進行は fail loudly（リースがあれば起きない = 内部の不変条件破れ）。
+      for (const captured of [4, 6]) {
+        const split = assertThrows(
+          () => internals(context).advance(captured, 1),
+          ExecutionError,
+        );
+        assert(split.message.includes("食い違う"), split.message);
+      }
+      assertThrows(() => internals(context).writeLengths(4, 1), ExecutionError, "食い違う");
       assertEquals(context.pastLength, 5, "拒否された進行は論理長を動かさない");
 
       context.rewind(2);
@@ -571,7 +586,7 @@ Deno.test({
       context.rewind(0);
       assertEquals(context.pastLength, 0);
 
-      internals(context).advance(3);
+      internals(context).advance(0, 3);
       for (const position of [-1, 4, 1.5, Number.NaN]) {
         assertThrows(() => context.rewind(position), ExecutionError, "rewind");
       }
@@ -597,14 +612,17 @@ Deno.test({
         assertEquals(context.chunkLength, U32_MAX);
         // u32 を超える queryLength は chunkLength の門で落ちる（0 に切り詰めて書かない）。
         assertThrows(
-          () => internals(context).writeLengths(U32_MAX + 1),
+          () => internals(context).writeLengths(0, U32_MAX + 1),
           ExecutionError,
           "chunkLength",
         );
         // 加算後の overflow はここでしか見られない（両項が u32 以下でも和は溢れる）。
-        internals(context).advance(U32_MAX);
+        internals(context).advance(0, U32_MAX);
         assertEquals(context.pastLength, U32_MAX);
-        const overflow = assertThrows(() => internals(context).advance(1), ExecutionError);
+        const overflow = assertThrows(
+          () => internals(context).advance(U32_MAX, 1),
+          ExecutionError,
+        );
         assert(overflow.message.includes("u32 の上限"), overflow.message);
         assertEquals(context.pastLength, U32_MAX, "拒否された進行は論理長を動かさない");
         // rewind の位置も pastLength を上限に持つので u32 を超えられない。
@@ -634,7 +652,7 @@ Deno.test({
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 2 });
     try {
-      internals(context).advance(2);
+      internals(context).advance(0, 2);
       internals(context).poison("state 変更 dispatch を含む run が失敗した");
       // 2 度目の汚染は真因を上書きしない。
       internals(context).poison("後続の別の失敗");
@@ -646,8 +664,10 @@ Deno.test({
         const operation of [
           () => context.pastLength,
           () => context.rewind(0),
-          () => internals(context).advance(1),
-          () => internals(context).writeLengths(1),
+          () => internals(context).pastLength(),
+          () => internals(context).acquireRun(),
+          () => internals(context).advance(2, 1),
+          () => internals(context).writeLengths(2, 1),
         ]
       ) {
         const error = assertThrows(operation, ExecutionError);
@@ -674,7 +694,7 @@ Deno.test({
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 2 });
-    internals(context).advance(1);
+    internals(context).advance(0, 1);
 
     gpu.destroy();
     await gpu.device.lost;
@@ -682,8 +702,9 @@ Deno.test({
 
     assertThrows(() => context.pastLength, GpuDeviceLostError, "device が失われた");
     assertThrows(() => context.rewind(0), GpuDeviceLostError);
-    assertThrows(() => internals(context).advance(1), GpuDeviceLostError);
-    assertThrows(() => internals(context).writeLengths(1), GpuDeviceLostError);
+    assertThrows(() => internals(context).acquireRun(), GpuDeviceLostError);
+    assertThrows(() => internals(context).advance(1, 1), GpuDeviceLostError);
+    assertThrows(() => internals(context).writeLengths(1, 1), GpuDeviceLostError);
 
     // dispose は「バッファを返してから flush の失敗を伝播させる」（RunArena と同じ規律）。
     const failure = await assertRejects(() => context.dispose(), GpuDeviceLostError);
@@ -701,7 +722,7 @@ Deno.test({
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 2 });
-    internals(context).advance(1);
+    internals(context).advance(0, 1);
 
     gpu.destroy();
     // MUST: ここで lost が**未記録**であること。記録済みなら既存の lost 判定だけで通ってしまい、
@@ -711,10 +732,10 @@ Deno.test({
 
     assertThrows(() => context.pastLength, GpuDeviceLostError, "device が失われた");
     assertThrows(() => context.rewind(0), GpuDeviceLostError);
-    assertThrows(() => internals(context).advance(1), GpuDeviceLostError);
+    assertThrows(() => internals(context).advance(1, 1), GpuDeviceLostError);
     // writeLengths が最も危険な穴（破棄済みバッファへの writeBuffer は警告すら出ない no-op で、
     // ホストの論理長と GPU が見る値が黙って分裂する）。
-    assertThrows(() => internals(context).writeLengths(1), GpuDeviceLostError);
+    assertThrows(() => internals(context).writeLengths(1, 1), GpuDeviceLostError);
     // 生成の入口も同じ判定（空の KV を持つ context を作らせない）。
     await assertRejects(
       () => session.createGenerationContext({ chunkLength: 1 }),
@@ -751,25 +772,25 @@ Deno.test({
       }
     };
     try {
-      internals(context).writeLengths(4);
+      internals(context).writeLengths(0, 4);
       assertEquals(await readLengths(), [0, 4], "prefill 1 本目は past 0 / query 4");
 
-      internals(context).advance(4);
-      internals(context).writeLengths(3);
+      internals(context).advance(0, 4);
+      internals(context).writeLengths(4, 3);
       assertEquals(await readLengths(), [4, 3], "past と query は独立のスカラ");
 
       // decode 形（queryLength=1）へ移ると query 語だけが変わる = 全域を書き直している証拠。
-      internals(context).advance(3);
-      internals(context).writeLengths(1);
+      internals(context).advance(4, 3);
+      internals(context).writeLengths(7, 1);
       assertEquals(await readLengths(), [7, 1]);
 
       // rewind は次の writeLengths からそのまま効く（論理長は context が所有する）。
       context.rewind(2);
-      internals(context).writeLengths(1);
+      internals(context).writeLengths(2, 1);
       assertEquals(await readLengths(), [2, 1]);
 
       for (const queryLength of [0, 5, 1.5]) {
-        assertThrows(() => internals(context).writeLengths(queryLength), ExecutionError);
+        assertThrows(() => internals(context).writeLengths(2, queryLength), ExecutionError);
       }
       assertEquals(await readLengths(), [2, 1], "拒否された書き出しは uniform を触らない");
     } finally {

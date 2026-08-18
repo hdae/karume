@@ -329,6 +329,21 @@ const PARITY_CASES: readonly StateCase[] = [
     query: 8,
     rowsBlock: 5,
   },
+  // **P が u32 の上限近く**（下限述語の引き算がどちら向きかで値が変わる唯一の形）。
+  // `col + W > limit` の加算形だと `P + 0` に対する causal 対角 `col = P` で
+  // `P + 2` が 2^32 を跨いで 0 に巻き戻り、自己参照の key が窓外と判定されて値が飛ぶ。
+  {
+    name: "sliding W2 P near u32 max",
+    batch: 1,
+    heads: 2,
+    kvHeads: 2,
+    chunkRows: 1,
+    depth: 4,
+    capacity: 2,
+    window: 2,
+    past: 0xfffffffe,
+    query: 1,
+  },
 ];
 
 /** 参照が「空行」と判定する行（`[B·H, M]` の平坦添字）。 */
@@ -348,6 +363,17 @@ const emptyRows = (spec: StateCase): readonly number[] => {
         }
       }
       if (!any) rows.push(plane * spec.chunkRows + row);
+    }
+  }
+  return rows;
+};
+
+/** pad 行（`row ≥ Q`）の `[B·H, M]` 平坦添字。 */
+const padRows = (spec: StateCase): readonly number[] => {
+  const rows: number[] = [];
+  for (let plane = 0; plane < spec.batch * spec.heads; plane += 1) {
+    for (let row = spec.query; row < spec.chunkRows; row += 1) {
+      rows.push(plane * spec.chunkRows + row);
     }
   }
   return rows;
@@ -377,14 +403,22 @@ Deno.test({
         assertEquals(report.pass, true, `${spec.name}: ${formatAllclose(report)}`);
         worstAbs = Math.max(worstAbs, report.maxAbsError);
         worstRel = Math.max(worstRel, report.maxRelError);
-        // ① 空行は**厳密 0**（tolerance の内側に隠れる誤りを別途締める）
+        // ① pad 行は**厳密 0**（tolerance の内側に隠れる誤りを別途締める）。空行はその
+        //   部分集合（valid 行は causal 自己参照で必ず非空）なので、包含も併せて見る —
+        //   崩れたら「空行 → 0」を pad 行の 0 書きが包含している根拠が消える
         const empties = emptyRows(spec);
-        for (const row of empties) {
+        const pads = padRows(spec);
+        assertEquals(
+          empties.filter((row) => !pads.includes(row)),
+          [],
+          `${spec.name}: 空行が pad 行の外に出た（空行 ⊂ pad 行が崩れている）`,
+        );
+        for (const row of pads) {
           for (let d = 0; d < spec.depth; d += 1) {
             assertEquals(
               Object.is(actual.out[row * spec.depth + d], 0),
               true,
-              `${spec.name}: 空行 ${row} の出力が厳密 0 でない（${
+              `${spec.name}: pad 行 ${row} の出力が厳密 0 でない（${
                 actual.out[row * spec.depth + d]
               }）`,
             );
@@ -405,12 +439,21 @@ Deno.test({
   },
 });
 
-/** 述語の直接検査に使う 1 枚ブロックのケース（S を読み戻してビット列で見る）。 */
+/**
+ * 述語の直接検査に使う 1 枚ブロックのケース（S を読み戻してビット列で見る）。
+ *
+ * 条件は 3 つ: ①有効行に述語内・述語外の列が**両方**実在する（causal 上限は全ケース・sliding の
+ * 下限は `P10 wrap` / `W6 r2 wrap pad` が踏む）②pad 行が実在する（S が書かれないことの門）
+ * ③行ブロック 1 枚（局所行 = グローバル行）。
+ * NOTE: 波 D-7 で ① が有効行だけを覆うようになったので、`sliding W2 empty rows`（Q=1 で
+ * 有効行が row 0 の 1 本・その 1 列は必ず述語内）はここでは述語外の列を作れない。同ケースは
+ * parity 側と故障注入（③PV の pad 行 0 書き）で引き続き踏む。
+ */
 const PREDICATE_CASES: readonly StateCase[] = [
   PARITY_CASES[2],
+  PARITY_CASES[7],
   PARITY_CASES[9],
   PARITY_CASES[11],
-  PARITY_CASES[13],
 ];
 
 Deno.test({
@@ -427,17 +470,20 @@ Deno.test({
         const base = stateColumnBase(spec.window, spec.past);
         const live = stateLiveColumns(spec.window, spec.past, spec.query);
         const rowsBlock = spec.rowsBlock ?? spec.chunkRows;
+        // 単一ブロックのケースだけを並べているので rowOffset = 0 = 有効行は先頭 Q 行
+        const effRows = Math.min(spec.query, rowsBlock);
         const bits = bitsOf(scores);
         let masked = 0;
         let written = 0;
+        let skipped = 0;
         for (let plane = 0; plane < spec.batch * spec.heads; plane += 1) {
-          for (let local = 0; local < rowsBlock; local += 1) {
+          for (let local = 0; local < effRows; local += 1) {
             // 単一ブロックのケースだけを並べているので、局所行 = グローバル行
             const limit = spec.past + local;
             for (let cl = 0; cl < live; cl += 1) {
               const col = base + cl;
               const inWindow = col <= limit &&
-                (!stateSliding(spec.window) || col + spec.window > limit);
+                (!stateSliding(spec.window) || limit - col < spec.window);
               const at = (plane * rowsBlock + local) * colCap + cl;
               if (inWindow) {
                 assertEquals(
@@ -461,10 +507,24 @@ Deno.test({
               }
             }
           }
+          // pad 行の S は**1 語も書かれない**（仕事量が M ではなく Q に比例することの直接の裏 —
+          // 毒値がそのまま残る。ここが書かれていたら ① が全 M 行を回している）
+          for (let local = effRows; local < rowsBlock; local += 1) {
+            for (let cl = 0; cl < live; cl += 1) {
+              const at = (plane * rowsBlock + local) * colCap + cl;
+              assertEquals(
+                scores[at],
+                STATE_S_POISON,
+                `${spec.name}: pad 行 (${local},${cl}) の S が書かれている（① が M 行を回した）`,
+              );
+              skipped += 1;
+            }
+          }
         }
-        // 門が空振りしていない（両側の列が実在する形を選んである）
+        // 門が空振りしていない（両側の列と pad 行が実在する形を選んである）
         assert(written > 0, `${spec.name}: 述語内の列が 1 つも無い`);
         assert(masked > 0, `${spec.name}: 述語外の列が 1 つも無い（下限 / 上限が効いていない形）`);
+        assert(skipped > 0, `${spec.name}: pad 行が 1 つも無い（仕事量の門が空振り）`);
       }
     } finally {
       gpu.destroy();
@@ -656,7 +716,13 @@ const INJECTIONS: readonly Injection[] = [
   {
     label: "sliding の下限述語を削除",
     spec: PARITY_CASES[9],
-    apply: replaceIn(["qk"], " && col + params.window > limit", ""),
+    apply: replaceIn(["qk"], " && (limit - col) < params.window", ""),
+  },
+  // ①' 下限の引き算を u32 で巻き戻る加算形へ戻す（P が u32 上限近くでのみ値が変わる）
+  {
+    label: "下限述語を col + W > limit の加算形へ差し替え",
+    spec: PARITY_CASES[16],
+    apply: replaceIn(["qk"], "(limit - col) < params.window", "col + params.window > limit"),
   },
   // ② 読み側の ring 写像だけを `% C` に差し替える（読み書き同式 MUST を破る）
   {
@@ -664,11 +730,15 @@ const INJECTIONS: readonly Injection[] = [
     spec: PARITY_CASES[10],
     apply: replaceIn(["qk", "pv"], "col % params.window", "col % params.capacity"),
   },
-  // ③ ② の空行ガードを外す（exp(−inf − (−inf)) = NaN が分母へ入る）
+  // ③ ③PV の pad 行 0 書きを外す（pad 行が live 走査へ落ち、①② が覆っていない S / stats を食う）。
+  //   NOTE: 波 D-7 で ①② が有効行だけを覆うようになった結果、**空行は構造的に生じなくなった**
+  //   （valid 行は causal 自己参照で必ず非空・空行 ⊂ pad 行）。② の空行ガードは防御として残るが、
+  //   もう検出器を持てない — 「空行 / pad 行 → 厳密 0」（ADR 0067 決定 6 / ADR 0066 追記 6）を
+  //   守っているのはこの分岐なので、故障注入の相手をそちらへ移した。
   {
-    label: "行統計の空行ガードを削除",
+    label: "③PV の pad 行 0 書きを削除",
     spec: PARITY_CASES[13],
-    apply: replaceIn(["stats"], "let empty = amax == neg_inf;", "let empty = false;"),
+    apply: replaceIn(["pv"], "    out[at] = 0.0;\n    return;\n", ""),
   },
   // ④ GQA の kv 写像で r を無視する（head 対応が崩れる）
   {

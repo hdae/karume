@@ -229,6 +229,35 @@ const generationEncoding = (
 });
 
 /**
+ * context の容量束縛と run の解決済み束縛が、**両方に現れる記号**で一致することを確かめる
+ * （ADR 0066 追記 7 の「効く範囲の分担」の実行時執行）。
+ *
+ * 記号は 2 つの束縛点を持つ: 入力 shape（run — `bindSymbols`）と `spec.bindings`（context）。
+ * states と入力の**両方**に現れる記号はその 2 箇所で独立に決まるので、割れたまま走ると
+ * 「確保容量は C=4・計画と dispatch は C=3」のような分裂が例外も警告も無く成立する
+ * （state の読み書きが宣言 shape の外へ落ちる = robustness で捨てられる沈黙誤読）。
+ *
+ * MUST: エンコードの前に落とす（この段の失敗は state に届かないので poison しない）。
+ * NOTE: 片方にしか現れない記号は対象外 — states 専用記号は run の bindings で与えられない
+ * （`bindSymbols` が拒否）し、値 shape 専用の記号は context が知らない。
+ */
+const assertGenerationBindings = (
+  contextBindings: SymbolBindings,
+  runBindings: SymbolBindings,
+): void => {
+  for (const [sym, value] of Object.entries(contextBindings)) {
+    if (!Object.hasOwn(runBindings, sym)) continue;
+    if (runBindings[sym] !== value) {
+      throw new ExecutionError(
+        `記号 '${sym}' が GenerationContext の束縛 ${value} と run の解決値 ` +
+          `${runBindings[sym]} で食い違う（states と入力の両方に現れる記号は 2 つの束縛点で` +
+          "同じ値でなければならない — ADR 0066 追記 7）",
+      );
+    }
+  }
+};
+
+/**
  * 進行中 run の常駐入力束縛を全て返す（{@link ResidentTensor.dispose} の予約を解く）。
  *
  * MUST: 成功・失敗のどちらの経路でも必ず 1 度呼ぶ。返し損ねるとその常駐テンソルは
@@ -752,7 +781,24 @@ export class Session {
     if (this.#disposal !== undefined) {
       return Promise.reject(new ExecutionError("dispose 済みの Session では実行できない"));
     }
-    return this.#serialize(() => this.#runOnce(inputs, bindings, generation));
+    // MUST: context のリース取得は `#serialize` に積む**前**（`enqueue` の `batch.enter` と
+    // 同じ理由 — 本体はマイクロタスクを 1 段挟むので、本体で取ると「未 await の run の直後に
+    // `context.rewind()`」が「進行中 run が居ない」と判定され、捕捉済み P と uniform が分裂する）。
+    // 検査の失敗は従来どおり戻り Promise の reject で返す（同期 throw に変えない）。
+    const lease = generation?.context[RUNTIME_INTERNAL];
+    try {
+      lease?.acquireRun();
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+    return this.#serialize(async () => {
+      try {
+        return await this.#runOnce(inputs, bindings, generation);
+      } finally {
+        // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると以後の rewind が永久に拒否される）。
+        lease?.releaseRun();
+      }
+    });
   }
 
   /**
@@ -921,9 +967,14 @@ export class Session {
       [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.shape]),
     );
     // MUST: 論理長は run の頭で 1 度だけ読む（汚染・破棄・device 消失はこの読みが落とす）。
-    // uniform へ書く値・dispatch 数の算出・容量の検査が同じ 1 つの値から出ることが、
-    // 「GPU が走査する範囲」と「ホストが撃った workgroup 数」の一致の根拠になる。
-    const pastLength = generation?.context.pastLength ?? 0;
+    // uniform へ書く値・dispatch 数の算出・容量の検査・進行が同じ 1 つの値から出ることが、
+    // 「GPU が走査する範囲」と「ホストが撃った workgroup 数」の一致の根拠になる（下流の
+    // `writeLengths` / `advance` はこの捕捉値を受け取り、context の現在値と照合する）。
+    // MUST: 読むのは**内部面**（利用者面の `pastLength` ではない）。dispose は 2 段で、
+    // 受理済みのこの run は 1 段目（受付終了）の後にも完走する契約のため。
+    const pastLength = generation === undefined
+      ? 0
+      : generation.context[RUNTIME_INTERNAL].pastLength();
     /**
      * generation run の context 側の面。**context と encoding を 1 つの変数に束ねる**のは、
      * 焼き込み経路（{@link Session.#generationGroups}）が両方を同時に要るため — 別々に持つと
@@ -944,6 +995,9 @@ export class Session {
     // MUST: 束縛の解決（= 入力 shape の検証）はヒット・ミスに関わらず**毎 run 走らせる**。
     // ここが飛ぶと、キャッシュに当たった run だけ入力 shape の宣言不一致を素通りする。
     const resolved = bindSymbols(graph, inputShapes, bindings, residentNames(residentInputs));
+    if (generation !== undefined) {
+      assertGenerationBindings(generation.context[RUNTIME_INTERNAL].bindings, resolved);
+    }
     const preparedKey = this.#preparedKey(resolved, residentInputs, stateShapes);
     const prepared = this.#takePrepared(preparedKey);
     // 計画（planGraph）と融合判定（planFusions）はどちらも GPU に触れない純関数で、ヒット時は
@@ -1074,8 +1128,16 @@ export class Session {
               // MUST: 論理長の検査と搬送は **dispatch を 1 本も積む前**（ここまでの失敗は state に
               // 届かないので poison しない）。`queue.writeBuffer` は issue 順で queue timeline へ
               // 載るので、先行 submit を追い越さない（ADR 0004 不変条件④ / ADR 0066 追記 4）。
-              assertGenerationRun(limits, pastLength, generation.queryLength);
-              generation.context[RUNTIME_INTERNAL].writeLengths(generation.queryLength);
+              assertGenerationRun(
+                limits,
+                generation.context.chunkLength,
+                pastLength,
+                generation.queryLength,
+              );
+              generation.context[RUNTIME_INTERNAL].writeLengths(
+                pastLength,
+                generation.queryLength,
+              );
             }
             // MUST: スナップショットは書き dispatch を**積む前**（`SubmitScheduler.dispatch` は
             // チャンク上限・時間予算で run の途中に自動 submit する — src/gpu/submit.ts）。
@@ -1190,7 +1252,7 @@ export class Session {
       // 「論理長は run の成功で進む」の成功はこの意味）。readback や後始末で落ちた run は
       // 物理 ring だけが進んだ状態なので、進めずに下の poison へ倒す。
       if (generation !== undefined) {
-        generation.context[RUNTIME_INTERNAL].advance(generation.queryLength);
+        generation.context[RUNTIME_INTERNAL].advance(pastLength, generation.queryLength);
       }
       return outputs;
     } catch (cause) {

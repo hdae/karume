@@ -1902,7 +1902,13 @@ export class RecipeBuilder {
         }),
         PARAMS_UNIFORM_USAGE,
       );
-      const dispatchGeometry = { batchHeads, rowsBlock: block.rows, depth, window };
+      const dispatchGeometry = {
+        batchHeads,
+        rowsBlock: block.rows,
+        rowOffset: block.offset,
+        depth,
+        window,
+      };
       const scores = builder.allocTemp(batchHeads * block.rows * colCap * 4);
       const rowStats = builder.allocTemp(batchHeads * block.rows * STATE_STATS_STRIDE * 4);
 
@@ -1925,12 +1931,13 @@ export class RecipeBuilder {
       });
 
       // ② 行統計 — 1 行 = 1 workgroup の行方向 grid-stride（live の走査は行ループの内側）。
+      // 覆うのは有効行だけなので、workgroup 数も ① と同じく論理長から算出する。
       builder.dispatch({
         key: statsKey,
         pipeline: stats.pipeline,
         layout: stats.layout,
         params: this.#writeParams(
-          stateStatsParams(batchHeads * block.rows, colCap, window),
+          stateStatsParams(batchHeads, block.rows, block.offset, colCap, window),
           PARAMS_UNIFORM_USAGE,
         ),
         bindings: [
@@ -1938,7 +1945,8 @@ export class RecipeBuilder {
           { binding: 2, source: rowStats },
           { binding: 3, source: { kind: "lengths" } },
         ],
-        workgroups: stateStatsWorkgroups(dispatchGeometry, limit, `${where} ②stats`),
+        workgroups: (_past, query) =>
+          stateStatsWorkgroups(dispatchGeometry, query, limit, `${where} ②stats`),
       });
 
       // ③PV — 出力は `rowOffset` からの `rowsBlock` 行**全て**（pad 行も full-write）。

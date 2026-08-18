@@ -1,6 +1,8 @@
 // karume attention_state_stats (states 形の行統計 m = amax(S) と inv = 1/Σexp(S - m), f32)
 struct Params {
-  rows: u32,
+  batch_heads: u32,
+  rows_block: u32,
+  row_offset: u32,
   col_cap: u32,
   window: u32,
   neg_inf: u32,
@@ -22,6 +24,13 @@ fn live_columns(past: u32, query: u32) -> u32 {
   return past + query;
 }
 
+fn effective_rows(query: u32) -> u32 {
+  if (query <= params.row_offset) {
+    return 0u;
+  }
+  return min(params.rows_block, query - params.row_offset);
+}
+
 var<workgroup> scratch: array<f32, 256>;
 
 @compute @workgroup_size(256)
@@ -33,8 +42,13 @@ fn main(
   let lid = lid3.x;
   let neg_inf = bitcast<f32>(params.neg_inf);
   let live = live_columns(lengths.past, lengths.query);
-  var row = wid.x;
-  while (row < params.rows) {
+  // 有効行は各 z 平面の**前詰め** rows 本。total = 0 ならループへ入らないので rows での
+  // 除算・剰余は 0 除算にならない（ホストも 0 なら dispatch を積まない）
+  let rows = effective_rows(lengths.query);
+  let total = params.batch_heads * rows;
+  var index = wid.x;
+  while (index < total) {
+    let row = (index / rows) * params.rows_block + index % rows;
     let base = row * params.col_cap;
 
     // ① 行の最大値。identity は **-inf**（有限 sentinel は MUST NOT — ADR 0067 決定 6）
@@ -92,6 +106,6 @@ fn main(
     }
     // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
     workgroupBarrier();
-    row = row + nwg.x;
+    index = index + nwg.x;
   }
 }
