@@ -284,10 +284,10 @@ I32_DTYPES = frozenset({"i32"})
 IO_DTYPES = SEMANTIC_DTYPES
 #: ランタイムが実行できる格納 dtype（宣言としては bf16 も valid）。
 #: `i32` は記号依存定数の焼き込み先として実行対象（生の int32 — ADR 0010）。
-#: `f16` は ADR 0018 / `i8` は ADR 0019 — 適格な重みスロットは圧縮のまま GPU 常駐し、
-#: 適格外はロード時に CPU で f32 展開されるので、どちらの経路でも実行できる
-#: （TS 側 RuntimeSupport.storage の鏡像）。
-M0_STORAGE_DTYPES = frozenset({"f32", "f16", "i8", "i32"})
+#: `f16` は ADR 0018 / `i8` は ADR 0019 / `i4` は ADR 0069 — 適格な重みスロットは圧縮のまま
+#: GPU 常駐し、適格外はロード時に CPU で f32 展開されるので、どちらの経路でも実行できる
+#: （TS 側 RuntimeSupport.storage の鏡像）。i4 の適格だけ狭い（linear の重みスロット限定）。
+M0_STORAGE_DTYPES = frozenset({"f32", "f16", "i8", "i4", "i32"})
 
 OpKind = Literal[
     "unary",

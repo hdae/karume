@@ -22,6 +22,7 @@
 
 import { assertRuntimeSupport, type KarumeModel } from "../format/container.ts";
 import { alignF16Payload, decodeF16 } from "../format/f16.ts";
+import { decodeI4 } from "../format/i4.ts";
 import { alignI8Payload, decodeI8 } from "../format/i8.ts";
 import type { IrDtype } from "../format/ir.ts";
 import { type SafetensorsFile, tensorBytes } from "../format/safetensors.ts";
@@ -67,6 +68,7 @@ import {
   declaredDtypes,
   eligibleCompressedInitializers,
   ExecutionError,
+  linearWeightInitializers,
   planGraph,
   statesOnlySymbols,
   type SymbolBindings,
@@ -514,8 +516,14 @@ type SessionState = {
    * f32 として読む — カーネル変種の選択はこの表 1 つで決まる。
    */
   readonly weightStorages: ReadonlyMap<string, WeightStorage>;
-  /** i8 で常駐した重みの per-channel scale バッファ（変種の追加束縛 — ADR 0019）。 */
+  /** i8 / i4 で常駐した重みの scale バッファ（変種の追加束縛 — ADR 0019 / 0069）。 */
   readonly weightScaleBuffers: ReadonlyMap<string, GPUBuffer>;
+  /**
+   * i4 で常駐した重みの group 長（ADR 0069 決定 2）。WGSL に shift を焼くのでキー・生成の
+   * 両方がこの表から引く — 宣言（graph）と別の値を渡せる形にすると沈黙誤値になるため、
+   * 載せるのは executor（宣言から写した 1 箇所）だけ。
+   */
+  readonly weightGroupSizes: ReadonlyMap<string, number>;
   readonly storage: StorageDiagnostics;
   /** linear の実行形（opt-in — {@link SessionOptions.linearCompute}）。 */
   readonly linearCompute: "f32" | "i8a8" | "f16";
@@ -624,8 +632,11 @@ export class Session {
     const eligible = eligibleCompressedInitializers(model.graph);
     // i8 の per-channel scale が掛かる軸（消費側 op から決まる — ADR 0019）。
     const channelAxes = weightChannelAxes(model.graph);
+    // i4 の適格はさらに狭く「重みスロットでの消費が linear だけ」（ADR 0069 決定 5）。
+    const linearOnly = linearWeightInitializers(model.graph);
     const weightStorages = new Map<string, WeightStorage>();
     const weightScaleBuffers = new Map<string, GPUBuffer>();
+    const weightGroupSizes = new Map<string, number>();
     let residentCompressedBytes = 0;
     let hostExpandedBytes = 0;
     // MUST: 重みアップロードも errorScope で囲む（ADR 0004 の「errorScope 常設」）。上限超過の
@@ -643,10 +654,10 @@ export class Session {
           );
         }
         const raw = tensorBytes(model.file, view);
-        // 格納 f16 / i8 だけが 2 経路に分かれる（ADR 0018 / 0019）。適格なら生バイトのまま
-        // 常駐させ dequant はカーネル内（VRAM 削減はこれで初めて成立する）、適格外はここで
-        // f32 へ展開する（正しさは保たれ VRAM 削減はゼロ）。他の格納 dtype は生バイトが
-        // そのまま GPU 表現。
+        // 格納 f16 / i8 / i4 だけが 2 経路に分かれる（ADR 0018 / 0019 / 0069）。適格なら
+        // 生バイトのまま常駐させ dequant はカーネル内（VRAM 削減はこれで初めて成立する）、
+        // 適格外はここで f32 へ展開する（正しさは保たれ VRAM 削減はゼロ）。他の格納 dtype は
+        // 生バイトがそのまま GPU 表現。
         let payload: Uint8Array<ArrayBuffer> | Float32Array<ArrayBuffer> = raw;
         if (initializer.storage.dtype === "f16") {
           if (eligible.has(name)) {
@@ -682,6 +693,39 @@ export class Session {
             weightScaleBuffers.set(name, scaleBuffer);
           } else {
             payload = decodeI8(raw, shape, scale.values, scale.shape);
+            hostExpandedBytes += payload.byteLength;
+          }
+        }
+        if (initializer.storage.dtype === "i4") {
+          const scale = scaleTensor(model.file, name, initializer.storage.scale);
+          const shape = model.graph.values[name].shape.map(Number);
+          // 値域（2 冪 ≥ 16・整除）は parseIrGraph が保証済み。存在は型の上でだけ optional
+          // なので、黙って読み飛ばさず言い直す（「格納 i8 なのに scale が無い」と同じ流儀）。
+          const groupSize = initializer.storage.groupSize;
+          if (groupSize === undefined) {
+            throw new ExecutionError(`initializer '${name}': 格納 i4 なのに group_size が無い`);
+          }
+          // 適格は f16 / i8 より狭い「消費が linear の重みスロットのみ」（ADR 0069 決定 5 —
+          // 展開経路が linear のタイル読みにしか無い）。他の重みスロットと共有される i4 は
+          // CPU 展開の受け皿へ（正しさは保たれ VRAM 削減はゼロ — i8 の適格外と同じ設計）。
+          if (eligible.has(name) && linearOnly.has(name)) {
+            // ペイロードは詰め物不要で常に 4 バイト整列 — バイト長 = numel / 2 で、numel は
+            // group_size（2 冪 ≥ 16）の倍数だからバイト長は 8 の倍数（ADR 0069 決定 2）。
+            weightStorages.set(name, "i4");
+            weightGroupSizes.set(name, groupSize);
+            // MUST: scale のバッファも「GPU 常駐圧縮」に数える（i8 と同じ — 実際に抱える
+            // バイト数。exporter の storage_breakdown と診断の意味を揃える）。
+            residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
+            const scaleBuffer = weights.allocHostWritten(
+              Math.max(4, scale.bytes.byteLength),
+              HOST_WRITTEN_USAGE,
+            );
+            if (scale.bytes.byteLength > 0) {
+              gpu.device.queue.writeBuffer(scaleBuffer, 0, scale.bytes);
+            }
+            weightScaleBuffers.set(name, scaleBuffer);
+          } else {
+            payload = decodeI4(raw, shape, scale.values, scale.shape, groupSize);
             hostExpandedBytes += payload.byteLength;
           }
         }
@@ -742,6 +786,7 @@ export class Session {
       prepared: new Map(),
       weightStorages,
       weightScaleBuffers,
+      weightGroupSizes,
       storage: { residentCompressedBytes, hostExpandedBytes },
       linearCompute,
       attentionCompute,

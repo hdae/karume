@@ -376,6 +376,29 @@ export const eligibleCompressedInitializers = (graph: IrGraph): ReadonlySet<stri
 };
 
 /**
+ * 重みスロットでの消費が **linear だけ**の initializer（i4 の適格集合の狭め — ADR 0069
+ * 決定 5。エクスポータ側 `karume/emit.py: linear_weight_initializers` の鏡像）。
+ *
+ * MUST: {@link eligibleCompressedInitializers} との**積**で使う — ここは「重みスロットの中で
+ * linear 以外（conv 系 / embedding）にも食われていないか」だけを見る。i4 の展開経路は linear
+ * のタイル読みにしか無いので、共有された重みを常駐させると他方のカーネルが packed バイトを
+ * f32 として読む（例外は出ない）。
+ */
+export const linearWeightInitializers = (graph: IrGraph): ReadonlySet<string> => {
+  const linear = new Set<string>();
+  const other = new Set<string>();
+  for (const node of graph.nodes) {
+    const weightSlot = WEIGHT_SLOTS.get(node.op);
+    if (weightSlot === undefined) continue;
+    const name = node.ins[weightSlot];
+    if (name === undefined || !Object.hasOwn(graph.initializers, name)) continue;
+    (node.op === "linear" ? linear : other).add(name);
+  }
+  for (const name of other) linear.delete(name);
+  return linear;
+};
+
+/**
  * 値名 → グラフ内での消費回数。MUST: `node.ins` の厳密な延べ計数（同じ値を 2 回取れば 2）。
  *
  * NOTE: 多出力ノード（ADR 0068 決定 1）でも数え方は 1 文字も変わらない — 数えるのは**消費側**

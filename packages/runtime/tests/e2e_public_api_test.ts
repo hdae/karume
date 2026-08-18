@@ -176,7 +176,7 @@ Deno.test("公開面が capability 照会とモデル解析の失敗型を提供
   for (const op of ["matmul", "add", "sum", "gelu", "amax"]) {
     assertEquals(ops.includes(op), true, op);
   }
-  assertEquals(capabilities().storage, ["f16", "f32", "i32", "i8"]);
+  assertEquals(capabilities().storage, ["f16", "f32", "i32", "i4", "i8"]);
   assertThrows(() => openModel(new ArrayBuffer(4)), SafetensorsError);
 });
 

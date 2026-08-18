@@ -28,9 +28,17 @@
  */
 
 /** 重みスロットの格納形。意味論はどれも f32（計算は常に f32 — ADR 0006）。 */
-export type WeightStorage = "f32" | "f16" | "i8";
+export type WeightStorage = "f32" | "f16" | "i8" | "i4";
 
-/** 変種の全数（スナップショットと縮退ハーネスの網羅を機械的に回すための列挙）。 */
+/**
+ * 融合 5 カーネルが**共有する**変種の全数（スナップショットと縮退ハーネスの網羅を機械的に
+ * 回すための列挙）。
+ *
+ * MUST: `i4` は入れない — i4 の実行経路は **linear 限定**（ADR 0069 決定 5）で、conv 系 /
+ * embedding の生成入力に i4 を渡すと {@link weightScaleWgsl} が束縛を出さないまま
+ * `dequant(i, scale)` が未定義識別子を参照する不成立 WGSL になる。linear の i4 変種は
+ * スナップショット側が明示的に並べる。
+ */
 export const WEIGHT_STORAGES: readonly WeightStorage[] = ["f32", "f16", "i8"];
 
 /**
@@ -40,7 +48,7 @@ export const WEIGHT_STORAGES: readonly WeightStorage[] = ["f32", "f16", "i8"];
  * 暗黙シェーダキャッシュを取り直すうえ、キー固定のテストが一斉に動く。
  */
 export const weightKeyPart = (storage: WeightStorage): string =>
-  storage === "f32" ? "" : storage === "f16" ? ":wf16" : ":wi8";
+  storage === "f32" ? "" : storage === "f16" ? ":wf16" : storage === "i8" ? ":wi8" : ":wi4";
 
 /**
  * 重みバッファの WGSL 要素型（f16 は 2 要素・i8 は 4 要素を 1 語に詰めた格納なので u32）。
@@ -52,7 +60,13 @@ export const weightArrayType = (storage: WeightStorage, quad = false): string =>
 
 /** WGSL 先頭コメントに足す但し書き（f32 は空 — 既存バイト列を保つ）。 */
 export const weightNote = (storage: WeightStorage): string =>
-  storage === "f32" ? "" : storage === "f16" ? ", 重み f16 格納" : ", 重み i8 格納";
+  storage === "f32"
+    ? ""
+    : storage === "f16"
+    ? ", 重み f16 格納"
+    : storage === "i8"
+    ? ", 重み i8 格納"
+    : ", 重み i4 格納";
 
 /**
  * i8 変種で per-channel scale を束ねる局所変数の**既定の**名前。
@@ -103,6 +117,42 @@ fn dequant(i: u32) -> f32 {
 }
 `;
   }
+  if (storage === "i4") {
+    // MUST: nibble の展開順は「要素 2i = 下位 / 2i+1 = 上位・u = q + 8」（ADR 0069 決定 4 —
+    // 正本はエクスポータ emit.py の pack_int4。取り違えても形も型も合う沈黙誤値になるので、
+    // 検出は非対称パターンの GPU 門が持つ）。scale は group ごとで k に依存するため、i8 と
+    // 違いループ不変に巻き上げられない — 呼び出し側（gemm.ts の fillBLinear）が quad ごとに
+    // 引いて渡す（4 整列 quad は group_size ≥ 16 のため group を跨がない）。
+    return quad
+      ? `
+@group(0) @binding(${scaleBinding}) var<storage, read> wscale: array<f32>;
+
+// i4 格納の quad 展開: 要素 i..i+3 = 同一語内の 2 バイト（i は 4 の倍数 — 語も group も跨がない）
+// 復元は f32(i32(u) − 8) · scale の成分ごと f32 乗算（CPU 展開 format/i4.ts と同一の丸め）
+fn dequant4(i: u32, scale: f32) -> vec4<f32> {
+  let bytes = unpack4xU8(${name}[i >> 3u]);
+  let b0 = bytes[(i >> 1u) & 3u];
+  let b1 = bytes[((i >> 1u) & 3u) + 1u];
+  return vec4<f32>(
+    f32(i32(b0 & 0xFu) - 8),
+    f32(i32(b0 >> 4u) - 8),
+    f32(i32(b1 & 0xFu) - 8),
+    f32(i32(b1 >> 4u) - 8),
+  ) * scale;
+}
+`
+      : `
+@group(0) @binding(${scaleBinding}) var<storage, read> wscale: array<f32>;
+
+// i4 格納の展開: 要素 i = f32(i32(nibble) − 8) · scale
+// （1 語 = 8 要素。平坦添字で語 i/8・バイト (i/2)%4・nibble i%2 を割る — ADR 0069）
+fn dequant(i: u32, scale: f32) -> f32 {
+  let byte = unpack4xU8(${name}[i >> 3u])[(i >> 1u) & 3u];
+  let nibble = select(byte & 0xFu, byte >> 4u, (i & 1u) == 1u);
+  return f32(i32(nibble) - 8) * scale;
+}
+`;
+  }
   // MUST: quad 版でも scale は**成分ごとの f32 乗算**（`vec4 * scalar`）。スカラ経路の
   // `f32(q) * s` と同一の演算・同一の丸めで、ADR 0019 の「scale は縮約の外へ出さない」を保つ。
   return quad
@@ -136,6 +186,9 @@ fn dequant(i: u32, scale: f32) -> f32 {
  * 1 チャネルの 4 カーネル（conv1d / conv2d 直接 / conv_transpose1d / embedding）の生成物を
  * 1 バイトも動かさないための既定で、スナップショット（tests/fixtures/wgsl/）が検出器。
  * 複数チャネルを担当する側（GEMM 骨格の充填スロット）だけがスロットごとの別名を渡す。
+ *
+ * NOTE: i4 は**ここで束ねない**（空文字のまま）— group scale は k 依存でループ不変が
+ * 成立しないため、linear の充填側（gemm.ts の fillBLinear）が quad ごとに引く（ADR 0069）。
  */
 export const weightScaleWgsl = (
   storage: WeightStorage,

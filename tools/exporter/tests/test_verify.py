@@ -1739,12 +1739,15 @@ class TestSelfReader:
     （`packages/runtime/src/format/safetensors.ts`）の鏡像であるべき、という理由も同じ向き。
     """
 
-    def test_a_packed_four_bit_container_is_read_and_only_the_capability_gate_fires(self, tmp_path):
-        """宣言 / shape / group 形 scale の突合まで通り、未開放の capability だけが残る。"""
+    def test_a_packed_four_bit_container_passes_the_full_verification(self, tmp_path):
+        """宣言 / shape / group 形 scale / runtime support の全規則を自前リーダ経由で通る
+        （実行 capability は実行経路と同時に開放済み — ADR 0069 Phase 1 第 3 便）。"""
         path = i4_container(tmp_path / "m.safetensors", scale_shape=[3, 2])
 
-        with pytest.raises(ContainerError, match=re.escape("非対応 格納 dtype 'i4'")):
-            verify_model(path)
+        graph = verify_model(path)
+
+        assert graph.initializers["w"].storage.dtype == "i4"
+        assert graph.initializers["w"].storage.group_size == 16
 
     def test_a_keepdim_scale_on_a_packed_four_bit_weight_is_rejected(self, tmp_path):
         """group 形の分岐が**実ファイル**でも効く（keepdim 形 `[3,1]` は group 数 2 と違う）。

@@ -32,7 +32,6 @@ from karume.ir import (
     IrStorage,
     IrValue,
 )
-from karume.ops import M0_STORAGE_DTYPES
 from karume.quantize import (
     channel_scale,
     dequantize_int4,
@@ -753,31 +752,13 @@ class TestI4Storage:
 
         assert_reader_layout(path)  # 例外が出なければ合格（I4 の先頭 4 バイト整列を含む）
 
-    def test_the_i4_file_stops_only_at_the_closed_capability_gate(self, tmp_path):
-        """i4 の実行 capability は未開放（第 1 便の裁定 — 実行経路の便で開く）。
-
-        `assert_runtime_support` は reader / container 層より**後**なので、ここで
-        capability 不足だけが出るのは「自前リーダで読め、宣言・shape・group 形 scale の突合を
-        全部通った」ことの裏。
-        """
-        graph, tensors, scales = int4_weight_graph()
-
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
-
-        with pytest.raises(ContainerError, match="非対応 格納 dtype 'i4'"):
-            verify_model(path)
-
-    def test_the_i4_file_passes_the_full_verification_once_the_capability_opens(
-        self, tmp_path, monkeypatch
-    ):
-        """capability の 1 行だけを開けて残り全規則を通す（第 3 便が開ける先の予行）。
+    def test_the_i4_file_passes_the_full_verification(self, tmp_path):
+        """emit → verify_model の往復が i4 で最後まで通る（実行 capability は第 3 便で開放済み）。
 
         ここが緑なのは、自前リーダ（`verify._read_container`）が I4 コンテナを読めていること
-        そのもの — `safetensors` の `safe_open` はこのファイルを開けない。
+        そのもの — `safetensors` の `safe_open` はこのファイルを開けない。宣言・shape・
+        group 形 scale・runtime support・op 契約の全規則を通る。
         """
-        from karume import verify
-
-        monkeypatch.setattr(verify, "M0_STORAGE_DTYPES", frozenset({*M0_STORAGE_DTYPES, "i4"}))
         graph, tensors, scales = int4_weight_graph()
 
         path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)

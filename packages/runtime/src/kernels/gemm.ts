@@ -277,6 +277,13 @@ type GemmSpec =
     readonly compute?: GemmCompute;
     /** 平坦化後の行数 M（幾何のバケット — 省略時は既定幾何）。 */
     readonly rows?: number;
+    /**
+     * i4 の group 長の log2（`weight: "i4"` のとき**必須**・他では禁止 — ADR 0069）。
+     * WGSL に焼くので、group 長が違えばキーも違う（linearKey が `g<group>` を付ける）。
+     * scale 添字は `wcol · (dims.k >> shift) + (wk0 >> shift)` — group 数は既存の uniform
+     * `dims.k` から導けるため params の形は変わらない。
+     */
+    readonly weightGroupShift?: number;
   }
   | {
     /**
@@ -661,27 +668,39 @@ const fillBLinear = (
   weight: WeightStorage,
   v4: boolean,
   compute: GemmCompute = "f32",
+  groupShift?: number,
 ): string => {
+  // i4 の group scale は k 依存なのでチャネル不変の巻き上げ（{@link scaleVar}）が使えない —
+  // **quad ごと**に 1 度引く（wk0 は 4 整列・group_size ≥ 16 なので quad は group を跨がない
+  // — ADR 0069 決定 3 の「タイル読み込み時に group 境界で引き直す」の実装形）。端 quad
+  // （wk0 ≥ dims.k / wcol ≥ dims.n）の添字は WGSL の境界付きアクセスで安全で、読んだ値は
+  // ガードにより一度も使われない（prologueBLinear の端タイルと同じ扱い）。
+  const groupScale = (slot: number): string =>
+    weight === "i4"
+      ? `
+      let wgs${slot} = wscale[wcol${slot} * (dims.k >> ${groupShift}u) + (wk0 >> ${groupShift}u)];`
+      : "";
+  const scaleExpr = (slot: number): string => weight === "i4" ? `wgs${slot}` : scaleVar(slot);
   const filled = slots(gemmColumnSlots(geometry)).map((slot) =>
     `    var wv${slot} = vec4<f32>(0.0);
 ${
       v4
-        ? `    if (wcol${slot} < dims.n && wk0 < dims.k) {
-      wv${slot} = ${weightRead4(name, weight, `wrow_base${slot} + wk0`, scaleVar(slot))};
+        ? `    if (wcol${slot} < dims.n && wk0 < dims.k) {${groupScale(slot)}
+      wv${slot} = ${weightRead4(name, weight, `wrow_base${slot} + wk0`, scaleExpr(slot))};
     }`
         : `    if (wcol${slot} < dims.n) {
-      let wbase = wrow_base${slot} + wk0;
+      let wbase = wrow_base${slot} + wk0;${groupScale(slot)}
       if (wk0 < dims.k) {
-        wv${slot}.x = ${weightRead(name, weight, "wbase", scaleVar(slot))};
+        wv${slot}.x = ${weightRead(name, weight, "wbase", scaleExpr(slot))};
       }
       if (wk0 + 1u < dims.k) {
-        wv${slot}.y = ${weightRead(name, weight, "wbase + 1u", scaleVar(slot))};
+        wv${slot}.y = ${weightRead(name, weight, "wbase + 1u", scaleExpr(slot))};
       }
       if (wk0 + 2u < dims.k) {
-        wv${slot}.z = ${weightRead(name, weight, "wbase + 2u", scaleVar(slot))};
+        wv${slot}.z = ${weightRead(name, weight, "wbase + 2u", scaleExpr(slot))};
       }
       if (wk0 + 3u < dims.k) {
-        wv${slot}.w = ${weightRead(name, weight, "wbase + 3u", scaleVar(slot))};
+        wv${slot}.w = ${weightRead(name, weight, "wbase + 3u", scaleExpr(slot))};
       }
     }`
     }
@@ -1163,6 +1182,7 @@ const linearVariantWgsl = (
   weight: WeightStorage,
   v4: boolean,
   compute: GemmCompute = "f32",
+  groupShift?: number,
 ): string => {
   // MUST: i8 重み × f16 計算は組まない（w8a16 — ADR 0028 決定 3）。ALU が 1:1 の機では
   // 速度の案として成立せず、品質の案としては需要が出てから別途裁定する。黙って f32 計算へ
@@ -1171,6 +1191,20 @@ const linearVariantWgsl = (
     throw new CodegenError(
       "linear: 重み i8 格納 × f16 計算（w8a16）は未実装 — " +
         "linearCompute を 'f32' か 'i8a8' にするか、重みを f32 / f16 格納で持つこと",
+    );
+  }
+  // i4 も同型（w4a16 は未実装 — ADR 0069。黙って f32 計算へ落とさない理由は i8 と同文）。
+  if (compute === "f16" && weight === "i4") {
+    throw new CodegenError(
+      "linear: 重み i4 格納 × f16 計算（w4a16）は未実装 — " +
+        "linearCompute を 'f32' にするか、重みを f32 / f16 格納で持つこと",
+    );
+  }
+  // MUST: group 長の log2 は i4 と 1 対 1（欠けたまま生成すると scale 添字が壊れた WGSL が
+  // 出る・i4 以外に付くのは呼び出し側の結線バグ）— どちらも生成の入口で落とす。
+  if ((weight === "i4") !== (groupShift !== undefined)) {
+    throw new CodegenError(
+      `linear: weightGroupShift は重み i4 格納と対で渡す（weight=${weight} / shift=${groupShift}）`,
     );
   }
   const element = v4 ? "vec4<f32>" : "f32";
@@ -1187,7 +1221,7 @@ const linearVariantWgsl = (
     `${quadDims(v4)}${prologueA(geometry, "linear", v4)}
 ${prologueBLinear(geometry, weight)}`,
     `${fillA(geometry, "x", v4, undefined, compute)}
-${fillBLinear(geometry, "w", weight, v4, compute)}`,
+${fillBLinear(geometry, "w", weight, v4, compute, groupShift)}`,
     store(geometry, "out", "linear", v4, true),
     "",
     gemmAccumulatorInit(geometry),
@@ -1653,7 +1687,13 @@ export const gemmWgsl = (spec: GemmSpec): string => {
   assertGemmGeometry(geometry, spec.op);
   switch (spec.op) {
     case "linear":
-      return linearVariantWgsl(geometry, spec.weight, spec.v4, spec.compute);
+      return linearVariantWgsl(
+        geometry,
+        spec.weight,
+        spec.v4,
+        spec.compute,
+        spec.weightGroupShift,
+      );
     case "conv1d":
       return conv1dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "conv2d":

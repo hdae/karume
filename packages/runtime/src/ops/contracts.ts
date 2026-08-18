@@ -746,11 +746,12 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
       attrKeys: new Set([...attrKeysOf(found), ...optionalAttrKeysOf(found)]),
     }]),
   ),
-  // 生の int32 格納（ADR 0010）は記号依存定数の焼き込み先として実行対象。f16（ADR 0018）と
-  // i8（ADR 0019）は実行経路が入った（適格な重みスロットは圧縮のまま GPU 常駐・適格外は
-  // ロード時に CPU で f32 展開）ので、**どの initializer に付いていても実行できる**。
+  // 生の int32 格納（ADR 0010）は記号依存定数の焼き込み先として実行対象。f16（ADR 0018）・
+  // i8（ADR 0019）・i4（ADR 0069）は実行経路が入った（適格な重みスロットは圧縮のまま GPU
+  // 常駐・適格外はロード時に CPU で f32 展開）ので、**どの initializer に付いていても実行
+  // できる**。i4 の適格だけ狭い（linear の重みスロット限定 — 適格外は CPU 展開の受け皿）。
   // bf16 だけが宣言としては valid で実行できない（capability 不足として列挙で落ちる）。
-  storage: new Set(["f32", "f16", "i8", "i32"]),
+  storage: new Set(["f32", "f16", "i8", "i4", "i32"]),
   io: new Set(IO_DTYPES),
 };
 

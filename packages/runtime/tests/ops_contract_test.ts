@@ -142,15 +142,15 @@ Deno.test("WEIGHT_CHANNEL_AXES は WEIGHT_SLOTS と同じ op を覆う", () => {
 
 Deno.test("ランタイム対応表と capability 照会は契約表から導かれる", () => {
   assertEquals(RUNTIME_SUPPORT.ops.size, OP_CONTRACTS.size);
-  // 生の int32 格納は記号依存定数の焼き込み先として実行対象（ADR 0010）。f16（ADR 0018）と
-  // i8（ADR 0019）は実行経路が入った（適格な重みは圧縮のまま常駐・適格外は CPU 展開）。
-  // bf16 だけが宣言として valid なまま実行できない。
-  assertEquals([...RUNTIME_SUPPORT.storage], ["f32", "f16", "i8", "i32"]);
+  // 生の int32 格納は記号依存定数の焼き込み先として実行対象（ADR 0010）。f16（ADR 0018）・
+  // i8（ADR 0019）・i4（ADR 0069 — 適格は linear 限定）は実行経路が入った（適格な重みは
+  // 圧縮のまま常駐・適格外は CPU 展開）。bf16 だけが宣言として valid なまま実行できない。
+  assertEquals([...RUNTIME_SUPPORT.storage], ["f32", "f16", "i8", "i4", "i32"]);
   // 転送層の軸（未使用のグラフ入力にも効く）— i32 / bool も転送できる（ADR 0009）
   assertEquals([...RUNTIME_SUPPORT.io].sort(), ["bool", "f32", "i32"]);
   assertEquals([...IO_DTYPES].sort(), ["bool", "f32", "i32"]);
   assertEquals(capabilities().ops, [...OP_CONTRACTS.keys()].sort());
-  assertEquals(capabilities().storage, ["f16", "f32", "i32", "i8"]);
+  assertEquals(capabilities().storage, ["f16", "f32", "i32", "i4", "i8"]);
   // 射影の中身は**期待値リテラル**で固定する。契約表を辿り直して同じ式で突き合わせると、
   // 導出元が同一オブジェクトなので構造が壊れない限り絶対に落ちない検査になる。
   const support = (op: string): OpSupport => {

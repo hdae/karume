@@ -275,6 +275,8 @@ type RecipeBuilderContext = {
   readonly paramsCache: Map<string, GPUBuffer>;
   readonly weightStorages: ReadonlyMap<string, WeightStorage>;
   readonly weightScaleBuffers: ReadonlyMap<string, GPUBuffer>;
+  /** i4 で常駐した重みの group 長（キーと WGSL の shift の導出元 — ADR 0069）。 */
+  readonly weightGroupSizes: ReadonlyMap<string, number>;
   readonly linearCompute: "f32" | "i8a8" | "f16";
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
@@ -1343,13 +1345,27 @@ export class RecipeBuilder {
           "linearCompute を 'i8a8' にするか、この重みを f32 / f16 格納で持つこと",
       );
     }
+    // i4 も同型（w4a16 は未実装 — ADR 0069。黙って f32 計算へ落とさない理由は i8 と同文）。
+    // NOTE: linearCompute 'i8a8' × i4 常駐は**通常の f32 計算経路**へ流れる — i8a8 の述語が
+    // 「i8 常駐」を含む opt-in で、f32 / f16 常駐が通常経路で走るのと同じ扱い（縮退ではなく
+    // i4 の実装済み経路そのもの）。
+    if (compute === "f16" && weightStorage === "i4") {
+      throw new ExecutionError(
+        `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
+          "linearCompute 'f16' は i4 常駐の重みとは組めない（w4a16 は未実装 — ADR 0069）。" +
+          "linearCompute を 'f32' にするか、この重みを f32 / f16 格納で持つこと",
+      );
+    }
     const v4 = gemmUsesVec4(k, n);
+    // i4 は group 長がキーと WGSL（shift の焼き込み）の両方に効く（ADR 0069 — 同一キー →
+    // バイト同一 WGSL の codegen 決定性）。
+    const groupSize = weightStorage === "i4" ? this.#weightGroupSize(step) : undefined;
     // MUST: タイル幾何は平坦化後の行数 m のバケット（src/kernels/gemm-geometry.ts）。
     // キー・WGSL・dispatch に**同じ m** を通す。
-    const key = linearKey(weightStorage, v4, compute, m);
+    const key = linearKey(weightStorage, v4, compute, m, groupSize);
     const { pipeline, layout } = await this.#state.cache.get(
       key,
-      linearWgsl(weightStorage, v4, compute, m),
+      linearWgsl(weightStorage, v4, compute, m, groupSize),
     );
     const params = this.#writeParams(linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
@@ -2638,8 +2654,8 @@ export class RecipeBuilder {
   }
 
   /**
-   * i8 変種の追加束縛（per-channel scale）。f32 / f16 では空配列になり、bind group は従来の
-   * ままになる（ADR 0019）。
+   * i8 / i4 変種の追加束縛（per-channel / group scale）。f32 / f16 では空配列になり、
+   * bind group は従来のままになる（ADR 0019 / 0069）。
    *
    * MUST: 束縛番号はカーネル側の定数（`*_SCALE_BINDING`）から引く。WGSL の宣言と executor が
    * 別々に番号を持つと、変種を足したときに片方だけずれる。
@@ -2649,7 +2665,7 @@ export class RecipeBuilder {
     storage: WeightStorage,
     binding: number,
   ): readonly BindingRecipe[] {
-    if (storage !== "i8") return [];
+    if (storage !== "i8" && storage !== "i4") return [];
     const slot = WEIGHT_SLOTS.get(step.node.op);
     if (slot === undefined) {
       throw new ExecutionError(`op '${step.node.op}' に重みスロットの定義が無い`);
@@ -2657,9 +2673,29 @@ export class RecipeBuilder {
     const name = step.node.ins[slot];
     const buffer = this.#state.weightScaleBuffers.get(name);
     if (buffer === undefined) {
-      throw new ExecutionError(`initializer '${name}': i8 常駐なのに scale バッファが無い`);
+      throw new ExecutionError(`initializer '${name}': ${storage} 常駐なのに scale バッファが無い`);
     }
     return [{ binding, source: { kind: "resident", buffer } }];
+  }
+
+  /**
+   * i4 常駐の重みの group 長（executor が宣言から写した表 — ADR 0069）。
+   *
+   * 存在は結線の不変条件（i4 を weightStorages に載せた executor が必ず対で載せる）なので、
+   * 欠けは黙って既定へ落とさず fail loudly にする — 既定で埋めると「group 64 の資産が
+   * group 32 のパイプラインで走る」沈黙誤値になる。
+   */
+  #weightGroupSize(step: NodePlan): number {
+    const slot = WEIGHT_SLOTS.get(step.node.op);
+    if (slot === undefined) {
+      throw new ExecutionError(`op '${step.node.op}' に重みスロットの定義が無い`);
+    }
+    const name = step.node.ins[slot];
+    const groupSize = this.#state.weightGroupSizes.get(name);
+    if (groupSize === undefined) {
+      throw new ExecutionError(`initializer '${name}': i4 常駐なのに group_size が無い`);
+    }
+    return groupSize;
   }
 
   /**

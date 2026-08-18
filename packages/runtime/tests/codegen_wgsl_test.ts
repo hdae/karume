@@ -255,6 +255,14 @@ const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, tr
         conv2dIgemmWgsl(weight, v4),
       ] as const,
     ]),
+    // i4 は **linear 限定**（ADR 0069 決定 5）— conv 系の直積には入れない（group scale の
+    // 束縛経路が linear の充填にしか無く、conv へ渡すと不成立 WGSL になる）。group は既定の
+    // 32（追記 1）で代表させる — group 違いはキーの g 部と shift の焼き込みが対で変わるだけ。
+    [
+      `linear i4 g32${v4 ? " v4" : ""}`,
+      linearKey("i4", v4, "f32", undefined, 32),
+      linearWgsl("i4", v4, "f32", undefined, 32),
+    ] as const,
   ]);
 const EMBEDDING_WGSL = embeddingWgsl("f32");
 const CONV1D_WGSL = conv1dWgsl("f32");
@@ -422,6 +430,9 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["conv_transpose1d_wf16.wgsl", convTranspose1dWgsl("f16")],
     ["linear_wi8.wgsl", linearWgsl("i8", false)],
     ["linear_wi8_v4.wgsl", linearWgsl("i8", true)],
+    // i4 は linear 限定（ADR 0069）— group 32（既定）の shift を焼いた変種
+    ["linear_wi4.wgsl", linearWgsl("i4", false, "f32", undefined, 32)],
+    ["linear_wi4_v4.wgsl", linearWgsl("i4", true, "f32", undefined, 32)],
     ["embedding_wi8.wgsl", embeddingWgsl("i8")],
     ["conv1d_wi8.wgsl", conv1dWgsl("i8")],
     ["conv2d_wi8.wgsl", conv2dWgsl("i8")],
@@ -574,6 +585,11 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
     assertEquals(bmmWgsl(v4), bmmWgsl(v4), `bmm:v4=${v4}`);
     assertEquals(attentionQkWgsl(v4), attentionQkWgsl(v4), `attention_qk:v4=${v4}`);
     assertEquals(attentionPvWgsl(v4), attentionPvWgsl(v4), `attention_pv:v4=${v4}`);
+    assertEquals(
+      linearWgsl("i4", v4, "f32", undefined, 32),
+      linearWgsl("i4", v4, "f32", undefined, 32),
+      `linear:i4:v4=${v4}`,
+    );
     for (const weight of WEIGHT_STORAGES) {
       assertEquals(linearWgsl(weight, v4), linearWgsl(weight, v4), `linear:${weight}:v4=${v4}`);
       assertEquals(
@@ -664,6 +680,13 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
         conv1dIgemmKey(weight, v4, GEMM_MTILE_SMALL),
       ])
     ),
+    // i4 linear は **group 長ごとに別キー**（shift を WGSL に焼く — ADR 0069）。g 部が
+    // キーに乗っていないと group 32 のパイプラインが group 64 の資産で走り、scale 添字が
+    // ずれた沈黙誤値になる（g32 の基本形は上の GEMM 直積が持っている）。
+    ...[false, true].flatMap((v4) => [
+      linearKey("i4", v4, "f32", undefined, 64),
+      linearKey("i4", v4, "f32", undefined, 128),
+    ]),
     // w8a8: v4 × 整数内積変種の 4 本 + 活性量子化。**dp4a とエミュを別キーにする**のが条件で、
     // 同じキーに割り当たると診断でどちらが走ったか分からなくなる（設計 §4.4-5）。
     ...[false, true].flatMap((v4) => [linearI8a8Key(v4, false), linearI8a8Key(v4, true)]),
@@ -3547,6 +3570,16 @@ Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 �
   }
   // 格納判別子は v4 判別子の**後ろ**に付く（linear だけ 2 軸を持つ）
   assertEquals(linearKey("f16", true), "linear:v2:f32:reg128x128r8x8w16v4:wf16");
+  // i4 は group 長がキーに乗る（shift の焼き込みと対 — ADR 0069）
+  assertEquals(
+    linearKey("i4", true, "f32", undefined, 32),
+    "linear:v2:f32:reg128x128r8x8w16v4:wi4g32",
+  );
+  // group 長は i4 と 1 対 1（欠け / 余りはどちらも結線バグ — 黙って通すと g 部の無い
+  // キーが立って group 違いの資産が同じパイプラインへ割り当たる）
+  assertThrows(() => linearKey("i4", false), CodegenError, "対で渡す");
+  assertThrows(() => linearKey("f32", false, "f32", undefined, 32), CodegenError, "対で渡す");
+  assertThrows(() => linearKey("i4", false, "f32", undefined, 24), CodegenError, "2 冪");
 });
 
 /**
