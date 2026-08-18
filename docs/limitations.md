@@ -144,14 +144,14 @@ flush 頻度をどう変えても天井は動かない**（判定に入るのは
 IR v1 の格納スキーマとしては受理するが、実行経路が無く `createSession` が capability 不足と
 して全件列挙で拒否する。設計は [decisions/0006](decisions/0006-quantization.md) で確定済み。
 
-group 量子化（w4）は [decisions/0069](decisions/0069-packed-w4-storage.md) で**解禁**され、
-格納 dtype `i4`（packed 4bit・K 方向 group の対称量子化）として format 層が受理する
-（語彙・バイト長 `numel / 2`・テンソル先頭 4 バイト整列・group 形 scale）。制約は
-`group_size` が 2 冪かつ 16 以上・量子化軸（最終次元）が `group_size` で割り切れること・
-scale companion（F32・重みと同 rank で最終次元だけ group 数）が必須の 3 点。**実行経路は
-実装波で入る**ので、それまで `i4` の initializer は capability 不足で落ちる。`i4` 以外の
-格納 dtype に付いた `storage.group_size` は解禁後も `非対応 group 量子化` として落ちる
-（黙って per-channel として読むと沈黙誤値になるため）。
+group 量子化（w4）は [decisions/0069](decisions/0069-packed-w4-storage.md) で**解禁・実行
+経路も実装済み**（2026-08-18）— 格納 dtype `i4`（packed 4bit・K 方向 group の対称量子化）。
+制約は `group_size` が 2 冪かつ 16 以上・量子化軸（最終次元）が `group_size` で割り切れる
+こと・scale companion（F32・重みと同 rank で最終次元だけ group 数）が必須の 3 点。**適格は
+f16 / i8 より狭く「消費が linear の重みスロットのみ」**（0069 決定 5 — embedding 等への追補は
+需要が出た op から）で、適格外はロード時 CPU 展開（VRAM 削減ゼロ）。`i4` 以外の格納 dtype に
+付いた `storage.group_size` は解禁後も `非対応 group 量子化` として落ちる（黙って
+per-channel として読むと沈黙誤値になるため）。
 
 **f16 は 2026-08-03 に解禁**（[decisions/0018](decisions/0018-f16-weight-execution.md)）、
 **i8（per-channel symmetric int8）も同日に解禁**

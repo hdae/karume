@@ -126,11 +126,11 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   `i32` だけが**生の int32**（記号依存定数の焼き込み先 —
   ADR [0010](decisions/0010-symbolic-constant-folding.md)。「格納語彙は f32 の符号化」の
   明示的な例外）。量子化格納は `storage.scale`（scale テンソルの safetensors キー）・
-  `storage.group_size` を持てる。**ランタイムが実行できるのは `f32` / `f16` / `i8` /
+  `storage.group_size` を持てる。**ランタイムが実行できるのは `f32` / `f16` / `i8` / `i4` /
   `i32`** — bf16 だけが「宣言としては valid、実行は fail loudly（capability 不足の診断付き）」。
-  `i4` は格納形が ADR [0069](decisions/0069-packed-w4-storage.md) で確定した段階で、
-  **format 層（語彙・バイト長・整列・scale の形）が受理する**ところまで入っている
-  （実行経路は実装波が入れる — それまでは capability 不足で落ちる）。
+  `i4`（ADR [0069](decisions/0069-packed-w4-storage.md)）の適格だけ狭い —
+  **消費が linear の重みスロットのみ**の initializer が packed のまま GPU 常駐し、
+  適格外はロード時に CPU で f32 展開される（正しさは保たれ VRAM 削減はゼロ）。
 - **`i4` の格納形**（ADR 0069 決定 2 / 3）: K 方向 group の対称量子化を packed 4bit で持つ。
   テンソル shape は**論理形のまま**で、safetensors 側は `I4`・バイト長は `numel / 2`
   （要素数が奇数の宣言は bit 総量が byte 境界に乗らないので fail loudly）・**テンソル先頭は

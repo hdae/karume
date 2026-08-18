@@ -1,6 +1,10 @@
 # 0019 — i8（w8）格納の実行経路（per-channel scale + カーネル内 dequant）
 
-- Status: accepted（2026-08-03）
+- Status: accepted（2026-08-03）。**一部 supersede**（2026-08-18 — ADR
+  [0069](0069-packed-w4-storage.md) 決定 1）: 「w4 不採用・再測しない」の射程を「SBV2 voice の
+  音声 SNR / 発話長・per-tensor RTN および int4 group の 1 時点実測」に限定し、テキスト生成へ
+  一般化しない。w4（格納 `i4`・K 方向 group）は 0069 で解禁・実装済み。i8 経路・±127 対称・
+  平坦添字・タイル読み込み時 dequant・fake-quant 規律は 0069 の土台として現行のまま有効。
 - 前提: ADR [0006](0006-quantization.md)（格納のみ量子化・fake-quant 正・bias/折り畳み定数は
   常に f32・FQN 突合・診断常設）/ [0018](0018-f16-weight-execution.md)（f16 実行経路 —
   weight 変種の生成部品と検証規律はここで確立済み）。プロトタイプには i8 の完全な先行実装と
@@ -16,7 +20,9 @@
   per-tensor はプロトタイプ実測（voice SNR 4.7〜5.7dB）で音声として不成立のため不採用。
   w4 も先行実測（SNR −1.5〜+5.1dB・発話長の系統的短縮）で不採用確定 — IR の `group_size` は
   予約のまま使わず、**付いていれば capability 不足で実行拒否**する（黙って per-channel と
-  読むと group scale の意味が変わる沈黙誤値になる）。
+  読むと group scale の意味が変わる沈黙誤値になる）。〔supersede — この w4 項は ADR 0069 が
+  上書き: 実測の帰属は int4 group・射程は SBV2 voice の 1 時点。`group_size` は格納 `i4` で
+  解禁済み（`i4` 以外に付いた場合の実行拒否は現行のまま）〕
 - **scale は companion テンソル**（F32・weight と同 rank の keepdim broadcast 形）。IR v1 の
   `storage.scale`（既存語彙）で**明示宣言**する — キー命名は自由だが実テンソル名との衝突を
   emit 時に検査する。ロード時に存在・dtype・broadcast 可能形を検証して fail loudly。
@@ -69,6 +75,8 @@
 - 縮約の外で scale（プロトタイプ形）: 乗算最少だが GPU/CPU 展開のビット一致を失う。
   perf マイルストーンの upgrade path として温存（上記の改訂条件付き）。却下（保留）。
 - per-tensor / w4 group 量子化: プロトタイプの数値・聴感ゲートで不採用確定。再測しない。
+  〔supersede — 「再測しない」は ADR 0069 決定 1 が撤回。w4 group は再測（Phase 0 sweep）の
+  うえ格納 `i4` として解禁済み。per-tensor の不採用は現行のまま〕
 - DP4a（`dot4I8Packed` 系の整数 MAC）: プロトタイプ実測 4.73× と大きいが計算契約ごと変わる。
   perf で裁定。
 - 全ターゲット一括 i8 系列: VAE/text 層の削減量が小さく検証コストだけ増える。

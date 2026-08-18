@@ -36,11 +36,14 @@
   実 GPU 検収門（**greedy 3 ケース × K=16 の token id 列が torch と厳密一致**・prefill logits
   maxAbs 7.439e-5 = 1-shot 門と同値・census 全 :gqa）。`enqueue` の generation 面は
   **設けない**裁定で確定（limitations — speculative 実需で再訪）。decode 出口の token-only
-  既定形は先送り裁定（ADR 0068 追記 3 — backlog 4 番）。**波 F 進行中（w4 — ADR 0069）**:
-  Phase 0 済（2026-08-18 — sweep 実測 `93ebaf6`・**既定 group 32 対称・zero-point 欄なし
-  確定** = ADR 0069 追記。w4 RTN は 1B 級で品質が明確に落ちる実測 — 検収方法論には無関係）。
-  **次 = Phase 1（i4 格納実装: ir-v1 / safetensors 3 面 / container / WGSL linear /
-  emit + 検出器）**。送り: L8 fake-device 注入面は保留継続。
+  既定形は先送り裁定（ADR 0068 追記 3 — backlog 4 番）。**波 F 済（w4 — ADR 0069・2026-08-18）**:
+  Phase 0 = sweep 実測（`93ebaf6` — 既定 group 32 対称・zero-point 欄なし確定。w4 RTN は
+  1B 級で品質が明確に落ちる実測 — 検収方法論には無関係）。Phase 1 = format 層（`39d6405`）+
+  exporter 発行（`61483e2` — nibble pack・逆変換門・検出器 3 点・**書き出し順は整列降順
+  F32,I32,I4,F16,I8 に訂正**〈ADR 0069 追記 2〉・verify 自前リーダ化）+ runtime 実行
+  （`a690057` — 適格 = linear 限定・`:wi4g<N>` 変種・capability 両側開放・GPU 門 5 本）。
+  **実モデル w4 検収は波 H（Gemma 4 E2B）で**。**次 = 波 G（shard + admission — ADR 0070）**。
+  送り: L8 fake-device 注入面は保留継続。
 
 ## Open decisions
 
