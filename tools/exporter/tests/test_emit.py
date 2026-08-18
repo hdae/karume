@@ -779,11 +779,30 @@ class TestI4Storage:
         assert breakdown.plain_tensors == 1
         assert breakdown.plain_bytes == 3 * 4
 
-    def test_an_eligible_weight_that_is_not_a_linear_weight_fails_loudly(self, tmp_path):
-        """embedding 表は圧縮適格だが i4 の実行経路が無い（黙って f32 へ落とさない）。"""
+    def test_a_non_linear_eligible_weight_stays_f32(self, tmp_path):
+        """embedding 表は一般適格でも i4 にせず f32 のまま残す（Codex 波 F 指摘 I4-ELIG-01）。
+
+        ここで export 全体を落とすと、linear + embedding を持つ普通の LLM が i4 で書けなく
+        なる。ランタイム側の受け皿（eligible ∩ linearOnly の外は CPU 展開）と対の設計は
+        「linear だけ圧縮・他は f32」で、i8 の適格外が f32 で残るのと同じ。
+        """
         graph, tensors, scales = int4_weight_graph(embedding=True)
 
-        with pytest.raises(EmitError, match="linear の重みスロットだけ"):
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        declared = written_graph(path).initializers
+        assert declared["w"].storage.dtype == "i4"
+        assert declared["emb"].storage.dtype == "f32"
+        assert verify_model(path).initializers["emb"].storage.dtype == "f32"
+
+    def test_a_graph_whose_only_weight_is_shared_with_conv_fails_loudly(self, tmp_path):
+        """linear と conv で共有された重みしか無い形は「適格 0 本」で落ちる（沈黙させない）。"""
+        graph, tensors, scales = int4_weight_graph()
+        graph.nodes.append(IrNode(op="conv1d", ins=["x", "w", "b"], outs=["c"], attrs={}))
+        graph.values["c"] = IrValue(dtype="f32", shape=["T", 3])
+        graph.outputs.append("c")
+
+        with pytest.raises(EmitError, match="適格な重みスロットが 1 本も無い"):
             write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
 
     def test_a_missing_scale_fails_loudly(self, tmp_path):

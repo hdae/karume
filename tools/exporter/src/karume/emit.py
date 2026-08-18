@@ -14,7 +14,8 @@ initializer だけ**:
    `eligibleCompressedInitializers` と同じ規則。
    bias も norm 系 weight も混在消費も消費ゼロも適格外 — ADR 0006）。
    **i4 はさらに狭く `linear` の重みスロット限定**（ADR 0069 決定 5 — 実行経路が linear で
-   始まる。他の重みスロットへの i4 指定は fail loudly）。
+   始まる。一般適格でも linear 以外の重み〈embedding / conv 系〉は f32 のまま残す — i8 の
+   適格外と同じ受け皿で、ランタイム側の eligible ∩ linearOnly と対）。
 2. **逆変換がビット一致**する（= fake-quant 済み）。f16 は `f32 → f16 → f32` の往復、
    i8 は `q8.to(f32) · scale`、i4 は `dequant(unpack(pack(q4)))`（`scale` は fake-quant が
    使った値を**そのまま**）。
@@ -420,6 +421,13 @@ def _plan_weight_dtype(
     eligible = eligible_compressed_initializers(graph)
     axes = weight_channel_axes(graph) if weight_dtype == "i8" else {}
     linear_weights = linear_weight_initializers(graph) if weight_dtype == "i4" else set()
+    # i4 の適格は **linear の重みスロット限定**（ADR 0069 決定 5）— 一般適格でも linear 以外
+    # （embedding / conv 系）の重みは f32 のまま残す。i8 の適格外が f32 で残るのと同じ設計で、
+    # ランタイム側（executor.ts の eligible ∩ linearOnly）と対。ここで交差させないと、
+    # linear + embedding を持つ普通の LLM が「embedding を i4 にできない」で export 不能になる
+    # （Codex 波 F 指摘 I4-ELIG-01）。交差が空なら下の「適格 0 本」診断で落ちる。
+    if weight_dtype == "i4":
+        eligible = eligible & linear_weights
     reserved = set(tensors)
     for name in sorted(eligible):
         key = graph.initializers[name].tensor
