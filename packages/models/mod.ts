@@ -91,3 +91,11 @@ export { normalizeToNchw, resizeRgb8 } from "./src/image/preprocess.ts";
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 export { decodeWav, encodeWav } from "./src/audio/wav.ts";
 export type { DecodedWav } from "./src/audio/wav.ts";
+
+/**
+ * 固定長 greedy 生成ループ。**パイプライン非依存の共通処理**（autoregressive な言語モデルは
+ * 総じて「固定長 chunk の prefill → 1 token ずつ decode」を通る — ADR 0066 決定 4）なので、
+ * `encodePng` / `decodeWav` と同じくファミリのサブパスではなく barrel 直下に置く。
+ */
+export { generateGreedy } from "./src/generation/greedy.ts";
+export type { GreedySpec } from "./src/generation/greedy.ts";
