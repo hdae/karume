@@ -73,10 +73,13 @@ import {
   weightChannelAxes,
 } from "./plan.ts";
 import {
+  assertGenerationRun,
   bakeBindGroups,
   derivePlanSlots,
   executeBakedPlan,
   executeStepRecipe,
+  type GenerationEncoding,
+  type GenerationLimits,
   type StepRecipe,
 } from "./recipe.ts";
 import { RecipeBuilder } from "./recipe-builder.ts";
@@ -301,6 +304,23 @@ type PreparedPlan = {
   readonly recipes: readonly StepRecipe[];
   /** 計画時に決まった融合回数（ヒット run もこの値を常設診断へ報告する — ADR 0040 §3）。 */
   readonly fusions: FusionCounts;
+  /**
+   * generation run の run 前検査に要る計画事実（{@link assertGenerationRun}）。state ノードを
+   * 持たないグラフでは空で、その run は検査を 1 つも通さない（見る対象が無い）。
+   */
+  readonly generation: GenerationLimits;
+};
+
+/**
+ * generation run 1 回ぶんの指定（{@link Session.run} の第 3 引数）。
+ *
+ * `queryLength` は今 step の実 token 数（prefill は `1..chunkLength`・decode は 1）で、
+ * **`pastLength` は渡さない** — 論理長の進行は context が所有し、run の成功でのみ進む
+ * （ADR 0066 決定 6 の二重簿記の禁止）。
+ */
+export type GenerationRun = {
+  readonly context: GenerationContext;
+  readonly queryLength: number;
 };
 
 /**
@@ -666,14 +686,21 @@ export class Session {
    * 代わりに落ちる。先行 run の失敗は後続 run に伝播しない。
    * NOTE: 同一 device 上の**別 Session** との重なりは、この直列化では防げない（Session ごとに
    * 別のチェーンになる）。そちらは GpuContext の errorScope 区間ロックが受け持つ。
+   *
+   * `generation` を渡した run は **state 参照グラフの 1 step**（ADR 0066 決定 4 の prefill-chunk
+   * または decode）になる。渡さない run は 1 バイトも挙動が変わらない。
    */
-  run(inputs: RunInputs, bindings: SymbolBindings = {}): Promise<RunOutputs> {
+  run(
+    inputs: RunInputs,
+    bindings: SymbolBindings = {},
+    generation?: GenerationRun,
+  ): Promise<RunOutputs> {
     // dispose 済みの判定は呼び出し時点で行う（チェーンの中で見ると、dispose より前に発行した
     // run まで巻き添えで落ちる）。
     if (this.#disposal !== undefined) {
       return Promise.reject(new ExecutionError("dispose 済みの Session では実行できない"));
     }
-    return this.#serialize(() => this.#runOnce(inputs, bindings));
+    return this.#serialize(() => this.#runOnce(inputs, bindings, generation));
   }
 
   /**
@@ -733,8 +760,9 @@ export class Session {
    * （決定 6）。容量が `maxStorageBufferBindingSize` を超えるスロットは確保の前に落とす（追記 5）。
    * NOTE: context は Session より長生きできる（`dispose` は注入した flush と自分のバッファだけを
    * 触る）。ただし state を使う run は Session 経由なので、実際の用途は Session の生存中に閉じる。
-   * NOTE（波 D）: prefill / decode の呼び出し形（メソッド名・入出力型）は ADR 0066 決定 6 が
-   * 実装設計へ委ねた部分で、`states` 欄つき attention / `state_append` と同時に生える。
+   * NOTE: prefill / decode の呼び出し形（ADR 0066 決定 6 が実装設計へ委ねた部分）は
+   * **`Session.run` の第 3 引数 1 本**に落ちた（{@link GenerationRun}）。2 つの実行形を分ける
+   * のは `queryLength` と入力の物理 chunk 行数だけで、メソッドは増やさない。
    */
   createGenerationContext(spec: GenerationContextSpec): Promise<GenerationContext> {
     // dispose 済みの判定は呼び出し時点で行う（run / enqueue と同じ規律）。
@@ -806,8 +834,8 @@ export class Session {
         residentBytes: [...this.#contexts]
           .reduce((total, context) => total + context[RUNTIME_INTERNAL].bytes, 0),
         contextCount: this.#contextCount,
-        // 波 D: state を含む bind group の焼き直し回数（ADR 0066 決定 5 の焼き込み単位の分離を
-        // 実装した時点で埋まる）。state を束ねる dispatch が 1 本も無い本波では 0 が正しい値。
+        // 波 D-4（ADR 0066 決定 5 の焼き込み単位の分離）で埋まる。generation run が bind group を
+        // run ごとに組む本波では「焼き直し」という事象が存在しないので 0 が正しい値。
         rebindCount: 0,
       },
     };
@@ -820,20 +848,56 @@ export class Session {
     return result;
   }
 
-  async #runOnce(inputs: RunInputs, bindings: SymbolBindings): Promise<RunOutputs> {
+  async #runOnce(
+    inputs: RunInputs,
+    bindings: SymbolBindings,
+    generation: GenerationRun | undefined,
+  ): Promise<RunOutputs> {
     const { gpu, model, scheduler } = this.#state;
     const graph = model.graph;
+
+    // MUST: context の素性は**エンコードに入る前**に見る（この段の失敗は state に届かないので
+    // poison しない）。別 Session / dispose 済みの取り違えは、通すと「別の生成の KV を束ねた
+    // まま回る」沈黙誤値になり、値にしか出ない。
+    if (generation !== undefined && !this.#contexts.has(generation.context)) {
+      throw new ExecutionError(
+        "run の GenerationContext がこの Session の生存集合に無い" +
+          "（別の Session が作った context か、dispose 済み）",
+      );
+    }
+    // 束縛解決済みのスロット容量。レシピと計画鍵に載るのは**この容量だけ**で、context の
+    // 識別子は 1 バイトも載らない（ADR 0066 決定 5 — {@link Session.#preparedKey}）。
+    const stateShapes = generation === undefined ? undefined : new Map(
+      [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.shape]),
+    );
+    // MUST: 論理長は run の頭で 1 度だけ読む（汚染・破棄・device 消失はこの読みが落とす）。
+    // uniform へ書く値・dispatch 数の算出・容量の検査が同じ 1 つの値から出ることが、
+    // 「GPU が走査する範囲」と「ホストが撃った workgroup 数」の一致の根拠になる。
+    const pastLength = generation?.context.pastLength ?? 0;
+    const encoding: GenerationEncoding | undefined = generation === undefined ? undefined : {
+      slots: new Map(
+        [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.buffer]),
+      ),
+      lengths: generation.context[RUNTIME_INTERNAL].lengths,
+      past: pastLength,
+      query: generation.queryLength,
+    };
+    /**
+     * 最初の state 書き dispatch を積んだ時点の submit カウンタ（undefined = まだ積んでいない）。
+     * 失敗時の poison 判定（ADR 0066 追記 3）はこの値との比較 1 本で決まる。
+     */
+    let stateWriteSubmits: number | undefined;
 
     const { inputShapes, residentInputs } = splitInputs(inputs);
     // MUST: 束縛の解決（= 入力 shape の検証）はヒット・ミスに関わらず**毎 run 走らせる**。
     // ここが飛ぶと、キャッシュに当たった run だけ入力 shape の宣言不一致を素通りする。
     const resolved = bindSymbols(graph, inputShapes, bindings, residentNames(residentInputs));
-    const preparedKey = this.#preparedKey(resolved, residentInputs);
+    const preparedKey = this.#preparedKey(resolved, residentInputs, stateShapes);
     const prepared = this.#takePrepared(preparedKey);
     // 計画（planGraph）と融合判定（planFusions）はどちらも GPU に触れない純関数で、ヒット時は
     // 丸ごと飛ばす（根拠は {@link Session.#preparedKey}）。融合は掴めなかったノードを素のまま
     // ステップ列に並べるので、この段は「速くなるか」だけを決め、正しさには関与しない。
-    const derived = prepared ?? this.#planSteps(resolved);
+    const derived = prepared ?? this.#planSteps(resolved, stateShapes);
     const shapes = derived.shapes;
     // MUST: ヒット run も融合回数を報告する（ADR 0040 §3 の常設契約 — キャッシュの有無で
     // 観測点が消えると、融合が外れた状態がヒット run の裏に隠れる）。
@@ -882,150 +946,237 @@ export class Session {
     // が、同一 device 上の**別 Session** の run とは重なりうる（GpuContext の不変条件を参照）。
     // MUST NOT: この区間の内側からロックを再取得しない（自己デッドロック — 内側の層は同期
     // 区間で完結するスコープのみを使う）。
-    return await gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
-      // GPU 時間内訳の寿命は **直近 run**（ADR 0021）。ロックを取ってから捨てることで、
-      // 表が「今から積む run のぶんだけ」になる（先行 run の回収は既に済んでいる）。
-      scheduler.resetTiming();
-      let outputs: RunOutputs;
-      // 活性化した slot backing（ミス run では undefined のまま）。readback の適格判定が
-      // 「その実体が pin された slot か」を見るため、エンコード区間の外まで持ち越す。
-      let backing: ActiveBacking | undefined;
-      // この run が backing を新規構築したか（失敗時の回復規律 — 下の catch が読む）。
-      let builtBacking = false;
-      // 単一フェンス経路で run 本体のコマンド列へ積んだ読み戻し（undefined = 二段待ち経路）。
-      let staged: readonly StagedOutput[] | undefined;
-      try {
-        // 無効な bindGroup / dispatch は throw せず submit ごと失敗し、出力にプール残骸が
-        // 残る沈黙故障になる。中間バッファの確保も同じ区間で out-of-memory を見る。
-        pushFailureScopes(device);
-        let popped = false;
+    const encode = async (): Promise<RunOutputs> =>
+      await gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
+        // GPU 時間内訳の寿命は **直近 run**（ADR 0021）。ロックを取ってから捨てることで、
+        // 表が「今から積む run のぶんだけ」になる（先行 run の回収は既に済んでいる）。
+        scheduler.resetTiming();
+        let outputs: RunOutputs;
+        // 活性化した slot backing（ミス run では undefined のまま）。readback の適格判定が
+        // 「その実体が pin された slot か」を見るため、エンコード区間の外まで持ち越す。
+        let backing: ActiveBacking | undefined;
+        // この run が backing を新規構築したか（失敗時の回復規律 — 下の catch が読む）。
+        let builtBacking = false;
+        // 単一フェンス経路で run 本体のコマンド列へ積んだ読み戻し（undefined = 二段待ち経路）。
+        let staged: readonly StagedOutput[] | undefined;
         try {
-          // 導出相 → 実行相。どちらも run の errorScope 区間の内側で、間に submit を挟まない
-          // （params の writeBuffer は導出相で出るので、それを読む dispatch の submit より
-          // 必ず先に発行される）。ヒット run はこの導出相ごと飛ぶ — params の writeBuffer も
-          // パイプライン生成も出ないので、GPU 操作はレシピ実行のぶんだけになる。
-          let recipes: readonly StepRecipe[];
-          if ("recipes" in derived) {
-            recipes = derived.recipes;
-            // MUST: 入力の検査（値依存 — 毎 run）は backing 構築より前。ここで落ちる run に
-            // slot（DiT で ~GiB 規模）の構築を払わせない。
-            const data = graph.inputs.map((spec) =>
-              this.#checkInput(spec.name, inputs[spec.name], shapes)
-            );
-            // MUST: backing を作るのは**ヒット run だけ**。単発 run（1 回しか走らない
-            // ワークロード）に slot メモリを払わせないための唯一の門で、ミス run の挙動と
-            // ArenaStats はこれで完全に据え置かれる。
-            const activated = this.#activateBacking(
-              preparedKey,
-              recipes,
-              shapes,
-              residentInputs,
-            );
-            backing = activated.backing;
-            builtBacking = activated.built;
-            graph.inputs.forEach((spec, index) => {
-              // 常駐入力は writeBuffer を出さない（実体がそのまま焼き込まれている）。
-              const values = data[index];
-              if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
-            });
-          } else {
-            for (const spec of graph.inputs) {
-              env.set(
-                spec.name,
-                this.#bindInput(spec.name, inputs[spec.name], shapes, arena, boundResidents),
-              );
+          // 無効な bindGroup / dispatch は throw せず submit ごと失敗し、出力にプール残骸が
+          // 残る沈黙故障になる。中間バッファの確保も同じ区間で out-of-memory を見る。
+          pushFailureScopes(device);
+          let popped = false;
+          try {
+            // 導出相 → 実行相。どちらも run の errorScope 区間の内側で、間に submit を挟まない
+            // （params の writeBuffer は導出相で出るので、それを読む dispatch の submit より
+            // 必ず先に発行される）。ヒット run はこの導出相ごと飛ぶ — params の writeBuffer も
+            // パイプライン生成も出ないので、GPU 操作はレシピ実行のぶんだけになる。
+            let recipes: readonly StepRecipe[];
+            let limits: GenerationLimits;
+            if ("recipes" in derived) {
+              recipes = derived.recipes;
+              limits = derived.generation;
+              if (generation === undefined) {
+                // MUST: 入力の検査（値依存 — 毎 run）は backing 構築より前。ここで落ちる run に
+                // slot（DiT で ~GiB 規模）の構築を払わせない。
+                const data = graph.inputs.map((spec) =>
+                  this.#checkInput(spec.name, inputs[spec.name], shapes)
+                );
+                // MUST: backing を作るのは**ヒット run だけ**。単発 run（1 回しか走らない
+                // ワークロード）に slot メモリを払わせないための唯一の門で、ミス run の挙動と
+                // ArenaStats はこれで完全に据え置かれる。
+                const activated = this.#activateBacking(
+                  preparedKey,
+                  recipes,
+                  shapes,
+                  residentInputs,
+                );
+                backing = activated.backing;
+                builtBacking = activated.built;
+                graph.inputs.forEach((spec, index) => {
+                  // 常駐入力は writeBuffer を出さない（実体がそのまま焼き込まれている）。
+                  const values = data[index];
+                  if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
+                });
+              } else {
+                // DECIDED: **generation run は backing に載せない**（ADR 0066 決定 5 — 分離焼き込みは
+                // 波 D-4）。context 所有の実体を Session 所有の bind group へ焼き込むと、context を
+                // 切り替えた瞬間に「前の context の KV を束ねたまま」回る沈黙 stale 読みになる。
+                // ヒット run もアリーナ経路で走り、**飛ぶのはレシピ再導出だけ**（ADR 0066 受入
+                // 条件③の「レシピ再導出ゼロ」はここが実体）。
+                this.#bindInputs(inputs, shapes, arena, env, boundResidents);
+              }
+            } else {
+              this.#bindInputs(inputs, shapes, arena, env, boundResidents);
+              const built = await this.#recipeBuilder.buildRecipes(derived.steps, stateShapes);
+              recipes = built.recipes;
+              limits = built.generation;
+              // MUST: 登録は `RecipeBuilder.buildRecipes` が**完走して戻った後**だけ。途中で throw した run の
+              // 部分レシピを載せると、次の同一 bindings の run が欠けたステップ列を実行し、
+              // 例外なしで誤った値を返す。
+              this.#registerPrepared(preparedKey, {
+                shapes,
+                recipes,
+                fusions: derived.fusions,
+                generation: limits,
+              });
             }
-            recipes = await this.#recipeBuilder.buildRecipes(derived.steps);
-            // MUST: 登録は `RecipeBuilder.buildRecipes` が**完走して戻った後**だけ。途中で throw した run の
-            // 部分レシピを載せると、次の同一 bindings の run が欠けたステップ列を実行し、
-            // 例外なしで誤った値を返す。
-            this.#registerPrepared(preparedKey, { shapes, recipes, fusions: derived.fusions });
-          }
-          this.#lastRunPrepared = {
-            hit: prepared !== undefined,
-            cachedPlans: this.#state.prepared.size,
-          };
-          if (backing === undefined) {
-            const run = { device, scheduler, arena, env };
-            for (const recipe of recipes) executeStepRecipe(recipe, run);
-            arena.assertDrained();
-          } else {
-            // slot 経路。積むコマンド列はアリーナ経路と同一で、bind 先の実体が run を跨いで
-            // 固定されるだけ（前 run の残骸が残っていてよい根拠は full-write — ADR 0014）。
-            // bind group は構築時に焼き込み済みなので、ここは dispatch を積むだけ。
-            executeBakedPlan(recipes, backing.groups, scheduler);
-          }
+            this.#lastRunPrepared = {
+              hit: prepared !== undefined,
+              cachedPlans: this.#state.prepared.size,
+            };
+            if (generation !== undefined) {
+              // MUST: 論理長の検査と搬送は **dispatch を 1 本も積む前**（ここまでの失敗は state に
+              // 届かないので poison しない）。`queue.writeBuffer` は issue 順で queue timeline へ
+              // 載るので、先行 submit を追い越さない（ADR 0004 不変条件④ / ADR 0066 追記 4）。
+              assertGenerationRun(limits, pastLength, generation.queryLength);
+              generation.context[RUNTIME_INTERNAL].writeLengths(generation.queryLength);
+            }
+            if (backing === undefined) {
+              const run = { device, scheduler, arena, env, generation: encoding };
+              for (const recipe of recipes) {
+                // MUST: スナップショットは書き dispatch を**積む前**（`SubmitScheduler.dispatch` は
+                // チャンク上限・時間予算で run の途中に自動 submit する — src/gpu/submit.ts）。
+                // 後で取ると、積んだ瞬間の自動 submit を数え損ねて「submit したのに poison
+                // しない」= 沈黙破壊になる。逆向きの誤差（積む前の時間予算 submit を数えて
+                // しまう過剰 poison）は新しい context で復旧できる安全側。
+                if (recipe.writesState && stateWriteSubmits === undefined) {
+                  stateWriteSubmits = scheduler.submitCount;
+                }
+                executeStepRecipe(recipe, run);
+              }
+              arena.assertDrained();
+            } else {
+              // slot 経路。積むコマンド列はアリーナ経路と同一で、bind 先の実体が run を跨いで
+              // 固定されるだけ（前 run の残骸が残っていてよい根拠は full-write — ADR 0014）。
+              // bind group は構築時に焼き込み済みなので、ここは dispatch を積むだけ。
+              executeBakedPlan(recipes, backing.groups, scheduler);
+            }
 
-          if (singleFence) {
-            // MUST: 読み戻しの copy は **dispatch と同じコマンド列**へ積む（FIFO）。別 encoder の
-            // 別 submit にすると submit が 2 本に割れ、mapAsync が「先行 dispatch の完了」を
-            // 含意しなくなる（含意の根拠は同一キューでの発行順）。
-            staged = this.#stageOutputs(
-              backing?.outputs ?? env,
-              shapes,
-              arena,
-              backing,
-              (source, size, staging) => scheduler.copyBuffer(source, 0, staging, 0, size),
+            if (singleFence) {
+              // MUST: 読み戻しの copy は **dispatch と同じコマンド列**へ積む（FIFO）。別 encoder の
+              // 別 submit にすると submit が 2 本に割れ、mapAsync が「先行 dispatch の完了」を
+              // 含意しなくなる（含意の根拠は同一キューでの発行順）。
+              staged = this.#stageOutputs(
+                backing?.outputs ?? env,
+                shapes,
+                arena,
+                backing,
+                (source, size, staging) => scheduler.copyBuffer(source, 0, staging, 0, size),
+              );
+              // フェンスを張らずに出し切る。待ちは下の mapAsync 1 本に集約される。
+              scheduler.submitPending();
+            } else {
+              await scheduler.flush();
+            }
+            // errorScope の網は経路で変えない（単一フェンス経路では readback の copy と staging
+            // 確保も run 本体の 2 本に相乗りする — 二段待ち経路の `#readOutputs` が張る対と同じ
+            // `out-of-memory` + `validation`）。
+            const pending = popFailureScopes(
+              device,
+              singleFence ? "run のエンコードと readback" : "run のエンコード",
             );
-            // フェンスを張らずに出し切る。待ちは下の mapAsync 1 本に集約される。
-            scheduler.submitPending();
-          } else {
-            await scheduler.flush();
+            popped = true;
+            const failure = await pending;
+            if (failure !== undefined) throw failure;
+          } catch (cause) {
+            // MUST: 失敗した run の残 pending dispatch は submit せずに捨てる（エンコード途中の
+            // throw で先行ノードのぶんが残る）。実行する理由が無いうえ、後始末の
+            // arena.destroy() → flush で出すと、破棄されるバッファを参照したまま submit する
+            // ことになる。discard は同期なので、捨てるまでの間に submit の隙が生まれない。
+            scheduler.discard();
+            if (!popped) await discardFailureScopes(device);
+            throw cause;
           }
-          // errorScope の網は経路で変えない（単一フェンス経路では readback の copy と staging
-          // 確保も run 本体の 2 本に相乗りする — 二段待ち経路の `#readOutputs` が張る対と同じ
-          // `out-of-memory` + `validation`）。
-          const pending = popFailureScopes(
-            device,
-            singleFence ? "run のエンコードと readback" : "run のエンコード",
-          );
-          popped = true;
-          const failure = await pending;
-          if (failure !== undefined) throw failure;
-        } catch (cause) {
-          // MUST: 失敗した run の残 pending dispatch は submit せずに捨てる（エンコード途中の
-          // throw で先行ノードのぶんが残る）。実行する理由が無いうえ、後始末の
-          // arena.destroy() → flush で出すと、破棄されるバッファを参照したまま submit する
-          // ことになる。discard は同期なので、捨てるまでの間に submit の隙が生まれない。
-          scheduler.discard();
-          if (!popped) await discardFailureScopes(device);
-          throw cause;
-        }
 
-        // backed run は env を組まない（読み戻し先は焼き込み時に確定した写像）。
-        outputs = staged === undefined
-          ? await this.#readOutputs(backing?.outputs ?? env, shapes, arena, backing)
-          : await this.#finishStagedRead(staged);
-        this.#lastRun = arena.stats;
-        this.#lastRunParams = this.#recipeBuilder.paramsStats;
-      } catch (cause) {
-        // MUST: 後始末の失敗で本体の例外を上書きしない。原因は本体側にあり、destroy の
-        // rejection（主因は device 消失）に差し替わると調査の起点が消える。
-        await arena.destroy().catch(() => undefined);
-        // MUST: **この run が新規構築した** backing だけを退役させる。一過性の失敗（構築時の
-        // out-of-memory 等）は次の同一 signature ヒットでの再構築で回復し、壊れたまま常駐した
-        // backing が後続 run に居座らない。既存 backing での失敗 run は退役させない — 無関係な
-        // 失敗のたびに ~GiB 規模の再構築を強いるスラッシングになる（そちらの回復手段は
-        // signature 切替と LRU 追い出し）。
-        if (builtBacking) this.#retireBacking();
-        // MUST: 破棄待ちの slot は arena.destroy（= flush / discard 済み）の**後**に返す。
+          // backed run は env を組まない（読み戻し先は焼き込み時に確定した写像）。
+          outputs = staged === undefined
+            ? await this.#readOutputs(backing?.outputs ?? env, shapes, arena, backing)
+            : await this.#finishStagedRead(staged);
+          this.#lastRun = arena.stats;
+          this.#lastRunParams = this.#recipeBuilder.paramsStats;
+        } catch (cause) {
+          // MUST: 後始末の失敗で本体の例外を上書きしない。原因は本体側にあり、destroy の
+          // rejection（主因は device 消失）に差し替わると調査の起点が消える。
+          await arena.destroy().catch(() => undefined);
+          // MUST: **この run が新規構築した** backing だけを退役させる。一過性の失敗（構築時の
+          // out-of-memory 等）は次の同一 signature ヒットでの再構築で回復し、壊れたまま常駐した
+          // backing が後続 run に居座らない。既存 backing での失敗 run は退役させない — 無関係な
+          // 失敗のたびに ~GiB 規模の再構築を強いるスラッシングになる（そちらの回復手段は
+          // signature 切替と LRU 追い出し）。
+          if (builtBacking) this.#retireBacking();
+          // MUST: 破棄待ちの slot は arena.destroy（= flush / discard 済み）の**後**に返す。
+          this.#destroyRetired();
+          throw cause;
+        } finally {
+          // MUST: 束縛予約は成功・失敗のどちらの経路でも必ずここで返す（返し損ねるとその常駐
+          // テンソルは Session の寿命いっぱい破棄できなくなる）。この時点では読み戻しまで含めて
+          // 全ての GPU 操作が submit 済みなので、以後の `dispose()` は「submit 済みコマンドが
+          // 参照するバッファの破棄」= WebGPU 的に安全（実解放は完了まで実装が遅延する）。
+          releaseBoundResidents(boundResidents);
+        }
+        // 本体が通ったときは後始末の失敗をそのまま伝える（flush 未完了のまま返さない）。
+        await arena.destroy();
+        // 切替 / 追い出しで浮いた旧 backing を返す唯一の後始末点（flush 後 — ADR 0004 の
+        // flush-before-destroy）。dispose が同じことをするので、ここを通らずに落ちた run の
+        // 積み残しも取りこぼさない。
         this.#destroyRetired();
-        throw cause;
-      } finally {
-        // MUST: 束縛予約は成功・失敗のどちらの経路でも必ずここで返す（返し損ねるとその常駐
-        // テンソルは Session の寿命いっぱい破棄できなくなる）。この時点では読み戻しまで含めて
-        // 全ての GPU 操作が submit 済みなので、以後の `dispose()` は「submit 済みコマンドが
-        // 参照するバッファの破棄」= WebGPU 的に安全（実解放は完了まで実装が遅延する）。
-        releaseBoundResidents(boundResidents);
+        return outputs;
+      });
+
+    try {
+      const outputs = await encode();
+      // MUST: 論理長を進めるのは run が**例外なく返った**ときだけ（ADR 0066 決定 6 —
+      // 「論理長は run の成功で進む」の成功はこの意味）。readback や後始末で落ちた run は
+      // 物理 ring だけが進んだ状態なので、進めずに下の poison へ倒す。
+      if (generation !== undefined) {
+        generation.context[RUNTIME_INTERNAL].advance(generation.queryLength);
       }
-      // 本体が通ったときは後始末の失敗をそのまま伝える（flush 未完了のまま返さない）。
-      await arena.destroy();
-      // 切替 / 追い出しで浮いた旧 backing を返す唯一の後始末点（flush 後 — ADR 0004 の
-      // flush-before-destroy）。dispose が同じことをするので、ここを通らずに落ちた run の
-      // 積み残しも取りこぼさない。
-      this.#destroyRetired();
       return outputs;
-    });
+    } catch (cause) {
+      this.#poisonOnStateWrite(generation, stateWriteSubmits, cause);
+      throw cause;
+    }
+  }
+
+  /**
+   * 失敗した generation run の後始末（ADR 0066 追記 3 の「失敗の原子性」）。
+   *
+   * state 変更 dispatch を**submit した**なら物理 ring は上書きされ得るが論理長は進んでいない
+   * ので、context は poison する（rollback / staging は持たない設計 — 復旧は新しい context +
+   * ホスト側の state 再構築）。submit していなければ pending は `scheduler.discard()` が捨てて
+   * おり ring は無傷なので、poison しない。
+   *
+   * MUST: 判定不能な経路は poison に倒す（過剰 poison は新しい context で復旧できるが、
+   * 過少 poison は「壊れた KV で生成が続く」沈黙破壊になる）。スナップショットを書き
+   * dispatch の**前**に取っているのはそのため。
+   */
+  #poisonOnStateWrite(
+    generation: GenerationRun | undefined,
+    snapshot: number | undefined,
+    cause: unknown,
+  ): void {
+    if (generation === undefined || snapshot === undefined) return;
+    if (this.#state.scheduler.submitCount === snapshot) return;
+    generation.context[RUNTIME_INTERNAL].poison(
+      `state 変更 dispatch を submit した run が失敗した（${
+        cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause)
+      }）`,
+    );
+  }
+
+  /**
+   * アリーナ経路の入力束縛をグラフ入力ぶんまとめて積む（{@link Session.#bindInput} の呼び口）。
+   * 非 backed のミス run と generation run が共有する 1 本。
+   */
+  #bindInputs(
+    inputs: RunInputs,
+    shapes: ReadonlyMap<string, readonly number[]>,
+    arena: RunArena,
+    env: Map<string, GPUBuffer>,
+    bound: ResidentTensor[],
+  ): void {
+    for (const spec of this.#state.model.graph.inputs) {
+      env.set(spec.name, this.#bindInput(spec.name, inputs[spec.name], shapes, arena, bound));
+    }
   }
 
   /**
@@ -1062,9 +1213,11 @@ export class Session {
       options.bindings ?? {},
       residentNames(residentInputs),
     );
-    const preparedKey = this.#preparedKey(resolved, residentInputs);
+    // MUST: `enqueue` は generation 面を持たない（波 D-4 / D-5）。state 参照グラフは
+    // `stateShapes` 無しの導出で fail loudly になる（黙って state 抜きで走らない）。
+    const preparedKey = this.#preparedKey(resolved, residentInputs, undefined);
     const prepared = this.#takePrepared(preparedKey);
-    const derived = prepared ?? this.#planSteps(resolved);
+    const derived = prepared ?? this.#planSteps(resolved, undefined);
     const shapes = derived.shapes;
     this.#lastRunFusions = derived.fusions;
     this.#lastRunPrepared = undefined;
@@ -1076,9 +1229,15 @@ export class Session {
       if ("recipes" in derived) {
         recipes = derived.recipes;
       } else {
-        recipes = await this.#recipeBuilder.buildRecipes(derived.steps);
+        const built = await this.#recipeBuilder.buildRecipes(derived.steps);
+        recipes = built.recipes;
         // MUST: 登録は `RecipeBuilder.buildRecipes` が完走して戻った後だけ（run と同じ理由）。
-        this.#registerPrepared(preparedKey, { shapes, recipes, fusions: derived.fusions });
+        this.#registerPrepared(preparedKey, {
+          shapes,
+          recipes,
+          fusions: derived.fusions,
+          generation: built.generation,
+        });
       }
       // MUST: 入力と写し先の検査（値依存）は backing 構築より前。ここで落ちる enqueue に
       // slot の構築を払わせない。
@@ -1204,8 +1363,11 @@ export class Session {
    * 枚数のような「機の能力で決まる計画」を静的に決められる — src/runtime/fusion.ts の
    * {@link FusionLimits}）。
    */
-  #planSteps(bindings: SymbolBindings): PlannedSteps {
-    const plan = planGraph(this.#state.model.graph, bindings);
+  #planSteps(
+    bindings: SymbolBindings,
+    stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
+  ): PlannedSteps {
+    const plan = planGraph(this.#state.model.graph, bindings, stateShapes);
     const { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension } =
       this.#state.gpu.limits;
     const fusion = planFusions(plan.nodes, {
@@ -1240,20 +1402,37 @@ export class Session {
    * 切り替えるたびに計画・融合判定・レシピ導出と slot backing 構築が全滅する（decode の
    * ホットパスで毎シーケンス再導出になる）。常駐入力と逆の扱いになるのは、context 所有の実体
    * （state スロットと論理長 uniform）を Session 所有の bind group へ焼き込まないため — 分離の
-   * 代償として「state を含む bind group」だけを context 側で束ね直す（決定 5・実装は波 D）。
+   * 代償として「state を含む bind group」だけを context 側で束ね直す（決定 5・実装は波 D-4）。
    * この不変条件は tests/gpu_generation_context_test.ts が「context を 2 本作っても導出済み計画と
    * params キャッシュが増えない」形で門にしている。
+   * MUST: 載せるのは**解決済みスロット容量**の側（ADR 0066 決定 3 の「鍵は容量」・追記 7）。
+   * 同じ Session で C=512 と C=131072 の context を作れば、state 参照計画は容量ごとに別鍵に
+   * なるのが正しい（レシピは容量を params と S の確保サイズへ焼き込むため）。区切りの `#` は
+   * 上流 2 節（数値・カンマ・`|`・`t`/`r<id>`）に現れないので、**generation を伴わない run の
+   * 鍵は 1 文字も動かない**。
    */
-  #preparedKey(bindings: SymbolBindings, residents: ReadonlyMap<string, ResidentTensor>): string {
-    const dims = this.#state.model.graph.symbols.map((sym) => bindings[sym]).join(",");
-    if (residents.size === 0) return dims;
-    const bound = this.#state.model.graph.inputs
-      .map((spec) => {
-        const resident = residents.get(spec.name);
-        return resident === undefined ? "t" : `r${resident[RUNTIME_INTERNAL].id}`;
-      })
-      .join(",");
-    return `${dims}|${bound}`;
+  #preparedKey(
+    bindings: SymbolBindings,
+    residents: ReadonlyMap<string, ResidentTensor>,
+    stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
+  ): string {
+    const graph = this.#state.model.graph;
+    const dims = graph.symbols.map((sym) => bindings[sym]).join(",");
+    const bound = residents.size === 0 ? "" : `|${
+      graph.inputs
+        .map((spec) => {
+          const resident = residents.get(spec.name);
+          return resident === undefined ? "t" : `r${resident[RUNTIME_INTERNAL].id}`;
+        })
+        .join(",")
+    }`;
+    if (stateShapes === undefined) return `${dims}${bound}`;
+    // MUST: 並べる順は `graph.states` の宣言順（Map の反復順に依存させない — スロットの
+    // 集合が同じでも順序が違う 2 つの context が別鍵になると、切替のたびに再導出が起きる）。
+    const capacities = Object.keys(graph.states)
+      .map((name) => (stateShapes.get(name) ?? []).join("x"))
+      .join(";");
+    return `${dims}${bound}#${capacities}`;
   }
 
   /** キャッシュを引き、当たったら最近使用へ回す（Map の挿入順が LRU の順序そのもの）。 */

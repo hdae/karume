@@ -20,6 +20,11 @@
  * 丸ごと省く。さらに束縛先が run を跨いで固定されるので、{@link bakeBindGroups} が全 dispatch の
  * bind group を**構築時に 1 度だけ**組み、run に残るのは {@link executeBakedPlan} の dispatch
  * だけになる（createBindGroup も env の構築も出ない）。
+ *
+ * MUST: **generation run（{@link GenerationEncoding} を伴う実行）はアリーナ経路だけ**。context
+ * 所有の実体（state スロット・論理長 uniform）は Session 所有の bind group へ焼き込めない
+ * （ADR 0066 決定 5 の焼き込み単位の分離 — 実装は波 D-4）ので、焼き込み経路の入口 2 本は
+ * `assertStateFree` で fail loudly にしてある。
  */
 
 import { type RunArena, toSizeClass } from "../gpu/arena.ts";
@@ -37,14 +42,38 @@ export type ValueSource =
 /** 同一ステップ内で閉じた一時領域への参照（`id` は {@link StepRecipe.temps} の添字）。 */
 export type TempSource = { readonly kind: "temp"; readonly id: number };
 
+/**
+ * {@link GenerationContext} が所有する実体（ADR 0066 決定 5 — 所有権の分離）。
+ *
+ * `state` は名前付きスロット・`lengths` は論理長 uniform（追記 4 の搬送路）で、どちらも
+ * **Session 所有ではない**。レシピは名前と種別だけを持ち、実体は run ごとに
+ * {@link GenerationEncoding} が配る — これが「レシピは context の識別子を知らない」
+ * （計画鍵に context が載らない）の実体側の根拠になる。
+ */
+export type GenerationSource =
+  | { readonly kind: "state"; readonly name: string }
+  | { readonly kind: "lengths" };
+
 /** bind group の 1 スロットが指す実体の出どころ。 */
-export type BindingSource = ValueSource | TempSource;
+export type BindingSource = ValueSource | TempSource | GenerationSource;
 
 /** bind group の 1 エントリ。MUST: 束縛番号はカーネル側の宣言と一致させる。 */
 export type BindingRecipe = {
   readonly binding: number;
   readonly source: BindingSource;
 };
+
+/**
+ * dispatch の workgroup 数。**静的な 3 つ組**（既存の全ビルダ）か、**論理長から算出する
+ * 純関数**（states 形 — ADR 0067 決定 4「dispatch 数はホストが論理長から算出」）のどちらか。
+ *
+ * MUST: 判別共用体で持つ（同じ dispatch に静的値と算出関数を並存させない）。両方持てる形に
+ * すると「どちらが正本か」が dispatch ごとに割れ、片方だけ直された実装が例外なしに
+ * 別の仕事量で回る。
+ */
+export type DispatchWorkgroups =
+  | readonly [number, number, number]
+  | ((past: number, query: number) => readonly [number, number, number]);
 
 /**
  * 1 dispatch ぶんのレシピ。
@@ -60,7 +89,7 @@ type DispatchRecipe = {
   /** 内容アドレスキャッシュ済みの params（Session 常駐）。 */
   readonly params: GPUBuffer;
   readonly bindings: readonly BindingRecipe[];
-  readonly workgroups: readonly [number, number, number];
+  readonly workgroups: DispatchWorkgroups;
 };
 
 /**
@@ -112,6 +141,14 @@ export type StepRecipe = {
   readonly dispatches: readonly DispatchRecipe[];
   /** ステップ末尾に解放する入力の**延べ列**（現行簿記と同一順）。 */
   readonly releases: readonly string[];
+  /**
+   * このステップが **state スロットへ書く**か（`state_append` を含むか — ADR 0067 決定 5）。
+   *
+   * MUST: 失敗時の poison 判定（ADR 0066 追記 3）の唯一の判別点。物理 ring が上書きされうる
+   * のは書き dispatch を submit した run だけなので、executor はこの真偽で「submit カウンタの
+   * スナップショットを取る位置」を決める。読むだけの states 形 attention は false。
+   */
+  readonly writesState: boolean;
 };
 
 /** 構築中の可変な一時仕様（{@link TempRecipe} の可変版）。 */
@@ -157,6 +194,75 @@ export class StepRecipeBuilder {
   }
 }
 
+/**
+ * generation run 1 回ぶんの context 側の実体と論理長（ADR 0066 決定 5 / 追記 4）。
+ *
+ * MUST: 論理長は**エンコード時の値**（`lengths` uniform に書いた値と同じ組）。dispatch 数を
+ * ここから算出する（{@link DispatchWorkgroups}）ので、uniform と食い違うと「GPU が走査する
+ * 範囲」と「ホストが撃った workgroup 数」がずれ、S の一部が未書き込みのまま読まれる。
+ */
+export type GenerationEncoding = {
+  /** スロット名 → context 所有のバッファ。 */
+  readonly slots: ReadonlyMap<string, GPUBuffer>;
+  /** 論理長 uniform（`{past, query}` の 8 バイト）。 */
+  readonly lengths: GPUBuffer;
+  readonly past: number;
+  readonly query: number;
+};
+
+/**
+ * generation run の**論理長に対する**受け口（導出相が state ノードから集める — 実体は
+ * src/runtime/recipe-builder.ts）。state ノードを持たないグラフでは両方とも空になる。
+ *
+ * MUST: 導出済み計画（executor の `PreparedPlan`）と同じ寿命で持つ。ヒット run は計画も導出も
+ * 走らせないので、レシピ列と一緒に畳んでおかないと「2 run 目だけ検査が消える」形になる。
+ */
+export type GenerationLimits = {
+  /**
+   * state ノードの物理 chunk 行数 `M`（同値は畳んだ集合）。`queryLength` はこの**最小**まで
+   * — 超えた行は宣言 shape に載らない（ADR 0066 決定 4 の固定長 chunk + pad）。
+   */
+  readonly chunkRows: ReadonlySet<number>;
+  /**
+   * full スロット（attrs `window` 宣言なし）の名前 → 行容量 `C`。sliding は ring なので
+   * 対象外（ADR 0067 決定 4 ④ — 「full スロットは実行時に `pastLength + queryLength ≤ C`」）。
+   */
+  readonly fullCapacities: ReadonlyMap<string, number>;
+};
+
+/**
+ * generation run の**エンコード前**の検査（ADR 0066 決定 4 / ADR 0067 決定 4 ④）。
+ *
+ * MUST: dispatch を 1 本も積む前に落とす。`queryLength > M` は q / ins の宣言 shape の外を
+ * 読み書きする形で、`pastLength + queryLength > C` の full スロットは `state_append` の書きが
+ * 範囲外へ落ちる（robustness で捨てられる = **静かに書かれない**）— どちらも例外も警告も
+ * 出ないまま、次 step の読者が残骸を過去 KV として食う。
+ * MUST: `queryLength ≤ chunkLength` と u32 値域はここで重ねて見ない（`GenerationContext` の
+ * `writeLengths` / `advance` が持つ — 二重簿記の禁止）。
+ */
+export const assertGenerationRun = (
+  limits: GenerationLimits,
+  pastLength: number,
+  queryLength: number,
+): void => {
+  for (const rows of limits.chunkRows) {
+    if (queryLength > rows) {
+      throw new ExecutionError(
+        `queryLength ${queryLength} が state ノードの物理 chunk 行数 ${rows} を超える` +
+          "（prefill は固定長 chunk + pad・decode は 1 — ADR 0066 決定 4）",
+      );
+    }
+  }
+  for (const [name, capacity] of limits.fullCapacities) {
+    if (pastLength + queryLength > capacity) {
+      throw new ExecutionError(
+        `state '${name}': pastLength ${pastLength} + queryLength ${queryLength} が full スロットの` +
+          `容量 ${capacity} を超える（ADR 0067 決定 4 ④ — sliding でないスロットは巻かない）`,
+      );
+    }
+  }
+};
+
 /** bind group を組んで dispatch を積むのに要る文脈（アリーナ経路と slot 経路の共通部）。 */
 type EncodeContext = {
   readonly device: GPUDevice;
@@ -166,6 +272,8 @@ type EncodeContext = {
    * 畳み込み済みなので、ここには載らない。
    */
   readonly env: Map<string, GPUBuffer>;
+  /** generation run のときだけ渡る context 側の面（1-shot 実行では undefined）。 */
+  readonly generation?: GenerationEncoding;
 };
 
 /** レシピ実行に要る run 寿命の文脈（アリーナ簿記あり — {@link executeStepRecipe}）。 */
@@ -180,11 +288,95 @@ const resolveValue = (source: ValueSource, env: ReadonlyMap<string, GPUBuffer>):
   return buffer;
 };
 
+/**
+ * context 所有の実体を引く。
+ *
+ * MUST: generation 情報が無い実行で state / 論理長を束ねようとしたら fail loudly（計画層が
+ * 先に落とすので到達しない防波堤 — 通すと `undefined` を bind group へ渡して validation で
+ * 落ち、真因から遠い診断になる）。
+ */
+const resolveGeneration = (
+  source: GenerationSource,
+  generation: GenerationEncoding | undefined,
+): GPUBuffer => {
+  if (generation === undefined) {
+    throw new ExecutionError(
+      `${
+        source.kind === "lengths" ? "論理長 uniform" : `state スロット '${source.name}'`
+      }を束ねる dispatch を GenerationContext 無しで実行しようとした`,
+    );
+  }
+  if (source.kind === "lengths") return generation.lengths;
+  const buffer = generation.slots.get(source.name);
+  if (buffer === undefined) {
+    throw new ExecutionError(`state スロット '${source.name}' の実体が GenerationContext に無い`);
+  }
+  return buffer;
+};
+
 const resolveBinding = (
   source: BindingSource,
   env: ReadonlyMap<string, GPUBuffer>,
   temps: readonly GPUBuffer[],
-): GPUBuffer => (source.kind === "temp" ? temps[source.id] : resolveValue(source, env));
+  generation: GenerationEncoding | undefined,
+): GPUBuffer => {
+  switch (source.kind) {
+    case "temp":
+      return temps[source.id];
+    case "state":
+    case "lengths":
+      return resolveGeneration(source, generation);
+    default:
+      return resolveValue(source, env);
+  }
+};
+
+/**
+ * 論理長から算出する形（{@link DispatchWorkgroups}）を実数へ落とす。
+ *
+ * MUST: 算出は**エンコードのたび**（毎 run 論理長が変わる）。ここで畳んで持ち回ると
+ * 「レシピは bindings の純関数」が崩れ、前 step の workgroup 数で回る。
+ */
+const resolveWorkgroups = (
+  recipe: DispatchRecipe,
+  generation: GenerationEncoding | undefined,
+): readonly [number, number, number] => {
+  if (typeof recipe.workgroups !== "function") return recipe.workgroups;
+  if (generation === undefined) {
+    throw new ExecutionError(
+      `dispatch '${recipe.key}': workgroup 数を論理長から算出する dispatch を ` +
+        "GenerationContext 無しで実行しようとした",
+    );
+  }
+  return recipe.workgroups(generation.past, generation.query);
+};
+
+/**
+ * レシピ列が context 所有の実体を 1 つも束ねないことの門（**焼き込み経路の入口**）。
+ *
+ * MUST: slot backing（{@link derivePlanSlots} / {@link bakeBindGroups}）は state を扱えない。
+ * 焼き込み単位の分離（ADR 0066 決定 5 — 実装は波 D-4）が無いまま焼くと、bind group が
+ * **前の context の KV を束ねたまま**回り続ける沈黙 stale 読みの入り口になる。
+ */
+const assertStateFree = (recipes: readonly StepRecipe[], where: string): void => {
+  for (const recipe of recipes) {
+    for (const dispatch of recipe.dispatches) {
+      for (const entry of dispatch.bindings) {
+        if (entry.source.kind !== "state" && entry.source.kind !== "lengths") continue;
+        throw new ExecutionError(
+          `${where}: dispatch '${dispatch.key}' が GenerationContext 所有の実体を束ねている` +
+            "（state を含む bind group の焼き込みは波 D-4 — ADR 0066 決定 5 の分離焼き込み）",
+        );
+      }
+      if (typeof dispatch.workgroups === "function") {
+        throw new ExecutionError(
+          `${where}: dispatch '${dispatch.key}' の workgroup 数が論理長から算出される` +
+            "（焼き込み経路は run を跨いで固定の dispatch 数しか扱えない）",
+        );
+      }
+    }
+  }
+};
 
 /**
  * 1 dispatch ぶんの bind group を組む。
@@ -217,9 +409,14 @@ const encodeDispatch = (
   const bindGroup = createBindGroup(
     run.device,
     recipe,
-    (source) => resolveBinding(source, run.env, temps),
+    (source) => resolveBinding(source, run.env, temps, run.generation),
   );
-  run.scheduler.dispatch(recipe.pipeline, bindGroup, recipe.workgroups, recipe.key);
+  run.scheduler.dispatch(
+    recipe.pipeline,
+    bindGroup,
+    resolveWorkgroups(recipe, run.generation),
+    recipe.key,
+  );
 };
 
 /**
@@ -314,6 +511,7 @@ type PlanSlots = {
  * MUST: 純関数（GPU 資源を作らず、レシピも変更しない）。
  */
 export const derivePlanSlots = (recipes: readonly StepRecipe[]): PlanSlots => {
+  assertStateFree(recipes, "slot 導出");
   const bytes: number[] = [];
   // サイズクラス → 空き slot（LIFO — RunArena.#pool と同じ形）。
   const pool = new Map<number, number[]>();
@@ -433,6 +631,7 @@ export const bakeBindGroups = (
     readonly inputs: ReadonlyMap<string, GPUBuffer>;
   },
 ): BakedPlan => {
+  assertStateFree(recipes, "bind group の焼き込み");
   const { device, buffers, inputs } = context;
   const values = new Map<string, GPUBuffer>(inputs);
   const groups: (readonly GPUBindGroup[])[] = [];
@@ -449,7 +648,11 @@ export const bakeBindGroups = (
     const temps = step.temps.map((slot) => resolveSlot(slot, buffers));
     groups.push(
       recipe.dispatches.map((dispatch) =>
-        createBindGroup(device, dispatch, (source) => resolveBinding(source, values, temps))
+        createBindGroup(
+          device,
+          dispatch,
+          (source) => resolveBinding(source, values, temps, undefined),
+        )
       ),
     );
   });
@@ -472,7 +675,13 @@ export const executeBakedPlan = (
   recipes.forEach((recipe, index) => {
     const stepGroups = groups[index];
     recipe.dispatches.forEach((dispatch, id) => {
-      scheduler.dispatch(dispatch.pipeline, stepGroups[id], dispatch.workgroups, dispatch.key);
+      // 焼き込み経路に来るレシピは `assertStateFree` を通っている（= 静的な 3 つ組だけ）。
+      scheduler.dispatch(
+        dispatch.pipeline,
+        stepGroups[id],
+        resolveWorkgroups(dispatch, undefined),
+        dispatch.key,
+      );
     });
   });
 };

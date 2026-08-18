@@ -484,6 +484,18 @@ export class SubmitScheduler {
     this.#clampedNegativeSamples = 0;
   }
 
+  /**
+   * 実 `queue.submit` を出した累計回数（単調増加・{@link SubmitStats.submitCount} と同じ値）。
+   *
+   * generation run の失敗が state の物理 ring に届いたかの判定に使う（ADR 0066 追記 3 —
+   * executor の poison 結線）。`stats` が同じ値を持つのに別の口を置くのは、判定が run の
+   * ホットパスで 2 回引かれるため（`stats` は `measuredMs` の配列複製を伴う）。
+   * MUST: 独立に更新するカウンタを増やさない — `#submitChunk` の 1 箇所だけが動かす。
+   */
+  get submitCount(): number {
+    return this.#submitCount;
+  }
+
   get stats(): SubmitStats {
     return {
       submitCount: this.#submitCount,

@@ -255,6 +255,18 @@ const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
 const windowIsSingleOutput = (window: readonly NodePlan[]): boolean =>
   window.every((step) => outputCountOf(step.contract) === 1);
 
+/**
+ * 窓に **state を触るノード**が 1 本でも入っていないか（ADR 0067 決定 5b）。
+ *
+ * MUST: state 参照はテンソルのデータ辺を張らないため、融合が窓内 passthrough を前へ動かすと
+ * `nodes` 配列順が崩れても shape 検査も参照計数も何も落ちない — 「今 step の k/v を過去として
+ * 二重に読む」形が例外なしに出る。
+ * MUST: ここが唯一の判定点（{@link windowIsSingleOutput} と同じ位置）。ルール側の match に
+ * 書かせると、将来のルールが 1 本書き忘れただけで沈黙誤値になる。
+ */
+const windowTouchesState = (window: readonly NodePlan[]): boolean =>
+  window.some((step) => Object.keys(step.node.states).length > 0);
+
 /** 鎖の全ノードが f32 専業か（融合カーネルは全て f32 固定）。 */
 const allF32 = (chain: readonly NodePlan[]): boolean =>
   chain.every((step) =>
@@ -379,6 +391,7 @@ const assertTempLifetimes = (
  * passthrough は**掴んだ窓と鎖から導く**。ルール側に宣言させると、同じ事実がルールの
  * 本数だけ複製され、1 本ずれても例外は出ない。
  * MUST: 多出力ノードを含む窓は全ルールでここが落とす（{@link windowIsSingleOutput}）。
+ * MUST: state を触るノードを含む窓も同じ位置で落とす（{@link windowTouchesState}）。
  */
 const defineRule = <Matched extends FusionMatch>(rule: {
   readonly name: FusionRuleName;
@@ -400,6 +413,9 @@ const defineRule = <Matched extends FusionMatch>(rule: {
     // 多出力ノード（ADR 0068 決定 1）は融合候補にしない。matcher の op 名の綴りは受理集合を
     // 狭めるだけで「出力が 1 本」を保証しないので、窓の全ノードを契約から見る 1 箇所を置く。
     if (!windowIsSingleOutput(matched.window)) return undefined;
+    // state を触るノード（ADR 0067 決定 5b）は融合候補にしない — 並べ替えの禁止は窓の
+    // 仕組み側の不変条件で、matcher の op 名の綴りでは表せない。
+    if (windowTouchesState(matched.window)) return undefined;
     const folded = new Set(matched.chain);
     const passthrough = matched.window.filter((step) => !folded.has(step));
     // MUST: 鎖は窓の部分列。外れていれば窓外のノードを畳んだ（= 走査幅が足りず二重実行）か

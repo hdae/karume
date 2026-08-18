@@ -282,9 +282,9 @@ export type StateBackingStats = {
   /**
    * state を含む bind group を焼き直した累計回数。
    *
-   * NOTE: 波 C の時点では **0 固定**（state を束ねる dispatch がまだ無い — ノードの `states` 欄 /
-   * `state_append` / attention 統合は波 D）。波 D で ADR 0066 決定 5 の「焼き込み単位の分離」を
-   * 実装した時点でここが埋まる。
+   * NOTE: 波 D-3 の時点でも **0 固定**。generation run は焼き込みを 1 度も通さない
+   * （state を束ねる bind group は run ごとに組む — アリーナ経路固定）ので、焼き直しという
+   * 事象がまだ存在しない。ADR 0066 決定 5 の「焼き込み単位の分離」を実装する波 D-4 で埋まる。
    */
   readonly rebindCount: number;
 };

@@ -786,8 +786,8 @@ Deno.test({
 // 実行経路の結線は波 D-3）。ここが固定するのは 2 点へ組み替えた:
 // ①context 生成そのものが計画導出を 1 回も走らせない（鍵に context が載っていれば導出が動く）
 // ②state 参照ノードを持つグラフの 1-shot 実行は fail loudly（黙って state 抜きで走らない）
-// NOTE: 「同じ鍵に当たる（hit: true）」= ADR 0066 受入条件③の run 側は、波 D-3 で
-// GenerationContext から run へスロット shape が渡るようになった時に復活させる。
+// NOTE: 「同じ鍵に当たる（hit: true）」= ADR 0066 受入条件③の run 側は波 D-3 で結線され、
+// tests/gpu_state_execution_test.ts が「別 context・同容量なら 2 本目が hit」の形で持っている。
 Deno.test({
   name: "context 生成は計画導出を走らせず、state 参照グラフの 1-shot 実行は拒否される（実 GPU）",
   ignore: !GPU_AVAILABLE,

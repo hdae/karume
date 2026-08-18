@@ -8,9 +8,9 @@
  * おり、ResidentTensor は GpuContext 所有の別 dispose 契約を持つため、どちらも「context 単位で
  * 返す」（決定 6）と粒度が合わない。素の `createBuffer` + 自前の簿記が最小の形になる。
  *
- * MUST: 本波（波 C）の時点で **state を読み書きする実行経路は無い** — ノードの `states` 欄・
- * `state_append`・attention 統合は波 D（ADR 0067 決定 4 / 5）。ここにあるのは所有権・寿命・
- * 搬送路（論理長 uniform）だけで、実行統合の結線点は「波 D」と書いた注記がそのまま指す。
+ * MUST: ここが持つのは所有権・寿命・搬送路（論理長 uniform）だけで、実体を**束ねる**のは
+ * 実行側（`Session.run` の generation 面が内部面 {@link GenerationContextInternals} 経由で
+ * 読む）。焼き込み bind group を context 側に持つ形（ADR 0066 決定 5 の分離焼き込み）は波 D-4。
  * MUST: executor.ts を import しない（Session → context の一方向 import を型でも崩さない）。
  * Session から借りる面は {@link GenerationContextHost} の構造的な数欄だけ
  * （`RecipeBuilderContext` と同じ流儀）。
@@ -27,7 +27,7 @@ import {
   pushFailureScopes,
   RUNTIME_INTERNAL,
 } from "../gpu/device.ts";
-import { numel } from "../ops.ts";
+import { numel, stateWindow } from "../ops.ts";
 import { ExecutionError, type SymbolBindings } from "./plan.ts";
 import type { GenerationContextSpec } from "./session-types.ts";
 
@@ -111,12 +111,12 @@ export type GenerationContextHost = {
  *
  * MUST: 素の名前で公開しない（ADR 0008 の薄い面）。論理長の進行は run の成功で起きる契約
  * （決定 6 — ホスト側の手動加算は API にしない）なので、`advance` / `poison` / `writeLengths` は
- * **波 D の実行統合だけが呼ぶ**。
+ * **実行統合（`Session.run` の generation 面）だけが呼ぶ**。
  */
 type GenerationContextInternals = {
-  /** state スロットの実体（波 D の bind group はここから束ねる — 決定 5 の焼き込み分離）。 */
+  /** state スロットの実体（generation run の bind group はここから束ねる — 決定 5）。 */
   readonly slots: ReadonlyMap<string, StateSlotBacking>;
-  /** 論理長 uniform（波 D のレシピは固定束縛でこれを参照する — 追記 4）。 */
+  /** 論理長 uniform（レシピは固定束縛でこれを参照する — 追記 4）。 */
   readonly lengths: GPUBuffer;
   /** この context が常駐させている GPU バイト数（診断 `stateBacking.residentBytes` の元）。 */
   readonly bytes: number;
@@ -126,6 +126,26 @@ type GenerationContextInternals = {
   advance(queryLength: number): void;
   /** 汚染する（state 変更 dispatch を含む run の失敗 — 追記 3）。 */
   poison(reason: string): void;
+};
+
+/**
+ * sliding なスロットの名前（ノード attrs `window` 由来 — ADR 0067 決定 4）。
+ *
+ * MUST: 判定材料はノード側にしかない（`graph.states` の宣言は容量だけを持ち、窓は
+ * **参照するノード**が宣言する）。同一スロットに触れる全ノードで `window` が一致することは
+ * `validateGraphContracts` の `assertStateOrder` が Session 構築時に済ませているので、
+ * ここは 1 本でも sliding 宣言があれば sliding として拾えばよい。
+ */
+const slidingSlotNames = (graph: IrGraph): ReadonlySet<string> => {
+  const sliding = new Set<string>();
+  graph.nodes.forEach((node, index) => {
+    const slots = Object.values(node.states);
+    if (slots.length === 0) return;
+    const window = stateWindow(node.attrs, `nodes[${index}] (${node.op})`);
+    if (window === undefined) return;
+    for (const slot of slots) sliding.add(slot);
+  });
+  return sliding;
 };
 
 /**
@@ -198,6 +218,8 @@ export class GenerationContext {
   readonly [RUNTIME_INTERNAL]: GenerationContextInternals;
   readonly #host: GenerationContextHost;
   readonly #slots: ReadonlyMap<string, StateSlotBacking>;
+  /** sliding なスロット名（{@link GenerationContext.rewind} の全拒否条件 — ADR 0066 追記 2）。 */
+  readonly #slidingSlots: ReadonlySet<string>;
   readonly #lengths: GPUBuffer;
   /**
    * 論理長の書き出し値。**全域を毎回書く**（部分書きにすると、片方だけ更新された組が残って
@@ -213,11 +235,13 @@ export class GenerationContext {
   private constructor(
     host: GenerationContextHost,
     slots: ReadonlyMap<string, StateSlotBacking>,
+    slidingSlots: ReadonlySet<string>,
     lengths: GPUBuffer,
     chunkLength: number,
   ) {
     this.#host = host;
     this.#slots = slots;
+    this.#slidingSlots = slidingSlots;
     this.#lengths = lengths;
     this.chunkLength = chunkLength;
     this[RUNTIME_INTERNAL] = {
@@ -320,7 +344,13 @@ export class GenerationContext {
       // GpuDeviceLostError へ正規化する。
       const failure = await gpu[RUNTIME_INTERNAL].raceDeviceLost(pending, where);
       if (failure !== undefined) throw failure;
-      context = new GenerationContext(host, slots, lengths, spec.chunkLength);
+      context = new GenerationContext(
+        host,
+        slots,
+        slidingSlotNames(graph),
+        lengths,
+        spec.chunkLength,
+      );
       return context;
     } finally {
       // MUST: 後始末の失敗で本体の例外を上書きしない（Session.create と同じ規律）。push した
@@ -352,14 +382,20 @@ export class GenerationContext {
   /**
    * 論理位置を切り詰める（ADR 0066 決定 6）。`0 ≤ position ≤ pastLength` の整数のみ。
    *
-   * NOTE（波 D で結線）: **sliding スロットを含む context の位置指定 rewind は fail loudly**
-   * （追記 2 — エビクト発生後は resident な位置でも物理配置と論理範囲が一致しないため、ORT
-   * GenAI と同じく全拒否）。sliding 性はノード attrs `window`（ADR 0067 決定 4）由来で、ノードの
-   * `states` 欄が IR にまだ無い本波では判定材料が存在しない。波 D の `states` 欄実装と同時に、
-   * この位置へ拒否を入れる。
+   * MUST: **sliding スロットを 1 本でも含む context は全拒否**（ADR 0066 追記 2）。ring は
+   * エビクトが起きた後、resident な位置への巻き戻しでも物理配置と論理範囲が一致しない
+   * （左詰め compaction を持たないため）。ORT GenAI が同じ理由で current 未満への rewind を
+   * 全拒否しているのと同じ契約で、緩めるなら compaction の実装と対にする。
    */
   rewind(position: number): void {
     this.#assertUsable("rewind");
+    if (this.#slidingSlots.size > 0) {
+      throw new ExecutionError(
+        `rewind: sliding スロット [${[...this.#slidingSlots].join(", ")}] を含む context は` +
+          "巻き戻せない（ring はエビクト後に物理配置と論理範囲が一致しないため — ADR 0066 " +
+          "追記 2）。有効なのは全スロットが非 sliding の context だけで、復旧は新しい context",
+      );
+    }
     if (!Number.isSafeInteger(position) || position < 0) {
       throw new ExecutionError(`rewind: 位置 ${position} が非負整数でない`);
     }
@@ -400,8 +436,8 @@ export class GenerationContext {
    *
    * MUST: params の内容アドレスキャッシュ（ADR 0042）には**載せない**。毎 step 値が変わるものを
    * 内容アドレスに載せると「キャッシュ無界成長」と「PreparedPlan ヒット時に導出相が走らず更新
-   * 不能」の両方を踏む。実体は context 所有のこのバッファ 1 本きりで、レシピからは固定束縛で
-   * 参照する（波 D — 束縛の結線は `states` 欄つき attention / `state_append` の実装と同時）。
+   * 不能」の両方を踏む。実体は context 所有のこのバッファ 1 本きりで、レシピからは固定束縛
+   * （`BindingSource` の `lengths`）で参照する。
    * MUST: 呼ぶのは**毎 run の encode 前**（`queue.writeBuffer` は issue 順で queue timeline に
    * 載るので、submit 済みの dispatch を追い越さない — ADR 0004 不変条件④）。
    */
@@ -416,9 +452,10 @@ export class GenerationContext {
   /**
    * 論理長を進める（ADR 0066 決定 6 — **run の成功でのみ**呼ぶ）。
    *
-   * NOTE（波 D で結線）: full スロットの実行時検査 `pastLength + queryLength ≤ 容量`
-   * （ADR 0067 決定 4 の④ — context 側検査）はここに入る。容量軸がどの次元かは
-   * ノードの `states` 欄と attrs `window` が決めるため、本波では判定材料が存在しない。
+   * NOTE: full スロットの実行時検査 `pastLength + queryLength ≤ 容量`（ADR 0067 決定 4 の④）は
+   * **run のエンコード前**に居る（`assertGenerationRun` — src/runtime/recipe.ts）。容量軸がどの
+   * 次元かを決めるのは op 契約なので、導出相が集めた {@link GenerationLimits} が正本で、
+   * ここでは重ねて見ない（進行の時点で検査しても、既に書かれた後で手遅れになる）。
    */
   #advance(queryLength: number): void {
     this.#assertUsable("advance");
@@ -441,7 +478,7 @@ export class GenerationContext {
    *
    * 論理長は進まないが物理 ring は上書きされ得るので、rollback / staging を持たない設計では
    * 「以後の全操作を拒否」以外に整合を主張する手段が無い（復旧 = 新しい context + ホスト側
-   * 再構築）。トリガの結線は波 D の実行統合（run の失敗経路）。
+   * 再構築）。トリガは run の失敗経路（executor の `#poisonOnStateWrite`）。
    *
    * MUST: 2 度目以降は最初の理由を保つ（真因を後続の失敗で上書きしない）。
    */

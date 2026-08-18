@@ -17,7 +17,7 @@ import { derivePlanSlots, type StepOutput, type StepRecipe } from "../src/runtim
 const step = (
   outputs: readonly StepOutput[],
   releases: readonly string[] = [],
-): StepRecipe => ({ outputs, temps: [], dispatches: [], releases });
+): StepRecipe => ({ outputs, temps: [], dispatches: [], releases, writesState: false });
 
 /** プールから確保する出力（`byteLength` は 4 の倍数 = サイズクラスと同値にしておく）。 */
 const alloc = (

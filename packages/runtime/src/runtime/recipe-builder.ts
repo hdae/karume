@@ -166,6 +166,27 @@ import {
   type ScoreStorage,
   scoreStorageBytes,
 } from "../kernels/score-storage.ts";
+import {
+  STATE_STATS_STRIDE,
+  stateAttentionParams,
+  statePvKey,
+  statePvWgsl,
+  statePvWorkgroups,
+  stateQkKey,
+  stateQkWgsl,
+  stateQkWorkgroups,
+  stateSliding,
+  stateStatsKey,
+  stateStatsParams,
+  stateStatsWgsl,
+  stateStatsWorkgroups,
+} from "../kernels/state-attention.ts";
+import {
+  stateAppendKey,
+  stateAppendParams,
+  stateAppendWgsl,
+  stateAppendWorkgroups,
+} from "../kernels/state-append.ts";
 import type { KarumeModel } from "../format/container.ts";
 import type { IrDtype } from "../format/ir.ts";
 import type { RunArena } from "../gpu/arena.ts";
@@ -207,16 +228,18 @@ import {
   rmsNormEps,
   scalarParamValues,
   sliceAttrs,
+  stateWindow,
   topkK,
   type UnaryOpName,
   WEIGHT_SLOTS,
   WHERE_OP,
 } from "../ops.ts";
-import type { ExecStep, FusedOperand, FusedStep } from "./fusion.ts";
+import { type ExecStep, type FusedOperand, type FusedStep, planRowBlocks } from "./fusion.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 import {
   type BindingRecipe,
   type BindingSource,
+  type GenerationLimits,
   type StepOutput,
   type StepRecipe,
   StepRecipeBuilder,
@@ -256,8 +279,28 @@ type RecipeBuilderContext = {
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
   readonly i8a8Dot: I8a8Dot;
+  /**
+   * 行ブロック枚数の強制（**テスト専用** — executor の `ROW_BLOCK_SPLIT`）。分解経路は
+   * 融合ルールが受け取るが、states 形の行ブロック（ADR 0067 決定 7）は導出相が直接割るので
+   * ここにも同じノブが要る（強制分割 parity の足を経路ごとに別のノブにしない）。
+   */
+  readonly rowBlockSplit: number | undefined;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;
+};
+
+/**
+ * state ノードのビルドに要る文脈（束縛解決済みのスロット容量と、run 前検査の集積先）。
+ *
+ * MUST: 集積は導出相の 1 度きり（{@link GenerationLimits} は導出済み計画と同じ寿命で持ち、
+ * ヒット run はここを走らせない）。run ごとに数え直す形にすると、ヒット run だけ検査が
+ * 消えるか、2 実装に分かれる。
+ */
+type StateBuildContext = {
+  /** スロット名 → 束縛解決済みの容量込み具体形（`GenerationContext` が渡す）。 */
+  readonly shapes: ReadonlyMap<string, readonly number[]>;
+  readonly chunkRows: Set<number>;
+  readonly fullCapacities: Map<string, number>;
 };
 
 /**
@@ -288,14 +331,33 @@ export class RecipeBuilder {
   /**
    * 導出相 — ステップ列をレシピ列へ落とす。GPU コマンドを 1 つも出さず、run 寿命の実体
    * （{@link RunArena} のバッファ）にも触れない（モジュール doc の MUST）。
+   *
+   * @param stateShapes 束縛解決済みの state スロット shape（スロット名 → 容量込みの具体形）。
+   *   MUST: レシピは「bindings ∪ 容量」の純関数のまま — context の**識別子は渡さない**
+   *   （ADR 0066 決定 5。実体は run ごとに `GenerationEncoding` が配る）。省略した導出で
+   *   state ノードに当たれば fail loudly（黙って従来形として組まない）。
    */
-  async buildRecipes(steps: readonly ExecStep[]): Promise<readonly StepRecipe[]> {
+  async buildRecipes(
+    steps: readonly ExecStep[],
+    stateShapes?: ReadonlyMap<string, readonly number[]>,
+  ): Promise<{
+    readonly recipes: readonly StepRecipe[];
+    readonly generation: GenerationLimits;
+  }> {
     // 実体は実行相まで決まらないので、導出相は「その値名が既に定義済みか」だけを追う
     // （束縛漏れを実行相へ持ち越さず、ここで fail loudly にする）。
     const defined = new Set(this.#state.model.graph.inputs.map((spec) => spec.name));
+    const states: StateBuildContext = {
+      shapes: stateShapes ?? new Map(),
+      chunkRows: new Set(),
+      fullCapacities: new Map(),
+    };
     const recipes: StepRecipe[] = [];
-    for (const step of steps) recipes.push(await this.#buildStep(step, defined));
-    return recipes;
+    for (const step of steps) recipes.push(await this.#buildStep(step, defined, states));
+    return {
+      recipes,
+      generation: { chunkRows: states.chunkRows, fullCapacities: states.fullCapacities },
+    };
   }
 
   /**
@@ -320,7 +382,11 @@ export class RecipeBuilder {
    * MUST: 出力列は**出力 slot 昇順**で組む（{@link StepRecipe.outputs} の順序規約 — 実行・
    * slot 導出・焼き込みと共有する 1 本）。融合ステップは単一出力（fusion.ts の窓ガード）。
    */
-  async #buildStep(step: ExecStep, defined: Set<string>): Promise<StepRecipe> {
+  async #buildStep(
+    step: ExecStep,
+    defined: Set<string>,
+    states: StateBuildContext,
+  ): Promise<StepRecipe> {
     // 素のノードの出力列は `node.outs` と同順・同長（plan.ts の {@link NodePlan.outputs}）。
     const outSlots: readonly { readonly name: string; readonly shape: readonly number[] }[] =
       step.kind === "node"
@@ -358,7 +424,7 @@ export class RecipeBuilder {
 
     const builder = new StepRecipeBuilder();
     if (step.kind === "node") {
-      await this.#buildNode(step.plan, step.aliasesInput, binds, outs, builder);
+      await this.#buildNode(step.plan, step.aliasesInput, binds, outs, builder, states);
     } else {
       await this.#buildFused(step, binds, outs, builder);
     }
@@ -369,6 +435,9 @@ export class RecipeBuilder {
       temps: builder.temps,
       dispatches: builder.dispatches,
       releases: consumedNames,
+      // MUST: 判別は契約（`state_append` だけが書き手 — ADR 0067 決定 5）。融合ステップは
+      // state を触るノードを含めない（fusion.ts の窓ガード）ので常に false。
+      writesState: step.kind === "node" && step.plan.contract.kind === "stateAppend",
     };
   }
 
@@ -459,6 +528,7 @@ export class RecipeBuilder {
     binds: readonly BindingSource[],
     outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
+    states: StateBuildContext,
   ): Promise<void> {
     switch (step.contract.kind) {
       case "unary":
@@ -547,7 +617,11 @@ export class RecipeBuilder {
         await this.#buildSoftmax(step, true, binds, outs, builder);
         break;
       case "attention":
-        await this.#buildAttention(step, binds, outs, builder);
+        // 欄の有無が形を判別する（ADR 0067 決定 4）。states 形は別族カーネル
+        // （src/kernels/state-attention.ts）で、融合 attention とは 1 バイトも共有しない。
+        await (Object.keys(step.node.states).length > 0
+          ? this.#buildStateAttention(step, binds, outs, builder, states)
+          : this.#buildAttention(step, binds, outs, builder));
         break;
       case "embedding":
         await this.#buildEmbedding(step, binds, outs, builder);
@@ -577,12 +651,8 @@ export class RecipeBuilder {
         // 別名化は #buildStep で済んでいる（この op は 1 dispatch も出さない）。
         break;
       case "stateAppend":
-        // 契約と shape 規則だけが先に入った段階（ADR 0067 決定 5 — 実行結線は state を所有する
-        // GenerationContext 側と同じ波で入る）。MUST: 素通りさせない — state への書き込みが
-        // 出ないまま次のノードへ進むと、読者が前 step の残骸を過去 KV として読む。
-        throw new ExecutionError(
-          `op '${step.contract.name}' の実行はまだ結線されていない（state 参照ノード）`,
-        );
+        await this.#buildStateAppend(step, binds, builder, states);
+        break;
       default: {
         // MUST: 未処理の kind をここで止める。switch が素通りすると出力バッファに 1 バイトも
         // 書かれないまま次のノードへ進み、プール再利用の残骸がそのまま値になる
@@ -1712,6 +1782,232 @@ export class RecipeBuilder {
     // 落ちるか、プール再利用から外れて peak が過大に出る）。
     builder.releaseTemp(stats);
     builder.releaseTemp(scores);
+  }
+
+  /**
+   * `states` 欄のキーが指すスロットの名前と束縛解決済み容量形。
+   *
+   * 形の妥当性（`[B,Hkv,C,D]`・ins との B / Hkv / D 一致・`window ≤ C`）は shape 層
+   * （src/ops/shapes.ts）が済ませているので、ここで引けないのはランタイム内部の不変条件破れ
+   * （導出相が `stateShapes` 無しで state ノードに当たった経路を含む）。
+   */
+  #stateSlot(
+    step: NodePlan,
+    key: string,
+    states: StateBuildContext,
+    where: string,
+  ): { readonly name: string; readonly shape: readonly number[] } {
+    const name = step.node.states[key];
+    if (name === undefined) throw new ExecutionError(`${where}: states 欄に '${key}' が無い`);
+    const shape = states.shapes.get(name);
+    if (shape === undefined) {
+      throw new ExecutionError(
+        `${where}: state スロット '${name}' の解決済み容量が無い` +
+          "（GenerationContext を伴わない実行では state 参照ノードを組めない）",
+      );
+    }
+    return { name, shape };
+  }
+
+  /**
+   * states 形 attention（ADR 0067 決定 4 / 6 / 7）。**1 ノード = 行ブロック 1 枚あたり 3 dispatch**
+   * で、カーネル族は融合 attention と完全に別（src/kernels/state-attention.ts）。
+   *
+   * ①QK（S を live 列だけ実体化）→ ②行統計（identity −inf・空行ガード）→ ③PV（P 非実体化）。
+   * K / V の出どころは 2 つ（論理 col < `pastLength` は**スロット**・以降は今 step の `ins`）で、
+   * 走査範囲は実行時値なので **①QK の dispatch 数だけが論理長から算出**される（②③ は出力側の
+   * 形だけで決まり、live の走査は invocation の内側）。
+   *
+   * MUST: 行ブロックは {@link planRowBlocks}（ADR 0060 と同じ純関数）で割る。S 1 枚 =
+   * `B·H · block · colCap · 4` バイトが `maxStorageBufferBindingSize` に収まる最小枚数の等分で、
+   * 実行時オートチューンは持たない（ADR 0022）。1 行でも収まらない形は fail loudly。
+   * MUST: 一時（S / 行統計）は**ブロックごとに**確保して返す（全ブロックぶんまとめて取ると、
+   * 上限を越えない形にした意味が消える）。
+   */
+  async #buildStateAttention(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    outs: readonly BindingSource[],
+    builder: StepRecipeBuilder,
+    states: StateBuildContext,
+  ): Promise<void> {
+    const [q, insK] = step.inputShapes;
+    const where = `attention (states) [${q.join(",")}] × [${insK.join(",")}]`;
+    const [batch, heads, chunkRows, depth] = q;
+    const kvRepeat = heads / insK[1];
+    const gqa = kvRepeat > 1;
+    const kSlot = this.#stateSlot(step, "k", states, where);
+    const vSlot = this.#stateSlot(step, "v", states, where);
+    // k / v スロットが同形であることは shape 層が済ませている（容量は片方から引けばよい）。
+    const capacity = kSlot.shape[2];
+    const window = stateWindow(step.node.attrs, where) ?? 0;
+    const sliding = stateSliding(window);
+    // S の列ストライド上限。full は容量ぶん・sliding は resident 窓 `(W−1) + M`
+    // （下限式の正本は src/kernels/state-attention.ts の `assertStateGeometry`）。
+    const colCap = sliding ? window - 1 + chunkRows : capacity;
+    const scale = attentionScale(step.node.attrs, where);
+    // DECIDED: 数値変種 × states 形は fail loudly で開始する（ADR 0058 決定 3 —「未実装の組は
+    // 縮退でなく fail loudly」。黙って f32 で走ると opt-in を指定した意味が診断からも数値からも
+    // 消える）。判定は**一時バッファを取る前**（GQA × i8a8 の門と同じ位置）。
+    if (this.#state.attentionCompute !== "f32") {
+      throw new ExecutionError(
+        `${where}: states 形の attention は attentionCompute '${this.#state.attentionCompute}' と` +
+          "組めない（f32 の別族カーネルのみ — ADR 0067 決定 3 / 4）",
+      );
+    }
+    if (this.#state.attentionScoreStorage !== "f32") {
+      throw new ExecutionError(
+        `${where}: states 形の attention は attentionScoreStorage ` +
+          `'${this.#state.attentionScoreStorage}' と組めない（S の格納は f32 のみ）`,
+      );
+    }
+    // run 前検査（ADR 0066 決定 4 / ADR 0067 決定 4 ④）の材料。sliding は ring なので容量の
+    // 検査対象にしない。
+    states.chunkRows.add(chunkRows);
+    if (!sliding) {
+      states.fullCapacities.set(kSlot.name, capacity);
+      states.fullCapacities.set(vSlot.name, capacity);
+    }
+
+    const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
+    const batchHeads = batch * heads;
+    const blocks = planRowBlocks(
+      chunkRows,
+      batchHeads * colCap * 4,
+      this.#state.gpu.limits.maxStorageBufferBindingSize,
+      this.#state.rowBlockSplit,
+    );
+
+    const qkKey = stateQkKey(sliding, gqa);
+    const statsKey = stateStatsKey(sliding);
+    const pvKey = statePvKey(sliding, gqa);
+    const qk = await this.#state.cache.get(qkKey, stateQkWgsl(sliding, gqa));
+    const stats = await this.#state.cache.get(statsKey, stateStatsWgsl(sliding));
+    const pv = await this.#state.cache.get(pvKey, statePvWgsl(sliding, gqa));
+
+    for (const block of blocks) {
+      // ①③ が共有する静的 params（内容アドレスキャッシュ適格 — ブロック間の差は rowOffset /
+      // rowsBlock だけ）。
+      const params = this.#writeParams(
+        stateAttentionParams({
+          rowsBlock: block.rows,
+          rowOffset: block.offset,
+          chunkRows,
+          depth,
+          kvRepeat,
+          window,
+          capacity,
+          colCap,
+          scale,
+        }),
+        PARAMS_UNIFORM_USAGE,
+      );
+      const dispatchGeometry = { batchHeads, rowsBlock: block.rows, depth, window };
+      const scores = builder.allocTemp(batchHeads * block.rows * colCap * 4);
+      const rowStats = builder.allocTemp(batchHeads * block.rows * STATE_STATS_STRIDE * 4);
+
+      // ①QK — **workgroup 数だけが論理長から算出**される（仕事量 ∝ Q × (有効 past + Q) の機構
+      // そのもの — ADR 0066 決定 3 の合格条件）。
+      builder.dispatch({
+        key: qkKey,
+        pipeline: qk.pipeline,
+        layout: qk.layout,
+        params,
+        bindings: [
+          { binding: 1, source: binds[0] },
+          { binding: 2, source: binds[1] },
+          { binding: 3, source: { kind: "state", name: kSlot.name } },
+          { binding: 4, source: scores },
+          { binding: 5, source: { kind: "lengths" } },
+        ],
+        workgroups: (past, query) =>
+          stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
+      });
+
+      // ② 行統計 — 1 行 = 1 workgroup の行方向 grid-stride（live の走査は行ループの内側）。
+      builder.dispatch({
+        key: statsKey,
+        pipeline: stats.pipeline,
+        layout: stats.layout,
+        params: this.#writeParams(
+          stateStatsParams(batchHeads * block.rows, colCap, window),
+          PARAMS_UNIFORM_USAGE,
+        ),
+        bindings: [
+          { binding: 1, source: scores },
+          { binding: 2, source: rowStats },
+          { binding: 3, source: { kind: "lengths" } },
+        ],
+        workgroups: stateStatsWorkgroups(dispatchGeometry, limit, `${where} ②stats`),
+      });
+
+      // ③PV — 出力は `rowOffset` からの `rowsBlock` 行**全て**（pad 行も full-write）。
+      builder.dispatch({
+        key: pvKey,
+        pipeline: pv.pipeline,
+        layout: pv.layout,
+        params,
+        bindings: [
+          { binding: 1, source: scores },
+          { binding: 2, source: rowStats },
+          { binding: 3, source: binds[2] },
+          { binding: 4, source: { kind: "state", name: vSlot.name } },
+          { binding: 5, source: outs[0] },
+          { binding: 6, source: { kind: "lengths" } },
+        ],
+        workgroups: statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
+      });
+
+      // MUST: 確保の逆順で返す（{@link executeStepRecipe} の LIFO と同じ順）。
+      builder.releaseTemp(rowStats);
+      builder.releaseTemp(scores);
+    }
+  }
+
+  /**
+   * `state_append`（今 step の k / v をスロットへ書く単機能 effect op — ADR 0067 決定 5）。
+   * **1 ノード = 1 dispatch・出力 0 本**（`StepRecipe.outputs` は空列）。
+   *
+   * MUST: workgroup 数は `queryLength` から算出する（容量 `C` に比例させない — ADR 0066 決定 3）。
+   * 書くのは先頭 `queryLength` 行だけで、pad 行はカーネルの添字空間に入らない。
+   */
+  async #buildStateAppend(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    builder: StepRecipeBuilder,
+    states: StateBuildContext,
+  ): Promise<void> {
+    const x = step.inputShapes[0];
+    const where = `state_append [${x.join(",")}]`;
+    const slot = this.#stateSlot(step, "slot", states, where);
+    const capacity = slot.shape[2];
+    const window = stateWindow(step.node.attrs, where) ?? 0;
+    const sliding = stateSliding(window);
+    const geometry = {
+      kvPlanes: x[0] * x[1],
+      chunkRows: x[2],
+      depth: x[3],
+      capacity,
+      window,
+    };
+    states.chunkRows.add(x[2]);
+    if (!sliding) states.fullCapacities.set(slot.name, capacity);
+
+    const key = stateAppendKey(sliding);
+    const { pipeline, layout } = await this.#state.cache.get(key, stateAppendWgsl(sliding));
+    const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params: this.#writeParams(stateAppendParams(geometry), PARAMS_UNIFORM_USAGE),
+      bindings: [
+        { binding: 1, source: binds[0] },
+        { binding: 2, source: { kind: "state", name: slot.name } },
+        { binding: 3, source: { kind: "lengths" } },
+      ],
+      workgroups: (_past, query) => stateAppendWorkgroups(geometry, query, limit, where),
+    });
   }
 
   /**

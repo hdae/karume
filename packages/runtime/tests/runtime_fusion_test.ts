@@ -176,6 +176,43 @@ Deno.test("SiLU の反例（別名 / 内部 output / 別 consumer / 別 gate / b
   }
 });
 
+/**
+ * state を触るノードを含む窓は**全ルールで**掴まない（ADR 0067 決定 5b）。
+ *
+ * state 参照はテンソルのデータ辺を張らないので、融合が窓内 passthrough を前へ動かすと
+ * `nodes` 配列順が崩れても shape 検査も参照計数も何も落ちない（「今 step の k/v を過去として
+ * 二重に読む」が例外なしに出る）。
+ *
+ * NOTE: 現行の op 語彙では `states` 欄を持てるのが `attention` / `state_append` の 2 本だけで、
+ * どちらも既存 5 ルールの窓の綴りに現れない — つまり**実グラフからは踏めない**。それでも窓の
+ * 仕組み側の不変条件として置いてある門なので、掴めることが確定している窓（SiLU）の片方に
+ * `states` 欄を差した合成ノードで、判定点が実際に効いていることを固定する。
+ */
+Deno.test("state を触るノードを含む窓はどのルールも掴まない（窓の仕組み側の不変条件）", () => {
+  const ir = parse(siluGraph());
+  const plan = planGraph(ir, bindSymbols(ir, siluInputs()));
+  const context = {
+    useCounts: countUses(ir),
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+  };
+  // 対照: 素のままなら掴める（下の 0 が「そもそも掴めない窓」でないことの裏）。
+  assertEquals(planFusions(plan.nodes, context).counts.silu, 1);
+
+  for (const tainted of [0, 1]) {
+    const nodes = plan.nodes.map((node, index) =>
+      index === tainted ? { ...node, node: { ...node.node, states: { k: "kv" } } } : node
+    );
+    const fused = planFusions(nodes, context);
+    assertEquals(fused.counts.silu, 0, `nodes[${tainted}] に states 欄があるのに掴んだ`);
+    assertEquals(
+      fused.steps.every((step) => step.kind === "node"),
+      true,
+      `nodes[${tainted}]: ${outline(fused.steps).join(",")}`,
+    );
+  }
+});
+
 // ---------------------------------------------------------- upsample2x
 
 type UpsampleOptions = {
