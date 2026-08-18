@@ -41,6 +41,8 @@ import {
   argmaxParams,
 } from "../src/kernels/argmax.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../src/kernels/bmm.ts";
+import { statePvWgsl, stateQkWgsl, stateStatsWgsl } from "../src/kernels/state-attention.ts";
+import { stateAppendWgsl } from "../src/kernels/state-append.ts";
 import {
   assertTopkK,
   TOPK_CORE_LIMIT_MAX_K,
@@ -501,6 +503,25 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // `epc` がキー軸に増える — 実測形の self（dim 4096 → 16 要素／スレッド）を凍結する。
     // MUST: 上の 2 回読み版と対で置く（値はビット同一である以上、生成物の側でしか差が見えない）。
     ["attention_stats_rc16.wgsl", attentionStatsWgsl("f32", "f32", 16)],
+    // **states 形 attention**（ADR 0067 決定 4〜7）の 3 カーネル + `state_append`。既存の融合
+    // attention とは 1 バイトも共有しない**別族**（K / V の出どころが 2 つ・identity が −inf・
+    // 走査範囲が実行時値）なので、この 12 本を足すことより **上の attention_* / bmm_* /
+    // gemm 骨格の全スナップショットが 1 バイトも動かない**ことがこの列挙の主目的。
+    // MUST: 変種は 4 族とも full / sliding を対で置く（sliding だけが下限述語と ring 写像を
+    // 持つので、片側だけの固定では「full に下限が生えた」も「sliding から下限が消えた」も
+    // スナップショットを素通りする）。①③ は GQA 変種も対で置く。
+    ["attention_state_qk.wgsl", stateQkWgsl(false, false)],
+    ["attention_state_qk_gqa.wgsl", stateQkWgsl(false, true)],
+    ["attention_state_qk_sliding.wgsl", stateQkWgsl(true, false)],
+    ["attention_state_qk_sliding_gqa.wgsl", stateQkWgsl(true, true)],
+    ["attention_state_stats.wgsl", stateStatsWgsl(false)],
+    ["attention_state_stats_sliding.wgsl", stateStatsWgsl(true)],
+    ["attention_state_pv.wgsl", statePvWgsl(false, false)],
+    ["attention_state_pv_gqa.wgsl", statePvWgsl(false, true)],
+    ["attention_state_pv_sliding.wgsl", statePvWgsl(true, false)],
+    ["attention_state_pv_sliding_gqa.wgsl", statePvWgsl(true, true)],
+    ["state_append.wgsl", stateAppendWgsl(false)],
+    ["state_append_sliding.wgsl", stateAppendWgsl(true)],
   ];
   for (const [name, generated] of cases) {
     assertEquals(generated, await fixture(name), name);
