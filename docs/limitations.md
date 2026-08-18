@@ -168,8 +168,9 @@ broadcast できない形・実テンソルとの名前衝突・チャネル軸�
 ## 要素数が奇数の f16 テンソル・I8 テンソルは safetensors 上の並び順に制約がある
 
 裁定の正本は ADR [0063](decisions/0063-safetensors-physical-layout.md)。リーダはデータ節の
-「隙間なし・要素サイズ整列」を要求し（違反は `SafetensorsError`）、エクスポータは書き出し順
-「F32 → I32 → 偶数要素 F16 → 奇数要素 F16 → I8」+ `verify.assert_reader_layout` で保証する。
+「隙間なし・整列単位（I4 は先頭 4 バイト）整列」を要求し（違反は `SafetensorsError`）、
+エクスポータは書き出し順
+「F32 → I32 → I4 → 偶数要素 F16 → 奇数要素 F16 → I8」+ `verify.assert_reader_layout` で保証する。
 HF の `safe_open` は整列違反を読めてしまうので、そちらを通すだけでは検出できない。
 
 ## gather / embedding の範囲外添字は GPU で NaN 汚染になる（例外にならない）

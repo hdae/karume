@@ -75,9 +75,9 @@ import torch
 from _shared.paths import SERIES_ROOT
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
-from karume.emit import WEIGHT_DTYPES
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
+from .export import WEIGHT_DTYPES
 from .resolution import parse_resolution, resolution_meta
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

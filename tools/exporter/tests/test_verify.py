@@ -20,6 +20,7 @@ from karume.verify import (
     ContainerError,
     IrError,
     _assert_scale_tensor,
+    _StoredTensor,
     assert_op_contracts,
     assert_reader_layout,
     assert_runtime_support,
@@ -1691,31 +1692,92 @@ class TestQuantizedScaleTensor:
             verify_model(path)
 
 
-class _StubSafetensors:
-    """`_assert_scale_tensor` が触る面（get_slice → get_dtype / get_shape）だけのスタブ。
+def i4_container(path, *, scale_shape: list[int], group_size: int = 16):
+    """packed 4bit を含む配布形をヘッダ JSON から直に組む。
 
-    MUST: ここだけ実ファイルを使わない。`safetensors` ライブラリは `I4` を知らない
-    （0.8.0 の dtype 語彙に無い）ので、group 形 scale を持つ配布形は `safe_open` の時点で
-    開けず、この規則を実ファイル経由では踏めない。
+    `save_file` では作れない（`safetensors` 0.8.0 の dtype 語彙に `I4` が無い）ので、
+    データ節も自前で並べる。並びは F32 → F32 → I4（整列単位の降順 — ADR 0063 / 0069 追記 2）。
+    """
+    graph = base_graph()
+    graph["requires"] = {"ops": ["linear"]}
+    graph["inputs"] = [{"name": "x", "dtype": "f32", "shape": ["T", 32]}]
+    graph["initializers"] = {
+        "w": {
+            "tensor": "enc.w",
+            "storage": {"dtype": "i4", "scale": "enc.s", "group_size": group_size},
+        },
+        "b": {"tensor": "enc.b", "storage": {"dtype": "f32"}},
+    }
+    graph["values"] = {
+        "w": {"dtype": "f32", "shape": [3, 32]},
+        "b": {"dtype": "f32", "shape": [3]},
+        "y": {"dtype": "f32", "shape": ["T", 3]},
+    }
+    graph["nodes"] = [{"op": "linear", "ins": ["x", "w", "b"], "outs": ["y"], "attrs": {}}]
+    scale_bytes = 4
+    for dim in scale_shape:
+        scale_bytes *= dim
+    header = {
+        "__metadata__": {IR_METADATA_KEY: json.dumps(graph)},
+        "enc.b": {"dtype": "F32", "shape": [3], "data_offsets": [0, 12]},
+        "enc.s": {"dtype": "F32", "shape": scale_shape, "data_offsets": [12, 12 + scale_bytes]},
+        "enc.w": {
+            "dtype": "I4",
+            "shape": [3, 32],
+            "data_offsets": [12 + scale_bytes, 12 + scale_bytes + 48],
+        },
+    }
+    # payload の中身は読まれない（規則は宣言とレイアウトだけ）— nibble は 0 を避けて 8 で埋める。
+    return write_raw_container(path, header, b"\0" * (12 + scale_bytes) + b"\x88" * 48)
+
+
+class TestSelfReader:
+    """テンソルの読み口は**自前**（ヘッダ JSON + data_offsets）— ADR 0069 決定 2。
+
+    `safetensors` ライブラリ（0.8.0）は `I4` を知らず `safe_open` が開けないので、ライブラリを
+    通す読み口のままでは packed 4bit の配布形を 1 行も検証できない。verify は Karume のリーダ
+    （`packages/runtime/src/format/safetensors.ts`）の鏡像であるべき、という理由も同じ向き。
     """
 
-    class _Slice:
-        def __init__(self, dtype: str, shape: tuple[int, ...]) -> None:
-            self._dtype = dtype
-            self._shape = shape
+    def test_a_packed_four_bit_container_is_read_and_only_the_capability_gate_fires(self, tmp_path):
+        """宣言 / shape / group 形 scale の突合まで通り、未開放の capability だけが残る。"""
+        path = i4_container(tmp_path / "m.safetensors", scale_shape=[3, 2])
 
-        def get_dtype(self) -> str:
-            return self._dtype
+        with pytest.raises(ContainerError, match=re.escape("非対応 格納 dtype 'i4'")):
+            verify_model(path)
 
-        def get_shape(self) -> tuple[int, ...]:
-            return self._shape
+    def test_a_keepdim_scale_on_a_packed_four_bit_weight_is_rejected(self, tmp_path):
+        """group 形の分岐が**実ファイル**でも効く（keepdim 形 `[3,1]` は group 数 2 と違う）。
 
-    def __init__(self, tensors: dict[str, tuple[str, tuple[int, ...]]]) -> None:
-        self._tensors = tensors
+        素通りすると group ごとの scale が 1 チャネル 1 値として読まれる沈黙誤値になる。
+        """
+        path = i4_container(tmp_path / "m.safetensors", scale_shape=[3, 1])
 
-    def get_slice(self, key: str) -> _Slice:
-        dtype, shape = self._tensors[key]
-        return self._Slice(dtype, shape)
+        with pytest.raises(ContainerError, match="group 形"):
+            verify_model(path)
+
+    def test_a_metadata_that_is_not_a_string_map_is_rejected(self, tmp_path):
+        """`__metadata__` の型は自前で見る（素で添字すると AttributeError として漏れる）。
+
+        `save_file` では作れない形だが、`karume verify` は外部の safetensors も食う公開 CLI。
+        """
+        header = {
+            "__metadata__": {IR_METADATA_KEY: {"format": "karume-ir"}},
+            "t": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
+        }
+        path = write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 8)
+
+        with pytest.raises(ContainerError, match="文字列"):
+            verify_model(path)
+
+    def test_a_header_that_is_not_an_object_is_rejected(self, tmp_path):
+        blob = json.dumps([1, 2]).encode("utf-8")
+        blob += b" " * (-len(blob) % 8)
+        path = tmp_path / "m.safetensors"
+        path.write_bytes(len(blob).to_bytes(8, "little") + blob)
+
+        with pytest.raises(ContainerError, match="最上位オブジェクトでない"):
+            verify_model(path)
 
 
 class TestGroupScaleTensor:
@@ -1725,6 +1787,10 @@ class TestGroupScaleTensor:
     `[4,64]` / group_size 32（= group 形 `[4,2]`）で見る。形の分岐が効いていないと、
     keepdim 形 `[4,1]` が「broadcast できる」として素通りし、group ごとの scale が
     1 チャネル 1 値として読まれる沈黙誤値になる。
+
+    NOTE: ここだけ実ファイルを使わない — 拒否する側の形（rank 違い・keepdim 形・F16 scale）は
+    エクスポータが作れないので、自前リーダが読んだ宣言（`_StoredTensor`）を直に組んで
+    規則だけを踏む。emit が作る**正しい** i4 コンテナ側の往復は tests/test_emit.py が見る。
     """
 
     def _check(
@@ -1746,9 +1812,11 @@ class TestGroupScaleTensor:
             },
         )
         _assert_scale_tensor(
-            _StubSafetensors({"enc.s": (scale_dtype, scale_shape)}),
+            {
+                "enc.w": _StoredTensor(dtype="I4", shape=[4, 64]),
+                "enc.s": _StoredTensor(dtype=scale_dtype, shape=list(scale_shape)),
+            },
             graph,
-            {"enc.w", "enc.s"},
             "w",
             "enc.s",
             [4, 64],

@@ -1,4 +1,4 @@
-"""重みの fake-quant（格納 dtype で表現可能な値へ丸める）— ADR 0006 / 0018 / 0019。
+"""重みの fake-quant（格納 dtype で表現可能な値へ丸める）— ADR 0006 / 0018 / 0019 / 0069。
 
 意味論は「格納のみ量子化・計算は f32」。エクスポータが重みを**先に**丸めてから参照と
 golden を採ることで、GPU 側「圧縮格納 + f32 計算」と torch 側「丸め済み重みの f32 計算」が
@@ -198,3 +198,145 @@ def fake_quant_int8(model: nn.Module) -> Int8Report:
             f"（対象の型: {', '.join(cls.__name__ for cls in QUANT_CHANNEL_AXES)}）"
         )
     return Int8Report(scales=scales, modules=len(scales), elements=elements)
+
+
+# ---- i4（K 方向 group symmetric）— ADR 0069 ---------------------------------
+
+#: 量子化幅の片側（**−8 は使わない**）。±7 に閉じると group の amax 要素が `q = ±7` に乗って
+#: `q·scale` で厳密に復元されるので、fake-quant が**冪等**になる（ADR 0019 の ±127 論証の
+#: 4bit 版 — ADR 0069 決定 3）。−8 を許すと scale だけが動く再量子化が起きる。
+INT4_MAX = 7
+
+#: 既定の group 長（ADR 0069 追記 = Phase 0 sweep の実測で確定した 32）。格納欄なので、
+#: サイズ優先の資産が 64 / 128 を選ぶことは妨げない（受理集合は 2 冪かつ 16 以上 — 値域の
+#: 検査は格納側の規則として `verify.py` が持つ）。
+DEFAULT_GROUP_SIZE = 32
+
+
+@dataclass(frozen=True)
+class Int4Report:
+    """group 対称 int4 で丸めた重みの scale 台帳と計数（`Int8Report` と同じ器）。
+
+    `scales` のキーは i8 と同じ**モデル内 FQN**（`<module>.weight`）。値は**重みと同 rank・
+    最終次元だけ group 数**の F32（linear `W[O,I]` → `[O, I/group_size]` — ADR 0069 決定 3。
+    i8 の keepdim broadcast 形とは受理集合が交わらない別の形）。
+    """
+
+    #: FQN → scale（group 形 `[…, in/group_size]`・F32）。
+    scales: Mapping[str, torch.Tensor]
+    group_size: int
+    modules: int
+    elements: int
+
+    def describe(self) -> str:
+        return f"modules {self.modules} / {self.elements:,} elements / group {self.group_size}"
+
+
+def _grouped_view(weight: torch.Tensor, group_size: int, where: str) -> torch.Tensor:
+    """量子化軸（**最終次元 = linear の in 軸**）を `[…, groups, group_size]` へ割る。
+
+    MUST: 割り切れない形は fail loudly（ADR 0069 決定 2）。端数 group を許すと最後の group
+    だけ scale の担当範囲が短くなり、行境界が語境界からずれて平坦添字の展開が黙って別の値を
+    出す — 端数を作らない制約で整列問題そのものを消すのが格納側の設計。
+    """
+    in_axis = int(weight.shape[-1])
+    if in_axis % group_size:
+        raise QuantizeError(
+            f"{where}: 量子化軸（最終次元）{in_axis} が group_size {group_size} で"
+            "割り切れない（i4 は端数 group を作らない MUST — ADR 0069 決定 2）"
+        )
+    return weight.reshape(*weight.shape[:-1], in_axis // group_size, group_size)
+
+
+def group_size_of(weight: torch.Tensor, scale: torch.Tensor) -> int:
+    """group 形の scale から group 長を引く（`[…, groups]` → `in / groups`）。
+
+    MUST: group 長の源は**渡された scale** だけにする。別引数で受け取る形にすると
+    「fake-quant が使った scale」と「格納で宣言する group 長」が独立に動けてしまい、
+    食い違っても形と型は合うので沈黙誤値になる（ADR 0069 決定 3 の「scale 再計算禁止」と
+    同じ穴）。格納側の宣言もここから引く（`emit._plan_i4`）。
+    """
+    if scale.dim() != weight.dim() or list(scale.shape[:-1]) != list(weight.shape[:-1]):
+        raise QuantizeError(
+            f"scale {list(scale.shape)} が重み {list(weight.shape)} の group 形"
+            "（同 rank・最終次元だけ group 数）でない"
+        )
+    groups = int(scale.shape[-1])
+    in_axis = int(weight.shape[-1])
+    if groups < 1 or in_axis % groups:
+        raise QuantizeError(f"scale の group 数 {groups} が重みの量子化軸 {in_axis} を割り切らない")
+    return in_axis // groups
+
+
+def group_scale(weight: torch.Tensor, group_size: int, where: str = "重み") -> torch.Tensor:
+    """`scale = clamp(amax_group / 7, f32 tiny)` を group 形（`[…, in/group_size]`）で返す。
+
+    下限 clamp が要るのは全ゼロ group（`amax == 0`）— そのまま割ると NaN になる。clamp 後は
+    `q = 0` に落ちて `q·scale = 0` が厳密に元値へ戻る（`channel_scale` と同文の 4bit 版）。
+    """
+    grouped = _grouped_view(weight, group_size, where)
+    amax = grouped.abs().amax(dim=-1)
+    return torch.clamp(amax / INT4_MAX, min=torch.finfo(torch.float32).tiny)
+
+
+def quantize_to_int4(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """`q = clamp(round(w / scale), ±7)` を int8 の器・重みと同じ論理形で返す。
+
+    MUST: 呼び出し側は fake-quant が使った scale を**そのまま**渡す（`quantize_to_int8` と
+    同文 — ここで amax から引き直すと f32 の丸めで 1ulp 動きうる）。torch に 4bit の器は
+    無いので値は int8 に載せる。**1 バイトへ 2 要素を詰めるのは格納側**（`emit.pack_int4`）で、
+    ここは pack 順を知らない。
+    """
+    grouped = _grouped_view(weight, group_size_of(weight, scale), "重み")
+    quantized = torch.round(grouped / scale.unsqueeze(-1)).clamp_(-INT4_MAX, INT4_MAX)
+    return quantized.reshape(weight.shape).to(torch.int8)
+
+
+def dequantize_int4(quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """`q·scale` を f32・重みと同じ論理形で返す（格納の逆変換）。
+
+    fake-quant（下）と emit の逆変換ビット一致門（ADR 0069 決定 4 ③）が**同じ経路**を通る
+    ための共通実装 — 別実装にすると「丸めに使った式」と「格納を検算する式」が独立に動く。
+    """
+    grouped = _grouped_view(
+        quantized.to(torch.float32), group_size_of(quantized, scale), "量子化値"
+    )
+    return (grouped * scale.unsqueeze(-1)).reshape(quantized.shape)
+
+
+def fake_quant_int4(model: nn.Module, group_size: int = DEFAULT_GROUP_SIZE) -> Int4Report:
+    """`nn.Linear` の重みを K 方向 group symmetric int4 の表現可能値へ丸める（ADR 0069）。
+
+    対象が **`nn.Linear` の `weight` だけ**なのは、i4 の実行経路が linear の重みスロット限定で
+    始まるから（ADR 0069 決定 5 — i8 の {@link QUANT_CHANNEL_AXES} 全 5 種とは対象が違う。
+    embedding などの追補は需要が出た op から）。bias も norm 系 weight も触らない。
+
+    MUST: 呼ぶ順序は「実効重みが確定した後・参照/golden の採取より前」（モジュール docstring）。
+
+    戻り値の scale 台帳は emit へそのまま渡す。1 本も量子化できなかった場合は fail loudly —
+    「`--dtype i4` を指定したのに実質 f32 で書けてしまった」を沈黙させないため（ADR 0006）。
+    """
+    scales: dict[str, torch.Tensor] = {}
+    elements = 0
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            # 完全一致ではなく isinstance で拾う（実モデルは nn.Linear の薄い派生を使う —
+            # `_channel_axis` と同じ理由）。
+            if not isinstance(module, nn.Linear):
+                continue
+            fqn = f"{name}.weight" if name else "weight"
+            weight = module.weight
+            if weight.dtype is not torch.float32:
+                raise QuantizeError(
+                    f"'{fqn}': dtype {weight.dtype} は量子化できない（意味論 f32 のみ）"
+                )
+            scale = group_scale(weight, group_size, f"'{fqn}'")
+            weight.copy_(dequantize_int4(quantize_to_int4(weight, scale), scale))
+            scales[fqn] = scale
+            elements += weight.numel()
+    if not scales:
+        raise QuantizeError(
+            "格納 i4 を指定したが group 量子化できる重みが 1 本も無い"
+            "（対象は nn.Linear の weight だけ — ADR 0069 決定 5）"
+        )
+    return Int4Report(scales=scales, group_size=group_size, modules=len(scales), elements=elements)

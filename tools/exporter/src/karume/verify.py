@@ -17,10 +17,9 @@ import argparse
 import json
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from safetensors import safe_open
 
 from karume.dims import MAX_SAFE_INT, is_symbol_name, parse_dim, try_parse_dim
 from karume.emit import EmitError, eligible_compressed_initializers, weight_channel_axes
@@ -28,6 +27,7 @@ from karume.ir import (
     IR_FORMAT,
     IR_METADATA_KEY,
     IR_VERSION,
+    MIN_GROUP_SIZE,
     IrDim,
     IrGraph,
     IrInitializer,
@@ -82,9 +82,6 @@ STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i4", "i32")
 #: scale / group_size の記述子を持てる格納 dtype（量子化格納）。TS 側
 #: `packages/runtime/src/format/ir.ts` の QUANTIZED_STORAGE_DTYPES の鏡像。
 QUANTIZED_STORAGE_DTYPES = ("i8", "i4")
-
-#: i4 の group 長の下限（ORT と同じ制約 — ADR 0069 決定 2）。
-MIN_GROUP_SIZE = 16
 
 #: state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。
 STATE_DTYPES = ("f32",)
@@ -939,17 +936,21 @@ def _as_reader_entry(value: Any, where: str) -> dict[str, Any]:
     return value
 
 
-def assert_reader_layout(path: str | Path) -> None:
-    """Karume のリーダ（`packages/runtime/src/format/safetensors.ts`）が読めるレイアウトかを見る。
+@dataclass(frozen=True)
+class _StoredTensor:
+    """自前リーダが読んだテンソル 1 本の宣言（safetensors dtype と**論理** shape）。"""
 
-    HF の `safe_open` は読めるのに Karume が読めないファイルが作れる — リーダは
-    「データ節を隙間なく覆う」「各テンソルの**絶対** offset が要素サイズに整列している」を
-    要求し、後者は要素数が奇数の F16（バイト長 ≡ 2 mod 4）の直後に F32 / I32 を置くと
-    破れる（docs/limitations.md）。並び順はエクスポータの責務なので、**書いた側で**
-    その責務を果たせているかをここで検査する。
+    dtype: str
+    shape: list[int]
 
-    MUST: この検査は `safetensors` のリーダを通さない（通すと同じ規則の再実装ではなく
-    「別のリーダが読めた」だけの主張になる）。ヘッダ JSON を直に読んで規則を写す。
+
+def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
+    """ヘッダ JSON と `(データ節の絶対開始位置, データ節のバイト長)` を返す。
+
+    MUST: 宣言長を read へ渡す前にファイル実長で拘束する（`dist.safetensors_header` と
+    同型の防御）。u64 をそのまま渡すと規則違反が ContainerError ではなく
+    OverflowError / MemoryError として漏れ、門の診断が「不正なファイル」ではなく
+    「エクスポータが壊れた」に見える。
     """
     file = Path(path)
     file_size = file.stat().st_size
@@ -960,22 +961,67 @@ def assert_reader_layout(path: str | Path) -> None:
                 f"ファイルが短すぎる: {len(raw_length)} バイト（ヘッダ長すら無い）"
             )
         header_length = int.from_bytes(raw_length, "little")
-        # MUST: 宣言長を read へ渡す前にファイル実長で拘束する（`dist.safetensors_header` と
-        # 同型の防御）。u64 をそのまま渡すと規則違反が ContainerError ではなく
-        # OverflowError / MemoryError として漏れ、門の診断が「不正なファイル」ではなく
-        # 「エクスポータが壊れた」に見える。
         if header_length <= 0 or header_length > file_size - _HEADER_LENGTH_BYTES:
             raise ContainerError(
                 f"ヘッダ長 {header_length} がファイル長 {file_size} と矛盾している"
             )
         header_bytes = handle.read(header_length)
         data_start = _HEADER_LENGTH_BYTES + header_length
-        data_length = file_size - data_start
 
     try:
         header = json.loads(header_bytes)
     except ValueError as cause:
         raise ContainerError(f"safetensors ヘッダ JSON を解析できない: {cause}") from cause
+    if not isinstance(header, dict):
+        raise ContainerError("safetensors ヘッダが最上位オブジェクトでない")
+    return header, data_start, file_size - data_start
+
+
+def _read_container(path: str | Path) -> tuple[Mapping[str, str], Mapping[str, _StoredTensor]]:
+    """配布形を**自前で**読み、`(__metadata__, テンソルキー → 宣言)` を返す。
+
+    MUST: `safetensors` のリーダを通さない。ライブラリ（0.8.0）の dtype 語彙に `I4` が無く、
+    packed 4bit を含む配布形は `safe_open` の時点で開けない（ADR 0069 決定 2）— verify は
+    Karume のリーダ（`packages/runtime/src/format/safetensors.ts`）の鏡像であるべきなので、
+    読み口も自前で持つ。「別のリーダが読めた」は規則の再実装ではない、という
+    `assert_reader_layout` と同じ理由でもある。
+
+    NOTE: レイアウト規則（隙間なし・整列・宣言バイト長の一致）は `assert_reader_layout` の
+    担当で、呼び出し側（`verify_model`）が**先に**通す。ここは宣言の読み取りだけ。
+    """
+    header, _, _ = _read_header(path)
+    raw = header.get("__metadata__", {})
+    if not isinstance(raw, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
+    ):
+        raise ContainerError("__metadata__ が文字列 → 文字列のマップでない")
+    tensors: dict[str, _StoredTensor] = {}
+    for name, value in header.items():
+        if name == "__metadata__":
+            continue
+        where = f"テンソル '{name}'"
+        entry = _as_reader_entry(value, where)
+        shape = [
+            _as_reader_index(dim, where, f"shape[{axis}] の次元")
+            for axis, dim in enumerate(entry["shape"])
+        ]
+        tensors[name] = _StoredTensor(dtype=entry["dtype"], shape=shape)
+    return raw, tensors
+
+
+def assert_reader_layout(path: str | Path) -> None:
+    """Karume のリーダ（`packages/runtime/src/format/safetensors.ts`）が読めるレイアウトかを見る。
+
+    HF の `safe_open` は読めるのに Karume が読めないファイルが作れる — リーダは
+    「データ節を隙間なく覆う」「各テンソルの**絶対** offset が dtype の整列単位に整列している」
+    を要求し、後者は要素数が奇数の F16（バイト長 ≡ 2 mod 4）の直後に F32 / I32 / I4 を置くと
+    破れる（docs/limitations.md）。並び順はエクスポータの責務なので、**書いた側で**
+    その責務を果たせているかをここで検査する。
+
+    MUST: この検査は `safetensors` のリーダを通さない（通すと同じ規則の再実装ではなく
+    「別のリーダが読めた」だけの主張になる）。ヘッダ JSON を直に読んで規則を写す。
+    """
+    header, data_start, data_length = _read_header(path)
 
     declared = []
     for name, entry in header.items():
@@ -1034,9 +1080,8 @@ def assert_reader_layout(path: str | Path) -> None:
 
 
 def _assert_scale_tensor(
-    handle: Any,
+    stored: Mapping[str, _StoredTensor],
     graph: IrGraph,
-    keys: set[str],
     name: str,
     scale_key: str,
     weight_shape: list[Any],
@@ -1069,19 +1114,17 @@ def _assert_scale_tensor(
     `plan.ts` の鏡像 = `emit.weight_channel_axes`）。
     """
     where = f"initializer '{name}'"
-    if scale_key not in keys:
+    view = stored.get(scale_key)
+    if view is None:
         raise ContainerError(f"{where}: scale テンソル '{scale_key}' がファイルに無い")
     for other, initializer in graph.initializers.items():
         if initializer.tensor == scale_key:
             raise ContainerError(
                 f"{where}: scale テンソル '{scale_key}' が initializer '{other}' の実体と同じキー"
             )
-    view = handle.get_slice(scale_key)
-    if view.get_dtype() != "F32":
-        raise ContainerError(
-            f"{where}: scale テンソル '{scale_key}' が {view.get_dtype()}（F32 が必要）"
-        )
-    shape = list(view.get_shape())
+    if view.dtype != "F32":
+        raise ContainerError(f"{where}: scale テンソル '{scale_key}' が {view.dtype}（F32 が必要）")
+    shape = list(view.shape)
     form = "keepdim broadcast" if group_size is None else "group"
     if len(shape) != len(weight_shape):
         raise ContainerError(
@@ -1112,52 +1155,48 @@ def _assert_scale_tensor(
 def verify_model(path: str | Path) -> IrGraph:
     """配布形 1 ファイルを IR v1 の全規則で検証し、読めたグラフを返す。"""
     assert_reader_layout(path)
-    with safe_open(str(path), framework="pt") as handle:
-        metadata = handle.metadata() or {}
-        text = metadata.get(IR_METADATA_KEY)
-        if text is None:
-            raise ContainerError(f"__metadata__.{IR_METADATA_KEY} が無い（Karume モデルではない）")
-        graph = parse_ir_graph(text)
-        # per-channel scale の受理形は「圧縮のまま GPU 常駐するか」で 2 通りに分かれる
-        # （_assert_scale_tensor の 3 / 4）。判定も軸の導出もランタイム
-        # （packages/runtime/src/runtime/plan.ts）と同じものを使う — 別実装にすると
-        # 「verify は緑・ロードだけ落ちる」がこの 2 経路の境目で復活する。
-        eligible = eligible_compressed_initializers(graph)
-        try:
-            channel_axes = weight_channel_axes(graph)
-        except EmitError as cause:
-            raise ContainerError(str(cause)) from cause
-        keys = set(handle.keys())
-        for name, initializer in graph.initializers.items():
-            where = f"initializer '{name}'"
-            if initializer.tensor not in keys:
-                raise ContainerError(f"{where}: テンソル '{initializer.tensor}' がファイルに無い")
-            view = handle.get_slice(initializer.tensor)
-            expected = STORAGE_ENCODING[initializer.storage.dtype]
-            if view.get_dtype() != expected:
-                raise ContainerError(
-                    f"{where}: 格納 dtype '{initializer.storage.dtype}' に対し safetensors 側が"
-                    f" {view.get_dtype()}（{expected} が必要）"
-                )
-            declared = graph.values[name].shape
-            actual = list(view.get_shape())
-            if declared != actual:
-                raise ContainerError(f"{where}: 宣言 shape {declared} ≠ 実テンソル {actual}")
-            scale = initializer.storage.scale
-            if scale is not None:
-                # group 形の scale を要求するのは格納 i4 だけ（ADR 0069 決定 3）。i8 に付いた
-                # group_size は語彙としては通る（実行できないことは assert_runtime_support が
-                # 列挙する）ので、形の分岐は group_size の有無ではなく**格納 dtype**で決める。
-                _assert_scale_tensor(
-                    handle,
-                    graph,
-                    keys,
-                    name,
-                    scale,
-                    declared,
-                    channel_axes.get(name) if name in eligible else None,
-                    initializer.storage.group_size if initializer.storage.dtype == "i4" else None,
-                )
+    metadata, stored = _read_container(path)
+    text = metadata.get(IR_METADATA_KEY)
+    if text is None:
+        raise ContainerError(f"__metadata__.{IR_METADATA_KEY} が無い（Karume モデルではない）")
+    graph = parse_ir_graph(text)
+    # per-channel scale の受理形は「圧縮のまま GPU 常駐するか」で 2 通りに分かれる
+    # （_assert_scale_tensor の 3 / 4）。判定も軸の導出もランタイム
+    # （packages/runtime/src/runtime/plan.ts）と同じものを使う — 別実装にすると
+    # 「verify は緑・ロードだけ落ちる」がこの 2 経路の境目で復活する。
+    eligible = eligible_compressed_initializers(graph)
+    try:
+        channel_axes = weight_channel_axes(graph)
+    except EmitError as cause:
+        raise ContainerError(str(cause)) from cause
+    for name, initializer in graph.initializers.items():
+        where = f"initializer '{name}'"
+        view = stored.get(initializer.tensor)
+        if view is None:
+            raise ContainerError(f"{where}: テンソル '{initializer.tensor}' がファイルに無い")
+        expected = STORAGE_ENCODING[initializer.storage.dtype]
+        if view.dtype != expected:
+            raise ContainerError(
+                f"{where}: 格納 dtype '{initializer.storage.dtype}' に対し safetensors 側が"
+                f" {view.dtype}（{expected} が必要）"
+            )
+        declared = graph.values[name].shape
+        if declared != view.shape:
+            raise ContainerError(f"{where}: 宣言 shape {declared} ≠ 実テンソル {view.shape}")
+        scale = initializer.storage.scale
+        if scale is not None:
+            # group 形の scale を要求するのは格納 i4 だけ（ADR 0069 決定 3）。i8 に付いた
+            # group_size は語彙としては通る（実行できないことは assert_runtime_support が
+            # 列挙する）ので、形の分岐は group_size の有無ではなく**格納 dtype**で決める。
+            _assert_scale_tensor(
+                stored,
+                graph,
+                name,
+                scale,
+                declared,
+                channel_axes.get(name) if name in eligible else None,
+                initializer.storage.group_size if initializer.storage.dtype == "i4" else None,
+            )
     assert_runtime_support(graph)
     assert_op_contracts(graph)
     return graph

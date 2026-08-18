@@ -13,9 +13,13 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from karume.emit import (
+    INT4_OFFSET,
     EmitError,
     eligible_compressed_initializers,
+    linear_weight_initializers,
+    pack_int4,
     storage_breakdown,
+    unpack_int4,
     weight_channel_axes,
     write_model,
 )
@@ -28,8 +32,15 @@ from karume.ir import (
     IrStorage,
     IrValue,
 )
-from karume.quantize import channel_scale, quantize_to_int8
-from karume.verify import ContainerError, assert_reader_layout, verify_model
+from karume.ops import M0_STORAGE_DTYPES
+from karume.quantize import (
+    channel_scale,
+    dequantize_int4,
+    group_scale,
+    quantize_to_int4,
+    quantize_to_int8,
+)
+from karume.verify import ContainerError, assert_reader_layout, parse_ir_graph, verify_model
 
 
 def sample_graph() -> tuple[IrGraph, dict[str, torch.Tensor]]:
@@ -138,17 +149,25 @@ def weight_graph(
     return graph, tensors
 
 
-def compressed_view(graph: IrGraph, dtypes: dict[str, str]) -> IrGraph:
+def compressed_view(
+    graph: IrGraph, dtypes: dict[str, str], *, group_size: int | None = None
+) -> IrGraph:
     """`write_model` がヘッダへ載せるはずの宣言ビュー（呼び手の graph は書き換わらない）。
 
     companion scale のキー規則（`karume.scale.<テンソルキー>`）は実装を呼ばずテスト側で
-    書き下す — 実装から引くと突合が恒真になる。
+    書き下す — 実装から引くと突合が恒真になる。`group_size` は i4 の宣言欄
+    （ADR 0069 決定 2）で、i8 / f16 の宣言には載らない。
     """
     initializers = dict(graph.initializers)
     for name, dtype in dtypes.items():
         key = initializers[name].tensor
-        scale = f"karume.scale.{key}" if dtype == "i8" else None
-        initializers[name] = IrInitializer(tensor=key, storage=IrStorage(dtype=dtype, scale=scale))
+        scale = f"karume.scale.{key}" if dtype in ("i8", "i4") else None
+        initializers[name] = IrInitializer(
+            tensor=key,
+            storage=IrStorage(
+                dtype=dtype, scale=scale, group_size=group_size if dtype == "i4" else None
+            ),
+        )
     return replace(graph, initializers=initializers)
 
 
@@ -517,6 +536,351 @@ class TestI8Storage:
         assert breakdown.plain_bytes == 3 * 4
 
 
+def container_header(path) -> dict:
+    """safetensors のヘッダ JSON を直に読む。
+
+    `safetensors` ライブラリ（0.8.0）は `I4` を知らないので、packed 4bit を含む配布形は
+    `safe_open` では開けない（ADR 0069 決定 2）— 観測はヘッダ JSON から行う。
+    """
+    raw = path.read_bytes()
+    length = struct.unpack("<Q", raw[:8])[0]
+    return json.loads(raw[8 : 8 + length])
+
+
+def stored_payload(path, name: str) -> torch.Tensor:
+    """データ節から 1 本ぶんの生バイトを uint8 テンソルで取り出す。"""
+    raw = path.read_bytes()
+    length = struct.unpack("<Q", raw[:8])[0]
+    begin, end = json.loads(raw[8 : 8 + length])[name]["data_offsets"]
+    start = 8 + length
+    return torch.frombuffer(bytearray(raw[start + begin : start + end]), dtype=torch.uint8)
+
+
+def written_graph(path) -> IrGraph:
+    """書いたファイルに載った宣言（ヘッダの埋め込みグラフを `parse_ir_graph` で読み直す）。
+
+    i4 は実行 capability が未開放（ADR 0069 の実行波で開く）なので `verify_model` は最後まで
+    通らない — 宣言の観測点をここに置く。読むのは verify の正規のパーサなので、i4 の宣言規則
+    （scale + group_size 必須・2 冪 ≥ 16・量子化軸の整除）はこの経路でも掛かる。
+    """
+    return parse_ir_graph(container_header(path)["__metadata__"][IR_METADATA_KEY])
+
+
+def asymmetric_nibbles(count: int) -> torch.Tensor:
+    """隣接要素が全て異なる非対称パターン `[1,−2,3,−4,…]`（値域 ±7）。
+
+    pack 順の検出器（ADR 0069 決定 4 ①）— 対称なパターンだと上下 nibble を取り違えても
+    往復が通ってしまう。
+    """
+    index = torch.arange(count)
+    return (((index % 7) + 1) * torch.where(index % 2 == 0, 1, -1)).to(torch.int8)
+
+
+class TestPackedFourBitOrder:
+    """pack 順の正本（ADR 0069 決定 4）— 「要素 2i が下位 nibble / 2i+1 が上位 nibble」。
+
+    上流でも割れている自由パラメータで、間違えても**形も型も合う沈黙誤値**にしかならない。
+    往復（pack → unpack）だけでは pack と unpack が同じ向きに間違った形を検出できないので、
+    バイト値を手で書き下した固定と対で置く。
+    """
+
+    def test_the_even_element_goes_to_the_low_nibble(self):
+        """`q = [1, 2]` → `u = [9, 10]` → 1 バイト `0xA9`（上下を逆に詰めると `0x9A`）。"""
+        packed = pack_int4(torch.tensor([1, 2], dtype=torch.int8))
+
+        assert packed.dtype is torch.uint8
+        assert packed.tolist() == [0xA9]
+
+    def test_the_stored_nibbles_are_offset_by_eight_and_never_zero(self):
+        """格納値は `u = q + 8`（値域 [1,15]・0 は未使用の 15 準位 — ADR 0069 決定 3）。"""
+        packed = pack_int4(torch.tensor([-7, 7, 0, -7], dtype=torch.int8))
+
+        assert INT4_OFFSET == 8
+        assert packed.tolist() == [0xF1, 0x18]
+        nibbles = [byte & 0x0F for byte in packed.tolist()] + [
+            byte >> 4 for byte in packed.tolist()
+        ]
+        assert 0 not in nibbles
+
+    @pytest.mark.parametrize(
+        "shape",
+        [(1, 16), (3, 16), (2, 48), (5, 20), (7, 4), (2, 3, 6)],
+        ids=["one-row", "two-words", "six-words", "row-straddles", "short-rows", "rank3"],
+    )
+    def test_the_round_trip_preserves_every_position(self, shape):
+        """行長が語（4 バイト = 8 要素）境界と一致しない形も含めて、位置が完全に一致する。
+
+        平坦添字の罠（ADR 0019 の同型検出器の 4bit 版）— 行ごとに詰め直す実装だと
+        `(5,20)` / `(7,4)` のように行が語の途中で終わる形で位置がずれる。
+        """
+        count = 1
+        for dim in shape:
+            count *= dim
+        quantized = asymmetric_nibbles(count).reshape(shape)
+
+        packed = pack_int4(quantized)
+
+        assert packed.numel() == count // 2
+        assert torch.equal(unpack_int4(packed, shape), quantized)
+
+    def test_a_split_half_pack_does_not_survive_the_round_trip(self):
+        """故障注入: llama.cpp Q4_0 型の split-half 順（前半 = 下位 / 後半 = 上位）で詰めると、
+        こちらの unpack は**形も型も合ったまま**別の列を返す。
+
+        検出器が実際に検出力を持つことの確認 — ここが通ってしまうなら往復テストは恒真。
+        """
+        quantized = asymmetric_nibbles(16)
+        nibbles = (quantized + INT4_OFFSET).to(torch.uint8)
+        half = nibbles.numel() // 2
+
+        split = nibbles[:half] | (nibbles[half:] << 4)
+
+        restored = unpack_int4(split, (16,))
+        assert restored.shape == quantized.shape
+        assert not torch.equal(restored, quantized)
+
+    def test_an_odd_element_count_fails_loudly(self):
+        """末尾要素が半バイトだけ突き出す形は詰められない（バイト長が宣言から決まらない）。"""
+        with pytest.raises(EmitError, match="奇数"):
+            pack_int4(torch.zeros(3, dtype=torch.int8))
+
+
+def int4_weight_graph(
+    *, embedding: bool = False, group_size: int = 16
+) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """linear の重み `[3,32]` を group 対称 i4 で fake-quant 済みにしたグラフ。
+
+    in 軸 32 / group 16 なので 1 行に group が 2 つ入る（scale の group 形 `[3,2]`）。
+    `embedding` を立てると「重みスロット適格だが linear ではない」重み（embedding 表）が
+    増える — i4 が拒否すべき形（ADR 0069 決定 5）。
+    """
+    nodes = [IrNode(op="linear", ins=["x", "w", "b"], outs=["h"], attrs={})]
+    inputs = [IrInput(name="x", dtype="f32", shape=["T", 32])]
+    initializers = {
+        "w": IrInitializer(tensor="enc.w", storage=IrStorage(dtype="f32")),
+        "b": IrInitializer(tensor="enc.b", storage=IrStorage(dtype="f32")),
+    }
+    values = {
+        "w": IrValue(dtype="f32", shape=[3, 32]),
+        "b": IrValue(dtype="f32", shape=[3]),
+        "h": IrValue(dtype="f32", shape=["T", 3]),
+    }
+    tensors = {"enc.w": torch.randn(3, 32), "enc.b": torch.randn(3)}
+    outputs = ["h"]
+    if embedding:
+        nodes.append(
+            IrNode(op="embedding", ins=["emb", "idx"], outs=["e"], attrs={"padding_idx": -1})
+        )
+        inputs.append(IrInput(name="idx", dtype="i32", shape=["T"]))
+        initializers["emb"] = IrInitializer(tensor="enc.emb", storage=IrStorage(dtype="f32"))
+        values["emb"] = IrValue(dtype="f32", shape=[3, 32])
+        values["e"] = IrValue(dtype="f32", shape=["T", 32])
+        tensors["enc.emb"] = torch.randn(3, 32)
+        outputs.append("e")
+    graph = IrGraph(
+        symbols=["T"],
+        inputs=inputs,
+        outputs=outputs,
+        initializers=initializers,
+        values=values,
+        nodes=nodes,
+    )
+    scale = group_scale(tensors["enc.w"], group_size)
+    tensors["enc.w"] = dequantize_int4(quantize_to_int4(tensors["enc.w"], scale), scale)
+    return graph, tensors, {"enc.w": scale}
+
+
+def write_int4(path, graph: IrGraph, tensors, scales):
+    return write_model(path, graph, tensors, weight_dtype="i4", weight_scales=scales)
+
+
+class TestI4Eligibility:
+    """i4 の適格は **linear の重みスロット限定**（ADR 0069 決定 5 — 実行経路が linear 始まり）。"""
+
+    def test_only_linear_weight_slots_are_listed(self):
+        graph, _, _ = int4_weight_graph(embedding=True)
+
+        assert eligible_compressed_initializers(graph) == {"w", "emb"}
+        assert linear_weight_initializers(graph) == {"w"}
+
+    def test_a_weight_shared_with_another_weight_slot_is_excluded(self):
+        """conv とも共有される重みは linear 限定の適格に入らない（展開経路が 1 つに決まらない）。"""
+        graph, _, _ = int4_weight_graph()
+        graph.nodes.append(IrNode(op="conv1d", ins=["x", "w", "b"], outs=["c"], attrs={}))
+
+        assert linear_weight_initializers(graph) == set()
+
+
+class TestI4Storage:
+    def test_eligible_linear_weights_are_stored_as_i4_with_a_group_scale(self, tmp_path):
+        graph, tensors, scales = int4_weight_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        declared = written_graph(path).initializers
+        assert declared["w"].storage.dtype == "i4"
+        assert declared["w"].storage.scale == "karume.scale.enc.w"
+        assert declared["w"].storage.group_size == 16
+        # MUST: bias は常に f32（プロトタイプの降格バグの根治形 — ADR 0006）。
+        assert declared["b"].storage.dtype == "f32"
+        header = container_header(path)
+        assert header["enc.w"]["dtype"] == "I4"
+        assert header["enc.w"]["shape"] == [3, 32]  # shape は論理形のまま
+        begin, end = header["enc.w"]["data_offsets"]
+        assert end - begin == 3 * 32 // 2  # バイト長だけが bit 幅から決まる
+        assert header["karume.scale.enc.w"]["shape"] == [3, 2]
+        assert header["karume.scale.enc.w"]["dtype"] == "F32"
+
+    def test_the_stored_bytes_reconstruct_the_weight_bit_for_bit(self, tmp_path):
+        """`dequant(unpack(格納バイト))` が fake-quant 済みの重みと**ビット一致**する。
+
+        emit の門（`_convert_for_storage`）と同じ式だが、こちらは**ファイルに出たバイト**から
+        辿る — 書き出しの経路（順序・offset・memoryview の cast）まで含めて対応を固定する。
+        """
+        graph, tensors, scales = int4_weight_graph()
+        expected = tensors["enc.w"].clone()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        packed = stored_payload(path, "enc.w")
+        restored = dequantize_int4(unpack_int4(packed, (3, 32)), scales["enc.w"])
+        assert torch.equal(restored, expected)
+
+    def test_the_emitted_i4_file_satisfies_the_reader_layout_rules(self, tmp_path):
+        graph, tensors, scales = int4_weight_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        assert_reader_layout(path)  # 例外が出なければ合格（I4 の先頭 4 バイト整列を含む）
+
+    def test_the_i4_file_stops_only_at_the_closed_capability_gate(self, tmp_path):
+        """i4 の実行 capability は未開放（第 1 便の裁定 — 実行経路の便で開く）。
+
+        `assert_runtime_support` は reader / container 層より**後**なので、ここで
+        capability 不足だけが出るのは「自前リーダで読め、宣言・shape・group 形 scale の突合を
+        全部通った」ことの裏。
+        """
+        graph, tensors, scales = int4_weight_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        with pytest.raises(ContainerError, match="非対応 格納 dtype 'i4'"):
+            verify_model(path)
+
+    def test_the_i4_file_passes_the_full_verification_once_the_capability_opens(
+        self, tmp_path, monkeypatch
+    ):
+        """capability の 1 行だけを開けて残り全規則を通す（第 3 便が開ける先の予行）。
+
+        ここが緑なのは、自前リーダ（`verify._read_container`）が I4 コンテナを読めていること
+        そのもの — `safetensors` の `safe_open` はこのファイルを開けない。
+        """
+        from karume import verify
+
+        monkeypatch.setattr(verify, "M0_STORAGE_DTYPES", frozenset({*M0_STORAGE_DTYPES, "i4"}))
+        graph, tensors, scales = int4_weight_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        expected = compressed_view(graph, {"w": "i4"}, group_size=16)
+        assert verify_model(path).to_dict() == expected.to_dict()
+
+    def test_the_breakdown_counts_i4_bytes_and_the_group_scale_overhead(self, tmp_path):
+        graph, tensors, scales = int4_weight_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        breakdown = storage_breakdown(written_graph(path))
+
+        assert breakdown.compressed_tensors == 1
+        assert breakdown.compressed_bytes == 3 * 32 // 2  # i4 = 0.5 バイト/要素
+        # scale は group 数（3 行 × 2 group）× 4 バイト。
+        assert breakdown.scale_bytes == 3 * 2 * 4
+        assert breakdown.plain_tensors == 1
+        assert breakdown.plain_bytes == 3 * 4
+
+    def test_an_eligible_weight_that_is_not_a_linear_weight_fails_loudly(self, tmp_path):
+        """embedding 表は圧縮適格だが i4 の実行経路が無い（黙って f32 へ落とさない）。"""
+        graph, tensors, scales = int4_weight_graph(embedding=True)
+
+        with pytest.raises(EmitError, match="linear の重みスロットだけ"):
+            write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+    def test_a_missing_scale_fails_loudly(self, tmp_path):
+        """適格なのに scale が無い = fake-quant が届いていない重み（ADR 0006）。"""
+        graph, tensors, _ = int4_weight_graph()
+
+        with pytest.raises(EmitError, match="group scale が無い"):
+            write_int4(tmp_path / "model.safetensors", graph, tensors, {})
+
+    def test_a_scale_that_is_not_in_group_form_fails_loudly(self, tmp_path):
+        graph, tensors, _ = int4_weight_graph()
+
+        with pytest.raises(EmitError, match="group 形"):
+            write_int4(tmp_path / "model.safetensors", graph, tensors, {"enc.w": torch.ones(1, 2)})
+
+    def test_a_group_size_outside_the_accepted_set_fails_loudly(self, tmp_path):
+        """scale `[3,4]` は group 8 を意味する — 2 冪だが 16 未満（ADR 0069 決定 2）。
+
+        書いてから `verify` で落とすのでは「読めないファイルを配布形に残す」ので、
+        書く前の計画段で落とす。
+        """
+        graph, tensors, _ = int4_weight_graph()
+
+        with pytest.raises(EmitError, match="2 冪かつ 16 以上でない"):
+            write_int4(tmp_path / "model.safetensors", graph, tensors, {"enc.w": torch.ones(3, 4)})
+
+    def test_a_scale_that_is_not_f32_fails_loudly(self, tmp_path):
+        """companion scale は F32 固定（i8 と同じ理由 — 逆変換の等値検査では検出できない）。"""
+        graph, tensors, scales = int4_weight_graph()
+        half = {key: value.to(torch.float16) for key, value in scales.items()}
+
+        with pytest.raises(EmitError, match="scale の dtype"):
+            write_int4(tmp_path / "model.safetensors", graph, tensors, half)
+
+    def test_an_unrounded_eligible_weight_fails_loudly(self, tmp_path):
+        """丸めの掛け忘れ / 順序の誤りは黙って通さない（ADR 0006）。"""
+        graph, tensors, scales = int4_weight_graph()
+        tensors["enc.w"] = torch.full((3, 32), 1.0 / 3.0)
+
+        with pytest.raises(EmitError, match="ビット一致しない"):
+            write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+    def test_a_scale_that_is_not_the_one_fake_quant_used_fails_loudly(self, tmp_path):
+        """fake-quant が使ったのと**別の** scale で書こうとすると逆変換ゲートが落ちる。"""
+        graph, tensors, scales = int4_weight_graph()
+        drifted = {key: value * 1.0000002 for key, value in scales.items()}
+
+        with pytest.raises(EmitError, match="ビット一致しない"):
+            write_int4(tmp_path / "model.safetensors", graph, tensors, drifted)
+
+    def test_a_tampered_packed_byte_is_caught_by_the_round_trip_gate(self, tmp_path, monkeypatch):
+        """故障注入: packed バイトを 1 個だけ書き換えると逆変換ビット一致門が発火する
+        （ADR 0069 決定 4 ③）。
+
+        shape も dtype もバイト長も変わらないので、この門以外に検出点は無い。
+        """
+        from karume import emit
+
+        pack = emit.pack_int4
+
+        def tamper(quantized):
+            packed = pack(quantized)
+            packed[0] ^= 0x10  # 上位 nibble を 1 段ずらす
+            return packed
+
+        monkeypatch.setattr(emit, "pack_int4", tamper)
+        graph, tensors, scales = int4_weight_graph()
+
+        with pytest.raises(EmitError, match="ビット一致しない"):
+            write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+    def test_a_graph_without_eligible_weights_fails_loudly(self, tmp_path):
+        graph, tensors = sample_graph()
+
+        with pytest.raises(EmitError, match="適格な重みスロットが 1 本も無い"):
+            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="i4")
+
+
 class TestFailureLeavesTheGraphUntouched:
     """1 本でも落ちたら宣言は 1 つも書き換えない（commit は全バイトを書き終えた後）。
 
@@ -680,9 +1044,7 @@ class TestStreamingConversion:
 
 def data_layout(path) -> list[tuple[int, str, str]]:
     """safetensors のデータ節に並ぶ順（開始 offset / 名前 / dtype）。"""
-    raw = path.read_bytes()
-    length = struct.unpack("<Q", raw[:8])[0]
-    header = json.loads(raw[8 : 8 + length])
+    header = container_header(path)
     entries = [
         (entry["data_offsets"][0], name, entry["dtype"])
         for name, entry in header.items()
@@ -720,6 +1082,38 @@ class TestWriteOrder:
         dtypes = [dtype for _, _, dtype in data_layout(path)]
         assert dtypes[-2:] == ["I8", "I8"]
         assert "I8" not in dtypes[:-2]
+
+    def test_i4_tensors_are_written_with_the_four_byte_aligned_group(self, tmp_path):
+        """並びは**整列単位の降順** — F32 / I32 / I4 → F16 → I8（ADR 0069 追記 2）。
+
+        I4 は要素整列の概念を持たず「テンソル先頭が 4 バイト整列」を要求するので、F16 / I8 の
+        後ろへ置くと絶対 offset が 4 の倍数から外れる。逆に I4 節のバイト長は必ず 8 の倍数
+        （量子化軸が 2 冪 ≥ 16 の group で割り切れる ⇒ 要素数は 16 の倍数）なので、F32 / I32 と
+        同じ群に前置しても後続の整列を崩さない。
+        """
+        from karume.emit import _Conversion, _write_order
+
+        tensors = {
+            "plain": torch.randn(4),
+            "sym": torch.zeros(2, dtype=torch.int32),
+            "packed": torch.randn(32),
+            "odd": torch.randn(3).to(torch.float16),
+            "bytes": torch.zeros(3, dtype=torch.int8),
+        }
+        conversions = {"packed": _Conversion(dtype="i4", name="w", scale=torch.ones(2))}
+
+        order = _write_order(tensors, conversions)
+
+        assert order == ["plain", "sym", "packed", "odd", "bytes"]
+
+    def test_the_emitted_i4_file_places_the_packed_weight_after_the_f32_tensors(self, tmp_path):
+        graph, tensors, scales = int4_weight_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        dtypes = [dtype for _, _, dtype in data_layout(path)]
+        assert dtypes == ["F32", "F32", "I4"]
+        assert_reader_layout(path)
 
     def test_the_emitted_file_satisfies_the_reader_layout_rules(self, tmp_path):
         graph, tensors = weight_graph()

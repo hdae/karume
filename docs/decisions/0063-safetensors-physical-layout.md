@@ -4,6 +4,7 @@
   これまで cross-package 不変条件の正本が `docs/limitations.md` にあった）
 - 関連: ADR [0003](0003-ir-v1.md)（コンテナ形式）/ [0018](0018-f16-weight-execution.md)（f16
   格納 — 偶奇問題の発生元）/ [0019](0019-i8-weight-execution.md)（i8 格納 — 1 バイト要素）/
+  [0069](0069-packed-w4-storage.md)（packed 4bit — 本 ADR とセットで改訂）/
   実装 = `packages/runtime/src/format/safetensors.ts`（リーダ）・
   `tools/exporter/karume/emit.py`（ライタ）・`karume/verify.py` の `assert_reader_layout`
 
@@ -20,9 +21,14 @@
 
 - **リーダ（runtime）**: データ節を「隙間なく・要素サイズに整列して」覆うことを要求し、
   違反は `SafetensorsError` で fail loudly（gap・整列・宣言バイト数の厳密一致）。
-- **ライタ（exporter）**: 書き出し順を「**F32 → I32 → 偶数要素 F16 → 奇数要素 F16 → I8**」に
-  固定する（`emit.py` — `safetensors.torch.save_file` は使わない）。奇数要素の F16・要素数が
-  4 の倍数でない I8 は末尾側へ寄る配置で、後続テンソルの整列を崩さない。
+- **ライタ（exporter）**: 書き出し順を「**F32 → I32 → I4 → 偶数要素 F16 → 奇数要素 F16 →
+  I8**」に固定する（`emit.py` — `safetensors.torch.save_file` は使わない）。奇数要素の F16・
+  要素数が 4 の倍数でない I8 は末尾側へ寄る配置で、後続テンソルの整列を崩さない。並びは
+  **整列単位の降順**で、`I4` は要素整列の概念を持たないかわりに「テンソル先頭が 4 バイト
+  整列」を要求する（展開カーネルが `array<u32>` で束縛する — ADR 0069 決定 2）ので F32 / I32
+  と同じ群に入る。`I4` の節のバイト長は必ず 8 の倍数（量子化軸が 2 冪 ≥ 16 の `group_size` で
+  割り切れる ⇒ 論理要素数は 16 の倍数）なので、前置しても後続の整列も F16 の偶奇規則も
+  変えない（ADR 0069 追記 2 — 決定 2 の「I8 の後ろ末尾」からの訂正）。
 - **emit 直後の自己検査**: `verify.assert_reader_layout` がリーダ規則を写した検査を通す
   （書けたのに読めないファイルを配布形に混入させない）。
 - GPU 常駐時のゼロ詰め（ADR 0018 / 0019）は**バッファ内**の話で、ファイル上のバイト列は

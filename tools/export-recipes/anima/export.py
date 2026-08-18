@@ -81,7 +81,7 @@ from karume.convert import (
     normalize_boundary_tensor,
 )
 from karume.dist import sha256_file
-from karume.emit import WEIGHT_DTYPES, storage_breakdown
+from karume.emit import storage_breakdown
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
@@ -89,6 +89,11 @@ from karume.quantize import fake_quant_int8, round_weights_to_f16
 from . import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+#: この recipe が扱う格納 dtype（irodori / deberta と同じく **recipe 固有の集合**）。
+#: core の `karume.emit.WEIGHT_DTYPES` から引かない — core が書ける集合（i4 追加 —
+#: ADR 0069）と anima が系列・検収を持つ集合は別の判断で、結合すると core 側の拡張が
+#: そのままこの CLI の受理に化ける。
+WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
 #: 実重みの取得元（HF Hub。ローカルキャッシュ済み — recon §7）。
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 #: 生成物の既定の置き場（格納 dtype 別の**系列**）。ターゲット名のサブディレクトリを 1 段掘る。

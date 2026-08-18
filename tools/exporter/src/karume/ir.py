@@ -18,6 +18,11 @@ IR_METADATA_KEY = "karume_ir"
 #: 非負整数、または `coeff·sym+offset` の正準表記（dims.py）。
 IrDim = int | str
 
+#: group 量子化格納（`i4`）の group 長の下限（受理集合は **2 冪かつこれ以上** — ADR 0069
+#: 決定 2・ORT と同制約）。ライタ（emit）と検証（verify）が同じ受理集合を見るための 1 本
+#: （TS 側の正本は `packages/runtime/src/format/ir.ts`）。
+MIN_GROUP_SIZE = 16
+
 
 @dataclass(frozen=True)
 class IrStorage:
