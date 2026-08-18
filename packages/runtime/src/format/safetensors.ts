@@ -7,20 +7,49 @@ export type SafetensorsDtype =
   | "F16"
   | "BF16"
   | "I8"
+  | "I4"
   | "U8"
   | "I32"
   | "U32"
   | "I64"
   | "BOOL";
 
-const DTYPE_BYTES: Readonly<Record<SafetensorsDtype, number>> = {
+/**
+ * dtype → 1 要素の **bit** 数（サイズ表）。バイト長の検証は `numel × bits / 8` の厳密一致で、
+ * 8 で割り切れない bit 総量は受理しない。
+ *
+ * MUST: 整列表（{@link DTYPE_ALIGN}）と分けて持つ（ADR 0069 決定 2 の 3 面分離）。I4 は
+ * 1 バイトに 2 要素を詰めるので「要素サイズ = 整列」が成り立たず、1 本の表で両方を賄うと
+ * 4bit 格納でどちらかが必ず壊れる。
+ */
+const DTYPE_BITS: Readonly<Record<SafetensorsDtype, number>> = {
+  F32: 32,
+  F16: 16,
+  BF16: 16,
+  I8: 8,
+  // packed 4bit（ADR 0069 決定 2）。shape は論理形のままで、バイト数だけが bit 幅から決まる。
+  I4: 4,
+  U8: 8,
+  I32: 32,
+  // U32 は意味論 bool の実表現（u32 の 0/1 — ADR 0009）。golden の io がこの形で書かれる。
+  U32: 32,
+  I64: 64,
+  BOOL: 8,
+};
+
+/**
+ * dtype → テンソル**先頭**に要求する byte 整列（整列表）。要素サイズと一致するのは要素整列の
+ * 概念を持つ dtype だけで、**I4 は 4**（要素境界ではなく、展開カーネルが `array<u32>` として
+ * 束縛する都合 — ADR 0069 決定 2）。
+ */
+const DTYPE_ALIGN: Readonly<Record<SafetensorsDtype, number>> = {
   F32: 4,
   F16: 2,
   BF16: 2,
   I8: 1,
+  I4: 4,
   U8: 1,
   I32: 4,
-  // U32 は意味論 bool の実表現（u32 の 0/1 — ADR 0009）。golden の io がこの形で書かれる。
   U32: 4,
   I64: 8,
   BOOL: 1,
@@ -61,8 +90,7 @@ type DeclaredTensor = {
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const isKnownDtype = (dtype: string): dtype is SafetensorsDtype =>
-  Object.hasOwn(DTYPE_BYTES, dtype);
+const isKnownDtype = (dtype: string): dtype is SafetensorsDtype => Object.hasOwn(DTYPE_BITS, dtype);
 
 const asIndex = (value: unknown, where: string, what: string): number => {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
@@ -110,7 +138,18 @@ const parseDeclaration = (name: string, raw: unknown): DeclaredTensor => {
     throw new SafetensorsError(`${where}: data_offsets が逆転している [${begin}, ${end})`);
   }
 
-  const expected = elementCount(shape, where) * DTYPE_BYTES[dtype];
+  const count = elementCount(shape, where);
+  const bits = count * DTYPE_BITS[dtype];
+  // MUST: bit 総量が byte 境界に乗らない形（I4 の要素数が奇数）は fail loudly。末尾要素が
+  // 半バイトだけ突き出すので、テンソルの長さが宣言から一意に決まらない。
+  if (bits % 8 !== 0) {
+    throw new SafetensorsError(
+      `${where}: ${dtype}（1 要素 ${
+        DTYPE_BITS[dtype]
+      }bit）の要素数 ${count} が奇数で byte 境界に乗らない`,
+    );
+  }
+  const expected = bits / 8;
   if (end - begin !== expected) {
     throw new SafetensorsError(
       `${where}: サイズ不一致 offsets=${end - begin} 期待=${expected}（${dtype} [${
@@ -201,13 +240,14 @@ export const parseSafetensors = (buffer: ArrayBuffer): SafetensorsFile => {
         `${where}: データ節の範囲外 [${entry.begin}, ${entry.end}) データ節長=${dataLength}`,
       );
     }
-    const align = DTYPE_BYTES[entry.dtype];
+    const align = DTYPE_ALIGN[entry.dtype];
     if ((dataStart + entry.begin) % align !== 0) {
-      // コピーを作らず typed array view を張る前提が崩れるため受理しない。
+      // コピーを作らず typed array view を張る前提（I4 は u32 として束縛する前提）が
+      // 崩れるため受理しない。
       throw new SafetensorsError(
         `${where}: 絶対 offset ${
           dataStart + entry.begin
-        } が ${entry.dtype} の要素サイズ ${align} に整列していない`,
+        } が ${entry.dtype} の整列単位 ${align} バイトに整列していない`,
       );
     }
     cursor = entry.end;
@@ -225,6 +265,12 @@ export const parseSafetensors = (buffer: ArrayBuffer): SafetensorsFile => {
   return { buffer, metadata, tensors };
 };
 
-/** テンソルの生バイト（コピーしない）。 */
+/**
+ * テンソルの生バイト（コピーしない）。
+ *
+ * NOTE: dtype 別の TypedArray は返さない。I4 に対応する TypedArray は存在しないが、この面は
+ * 最初から「raw バイト + 論理 numel（{@link TensorView.shape}）」なので 4bit 格納でも
+ * 表現が足りている（ADR 0069 決定 2 の 3 面目）。
+ */
 export const tensorBytes = (file: SafetensorsFile, view: TensorView): Uint8Array<ArrayBuffer> =>
   new Uint8Array(file.buffer, view.byteOffset, view.byteLength);

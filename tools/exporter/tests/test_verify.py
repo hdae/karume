@@ -19,6 +19,7 @@ from karume.ops import OpContractError, state_window
 from karume.verify import (
     ContainerError,
     IrError,
+    _assert_scale_tensor,
     assert_op_contracts,
     assert_reader_layout,
     assert_runtime_support,
@@ -370,7 +371,48 @@ class TestStorageDescriptor:
 
     def test_unknown_storage_dtype_is_rejected(self):
         with pytest.raises(IrError, match="語彙外"):
-            parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "i4"}}})
+            parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "i2"}}})
+
+
+class TestGroupQuantizedStorage:
+    """group 量子化格納（i4 — ADR 0069 決定 2）の宣言規則。
+
+    scale と group_size を必須にし、group 長は 2 冪かつ 16 以上・量子化軸（最終次元）が
+    group 長で割り切れることを MUST とする（端数 group を作らない制約が、行境界・group 境界の
+    バイト整列を保証している）。TS 側 `packages/runtime/src/format/ir.ts` の鏡像。
+    """
+
+    def _i4(self, storage: dict, last_dim: int = 32) -> dict:
+        return {
+            "initializers": {"w": {"tensor": "enc.w", "storage": storage}},
+            "values": {
+                "w": {"dtype": "f32", "shape": [4, last_dim]},
+                "y": {"dtype": "f32", "shape": ["T", 4]},
+            },
+        }
+
+    def test_a_well_formed_declaration_is_accepted(self):
+        graph = parse(**self._i4({"dtype": "i4", "scale": "enc.s", "group_size": 32}))
+
+        assert graph.initializers["w"].storage.group_size == 32
+        assert graph.initializers["w"].storage.scale == "enc.s"
+
+    def test_a_missing_group_size_is_rejected(self):
+        with pytest.raises(IrError, match="group_size が要る"):
+            parse(**self._i4({"dtype": "i4", "scale": "enc.s"}))
+
+    def test_a_missing_scale_is_rejected(self):
+        with pytest.raises(IrError, match="scale（scale テンソルのキー）が要る"):
+            parse(**self._i4({"dtype": "i4", "group_size": 32}))
+
+    @pytest.mark.parametrize("group_size", [24, 8], ids=["not-a-power-of-two", "below-16"])
+    def test_a_group_size_outside_the_accepted_set_is_rejected(self, group_size):
+        with pytest.raises(IrError, match="2 冪かつ 16 以上でない"):
+            parse(**self._i4({"dtype": "i4", "scale": "enc.s", "group_size": group_size}))
+
+    def test_a_quantization_axis_that_the_group_size_does_not_divide_is_rejected(self):
+        with pytest.raises(IrError, match="割り切れない"):
+            parse(**self._i4({"dtype": "i4", "scale": "enc.s", "group_size": 32}, last_dim=48))
 
 
 def declared_states(states: dict, *, referenced: list[str] | None = None) -> dict:
@@ -1124,6 +1166,29 @@ class TestRuntimeSupport:
         with pytest.raises(ContainerError, match="非対応 格納 dtype"):
             assert_runtime_support(graph)
 
+    def test_group_size_on_a_storage_other_than_i4_is_reported(self):
+        """group 量子化を受理する格納は i4 だけ（ADR 0069 決定 2）。
+
+        i8 に付いた group_size は実行経路が無く、黙って無視すると group ごとの scale を
+        per-channel として読む沈黙誤値になる。TS 側 assertRuntimeSupport の鏡像で、
+        この検査が Python 側に無いと「verify は緑・ブラウザだけ落ちる」非対称になる。
+        """
+        graph = parse(
+            initializers={
+                "w": {
+                    "tensor": "enc.w",
+                    "storage": {"dtype": "i8", "scale": "enc.s", "group_size": 32},
+                }
+            }
+        )
+
+        with pytest.raises(ContainerError) as err:
+            assert_runtime_support(graph)
+
+        message = str(err.value)
+        assert "非対応 group 量子化 (1): w" in message
+        assert "i4 のみ" in message
+
     def test_unknown_attrs_on_a_known_op_are_reported(self):
         graph = parse(
             nodes=[{"op": "add", "ins": ["x", "w"], "outs": ["y"], "attrs": {"alpha": 2}}]
@@ -1464,6 +1529,45 @@ class TestReaderEntryStructure:
             assert_reader_layout(path)
 
 
+class TestReaderPackedFourBit:
+    """packed 4bit（ADR 0069 決定 2）— サイズは bit 単位・整列はテンソル**先頭** 4 バイト。
+
+    `safetensors` ライブラリは `I4` を知らない（0.8.0 の dtype 語彙に無い）ので、ヘッダ JSON を
+    直に読む `assert_reader_layout` が I4 を踏める唯一の門。TS 側リーダ
+    （`packages/runtime/src/format/safetensors.ts`）の受理集合と 1 対 1 に保つ。
+    """
+
+    def test_a_packed_tensor_is_half_its_element_count(self, tmp_path):
+        header = {"w": {"dtype": "I4", "shape": [3, 32], "data_offsets": [0, 48]}}
+
+        assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 48))
+
+    def test_an_odd_element_count_is_rejected(self, tmp_path):
+        """bit 総量が byte 境界に乗らない形（末尾要素が半バイトだけ突き出す）。"""
+        header = {"w": {"dtype": "I4", "shape": [3], "data_offsets": [0, 2]}}
+
+        with pytest.raises(ContainerError, match="byte 境界に乗らない"):
+            assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 2))
+
+    def test_a_size_that_is_not_half_the_element_count_is_rejected(self, tmp_path):
+        header = {"w": {"dtype": "I4", "shape": [3, 32], "data_offsets": [0, 96]}}
+
+        with pytest.raises(ContainerError, match="サイズ不一致"):
+            assert_reader_layout(
+                write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 96)
+            )
+
+    def test_a_tensor_start_off_the_four_byte_boundary_is_rejected(self, tmp_path):
+        """I4 は要素整列（0.5 バイト）ではなく u32 束縛のための先頭 4 バイト整列を要求する。"""
+        header = {
+            "a": {"dtype": "I8", "shape": [2], "data_offsets": [0, 2]},
+            "w": {"dtype": "I4", "shape": [4], "data_offsets": [2, 4]},
+        }
+
+        with pytest.raises(ContainerError, match="整列していない"):
+            assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 4))
+
+
 class TestHeaderLengthBound:
     """ヘッダ長 u64 はファイル実長で拘束してから read へ渡す（`dist.safetensors_header` と同型）。
 
@@ -1585,6 +1689,87 @@ class TestQuantizedScaleTensor:
 
         with pytest.raises(ContainerError, match="の実体と同じキー"):
             verify_model(path)
+
+
+class _StubSafetensors:
+    """`_assert_scale_tensor` が触る面（get_slice → get_dtype / get_shape）だけのスタブ。
+
+    MUST: ここだけ実ファイルを使わない。`safetensors` ライブラリは `I4` を知らない
+    （0.8.0 の dtype 語彙に無い）ので、group 形 scale を持つ配布形は `safe_open` の時点で
+    開けず、この規則を実ファイル経由では踏めない。
+    """
+
+    class _Slice:
+        def __init__(self, dtype: str, shape: tuple[int, ...]) -> None:
+            self._dtype = dtype
+            self._shape = shape
+
+        def get_dtype(self) -> str:
+            return self._dtype
+
+        def get_shape(self) -> tuple[int, ...]:
+            return self._shape
+
+    def __init__(self, tensors: dict[str, tuple[str, tuple[int, ...]]]) -> None:
+        self._tensors = tensors
+
+    def get_slice(self, key: str) -> _Slice:
+        dtype, shape = self._tensors[key]
+        return self._Slice(dtype, shape)
+
+
+class TestGroupScaleTensor:
+    """group 形 scale（ADR 0069 決定 3）— 重みと同 rank・**最終次元だけ group 数**。
+
+    per-channel の keepdim broadcast 形とは受理集合が交わらない別分岐なので、重みは
+    `[4,64]` / group_size 32（= group 形 `[4,2]`）で見る。形の分岐が効いていないと、
+    keepdim 形 `[4,1]` が「broadcast できる」として素通りし、group ごとの scale が
+    1 チャネル 1 値として読まれる沈黙誤値になる。
+    """
+
+    def _check(
+        self,
+        scale_dtype: str = "F32",
+        scale_shape: tuple[int, ...] = (4, 2),
+        group_size: int = 32,
+    ) -> None:
+        graph = parse(
+            initializers={
+                "w": {
+                    "tensor": "enc.w",
+                    "storage": {"dtype": "i4", "scale": "enc.s", "group_size": group_size},
+                }
+            },
+            values={
+                "w": {"dtype": "f32", "shape": [4, 64]},
+                "y": {"dtype": "f32", "shape": ["T", 4]},
+            },
+        )
+        _assert_scale_tensor(
+            _StubSafetensors({"enc.s": (scale_dtype, scale_shape)}),
+            graph,
+            {"enc.w", "enc.s"},
+            "w",
+            "enc.s",
+            [4, 64],
+            None,
+            group_size,
+        )
+
+    def test_a_well_formed_group_scale_is_accepted(self):
+        self._check()
+
+    def test_a_keepdim_broadcast_scale_is_rejected(self):
+        with pytest.raises(ContainerError, match="group 形"):
+            self._check(scale_shape=(4, 1))
+
+    def test_a_scale_with_a_different_rank_is_rejected(self):
+        with pytest.raises(ContainerError, match="rank"):
+            self._check(scale_shape=(8,))
+
+    def test_a_non_f32_scale_is_rejected(self):
+        with pytest.raises(ContainerError, match="F32 が必要"):
+            self._check(scale_dtype="F16")
 
 
 def conv_i8_graph(op: str) -> dict:

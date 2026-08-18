@@ -77,7 +77,14 @@ TOP_LEVEL_KEYS = (
 OPTIONAL_TOP_LEVEL_KEYS = ("states",)
 
 SEMANTIC_DTYPES = ("f32", "i32", "bool")
-STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i32")
+STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i4", "i32")
+
+#: scale / group_size の記述子を持てる格納 dtype（量子化格納）。TS 側
+#: `packages/runtime/src/format/ir.ts` の QUANTIZED_STORAGE_DTYPES の鏡像。
+QUANTIZED_STORAGE_DTYPES = ("i8", "i4")
+
+#: i4 の group 長の下限（ORT と同じ制約 — ADR 0069 決定 2）。
+MIN_GROUP_SIZE = 16
 
 #: state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。
 STATE_DTYPES = ("f32",)
@@ -88,14 +95,22 @@ RESERVED_STATE_DTYPES = ("f16",)
 #: 上限（ops.STRIDED_RANK）と同じ数値だが理由が別なので定数を共有しない。
 MAX_STATE_RANK = 4
 
-#: 格納 dtype → safetensors dtype。f32/f16/bf16/i8 は意味論 f32 の符号化で、`i32` だけが
-#: 生の int32（ADR 0010 の明示的な例外）。
-STORAGE_ENCODING = {"f32": "F32", "f16": "F16", "bf16": "BF16", "i8": "I8", "i32": "I32"}
+#: 格納 dtype → safetensors dtype。f32/f16/bf16/i8/i4 は意味論 f32 の符号化で、`i32` だけが
+#: 生の int32（ADR 0010 の明示的な例外）。`i4` は packed 4bit（ADR 0069 決定 2 — shape は
+#: 論理形のままで、バイト数だけが bit 幅から決まる）。
+STORAGE_ENCODING = {
+    "f32": "F32",
+    "f16": "F16",
+    "bf16": "BF16",
+    "i8": "I8",
+    "i4": "I4",
+    "i32": "I32",
+}
 
 #: initializer の意味論 dtype → 許される格納 dtype（docs/ir-v1.md「値と型」）。
 #: MUST: 交差を許さない — `i32` 宣言の initializer が f16 のビット列として読まれる
 #: 沈黙誤値になる。bool の initializer は語彙に無い。
-INITIALIZER_STORAGE = {"f32": ("f32", "f16", "bf16", "i8"), "i32": ("i32",)}
+INITIALIZER_STORAGE = {"f32": ("f32", "f16", "bf16", "i8", "i4"), "i32": ("i32",)}
 
 
 # ---- JSON 層 --------------------------------------------------------------
@@ -264,14 +279,18 @@ def _parse_storage(value: Any, where: str) -> IrStorage:
     has_group_size = "group_size" in obj
     # scale / group_size は量子化格納の記述子。非量子化 dtype に付いているのは
     # エクスポータの取り違えなので受理しない（黙って無視すると格納の意味が二重化する）。
-    if dtype != "i8" and (has_scale or has_group_size):
+    if dtype not in QUANTIZED_STORAGE_DTYPES and (has_scale or has_group_size):
         raise IrError(f"{where}: 格納 dtype '{dtype}' に scale / group_size は付けられない")
-    # MUST: i8 は scale を**明示宣言**する
-    # （ADR 0019・TS 側 packages/runtime/src/format/ir.ts の鏡像）。
+    # MUST: i8 / i4 は scale を**明示宣言**する
+    # （ADR 0019 / 0069・TS 側 packages/runtime/src/format/ir.ts の鏡像）。
     # 既定 1.0 で補完すると、scale の書き忘れが「全チャネル 1.0 で dequant した重み」に化けて
     # ロードも実行も通ってしまう（差が O(scale) で出るのに、どこにも例外が出ない）。
-    if dtype == "i8" and not has_scale:
-        raise IrError(f"{where}: 格納 dtype 'i8' には scale（scale テンソルのキー）が要る")
+    if dtype in QUANTIZED_STORAGE_DTYPES and not has_scale:
+        raise IrError(f"{where}: 格納 dtype '{dtype}' には scale（scale テンソルのキー）が要る")
+    # MUST: i4 は group_size を**明示宣言**する（ADR 0069 決定 2）。group 長が決まらない
+    # 4bit 格納は scale の引き直し位置が決まらず、展開が黙って別の値を出す。
+    if dtype == "i4" and not has_group_size:
+        raise IrError(f"{where}: 格納 dtype 'i4' には group_size が要る（ADR 0069 決定 2）")
     scale = _as_nonempty_str(obj["scale"], f"{where}.scale") if has_scale else None
     group_size = None
     if has_group_size:
@@ -282,6 +301,13 @@ def _parse_storage(value: Any, where: str) -> IrStorage:
         # （packages/runtime/src/format/ir.ts）。ここで受理するとランタイムだけが落ちる。
         if raw > MAX_SAFE_INT:
             raise IrError(f"{where}.group_size: {raw} が安全整数 2^53−1 を超える")
+        # MUST: i4 の group 長は 2 冪かつ 16 以上（ADR 0069 決定 2 — ORT と同制約）。この制約が
+        # 行境界・group 境界を常にバイト整列させ、末尾ゼロ詰め無しで u32 束縛が成立する。
+        if dtype == "i4" and (raw & (raw - 1) != 0 or raw < MIN_GROUP_SIZE):
+            raise IrError(
+                f"{where}.group_size: {raw} が 2 冪かつ {MIN_GROUP_SIZE} 以上でない"
+                "（ADR 0069 決定 2）"
+            )
         group_size = raw
     return IrStorage(dtype=dtype, scale=scale, group_size=group_size)
 
@@ -503,6 +529,29 @@ def _check_definitions(
     return defined
 
 
+def _check_group_quantized_shape(name: str, initializer: IrInitializer, value: IrValue) -> None:
+    """group 量子化格納（i4）の宣言 shape と group 長の整合（ADR 0069 決定 2・
+    TS 側 checkGroupQuantizedShape の鏡像）。
+
+    量子化軸は**最終次元**（linear の in 軸）で、そこが `group_size` で割り切れることが MUST。
+    端数 group を許すと最後の group だけ scale の担当範囲が短くなり、行境界が語境界からずれて
+    平坦添字の展開が黙って別の値を出す（端数を作らない制約で整列問題そのものを消す設計）。
+    """
+    # 値域（2 冪かつ 16 以上）は _parse_storage が保証済み。存在は型の上でだけ optional なので、
+    # 黙って読み飛ばさず言い直す（TS 側 checkGroupQuantizedShape と同じ流儀）。
+    group_size = initializer.storage.group_size
+    if group_size is None:
+        raise IrError(f"graph.initializers['{name}']: 格納 i4 なのに group_size が無い")
+    if not value.shape:
+        raise IrError(f"graph.values['{name}']: 格納 i4 の initializer に量子化軸が無い（rank 0）")
+    last_dim = value.shape[-1]
+    if not isinstance(last_dim, int) or last_dim % group_size != 0:
+        raise IrError(
+            f"graph.values['{name}']: 格納 i4 の最終次元 {last_dim} が"
+            f" group_size {group_size} で割り切れない（ADR 0069 決定 2）"
+        )
+
+
 def _check_declarations(
     inputs: Sequence[IrInput],
     initializers: Mapping[str, IrInitializer],
@@ -539,6 +588,8 @@ def _check_declarations(
         # initializer は束縛前に確定していなければ safetensors 側 shape と突合できない。
         if any(not isinstance(dim, int) for dim in values[name].shape):
             raise IrError(f"graph.values['{name}']: initializer の shape に記号次元は使えない")
+        if storage_dtype == "i4":
+            _check_group_quantized_shape(name, initializers[name], values[name])
     for node in nodes:
         for out in node.outs:
             if out not in values:
@@ -745,12 +796,20 @@ def assert_runtime_support(graph: IrGraph) -> None:
             bad_attrs.append(f"{where}: {', '.join(unknown)}")
 
     missing_storage: dict[str, list[str]] = {}
+    # group 量子化を受理する格納は **i4 だけ**（ADR 0069 決定 2）。他の格納 dtype に付いた
+    # group_size は実行経路が無く、黙って無視すると group ごとの scale を per-channel として
+    # 読む沈黙誤値になるので、capability 不足で落とす（TS 側 assertRuntimeSupport の鏡像 —
+    # ここが無いと「verify は緑・ブラウザだけ落ちる」非対称になる）。
+    group_quantized: list[str] = []
     for name, initializer in graph.initializers.items():
         dtype = initializer.storage.dtype
         if dtype not in M0_STORAGE_DTYPES:
             missing_storage.setdefault(dtype, []).append(name)
+            continue
+        if dtype != "i4" and initializer.storage.group_size is not None:
+            group_quantized.append(name)
 
-    if not (missing_ops or bad_dtypes or bad_attrs or missing_storage):
+    if not (missing_ops or bad_dtypes or bad_attrs or missing_storage or group_quantized):
         return
     diagnostics: list[str] = []
     if missing_ops:
@@ -763,6 +822,11 @@ def assert_runtime_support(graph: IrGraph) -> None:
     for dtype, users in sorted(missing_storage.items()):
         diagnostics.append(
             f"非対応 格納 dtype '{dtype}' ({len(users)}): {', '.join(sorted(users))}"
+        )
+    if group_quantized:
+        diagnostics.append(
+            f"非対応 group 量子化 ({len(group_quantized)}): {', '.join(sorted(group_quantized))}"
+            "（group 量子化の格納は i4 のみ — ADR 0069）"
         )
     raise ContainerError(f"ランタイムの capability 不足 — {' / '.join(diagnostics)}")
 
@@ -805,13 +869,31 @@ def assert_op_contracts(graph: IrGraph) -> None:
 
 # ---- 配布形（safetensors）との突合 -----------------------------------------
 
-#: safetensors dtype → 要素バイト数（= Karume リーダが要求する整列）。
-#: 正本は TS 側 `packages/runtime/src/format/safetensors.ts` の DTYPE_BYTES。
-READER_DTYPE_BYTES = {
+#: safetensors dtype → 1 要素の **bit** 数（サイズ表）。バイト長は `numel × bits / 8` の
+#: 厳密一致で見る。正本は TS 側 `packages/runtime/src/format/safetensors.ts` の DTYPE_BITS。
+#: MUST: 整列表（READER_DTYPE_ALIGN）と分けて持つ（ADR 0069 決定 2 の 3 面分離）— `I4` は
+#: 1 バイトに 2 要素を詰めるので「要素サイズ = 整列」が成り立たない。
+READER_DTYPE_BITS = {
+    "F32": 32,
+    "F16": 16,
+    "BF16": 16,
+    "I8": 8,
+    "I4": 4,
+    "U8": 8,
+    "I32": 32,
+    "U32": 32,
+    "I64": 64,
+    "BOOL": 8,
+}
+
+#: safetensors dtype → テンソル**先頭**に要求する byte 整列（整列表）。`I4` は要素整列の概念を
+#: 持たず、展開カーネルが `array<u32>` として束縛する都合で 4（ADR 0069 決定 2）。
+READER_DTYPE_ALIGN = {
     "F32": 4,
     "F16": 2,
     "BF16": 2,
     "I8": 1,
+    "I4": 4,
     "U8": 1,
     "I32": 4,
     "U32": 4,
@@ -902,7 +984,7 @@ def assert_reader_layout(path: str | Path) -> None:
         where = f"テンソル '{name}'"
         entry = _as_reader_entry(entry, where)
         dtype = entry["dtype"]
-        if dtype not in READER_DTYPE_BYTES:
+        if dtype not in READER_DTYPE_BITS:
             raise ContainerError(f"{where}: リーダが知らない dtype '{dtype}'")
         offsets = entry["data_offsets"]
         if not isinstance(offsets, list) or len(offsets) != 2:
@@ -916,10 +998,18 @@ def assert_reader_layout(path: str | Path) -> None:
             # 途中で精度を失った要素数がバイト長と偶然一致する形を通してしまう。
             if count > MAX_SAFE_INT:
                 raise ContainerError(f"{where}: 要素数が安全整数 2^53−1 を超える")
-        if end - begin != count * READER_DTYPE_BYTES[dtype]:
+        bits = count * READER_DTYPE_BITS[dtype]
+        # MUST: bit 総量が byte 境界に乗らない形（I4 の要素数が奇数）は fail loudly。末尾要素が
+        # 半バイトだけ突き出すので、テンソルの長さが宣言から一意に決まらない。
+        if bits % 8 != 0:
+            raise ContainerError(
+                f"{where}: {dtype}（1 要素 {READER_DTYPE_BITS[dtype]}bit）の要素数 {count} が"
+                " 奇数で byte 境界に乗らない"
+            )
+        if end - begin != bits // 8:
             raise ContainerError(
                 f"{where}: サイズ不一致 offsets={end - begin} "
-                f"期待={count * READER_DTYPE_BYTES[dtype]}（{dtype} {entry['shape']}）"
+                f"期待={bits // 8}（{dtype} {entry['shape']}）"
             )
         declared.append((begin, end, name, dtype))
 
@@ -930,11 +1020,11 @@ def assert_reader_layout(path: str | Path) -> None:
                 f"テンソル '{name}': データ節が隙間なく覆われていない"
                 f"（使用済み末尾={cursor} / このテンソルの開始={begin}）"
             )
-        align = READER_DTYPE_BYTES[dtype]
+        align = READER_DTYPE_ALIGN[dtype]
         if (data_start + begin) % align != 0:
             raise ContainerError(
                 f"テンソル '{name}': 絶対 offset {data_start + begin} が {dtype} の"
-                f" 要素サイズ {align} に整列していない"
+                f" 整列単位 {align} バイトに整列していない"
                 "（奇数要素の F16 より後ろに 4 バイト型を置いていないか — "
                 "並び順の規約は karume/emit.py）"
             )
@@ -951,6 +1041,7 @@ def _assert_scale_tensor(
     scale_key: str,
     weight_shape: list[Any],
     channel_axis: int | None,
+    group_size: int | None = None,
 ) -> None:
     """量子化格納の scale テンソルを実ファイルと突き合わせる
     （`packages/runtime/src/format/container.ts` の鏡像）。
@@ -961,8 +1052,12 @@ def _assert_scale_tensor(
 
     1. **実在**する
     2. **F32**（scale を別 dtype のビット列として読むと全チャネルが桁違いの値になる）
-    3. **重みと同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値）
+    3. 形（`group_size` の有無で 2 通り — ADR 0069 決定 3）
+       - per-channel（i8）: **重みと同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値）
+       - group（i4）: **重みと同 rank・最終次元だけ group 数**（`last_dim // group_size`）で
+         他軸は重みと同値。keepdim broadcast 形とは受理集合が交わらないので**別分岐**
     4. `channel_axis` が決まる（= 適格重み）なら、**その軸だけが伸びた keepdim 形ちょうど**
+       （group 形は量子化軸が最終次元に固定されているので 4 の対象外）
     5. **他 initializer の実体との名前衝突が無い**（別の重みを scale として読む形）
 
     NOTE: 3 と 4 の切り分けはランタイムの 2 経路そのもの。適格外（ホストで f32 展開 —
@@ -987,11 +1082,21 @@ def _assert_scale_tensor(
             f"{where}: scale テンソル '{scale_key}' が {view.get_dtype()}（F32 が必要）"
         )
     shape = list(view.get_shape())
+    form = "keepdim broadcast" if group_size is None else "group"
     if len(shape) != len(weight_shape):
         raise ContainerError(
-            f"{where}: scale {shape} の rank が重み {weight_shape} と違う"
-            "（keepdim broadcast 形が必要）"
+            f"{where}: scale {shape} の rank が重み {weight_shape} と違う（{form} 形が必要）"
         )
+    if group_size is not None:
+        # 量子化軸（最終次元）が group 数に置き換わった形ちょうど。割り切れることは
+        # parse_ir_graph が保証済み（ADR 0069 決定 2）。
+        expected = [*weight_shape[:-1], weight_shape[-1] // group_size]
+        if shape != expected:
+            raise ContainerError(
+                f"{where}: scale {shape} が重み {weight_shape} の group 形 {expected}"
+                f"（group_size={group_size}）でない"
+            )
+        return
     if any(dim != 1 and dim != weight_shape[axis] for axis, dim in enumerate(shape)):
         raise ContainerError(f"{where}: scale {shape} が重み {weight_shape} へ broadcast できない")
     if channel_axis is None:
@@ -1040,6 +1145,9 @@ def verify_model(path: str | Path) -> IrGraph:
                 raise ContainerError(f"{where}: 宣言 shape {declared} ≠ 実テンソル {actual}")
             scale = initializer.storage.scale
             if scale is not None:
+                # group 形の scale を要求するのは格納 i4 だけ（ADR 0069 決定 3）。i8 に付いた
+                # group_size は語彙としては通る（実行できないことは assert_runtime_support が
+                # 列挙する）ので、形の分岐は group_size の有無ではなく**格納 dtype**で決める。
                 _assert_scale_tensor(
                     handle,
                     graph,
@@ -1048,6 +1156,7 @@ def verify_model(path: str | Path) -> IrGraph:
                     scale,
                     declared,
                     channel_axes.get(name) if name in eligible else None,
+                    initializer.storage.group_size if initializer.storage.dtype == "i4" else None,
                 )
     assert_runtime_support(graph)
     assert_op_contracts(graph)

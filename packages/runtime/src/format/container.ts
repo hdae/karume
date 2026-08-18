@@ -74,7 +74,7 @@ export type RuntimeSupport = {
 };
 
 /**
- * 格納 dtype → safetensors dtype。f32 / f16 / bf16 / i8 は意味論 f32 の符号化で、
+ * 格納 dtype → safetensors dtype。f32 / f16 / bf16 / i8 / i4 は意味論 f32 の符号化で、
  * `i32` だけが生の int32（ADR 0010 の明示的な例外）。
  *
  * NOTE: この表は「宣言と実テンソルの突合」専用で、実行できるかどうかとは別軸
@@ -86,6 +86,8 @@ const STORAGE_ENCODING: Readonly<Record<IrStorageDtype, SafetensorsDtype>> = {
   f16: "F16",
   bf16: "BF16",
   i8: "I8",
+  // packed 4bit（ADR 0069 決定 2）。shape は論理形のままで、バイト数だけが bit 幅から決まる。
+  i4: "I4",
   i32: "I32",
 };
 
@@ -128,7 +130,15 @@ const openModelFile = (file: SafetensorsFile): KarumeModel => {
       );
     }
     const scaleKey = initializer.storage.scale;
-    if (scaleKey !== undefined) assertScaleTensor(graph, file, name, scaleKey, declared.shape);
+    if (scaleKey !== undefined) {
+      // group 形の scale を要求するのは格納 i4 だけ（ADR 0069 決定 3）。i8 に付いた
+      // group_size は語彙としては通る（実行できないことは assertRuntimeSupport が列挙する）
+      // ので、scale の形の分岐は group_size の有無ではなく**格納 dtype**で決める。
+      const groupSize = initializer.storage.dtype === "i4"
+        ? initializer.storage.groupSize
+        : undefined;
+      assertScaleTensor(graph, file, name, scaleKey, declared.shape, groupSize);
+    }
   }
   assertNoSurplusTensors(graph, file);
 
@@ -169,8 +179,13 @@ const assertNoSurplusTensors = (graph: IrGraph, file: SafetensorsFile): void => 
  *
  * 1. 実在（無ければ束縛するバッファが無い）
  * 2. **F32**（scale を f16 のビット列として読むと全チャネルが桁違いの値になる）
- * 3. 重みと**同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値。1 軸だけが
- *    チャネル軸として残る形 — `torch.amax(..., keepdim=True)` の出力そのもの）
+ * 3. 形（`groupSize` の有無で 2 通り — ADR 0069 決定 3）
+ *    - per-channel（i8）: 重みと**同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値。
+ *      1 軸だけがチャネル軸として残る形 — `torch.amax(..., keepdim=True)` の出力そのもの）
+ *    - group（i4）: 重みと**同 rank・最終次元だけ group 数**（`lastDim / groupSize`）で
+ *      他軸は重みと同値。keepdim broadcast 形とは受理集合が交わらないので**別分岐**にする
+ *      （broadcast 形の規則で見ると group 数の取り違えが「1 でも同値でもない軸」として
+ *      落ちるだけで、正しい group 形も一緒に落ちる）
  * 4. **実テンソルとの名前衝突が無い**（別の initializer の実体を scale として読むと、
  *    dtype も shape も偶然合う組で沈黙誤値になる）
  *
@@ -183,6 +198,8 @@ const assertScaleTensor = (
   name: string,
   scaleKey: string,
   weightShape: readonly (number | string)[],
+  /** group 量子化（格納 i4）の group 長。per-channel（i8）では undefined。 */
+  groupSize: number | undefined,
 ): void => {
   const where = `initializer '${name}'`;
   const view = file.tensors.get(scaleKey);
@@ -201,12 +218,28 @@ const assertScaleTensor = (
       `${where}: scale テンソル '${scaleKey}' が ${view.dtype}（F32 が必要）`,
     );
   }
+  const form = groupSize === undefined ? "keepdim broadcast" : "group";
   if (view.shape.length !== weightShape.length) {
     throw new ContainerError(
       `${where}: scale [${view.shape.join(",")}] の rank が重み [${
         weightShape.join(",")
-      }] と違う（keepdim broadcast 形が必要）`,
+      }] と違う（${form} 形が必要）`,
     );
+  }
+  if (groupSize !== undefined) {
+    // 量子化軸（最終次元）が group 数に置き換わった形ちょうど。割り切れることは
+    // parseIrGraph が保証済み（ADR 0069 決定 2）。
+    const expected = weightShape.map((dim, axis) =>
+      axis === weightShape.length - 1 ? Number(dim) / groupSize : dim
+    );
+    if (view.shape.some((dim, axis) => dim !== expected[axis])) {
+      throw new ContainerError(
+        `${where}: scale [${view.shape.join(",")}] が重み [${weightShape.join(",")}] の group 形 [${
+          expected.join(",")
+        }]（group_size=${groupSize}）でない`,
+      );
+    }
+    return;
   }
   const broadcastable = view.shape.every((dim, axis) => dim === 1 || dim === weightShape[axis]);
   if (!broadcastable) {
@@ -280,8 +313,9 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
   });
 
   const missingStorage = new Map<IrStorageDtype, string[]>();
-  // group 量子化（w4 の語彙 — ADR 0019 で不採用確定）は実行経路が無い。黙って無視すると
-  // group ごとの scale を per-channel として読む沈黙誤値になるので、capability 不足で落とす。
+  // group 量子化を受理する格納は **i4 だけ**（ADR 0069 決定 2）。他の格納 dtype に付いた
+  // group_size は実行経路が無く、黙って無視すると group ごとの scale を per-channel として
+  // 読む沈黙誤値になるので、capability 不足で落とす。
   const groupQuantized: string[] = [];
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     const dtype = initializer.storage.dtype;
@@ -291,7 +325,7 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
       missingStorage.set(dtype, users);
       continue;
     }
-    if (initializer.storage.groupSize !== undefined) groupQuantized.push(name);
+    if (dtype !== "i4" && initializer.storage.groupSize !== undefined) groupQuantized.push(name);
   }
 
   if (
@@ -315,7 +349,9 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
   }
   if (groupQuantized.length > 0) {
     diagnostics.push(
-      `非対応 group 量子化 (${groupQuantized.length}): ${groupQuantized.sort().join(", ")}`,
+      `非対応 group 量子化 (${groupQuantized.length}): ${
+        groupQuantized.sort().join(", ")
+      }（group 量子化の格納は i4 のみ — ADR 0069）`,
     );
   }
   throw new ContainerError(`ランタイムの capability 不足 — ${diagnostics.join(" / ")}`);

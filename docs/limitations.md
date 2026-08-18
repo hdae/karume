@@ -139,13 +139,19 @@ flush 頻度をどう変えても天井は動かない**（判定に入るのは
 - 出所の file:line・既知の上流報告（denoland/deno#35195 等）・逆算の根拠は
   [research/2026-08-03-wgpu-memory-ceiling.md](research/2026-08-03-wgpu-memory-ceiling.md)。
 
-## bf16 格納と group 量子化は宣言のみ受理・実行は fail loudly
+## bf16 格納は宣言のみ受理・実行は fail loudly
 
 IR v1 の格納スキーマとしては受理するが、実行経路が無く `createSession` が capability 不足と
 して全件列挙で拒否する。設計は [decisions/0006](decisions/0006-quantization.md) で確定済み。
-`storage.group_size`（group 量子化 = w4）も同じ扱い — 語彙としては残るが
-[decisions/0019](decisions/0019-i8-weight-execution.md) で**不採用が確定**しており、付いていれば
-`非対応 group 量子化` として落ちる（黙って per-channel として読むと沈黙誤値になるため）。
+
+group 量子化（w4）は [decisions/0069](decisions/0069-packed-w4-storage.md) で**解禁**され、
+格納 dtype `i4`（packed 4bit・K 方向 group の対称量子化）として format 層が受理する
+（語彙・バイト長 `numel / 2`・テンソル先頭 4 バイト整列・group 形 scale）。制約は
+`group_size` が 2 冪かつ 16 以上・量子化軸（最終次元）が `group_size` で割り切れること・
+scale companion（F32・重みと同 rank で最終次元だけ group 数）が必須の 3 点。**実行経路は
+実装波で入る**ので、それまで `i4` の initializer は capability 不足で落ちる。`i4` 以外の
+格納 dtype に付いた `storage.group_size` は解禁後も `非対応 group 量子化` として落ちる
+（黙って per-channel として読むと沈黙誤値になるため）。
 
 **f16 は 2026-08-03 に解禁**（[decisions/0018](decisions/0018-f16-weight-execution.md)）、
 **i8（per-channel symmetric int8）も同日に解禁**

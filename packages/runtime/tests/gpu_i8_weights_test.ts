@@ -287,7 +287,9 @@ Deno.test("scale テンソルの実在・dtype・keepdim 形・名前衝突を�
   );
 });
 
-Deno.test("group 量子化（group_size）は capability 不足で落とす（w4 は不採用 — ADR 0019）", () => {
+// group 量子化を受理する格納は i4 だけ（ADR 0069 決定 2）— i8 に付いた group_size は
+// 従来どおり capability 不足で落とす（group ごとの scale を per-channel として読む沈黙誤値）。
+Deno.test("i4 以外の格納 dtype に付いた group_size は capability 不足で落とす（ADR 0069）", () => {
   const model = openModel(i8LinearModel(({ graph }) => {
     graph.initializers["w"].storage = { dtype: "i8", scale: "m.s", group_size: 32 };
   }));
@@ -297,6 +299,7 @@ Deno.test("group 量子化（group_size）は capability 不足で落とす（w4
     "capability 不足",
   );
   assertEquals(error.message.includes("非対応 group 量子化 (1): w"), true, error.message);
+  assertEquals(error.message.includes("i4 のみ"), true, error.message);
 });
 
 Deno.test("bf16 は従来どおり capability 不足で fail loudly（i8 の門が開いても変わらない）", () => {

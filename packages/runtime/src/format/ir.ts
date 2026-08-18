@@ -8,12 +8,12 @@ import { isSymbolName, parseDim, tryParseDim } from "./dims.ts";
 export type IrDtype = "f32" | "i32" | "bool";
 
 /**
- * 格納 dtype。f32 / f16 / bf16 / i8 は**意味論 f32 の符号化**で、`i32` だけが生の int32
- * （記号依存定数の焼き込み先 — ADR 0010 の明示的な例外）。実行できるのは f32 / f16 / i8 / i32
- * で（f16 は ADR 0018・i8 は ADR 0019 — どちらも適格な重みスロットは圧縮のまま GPU 常駐・
- * 適格外はロード時に CPU で f32 展開）、bf16 は宣言として受理するだけ。
+ * 格納 dtype。f32 / f16 / bf16 / i8 / i4 は**意味論 f32 の符号化**で、`i32` だけが生の int32
+ * （記号依存定数の焼き込み先 — ADR 0010 の明示的な例外）。実行できるのは f32 / f16 / i8 / i4 /
+ * i32 で（f16 は ADR 0018・i8 は ADR 0019・i4 は ADR 0069 — いずれも適格な重みスロットは
+ * 圧縮のまま GPU 常駐・適格外はロード時に CPU で f32 展開）、bf16 は宣言として受理するだけ。
  */
-export type IrStorageDtype = "f32" | "f16" | "bf16" | "i8" | "i32";
+export type IrStorageDtype = "f32" | "f16" | "bf16" | "i8" | "i4" | "i32";
 
 /** 非負整数、または `coeff·sym+offset` の正準表記（dims.ts）。 */
 export type IrDim = number | string;
@@ -42,10 +42,12 @@ type IrInput = {
 type IrStorage = {
   readonly dtype: IrStorageDtype;
   /**
-   * 量子化格納の scale テンソルの safetensors キー（`dtype: "i8"` では**必須** — ADR 0019）。
-   * 実体は重みと同 rank の keepdim broadcast 形の F32（検証は format/container.ts）。
+   * 量子化格納の scale テンソルの safetensors キー（`dtype: "i8"` / `"i4"` では**必須** —
+   * ADR 0019 / 0069）。実体は F32 で、形は i8 が「重みと同 rank の keepdim broadcast」・
+   * i4 が「最終次元だけ group 数に置換」（検証は format/container.ts）。
    */
   readonly scale?: string;
+  /** group 量子化の group 長（`dtype: "i4"` では**必須**・2 冪かつ 16 以上 — ADR 0069 決定 2）。 */
   readonly groupSize?: number;
 };
 
@@ -115,7 +117,22 @@ const OPTIONAL_TOP_LEVEL_KEYS = ["states"] as const;
 
 /** 意味論 dtype の全語彙（宣言としての受理集合 — 実行可否は契約表 src/ops.ts が持つ）。 */
 export const SEMANTIC_DTYPES = ["f32", "i32", "bool"] as const;
-const STORAGE_DTYPES = ["f32", "f16", "bf16", "i8", "i32"] as const;
+const STORAGE_DTYPES = ["f32", "f16", "bf16", "i8", "i4", "i32"] as const;
+
+/**
+ * scale / group_size の記述子を持てる格納 dtype（量子化格納）。
+ *
+ * MUST: 量子化でない dtype に付いた記述子は fail loudly（黙って無視すると格納の意味が
+ * 二重化する）。group 量子化そのものの受理は格納 i4 だけ（ADR 0069 決定 2）で、それは
+ * capability の層（format/container.ts）が見る。
+ */
+const QUANTIZED_STORAGE_DTYPES: readonly IrStorageDtype[] = ["i8", "i4"];
+
+/** i4 の group 長の下限（ORT と同じ制約 — ADR 0069 決定 2）。 */
+const MIN_GROUP_SIZE = 16;
+
+/** 2 冪判定。ビット演算は 2^31 以上で int32 へ切り詰められるため使わない。 */
+const isPowerOfTwo = (value: number): boolean => 2 ** Math.round(Math.log2(value)) === value;
 
 /** state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。 */
 const STATE_DTYPES = ["f32"] as const;
@@ -143,7 +160,7 @@ const MAX_STATE_RANK = 4;
  * safetensors 側の BOOL は 1 バイト格納で 4 バイト前提の転送とも噛み合わない）。
  */
 const INITIALIZER_STORAGE: ReadonlyMap<IrDtype, readonly IrStorageDtype[]> = new Map([
-  ["f32", ["f32", "f16", "bf16", "i8"]],
+  ["f32", ["f32", "f16", "bf16", "i8", "i4"]],
   ["i32", ["i32"]],
 ]);
 
@@ -255,13 +272,18 @@ const parseStorage = (value: unknown, where: string): IrStorage => {
   const hasGroupSize = Object.hasOwn(obj, "group_size");
   // scale / group_size は量子化格納の記述子。非量子化 dtype に付いているのはエクスポータの
   // 取り違えなので受理しない（黙って無視すると格納の意味が二重化する）。
-  if (dtype !== "i8" && (hasScale || hasGroupSize)) {
+  if (!QUANTIZED_STORAGE_DTYPES.includes(dtype) && (hasScale || hasGroupSize)) {
     throw new IrError(`${where}: 格納 dtype '${dtype}' に scale / group_size は付けられない`);
   }
-  // MUST: i8 は scale を**明示宣言**する（ADR 0019）。既定 1.0 で補完すると、scale を
-  // 書き忘れたモデルが「量子化前の 1/127 倍の重み」で静かに走る。
-  if (dtype === "i8" && !hasScale) {
-    throw new IrError(`${where}: 格納 dtype 'i8' には scale（scale テンソルのキー）が要る`);
+  // MUST: i8 / i4 は scale を**明示宣言**する（ADR 0019 / 0069）。既定 1.0 で補完すると、
+  // scale を書き忘れたモデルが「量子化前の 1/127（i4 は 1/7）倍の重み」で静かに走る。
+  if (QUANTIZED_STORAGE_DTYPES.includes(dtype) && !hasScale) {
+    throw new IrError(`${where}: 格納 dtype '${dtype}' には scale（scale テンソルのキー）が要る`);
+  }
+  // MUST: i4 は group_size を**明示宣言**する（ADR 0069 決定 2）。group 長が決まらない
+  // 4bit 格納は scale の引き直し位置が決まらず、展開が黙って別の値を出す。
+  if (dtype === "i4" && !hasGroupSize) {
+    throw new IrError(`${where}: 格納 dtype 'i4' には group_size が要る（ADR 0069 決定 2）`);
   }
   const storage: { dtype: IrStorageDtype; scale?: string; groupSize?: number } = { dtype };
   if (hasScale) storage.scale = asNonEmptyString(obj["scale"], `${where}.scale`);
@@ -269,6 +291,13 @@ const parseStorage = (value: unknown, where: string): IrStorage => {
     const groupSize = obj["group_size"];
     if (typeof groupSize !== "number" || !Number.isSafeInteger(groupSize) || groupSize < 1) {
       throw new IrError(`${where}.group_size: 正整数でない`);
+    }
+    // MUST: i4 の group 長は 2 冪かつ 16 以上（ADR 0069 決定 2 — ORT と同制約）。この制約が
+    // 行境界・group 境界を常にバイト整列させ、末尾ゼロ詰め無しで u32 束縛が成立する。
+    if (dtype === "i4" && (!isPowerOfTwo(groupSize) || groupSize < MIN_GROUP_SIZE)) {
+      throw new IrError(
+        `${where}.group_size: ${groupSize} が 2 冪かつ ${MIN_GROUP_SIZE} 以上でない（ADR 0069 決定 2）`,
+      );
     }
     storage.groupSize = groupSize;
   }
@@ -581,6 +610,35 @@ const checkDefinitions = (
 };
 
 /**
+ * group 量子化格納（i4）の宣言 shape と group 長の整合（ADR 0069 決定 2）。
+ *
+ * 量子化軸は**最終次元**（linear の in 軸）で、そこが `group_size` で割り切れることが MUST。
+ * 端数 group を許すと最後の group だけ scale の担当範囲が短くなり、行境界が語境界からずれて
+ * 平坦添字の展開が黙って別の値を出す（端数を作らない制約で整列問題そのものを消す設計）。
+ */
+const checkGroupQuantizedShape = (
+  name: string,
+  initializer: IrInitializer,
+  value: IrValueInfo,
+): void => {
+  // 値域（2 冪かつ 16 以上）は parseStorage が保証済み。存在は型の上でだけ optional なので、
+  // 黙って読み飛ばさず言い直す（executor.ts の「格納 i8 なのに scale が無い」と同じ流儀）。
+  const groupSize = initializer.storage.groupSize;
+  if (groupSize === undefined) {
+    throw new IrError(`graph.initializers['${name}']: 格納 i4 なのに group_size が無い`);
+  }
+  const lastDim = value.shape[value.shape.length - 1];
+  if (typeof lastDim !== "number") {
+    throw new IrError(`graph.values['${name}']: 格納 i4 の initializer に量子化軸が無い（rank 0）`);
+  }
+  if (lastDim % groupSize !== 0) {
+    throw new IrError(
+      `graph.values['${name}']: 格納 i4 の最終次元 ${lastDim} が group_size ${groupSize} で割り切れない（ADR 0069 決定 2）`,
+    );
+  }
+};
+
+/**
  * 宣言の完全性: 入力は inputs[] が、initializer とノード出力は values{} が、
  * それぞれちょうど 1 回宣言する。孤立宣言（誰も定義しない values）も fail loudly。
  */
@@ -627,6 +685,7 @@ const checkDeclarations = (
     if (values[name].shape.some((dim) => typeof dim !== "number")) {
       throw new IrError(`graph.values['${name}']: initializer の shape に記号次元は使えない`);
     }
+    if (storageDtype === "i4") checkGroupQuantizedShape(name, initializers[name], values[name]);
   }
   for (const node of nodes) {
     for (const out of node.outs) {

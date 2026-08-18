@@ -24,8 +24,9 @@ class IrStorage:
     """格納 dtype。M0 ランタイムが実行できるのは f32 のみ。"""
 
     dtype: str
-    #: 量子化格納の scale テンソルの safetensors キー（storage.dtype == "i8" のみ）。
+    #: 量子化格納の scale テンソルの safetensors キー（storage.dtype == "i8" / "i4" のみ）。
     scale: str | None = None
+    #: group 量子化の group 長（storage.dtype == "i4" では必須 — ADR 0069 決定 2）。
     group_size: int | None = None
 
     def to_dict(self) -> dict:

@@ -147,6 +147,42 @@ Deno.test("parseSafetensors: 要素サイズに整列しないテンソルを拒
   assertThrows(() => parseSafetensors(buffer), SafetensorsError, "整列していない");
 });
 
+// ADR 0069 決定 2: I4 は shape を論理形のまま持ち、バイト数だけが bit 幅から決まる（numel/2）。
+Deno.test("parseSafetensors: I4 は論理 shape のまま numel/2 バイトで受理する", () => {
+  const buffer = buildSafetensors([
+    { name: "w", dtype: "I4", shape: [3, 32], data: new Uint8Array(48) },
+  ]);
+  const file = parseSafetensors(buffer);
+  const view = file.tensors.get("w");
+  if (view === undefined) throw new Error("tensor w が無い");
+
+  assertEquals(view.shape, [3, 32]);
+  assertEquals(view.byteLength, 48);
+  // 4bit の TypedArray は存在しないので view は raw バイトのまま（3 面目 = raw + 論理 numel）
+  assertEquals(tensorBytes(file, view).byteLength, 48);
+});
+
+// 要素数が奇数だと bit 総量が byte 境界に乗らず、末尾要素が半バイトだけ突き出す。
+Deno.test("parseSafetensors: 要素数が奇数の I4 を拒否する", () => {
+  const buffer = packSafetensors(
+    { w: { dtype: "I4", shape: [3], data_offsets: [0, 2] } },
+    new Uint8Array(2),
+  );
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "byte 境界に乗らない");
+});
+
+// I4 は要素整列（0.5 バイト）ではなく「テンソル先頭が 4 バイト整列」を要求する（u32 束縛）。
+Deno.test("parseSafetensors: I4 のテンソル先頭が 4 バイト整列していない形を拒否する", () => {
+  const buffer = packSafetensors(
+    {
+      a: { dtype: "I8", shape: [2], data_offsets: [0, 2] },
+      w: { dtype: "I4", shape: [4], data_offsets: [2, 4] },
+    },
+    new Uint8Array(4),
+  );
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "整列していない");
+});
+
 Deno.test("parseSafetensors: __metadata__ の非文字列値を拒否する", () => {
   const buffer = packSafetensors({ __metadata__: { k: 1 } }, new Uint8Array(0));
   assertThrows(() => parseSafetensors(buffer), SafetensorsError, "文字列でない");

@@ -148,9 +148,41 @@ Deno.test("parseIrGraph: dtype 語彙", () => {
   assertRejects("意味論 dtype に i64", (g) => {
     g.inputs[0].dtype = "i64";
   });
-  assertRejects("格納 dtype に i4", (g) => {
-    g.initializers["w"].storage = { dtype: "i4" };
+  assertRejects("格納 dtype に i2", (g) => {
+    g.initializers["w"].storage = { dtype: "i2" };
   });
+});
+
+// ADR 0069 決定 2: group 量子化格納（i4）は scale と group_size を必須にし、group 長は
+// 2 冪かつ 16 以上・量子化軸（最終次元）が group 長で割り切れることを MUST とする
+// （端数 group を作らない制約が、行境界・group 境界のバイト整列を保証している）。
+Deno.test("parseIrGraph: 格納 i4 の受理形（scale + group_size + 量子化軸の整除）", () => {
+  const asI4 = (storage: Record<string, unknown>, lastDim = 32) => (graph: GraphJson): void => {
+    graph.values["w"] = { dtype: "f32", shape: [4, lastDim] };
+    graph.initializers["w"].storage = storage;
+  };
+
+  const graph = parseMutated(asI4({ dtype: "i4", scale: "enc.w.scale", group_size: 32 }));
+  assertEquals(graph.initializers["w"].storage, {
+    dtype: "i4",
+    scale: "enc.w.scale",
+    groupSize: 32,
+  });
+
+  assertRejects("i4 の group_size 欠落", asI4({ dtype: "i4", scale: "enc.w.scale" }));
+  assertRejects("i4 の scale 欠落", asI4({ dtype: "i4", group_size: 32 }));
+  assertRejects(
+    "group_size が 2 冪でない",
+    asI4({ dtype: "i4", scale: "enc.w.scale", group_size: 24 }),
+  );
+  assertRejects(
+    "group_size が 16 未満",
+    asI4({ dtype: "i4", scale: "enc.w.scale", group_size: 8 }),
+  );
+  assertRejects(
+    "量子化軸が group_size で割り切れない",
+    asI4({ dtype: "i4", scale: "enc.w.scale", group_size: 32 }, 48),
+  );
 });
 
 Deno.test("parseIrGraph: 量子化格納は宣言として受理する（実行可否は別の層）", () => {

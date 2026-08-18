@@ -121,14 +121,30 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   （`packages/runtime/src/ops.ts` / `karume/ops.py`）で、ランタイムは非対応を列挙して fail loudly。
   グラフ入力の転送は 3 型とも可能。torch 既定の整数 i64 は **エクスポータ境界で i32 へ
   正規化**する（値域外は fail loudly）— IR に i64 は無い。
-- **格納 dtype**（`initializers[].storage.dtype`）: `"f32" | "f16" | "bf16" | "i8" | "i32"`。
-  前 4 つは**意味論 f32 の符号化**で、`i32` だけが**生の int32**（記号依存定数の焼き込み先 —
+- **格納 dtype**（`initializers[].storage.dtype`）:
+  `"f32" | "f16" | "bf16" | "i8" | "i4" | "i32"`。`i32` 以外は**意味論 f32 の符号化**で、
+  `i32` だけが**生の int32**（記号依存定数の焼き込み先 —
   ADR [0010](decisions/0010-symbolic-constant-folding.md)。「格納語彙は f32 の符号化」の
   明示的な例外）。量子化格納は `storage.scale`（scale テンソルの safetensors キー）・
   `storage.group_size` を持てる。**ランタイムが実行できるのは `f32` / `f16` / `i8` /
   `i32`** — bf16 だけが「宣言としては valid、実行は fail loudly（capability 不足の診断付き）」。
-  `group_size` は語彙としては残るが**実行経路が無い**（group 量子化 = w4 は ADR 0019 で
-  不採用確定）— 付いていれば capability 不足で落ちる。
+  `i4` は格納形が ADR [0069](decisions/0069-packed-w4-storage.md) で確定した段階で、
+  **format 層（語彙・バイト長・整列・scale の形）が受理する**ところまで入っている
+  （実行経路は実装波が入れる — それまでは capability 不足で落ちる）。
+- **`i4` の格納形**（ADR 0069 決定 2 / 3）: K 方向 group の対称量子化を packed 4bit で持つ。
+  テンソル shape は**論理形のまま**で、safetensors 側は `I4`・バイト長は `numel / 2`
+  （要素数が奇数の宣言は bit 総量が byte 境界に乗らないので fail loudly）・**テンソル先頭は
+  4 バイト整列** MUST（要素整列の概念を持たず、展開カーネルが `array<u32>` で束縛するため）。
+  宣言の規則は 3 点:
+  - `storage.group_size` が**必須**で、**2 冪かつ 16 以上**
+  - 量子化軸は**最終次元**（linear の in 軸）で、`最終次元 % group_size == 0` MUST
+    （端数 group を作らない制約が、行境界・group 境界のバイト整列を保証する）
+  - `storage.scale` も**必須**。実体は F32 で、形は**重みと同 rank・最終次元だけ group 数**
+    （重み `[O,I]` に対し scale `[O, I/group_size]`）— i8 の keepdim broadcast 形とは別分岐
+
+  `group_size` を `i4` 以外の格納 dtype に付けた宣言は `非対応 group 量子化` として
+  capability 不足で落ちる（**group 量子化の格納は `i4` のみ**。黙って無視すると group ごとの
+  scale を per-channel として読む沈黙誤値になる）。
 - **`f16` の実行**（ADR [0018](decisions/0018-f16-weight-execution.md)）: 意味論はあくまで f32
   （「格納のみ量子化・計算は f32」— ADR 0006）で、経路が**適格判定で 2 つに分かれる**。
   - **適格**（その initializer の消費が `linear` / `conv1d` / `conv2d` / `conv_transpose1d` /
@@ -179,8 +195,9 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
 
   bool の initializer は語彙に無い（実測に無く、safetensors の `BOOL` は 1 バイト格納で
   4 バイト前提の転送と噛み合わない）。
-- `storage.scale` / `storage.group_size` は `storage.dtype: "i8"` のときのみ許可。
-  `i8` では `scale` は**必須**（ADR 0019）。
+- `storage.scale` / `storage.group_size` は `storage.dtype: "i8"` / `"i4"` のときのみ許可。
+  `i8` では `scale` が**必須**（ADR 0019）、`i4` では `scale` と `group_size` の**両方が必須**
+  （ADR 0069 決定 2）。
 - 非有限数の拒否はリテラルだけでなく**値レベル**で行う（`1e999` は JSON として構文有効だが
   Infinity に丸まるため、パース時 reviver で拒否）。safetensors ヘッダ側の未知キーは許容する
   （外部フォーマット）— 未知キー拒否はグラフ JSON のみの規則。

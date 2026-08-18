@@ -9,7 +9,14 @@ import {
 } from "../src/format/container.ts";
 import { type IrDtype, IrError, type IrStorageDtype } from "../src/format/ir.ts";
 import { RUNTIME_SUPPORT } from "../src/ops.ts";
-import { baseGraph, baseModelBuffer, buildSafetensors, f32Bytes } from "./helpers/format.ts";
+import {
+  baseGraph,
+  baseModelBuffer,
+  buildSafetensors,
+  f32Bytes,
+  type GraphJson,
+  type TensorSpec,
+} from "./helpers/format.ts";
 
 /** M0 と同形（f32 のみ・attrs 無し・二項・単一出力）の最小対応表。 */
 const f32Only: OpSupport = {
@@ -26,6 +33,26 @@ const M0_SUPPORT: RuntimeSupport = {
 };
 
 const i8Bytes = (length: number): Uint8Array<ArrayBuffer> => new Uint8Array(length);
+
+/**
+ * group 量子化格納（i4 + group 形 scale — ADR 0069）の最小モデル。重みは `[4,64]` で
+ * group_size 32 なので、scale の group 形は `[4,2]`（keepdim broadcast 形 `[4,1]` とは別物 —
+ * 形の分岐が効いていないと片方が素通りする）。
+ */
+const i4Model = (
+  mutate: (parts: { graph: GraphJson; tensors: TensorSpec[] }) => void = () => {},
+): ArrayBuffer => {
+  const graph = baseGraph();
+  graph.values["w"] = { dtype: "f32", shape: [4, 64] };
+  graph.initializers["w"].storage = { dtype: "i4", scale: "enc.w.scale", group_size: 32 };
+  const tensors: TensorSpec[] = [
+    { name: "enc.w", dtype: "I4", shape: [4, 64], data: new Uint8Array(128) },
+    { name: "enc.w.scale", dtype: "F32", shape: [4, 2], data: f32Bytes(new Array(8).fill(1)) },
+    { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+  ];
+  mutate({ graph, tensors });
+  return baseModelBuffer(graph, tensors);
+};
 
 Deno.test("openModel: 正常系は graph と safetensors を結合して開ける", () => {
   const model = openModel(baseModelBuffer());
@@ -112,6 +139,60 @@ Deno.test("openModel: 量子化 initializer の scale テンソルは余剰扱�
     { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
   ]);
   assertEquals(openModel(buffer).file.tensors.size, 3);
+});
+
+// ADR 0069 決定 3: group 量子化の scale は「重みと同 rank・最終次元だけ group 数」で、
+// per-channel の keepdim broadcast 形とは受理集合が交わらない別分岐。
+Deno.test("openModel: 格納 i4 は group 形の scale を受理する", () => {
+  const model = openModel(i4Model());
+  assertEquals(model.graph.initializers["w"].storage.groupSize, 32);
+  assertEquals(model.file.tensors.get("enc.w")?.byteLength, 128);
+  assertEquals(model.file.tensors.get("enc.w.scale")?.shape, [4, 2]);
+});
+
+Deno.test("openModel: 格納 i4 の scale が group 形でないものを拒否する", () => {
+  // rank 違い（group 数だけの 1 次元）
+  assertThrows(
+    () =>
+      openModel(i4Model(({ tensors }) => {
+        tensors[1] = {
+          name: "enc.w.scale",
+          dtype: "F32",
+          shape: [8],
+          data: f32Bytes(new Array(8).fill(1)),
+        };
+      })),
+    ContainerError,
+    "rank",
+  );
+  // group 数違い（per-channel の keepdim broadcast 形 — i8 なら通る形）
+  assertThrows(
+    () =>
+      openModel(i4Model(({ tensors }) => {
+        tensors[1] = {
+          name: "enc.w.scale",
+          dtype: "F32",
+          shape: [4, 1],
+          data: f32Bytes([1, 1, 1, 1]),
+        };
+      })),
+    ContainerError,
+    "group 形",
+  );
+  // F32 以外（別 dtype のビット列として読むと全 group が桁違いの値になる）
+  assertThrows(
+    () =>
+      openModel(i4Model(({ tensors }) => {
+        tensors[1] = {
+          name: "enc.w.scale",
+          dtype: "F16",
+          shape: [4, 2],
+          data: new Uint8Array(16),
+        };
+      })),
+    ContainerError,
+    "F32 が必要",
+  );
 });
 
 Deno.test("assertRuntimeSupport: 非対応 op を列挙して落とす", () => {
@@ -285,6 +366,33 @@ Deno.test("assertRuntimeSupport: 非対応の格納 dtype を initializer 名つ
   );
   assertEquals(error.message.includes("'bf16' (1): b"), true, error.message);
   assertEquals(error.message.includes("'f16' (1): w"), true, error.message);
+});
+
+// group 量子化を受理する格納は i4 だけ（ADR 0069 決定 2）。他の格納 dtype に付いた group_size は
+// 実行経路が無く、黙って無視すると group ごとの scale を per-channel として読む沈黙誤値になる。
+Deno.test("assertRuntimeSupport: group_size は i4 だけが通り、他の格納 dtype では落ちる", () => {
+  assertRuntimeSupport(openModel(i4Model()).graph, {
+    ...M0_SUPPORT,
+    storage: new Set<IrStorageDtype>(["f32", "i4"]),
+  });
+
+  const graph = baseGraph();
+  graph.initializers["w"].storage = { dtype: "i8", scale: "enc.w.scale", group_size: 32 };
+  const model = openModel(baseModelBuffer(graph, [
+    { name: "enc.w", dtype: "I8", shape: [4, 3], data: i8Bytes(12) },
+    { name: "enc.w.scale", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
+    { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+  ]));
+  const error = assertThrows(
+    () =>
+      assertRuntimeSupport(model.graph, {
+        ...M0_SUPPORT,
+        storage: new Set<IrStorageDtype>(["f32", "i8"]),
+      }),
+    ContainerError,
+    "非対応 group 量子化 (1): w",
+  );
+  assertEquals(error.message.includes("i4 のみ"), true, error.message);
 });
 
 // ADR 0010: 生の int32 格納は safetensors 側の I32 と 1 対 1（f32 の符号化語彙とは別系統）。
