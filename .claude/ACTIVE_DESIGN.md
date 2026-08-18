@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-17
+> Last updated: 2026-08-18
 
 ## Now
 
@@ -28,14 +28,16 @@
   attention + `state_append`（ADR 0067 決定 4〜7）— 契約層 TS/Py・カーネル族 4 本・実行統合
   （`run` 第 3 引数 generation）・分離焼き込み（ADR 0066 決定 5）・受入テスト群（帯 mask
   交差オラクル・0066 受入②・0067 受入⑤）。0 本席 / states 専用記号束縛 / C-2 結線点 5 件も
-  全消化。**波 E 済（2026-08-18・4 コミット `4c0a587`..`ca15c06`）**: core 手術ヘルパ
+  全消化。**波 E 済（2026-08-18・6 コミット `4c0a587`..`e92bcbc`）**: core 手術ヘルパ
   `karume/states.py`（export 後の attention→states 形書換 — Gemma 4 でも使う汎用機構）+
-  models `generateGreedy`（固定 chunk prefill / decode M=1）+ MiniCPM5 decode 台本
-  （RoPE 表引き swap・`outputs/series/minicpm5-1b-decode/` 実走済み・絶対位置上限 = 表 512 行）+
+  models `generateGreedy`（固定 chunk prefill / decode M=1・`maxPosition` 必須）+ MiniCPM5
+  decode 台本（RoPE 表引き swap・`outputs/series/minicpm5-1b-decode/` staging 公開で実走済み・
+  絶対位置上限 = 表 512 行）+
   実 GPU 検収門（**greedy 3 ケース × K=16 の token id 列が torch と厳密一致**・prefill logits
   maxAbs 7.439e-5 = 1-shot 門と同値・census 全 :gqa）。`enqueue` の generation 面は
-  **設けない**裁定で確定（limitations — speculative 実需で再訪）。**次 = 波 F（w4 —
-  ADR 0069・Phase 0 fake-quant sweep から）**。送り: L8 fake-device 注入面は保留継続。
+  **設けない**裁定で確定（limitations — speculative 実需で再訪）。decode 出口の token-only
+  既定形は先送り裁定（ADR 0068 追記 3 — backlog 4 番）。**波 F 進行中（w4 — ADR 0069・
+  Phase 0 fake-quant sweep から・runtime 非接触）**。送り: L8 fake-device 注入面は保留継続。
 
 ## Open decisions
 

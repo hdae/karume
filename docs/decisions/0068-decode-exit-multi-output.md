@@ -129,3 +129,18 @@ IR スキーマは `outs` 長さ 1 以上を既に許可しており**仕様改�
 multi-output は実装済み）。exporter 側は「多出力 aten を通す道が現状ゼロ」で、converter の
 タプル meta + `operator.getitem` スロット結線が新機構になる（argmax は単一出力なので
 この機構を要しない — 段階分割の自然な切れ目）。
+
+## 追記 3（2026-08-18・波 E — 決定 4 の既定出口は未検収・opt-in 形で先送り）
+
+波 E の decode 台本（minicpm5 `export_decode.py`）は決定 4 の既定（lm_head 最終位置のみ・
+readback は token のみ）ではなく、**全 M 行に lm_head を通し logits + token を必須出力に
+宣言する opt-in 形**で検収した。機序: 「最終位置のみ」は decode（M=1）では自明だが、prefill
+チャンクの最終**有効**行 = `queryLength − 1` は実行時スカラで、現行 IR 語彙にはグラフから
+これを静的に切る手段が無い。既定形の成立には last_row 添字を i32 グラフ入力で受けて
+gather → lm_head へ通す新配線（+ models 側の入力供給・token-only 検収門）が要る —
+独立の設計判断として切る。
+
+裁定（2026-08-18）: **token-only 既定形の追加は波 F/H で行う**（backlog 4 番に起票）。
+現系列は診断線（prefill logits tolerance 門の対象）として併存させる。それまで decode の
+実効 readback（prefill チャンクあたり ~16.7MB の logits）と全行 lm_head 計算は過大のまま —
+検収の正しさには影響せず、この形の上で decode 性能を主張しない。

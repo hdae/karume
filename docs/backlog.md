@@ -50,7 +50,8 @@ KV 共有層〉。C-2 の結線点 5 件と 0 本席は全消化。**送り**: `
 narrow interface DI〉・`40b9475` decode 台本〈RoPE 表引き swap・greedy golden K=16 +
 margin 門 1e-2 — capital-ja は 0.0077 で除外・series 実走済み〉・`ca15c06` 検収門
 〈token id 列厳密一致 3 ケース・prefill maxAbs 7.439e-5 = 1-shot 門と同値・census
-QK/PV 全数 :gqa・cachedPlans=2 安定〉。**送りの裁定**: `enqueue` の generation 面は
+QK/PV 全数 :gqa・cachedPlans=2 安定〉・`1325546` docs・`e92bcbc` Codex 指摘消化
+〈`maxPosition` 必須化・staging 公開・i32 値域・pad 行記述訂正〉。**送りの裁定**: `enqueue` の generation 面は
 **設けない**〈limitations に理由 — token feedback の逐次律速でフェンス束ねの利得が
 立たない。speculative の実需で再訪〉・decode 系列の絶対位置上限 = RoPE 表 512 行
 〈series README〉）** →
@@ -82,7 +83,9 @@ IR スキーマに予約する。実装は最初の実需モデルまで先送�
    staging の estimator + 診断（絶対保証ではない）。
 4. **decode 出口（済 — 波 B 2026-08-17）**: GPU `argmax`（`cbe093a`）+ static-k `topk`
    （`50871e3`）。runtime の generic multi-output は列化 2 段（`3a31544` / `9a795a7`）で消化・
-   0 本席（effect op）は波 D `5662c9a` で入居。
+   0 本席（effect op）は波 D `5662c9a` で入居。**残: token-only 既定出口**（ADR 0068 決定 4 の
+   既定形 — last_row i32 入力 + gather の新配線。波 F/H で設計から着手・現 decode 台本は
+   logits opt-in 形で検収済み = ADR 0068 追記 3・2026-08-18 裁定）。
 5. **autoregressive attention（済 — 波 A + 波 D 2026-08-18）**: causal / GQA / logical prefix
    length / KV state access / empty-row 意味論を states 形（ADR 0067 決定 4〜7）で消化。
    **row-block の portability は保存 attention 経路の行ブロック内蔵で正面解決**（`88d7021` —
