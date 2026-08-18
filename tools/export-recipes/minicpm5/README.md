@@ -1,19 +1,23 @@
-# MiniCPM5-1B export recipe (1-shot)
+# MiniCPM5-1B export recipes
 
-**Outside the wheel** — this recipe is repo-only (ADR
-[0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)) and it produces a series, not a
-distribution, so it has no dist recipe and no model card.
+**Outside the wheel** — these recipes are repo-only (ADR
+[0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)) and they produce series, not
+distributions, so they have no dist recipe and no model card.
 
 Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The authority for the design
-decisions is the module docstring (`export.py`); this file is the entry point only.
+decisions is the module docstrings (`export.py`, `export_decode.py`); this file is the entry point
+only.
 
-## What it emits
+Two scripts read the same checkpoint: `export.py` emits the 1-shot (prefill-equivalent) graph, and
+`export_decode.py` emits the states-form chunk graph that the generation path is accepted against.
+
+## What `export.py` emits
 
 MiniCPM5-1B as **one graph** in the 1-shot (prefill-equivalent) shape: `input_ids[1, T]` in, raw
 `logits[1, T, 130560]` out, with no KV cache. It is the acceptance fixture for ADR
 [0067](../../../docs/decisions/0067-autoregressive-attention-vocabulary.md) decision 1 — grouped
-query attention as a divisible broadcast — on a real checkpoint. The state slots and the decode
-path (ADR [0066](../../../docs/decisions/0066-generation-context-state-slots.md)) are a later wave.
+query attention as a divisible broadcast — on a real checkpoint. The state slots and the decode path
+are the second recipe below.
 
 Two properties are what make this fixture worth having, and `export.py` fails the export loudly
 when either is lost:
@@ -43,6 +47,56 @@ The sanity check is not a tautology: for every case the greedy token at the **la
 equal a specific expected continuation (`Paris` / `東京`), and the export fails if all four cases
 agree on one token (a constant output).
 
+## What `export_decode.py` emits
+
+The same checkpoint as **one states-form chunk graph**: `input_ids[1, M]` and `position_ids[1, M]`
+in, `logits[1, M, 130560]` and `token[1, M, 1]` out, with the KV held in 48 named state slots instead
+of graph I/O. It is the acceptance fixture for ADR
+[0066](../../../docs/decisions/0066-generation-context-state-slots.md) (the generation context and
+named state slots), ADR
+[0067](../../../docs/decisions/0067-autoregressive-attention-vocabulary.md) decisions 4 to 5b
+(state-referencing attention and `state_append`) and ADR
+[0068](../../../docs/decisions/0068-decode-exit-multi-output.md) decision 4 (the decode exit, an
+`argmax` node next to the logits).
+
+`M` is the physical chunk extent — `chunkLength` when prefilling, 1 when decoding — and only its
+leading `queryLength` rows are valid. The slots are declared `[1, 2, "C", 128]` with `C` left
+symbolic, so the capacity is chosen by `createGenerationContext` instead of being baked in at export
+time.
+
+Two structural differences from the 1-shot recipe, and the export fails loudly when either is lost:
+
+- **positions are a graph input and RoPE is a table lookup.** In the 1-shot shape a position is
+  always its row index, so cos/sin fold into a constant; here a position is `pastLength + row` and is
+  only known at run time. The recipe swaps `model.model.rotary_emb` for a module that gathers a
+  512-position cos/sin table with `F.embedding`, and asserts at construction time that the lookup
+  reproduces the original implementation exactly (`torch.equal`, three kinds of position vector).
+- **the causal mask is scaffolding for the trace only.** The graph is exported with the same additive
+  mask as the 1-shot recipe, and `karume.states.to_states_form` then drops it — causality in the
+  states form is a predicate over `pastLength + row`, so the `Tmax × Tmax` constant and its
+  `sym_prefix_slice` are pruned. The form check requires that no residue of either survives.
+
+Output layout:
+
+```
+outputs/series/minicpm5-1b-decode/model.safetensors         weights/constants + karume_ir
+outputs/series/minicpm5-1b-decode/io.<case>.safetensors     unpadded inputs and expected outputs
+outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors greedy continuation of K = 16 steps
+```
+
+The `io.*` files use the same key convention as the 1-shot series and cover all four cases at their
+full unpadded length. They are a reference table rather than a run script: the runtime executes the
+graph in chunks and compares only the valid rows, since padding rows are written as zeros (ADR 0066
+addendum 8) and have no counterpart on the reference side.
+
+The `greedy.*` files are the acceptance record for the decode path — `prompt` i32 `[T]`, `expected`
+i32 `[K]` and `margin` f32 `[K]`. The continuation is recomputed from scratch at every step (a full
+re-forward, never a KV cache: the expectation must not come out of the mechanism under test). Every
+step has to keep a top1−top2 logit margin above `1e-2`, so that GPU-side deviation cannot flip the
+sequence; `capital-ja` is excluded from the greedy cases because its step 5 margin is 0.0077
+(measured 2026-08-18). The first continuation token is additionally checked against the 1-shot
+recipe's expectation table, which is what ties the two graphs together.
+
 ## Requirements
 
 The weights go under `inputs/minicpm5/MiniCPM5-1B/` (see
@@ -55,6 +109,7 @@ container of roughly the same multiple.
 ```sh
 cd tools/export-recipes
 uv run --with 'transformers==5.14.1' python -m minicpm5.export
+uv run --with 'transformers==5.14.1' python -m minicpm5.export_decode
 ```
 
 `transformers` is pinned to 5.14.1 for the same reason as DeBERTa and EmbeddingGemma (a change in
