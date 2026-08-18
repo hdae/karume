@@ -8,9 +8,9 @@
  * おり、ResidentTensor は GpuContext 所有の別 dispose 契約を持つため、どちらも「context 単位で
  * 返す」（決定 6）と粒度が合わない。素の `createBuffer` + 自前の簿記が最小の形になる。
  *
- * MUST: ここが持つのは所有権・寿命・搬送路（論理長 uniform）だけで、実体を**束ねる**のは
- * 実行側（`Session.run` の generation 面が内部面 {@link GenerationContextInternals} 経由で
- * 読む）。焼き込み bind group を context 側に持つ形（ADR 0066 決定 5 の分離焼き込み）は波 D-4。
+ * MUST: ここが持つのは所有権・寿命・搬送路（論理長 uniform）と、**state を束ねる bind group の
+ * 置き場**（ADR 0066 決定 5 の分離焼き込み）だけ。束ね方を決めるのは実行側で、context はその
+ * 成果物を backing の世代識別子と対で預かるだけの器（{@link GenerationContextInternals}）。
  * MUST: executor.ts を import しない（Session → context の一方向 import を型でも崩さない）。
  * Session から借りる面は {@link GenerationContextHost} の構造的な数欄だけ
  * （`RecipeBuilderContext` と同じ流儀）。
@@ -29,6 +29,7 @@ import {
 } from "../gpu/device.ts";
 import { numel, stateWindow } from "../ops.ts";
 import { ExecutionError, type SymbolBindings } from "./plan.ts";
+import type { BakedGroups } from "./recipe.ts";
 import type { GenerationContextSpec } from "./session-types.ts";
 
 /**
@@ -120,6 +121,17 @@ type GenerationContextInternals = {
   readonly lengths: GPUBuffer;
   /** この context が常駐させている GPU バイト数（診断 `stateBacking.residentBytes` の元）。 */
   readonly bytes: number;
+  /**
+   * `token` の backing に対して焼いてある context 側 bind group（無ければ undefined = 焼き直し）。
+   *
+   * MUST: 引くときに必ず `token` を照合する（**引ける形を token 無しで作らない**）。束は
+   * backing 所有のバッファ（slot / 入力）も掴んでいるので、退役した backing の token で焼いた束を
+   * そのまま dispatch すると破棄済みバッファを読む — 照合と焼き直しと dispatch の順を
+   * 1 箇所に閉じるための引数（executor の `#generationGroups`）。
+   */
+  bakedGroups(token: number): BakedGroups | undefined;
+  /** 焼き直した束を預ける（前の束は捨てる — 退役した backing への参照を残さない）。 */
+  setBakedGroups(token: number, groups: BakedGroups): void;
   /** 論理長を書き出す（毎 run の encode 前 — {@link GenerationContext} の doc）。 */
   writeLengths(queryLength: number): void;
   /** 論理長を進める（**run の成功でのみ** — 決定 6）。 */
@@ -227,6 +239,12 @@ export class GenerationContext {
    */
   readonly #lengthValues = new Uint32Array(2);
   #pastLength = 0;
+  /**
+   * context 側で焼いた bind group 束と、それを焼いた相手の backing の世代識別子
+   * （ADR 0066 決定 5）。**GPUBindGroup は destroy 不要**（GC 任せ）だが、掴んでいる backing 所有の
+   * バッファの寿命を延ばすので、焼き直しでは必ず前の束ごと置き換える。
+   */
+  #baked: { readonly token: number; readonly groups: BakedGroups } | undefined;
   /** 汚染の理由（追記 3）。立つと `dispose` 以外の全操作を拒否する（読みも含む）。 */
   #poisoned: string | undefined;
   #disposal: Promise<void> | undefined;
@@ -250,6 +268,11 @@ export class GenerationContext {
       // 容量は確定済み（静的物理格納 — ADR 0066 決定 3）なので、ここで 1 度畳んで持つ。
       bytes: [...slots.values()].reduce((total, slot) => total + slot.byteLength, 0) +
         LENGTHS_BYTES,
+      bakedGroups: (token: number): BakedGroups | undefined =>
+        this.#baked?.token === token ? this.#baked.groups : undefined,
+      setBakedGroups: (token: number, groups: BakedGroups): void => {
+        this.#baked = { token, groups };
+      },
       writeLengths: (queryLength: number): void => this.#writeLengths(queryLength),
       advance: (queryLength: number): void => this.#advance(queryLength),
       poison: (reason: string): void => this.#poison(reason),
@@ -425,6 +448,10 @@ export class GenerationContext {
       } finally {
         for (const slot of this.#slots.values()) slot.buffer.destroy();
         this.#lengths.destroy();
+        // MUST: 焼いた束もここで手放す。以後 run は来ない（`#assertUsable` が落とす）ので
+        // 正しさには効かないが、掴んだままだと破棄済みバッファを参照する bind group が
+        // context の参照ぶんだけ生き残る。
+        this.#baked = undefined;
         this.#host.forget(this);
       }
     });

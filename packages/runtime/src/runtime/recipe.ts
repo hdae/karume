@@ -21,10 +21,13 @@
  * bind group を**構築時に 1 度だけ**組み、run に残るのは {@link executeBakedPlan} の dispatch
  * だけになる（createBindGroup も env の構築も出ない）。
  *
- * MUST: **generation run（{@link GenerationEncoding} を伴う実行）はアリーナ経路だけ**。context
- * 所有の実体（state スロット・論理長 uniform）は Session 所有の bind group へ焼き込めない
- * （ADR 0066 決定 5 の焼き込み単位の分離 — 実装は波 D-4）ので、焼き込み経路の入口 2 本は
- * `assertStateFree` で fail loudly にしてある。
+ * MUST: **焼き込みの単位は束ねる相手の所有者で分ける**（ADR 0066 決定 5）。Session 所有の実体
+ * （slot / 常駐入力 / 重み）だけを束ねる dispatch は {@link bakeBindGroups} が backing の構築時に
+ * 1 度だけ焼き、context 所有の実体（state スロット・論理長 uniform）を束ねる dispatch は
+ * {@link bakeGenerationBindGroups} が **GenerationContext ごと**に焼く。分けないと「前の context の
+ * KV を束ねたまま回る」沈黙 stale 読みか、context 切替ごとの全再構築スラッシングの二択になる。
+ * 判別は {@link bindsGeneration} の 1 本で、2 つの焼き込みは互いの穴（`undefined`）を埋め合う
+ * （{@link BakedGroups}）。
  */
 
 import { type RunArena, toSizeClass } from "../gpu/arena.ts";
@@ -352,31 +355,22 @@ const resolveWorkgroups = (
 };
 
 /**
- * レシピ列が context 所有の実体を 1 つも束ねないことの門（**焼き込み経路の入口**）。
+ * この dispatch が {@link GenerationContext} 所有の実体を束ねるか — **焼き込み単位の判別 1 本**
+ * （ADR 0066 決定 5）。
  *
- * MUST: slot backing（{@link derivePlanSlots} / {@link bakeBindGroups}）は state を扱えない。
- * 焼き込み単位の分離（ADR 0066 決定 5 — 実装は波 D-4）が無いまま焼くと、bind group が
- * **前の context の KV を束ねたまま**回り続ける沈黙 stale 読みの入り口になる。
+ * MUST: 判別点はここだけ。Session 側（{@link bakeBindGroups}）と context 側
+ * （{@link bakeGenerationBindGroups}）が別々の条件を持つと、どちらも焼かない dispatch
+ * （実行時に fail loudly = まだ安全）か、**両方が焼く** dispatch（Session 側の group が
+ * context 所有の実体を掴んだまま run を跨ぎ、切替後も前の context の KV を読む沈黙 stale 読み）が
+ * 生まれる。
+ * NOTE: 動的 workgroups（{@link DispatchWorkgroups} の関数形）は判別に**入れない** — 束ねる実体
+ * とは直交する軸で、dispatch 数はどちらの側で焼いた group でもエンコードのたびに論理長から
+ * 解決される（{@link resolveWorkgroups}）。
  */
-const assertStateFree = (recipes: readonly StepRecipe[], where: string): void => {
-  for (const recipe of recipes) {
-    for (const dispatch of recipe.dispatches) {
-      for (const entry of dispatch.bindings) {
-        if (entry.source.kind !== "state" && entry.source.kind !== "lengths") continue;
-        throw new ExecutionError(
-          `${where}: dispatch '${dispatch.key}' が GenerationContext 所有の実体を束ねている` +
-            "（state を含む bind group の焼き込みは波 D-4 — ADR 0066 決定 5 の分離焼き込み）",
-        );
-      }
-      if (typeof dispatch.workgroups === "function") {
-        throw new ExecutionError(
-          `${where}: dispatch '${dispatch.key}' の workgroup 数が論理長から算出される` +
-            "（焼き込み経路は run を跨いで固定の dispatch 数しか扱えない）",
-        );
-      }
-    }
-  }
-};
+const bindsGeneration = (dispatch: DispatchRecipe): boolean =>
+  dispatch.bindings.some((entry) =>
+    entry.source.kind === "state" || entry.source.kind === "lengths"
+  );
 
 /**
  * 1 dispatch ぶんの bind group を組む。
@@ -487,7 +481,7 @@ type StepSlots = {
  * slot は「run の間ずっと GPU に存在する中間バッファ 1 本」で、RunArena が run ごとに
  * createBuffer していた実体をそのまま Session 常駐へ移した形。
  */
-type PlanSlots = {
+export type PlanSlots = {
   /** slot ごとのバイト数（{@link toSizeClass} 済み — RunArena が実際に確保する大きさ）。 */
   readonly bytes: readonly number[];
   /** {@link StepRecipe} 列と同順・同長の割当。 */
@@ -509,9 +503,11 @@ type PlanSlots = {
  * 崩れ ②「別の値が同じ実体を掴んでよいか」の判断がアリーナと 2 実装に分かれる。
  *
  * MUST: 純関数（GPU 資源を作らず、レシピも変更しない）。
+ * NOTE: state スロットと論理長 uniform は slot 表に**現れない**（ADR 0066 決定 5 — 所有者が
+ * GenerationContext でプール対象外）。ここが見るのは出力と一時の確保仕様だけなので、束縛の
+ * 種別を判別する必要が無い = generation を伴うレシピ列もそのまま通る。
  */
 export const derivePlanSlots = (recipes: readonly StepRecipe[]): PlanSlots => {
-  assertStateFree(recipes, "slot 導出");
   const bytes: number[] = [];
   // サイズクラス → 空き slot（LIFO — RunArena.#pool と同じ形）。
   const pool = new Map<number, number[]>();
@@ -591,13 +587,29 @@ const resolveSlot = (slot: number | undefined, buffers: readonly GPUBuffer[]): G
   return buffer;
 };
 
+/**
+ * 焼き込み済み bind group の表。外側は {@link StepRecipe} 列と、内側は
+ * {@link StepRecipe.dispatches} と同順・同長。
+ *
+ * `undefined` は「この位置は**もう一方の所有者**が焼く」印（ADR 0066 決定 5 の焼き込み単位の
+ * 分離）。Session 側の表と context 側の表は {@link bindsGeneration} で相補になり、実行
+ * （{@link executeBakedPlan}）が 1 位置ずつ埋め合わせる。
+ */
+export type BakedGroups = readonly (readonly (GPUBindGroup | undefined)[])[];
+
+/** 焼き込みに要る Session 側の実体（両方の焼き込みが同じ束を受ける）。 */
+type BakeContext = {
+  readonly device: GPUDevice;
+  /** slot 添字 → 常駐バッファ（{@link PlanSlots.bytes} と同順・同長）。 */
+  readonly buffers: readonly GPUBuffer[];
+  /** グラフ入力名 → backing 所有の常駐バッファ。 */
+  readonly inputs: ReadonlyMap<string, GPUBuffer>;
+};
+
 /** 焼き込み済みの slot backing 実行資材（{@link bakeBindGroups}）。 */
 type BakedPlan = {
-  /**
-   * 全ステップ × 全 dispatch の bind group。外側は {@link StepRecipe} 列と、内側は
-   * {@link StepRecipe.dispatches} と同順・同長。
-   */
-  readonly groups: readonly (readonly GPUBindGroup[])[];
+  /** Session 所有の実体だけを束ねる dispatch の bind group（残りは `undefined` の穴）。 */
+  readonly groups: BakedGroups;
   /**
    * 全ステップを展開し終えた時点の値名 → 実体（アリーナ経路の run 末尾の `env` と同じもの）。
    * グラフ出力の読み戻し先を構築時に確定するのに使う。
@@ -606,35 +618,27 @@ type BakedPlan = {
 };
 
 /**
- * slot backing の bind group を焼き込む（構築時に 1 度だけ）。
- *
- * 焼き込めるのは束縛先が run を跨いで固定だから: params / 重み / per-channel scale は
- * `resident` の直参照、ノード出力・一時は {@link PlanSlots} の常駐 slot、グラフ入力は backing が
- * 所有する常駐バッファ（`inputs`）。run ごとに変わるのは**入力バッファの中身だけ**で、
- * bind group が指す実体は 1 つも動かない。
+ * 焼き込みの**唯一の実装**（Session 側 / context 側はどちらもここを通る）。`select` が真の
+ * dispatch だけ bind group を組み、残りは `undefined` の穴で返す。
  *
  * MUST: 値名 → 実体の写像はアリーナ経路（{@link executeStepRecipe}）と**同じ順で**展開する
  * — 出力を先に env へ載せてから当該ステップの dispatch を解決する順序が崩れると、出力を
  * 自分の入力にも束ねるステップだけが別の実体を掴む。出力が複数ある形では**出力 slot 昇順**まで
  * 揃える（{@link StepRecipe.outputs} の順序規約）。
- * MUST: 呼ぶのは run の errorScope 区間の内側だけ（createBindGroup の validation 失敗は
- * 例外にならない）。
+ * MUST: 2 つの焼き込みで歩き方を分けない。context 側だけ別実装にすると、同じ dispatch の同じ
+ * 束縛が「Session 側が焼いた group」と「context 側が焼いた group」で別の実体を指しうる
+ * （どちらも layout は満たすので validation は通り、値だけが静かに変わる）。
  */
-export const bakeBindGroups = (
+const bakeGroups = (
   recipes: readonly StepRecipe[],
   slots: PlanSlots,
-  context: {
-    readonly device: GPUDevice;
-    /** slot 添字 → 常駐バッファ（{@link PlanSlots.bytes} と同順・同長）。 */
-    readonly buffers: readonly GPUBuffer[];
-    /** グラフ入力名 → backing 所有の常駐バッファ。 */
-    readonly inputs: ReadonlyMap<string, GPUBuffer>;
-  },
+  context: BakeContext,
+  select: (dispatch: DispatchRecipe) => boolean,
+  generation: GenerationEncoding | undefined,
 ): BakedPlan => {
-  assertStateFree(recipes, "bind group の焼き込み");
   const { device, buffers, inputs } = context;
   const values = new Map<string, GPUBuffer>(inputs);
-  const groups: (readonly GPUBindGroup[])[] = [];
+  const groups: (readonly (GPUBindGroup | undefined)[])[] = [];
   recipes.forEach((recipe, index) => {
     const step = slots.steps[index];
     recipe.outputs.forEach((output, slot) => {
@@ -648,15 +652,73 @@ export const bakeBindGroups = (
     const temps = step.temps.map((slot) => resolveSlot(slot, buffers));
     groups.push(
       recipe.dispatches.map((dispatch) =>
-        createBindGroup(
-          device,
-          dispatch,
-          (source) => resolveBinding(source, values, temps, undefined),
-        )
+        select(dispatch)
+          ? createBindGroup(
+            device,
+            dispatch,
+            (source) => resolveBinding(source, values, temps, generation),
+          )
+          : undefined
       ),
     );
   });
   return { groups, values };
+};
+
+/**
+ * slot backing の bind group を焼き込む（構築時に 1 度だけ）。
+ *
+ * 焼き込めるのは束縛先が run を跨いで固定だから: params / 重み / per-channel scale は
+ * `resident` の直参照、ノード出力・一時は {@link PlanSlots} の常駐 slot、グラフ入力は backing が
+ * 所有する常駐バッファ（`inputs`）。run ごとに変わるのは**入力バッファの中身だけ**で、
+ * bind group が指す実体は 1 つも動かない。
+ *
+ * MUST: context 所有の実体を束ねる dispatch は**焼かない**（ADR 0066 決定 5）。backing は
+ * Session 所有・容量 1 で、どの GenerationContext と組むかは run のたびに変わるため、ここで
+ * 焼くと切替後も前の context の KV を束ねたまま回る。その位置は
+ * {@link bakeGenerationBindGroups} が埋める。
+ * MUST: 呼ぶのは run の errorScope 区間の内側だけ（createBindGroup の validation 失敗は
+ * 例外にならない）。
+ */
+export const bakeBindGroups = (
+  recipes: readonly StepRecipe[],
+  slots: PlanSlots,
+  context: BakeContext,
+): BakedPlan =>
+  bakeGroups(recipes, slots, context, (dispatch) => !bindsGeneration(dispatch), undefined);
+
+/**
+ * generation run の **context 側**の bind group を焼き込む（ADR 0066 決定 5 の分離焼き込み）。
+ *
+ * 束ねる相手は 2 種類混ざる: backing 所有の実体（slot / 入力 / 重み — {@link bakeBindGroups} と
+ * **同じ値解決**で再現する）と、context 所有の実体（state スロット・論理長 uniform）。したがって
+ * この束の寿命は **(backing, context) の組**で、どちらが入れ替わっても焼き直しが要る
+ * （backing 側は世代識別子で検出する — executor の `#generationGroups`）。
+ *
+ * MUST: 呼ぶのは run の errorScope 区間の内側だけ（{@link bakeBindGroups} と同じ理由）。
+ */
+export const bakeGenerationBindGroups = (
+  recipes: readonly StepRecipe[],
+  slots: PlanSlots,
+  context: BakeContext & { readonly generation: GenerationEncoding },
+): BakedGroups => bakeGroups(recipes, slots, context, bindsGeneration, context.generation).groups;
+
+/**
+ * generation run の焼き込み実行面（{@link executeBakedPlan} の第 4 引数）。
+ */
+export type BakedGeneration = {
+  /** context 側で焼いた bind group（Session 側の `undefined` の穴を埋める）。 */
+  readonly groups: BakedGroups;
+  /** 論理長と context 所有の実体（dispatch 数の算出はこの値から）。 */
+  readonly encoding: GenerationEncoding;
+  /**
+   * ステップの dispatch を積む**前**に呼ぶ（poison 判定のスナップショット点 — ADR 0066 追記 3）。
+   *
+   * MUST: 呼ぶ位置はアリーナ経路（{@link executeStepRecipe} の呼び口）と同じ「各ステップの直前」。
+   * ずらすと、同じグラフの同じ失敗が経路（ミス run / ヒット run）によって poison したりしなかったり
+   * する。
+   */
+  onStep(recipe: StepRecipe): void;
 };
 
 /**
@@ -666,20 +728,32 @@ export const bakeBindGroups = (
  * MUST: 積むコマンド列は {@link executeStepRecipe} と**同一**（bind 先の実体が run を跨いで
  * 同じになるだけ）。前 run の残骸が slot に残っていても正しいのは full-write（ADR 0014 —
  * 全ノードが出力の全バイトを書く）が根拠で、プール再利用の安全性と同じ 1 本の不変条件。
+ * MUST: 埋まらない位置は fail loudly（generation 面を渡さずに state を束ねる dispatch へ来た形）。
+ * 通すと `undefined` を `setBindGroup` へ渡して真因から遠い診断になる。
  */
 export const executeBakedPlan = (
   recipes: readonly StepRecipe[],
-  groups: readonly (readonly GPUBindGroup[])[],
+  groups: BakedGroups,
   scheduler: SubmitScheduler,
+  generation?: BakedGeneration,
 ): void => {
   recipes.forEach((recipe, index) => {
+    generation?.onStep(recipe);
     const stepGroups = groups[index];
+    const contextGroups = generation?.groups[index];
     recipe.dispatches.forEach((dispatch, id) => {
-      // 焼き込み経路に来るレシピは `assertStateFree` を通っている（= 静的な 3 つ組だけ）。
+      const bindGroup = stepGroups[id] ?? contextGroups?.[id];
+      if (bindGroup === undefined) {
+        throw new ExecutionError(
+          `dispatch '${dispatch.key}': GenerationContext 所有の実体を束ねる bind group が` +
+            "焼かれていない（ADR 0066 決定 5 の分離焼き込み — context 側の焼き込みを経ずに" +
+            "焼き込み経路へ来た）",
+        );
+      }
       scheduler.dispatch(
         dispatch.pipeline,
-        stepGroups[id],
-        resolveWorkgroups(dispatch, undefined),
+        bindGroup,
+        resolveWorkgroups(dispatch, generation?.encoding),
         dispatch.key,
       );
     });

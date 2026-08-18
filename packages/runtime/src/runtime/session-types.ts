@@ -280,11 +280,13 @@ export type StateBackingStats = {
   /** Session の生存中に生成した context の累計本数（現存数ではなく累計）。 */
   readonly contextCount: number;
   /**
-   * state を含む bind group を焼き直した累計回数。
+   * state を含む bind group を焼き直した累計回数（ADR 0066 決定 5 の焼き込み単位の分離）。
    *
-   * NOTE: 波 D-3 の時点でも **0 固定**。generation run は焼き込みを 1 度も通さない
-   * （state を束ねる bind group は run ごとに組む — アリーナ経路固定）ので、焼き直しという
-   * 事象がまだ存在しない。ADR 0066 決定 5 の「焼き込み単位の分離」を実装する波 D-4 で埋まる。
+   * 焼き直しが起きるのは **(context, backing 実体) の組が変わったとき**だけ — 初回・context の
+   * 切替・backing の再構築（別 signature への切替 / LRU 追い出し / 構築失敗からの復帰）。
+   * MUST: **run 数に比例して伸びていないこと**が、決定 5 の分離が効いていることの唯一の観測点。
+   * 比例して伸びる形は「切替のたびに全部組み直す」状態そのもので、値は正しいまま decode の
+   * ホットパスに createBindGroup が戻る（例外も警告も出ない）。
    */
   readonly rebindCount: number;
 };

@@ -76,11 +76,14 @@ import {
 import {
   assertGenerationRun,
   bakeBindGroups,
+  type BakedGroups,
+  bakeGenerationBindGroups,
   derivePlanSlots,
   executeBakedPlan,
   executeStepRecipe,
   type GenerationEncoding,
   type GenerationLimits,
+  type PlanSlots,
   type StepRecipe,
 } from "./recipe.ts";
 import { RecipeBuilder } from "./recipe-builder.ts";
@@ -204,6 +207,26 @@ const assertResidentUsable = (
     );
   }
 };
+
+/**
+ * context 所有の実体と論理長を run 1 回ぶんの束にする（{@link GenerationEncoding}）。
+ *
+ * MUST: 論理長は**呼び出し側が 1 度読んだ値**を受け取る（ここで `context.pastLength` を読み直さ
+ * ない）。uniform へ書く値・dispatch 数の算出・容量の検査が同じ 1 つの値から出ることが、
+ * 「GPU が走査する範囲」と「ホストが撃った workgroup 数」の一致の根拠。
+ */
+const generationEncoding = (
+  context: GenerationContext,
+  past: number,
+  query: number,
+): GenerationEncoding => ({
+  slots: new Map(
+    [...context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.buffer]),
+  ),
+  lengths: context[RUNTIME_INTERNAL].lengths,
+  past,
+  query,
+});
 
 /**
  * 進行中 run の常駐入力束縛を全て返す（{@link ResidentTensor.dispose} の予約を解く）。
@@ -355,6 +378,15 @@ type ActiveBacking = {
   /** この backing が属する導出済み計画のキー（{@link Session.#preparedKey}）。 */
   readonly key: string;
   /**
+   * **この backing 実体の世代識別子**（`Session.#backingBuilds` の採番 — 単調増加で再利用しない）。
+   *
+   * MUST: 同じ `key` で作り直した backing は必ず別の値になる。GenerationContext が焼いた
+   * bind group（ADR 0066 決定 5）はこの実体の slot / 入力バッファを掴んでいるので、識別子を
+   * key で代用すると「退役して作り直した backing」の切替が検出できず、破棄済みバッファを
+   * 束ねた古い group がそのまま dispatch される（例外も警告も出ない）。
+   */
+  readonly build: number;
+  /**
    * transient slot の常駐バイト数（**入力バッファは含まない**）。
    * MUST: この定義を変えない — 「slot 表の総バイト数 = 非 backed run のプール確保」という
    * footprint 不変の門（tests/gpu_plan_backing_test.ts）がこの値そのもので、入力ぶんを混ぜると
@@ -372,8 +404,19 @@ type ActiveBacking = {
    * （参照中の {@link ResidentTensor.dispose} を fail loudly にする根拠）。
    */
   readonly residents: readonly ResidentTensor[];
-  /** 焼き込み済み bind group（{@link bakeBindGroups}）。backed run はこれを dispatch するだけ。 */
-  readonly groups: readonly (readonly GPUBindGroup[])[];
+  /**
+   * 焼き込み済み bind group（{@link bakeBindGroups}）。backed run はこれを dispatch するだけ。
+   * state を束ねる位置は `undefined` の穴で、埋めるのは context 側の焼き込み（決定 5）。
+   */
+  readonly groups: BakedGroups;
+  /**
+   * slot 表と slot 添字 → 常駐バッファ。**context 側の焼き込みが同じ値解決を再現する**ための
+   * 材料で、Session 側の焼き込み（構築時 1 度）にはもう要らない。
+   * MUST: 焼き込みに使ったものをそのまま持つ（作り直して渡すと、2 つの焼き込みが別々の実体を
+   * 束ねうる）。
+   */
+  readonly slots: PlanSlots;
+  readonly buffers: readonly GPUBuffer[];
   /** グラフ出力名 → 実体（読み戻し先 — 構築時に確定。backed run は env を組まない）。 */
   readonly outputs: ReadonlyMap<string, GPUBuffer>;
   /**
@@ -490,6 +533,14 @@ export class Session {
    */
   readonly #contexts = new Set<GenerationContext>();
   #contextCount = 0;
+  /**
+   * state を含む bind group を焼き直した累計回数（診断 `stateBacking.rebindCount`）。
+   *
+   * MUST: Session 累計で数える（context ごとに分けない）。観測したいのは「context を交互に
+   * 使うと切替のたびに焼き直しが走る」形そのもので、それは Session の run 列に対する回数で
+   * しか見えない。
+   */
+  #stateRebinds = 0;
   /**
    * 実行中 / 待機中の run と dispose の直列化チェーン。決着（成功・失敗）だけを次に渡すため
    * 自身は決して reject しない。
@@ -835,9 +886,7 @@ export class Session {
         residentBytes: [...this.#contexts]
           .reduce((total, context) => total + context[RUNTIME_INTERNAL].bytes, 0),
         contextCount: this.#contextCount,
-        // 波 D-4（ADR 0066 決定 5 の焼き込み単位の分離）で埋まる。generation run が bind group を
-        // run ごとに組む本波では「焼き直し」という事象が存在しないので 0 が正しい値。
-        rebindCount: 0,
+        rebindCount: this.#stateRebinds,
       },
     };
   }
@@ -875,14 +924,16 @@ export class Session {
     // uniform へ書く値・dispatch 数の算出・容量の検査が同じ 1 つの値から出ることが、
     // 「GPU が走査する範囲」と「ホストが撃った workgroup 数」の一致の根拠になる。
     const pastLength = generation?.context.pastLength ?? 0;
-    const encoding: GenerationEncoding | undefined = generation === undefined ? undefined : {
-      slots: new Map(
-        [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.buffer]),
-      ),
-      lengths: generation.context[RUNTIME_INTERNAL].lengths,
-      past: pastLength,
-      query: generation.queryLength,
+    /**
+     * generation run の context 側の面。**context と encoding を 1 つの変数に束ねる**のは、
+     * 焼き込み経路（{@link Session.#generationGroups}）が両方を同時に要るため — 別々に持つと
+     * 「片方だけ undefined」という起こり得ない組を型で排除できず、握り潰しの分岐が生える。
+     */
+    const generationFace = generation === undefined ? undefined : {
+      context: generation.context,
+      encoding: generationEncoding(generation.context, pastLength, generation.queryLength),
     };
+    const encoding = generationFace?.encoding;
     /**
      * 最初の state 書き dispatch を積んだ時点の submit カウンタ（undefined = まだ積んでいない）。
      * 失敗時の poison 判定（ADR 0066 追記 3）はこの値との比較 1 本で決まる。
@@ -975,36 +1026,31 @@ export class Session {
             if ("recipes" in derived) {
               recipes = derived.recipes;
               limits = derived.generation;
-              if (generation === undefined) {
-                // MUST: 入力の検査（値依存 — 毎 run）は backing 構築より前。ここで落ちる run に
-                // slot（DiT で ~GiB 規模）の構築を払わせない。
-                const data = graph.inputs.map((spec) =>
-                  this.#checkInput(spec.name, inputs[spec.name], shapes)
-                );
-                // MUST: backing を作るのは**ヒット run だけ**。単発 run（1 回しか走らない
-                // ワークロード）に slot メモリを払わせないための唯一の門で、ミス run の挙動と
-                // ArenaStats はこれで完全に据え置かれる。
-                const activated = this.#activateBacking(
-                  preparedKey,
-                  recipes,
-                  shapes,
-                  residentInputs,
-                );
-                backing = activated.backing;
-                builtBacking = activated.built;
-                graph.inputs.forEach((spec, index) => {
-                  // 常駐入力は writeBuffer を出さない（実体がそのまま焼き込まれている）。
-                  const values = data[index];
-                  if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
-                });
-              } else {
-                // DECIDED: **generation run は backing に載せない**（ADR 0066 決定 5 — 分離焼き込みは
-                // 波 D-4）。context 所有の実体を Session 所有の bind group へ焼き込むと、context を
-                // 切り替えた瞬間に「前の context の KV を束ねたまま」回る沈黙 stale 読みになる。
-                // ヒット run もアリーナ経路で走り、**飛ぶのはレシピ再導出だけ**（ADR 0066 受入
-                // 条件③の「レシピ再導出ゼロ」はここが実体）。
-                this.#bindInputs(inputs, shapes, arena, env, boundResidents);
-              }
+              // MUST: 入力の検査（値依存 — 毎 run）は backing 構築より前。ここで落ちる run に
+              // slot（DiT で ~GiB 規模）の構築を払わせない。
+              const data = graph.inputs.map((spec) =>
+                this.#checkInput(spec.name, inputs[spec.name], shapes)
+              );
+              // MUST: backing を作るのは**ヒット run だけ**。単発 run（1 回しか走らない
+              // ワークロード）に slot メモリを払わせないための唯一の門で、ミス run の挙動と
+              // ArenaStats はこれで完全に据え置かれる。
+              // MUST: generation run も**同じ backing に載る**（ADR 0066 決定 5）。載る相手は
+              // Session 所有の実体を束ねる dispatch だけで、context 所有の実体を束ねる dispatch は
+              // 焼かれずに残り、下の `#generationGroups` が context ごとに埋める。分けているから
+              // こそ、backing は context を切り替えても作り直さずに済む。
+              const activated = this.#activateBacking(
+                preparedKey,
+                recipes,
+                shapes,
+                residentInputs,
+              );
+              backing = activated.backing;
+              builtBacking = activated.built;
+              graph.inputs.forEach((spec, index) => {
+                // 常駐入力は writeBuffer を出さない（実体がそのまま焼き込まれている）。
+                const values = data[index];
+                if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
+              });
             } else {
               this.#bindInputs(inputs, shapes, arena, env, boundResidents);
               const built = await this.#recipeBuilder.buildRecipes(derived.steps, stateShapes);
@@ -1031,25 +1077,40 @@ export class Session {
               assertGenerationRun(limits, pastLength, generation.queryLength);
               generation.context[RUNTIME_INTERNAL].writeLengths(generation.queryLength);
             }
+            // MUST: スナップショットは書き dispatch を**積む前**（`SubmitScheduler.dispatch` は
+            // チャンク上限・時間予算で run の途中に自動 submit する — src/gpu/submit.ts）。
+            // 後で取ると、積んだ瞬間の自動 submit を数え損ねて「submit したのに poison
+            // しない」= 沈黙破壊になる。逆向きの誤差（積む前の時間予算 submit を数えて
+            // しまう過剰 poison）は新しい context で復旧できる安全側。
+            // MUST: 2 経路（アリーナ / 焼き込み）で**同じ位置**から呼ぶ。ずらすと同じグラフの
+            // 同じ失敗が、ミス run では poison しヒット run ではしない（またはその逆）になる。
+            const noteStateWrite = (recipe: StepRecipe): void => {
+              if (recipe.writesState && stateWriteSubmits === undefined) {
+                stateWriteSubmits = scheduler.submitCount;
+              }
+            };
             if (backing === undefined) {
               const run = { device, scheduler, arena, env, generation: encoding };
               for (const recipe of recipes) {
-                // MUST: スナップショットは書き dispatch を**積む前**（`SubmitScheduler.dispatch` は
-                // チャンク上限・時間予算で run の途中に自動 submit する — src/gpu/submit.ts）。
-                // 後で取ると、積んだ瞬間の自動 submit を数え損ねて「submit したのに poison
-                // しない」= 沈黙破壊になる。逆向きの誤差（積む前の時間予算 submit を数えて
-                // しまう過剰 poison）は新しい context で復旧できる安全側。
-                if (recipe.writesState && stateWriteSubmits === undefined) {
-                  stateWriteSubmits = scheduler.submitCount;
-                }
+                noteStateWrite(recipe);
                 executeStepRecipe(recipe, run);
               }
               arena.assertDrained();
             } else {
               // slot 経路。積むコマンド列はアリーナ経路と同一で、bind 先の実体が run を跨いで
               // 固定されるだけ（前 run の残骸が残っていてよい根拠は full-write — ADR 0014）。
-              // bind group は構築時に焼き込み済みなので、ここは dispatch を積むだけ。
-              executeBakedPlan(recipes, backing.groups, scheduler);
+              // bind group は構築時に焼き込み済みなので、ここは dispatch を積むだけ
+              // （generation run は context 側の束だけを run ごとに照合する — 決定 5）。
+              executeBakedPlan(
+                recipes,
+                backing.groups,
+                scheduler,
+                generationFace === undefined ? undefined : {
+                  groups: this.#generationGroups(generationFace, backing, recipes),
+                  encoding: generationFace.encoding,
+                  onStep: noteStateWrite,
+                },
+              );
             }
 
             if (singleFence) {
@@ -1214,7 +1275,7 @@ export class Session {
       options.bindings ?? {},
       residentNames(residentInputs),
     );
-    // MUST: `enqueue` は generation 面を持たない（波 D-4 / D-5）。state 参照グラフは
+    // MUST: `enqueue` は generation 面を持たない（波 D-5）。state 参照グラフは
     // `stateShapes` 無しの導出で fail loudly になる（黙って state 抜きで走らない）。
     const preparedKey = this.#preparedKey(resolved, residentInputs, undefined);
     const prepared = this.#takePrepared(preparedKey);
@@ -1403,7 +1464,8 @@ export class Session {
    * 切り替えるたびに計画・融合判定・レシピ導出と slot backing 構築が全滅する（decode の
    * ホットパスで毎シーケンス再導出になる）。常駐入力と逆の扱いになるのは、context 所有の実体
    * （state スロットと論理長 uniform）を Session 所有の bind group へ焼き込まないため — 分離の
-   * 代償として「state を含む bind group」だけを context 側で束ね直す（決定 5・実装は波 D-4）。
+   * 代償として「state を含む bind group」だけを context 側で束ね直す
+   * （{@link Session.#generationGroups}）。
    * この不変条件は tests/gpu_generation_context_test.ts が「context を 2 本作っても導出済み計画と
    * params キャッシュが増えない」形で門にしている。
    * MUST: 載せるのは**解決済みスロット容量**の側（ADR 0066 決定 3 の「鍵は容量」・追記 7）。
@@ -1542,12 +1604,19 @@ export class Session {
         resident[RUNTIME_INTERNAL].retainBaked();
         retained.push(resident);
       }
+      // 世代識別子は「作った順」の単調カウンタそのもの（診断の `buildCount` と同じ採番）。
+      // MUST: 識別子と累計を**同じ 1 つの式**から採る（別々に足すと、片方だけ通らない経路で
+      // 恒久的にずれて「作り直したのに同じ世代」になる）。
+      const build = this.#backingBuilds + 1;
       const backing: ActiveBacking = {
         key,
+        build,
         bytes: slots.bytes.reduce((total, size) => total + size, 0),
         inputs,
         residents,
         groups: baked.groups,
+        slots,
+        buffers,
         outputs,
         owned: new Set([...buffers, ...ownedInputs]),
         readable: new Set([
@@ -1556,7 +1625,7 @@ export class Session {
         ]),
       };
       this.#backing = backing;
-      this.#backingBuilds += 1;
+      this.#backingBuilds = build;
       return { backing, built: true };
     } catch (cause) {
       // MUST: 確保物は既存の破棄経路（`#retired` → `#destroyRetired`）へ載せるだけにする。
@@ -1568,6 +1637,44 @@ export class Session {
       for (const resident of retained) resident[RUNTIME_INTERNAL].releaseBaked();
       throw cause;
     }
+  }
+
+  /**
+   * generation run の **context 側** bind group を用意する（ADR 0066 決定 5 の分離焼き込み）。
+   *
+   * 束の寿命は **(context, backing 実体) の組**なので、判別は backing の世代識別子 1 つで足りる
+   * （context 側は自分のキャッシュしか見ない）。同一 context の連続 run は 0 回・context 切替と
+   * backing 再構築でだけ 1 回焼く形になり、その回数が診断 `stateBacking.rebindCount` になる。
+   *
+   * MUST: 「世代識別子の照合 → 焼き直し → dispatch」の順を**この 1 本に閉じる**。照合を経ずに
+   * キャッシュを読める口を別に作ると、退役した backing の実体を束ねた古い group で dispatch する
+   * 形が生まれる。退役した実体は**その run の後始末まで生きている**（`#retired` → flush 後の
+   * `#destroyRetired`）ので、古い束は別の計画の実体を束ねたまま validation を通り、**値だけが
+   * 静かに変わる**（照合を外した故障注入で実測 — 出力 64 要素が全て不一致・例外ゼロ）。
+   * MUST: 呼ぶのは run の errorScope 区間の内側だけ（createBindGroup の validation 失敗は
+   * 例外にならない）。
+   * NOTE: 束に載るのは `encoding` の**バッファだけ**（`past` / `query` は uniform の中身）。
+   * だから毎 run 論理長が変わっても束は無効にならず、焼き直しの条件は backing の世代だけになる。
+   */
+  #generationGroups(
+    face: { readonly context: GenerationContext; readonly encoding: GenerationEncoding },
+    backing: ActiveBacking,
+    recipes: readonly StepRecipe[],
+  ): BakedGroups {
+    const internals = face.context[RUNTIME_INTERNAL];
+    const cached = internals.bakedGroups(backing.build);
+    if (cached !== undefined) return cached;
+    const groups = bakeGenerationBindGroups(recipes, backing.slots, {
+      device: this.#state.gpu.device,
+      // MUST: backing が焼き込みに使ったものをそのまま渡す（同じ値解決の再現 —
+      // {@link bakeGenerationBindGroups}）。
+      buffers: backing.buffers,
+      inputs: backing.inputs,
+      generation: face.encoding,
+    });
+    internals.setBakedGroups(backing.build, groups);
+    this.#stateRebinds += 1;
+    return groups;
   }
 
   /**

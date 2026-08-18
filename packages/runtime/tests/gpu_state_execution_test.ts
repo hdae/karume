@@ -9,6 +9,13 @@
 //   ⑥queryLength の 3 拒否 / ⑦計画鍵に context が載らないこと / ⑧stateless 実行の拒否
 //   ⑨state を submit した run の失敗が context を poison すること
 //
+// 波 D-4（ADR 0066 決定 5 の焼き込み単位の分離）で足したのは次の 4 本:
+//
+//   ⑩ 切替 A/B（再導出ゼロ + backing 再構築ゼロ + 焼き直しは context ごと 1 度 + 取り違えゼロ）
+//   ⑪ backing が別 signature に入れ替わったときの復帰（世代識別子で焼き直す）
+//   ⑫ 故障注入（context 側の束を取り違えると parity が落ちる = ⑩ が空振りでない証明）
+//   ⑬ ①の backed 移行（3 run 目以降は slot backing で走り、移行点で値が変わらない）
+//
 // MUST: オラクルは**ホスト側でスロットを持ち回る**（`referenceStateAppend` の戻りを次 step の
 // `referenceStateAttention` へ食わせる）。1 step だけの突合では「append が書いた行を次の step が
 // 過去として読む」という結線そのものが検証されない。
@@ -27,6 +34,7 @@ import {
   type Tensor,
 } from "../src/runtime/executor.ts";
 import type { GenerationContext } from "../src/runtime/generation-context.ts";
+import type { BakedGroups } from "../src/runtime/recipe.ts";
 import { OpContractError } from "../src/ops.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import type { GraphJson } from "./helpers/format.ts";
@@ -281,11 +289,24 @@ Deno.test({
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
       assertEquals(context.pastLength, 7, "論理長は 4 → 5 → 6 → 7 と run の成功でだけ進む");
 
-      // MUST: generation run は backing に載らない（ADR 0066 決定 5 — 分離焼き込みは波 D-4）。
+      // 波 D-4: generation run も slot backing に載る（ADR 0066 決定 5 の分離焼き込み）。載るのは
+      // **Session 所有の実体を束ねる dispatch だけ**で、state を束ねる位置は context 側が焼く。
+      // decode 2 / 3 はその backed 経路で走っており、**アリーナ → backed の移行点で値が変わらない**
+      // ことは上の各 step の突合そのものが押さえている。
+      const diagnostics = session.diagnostics();
       assertEquals(
-        session.diagnostics().planBacking,
-        { residentBytes: 0, buildCount: 0 },
-        "generation run が slot backing を焼いている（context 跨ぎの stale 読みの入口）",
+        diagnostics.planBacking.buildCount,
+        1,
+        "同一鍵の連続 decode で backing を作り直している（切替スラッシング）",
+      );
+      assert(
+        diagnostics.planBacking.residentBytes > 0,
+        "generation run が backed 経路に載っていない（slot が常駐していない）",
+      );
+      assertEquals(
+        diagnostics.stateBacking.rebindCount,
+        1,
+        "同一 (context, backing) の連続 run で context 側 bind group を焼き直している",
       );
     } finally {
       await context.dispose();
@@ -640,6 +661,9 @@ Deno.test({
         true,
         "同容量の別 context が別鍵になっている",
       );
+      // ヒット run なので slot backing が立つ（generation run も backed — 波 D-4）。
+      assertEquals(session.diagnostics().planBacking.buildCount, 1);
+      assertEquals(session.diagnostics().stateBacking.rebindCount, 1, "second が 1 度焼く");
 
       // 容量が違えば別鍵（レシピは容量を params と S の確保サイズへ焼き込む）。
       await runStep(session, wider, SYMBOLIC, inputs, 1, 1);
@@ -648,9 +672,17 @@ Deno.test({
         false,
         "容量の違う context が同じレシピを使い回している",
       );
+      // MUST: ミス run は backing を作らない（単発 run に slot メモリを払わせない門）ので、
+      // 容量の違う context を挟んでも活性 backing は据え置き = 焼き直しも起きない。
+      assertEquals(session.diagnostics().planBacking.buildCount, 1, "ミス run が backing を作った");
+      assertEquals(session.diagnostics().stateBacking.rebindCount, 1);
+
       // 戻ると最初の鍵にまた当たる（LRU に両方載っている）。
       await runStep(session, first, SYMBOLIC, inputs, 1, 1);
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
+      // backing は同じ実体のまま（世代識別子が動かない）で、焼くのは first のぶん 1 度だけ。
+      assertEquals(session.diagnostics().planBacking.buildCount, 1);
+      assertEquals(session.diagnostics().stateBacking.rebindCount, 2, "first が 1 度焼く");
 
       // states 専用記号を run の bindings に書いた形は fail loudly（黙って受けて鍵だけ割れる
       // 形にしない — 同じ計画が別鍵で重複導出される沈黙劣化）。
@@ -693,7 +725,10 @@ Deno.test({
   },
 });
 
-/** 内部面（論理長の進行を直に駆動する — 汚染の前提を作るためだけに使う）。 */
+/**
+ * 内部面（論理長の進行を直に駆動する / 焼き込み束を覗く）。**故障注入と前提づくり専用**で、
+ * 通常の結線は全て `Session.run` 越しに見る。
+ */
 const internals = (context: GenerationContext) => context[RUNTIME_INTERNAL];
 
 /**
@@ -736,6 +771,171 @@ Deno.test({
       );
     } finally {
       await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **切替 A/B**（ADR 0066 受入条件③の完成形 — 決定 5 の焼き込み単位の分離）。
+ *
+ * 同じ Session・同じ容量の context 2 本を交互に decode する。分離が効いていれば同時に 3 つが
+ * 成り立つ: ①レシピ再導出ゼロ（鍵に context が載らない）②backing 再構築ゼロ（Session 所有の
+ * 焼き込みは context に依らない）③stale 読みゼロ（state を束ねる bind group は context ごと）。
+ *
+ * MUST: 入力の salt を context ごとに変える — KV の取り違えは例外を出さず**値にしか出ない**ので、
+ * 同じ入力を配ると鎖の誤りが自己相殺しうる。
+ */
+Deno.test({
+  name: "context を交互に切り替えても再導出・backing 再構築ゼロで KV を取り違えない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    const a = await session.createGenerationContext({ chunkLength: 1 });
+    const b = await session.createGenerationContext({ chunkLength: 1 });
+    const stateA = newOracle(FULL, 8);
+    const stateB = newOracle(FULL, 8);
+    try {
+      // 導出が走るのは M=1 の 1 本目だけ。以後は全て同じ鍵に当たる。
+      await assertStep(session, a, FULL, 8, stateA, 1, 1, 0, "A 初回");
+      assertEquals(session.diagnostics().lastRunPrepared?.hit, false, "1 本目は導出 run");
+
+      for (let step = 0; step < 3; step += 1) {
+        await assertStep(session, b, FULL, 8, stateB, 1, 1, 301 + step * 7, `B decode ${step}`);
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          true,
+          `B decode ${step}: context 切替で再導出が起きた（鍵に context が載っている）`,
+        );
+        await assertStep(session, a, FULL, 8, stateA, 1, 1, 401 + step * 7, `A decode ${step}`);
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          true,
+          `A decode ${step}: context 切替で再導出が起きた`,
+        );
+      }
+
+      const diagnostics = session.diagnostics();
+      assertEquals(
+        diagnostics.planBacking.buildCount,
+        1,
+        "context 切替が slot backing を作り直している（決定 5 が避けた全再構築スラッシング）",
+      );
+      // 焼き直しは **context ごとに 1 度**きり。束が有効なのは backing 実体に対してなので、
+      // 切替では無効にならない（切替のたびに増える形は run 数に比例する再構築の入り口）。
+      assertEquals(
+        diagnostics.stateBacking.rebindCount,
+        2,
+        "context 側 bind group の焼き直しが context ごと 1 度で収まっていない",
+      );
+      assertEquals(diagnostics.stateBacking.contextCount, 2);
+      assertEquals(a.pastLength, 4);
+      assertEquals(b.pastLength, 3);
+    } finally {
+      for (const context of [a, b]) await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * backing が**別 signature に入れ替わった**後の復帰（ADR 0066 決定 5 の世代識別子）。
+ *
+ * M=4（prefill 形）と M=1（decode 形）は別鍵なので、容量 1 の slot backing を奪い合う。退役した
+ * backing の slot / 入力バッファは run の後始末で `destroy()` されるため、context 側が古い束を
+ * 掴んだまま回れば**破棄済みバッファを束ねた dispatch**になる（値か例外のどちらかで必ず壊れる）。
+ * 焼き直しが backing の再構築に追随していることを、値の正しさと回数の両方で押さえる。
+ */
+Deno.test({
+  name: "backing の入れ替わりに追随して context 側 bind group を焼き直す（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    const state = newOracle(FULL, 8);
+    try {
+      // 2 つの鍵をそれぞれ導出させる（ここまでは全てミス run = backing 不使用）。
+      await assertStep(session, context, FULL, 8, state, 4, 1, 0, "M=4 初回（導出）");
+      await assertStep(session, context, FULL, 8, state, 1, 1, 11, "M=1 初回（導出）");
+      assertEquals(session.diagnostics().planBacking.buildCount, 0, "ミス run が backing を作った");
+
+      /** 各 run 決着時の `[backing 構築回数, 焼き直し回数]`。 */
+      const builds: [number, number][] = [];
+      for (const [rows, salt] of [[1, 23], [4, 31], [1, 43], [4, 53]] as const) {
+        await assertStep(session, context, FULL, 8, state, rows, 1, salt, `M=${rows} へ切替`);
+        assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "レシピは再導出しない");
+        const diagnostics = session.diagnostics();
+        builds.push([diagnostics.planBacking.buildCount, diagnostics.stateBacking.rebindCount]);
+      }
+      // 鍵が交互に変わるので backing は毎 run 作り直しになり、context 側も毎 run 焼き直す。
+      // MUST: 焼き直し回数が backing の構築回数に追随すること — 追随しないなら、退役した
+      // backing のバッファを束ねた束が使い回されている。
+      assertEquals(
+        builds,
+        [[1, 1], [2, 2], [3, 3], [4, 4]],
+        "backing の再構築に context 側の焼き直しが追随していない",
+      );
+      assertEquals(context.pastLength, 6);
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **故障注入** — 切替 A/B（上）が空振りでないことの実証。
+ *
+ * context B の焼き込み束を **A のもの**で差し替える = state を含む bind group を context 跨ぎで
+ * 共有した実装（波 D-3 の DECIDED が名指ししていた「前の context の KV を束ねたまま回る」形）を
+ * 再現する。A / B は同容量なのでバッファの大きさは 1 バイトも違わず、**validation は通って値だけが
+ * 静かに変わる** — この突合が落ちなければ、切替 A/B の parity は何も守っていない。
+ */
+Deno.test({
+  name: "context 側の束を取り違えると出力が前の context の KV を読む（故障注入・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    const a = await session.createGenerationContext({ chunkLength: 1 });
+    const b = await session.createGenerationContext({ chunkLength: 1 });
+    const stateA = newOracle(FULL, 8);
+    const stateB = newOracle(FULL, 8);
+    try {
+      // 焼き込みが起きるのはヒット run からなので、A を backed まで温めてから束を横取りする。
+      await assertStep(session, a, FULL, 8, stateA, 1, 1, 0, "A 初回（導出）");
+      const internalsA = internals(a);
+      const setBaked = internalsA.setBakedGroups;
+      let stolen: BakedGroups | undefined;
+      internalsA.setBakedGroups = (token, groups) => {
+        stolen = groups;
+        setBaked(token, groups);
+      };
+      await assertStep(session, a, FULL, 8, stateA, 1, 1, 13, "A backed");
+      assert(stolen !== undefined, "A の context 側 bind group が焼かれていない（注入が空振り）");
+
+      // 注入: B は自分の束の代わりに A の束（A の KV スロットと A の論理長 uniform）を使う。
+      internals(b).bakedGroups = () => stolen;
+      const inputs = stepInputs(FULL, 1, 77);
+      const actual = await runStep(session, b, FULL, inputs, 1, 1);
+      const expected = advanceOracle(FULL, 8, stateB, inputs, 1, 1);
+      const report = compareTensors(
+        { dtype: "f32", data: actual },
+        { dtype: "f32", data: expected },
+        STATE_TOLERANCE,
+      );
+      assertEquals(
+        report.pass,
+        false,
+        "A の束で走った B の run が B のオラクルと一致した（切替 A/B の突合が空振りしている）",
+      );
+    } finally {
+      for (const context of [a, b]) await context.dispose();
       await session.dispose();
       gpu.destroy();
     }
