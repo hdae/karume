@@ -53,6 +53,8 @@ CORE_MODULES: tuple[str, ...] = (
     "custom_ops",
     # 段 2 で Anima の patch 層から回収したモデル非依存の export 検証ヘルパ。
     "rope",
+    # states 形への IR 手術（ADR 0067）。decode 台本が使うがモデル知識は持たない。
+    "states",
     # 段 5 で純化した組み立てエンジンとカード描画・CLI（family 知識も repo topology も無い）。
     "dist",
     "modelcard",
