@@ -135,7 +135,8 @@ export type StepRecipe = {
    *
    * MUST: **確保 → retain → env 登録 → 定義ぶんの解放を、この列の昇順で**行う。順序を共有する
    * のは 4 箇所 — 実行（{@link executeStepRecipe}）・slot 導出（{@link derivePlanSlots}）・
-   * 焼き込み（{@link bakeBindGroups}）・列の組み立て（recipe-builder の `#buildStep`）。1 箇所でも
+   * 焼き込み（実体は `bakeGroups` 1 本 — 入口は {@link bakeBindGroups} /
+   * {@link bakeGenerationBindGroups}）・列の組み立て（recipe-builder の `#buildStep`）。1 箇所でも
    * 順序が割れると例外は出ず、プール再利用の相手（= slot の本数と総バイト数、別名判定）だけが
    * 実行と導出で食い違う。
    */

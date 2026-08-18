@@ -630,3 +630,19 @@ ISA で gemm / conv の kernel を出し分けるため、計算結果の最終 
 ±1〜2 ulp）。CI では io のバイト突合を明示 SKIP し、model（グラフ + 固定 seed の重み —
 torch の CPU RNG はクロスマシンで決定的）のバイト突合だけを要求する。golden を消費する
 Deno 側の実 GPU テストはもともと tolerance 判定なので影響しない。
+
+## states 形 attention は f32 経路のみ（数値変種と組めない）・sliding rewind 全拒否
+
+`states` 欄つき attention / `state_append`（ADR
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 / 5）の意図的な制約:
+
+- **`attentionCompute: 'i8a8' / 'f16'` × states 形は fail loudly**（別族カーネルは f32 のみ —
+  縮退せず拒否・ADR 0058 決定 3。opt-in の席は実需が出た時に ADR 0058 流儀で起こす）。
+  **`attentionScoreStorage: 'f16'` × states 形も同様**（S の格納は f32 のみ）。
+- **sliding スロットを 1 本でも含む GenerationContext の `rewind` は全拒否**（ADR
+  [0066](decisions/0066-generation-context-state-slots.md) 追記 2 — ring はエビクト後に物理配置と
+  論理範囲が一致せず、左詰め compaction を持たない。緩和は compaction 実装と対）。
+- **`enqueue` は generation 面を持たない**（state 参照グラフは導出で fail loudly）。decode
+  ループの enqueue 化は実需（波 E 以降）での判断。
+- state スロットの dtype は f32 のみ（f16 は席予約 — ADR 0066 追記 5）・複数シーケンス /
+  batch>1 の生成・paged KV は ADR 0066 決定 8 のスコープ外。

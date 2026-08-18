@@ -37,11 +37,14 @@ accepted（裁定 A〜C + Codex 6 巡収束）。**実装波の波割りは裁�
 波 D へ・topk exporter 側〈getitem 結線〉は sampling 実需まで先送り）** →
 **C = GenerationContext + states{}（済 2026-08-17 — `1d7bdbb` states{} パーサ・`(C-2)`
 GenerationContext = 第 5 寿命クラス + 可変 uniform + poison/rewind/device-loss + 診断席）**
-→ D = states 形 attention + state_append（0 本席 = ir.ts / verify.py の outs
-改訂と**shapes.py の本数検査前 `declared_outputs[0]` 参照の解消**も同時 — 第 2 巡レビュー
-指摘。**states 専用記号の束縛可能性も同時**〈ADR 0066 追記 7 — checkSymbolBindability を
-入力 ∪ states へ緩める〉。C-2 が残した結線点 = ActiveBacking 分離・sliding rewind 拒否・
-poison トリガ・full スロット実行時容量検査・uniform 固定束縛）→ E = decode 台本 +
+→ **D = states 形 attention + state_append（済 2026-08-18 — `5662c9a` 契約層 TS/Py〈0 本席・
+束縛点 2 つ・参照完全性・順序検査 5b〉・`52729d0` カーネル族 4 本〈両側述語・ring 読み書き
+同式・空行→厳密 0〉・`88d7021` 実行統合〈run 第 3 引数 generation・poison=submit カウンタ
+比較・行ブロック・fusion ガード・sliding rewind 全拒否〉・`485439e` states 専用記号の
+bindSymbols 免除・`22b5f64` 分離焼き込み〈ADR 0066 決定 5 = 世代識別子 + rebind 診断〉・
+`2d1cc60` 受入テスト群〈帯 mask 交差オラクル・0066 受入②・0067 受入⑤・容量非依存・
+KV 共有層〉。C-2 の結線点 5 件と 0 本席は全消化。**送り**: `enqueue` の generation 面は
+波 E 判断・L8 fake-device 注入面は保留継続）** → E = decode 台本 +
 greedy 検収 →
 F = w4（Phase 0 sweep は A 完了後から並行可）→ G = shard + admission → H = Gemma 4 E2B
 検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで
@@ -69,11 +72,14 @@ IR スキーマに予約する。実装は最初の実需モデルまで先送�
    fake-quant の Phase 0（format 候補 sweep — runtime を触らない）。
 3. **メモリ予算 / admission**: resident weights + 展開分 + KV + prepared backing + transients +
    staging の estimator + 診断（絶対保証ではない）。
-4. **decode 出口**: GPU `argmax`（greedy MVP）→ static-k `topk`。runtime の generic
-   multi-output（topk / LSTM h_n / router — IR スキーマは既に複数出力有効・executor 側が未実装）。
-5. **autoregressive attention**: causal / GQA / logical prefix length / KV state access /
-   mask 表現 / empty-row 意味論。**row-block matcher の portability 依存はここで正面解決**
-   （exact-match が唯一の 128MiB 級ポータビリティ経路である現状を op 側の席へ）。
+4. **decode 出口（済 — 波 B 2026-08-17）**: GPU `argmax`（`cbe093a`）+ static-k `topk`
+   （`50871e3`）。runtime の generic multi-output は列化 2 段（`3a31544` / `9a795a7`）で消化・
+   0 本席（effect op）は波 D `5662c9a` で入居。
+5. **autoregressive attention（済 — 波 A + 波 D 2026-08-18）**: causal / GQA / logical prefix
+   length / KV state access / empty-row 意味論を states 形（ADR 0067 決定 4〜7）で消化。
+   **row-block の portability は保存 attention 経路の行ブロック内蔵で正面解決**（`88d7021` —
+   matcher 依存は分解経路専用のまま）。mask は attrs 化でなく**述語計算**（両側 — 実体化
+   ゼロ）に裁定済み。
    **G3 = kv_heads > 1 の GQA は波 A で解決済み**（2026-08-17 — ADR 0067 決定 1〜3 実装・
    r=1 バイト同一・repeat_kv parity・GQA×i8a8 は fail loudly。実モデル検収 =
    `e2e_minicpm5_test.ts`〈logits tolerance + greedy + census〉）。

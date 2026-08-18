@@ -230,7 +230,9 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   束縛可能性検査は「入力 shape **∪** states shape のどこかに現れる」で、**states 専用記号
   （states にしか現れない記号）が `values{}` の宣言 shape に現れたら fail loudly** — 通常値の
   解決に効くのは入力由来の束縛だけなので、現れれば実行時に必ず束縛不能になる（宣言の時点で
-  落とす）。
+  落とす）。実行時も同じ分担: states 専用記号は `run` / `enqueue` の bindings では
+  **要求されず、渡したら fail loudly**（束縛点は `createGenerationContext` の 1 箇所 —
+  context が持つ容量との二重簿記を作らない）。
 - `dtype` は **`f32` のみ**。`f16` は**席の予約だけ**があり（ADR 0066 追記 5 — state 格納の
   低精度化は数値契約が変わるので ADR [0058](decisions/0058-numerics-opt-in-contract.md) 流儀の
   opt-in が要る）、宣言されたら「**未対応**」として fail loudly する（「語彙外」とは別の診断）。

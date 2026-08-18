@@ -318,6 +318,14 @@ index）/ 全 −inf 行も最小 index から k 本。**値の列は torch と�
 `aten.topk.default` ではなく **`operator.getitem`** なので、ハンドラだけ足しても道は開かない。
 現状の topk ノードは**ランタイム側の手書き IR / 将来の decode 台本**からのみ現れる。
 
+NOTE: 2026-08-18 `state_append` を**拡張原子層**（Core ATen 外）に追加し、`attention` に
+**states 形**（省略可能な `states` 欄 — 同一 op 名の契約拡張で欄の有無が形を判別）を足した。
+契約の正本は ADR [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 / 5。
+`state_append` は **aten に対応物が無い** effect op（**出力 0 本**の最初の入居者 — ADR 0068
+決定 1 の列化が 0 本席を受ける）で、torch.export の経路からは原理的に出ない
+（`NON_EMITTABLE_OPS` — 発行は decode グラフ台本の担当）。attention に内蔵しない理由・
+`window` attrs・nodes 配列順の効果順序は ADR 決定 5 / 5b が持つ。
+
 NOTE: 2026-08-13 に起票した層表の 2 穴（Core ATen 外・モデル由来の原子の行き場 /
 「容量・性能で非成立」の線引きの非等価）は、**2026-08-14 の入場門モデルへの改訂
 （[ADR 0059](decisions/0059-op-vocabulary-entry-doors.md)）で解消済み** — 要求元軸の廃止と

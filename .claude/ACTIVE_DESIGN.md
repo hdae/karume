@@ -24,9 +24,12 @@
   topk（多出力の最初の入居者・値列 = torch と数値同値・添字列 = 最小 index 規範〈ADR 0068
   追記 2〉・k ≤ 63 既定上限）。**波 C 済（2026-08-17）**: states{} パーサ（`1d7bdbb`）+
   GenerationContext（第 5 寿命クラス・可変 uniform・poison/rewind/device-loss・診断席・
-  計画鍵不変条件）。**次 = 波 D（states 形 attention + state_append — ADR 0067 決定 4〜7）**。
-  波 D 同時消化: 0 本席 / states 専用記号の束縛（ADR 0066 追記 7）/ C-2 の結線点
-  （ActiveBacking 分離・sliding rewind 拒否・poison トリガ・full 容量実行時検査）。
+  計画鍵不変条件）。**波 D 済（2026-08-18・7 コミット `5662c9a`..`2d1cc60`）**: states 形
+  attention + `state_append`（ADR 0067 決定 4〜7）— 契約層 TS/Py・カーネル族 4 本・実行統合
+  （`run` 第 3 引数 generation）・分離焼き込み（ADR 0066 決定 5）・受入テスト群（帯 mask
+  交差オラクル・0066 受入②・0067 受入⑤）。0 本席 / states 専用記号束縛 / C-2 結線点 5 件も
+  全消化。**次 = 波 E（decode 台本 + MiniCPM5 greedy 検収）**。送り: `enqueue` の generation
+  面は波 E 判断・L8 fake-device 注入面は保留継続。
 
 ## Open decisions
 
@@ -41,7 +44,8 @@
 - **融合 matcher は実測形 exact-match** — exporter の発行順・形が変わると黙って外れ、値は
   正しいまま性能だけ落ちる。観測 = `Diagnostics.lastRunFusions` +
   `assets_fusion_counts_test.ts`。**row-block だけは外れ方が性能でなく資源** — 128MiB 級
-  device で resource-limit failure に戻る（正面解決 = ADR 0067 決定 7・実装は波 D）。
+  device で resource-limit failure に戻る（**分解経路の matcher だけの話** — 保存 attention の
+  states 形は行ブロックを op 内蔵で持つ・ADR 0067 決定 7・波 D 済）。
 - **RoPE / SiLU 融合の丸め障壁（workgroup memory 往復）は実測依存** — バックエンド更新で
   PNG 門が割れたらまずここを疑う。
 - **`deno task verify` はリポ内に worktree を置くと worktree 側まで test を拾う** — worktree は

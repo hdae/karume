@@ -98,3 +98,12 @@ fail loudly だったこの形は正規の受理形になった（実測 =
   （model.py:429 — 空行の先頭を強制 True にするホスト側ロジック）は B=1 + 「参照ありなら
   マスク非空」の入力契約で第 0 層 patch、duration の masked_mean（caption 全 0 時の 0/0）は
   export 台本側で処置。
+
+## 追記（2026-08-18・対照 — states 形は空行が正規）
+
+決定 3 の「融合 attention へ全 −inf 行を与えるのは契約違反」は **states 形（ADR
+[0067](0067-autoregressive-attention-vocabulary.md) 決定 4 — `states` 欄つき attention）には
+適用されない**。states 形では padding 行が窓から落ちる空行が**正規に**出るため、行統計は
+「identity −inf + 空行は `(0, 0)` を書く」構成で空行 → 出力厳密 0 を構造的に保証する
+（決定 6 — 有限 sentinel での代用は MUST NOT）。2 つの契約は同一 op 名の別形として並立し、
+欄の有無が形を判別する。

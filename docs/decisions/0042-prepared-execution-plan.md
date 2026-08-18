@@ -113,3 +113,18 @@ createBindGroup 44.4ms/step（段 D）も **GPU 実行と完全に重畳して�
 timestep-only stage = 772/predict）が狙っていたホスト費用は重畳側にあり、GPU 側の利得も
 E ≈ 0.60% / timestep ≈ 0.12% しかない。この環境では**壁時計の利得はほぼゼロ**と結論できる
 （採否の裁定は research 側の記録とともにユーザーへ）。
+
+## 追記（2026-08-18・波 D — 焼き込み単位の分離と backing 世代識別子）
+
+ADR [0066](0066-generation-context-state-slots.md) 決定 5 の実装（`22b5f64`）で backing 節が
+次の 2 点の改訂を受けた（本文の機構は不変 — generation を伴わない run は 1 バイトも変わらない）:
+
+1. **焼き込みの単位は束ねる相手の所有者で分ける**: `bakeBindGroups` が焼くのは Session 所有の
+   実体だけを束ねる dispatch で、GenerationContext 所有の実体（state スロット・論理長 uniform）を
+   束ねる dispatch は **context 側**（`bakeGenerationBindGroups`）が (context, backing 実体) の
+   組ごとに焼く。判別は `bindsGeneration` の 1 本・歩きは `bakeGroups` の 1 本を両側で共有。
+2. **ActiveBacking は世代識別子（`build`）を持つ**: 同じ計画鍵で作り直した backing も必ず別値に
+   なる単調採番。context 側の束はこの識別子で照合してから使う MUST — **退役した backing の
+   バッファは当該 run の後始末（flush 後の destroy）まで生存する**ため、照合を欠いた古い束は
+   validation を通ったまま**値だけが静かに変わる**（波 D-4 の故障注入で実測: 出力全要素不一致・
+   例外ゼロ）。診断は `stateBacking.rebindCount`（run 数に比例しないことが分離の観測点）。
