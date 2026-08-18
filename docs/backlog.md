@@ -55,8 +55,9 @@ QK/PV 全数 :gqa・cachedPlans=2 安定〉・`1325546` docs・`e92bcbc` Codex �
 **設けない**〈limitations に理由 — token feedback の逐次律速でフェンス束ねの利得が
 立たない。speculative の実需で再訪〉・decode 系列の絶対位置上限 = RoPE 表 512 行
 〈series README〉）** →
-F = w4（Phase 0 sweep は A 完了後から並行可）→ G = shard + admission → H = Gemma 4 E2B
-検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで
+**F = w4（進行中 — Phase 0 済 2026-08-18: 既定 group 32 対称・裁定 B 実測確認 = ADR 0069
+追記・[research](research/2026-08-18-w4-fake-quant-sweep.md)。次 = Phase 1 の i4 格納実装）**
+→ G = shard + admission → H = Gemma 4 E2B 検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで
 先送り / 検収は固定 token id 列の parity（tokenizer・models パイプライン本格化は波外）。
 **以下の番号項目は実装波の作業台帳として残る（設計の正本は各 ADR）**。前提の宣言として **R2（shape 不変条件）を最初の
 ADR に含める**: 恒久不変条件は「静的物理格納・固定 rank・計画キャッシュの鍵は常に容量」まで —
@@ -78,7 +79,8 @@ IR スキーマに予約する。実装は最初の実需モデルまで先送�
    （1 要素 = 1 payload 要素の現契約を破る初の格納形）+ safetensors shard + 全量 ArrayBuffer
    保持の廃止（shard 単位 fetch → verify → upload → 解放）。ADR 0019 の「w4 再測しない」は
    **正面から supersede する reopen ADR が先**（旧測定の適用範囲を明示）→ その後 Python
-   fake-quant の Phase 0（format 候補 sweep — runtime を触らない）。
+   fake-quant の Phase 0（format 候補 sweep — runtime を触らない）。**reopen = ADR 0069 済・
+   Phase 0 済（2026-08-18 — 既定 group 32 対称・zero-point 欄なし確定）**。
 3. **メモリ予算 / admission**: resident weights + 展開分 + KV + prepared backing + transients +
    staging の estimator + 診断（絶対保証ではない）。
 4. **decode 出口（済 — 波 B 2026-08-17）**: GPU `argmax`（`cbe093a`）+ static-k `topk`

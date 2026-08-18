@@ -139,3 +139,23 @@ runtime を触らない **format 候補 sweep** を先行する: 検収モデル
 - 受入条件: ①既存 f32/f16/i8 資産の読み書き・全 sha 門無風 ②逆変換ビット一致門
   ③pack 順検出器（決定 4 の 3 点）④GPU dequant と CPU 展開のビット一致 ⑤診断
   （`residentCompressedBytes` に i4 + scale が正しく載る）。
+
+## 追記（2026-08-18・Phase 0 完了 — 既定 group_size と裁定 B の実測確定）
+
+決定 6 の sweep を実施した（実測の正本 =
+[research/2026-08-18-w4-fake-quant-sweep.md](../research/2026-08-18-w4-fake-quant-sweep.md)・
+台本 = `tools/export-recipes/minicpm5/sweep_w4.py`）。確定 2 点（2026-08-18 ユーザー裁定）:
+
+1. **既定 group_size = 32（対称）**。weight 相対 RMSE は 32 < 64 < 128 で単調、自由走行
+   greedy の保持は g32 対称だけが相対的に持つ（23/48 — 他構成は 3〜8/48）。サイズ差は
+   g128 比 +18%（bpw 5.0・2B 級 ~1.25GiB）で常駐可能化の目的を損なわない。group_size は
+   格納欄であり、サイズ優先の資産が個別に 64 / 128 を選ぶことは妨げない（受理集合は
+   決定 2 のまま = 2 冪かつ ≥ 16）。
+2. **裁定 B（zero-point 欄なし）を実測で確認**: 連続 zero-point という上界測定でも
+   weight 空間の改善（−11〜−15%）がモデル級の品質に乗らず、同幅の改善は group を 1 段
+   細かくするだけで得られる。決定 3 の予約 3 点は変更なし（将来の追加条件のために残す）。
+
+付随所見: w4 RTN は 1B 級 checkpoint で品質が明確に落ちる（teacher-forced 一致 31〜37/48）。
+これは実装の検収方法論（fake-quant 済み重みとの一致 — ADR 0006）には影響しないが、w4 の
+採用は品質と引き換えの選択であることが数値で立った。AWQ / GPTQ 級の重み調整は未測定
+（実需が立てば別 ADR）。
