@@ -68,6 +68,7 @@ import {
   eligibleCompressedInitializers,
   ExecutionError,
   planGraph,
+  statesOnlySymbols,
   type SymbolBindings,
   validateGraphContracts,
   weightChannelAxes,
@@ -1417,7 +1418,11 @@ export class Session {
     stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
   ): string {
     const graph = this.#state.model.graph;
-    const dims = graph.symbols.map((sym) => bindings[sym]).join(",");
+    // states 専用記号（KV 容量 `C` 等）は dims 節に**載せない** — bindSymbols が要求も受理も
+    // しない（ADR 0066 追記 7）ので値が無く、容量の情報は下の capacities 節が完全に持つ。
+    const statesOnly = statesOnlySymbols(graph);
+    const dims = graph.symbols.filter((sym) => !statesOnly.has(sym))
+      .map((sym) => bindings[sym]).join(",");
     const bound = residents.size === 0 ? "" : `|${
       graph.inputs
         .map((spec) => {

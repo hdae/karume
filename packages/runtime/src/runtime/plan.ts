@@ -398,11 +398,35 @@ const assertExtent = (size: number, where: string): number => {
 };
 
 /**
+ * **states 専用記号**（states の shape にしか現れない記号 — KV 容量 `C` 等）の集合。
+ *
+ * 束縛点は `createGenerationContext(spec.bindings)` の側（ADR 0066 追記 7 の束縛点 2）で、
+ * run / enqueue の入力からは原理的に解けない。valid な IR では「入力から解けない記号 =
+ * states に現れる記号」が成立する（format/ir.ts の checkSymbolBindability が入力 ∪ states の
+ * どちらかへの出現を要求し、states 専用記号の値 shape 出現を拒否している）ので、判定は
+ * 「入力 shape の次元位置に現れない」だけでよい。
+ */
+export const statesOnlySymbols = (graph: IrGraph): ReadonlySet<string> => {
+  const fromInputs = new Set<string>();
+  for (const spec of graph.inputs) {
+    for (const dim of spec.shape) {
+      if (typeof dim !== "string") continue;
+      fromInputs.add(parseDim(dim).sym);
+    }
+  }
+  return new Set(graph.symbols.filter((sym) => !fromInputs.has(sym)));
+};
+
+/**
  * 実入力の shape からシンボルを束縛する。
  *
  * MUST: 束縛は**入力 shape の次元位置**から取る（要素数からの逆算はしない — 複数シンボルが
  * 混ざると解が一意でなく、静かに誤った束縛が通る）。1 次元 1 シンボルの派生形（`2T` /
  * `T+8` 等）は位置ごとに解が一意なので束縛源になる（{@link solveDim} — ADR 0057）。
+ * MUST: **states 専用記号は要求しない・seed でも受けない**（ADR 0066 追記 7 の効く範囲の
+ * 分担 — 値 shape の解決に効くのは入力由来の束縛だけで、容量の正本は context が持つ）。
+ * 受けると「context 生成時の容量」と「run に渡した値」の二重簿記になり、食い違いは値には
+ * 出ず計画キャッシュの鍵だけが静かに割れる（同じ計画が別鍵で重複導出される）。
  * MUST: 割り切れない実寸は fail loudly。丸めて受けると、宣言 `2T` に奇数長を渡した run が
  * 「末尾 1 要素だけ意味の違う入力」として最後まで通る。
  * MUST: 束縛の有無は `Object.hasOwn` のみで見る。`bindings[sym] !== undefined` は
@@ -427,10 +451,17 @@ export const bindSymbols = (
   // Deno はこの setter を無効化しているため手元では再現しないが、ブラウザ（対象実行系の
   // 一方）では起きる。
   const bindings: Record<string, number> = Object.create(null);
+  const statesOnly = statesOnlySymbols(graph);
   for (const [sym, value] of Object.entries(seed)) {
     if (!symbols.has(sym)) {
       throw new ExecutionError(
         `束縛 '${sym}' はグラフの symbols [${graph.symbols.join(", ")}] に無い`,
+      );
+    }
+    if (statesOnly.has(sym)) {
+      throw new ExecutionError(
+        `束縛 '${sym}' は states 専用記号 — 束縛点は createGenerationContext(spec.bindings)` +
+          "（ADR 0066 追記 7）。run / enqueue の bindings では与えられない",
       );
     }
     bindings[sym] = assertExtent(value, `束縛 '${sym}'`);
@@ -479,6 +510,8 @@ export const bindSymbols = (
   }
 
   for (const sym of graph.symbols) {
+    // states 専用記号は入力から解けないのが正規（束縛点は context 生成 — 上の MUST）。
+    if (statesOnly.has(sym)) continue;
     if (!Object.hasOwn(bindings, sym)) {
       throw new ExecutionError(`シンボル '${sym}' を入力 shape から束縛できなかった`);
     }

@@ -8,6 +8,7 @@ import {
   ExecutionError,
   planGraph,
   resolveShape,
+  statesOnlySymbols,
   validateGraphContracts,
 } from "../src/runtime/plan.ts";
 import type { GraphJson } from "./helpers/format.ts";
@@ -507,4 +508,31 @@ Deno.test("sliding の window はスロット容量を超えられない（読�
     OpContractError,
     "スロット容量 16 を超える",
   );
+});
+
+// ADR 0066 追記 7 の「効く範囲の分担」: states 専用記号（KV 容量 `C`）の束縛点は
+// createGenerationContext だけで、run / enqueue の bindSymbols は要求も受理もしない。
+Deno.test("states 専用記号は bindSymbols が要求せず、seed に来たら拒否する", () => {
+  const graph = parse(stateGraph());
+  assertEquals([...statesOnlySymbols(graph)], ["C"]);
+  // 入力 shape だけで束縛が閉じる（C が無くても「束縛できなかった」にならない）
+  const inputs = { q: [1, 8, 3, 4], k: [1, 2, 3, 4], v: [1, 2, 3, 4] };
+  const bindings = bindSymbols(graph, inputs);
+  assertEquals(bindings, { M: 3 });
+  assertEquals(Object.hasOwn(bindings, "C"), false);
+  // seed で渡す形は fail loudly（context 生成時の容量との二重簿記 — 食い違いは値に出ず
+  // 計画キャッシュの鍵だけが静かに割れる）
+  assertThrows(
+    () => bindSymbols(graph, inputs, { C: 16 }),
+    ExecutionError,
+    "states 専用記号",
+  );
+  // 入力にも現れる記号は従来どおり（states に**も**現れる形は「専用」ではない）
+  assertThrows(
+    () => bindSymbols(graph, { q: [1, 8, 3, 4], k: [1, 2, 5, 4], v: [1, 2, 3, 4] }),
+    ExecutionError,
+    "束縛が衝突",
+  );
+  // states の無いグラフでは空集合（挙動は 1 バイトも変わらない）
+  assertEquals(statesOnlySymbols(parse(linearGraph())).size, 0);
 });

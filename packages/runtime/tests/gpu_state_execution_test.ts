@@ -627,12 +627,14 @@ Deno.test({
     const wider = await session.createGenerationContext({ chunkLength: 1, bindings: { C: 12 } });
     const inputs = stepInputs(SYMBOLIC, 1, 0);
     try {
-      await runStep(session, first, SYMBOLIC, inputs, 1, 1, { C: 8 });
+      // MUST: 容量記号 `C` は run の bindings に**要らない**（束縛点は createGenerationContext
+      // だけ — ADR 0066 追記 7 の効く範囲の分担。渡させると context との二重簿記になる）。
+      await runStep(session, first, SYMBOLIC, inputs, 1, 1);
       assertEquals(session.diagnostics().lastRunPrepared?.hit, false, "1 本目は導出 run");
 
       // MUST: **別 context・同じ容量**は同じ鍵（context の識別子が鍵に載っていればここで
       // 再導出が起き、decode のホットパスが毎シーケンス全滅する — ADR 0066 決定 5）。
-      await runStep(session, second, SYMBOLIC, inputs, 1, 1, { C: 8 });
+      await runStep(session, second, SYMBOLIC, inputs, 1, 1);
       assertEquals(
         session.diagnostics().lastRunPrepared?.hit,
         true,
@@ -640,15 +642,23 @@ Deno.test({
       );
 
       // 容量が違えば別鍵（レシピは容量を params と S の確保サイズへ焼き込む）。
-      await runStep(session, wider, SYMBOLIC, inputs, 1, 1, { C: 12 });
+      await runStep(session, wider, SYMBOLIC, inputs, 1, 1);
       assertEquals(
         session.diagnostics().lastRunPrepared?.hit,
         false,
         "容量の違う context が同じレシピを使い回している",
       );
       // 戻ると最初の鍵にまた当たる（LRU に両方載っている）。
-      await runStep(session, first, SYMBOLIC, inputs, 1, 1, { C: 8 });
+      await runStep(session, first, SYMBOLIC, inputs, 1, 1);
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
+
+      // states 専用記号を run の bindings に書いた形は fail loudly（黙って受けて鍵だけ割れる
+      // 形にしない — 同じ計画が別鍵で重複導出される沈黙劣化）。
+      const rejected = await assertRejects(
+        () => runStep(session, first, SYMBOLIC, inputs, 1, 1, { C: 8 }),
+        ExecutionError,
+      );
+      assert(rejected.message.includes("states 専用記号"), rejected.message);
     } finally {
       for (const context of [first, second, wider]) await context.dispose();
       await session.dispose();
