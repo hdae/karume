@@ -28,7 +28,9 @@
 //
 // - `io.<case>.safetensors` — **無 pad 全長 1 回**の入出力（4 ケース）。chunk 形のグラフを
 //   全長 1 発で回した参照ではなく「同じ重み・同じ位置で torch が出す値」の表で、こちらは
-//   chunk へ割って**有効行だけ**を突き合わせる（pad 行の出力は 0 固定 — ADR 0066 追記 8）。
+//   chunk へ割って**有効行だけ**を突き合わせる（pad 行で 0 に固定されるのは states 形
+//   attention の出力だけ — ADR 0066 追記 8。後段の MLP / lm_head は pad 行にも意味のない値を
+//   書くので、pad 行のグラフ出力は**読んではならない** — 参照側に対応物も無い）。
 // - `greedy.<case>.safetensors` — decode 検収の正本（3 ケース）。`prompt` i32 `[T]` /
 //   `expected` i32 `[K]` / `margin` f32 `[K]`。期待列は**全長 full re-forward** で採ってあり
 //   （KV cache 経路を通さない — `export_decode.greedy_continuation` の MUST）、検収したい機構と
@@ -93,6 +95,13 @@ const CHUNK_LENGTH = 32;
  */
 const CAPACITY_SYMBOL = "C";
 const CAPACITY = 128;
+
+/**
+ * この系列が引ける絶対位置の排他的上限（正本は `export_decode.ROPE_TABLE_POSITIONS` = RoPE 表の
+ * 行数）。表の外の gather は非有限を返し argmax が沈黙誤 token に畳むので、`generateGreedy` は
+ * この値を要求して入口で落とす。
+ */
+const MAX_POSITION = 512;
 
 /** グラフ入力の名前（正本は `export_decode.INPUT_IDS` / `POSITION_IDS`）。 */
 const INPUT_IDS = "input_ids";
@@ -367,6 +376,7 @@ Deno.test({
             positionIds: POSITION_IDS,
             token: tokenName,
             chunkLength: CHUNK_LENGTH,
+            maxPosition: MAX_POSITION,
             // 容量記号は context 生成だけへ渡る（run の bindings には出ない — 追記 7）。
             bindings: { [CAPACITY_SYMBOL]: CAPACITY },
             prompt,

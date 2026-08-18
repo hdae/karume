@@ -17,7 +17,9 @@ transformers を要するケースだけ `importorskip` で SKIP する（既定
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -453,6 +455,64 @@ def _export_tiny_decode(wrapper) -> tuple[IrGraph, dict]:
         symbol_names=(decode.SEQ_SYMBOL,),
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     )
+
+
+class TestPublish:
+    """staging → final の入れ替え（`_publish`）。
+
+    守るのは「**新旧の混ざった正規資産を作れない**」こと（独立レビュー high 指摘の閉鎖）。
+    ファイル単位で final へ書く形だと、門の途中で落ちた実走が「新 model + 旧 greedy」を残し、
+    検収門が拒否済み資産で緑になれる。
+    """
+
+    @staticmethod
+    def _series(root, name: str, files: dict[str, str]):
+        directory = root / name
+        directory.mkdir()
+        for filename, body in files.items():
+            (directory / filename).write_text(body)
+        return directory
+
+    def test_a_fresh_target_is_created(self, tmp_path):
+        staging = self._series(tmp_path, "staging", {"model": "new"})
+
+        decode._publish(staging, tmp_path / "final")
+
+        assert (tmp_path / "final" / "model").read_text() == "new"
+        assert not staging.exists()
+
+    def test_an_existing_target_is_replaced_wholesale(self, tmp_path):
+        """旧にだけあるファイル（例: 除外されたケースの greedy）が final に残らない。"""
+        final = self._series(tmp_path, "final", {"model": "old", "greedy.stale": "old"})
+        staging = self._series(tmp_path, "staging", {"model": "new"})
+
+        decode._publish(staging, final)
+
+        assert (final / "model").read_text() == "new"
+        assert not (final / "greedy.stale").exists()
+        assert not list(tmp_path.glob("final.retired-*"))
+
+    def test_a_failed_promotion_restores_the_old_series(self, tmp_path, monkeypatch):
+        """昇格の rename が失敗しても、final は**完全な旧資産のまま**（不在にも混成にもならない）。
+
+        NOTE: `os.replace` を staging 昇格の 1 回だけ失敗させる（退避と復元は本物を通す）。
+        """
+        final = self._series(tmp_path, "final", {"model": "old"})
+        staging = self._series(tmp_path, "staging", {"model": "new"})
+        real_replace = os.replace
+
+        def failing_replace(src, dst):
+            if Path(src) == staging:
+                raise OSError("昇格に失敗")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", failing_replace)
+
+        with pytest.raises(OSError, match="昇格に失敗"):
+            decode._publish(staging, final)
+
+        assert (final / "model").read_text() == "old"
+        assert staging.exists()
 
 
 class TestExportedDecodeForm:

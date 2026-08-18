@@ -86,8 +86,10 @@ outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors greedy continuation 
 
 The `io.*` files use the same key convention as the 1-shot series and cover all four cases at their
 full unpadded length. They are a reference table rather than a run script: the runtime executes the
-graph in chunks and compares only the valid rows, since padding rows are written as zeros (ADR 0066
-addendum 8) and have no counterpart on the reference side.
+graph in chunks and compares only the valid rows. On padding rows only the states-form attention
+output is exactly zero (ADR 0066 addendum 8); the MLP and lm_head still write meaningless values
+there, so padding rows of the graph outputs must not be read — they have no counterpart on the
+reference side either.
 
 The `greedy.*` files are the acceptance record for the decode path — `prompt` i32 `[T]`, `expected`
 i32 `[K]` and `margin` f32 `[K]`. The continuation is recomputed from scratch at every step (a full

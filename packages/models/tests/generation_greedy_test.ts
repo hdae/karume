@@ -158,6 +158,7 @@ Deno.test("generateGreedy: prefill は固定長 chunk で流し、pad 行は 0�
     positionIds: POSITIONS,
     token: TOKEN,
     chunkLength: 32,
+    maxPosition: 512,
     prompt,
     maxNewTokens: 1,
   });
@@ -193,6 +194,7 @@ Deno.test("generateGreedy: T = chunkLength ちょうどは 1 chunk で pad 行�
     positionIds: POSITIONS,
     token: TOKEN,
     chunkLength: 4,
+    maxPosition: 512,
     prompt,
     maxNewTokens: 1,
   });
@@ -212,6 +214,7 @@ Deno.test("generateGreedy: T < chunkLength は 1 chunk・末尾が pad 0 で埋�
     positionIds: POSITIONS,
     token: TOKEN,
     chunkLength: 4,
+    maxPosition: 512,
     prompt: [7, 8],
     maxNewTokens: 1,
   });
@@ -232,6 +235,7 @@ Deno.test("generateGreedy: decode は queryLength=1 固定で、位置が T, T+1
     positionIds: POSITIONS,
     token: TOKEN,
     chunkLength: 4,
+    maxPosition: 512,
     prompt: [10, 11, 12],
     maxNewTokens: 3,
   });
@@ -258,6 +262,7 @@ Deno.test("generateGreedy: maxNewTokens=1 は decode を 1 回も回さない", 
     positionIds: POSITIONS,
     token: TOKEN,
     chunkLength: 4,
+    maxPosition: 512,
     prompt: [10, 11, 12],
     maxNewTokens: 1,
   });
@@ -276,6 +281,7 @@ Deno.test("generateGreedy: 容量記号は createGenerationContext だけへ渡�
     positionIds: POSITIONS,
     token: TOKEN,
     chunkLength: 4,
+    maxPosition: 512,
     bindings: { C: 8 },
     prompt: [10, 11],
     maxNewTokens: 2,
@@ -297,6 +303,7 @@ Deno.test("generateGreedy: 正常終了で context を 1 度だけ dispose す�
     positionIds: POSITIONS,
     token: TOKEN,
     chunkLength: 4,
+    maxPosition: 512,
     prompt: [10, 11],
     maxNewTokens: 3,
   });
@@ -316,6 +323,7 @@ Deno.test("generateGreedy: run が落ちても context を dispose し、例外�
           positionIds: POSITIONS,
           token: TOKEN,
           chunkLength: 4,
+          maxPosition: 512,
           prompt: [10, 11],
           maxNewTokens: 3,
         }),
@@ -377,6 +385,7 @@ Deno.test("generateGreedy: token 出力の名前 / dtype / 形が違えば fail 
           positionIds: POSITIONS,
           token: TOKEN,
           chunkLength: 4,
+          maxPosition: 512,
           prompt: [10, 11],
           maxNewTokens: 2,
         }),
@@ -395,6 +404,7 @@ Deno.test("generateGreedy: 入口検査は context を作る前に落ちる", as
     positionIds: POSITIONS,
     token: TOKEN,
     chunkLength: 4,
+    maxPosition: 512,
     prompt: [10, 11],
     maxNewTokens: 2,
   };
@@ -405,7 +415,14 @@ Deno.test("generateGreedy: 入口検査は context を作る前に落ちる", as
     [{ maxNewTokens: 0 }, "maxNewTokens 0"],
     [{ maxNewTokens: -1 }, "maxNewTokens -1"],
     [{ maxNewTokens: 1.5 }, "maxNewTokens 1.5"],
-    [{ prompt: [10, 1.5] }, "prompt[1] 1.5 が整数でない"],
+    [{ maxPosition: 0 }, "maxPosition 0"],
+    [{ maxPosition: 2.5 }, "maxPosition 2.5"],
+    [{ prompt: [10, 1.5] }, "prompt[1] 1.5 が 0..2147483647 の整数でない"],
+    // `Int32Array` の wrap は例外を出さず別の有効 id（2^32+1 → 1）に化ける — 入口が唯一の検出線。
+    [{ prompt: [10, 4294967297] }, "prompt[1] 4294967297 が 0..2147483647 の整数でない"],
+    [{ prompt: [-1, 10] }, "prompt[0] -1 が 0..2147483647 の整数でない"],
+    // 踏む最大位置 = T + K - 2。maxPosition は排他的上限なので、ちょうど届く形は落ちる。
+    [{ maxPosition: 2 }, "最終位置 2 を踏む"],
   ];
 
   for (const [override, message] of cases) {
@@ -418,6 +435,24 @@ Deno.test("generateGreedy: 入口検査は context を作る前に落ちる", as
     assertEquals(fake.specs.length, 0, message);
     assertEquals(fake.calls.length, 0, message);
   }
+});
+
+Deno.test("generateGreedy: maxPosition は排他的上限（最終位置 + 1 でちょうど通る）", async () => {
+  // T=2, K=2 の最終位置は T + K - 2 = 2（decode 1 回目が位置 2 を踏む）。上限 3 = ぎりぎり適法。
+  const fake = fakeSession();
+  const generated = await generateGreedy({
+    session: fake.session,
+    inputIds: IDS,
+    positionIds: POSITIONS,
+    token: TOKEN,
+    chunkLength: 4,
+    maxPosition: 3,
+    prompt: [10, 11],
+    maxNewTokens: 2,
+  });
+
+  assertEquals(generated.length, 2);
+  assertEquals(fake.calls[1].positions, [2]);
 });
 
 Deno.test("GreedySession: 実 Session の面を型で満たす（綴りのドリフト検出）", () => {

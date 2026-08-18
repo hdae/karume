@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -454,6 +455,32 @@ def _write_container(graph: IrGraph, tensors: Mapping[str, torch.Tensor], path: 
     return verified
 
 
+def _publish(staging: Path, final: Path) -> None:
+    """全ての門を通した staging ディレクトリを final へ**丸ごと**入れ替える。
+
+    MUST: 公開は形検査・margin 門・sanity の**全部の後**（呼び手 = {@link export_series} の
+    構造で保証）。ファイル単位で final へ書いていく形だと、途中の門で落ちたときに
+    「新しい model + 古い greedy」の**混ざった正規資産**が残り、検収門が拒否済みの資産で
+    緑になれる（2026-08-18 独立レビュー high 指摘）。
+
+    完全な原子性は狙わない — 退避 → 昇格の 2 rename の間で落ちると final は**不在**になるが、
+    不在は読み手が確実に検出できる（fail loudly）。作れてはいけないのは「静かに読めてしまう
+    混成」で、この手順はそれを構造的に作れない。昇格に失敗したら旧資産を戻す。
+    """
+    retired: Path | None = None
+    if final.exists():
+        retired = final.with_name(f"{final.name}.retired-{uuid4().hex}")
+        os.replace(final, retired)
+    try:
+        os.replace(staging, final)
+    except BaseException:
+        if retired is not None:
+            os.replace(retired, final)
+        raise
+    if retired is not None:
+        shutil.rmtree(retired)
+
+
 def _write_io(
     wrapper: nn.Module,
     graph: IrGraph,
@@ -465,7 +492,9 @@ def _write_io(
     NOTE: これは「同じ重み・同じ位置で torch が出す値」の**参照表**であって、ランタイムの
     実行台本ではない。decode 系列のグラフは chunk 形（`M = chunkLength`）で走るので、Deno 側は
     全長 T を chunk へ割って実行し、**有効行だけ**をここの `output.0` / `output.1` の対応行と
-    突き合わせる（pad 行の出力は 0 固定 — ADR 0066 追記 8 — で、参照側に対応物が無い）。
+    突き合わせる。pad 行で 0 に固定されるのは **states 形 attention の出力だけ**（ADR 0066
+    追記 8）で、後段の MLP / lm_head は pad 行にも意味のない値を書く — pad 行のグラフ出力は
+    **読んではならない**（参照側に対応物も無い）。
     """
     written: list[str] = []
     for name, ids in cases:
@@ -593,52 +622,66 @@ def export_series(
     positions: int = ROPE_TABLE_POSITIONS,
     steps: int = GREEDY_STEPS,
 ) -> dict[str, Any]:
-    """states 形 IR コンテナ・io golden・greedy golden を書き、要約を返す。"""
+    """states 形 IR コンテナ・io golden・greedy golden を書き、要約を返す。
+
+    MUST: 生成物は staging ディレクトリへ書き、**全ての門**（形検査・margin 門・波 A 期待表との
+    sanity）を通してから {@link _publish} で final へ入れ替える。門より前に final へ置くと、
+    落ちた実走が「検収門を通れる資産」を残す（{@link _publish} の docstring）。
+    """
     wrapper = load_wrapper(model_dir, positions=positions)
     cases = one_shot.build_cases(model_dir, sym_max)
     greedy_cases = tuple(case for case in cases if case[0] in GREEDY_CASES)
     # io は prompt を丸ごと 1 回引くだけ（継続分の位置は要らない）ので steps=0 で見る。
     assert_case_room(cases, 0, positions)
     assert_case_room(greedy_cases, steps, positions)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = out_dir.with_name(f"{out_dir.name}.staging-{uuid4().hex}")
+    staging.mkdir()
 
-    # 例示入力は最長ケース（記号次元の 0/1 特殊化から遠い）。min=2 は同じ理由、max は
-    # mask の Tmax 畳み込みの評価点（手術で刈るので配布物には残らないが、trace は通る）。
-    _, example_ids = max(cases, key=lambda case: case[1].shape[1])
-    seq = Dim(SEQ_SYMBOL, min=2, max=sym_max)
-    print("[export] torch.export → 変換", file=sys.stderr, flush=True)
-    graph, tensors = export_module(
-        wrapper,
-        (example_ids, positions_for(example_ids)),
-        dynamic_shapes=({1: seq}, {1: seq}),
-        symbol_names=(SEQ_SYMBOL,),
-        preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-    )
-    config = wrapper.model.config
-    print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
-    surgical = to_states_form(graph, states_plan(graph, int(config.num_hidden_layers)))
-    verified = _write_container(surgical, tensors, out_dir / one_shot.MODEL_FILE)
-    form = assert_ir_form_decode(verified, config)
+    try:
+        # 例示入力は最長ケース（記号次元の 0/1 特殊化から遠い）。min=2 は同じ理由、max は
+        # mask の Tmax 畳み込みの評価点（手術で刈るので配布物には残らないが、trace は通る）。
+        _, example_ids = max(cases, key=lambda case: case[1].shape[1])
+        seq = Dim(SEQ_SYMBOL, min=2, max=sym_max)
+        print("[export] torch.export → 変換", file=sys.stderr, flush=True)
+        graph, tensors = export_module(
+            wrapper,
+            (example_ids, positions_for(example_ids)),
+            dynamic_shapes=({1: seq}, {1: seq}),
+            symbol_names=(SEQ_SYMBOL,),
+            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        )
+        config = wrapper.model.config
+        print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
+        surgical = to_states_form(graph, states_plan(graph, int(config.num_hidden_layers)))
+        verified = _write_container(surgical, tensors, staging / one_shot.MODEL_FILE)
+        form = assert_ir_form_decode(verified, config)
 
-    print("[io] 全長 forward", file=sys.stderr, flush=True)
-    io_written = _write_io(wrapper, verified, cases, out_dir)
-    greedy_written, tokens, margins = _write_greedy(
-        wrapper, greedy_cases, out_dir, steps=steps, floor=MARGIN_FLOOR
-    )
+        print("[io] 全長 forward", file=sys.stderr, flush=True)
+        io_written = _write_io(wrapper, verified, cases, staging)
+        greedy_written, tokens, margins = _write_greedy(
+            wrapper, greedy_cases, staging, steps=steps, floor=MARGIN_FLOOR
+        )
 
-    # 第 1 継続 token を波 A の期待表と突き合わせる（機構横断の突合 — 1-shot 形と decode 形の
-    # 台本は別物なので、同じ重み・同じ prompt で 1 位が一致することが両者の交差検証になる）。
-    tokenizer = one_shot.load_tokenizer(model_dir)
-    first = {name: continuation[0] for name, continuation in tokens.items()}
-    expected = {
-        name: token
-        for name, token in one_shot.expected_token_ids(tokenizer).items()
-        if name in first
-    }
-    labels = {
-        token: tokenizer.id_to_token(token)
-        for token in set(first.values()) | set(expected.values())
-    }
+        # 第 1 継続 token を波 A の期待表と突き合わせる（機構横断の突合 — 1-shot 形と decode 形の
+        # 台本は別物なので、同じ重み・同じ prompt で 1 位が一致することが両者の交差検証になる）。
+        # MUST: 公開より前に評価する（落ちたら staging ごと消える — 混成資産を残さない）。
+        tokenizer = one_shot.load_tokenizer(model_dir)
+        first = {name: continuation[0] for name, continuation in tokens.items()}
+        expected = {
+            name: token
+            for name, token in one_shot.expected_token_ids(tokenizer).items()
+            if name in first
+        }
+        labels = {
+            token: tokenizer.id_to_token(token)
+            for token in set(first.values()) | set(expected.values())
+        }
+        sanity = one_shot._sanity(first, expected, labels)
+        _publish(staging, out_dir)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return {
         "dir": str(out_dir),
         "nodes": len(verified.nodes),
@@ -657,7 +700,7 @@ def export_series(
         "continuation": {
             name: tokenizer.decode(continuation) for name, continuation in sorted(tokens.items())
         },
-        "sanity": one_shot._sanity(first, expected, labels),
+        "sanity": sanity,
     }
 
 

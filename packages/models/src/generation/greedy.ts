@@ -57,6 +57,16 @@ export type GreedySpec<C extends GenerationDisposable = GenerationContext> = {
   readonly token: string;
   /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。 */
   readonly chunkLength: number;
+  /**
+   * 資産が引ける絶対位置の**排他的上限**（位置は `0..maxPosition-1`。RoPE 表を焼いた系列なら
+   * 表の行数 — MiniCPM5 decode 系列は 512）。
+   *
+   * MUST: 省略可能にしない。表の外の gather は例外を出さず（OOB は by-design で非有限 —
+   * limitations）、argmax がその非有限 logits を**もっともらしい token id に畳む**ので、
+   * 上限を知らないまま回すと生成の後半が沈黙誤 token になる（2026-08-18 実測 — 位置 512 で
+   * 全 logits 非有限 → token 0）。ここで落とすのが唯一の fail loudly の位置。
+   */
+  readonly maxPosition: number;
   /** state スロット容量の記号束縛（`createGenerationContext` へ素通し）。 */
   readonly bindings?: SymbolBindings;
   /** プロンプトの token id 列（長さ 1 以上）。 */
@@ -169,13 +179,26 @@ const readToken = (outputs: RunOutputs, name: string, rows: number, row: number)
 export const generateGreedy = async <C extends GenerationDisposable>(
   spec: GreedySpec<C>,
 ): Promise<number[]> => {
-  const { session, prompt, chunkLength, maxNewTokens } = spec;
+  const { session, prompt, chunkLength, maxNewTokens, maxPosition } = spec;
   const chunks = planPrefillChunks(prompt.length, chunkLength);
   assertPositiveInteger(maxNewTokens, "maxNewTokens");
+  assertPositiveInteger(maxPosition, "maxPosition");
   prompt.forEach((id, index) => {
-    // `Int32Array` への書き込みは非整数を黙って切り詰めるので、入口で落とす。
-    if (!Number.isSafeInteger(id)) throw new Error(`prompt[${index}] ${id} が整数でない`);
+    // `Int32Array` への書き込みは非整数の切り詰めも i32 値域外の wrap も**黙って**行う
+    // （例: 2^32+1 → 1 — 別の有効 token id に化けて例外にならない）ので、入口で落とす。
+    if (!Number.isSafeInteger(id) || id < 0 || id > 0x7fffffff) {
+      throw new Error(`prompt[${index}] ${id} が 0..2147483647 の整数でない`);
+    }
   });
+  // 踏む最大の絶対位置 = 最終 decode step の T + maxNewTokens - 2（decode 0 回なら prefill の
+  // T - 1 で、同じ式に畳まれる）。表の外は沈黙誤 token（maxPosition の JSDoc）なのでここで落とす。
+  const lastPosition = prompt.length + maxNewTokens - 2;
+  if (lastPosition >= maxPosition) {
+    throw new Error(
+      `prompt ${prompt.length} + maxNewTokens ${maxNewTokens} は最終位置 ${lastPosition} を踏む` +
+        `（maxPosition ${maxPosition} の外 — この資産では位置 0..${maxPosition - 1} しか引けない）`,
+    );
+  }
 
   // MUST: 容量記号（states 専用記号）の束縛点は context 生成**だけ**で、run の bindings へは
   // 渡さない（ADR 0066 追記 7 — run の記号解決に効くのは入力由来の束縛だけ）。
