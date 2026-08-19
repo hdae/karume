@@ -254,10 +254,34 @@ Deno.test("NFKC: サロゲートを除く全コードポイントで正本の差
 
 // ---- ⑤ 資産パーサ（外部境界）------------------------------------------------
 
+/**
+ * `byteBaseId` は 256 本連番の先頭なので、成功パスの検査には `id + 255 < 語彙の行数` を
+ * 満たす語彙が要る（G4-02）。本物のトークンの後ろへ短い埋め草行を足して行数を稼ぐ —
+ * 埋め草は `maxTokenLength` / `minScore` を狂わせないよう短く・スコア 0（本物の最小スコアより
+ * 大きい）に揃える。
+ */
+const padVocabForByteBase = (
+  realTokens: readonly string[],
+  realScores: readonly number[],
+  byteBaseId: number,
+): { vocabText: string; scores: number[] } => {
+  const fillerCount = Math.max(0, byteBaseId + 256 - realTokens.length);
+  const filler = Array.from({ length: fillerCount }, (_, i) => `f${i}`);
+  return {
+    vocabText: [...realTokens, ...filler].join("\n"),
+    scores: [...realScores, ...Array(fillerCount).fill(0)],
+  };
+};
+
 Deno.test("資産パーサ: 素の JSON から資産表を組み、id / スコアを行番号で対応付ける", () => {
+  const { vocabText, scores } = padVocabForByteBase(
+    ["<unk>", "<s>", "<pad>", "▁こんにちは", "世界"],
+    [0, 0, 0, -1.5, -2.5],
+    3,
+  );
   const parsed = parseIrodoriTokenizerAsset({
-    vocabText: "<unk>\n<s>\n<pad>\n▁こんにちは\n世界",
-    scores: [0, 0, 0, -1.5, -2.5],
+    vocabText,
+    scores,
     addedTokens: [["<unk>", 0], ["<s>", 1], ["<pad>", 2]],
     bosId: 1,
     padId: 2,
@@ -273,15 +297,16 @@ Deno.test("資産パーサ: 素の JSON から資産表を組み、id / スコ�
 });
 
 Deno.test("資産パーサ: 行数不一致と必須キー欠落は fail loudly", () => {
+  const { vocabText, scores } = padVocabForByteBase(["<unk>", "<s>", "<pad>"], [0, 0, 0], 0);
   const base = {
-    vocabText: "<unk>\n<s>\n<pad>",
-    scores: [0, 0, 0],
+    vocabText,
+    scores,
     addedTokens: [["<unk>", 0]],
     bosId: 1,
     padId: 2,
     unkId: 0,
-    // 3 行の語彙なので特殊 id は 0..2（範囲そのものは下の専用テストが見る）。
-    byteBaseId: 2,
+    // 本物は 3 行（byteBaseId の値域を満たすための埋め草は末尾 — 上の doc 参照）。
+    byteBaseId: 0,
   };
   // スコアが 1 本欠けても Viterbi は落ちない（語彙に無い断片はバイト展開へ逃げる）ので、
   // ここで落とさないと id が総ずれしたまま沈黙で流れる。
@@ -305,9 +330,11 @@ Deno.test("資産パーサ: 行数不一致と必須キー欠落は fail loudly"
 });
 
 Deno.test("資産パーサ: 特殊 id は整数かつ語彙の行数未満（Int32Array で沈黙切り捨てになる前に落とす）", () => {
+  const VOCAB_SIZE = 256;
+  const { vocabText, scores } = padVocabForByteBase(["<unk>", "<s>", "<pad>"], [0, 0, 0], 0);
   const base = {
-    vocabText: "<unk>\n<s>\n<pad>",
-    scores: [0, 0, 0],
+    vocabText,
+    scores,
     addedTokens: [["<unk>", 0]],
     bosId: 1,
     padId: 2,
@@ -326,17 +353,38 @@ Deno.test("資産パーサ: 特殊 id は整数かつ語彙の行数未満（Int
     Error,
     "tokenizer.byteBaseId: トークン id が 0..2147483647 の整数でない（-1）",
   );
-  // 語彙の行数ちょうど = 1 つ外側。
+  // 語彙の行数ちょうど = 1 つ外側（埋め草込みで VOCAB_SIZE 行）。
   assertThrows(
-    () => parseIrodoriTokenizerAsset({ ...base, bosId: 3 }),
+    () => parseIrodoriTokenizerAsset({ ...base, bosId: VOCAB_SIZE }),
     Error,
-    "tokenizer.bosId: トークン id 3 が語彙の行数 3 以上",
+    `tokenizer.bosId: トークン id ${VOCAB_SIZE} が語彙の行数 ${VOCAB_SIZE} 以上`,
   );
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["<unk>", 0.5]] }),
     Error,
     "トークン id が 0..2147483647 の整数でない（0.5）",
   );
+});
+
+Deno.test("資産パーサ: byteBaseId はバイト 256 本の連番全体が語彙内にあることを要求する（G4-02）", () => {
+  const VOCAB_SIZE = 300;
+  const base = {
+    vocabText: Array.from({ length: VOCAB_SIZE }, (_, i) => `t${i}`).join("\n"),
+    scores: Array.from({ length: VOCAB_SIZE }, () => 0),
+    addedTokens: [],
+    bosId: 0,
+    padId: 0,
+    unkId: 0,
+  };
+  // 負例: byteBaseId=299 だと 299..554 が語彙 300 行に収まらない。
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, byteBaseId: 299 }),
+    Error,
+    "バイト 256 本",
+  );
+  // 正例: byteBaseId = 300 − 256 = 44 はちょうど収まる（44..299 の 256 本が末尾まで）。
+  const parsed = parseIrodoriTokenizerAsset({ ...base, byteBaseId: 44 });
+  assertEquals(parsed.byteBaseId, 44);
 });
 
 // ---- 境界（golden のケースが実際に叩いているもの）----------------------------

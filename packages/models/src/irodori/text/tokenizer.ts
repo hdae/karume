@@ -141,6 +141,25 @@ const asVocabId = (value: unknown, label: string, vocabSize: number): number => 
   return id;
 };
 
+/**
+ * byte fallback の先頭 id（{@link asId} に加えて 256 本連番全体が語彙内であること）。
+ *
+ * MUST: 単独 id 用の {@link asVocabId}（`< vocabSize`）では足りない — `byteBaseId` は
+ * 単独の id ではなく未知断片の展開先 256 本連番の先頭で、消費側（`unigram.ts` の
+ * `base + byte`、byte = 0..255）は `byteBaseId + 255` まで発行する。ここを見逃すと
+ * 未知断片が現れた瞬間に語彙外 id が出て、embedding gather の OOB（非有限 — ADR 0061）まで
+ * 表面化しない沈黙誤値になる。
+ */
+const asByteBaseId = (value: unknown, label: string, vocabSize: number): number => {
+  const id = asId(value, label);
+  if (id + 255 >= vocabSize) {
+    throw new Error(
+      `${label}: バイト 256 本（${id}..${id + 255}）が語彙の行数 ${vocabSize} に収まらない`,
+    );
+  }
+  return id;
+};
+
 const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
   if (!Array.isArray(raw)) throw new Error(`${label}: 配列でない`);
   const out = new Map<string, number>();
@@ -160,7 +179,9 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
  *
  * MUST: 語彙の行数と `scores` の本数を突き合わせる。ずれたまま通すと id が総ずれするが、
  * Viterbi は落ちない（語彙に無い断片はバイト展開へ逃げる）ので**沈黙誤値**になる。
- * MUST: 特殊 id は整数かつ語彙の行数未満（{@link asVocabId} — 理由は同 doc）。
+ * MUST: 単独の特殊 id は整数かつ語彙の行数未満（{@link asVocabId} — 理由は同 doc）。
+ * MUST: `byteBaseId` は単独 id ではないので {@link asVocabId} では足りない —
+ * 256 本連番の全体が語彙内であること（{@link asByteBaseId} — 理由は同 doc）。
  */
 export const parseIrodoriTokenizerAsset = (
   raw: unknown,
@@ -187,7 +208,7 @@ export const parseIrodoriTokenizerAsset = (
     minScore,
     maxTokenLength,
     unkId: asVocabId(obj["unkId"], `${label}.unkId`, tokens.length),
-    byteBaseId: asVocabId(obj["byteBaseId"], `${label}.byteBaseId`, tokens.length),
+    byteBaseId: asByteBaseId(obj["byteBaseId"], `${label}.byteBaseId`, tokens.length),
     bosId: asVocabId(obj["bosId"], `${label}.bosId`, tokens.length),
     padId: asVocabId(obj["padId"], `${label}.padId`, tokens.length),
     addedTokens: parseAddedTokens(obj["addedTokens"], `${label}.addedTokens`),
