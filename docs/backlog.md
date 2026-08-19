@@ -17,9 +17,11 @@ ADR [0069](decisions/0069-packed-w4-storage.md) 追記 5。recipe 基盤 4 件
 CX-2.3 golden provenance = ADR [0068](decisions/0068-decode-exit-multi-output.md) 追記 5）も
 同波で消化（token 系列再 export の sha256 完全一致で CX-1.1 の生成物不変を実資産検収済み）。
 
-**残項目（人間レビュー待ち）**: 聴感（SBV2 `outputs/demo/quant-sim/` / Irodori
-`outputs/demo/irodori-quant-sim/`）と視認（Anima `outputs/demo/anima-w4-screen/image_*.png`）
-→ Q-1（SBV2 BERT linear i4 配布）と Q-5（TTS/画像系 w4 不採用）の最終裁定。
+**聴感・視認も消化（2026-08-19 ユーザー実施 — 波は完全クローズ）**: RTN / NF4 は全ファミリ
+一次通過・kmeans / mxfp4 に人間検知の不具合（音量低下・不安定・画像崩壊）。裁定の反映先 =
+research §6（人間レビュー節 — 「同一性 ≠ 成立性」の訂正込み）+ perf-ledger Q-1〜Q-5
+（**Q-4 不採用確定・Q-5 は不採用を撤回して配布席候補へ改訂**）。既定化は速度と細かい品質の
+バランスで別途裁定（ユーザー方針 — w4 変種は当面 opt-in 配布席の候補）。
 
 全体レビュー波は **0.3.0 の JSR / PyPI リリース（2026-08-16）まで含めて全消化**。
 勢力図・ポジショニング検証は
@@ -56,6 +58,9 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## next — 量子化方式の探索・第 2 段（2026-08-19 裁定で now 波から分離）
 
+- **冒頭に Q-1 の実装**（2026-08-19 承認 — 聴感一次通過済み）: SBV2 BERT linear を i4 で焼いた
+  配布形の生成（dist の dtype 指定・−9.76%）+ 実 GPU WAV 検収。HF jvnv 上げ直しはリリース枠と
+  同乗（資産準備まで）。
 - **校正ループ系**（GPTQ / AWQ — 格納形は i4 g32 のまま値の選びだけ賢くする系。runtime 0 行で
   乗るため筋が良いが、校正データ + 最適化ループの実装が要る）。
 - **g 軸の評価**（now 波は g=32 固定 — 方式が絞れてから勝者方式で g32/g64/g128 を再評価する。

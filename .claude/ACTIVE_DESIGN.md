@@ -31,7 +31,10 @@
   採否台帳 = perf-ledger Q-1〜Q-5。要旨: 方式序列はモデル系統で割れる（LLM/埋め込み =
   kmeans:shared 最良 / TTS = nf4 相対最良 / 画像 = 方式差消失の全滅帯）・SBV2 BERT linear i4 =
   配布 −9.76%（既存格納形・聴感待ち）。recipe 基盤 4 件（CX-1.4/1.1/1.3/2.3）も同波で消化。
-  **残 = 聴感/視認（人間）→ Q-1 / Q-5 の裁定**。
+  **聴感/視認も消化（同日ユーザー実施）**: RTN/NF4 全ファミリ一次通過・**Q-4（mxfp4）不採用
+  確定・Q-5 は配布席候補へ改訂**（正本 = research §6 / perf-ledger Q 節）。既定化は速度と
+  細かい品質のバランスで別途。次波 = 量子化探索・第 2 段（**冒頭に Q-1 実装** = SBV2 BERT
+  linear i4 配布形 + 実 GPU 検収 — backlog next 節）。
 
 ## Open decisions
 

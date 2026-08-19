@@ -60,14 +60,3 @@ parity テストへ N > 256 の形を 1 本足すのが最小の埋め方。
 maxAbs 2.23e-3）を通過している（同日再実行で確認）。「N > 256 を踏むテストが 1 本も無い」
 状態は解消したが、これは**弱い数値検証**であり、ビット単位の恒久 parity 門は依然無い —
 最小の埋め方（parity テストへ N > 256 を 1 本）は変わらず有効。
-
-## anima の measure_quant 既存 10 構成モードが起動時に落ちる
-
-`anima/measure_quant.py:741` 付近が `reference_steps(..., args.resolution, ...)` と **int** を
-渡すが、`anima/pipeline_ref.py` の `reference_steps` は Anima family 移行（`c84dd07`）で
-`size: tuple[int, int]`（`width, height = size` で展開）を受ける形になった —
-`TypeError: cannot unpack non-iterable int object` で 10 構成モードは 1 step も走らない
-（2026-08-19 の w4 スクリーニングレッグが発見・再現確認済み）。`--w4-screen` モードは最初から
-タプルを渡しているので影響なし。修正は `(args.resolution, args.resolution)` の 1 行 +
-`--resolution` の意味（正方前提）を docstring へ明記。混入時点以降、10 構成モードの実行記録は
-無い（Q0 の記録は混入前の実測）。
