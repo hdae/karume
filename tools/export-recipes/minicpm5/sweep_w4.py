@@ -1,5 +1,5 @@
 """MiniCPM5-1B の w4 fake-quant sweep（ADR [0069](../../../docs/decisions/0069-packed-w4-storage.md)
-決定 6 = Phase 0）— 既定 group_size と〔裁定 B: zero-point 欄なし〕の実測根拠を採る台本。
+決定 6 = Phase 0）と**量子化方式スクリーニング**の台本。
 
     uv run --with 'transformers==5.14.1' python -m minicpm5.sweep_w4
 
@@ -11,8 +11,18 @@ assert_baseline_reproduces}）。
 
 ## 何を測るか
 
-group_size {32, 64, 128} × 対称 / 非対称の 6 通り + baseline + `lm_head` 除外の 1 本
-（{@link SWEEP_CONFIGS}）。config ごとに 3 列を採る:
+**Phase 0 グリッド**（{@link SWEEP_CONFIGS}）= group_size {32, 64, 128} × 対称 / 非対称の
+6 通り + baseline + `lm_head` 除外の 1 本。
+
+**方式グリッド**（{@link METHOD_CONFIGS}）= 方式 7 種（{@link QUANT_METHODS} — RTN i4 /
+FP4 / NF4 / MXFP4 / k-means の表 3 粒度）× 対象 2 形（linear 限定 169 本 / `embed_tokens`
+込み 170 本）。**group_size は 32 固定**で g 軸は振らない — g の答えは Phase 0 が出して
+いて、ここで測りたいのは「同じ g で丸め方を変えたときの差」だけだから（2 軸を同時に
+振ると方式の差と g の差が混ざる）。丸めの実装は core（`karume.quant_methods` /
+`karume.quantize`）の共有で、対象選択も `iter_quant_targets` の共有 — 写した別実装にすると
+「測った対象・式」と「出荷する対象・式」が黙って割れる。
+
+config ごとに 4 列を採る（先の 3 列は Phase 0 と同じ・4 列目は方式グリッドのみ）:
 
 1. **weight 相対 RMSE**（族別）— 丸めそのものの大きさ。族内の全層をまとめた
    `‖w − fq‖₂ / ‖w‖₂` で、どの族が壊れやすいかを見る。
@@ -20,6 +30,10 @@ group_size {32, 64, 128} × 対称 / 非対称の 6 通り + baseline + `lm_head
    ずれないので、config 間で**同じ位置**の劣化量を比べられる。
 3. **自由走行 greedy の発散 step** — 実際の生成が期待列から離れるまでの長さ。人間が読む
    ときの「壊れ方」に一番近い列。
+4. **サイズ試算**（{@link QuantMethod.formula}）— 方式ごとの実効 bpw と、量子化対象テンソル
+   集合だけを投影した MiB。品質だけ見ると表のコストが見えない（k-means per-channel は
+   表がチャネル数に比例する）ので、品質と同じ表で並べる。**実測ではなく式による投影**で、
+   格納形を持たない方式（この台本の 7 種のうち RTN 以外全部）は書けもしない。
 
 期待列は**波 E の資産が正本**（`outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors`
 — margin 門つきで採った 3 ケース）。ここで採り直さないのは、sweep が測りたいのが
@@ -35,18 +49,22 @@ group 軸は**重みの最終次元 = linear の in 軸**。対称は `s = clamp
 
 ## 出力
 
-進捗は stderr へ即 flush（背景実行で追うため）。最後に stdout へ markdown 表 2 枚
-（品質 / 族別 wRMSE）を出す — そのまま `docs/research/` へ転記する形。
+進捗は stderr へ即 flush（背景実行で追うため）。最後に stdout へ markdown 表 4 枚
+（要約 / 品質 / 族別 wRMSE / サイズ試算）を出す — そのまま `docs/research/` へ転記する形。
+`--json` を渡すと機械可読の JSON も書く（**config 1 本ごとに書き直す** — 数十分級の実行が
+途中で落ちても、そこまでの測定値が残る）。
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
+import json
 import math
 import sys
 import time
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,7 +73,26 @@ from safetensors.torch import load_file
 from torch import nn
 
 from _shared.decode_series import EXPECTED_KEY, GREEDY_PREFIX, GREEDY_SUFFIX, PROMPT_KEY
-from karume.quantize import QuantizeError
+from karume.quant_methods import (
+    DEFAULT_CODEBOOK_ITERATIONS,
+    DEFAULT_CODEBOOK_LEVELS,
+    fake_quant_fp4,
+    fake_quant_kmeans,
+    fake_quant_mxfp4,
+    fake_quant_nf4,
+    fit_codebook,
+    group_absmax_scale,
+    round_groups_to_levels,
+)
+from karume.quantize import (
+    DEFAULT_GROUP_SIZE,
+    QuantizeError,
+    channel_rows,
+    fake_quant_int4,
+    group_size_of,
+    iter_quant_targets,
+    restore_channel_rows,
+)
 from minicpm5 import export as one_shot
 from minicpm5 import export_decode as decode
 
@@ -97,6 +134,13 @@ LINEAR_FAMILIES: tuple[str, ...] = (
 #: 語彙側の族名（`--only` 相当の除外指定 {@link SweepConfig.include_lm_head} が指す先）。
 LM_HEAD = "lm_head"
 
+#: 入力側の embedding の族名（方式グリッドの「非 linear 込み」で増える 1 本）。
+#: `tie_word_embeddings: false` なので `lm_head` とは独立した重み。
+EMBED_TOKENS = "embed_tokens"
+
+#: 族別 wRMSE 表の列（方式グリッドは `embed_tokens` まで載りうる）。
+METHOD_FAMILIES: tuple[str, ...] = (*LINEAR_FAMILIES, EMBED_TOKENS)
+
 #: baseline の config 名（{@link select_configs} が常に先頭へ入れる）。
 BASELINE_NAME = "baseline"
 
@@ -126,6 +170,148 @@ SWEEP_CONFIGS: tuple[SweepConfig, ...] = (
     SweepConfig("g128-asym", group_size=128, asymmetric=True),
     SweepConfig("g128-sym-blocks", group_size=128, include_lm_head=False),
 )
+
+
+# ---- 方式グリッド（量子化方式スクリーニング）-------------------------------
+
+#: 方式比較の group 長 = **32 固定**（core の既定 = Phase 0 の実測で確定した値）。g 軸を
+#: 同時に振らないのは、方式の差と g の差が混ざると「どちらが効いたか」が言えなくなるため。
+METHOD_GROUP_SIZE = DEFAULT_GROUP_SIZE
+
+#: k-means の表 1 枚のビット数（16 centroid × f32）。
+CODEBOOK_BITS = DEFAULT_CODEBOOK_LEVELS * 32
+
+
+@dataclass(frozen=True)
+class TargetCounts:
+    """量子化対象テンソル集合の計数（サイズ試算の入力）。
+
+    `channels` は {@link karume.quantize.channel_rows} の行数の総和 = per-channel の表を
+    張る単位の数で、`modules` は層数（per-tensor の表の枚数）。
+    """
+
+    modules: int
+    channels: int
+    elements: int
+
+    @property
+    def groups(self) -> int:
+        """g32 group の総数（group ごとに scale 1 個が要る方式のサイズ試算に使う）。"""
+        return self.elements // METHOD_GROUP_SIZE
+
+
+@dataclass(frozen=True)
+class QuantMethod:
+    """丸め方式 1 種 — 名前・丸めの当て方・サイズ試算の式を 1 行に束ねる。
+
+    3 つを別表に散らすと「品質を測った方式」と「サイズを試算した方式」が黙って割れる
+    （方式を 1 種足したときに片方だけ更新される形になる）。
+    """
+
+    #: 表と JSON に出る方式名。
+    name: str
+    #: config 名の接頭（`<slug>-linear` / `<slug>-embed`）。
+    slug: str
+    #: 丸めを model へ in-place で当てる（`(model, op_types, group_size)`）。
+    round_weights: Callable[[nn.Module, tuple[type[nn.Module], ...], int], object]
+    #: 量子化対象集合の投影ビット数。
+    projected_bits: Callable[[TargetCounts], float]
+    #: `projected_bits` の式（**出力へそのまま載せる** — 投影の前提を表から追えるように）。
+    formula: str
+
+
+#: RTN（= 格納形 `i4`）の方式名。方式列の**基準** — 他の 6 種はこれとの差で読む。
+RTN_METHOD = "rtn-g32-sym"
+
+#: k-means 方式名の接頭（`kmeans:<粒度>` — core の {@link
+#: karume.quant_methods.KMEANS_GRANULARITIES} と同じ綴り）。
+KMEANS_PREFIX = "kmeans:"
+
+#: 方式 7 種（この順で走る）。丸めは全て core の共有実装で、ここは呼び分けだけを持つ。
+QUANT_METHODS: tuple[QuantMethod, ...] = (
+    QuantMethod(
+        RTN_METHOD,
+        "rtn",
+        lambda model, op_types, group: fake_quant_int4(model, group, op_types=op_types),
+        lambda counts: 4 * counts.elements + 32 * counts.groups,
+        "4bit + g32 f32 scale = 5.0 bpw",
+    ),
+    QuantMethod(
+        "fp4",
+        "fp4",
+        lambda model, op_types, group: fake_quant_fp4(model, group, op_types=op_types),
+        lambda counts: 4 * counts.elements + 32 * counts.groups,
+        "4bit + g32 f32 scale = 5.0 bpw",
+    ),
+    QuantMethod(
+        "nf4",
+        "nf4",
+        lambda model, op_types, group: fake_quant_nf4(model, group, op_types=op_types),
+        lambda counts: 4 * counts.elements + 32 * counts.groups,
+        "4bit + g32 f32 scale = 5.0 bpw",
+    ),
+    QuantMethod(
+        "mxfp4",
+        "mxfp4",
+        lambda model, op_types, group: fake_quant_mxfp4(model, group, op_types=op_types),
+        lambda counts: 4 * counts.elements + 8 * counts.groups,
+        "4bit + g32 E8M0 scale = 4.25 bpw",
+    ),
+    QuantMethod(
+        f"{KMEANS_PREFIX}per_tensor",
+        "kmeans-tensor",
+        lambda model, op_types, group: fake_quant_kmeans(
+            model, "per_tensor", group, op_types=op_types
+        ),
+        lambda counts: 4 * counts.elements + CODEBOOK_BITS * counts.modules,
+        "4bit + 表 16×f32 毎層（scale 無し）",
+    ),
+    QuantMethod(
+        f"{KMEANS_PREFIX}per_channel",
+        "kmeans-channel",
+        lambda model, op_types, group: fake_quant_kmeans(
+            model, "per_channel", group, op_types=op_types
+        ),
+        lambda counts: 4 * counts.elements + CODEBOOK_BITS * counts.channels,
+        "4bit + 表 16×f32 毎チャネル（scale 無し）",
+    ),
+    QuantMethod(
+        f"{KMEANS_PREFIX}shared",
+        "kmeans-shared",
+        lambda model, op_types, group: fake_quant_kmeans(model, "shared", group, op_types=op_types),
+        lambda counts: 4 * counts.elements + 32 * counts.groups + CODEBOOK_BITS,
+        "4bit + g32 f32 scale + 表 16×f32 を全体で 1 枚",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class MethodConfig:
+    """方式グリッドの 1 実行ぶん（方式 × 対象 2 形）。
+
+    `include_embedding` は「非 linear 込み」の列 — `embed_tokens` を対象へ足す。i4 の実行
+    経路は linear 限定（ADR 0069 決定 5）なので**出荷できる形ではない**が、語彙側を
+    丸めたときの品質とサイズの取り分は測っておく価値がある（混成格納の判断材料）。
+    """
+
+    name: str
+    method: QuantMethod
+    include_embedding: bool
+
+
+#: 方式グリッド = 7 方式 × 対象 2 形（linear 限定 / `embed_tokens` 込み）。
+METHOD_CONFIGS: tuple[MethodConfig, ...] = tuple(
+    MethodConfig(
+        name=f"{method.slug}-{'embed' if include_embedding else 'linear'}",
+        method=method,
+        include_embedding=include_embedding,
+    )
+    for method in QUANT_METHODS
+    for include_embedding in (False, True)
+)
+
+#: `--only` が選べる全 config（宣言順 = 実行順）。
+ALL_CONFIGS: tuple[SweepConfig | MethodConfig, ...] = (*SWEEP_CONFIGS, *METHOD_CONFIGS)
 
 
 # ---- 量子化式（ADR 0069 決定 3）--------------------------------------------
@@ -251,6 +437,127 @@ def linear_weights(model: nn.Module) -> dict[str, torch.Tensor]:
     return weights
 
 
+def method_op_types(include_embedding: bool) -> tuple[type[nn.Module], ...]:
+    """方式グリッドの対象 2 形 → `iter_quant_targets` の `op_types`。
+
+    非 linear 込みの列で足すのを `nn.Embedding` だけに絞るのは、MiniCPM5-1B に他の量子化
+    可能型（conv 系）が 1 本も無いから — i8 の 5 種を丸ごと渡しても対象は同じで、「広い型を
+    渡した」という見かけだけが増える。
+    """
+    return (nn.Linear, nn.Embedding) if include_embedding else (nn.Linear,)
+
+
+def collect_targets(
+    model: nn.Module, op_types: tuple[type[nn.Module], ...]
+) -> tuple[dict[str, torch.Tensor], TargetCounts]:
+    """量子化対象を fqn 引きの重みと計数で返す（対象選択は core の共有）。
+
+    MUST: 族が {@link METHOD_FAMILIES} に無い対象は fail loudly（{@link linear_weights} と
+    同文）。対象が黙って増減すると、族別の表もサイズ試算も別のモデルの数値になる。
+    """
+    weights: dict[str, torch.Tensor] = {}
+    channels = 0
+    elements = 0
+    for fqn, weight, axis in iter_quant_targets(model, op_types):
+        if family_of(fqn) not in METHOD_FAMILIES:
+            raise QuantizeError(
+                f"'{fqn}': 未知の族（対象は {list(METHOD_FAMILIES)}）"
+                "— 模型の構成が sweep の想定と違う"
+            )
+        weights[fqn] = weight
+        channels += int(weight.shape[axis])
+        elements += int(weight.numel())
+    if not weights:
+        raise QuantizeError(
+            f"量子化対象が 1 本も無い（対象の型: {', '.join(cls.__name__ for cls in op_types)}）"
+        )
+    return weights, TargetCounts(modules=len(weights), channels=channels, elements=elements)
+
+
+# ---- サイズ試算 -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SizeProjection:
+    """方式 × 対象集合の**投影**サイズ（実測ではない — 式は {@link QuantMethod.formula}）。"""
+
+    counts: TargetCounts
+    bits: float
+    formula: str
+
+    @property
+    def bits_per_weight(self) -> float:
+        return self.bits / self.counts.elements
+
+    @property
+    def projected_mib(self) -> float:
+        return self.bits / 8 / 1024**2
+
+    @property
+    def f32_mib(self) -> float:
+        """同じ対象集合を f32 で持ったときの MiB（投影の分母 — 圧縮率を表から読めるように）。"""
+        return self.counts.elements * 4 / 1024**2
+
+
+def project_size(method: QuantMethod, counts: TargetCounts) -> SizeProjection:
+    """方式の式を対象集合の計数へ当てる。"""
+    return SizeProjection(counts=counts, bits=method.projected_bits(counts), formula=method.formula)
+
+
+# ---- 方式の適用 -------------------------------------------------------------
+
+
+def fake_quant_kmeans_shared_strided(
+    model: nn.Module, op_types: tuple[type[nn.Module], ...], group_size: int, stride: int
+) -> int:
+    """`kmeans:shared` の**表の fit だけ**を等間隔 stride の部分標本で採る版（適用は全量）。
+
+    core の {@link karume.quant_methods.fake_quant_kmeans}(`shared`) は全対象の正規化値を
+    1 本へ連結してから Lloyd を回すので、1B 級では f32 の連結 4GB に加えて `fit_codebook` の
+    f64 一時領域（値・重み・添字）が 20GB 級になり、機体の実メモリで落ちる。標本を
+    `flat[::stride]`（乱数を使わない = 同一入力 → ビット同一）に落とすと fit の一時領域だけが
+    1/stride になり、**丸めそのものは全量**へ当たる。
+
+    MUST: 使ったら出力へ明記する（`--kmeans-shared-stride` は JSON と markdown の脚注へ
+    そのまま出る）— 部分標本で採った表と全量で採った表は別物になりうるので、数値を読む側が
+    区別できないと困る。
+
+    戻り値は丸めた本数（core の `MethodReport.modules` 相当）。
+    """
+    samples: list[torch.Tensor] = []
+    with torch.no_grad():
+        for fqn, weight, axis in iter_quant_targets(model, op_types):
+            rows = channel_rows(weight, axis)
+            scale = group_absmax_scale(rows, group_size, 1.0, f"'{fqn}'")
+            grouped = grouped_view(rows, group_size_of(rows, scale))
+            samples.append((grouped / scale.unsqueeze(-1)).reshape(-1)[::stride].clone())
+        table = fit_codebook(
+            torch.cat(samples).reshape(1, -1), DEFAULT_CODEBOOK_LEVELS, DEFAULT_CODEBOOK_ITERATIONS
+        ).reshape(-1)
+        del samples
+        modules = 0
+        for fqn, weight, axis in iter_quant_targets(model, op_types):
+            rows = channel_rows(weight, axis)
+            scale = group_absmax_scale(rows, group_size, 1.0, f"'{fqn}'")
+            rounded = round_groups_to_levels(rows, table, scale, f"'{fqn}'")
+            weight.copy_(restore_channel_rows(rounded, weight, axis))
+            modules += 1
+    return modules
+
+
+def apply_method(model: nn.Module, config: MethodConfig, shared_stride: int) -> None:
+    """方式グリッド 1 本の丸めを model へ in-place で当てる。
+
+    `shared_stride > 1` のときだけ `kmeans:shared` が部分標本 fit の版
+    （{@link fake_quant_kmeans_shared_strided}）へ替わる — 他の方式には効かない。
+    """
+    op_types = method_op_types(config.include_embedding)
+    if config.method.name == f"{KMEANS_PREFIX}shared" and shared_stride > 1:
+        fake_quant_kmeans_shared_strided(model, op_types, METHOD_GROUP_SIZE, shared_stride)
+        return
+    config.method.round_weights(model, op_types, METHOD_GROUP_SIZE)
+
+
 # ---- 期待列（波 E の資産）---------------------------------------------------
 
 
@@ -309,11 +616,20 @@ class CaseResult:
 
 @dataclass(frozen=True)
 class ConfigResult:
-    """1 config の測定値（族別 wRMSE は量子化した族だけが載る）。"""
+    """1 config の測定値（族別 wRMSE は量子化した族だけが載る）。
+
+    `overall_rmse` は対象集合を丸ごと 1 本にした `‖w − fq‖₂ / ‖w‖₂`（族平均ではない —
+    族ごとの要素数が 20 倍違うので平均だと重み付けが恣意的になる）。`size` は方式グリッド
+    だけが持つ（Phase 0 の config は格納形が i4 の 1 通りで、試算しても同じ数が並ぶ）。
+    """
 
     name: str
     weight_rmse: Mapping[str, float]
     cases: Mapping[str, CaseResult]
+    seconds: float = 0.0
+    overall_rmse: float | None = None
+    method: QuantMethod | None = None
+    size: SizeProjection | None = None
 
 
 def teacher_forced(wrapper: nn.Module, case: GreedyCase) -> tuple[int, float]:
@@ -354,15 +670,42 @@ def greedy_prefix(wrapper: nn.Module, case: GreedyCase) -> int:
     return case.steps
 
 
-def apply_config(
+def restore_pristine(
+    weights: Mapping[str, torch.Tensor], pristine: Mapping[str, torch.Tensor]
+) -> None:
+    """全対象を pristine（素の f32）へ戻す。
+
+    MUST: **config ごとに毎回**戻す。戻さずに当てると測っているのが「RTN の上の NF4」に
+    なり、config 間の比較そのものが意味を失う（方式は積み重ねない）。戻す範囲は
+    Phase 0 と方式グリッドの**和集合**（linear + `embed_tokens`）— 片方のグリッドが触った
+    重みがもう片方の測定に残らないように。
+    """
+    with torch.no_grad():
+        for fqn, weight in weights.items():
+            weight.copy_(pristine[fqn])
+
+
+def apply_config(weights: Mapping[str, torch.Tensor], config: SweepConfig) -> list[str]:
+    """Phase 0 の fake-quant を当て、量子化した fqn を返す（復元は呼び出し側）。"""
+    if config.group_size is None:
+        return []
+    quantize = fake_quant_asymmetric if config.asymmetric else fake_quant_symmetric
+    touched: list[str] = []
+    with torch.no_grad():
+        for fqn, weight in weights.items():
+            if family_of(fqn) == LM_HEAD and not config.include_lm_head:
+                continue
+            weight.copy_(quantize(weight, config.group_size))
+            touched.append(fqn)
+    return touched
+
+
+def measure_rmse(
     weights: Mapping[str, torch.Tensor],
     pristine: Mapping[str, torch.Tensor],
-    config: SweepConfig,
-) -> dict[str, float]:
-    """pristine から復元してから config の fake-quant を当て、族別の相対 RMSE を返す。
-
-    MUST: 毎回 pristine から戻す。戻さずに当てると測っているのが「group 32 の上の
-    group 128」になり、config 間の比較そのものが意味を失う。
+    touched: Sequence[str],
+) -> tuple[dict[str, float], float | None]:
+    """丸め後の重みと pristine から族別 + 全体の相対 RMSE を採る。
 
     相対 RMSE は族内の全層をまとめた `‖w − fq‖₂ / ‖w‖₂`（要素数が約分されるので層の大きさで
     重み付けされない）。総和は f64 で採る — 族によっては 2 億要素を足すので f32 累算では
@@ -371,20 +714,15 @@ def apply_config(
     errors: dict[str, float] = defaultdict(float)
     norms: dict[str, float] = defaultdict(float)
     with torch.no_grad():
-        for fqn, weight in weights.items():
-            weight.copy_(pristine[fqn])
-        if config.group_size is None:
-            return {}
-        for fqn, weight in weights.items():
+        for fqn in touched:
             family = family_of(fqn)
-            if family == LM_HEAD and not config.include_lm_head:
-                continue
-            quantize = fake_quant_asymmetric if config.asymmetric else fake_quant_symmetric
-            fq = quantize(weight, config.group_size)
-            errors[family] += float((fq - weight).pow(2).sum(dtype=torch.float64))
-            norms[family] += float(weight.pow(2).sum(dtype=torch.float64))
-            weight.copy_(fq)
-    return {family: math.sqrt(errors[family] / norms[family]) for family in errors}
+            difference = weights[fqn] - pristine[fqn]
+            errors[family] += float(difference.pow(2).sum(dtype=torch.float64))
+            norms[family] += float(pristine[fqn].pow(2).sum(dtype=torch.float64))
+    if not errors:
+        return {}, None
+    families = {family: math.sqrt(errors[family] / norms[family]) for family in errors}
+    return families, math.sqrt(sum(errors.values()) / sum(norms.values()))
 
 
 def assert_baseline_reproduces(
@@ -408,7 +746,7 @@ def assert_baseline_reproduces(
         )
 
 
-def select_configs(only: Sequence[str]) -> tuple[SweepConfig, ...]:
+def select_configs(only: Sequence[str]) -> tuple[SweepConfig | MethodConfig, ...]:
     """`--only` で選んだ config を宣言順で返す（**baseline は常に先頭で走る**）。
 
     baseline を外せないのは、部分再実行でも sanity 門（{@link assert_baseline_reproduces}）を
@@ -416,35 +754,71 @@ def select_configs(only: Sequence[str]) -> tuple[SweepConfig, ...]:
     残さないことが効く。
     """
     if not only:
-        return SWEEP_CONFIGS
+        return ALL_CONFIGS
     chosen = {BASELINE_NAME, *only}
-    return tuple(config for config in SWEEP_CONFIGS if config.name in chosen)
+    return tuple(config for config in ALL_CONFIGS if config.name in chosen)
 
 
 def run_sweep(
     model_dir: Path,
-    configs: Sequence[SweepConfig],
+    configs: Sequence[SweepConfig | MethodConfig],
     *,
     decode_dir: Path = DEFAULT_DECODE_DIR,
+    kmeans_shared_stride: int = 0,
+    json_path: Path | None = None,
 ) -> list[ConfigResult]:
     """模型を 1 回だけ読み、config を順に当てて測る。
 
-    pristine クローン（CPU・linear だけで ~3.5GB）を先に採るので、config ごとの丸めは常に
-    元の重みから始まる。進捗は 1 ケース / 1 config ごとに stderr へ即 flush する。
+    pristine クローン（CPU・linear 169 本で ~3.5GB・`embed_tokens` 込みで ~4.3GB）を先に
+    採るので、config ごとの丸めは常に元の重みから始まる。退避の範囲を**常に和集合**に
+    するのは、Phase 0 の config が embedding を戻さない形を作らないため。
+
+    進捗は 1 ケース / 1 config ごとに stderr へ即 flush し、`json_path` があれば config
+    1 本ごとに書き直す（k-means の数十分級の実行が途中で落ちても測定値が残る）。
     """
     cases = load_cases(decode_dir)
     lengths = " ".join(f"{case.name}(T={case.prompt.shape[1]},K={case.steps})" for case in cases)
     print(f"[sweep] 期待列 {len(cases)} ケース: {lengths}", file=sys.stderr, flush=True)
 
     wrapper = one_shot.load_wrapper(model_dir)
-    weights = linear_weights(wrapper)
-    print(f"[sweep] 量子化対象 {len(weights)} 本を pristine 退避", file=sys.stderr, flush=True)
-    pristine = {fqn: weight.detach().clone() for fqn, weight in weights.items()}
+    linear = linear_weights(wrapper)
+    union, counts = collect_targets(wrapper, method_op_types(include_embedding=True))
+    print(
+        f"[sweep] 量子化対象 linear {len(linear)} 本 / 和集合 {counts.modules} 本"
+        f"（{counts.elements:,} 要素）を pristine 退避",
+        file=sys.stderr,
+        flush=True,
+    )
+    pristine = {fqn: weight.detach().clone() for fqn, weight in union.items()}
 
     results: list[ConfigResult] = []
     for config in configs:
+        # 前の config の一時領域（k-means は f64 で対象と同オーダー）を次の丸めの前に手放す。
+        # 参照循環に載った GB 級のテンソルが世代 GC 待ちで残ると、次の config が実メモリを
+        # 踏み抜く（refcount だけでは足りない場所があるので明示する）。
+        gc.collect()
         started = time.perf_counter()
-        weight_rmse = apply_config(weights, pristine, config)
+        restore_pristine(union, pristine)
+        method: QuantMethod | None = None
+        size: SizeProjection | None = None
+        if isinstance(config, SweepConfig):
+            touched = apply_config(linear, config)
+        else:
+            method = config.method
+            targets, target_counts = collect_targets(
+                wrapper, method_op_types(config.include_embedding)
+            )
+            apply_method(wrapper, config, kmeans_shared_stride)
+            touched = list(targets)
+            size = project_size(method, target_counts)
+        weight_rmse, overall = measure_rmse(union, pristine, touched)
+        rounded = time.perf_counter() - started
+        overall_text = "-" if overall is None else f"{overall:.4g}"
+        print(
+            f"[{config.name}] 丸め {len(touched)} 本 {rounded:.1f}s wRMSE {overall_text}",
+            file=sys.stderr,
+            flush=True,
+        )
         measured: dict[str, CaseResult] = {}
         for case in cases:
             matches, nll = teacher_forced(wrapper, case)
@@ -460,12 +834,26 @@ def run_sweep(
             )
         if config.name == BASELINE_NAME:
             assert_baseline_reproduces(cases, measured)
-        results.append(ConfigResult(config.name, weight_rmse, measured))
+        results.append(
+            ConfigResult(
+                name=config.name,
+                weight_rmse=weight_rmse,
+                cases=measured,
+                seconds=time.perf_counter() - started,
+                overall_rmse=overall,
+                method=method,
+                size=size,
+            )
+        )
         print(
             f"[{config.name}] 完了 {time.perf_counter() - started:.1f}s",
             file=sys.stderr,
             flush=True,
         )
+        if json_path is not None:
+            json_path.write_text(
+                results_json(results, cases, kmeans_shared_stride), encoding="utf-8"
+            )
     return results
 
 
@@ -504,11 +892,103 @@ def rmse_table(results: Sequence[ConfigResult]) -> str:
         [result.name]
         + [
             f"{result.weight_rmse[family]:.4g}" if family in result.weight_rmse else "-"
-            for family in LINEAR_FAMILIES
+            for family in METHOD_FAMILIES
         ]
         for result in results
     ]
-    return _markdown(["config", *LINEAR_FAMILIES], rows)
+    return _markdown(["config", *METHOD_FAMILIES], rows)
+
+
+def summary_table(results: Sequence[ConfigResult]) -> str:
+    """方式 × 対象 2 形を 1 行 1 config で読む要約表（ケース合算）。
+
+    合算は「3 ケース × 16 位置 = 48 点の一致数」「NLL の 3 ケース単純和」「自由走行の
+    接頭辞長の 3 ケース和」— ケース別の内訳は {@link quality_table} に残る。
+    """
+    header = ["config", "方式", "対象", "bpw", "投影 MiB", "wRMSE", "teacher", "NLL 和", "greedy"]
+    rows = []
+    for result in results:
+        cases = list(result.cases.values())
+        total = sum(case.steps for case in cases)
+        rows.append(
+            [
+                result.name,
+                result.method.name if result.method else "-",
+                "-" if result.size is None else f"{result.size.counts.modules} 本",
+                "-" if result.size is None else f"{result.size.bits_per_weight:.4g}",
+                "-" if result.size is None else f"{result.size.projected_mib:.1f}",
+                "-" if result.overall_rmse is None else f"{result.overall_rmse:.4g}",
+                f"{sum(case.matches for case in cases)}/{total}",
+                f"{sum(case.nll for case in cases):.4g}",
+                f"{sum(case.prefix for case in cases)}/{total}",
+            ]
+        )
+    return _markdown(header, rows)
+
+
+def size_table(results: Sequence[ConfigResult]) -> str:
+    """方式 × 対象集合のサイズ試算（**式による投影**・実測ではない）。"""
+    header = ["config", "本数", "チャネル", "要素", "式", "bpw", "投影 MiB", "f32 MiB"]
+    rows = [
+        [
+            result.name,
+            f"{result.size.counts.modules}",
+            f"{result.size.counts.channels:,}",
+            f"{result.size.counts.elements:,}",
+            result.size.formula,
+            f"{result.size.bits_per_weight:.4g}",
+            f"{result.size.projected_mib:.1f}",
+            f"{result.size.f32_mib:.1f}",
+        ]
+        for result in results
+        if result.size is not None
+    ]
+    return _markdown(header, rows)
+
+
+def results_json(
+    results: Sequence[ConfigResult], cases: Sequence[GreedyCase], kmeans_shared_stride: int
+) -> str:
+    """機械可読の測定値（markdown 表の全列 + 表に出さない計数）。"""
+    payload = {
+        "group_size": METHOD_GROUP_SIZE,
+        "kmeans_shared_stride": kmeans_shared_stride,
+        "cases": [
+            {"name": case.name, "prompt_length": int(case.prompt.shape[1]), "steps": case.steps}
+            for case in cases
+        ],
+        "configs": [
+            {
+                "name": result.name,
+                "method": result.method.name if result.method else None,
+                "seconds": round(result.seconds, 3),
+                "weight_rmse": dict(result.weight_rmse),
+                "overall_rmse": result.overall_rmse,
+                "cases": {
+                    name: {
+                        "steps": case.steps,
+                        "matches": case.matches,
+                        "nll": case.nll,
+                        "prefix": case.prefix,
+                    }
+                    for name, case in result.cases.items()
+                },
+                "size": None
+                if result.size is None
+                else {
+                    "modules": result.size.counts.modules,
+                    "channels": result.size.counts.channels,
+                    "elements": result.size.counts.elements,
+                    "formula": result.size.formula,
+                    "bits_per_weight": result.size.bits_per_weight,
+                    "projected_mib": result.size.projected_mib,
+                    "f32_mib": result.size.f32_mib,
+                },
+            }
+            for result in results
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -519,14 +999,35 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--only",
         action="append",
         default=[],
-        choices=[config.name for config in SWEEP_CONFIGS],
+        choices=[config.name for config in ALL_CONFIGS],
         help="この config だけ走らせる（複数可・部分再実行用）。baseline は常に先行する。",
     )
+    parser.add_argument("--json", type=Path, default=None, help="機械可読の測定値の書き出し先。")
+    parser.add_argument(
+        "--kmeans-shared-stride",
+        type=int,
+        default=0,
+        help="kmeans:shared の表の fit だけを等間隔 stride の部分標本で採る（0 / 1 = 全量）。"
+        "全量が実メモリに載らない機体のための逃げ道で、丸めは常に全量へ当たる。",
+    )
     args = parser.parse_args(argv)
-    results = run_sweep(args.model_dir, select_configs(args.only), decode_dir=args.decode_dir)
+    results = run_sweep(
+        args.model_dir,
+        select_configs(args.only),
+        decode_dir=args.decode_dir,
+        kmeans_shared_stride=args.kmeans_shared_stride,
+        json_path=args.json,
+    )
+    if args.kmeans_shared_stride > 1:
+        print(f"> kmeans:shared の表は 1/{args.kmeans_shared_stride} 部分標本で fit（適用は全量）")
+        print()
+    print(summary_table(results))
+    print()
     print(quality_table(results))
     print()
     print(rmse_table(results))
+    print()
+    print(size_table(results))
 
 
 if __name__ == "__main__":
