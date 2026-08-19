@@ -748,9 +748,16 @@ export class GpuContext {
    * （`withScopeLock` — {@link GpuContextInternals}）。これが「batch の内側で出した GPU 操作は
    * 全て batch の errorScope に帰属する」ことと、「pop がスタック先頭を取り違えない」ことの根拠。
    *
-   * MUST: 開いている間に同一 device の {@link Session.run} を await しない — run はロックを
-   * 取りに行くので {@link BatchScope.finish} まで決着せず、待ち合わせると自己デッドロックに
-   * なる（batch 中は `enqueue` と `finish` だけを使う）。
+   * MUST: 区間中に同一 device の {@link Session.run} / `dispose` を**発行しない**（await の
+   * 有無に依らない）。run は区間ロックを取りに行くので {@link BatchScope.finish} まで決着せず、
+   * その run が同一 Session の `enqueue` より前に居ると「finish → in-flight リース → enqueue 本体
+   * → 先行 run → 区間ロック」の 4 辺が閉じて確定的な自己デッドロックになる（区間を開く**前**に
+   * 発行した未 await の run も同じ — `beginBatch` はコンストラクタで同期にロックを先取りするので、
+   * 同一 tick なら常に batch が先）。この形は `Session.enqueue` が {@link BatchScopeError} へ
+   * 変換する。
+   * NOTE: 閉路にならない形でも、**区間中に await する Session 操作全般**（`session.dispose()` /
+   * `context.dispose()`）は先行に未決着 run があると `finish()` まで返らず、利用者からは
+   * ハングに見える。batch 中は `enqueue` と `finish` だけを使うこと。
    * MUST: 計測が有効な device では開けない。1 dispatch = 1 pass に開いた timestamp は
    * flush でしか回収されないため、batch の間 N run 分が未回収で溜まる（内訳を取るなら
    * 通常の run で計測すること — ADR 0021）。

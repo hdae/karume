@@ -296,6 +296,34 @@ Deno.test({
 });
 
 Deno.test({
+  name: "確保の await を跨いで dispose された Session は context を握らせない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    try {
+      // createGenerationContext は直列化チェーンに乗らない（乗せると batch 区間の未決着 run と
+      // 同型の閉路に巻き込まれる）ので、呼び出し時点の dispose 判定を確保の await が跨ぐ。
+      // 確保後に再判定しないと、dispose 済み Session の生存集合へ context が登録され、診断が
+      // 実体の残る常駐を主張し続ける（バッファは利用者が context.dispose() を呼ぶまで残る）。
+      const pending = session.createGenerationContext({ chunkLength: 4 });
+      const disposal = session.dispose();
+      await disposal;
+      const error = await assertRejects(() => pending, ExecutionError);
+      assert(error.message.includes("dispose 済みの Session"), error.message);
+      assertEquals(
+        session.diagnostics().stateBacking,
+        { residentBytes: 0, contextCount: 0, rebindCount: 0 },
+        "確保できたぶんは破棄され、生存集合にも累計にも載らない",
+      );
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "states 宣言を持たないグラフでは GenerationContext を作れない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

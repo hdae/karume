@@ -35,6 +35,7 @@ import type { IrDtype, IrGraph } from "../format/ir.ts";
 import { parseSafetensors, type SafetensorsFile, tensorBytes } from "../format/safetensors.ts";
 import { type ArenaStats, RunArena, STORAGE_USAGE } from "../gpu/arena.ts";
 import {
+  BatchScopeError,
   discardFailureScopes,
   type GpuContext,
   popFailureScopes,
@@ -664,6 +665,17 @@ export class Session {
    * 自身は決して reject しない。
    */
   #chain: Promise<void> = Promise.resolve();
+  /**
+   * 発行済みで未決着の {@link Session.run} の本数（batch の自己デッドロック検出器の観測点）。
+   *
+   * MUST: 増減はどちらも**同期区間**で行う（`run` の呼び出し区間で +1・本体の finally で −1）。
+   * 呼び出し順 = `#chain` の順なので、`enqueue` の同期区間でこれが正なら「未決着の run が
+   * enqueue より前に居る」= 閉路の成立条件そのものになる（{@link Session.enqueue}）。
+   * MUST: 数えるのは `run` だけ。errorScope 区間ロックを要求するのは run 本体ただ 1 つで、
+   * dispose 系（`Session.dispose` / `GenerationContext.dispose`）は flush しか待たないため
+   * 閉路に参加できない（それらを混ぜると、決着する列まで拒否する過剰な門になる）。
+   */
+  #pendingRuns = 0;
   #disposal: Promise<void> | undefined;
 
   private constructor(state: SessionState) {
@@ -986,12 +998,16 @@ export class Session {
     } catch (cause) {
       return Promise.reject(cause);
     }
+    // MUST: 同期区間で数える（本体はマイクロタスクを 1 段挟むので、本体で数えると同じ tick に
+    // 積まれた `enqueue` から「未決着の run」が見えない）。
+    this.#pendingRuns += 1;
     return this.#serialize(async () => {
       try {
         return await this.#runOnce(inputs, bindings, generation);
       } finally {
         // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると以後の rewind が永久に拒否される）。
         lease?.releaseRun();
+        this.#pendingRuns -= 1;
       }
     });
   }
@@ -1012,6 +1028,12 @@ export class Session {
    * 「次の enqueue / `writeBuffer` が先行 dispatch を追い越さない」の根拠。
    * MUST: 同一 Session の run / enqueue / dispose は呼び出し順に直列化される（`run` と同じ
    * {@link Session.#chain}）。
+   * MUST: **未決着の `run` を先に持つ Session からは enqueue できない**（fail loudly）。
+   * その列は確定的な自己デッドロックになる: batch 区間は errorScope 区間ロックを保持したまま
+   * in-flight リースの返却を待ち → リースは enqueue 本体の finally でしか返らず → enqueue 本体は
+   * `#chain` の先行 run の決着を待ち → run 本体はその区間ロックを待つ、で 4 辺が閉じる。
+   * `withScopeLock` は「正当な待ち行列」と「再入」を区別できず再入検出器を置けない設計なので、
+   * 検出しなければ**例外も診断も出ないまま永久にハングする** — ハングを型付き例外へ変換する。
    * NOTE: 戻り Promise を await せずに {@link BatchScope.finish} を呼んでも取りこぼさない。
    * batch の in-flight リースをこの**同期区間**で取り、finish は未返却リースが全て返るまで
    * フェンスへ進まない（機構は `BatchInternals.enter`）。
@@ -1019,6 +1041,18 @@ export class Session {
   enqueue(inputs: RunInputs, options: EnqueueOptions): Promise<void> {
     if (this.#disposal !== undefined) {
       return Promise.reject(new ExecutionError("dispose 済みの Session では実行できない"));
+    }
+    // MUST: リースを取る**前**に見る（取ってから落とすと、返し手の居ないリースが 1 本残って
+    // `finish()` が今度こそ永久に待つ）。
+    if (this.#pendingRuns > 0) {
+      return Promise.reject(
+        new BatchScopeError(
+          `未決着の run が ${this.#pendingRuns} 本ある Session には enqueue できない` +
+            "（batch 区間は errorScope 区間ロックを握ったまま enqueue の決着を待ち、その " +
+            "enqueue は先行 run を待ち、run はそのロックを待つ = 自己デッドロック）。" +
+            "run を await してから batch を開くか、区間中は enqueue だけを使うこと",
+        ),
+      );
     }
     const batch = options.batch[RUNTIME_INTERNAL];
     // MUST: 受け口の検査とリース取得は `#serialize` に積む**前**に済ませる。本体はマイクロ
@@ -1072,6 +1106,14 @@ export class Session {
    *
    * MUST: 生存集合への登録は**確保が決着した後**（失敗した context を数えると、診断の常駐
    * バイト数が実体の無いぶんを主張し続ける）。
+   * MUST: dispose 判定は確保の**後にもう一度**執行する。`#disposal` は `dispose()` の同期区間で
+   * 立つので、`GenerationContext.create` の await を跨いで dispose が発行されると呼び出し時点の
+   * 判定をすり抜け、dispose 済み Session の生存集合へ登録されてしまう（診断
+   * `stateBacking.residentBytes` が非ゼロを主張し続け、その GPU バッファは利用者が
+   * `context.dispose()` を呼ぶまで残る）。確保済みの context は自分で破棄してから落とす。
+   * NOTE: create 全体を {@link Session.#serialize} へ積む形は**採らない** — `#chain` の一員に
+   * なると、batch 区間の未決着 run と同型の循環（BatchScope → enqueue → run → errorScope 区間
+   * ロック）に create まで巻き込まれる。チェーン外であることが待ち合わせグラフ上は安全側。
    */
   async #createGenerationContext(spec: GenerationContextSpec): Promise<GenerationContext> {
     const host: GenerationContextHost = {
@@ -1084,6 +1126,11 @@ export class Session {
       },
     };
     const context = await GenerationContext.create(host, spec);
+    if (this.#disposal !== undefined) {
+      // 確保済みぶんを先に返してから fail loudly（黙って生存集合の外へ漏らさない）。
+      await context.dispose();
+      throw new ExecutionError("dispose 済みの Session では GenerationContext を作れない");
+    }
     this.#contexts.add(context);
     this.#contextCount += 1;
     return context;
