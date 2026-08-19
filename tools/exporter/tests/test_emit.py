@@ -1192,3 +1192,121 @@ class TestJsonCompliance:
         restored = json.loads(graph.to_json(), parse_constant=lambda lit: pytest.fail(lit))
 
         assert restored["requires"]["ops"] == ["add"]
+
+
+def mixed_weight_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """linear = i4 / embedding = i8 の混成向けに両方を fake-quant 済みにしたグラフ。
+
+    LLM の「embedding / tied lm_head は i8・linear 本体は i4」（Gemma 4 E2B が初出）の最小形。
+    """
+    graph, tensors, scales = int4_weight_graph(embedding=True)
+    emb_scale = channel_scale(tensors["enc.emb"], 0)
+    tensors["enc.emb"] = quantize_to_int8(tensors["enc.emb"], emb_scale).to(torch.float32) * (
+        emb_scale
+    )
+    scales["enc.emb"] = emb_scale
+    return graph, tensors, scales
+
+
+class TestMixedStorage:
+    """`weight_dtype_overrides` — 1 本単位の明示指定（既定に優先・満たせなければ fail loudly）。"""
+
+    def test_an_override_mixes_i8_into_an_i4_default(self, tmp_path):
+        graph, tensors, scales = mixed_weight_graph()
+
+        path = write_model(
+            tmp_path / "model.safetensors",
+            graph,
+            tensors,
+            weight_dtype="i4",
+            weight_scales=scales,
+            weight_dtype_overrides={"enc.emb": "i8"},
+        )
+
+        declared = verify_model(path).initializers
+        assert declared["w"].storage.dtype == "i4"
+        assert declared["w"].storage.group_size == 16
+        assert declared["emb"].storage.dtype == "i8"
+        assert declared["emb"].storage.scale == "karume.scale.enc.emb"
+        assert declared["b"].storage.dtype == "f32"
+        header = container_header(path)
+        assert header["enc.w"]["dtype"] == "I4"
+        assert header["enc.emb"]["dtype"] == "I8"
+
+    def test_overrides_compress_even_with_a_f32_default(self, tmp_path):
+        """既定 f32 は従来「空プランで即返し」だった — 明示指定だけの圧縮も通ること。"""
+        graph, tensors, scales = mixed_weight_graph()
+
+        path = write_model(
+            tmp_path / "model.safetensors",
+            graph,
+            tensors,
+            weight_scales=scales,
+            weight_dtype_overrides={"enc.emb": "i8"},
+        )
+
+        declared = verify_model(path).initializers
+        assert declared["emb"].storage.dtype == "i8"
+        assert declared["w"].storage.dtype == "f32"
+
+    def test_an_override_to_f32_exempts_a_weight_from_the_default(self, tmp_path):
+        graph, tensors = weight_graph()
+
+        path = write_model(
+            tmp_path / "model.safetensors",
+            graph,
+            tensors,
+            weight_dtype="f16",
+            weight_dtype_overrides={"enc.w": "f32"},
+        )
+
+        declared = verify_model(path).initializers
+        assert declared["w"].storage.dtype == "f32"
+        assert declared["emb"].storage.dtype == "f16"
+
+    def test_an_unknown_override_key_fails_loudly(self, tmp_path):
+        graph, tensors = weight_graph()
+
+        with pytest.raises(EmitError, match="どの initializer のテンソルでもない"):
+            write_model(
+                tmp_path / "model.safetensors",
+                graph,
+                tensors,
+                weight_dtype="f16",
+                weight_dtype_overrides={"enc.typo": "f16"},
+            )
+
+    def test_an_override_on_an_ineligible_weight_fails_loudly(self, tmp_path):
+        """既定 dtype は適格外を静かに f32 へ残すが、明示指定は黙って別の格納にしない。"""
+        graph, tensors = weight_graph(share_weight=True)
+
+        with pytest.raises(EmitError, match="適格でない"):
+            write_model(
+                tmp_path / "model.safetensors",
+                graph,
+                tensors,
+                weight_dtype_overrides={"enc.w": "f16"},
+            )
+
+    def test_an_explicit_i4_on_a_non_linear_weight_fails_loudly(self, tmp_path):
+        graph, tensors, scales = mixed_weight_graph()
+
+        with pytest.raises(EmitError, match="linear の重みスロットだけ"):
+            write_model(
+                tmp_path / "model.safetensors",
+                graph,
+                tensors,
+                weight_scales=scales,
+                weight_dtype_overrides={"enc.emb": "i4"},
+            )
+
+    def test_an_unknown_override_dtype_fails_loudly(self, tmp_path):
+        graph, tensors = weight_graph()
+
+        with pytest.raises(EmitError, match="書き出せない"):
+            write_model(
+                tmp_path / "model.safetensors",
+                graph,
+                tensors,
+                weight_dtype_overrides={"enc.w": "f64"},
+            )

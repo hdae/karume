@@ -5,8 +5,15 @@ convert() の前段で呼ぶ。各パスは `(graph, stats) -> None` の関数�
 
 - `_drop_metadata_asserts`: `aten._assert_tensor_metadata` の削除。eliminate_dead_code は
   これを impure と見なして残すため、置き換え済みの部分木が assert 経由で生き残る。
+- `_pow_neg_half_to_rsqrt`: `pow.Tensor_Scalar(x, -0.5)` → `rsqrt(x)`（定義域全体で同義 —
+  x>0 は同値・x=0 は両者 +inf・x<0 は両者 NaN）。transformers の Gemma4RMSNorm が
+  torch/JAX のコンパイラ差を理由に rsqrt でなく pow で書くため、`_fold_rms_norm` が拾う
+  rsqrt 形へ寄せる。rms_norm に畳まれず残った rsqrt は未対応 op の全件列挙に出る
+  （rsqrt は IR 語彙に無い — 黙って通らない）。
 - `_fold_rms_norm`: `mul(weight, mul(x, rsqrt(mean(x²)+eps)))` → `rms_norm` 1 ノード
   （ADR 0016 / 0017。手書き RMSNorm は preserve では畳めない — FX パターンマッチが要る）。
+  weight 無し形 `mul(x, rsqrt(mean(x²)+eps))` も**weight 付きの畳み込み後に**拾う
+  （Gemma4 の `v_norm` = RMSNorm with_scale=False。ones 合成は `_h_rms_norm` 側）。
 - `_drop_safe_softmax_guard`: SDPA の safe-softmax ガード（`eq(-inf)` / `any.dim` /
   `full_like` / `where`）を畳む。不活性を証明できたら**除去**（ADR 0016）、できなければ
   `safe_softmax` へ**構成的に置換**する（ADR 0044）。
@@ -27,7 +34,8 @@ convert() の前段で呼ぶ。各パスは `(graph, stats) -> None` の関数�
   （recon §4-4。IR 語彙も attrs も増やさない唯一の道）。
 - `_eq_zero_to_not_bool`: `eq(x, 0)` → `bitwise_not(cast(x, bool))`（ADR 0015 の裁定。
   cast 規約「x → bool は x != 0」からの帰結で、新 op を作らずに済む）。
-- `_select_to_squeeze`: `select.int(長さ 1 の軸, 添字 0)` → `squeeze`（汎用衛生）。
+- `_select_to_squeeze`: `select.int(長さ 1 の軸, 添字 0)` → `squeeze`（汎用衛生）。静的な
+  長さ 2 以上の軸は `slice(幅 1) + squeeze` へ開く（Gemma4 の PLE 層別スライスが初出）。
 - `_split_to_slices`: `split_with_sizes` + `getitem` → `slice` の列（ADR 0014。IR に多出力 op が
   無いので、分割は取り出し口ごとの slice に開く）。
 
@@ -35,6 +43,9 @@ MUST: `_fold_rms_norm` は `_pow2_to_mul` と `_promote_scalar_operands` の**�
 走る（ADR 0016 の順序 MUST）。`pow(x,2)` が `mul(x,x)` に潰れてもパターン照合自体は
 `_is_square_of` が両形を見るので生き残るが、`add(mean, eps)` の eps が rank-1 定数へ昇格すると
 Python スカラの照合が外れて畳めなくなる。
+
+MUST: `_pow_neg_half_to_rsqrt` は `_fold_rms_norm` より**先**に走る（matcher は rsqrt 形しか
+見ない — 後だと pow 形の RMSNorm が丸ごと未対応 op 列挙へ落ちる）。
 
 MUST: 鎖 3 パス（rank 下げ）の発火は **rank > STRIDED_RANK の値を含む形に限る**（ADR 0016）。
 既存グラフ（SBV2 / DeBERTa は全て rank ≤ 4）へ誤爆させないための安全線で、新しい定数は
@@ -173,6 +184,44 @@ def _drop_metadata_asserts(graph: Graph, stats: Counter) -> None:
 # ---- RMS 正規化パターンの畳み込み（ADR 0016 / 0017）------------------------
 
 
+def _pow_neg_half_to_rsqrt(graph: Graph, stats: Counter) -> None:
+    """`aten.pow(x, -0.5)` → `rsqrt(x)`（rms_norm パターンの前段正規化）。
+
+    transformers の Gemma4RMSNorm は torch/JAX のコンパイラ差を理由に `rsqrt` でなく
+    `pow(ms, -0.5)` を書く（modeling_gemma4.py の注記）。定義域全体で rsqrt と同義
+    （x>0 は同値・x=0 は両者 +inf・x<0 は両者 NaN — `_is_square_of` が pow/mul の両形を
+    同値と見るのと同じ扱い）。rms_norm に畳まれず残った rsqrt は IR 語彙に無いので
+    未対応 op の全件列挙に出る（黙って近似しない）。
+
+    MUST: dtype 不変を要求する（`_pow2_to_mul` と同文 — 昇格を伴う形は恒等な書き換えで
+    ない）。指数は float の -0.5 だけ（int に -0.5 は無いが、bool 遮断は流儀として揃える）。
+    """
+    for node in list(graph.nodes):
+        if node.op != "call_function" or node.target is not aten.pow.Tensor_Scalar:
+            continue
+        exponent = node.args[1]
+        if isinstance(exponent, bool) or not isinstance(exponent, (int, float)):
+            continue
+        if float(exponent) != -0.5:
+            continue
+        src = node.args[0]
+        if not isinstance(src, Node):
+            continue
+        src_val = src.meta.get("val")
+        out_val = node.meta.get("val")
+        if not isinstance(src_val, torch.Tensor) or not isinstance(out_val, torch.Tensor):
+            continue
+        if src_val.dtype is not out_val.dtype:
+            continue
+        with graph.inserting_before(node):
+            replacement = graph.call_function(aten.rsqrt.default, (src,))
+        # convert は全ノードの meta["val"]（FakeTensor）を要求する。
+        replacement.meta.update(node.meta)
+        node.replace_all_uses_with(replacement)
+        graph.erase_node(node)
+        stats["pow-0.5->rsqrt"] += 1
+
+
 def _eps_operand(node: Any) -> float | None:
     """`add(mean, eps)` の eps を返す（`add.Tensor` のスカラ形と `add.Scalar` の両方）。"""
     if not isinstance(node, Node) or node.op != "call_function":
@@ -234,11 +283,38 @@ def _rms_norm_operands(node: Node) -> tuple[Node, Node, float] | None:
     return None
 
 
+def _weightless_rms_norm_operands(node: Node) -> tuple[Node, float] | None:
+    """`mul(x, rsqrt(mean(x²)+eps))` を (x, eps) に分解する（weight 無し形）。
+
+    Gemma4 の `v_norm`（RMSNorm with_scale=False）が初出。この形は weight 付き形の
+    **内側の mul と同形**なので、当て方は {@link _fold_rms_norm} の第 2 走査（weight 付きの
+    畳み込みで死んだノードを除いた後）に限る — 順序を崩すと weight 付き norm が
+    「weight 無し rms_norm + 裸の mul」に割れて weight の融合が消える。
+    """
+    if node.op != "call_function" or node.target is not aten.mul.Tensor:
+        return None
+    for x, rsqrt in (node.args[:2], node.args[1::-1]):
+        if not isinstance(x, Node) or not isinstance(rsqrt, Node):
+            continue
+        if rsqrt.op != "call_function" or rsqrt.target is not aten.rsqrt.default:
+            continue
+        eps = _eps_operand(rsqrt.args[0])
+        if eps is None:
+            continue
+        mean = rsqrt.args[0].args[0]
+        if not _is_last_dim_mean(mean) or not _is_square_of(mean.args[0], x):
+            continue
+        return x, eps
+    return None
+
+
 def _fold_rms_norm(graph: Graph, stats: Counter) -> None:
     """RMS 正規化の分解形を `aten.rms_norm` 1 ノードへ畳む（ADR 0017 の供給ルート②）。
 
     手書き実装（Qwen3 / DiT）と diffusers `nn.RMSNorm` は core decomp で同じ
-    pow/mean/rsqrt 形に降りるので、供給元を問わず 1 パターンで拾える。
+    pow/mean/rsqrt 形に降りるので、供給元を問わず 1 パターンで拾える。weight 付きを
+    第 1 走査で畳み、weight 無し形（Gemma4 `v_norm`）は**第 2 走査**で拾う
+    （{@link _weightless_rms_norm_operands} — 順序の理由はそちらの docstring）。
 
     MUST: weight が**最終次元長の rank-1** でない形は畳まない。rms_norm の契約は
     「正規化長の正本 = weight の長さ」（ADR 0017）で、broadcast 形の weight を畳むと
@@ -264,6 +340,28 @@ def _fold_rms_norm(graph: Graph, stats: Counter) -> None:
         new.meta.update(node.meta)
         _replace(graph, node, new)
         stats["rms_norm"] += 1
+    # weight 無し形の第 2 走査。weight 付きの畳み込みで内側の mul は users 0 の死体として
+    # 残る（DCE は normalize_graph の末尾）ので、生きているノードだけに当てる MUST —
+    # ここを見ないと畳み込み済み norm の内側を二重に拾って weight の融合を壊す。
+    for node in list(graph.nodes):
+        if node.op != "call_function" or not node.users:
+            continue
+        matched_weightless = _weightless_rms_norm_operands(node)
+        if matched_weightless is None:
+            continue
+        x, eps = matched_weightless
+        x_val = _val(x)
+        length = _static_size(x_val.shape[-1])
+        if length is None:
+            continue
+        if not math.isfinite(eps) or eps <= 0:
+            continue
+        # weight は None のまま渡す（アリティ 2 への ones 合成は `_h_rms_norm` の責務 —
+        # ADR 0017 の「×1 の厳密恒等」をここへ写して二重管理にしない）。
+        new = _insert(graph, node, aten.rms_norm.default, (x, [length], None, eps), x_val)
+        new.meta.update(node.meta)
+        _replace(graph, node, new)
+        stats["rms_norm_weightless"] += 1
 
 
 # ---- safe-softmax ガードの除去（ADR 0016）----------------------------------
@@ -1086,14 +1184,16 @@ def _eq_zero_to_not_bool(graph: Graph, stats: Counter) -> None:
 
 
 def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
-    """`select.int(長さ 1 の軸, 添字 0)` → `squeeze`（汎用衛生 — ADR 0016）。
+    """`select.int`（静的軸）→ `squeeze` / `slice + squeeze`（汎用衛生 — ADR 0016）。
+
+    長さ 1 の軸・添字 0 は従来どおり `squeeze` 1 本（slice を挟まない — 既存モデルの
+    グラフをバイト不変に保つ）。それ以外の静的軸は `slice(幅 1) + squeeze` へ開く
+    （Gemma4 の PLE 層別スライス `per_layer_inputs[:, :, i, :]` が初出。slice は
+    `_h_slice` の静的軸・静的範囲、squeeze は既存の reshape 正規化がそのまま受ける）。
 
     MUST: **記号次元の軸は fail loudly**。長さを export 時のヒント値で採ると「ヒント値 1 の
     記号次元」が squeeze に化け、実行時（ヒント以外の束縛）で無言の誤値になる — 静かに
     間違える形なので、ここで止める以外に検出器が無い。
-    NOTE: 静的で長さ 2 以上の軸は書き換えずに残す（`aten.select.int` として未対応 op の
-    全件列挙に出る）。こちらは黙って間違える形ではないので、診断は 1 度に全部並べる側
-    （ADR 0005）に寄せる。
     """
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target is not aten.select.int:
@@ -1113,13 +1213,23 @@ def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
                 f"記号次元の軸を切る select は未対応: {node.name} dim={raw_dim} index={index}"
                 "（ヒント値で長さを採ると実行時に無言の誤値になる）"
             )
-        if index != 0 or size != 1:
+        if not -size <= index < size:
             continue
+        if index == 0 and size == 1:
+            with graph.inserting_before(node):
+                replacement = graph.call_function(aten.squeeze.dims, (src, [dim]))
+            replacement.meta.update(node.meta)
+            _replace(graph, node, replacement)
+            stats["select->squeeze"] += 1
+            continue
+        # 負添字は torch の select 意味論（-size ≤ index < size）どおり正規化する。
+        start = index % size
+        sliced = _insert(graph, node, aten.slice.Tensor, (src, dim, start, start + 1), src_val)
         with graph.inserting_before(node):
-            replacement = graph.call_function(aten.squeeze.dims, (src, [dim]))
+            replacement = graph.call_function(aten.squeeze.dims, (sliced, [dim]))
         replacement.meta.update(node.meta)
         _replace(graph, node, replacement)
-        stats["select->squeeze"] += 1
+        stats["select->slice+squeeze"] += 1
 
 
 def _split_to_slices(graph: Graph, stats: Counter) -> None:
@@ -1201,7 +1311,9 @@ def _passes(placeholders: _Placeholders) -> tuple[Callable[[Graph, Counter], Non
     """
     return (
         _drop_metadata_asserts,
-        # 高位パターンの畳み込み・除去（元パターンを他のパスが崩す前に走らせる）
+        # 高位パターンの畳み込み・除去（元パターンを他のパスが崩す前に走らせる）。
+        # MUST: pow(-0.5)→rsqrt は _fold_rms_norm より先（matcher は rsqrt 形しか見ない）。
+        _pow_neg_half_to_rsqrt,
         _fold_rms_norm,
         partial(_drop_safe_softmax_guard, placeholders=placeholders),
         _additive_attn_mask,

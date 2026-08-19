@@ -418,6 +418,23 @@ class BroadcastRmsNorm(HandWrittenRmsNorm):
         self.weight = nn.Parameter(torch.linspace(0.5, 1.5, 3).reshape(3, 1))
 
 
+class PowRmsNorm(HandWrittenRmsNorm):
+    """Gemma4 形 — rsqrt でなく `pow(ms, -0.5)`（modeling_gemma4.py が torch/JAX の
+    コンパイラ差を理由に書く形。`_pow_neg_half_to_rsqrt` が前段で寄せる）。"""
+
+    def forward(self, x):
+        return x * (x.pow(2).mean(-1, keepdim=True) + self.EPS).pow(-0.5) * self.weight
+
+
+class WeightlessRmsNorm(nn.Module):
+    """Gemma4 `v_norm`（RMSNorm with_scale=False）— weight 無し形。"""
+
+    EPS = 1e-6
+
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.EPS)
+
+
 class TestFoldRmsNorm:
     def test_the_decomposed_form_becomes_one_rms_norm_node(self):
         graph, _ = export_and_convert(HandWrittenRmsNorm(), (torch.randn(3, 4),))
@@ -447,12 +464,59 @@ class TestFoldRmsNorm:
         assert "aten.mean.dim" in err.value.ops
         assert "aten.rsqrt.default" in err.value.ops
 
-    def test_a_broadcast_weight_is_left_in_the_enumeration(self):
-        """契約は「正規化長の正本 = weight の長さ」— broadcast 形は畳まず落とす。"""
-        with pytest.raises(UnsupportedAtenOpsError) as err:
-            export_and_convert(BroadcastRmsNorm(), (torch.randn(3, 3),))
+    def test_the_pow_form_becomes_one_rms_norm_node(self):
+        """Gemma4 の pow(ms, -0.5) 形も `_pow_neg_half_to_rsqrt` 経由で 1 ノードに畳まれる。"""
+        graph, _ = export_and_convert(PowRmsNorm(), (torch.randn(3, 4),))
 
-        assert "aten.mean.dim" in err.value.ops
+        assert node_ops(graph) == ["rms_norm"]
+        assert only_node(graph, "rms_norm").attrs == {"eps": PowRmsNorm.EPS}
+
+    def test_a_stray_pow_neg_half_surfaces_as_rsqrt_in_the_enumeration(self):
+        """RMSNorm に畳まれない pow(-0.5) は rsqrt になって**未対応 op として落ちる**
+        （rsqrt は IR 語彙に無い — 黙って通らないことの固定）。"""
+
+        class StrayPow(nn.Module):
+            def forward(self, x):
+                return (x * x + 1.0).pow(-0.5)
+
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            export_and_convert(StrayPow(), (torch.randn(3, 4),))
+
+        assert "aten.rsqrt.default" in err.value.ops
+
+    def test_the_weightless_form_becomes_rms_norm_with_synthesized_ones(self):
+        """weight 無し形（Gemma4 v_norm）は rms_norm 1 ノード + ones 合成（×1 の厳密恒等）。"""
+        graph, tensors = export_and_convert(WeightlessRmsNorm(), (torch.randn(3, 4),))
+
+        assert node_ops(graph) == ["rms_norm"]
+        node = only_node(graph, "rms_norm")
+        assert node.attrs == {"eps": WeightlessRmsNorm.EPS}
+        weight_key = graph.initializers[node.ins[1]].tensor
+        assert torch.equal(tensors[weight_key], torch.ones(4))
+
+    def test_a_weighted_norm_never_splits_into_the_weightless_form(self):
+        """第 2 走査（weight 無し）が weight 付き norm の内側 mul を先取りしないこと。
+
+        崩れると rms_norm_weightless + 裸の mul に割れて weight の融合が消える —
+        統計の内訳がそのまま検出器になる。
+        """
+        decomposed = decompose(HandWrittenRmsNorm(), (torch.randn(3, 4),))
+
+        stats = normalize_graph(decomposed)
+
+        assert stats["rms_norm"] == 1
+        assert "rms_norm_weightless" not in stats
+
+    def test_a_broadcast_weight_folds_weightless_and_keeps_its_own_mul(self):
+        """broadcast weight は rms_norm に**入らない**（契約 = 正規化長の正本は weight の
+        長さ）。正規化部だけ weight 無しで畳まれ、broadcast の乗算は裸の mul として残る —
+        意味論は torch と同一のまま、契約外の weight が rms_norm へ混入しないことの固定。"""
+        graph, tensors = export_and_convert(BroadcastRmsNorm(), (torch.randn(3, 3),))
+
+        assert node_ops(graph) == ["rms_norm", "mul"]
+        node = only_node(graph, "rms_norm")
+        weight_key = graph.initializers[node.ins[1]].tensor
+        assert torch.equal(tensors[weight_key], torch.ones(3))
 
 
 class CausalAttention(nn.Module):
@@ -914,17 +978,30 @@ class TestSelectToSqueeze:
         assert node_ops(graph) == ["reshape", "mul"]
         assert graph.values[graph.nodes[0].outs[0]].shape == [2, 3]
 
-    def test_selecting_a_longer_axis_stays_in_the_enumeration(self):
-        """長さ 2 以上の軸の select は squeeze と同値でない — 書き換えず全件列挙に回す。"""
+    def test_selecting_a_longer_axis_becomes_slice_and_reshape(self):
+        """長さ 2 以上の静的軸の select は `slice(幅 1) + squeeze`（Gemma4 の PLE 層別
+        スライスが初出。squeeze は既存の reshape 正規化が受ける）。"""
 
         class SelectRow(nn.Module):
             def forward(self, x):
-                return torch.select(x, 1, 0) * 2.0
+                return torch.select(x, 1, 2) * 2.0
 
-        with pytest.raises(UnsupportedAtenOpsError) as err:
-            export_and_convert(SelectRow(), (torch.randn(2, 3, 4),))
+        graph, _ = export_and_convert(SelectRow(), (torch.randn(2, 3, 4),))
 
-        assert "aten.select.int" in err.value.ops
+        assert node_ops(graph) == ["slice", "reshape", "mul"]
+        assert only_node(graph, "slice").attrs == {"dim": 1, "start": 2, "end": 3}
+        assert graph.values[graph.nodes[1].outs[0]].shape == [2, 4]
+
+    def test_a_negative_select_index_is_normalized(self):
+        """負添字は torch の select 意味論（-size ≤ index < size）どおり正の幅 1 区間へ。"""
+
+        class SelectLast(nn.Module):
+            def forward(self, x):
+                return torch.select(x, 1, -1) * 2.0
+
+        graph, _ = export_and_convert(SelectLast(), (torch.randn(2, 3, 4),))
+
+        assert only_node(graph, "slice").attrs == {"dim": 1, "start": 2, "end": 3}
 
     def test_selecting_a_symbolic_axis_is_rejected(self, dyn_t):
         """記号次元の軸はヒント値で長さを採ると無言の誤値になる — ここで止める。"""

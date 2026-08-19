@@ -521,3 +521,52 @@ class TestInt8FailsLoudly:
 
         with pytest.raises(QuantizeError, match="量子化できない"):
             fake_quant_int8(model)
+
+
+class TestIncludeFilter:
+    """`include`（モジュール FQN の述語）— 混成格納で i8 / i4 の対象を排他に割る口。"""
+
+    def test_int8_only_touches_included_modules(self):
+        model = Weighted()
+        before = model.dense.weight.detach().clone()
+
+        report = fake_quant_int8(model, include=lambda fqn: fqn == "table")
+
+        assert sorted(report.scales) == ["table.weight"]
+        assert torch.equal(model.dense.weight, before)
+
+    def test_int4_only_touches_included_modules(self):
+        model = Grouped()
+        before = model.wide.weight.detach().clone()
+
+        report = fake_quant_int4(model, include=lambda fqn: fqn == "dense")
+
+        assert sorted(report.scales) == ["dense.weight"]
+        assert torch.equal(model.wide.weight, before)
+
+    def test_int8_still_fails_loudly_when_include_drops_everything(self):
+        with pytest.raises(QuantizeError, match="1 本も無い"):
+            fake_quant_int8(Weighted(), include=lambda fqn: False)
+
+    def test_int4_still_fails_loudly_when_include_drops_everything(self):
+        with pytest.raises(QuantizeError, match="1 本も無い"):
+            fake_quant_int4(Grouped(), include=lambda fqn: False)
+
+    def test_an_excluded_module_does_not_trip_the_type_ambiguity_check(self):
+        """include の判定は型検査より先 — 対象外モジュールの曖昧型で落とさない。"""
+        # 軸の違う 2 型（Linear=0 / ConvTranspose1d=1）へ同時に isinstance ヒットする型を
+        # __class__ 差し替えで作る（正規の __init__ 連鎖では合成できない — 型判定だけの模型）。
+        odd = nn.Linear(4, 3)
+        odd.__class__ = type("Odd", (nn.Linear, nn.ConvTranspose1d), {})
+
+        class Holder(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.odd = odd
+                self.table = nn.Embedding(7, 5)
+
+        with pytest.raises(QuantizeError, match="1 つに決まらない"):
+            fake_quant_int8(Holder())
+        report = fake_quant_int8(Holder(), include=lambda fqn: fqn == "table")
+
+        assert sorted(report.scales) == ["table.weight"]

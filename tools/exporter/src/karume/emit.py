@@ -401,6 +401,7 @@ def _plan_weight_dtype(
     tensors: Mapping[str, torch.Tensor],
     weight_dtype: str,
     weight_scales: Mapping[str, torch.Tensor],
+    weight_dtype_overrides: Mapping[str, str],
 ) -> _StoragePlan:
     """適格な重みの圧縮格納を**計画だけ**する（宣言も実体もまだ書き換えない）。
 
@@ -410,37 +411,77 @@ def _plan_weight_dtype(
     （格納 dtype の妥当性・適格判定・scale の有無と形〈i8 = keepdim / i4 = group〉・
     scale キーの衝突・「適格 0 本」）で、実データを読む検査は `_convert_for_storage` が
     書き出し直前に 1 本ずつ受け持つ。
+
+    `weight_dtype_overrides` は**テンソルキー（FQN）→ 格納 dtype** の明示指定（混成格納 —
+    LLM の「embedding は i8・linear は i4」が初出）。既定 `weight_dtype` が適格フィルタで
+    **静かに f32 へ残す**のに対し、明示指定は**満たせなければ fail loudly**（未知キー・
+    適格外・非 f32 実体・i4 × 非 linear のどれも通さない）— 呼び出し側の意図が 1 本単位で
+    書かれている以上、黙って別の格納にする余地は無い。`"f32"` の明示は「圧縮既定からの
+    除外」として使える。
     """
     if weight_dtype not in WEIGHT_DTYPES:
         raise EmitError(
             f"格納 dtype '{weight_dtype}' は書き出せない（{' / '.join(WEIGHT_DTYPES)}）"
         )
+    for key, dtype in weight_dtype_overrides.items():
+        if dtype not in WEIGHT_DTYPES:
+            raise EmitError(
+                f"weight_dtype_overrides['{key}'] の格納 dtype '{dtype}' は書き出せない"
+                f"（{' / '.join(WEIGHT_DTYPES)}）"
+            )
     plan = _StoragePlan(declarations={}, scales={}, conversions={})
-    if weight_dtype == "f32":
+    if weight_dtype == "f32" and not weight_dtype_overrides:
         return plan
     eligible = eligible_compressed_initializers(graph)
-    axes = weight_channel_axes(graph) if weight_dtype == "i8" else {}
-    linear_weights = linear_weight_initializers(graph) if weight_dtype == "i4" else set()
-    # i4 の適格は **linear の重みスロット限定**（ADR 0069 決定 5）— 一般適格でも linear 以外
-    # （embedding / conv 系）の重みは f32 のまま残す。i8 の適格外が f32 で残るのと同じ設計で、
-    # ランタイム側（executor.ts の eligible ∩ linearOnly）と対。ここで交差させないと、
-    # linear + embedding を持つ普通の LLM が「embedding を i4 にできない」で export 不能になる
-    # （Codex 波 F 指摘 I4-ELIG-01）。交差が空なら下の「適格 0 本」診断で落ちる。
-    if weight_dtype == "i4":
-        eligible = eligible & linear_weights
+    initializer_by_key = {graph.initializers[name].tensor: name for name in graph.initializers}
+    unknown = sorted(set(weight_dtype_overrides) - set(initializer_by_key))
+    if unknown:
+        raise EmitError(
+            f"weight_dtype_overrides のキー {unknown} がどの initializer のテンソルでもない"
+            "（FQN の綴りを確認する — 黙って無視すると指定した圧縮が静かに消える）"
+        )
+    for key in sorted(weight_dtype_overrides):
+        if weight_dtype_overrides[key] == "f32":
+            continue
+        name = initializer_by_key[key]
+        if name not in eligible:
+            raise EmitError(
+                f"initializer '{name}' ({key}): 明示指定 '{weight_dtype_overrides[key]}' だが"
+                "適格でない（重みスロット以外の消費がある — 混ざった消費は ADR 0018/0019 の"
+                "適格集合の外）"
+            )
+    requested = {weight_dtype, *weight_dtype_overrides.values()}
+    axes = weight_channel_axes(graph) if "i8" in requested else {}
+    linear_weights = linear_weight_initializers(graph) if "i4" in requested else set()
     reserved = set(tensors)
     for name in sorted(eligible):
         key = graph.initializers[name].tensor
+        dtype = weight_dtype_overrides.get(key, weight_dtype)
+        if dtype == "f32":
+            continue
         tensor = tensors[key]
         if tensor.dtype is not torch.float32:
             # i32 格納（記号依存定数 — ADR 0010）が重みスロットに来ることはないが、来たなら
-            # 意味論ごと違う話なので黙って圧縮格納にしない。
+            # 意味論ごと違う話なので黙って圧縮格納にしない。明示指定なら fail loudly。
+            if key in weight_dtype_overrides:
+                raise EmitError(
+                    f"initializer '{name}' ({key}): 明示指定 '{dtype}' だが実体が"
+                    f" {tensor.dtype}（圧縮格納は f32 実体のみ）"
+                )
             continue
-        if weight_dtype == "f16":
+        # i4 の適格は **linear の重みスロット限定**（ADR 0069 決定 5）— 既定 i4 では linear
+        # 以外（embedding / conv 系）を f32 のまま静かに残す。i8 の適格外が f32 で残るのと
+        # 同じ設計で、ランタイム側（executor.ts の eligible ∩ linearOnly）と対。ここで
+        # 除外しないと、linear + embedding を持つ普通の LLM が「embedding を i4 にできない」
+        # で export 不能になる（Codex 波 F 指摘 I4-ELIG-01）。明示指定の i4 × 非 linear は
+        # `_plan_i4` 自身の門が fail loudly で受ける。
+        if dtype == "i4" and key not in weight_dtype_overrides and name not in linear_weights:
+            continue
+        if dtype == "f16":
             declaration = IrInitializer(tensor=key, storage=IrStorage(dtype="f16"))
             conversion = _Conversion(dtype="f16", name=name)
         else:
-            if weight_dtype == "i8":
+            if dtype == "i8":
                 scale_key, scale, declaration = _plan_i8(
                     graph, reserved, name, tensor, weight_scales, axes
                 )
@@ -450,12 +491,15 @@ def _plan_weight_dtype(
                 )
             plan.scales[scale_key] = scale
             reserved.add(scale_key)
-            conversion = _Conversion(dtype=weight_dtype, name=name, scale=scale)
+            conversion = _Conversion(dtype=dtype, name=name, scale=scale)
         plan.conversions[key] = conversion
         plan.declarations[name] = declaration
     committed = {**graph.initializers, **plan.declarations}
-    if not any(init.storage.dtype == weight_dtype for init in committed.values()):
+    if weight_dtype != "f32" and not any(
+        init.storage.dtype == weight_dtype for init in committed.values()
+    ):
         # ADR 0006 の「圧縮指定なのに適格 0MB を沈黙させない」をエクスポータ側でも張る。
+        # 明示指定側は 1 本単位で計画済みか fail loudly 済みなので、ここで見るのは既定だけ。
         raise EmitError(
             f"格納 {weight_dtype} を指定したが適格な重みスロットが 1 本も無い"
             f"（融合 op の重みを持たないグラフに {weight_dtype} を指定していないか確認する）"
@@ -674,12 +718,18 @@ def write_model(
     *,
     weight_dtype: str = "f32",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
+    weight_dtype_overrides: Mapping[str, str] | None = None,
 ) -> Path:
     """グラフと格納テンソルを 1 ファイルに書き、書いたパスを返す。
 
     `weight_dtype` が `"f16"` / `"i8"` / `"i4"` のとき、**適格な重みスロットだけ**が圧縮格納に
     なる（宣言と実体が 1 経路で決まる — 別々に決めると「宣言 f16 / 実体 f32」の沈黙誤読が
     作れる）。i4 の適格は linear の重みスロット限定（ADR 0069 決定 5）。
+
+    `weight_dtype_overrides`（テンソルキー → 格納 dtype）は 1 本単位の明示指定で、既定
+    `weight_dtype` に**優先**する（混成格納 — 意味と fail loudly の線引きは
+    `_plan_weight_dtype` の docstring）。scale が要る dtype を混ぜるときは `weight_scales` に
+    i8 / i4 の台帳を**合流して**渡す（キー空間が FQN で重ならないので 1 つの Mapping で足りる）。
 
     MUST: 「計画（実データを読まない検査）→ データ節を 1 本ずつ変換しながら流す →
     全バイトを書き終えてから宣言を commit」の 3 段で進める。
@@ -712,7 +762,9 @@ def write_model(
         )
     out = Path(path)
     contiguous = {key: value.detach().contiguous() for key, value in tensors.items()}
-    plan = _plan_weight_dtype(graph, contiguous, weight_dtype, weight_scales or {})
+    plan = _plan_weight_dtype(
+        graph, contiguous, weight_dtype, weight_scales or {}, weight_dtype_overrides or {}
+    )
     source = {**contiguous, **plan.scales}
     committed = replace(graph, initializers={**graph.initializers, **plan.declarations})
     _save_ordered(

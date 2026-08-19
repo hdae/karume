@@ -51,6 +51,7 @@ def export_to_file(
     symbol_names: Sequence[str] = ("T",),
     weight_dtype: str = "f32",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
+    weight_dtype_overrides: Mapping[str, str] | None = None,
     preserved: Sequence[str] = PRESERVED_OP_PREFIXES,
 ) -> IrGraph:
     """変換して書き出し、書いたファイルを IR v1 の全規則で検証して返す。
@@ -58,7 +59,9 @@ def export_to_file(
     `weight_dtype` が `"f16"` / `"i8"` のとき適格な重みスロットだけが圧縮格納になる
     （ADR 0018 / 0019）。呼び出し側は**丸め（fake-quant）を参照・golden の採取より前に
     済ませておく** MUST — 掛け忘れは write_model が fail loudly で落とす（emit.py の適格判定）。
-    `weight_scales` は i8 のときの per-channel scale 台帳（`quantize.fake_quant_int8` の戻り）。
+    `weight_scales` は i8 / i4 の scale 台帳（`quantize.fake_quant_int8` / `fake_quant_int4` の
+    戻り — 混成では両者を合流して渡す）。`weight_dtype_overrides`（テンソルキー → dtype）は
+    1 本単位の明示指定で既定に優先する（混成格納 — 線引きは `emit._plan_weight_dtype`）。
 
     MUST: 書き出しの直後に verify_model を通す — 「書けたが読めない」ファイルを
     配布物として残さないための門（ADR 0005 の fail loudly 規律）。門を実効にするため、
@@ -81,7 +84,14 @@ def export_to_file(
     # 一意 suffix — 同じ final を狙う別プロセス / 別ターゲットの一時ファイルと衝突させない。
     staged = final.with_name(f"{final.name}.{uuid4().hex}.partial")
     try:
-        write_model(staged, graph, tensors, weight_dtype=weight_dtype, weight_scales=weight_scales)
+        write_model(
+            staged,
+            graph,
+            tensors,
+            weight_dtype=weight_dtype,
+            weight_scales=weight_scales,
+            weight_dtype_overrides=weight_dtype_overrides,
+        )
         verified = verify_model(staged)
         os.replace(staged, final)
     except BaseException:

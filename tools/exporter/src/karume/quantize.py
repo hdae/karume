@@ -16,7 +16,7 @@ per-channel scale そのものがずれる（値は全要素で変わる）。
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -157,22 +157,32 @@ def quantize_to_int8(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return torch.round(weight / scale).clamp_(-INT8_MAX, INT8_MAX).to(torch.int8)
 
 
-def fake_quant_int8(model: nn.Module) -> Int8Report:
+def fake_quant_int8(model: nn.Module, include: Callable[[str], bool] | None = None) -> Int8Report:
     """重みスロットを持つモジュールの重みを per-channel symmetric int8 の表現可能値へ丸める。
 
     対象は {@link QUANT_CHANNEL_AXES} に載る型のモジュールの `weight` だけ — bias も norm 系
     weight も**触らない**（bias は常に f32 が ADR 0006 の根治形で、量子化の対象に載せた瞬間に
     プロトタイプの降格バグが再来する）。
 
+    `include` は**モジュール FQN**（`named_modules` の名前）の述語（None = 全対象）。混成格納
+    （例: embedding は i8・linear は i4）で対象を割るための口。MUST: 混成では i8 / i4 の対象を
+    **排他に**割る — tied 重み（lm_head = embed_tokens）を両方に通すと二重丸めになり、後に
+    走った側の丸めだけが値に残って先の scale 台帳が実値と食い違う。
+
     MUST: 呼ぶ順序は「実効重みが確定した後・参照/golden の採取より前」（モジュール docstring）。
 
     戻り値の scale 台帳は emit へそのまま渡す。1 本も量子化できなかった場合は fail loudly —
-    「`--dtype i8` を指定したのに実質 f32 で書けてしまった」を沈黙させないため（ADR 0006）。
+    「`--dtype i8` を指定したのに実質 f32 で書けてしまった」を沈黙させないため（ADR 0006・
+    `include` が全対象を落とした場合も同じ）。
     """
     scales: dict[str, torch.Tensor] = {}
     elements = 0
     with torch.no_grad():
         for name, module in model.named_modules():
+            # include の判定は _channel_axis より先 — 対象外モジュールの型曖昧性
+            # （複数型ヒット）で落とさない。
+            if include is not None and not include(name):
+                continue
             axis = _channel_axis(module)
             if axis is None:
                 continue
@@ -304,22 +314,33 @@ def dequantize_int4(quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tenso
     return (grouped * scale.unsqueeze(-1)).reshape(quantized.shape)
 
 
-def fake_quant_int4(model: nn.Module, group_size: int = DEFAULT_GROUP_SIZE) -> Int4Report:
+def fake_quant_int4(
+    model: nn.Module,
+    group_size: int = DEFAULT_GROUP_SIZE,
+    include: Callable[[str], bool] | None = None,
+) -> Int4Report:
     """`nn.Linear` の重みを K 方向 group symmetric int4 の表現可能値へ丸める（ADR 0069）。
 
     対象が **`nn.Linear` の `weight` だけ**なのは、i4 の実行経路が linear の重みスロット限定で
     始まるから（ADR 0069 決定 5 — i8 の {@link QUANT_CHANNEL_AXES} 全 5 種とは対象が違う。
     embedding などの追補は需要が出た op から）。bias も norm 系 weight も触らない。
 
+    `include` は**モジュール FQN** の述語（None = 全対象）— 意味と排他 MUST は
+    {@link fake_quant_int8} と同文。tied lm_head（= embed_tokens で embedding 側も消費）は
+    i4 不適格（emit の linear 限定）なので、混成では include で i4 から外して i8 側へ割る。
+
     MUST: 呼ぶ順序は「実効重みが確定した後・参照/golden の採取より前」（モジュール docstring）。
 
     戻り値の scale 台帳は emit へそのまま渡す。1 本も量子化できなかった場合は fail loudly —
-    「`--dtype i4` を指定したのに実質 f32 で書けてしまった」を沈黙させないため（ADR 0006）。
+    「`--dtype i4` を指定したのに実質 f32 で書けてしまった」を沈黙させないため（ADR 0006・
+    `include` が全対象を落とした場合も同じ）。
     """
     scales: dict[str, torch.Tensor] = {}
     elements = 0
     with torch.no_grad():
         for name, module in model.named_modules():
+            if include is not None and not include(name):
+                continue
             # 完全一致ではなく isinstance で拾う（実モデルは nn.Linear の薄い派生を使う —
             # `_channel_axis` と同じ理由）。
             if not isinstance(module, nn.Linear):

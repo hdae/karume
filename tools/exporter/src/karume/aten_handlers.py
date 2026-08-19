@@ -715,7 +715,8 @@ def _h_rms_norm(node: Node) -> Emitted:
 
     供給ルートは 2 系統（ADR 0017）: diffusers `nn.RMSNorm` 由来の `aten.rms_norm` を
     PRESERVED で残した形と、手書き分解形を `normalize._fold_rms_norm` が畳んだ形。畳んだ側は
-    常に weight 付き・eps 明示で来るので、weight 無し / eps 無しの分岐は前者だけが踏む。
+    eps 明示で来る（eps 無しの分岐は前者だけが踏む）。weight 無しは両系統にある —
+    畳み側は Gemma4 `v_norm`（with_scale=False）の weight 無し形も weight=None で畳む。
 
     MUST: 正規化軸は最終次元 1 本のみ・weight は最終次元長の rank1（契約 — 正規化長の正本は
     weight の長さ）。`normalized_shape` は IR に載せない（二重管理にしない）。
