@@ -738,7 +738,16 @@ def run_dit(args: argparse.Namespace) -> DitRun:
 
         started = time.perf_counter()
         result = reference_steps(
-            model, latents, embeds, embeds, sigmas, args.resolution, args.steps, GUIDANCE
+            model,
+            latents,
+            embeds,
+            embeds,
+            sigmas,
+            # `reference_steps` は Anima family 移行（c84dd07）から (width, height) を受ける —
+            # int のままだと展開で TypeError（known-issues 2026-08-19 解消分・正方形前提）。
+            (args.resolution, args.resolution),
+            args.steps,
+            GUIDANCE,
         )
         for key, value in result.items():
             if key.startswith("latents_"):
@@ -1394,7 +1403,7 @@ def main() -> None:
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--out", type=Path, required=True, help="レポートと画像の出力先")
     parser.add_argument("--steps", type=int, default=10, help="turbo の step 数")
-    parser.add_argument("--resolution", type=int, default=512)
+    parser.add_argument("--resolution", type=int, default=512, help="正方形の一辺（px）")
     parser.add_argument("--max-sequence-length", type=int, default=512)
     parser.add_argument("--lora", type=Path, default=DEFAULT_LORA, help="DiT へ焼き込む LoRA")
     parser.add_argument("--lora-scale", type=float, default=1.0)
