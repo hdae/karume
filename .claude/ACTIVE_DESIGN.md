@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-18
+> Last updated: 2026-08-19
 
 ## Now
 
@@ -42,7 +42,14 @@
   exporter 発行（`61483e2` — nibble pack・逆変換門・検出器 3 点・**書き出し順は整列降順
   F32,I32,I4,F16,I8 に訂正**〈ADR 0069 追記 2〉・verify 自前リーダ化）+ runtime 実行
   （`a690057` — 適格 = linear 限定・`:wi4g<N>` 変種・capability 両側開放・GPU 門 5 本）。
-  **実モデル w4 検収は波 H（Gemma 4 E2B）で**。**次 = 波 G（shard + admission — ADR 0070）**。
+  **実モデル w4 検収は波 H（Gemma 4 E2B）で**。**波 G 済（shard + admission — ADR 0070・
+  2026-08-19）**: hub 2 相 `streamAssets`（`3ab4d45`）+ format shard 進行検証（`00d94f0`）+
+  shard 消費 Session 構築（`1fcadbb` — **全量面も 1 shard の列として同一経路**・errorScope
+  shard 単位・SessionState は graph のみ保持）+ admission estimator（`3240f18` —
+  GPU 非依存・比較はしない）。RAM ピーク実測 8.4→3.5GiB
+  （[research](../docs/research/2026-08-19-shard-load-ram-peak.md)）。manifest の shard 欄と
+  exporter 分割は R1 送り（shard 面の消費者は当面ローカル実験限定 — limitations）。
+  **次 = 波 H（Gemma 4 E2B 検収 — 実モデル w4 込み）**。
   送り: L8 fake-device 注入面は保留継続。
 
 ## Open decisions

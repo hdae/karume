@@ -165,6 +165,22 @@ i8 は `storage.scale`（重みと同 rank の keepdim broadcast 形・F32）の
 チャネル軸は出力チャネル（`conv_transpose1d` だけ軸 1）。scale の欠落・dtype 違い・
 broadcast できない形・実テンソルとの名前衝突・チャネル軸違いはすべてロード時に落ちる。
 
+## shard 逐次面の消費者は当面ローカル実験に限られる（manifest の shard 欄は R1）
+
+runtime の `createSessionFromShards` と hub の `streamAssets`（ADR
+[0070](decisions/0070-shard-loading-admission.md) — 2026-08-19 実装）は動くが、**manifest v2 に
+shard の欄がまだ無い**ため HF 配布資産は単一ファイルのまま（欄の確定は R1・HF 公開前締切 —
+hub は 2 形パースをしない = ADR 0041）。shard 列は手元で組んだ `FileRef` 列 / ファイル列を
+渡す形でだけ使える。exporter も shard 分割を**吐かない**（co-shard を吐く側の保証は R1 と
+同席 — リーダ側の co-shard / 完全性検査は実装済み）。付帯の制約 2 点:
+
+- hub の相 1（streaming prefetch）は CacheStorage 必須で fail loud（バイト列を手元に持たない
+  面なので素 fetch へ縮退する余地が無い — ADR 0070 追記）。`onCacheError` 診断が届くのは
+  相 2 のみ。
+- `estimateSessionMemory` の `transientBytes` は**近似**（融合前ノード列の生存区間
+  シミュレーション）。融合・行ブロック分割・params は `unaccounted` 欄が明示する非勘定で、
+  可否の最終門はこれまでどおり out-of-memory errorScope。
+
 ## 要素数が奇数の f16 テンソル・I8 テンソルは safetensors 上の並び順に制約がある
 
 裁定の正本は ADR [0063](decisions/0063-safetensors-physical-layout.md)。リーダはデータ節の

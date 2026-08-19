@@ -114,3 +114,41 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
   走る門（既存門の shard 版）③RAM ピーク実測（全量比で O(最大 shard) に落ちること）
   ④errorScope 区間の再設計後も無効バッファ / 整列違反の注入が検出されること（0004 門の
   shard 版）⑤宣言完全性の shard 横断検査（欠け・余剰の注入）。
+
+## 追記
+
+- 2026-08-19（波 G 実装 — 決定 1〜5 の具現で確定した面）:
+  - **hub（決定 2）**: `streamAssets(loaded, refs: FileRef[], options)` —
+    `AsyncGenerator<{path, bytes}>`。yield は入力順・空 / 重複 path は network に出る前に拒否。
+    相 1 は fetch-cache 0.4 の streaming prefetch（sha256 通過中照合 — 不一致はエントリ不成立）で、
+    `caches` 不在・キャッシュ書込み失敗は fail loud（バイト列を手元に持たない面に素 fetch 縮退の
+    余地は無い。`onCacheError` 診断が届くのは相 2 のみ）。相 2 の sha256 照合は従来の validate
+    フック経由で**キャッシュヒットにも走る**（非交渉条件の維持 — prefetch が焼く検証済み
+    マーカーは読まない。将来 opt-down する場合の席としてだけ残る）。
+  - **runtime（決定 3）**: `createSessionFromShards(gpu, shards: AsyncIterable<Uint8Array>,
+    options)`。最初の shard = グラフ shard（`karume_ir` 必須）・後続への `karume_ir` 再登場は
+    fail loudly・bytes は buffer 全体を占める view MUST。**全量面 `createSession` は「1 shard の
+    列」として同一経路で構築**する — 受入①は 2 面が経路を共有することの帰結で、A/B 門
+    （`gpu_shard_session_test.ts`）は分割粒度の差だけを検査する。エラーの帰属ラベルは全量面 =
+    従来どおり「重みのアップロード」・shard 面 =「shard [n] の重みアップロード」。SessionState は
+    graph のみを保持し file を掴まない（全量面でも構築後は配布バッファを固定しない）。
+  - **format（決定 1）**: 宣言完全性（欠け全件列挙）・余剰・shard 横断重複・co-shard 違反は
+    container.ts の shard 進行検証（`createShardValidator`）が持ち、`openModel` も同じ経路に
+    一本化した（検査の二重実装なし）。
+  - **admission（決定 5）**: `estimateSessionMemory(model, {bindings?, generation?})` —
+    GPU 非依存の純関数。カテゴリ写像: resident weights（圧縮 + 展開）→
+    `compressedWeightBytes`（↔ 診断 `storage.residentCompressedBytes` と厳密一致）/
+    `uncompressedWeightBytes`（f32 / i32 — 診断対象外なので別欄）/ `expandedWeightBytes`
+    （↔ `storage.hostExpandedBytes`）。state スロット → `stateBytes`（↔
+    `stateBacking.residentBytes`）。staging → `ioBytes`。prepared backing / transients →
+    `transientBytes` 1 欄に統合（同じ slot 表の必要側。融合前ノード列の生存区間
+    シミュレーション = **近似**）。unaccounted 欄は見積り出力側に持つ。
+    **`SessionDiagnostics` への欄追加は不要と裁定** — 実測側の対応欄（`storage.*` /
+    `stateBacking` / `planBacking` / `lastRun.peakTransientBytes`）が既に完備で、決定 5 の
+    「〜まで」は上限であって義務ではない（対応表の正本は estimate.ts の docstring）。
+  - **受入④の実装形**: 実 GPU で validation を人工発火させる注入口が無い（巨大確保が要る）ため、
+    shard 版の門は「validator 注入群（欠け・余剰・重複・co-shard・整列は safetensors パーサ門）+
+    途中失敗後のスコープ残高検査 + 同一 device での再構築成功 + 既存 poppingDevice 単体門」の
+    高度で張った（現行の重みアップロード 0004 門と同じ高度）。
+  - **R1 への送り**: exporter 側の shard 分割規則（co-shard を吐く側の保証）と manifest の
+    shard 欄は R1 のまま。shard 面の消費者がローカル実験に限られる状況も不変。

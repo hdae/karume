@@ -61,7 +61,12 @@ QK/PV 全数 :gqa・cachedPlans=2 安定〉・`1325546` docs・`e92bcbc` Codex �
 書き出し順訂正 = 整列降順 F32,I32,I4,F16,I8 = ADR 0069 追記 2・verify 自前リーダ化〉・
 `a690057` runtime 実行〈linear 限定適格・:wi4g\<N\> 変種・capability 開放・GPU 門 5 本 =
 CPU/GPU ビット一致込み〉。実モデル w4 検収は波 H で）**
-→ G = shard + admission → H = Gemma 4 E2B 検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで
+→ **G = shard + admission（済 2026-08-19 — `3ab4d45` hub 2 相 streamAssets・`00d94f0`
+shard 進行検証〈完全性・co-shard・横断重複〉・`1fcadbb` shard 消費 Session 構築〈全量面と
+経路統合・errorScope shard 単位・SessionState は graph のみ〉・`3240f18` admission
+estimator。RAM ピーク実測 8.4→3.5GiB =
+[research](research/2026-08-19-shard-load-ram-peak.md)・manifest shard 欄と exporter 分割は
+R1 送り = ADR 0070 追記）** → H = Gemma 4 E2B 検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで
 先送り / 検収は固定 token id 列の parity（tokenizer・models パイプライン本格化は波外）。
 **以下の番号項目は実装波の作業台帳として残る（設計の正本は各 ADR）**。前提の宣言として **R2（shape 不変条件）を最初の
 ADR に含める**: 恒久不変条件は「静的物理格納・固定 rank・計画キャッシュの鍵は常に容量」まで —
@@ -83,9 +88,11 @@ IR スキーマに予約する。実装は最初の実需モデルまで先送�
    （1 要素 = 1 payload 要素の現契約を破る初の格納形）+ safetensors shard + 全量 ArrayBuffer
    保持の廃止（shard 単位 fetch → verify → upload → 解放）。**packed 格納（w4 = `i4`）は
    波 F で全面済**（reopen = ADR 0069・Phase 0 sweep・format 層・emit・runtime 実行 —
-   2026-08-18）。**残 = shard + 全量保持廃止（波 G — ADR 0070）**。
-3. **メモリ予算 / admission**: resident weights + 展開分 + KV + prepared backing + transients +
-   staging の estimator + 診断（絶対保証ではない）。
+   2026-08-18）。**shard + 全量保持廃止も波 G で済**（2026-08-19 — ADR 0070。残 =
+   manifest の shard 欄 + exporter 側の分割規則で、どちらも R1 と同席）。
+3. **メモリ予算 / admission（済 — 波 G 2026-08-19）**: `estimateSessionMemory`（GPU 非依存・
+   カテゴリ別必要量 + unaccounted 欄・比較や可否判定はしない）。SessionDiagnostics への
+   欄追加は不要の裁定（実測側は既存欄で完備 — ADR 0070 追記）。
 4. **decode 出口（済 — 波 B 2026-08-17）**: GPU `argmax`（`cbe093a`）+ static-k `topk`
    （`50871e3`）。runtime の generic multi-output は列化 2 段（`3a31544` / `9a795a7`）で消化・
    0 本席（effect op）は波 D `5662c9a` で入居。**残: token-only 既定出口**（ADR 0068 決定 4 の
