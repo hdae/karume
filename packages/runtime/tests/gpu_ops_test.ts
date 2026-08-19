@@ -1,12 +1,18 @@
 // 実 GPU 実行 vs CPU 参照の数値突合（ADR 0005 の段 2）。M0 の全 op を代表 shape で回す。
 // MUST: 乱数を使わない — 失敗が再現しないと原因の切り分けができない。
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assertEquals, assertNotEquals, assertRejects, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
+import { TOPK_WORKGROUP_SIZE } from "../src/kernels/topk.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
-import { applyReferenceOp, applyReferenceOpOutputs, type RefTensor } from "../src/reference/ops.ts";
+import {
+  applyReferenceOp,
+  applyReferenceOpOutputs,
+  type RefTensor,
+  refTensor,
+} from "../src/reference/ops.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import {
@@ -35,6 +41,13 @@ import {
 } from "./helpers/gpu_op_cases.ts";
 import { fill, graphModelBuffer, outputName, singleOpGraph } from "./helpers/graph.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import {
+  type RankMutation,
+  type RankPipelineCache,
+  runArgmaxDirect,
+  runTopkDirect,
+} from "./helpers/rank-dispatch.ts";
+import { assertMutated } from "./helpers/state-dispatch.ts";
 
 /**
  * 1 ケースを実 GPU で走らせ、**出力 slot 昇順の列**を返す（ADR 0068 決定 1）。単一出力 op では
@@ -676,6 +689,243 @@ Deno.test({
         );
       } finally {
         await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 故障注入（ADR 0068 受入条件③）— argmax / topk の門が**実際に検出器**であることの実証。
+ *
+ * MUST: Session 経由（{@link runOutputs}）では撃てない。`PipelineCache` は**キー**でキャッシュ
+ * するので、変異版 WGSL を流し込む口が無い（口を作っても正常版のパイプラインが配られる）。
+ * ここは `helpers/rank-dispatch.ts` の直接 dispatch で、**最終 WGSL 文字列**をキーにした
+ * キャッシュを使う（states 形の `helpers/state-dispatch.ts` と同じ流儀）。
+ *
+ * MUST: 入力は**両系統**を用意する。P2E の実測（`.claude/reviews/2026-08-19_b04f589/findings/
+ * P2E-topk-merge-fuzz.md` §3・18,000 ケース）が示すとおり、topk の変異は検出できる入力の族が
+ * 相補的で、片方だけでは変異が**常に緑**になる:
+ *
+ * - **単一レーン入力**（上位 k 本が全て `i ≡ l (mod W)`）でしか③（レーン局所挿入の末尾比較）は
+ *   出ない — 上位 k 本が 1 レーンに載らないと局所リストが溢れず、末尾比較そのものが働かない。
+ * - **分散入力**（同値がレーンに散る）でしか①②（カーソル前進・tie 分岐）は出ない — 単一レーンが
+ *   全ラウンド勝つ入力ではカーソル前進の分岐が無害化し、tie も起きない。
+ *
+ * 本テストでもその相補性を再現した（2026-08-19 実測 / RTX 3080 Ti）: ①を単一レーン入力へ、
+ * ③を分散入力へ当てるとどちらも緑（= 検出できず）になる。
+ *
+ * NOTE: 検討したが**入れなかった**変異が 2 本ある（恒真テストを置かないため。同上の実測）:
+ *
+ * - **topk の最終 `workgroupBarrier()` 削除**: rows=256・dim=320・k=16 の 20 回試行で
+ *   mismatch 0。W=32 は NVIDIA の warp 幅そのもので workgroup が lockstep 実行されるため、
+ *   `won` の読みと次ラウンドの `head` 上書きが競合しない。P2E §4-1 の「逐次シミュレートでは
+ *   原理的に検出不能」は、この機では**実 GPU でも同じ**という実測。
+ * - **argmax の番兵 `dim` → `0`**: 番兵が答えに効くのは行の最大値が −inf のとき（= 全要素が
+ *   −inf）だけで、その行の正解添字は 0 なので**変異版も同じ 0** を返す。原理的に値へ出ない。
+ *   代わりに同じ MUST（有限 sentinel 禁止 — src/kernels/argmax.ts）を撃つ**番兵値**の変異
+ *   （`neg_inf` → `0.0`）を置いた。こちらは全負値の行で番兵 index `dim` が出力へ漏れる。
+ */
+type RankInjection = {
+  readonly label: string;
+  readonly mutate: RankMutation;
+};
+
+/** WGSL の該当箇所を書き換える（空振り = 文言変更で置換対象が消えた形は `assertMutated`）。 */
+const injectRank = (from: string, to: string): RankMutation => (wgsl) => {
+  const mutated = wgsl.replaceAll(from, to);
+  assertMutated(wgsl, mutated, from);
+  return mutated;
+};
+
+/** topk の故障注入 1 件（どの入力系統で撃つかまで含めて 1 件 — 上の相補性）。 */
+type TopkInjection = RankInjection & { readonly input: TopkFaultInput };
+
+type TopkFaultInput = {
+  readonly rows: number;
+  readonly dim: number;
+  readonly k: number;
+  readonly data: Float32Array<ArrayBuffer>;
+};
+
+/**
+ * 分散入力（`W = 32` の 3 周ぶん）。行 0 = 全要素同値、行 1 = 8 要素ずつの同値ブロックが
+ * レーン境界を跨ぐ形。どちらも「同値の集合から k 本を最小 index 順で取る」ので、カーソル前進を
+ * 1 レーンでも余計に進めると答えが飛ぶ。
+ */
+const TOPK_SPREAD_INPUT: TopkFaultInput = {
+  rows: 2,
+  dim: 96,
+  k: 8,
+  data: Float32Array.from(
+    Array.from({ length: 2 * 96 }, (_, i) => (i < 96 ? 7.5 : -Math.floor((i - 96) / 8))),
+  ),
+};
+
+/**
+ * 単一レーン入力（上位 5 本が全て `i ≡ 7 (mod 32)` = レーン 7 の担当）。k=3 なのでレーン 7 の
+ * 局所リストは 5 候補で 2 回溢れ、末尾比較が実際に候補を捨てる経路に乗る。
+ */
+const TOPK_SINGLE_LANE_INPUT: TopkFaultInput = {
+  rows: 1,
+  dim: 160,
+  k: 3,
+  data: Float32Array.from(
+    Array.from({ length: 160 }, (_, i) => (i % 32 === 7 ? 9 - (i - 7) / 32 : -1)),
+  ),
+};
+
+const TOPK_INJECTIONS: readonly TopkInjection[] = [
+  // ① 勝った要素の持ち主だけが進むカーソルを**全レーン前進**にする（merge の中核）
+  {
+    label: "カーソル前進条件を恒真にする",
+    input: TOPK_SPREAD_INPUT,
+    mutate: injectRank(`won % ${TOPK_WORKGROUP_SIZE}u == lid`, "true"),
+  },
+  // ② 勝者述語の tie 分岐を反転（最小 index 規範 → 最大 index）
+  {
+    label: "tie 分岐を ib > ia へ反転",
+    input: TOPK_SPREAD_INPUT,
+    mutate: injectRank("(vb == va && ib < ia)", "(vb == va && ib > ia)"),
+  },
+  // ③ レーン局所挿入の末尾（最弱）比較を 1 つ手前へずらす（k 本目が入らなくなる）
+  {
+    label: "レーン局所挿入の末尾比較を 1 ずらす",
+    input: TOPK_SINGLE_LANE_INPUT,
+    mutate: injectRank(
+      `block + ${TOPK_SINGLE_LANE_INPUT.k - 1}u`,
+      `block + ${TOPK_SINGLE_LANE_INPUT.k - 2}u`,
+    ),
+  },
+];
+
+/**
+ * argmax の故障注入用の行。0 = NaN 混在（NaN 分岐の検出線）/ 1 = 全負値（番兵値の検出線 —
+ * 有限 sentinel なら番兵 index `dim` が漏れる）/ 2 = 全 −inf（identity の順位が効く行）。
+ * `dim = 8 < 256` なので**担当要素を持たないレーン**が居る = 番兵がそのまま木へ入る。
+ */
+const ARGMAX_FAULT_INPUT = {
+  rows: 3,
+  dim: 8,
+  data: Float32Array.from([
+    1,
+    Number.NaN,
+    3,
+    Number.NaN,
+    2,
+    0,
+    -1,
+    5,
+    -5,
+    -2,
+    -9,
+    -2,
+    -7,
+    -3,
+    -4,
+    -8,
+    ...Array.from({ length: 8 }, () => Number.NEGATIVE_INFINITY),
+  ]),
+};
+
+const ARGMAX_INJECTIONS: readonly RankInjection[] = [
+  // ① identity の**値**を有限 sentinel にする（番兵 index が [0, dim) の外へ漏れる）
+  {
+    label: "行 max の identity を有限 sentinel にする",
+    mutate: injectRank("var best = neg_inf;", "var best = 0.0;"),
+  },
+  // ② 述語から NaN 分岐を落とす（NaN は比較で全て false になり黙って負ける）
+  {
+    label: "argmax_beats の NaN 分岐を削除",
+    mutate: injectRank(
+      [
+        "  let na = is_nan_bits(va);",
+        "  let nb = is_nan_bits(vb);",
+        "  if (na != nb) {",
+        "    return nb;",
+        "  }",
+        "  if (na) {",
+        "    return ib < ia;",
+        "  }",
+        "",
+      ].join("\n"),
+      "",
+    ),
+  },
+];
+
+/** topk の 2 出力を 1 つの比較対象へ畳む（片方だけ見る形を潰す）。 */
+const topkPair = (
+  result: { readonly values: Float32Array; readonly indices: Int32Array },
+): readonly (readonly number[])[] => [[...result.values], [...result.indices]];
+
+const referenceTopkPair = (input: TopkFaultInput): readonly (readonly number[])[] => {
+  const expected = applyReferenceOpOutputs(
+    "topk",
+    [refTensor([input.rows, input.dim], input.data)],
+    { k: input.k },
+  );
+  return [[...expected[0].data], [...expected[1].data]];
+};
+
+Deno.test({
+  name: "故障注入: argmax / topk の変異版はいずれも参照突合で赤くなる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const cache: RankPipelineCache = new Map();
+    try {
+      // 正常版が期待値と一致することが前提（ここが赤なら「変異版が不一致」は何の証拠にもならない）
+      for (const input of [TOPK_SPREAD_INPUT, TOPK_SINGLE_LANE_INPUT]) {
+        const actual = await runTopkDirect(gpu.device, input, input.data, { cache });
+        assertEquals(
+          topkPair(actual),
+          referenceTopkPair(input),
+          `正常版の topk（dim=${input.dim} k=${input.k}）が CPU 参照と違う`,
+        );
+      }
+      const argmaxExpected = [
+        ...applyReferenceOp(
+          "argmax",
+          [refTensor([ARGMAX_FAULT_INPUT.rows, ARGMAX_FAULT_INPUT.dim], ARGMAX_FAULT_INPUT.data)],
+          {},
+          [ARGMAX_FAULT_INPUT.rows, 1],
+        ).data,
+      ];
+      assertEquals(
+        [
+          ...await runArgmaxDirect(gpu.device, ARGMAX_FAULT_INPUT, ARGMAX_FAULT_INPUT.data, {
+            cache,
+          }),
+        ],
+        argmaxExpected,
+        "正常版の argmax が CPU 参照と違う",
+      );
+      for (const injection of TOPK_INJECTIONS) {
+        const input = injection.input;
+        const actual = await runTopkDirect(gpu.device, input, input.data, {
+          cache,
+          mutate: injection.mutate,
+        });
+        assertNotEquals(
+          topkPair(actual),
+          referenceTopkPair(input),
+          `topk の故障注入 '${injection.label}' が検出されなかった`,
+        );
+      }
+      for (const injection of ARGMAX_INJECTIONS) {
+        const actual = await runArgmaxDirect(
+          gpu.device,
+          ARGMAX_FAULT_INPUT,
+          ARGMAX_FAULT_INPUT.data,
+          { cache, mutate: injection.mutate },
+        );
+        assertNotEquals(
+          [...actual],
+          argmaxExpected,
+          `argmax の故障注入 '${injection.label}' が検出されなかった`,
+        );
       }
     } finally {
       gpu.destroy();
