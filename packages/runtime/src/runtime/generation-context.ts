@@ -39,7 +39,7 @@ import type { GenerationContextSpec } from "./session-types.ts";
  * 既存の params uniform（`struct Params { rows: u32, dim: u32 }` — codegen/reduce.ts）と
  * 同じ形なので、束縛の最小サイズはこの 8 バイトで足りる。
  */
-const LENGTHS_BYTES = 8;
+export const LENGTHS_BYTES: number = 8;
 
 /**
  * 論理長 uniform の usage。
@@ -51,7 +51,7 @@ const LENGTHS_BYTES = 8;
 const LENGTHS_USAGE = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
 
 /** state スロットの dtype は f32 のみ（`STATE_DTYPES` — f16 席は ADR 0066 追記 5 の予約）。 */
-const STATE_ELEMENT_BYTES = 4;
+export const STATE_ELEMENT_BYTES: number = 4;
 
 /**
  * 論理長の上限（搬送先が `Uint32Array` / WGSL `u32` — ADR 0066 追記 4）。
@@ -195,7 +195,7 @@ const slidingSlotNames = (graph: IrGraph): ReadonlySet<string> => {
  * MUST: 記号容量は**ここで与えられた値だけ**で決まる。states は束縛源にならず（ADR 0066
  * 決定 2）、context は入力を 1 本も持たないので、入力 shape からの推定は原理的に不可能。
  */
-const resolveBindings = (
+export const resolveBindings = (
   graph: IrGraph,
   bindings: SymbolBindings | undefined,
 ): SymbolBindings => {
@@ -221,7 +221,7 @@ const resolveBindings = (
  * MUST: 未束縛シンボルは fail loudly。ここを 0 や 1 で埋めると、容量の足りないスロットのまま
  * 生成が走り出して沈黙 OOB になる。
  */
-const resolveSlotShape = (
+export const resolveSlotShape = (
   name: string,
   shape: readonly IrDim[],
   bindings: SymbolBindings,

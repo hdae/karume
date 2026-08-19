@@ -72,6 +72,12 @@ export { DispatchLimitError } from "./src/codegen/errors.ts";
 
 export { createSession, createSessionFromShards } from "./src/runtime/executor.ts";
 /**
+ * メモリ必要量 estimator（ADR 0070 決定 5）。GPU 非依存の純関数で「必要側」のカテゴリ別
+ * バイト数だけを出す — 空き側との比較・可否判定はしない（最終門は out-of-memory errorScope）。
+ */
+export { estimateSessionMemory } from "./src/runtime/estimate.ts";
+export type { EstimateOptions, MemoryEstimate } from "./src/runtime/estimate.ts";
+/**
  * Session の構築は {@link createSession} だけを入口にするため、型としてのみ公開する。
  *
  * `Tensor` は意味論 dtype の判別ユニオン（ADR 0009 による ADR 0008 の部分改訂）:
