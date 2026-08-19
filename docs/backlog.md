@@ -7,7 +7,28 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — （空 — 次波の開始はユーザー裁定）
+## now — w4 横展開 + 量子化方式スクリーニング（2026-08-19 承認）
+
+RTN i4 g32 の既存ファミリ横展開と、校正ループ不要の 4bit 方式（FP4 / NF4 / MXFP4 /
+k-means codebook〈層ごとの表・channel ごと・層共有表 + g32 正規化の 3 粒度〉）の実測
+スクリーニングを 1 波に統合。方式比較は **g=32 固定**（g 軸の評価は別途 — 2026-08-19 裁定・
+next 節）。非 linear（conv / embedding）の w4 は**測定のみ**（emit の格納受理・runtime の
+linear 限定は不変 — 品質が良ければ拡張波の実需根拠になる）。
+
+- 前段 0: exporter core の fake-quant 拡張 — `fake_quant_int4` の 5 op 種化（既定は linear のみ
+  で後方互換）+ 方式丸めヘルパ群 + ADR 0069 追記
+- バッチ 1a（方式スクリーニング — 安いファミリで先に絞る）: MiniCPM5 `sweep_w4` 拡張 +
+  EmbeddingGemma measure_quant 新設（全方式 × g32・E2E 指標 — 重み relRMSE では絞らない:
+  g32-asym の RMSE 最小×自由走行最悪の逆転を実測済み）
+- バッチ 1b（横展開 — 重いファミリ）: Anima / SBV2 / Irodori へ RTN i4 g32（linear 限定 +
+  非 linear 込みの 2 形）+ スクリーニング勝者のみ追加構成。SBV2 / Irodori は聴感評価
+  （人間レビュー）必須
+- 基盤同席（1a/1b と並行 — 全体レビュー Codex 採用裁定）: CX-1.4 artifact transaction の
+  core 汎用化 → CX-1.1 gemma4 3 台本の variant 駆動統合 → CX-1.3 PLE bank モジュール化 +
+  CX-2.3 golden provenance 束縛
+- クローズ: research 時点スナップショット（方式 × ファミリ品質マトリクス + 配布サイズ試算
+  〈linear 限定 / 非 linear 込みの両形〉）→ 採用価値ランキング → 優先実装候補を
+  perf-ledger / backlog へ起票 → 裁定
 
 全体レビュー波は **0.3.0 の JSR / PyPI リリース（2026-08-16）まで含めて全消化**。
 勢力図・ポジショニング検証は
@@ -42,11 +63,16 @@ autoregressive 波の**残項目（波外へ送り）**:
   bool initializer / storage の設計・pipeline 単位の Session 常駐と device-loss lifecycle
   （perf H-4 と同体）・sampling/RNG はホスト維持（GPU 側は argmax/topk のみ）。
 
-## next — w4 横展開 → 量子化方式の探索（2026-08-19 ユーザー裁定）
+## next — 量子化方式の探索・第 2 段（2026-08-19 裁定で now 波から分離）
 
-先に **w4 の横展開（品質調査・recipe 基盤再編と同席）**、続いて**量子化方式の探索**へ
-（両項の内容は later 節が正本 — 着手時にここへ昇格させて具体化する）。
-**リリース準備波（release 節）はモデルの HF 公開も含み重いため後回し**（同日裁定）。
+- **校正ループ系**（GPTQ / AWQ — 格納形は i4 g32 のまま値の選びだけ賢くする系。runtime 0 行で
+  乗るため筋が良いが、校正データ + 最適化ループの実装が要る）。
+- **g 軸の評価**（now 波は g=32 固定 — 方式が絞れてから勝者方式で g32/g64/g128 を再評価する。
+  組合せ爆発を避ける裁定）。
+- now 波の採用価値ランキングを受けた**優先実装**（codebook 系採用なら格納の新席 = ADR 0069 の
+  bit 表・整列表・view 型 3 面の reopen。実測骨子ができたら perf-ledger へ起票し直す）。
+
+**リリース準備波（release 節）はモデルの HF 公開も含み重いため後回し**（2026-08-19 裁定・据え置き）。
 
 ## later
 
@@ -55,17 +81,6 @@ autoregressive 波の**残項目（波外へ送り）**:
   （`for await` の token イベント・EOS 停止・cancel・多ターン継続）+ `last_row` の runner 側
   導出（ADR 0068 追記 4 の所有関係のみ reopen）。`generateGreedy` は parity 検収用の内部
   ヘルパへ格下げ。LLM 実需（streaming / チャット）に直結する最大の API 波。
-- **w4 の横展開 — 既存ファミリでの品質調査**（ユーザー要望 2026-08-19）: Anima / SBV2 /
-  Irodori など既存モデルに w4（i4 g32）を当て、どこまで品質が落ちるかを測る。SBV2 w4 は
-  聴感未実施のまま（配布縮小 3 波の再検討候補 — 棄却記録はモデル固有の裁定どおり対象自身で
-  実測する）。Anima / Irodori / SBV2 には `measure_quant.py` の実測足場が既にある。
-  **recipe 基盤の再編を同席させる裁定（2026-08-19）**: variant 駆動の単一 recipe 化・
-  artifact transaction の exporter core 汎用化・PLE bank のモジュール化・系列間 golden の
-  provenance 束縛 — 横展開で recipe 群を触る前に基盤を入れると手戻り最小。
-- **量子化方式の探索**（ユーザー要望 2026-08-19 — 検討波の起票候補）: f8 / f4（浮動小数
-  格納）・ダイナミックレンジ量子化・テーブル参照（LUT / codebook）・**層ごとのテーブル参照**。
-  格納 dtype の受理集合（ADR 0069 の bit 表・整列表・view 型の 3 面）と検出器の設計から。
-  実測骨子ができたら perf-ledger へ起票し直す。
 - **モデル拡充の続き**: Kokoro-82M（LSTM = multi-output 待ち）・MobileSAM / SAM 2
   （conv_transpose2d）・BiRefNet_HR 2048² preset・DA-V2 可変解像度（upsample_bicubic2d）。
   候補調査の時点記録は [recon-2](research/2026-08-14-model-expansion-recon-2.md)。

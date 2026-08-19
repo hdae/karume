@@ -23,11 +23,15 @@
   [backlog](../docs/backlog.md) now 節。検収 = MiniCPM5-1B / Gemma 4 E2B とも実 GPU で
   greedy K=16 厳密一致（ring エビクト越え込み）・w4 混成の完全常駐（hostExpandedBytes 0）・
   chat デモ ~11 tok/s。
-- **全体レビュー消化中（2026-08-19）**: 波 A〜H の 82 コミットを差分レビュー（Pass1 6 グループ +
-  Pass2 反証 + Codex 提案型）— E/C = 0・W 19 → **修正波を実施中**（機械的 14 件 + 設計判断 4 件:
-  batch 自己デッドロックの例外化・create×dispose 競合窓・decode 台本ヘルパの `_shared` 共有化・
-  argmax/topk 変異ハーネス）。Codex 提案の波割りは backlog へ反映済み（R1 同席 4 件・
-  生成 API 波・recipe 基盤同席）。
+- **全体レビュー（2026-08-19）は修正波込みで全消化** — E/C = 0・W 19 → 修正 11 コミット・
+  verify 1620/0/5。Codex 提案の波割りは backlog へ反映済み（R1 同席 4 件・生成 API 波・
+  recipe 基盤同席）。
+- **現行波 = w4 横展開 + 量子化方式スクリーニング（2026-08-19 承認）**: RTN i4 g32 を
+  Anima / SBV2 / Irodori + EmbeddingGemma（measure_quant 新設）へ横展開し、校正ループ不要の
+  4bit 方式（FP4 / NF4 / MXFP4 / k-means codebook）を安いファミリ（MiniCPM5 / EG）で
+  スクリーニング → 勝者だけ重いファミリへ。**方式比較は g=32 固定**（g 軸評価は next 波）・
+  **非 linear の w4 は測定のみ**（emit / runtime の linear 限定は不変）。構造の正本 =
+  backlog now 節。recipe 基盤 4 件（CX-1.4/1.1/1.3/2.3）を同波で並行消化。
 
 ## Open decisions
 
