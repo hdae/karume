@@ -7,9 +7,11 @@ import {
   capabilities,
   createSession,
   type FusionCounts,
+  type GenerationRun,
   type GpuContext,
   openModel,
   SafetensorsError,
+  type Session,
   type SessionDiagnostics,
   type Tensor,
 } from "../mod.ts";
@@ -169,6 +171,14 @@ Deno.test("ランタイム内部の直列化プリミティブは公開型面に
   // 取りに行って**例外も診断も出ないまま自己デッドロック**する（再入検出器は置けない）。
   const hidden: ("withScopeLock" | "raceDeviceLost") extends keyof GpuContext ? false : true = true;
   assertEquals(hidden, true);
+});
+
+Deno.test("生成 run の第 3 引数が公開型で名指しできる（ADR 0066 決定 6 の呼び出し形）", () => {
+  // 型レベルの門。`GenerationRun` が mod.ts の輸出列から落ちると deno check で落ちる
+  // （構造的部分型でオブジェクトリテラルは渡せてしまうので、公開メソッドのシグネチャに
+  // 現れる型を**名前で**書く下の 1 行が輸出漏れの機械検出になる）。
+  const asThirdArgument = (run: GenerationRun): Parameters<Session["run"]>[2] => run;
+  assertEquals(typeof asThirdArgument, "function");
 });
 
 Deno.test("公開面が capability 照会とモデル解析の失敗型を提供する", () => {

@@ -223,6 +223,12 @@ Deno.test("①③ の params 門が沈黙誤値になる幾何を全て拒否す
   );
   assertThrows(() => stateStatsParams(0, 4, 0, 32, 0), CodegenError, "batch_heads");
   assertThrows(() => stateStatsParams(6, 0, 0, 32, 0), CodegenError, "rows_block");
+  // ② も sliding の値域門を持つ（②は sliding フラグを別引数で受けないので col_cap との
+  // 関係式 W ≤ col_cap で見る — 破れると live が col_cap を跨いで隣接行の S を食う）
+  assertThrows(() => stateStatsParams(6, 4, 0, 8, 9), CodegenError, "col_cap");
+  assertEquals(stateStatsParams(6, 4, 0, 8, 8).length, 8);
+  // full（window = 0）は ② の関係式の対象外（上限は ①③ 側の C 検査が持つ）
+  assertEquals(stateStatsParams(6, 4, 0, 8, 0).length, 8);
 });
 
 Deno.test("state_append の params 門（容量・正整数・u32 域）", () => {

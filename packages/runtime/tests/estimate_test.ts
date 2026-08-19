@@ -11,7 +11,7 @@
 // unaccounted 欄が認めている差）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { type KarumeModel, openModel } from "../src/format/container.ts";
+import { ContainerError, type KarumeModel, openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { createSession } from "../src/runtime/executor.ts";
 import { estimateSessionMemory } from "../src/runtime/estimate.ts";
@@ -79,6 +79,33 @@ Deno.test("圧縮しない格納（f32 / i32）は実バイトのまま非圧縮
   assertEquals(estimate.compressedWeightBytes, 0);
   assertEquals(estimate.expandedWeightBytes, 0);
   assertEquals(estimate.stateBytes, 0);
+});
+
+/**
+ * 格納 `bf16` の initializer を 1 本だけ持つ形。IR の語彙としては valid だが
+ * `RUNTIME_SUPPORT.storage` に無いので、`createSession` は必ず capability 不足で落ちる。
+ */
+const bf16Model = (): KarumeModel => {
+  const graph = plainGraph();
+  return openGraph(
+    {
+      ...graph,
+      initializers: { ...graph.initializers, w: { tensor: "m.w", storage: { dtype: "bf16" } } },
+    },
+    [
+      { name: "m.w", dtype: "BF16", shape: [4, 3], data: new Uint8Array(24) },
+      { name: "m.emb", dtype: "F32", shape: [5, 3], data: f32Bytes(new Array(15).fill(1)) },
+      { name: "m.idx", dtype: "I32", shape: [2], data: i32Bytes([0, 1]) },
+    ],
+  );
+};
+
+Deno.test("実構築が拒否する格納 dtype（bf16）に見積りを返さない", () => {
+  assertThrows(
+    () => estimateSessionMemory(bf16Model(), { bindings: { T: 7 } }),
+    ContainerError,
+    "capability 不足",
+  );
 });
 
 Deno.test("io は入力バッファ + 出力 readback staging（0 要素は 4 バイト床）", () => {

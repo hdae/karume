@@ -663,6 +663,11 @@ export const stateAttentionParams = (
  *
  * MUST: `B·H` と `rows_block` を**畳まずに**受ける（① ③ と同じ 2 軸）。畳んだ 1 語では
  * `z · rows_block + 局所行` へ戻せず、有効行の前詰めから S / stats の行を引けない。
+ * MUST: `window` も値域門に通す（{@link stateSliding} が要求する「キー選択・WGSL 生成・
+ * params 検査の 3 者を揃える」の ② 側）。② は `capacity` / `M` を受けないので上限式
+ * `W−1 + M`（{@link assertStateGeometry}）そのものは書けないが、`M ≥ 1` から従う必要条件
+ * `W ≤ col_cap` は書ける。これが破れると `live_columns` が `col_cap` を跨いで隣接行の S を
+ * 自分の行の amax に混ぜる（例外も NaN も出ない沈黙誤値）。
  */
 export const stateStatsParams = (
   batchHeads: number,
@@ -682,6 +687,12 @@ export const stateStatsParams = (
     throw new CodegenError(
       `attention_state_stats params: batch_heads / rows_block / col_cap は正整数` +
         `（${batchHeads} / ${rowsBlock} / ${colCap}）`,
+    );
+  }
+  if (stateSliding(window) && colCap < window) {
+    throw new CodegenError(
+      `attention_state_stats params: col_cap ${colCap} が sliding の live 上限 ${window}` +
+        `（= W−1 + M の最小 M = 1）に足りない`,
     );
   }
   const params = new Uint32Array(8);

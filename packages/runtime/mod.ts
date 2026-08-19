@@ -94,6 +94,7 @@ export type {
   FusionCounts,
   GenerationContext,
   GenerationContextSpec,
+  GenerationRun,
   ParamsCacheStats,
   PlanBackingStats,
   PreparedPlanStats,

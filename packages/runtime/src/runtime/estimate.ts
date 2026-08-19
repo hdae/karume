@@ -26,11 +26,11 @@
  * estimator が例外も警告も無く別の数を主張し続ける。
  */
 
-import type { KarumeModel } from "../format/container.ts";
+import { assertRuntimeSupport, type KarumeModel } from "../format/container.ts";
 import type { IrGraph } from "../format/ir.ts";
 import type { SafetensorsFile } from "../format/safetensors.ts";
 import { toSizeClass } from "../gpu/arena.ts";
-import { numel } from "../ops.ts";
+import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { assertGenerationBindings } from "./executor.ts";
 import {
   assertChunkLength,
@@ -320,6 +320,13 @@ export const estimateSessionMemory = (
   options: EstimateOptions = {},
 ): MemoryEstimate => {
   const graph = model.graph;
+  // MUST: 実構築（`createSession` / `createSessionFromShards`）と**同じ門**を先に通す。
+  // 作れない構成へ見積りを返すと、格納 dtype や op が非対応のモデルに対して estimator だけが
+  // もっともらしい総量を主張する（例: 格納 `bf16` は IR の語彙にはあるが RUNTIME_SUPPORT に
+  // 無く、Session 構築は必ず落ちる）。門を共有すれば語彙が増えたときの抜けも同時に塞がる。
+  // NOTE: これは capability 検査であって空き側との比較ではないので、ADR 0070 決定 5 の
+  // 「比較をしない」規律には抵触しない（GPU にも触らず純関数のまま）。
+  assertRuntimeSupport(graph, RUNTIME_SUPPORT);
   const bindings = planBindings(graph, options.bindings);
   const state = stateEstimate(graph, options.generation);
   // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —
