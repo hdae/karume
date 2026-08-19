@@ -12,8 +12,20 @@
  * - 進捗総量は content-length ではなく manifest の `size` 合計（path 一意化後）。
  */
 
-import { fetchHfFile, hfResolveUrl, isCommitSha, resolveHfRevision } from "@hdae/fetch-cache/hf";
-import { HubError, HubFetchError, IntegrityError, ManifestFormatError } from "./errors.ts";
+import {
+  fetchHfFile,
+  hfResolveUrl,
+  isCommitSha,
+  prefetchHfFile,
+  resolveHfRevision,
+} from "@hdae/fetch-cache/hf";
+import {
+  HubError,
+  HubFetchError,
+  IntegrityError,
+  ManifestFormatError,
+  ManifestReferenceError,
+} from "./errors.ts";
 import {
   type FileRef,
   type Manifest,
@@ -417,6 +429,237 @@ export const fetchAssets = async (
     assets = { ...assets, [key]: bytes };
   }
   return assets;
+};
+
+/** {@link streamAssets} が 1 本ずつ引き渡す shard。 */
+export type StreamedAsset = {
+  /** manifest が宣言していた path（`refs` に渡した順で届く）。 */
+  readonly path: string;
+  /** 検証（size / sha256）を通ったバイト列。buffer 全体を占める。 */
+  readonly bytes: Uint8Array<ArrayBuffer>;
+};
+
+/** {@link streamAssets} のオプション（全量面 {@link fetchAssets} と同じ透過）。 */
+export type StreamAssetsOptions = FetchAssetsOptions;
+
+/**
+ * shard を **2 相**で読み、1 本ずつ引き渡す逐次面（ADR 0070 決定 2）。
+ *
+ * - **相 1（prefetch）**: 最初の yield の前に、全 shard を永続キャッシュへ落とす
+ *   （streaming — RAM に全量を載せない・同時 4 本）。`sha256` は通過中に照合され、
+ *   不一致はエントリ不成立で fail loud（帯域を捨てた後に全量を握って落ちない）。
+ * - **相 2（逐次引き渡し）**: `refs` の順に 1 本ずつ「キャッシュから取得 → size / sha256 照合
+ *   （**キャッシュヒット側でも走る** — ADR 0070 の非交渉条件。破損は self-heal で 1 往復だけ
+ *   取り直す）→ 呼び手へ渡す → 参照を手放す」。
+ *
+ * 全量面 {@link fetchAssets} との違いは**渡したバイト列への参照を残さない**ことで、RAM ピークが
+ * O(最大 shard) に収まる（全量ホスト保持が成立しない検収モデル級のための面）。全量面は温存して
+ * あるので、小モデルは従来どおりそちらを使う。
+ *
+ * MUST: 相 1 は**最初の `next()` まで開始されない**（async generator の遅延）。呼んだだけでは
+ * 何も起きず、`for await` に入るか `next()` を呼んだ時点で DL が始まる。空の `refs`・重複 path も
+ * その時点（network に出る前）に {@link ManifestReferenceError} で弾く。
+ *
+ * NOTE: 相 1 は `caches` が無い環境・キャッシュ書込み失敗（quota 超過等）で **fail loud** になる
+ * （下層 prefetch の契約 — バイト列を手元に持たない面なので素 fetch へ縮退する余地が無い。黙って
+ * 縮退させると RAM ピークの目標が壊れる）。`onCacheError` の診断が届くのは相 2 だけで、相 1 の
+ * cache I/O 失敗は {@link HubFetchError} として上がる。
+ */
+export const streamAssets = async function* (
+  loaded: LoadedManifest,
+  refs: readonly FileRef[],
+  options: StreamAssetsOptions = {},
+): AsyncGenerator<StreamedAsset, void, unknown> {
+  const { repo, revisionSha, manifest } = loaded;
+  const available = manifest.available;
+  const target = hfRef(loaded, revisionSha);
+
+  // 入力検査は相 1 の前に済ませる（相 1 は全 shard を落としてしまうので、network に出た後で
+  // 呼び出し側の誤りに気づいても帯域が戻らない）。
+  if (refs.length === 0) {
+    throw new ManifestReferenceError(
+      `streamAssets: 取得対象が 1 つも無い（repo ${repo} @ ${revisionSha}）`,
+      { available },
+    );
+  }
+  const declared = new Set<string>();
+  for (const ref of refs) {
+    if (declared.has(ref.path)) {
+      throw new ManifestReferenceError(
+        `streamAssets: path '${ref.path}' が重複している（逐次面は渡された列をそのまま引き渡す —` +
+          ` 同じ shard を 2 回受け取るのは呼び出し側の誤り。全量面 fetchAssets は path で一意化する）`,
+        { available },
+      );
+    }
+    declared.add(ref.path);
+  }
+
+  let total = 0;
+  for (const ref of refs) total += ref.size;
+
+  const received = new Map<string, number>();
+  const fromNetwork = new Set<string>();
+  const emit = (phase: AssetPhase, path: string): void => {
+    if (options.onProgress === undefined) return;
+    let sum = 0;
+    for (const bytes of received.values()) sum += bytes;
+    options.onProgress({ phase, path, loaded: sum, total });
+  };
+
+  const budgets = new Map<string, ByteBudget>();
+  for (const ref of refs) {
+    budgets.set(hfResolveUrl({ ...target, path: ref.path }), {
+      maxBytes: ref.size,
+      exact: true,
+      onRequest: () => fromNetwork.add(ref.path),
+      violation: (actual, where) =>
+        new IntegrityError(
+          `${ref.path}: ${where} が manifest の size と食い違う（期待 ${ref.size} / 実際 ${actual}）`,
+          {
+            repo,
+            revisionSha,
+            path: ref.path,
+            expected: String(ref.size),
+            actual: String(actual),
+            source: "network",
+            available,
+          },
+        ),
+    });
+  }
+
+  const failure = new AbortController();
+  const prefetchSignal = options.signal === undefined
+    ? failure.signal
+    : AbortSignal.any([failure.signal, options.signal]);
+  const guarded = createGuardedFetch(options.fetch ?? globalThis.fetch, budgets);
+  // 名前空間の解決は headers が固定である入口で 1 回だけ（digest は非同期）。
+  const cacheName = await cacheNameFor(options.headers);
+
+  // ---- 相 1: 全 shard を永続キャッシュへ落とす（ここを抜けるまで 1 本も yield しない）。
+  const prefetchOne = async (ref: FileRef): Promise<void> => {
+    try {
+      await prefetchHfFile(target, { path: ref.path, sha256: ref.sha256 }, {
+        cacheName,
+        init: requestInit(options.headers, prefetchSignal),
+        fetch: guarded,
+        onProgress: (progress) => {
+          received.set(ref.path, progress.loaded);
+          emit("downloading", ref.path);
+        },
+        ...(options.caches === undefined ? {} : { caches: options.caches }),
+      });
+    } catch (error) {
+      if (error instanceof HubError || isAborted(error, prefetchSignal)) throw error;
+      // MUST: 捕まえた値の同一性だけで中断を判定しない — prefetch はバイト列を手元に持たない
+      // 面なので、転送中断も put の reject として現れ、`cause` に沈めて包まれる。signal が
+      // 落ちていればその reason を素通しする（巻き添えなら reason は最初の失敗そのもので、
+      // 全量面と同じく全ワーカーが同一の error に収束する）。
+      if (prefetchSignal.aborted) throw prefetchSignal.reason;
+      throw new HubFetchError(
+        `${ref.path} の事前取得に失敗した（repo ${repo} @ ${revisionSha}）`,
+        { repo, revisionSha, path: ref.path, available, cause: error },
+      );
+    }
+  };
+
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    try {
+      while (next < refs.length) await prefetchOne(refs[next++]);
+    } catch (error) {
+      // 1 本でも落ちたら残りを止める（fail loud — 全体が reject するのに DL を続ける意味はない）。
+      failure.abort(error);
+      throw error;
+    }
+  };
+  // MUST: 失敗しても全ワーカーの決着を待ってから抜ける（全量面と同じ理由 — 早期 reject だと
+  // 呼び出し側が catch した後も取得が背後で走り続ける）。
+  const settled = await Promise.allSettled(
+    Array.from({ length: Math.min(CONCURRENCY, refs.length) }, () => worker()),
+  );
+  for (const result of settled) {
+    if (result.status === "rejected") throw result.reason;
+  }
+
+  // 相 1 の network 実績は相 2 の帰属へ持ち越さない。相 2 で network に出るのは破損キャッシュの
+  // self-heal だけなので、持ち越すとキャッシュ読出し由来の不一致まで source "network" に化ける。
+  fromNetwork.clear();
+
+  // ---- 相 2: 1 本ずつ照合して引き渡す。
+  for (const ref of refs) {
+    // 相 2 は大半が「キャッシュ読出し + ハッシュ」で network に出ない＝下層の signal 監視が
+    // 効かない区間なので、shard の切れ目で明示的に中断を見る（数 GB のハッシュを何本も
+    // 回している最中に取り消しが効かないのは中断の透過が壊れているのと同じ）。
+    options.signal?.throwIfAborted();
+
+    const validate = async (bytes: Uint8Array): Promise<void> => {
+      const source = fromNetwork.has(ref.path) ? "network" : "cache";
+      if (bytes.byteLength !== ref.size) {
+        throw new IntegrityError(
+          `${ref.path}: バイト数が manifest と食い違う（期待 ${ref.size} / 実際 ${bytes.byteLength}）`,
+          {
+            repo,
+            revisionSha,
+            path: ref.path,
+            expected: String(ref.size),
+            actual: String(bytes.byteLength),
+            source,
+            available,
+          },
+        );
+      }
+      emit("verifying", ref.path);
+      const actual = await sha256Hex(bytes);
+      if (actual !== ref.sha256) {
+        throw new IntegrityError(
+          `${ref.path}: sha256 が manifest と食い違う（期待 ${ref.sha256} / 実際 ${actual}）`,
+          {
+            repo,
+            revisionSha,
+            path: ref.path,
+            expected: ref.sha256,
+            actual,
+            source,
+            available,
+          },
+        );
+      }
+    };
+    let bytes: Uint8Array;
+    try {
+      bytes = await fetchHfFile(target, { path: ref.path, validate }, {
+        cacheName,
+        init: requestInit(options.headers, options.signal),
+        fetch: guarded,
+        // 相 1 が温めた分はキャッシュヒットなので、ここが発火するのは self-heal の取り直しだけ。
+        // NOTE: self-heal は evict してから取り直すため、その 1 巡だけ `loaded` はそのファイル
+        //       ぶん巻き戻る（phase 契約が認めている「最初からやり直し」と同じ 1 巡）。
+        onProgress: (progress) => {
+          received.set(ref.path, progress.loaded);
+          emit("downloading", ref.path);
+        },
+        ...(options.caches === undefined ? {} : { caches: options.caches }),
+        ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
+      });
+    } catch (error) {
+      if (error instanceof HubError || isAborted(error, options.signal)) throw error;
+      throw new HubFetchError(`${ref.path} の取得に失敗した（repo ${repo} @ ${revisionSha}）`, {
+        repo,
+        revisionSha,
+        path: ref.path,
+        available,
+        cause: error,
+      });
+    }
+    const asset = assertTightView(bytes, ref.path);
+    received.set(ref.path, ref.size);
+    emit("complete", ref.path);
+    // MUST: ここで手放す — 引き渡したバイト列を generator 側の表に溜めない（溜めた瞬間に
+    // 全量面と同じ RAM 特性に戻り、この面の存在理由が消える）。次の反復に入れば `bytes` の
+    // 束縛ごと到達不能になるので、常駐するのは「今の 1 本」だけ。
+    yield { path: ref.path, bytes: asset };
+  }
 };
 
 /**
