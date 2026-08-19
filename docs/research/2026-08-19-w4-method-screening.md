@@ -1,0 +1,150 @@
+# w4 方式スクリーニング + 横展開 — 5 ファミリ実測（2026-08-19）
+
+> **性格**: 時点スナップショット（2026-08-19 実測）。w4 横展開 + 量子化方式スクリーニング波
+> （backlog now 節・ADR [0069](../decisions/0069-packed-w4-storage.md) 追記 5）の実測正本。
+> 全て torch CPU の fake-quant（GPU 非接触・ADR 0006 の方法論 — E2E 実装誤差とは分離した
+> 「量子化そのものの質」）。**g=32 固定**（g 軸は方式確定後に別途 — 2026-08-19 裁定）。
+> 台本 = 各 family の `measure_quant.py` / `sweep_w4.py`（コミット `927d800`〜`077affc`）・
+> 丸めの実装は全て core（`karume.quantize` / `karume.quant_methods`）の共有。
+> 環境 = torch 2.13.0+cpu / AMD Ryzen 5 5600（31GB）。数値の生データは
+> `outputs/demo/{minicpm5-w4-methods,embeddinggemma-quant-screen,quant-sim,anima-w4-screen,irodori-quant-sim}/`。
+
+## §1 方法
+
+- **方式 7 種**（校正ループ不要のもののみ — GPTQ/AWQ は next 波）を安いファミリ 2 本
+  （MiniCPM5-1B = 生成 LLM / EmbeddingGemma-300m = 埋め込み）でスクリーニングし、
+  **勝者 4 種**（rtn-i4-g32 / nf4 / mxfp4 / kmeans:shared）を重いファミリ 3 本
+  （SBV2 / Anima / Irodori）へ持ち込んだ。落選 = fp4（nf4 に同コストで支配）・
+  kmeans:per_tensor（両リグで崩壊）・kmeans:per_channel（shared に支配・bpw 利得小）。
+- 対象 2 形: **linear 限定 = 今日の配布対応形**（i4 の実行経路 — ADR 0069 決定 5）と
+  **非 linear 込み（i8 と同じ 5 op 種）= 上限測定**（emit の格納受理・runtime は不変）。
+  量子化軸（conv は受容野 Cin·K）が g32 非整列の重みは除外し全台本が一覧を出力する。
+- サイズは**式による投影**: rtn/nf4/kmeans:shared = 5.0 bpw（4bit + g32 F32 scale）・
+  mxfp4 = 4.25 bpw（E8M0 scale）・kmeans は表 16×f32 を粒度ぶん加算。
+- kmeans:shared の表 fit は 1B 級で実メモリ超のため等間隔部分標本（core `fit_stride` —
+  適用は全量・使った値は各出力に明記。MiniCPM5 = 1/11・Anima = 1/99・Irodori = 1/101）。
+
+## §2 スクリーニング（安いファミリ・全 7 方式）
+
+### MiniCPM5-1B（teacher = 3 ケース×16 位置の top-1 一致 /48・NLL = 3 ケース和・greedy = 自由走行一致接頭辞長 /48）
+
+| 方式 | 対象 | bpw | wRMSE | teacher | NLL 和 | greedy |
+|---|---|---|---|---|---|---|
+| baseline (f32) | — | — | — | 48/48 | 2.234 | 48/48 |
+| rtn-g32-sym | linear 169 | 5.0 | 0.0994 | 36/48 | 3.343 | 23/48 |
+| rtn-g32-sym | +embed 170 | 5.0 | 0.0990 | 37/48 | 3.352 | 23/48 |
+| fp4 | linear | 5.0 | 0.1011 | 37/48 | 3.087 | 7/48 |
+| nf4 | linear | 5.0 | 0.0877 | 37/48 | 2.921 | 2/48 |
+| mxfp4 | linear | 4.25 | 0.1154 | 29/48 | 3.450 | 5/48 |
+| kmeans:per_tensor | linear | 4.0 | 0.1273 | 8/48 | 24.56 | 0/48 |
+| kmeans:per_channel | linear | 4.28 | 0.1143 | 26/48 | 3.867 | 2/48 |
+| **kmeans:shared**〔1/11 標本 fit〕 | linear | 5.0 | **0.0861** | **38/48** | **2.713** | 15/48 |
+| **kmeans:shared**〔同〕 | +embed | 5.0 | **0.0859** | **42/48** | **2.651** | **25/48** |
+
+（rtn-linear は 2026-08-18 Phase 0 の g32-sym を全列再現 — ハーネスの接地確認）
+
+### EmbeddingGemma-300m（golden 5 ケース・基準 f32 との cosine / 意味順序 / ペア行列ドリフト）
+
+| 方式 | 対象 | cos min | cos mean | 意味順序 | ペア最大ドリフト |
+|---|---|---|---|---|---|
+| rtn-i4-g32 | linear 170 | 0.9341 | 0.9665 | 保持 | 6.66e-2 |
+| fp4 | linear | 0.9566 | 0.9772 | 保持 | 2.42e-2 |
+| nf4 | linear | 0.9628 | 0.9810 | 保持 | 2.73e-2 |
+| mxfp4 | linear | 0.9389 | 0.9642 | 保持 | 2.93e-2 |
+| kmeans:per_tensor | linear | 0.5204 | 0.7487 | 保持 | 2.46e-1 |
+| kmeans:per_channel | linear | 0.9379 | 0.9605 | 保持 | 5.08e-2 |
+| **kmeans:shared** | linear | **0.9681** | **0.9829** | 保持 | 2.70e-2 |
+| kmeans:shared | +embedding 171 | 0.9637 | 0.9808 | 保持 | 2.58e-2 |
+
+- 語彙表（+embedding — 対象要素 2.9 倍・EG 配布の約 66%）を足しても劣化はほぼ増えない
+  （cos min 差 −0.001〜−0.004）。ただし golden 5 ケースの語彙被覆は狭く**上界寄りの証拠**。
+- 全 15 構成で意味順序（near > far）保持。誤差は長文に積む（worst は全構成 long-document T=318）。
+
+## §3 横展開（重いファミリ・勝者 4 種）
+
+### SBV2（FN4 dump・SNR/LSD は f32 波形比・**位相/長さずれに弱いので最終判定は聴感**）
+
+| 構成 | 対象 | SNR (dB) | LSD (dB) | relRMS |
+|---|---|---|---|---|
+| w8（既録参考） | net_g 全役割 i8 | 10.15 | 2.77 | 0.311 |
+| w8a8（同） | + 活性 i8 | 9.00 | 4.38 | 0.355 |
+| w4-rtn | net_g 全役割 | −0.38 | 5.54 | 1.044 |
+| w4-nf4 | net_g 全役割 | **4.47** | 4.77 | 0.598 |
+| w4-mxfp4 | net_g 全役割 | −0.67 | 6.73 | 1.080 |
+| w4-kmeans | net_g 全役割 | 0.80 | 5.74 | 0.912 |
+| bert-w4-rtn | **BERT linear**（net_g f32） | −0.44 | 4.08 | 1.052 |
+| bert-w4-nf4 | 同 | 2.44 | **3.55** | 0.755 |
+
+- net_g の全役割 w4 は全方式が w8 帯（SNR 10dB 級）に遠く及ばない重劣化。**nf4 が相対最良**
+  （kmeans を逆転 — 方式序列はモデル依存）。
+- **BERT linear w4 は w_ceil を +2 frame 動かす**（229→231/255）ため SNR は発話タイミングの
+  ずれで潰れており数値では判定不能 — LSD では bert-w4-nf4 (3.55) が w8a8 (4.38) より良い帯。
+- **配布 karume-sbv2-jvnv（実 1029.9 MiB）への i8→i4 投影: BERT linear −99.8 MiB =
+  −9.69% / net_g linear −0.08%**（6 本 / 適格要素の 0.9% — 利得なし自体が採否根拠）。
+
+### Anima（DiT linear 454 本 = 1.96B 要素・turbo 10 step・512px・基準 f32 画像比）
+
+| 構成 | PSNR f32 (dB) | relRMS | uint8 最大差 (/255) |
+|---|---|---|---|
+| rtn-i4-g32 | 12.26 | 0.753 | 241 |
+| nf4 | 12.35 | 0.745 | 254 |
+| mxfp4 | 11.35 | 0.835 | 242 |
+| kmeans:shared〔1/99 標本 fit〕 | 12.08 | 0.768 | 251 |
+
+- **全方式が全滅級**（PSNR 12dB・uint8 最大差 ~250 = 別の絵）。拡散の軌道が w4 の摂動で
+  分岐しており、格子の張り方では救えない。「別の絵として成立しているか」は視認
+  （`outputs/demo/anima-w4-screen/image_*.png`）。DiT は非 linear の量子化可能型ゼロ
+  （patchify も Linear）なので linear 限定 = 全量。除外 = patch_embed 1 本（軸 68）。
+
+### Irodori（v4-small・full/no-ref 2 ケース・第一の門 = S（フレーム数）一致）
+
+| 構成 | S drift (full/no-ref) | zRelRms (full) | SNR (full) | LSD (full) |
+|---|---|---|---|---|
+| i4-all（全役割） | −4 / +13 | 0.514 | −0.77 | 10.34 |
+| **i4-linear（配布対応形）** | −4 / +9 | 0.511 | −0.76 | 9.58 |
+| i4-mixed（duration 据え置き） | −5 / +13 | 0.514 | −0.77 | 10.34 |
+| nf4-all | −8 / +8 | 0.438 | 1.28 | 9.21 |
+| mxfp4-all | −11 / +2 | 0.909 | −0.95 | 17.07 |
+| kmeans-shared-all〔1/101 標本 fit〕 | 0 / +6 | 0.693 | −1.64 | 12.08 |
+
+- **S 門は全構成で赤**（kmeans の full ケース 0 は偶然の一致 — no-ref は +6）。
+  **i4-mixed（duration 据え置き）でも S が動き、強制グリッド上の品質は i4-all とビット一致**
+  → S ドリフトの原因は duration の重みではなく**上流（backbone/text 特徴）の変形**。
+  混成席（ADR 0050 決定 6 の軸）では w4 の S を救えない。
+- **i4-linear（linear のみ・対象要素の 81.8%）も i4-all とほぼ同一の重劣化** — 劣化の主因は
+  linear 側で、配布対応形に絞っても品質は成立しない。
+- 品質は nf4 が相対最良だが全方式 SNR ≤ 1.3dB / LSD 9+ の重劣化帯（i8 系は別次元に良い —
+  既存構成表参照）。聴感 = `outputs/demo/irodori-quant-sim/<config>.<case>.wav`。
+
+## §4 横断所見
+
+1. **方式序列はモデル系統で割れる**: kmeans:shared は LLM / 埋め込みで全列最良
+   （MiniCPM5 teacher 36→42/48・EG cos mean 0.9665→0.9829）だが、TTS では nf4 に負け、
+   画像では差が消える。**「どの方式が良いか」は 1 回の実測では一般化できない**
+   （棄却記録はモデル固有、の方式版）。
+2. **wRMSE は品質の代理にならない**（Phase 0 の再現）: nf4 は MiniCPM5 で wRMSE・NLL とも
+   RTN より良いのに自由走行 2/48（RTN 23/48）。
+3. **モデル系統の感度が方式差より支配的**: 埋め込み（EG）は実用帯（cos 0.97+）、
+   生成 LLM は損失はあるが方式で明確に改善、TTS / 画像生成は**方式を問わず全滅帯**。
+   w4 の採否はまずモデル系統で決まり、方式選択は LLM / 埋め込み系でのみ意味を持つ。
+4. **非 linear（conv / embedding）まで広げても追加劣化はごく小さい**（EG・MiniCPM5・
+   irodori とも linear 限定と誤差レベル）— ただし TTS / 画像は linear だけで既に壊れて
+   いるので、runtime の i4 を conv へ広げる実需は今回の実測からは立たない。
+5. **配布サイズの実利が立った席**: SBV2 の BERT linear i4 = **配布全体 −9.76%**（今日の
+   格納形でそのまま出荷可能・聴感待ち）。EG は embedding 込み 15.6%（307M 要素 →183MiB）。
+6. mxfp4（4.25 bpw）は LLM で明確に劣後（teacher −7 点）・TTS でも最悪帯 — E8M0 の
+   1 binade 切り捨てが効く。EG のみドリフト優位。価格点の魅力に品質が伴わない。
+
+## §5 採用価値ランキング（裁定ドラフト — 聴感 / 視認の人間レビュー待ち）
+
+1. **SBV2 BERT linear の i4（RTN）配布** — 今日の格納形で −9.7%・LSD は w8a8 帯。聴感が
+   通れば即配布候補（★実利最大・実装ゼロ）。nf4 なら LSD さらに良いが格納の新席が要る。
+2. **kmeans:shared の格納席（LLM 向け優先実装候補）** — MiniCPM5 で RTN 比 teacher +2〜6 点・
+   NLL −0.6〜0.7 を同 bpw で得る。格納 = 表 16×f32 の companion 欄 + 表引き dequant
+   （ADR 0069 決定 2 の 3 面 reopen）。fit の標本化は core 実装済み。
+3. **NF4 の格納席（固定表 — 実装最小の非一様格子）** — EG / TTS 系で RTN より一貫して良い。
+   表が定数なので WGSL 定数表 + emit の丸め替えだけで乗る（companion 欄不要）。
+4. **w4 不採用の確定（Anima / Irodori / SBV2 net_g）** — 方式を問わず品質不成立
+   （聴感 / 視認で最終確認）。これらの縮小は f16 / i8 系の既存席と、next 波の校正ループ系
+   （GPTQ/AWQ）や g 軸再評価に持ち越し。
+5. mxfp4 は不採用寄り（品質が価格点に伴わない）。fp4 / kmeans per_tensor / per_channel は落選確定。
