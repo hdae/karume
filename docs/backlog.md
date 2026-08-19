@@ -93,6 +93,14 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## later
 
+- **w4 の横展開 — 既存ファミリでの品質調査**（ユーザー要望 2026-08-19）: Anima / SBV2 /
+  Irodori など既存モデルに w4（i4 g32）を当て、どこまで品質が落ちるかを測る。SBV2 w4 は
+  聴感未実施のまま（配布縮小 3 波の再検討候補 — 棄却記録はモデル固有の裁定どおり対象自身で
+  実測する）。Anima / Irodori / SBV2 には `measure_quant.py` の実測足場が既にある。
+- **量子化方式の探索**（ユーザー要望 2026-08-19 — 検討波の起票候補）: f8 / f4（浮動小数
+  格納）・ダイナミックレンジ量子化・テーブル参照（LUT / codebook）・**層ごとのテーブル参照**。
+  格納 dtype の受理集合（ADR 0069 の bit 表・整列表・view 型の 3 面）と検出器の設計から。
+  実測骨子ができたら perf-ledger へ起票し直す。
 - **モデル拡充の続き**: Kokoro-82M（LSTM = multi-output 待ち）・MobileSAM / SAM 2
   （conv_transpose2d）・BiRefNet_HR 2048² preset・DA-V2 可変解像度（upsample_bicubic2d）。
   候補調査の時点記録は [recon-2](research/2026-08-14-model-expansion-recon-2.md)。
