@@ -9,14 +9,20 @@
 //    `greedy.<case>.safetensors`（torch full re-forward の期待列）と 3 ケース × K=16 で
 //    厳密一致する。同じ重み・同じ丸め・同じ手術で出口だけが違うので、列が割れたら
 //    行選択（last_row 配線）か 1 行 lm_head の側の誤り。
+// ③ **出所（provenance）の束縛**: token-only 系列が書く `reference.json`（書き手側の正本は
+//    `tools/export-recipes/gemma4/provenance.py`）が、元チェックポイントの指紋と、②で流用する
+//    golden 1 本ずつの digest を持っていること。②の「同じ重み」という前提は資産の存在確認
+//    だけでは守れない（片方だけ古い組み合わせでも門は緑になる — 全体レビュー CX-2.3）ので、
+//    記録が無い / digest が合わない組み合わせは SKIP でなく **FAIL** にする。
 //
 // 期待列の正本を**再計算しない**のがこの門の設計 — logits opt-in 系列の golden をそのまま
 // 流用することで、「両系列が同じ列を吐く」という交差検証そのものが門になる（torch 参照の
 // 再実走〈数十分〉を払わず、しかも独立性は落ちない — 期待値の出所は full re-forward のまま）。
 //
-// 資産 2 系列を両方要求する: `outputs/series/gemma4-e2b-decode-token/`（model 本体 —
-// `tools/export-recipes/gemma4/export_token.py`）と `outputs/series/gemma4-e2b-decode/`
-// （greedy golden — `export_decode.py`）。どちらかが無い環境では**明示 SKIP** する。
+// 資産 2 系列を両方要求する: `outputs/series/gemma4-e2b-decode-token/`（model 本体 +
+// `reference.json` — `tools/export-recipes/gemma4/export_token.py`）と
+// `outputs/series/gemma4-e2b-decode/`（greedy golden — `export_decode.py`）。
+// token-only 系列が無い環境では**明示 SKIP** する。
 
 import { assert, assertEquals } from "@std/assert";
 import {
@@ -35,6 +41,9 @@ const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import
 const MODEL_FILE = "model.safetensors";
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
+/** 出所記録のファイル名と版（綴りの正本は `gemma4/provenance.py`）。 */
+const REFERENCE_FILE = "reference.json";
+const REFERENCE_SCHEMA = 1;
 
 /** SKIP 時にそのまま貼れる生成コマンド。 */
 const GENERATE_COMMAND =
@@ -94,6 +103,105 @@ Deno.test({
         exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)),
         `${GREEDY_PREFIX}${name}${SUFFIX} が ${GOLDEN_ROOT.pathname} に無い` +
           `（token-only 系列はあるのに期待列の正本が欠けている）`,
+      );
+    }
+  },
+});
+
+/** 系列ディレクトリの名前（記録が名乗る `series` と突き合わせる側）。 */
+const seriesName = (root: URL): string =>
+  root.pathname.split("/").filter((part) => part !== "").at(-1) ?? "";
+
+/** JSON の 1 段を「キー → 未検査の値」へ落とす（未知の形は明確な文言で落とす）。 */
+const objectAt = (value: unknown, where: string): Map<string, unknown> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${REFERENCE_FILE}: ${where} がオブジェクトでない`);
+  }
+  return new Map(Object.entries(value));
+};
+
+const stringAt = (entries: Map<string, unknown>, key: string, where: string): string => {
+  const value = entries.get(key);
+  if (typeof value !== "string" || value === "") {
+    throw new Error(`${REFERENCE_FILE}: ${where}.${key} が非空の文字列でない`);
+  }
+  return value;
+};
+
+/** `{bytes, sha256}` の 1 件（sha256 は 64 桁の小文字 hex であることまで見る）。 */
+const digestAt = (
+  entries: Map<string, unknown>,
+  key: string,
+  where: string,
+): { bytes: number; sha256: string } => {
+  const digest = objectAt(entries.get(key), `${where}.${key}`);
+  const bytes = digest.get("bytes");
+  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes <= 0) {
+    throw new Error(`${REFERENCE_FILE}: ${where}.${key}.bytes が正の整数でない`);
+  }
+  const sha256 = stringAt(digest, "sha256", `${where}.${key}`);
+  if (!/^[0-9a-f]{64}$/.test(sha256)) {
+    throw new Error(`${REFERENCE_FILE}: ${where}.${key}.sha256 が 64 桁の hex でない`);
+  }
+  return { bytes, sha256 };
+};
+
+const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> => {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+};
+
+/**
+ * ③ 出所の束縛（全体レビュー CX-2.3）。②が流用する golden は「この容器を作った実走が
+ * その場で digest を採ったもの」でなければならない — logits opt-in 系列を採り直せば digest が
+ * 動き、この門が落ちて token-only 系列の再 export を強制する。
+ *
+ * NOTE: `checkpoint` の指紋は**照合できない**（元チェックポイントはリポジトリの資産ではない）
+ * ので、ここで見るのは記録として立っていることまで。両系列が同じ重みを踏んでいることの
+ * 数値上の実証は②が受け持つ — この門はその②を「どの資産の組で見るべきか」に縛る側。
+ */
+Deno.test({
+  name: "Gemma 4 E2B token-only 資産: 出所記録が参照 golden を束ねている",
+  ignore: !MODEL_PRESENT,
+  fn: async () => {
+    const path = new URL(REFERENCE_FILE, TOKEN_ROOT);
+    assert(
+      exists(path),
+      `${REFERENCE_FILE} が ${TOKEN_ROOT.pathname} に無い` +
+        `（出所記録の無い世代の資産 — 再生成: ${GENERATE_COMMAND}）`,
+    );
+    const record = objectAt(JSON.parse(await Deno.readTextFile(path)), "根");
+
+    assertEquals(record.get("schema"), REFERENCE_SCHEMA, `${REFERENCE_FILE} の schema`);
+    assertEquals(stringAt(record, "series", "根"), seriesName(TOKEN_ROOT), "記録が名乗る系列");
+    const checkpoint = objectAt(record.get("checkpoint"), "checkpoint");
+    stringAt(checkpoint, "dir", "checkpoint");
+    const fingerprint = objectAt(checkpoint.get("files"), "checkpoint.files");
+    assert(fingerprint.size > 0, `${REFERENCE_FILE}: checkpoint.files が空`);
+    for (const file of fingerprint.keys()) digestAt(fingerprint, file, "checkpoint.files");
+
+    const reference = objectAt(record.get("reference"), "reference");
+    assertEquals(
+      stringAt(reference, "series", "reference"),
+      seriesName(GOLDEN_ROOT),
+      "束ねられた golden 系列（②が読む系列と同じであること）",
+    );
+    const goldens = objectAt(reference.get("goldens"), "reference.goldens");
+    assertEquals(
+      [...goldens.keys()].sort(),
+      EXPECTED_CASES.map((name) => `${GREEDY_PREFIX}${name}${SUFFIX}`).sort(),
+      "束ねられた golden の集合（②が読む 3 本と過不足なく一致）",
+    );
+    for (const name of EXPECTED_CASES) {
+      const file = `${GREEDY_PREFIX}${name}${SUFFIX}`;
+      const digest = digestAt(goldens, file, "reference.goldens");
+      const bytes = await Deno.readFile(new URL(file, GOLDEN_ROOT));
+      assertEquals(bytes.byteLength, digest.bytes, `${file}: byte 数`);
+      assertEquals(
+        await sha256Hex(bytes),
+        digest.sha256,
+        `${file}: sha256（token-only 系列が束ねた golden と別物 — ` +
+          `どちらかの系列だけを作り直した組み合わせ。再生成: ${GENERATE_COMMAND}）`,
       );
     }
   },

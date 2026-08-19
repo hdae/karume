@@ -25,9 +25,18 @@ logits を出さない形の greedy 期待列は logits opt-in 系列（`gemma4-
 再計算（1 実走数十分）を払わない。本台本の sanity は各ケースの**第 1 継続 token** を
 1-shot 台本の期待表と突き合わせるところまで（`export_decode` と同文）。
 
+## 流用する golden は出所記録で束ねる
+
+流用が成り立つ前提（**両系列が同じチェックポイントから出ている**）は、資産の存在確認では
+守れない — 片方だけ古い組み合わせでも門は緑になる（全体レビュー CX-2.3）。そこで元
+チェックポイントの指紋と、流用する golden 1 本ずつの digest を `reference.json` へ書き、
+TS 側の検収門がそれを検めてから parity を見る（正本は {@link gemma4.provenance}）。
+MUST: 記録を書くために logits opt-in 系列を**再 export しない** — 既存 golden を読むだけ。
+
 ## 出力レイアウト
 
     outputs/series/gemma4-e2b-decode-token/model.safetensors  重み・定数 + karume_ir
+    outputs/series/gemma4-e2b-decode-token/reference.json     出所記録（指紋 + 流用 golden）
 """
 
 from __future__ import annotations
@@ -40,6 +49,7 @@ from torch.nn import functional
 from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
+from gemma4 import ple
 
 #: 生成物の既定の置き場（logits opt-in 系列とは別ディレクトリ — 出口の違う別資産）。
 DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-decode-token"
@@ -66,7 +76,7 @@ class TokenOnlyChunkWrapper(decode.DecodeChunkWrapper):
             one_shot.SLIDING_ATTENTION: one_shot.additive_sliding_mask(length, self.sliding_window),
         }
         embeds = self.model.model.embed_tokens(input_ids)
-        stacked = one_shot.per_layer_inputs(self.per_layer, input_ids, self.per_layer_scale)
+        stacked = ple.per_layer_inputs(self.per_layer, input_ids, self.per_layer_scale)
         hidden = self.model.model(
             inputs_embeds=embeds,
             per_layer_inputs=stacked,

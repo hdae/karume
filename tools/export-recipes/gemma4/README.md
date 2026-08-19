@@ -175,6 +175,13 @@ and no logits are declared. It carries no golden files of its own: the acceptanc
 `greedy.<case>` records of the logits opt-in series against this graph, so the cross-series
 token-for-token match is itself the gate.
 
+Because that gate borrows another series' expectations, the export writes a `reference.json` next
+to the container: the fingerprint (sha256 and byte count) of the source checkpoint files it read,
+and the same digests for every borrowed `greedy.<case>.safetensors`. The acceptance test verifies
+those digests before it replays anything, so a combination where only one of the two series was
+regenerated fails loudly instead of passing quietly. Recording it needs no re-export of the logits
+series — the existing golden bytes are only read.
+
 ## Running
 
 ```sh

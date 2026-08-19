@@ -126,6 +126,7 @@ from torch.nn import functional
 from _shared.decode_series import _write_greedy, assert_case_room, positions_for
 from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
+from gemma4 import ple, provenance
 from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.emit import write_model
@@ -356,7 +357,7 @@ class DecodeChunkWrapper(one_shot.Gemma4Wrapper):
             one_shot.SLIDING_ATTENTION: one_shot.additive_sliding_mask(length, self.sliding_window),
         }
         embeds = self.model.model.embed_tokens(input_ids)
-        stacked = one_shot.per_layer_inputs(self.per_layer, input_ids, self.per_layer_scale)
+        stacked = ple.per_layer_inputs(self.per_layer, input_ids, self.per_layer_scale)
         logits = self.model(
             inputs_embeds=embeds,
             per_layer_inputs=stacked,
@@ -863,6 +864,7 @@ def export_series(
     sym_max: int = one_shot.SYM_MAX,
     positions: int = ROPE_TABLE_POSITIONS,
     steps: int = GREEDY_STEPS,
+    reference: Path = DEFAULT_OUT_DIR,
 ) -> dict[str, Any]:
     """variant の states 形 IR コンテナ（golden を採る系列なら io / greedy も）を書き、要約を返す。
 
@@ -870,6 +872,8 @@ def export_series(
     通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す
     （据え替えと後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
     MUST: `steps` を読むのは golden を採る系列だけ（token-only 系列には greedy 記録が無い）。
+    MUST: `reference` を読むのは golden を**採らない**系列だけ — 流用する greedy golden の
+    置き場で、出所記録（{@link gemma4.provenance}）がその digest を容器と束ねる。
     """
     wrapper = load_wrapper(variant, model_dir, positions=positions)
     # MUST: 丸めは参照・golden の採取より前（ADR 0006）— 後だと参照だけが元の重みで動く。
@@ -880,6 +884,11 @@ def export_series(
     assert_case_room(cases, 0, positions)
     if variant.goldens:
         assert_case_room(greedy_cases, steps, positions)
+    # MUST: 流用する golden の検めは席へ入る**前**（席の外に掛かる前提 — 落ちるなら
+    # 数十分の export を始める前に落とす）。読むだけで、参照系列には 1 バイトも書かない。
+    reference_goldens = (
+        {} if variant.goldens else provenance.assert_reference_goldens(reference, greedy_cases)
+    )
 
     # 例示入力は最長ケース（記号次元の 0/1 特殊化から遠い）。min=2 は同じ理由、max は
     # mask の Tmax 畳み込みの評価点（手術で刈るので配布物には残らないが、trace は通る）。
@@ -898,17 +907,14 @@ def export_series(
     print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
     surgical = to_states_form(graph, states_plan(graph, config))
 
-    # 据える単位は「系列ディレクトリ丸ごと」か「コンテナ 1 本」か（golden を採る系列だけ前者
-    # — 新 model + 旧 greedy の混成を作れない形にする）。
-    target = out_dir if variant.goldens else out_dir / one_shot.MODEL_FILE
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with staged_publication(target) as staged:
-        if variant.goldens:
-            # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
-            staged.mkdir()
-            container = staged / one_shot.MODEL_FILE
-        else:
-            container = staged
+    # 据える単位は**どちらの系列も「系列ディレクトリ丸ごと」**。golden を採る系列は
+    # 新 model + 旧 greedy の混成を作れない形にするため、採らない系列は容器と出所記録
+    # （{@link gemma4.provenance}）が食い違った組を作れない形にするため。
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    with staged_publication(out_dir) as staged:
+        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        staged.mkdir()
+        container = staged / one_shot.MODEL_FILE
         # 格納は既定 i8 + linear を 1 本ずつ i4（向きの根拠は 1-shot 台本の docstring —
         # tied 実体の FQN を書く前に知らずに済む側）。RoPE 表は既定 i8 の適格に入ってしまう
         # ので f32 を明示して外す（{@link rope_table_keys}）。
@@ -961,6 +967,13 @@ def export_series(
         }
         sanity = one_shot._sanity(first, expected, labels)
 
+        if not variant.goldens:
+            # 出所記録は容器と**同じ席**へ置く（据え替えが 1 回なので、新しい容器 + 古い
+            # 記録という組が作れない）。名乗る系列名は据えた後の名前 — 席の名前ではない。
+            print("[provenance] チェックポイント指紋 → reference.json", file=sys.stderr, flush=True)
+            record = provenance.build_record(out_dir, model_dir, reference_goldens)
+            provenance.write_record(staged, record)
+
     # 刈り込み本数と golden 3 種は golden を採る系列だけの欄（token-only の要約はコンテナ
     # 1 本ぶんなので増やさない）。
     pruned: dict[str, Any] = (
@@ -984,6 +997,8 @@ def export_series(
         if variant.goldens
         else {}
     )
+    # 逆に出所記録は golden を採らない系列だけの欄（束ねた golden が要約からも見える）。
+    bound: dict[str, Any] = {} if variant.goldens else {"reference": record["reference"]}
     return {
         "dir": str(out_dir),
         "nodes": len(verified.nodes),
@@ -997,6 +1012,7 @@ def export_series(
         "case_lengths": {name: int(ids.shape[1]) for name, ids in cases},
         "quantized": {"i8": int8.describe(), "i4": int4.describe()},
         "form": form,
+        **bound,
         **measured,
         "sanity": sanity,
     }
@@ -1006,12 +1022,15 @@ def run_variant_cli(variant: ChunkVariant, description: str, argv: Sequence[str]
     """variant の CLI を組んで走らせる（chunk 系列 2 本の入口はこれ 1 本）。
 
     骨組みは 1-shot 台本と共有する（{@link gemma4.export.series_parser}）— chunk 系列が足すのは
-    位置表の大きさ `--positions` と、golden を採る系列だけの `--steps`。
+    位置表の大きさ `--positions` と、golden を採る系列だけの `--steps`、採らない系列だけの
+    `--reference`（流用する golden 系列の置き場）。
     """
     parser = one_shot.series_parser(description, variant.out_dir)
     parser.add_argument("--positions", type=int, default=ROPE_TABLE_POSITIONS)
     if variant.goldens:
         parser.add_argument("--steps", type=int, default=GREEDY_STEPS)
+    else:
+        parser.add_argument("--reference", type=Path, default=DEFAULT_OUT_DIR)
     one_shot.run_series_cli(parser, partial(export_series, variant), argv)
 
 

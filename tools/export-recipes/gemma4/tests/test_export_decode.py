@@ -14,7 +14,7 @@
 - `greedy_continuation` が **full re-forward**（毎 step 先頭から・位置は arange）で採ること
 - 帯 / 因果 mask は 1-shot 台本のものを**そのまま**使うこと（窓の意味論を 2 箇所に持たない）
 - chunk 系列 2 本を駆動する variant の分岐（{@link decode.ChunkVariant}）— 組むラッパ・
-  `last_row` の有無・golden の有無・据える単位・要約の欄が系列ごとに正しく変わること
+  `last_row` の有無・golden の有無・出所記録の有無・要約の欄が系列ごとに正しく変わること
 
 transformers を要するケースだけ `importorskip` で SKIP する（既定 sync の CI ではモデル系
 依存が入らない — ADR 0065 の 2 job 構成）。
@@ -22,6 +22,8 @@ transformers を要するケースだけ `importorskip` で SKIP する（既定
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -29,6 +31,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
@@ -36,6 +39,7 @@ from _shared import decode_series as shared
 from gemma4 import export as gx
 from gemma4 import export_decode as decode
 from gemma4 import export_token as token_only
+from gemma4 import provenance
 from gemma4.tests.test_export import (
     FULL_DEPTH,
     HEADS,
@@ -1064,6 +1068,7 @@ TOKEN_ONLY_SUMMARY_KEYS = [
     "case_lengths",
     "quantized",
     "form",
+    "reference",
     "sanity",
 ]
 
@@ -1083,19 +1088,31 @@ class _StubSeriesTokenizer:
 
 
 @pytest.fixture
-def tiny_series(monkeypatch, tiny_materials):
+def tiny_series(monkeypatch, tiny_materials, tmp_path_factory):
     """実資産を読まずに {@link decode.export_series} を 1 周させるための差し替え一式。
 
     差し替えるのは**素材の出どころ**（模型・ケース・トークナイザ）と、tiny な乱数重みでは
     立てられない 2 つの期待だけ — 継続の余裕（床は `TestGreedyMargins` が固定）と最終位置の
     1 位（`test_export.TestSanity` が固定）。量子化 → export → 手術 → 書き出し → 形検査 →
     公開の経路は本物を通す。
+
+    NOTE: 素材の席（指紋を採るチェックポイントと流用する golden 系列）は `tmp_path` の**外**
+    に作る — 中に作ると「作業席も退避席も残らない」の検査が素材まで数えてしまう。
     """
     torch.manual_seed(1)
     cases = tuple(
         (name, torch.randint(0, VOCAB, (1, WINDOW + 3 - index), dtype=torch.int64))
         for index, name in enumerate(TINY_CASE_NAMES)
     )
+    checkpoint = tmp_path_factory.mktemp("checkpoint")
+    for name in provenance.FINGERPRINT_FILES:
+        (checkpoint / name).write_bytes(name.encode())
+    reference = tmp_path_factory.mktemp("reference-series")
+    for name, ids in cases:
+        save_file(
+            {shared.PROMPT_KEY: ids[0].to(torch.int32).contiguous()},
+            str(reference / f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}"),
+        )
     monkeypatch.setattr(gx, "build_cases", lambda model_dir, sym_max, window: cases)
     monkeypatch.setattr(gx, "load_tokenizer", lambda model_dir: _StubSeriesTokenizer())
     monkeypatch.setattr(decode, "MARGIN_FLOOR", 0.0)
@@ -1106,7 +1123,7 @@ def tiny_series(monkeypatch, tiny_materials):
         return {"stub": "ok"}
 
     monkeypatch.setattr(gx, "_sanity", record)
-    return SimpleNamespace(cases=cases, sanity=seen)
+    return SimpleNamespace(cases=cases, sanity=seen, checkpoint=checkpoint, reference=reference)
 
 
 class TestExportSeries:
@@ -1139,24 +1156,75 @@ class TestExportSeries:
         # 作業席も退避席も残らない（据え替えの後片付けは core の原語の担当）。
         assert list(tmp_path.iterdir()) == [out_dir]
 
-    def test_the_token_only_series_publishes_the_container_alone(self, tiny_series, tmp_path):
-        """golden を採らない系列は「コンテナ 1 本」を据える（io / greedy を書かない）。"""
+    def test_the_token_only_series_publishes_the_container_with_its_provenance(
+        self, tiny_series, tmp_path
+    ):
+        """golden を採らない系列は「コンテナ + 出所記録」を据える（io / greedy を書かない）。"""
         out_dir = tmp_path / "series"
 
         summary = decode.export_series(
             token_only.VARIANT,
-            tmp_path / "unused",
+            tiny_series.checkpoint,
             out_dir,
             sym_max=TINY_SYM_MAX,
             positions=TINY_POSITIONS,
+            reference=tiny_series.reference,
         )
 
-        assert [path.name for path in out_dir.iterdir()] == ["model.safetensors"]
+        assert sorted(path.name for path in out_dir.iterdir()) == [
+            "model.safetensors",
+            "reference.json",
+        ]
         assert summary["outputs"] == 1
         assert list(summary) == TOKEN_ONLY_SUMMARY_KEYS
         # sanity は全ケースぶん（greedy 記録が無いので全長 forward で採る）。
         assert set(tiny_series.sanity["greedy"]) == set(TINY_CASE_NAMES)
         assert list(tmp_path.iterdir()) == [out_dir]
+
+    def test_the_provenance_record_binds_the_reference_goldens(self, tiny_series, tmp_path):
+        """記録が「元 checkpoint の指紋」と「流用する golden の digest」を束ねている。"""
+        out_dir = tmp_path / "series"
+
+        decode.export_series(
+            token_only.VARIANT,
+            tiny_series.checkpoint,
+            out_dir,
+            sym_max=TINY_SYM_MAX,
+            positions=TINY_POSITIONS,
+            reference=tiny_series.reference,
+        )
+
+        record = json.loads((out_dir / provenance.REFERENCE_FILE).read_text(encoding="utf-8"))
+        assert record["schema"] == provenance.SCHEMA
+        assert record["series"] == out_dir.name
+        assert record["checkpoint"]["dir"] == tiny_series.checkpoint.name
+        assert sorted(record["checkpoint"]["files"]) == sorted(provenance.FINGERPRINT_FILES)
+        assert record["reference"]["series"] == tiny_series.reference.name
+        goldens = record["reference"]["goldens"]
+        assert sorted(goldens) == sorted(
+            f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}" for name in TINY_CASE_NAMES
+        )
+        for file, digest in goldens.items():
+            raw = (tiny_series.reference / file).read_bytes()
+            assert digest == {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+    def test_a_missing_reference_golden_stops_the_token_only_series(self, tiny_series, tmp_path):
+        """MUST: 流用先が欠けた組み合わせは席を作る前に落ちる（資産を 1 本も残さない）。"""
+        out_dir = tmp_path / "series"
+        for path in tiny_series.reference.iterdir():
+            path.unlink()
+
+        with pytest.raises(AssertionError, match="参照 golden"):
+            decode.export_series(
+                token_only.VARIANT,
+                tiny_series.checkpoint,
+                out_dir,
+                sym_max=TINY_SYM_MAX,
+                positions=TINY_POSITIONS,
+                reference=tiny_series.reference,
+            )
+
+        assert list(tmp_path.iterdir()) == []
 
     def test_a_failing_gate_leaves_nothing_behind(self, tiny_series, tmp_path, monkeypatch):
         """MUST: 門より前に final へ置かない（落ちた実走が検収を通れる資産を残さない）。"""

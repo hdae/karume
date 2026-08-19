@@ -25,6 +25,7 @@ import torch
 from torch import nn
 
 from gemma4 import export as gx
+from gemma4 import ple
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 
 #: tiny な被験体の形。head_dim は層種別で**違う値**にする（実物 E2B の 256 / 512 と同じ罠を
@@ -134,7 +135,7 @@ class TestPerLayerInputs:
         ids = torch.randint(0, VOCAB, (1, 5), dtype=torch.int64)
         scale = float(PLE_DIM) ** 0.5
 
-        rebuilt = gx.per_layer_inputs(_split_tables(packed), ids, scale)
+        rebuilt = ple.per_layer_inputs(_split_tables(packed), ids, scale)
 
         assert torch.equal(rebuilt, self._reference(packed, ids, scale))
 
@@ -146,17 +147,17 @@ class TestPerLayerInputs:
         tables = _split_tables(packed)
         swapped = nn.ModuleList([tables[1], tables[0], tables[2]])
 
-        rebuilt = gx.per_layer_inputs(swapped, ids, scale)
+        rebuilt = ple.per_layer_inputs(swapped, ids, scale)
 
         assert not torch.equal(rebuilt, self._reference(packed, ids, scale))
 
 
 def _tiny_text_config():
-    """検査席の PLE 表（{@link gx.PLE_PROBE_ROWS} 行）を持つ tiny な text config。"""
+    """検査席の PLE 表（{@link ple.PLE_PROBE_ROWS} 行）を持つ tiny な text config。"""
     transformers = pytest.importorskip("transformers")
     return transformers.Gemma4TextConfig(
         vocab_size=VOCAB,
-        vocab_size_per_layer_input=gx.PLE_PROBE_ROWS,
+        vocab_size_per_layer_input=ple.PLE_PROBE_ROWS,
         hidden_size=HIDDEN,
         intermediate_size=32,
         num_hidden_layers=len(LAYER_TYPES),
@@ -183,7 +184,7 @@ def tiny_model_and_tables():
     model = transformers.Gemma4ForCausalLM(_tiny_text_config()).to(torch.float32).eval()
     packed = _packed_table()
     tables = _split_tables(packed)
-    probe = gx.probe_rows(VOCAB)
+    probe = ple.probe_rows(VOCAB)
     with torch.no_grad():
         model.model.embed_tokens_per_layer.weight.copy_(
             packed[torch.tensor(probe, dtype=torch.int64)]
@@ -194,34 +195,34 @@ def tiny_model_and_tables():
 class TestProbeRows:
     def test_the_probe_scatters_across_both_ends_and_the_middle(self):
         """散点であること（Codex 波 H 指摘 H-05 — 連続 8 行だと 1 ブロックしか踏まない）。"""
-        probe = gx.probe_rows(262144)
+        probe = ple.probe_rows(262144)
 
-        assert len(probe) == gx.PLE_PROBE_ROWS
-        assert len(set(probe)) == gx.PLE_PROBE_ROWS
+        assert len(probe) == ple.PLE_PROBE_ROWS
+        assert len(set(probe)) == ple.PLE_PROBE_ROWS
         assert 0 in probe and 262143 in probe
         # 最初のブロック境界の両側と中央対。
-        assert gx.PLE_ROW_BLOCK - 1 in probe and gx.PLE_ROW_BLOCK in probe
+        assert ple.PLE_ROW_BLOCK - 1 in probe and ple.PLE_ROW_BLOCK in probe
         assert 262144 // 2 in probe
 
     def test_a_tiny_table_still_yields_the_full_count(self):
         """ブロック境界の無い tiny 表でも本数は固定（検査席の行数が config に焼かれる）。"""
-        probe = gx.probe_rows(VOCAB)
+        probe = ple.probe_rows(VOCAB)
 
-        assert len(probe) == gx.PLE_PROBE_ROWS
-        assert len(set(probe)) == gx.PLE_PROBE_ROWS
+        assert len(probe) == ple.PLE_PROBE_ROWS
+        assert len(set(probe)) == ple.PLE_PROBE_ROWS
         assert all(0 <= row < VOCAB for row in probe)
         assert 0 in probe and VOCAB - 1 in probe
 
     def test_a_table_shorter_than_the_probe_fails_loudly(self):
         with pytest.raises(ValueError, match="足りない"):
-            gx.probe_rows(gx.PLE_PROBE_ROWS - 1)
+            ple.probe_rows(ple.PLE_PROBE_ROWS - 1)
 
 
 class TestAssertPerLayerSplit:
     def test_a_faithful_split_passes(self, tiny_model_and_tables):
         model, tables, probe = tiny_model_and_tables
 
-        gx.assert_per_layer_split(model, tables, probe)
+        ple.assert_per_layer_split(model, tables, probe)
 
     def test_a_shuffled_split_fails_loudly(self, tiny_model_and_tables):
         """MUST: 列の割り付け違いはここで落とす（形も型も合うので後段では見えない）。"""
@@ -229,14 +230,14 @@ class TestAssertPerLayerSplit:
         shuffled = nn.ModuleList([tables[2], tables[0], tables[1]])
 
         with pytest.raises(AssertionError, match="ビット一致しない"):
-            gx.assert_per_layer_split(model, shuffled, probe)
+            ple.assert_per_layer_split(model, shuffled, probe)
 
     def test_a_split_of_the_wrong_width_fails_loudly(self, tiny_model_and_tables):
         model, tables, probe = tiny_model_and_tables
         short = nn.ModuleList([tables[0], tables[1]])
 
         with pytest.raises(AssertionError, match="形"):
-            gx.assert_per_layer_split(model, short, probe)
+            ple.assert_per_layer_split(model, short, probe)
 
 
 # ---- 量子化の対象割り付け --------------------------------------------------
