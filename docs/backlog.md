@@ -42,7 +42,11 @@ autoregressive 波の**残項目（波外へ送り）**:
   bool initializer / storage の設計・pipeline 単位の Session 常駐と device-loss lifecycle
   （perf H-4 と同体）・sampling/RNG はホスト維持（GPU 側は argmax/topk のみ）。
 
-## next — （空 — 次波の開始はユーザー裁定）
+## next — w4 横展開 → 量子化方式の探索（2026-08-19 ユーザー裁定）
+
+先に **w4 の横展開（品質調査・recipe 基盤再編と同席）**、続いて**量子化方式の探索**へ
+（両項の内容は later 節が正本 — 着手時にここへ昇格させて具体化する）。
+**リリース準備波（release 節）はモデルの HF 公開も含み重いため後回し**（同日裁定）。
 
 ## later
 
