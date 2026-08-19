@@ -541,8 +541,15 @@ def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path)
     書くのは実際に焼いたターゲットだけ（`LORA_PREFIXES` に無いターゲットの系列に置くと
     「このモデルにも焼いた」という事実でない主張になる）。配布形には入らない —
     `anima/distribution.py` の配置表が許可した役割だけが出力へ渡る。
+
+    MUST: 焼いていない側で**古い記録を消す**（全域関数）。`emit_target` は系列ディレクトリを
+    掃除しないので、`--lora` 付きで採った系列へ `--lora` 無しで採り直すと、重みだけ素に戻って
+    記録が前回のまま生き残る。`assert_lora_provenance` は「記録が在る × sha 一致」しか見ない
+    ので、その状態は「取り下げ」を素通しして配布 README に嘘の帰属を印字させる。記録の存在が
+    「今の `model.safetensors` に焼いた」と同値であることが、この機構の唯一の拠り所。
     """
     if args.lora is None or target not in LORA_PREFIXES:
+        (out_dir / LORA_PROVENANCE_FILE).unlink(missing_ok=True)
         return None
     record = {"file": args.lora.name, "sha256": sha256_file(args.lora)}
     (out_dir / LORA_PROVENANCE_FILE).write_text(

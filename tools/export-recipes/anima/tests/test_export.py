@@ -72,6 +72,19 @@ class TestLoraProvenance:
         assert export_anima._write_lora_provenance(self._args(None), "transformer", out_dir) is None
         assert list(out_dir.iterdir()) == []
 
+    def test_re_exporting_without_the_flag_removes_the_stale_record(self, tmp_path):
+        """記録の存在は「今の重みに焼いた」と同値 — 取り下げが素通りすると README が嘘を印字。"""
+        lora = tmp_path / "lora.safetensors"
+        lora.write_bytes(b"lora-bytes")
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+        export_anima._write_lora_provenance(self._args(lora), "transformer", out_dir)
+        assert (out_dir / LORA_PROVENANCE_FILE).exists()
+
+        assert export_anima._write_lora_provenance(self._args(None), "transformer", out_dir) is None
+
+        assert not (out_dir / LORA_PROVENANCE_FILE).exists()
+
 
 class TestFakeQuant:
     """`--dtype f16` の丸め（ADR 0006）— 既定 f32 の挙動を 1 ビットも動かさないこと。"""
