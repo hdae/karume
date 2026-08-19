@@ -212,3 +212,28 @@ Gemma 4 E2B（`tools/export-recipes/gemma4/` — 1-shot + states 形 decode の 
    重みスロット（= i8 適格集合）に入るため、`"f32"` 明示除外が必須
    （`export_decode.rope_table_keys`）。位置表の丸めは重みの丸めと違い**角度誤差が位置に
    沿って蓄積する**。読み手側は census の「f32 embedding = 表 4 本ちょうど」で固定。
+
+## 追記 5（2026-08-19・測定側の拡張 — 対象 op の opt-in と方式スクリーニングの受け皿）
+
+w4 横展開 + 量子化方式スクリーニング波（backlog now 節）に伴う **fake-quant 側だけの拡張**。
+格納の受理集合（決定 2）・実行経路の linear 限定（決定 5）・emit の適格判定は**一切変えない**。
+
+1. **`fake_quant_int4` に `op_types` の明示 opt-in を追加**（既定 `(nn.Linear,)` のまま =
+   既存呼び出しの挙動不変）。決定 5 の「追補は需要が出た op から」の**測定面の需要**が先に
+   立った形 — i8 と同じ 5 op 種まで広げて「非 linear の w4 は品質がどこまで戻るか」を
+   runtime 非接触で測る。group の軸は「in 軸」を一般化する（`quantize.channel_rows`:
+   conv は出力チャネルごとの受容野 `Cin·K` / `Cin·Kh·Kw` を平坦化・`ConvTranspose1d` は
+   転置レイアウトの軸 1・embedding は語彙エントリごとの D 軸）。conv 系の scale は受容野
+   平坦化の rank 2 になり**重みと rank が合わないため emit へ構造的に渡せない**
+   （誤用が沈黙しない側に倒してある）。
+2. **測定専用の丸め方式群を `quant_methods.py` に新設**（FP4 e2m1 / NF4 / MXFP4 /
+   k-means codebook〈per_tensor・per_channel・shared + g32 正規化の 3 粒度〉）。
+   `quantize.py` と別モジュールなのは「載っている形 = 出荷できる格納形」という読み方を
+   壊さないため。戻り値は計数のみで **scale / codebook の台帳を返さない**（emit へ流れる
+   口を作らない）。全方式とも決定的（k-means は分位点初期化 + 固定反復）・対象選択は
+   `iter_quant_targets` を格納経路と共有する。
+3. **位置づけ**: 決定 6（Phase 0 sweep）の方式次元への続編。追記 1 の g 軸確定（g32）を
+   前提に方式比較は g=32 固定で行い、g 軸の再評価は方式確定後に別途（2026-08-19 ユーザー
+   裁定）。校正ループ系（AWQ / GPTQ）は引き続き未測定 — 実需が立てば別 ADR（追記 1 のまま）。
+   codebook 系が採用に至る場合の格納の新席（表の companion 欄・view 型）は決定 2 の 3 面の
+   reopen として別途起票する。
