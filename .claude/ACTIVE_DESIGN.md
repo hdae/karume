@@ -49,8 +49,18 @@
   GPU 非依存・比較はしない）。RAM ピーク実測 8.4→3.5GiB
   （[research](../docs/research/2026-08-19-shard-load-ram-peak.md)）。manifest の shard 欄と
   exporter 分割は R1 送り（shard 面の消費者は当面ローカル実験限定 — limitations）。
-  **次 = 波 H（Gemma 4 E2B 検収 — 実モデル w4 込み）**。
-  送り: L8 fake-device 注入面は保留継続。
+  **波 H 済（Gemma 4 E2B 検収 — 2026-08-19・autoregressive-ready 波 A〜H 全消化）**:
+  exporter core 3 面（`f15bbb3` — Gemma4 系 aten 正規化 3 点 + 混成格納の席〈quantize
+  `include` / emit `weight_dtype_overrides`〉= ADR 0069 追記 4）→ 1-shot recipe
+  （`ac930f3`/`59bbfc0` — PLE 35 分割〈binding 上限 2GB−4〉・層種別 mask 2 本・混成
+  i8×i4・T=598 で帯実効）→ decode 台本（`3d217ae` — RoPE 表引き 2 組・30 slot + KV 共有
+  〈源 = 層 13/14〉・RoPE 表は f32 明示除外）→ 検収門（`c5f1f7f` — greedy 3 ケース ×
+  K=16 厳密一致〈ring エビクト越え込み〉・logits atol 1e-2〈実測最悪 2.23e-3〉・census
+  混成キー）→ **token-only 既定出口**（ADR 0068 追記 4 — `export_token.py` + models
+  `generateGreedy` の `lastRow`・新規 op ゼロ・系列間交差 parity 門）。実 GPU で w4 混成が
+  完全常駐（hostExpandedBytes 0）・chat デモ ~11 tok/s。
+  送り: R1 同席（manifest shard 欄 + exporter 分割）・MiniCPM5 token-only 鏡像・
+  L8 fake-device 注入面は保留継続（正本 = backlog）。
 
 ## Open decisions
 

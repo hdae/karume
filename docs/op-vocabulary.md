@@ -375,3 +375,10 @@ NOTE: 2026-08-13 に起票した層表の 2 穴（Core ATen 外・モデル由�
   プロトタイプは踏襲していた。行 reduce 族を増やす**前に**、テンプレートを逐次のまま
   複製してよいか一度裁定しておくと、後で並列化に切り替える際の書き換えが減る
   （プロトタイプはこの裁定を先送りしたまま実装を進めていた）。
+
+NOTE: 2026-08-19 波 H（Gemma 4 E2B）で第 2 層に **op 追加ゼロ**のまま 3 形を受理拡張
+（いずれも normalize の同値書換 — 台帳 NOTE のみ・ADR 0043 の手順 2 側）:
+`pow(x,-0.5)` → rsqrt 寄せ（Gemma4RMSNorm の pow 形）・weight 無し RMSNorm の畳み込み
+（`v_norm` = with_scale=False・ones 合成はハンドラ側）・静的 `select.int` → `slice+squeeze`
+合成（PLE の層別スライス）。token-only 出口（ADR 0068 追記 4）の実行時行選択も既存
+`embedding` の合成で成立（新 op なし）。

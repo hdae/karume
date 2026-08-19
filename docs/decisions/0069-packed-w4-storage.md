@@ -185,3 +185,30 @@ runtime を触らない **format 候補 sweep** を先行する: 検収モデル
 丸め済み重みから引き直した scale `fl(amax(|q·s|)/7) = s` が不動点」で、ADR 0019 の
 ±127 論証も同型（i8 側の実測 NOTE は `tests/test_emit.py`）。検証門の設計（逆変換ビット一致・
 冪等）は不変。
+
+## 追記 4（2026-08-19・波 H — 実モデル検収と混成格納の API 席）
+
+Gemma 4 E2B（`tools/export-recipes/gemma4/` — 1-shot + states 形 decode の 2 系列）で
+**実モデル w4 検収を完了**。linear 276 本 = i4 g32（1.88B 要素）・embedding 系 36 本
+（主 embedding〈tied lm_head〉+ PLE 35 分割表）= i8（2.75B 要素）・残り f32 の**混成格納**で、
+実 GPU の greedy K=16 が torch golden と厳密一致（門 = `e2e_gemma4_test.ts` /
+`e2e_gemma4_greedy_test.ts`。census が `:wi4g32` / `:wi8` の両変種と hostExpandedBytes 0 =
+適格落ちゼロを固定）。
+
+実装確定 3 点:
+
+1. **混成の API 席**: `export_to_file` / `write_model` に `weight_dtype_overrides`
+   （テンソルキー → 格納 dtype・既定 `weight_dtype` に優先）、`fake_quant_int8` / `int4` に
+   `include`（モジュール FQN 述語）。各 dtype の適格規則・scale 形・検証門は本 ADR と
+   0018/0019 の**既存決定のまま**（割り付けの表現だけが増えた）。明示指定は**満たせなければ
+   fail loudly**（未知キー・適格外・i4 × 非 linear）・既定側は従来の「適格外は静かに f32」
+   （I4-ELIG-01 挙動）を維持。`"f32"` の明示 = 圧縮既定からの除外。
+2. **tied lm_head の割り付け**: embedding と linear の両重みスロットで消費される tied 実体は
+   i4 不適格（決定 5）・i8 は両者適格。fake-quant の include で **i4 側から除外して i8 に
+   一本化**する（両方に通すと二重丸めで scale 台帳が実値と食い違う）。格納指定は「既定 i8 +
+   linear を i4 明示」の向き — i4 側のキーが fake-quant 台帳そのものになり、tied 実体に
+   export が付ける FQN を書く前に知らずに済む。
+3. **RoPE 位置表は量子化しない**: decode 系列の表引き化で cos/sin 表が embedding の
+   重みスロット（= i8 適格集合）に入るため、`"f32"` 明示除外が必須
+   （`export_decode.rope_table_keys`）。位置表の丸めは重みの丸めと違い**角度誤差が位置に
+   沿って蓄積する**。読み手側は census の「f32 embedding = 表 4 本ちょうど」で固定。

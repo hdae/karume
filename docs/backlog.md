@@ -66,52 +66,30 @@ shard 進行検証〈完全性・co-shard・横断重複〉・`1fcadbb` shard �
 経路統合・errorScope shard 単位・SessionState は graph のみ〉・`3240f18` admission
 estimator。RAM ピーク実測 8.4→3.5GiB =
 [research](research/2026-08-19-shard-load-ram-peak.md)・manifest shard 欄と exporter 分割は
-R1 送り = ADR 0070 追記）** → H = Gemma 4 E2B 検収。付帯裁定: topk の exporter 側（多出力 aten の getitem 結線）は sampling 実需まで
-先送り / 検収は固定 token id 列の parity（tokenizer・models パイプライン本格化は波外）。
-**以下の番号項目は実装波の作業台帳として残る（設計の正本は各 ADR）**。前提の宣言として **R2（shape 不変条件）を最初の
-ADR に含める**: 恒久不変条件は「静的物理格納・固定 rank・計画キャッシュの鍵は常に容量」まで —
-「全論理形状がホスト既知」は恒久にせず、**有界論理 extent の席**（compact-prefix 軸 1 本・
-DDS op は payload + extent の複数出力・extent は計画鍵に入れない・admission は容量課金）を
-IR スキーマに予約する。実装は最初の実需モデルまで先送り・上限超えと動的 rank はホスト介在の
-グラフ分割のまま（根拠 = [runtime-landscape §3](research/2026-08-16-runtime-landscape.md)・
-2026-08-16 裁定）:
+R1 送り = ADR 0070 追記）** → **H = Gemma 4 E2B 検収（済 2026-08-19 — 実モデル w4 + token-only 既定出口込みで
+autoregressive-ready 波 A〜H 全消化）**: exporter core 3 面（`f15bbb3` — Gemma4 系 aten
+正規化 3 点〈pow⁻⁰·⁵ / weight 無し RMSNorm / 静的 select→slice+squeeze〉+ quantize
+`include` + emit `weight_dtype_overrides` = 混成格納の席・ADR 0069 追記 4）→ 1-shot recipe
+（`ac930f3` + `59bbfc0` — PLE 35 分割〈binding 上限 2GB−4 対応〉・層種別 mask 2 本・
+既定 i8 + linear i4 明示・tied lm_head は i8 一本化）→ decode 台本（`3d217ae` — RoPE 表引き
+2 組・30 slot + KV 共有読者〈源 = 層 13/14〉・RoPE 表は f32 明示除外）→ 検収門（`c5f1f7f` —
+1-shot logits atol 1e-2〈実測最悪 2.23e-3〉+ census 混成キー / decode greedy 3 ケース ×
+K=16 厳密一致〈T=598 = ring エビクト越え〉+ prefill 最終 chunk 1.09e-3）→ **token-only
+既定出口**（ADR 0068 追記 4 — `export_token.py` + models `generateGreedy` の `lastRow`・
+新規 op ゼロ・系列間交差 parity 門）。生成デモ提示済み（chat template K=128・~11 tok/s）。
 
-1. **KV state / GenerationContext**: KV を Session の普通の入出力にしない。寿命分離
-   （Session = immutable weights / GenerationContext = 1 生成の mutable state）・
-   fixed-capacity physical + logical `pastLength`・prefill と decode は別 execution shape・
-   device loss 時の再開契約。`pastLength` は shape symbol にしない（PreparedPlan/backing が
-   毎 token 再構築になる — ADR 0042 の key 契約）。**state の単位は「層 × 均一 KV」ではなく
-   名前付き state スロット（per-slot shape・別名可）で定義する**（R3・2026-08-16 裁定 —
-   検収モデルの Gemma 4 E2B が sliding 固定長 512 / keys-as-values / 20 層 cache 共有の
-   3 種混在で、均一前提だと 5 ADR 全部の改訂になる）。
-2. **packed weight storage + sharded loading**: int4 級の logical shape / physical payload 分離
-   （1 要素 = 1 payload 要素の現契約を破る初の格納形）+ safetensors shard + 全量 ArrayBuffer
-   保持の廃止（shard 単位 fetch → verify → upload → 解放）。**packed 格納（w4 = `i4`）は
-   波 F で全面済**（reopen = ADR 0069・Phase 0 sweep・format 層・emit・runtime 実行 —
-   2026-08-18）。**shard + 全量保持廃止も波 G で済**（2026-08-19 — ADR 0070。残 =
-   manifest の shard 欄 + exporter 側の分割規則で、どちらも R1 と同席）。
-3. **メモリ予算 / admission（済 — 波 G 2026-08-19）**: `estimateSessionMemory`（GPU 非依存・
-   カテゴリ別必要量 + unaccounted 欄・比較や可否判定はしない）。SessionDiagnostics への
-   欄追加は不要の裁定（実測側は既存欄で完備 — ADR 0070 追記）。
-4. **decode 出口（済 — 波 B 2026-08-17）**: GPU `argmax`（`cbe093a`）+ static-k `topk`
-   （`50871e3`）。runtime の generic multi-output は列化 2 段（`3a31544` / `9a795a7`）で消化・
-   0 本席（effect op）は波 D `5662c9a` で入居。**残: token-only 既定出口**（ADR 0068 決定 4 の
-   既定形 — last_row i32 入力 + gather の新配線。波 F/H で設計から着手・現 decode 台本は
-   logits opt-in 形で検収済み = ADR 0068 追記 3・2026-08-18 裁定）。
-5. **autoregressive attention（済 — 波 A + 波 D 2026-08-18）**: causal / GQA / logical prefix
-   length / KV state access / empty-row 意味論を states 形（ADR 0067 決定 4〜7）で消化。
-   **row-block の portability は保存 attention 経路の行ブロック内蔵で正面解決**（`88d7021` —
-   matcher 依存は分解経路専用のまま）。mask は attrs 化でなく**述語計算**（両側 — 実体化
-   ゼロ）に裁定済み。
-   **G3 = kv_heads > 1 の GQA は波 A で解決済み**（2026-08-17 — ADR 0067 決定 1〜3 実装・
-   r=1 バイト同一・repeat_kv parity・GQA×i8a8 は fail loudly。実モデル検収 =
-   `e2e_minicpm5_test.ts`〈logits tolerance + greedy + census〉）。
-   mask は causal / sliding の attrs 化を含めて裁定（131K context の `[1,1,M,N]` 実体化は
-   68GB 級で物理的に不成立）。
+autoregressive 波の**残項目（波外へ送り）**:
 
-付随: bool initializer / storage の設計（mask 素材 — ⑤と同席で裁定）・pipeline 単位の
-Session 常駐と device-loss lifecycle（perf H-4 と同体）・sampling/RNG はホスト維持
-（op-vocabulary の裁定を再確認済み — GPU 側は argmax/topk のみ）。
+- **R1 と同席**: manifest v2 の shard 欄 + exporter 側 shard 分割規則（ADR 0070 追記 —
+  HF 公開前締切）。
+- **MiniCPM5 の token-only 系列**（ADR 0068 追記 4 の同形展開 — models 側 `lastRow` は
+  共通化済みで recipe + 門の鏡像だけ。topk の exporter 側〈多出力 aten の getitem 結線〉は
+  sampling 実需まで先送りのまま）。
+- L8（fake-device 注入面）は保留継続・`enqueue` の generation 面は設けない裁定で確定
+  （limitations）。
+- 有界論理 extent の席（R2 — IR スキーマ予約のみ・実装は最初の実需モデルまで先送り）・
+  bool initializer / storage の設計・pipeline 単位の Session 常駐と device-loss lifecycle
+  （perf H-4 と同体）・sampling/RNG はホスト維持（GPU 側は argmax/topk のみ）。
 
 ## later
 

@@ -144,3 +144,24 @@ gather → lm_head へ通す新配線（+ models 側の入力供給・token-only
 現系列は診断線（prefill logits tolerance 門の対象）として併存させる。それまで decode の
 実効 readback（prefill チャンクあたり ~16.7MB の logits）と全行 lm_head 計算は過大のまま —
 検収の正しさには影響せず、この形の上で decode 性能を主張しない。
+
+## 追記 4（2026-08-19・波 H — 決定 4 の既定形〈token-only 出口〉を実装）
+
+追記 3 で切り出した token-only 既定形を Gemma 4 E2B で実装・検収した
+（`tools/export-recipes/gemma4/export_token.py` — 系列 `gemma4-e2b-decode-token/`）。
+
+- **配線は追記 3 の想定どおり**: `last_row[1]` i32 グラフ入力（最終有効行 = `queryLength − 1`・
+  models `generateGreedy` の `lastRow` 指定が供給）→ 最終 norm 後 hidden `[1,M,H]` から
+  `F.embedding(last_row, hidden[0])` で 1 行選択 → その行だけ lm_head + softcap + argmax →
+  出力は `token[1,1,1]` **1 本**。**新規 op ゼロ**（行選択は既存 `embedding` — 添字が実行時値
+  でも最終次元固定の行 gather。`logits_to_keep` にテンソルを渡す上流形は advanced indexing =
+  語彙外なので使えない）。IR / ランタイム / エクスポータ core は無変更。
+- 出口は **argmax 直結 MUST**（形合わせの unsqueeze は lm_head の前に置く — 後ろに置くと
+  token 出力の供給元が reshape になり形検査が割れる）。
+- **検収は系列間交差 parity**（`e2e_gemma4_token_exit_test.ts`）: logits opt-in 系列の
+  greedy golden（torch full re-forward）と token-only 系列の生成列が 3 ケース × K=16 で
+  厳密一致。期待値の再計算は払わず、独立性は落ちない（出所は full re-forward のまま）。
+- 実効: decode の readback は token 4B のみ・lm_head は 1 行（prefill chunk あたり
+  `(M−1)×262144×1536` MAC と `[M,V]` logits バッファが消える）。logits opt-in 形は診断線
+  （prefill logits tolerance 門の対象）として併存（追記 3 の裁定を維持）。
+- 送り: MiniCPM5 系列への同形展開（backlog 起票 — 機構は models `lastRow` として共通化済み）。
