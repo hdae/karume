@@ -58,6 +58,8 @@ CORE_MODULES: tuple[str, ...] = (
     "rope",
     # states 形への IR 手術（ADR 0067）。decode 台本が使うがモデル知識は持たない。
     "states",
+    # 成果物公開の原語（ADR 0052 の staging → 検証 → swap）。path しか知らない。
+    "artifacts",
     # 段 5 で純化した組み立てエンジンとカード描画・CLI（family 知識も repo topology も無い）。
     "dist",
     "modelcard",

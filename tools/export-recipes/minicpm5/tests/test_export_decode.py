@@ -28,6 +28,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared import decode_series as shared
+from karume.artifacts import SUPERSEDED_SUFFIX
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_module
@@ -500,7 +501,7 @@ class TestPublish:
 
         assert (final / "model").read_text() == "new"
         assert not (final / "greedy.stale").exists()
-        assert not list(tmp_path.glob("final.retired-*"))
+        assert not list(tmp_path.glob("final" + SUPERSEDED_SUFFIX))
 
     def test_a_failed_promotion_restores_the_old_series(self, tmp_path, monkeypatch):
         """昇格の rename が失敗しても、final は**完全な旧資産のまま**（不在にも混成にもならない）。

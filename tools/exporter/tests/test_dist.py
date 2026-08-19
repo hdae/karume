@@ -23,11 +23,11 @@ from typing import Any, ClassVar
 import pytest
 
 from karume import dist
+from karume.artifacts import SUPERSEDED_SUFFIX
 from karume.dist import (
     MANIFEST_FORMAT,
     PIPELINES,
     SHARED_DIRNAME,
-    SUPERSEDED_SUFFIX,
     Artifact,
     DistError,
     ModelPlan,
@@ -376,7 +376,7 @@ class TestAtomicReplacement:
                 raise OSError("据え替えの途中で落ちた")
             real(src, dst)
 
-        monkeypatch.setattr("karume.dist.os.replace", failing)
+        monkeypatch.setattr("karume.artifacts.os.replace", failing)
 
     def _versioned_plans(self, version: str) -> list[ModelPlan]:
         """3 モデル × 1 役の最小計画。版ごとに**中身だけ**が変わる（長さは同じ）。

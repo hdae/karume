@@ -36,12 +36,12 @@ from anima.distribution import (
     anima_sources,
 )
 from dist import main
+from karume.artifacts import STAGING_SUFFIX
 from karume.dist import (
     MANIFEST_FILENAME,
     MANIFEST_FORMAT,
     MODEL_CARD_FILENAME,
     SHARED_DIRNAME,
-    STAGING_SUFFIX,
     Artifact,
     DistError,
     assemble_family,

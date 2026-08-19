@@ -61,7 +61,6 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
-import os
 import re
 import shutil
 from collections import Counter
@@ -74,6 +73,7 @@ from typing import Any, NamedTuple
 import numpy as np
 from safetensors.numpy import save
 
+from karume.artifacts import ArtifactSwapError, staged_publication
 from karume.ir import IR_METADATA_KEY
 from karume.modelcard import HF_OWNER
 
@@ -97,12 +97,6 @@ SHARED_DIRNAME = "shared"
 #: 下位ディレクトリに紛れ込んだ同名ファイルまで見逃さないため。**在ることは要求しない**
 #: （{@link verify_dist} はモデルカードを書く**前**に走るので、無いまま通る必要がある）。
 META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
-
-#: 組み立て中のツリー（staging）と、差し替え直前まで残す旧ツリーの置き場 — どちらも**出力先と
-#: 同じ親**に `<出力先の名前><接尾辞>` で作る。同じ親なのは rename が同一ファイルシステム内で
-#: しか原子的でないため（`/tmp` などへ逃がすと swap が跨デバイスコピーへ落ち、原子性ごと消える）。
-STAGING_SUFFIX = ".staging"
-SUPERSEDED_SUFFIX = ".old"
 
 #: 規模上限（ADR 0041 §7）。hub が同じ値で弾くので、**焼く側で先に落とす**
 #: （配布してから利用者の手元で初めて分かる形にしない）。
@@ -604,18 +598,6 @@ def manifest_text(manifest: Mapping[str, Any]) -> str:
     return json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
 
 
-def _discard_tree(path: Path) -> None:
-    """`path` を（在れば）丸ごと消す — staging / 退避先の後始末。
-
-    中断が残した作業ディレクトリを踏み直すと、plan に無いファイルが新しいツリーへ黙って混ざる
-    （{@link verify_dist} が宣言外ファイルとして落とすが、数 GB を並べ切った後になる）。
-    """
-    if path.is_dir():
-        shutil.rmtree(path)
-    elif path.exists():
-        path.unlink()
-
-
 def _materialize_family(
     plans: Sequence[ModelPlan], out_dir: Path, default_model: str
 ) -> dict[str, Any]:
@@ -687,12 +669,12 @@ def assemble_family(
 ) -> dict[str, Any]:
     """計画済みのモデル群を 1 リポへ組み立て、`out_dir` をその形へ**丸ごと差し替える**。
 
-    staging（`<出力先の名前>.staging`・同じ親）へ全部作り（共有席の決定 → 配置 →
-    `karume.json` → {@link verify_dist} → `README.md`）、通ってから rename で据える。既存の
-    `out_dir` は最後の rename まで 1 バイトも触らない — 途中で落ちれば staging だけが消えて、
-    配布形は前回のまま残る（in-place で更新していた頃の「旧 manifest + 新旧混在ツリー」という
-    失敗様式が構造的に無くなる）。前回の中断が残した staging は黙って捨てて作り直し、退避先は
-    出力先が在れば捨てる・無ければ（= 前回が rename 2 回の間で落ちた形）出力先へ戻す。
+    公開の規律（staging へ作る → 通ってから据える → 失敗は staging だけを消す → 前回の中断が
+    残した席の始末）は core の原語に預ける（{@link karume.artifacts.staged_publication}）—
+    ここが持つのは「席の中で何を作り、どの門を通すか」だけ（共有席の決定 → 配置 →
+    `karume.json` → {@link verify_dist} → `README.md`）。既存の `out_dir` は最後の rename まで
+    1 バイトも触らないので、途中で落ちれば配布形は前回のまま残る（in-place で更新していた頃の
+    「旧 manifest + 新旧混在ツリー」という失敗様式が構造的に無くなる）。
 
     MUST: 差し替えは**丸ごと**で、`out_dir` の元の中身は 1 つも引き継がない — `A` + `B` で
     組んだ出力へ `A` だけを組み直すと `B` は消える（全部コピーし終えてから宣言外ファイルとして
@@ -712,45 +694,15 @@ def assemble_family(
     assert_plan_limits(plans)
     assert_plan_sources(plans)
 
-    staging = out_dir.with_name(out_dir.name + STAGING_SUFFIX)
-    superseded = out_dir.with_name(out_dir.name + SUPERSEDED_SUFFIX)
-    _discard_tree(staging)
-    # 退避先だけが在って出力先が無いのは、前回が rename 2 回の**間**で落ちた形 — 退避先が
-    # last-known-good の配布形そのものなので、捨てると ADR 0052 Decision 2 の「既存配布形は
-    # 不変」が次の起動で破れる。戻してから作り直す（戻せば退避先は消えるので下は no-op・
-    # 出力先が在るときの退避先は従来どおりただの残骸）。
-    if superseded.is_dir() and not out_dir.exists():
-        os.replace(superseded, out_dir)
-    _discard_tree(superseded)
     try:
-        manifest = _materialize_family(plans, staging, default_model)
-        verify_dist(staging)
-        if render_card is not None:
-            (staging / MODEL_CARD_FILENAME).write_text(render_card(manifest), encoding="utf-8")
-    except BaseException:
-        # 中断（Ctrl-C）も含めて staging は残さない — 既存の配布形は触っていないので不変。
-        _discard_tree(staging)
-        raise
-    # 据えるのは rename 2 回。非空ディレクトリの上へは rename できないので既存を先に退避する。
-    if out_dir.exists():
-        try:
-            os.replace(out_dir, superseded)
-        except OSError as error:
-            # os.replace は原子的 — 失敗しても out_dir は無傷のまま残る（既存配布形は不変）。
-            # 据わらなかった staging だけを捨てる（2 回目の失敗経路と同じ後片付けの規律）。
-            _discard_tree(staging)
-            raise DistError(f"{out_dir} の退避（rename）に失敗した") from error
-    try:
-        os.replace(staging, out_dir)
-    except OSError as error:
-        # 2 回目が落ちると、唯一の正常な配布形が退避先にしか無い状態のまま止まる — 戻し、
-        # 据わらなかった staging は捨てる（ADR 0052 Decision 2 の「失敗は staging だけを消し、
-        # 既存配布形は不変」— 他の失敗経路と同じ後片付けへ揃える）。
-        if superseded.exists():
-            os.replace(superseded, out_dir)
-        _discard_tree(staging)
-        raise DistError(f"{out_dir} への据え替え（rename）に失敗した") from error
-    _discard_tree(superseded)
+        with staged_publication(out_dir) as staging:
+            manifest = _materialize_family(plans, staging, default_model)
+            verify_dist(staging)
+            if render_card is not None:
+                (staging / MODEL_CARD_FILENAME).write_text(render_card(manifest), encoding="utf-8")
+    except ArtifactSwapError as error:
+        # 据え替えの失敗を組み立ての失敗と取り違えない（原因の I/O 故障は連鎖に残る）。
+        raise DistError(str(error)) from error
     return manifest
 
 

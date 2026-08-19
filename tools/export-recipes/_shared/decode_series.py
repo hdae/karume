@@ -3,7 +3,8 @@
 ここに置くのは **states 形 decode 台本のうちモデル知識を 1 つも持たない層**だけ:
 greedy 継続の採り方（{@link greedy_continuation}）・その余裕門（{@link assert_greedy_margins}）
 ・golden の書き出し（{@link _write_greedy}）・位置表の容量門（{@link assert_case_room}）・
-staging → final の入れ替え（{@link _publish}）。config も layer_type も読まないので、family
+公開の時機（{@link _publish} — 据え替えそのものは core の
+{@link karume.artifacts.swap_into_place}）。config も layer_type も読まないので、family
 ごとに引数を一般化する必要が無い。
 
 MUST: **これらの規律の正本はここ 1 本**（family 側の台本は import して使う）。門を片方の
@@ -19,17 +20,15 @@ MUST が gemma4 側にしか無い状態が生まれた（2026-08-19 レビュ�
 
 from __future__ import annotations
 
-import os
-import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from uuid import uuid4
 
 import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from karume.artifacts import swap_into_place
 from karume.convert import normalize_boundary_tensor
 
 #: greedy golden のファイル名（`greedy.<case>.safetensors`）。読み手は TS 側の検収門と
@@ -154,19 +153,8 @@ def _publish(staging: Path, final: Path) -> None:
     落ちたときに「新しい model + 古い greedy」の**混ざった正規資産**が残り、検収門が
     拒否済みの資産で緑になれる。
 
-    完全な原子性は狙わない — 退避 → 昇格の 2 rename の間で落ちると final は**不在**になるが、
-    不在は読み手が確実に検出できる（fail loudly）。作れてはいけないのは「静かに読めてしまう
-    混成」で、この手順はそれを構造的に作れない。昇格に失敗したら旧資産を戻す。
+    据え替えそのものの規律（退避 → 昇格 → 失敗時の戻し・中断が残した席の始末）は core の
+    原語が持つ（{@link karume.artifacts.swap_into_place}）— ここが綴るのは「いつ公開して
+    よいか」だけ。
     """
-    retired: Path | None = None
-    if final.exists():
-        retired = final.with_name(f"{final.name}.retired-{uuid4().hex}")
-        os.replace(final, retired)
-    try:
-        os.replace(staging, final)
-    except BaseException:
-        if retired is not None:
-            os.replace(retired, final)
-        raise
-    if retired is not None:
-        shutil.rmtree(retired)
+    swap_into_place(staging, final)

@@ -33,12 +33,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import torch
 from torch.export import Dim
@@ -47,6 +45,7 @@ from torch.nn import functional
 from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
+from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.pipeline import export_module
 from karume.states import to_states_form
@@ -119,8 +118,9 @@ def export_series(
 ) -> dict[str, Any]:
     """token-only の IR コンテナを書き、要約を返す。
 
-    MUST: 公開（`os.replace`）は形検査と sanity の**後**（`export_decode._publish` と同じ
-    理由の単一ファイル版 — 門より前に置くと落ちた実走が検収を通れる資産を残す）。
+    MUST: 公開は形検査と sanity の**後**（`export_decode._publish` と同じ理由の単一ファイル版
+    — 門より前に置くと落ちた実走が検収を通れる資産を残す）。門を作業席の中に置く形そのものは
+    core の原語（{@link karume.artifacts.staged_publication}）が持つ。
     """
     wrapper = load_wrapper(model_dir, positions=positions)
     # MUST: 丸めは参照・golden の採取より前（ADR 0006）。
@@ -144,8 +144,7 @@ def export_series(
     print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
     surgical = to_states_form(graph, decode.states_plan(graph, config))
     final = out_dir / one_shot.MODEL_FILE
-    staged = final.with_name(f"{final.name}.token-{uuid4().hex}.partial")
-    try:
+    with staged_publication(final) as staged:
         verified = decode._write_container(
             surgical,
             tensors,
@@ -177,10 +176,6 @@ def export_series(
             for token in set(first.values()) | set(expected.values())
         }
         sanity = one_shot._sanity(first, expected, labels)
-        os.replace(staged, final)
-    except BaseException:
-        staged.unlink(missing_ok=True)
-        raise
     return {
         "dir": str(out_dir),
         "nodes": len(verified.nodes),
