@@ -250,7 +250,7 @@ const generationEncoding = (
  * NOTE: 片方にしか現れない記号は対象外 — states 専用記号は run の bindings で与えられない
  * （`bindSymbols` が拒否）し、値 shape 専用の記号は context が知らない。
  */
-const assertGenerationBindings = (
+export const assertGenerationBindings = (
   contextBindings: SymbolBindings,
   runBindings: SymbolBindings,
 ): void => {
@@ -376,10 +376,22 @@ const wholeFileShards = async function* (
  * 現れたら取り違え（別モデルの混入・並び順の崩れ）の徴候なので fail loudly。
  */
 const followingShards = async function* (
-  graphFile: SafetensorsFile,
+  // MUST: グラフ shard は「箱」で受けて最初の yield で手放す。素の引数で受けると generator の
+  // 引数束縛が全 shard の処理中ずっと生き、グラフ shard のバイト列が固定されて RAM ピークが
+  // 「最大 shard 1 本」でなく「グラフ shard + 現在 shard」になる（グラフ shard に大テンソルを
+  // 同居させた合法な列で実害 — フェンス後解放の契約は先頭 shard にも適用する）。
+  handoff: { file: SafetensorsFile | undefined },
   iterator: AsyncIterator<Uint8Array<ArrayBuffer>>,
 ): AsyncGenerator<WeightShard, void, unknown> {
-  yield { file: graphFile, label: "shard [0] の重みアップロード" };
+  {
+    const graphFile = handoff.file;
+    if (graphFile === undefined) {
+      throw new ExecutionError("グラフ shard の受け渡し箱が空（内部不変条件の破れ）");
+    }
+    handoff.file = undefined;
+    // ブロックスコープに閉じる（yield から戻った後は束縛ごと回収可能になる）
+    yield { file: graphFile, label: "shard [0] の重みアップロード" };
+  }
   let index = 1;
   while (true) {
     const next = await iterator.next();
@@ -691,17 +703,23 @@ export class Session {
   ): Promise<Session> {
     const iterator = shards[Symbol.asyncIterator]();
     try {
-      const first = await iterator.next();
+      let first = await iterator.next();
       if (first.done === true) {
         throw new ExecutionError("shard 列が空（最初の shard はグラフ shard — ADR 0070 決定 3）");
       }
-      const graphFile = parseSafetensors(shardBuffer(first.value, 0));
+      // MUST: グラフ shard への参照をこのフレームに残さない（`#build` の完了を await する間
+      // ずっと固定される — followingShards 側の「箱」と同じ理由）。graph は parseIrGraph が
+      // 組む独立のオブジェクトで、file を参照しない。
+      let graphFile: SafetensorsFile | undefined = parseSafetensors(shardBuffer(first.value, 0));
+      first = { done: true, value: undefined };
       const graph = extractIrGraph(graphFile);
       // 非対応 op / 格納 dtype の全件列挙門はグラフ shard の時点で通す（重み shard を
       // アップロードし始める前に「実行できない」が分かる）。
       assertRuntimeSupport(graph, RUNTIME_SUPPORT);
       validateGraphContracts(graph);
-      return await Session.#build(gpu, graph, followingShards(graphFile, iterator), options);
+      const files = followingShards({ file: graphFile }, iterator);
+      graphFile = undefined;
+      return await Session.#build(gpu, graph, files, options);
     } catch (cause) {
       // MUST: 後始末の失敗で本体の例外を上書きしない（run 側と同じ規律）。
       await iterator.return?.().catch(() => undefined);
