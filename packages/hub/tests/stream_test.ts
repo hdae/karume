@@ -293,6 +293,32 @@ Deno.test("streamAssets: 相 2 中の中断は shard の切れ目で素通しす
   assert(seen.length < refs.length, "中断したのに全 shard を配り切っている");
 });
 
+Deno.test("streamAssets: 最終 shard の検証中の中断でも配り切らずに素通しする", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+  const controller = new AbortController();
+  const reason = new Error("app: 検証中に取り消した");
+  // 1 shard だけの列 = その shard が最終 shard。冒頭の中断確認は通過済みなので、
+  // verifying 中の中断は yield 直前の確認だけが観測できる。
+  const only = [refs[0]];
+  const seen: string[] = [];
+
+  const error = await assertRejects(async () => {
+    for await (
+      const asset of streamAssets(loaded, only, {
+        fetch: mock.fetch,
+        caches,
+        signal: controller.signal,
+        onProgress: (progress) => {
+          if (progress.phase === "verifying") controller.abort(reason);
+        },
+      })
+    ) seen.push(asset.path);
+  });
+  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
+  assertEquals(seen, [], "取り消したのに検証済みバイトを配っている");
+});
+
 /** phase の進む向き（大きいほど後）。 */
 const PHASE_RANK: Record<AssetPhase, number> = { downloading: 0, verifying: 1, complete: 2 };
 

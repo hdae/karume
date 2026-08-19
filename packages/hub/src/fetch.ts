@@ -652,6 +652,10 @@ export const streamAssets = async function* (
         cause: error,
       });
     }
+    // MUST: yield の直前にも中断を見る — 冒頭の確認だけだと「最終 shard のキャッシュ読出し +
+    // sha256 検証の最中に中断された」形が観測されず、取り消したはずのロードが正常完了して
+    // 下流の Session 構築まで走る（検証済みバイトを配ってから止まるのでは中断の意味が無い）。
+    options.signal?.throwIfAborted();
     const asset = assertTightView(bytes, ref.path);
     received.set(ref.path, ref.size);
     emit("complete", ref.path);
