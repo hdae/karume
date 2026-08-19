@@ -24,6 +24,7 @@ from torch import nn
 from irodori import export as ex
 from irodori import measure_quant as mq
 from irodori import pipeline_ref as ip
+from karume.quantize import QUANT_MODULE_TYPES
 
 
 class TestMetrics:
@@ -389,3 +390,262 @@ class TestFramesOverride:
         signature = ip.run_case.__kwdefaults__
 
         assert signature["frames_override"] is None
+
+
+class _W4Like(nn.Module):
+    """g32 に載る重みと載らない重みを混ぜた木（対象の割り方と除外の検査用）。
+
+    - `aligned` … linear の in 軸 64 = g32 が 2 本
+    - `ragged` … linear の in 軸 12（g32 で割り切れない → 除外）
+    - `conv` … `Cin·K = 8·4 = 32`（受容野を平坦化した軸で 1 本ぶん）
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.aligned = nn.Linear(64, 4, bias=False)
+        self.ragged = nn.Linear(12, 4, bias=False)
+        self.conv = nn.Conv1d(8, 4, 4, bias=False)
+
+
+class TestW4ConfigTable:
+    """w4 構成表（ADR 0069 追記 5 — 勝者 4 方式 × 全役割 + RTN の混成）。"""
+
+    def test_every_w4_config_carries_a_method(self):
+        assert all(recipe.method is not None for recipe in mq.W4_CONFIGS.values())
+
+    def test_no_storage_dtype_config_carries_a_method(self):
+        """f16 / i8 側に方式が付くと `irodori.export.fake_quant` を素通りする。"""
+        others = {**mq.CONFIGS, **mq.DIAGNOSTICS}
+
+        assert all(recipe.method is None for recipe in others.values())
+
+    def test_the_methods_are_the_four_screening_winners(self):
+        """スクリーニングで残った 4 種そのもの（fp4 と kmeans の他 2 粒度は落選）。"""
+        names = {recipe.method.name for recipe in mq.W4_CONFIGS.values()}
+
+        assert names == {"rtn-i4-g32", "nf4", "mxfp4", "kmeans:shared"}
+
+    def test_the_all_role_configs_cover_every_role(self):
+        covering = [name for name, recipe in mq.W4_CONFIGS.items() if recipe.roles == mq.ROLES]
+
+        assert covering == ["i4-all", "nf4-all", "mxfp4-all", "kmeans-shared-all"]
+
+    def test_the_w4_mixed_config_shares_the_axis_with_the_i8_one(self):
+        """MUST: 混成の軸は i8 と同じ（別々に書くと 2 つの混成が黙って別物になる）。"""
+        assert mq.RECIPES["i4-mixed"].roles == mq.RECIPES["i8-mixed"].roles
+        assert set(mq.RECIPES["i4-mixed"].roles) == set(mq.ROLES) - {ex.TARGET_DURATION}
+
+    def test_the_weight_spelling_is_the_method_name(self):
+        """`weight` は丸めの綴り — 方式名と二重管理にしない。"""
+        assert mq.RECIPES["nf4-all"].weight == "nf4"
+
+    def test_the_op_types_stay_the_five_i8_kinds(self):
+        """狭めると「非 linear まで丸めた品質」を測っているつもりで linear だけ測る。"""
+        assert mq.W4_OP_TYPES == QUANT_MODULE_TYPES
+
+    def test_the_group_size_is_pinned_to_32(self):
+        """方式比較で g を同時に振らない（ADR 0069 追記 5 の 3）。"""
+        assert mq.W4_GROUP_SIZE == 32
+
+
+class TestScanTargets:
+    """対象の割り方（g32 に載る側 / 割り切れず外す側）— 除外は必ず一覧で出る。"""
+
+    def test_it_splits_the_aligned_and_the_ragged(self):
+        scan = mq.scan_targets(_W4Like(), mq.W4_OP_TYPES)
+
+        assert scan.counts == mq.TargetCounts(modules=2, channels=8, elements=64 * 4 + 8 * 4 * 4)
+        assert [item.fqn for item in scan.excluded] == ["ragged.weight"]
+        assert scan.excluded[0].axis_length == 12
+
+    def test_the_linear_only_set_leaves_the_conv_out(self):
+        scan = mq.scan_targets(_W4Like(), (nn.Linear,))
+
+        assert scan.counts == mq.TargetCounts(modules=1, channels=4, elements=64 * 4)
+
+    def test_the_group_count_follows_the_element_count(self):
+        counts = mq.TargetCounts(modules=2, channels=8, elements=384)
+
+        assert counts.groups == 384 // 32
+
+    def test_the_conv_axis_is_the_flattened_receptive_field(self):
+        """group 軸は各 op の「in 軸」一般化 — conv は `Cin·K`（ADR 0069 追記 5 の 1）。"""
+        weight = nn.Conv1d(8, 4, 4, bias=False).weight
+
+        assert mq.group_axis_length(weight, 0) == 8 * 4
+
+    def test_the_transposed_conv_axis_is_the_layout_axis_one(self):
+        """`ConvTranspose1d` は重みが `[Cin, Cout, K]` なのでチャネル軸が 1。"""
+        weight = nn.ConvTranspose1d(4, 8, 8, bias=False).weight
+
+        assert mq.group_axis_length(weight, 1) == 4 * 8
+
+    def test_the_include_predicate_drops_exactly_the_excluded_modules(self):
+        scan = mq.scan_targets(_W4Like(), mq.W4_OP_TYPES)
+
+        include = mq.aligned_include(scan.excluded)
+
+        assert not include("ragged")
+        assert include("aligned") and include("conv")
+
+
+class TestApplyWeightQuant:
+    """丸めの当て方（w4 は方式ごとの core 呼び・f16 / i8 は配布経路と同じ関数）。"""
+
+    def test_it_rounds_the_aligned_weights_and_leaves_the_ragged_alone(self):
+        torch.manual_seed(0)
+        module = _W4Like()
+        before = {name: tensor.detach().clone() for name, tensor in module.named_parameters()}
+
+        reports = mq.apply_weight_quant(
+            mq.w4_recipe(mq.W4_RTN, (ex.TARGET_DIT,)), {ex.TARGET_DIT: module}
+        )
+
+        assert not torch.equal(module.aligned.weight, before["aligned.weight"])
+        assert not torch.equal(module.conv.weight, before["conv.weight"])
+        assert torch.equal(module.ragged.weight, before["ragged.weight"])
+        assert "g32 非整列 1 本を除外" in reports[ex.TARGET_DIT]
+
+    def test_a_role_without_target_types_stays_f32(self):
+        """norm 系は w4 の対象型を持たない — 役割単位の「0 本」で落とさない側。"""
+        reports = mq.apply_weight_quant(
+            mq.w4_recipe(mq.W4_RTN, (ex.TARGET_DIT,)), {"text_norm": nn.LayerNorm(8)}
+        )
+
+        assert reports["text_norm"] == "格納 f32 のまま（w4 の対象型を持たない）"
+
+    def test_a_role_whose_targets_all_fall_off_the_grid_is_fail_loudly(self):
+        """全部 g32 で外れた役割を黙って f32 で回すと「丸めたつもりの構成」を測る。"""
+        module = nn.Linear(12, 4, bias=False)
+
+        with pytest.raises(SystemExit, match="g32"):
+            mq.apply_weight_quant(
+                mq.w4_recipe(mq.W4_RTN, (ex.TARGET_DIT,)), {ex.TARGET_DIT: module}
+            )
+
+    def test_a_storage_dtype_recipe_goes_through_the_export_helper(self):
+        """f16 / i8 は配布経路と同じ `irodori.export.fake_quant` のまま。"""
+        reports = mq.apply_weight_quant(
+            mq.Recipe("f16", (ex.TARGET_DIT,)), {ex.TARGET_DIT: TinyModule()}
+        )
+
+        assert "f16" in reports[ex.TARGET_DIT]
+
+    def test_the_shared_codebook_takes_the_fit_stride(self):
+        """表の fit だけ部分標本（適用は全量）— dit 役割の全量 fit は実メモリを超える。"""
+        torch.manual_seed(0)
+        module = _W4Like()
+        recipe = mq.w4_recipe(mq.W4_KMEANS_SHARED, (ex.TARGET_DIT,))
+
+        reports = mq.apply_weight_quant(recipe, {ex.TARGET_DIT: module}, 3)
+
+        assert "表の fit は 1/3 部分標本" in reports[ex.TARGET_DIT]
+
+    def test_a_fit_stride_on_a_method_without_a_table_is_fail_loudly(self):
+        """MUST: 効かない構成へ渡されたら落とす（黙って無視すると数値の読み方が変わる）。"""
+        with pytest.raises(SystemExit, match="fit"):
+            mq.check_fit_stride(mq.RECIPES["i4-all"], 11)
+
+    def test_the_default_fit_stride_passes_every_config(self):
+        for recipe in mq.RECIPES.values():
+            mq.check_fit_stride(recipe, 1)
+
+    def test_the_rounding_is_idempotent(self):
+        """MUST: 冪等（±7 に閉じた対称 — 再適用でビット不変・ADR 0069 決定 3）。"""
+        torch.manual_seed(0)
+        module = _W4Like()
+        recipe = mq.w4_recipe(mq.W4_RTN, (ex.TARGET_DIT,))
+        mq.apply_weight_quant(recipe, {ex.TARGET_DIT: module})
+        once = module.aligned.weight.detach().clone()
+
+        mq.apply_weight_quant(recipe, {ex.TARGET_DIT: module})
+
+        assert torch.equal(module.aligned.weight, once)
+
+
+class TestSizeProjection:
+    """サイズ試算（**式による投影**・実測ではない）— 品質と同じ表に載せる列。"""
+
+    COUNTS = mq.TargetCounts(modules=2, channels=8, elements=384)
+
+    def test_a_f32_scale_method_projects_to_five_bits_per_weight(self):
+        assert mq.project_size(mq.W4_RTN, self.COUNTS, 1).bits_per_weight == 5.0
+        assert mq.project_size(mq.W4_NF4, self.COUNTS, 1).bits_per_weight == 5.0
+
+    def test_the_power_of_two_scale_saves_the_scale_bits(self):
+        """MXFP4 の scale は E8M0（1 バイト）— g32 なら 4.25 bpw。"""
+        assert mq.project_size(mq.W4_MXFP4, self.COUNTS, 1).bits_per_weight == 4.25
+
+    def test_the_shared_codebook_costs_one_table_per_artifact(self):
+        projected = mq.project_size(mq.W4_KMEANS_SHARED, self.COUNTS, 3)
+
+        assert projected.bits == 5.0 * 384 + mq.CODEBOOK_BITS * 3
+
+    def test_a_table_free_method_ignores_the_artifact_count(self):
+        assert (
+            mq.project_size(mq.W4_RTN, self.COUNTS, 1).bits
+            == mq.project_size(mq.W4_RTN, self.COUNTS, 9).bits
+        )
+
+    def test_the_f32_side_is_the_denominator_of_the_ratio(self):
+        assert mq.project_size(mq.W4_RTN, self.COUNTS, 1).f32_mib == 384 * 4 / 1024**2
+
+
+def _w4_config(excluded: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "cases": {},
+        "gates": {"failures": []},
+        "w4": {
+            "method": "rtn-i4-g32",
+            "excluded": excluded,
+            "size": {
+                "formula": "4bit + g32 f32 scale = 5.0 bpw",
+                "modules": 2,
+                "elements": 384,
+                "bitsPerWeight": 5.0,
+                "projectedMiB": 2.0,
+                "f32MiB": 8.0,
+            },
+        },
+    }
+
+
+class TestW4Tables:
+    """w4 の 2 出力（サイズ試算の表・除外一覧）— 除外を黙らせない。"""
+
+    def test_the_size_table_carries_the_formula_and_the_ratio(self):
+        table = mq.size_table({"i4-all": _w4_config([])})
+
+        assert table.splitlines()[-1] == (
+            "| i4-all | rtn-i4-g32 | 2 | 384 | 4bit + g32 f32 scale = 5.0 bpw"
+            " | 5.000 | 2.0 | 8.0 | 0.250 |"
+        )
+
+    def test_a_config_without_w4_gets_no_row(self):
+        table = mq.size_table({"i8-all": {"cases": {}, "gates": {"failures": []}}})
+
+        assert len(table.splitlines()) == 2
+
+    def test_the_exclusions_are_listed_per_weight(self):
+        excluded = [
+            {
+                "role": "speaker",
+                "fqn": "encoder.blocks.0.mlp.w2.weight",
+                "axisLength": 1996,
+                "elements": 1532928,
+            }
+        ]
+
+        lines = mq.excluded_lines({"i4-all": _w4_config(excluded)})
+
+        assert lines[0] == "- i4-all: g32 非整列 1 本を除外"
+        assert "speaker / encoder.blocks.0.mlp.w2.weight 軸長 1996" in lines[1]
+
+    def test_no_exclusion_still_says_so(self):
+        """「除外なし」も出す — 行が無いのは「w4 でない」と区別が付かない。"""
+        assert mq.excluded_lines({"i4-all": _w4_config([])}) == [
+            "- i4-all: g32 非整列による除外なし"
+        ]
+
+    def test_a_config_without_w4_is_silent(self):
+        assert mq.excluded_lines({"i8-all": {"cases": {}, "gates": {"failures": []}}}) == []

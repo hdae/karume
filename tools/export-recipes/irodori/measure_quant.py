@@ -12,6 +12,8 @@
     uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' \
         python -m irodori.measure_quant --config f32
     uv run ... python -m irodori.measure_quant --config i8-all
+    uv run ... python -m irodori.measure_quant --config i4-all
+    uv run ... python -m irodori.measure_quant --scan   # w4 の対象規模と試算だけ（実測なし）
     uv run ... python -m irodori.measure_quant          # 実測はせずレポートだけ組み直す
 
 **1 実行 = 1 構成**（`--config`）。full-loop は DiT を 1 ケースあたり 240 forward 回す torch CPU
@@ -29,6 +31,40 @@
 | `i8-mixed`       | duration 以外 i8     | 混成表の候補（ADR 0050 決定 6 の (i) 案）       |
 | `w8a8`           | 全役割 i8 + 活性 i8  | 配布 `w8a8` 席（DiT の Linear だけ活性も i8）   |
 | `i8-<役割>-only` | その役割だけ i8      | **直交分解 5 本**（境界 = `load_*` と 1:1）     |
+
+w4（ADR 0069 追記 5）の 5 構成は**スクリーニングの勝者 4 方式**（g=32 固定）を全役割へ当てた
+もので、丸めの対象 op を i8 と同じ 5 種へ広げる（`op_types` の明示 opt-in — linear / conv 系 /
+embedding）。**出荷できる形ではない**（i4 の実行経路は linear 限定 = 決定 5・conv 系の scale は
+emit へ構造的に渡せない）— ここで測るのは「非 linear まで丸めたときに品質がどこまで戻るか」
+の上限で、格納の受理集合も runtime も 1 行も触らない。
+
+| 構成                | 方式          | 何を答える                                        |
+| ------------------- | ------------- | ------------------------------------------------- |
+| `i4-all`            | `rtn-i4-g32`  | 全役割 w4 で **S が動くか**（第一の門）+ 品質      |
+| `i4-mixed`          | `rtn-i4-g32`  | `i8-mixed` と同じ軸の受け皿（duration だけ据え置き）|
+| `nf4-all`           | `nf4`         | 正規分位点の格子でどこまで戻るか                  |
+| `mxfp4-all`         | `mxfp4`       | 2 のべき scale（E8M0）の取り分 — 4.25 bpw         |
+| `kmeans-shared-all` | `kmeans:shared` | 学習した共有表の取り分（表 16×f32 が別途要る）  |
+
+`i4-mixed` を RTN にだけ置くのは、S が動くかどうかが**丸めの粗さ**で決まるから（4 方式ぶんの
+混成を並べても同じ問いを 4 回聞くだけになる。RTN で受け皿の形が立てば他方式へ横展開できる）。
+
+`kmeans-shared-all` は表を張る前に対象の正規化値を 1 本へ連結するので、dit 役割（丸める木で
+7.5 億要素）の全量 fit は f64 の作業領域まで含めて 20GB 超になる。`--kmeans-fit-stride` が
+core の逃げ道（**表の fit だけ**等間隔部分標本・適用は常に全量）で、使った値は出力へ載る。
+
+**linear 限定形は構成として置かない** — `--scan` が対象規模（本数・チャネル・要素・縮小率）を
+数えて出す。conv 主体なら linear だけ丸めても配布サイズがほとんど動かず、full-loop を数十分
+回す価値が無いため、回すかどうかをこの表で決める。
+
+量子化軸（`channel_rows` で畳んだ最終次元）が g32 で割り切れない重みは `include` で対象から
+外す（端数 group を作らない = ADR 0069 決定 2）。**除外一覧は毎回出力へ載せる** — 黙って外すと
+「全役割を丸めた」と読める表の裏で、割り切れない層だけ f32 のまま残る。
+
+サイズ列（実効 bpw / 投影 MiB / 式）は**式による投影**で実測ではない。計数は**配布グラフに
+載る重みだけ**（`irodori.export.load_dit` はグラフに載らない backbone のコピーまで抱えるので、
+丸めた木で数えると出荷しない重みのぶんだけ膨らむ）。丸める木のほうは i8 と同じ役割モジュール
+に据え置く — 「何を丸めたか」が i8 と食い違うと方式間の比較が成立しない。
 
 `w8a8` は `i8-all` と**同じ丸めの重み**に、DiT の `nn.Linear` 入力へ per-token i8 の
 fake-quant（`karume.act_quant.quantize_rows` — ランタイム `quantize-rows.ts` の数値鏡像）を
@@ -91,7 +127,7 @@ import json
 import math
 import time
 import wave
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -103,6 +139,18 @@ from torch import nn
 
 from _shared.paths import OUTPUTS_ROOT, SERIES_ROOT
 from karume import act_quant
+from karume.quant_methods import (
+    DEFAULT_CODEBOOK_LEVELS,
+    fake_quant_kmeans,
+    fake_quant_mxfp4,
+    fake_quant_nf4,
+)
+from karume.quantize import (
+    DEFAULT_GROUP_SIZE,
+    QUANT_MODULE_TYPES,
+    fake_quant_int4,
+    iter_quant_targets,
+)
 
 from . import export as ex
 from . import patch
@@ -146,18 +194,230 @@ CASE_HAS_REFERENCE: Mapping[str, bool] = MappingProxyType(
 )
 
 
+# ---- w4 の方式（スクリーニングの勝者 4 種）----------------------------------
+
+#: w4 の group 長 = **32 固定**（core の既定 = ADR 0069 追記 1 で確定した値）。方式比較で g を
+#: 同時に振らないのは、方式の差と g の差が混ざると「どちらが効いたか」が言えなくなるため
+#: （g 軸の再評価は方式確定後 — ADR 0069 追記 5 の 3）。
+W4_GROUP_SIZE = DEFAULT_GROUP_SIZE
+
+#: w4 の丸め対象 op 種 = i8 と同じ 5 種（`fake_quant_int4` の `op_types` 明示 opt-in —
+#: ADR 0069 追記 5 の 1）。**出荷経路ではない** — i4 の実行経路は linear 限定（決定 5）で、
+#: conv 系の scale は受容野平坦化の rank 2 になり emit へ構造的に渡せない。ここで広げるのは
+#: 「非 linear まで丸めたときに品質がどこまで戻るか」を runtime 非接触で測る側。
+W4_OP_TYPES: tuple[type[nn.Module], ...] = QUANT_MODULE_TYPES
+
+#: k-means の表 1 枚のビット数（16 centroid × f32）。
+CODEBOOK_BITS = DEFAULT_CODEBOOK_LEVELS * 32
+
+
+class TargetCounts(NamedTuple):
+    """w4 対象テンソル集合の計数（サイズ試算の入力）。
+
+    `channels` は `karume.quantize.channel_rows` の行数の総和、`modules` は層数。
+    """
+
+    modules: int
+    channels: int
+    elements: int
+
+    @property
+    def groups(self) -> int:
+        """g32 group の総数（group ごとに scale 1 個が要る方式のサイズ試算に使う）。"""
+        return self.elements // W4_GROUP_SIZE
+
+
+def total_counts(counts: Sequence[TargetCounts]) -> TargetCounts:
+    """役割ごとの計数を 1 本へ足す（サイズ試算はモデル全体で読む）。"""
+    return TargetCounts(
+        modules=sum(item.modules for item in counts),
+        channels=sum(item.channels for item in counts),
+        elements=sum(item.elements for item in counts),
+    )
+
+
+class Excluded(NamedTuple):
+    """量子化軸が g32 で割り切れず対象から外した重み（一覧は出力へ必ず載せる）。"""
+
+    module: str
+    fqn: str
+    axis_length: int
+    elements: int
+
+
+def group_axis_length(weight: torch.Tensor, axis: int) -> int:
+    """`karume.quantize.channel_rows` で畳んだときの量子化軸長（= 要素数 / チャネル数）。
+
+    実際に `channel_rows` を呼ばないのは `ConvTranspose1d` の平坦化が `reshape` の**コピー**
+    になるため（形だけ知りたい計数で重み 1 本ぶんの一時領域を作らない）。
+    """
+    return weight.numel() // int(weight.shape[axis])
+
+
+class RoleScan(NamedTuple):
+    """1 つの木の w4 対象規模（g32 に載った側と、割り切れず外した側）。"""
+
+    counts: TargetCounts
+    excluded: tuple[Excluded, ...]
+
+
+def scan_targets(model: nn.Module, op_types: tuple[type[nn.Module], ...]) -> RoleScan:
+    """`iter_quant_targets` の対象を「g32 に載る側 / 割り切れず外す側」へ割る。
+
+    対象選択は core（格納経路と同じ `iter_quant_targets`）を通す — 写した別実装にすると
+    「測った対象」と「丸めた対象」が黙って割れる。端数 group を作らないのは格納側の制約
+    そのもの（ADR 0069 決定 2）なので、割り切れない重みは丸めずに**一覧で出す**。
+    """
+    modules = channels = elements = 0
+    excluded: list[Excluded] = []
+    for fqn, weight, axis in iter_quant_targets(model, op_types):
+        length = group_axis_length(weight, axis)
+        if length % W4_GROUP_SIZE:
+            excluded.append(Excluded(fqn.removesuffix(".weight"), fqn, length, weight.numel()))
+            continue
+        modules += 1
+        channels += int(weight.shape[axis])
+        elements += weight.numel()
+    return RoleScan(TargetCounts(modules, channels, elements), tuple(excluded))
+
+
+def aligned_include(excluded: Sequence[Excluded]) -> Callable[[str], bool]:
+    """g32 で割り切れないモジュールを落とす `include` 述語（モジュール FQN で引く）。"""
+    dropped = {item.module for item in excluded}
+    return lambda name: name not in dropped
+
+
+@dataclass(frozen=True)
+class W4Method:
+    """w4 の丸め方式 1 種 — 名前・丸めの当て方・サイズ試算の式を 1 行に束ねる。
+
+    3 つを別表に散らすと「品質を測った方式」と「サイズを試算した方式」が黙って割れる
+    （方式を 1 種足したときに片方だけ更新される形になる）。丸めの実装は core の共有
+    （`karume.quantize` / `karume.quant_methods`）で、ここが持つのは呼び分けと式だけ。
+    """
+
+    #: スクリーニングと同じ方式名（表・JSON にそのまま出る）。
+    name: str
+    #: 丸めを model へ in-place で当てる（`(model, include, fit_stride)` → `describe()` を
+    #: 持つ報告）。`fit_stride` を読むのは {@link W4_KMEANS_SHARED} だけ。
+    round_model: Callable[[nn.Module, Callable[[str], bool], int], Any]
+    #: 対象集合の投影ビット数（`(計数, 表の枚数)`）。
+    projected_bits: Callable[[TargetCounts, int], float]
+    #: `projected_bits` の式（**出力へそのまま載せる** — 投影の前提を表から追えるように）。
+    formula: str
+    #: 表の fit を部分標本にできるか（`--kmeans-fit-stride` が効く方式か）。
+    samples_fit: bool = False
+
+
+#: RTN（= 格納形 `i4`・ADR 0069 決定 3）。w4 列の**基準**で、他の 3 方式はこれとの差で読む。
+W4_RTN = W4Method(
+    "rtn-i4-g32",
+    lambda model, include, _stride: fake_quant_int4(
+        model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
+    ),
+    lambda counts, _tables: 4 * counts.elements + 32 * counts.groups,
+    "4bit + g32 f32 scale = 5.0 bpw",
+)
+
+W4_NF4 = W4Method(
+    "nf4",
+    lambda model, include, _stride: fake_quant_nf4(
+        model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
+    ),
+    lambda counts, _tables: 4 * counts.elements + 32 * counts.groups,
+    "4bit + g32 f32 scale = 5.0 bpw",
+)
+
+W4_MXFP4 = W4Method(
+    "mxfp4",
+    lambda model, include, _stride: fake_quant_mxfp4(
+        model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
+    ),
+    lambda counts, _tables: 4 * counts.elements + 8 * counts.groups,
+    "4bit + g32 E8M0 scale = 4.25 bpw",
+)
+
+#: k-means の共有表。**表は役割ごとに 1 枚**（`tables` = 対象を持つ役割数）— 配布は役割ごとに
+#: 別の IR 成果物なので、成果物をまたいで 1 枚の表を共有する席が格納側に無い。丸めも役割
+#: ごとに閉じて当てる（`apply_weight_quant`）ので、試算と実際の表の枚数が一致する。
+#:
+#: NOTE: `shared` は表を張る前に対象の正規化値を 1 本へ連結するので、dit 役割（丸める木で
+#: 7.5 億要素）では f64 の作業領域まで含めて 20GB 超になる。`--kmeans-fit-stride` が core の
+#: 逃げ道（**表の fit だけ**等間隔部分標本・適用は常に全量）。
+W4_KMEANS_SHARED = W4Method(
+    "kmeans:shared",
+    lambda model, include, stride: fake_quant_kmeans(
+        model, "shared", W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES, fit_stride=stride
+    ),
+    lambda counts, tables: 4 * counts.elements + 32 * counts.groups + CODEBOOK_BITS * tables,
+    "4bit + g32 f32 scale + 表 16×f32 を役割ごとに 1 枚",
+    samples_fit=True,
+)
+
+
+def check_fit_stride(recipe: Recipe, fit_stride: int) -> None:
+    """`--kmeans-fit-stride` が効かない構成へ渡されたら fail loudly（黙って無視しない）。"""
+    if fit_stride == 1:
+        return
+    if recipe.method is None or not recipe.method.samples_fit:
+        raise SystemExit(
+            f"--kmeans-fit-stride {fit_stride} は表の fit を部分標本にする方式専用"
+            f"（この構成の丸めは {recipe.weight}）"
+        )
+
+
+@dataclass(frozen=True)
+class SizeProjection:
+    """方式 × 対象集合の**投影**サイズ（実測ではない — 式は {@link W4Method.formula}）。"""
+
+    counts: TargetCounts
+    tables: int
+    bits: float
+    formula: str
+
+    @property
+    def bits_per_weight(self) -> float:
+        return self.bits / self.counts.elements
+
+    @property
+    def projected_mib(self) -> float:
+        return self.bits / 8 / 1024**2
+
+    @property
+    def f32_mib(self) -> float:
+        """同じ対象集合を f32 で持ったときの MiB（投影の分母 — 縮小率を表から読めるように）。"""
+        return self.counts.elements * 4 / 1024**2
+
+
+def project_size(method: W4Method, counts: TargetCounts, tables: int) -> SizeProjection:
+    """方式の式を対象集合の計数へ当てる（`tables` = 表を張る成果物の数）。"""
+    return SizeProjection(counts, tables, method.projected_bits(counts, tables), method.formula)
+
+
 @dataclass(frozen=True)
 class Recipe:
     """1 構成の量子化レシピ（`weight` が `None` なら丸めない）。"""
 
+    #: 丸めの綴り（格納 dtype `f16` / `i8`、または w4 の方式名）。
     weight: str | None
     roles: tuple[str, ...]
     #: DiT の `nn.Linear` 入力へ per-token i8 の fake-quant を掛けるか（w8a8 の活性側）。
     act_quant: bool = False
+    #: w4 方式（`None` = `weight` が格納 dtype の綴りで `irodori.export.fake_quant` を通る側）。
+    method: W4Method | None = None
+
+
+def w4_recipe(method: W4Method, roles: tuple[str, ...]) -> Recipe:
+    """w4 方式 1 本ぶんのレシピ（`weight` の綴りは方式名 — 二重管理を作らない）。"""
+    return Recipe(method.name, roles, method=method)
 
 
 #: 活性シムの比較相手（**同じ重みで活性だけ素の**構成）。素通り検出はこの 1 本との差で見る。
 WEIGHT_ONLY_BASE = "i8-all"
+
+#: 混成形の役割（duration だけ f32 据え置き — ADR 0050 決定 6 の (i) 案）。i8 と w4 で
+#: **同じ軸**にする（別々に書くと片方だけ動いたときに 2 つの混成が黙って別物になる）。
+MIXED_ROLES: tuple[str, ...] = tuple(role for role in ROLES if role != ex.TARGET_DURATION)
 
 #: 主要 5 構成（聴き比べと配布形の裁定に載る側）。
 CONFIGS: Mapping[str, Recipe] = MappingProxyType(
@@ -166,7 +426,7 @@ CONFIGS: Mapping[str, Recipe] = MappingProxyType(
         "f16": Recipe("f16", ROLES),
         WEIGHT_ONLY_BASE: Recipe("i8", ROLES),
         # ADR 0050 決定 6 の (i) 案 — duration だけ f32 据え置き。
-        "i8-mixed": Recipe("i8", tuple(role for role in ROLES if role != ex.TARGET_DURATION)),
+        "i8-mixed": Recipe("i8", MIXED_ROLES),
         # 配布形の `w8a8` 席 — 重みは `i8-all` と 1 バイトも変わらず、DiT の活性だけが i8。
         "w8a8": Recipe("i8", ROLES, act_quant=True),
     }
@@ -184,8 +444,26 @@ DIAGNOSTICS: Mapping[str, Recipe] = MappingProxyType(
     {f"i8-{role}-only": Recipe("i8", (role,)) for role in DECOMPOSED_ROLES}
 )
 
+#: w4 スクリーニングの勝者 4 種 × 全役割形 + RTN の duration 据え置き混成。
+#:
+#: 第一の門は i8 と**同じ軸** — S が動くか（ADR 0050 決定 6）。動いた場合の受け皿として
+#: RTN にだけ混成形を置く（S が動くかどうかは丸めの粗さで決まるので、4 方式ぶんの混成を
+#: 並べても同じ問いを 4 回聞くだけになる。RTN で受け皿の形が立てば他方式へ横展開できる）。
+#:
+#: 全役割形の対象 op 種は {@link W4_OP_TYPES}（linear / conv 系 / embedding）。linear 限定形は
+#: 構成として置かない — `--scan` が対象規模（本数・要素数・縮小率）を数えて出す側で持つ。
+W4_CONFIGS: Mapping[str, Recipe] = MappingProxyType(
+    {
+        "i4-all": w4_recipe(W4_RTN, ROLES),
+        "i4-mixed": w4_recipe(W4_RTN, MIXED_ROLES),
+        "nf4-all": w4_recipe(W4_NF4, ROLES),
+        "mxfp4-all": w4_recipe(W4_MXFP4, ROLES),
+        "kmeans-shared-all": w4_recipe(W4_KMEANS_SHARED, ROLES),
+    }
+)
+
 #: 構成名 → レシピの全表。
-RECIPES: Mapping[str, Recipe] = MappingProxyType({**CONFIGS, **DIAGNOSTICS})
+RECIPES: Mapping[str, Recipe] = MappingProxyType({**CONFIGS, **DIAGNOSTICS, **W4_CONFIGS})
 
 #: LSD の STFT 設定（48kHz の解析グリッド — hop 512 ≈ 10.7ms）。
 STFT_N_FFT = 2048
@@ -288,6 +566,72 @@ def role_modules(modules: Mapping[str, nn.Module], roles: Sequence[str]) -> dict
     return picked
 
 
+def apply_weight_quant(
+    recipe: Recipe, scoped: Mapping[str, nn.Module], fit_stride: int = 1
+) -> dict[str, str]:
+    """構成ぶんの重みの丸めを役割モジュールへ当て、役割 → 要約を返す。
+
+    f16 / i8 はこれまでどおり `irodori.export.fake_quant`（配布経路と同じ関数）へ委ねる。
+    w4 は方式ごとに core の丸めを呼び、量子化軸が g32 で割り切れない重みだけ `include` で
+    落とす（端数 group を作らない — ADR 0069 決定 2）。
+
+    MUST: 丸めの対象は w4 でも**役割モジュールの木**（= i8 と同じ集合）にする。配布グラフに
+    載る部分木だけ丸めると i8 の測定値と「何を丸めたか」が食い違い、方式間の比較が成立
+    しなくなる（グラフに載らない内側のコピーまで丸まるが、forward に出てこないので品質には
+    効かない）。サイズ試算の計数だけは配布グラフ側から採る（{@link graph_scans}）。
+
+    MUST: 役割に w4 の候補があるのに全部が g32 で落ちたら fail loudly — その役割だけ f32 の
+    まま回すと「丸めたつもりの構成」を測ってしまう。
+    """
+    if recipe.method is None:
+        return dict(ex.fake_quant(recipe.weight, scoped).reports)
+    reports: dict[str, str] = {}
+    for name, module in sorted(scoped.items()):
+        scan = scan_targets(module, W4_OP_TYPES)
+        if scan.counts.modules == 0:
+            if scan.excluded:
+                raise SystemExit(
+                    f"{name}: w4 の対象 {len(scan.excluded)} 本が全て量子化軸を"
+                    f" g32 で割り切れず 0 本になった（{scan.excluded[0].fqn} の軸長"
+                    f" {scan.excluded[0].axis_length} 他）"
+                )
+            reports[name] = "格納 f32 のまま（w4 の対象型を持たない）"
+            continue
+        rounded = recipe.method.round_model(module, aligned_include(scan.excluded), fit_stride)
+        skipped = f" / g32 非整列 {len(scan.excluded)} 本を除外" if scan.excluded else ""
+        sampled = f" / 表の fit は 1/{fit_stride} 部分標本" if fit_stride > 1 else ""
+        reports[name] = f"{recipe.method.name} へ丸めた — {rounded.describe()}{skipped}{sampled}"
+    for name, report in reports.items():
+        print(f"[fake-quant] {name}: {report}", flush=True)
+    return reports
+
+
+def role_graphs(graphs: ip.HostGraphs) -> dict[str, nn.Module]:
+    """役割 → **配布グラフ**（`irodori.export.export_series` が emit する 6 本のラッパ）。"""
+    return {
+        ex.TARGET_BACKBONE: graphs.backbone,
+        ex.TARGET_TEXT_PROJ: graphs.text_proj,
+        ex.TARGET_CAPTION_PROJ: graphs.caption_proj,
+        ex.TARGET_SPEAKER: graphs.speaker,
+        ex.TARGET_DURATION: graphs.duration,
+        ex.TARGET_DIT: graphs.dit,
+    }
+
+
+def graph_scans(graphs: Mapping[str, nn.Module], roles: Sequence[str]) -> dict[str, RoleScan]:
+    """役割 → 配布グラフに載る w4 対象の規模（サイズ試算と除外一覧の入力）。
+
+    丸めた木ではなくラッパを数えるのは、`irodori.export.load_dit` が組む DiT が**グラフに
+    載らない backbone のコピー**まで抱えるため（`export.TARGET_SCALE_SOURCES` の NOTE）。
+    丸めた集合で試算すると、出荷しない重みのぶんだけ投影 MiB が膨らむ。
+    """
+    return {
+        role: scan_targets(graph, W4_OP_TYPES)
+        for role, graph in graphs.items()
+        if role in set(roles)
+    }
+
+
 class Loaded(NamedTuple):
     """`load_modules` の戻り（丸めを当てる前の素の一式）。"""
 
@@ -364,25 +708,60 @@ def build_graphs(
     )
 
 
+class DecoderStage(NamedTuple):
+    """{@link build_decoder} の戻り。`scan` は w4 構成でコーデックを丸めたときだけ埋まる。"""
+
+    graph: nn.Module
+    sample_rate: int
+    report: str | None
+    scan: RoleScan | None
+
+
 def build_decoder(
-    source_dir: Path, model_dir: Path, weight: str | None, quantize: bool
-) -> tuple[nn.Module, int, str | None]:
+    source_dir: Path, model_dir: Path, recipe: Recipe, fit_stride: int = 1
+) -> DecoderStage:
     """コーデックの decode 経路（`DecoderGraph`）とサンプリング周波数・丸めの要約を返す。
 
     MUST（順序）: 丸めは `fold_weight_norm` / `lift_snake_alphas` の**後**（`irodori.dacvae.export`
-    の `_fake_quant` の順序 MUST — ここは同じ前処理を同じ順で通してから同じ関数を呼ぶ）。
+    の `_fake_quant` の順序 MUST — ここは同じ前処理を同じ順で通してから丸めを当てる）。
     切り詰めた `in_proj` は decode 経路に出てこないので組まない。
+
+    w4 は `dv._fake_quant`（格納 dtype の綴りしか受けない）を通らず、方式の丸めを**コーデック
+    モデル全体**へ当てる。計数と除外一覧は decode 経路のラッパから採る（{@link graph_scans}
+    と同じ理由 — encoder は配布されない）。
+
+    NOTE: `DecoderGraph` の木には透かし枝の未使用層が残る（`bypass_watermark` は forward を
+    差し替えるだけでモジュールは外さない）ので、計数は decode が実際に通る集合より
+    **6,266,080 要素（24MiB 相当・コーデックの 8.8%）多い**。`dv.main_path` で正確に割れるが、
+    あちらは「門でのみ使う写し」なので計数へは持ち込まない（モデル全体では 0.8% の上振れ）。
     """
     source = dv.DacvaeSource(source_dir)
     model = dv.load_codec(source, model_dir)
     dv.bypass_watermark(model.decoder)
     dv.fold_weight_norm(model)
     dv.lift_snake_alphas(source, model)
-    report = dv._fake_quant(weight if quantize and weight is not None else "f32", model).report
-    return (
-        dv.DecoderGraph(model.quantizer.out_proj, model.decoder),
+    quantize = ROLE_CODEC in recipe.roles and recipe.weight is not None
+    if not quantize:
+        report = dv._fake_quant("f32", model).report
+    elif recipe.method is None:
+        report = dv._fake_quant(recipe.weight, model).report
+    else:
+        scan = scan_targets(model, W4_OP_TYPES)
+        if scan.counts.modules == 0:
+            raise SystemExit(
+                f"codec: w4 の対象 {len(scan.excluded)} 本が全て量子化軸を g32 で"
+                "割り切れず 0 本になった"
+            )
+        rounded = recipe.method.round_model(model, aligned_include(scan.excluded), fit_stride)
+        sampled = f" / 表の fit は 1/{fit_stride} 部分標本" if fit_stride > 1 else ""
+        report = f"{recipe.method.name} へ丸めた — {rounded.describe()}{sampled}"
+        print(f"[fake-quant] codec: {report}", flush=True)
+    graph = dv.DecoderGraph(model.quantizer.out_proj, model.decoder)
+    return DecoderStage(
+        graph,
         int(model.sample_rate),
         report,
+        scan_targets(graph, W4_OP_TYPES) if quantize and recipe.method is not None else None,
     )
 
 
@@ -438,6 +817,8 @@ class LatentResult(NamedTuple):
     latents: dict[str, torch.Tensor]
     reports: dict[str, str]
     act_quant_linears: int
+    #: 役割 → 配布グラフ側の w4 対象規模（w4 構成のみ・他は空）。
+    scans: dict[str, RoleScan]
 
 
 def attach_dit_act_quant(
@@ -480,10 +861,10 @@ def latent_stage(
     # 丸めそのものを呼ばない — `fake_quant` の「0 本は fail loudly」は正しい規律なので、
     # ここで例外にせず**呼ばない**ことで満たす。
     scoped = role_modules(modules, recipe.roles)
-    quantized = (
-        ex.fake_quant(recipe.weight, scoped)
+    reports = (
+        apply_weight_quant(recipe, scoped, args.kmeans_fit_stride)
         if recipe.weight is not None and scoped
-        else ex.FakeQuantResult({}, {})
+        else {}
     )
     patch.apply_patches()
     # 活性シムは重みの丸めの**後**（重みは実行前に決まり、活性は実行時に決まる — 両者は独立
@@ -492,6 +873,9 @@ def latent_stage(
     if act_quant_linears:
         print(f"[{name}] 活性量子化シム: nn.Linear {act_quant_linears} 本（dit）", flush=True)
     graphs = build_graphs(modules, config, model_config)
+    # サイズ試算の計数は**配布グラフ**から採る（{@link graph_scans}）— ラッパは丸め済みの
+    # モジュールを抱えるだけなので、ここで数えても値には触れない。
+    scans = graph_scans(role_graphs(graphs), recipe.roles) if recipe.method is not None else {}
     speaker_max = ex.speaker_sym_max(model_config)
     caps = {
         "text": int(model_config["max_text_len"]),
@@ -527,13 +911,60 @@ def latent_stage(
     act_quant.detach_act_quant(handles)
     del graphs, modules, source
     gc.collect()
-    return LatentResult(metas, latents, dict(quantized.reports), act_quant_linears)
+    return LatentResult(metas, latents, reports, act_quant_linears, scans)
+
+
+def w4_payload(recipe: Recipe, scans: Mapping[str, RoleScan], fit_stride: int) -> dict[str, Any]:
+    """w4 構成の対象規模・除外一覧・サイズ試算（JSON へそのまま載る形）。
+
+    `tables` は表を張る成果物の数 = 対象を持つ役割数（`kmeans:shared` の表は役割ごとに
+    1 枚 — {@link W4_KMEANS_SHARED}）。他の 3 方式では式に効かない。
+    """
+    if recipe.method is None:
+        raise SystemExit(f"w4 構成でないレシピ（weight={recipe.weight}）の試算を求められた")
+    counts = {role: scan.counts for role, scan in scans.items()}
+    tables = sum(1 for item in counts.values() if item.modules)
+    size = project_size(recipe.method, total_counts(list(counts.values())), tables)
+    return {
+        "method": recipe.method.name,
+        "groupSize": W4_GROUP_SIZE,
+        "opTypes": [cls.__name__ for cls in W4_OP_TYPES],
+        # MUST: 部分標本の表と全量の表は別物になりうるので、使った事実を数値の横へ出す
+        # （`karume.quant_methods.fake_quant_kmeans` の MUST）。
+        "fitStride": fit_stride,
+        "roles": {
+            role: {"modules": item.modules, "channels": item.channels, "elements": item.elements}
+            for role, item in sorted(counts.items())
+        },
+        "excluded": [
+            {
+                "role": role,
+                "fqn": item.fqn,
+                "axisLength": item.axis_length,
+                "elements": item.elements,
+            }
+            for role, scan in sorted(scans.items())
+            for item in scan.excluded
+        ],
+        "size": {
+            "formula": size.formula,
+            "tables": size.tables,
+            "modules": size.counts.modules,
+            "channels": size.counts.channels,
+            "elements": size.counts.elements,
+            "bits": size.bits,
+            "bitsPerWeight": size.bits_per_weight,
+            "projectedMiB": size.projected_mib,
+            "f32MiB": size.f32_mib,
+        },
+    }
 
 
 def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
     """1 構成ぶんを走らせ、per-config の JSON を書いて返す。"""
     started = time.perf_counter()
     recipe = RECIPES[name]
+    check_fit_stride(recipe, args.kmeans_fit_stride)
     base_frames = None
     goldens = None
     if name == BASE_CONFIG:
@@ -555,20 +986,22 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
         for case in ip.PIPELINE_CASES:
             weight_only_path(args.out, case.name)
 
-    metas, latents, reports, act_quant_linears = latent_stage(name, recipe, args, base_frames)
-
-    decoder, sample_rate, codec_report = build_decoder(
-        args.codec_source_dir,
-        args.codec_model_dir,
-        recipe.weight,
-        ROLE_CODEC in recipe.roles,
+    metas, latents, reports, act_quant_linears, scans = latent_stage(
+        name, recipe, args, base_frames
     )
+
+    stage = build_decoder(
+        args.codec_source_dir, args.codec_model_dir, recipe, args.kmeans_fit_stride
+    )
+    decoder, sample_rate, codec_report = stage.graph, stage.sample_rate, stage.report
+    if stage.scan is not None:
+        scans[ROLE_CODEC] = stage.scan
     audios: dict[str, torch.Tensor] = {}
     for case, latent in latents.items():
         with torch.no_grad():
             audios[case] = decoder(latent).reshape(-1).detach().clone()
         print(f"[{name}/{case}] decoded {audios[case].shape[0]} samples", flush=True)
-    del decoder
+    del decoder, stage
     gc.collect()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -651,6 +1084,8 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
         "gates": run_gates(name, recipe, latents, entries, goldens),
         "elapsed": round(time.perf_counter() - started, 1),
     }
+    if recipe.method is not None:
+        payload["w4"] = w4_payload(recipe, scans, args.kmeans_fit_stride)
     (args.out / f"{name}.json").write_text(
         json.dumps(payload, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -811,6 +1246,60 @@ def quality_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def size_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
+    """w4 構成のサイズ試算（**式による投影**・実測ではない）。
+
+    品質だけ並べると表のコストが見えない（`kmeans:shared` は成果物ごとに 16×f32 の表が要る）
+    ので、同じレポートに式ごと載せる。
+    """
+    header = ["config", "方式", "本数", "要素", "式", "bpw", "投影 MiB", "f32 MiB", "縮小率"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    for name, payload in collected.items():
+        size = payload.get("w4", {}).get("size")
+        if size is None:
+            continue
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    name,
+                    payload["w4"]["method"],
+                    str(size["modules"]),
+                    f"{size['elements']:,}",
+                    size["formula"],
+                    f"{size['bitsPerWeight']:.3f}",
+                    f"{size['projectedMiB']:.1f}",
+                    f"{size['f32MiB']:.1f}",
+                    f"{size['projectedMiB'] / size['f32MiB']:.3f}",
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines)
+
+
+def excluded_lines(collected: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """g32 非整列で対象から外した重みの一覧（構成ごと・**必ず出力へ載せる**）。
+
+    黙って外すと「全役割を丸めた」と読める表の裏で、割り切れない層だけ f32 のまま残る。
+    """
+    lines: list[str] = []
+    for name, payload in collected.items():
+        excluded = payload.get("w4", {}).get("excluded")
+        if excluded is None:
+            continue
+        if not excluded:
+            lines.append(f"- {name}: g32 非整列による除外なし")
+            continue
+        lines.append(f"- {name}: g32 非整列 {len(excluded)} 本を除外")
+        lines += [
+            f"    - {item['role']} / {item['fqn']} 軸長 {item['axisLength']}"
+            f"（{item['elements']:,} 要素）"
+            for item in excluded
+        ]
+    return lines
+
+
 def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -828,6 +1317,10 @@ def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             "act_quant": f"w8a8 は DiT の nn.Linear 入力へ per-token i8 の fake-quant を掛ける"
             f"（karume.act_quant — ランタイム quantize-rows.ts の鏡像）。素通り検出は"
             f" {WEIGHT_ONLY_BASE} との z ビット等値",
+            "w4": f"方式は g={W4_GROUP_SIZE} 固定で比較（ADR 0069 追記 5 の 3）。対象 op は"
+            f" {', '.join(cls.__name__ for cls in W4_OP_TYPES)} — i4 の実行経路は linear 限定"
+            "（決定 5）なので全役割形は出荷できる形ではなく、品質の上限を測る側。サイズ列は"
+            "**式による投影**で、計数は配布グラフに載る重みだけ",
             "verdict": "最終裁定は聴感（ユーザー）— WAV は同一テキスト・同一 seed で並ぶ",
         },
         "configs": dict(collected),
@@ -837,6 +1330,177 @@ def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             if payload["gates"]["failures"]
         },
     }
+
+
+# ---- 対象規模の下見（`--scan`）----------------------------------------------
+
+#: 下見で並べる対象 op 集合。`linear` は i4 の実行経路がそのまま受けられる形（ADR 0069
+#: 決定 5）、`all` は測定用に広げた {@link W4_OP_TYPES}。**linear 限定形は品質を測らない**
+#: — 数えれば conv 主体かどうかが分かり、conv 主体なら linear だけ丸めても配布サイズが
+#: 動かないので、full-loop を数十分回す価値が無い（回すかどうかはこの表で決める）。
+SCAN_OP_SETS: Mapping[str, tuple[type[nn.Module], ...]] = MappingProxyType(
+    {"linear": (nn.Linear,), "all": W4_OP_TYPES}
+)
+
+SCAN_FILE = "w4-scan.json"
+
+#: 下見で試算を並べる方式（構成表の 4 種と同じ順・同じ実体）。
+SCAN_METHODS: tuple[W4Method, ...] = (W4_RTN, W4_NF4, W4_MXFP4, W4_KMEANS_SHARED)
+
+
+def scan_graphs(args: argparse.Namespace) -> dict[str, nn.Module]:
+    """配布グラフ 7 本（6 役割 + コーデックの decode 経路）を**丸めずに**組む。"""
+    source, modules, config, _text_config, model_config = load_modules(
+        args.model_dir, args.source_dir
+    )
+    patch.apply_patches()
+    graphs = role_graphs(build_graphs(modules, config, model_config))
+    stage = build_decoder(args.codec_source_dir, args.codec_model_dir, RECIPES[BASE_CONFIG])
+    del source
+    return {**graphs, ROLE_CODEC: stage.graph}
+
+
+def scan_report(args: argparse.Namespace) -> dict[str, Any]:
+    """役割 × op 集合の対象規模とサイズ試算（full-loop を 1 回も回さない）。"""
+    graphs = scan_graphs(args)
+    op_sets: dict[str, Any] = {}
+    for label, op_types in SCAN_OP_SETS.items():
+        scans = {role: scan_targets(graph, op_types) for role, graph in graphs.items()}
+        counts = {role: scan.counts for role, scan in scans.items()}
+        tables = sum(1 for item in counts.values() if item.modules)
+        total = total_counts(list(counts.values()))
+        op_sets[label] = {
+            "opTypes": [cls.__name__ for cls in op_types],
+            "roles": {
+                role: {
+                    "modules": item.modules,
+                    "channels": item.channels,
+                    "elements": item.elements,
+                    "f32MiB": item.elements * 4 / 1024**2,
+                }
+                for role, item in counts.items()
+            },
+            "excluded": [
+                {
+                    "role": role,
+                    "fqn": item.fqn,
+                    "axisLength": item.axis_length,
+                    "elements": item.elements,
+                }
+                for role, scan in scans.items()
+                for item in scan.excluded
+            ],
+            "total": {
+                "modules": total.modules,
+                "channels": total.channels,
+                "elements": total.elements,
+                "f32MiB": total.elements * 4 / 1024**2,
+            },
+            "methods": {},
+        }
+        for method in SCAN_METHODS:
+            size = project_size(method, total, tables)
+            op_sets[label]["methods"][method.name] = {
+                "formula": size.formula,
+                "tables": size.tables,
+                "bits": size.bits,
+                "bitsPerWeight": size.bits_per_weight,
+                "projectedMiB": size.projected_mib,
+                "f32MiB": size.f32_mib,
+                "ratio": size.projected_mib / size.f32_mib,
+            }
+    return {
+        "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "script": "tools/export-recipes/irodori/measure_quant.py --scan",
+        "groupSize": W4_GROUP_SIZE,
+        "note": "計数は配布グラフに載る重みだけ（丸める木は役割モジュール = i8 と同じ集合）。"
+        "サイズは式による投影で、実測ではない",
+        "opSets": op_sets,
+    }
+
+
+def scan_scale_table(payload: Mapping[str, Any]) -> str:
+    """役割 × op 集合の対象規模（**本数・チャネル・要素**）。"""
+    header = ["op 集合", "役割", "本数", "チャネル", "要素", "f32 MiB"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    for label, entry in payload["opSets"].items():
+        rows = [*entry["roles"].items(), ("合計", entry["total"])]
+        lines += [
+            "| "
+            + " | ".join(
+                [
+                    label,
+                    role,
+                    str(item["modules"]),
+                    f"{item['channels']:,}",
+                    f"{item['elements']:,}",
+                    f"{item['f32MiB']:.2f}",
+                ]
+            )
+            + " |"
+            for role, item in rows
+        ]
+    return "\n".join(lines)
+
+
+def scan_size_table(payload: Mapping[str, Any]) -> str:
+    """op 集合 × 方式のサイズ試算（**式による投影**・実測ではない）。"""
+    header = ["op 集合", "方式", "式", "bpw", "投影 MiB", "f32 MiB", "縮小率"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    for label, entry in payload["opSets"].items():
+        lines += [
+            "| "
+            + " | ".join(
+                [
+                    label,
+                    name,
+                    size["formula"],
+                    f"{size['bitsPerWeight']:.3f}",
+                    f"{size['projectedMiB']:.1f}",
+                    f"{size['f32MiB']:.1f}",
+                    f"{size['ratio']:.3f}",
+                ]
+            )
+            + " |"
+            for name, size in entry["methods"].items()
+        ]
+    return "\n".join(lines)
+
+
+def scan_excluded_lines(payload: Mapping[str, Any]) -> list[str]:
+    """g32 非整列で対象から外れる重みの一覧（op 集合ごと）。"""
+    lines: list[str] = []
+    for label, entry in payload["opSets"].items():
+        if not entry["excluded"]:
+            lines.append(f"- {label}: g32 非整列による除外なし")
+            continue
+        lines.append(f"- {label}: g32 非整列 {len(entry['excluded'])} 本")
+        lines += [
+            f"    - {item['role']} / {item['fqn']} 軸長 {item['axisLength']}"
+            f"（{item['elements']:,} 要素）"
+            for item in entry["excluded"]
+        ]
+    return lines
+
+
+def run_scan(args: argparse.Namespace) -> None:
+    """{@link scan_report} を走らせて JSON を書き、markdown 表を stdout へ出す。"""
+    payload = scan_report(args)
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / SCAN_FILE).write_text(
+        json.dumps(payload, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    print()
+    print("w4 対象規模（配布グラフに載る重みだけ・丸めていない）:")
+    print(scan_scale_table(payload))
+    print()
+    print("g32 非整列の除外:")
+    print("\n".join(scan_excluded_lines(payload)))
+    print()
+    print("サイズ試算（式による投影・実測ではない）:")
+    print(scan_size_table(payload))
+    print()
+    print(f"scan → {args.out / SCAN_FILE}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -854,7 +1518,24 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="走らせる構成（1 実行 = 1 構成）。省略すると実測はせず、"
         f"--out に残っている成果物から {REPORT_FILE} と表を組み直すだけ",
     )
+    parser.add_argument(
+        "--scan",
+        action="store_true",
+        help="w4 の対象規模とサイズ試算だけを出して終わる（full-loop は回さない）",
+    )
+    parser.add_argument(
+        "--kmeans-fit-stride",
+        type=int,
+        default=1,
+        help="kmeans:shared の**表の fit だけ**を等間隔部分標本にする（適用は常に全量）。"
+        "dit 役割の全量 fit は f64 の作業領域まで含めて 20GB 超になるので、"
+        "kmeans-shared-all は実メモリに合わせてここを上げる。使った値は出力へ載る",
+    )
     args = parser.parse_args(argv)
+
+    if args.scan:
+        run_scan(args)
+        return
 
     if args.config is not None:
         payload = run_config(args.config, args)
@@ -874,6 +1555,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     print()
     print("品質（基準と同じ時間グリッド上）:")
     print(quality_table(collected))
+    exclusions = excluded_lines(collected)
+    if exclusions:
+        print()
+        print("w4 サイズ試算（式による投影・実測ではない）:")
+        print(size_table(collected))
+        print()
+        print("g32 非整列の除外:")
+        print("\n".join(exclusions))
     print()
     print(f"report → {args.out / REPORT_FILE}")
     if report["failures"]:
