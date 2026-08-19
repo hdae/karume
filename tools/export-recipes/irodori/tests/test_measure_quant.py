@@ -447,6 +447,20 @@ class TestW4ConfigTable:
         """方式比較で g を同時に振らない（ADR 0069 追記 5 の 3）。"""
         assert mq.W4_GROUP_SIZE == 32
 
+    def test_the_linear_config_is_the_shippable_form(self):
+        """`i4-linear` = RTN × Linear のみ（今日の配布対応形 — ADR 0069 決定 5）。"""
+        recipe = mq.RECIPES["i4-linear"]
+
+        assert recipe.method is mq.W4_RTN
+        assert recipe.op_types == (nn.Linear,)
+        # codec に linear は 1 本も無いので roles から外す（恒等 — 対象 0 の役割を回さない）。
+        assert set(recipe.roles) == set(mq.ROLES) - {mq.ROLE_CODEC}
+
+    def test_the_all_role_configs_keep_the_wide_op_types(self):
+        """既定の op 種は広い 5 種のまま（i4-linear の追加で既存構成が狭まっていない）。"""
+        for name in ("i4-all", "i4-mixed", "nf4-all", "mxfp4-all", "kmeans-shared-all"):
+            assert mq.RECIPES[name].op_types == mq.W4_OP_TYPES, name
+
 
 class TestScanTargets:
     """対象の割り方（g32 に載る側 / 割り切れず外す側）— 除外は必ず一覧で出る。"""
@@ -530,6 +544,39 @@ class TestApplyWeightQuant:
         )
 
         assert "f16" in reports[ex.TARGET_DIT]
+
+    def test_a_linear_only_recipe_leaves_the_conv_untouched(self):
+        """`i4-linear` の実体 — op_types が丸めの側にも効く（scan だけ狭めても意味が無い）。"""
+        torch.manual_seed(0)
+        module = _W4Like()
+        before = {name: tensor.detach().clone() for name, tensor in module.named_parameters()}
+
+        mq.apply_weight_quant(
+            mq.w4_recipe(mq.W4_RTN, (ex.TARGET_DIT,), op_types=(nn.Linear,)),
+            {ex.TARGET_DIT: module},
+        )
+
+        assert not torch.equal(module.aligned.weight, before["aligned.weight"])
+        assert torch.equal(module.conv.weight, before["conv.weight"])
+        assert torch.equal(module.ragged.weight, before["ragged.weight"])
+
+    def test_a_method_that_rounds_a_different_set_than_the_scan_is_fail_loudly(self):
+        """数えた対象と丸めた対象が割れたら落とす（op_types の焼き込み退行の検出器）。"""
+        wide = mq.W4Method(
+            "rtn-i4-g32",
+            # 構成の op_types を無視して常に広い 5 種で丸める（退行の再現）。
+            lambda model, _op_types, include, _stride: mq.fake_quant_int4(
+                model, mq.W4_GROUP_SIZE, include=include, op_types=mq.W4_OP_TYPES
+            ),
+            lambda counts, _tables: 4.0 * counts.elements,
+            "検査用",
+        )
+
+        with pytest.raises(SystemExit, match="丸めた本数"):
+            mq.apply_weight_quant(
+                mq.w4_recipe(wide, (ex.TARGET_DIT,), op_types=(nn.Linear,)),
+                {ex.TARGET_DIT: _W4Like()},
+            )
 
     def test_the_shared_codebook_takes_the_fit_stride(self):
         """表の fit だけ部分標本（適用は全量）— dit 役割の全量 fit は実メモリを超える。"""

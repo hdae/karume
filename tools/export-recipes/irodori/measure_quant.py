@@ -298,9 +298,11 @@ class W4Method:
 
     #: スクリーニングと同じ方式名（表・JSON にそのまま出る）。
     name: str
-    #: 丸めを model へ in-place で当てる（`(model, include, fit_stride)` → `describe()` を
-    #: 持つ報告）。`fit_stride` を読むのは {@link W4_KMEANS_SHARED} だけ。
-    round_model: Callable[[nn.Module, Callable[[str], bool], int], Any]
+    #: 丸めを model へ in-place で当てる（`(model, op_types, include, fit_stride)` →
+    #: `describe()` を持つ報告）。`op_types` は構成側（{@link Recipe.op_types}）が決める —
+    #: ここへ焼くと「数えた対象」と「丸めた対象」が構成ごとに割れうる。`fit_stride` を
+    #: 読むのは {@link W4_KMEANS_SHARED} だけ。
+    round_model: Callable[[nn.Module, tuple[type[nn.Module], ...], Callable[[str], bool], int], Any]
     #: 対象集合の投影ビット数（`(計数, 表の枚数)`）。
     projected_bits: Callable[[TargetCounts, int], float]
     #: `projected_bits` の式（**出力へそのまま載せる** — 投影の前提を表から追えるように）。
@@ -312,8 +314,8 @@ class W4Method:
 #: RTN（= 格納形 `i4`・ADR 0069 決定 3）。w4 列の**基準**で、他の 3 方式はこれとの差で読む。
 W4_RTN = W4Method(
     "rtn-i4-g32",
-    lambda model, include, _stride: fake_quant_int4(
-        model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
+    lambda model, op_types, include, _stride: fake_quant_int4(
+        model, W4_GROUP_SIZE, include=include, op_types=op_types
     ),
     lambda counts, _tables: 4 * counts.elements + 32 * counts.groups,
     "4bit + g32 f32 scale = 5.0 bpw",
@@ -321,8 +323,8 @@ W4_RTN = W4Method(
 
 W4_NF4 = W4Method(
     "nf4",
-    lambda model, include, _stride: fake_quant_nf4(
-        model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
+    lambda model, op_types, include, _stride: fake_quant_nf4(
+        model, W4_GROUP_SIZE, include=include, op_types=op_types
     ),
     lambda counts, _tables: 4 * counts.elements + 32 * counts.groups,
     "4bit + g32 f32 scale = 5.0 bpw",
@@ -330,8 +332,8 @@ W4_NF4 = W4Method(
 
 W4_MXFP4 = W4Method(
     "mxfp4",
-    lambda model, include, _stride: fake_quant_mxfp4(
-        model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
+    lambda model, op_types, include, _stride: fake_quant_mxfp4(
+        model, W4_GROUP_SIZE, include=include, op_types=op_types
     ),
     lambda counts, _tables: 4 * counts.elements + 8 * counts.groups,
     "4bit + g32 E8M0 scale = 4.25 bpw",
@@ -346,8 +348,8 @@ W4_MXFP4 = W4Method(
 #: 逃げ道（**表の fit だけ**等間隔部分標本・適用は常に全量）。
 W4_KMEANS_SHARED = W4Method(
     "kmeans:shared",
-    lambda model, include, stride: fake_quant_kmeans(
-        model, "shared", W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES, fit_stride=stride
+    lambda model, op_types, include, stride: fake_quant_kmeans(
+        model, "shared", W4_GROUP_SIZE, include=include, op_types=op_types, fit_stride=stride
     ),
     lambda counts, tables: 4 * counts.elements + 32 * counts.groups + CODEBOOK_BITS * tables,
     "4bit + g32 f32 scale + 表 16×f32 を役割ごとに 1 枚",
@@ -405,11 +407,18 @@ class Recipe:
     act_quant: bool = False
     #: w4 方式（`None` = `weight` が格納 dtype の綴りで `irodori.export.fake_quant` を通る側）。
     method: W4Method | None = None
+    #: w4 の丸め対象 op 種（`method` があるときだけ意味を持つ）。既定は測定用に広げた 5 種で、
+    #: `(nn.Linear,)` に絞った形が**今日の配布対応形**（i4 の実行経路 — ADR 0069 決定 5）。
+    op_types: tuple[type[nn.Module], ...] = W4_OP_TYPES
 
 
-def w4_recipe(method: W4Method, roles: tuple[str, ...]) -> Recipe:
+def w4_recipe(
+    method: W4Method,
+    roles: tuple[str, ...],
+    op_types: tuple[type[nn.Module], ...] = W4_OP_TYPES,
+) -> Recipe:
     """w4 方式 1 本ぶんのレシピ（`weight` の綴りは方式名 — 二重管理を作らない）。"""
-    return Recipe(method.name, roles, method=method)
+    return Recipe(method.name, roles, method=method, op_types=op_types)
 
 
 #: 活性シムの比較相手（**同じ重みで活性だけ素の**構成）。素通り検出はこの 1 本との差で見る。
@@ -450,11 +459,21 @@ DIAGNOSTICS: Mapping[str, Recipe] = MappingProxyType(
 #: RTN にだけ混成形を置く（S が動くかどうかは丸めの粗さで決まるので、4 方式ぶんの混成を
 #: 並べても同じ問いを 4 回聞くだけになる。RTN で受け皿の形が立てば他方式へ横展開できる）。
 #:
-#: 全役割形の対象 op 種は {@link W4_OP_TYPES}（linear / conv 系 / embedding）。linear 限定形は
-#: 構成として置かない — `--scan` が対象規模（本数・要素数・縮小率）を数えて出す側で持つ。
+#: 全役割形の対象 op 種は {@link W4_OP_TYPES}（linear / conv 系 / embedding）。
+#:
+#: `i4-linear` は**今日の配布対応形**（RTN i4 × linear 限定 = 実際に出荷できる唯一の形 —
+#: ADR 0069 決定 5）。`--scan` の実測で linear が対象要素の 81.8% を覆い「conv 主体なら
+#: 省略」の前提が成立しなかったため、品質構成として置く（2026-08-19 全体レビュー後の追補）。
+#: roles から codec を外すのは codec に linear が 1 本も無いから（対象 0 の役割を回さない —
+#: 除外ではなく恒等なので構成の意味は「全役割の linear」のまま）。linear の混成形（duration
+#: 除外）は置かない — 全役割の実測で S ドリフトの原因が duration の重みでなく上流特徴の
+#: 変形だと確定した（i4-mixed の強制グリッド品質が i4-all とビット一致）ため、混成しても
+#: S は救えない。
+W4_LINEAR_ROLES: tuple[str, ...] = tuple(role for role in ROLES if role != ROLE_CODEC)
 W4_CONFIGS: Mapping[str, Recipe] = MappingProxyType(
     {
         "i4-all": w4_recipe(W4_RTN, ROLES),
+        "i4-linear": w4_recipe(W4_RTN, W4_LINEAR_ROLES, op_types=(nn.Linear,)),
         "i4-mixed": w4_recipe(W4_RTN, MIXED_ROLES),
         "nf4-all": w4_recipe(W4_NF4, ROLES),
         "mxfp4-all": w4_recipe(W4_MXFP4, ROLES),
@@ -587,7 +606,7 @@ def apply_weight_quant(
         return dict(ex.fake_quant(recipe.weight, scoped).reports)
     reports: dict[str, str] = {}
     for name, module in sorted(scoped.items()):
-        scan = scan_targets(module, W4_OP_TYPES)
+        scan = scan_targets(module, recipe.op_types)
         if scan.counts.modules == 0:
             if scan.excluded:
                 raise SystemExit(
@@ -597,7 +616,15 @@ def apply_weight_quant(
                 )
             reports[name] = "格納 f32 のまま（w4 の対象型を持たない）"
             continue
-        rounded = recipe.method.round_model(module, aligned_include(scan.excluded), fit_stride)
+        rounded = recipe.method.round_model(
+            module, recipe.op_types, aligned_include(scan.excluded), fit_stride
+        )
+        if rounded.modules != scan.counts.modules:
+            raise SystemExit(
+                f"{name}: 丸めた本数 {rounded.modules} が対象 {scan.counts.modules} と違う"
+                "（op_types か include が scan と割れている — 数えた対象と丸めた対象は"
+                "同じ集合でなければならない）"
+            )
         skipped = f" / g32 非整列 {len(scan.excluded)} 本を除外" if scan.excluded else ""
         sampled = f" / 表の fit は 1/{fit_stride} 部分標本" if fit_stride > 1 else ""
         reports[name] = f"{recipe.method.name} へ丸めた — {rounded.describe()}{skipped}{sampled}"
@@ -618,17 +645,20 @@ def role_graphs(graphs: ip.HostGraphs) -> dict[str, nn.Module]:
     }
 
 
-def graph_scans(graphs: Mapping[str, nn.Module], roles: Sequence[str]) -> dict[str, RoleScan]:
+def graph_scans(
+    graphs: Mapping[str, nn.Module],
+    roles: Sequence[str],
+    op_types: tuple[type[nn.Module], ...],
+) -> dict[str, RoleScan]:
     """役割 → 配布グラフに載る w4 対象の規模（サイズ試算と除外一覧の入力）。
 
     丸めた木ではなくラッパを数えるのは、`irodori.export.load_dit` が組む DiT が**グラフに
     載らない backbone のコピー**まで抱えるため（`export.TARGET_SCALE_SOURCES` の NOTE）。
-    丸めた集合で試算すると、出荷しない重みのぶんだけ投影 MiB が膨らむ。
+    丸めた集合で試算すると、出荷しない重みのぶんだけ投影 MiB が膨らむ。op 種は丸めと同じ
+    ものを受ける（別々に動くと「丸めた対象」と「試算した対象」が黙って割れる）。
     """
     return {
-        role: scan_targets(graph, W4_OP_TYPES)
-        for role, graph in graphs.items()
-        if role in set(roles)
+        role: scan_targets(graph, op_types) for role, graph in graphs.items() if role in set(roles)
     }
 
 
@@ -746,13 +776,15 @@ def build_decoder(
     elif recipe.method is None:
         report = dv._fake_quant(recipe.weight, model).report
     else:
-        scan = scan_targets(model, W4_OP_TYPES)
+        scan = scan_targets(model, recipe.op_types)
         if scan.counts.modules == 0:
             raise SystemExit(
                 f"codec: w4 の対象 {len(scan.excluded)} 本が全て量子化軸を g32 で"
                 "割り切れず 0 本になった"
             )
-        rounded = recipe.method.round_model(model, aligned_include(scan.excluded), fit_stride)
+        rounded = recipe.method.round_model(
+            model, recipe.op_types, aligned_include(scan.excluded), fit_stride
+        )
         sampled = f" / 表の fit は 1/{fit_stride} 部分標本" if fit_stride > 1 else ""
         report = f"{recipe.method.name} へ丸めた — {rounded.describe()}{sampled}"
         print(f"[fake-quant] codec: {report}", flush=True)
@@ -761,7 +793,7 @@ def build_decoder(
         graph,
         int(model.sample_rate),
         report,
-        scan_targets(graph, W4_OP_TYPES) if quantize and recipe.method is not None else None,
+        scan_targets(graph, recipe.op_types) if quantize and recipe.method is not None else None,
     )
 
 
@@ -875,7 +907,11 @@ def latent_stage(
     graphs = build_graphs(modules, config, model_config)
     # サイズ試算の計数は**配布グラフ**から採る（{@link graph_scans}）— ラッパは丸め済みの
     # モジュールを抱えるだけなので、ここで数えても値には触れない。
-    scans = graph_scans(role_graphs(graphs), recipe.roles) if recipe.method is not None else {}
+    scans = (
+        graph_scans(role_graphs(graphs), recipe.roles, recipe.op_types)
+        if recipe.method is not None
+        else {}
+    )
     speaker_max = ex.speaker_sym_max(model_config)
     caps = {
         "text": int(model_config["max_text_len"]),
@@ -928,7 +964,7 @@ def w4_payload(recipe: Recipe, scans: Mapping[str, RoleScan], fit_stride: int) -
     return {
         "method": recipe.method.name,
         "groupSize": W4_GROUP_SIZE,
-        "opTypes": [cls.__name__ for cls in W4_OP_TYPES],
+        "opTypes": [cls.__name__ for cls in recipe.op_types],
         # MUST: 部分標本の表と全量の表は別物になりうるので、使った事実を数値の横へ出す
         # （`karume.quant_methods.fake_quant_kmeans` の MUST）。
         "fitStride": fit_stride,
@@ -1318,8 +1354,9 @@ def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             f"（karume.act_quant — ランタイム quantize-rows.ts の鏡像）。素通り検出は"
             f" {WEIGHT_ONLY_BASE} との z ビット等値",
             "w4": f"方式は g={W4_GROUP_SIZE} 固定で比較（ADR 0069 追記 5 の 3）。対象 op は"
-            f" {', '.join(cls.__name__ for cls in W4_OP_TYPES)} — i4 の実行経路は linear 限定"
-            "（決定 5）なので全役割形は出荷できる形ではなく、品質の上限を測る側。サイズ列は"
+            "構成ごと（正本は各 config JSON の w4.opTypes — 全役割形 = i8 と同じ 5 種 /"
+            " i4-linear = Linear のみ）。i4 の実行経路は linear 限定（決定 5）なので全役割形は"
+            "出荷できる形ではなく品質の上限を測る側、i4-linear が今日の配布対応形。サイズ列は"
             "**式による投影**で、計数は配布グラフに載る重みだけ",
             "verdict": "最終裁定は聴感（ユーザー）— WAV は同一テキスト・同一 seed で並ぶ",
         },
