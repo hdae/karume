@@ -225,6 +225,9 @@ export type IrodoriGenerateRequest = {
    * DiT ループに与えた 1.76 倍を放棄する（生成全体では実測 7.2 → 8.6 秒 / S 170・参照環境
    * 2026-08-16）。2 経路の出力はビット同一（`runDitLoopResident` の MUST）なので**波形は
    * 1 ビットも変わらない**（`e2e_irodori_wav_test.ts` の onEvent 段が同じ sha256 で門にしている）。
+   *
+   * MUST: `onEvent` の中で同じパイプラインの `generate` / `generateLatent` / `dispose` を
+   * await してはならない（直列化鎖の自己デッドロック — 中断は throw で行う）。
    */
   readonly onEvent?: (event: IrodoriGenerateEvent) => void | Promise<void>;
 };

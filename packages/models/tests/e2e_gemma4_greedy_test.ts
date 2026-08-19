@@ -570,9 +570,11 @@ Deno.test({
           let worst = 0;
           let worstAt = "";
           let chunks = 0;
+          let totalQueryLength = 0;
           try {
             for (let position = 0; position < total; position += CHUNK_LENGTH) {
               const queryLength = Math.min(CHUNK_LENGTH, total - position);
+              totalQueryLength += queryLength;
               // pad 行は 0 のまま（ADR 0066 追記 6 の値契約）— `Int32Array` の初期値がその契約。
               const ids = new Int32Array(CHUNK_LENGTH);
               const positions = new Int32Array(CHUNK_LENGTH);
@@ -626,7 +628,9 @@ Deno.test({
             // MUST: 途中で落ちても返す（KV 容量ぶんの VRAM を抱えたままにしない）。
             await context.dispose();
           }
-          assertEquals(chunks, Math.ceil(total / CHUNK_LENGTH), "prefill chunk の本数");
+          // 恒真回避: `chunks` はループ反復数そのものなので自己比較になる（G4 L-4）。
+          // 各 chunk の queryLength の総和が全行数 total と一致することを実効に検査する。
+          assertEquals(totalQueryLength, total, "chunk の queryLength 総和");
           console.log(
             `[e2e] gemma4 decode prefill context-en: ${chunks} chunk / 全 ${total} 行 / ` +
               `最終 chunk の logits maxAbs ${worst.toExponential(3)}（最悪 ${worstAt}）`,

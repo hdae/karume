@@ -156,8 +156,24 @@ const discoverCases = (prefix: string): readonly string[] =>
 /** 登録時点で必要なので同期列挙する（`Deno.test` の ignore 判定と同じ理由）。 */
 const IO_CASES = discoverCases(IO_PREFIX);
 const GREEDY_CASES = discoverCases(GREEDY_PREFIX);
+
+const fileExists = (url: URL): boolean => {
+  try {
+    return Deno.statSync(url).isFile;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+};
+
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
 const AVAILABLE = IO_CASES.length > 0 || GREEDY_CASES.length > 0;
+/**
+ * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
+ * golden が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、完全性テスト自身が
+ * SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+ */
+const ANY_PRESENT = AVAILABLE || fileExists(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!AVAILABLE) {
   console.warn(
@@ -308,8 +324,8 @@ const preparedOf = (diagnostics: SessionDiagnostics, where: string) => {
 
 Deno.test({
   name: "MiniCPM5 decode 資産: 期待するケースとモデル本体が揃っている",
-  // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-  ignore: !AVAILABLE,
+  // 完全に空の環境だけ SKIP。**何か 1 つでも**あれば欠けは FAIL（`ANY_PRESENT` の JSDoc）。
+  ignore: !ANY_PRESENT,
   fn: () => {
     assertEquals(IO_CASES, [...EXPECTED_IO_CASES], `${SERIES_ROOT.pathname} の io ケース`);
     assertEquals(
@@ -446,9 +462,11 @@ Deno.test({
           let worst = 0;
           let worstAt = "";
           let chunks = 0;
+          let totalQueryLength = 0;
           try {
             for (let position = 0; position < total; position += CHUNK_LENGTH) {
               const queryLength = Math.min(CHUNK_LENGTH, total - position);
+              totalQueryLength += queryLength;
               // pad 行は 0 のまま（ADR 0066 追記 6 の値契約）— `Int32Array` の初期値がその契約。
               const ids = new Int32Array(CHUNK_LENGTH);
               const positions = new Int32Array(CHUNK_LENGTH);
@@ -500,7 +518,9 @@ Deno.test({
             // MUST: 途中で落ちても返す（KV 容量ぶんの VRAM を抱えたままにしない）。
             await context.dispose();
           }
-          assertEquals(chunks, Math.ceil(total / CHUNK_LENGTH), "prefill chunk の本数");
+          // 恒真回避: `chunks` はループ反復数そのものなので自己比較になる（G4 L-4）。
+          // 各 chunk の queryLength の総和が有効行数 total と一致することを実効に検査する。
+          assertEquals(totalQueryLength, total, "chunk の queryLength 総和");
           console.log(
             `[e2e] minicpm5 decode prefill context-en: ${chunks} chunk / 有効 ${total} 行 / ` +
               `logits maxAbs ${worst.toExponential(3)}（最悪 ${worstAt}）`,
