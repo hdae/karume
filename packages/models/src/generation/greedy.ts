@@ -53,8 +53,15 @@ export type GreedySpec<C extends GenerationDisposable = GenerationContext> = {
   readonly inputIds: string;
   /** 絶対位置を受けるグラフ入力の名前（`[1,M]` の i32）。 */
   readonly positionIds: string;
-  /** argmax token を出すグラフ出力の名前（`[1,M,1]` の i32）。 */
+  /** argmax token を出すグラフ出力の名前（`[1,M,1]` の i32 — token-only 形は `[1,1,1]`）。 */
   readonly token: string;
+  /**
+   * token-only 出口（ADR 0068 決定 4 の既定形）の **last_row 入力**の名前（`[1]` の i32）。
+   * 指定すると各 run に最終有効行の添字（prefill = `queryLength − 1` / decode = `0`）を供給し、
+   * `token` 出力を `[1,1,1]`（選ばれた 1 行ぶん）として読む。省略時は現行の logits opt-in 形
+   * （`[1,M,1]` の全行 argmax から最終有効行を読む）。
+   */
+  readonly lastRow?: string;
   /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。 */
   readonly chunkLength: number;
   /**
@@ -116,6 +123,13 @@ const i32Row = (rows: number, data: Int32Array<ArrayBuffer>): Tensor => ({
   data,
 });
 
+/** token-only 形の last_row 入力（`[1]` の i32 — 選ぶ行の添字）。 */
+const lastRowInput = (row: number): Tensor => ({
+  dtype: "i32",
+  shape: [1],
+  data: Int32Array.of(row),
+});
+
 const prefillInputs = <C extends GenerationDisposable>(
   spec: GreedySpec<C>,
   chunk: PrefillChunk,
@@ -132,6 +146,8 @@ const prefillInputs = <C extends GenerationDisposable>(
   return {
     [spec.inputIds]: i32Row(spec.chunkLength, ids),
     [spec.positionIds]: i32Row(spec.chunkLength, positions),
+    // token-only 形は最終**有効**行を添字で選ぶ（pad 行の lm_head は走らない — ADR 0068 決定 4）。
+    ...(spec.lastRow === undefined ? {} : { [spec.lastRow]: lastRowInput(chunk.queryLength - 1) }),
   };
 };
 
@@ -142,6 +158,7 @@ const decodeInputs = <C extends GenerationDisposable>(
 ): RunInputs => ({
   [spec.inputIds]: i32Row(1, Int32Array.of(token)),
   [spec.positionIds]: i32Row(1, Int32Array.of(position)),
+  ...(spec.lastRow === undefined ? {} : { [spec.lastRow]: lastRowInput(0) }),
 });
 
 /**
@@ -207,6 +224,8 @@ export const generateGreedy = async <C extends GenerationDisposable>(
     chunkLength,
   });
   try {
+    // token-only 形は出力が選ばれた 1 行ぶん（`[1,1,1]`）なので、読む位置は形も添字も固定。
+    const tokenOnly = spec.lastRow !== undefined;
     let token = 0;
     for (const chunk of chunks) {
       const outputs = await session.run(prefillInputs(spec, chunk), undefined, {
@@ -215,7 +234,9 @@ export const generateGreedy = async <C extends GenerationDisposable>(
       });
       // 生成の起点になるのは**最終 chunk の最終有効行**だけ（chunks は 1 本以上なので、この
       // 初期値は必ず上書きされる）。途中 chunk の出力は捨てる。
-      token = readToken(outputs, spec.token, chunkLength, chunk.queryLength - 1);
+      token = tokenOnly
+        ? readToken(outputs, spec.token, 1, 0)
+        : readToken(outputs, spec.token, chunkLength, chunk.queryLength - 1);
     }
 
     const generated = [token];

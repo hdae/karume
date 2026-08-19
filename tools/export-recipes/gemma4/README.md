@@ -164,12 +164,24 @@ records, and its container additionally carries the 6 MiB of RoPE tables.
 `export_decode.py` needs the same machine, and takes considerably longer: the greedy record is
 `3 cases × 16 steps` of full re-forwards, and the long case re-forwards ~600 tokens each time.
 
+## What `export_token.py` emits
+
+The **token-only default exit** (ADR
+[0068](../../../docs/decisions/0068-decode-exit-multi-output.md) addendum 4) as a third series,
+`outputs/series/gemma4-e2b-decode-token/`: the same states-form chunk graph with a `last_row[1]`
+i32 input added, and the exit replaced by a runtime row select (`F.embedding` over the final
+hidden states), a single-row `lm_head` + softcap, and `argmax` — the only output is `token[1,1,1]`
+and no logits are declared. It carries no golden files of its own: the acceptance test replays the
+`greedy.<case>` records of the logits opt-in series against this graph, so the cross-series
+token-for-token match is itself the gate.
+
 ## Running
 
 ```sh
 cd tools/export-recipes
 uv run --with 'transformers==5.14.1' python -m gemma4.export
 uv run --with 'transformers==5.14.1' python -m gemma4.export_decode
+uv run --with 'transformers==5.14.1' python -m gemma4.export_token
 ```
 
 `transformers` is pinned to 5.14.1 for the same reason as DeBERTa, EmbeddingGemma and MiniCPM5 (a

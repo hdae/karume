@@ -463,3 +463,115 @@ Deno.test("GreedySession: 実 Session の面を型で満たす（綴りのドリ
   const asGreedySession = (session: Session): GreedySession => session;
   assertEquals(typeof asGreedySession, "function");
 });
+
+// ---- token-only 出口（ADR 0068 決定 4 の既定形 — `lastRow` 指定時の 1 行ぶん出力） ----
+
+const LAST_ROW = "last_row";
+
+/** token-only 形の fake: `last_row` を記録し、`[1,1,1]` の token を返す。 */
+const tokenOnlySession = () => {
+  const lastRows: (readonly number[])[] = [];
+  const rows: number[] = [];
+  let disposals = 0;
+  const context: FakeContext = {
+    dispose: () => {
+      disposals += 1;
+      return Promise.resolve();
+    },
+  };
+  let call = 0;
+  const session: GreedySession<FakeContext> = {
+    createGenerationContext: () => Promise.resolve(context),
+    run: (inputs, _bindings, generation) => {
+      const row = readRow(inputs, LAST_ROW);
+      lastRows.push(row.shape);
+      rows.push(row.values[0]);
+      void generation;
+      const value = 5000 + call;
+      call += 1;
+      return Promise.resolve({
+        [TOKEN]: { dtype: "i32", shape: [1, 1, 1], data: Int32Array.of(value) } as const,
+      } as RunOutputs);
+    },
+  };
+  return { session, lastRows, rows, disposals: () => disposals };
+};
+
+Deno.test("generateGreedy(lastRow): prefill は最終有効行の添字・decode は 0 を [1] i32 で渡す", async () => {
+  const fake = tokenOnlySession();
+
+  const generated = await generateGreedy({
+    session: fake.session,
+    inputIds: IDS,
+    positionIds: POSITIONS,
+    token: TOKEN,
+    lastRow: LAST_ROW,
+    chunkLength: 4,
+    maxPosition: 64,
+    prompt: promptOf(6),
+    maxNewTokens: 3,
+  });
+
+  // prefill 2 chunk（有効行 4 / 2）→ 添字 3, 1。decode 2 回 → 添字 0, 0。
+  assertEquals(fake.rows, [3, 1, 0, 0]);
+  // 形は常に `[1]`（行選択の添字 1 個 — chunk 形 `[1,M]` とは別の rank-1 入力）。
+  for (const shape of fake.lastRows) assertEquals(shape, [1]);
+  // 起点は最終 chunk（call=1）の値・以後は各 decode の値（`[1,1,1]` の 0 番目を読む）。
+  assertEquals(generated, [5001, 5002, 5003]);
+  assertEquals(fake.disposals(), 1);
+});
+
+Deno.test("generateGreedy(lastRow): token 出力が [1,1,1] でなければ fail loudly", async () => {
+  const session: GreedySession<FakeContext> = {
+    createGenerationContext: () => Promise.resolve({ dispose: () => Promise.resolve() }),
+    run: () =>
+      // lastRow 指定なのに全行形 `[1,M,1]` を返す資産（= logits opt-in 形の取り違え）。
+      Promise.resolve({
+        [TOKEN]: { dtype: "i32", shape: [1, 4, 1], data: new Int32Array(4) },
+      } as RunOutputs),
+  };
+
+  await assertRejects(
+    () =>
+      generateGreedy({
+        session,
+        inputIds: IDS,
+        positionIds: POSITIONS,
+        token: TOKEN,
+        lastRow: LAST_ROW,
+        chunkLength: 4,
+        maxPosition: 64,
+        prompt: promptOf(4),
+        maxNewTokens: 1,
+      }),
+    Error,
+    "[1,1,1] でない",
+  );
+});
+
+Deno.test("generateGreedy: lastRow 省略時は last_row 入力を渡さない（現行形は無風）", async () => {
+  const seen: boolean[] = [];
+  const fake = fakeSession({
+    outputs: (call, rows) => defaultOutputs(call, rows),
+  });
+  const spying: GreedySession<FakeContext> = {
+    createGenerationContext: (spec) => fake.session.createGenerationContext(spec),
+    run: (inputs, bindings, generation) => {
+      seen.push(Object.hasOwn(inputs, LAST_ROW));
+      return fake.session.run(inputs, bindings, generation);
+    },
+  };
+
+  await generateGreedy({
+    session: spying,
+    inputIds: IDS,
+    positionIds: POSITIONS,
+    token: TOKEN,
+    chunkLength: 4,
+    maxPosition: 64,
+    prompt: promptOf(6),
+    maxNewTokens: 2,
+  });
+
+  assertEquals(seen, [false, false, false]);
+});

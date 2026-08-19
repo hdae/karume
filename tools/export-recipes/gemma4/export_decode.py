@@ -493,6 +493,12 @@ def states_plan(
     )
 
 
+#: token-only 既定出口（ADR 0068 決定 4）の last_row 入力名。綴りは wrapper の forward 引数名
+#: そのもの（torch.export がグラフ入力名に採る）— 正本はここで、`export_token` と
+#: `assert_ir_form_decode(token_only=True)` の両方が参照する。
+TOKEN_ONLY_LAST_ROW = "last_row"
+
+
 def assert_ir_form_decode(
     graph: IrGraph,
     config: Any,
@@ -500,8 +506,14 @@ def assert_ir_form_decode(
     *,
     seq_symbol: str = SEQ_SYMBOL,
     capacity_symbol: str = CAPACITY_SYMBOL,
+    token_only: bool = False,
 ) -> dict[str, Any]:
     """states 形 decode グラフの形を検査する（**数値が合ったまま静かに壊れる**性質を全部見る）。
+
+    `token_only` は ADR 0068 決定 4 の**既定出口形**（`export_token` — 入力に `last_row` が
+    増え、出力が argmax token 1 本になる）。入口・出口以外の検査（states / 層種別 / 残骸 /
+    格納内訳）は両形で同一なので、この 1 関数が両方を受ける（別関数に割ると片方だけ検査が
+    痩せていく）。
 
     golden の突合では捕まらない性質だけを並べる:
 
@@ -527,21 +539,29 @@ def assert_ir_form_decode(
     window = int(config.sliding_window)
 
     names = [spec.name for spec in graph.inputs]
-    if names != [INPUT_IDS, POSITION_IDS]:
+    expected_inputs = (
+        [INPUT_IDS, POSITION_IDS, TOKEN_ONLY_LAST_ROW] if token_only else [INPUT_IDS, POSITION_IDS]
+    )
+    if names != expected_inputs:
         raise AssertionError(
-            f"グラフ入力が {names} — `{INPUT_IDS}` / `{POSITION_IDS}` の 2 本でない"
+            f"グラフ入力が {names} — {expected_inputs} でない"
             "（mask が畳み込まれずに入力へ残っている可能性）"
         )
-    if len(graph.outputs) != 2:
-        raise AssertionError(
-            f"IR 出力が {len(graph.outputs)} 本（decode 出口は logits / token の 2 本）"
+    expected_outputs = 1 if token_only else 2
+    if len(graph.outputs) != expected_outputs:
+        kind = (
+            "token-only 出口は token の 1 本"
+            if token_only
+            else "decode 出口は logits / token の 2 本"
         )
+        raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（{kind}）")
     producer = {out: node for node in graph.nodes for out in node.outs}
-    token_source = producer.get(graph.outputs[1])
+    token_source = producer.get(graph.outputs[-1])
     if token_source is None or token_source.op != ARGMAX_OP:
         found = "ノード出力でない" if token_source is None else token_source.op
         raise AssertionError(
-            f"出力 1 の供給元が {found} — `{ARGMAX_OP}` でない（ADR 0068 決定 4 の decode 出口）"
+            f"出力 {len(graph.outputs) - 1} の供給元が {found} — `{ARGMAX_OP}` でない"
+            "（ADR 0068 決定 4 の decode 出口）"
         )
 
     attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
