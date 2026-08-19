@@ -13,54 +13,21 @@
 
 - **0.3.0 リリース済み**（2026-08-16・JSR 3 + PyPI・CI 緑）。ポジショニングの正本 =
   [research/2026-08-16-runtime-landscape.md](../docs/research/2026-08-16-runtime-landscape.md)。
-- **autoregressive-ready 実装波: 進行中** — ADR
+- **autoregressive-ready 実装波 A〜H: 全消化（2026-08-17〜19）** — GQA 整除 broadcast・
+  多出力 + argmax / topk・GenerationContext（第 5 寿命クラス）・states 形 attention +
+  state_append・decode 台本 + greedy 検収・w4（i4 g32・linear 限定）・shard ロード +
+  admission estimator・Gemma 4 E2B 検収（PLE 35 分割・KV 共有 30 slot・混成 i8+i4）・
+  **token-only 既定出口**。設計の正本 = ADR
   [0066](../docs/decisions/0066-generation-context-state-slots.md)〜
-  [0070](../docs/decisions/0070-shard-loading-admission.md) accepted・波割り A〜H 裁定済み
-  （正本 = [backlog](../docs/backlog.md) next 節）。**波 A 済（2026-08-17）**: GQA 整除
-  broadcast（`b78b0c1` — r=1 バイト同一・repeat_kv parity・i8a8×GQA fail loudly）+
-  MiniCPM5-1B 1-shot recipe（`3f072cb` — 真の GQA 形 24 層・sanity greedy）+
-  `e2e_minicpm5_test.ts`（tolerance 1e-3・greedy・census 全 `:gqa`）。**波 B 済
-  （2026-08-17）**: 出力列化 2 段（`3a31544`/`9a795a7` — バイト不変）+ argmax（`cbe093a`）+
-  topk（多出力の最初の入居者・値列 = torch と数値同値・添字列 = 最小 index 規範〈ADR 0068
-  追記 2〉・k ≤ 63 既定上限）。**波 C 済（2026-08-17）**: states{} パーサ（`1d7bdbb`）+
-  GenerationContext（第 5 寿命クラス・可変 uniform・poison/rewind/device-loss・診断席・
-  計画鍵不変条件）。**波 D 済（2026-08-18・7 コミット `5662c9a`..`2d1cc60`）**: states 形
-  attention + `state_append`（ADR 0067 決定 4〜7）— 契約層 TS/Py・カーネル族 4 本・実行統合
-  （`run` 第 3 引数 generation）・分離焼き込み（ADR 0066 決定 5）・受入テスト群（帯 mask
-  交差オラクル・0066 受入②・0067 受入⑤）。0 本席 / states 専用記号束縛 / C-2 結線点 5 件も
-  全消化。**波 E 済（2026-08-18・6 コミット `4c0a587`..`e92bcbc`）**: core 手術ヘルパ
-  `karume/states.py`（export 後の attention→states 形書換 — Gemma 4 でも使う汎用機構）+
-  models `generateGreedy`（固定 chunk prefill / decode M=1・`maxPosition` 必須）+ MiniCPM5
-  decode 台本（RoPE 表引き swap・`outputs/series/minicpm5-1b-decode/` staging 公開で実走済み・
-  絶対位置上限 = 表 512 行）+
-  実 GPU 検収門（**greedy 3 ケース × K=16 の token id 列が torch と厳密一致**・prefill logits
-  maxAbs 7.439e-5 = 1-shot 門と同値・census 全 :gqa）。`enqueue` の generation 面は
-  **設けない**裁定で確定（limitations — speculative 実需で再訪）。decode 出口の token-only
-  既定形は先送り裁定（ADR 0068 追記 3 — backlog 4 番）。**波 F 済（w4 — ADR 0069・2026-08-18）**:
-  Phase 0 = sweep 実測（`93ebaf6` — 既定 group 32 対称・zero-point 欄なし確定。w4 RTN は
-  1B 級で品質が明確に落ちる実測 — 検収方法論には無関係）。Phase 1 = format 層（`39d6405`）+
-  exporter 発行（`61483e2` — nibble pack・逆変換門・検出器 3 点・**書き出し順は整列降順
-  F32,I32,I4,F16,I8 に訂正**〈ADR 0069 追記 2〉・verify 自前リーダ化）+ runtime 実行
-  （`a690057` — 適格 = linear 限定・`:wi4g<N>` 変種・capability 両側開放・GPU 門 5 本）。
-  **実モデル w4 検収は波 H（Gemma 4 E2B）で**。**波 G 済（shard + admission — ADR 0070・
-  2026-08-19）**: hub 2 相 `streamAssets`（`3ab4d45`）+ format shard 進行検証（`00d94f0`）+
-  shard 消費 Session 構築（`1fcadbb` — **全量面も 1 shard の列として同一経路**・errorScope
-  shard 単位・SessionState は graph のみ保持）+ admission estimator（`3240f18` —
-  GPU 非依存・比較はしない）。RAM ピーク実測 8.4→3.5GiB
-  （[research](../docs/research/2026-08-19-shard-load-ram-peak.md)）。manifest の shard 欄と
-  exporter 分割は R1 送り（shard 面の消費者は当面ローカル実験限定 — limitations）。
-  **波 H 済（Gemma 4 E2B 検収 — 2026-08-19・autoregressive-ready 波 A〜H 全消化）**:
-  exporter core 3 面（`f15bbb3` — Gemma4 系 aten 正規化 3 点 + 混成格納の席〈quantize
-  `include` / emit `weight_dtype_overrides`〉= ADR 0069 追記 4）→ 1-shot recipe
-  （`ac930f3`/`59bbfc0` — PLE 35 分割〈binding 上限 2GB−4〉・層種別 mask 2 本・混成
-  i8×i4・T=598 で帯実効）→ decode 台本（`3d217ae` — RoPE 表引き 2 組・30 slot + KV 共有
-  〈源 = 層 13/14〉・RoPE 表は f32 明示除外）→ 検収門（`c5f1f7f` — greedy 3 ケース ×
-  K=16 厳密一致〈ring エビクト越え込み〉・logits atol 1e-2〈実測最悪 2.23e-3〉・census
-  混成キー）→ **token-only 既定出口**（ADR 0068 追記 4 — `export_token.py` + models
-  `generateGreedy` の `lastRow`・新規 op ゼロ・系列間交差 parity 門）。実 GPU で w4 混成が
-  完全常駐（hostExpandedBytes 0）・chat デモ ~11 tok/s。
-  送り: R1 同席（manifest shard 欄 + exporter 分割）・MiniCPM5 token-only 鏡像・
-  L8 fake-device 注入面は保留継続（正本 = backlog）。
+  [0070](../docs/decisions/0070-shard-loading-admission.md)（各追記）、波の経緯と送り =
+  [backlog](../docs/backlog.md) now 節。検収 = MiniCPM5-1B / Gemma 4 E2B とも実 GPU で
+  greedy K=16 厳密一致（ring エビクト越え込み）・w4 混成の完全常駐（hostExpandedBytes 0）・
+  chat デモ ~11 tok/s。
+- **全体レビュー消化中（2026-08-19）**: 波 A〜H の 82 コミットを差分レビュー（Pass1 6 グループ +
+  Pass2 反証 + Codex 提案型）— E/C = 0・W 19 → **修正波を実施中**（機械的 14 件 + 設計判断 4 件:
+  batch 自己デッドロックの例外化・create×dispose 競合窓・decode 台本ヘルパの `_shared` 共有化・
+  argmax/topk 変異ハーネス）。Codex 提案の波割りは backlog へ反映済み（R1 同席 4 件・
+  生成 API 波・recipe 基盤同席）。
 
 ## Open decisions
 

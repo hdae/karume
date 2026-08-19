@@ -16,67 +16,18 @@
 [research/2026-08-11-embeddinggemma-ort-comparison.md](research/2026-08-11-embeddinggemma-ort-comparison.md)
 §7（EG bare 28.11ms — レビュー波の門追加は性能コストゼロを確認）。
 
-## next — autoregressive-ready 基盤波
-
-「Gemma 4 対応」ではなく **IR / loader / state 実行モデルを autoregressive-ready にする波**。
-検収モデル = Gemma 4 E2B / MiniCPM5-1B（MiniMax-M3 は非目標で裁定済み 2026-08-16 — ADR 0001 へ
-1 行はこの波で）。**実装前に ADR を先行**させる（順序も設計判断）。参照資料は収集済み
-（[research/2026-08-17-autoregressive-references.md](research/2026-08-17-autoregressive-references.md)
-— 掃引 8 + 深掘り 3 + 敵対検証 3・検収モデル config 一次確定込み。ADR の根拠節はここを
-引用する）。**ADR 先行は完了**（2026-08-17）:
-[0066](decisions/0066-generation-context-state-slots.md)（GenerationContext / state
-スロット・R2/R3）・[0067](decisions/0067-autoregressive-attention-vocabulary.md)（attention
-語彙 = G3 / states 形 / state_append）・
-[0068](decisions/0068-decode-exit-multi-output.md)（multi-output + argmax / topk）・
-[0069](decisions/0069-packed-w4-storage.md)（0019 reopen + i4 格納）・
-[0070](decisions/0070-shard-loading-admission.md)（shard 2 相 + admission）— 全て
-accepted（裁定 A〜C + Codex 6 巡収束）。**実装波の波割りは裁定済み**（2026-08-17・
-案 X = 検収足場先行）: **A = GQA + MiniCPM5 検収足場（済 2026-08-17 — `b78b0c1` 実装・
-`3f072cb` recipe・e2e 門）** → **B = 多出力 + argmax / topk（済 2026-08-17 —
-`3a31544`/`9a795a7` 出力列化・`cbe093a` argmax・topk と docs は後続コミット。0 本席は
-波 D へ・topk exporter 側〈getitem 結線〉は sampling 実需まで先送り）** →
-**C = GenerationContext + states{}（済 2026-08-17 — `1d7bdbb` states{} パーサ・`(C-2)`
-GenerationContext = 第 5 寿命クラス + 可変 uniform + poison/rewind/device-loss + 診断席）**
-→ **D = states 形 attention + state_append（済 2026-08-18 — `5662c9a` 契約層 TS/Py〈0 本席・
-束縛点 2 つ・参照完全性・順序検査 5b〉・`52729d0` カーネル族 4 本〈両側述語・ring 読み書き
-同式・空行→厳密 0〉・`88d7021` 実行統合〈run 第 3 引数 generation・poison=submit カウンタ
-比較・行ブロック・fusion ガード・sliding rewind 全拒否〉・`485439e` states 専用記号の
-bindSymbols 免除・`22b5f64` 分離焼き込み〈ADR 0066 決定 5 = 世代識別子 + rebind 診断〉・
-`2d1cc60` 受入テスト群〈帯 mask 交差オラクル・0066 受入②・0067 受入⑤・容量非依存・
-KV 共有層〉。C-2 の結線点 5 件と 0 本席は全消化。**送り**: `enqueue` の generation 面は
-波 E 判断・L8 fake-device 注入面は保留継続）** → **E = decode 台本 + greedy 検収（済 2026-08-18 — `4c0a587` core 手術ヘルパ
-`karume/states.py`〈attention→states 形書換 + append 挿入 + 残骸刈り・sliding / KV 共有 /
-数値容量まで被覆〉・`75afc26` models `generateGreedy`〈固定 chunk prefill + decode M=1・
-narrow interface DI〉・`40b9475` decode 台本〈RoPE 表引き swap・greedy golden K=16 +
-margin 門 1e-2 — capital-ja は 0.0077 で除外・series 実走済み〉・`ca15c06` 検収門
-〈token id 列厳密一致 3 ケース・prefill maxAbs 7.439e-5 = 1-shot 門と同値・census
-QK/PV 全数 :gqa・cachedPlans=2 安定〉・`1325546` docs・`e92bcbc` Codex 指摘消化
-〈`maxPosition` 必須化・staging 公開・i32 値域・pad 行記述訂正〉。**送りの裁定**: `enqueue` の generation 面は
-**設けない**〈limitations に理由 — token feedback の逐次律速でフェンス束ねの利得が
-立たない。speculative の実需で再訪〉・decode 系列の絶対位置上限 = RoPE 表 512 行
-〈series README〉）** →
-**F = w4（済 2026-08-18 — Phase 0: sweep 実測で既定 group 32 対称・zero-point 欄なし確定
-〈ADR 0069 追記・[research](research/2026-08-18-w4-fake-quant-sweep.md)〉。Phase 1:
-`39d6405` format 層 TS/Py・`61483e2` exporter 発行〈nibble pack + 逆変換門 + 検出器・
-書き出し順訂正 = 整列降順 F32,I32,I4,F16,I8 = ADR 0069 追記 2・verify 自前リーダ化〉・
-`a690057` runtime 実行〈linear 限定適格・:wi4g\<N\> 変種・capability 開放・GPU 門 5 本 =
-CPU/GPU ビット一致込み〉。実モデル w4 検収は波 H で）**
-→ **G = shard + admission（済 2026-08-19 — `3ab4d45` hub 2 相 streamAssets・`00d94f0`
-shard 進行検証〈完全性・co-shard・横断重複〉・`1fcadbb` shard 消費 Session 構築〈全量面と
-経路統合・errorScope shard 単位・SessionState は graph のみ〉・`3240f18` admission
-estimator。RAM ピーク実測 8.4→3.5GiB =
-[research](research/2026-08-19-shard-load-ram-peak.md)・manifest shard 欄と exporter 分割は
-R1 送り = ADR 0070 追記）** → **H = Gemma 4 E2B 検収（済 2026-08-19 — 実モデル w4 + token-only 既定出口込みで
-autoregressive-ready 波 A〜H 全消化）**: exporter core 3 面（`f15bbb3` — Gemma4 系 aten
-正規化 3 点〈pow⁻⁰·⁵ / weight 無し RMSNorm / 静的 select→slice+squeeze〉+ quantize
-`include` + emit `weight_dtype_overrides` = 混成格納の席・ADR 0069 追記 4）→ 1-shot recipe
-（`ac930f3` + `59bbfc0` — PLE 35 分割〈binding 上限 2GB−4 対応〉・層種別 mask 2 本・
-既定 i8 + linear i4 明示・tied lm_head は i8 一本化）→ decode 台本（`3d217ae` — RoPE 表引き
-2 組・30 slot + KV 共有読者〈源 = 層 13/14〉・RoPE 表は f32 明示除外）→ 検収門（`c5f1f7f` —
-1-shot logits atol 1e-2〈実測最悪 2.23e-3〉+ census 混成キー / decode greedy 3 ケース ×
-K=16 厳密一致〈T=598 = ring エビクト越え〉+ prefill 最終 chunk 1.09e-3）→ **token-only
-既定出口**（ADR 0068 追記 4 — `export_token.py` + models `generateGreedy` の `lastRow`・
-新規 op ゼロ・系列間交差 parity 門）。生成デモ提示済み（chat template K=128・~11 tok/s）。
+**autoregressive-ready 基盤波（A〜H）も全消化（2026-08-17〜19）** — GQA・多出力 +
+argmax / topk・GenerationContext・states 形 attention・decode 台本 + greedy 検収・w4
+（i4 g32）・shard ロード + admission・Gemma 4 E2B / MiniCPM5-1B 実モデル検収・token-only
+既定出口まで完了。設計と経緯の正本 = ADR
+[0066](decisions/0066-generation-context-state-slots.md) /
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) /
+[0068](decisions/0068-decode-exit-multi-output.md) /
+[0069](decisions/0069-packed-w4-storage.md) /
+[0070](decisions/0070-shard-loading-admission.md)（各追記）と research
+（[autoregressive-references](research/2026-08-17-autoregressive-references.md) /
+[w4-fake-quant-sweep](research/2026-08-18-w4-fake-quant-sweep.md) /
+[shard-load-ram-peak](research/2026-08-19-shard-load-ram-peak.md)）。
 
 autoregressive 波の**残項目（波外へ送り）**:
 
@@ -91,12 +42,22 @@ autoregressive 波の**残項目（波外へ送り）**:
   bool initializer / storage の設計・pipeline 単位の Session 常駐と device-loss lifecycle
   （perf H-4 と同体）・sampling/RNG はホスト維持（GPU 側は argmax/topk のみ）。
 
+## next — （空 — 次波の開始はユーザー裁定）
+
 ## later
 
+- **生成 API 波（起票 2026-08-19 — 全体レビューの Codex 提案を採用裁定）**: 静的配線と
+  リクエストを分離した `GenerationProgram`（setup 時に全結線を検証）+ stateful sequence API
+  （`for await` の token イベント・EOS 停止・cancel・多ターン継続）+ `last_row` の runner 側
+  導出（ADR 0068 追記 4 の所有関係のみ reopen）。`generateGreedy` は parity 検収用の内部
+  ヘルパへ格下げ。LLM 実需（streaming / チャット）に直結する最大の API 波。
 - **w4 の横展開 — 既存ファミリでの品質調査**（ユーザー要望 2026-08-19）: Anima / SBV2 /
   Irodori など既存モデルに w4（i4 g32）を当て、どこまで品質が落ちるかを測る。SBV2 w4 は
   聴感未実施のまま（配布縮小 3 波の再検討候補 — 棄却記録はモデル固有の裁定どおり対象自身で
   実測する）。Anima / Irodori / SBV2 には `measure_quant.py` の実測足場が既にある。
+  **recipe 基盤の再編を同席させる裁定（2026-08-19）**: variant 駆動の単一 recipe 化・
+  artifact transaction の exporter core 汎用化・PLE bank のモジュール化・系列間 golden の
+  provenance 束縛 — 横展開で recipe 群を触る前に基盤を入れると手戻り最小。
 - **量子化方式の探索**（ユーザー要望 2026-08-19 — 検討波の起票候補）: f8 / f4（浮動小数
   格納）・ダイナミックレンジ量子化・テーブル参照（LUT / codebook）・**層ごとのテーブル参照**。
   格納 dtype の受理集合（ADR 0069 の bit 表・整列表・view 型の 3 面）と検出器の設計から。
@@ -135,6 +96,11 @@ autoregressive 波の**残項目（波外へ送り）**:
   （ADR 0041 / 0063 reopen・2026-08-16 裁定で追加 OK）。**HF 公開前が締切** — hub は v2 のみを
   読み 2 形パースをしない（ADR 0041）ので、公開後に必要になると全リポ再アップになる。
   今なら席を空けるだけで既存 manifest は 1 要素として書ける。
+  **同席裁定（2026-08-19 全体レビュー — Codex 提案の採用）**: ロード面の公開 API を固める
+  この波で同時に設計する — ①shard identity（`{id, bytes}`）の hub↔runtime 境界保存
+  ②`prepareModel(graphShard) → estimate → createSession(weightShards)` の 2 段境界
+  （admission を重み DL 前へ — ADR 0070 の graph-first に沿う）③estimator のシナリオ別報告 +
+  `peakAccountedBytes` 改名 ④重み常駐の判別 union 化（`ResidentWeight` — 3 並列 map の統合）。
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）
 - HF 公開一式: karume-sbv2-jvnv 上げ直し・新規 5 モデル・Irodori
 - リポ直下 README の書き上げ・JSR npm 互換層の sideEffects 検証
