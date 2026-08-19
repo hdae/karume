@@ -165,3 +165,24 @@ gather → lm_head へ通す新配線（+ models 側の入力供給・token-only
   `(M−1)×262144×1536` MAC と `[M,V]` logits バッファが消える）。logits opt-in 形は診断線
   （prefill logits tolerance 門の対象）として併存（追記 3 の裁定を維持）。
 - 送り: MiniCPM5 系列への同形展開（backlog 起票 — 機構は models `lastRow` として共通化済み）。
+
+## 追記 5（2026-08-19・全体レビュー CX-2.3 — token-only 系列の出所束縛）
+
+追記 4 の検収（系列間交差 parity）は「両系列が同じチェックポイントから出た」という前提に
+立つが、その前提だけが機械可読でなかった — 資産ディレクトリの存在確認しか無く、片方だけ
+古い組み合わせでも門が緑になれた。消化（コミット `353baf0`）:
+
+- **token-only の export が `reference.json` を書く**（書き手の正本 =
+  `tools/export-recipes/gemma4/provenance.py`）: 元チェックポイントの指紋
+  （model/config/tokenizer の sha256 + bytes）と、流用する `greedy.<case>.safetensors`
+  1 本ずつの digest。golden の `prompt` は export 時に `torch.equal` で今回のケースと突合
+  （`expected` は読まない — 期待列の突合は実 GPU 門の仕事のまま）。
+- **検収門に③（出所の束縛）を追加**（`e2e_gemma4_token_exit_test.ts`）: 記録の schema・
+  系列名・golden 集合の過不足・実バイトの sha256 照合。記録なし / 不一致は SKIP でなく
+  **FAIL**（logits 系列を採り直せば digest が動き、token-only の再 export が強制される）。
+- **据える単位を token-only でも「系列ディレクトリ丸ごと」へ統一** — 容器と記録が同じ
+  据え替えで動くので「新しい容器 + 古い記録」が構造的に作れない。logits 系列の再 export は
+  不要（既存 golden のバイトを読むだけ）。
+- 出力レイアウト: `gemma4-e2b-decode-token/` = `model.safetensors` + `reference.json`。
+- 送り: logits opt-in 系列側の同形記録（両系列が同じ checkpoint を名乗ることの機械照合）は
+  次にその系列を採り直すときに同時導入する（greedy 再採取が高価なため — レビュー隣接記録）。

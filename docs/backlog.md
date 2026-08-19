@@ -7,28 +7,19 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — w4 横展開 + 量子化方式スクリーニング（2026-08-19 承認）
+## now — w4 横展開 + 量子化方式スクリーニング（2026-08-19 — 実装・実測は全消化）
 
-RTN i4 g32 の既存ファミリ横展開と、校正ループ不要の 4bit 方式（FP4 / NF4 / MXFP4 /
-k-means codebook〈層ごとの表・channel ごと・層共有表 + g32 正規化の 3 粒度〉）の実測
-スクリーニングを 1 波に統合。方式比較は **g=32 固定**（g 軸の評価は別途 — 2026-08-19 裁定・
-next 節）。非 linear（conv / embedding）の w4 は**測定のみ**（emit の格納受理・runtime の
-linear 限定は不変 — 品質が良ければ拡張波の実需根拠になる）。
+**実装・実測・起票まで消化済み**。実測の正本 =
+[research/2026-08-19-w4-method-screening.md](research/2026-08-19-w4-method-screening.md)、
+採否の台帳 = [perf-ledger](perf-ledger.md) の量子化方式節（Q-1〜Q-5）、測定側拡張の設計 =
+ADR [0069](decisions/0069-packed-w4-storage.md) 追記 5。recipe 基盤 4 件
+（CX-1.4 artifact transaction / CX-1.1 variant 統合 / CX-1.3 PLE モジュール化 /
+CX-2.3 golden provenance = ADR [0068](decisions/0068-decode-exit-multi-output.md) 追記 5）も
+同波で消化（token 系列再 export の sha256 完全一致で CX-1.1 の生成物不変を実資産検収済み）。
 
-- 前段 0: exporter core の fake-quant 拡張 — `fake_quant_int4` の 5 op 種化（既定は linear のみ
-  で後方互換）+ 方式丸めヘルパ群 + ADR 0069 追記
-- バッチ 1a（方式スクリーニング — 安いファミリで先に絞る）: MiniCPM5 `sweep_w4` 拡張 +
-  EmbeddingGemma measure_quant 新設（全方式 × g32・E2E 指標 — 重み relRMSE では絞らない:
-  g32-asym の RMSE 最小×自由走行最悪の逆転を実測済み）
-- バッチ 1b（横展開 — 重いファミリ）: Anima / SBV2 / Irodori へ RTN i4 g32（linear 限定 +
-  非 linear 込みの 2 形）+ スクリーニング勝者のみ追加構成。SBV2 / Irodori は聴感評価
-  （人間レビュー）必須
-- 基盤同席（1a/1b と並行 — 全体レビュー Codex 採用裁定）: CX-1.4 artifact transaction の
-  core 汎用化 → CX-1.1 gemma4 3 台本の variant 駆動統合 → CX-1.3 PLE bank モジュール化 +
-  CX-2.3 golden provenance 束縛
-- クローズ: research 時点スナップショット（方式 × ファミリ品質マトリクス + 配布サイズ試算
-  〈linear 限定 / 非 linear 込みの両形〉）→ 採用価値ランキング → 優先実装候補を
-  perf-ledger / backlog へ起票 → 裁定
+**残項目（人間レビュー待ち）**: 聴感（SBV2 `outputs/demo/quant-sim/` / Irodori
+`outputs/demo/irodori-quant-sim/`）と視認（Anima `outputs/demo/anima-w4-screen/image_*.png`）
+→ Q-1（SBV2 BERT linear i4 配布）と Q-5（TTS/画像系 w4 不採用）の最終裁定。
 
 全体レビュー波は **0.3.0 の JSR / PyPI リリース（2026-08-16）まで含めて全消化**。
 勢力図・ポジショニング検証は

@@ -26,12 +26,12 @@
 - **全体レビュー（2026-08-19）は修正波込みで全消化** — E/C = 0・W 19 → 修正 11 コミット・
   verify 1620/0/5。Codex 提案の波割りは backlog へ反映済み（R1 同席 4 件・生成 API 波・
   recipe 基盤同席）。
-- **現行波 = w4 横展開 + 量子化方式スクリーニング（2026-08-19 承認）**: RTN i4 g32 を
-  Anima / SBV2 / Irodori + EmbeddingGemma（measure_quant 新設）へ横展開し、校正ループ不要の
-  4bit 方式（FP4 / NF4 / MXFP4 / k-means codebook）を安いファミリ（MiniCPM5 / EG）で
-  スクリーニング → 勝者だけ重いファミリへ。**方式比較は g=32 固定**（g 軸評価は next 波）・
-  **非 linear の w4 は測定のみ**（emit / runtime の linear 限定は不変）。構造の正本 =
-  backlog now 節。recipe 基盤 4 件（CX-1.4/1.1/1.3/2.3）を同波で並行消化。
+- **w4 横展開 + 量子化方式スクリーニング波（2026-08-19）: 実装・実測は全消化** — 実測正本 =
+  [research/2026-08-19-w4-method-screening.md](../docs/research/2026-08-19-w4-method-screening.md)・
+  採否台帳 = perf-ledger Q-1〜Q-5。要旨: 方式序列はモデル系統で割れる（LLM/埋め込み =
+  kmeans:shared 最良 / TTS = nf4 相対最良 / 画像 = 方式差消失の全滅帯）・SBV2 BERT linear i4 =
+  配布 −9.76%（既存格納形・聴感待ち）。recipe 基盤 4 件（CX-1.4/1.1/1.3/2.3）も同波で消化。
+  **残 = 聴感/視認（人間）→ Q-1 / Q-5 の裁定**。
 
 ## Open decisions
 
