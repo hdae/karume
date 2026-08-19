@@ -176,8 +176,9 @@ PER_LAYER_PREFIX = "per_layer."
 EMBED_TOKENS_MODULE = "model.model.embed_tokens"
 LM_HEAD_MODULE = "model.lm_head"
 
-#: PLE 分割の等価検査に使う行数。モデル本体の `embed_tokens_per_layer` にはこの行数だけを
-#: 確保し（`config.vocab_size_per_layer_input` を差し替える — この欄は上流でも
+#: PLE 分割の等価検査に使う行数（行の選び方は {@link probe_rows} — ブロック境界・両端・
+#: 中央の散点）。モデル本体の `embed_tokens_per_layer` にはこの行数だけを確保し
+#: （`config.vocab_size_per_layer_input` を差し替える — この欄は上流でも
 #: `Gemma4TextModel.__init__` と `resize_token_embeddings` からしか読まれない）、
 #: 262144 行の f32 表がメモリに二重に載る形を作らない。分割 35 本は
 #: {@link load_per_layer_tables} が safetensors から直接組む。
@@ -457,8 +458,41 @@ def load_per_layer_tables(model_file: Path, layers: int, dim: int) -> nn.ModuleL
     return nn.ModuleList([nn.Embedding.from_pretrained(table, freeze=True) for table in tables])
 
 
+def probe_rows(rows: int) -> tuple[int, ...]:
+    """PLE 分割の等価検査に使う {@link PLE_PROBE_ROWS} 本の**散点**行。
+
+    連続 8 行だと 1 つの行ブロック（{@link PLE_ROW_BLOCK}）しか踏まず、別ブロックだけの
+    取り違え・破損が門に映らない（Codex 波 H 指摘 H-05）。先頭・最初のブロック境界の両側・
+    中央対・末尾ブロック先頭・末尾対を採り、足りない分は先頭から順に埋めて**常にちょうど**
+    {@link PLE_PROBE_ROWS} 本にする（tiny 表でもブロック境界が無いだけで同数 — 検査席の
+    行数 = 本数が config に焼かれるため可変にしない）。
+    """
+    if rows < PLE_PROBE_ROWS:
+        raise ValueError(f"PLE 表の行数 {rows} が probe の {PLE_PROBE_ROWS} 本に足りない")
+    candidates = [
+        0,
+        PLE_ROW_BLOCK - 1,
+        PLE_ROW_BLOCK,
+        rows // 2,
+        rows // 2 + 1,
+        rows - PLE_ROW_BLOCK,
+        rows - 2,
+        rows - 1,
+    ]
+    picked: list[int] = []
+    for row in candidates:
+        if 0 <= row < rows and row not in picked:
+            picked.append(row)
+    filler = 1
+    while len(picked) < PLE_PROBE_ROWS:
+        if filler not in picked:
+            picked.append(filler)
+        filler += 1
+    return tuple(picked[:PLE_PROBE_ROWS])
+
+
 def renamed_state(
-    model: nn.Module, model_file: Path, probe_start: int
+    model: nn.Module, model_file: Path, probe: Sequence[int]
 ) -> tuple[dict[str, torch.Tensor], list[str]]:
     """text 部のキーを付け替えた f32 の state_dict と、捨てたキーの一覧を返す。
 
@@ -469,8 +503,8 @@ def renamed_state(
       捨てる対象は上流が持つ `_keys_to_ignore_on_load_unexpected`（`Gemma4TextModel.__init__`
       が層構成から組む）を**そのまま**使う — 共有の規則をここで書き直すと、上流が層の割り方を
       変えたときに 2 箇所が独立に動く。
-    - PLE の 1 枚表は {@link PLE_PROBE_ROWS} 行だけを検査席へ載せる（本体は
-      {@link load_per_layer_tables} が持つ 35 分割）。
+    - PLE の 1 枚表は probe の {@link PLE_PROBE_ROWS} 行（{@link probe_rows} の散点）だけを
+      検査席へ載せる（本体は {@link load_per_layer_tables} が持つ 35 分割）。
 
     tied な `lm_head.weight` は state_dict に**同じテンソルを 2 度**載せる — チェックポイントに
     実体が無く（`_tied_weights_keys`）、載せないと `load_state_dict` の missing に出る。
@@ -487,7 +521,8 @@ def renamed_state(
                 dropped.append(name)
                 continue
             if key == PLE_CHECKPOINT_KEY:
-                rows = handle.get_slice(key)[probe_start : probe_start + PLE_PROBE_ROWS, :]
+                sliced = handle.get_slice(key)
+                rows = torch.cat([sliced[row : row + 1, :] for row in probe])
                 state[name] = rows.to(torch.float32)
                 continue
             state[name] = handle.get_tensor(key).to(torch.float32)
@@ -497,21 +532,22 @@ def renamed_state(
     return state, dropped
 
 
-def assert_per_layer_split(model: nn.Module, tables: nn.ModuleList, probe_start: int) -> None:
+def assert_per_layer_split(model: nn.Module, tables: nn.ModuleList, probe: Sequence[int]) -> None:
     """35 分割が上流 `get_per_layer_inputs` と**ビット一致**することを検査する。
 
-    参照側はモデル本体の `embed_tokens_per_layer`（チェックポイントの
-    `[probe_start, probe_start+{@link PLE_PROBE_ROWS})` 行だけを載せた席）で、
-    上流のスケール（`hidden_size_per_layer_input ** 0.5`）と reshape を通った出力そのもの。
-    分割側は同じ行を 35 本から引いて {@link per_layer_inputs} で組み直したもの。
+    参照側はモデル本体の `embed_tokens_per_layer`（チェックポイントの probe 行 —
+    {@link probe_rows} の散点 — だけをその並びで載せた席）で、上流のスケール
+    （`hidden_size_per_layer_input ** 0.5`）と reshape を通った出力そのもの。分割側は
+    **元の行番号**で 35 本から引いて {@link per_layer_inputs} で組み直したもの。
 
     MUST: `torch.equal`（ビット一致）で見る — 列の割り付けを間違えても形も型も dtype も
     合うので、`allclose` にすると「近いが別の表」を通す。
     """
-    local = torch.arange(PLE_PROBE_ROWS, dtype=torch.int64).unsqueeze(0)
+    local = torch.arange(len(probe), dtype=torch.int64).unsqueeze(0)
+    original = torch.tensor([list(probe)], dtype=torch.int64)
     with torch.no_grad():
         reference = model.model.get_per_layer_inputs(local, None)
-        rebuilt = per_layer_inputs(tables, local + probe_start, per_layer_scale(model.config))
+        rebuilt = per_layer_inputs(tables, original, per_layer_scale(model.config))
     if tuple(reference.shape) != tuple(rebuilt.shape):
         raise AssertionError(
             f"PLE 分割の形 {tuple(rebuilt.shape)} が上流 {tuple(reference.shape)} と違う"
@@ -556,13 +592,13 @@ def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
             f"PLE 表の行 {rows} が config の vocab_size_per_layer_input"
             f" {config.vocab_size_per_layer_input} と違う"
         )
-    # 分割の等価検査に使う行は語彙の中ほど（0 付近は pad / 特殊トークンで値が偏りやすい）。
-    probe_start = rows // 2
+    # 分割の等価検査に使う行はブロック境界・両端・中央の散点（{@link probe_rows}）。
+    probe = probe_rows(rows)
     config.vocab_size_per_layer_input = PLE_PROBE_ROWS
     config._attn_implementation = ATTENTION_NAME
 
     model = Gemma4ForCausalLM(config).eval()
-    state, dropped = renamed_state(model, model_file, probe_start)
+    state, dropped = renamed_state(model, model_file, probe)
     if not dropped:
         raise ValueError(
             "KV 共有層の k/v 残骸が 1 本も捨てられなかった"
@@ -573,7 +609,7 @@ def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
     tables = load_per_layer_tables(
         model_file, int(config.num_hidden_layers), int(config.hidden_size_per_layer_input)
     )
-    assert_per_layer_split(model, tables, probe_start)
+    assert_per_layer_split(model, tables, probe)
     return model, tables
 
 

@@ -565,7 +565,16 @@ class TestAssertIrFormDecode:
 
 class TestGreedyMargins:
     def test_a_comfortable_margin_passes(self):
-        decode.assert_greedy_margins({"a": [1.0, 0.5, 0.011], "b": [2.0]}, decode.MARGIN_FLOOR)
+        decode.assert_greedy_margins({"a": [1.0, 0.5, 0.026], "b": [2.0]}, decode.MARGIN_FLOOR)
+
+    def test_the_floor_stays_above_the_gate_precondition(self):
+        """生産側の床 > 消費側の前提（2 × atol 1e-2 — Codex 波 H 指摘 H-04）。
+
+        下だと「台本は採るが検収門の margin 前提で落ちる」ケースが作れてしまい、門の
+        『ここが落ちるのは台本と資産が食い違ったときだけ』が成立しない。atol の正本は
+        `e2e_gemma4_greedy_test.ts` の PREFILL_ATOL（= 1e-2）— 変えたら両方を動かす。
+        """
+        assert decode.MARGIN_FLOOR > 2 * 1e-2
 
     def test_a_thin_margin_fails_loudly(self):
         """MUST: 余裕の無い step を golden に混ぜると GPU 偏差で列が割れる。"""

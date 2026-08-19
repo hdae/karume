@@ -210,8 +210,24 @@ const discoverCases = (prefix: string): readonly string[] =>
 /** 登録時点で必要なので同期列挙する（`Deno.test` の ignore 判定と同じ理由）。 */
 const IO_CASES = discoverCases(IO_PREFIX);
 const GREEDY_CASES = discoverCases(GREEDY_PREFIX);
+
+const fileExists = (url: URL): boolean => {
+  try {
+    return Deno.statSync(url).isFile;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+};
+
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
 const AVAILABLE = IO_CASES.length > 0 || GREEDY_CASES.length > 0;
+/**
+ * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
+ * golden が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、完全性テスト自身が
+ * SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+ */
+const ANY_PRESENT = AVAILABLE || fileExists(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!AVAILABLE) {
   console.warn(
@@ -414,8 +430,8 @@ const preparedOf = (diagnostics: SessionDiagnostics, where: string) => {
 
 Deno.test({
   name: "Gemma 4 E2B decode 資産: 期待するケースとモデル本体が揃っている",
-  // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-  ignore: !AVAILABLE,
+  // 完全に空の環境だけ SKIP。**何か 1 つでも**あれば欠けは FAIL（`ANY_PRESENT` の JSDoc）。
+  ignore: !ANY_PRESENT,
   fn: () => {
     assertEquals(IO_CASES, [...EXPECTED_IO_CASES], `${SERIES_ROOT.pathname} の io ケース`);
     assertEquals(
@@ -461,8 +477,8 @@ Deno.test({
 
           // golden 側の資格（**恒真でない**）: torch 側の 1 位 / 2 位の差が atol の 2 倍を
           // 超えていれば、③の許容内の数値差では 1 位が動けない = この列は数値差で割れない。
-          // 台本側は `MARGIN_FLOOR = 1e-2` で採るケースを選んでいるので、ここが落ちるのは
-          // 台本と資産が食い違ったときだけ。
+          // 台本側は `MARGIN_FLOOR = 2.5e-2`（> 2 × atol — 生産側の床が消費側の前提より上）で
+          // 採るケースを選んでいるので、ここが落ちるのは台本と資産が食い違ったときだけ。
           const minMargin = Math.min(...golden.margin);
           assert(
             minMargin > 2 * PREFILL_ATOL,
@@ -782,6 +798,15 @@ Deno.test({
 
     const gpu = await acquireGpu({ gpuTiming: true });
     const session = await createSession(gpu, parsed);
+    // 混成格納の常駐そのもの（ADR 0069 の検収条件 — キー検査と独立の実測線）。適格落ちは
+    // 例外を出さず CPU で f32 展開されるだけなので、hostExpandedBytes が唯一の直接観測。
+    const storage = session.diagnostics().storage;
+    assert(storage !== undefined, "diagnostics.storage が無い");
+    assertEquals(storage.hostExpandedBytes, 0, "hostExpandedBytes（適格落ちの CPU 展開）");
+    assert(
+      storage.residentCompressedBytes > 3_000_000_000,
+      `residentCompressedBytes ${storage.residentCompressedBytes} が混成常駐の規模でない`,
+    );
     const context = await session.createGenerationContext({
       bindings: { [CAPACITY_SYMBOL]: CAPACITY },
       chunkLength: CHUNK_LENGTH,

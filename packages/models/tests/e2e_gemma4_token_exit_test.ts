@@ -65,15 +65,39 @@ const exists = (url: URL): boolean => {
   }
 };
 
-const AVAILABLE = exists(new URL(MODEL_FILE, TOKEN_ROOT)) &&
-  EXPECTED_CASES.every((name) => exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)));
+const MODEL_PRESENT = exists(new URL(MODEL_FILE, TOKEN_ROOT));
+const GOLDENS_PRESENT = EXPECTED_CASES.every((name) =>
+  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT))
+);
+const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
 
-if (!AVAILABLE) {
+if (!MODEL_PRESENT) {
   console.warn(
-    `[karume] token-only 系列（${TOKEN_ROOT.pathname}）か greedy golden（${GOLDEN_ROOT.pathname}）` +
-      `が無いため Gemma 4 E2B token-only 検収を SKIP する。生成: ${GENERATE_COMMAND}`,
+    `[karume] token-only 系列（${TOKEN_ROOT.pathname}）が無いため Gemma 4 E2B token-only 検収を ` +
+      `SKIP する。生成: ${GENERATE_COMMAND}`,
   );
 }
+
+/**
+ * 依存資産の完全性（Codex 波 H 指摘 H-02 — 欠落を SKIP に畳まない）。この門は 2 系列に
+ * 依存する: token-only 系列の model（自系列 — 無ければ「未生成」で SKIP が正しい）と、
+ * logits opt-in 系列の greedy golden（期待列の正本）。**自系列があるのに正本が欠けている**のは
+ * 未生成でなく欠損なので、SKIP でなく FAIL にする（opt-in 系列内部の欠けは
+ * `e2e_gemma4_greedy_test.ts` の完全性テストが受け持つ — ここは系列間の依存だけを見る）。
+ */
+Deno.test({
+  name: "Gemma 4 E2B token-only 資産: 期待列の正本（opt-in 系列 golden）が揃っている",
+  ignore: !MODEL_PRESENT,
+  fn: () => {
+    for (const name of EXPECTED_CASES) {
+      assert(
+        exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)),
+        `${GREEDY_PREFIX}${name}${SUFFIX} が ${GOLDEN_ROOT.pathname} に無い` +
+          `（token-only 系列はあるのに期待列の正本が欠けている）`,
+      );
+    }
+  },
+});
 
 const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   const bytes = await Deno.readFile(new URL(file, root));
@@ -103,15 +127,56 @@ const assertTokenOnlyForm = (parsed: KarumeModel): void => {
     "グラフ入力（token-only は last_row が増える）",
   );
   assertEquals(graph.outputs.length, 1, "graph.outputs の本数（token 1 本 — logits は出さない）");
-  const producer = new Map<string, string>();
+  const producer = new Map<string, (typeof graph.nodes)[number]>();
   for (const node of graph.nodes) {
-    for (const out of node.outs) producer.set(out, node.op);
+    for (const out of node.outs) producer.set(out, node);
   }
-  assertEquals(producer.get(graph.outputs[0]), "argmax", "出力 0 の供給元（argmax 直結）");
+  const argmax = producer.get(graph.outputs[0]);
+  assert(argmax !== undefined, "出力 0 がノード出力でない");
+  assertEquals(argmax.op, "argmax", "出力 0 の供給元（argmax 直結）");
   assertEquals(
     Object.keys(graph.states).length,
     30,
     "states スロットの本数（opt-in 形と同一の 30 本）",
+  );
+
+  // **1 行 lm_head の固定**（Codex 波 H 指摘 H-01）。行ごとの lm_head と行選択は可換なので
+  // 「全行 lm_head → 行選択 → argmax」でも token 列は一致する — ADR 0068 の実効（lm_head
+  // 1 行・[M,V] バッファ消滅）はこの構造検査でしか固定できない。argmax から softcap 鎖
+  // （ins[0] が本流）を遡った最初の linear が lm_head で、その入力は [1,1,H]（選択済みの
+  // 1 行）・祖先に last_row 入力を持つ。
+  let lmHead = argmax;
+  let found = false;
+  for (let step = 0; step < 8; step += 1) {
+    const source = producer.get(lmHead.ins[0]);
+    assert(source !== undefined, `token 出力の祖先（'${lmHead.ins[0]}'）が途切れた`);
+    lmHead = source;
+    if (lmHead.op === "linear") {
+      found = true;
+      break;
+    }
+  }
+  assert(found, "token 出力の 8 段以内に lm_head（linear）が無い");
+  const rowShape = graph.values[lmHead.ins[0]].shape;
+  assertEquals(rowShape.slice(0, 2), [1, 1], "lm_head 入力の行数（全行 lm_head への退行検出）");
+  const inputNames = new Set(graph.inputs.map((spec) => spec.name));
+  const frontier = [lmHead.ins[0]];
+  const seen = new Set<string>();
+  const reachable = new Set<string>();
+  while (frontier.length > 0) {
+    const name = frontier.pop()!;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (inputNames.has(name)) {
+      reachable.add(name);
+      continue;
+    }
+    const upstream = producer.get(name);
+    if (upstream !== undefined) frontier.push(...upstream.ins);
+  }
+  assert(
+    reachable.has(LAST_ROW),
+    `lm_head の入力が '${LAST_ROW}' に依存しない（到達した入力: ${[...reachable].sort()}）`,
   );
 };
 
@@ -129,6 +194,12 @@ Deno.test({
     const gpu = await acquireGpu();
     const session = await createSession(gpu, parsed);
     try {
+      // 混成格納の常駐（ADR 0069 の検収条件 — 適格落ちは例外を出さず CPU 展開されるだけ
+      // なので、hostExpandedBytes が唯一の直接観測）。
+      const storage = session.diagnostics().storage;
+      assert(storage !== undefined, "diagnostics.storage が無い");
+      assertEquals(storage.hostExpandedBytes, 0, "hostExpandedBytes（適格落ちの CPU 展開）");
+
       await t.step("② 3 ケース × 16 step が opt-in 系列の期待列と厳密一致", async () => {
         for (const caseName of EXPECTED_CASES) {
           const golden = parseSafetensors(

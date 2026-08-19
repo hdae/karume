@@ -163,7 +163,11 @@ GREEDY_STEPS = 16
 #: **恒真でない**（強く決まらない継続を持つケースはここで落ちる）。落ちたケースは K を下げずに
 #: {@link GREEDY_CASES} から外す — 余裕の無い列を golden にすると「GPU 側が正しくても赤」の
 #: 門になる。
-MARGIN_FLOOR = 1e-2
+#:
+#: MUST: 検収門の前提（`e2e_gemma4_greedy_test.ts` — `minMargin > 2 × atol`・atol = 1e-2）
+#: **より上**に置く。下だと「台本は採るが門の前提で落ちる」ケースが作れてしまい、門の
+#: 「ここが落ちるのは台本と資産が食い違ったときだけ」が成立しない（Codex 波 H 指摘 H-04）。
+MARGIN_FLOOR = 2.5e-2
 
 #: greedy golden を採るケース（{@link gemma4.export.GOLDEN_CASES} の部分集合）。
 #: io golden は 3 ケース全部で採る（こちらは 1 step ぶんなので余裕門が要らない）。
@@ -563,6 +567,50 @@ def assert_ir_form_decode(
             f"出力 {len(graph.outputs) - 1} の供給元が {found} — `{ARGMAX_OP}` でない"
             "（ADR 0068 決定 4 の decode 出口）"
         )
+    if token_only:
+        # **1 行 lm_head の固定**（Codex 波 H 指摘 H-01）。行ごとの lm_head と行選択は可換
+        # なので「全行 lm_head → softcap → 行選択 → argmax」でも token 列は一致する —
+        # ADR 0068 の実効（lm_head 1 行・[M,V] バッファ消滅）はこの構造検査でしか固定できない。
+        # argmax から softcap 鎖（div/tanh/mul — いずれも ins[0] が本流）を遡って最初の
+        # linear が lm_head。その入力が [1,1,H]（行 1 本）で、祖先に last_row 入力を持つこと。
+        node = token_source
+        for _ in range(8):
+            source = producer.get(node.ins[0])
+            if source is None:
+                raise AssertionError(
+                    f"token 出力の祖先（'{node.ins[0]}'）が途切れた — lm_head（linear）に届かない"
+                )
+            node = source
+            if node.op == "linear":
+                break
+        else:
+            raise AssertionError("token 出力の 8 段以内に lm_head（linear）が無い")
+        row_shape = declared_shape(graph, node.ins[0])
+        if list(row_shape[:2]) != [1, 1]:
+            raise AssertionError(
+                f"lm_head の入力が {row_shape} — [1,1,H]（選択済みの 1 行）でない"
+                "（全行 lm_head へ退行している）"
+            )
+        input_names = {spec.name for spec in graph.inputs}
+        frontier = [node.ins[0]]
+        seen: set[str] = set()
+        reachable: set[str] = set()
+        while frontier:
+            name = frontier.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            if name in input_names:
+                reachable.add(name)
+                continue
+            upstream = producer.get(name)
+            if upstream is not None:
+                frontier.extend(upstream.ins)
+        if TOKEN_ONLY_LAST_ROW not in reachable:
+            raise AssertionError(
+                f"lm_head の入力が `{TOKEN_ONLY_LAST_ROW}` に依存しない"
+                f"（到達した入力: {sorted(reachable)}）— 行選択が lm_head より前に居ない"
+            )
 
     attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
     if len(attentions) != layers:

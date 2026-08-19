@@ -172,8 +172,24 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
 
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
 const CASES = discoverCases(SERIES_ROOT);
+
+const fileExists = (url: URL): boolean => {
+  try {
+    return Deno.statSync(url).isFile;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+};
+
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
 const AVAILABLE = CASES.length > 0;
+/**
+ * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
+ * io が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、`ignore: !AVAILABLE` だと
+ * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+ */
+const ANY_PRESENT = AVAILABLE || fileExists(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!AVAILABLE) {
   console.warn(
@@ -282,8 +298,9 @@ const assertGemma4Form = (model: KarumeModel): number => {
 
 Deno.test({
   name: "Gemma 4 E2B 資産: 期待するケースとモデル本体が揃っている",
-  // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-  ignore: !AVAILABLE,
+  // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
+  //（モデルだけ残って golden が全滅した欠損も拾う — `ANY_PRESENT` の JSDoc）。
+  ignore: !ANY_PRESENT,
   fn: () => {
     assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
     const model = new URL(MODEL_FILE, SERIES_ROOT);
@@ -432,6 +449,16 @@ Deno.test({
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     const session = await createSession(gpu, parsed);
     try {
+      // 混成格納の常駐そのもの（ADR 0069 の検収条件 — キー検査と独立の実測線）。適格落ちは
+      // 例外を出さず CPU で f32 展開されるだけなので、hostExpandedBytes が唯一の直接観測。
+      const storage = session.diagnostics().storage;
+      assert(storage !== undefined, "diagnostics.storage が無い");
+      assertEquals(storage.hostExpandedBytes, 0, "hostExpandedBytes（適格落ちの CPU 展開）");
+      assert(
+        storage.residentCompressedBytes > 3_000_000_000,
+        `residentCompressedBytes ${storage.residentCompressedBytes} が混成常駐の規模でない`,
+      );
+
       // 最短のケース（T=6）1 本で足りる — 見るのは走ったパイプラインの種類と本数。
       const { inputs } = await loadCase("capital-en", parsed.graph.inputs);
       await session.run(inputs);

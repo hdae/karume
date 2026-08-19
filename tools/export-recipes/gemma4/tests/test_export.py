@@ -177,40 +177,66 @@ def _tiny_text_config():
 
 @pytest.fixture
 def tiny_model_and_tables():
-    """`(model, tables, probe_start)` — 検査席に分割元の同じ行を載せた組。"""
+    """`(model, tables, probe)` — 検査席に分割元の**散点** probe 行を載せた組。"""
     transformers = pytest.importorskip("transformers")
     torch.manual_seed(0)
     model = transformers.Gemma4ForCausalLM(_tiny_text_config()).to(torch.float32).eval()
     packed = _packed_table()
     tables = _split_tables(packed)
-    probe_start = VOCAB // 2
+    probe = gx.probe_rows(VOCAB)
     with torch.no_grad():
         model.model.embed_tokens_per_layer.weight.copy_(
-            packed[probe_start : probe_start + gx.PLE_PROBE_ROWS]
+            packed[torch.tensor(probe, dtype=torch.int64)]
         )
-    return model, tables, probe_start
+    return model, tables, probe
+
+
+class TestProbeRows:
+    def test_the_probe_scatters_across_both_ends_and_the_middle(self):
+        """散点であること（Codex 波 H 指摘 H-05 — 連続 8 行だと 1 ブロックしか踏まない）。"""
+        probe = gx.probe_rows(262144)
+
+        assert len(probe) == gx.PLE_PROBE_ROWS
+        assert len(set(probe)) == gx.PLE_PROBE_ROWS
+        assert 0 in probe and 262143 in probe
+        # 最初のブロック境界の両側と中央対。
+        assert gx.PLE_ROW_BLOCK - 1 in probe and gx.PLE_ROW_BLOCK in probe
+        assert 262144 // 2 in probe
+
+    def test_a_tiny_table_still_yields_the_full_count(self):
+        """ブロック境界の無い tiny 表でも本数は固定（検査席の行数が config に焼かれる）。"""
+        probe = gx.probe_rows(VOCAB)
+
+        assert len(probe) == gx.PLE_PROBE_ROWS
+        assert len(set(probe)) == gx.PLE_PROBE_ROWS
+        assert all(0 <= row < VOCAB for row in probe)
+        assert 0 in probe and VOCAB - 1 in probe
+
+    def test_a_table_shorter_than_the_probe_fails_loudly(self):
+        with pytest.raises(ValueError, match="足りない"):
+            gx.probe_rows(gx.PLE_PROBE_ROWS - 1)
 
 
 class TestAssertPerLayerSplit:
     def test_a_faithful_split_passes(self, tiny_model_and_tables):
-        model, tables, probe_start = tiny_model_and_tables
+        model, tables, probe = tiny_model_and_tables
 
-        gx.assert_per_layer_split(model, tables, probe_start)
+        gx.assert_per_layer_split(model, tables, probe)
 
     def test_a_shuffled_split_fails_loudly(self, tiny_model_and_tables):
         """MUST: 列の割り付け違いはここで落とす（形も型も合うので後段では見えない）。"""
-        model, tables, probe_start = tiny_model_and_tables
+        model, tables, probe = tiny_model_and_tables
         shuffled = nn.ModuleList([tables[2], tables[0], tables[1]])
 
         with pytest.raises(AssertionError, match="ビット一致しない"):
-            gx.assert_per_layer_split(model, shuffled, probe_start)
+            gx.assert_per_layer_split(model, shuffled, probe)
 
     def test_a_split_of_the_wrong_width_fails_loudly(self, tiny_model_and_tables):
-        model, tables, probe_start = tiny_model_and_tables
+        model, tables, probe = tiny_model_and_tables
         short = nn.ModuleList([tables[0], tables[1]])
 
         with pytest.raises(AssertionError, match="形"):
-            gx.assert_per_layer_split(model, short, probe_start)
+            gx.assert_per_layer_split(model, short, probe)
 
 
 # ---- 量子化の対象割り付け --------------------------------------------------
