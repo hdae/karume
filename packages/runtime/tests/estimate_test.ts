@@ -380,6 +380,43 @@ Deno.test("initializer とグラフ入力は中間ピークに数えない（重
   assertEquals(estimateSessionMemory(plainModel(), { bindings: { T: 7 } }).transientBytes, 108);
 });
 
+Deno.test("slot の再利用はサイズクラスの厳密一致だけ（断片化ぶんを過小に数えない）", () => {
+  // 8 → 12 → 4 バイトの 3 段。生存ピークは 20 だが、実行側の exact-size 再利用では
+  // 解放済みの 8 が 12 にも 4 にも使えず slot が 3 本累積する（8 + 12 + 4 = 24）。
+  const graph: GraphJson = {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["matmul"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [1, 2] }],
+    outputs: ["y"],
+    initializers: {
+      w1: { tensor: "m.w1", storage: { dtype: "f32" } },
+      w2: { tensor: "m.w2", storage: { dtype: "f32" } },
+      w3: { tensor: "m.w3", storage: { dtype: "f32" } },
+    },
+    values: {
+      w1: { dtype: "f32", shape: [2, 2] },
+      w2: { dtype: "f32", shape: [2, 3] },
+      w3: { dtype: "f32", shape: [3, 1] },
+      t1: { dtype: "f32", shape: [1, 2] },
+      t2: { dtype: "f32", shape: [1, 3] },
+      y: { dtype: "f32", shape: [1, 1] },
+    },
+    nodes: [
+      { op: "matmul", ins: ["x", "w1"], outs: ["t1"], attrs: {} },
+      { op: "matmul", ins: ["t1", "w2"], outs: ["t2"], attrs: {} },
+      { op: "matmul", ins: ["t2", "w3"], outs: ["y"], attrs: {} },
+    ],
+  };
+  const model = openGraph(graph, [
+    { name: "m.w1", dtype: "F32", shape: [2, 2], data: f32Bytes([1, 0, 0, 1]) },
+    { name: "m.w2", dtype: "F32", shape: [2, 3], data: f32Bytes(new Array(6).fill(1)) },
+    { name: "m.w3", dtype: "F32", shape: [3, 1], data: f32Bytes([1, 1, 1]) },
+  ]);
+  assertEquals(estimateSessionMemory(model).transientBytes, 24);
+});
+
 // ---------------------------------------------------------------------------
 // fail loudly
 // ---------------------------------------------------------------------------
@@ -417,6 +454,45 @@ Deno.test("states 宣言の無いグラフに generation を渡すと fail loudl
       }),
     ExecutionError,
     "states 宣言を持たない",
+  );
+});
+
+Deno.test("実構築が拒否する chunkLength に見積りを返さない", () => {
+  assertThrows(
+    () =>
+      estimateSessionMemory(stateModel(), {
+        bindings: { T: 2 },
+        generation: { chunkLength: 0, bindings: { C: 8 } },
+      }),
+    ExecutionError,
+    "chunkLength 0 が",
+  );
+});
+
+Deno.test("states と入力の両方に現れる記号の食い違いは fail loudly（run と同じ門）", () => {
+  // v の容量を T にして共有記号を作る（k は C のまま — states 専用記号の分担は不変）
+  const graph = stateGraph();
+  graph.states = {
+    ...graph.states,
+    v: { dtype: "f32", shape: [1, 2, "T", 4] },
+  };
+  const model = openGraph(graph, [
+    { name: "m.w", dtype: "F32", shape: [4, 3], data: f32Bytes(new Array(12).fill(0)) },
+    {
+      name: "m.chunk",
+      dtype: "F32",
+      shape: [1, 2, 4, 4],
+      data: f32Bytes(new Array(32).fill(0)),
+    },
+  ]);
+  assertThrows(
+    () =>
+      estimateSessionMemory(model, {
+        bindings: { T: 2 },
+        generation: { chunkLength: 4, bindings: { C: 8, T: 3 } },
+      }),
+    ExecutionError,
+    "記号 'T' が",
   );
 });
 

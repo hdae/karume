@@ -195,6 +195,25 @@ const slidingSlotNames = (graph: IrGraph): ReadonlySet<string> => {
  * MUST: 記号容量は**ここで与えられた値だけ**で決まる。states は束縛源にならず（ADR 0066
  * 決定 2）、context は入力を 1 本も持たないので、入力 shape からの推定は原理的に不可能。
  */
+/**
+ * `chunkLength` の値域検査（GPU 非依存の純関数）。
+ *
+ * MUST: 上限は u32（`queryLength ≤ chunkLength` の門を通じて論理長の上限もここで決まる —
+ * {@link MAX_LOGICAL_LENGTH}）。estimator（estimate.ts）も同じ門を通す — 実構築が拒否する
+ * 指定に見積りだけが正常値を返すと、作れない構成へ admission の数字が与えられる。
+ */
+export const assertChunkLength = (chunkLength: number): void => {
+  if (
+    !Number.isSafeInteger(chunkLength) || chunkLength < 1 ||
+    chunkLength > MAX_LOGICAL_LENGTH
+  ) {
+    throw new ExecutionError(
+      `chunkLength ${chunkLength} が 1..${MAX_LOGICAL_LENGTH} の整数でない` +
+        "（固定長 prefill chunk の行数・搬送先は u32 — ADR 0066 決定 4 / 追記 4）",
+    );
+  }
+};
+
 export const resolveBindings = (
   graph: IrGraph,
   bindings: SymbolBindings | undefined,
@@ -365,17 +384,7 @@ export class GenerationContext {
           "state の無いモデルでは作れない — 1-shot 実行は Session.run / enqueue をそのまま使う）",
       );
     }
-    // MUST: 上限は u32（`queryLength ≤ chunkLength` の門を通じて論理長の上限もここで決まる —
-    // {@link MAX_LOGICAL_LENGTH}）。
-    if (
-      !Number.isSafeInteger(spec.chunkLength) || spec.chunkLength < 1 ||
-      spec.chunkLength > MAX_LOGICAL_LENGTH
-    ) {
-      throw new ExecutionError(
-        `chunkLength ${spec.chunkLength} が 1..${MAX_LOGICAL_LENGTH} の整数でない` +
-          "（固定長 prefill chunk の行数・搬送先は u32 — ADR 0066 決定 4 / 追記 4）",
-      );
-    }
+    assertChunkLength(spec.chunkLength);
     const bindings = resolveBindings(graph, spec.bindings);
     const limit = gpu.limits.maxStorageBufferBindingSize;
     const planned = names.map((name) => {

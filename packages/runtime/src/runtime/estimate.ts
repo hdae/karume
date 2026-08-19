@@ -31,7 +31,9 @@ import type { IrGraph } from "../format/ir.ts";
 import type { SafetensorsFile } from "../format/safetensors.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import { numel } from "../ops.ts";
+import { assertGenerationBindings } from "./executor.ts";
 import {
+  assertChunkLength,
   LENGTHS_BYTES,
   resolveBindings,
   resolveSlotShape,
@@ -78,11 +80,12 @@ export type MemoryEstimate = {
   /** グラフ入力バッファ + 出力 readback staging（厳密）。 */
   readonly ioBytes: number;
   /**
-   * 中間（transient）ピークの見積り = prepared backing の必要側と同義（**近似**）。
+   * 中間（transient）slot 表の必要バイト = prepared backing の必要側と同義（**近似**）。
    *
-   * 融合前のノード列を宣言順に歩く生存区間シミュレーションで、解放の規則は実行相と同じ
-   * （消費回数は `countUses`・グラフ出力は pinned で解放しない）。融合が消す中間・ノード内
-   * 一時は勘定に入らない（{@link MemoryEstimate.unaccounted}）。
+   * 融合前のノード列を宣言順に歩き、実行相と同じ確保規則（exact-size LIFO 再利用・
+   * 消費回数は `countUses`・グラフ出力は pinned で解放しない）で slot 表を再生した総バイト。
+   * 融合が消す中間・行ブロック分割やノード内の一時は勘定に入らない
+   * （{@link MemoryEstimate.unaccounted}）。
    */
   readonly transientBytes: number;
   /** 上記の合計。 */
@@ -164,8 +167,9 @@ const stateEstimate = (
 ): {
   readonly bytes: number;
   readonly shapes: ReadonlyMap<string, readonly number[]> | undefined;
+  readonly bindings: SymbolBindings | undefined;
 } => {
-  if (spec === undefined) return { bytes: 0, shapes: undefined };
+  if (spec === undefined) return { bytes: 0, shapes: undefined, bindings: undefined };
   const names = Object.keys(graph.states);
   // MUST: states 宣言の無いグラフで generation を受けない（`GenerationContext.create` が
   // 拒否する形。通すと「作れない context のバイト数」を数えた見積りが返る）。
@@ -174,6 +178,9 @@ const stateEstimate = (
       "このグラフは states 宣言を持たない（GenerationContext は作れないので options.generation を渡さないこと）",
     );
   }
+  // MUST: 実構築（GenerationContext.create）が拒否する spec に見積りを返さない — 値域は
+  // 同じ門（assertChunkLength）を通す。
+  assertChunkLength(spec.chunkLength);
   const bindings = resolveBindings(graph, spec.bindings);
   const shapes = new Map<string, readonly number[]>();
   let bytes = 0;
@@ -183,7 +190,7 @@ const stateEstimate = (
     bytes += numel(shape) * STATE_ELEMENT_BYTES;
   }
   // 論理長 uniform は context 1 本につき 1 枚（スロット数に依らない）。
-  return { bytes: bytes + LENGTHS_BYTES, shapes };
+  return { bytes: bytes + LENGTHS_BYTES, shapes, bindings };
 };
 
 /**
@@ -246,33 +253,43 @@ type LiveValue = {
 };
 
 /**
- * 中間ピークの見積り（近似）。融合前のノード列を宣言順に歩き、実行相
- * （`executeStepRecipe`）と同じ順序で確保と解放を模す:
- * 出力の確保 → （ピーク観測）→ 入力の解放（延べ）→ 定義ぶんの解放。
+ * 中間（transient）slot 表の必要バイト（近似）。融合前のノード列を宣言順に歩き、実行相と
+ * **同じ確保規則**を再生する: 解放済み slot の再利用は**サイズクラスの厳密一致だけ**
+ * （RunArena / `derivePlanSlots` の LIFO プール — 近いサイズへの縮めはしない）で、一致が
+ * 無ければ新しい slot が増える。返すのは生成された slot の総バイト = prepared backing が
+ * 常駐させる必要側。
  *
+ * MUST: 「同時生存バイトの最大」で代用しない — 実行側は exact-size 再利用なので、サイズが
+ * 揃わない列では解放済みぶんが再利用されずに slot が累積し、生存ピークは系統的に過小になる
+ * （8→12→4 バイトの 3 段で 20 vs 24 — 断片化は unaccounted ではなく規則そのもの）。
  * MUST: 数えるのは**ノード出力だけ**。initializer / グラフ入力は重み・io の側で、state
  * スロットは context の側で数えており、ここで重ねると同じバイトが 2 回総計に乗る。
  */
-const transientPeak = (graph: IrGraph, nodes: readonly NodePlan[]): number => {
+const transientSlotBytes = (graph: IrGraph, nodes: readonly NodePlan[]): number => {
   const uses = countUses(graph);
   const pinned = new Set(graph.outputs);
   const live = new Map<string, LiveValue>();
-  let bytes = 0;
-  let peak = 0;
+  /** サイズクラス → 解放済み slot の本数（LIFO の中身は数だけで足りる — 取り出しは同サイズ）。 */
+  const pool = new Map<number, number>();
+  let total = 0;
+  const alloc = (size: number): void => {
+    const free = pool.get(size) ?? 0;
+    if (free > 0) pool.set(size, free - 1);
+    else total += size;
+  };
   const drop = (name: string): void => {
     const value = live.get(name);
     if (value === undefined || value.remaining > 0 || pinned.has(name)) return;
-    bytes -= value.bytes;
+    pool.set(value.bytes, (pool.get(value.bytes) ?? 0) + 1);
     live.delete(name);
   };
   for (const node of nodes) {
     for (const out of node.outputs) {
       // ステップ出力の確保サイズは常に numel×4（recipe-builder の `#buildStep`）。
       const size = toSizeClass(numel(out.shape) * 4);
-      bytes += size;
+      alloc(size);
       live.set(out.name, { bytes: size, remaining: uses.get(out.name) ?? 0 });
     }
-    peak = Math.max(peak, bytes);
     for (const name of node.node.ins) {
       const value = live.get(name);
       // グラフ入力・initializer はプール対象外（ここには載っていない）。
@@ -283,7 +300,7 @@ const transientPeak = (graph: IrGraph, nodes: readonly NodePlan[]): number => {
     // 消費者ゼロの中間出力が解放されるのはこの 1 本だけ（実行相の「定義ぶんの解放」と同位置）。
     for (const out of node.outputs) drop(out.name);
   }
-  return peak;
+  return total;
 };
 
 /**
@@ -305,6 +322,9 @@ export const estimateSessionMemory = (
   const graph = model.graph;
   const bindings = planBindings(graph, options.bindings);
   const state = stateEstimate(graph, options.generation);
+  // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —
+  // ADR 0066 追記 7 — に見積りだけが正常値を返さない）。
+  if (state.bindings !== undefined) assertGenerationBindings(state.bindings, bindings);
   const weights = weightEstimate(model);
   const plan = planGraph(graph, bindings, state.shapes);
 
@@ -315,7 +335,7 @@ export const estimateSessionMemory = (
     ioBytes += toSizeClass(numel(shapeOf(plan.shapes, spec.name)) * 4);
   }
   for (const name of graph.outputs) ioBytes += toSizeClass(numel(shapeOf(plan.shapes, name)) * 4);
-  const transientBytes = transientPeak(graph, plan.nodes);
+  const transientBytes = transientSlotBytes(graph, plan.nodes);
 
   return {
     compressedWeightBytes: weights.compressed,
