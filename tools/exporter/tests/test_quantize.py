@@ -19,7 +19,9 @@ from karume.quantize import (
     INT4_MAX,
     INT8_MAX,
     QUANT_CHANNEL_AXES,
+    QUANT_MODULE_TYPES,
     QuantizeError,
+    channel_rows,
     channel_scale,
     dequantize_int4,
     fake_quant_int4,
@@ -455,6 +457,179 @@ class TestInt4GroupQuantization:
         assert report.modules == 2
         assert report.elements == 3 * 32 + 2 * 64
         assert report.group_size == 32
+
+
+#: 「in 軸」の group を踏むための固定重み — 3 要素の group を 4 つ（= 2 チャネル × 2 group）。
+#: scale が 1 / 2 / tiny の 3 通りに割れる並びで、丸めが起きる要素（3.25 → 3・1.75 → 2・
+#: 6.5 → 3 段）を含み、かつ**丸めに曖昧さが無い**（.5 の同点が無いので偶数丸めに依存しない）。
+GROUP_VALUES: tuple[tuple[float, ...], ...] = (
+    (7.0, 3.25, -2.0),
+    (-7.0, 1.75, 0.0),
+    (14.0, 6.5, -4.0),
+    (0.0, 0.0, 0.0),
+)
+
+#: {@link GROUP_VALUES} を `q·scale` へ落とした期待値（scale = amax/7 = 1 / 1 / 2 / tiny）。
+GROUP_ROUNDED: tuple[tuple[float, ...], ...] = (
+    (7.0, 3.0, -2.0),
+    (-7.0, 2.0, 0.0),
+    (14.0, 6.0, -4.0),
+    (0.0, 0.0, 0.0),
+)
+
+#: 期待する group scale（チャネル × group）。全ゼロ group は下限 clamp に落ちる。
+GROUP_SCALES = ((1.0, 1.0), (2.0, torch.finfo(torch.float32).tiny))
+
+
+def group_tensor(values: tuple[tuple[float, ...], ...]) -> torch.Tensor:
+    """`[チャネル, in]` へ畳んだ期待形（チャネル c は group 2c・2c+1 を持つ）。"""
+    rows = [values[2 * channel] + values[2 * channel + 1] for channel in range(2)]
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+def linear_with_groups() -> nn.Linear:
+    module = nn.Linear(6, 2)
+    with torch.no_grad():
+        module.weight.copy_(group_tensor(GROUP_VALUES))
+    return module
+
+
+def embedding_with_groups() -> nn.Embedding:
+    module = nn.Embedding(2, 6)
+    with torch.no_grad():
+        module.weight.copy_(group_tensor(GROUP_VALUES))
+    return module
+
+
+def conv1d_with_groups() -> nn.Conv1d:
+    """`[Cout, Cin, K]` — 出力チャネルごとに `Cin·K` を平坦化した先が group に割れる。"""
+    module = nn.Conv1d(2, 2, kernel_size=3)
+    with torch.no_grad():
+        module.weight.copy_(group_tensor(GROUP_VALUES).reshape(2, 2, 3))
+    return module
+
+
+def conv2d_with_groups() -> nn.Conv2d:
+    """`[Cout, Cin, Kh, Kw]` — 平坦化は `Cin·Kh·Kw` の行優先（group は Kh 境界で割れる）。"""
+    module = nn.Conv2d(1, 2, kernel_size=(2, 3))
+    with torch.no_grad():
+        module.weight.copy_(group_tensor(GROUP_VALUES).reshape(2, 1, 2, 3))
+    return module
+
+
+def conv_transpose1d_with_groups() -> nn.ConvTranspose1d:
+    """`[Cin, Cout, K]` の転置レイアウト — **軸 1**（Cout）ごとに `Cin·K` を平坦化する。
+
+    重みの軸 0 と 1 を入れ替えて置くので、軸 0 で読んだ実装は別の group を切ってしまう
+    （= 軸の取り違えがこのフィクスチャで露見する）。
+    """
+    module = nn.ConvTranspose1d(2, 2, kernel_size=3)
+    with torch.no_grad():
+        module.weight.copy_(group_tensor(GROUP_VALUES).reshape(2, 2, 3).transpose(0, 1))
+    return module
+
+
+class WeightedGroups(nn.Module):
+    """5 op 種を 1 つに束ねた模型（**平坦化後の in 軸が全部 6**なので同じ group_size で通る）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dense = linear_with_groups()
+        self.conv = conv1d_with_groups()
+        self.image = conv2d_with_groups()
+        self.up = conv_transpose1d_with_groups()
+        self.table = embedding_with_groups()
+
+
+class TestInt4InAxisPerOpType:
+    """group の軸 = 各 op の「in 軸」一般化（`op_types` で広げたときの軸の正しさ）。"""
+
+    @pytest.mark.parametrize(
+        ("build", "op_type"),
+        [
+            (linear_with_groups, nn.Linear),
+            (conv1d_with_groups, nn.Conv1d),
+            (conv2d_with_groups, nn.Conv2d),
+            (conv_transpose1d_with_groups, nn.ConvTranspose1d),
+            (embedding_with_groups, nn.Embedding),
+        ],
+    )
+    def test_each_op_type_groups_along_its_own_in_axis(self, build, op_type) -> None:
+        """5 op 種とも「出力チャネルごとの受容野」を group に割る（期待値は直書き）。
+
+        期待値は実装と別経路（{@link GROUP_ROUNDED} の直書き）で持つ — 実装の平坦化を
+        期待値側でも呼ぶと、軸を取り違えたまま両者が一致して緑になる。
+        """
+        module = build()
+
+        report = fake_quant_int4(module, group_size=3, op_types=(op_type,))
+
+        assert torch.equal(report.scales["weight"], torch.tensor(GROUP_SCALES))
+        assert torch.equal(
+            channel_rows(module.weight, QUANT_CHANNEL_AXES[op_type]),
+            group_tensor(GROUP_ROUNDED),
+        )
+
+    def test_the_transposed_layout_is_written_back_in_place(self) -> None:
+        """`ConvTranspose1d` の平坦形は重みの view にならない（`movedim` → `reshape` がコピー）。
+
+        書き戻しを平坦形へ書いて済ませると、丸めは走ったのに**重みは 1 要素も変わらない**
+        （報告だけが正しく見える沈黙）。ここは元の `[Cin, Cout, K]` 上で直接確かめる。
+        """
+        module = conv_transpose1d_with_groups()
+
+        fake_quant_int4(module, group_size=3, op_types=(nn.ConvTranspose1d,))
+
+        expected = group_tensor(GROUP_ROUNDED).reshape(2, 2, 3).transpose(0, 1)
+        assert torch.equal(module.weight, expected)
+
+    def test_the_default_target_is_still_linear_only(self) -> None:
+        """既定は `nn.Linear` のまま（`op_types` は明示 opt-in — 既存呼び出しの挙動は不変）。"""
+        model = Weighted()
+        untouched = {
+            name: parameter.detach().clone()
+            for name, parameter in model.named_parameters()
+            if name != "dense.weight"
+        }
+
+        report = fake_quant_int4(model, group_size=5)
+
+        assert set(report.scales) == {"dense.weight"}
+        for name, before in untouched.items():
+            assert torch.equal(model.get_parameter(name), before), name
+
+    def test_widening_to_all_five_types_quantizes_all_of_them(self) -> None:
+        """`QUANT_MODULE_TYPES`（i8 と同じ 5 種）まで広げると 5 本とも同じ group で丸まる。"""
+        model = WeightedGroups()
+
+        report = fake_quant_int4(model, group_size=3, op_types=QUANT_MODULE_TYPES)
+
+        assert set(report.scales) == {
+            "dense.weight",
+            "conv.weight",
+            "image.weight",
+            "up.weight",
+            "table.weight",
+        }
+        assert report.elements == 12 * 5
+        for name, module in model.named_children():
+            axis = QUANT_CHANNEL_AXES[type(module)]
+            assert torch.equal(report.scales[f"{name}.weight"], torch.tensor(GROUP_SCALES)), name
+            assert torch.equal(channel_rows(module.weight, axis), group_tensor(GROUP_ROUNDED)), name
+
+    def test_a_group_size_that_does_not_divide_a_flattened_receptive_field_fails_loudly(
+        self,
+    ) -> None:
+        """整除は**平坦化後の in 軸**で見る（conv の `Cin·K` が割り切れなければ落とす）。"""
+        model = nn.Conv1d(3, 5, kernel_size=3)  # Cin·K = 9
+
+        with pytest.raises(QuantizeError, match="割り切れない"):
+            fake_quant_int4(model, group_size=32, op_types=(nn.Conv1d,))
+
+    def test_a_type_without_a_channel_axis_is_not_a_target(self) -> None:
+        """軸を引けない型を渡しても対象にはならない（= 対象 0 本として fail loudly）。"""
+        with pytest.raises(QuantizeError, match="1 本も無い"):
+            fake_quant_int4(Weighted(), group_size=32, op_types=(nn.LayerNorm,))
 
 
 class TestInt4GroupSize:

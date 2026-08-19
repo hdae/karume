@@ -44,6 +44,9 @@ CORE_MODULES: tuple[str, ...] = (
     "aten_handlers",
     "normalize",
     "quantize",
+    # 測定専用の丸め方式（格納経路を持たない — quant_methods モジュール docstring）。
+    # 対象選択は quantize と共有で、family 知識は持たない。
+    "quant_methods",
     "act_quant",
     "emit",
     "verify",

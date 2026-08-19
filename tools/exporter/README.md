@@ -341,9 +341,12 @@ exported at all. An **explicit** i4 on a non-linear weight fails loudly instead 
 along the K (input) axis, per group of `group_size` elements —
 `scale = clamp(amax_group / 7, f32 tiny)` and `q = clamp(round(w/scale), ±7)`. **−8 is not used**, so
 the largest-magnitude element of a group lands on `q = ±7` and is restored exactly, which makes the
-fake-quant **idempotent**. The target is `nn.Linear.weight` only (bias and norm weights are never
-touched). `group_size` defaults to **32** and must be a **power of two ≥ 16**; the quantized axis has
-to be divisible by it. 0 targets fails loudly with `QuantizeError`.
+fake-quant **idempotent**. The target is `nn.Linear.weight` by default (bias and norm weights are
+never touched); `op_types` opts in to the wider set the i8 path uses (`QUANT_MODULE_TYPES` — conv
+family and embedding), where a group runs along the flattened receptive field of one output channel.
+That widening is for **measuring** quantization error: only the linear entries of the returned ledger
+can be handed to `write_model`. `group_size` defaults to **32** and must be a **power of two ≥ 16**;
+the quantized axis has to be divisible by it. 0 targets fails loudly with `QuantizeError`.
 
 **Packing order** (`emit.pack_int4` is authoritative, and `tests/test_emit.py` pins it by byte
 value): two elements that are **adjacent in flat index** share one byte, element `2i` in the **low**
