@@ -48,6 +48,12 @@ f32 重みを潰すので順序が逆にできない）。7.29GiB のロード�
 
     uv run python -m anima.measure_quant --out /path/to/q0
 
+`--w4-screen` は**独立のモード**（10 構成は 1 本も走らない — {@link run_w4_screen}）。
+w4 の丸め方式（rtn-i4-g32 / nf4 / mxfp4 / kmeans:shared）を横並びにする側で、上の 10 構成の
+**積み上げ意味論とは別経路**: あちらは同じインスタンスへ in-place で積み上げるが、方式比較は
+構成ごとに pristine（素の f32 重み）へ戻してから当てる（積み重ね禁止 MUST）。記号・基準・
+出力ファイル名も共有しない。
+
 NOTE: 非 DiT（text_encoder / text_conditioner / VAE）は全構成とも **f32 のまま**にする。
 比較軸を DiT の量子化 1 本に絞るため（資産系列 `outputs/series/anima-i8/` は他 3 つが f16 だが、
 その差は全構成に同じ形で乗るので相対比較では相殺される）。attention の差し替えも
@@ -65,8 +71,10 @@ import gc
 import json
 import math
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Protocol
 
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -79,11 +87,26 @@ from karume.act_quant import (
     quantize_rows,
     quantize_rows_parts,
 )
-from karume.quantize import INT8_MAX, fake_quant_int8
+from karume.quant_methods import (
+    DEFAULT_CODEBOOK_LEVELS,
+    fake_quant_kmeans,
+    fake_quant_mxfp4,
+    fake_quant_nf4,
+)
+from karume.quantize import (
+    DEFAULT_GROUP_SIZE,
+    INT8_MAX,
+    QUANT_MODULE_TYPES,
+    channel_rows,
+    fake_quant_int4,
+    fake_quant_int8,
+    iter_quant_targets,
+)
 
 from .measure_report import build_report, build_summary, write_layer_csv
 from .pipeline_ref import (
     LATENT_CHANNELS,
+    PROMPT,
     SEED,
     SHIFT,
     SPATIAL_COMPRESSION,
@@ -766,14 +789,20 @@ def run_dit(args: argparse.Namespace) -> DitRun:
     return DitRun(out, linear_stats, attn_stats, diagnostics, attention_nodes)
 
 
-def decode_all(repo: str, latents: dict[str, torch.Tensor], last: str) -> dict[str, torch.Tensor]:
-    """全構成の最終 latent を**同じ f32 VAE**で decode する（VAE のロードは 1 回）。"""
+def decode_all(
+    repo: str, latents: dict[str, torch.Tensor], last: str, tags: Sequence[str]
+) -> dict[str, torch.Tensor]:
+    """全構成の最終 latent を**同じ f32 VAE**で decode する（VAE のロードは 1 回）。
+
+    構成名を引数で受けるのは、`--w4-screen` が別の表を持つため（10 構成のモジュール
+    グローバルをこちらから読むと、モードごとに別の集合を渡せない）。
+    """
     from diffusers import AutoencoderKLQwenImage
 
     vae = AutoencoderKLQwenImage.from_pretrained(repo, subfolder="vae")
     vae.to(torch.float32).eval()
     images: dict[str, torch.Tensor] = {}
-    for tag in CONFIG_NAMES:
+    for tag in tags:
         started = time.perf_counter()
         z = denormalize_latents(vae, latents[f"{tag}/{last}"])
         with torch.no_grad():
@@ -798,6 +827,564 @@ def save_images(images: dict[str, torch.Tensor], out: Path) -> str:
     for tag, array in arrays.items():
         Image.fromarray(array.numpy()).save(out / f"image_{tag}.png")
     return "image_*.png"
+
+
+# ---- w4 方式スクリーニング（`--w4-screen` — 独立モード）----------------------
+#
+# 上の 10 構成とは**別経路**（MUST）。あちらは (a)→(b)→… を同じインスタンスへ in-place で
+# 積み上げる意味論（重みの i8 の上に活性 i8 を足す）だが、こちらは**方式間の比較**なので、
+# 構成ごとに pristine（素の f32 重み）へ戻してから当てる。戻さずに当てると測っているのが
+# 「NF4 の上の MXFP4」になり、方式比較そのものが成立しない（EG / MiniCPM5 の台本と同じ規律）。
+# 記号・基準・出力ファイル名も上の表とは共有しない。
+#
+# 持ち込む 4 方式は、安いファミリ 2 本のスクリーニングで残った勝者（ADR 0069 追記 5）:
+#
+#     rtn-i4-g32     配布形 `i4` の格納そのもの（比較の基準）
+#     nf4            正規分布の分位点格子（fp4 は同コストで nf4 に支配されたので落選）
+#     mxfp4          FP4 表 × group の 2 のべき scale（4.25 bpw の側）
+#     kmeans:shared  層をまたいで 1 枚の 16 centroid 表（per_tensor は崩壊・per_channel は被支配）
+#
+# 丸めの実装は全て core（`karume.quantize` / `karume.quant_methods`）の共有で、対象選択も
+# `iter_quant_targets` の共有 — 写した別実装にすると「測った対象・式」と「出荷する対象・式」が
+# 黙って割れる。スコープは 10 構成と同じ **DiT のみ**（text_encoder / text_conditioner / VAE は
+# 全構成 f32 のまま）。
+
+#: 方式比較の group 長 = **32 固定**（ADR 0069 追記 1 で確定した既定 = core の既定）。
+#: g 軸を同時に振らないのは、方式の差と g の差が混ざると「どちらが効いたか」が言えなくなるため
+#: （ADR 0069 追記 5 ③ / 2026-08-19 ユーザー裁定）。
+W4_GROUP_SIZE = DEFAULT_GROUP_SIZE
+
+#: 丸めの対象型。**DiT に実在する量子化可能型は `nn.Linear` だけ**（patchify も
+#: `CosmosPatchEmbed.proj` = `nn.Linear`・埋め込み表も conv も無い）なので、i4 の実行経路
+#: （ADR 0069 決定 5 の linear 限定）と対象が一致する = 全構成が**配布対応形**になる。
+#: 非 linear が現れたら {@link scan_w4_targets} が fail loudly で落とす。
+W4_OP_TYPES: tuple[type[nn.Module], ...] = (nn.Linear,)
+
+#: 基準構成の綴り（丸めなし — 全ての relRMS / PSNR の分母）。
+W4_BASE_CONFIG = "f32"
+
+#: `--w4-screen` の生成物（10 構成の `report.md` / `attn.json` とは別名 — 同じ `--out` へ
+#: 出しても取り違えないように）。
+W4_REPORT_FILE = "w4_report.md"
+W4_JSON_FILE = "w4_screen.json"
+W4_LATENTS_FILE = "w4_latents.safetensors"
+
+#: `kmeans:shared` の**表の fit** に使う標本数の予算。shared は全対象の正規化値を 1 本へ
+#: 連結してから Lloyd 法を回すので、f32 の連結 + f64 の作業領域 + int64 の割り当て添字で
+#: 標本 1 要素あたり ~28B 要る。DiT は 19.6 億要素あり、全量 fit は連結だけで 7.3GiB・
+#: 作業領域込みで 50GiB 級 = 実メモリ（31GB）に載らない。2,000 万要素なら ~0.6GiB に収まり、
+#: 16 centroid の 1 次元 k-means には桁で足りる（適用は常に全量 — core の `fit_stride`）。
+W4_KMEANS_FIT_BUDGET = 20_000_000
+
+# サイズ試算の bit 幅（格納規則の逐語）。出典は `docs/ir-v1.md` の `i4` 格納形（scale は
+# **F32**・group ごと 1 個）と OCP Microscaling Formats v1.0（MX の共有 scale は E8M0 =
+# 指数 1 バイト）。k-means は格納形を持たない測定専用方式なので、**表のコストを込みで**数える。
+
+#: 4bit 格子のペイロード（全方式共通 — 比較しているのは「格子の張り方」であって bit 数ではない）。
+W4_PAYLOAD_BITS = 4.0
+#: group scale の bit 幅（`i4` の格納は F32 の group scale が MUST — `docs/ir-v1.md`）。
+W4_F32_SCALE_BITS = 32.0
+#: MXFP4 の共有 scale は E8M0（指数 1 バイト）。
+W4_MX_SCALE_BITS = 8.0
+#: codebook 1 エントリの bit 幅（centroid を F32 で持つ）。
+W4_CODEBOOK_ENTRY_BITS = 32.0
+
+W4_F32_BITS = 32.0
+BITS_PER_BYTE = 8
+MIB = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class W4Targets:
+    """w4 の対象集合の素性（サイズ試算の入力と、除外の台帳）。
+
+    `groups` は g32 の group 数の総和で、{@link karume.quantize.channel_rows} の平坦形
+    （= 丸めが group を割る軸）から数える — 別の軸で数えると試算だけが別の形の数になる。
+    """
+
+    modules: int
+    elements: int
+    groups: int
+    #: 量子化軸が `W4_GROUP_SIZE` で割り切れず**対象から外した**重み（FQN → 量子化軸長）。
+    excluded: Mapping[str, int]
+
+    def include(self, name: str) -> bool:
+        """`fake_quant_*` の `include` 述語（**モジュール FQN** で呼ばれる）。
+
+        FQN の綴りは {@link karume.quantize.iter_quant_targets} と同じ形で作る（片方だけ
+        別の綴りにすると、除外したつもりのモジュールが黙って対象に残る）。
+        """
+        return (f"{name}.weight" if name else "weight") not in self.excluded
+
+
+def scan_w4_targets(model: nn.Module) -> W4Targets:
+    """対象集合の素性と、量子化軸が g32 で割り切れない除外一覧を 1 度に採る。
+
+    MUST: 非 linear の量子化可能型（conv 系 / embedding）が現れたら fail loudly。この台本は
+    「対象 = linear 限定 = i4 の実行経路と一致 = 配布対応形」を前提に表を作っており、上流の
+    diffusers が patchify を conv へ替えれば前提が黙って崩れる（表は出るが、出せない形の
+    数値になる）。増えたときは**非 linear 込みの列を足すかどうか**をまず決める。
+
+    MUST: 割り切れない対象は `include` で外し、除外一覧を出力へ載せる（ADR 0069 決定 2 —
+    端数 group は格納できない形なので、その bpw も品質も出さない）。黙って全体を諦めない。
+    """
+    wide = {fqn for fqn, _weight, _axis in iter_quant_targets(model, QUANT_MODULE_TYPES)}
+    targets = list(iter_quant_targets(model, W4_OP_TYPES))
+    extra = sorted(wide - {fqn for fqn, _weight, _axis in targets})
+    if extra:
+        raise AssertionError(
+            f"DiT に非 linear の量子化可能な重みがある: {extra}"
+            "（この台本は linear 限定 = i4 の実行経路と一致する形を測る前提 — "
+            "非 linear 込みの列を足すかどうかを先に決めること）"
+        )
+    modules = elements = groups = 0
+    excluded: dict[str, int] = {}
+    for fqn, weight, axis in targets:
+        rows = channel_rows(weight, axis)
+        span = int(rows.shape[1])
+        if span % W4_GROUP_SIZE:
+            excluded[fqn] = span
+            continue
+        modules += 1
+        elements += int(weight.numel())
+        groups += int(rows.shape[0]) * (span // W4_GROUP_SIZE)
+    if not modules:
+        raise AssertionError(
+            f"g{W4_GROUP_SIZE} で量子化できる重みが 1 本も無い（除外 {sorted(excluded)}）"
+        )
+    return W4Targets(modules=modules, elements=elements, groups=groups, excluded=excluded)
+
+
+def w4_fit_stride(elements: int) -> int:
+    """対象要素数から `fake_quant_kmeans(fit_stride=…)` の等間隔 stride を決める。
+
+    予算（{@link W4_KMEANS_FIT_BUDGET}）に収まるなら 1 = 全量 fit。**奇数へ切り上げる**のは
+    group 長が 2 冪だから — 偶数 stride は group 内の偶数 lane しか踏まない（`gcd > 1`）が、
+    奇数なら常に互いに素で標本が group 内の全 lane を等しく踏む。
+    """
+    stride = -(-elements // W4_KMEANS_FIT_BUDGET)
+    return stride + 1 if stride % 2 == 0 else stride
+
+
+class W4RoundReport(Protocol):
+    """`fake_quant_*` の戻り値のうち**この台本が読む面**だけ（i4 と測定専用方式で型が違う）。"""
+
+    @property
+    def modules(self) -> int: ...
+
+    def describe(self) -> str: ...
+
+
+@dataclass(frozen=True)
+class W4Method:
+    """1 方式のレシピ（丸めの当て方とサイズ試算の式を 1 行に束ねる）。
+
+    2 つを別表に散らすと「品質を測った方式」と「サイズを試算した方式」が黙って割れる
+    （方式を 1 つ足したときに片方だけ更新される形になる）。`apply` は**素の f32 重みへ**
+    当てる前提で、積み重ねの禁止は呼び出し側の {@link restore_w4} が担保する。
+    """
+
+    name: str
+    #: `(model, include 述語, kmeans の fit_stride) -> 丸めの計数`。
+    apply: Callable[[nn.Module, Callable[[str], bool], int], W4RoundReport]
+    #: 対象集合の投影ビット数。
+    bits: Callable[[W4Targets], float]
+    #: `bits` の式（**出力へそのまま載せる** — 投影の前提を表から追えるように）。
+    formula: str
+
+
+def _w4_group_scaled_bits(scale_bits: float) -> Callable[[W4Targets], float]:
+    """group scale を持つ方式の総 bit（`4·N + scale_bits·G`）。"""
+
+    def bits(targets: W4Targets) -> float:
+        return W4_PAYLOAD_BITS * targets.elements + scale_bits * targets.groups
+
+    return bits
+
+
+W4_METHODS: tuple[W4Method, ...] = (
+    W4Method(
+        "rtn-i4-g32",
+        lambda model, include, _stride: fake_quant_int4(
+            model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
+        ),
+        _w4_group_scaled_bits(W4_F32_SCALE_BITS),
+        "4·N + 32·G（G = N/32 の group ごとに F32 scale 1 個 — 配布形 `i4` の格納そのもの）",
+    ),
+    W4Method(
+        "nf4",
+        lambda model, include, _stride: fake_quant_nf4(
+            model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
+        ),
+        _w4_group_scaled_bits(W4_F32_SCALE_BITS),
+        "4·N + 32·G（i4 と同じ group absmax scale・格子が正規分布の分位点）",
+    ),
+    W4Method(
+        "mxfp4",
+        lambda model, include, _stride: fake_quant_mxfp4(
+            model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
+        ),
+        _w4_group_scaled_bits(W4_MX_SCALE_BITS),
+        "4·N + 8·G（共有 scale が E8M0 の 2 のべき — OCP MX v1.0）",
+    ),
+    W4Method(
+        "kmeans:shared",
+        lambda model, include, stride: fake_quant_kmeans(
+            model,
+            "shared",
+            W4_GROUP_SIZE,
+            include=include,
+            op_types=W4_OP_TYPES,
+            fit_stride=stride,
+        ),
+        lambda targets: (
+            W4_PAYLOAD_BITS * targets.elements
+            + W4_F32_SCALE_BITS * targets.groups
+            + W4_CODEBOOK_ENTRY_BITS * DEFAULT_CODEBOOK_LEVELS
+        ),
+        "4·N + 32·G + 32·16（表はモデル全体で 1 枚・group absmax scale つき）",
+    ),
+)
+
+W4_METHOD_NAMES = tuple(method.name for method in W4_METHODS)
+
+
+def select_w4_methods(only: Sequence[str]) -> tuple[W4Method, ...]:
+    """`--w4-only` で選んだ方式を宣言順で返す（基準 `f32` は常に走る — 比較の分母）。"""
+    if not only:
+        return W4_METHODS
+    chosen = set(only)
+    return tuple(method for method in W4_METHODS if method.name in chosen)
+
+
+def w4_size_projection(method: W4Method, targets: W4Targets) -> dict[str, Any]:
+    """方式 × 対象集合の実効 bpw と投影 MiB（対象テンソルだけの合計 — 模型全体ではない）。"""
+    bits = method.bits(targets)
+    baseline_bits = W4_F32_BITS * targets.elements
+    return {
+        "modules": targets.modules,
+        "elements": targets.elements,
+        "groups": targets.groups,
+        "bitsPerWeight": bits / targets.elements,
+        "projectedMiB": bits / BITS_PER_BYTE / MIB,
+        "f32MiB": baseline_bits / BITS_PER_BYTE / MIB,
+        "ratio": bits / baseline_bits,
+        "formula": method.formula,
+    }
+
+
+def restore_w4(weights: Mapping[str, torch.Tensor], pristine: Mapping[str, torch.Tensor]) -> None:
+    """全対象を pristine の f32 重みへ戻す（**方式を積み重ねない** MUST の実体）。"""
+    with torch.no_grad():
+        for fqn, weight in weights.items():
+            weight.copy_(pristine[fqn])
+
+
+def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
+    """方式ごとに pristine から丸め直して DiT を走らせ、品質とサイズ試算を集める。
+
+    模型のロードは 1 回きり（7.29GiB）。pristine の退避は対象の重みだけ（除外分は 1 度も
+    触らないので採らない）で、丸めの一時領域と合わせたピークが実メモリを決める。
+    """
+    methods = select_w4_methods(args.w4_only)
+    sigmas = sigma_schedule(args.steps, SHIFT)
+    print(f"[sigmas] {sigmas[0]:.4f} … {sigmas[-2]:.4f} → 0 ({args.steps} steps)", flush=True)
+
+    text = encode_text(args.repo, args.max_sequence_length, "f32")
+    embeds = text["encoder_hidden_states"]
+    print(f"[text] encoder_hidden_states={list(embeds.shape)}", flush=True)
+
+    latent = args.resolution // SPATIAL_COMPRESSION
+    latents_init = torch.randn(
+        (1, LATENT_CHANNELS, 1, latent, latent),
+        generator=torch.Generator().manual_seed(SEED),
+        dtype=torch.float32,
+    )
+
+    _proj, model = timesteps_proj_table(args.repo, sigmas, "f32", args.lora, args.lora_scale)
+    targets = scan_w4_targets(model)
+    stride = w4_fit_stride(targets.elements)
+    print(
+        f"[w4] 対象 {targets.modules} 本 / {targets.elements:,} 要素"
+        f" / group {targets.groups:,}（g{W4_GROUP_SIZE}）",
+        flush=True,
+    )
+    for fqn, span in sorted(targets.excluded.items()):
+        print(f"[w4] 除外 {fqn}: 量子化軸 {span} が {W4_GROUP_SIZE} で割り切れない", flush=True)
+    if stride > 1:
+        print(
+            f"[w4] kmeans:shared の表は 1/{stride} の等間隔部分標本で fit"
+            f"（≈ {targets.elements // stride:,} 要素・適用は全量）",
+            flush=True,
+        )
+
+    weights = {
+        fqn: weight
+        for fqn, weight, _axis in iter_quant_targets(model, W4_OP_TYPES)
+        if fqn not in targets.excluded
+    }
+    pristine = {fqn: weight.detach().clone() for fqn, weight in weights.items()}
+
+    latents: dict[str, torch.Tensor] = {}
+    configs: dict[str, dict[str, Any]] = {}
+    for method in (None, *methods):
+        name = W4_BASE_CONFIG if method is None else method.name
+        started = time.perf_counter()
+        if method is None:
+            report = "丸めなし（基準）"
+        else:
+            # MUST: 当てる前に必ず戻す（方式を積み重ねない — 節の冒頭）。
+            restore_w4(weights, pristine)
+            rounded = method.apply(model, targets.include, stride)
+            if rounded.modules != targets.modules:
+                raise AssertionError(
+                    f"{name}: 丸めた本数 {rounded.modules} が対象 {targets.modules} と違う"
+                    "（include 述語か op_types が効いていない）"
+                )
+            report = rounded.describe()
+        result = reference_steps(
+            model,
+            latents_init,
+            embeds,
+            embeds,
+            sigmas,
+            (args.resolution, args.resolution),
+            args.steps,
+            GUIDANCE,
+        )
+        for key, value in result.items():
+            if key.startswith("latents_"):
+                latents[f"{name}/{key}"] = value
+        elapsed = time.perf_counter() - started
+        configs[name] = {"method": name, "quantReport": report, "elapsed": round(elapsed, 1)}
+        print(f"[{name}] {report} ({elapsed:.1f}s)", flush=True)
+
+    # 丸め済みの重みと pristine（対象と同サイズ）を VAE decode の前に手放す。
+    del model, weights, pristine
+    gc.collect()
+
+    last = f"latents_step{args.steps:04d}"
+    tags = tuple(configs)
+    images = decode_all(args.repo, latents, last, tags)
+    keys = [f"latents_step{index:04d}" for index in range(1, args.steps + 1)]
+    by_name = {method.name: method for method in methods}
+    failures: list[str] = []
+    base_image = images[W4_BASE_CONFIG]
+    u8_base = to_uint8(base_image).to(torch.float32)
+    # 基準行そのものは測らない（自分との比較は relRMS 0 / PSNR ∞ で情報が無く、∞ は JSON の
+    # 値としても不正）。表も門も丸めた構成だけを見る。
+    for name, entry in ((name, configs[name]) for name in configs if name != W4_BASE_CONFIG):
+        u8 = to_uint8(images[name]).to(torch.float32)
+        entry["latentRelRms"] = [
+            rel_rms(latents[f"{name}/{key}"], latents[f"{W4_BASE_CONFIG}/{key}"]) for key in keys
+        ]
+        entry["psnrF32"] = psnr(images[name], base_image, 2.0)
+        entry["psnrUint8"] = psnr(u8, u8_base, 255.0)
+        entry["imageRelRms"] = rel_rms(images[name], base_image)
+        entry["uint8MaxDiff"] = float((u8 - u8_base).abs().max())
+        entry["moved"] = not torch.equal(
+            latents[f"{name}/{last}"], latents[f"{W4_BASE_CONFIG}/{last}"]
+        )
+        entry["size"] = w4_size_projection(by_name[name], targets)
+        # 恒真化の遮断: 素通りは常に「品質が良い」側の嘘になる（丸めが 1 本も当たっていない
+        # 場合だけ基準とビット一致し、しかも数値は完璧に見える）。
+        if not entry["moved"]:
+            failures.append(f"{name}: 最終 latent が `{W4_BASE_CONFIG}` とビット一致（素通り）")
+
+    image_note = save_images(images, args.out)
+    if not args.no_latents:
+        from safetensors.torch import save_file
+
+        save_file(latents, str(args.out / W4_LATENTS_FILE))
+    return {
+        "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "script": "tools/export-recipes/anima/measure_quant.py --w4-screen",
+        "torch": torch.__version__,
+        "repo": args.repo,
+        "prompt": PROMPT,
+        "steps": args.steps,
+        "resolution": args.resolution,
+        "guidanceScale": GUIDANCE,
+        "seed": SEED,
+        "lora": str(args.lora),
+        "groupSize": W4_GROUP_SIZE,
+        "codebookLevels": DEFAULT_CODEBOOK_LEVELS,
+        "kmeansFitStride": stride,
+        "kmeansFitSamplesApprox": targets.elements // stride,
+        "targets": {
+            "opTypes": [cls.__name__ for cls in W4_OP_TYPES],
+            "modules": targets.modules,
+            "elements": targets.elements,
+            "groups": targets.groups,
+        },
+        "excluded": [
+            {"weight": fqn, "quantAxis": span} for fqn, span in sorted(targets.excluded.items())
+        ],
+        "imageNote": image_note,
+        "configs": configs,
+        "gates": {
+            "moved": {
+                name: entry["moved"] for name, entry in configs.items() if name != W4_BASE_CONFIG
+            },
+            "failures": failures,
+        },
+    }
+
+
+def _w4_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    lines = [f"| {' | '.join(header)} |", f"| {' | '.join('---' for _ in header)} |"]
+    lines += [f"| {' | '.join(row)} |" for row in rows]
+    return "\n".join(lines)
+
+
+def w4_report_markdown(payload: Mapping[str, Any]) -> str:
+    """`w4_report.md` の本文（**payload だけ**から作る — 表と JSON が割れないように）。"""
+    configs: dict[str, dict[str, Any]] = payload["configs"]
+    names = list(configs)
+    quantized = [name for name in names if name != W4_BASE_CONFIG]
+    lines: list[str] = []
+    lines.append(
+        f"# w4 方式スクリーニング — Anima DiT の丸め方式 {len(quantized)} 種（torch CPU 実測）"
+    )
+    lines.append("")
+    lines.append(
+        f"- 日付: {payload['generated']} / 計測: `{payload['script']}`"
+        f"（torch {payload['torch']}・CPU f32）"
+    )
+    lines.append(
+        f"- 条件: Anima turbo {payload['steps']} step・{payload['resolution']}px"
+        f"・CFG={payload['guidanceScale']:g}・LoRA 焼き込み・seed {payload['seed']}"
+    )
+    lines.append(f"- プロンプト: `{payload['prompt']}`")
+    lines.append(
+        f"- 対象: DiT の `{'` / `'.join(payload['targets']['opTypes'])}`"
+        f" {payload['targets']['modules']} 本 / {payload['targets']['elements']:,} 要素"
+        f"（g={payload['groupSize']} 固定・group {payload['targets']['groups']:,} 個）。"
+        "**非 DiT（text_encoder / text_conditioner / VAE）は全構成とも f32 のまま**。"
+    )
+    lines.append(
+        "- MUST: 構成ごとに pristine（素の f32 重み）へ戻してから当てる — **方式は積み重ねない**。"
+        "同じ台本の 10 構成（w8 / w8a8 / attention a8）の積み上げ意味論とは**別経路**。"
+    )
+    lines.append(
+        "- 丸めは全て core の共有実装（`karume.quantize.fake_quant_int4` / "
+        "`karume.quant_methods` の nf4 / mxfp4 / kmeans）で、対象選択も "
+        "`iter_quant_targets` の共有（測った対象と出荷する対象を割らないため）。"
+    )
+    excluded = payload["excluded"]
+    if excluded:
+        lines.append(
+            "- 除外（量子化軸が g"
+            f"{payload['groupSize']} で割り切れないので対象から外した — ADR 0069 決定 2）: "
+            + " / ".join(f"`{item['weight']}`（軸 {item['quantAxis']}）" for item in excluded)
+        )
+    if payload["kmeansFitStride"] > 1:
+        lines.append(
+            f"- `kmeans:shared` の**表の fit だけ** 1/{payload['kmeansFitStride']} の等間隔"
+            f"部分標本（≈ {payload['kmeansFitSamplesApprox']:,} 要素）で採った — **適用は全量**。"
+            "全量 fit は作業領域が実メモリに載らないため（部分標本の表と全量の表は別物に"
+            "なりうるので、数値を読む側が区別できるようここに明記する）。"
+        )
+    lines.append("")
+
+    lines.append(f"## ① step ごとの latent relRMS（基準 = `{W4_BASE_CONFIG}`）")
+    lines.append("")
+    lines.append("`relRMS(v, r) = ‖v − r‖₂ / ‖r‖₂`。")
+    lines.append("")
+    rows = [
+        [str(index + 1), *(f"{configs[name]['latentRelRms'][index]:.4e}" for name in quantized)]
+        for index in range(payload["steps"])
+    ]
+    lines.append(_w4_table(["step", *(f"`{name}`" for name in quantized)], rows))
+    lines.append("")
+
+    lines.append(f"## ② VAE decode 後の最終画像（基準 = `{W4_BASE_CONFIG}`）")
+    lines.append("")
+    lines.append(
+        "PSNR は `[-1,1]` の生 tensor（data range 2.0）と、PNG と同じ uint8 量子化後"
+        "（data range 255）の 2 系列。relRMS は生 tensor。"
+    )
+    lines.append("")
+    rows = [
+        [
+            f"`{name}`",
+            f"{configs[name]['psnrF32']:.2f}",
+            f"{configs[name]['psnrUint8']:.2f}",
+            f"{configs[name]['imageRelRms']:.4e}",
+            f"{configs[name]['uint8MaxDiff']:.0f}",
+            f"{configs[name]['elapsed']:.0f}s",
+        ]
+        for name in quantized
+    ]
+    lines.append(
+        _w4_table(
+            ["構成", "PSNR f32 (dB)", "PSNR uint8 (dB)", "relRMS", "uint8 最大差 (/255)", "所要"],
+            rows,
+        )
+    )
+    lines.append("")
+    lines.append(
+        f"画像: {payload['imageNote']}（{' / '.join(f'`image_{name}`' for name in names)}）"
+    )
+    lines.append("")
+
+    lines.append("## ③ サイズ試算（対象テンソル集合のみ・**式による投影**）")
+    lines.append("")
+    lines.append(
+        f"N = 対象要素数 {payload['targets']['elements']:,} / G = N/{payload['groupSize']} = "
+        f"{payload['targets']['groups']:,}。実測ではなく格納規則の式で、格納形を持たない方式"
+        "（rtn 以外）は書けもしない — 品質と同じ表で並べるのは、表のコストが見えないまま"
+        "品質だけで選ばないため。"
+    )
+    lines.append("")
+    rows = [
+        [
+            f"`{name}`",
+            f"{configs[name]['size']['bitsPerWeight']:.3f}",
+            f"{configs[name]['size']['projectedMiB']:.1f}",
+            f"{configs[name]['size']['f32MiB']:.1f}",
+            f"{configs[name]['size']['ratio'] * 100:.1f}%",
+            configs[name]["size"]["formula"],
+        ]
+        for name in quantized
+    ]
+    lines.append(_w4_table(["構成", "bpw", "投影 MiB", "f32 MiB", "比", "式"], rows))
+    lines.append("")
+
+    lines.append("## ④ 門")
+    lines.append("")
+    lines.append(
+        "丸めが素通りしていないこと（各構成の最終 latent が基準と**ビット一致しない**）— "
+        "一致するのは丸めが 1 本も当たっていない場合だけで、しかも品質は「完璧」側に出る。"
+    )
+    lines.append("")
+    rows = [
+        [
+            f"`{name}`",
+            "OK" if configs[name]["moved"] else "**NG（素通り）**",
+            configs[name]["quantReport"],
+        ]
+        for name in quantized
+    ]
+    lines.append(_w4_table(["構成", "基準と異なる", "丸めの計数"], rows))
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def main_w4(args: argparse.Namespace) -> None:
+    """`--w4-screen` の入口（10 構成は 1 本も走らない）。"""
+    args.out.mkdir(parents=True, exist_ok=True)
+    payload = run_w4_screen(args)
+    (args.out / W4_REPORT_FILE).write_text(w4_report_markdown(payload), encoding="utf-8")
+    (args.out / W4_JSON_FILE).write_text(
+        json.dumps(payload, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    print()
+    print(f"report OK → {args.out / W4_REPORT_FILE}", flush=True)
+    failures = payload["gates"]["failures"]
+    if failures:
+        raise AssertionError("検証ゲートが赤: " + " / ".join(failures))
+    print("gates: all green", flush=True)
 
 
 def main() -> None:
@@ -838,7 +1425,30 @@ def main() -> None:
         " 重みの i8 丸めは in-place で順序依存なので任意の部分集合は許さない — 前方接頭辞のみ。"
         f" 基準 `{BASELINE}` より手前で切る指定は集計が成立しないため拒否する",
     )
+    parser.add_argument(
+        "--w4-screen",
+        action="store_true",
+        help="**10 構成の代わりに** w4 の丸め方式スクリーニングを走らせる"
+        f"（{' / '.join(W4_METHOD_NAMES)} + 基準 f32・g{W4_GROUP_SIZE} 固定）。"
+        "構成ごとに素の f32 重みへ戻してから当てる別経路で、生成物も別名",
+    )
+    parser.add_argument(
+        "--w4-only",
+        action="append",
+        default=[],
+        choices=W4_METHOD_NAMES,
+        help="`--w4-screen` でこの方式だけ走らせる（複数可・部分再実行用）。基準 f32 は常に走る",
+    )
     args = parser.parse_args()
+    if args.w4_only and not args.w4_screen:
+        parser.error("--w4-only は --w4-screen と併用する")
+    if args.w4_screen:
+        # 積み上げ経路のノブ（前方接頭辞と attention の故障注入）は方式スクリーニングに
+        # 意味を持たない — 黙って無視せず拒否する。
+        if args.until is not None or args.inject is not None:
+            parser.error("--w4-screen は --until / --inject と併用できない（別経路）")
+        main_w4(args)
+        return
     if args.until is not None:
         cutoff = CONFIG_NAMES.index(args.until)
         if cutoff < CONFIG_NAMES.index(BASELINE):
@@ -857,7 +1467,7 @@ def main() -> None:
         save_file(latents, str(args.out / "dit_out.safetensors"))
     write_layer_csv(stats, args.out / "layers.csv")
 
-    images = decode_all(args.repo, latents, f"latents_step{args.steps:04d}")
+    images = decode_all(args.repo, latents, f"latents_step{args.steps:04d}", CONFIG_NAMES)
     image_note = save_images(images, args.out)
     # --until が書き換えた派生表と engine 側の指標は**全て引数で渡す**（レポート側から
     # このモジュールを import すると循環するので、逆辺は型注釈だけに留めてある）。
