@@ -88,7 +88,7 @@ scale 台帳が実値と食い違う）。格納は既定 `i8` + linear を 1 �
 
 io のテンソルキー規約は tiny golden / DeBERTa / EmbeddingGemma / MiniCPM5 と同じ
 （`input.<グラフ入力名>` / `output.<位置>`）。logits は語彙 262144 なので 1 ケースあたり
-`T × 1.05MB`（`context-en` は T=595 で 624MB）— ディスクは潤沢なので全行を書く。
+`T × 1.05MB`（`context-en` は T=598 で 627MB）— ディスクは潤沢なので全行を書く。
 
 ## BOS はこちらで付ける
 
@@ -186,9 +186,13 @@ PLE_PROBE_ROWS = 8
 #: 表を 1 枚読みせずに 35 本へ配るときの行ブロック（f32 で 8192×8960×4B = 293MB）。
 PLE_ROW_BLOCK = 8192
 
-#: 長め（T=595）の英語ケースの本文。**T > 512（`sliding_window`）** を踏むためのもので、
+#: 長め（T=598）の英語ケースの本文。**T > 512（`sliding_window`）** を踏むためのもので、
 #: これが無いと帯マスクが causal と一致してしまい sliding 層の窓が一度も評価されない。
-#: 末尾は「強く決まる継続」になる段落。
+#:
+#: 末尾は "… the city called"（継続 = `▁Paris`）。素の "The capital of France is" で終える形は
+#: この長さの叙述文だと bf16 標準経路の実測でも 1 位が `▁the`（"the city of Paris" 系の継続）
+#: になり、期待が立たない — 末尾 3 候補の実測（2026-08-19・margin 12.8 / **13.9** / 0.1）で
+#: 最良のこの形に固定した。短文ケースの実績（`▁Paris` が 1 位）は長文へ外挿できない。
 CONTEXT_EN = (
     "France is a country in Western Europe whose written history reaches back to the Roman "
     "province of Gaul. Its territory is shaped by four great river basins, and the towns that "
@@ -226,10 +230,10 @@ CONTEXT_EN = (
     "For a reader who has followed the geography, the political history and the administrative "
     "reforms above, the conclusion is not in doubt. The parliament meets there, the ministries "
     "are quartered there, the head of state lives there, and the Seine still runs past the island "
-    "where the first settlement stood. The capital of France is"
+    "where the first settlement stood. The capital of France is the city called"
 )
 
-#: golden の固定文（`(ケース名, 本文)`）。T は `<bos>` 込みで 6 / 10 / 595 に散らす
+#: golden の固定文（`(ケース名, 本文)`）。T は `<bos>` 込みで 6 / 10 / 598 に散らす
 #: （0/1 特殊化から遠く、`sliding_window` 512 の両側に跨り、上限 768 より内側）。
 #: `capital-ja` は minicpm5 と同じ**対構造**（「フランスの首都はパリ、」の前置き）で、
 #: 素の「日本の首都は」より継続が決まりやすい形にしてある。
@@ -533,8 +537,14 @@ def build_wrapper(model: nn.Module, tables: nn.ModuleList) -> Gemma4Wrapper:
     return Gemma4Wrapper(model, tables).eval()
 
 
-def load_wrapper(model_dir: Path) -> Gemma4Wrapper:
-    """実重みを f32 で読み、RoPE バッファを降格した export 可能なラッパを返す。"""
+def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
+    """実重みを f32 で読んだ text モデルと PLE の 35 分割を返す（検査席の表は載ったまま）。
+
+    ラッパの組み立て（{@link build_wrapper}）と RoPE バッファの降格を**含まない**のは、
+    decode 台本（{@link gemma4.export_decode}）が同じ素材を別のラッパ形・別の RoPE 形
+    （表引きへの差し替え）で使うから。素材の読み方と 3 つの等価検査（PLE 表の行数・
+    KV 共有層の残骸落とし・35 分割のビット一致）は 1 箇所に閉じる。
+    """
     from transformers import Gemma4ForCausalLM
 
     register_attention()
@@ -564,6 +574,12 @@ def load_wrapper(model_dir: Path) -> Gemma4Wrapper:
         model_file, int(config.num_hidden_layers), int(config.hidden_size_per_layer_input)
     )
     assert_per_layer_split(model, tables, probe_start)
+    return model, tables
+
+
+def load_wrapper(model_dir: Path) -> Gemma4Wrapper:
+    """実重みを f32 で読み、RoPE バッファを降格した export 可能なラッパを返す。"""
+    model, tables = load_model_and_tables(model_dir)
     # inv_freq がバッファのままだと定数畳み込みの葉にならず、sin / cos が IR に残る。
     assert_rope_lifted(model, "gemma4")
     return build_wrapper(model, tables)

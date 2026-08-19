@@ -8,8 +8,11 @@ The checkpoint is `google/gemma-4-E2B-it`, whose weights are covered by the **Ge
 the per-revision license interview is a release gate (ADR 0065 stage 6) and nothing derived from
 these weights is published from this repository today.
 
-The authority for the design decisions is the module docstring of `export.py`; this file is the
-entry point only.
+The authority for the design decisions is the module docstrings (`export.py`, `export_decode.py`);
+this file is the entry point only.
+
+Two scripts read the same checkpoint: `export.py` emits the 1-shot (prefill-equivalent) graph, and
+`export_decode.py` emits the states-form chunk graph that the generation path is accepted against.
 
 ## What `export.py` emits
 
@@ -64,7 +67,7 @@ bound of 768.
 
 ## Golden cases
 
-Three fixed prompts at `T` = 6, 10 and 595: two short ones (English and Japanese) and one long
+Three fixed prompts at `T` = 6, 10 and 598: two short ones (English and Japanese) and one long
 English passage. The long one is not optional — the sliding window is 512, so any case at or below
 that length gets a band mask identical to the causal mask and leaves the 28 sliding layers
 untested. `export.py` refuses to continue when no case exceeds the window.
@@ -79,6 +82,70 @@ equal a specific expected continuation (`Paris` / `東京`), and the export fail
 agree on one token (a constant output). The expectations are stated in `GREEDY_EXPECTATIONS`; a
 mismatch reports the measured token and the expected one, both decoded.
 
+## What `export_decode.py` emits
+
+The same checkpoint as **one states-form chunk graph**: `input_ids[1, M]` and `position_ids[1, M]`
+in, `logits[1, M, 262144]` and `token[1, M, 1]` out, with the KV held in 30 named state slots
+instead of graph I/O. It is the acceptance fixture for ADR
+[0066](../../../docs/decisions/0066-generation-context-state-slots.md) (the generation context and
+named state slots), ADR
+[0067](../../../docs/decisions/0067-autoregressive-attention-vocabulary.md) decisions 4 to 5b
+(state-referencing attention and `state_append`), ADR
+[0068](../../../docs/decisions/0068-decode-exit-multi-output.md) decision 4 (the decode exit) and
+ADR [0069](../../../docs/decisions/0069-packed-w4-storage.md) (packed int4) — the first fixture that
+carries a sliding window, shared KV and mixed storage at once.
+
+`M` is the physical chunk extent — `chunkLength` when prefilling, 1 when decoding — and only its
+leading `queryLength` rows are valid. The capacity is the symbol `C` on every slot, so it is chosen
+by `createGenerationContext` instead of being baked in at export time.
+
+Three structural differences from the 1-shot recipe, and the export fails loudly when any is lost:
+
+- **positions are a graph input and RoPE is a table lookup.** In the 1-shot shape a position is
+  always its row index, so cos/sin fold into constants; here a position is `pastLength + row` and is
+  only known at run time. The recipe swaps `model.model.rotary_emb` for a module that gathers a
+  1024-position cos/sin table with `F.embedding` — **one table pair per layer type**, because Gemma
+  4 calls its rotary with a `layer_type` argument and the two types differ in both head dim and RoPE
+  type. The lookup is asserted to reproduce the original implementation exactly (`torch.equal`,
+  three kinds of position vector, both layer types) before the swap happens. Because the tables are
+  consumed as `embedding` weights they land in the int8 eligibility set, so the recipe excludes them
+  from compressed storage explicitly: rounding a position table would smear the angles.
+- **only the 15 KV-owning layers get slots.** Layers 15 to 34 share key/value states upstream, so
+  they read the slots of the last sliding layer (13) and the last full layer (14) rather than
+  declaring their own. The surgery in `karume.states` requires every reader of a slot to agree on
+  the derived shape, the window and the tensor written into it, which is what proves the mapping is
+  the one upstream actually wired.
+- **the masks are scaffolding for the trace only.** The graph is exported with the same two additive
+  masks as the 1-shot recipe, and `karume.states.to_states_form` then drops them — causality and the
+  window become predicates over `pastLength + row`, so both `Tmax × Tmax` constants and their
+  `sym_prefix_slice` nodes are pruned. The form check requires that no residue survives. The window
+  is declared as the plain `config.sliding_window`: the runtime predicate
+  `col <= limit && (limit - col) < window` and the upstream mask function are the same inclusion,
+  self included.
+
+Output layout:
+
+```
+outputs/series/gemma4-e2b-decode/model.safetensors         weights/constants + karume_ir
+outputs/series/gemma4-e2b-decode/io.<case>.safetensors     unpadded inputs and expected outputs
+outputs/series/gemma4-e2b-decode/greedy.<case>.safetensors greedy continuation of K = 16 steps
+```
+
+The `io.*` files use the same key convention as the 1-shot series and cover all three cases at their
+full unpadded length. They are a reference table rather than a run script: the runtime executes the
+graph in chunks and compares only the valid rows. On padding rows only the states-form attention
+output is exactly zero (ADR 0066 addendum 8); the MLP and lm_head still write meaningless values
+there, so padding rows of the graph outputs must not be read.
+
+The `greedy.*` files are the acceptance record for the decode path — `prompt` i32 `[T]`, `expected`
+i32 `[K]` and `margin` f32 `[K]`. The continuation is recomputed from scratch at every step (a full
+re-forward, never a KV cache: the expectation must not come out of the mechanism under test). Every
+step has to keep a top1−top2 logit margin above `1e-2` so that GPU-side deviation cannot flip the
+sequence; a case that fails the gate is removed from `GREEDY_CASES` rather than shortened, and the
+gate reports every offending case at once so one run settles the set. The first continuation token
+is additionally checked against the 1-shot recipe's expectation table, which is what ties the two
+graphs together.
+
 ## Requirements
 
 The weights go under `inputs/gemma4/gemma-4-E2B-it/` (see
@@ -91,13 +158,18 @@ being materialized once as a whole, and the model itself is constructed with onl
 rows (the ones the split check reads).
 
 The golden files are large: `io.context-en.safetensors` alone holds 624 MB of logits, and the three
-cases come to roughly 640 MB.
+cases come to roughly 640 MB. The decode series writes the same io files plus three small greedy
+records, and its container additionally carries the 6 MiB of RoPE tables.
+
+`export_decode.py` needs the same machine, and takes considerably longer: the greedy record is
+`3 cases × 16 steps` of full re-forwards, and the long case re-forwards ~600 tokens each time.
 
 ## Running
 
 ```sh
 cd tools/export-recipes
 uv run --with 'transformers==5.14.1' python -m gemma4.export
+uv run --with 'transformers==5.14.1' python -m gemma4.export_decode
 ```
 
 `transformers` is pinned to 5.14.1 for the same reason as DeBERTa, EmbeddingGemma and MiniCPM5 (a
