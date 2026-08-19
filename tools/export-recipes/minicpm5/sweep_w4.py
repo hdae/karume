@@ -54,6 +54,7 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
+from _shared.decode_series import EXPECTED_KEY, GREEDY_PREFIX, GREEDY_SUFFIX, PROMPT_KEY
 from karume.quantize import QuantizeError
 from minicpm5 import export as one_shot
 from minicpm5 import export_decode as decode
@@ -272,7 +273,7 @@ def load_cases(decode_dir: Path) -> tuple[GreedyCase, ...]:
     資産が無ければ**実行手順つきで**落とす — 60 分級の実行の入口で、直せる形の失敗を
     「ファイルが無い」だけで返さない。
     """
-    paths = sorted(decode_dir.glob(f"{decode.GREEDY_PREFIX}*{one_shot.IO_SUFFIX}"))
+    paths = sorted(decode_dir.glob(f"{GREEDY_PREFIX}*{GREEDY_SUFFIX}"))
     if not paths:
         raise FileNotFoundError(
             f"greedy 期待列が {decode_dir} に 1 件も無い — 先に波 E の decode 資産を作ること:\n"
@@ -281,13 +282,13 @@ def load_cases(decode_dir: Path) -> tuple[GreedyCase, ...]:
         )
     cases: list[GreedyCase] = []
     for path in paths:
-        name = path.name[len(decode.GREEDY_PREFIX) : -len(one_shot.IO_SUFFIX)]
+        name = path.name[len(GREEDY_PREFIX) : -len(GREEDY_SUFFIX)]
         tensors = load_file(str(path))
         cases.append(
             GreedyCase(
                 name=name,
-                prompt=tensors[decode.PROMPT_KEY].to(torch.int64).unsqueeze(0),
-                expected=tensors[decode.EXPECTED_KEY].to(torch.int64),
+                prompt=tensors[PROMPT_KEY].to(torch.int64).unsqueeze(0),
+                expected=tensors[EXPECTED_KEY].to(torch.int64),
             )
         )
     return tuple(cases)

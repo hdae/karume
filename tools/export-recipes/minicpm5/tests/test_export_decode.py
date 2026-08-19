@@ -27,6 +27,7 @@ import torch
 from torch import nn
 from torch.export import Dim
 
+from _shared import decode_series as shared
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_module
@@ -350,22 +351,31 @@ class TestAssertIrFormDecode:
 
 class TestGreedyMargins:
     def test_a_comfortable_margin_passes(self):
-        decode.assert_greedy_margins({"a": [1.0, 0.5, 0.011], "b": [2.0]}, decode.MARGIN_FLOOR)
+        shared.assert_greedy_margins({"a": [1.0, 0.5, 0.011], "b": [2.0]}, decode.MARGIN_FLOOR)
+
+    def test_the_floor_stays_above_the_gate_precondition(self):
+        """生産側の床 > 消費側の前提（2 × atol 1e-3 — gemma4 側と同形の門）。
+
+        下だと「台本は採るが検収門の margin 前提で落ちる」ケースが作れてしまい、門の
+        『ここが落ちるのは台本と資産が食い違ったときだけ』が成立しない。atol の正本は
+        `e2e_minicpm5_greedy_test.ts` の PREFILL_ATOL（= 1e-3）— 変えたら両方を動かす。
+        """
+        assert decode.MARGIN_FLOOR > 2 * 1e-3
 
     def test_a_thin_margin_fails_loudly(self):
         """MUST: 余裕の無い step を golden に混ぜると GPU 偏差で列が割れる。"""
         with pytest.raises(AssertionError, match=r"margin が下限"):
-            decode.assert_greedy_margins({"a": [1.0, 1e-3, 0.5]}, decode.MARGIN_FLOOR)
+            shared.assert_greedy_margins({"a": [1.0, 1e-3, 0.5]}, decode.MARGIN_FLOOR)
 
     def test_the_floor_itself_is_not_accepted(self):
         """境界は「超える」— ちょうど下限は通さない。"""
         with pytest.raises(AssertionError, match=r"margin が下限"):
-            decode.assert_greedy_margins({"a": [decode.MARGIN_FLOOR]}, decode.MARGIN_FLOOR)
+            shared.assert_greedy_margins({"a": [decode.MARGIN_FLOOR]}, decode.MARGIN_FLOOR)
 
     def test_every_offending_case_is_reported_at_once(self):
         """MUST: 最初の 1 件で止めない — 外すケースの判断材料が 1 回の実走で揃わなくなる。"""
         with pytest.raises(AssertionError) as failure:
-            decode.assert_greedy_margins(
+            shared.assert_greedy_margins(
                 {"a": [1.0], "b": [1e-3], "c": [0.5, 0.0]}, decode.MARGIN_FLOOR
             )
 
@@ -400,7 +410,7 @@ class TestGreedyContinuation:
         """MUST: full re-forward（KV 経路を使わない）— 検収対象の機構で期待値を作らない。"""
         wrapper = _StubWrapper({2: [0.0, 3.0, 1.0], 3: [5.0, 0.0, 1.0], 4: [0.0, 0.0, 2.5]})
 
-        tokens, margins = decode.greedy_continuation(wrapper, torch.tensor([[7, 8]]), 3)
+        tokens, margins = shared.greedy_continuation(wrapper, torch.tensor([[7, 8]]), 3)
 
         assert tokens == [1, 0, 2]
         assert margins == pytest.approx([2.0, 4.0, 2.5])
@@ -414,19 +424,19 @@ class TestGreedyContinuation:
         """位置は毎 step `arange(len)`（表引き RoPE が実位置で引けることの前提）。"""
         wrapper = _StubWrapper({3: [1.0, 0.0], 4: [0.0, 2.0]})
 
-        decode.greedy_continuation(wrapper, torch.tensor([[4, 5, 6]]), 2)
+        shared.greedy_continuation(wrapper, torch.tensor([[4, 5, 6]]), 2)
 
         assert [positions for _, positions in wrapper.calls] == [[0, 1, 2], [0, 1, 2, 3]]
 
 
 class TestCaseRoom:
     def test_a_prompt_that_fits_with_its_continuation_passes(self):
-        decode.assert_case_room([("case", torch.zeros(1, 10, dtype=torch.int64))], 6, 16)
+        shared.assert_case_room([("case", torch.zeros(1, 10, dtype=torch.int64))], 6, 16)
 
     def test_a_continuation_past_the_table_fails_loudly(self):
         """MUST: 表の外の位置は引けない（`F.embedding` は OOB を黙って返さない）。"""
         with pytest.raises(AssertionError, match="RoPE 表の位置数"):
-            decode.assert_case_room([("case", torch.zeros(1, 11, dtype=torch.int64))], 6, 16)
+            shared.assert_case_room([("case", torch.zeros(1, 11, dtype=torch.int64))], 6, 16)
 
 
 class TestGreedyCases:
@@ -476,7 +486,7 @@ class TestPublish:
     def test_a_fresh_target_is_created(self, tmp_path):
         staging = self._series(tmp_path, "staging", {"model": "new"})
 
-        decode._publish(staging, tmp_path / "final")
+        shared._publish(staging, tmp_path / "final")
 
         assert (tmp_path / "final" / "model").read_text() == "new"
         assert not staging.exists()
@@ -486,7 +496,7 @@ class TestPublish:
         final = self._series(tmp_path, "final", {"model": "old", "greedy.stale": "old"})
         staging = self._series(tmp_path, "staging", {"model": "new"})
 
-        decode._publish(staging, final)
+        shared._publish(staging, final)
 
         assert (final / "model").read_text() == "new"
         assert not (final / "greedy.stale").exists()
@@ -509,7 +519,7 @@ class TestPublish:
         monkeypatch.setattr(os, "replace", failing_replace)
 
         with pytest.raises(OSError, match="昇格に失敗"):
-            decode._publish(staging, final)
+            shared._publish(staging, final)
 
         assert (final / "model").read_text() == "old"
         assert staging.exists()
