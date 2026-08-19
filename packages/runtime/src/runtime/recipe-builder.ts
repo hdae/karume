@@ -187,8 +187,7 @@ import {
   stateAppendWgsl,
   stateAppendWorkgroups,
 } from "../kernels/state-append.ts";
-import type { KarumeModel } from "../format/container.ts";
-import type { IrDtype } from "../format/ir.ts";
+import type { IrDtype, IrGraph } from "../format/ir.ts";
 import type { RunArena } from "../gpu/arena.ts";
 import type { GpuContext } from "../gpu/device.ts";
 import type { PipelineCache } from "../gpu/pipeline-cache.ts";
@@ -267,7 +266,7 @@ const PARAMS_UNIFORM_USAGE = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
  */
 type RecipeBuilderContext = {
   readonly gpu: GpuContext;
-  readonly model: KarumeModel;
+  readonly graph: IrGraph;
   readonly cache: PipelineCache;
   /** params の確保先（**Session 常駐**の weights アリーナ — `#writeParams` の MUST）。 */
   readonly weights: RunArena;
@@ -348,7 +347,7 @@ export class RecipeBuilder {
   }> {
     // 実体は実行相まで決まらないので、導出相は「その値名が既に定義済みか」だけを追う
     // （束縛漏れを実行相へ持ち越さず、ここで fail loudly にする）。
-    const defined = new Set(this.#state.model.graph.inputs.map((spec) => spec.name));
+    const defined = new Set(this.#state.graph.inputs.map((spec) => spec.name));
     const states: StateBuildContext = {
       shapes: stateShapes ?? new Map(),
       chunkRows: new Set(),

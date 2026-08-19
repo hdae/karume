@@ -70,7 +70,7 @@ export type { RuntimeCapabilities } from "./src/ops.ts";
 
 export { DispatchLimitError } from "./src/codegen/errors.ts";
 
-export { createSession } from "./src/runtime/executor.ts";
+export { createSession, createSessionFromShards } from "./src/runtime/executor.ts";
 /**
  * Session の構築は {@link createSession} だけを入口にするため、型としてのみ公開する。
  *
