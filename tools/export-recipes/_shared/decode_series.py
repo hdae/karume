@@ -156,5 +156,9 @@ def _publish(staging: Path, final: Path) -> None:
     据え替えそのものの規律（退避 → 昇格 → 失敗時の戻し・中断が残した席の始末）は core の
     原語が持つ（{@link karume.artifacts.swap_into_place}）— ここが綴るのは「いつ公開して
     よいか」だけ。
+
+    NOTE: 本番の呼び手は全て core 直呼びへ移行済み（2026-08-19 の CX-1.1/1.4）で、参照は
+    両 family のテストのみ。それでも**意図して温存**する（2026-08-19 ユーザー裁定）—
+    「公開の時機」の規律の文書アンカーとして。dead code 掃除の対象にしない。
     """
     swap_into_place(staging, final)
