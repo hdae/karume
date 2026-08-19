@@ -408,9 +408,9 @@ def _plan_weight_dtype(
     MUST: この段で圧縮テンソルを作らない。全件を先に変換すると、圧縮側の集合が呼び出し側の
     f32 集合と**同時に**生きてピーク RAM が両者の和になる（Irodori 規模で f32 3.44GB に
     f16 1.72GB / i8 0.87GB が重なる）。ここで済ませるのは実データを読まない検査だけ
-    （格納 dtype の妥当性・適格判定・scale の有無と形〈i8 = keepdim / i4 = group〉・
-    scale キーの衝突・「適格 0 本」）で、実データを読む検査は `_convert_for_storage` が
-    書き出し直前に 1 本ずつ受け持つ。
+    （名前 ↔ テンソルキーの 1:1・格納 dtype の妥当性・適格判定・scale の有無と形
+    〈i8 = keepdim / i4 = group〉・scale キーの衝突・「適格 0 本」）で、実データを読む検査は
+    `_convert_for_storage` が書き出し直前に 1 本ずつ受け持つ。
 
     `weight_dtype_overrides` は**テンソルキー（FQN）→ 格納 dtype** の明示指定（混成格納 —
     LLM の「embedding は i8・linear は i4」が初出）。既定 `weight_dtype` が適格フィルタで
@@ -419,6 +419,23 @@ def _plan_weight_dtype(
     書かれている以上、黙って別の格納にする余地は無い。`"f32"` の明示は「圧縮既定からの
     除外」として使える。
     """
+    initializer_by_key = {graph.initializers[name].tensor: name for name in graph.initializers}
+    if len(initializer_by_key) != len(graph.initializers):
+        # MUST: initializer 名 ↔ テンソルキーは 1:1。潰れると適格検査は後勝ちで残った 1 名しか
+        # 見ないのに、計画ループは適格な**全ての**名前を回す — 実体は key 単位で packed に
+        # 変換され、適格外だった名前の宣言は f32 のまま残るので、形も型も合ったまま値だけが
+        # 壊れる。現行の convert 経路（torch.export の placeholder → FQN は単射・`_emit_const`
+        # は digest 一意）では到達しないが、その 1:1 は上流の実装挙動 1 点に乗っているだけで
+        # どこにも書かれていないので、ここを唯一の門にする。
+        names_by_key: dict[str, list[str]] = {}
+        for name, initializer in graph.initializers.items():
+            names_by_key.setdefault(initializer.tensor, []).append(name)
+        collided = {key: names for key, names in sorted(names_by_key.items()) if len(names) > 1}
+        raise EmitError(
+            f"initializer 名とテンソルキーが 1:1 でない: {collided}"
+            "（宣言は名前単位・実体はキー単位なので、同じキーを指す名前の一部だけが圧縮格納に"
+            "なると宣言と実体がずれる）"
+        )
     if weight_dtype not in WEIGHT_DTYPES:
         raise EmitError(
             f"格納 dtype '{weight_dtype}' は書き出せない（{' / '.join(WEIGHT_DTYPES)}）"
@@ -433,7 +450,6 @@ def _plan_weight_dtype(
     if weight_dtype == "f32" and not weight_dtype_overrides:
         return plan
     eligible = eligible_compressed_initializers(graph)
-    initializer_by_key = {graph.initializers[name].tensor: name for name in graph.initializers}
     unknown = sorted(set(weight_dtype_overrides) - set(initializer_by_key))
     if unknown:
         raise EmitError(

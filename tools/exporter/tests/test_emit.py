@@ -1310,3 +1310,48 @@ class TestMixedStorage:
                 tensors,
                 weight_dtype_overrides={"enc.w": "f64"},
             )
+
+    def test_an_override_on_a_non_f32_tensor_fails_loudly(self, tmp_path):
+        """既定は非 f32 実体を静かに飛ばすが、明示指定は「圧縮格納は f32 実体のみ」で落ちる。
+
+        i32 格納（記号依存定数 — ADR 0010）が重みスロットへ流れた形。意味論ごと違うので
+        黙って圧縮格納にしない側の枝（他の 3 枝と対）。
+        """
+        graph, tensors, scales = mixed_weight_graph()
+        tensors["enc.emb"] = torch.zeros(3, 32, dtype=torch.int32)
+
+        with pytest.raises(EmitError, match="圧縮格納は f32 実体のみ"):
+            write_model(
+                tmp_path / "model.safetensors",
+                graph,
+                tensors,
+                weight_scales=scales,
+                weight_dtype_overrides={"enc.emb": "i8"},
+            )
+
+
+class TestInitializerKeyInjectivity:
+    """宣言は名前単位・実体はキー単位 — 名前 ↔ テンソルキーが 1:1 でなければ計画段で落とす。"""
+
+    def test_two_initializers_sharing_one_tensor_key_fail_loudly(self, tmp_path):
+        """片方だけが適格だと「実体は packed / 宣言は f32」の沈黙誤値になる形。"""
+        graph, tensors = weight_graph()
+        graph = replace(
+            graph,
+            initializers={
+                **graph.initializers,
+                "w_alias": IrInitializer(tensor="enc.w", storage=IrStorage(dtype="f32")),
+            },
+            values={
+                **graph.values,
+                "w_alias": IrValue(dtype="f32", shape=[3, 4]),
+                "a": IrValue(dtype="f32", shape=[3, 4]),
+            },
+            nodes=[
+                *graph.nodes,
+                IrNode(op="mul", ins=["w_alias", "w_alias"], outs=["a"], attrs={}),
+            ],
+        )
+
+        with pytest.raises(EmitError, match="1:1 でない"):
+            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
