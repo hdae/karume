@@ -73,9 +73,21 @@ Deno.test("openModel: initializer の参照先テンソルが無いものを拒�
   const graph = baseGraph();
   graph.initializers["w"].tensor = "missing.w";
   assertThrows(
-    () => openModel(baseModelBuffer(graph)),
+    () =>
+      openModel(baseModelBuffer(graph, [
+        { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+      ])),
     ContainerError,
     "がファイルに無い",
+  );
+
+  // 実体を残したまま宣言だけ改名した形は「欠け」と「余剰」の両方が立つ。shard 進行検証では
+  // 余剰は shard 単体で決まり、欠けは全 shard 読了まで決まらない（後続 shard で来るため）ので、
+  // 帰属は余剰が先になる — どちらの形も拒否されることは変わらない（ADR 0070 決定 1）。
+  assertThrows(
+    () => openModel(baseModelBuffer(graph)),
+    ContainerError,
+    "参照されないテンソル (1): enc.w",
   );
 });
 
