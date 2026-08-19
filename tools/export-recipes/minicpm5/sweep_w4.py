@@ -74,24 +74,17 @@ from torch import nn
 
 from _shared.decode_series import EXPECTED_KEY, GREEDY_PREFIX, GREEDY_SUFFIX, PROMPT_KEY
 from karume.quant_methods import (
-    DEFAULT_CODEBOOK_ITERATIONS,
     DEFAULT_CODEBOOK_LEVELS,
     fake_quant_fp4,
     fake_quant_kmeans,
     fake_quant_mxfp4,
     fake_quant_nf4,
-    fit_codebook,
-    group_absmax_scale,
-    round_groups_to_levels,
 )
 from karume.quantize import (
     DEFAULT_GROUP_SIZE,
     QuantizeError,
-    channel_rows,
     fake_quant_int4,
-    group_size_of,
     iter_quant_targets,
-    restore_channel_rows,
 )
 from minicpm5 import export as one_shot
 from minicpm5 import export_decode as decode
@@ -507,53 +500,19 @@ def project_size(method: QuantMethod, counts: TargetCounts) -> SizeProjection:
 # ---- 方式の適用 -------------------------------------------------------------
 
 
-def fake_quant_kmeans_shared_strided(
-    model: nn.Module, op_types: tuple[type[nn.Module], ...], group_size: int, stride: int
-) -> int:
-    """`kmeans:shared` の**表の fit だけ**を等間隔 stride の部分標本で採る版（適用は全量）。
-
-    core の {@link karume.quant_methods.fake_quant_kmeans}(`shared`) は全対象の正規化値を
-    1 本へ連結してから Lloyd を回すので、1B 級では f32 の連結 4GB に加えて `fit_codebook` の
-    f64 一時領域（値・重み・添字）が 20GB 級になり、機体の実メモリで落ちる。標本を
-    `flat[::stride]`（乱数を使わない = 同一入力 → ビット同一）に落とすと fit の一時領域だけが
-    1/stride になり、**丸めそのものは全量**へ当たる。
-
-    MUST: 使ったら出力へ明記する（`--kmeans-shared-stride` は JSON と markdown の脚注へ
-    そのまま出る）— 部分標本で採った表と全量で採った表は別物になりうるので、数値を読む側が
-    区別できないと困る。
-
-    戻り値は丸めた本数（core の `MethodReport.modules` 相当）。
-    """
-    samples: list[torch.Tensor] = []
-    with torch.no_grad():
-        for fqn, weight, axis in iter_quant_targets(model, op_types):
-            rows = channel_rows(weight, axis)
-            scale = group_absmax_scale(rows, group_size, 1.0, f"'{fqn}'")
-            grouped = grouped_view(rows, group_size_of(rows, scale))
-            samples.append((grouped / scale.unsqueeze(-1)).reshape(-1)[::stride].clone())
-        table = fit_codebook(
-            torch.cat(samples).reshape(1, -1), DEFAULT_CODEBOOK_LEVELS, DEFAULT_CODEBOOK_ITERATIONS
-        ).reshape(-1)
-        del samples
-        modules = 0
-        for fqn, weight, axis in iter_quant_targets(model, op_types):
-            rows = channel_rows(weight, axis)
-            scale = group_absmax_scale(rows, group_size, 1.0, f"'{fqn}'")
-            rounded = round_groups_to_levels(rows, table, scale, f"'{fqn}'")
-            weight.copy_(restore_channel_rows(rounded, weight, axis))
-            modules += 1
-    return modules
-
-
 def apply_method(model: nn.Module, config: MethodConfig, shared_stride: int) -> None:
     """方式グリッド 1 本の丸めを model へ in-place で当てる。
 
-    `shared_stride > 1` のときだけ `kmeans:shared` が部分標本 fit の版
-    （{@link fake_quant_kmeans_shared_strided}）へ替わる — 他の方式には効かない。
+    `shared_stride > 1` のときだけ `kmeans:shared` の**表の fit** が等間隔部分標本になる
+    （core の `fit_stride` — 適用は常に全量・他の方式には効かない）。全量 fit は 1B 級で
+    実メモリを超えるための逃げ道で、使った事実は JSON と markdown の脚注へそのまま出る
+    （{@link karume.quant_methods.fake_quant_kmeans} の MUST）。
     """
     op_types = method_op_types(config.include_embedding)
     if config.method.name == f"{KMEANS_PREFIX}shared" and shared_stride > 1:
-        fake_quant_kmeans_shared_strided(model, op_types, METHOD_GROUP_SIZE, shared_stride)
+        fake_quant_kmeans(
+            model, "shared", METHOD_GROUP_SIZE, op_types=op_types, fit_stride=shared_stride
+        )
         return
     config.method.round_weights(model, op_types, METHOD_GROUP_SIZE)
 

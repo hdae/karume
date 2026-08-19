@@ -356,6 +356,7 @@ def fake_quant_kmeans(
     op_types: tuple[type[nn.Module], ...] = (nn.Linear,),
     levels: int = DEFAULT_CODEBOOK_LEVELS,
     iterations: int = DEFAULT_CODEBOOK_ITERATIONS,
+    fit_stride: int = 1,
 ) -> MethodReport:
     """16 centroid の k-means codebook で丸める（表の粒度 3 種）。
 
@@ -370,11 +371,22 @@ def fake_quant_kmeans(
     MUST: 同一入力 → ビット同一出力（{@link fit_codebook} が決定的・seed に依存しない）。
 
     NOTE: `shared` は表を当てる前に**全対象の正規化値を 1 本へ連結**するので、対象の重みと
-    同サイズの f32 一時領域が要る（測定台本で 1B 級を丸ごと通すときはここが山になる）。
+    同サイズの f32 一時領域（+ {@link fit_codebook} の f64 作業領域）が要り、1B 級では実
+    メモリを超える。`fit_stride` はその逃げ道 — **`shared` の表の fit だけ**を等間隔
+    `flat[::fit_stride]`（モジュールごと）の部分標本で採る（**適用は常に全量**）。乱数を
+    使わないので決定性 MUST はそのまま成り立つ。MUST: 使ったら測定側の出力へ明記する —
+    部分標本の表と全量の表は別物になりうるので、数値を読む側が区別できること。
     """
     if granularity not in KMEANS_GRANULARITIES:
         raise QuantizeError(
             f"k-means の粒度 '{granularity}' は未対応（{', '.join(KMEANS_GRANULARITIES)}）"
+        )
+    if fit_stride < 1:
+        raise QuantizeError(f"fit_stride は 1 以上（実測 {fit_stride}）")
+    if fit_stride != 1 and granularity != "shared":
+        raise QuantizeError(
+            f"fit_stride は shared 専用（'{granularity}' の fit は対象と同サイズの連結を"
+            "作らないので、標本化する理由が無い — 黙って無視もしない）"
         )
     method = f"kmeans:{granularity}"
     if granularity != "shared":
@@ -395,7 +407,10 @@ def fake_quant_kmeans(
             rows = channel_rows(weight, axis)
             scale = group_absmax_scale(rows, group_size, 1.0, f"'{fqn}'")
             grouped = grouped_view(rows, group_size_of(rows, scale), f"'{fqn}'")
-            normalized.append((grouped / scale.unsqueeze(-1)).reshape(-1))
+            flat = (grouped / scale.unsqueeze(-1)).reshape(-1)
+            # 標本のみ保持する場合は clone で母体を切り離す（view のままだと全量が生き残り、
+            # fit_stride の目的である一時領域の削減が黙って無効になる）。
+            normalized.append(flat[::fit_stride].clone() if fit_stride > 1 else flat)
     if not normalized:
         raise QuantizeError(
             f"{method}: 丸められる重みが 1 本も無い"

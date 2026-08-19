@@ -338,6 +338,49 @@ class TestKMeansCodebook:
         with pytest.raises(QuantizeError, match="割り切れない"):
             fake_quant_kmeans(nn.Linear(20, 3), "shared", group_size=GROUP)
 
+    def test_a_strided_fit_is_deterministic(self):
+        """`fit_stride` は等間隔標本（乱数なし）— seed を振っても結果が動かない。"""
+        model = layers()
+        twin = copy.deepcopy(model)
+
+        fake_quant_kmeans(model, "shared", group_size=GROUP, fit_stride=3)
+        torch.manual_seed(999)
+        fake_quant_kmeans(twin, "shared", group_size=GROUP, fit_stride=3)
+
+        assert torch.equal(model.dense.weight, twin.dense.weight)
+        assert torch.equal(model.wide.weight, twin.wide.weight)
+
+    def test_the_strided_fit_sees_only_the_sampled_values(self):
+        """対照（標本化が実際に効く）— 偶数添字 +1 / 奇数 −1 の重みで stride=2 の表は
+        +1 しか見ないので、適用後は全要素が +1 へ倒れる（全量 fit は ±1 を厳密復元する）。
+        """
+
+        def alternating() -> nn.Linear:
+            module = nn.Linear(32, 1, bias=False)
+            with torch.no_grad():
+                values = torch.ones(32)
+                values[1::2] = -1.0
+                module.weight.copy_(values.reshape(1, 32))
+            return module
+
+        full = alternating()
+        sampled = alternating()
+
+        fake_quant_kmeans(full, "shared", group_size=GROUP)
+        fake_quant_kmeans(sampled, "shared", group_size=GROUP, fit_stride=2)
+
+        assert torch.equal(full.weight, alternating().weight)
+        assert torch.equal(sampled.weight, torch.ones(1, 32))
+
+    def test_a_stride_on_a_granularity_without_a_concat_fit_fails_loudly(self):
+        """`fit_stride` は shared 専用 — 他粒度で黙って無視される形を作らない。"""
+        with pytest.raises(QuantizeError, match="shared 専用"):
+            fake_quant_kmeans(layers(), "per_tensor", group_size=GROUP, fit_stride=2)
+
+    def test_a_non_positive_stride_fails_loudly(self):
+        with pytest.raises(QuantizeError, match="1 以上"):
+            fake_quant_kmeans(layers(), "shared", group_size=GROUP, fit_stride=0)
+
     def test_an_unknown_granularity_fails_loudly(self):
         with pytest.raises(QuantizeError, match="未対応"):
             fake_quant_kmeans(layers(), "per_group", group_size=GROUP)  # type: ignore[arg-type]
