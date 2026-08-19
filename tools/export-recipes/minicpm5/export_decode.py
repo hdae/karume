@@ -61,7 +61,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -74,8 +73,9 @@ from torch import nn
 from torch.export import Dim
 from torch.nn import functional
 
-from _shared.decode_series import _publish, _write_greedy, assert_case_room, positions_for
+from _shared.decode_series import _write_greedy, assert_case_room, positions_for
 from _shared.paths import SERIES_ROOT
+from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.emit import write_model
 from karume.ir import IrGraph
@@ -497,9 +497,9 @@ def export_series(
 ) -> dict[str, Any]:
     """states 形 IR コンテナ・io golden・greedy golden を書き、要約を返す。
 
-    MUST: 生成物は staging ディレクトリへ書き、**全ての門**（形検査・margin 門・波 A 期待表との
-    sanity）を通してから {@link _publish} で final へ入れ替える。門より前に final へ置くと、
-    落ちた実走が「検収門を通れる資産」を残す（{@link _publish} の docstring）。
+    MUST: 生成物は作業席へ書き、**全ての門**（形検査・margin 門・波 A 期待表との sanity）を
+    通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す
+    （据え替えと後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
     """
     wrapper = load_wrapper(model_dir, positions=positions)
     cases = one_shot.build_cases(model_dir, sym_max)
@@ -508,10 +508,10 @@ def export_series(
     assert_case_room(cases, 0, positions)
     assert_case_room(greedy_cases, steps, positions)
     out_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging = out_dir.with_name(f"{out_dir.name}.staging-{uuid4().hex}")
-    staging.mkdir()
 
-    try:
+    with staged_publication(out_dir) as staging:
+        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        staging.mkdir()
         # 例示入力は最長ケース（記号次元の 0/1 特殊化から遠い）。min=2 は同じ理由、max は
         # mask の Tmax 畳み込みの評価点（手術で刈るので配布物には残らないが、trace は通る）。
         _, example_ids = max(cases, key=lambda case: case[1].shape[1])
@@ -538,7 +538,7 @@ def export_series(
 
         # 第 1 継続 token を波 A の期待表と突き合わせる（機構横断の突合 — 1-shot 形と decode 形の
         # 台本は別物なので、同じ重み・同じ prompt で 1 位が一致することが両者の交差検証になる）。
-        # MUST: 公開より前に評価する（落ちたら staging ごと消える — 混成資産を残さない）。
+        # MUST: 公開より前に評価する（落ちたら作業席ごと消える — 混成資産を残さない）。
         tokenizer = one_shot.load_tokenizer(model_dir)
         first = {name: continuation[0] for name, continuation in tokens.items()}
         expected = {
@@ -551,10 +551,6 @@ def export_series(
             for token in set(first.values()) | set(expected.values())
         }
         sanity = one_shot._sanity(first, expected, labels)
-        _publish(staging, out_dir)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
     return {
         "dir": str(out_dir),
         "nodes": len(verified.nodes),

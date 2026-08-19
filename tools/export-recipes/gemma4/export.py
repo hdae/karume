@@ -104,7 +104,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -946,14 +946,40 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
     }
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+def series_parser(description: str, out_dir: Path) -> argparse.ArgumentParser:
+    """この family の 3 台本に共通な CLI の骨組み（`--model-dir` / `--out` / `--sym-max`）。
+
+    系列で違うのは既定の出力先と、chunk 系列だけが足す `--positions` / `--steps` だけ
+    （{@link gemma4.export_decode.run_variant_cli}）。3 つの入口で綴りや既定が割れると、
+    「台本ごとに違う名前の同じノブ」が生える。
+    """
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--out", type=Path, default=out_dir)
     parser.add_argument("--sym-max", type=int, default=SYM_MAX)
+    return parser
+
+
+def run_series_cli(
+    parser: argparse.ArgumentParser,
+    run: Callable[..., dict[str, Any]],
+    argv: Sequence[str] | None,
+) -> None:
+    """CLI を解いて `run(model_dir, out, **残りのノブ)` を呼び、要約 JSON を刷る。
+
+    MUST: `--model-dir` / `--out` 以外は**そのまま名前付きで**渡す — argparse の dest と
+    各 `export_series` のキーワード名が同じ綴りであることが条件で、系列ごとにノブの本数が
+    違っても受け渡しを書き足さずに済む形。
+    """
     args = parser.parse_args(argv)
-    summary = export_series(args.model_dir, args.out, sym_max=args.sym_max)
+    positional = ("model_dir", "out")
+    options = {name: value for name, value in vars(args).items() if name not in positional}
+    summary = run(args.model_dir, args.out, **options)
     print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    run_series_cli(series_parser(__doc__.split("\n\n")[0], DEFAULT_OUT_DIR), export_series, argv)
 
 
 if __name__ == "__main__":

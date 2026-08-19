@@ -13,6 +13,8 @@
 - greedy の margin 門が下限以下の step を落とすこと（恒真でない余裕保証）
 - `greedy_continuation` が **full re-forward**（毎 step 先頭から・位置は arange）で採ること
 - 帯 / 因果 mask は 1-shot 台本のものを**そのまま**使うこと（窓の意味論を 2 箇所に持たない）
+- chunk 系列 2 本を駆動する variant の分岐（{@link decode.ChunkVariant}）— 組むラッパ・
+  `last_row` の有無・golden の有無・据える単位・要約の欄が系列ごとに正しく変わること
 
 transformers を要するケースだけ `importorskip` で SKIP する（既定 sync の CI ではモデル系
 依存が入らない — ADR 0065 の 2 job 構成）。
@@ -33,6 +35,7 @@ from torch.export import Dim
 from _shared import decode_series as shared
 from gemma4 import export as gx
 from gemma4 import export_decode as decode
+from gemma4 import export_token as token_only
 from gemma4.tests.test_export import (
     FULL_DEPTH,
     HEADS,
@@ -933,3 +936,245 @@ class TestPublish:
 
         assert (final / "model").read_text() == "old"
         assert staging.exists()
+
+
+# ---- variant 駆動の中核 ----------------------------------------------------
+
+
+class TestChunkVariants:
+    """chunk 系列 2 本の記述子（{@link decode.ChunkVariant}）が宣言する 4 欄。"""
+
+    def test_the_logits_series_declares_the_two_output_exit_with_goldens(self):
+        assert decode.DECODE.wrapper is decode.DecodeChunkWrapper
+        assert decode.DECODE.token_only is False
+        assert decode.DECODE.goldens is True
+
+    def test_the_token_only_series_declares_the_other_exit_without_goldens(self):
+        """MUST: golden を採らないのは、検収門が logits 系列の greedy 記録を流用するから。"""
+        assert token_only.VARIANT.wrapper is token_only.TokenOnlyChunkWrapper
+        assert token_only.VARIANT.token_only is True
+        assert token_only.VARIANT.goldens is False
+
+    def test_the_two_series_land_in_different_directories(self):
+        """置き場を共有すると、出口の違う 2 つの資産が互いを上書きする。"""
+        assert decode.DECODE.out_dir != token_only.VARIANT.out_dir
+
+    def test_both_wrappers_share_the_chunk_module_space(self):
+        """MUST: 量子化の対象述語と scale 台帳を再利用できる条件（FQN 空間の同一性）。"""
+        assert issubclass(token_only.VARIANT.wrapper, decode.DECODE.wrapper)
+
+
+class TestExportArgs:
+    @pytest.fixture
+    def seq(self):
+        return Dim(decode.SEQ_SYMBOL, min=2, max=TINY_SYM_MAX)
+
+    def test_the_logits_form_traces_ids_and_positions(self, seq):
+        ids = torch.zeros(1, 5, dtype=torch.int64)
+
+        args, shapes = decode._export_args(decode.DECODE, ids, seq)
+
+        assert len(args) == 2
+        assert torch.equal(args[1], torch.arange(5).unsqueeze(0))
+        assert shapes == ({1: seq}, {1: seq})
+
+    def test_the_token_only_form_adds_the_last_row_as_a_static_input(self, seq):
+        """MUST: `last_row` は最終有効行 T−1 を指し、記号次元を持たない（M と紐づけない）。"""
+        ids = torch.zeros(1, 5, dtype=torch.int64)
+
+        args, shapes = decode._export_args(token_only.VARIANT, ids, seq)
+
+        assert len(args) == 3
+        assert args[2].tolist() == [4]
+        assert args[2].dtype is torch.int64
+        assert shapes[2] is None
+
+
+@pytest.fixture
+def tiny_materials(monkeypatch):
+    """`one_shot.load_model_and_tables` を tiny な模型へ差し替える（実重みを読まない席）。"""
+    transformers = pytest.importorskip("transformers")
+
+    def materials(model_dir):
+        torch.manual_seed(0)
+        gx.register_attention()
+        config = _tiny_decode_config()
+        config._attn_implementation = gx.ATTENTION_NAME
+        model = transformers.Gemma4ForCausalLM(config).to(torch.float32).eval()
+        tables = nn.ModuleList(
+            [
+                nn.Embedding.from_pretrained(torch.randn(VOCAB, PLE_DIM), freeze=True)
+                for _ in DECODE_LAYER_TYPES
+            ]
+        )
+        return model, tables
+
+    monkeypatch.setattr(gx, "load_model_and_tables", materials)
+
+
+class TestLoadWrapper:
+    @pytest.mark.parametrize(
+        "variant",
+        [decode.DECODE, token_only.VARIANT],
+        ids=["logits", "token-only"],
+    )
+    def test_it_builds_the_variant_wrapper_on_a_table_rope(self, variant, tiny_materials):
+        """variant で変わるのはラッパ型だけ（素材の読み方と RoPE の差し替えは共通）。"""
+        wrapper = decode.load_wrapper(variant, Path("unused"), positions=TINY_POSITIONS)
+
+        assert type(wrapper) is variant.wrapper
+        assert isinstance(wrapper.model.model.rotary_emb, decode.RopeTable)
+        # 検査席の PLE 表は落ちている（量子化の対象網羅の条件 — 1-shot 台本と同文）。
+        assert not hasattr(wrapper.model.model, "embed_tokens_per_layer")
+        assert not wrapper.training
+
+
+#: driver の一周に使うケース名。greedy 採用集合と 1-shot の期待表の**両方**にある名前でないと、
+#: 系列の門（`GREEDY_CASES` の絞り込みと第 1 継続の突合）が実物と違う枝を通る。
+TINY_CASE_NAMES = ("capital-en", "capital-ja")
+
+#: 系列ごとの要約の欄（順序込み）。ここが変わると実走の記録の形が変わる。
+DECODE_SUMMARY_KEYS = [
+    "dir",
+    "nodes",
+    "outputs",
+    "initializers",
+    "pruned_initializers",
+    "model_bytes",
+    "ops",
+    "symbols",
+    "io",
+    "greedy",
+    "greedy_steps",
+    "case_lengths",
+    "quantized",
+    "form",
+    "margin_min",
+    "continuation",
+    "sanity",
+]
+TOKEN_ONLY_SUMMARY_KEYS = [
+    "dir",
+    "nodes",
+    "outputs",
+    "initializers",
+    "model_bytes",
+    "ops",
+    "symbols",
+    "case_lengths",
+    "quantized",
+    "form",
+    "sanity",
+]
+
+
+class _StubSeriesTokenizer:
+    """期待表の引き・ラベル・継続の復号に要る 3 面だけを持つトークナイザの被験体。"""
+
+    def encode(self, text: str, add_special_tokens: bool = True):
+        """`tokenizers.Tokenizer.encode` の呼び出し規約だけ合わせる（単一トークンを返す）。"""
+        return SimpleNamespace(ids=[len(text) % VOCAB])
+
+    def id_to_token(self, token: int) -> str:
+        return f"<{token}>"
+
+    def decode(self, tokens) -> str:
+        return " ".join(f"<{token}>" for token in tokens)
+
+
+@pytest.fixture
+def tiny_series(monkeypatch, tiny_materials):
+    """実資産を読まずに {@link decode.export_series} を 1 周させるための差し替え一式。
+
+    差し替えるのは**素材の出どころ**（模型・ケース・トークナイザ）と、tiny な乱数重みでは
+    立てられない 2 つの期待だけ — 継続の余裕（床は `TestGreedyMargins` が固定）と最終位置の
+    1 位（`test_export.TestSanity` が固定）。量子化 → export → 手術 → 書き出し → 形検査 →
+    公開の経路は本物を通す。
+    """
+    torch.manual_seed(1)
+    cases = tuple(
+        (name, torch.randint(0, VOCAB, (1, WINDOW + 3 - index), dtype=torch.int64))
+        for index, name in enumerate(TINY_CASE_NAMES)
+    )
+    monkeypatch.setattr(gx, "build_cases", lambda model_dir, sym_max, window: cases)
+    monkeypatch.setattr(gx, "load_tokenizer", lambda model_dir: _StubSeriesTokenizer())
+    monkeypatch.setattr(decode, "MARGIN_FLOOR", 0.0)
+    seen: dict[str, dict[str, int]] = {}
+
+    def record(greedy, expected, labels):
+        seen["greedy"] = dict(greedy)
+        return {"stub": "ok"}
+
+    monkeypatch.setattr(gx, "_sanity", record)
+    return SimpleNamespace(cases=cases, sanity=seen)
+
+
+class TestExportSeries:
+    """variant 駆動の一周（tiny 模型）。系列で変わるのは出口・golden・据える単位・要約の欄。"""
+
+    def test_the_logits_series_publishes_the_container_with_its_goldens(
+        self, tiny_series, tmp_path
+    ):
+        out_dir = tmp_path / "series"
+
+        summary = decode.export_series(
+            decode.DECODE,
+            tmp_path / "unused",
+            out_dir,
+            sym_max=TINY_SYM_MAX,
+            positions=TINY_POSITIONS,
+            steps=1,
+        )
+
+        assert sorted(path.name for path in out_dir.iterdir()) == [
+            "greedy.capital-en.safetensors",
+            "greedy.capital-ja.safetensors",
+            "io.capital-en.safetensors",
+            "io.capital-ja.safetensors",
+            "model.safetensors",
+        ]
+        assert summary["outputs"] == 2
+        assert list(summary) == DECODE_SUMMARY_KEYS
+        assert set(tiny_series.sanity["greedy"]) == set(TINY_CASE_NAMES)
+        # 作業席も退避席も残らない（据え替えの後片付けは core の原語の担当）。
+        assert list(tmp_path.iterdir()) == [out_dir]
+
+    def test_the_token_only_series_publishes_the_container_alone(self, tiny_series, tmp_path):
+        """golden を採らない系列は「コンテナ 1 本」を据える（io / greedy を書かない）。"""
+        out_dir = tmp_path / "series"
+
+        summary = decode.export_series(
+            token_only.VARIANT,
+            tmp_path / "unused",
+            out_dir,
+            sym_max=TINY_SYM_MAX,
+            positions=TINY_POSITIONS,
+        )
+
+        assert [path.name for path in out_dir.iterdir()] == ["model.safetensors"]
+        assert summary["outputs"] == 1
+        assert list(summary) == TOKEN_ONLY_SUMMARY_KEYS
+        # sanity は全ケースぶん（greedy 記録が無いので全長 forward で採る）。
+        assert set(tiny_series.sanity["greedy"]) == set(TINY_CASE_NAMES)
+        assert list(tmp_path.iterdir()) == [out_dir]
+
+    def test_a_failing_gate_leaves_nothing_behind(self, tiny_series, tmp_path, monkeypatch):
+        """MUST: 門より前に final へ置かない（落ちた実走が検収を通れる資産を残さない）。"""
+
+        def refuse(greedy, expected, labels):
+            raise AssertionError("最終位置の 1 位が期待継続と違う")
+
+        monkeypatch.setattr(gx, "_sanity", refuse)
+        out_dir = tmp_path / "series"
+
+        with pytest.raises(AssertionError, match="期待継続と違う"):
+            decode.export_series(
+                decode.DECODE,
+                tmp_path / "unused",
+                out_dir,
+                sym_max=TINY_SYM_MAX,
+                positions=TINY_POSITIONS,
+                steps=1,
+            )
+
+        assert list(tmp_path.iterdir()) == []

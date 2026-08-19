@@ -7,11 +7,24 @@ ADR [0066](../../../docs/decisions/0066-generation-context-state-slots.md)（Gen
 [0068](../../../docs/decisions/0068-decode-exit-multi-output.md) 決定 4（decode 出口）/
 [0069](../../../docs/decisions/0069-packed-w4-storage.md)（packed w4）を、**sliding + KV 共有 +
 混成量子化**を同時に持つ実モデルで検収する足場。同じ枠の KV 共有なし版が
-`minicpm5/export_decode.py`。モデル非依存の門（greedy の採り方・余裕門・容量門・公開の
-入れ替え）の正本は {@link _shared.decode_series}、1-shot 形のヘルパは {@link gemma4.export}
-で、どちらも import して再利用する（同じ規律を 2 箇所に書かない）。
+`minicpm5/export_decode.py`。モデル非依存の門（greedy の採り方・余裕門・容量門）の正本は
+{@link _shared.decode_series}、1-shot 形のヘルパは {@link gemma4.export} で、どちらも import
+して再利用する（同じ規律を 2 箇所に書かない）。
 
     uv run --with 'transformers==5.14.1' python -m gemma4.export_decode
+
+## この台本は chunk 系列 2 本の中核でもある
+
+states 形の chunk グラフは出口が 2 種類ある — logits opt-in 形（この台本の系列）と
+token-only 既定出口（{@link gemma4.export_token} の系列 / ADR 0068 決定 4）。両者で違うのは
+**出口の形と golden を採るかどうかだけ**で、素材の読み方・RoPE の表引き・KV 共有の手術・
+混成量子化・門の順序は同一なので、経路は {@link ChunkVariant} 駆動の 1 本
+（{@link load_wrapper} / {@link export_series} / {@link run_variant_cli}）に閉じる。
+token-only 台本が持つのはラッパ 1 つと variant 記述と入口だけ。
+
+MUST: 差分は variant の 4 欄に載る形だけにする。台本側へ経路を戻すと、片方にだけ門を足した
+ときにもう片方が黙って弱くなる（`_shared.decode_series` の module docstring と同じ理由で、
+実際に逐語コピーだった時期に margin 床の MUST が片方にしか無い状態が生まれた）。
 
 ## 何をグラフに載せるか
 
@@ -95,12 +108,11 @@ causal も窓も**述語計算**になるので mask tensor は要らない。�
 
 from __future__ import annotations
 
-import argparse
-import json
 import os
-import shutil
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -111,9 +123,10 @@ from torch import nn
 from torch.export import Dim
 from torch.nn import functional
 
-from _shared.decode_series import _publish, _write_greedy, assert_case_room, positions_for
+from _shared.decode_series import _write_greedy, assert_case_room, positions_for
 from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
+from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.emit import write_model
 from karume.ir import IrGraph, IrNode
@@ -124,10 +137,9 @@ from karume.states import StateAttentionSpec, StatesPlan, to_states_form
 from karume.verify import verify_model
 
 #: 生成物の既定の置き場（1-shot 系列とは別ディレクトリ — グラフの形が違う別資産）。
+#: 素材（`--model-dir` の既定）は 1-shot 形と同じで、綴りは共通の CLI 骨組みが持つ
+#: （{@link gemma4.export.series_parser}）。
 DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-decode"
-
-#: 公式重みの置き場（1-shot 形と同じ素材）。
-DEFAULT_MODEL_DIR = one_shot.DEFAULT_MODEL_DIR
 
 #: グラフ入力の名前（chunk ラッパの forward 引数名）。{@link assert_ir_form_decode} が
 #: 「この 2 本だけ」を見るための綴り。
@@ -355,14 +367,47 @@ class DecodeChunkWrapper(one_shot.Gemma4Wrapper):
         return logits, logits.argmax(-1, keepdim=True)
 
 
-def load_wrapper(model_dir: Path, *, positions: int = ROPE_TABLE_POSITIONS) -> DecodeChunkWrapper:
-    """実重みを f32 で読み、RoPE を表引きへ差し替えた export 可能な chunk ラッパを返す。"""
+@dataclass(frozen=True)
+class ChunkVariant:
+    """chunk 系列 2 本（logits opt-in / token-only）の**差分だけ**を持つ記述子。
+
+    載せるのは {@link export_series} が実際に分岐する 4 点 — 系列の置き場・組むラッパ・出口の
+    形・自分の golden を採るか。手術も混成量子化も門の順序も両系列で同一なので、それ以外の席は
+    作らない（席を作ると「片方だけ違う経路」が書けるようになる）。
+    """
+
+    #: 生成物の既定の置き場（系列ごとに別ディレクトリ — グラフの形が違う別資産）。
+    out_dir: Path
+    #: 組む chunk ラッパ（{@link DecodeChunkWrapper} の継承鎖のどれか）。
+    wrapper: type[DecodeChunkWrapper]
+    #: 出口が token-only（`last_row` 入力が増え、出力が token 1 本 — ADR 0068 決定 4）か。
+    token_only: bool
+    #: 自分の golden（io + greedy）を採るか。token-only 系列は logits opt-in 系列の greedy
+    #: 記録を検収門がそのまま流用するので採らない（{@link gemma4.export_token} の docstring）
+    #: — 出口の形とは独立の系列ごとの方針なので、`token_only` から導かない。
+    goldens: bool
+
+
+#: この台本の系列（logits opt-in 形 — 全 M 行の logits と token を出す）。
+DECODE = ChunkVariant(
+    out_dir=DEFAULT_OUT_DIR, wrapper=DecodeChunkWrapper, token_only=False, goldens=True
+)
+
+
+def load_wrapper(
+    variant: ChunkVariant, model_dir: Path, *, positions: int = ROPE_TABLE_POSITIONS
+) -> DecodeChunkWrapper:
+    """実重みを f32 で読み、RoPE を表引きへ差し替えた export 可能な chunk ラッパを返す。
+
+    variant で変わるのは最後に組むラッパ型だけ — 素材の読み方（3 つの等価検査を含む）と
+    RoPE の差し替えは chunk 系列で同一。
+    """
     model, tables = one_shot.load_model_and_tables(model_dir)
     # 検査席の PLE 表を落とす理由は {@link gemma4.export.build_wrapper} と同じ
     # （分割 35 本を PLE の唯一の正本にして、量子化の対象網羅を言える形にする）。
     del model.model.embed_tokens_per_layer
     swap_rope_table(model, positions)
-    return DecodeChunkWrapper(model, tables).eval()
+    return variant.wrapper(model, tables).eval()
 
 
 def rope_table_keys(wrapper: nn.Module) -> tuple[str, ...]:
@@ -491,6 +536,16 @@ def states_plan(
 #: そのもの（torch.export がグラフ入力名に採る）— 正本はここで、`export_token` と
 #: `assert_ir_form_decode(token_only=True)` の両方が参照する。
 TOKEN_ONLY_LAST_ROW = "last_row"
+
+
+def last_row_for(ids: torch.Tensor) -> torch.Tensor:
+    """無 pad 全長 prompt の最終有効行の添字 `[T−1]`（token-only 出口の `last_row` 入力）。
+
+    {@link positions_for} と対の「1 chunk で全 prompt を食う」形の値で、例示入力にも sanity の
+    全長 forward にも同じものが要る（綴りが 2 箇所に割れると、行選択が最後の行を指さない形が
+    片方だけで作れてしまう）。
+    """
+    return torch.tensor([int(ids.shape[1]) - 1], dtype=torch.int64)
 
 
 def assert_ir_form_decode(
@@ -785,7 +840,23 @@ def _write_io(
     return written
 
 
+def _export_args(
+    variant: ChunkVariant, ids: torch.Tensor, seq: Dim
+) -> tuple[tuple[torch.Tensor, ...], tuple[Any, ...]]:
+    """例示入力と `dynamic_shapes` の組（token-only は `last_row` が 1 本増える）。
+
+    `last_row` は静的 `[1]`（動的次元なし）— 実行時スカラだが形は 1 要素で固定なので、
+    記号次元を与えると M と紐づいた別物になる。
+    """
+    args: tuple[torch.Tensor, ...] = (ids, positions_for(ids))
+    shapes: tuple[Any, ...] = ({1: seq}, {1: seq})
+    if variant.token_only:
+        return (*args, last_row_for(ids)), (*shapes, None)
+    return args, shapes
+
+
 def export_series(
+    variant: ChunkVariant,
     model_dir: Path,
     out_dir: Path,
     *,
@@ -793,47 +864,58 @@ def export_series(
     positions: int = ROPE_TABLE_POSITIONS,
     steps: int = GREEDY_STEPS,
 ) -> dict[str, Any]:
-    """states 形 IR コンテナ・io golden・greedy golden を書き、要約を返す。
+    """variant の states 形 IR コンテナ（golden を採る系列なら io / greedy も）を書き、要約を返す。
 
-    MUST: 生成物は staging ディレクトリへ書き、**全ての門**（形検査・margin 門・1-shot 期待表
-    との sanity）を通してから {@link _publish} で final へ入れ替える。門より前に final へ置くと、
-    落ちた実走が「検収門を通れる資産」を残す（{@link _publish} の docstring）。
+    MUST: 生成物は作業席へ書き、**全ての門**（形検査・margin 門・1-shot 期待表との sanity）を
+    通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す
+    （据え替えと後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
+    MUST: `steps` を読むのは golden を採る系列だけ（token-only 系列には greedy 記録が無い）。
     """
-    wrapper = load_wrapper(model_dir, positions=positions)
+    wrapper = load_wrapper(variant, model_dir, positions=positions)
     # MUST: 丸めは参照・golden の採取より前（ADR 0006）— 後だと参照だけが元の重みで動く。
     int8, int4, scales = one_shot.quantize_wrapper(wrapper)
     cases = one_shot.build_cases(model_dir, sym_max, wrapper.sliding_window)
     greedy_cases = tuple(case for case in cases if case[0] in GREEDY_CASES)
-    # io は prompt を丸ごと 1 回引くだけ（継続分の位置は要らない）ので steps=0 で見る。
+    # io / sanity は prompt を丸ごと 1 回引くだけ（継続分の位置は要らない）ので steps=0 で見る。
     assert_case_room(cases, 0, positions)
-    assert_case_room(greedy_cases, steps, positions)
-    out_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging = out_dir.with_name(f"{out_dir.name}.staging-{uuid4().hex}")
-    staging.mkdir()
+    if variant.goldens:
+        assert_case_room(greedy_cases, steps, positions)
 
-    try:
-        # 例示入力は最長ケース（記号次元の 0/1 特殊化から遠い）。min=2 は同じ理由、max は
-        # mask の Tmax 畳み込みの評価点（手術で刈るので配布物には残らないが、trace は通る）。
-        _, example_ids = max(cases, key=lambda case: case[1].shape[1])
-        seq = Dim(SEQ_SYMBOL, min=2, max=sym_max)
-        print("[export] torch.export → 変換", file=sys.stderr, flush=True)
-        graph, tensors = export_module(
-            wrapper,
-            (example_ids, positions_for(example_ids)),
-            dynamic_shapes=({1: seq}, {1: seq}),
-            symbol_names=(SEQ_SYMBOL,),
-            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-        )
-        config = wrapper.model.config
-        print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
-        surgical = to_states_form(graph, states_plan(graph, config))
+    # 例示入力は最長ケース（記号次元の 0/1 特殊化から遠い）。min=2 は同じ理由、max は
+    # mask の Tmax 畳み込みの評価点（手術で刈るので配布物には残らないが、trace は通る）。
+    _, example_ids = max(cases, key=lambda case: case[1].shape[1])
+    seq = Dim(SEQ_SYMBOL, min=2, max=sym_max)
+    args, shapes = _export_args(variant, example_ids, seq)
+    print("[export] torch.export → 変換", file=sys.stderr, flush=True)
+    graph, tensors = export_module(
+        wrapper,
+        args,
+        dynamic_shapes=shapes,
+        symbol_names=(SEQ_SYMBOL,),
+        preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+    )
+    config = wrapper.model.config
+    print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
+    surgical = to_states_form(graph, states_plan(graph, config))
+
+    # 据える単位は「系列ディレクトリ丸ごと」か「コンテナ 1 本」か（golden を採る系列だけ前者
+    # — 新 model + 旧 greedy の混成を作れない形にする）。
+    target = out_dir if variant.goldens else out_dir / one_shot.MODEL_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with staged_publication(target) as staged:
+        if variant.goldens:
+            # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+            staged.mkdir()
+            container = staged / one_shot.MODEL_FILE
+        else:
+            container = staged
         # 格納は既定 i8 + linear を 1 本ずつ i4（向きの根拠は 1-shot 台本の docstring —
         # tied 実体の FQN を書く前に知らずに済む側）。RoPE 表は既定 i8 の適格に入ってしまう
         # ので f32 を明示して外す（{@link rope_table_keys}）。
         verified = _write_container(
             surgical,
             tensors,
-            staging / one_shot.MODEL_FILE,
+            container,
             weight_dtype="i8",
             weight_scales=scales,
             weight_dtype_overrides={
@@ -842,20 +924,32 @@ def export_series(
             },
         )
         form = assert_ir_form_decode(
-            verified, config, {"i8": len(int8.scales), "i4": len(int4.scales)}
+            verified,
+            config,
+            {"i8": len(int8.scales), "i4": len(int4.scales)},
+            token_only=variant.token_only,
         )
 
-        print("[io] 全長 forward", file=sys.stderr, flush=True)
-        io_written = _write_io(wrapper, verified, cases, staging)
-        greedy_written, tokens, margins = _write_greedy(
-            wrapper, greedy_cases, staging, steps=steps, floor=MARGIN_FLOOR
-        )
+        if variant.goldens:
+            print("[io] 全長 forward", file=sys.stderr, flush=True)
+            io_written = _write_io(wrapper, verified, cases, staged)
+            greedy_written, tokens, margins = _write_greedy(
+                wrapper, greedy_cases, staged, steps=steps, floor=MARGIN_FLOOR
+            )
+            first = {name: continuation[0] for name, continuation in tokens.items()}
+        else:
+            # golden を採らない系列は sanity のためだけに全長を 1 回引く（行選択は T−1）。
+            print("[sanity] 全長 forward", file=sys.stderr, flush=True)
+            first = {}
+            for name, ids in cases:
+                with torch.no_grad():
+                    token = wrapper(ids, positions_for(ids), last_row_for(ids))
+                first[name] = int(token[0, 0, 0])
 
         # 第 1 継続 token を 1-shot 台本の期待表と突き合わせる（機構横断の突合 — 1-shot 形と
-        # decode 形の台本は別物なので、同じ重み・同じ prompt で 1 位が一致することが両者の
-        # 交差検証になる）。MUST: 公開より前に評価する（落ちたら staging ごと消える）。
+        # chunk 形の台本は別物なので、同じ重み・同じ prompt で 1 位が一致することが両者の
+        # 交差検証になる）。MUST: 公開より前に評価する（落ちたら作業席ごと消える）。
         tokenizer = one_shot.load_tokenizer(model_dir)
-        first = {name: continuation[0] for name, continuation in tokens.items()}
         expected = {
             name: token
             for name, token in one_shot.expected_token_ids(tokenizer).items()
@@ -866,49 +960,63 @@ def export_series(
             for token in set(first.values()) | set(expected.values())
         }
         sanity = one_shot._sanity(first, expected, labels)
-        _publish(staging, out_dir)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+
+    # 刈り込み本数と golden 3 種は golden を採る系列だけの欄（token-only の要約はコンテナ
+    # 1 本ぶんなので増やさない）。
+    pruned: dict[str, Any] = (
+        {"pruned_initializers": len(graph.initializers) - len(verified.initializers)}
+        if variant.goldens
+        else {}
+    )
+    written: dict[str, Any] = (
+        {"io": io_written, "greedy": greedy_written, "greedy_steps": steps}
+        if variant.goldens
+        else {}
+    )
+    measured: dict[str, Any] = (
+        {
+            "margin_min": {name: min(values) for name, values in sorted(margins.items())},
+            "continuation": {
+                name: tokenizer.decode(continuation)
+                for name, continuation in sorted(tokens.items())
+            },
+        }
+        if variant.goldens
+        else {}
+    )
     return {
         "dir": str(out_dir),
         "nodes": len(verified.nodes),
         "outputs": len(verified.outputs),
         "initializers": len(verified.initializers),
-        "pruned_initializers": len(graph.initializers) - len(verified.initializers),
+        **pruned,
         "model_bytes": (out_dir / one_shot.MODEL_FILE).stat().st_size,
         "ops": sorted(verified.required_ops),
         "symbols": list(verified.symbols),
-        "io": io_written,
-        "greedy": greedy_written,
-        "greedy_steps": steps,
+        **written,
         "case_lengths": {name: int(ids.shape[1]) for name, ids in cases},
         "quantized": {"i8": int8.describe(), "i4": int4.describe()},
         "form": form,
-        "margin_min": {name: min(values) for name, values in sorted(margins.items())},
-        "continuation": {
-            name: tokenizer.decode(continuation) for name, continuation in sorted(tokens.items())
-        },
+        **measured,
         "sanity": sanity,
     }
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR)
-    parser.add_argument("--sym-max", type=int, default=one_shot.SYM_MAX)
+def run_variant_cli(variant: ChunkVariant, description: str, argv: Sequence[str] | None) -> None:
+    """variant の CLI を組んで走らせる（chunk 系列 2 本の入口はこれ 1 本）。
+
+    骨組みは 1-shot 台本と共有する（{@link gemma4.export.series_parser}）— chunk 系列が足すのは
+    位置表の大きさ `--positions` と、golden を採る系列だけの `--steps`。
+    """
+    parser = one_shot.series_parser(description, variant.out_dir)
     parser.add_argument("--positions", type=int, default=ROPE_TABLE_POSITIONS)
-    parser.add_argument("--steps", type=int, default=GREEDY_STEPS)
-    args = parser.parse_args(argv)
-    summary = export_series(
-        args.model_dir,
-        args.out,
-        sym_max=args.sym_max,
-        positions=args.positions,
-        steps=args.steps,
-    )
-    print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
+    if variant.goldens:
+        parser.add_argument("--steps", type=int, default=GREEDY_STEPS)
+    one_shot.run_series_cli(parser, partial(export_series, variant), argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    run_variant_cli(DECODE, __doc__.split("\n\n")[0], argv)
 
 
 if __name__ == "__main__":
