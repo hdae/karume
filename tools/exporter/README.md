@@ -249,7 +249,7 @@ capture). Two points matter:
 transposed `[Cin,Cout,K]` layout) — mixing up the axis table does not show up in the values for the
 other 4 ops.
 
-## Compressed weight storage (f16 / i8 — ADR 0018 / 0019)
+## Compressed weight storage (f16 / i8 / i4 — ADR 0018 / 0019 / 0069)
 
 Storage compression is emit-side and model-independent: which initializers may be stored
 compressed, how the fake-quant is defined, and in what order the tensors are written. The
@@ -326,6 +326,69 @@ would push the following absolute offsets off the multiple of their element size
 injection in `test_emit.py` demonstrates this — HF's `safe_open` can still read them).
 
     F32 (name ascending) → I32 → even-count F16 → odd-count F16 → **I8 (last)**
+
+### Group-wise int4 (`weight_dtype="i4"` — ADR 0069)
+
+**Eligibility is narrower than f16 / i8**: on top of the AND of 2 conditions above, an i4 initializer
+must be consumed **only by the weight slot of `linear`** (`linear_weight_initializers`). The
+execution path starts at linear, so an initializer that is also consumed by another weight slot
+(`embedding` / the conv family) cannot be stored as i4. With the **default** `weight_dtype="i4"` such
+a weight silently stays f32 — the same landing pad as an i8-ineligible weight, and the counterpart of
+the runtime's `eligible ∩ linearOnly`; without it an ordinary LLM (linear + embedding) could not be
+exported at all. An **explicit** i4 on a non-linear weight fails loudly instead (see below).
+
+**Definition of the quantization** (`src/karume/quantize.py`, `fake_quant_int4`): symmetric int4
+along the K (input) axis, per group of `group_size` elements —
+`scale = clamp(amax_group / 7, f32 tiny)` and `q = clamp(round(w/scale), ±7)`. **−8 is not used**, so
+the largest-magnitude element of a group lands on `q = ±7` and is restored exactly, which makes the
+fake-quant **idempotent**. The target is `nn.Linear.weight` only (bias and norm weights are never
+touched). `group_size` defaults to **32** and must be a **power of two ≥ 16**; the quantized axis has
+to be divisible by it. 0 targets fails loudly with `QuantizeError`.
+
+**Packing order** (`emit.pack_int4` is authoritative, and `tests/test_emit.py` pins it by byte
+value): two elements that are **adjacent in flat index** share one byte, element `2i` in the **low**
+nibble and `2i+1` in the high nibble, each stored as the offset-8 unsigned nibble `u = q + 8`. This
+is deliberately **not** llama.cpp's Q4_0 split-half layout — mixing the two up produces a container
+whose shapes and types still match, so only this rule and its byte-level test stand between the two.
+An odd element count fails loudly (the last element would stick out by half a byte).
+
+**Companion scales**: like i8, an F32 tensor named `karume.scale.<weight key>` goes into the same
+file and is declared through `storage.scale`, but the shape is the **group form** — same rank as the
+weight with the last dimension replaced by the group count (`[…, K/group_size]`) — and
+`storage.group_size` is declared alongside it. The scale is the one the fake-quant used, verbatim.
+The inverse-transform check runs on the **stored bytes** (`dequantize_int4(unpack_int4(packed))`),
+because a mistaken pack order is otherwise a silent wrong-value bug.
+
+**Ordering**: an I4 data section is always a multiple of 8 bytes, so it belongs to the 4-byte-aligned
+group and goes with F32 / I32 (ADR 0069 addendum 2):
+
+    F32 (name ascending) → I32 → **I4** → even-count F16 → odd-count F16 → I8 (last)
+
+### Mixed storage (`weight_dtype_overrides` — ADR 0069 addendum 4)
+
+`export_to_file` / `write_model` take `weight_dtype_overrides` (**tensor key (FQN) → storage dtype**),
+which takes precedence over the single default `weight_dtype`. This is what an LLM needs: "embedding
+i8, linear i4" (first used by Gemma 4 E2B — `../export-recipes/gemma4/`). Pass the merged i8 + i4
+ledgers in one `weight_scales` mapping (the key space is the FQN, so they never collide). On the
+fake-quant side, `fake_quant_int8` / `fake_quant_int4` take an `include` predicate over module FQNs
+so that each weight is rounded exactly once — rounding one weight through both would leave the scale
+ledger disagreeing with the actual values.
+
+Where the default `weight_dtype` **silently leaves ineligible weights as f32**, an explicit override
+**fails loudly whenever it cannot be honoured** — the caller wrote the intent one tensor at a time,
+so there is no room for silently choosing another storage. The 4 branches:
+
+| Situation                          | Result                                                             |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| the key is no initializer's tensor | `EmitError` (a typo would silently drop the requested compression) |
+| the initializer is not eligible    | `EmitError` (consumed outside a weight slot)                       |
+| the tensor is not f32              | `EmitError` (compressed storage takes f32 values only)             |
+| `"i4"` on a non-linear weight      | `EmitError` (the i4 eligibility above)                             |
+
+An explicit `"f32"` is the opposite direction: it **exempts** one tensor from a compressed default.
+That is mandatory for the RoPE position tables of the decode series, which land in an `embedding`
+weight slot and would otherwise be rounded by an i8 default — unlike weight rounding, angle error
+there accumulates along the position axis.
 
 ## Module structure
 
@@ -562,10 +625,7 @@ the attrs are placed here.
 - A Python interpretation oracle for the IR (numerical comparison). Numerical verification is
   handled by the Deno-side E2E.
 - **bf16 storage** (it is in the IR vocabulary but has no execution path — ADR 0006). f16 is
-  implemented in ADR 0018 and i8 + per-channel scale in ADR 0019. w4 (group quantization) is
-  confirmed as not adopted.
-- **Mixed storage** (mixing i8 and f16 within one target). `emit._plan_weight_dtype` applies a
-  single `weight_dtype` to everything.
+  implemented in ADR 0018, i8 + per-channel scale in ADR 0019, and i4 + group scale in ADR 0069.
 - Host implementations of the runtime pipelines (SBV2: text → durations → assembling y_mask → voice
   / Anima: tokenization → scheduler → CFG → denormalization). The layer that connects the emitted
   targets is outside the exporter's scope (for Anima the host implementation lives in

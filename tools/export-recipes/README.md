@@ -83,6 +83,7 @@ release gate, and this reorganization only creates its precondition.
 | `embeddinggemma` (sentence embedding) | one graph covering all 5 SentenceTransformer modules — series only, no distribution                                  | [embeddinggemma/README.md](embeddinggemma/README.md) |
 | `vowel-detector` (lip-sync vowels)    | the CRNN as one graph with a symbolic length                                                                         | [vowel_detector/README.md](vowel_detector/README.md) |
 | `minicpm5` (causal LM, 1-shot)        | MiniCPM5-1B as one prefill-shaped graph — the GQA acceptance fixture (ADR 0067), series only                         | [minicpm5/README.md](minicpm5/README.md)             |
+| `gemma4` (causal LM, 1-shot + decode) | Gemma 4 E2B as 3 series (1-shot / states-form decode / token-only exit) — the mixed i8 × i4 fixture, series only     | [gemma4/README.md](gemma4/README.md)                 |
 
 ## Patch layers
 

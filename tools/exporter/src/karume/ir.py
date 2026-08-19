@@ -26,7 +26,7 @@ MIN_GROUP_SIZE = 16
 
 @dataclass(frozen=True)
 class IrStorage:
-    """格納 dtype。M0 ランタイムが実行できるのは f32 のみ。"""
+    """格納 dtype。実行経路があるのは f32 / f16 / i8 / i4 と、記号依存定数の i32。"""
 
     dtype: str
     #: 量子化格納の scale テンソルの safetensors キー（storage.dtype == "i8" / "i4" のみ）。
@@ -118,7 +118,8 @@ class IrGraph:
     outputs: list[str] = field(default_factory=list)
     initializers: dict[str, IrInitializer] = field(default_factory=dict)
     values: dict[str, IrValue] = field(default_factory=dict)
-    #: state スロット宣言（ADR 0066 決定 2）。エクスポータはまだ出さない — 読む側だけが先。
+    #: state スロット宣言（ADR 0066 決定 2）。これを出すのは export 後の手術
+    #: `karume.states.to_states_form`（ADR 0067）— `convert` は attention 形のまま出す。
     states: dict[str, IrState] = field(default_factory=dict)
     nodes: list[IrNode] = field(default_factory=list)
 
