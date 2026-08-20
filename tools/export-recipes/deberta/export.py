@@ -7,6 +7,7 @@
     uv run --with 'transformers==5.14.1' python -m deberta.export
     uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2
     uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i8 --act-quant
+    uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layers 22
 
 transformers は **5.14.1 でピン**する（recon §6-5 — モデリングコードが変わるとグラフ形が
 変わる）。pyproject.toml / uv.lock には入れず `--with` で一時的に足す。
@@ -24,6 +25,11 @@ io のテンソルキー規約は tiny golden と同じ（`input.<グラフ入�
 `--dtype i8` は**別系列**（`outputs/series/deberta-i8/`）へ書く — f32 系列と同居させると既存 E2E の
 網（f32 の tolerance）が黙って別の資産に掛かる。`--dtype f16` は**足さない**（SBV2 系列の
 f16 化と一体で決める話 — タスク #30 の領分）。
+
+`--dtype i4` も同じ理由で**別系列**（`outputs/series/deberta-i4/`）で、中身は**混成**
+（`nn.Linear` = i4 group32・embedding / conv = i8）。SBV2 配布形では `w8-bert4` quant の
+`text_encoder` 席に入る（`sbv2/distribution.py`）。i4 の実行経路は linear の重みスロット限定
+（ADR 0069 決定 5）なので、単一 dtype の i4 系列は原理的に作れない。
 
 `--act-quant` は w8a8（`SessionOptions.linearCompute: "i8a8"`）の torch 鏡像で、適格
 `nn.Linear` の入力を per-token i8 へ落とした期待値を **`io-i8a8.<case>.safetensors`** という
@@ -52,7 +58,7 @@ from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.quantize import fake_quant_int8
+from karume.quantize import fake_quant_int4, fake_quant_int8
 
 from . import patch
 
@@ -60,7 +66,14 @@ from . import patch
 MODEL_ID = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 
 #: 対応する格納 dtype。**f16 は無い** — SBV2 系列と一体で決める（タスク #30）。
-WEIGHT_DTYPES: tuple[str, ...] = ("f32", "i8")
+#: `i4` は**混成**の系列名で、実体は「`nn.Linear` = i4 group32・それ以外（embedding / conv）=
+#: 従来どおり i8 per-channel」（{@link BASE_WEIGHT_DTYPES} / {@link _fake_quant}）。i4 の実行経路が
+#: linear の重みスロット限定である以上（ADR 0069 決定 5）、系列としては混成にしかなり得ない。
+WEIGHT_DTYPES: tuple[str, ...] = ("f32", "i8", "i4")
+
+#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、linear は
+#: 1 本単位の `weight_dtype_overrides` で i4 へ振る（gemma4 の混成 i8+i4 と同形）。
+BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "i8": "i8", "i4": "i8"}
 
 #: 生成物の既定の置き場（格納 dtype 別の**系列**）。親は `SERIES_ROOT`（= outputs/series/）—
 #: models/ は配布形だけの場所（_shared.paths）。`.gitignore` の `outputs/` でコミット対象外。
@@ -68,6 +81,7 @@ WEIGHT_DTYPES: tuple[str, ...] = ("f32", "i8")
 DEFAULT_OUT_ROOTS: Mapping[str, Path] = {
     "f32": SERIES_ROOT / "deberta",
     "i8": SERIES_ROOT / "deberta-i8",
+    "i4": SERIES_ROOT / "deberta-i4",
 }
 
 #: 1 ケースぶんのグラフ入力（名前 → テンソル）。
@@ -311,8 +325,22 @@ def _write_mirror_io(
         detach_act_quant(handles)
 
 
-def _fake_quant(dtype: str, wrapper: nn.Module) -> Mapping[str, torch.Tensor]:
-    """格納 dtype の表現可能値へ重みを丸め、i8 の per-channel scale 台帳を返す（ADR 0006）。
+def _linear_module_names(wrapper: nn.Module) -> frozenset[str]:
+    """`nn.Linear` モジュールの FQN 集合（混成 i8+i4 の**排他割り**の唯一の源）。
+
+    綴りを写経せずモジュール木から引くのは、i8 側の述語を「この集合に居ない」で書くため。
+    2 つの述語を別々の綴りから作ると、どちらにも入らない重みが**黙って f32 のまま残る**
+    （二重丸め禁止の逆側の穴で、値は正しいままサイズだけが戻る）。
+    """
+    return frozenset(
+        name for name, child in wrapper.named_modules() if isinstance(child, nn.Linear)
+    )
+
+
+def _fake_quant(
+    dtype: str, wrapper: nn.Module
+) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
+    """格納 dtype の表現可能値へ重みを丸め、scale 台帳と 1 本単位の格納指定を返す（ADR 0006）。
 
     MUST: **export する `nn.Module` そのもの**（= `HiddenStatesWrapper`）に当てる。scale 台帳の
     キーはここで見た FQN で、safetensors のテンソルキー（= `torch.export` が見る FQN）と同じで
@@ -320,12 +348,27 @@ def _fake_quant(dtype: str, wrapper: nn.Module) -> Mapping[str, torch.Tensor]:
 
     MUST: 呼ぶのは **golden io の採取より前**（`quantize.py` の docstring）— 後に当てると
     期待値だけが元の重みで計算され、E2E の差に量子化誤差が混ざって tolerance の意味が消える。
+
+    i4 系列は混成（linear = i4 group32・残り = i8 per-channel）で、2 つの述語は
+    {@link _linear_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。返す
+    override は「linear の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を
+    満たせなければ fail loudly する。
     """
     if dtype == "f32":
-        return {}
-    report = fake_quant_int8(wrapper)
-    print(f"[fake-quant] i8 per-channel へ丸めた — {report.describe()}", flush=True)
-    return report.scales
+        return {}, {}
+    if dtype == "i8":
+        report = fake_quant_int8(wrapper)
+        print(f"[fake-quant] i8 per-channel へ丸めた — {report.describe()}", flush=True)
+        return report.scales, {}
+    linears = _linear_module_names(wrapper)
+    int8 = fake_quant_int8(wrapper, include=lambda name: name not in linears)
+    int4 = fake_quant_int4(wrapper, include=lambda name: name in linears)
+    print(
+        f"[fake-quant] linear を i4 group へ丸めた — {int4.describe()}"
+        f" / 残りは i8 per-channel — {int8.describe()}",
+        flush=True,
+    )
+    return {**int8.scales, **int4.scales}, dict.fromkeys(int4.scales, "i4")
 
 
 def export_variant(
@@ -349,7 +392,7 @@ def export_variant(
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     cases = build_cases(tokenizer, model)
     wrapper = HiddenStatesWrapper(model, single_output=single_output)
-    scales = _fake_quant(dtype, wrapper)
+    scales, dtype_overrides = _fake_quant(dtype, wrapper)
 
     # 例示入力は padded ケース（mask に 0 を含む実トークン列）。min=2 は 0/1 特殊化を避ける
     # ため、max は Tmax 畳み込みの評価点そのもの（ADR 0010 — 別ノブで二重管理しない）。
@@ -361,8 +404,9 @@ def export_variant(
         out_dir / MODEL_FILE,
         # 添字表は `[T, T]` — 両軸が同じ記号（正方であることを export の段で縛る）。
         dynamic_shapes=({1: seq}, {1: seq}, {0: seq, 1: seq}, {0: seq, 1: seq}),
-        weight_dtype=dtype,
+        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
         weight_scales=scales,
+        weight_dtype_overrides=dtype_overrides,
     )
     declared = tuple(item.name for item in graph.inputs)
     if declared != INPUT_ORDER:
@@ -399,13 +443,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとの系列 — outputs/series/deberta{,-i8}/）",
+        help="出力先（既定は --dtype ごとの系列 — outputs/series/deberta{,-i8,-i4}/）",
     )
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f32",
-        help="重みの格納 dtype（i8 は fake-quant してから適格スロットだけ圧縮格納する — ADR 0019）",
+        help="重みの格納 dtype（i8 は fake-quant してから適格スロットだけ圧縮格納する — ADR 0019。"
+        "i4 は混成で、linear だけ group32 の i4・残りは i8 — ADR 0069）",
     )
     parser.add_argument(
         "--act-quant",

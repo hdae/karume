@@ -25,6 +25,9 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2 # 2 lay
 # 1b. i8 series (ADR 0019 storage + ADR 0025 w8a8 mirror goldens)
 uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i8 --act-quant
 
+# 1c. i4 series — the shipped variant only (the seat of the SBV2 `w8-bert4` quant)
+uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layers 22
+
 # 2. real-GPU comparison: not available in this repository yet (see the note below)
 ```
 
@@ -33,6 +36,11 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i8 --act-q
 - The outputs go to **`outputs/series/deberta/<variant>/`** (kept out of commits by the `outputs/`
   entry in the top-level `.gitignore` — the 24-layer weights are 1.3GB). `--dtype i8` is a
   **separate series** `outputs/series/deberta-i8/<variant>/`.
+- **`--dtype i4` is a mixed series** `outputs/series/deberta-i4/<variant>/`: `nn.Linear` weights in
+  group-32 i4 (ADR 0069), everything else (embeddings, conv) in per-channel i8 exactly as in the i8
+  series. i4 only has an execution path for the linear weight slot, so a single-dtype i4 series
+  cannot exist. Only `sbv2-22layer` is worth writing — it is the seat of the SBV2 distribution's
+  `w8-bert4` quant, and no other consumer reads this series.
 - **`sbv2-22layer` is what the SBV2 distribution ships.** SBV2 only ever reads
   `hidden_states[-3]` (= index 22 = the output of layer 21), so the last two layers are dead weight;
   the truncated model's final output is **bit-identical** to the 24-layer model's `hidden_states[-3]`
@@ -52,6 +60,10 @@ outputs/series/deberta-i8/sbv2-22layer/model.safetensors      22 layers in i8 st
 outputs/series/deberta-i8/full-24layer/model.safetensors      24 layers in i8 storage (319MB)
 outputs/series/deberta-i8/<variant>/io.<case>.safetensors       w8 goldens (activations in f32)
 outputs/series/deberta-i8/<variant>/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
+
+outputs/series/deberta-i4/sbv2-22layer/model.safetensors      22 layers, linear in i4 / the rest in
+                                                              i8 (1128 nodes / 202.5MB / 1 output)
+outputs/series/deberta-i4/sbv2-22layer/io.<case>.safetensors  goldens taken after the i4 rounding
 ```
 
 The io tensor key naming is the same as the tiny goldens (`input.<graph input name>` /

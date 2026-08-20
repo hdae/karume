@@ -7,8 +7,10 @@
 配布するのは**実行に要る 3 グラフ + ホスト資産 4 本**だけ（ADR 0038 §2 の SBV2 例は
 5 グラフを並べるが、あれは形の例示）。`front` = enc_p + dp + sdp、`voice` = flow + dec の
 融合なので、`dp` / `flow` / `dec` は golden 検証専用の単体グラフで配布形には入らない。
-`text_encoder`（DeBERTa）が i8 単体なのは、`deberta/export.py` が f16 を持たず、i8 は
-ADR 0026 が聴感ゲート込みで受理済みだから（f32 の 1.32GB は配布に非現実的）。
+`text_encoder`（DeBERTa）に f16 席が無いのは `deberta/export.py` が f16 を持たないから
+（f32 の 1.32GB は配布に非現実的）。既定の i8 は ADR 0026 が聴感ゲート込みで受理済みで、
+i4 混成（linear だけ i4 group32）は `w8-bert4` quant の席として後から足した
+（perf-ledger Q-1 — 既定はまだ i8）。
 
 ホスト資産のうち `style_vectors` / `speaker_embeddings` は**表を配って実行時に行を引く**形。
 `front` / `voice` のグラフ入力 `style_vec[1,256]` / `g[1,512,1]` はこの 2 表から作られ、
@@ -64,7 +66,10 @@ SBV2_PIPELINE = "sbv2/1"
 #: DeBERTa の系列とその variant ディレクトリ（`deberta/export.py` の綴り）。モデル名に依らない
 #: （ファミリー組み立てでは全モデルが同じ text_encoder を指し、`shared/` へ 1 回だけ入る）。
 #: 22 層 variant なのは末尾 2 層が SBV2 の経路で死んでいるから（{@link SBV2_TEXT_ENCODER_LAYERS}）。
+#: i4 系列は**混成**（linear = i4 group32・embedding / conv = i8 — `deberta/export.py` の
+#: `BASE_WEIGHT_DTYPES`）で、`w8-bert4` quant の text_encoder 席になる。
 SBV2_TEXT_ENCODER_SERIES = "deberta-i8"
+SBV2_TEXT_ENCODER_I4_SERIES = "deberta-i4"
 SBV2_TEXT_ENCODER_VARIANT = "sbv2-22layer"
 
 #: 配布 text_encoder に残っている encoder 層の数。SBV2 が使う `hidden_states[-3]`
@@ -112,8 +117,12 @@ SBV2_SPEAKER_KEY = "speaker_embeddings"
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表・変換先・manifest が共有する 1 箇所。
 #: `style_vectors` / `speaker_embeddings` だけは配置ではなく変換の出力なので
 #: {@link sbv2_placements} には現れない。
+#: 役割名が dtype 接尾辞を持たない `text_encoder` だけ i8 席の綴りのままなのは、2 つ目の
+#: 格納形（i4 混成）が後から生えた席だから — 既存席の役割名を動かすと配布形の path も
+#: 動くので、増える側にだけ接尾辞を付ける。
 SBV2_OUTPUT_PATHS: Mapping[str, str] = {
     "text_encoder": "text_encoder/model.i8.safetensors",
+    "text_encoder_i4": "text_encoder/model.i4.safetensors",
     "front_f16": "front/model.f16.safetensors",
     "front_i8": "front/model.i8.safetensors",
     "voice_f16": "voice/model.f16.safetensors",
@@ -124,22 +133,34 @@ SBV2_OUTPUT_PATHS: Mapping[str, str] = {
     "speaker_embeddings": "speakers/speaker_embeddings.safetensors",
 }
 
+#: text_encoder の席（格納形ごとに 1 本）。MUST: 門 {@link assert_bert_hidden} は**席ごとに**
+#: 掛ける — 2 本は別々に export された独立のコンテナなので、片方だけ層数・出力形・入力の並びが
+#: ずれた配布形が普通に組み上がる（ずれても shape は合ったまま実行は通り、別の層の BERT 特徴で
+#: 音が出るだけで沈黙する）。
+SBV2_TEXT_ENCODER_ROLES: tuple[str, ...] = ("text_encoder", "text_encoder_i4")
+
 #: 格納 dtype の要求（Anima の {@link STORAGE_REQUIREMENTS} と同じ根拠 — 素の F32 資産が
-#: 組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。`text_encoder` は
-#: i8 系列 1 本だけを配るので I8 を要求する。tokenizer / symbols（JSON）と style_vectors
-#: （こちらが書く F32）はここに載せない。
+#: 組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。tokenizer / symbols
+#: （JSON）と style_vectors（こちらが書く F32）はここに載せない。
+#:
+#: `text_encoder` は i8 系列なので I8、`text_encoder_i4` は混成（F32 + I8 + I4 が同居する）
+#: なので **I4 を要求する** — {@link assert_storage} は「要求 dtype がヘッダに在るか」の片方向
+#: 検査なので、集合の中で 2 つの系列を区別できる唯一の dtype を名指しする。I8 を要求しても
+#: i8 系列が素通りしてしまい、席の取り違えが沈黙する。
 SBV2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "text_encoder": "I8",
+    "text_encoder_i4": "I4",
     "front_f16": "F16",
     "front_i8": "I8",
     "voice_f16": "F16",
     "voice_i8": "I8",
 }
 
-#: weights の宣言（dtype ラベル → 役割名）。`text_encoder` は i8 単体でも**dtype キー必須**の
-#: 統一形で書く（ADR 0041 §3 — v1 の `{file}` / `{variants}` の 2 形は消えた）。
+#: weights の宣言（dtype ラベル → 役割名）。dtype キーは ADR 0041 §3 の統一形（v1 の `{file}` /
+#: `{variants}` の 2 形は消えた）。`text_encoder` の `i4` は**混成の系列**を指すラベルで、
+#: 実体は linear だけが i4 group32・embedding / conv は i8（`deberta/export.py`）。
 SBV2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    "text_encoder": {"i8": WeightFiles("text_encoder")},
+    "text_encoder": {"i8": WeightFiles("text_encoder"), "i4": WeightFiles("text_encoder_i4")},
     "front": {"f16": WeightFiles("front_f16"), "i8": WeightFiles("front_i8")},
     "voice": {"f16": WeightFiles("voice_f16"), "i8": WeightFiles("voice_i8")},
 }
@@ -152,15 +173,21 @@ SBV2_ASSETS: Mapping[str, str] = {
     "speaker_embeddings": "speaker_embeddings",
 }
 
-#: quant 表。dtype が 1 つしかない `text_encoder` は書かない（{@link complete_quant_weights}
-#: が完全写像へ埋める — hub は写像の完全性を実行時にも検査する）。
+#: quant 表。MUST: **dtype が 2 つ以上ある役割は全 quant が明示指定する**
+#: （{@link complete_quant_weights}）— `text_encoder` に i4 席が生えた時点で、既定を勝手に
+#: 選ぶ経路（黙って別の格納形が配られる）は塞がれている。
+#:
+#: `w8-bert4` は `w8` と同構成で `text_encoder` だけ i4 混成（BERT の linear を i4 group32 に
+#: 落とす）。数値は f32 同一性の指標では大きく動くが、聴感は一次通過（perf-ledger Q-1 /
+#: research 2026-08-19 §6）。既定はまだ `w8` — 既定化は速度と品質のバランスで別途裁定。
 SBV2_QUANTS: Mapping[str, Any] = {
-    "f16": {"weights": {"front": "f16", "voice": "f16"}, "session": {}},
-    "w8": {"weights": {"front": "i8", "voice": "i8"}, "session": {}},
+    "f16": {"weights": {"text_encoder": "i8", "front": "f16", "voice": "f16"}, "session": {}},
+    "w8": {"weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"}, "session": {}},
     "w8a8": {
-        "weights": {"front": "i8", "voice": "i8"},
+        "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
         "session": {"linearCompute": "i8a8"},
     },
+    "w8-bert4": {"weights": {"text_encoder": "i4", "front": "i8", "voice": "i8"}, "session": {}},
 }
 
 SBV2_DEFAULT_QUANT = "w8"
@@ -219,6 +246,7 @@ class Sbv2Sources:
     series_f16: Path
     series_i8: Path
     text_encoder: Path
+    text_encoder_i4: Path
     demo: Path
     model: Path
 
@@ -229,6 +257,7 @@ def sbv2_sources(series_dir: Path, model: str = SBV2_DEFAULT_MODEL) -> Sbv2Sourc
         series_f16=series_dir / f"{sbv2_series_name(model)}-f16",
         series_i8=series_dir / f"{sbv2_series_name(model)}-i8",
         text_encoder=series_dir / SBV2_TEXT_ENCODER_SERIES / SBV2_TEXT_ENCODER_VARIANT,
+        text_encoder_i4=series_dir / SBV2_TEXT_ENCODER_I4_SERIES / SBV2_TEXT_ENCODER_VARIANT,
         demo=OUTPUTS_ROOT / SBV2_DEMO_DIRNAME,
         model=INPUTS_ROOT / SBV2_SERIES_PREFIX / model,
     )
@@ -243,6 +272,7 @@ def sbv2_placements(sources: Sbv2Sources) -> dict[str, Path]:
     """
     return {
         "text_encoder": sources.text_encoder / "model.safetensors",
+        "text_encoder_i4": sources.text_encoder_i4 / "model.safetensors",
         "front_f16": sources.series_f16 / "front" / "model.safetensors",
         "front_i8": sources.series_i8 / "front" / "model.safetensors",
         "voice_f16": sources.series_f16 / "voice" / "model.safetensors",
@@ -544,7 +574,8 @@ def sbv2_plan(
     speaker_embeddings = sbv2_speaker_embeddings(sources.model, config)
     for role, source in placements.items():
         assert_storage(role, source, SBV2_STORAGE_REQUIREMENTS)
-    assert_bert_hidden(placements["text_encoder"], placements["symbols"])
+    for role in SBV2_TEXT_ENCODER_ROLES:
+        assert_bert_hidden(placements[role], placements["symbols"])
     artifacts = {
         role: Artifact(SBV2_OUTPUT_PATHS[role], source=source)
         for role, source in placements.items()

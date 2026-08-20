@@ -130,6 +130,9 @@ def _fake_ir(
 #: IR コンテナとしても読まれる（層数と出力本数の門）ので `__metadata__` を持つ。
 _SBV2_PAYLOADS = {
     "text_encoder": _fake_safetensors("I8", b"deberta-i8-weights", {IR_METADATA_KEY: _fake_ir()}),
+    "text_encoder_i4": _fake_safetensors(
+        "I4", b"deberta-i4-weights", {IR_METADATA_KEY: _fake_ir()}
+    ),
     "front_f16": _fake_safetensors("F16", b"front-f16-weights"),
     "front_i8": _fake_safetensors("I8", b"front-i8-weights"),
     "voice_f16": _fake_safetensors("F16", b"voice-f16-weights"),
@@ -210,11 +213,14 @@ def _build_sbv2_sources(
         series_f16=series / f"{stem}-f16",
         series_i8=series / f"{stem}-i8",
         text_encoder=series / "deberta-i8" / "sbv2-22layer",
+        text_encoder_i4=series / "deberta-i4" / "sbv2-22layer",
         demo=root / "outputs" / "sbv2-demo",
         model=root / "inputs" / "sbv2" / model,
     )
     _write(sources.text_encoder / "model.safetensors", _SBV2_PAYLOADS["text_encoder"])
     _write(sources.text_encoder / "io.case0.safetensors", b"io-fixture")
+    _write(sources.text_encoder_i4 / "model.safetensors", _SBV2_PAYLOADS["text_encoder_i4"])
+    _write(sources.text_encoder_i4 / "io.case0.safetensors", b"io-fixture")
     for series_dir, label in ((sources.series_f16, "f16"), (sources.series_i8, "i8")):
         for target in ("front", "voice"):
             role = f"{target}_{label}"
@@ -534,6 +540,17 @@ class TestSbv2StorageGate:
         with pytest.raises(DistError, match=r"text_encoder: .* I8 が無い"):
             _assemble_sbv2(sources, tmp_path / "out")
 
+    def test_it_stops_when_the_i4_seat_holds_the_i8_series(self, tmp_path: Path) -> None:
+        """i4 席に i8 系列を挿すと、サイズだけが元へ戻った配布形が黙って組み上がる。
+
+        2 つの席は同じ 22 層 DeBERTa なので、層数・出力・入力の門は**両方とも通る** —
+        格納 dtype の要求だけが席を区別できる。
+        """
+        sources = _build_sbv2_sources(tmp_path)
+        (sources.text_encoder_i4 / "model.safetensors").write_bytes(_SBV2_PAYLOADS["text_encoder"])
+        with pytest.raises(DistError, match=r"text_encoder_i4: .* I4 が無い"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
 
 class TestSbv2BertHiddenGate:
     """22 層 × 出力 1 本 × 位置 1 の組み合わせだけを通す門。
@@ -584,6 +601,18 @@ class TestSbv2BertHiddenGate:
         with pytest.raises(DistError, match=r"グラフ入力が \['input_ids', 'attention_mask'\]"):
             _assemble_sbv2(sources, tmp_path / "out")
 
+    def test_it_checks_every_text_encoder_seat(self, tmp_path: Path) -> None:
+        """席ごとに掛ける門 — i8 席だけ見ていると i4 席の切り詰め忘れが素通りする。
+
+        2 本は別々の `deberta/export.py` 実行の産物なので、対で動かし忘れる形は普通に起きる。
+        """
+        sources = _build_sbv2_sources(tmp_path)
+        (sources.text_encoder_i4 / "model.safetensors").write_bytes(
+            _fake_safetensors("I4", b"deberta-i4-weights", {IR_METADATA_KEY: _fake_ir(layers=24)})
+        )
+        with pytest.raises(DistError, match=r"encoder は 24 層で、期待の 22 層でない"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
 
 class TestSbv2Manifest:
     def test_it_writes_the_envelope_of_adr_0041(self, sbv2_assembled) -> None:
@@ -603,12 +632,17 @@ class TestSbv2Manifest:
         assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
         assert (out_dir / ref["path"]).read_bytes() == payload
 
-    def test_the_single_dtype_text_encoder_still_has_a_dtype_key(self, sbv2_assembled) -> None:
-        """i8 単体でも `{ "i8": … }` の統一形（ADR 0041 §3 — 2 形パースを消した）。"""
+    def test_the_text_encoder_declares_both_storage_forms(self, sbv2_assembled) -> None:
+        """dtype キーは常に要る統一形（ADR 0041 §3 — 2 形パースを消した）。
+
+        並びは {@link SBV2_WEIGHTS} の宣言順そのもの（manifest の weights 節と quant 節で
+        同じ役割が別の順に並ばない — `complete_quant_weights` の MUST と対）。
+        """
         _, manifest = sbv2_assembled
         entry = _sbv2_model(manifest)["weights"]["text_encoder"]
-        assert list(entry) == ["i8"]
+        assert list(entry) == ["i8", "i4"]
         assert entry["i8"]["file"]["path"].endswith("model.i8.safetensors")
+        assert entry["i4"]["file"]["path"].endswith("model.i4.safetensors")
 
     def test_it_carries_the_quant_table(self, sbv2_assembled) -> None:
         _, manifest = sbv2_assembled
@@ -623,7 +657,24 @@ class TestSbv2Manifest:
         model = _sbv2_model(manifest)
         for name, quant in model["quants"].items():
             assert set(quant["weights"]) == set(SBV2_WEIGHTS), name
-            assert quant["weights"]["text_encoder"] == "i8"
+            assert quant["weights"]["text_encoder"] == ("i4" if name == "w8-bert4" else "i8"), name
+
+    def test_the_bert4_quant_is_w8_with_only_the_text_encoder_swapped(self, sbv2_assembled) -> None:
+        """`w8-bert4` の意味は「`w8` と同構成で BERT だけ i4」— 差分が 1 席であることを固定する。
+
+        session ノブまで見るのは、`w8a8` のような**別軸**の変更が紛れ込んだまま「格納形だけの
+        席」を名乗ると、聴感で採った裁定（perf-ledger Q-1）の対象が黙って変わるから。
+        """
+        _, manifest = sbv2_assembled
+        quants = _sbv2_model(manifest)["quants"]
+        base, variant = quants["w8"], quants["w8-bert4"]
+
+        assert variant["session"] == base["session"]
+        differing = {
+            role for role in base["weights"] if base["weights"][role] != variant["weights"][role]
+        }
+        assert differing == {"text_encoder"}
+        assert variant["weights"]["text_encoder"] == "i4"
 
 
 class TestSbv2VerifyDist:
@@ -702,6 +753,8 @@ class TestSbv2Sources:
         assert sources.model.name == "FN7"
         # DeBERTa はモデル名に依らない（ファミリーでは shared/ へ 1 本化される）。
         assert sources.text_encoder == tmp_path / "deberta-i8" / "sbv2-22layer"
+        # 格納形ごとに**別系列**（ADR 0019）— variant 名だけが両者で同じ。
+        assert sources.text_encoder_i4 == tmp_path / "deberta-i4" / "sbv2-22layer"
 
     def test_it_looks_outside_the_series_root_for_the_host_assets(self, tmp_path: Path) -> None:
         """デモ資産（`outputs/` 直下）と実重み（`inputs/`）は系列ではない — 綴りは paths.py。"""

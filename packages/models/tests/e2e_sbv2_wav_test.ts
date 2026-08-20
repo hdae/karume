@@ -28,6 +28,13 @@
  * - 実効値は {@link REFERENCE_KNOBS} に写してあり、**配布形の既定が動いたら門より先に**
  *   落ちる（「数値の回帰」と「資産の差し替え」を混同しないため）。
  *
+ * ## 2 本目の門 — `w8-bert4`（BERT の linear を i4 混成で焼いた席）
+ *
+ * 条件は `w8` と同一（FN4 / seed 0 / 配布形の既定ノブ）で、差し替えるのは quant だけ。参照値は
+ * 2026-08-20 にこの参照環境で採取して凍結した（perf-ledger Q-1 の配布配線）。`w8` と**別の値に
+ * なるのが正**なので、`w8` の digest と一致した場合も落とす — 一致は「i4 席が効いていない」
+ * （quant 解決が既定へ落ちた / i4 席に i8 資産が入った）ことの証拠で、数値の網では捕まらない。
+ *
  * ## 参照 digest はこの参照環境専用（クロスデバイスのビット同一は保証しない）
  *
  * 参照値は参照環境（RTX 3080 Ti / Linux / Vulkan (wgpu)）で焼いたもので、他バックエンド
@@ -69,8 +76,25 @@ const QUANT = "w8";
 const TEXT = "こんにちは、これはテストです。";
 const SEED = 0;
 
+/**
+ * `w8` と**同構成で `text_encoder` だけ i4 混成**（BERT の linear だけ group32 の i4・
+ * embedding / conv は i8）の quant。配布形の差分は 1 席だけで、session ノブは `w8` と同じ
+ * （`sbv2/distribution.py` の `SBV2_QUANTS` がそれを固定する）。
+ */
+const BERT4_QUANT = "w8-bert4";
+
 /** 参照値（ADR 0039 の実測 — **変更禁止**）。 */
 const REFERENCE_SHA256 = "a82f72e2c18956ec725a3f692182e8c9a7dad4011e760dab9fb3d051653db2f4";
+
+/**
+ * `w8-bert4` の参照値（2026-08-20 に参照環境で採取して凍結 — **変更禁止**）。
+ *
+ * `w8` と**別の値になるのが正**（BERT の linear が i4 に落ちれば特徴量が動き、波形も動く）。
+ * 一致してしまったら i4 席が効いていない（i8 資産が i4 席に入った / quant 解決が既定へ落ちた）
+ * ことを意味するので、そこも門に含める。実体は {@link REFERENCE_WAV} のような手元の材料が
+ * 無いので、食い違ったときは WAV を落として人が聴ける形にするだけにする。
+ */
+const BERT4_REFERENCE_SHA256 = "aa9671ad8ff5075bb6b153f775a2b8edd9d19d2f3792ae060d198445c72a1933";
 
 /** 参照 WAV を焼いた時点の実効ノブ（配布形の `pipelineConfig.defaults` と一致するはず）。 */
 const REFERENCE_KNOBS: Sbv2Defaults = {
@@ -127,8 +151,9 @@ const modelEntry = (manifest: Manifest): ModelEntry => {
  */
 const loadLocalAssets = async (
   manifest: Manifest,
+  quant: string = QUANT,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
-  const files = resolveFiles(manifest, { model: MODEL, quant: QUANT });
+  const files = resolveFiles(manifest, { model: MODEL, quant });
   const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   for (const key of Object.keys(files)) {
@@ -162,8 +187,8 @@ const assertReferenceKnobs = (entry: ModelEntry): Sbv2Defaults => {
  * 実効ノブの 1 行表示（突合が割れたときに「何を焼いたか」を報告へ残す）。門は `generate` へ
  * ノブを 1 つも渡さないので、配布形の既定＝実効値。
  */
-const describeKnobs = (defaults: Sbv2Defaults): string =>
-  `model ${MODEL} / quant ${QUANT} / seed ${SEED} / text ${JSON.stringify(TEXT)} / ` +
+const describeKnobs = (defaults: Sbv2Defaults, quant: string = QUANT): string =>
+  `model ${MODEL} / quant ${quant} / seed ${SEED} / text ${JSON.stringify(TEXT)} / ` +
   KNOB_KEYS.map((key) => `${key} ${defaults[key]}`).join(" / ") +
   ` / yomi ${YOMI_VERSION}`;
 
@@ -251,6 +276,51 @@ Deno.test({
     );
     if (actual !== REFERENCE_SHA256) {
       throw new Error(await mismatchReport(audio, wav, actual, defaults));
+    }
+  },
+});
+
+Deno.test({
+  name:
+    `e2e(実GPU): 配布形 ${MODEL} / quant ${BERT4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+  ignore: !RUNNABLE,
+  fn: async () => {
+    const manifest = readManifest();
+    const defaults = assertReferenceKnobs(modelEntry(manifest));
+    const assets = await loadLocalAssets(manifest, BERT4_QUANT);
+    const started = performance.now();
+    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
+      model: MODEL,
+      quant: BERT4_QUANT,
+    });
+    // ノブは 1 つも渡さない — `w8` の門と同じ条件（差は text_encoder の格納形だけ）。
+    const audio = await pipeline.generate({ text: TEXT, seed: SEED });
+    const wav = encodeWav(audio.data, audio.sampleRate);
+    const actual = await sha256Hex(wav);
+    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+    console.log(
+      `[e2e] sbv2 ${MODEL}/${BERT4_QUANT}: ${elapsed}s / WAV ${wav.length}B / ` +
+        `${(audio.data.length / audio.sampleRate).toFixed(2)}s / yomi ${YOMI_VERSION} / ` +
+        `sha256 ${actual}`,
+    );
+    if (actual === REFERENCE_SHA256) {
+      throw new Error(
+        `${BERT4_QUANT} の WAV が ${QUANT} と sha256 完全一致した（${actual}）— ` +
+          "i4 席が効いていない（i4 quant の解決が既定へ落ちた / i4 席に i8 資産が入っている）",
+      );
+    }
+    if (actual !== BERT4_REFERENCE_SHA256) {
+      await Deno.mkdir(OUTPUTS_DIR, { recursive: true });
+      const dumped = new URL("e2e-sbv2-w8-bert4-mismatch.wav", OUTPUTS_DIR);
+      await Deno.writeFile(dumped, wav);
+      throw new Error(
+        `出力 WAV の sha256 が参照と一致しない\n` +
+          `  期待 ${BERT4_REFERENCE_SHA256}\n  実際 ${actual}\n` +
+          `  WAV ${wav.length} バイト / サンプル ${audio.data.length} / ${audio.sampleRate}Hz / ` +
+          `${(audio.data.length / audio.sampleRate).toFixed(3)}s\n` +
+          `  実効ノブ ${describeKnobs(defaults, BERT4_QUANT)}\n` +
+          `  実物 ${dumped.pathname}`,
+      );
     }
   },
 });

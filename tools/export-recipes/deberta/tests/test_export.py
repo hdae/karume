@@ -37,6 +37,23 @@ class TinyText(nn.Module):
         return (self.fc(x),)
 
 
+class TinyHybrid(nn.Module):
+    """i4 混成（linear = i4 group32・残り = i8）の最小の骨格。
+
+    linear の in 軸を 64 にするのは i4 が端数 group を作らない MUST（ADR 0069 決定 2）のため。
+    embedding を持たせるのは、i8 側の対象が空だと `fake_quant_int8` が fail loudly して
+    「排他に割れているか」を観測できないから。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed = nn.Embedding(8, 64)
+        self.fc = nn.Linear(64, 4)
+
+    def forward(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        return (self.fc(self.embed(input_ids)),)
+
+
 #: `_write_io` はケースを `(名前, グラフ入力名 → テンソル)` で受ける（実物は 4 入力だが、
 #: 引く順は `graph.inputs` から来るので tiny な 2 入力でも同じ経路が通る）。
 CASES = (
@@ -65,12 +82,22 @@ class TestSeries:
         """MUST: 圧縮系列は別ディレクトリ（ADR 0019）— 同居させると f32 の網が消える。"""
         roots = export_deberta.DEFAULT_OUT_ROOTS
 
-        assert set(roots) == set(export_deberta.WEIGHT_DTYPES) == {"f32", "i8"}
+        assert set(roots) == set(export_deberta.WEIGHT_DTYPES) == {"f32", "i8", "i4"}
         assert len(set(roots.values())) == len(roots)
 
     def test_f16_is_not_offered(self):
         """f16 は SBV2 系列と一体で決める（タスク #30）— ここで先取りしない。"""
         assert "f16" not in export_deberta.WEIGHT_DTYPES
+
+    def test_the_i4_series_is_stored_as_i8_by_default(self):
+        """i4 は**混成**（linear だけ i4・残りは i8）— 単一 dtype の i4 系列は作れない。
+
+        i4 の実行経路が linear の重みスロット限定（ADR 0069 決定 5）である以上、既定を i4 に
+        すると embedding / conv が黙って f32 で残る。既定は i8 で、linear だけ 1 本単位の
+        override で振るのが唯一の形。
+        """
+        assert set(export_deberta.BASE_WEIGHT_DTYPES) == set(export_deberta.WEIGHT_DTYPES)
+        assert export_deberta.BASE_WEIGHT_DTYPES["i4"] == "i8"
 
 
 class TestActQuantCli:
@@ -100,7 +127,7 @@ class TestFakeQuant:
         wrapper = TinyText()
         before = wrapper.fc.weight.clone()
 
-        assert export_deberta._fake_quant("f32", wrapper) == {}
+        assert export_deberta._fake_quant("f32", wrapper) == ({}, {})
         assert torch.equal(wrapper.fc.weight, before)
 
     def test_i8_rounds_to_per_channel_representable_values_keyed_by_fqn(self):
@@ -108,12 +135,31 @@ class TestFakeQuant:
         torch.manual_seed(0)
         wrapper = TinyText()
 
-        scales = export_deberta._fake_quant("i8", wrapper)
+        scales, overrides = export_deberta._fake_quant("i8", wrapper)
 
+        assert overrides == {}, "i8 単一系列に 1 本単位の格納指定は要らない"
         assert "fc.weight" in scales, "キーが export 対象の FQN 空間に無い"
         scale = scales["fc.weight"]
         assert list(scale.shape) == [4, 1]
         assert torch.equal(torch.round(wrapper.fc.weight / scale) * scale, wrapper.fc.weight)
+
+    def test_i4_splits_linear_and_the_rest_exclusively(self):
+        """MUST: i8 / i4 の対象は排他（`quantize.py` の混成 MUST — 二重丸めは沈黙誤値）。
+
+        どちらにも入らない重みが残る穴も同時に見る（合流台帳が両方の重みを覆っていること）。
+        scale の**形**で振り分け先が読める: i4 は group 形 `[チャネル, group 数]`、i8 は
+        重みと同 rank の keepdim 形。
+        """
+        torch.manual_seed(0)
+        wrapper = TinyHybrid()
+
+        scales, overrides = export_deberta._fake_quant("i4", wrapper)
+
+        assert overrides == {"fc.weight": "i4"}
+        assert set(scales) == {"fc.weight", "embed.weight"}
+        # in 軸 64 / group 32 なので group 数 2 — keepdim 形（[4, 1]）とは形で区別できる。
+        assert list(scales["fc.weight"].shape) == [4, 2]
+        assert list(scales["embed.weight"].shape) == [8, 1]
 
 
 class TestMirrorIo:
