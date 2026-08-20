@@ -40,10 +40,12 @@
   **クローズ** — Q-6 出荷結線（deberta-i4 export へ gptq-rtn・格納形不変・WAV 参照採り直し）
   → 再聴「ほぼ違いが分からない」→ **SBV2 の既定 quant = w4 へ変更**（ADR 0039 決定 5 更新・
   速度 = 取得 −30%/ロード 1.7 倍速/温間合成 ~4% 速 — research §7・w8 は opt-in 参照系）。
-  **J-5b（net_g conv1d i4）も消化** — ADR 0069 追記 7（scale rank2 一般化・gemm A 側 i4・
-  適格 = conv1d ∧ groups==1 ∧ 行長整除）で **w4 = 237.5MB（w8 比 −36.3%）**・温間合成最速。
-  残 = 新 w4 の聴感（conv i4 の配布初適用）。後続 = J-3（g 軸）→ J-4（格納席 — gptq-kmeans
-  companion が最有力・irodori/anima の配布 i4 席新設もここと同時）。骨子 = backlog now 節。
+  **J-5b（net_g conv1d i4）も聴感込みでクローズ** — ADR 0069 追記 7（scale rank2 一般化・
+  gemm A 側 i4・適格 = conv1d ∧ groups==1 ∧ 行長整除）で **w4 = 237.5MB（w8 比 −36.3%）**・
+  温間合成最速・聴感 = conv i4 で変化なし（f32 比の「テンション少し低め」は net_g RTN i4
+  由来の想定内 — 品質ノブは g 軸のみ = J-3 の評価軸）。後続 = J-3（g 軸)→ J-4（格納席 —
+  gptq-kmeans companion が最有力・irodori/anima の配布 i4 席新設もここと同時）。骨子 =
+  backlog now 節。
 
 ## Open decisions
 
