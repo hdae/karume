@@ -5,7 +5,7 @@
 0 行で、ここで測るのは**量子化そのものの質**（ADR 0006 の fake-quant 方法論では E2E は
 実装誤差しか測らないため、品質は別軸で測る必要がある）。
 
-11 構成を**同一発話・同一乱数**（`outputs/demo/sbv2-dump/dump.safetensors` の離散入力・ノイズ列）で
+14 構成を**同一発話・同一乱数**（`outputs/demo/sbv2-dump/dump.safetensors` の離散入力・ノイズ列）で
 走らせる。既存 5 構成は**生成ネット側だけ**を振る（**BERT は f32 固定**）:
 
     (1) f32    基準。`sbv2.demo reference` と同じ経路（既存 reference.wav とビット一致）
@@ -39,9 +39,26 @@ BERT 側の 2 本が**配布の本命** — `shared/text_encoder` は配布 karu
 **除外**する（i4 は端数 group を作らない MUST — ADR 0069 決定 2 で core が fail loudly する）。
 除外一覧・役割別の対象規模・サイズ試算は `report.json` の `w4` 節。
 
+## 校正付き丸め（{@link CALIB_CONFIGS}・波 J-2）
+
+上の w4 は重みだけを見て丸める（RTN 系）。**校正付き丸め**（GPTQ — core の
+`karume.quant_calib`）は「その層に実際に流れる活性」から**同じ格子の中で**丸め先を選び直す
+方式で、BERT 側に 3 構成を足す（net_g は f32 固定・格子は上の方式グリッドと 1 バイトも
+変わらない）:
+
+    (12) bert-gptq-rtn     BERT の linear を GPTQ × RTN i4 g32（`bert-w4-rtn` の校正版）
+    (13) bert-gptq-nf4     同上を NF4 の固定表（`bert-w4-nf4` の校正版）
+    (14) bert-gptq-kmeans  同上を k-means 表（core の `kmeans_shared` = **層ごと** 1 枚）
+
+校正入力は {@link sbv2.calib_texts.CALIB_TEXTS} の 48 文を既存の DeBERTa tokenizer 経路で採り、
+先頭 encoder layer への呼び出しを捕まえて stage 列へ流す（{@link capture_stage_batches}）。
+stage は**特徴を採る層まで**なので、対象は `bert:linear` の census の部分集合になる
+（{@link CALIB_TARGET}）。`--calib-limit` で縮小実行でき、縮小した事実は表と `report.json` の
+両方へ残る。
+
     uv run --group sbv2 python -m sbv2.measure_quant
 
-出力は `outputs/demo/quant-sim/`（`<config>.wav` 11 本 + `report.json`）。`--configs` で
+出力は `outputs/demo/quant-sim/`（`<config>.wav` 14 本 + `report.json`）。`--configs` で
 主要構成を名前で絞れる（`f32` は SNR の基準なので常に走る）。
 
 ## 活性量子化の粒度と適用点
@@ -101,7 +118,7 @@ import re
 import struct
 import time
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
 from pathlib import Path
@@ -114,6 +131,14 @@ from torch import nn
 
 from _shared.paths import DIST_ROOT, OUTPUTS_ROOT
 from karume.act_quant import quantize_rows
+from karume.quant_calib import (
+    CalibMethod,
+    CalibReport,
+    GridSpec,
+    StageBatch,
+    StageSpec,
+    calibrate_stages,
+)
 from karume.quant_methods import (
     DEFAULT_CODEBOOK_LEVELS,
     fake_quant_kmeans,
@@ -131,6 +156,7 @@ from karume.quantize import (
 )
 
 from . import demo, export, patch
+from .calib_texts import CALIB_TEXTS
 
 #: デモ・ベンチの生成物置き場。資産（`sbv2.demo.DEFAULT_DEMO_DIR`）と分離する —
 #: 生成物の掃除（`rm -rf outputs/demo`）が資産や系列を巻き込まないため（docs/assets-layout.md）。
@@ -263,6 +289,97 @@ W4_ROLES: Mapping[str, tuple[type[nn.Module], ...]] = MappingProxyType(
 )
 
 
+# ---- 校正付き丸めの語彙（波 J-2）--------------------------------------------
+
+#: 校正付き丸めの group 長 = 方式グリッドと同じ 32 固定。校正は**格子を 1 バイトも変えない**
+#: （同じ格子の中で丸め先を選び直すだけ — `karume.quant_calib` のモジュール docstring）ので、
+#: g 軸を振らない理由も {@link W4_GROUP_SIZE} と同文。
+CALIB_GROUP_SIZE = W4_GROUP_SIZE
+
+#: 校正付き構成の対象名（`w4` 節の対象列）。`bert:linear` の census とは**集合が違う** —
+#: 校正の stage は特徴を採る層までしか作らない（{@link bert_stages}）ので、それ以降の層の
+#: linear は入らない。代わりに**配布形（22 層 variant）の linear 集合と一致する**ので、
+#: {@link project_distribution} の縮小試算がそのままこの集合の話になる。
+CALIB_TARGET = "bert:linear:calib"
+
+
+def group_scale_bits(counts: TargetCounts) -> float:
+    """4bit ペイロード + group ごとの f32 scale（RTN / NF4 の格納そのもの）。"""
+    return 4 * counts.elements + 32 * counts.groups
+
+
+def layer_table_bits(counts: TargetCounts) -> float:
+    """上に**層ごと 1 枚**の k-means 表を足した式。
+
+    core の `kmeans_shared` は「group absmax で正規化した値空間に 1 枚の表」を張るが、その
+    射程は**層内**に閉じる（stage 逐次の駆動と全層を跨ぐ表が噛み合わない —
+    {@link karume.quant_calib.GridSpec} の NOTE）。方式グリッドの `kmeans:shared`（全体で
+    1 枚 = {@link CODEBOOK_BITS} を 1 回だけ）と式が違うのはこのため。
+    """
+    return group_scale_bits(counts) + CODEBOOK_BITS * counts.modules
+
+
+@dataclass(frozen=True)
+class CalibConfig:
+    """校正付き丸め 1 本ぶんの指定（方式 × 格納グリッド）。
+
+    丸めの実装は core（`karume.quant_calib`）の共有で、ここは呼び分けと投影式だけを持つ —
+    {@link W4Method} と同じ理由（台本ローカルに丸めを書くと、測った式と出荷する式が独立に
+    動きはじめる）。
+    """
+
+    name: str
+    method: CalibMethod
+    grid: GridSpec
+    #: 量子化対象集合の投影ビット数（{@link W4Method.projected_bits} と同じ器）。
+    projected_bits: Callable[[TargetCounts], float]
+    #: `projected_bits` の式（**出力へそのまま載せる**）。
+    formula: str
+
+    @property
+    def label(self) -> str:
+        """表と JSON に出る方式名（`<方式>/<格納グリッド>`）。"""
+        return f"{self.method}/{self.grid.kind}"
+
+
+#: 校正グリッド 3 本 = GPTQ × 格納グリッド 3 種（core の `GRID_KINDS` 全部）。既存の
+#: `bert-w4-rtn` / `bert-w4-nf4` の**校正版**で、格子は 1 バイトも変わらない。
+#:
+#: AWQ 系を置かないのは、丸めた重みが `W_eff = Q(W')/s` の形になり、等価倍率 `s` を隣接演算へ
+#: fold するか companion テンソルとして配るまで**単独で格納できない**から
+#: （`karume.quant_calib` のモジュール docstring）。ここは配布候補の**聴感を WAV で確かめる**
+#: 席なので、格納の当てが無い列は聴く WAV を増やすだけになる（格納形が無いことを測る席は
+#: net_g 側の w4 4 本 — 立場が逆）。
+CALIB_CONFIGS: Mapping[str, CalibConfig] = MappingProxyType(
+    {
+        config.name: config
+        for config in (
+            CalibConfig(
+                "gptq-rtn",
+                "gptq",
+                GridSpec(kind="rtn", group_size=CALIB_GROUP_SIZE),
+                group_scale_bits,
+                "4bit + g32 f32 scale = 5.0 bpw（格納は RTN i4 そのもの）",
+            ),
+            CalibConfig(
+                "gptq-nf4",
+                "gptq",
+                GridSpec(kind="nf4", group_size=CALIB_GROUP_SIZE),
+                group_scale_bits,
+                "4bit + g32 f32 scale = 5.0 bpw（格子は NF4 の固定表）",
+            ),
+            CalibConfig(
+                "gptq-kmeans",
+                "gptq",
+                GridSpec(kind="kmeans_shared", group_size=CALIB_GROUP_SIZE),
+                layer_table_bits,
+                f"4bit + g32 f32 scale + 表 {DEFAULT_CODEBOOK_LEVELS}×f32 を**層ごと** 1 枚",
+            ),
+        )
+    }
+)
+
+
 @dataclass(frozen=True)
 class Recipe:
     """1 構成の量子化レシピ。
@@ -281,9 +398,12 @@ class Recipe:
     roles: str = "all"
     #: BERT（DeBERTa）の linear へ当てる w4 方式。**None = f32 固定**（既存 5 構成の契約）。
     bert_method: str | None = None
+    #: BERT の linear へ当てる**校正付き**丸め（{@link CALIB_CONFIGS} の鍵）。
+    #: `bert_method` との併用は構成の書き間違い（{@link bert_variant} が落とす）。
+    bert_calib: str | None = None
 
 
-#: 主要 11 構成（WAV を `--out` 直下へ書き、聴き比べの対象になる）。
+#: 主要 14 構成（WAV を `--out` 直下へ書き、聴き比べの対象になる）。
 CONFIGS: Mapping[str, Recipe] = MappingProxyType(
     {
         "f32": Recipe(None, None),
@@ -299,6 +419,10 @@ CONFIGS: Mapping[str, Recipe] = MappingProxyType(
         # BERT の linear だけ（net_g は f32 固定 — 既存 5 構成と直交する分離軸）。
         "bert-w4-rtn": Recipe(None, None, scope=(), bert_method=RTN_METHOD),
         "bert-w4-nf4": Recipe(None, None, scope=(), bert_method="nf4"),
+        # 上 2 本の校正版（GPTQ・net_g は f32 固定・格子は同じ — 波 J-2）。
+        "bert-gptq-rtn": Recipe(None, None, scope=(), bert_calib="gptq-rtn"),
+        "bert-gptq-nf4": Recipe(None, None, scope=(), bert_calib="gptq-nf4"),
+        "bert-gptq-kmeans": Recipe(None, None, scope=(), bert_calib="gptq-kmeans"),
     }
 )
 
@@ -882,6 +1006,357 @@ def quantized_bert_feature(method_name: str, inputs: ChainInputs) -> tuple[torch
     return feature, report.describe()
 
 
+# ---- 校正付き丸めの駆動（Catcher + stage 分解）-------------------------------
+
+#: 校正 stage のモデル内 FQN 接頭辞（`DebertaV2Model.encoder` = `DebertaV2Encoder` →
+#: `.layer`）。stage 内の局所 FQN が `<層番号>.attention.self.query_proj.weight` になるように
+#: {@link EncoderStage} が子の名前を層番号にしてあるので、接頭辞はここまでで足りる
+#: （scale 台帳のキーを {@link karume.quantize.Int4Report} と同じ**モデル内 FQN** の空間へ
+#: 揃えるため — core の `StageSpec` 契約）。
+BERT_STAGE_PREFIX = "encoder.layer"
+
+#: {@link EncoderStage.forward} が ConvLayer 用に受け取る keyword 名。`DebertaV2Encoder` は
+#: 層へ渡す 4 次元 mask とは別に、**素の 2 次元 mask** を ConvLayer へ渡す。
+INPUT_MASK_KWARG = "input_mask"
+
+
+class _FirstStageReached(Exception):  # noqa: N818 — 異常ではなく打ち切りの合図なので Error と呼ばない
+    """先頭 stage の入力が揃った合図（校正 forward を打ち切るための番兵）。"""
+
+
+class EncoderStage(nn.Module):
+    """encoder layer 1 枚を「hidden を位置引数で受ける」形へ包む stage ラッパ。
+
+    包む理由は 2 つあり、どちらも `DebertaV2Encoder.forward`（transformers 5.14.1）の
+    呼び出しの形に由来する:
+
+    1. 層へ mask を**位置引数**で渡す（`layer_module(next_kv, attention_mask, …)`）。
+       `calibrate_stages` は次 stage へ「選んだ出力を**唯一の位置引数**」として渡す駆動なので、
+       mask は keyword で運ぶ形に直さないと 2 段目以降で落ちる。
+    2. **先頭層だけ**は出力に ConvLayer が乗る（ループ内の `i == 0` — stage の入力 hidden を
+       残差として混ぜ直す）。stage 分解でここを落とすと 2 段目以降が本物と違う hidden を
+       見ることになり、校正が別の活性から丸め先を選ぶ。
+
+    層 kwargs（`relative_pos` / `rel_embeddings` / `query_states` / `output_attentions`）は
+    ループの**前**に 1 度だけ作られ**全層で同一**（実測で確認 — Gemma3 のような layer_type 別
+    の切り替えは無い）なので、`calibrate_stages` の既定（stage 間で kwargs 不変）にそのまま
+    乗る。
+
+    子モジュールの名前を**層番号**にしてあるのは、stage 内の局所 FQN
+    （`0.attention.self.query_proj.weight`）へ {@link BERT_STAGE_PREFIX} を足すだけでモデル内
+    FQN へ戻すため。ConvLayer も子として登録されるが `nn.Linear` を 1 本も持たない
+    （`Conv1d` + `LayerNorm`）ので、走査（`iter_quant_targets` の `nn.Linear` 限定）の対象集合は
+    動かない。
+    """
+
+    def __init__(self, index: int, layer: nn.Module, conv: nn.Module | None) -> None:
+        super().__init__()
+        self.child = str(index)
+        self.add_module(self.child, layer)
+        self.conv = conv
+
+    def forward(
+        self, hidden: torch.Tensor, *, input_mask: torch.Tensor, **layer_kwargs: Any
+    ) -> torch.Tensor:
+        output = getattr(self, self.child)(hidden, **layer_kwargs)[0]
+        if self.conv is None:
+            return output
+        return self.conv(hidden, output, input_mask)
+
+
+def bert_stages(bert: nn.Module) -> tuple[StageSpec, ...]:
+    """実行順の encoder layer を `(モデル内 FQN 接頭辞, stage)` で返す。
+
+    **特徴を採る層までしか作らない** — 参照模型は切り詰めていない全 24 層だが、特徴は
+    `hidden_states[-demo.BERT_HIDDEN_FROM_END]`（= 22 層目の出力）から採るので、それ以降の層は
+    丸めても出力に 1bit も効かない（配布グラフが 22 層 variant なのと同じ境界 — ADR 0045
+    決定 1/2 の「参照側と配布グラフ側で位置の定数を分ける」で、ここが参照側の位置）。したがって
+    校正の対象集合は既存 `bert-w4-*` の census（全 24 層）の**部分集合**であり、**配布形の
+    linear 集合と一致する**（{@link CALIB_TARGET}）。
+    """
+    encoder = bert.encoder
+    if encoder.conv is None:
+        raise AssertionError(
+            "DeBERTa encoder に ConvLayer が無い（先頭層の残差混合が消える構成 —"
+            " 模型の構成が台本の想定と違う）"
+        )
+    layers = list(encoder.layer)
+    count = len(layers) - (demo.BERT_HIDDEN_FROM_END - 1)
+    if count < 1:
+        raise AssertionError(
+            f"encoder が {len(layers)} 層しか無い"
+            f"（特徴は末尾から {demo.BERT_HIDDEN_FROM_END} 番目の hidden から採る）"
+        )
+    return tuple(
+        (BERT_STAGE_PREFIX, EncoderStage(index, layer, encoder.conv if index == 0 else None))
+        for index, layer in enumerate(layers[:count])
+    )
+
+
+def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor], TargetCounts]:
+    """stage 内の量子化対象を fqn 引きの重みと計数で返す（校正の**走査** = 門の基準）。
+
+    対象選択は core の `iter_quant_targets` の共有（{@link census_w4_targets} と同文 — 写した
+    別実装にすると「数えた対象」と「丸めた対象」が黙って割れる）。ここで数えた本数と、校正が
+    実際に丸めた本数を {@link assert_calib_covers_scan} が突き合わせる。
+
+    net_g 側の census と違って割り切れない重みを**外さず fail loudly** にする — DeBERTa の
+    linear は量子化軸が 1024 / 4096 の 2 種しか無く、除外が要るのは受容野が半端な conv を持つ
+    net_g 側の話だから。外す道をここへ作ると「黙って対象が痩せた」が校正側にも生える。
+    """
+    weights: dict[str, torch.Tensor] = {}
+    channels = 0
+    elements = 0
+    for prefix, stage in stages:
+        for local, weight, axis in iter_quant_targets(stage, W4_ROLES["linear"]):
+            fqn = f"{prefix}.{local}"
+            span = int(channel_rows(weight, axis).shape[-1])
+            if span % CALIB_GROUP_SIZE:
+                raise AssertionError(
+                    f"'{fqn}': 量子化軸 {span} が group {CALIB_GROUP_SIZE} で割り切れない"
+                    "（i4 は端数 group を作らない — ADR 0069 決定 2）"
+                )
+            weights[fqn] = weight
+            channels += int(weight.shape[axis])
+            elements += int(weight.numel())
+    if not weights:
+        raise AssertionError("encoder stage に nn.Linear が 1 本も無い（模型の構成が想定と違う）")
+    return weights, TargetCounts(modules=len(weights), channels=channels, elements=elements)
+
+
+def calib_corpus(limit: int | None) -> tuple[str, ...]:
+    """校正に使う文（`limit` は**先頭 N 文**の上限 — `None` は全 48 文）。
+
+    先頭から採るのは {@link sbv2.calib_texts.CALIB_TEXTS} が朗読調 / 問いかけ / 数字読みを
+    混ぜて並べてあるため（縮小実行でも役割の混合が保たれる）。
+    """
+    if limit is not None and limit < 1:
+        raise ValueError(f"校正文数の上限は 1 以上（実測 {limit}）")
+    return CALIB_TEXTS if limit is None else CALIB_TEXTS[:limit]
+
+
+def assert_calib_disjoint(texts: Sequence[str], evaluated: Sequence[str]) -> None:
+    """校正コーパスが評価文と**部分一致でも**重ならないことを見る。
+
+    MUST: fail loudly。重なると SNR / LSD が「校正で見た文をそのまま出せたか」を測る数になり、
+    校正の質ではなく漏れを測ることになる。評価文の正本は dump の `meta` なので、コーパス側に
+    写しを持たずここで突き合わせる（写すと dump を録り直したときに片方だけ古くなる）。
+    """
+    hits = sorted(
+        {text for text in texts for body in evaluated if body and (body in text or text in body)}
+    )
+    if hits:
+        raise AssertionError(
+            f"校正コーパスが評価文と重なっている: {hits[:3]}（評価文 {list(evaluated)}）"
+        )
+
+
+def calib_inputs(texts: Sequence[str]) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+    """校正コーパスを**既存の tokenizer 経路**（{@link sbv2.demo.load_bert_tokenizer}）で
+    `(input_ids, attention_mask)` の `[1,T]` へ落とす。
+
+    トークナイザを写さないのは `prepare_inputs` の dump 突合と同文 — 別経路で引くと「校正で
+    見た活性」と「評価で流れる活性」が黙って別のトークン分割になる。
+    """
+    tokenizer = demo.load_bert_tokenizer()
+    encoded = [tokenizer(text) for text in texts]
+    return tuple(
+        (
+            torch.tensor([entry["input_ids"]], dtype=torch.int64),
+            torch.tensor([entry["attention_mask"]], dtype=torch.int64),
+        )
+        for entry in encoded
+    )
+
+
+def capture_stage_batches(
+    bert: nn.Module, inputs: Sequence[tuple[torch.Tensor, torch.Tensor]]
+) -> tuple[StageBatch, ...]:
+    """先頭 stage への hidden と付随引数を forward_pre_hook で捕まえる（Catcher）。
+
+    校正入力は「embeddings を通った後の hidden と、encoder が組んだ 4 次元 mask / 相対位置 /
+    `rel_embeddings`」で、自前で組み直すと transformers 側と黙って割れる。**先頭層の呼び出し
+    そのもの**を捕まえるのが、前段を写さずに同じ入力を採る形。
+
+    ConvLayer が要る 2 次元 mask は層へは渡らないので、**ConvLayer の呼び出し**からもう 1 本
+    捕まえる（`attention_mask.dim() <= 2` の分岐を写すと片方だけ仕様から外れる、で同文）。
+    番兵で打ち切るのは ConvLayer 側 — そこまでで走るのは先頭層 1 枚だけ。
+
+    MUST: 揃わずに forward が完走したら fail loudly — stage の綴りが模型の構成と食い違って
+    いる合図で、黙って進むと「校正入力ゼロ」の診断が core 側で出るだけになる。
+    """
+    encoder = bert.encoder
+    captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    masks: list[torch.Tensor] = []
+
+    def catch_layer(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        captured.append((args, dict(kwargs)))
+
+    def catch_conv(_module: nn.Module, args: tuple[Any, ...]) -> None:
+        masks.append(args[2])
+        raise _FirstStageReached
+
+    handles = [
+        encoder.layer[0].register_forward_pre_hook(catch_layer, with_kwargs=True),
+        encoder.conv.register_forward_pre_hook(catch_conv),
+    ]
+    batches: list[StageBatch] = []
+    try:
+        for index, (ids, mask) in enumerate(inputs):
+            captured.clear()
+            masks.clear()
+            try:
+                with torch.no_grad():
+                    bert(input_ids=ids, attention_mask=mask)
+            except _FirstStageReached:
+                pass
+            if len(captured) != 1 or len(masks) != 1:
+                raise AssertionError(
+                    f"校正入力 {index} で先頭 stage の入力が揃わなかった"
+                    f"（層 {len(captured)} 件 / ConvLayer {len(masks)} 件）"
+                    "— stage の綴りが模型の構成と食い違っている"
+                )
+            args, kwargs = captured[0]
+            if len(args) != 2:
+                raise AssertionError(
+                    f"先頭層が位置引数 {len(args)} 個で呼ばれた（hidden と mask の 2 個が想定 —"
+                    " transformers 側の呼び出しの形が変わっている）"
+                )
+            hidden, attention_mask = args
+            batches.append(
+                (
+                    (hidden.detach(),),
+                    {"attention_mask": attention_mask, INPUT_MASK_KWARG: masks[0], **kwargs},
+                )
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
+    return tuple(batches)
+
+
+@dataclass(frozen=True)
+class CalibRig:
+    """校正付き構成 1 本ぶんの足場（stage 列・走査・先頭 stage への入力）。
+
+    minicpm5 / EG のリグと違って**構成ごとに組み直す** — この台本は方式を積み重ねないために
+    BERT を構成ごとに素の重みから読み直す（{@link quantized_bert_feature} と同じ pristine の
+    採り方）ので、stage も先頭 stage の入力もその模型に紐づく。
+    """
+
+    stages: tuple[StageSpec, ...]
+    scan: Mapping[str, torch.Tensor]
+    counts: TargetCounts
+    batches: tuple[StageBatch, ...]
+
+
+def build_calib_rig(bert: nn.Module, meta: Mapping[str, Any], limit: int | None) -> CalibRig:
+    """校正の足場を組む（stage 分解 → 走査 → 評価文との分離検査 → tokenize → Catcher）。"""
+    stages = bert_stages(bert)
+    scan, counts = calib_targets(stages)
+    texts = calib_corpus(limit)
+    assert_calib_disjoint(texts, (meta["text"], meta["bertText"]))
+    return CalibRig(
+        stages=stages,
+        scan=scan,
+        counts=counts,
+        batches=capture_stage_batches(bert, calib_inputs(texts)),
+    )
+
+
+def apply_calib(config: CalibConfig, rig: CalibRig) -> CalibReport:
+    """校正付き丸め 1 本を模型へ in-place で当てる（stage 逐次の駆動は core 側）。"""
+    return calibrate_stages(rig.stages, rig.batches, method=config.method, spec=config.grid)
+
+
+def assert_calib_covers_scan(
+    report: CalibReport, scan: Mapping[str, torch.Tensor], name: str
+) -> None:
+    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+
+    MUST: fail loudly。stage の綴りや対象型が変わって encoder の一部が校正に載らなくなっても
+    表には行が残り、しかも丸め漏れのぶん SNR / LSD は**良い側**に出る（素通りを数字から
+    読めない）。既存 6 門（{@link run_gates}）と同じ立場の恒真化の遮断。
+    """
+    rounded = {layer.fqn for layer in report.layers}
+    missing = sorted(set(scan) - rounded)
+    extra = sorted(rounded - set(scan))
+    if missing or extra or report.modules != len(scan):
+        raise AssertionError(
+            f"[{name}] 校正が丸めた {report.modules} 本が走査の {len(scan)} 本と一致しない"
+            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+        )
+
+
+def calibrated_bert_feature(
+    name: str, inputs: ChainInputs, limit: int | None
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """BERT の **encoder 内 linear** を校正付き丸めで丸めてから特徴を採る（`(特徴, 報告)`）。
+
+    MUST: 模型は**素の重みから読み直す**（方式を積み重ねない — {@link quantized_bert_feature}
+    と同文）。丸めそのものは core の `calibrate_stages` の共有で、台本が持つのは stage 分解と
+    校正入力の採り方だけ。
+    """
+    config = CALIB_CONFIGS[name]
+    bert = load_bert()
+    rig = build_calib_rig(bert, inputs.meta, limit)
+    report = apply_calib(config, rig)
+    assert_calib_covers_scan(report, rig.scan, name)
+    feature = bert_feature_of(bert, inputs.tensors)
+    projection = SizeProjection(
+        counts=rig.counts, bits=config.projected_bits(rig.counts), formula=config.formula
+    )
+    rows = [layer.tokens for layer in report.layers]
+    detail = {
+        "quant": report.describe(),
+        "method": config.label,
+        "target": CALIB_TARGET,
+        "stages": report.stages,
+        "calib_texts": len(rig.batches),
+        # `--calib-limit` の縮小実行だったかの記録（`None` = 全量）— 縮小した数値を全量の
+        # 数値として読まれないように、指標と同じファイルへ残す。
+        "calib_limit": limit,
+        # 層ごとに見た入力**行**数の幅（`H = Σ XᵀX` の重み）。`query_proj` / `key_proj` は
+        # share_att_key の相対位置埋め込み（1 forward あたり 512 行）も食うので、素のトークン
+        # 行数（= 下限側）より必ず多い側へ出る — 1 つの数で書くと読み手が取り違える。
+        "calib_rows": {"min": min(rows), "max": max(rows)},
+        "size": {
+            "modules": projection.counts.modules,
+            "elements": projection.counts.elements,
+            "bits_per_weight": projection.bits_per_weight,
+            "projected_mib": projection.projected_mib,
+            "f32_mib": projection.f32_mib,
+            "formula": projection.formula,
+        },
+    }
+    del bert, rig
+    gc.collect()
+    return feature, detail
+
+
+def bert_variant(recipe: Recipe) -> str | None:
+    """BERT 特徴のキャッシュ鍵（`None` = f32 固定）。
+
+    素の方式（{@link W4_METHODS}）と校正付き（{@link CALIB_CONFIGS}）で名前空間は交わらない
+    ので 1 本の鍵で足りる。両方を持つ Recipe は構成の書き間違いなので落とす。
+    """
+    if recipe.bert_method is not None and recipe.bert_calib is not None:
+        raise AssertionError("BERT の丸めは素の方式か校正付きのどちらか一方")
+    return recipe.bert_method or recipe.bert_calib
+
+
+def bert_feature_for(
+    recipe: Recipe, inputs: ChainInputs, calib_limit: int | None
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """構成の BERT 契約に合った特徴と、その丸めの報告を作る（f32 固定の構成では呼ばない）。"""
+    if recipe.bert_calib is not None:
+        return calibrated_bert_feature(recipe.bert_calib, inputs, calib_limit)
+    if recipe.bert_method is None:
+        raise AssertionError("BERT の丸めを持たない構成で特徴を作ろうとしている")
+    feature, described = quantized_bert_feature(recipe.bert_method, inputs)
+    return feature, {"quant": described, "method": recipe.bert_method, "target": "bert:linear"}
+
+
 def run_config(
     name: str,
     model_dir: Path,
@@ -1000,6 +1475,7 @@ def run_config(
             "targets": w4_targets,
         },
         "bert_method": recipe.bert_method,
+        "bert_calib": recipe.bert_calib,
         "version": hps.version,
         "frames": total_frames,
         "samples": int(audio.shape[0]),
@@ -1119,6 +1595,11 @@ def build_report(
             "w4": "方式は **g=32 固定**（ADR 0069 追記 5）。net_g は全役割・BERT は linear 限定で、"
             "丸めは core（karume.quantize / karume.quant_methods）の共有。サイズは実測ではなく"
             "**式による投影**で、格納形を持つのは RTN（`i4`）だけ",
+            "bert_calib": "校正付き丸め（GPTQ）は core（karume.quant_calib）の共有で、**格子は"
+            "方式グリッドと 1 バイトも変わらない**（変わるのは同じ格子の中でどの準位へ寄せるか）。"
+            "校正入力は sbv2/calib_texts.py の 48 文を既存の DeBERTa tokenizer 経路で採り、"
+            "評価文とは部分一致まで分離する。stage は encoder の**特徴を採る層まで**で、"
+            f"対象は `{CALIB_TARGET}`（`bert:linear` の census の部分集合）",
         },
         "gates": gates,
         "w4": w4,
@@ -1349,6 +1830,7 @@ def build_w4_section(
     inputs: ChainInputs,
     bert_reports: Mapping[str, dict[str, Any]],
     dist_dir: Path,
+    calib_limit: int | None,
 ) -> dict[str, Any]:
     """report.json の `w4` 節 — 対象集合の census・サイズ試算・配布形への投影。
 
@@ -1381,6 +1863,15 @@ def build_w4_section(
         },
         "projections": build_projections(counts),
         "bert_quant": dict(bert_reports),
+        "calib": {
+            "group_size": CALIB_GROUP_SIZE,
+            "target": CALIB_TARGET,
+            "target_description": "BERT（DeBERTa）の encoder 内 linear のうち**特徴を採る層"
+            "まで** — `bert:linear` の census の部分集合（末尾の層は出力に効かない）",
+            "texts": len(calib_corpus(calib_limit)),
+            "limit": calib_limit,
+            "methods": {name: config.formula for name, config in CALIB_CONFIGS.items()},
+        },
     }
     if dist_dir.is_dir():
         section["distribution"] = project_distribution(dist_dir, linear_fqns)
@@ -1421,6 +1912,13 @@ def main() -> None:
         " f32 は SNR の基準なので常に走る",
     )
     parser.add_argument(
+        "--calib-limit",
+        type=int,
+        default=None,
+        help=f"校正コーパスの先頭 N 文だけを使う（既定は全 {len(CALIB_TEXTS)} 文）。"
+        " 縮小 smoke 用のノブで、校正付き構成にだけ効く",
+    )
+    parser.add_argument(
         "--no-diagnostics",
         action="store_true",
         help="front / voice 直交分解の診断構成を走らせない（主要構成だけ）",
@@ -1459,28 +1957,27 @@ def main() -> None:
         diag_dir.mkdir(parents=True, exist_ok=True)
         plan += [(name, diag_dir) for name in DIAGNOSTICS]
 
-    # BERT を振る構成の特徴（方式ごとに 1 度だけ作る — 素の重みから読み直すので積み重ならない）。
+    # BERT を振る構成の特徴（丸め方ごとに 1 度だけ作る — 素の重みから読み直すので積み重ならない）。
     features: dict[str | None, torch.Tensor] = {None: inputs.bert_feature}
     bert_reports: dict[str, dict[str, Any]] = {}
 
     results: dict[str, dict[str, Any]] = {}
     wavs: dict[str, Path] = {}
     for name, directory in plan:
-        method = RECIPES[name].bert_method
-        if method is not None and method not in features:
-            feature, described = quantized_bert_feature(method, inputs)
-            features[method] = feature
-            bert_reports[method] = {
-                "quant": described,
+        variant = bert_variant(RECIPES[name])
+        if variant is not None and variant not in features:
+            feature, detail = bert_feature_for(RECIPES[name], inputs, args.calib_limit)
+            features[variant] = feature
+            bert_reports[variant] = detail | {
                 "differs_from_f32": not bool(torch.equal(feature, inputs.bert_feature)),
                 "rel_rms_vs_f32": rel_rms(feature, inputs.bert_feature),
             }
-            print(f"[bert:{method}] {described}", flush=True)
+            print(f"[bert:{variant}] {detail['quant']}", flush=True)
         results[name] = run_config(
             name,
             args.model_dir,
             inputs,
-            bert_feature=features[method],
+            bert_feature=features[variant],
             census=census,
             inject=args.inject,
         )
@@ -1496,7 +1993,7 @@ def main() -> None:
         )
 
     gates = run_gates(results, wavs, args.reference_wav, census, bert_reports)
-    w4 = build_w4_section(census, inputs, bert_reports, args.dist_dir)
+    w4 = build_w4_section(census, inputs, bert_reports, args.dist_dir, args.calib_limit)
     report = build_report(args, inputs, results, wavs, gates, w4)
     # dump 側の波形（実 GPU の Karume 出力）との突合も残す — f32 経路の二重の裏取り。
     dump_audio = inputs.tensors["audio"].reshape(-1).to(torch.float32)
@@ -1514,6 +2011,24 @@ def main() -> None:
         print()
         print("診断（front / voice 直交分解）:")
         print(format_table(report["diagnostics"]))
+    calib_notes = [
+        f"> {variant}: {entry['quant']} / 投影 {entry['size']['bits_per_weight']:.3f} bpw"
+        f"（{entry['size']['formula']}）"
+        for variant, entry in bert_reports.items()
+        if variant in CALIB_CONFIGS
+    ]
+    if calib_notes:
+        print()
+        print(
+            f"校正付き構成の内訳（校正 {len(calib_corpus(args.calib_limit))} 文 /"
+            f" 対象 {CALIB_TARGET}）:"
+        )
+        print("\n".join(calib_notes))
+        if args.calib_limit is not None:
+            print(
+                f"> 校正は先頭 {args.calib_limit} 文のみの縮小実行"
+                f"（全 {len(CALIB_TEXTS)} 文ではない — 数値を全量のものとして読まないこと）"
+            )
     print()
     print("w4 サイズ試算（**実測ではなく式による投影** — 格納形を持つのは RTN だけ）:")
     print(format_projection_table(report["w4"]["projections"]))
