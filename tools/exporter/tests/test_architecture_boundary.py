@@ -47,6 +47,8 @@ CORE_MODULES: tuple[str, ...] = (
     # 測定専用の丸め方式（格納経路を持たない — quant_methods モジュール docstring）。
     # 対象選択は quantize と共有で、family 知識は持たない。
     "quant_methods",
+    # 校正付き丸め（GPTQ / AWQ）。対象選択は quantize と共有・family 知識は持たない。
+    "quant_calib",
     "act_quant",
     "emit",
     "verify",
