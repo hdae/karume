@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-19
+> Last updated: 2026-08-20
 
 ## Now
 
@@ -26,15 +26,16 @@
 - **全体レビュー（2026-08-19）は修正波込みで全消化** — E/C = 0・W 19 → 修正 11 コミット・
   verify 1620/0/5。Codex 提案の波割りは backlog へ反映済み（R1 同席 4 件・生成 API 波・
   recipe 基盤同席）。
-- **w4 横展開 + 量子化方式スクリーニング波（2026-08-19）: 実装・実測は全消化** — 実測正本 =
+- **波 I（w4 横展開 + 方式スクリーニング・2026-08-19）: 聴感/視認込みで完全クローズ** —
+  実測正本 =
   [research/2026-08-19-w4-method-screening.md](../docs/research/2026-08-19-w4-method-screening.md)・
-  採否台帳 = perf-ledger Q-1〜Q-5。要旨: 方式序列はモデル系統で割れる（LLM/埋め込み =
-  kmeans:shared 最良 / TTS = nf4 相対最良 / 画像 = 方式差消失の全滅帯）・SBV2 BERT linear i4 =
-  配布 −9.76%（既存格納形・聴感待ち）。recipe 基盤 4 件（CX-1.4/1.1/1.3/2.3）も同波で消化。
-  **聴感/視認も消化（同日ユーザー実施）**: RTN/NF4 全ファミリ一次通過・**Q-4（mxfp4）不採用
-  確定・Q-5 は配布席候補へ改訂**（正本 = research §6 / perf-ledger Q 節）。既定化は速度と
-  細かい品質のバランスで別途。次波 = 量子化探索・第 2 段（**冒頭に Q-1 実装** = SBV2 BERT
-  linear i4 配布形 + 実 GPU 検収 — backlog next 節）。
+  採否 = perf-ledger Q 節（RTN/NF4 全ファミリ一次通過・Q-4 mxfp4 不採用確定・Q-2 kmeans は
+  LLM/埋め込み限定）。方式序列はモデル系統で割れる — 1 回の実測で一般化しない。既定化は
+  速度と細かい品質のバランスで別途。
+- **波 J（量子化探索・第 2 段・2026-08-20 着手）が現行**: J-1（Q-1 = SBV2 BERT linear i4 の
+  配布配線 + 実 GPU WAV 門）は**消化済み** — deberta-i4 混成系列 + quant `w8-bert4`（既定は
+  w8 のまま・perf-ledger Q-1 ✅）。J-2（GPTQ/AWQ 校正付き丸め）・J-3（g 軸）・J-4（格納席の
+  実装裁定）は波割り裁定待ち（骨子 = backlog now 節）。
 
 ## Open decisions
 

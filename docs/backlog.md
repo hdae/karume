@@ -7,41 +7,27 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — w4 横展開 + 量子化方式スクリーニング（2026-08-19 — 実装・実測は全消化）
+## now — 量子化方式の探索・第 2 段（波 J・2026-08-20 着手）
 
-**実装・実測・起票まで消化済み**。実測の正本 =
+前段（波 I = w4 横展開 + 方式スクリーニング・聴感/視認込み）は**完全クローズ** — 実測の正本 =
 [research/2026-08-19-w4-method-screening.md](research/2026-08-19-w4-method-screening.md)、
-採否の台帳 = [perf-ledger](perf-ledger.md) の量子化方式節（Q-1〜Q-5）、測定側拡張の設計 =
-ADR [0069](decisions/0069-packed-w4-storage.md) 追記 5。recipe 基盤 4 件
-（CX-1.4 artifact transaction / CX-1.1 variant 統合 / CX-1.3 PLE モジュール化 /
-CX-2.3 golden provenance = ADR [0068](decisions/0068-decode-exit-multi-output.md) 追記 5）も
-同波で消化（token 系列再 export の sha256 完全一致で CX-1.1 の生成物不変を実資産検収済み）。
+採否 = [perf-ledger](perf-ledger.md) の量子化方式節（Q-1〜Q-5）、recipe 基盤 4 件 = ADR
+[0068](decisions/0068-decode-exit-multi-output.md) 追記 5 / [0069](decisions/0069-packed-w4-storage.md)
+追記 5。
 
-**聴感・視認も消化（2026-08-19 ユーザー実施 — 波は完全クローズ）**: RTN / NF4 は全ファミリ
-一次通過・kmeans / mxfp4 に人間検知の不具合（音量低下・不安定・画像崩壊）。裁定の反映先 =
-research §6（人間レビュー節 — 「同一性 ≠ 成立性」の訂正込み）+ perf-ledger Q-1〜Q-5
-（**Q-4 不採用確定・Q-5 は不採用を撤回して配布席候補へ改訂**）。既定化は速度と細かい品質の
-バランスで別途裁定（ユーザー方針 — w4 変種は当面 opt-in 配布席の候補）。
+- **J-1: Q-1 実装 — 消化済み（2026-08-20）**: deberta-i4 混成系列（linear = i4 g32・残り i8）+
+  SBV2 quant `w8-bert4` + 実 GPU WAV 門（perf-ledger Q-1 ✅）。既定 quant は w8 のまま。
+  HF jvnv 上げ直しはリリース枠と同乗（資産は準備済み）。
+- **J-2: 校正ループ系（GPTQ / AWQ）** — core `quant_calib.py`（決定的・±7 グリッド共有）+
+  校正コーパス新設 + fake-quant スクリーニング {gptq, awq, awq→gptq} × {rtn, nf4, kmeans:shared}
+  を安いファミリ（minicpm5 / EG）→ 勝者を重いファミリ → 聴感/視認。GPTQ は格納 i4 g32 のまま
+  値の選びだけ賢くする系で runtime 0 行・AWQ の per-channel scale は格納に fold か companion が
+  要る（fake-quant は fold 理想形の上限を測る）。**波割り裁定待ち（2026-08-20 提案）**。
+- **J-3: g 軸の評価**（波 I は g=32 固定の裁定 — 方式勝者で g32/g64/g128 を再評価）。
+- **J-4: 格納席の実装裁定**（Q-2 kmeans companion 席 / Q-3 NF4 定数表席 — J-2 の結果を見てから。
+  codebook 系採用なら ADR 0069 の bit 表・整列表・view 型 3 面の reopen）。
 
-全体レビュー波は **0.3.0 の JSR / PyPI リリース（2026-08-16）まで含めて全消化**。
-勢力図・ポジショニング検証は
-[research/2026-08-16-runtime-landscape.md](research/2026-08-16-runtime-landscape.md)、
-リリース時点の実測は
-[research/2026-08-11-embeddinggemma-ort-comparison.md](research/2026-08-11-embeddinggemma-ort-comparison.md)
-§7（EG bare 28.11ms — レビュー波の門追加は性能コストゼロを確認）。
-
-**autoregressive-ready 基盤波（A〜H）も全消化（2026-08-17〜19）** — GQA・多出力 +
-argmax / topk・GenerationContext・states 形 attention・decode 台本 + greedy 検収・w4
-（i4 g32）・shard ロード + admission・Gemma 4 E2B / MiniCPM5-1B 実モデル検収・token-only
-既定出口まで完了。設計と経緯の正本 = ADR
-[0066](decisions/0066-generation-context-state-slots.md) /
-[0067](decisions/0067-autoregressive-attention-vocabulary.md) /
-[0068](decisions/0068-decode-exit-multi-output.md) /
-[0069](decisions/0069-packed-w4-storage.md) /
-[0070](decisions/0070-shard-loading-admission.md)（各追記）と research
-（[autoregressive-references](research/2026-08-17-autoregressive-references.md) /
-[w4-fake-quant-sweep](research/2026-08-18-w4-fake-quant-sweep.md) /
-[shard-load-ram-peak](research/2026-08-19-shard-load-ram-peak.md)）。
+**リリース準備波（release 節）はモデルの HF 公開も含み重いため後回し**（2026-08-19 裁定・据え置き）。
 
 autoregressive 波の**残項目（波外へ送り）**:
 
@@ -55,20 +41,6 @@ autoregressive 波の**残項目（波外へ送り）**:
 - 有界論理 extent の席（R2 — IR スキーマ予約のみ・実装は最初の実需モデルまで先送り）・
   bool initializer / storage の設計・pipeline 単位の Session 常駐と device-loss lifecycle
   （perf H-4 と同体）・sampling/RNG はホスト維持（GPU 側は argmax/topk のみ）。
-
-## next — 量子化方式の探索・第 2 段（2026-08-19 裁定で now 波から分離）
-
-- **冒頭に Q-1 の実装**（2026-08-19 承認 — 聴感一次通過済み）: SBV2 BERT linear を i4 で焼いた
-  配布形の生成（dist の dtype 指定・−9.76%）+ 実 GPU WAV 検収。HF jvnv 上げ直しはリリース枠と
-  同乗（資産準備まで）。
-- **校正ループ系**（GPTQ / AWQ — 格納形は i4 g32 のまま値の選びだけ賢くする系。runtime 0 行で
-  乗るため筋が良いが、校正データ + 最適化ループの実装が要る）。
-- **g 軸の評価**（now 波は g=32 固定 — 方式が絞れてから勝者方式で g32/g64/g128 を再評価する。
-  組合せ爆発を避ける裁定）。
-- now 波の採用価値ランキングを受けた**優先実装**（codebook 系採用なら格納の新席 = ADR 0069 の
-  bit 表・整列表・view 型 3 面の reopen。実測骨子ができたら perf-ledger へ起票し直す）。
-
-**リリース準備波（release 節）はモデルの HF 公開も含み重いため後回し**（2026-08-19 裁定・据え置き）。
 
 ## later
 
