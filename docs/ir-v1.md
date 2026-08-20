@@ -129,19 +129,21 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   `storage.group_size` を持てる。**ランタイムが実行できるのは `f32` / `f16` / `i8` / `i4` /
   `i32`** — bf16 だけが「宣言としては valid、実行は fail loudly（capability 不足の診断付き）」。
   `i4`（ADR [0069](decisions/0069-packed-w4-storage.md)）の適格だけ狭い —
-  **消費が linear / embedding の重みスロットのみ**の initializer が packed のまま GPU 常駐し
-  （0069 追記 6 の embedding 追補）、適格外はロード時に CPU で f32 展開される
-  （正しさは保たれ VRAM 削減はゼロ）。
-- **`i4` の格納形**（ADR 0069 決定 2 / 3）: K 方向 group の対称量子化を packed 4bit で持つ。
+  **消費が linear / embedding / conv1d（`groups == 1`）の重みスロットのみ**の initializer が
+  packed のまま GPU 常駐し（0069 追記 6 の embedding 追補・追記 7 の conv1d 追補）、適格外は
+  ロード時に CPU で f32 展開される（正しさは保たれ VRAM 削減はゼロ）。
+- **`i4` の格納形**（ADR 0069 決定 2 / 3）: 行方向 group の対称量子化を packed 4bit で持つ。
   テンソル shape は**論理形のまま**で、safetensors 側は `I4`・バイト長は `numel / 2`
   （要素数が奇数の宣言は bit 総量が byte 境界に乗らないので fail loudly）・**テンソル先頭は
   4 バイト整列** MUST（要素整列の概念を持たず、展開カーネルが `array<u32>` で束縛するため）。
   宣言の規則は 3 点:
   - `storage.group_size` が**必須**で、**2 冪かつ 16 以上**
-  - 量子化軸は**最終次元**（linear の in 軸）で、`最終次元 % group_size == 0` MUST
+  - 量子化軸は「**先頭次元を行・残りを平坦化**した行長」（`numel / shape[0]` — rank2 の重みでは
+    最終次元そのもの・conv1d `[O,Cin,K]` では `Cin·K`）で、`行長 % group_size == 0` MUST
     （端数 group を作らない制約が、行境界・group 境界のバイト整列を保証する）
-  - `storage.scale` も**必須**。実体は F32 で、形は**重みと同 rank・最終次元だけ group 数**
-    （重み `[O,I]` に対し scale `[O, I/group_size]`）— i8 の keepdim broadcast 形とは別分岐
+  - `storage.scale` も**必須**。実体は F32 で、形は **rank 非依存の rank2**
+    `[shape[0], 行長 / group_size]`（rank2 の重みでは従来の「同 rank・最終次元だけ group 数」と
+    同値 — 0069 追記 7）— i8 の keepdim broadcast 形とは別分岐
 
   `group_size` を `i4` 以外の格納 dtype に付けた宣言は `非対応 group 量子化` として
   capability 不足で落ちる（**group 量子化の格納は `i4` のみ**。黙って無視すると group ごとの

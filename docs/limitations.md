@@ -146,10 +146,12 @@ IR v1 の格納スキーマとしては受理するが、実行経路が無く `
 
 group 量子化（w4）は [decisions/0069](decisions/0069-packed-w4-storage.md) で**解禁・実行
 経路も実装済み**（2026-08-18）— 格納 dtype `i4`（packed 4bit・K 方向 group の対称量子化）。
-制約は `group_size` が 2 冪かつ 16 以上・量子化軸（最終次元）が `group_size` で割り切れる
-こと・scale companion（F32・重みと同 rank で最終次元だけ group 数）が必須の 3 点。**適格は
-f16 / i8 より狭く「消費が linear / embedding の重みスロットのみ」**（0069 決定 5 と追記 6 —
-conv 系への追補は需要が出た op から）で、適格外はロード時 CPU 展開（VRAM 削減ゼロ）。`i4` 以外の格納 dtype に
+制約は `group_size` が 2 冪かつ 16 以上・量子化軸（先頭次元を行とした平坦行長 — rank2 では
+最終次元そのもの）が `group_size` で割り切れること・scale companion（F32・rank2
+`[行数, 行長/group_size]`）が必須の 3 点。**適格は f16 / i8 より狭く「消費が linear /
+embedding / conv1d（`groups == 1`）の重みスロットのみ」**（0069 決定 5 と追記 6 / 7 —
+conv2d / conv_transpose1d への追補は需要が出た op から）で、適格外はロード時 CPU 展開
+（VRAM 削減ゼロ）。`i4` 以外の格納 dtype に
 付いた `storage.group_size` は解禁後も `非対応 group 量子化` として落ちる（黙って
 per-channel として読むと沈黙誤値になるため）。
 

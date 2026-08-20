@@ -132,6 +132,11 @@ rows stay i8, so a single-dtype i4 series cannot exist. Only `front` and `voice`
 writing — they are the seats of the distribution's `w4` quant, and no other consumer reads this
 series.
 
+| Target  | i8 storage   | i4 storage   | i4 tensors (linear + conv1d) | Elements rounded to i4 |
+| ------- | ------------ | ------------ | ---------------------------: | ---------------------: |
+| `front` | 10,324,816 B | 7,381,496 B  |                 62 (2 + 60)  |              7,684,672 |
+| `voice` | 55,516,968 B | 36,039,208 B |                230 (4 + 226) |             51,386,368 |
+
 The gain is negligible on purpose: net_g carries only 6 linears (`enc_p.style_proj` /
 `enc_p.encoder.spk_emb_linear` in `front`, the 4 `flow_rev.flow.flows.<i>.enc.spk_emb_linear` in
 `voice`) against 86–90% conv1d. The point of the series is to let the distribution ship a

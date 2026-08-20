@@ -262,3 +262,38 @@ w4 横展開 + 量子化方式スクリーニング波（backlog now 節）に�
    embedding op が立たない = 重みスロット消費ゼロで一般適格外〉と conv）。系列 202.45 →
    193.91 MB（−8.15 MiB — group scale の f32 が payload 半減益の約 3 割を食う）。SBV2
    `w8-bert4` の取得量 = w8 比 −30.33%。WAV 参照は採り直し（旧値は e2e 側 NOTE が保持）。
+
+## 追記 7（2026-08-20・決定 5 の追補第 2 号 — conv1d の i4 実行経路と scale 形の rank 非依存化）
+
+決定 5 の「需要が出た op から追補」の第 2 号として **conv1d（`groups == 1`）を i4 適格へ
+追補**した（ユーザー承認・波 J-5b・`eac9d43`）。
+
+1. **適格述語**: op が conv1d ∧ attrs の `groups == 1` ∧ 格納行長 `Cin·K % group_size == 0`。
+   `groups > 1`（depthwise 系）は直接カーネル行きで展開経路が無く、`conv_transpose1d` は重み
+   `[Cin,Cout,K]` の行軸が先頭でないため pack 順が合わない（2.6 MiB のために permuted pack を
+   買わない — 同日ユーザー裁定）。emit（`I4_WEIGHT_OPS` + `_has_i4_kernel`）と plan.ts
+   （`I4_WEIGHT_OPS` + `i4Executable`）は**集合の中身も絞りの構造も対**の鏡像。
+2. **scale の論理形を rank 非依存へ一般化**（決定 3 の改訂）: 量子化軸 = 「先頭次元を行・残りを
+   平坦化」した行長（exporter `quantize.storage_rows` / runtime `format/i4.groupScaleShape` —
+   各側 1 実装共有）。scale = rank2 `[rows, (numel/rows)/g]`。rank2 の重み（linear /
+   embedding）では従来の「同 rank・最終次元だけ group 数」と同値で既存資産の検査結果は不変。
+   **narrowing**: rank1 の i4 重みは表現不能になった（適格 op に rank1 の重みスロットは無く、
+   現存資産・テストへの影響ゼロ）。pack のバイト列は重みの連続メモリ順のまま rank に依らず
+   一意（`[O,Cin,K]` row-major = `[O, Cin·K]` 平坦と同一バイト列）。
+3. **実行**: conv1d の implicit GEMM（A 側 = `W[Cout, Cin·K]`）のタイル充填が quad ごとに
+   group scale を引く（gemm.ts `fillAConv` — linear の B 側の鏡映・4 整列 quad は group ≥ 16 を
+   跨がない）。直接カーネル / conv2d への i4 は生成入口の `CodegenError`（適格判定が閉じている
+   前提だけに乗らない）。キーは `:wi4g32`（linear と同流儀）。attrs 欠落の conv1d は適格判定の
+   時点で fail loudly（既定値補完をしない — 従来の後段検査より前倒し）。
+4. **census と graph の一致**（recipe 側の教訓）: fake-quant の census はモジュール木から
+   数えるため、**使わない部分モジュールを抱える wrapper** では torch.export の graph と
+   食い違い、emit の override 綴り検査（沈黙 drop 防止）が落ちる。SBV2 front の
+   `SdpReverseNoiseIn` が該当（sdp 丸ごと保持 — `post_*` は訓練専用・reverse は ConvFlow を
+   1 本落とす）し、**所有 = 使用**へ再構成して構造的に一致させた（`sbv2/patch.py` — 同一
+   オブジェクト・同一呼び順で数値不変・`--verify front` 緑）。
+5. **SBV2 への適用実測（2026-08-20・全 14 モデル再 export）**: 適格 conv1d = front 60 +
+   voice 226 本（形は適格でも `groups > 1` の 12 / 48 本は i8 残留）。i4 系列 front
+   10.27→7.38 MB・voice 55.37→36.04 MB（計 −22.2 MB）。`w4` 取得量 = **237.5 MB（w8 比
+   −36.3%）**・温間合成 ~500ms（w8 ~547ms — conv 重み読みの帯域半減で in-kernel dequant
+   でも最速）。WAV 参照（w4）は採り直し（旧値は e2e 側 NOTE が保持・w8 / w8-bert4 門は不変 =
+   i8 席の非破壊証明）。

@@ -49,10 +49,14 @@
   `w8-bert4` 取得量 = w8 比 **−30.33%**。WAV 参照 2 本採り直し済み（聴感確認済み 2026-08-20 —
   品質 OK・硬さの印象は第 3 段で再聴）。
   tied lm_head は適格へ反転（LLM 側の副次利得）。
-- **J-5b（承認済み・未着手）**: net_g conv1d i4（in 軸 = channel_rows 平坦の連続 group・
-  scale rank2 の正式化 = ADR 0069 新決定。≈−27.5 MiB・J-5a と合わせ w8 比 ≈−40% 見込み）。
-  **convT は対象外**（2.6 MiB のために permuted pack を買わない — 2026-08-20 ヘッダ実測:
-  net_g I8 59.0 MiB 中 convT 4.4%）。着地時も WAV 参照採り直し。
+- **J-5b: net_g conv1d i4 — 消化済み（2026-08-20・`eac9d43` + 参照採り直し）**: conv1d
+  （groups == 1）を i4 適格へ追補（ADR 0069 **追記 7** — scale を rank 非依存の rank2 形へ
+  一般化・gemm A 側タイルローダに group scale・emit/plan 鏡像は同型で固定・convT / depthwise
+  は対象外）。SBV2 全 14 モデル再 export + 再配布で **w4 = 237.5MB（w8 比 −36.3%）**・温間合成
+  ~500ms で最速（実測は ADR 追記 7 / research 2026-08-20 §7 系）。見込み ≈−40% は scale 増分と
+  groups>1 残留の分だけ下振れ（正味 −22.2MB）。front の `SdpReverseNoiseIn` は「所有 = 使用」へ
+  再構成（census と graph の構造的一致 — `--verify front` 緑）。w4 WAV 参照は三度目の採り直し
+  （w8 / w8-bert4 門は不変）。**残 = 新 w4 の聴感（conv i4 が配布実経路に乗った初の形）**。
 - **J-3: g 軸の評価**（波 I は g=32 固定の裁定 — 方式勝者で g32/g64/g128 を再評価）。
 - **J-4: 格納席の実装裁定**（Q-2 kmeans companion 席 / Q-3 NF4 定数表席 — J-2 第 2 段の
   結果を見てから。codebook 系採用なら ADR 0069 の bit 表・整列表・view 型 3 面の reopen）。
