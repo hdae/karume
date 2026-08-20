@@ -1,4 +1,4 @@
-"""`sbv2/calib_texts.py` の校正コーパスの性質。
+"""`deberta/calib_texts.py` の校正コーパスの性質。
 
 文面そのものは判断の対象にしない（品質は実測が答える）。ここで固定するのは、崩れると
 **測定値の意味が変わる**側だけ:
@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from sbv2.calib_texts import CALIB_TEXTS
+from deberta.calib_texts import CALIB_TEXTS
 
 #: 数字読みの席の判定に使う漢数字（トークナイザは通さない — 文字の有無だけで見る）。
 NUMERALS = "〇一二三四五六七八九十百千万"

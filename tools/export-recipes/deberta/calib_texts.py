@@ -1,8 +1,15 @@
-"""SBV2 の **BERT（DeBERTa）**校正コーパス（GPTQ が見る活性を作る 48 文）。
+"""DeBERTa（SBV2 の text front）の校正コーパス（GPTQ が見る活性を作る 48 文）。
 
 `karume.quant_calib` の校正付き丸めは「その層に実際に流れる活性」から丸め先を選び直す方式
-なので、コーパスの性格がそのまま丸めの偏りになる。ここは `measure_quant.py` の校正付き構成
-（{@link sbv2.measure_quant.CALIB_CONFIGS}）が読む唯一の入力で、選定方針は次の 3 点:
+なので、コーパスの性格がそのまま丸めの偏りになる。読み手は 2 つあり、**どちらも同じ 48 文を
+見る**のが要（測って良かった丸めと、配って出す丸めが別のコーパスから決まると、計測が配布形の
+予測にならない）:
+
+- `deberta.export` の i4 系列（校正付き丸めの**出荷経路** — {@link deberta.calib}）
+- `sbv2.measure_quant` の校正付き構成（`CALIB_CONFIGS` — 品質の**計測**）
+
+模型を持つ側がコーパスを持つので置き場はここ（`deberta`）で、`sbv2` 側が名指しで import する。
+選定方針は次の 3 点:
 
 - **評価文と分離する** — dump の発話（`meta["text"]` / `meta["bertText"]`）と 1 文も
   重ねない（部分一致まで {@link sbv2.measure_quant.assert_calib_disjoint} が fail loudly に

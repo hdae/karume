@@ -31,6 +31,12 @@ f16 化と一体で決める話 — タスク #30 の領分）。
 `text_encoder` 席に入る（`sbv2/distribution.py`）。i4 の実行経路は linear / embedding の
 重みスロット限定（ADR 0069 決定 5）なので、単一 dtype の i4 系列は原理的に作れない。
 
+i4 系列の encoder linear は **GPTQ 校正付きで丸める**（既定 — perf-ledger Q-6 / `deberta.calib`）。
+格納形は 1 バイトも変わらない（格子は RTN i4 g32 のまま）で、変わるのは丸め値と scale 台帳の
+中身だけ。校正入力は {@link deberta.calib_texts.CALIB_TEXTS} の 48 文を **golden と同じ入力
+構築経路**（{@link build_graph_inputs}）で通したもの。校正の失敗は fail loudly で、素の RTN へ
+黙って落ちる分岐は持たない（「校正付きのつもりで校正なしを配った」は資産から読めない）。
+
 `--act-quant` は w8a8（`SessionOptions.linearCompute: "i8a8"`）の torch 鏡像で、適格
 `nn.Linear` の入力を per-token i8 へ落とした期待値を **`io-i8a8.<case>.safetensors`** という
 別 prefix で追加で書く。**通常の golden io はフックなしで採る** MUST — フックを掛けたまま
@@ -66,7 +72,8 @@ from karume.quantize import (
     iter_quant_targets,
 )
 
-from . import patch
+from . import calib, patch
+from .calib_texts import CALIB_TEXTS
 
 #: SBV2 text front が使う BERT そのもの（recon §1）。
 MODEL_ID = "ku-nlp/deberta-v2-large-japanese-char-wwm"
@@ -91,6 +98,17 @@ I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Embedding)
 #: NOTE: 綴りが上流のモジュール名の変更で空振りしても沈黙はしない — 除外が消えた瞬間に emit の
 #: 明示指定の門が「適格でない」でそのテンソル名を挙げて落ちる。
 NON_LOOKUP_EMBEDDINGS: frozenset[str] = frozenset({"model.encoder.rel_embeddings"})
+
+#: encoder stage の**外**に居る i4 適格の重み（= 語彙表 1 本）。校正付き丸めは stage 逐次の
+#: 駆動なので stage の中しか丸められず、外の適格は素の RTN i4 が担う
+#: （{@link _round_i4_calibrated}）。
+#:
+#: 名前で宣言するのは「黙った分類替え」を作らないため — 実測（config から組んだ全層 wrapper）で
+#: stage 外の i4 適格はこの 1 本だけ（`embed_proj` は `embedding_size == hidden_size` で
+#: `None`・`position_embeddings` / `token_type_embeddings` も config で `None`・`rel_embeddings` は
+#: {@link NON_LOOKUP_EMBEDDINGS} で適格外）。上流の構成が変わって適格が増減したら、
+#: {@link _round_i4_calibrated} の門がその FQN を挙げて落ちる。
+NON_STAGE_I4_WEIGHTS: frozenset[str] = frozenset({"model.embeddings.word_embeddings"})
 
 #: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格な
 #: linear / embedding は 1 本単位の `weight_dtype_overrides` で i4 へ振る（gemma4 の混成
@@ -239,18 +257,42 @@ def load_model(model_id: str, num_layers: int) -> nn.Module:
     return model
 
 
-def build_cases(tokenizer: Any, model: nn.Module) -> tuple[tuple[str, InputArgs], ...]:
-    """golden 4 ケース（3 文 + padded）の `(名前, グラフ入力名 → テンソル)`。
+def encode_text(tokenizer: Any, text: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """1 文を `[1, T]` の `(input_ids, attention_mask)` へ落とす（mask は全 1）。"""
+    ids = torch.tensor([tokenizer(text)["input_ids"]], dtype=torch.int64)
+    return ids, torch.ones_like(ids)
+
+
+def build_graph_inputs(model: nn.Module, ids: torch.Tensor, mask: torch.Tensor) -> InputArgs:
+    """`(input_ids, attention_mask)` へ相対位置の添字表を足して 4 入力の組にする。
 
     相対位置の添字表はグラフ入力なのでケースごとに実長で作る（`deberta.patch` が正本）。
     バケット幅と最大位置は**モジュールから読む** — config の `max_relative_positions` は
     -1 のとき `max_position_embeddings` へフォールバックする規則を持つので、写すと二重管理になる。
+
+    golden ケース（{@link build_cases}）と校正入力（{@link build_calib_args}）が**同じここを
+    通る**こと MUST — 別の綴りで組むと、校正で見た活性と golden が流す活性が黙って別物になる。
     """
     attention = model.encoder.layer[0].attention.self
-    ids_cases: list[tuple[str, torch.Tensor, torch.Tensor]] = []
-    for index, text in enumerate(GOLDEN_SENTENCES):
-        ids = torch.tensor([tokenizer(text)["input_ids"]], dtype=torch.int64)
-        ids_cases.append((f"case{index}", ids, torch.ones_like(ids)))
+    c2p_pos, p2c_pos = patch.build_rel_pos_tables(
+        int(ids.shape[1]),
+        position_buckets=attention.position_buckets,
+        max_position=attention.max_relative_positions,
+    )
+    return {
+        "input_ids": ids,
+        "attention_mask": mask,
+        "c2p_pos": c2p_pos,
+        "p2c_pos": p2c_pos,
+    }
+
+
+def build_cases(tokenizer: Any, model: nn.Module) -> tuple[tuple[str, InputArgs], ...]:
+    """golden 4 ケース（3 文 + padded）の `(名前, グラフ入力名 → テンソル)`。"""
+    ids_cases: list[tuple[str, torch.Tensor, torch.Tensor]] = [
+        (f"case{index}", *encode_text(tokenizer, text))
+        for index, text in enumerate(GOLDEN_SENTENCES)
+    ]
 
     pad_id = tokenizer.pad_token_id
     if pad_id is None:
@@ -264,26 +306,25 @@ def build_cases(tokenizer: Any, model: nn.Module) -> tuple[tuple[str, InputArgs]
             torch.cat([torch.ones_like(base_ids), torch.zeros_like(pad_ids)], dim=1),
         )
     )
+    return tuple((name, build_graph_inputs(model, ids, mask)) for name, ids, mask in ids_cases)
 
-    cases: list[tuple[str, InputArgs]] = []
-    for name, ids, mask in ids_cases:
-        c2p_pos, p2c_pos = patch.build_rel_pos_tables(
-            int(ids.shape[1]),
-            position_buckets=attention.position_buckets,
-            max_position=attention.max_relative_positions,
-        )
-        cases.append(
-            (
-                name,
-                {
-                    "input_ids": ids,
-                    "attention_mask": mask,
-                    "c2p_pos": c2p_pos,
-                    "p2c_pos": p2c_pos,
-                },
-            )
-        )
-    return tuple(cases)
+
+def build_calib_args(
+    tokenizer: Any, model: nn.Module, texts: Sequence[str]
+) -> tuple[tuple[torch.Tensor, ...], ...]:
+    """校正コーパスを wrapper の**位置引数**（{@link INPUT_ORDER} の並び）の列へ落とす。
+
+    トークナイズも添字表も golden と同じ経路（{@link encode_text} / {@link build_graph_inputs}）
+    を通す。位置引数にするのは、校正リグ（`deberta.calib`）がグラフ入力の**名前を知らない**で
+    済ませるため（リグは wrapper を呼ぶだけ）。
+    """
+    if not texts:
+        raise ValueError("校正コーパスが空（校正付き i4 は入力ゼロでは成立しない）")
+    built: list[tuple[torch.Tensor, ...]] = []
+    for text in texts:
+        args = build_graph_inputs(model, *encode_text(tokenizer, text))
+        built.append(tuple(args[key] for key in INPUT_ORDER))
+    return tuple(built)
 
 
 def _write_io(
@@ -369,8 +410,74 @@ def _i4_module_names(wrapper: nn.Module) -> frozenset[str]:
     )
 
 
+def _round_i4_plain(
+    wrapper: nn.Module, names: frozenset[str], label: str
+) -> Mapping[str, torch.Tensor]:
+    """名指しの集合を素の RTN i4 g32 で丸める（校正を通さない 1 段目の格子そのもの）。
+
+    `label` は診断行の主語（助詞まで込み — 「〜を i4 group へ丸めた」に嵌まる形）。
+    """
+    report = fake_quant_int4(
+        wrapper,
+        include=lambda name: name in names,
+        op_types=I4_MODULE_TYPES,
+    )
+    print(f"[fake-quant] {label} i4 group へ丸めた（RTN） — {report.describe()}", flush=True)
+    return report.scales
+
+
+def _round_i4_calibrated(
+    wrapper: nn.Module,
+    i4_names: frozenset[str],
+    calib_args: Sequence[Sequence[torch.Tensor]],
+) -> Mapping[str, torch.Tensor]:
+    """i4 適格を「stage 外 = RTN」「encoder stage 内 = GPTQ」へ排他に割って丸める。
+
+    順序 MUST（① → ② → ③）:
+
+    1. **stage 外の適格（語彙表）を先に RTN i4 で丸める** — 配布実行時に encoder へ入るのは
+       i4 の語彙表を引いた活性なので、校正入力を配布条件へ合わせる（語彙表の丸め誤差が
+       伝播した状態で encoder の丸め先を選ぶ）。後に回すと「f32 の表を引いた活性」で校正した
+       重みを、i4 の表と組んで配ることになる。
+    2. 校正バッチの捕捉と stage 分解一致門（`deberta.calib.build_rig`）。
+    3. stage 内の適格 linear を GPTQ × RTN 格子で丸める。
+
+    MUST: stage 外の適格は {@link NON_STAGE_I4_WEIGHTS} と一致すること — 一致しないなら上流の
+    構成が変わって適格が増減している。黙って RTN 側へ流す（= 校正が痩せる）のも、黙って i8 へ
+    落とす（= サイズだけ戻る）のも数字から読めないので、その場で落とす。
+    """
+    stages = calib.encoder_stages(wrapper)
+    stage_names = calib.stage_linear_names(stages) & i4_names
+    plain_names = i4_names - stage_names
+    if plain_names != NON_STAGE_I4_WEIGHTS:
+        raise AssertionError(
+            f"encoder stage の外の i4 適格が {sorted(plain_names)} で、宣言"
+            f"（NON_STAGE_I4_WEIGHTS = {sorted(NON_STAGE_I4_WEIGHTS)}）と違う"
+            " — 上流の構成が変わって i4 の割り方が動いている"
+        )
+    plain = _round_i4_plain(wrapper, plain_names, "stage 外の語彙表を")
+    rig = calib.build_rig(wrapper, stages, calib_args)
+    report, ledger = calib.calibrate_i4(
+        rig, include=lambda local: f"{calib.STAGE_PREFIX}.{local}" in stage_names
+    )
+    calibrated = ledger.scales
+    # MUST: 2 経路は互いに素（重なれば同じ重みを 2 度丸めたことになり、値だけが静かに狂う）。
+    overlap = sorted(set(plain) & set(calibrated))
+    if overlap:
+        raise AssertionError(f"i4 の 2 経路が同じ重みを丸めている（二重丸め）: {overlap[:3]}")
+    print(
+        f"[fake-quant] encoder stage の linear を GPTQ 校正付きで丸めた — {report.describe()}"
+        f" / 校正入力 {len(rig.batches)} 件・{rig.tokens:,} トークン",
+        flush=True,
+    )
+    return {**plain, **calibrated}
+
+
 def _fake_quant(
-    dtype: str, wrapper: nn.Module
+    dtype: str,
+    wrapper: nn.Module,
+    *,
+    calib_args: Sequence[Sequence[torch.Tensor]] | None = None,
 ) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
     """格納 dtype の表現可能値へ重みを丸め、scale 台帳と 1 本単位の格納指定を返す（ADR 0006）。
 
@@ -380,11 +487,14 @@ def _fake_quant(
 
     MUST: 呼ぶのは **golden io の採取より前**（`quantize.py` の docstring）— 後に当てると
     期待値だけが元の重みで計算され、E2E の差に量子化誤差が混ざって tolerance の意味が消える。
+    校正付き丸め（GPTQ）も同じ理由でここに閉じる。
 
     i4 系列は混成（適格な linear / embedding = i4 group32・残り = i8 per-channel）で、2 つの
     述語は {@link _i4_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。返す
     override は「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を
     満たせなければ fail loudly する。
+
+    `calib_args` は i4 のときだけ効く（`None` = 校正なしの素の RTN — テスト用の opt-out）。
     """
     if dtype == "f32":
         return {}, {}
@@ -393,25 +503,21 @@ def _fake_quant(
         print(f"[fake-quant] i8 per-channel へ丸めた — {report.describe()}", flush=True)
         return report.scales, {}
     i4_names = _i4_module_names(wrapper)
-    int8 = fake_quant_int8(wrapper, include=lambda name: name not in i4_names)
-    int4 = fake_quant_int4(
-        wrapper,
-        include=lambda name: name in i4_names,
-        op_types=I4_MODULE_TYPES,
+    int4_scales = (
+        _round_i4_plain(wrapper, i4_names, "linear / embedding を")
+        if calib_args is None
+        else _round_i4_calibrated(wrapper, i4_names, calib_args)
     )
-    # MUST: 丸めた本数 = 格納本数（override の本数）。ずれるのは「適格と数えたのに丸まって
+    # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「適格と数えたのに丸まって
     # いない」形で、i4 席に i8 の重みが混ざったまま緑になる。
-    if len(int4.scales) != len(i4_names):
+    if set(int4_scales) != {f"{name}.weight" for name in i4_names}:
         raise AssertionError(
-            f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(int4.scales)} 本"
-            "（`iter_quant_targets` の対象集合と include の述語がずれている）"
+            f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(int4_scales)} 本"
+            f"（過不足: {sorted(set(int4_scales) ^ {f'{name}.weight' for name in i4_names})[:3]}）"
         )
-    print(
-        f"[fake-quant] linear / embedding を i4 group へ丸めた — {int4.describe()}"
-        f" / 残りは i8 per-channel — {int8.describe()}",
-        flush=True,
-    )
-    return {**int8.scales, **int4.scales}, dict.fromkeys(int4.scales, "i4")
+    int8 = fake_quant_int8(wrapper, include=lambda name: name not in i4_names)
+    print(f"[fake-quant] 残りは i8 per-channel — {int8.describe()}", flush=True)
+    return {**int8.scales, **int4_scales}, dict.fromkeys(int4_scales, "i4")
 
 
 def export_variant(
@@ -423,8 +529,14 @@ def export_variant(
     dtype: str = "f32",
     act_quant: bool = False,
     single_output: bool = False,
+    calib_texts: Sequence[str] | None = CALIB_TEXTS,
 ) -> dict[str, Any]:
-    """1 層数ぶんの IR コンテナと golden io を書き、要約を返す。"""
+    """1 層数ぶんの IR コンテナと golden io を書き、要約を返す。
+
+    `calib_texts` は **i4 系列だけ**が読む校正コーパス（既定 = 全 48 文）。`None` にすると
+    校正なしの素の RTN i4 に戻る — テスト用の opt-out で、CLI からは届かない
+    （`--dtype i4` は必ず校正付き）。
+    """
     from transformers import AutoTokenizer
 
     # MUST: 差し替えは golden を採る前（`deberta.patch` の docstring）— 後に当てると期待値だけが
@@ -435,7 +547,13 @@ def export_variant(
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     cases = build_cases(tokenizer, model)
     wrapper = HiddenStatesWrapper(model, single_output=single_output)
-    scales, dtype_overrides = _fake_quant(dtype, wrapper)
+    # MUST: 校正入力は**パッチ適用後の wrapper**へ流す（stage の実シグネチャがパッチで変わる）。
+    calib_args = (
+        build_calib_args(tokenizer, model, calib_texts)
+        if dtype == "i4" and calib_texts is not None
+        else None
+    )
+    scales, dtype_overrides = _fake_quant(dtype, wrapper, calib_args=calib_args)
 
     # 例示入力は padded ケース（mask に 0 を含む実トークン列）。min=2 は 0/1 特殊化を避ける
     # ため、max は Tmax 畳み込みの評価点そのもの（ADR 0010 — 別ノブで二重管理しない）。
@@ -475,6 +593,7 @@ def export_variant(
         "io": written,
         "act_quant_io": mirror,
         "act_quant_linears": attached,
+        "calib_texts": len(calib_args) if calib_args is not None else 0,
         "case_lengths": {name: int(args["input_ids"].shape[1]) for name, args in cases},
     }
 
@@ -493,7 +612,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=WEIGHT_DTYPES,
         default="f32",
         help="重みの格納 dtype（i8 は fake-quant してから適格スロットだけ圧縮格納する — ADR 0019。"
-        "i4 は混成で、適格な linear / embedding が group32 の i4・残りは i8 — ADR 0069）",
+        "i4 は混成で、適格な linear / embedding が group32 の i4・残りは i8 — ADR 0069。"
+        f"i4 の encoder linear は GPTQ 校正付き（校正コーパス {len(CALIB_TEXTS)} 文）で丸める）",
     )
     parser.add_argument(
         "--act-quant",

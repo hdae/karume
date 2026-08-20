@@ -50,7 +50,7 @@ BERT 側の 2 本が**配布の本命** — `shared/text_encoder` は配布 karu
     (13) bert-gptq-nf4     同上を NF4 の固定表（`bert-w4-nf4` の校正版）
     (14) bert-gptq-kmeans  同上を k-means 表（core の `kmeans_shared` = **層ごと** 1 枚）
 
-校正入力は {@link sbv2.calib_texts.CALIB_TEXTS} の 48 文を既存の DeBERTa tokenizer 経路で採り、
+校正入力は {@link deberta.calib_texts.CALIB_TEXTS} の 48 文を既存の DeBERTa tokenizer 経路で採り、
 先頭 encoder layer への呼び出しを捕まえて stage 列へ流す（{@link capture_stage_batches}）。
 stage は**特徴を採る層まで**なので、対象は `bert:linear` の census の部分集合になる
 （{@link CALIB_TARGET}）。`--calib-limit` で縮小実行でき、縮小した事実は表と `report.json` の
@@ -130,6 +130,7 @@ from safetensors.torch import load_file
 from torch import nn
 
 from _shared.paths import DIST_ROOT, OUTPUTS_ROOT
+from deberta.calib_texts import CALIB_TEXTS
 from karume.act_quant import quantize_rows
 from karume.quant_calib import (
     CalibMethod,
@@ -156,7 +157,6 @@ from karume.quantize import (
 )
 
 from . import demo, export, patch
-from .calib_texts import CALIB_TEXTS
 
 #: デモ・ベンチの生成物置き場。資産（`sbv2.demo.DEFAULT_DEMO_DIR`）と分離する —
 #: 生成物の掃除（`rm -rf outputs/demo`）が資産や系列を巻き込まないため（docs/assets-layout.md）。
@@ -1127,7 +1127,7 @@ def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor],
 def calib_corpus(limit: int | None) -> tuple[str, ...]:
     """校正に使う文（`limit` は**先頭 N 文**の上限 — `None` は全 48 文）。
 
-    先頭から採るのは {@link sbv2.calib_texts.CALIB_TEXTS} が朗読調 / 問いかけ / 数字読みを
+    先頭から採るのは {@link deberta.calib_texts.CALIB_TEXTS} が朗読調 / 問いかけ / 数字読みを
     混ぜて並べてあるため（縮小実行でも役割の混合が保たれる）。
     """
     if limit is not None and limit < 1:
@@ -1597,7 +1597,7 @@ def build_report(
             "**式による投影**で、格納形を持つのは RTN（`i4`）だけ",
             "bert_calib": "校正付き丸め（GPTQ）は core（karume.quant_calib）の共有で、**格子は"
             "方式グリッドと 1 バイトも変わらない**（変わるのは同じ格子の中でどの準位へ寄せるか）。"
-            "校正入力は sbv2/calib_texts.py の 48 文を既存の DeBERTa tokenizer 経路で採り、"
+            "校正入力は deberta/calib_texts.py の 48 文を既存の DeBERTa tokenizer 経路で採り、"
             "評価文とは部分一致まで分離する。stage は encoder の**特徴を採る層まで**で、"
             f"対象は `{CALIB_TARGET}`（`bert:linear` の census の部分集合）",
         },

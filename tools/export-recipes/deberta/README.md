@@ -42,6 +42,12 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layer
   i4 only has an execution path for the linear and embedding weight slots, so a single-dtype i4
   series cannot exist. Only `sbv2-22layer` is worth writing — it is the seat of the SBV2
   distribution's `w8-bert4` quant, and no other consumer reads this series.
+- **The i4 encoder linears are rounded with GPTQ calibration** (`deberta/calib.py`, always on — there
+  is no flag). The stored bytes are unchanged: the grid stays RTN i4 g32, so only the rounded values
+  and the scale ledger differ. The calibration inputs are the 48 sentences of
+  `deberta/calib_texts.py` pushed through the same input-building path as the goldens; the word
+  embedding table (outside the encoder stages) keeps the plain RTN rounding and is rounded **first**,
+  so the encoder is calibrated on the activations it will actually see when shipped.
 - **`sbv2-22layer` is what the SBV2 distribution ships.** SBV2 only ever reads
   `hidden_states[-3]` (= index 22 = the output of layer 21), so the last two layers are dead weight;
   the truncated model's final output is **bit-identical** to the 24-layer model's `hidden_states[-3]`
