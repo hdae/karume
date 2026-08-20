@@ -22,7 +22,15 @@ FP4 / NF4 / MXFP4 / k-means の表 3 粒度）× 対象 2 形（linear 限定 16
 `karume.quantize`）の共有で、対象選択も `iter_quant_targets` の共有 — 写した別実装にすると
 「測った対象・式」と「出荷する対象・式」が黙って割れる。
 
-config ごとに 4 列を採る（先の 3 列は Phase 0 と同じ・4 列目は方式グリッドのみ）:
+**校正グリッド**（{@link CALIB_CONFIGS}）= 校正付き丸め 5 本（GPTQ × 格納グリッド 3 種 /
+AWQ / AWQ+GPTQ）。丸めは core の `karume.quant_calib` の共有で、**格子は方式グリッドと同じ**
+（変わるのは同じ格子の中でどの準位へ寄せるか）。対象は **decoder 内の linear 限定の 1 形**
+だけで、`embed_tokens` 込みの組も `lm_head` も作らない — 校正の駆動（`calibrate_stages`）が
+stage 内の `nn.Linear` に閉じているため、既存の「方式 7 種 × 対象 2 形」の表とは対象集合が
+違う（{@link CalibConfig}）。校正入力は {@link minicpm5.calib_texts.CALIB_TEXTS} の 48 文で、
+先頭 decoder layer への呼び出しを捕まえて stage 列へ流す（{@link capture_stage_batches}）。
+
+config ごとに 4 列を採る（先の 3 列は Phase 0 と同じ・4 列目は方式グリッドと校正グリッド）:
 
 1. **weight 相対 RMSE**（族別）— 丸めそのものの大きさ。族内の全層をまとめた
    `‖w − fq‖₂ / ‖w‖₂` で、どの族が壊れやすいかを見る。
@@ -65,7 +73,7 @@ import sys
 import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -73,6 +81,14 @@ from safetensors.torch import load_file
 from torch import nn
 
 from _shared.decode_series import EXPECTED_KEY, GREEDY_PREFIX, GREEDY_SUFFIX, PROMPT_KEY
+from karume.quant_calib import (
+    CalibMethod,
+    CalibReport,
+    GridSpec,
+    StageBatch,
+    StageSpec,
+    calibrate_stages,
+)
 from karume.quant_methods import (
     DEFAULT_CODEBOOK_LEVELS,
     fake_quant_fp4,
@@ -88,6 +104,7 @@ from karume.quantize import (
 )
 from minicpm5 import export as one_shot
 from minicpm5 import export_decode as decode
+from minicpm5.calib_texts import CALIB_TEXTS
 
 #: 実重みの置き場（1-shot / decode 形と同じ素材）。
 DEFAULT_MODEL_DIR = one_shot.DEFAULT_MODEL_DIR
@@ -303,8 +320,110 @@ METHOD_CONFIGS: tuple[MethodConfig, ...] = tuple(
     for include_embedding in (False, True)
 )
 
+
+# ---- 校正グリッド（校正付き丸め）-------------------------------------------
+
+#: 校正付き丸めの group 長 = 方式グリッドと同じ 32 固定。校正は**格子を 1 バイトも変えない**
+#: （同じ格子の中で丸め先を選び直すだけ — `karume.quant_calib` のモジュール docstring）ので、
+#: g 軸を振らない理由も {@link METHOD_GROUP_SIZE} と同文。
+CALIB_GROUP_SIZE = METHOD_GROUP_SIZE
+
+
+def group_scale_bits(counts: TargetCounts) -> float:
+    """4bit ペイロード + group ごとの f32 scale（RTN / NF4 の格納そのもの）。"""
+    return 4 * counts.elements + 32 * counts.groups
+
+
+def layer_table_bits(counts: TargetCounts) -> float:
+    """上に**層ごと 1 枚**の k-means 表を足した式。
+
+    core の `kmeans_shared` は「group absmax で正規化した値空間に 1 枚の表」を張るが、
+    その射程は**層内**に閉じる（stage 逐次の駆動と全層を跨ぐ表が噛み合わない —
+    {@link karume.quant_calib.GridSpec} の NOTE）。方式グリッドの `kmeans:shared`
+    （全体で 1 枚）と式が違うのはこのため。
+    """
+    return group_scale_bits(counts) + CODEBOOK_BITS * counts.modules
+
+
+#: group absmax scale を持つ 4bit 格子の投影式（表を持たない方式で共有する文言）。
+GROUP_SCALE_FORMULA = "4bit + g32 f32 scale = 5.0 bpw"
+
+#: AWQ 系の投影式に付ける注記 — 等価倍率 `s` は `W_eff` に畳み込んだ形でしか持てず、
+#: 格納するには fold か companion が要る（`karume.quant_calib` のモジュール docstring）。
+AWQ_FORMULA_NOTE = "（等価倍率 s の fold / companion は未計上）"
+
+
+@dataclass(frozen=True)
+class CalibConfig:
+    """校正付き丸め 1 本ぶんの指定（方式 × 格納グリッド）。
+
+    対象は **decoder 内の `nn.Linear` 限定**（{@link karume.quant_calib.calibrate_stages} が
+    stage 内の linear しか見ない）。`lm_head` と `embed_tokens` は stage の外なので入らず、
+    方式グリッドの「対象 2 形」とは**対象集合が違う** — サイズ試算も校正が実際に丸めた
+    集合の計数から出す（{@link calib_targets}）。
+    """
+
+    name: str
+    method: CalibMethod
+    grid: GridSpec
+    #: 量子化対象集合の投影ビット数（{@link QuantMethod.projected_bits} と同じ器）。
+    projected_bits: Callable[[TargetCounts], float]
+    #: `projected_bits` の式（**出力へそのまま載せる**）。
+    formula: str
+
+    @property
+    def label(self) -> str:
+        """表と JSON に出る方式名（`<方式>/<格納グリッド>`）。"""
+        return f"{self.method}/{self.grid.kind}"
+
+
+#: 校正グリッド = 5 本（この順で走る）。丸めは全て core の共有実装
+#: （`karume.quant_calib`）で、ここは呼び分けと投影式だけを持つ。**対象は linear 限定の
+#: 1 形のみ** — `embed_tokens` 込みの組は作らない（`calibrate_stages` は `nn.Linear` 限定で、
+#: 語彙表は stage の外）。
+CALIB_CONFIGS: tuple[CalibConfig, ...] = (
+    CalibConfig(
+        "gptq-rtn",
+        "gptq",
+        GridSpec(kind="rtn", group_size=CALIB_GROUP_SIZE),
+        group_scale_bits,
+        GROUP_SCALE_FORMULA,
+    ),
+    CalibConfig(
+        "gptq-nf4",
+        "gptq",
+        GridSpec(kind="nf4", group_size=CALIB_GROUP_SIZE),
+        group_scale_bits,
+        f"{GROUP_SCALE_FORMULA}（格子は NF4 の固定表）",
+    ),
+    CalibConfig(
+        "gptq-kmeans",
+        "gptq",
+        GridSpec(kind="kmeans_shared", group_size=CALIB_GROUP_SIZE),
+        layer_table_bits,
+        "4bit + g32 f32 scale + 表 16×f32 を層ごと 1 枚",
+    ),
+    CalibConfig(
+        "awq-rtn",
+        "awq",
+        GridSpec(kind="rtn", group_size=CALIB_GROUP_SIZE),
+        group_scale_bits,
+        f"{GROUP_SCALE_FORMULA}{AWQ_FORMULA_NOTE}",
+    ),
+    CalibConfig(
+        "awq-gptq-rtn",
+        "awq+gptq",
+        GridSpec(kind="rtn", group_size=CALIB_GROUP_SIZE),
+        group_scale_bits,
+        f"{GROUP_SCALE_FORMULA}{AWQ_FORMULA_NOTE}",
+    ),
+)
+
+#: `--only` が選べる config の型（Phase 0 / 方式 / 校正の 3 系統）。
+AnyConfig = SweepConfig | MethodConfig | CalibConfig
+
 #: `--only` が選べる全 config（宣言順 = 実行順）。
-ALL_CONFIGS: tuple[SweepConfig | MethodConfig, ...] = (*SWEEP_CONFIGS, *METHOD_CONFIGS)
+ALL_CONFIGS: tuple[AnyConfig, ...] = (*SWEEP_CONFIGS, *METHOD_CONFIGS, *CALIB_CONFIGS)
 
 
 # ---- 量子化式（ADR 0069 決定 3）--------------------------------------------
@@ -517,6 +636,163 @@ def apply_method(model: nn.Module, config: MethodConfig, shared_stride: int) -> 
     config.method.round_weights(model, op_types, METHOD_GROUP_SIZE)
 
 
+# ---- 校正付き丸めの駆動（Catcher + stage 分解）-------------------------------
+
+#: decoder 層のモデル内 FQN 接頭辞（`CausalLmWrapper.model` = `LlamaForCausalLM` →
+#: `.model` = `LlamaModel` → `.layers`）。接頭辞を `calibrate_stages` へ渡すのは、scale 台帳の
+#: キーを {@link karume.quantize.Int4Report} と同じ**モデル内 FQN** の空間へ揃えるため
+#: （core の `StageSpec` 契約）。
+DECODER_PREFIX = "model.model.layers"
+
+
+class _FirstStageReached(Exception):  # noqa: N818 — 異常ではなく打ち切りの合図なので Error と呼ばない
+    """先頭 stage へ入力が届いた合図（校正 forward を打ち切るための番兵）。"""
+
+
+def decoder_stages(wrapper: nn.Module) -> tuple[StageSpec, ...]:
+    """実行順の decoder layer を `(モデル内 FQN 接頭辞, モジュール)` で返す。
+
+    最終段の `norm` と `lm_head` は**入れない** — 校正の対象は decoder 内の linear だけで、
+    `lm_head` を stage として足すと「その入力が最終 norm を通っていない」形になる。方式
+    グリッドの 169 本と対象集合が違うのはこのため（{@link CalibConfig}）。
+    """
+    layers = wrapper.model.model.layers
+    return tuple((f"{DECODER_PREFIX}.{index}", layer) for index, layer in enumerate(layers))
+
+
+def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor], TargetCounts]:
+    """stage 内の量子化対象を fqn 引きの重みと計数で返す（校正の**走査** = 門の基準）。
+
+    対象選択は core の `iter_quant_targets` の共有（{@link collect_targets} と同文 — 写した
+    別実装にすると「測った対象」と「丸めた対象」が黙って割れる）。ここで数えた本数と、
+    校正が実際に丸めた本数を {@link assert_calib_covers_scan} が突き合わせる。
+    """
+    weights: dict[str, torch.Tensor] = {}
+    channels = 0
+    elements = 0
+    for prefix, stage in stages:
+        for local, weight, axis in iter_quant_targets(stage, (nn.Linear,)):
+            fqn = f"{prefix}.{local}"
+            if family_of(fqn) not in LINEAR_FAMILIES:
+                raise QuantizeError(
+                    f"'{fqn}': 未知の linear 族（対象は {list(LINEAR_FAMILIES)}）"
+                    "— 模型の構成が sweep の想定と違う"
+                )
+            weights[fqn] = weight
+            channels += int(weight.shape[axis])
+            elements += int(weight.numel())
+    if not weights:
+        raise QuantizeError("decoder stage に nn.Linear が 1 本も無い（模型の構成が想定と違う）")
+    return weights, TargetCounts(modules=len(weights), channels=channels, elements=elements)
+
+
+def calib_inputs(model_dir: Path, limit: int | None) -> tuple[torch.Tensor, ...]:
+    """校正コーパスを**既存の tokenizer 経路**（{@link minicpm5.export.load_tokenizer}）で
+    `[1,T]` の id 列へ落とす。
+
+    `limit` は先頭 N 文の上限（縮小 smoke 用 — `None` は全 48 文）。並びの先頭から採るのは
+    {@link minicpm5.calib_texts.CALIB_TEXTS} が言語とスタイルを混ぜて並べてあるため。
+    """
+    if limit is not None and limit < 1:
+        raise ValueError(f"校正文数の上限は 1 以上（実測 {limit}）")
+    texts = CALIB_TEXTS if limit is None else CALIB_TEXTS[:limit]
+    tokenizer = one_shot.load_tokenizer(model_dir)
+    return tuple(torch.tensor([tokenizer.encode(text).ids], dtype=torch.int64) for text in texts)
+
+
+def capture_stage_batches(
+    wrapper: nn.Module, first: nn.Module, inputs: Sequence[torch.Tensor]
+) -> tuple[StageBatch, ...]:
+    """先頭 decoder layer への `(args, kwargs)` を forward_pre_hook で捕まえる（Catcher）。
+
+    校正入力は「embedding・RoPE 表・加算 causal mask を通った後の hidden とその付随引数」で、
+    自前で組み直すと transformers 側の前段（と `export.py` のラッパが渡す mask の形）と黙って
+    割れる。**先頭 stage の呼び出しそのもの**を捕まえ、番兵例外で forward を打ち切るのが、
+    前段を写さずに同じ入力を採る形。
+
+    kwargs（mask / position_ids / position_embeddings …）は Llama では**全層で同一**なので、
+    `calibrate_stages` の既定（stage 間で不変として運ぶ）にそのまま乗る。
+
+    MUST: 捕まえずに forward が完走したら fail loudly — stage の綴りが模型の構成と食い違って
+    いる合図で、黙って進むと「校正入力ゼロ」の診断が core 側で出るだけになる。
+    """
+    captured: list[StageBatch] = []
+
+    def catcher(_module: nn.Module, args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        captured.append((tuple(args), dict(kwargs)))
+        raise _FirstStageReached
+
+    handle = first.register_forward_pre_hook(catcher, with_kwargs=True)
+    try:
+        for index, ids in enumerate(inputs):
+            try:
+                with torch.no_grad():
+                    wrapper(ids)
+            except _FirstStageReached:
+                continue
+            raise AssertionError(
+                f"校正入力 {index} で先頭 decoder layer が呼ばれずに forward が完走した"
+                "（stage の綴りが模型の構成と食い違っている）"
+            )
+    finally:
+        handle.remove()
+    return tuple(captured)
+
+
+@dataclass(frozen=True)
+class CalibRig:
+    """校正付き構成が共有する足場（stage 列・走査・先頭 stage への入力）。
+
+    config ごとに作り直さない — 先頭 stage の入力は `embed_tokens` を通っただけの hidden で、
+    校正が丸めるのは decoder 内の linear だけなので、pristine 復元を挟んでも動かない
+    （**丸めを 1 本も当てる前**に 1 回だけ採る）。
+    """
+
+    stages: tuple[StageSpec, ...]
+    scan: Mapping[str, torch.Tensor]
+    counts: TargetCounts
+    batches: tuple[StageBatch, ...]
+
+
+def build_calib_rig(wrapper: nn.Module, model_dir: Path, limit: int | None) -> CalibRig:
+    """校正の足場を組む（stage 分解 → 走査 → tokenize → Catcher）。"""
+    stages = decoder_stages(wrapper)
+    scan, counts = calib_targets(stages)
+    batches = capture_stage_batches(wrapper, stages[0][1], calib_inputs(model_dir, limit))
+    return CalibRig(stages=stages, scan=scan, counts=counts, batches=batches)
+
+
+def apply_calib(config: CalibConfig, rig: CalibRig, shared_stride: int) -> CalibReport:
+    """校正付き丸め 1 本を model へ in-place で当てる（stage 逐次の駆動は core 側）。
+
+    `shared_stride > 1` のときだけ `kmeans_shared` の**表の fit** が等間隔部分標本になる
+    （{@link apply_method} と同じ逃げ道・同じノブ）。使った事実は
+    {@link karume.quant_calib.CalibReport.describe} が拾って出力へ出る。
+    """
+    spec = config.grid
+    if spec.kind == "kmeans_shared" and shared_stride > 1:
+        spec = replace(spec, fit_stride=shared_stride)
+    return calibrate_stages(rig.stages, rig.batches, method=config.method, spec=spec)
+
+
+def assert_calib_covers_scan(
+    report: CalibReport, scan: Mapping[str, torch.Tensor], name: str
+) -> None:
+    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+
+    MUST: fail loudly。stage の綴りや対象型が変わって decoder の一部が校正に載らなくなっても
+    表には行が残り、しかも丸め漏れのぶん品質は**良い側**に出る（素通りを数字から読めない）。
+    """
+    rounded = {layer.fqn for layer in report.layers}
+    missing = sorted(set(scan) - rounded)
+    extra = sorted(rounded - set(scan))
+    if missing or extra or report.modules != len(scan):
+        raise AssertionError(
+            f"[{name}] 校正が丸めた {report.modules} 本が走査の {len(scan)} 本と一致しない"
+            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+        )
+
+
 # ---- 期待列（波 E の資産）---------------------------------------------------
 
 
@@ -578,8 +854,9 @@ class ConfigResult:
     """1 config の測定値（族別 wRMSE は量子化した族だけが載る）。
 
     `overall_rmse` は対象集合を丸ごと 1 本にした `‖w − fq‖₂ / ‖w‖₂`（族平均ではない —
-    族ごとの要素数が 20 倍違うので平均だと重み付けが恣意的になる）。`size` は方式グリッド
-    だけが持つ（Phase 0 の config は格納形が i4 の 1 通りで、試算しても同じ数が並ぶ）。
+    族ごとの要素数が 20 倍違うので平均だと重み付けが恣意的になる）。`size` は方式グリッドと
+    校正グリッドだけが持つ（Phase 0 の config は格納形が i4 の 1 通りで、試算しても同じ数が
+    並ぶ）。
     """
 
     name: str
@@ -587,8 +864,12 @@ class ConfigResult:
     cases: Mapping[str, CaseResult]
     seconds: float = 0.0
     overall_rmse: float | None = None
-    method: QuantMethod | None = None
+    #: 表と JSON に出る方式名（Phase 0 の config は方式軸を持たないので `None`）。
+    method: str | None = None
     size: SizeProjection | None = None
+    #: 校正付き構成の 1 行要約（{@link karume.quant_calib.CalibReport.describe} —
+    #: `fit_stride` を使った事実や AWQ の α の範囲もここに出る）。
+    calib: str | None = None
 
 
 def teacher_forced(wrapper: nn.Module, case: GreedyCase) -> tuple[int, float]:
@@ -705,7 +986,7 @@ def assert_baseline_reproduces(
         )
 
 
-def select_configs(only: Sequence[str]) -> tuple[SweepConfig | MethodConfig, ...]:
+def select_configs(only: Sequence[str]) -> tuple[AnyConfig, ...]:
     """`--only` で選んだ config を宣言順で返す（**baseline は常に先頭で走る**）。
 
     baseline を外せないのは、部分再実行でも sanity 門（{@link assert_baseline_reproduces}）を
@@ -720,10 +1001,11 @@ def select_configs(only: Sequence[str]) -> tuple[SweepConfig | MethodConfig, ...
 
 def run_sweep(
     model_dir: Path,
-    configs: Sequence[SweepConfig | MethodConfig],
+    configs: Sequence[AnyConfig],
     *,
     decode_dir: Path = DEFAULT_DECODE_DIR,
     kmeans_shared_stride: int = 0,
+    calib_limit: int | None = None,
     json_path: Path | None = None,
 ) -> list[ConfigResult]:
     """模型を 1 回だけ読み、config を順に当てて測る。
@@ -731,6 +1013,10 @@ def run_sweep(
     pristine クローン（CPU・linear 169 本で ~3.5GB・`embed_tokens` 込みで ~4.3GB）を先に
     採るので、config ごとの丸めは常に元の重みから始まる。退避の範囲を**常に和集合**に
     するのは、Phase 0 の config が embedding を戻さない形を作らないため。
+
+    校正付き構成の足場（{@link CalibRig}）は**最初に要求されたときに 1 回だけ**組む —
+    pristine 復元は config ごとの先頭で済んでいるので、そこで採る先頭 stage の入力は素の
+    重みのものになる。校正 config を 1 本も選ばなければ tokenizer も Catcher も走らない。
 
     進捗は 1 ケース / 1 config ごとに stderr へ即 flush し、`json_path` があれば config
     1 本ごとに書き直す（k-means の数十分級の実行が途中で落ちても測定値が残る）。
@@ -751,6 +1037,7 @@ def run_sweep(
     pristine = {fqn: weight.detach().clone() for fqn, weight in union.items()}
 
     results: list[ConfigResult] = []
+    rig: CalibRig | None = None
     for config in configs:
         # 前の config の一時領域（k-means は f64 で対象と同オーダー）を次の丸めの前に手放す。
         # 参照循環に載った GB 級のテンソルが世代 GC 待ちで残ると、次の config が実メモリを
@@ -758,18 +1045,40 @@ def run_sweep(
         gc.collect()
         started = time.perf_counter()
         restore_pristine(union, pristine)
-        method: QuantMethod | None = None
+        method: str | None = None
         size: SizeProjection | None = None
+        calib: str | None = None
         if isinstance(config, SweepConfig):
             touched = apply_config(linear, config)
-        else:
-            method = config.method
+        elif isinstance(config, MethodConfig):
+            method = config.method.name
             targets, target_counts = collect_targets(
                 wrapper, method_op_types(config.include_embedding)
             )
             apply_method(wrapper, config, kmeans_shared_stride)
             touched = list(targets)
-            size = project_size(method, target_counts)
+            size = project_size(config.method, target_counts)
+        else:
+            if rig is None:
+                rig = build_calib_rig(wrapper, model_dir, calib_limit)
+                print(
+                    f"[sweep] 校正 {len(rig.batches)} 文 / stage {len(rig.stages)} 段 /"
+                    f" 対象 linear {rig.counts.modules} 本"
+                    "（decoder 内のみ — lm_head / embed_tokens は含まない）",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            method = config.label
+            report = apply_calib(config, rig, kmeans_shared_stride)
+            assert_calib_covers_scan(report, rig.scan, config.name)
+            touched = list(rig.scan)
+            calib = report.describe()
+            size = SizeProjection(
+                counts=rig.counts,
+                bits=config.projected_bits(rig.counts),
+                formula=config.formula,
+            )
+            print(f"[{config.name}] {calib}", file=sys.stderr, flush=True)
         weight_rmse, overall = measure_rmse(union, pristine, touched)
         rounded = time.perf_counter() - started
         overall_text = "-" if overall is None else f"{overall:.4g}"
@@ -802,6 +1111,7 @@ def run_sweep(
                 overall_rmse=overall,
                 method=method,
                 size=size,
+                calib=calib,
             )
         )
         print(
@@ -811,7 +1121,7 @@ def run_sweep(
         )
         if json_path is not None:
             json_path.write_text(
-                results_json(results, cases, kmeans_shared_stride), encoding="utf-8"
+                results_json(results, cases, kmeans_shared_stride, calib_limit), encoding="utf-8"
             )
     return results
 
@@ -872,7 +1182,7 @@ def summary_table(results: Sequence[ConfigResult]) -> str:
         rows.append(
             [
                 result.name,
-                result.method.name if result.method else "-",
+                result.method or "-",
                 "-" if result.size is None else f"{result.size.counts.modules} 本",
                 "-" if result.size is None else f"{result.size.bits_per_weight:.4g}",
                 "-" if result.size is None else f"{result.size.projected_mib:.1f}",
@@ -906,12 +1216,20 @@ def size_table(results: Sequence[ConfigResult]) -> str:
 
 
 def results_json(
-    results: Sequence[ConfigResult], cases: Sequence[GreedyCase], kmeans_shared_stride: int
+    results: Sequence[ConfigResult],
+    cases: Sequence[GreedyCase],
+    kmeans_shared_stride: int,
+    calib_limit: int | None = None,
 ) -> str:
-    """機械可読の測定値（markdown 表の全列 + 表に出さない計数）。"""
+    """機械可読の測定値（markdown 表の全列 + 表に出さない計数）。
+
+    `calib_limit` は**校正が縮小実行だったか**の記録（`None` = 全量）— 縮小した数値を
+    全量の数値として読まれないように、測定値と同じファイルへ残す。
+    """
     payload = {
         "group_size": METHOD_GROUP_SIZE,
         "kmeans_shared_stride": kmeans_shared_stride,
+        "calib_limit": calib_limit,
         "cases": [
             {"name": case.name, "prompt_length": int(case.prompt.shape[1]), "steps": case.steps}
             for case in cases
@@ -919,7 +1237,8 @@ def results_json(
         "configs": [
             {
                 "name": result.name,
-                "method": result.method.name if result.method else None,
+                "method": result.method,
+                "calib": result.calib,
                 "seconds": round(result.seconds, 3),
                 "weight_rmse": dict(result.weight_rmse),
                 "overall_rmse": result.overall_rmse,
@@ -969,16 +1288,29 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="kmeans:shared の表の fit だけを等間隔 stride の部分標本で採る（0 / 1 = 全量）。"
         "全量が実メモリに載らない機体のための逃げ道で、丸めは常に全量へ当たる。",
     )
+    parser.add_argument(
+        "--calib-limit",
+        type=int,
+        default=None,
+        help=f"校正コーパスの先頭 N 文だけを使う（既定は全 {len(CALIB_TEXTS)} 文）。"
+        "縮小 smoke 用のノブで、校正付き構成にだけ効く。",
+    )
     args = parser.parse_args(argv)
     results = run_sweep(
         args.model_dir,
         select_configs(args.only),
         decode_dir=args.decode_dir,
         kmeans_shared_stride=args.kmeans_shared_stride,
+        calib_limit=args.calib_limit,
         json_path=args.json,
     )
     if args.kmeans_shared_stride > 1:
         print(f"> kmeans:shared の表は 1/{args.kmeans_shared_stride} 部分標本で fit（適用は全量）")
+        print()
+    if args.calib_limit is not None:
+        print(
+            f"> 校正コーパスは先頭 {args.calib_limit} 文のみ（全 {len(CALIB_TEXTS)} 文の縮小実行）"
+        )
         print()
     print(summary_table(results))
     print()
@@ -987,6 +1319,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(rmse_table(results))
     print()
     print(size_table(results))
+    notes = [f"> {result.name}: {result.calib}" for result in results if result.calib]
+    if notes:
+        print()
+        print("校正付き構成の内訳（`CalibReport.describe`）:")
+        print("\n".join(notes))
 
 
 if __name__ == "__main__":

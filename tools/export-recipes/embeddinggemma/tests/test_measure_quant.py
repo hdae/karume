@@ -394,3 +394,264 @@ class TestMibConversion:
         """`MiB` 表記どおり 2^20（10^6 と混ぜると表の数字が 5% ずれる）。"""
         assert mq.MIB == 2**20
         assert math.log2(mq.MIB) == 20
+
+
+# ---- 校正付き丸め（波 J-2）--------------------------------------------------
+
+
+class TinyAttention(nn.Module):
+    """量子化対象の linear 2 本（in 軸は group 32 で割り切れる）。"""
+
+    def __init__(self, features: int) -> None:
+        super().__init__()
+        self.q_proj = nn.Linear(features, features, bias=False)
+        self.o_proj = nn.Linear(features, features, bias=False)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return self.o_proj(self.q_proj(hidden))
+
+
+class TinyDecoderLayer(nn.Module):
+    """decoder layer 相当。`bias` は「layer_type ごとに違う kwargs」の代役（加算で観測）。"""
+
+    def __init__(self, features: int) -> None:
+        super().__init__()
+        self.self_attn = TinyAttention(features)
+
+    def forward(self, hidden: torch.Tensor, bias: float = 0.0) -> torch.Tensor:
+        return self.self_attn(hidden + bias)
+
+
+class TinyConfig:
+    """`Gemma3TextConfig` の代役（`layer_types` だけを持つ）。"""
+
+    def __init__(self, layer_types: tuple[str, ...]) -> None:
+        self.layer_types = layer_types
+
+
+class TinyText(nn.Module):
+    """`Gemma3TextModel` 相当（`.config.layer_types` / `.layers` / `.embed_tokens`）。"""
+
+    def __init__(self, vocab: int, features: int, layer_types: tuple[str, ...]) -> None:
+        super().__init__()
+        self.config = TinyConfig(layer_types)
+        self.embed_tokens = nn.Embedding(vocab, features)
+        self.layers = nn.ModuleList(TinyDecoderLayer(features) for _ in layer_types)
+
+
+#: layer_type ごとの kwargs（Gemma3 の sliding / full 2 系統の代役）。
+TINY_BIAS = {"sliding_attention": 0.5, "full_attention": -0.25}
+
+#: 先頭が sliding・途中に full が 1 枚（`capture_stage_batches` が 2 種類を捕まえる形）。
+TINY_LAYER_TYPES = ("sliding_attention", "sliding_attention", "full_attention")
+
+
+class TinyWrapper(nn.Module):
+    """`EmbeddingWrapper` 相当 — decoder の**外**に Dense を 1 本持つ（校正対象外の席）。"""
+
+    def __init__(self, vocab: int = 8, features: int = 32) -> None:
+        super().__init__()
+        self.model = TinyText(vocab, features, TINY_LAYER_TYPES)
+        self.dense2 = nn.Linear(features, features, bias=False)
+
+    def forward(self, input_ids: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
+        hidden = self.model.embed_tokens(input_ids)
+        for kind, layer in zip(self.model.config.layer_types, self.model.layers, strict=True):
+            hidden = layer(hidden, bias=TINY_BIAS[kind])
+        pooled = torch.sum(hidden * pool_mask.unsqueeze(-1), dim=1)
+        return self.dense2(pooled)
+
+
+def tiny_inputs(count: int = 2) -> tuple[torch.Tensor, ...]:
+    """長さの違う id 列（校正入力の代役 — tokenizer は通さない）。"""
+    return tuple(
+        torch.arange(2 + index, dtype=torch.int64).unsqueeze(0) % 8 for index in range(count)
+    )
+
+
+def tiny_rig(wrapper: TinyWrapper, inputs: tuple[torch.Tensor, ...]) -> mq.CalibRig:
+    stages = mq.decoder_stages(wrapper)
+    scan, stats = mq.calib_targets(stages)
+    return mq.CalibRig(
+        stages=stages,
+        scan=scan,
+        stats=stats,
+        batches=mq.capture_stage_batches(wrapper, inputs),
+    )
+
+
+class TestCalibConfigs:
+    def test_every_calib_config_is_selectable(self):
+        assert tuple(config.name for config in mq.CALIB_CONFIGS) == mq.CALIB_NAMES
+
+    def test_selecting_one_config_keeps_the_declaration_order(self):
+        chosen = mq.select_calib(["awq-rtn", "gptq-rtn"])
+
+        assert [config.name for config in chosen] == ["gptq-rtn", "awq-rtn"]
+
+    def test_an_empty_selection_runs_every_calib_config(self):
+        assert mq.select_calib([]) == mq.CALIB_CONFIGS
+
+    def test_selecting_only_a_method_leaves_no_calib_config(self):
+        """`--only nf4` は方式だけ — 校正付き構成を巻き込まない。"""
+        assert mq.select_calib(["nf4"]) == ()
+
+    def test_the_group_size_is_pinned_for_every_calib_config(self):
+        assert all(config.grid.group_size == mq.GROUP_SIZE for config in mq.CALIB_CONFIGS)
+
+    def test_no_calib_config_fits_its_table_on_a_subsample_by_default(self):
+        assert all(config.grid.fit_stride == 1 for config in mq.CALIB_CONFIGS)
+
+    def test_the_label_names_both_the_method_and_the_grid(self):
+        labels = {config.name: config.label for config in mq.CALIB_CONFIGS}
+
+        assert labels["gptq-nf4"] == "gptq/nf4"
+        assert labels["awq-gptq-rtn"] == "awq+gptq/rtn"
+
+    def test_the_size_projection_takes_a_calib_config(self):
+        """校正は格子を変えない — RTN グリッドの bpw は方式側と同じ 5.0。"""
+        config = next(c for c in mq.CALIB_CONFIGS if c.name == "gptq-rtn")
+
+        projection = mq.size_projection(config, _stats(elements=3200, groups=100))
+
+        assert projection["bitsPerWeight"] == pytest.approx(5.0)
+
+    def test_the_calibrated_codebook_costs_one_table_per_layer(self):
+        """core の `kmeans_shared` は**層内**の表（全体 1 枚の kmeans:shared とは式が違う）。"""
+        config = next(c for c in mq.CALIB_CONFIGS if c.name == "gptq-kmeans")
+        stats = _stats(modules=4, elements=3200, groups=100)
+
+        projection = mq.size_projection(config, stats)
+
+        tables = mq.CODEBOOK_ENTRY_BITS * mq.DEFAULT_CODEBOOK_LEVELS * stats.modules
+        assert projection["bitsPerWeight"] == pytest.approx(5.0 + tables / stats.elements)
+
+
+class TestCalibStages:
+    def test_the_stage_fqns_are_model_wide(self):
+        """台帳のキーを `Int4Report` と同じ FQN 空間へ揃える（core の `StageSpec` 契約）。"""
+        scan, stats = mq.calib_targets(mq.decoder_stages(TinyWrapper()))
+
+        assert sorted(scan)[:2] == [
+            "model.layers.0.self_attn.o_proj.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+        ]
+        assert stats.modules == 2 * len(TINY_LAYER_TYPES)
+
+    def test_the_dense_outside_the_decoder_is_not_in_the_scan(self):
+        """Dense 2 段は decoder の外 — 校正の対象集合に入らない（表の対象名の由来）。"""
+        scan, _stats = mq.calib_targets(mq.decoder_stages(TinyWrapper()))
+
+        assert not any("dense" in fqn for fqn in scan)
+
+    def test_each_stage_keeps_its_layer_type(self):
+        stages = mq.decoder_stages(TinyWrapper())
+
+        assert [stage.layer_type for _prefix, stage in stages] == list(TINY_LAYER_TYPES)
+
+    def test_a_layer_type_table_that_does_not_match_the_layers_fails_loudly(self):
+        wrapper = TinyWrapper()
+        wrapper.model.config.layer_types = TINY_LAYER_TYPES[:-1]
+
+        with pytest.raises(AssertionError, match="食い違う"):
+            mq.decoder_stages(wrapper)
+
+    def test_a_stage_applies_the_keyword_arguments_of_its_own_layer_type(self):
+        """MUST: 層ごとに違う mask / RoPE 表を取り違えない（`LayerStage` の存在理由）。"""
+        torch.manual_seed(0)
+        wrapper = TinyWrapper()
+        stages = mq.decoder_stages(wrapper)
+        hidden = torch.randn(1, 3, 32)
+        layer_kwargs = {kind: {"bias": bias} for kind, bias in TINY_BIAS.items()}
+
+        with torch.no_grad():
+            full = stages[2][1](hidden, layer_kwargs=layer_kwargs)
+            direct = wrapper.model.layers[2](hidden, bias=TINY_BIAS["full_attention"])
+
+        assert torch.equal(full, direct)
+
+
+class TestCatcher:
+    def test_it_captures_one_batch_per_calibration_text(self):
+        wrapper = TinyWrapper()
+
+        batches = mq.capture_stage_batches(wrapper, tiny_inputs(3))
+
+        assert len(batches) == 3
+        assert [int(args[0].shape[1]) for args, _kwargs in batches] == [2, 3, 4]
+
+    def test_it_captures_the_keyword_arguments_of_every_layer_type(self):
+        """片方の layer_type しか捕まえないと、その種類の層が再実行できない。"""
+        wrapper = TinyWrapper()
+
+        _args, kwargs = mq.capture_stage_batches(wrapper, tiny_inputs(1))[0]
+
+        assert kwargs[mq.LAYER_KWARGS] == {
+            "sliding_attention": {"bias": 0.5},
+            "full_attention": {"bias": -0.25},
+        }
+
+    def test_the_hooks_are_removed_even_though_the_forward_was_aborted(self):
+        wrapper = TinyWrapper()
+
+        mq.capture_stage_batches(wrapper, tiny_inputs(1))
+
+        assert not any(layer._forward_pre_hooks for layer in wrapper.model.layers)
+
+
+class TestCalibrationRun:
+    def test_it_rounds_every_scanned_linear(self):
+        torch.manual_seed(1)
+        wrapper = TinyWrapper()
+        rig = tiny_rig(wrapper, tiny_inputs(2))
+        before = {fqn: weight.detach().clone() for fqn, weight in rig.scan.items()}
+
+        report = mq.apply_calib(mq.CALIB_CONFIGS[0], rig)
+        mq.assert_calib_covers_scan(report, rig.scan, "gptq-rtn")
+
+        assert report.modules == len(rig.scan)
+        assert all(not torch.equal(rig.scan[fqn], value) for fqn, value in before.items())
+
+    def test_the_dense_outside_the_decoder_is_left_alone(self):
+        """校正は decoder 内だけ — 外の Dense は 1 ビットも動かない。"""
+        torch.manual_seed(2)
+        wrapper = TinyWrapper()
+        rig = tiny_rig(wrapper, tiny_inputs(2))
+        dense = wrapper.dense2.weight.detach().clone()
+
+        mq.apply_calib(mq.CALIB_CONFIGS[0], rig)
+
+        assert torch.equal(wrapper.dense2.weight, dense)
+
+    def test_every_calib_config_runs_end_to_end(self):
+        for config in mq.CALIB_CONFIGS:
+            torch.manual_seed(3)
+            wrapper = TinyWrapper()
+            rig = tiny_rig(wrapper, tiny_inputs(2))
+
+            report = mq.apply_calib(config, rig)
+            mq.assert_calib_covers_scan(report, rig.scan, config.name)
+
+            assert report.method == config.method
+            assert report.grid == config.grid.kind
+
+    def test_a_subsampled_table_is_reported(self):
+        """MUST: `fit_stride` を使ったら出力へ明記（`describe` が拾う）。"""
+        torch.manual_seed(4)
+        wrapper = TinyWrapper()
+        rig = tiny_rig(wrapper, tiny_inputs(2))
+        kmeans = next(config for config in mq.CALIB_CONFIGS if config.name == "gptq-kmeans")
+
+        report = mq.apply_calib(kmeans, rig, shared_stride=4)
+
+        assert "fit_stride 4" in report.describe()
+
+    def test_a_scan_the_calibration_missed_fails_loudly(self):
+        torch.manual_seed(5)
+        wrapper = TinyWrapper()
+        rig = tiny_rig(wrapper, tiny_inputs(2))
+        report = mq.apply_calib(mq.CALIB_CONFIGS[0], rig)
+        widened = {**rig.scan, "model.layers.9.self_attn.q_proj.weight": torch.zeros(1)}
+
+        with pytest.raises(AssertionError, match="一致しない"):
+            mq.assert_calib_covers_scan(report, widened, "gptq-rtn")
