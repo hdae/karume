@@ -1,7 +1,10 @@
 # 0041: manifest v2（`karume/2`）— 1 リポ複数モデルと語彙の整理
 
 - Status: accepted（構造・用語・shards 見送りまで**ユーザー裁定済み** 2026-08-08。
-  規模上限の具体値のみ本 ADR の提案値 — 実装時に最終確認）
+  規模上限の具体値のみ本 ADR の提案値 — 実装時に最終確認）。
+  **format と決定 4 の「shards は入れない」は ADR [0071](0071-manifest-v3-shards.md)
+  （`karume/3` — dtype エントリの shard 欄）が上書き** — 構造・語彙・path 規則・規模上限は
+  現行のまま。
 - Date: 2026-08-08
 - 関連: ADR [0038](0038-manifest-v1.md)（manifest v1 — **本 ADR が置き換える**）/
   [0039](0039-sbv2-distribution.md)（SBV2 配布形 — 決定 7「多話者の将来設計」への回答）/

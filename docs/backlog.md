@@ -41,7 +41,8 @@
   1.7 倍速・温間合成 ~4% 速 = 基準の速度側は充足）。**再聴裁定済み（2026-08-20 ユーザー
   「ほぼ違いが分からない」）→ 既定 quant = w4 へ変更**（ADR 0039 決定 5 更新・fn/jvnv
   再配布・既定解決の実証 = quant 未指定合成が w4 参照 sha と一致・w8 は opt-in 参照系）
-  — **第 3 段クローズ**。irodori / anima の配布 i4 席新設は J-4 と同時に裁定（irodori は
+  — **第 3 段クローズ**（既定はのちに波 K で `w8-bert4` へ再裁定 — ADR 0039 決定 5 の
+  再裁定 blockquote）。irodori / anima の配布 i4 席新設は J-4 と同時に裁定（irodori は
   kmeans 圧勝のため rtn 席を先行させない）。
 - **J-5a: embedding i4 — 消化済み（2026-08-20・`0d8c6f6`）**: i4 適格を
   `I4_WEIGHT_OPS = {linear, embedding}` へ一般化（ADR 0069 追記 6）。BERT 語彙表 i4 で系列
@@ -66,12 +67,33 @@
 - **J-4: 格納席の実装裁定**（Q-2 kmeans companion 席 / Q-3 NF4 定数表席 — J-2 第 2 段の
   結果を見てから。codebook 系採用なら ADR 0069 の bit 表・整列表・view 型 3 面の reopen）。
 
-**リリース準備波（release 節）はモデルの HF 公開も含み重いため後回し**（2026-08-19 裁定・据え置き）。
+## now — リリース + 公開波（波 K・2026-08-20 着手 — release 節の部分先行）
+
+J-3（g 軸スイープ）が重いため、その前にリリースとモデル公開を挟むユーザー裁定
+（2026-08-19 の「release 節は後回し」を部分変更）。手順の正本 =
+[release-runbook.md](release-runbook.md)（新設 — 特に pin と断片化対策）。
+
+- **K-1: manifest `karume/3` の shard 欄**（ADR [0071](decisions/0071-manifest-v3-shards.md) —
+  HF 公開前締切ぶんの先行。hub 単一形パース + dist の 1 要素書き + verify_dist 追随。
+  R1 同席の API 工事 4 件と exporter 自動分割規則は release 節に残置）— 実装中
+- **K-2: SBV2 既定 quant を `w8-bert4` へ**（ADR 0039 決定 5 の再裁定 — w4 は f32 比
+  テンション差が残るため既定は品質優先。w4 は速度/サイズ優先の opt-in。**w4 の名は据え置き**
+  〈格納形の語彙〉で、丸め方式はモデルカードの quant 備考に記載 — 2026-08-20 命名裁定）— 実装中
+- **K-3: SBV2 トーン注入席**（ADR [0072](decisions/0072-sbv2-text-injection.md) — overlay
+  辞書 + given_tone + `analyzeProsody`。非 breaking・0.4.0 同乗）— 実装中
+- **K-4: 4 リポの dist 再生成 + HF 公開**（fn / jvnv / irodori / anima ≈ 16.7GB。**FN は
+  出典表記つきで公開へ変更**〈2026-08-20 ユーザー裁定 — ADR 0041 の「クローズド運用」を
+  変更・出典 = rufflet17/voice_models・カード機構は実装済み〉。irodori / anima は既存 w8a8
+  系のまま — GPTQ/i4 席は J-4 後に quant 差分追加。断片化対策 = runbook §2 MUST・
+  ライセンス確認 = 人間ゲート → ユーザー Go でアップロード）
+- **K-5: pin 焼き込み → JSR 0.4.0**（ADR [0073](decisions/0073-models-source-pin.md) —
+  アップロード後に SHA を焼き、3 パッケージ lockstep で publish。**PyPI は未リリースのまま**
+  〈2026-08-20 確認 — PyPI に karume は存在しない・ACTIVE_DESIGN の旧記述は誤りとして訂正〉）
 
 autoregressive 波の**残項目（波外へ送り）**:
 
-- **R1 と同席**: manifest v2 の shard 欄 + exporter 側 shard 分割規則（ADR 0070 追記 —
-  HF 公開前締切）。
+- **R1 と同席**: manifest の shard 欄は**波 K で消化**（ADR 0071 — `karume/3`）。exporter 側
+  shard 分割規則（co-shard を吐く側の保証）は実需（LLM 級配布）まで release 節に残置。
 - **MiniCPM5 の token-only 系列**（ADR 0068 追記 4 の同形展開 — models 側 `lastRow` は
   共通化済みで recipe + 門の鏡像だけ。topk の exporter 側〈多出力 aten の getitem 結線〉は
   sampling 実需まで先送りのまま）。
@@ -88,6 +110,10 @@ autoregressive 波の**残項目（波外へ送り）**:
   （`for await` の token イベント・EOS 停止・cancel・多ターン継続）+ `last_row` の runner 側
   導出（ADR 0068 追記 4 の所有関係のみ reopen）。`generateGreedy` は parity 検収用の内部
   ヘルパへ格下げ。LLM 実需（streaming / チャット）に直結する最大の API 波。
+- **SBV2 の yomi 依存分離（ユーザー方針 2026-08-20・breaking・時期未定 — 早い段階で
+  実施したい意向）**: SBV2 パイプラインの入力を「yomi の解析結果だけ受ける」形へ再設計し、
+  `@hdae/yomi` を models の依存から外す。ADR 0072 の注入席は結合を素通しに留めてあり、
+  その際は overlay 解決が呼び手側へ移る。
 - **モデル拡充の続き**: Kokoro-82M（LSTM = multi-output 待ち）・MobileSAM / SAM 2
   （conv_transpose2d）・BiRefNet_HR 2048² preset・DA-V2 可変解像度（upsample_bicubic2d）。
   候補調査の時点記録は [recon-2](research/2026-08-14-model-expansion-recon-2.md)。
@@ -118,20 +144,20 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## release — リリース準備波（しばらく先）
 
-- **R1: manifest v2 の shard（複数ファイル）/ 1 コンポーネント内混成 dtype の席の ADR**
-  （ADR 0041 / 0063 reopen・2026-08-16 裁定で追加 OK）。**HF 公開前が締切** — hub は v2 のみを
-  読み 2 形パースをしない（ADR 0041）ので、公開後に必要になると全リポ再アップになる。
-  今なら席を空けるだけで既存 manifest は 1 要素として書ける。
-  **同席裁定（2026-08-19 全体レビュー — Codex 提案の採用）**: ロード面の公開 API を固める
-  この波で同時に設計する — ①shard identity（`{id, bytes}`）の hub↔runtime 境界保存
-  ②`prepareModel(graphShard) → estimate → createSession(weightShards)` の 2 段境界
-  （admission を重み DL 前へ — ADR 0070 の graph-first に沿う）③estimator のシナリオ別報告 +
-  `peakAccountedBytes` 改名 ④重み常駐の判別 union 化（`ResidentWeight` — 3 並列 map の統合）。
+- **R1 の残り: ロード面 API 工事 4 件 + exporter 自動分割規則**（manifest の shard 欄自体は
+  波 K で消化 — ADR [0071](decisions/0071-manifest-v3-shards.md)。凍結が要る資産側の形は
+  済み、コード API は公開後も動かせる）。
+  **同席裁定（2026-08-19 全体レビュー — Codex 提案の採用）**: ①shard identity
+  （`{id, bytes}`）の hub↔runtime 境界保存 ②`prepareModel(graphShard) → estimate →
+  createSession(weightShards)` の 2 段境界（admission を重み DL 前へ — ADR 0070 の
+  graph-first に沿う）③estimator のシナリオ別報告 + `peakAccountedBytes` 改名
+  ④重み常駐の判別 union 化（`ResidentWeight` — 3 並列 map の統合）。
+  exporter 側 shard 分割規則（co-shard 保証）は最初の LLM 級配布と同時。
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）
-- HF 公開一式: karume-sbv2-jvnv 上げ直し・新規 5 モデル・Irodori
+- HF 公開: **models/ の 4 リポぶんは波 K で実施中**（K-4）。以後の新モデルは runbook に従う
 - リポ直下 README の書き上げ・JSR npm 互換層の sideEffects 検証
 - ライセンス interview（export-recipes の family 別 provenance を upstream revision 単位で
-  人間確認 — 再編の release gate）
+  人間確認 — 再編の release gate。**公開 4 リポぶんは波 K-4 の人間ゲートで先行実施**）
 - 「semantic surface と実装済み subset の分離」方針の再裁定（attention / deform_conv2d /
   gather / conv_transpose1d / upsample_bilinear2d — 観測 subset を op 意味論にしない統一規約）
 - 大型 DL 前の limits preflight（DL 後にしか limits 不足が分からない問題）

@@ -12,6 +12,9 @@
 | `outputs/`（その他）      | ホスト資産（消すと再取得・再エミットが要る）                         | `outputs/sbv2-demo/` / `outputs/yomi/`                                               |
 | `inputs/<family>/<name>/` | 手置きの実重み（ckpt・config — 生成物ではない）                      | `inputs/sbv2/F1/`                                                                    |
 
+- `outputs/yomi/` の日本語辞書（`*.jtd`）の取得: HF dataset `hdae/yomi-dict` の
+  `naist-jdic.jtd.gz` を解いて置く（無いと models の修正辞書テストは SKIP される）。
+
 ## 組み立て（系列 → 配布形）
 
 ```sh
@@ -25,9 +28,10 @@ uv run python dist.py --pipeline sbv2 --card-profile fn \
     --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
 ```
 
-- 仕様の正本は ADR [0041](decisions/0041-manifest-v2.md)（manifest v2・リポ内レイアウト =
-  モデル別サブツリー + `shared/`・**配置は常に独立コピー** — ハードリンク禁止の理由も同 ADR
-  追記）。`karume.json` は現物から導出（手書き禁止 — ADR 0038）。
+- 仕様の正本は ADR [0041](decisions/0041-manifest-v2.md)（リポ内レイアウト = モデル別
+  サブツリー + `shared/`・**配置は常に独立コピー** — ハードリンク禁止の理由も同 ADR 追記）と
+  ADR [0071](decisions/0071-manifest-v3-shards.md)（format `karume/3` — shard 欄）。
+  `karume.json` は現物から導出（手書き禁止 — ADR 0038）。
 - 組み立ては冪等（再実行で置き換え）。`verify_dist` が宣言と現物の突合・宣言外ファイル検査まで
   行い、モデルカード `README.md` は検証済み manifest から機械生成される（帰属は
   `--card-profile` — exporter の README 参照）。

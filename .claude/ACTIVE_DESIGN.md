@@ -11,7 +11,8 @@
 
 ## Now
 
-- **0.3.0 リリース済み**（2026-08-16・JSR 3 + PyPI・CI 緑）。ポジショニングの正本 =
+- **0.3.0 リリース済み**（2026-08-16・**JSR 3 パッケージのみ** — PyPI `karume` は未リリース
+  〈2026-08-20 実確認・旧記述「+ PyPI」は誤りだった〉・CI 緑）。ポジショニングの正本 =
   [research/2026-08-16-runtime-landscape.md](../docs/research/2026-08-16-runtime-landscape.md)。
 - **autoregressive-ready 実装波 A〜H: 全消化（2026-08-17〜19）** — GQA 整除 broadcast・
   多出力 + argmax / topk・GenerationContext（第 5 寿命クラス）・states 形 attention +
@@ -43,9 +44,18 @@
   **J-5b（net_g conv1d i4）も聴感込みでクローズ** — ADR 0069 追記 7（scale rank2 一般化・
   gemm A 側 i4・適格 = conv1d ∧ groups==1 ∧ 行長整除）で **w4 = 237.5MB（w8 比 −36.3%）**・
   温間合成最速・聴感 = conv i4 で変化なし（f32 比の「テンション少し低め」は net_g RTN i4
-  由来の想定内 — 品質ノブは g 軸のみ = J-3 の評価軸）。後続 = J-3（g 軸)→ J-4（格納席 —
-  gptq-kmeans companion が最有力・irodori/anima の配布 i4 席新設もここと同時）。骨子 =
-  backlog now 節。
+  由来の想定内 — 品質ノブは g 軸のみ = J-3 の評価軸）。J-3（g 軸）→ J-4（格納席）は
+  波 K の後へ。骨子 = backlog now 節。
+- **波 K（リリース + 公開・2026-08-20 着手）が現行**: J-3 が重いため先にリリースを挟む
+  ユーザー裁定（release 節の部分先行）。①manifest **`karume/3`** shard 欄（ADR
+  [0071](../docs/decisions/0071-manifest-v3-shards.md) — 公開前締切ぶんのみ・API 工事 4 件は
+  残置）②SBV2 既定 quant = **`w8-bert4` へ再裁定**（ADR 0039 — w4 はテンション差が残るため
+  品質優先・w4 は opt-in・丸め方式はカード備考へ）③トーン注入席（ADR
+  [0072](../docs/decisions/0072-sbv2-text-injection.md) — overlay + given_tone）④4 リポ
+  dist 再生成 → ライセンス人間ゲート → HF 公開（**FN も出典表記つき公開へ** — 断片化対策
+  MUST）⑤pin 焼き込み（ADR
+  [0073](../docs/decisions/0073-models-source-pin.md)）→ JSR 0.4.0。手順の正本 =
+  [release-runbook](../docs/release-runbook.md)（新設）。
 
 ## Open decisions
 
