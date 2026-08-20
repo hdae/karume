@@ -27,9 +27,13 @@
   [research/2026-08-20-gptq-awq-calibrated-rounding.md](research/2026-08-20-gptq-awq-calibrated-rounding.md)。
   要旨: **GPTQ 大勝ち**（gptq-rtn = 今日の格納形のまま RTN 全面超え = perf-ledger Q-6 起票 /
   gptq-kmeans = 全列最良・greedy 37/48 で Q-2 の席価値上昇）・**AWQ 不採用（Q-7 ❌）**。
-- **J-2 第 2 段（裁定待ち）**: 勝者を重いファミリへ — SBV2 BERT（DeBERTa encoder の stage
-  分解）+ irodori / anima（DiT block）→ 聴感/視認。net_g conv は GPTQ 対象外（H が linear の
-  in 軸形 — conv は im2col 要）。
+- **J-2 第 2 段: 結線 + 実測消化・聴感/視認待ち（2026-08-20）**: gptq 3 構成を SBV2 BERT
+  （`3bf9cf8`）+ irodori/anima DiT（`fc89d29`）へ結線し本番実測済み（gates 全緑・正本 =
+  [research](research/2026-08-20-gptq-awq-calibrated-rounding.md) §6）。**DiT 2 ファミリは
+  数値が大幅改善**（irodori: S 予測が全構成一致 / anima: PSNR 12.3→22.7 dB）・SBV2 BERT は
+  数値判別不能（聴感のみ）。**残 = ユーザーの聴感/視認 → モデルごと採用裁定**（採用なら
+  Q-6 の出荷結線 = export へ CalibReport.int4 を渡す経路の実装）。net_g conv は GPTQ 対象外
+  （H が linear の in 軸形 — conv は im2col 要）。
 - **J-5a: embedding i4 — 消化済み（2026-08-20・`0d8c6f6`）**: i4 適格を
   `I4_WEIGHT_OPS = {linear, embedding}` へ一般化（ADR 0069 追記 6）。BERT 語彙表 i4 で系列
   −8.15 MiB（group scale の f32 が半減益の約 3 割を食い、見込み −12.5 MiB から下方訂正）・
