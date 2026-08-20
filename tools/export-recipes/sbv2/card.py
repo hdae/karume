@@ -98,17 +98,18 @@ class Sbv2CardProfile:
 
 # ---- FN 系（単一モデル） -------------------------------------------------
 
-#: ライセンス（実地確認 2026-08-07 — https://huggingface.co/rufflet17/voice_models）: 出所の
-#: リポジトリは **license を宣言しておらず、モデルカードも無い**。SPDX 識別子を当てられない
-#: ので `other` を採り、`license_link` は「実際に条件が書かれている場所」= 出所のリポジトリを
-#: 指す。公開者が改変自由としている事実は本文の帰属節に書く（HF の語彙では表せない）。
+#: ライセンス（実地確認 2026-08-20）: 出所の HF リポジトリは **license を宣言しておらず、
+#: モデルカードも無い**。利用条件が書かれているのは作者の Booth 頒布ページなので、SPDX
+#: 識別子は当てられず `other` を採り、`license_link` はそのページを指す。
+#: DECIDED: 帰属は**最小記述**に留める（「Booth のこのモデルを変換した」程度 — 条件の引用や
+#: 頒布者の詳細は書かない。2026-08-20 ユーザー裁定・FN の HF 公開自体も保留中 — backlog）。
 SBV2_FN_METADATA = CardMetadata(
     pipeline_tag=SBV2_PIPELINE_TAG,
     base_model=("rufflet17/voice_models",),
     base_model_relation="quantized",
     license="other",
-    license_name="rufflet17-voice-models-terms",
-    license_link="https://huggingface.co/rufflet17/voice_models",
+    license_name="upstream-distribution-terms",
+    license_link="https://booth.pm/ja/items/6695672",
     tags=("text-to-speech", "webgpu", "japanese"),
 )
 
@@ -118,10 +119,9 @@ SBV2_FN_PROFILE = Sbv2CardProfile(
     source_dirs=("FN/",),
     source_version="2.6.1-JP-Extra",
     attribution=(
-        "- **Terms**: the publisher declares the model free to modify. The source repository",
-        "  declares no SPDX license and carries no model card, so its page is where the",
-        f"  governing terms live — hence `license: {SBV2_FN_METADATA.license}` above,"
-        " pointed at it.",
+        "- **Source**: converted from the author's Style-Bert-VITS2 voice-model set distributed",
+        f"  on [Booth]({SBV2_FN_METADATA.license_link}) so it runs on this stack. See that page",
+        "  for the distribution terms.",
         f"- **Text encoder**: [{SBV2_TEXT_ENCODER_MODEL}]"
         f"(https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}),",
         f"  licensed **{SBV2_TEXT_ENCODER_LICENSE}** (as of retrieval). It is redistributed here",
