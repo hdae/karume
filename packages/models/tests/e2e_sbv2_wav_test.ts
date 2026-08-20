@@ -102,9 +102,10 @@ const REFERENCE_SHA256 = "a82f72e2c18956ec725a3f692182e8c9a7dad4011e760dab9fb3d0
  * 無いので、食い違ったときは WAV を落として人が聴ける形にするだけにする。
  *
  * NOTE: 2026-08-20 の embedding i4 追補で `text_encoder` 席の中身（語彙表が i8 → i4）が変わった
- * ため、参照を採り直した（旧値 `aa9671ad…`）。
+ * ため、参照を採り直した（旧値 `aa9671ad…`）。同日、encoder linear の丸めが GPTQ 校正付きに
+ * なり（perf-ledger Q-6 — 格納形は不変・丸め値だけが動く）再度採り直した（旧値 `c2e2f567…`）。
  */
-const BERT4_REFERENCE_SHA256 = "c2e2f56767ced61892973c3ba712448ab674a9674b4459d2c0e8a106ebe325a4";
+const BERT4_REFERENCE_SHA256 = "e1aabe02821962a4eff869a3aa1565d892b8b0eed235487741ffb485cb797ef4";
 
 /**
  * `w8-bert4` から**さらに `front` / `voice` も i4 混成**へ替えた quant（3 席とも i4）。session
@@ -120,9 +121,10 @@ const W4_QUANT = "w4";
  * linear は 6 本だけで配布バイトもほぼ変わらないため、**この門以外に検出手段が無い**。
  *
  * NOTE: 2026-08-20 の embedding i4 追補で `text_encoder` 席の中身（語彙表が i8 → i4）が変わった
- * ため、参照を採り直した（旧値 `c0bc803e…`）。`front` / `voice` 席は不変。
+ * ため、参照を採り直した（旧値 `c0bc803e…`）。同日、encoder linear の丸めが GPTQ 校正付きに
+ * なり（perf-ledger Q-6）再度採り直した（旧値 `054bfca7…`）。`front` / `voice` 席は両回とも不変。
  */
-const W4_REFERENCE_SHA256 = "054bfca78bb492f466869c4097ac5590da299cf31c36d92c6165863ec1d92979";
+const W4_REFERENCE_SHA256 = "2d69fc80d3c3c83538be653978cbae62830041f8cd105efc95d796137f6ddd4e";
 
 /** 参照 WAV を焼いた時点の実効ノブ（配布形の `pipelineConfig.defaults` と一致するはず）。 */
 const REFERENCE_KNOBS: Sbv2Defaults = {
