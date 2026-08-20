@@ -567,9 +567,7 @@ class TestSbv2StorageGate:
         i8 系列を挿しても層数も入力も出力も一致する。格納 dtype の要求だけが席を区別できる。
         """
         sources = _build_sbv2_sources(tmp_path)
-        (sources.series_i4 / "voice" / "model.safetensors").write_bytes(
-            _SBV2_PAYLOADS["voice_i8"]
-        )
+        (sources.series_i4 / "voice" / "model.safetensors").write_bytes(_SBV2_PAYLOADS["voice_i8"])
         with pytest.raises(DistError, match=r"voice_i4: .* I4 が無い"):
             _assemble_sbv2(sources, tmp_path / "out")
 
@@ -686,9 +684,9 @@ class TestSbv2Manifest:
         assert bert_i4_quants <= set(model["quants"])
         for name, quant in model["quants"].items():
             assert set(quant["weights"]) == set(SBV2_WEIGHTS), name
-            assert quant["weights"]["text_encoder"] == (
-                "i4" if name in bert_i4_quants else "i8"
-            ), name
+            assert quant["weights"]["text_encoder"] == ("i4" if name in bert_i4_quants else "i8"), (
+                name
+            )
 
     def test_the_bert4_quant_is_w8_with_only_the_text_encoder_swapped(self, sbv2_assembled) -> None:
         """`w8-bert4` の意味は「`w8` と同構成で BERT だけ i4」— 差分が 1 席であることを固定する。

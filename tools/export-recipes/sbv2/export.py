@@ -1282,8 +1282,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=WEIGHT_DTYPES,
         default="f32",
         help="重みの格納 dtype（f16 / i8 は fake-quant してから適格スロットだけ圧縮格納する"
-        " — ADR 0018 / 0019。i4 は混成で、適格 linear だけ group32 の i4・残りは i8 — ADR 0069"
-        "〈linear を持たない dp / dec には掛からない〉。**emit 専用**で --verify とは併用できない）",
+        " — ADR 0018 / 0019。i4 は混成で、適格 linear だけ group32 の i4・残りは i8 —"
+        " ADR 0069〈linear を持たない dp / dec には掛からない〉。**emit 専用**で"
+        " --verify とは併用できない）",
     )
     parser.add_argument(
         "--target",
