@@ -17,7 +17,7 @@
 
 - **J-1: Q-1 実装 — 消化済み（2026-08-20）**: deberta-i4 混成系列（linear = i4 g32・残り i8）+
   SBV2 quant `w8-bert4` + 実 GPU WAV 門（perf-ledger Q-1 ✅・配布 WAV 聴感確認済み）。
-  既定 quant は w8 のまま。HF jvnv 上げ直しはリリース枠と同乗（資産は準備済み）。
+  既定 quant はのちに w4 へ（J-2 第 3 段）。HF jvnv 上げ直しはリリース枠と同乗（資産は準備済み）。
 - **J-1b: SBV2 full-w4 — 消化済み（2026-08-20 ユーザー依頼）**: net_g（front/voice）の i4
   混成系列 + 3 席とも i4 の quant `w4` + WAV 門（perf-ledger Q-5 の SBV2 席）。net_g の適格
   linear は 6 本のみで削減は w8-bert4 比 −0.08% — 意味は「配布形を丸ごと 4bit で通す席」。
@@ -38,9 +38,10 @@
   一致門 3 種・校正コーパスは deberta へ移管し計測と共有）→ fn/jvnv 再配布 + WAV 参照
   採り直し（w8 門不変・verify 1629/0/5）。速度実測済み
   （[research §7](research/2026-08-20-gptq-awq-calibrated-rounding.md) — 取得 −30%・ロード
-  1.7 倍速・温間合成 ~4% 速 = 基準の速度側は充足）。**残 = ユーザーの再聴
-  （outputs/demo/sbv2-FN4-w8-bert4.wav / sbv2-FN4-w4.wav — 主眼 =「硬さ」が縮んだか）→
-  既定 quant の裁定**。irodori / anima の配布 i4 席新設は J-4 と同時に裁定（irodori は
+  1.7 倍速・温間合成 ~4% 速 = 基準の速度側は充足）。**再聴裁定済み（2026-08-20 ユーザー
+  「ほぼ違いが分からない」）→ 既定 quant = w4 へ変更**（ADR 0039 決定 5 更新・fn/jvnv
+  再配布・既定解決の実証 = quant 未指定合成が w4 参照 sha と一致・w8 は opt-in 参照系）
+  — **第 3 段クローズ**。irodori / anima の配布 i4 席新設は J-4 と同時に裁定（irodori は
   kmeans 圧勝のため rtn 席を先行させない）。
 - **J-5a: embedding i4 — 消化済み（2026-08-20・`0d8c6f6`）**: i4 適格を
   `I4_WEIGHT_OPS = {linear, embedding}` へ一般化（ADR 0069 追記 6）。BERT 語彙表 i4 で系列

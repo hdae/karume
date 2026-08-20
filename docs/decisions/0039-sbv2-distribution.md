@@ -111,6 +111,13 @@ linear は実質 0 GFLOP（ADR 0025 決定⑤）なので、`w8a8` は速度の�
 > 決定への影響は無い（w8a8 を速度目的にしない根拠はむしろ強まる）。実測は
 > [research/2026-08-10-op-timing-stats.md](../research/2026-08-10-op-timing-stats.md) §3。
 
+> 更新（2026-08-20・ユーザー裁定）: quant 表に `w8-bert4`（text_encoder だけ i4 混成）と
+> `w4`（3 席とも i4 混成）が加わり（ADR 0069 / perf-ledger Q-1・Q-5）、**既定は `w4` へ変更**。
+> 根拠 = GPTQ 校正付き丸めの出荷結線（perf-ledger Q-6）後の聴感が「ほぼ違いが分からない」+
+> 速度勝利（取得 −30%・ロード 1.7 倍速・温間合成 ~4% 速 —
+> [research/2026-08-20-gptq-awq-calibrated-rounding.md](../research/2026-08-20-gptq-awq-calibrated-rounding.md)
+> §7）。`w8` は opt-in の参照系（WAV 参照門の不変アンカー）として残す。
+
 ### 6. 日本語辞書は配布形に載せない（**暫定** — リファクタで再検討）
 
 `@hdae/yomi` の辞書はモデル資産ではなく yomi のバージョンに結びつくため、配布形に混ぜると
