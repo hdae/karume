@@ -226,6 +226,32 @@ class TestSbv2Sections:
         assert "const audio = await pipeline.generate({" in sbv2_card
 
 
+class TestSbv2QuantRounding:
+    """quant 表に続く**丸め方**の備考（同じ `i4` でも GPTQ 校正付きか素の RTN かは表に出ない）。"""
+
+    @staticmethod
+    def _notes(card: str) -> str:
+        _, _, rest = card.partition("## Model: ZA")
+        _, _, notes = rest.partition("How the stored weights were rounded:")
+        return notes.partition("### Styles")[0]
+
+    def test_it_explains_only_the_quants_the_model_declares(self, sbv2_card: str) -> None:
+        """配布形が持たない席は説明しない（`_sbv2_knob` と同じ規律）。"""
+        notes = self._notes(sbv2_card)
+        assert "- `w8` —" in notes
+        assert "`w8-bert4`" not in notes
+        assert "`w4`" not in notes
+
+    def test_the_default_mark_follows_default_quant(self, sbv2_card: str) -> None:
+        """既定マークは manifest 由来 — 備考に焼くと、既定が動いたとき表とだけ食い違う。"""
+        assert "(default)" not in self._notes(sbv2_card)
+
+        manifest = _sbv2_manifest()
+        manifest["models"]["ZA"]["defaultQuant"] = "w8"
+        moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE)
+        assert "- `w8` (default) —" in self._notes(moved)
+
+
 class TestSbv2Derivation:
     """MUST: 数値・ファイル一覧・quant 表・スタイル表・話者表は manifest 由来。"""
 

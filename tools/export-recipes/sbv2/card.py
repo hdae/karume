@@ -49,6 +49,28 @@ SBV2_TEXT_ENCODER_LICENSE = "cc-by-sa-4.0"
 #: 使い方スニペットのデモ文（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
 SBV2_DEMO_TEXT = "こんにちは、これはテストです。"
 
+#: quant ごとの**丸め方**（manifest に無い事実 — 表が持つのは「どの席がどの格納 dtype か」まで
+#: で、その dtype をどう作ったか〈per-tensor RTN / GPTQ 校正 / group-32〉は台本の知識）。
+#: 値は箇条 1 つぶんの行の並び。先頭行は quant 名に続く本文で、2 行目以降は Markdown の
+#: 継続行なので自分でインデントを持つ（`attribution` と同じ「行そのもの」の持ち方）。
+#:
+#: 既定マークは書かない — 既定は manifest の `defaultQuant` から引く（{@link _sbv2_quants}）。
+#: ここに書くと、既定が動いたときに表と説明が別々に嘘をつく。
+SBV2_QUANT_ROUNDING: Mapping[str, tuple[str, ...]] = {
+    "w8": ("every weight in `i8`, rounded per tensor (plain RTN).",),
+    "w8-bert4": (
+        "`text_encoder` in `i4` group-32: its linear layers rounded with **GPTQ",
+        "  calibration** (a 48-sentence Japanese corpus), its embedding table plain RTN.",
+        "  `front` / `voice` stay `i8`.",
+    ),
+    "w4": (
+        "the same text encoder as `w8-bert4`, plus `front` / `voice` linear and conv1d",
+        "  weights in `i4` group-32 with plain RTN. Smallest download and fastest warm",
+        "  synthesis; the output is very close to `w8-bert4`, with slightly lower tension",
+        "  than `f32`.",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class Sbv2CardProfile:
@@ -212,6 +234,28 @@ def _sbv2_base_weights(profile: Sbv2CardProfile) -> list[str]:
     ]
 
 
+def _sbv2_quants(model: Mapping[str, Any]) -> list[str]:
+    """汎用の quant 表に、SBV2 の**丸め方**の備考を足した節。
+
+    表は「どの席がどの格納 dtype か」しか言えない（manifest がそこまでしか持たない）ので、
+    同じ `i4` でも GPTQ 校正付きか素の RTN かが読めない — 既定が品質で選ばれている理由が
+    カードから消える。備考は**このモデルが宣言している quant だけ**に付ける（`_sbv2_knob` と
+    同じ規律 — 配布形が持たない席を説明すると、カードが配れる値を超えて喋る）。
+    """
+    default = model["defaultQuant"]
+    notes: list[str] = []
+    for name in model["quants"]:
+        rounding = SBV2_QUANT_ROUNDING.get(name)
+        if rounding is None:
+            continue
+        mark = " (default)" if name == default else ""
+        head, *rest = rounding
+        notes += [f"- `{name}`{mark} — {head}", *rest]
+    if not notes:
+        return quants(model)
+    return [*quants(model), "", "How the stored weights were rounded:", "", *notes]
+
+
 def _name_id_rows(table: Mapping[str, int]) -> list[str]:
     """`名前 → ID` の表を manifest の並びのまま行にする（ID は配る表の行番号そのもの）。"""
     return [f"| `{name}` | {identifier} |" for name, identifier in table.items()]
@@ -350,7 +394,7 @@ def render_sbv2_model_card(manifest: Mapping[str, Any], repo: str, profile: Sbv2
             [""],
             _sbv2_usage(manifest, repo),
             *model_sections(
-                manifest, (files, quants, _sbv2_styles, _sbv2_speakers, _sbv2_defaults)
+                manifest, (files, _sbv2_quants, _sbv2_styles, _sbv2_speakers, _sbv2_defaults)
             ),
         )
     )

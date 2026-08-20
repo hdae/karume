@@ -10,8 +10,9 @@
 `text_encoder`（DeBERTa）に f16 席が無いのは `deberta/export.py` が f16 を持たないから
 （f32 の 1.32GB は配布に非現実的）。既定の i8 は ADR 0026 が聴感ゲート込みで受理済みで、
 i4 混成（linear と embedding が i4 group32）は `w8-bert4` quant の席として後から足した
-（perf-ledger Q-1）。`front` / `voice` にも i4 混成席があり（適格な linear と conv1d が i4 —
-conv1d は波 J-5b の追補）、3 席とも i4 を選ぶのが `w4` quant（2026-08-20 から既定 quant）。
+（perf-ledger Q-1 — 2026-08-20 から既定 quant）。`front` / `voice` にも i4 混成席があり
+（適格な linear と conv1d が i4 — conv1d は波 J-5b の追補）、3 席とも i4 を選ぶのが `w4`
+quant（速度 / サイズ優先の opt-in）。
 
 ホスト資産のうち `style_vectors` / `speaker_embeddings` は**表を配って実行時に行を引く**形。
 `front` / `voice` のグラフ入力 `style_vec[1,256]` / `g[1,512,1]` はこの 2 表から作られ、
@@ -196,8 +197,9 @@ SBV2_ASSETS: Mapping[str, str] = {
 #: `w8-bert4` は `w8` と同構成で `text_encoder` だけ i4 混成（BERT の linear と語彙表を i4
 #: group32 に落とす）。`w4` は**3 席とも i4 混成**（session は空 = f32 compute のまま — 活性は
 #: 動かさない）。
-#: 数値は f32 同一性の指標では大きく動くが、聴感は一次通過（perf-ledger Q-1 /
-#: research 2026-08-19 §6 — net_g 全役割 rtn で明らかな劣化なし）。
+#: 数値は f32 同一性の指標では大きく動く。聴感は一次通過だが、`w4` は f32 比でテンションが
+#: 少し低め（perf-ledger Q-1 / research 2026-08-19 §6 — net_g の RTN i4 由来）で、これが
+#: 既定を `w8-bert4` に戻した根拠（{@link SBV2_DEFAULT_QUANT}）。
 #:
 #: NOTE: net_g 側の i4 は conv1d 追補（波 J-5b・ADR 0069 追記 7）で**サイズ利得の本体**に
 #: なった — 適格 conv1d ≈56MiB が半減する（linear だけの時代は 6 本 = 配布形全体の 0.1% 未満で
@@ -214,11 +216,12 @@ SBV2_QUANTS: Mapping[str, Any] = {
     "w4": {"weights": {"text_encoder": "i4", "front": "i4", "voice": "i4"}, "session": {}},
 }
 
-#: 既定は `w4`（2026-08-20 ユーザー裁定 — GPTQ 校正付き丸めの結線後、聴感で「ほぼ違いが
-#: 分からない」+ 速度勝利〈取得 −30%・ロード 1.7 倍速・温間合成 ~4% 速〉。経緯と数値は
-#: perf-ledger Q-1 / Q-6 と research 2026-08-20 §7）。`w8` は opt-in の参照系として残す —
-#: 既定化前の既定で、WAV 参照門（e2e_sbv2_wav_test）の不変アンカーでもある。
-SBV2_DEFAULT_QUANT = "w4"
+#: 既定は `w8-bert4`（2026-08-20 ユーザー再裁定 — 既定は**品質最優先**。`w4` は聴感で f32 比の
+#: 差が残る〈テンションが少し低め — net_g の RTN i4 由来〉ので、速度 / サイズを取りに行く人が
+#: 明示して選ぶ opt-in の席に置く。`w8-bert4` は BERT だけ GPTQ 校正付きの i4 で、聴感は f32
+#: とほぼ同一。経緯と数値は perf-ledger Q-1 / Q-6 と research 2026-08-20 §7）。`w8` は
+#: opt-in の参照系として残る — WAV 参照門（e2e_sbv2_wav_test）の不変アンカー。
+SBV2_DEFAULT_QUANT = "w8-bert4"
 
 #: `pipelineConfig.defaults` に載る実行時ノブ（`style_bert_vits2.constants` 由来）。綴りは
 #: `symbols.json` の `defaults` と共有する — 同じ源から引いた同じ値が配布形の 2 つの資産に
