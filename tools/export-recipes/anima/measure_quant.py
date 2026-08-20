@@ -49,10 +49,12 @@ f32 重みを潰すので順序が逆にできない）。7.29GiB のロード�
     uv run python -m anima.measure_quant --out /path/to/q0
 
 `--w4-screen` は**独立のモード**（10 構成は 1 本も走らない — {@link run_w4_screen}）。
-w4 の丸め方式（rtn-i4-g32 / nf4 / mxfp4 / kmeans:shared）を横並びにする側で、上の 10 構成の
-**積み上げ意味論とは別経路**: あちらは同じインスタンスへ in-place で積み上げるが、方式比較は
-構成ごとに pristine（素の f32 重み）へ戻してから当てる（積み重ね禁止 MUST）。記号・基準・
-出力ファイル名も共有しない。
+w4 の丸め方式（rtn-i4-g32 / nf4 / mxfp4 / kmeans:shared）と**校正付き丸め**（gptq-rtn /
+gptq-nf4 / gptq-kmeans — 波 J-2）を横並びにする側で、上の 10 構成の**積み上げ意味論とは
+別経路**: あちらは同じインスタンスへ in-place で積み上げるが、方式比較は構成ごとに pristine
+（素の f32 重み）へ戻してから当てる（積み重ね禁止 MUST）。記号・基準・出力ファイル名も
+共有しない。校正付きの対象は **DiT block 列の linear 限定**で 4 方式とは集合が違う
+（{@link CALIB_TARGET}）。
 
 NOTE: 非 DiT（text_encoder / text_conditioner / VAE）は全構成とも **f32 のまま**にする。
 比較軸を DiT の量子化 1 本に絞るため（資産系列 `outputs/series/anima-i8/` は他 3 つが f16 だが、
@@ -68,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import inspect
 import json
 import math
 import time
@@ -86,6 +89,14 @@ from karume.act_quant import (
     is_eligible,
     quantize_rows,
     quantize_rows_parts,
+)
+from karume.quant_calib import (
+    CalibMethod,
+    CalibReport,
+    GridSpec,
+    StageBatch,
+    StageSpec,
+    calibrate_stages,
 )
 from karume.quant_methods import (
     DEFAULT_CODEBOOK_LEVELS,
@@ -1089,13 +1100,231 @@ def restore_w4(weights: Mapping[str, torch.Tensor], pristine: Mapping[str, torch
             weight.copy_(pristine[fqn])
 
 
+# ---- 校正付き丸め（`--w4-screen` の校正列・波 J-2）---------------------------
+#
+# 上の 4 方式は重みだけを見て丸める（RTN 系）。**校正付き丸め**（GPTQ — core の
+# `karume.quant_calib`）は「その層に実際に流れる活性」から**同じ格子の中で**丸め先を選び直す
+# 側で、格納グリッド 3 種を同じ列へ足す。積み重ね禁止も pristine 復元も 4 方式と同文。
+#
+# 対象は **DiT block 列の `nn.Linear` 限定**（{@link CALIB_TARGET}）で、4 方式の対象（DiT 全体の
+# linear）とは**集合が違う** — 校正の駆動（`calibrate_stages`）は stage 内の `nn.Linear` に
+# 閉じるので、block の外（`patch_embed.proj` / `norm_out` / `proj_out` / `time_embed`）が入らない。
+# サイズ試算も品質もその集合で読む（表と JSON に対象を明記する）。
+#
+# 校正入力は**参照 step 列を横断**して採る（`--steps` ぶん・固定 PROMPT / 固定 SEED）。拡散
+# モデルの活性は sigma で分布が動くので、1 step だけ見ると後半 step の分布が校正から漏れる。
+
+#: 校正付き構成の対象名（表と JSON の「対象」列）。
+CALIB_TARGET = "dit:blocks-linear"
+
+#: DiT block 列の**モデル内 FQN 接頭辞**（scale 台帳のキーを `Int4Report` と同じ FQN 空間へ
+#: 揃えるために stage へ渡す — core の `StageSpec` の契約）。
+CALIB_BLOCK_PREFIX = "transformer_blocks"
+
+
+@dataclass(frozen=True)
+class CalibConfig:
+    """校正付き丸め 1 本ぶんの指定（方式 × 格納グリッド）。
+
+    `bits` / `formula` は {@link W4Method} と同じ器（{@link w4_size_projection} が両方を受ける）
+    — 校正は**格子を 1 バイトも変えない**ので、格納形の式は方式側と共有できる。
+    """
+
+    name: str
+    method: CalibMethod
+    grid: GridSpec
+    bits: Callable[[W4Targets], float]
+    formula: str
+
+
+def _calib_codebook_bits(targets: W4Targets) -> float:
+    """`kmeans_shared` の総 bit — 表は**層ごとに 1 枚**（core の `GridSpec` の NOTE）。"""
+    return (
+        W4_PAYLOAD_BITS * targets.elements
+        + W4_F32_SCALE_BITS * targets.groups
+        + W4_CODEBOOK_ENTRY_BITS * DEFAULT_CODEBOOK_LEVELS * targets.modules
+    )
+
+
+#: 校正付き構成 3 本（この順で表に並ぶ）。AWQ を置かないのは、等価倍率 `s` が単独で格納できず
+#: （fold か companion が要る）出口の無い列になるため（core の `quant_calib` の MUST）。
+CALIB_CONFIGS: tuple[CalibConfig, ...] = (
+    CalibConfig(
+        "gptq-rtn",
+        "gptq",
+        GridSpec(kind="rtn", group_size=W4_GROUP_SIZE),
+        _w4_group_scaled_bits(W4_F32_SCALE_BITS),
+        "4·N + 32·G（格納は配布形 `i4` そのもの — 校正は丸め先だけを変える）",
+    ),
+    CalibConfig(
+        "gptq-nf4",
+        "gptq",
+        GridSpec(kind="nf4", group_size=W4_GROUP_SIZE),
+        _w4_group_scaled_bits(W4_F32_SCALE_BITS),
+        "4·N + 32·G（格子は NF4 の固定表）",
+    ),
+    CalibConfig(
+        "gptq-kmeans",
+        "gptq",
+        GridSpec(kind="kmeans_shared", group_size=W4_GROUP_SIZE),
+        _calib_codebook_bits,
+        "4·N + 32·G + 32·16·(層数)（表の射程は**層内** — 全体 1 枚の kmeans:shared とは別式）",
+    ),
+)
+
+CALIB_NAMES: tuple[str, ...] = tuple(config.name for config in CALIB_CONFIGS)
+
+
+def select_calib(only: Sequence[str]) -> tuple[CalibConfig, ...]:
+    """`--w4-only` で選んだ校正付き構成を宣言順で返す（{@link select_w4_methods} と同じ流儀）。"""
+    if not only:
+        return CALIB_CONFIGS
+    chosen = set(only)
+    return tuple(config for config in CALIB_CONFIGS if config.name in chosen)
+
+
+def calib_stages(model: nn.Module) -> tuple[StageSpec, ...]:
+    """実行順の DiT block を `(モデル内 FQN 接頭辞, stage)` で返す。
+
+    block を**そのまま** stage にできるのは `CosmosTransformerBlock.forward` が
+    「hidden を位置引数・残りを keyword で受けて hidden を返す」形をしているから
+    （包み直すと写しが上流とずれうるので、包まないのが最善）。接頭辞に block 番号まで
+    入れてあるので、stage 内の局所 FQN（`attn1.to_q.weight`）はそのままモデル内 FQN へ戻る。
+    """
+    return tuple(
+        (f"{CALIB_BLOCK_PREFIX}.{index}", block)
+        for index, block in enumerate(model.transformer_blocks)
+    )
+
+
+def scan_calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor], W4Targets]:
+    """stage 内の校正対象を fqn 引きの重みと素性で返す（**走査** = 過不足一致門の基準）。
+
+    MUST: 非 linear の量子化可能型が現れたら fail loudly（{@link scan_w4_targets} と同文）。
+
+    MUST: g32 非整列は**除外せず fail loudly** — 校正は stage を丸ごと駆動する形なので、
+    途中の 1 本だけ外すと「走査の本数 = 丸めた本数」の門が張れなくなる（4 方式側は層ごとに
+    独立なので除外一覧を出す運用でよい）。
+    """
+    weights: dict[str, torch.Tensor] = {}
+    modules = elements = groups = 0
+    for prefix, stage in stages:
+        wide = {fqn for fqn, _weight, _axis in iter_quant_targets(stage, QUANT_MODULE_TYPES)}
+        targets = list(iter_quant_targets(stage, W4_OP_TYPES))
+        extra = sorted(wide - {fqn for fqn, _weight, _axis in targets})
+        if extra:
+            raise AssertionError(
+                f"{prefix} に非 linear の量子化可能な重みがある: {extra}"
+                "（校正は nn.Linear 限定 — 非 linear 込みの列を足すかどうかを先に決めること）"
+            )
+        for fqn, weight, axis in targets:
+            rows = channel_rows(weight, axis)
+            span = int(rows.shape[1])
+            if span % W4_GROUP_SIZE:
+                raise AssertionError(
+                    f"{prefix}.{fqn}: 量子化軸 {span} が g{W4_GROUP_SIZE} で割り切れない"
+                    "（校正は stage 単位で駆動するので 1 本だけ外す逃げ道が無い）"
+                )
+            weights[f"{prefix}.{fqn}"] = weight
+            modules += 1
+            elements += int(weight.numel())
+            groups += int(rows.shape[0]) * (span // W4_GROUP_SIZE)
+    if not modules:
+        raise AssertionError(f"校正対象 '{CALIB_TARGET}' に量子化できる重みが 1 本も無い")
+    return weights, W4Targets(modules=modules, elements=elements, groups=groups, excluded={})
+
+
+def capture_stage_batches(
+    model: nn.Module, run_reference: Callable[[], dict[str, torch.Tensor]], limit: int
+) -> tuple[dict[str, torch.Tensor], tuple[StageBatch, ...]]:
+    """参照 denoise を 1 周回しつつ、先頭 block への `(args, kwargs)` を step ごとに捕まえる。
+
+    CFG=1（{@link GUIDANCE}）なので 1 step = DiT 1 forward = 1 バッチ。付随引数は
+    `CosmosTransformer3DModel.forward` が block ループの**前**に 1 回作って全 block へ同じ
+    ものを渡すので、stage 間で不変にできる（`advance_kwargs` は要らない）。
+
+    位置引数の名前は `block.forward` の**シグネチャから**引く — 上流が引数の順序を変えても
+    綴りが黙って入れ替わらないようにするため（写した名前の並びを持たない）。
+
+    MUST: 呼び出し側は**丸めを 1 本も当てる前**（基準 `f32` の周回）にだけ使う。
+    """
+    blocks = list(model.transformer_blocks)
+    names = tuple(inspect.signature(blocks[0].forward).parameters)
+    batches: list[StageBatch] = []
+
+    def pre(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        if len(batches) >= limit:
+            return
+        batches.append(
+            (
+                (args[0].detach(),),
+                {**dict(zip(names[1:], args[1:], strict=False)), **kwargs},
+            )
+        )
+
+    handle = blocks[0].register_forward_pre_hook(pre, with_kwargs=True)
+    try:
+        result = run_reference()
+    finally:
+        handle.remove()
+    if not batches:
+        raise AssertionError(
+            "校正入力を 1 step も捕まえられなかった"
+            "（DiT の block ループが台本の想定と食い違っている）"
+        )
+    return result, tuple(batches)
+
+
+@dataclass(frozen=True)
+class CalibRig:
+    """校正付き構成が共有する足場（stage 列・走査・先頭 stage への入力）。
+
+    構成ごとに作り直さない — 捕捉は基準 `f32` の周回で 1 回だけ（**丸めを 1 本も当てる前**）。
+    """
+
+    stages: tuple[StageSpec, ...]
+    scan: Mapping[str, torch.Tensor]
+    targets: W4Targets
+    batches: tuple[StageBatch, ...]
+
+
+def apply_calib(config: CalibConfig, rig: CalibRig) -> CalibReport:
+    """校正付き丸め 1 本を DiT へ in-place で当てる（stage 逐次の駆動は core 側）。"""
+    report = calibrate_stages(rig.stages, rig.batches, method=config.method, spec=config.grid)
+    assert_calib_covers_scan(report, rig.scan, config.name)
+    return report
+
+
+def assert_calib_covers_scan(
+    report: CalibReport, scan: Mapping[str, torch.Tensor], name: str
+) -> None:
+    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+
+    MUST: fail loudly。stage の綴りや対象型が変わって block の一部が校正に載らなくなっても
+    表には行が残り、しかも丸め漏れのぶん PSNR は**良い側**に出る（素通りを数字から読めない）。
+    """
+    rounded = {layer.fqn for layer in report.layers}
+    missing = sorted(set(scan) - rounded)
+    extra = sorted(rounded - set(scan))
+    if missing or extra or report.modules != len(scan):
+        raise AssertionError(
+            f"[{name}] 校正が丸めた {report.modules} 本が走査の {len(scan)} 本と一致しない"
+            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+        )
+
+
 def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
     """方式ごとに pristine から丸め直して DiT を走らせ、品質とサイズ試算を集める。
 
     模型のロードは 1 回きり（7.29GiB）。pristine の退避は対象の重みだけ（除外分は 1 度も
     触らないので採らない）で、丸めの一時領域と合わせたピークが実メモリを決める。
+
+    校正付き構成（{@link CALIB_CONFIGS}）は 4 方式の**後**に走る（対象集合が違うので表の
+    並びで混ざらない）。足場は基準 `f32` の周回で 1 回だけ組む — 校正入力は**丸めを 1 本も
+    当てる前**に採る必要があるため。
     """
     methods = select_w4_methods(args.w4_only)
+    calib_configs = select_calib(args.w4_only)
     sigmas = sigma_schedule(args.steps, SHIFT)
     print(f"[sigmas] {sigmas[0]:.4f} … {sigmas[-2]:.4f} → 0 ({args.steps} steps)", flush=True)
 
@@ -1134,8 +1363,33 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
     }
     pristine = {fqn: weight.detach().clone() for fqn, weight in weights.items()}
 
+    rig: CalibRig | None = None
+    if calib_configs:
+        stages = calib_stages(model)
+        calib_scan, calib_targets = scan_calib_targets(stages)
+        print(
+            f"[calib] stage {len(stages)} 段 / 対象 linear {calib_targets.modules} 本"
+            f" / {calib_targets.elements:,} 要素（{CALIB_TARGET} — block の外は含まない）",
+            flush=True,
+        )
+
+    # `model` を**既定引数で束ねる**のは、下の `del` が同名の局所を外すため（素のクロージャ
+    # だと、消えた後に呼ばれたとき NameError になる形が残る）。
+    def run_reference(model: nn.Module = model) -> dict[str, torch.Tensor]:
+        return reference_steps(
+            model,
+            latents_init,
+            embeds,
+            embeds,
+            sigmas,
+            (args.resolution, args.resolution),
+            args.steps,
+            GUIDANCE,
+        )
+
     latents: dict[str, torch.Tensor] = {}
     configs: dict[str, dict[str, Any]] = {}
+    sizes: dict[str, dict[str, Any]] = {}
     for method in (None, *methods):
         name = W4_BASE_CONFIG if method is None else method.name
         started = time.perf_counter()
@@ -1151,16 +1405,14 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
                     "（include 述語か op_types が効いていない）"
                 )
             report = rounded.describe()
-        result = reference_steps(
-            model,
-            latents_init,
-            embeds,
-            embeds,
-            sigmas,
-            (args.resolution, args.resolution),
-            args.steps,
-            GUIDANCE,
-        )
+            sizes[name] = w4_size_projection(method, targets)
+        if method is None and calib_configs:
+            # MUST: 捕捉は**丸めを 1 本も当てる前**（基準 f32 の周回）に 1 回だけ。
+            result, batches = capture_stage_batches(model, run_reference, args.steps)
+            rig = CalibRig(stages=stages, scan=calib_scan, targets=calib_targets, batches=batches)
+            print(f"[calib] 校正バッチ {len(batches)} 本（step 横断）を捕捉", flush=True)
+        else:
+            result = run_reference()
         for key, value in result.items():
             if key.startswith("latents_"):
                 latents[f"{name}/{key}"] = value
@@ -1168,15 +1420,52 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
         configs[name] = {"method": name, "quantReport": report, "elapsed": round(elapsed, 1)}
         print(f"[{name}] {report} ({elapsed:.1f}s)", flush=True)
 
+    for config in calib_configs:
+        if rig is None:
+            raise AssertionError("校正の足場が組まれていない（基準 f32 の周回が走っていない）")
+        started = time.perf_counter()
+        # MUST: 校正付きも積み重ねない — 当てる前に pristine へ戻す（4 方式と同文）。
+        restore_w4(weights, pristine)
+        calib_report = apply_calib(config, rig)
+        result = run_reference()
+        for key, value in result.items():
+            if key.startswith("latents_"):
+                latents[f"{config.name}/{key}"] = value
+        elapsed = time.perf_counter() - started
+        configs[config.name] = {
+            "method": f"{calib_report.method}/{calib_report.grid}",
+            "target": CALIB_TARGET,
+            "quantReport": calib_report.describe(),
+            "calibModules": calib_report.modules,
+            "calibBatches": len(rig.batches),
+            "elapsed": round(elapsed, 1),
+        }
+        sizes[config.name] = w4_size_projection(config, rig.targets)
+        print(f"[{config.name}] {calib_report.describe()} ({elapsed:.1f}s)", flush=True)
+
+    calib_meta = (
+        None
+        if rig is None
+        else {
+            "name": CALIB_TARGET,
+            "stages": len(rig.stages),
+            "modules": rig.targets.modules,
+            "elements": rig.targets.elements,
+            "groups": rig.targets.groups,
+            "batches": len(rig.batches),
+        }
+    )
     # 丸め済みの重みと pristine（対象と同サイズ）を VAE decode の前に手放す。
-    del model, weights, pristine
+    # `rig` は stage 経由で block を、batches で校正入力を掴んだままなので一緒に落とす。
+    del model, weights, pristine, rig
+    if calib_configs:
+        del stages, calib_scan, calib_targets
     gc.collect()
 
     last = f"latents_step{args.steps:04d}"
     tags = tuple(configs)
     images = decode_all(args.repo, latents, last, tags)
     keys = [f"latents_step{index:04d}" for index in range(1, args.steps + 1)]
-    by_name = {method.name: method for method in methods}
     failures: list[str] = []
     base_image = images[W4_BASE_CONFIG]
     u8_base = to_uint8(base_image).to(torch.float32)
@@ -1194,7 +1483,7 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
         entry["moved"] = not torch.equal(
             latents[f"{name}/{last}"], latents[f"{W4_BASE_CONFIG}/{last}"]
         )
-        entry["size"] = w4_size_projection(by_name[name], targets)
+        entry["size"] = sizes[name]
         # 恒真化の遮断: 素通りは常に「品質が良い」側の嘘になる（丸めが 1 本も当たっていない
         # 場合だけ基準とビット一致し、しかも数値は完璧に見える）。
         if not entry["moved"]:
@@ -1226,6 +1515,9 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
             "elements": targets.elements,
             "groups": targets.groups,
         },
+        # 校正列の対象は上の 4 方式と**別集合**（block の外が入らない）— 表の bpw と品質を
+        # 読むときに取り違えないよう、素性を並べて出す。
+        "calibTargets": calib_meta,
         "excluded": [
             {"weight": fqn, "quantAxis": span} for fqn, span in sorted(targets.excluded.items())
         ],
@@ -1286,6 +1578,16 @@ def w4_report_markdown(payload: Mapping[str, Any]) -> str:
             "- 除外（量子化軸が g"
             f"{payload['groupSize']} で割り切れないので対象から外した — ADR 0069 決定 2）: "
             + " / ".join(f"`{item['weight']}`（軸 {item['quantAxis']}）" for item in excluded)
+        )
+    calib = payload.get("calibTargets")
+    if calib:
+        lines.append(
+            f"- **校正付き構成**（`{'` / `'.join(CALIB_NAMES)}`）の対象は上とは別集合 —"
+            f" `{calib['name']}` = DiT block 列の `nn.Linear` {calib['modules']} 本 /"
+            f" {calib['elements']:,} 要素（block の外の `patch_embed` / `norm_out` /"
+            " `proj_out` / `time_embed` は入らない）。校正入力は参照 step 列を横断した"
+            f" {calib['batches']} バッチ（stage {calib['stages']} 段）。**bpw も品質も"
+            "この集合で読む**（4 方式の行と直接は比較できない）。"
         )
     if payload["kmeansFitStride"] > 1:
         lines.append(
@@ -1438,15 +1740,17 @@ def main() -> None:
         "--w4-screen",
         action="store_true",
         help="**10 構成の代わりに** w4 の丸め方式スクリーニングを走らせる"
-        f"（{' / '.join(W4_METHOD_NAMES)} + 基準 f32・g{W4_GROUP_SIZE} 固定）。"
+        f"（{' / '.join(W4_METHOD_NAMES)} + 校正付き {' / '.join(CALIB_NAMES)}"
+        f" + 基準 f32・g{W4_GROUP_SIZE} 固定）。"
         "構成ごとに素の f32 重みへ戻してから当てる別経路で、生成物も別名",
     )
     parser.add_argument(
         "--w4-only",
         action="append",
         default=[],
-        choices=W4_METHOD_NAMES,
-        help="`--w4-screen` でこの方式だけ走らせる（複数可・部分再実行用）。基準 f32 は常に走る",
+        choices=(*W4_METHOD_NAMES, *CALIB_NAMES),
+        help="`--w4-screen` でこの方式 / 校正付き構成だけ走らせる（複数可・部分再実行用）。"
+        "基準 f32 は常に走る",
     )
     args = parser.parse_args()
     if args.w4_only and not args.w4_screen:

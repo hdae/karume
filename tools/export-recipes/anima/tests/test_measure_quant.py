@@ -346,3 +346,255 @@ class TestReport:
         payload["configs"]["nf4"] = {**payload["configs"]["nf4"], "moved": False}
 
         assert "**NG（素通り）**" in mq.w4_report_markdown(payload)
+
+
+# ---- 校正付き丸め（波 J-2）--------------------------------------------------
+#
+# 実重み無しで固定できるのは「対象の割り方」と「捕まえ方」と「門」だけ。GPTQ の数値そのものは
+# core（`karume.quant_calib`）のテストが持つ。
+
+
+class TinyCalibBlock(nn.Module):
+    """`CosmosTransformerBlock` の代役 — **引数の名前と並び**を写す（Catcher の対応表の根拠）。"""
+
+    def __init__(self, features: int) -> None:
+        super().__init__()
+        self.attn1 = nn.Linear(features, features, bias=False)
+        self.ff = nn.Linear(features, features, bias=False)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        embedded_timestep: torch.Tensor,
+        temb: torch.Tensor | None = None,
+        image_rotary_emb: torch.Tensor | None = None,
+        extra_pos_emb: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        controlnet_residual: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden = self.attn1(hidden_states) + encoder_hidden_states.mean(dim=1)[:, None, :]
+        hidden = hidden + self.ff(hidden) + embedded_timestep[:, None, :]
+        return hidden_states + hidden
+
+
+class TinyCalibDit(nn.Module):
+    """`CosmosTransformer3DModel` の代役（block を**全て位置引数で**呼ぶ形も写す）。"""
+
+    def __init__(self, features: int = 32, blocks: int = 2) -> None:
+        super().__init__()
+        self.features = features
+        self.transformer_blocks = nn.ModuleList(TinyCalibBlock(features) for _ in range(blocks))
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        embedded_timestep: torch.Tensor,
+        temb: torch.Tensor,
+    ) -> torch.Tensor:
+        for block in self.transformer_blocks:
+            hidden = block(
+                hidden, encoder_hidden_states, embedded_timestep, temb, None, None, None, None
+            )
+        return hidden
+
+
+def tiny_denoise(model: TinyCalibDit, steps: int) -> dict[str, torch.Tensor]:
+    """`reference_steps` と同じ形の参照ループ（1 step = DiT 1 forward — CFG=1）。"""
+    torch.manual_seed(11)
+    x = torch.randn(1, 4, model.features)
+    encoder = torch.randn(1, 5, model.features)
+    embedded = torch.randn(1, model.features)
+    temb = torch.randn(1, model.features)
+    out: dict[str, torch.Tensor] = {}
+    with torch.no_grad():
+        for index in range(steps):
+            x = x + model(x, encoder, embedded, temb)
+            out[f"latents_step{index + 1:04d}"] = x
+    return out
+
+
+def _calib_rig(model: TinyCalibDit, steps: int = 2) -> mq.CalibRig:
+    stages = mq.calib_stages(model)
+    scan, targets = mq.scan_calib_targets(stages)
+    _result, batches = mq.capture_stage_batches(model, lambda: tiny_denoise(model, steps), steps)
+    return mq.CalibRig(stages=stages, scan=scan, targets=targets, batches=batches)
+
+
+class TestCalibConfigTable:
+    def test_the_three_calibrated_configs_are_selectable(self):
+        assert mq.CALIB_NAMES == ("gptq-rtn", "gptq-nf4", "gptq-kmeans")
+
+    def test_selecting_a_subset_keeps_the_declaration_order(self):
+        chosen = mq.select_calib(["gptq-kmeans", "gptq-rtn"])
+
+        assert [config.name for config in chosen] == ["gptq-rtn", "gptq-kmeans"]
+
+    def test_an_empty_selection_runs_every_calibrated_config(self):
+        assert mq.select_calib([]) == mq.CALIB_CONFIGS
+
+    def test_selecting_only_a_method_leaves_no_calibrated_config(self):
+        """`--w4-only nf4` は方式だけ — 校正付き構成を巻き込まない。"""
+        assert mq.select_calib(["nf4"]) == ()
+
+    def test_selecting_only_a_calibrated_config_leaves_no_method(self):
+        assert mq.select_w4_methods(["gptq-rtn"]) == ()
+
+    def test_the_group_size_is_pinned_for_every_calibrated_config(self):
+        assert all(config.grid.group_size == mq.W4_GROUP_SIZE for config in mq.CALIB_CONFIGS)
+
+    def test_no_calibrated_config_fits_its_table_on_a_subsample(self):
+        """校正の表は**層ごと**に張るので全量 fit で作業領域が収まる（stride は要らない）。"""
+        assert all(config.grid.fit_stride == 1 for config in mq.CALIB_CONFIGS)
+
+    def test_the_calibrated_grids_project_to_the_same_bpw_as_the_methods(self):
+        """校正は格子を 1 バイトも変えない — rtn / nf4 は方式側と同じ 5.0 bpw。"""
+        for name in ("gptq-rtn", "gptq-nf4"):
+            config = next(item for item in mq.CALIB_CONFIGS if item.name == name)
+            assert mq.w4_size_projection(config, _targets())["bitsPerWeight"] == 5.0
+
+    def test_the_calibrated_codebook_costs_one_table_per_layer(self):
+        config = next(item for item in mq.CALIB_CONFIGS if item.name == "gptq-kmeans")
+        targets = _targets(modules=3, elements=3200, groups=100)
+
+        projection = mq.w4_size_projection(config, targets)
+
+        tables = mq.W4_CODEBOOK_ENTRY_BITS * mq.DEFAULT_CODEBOOK_LEVELS * 3
+        assert projection["bitsPerWeight"] == pytest.approx(5.0 + tables / 3200)
+
+
+class TestCalibTargets:
+    def test_the_stage_prefix_carries_the_block_index(self):
+        """局所 FQN（`attn1.weight`）へ足すだけでモデル内 FQN へ戻る形（core の `StageSpec`）。"""
+        stages = mq.calib_stages(TinyCalibDit())
+
+        assert [prefix for prefix, _stage in stages] == [
+            "transformer_blocks.0",
+            "transformer_blocks.1",
+        ]
+
+    def test_the_scan_keys_are_model_wide_fqns(self):
+        scan, targets = mq.scan_calib_targets(mq.calib_stages(TinyCalibDit()))
+
+        assert sorted(scan)[:2] == [
+            "transformer_blocks.0.attn1.weight",
+            "transformer_blocks.0.ff.weight",
+        ]
+        assert targets.modules == 4
+        assert targets.groups == 4 * 32 * (32 // mq.W4_GROUP_SIZE)
+
+    def test_a_non_linear_quantizable_weight_is_fail_loudly(self):
+        """linear 限定 = i4 の実行経路と一致、がこの列の前提（`scan_w4_targets` と同文）。"""
+        stages = (("transformer_blocks.0", nn.Conv1d(32, 8, 3, bias=False)),)
+
+        with pytest.raises(AssertionError, match="非 linear"):
+            mq.scan_calib_targets(stages)
+
+    def test_a_weight_off_the_group_grid_is_fail_loudly(self):
+        """MUST: 除外して進まない — stage 単位の駆動では過不足一致門が張れなくなる。"""
+        stages = (("transformer_blocks.0", nn.Linear(12, 4, bias=False)),)
+
+        with pytest.raises(AssertionError, match="割り切れない"):
+            mq.scan_calib_targets(stages)
+
+    def test_stages_without_a_linear_are_fail_loudly(self):
+        with pytest.raises(AssertionError, match="1 本も無い"):
+            mq.scan_calib_targets((("transformer_blocks.0", nn.LayerNorm(8)),))
+
+
+class TestCatcher:
+    def test_it_takes_one_batch_per_step(self):
+        model = TinyCalibDit()
+
+        _result, batches = mq.capture_stage_batches(model, lambda: tiny_denoise(model, 3), 3)
+
+        assert len(batches) == 3
+
+    def test_the_positional_arguments_are_named_from_the_block_signature(self):
+        """写した名前の並びを持たない — 上流が並べ替えても綴りが黙って入れ替わらない。"""
+        model = TinyCalibDit()
+
+        _result, batches = mq.capture_stage_batches(model, lambda: tiny_denoise(model, 1), 1)
+
+        _args, kwargs = batches[0]
+        assert list(kwargs) == [
+            "encoder_hidden_states",
+            "embedded_timestep",
+            "temb",
+            "image_rotary_emb",
+            "extra_pos_emb",
+            "attention_mask",
+            "controlnet_residual",
+        ]
+
+    def test_the_limit_caps_the_batches_without_cutting_the_reference(self):
+        """基準 f32 の周回そのものは最後まで回す（latent は全 step ぶん要る）。"""
+        model = TinyCalibDit()
+
+        result, batches = mq.capture_stage_batches(model, lambda: tiny_denoise(model, 4), 2)
+
+        assert len(batches) == 2
+        assert len(result) == 4
+
+    def test_the_hook_is_removed_afterwards(self):
+        model = TinyCalibDit()
+
+        mq.capture_stage_batches(model, lambda: tiny_denoise(model, 1), 1)
+
+        assert not model.transformer_blocks[0]._forward_pre_hooks
+
+    def test_a_reference_that_never_reaches_the_blocks_is_fail_loudly(self):
+        with pytest.raises(AssertionError, match="1 step も"):
+            mq.capture_stage_batches(TinyCalibDit(), dict, 2)
+
+
+class TestCalibrationRun:
+    def test_every_calibrated_config_rounds_every_scanned_linear(self):
+        for config in mq.CALIB_CONFIGS:
+            torch.manual_seed(13)
+            model = TinyCalibDit()
+            rig = _calib_rig(model)
+            before = {fqn: weight.detach().clone() for fqn, weight in rig.scan.items()}
+
+            report = mq.apply_calib(config, rig)
+
+            assert report.method == config.method
+            assert report.grid == config.grid.kind
+            assert report.modules == len(rig.scan)
+            assert all(not torch.equal(rig.scan[fqn], value) for fqn, value in before.items())
+
+    def test_a_scan_the_calibration_missed_is_fail_loudly(self):
+        """MUST: 丸め漏れは PSNR が**良い側**へ出る — 門が唯一の検出手段。"""
+        torch.manual_seed(17)
+        model = TinyCalibDit()
+        rig = _calib_rig(model)
+        report = mq.apply_calib(mq.CALIB_CONFIGS[0], rig)
+
+        with pytest.raises(AssertionError, match="一致しない"):
+            mq.assert_calib_covers_scan(
+                report, {**rig.scan, "transformer_blocks.9.ff.weight": torch.zeros(1)}, "gptq-rtn"
+            )
+
+
+#: 校正列の対象素性（`run_w4_screen` が JSON へ載せる形の代役）。
+CALIB_META = {
+    "name": mq.CALIB_TARGET,
+    "stages": 28,
+    "modules": 280,
+    "elements": 1_900_000_000,
+    "groups": 59_375_000,
+    "batches": 10,
+}
+
+
+class TestCalibReport:
+    def test_the_calibrated_target_set_is_spelled_out(self):
+        """MUST: 4 方式と対象集合が違うことを表に明記（bpw も品質も直接は比較できない）。"""
+        report = mq.w4_report_markdown(_payload(calibTargets=CALIB_META))
+
+        assert mq.CALIB_TARGET in report
+        assert "280 本" in report
+
+    def test_a_run_without_calibrated_configs_says_nothing_about_them(self):
+        assert mq.CALIB_TARGET not in mq.w4_report_markdown(_payload(calibTargets=None))

@@ -13,6 +13,7 @@
         python -m irodori.measure_quant --config f32
     uv run ... python -m irodori.measure_quant --config i8-all
     uv run ... python -m irodori.measure_quant --config i4-all
+    uv run ... python -m irodori.measure_quant --config gptq-rtn   # 校正付き（波 J-2）
     uv run ... python -m irodori.measure_quant --scan   # w4 の対象規模と試算だけ（実測なし）
     uv run ... python -m irodori.measure_quant          # 実測はせずレポートだけ組み直す
 
@@ -52,6 +53,35 @@ emit へ構造的に渡せない）— ここで測るのは「非 linear まで
 `kmeans-shared-all` は表を張る前に対象の正規化値を 1 本へ連結するので、dit 役割（丸める木で
 7.5 億要素）の全量 fit は f64 の作業領域まで含めて 20GB 超になる。`--kmeans-fit-stride` が
 core の逃げ道（**表の fit だけ**等間隔部分標本・適用は常に全量）で、使った値は出力へ載る。
+
+## 校正付き丸め（{@link CALIB_CONFIGS}・波 J-2）
+
+上の w4 5 構成は重みだけを見て丸める（RTN 系）。**校正付き丸め**（GPTQ — core の
+`karume.quant_calib`）は「その層に実際に流れる活性」から**同じ格子の中で**丸め先を選び直す
+側で、格納グリッド 3 種を同じ測定列へ足す:
+
+| 構成          | 方式 / 格子 | 何を答える                                        |
+| ------------- | ----------- | ------------------------------------------------- |
+| `gptq-rtn`    | `gptq/rtn`  | 出荷可能な格子のまま校正でどこまで戻るか（本命）  |
+| `gptq-nf4`    | `gptq/nf4`  | 正規分位点の格子 × 校正                           |
+| `gptq-kmeans` | `gptq/kmeans_shared` | 学習した表（**射程は層内**）× 校正        |
+
+対象は **DiT block 列の `nn.Linear` 限定**（{@link CALIB_TARGET}）で、`i4-linear`（全役割の
+linear）とは**集合が違う** — 校正の駆動（`calibrate_stages`）は stage 内の `nn.Linear` に
+閉じており、backbone / projector / speaker / duration / codec も、DiT の `in_proj` /
+`out_proj` / `cond_module` も stage の外にあるため。
+
+校正入力は **{@link irodori.pipeline_ref.PIPELINE_CASES} 2 件の参照ループ（f32・CFG 込み）の
+全 step**で、step ごとに先頭 DiT block への `(hidden, 付随引数)` を捕まえて 1 バッチにする
+（{@link capture_case_batches}）。拡散モデルの活性は t で分布が動くので、**step を横断して**
+採らないと後半 step の分布だけ校正から漏れる。付随引数（`cond_embed` / 条件 state /
+マスク / RoPE 表）は `DitGraph.forward` がループの**前**に 1 回作って全 block へ同じものを
+渡すので、stage 間で不変にできる（`advance_kwargs` は要らない）。
+
+MUST: 捕捉は**丸めを 1 本も当てる前**（pristine）に 1 回だけ。stage 分解が `DitGraph` の
+1 forward と**ビット一致**することも、丸める前にその場で実測する
+（{@link assert_stage_split_matches_graph}）— block 本体の写しが上流とずれると、値が静かに
+別物になったまま表だけ出る。
 
 **linear 限定形は構成として置かない** — `--scan` が対象規模（本数・チャネル・要素・縮小率）を
 数えて出す。conv 主体なら linear だけ丸めても配布サイズがほとんど動かず、full-loop を数十分
@@ -139,6 +169,14 @@ from torch import nn
 
 from _shared.paths import OUTPUTS_ROOT, SERIES_ROOT
 from karume import act_quant
+from karume.quant_calib import (
+    CalibMethod,
+    CalibReport,
+    GridSpec,
+    StageBatch,
+    StageSpec,
+    calibrate_stages,
+)
 from karume.quant_methods import (
     DEFAULT_CODEBOOK_LEVELS,
     fake_quant_kmeans,
@@ -357,10 +395,90 @@ W4_KMEANS_SHARED = W4Method(
 )
 
 
+# ---- 校正付き丸めの構成（波 J-2）--------------------------------------------
+
+#: 校正付き構成の対象名（JSON の `w4.opTypes` と並ぶ「何を丸めたか」の綴り）。w4 方式の
+#: `i4-linear`（全役割の linear）とは**集合が違う** — 校正の駆動は stage 内の `nn.Linear` に
+#: 閉じるので、DiT block の外（`in_proj` / `out_proj` / `cond_module`）も他役割も入らない。
+CALIB_TARGET = "dit:blocks-linear"
+
+#: DiT block 列の**モデル内 FQN 接頭辞**（`load_dit` が組む `TextToLatentRFDiT` の `.blocks`）。
+#: scale 台帳のキーを `Int4Report` と同じ FQN 空間へ揃えるために stage へ渡す
+#: （core の `StageSpec` の契約）。
+DIT_BLOCK_PREFIX = "blocks"
+
+
+@dataclass(frozen=True)
+class CalibConfig:
+    """校正付き丸め 1 本ぶんの指定（方式 × 格納グリッド）。
+
+    `projected_bits` / `formula` は {@link W4Method} と同じ器で、{@link project_size} が
+    両方を受ける — 校正は**格子を 1 バイトも変えない**（同じ格子の中で丸め先を選び直すだけ）
+    ので、格納形の式は方式側と共有できる。
+    """
+
+    #: 構成名（`--config` の綴り・表と JSON にそのまま出る）。
+    name: str
+    #: core の校正方式（`karume.quant_calib`）。
+    method: CalibMethod
+    #: 丸め先の格納グリッド。
+    grid: GridSpec
+    #: 対象集合の投影ビット数（`(計数, 表の枚数)`）。
+    projected_bits: Callable[[TargetCounts, int], float]
+    #: `projected_bits` の式（**出力へそのまま載せる**）。
+    formula: str
+
+
+def _calib_group_scaled_bits(counts: TargetCounts, _tables: int) -> float:
+    """group ごとに f32 scale 1 個を持つ格子の総 bit（`rtn` / `nf4` 共通）。"""
+    return 4 * counts.elements + 32 * counts.groups
+
+
+def _calib_codebook_bits(counts: TargetCounts, tables: int) -> float:
+    """`kmeans_shared` の総 bit — 表は**層ごとに 1 枚**（`tables` = 対象の層数）。"""
+    return _calib_group_scaled_bits(counts, tables) + CODEBOOK_BITS * tables
+
+
+#: 校正付き構成 3 本（この順で表に並ぶ）。丸めは core の `karume.quant_calib` の共有で、
+#: ここが持つのは呼び分けと投影式だけ。AWQ を置かないのは、等価倍率 `s` が単独で格納できず
+#: （fold か companion が要る）出口の無い列になるため（core のモジュール docstring の MUST）。
+CALIB_CONFIGS: tuple[CalibConfig, ...] = (
+    CalibConfig(
+        "gptq-rtn",
+        "gptq",
+        GridSpec(kind="rtn", group_size=W4_GROUP_SIZE),
+        _calib_group_scaled_bits,
+        "4bit + g32 f32 scale = 5.0 bpw（格納は RTN i4 そのもの — 校正は丸め先だけを変える）",
+    ),
+    CalibConfig(
+        "gptq-nf4",
+        "gptq",
+        GridSpec(kind="nf4", group_size=W4_GROUP_SIZE),
+        _calib_group_scaled_bits,
+        "4bit + g32 f32 scale = 5.0 bpw（格子は NF4 の固定表）",
+    ),
+    CalibConfig(
+        "gptq-kmeans",
+        "gptq",
+        GridSpec(kind="kmeans_shared", group_size=W4_GROUP_SIZE),
+        _calib_codebook_bits,
+        "4bit + g32 f32 scale + 表 16×f32 を**層ごと**に 1 枚"
+        "（射程が層内 — 役割ごとに 1 枚の kmeans:shared とは別式）",
+    ),
+)
+
+CALIB_NAMES: tuple[str, ...] = tuple(config.name for config in CALIB_CONFIGS)
+
+
 def check_fit_stride(recipe: Recipe, fit_stride: int) -> None:
     """`--kmeans-fit-stride` が効かない構成へ渡されたら fail loudly（黙って無視しない）。"""
     if fit_stride == 1:
         return
+    if recipe.calib is not None:
+        raise SystemExit(
+            f"--kmeans-fit-stride {fit_stride} は校正付き構成には効かない"
+            f"（{recipe.weight} の表は**層ごと**に張るので全量 fit でも作業領域が小さい）"
+        )
     if recipe.method is None or not recipe.method.samples_fit:
         raise SystemExit(
             f"--kmeans-fit-stride {fit_stride} は表の fit を部分標本にする方式専用"
@@ -391,8 +509,14 @@ class SizeProjection:
         return self.counts.elements * 4 / 1024**2
 
 
-def project_size(method: W4Method, counts: TargetCounts, tables: int) -> SizeProjection:
-    """方式の式を対象集合の計数へ当てる（`tables` = 表を張る成果物の数）。"""
+def project_size(
+    method: W4Method | CalibConfig, counts: TargetCounts, tables: int
+) -> SizeProjection:
+    """方式の式を対象集合の計数へ当てる（`tables` = 表を張る成果物の数）。
+
+    校正付き構成（{@link CalibConfig}）も同じ器で受ける — 校正は格子を 1 バイトも変えないので、
+    格納形の式は方式側と共有できる。
+    """
     return SizeProjection(counts, tables, method.projected_bits(counts, tables), method.formula)
 
 
@@ -410,6 +534,9 @@ class Recipe:
     #: w4 の丸め対象 op 種（`method` があるときだけ意味を持つ）。既定は測定用に広げた 5 種で、
     #: `(nn.Linear,)` に絞った形が**今日の配布対応形**（i4 の実行経路 — ADR 0069 決定 5）。
     op_types: tuple[type[nn.Module], ...] = W4_OP_TYPES
+    #: 校正付き丸め（`None` = 重みだけを見て丸める側）。`method` とは**排他** — 校正は
+    #: stage 逐次で駆動するので、`apply_weight_quant` の役割一括の経路を通らない。
+    calib: CalibConfig | None = None
 
 
 def w4_recipe(
@@ -481,8 +608,20 @@ W4_CONFIGS: Mapping[str, Recipe] = MappingProxyType(
     }
 )
 
+#: 校正付き構成（波 J-2）— 役割は `dit` だけ（丸めるのは DiT block 列の linear で、他役割は
+#: 1 ビットも動かない）。`weight` の綴りは構成名そのもの（二重管理を作らない — {@link w4_recipe}
+#: と同じ流儀）。
+CALIB_RECIPES: Mapping[str, Recipe] = MappingProxyType(
+    {
+        config.name: Recipe(config.name, (ex.TARGET_DIT,), op_types=(nn.Linear,), calib=config)
+        for config in CALIB_CONFIGS
+    }
+)
+
 #: 構成名 → レシピの全表。
-RECIPES: Mapping[str, Recipe] = MappingProxyType({**CONFIGS, **DIAGNOSTICS, **W4_CONFIGS})
+RECIPES: Mapping[str, Recipe] = MappingProxyType(
+    {**CONFIGS, **DIAGNOSTICS, **W4_CONFIGS, **CALIB_RECIPES}
+)
 
 #: LSD の STFT 設定（48kHz の解析グリッド — hop 512 ≈ 10.7ms）。
 STFT_N_FFT = 2048
@@ -797,6 +936,284 @@ def build_decoder(
     )
 
 
+# ---- 校正付き丸めの駆動（stage 分解 + Catcher）-------------------------------
+
+
+class _CalibStepsReached(Exception):  # noqa: N818 — 異常ではなく打ち切りの合図
+    """必要な step 数ぶん捕まえた合図（参照ループを途中で畳むための番兵）。"""
+
+
+class DitBlockStage(nn.Module):
+    """DiT block 1 枚を「hidden を位置引数で受ける」形へ包む stage ラッパ。
+
+    block 本体は `irodori.export.DitGraph.forward` のループ 4 行と**同じ順序**で組む —
+    `TextToLatentRFDiT` の block は `DiffusionBlock.forward` を持つが、`DitGraph` は
+    それを呼ばずに attention の同値実装（{@link irodori.export.DitGraph._attention}）へ
+    展開するので、block をそのまま stage にすると**測っている経路が別物**になる。attention は
+    その staticmethod を直に借りて写しを増やさない。
+
+    MUST: 写しが上流とずれていないことは {@link assert_stage_split_matches_graph} が丸める前に
+    ビット一致で実測する（`nn.Dropout(p=0.0)` を落とすのは `DitGraph` と同じ厳密恒等）。
+
+    子モジュールの名前を**block 番号**にしてあるのは、stage 内の局所 FQN
+    （`0.attention.wq.weight`）へ {@link DIT_BLOCK_PREFIX} を足すだけでモデル内 FQN へ
+    戻すため。
+    """
+
+    def __init__(self, index: int, block: nn.Module) -> None:
+        super().__init__()
+        self.child = str(index)
+        self.add_module(self.child, block)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cond_embed: torch.Tensor,
+        text: torch.Tensor,
+        speaker: torch.Tensor,
+        caption: torch.Tensor,
+        mask: torch.Tensor,
+        freqs: torch.Tensor,
+    ) -> torch.Tensor:
+        block = getattr(self, self.child)
+        h, attention_gate = block.attention_adaln(x, cond_embed)
+        x = x + attention_gate * ex.DitGraph._attention(
+            block.attention, h, text, speaker, caption, mask, freqs
+        )
+        h, mlp_gate = block.mlp_adaln(x, cond_embed)
+        return x + mlp_gate * block.mlp(h)
+
+
+def dit_stages(graph: nn.Module) -> tuple[StageSpec, ...]:
+    """実行順の DiT block を `(モデル内 FQN 接頭辞, stage)` で返す。"""
+    return tuple(
+        (DIT_BLOCK_PREFIX, DitBlockStage(index, block)) for index, block in enumerate(graph.blocks)
+    )
+
+
+def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor], TargetCounts]:
+    """stage 内の校正対象を fqn 引きの重みと計数で返す（**走査** = 過不足一致門の基準）。
+
+    対象選択は core の `iter_quant_targets` の共有（{@link scan_targets} と同文）。
+
+    MUST: g32 非整列は**除外せず fail loudly** — 校正は stage を丸ごと駆動する形なので、
+    途中の 1 本だけ `include` で外すと「走査の本数 = 丸めた本数」の門が張れなくなる
+    （w4 方式側は層ごとに独立なので除外一覧を出す運用でよい）。
+    """
+    weights: dict[str, torch.Tensor] = {}
+    modules = channels = elements = 0
+    for prefix, stage in stages:
+        for local, weight, axis in iter_quant_targets(stage, (nn.Linear,)):
+            fqn = f"{prefix}.{local}"
+            length = group_axis_length(weight, axis)
+            if length % W4_GROUP_SIZE:
+                raise SystemExit(
+                    f"{fqn}: 量子化軸 {length} が g{W4_GROUP_SIZE} で割り切れない"
+                    "（校正は stage 単位で駆動するので 1 本だけ外す逃げ道が無い）"
+                )
+            weights[fqn] = weight
+            modules += 1
+            channels += int(weight.shape[axis])
+            elements += int(weight.numel())
+    if not modules:
+        raise SystemExit(f"校正対象 '{CALIB_TARGET}' に量子化できる重みが 1 本も無い")
+    return weights, TargetCounts(modules, channels, elements)
+
+
+def capture_case_batches(
+    graph: nn.Module, run_reference: Callable[[], object], limit: int
+) -> tuple[list[StageBatch], tuple[torch.Tensor, ...]]:
+    """1 ケースの参照ループ（f32・CFG 込み）から **step ごとに 1 バッチ**捕まえる。
+
+    戻りは `(バッチ列, 先頭 forward の DitGraph 引数)`。後者は
+    {@link assert_stage_split_matches_graph} が stage 分解の同値を実測するのに使う。
+
+    1 step は cond 1 回 + CFG の uncond n 回の forward になるが、その全てが**同じ `x_t`**
+    を受ける（`irodori.pipeline_ref._euler` は step ごとに 1 本の `x_t` しか作らない）ので、
+    `x_t` の**同一性**で step 境界を割り、新しくなった直後の 1 forward = cond 側だけを採る。
+
+    捕まえるのは `DitGraph` が block ループの**前**に作る一式（`cond_embed` / 正規化済みの
+    text・caption / speaker state / 連結マスク / RoPE 表）と、先頭 block への hidden。
+    自前で組み直さないのは、組み直した瞬間に `DitGraph` の綴りと黙って割れうるから
+    （EG の Catcher と同じ規律）。
+
+    `limit` を捕まえ切ったら番兵で参照ループを畳む — `run_case` は CFG ありのループの**後**に
+    CFG 無しのループをもう 1 周回すので、畳まないと「同じ step の別軌道」まで混ざる。
+    """
+    batches: list[StageBatch] = []
+    probe: list[tuple[torch.Tensor, ...]] = []
+    state: dict[str, Any] = {"x_t": None, "take": False}
+    pending: dict[str, torch.Tensor] = {}
+
+    def on_graph(_module: nn.Module, args: tuple[Any, ...]) -> None:
+        if args[0] is state["x_t"]:
+            state["take"] = False
+            return
+        if len(batches) >= limit:
+            raise _CalibStepsReached
+        state["x_t"] = args[0]
+        state["take"] = True
+        pending["mask"] = args[2]
+        pending["speaker"] = args[4]
+        if not probe:
+            probe.append(tuple(args))
+
+    def on_text(_module: nn.Module, _args: tuple[Any, ...], output: torch.Tensor) -> None:
+        if state["take"]:
+            pending["text"] = output.detach()
+
+    def on_caption(_module: nn.Module, _args: tuple[Any, ...], output: torch.Tensor) -> None:
+        if state["take"]:
+            pending["caption"] = output.detach()
+
+    def on_block(_module: nn.Module, args: tuple[Any, ...]) -> None:
+        if not state["take"]:
+            return
+        hidden = args[0].detach()
+        batches.append(
+            (
+                (hidden,),
+                {
+                    "cond_embed": args[1].detach(),
+                    "text": pending["text"],
+                    "speaker": pending["speaker"],
+                    "caption": pending["caption"],
+                    "mask": pending["mask"],
+                    "freqs": graph.rope_table[: int(hidden.shape[1])],
+                },
+            )
+        )
+        state["take"] = False
+
+    handles = [
+        graph.register_forward_pre_hook(on_graph),
+        graph.text_norm.register_forward_hook(on_text),
+        graph.caption_norm.register_forward_hook(on_caption),
+        graph.blocks[0].attention_adaln.register_forward_pre_hook(on_block),
+    ]
+    try:
+        run_reference()
+    except _CalibStepsReached:
+        pass
+    finally:
+        for handle in handles:
+            handle.remove()
+    if not batches or not probe:
+        raise SystemExit(
+            "校正入力を 1 step も捕まえられなかった（DitGraph の綴りが台本の想定と食い違っている）"
+        )
+    return batches, probe[0]
+
+
+def assert_stage_split_matches_graph(
+    graph: nn.Module,
+    probe: tuple[torch.Tensor, ...],
+    batch: StageBatch,
+    stages: Sequence[StageSpec],
+) -> None:
+    """stage 分解 + 尾（`out_norm` → `out_proj`）が `DitGraph` の 1 forward と**ビット一致**。
+
+    `probe` はその forward の `DitGraph` 引数、`batch` は**同じ forward**で捕まえた先頭
+    stage への入力。
+
+    MUST: 丸める前に実測する。{@link DitBlockStage} は block ループの写しなので、上流の
+    `DitGraph.forward` が変わると黙ってずれる — ずれた側で丸めると「別の経路の GPTQ」を
+    測っていることになり、しかも数値は普通に出る（表からは読めない）。
+    """
+    args, kwargs = batch
+    with torch.no_grad():
+        reference = graph(*probe)
+        hidden = args[0]
+        for _prefix, stage in stages:
+            hidden = stage(hidden, **kwargs)
+        rebuilt = graph.out_proj(graph.out_norm(hidden))
+    if not torch.equal(rebuilt, reference):
+        raise SystemExit(
+            "stage 分解の再構成が DitGraph の出力とビット一致しない"
+            f"（最大絶対差 {float((rebuilt - reference).abs().max()):.4e}）"
+            " — DitBlockStage の写しが irodori.export.DitGraph.forward とずれている"
+        )
+
+
+@dataclass(frozen=True)
+class CalibRig:
+    """校正付き構成が共有する足場（stage 列・走査・先頭 stage への入力）。
+
+    構成ごとに作り直さない — 校正入力は**丸めを 1 本も当てる前**に 1 回だけ採る（`restore`
+    に当たる pristine の作法は「1 実行 = 1 構成」で担保されている）。
+    """
+
+    stages: tuple[StageSpec, ...]
+    scan: Mapping[str, torch.Tensor]
+    counts: TargetCounts
+    batches: tuple[StageBatch, ...]
+    #: ケース名 → 捕まえた step 数（縮小実行を数値の横に残す）。
+    steps: Mapping[str, int]
+    #: 校正に積んだ hidden の総トークン数（= Σ step ごとの S）。
+    tokens: int
+
+
+def build_calib_rig(
+    graphs: ip.HostGraphs, run_reference: Callable[[ip.PipelineCase], object], limit: int
+) -> CalibRig:
+    """校正の足場を組む（stage 分解 → 走査 → 参照ループ捕捉 → 同値門）。"""
+    graph = graphs.dit
+    stages = dit_stages(graph)
+    scan, counts = calib_targets(stages)
+    batches: list[StageBatch] = []
+    steps: dict[str, int] = {}
+    for case in ip.PIPELINE_CASES:
+        caught, probe = capture_case_batches(graph, lambda case=case: run_reference(case), limit)
+        if not batches:
+            # `probe` と `caught[0]` は**同じ forward**（先頭 step の cond 側）。
+            assert_stage_split_matches_graph(graph, probe, caught[0], stages)
+        steps[case.name] = len(caught)
+        batches += caught
+        print(f"[calib] {case.name}: 校正 {len(caught)} step を捕捉", flush=True)
+    tokens = sum(int(args[0].shape[1]) for args, _kwargs in batches)
+    print(
+        f"[calib] stage {len(stages)} 段 / 対象 linear {counts.modules} 本"
+        f" / バッチ {len(batches)} 本 / hidden 合計 {tokens:,} token"
+        f"（対象は {CALIB_TARGET} — DiT block の外と他役割は含まない）",
+        flush=True,
+    )
+    return CalibRig(
+        stages=stages,
+        scan=scan,
+        counts=counts,
+        batches=tuple(batches),
+        steps=steps,
+        tokens=tokens,
+    )
+
+
+def apply_calib(config: CalibConfig, rig: CalibRig) -> tuple[dict[str, str], CalibReport]:
+    """校正付き丸め 1 本を DiT へ in-place で当てる（stage 逐次の駆動は core 側）。"""
+    report = calibrate_stages(rig.stages, rig.batches, method=config.method, spec=config.grid)
+    assert_calib_covers_scan(report, rig.scan, config.name)
+    summary = f"{config.name} へ校正付きで丸めた — {report.describe()}"
+    print(f"[fake-quant] {ex.TARGET_DIT}: {summary}", flush=True)
+    return {ex.TARGET_DIT: summary}, report
+
+
+def assert_calib_covers_scan(
+    report: CalibReport, scan: Mapping[str, torch.Tensor], name: str
+) -> None:
+    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+
+    MUST: fail loudly。stage の綴りや対象型が変わって block の一部が校正に載らなくなっても
+    表には行が残り、しかも丸め漏れのぶん品質は**良い側**に出る（素通りを数字から読めない）。
+    """
+    rounded = {layer.fqn for layer in report.layers}
+    missing = sorted(set(scan) - rounded)
+    extra = sorted(rounded - set(scan))
+    if missing or extra or report.modules != len(scan):
+        raise SystemExit(
+            f"[{name}] 校正が丸めた {report.modules} 本が走査の {len(scan)} 本と一致しない"
+            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+        )
+
+
 # ---- 1 構成の実行 ------------------------------------------------------------
 
 
@@ -851,6 +1268,8 @@ class LatentResult(NamedTuple):
     act_quant_linears: int
     #: 役割 → 配布グラフ側の w4 対象規模（w4 構成のみ・他は空）。
     scans: dict[str, RoleScan]
+    #: 校正付き構成の足場と丸めの計数（校正付き構成のみ・他は `None`）。
+    calib: tuple[CalibRig, CalibReport] | None = None
 
 
 def attach_dit_act_quant(
@@ -892,10 +1311,15 @@ def latent_stage(
     # 対象が空になるのは `i8-codec-only`（latent 側の役割を 1 つも含まない）だけで、そのときは
     # 丸めそのものを呼ばない — `fake_quant` の「0 本は fail loudly」は正しい規律なので、
     # ここで例外にせず**呼ばない**ことで満たす。
+    #
+    # 校正付き構成だけは順序が違う（丸めがグラフより後）— 校正入力は「素の f32 で回した参照
+    # ループ」から採るので、グラフを組んでその上で pristine の full-loop を 1 周してからで
+    # ないと丸められない。**丸めより前**という MUST は保たれている（このブロックまでは
+    # どの重みも 1 ビットも動いていない）。
     scoped = role_modules(modules, recipe.roles)
     reports = (
         apply_weight_quant(recipe, scoped, args.kmeans_fit_stride)
-        if recipe.weight is not None and scoped
+        if recipe.weight is not None and recipe.calib is None and scoped
         else {}
     )
     patch.apply_patches()
@@ -920,11 +1344,15 @@ def latent_stage(
     }
     tokenizer = Tokenizer.from_file(str(args.model_dir / ex.TOKENIZER_FILE))
 
-    metas: dict[str, dict[str, Any]] = {}
-    latents: dict[str, torch.Tensor] = {}
-    for case in ip.PIPELINE_CASES:
-        started = time.perf_counter()
-        tensors, meta = ip.run_case(
+    # グラフ一式を**既定引数で束ねる**のは、下の `del` が同名の局所を外すため（素の
+    # クロージャだと、消えた後に呼ばれたとき NameError になる形が残る）。
+    def run_case(
+        case: ip.PipelineCase,
+        graphs: ip.HostGraphs = graphs,
+        source: Any = source,
+        modules: Mapping[str, nn.Module] = modules,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        return ip.run_case(
             case,
             graphs,
             source,
@@ -936,6 +1364,19 @@ def latent_stage(
             caps,
             frames_override=None if base_frames is None else base_frames[case.name],
         )
+
+    calib: tuple[CalibRig, CalibReport] | None = None
+    if recipe.calib is not None:
+        rig = build_calib_rig(graphs, run_case, args.calib_steps)
+        reports, calib_report = apply_calib(recipe.calib, rig)
+        scans = {ex.TARGET_DIT: RoleScan(rig.counts, ())}
+        calib = (rig, calib_report)
+
+    metas: dict[str, dict[str, Any]] = {}
+    latents: dict[str, torch.Tensor] = {}
+    for case in ip.PIPELINE_CASES:
+        started = time.perf_counter()
+        tensors, meta = run_case(case)
         meta["elapsed"] = round(time.perf_counter() - started, 1)
         metas[case.name] = meta
         latents[case.name] = tensors["z"].detach().clone()
@@ -947,22 +1388,29 @@ def latent_stage(
     act_quant.detach_act_quant(handles)
     del graphs, modules, source
     gc.collect()
-    return LatentResult(metas, latents, reports, act_quant_linears, scans)
+    return LatentResult(metas, latents, reports, act_quant_linears, scans, calib)
 
 
 def w4_payload(recipe: Recipe, scans: Mapping[str, RoleScan], fit_stride: int) -> dict[str, Any]:
     """w4 構成の対象規模・除外一覧・サイズ試算（JSON へそのまま載る形）。
 
     `tables` は表を張る成果物の数 = 対象を持つ役割数（`kmeans:shared` の表は役割ごとに
-    1 枚 — {@link W4_KMEANS_SHARED}）。他の 3 方式では式に効かない。
+    1 枚 — {@link W4_KMEANS_SHARED}）。他の 3 方式では式に効かない。**校正付き構成では
+    表の射程が層内**なので、代わりに対象の層数を渡す（{@link _calib_codebook_bits}）。
     """
-    if recipe.method is None:
+    spec: W4Method | CalibConfig | None = recipe.method or recipe.calib
+    if spec is None:
         raise SystemExit(f"w4 構成でないレシピ（weight={recipe.weight}）の試算を求められた")
     counts = {role: scan.counts for role, scan in scans.items()}
-    tables = sum(1 for item in counts.values() if item.modules)
-    size = project_size(recipe.method, total_counts(list(counts.values())), tables)
+    total = total_counts(list(counts.values()))
+    tables = (
+        total.modules
+        if recipe.calib is not None
+        else sum(1 for item in counts.values() if item.modules)
+    )
+    size = project_size(spec, total, tables)
     return {
-        "method": recipe.method.name,
+        "method": spec.name,
         "groupSize": W4_GROUP_SIZE,
         "opTypes": [cls.__name__ for cls in recipe.op_types],
         # MUST: 部分標本の表と全量の表は別物になりうるので、使った事実を数値の横へ出す
@@ -1022,7 +1470,7 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
         for case in ip.PIPELINE_CASES:
             weight_only_path(args.out, case.name)
 
-    metas, latents, reports, act_quant_linears, scans = latent_stage(
+    metas, latents, reports, act_quant_linears, scans, calib = latent_stage(
         name, recipe, args, base_frames
     )
 
@@ -1120,8 +1568,21 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
         "gates": run_gates(name, recipe, latents, entries, goldens),
         "elapsed": round(time.perf_counter() - started, 1),
     }
-    if recipe.method is not None:
+    if recipe.method is not None or recipe.calib is not None:
         payload["w4"] = w4_payload(recipe, scans, args.kmeans_fit_stride)
+    if calib is not None:
+        rig, calib_report = calib
+        payload["calib"] = {
+            "method": f"{calib_report.method}/{calib_report.grid}",
+            "target": CALIB_TARGET,
+            "stages": calib_report.stages,
+            "roundedModules": calib_report.modules,
+            "scanModules": rig.counts.modules,
+            "steps": dict(rig.steps),
+            "batches": len(rig.batches),
+            "tokens": rig.tokens,
+            "quantReport": calib_report.describe(),
+        }
     (args.out / f"{name}.json").write_text(
         json.dumps(payload, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -1358,6 +1819,11 @@ def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             " i4-linear = Linear のみ）。i4 の実行経路は linear 限定（決定 5）なので全役割形は"
             "出荷できる形ではなく品質の上限を測る側、i4-linear が今日の配布対応形。サイズ列は"
             "**式による投影**で、計数は配布グラフに載る重みだけ",
+            "calib": f"校正付き構成（{' / '.join(CALIB_NAMES)}）は core の `karume.quant_calib`"
+            f" で DiT block 列の linear（{CALIB_TARGET}）だけを stage 逐次に丸める。校正入力は"
+            "参照ループ（f32・CFG 込み）の step 横断で、step ごとに先頭 block への入力を"
+            "捕まえたもの（使った step 数は各 config JSON の calib.steps）。**対象集合は"
+            " i4-linear と違う**ので、bpw は同じでも品質の行は直接は比較できない",
             "verdict": "最終裁定は聴感（ユーザー）— WAV は同一テキスト・同一 seed で並ぶ",
         },
         "configs": dict(collected),
@@ -1561,6 +2027,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="w4 の対象規模とサイズ試算だけを出して終わる（full-loop は回さない）",
     )
     parser.add_argument(
+        "--calib-steps",
+        type=int,
+        default=ip.NUM_STEPS,
+        help=f"校正付き構成が 1 ケースあたり使う step 数（既定 = 参照ループ全 {ip.NUM_STEPS}"
+        " step）。捕まえ切った時点で参照ループを畳むので、縮小 smoke ではここを下げる。"
+        "使った値は出力へ載る",
+    )
+    parser.add_argument(
         "--kmeans-fit-stride",
         type=int,
         default=1,
@@ -1569,6 +2043,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "kmeans-shared-all は実メモリに合わせてここを上げる。使った値は出力へ載る",
     )
     args = parser.parse_args(argv)
+    if not 1 <= args.calib_steps <= ip.NUM_STEPS:
+        parser.error(f"--calib-steps は 1〜{ip.NUM_STEPS}（参照ループの step 数）")
 
     if args.scan:
         run_scan(args)

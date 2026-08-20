@@ -696,3 +696,321 @@ class TestW4Tables:
 
     def test_a_config_without_w4_is_silent(self):
         assert mq.excluded_lines({"i8-all": {"cases": {}, "gates": {"failures": []}}}) == []
+
+
+# ---- 校正付き丸め（波 J-2）--------------------------------------------------
+#
+# 実重み無しで固定できるのは「捕まえ方」と「門」だけ。DiT block の写し
+# （{@link mq.DitBlockStage}）そのものは実重みでしか意味を持たないので、ここでは
+# **同値門が実際に落ちること**（検出力）を代役の stage で実測する。
+
+
+def _tiny_context(
+    text: torch.Tensor,
+    speaker: torch.Tensor,
+    caption: torch.Tensor,
+    mask: torch.Tensor,
+    freqs: torch.Tensor,
+) -> torch.Tensor:
+    """付随引数 5 本を全部混ぜた項（1 本でも取り違えたら出力が変わる形にする）。"""
+    pooled = text.mean(dim=1) + speaker.mean(dim=1) + caption.mean(dim=1)
+    return pooled[:, None, :] * float(mask.sum()) + freqs[None, :, :]
+
+
+class TinyAdaLN(nn.Module):
+    """`LowRankAdaLN` の席 — Catcher が先頭 block を捕まえるフック点そのもの。"""
+
+    def __init__(self, features: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(features, features, bias=False)
+
+    def forward(self, x: torch.Tensor, cond_embed: torch.Tensor) -> torch.Tensor:
+        return self.proj(x) + cond_embed
+
+
+class TinyBlock(nn.Module):
+    def __init__(self, features: int) -> None:
+        super().__init__()
+        self.attention_adaln = TinyAdaLN(features)
+        self.mlp = nn.Linear(features, features, bias=False)
+
+
+class TinyGraph(nn.Module):
+    """`DitGraph` の代役 — 引数の並びと「付随引数を block ループの**前**に 1 回作る」形の写し。"""
+
+    def __init__(self, features: int = 32, blocks: int = 2, sym_max: int = 8) -> None:
+        super().__init__()
+        self.features = features
+        self.cond_module = nn.Linear(features, features, bias=False)
+        self.text_norm = nn.LayerNorm(features)
+        self.caption_norm = nn.LayerNorm(features)
+        self.in_proj = nn.Linear(features, features, bias=False)
+        self.blocks = nn.ModuleList(TinyBlock(features) for _ in range(blocks))
+        self.out_norm = nn.LayerNorm(features)
+        self.out_proj = nn.Linear(features, features, bias=False)
+        self.rope_table = torch.linspace(0.0, 1.0, sym_max * features).reshape(sym_max, features)
+
+    def forward(
+        self,
+        x_t: torch.Tensor,
+        t_embed: torch.Tensor,
+        mask: torch.Tensor,
+        text_state: torch.Tensor,
+        speaker_state: torch.Tensor,
+        caption_state: torch.Tensor,
+    ) -> torch.Tensor:
+        cond_embed = self.cond_module(t_embed)[:, None, :]
+        text = self.text_norm(text_state)
+        caption = self.caption_norm(caption_state)
+        x = self.in_proj(x_t)
+        freqs = self.rope_table[: x.shape[1]]
+        for block in self.blocks:
+            h = block.attention_adaln(x, cond_embed)
+            x = x + block.mlp(h) + _tiny_context(text, speaker_state, caption, mask, freqs)
+        return self.out_proj(self.out_norm(x))
+
+
+class TinyStage(nn.Module):
+    """`TinyGraph` の block 1 枚ぶん（{@link mq.DitBlockStage} と同じ子の名付け方）。"""
+
+    def __init__(self, index: int, block: nn.Module) -> None:
+        super().__init__()
+        self.child = str(index)
+        self.add_module(self.child, block)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cond_embed: torch.Tensor,
+        text: torch.Tensor,
+        speaker: torch.Tensor,
+        caption: torch.Tensor,
+        mask: torch.Tensor,
+        freqs: torch.Tensor,
+    ) -> torch.Tensor:
+        block = getattr(self, self.child)
+        h = block.attention_adaln(x, cond_embed)
+        return x + block.mlp(h) + _tiny_context(text, speaker, caption, mask, freqs)
+
+
+class BrokenStage(TinyStage):
+    """付随引数を 1 本落とした stage（同値門の検出力を実証する故障注入）。"""
+
+    def forward(self, x, cond_embed, text, speaker, caption, mask, freqs):
+        block = getattr(self, self.child)
+        return x + block.mlp(block.attention_adaln(x, cond_embed))
+
+
+def tiny_stages(graph: TinyGraph, stage_cls: type[TinyStage] = TinyStage) -> tuple[object, ...]:
+    return tuple(
+        (mq.DIT_BLOCK_PREFIX, stage_cls(index, block)) for index, block in enumerate(graph.blocks)
+    )
+
+
+def tiny_reference(graph: TinyGraph, steps: int, forwards_per_step: int) -> list[int]:
+    """`pipeline_ref._euler` と同じ形の参照ループ（**同じ `x_t`** を step 内で使い回す）。"""
+    torch.manual_seed(7)
+    seen: list[int] = []
+    x_t = torch.randn(1, 4, graph.features)
+    t_embed = torch.randn(1, graph.features)
+    mask = torch.ones((1, 1, 1, 6), dtype=torch.bool)
+    text = torch.randn(1, 5, graph.features)
+    speaker = torch.randn(1, 3, graph.features)
+    caption = torch.randn(1, 2, graph.features)
+    with torch.no_grad():
+        for _step in range(steps):
+            out = x_t
+            for _forward in range(forwards_per_step):
+                out = graph(x_t, t_embed, mask, text, speaker, caption)
+                seen.append(1)
+            x_t = x_t + out
+    return seen
+
+
+class TestCalibConfigTable:
+    def test_the_three_calibrated_configs_are_selectable(self):
+        assert mq.CALIB_NAMES == ("gptq-rtn", "gptq-nf4", "gptq-kmeans")
+        assert all(name in mq.RECIPES for name in mq.CALIB_NAMES)
+
+    def test_every_calibrated_config_rounds_only_the_dit_role(self):
+        """校正は DiT block の linear だけ — 直交性の門の期待値がそこから出る。"""
+        for name in mq.CALIB_NAMES:
+            assert mq.RECIPES[name].roles == (ex.TARGET_DIT,)
+            assert mq.RECIPES[name].op_types == (nn.Linear,)
+
+    def test_a_calibrated_config_is_not_a_w4_method_config(self):
+        """`method` と `calib` は排他 — 両方立つと役割一括の経路にも入ってしまう。"""
+        for recipe in mq.RECIPES.values():
+            assert recipe.method is None or recipe.calib is None
+
+    def test_the_group_size_is_pinned_for_every_calibrated_config(self):
+        assert all(config.grid.group_size == mq.W4_GROUP_SIZE for config in mq.CALIB_CONFIGS)
+
+    def test_no_calibrated_config_fits_its_table_on_a_subsample(self):
+        assert all(config.grid.fit_stride == 1 for config in mq.CALIB_CONFIGS)
+
+    def test_the_calibrated_grids_project_to_the_same_bpw_as_the_methods(self):
+        """校正は格子を 1 バイトも変えない — rtn / nf4 は方式側と同じ 5.0 bpw。"""
+        counts = mq.TargetCounts(modules=2, channels=8, elements=384)
+
+        for name in ("gptq-rtn", "gptq-nf4"):
+            config = next(item for item in mq.CALIB_CONFIGS if item.name == name)
+            assert mq.project_size(config, counts, 2).bits_per_weight == 5.0
+
+    def test_the_calibrated_codebook_costs_one_table_per_layer(self):
+        """core の `kmeans_shared` は**層内**の表（役割ごとに 1 枚の kmeans:shared とは別式）。"""
+        counts = mq.TargetCounts(modules=2, channels=8, elements=384)
+        config = next(item for item in mq.CALIB_CONFIGS if item.name == "gptq-kmeans")
+
+        assert mq.project_size(config, counts, 2).bits == 5.0 * 384 + mq.CODEBOOK_BITS * 2
+
+    def test_a_fit_stride_on_a_calibrated_config_is_fail_loudly(self):
+        """MUST: 効かないノブを黙って無視しない（表の射程が層内なので全量 fit で足りる）。"""
+        with pytest.raises(SystemExit, match="校正付き構成"):
+            mq.check_fit_stride(mq.RECIPES["gptq-kmeans"], 3)
+
+
+class TestCalibTargets:
+    def test_the_scan_keys_are_model_wide_fqns(self):
+        """台帳のキーを `Int4Report` と同じ FQN 空間へ揃える（core の `StageSpec` の契約）。"""
+        scan, counts = mq.calib_targets(tiny_stages(TinyGraph()))
+
+        assert sorted(scan)[:2] == [
+            "blocks.0.attention_adaln.proj.weight",
+            "blocks.0.mlp.weight",
+        ]
+        assert counts.modules == 4
+
+    def test_a_weight_off_the_group_grid_is_fail_loudly(self):
+        """MUST: 除外して進まない — stage 単位の駆動では過不足一致門が張れなくなる。"""
+        stages = ((mq.DIT_BLOCK_PREFIX, nn.Linear(12, 4, bias=False)),)
+
+        with pytest.raises(SystemExit, match="割り切れない"):
+            mq.calib_targets(stages)
+
+    def test_stages_without_a_linear_are_fail_loudly(self):
+        with pytest.raises(SystemExit, match="1 本も無い"):
+            mq.calib_targets(((mq.DIT_BLOCK_PREFIX, nn.LayerNorm(8)),))
+
+
+class TestCatcher:
+    def test_it_takes_one_batch_per_step_not_per_forward(self):
+        """CFG の uncond forward は**同じ `x_t`** を受ける — step を数えるのはその同一性。"""
+        graph = TinyGraph()
+
+        batches, _probe = mq.capture_case_batches(
+            graph, lambda: tiny_reference(graph, 3, 4), limit=40
+        )
+
+        assert len(batches) == 3
+
+    def test_the_keyword_arguments_carry_the_whole_side_input(self):
+        graph = TinyGraph()
+
+        batches, _probe = mq.capture_case_batches(
+            graph, lambda: tiny_reference(graph, 1, 1), limit=40
+        )
+
+        (hidden,), kwargs = batches[0]
+        assert sorted(kwargs) == ["caption", "cond_embed", "freqs", "mask", "speaker", "text"]
+        assert torch.equal(kwargs["freqs"], graph.rope_table[: int(hidden.shape[1])])
+
+    def test_the_limit_cuts_the_reference_loop_short(self):
+        """捕まえ切ったら畳む — `run_case` は CFG 有りの後にもう 1 周回すので混ざらせない。"""
+        graph = TinyGraph()
+        seen: list[int] = []
+
+        batches, _probe = mq.capture_case_batches(
+            graph, lambda: seen.extend(tiny_reference(graph, 10, 2)), limit=2
+        )
+
+        assert len(batches) == 2
+        assert len(seen) == 0  # 番兵で抜けるので参照ループは最後まで走らない
+
+    def test_the_hooks_are_removed_even_though_the_loop_was_aborted(self):
+        graph = TinyGraph()
+
+        mq.capture_case_batches(graph, lambda: tiny_reference(graph, 5, 1), limit=1)
+
+        assert not graph._forward_pre_hooks
+        assert not graph.text_norm._forward_hooks
+        assert not graph.caption_norm._forward_hooks
+        assert not graph.blocks[0].attention_adaln._forward_pre_hooks
+
+    def test_a_loop_that_never_reaches_the_graph_is_fail_loudly(self):
+        with pytest.raises(SystemExit, match="1 step も"):
+            mq.capture_case_batches(TinyGraph(), lambda: None, limit=4)
+
+
+class TestStageSplitGate:
+    def test_a_faithful_split_reproduces_the_graph_bit_for_bit(self):
+        graph = TinyGraph()
+        batches, probe = mq.capture_case_batches(
+            graph, lambda: tiny_reference(graph, 1, 1), limit=1
+        )
+
+        mq.assert_stage_split_matches_graph(graph, probe, batches[0], tiny_stages(graph))
+
+    def test_a_split_that_drops_a_side_input_is_fail_loudly(self):
+        """MUST: 写しがずれたら落とす — ずれた経路の GPTQ は数字からは読めない。"""
+        graph = TinyGraph()
+        batches, probe = mq.capture_case_batches(
+            graph, lambda: tiny_reference(graph, 1, 1), limit=1
+        )
+
+        with pytest.raises(SystemExit, match="ビット一致しない"):
+            mq.assert_stage_split_matches_graph(
+                graph, probe, batches[0], tiny_stages(graph, BrokenStage)
+            )
+
+
+def _tiny_rig(graph: TinyGraph, steps: int = 2) -> mq.CalibRig:
+    stages = tiny_stages(graph)
+    scan, counts = mq.calib_targets(stages)
+    batches, _probe = mq.capture_case_batches(
+        graph, lambda: tiny_reference(graph, steps, 1), limit=steps
+    )
+    return mq.CalibRig(
+        stages=stages,
+        scan=scan,
+        counts=counts,
+        batches=tuple(batches),
+        steps={"tiny": len(batches)},
+        tokens=sum(int(args[0].shape[1]) for args, _kwargs in batches),
+    )
+
+
+class TestCalibrationRun:
+    def test_every_calibrated_config_rounds_every_scanned_linear(self):
+        for config in mq.CALIB_CONFIGS:
+            torch.manual_seed(3)
+            graph = TinyGraph()
+            rig = _tiny_rig(graph)
+            before = {fqn: weight.detach().clone() for fqn, weight in rig.scan.items()}
+
+            _reports, report = mq.apply_calib(config, rig)
+
+            assert report.method == config.method
+            assert report.grid == config.grid.kind
+            assert report.modules == len(rig.scan)
+            assert all(not torch.equal(rig.scan[fqn], value) for fqn, value in before.items())
+
+    def test_the_report_names_the_dit_role(self):
+        torch.manual_seed(4)
+        graph = TinyGraph()
+
+        reports, _report = mq.apply_calib(mq.CALIB_CONFIGS[0], _tiny_rig(graph))
+
+        assert "gptq-rtn" in reports[ex.TARGET_DIT]
+
+    def test_a_scan_the_calibration_missed_is_fail_loudly(self):
+        """MUST: 丸め漏れは品質が**良い側**へ出る — 数字から読めないので門が唯一の検出手段。"""
+        torch.manual_seed(5)
+        graph = TinyGraph()
+        rig = _tiny_rig(graph)
+        _reports, report = mq.apply_calib(mq.CALIB_CONFIGS[0], rig)
+
+        with pytest.raises(SystemExit, match="一致しない"):
+            mq.assert_calib_covers_scan(
+                report, {**rig.scan, "blocks.9.mlp.weight": torch.zeros(1)}, "gptq-rtn"
+            )
