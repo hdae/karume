@@ -18,6 +18,7 @@
     uv run --group sbv2 python -m sbv2.export --target front
     uv run --group sbv2 python -m sbv2.export --dtype f16   # → outputs/series/sbv2-FN4-f16/
     uv run --group sbv2 python -m sbv2.export --dtype i8    # → outputs/series/sbv2-FN4-i8/
+    uv run --group sbv2 python -m sbv2.export --dtype i4 --target front --target voice
     uv run --group sbv2 python -m sbv2.export --verify flow  # 参照実装との eager 同値検証
 
 NOTE: sync が `--all-groups` なのは workspace の venv が 1 つだからで（`tools/pyproject.toml`）、
@@ -46,13 +47,19 @@ MUST: `--verify` は**ターゲットを 1 つだけ取る**（`--verify front` 
 io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グラフ入力名>` /
 `output.<位置>`）。
 
-## 格納 dtype の系列（ADR 0018 / 0019）
+## 格納 dtype の系列（ADR 0018 / 0019 / 0069）
 
-`--dtype f16` / `--dtype i8` はそれぞれ**別系列**（`sbv2-FN4-f16/` / `sbv2-FN4-i8/`）へ
-書く — f32 系列と同居させると既存 E2E の網（f32 の tolerance）が黙って別の資産に掛かる。
-丸め（fake-quant）は共有の `quantize.round_weights_to_f16` / `quantize.fake_quant_int8` を
+`--dtype f16` / `--dtype i8` / `--dtype i4` はそれぞれ**別系列**（`sbv2-FN4-f16/` /
+`sbv2-FN4-i8/` / `sbv2-FN4-i4/`）へ書く — f32 系列と同居させると既存 E2E の網（f32 の
+tolerance）が黙って別の資産に掛かる。丸め（fake-quant）は共有の
+`quantize.round_weights_to_f16` / `quantize.fake_quant_int8` / `quantize.fake_quant_int4` を
 **remove_weight_norm / パッチ適用の後・参照と golden の採取の前**に当てる
 （`_fake_quant` の順序 MUST）。
+
+`--dtype i4` だけは**混成**（適格 `nn.Linear` = i4 group32・残りは i8 per-channel）で、
+配布形では `w4` quant の `front` / `voice` 席に入る（`sbv2/distribution.py`）。i4 の実行経路は
+linear の重みスロット限定（ADR 0069 決定 5）なので、単一 dtype の i4 系列は原理的に作れず、
+linear を 1 本も持たない `dp` / `dec`（全て conv）へ渡すと「対象 0 本」で fail loudly する。
 
 MUST: `--dtype` は **emit 専用**（`--sym-max` と同じ扱い）。`--verify` は格納形式を見ない
 eager 比較で、しかも dec / voice では丸めを remove の**後**にしか当てられないのに参照は
@@ -80,7 +87,14 @@ from karume.convert import normalize_boundary_tensor
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.quantize import fake_quant_int8, round_weights_to_f16
+from karume.quantize import (
+    DEFAULT_GROUP_SIZE,
+    channel_rows,
+    fake_quant_int4,
+    fake_quant_int8,
+    iter_quant_targets,
+    round_weights_to_f16,
+)
 
 from . import patch
 
@@ -92,11 +106,25 @@ DEFAULT_MODEL_DIR = INPUTS_ROOT / "sbv2" / "FN4"
 #: 変わらない（5 ターゲットとも conv1d が 86〜90% を占め linear は実質 0 GFLOP —
 #: ADR 0025 決定⑤）。狙いは資産サイズとロード時間で、実行経路は ADR 0019 の w8a32
 #: （i8 格納・計算は f32）そのもの。
-WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
+#: `i4` は**混成**の系列名で、実体は「適格な `nn.Linear` = i4 group32・それ以外（非適格の
+#: linear と conv / embedding を含む）= 従来どおり i8 per-channel」（{@link BASE_WEIGHT_DTYPES} /
+#: {@link _i4_module_names}）。i4 の実行経路が linear の重みスロット限定である以上（ADR 0069
+#: 決定 5）、系列としては混成にしかなり得ない。net_g の linear は 6 本しかない（front 2 /
+#: voice 4）ので狙いは配布サイズではなく、**BERT と合わせて配布形を丸ごと w4 にする席**
+#: （`sbv2/distribution.py` の quant `w4`）。
+#:
+#: MUST: linear を 1 本も持たないターゲット（`dp` / `dec` は全て conv）に `i4` を渡すと
+#: `fake_quant_int4` が「対象 0 本」で fail loudly する — 混成の i4 席が意味を持つのは
+#: `front` / `flow` / `voice` だけ。
+WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
+
+#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格 linear は
+#: 1 本単位の `weight_dtype_overrides` で i4 へ振る（deberta の i4 混成系列と同形）。
+BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "f16": "f16", "i8": "i8", "i4": "i8"}
 
 
 def default_out_root(model_dir: Path, dtype: str) -> Path:
-    """生成物の既定の置き場（`outputs/series/sbv2-<実重みのディレクトリ名>{,-f16,-i8}/`）。
+    """生成物の既定の置き場（`outputs/series/sbv2-<実重みのディレクトリ名>{,-f16,-i8,-i4}/`）。
 
     ターゲット名（`dp` / `front`）のサブディレクトリは呼び出し側が 1 段掘る。
 
@@ -625,11 +653,39 @@ def _write_io(
     return written
 
 
-def _fake_quant(dtype: str, module: nn.Module, target: str) -> Mapping[str, torch.Tensor]:
-    """格納 dtype の表現可能値へ**実効重み**を丸め、i8 の per-channel scale 台帳を返す。
+def _i4_module_names(module: nn.Module) -> frozenset[str]:
+    """i4 group32 で丸める `nn.Linear` の FQN 集合（混成の**排他割り**の唯一の源）。
 
-    ADR 0006 / 0018（f16）/ 0019（i8）の fake-quant。台帳のキーはモデル内 FQN で、
+    適格は 2 条件の積: ① `nn.Linear` であること（emit の i4 適格 = linear の重みスロット限定 —
+    ADR 0069 決定 5。外れたテンソルへ i4 を明示指定すると emit が fail loudly する）
+    ② 量子化軸が group 長で割り切れること（i4 は端数 group を作らない MUST — 同決定 2。
+    外れた重みは**構成ごと落とすのではなく対象から外す**〈`measure_quant.census_w4_targets`
+    と同じ扱い〉ので、非適格の linear は i8 側へ落ちる）。
+
+    対象列挙を core（`iter_quant_targets`）に通すのは、丸めが見る集合とここが数える集合を
+    1 本の実装のままにするため。i8 側の述語を「この集合に居ない」で書くのも同じ理由で、
+    2 つの述語を別々の綴りから作るとどちらにも入らない重みが**黙って f32 のまま残る**
+    （二重丸め禁止の逆側の穴で、値は正しいままサイズだけが戻る）。
+    """
+    return frozenset(
+        fqn.removesuffix(".weight")
+        for fqn, weight, axis in iter_quant_targets(module, (nn.Linear,))
+        if channel_rows(weight, axis).shape[-1] % DEFAULT_GROUP_SIZE == 0
+    )
+
+
+def _fake_quant(
+    dtype: str, module: nn.Module, target: str
+) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
+    """格納 dtype の表現可能値へ**実効重み**を丸め、scale 台帳と 1 本単位の格納指定を返す。
+
+    ADR 0006 / 0018（f16）/ 0019（i8）/ 0069（i4）の fake-quant。台帳のキーはモデル内 FQN で、
     emit 側が safetensors のテンソルキーとして突き合わせる（`id()` 突合は禁止 — ADR 0006）。
+
+    i4 系列は混成（適格 linear = i4 group32・残り = i8 per-channel）で、2 つの述語は
+    {@link _i4_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。返す override は
+    「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を満たせなければ
+    fail loudly する（`emit._plan_i4` — 沈黙 i8 へ落ちる経路は無い）。
 
     MUST: 当てる相手は **export する `nn.Module` そのもの**（`net_g` 全体ではない）。
     そのターゲットのグラフに現れない重みまで動かすと、同じ net_g から別ターゲットを
@@ -654,17 +710,27 @@ def _fake_quant(dtype: str, module: nn.Module, target: str) -> Mapping[str, torc
     （グラフ定数は適格外 = f32 格納 — emit.py の適格判定）。
     """
     if dtype == "f32":
-        return {}
+        return {}, {}
     if dtype == "i8":
         int8 = fake_quant_int8(module)
         print(
             f"[fake-quant] {target}: i8 per-channel へ丸めた — {int8.describe()}",
             flush=True,
         )
-        return int8.scales
-    report = round_weights_to_f16(module)
-    print(f"[fake-quant] {target}: f16 表現可能値へ丸めた — {report.describe()}", flush=True)
-    return {}
+        return int8.scales, {}
+    if dtype == "f16":
+        report = round_weights_to_f16(module)
+        print(f"[fake-quant] {target}: f16 表現可能値へ丸めた — {report.describe()}", flush=True)
+        return {}, {}
+    linears = _i4_module_names(module)
+    rest = fake_quant_int8(module, include=lambda name: name not in linears)
+    int4 = fake_quant_int4(module, DEFAULT_GROUP_SIZE, include=lambda name: name in linears)
+    print(
+        f"[fake-quant] {target}: 適格 linear を i4 group へ丸めた — {int4.describe()}"
+        f" / 残りは i8 per-channel — {rest.describe()}",
+        flush=True,
+    )
+    return {**rest.scales, **int4.scales}, dict.fromkeys(int4.scales, "i4")
 
 
 def _summary(
@@ -717,7 +783,7 @@ def export_dp(
     net_g, hps = load_net_g(model_dir)
     module = DurationPredictorGraph(net_g.dp)
     # 前処理は無い（パッチも remove_weight_norm も通らない）ので、ここが「実効重み確定後」。
-    scales = _fake_quant(dtype, module, TARGET_DP)
+    scales, dtype_overrides = _fake_quant(dtype, module, TARGET_DP)
     g = speaker_embedding(net_g)
     built = build_cases(g, cases)
 
@@ -732,8 +798,9 @@ def export_dp(
         out_dir / MODEL_FILE,
         dynamic_shapes=({2: phonemes}, {2: phonemes}, {}),
         symbol_names=("P",),
-        weight_dtype=dtype,
+        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
         weight_scales=scales,
+        weight_dtype_overrides=dtype_overrides,
     )
     written = _write_io(module, graph, built, out_dir)
     return _summary(
@@ -767,7 +834,7 @@ def export_front(
     net_g, hps = load_net_g(model_dir)
     patch.apply_all_patches()
     module = patch.Sbv2Front(net_g)
-    scales = _fake_quant(dtype, module, TARGET_FRONT)
+    scales, dtype_overrides = _fake_quant(dtype, module, TARGET_FRONT)
     built = build_front_cases(speaker_embedding(net_g), style_vector(model_dir), cases)
 
     # 例示入力は padded ケース（x_mask に 0 を含む形）。
@@ -792,8 +859,9 @@ def export_front(
         out_dir / MODEL_FILE,
         dynamic_shapes=dynamic_shapes,
         symbol_names=("P",),
-        weight_dtype=dtype,
+        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
         weight_scales=scales,
+        weight_dtype_overrides=dtype_overrides,
     )
     written = _write_io(module, graph, built, out_dir)
     return _summary(
@@ -846,7 +914,7 @@ def export_flow(
     net_g, hps = load_net_g(model_dir)
     patch.apply_all_patches()
     module = patch.FlowReverse(net_g)
-    scales = _fake_quant(dtype, module, TARGET_FLOW)
+    scales, dtype_overrides = _fake_quant(dtype, module, TARGET_FLOW)
     built = build_flow_cases(speaker_embedding(net_g), cases)
 
     example = dict(built[-1][1])  # padded ケース（y_mask に 0 を含む形）
@@ -866,8 +934,9 @@ def export_flow(
         out_dir / MODEL_FILE,
         dynamic_shapes=dynamic_shapes,
         symbol_names=("T",),
-        weight_dtype=dtype,
+        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
         weight_scales=scales,
+        weight_dtype_overrides=dtype_overrides,
     )
     written = _write_io(module, graph, built, out_dir)
     return _summary(
@@ -901,7 +970,7 @@ def export_dec(
     ensure_dec_plain(net_g)
     module = net_g.dec
     # MUST: remove_weight_norm の**後**（`ensure_dec_plain` が予告している順序制約）。
-    scales = _fake_quant(dtype, module, TARGET_DEC)
+    scales, dtype_overrides = _fake_quant(dtype, module, TARGET_DEC)
     built = build_dec_cases(speaker_embedding(net_g), cases)
 
     example = dict(built[-1][1])
@@ -913,8 +982,9 @@ def export_dec(
         out_dir / MODEL_FILE,
         dynamic_shapes=({2: frames}, {}),
         symbol_names=("T",),
-        weight_dtype=dtype,
+        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
         weight_scales=scales,
+        weight_dtype_overrides=dtype_overrides,
     )
     written = _write_io(module, graph, built, out_dir)
     return _summary(
@@ -950,7 +1020,7 @@ def export_voice(
     ensure_dec_plain(net_g)
     module = patch.Sbv2Voice(net_g)
     # MUST: remove_weight_norm の**後**（dec を内包するので dec 単体と同じ順序制約）。
-    scales = _fake_quant(dtype, module, TARGET_VOICE)
+    scales, dtype_overrides = _fake_quant(dtype, module, TARGET_VOICE)
     built = build_flow_cases(speaker_embedding(net_g), cases)
 
     example = dict(built[-1][1])
@@ -969,8 +1039,9 @@ def export_voice(
         out_dir / MODEL_FILE,
         dynamic_shapes=dynamic_shapes,
         symbol_names=("T",),
-        weight_dtype=dtype,
+        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
         weight_scales=scales,
+        weight_dtype_overrides=dtype_overrides,
     )
     written = _write_io(module, graph, built, out_dir)
     return _summary(
@@ -1204,14 +1275,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=Path,
         default=None,
         help="出力先（既定は --dtype ごとの系列 —"
-        " outputs/series/sbv2-<--model-dir のディレクトリ名>{,-f16,-i8}/）",
+        " outputs/series/sbv2-<--model-dir のディレクトリ名>{,-f16,-i8,-i4}/）",
     )
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f32",
         help="重みの格納 dtype（f16 / i8 は fake-quant してから適格スロットだけ圧縮格納する"
-        " — ADR 0018 / 0019。**emit 専用**で --verify とは併用できない）",
+        " — ADR 0018 / 0019。i4 は混成で、適格 linear だけ group32 の i4・残りは i8 — ADR 0069"
+        "〈linear を持たない dp / dec には掛からない〉。**emit 専用**で --verify とは併用できない）",
     )
     parser.add_argument(
         "--target",

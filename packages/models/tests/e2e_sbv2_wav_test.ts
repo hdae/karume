@@ -35,6 +35,13 @@
  * なるのが正**なので、`w8` の digest と一致した場合も落とす — 一致は「i4 席が効いていない」
  * （quant 解決が既定へ落ちた / i4 席に i8 資産が入った）ことの証拠で、数値の網では捕まらない。
  *
+ * ## 3 本目の門 — `w4`（3 席とも i4 混成で焼いた配布形）
+ *
+ * 条件はやはり `w8` と同一で、差し替えるのは quant だけ。参照値は 2026-08-20 に採取して凍結した
+ * （perf-ledger Q-1 の full-w4 側）。`w8` とも `w8-bert4` とも**別の値になるのが正**で、どちらかと
+ * 一致したら落とす — `w8-bert4` との一致は「net_g 側の i4 席が効いていない」ことの証拠で、
+ * net_g の適格 linear は 6 本しかない（front 2 / voice 4）ぶん**資産サイズの差でも気づけない**。
+ *
  * ## 参照 digest はこの参照環境専用（クロスデバイスのビット同一は保証しない）
  *
  * 参照値は参照環境（RTX 3080 Ti / Linux / Vulkan (wgpu)）で焼いたもので、他バックエンド
@@ -95,6 +102,21 @@ const REFERENCE_SHA256 = "a82f72e2c18956ec725a3f692182e8c9a7dad4011e760dab9fb3d0
  * 無いので、食い違ったときは WAV を落として人が聴ける形にするだけにする。
  */
 const BERT4_REFERENCE_SHA256 = "aa9671ad8ff5075bb6b153f775a2b8edd9d19d2f3792ae060d198445c72a1933";
+
+/**
+ * `w8-bert4` から**さらに `front` / `voice` も i4 混成**へ替えた quant（3 席とも i4）。session
+ * ノブは `w8` と同じで、動かす軸は格納形だけ（`sbv2/distribution.py` の `SBV2_QUANTS`）。
+ */
+const W4_QUANT = "w4";
+
+/**
+ * `w4` の参照値（2026-08-20 に参照環境で採取して凍結 — **変更禁止**）。
+ *
+ * `w8` とも `w8-bert4` とも**別の値になるのが正**。`w8-bert4` と一致したら net_g 側の i4 席が
+ * 効いていない（i4 席に i8 資産が入った / quant 解決が既定へ落ちた）ことを意味し、net_g の適格
+ * linear は 6 本だけで配布バイトもほぼ変わらないため、**この門以外に検出手段が無い**。
+ */
+const W4_REFERENCE_SHA256 = "c0bc803e7b19f03717c4d2104d4c5280b08d23440d7268a1d1db7559985535c8";
 
 /** 参照 WAV を焼いた時点の実効ノブ（配布形の `pipelineConfig.defaults` と一致するはず）。 */
 const REFERENCE_KNOBS: Sbv2Defaults = {
@@ -319,6 +341,55 @@ Deno.test({
           `  WAV ${wav.length} バイト / サンプル ${audio.data.length} / ${audio.sampleRate}Hz / ` +
           `${(audio.data.length / audio.sampleRate).toFixed(3)}s\n` +
           `  実効ノブ ${describeKnobs(defaults, BERT4_QUANT)}\n` +
+          `  実物 ${dumped.pathname}`,
+      );
+    }
+  },
+});
+
+Deno.test({
+  name:
+    `e2e(実GPU): 配布形 ${MODEL} / quant ${W4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+  ignore: !RUNNABLE,
+  fn: async () => {
+    const manifest = readManifest();
+    const defaults = assertReferenceKnobs(modelEntry(manifest));
+    const assets = await loadLocalAssets(manifest, W4_QUANT);
+    const started = performance.now();
+    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
+      model: MODEL,
+      quant: W4_QUANT,
+    });
+    // ノブは 1 つも渡さない — `w8` の門と同じ条件（差は 3 席の格納形だけ）。
+    const audio = await pipeline.generate({ text: TEXT, seed: SEED });
+    const wav = encodeWav(audio.data, audio.sampleRate);
+    const actual = await sha256Hex(wav);
+    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+    console.log(
+      `[e2e] sbv2 ${MODEL}/${W4_QUANT}: ${elapsed}s / WAV ${wav.length}B / ` +
+        `${(audio.data.length / audio.sampleRate).toFixed(2)}s / yomi ${YOMI_VERSION} / ` +
+        `sha256 ${actual}`,
+    );
+    // 席の不発は 2 通りある（3 席とも既定へ落ちた / net_g の 2 席だけ i8 のまま）ので、
+    // 「先行する 2 つの quant のどちらかと一致したら落とす」を 1 本の判定で持つ。
+    const collided = [[QUANT, REFERENCE_SHA256], [BERT4_QUANT, BERT4_REFERENCE_SHA256]]
+      .find(([, digest]) => digest === actual);
+    if (collided !== undefined) {
+      throw new Error(
+        `${W4_QUANT} の WAV が ${collided[0]} と sha256 完全一致した（${actual}）— ` +
+          "i4 席が効いていない（i4 quant の解決が既定へ落ちた / i4 席に i8 資産が入っている）",
+      );
+    }
+    if (actual !== W4_REFERENCE_SHA256) {
+      await Deno.mkdir(OUTPUTS_DIR, { recursive: true });
+      const dumped = new URL("e2e-sbv2-w4-mismatch.wav", OUTPUTS_DIR);
+      await Deno.writeFile(dumped, wav);
+      throw new Error(
+        `出力 WAV の sha256 が参照と一致しない\n` +
+          `  期待 ${W4_REFERENCE_SHA256}\n  実際 ${actual}\n` +
+          `  WAV ${wav.length} バイト / サンプル ${audio.data.length} / ${audio.sampleRate}Hz / ` +
+          `${(audio.data.length / audio.sampleRate).toFixed(3)}s\n` +
+          `  実効ノブ ${describeKnobs(defaults, W4_QUANT)}\n` +
           `  実物 ${dumped.pathname}`,
       );
     }

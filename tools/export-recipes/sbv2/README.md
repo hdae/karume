@@ -75,6 +75,8 @@ uv run --group sbv2 python -m sbv2.export                # all targets
 uv run --group sbv2 python -m sbv2.export --target front # one target only
 uv run --group sbv2 python -m sbv2.export --dtype f16    # f16 series → outputs/series/sbv2-FN4-f16/
 uv run --group sbv2 python -m sbv2.export --dtype i8     # i8 series  → outputs/series/sbv2-FN4-i8/
+# mixed i4 series — only the two targets the distribution ships (dp / dec carry no linear at all)
+uv run --group sbv2 python -m sbv2.export --dtype i4 --target front --target voice
 
 # 2. eager equivalence against the reference implementation (**one target per process**; see "Patch layer" below)
 uv run --group sbv2 python -m sbv2.export --verify front
@@ -95,7 +97,7 @@ outputs/series/sbv2-FN4/voice/model.safetensors    IR 1836 nodes / 655 initializ
 outputs/series/sbv2-FN4/<target>/io.<case>.safetensors  inputs and expected torch CPU outputs
 ```
 
-#### Storage dtype series (`--dtype f16` / `--dtype i8` — ADR 0018 / 0019)
+#### Storage dtype series (`--dtype f16` / `--dtype i8` / `--dtype i4` — ADR 0018 / 0019 / 0069)
 
 `--dtype f16` / `--dtype i8` each write to a **separate series**,
 `outputs/series/sbv2-FN4-f16/<target>/` / `outputs/series/sbv2-FN4-i8/<target>/` (keeping them next
@@ -120,6 +122,23 @@ depend on the storage dtype.) The ratio is higher for `front` alone because the 
 relative-position tables (2.1MB of i32 / f32 constants) are ineligible for weight slots and stay
 f32. The totals are f32 470.34MB → f16 237.57MB (50.5%) → **i8 121.81MB (25.9%)**, and the i8
 companion scales are 505,576 B (0.42% of the compressed bytes).
+
+`--dtype i4` is a **mixed series** `outputs/series/sbv2-FN4-i4/<target>/`: eligible `nn.Linear`
+weights in group-32 i4 (ADR 0069), everything else — including linears whose quantization axis is
+not a multiple of 32 — in per-channel i8 exactly as in the i8 series. i4 only has an execution path
+for the linear weight slot, so a single-dtype i4 series cannot exist, and `dp` / `dec` (all conv,
+zero linear) fail loudly with "no eligible weights". Only `front` and `voice` are worth writing —
+they are the seats of the distribution's `w4` quant, and no other consumer reads this series.
+
+| Target  | i8 storage   | i4 storage   | i4 tensors | Elements rounded to i4 |
+| ------- | ------------ | ------------ | ---------: | ---------------------: |
+| `front` | 10,324,816 B | 10,268,024 B |          2 |                147,456 |
+| `voice` | 55,516,968 B | 55,366,504 B |          4 |                393,216 |
+
+The gain is negligible on purpose: net_g carries only 6 linears (`enc_p.style_proj` /
+`enc_p.encoder.spk_emb_linear` in `front`, the 4 `flow_rev.flow.flows.<i>.enc.spk_emb_linear` in
+`voice`) against 86–90% conv1d. The point of the series is to let the distribution ship a
+whole-pipeline 4-bit seat next to the text encoder's, not to shrink net_g.
 
 MUST: `--dtype` is **emit-only** (like `--sym-max`). The CLI rejects combining it with `--verify` —
 verification is an eager comparison that does not look at the storage format, and for dec / voice

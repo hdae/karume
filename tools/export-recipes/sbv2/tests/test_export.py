@@ -478,6 +478,23 @@ class _TinyDp(nn.Module):
         return self.conv((x + self.cond(g)) * x_mask) * x_mask
 
 
+class _TinyHybrid(nn.Module):
+    """i4 混成（適格 linear = i4 group32・残り = i8）の最小の骨格。
+
+    `fc` の in 軸を 64 にするのは i4 が端数 group を作らない MUST（ADR 0069 決定 2）のため。
+    `odd`（in 軸 48）は**割り切れない linear**で、適格から外れて i8 側へ落ちる枝の検出器 —
+    実 net_g では 6 本とも割り切れる（FN4 実測）ので、ここでしか踏めない。conv を持たせるのは、
+    i8 側の対象が空だと `fake_quant_int8` が fail loudly して「排他に割れているか」を
+    観測できないから。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(4, 4, 3)
+        self.fc = nn.Linear(64, 4)
+        self.odd = nn.Linear(48, 4)
+
+
 class _TinyNetG(nn.Module):
     """`export_dp` が触る net_g の面だけ（`dp` と話者埋め込み）。"""
 
@@ -535,14 +552,25 @@ class TestWeightDtypeSeries:
             for dtype in export_sbv2.WEIGHT_DTYPES
         }
 
-        assert set(roots) == {"f32", "f16", "i8"}
+        assert set(roots) == {"f32", "f16", "i8", "i4"}
         assert len(set(roots.values())) == len(roots)
         # 系列は `outputs/series/` 側（`models/` は配布形だけの場所 — ADR 0037）。
         assert roots == {
             "f32": SERIES_ROOT / "sbv2-FN4",
             "f16": SERIES_ROOT / "sbv2-FN4-f16",
             "i8": SERIES_ROOT / "sbv2-FN4-i8",
+            "i4": SERIES_ROOT / "sbv2-FN4-i4",
         }
+
+    def test_the_i4_series_is_stored_as_i8_by_default(self):
+        """i4 は**混成**（適格 linear だけ i4・残りは i8）— 単一 dtype の i4 系列は作れない。
+
+        i4 の実行経路が linear の重みスロット限定（ADR 0069 決定 5）である以上、既定を i4 に
+        すると conv / embedding が黙って f32 で残る。既定は i8 で、適格 linear だけ 1 本単位の
+        override で振るのが唯一の形。
+        """
+        assert set(export_sbv2.BASE_WEIGHT_DTYPES) == set(export_sbv2.WEIGHT_DTYPES)
+        assert export_sbv2.BASE_WEIGHT_DTYPES["i4"] == "i8"
 
     def test_the_series_name_carries_the_weights_directory_name(self):
         """話者ごとに別系列（綴りを共有すると別話者の資産を黙って上書きする）。"""
@@ -606,10 +634,31 @@ class TestWeightDtypeSeries:
         module = _TinyDp()
         assert not _weights_are_int8_exact(module), "量子化前から格子に乗っていては検出力が無い"
 
-        scales = export_sbv2._fake_quant("i8", module, export_sbv2.TARGET_DP)
+        scales, overrides = export_sbv2._fake_quant("i8", module, export_sbv2.TARGET_DP)
 
+        assert overrides == {}, "i8 単一系列に 1 本単位の格納指定は要らない"
         assert _weights_are_int8_exact(module)
         assert set(scales) == {"cond.weight", "conv.weight"}
+
+    def test_i4_splits_the_eligible_linears_and_the_rest_exclusively(self):
+        """MUST: i8 / i4 の対象は排他（`quantize.py` の混成 MUST — 二重丸めは沈黙誤値）。
+
+        どちらにも入らない重みが残る穴も同時に見る（合流台帳が全ての重みを覆っていること）。
+        振り分け先は scale の**形**で読める: i4 は group 形 `[チャネル, group 数]`、i8 は
+        重みと同 rank の keepdim 形。`odd`（in 軸 48）は i4 の適格から外れて i8 側へ落ちる —
+        ここが黙って落ちると「i4 系列なのに対象が痩せた」が観測できない。
+        """
+        torch.manual_seed(0)
+        module = _TinyHybrid()
+
+        scales, overrides = export_sbv2._fake_quant("i4", module, export_sbv2.TARGET_FRONT)
+
+        assert overrides == {"fc.weight": "i4"}
+        assert set(scales) == {"fc.weight", "odd.weight", "conv.weight"}
+        # in 軸 64 / group 32 なので group 数 2 — keepdim 形（[4, 1]）とは形で区別できる。
+        assert list(scales["fc.weight"].shape) == [4, 2]
+        assert list(scales["odd.weight"].shape) == [4, 1]
+        assert list(scales["conv.weight"].shape) == [4, 1, 1]
 
     def test_rounding_before_removing_the_weight_norm_leaves_the_grid(self):
         """MUST の裏付け: 丸めは `remove_weight_norm` の**後**（`ensure_dec_plain` の予告）。

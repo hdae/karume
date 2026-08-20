@@ -135,10 +135,15 @@ _SBV2_PAYLOADS = {
     ),
     "front_f16": _fake_safetensors("F16", b"front-f16-weights"),
     "front_i8": _fake_safetensors("I8", b"front-i8-weights"),
+    "front_i4": _fake_safetensors("I4", b"front-i4-weights"),
     "voice_f16": _fake_safetensors("F16", b"voice-f16-weights"),
     "voice_i8": _fake_safetensors("I8", b"voice-i8-weights"),
+    "voice_i4": _fake_safetensors("I4", b"voice-i4-weights"),
     "tokenizer": b'{"deberta": true}',
 }
+
+#: 系列ラベル → 偽資産のヘッダ dtype（`SBV2_STORAGE_REQUIREMENTS` が要求する側）。
+_SBV2_SERIES_DTYPES: Mapping[str, str] = {"f16": "F16", "i8": "I8", "i4": "I4"}
 
 #: 実行時ノブの既定。**実際の `style_bert_vits2` の値とは別の数**にしてある — 組み立てが
 #: 引数のノブを配るのか自分の表を配るのかを、値そのもので見分けるため。
@@ -212,6 +217,7 @@ def _build_sbv2_sources(
     sources = Sbv2Sources(
         series_f16=series / f"{stem}-f16",
         series_i8=series / f"{stem}-i8",
+        series_i4=series / f"{stem}-i4",
         text_encoder=series / "deberta-i8" / "sbv2-22layer",
         text_encoder_i4=series / "deberta-i4" / "sbv2-22layer",
         demo=root / "outputs" / "sbv2-demo",
@@ -221,13 +227,16 @@ def _build_sbv2_sources(
     _write(sources.text_encoder / "io.case0.safetensors", b"io-fixture")
     _write(sources.text_encoder_i4 / "model.safetensors", _SBV2_PAYLOADS["text_encoder_i4"])
     _write(sources.text_encoder_i4 / "io.case0.safetensors", b"io-fixture")
-    for series_dir, label in ((sources.series_f16, "f16"), (sources.series_i8, "i8")):
+    for series_dir, label in (
+        (sources.series_f16, "f16"),
+        (sources.series_i8, "i8"),
+        (sources.series_i4, "i4"),
+    ):
         for target in ("front", "voice"):
             role = f"{target}_{label}"
             payload = _SBV2_PAYLOADS[role]
             if offset:
-                dtype = "F16" if label == "f16" else "I8"
-                payload = _fake_safetensors(dtype, f"{role}-{model}".encode())
+                payload = _fake_safetensors(_SBV2_SERIES_DTYPES[label], f"{role}-{model}".encode())
             _write(series_dir / target / "model.safetensors", payload)
             _write(series_dir / target / "io.p2.safetensors", b"io-fixture")
         # 配布しない単体グラフ（golden 検証専用）も系列には並ぶ。
@@ -551,6 +560,19 @@ class TestSbv2StorageGate:
         with pytest.raises(DistError, match=r"text_encoder_i4: .* I4 が無い"):
             _assemble_sbv2(sources, tmp_path / "out")
 
+    def test_it_stops_when_a_voice_i4_seat_holds_the_i8_series(self, tmp_path: Path) -> None:
+        """net_g の i4 席も同じ — 混成の利得が小さいぶん、取り違えはサイズ差でも見えない。
+
+        `front` / `voice` の i4 混成は同じグラフの別系列（適格 linear 6 本だけが i4）なので、
+        i8 系列を挿しても層数も入力も出力も一致する。格納 dtype の要求だけが席を区別できる。
+        """
+        sources = _build_sbv2_sources(tmp_path)
+        (sources.series_i4 / "voice" / "model.safetensors").write_bytes(
+            _SBV2_PAYLOADS["voice_i8"]
+        )
+        with pytest.raises(DistError, match=r"voice_i4: .* I4 が無い"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
 
 class TestSbv2BertHiddenGate:
     """22 層 × 出力 1 本 × 位置 1 の組み合わせだけを通す門。
@@ -652,12 +674,21 @@ class TestSbv2Manifest:
         assert model["defaultQuant"] in model["quants"]
 
     def test_every_quant_names_the_text_encoder_too(self, sbv2_assembled) -> None:
-        """v1 で `weights` に書けなかった単一ファイル役も、v2 では完全写像の一部（§3）。"""
+        """v1 で `weights` に書けなかった単一ファイル役も、v2 では完全写像の一部（§3）。
+
+        BERT を i4 混成で焼く quant の**名指し**を表と独立に持つのは、`SBV2_QUANTS` の編集で
+        既存 quant の text_encoder が黙って別の格納形へ動いた場合を捕まえるため
+        （表から導くと恒真になる）。
+        """
+        bert_i4_quants = {"w8-bert4", "w4"}
         _, manifest = sbv2_assembled
         model = _sbv2_model(manifest)
+        assert bert_i4_quants <= set(model["quants"])
         for name, quant in model["quants"].items():
             assert set(quant["weights"]) == set(SBV2_WEIGHTS), name
-            assert quant["weights"]["text_encoder"] == ("i4" if name == "w8-bert4" else "i8"), name
+            assert quant["weights"]["text_encoder"] == (
+                "i4" if name in bert_i4_quants else "i8"
+            ), name
 
     def test_the_bert4_quant_is_w8_with_only_the_text_encoder_swapped(self, sbv2_assembled) -> None:
         """`w8-bert4` の意味は「`w8` と同構成で BERT だけ i4」— 差分が 1 席であることを固定する。
@@ -675,6 +706,29 @@ class TestSbv2Manifest:
         }
         assert differing == {"text_encoder"}
         assert variant["weights"]["text_encoder"] == "i4"
+
+    def test_the_voices_declare_all_three_storage_forms(self, sbv2_assembled) -> None:
+        """`front` / `voice` は f16 / i8 / i4 混成の 3 席（並びは {@link SBV2_WEIGHTS} 宣言順）。"""
+        _, manifest = sbv2_assembled
+        for role in ("front", "voice"):
+            entry = _sbv2_model(manifest)["weights"][role]
+            assert list(entry) == ["f16", "i8", "i4"], role
+            for label in entry:
+                assert entry[label]["file"]["path"].endswith(f"model.{label}.safetensors"), role
+
+    def test_the_w4_quant_takes_the_mixed_form_in_every_role(self, sbv2_assembled) -> None:
+        """`w4` の意味は「3 席とも i4 混成・session は `w8` のまま」— 軸が 1 つであることを固定。
+
+        session まで見るのは `w8-bert4` の門と同じ理由 — 活性の量子化（`w8a8` 軸）が紛れ込むと、
+        聴感で採った裁定（perf-ledger Q-1 / research 2026-08-19 §6）の対象が黙って変わる。
+        """
+        _, manifest = sbv2_assembled
+        quants = _sbv2_model(manifest)["quants"]
+        base, variant = quants["w8"], quants["w4"]
+
+        assert variant["session"] == base["session"]
+        assert set(variant["weights"].values()) == {"i4"}
+        assert set(variant["weights"]) == set(base["weights"])
 
 
 class TestSbv2VerifyDist:
