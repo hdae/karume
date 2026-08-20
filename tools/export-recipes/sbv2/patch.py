@@ -500,11 +500,23 @@ class SdpReverseNoiseIn(nn.Module):
     原 `forward(..., reverse=True)` と等価で、差分は `torch.randn(B,2,P) * noise_scale` を
     外部入力 `z_noise` で受ける 1 点のみ（`noise_scale` の乗算はホスト側 — 実行時ノブを
     グラフに焼かない）。`torch.detach` は eager の推論経路で恒等なので写さない。
+
+    MUST: **使う部分モジュールだけを持つ**（sdp 丸ごとを抱えない）。reverse 経路が触らない
+    `post_*`（訓練専用の posterior）と落とす ConvFlow は木に居ると fake-quant の census には
+    乗るのに torch.export が辿らず initializer に立たない — i4 の override 綴り検査（emit の
+    沈黙 drop 防止）が「グラフに無いキー」で落ちる。所有 = 使用にすると census と graph が
+    構造的に一致する（波 J-5b で顕在化）。flow の選別（reversed 順から末尾 2 本目 =
+    無用な vflow を除く — 原実装どおり）も同じ理由で `__init__` へ寄せ、使う 7 本だけを登録する。
     """
 
     def __init__(self, sdp: nn.Module) -> None:
         super().__init__()
-        self.sdp = sdp
+        self.pre = sdp.pre
+        self.cond = sdp.cond
+        self.convs = sdp.convs
+        self.proj = sdp.proj
+        flows = list(reversed(sdp.flows))
+        self.flows = nn.ModuleList([*flows[:-2], flows[-1]])
 
     def forward(
         self,
@@ -513,17 +525,12 @@ class SdpReverseNoiseIn(nn.Module):
         g: torch.Tensor,
         z_noise: torch.Tensor,
     ) -> torch.Tensor:
-        sdp = self.sdp
-        x = sdp.pre(x)
-        x = x + sdp.cond(g)
-        x = sdp.convs(x, x_mask)
-        x = sdp.proj(x) * x_mask
-
-        # 原実装どおり: reversed 順から末尾 2 本目（無用な vflow）を除く。
-        flows = list(reversed(sdp.flows))
-        flows = [*flows[:-2], flows[-1]]
+        x = self.pre(x)
+        x = x + self.cond(g)
+        x = self.convs(x, x_mask)
+        x = self.proj(x) * x_mask
         z = z_noise
-        for flow in flows:
+        for flow in self.flows:
             z = flow(z, x_mask, g=x, reverse=True)
         # 原実装は `torch.split(z, [1, 1], 1)` の第 1 要素。分割は取り出し口 1 本で足りる。
         return z[:, :1]
