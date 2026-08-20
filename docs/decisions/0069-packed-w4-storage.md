@@ -237,3 +237,28 @@ w4 横展開 + 量子化方式スクリーニング波（backlog now 節）に�
    裁定）。校正ループ系（AWQ / GPTQ）は引き続き未測定 — 実需が立てば別 ADR（追記 1 のまま）。
    codebook 系が採用に至る場合の格納の新席（表の companion 欄・view 型）は決定 2 の 3 面の
    reopen として別途起票する。
+
+## 追記 6（2026-08-20・決定 5 の追補第 1 号 — embedding の i4 実行経路と格納適格）
+
+決定 5 の「需要が出た op から追補」の第 1 号として **embedding を i4 適格へ追補**した
+（ユーザー承認・波 J-5a・`0d8c6f6`）。
+
+1. **適格集合**: i4 の適格 op は `I4_WEIGHT_OPS = {linear, embedding}`（`emit.py` と
+   `plan.ts` の鏡像 — 適格判定・executor・estimate は各側 1 実装を共有）。conv 系は
+   据え置き（展開経路が無い — `weight-storage.ts` の MUST。conv1d の追補は別決定 =
+   波 J-5b の領分）。
+2. **格納形は不変**: 語彙表 `[V,D]` は `channel_rows` が恒等で、group scale
+   `[V, D/g]` は「重みと同 rank・最終次元だけ group 数」— 決定 2/3 の規則がそのまま
+   成立し、新しい格納形は増えていない。
+3. **実行**: gather カーネルの per-thread group scale（1 スレッド 1 出力要素で巻き上げ先が
+   無く、要素ごとに `wscale[pick·(D/g) + col/g]` を引く — linear の quad 単位引きとは
+   別実装）。group 長は shift として WGSL へ焼くためキーに g 部が乗る（`:wi4g32`）。
+   GPU dequant と CPU 展開（`decodeI4`）は全 15 nibble × 語内 8 位置でビット一致を門化
+   （`gpu_i4_weights_test.ts`）。
+4. **tied lm_head の反転**: linear と embedding の両方の重みスロットで消費される実体は、
+   従来「linear 限定ゆえ不適格」だったが両 op とも展開経路を持つため**適格へ反転**
+   （両側の単体で固定）。
+5. **DeBERTa への適用実測**: 語彙表 22012×1024 を i4 化（除外 = `rel_embeddings`〈graph 上
+   embedding op が立たない = 重みスロット消費ゼロで一般適格外〉と conv）。系列 202.45 →
+   193.91 MB（−8.15 MiB — group scale の f32 が payload 半減益の約 3 割を食う）。SBV2
+   `w8-bert4` の取得量 = w8 比 −30.33%。WAV 参照は採り直し（旧値は e2e 側 NOTE が保持）。

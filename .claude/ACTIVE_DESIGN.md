@@ -32,12 +32,14 @@
   採否 = perf-ledger Q 節（RTN/NF4 全ファミリ一次通過・Q-4 mxfp4 不採用確定・Q-2 kmeans は
   LLM/埋め込み限定）。方式序列はモデル系統で割れる — 1 回の実測で一般化しない。既定化は
   速度と細かい品質のバランスで別途。
-- **波 J（量子化探索・第 2 段・2026-08-20 着手）が現行**: J-1（quant `w8-bert4`・Q-1 ✅・
-  配布 WAV 聴感確認済み）と J-1b（full-w4 quant `w4` — net_g 適格 linear 6 本のみ・意味は
-  「丸ごと 4bit 席」）は**消化済み**。J-2（GPTQ/AWQ）は波割り承認済みで進行中 — core
-  `quant_calib.py` 着地（act-order 不採用・rtn グリッドのみ出荷可・H=λI オラクル門）、
-  minicpm5/EG リグ結線 + 校正コーパスは実装中 → 実測スイープへ。J-3（g 軸）・J-4（格納席の
-  実装裁定 — J-2 の結果を見てから）が後続（骨子 = backlog now 節）。
+- **波 J（量子化探索・第 2 段・2026-08-20 着手）が現行**: 消化済み = J-1（`w8-bert4`）・
+  J-1b（`w4`）・J-2 第 1 段（**GPTQ 大勝ち** — gptq-rtn は格納不変で RTN 全面超え = Q-6・
+  gptq-kmeans 全列最良 = Q-2 価値上昇・AWQ = Q-7 ❌ 実装温存）・**J-5a（embedding i4 —
+  ADR 0069 追記 6・i4 適格 = linear + embedding・w8-bert4 取得量 −30.33%・WAV 参照採り直し）**。
+  進行中 = J-2 第 2 段（gptq 3 構成を SBV2 BERT + irodori/anima DiT へ → 聴感/視認 →
+  モデルごと採用）。後続 = J-5b（net_g conv1d i4 — convT 対象外の裁定済み）→ J-3（g 軸）→
+  J-4（格納席 — gptq-kmeans の companion 席が最有力）。既定化基準 = 「品質 i8 同等 + 速度
+  勝利」でユーザー判断（採用報告に速度実測を添える）。骨子 = backlog now 節。
 
 ## Open decisions
 

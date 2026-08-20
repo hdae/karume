@@ -30,12 +30,15 @@
 - **J-2 第 2 段（裁定待ち）**: 勝者を重いファミリへ — SBV2 BERT（DeBERTa encoder の stage
   分解）+ irodori / anima（DiT block）→ 聴感/視認。net_g conv は GPTQ 対象外（H が linear の
   in 軸形 — conv は im2col 要）。
-- **J-5（2026-08-20 ユーザー承認 — SBV2 縮小レバー 2 本）**: **J-5a** = embedding i4（gather
-  経路 — ADR 0069 決定 5 の「最初の追補候補」。BERT 語彙表 ≈−12.5 MiB）→ **J-5b** = net_g
-  conv1d i4（in 軸 = channel_rows 平坦の連続 group・scale rank2 の正式化 = ADR 0069 新決定。
-  ≈−27.5 MiB・合計で w8 比 −39% 見込み）。**convT は対象外**（2.6 MiB のために permuted pack を
-  買わない — 2026-08-20 ヘッダ実測: net_g I8 59.0 MiB 中 convT 4.4%）。系列再生成に伴い
-  `w8-bert4` / `w4` の WAV 参照は採り直し。
+- **J-5a: embedding i4 — 消化済み（2026-08-20・`0d8c6f6`）**: i4 適格を
+  `I4_WEIGHT_OPS = {linear, embedding}` へ一般化（ADR 0069 追記 6）。BERT 語彙表 i4 で系列
+  −8.15 MiB（group scale の f32 が半減益の約 3 割を食い、見込み −12.5 MiB から下方訂正）・
+  `w8-bert4` 取得量 = w8 比 **−30.33%**。WAV 参照 2 本採り直し済み（聴感 = 新 WAV の確認待ち）。
+  tied lm_head は適格へ反転（LLM 側の副次利得）。
+- **J-5b（承認済み・未着手）**: net_g conv1d i4（in 軸 = channel_rows 平坦の連続 group・
+  scale rank2 の正式化 = ADR 0069 新決定。≈−27.5 MiB・J-5a と合わせ w8 比 ≈−40% 見込み）。
+  **convT は対象外**（2.6 MiB のために permuted pack を買わない — 2026-08-20 ヘッダ実測:
+  net_g I8 59.0 MiB 中 convT 4.4%）。着地時も WAV 参照採り直し。
 - **J-3: g 軸の評価**（波 I は g=32 固定の裁定 — 方式勝者で g32/g64/g128 を再評価）。
 - **J-4: 格納席の実装裁定**（Q-2 kmeans companion 席 / Q-3 NF4 定数表席 — J-2 第 2 段の
   結果を見てから。codebook 系採用なら ADR 0069 の bit 表・整列表・view 型 3 面の reopen）。
