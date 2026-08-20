@@ -33,12 +33,15 @@
   数値が大幅改善**（irodori: S 予測が全構成一致 / anima: PSNR 12.3→22.7 dB）・SBV2 BERT は
   数値判別不能（聴感のみ）。**聴感/視認裁定済み（research §6 裁定節）: 3 ファミリとも品質
   OK → 採用確定**。net_g conv は GPTQ 対象外（H が linear の in 軸形 — conv は im2col 要）。
-- **J-2 第 3 段: Q-6 出荷結線 + 速度実測（進行中）**: deberta-i4 系列の export へ gptq-rtn を
-  結線（encoder linear = `calibrate_stages`・語彙表ほかは RTN 維持・校正 = calib_texts 48 文・
-  過不足一致門）→ w8-bert4 / w4 再配布 + WAV 参照採り直し + 再聴（主眼 =「硬さ」が縮むか）。
-  併せて既定化判断用の速度実測（w8 / w8-bert4 / w4 の実 GPU ロード + 合成壁時計 — 判断は
-  ユーザー基準「品質 i8 同等 + 速度勝利」）。irodori / anima の配布 i4 席新設は J-4 と同時に
-  裁定（irodori は kmeans 圧勝のため rtn 席を先行させない）。
+- **J-2 第 3 段: Q-6 出荷結線 + 速度実測 — 結線消化（2026-08-20・`a1cf286` + `1379c3e`）**:
+  deberta-i4 export へ gptq-rtn を結線（encoder linear 132 本 = 校正付き・語彙表は先に RTN・
+  一致門 3 種・校正コーパスは deberta へ移管し計測と共有）→ fn/jvnv 再配布 + WAV 参照
+  採り直し（w8 門不変・verify 1629/0/5）。速度実測済み
+  （[research §7](research/2026-08-20-gptq-awq-calibrated-rounding.md) — 取得 −30%・ロード
+  1.7 倍速・温間合成 ~4% 速 = 基準の速度側は充足）。**残 = ユーザーの再聴
+  （outputs/demo/sbv2-FN4-w8-bert4.wav / sbv2-FN4-w4.wav — 主眼 =「硬さ」が縮んだか）→
+  既定 quant の裁定**。irodori / anima の配布 i4 席新設は J-4 と同時に裁定（irodori は
+  kmeans 圧勝のため rtn 席を先行させない）。
 - **J-5a: embedding i4 — 消化済み（2026-08-20・`0d8c6f6`）**: i4 適格を
   `I4_WEIGHT_OPS = {linear, embedding}` へ一般化（ADR 0069 追記 6）。BERT 語彙表 i4 で系列
   −8.15 MiB（group scale の f32 が半減益の約 3 割を食い、見込み −12.5 MiB から下方訂正）・

@@ -36,10 +36,13 @@
   J-1b（`w4`）・J-2 第 1 段（**GPTQ 大勝ち** — gptq-rtn は格納不変で RTN 全面超え = Q-6・
   gptq-kmeans 全列最良 = Q-2 価値上昇・AWQ = Q-7 ❌ 実装温存）・**J-5a（embedding i4 —
   ADR 0069 追記 6・i4 適格 = linear + embedding・w8-bert4 取得量 −30.33%・WAV 参照採り直し）**。
-  進行中 = J-2 第 2 段（gptq 3 構成を SBV2 BERT + irodori/anima DiT へ → 聴感/視認 →
-  モデルごと採用）。後続 = J-5b（net_g conv1d i4 — convT 対象外の裁定済み）→ J-3（g 軸）→
-  J-4（格納席 — gptq-kmeans の companion 席が最有力）。既定化基準 = 「品質 i8 同等 + 速度
-  勝利」でユーザー判断（採用報告に速度実測を添える）。骨子 = backlog now 節。
+  J-2 第 2 段は**聴感/視認裁定込みで消化**（3 ファミリとも品質 OK → 採用確定）、第 3 段 =
+  **Q-6 出荷結線も消化**（deberta-i4 export へ gptq-rtn・格納形不変・WAV 参照採り直し・速度
+  実測 = ロード 1.7 倍速 + 温間合成 ~4% 速 — research §7）。残 = ユーザーの配布 WAV 再聴
+  （主眼 =「硬さ」が縮んだか）→ 既定 quant 裁定。後続 = J-5b（net_g conv1d i4 — convT 対象外の
+  裁定済み）→ J-3（g 軸）→ J-4（格納席 — gptq-kmeans companion が最有力・irodori/anima の
+  配布 i4 席新設もここと同時）。既定化基準 = 「品質 i8 同等 + 速度勝利」でユーザー判断。
+  骨子 = backlog now 節。
 
 ## Open decisions
 
