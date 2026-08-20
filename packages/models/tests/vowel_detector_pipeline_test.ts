@@ -56,14 +56,14 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
 /** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["crnn-epoch3"]` の中身を上書きする。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/2",
+    format: "karume/3",
     generator: "karume/0.2.2",
     defaultModel: "crnn-epoch3",
     models: {
       "crnn-epoch3": {
         pipeline: "vowel-detector/1",
         weights: {
-          crnn: { f32: { file: fileRef("crnn-epoch3/model.f32.safetensors") } },
+          crnn: { f32: { shards: [fileRef("crnn-epoch3/model.f32.safetensors")] } },
         },
         assets: { mel_basis: fileRef("crnn-epoch3/features/mel-basis.safetensors") },
         quants: { f32: { weights: { crnn: "f32" }, session: {} } },

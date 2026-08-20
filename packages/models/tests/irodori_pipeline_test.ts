@@ -70,11 +70,11 @@ const manifestText = (patch: Record<string, unknown> = {}): string => {
   let weights: Record<string, unknown> = {};
   let mapping: Record<string, string> = {};
   for (const name of WEIGHT_NAMES) {
-    weights = { ...weights, [name]: { f32: { file: { ...FILE, path: `${name}/model.f32` } } } };
+    weights = { ...weights, [name]: { f32: { shards: [{ ...FILE, path: `${name}/model.f32` }] } } };
     mapping = { ...mapping, [name]: "f32" };
   }
   return JSON.stringify({
-    format: "karume/2",
+    format: "karume/3",
     generator: "karume/0.1.0",
     defaultModel: "v4-small",
     models: {

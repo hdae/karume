@@ -6,7 +6,8 @@ import { ManifestReferenceError } from "./errors.ts";
 import type { FileRef, Manifest, ModelEntry, WeightFiles } from "./manifest.ts";
 
 /**
- * 取得キー → ファイル参照。キーは weights 名 / `"<weights>.<extra>"` / assets 名。
+ * 取得キー → ファイル参照。キーは weights 名 / `"<weights>[<shard>]"`（複数 shard のとき）/
+ * `"<weights>.<extra>"` / assets 名。
  *
  * NOTE: 同一 `path` を指すキーが複数あっても**キーは落とさない**（落とすと呼び出し側が
  * その weights の bytes を引けなくなる）。取得と進捗総量の path 一意化は取得層
@@ -37,6 +38,17 @@ const selectModel = (manifest: Manifest, model?: string): ModelEntry => {
   return manifest.models[name];
 };
 
+/**
+ * shard の取得キー。1 shard なら weights 名そのもの（単一ファイル配布のキーを動かさない）、
+ * 複数 shard なら宣言順の位置を添えた `<weights>[i]` に展開する。
+ *
+ * MUST: 区切りに `.` を使わない — `<weights>.<extra>` は extras の名前空間で、shard を同じ形に
+ * すると extras 名と shard 番号が同じキーを主張し得る（この表はキーで引かれるので衝突は取り違え
+ * そのもの）。`[i]` は名前空間として交わらない。
+ */
+const shardKey = (name: string, index: number, count: number): string =>
+  count === 1 ? name : `${name}[${index}]`;
+
 const addWeightFiles = (
   entry: ModelEntry,
   files: ResolvedFiles,
@@ -53,7 +65,8 @@ const addWeightFiles = (
     }
     next = { ...next, [key]: ref };
   };
-  put(name, chosen.file);
+  // 宣言順のまま並べる（配列位置 = shard id — 並べ替えると識別子が壊れる）。
+  chosen.shards.forEach((ref, index) => put(shardKey(name, index, chosen.shards.length), ref));
   for (const extra of Object.keys(chosen.extras)) {
     put(`${name}.${extra}`, chosen.extras[extra]);
   }

@@ -39,13 +39,15 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 def _depth_anything_manifest(model: str = "small") -> dict[str, Any]:
     """Depth Anything V2 の最小 manifest（値は実物と重ならない偽値）。"""
     return {
-        "format": "karume/2",
+        "format": "karume/3",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
             model: {
                 "pipeline": DEPTH_ANYTHING_SUPPORTED_PIPELINE,
-                "weights": {"depth": {"f32": {"file": _ref("d/model.f32.safetensors", 17, "e")}}},
+                "weights": {
+                    "depth": {"f32": {"shards": [_ref("d/model.f32.safetensors", 17, "e")]}}
+                },
                 "assets": {},
                 "quants": {"f32": {"weights": {"depth": "f32"}, "session": {}}},
                 "defaultQuant": "f32",

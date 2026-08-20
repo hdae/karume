@@ -91,7 +91,7 @@ def _manifest() -> dict[str, Any]:
     `tables` は f16 / i8 の両 dtype が同一 path を指す形（rope_base の 1 本化と同型）。
     """
     return {
-        "format": "karume/2",
+        "format": "karume/3",
         "generator": "karume/9.9.9",
         "defaultModel": "zeta",
         "models": {
@@ -100,14 +100,14 @@ def _manifest() -> dict[str, Any]:
                 "weights": {
                     "front": {
                         "f16": {
-                            "file": _ref("zeta/front-f16.safetensors", 4096, "a" * 64),
+                            "shards": [_ref("zeta/front-f16.safetensors", 4096, "a" * 64)],
                             "extras": {"rope": _ref("zeta/front-rope.safetensors", 64, "b" * 64)},
                         },
-                        "i8": {"file": _ref("zeta/front-i8.safetensors", 2048, "c" * 64)},
+                        "i8": {"shards": [_ref("zeta/front-i8.safetensors", 2048, "c" * 64)]},
                     },
                     "tables": {
-                        "f16": {"file": _ref("zeta/tables.safetensors", 128, "d" * 64)},
-                        "i8": {"file": _ref("zeta/tables.safetensors", 128, "d" * 64)},
+                        "f16": {"shards": [_ref("zeta/tables.safetensors", 128, "d" * 64)]},
+                        "i8": {"shards": [_ref("zeta/tables.safetensors", 128, "d" * 64)]},
                     },
                 },
                 "assets": {"tokenizer": _ref("shared/tokenizer.json", 32, "e" * 64)},
@@ -124,7 +124,7 @@ def _manifest() -> dict[str, Any]:
             "alpha": {
                 "pipeline": "fake/1",
                 "weights": {
-                    "front": {"f16": {"file": _ref("alpha/front.safetensors", 512, "f" * 64)}}
+                    "front": {"f16": {"shards": [_ref("alpha/front.safetensors", 512, "f" * 64)]}}
                 },
                 "assets": {},
                 "quants": {"f16": {"weights": {"front": "f16"}, "session": {}}},

@@ -1,7 +1,7 @@
 """配布ディレクトリの組み立て — 系列ディレクトリ群 → HF へそのまま上げられる 1 リポ形。
 
 仕様の正本は ADR 0041（`docs/decisions/0041-manifest-v2.md`）。ここが作るのは §2 の形で
-並んだファイル群と、それを宣言する `karume.json`（`karume/2`）、そして manifest から機械導出
+並んだファイル群と、それを宣言する `karume.json`（`karume/3`）、そして manifest から機械導出
 したモデルカード `README.md`（ADR 0037 §3 の「そのまま HF リポとして上げられる形」）。
 
 **リポ内レイアウトは一律「モデル別サブツリー + `shared/` + 直下 `karume.json` / `README.md`」**
@@ -82,8 +82,10 @@ from karume.modelcard import HF_OWNER
 #: manifest のファイル名（ADR 0041 §1 — リポジトリ直下の固定名）。
 MANIFEST_FILENAME = "karume.json"
 
-#: manifest の形式識別子（ADR 0041 §1 — hub は v2 だけを読む）。
-MANIFEST_FORMAT = "karume/2"
+#: manifest の形式識別子（ADR 0041 §1 — hub は 1 形しか読まない）。`karume/3` は weights の
+#: dtype エントリを **shard 列**（`{shards, extras?}`）にした形で、単一ファイルの資産は
+#: 1 要素の列として宣言される（ADR 0070 決定 1 の shard 欄の確定）。
+MANIFEST_FORMAT = "karume/3"
 
 #: モデルカードのファイル名（ADR 0037 §3 — HF が frontmatter を読む固定名）。
 MODEL_CARD_FILENAME = "README.md"
@@ -104,6 +106,10 @@ MAX_MODELS = 32
 MAX_WEIGHTS = 32
 MAX_ASSETS = 32
 MAX_QUANTS = 32
+#: 1 dtype エントリが並べられる shard 数（`karume/3`）。exporter は分割規則を持たない
+#: （常に 1 要素を書く）が、検査は hub と同じ値で弾く — {@link verify_dist} は手元のどの
+#: 配布形にも掛けられる門なので、上限を知らない検査になっていると v3 の受理集合が 2 つに割れる。
+MAX_SHARDS = 1024
 MAX_PIPELINE_CONFIG_BYTES = 256 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 
@@ -315,10 +321,14 @@ def preprocessor_channels(
 
 @dataclass(frozen=True)
 class WeightFiles:
-    """weights の 1 dtype ぶん（ADR 0041 §3 の `{file, extras?}`）。中身は**役割名**。
+    """weights の 1 dtype ぶん（`karume/3` の `{shards, extras?}`）。中身は**役割名**。
 
     実 path は {@link Artifact} 側が持つ — 共有の畳み込みで path が `shared/…` へ動くので、
     宣言側が path を直に握っていると 2 箇所が独立に動く。
+
+    `file` が単数なのは、**exporter に shard 分割規則を持たせない**ため（ADR 0070 決定 1 —
+    分割の実需は LLM 配布で、そこまでは席だけ）。現行資産のコンテナは `karume_ir` を持つ
+    1 本なので、そのまま「先頭 = グラフ shard」の 1 要素 shard 列として宣言される。
     """
 
     file: str
@@ -506,7 +516,12 @@ def _model_entry(plan: ModelPlan, refs: Mapping[str, dict[str, Any]]) -> dict:
         entry: dict[str, Any] = {}
         for label, files in labels.items():
             extras = {extra: refs[role] for extra, role in files.extras.items()}
-            entry[label] = {"file": refs[files.file], **({"extras": extras} if extras else {})}
+            # `shards` は順序付きの列で、**先頭がグラフ shard**（`karume_ir` を持つコンテナ）。
+            # 分割規則を持たない現状は常に 1 要素 = そのコンテナそのもの（{@link WeightFiles}）。
+            entry[label] = {
+                "shards": [refs[files.file]],
+                **({"extras": extras} if extras else {}),
+            }
         weights[name] = entry
     return {
         "pipeline": plan.pipeline,
@@ -714,7 +729,8 @@ def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[s
     for model_name, model in manifest["models"].items():
         for name, labels in model["weights"].items():
             for label, entry in labels.items():
-                yield f"models.{model_name}.weights.{name}.{label}", entry["file"]
+                for index, ref in enumerate(entry["shards"]):
+                    yield f"models.{model_name}.weights.{name}.{label}.shards[{index}]", ref
                 for extra, ref in entry.get("extras", {}).items():
                     yield f"models.{model_name}.weights.{name}.{label}.extras.{extra}", ref
         for name, ref in model["assets"].items():
@@ -722,11 +738,12 @@ def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[s
 
 
 def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
-    """`karume/2` の構造整合（hub のパーサが受理する形かを焼いた側でも見る）。
+    """`karume/3` の構造整合（hub のパーサが受理する形かを焼いた側でも見る）。
 
     ここが見るのは**この配布形が自分で閉じているか**だけ — `defaultModel` / `defaultQuant` の
-    指し先、quant の weights 完全写像、そしてレイアウト（ADR 0041 §9）。hub の全検査を写経
-    しても正本が 2 つになるだけなので、写すのは「組み立てが壊れたら真っ先に破れる」規則に絞る。
+    指し先、quant の weights 完全写像、weights の shard 列、そしてレイアウト（ADR 0041 §9）。
+    hub の全検査を写経しても正本が 2 つになるだけなので、写すのは「組み立てが壊れたら真っ先に
+    破れる」規則に絞る。
     """
     if manifest.get("format") != MANIFEST_FORMAT:
         raise DistError(f"format が '{MANIFEST_FORMAT}' でない: {manifest.get('format')!r}")
@@ -742,6 +759,19 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
     for model_name, model in models.items():
         weights = model["weights"]
         quants = model["quants"]
+        for name, labels in weights.items():
+            for label, entry in labels.items():
+                # MUST: shard 列は**非空**（先頭がグラフ shard = `karume_ir` を持つコンテナ）。
+                # v2 の `{file}` を持ったままの manifest もここで落ちる — 形式識別子だけ書き換え
+                # て中身が旧形の配布形は、hub が読めないのに焼く側では通ってしまう。
+                shards = entry.get("shards")
+                if not isinstance(shards, list) or not 1 <= len(shards) <= MAX_SHARDS:
+                    # 実物が列なら件数だけを言う（上限超えの列をそのまま綴ると診断が数 MB になる）。
+                    found = f"{len(shards)} 要素" if isinstance(shards, list) else repr(shards)
+                    raise DistError(
+                        f"{model_name}.weights.{name}.{label}.shards が"
+                        f" 1〜{MAX_SHARDS} 要素の配列でない（実際: {found}）"
+                    )
         if model["defaultQuant"] not in quants:
             raise DistError(
                 f"{model_name}.defaultQuant '{model['defaultQuant']}' が"

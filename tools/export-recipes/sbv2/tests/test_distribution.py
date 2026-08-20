@@ -646,7 +646,7 @@ class TestSbv2Manifest:
 
     def test_it_derives_size_and_sha256_from_the_placed_files(self, sbv2_assembled) -> None:
         out_dir, manifest = sbv2_assembled
-        ref = _sbv2_model(manifest)["weights"]["front"]["i8"]["file"]
+        ref = _sbv2_model(manifest)["weights"]["front"]["i8"]["shards"][0]
         payload = _SBV2_PAYLOADS["front_i8"]
         assert ref["size"] == len(payload)
         assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
@@ -661,8 +661,19 @@ class TestSbv2Manifest:
         _, manifest = sbv2_assembled
         entry = _sbv2_model(manifest)["weights"]["text_encoder"]
         assert list(entry) == ["i8", "i4"]
-        assert entry["i8"]["file"]["path"].endswith("model.i8.safetensors")
-        assert entry["i4"]["file"]["path"].endswith("model.i4.safetensors")
+        assert entry["i8"]["shards"][0]["path"].endswith("model.i8.safetensors")
+        assert entry["i4"]["shards"][0]["path"].endswith("model.i4.safetensors")
+
+    def test_every_dtype_seat_declares_a_single_shard(self, sbv2_assembled) -> None:
+        """`karume/3` の shard 列は、この配布形では常に 1 要素（= `karume_ir` を持つコンテナ）。
+
+        exporter に分割規則が無いこと（ADR 0070 決定 1 は席だけ）の実 recipe 側の観測点 —
+        列に移した後も「1 本のコンテナを 1 本として配る」形が変わっていないことを固定する。
+        """
+        _, manifest = sbv2_assembled
+        for name, labels in _sbv2_model(manifest)["weights"].items():
+            for label, entry in labels.items():
+                assert len(entry["shards"]) == 1, (name, label)
 
     def test_it_carries_the_quant_table(self, sbv2_assembled) -> None:
         _, manifest = sbv2_assembled
@@ -712,7 +723,8 @@ class TestSbv2Manifest:
             entry = _sbv2_model(manifest)["weights"][role]
             assert list(entry) == ["f16", "i8", "i4"], role
             for label in entry:
-                assert entry[label]["file"]["path"].endswith(f"model.{label}.safetensors"), role
+                path = entry[label]["shards"][0]["path"]
+                assert path.endswith(f"model.{label}.safetensors"), role
 
     def test_the_w4_quant_takes_the_mixed_form_in_every_role(self, sbv2_assembled) -> None:
         """`w4` の意味は「3 席とも i4 混成・session は `w8` のまま」— 軸が 1 つであることを固定。
@@ -767,7 +779,7 @@ class TestSbv2Family:
         """319MB の DeBERTa がモデルごとに複製されるのが v1 の実害（ADR 0041 Context ②）。"""
         _, manifest = family
         paths = {
-            name: model["weights"]["text_encoder"]["i8"]["file"]["path"]
+            name: model["weights"]["text_encoder"]["i8"]["shards"][0]["path"]
             for name, model in manifest["models"].items()
         }
         assert set(paths.values()) == {f"{SHARED_DIRNAME}/{SBV2_OUTPUT_PATHS['text_encoder']}"}

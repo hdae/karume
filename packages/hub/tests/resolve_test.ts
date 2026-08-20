@@ -1,10 +1,11 @@
 // `resolveFiles` の 2 軸（model / quant）。取得層は通さず、manifest から取得キー表を作るところ
 // だけを見る。
 //
-// ここで押さえるのは 3 つ:
+// ここで押さえるのは 4 つ:
 //  ① 省略時は `defaultModel` / `defaultQuant` に落ちる（v2 で model 軸が増えた）。
 //  ② weights は選んだ dtype、assets は quant に依らず常に同じ実体が入る。
 //  ③ 未知の model / quant は**利用可能な一覧**を添えて落ちる（ADR 0041 §8）。
+//  ④ 複数 shard は宣言順のまま `<weights>[i]` へ展開される（v3 の shards 欄）。
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { ManifestReferenceError, parseManifest, resolveFiles } from "../mod.ts";
@@ -60,6 +61,43 @@ Deno.test("resolveFiles: 同一 path を指すキーは落とさず、同じ 3 �
   assertEquals(files["rope_alias"], files["transformer.rope_base"]);
   const paths = Object.values(files).map((ref) => ref.path);
   assertEquals(new Set(paths).size, 6, "7 キー / 6 パス（取得と進捗は path で一意化される）");
+});
+
+Deno.test("resolveFiles: 複数 shard は宣言順のまま別々の取得キーへ展開する", () => {
+  const shard = (name: string, size: number, mark: string) => ({
+    path: `net/${name}`,
+    size,
+    sha256: mark.repeat(32),
+  });
+  const graph = shard("graph.safetensors", 6, "a1");
+  const first = shard("weights-0.safetensors", 8, "b2");
+  const second = shard("weights-1.safetensors", 4, "c3");
+  const sharded = parseManifest(JSON.stringify({
+    format: "karume/3",
+    generator: "karume/0.1.0",
+    defaultModel: "m",
+    models: {
+      m: {
+        pipeline: "anima/1",
+        weights: {
+          net: {
+            f16: {
+              shards: [graph, first, second],
+              extras: { rope_base: shard("rope_base.safetensors", 6, "d4") },
+            },
+          },
+        },
+        assets: {},
+        quants: { q: { weights: { net: "f16" }, session: {} } },
+        defaultQuant: "q",
+        pipelineConfig: {},
+      },
+    },
+  }));
+  const files = resolveFiles(sharded);
+  // shard は `[i]`、extras は `.` — 名前空間が交わらないので取り違えが起きない。
+  assertEquals(Object.keys(files), ["net[0]", "net[1]", "net[2]", "net.rope_base"]);
+  assertEquals([files["net[0]"], files["net[1]"], files["net[2]"]], [graph, first, second]);
 });
 
 Deno.test("resolveFiles: 実在しない model は利用可能一覧つきで拒否する", () => {

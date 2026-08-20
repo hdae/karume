@@ -34,13 +34,13 @@ const FILE = {
 /** `models/karume-sbv2-fn/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/2",
+    format: "karume/3",
     generator: "karume/0.1.0",
     defaultModel: "FN4",
     models: {
       FN4: {
         pipeline: "sbv2/1",
-        weights: { front: { i8: { file: FILE } } },
+        weights: { front: { i8: { shards: [FILE] } } },
         assets: {},
         quants: { w8: { weights: { front: "i8" }, session: {} } },
         defaultQuant: "w8",

@@ -361,7 +361,7 @@ class TestIrodoriLayout:
         model = _irodori_model(manifest)
         for seat, (dtype, _) in IRODORI_QUANT_SEATS.items():
             for role, label in model["quants"][seat]["weights"].items():
-                path = model["weights"][role][label]["file"]["path"]
+                path = model["weights"][role][label]["shards"][0]["path"]
                 assert path.endswith(f"model.{dtype}.safetensors"), (role, seat, path)
                 assert (out_dir / path).is_file()
 

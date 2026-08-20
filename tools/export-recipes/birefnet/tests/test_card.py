@@ -39,13 +39,15 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 def _birefnet_manifest(model: str = "hr") -> dict[str, Any]:
     """BiRefNet 系の最小 manifest（値は実物と重ならない偽値）。"""
     return {
-        "format": "karume/2",
+        "format": "karume/3",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
             model: {
                 "pipeline": BIREFNET_SUPPORTED_PIPELINE,
-                "weights": {"matte": {"f32": {"file": _ref("m/model.f32.safetensors", 13, "d")}}},
+                "weights": {
+                    "matte": {"f32": {"shards": [_ref("m/model.f32.safetensors", 13, "d")]}}
+                },
                 "assets": {},
                 "quants": {"f32": {"weights": {"matte": "f32"}, "session": {}}},
                 "defaultQuant": "f32",

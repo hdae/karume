@@ -360,7 +360,7 @@ class TestManifest:
         for name, entry in weights.items():
             assert sorted(entry) == sorted(ANIMA_WEIGHTS[name]), name
             for files in entry.values():
-                assert sorted(files) in (["file"], ["extras", "file"])
+                assert sorted(files) in (["shards"], ["extras", "shards"])
 
     def test_the_unconditional_files_live_in_assets(self, assembled) -> None:
         _, manifest = assembled
@@ -371,7 +371,7 @@ class TestManifest:
 
     def test_it_derives_size_and_sha256_from_the_placed_files(self, assembled) -> None:
         out_dir, manifest = assembled
-        ref = manifest["models"][ANIMA_MODEL_NAME]["weights"]["text_encoder"]["f16"]["file"]
+        ref = manifest["models"][ANIMA_MODEL_NAME]["weights"]["text_encoder"]["f16"]["shards"][0]
         payload = _PAYLOADS["text_encoder"]
         assert ref["size"] == len(payload)
         assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
@@ -540,7 +540,7 @@ class TestFamilyAssembly:
         out_dir, manifest = family
         shared_path = f"{SHARED_DIRNAME}/{OUTPUT_PATHS['text_encoder']}"
         for name in manifest["models"]:
-            ref = manifest["models"][name]["weights"]["text_encoder"]["f16"]["file"]
+            ref = manifest["models"][name]["weights"]["text_encoder"]["f16"]["shards"][0]
             assert ref["path"] == shared_path
         assert (out_dir / shared_path).read_bytes() == _PAYLOADS["text_encoder"]
         # 各モデルのサブツリーには残らない（1 回だけ置く = 重複を配らない）。
@@ -550,7 +550,7 @@ class TestFamilyAssembly:
     def test_it_keeps_the_files_that_differ_inside_each_model_subtree(self, family) -> None:
         out_dir, manifest = family
         paths = {
-            name: manifest["models"][name]["weights"]["transformer"]["i8"]["file"]["path"]
+            name: manifest["models"][name]["weights"]["transformer"]["i8"]["shards"][0]["path"]
             for name in manifest["models"]
         }
         assert paths == {

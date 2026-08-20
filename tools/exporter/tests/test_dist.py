@@ -15,6 +15,7 @@ core だけで観測できる層だけ — 合成計画で足りる規模上限�
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -25,7 +26,9 @@ import pytest
 from karume import dist
 from karume.artifacts import SUPERSEDED_SUFFIX
 from karume.dist import (
+    MANIFEST_FILENAME,
     MANIFEST_FORMAT,
+    MAX_SHARDS,
     PIPELINES,
     SHARED_DIRNAME,
     Artifact,
@@ -153,7 +156,7 @@ class TestManifestLimits:
     def _model(config: Any = None) -> dict[str, Any]:
         return {
             "pipeline": "anima/1",
-            "weights": {"w": {"f16": {"file": _ref("m/w.safetensors")}}},
+            "weights": {"w": {"f16": {"shards": [_ref("m/w.safetensors")]}}},
             "assets": {},
             "quants": {"f16": {"weights": {"w": "f16"}, "session": {}}},
             "defaultQuant": "f16",
@@ -181,6 +184,71 @@ class TestManifestLimits:
         oversized = {"table": {f"k{index}": index for index in range(40_000)}}
         with pytest.raises(DistError, match="pipelineConfig"):
             assert_manifest_limits(self._manifest({"m": self._model(oversized)}))
+
+
+class TestShardDeclaration:
+    """`karume/3` の weights は dtype ごとに **shard 列**を持つ（ADR 0070 決定 1 の欄）。
+
+    exporter は分割規則を持たない（{@link WeightFiles}）ので、書く列は常に 1 要素 —
+    `karume_ir` を持つコンテナそのもの = 先頭のグラフ shard。
+    """
+
+    _PAYLOAD = b"weights-A"
+
+    def _assemble(self, tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+        out_dir = tmp_path / "models" / "sharded"
+        plans = [_synthetic_plan("A", "w/model.safetensors", self._PAYLOAD)]
+        return out_dir, assemble_family(plans, out_dir, "A")
+
+    def _rewrite_weights(self, out_dir: Path, entry: Any) -> None:
+        """据わった配布形の manifest だけを別形に差し替える（現物はそのまま）。"""
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        manifest["models"]["A"]["weights"]["w"]["f16"] = entry
+        (out_dir / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+    def test_the_format_identifier_names_the_third_manifest_version(self) -> None:
+        """形式識別子は hub と 1 文字も違えられない（hub は 1 形しか読まない）。"""
+        assert MANIFEST_FORMAT == "karume/3"
+
+    def test_it_declares_the_container_as_a_one_element_shard_list(self, tmp_path: Path) -> None:
+        out_dir, manifest = self._assemble(tmp_path)
+        entry = manifest["models"]["A"]["weights"]["w"]["f16"]
+
+        # v2 の `file` は残っていない（2 形が同居すると hub が「どちらを読むか」を持つ）。
+        assert list(entry) == ["shards"]
+        assert entry["shards"] == [
+            {
+                "path": "A/w/model.safetensors",
+                "size": len(self._PAYLOAD),
+                "sha256": hashlib.sha256(self._PAYLOAD).hexdigest(),
+            }
+        ]
+        assert (out_dir / entry["shards"][0]["path"]).read_bytes() == self._PAYLOAD
+
+    def test_the_shard_is_covered_by_the_declaration_check(self, tmp_path: Path) -> None:
+        """突合は shard 列を辿って現物へ届く（列に移して素通りしはじめると宣言外扱いになる）。"""
+        out_dir, _ = self._assemble(tmp_path)
+        assert verify_dist(out_dir) == {"A/w/model.safetensors": len(self._PAYLOAD)}
+
+    def test_it_refuses_a_manifest_that_kept_the_v2_single_file_form(self, tmp_path: Path) -> None:
+        """形式識別子だけ v3 で中身が `{file}` の manifest は、hub が読めないのでここで落とす。"""
+        out_dir, manifest = self._assemble(tmp_path)
+        ref = manifest["models"]["A"]["weights"]["w"]["f16"]["shards"][0]
+        self._rewrite_weights(out_dir, {"file": ref})
+        with pytest.raises(DistError, match="shards が"):
+            verify_dist(out_dir)
+
+    @pytest.mark.parametrize("shards", [[], "A/w/model.safetensors"])
+    def test_it_refuses_a_shard_list_that_is_not_a_non_empty_array(
+        self, tmp_path: Path, shards: Any
+    ) -> None:
+        """空の列（= 重みを 1 本も指さない dtype 席）も、列ですらない値も受理しない。"""
+        out_dir, _ = self._assemble(tmp_path)
+        self._rewrite_weights(out_dir, {"shards": shards})
+        with pytest.raises(DistError, match=f"1〜{MAX_SHARDS} 要素の配列でない"):
+            verify_dist(out_dir)
 
 
 class TestPlanGates:
@@ -221,7 +289,7 @@ class TestFamilyAssembly:
         manifest = assemble_family(plans, out_dir, "A")
 
         for name, payload in (("A", first), ("B", first), ("C", second), ("D", second)):
-            ref = manifest["models"][name]["weights"]["w"]["f16"]["file"]
+            ref = manifest["models"][name]["weights"]["w"]["f16"]["shards"][0]
             assert (out_dir / ref["path"]).read_bytes() == payload, name
             assert ref["sha256"] == hashlib.sha256(payload).hexdigest(), name
             assert ref["size"] == len(payload), name
@@ -262,7 +330,7 @@ class TestFamilyAssembly:
 
         assert taken == []
         for name, payload in (("A", short), ("B", long)):
-            ref = manifest["models"][name]["weights"]["w"]["f16"]["file"]
+            ref = manifest["models"][name]["weights"]["w"]["f16"]["shards"][0]
             assert ref["path"] == f"{name}/{rel_path}", name
             assert (out_dir / ref["path"]).read_bytes() == payload, name
         assert not (out_dir / SHARED_DIRNAME).exists()
@@ -284,7 +352,7 @@ class TestFamilyAssembly:
 
         assert taken == [rel_path, rel_path]
         for name, payload in (("A", first), ("B", second)):
-            ref = manifest["models"][name]["weights"]["w"]["f16"]["file"]
+            ref = manifest["models"][name]["weights"]["w"]["f16"]["shards"][0]
             assert ref["path"] == f"{name}/{rel_path}", name
             assert (out_dir / ref["path"]).read_bytes() == payload, name
         assert not (out_dir / SHARED_DIRNAME).exists()
@@ -311,10 +379,10 @@ class TestFamilyAssembly:
         assert taken == [rel_path, rel_path]
         target = f"{SHARED_DIRNAME}/{rel_path}"
         for name in ("A", "B"):
-            ref = manifest["models"][name]["weights"]["w"]["f16"]["file"]
+            ref = manifest["models"][name]["weights"]["w"]["f16"]["shards"][0]
             assert ref["path"] == target, name
             assert ref["sha256"] == hashlib.sha256(shared_bytes).hexdigest(), name
-        loner = manifest["models"]["C"]["weights"]["w"]["f16"]["file"]
+        loner = manifest["models"]["C"]["weights"]["w"]["f16"]["shards"][0]
         assert loner["path"] == f"C/{rel_path}"
         assert (out_dir / loner["path"]).read_bytes() == odd
         assert (out_dir / target).read_bytes() == shared_bytes

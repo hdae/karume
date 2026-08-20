@@ -1,5 +1,5 @@
 {
-  "format": "karume/2",
+  "format": "karume/3",
   "generator": "karume/0.1.0",
   "defaultModel": "anima-turbo",
   "models": {
@@ -8,29 +8,35 @@
       "weights": {
         "text_encoder": {
           "f16": {
-            "file": {
-              "path": "text_encoder/model.safetensors",
-              "size": 42,
-              "sha256": "14a36a9dbd47cb0288f910d3c713008bef9a97ed11f4816082fe40d592c991b9"
-            }
+            "shards": [
+              {
+                "path": "text_encoder/model.safetensors",
+                "size": 42,
+                "sha256": "14a36a9dbd47cb0288f910d3c713008bef9a97ed11f4816082fe40d592c991b9"
+              }
+            ]
           }
         },
         "text_conditioner": {
           "f16": {
-            "file": {
-              "path": "text_conditioner/model.safetensors",
-              "size": 46,
-              "sha256": "6c2c839f36130ea9889e282b706f93939337823efe553b27dc1c2bbf4d94be7e"
-            }
+            "shards": [
+              {
+                "path": "text_conditioner/model.safetensors",
+                "size": 46,
+                "sha256": "6c2c839f36130ea9889e282b706f93939337823efe553b27dc1c2bbf4d94be7e"
+              }
+            ]
           }
         },
         "transformer": {
           "f16": {
-            "file": {
-              "path": "transformer/model.f16.safetensors",
-              "size": 45,
-              "sha256": "34e402b013ecd081136a12177f61d0c8bc861849e27b97e4a8af10f8e98e7e1e"
-            },
+            "shards": [
+              {
+                "path": "transformer/model.f16.safetensors",
+                "size": 45,
+                "sha256": "34e402b013ecd081136a12177f61d0c8bc861849e27b97e4a8af10f8e98e7e1e"
+              }
+            ],
             "extras": {
               "rope_base": {
                 "path": "transformer/rope_base.safetensors",
@@ -40,11 +46,13 @@
             }
           },
           "i8": {
-            "file": {
-              "path": "transformer/model.i8.safetensors",
-              "size": 44,
-              "sha256": "9ee4f749d4f6e27b29c760a4ebab8cac2cc64c7e8fb9282ac314056e6dc39e32"
-            },
+            "shards": [
+              {
+                "path": "transformer/model.i8.safetensors",
+                "size": 44,
+                "sha256": "9ee4f749d4f6e27b29c760a4ebab8cac2cc64c7e8fb9282ac314056e6dc39e32"
+              }
+            ],
             "extras": {
               "rope_base": {
                 "path": "transformer/rope_base.safetensors",
@@ -56,11 +64,13 @@
         },
         "vae_decoder": {
           "f16": {
-            "file": {
-              "path": "vae_decoder/model.safetensors",
-              "size": 41,
-              "sha256": "422c2a6d4a1839415af25db2feb032c5df824df03f023da868cb4fabd6a6aec4"
-            }
+            "shards": [
+              {
+                "path": "vae_decoder/model.safetensors",
+                "size": 41,
+                "sha256": "422c2a6d4a1839415af25db2feb032c5df824df03f023da868cb4fabd6a6aec4"
+              }
+            ]
           }
         }
       },
@@ -128,20 +138,24 @@
       "weights": {
         "text_encoder": {
           "f16": {
-            "file": {
-              "path": "text_encoder/model.safetensors",
-              "size": 42,
-              "sha256": "14a36a9dbd47cb0288f910d3c713008bef9a97ed11f4816082fe40d592c991b9"
-            }
+            "shards": [
+              {
+                "path": "text_encoder/model.safetensors",
+                "size": 42,
+                "sha256": "14a36a9dbd47cb0288f910d3c713008bef9a97ed11f4816082fe40d592c991b9"
+              }
+            ]
           }
         },
         "transformer": {
           "i8": {
-            "file": {
-              "path": "transformer/model.i8.safetensors",
-              "size": 44,
-              "sha256": "9ee4f749d4f6e27b29c760a4ebab8cac2cc64c7e8fb9282ac314056e6dc39e32"
-            },
+            "shards": [
+              {
+                "path": "transformer/model.i8.safetensors",
+                "size": 44,
+                "sha256": "9ee4f749d4f6e27b29c760a4ebab8cac2cc64c7e8fb9282ac314056e6dc39e32"
+              }
+            ],
             "extras": {
               "rope_base": {
                 "path": "transformer/rope_base.safetensors",

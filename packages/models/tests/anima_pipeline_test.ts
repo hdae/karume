@@ -27,13 +27,13 @@ const FILE = {
 /** `models/karume-anima-turbo/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/2",
+    format: "karume/3",
     generator: "karume/0.1.0",
     defaultModel: "anima-turbo",
     models: {
       "anima-turbo": {
         pipeline: "anima/1",
-        weights: { transformer: { f16: { file: FILE } } },
+        weights: { transformer: { f16: { shards: [FILE] } } },
         assets: {},
         quants: { "w8a8-s16": { weights: { transformer: "f16" }, session: {} } },
         defaultQuant: "w8a8-s16",

@@ -61,7 +61,7 @@ const validManifestText = await Deno.readTextFile(
 const FILE = { path: "net/model.f16.safetensors", size: 4, sha256: "a1".repeat(32) };
 
 /**
- * 検査に要る欄だけを持つ最小の v2 manifest。`patch` は `models.m` の中身を、`envelope` は
+ * 検査に要る欄だけを持つ最小の v3 manifest。`patch` は `models.m` の中身を、`envelope` は
  * トップレベルを上書きする。
  */
 const withModel = (
@@ -69,13 +69,13 @@ const withModel = (
   envelope: Record<string, unknown> = {},
 ): string =>
   JSON.stringify({
-    format: "karume/2",
+    format: "karume/3",
     generator: "karume/0.1.0",
     defaultModel: "m",
     models: {
       m: {
         pipeline: "anima/1",
-        weights: { net: { f16: { file: FILE } } },
+        weights: { net: { f16: { shards: [FILE] } } },
         assets: {},
         quants: { q: { weights: { net: "f16" }, session: {} } },
         defaultQuant: "q",
@@ -104,14 +104,14 @@ Deno.test("parseManifest: fixture の全違反ケースが宣言どおりのエ�
 
 Deno.test("parseManifest: JSON として壊れていれば ManifestFormatError に包んで再送出する", () => {
   const error = assertThrows(
-    () => parseManifest('{"format": "karume/2",}'),
+    () => parseManifest('{"format": "karume/3",}'),
     ManifestFormatError,
   );
   assert(error.cause instanceof SyntaxError, "元の SyntaxError を cause に残す");
 });
 
 Deno.test("parseManifest: v1（karume/1）は読まずに未対応 major として落とす", () => {
-  // ADR 0041 §1: hub は v2 だけを読む（2 形パースを持たない）。旧クライアントの裏返しで、
+  // ADR 0041 §1: hub は現行版だけを読む（2 形パースを持たない）。旧クライアントの裏返しで、
   // 新クライアントが旧 manifest を**旧解釈で黙って実行する**経路も作らない。
   const error = assertThrows(
     () =>
@@ -127,15 +127,48 @@ Deno.test("parseManifest: v1（karume/1）は読まずに未対応 major とし�
     ManifestFormatError,
   );
   assert(
+    error.message.includes("karume/3"),
+    `${error.message} が「読めるのは karume/3」を名指ししていない`,
+  );
+});
+
+Deno.test("parseManifest: 直前版（karume/2）も読まず、現行が karume/3 であることを名指しする", () => {
+  // v2 は weights の dtype エントリが `{file}`。綴りは v3 と 1 欄しか違わないので、format を
+  // 見ずに構造から入ると「未知キー 'file'」という枝葉の診断になり、本当の理由（この hub は
+  // karume/3 しか読まない）が隠れる。診断が版を名指しすることまでを観測値として固定する。
+  const error = assertThrows(
+    () =>
+      parseManifest(JSON.stringify({
+        format: "karume/2",
+        generator: "karume/0.1.0",
+        defaultModel: "m",
+        models: {
+          m: {
+            pipeline: "anima/1",
+            weights: { net: { f16: { file: FILE } } },
+            assets: {},
+            quants: { q: { weights: { net: "f16" }, session: {} } },
+            defaultQuant: "q",
+            pipelineConfig: {},
+          },
+        },
+      })),
+    ManifestFormatError,
+  );
+  assert(
     error.message.includes("karume/2"),
-    `${error.message} が「読めるのは karume/2」を名指ししていない`,
+    `${error.message} が拒否した版を名指ししていない`,
+  );
+  assert(
+    error.message.includes("karume/3"),
+    `${error.message} が「読めるのは karume/3」を名指ししていない`,
   );
 });
 
 Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
   const modelEntry = (quantName: string) => ({
     pipeline: "anima/1",
-    weights: { net: { f16: { file: FILE } } },
+    weights: { net: { f16: { shards: [FILE] } } },
     assets: {},
     quants: { [quantName]: { weights: { net: "f16" }, session: {} } },
     defaultQuant: quantName,
@@ -148,7 +181,7 @@ Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
       models = { ...models, [`m${index}`]: modelEntry("q") };
     }
     const text = JSON.stringify({
-      format: "karume/2",
+      format: "karume/3",
       generator: "karume/0.1.0",
       defaultModel: "m0",
       models,
@@ -160,7 +193,7 @@ Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
     let weights: Record<string, unknown> = {};
     let mapping: Record<string, string> = {};
     for (let index = 0; index < 33; index += 1) {
-      weights = { ...weights, [`w${index}`]: { f16: { file: FILE } } };
+      weights = { ...weights, [`w${index}`]: { f16: { shards: [FILE] } } };
       mapping = { ...mapping, [`w${index}`]: "f16" };
     }
     assertThrows(
@@ -169,6 +202,24 @@ Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
           weights,
           quants: { q: { weights: mapping, session: {} } },
         })),
+      ManifestFormatError,
+    );
+  });
+
+  await t.step("shards 1025 件（1024 件は通る）", () => {
+    const shards = (count: number): unknown[] =>
+      Array.from({ length: count }, (_, index) => ({
+        path: `net/model.f16.shard${index}.safetensors`,
+        size: 8,
+        sha256: "b2".repeat(32),
+      }));
+    // 上限ちょうどが通ることまで見る（片側だけだと「常に落ちる」実装でも緑になる）。
+    const accepted = parseManifest(
+      withModel({ weights: { net: { f16: { shards: shards(1024) } } } }),
+    );
+    assertEquals(accepted.models["m"].weights["net"]["f16"].shards.length, 1024);
+    assertThrows(
+      () => parseManifest(withModel({ weights: { net: { f16: { shards: shards(1025) } } } })),
       ManifestFormatError,
     );
   });
@@ -234,7 +285,7 @@ Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラ�
   const error = assertThrows(
     () =>
       parseManifest(JSON.stringify({
-        format: "karume/2",
+        format: "karume/3",
         generator: "karume/0.1.0",
         defaultModel: "fast",
         models: {
@@ -242,8 +293,10 @@ Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラ�
             pipeline: "anima/1",
             weights: {
               net: {
-                f16: { file: { path: "net/f16.safetensors", size: 8, sha256: "b2".repeat(32) } },
-                i8: { file: { path: "net/i8.safetensors", size: 4, sha256: "c3".repeat(32) } },
+                f16: {
+                  shards: [{ path: "net/f16.safetensors", size: 8, sha256: "b2".repeat(32) }],
+                },
+                i8: { shards: [{ path: "net/i8.safetensors", size: 4, sha256: "c3".repeat(32) }] },
               },
             },
             assets: {},
@@ -254,7 +307,7 @@ Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラ�
           slim: {
             pipeline: "anima/1",
             weights: {
-              net: { i8: { file: { path: "slim/i8.st", size: 2, sha256: "d4".repeat(32) } } },
+              net: { i8: { shards: [{ path: "slim/i8.st", size: 2, sha256: "d4".repeat(32) }] } },
             },
             assets: {},
             quants: { w8: { weights: { net: "i8" }, session: {} } },
@@ -284,7 +337,7 @@ Deno.test("parseManifest: トップレベルの違反にはモデル一覧だけ
 
 Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () => {
   const manifest = parseManifest(validManifestText);
-  assertEquals(manifest.format, "karume/2");
+  assertEquals(manifest.format, "karume/3");
   assertEquals(manifest.generator, "karume/0.1.0");
   assertEquals(manifest.defaultModel, "anima-turbo");
   assertEquals(Object.keys(manifest.models), ["anima-turbo", "anima-lite"]);
@@ -300,8 +353,8 @@ Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () =>
   assertEquals(Object.keys(turbo.weights["transformer"]), ["f16", "i8"]);
   assertEquals(Object.keys(turbo.weights["vae_decoder"]), ["f16"]);
   assertEquals(
-    turbo.weights["transformer"]["i8"].file.path,
-    "transformer/model.i8.safetensors",
+    turbo.weights["transformer"]["i8"].shards.map((shard) => shard.path),
+    ["transformer/model.i8.safetensors"],
   );
   // extras は dtype エントリの内側（ADR 0041 §3 は席を動かしていない）。
   assertEquals(Object.keys(turbo.weights["transformer"]["i8"].extras), ["rope_base"]);
@@ -328,12 +381,82 @@ Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () =>
 
 Deno.test("parseManifest: モデル間で同一 path を指す共有は成立する（ADR 0041 §5）", () => {
   const manifest = parseManifest(validManifestText);
-  const shared = manifest.models["anima-turbo"].weights["text_encoder"]["f16"].file;
-  const same = manifest.models["anima-lite"].weights["text_encoder"]["f16"].file;
+  const shared = manifest.models["anima-turbo"].weights["text_encoder"]["f16"].shards[0];
+  const same = manifest.models["anima-lite"].weights["text_encoder"]["f16"].shards[0];
   assertEquals(same.path, shared.path);
   assertEquals(same.sha256, shared.sha256);
   // 表は 1 本なので、同じ path は同じ FileRef インスタンスに畳まれる（取得も 1 回になる）。
   assert(same === shared, "同一 path の参照が畳まれていない");
+});
+
+Deno.test("parseManifest: weights の shards 欄（ADR 0070 決定 1）", async (t) => {
+  const shard = (name: string, size: number, mark: string) => ({
+    path: `net/${name}`,
+    size,
+    sha256: mark.repeat(32),
+  });
+
+  await t.step("1 要素の shards は単一ファイル配布として読める", () => {
+    const manifest = parseManifest(withModel());
+    assertEquals(manifest.models["m"].weights["net"]["f16"].shards, [FILE]);
+  });
+
+  await t.step("複数要素は宣言順のまま保たれる（配列位置が shard id）", () => {
+    const graph = shard("graph.safetensors", 6, "a1");
+    const first = shard("weights-0.safetensors", 8, "b2");
+    const second = shard("weights-1.safetensors", 4, "c3");
+    const manifest = parseManifest(
+      withModel({ weights: { net: { f16: { shards: [graph, first, second] } } } }),
+    );
+    // 並べ替えも重複畳み込みもしない — 順序は先頭 = グラフ shard という意味を持つ（検査は runtime）。
+    assertEquals(
+      manifest.models["m"].weights["net"]["f16"].shards.map((entry) => entry.path),
+      ["net/graph.safetensors", "net/weights-0.safetensors", "net/weights-1.safetensors"],
+    );
+  });
+
+  await t.step("shards の中でも同一 path の 3 点セット不一致は拒否する", () => {
+    const error = assertThrows(
+      () =>
+        parseManifest(withModel({
+          weights: {
+            net: {
+              f16: {
+                shards: [
+                  shard("weights-0.safetensors", 8, "b2"),
+                  shard(
+                    "weights-0.safetensors",
+                    8,
+                    "c3",
+                  ),
+                ],
+              },
+            },
+          },
+        })),
+      ManifestReferenceError,
+    );
+    assert(
+      error.message.includes("weights-0.safetensors"),
+      `${error.message} が食い違った path を名指ししていない`,
+    );
+  });
+
+  await t.step("extras は shards と独立の席のまま", () => {
+    const manifest = parseManifest(withModel({
+      weights: {
+        net: {
+          f16: {
+            shards: [shard("weights-0.safetensors", 8, "b2")],
+            extras: { rope_base: shard("rope_base.safetensors", 6, "d4") },
+          },
+        },
+      },
+    }));
+    const files = manifest.models["m"].weights["net"]["f16"];
+    assertEquals(files.shards.length, 1);
+    assertEquals(Object.keys(files.extras), ["rope_base"]);
+  });
 });
 
 Deno.test("parseManifest: pipeline の major は形だけ検査し、裁定は models 側へ渡す", () => {

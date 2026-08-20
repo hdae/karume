@@ -116,7 +116,10 @@ def file_rows(model: Mapping[str, Any]) -> list[tuple[str, list[str], Mapping[st
 
     for name, entry in model["weights"].items():
         for label, weight_files in entry.items():
-            add(name, label, weight_files["file"])
+            # shard 列は全要素を並べる（表の役目は「配るファイルの一覧」— 先頭のグラフ shard
+            # だけ載せると、残りの shard が manifest にしか現れない）。
+            for ref in weight_files["shards"]:
+                add(name, label, ref)
         for label, weight_files in entry.items():
             for extra, ref in weight_files.get("extras", {}).items():
                 add(f"{name}.{extra}", label, ref)

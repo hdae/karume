@@ -35,21 +35,21 @@ def _manifest() -> dict[str, Any]:
     shared_encoder = _ref("shared/text_encoder/model.safetensors", 111, "a")
     rope = _ref("turbo/transformer/rope_base.safetensors", 333, "c")
     return {
-        "format": "karume/2",
+        "format": "karume/3",
         "generator": "karume/9.9.9",
         "defaultModel": "turbo",
         "models": {
             "turbo": {
                 "pipeline": SUPPORTED_PIPELINE,
                 "weights": {
-                    "text_encoder": {"f16": {"file": shared_encoder}},
+                    "text_encoder": {"f16": {"shards": [shared_encoder]}},
                     "transformer": {
                         "f16": {
-                            "file": _ref("turbo/transformer/model.f16.safetensors", 222, "b"),
+                            "shards": [_ref("turbo/transformer/model.f16.safetensors", 222, "b")],
                             "extras": {"rope_base": rope},
                         },
                         "i8": {
-                            "file": _ref("turbo/transformer/model.i8.safetensors", 444, "d"),
+                            "shards": [_ref("turbo/transformer/model.i8.safetensors", 444, "d")],
                             "extras": {"rope_base": rope},
                         },
                     },
@@ -84,9 +84,9 @@ def _manifest() -> dict[str, Any]:
             "lite": {
                 "pipeline": SUPPORTED_PIPELINE,
                 "weights": {
-                    "text_encoder": {"f16": {"file": shared_encoder}},
+                    "text_encoder": {"f16": {"shards": [shared_encoder]}},
                     "transformer": {
-                        "i8": {"file": _ref("lite/transformer/model.i8.safetensors", 666, "f")}
+                        "i8": {"shards": [_ref("lite/transformer/model.i8.safetensors", 666, "f")]}
                     },
                 },
                 "assets": {"tokenizer": _ref("shared/tokenizer/qwen2.json", 555, "e")},
@@ -237,7 +237,7 @@ class TestDerivation:
 
     def test_it_takes_the_sizes_from_the_manifest(self, card: str) -> None:
         manifest = _manifest()
-        manifest["models"]["turbo"]["weights"]["text_encoder"]["f16"]["file"]["size"] = 999
+        manifest["models"]["turbo"]["weights"]["text_encoder"]["f16"]["shards"][0]["size"] = 999
         moved = render_model_card(manifest, REPO)
         assert "111 B" in card
         assert "111 B" not in moved

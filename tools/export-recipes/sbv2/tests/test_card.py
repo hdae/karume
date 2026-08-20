@@ -48,13 +48,15 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
     """SigLIP2 の最小 manifest（テンプレート取り違えの門を両向きに見るための相手）。"""
     return {
-        "format": "karume/2",
+        "format": "karume/3",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
             model: {
                 "pipeline": SIGLIP2_SUPPORTED_PIPELINE,
-                "weights": {"vision": {"f32": {"file": _ref("v/model.f32.safetensors", 11, "c")}}},
+                "weights": {
+                    "vision": {"f32": {"shards": [_ref("v/model.f32.safetensors", 11, "c")]}}
+                },
                 "assets": {},
                 "quants": {"f32": {"weights": {"vision": "f32"}, "session": {}}},
                 "defaultQuant": "f32",
@@ -80,21 +82,21 @@ def _sbv2_manifest() -> dict[str, Any]:
     text_encoder = _ref("shared/text_encoder/model.i8.safetensors", 555, "e")
     tokenizer = _ref("shared/tokenizer/fake-tokenizer.json", 11, "3")
     return {
-        "format": "karume/2",
+        "format": "karume/3",
         "generator": "karume/9.9.9",
         "defaultModel": "ZA",
         "models": {
             "ZA": {
                 "pipeline": SBV2_SUPPORTED_PIPELINE,
                 "weights": {
-                    "text_encoder": {"i8": {"file": text_encoder}},
+                    "text_encoder": {"i8": {"shards": [text_encoder]}},
                     "front": {
-                        "f16": {"file": _ref("ZA/front/model.f16.safetensors", 666, "f")},
-                        "i8": {"file": _ref("ZA/front/model.i8.safetensors", 777, "0")},
+                        "f16": {"shards": [_ref("ZA/front/model.f16.safetensors", 666, "f")]},
+                        "i8": {"shards": [_ref("ZA/front/model.i8.safetensors", 777, "0")]},
                     },
                     "voice": {
-                        "f16": {"file": _ref("ZA/voice/model.f16.safetensors", 888, "1")},
-                        "i8": {"file": _ref("ZA/voice/model.i8.safetensors", 999, "2")},
+                        "f16": {"shards": [_ref("ZA/voice/model.f16.safetensors", 888, "1")]},
+                        "i8": {"shards": [_ref("ZA/voice/model.i8.safetensors", 999, "2")]},
                     },
                 },
                 "assets": {
@@ -135,9 +137,9 @@ def _sbv2_manifest() -> dict[str, Any]:
             "ZB": {
                 "pipeline": SBV2_SUPPORTED_PIPELINE,
                 "weights": {
-                    "text_encoder": {"i8": {"file": text_encoder}},
-                    "front": {"i8": {"file": _ref("ZB/front/model.i8.safetensors", 100, "7")}},
-                    "voice": {"i8": {"file": _ref("ZB/voice/model.i8.safetensors", 200, "8")}},
+                    "text_encoder": {"i8": {"shards": [text_encoder]}},
+                    "front": {"i8": {"shards": [_ref("ZB/front/model.i8.safetensors", 100, "7")]}},
+                    "voice": {"i8": {"shards": [_ref("ZB/voice/model.i8.safetensors", 200, "8")]}},
                 },
                 "assets": {
                     "tokenizer": tokenizer,
@@ -233,9 +235,10 @@ class TestSbv2Derivation:
         files, _, _ = rest.partition("### Quants")
         model = _sbv2_manifest()["models"]["ZA"]
         declared = [
-            entry["file"]["path"]
+            ref["path"]
             for weights in model["weights"].values()
             for entry in weights.values()
+            for ref in entry["shards"]
         ]
         declared += [ref["path"] for ref in model["assets"].values()]
         rows = [line for line in files.splitlines() if line.startswith("| `")]
@@ -245,7 +248,7 @@ class TestSbv2Derivation:
 
     def test_it_takes_the_sizes_from_the_manifest(self, sbv2_card: str) -> None:
         manifest = _sbv2_manifest()
-        manifest["models"]["ZA"]["weights"]["text_encoder"]["i8"]["file"]["size"] = 12345
+        manifest["models"]["ZA"]["weights"]["text_encoder"]["i8"]["shards"][0]["size"] = 12345
         moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE)
         assert "555 B" in sbv2_card
         assert "555 B" not in moved

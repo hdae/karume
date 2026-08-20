@@ -1,5 +1,5 @@
 /**
- * `@karume/hub` — 配布 manifest v2（`karume.json` / `karume/2`）の解決と HF からの取得。
+ * `@karume/hub` — 配布 manifest v3（`karume.json` / `karume/3`）の解決と HF からの取得。
  *
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
  * 面は利用者ストーリーに対応する — manifest を読む（{@link parseManifest} /

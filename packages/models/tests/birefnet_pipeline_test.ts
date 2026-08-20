@@ -50,13 +50,13 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
 /** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["hr"]` の中身を上書きする。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/2",
+    format: "karume/3",
     generator: "karume/0.2.2",
     defaultModel: "hr",
     models: {
       hr: {
         pipeline: "birefnet/1",
-        weights: { matte: { f32: { file: FILE } } },
+        weights: { matte: { f32: { shards: [FILE] } } },
         // 実行に要るのはグラフ 1 本だけ（tokenizer も表も無い）。
         assets: {},
         quants: { f32: { weights: { matte: "f32" }, session: {} } },

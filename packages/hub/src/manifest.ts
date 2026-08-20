@@ -1,8 +1,9 @@
 /**
- * `karume.json`（配布 manifest v2 = `karume/2`）の parse と全構造検査 — ADR 0041 の正本実装。
+ * `karume.json`（配布 manifest v3 = `karume/3`）の parse と全構造検査 — ADR 0041 の正本実装。
  *
- * MUST: **v1 は読まない**。`format` が `karume/2` 以外なら unsupported format で落とす
- * （2 形パースを持たない — ADR 0041 §1）。
+ * MUST: **旧版は読まない**。`format` が `karume/3` 以外なら unsupported format で落とす
+ * （2 形パースを持たない — ADR 0041 §1）。v3 は weights の dtype エントリを
+ * `{file}` から `{shards}` へ置き換えた版（ADR 0070 決定 1 の shard 欄）で、`file` は廃止。
  * MUST: 手書き parse・Web 標準 API のみ・未対応と想定外は fail loudly（黙って正規化しない）。
  * MUST: manifest 由来のマップは `Object.hasOwn` 経由でのみ引き、合成はスプレッドのみ
  * （`Object.assign` 禁止 — CLAUDE.md 横断不変条件 / ADR 0038 §1）。
@@ -34,7 +35,7 @@ const MAX_QUANTS = 32;
 const MAX_PIPELINE_CONFIG_BYTES = 256 * 1024;
 /**
  * manifest 全域走査の深さ上限。実在の manifest は envelope → models → weights → dtype →
- * extras → file の 6 段前後（`pipelineConfig` の入れ子を足しても十数段）で足りる。一方
+ * shards → 要素の 6 段前後（`pipelineConfig` の入れ子を足しても十数段）で足りる。一方
  * 深さ検査が無いと、1MiB に収まる深いネストが `assertNoForbiddenKeys` の再帰でスタックを
  * 食い潰し、素の `RangeError` として `HubError` 契約の外へ抜ける（Deno 実測: 素の walk は
  * 配列 2,410 段で `RangeError`）。実用の要求より十分上・実測の破綻点よりはるか下に置き、
@@ -43,8 +44,14 @@ const MAX_PIPELINE_CONFIG_BYTES = 256 * 1024;
 const MAX_MANIFEST_DEPTH = 64;
 /** 1 ファイルの上限バイト数（ADR 0038 §2 から据え置き）。 */
 const MAX_FILE_BYTES = 16 * 2 ** 30;
+/**
+ * 1 dtype エントリの shard 数の上限。実在の配布は数十本で足りる（16GiB / shard の上限と
+ * 併せれば 1024 本は現実の配布規模のはるか上）一方、上限が無いと 1MiB の manifest に
+ * 数千の shard 参照を詰めた入力がそのまま取得計画になる。
+ */
+const MAX_SHARDS = 1024;
 /** hub が理解する `format` の major。未知 major は fail loudly（ADR 0041 §1）。 */
-const FORMAT_MAJOR = 2;
+const FORMAT_MAJOR = 3;
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
@@ -67,7 +74,7 @@ const MODEL_KEYS: readonly string[] = [
   "defaultQuant",
   "pipelineConfig",
 ];
-const WEIGHT_DTYPE_KEYS: readonly string[] = ["file", "extras"];
+const WEIGHT_DTYPE_KEYS: readonly string[] = ["shards", "extras"];
 const FILE_REF_KEYS: readonly string[] = ["path", "size", "sha256"];
 const QUANT_KEYS: readonly string[] = ["weights", "session", "gpuFeatures"];
 const GPU_FEATURE_KEYS: readonly string[] = ["shaderF16"];
@@ -96,14 +103,22 @@ export type FileRef = {
 };
 
 /**
- * weights の 1 dtype ぶんのファイル群（`{file, extras?}`）。
+ * weights の 1 dtype ぶんのファイル群（`{shards, extras?}`）。
+ *
+ * MUST: `shards` は**順序付き**（1 要素以上・{@link MAX_SHARDS} 以下）。宣言順は保存され、
+ * 先頭 = グラフ shard（`karume_ir` を持つ）・後続 = 重み shard という**意味**を持つ
+ * （ADR 0070 決定 3）。hub はその意味を検査しない — safetensors を開かないのが hub の境界で、
+ * 順序の意味は shard を消費する runtime 側の契約。hub が保証するのは「宣言順のまま渡す」ことだけ。
+ *
+ * shard の識別子は**配列位置 = id・`size` = その shard のバイト数**として導出する。manifest に
+ * id 欄は設けない（位置から導ける値を独立に更新される欄へ写すと正本が 2 つになる）。
  *
  * NOTE: `extras`（rope_base 等）は v1 と同じ席 = dtype エントリの内側に置く（ADR 0041 §3 は
  * components を weights / assets へ割るだけで、extras の位置は動かしていない）。dtype ごとに
  * 別の付帯資産を持てることに意味がある（同一実体なら同じ path を書けば取得は 1 回に畳まれる）。
  */
 export type WeightFiles = {
-  readonly file: FileRef;
+  readonly shards: readonly FileRef[];
   readonly extras: Readonly<Record<string, FileRef>>;
 };
 
@@ -322,6 +337,25 @@ const parseFileRef = (
   return ref;
 };
 
+/**
+ * shard 列を宣言順のまま読む。並べ替えも重複畳み込みもしない — 位置が shard の id なので、
+ * 列を触った瞬間に識別子が壊れる（同一 path の 3 点セット一致だけは {@link parseFileRef} の
+ * 表が全域で見る）。
+ */
+const parseShards = (
+  fail: Fail,
+  raw: unknown,
+  where: string,
+  seen: Map<string, FileRef>,
+): readonly FileRef[] => {
+  if (!Array.isArray(raw)) throw fail.format(`${where}: 無い / 配列でない`);
+  if (raw.length === 0) throw fail.format(`${where}: 空（shard が 1 つ以上要る）`);
+  if (raw.length > MAX_SHARDS) {
+    throw fail.format(`${where}: ${raw.length} 件が上限 ${MAX_SHARDS} を超えた`);
+  }
+  return raw.map((entry, index) => parseFileRef(fail, entry, `${where}[${index}]`, seen));
+};
+
 const parseWeightFiles = (
   fail: Fail,
   raw: unknown,
@@ -330,16 +364,16 @@ const parseWeightFiles = (
 ): WeightFiles => {
   if (!isRecord(raw)) throw fail.format(`${where}: dtype エントリがオブジェクトでない`);
   assertAllowedKeys(fail, raw, WEIGHT_DTYPE_KEYS, where);
-  const file = parseFileRef(fail, raw["file"], `${where}.file`, seen);
+  const shards = parseShards(fail, raw["shards"], `${where}.shards`, seen);
   const extrasRaw = raw["extras"];
-  if (extrasRaw === undefined) return { file, extras: {} };
+  if (extrasRaw === undefined) return { shards, extras: {} };
   if (!isRecord(extrasRaw)) throw fail.format(`${where}.extras: オブジェクトでない`);
   let extras: Readonly<Record<string, FileRef>> = {};
   for (const name of Object.keys(extrasRaw)) {
     const ref = parseFileRef(fail, extrasRaw[name], `${where}.extras.${name}`, seen);
     extras = { ...extras, [name]: ref };
   }
-  return { file, extras };
+  return { shards, extras };
 };
 
 /** weights の 1 エントリ（dtype ラベル → ファイル群）。**dtype キーは 1 つ以上必須**。 */
@@ -352,7 +386,7 @@ const parseWeightEntry = (
   if (!isRecord(raw)) throw fail.format(`${where}: weights エントリがオブジェクトでない`);
   const labels = Object.keys(raw);
   if (labels.length === 0) {
-    throw fail.format(`${where}: 空（dtype ラベルが 1 つ以上要る — v2 は dtype キー必須）`);
+    throw fail.format(`${where}: 空（dtype ラベルが 1 つ以上要る — v3 は dtype キー必須）`);
   }
   let entry: WeightEntry = {};
   for (const label of labels) {
@@ -618,7 +652,7 @@ export const parseManifest = (text: string): Manifest => {
   const fail = createFail(available);
   // MUST: `format` を未知キー検査より**先**に見る。v1 manifest はトップレベルの綴りが丸ごと
   // 違うので、順が逆だと「未知キー 'components'」という的外れな診断が出て、本当の理由
-  // （この hub は karume/2 しか読まない）が隠れる（ADR 0041 §1）。
+  // （この hub は karume/3 しか読まない）が隠れる（ADR 0041 §1）。
   const format = parseFormat(fail, root["format"]);
   assertAllowedKeys(fail, root, ENVELOPE_KEYS, "manifest");
   const generator = root["generator"];
