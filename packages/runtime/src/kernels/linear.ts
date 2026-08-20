@@ -14,30 +14,15 @@
  *   要素ごとに掛かる（MAC ごとでも縮約の外でもない — ADR 0019）。
  */
 
-import { CodegenError } from "../codegen/errors.ts";
 import { type GemmCompute, gemmComputeKeyPart, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
-import { weightKeyPart, type WeightStorage } from "./weight-storage.ts";
+import {
+  i4GroupKeyPart,
+  i4GroupShift,
+  weightKeyPart,
+  type WeightStorage,
+} from "./weight-storage.ts";
 
 export { LINEAR_SCALE_BINDING } from "./gemm.ts";
-
-/**
- * i4 の group 長（キー断片と WGSL の shift の共通導出点）。
- *
- * MUST: i4 と 1 対 1（i4 なのに無い / i4 以外に付く、はどちらも結線バグで、黙って通すと
- * 「group 32 のパイプラインが group 64 の資産で走る」沈黙誤値になる）。2 冪 ≥ 16 は宣言層
- * （format/ir.ts）が保証済みだが、shift をここで導出する以上は言い直す。
- */
-const i4GroupShift = (weight: WeightStorage, groupSize: number | undefined): number | undefined => {
-  if ((weight === "i4") !== (groupSize !== undefined)) {
-    throw new CodegenError(`linear: groupSize は重み i4 格納と対で渡す（weight=${weight}）`);
-  }
-  if (groupSize === undefined) return undefined;
-  const shift = Math.log2(groupSize);
-  if (!Number.isInteger(shift) || groupSize < 16) {
-    throw new CodegenError(`linear: i4 の group_size ${groupSize} が 2 冪かつ 16 以上でない`);
-  }
-  return shift;
-};
 
 /**
  * `rows` は平坦化後の M（先行次元の積）。タイル幾何のバケット（src/kernels/gemm-geometry.ts の
@@ -53,11 +38,10 @@ export const linearKey = (
   rows?: number,
   groupSize?: number,
 ): string => {
-  i4GroupShift(weight, groupSize);
-  const group = groupSize === undefined ? "" : `g${groupSize}`;
-  return `linear:v2:f32:${gemmKeyPart(v4, rows)}${weightKeyPart(weight)}${group}${
-    gemmComputeKeyPart(compute)
-  }`;
+  i4GroupShift("linear", weight, groupSize);
+  return `linear:v2:f32:${gemmKeyPart(v4, rows)}${weightKeyPart(weight)}${
+    i4GroupKeyPart(groupSize)
+  }${gemmComputeKeyPart(compute)}`;
 };
 
 export const linearWgsl = (
@@ -73,7 +57,7 @@ export const linearWgsl = (
     weight,
     compute,
     rows,
-    weightGroupShift: i4GroupShift(weight, groupSize),
+    weightGroupShift: i4GroupShift("linear", weight, groupSize),
   });
 
 export const linearParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>

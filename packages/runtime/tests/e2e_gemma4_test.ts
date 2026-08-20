@@ -399,8 +399,9 @@ const dispatches = (of: readonly TimingEntry[]): number =>
  *
  * - `linear:` は全て `:wi4g32`（i4 群量子化）か `:wi8`（tied `lm_head`）を含む。裸の
  *   `linear:v2:f32:…` が 1 本でも出たら、その重みは適格判定を外れて f32 に展開されている。
- * - `embedding:` は全て `:wi8`（主 embedding + PLE 35 表）。i4 は **linear 限定**（ADR 0069
- *   決定 5 / src/kernels/weight-storage.ts の MUST）なので、embedding 側に i4 は出ない。
+ * - `embedding:` は全て `:wi8`（主 embedding + PLE 35 表）。i4 の実行経路は embedding にも
+ *   あるが、**この系列は embedding を i8 に割り付けている**（`gemma4/export.py` の混成指定）—
+ *   ここに `:wi4g32` が出たら割り付けが黙って変わったということ。
  * - 両方の linear 変種が出ること = 混成そのもの（片側だけなら「一様格納が通っただけ」）。
  */
 const assertStorageKeys = (entries: readonly TimingEntry[], shown: string): void => {

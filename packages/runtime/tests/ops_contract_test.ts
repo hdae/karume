@@ -143,7 +143,7 @@ Deno.test("WEIGHT_CHANNEL_AXES は WEIGHT_SLOTS と同じ op を覆う", () => {
 Deno.test("ランタイム対応表と capability 照会は契約表から導かれる", () => {
   assertEquals(RUNTIME_SUPPORT.ops.size, OP_CONTRACTS.size);
   // 生の int32 格納は記号依存定数の焼き込み先として実行対象（ADR 0010）。f16（ADR 0018）・
-  // i8（ADR 0019）・i4（ADR 0069 — 適格は linear 限定）は実行経路が入った（適格な重みは
+  // i8（ADR 0019）・i4（ADR 0069 — 適格は linear / embedding 限定）は実行経路が入った（適格な重みは
   // 圧縮のまま常駐・適格外は CPU 展開）。bf16 だけが宣言として valid なまま実行できない。
   assertEquals([...RUNTIME_SUPPORT.storage], ["f32", "f16", "i8", "i4", "i32"]);
   // 転送層の軸（未使用のグラフ入力にも効く）— i32 / bool も転送できる（ADR 0009）

@@ -530,7 +530,8 @@ def _check_group_quantized_shape(name: str, initializer: IrInitializer, value: I
     """group 量子化格納（i4）の宣言 shape と group 長の整合（ADR 0069 決定 2・
     TS 側 checkGroupQuantizedShape の鏡像）。
 
-    量子化軸は**最終次元**（linear の in 軸）で、そこが `group_size` で割り切れることが MUST。
+    量子化軸は**最終次元**（linear `[O,I]` の in 軸・embedding `[V,D]` の D 軸）で、そこが
+    `group_size` で割り切れることが MUST。
     端数 group を許すと最後の group だけ scale の担当範囲が短くなり、行境界が語境界からずれて
     平坦添字の展開が黙って別の値を出す（端数を作らない制約で整列問題そのものを消す設計）。
     """

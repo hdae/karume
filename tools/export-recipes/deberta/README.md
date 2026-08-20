@@ -36,11 +36,12 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layer
 - The outputs go to **`outputs/series/deberta/<variant>/`** (kept out of commits by the `outputs/`
   entry in the top-level `.gitignore` — the 24-layer weights are 1.3GB). `--dtype i8` is a
   **separate series** `outputs/series/deberta-i8/<variant>/`.
-- **`--dtype i4` is a mixed series** `outputs/series/deberta-i4/<variant>/`: `nn.Linear` weights in
-  group-32 i4 (ADR 0069), everything else (embeddings, conv) in per-channel i8 exactly as in the i8
-  series. i4 only has an execution path for the linear weight slot, so a single-dtype i4 series
-  cannot exist. Only `sbv2-22layer` is worth writing — it is the seat of the SBV2 distribution's
-  `w8-bert4` quant, and no other consumer reads this series.
+- **`--dtype i4` is a mixed series** `outputs/series/deberta-i4/<variant>/`: `nn.Linear` and
+  `nn.Embedding` weights in group-32 i4 (ADR 0069), everything else (conv, and any weight whose
+  quantization axis the group size does not divide) in per-channel i8 exactly as in the i8 series.
+  i4 only has an execution path for the linear and embedding weight slots, so a single-dtype i4
+  series cannot exist. Only `sbv2-22layer` is worth writing — it is the seat of the SBV2
+  distribution's `w8-bert4` quant, and no other consumer reads this series.
 - **`sbv2-22layer` is what the SBV2 distribution ships.** SBV2 only ever reads
   `hidden_states[-3]` (= index 22 = the output of layer 21), so the last two layers are dead weight;
   the truncated model's final output is **bit-identical** to the 24-layer model's `hidden_states[-3]`

@@ -27,9 +27,9 @@ io のテンソルキー規約は tiny golden と同じ（`input.<グラフ入�
 f16 化と一体で決める話 — タスク #30 の領分）。
 
 `--dtype i4` も同じ理由で**別系列**（`outputs/series/deberta-i4/`）で、中身は**混成**
-（`nn.Linear` = i4 group32・embedding / conv = i8）。SBV2 配布形では `w8-bert4` quant の
-`text_encoder` 席に入る（`sbv2/distribution.py`）。i4 の実行経路は linear の重みスロット限定
-（ADR 0069 決定 5）なので、単一 dtype の i4 系列は原理的に作れない。
+（`nn.Linear` / `nn.Embedding` = i4 group32・残り = i8）。SBV2 配布形では `w8-bert4` quant の
+`text_encoder` 席に入る（`sbv2/distribution.py`）。i4 の実行経路は linear / embedding の
+重みスロット限定（ADR 0069 決定 5）なので、単一 dtype の i4 系列は原理的に作れない。
 
 `--act-quant` は w8a8（`SessionOptions.linearCompute: "i8a8"`）の torch 鏡像で、適格
 `nn.Linear` の入力を per-token i8 へ落とした期待値を **`io-i8a8.<case>.safetensors`** という
@@ -58,7 +58,13 @@ from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.quantize import fake_quant_int4, fake_quant_int8
+from karume.quantize import (
+    DEFAULT_GROUP_SIZE,
+    channel_rows,
+    fake_quant_int4,
+    fake_quant_int8,
+    iter_quant_targets,
+)
 
 from . import patch
 
@@ -66,13 +72,29 @@ from . import patch
 MODEL_ID = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 
 #: 対応する格納 dtype。**f16 は無い** — SBV2 系列と一体で決める（タスク #30）。
-#: `i4` は**混成**の系列名で、実体は「`nn.Linear` = i4 group32・それ以外（embedding / conv）=
-#: 従来どおり i8 per-channel」（{@link BASE_WEIGHT_DTYPES} / {@link _fake_quant}）。i4 の実行経路が
-#: linear の重みスロット限定である以上（ADR 0069 決定 5）、系列としては混成にしかなり得ない。
+#: `i4` は**混成**の系列名で、実体は「{@link I4_MODULE_TYPES} の適格な重み = i4 group32・
+#: それ以外（conv・group 長で割り切れない重み）= 従来どおり i8 per-channel」
+#: （{@link BASE_WEIGHT_DTYPES} / {@link _fake_quant}）。i4 の実行経路が linear / embedding の
+#: 重みスロット限定である以上（ADR 0069 決定 5）、系列としては混成にしかなり得ない。
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "i8", "i4")
 
-#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、linear は
-#: 1 本単位の `weight_dtype_overrides` で i4 へ振る（gemma4 の混成 i8+i4 と同形）。
+#: i4 group32 で丸める**モジュール型**（= i4 の実行経路を持つ op と対 — `karume.emit` の
+#: `I4_WEIGHT_OPS`）。conv 系は展開経路が無いので入れない（入れると emit が fail loudly する）。
+I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Embedding)
+
+#: `nn.Embedding` の器に入っているが**表引きされない**重みの FQN。相対位置の埋め込み表は
+#: `deberta.patch` が差し替えた forward で「表を切り出して query_proj / key_proj に通す」形で
+#: 使われるので、グラフに `embedding` op が立たない — 重みスロットの消費がゼロなので圧縮格納の
+#: 適格外で、i8 系列でも f32 のまま残っている。型だけで i4 に振ると emit が「適格でない」で
+#: fail loudly するため、i4 の対象集合からは名前で外す（丸めは従来どおり i8 側が担う）。
+#:
+#: NOTE: 綴りが上流のモジュール名の変更で空振りしても沈黙はしない — 除外が消えた瞬間に emit の
+#: 明示指定の門が「適格でない」でそのテンソル名を挙げて落ちる。
+NON_LOOKUP_EMBEDDINGS: frozenset[str] = frozenset({"model.encoder.rel_embeddings"})
+
+#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格な
+#: linear / embedding は 1 本単位の `weight_dtype_overrides` で i4 へ振る（gemma4 の混成
+#: i8+i4 と同形）。
 BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "i8": "i8", "i4": "i8"}
 
 #: 生成物の既定の置き場（格納 dtype 別の**系列**）。親は `SERIES_ROOT`（= outputs/series/）—
@@ -325,15 +347,25 @@ def _write_mirror_io(
         detach_act_quant(handles)
 
 
-def _linear_module_names(wrapper: nn.Module) -> frozenset[str]:
-    """`nn.Linear` モジュールの FQN 集合（混成 i8+i4 の**排他割り**の唯一の源）。
+def _i4_module_names(wrapper: nn.Module) -> frozenset[str]:
+    """i4 group32 で丸めるモジュールの FQN 集合（混成 i8+i4 の**排他割り**の唯一の源）。
 
-    綴りを写経せずモジュール木から引くのは、i8 側の述語を「この集合に居ない」で書くため。
+    適格は 3 条件の積: ① {@link I4_MODULE_TYPES} であること（emit の i4 適格 = linear /
+    embedding の重みスロット限定 — ADR 0069 決定 5。外れたテンソルへ i4 を明示指定すると emit が
+    fail loudly する）② 量子化軸が group 長で割り切れること（i4 は端数 group を作らない MUST —
+    同決定 2。外れた重みは**構成ごと落とすのではなく対象から外す**ので i8 側へ落ちる）
+    ③ {@link NON_LOOKUP_EMBEDDINGS} でないこと（器は `nn.Embedding` でも表引きされない重み）。
+
+    対象列挙を core（`iter_quant_targets`）に通すのは、丸めが見る集合とここが数える集合を
+    1 本の実装のままにするため。i8 側の述語を「この集合に居ない」で書くのも同じ理由で、
     2 つの述語を別々の綴りから作ると、どちらにも入らない重みが**黙って f32 のまま残る**
     （二重丸め禁止の逆側の穴で、値は正しいままサイズだけが戻る）。
     """
     return frozenset(
-        name for name, child in wrapper.named_modules() if isinstance(child, nn.Linear)
+        fqn.removesuffix(".weight")
+        for fqn, weight, axis in iter_quant_targets(wrapper, I4_MODULE_TYPES)
+        if channel_rows(weight, axis).shape[-1] % DEFAULT_GROUP_SIZE == 0
+        and fqn.removesuffix(".weight") not in NON_LOOKUP_EMBEDDINGS
     )
 
 
@@ -349,9 +381,9 @@ def _fake_quant(
     MUST: 呼ぶのは **golden io の採取より前**（`quantize.py` の docstring）— 後に当てると
     期待値だけが元の重みで計算され、E2E の差に量子化誤差が混ざって tolerance の意味が消える。
 
-    i4 系列は混成（linear = i4 group32・残り = i8 per-channel）で、2 つの述語は
-    {@link _linear_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。返す
-    override は「linear の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を
+    i4 系列は混成（適格な linear / embedding = i4 group32・残り = i8 per-channel）で、2 つの
+    述語は {@link _i4_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。返す
+    override は「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を
     満たせなければ fail loudly する。
     """
     if dtype == "f32":
@@ -360,11 +392,22 @@ def _fake_quant(
         report = fake_quant_int8(wrapper)
         print(f"[fake-quant] i8 per-channel へ丸めた — {report.describe()}", flush=True)
         return report.scales, {}
-    linears = _linear_module_names(wrapper)
-    int8 = fake_quant_int8(wrapper, include=lambda name: name not in linears)
-    int4 = fake_quant_int4(wrapper, include=lambda name: name in linears)
+    i4_names = _i4_module_names(wrapper)
+    int8 = fake_quant_int8(wrapper, include=lambda name: name not in i4_names)
+    int4 = fake_quant_int4(
+        wrapper,
+        include=lambda name: name in i4_names,
+        op_types=I4_MODULE_TYPES,
+    )
+    # MUST: 丸めた本数 = 格納本数（override の本数）。ずれるのは「適格と数えたのに丸まって
+    # いない」形で、i4 席に i8 の重みが混ざったまま緑になる。
+    if len(int4.scales) != len(i4_names):
+        raise AssertionError(
+            f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(int4.scales)} 本"
+            "（`iter_quant_targets` の対象集合と include の述語がずれている）"
+        )
     print(
-        f"[fake-quant] linear を i4 group へ丸めた — {int4.describe()}"
+        f"[fake-quant] linear / embedding を i4 group へ丸めた — {int4.describe()}"
         f" / 残りは i8 per-channel — {int8.describe()}",
         flush=True,
     )
@@ -450,7 +493,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=WEIGHT_DTYPES,
         default="f32",
         help="重みの格納 dtype（i8 は fake-quant してから適格スロットだけ圧縮格納する — ADR 0019。"
-        "i4 は混成で、linear だけ group32 の i4・残りは i8 — ADR 0069）",
+        "i4 は混成で、適格な linear / embedding が group32 の i4・残りは i8 — ADR 0069）",
     )
     parser.add_argument(
         "--act-quant",

@@ -404,11 +404,12 @@ def fake_quant_int4(
     {@link QUANT_MODULE_TYPES}（全 5 種）まで広げられる — ただし広げてよいのは**品質測定**
     まで。bias も norm 系 weight も触らないのは全対象で同じ。
 
-    MUST: **emit へ渡せるのは linear 分の scale だけ**（`emit._plan_i4` の適格は消費 op が
-    linear であること）。conv 系は {@link channel_rows} で受容野を平坦化した rank 2 の scale に
-    なり、そもそも重みと rank が合わない。embedding は形こそ合うが実行経路が無いので、
-    渡すと emit 側が fail loudly する。広げた対象は「その方式ならどこまで戻るか」を測る側の
-    ためのもので、出荷経路ではない（測定専用の方式群は `quant_methods`）。
+    MUST: **emit へ渡せるのは linear と embedding 分の scale だけ**（`emit._plan_i4` の適格は
+    消費 op が `emit.I4_WEIGHT_OPS` に載ること）。embedding は `[V,D]` で {@link channel_rows} が
+    恒等なので group scale も重みと同 rank になり、そのまま格納できる。conv 系は受容野を
+    平坦化した rank 2 の scale になり、そもそも重みと rank が合わない（渡すと emit 側が
+    fail loudly する）。広げた対象は「その方式ならどこまで戻るか」を測る側のためのもので、
+    出荷経路ではない（測定専用の方式群は `quant_methods`）。
 
     group の軸は各 op の「in 軸」を一般化する（{@link channel_rows}）— linear は in 軸、
     conv は出力チャネルごとの受容野（`Cin·K` / `Cin·Kh·Kw`）、`ConvTranspose1d` は転置
@@ -416,7 +417,9 @@ def fake_quant_int4(
 
     `include` は**モジュール FQN** の述語（None = 全対象）— 意味と排他 MUST は
     {@link fake_quant_int8} と同文。tied lm_head（= embed_tokens で embedding 側も消費）は
-    i4 不適格（emit の linear 限定）なので、混成では include で i4 から外して i8 側へ割る。
+    linear / embedding のどちらも i4 の展開経路を持つので **i4 適格**（`emit.I4_WEIGHT_OPS` —
+    2026-08-20 の embedding 追補で「linear 限定ゆえ不適格」が反転した）。scale の形も
+    `[V, D/g]` で一致する。
 
     MUST: 呼ぶ順序は「実効重みが確定した後・参照/golden の採取より前」（モジュール docstring）。
 

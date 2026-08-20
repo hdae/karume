@@ -38,20 +38,23 @@ class TinyText(nn.Module):
 
 
 class TinyHybrid(nn.Module):
-    """i4 混成（linear = i4 group32・残り = i8）の最小の骨格。
+    """i4 混成（適格な linear / embedding = i4 group32・残り = i8）の最小の骨格。
 
-    linear の in 軸を 64 にするのは i4 が端数 group を作らない MUST（ADR 0069 決定 2）のため。
-    embedding を持たせるのは、i8 側の対象が空だと `fake_quant_int8` が fail loudly して
-    「排他に割れているか」を観測できないから。
+    量子化軸を 64 にするのは i4 が端数 group を作らない MUST（ADR 0069 決定 2）のため。
+    `narrow` は量子化軸 16（< group 32）で**割り切れない**適格外の linear で、i8 側へ落ちる —
+    i8 側の対象が空だと `fake_quant_int8` が fail loudly して「排他に割れているか」を
+    観測できないので、この 1 本が i8 側の住人も兼ねる。
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.embed = nn.Embedding(8, 64)
         self.fc = nn.Linear(64, 4)
+        self.narrow = nn.Linear(16, 4)
 
     def forward(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        return (self.fc(self.embed(input_ids)),)
+        embedded = self.embed(input_ids)
+        return (self.fc(embedded) + self.narrow(embedded[..., :16]),)
 
 
 #: `_write_io` はケースを `(名前, グラフ入力名 → テンソル)` で受ける（実物は 4 入力だが、
@@ -90,11 +93,12 @@ class TestSeries:
         assert "f16" not in export_deberta.WEIGHT_DTYPES
 
     def test_the_i4_series_is_stored_as_i8_by_default(self):
-        """i4 は**混成**（linear だけ i4・残りは i8）— 単一 dtype の i4 系列は作れない。
+        """i4 は**混成**（適格な linear / embedding だけ i4・残りは i8）— 単一 dtype の i4 系列は
+        作れない。
 
-        i4 の実行経路が linear の重みスロット限定（ADR 0069 決定 5）である以上、既定を i4 に
-        すると embedding / conv が黙って f32 で残る。既定は i8 で、linear だけ 1 本単位の
-        override で振るのが唯一の形。
+        i4 の実行経路が linear / embedding の重みスロット限定（ADR 0069 決定 5）である以上、
+        既定を i4 にすると conv や group 長で割り切れない重みが黙って f32 で残る。既定は i8 で、
+        適格分だけ 1 本単位の override で振るのが唯一の形。
         """
         assert set(export_deberta.BASE_WEIGHT_DTYPES) == set(export_deberta.WEIGHT_DTYPES)
         assert export_deberta.BASE_WEIGHT_DTYPES["i4"] == "i8"
@@ -143,10 +147,10 @@ class TestFakeQuant:
         assert list(scale.shape) == [4, 1]
         assert torch.equal(torch.round(wrapper.fc.weight / scale) * scale, wrapper.fc.weight)
 
-    def test_i4_splits_linear_and_the_rest_exclusively(self):
+    def test_i4_splits_the_eligible_modules_and_the_rest_exclusively(self):
         """MUST: i8 / i4 の対象は排他（`quantize.py` の混成 MUST — 二重丸めは沈黙誤値）。
 
-        どちらにも入らない重みが残る穴も同時に見る（合流台帳が両方の重みを覆っていること）。
+        どちらにも入らない重みが残る穴も同時に見る（合流台帳が全ての重みを覆っていること）。
         scale の**形**で振り分け先が読める: i4 は group 形 `[チャネル, group 数]`、i8 は
         重みと同 rank の keepdim 形。
         """
@@ -155,10 +159,36 @@ class TestFakeQuant:
 
         scales, overrides = export_deberta._fake_quant("i4", wrapper)
 
-        assert overrides == {"fc.weight": "i4"}
-        assert set(scales) == {"fc.weight", "embed.weight"}
-        # in 軸 64 / group 32 なので group 数 2 — keepdim 形（[4, 1]）とは形で区別できる。
+        # embedding も i4 席（ADR 0069 決定 5 の embedding 追補）— 語彙表 `[V,D]` の D 軸で group。
+        assert overrides == {"fc.weight": "i4", "embed.weight": "i4"}
+        assert set(scales) == {"fc.weight", "embed.weight", "narrow.weight"}
+        # 量子化軸 64 / group 32 なので group 数 2 — keepdim 形（[4, 1]）とは形で区別できる。
         assert list(scales["fc.weight"].shape) == [4, 2]
+        assert list(scales["embed.weight"].shape) == [8, 2]
+        # 割り切れない 1 本は i8 のまま（構成ごと落とさず対象から外す）
+        assert list(scales["narrow.weight"].shape) == [4, 1]
+
+    def test_a_weight_that_the_group_size_does_not_divide_stays_in_the_i8_side(self):
+        """i4 適格の正本は emit 側の規則（型 × 整除）— 綴りではなく実測から引く。"""
+        torch.manual_seed(0)
+        wrapper = TinyHybrid()
+
+        assert export_deberta._i4_module_names(wrapper) == {"fc", "embed"}
+
+    def test_a_table_that_is_never_looked_up_is_excluded_from_the_i4_side(self, monkeypatch):
+        """`nn.Embedding` の器でも表引きされない重みは重みスロットの消費がゼロ = 圧縮の適格外。
+
+        i4 に振ると emit の明示指定の門が「適格でない」で落ちるので、対象集合の側で外す
+        （実物は DeBERTa の相対位置表 — `deberta.patch` が切り出して linear に通す）。
+        """
+        torch.manual_seed(0)
+        wrapper = TinyHybrid()
+        monkeypatch.setattr(export_deberta, "NON_LOOKUP_EMBEDDINGS", frozenset({"embed"}))
+
+        assert export_deberta._i4_module_names(wrapper) == {"fc"}
+        # 外した表は i8 側（丸めの担い手が変わらない = 従来の数値のまま）
+        scales, overrides = export_deberta._fake_quant("i4", wrapper)
+        assert overrides == {"fc.weight": "i4"}
         assert list(scales["embed.weight"].shape) == [8, 1]
 
 

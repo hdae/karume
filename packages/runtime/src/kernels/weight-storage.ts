@@ -27,6 +27,8 @@
  * バイト不変が壊れ、conv1d / conv2d / conv_transpose1d / embedding の生成物が一斉に動く。
  */
 
+import { CodegenError } from "../codegen/errors.ts";
+
 /** 重みスロットの格納形。意味論はどれも f32（計算は常に f32 — ADR 0006）。 */
 export type WeightStorage = "f32" | "f16" | "i8" | "i4";
 
@@ -34,12 +36,42 @@ export type WeightStorage = "f32" | "f16" | "i8" | "i4";
  * 融合 5 カーネルが**共有する**変種の全数（スナップショットと縮退ハーネスの網羅を機械的に
  * 回すための列挙）。
  *
- * MUST: `i4` は入れない — i4 の実行経路は **linear 限定**（ADR 0069 決定 5）で、conv 系 /
- * embedding の生成入力に i4 を渡すと {@link weightScaleWgsl} が束縛を出さないまま
- * `dequant(i, scale)` が未定義識別子を参照する不成立 WGSL になる。linear の i4 変種は
- * スナップショット側が明示的に並べる。
+ * MUST: `i4` は入れない — i4 の実行経路は **linear と embedding だけ**（ADR 0069 決定 5 と
+ * その embedding 追補）で、conv 系の生成入力に i4 を渡すと group scale の束縛が出ないまま
+ * `dequant(i, scale)` が未定義識別子を参照する不成立 WGSL になる。加えて i4 変種は group 長を
+ * WGSL に焼く（キーの `g` 部と対）ので、格納形だけを引数に取るこの列挙では表せない —
+ * linear / embedding の i4 変種はスナップショット側が group 長つきで明示的に並べる。
  */
 export const WEIGHT_STORAGES: readonly WeightStorage[] = ["f32", "f16", "i8"];
+
+/**
+ * i4 の group 長 → WGSL に焼く shift（キー断片と生成物の共通導出点 — linear / embedding が共有）。
+ *
+ * MUST: i4 と 1 対 1（i4 なのに無い / i4 以外に付く、はどちらも結線バグで、黙って通すと
+ * 「group 32 のパイプラインが group 64 の資産で走る」沈黙誤値になる）。2 冪 ≥ 16 は宣言層
+ * （format/ir.ts）が保証済みだが、shift をここで導出する以上は言い直す。
+ *
+ * `where` はカーネル名（診断の主語）— 生成入口の取り違えをメッセージから追えるようにする。
+ */
+export const i4GroupShift = (
+  where: string,
+  weight: WeightStorage,
+  groupSize: number | undefined,
+): number | undefined => {
+  if ((weight === "i4") !== (groupSize !== undefined)) {
+    throw new CodegenError(`${where}: groupSize は重み i4 格納と対で渡す（weight=${weight}）`);
+  }
+  if (groupSize === undefined) return undefined;
+  const shift = Math.log2(groupSize);
+  if (!Number.isInteger(shift) || groupSize < 16) {
+    throw new CodegenError(`${where}: i4 の group_size ${groupSize} が 2 冪かつ 16 以上でない`);
+  }
+  return shift;
+};
+
+/** i4 の group 長のキー断片（`g32` — 同一キー → バイト同一 WGSL の codegen 決定性）。 */
+export const i4GroupKeyPart = (groupSize: number | undefined): string =>
+  groupSize === undefined ? "" : `g${groupSize}`;
 
 /**
  * パイプラインキーに載せる格納判別子。
@@ -187,8 +219,10 @@ fn dequant(i: u32, scale: f32) -> f32 {
  * 1 バイトも動かさないための既定で、スナップショット（tests/fixtures/wgsl/）が検出器。
  * 複数チャネルを担当する側（GEMM 骨格の充填スロット）だけがスロットごとの別名を渡す。
  *
- * NOTE: i4 は**ここで束ねない**（空文字のまま）— group scale は k 依存でループ不変が
- * 成立しないため、linear の充填側（gemm.ts の fillBLinear）が quad ごとに引く（ADR 0069）。
+ * NOTE: i4 は**ここで束ねない**（空文字のまま）— group scale は量子化軸（k / D）依存で
+ * チャネル不変の巻き上げが成立しないため、引く場所はカーネルごとに違う: linear は充填側
+ * （gemm.ts の fillBLinear）が quad ごとに、embedding は 1 スレッド 1 出力要素なので
+ * カーネル本体が要素ごとに引く（ADR 0069）。
  */
 export const weightScaleWgsl = (
   storage: WeightStorage,

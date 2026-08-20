@@ -36,6 +36,35 @@ Deno.test("decodeI4: scale は group ごとに引かれる（行 × group の平
   assertEquals([...decoded], [1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 8, 8, 8, 8]);
 });
 
+Deno.test("decodeI4: 語彙表 [V,D] は適格外でもそのまま展開できる（group 32・行 × group 順）", () => {
+  // embedding の重み `[V,D]` は `channel_rows` が恒等なので、group は D 軸に沿って切られる
+  // （ADR 0069 決定 5 の embedding 追補）。適格外の i4 embedding はこの展開器が受け皿になる。
+  // V = 3 / D = 64 / group 32 → group 形 [3, 2]。q は行と列で変える（行 / group の取り違えが
+  // 値に出る形）。
+  const vocab = 3;
+  const hidden = 64;
+  const groupSize = 32;
+  const q = Array.from(
+    { length: vocab * hidden },
+    (_, i) => ((Math.floor(i / hidden) + i) % 15) - 7,
+  );
+  const bytes = new Uint8Array(q.length / 2);
+  for (const [i, value] of q.entries()) {
+    const u = value + 8;
+    bytes[i >> 1] |= (i & 1) === 1 ? u << 4 : u;
+  }
+  const scale = Float32Array.from([0.5, 0.25, 1, 2, 4, 8]);
+  const decoded = decodeI4(bytes, [vocab, hidden], scale, [vocab, 2], groupSize);
+
+  assertEquals(decoded.length, vocab * hidden);
+  const expected = q.map((value, i) => {
+    const row = Math.floor(i / hidden);
+    const group = Math.floor((i % hidden) / groupSize);
+    return Math.fround(value * scale[row * 2 + group]);
+  });
+  assertEquals([...decoded], expected);
+});
+
 Deno.test("decodeI4: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と同値）", () => {
   // 0.1 は f32 で丸められる値（format/i8.ts の同型テストと同じ論証 — q は整数で f32 厳密、
   // 積は f64 で厳密なので 1 回丸めが f32 乗算の正しい丸めと一致する）。

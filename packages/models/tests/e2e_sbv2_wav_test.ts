@@ -84,8 +84,8 @@ const TEXT = "こんにちは、これはテストです。";
 const SEED = 0;
 
 /**
- * `w8` と**同構成で `text_encoder` だけ i4 混成**（BERT の linear だけ group32 の i4・
- * embedding / conv は i8）の quant。配布形の差分は 1 席だけで、session ノブは `w8` と同じ
+ * `w8` と**同構成で `text_encoder` だけ i4 混成**（BERT の linear と語彙表が group32 の i4・
+ * conv と相対位置表は i8）の quant。配布形の差分は 1 席だけで、session ノブは `w8` と同じ
  * （`sbv2/distribution.py` の `SBV2_QUANTS` がそれを固定する）。
  */
 const BERT4_QUANT = "w8-bert4";
@@ -100,8 +100,11 @@ const REFERENCE_SHA256 = "a82f72e2c18956ec725a3f692182e8c9a7dad4011e760dab9fb3d0
  * 一致してしまったら i4 席が効いていない（i8 資産が i4 席に入った / quant 解決が既定へ落ちた）
  * ことを意味するので、そこも門に含める。実体は {@link REFERENCE_WAV} のような手元の材料が
  * 無いので、食い違ったときは WAV を落として人が聴ける形にするだけにする。
+ *
+ * NOTE: 2026-08-20 の embedding i4 追補で `text_encoder` 席の中身（語彙表が i8 → i4）が変わった
+ * ため、参照を採り直した（旧値 `aa9671ad…`）。
  */
-const BERT4_REFERENCE_SHA256 = "aa9671ad8ff5075bb6b153f775a2b8edd9d19d2f3792ae060d198445c72a1933";
+const BERT4_REFERENCE_SHA256 = "c2e2f56767ced61892973c3ba712448ab674a9674b4459d2c0e8a106ebe325a4";
 
 /**
  * `w8-bert4` から**さらに `front` / `voice` も i4 混成**へ替えた quant（3 席とも i4）。session
@@ -115,8 +118,11 @@ const W4_QUANT = "w4";
  * `w8` とも `w8-bert4` とも**別の値になるのが正**。`w8-bert4` と一致したら net_g 側の i4 席が
  * 効いていない（i4 席に i8 資産が入った / quant 解決が既定へ落ちた）ことを意味し、net_g の適格
  * linear は 6 本だけで配布バイトもほぼ変わらないため、**この門以外に検出手段が無い**。
+ *
+ * NOTE: 2026-08-20 の embedding i4 追補で `text_encoder` 席の中身（語彙表が i8 → i4）が変わった
+ * ため、参照を採り直した（旧値 `c0bc803e…`）。`front` / `voice` 席は不変。
  */
-const W4_REFERENCE_SHA256 = "c0bc803e7b19f03717c4d2104d4c5280b08d23440d7268a1d1db7559985535c8";
+const W4_REFERENCE_SHA256 = "054bfca78bb492f466869c4097ac5590da299cf31c36d92c6165863ec1d92979";
 
 /** 参照 WAV を焼いた時点の実効ノブ（配布形の `pipelineConfig.defaults` と一致するはず）。 */
 const REFERENCE_KNOBS: Sbv2Defaults = {

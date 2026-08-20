@@ -43,7 +43,7 @@ import {
   countUses,
   eligibleCompressedInitializers,
   ExecutionError,
-  linearWeightInitializers,
+  i4EligibleInitializers,
   type NodePlan,
   planGraph,
   statesOnlySymbols,
@@ -195,7 +195,7 @@ const stateEstimate = (
 
 /**
  * 重みの見積り。分類は Session 構築（executor.ts の `Session.create`）と同じ 3 点 —
- * 適格判定 {@link eligibleCompressedInitializers}、i4 だけ {@link linearWeightInitializers}
+ * 適格判定 {@link eligibleCompressedInitializers}、i4 だけ {@link i4EligibleInitializers}
  * との積（ADR 0069 決定 5）、格納 dtype ごとの分岐。
  *
  * バイト数は宣言 shape から求める（container の突合が「実バイト = 宣言由来バイト」を保証済み）。
@@ -207,7 +207,7 @@ const weightEstimate = (
 ): { readonly compressed: number; readonly uncompressed: number; readonly expanded: number } => {
   const { graph, file } = model;
   const eligible = eligibleCompressedInitializers(graph);
-  const linearOnly = linearWeightInitializers(graph);
+  const i4Eligible = i4EligibleInitializers(graph);
   let compressed = 0;
   let uncompressed = 0;
   let expanded = 0;
@@ -221,9 +221,10 @@ const weightEstimate = (
       uncompressed += toSizeClass(tensorByteLength(file, where, initializer.tensor));
       continue;
     }
-    // i4 の適格は f16 / i8 より狭い「重みスロットでの消費が linear だけ」（ADR 0069 決定 5）。
+    // i4 の適格は f16 / i8 より狭い「重みスロットでの消費が linear / embedding だけ」
+    // （ADR 0069 決定 5）。
     const residentEligible = storage === "i4"
-      ? eligible.has(name) && linearOnly.has(name)
+      ? eligible.has(name) && i4Eligible.has(name)
       : eligible.has(name);
     if (!residentEligible) {
       // 適格外はロード時に CPU で f32 展開する（VRAM 削減はゼロ）。

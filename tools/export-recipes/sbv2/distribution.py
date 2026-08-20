@@ -9,9 +9,9 @@
 融合なので、`dp` / `flow` / `dec` は golden 検証専用の単体グラフで配布形には入らない。
 `text_encoder`（DeBERTa）に f16 席が無いのは `deberta/export.py` が f16 を持たないから
 （f32 の 1.32GB は配布に非現実的）。既定の i8 は ADR 0026 が聴感ゲート込みで受理済みで、
-i4 混成（linear だけ i4 group32）は `w8-bert4` quant の席として後から足した
-（perf-ledger Q-1 — 既定はまだ i8）。`front` / `voice` にも同じ形の i4 混成席があり、3 席とも
-i4 を選ぶのが `w4` quant（perf-ledger Q-1 の full-w4 側）。
+i4 混成（linear と embedding が i4 group32）は `w8-bert4` quant の席として後から足した
+（perf-ledger Q-1 — 既定はまだ i8）。`front` / `voice` にも i4 混成席があり（そちらは適格
+linear だけが i4）、3 席とも i4 を選ぶのが `w4` quant（perf-ledger Q-1 の full-w4 側）。
 
 ホスト資産のうち `style_vectors` / `speaker_embeddings` は**表を配って実行時に行を引く**形。
 `front` / `voice` のグラフ入力 `style_vec[1,256]` / `g[1,512,1]` はこの 2 表から作られ、
@@ -67,8 +67,8 @@ SBV2_PIPELINE = "sbv2/1"
 #: DeBERTa の系列とその variant ディレクトリ（`deberta/export.py` の綴り）。モデル名に依らない
 #: （ファミリー組み立てでは全モデルが同じ text_encoder を指し、`shared/` へ 1 回だけ入る）。
 #: 22 層 variant なのは末尾 2 層が SBV2 の経路で死んでいるから（{@link SBV2_TEXT_ENCODER_LAYERS}）。
-#: i4 系列は**混成**（linear = i4 group32・embedding / conv = i8 — `deberta/export.py` の
-#: `BASE_WEIGHT_DTYPES`）で、`w8-bert4` quant の text_encoder 席になる。
+#: i4 系列は**混成**（linear と語彙表 = i4 group32・conv と相対位置表 = i8 — `deberta/export.py`
+#: の `BASE_WEIGHT_DTYPES` / `I4_MODULE_TYPES`）で、`w8-bert4` quant の text_encoder 席になる。
 SBV2_TEXT_ENCODER_SERIES = "deberta-i8"
 SBV2_TEXT_ENCODER_I4_SERIES = "deberta-i4"
 SBV2_TEXT_ENCODER_VARIANT = "sbv2-22layer"
@@ -164,7 +164,8 @@ SBV2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 
 #: weights の宣言（dtype ラベル → 役割名）。dtype キーは ADR 0041 §3 の統一形（v1 の `{file}` /
 #: `{variants}` の 2 形は消えた）。どの役割でも `i4` は**混成の系列**を指すラベルで、実体は
-#: 適格 linear だけが i4 group32・残りは i8（`deberta/export.py` / `sbv2/export.py`）。
+#: 「i4 適格な重みが i4 group32・残りは i8」— 適格の範囲は台本ごとに違い、`text_encoder` は
+#: linear + 語彙表（`deberta/export.py`）、`front` / `voice` は linear だけ（`sbv2/export.py`）。
 SBV2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     "text_encoder": {"i8": WeightFiles("text_encoder"), "i4": WeightFiles("text_encoder_i4")},
     "front": {
@@ -191,8 +192,9 @@ SBV2_ASSETS: Mapping[str, str] = {
 #: （{@link complete_quant_weights}）— `text_encoder` に i4 席が生えた時点で、既定を勝手に
 #: 選ぶ経路（黙って別の格納形が配られる）は塞がれている。
 #:
-#: `w8-bert4` は `w8` と同構成で `text_encoder` だけ i4 混成（BERT の linear を i4 group32 に
-#: 落とす）。`w4` は**3 席とも i4 混成**（session は空 = f32 compute のまま — 活性は動かさない）。
+#: `w8-bert4` は `w8` と同構成で `text_encoder` だけ i4 混成（BERT の linear と語彙表を i4
+#: group32 に落とす）。`w4` は**3 席とも i4 混成**（session は空 = f32 compute のまま — 活性は
+#: 動かさない）。
 #: 数値は f32 同一性の指標では大きく動くが、聴感は一次通過（perf-ledger Q-1 /
 #: research 2026-08-19 §6 — net_g 全役割 rtn で明らかな劣化なし）。既定はまだ `w8` —
 #: 既定化は速度と品質のバランスで別途裁定。

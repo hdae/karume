@@ -12,8 +12,10 @@ import {
   assertNodeContract,
   catDim,
   computeOutputShape,
+  EMBEDDING_OP,
   flipDim,
   IO_DTYPES,
+  LINEAR_OP,
   type OpContract,
   resolveNodeDtypes,
   sliceAttrs,
@@ -376,26 +378,35 @@ export const eligibleCompressedInitializers = (graph: IrGraph): ReadonlySet<stri
 };
 
 /**
- * 重みスロットでの消費が **linear だけ**の initializer（i4 の適格集合の狭め — ADR 0069
- * 決定 5。エクスポータ側 `karume/emit.py: linear_weight_initializers` の鏡像）。
+ * i4 の**展開経路を持つ** op（ADR 0069 決定 5 の linear とその embedding 追補）。
+ *
+ * MUST: conv 系（conv1d / conv2d / conv_transpose1d）を入れない。group scale の束縛は linear の
+ * タイル充填（gemm.ts の `fillBLinear`）と embedding カーネルにしか無く、conv の生成入力へ i4 を
+ * 渡すと `dequant(i, scale)` が未定義識別子を参照する不成立 WGSL になる
+ * （src/kernels/weight-storage.ts）。エクスポータ側 `karume/emit.py: I4_WEIGHT_OPS` の鏡像。
+ */
+const I4_WEIGHT_OPS: ReadonlySet<string> = new Set([LINEAR_OP, EMBEDDING_OP]);
+
+/**
+ * 重みスロットでの消費が {@link I4_WEIGHT_OPS} **だけ**の initializer（i4 の適格集合の狭め —
+ * ADR 0069 決定 5。エクスポータ側 `karume/emit.py: i4_eligible_initializers` の鏡像）。
  *
  * MUST: {@link eligibleCompressedInitializers} との**積**で使う — ここは「重みスロットの中で
- * linear 以外（conv 系 / embedding）にも食われていないか」だけを見る。i4 の展開経路は linear
- * のタイル読みにしか無いので、共有された重みを常駐させると他方のカーネルが packed バイトを
- * f32 として読む（例外は出ない）。
+ * 展開経路の無い op（conv 系）にも食われていないか」だけを見る。共有された重みを常駐させると
+ * そちらのカーネルが packed バイトを f32 として読む（例外は出ない）。
  */
-export const linearWeightInitializers = (graph: IrGraph): ReadonlySet<string> => {
-  const linear = new Set<string>();
+export const i4EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
+  const executable = new Set<string>();
   const other = new Set<string>();
   for (const node of graph.nodes) {
     const weightSlot = WEIGHT_SLOTS.get(node.op);
     if (weightSlot === undefined) continue;
     const name = node.ins[weightSlot];
     if (name === undefined || !Object.hasOwn(graph.initializers, name)) continue;
-    (node.op === "linear" ? linear : other).add(name);
+    (I4_WEIGHT_OPS.has(node.op) ? executable : other).add(name);
   }
-  for (const name of other) linear.delete(name);
-  return linear;
+  for (const name of other) executable.delete(name);
+  return executable;
 };
 
 /**

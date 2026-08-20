@@ -209,7 +209,7 @@ Deno.test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（
   assertEquals(estimate.ioBytes, 64);
 });
 
-Deno.test("i4 適格は numel÷2 + group scale（linear の重みスロット限定）", () => {
+Deno.test("i4 適格は numel÷2 + group scale（linear / embedding の重みスロット限定）", () => {
   const graph: GraphJson = {
     format: "karume-ir",
     version: 1,
@@ -241,7 +241,7 @@ Deno.test("i4 適格は numel÷2 + group scale（linear の重みスロット限
   assertEquals(estimate.expandedWeightBytes, 0);
 });
 
-Deno.test("i4 が linear 以外の重みスロット（embedding）で消費されると f32 展開へ回る", () => {
+Deno.test("i4 の embedding も packed のまま常駐する（ADR 0069 決定 5 の embedding 追補）", () => {
   const graph: GraphJson = {
     format: "karume-ir",
     version: 1,
@@ -263,7 +263,38 @@ Deno.test("i4 が linear 以外の重みスロット（embedding）で消費さ�
     { name: "m.w", dtype: "I4", shape: [4, 16], data: new Uint8Array(32) },
   ]);
   const estimate = estimateSessionMemory(model);
-  // packed のままでは常駐できない（展開経路は linear のタイル読みにしか無い — ADR 0069 決定 5）
+  // 語彙表 numel 64 → 32 バイト + group scale 4×4=16（展開経路は embedding カーネルにもある）
+  assertEquals(estimate.compressedWeightBytes, 48);
+  assertEquals(estimate.uncompressedWeightBytes, 0);
+  assertEquals(estimate.expandedWeightBytes, 0);
+});
+
+Deno.test("グラフ出力になった i4 は適格外で f32 展開へ回る", () => {
+  // 展開経路を持たない重みスロット（conv 系）との共有は**この層では作れない**（conv の重みは
+  // rank 3 以上で、embedding / linear と shape 契約が両立しない）ので、i4 の適格外の受け皿は
+  // グラフ出力の側で踏む。判定の 3 点自体は `i4EligibleInitializers` の単体
+  // （gpu_i4_weights_test.ts）が conv 込みで固定する。
+  const graph: GraphJson = {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["embedding"] },
+    symbols: [],
+    inputs: [{ name: "ids", dtype: "i32", shape: [2] }],
+    outputs: ["y", "w"],
+    initializers: {
+      w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: 16 } },
+    },
+    values: {
+      w: { dtype: "f32", shape: [4, 16] },
+      y: { dtype: "f32", shape: [2, 16] },
+    },
+    nodes: [{ op: "embedding", ins: ["w", "ids"], outs: ["y"], attrs: { padding_idx: -1 } }],
+  };
+  const model = openGraph(graph, [
+    { name: "m.s", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
+    { name: "m.w", dtype: "I4", shape: [4, 16], data: new Uint8Array(32) },
+  ]);
+  const estimate = estimateSessionMemory(model);
   assertEquals(estimate.compressedWeightBytes, 0);
   assertEquals(estimate.uncompressedWeightBytes, 0);
   assertEquals(estimate.expandedWeightBytes, 64 * 4);

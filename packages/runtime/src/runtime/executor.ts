@@ -76,7 +76,7 @@ import {
   declaredDtypes,
   eligibleCompressedInitializers,
   ExecutionError,
-  linearWeightInitializers,
+  i4EligibleInitializers,
   planGraph,
   statesOnlySymbols,
   type SymbolBindings,
@@ -783,8 +783,9 @@ export class Session {
     const eligible = eligibleCompressedInitializers(graph);
     // i8 の per-channel scale が掛かる軸（消費側 op から決まる — ADR 0019）。
     const channelAxes = weightChannelAxes(graph);
-    // i4 の適格はさらに狭く「重みスロットでの消費が linear だけ」（ADR 0069 決定 5）。
-    const linearOnly = linearWeightInitializers(graph);
+    // i4 の適格はさらに狭く「重みスロットでの消費が linear / embedding だけ」
+    // （ADR 0069 決定 5 — 展開経路を持つカーネルはこの 2 つ）。
+    const i4Eligible = i4EligibleInitializers(graph);
     const weightStorages = new Map<string, WeightStorage>();
     const weightScaleBuffers = new Map<string, GPUBuffer>();
     const weightGroupSizes = new Map<string, number>();
@@ -860,10 +861,11 @@ export class Session {
               if (groupSize === undefined) {
                 throw new ExecutionError(`initializer '${name}': 格納 i4 なのに group_size が無い`);
               }
-              // 適格は f16 / i8 より狭い「消費が linear の重みスロットのみ」（ADR 0069 決定 5 —
-              // 展開経路が linear のタイル読みにしか無い）。他の重みスロットと共有される i4 は
-              // CPU 展開の受け皿へ（正しさは保たれ VRAM 削減はゼロ — i8 の適格外と同じ設計）。
-              if (eligible.has(name) && linearOnly.has(name)) {
+              // 適格は f16 / i8 より狭い「消費が linear / embedding の重みスロットのみ」
+              // （ADR 0069 決定 5 — 展開経路が linear のタイル読みと embedding のカーネルに
+              // しか無い）。展開経路の無い重みスロット（conv 系）と共有される i4 は CPU 展開の
+              // 受け皿へ（正しさは保たれ VRAM 削減はゼロ — i8 の適格外と同じ設計）。
+              if (eligible.has(name) && i4Eligible.has(name)) {
                 // ペイロードは詰め物不要で常に 4 バイト整列 — バイト長 = numel / 2 で、numel は
                 // group_size（2 冪 ≥ 16）の倍数だからバイト長は 8 の倍数（ADR 0069 決定 2）。
                 weightStorages.set(name, "i4");

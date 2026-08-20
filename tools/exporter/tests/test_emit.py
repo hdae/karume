@@ -16,7 +16,7 @@ from karume.emit import (
     INT4_OFFSET,
     EmitError,
     eligible_compressed_initializers,
-    linear_weight_initializers,
+    i4_eligible_initializers,
     pack_int4,
     storage_breakdown,
     unpack_int4,
@@ -645,13 +645,14 @@ class TestPackedFourBitOrder:
 
 
 def int4_weight_graph(
-    *, embedding: bool = False, group_size: int = 16
+    *, embedding: bool = False, conv: bool = False, group_size: int = 16
 ) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     """linear の重み `[3,32]` を group 対称 i4 で fake-quant 済みにしたグラフ。
 
     in 軸 32 / group 16 なので 1 行に group が 2 つ入る（scale の group 形 `[3,2]`）。
-    `embedding` を立てると「重みスロット適格だが linear ではない」重み（embedding 表）が
-    増える — i4 が拒否すべき形（ADR 0069 決定 5）。
+    `embedding` を立てると **embedding 表**（i4 適格の 2 つ目の重みスロット — ADR 0069
+    決定 5 の追補）が、`conv` を立てると **conv1d の重み**（重みスロット適格だが i4 の
+    展開経路が無い = i4 が拒否すべき形）が増える。
     """
     nodes = [IrNode(op="linear", ins=["x", "w", "b"], outs=["h"], attrs={})]
     inputs = [IrInput(name="x", dtype="f32", shape=["T", 32])]
@@ -676,6 +677,16 @@ def int4_weight_graph(
         values["e"] = IrValue(dtype="f32", shape=["T", 32])
         tensors["enc.emb"] = torch.randn(3, 32)
         outputs.append("e")
+    if conv:
+        nodes.append(IrNode(op="conv1d", ins=["x", "cw", "cb"], outs=["c"], attrs={}))
+        initializers["cw"] = IrInitializer(tensor="enc.cw", storage=IrStorage(dtype="f32"))
+        initializers["cb"] = IrInitializer(tensor="enc.cb", storage=IrStorage(dtype="f32"))
+        values["cw"] = IrValue(dtype="f32", shape=[3, 2, 16])
+        values["cb"] = IrValue(dtype="f32", shape=[3])
+        values["c"] = IrValue(dtype="f32", shape=["T", 3])
+        tensors["enc.cw"] = torch.randn(3, 2, 16)
+        tensors["enc.cb"] = torch.randn(3)
+        outputs.append("c")
     graph = IrGraph(
         symbols=["T"],
         inputs=inputs,
@@ -693,21 +704,43 @@ def write_int4(path, graph: IrGraph, tensors, scales):
     return write_model(path, graph, tensors, weight_dtype="i4", weight_scales=scales)
 
 
-class TestI4Eligibility:
-    """i4 の適格は **linear の重みスロット限定**（ADR 0069 決定 5 — 実行経路が linear 始まり）。"""
+def int4_embedding_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """linear と embedding の**両方**を group 対称 i4 で丸めたグラフ（embedding 追補の正の形）。
 
-    def test_only_linear_weight_slots_are_listed(self):
+    embedding 表 `[V,D]` は `channel_rows` が恒等なので、group scale も `[V, D/group]` の
+    「重みと同 rank・最終次元だけ group 数」— linear とまったく同じ形で格納できる。
+    """
+    graph, tensors, scales = int4_weight_graph(embedding=True)
+    emb_scale = group_scale(tensors["enc.emb"], 16)
+    tensors["enc.emb"] = dequantize_int4(quantize_to_int4(tensors["enc.emb"], emb_scale), emb_scale)
+    scales["enc.emb"] = emb_scale
+    return graph, tensors, scales
+
+
+class TestI4Eligibility:
+    """i4 の適格は **linear / embedding の重みスロット限定**（ADR 0069 決定 5 + embedding 追補
+    — i4 の展開経路を持つカーネルはこの 2 つだけ）。
+    """
+
+    def test_linear_and_embedding_weight_slots_are_listed(self):
         graph, _, _ = int4_weight_graph(embedding=True)
 
         assert eligible_compressed_initializers(graph) == {"w", "emb"}
-        assert linear_weight_initializers(graph) == {"w"}
+        assert i4_eligible_initializers(graph) == {"w", "emb"}
+
+    def test_a_conv_weight_is_eligible_but_not_i4_eligible(self):
+        """conv 系の重みは一般適格でも i4 の適格には入らない（展開経路が無い）。"""
+        graph, _, _ = int4_weight_graph(conv=True)
+
+        assert eligible_compressed_initializers(graph) == {"w", "cw"}
+        assert i4_eligible_initializers(graph) == {"w"}
 
     def test_a_weight_shared_with_another_weight_slot_is_excluded(self):
-        """conv とも共有される重みは linear 限定の適格に入らない（展開経路が 1 つに決まらない）。"""
+        """conv とも共有される重みは i4 の適格に入らない（展開経路が 1 つに決まらない）。"""
         graph, _, _ = int4_weight_graph()
         graph.nodes.append(IrNode(op="conv1d", ins=["x", "w", "b"], outs=["c"], attrs={}))
 
-        assert linear_weight_initializers(graph) == set()
+        assert i4_eligible_initializers(graph) == set()
 
 
 class TestI4Storage:
@@ -779,21 +812,87 @@ class TestI4Storage:
         assert breakdown.plain_tensors == 1
         assert breakdown.plain_bytes == 3 * 4
 
-    def test_a_non_linear_eligible_weight_stays_f32(self, tmp_path):
-        """embedding 表は一般適格でも i4 にせず f32 のまま残す（Codex 波 F 指摘 I4-ELIG-01）。
+    def test_a_conv_weight_stays_f32(self, tmp_path):
+        """conv の重みは一般適格でも i4 にせず f32 のまま残す（Codex 波 F 指摘 I4-ELIG-01）。
 
-        ここで export 全体を落とすと、linear + embedding を持つ普通の LLM が i4 で書けなく
-        なる。ランタイム側の受け皿（eligible ∩ linearOnly の外は CPU 展開）と対の設計は
-        「linear だけ圧縮・他は f32」で、i8 の適格外が f32 で残るのと同じ。
+        ここで export 全体を落とすと、linear + conv を持つ普通のグラフが i4 で書けなくなる。
+        ランタイム側の受け皿（eligible ∩ i4Eligible の外は CPU 展開）と対の設計は
+        「展開経路のある op の重みだけ圧縮・他は f32」で、i8 の適格外が f32 で残るのと同じ。
         """
-        graph, tensors, scales = int4_weight_graph(embedding=True)
+        graph, tensors, scales = int4_weight_graph(conv=True)
 
         path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
 
         declared = written_graph(path).initializers
         assert declared["w"].storage.dtype == "i4"
-        assert declared["emb"].storage.dtype == "f32"
-        assert verify_model(path).initializers["emb"].storage.dtype == "f32"
+        assert declared["cw"].storage.dtype == "f32"
+
+    def test_an_embedding_table_is_stored_as_i4_with_a_group_scale(self, tmp_path):
+        """embedding 表 `[V,D]` も i4 で格納される（ADR 0069 決定 5 の embedding 追補）。
+
+        scale は linear とまったく同じ group 形（同 rank・最終次元だけ group 数）で、
+        宣言も `storage.group_size` を持つ — 席が増えただけで格納規則は 1 つ。
+        """
+        graph, tensors, scales = int4_embedding_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        declared = written_graph(path).initializers
+        assert declared["emb"].storage.dtype == "i4"
+        assert declared["emb"].storage.scale == "karume.scale.enc.emb"
+        assert declared["emb"].storage.group_size == 16
+        header = container_header(path)
+        assert header["enc.emb"]["dtype"] == "I4"
+        assert header["enc.emb"]["shape"] == [3, 32]  # shape は論理形のまま
+        begin, end = header["enc.emb"]["data_offsets"]
+        assert end - begin == 3 * 32 // 2
+        assert header["karume.scale.enc.emb"]["shape"] == [3, 2]
+        assert header["karume.scale.enc.emb"]["dtype"] == "F32"
+
+    def test_the_stored_embedding_bytes_reconstruct_the_table_bit_for_bit(self, tmp_path):
+        """embedding 表でも `dequant(unpack(格納バイト))` が丸め済みの重みとビット一致する。"""
+        graph, tensors, scales = int4_embedding_graph()
+        expected = tensors["enc.emb"].clone()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        packed = stored_payload(path, "enc.emb")
+        restored = dequantize_int4(unpack_int4(packed, (3, 32)), scales["enc.emb"])
+        assert torch.equal(restored, expected)
+
+    def test_the_emitted_embedding_i4_file_satisfies_the_reader_layout_rules(self, tmp_path):
+        """I4 が 2 本並んでも「隙間なく・4 バイト整列」が保たれる（ADR 0069 追記 2 の並び）。"""
+        graph, tensors, scales = int4_embedding_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        assert_reader_layout(path)
+
+    def test_the_embedding_i4_file_passes_the_full_verification(self, tmp_path):
+        """emit → verify_model の往復が embedding の i4 でも最後まで通る。
+
+        group 形の検査（`_check_group_quantized_shape` — 最終次元 % group_size）は
+        embedding `[V,D]` の D 軸でそのまま成立する。
+        """
+        graph, tensors, scales = int4_embedding_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        expected = compressed_view(graph, {"w": "i4", "emb": "i4"}, group_size=16)
+        assert verify_model(path).to_dict() == expected.to_dict()
+
+    def test_the_breakdown_counts_both_i4_tensors(self, tmp_path):
+        """内訳の i4 バイトは linear と embedding の 2 本ぶん（0.5 バイト / 要素）。"""
+        graph, tensors, scales = int4_embedding_graph()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        breakdown = storage_breakdown(written_graph(path))
+
+        assert breakdown.compressed_tensors == 2
+        assert breakdown.compressed_bytes == 2 * (3 * 32 // 2)
+        assert breakdown.scale_bytes == 2 * (3 * 2 * 4)
+        assert breakdown.plain_tensors == 1
+        assert breakdown.plain_bytes == 3 * 4
 
     def test_a_graph_whose_only_weight_is_shared_with_conv_fails_loudly(self, tmp_path):
         """linear と conv で共有された重みしか無い形は「適格 0 本」で落ちる（沈黙させない）。"""
@@ -1288,16 +1387,20 @@ class TestMixedStorage:
                 weight_dtype_overrides={"enc.w": "f16"},
             )
 
-    def test_an_explicit_i4_on_a_non_linear_weight_fails_loudly(self, tmp_path):
-        graph, tensors, scales = mixed_weight_graph()
+    def test_an_explicit_i4_on_a_conv_weight_fails_loudly(self, tmp_path):
+        """conv の重みは一般適格でも i4 の展開経路が無い。
 
-        with pytest.raises(EmitError, match="linear の重みスロットだけ"):
+        既定は静かに f32 へ残すが、明示指定は fail loudly（`_plan_weight_dtype` の線引き）。
+        """
+        graph, tensors, scales = int4_weight_graph(conv=True)
+
+        with pytest.raises(EmitError, match="の重みスロットだけ"):
             write_model(
                 tmp_path / "model.safetensors",
                 graph,
                 tensors,
                 weight_scales=scales,
-                weight_dtype_overrides={"enc.emb": "i4"},
+                weight_dtype_overrides={"enc.cw": "i4"},
             )
 
     def test_an_unknown_override_dtype_fails_loudly(self, tmp_path):

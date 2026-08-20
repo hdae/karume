@@ -2288,8 +2288,13 @@ export class RecipeBuilder {
     const weight = step.inputShapes[0];
     const count = numel(step.outputs[0].shape);
     const weightStorage = this.#weightStorage(step);
-    const key = embeddingKey(weightStorage);
-    const { pipeline, layout } = await this.#state.cache.get(key, embeddingWgsl(weightStorage));
+    // i4 は group 長を WGSL に焼く（キーの g 部と対 — linear と同じ規律・ADR 0069）。
+    const groupSize = weightStorage === "i4" ? this.#weightGroupSize(step) : undefined;
+    const key = embeddingKey(weightStorage, groupSize);
+    const { pipeline, layout } = await this.#state.cache.get(
+      key,
+      embeddingWgsl(weightStorage, groupSize),
+    );
     const params = this.#writeParams(
       embeddingParams(count, weight[1], weight[0]),
       PARAMS_UNIFORM_USAGE,

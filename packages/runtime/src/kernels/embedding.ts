@@ -24,15 +24,25 @@
  * MUST: NaN のビット列は params で運ぶ。WGSL には NaN リテラルが無く、`bitcast<f32>(...)` を
  * 定数式で書くと「const-expression が NaN」としてシェーダ生成エラーになりうる実装がある。
  *
- * 重みは格納の変種を持つ（`w=f32` / `w=f16` / `w=i8` — ADR 0018 / 0019）。差は行の
- * 読み出し 1 行と、i8 の per-row scale（チャネル軸 = 語彙軸 0）だけで、範囲外添字の裁定は
- * 共通（src/kernels/weight-storage.ts）。scale の読み出しは範囲内分岐の**内側**に置く
+ * 重みは格納の変種を持つ（`w=f32` / `w=f16` / `w=i8` / `w=i4` — ADR 0018 / 0019 / 0069）。
+ * 差は行の読み出し 1 行と scale の引き方だけで、範囲外添字の裁定は共通
+ * （src/kernels/weight-storage.ts）。scale の読み出しは範囲内分岐の**内側**に置く
  * （範囲外の `pick` で `wscale` を引かない）。
+ *
+ * ## i4 の group scale は**要素ごと**（ADR 0069 決定 3）
+ *
+ * i8 の scale は行（= 語彙エントリ）ごとで、行が決まればループ不変になる。i4 の group scale は
+ * 量子化軸（重み `[V,D]` の D 軸）方向に `group_size` ごと変わるので、`col` から引き直す:
+ * `wscale[pick * (D / group_size) + col / group_size]`。1 スレッドが 1 出力要素しか持たない
+ * ので巻き上げる先が無く、linear（gemm.ts の充填が quad ごとに引く）と違いここで直に引く。
+ * MUST: group 長は WGSL に shift として焼くので**キーにも入れる**（`:wi4g32`）。
  */
 
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 import {
+  i4GroupKeyPart,
+  i4GroupShift,
   WEIGHT_SCALE_VAR,
   weightArrayType,
   weightKeyPart,
@@ -45,16 +55,33 @@ import {
 
 export const EMBEDDING_WORKGROUP_SIZE = 256;
 
-/** i8 変種の scale 束縛（出力の次の番号 — executor の bind entries と対で使う）。 */
+/** i8 / i4 変種の scale 束縛（出力の次の番号 — executor の bind entries と対で使う）。 */
 export const EMBEDDING_SCALE_BINDING = 4;
 
 /** 範囲外添字の出力に書く quiet NaN のビット列（f32）。 */
 export const EMBEDDING_OOB_BITS = 0x7fc00000;
 
-export const embeddingKey = (weight: WeightStorage): string =>
-  `embedding:v1:f32:i32:wg${EMBEDDING_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
+/**
+ * i4 の group scale を**この 1 スレッドぶんだけ**束ねる行（i8 は行 scale・他は空文字）。
+ *
+ * MUST: 束縛名は i8 と同じ {@link WEIGHT_SCALE_VAR} — {@link weightRead} へ渡す式を格納形で
+ * 分岐させないため。行の位置（範囲内分岐の内側・字下げ）も i8 と揃える。
+ */
+const embeddingScaleWgsl = (weight: WeightStorage, groupShift: number | undefined): string =>
+  weight === "i4"
+    ? `
+      // group scale は量子化軸（列）依存 — 1 スレッド 1 要素なので巻き上げず要素ごとに引く
+      let ${WEIGHT_SCALE_VAR} = wscale[u32(pick) * (dims.hidden >> ${groupShift}u) + (col >> ${groupShift}u)];`
+    : weightScaleWgsl(weight, "u32(pick)", "      ");
 
-export const embeddingWgsl = (weight: WeightStorage): string =>
+export const embeddingKey = (weight: WeightStorage, groupSize?: number): string => {
+  i4GroupShift("embedding", weight, groupSize);
+  return `embedding:v1:f32:i32:wg${EMBEDDING_WORKGROUP_SIZE}${weightKeyPart(weight)}${
+    i4GroupKeyPart(groupSize)
+  }`;
+};
+
+export const embeddingWgsl = (weight: WeightStorage, groupSize?: number): string =>
   `// karume embedding (out[..., h] = weight[index[...], h], f32 / 添字 i32${weightNote(weight)})
 struct Dims {
   n: u32,
@@ -81,7 +108,7 @@ fn main(
     // 契約外の添字は別の行を返さず NaN で汚染する（カーネル doc の裁定）
     if (pick < 0 || u32(pick) >= dims.vocab) {
       out[i] = bitcast<f32>(dims.oob);
-    } else {${weightScaleWgsl(weight, "u32(pick)", "      ")}
+    } else {${embeddingScaleWgsl(weight, i4GroupShift("embedding", weight, groupSize))}
       out[i] = ${weightRead("weight", weight, "u32(pick) * dims.hidden + col", WEIGHT_SCALE_VAR)};
     }
     i = i + stride;

@@ -13,9 +13,10 @@ initializer だけ**:
    （ランタイム側 `packages/runtime/src/runtime/plan.ts` の
    `eligibleCompressedInitializers` と同じ規則。
    bias も norm 系 weight も混在消費も消費ゼロも適格外 — ADR 0006）。
-   **i4 はさらに狭く `linear` の重みスロット限定**（ADR 0069 決定 5 — 実行経路が linear で
-   始まる。一般適格でも linear 以外の重み〈embedding / conv 系〉は f32 のまま残す — i8 の
-   適格外と同じ受け皿で、ランタイム側の eligible ∩ linearOnly と対）。
+   **i4 はさらに狭く {@link I4_WEIGHT_OPS}（`linear` / `embedding`）の重みスロット限定**
+   （ADR 0069 決定 5 と embedding 追補 — i4 の展開経路を持つ op はこの 2 つだけ。一般適格でも
+   conv 系の重みは f32 のまま残す — i8 の適格外と同じ受け皿で、ランタイム側の
+   eligible ∩ i4Eligible と対）。
 2. **逆変換がビット一致**する（= fake-quant 済み）。f16 は `f32 → f16 → f32` の往復、
    i8 は `q8.to(f32) · scale`、i4 は `dequant(unpack(pack(q4)))`（`scale` は fake-quant が
    使った値を**そのまま**）。
@@ -61,7 +62,7 @@ from types import MappingProxyType
 import torch
 
 from karume.ir import IR_METADATA_KEY, MIN_GROUP_SIZE, IrGraph, IrInitializer, IrStorage
-from karume.ops import LINEAR_OP, WEIGHT_CHANNEL_AXES, WEIGHT_SLOTS
+from karume.ops import EMBEDDING_OP, LINEAR_OP, WEIGHT_CHANNEL_AXES, WEIGHT_SLOTS
 from karume.quantize import (
     QuantizeError,
     dequantize_int4,
@@ -72,6 +73,16 @@ from karume.quantize import (
 
 #: 書き出せる格納 dtype（重みスロット向け）。bf16 は実行経路が無い（ADR 0006）。
 WEIGHT_DTYPES = ("f32", "f16", "i8", "i4")
+
+#: i4 の**実行経路を持つ** op（= i4 適格な重みスロットの消費先 — ADR 0069 決定 5 の linear と
+#: その embedding 追補）。ランタイム側 `packages/runtime/src/runtime/plan.ts` の `I4_WEIGHT_OPS`
+#: の鏡像で、両者が割れると「export は緑・ロードで CPU 展開に落ちる（VRAM 削減が黙って消える）」
+#: か、その逆に「宣言できない格納を要求して export だけが落ちる」形になる。
+#:
+#: MUST: conv 系（conv1d / conv2d / conv_transpose1d）を入れない。group scale の束縛が
+#: linear の充填と embedding のカーネルにしか無く、conv の生成入力へ i4 を渡すと
+#: 不成立 WGSL になる（`packages/runtime/src/kernels/weight-storage.ts`）。
+I4_WEIGHT_OPS: frozenset[str] = frozenset({LINEAR_OP, EMBEDDING_OP})
 
 #: torch dtype → safetensors dtype 名 / 1 要素の **bit** 数。ここに無い dtype は fail loudly。
 #: bit 単位で持つのは packed 4bit（1 バイトに 2 要素 — ADR 0069 決定 2）が要素バイト数で
@@ -187,14 +198,16 @@ def weight_channel_axes(graph: IrGraph) -> dict[str, int]:
     return axes
 
 
-def linear_weight_initializers(graph: IrGraph) -> set[str]:
-    """重みスロットでの消費が `linear` **だけ**の initializer（i4 の適格集合 — ADR 0069 決定 5）。
+def i4_eligible_initializers(graph: IrGraph) -> set[str]:
+    """重みスロットでの消費が {@link I4_WEIGHT_OPS} **だけ**の initializer
+    （i4 の適格集合 — ADR 0069 決定 5）。
 
-    i4 の実行経路は linear の重みスロット限定で始まるので、他の重みスロット（conv 系 /
-    embedding）でも消費される initializer は i4 で格納できない。`weight_channel_axes` と
+    i4 の展開経路（`unpack4xU8` + group scale）を持つカーネルは linear と embedding だけなので、
+    それ以外の重みスロット（conv 系）でも消費される initializer は i4 で格納できない —
+    そのカーネルは packed バイトを f32 として読む（例外は出ない）。`weight_channel_axes` と
     同じく**消費側の op** から引く（重みの shape だけでは区別できない）。
     """
-    linear: set[str] = set()
+    executable: set[str] = set()
     other: set[str] = set()
     for node in graph.nodes:
         slot = WEIGHT_SLOTS.get(node.op)
@@ -203,8 +216,8 @@ def linear_weight_initializers(graph: IrGraph) -> set[str]:
         name = node.ins[slot]
         if name not in graph.initializers:
             continue
-        (linear if node.op == LINEAR_OP else other).add(name)
-    return linear - other
+        (executable if node.op in I4_WEIGHT_OPS else other).add(name)
+    return executable - other
 
 
 def _scale_key(tensor_key: str) -> str:
@@ -342,13 +355,13 @@ def _plan_i4(
     name: str,
     tensor: torch.Tensor,
     scales: Mapping[str, torch.Tensor],
-    linear_weights: Set[str],
+    i4_eligible: Set[str],
 ) -> tuple[str, torch.Tensor, IrInitializer]:
     """i4 格納の計画（scale のキーとテンソル・新しい宣言）を返す — 重みには触らない。
 
     `_plan_i8` と同じ流儀（キー生成・衝突検査・scale の dtype 検査）で、違うのは 3 点:
-    適格が **linear の重みスロット限定**（ADR 0069 決定 5）・scale が **group 形**・宣言が
-    `storage.group_size` を持つこと。group 長は**渡された scale の形から引く**
+    適格が **{@link I4_WEIGHT_OPS} の重みスロット限定**（ADR 0069 決定 5）・scale が
+    **group 形**・宣言が `storage.group_size` を持つこと。group 長は**渡された scale の形から引く**
     （`quantize.group_size_of` — 別引数で受けると fake-quant が使った group と別の値を宣言
     できてしまい、形も型も合う沈黙誤値になる）。
 
@@ -357,10 +370,11 @@ def _plan_i4(
     """
     initializer = graph.initializers[name]
     key = initializer.tensor
-    if name not in linear_weights:
+    if name not in i4_eligible:
         raise EmitError(
-            f"initializer '{name}' ({key}): 格納 i4 は linear の重みスロットだけ"
-            "（ADR 0069 決定 5 — 実行経路が linear 限定で始まる）"
+            f"initializer '{name}' ({key}): 格納 i4 は"
+            f" {' / '.join(sorted(I4_WEIGHT_OPS))} の重みスロットだけ"
+            "（ADR 0069 決定 5 — i4 の展開経路を持つカーネルはこの 2 つ）"
         )
     scale = scales.get(key)
     if scale is None:
@@ -415,7 +429,7 @@ def _plan_weight_dtype(
     `weight_dtype_overrides` は**テンソルキー（FQN）→ 格納 dtype** の明示指定（混成格納 —
     LLM の「embedding は i8・linear は i4」が初出）。既定 `weight_dtype` が適格フィルタで
     **静かに f32 へ残す**のに対し、明示指定は**満たせなければ fail loudly**（未知キー・
-    適格外・非 f32 実体・i4 × 非 linear のどれも通さない）— 呼び出し側の意図が 1 本単位で
+    適格外・非 f32 実体・i4 × i4 適格外のどれも通さない）— 呼び出し側の意図が 1 本単位で
     書かれている以上、黙って別の格納にする余地は無い。`"f32"` の明示は「圧縮既定からの
     除外」として使える。
     """
@@ -468,7 +482,7 @@ def _plan_weight_dtype(
             )
     requested = {weight_dtype, *weight_dtype_overrides.values()}
     axes = weight_channel_axes(graph) if "i8" in requested else {}
-    linear_weights = linear_weight_initializers(graph) if "i4" in requested else set()
+    i4_eligible = i4_eligible_initializers(graph) if "i4" in requested else set()
     reserved = set(tensors)
     for name in sorted(eligible):
         key = graph.initializers[name].tensor
@@ -485,13 +499,13 @@ def _plan_weight_dtype(
                     f" {tensor.dtype}（圧縮格納は f32 実体のみ）"
                 )
             continue
-        # i4 の適格は **linear の重みスロット限定**（ADR 0069 決定 5）— 既定 i4 では linear
-        # 以外（embedding / conv 系）を f32 のまま静かに残す。i8 の適格外が f32 で残るのと
-        # 同じ設計で、ランタイム側（executor.ts の eligible ∩ linearOnly）と対。ここで
-        # 除外しないと、linear + embedding を持つ普通の LLM が「embedding を i4 にできない」
-        # で export 不能になる（Codex 波 F 指摘 I4-ELIG-01）。明示指定の i4 × 非 linear は
-        # `_plan_i4` 自身の門が fail loudly で受ける。
-        if dtype == "i4" and key not in weight_dtype_overrides and name not in linear_weights:
+        # i4 の適格は **{@link I4_WEIGHT_OPS} の重みスロット限定**（ADR 0069 決定 5）— 既定 i4
+        # では conv 系の重みを f32 のまま静かに残す。i8 の適格外が f32 で残るのと同じ設計で、
+        # ランタイム側（executor.ts の eligible ∩ i4Eligible）と対。ここで除外しないと、
+        # conv を混ぜたグラフが「conv の重みを i4 にできない」で export 不能になる
+        # （Codex 波 F 指摘 I4-ELIG-01）。明示指定の i4 × 適格外は `_plan_i4` 自身の門が
+        # fail loudly で受ける。
+        if dtype == "i4" and key not in weight_dtype_overrides and name not in i4_eligible:
             continue
         if dtype == "f16":
             declaration = IrInitializer(tensor=key, storage=IrStorage(dtype="f16"))
@@ -503,7 +517,7 @@ def _plan_weight_dtype(
                 )
             else:
                 scale_key, scale, declaration = _plan_i4(
-                    graph, reserved, name, tensor, weight_scales, linear_weights
+                    graph, reserved, name, tensor, weight_scales, i4_eligible
                 )
             plan.scales[scale_key] = scale
             reserved.add(scale_key)
@@ -740,7 +754,8 @@ def write_model(
 
     `weight_dtype` が `"f16"` / `"i8"` / `"i4"` のとき、**適格な重みスロットだけ**が圧縮格納に
     なる（宣言と実体が 1 経路で決まる — 別々に決めると「宣言 f16 / 実体 f32」の沈黙誤読が
-    作れる）。i4 の適格は linear の重みスロット限定（ADR 0069 決定 5）。
+    作れる）。i4 の適格は {@link I4_WEIGHT_OPS}（linear / embedding）の重みスロット限定
+    （ADR 0069 決定 5）。
 
     `weight_dtype_overrides`（テンソルキー → 格納 dtype）は 1 本単位の明示指定で、既定
     `weight_dtype` に**優先**する（混成格納 — 意味と fail loudly の線引きは
