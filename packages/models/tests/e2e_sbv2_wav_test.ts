@@ -122,9 +122,11 @@ const W4_QUANT = "w4";
  *
  * NOTE: 2026-08-20 の embedding i4 追補で `text_encoder` 席の中身（語彙表が i8 → i4）が変わった
  * ため、参照を採り直した（旧値 `c0bc803e…`）。同日、encoder linear の丸めが GPTQ 校正付きに
- * なり（perf-ledger Q-6）再度採り直した（旧値 `054bfca7…`）。`front` / `voice` 席は両回とも不変。
+ * なり（perf-ledger Q-6）再度採り直した（旧値 `054bfca7…`）。さらに同日、conv1d の i4 追補
+ * （ADR 0069 追記 7 — `front` / `voice` 席の conv1d が i4 g32 へ）で三度採り直した
+ * （旧値 `2d69fc80…`）。
  */
-const W4_REFERENCE_SHA256 = "2d69fc80d3c3c83538be653978cbae62830041f8cd105efc95d796137f6ddd4e";
+const W4_REFERENCE_SHA256 = "869f1cfd7e3c0633a5f97f2e61fa7dee90861deb241350aa3e746d617189517b";
 
 /** 参照 WAV を焼いた時点の実効ノブ（配布形の `pipelineConfig.defaults` と一致するはず）。 */
 const REFERENCE_KNOBS: Sbv2Defaults = {
