@@ -61,8 +61,11 @@ export type {
   Sbv2FromPretrainedOptions,
   Sbv2GenerateRequest,
   Sbv2PipelineOptions,
+  Sbv2ProsodyDraft,
   Sbv2RunComponent,
 } from "./src/sbv2/pipeline.ts";
+/** 修正辞書エントリの綴りは `@hdae/yomi` が正本（`./sbv2` と同じく素通し — 変換層は作らない）。 */
+export type { OverlayEntry } from "@hdae/yomi";
 
 export { Siglip2Pipeline } from "./src/siglip2/pipeline.ts";
 export type {
