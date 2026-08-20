@@ -21,23 +21,29 @@
 - **J-1b: SBV2 full-w4 — 消化済み（2026-08-20 ユーザー依頼）**: net_g（front/voice）の i4
   混成系列 + 3 席とも i4 の quant `w4` + WAV 門（perf-ledger Q-5 の SBV2 席）。net_g の適格
   linear は 6 本のみで削減は w8-bert4 比 −0.08% — 意味は「配布形を丸ごと 4bit で通す席」。
-  聴感 = `outputs/demo/sbv2-FN4-w4.wav` の確認待ち。
+  聴感 = 確認済み（2026-08-20 品質 OK・f32 比で微妙に硬い印象 — 第 3 段の gptq 結線後に再聴）。
 - **J-2 第 1 段: 消化済み（2026-08-20）** — core `quant_calib.py`（`ce568b0`）+ minicpm5/EG
   リグ結線・校正コーパス 48 文 ×2（`730c21b`）+ 実測 5 構成 × 2 ファミリ。実測の正本 =
   [research/2026-08-20-gptq-awq-calibrated-rounding.md](research/2026-08-20-gptq-awq-calibrated-rounding.md)。
   要旨: **GPTQ 大勝ち**（gptq-rtn = 今日の格納形のまま RTN 全面超え = perf-ledger Q-6 起票 /
   gptq-kmeans = 全列最良・greedy 37/48 で Q-2 の席価値上昇）・**AWQ 不採用（Q-7 ❌）**。
-- **J-2 第 2 段: 結線 + 実測消化・聴感/視認待ち（2026-08-20）**: gptq 3 構成を SBV2 BERT
-  （`3bf9cf8`）+ irodori/anima DiT（`fc89d29`）へ結線し本番実測済み（gates 全緑・正本 =
+- **J-2 第 2 段: 消化済み（2026-08-20）**: gptq 3 構成を SBV2 BERT（`3bf9cf8`）+
+  irodori/anima DiT（`fc89d29`）へ結線し本番実測（gates 全緑・正本 =
   [research](research/2026-08-20-gptq-awq-calibrated-rounding.md) §6）。**DiT 2 ファミリは
   数値が大幅改善**（irodori: S 予測が全構成一致 / anima: PSNR 12.3→22.7 dB）・SBV2 BERT は
-  数値判別不能（聴感のみ）。**残 = ユーザーの聴感/視認 → モデルごと採用裁定**（採用なら
-  Q-6 の出荷結線 = export へ CalibReport.int4 を渡す経路の実装）。net_g conv は GPTQ 対象外
-  （H が linear の in 軸形 — conv は im2col 要）。
+  数値判別不能（聴感のみ）。**聴感/視認裁定済み（research §6 裁定節）: 3 ファミリとも品質
+  OK → 採用確定**。net_g conv は GPTQ 対象外（H が linear の in 軸形 — conv は im2col 要）。
+- **J-2 第 3 段: Q-6 出荷結線 + 速度実測（進行中）**: deberta-i4 系列の export へ gptq-rtn を
+  結線（encoder linear = `calibrate_stages`・語彙表ほかは RTN 維持・校正 = calib_texts 48 文・
+  過不足一致門）→ w8-bert4 / w4 再配布 + WAV 参照採り直し + 再聴（主眼 =「硬さ」が縮むか）。
+  併せて既定化判断用の速度実測（w8 / w8-bert4 / w4 の実 GPU ロード + 合成壁時計 — 判断は
+  ユーザー基準「品質 i8 同等 + 速度勝利」）。irodori / anima の配布 i4 席新設は J-4 と同時に
+  裁定（irodori は kmeans 圧勝のため rtn 席を先行させない）。
 - **J-5a: embedding i4 — 消化済み（2026-08-20・`0d8c6f6`）**: i4 適格を
   `I4_WEIGHT_OPS = {linear, embedding}` へ一般化（ADR 0069 追記 6）。BERT 語彙表 i4 で系列
   −8.15 MiB（group scale の f32 が半減益の約 3 割を食い、見込み −12.5 MiB から下方訂正）・
-  `w8-bert4` 取得量 = w8 比 **−30.33%**。WAV 参照 2 本採り直し済み（聴感 = 新 WAV の確認待ち）。
+  `w8-bert4` 取得量 = w8 比 **−30.33%**。WAV 参照 2 本採り直し済み（聴感確認済み 2026-08-20 —
+  品質 OK・硬さの印象は第 3 段で再聴）。
   tied lm_head は適格へ反転（LLM 側の副次利得）。
 - **J-5b（承認済み・未着手）**: net_g conv1d i4（in 軸 = channel_rows 平坦の連続 group・
   scale rank2 の正式化 = ADR 0069 新決定。≈−27.5 MiB・J-5a と合わせ w8 比 ≈−40% 見込み）。
