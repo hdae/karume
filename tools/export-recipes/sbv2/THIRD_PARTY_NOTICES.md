@@ -36,14 +36,14 @@ published.
 
 ### rufflet17/voice_models (FN voice family)
 
-| Item                     | Value                                                                                                                                                            |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://huggingface.co/rufflet17/voice_models>                                                                                                                  |
-| Revision used            | Unverified                                                                                                                                                       |
-| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                                                                                    |
-| Code license             | n/a (weights only)                                                                                                                                               |
-| Weights license          | `card.py` records `license: other` / `rufflet17-voice-models-terms`, pointing at the repository page (checked 2026-08-07). Unverified against the revision used. |
-| Attribution requirements | Unverified                                                                                                                                                       |
+| Item                     | Value                                                                                                                                                                                                                                                                                                                               |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/rufflet17/voice_models>                                                                                                                                                                                                                                                                                     |
+| Revision used            | Unverified                                                                                                                                                                                                                                                                                                                          |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                                                                                                                                                                                                                                                       |
+| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                  |
+| Weights license          | `card.py` records `license: other` / `rufflet17-voice-models-terms`, pointing at the repository page. Re-checked 2026-08-20 via the HF API: the repository declares no license and carries **no README / model card at all** (145 files; the root holds only `.gitattributes`), so no written terms exist on the repository itself. |
+| Attribution requirements | None stated on the repository. Per the upstream author's statement (relayed by the project owner, 2026-08-20): the models are **freely redistributable merged models** — no single real person's voice is reproduced. The public location of that statement is not yet identified; record its URL here when known.                  |
 
 ### litagin/style_bert_vits2_jvnv (JVNV voice family)
 

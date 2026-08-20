@@ -63,6 +63,15 @@ shard identity API・`prepareModel → estimate → createSession` の 2 段境�
 改名・`ResidentWeight` union 化（2026-08-19 レビューの同席裁定）は**本 ADR に含めない** —
 backlog release 節に残置。凍結が要るのは資産側の形だけで、コード API は公開後も動かせる。
 
+## 追記（2026-08-20 — 配布リポ直下の法的テキスト席）
+
+リポ内レイアウト（ADR 0041 §9）の宣言外ファイル例外に、直下の **`LICENSE.md` / `NOTICE.md`**
+を追加した（`karume.dist.LEGAL_PATHS` — `Pipeline.root_files` で渡す・既定は空・受理名は
+この 2 つだけで他名は fail loudly）。上流の重みライセンスが再配布の条件としてライセンス文の
+コピーや Attribution Notice の同梱を要求する場合の席で、manifest は宣言しない（モデルの
+資産ではなく配布リポそのものに掛かる）。初出は anima（CircleStone Non-Commercial License
+§3(a)/(b)/(d) — 逐語原文は recipe の `circlestone_license.txt`）。
+
 ## Consequences
 
 - 配布 4 リポ（sbv2-fn / sbv2-jvnv / irodori-v4-small / anima-turbo）の dist 再生成が必要

@@ -22,9 +22,9 @@ questions it has to answer.
   verbatim from `AnimaTextConditioner` and `CosmosTransformer3DModel`, and `tiling.py` self-reports
   verbatim ports of `AutoencoderKLQwenImage.blend_v` / `blend_h`. `pipeline_ref.py` self-reports a
   verbatim transcription of the upstream pipeline blocks.
-- **Distilled LoRA** — baked into the weights at export time (`lora.py`). The conversion to
-  diffusers naming uses the diffusers-supplied function; the LoRA's own distribution is not named
-  in this directory.
+- **Distilled LoRA** — the official CircleStone Labs "Anima Turbo LoRA" (see the inventory row
+  below), baked into the weights at export time (`lora.py`). The conversion to diffusers naming
+  uses the diffusers-supplied function.
 
 ## Release-gate inventory
 
@@ -55,11 +55,11 @@ published.
 
 ### Distilled LoRA (baked in at export time)
 
-| Item                     | Value                                         |
-| ------------------------ | --------------------------------------------- |
-| Upstream repository      | Unverified                                    |
-| Revision used            | Unverified                                    |
-| Form of copy             | Merged into the exported weights (`lora.py`). |
-| Code license             | n/a (weights only)                            |
-| Weights license          | Unverified                                    |
-| Attribution requirements | Unverified                                    |
+| Item                     | Value                                                                                                                                                                                                                        |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | Official CircleStone Labs "Anima Turbo LoRA" — <https://civitai.com/models/2560840/anima-turbo-lora> (author `circlestone_labs`; identified 2026-08-20, user-confirmed provenance)                                           |
+| Revision used            | v0.2 (`inputs/anima/anima-turbo-lora-v0.2.safetensors`, 148,902,616 B — matches the v0.2 SafeTensor size listed on the Civitai page as of 2026-08-20)                                                                        |
+| Form of copy             | Merged into the exported weights (`lora.py`).                                                                                                                                                                                |
+| Code license             | n/a (weights only)                                                                                                                                                                                                           |
+| Weights license          | "Anima License" per the Civitai page = the CircleStone Non-Commercial License (same terms as the base weights; Copyright CircleStone Labs LLC). Checked on the model page 2026-08-20.                                        |
+| Attribution requirements | Covered by the base-model obligations: the distribution bundles `LICENSE.md` + `NOTICE.md` (Attribution Notice, modification statement naming the baked LoRA, non-endorsement) per License §3(a)/(b)/(d) — wired 2026-08-20. |
