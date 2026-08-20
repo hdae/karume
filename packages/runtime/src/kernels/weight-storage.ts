@@ -36,11 +36,11 @@ export type WeightStorage = "f32" | "f16" | "i8" | "i4";
  * 融合 5 カーネルが**共有する**変種の全数（スナップショットと縮退ハーネスの網羅を機械的に
  * 回すための列挙）。
  *
- * MUST: `i4` は入れない — i4 の実行経路は **linear と embedding だけ**（ADR 0069 決定 5 と
- * その embedding 追補）で、conv 系の生成入力に i4 を渡すと group scale の束縛が出ないまま
- * `dequant(i, scale)` が未定義識別子を参照する不成立 WGSL になる。加えて i4 変種は group 長を
- * WGSL に焼く（キーの `g` 部と対）ので、格納形だけを引数に取るこの列挙では表せない —
- * linear / embedding の i4 変種はスナップショット側が group 長つきで明示的に並べる。
+ * MUST: `i4` は入れない — i4 の実行経路は **linear / embedding / conv1d の implicit GEMM
+ * （groups == 1）だけ**（ADR 0069 決定 5 と その embedding / conv1d 追補）で、残りの生成入口
+ * （conv1d 直接カーネル / conv2d / conv_transpose1d）に i4 を渡す経路は各生成関数が落とす。
+ * 加えて i4 変種は group 長を WGSL に焼く（キーの `g` 部と対）ので、格納形だけを引数に取る
+ * この列挙では表せない — i4 変種はスナップショット側が group 長つきで明示的に並べる。
  */
 export const WEIGHT_STORAGES: readonly WeightStorage[] = ["f32", "f16", "i8"];
 
@@ -153,8 +153,9 @@ fn dequant(i: u32) -> f32 {
     // MUST: nibble の展開順は「要素 2i = 下位 / 2i+1 = 上位・u = q + 8」（ADR 0069 決定 4 —
     // 正本はエクスポータ emit.py の pack_int4。取り違えても形も型も合う沈黙誤値になるので、
     // 検出は非対称パターンの GPU 門が持つ）。scale は group ごとで k に依存するため、i8 と
-    // 違いループ不変に巻き上げられない — 呼び出し側（gemm.ts の fillBLinear）が quad ごとに
-    // 引いて渡す（4 整列 quad は group_size ≥ 16 のため group を跨がない）。
+    // 違いループ不変に巻き上げられない — 呼び出し側（linear は gemm.ts の fillBLinear が B 側で、
+    // conv1d igemm は fillAConv が A 側で）が quad ごとに引いて渡す（4 整列 quad は
+    // group_size ≥ 16 のため group を跨がない）。
     return quad
       ? `
 @group(0) @binding(${scaleBinding}) var<storage, read> wscale: array<f32>;
@@ -221,7 +222,8 @@ fn dequant(i: u32, scale: f32) -> f32 {
  *
  * NOTE: i4 は**ここで束ねない**（空文字のまま）— group scale は量子化軸（k / D）依存で
  * チャネル不変の巻き上げが成立しないため、引く場所はカーネルごとに違う: linear は充填側
- * （gemm.ts の fillBLinear）が quad ごとに、embedding は 1 スレッド 1 出力要素なので
+ * （gemm.ts の fillBLinear）が quad ごとに、conv1d の implicit GEMM は A 側の充填
+ * （gemm.ts の fillAConv）が quad ごとに、embedding は 1 スレッド 1 出力要素なので
  * カーネル本体が要素ごとに引く（ADR 0069）。
  */
 export const weightScaleWgsl = (

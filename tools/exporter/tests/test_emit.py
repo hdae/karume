@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import struct
 import weakref
 from dataclasses import replace
@@ -32,6 +33,7 @@ from karume.ir import (
     IrStorage,
     IrValue,
 )
+from karume.ops import OpContractError
 from karume.quantize import (
     channel_scale,
     dequantize_int4,
@@ -644,15 +646,30 @@ class TestPackedFourBitOrder:
             pack_int4(torch.zeros(3, dtype=torch.int8))
 
 
+def conv1d_attrs(groups: int = 1) -> dict:
+    """conv1d の attrs（4 つとも宣言必須 — `ops.CONV1D_ATTRS`）。"""
+    return {"stride": 1, "padding": 0, "dilation": 1, "groups": groups}
+
+
 def int4_weight_graph(
-    *, embedding: bool = False, conv: bool = False, group_size: int = 16
+    *,
+    embedding: bool = False,
+    conv: bool = False,
+    group_size: int = 16,
+    conv_shape: tuple[int, ...] = (3, 2, 16),
+    conv_groups: int = 1,
+    conv_op: str = "conv1d",
 ) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     """linear の重み `[3,32]` を group 対称 i4 で fake-quant 済みにしたグラフ。
 
     in 軸 32 / group 16 なので 1 行に group が 2 つ入る（scale の group 形 `[3,2]`）。
     `embedding` を立てると **embedding 表**（i4 適格の 2 つ目の重みスロット — ADR 0069
-    決定 5 の追補）が、`conv` を立てると **conv1d の重み**（重みスロット適格だが i4 の
-    展開経路が無い = i4 が拒否すべき形）が増える。
+    決定 5 の追補）が、`conv` を立てると **conv の重み**（既定は `groups == 1` の conv1d
+    `[3,2,16]` = i4 適格の 3 つ目。`conv_shape` / `conv_groups` / `conv_op` で適格から
+    外れる枝も踏める）が増える。
+
+    conv の重みは**適格な形のときだけ**丸めて台帳に載せる（適格外は emit が f32 のまま
+    残すので、丸めても台帳が使われない）。
     """
     nodes = [IrNode(op="linear", ins=["x", "w", "b"], outs=["h"], attrs={})]
     inputs = [IrInput(name="x", dtype="f32", shape=["T", 32])]
@@ -678,14 +695,19 @@ def int4_weight_graph(
         tensors["enc.emb"] = torch.randn(3, 32)
         outputs.append("e")
     if conv:
-        nodes.append(IrNode(op="conv1d", ins=["x", "cw", "cb"], outs=["c"], attrs={}))
+        # conv の入力は rank 3（`x[B,Cin,L]`）— L = K + 1 なので出力長は 2
+        # （stride / dilation 1・padding 0）。verify の shape 推論まで通す形にしておく。
+        channels, kernel = conv_shape[1] * conv_groups, conv_shape[2]
+        attrs = conv1d_attrs(conv_groups) if conv_op == "conv1d" else {"stride": 1, "padding": 0}
+        nodes.append(IrNode(op=conv_op, ins=["cx", "cw", "cb"], outs=["c"], attrs=attrs))
+        inputs.append(IrInput(name="cx", dtype="f32", shape=[1, channels, kernel + 1]))
         initializers["cw"] = IrInitializer(tensor="enc.cw", storage=IrStorage(dtype="f32"))
         initializers["cb"] = IrInitializer(tensor="enc.cb", storage=IrStorage(dtype="f32"))
-        values["cw"] = IrValue(dtype="f32", shape=[3, 2, 16])
-        values["cb"] = IrValue(dtype="f32", shape=[3])
-        values["c"] = IrValue(dtype="f32", shape=["T", 3])
-        tensors["enc.cw"] = torch.randn(3, 2, 16)
-        tensors["enc.cb"] = torch.randn(3)
+        values["cw"] = IrValue(dtype="f32", shape=list(conv_shape))
+        values["cb"] = IrValue(dtype="f32", shape=[conv_shape[0]])
+        values["c"] = IrValue(dtype="f32", shape=[1, conv_shape[0], 2])
+        tensors["enc.cw"] = torch.randn(*conv_shape)
+        tensors["enc.cb"] = torch.randn(conv_shape[0])
         outputs.append("c")
     graph = IrGraph(
         symbols=["T"],
@@ -695,9 +717,15 @@ def int4_weight_graph(
         values=values,
         nodes=nodes,
     )
-    scale = group_scale(tensors["enc.w"], group_size)
-    tensors["enc.w"] = dequantize_int4(quantize_to_int4(tensors["enc.w"], scale), scale)
-    return graph, tensors, {"enc.w": scale}
+    scales = {}
+    for key in ["enc.w"] + (["enc.cw"] if conv else []):
+        weight = tensors[key]
+        if weight.numel() // weight.shape[0] % group_size:
+            continue  # 端数 group（ADR 0069 決定 2）— 丸められない = 適格でもない
+        scale = group_scale(weight, group_size)
+        tensors[key] = dequantize_int4(quantize_to_int4(weight, scale), scale)
+        scales[key] = scale
+    return graph, tensors, scales
 
 
 def write_int4(path, graph: IrGraph, tensors, scales):
@@ -718,8 +746,11 @@ def int4_embedding_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, 
 
 
 class TestI4Eligibility:
-    """i4 の適格は **linear / embedding の重みスロット限定**（ADR 0069 決定 5 + embedding 追補
-    — i4 の展開経路を持つカーネルはこの 2 つだけ）。
+    """i4 の適格は **linear / embedding / conv1d の重みスロット限定**（ADR 0069 決定 5 +
+    embedding / conv1d 追補 — i4 の展開経路を持つカーネルはこの 3 つだけ）。
+
+    conv1d は展開できるのが igemm 変種だけなので `groups == 1` が要り、さらに格納行
+    （`Cin·K` の平坦化）が group 長で割り切れることが要る。
     """
 
     def test_linear_and_embedding_weight_slots_are_listed(self):
@@ -728,19 +759,68 @@ class TestI4Eligibility:
         assert eligible_compressed_initializers(graph) == {"w", "emb"}
         assert i4_eligible_initializers(graph) == {"w", "emb"}
 
-    def test_a_conv_weight_is_eligible_but_not_i4_eligible(self):
-        """conv 系の重みは一般適格でも i4 の適格には入らない（展開経路が無い）。"""
+    def test_a_dense_conv1d_weight_is_i4_eligible(self):
+        """`groups == 1` の conv1d は i4 の適格（波 J-5b の追補）。
+
+        行長は最終次元（K = 16）ではなく**受容野の平坦化**（`Cin·K` = 32）— group 16 で
+        2 group に割れる。K だけを見ていると `[3,2,16]` が「16 % 16 == 0」で通ってしまい、
+        受容野をまたぐ group が別の scale で読まれる沈黙誤値になる。
+        """
         graph, _, _ = int4_weight_graph(conv=True)
 
         assert eligible_compressed_initializers(graph) == {"w", "cw"}
-        assert i4_eligible_initializers(graph) == {"w"}
+        assert i4_eligible_initializers(graph, group_size=16) == {"w", "cw"}
+
+    def test_a_grouped_conv1d_weight_is_not_i4_eligible(self):
+        """`groups > 1` は direct カーネルで実行され、i4 の展開経路が無い。"""
+        graph, _, _ = int4_weight_graph(conv=True, conv_groups=2)
+
+        assert eligible_compressed_initializers(graph) == {"w", "cw"}
+        assert i4_eligible_initializers(graph, group_size=16) == {"w"}
+
+    def test_a_conv1d_without_a_declared_groups_attr_fails_loudly(self):
+        """`groups` の宣言が無い形に既定値 1 を補わない（ADR 0012・ランタイム側と同じ扱い）。
+
+        黙って 1 を仮定すると depthwise の重みが i4 で常駐し、direct カーネルが packed バイトを
+        f32 として読む（例外の出ない沈黙誤値）。
+        """
+        graph, _, _ = int4_weight_graph(conv=True)
+        without_groups = {key: value for key, value in conv1d_attrs().items() if key != "groups"}
+        graph.nodes[-1] = replace(graph.nodes[-1], attrs=without_groups)
+
+        with pytest.raises(OpContractError, match=re.escape("attrs.groups")):
+            i4_eligible_initializers(graph, group_size=16)
+
+    def test_a_conv1d_whose_flattened_row_is_not_divisible_is_not_i4_eligible(self):
+        """行長 `Cin·K` = 24 は group 16 で端数 group を作る（ADR 0069 決定 2）。
+
+        適格に入れてしまうと「fake-quant が届いていない重み」として export 全体が落ちる —
+        linear と割り切れない conv1d を持つ普通のグラフが i4 で書けなくなる。
+        """
+        graph, _, _ = int4_weight_graph(conv=True, conv_shape=(3, 3, 8))
+
+        assert eligible_compressed_initializers(graph) == {"w", "cw"}
+        assert i4_eligible_initializers(graph, group_size=16) == {"w"}
+
+    def test_a_conv_transpose1d_weight_is_not_i4_eligible(self):
+        """転置レイアウト `[Cin,Cout,K]` は行軸が先頭でない = pack 順と行の並びが食い違う。
+
+        2026-08-20 のユーザー裁定で permuted pack は買わないので、展開経路ごと持たない。
+        """
+        graph, _, _ = int4_weight_graph(conv=True, conv_op="conv_transpose1d")
+
+        assert eligible_compressed_initializers(graph) == {"w", "cw"}
+        assert i4_eligible_initializers(graph, group_size=16) == {"w"}
 
     def test_a_weight_shared_with_another_weight_slot_is_excluded(self):
-        """conv とも共有される重みは i4 の適格に入らない（展開経路が 1 つに決まらない）。"""
+        """i4 の経路を持たない重みスロットとも共有される重みは適格に入らない
+        （展開経路が 1 つに決まらない）。"""
         graph, _, _ = int4_weight_graph()
-        graph.nodes.append(IrNode(op="conv1d", ins=["x", "w", "b"], outs=["c"], attrs={}))
+        graph.nodes.append(
+            IrNode(op="conv1d", ins=["x", "w", "b"], outs=["c"], attrs=conv1d_attrs(groups=2))
+        )
 
-        assert i4_eligible_initializers(graph) == set()
+        assert i4_eligible_initializers(graph, group_size=16) == set()
 
 
 class TestI4Storage:
@@ -812,14 +892,66 @@ class TestI4Storage:
         assert breakdown.plain_tensors == 1
         assert breakdown.plain_bytes == 3 * 4
 
-    def test_a_conv_weight_stays_f32(self, tmp_path):
-        """conv の重みは一般適格でも i4 にせず f32 のまま残す（Codex 波 F 指摘 I4-ELIG-01）。
+    def test_a_dense_conv1d_weight_is_stored_as_i4_with_a_rank2_group_scale(self, tmp_path):
+        """`groups == 1` の conv1d `[3,2,16]` は i4 格納・scale は **rank2**（波 J-5b）。
 
-        ここで export 全体を落とすと、linear + conv を持つ普通のグラフが i4 で書けなくなる。
-        ランタイム側の受け皿（eligible ∩ i4Eligible の外は CPU 展開）と対の設計は
-        「展開経路のある op の重みだけ圧縮・他は f32」で、i8 の適格外が f32 で残るのと同じ。
+        scale の形は rank に依らず「行数 = 先頭次元・最終次元 = 行長 / group 長」
+        （ADR 0069 決定 3 の rank 非依存規則）— 重みと同 rank の `[3,2,1]` ではない。
         """
         graph, tensors, scales = int4_weight_graph(conv=True)
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        declared = written_graph(path).initializers
+        assert declared["cw"].storage.dtype == "i4"
+        assert declared["cw"].storage.group_size == 16
+        header = container_header(path)
+        assert header["enc.cw"]["dtype"] == "I4"
+        assert header["enc.cw"]["shape"] == [3, 2, 16]  # shape は論理形のまま
+        begin, end = header["enc.cw"]["data_offsets"]
+        assert end - begin == 3 * 2 * 16 // 2
+        assert header["karume.scale.enc.cw"]["shape"] == [3, 2]
+        assert declared["cb"].storage.dtype == "f32", "bias は常に f32（ADR 0006）"
+
+    def test_the_stored_conv1d_bytes_reconstruct_the_rank3_weight_bit_for_bit(self, tmp_path):
+        """rank3 でも `dequant(unpack(格納バイト))` が丸め済みの重みと**ビット一致**する。
+
+        payload の nibble 順は重みの連続メモリ順（`[O,Cin,K]` の row-major = `[O,Cin·K]` の
+        平坦と同一バイト列）— 行の畳み方を取り違えても形も型もバイト長も合うので、この門が
+        唯一の検出点（ADR 0069 決定 4 ③）。
+        """
+        graph, tensors, scales = int4_weight_graph(conv=True)
+        expected = tensors["enc.cw"].clone()
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        packed = stored_payload(path, "enc.cw")
+        restored = dequantize_int4(unpack_int4(packed, (3, 2, 16)), scales["enc.cw"])
+        assert torch.equal(restored, expected)
+
+    def test_the_conv1d_i4_file_passes_the_full_verification(self, tmp_path):
+        """emit → verify_model の往復が rank3 の i4 でも最後まで通る。
+
+        group 形の検査（`_check_group_quantized_shape` / `_assert_scale_tensor`）が rank2 の
+        scale を rank3 の重みに対して受理する — ここが同 rank を要求したままだと、書けた
+        ファイルが読めない。
+        """
+        graph, tensors, scales = int4_weight_graph(conv=True)
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        declared = verify_model(path).initializers
+        assert declared["cw"].storage.dtype == "i4"
+        assert declared["w"].storage.dtype == "i4"
+
+    def test_a_grouped_conv1d_weight_stays_f32(self, tmp_path):
+        """適格外の conv1d は i4 にせず f32 のまま残す（Codex 波 F 指摘 I4-ELIG-01）。
+
+        ここで export 全体を落とすと、linear + depthwise conv を持つ普通のグラフが i4 で
+        書けなくなる。ランタイム側の受け皿（eligible ∩ i4Eligible の外は CPU 展開）と対の
+        設計は「展開経路のある op の重みだけ圧縮・他は f32」で、i8 の適格外と同じ。
+        """
+        graph, tensors, scales = int4_weight_graph(conv=True, conv_groups=2)
 
         path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
 
@@ -895,9 +1027,11 @@ class TestI4Storage:
         assert breakdown.plain_bytes == 3 * 4
 
     def test_a_graph_whose_only_weight_is_shared_with_conv_fails_loudly(self, tmp_path):
-        """linear と conv で共有された重みしか無い形は「適格 0 本」で落ちる（沈黙させない）。"""
+        """linear と depthwise conv で共有された重みしか無い形は「適格 0 本」で落ちる。"""
         graph, tensors, scales = int4_weight_graph()
-        graph.nodes.append(IrNode(op="conv1d", ins=["x", "w", "b"], outs=["c"], attrs={}))
+        graph.nodes.append(
+            IrNode(op="conv1d", ins=["x", "w", "b"], outs=["c"], attrs=conv1d_attrs(groups=2))
+        )
         graph.values["c"] = IrValue(dtype="f32", shape=["T", 3])
         graph.outputs.append("c")
 
@@ -1388,11 +1522,11 @@ class TestMixedStorage:
             )
 
     def test_an_explicit_i4_on_a_conv_weight_fails_loudly(self, tmp_path):
-        """conv の重みは一般適格でも i4 の展開経路が無い。
+        """適格外の conv（ここでは depthwise）は一般適格でも i4 の展開経路が無い。
 
         既定は静かに f32 へ残すが、明示指定は fail loudly（`_plan_weight_dtype` の線引き）。
         """
-        graph, tensors, scales = int4_weight_graph(conv=True)
+        graph, tensors, scales = int4_weight_graph(conv=True, conv_groups=2)
 
         with pytest.raises(EmitError, match="の重みスロットだけ"):
             write_model(

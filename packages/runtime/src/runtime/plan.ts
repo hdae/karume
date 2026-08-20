@@ -12,6 +12,8 @@ import {
   assertNodeContract,
   catDim,
   computeOutputShape,
+  CONV1D_OP,
+  conv1dAttrs,
   EMBEDDING_OP,
   flipDim,
   IO_DTYPES,
@@ -378,22 +380,41 @@ export const eligibleCompressedInitializers = (graph: IrGraph): ReadonlySet<stri
 };
 
 /**
- * i4 の**展開経路を持つ** op（ADR 0069 決定 5 の linear とその embedding 追補）。
+ * i4 の**展開経路を持つ** op（ADR 0069 決定 5 と embedding / conv1d 追補）。conv1d は
+ * **groups == 1 のときに限り**適格で、その絞り込みは attrs を見ないと決まらないので
+ * {@link i4Executable} が担う。エクスポータ側 `karume/emit.py: I4_WEIGHT_OPS` +
+ * `_has_i4_kernel` の鏡像 — **集合の中身も絞りの構造も対**（片側だけ集合へ足すと、鏡像を
+ * 名乗る 2 定数が別物になり将来の追補で片側だけが更新される）。
  *
- * MUST: conv 系（conv1d / conv2d / conv_transpose1d）を入れない。group scale の束縛は linear の
- * タイル充填（gemm.ts の `fillBLinear`）と embedding カーネルにしか無く、conv の生成入力へ i4 を
- * 渡すと `dequant(i, scale)` が未定義識別子を参照する不成立 WGSL になる
- * （src/kernels/weight-storage.ts）。エクスポータ側 `karume/emit.py: I4_WEIGHT_OPS` の鏡像。
+ * MUST: conv2d / conv_transpose1d を入れない（展開経路そのものが無い — 生成側でも
+ * src/kernels/gemm.ts の conv2d 門と src/kernels/conv1d.ts の direct 門が落とす）。
  */
-const I4_WEIGHT_OPS: ReadonlySet<string> = new Set([LINEAR_OP, EMBEDDING_OP]);
+const I4_WEIGHT_OPS: ReadonlySet<string> = new Set([LINEAR_OP, EMBEDDING_OP, CONV1D_OP]);
 
 /**
- * 重みスロットでの消費が {@link I4_WEIGHT_OPS} **だけ**の initializer（i4 の適格集合の狭め —
- * ADR 0069 決定 5。エクスポータ側 `karume/emit.py: i4_eligible_initializers` の鏡像）。
+ * このノードの重みスロットに i4 の展開経路があるか（ADR 0069 決定 5 と その追補の述語）。
+ *
+ * conv1d は **`groups == 1` の implicit GEMM だけ**が展開経路を持つ（A タイル充填の group
+ * scale — gemm.ts の `fillAConv`）。`groups > 1` は直接カーネルへ流れ、そちらに展開経路は
+ * 無い（src/kernels/conv1d.ts）。conv_transpose1d は転置レイアウトの pack が要るので対象外
+ * （2026-08-20 ユーザー裁定）。
+ *
+ * MUST: `groups` は**既定値で補完しない**（`conv1dAttrs` が欠落を落とす — ADR 0015 の
+ * 「欄を作った後は既定値補完をしないことだけが担保する」）。ここが黙って 1 を仮定すると、
+ * depthwise の重みが i4 で常駐して直接カーネルが packed バイトを f32 として読む。
+ */
+const i4Executable = (node: IrNode): boolean =>
+  I4_WEIGHT_OPS.has(node.op) &&
+  (node.op !== CONV1D_OP || conv1dAttrs(node.attrs, `nodes (${node.op})`).groups === 1);
+
+/**
+ * 重みスロットでの消費が {@link i4Executable} を満たす op **だけ**の initializer（i4 の適格集合の
+ * 狭め — ADR 0069 決定 5。エクスポータ側 `karume/emit.py: i4_eligible_initializers` の鏡像）。
  *
  * MUST: {@link eligibleCompressedInitializers} との**積**で使う — ここは「重みスロットの中で
- * 展開経路の無い op（conv 系）にも食われていないか」だけを見る。共有された重みを常駐させると
- * そちらのカーネルが packed バイトを f32 として読む（例外は出ない）。
+ * 展開経路の無い op（conv2d / conv_transpose1d / groups > 1 の conv1d）にも食われていないか」
+ * だけを見る。共有された重みを常駐させるとそちらのカーネルが packed バイトを f32 として読む
+ * （例外は出ない）。
  */
 export const i4EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
   const executable = new Set<string>();
@@ -403,7 +424,7 @@ export const i4EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
     if (weightSlot === undefined) continue;
     const name = node.ins[weightSlot];
     if (name === undefined || !Object.hasOwn(graph.initializers, name)) continue;
-    (I4_WEIGHT_OPS.has(node.op) ? executable : other).add(name);
+    (i4Executable(node) ? executable : other).add(name);
   }
   for (const name of other) executable.delete(name);
   return executable;

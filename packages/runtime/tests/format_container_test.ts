@@ -207,6 +207,58 @@ Deno.test("openModel: 格納 i4 の scale が group 形でないものを拒否�
   );
 });
 
+// ADR 0069 決定 3 の一般化（波 J-5b）: group scale は **rank 非依存の rank 2**
+// `[shape[0], (numel / shape[0]) / g]`。rank 2 の重みでは従来の「同 rank・最終次元だけ
+// group 数」と同値なので、既存資産の検査結果は 1 件も変わらない（上の [4,64] → [4,2] が
+// その回帰）。conv1d の `[Cout,Cin,K]` → `[Cout, (Cin·K)/g]` が唯一の新形。
+Deno.test("openModel: rank 3 の i4 重み（conv1d）は rank 2 の group scale を受理する", () => {
+  const conv = (
+    mutate: (parts: { tensors: TensorSpec[] }) => void = () => {},
+  ): ArrayBuffer => {
+    const graph = baseGraph();
+    // 重み `[4,8,2]`（行長 16 = g16 が 1 つ）。消費側 op は結合検証の対象外なので、
+    // 見るのは格納の宣言と実テンソルの突合だけ。
+    graph.values["w"] = { dtype: "f32", shape: [4, 8, 2] };
+    graph.initializers["w"].storage = { dtype: "i4", scale: "enc.w.scale", group_size: 16 };
+    const tensors: TensorSpec[] = [
+      { name: "enc.w", dtype: "I4", shape: [4, 8, 2], data: new Uint8Array(32) },
+      { name: "enc.w.scale", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
+      { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+    ];
+    mutate({ tensors });
+    return baseModelBuffer(graph, tensors);
+  };
+  assertEquals(openModel(conv()).file.tensors.get("enc.w.scale")?.shape, [4, 1]);
+  // 重みと同 rank（旧規則の形）は落ちる — group 形は rank に依らず rank 2
+  assertThrows(
+    () =>
+      openModel(conv(({ tensors }) => {
+        tensors[1] = {
+          name: "enc.w.scale",
+          dtype: "F32",
+          shape: [4, 8, 1],
+          data: f32Bytes(new Array(32).fill(1)),
+        };
+      })),
+    ContainerError,
+    "rank",
+  );
+  // 行長の割り方が違う形（`K / g` を取った `[4, 2]` 等）も落ちる
+  assertThrows(
+    () =>
+      openModel(conv(({ tensors }) => {
+        tensors[1] = {
+          name: "enc.w.scale",
+          dtype: "F32",
+          shape: [4, 2],
+          data: f32Bytes(new Array(8).fill(1)),
+        };
+      })),
+    ContainerError,
+    "group 形",
+  );
+});
+
 Deno.test("assertRuntimeSupport: 非対応 op を列挙して落とす", () => {
   const graph = baseGraph();
   graph.requires.ops = ["matmul", "gelu", "tanh"];

@@ -56,10 +56,11 @@ tolerance）が黙って別の資産に掛かる。丸め（fake-quant）は共�
 **remove_weight_norm / パッチ適用の後・参照と golden の採取の前**に当てる
 （`_fake_quant` の順序 MUST）。
 
-`--dtype i4` だけは**混成**（適格 `nn.Linear` = i4 group32・残りは i8 per-channel）で、
-配布形では `w4` quant の `front` / `voice` 席に入る（`sbv2/distribution.py`）。i4 の実行経路は
-linear の重みスロット限定（ADR 0069 決定 5）なので、単一 dtype の i4 系列は原理的に作れず、
-linear を 1 本も持たない `dp` / `dec`（全て conv）へ渡すと「対象 0 本」で fail loudly する。
+`--dtype i4` だけは**混成**（適格な `nn.Linear` / `nn.Conv1d` = i4 group32・残りは i8
+per-channel）で、配布形では `w4` quant の `front` / `voice` 席に入る（`sbv2/distribution.py`）。
+i4 の実行経路は linear / embedding / conv1d の重みスロット限定（ADR 0069 決定 5 とその追補）で、
+`nn.ConvTranspose1d` と depthwise conv（`groups > 1`）と行長が group32 で割り切れない重みは
+i8 側へ落ちるので、系列としては混成にしかならない。
 
 MUST: `--dtype` は **emit 専用**（`--sym-max` と同じ扱い）。`--verify` は格納形式を見ない
 eager 比較で、しかも dec / voice では丸めを remove の**後**にしか当てられないのに参照は
@@ -89,6 +90,7 @@ from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.quantize import (
     DEFAULT_GROUP_SIZE,
+    QUANT_MODULE_TYPES,
     channel_rows,
     fake_quant_int4,
     fake_quant_int8,
@@ -106,21 +108,28 @@ DEFAULT_MODEL_DIR = INPUTS_ROOT / "sbv2" / "FN4"
 #: 変わらない（5 ターゲットとも conv1d が 86〜90% を占め linear は実質 0 GFLOP —
 #: ADR 0025 決定⑤）。狙いは資産サイズとロード時間で、実行経路は ADR 0019 の w8a32
 #: （i8 格納・計算は f32）そのもの。
-#: `i4` は**混成**の系列名で、実体は「適格な `nn.Linear` = i4 group32・それ以外（非適格の
-#: linear と conv / embedding を含む）= 従来どおり i8 per-channel」（{@link BASE_WEIGHT_DTYPES} /
-#: {@link _i4_module_names}）。i4 の実行経路が linear の重みスロット限定である以上（ADR 0069
-#: 決定 5）、系列としては混成にしかなり得ない。net_g の linear は 6 本しかない（front 2 /
-#: voice 4）ので狙いは配布サイズではなく、**BERT と合わせて配布形を丸ごと w4 にする席**
-#: （`sbv2/distribution.py` の quant `w4`）。
+#: `i4` は**混成**の系列名で、実体は「適格な `nn.Linear` / `nn.Conv1d` = i4 group32・それ以外
+#: （非適格の linear / conv1d と `ConvTranspose1d` / embedding）= 従来どおり i8 per-channel」
+#: （{@link BASE_WEIGHT_DTYPES} / {@link I4_MODULE_TYPES} / {@link _i4_module_names}）。
+#: 適格外が必ず残る（`dec` の `ups` は転置レイアウト・`dp` の `convs_sep` は depthwise）ので、
+#: 系列としては混成にしかなり得ない。net_g の linear は 6 本しかない（front 2 / voice 4）が、
+#: **conv1d は 5 ターゲットとも本体**（ADR 0025 決定⑤）なので、conv1d の追補（波 J-5b）で
+#: 初めて net_g 自身の配布サイズが動く。
 #:
-#: MUST: linear を 1 本も持たないターゲット（`dp` / `dec` は全て conv）に `i4` を渡すと
-#: `fake_quant_int4` が「対象 0 本」で fail loudly する — 混成の i4 席が意味を持つのは
-#: `front` / `flow` / `voice` だけ。
+#: MUST: i4 の適格を 1 本も持たないターゲットに `i4` を渡すと `fake_quant_int4` が
+#: 「対象 0 本」で fail loudly する（沈黙 i8 系列を作らないための門）。
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 
-#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格 linear は
+#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格な重みは
 #: 1 本単位の `weight_dtype_overrides` で i4 へ振る（deberta の i4 混成系列と同形）。
 BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "f16": "f16", "i8": "i8", "i4": "i8"}
+
+#: i4 group32 で丸めるモジュール型（emit の `I4_WEIGHT_OPS` = linear / embedding / conv1d の
+#: モジュール側の綴り）。**embedding は入れない** — net_g の語彙表（`enc_p.emb`）の i4 化は
+#: 別の判断で、波 J-5b の射程外（`nn.ConvTranspose1d` は `nn.Conv1d` の派生ではないので、
+#: `dec` の `ups` は型で自然に落ちる）。実際の適格はこの型に `groups == 1` と行長の整除を
+#: 掛けた積（{@link _i4_module_names}）。
+I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Conv1d)
 
 
 def default_out_root(model_dir: Path, dtype: str) -> Path:
@@ -653,25 +662,44 @@ def _write_io(
     return written
 
 
-def _i4_module_names(module: nn.Module) -> frozenset[str]:
-    """i4 group32 で丸める `nn.Linear` の FQN 集合（混成の**排他割り**の唯一の源）。
+def _module_name(weight_fqn: str) -> str:
+    """`iter_quant_targets` が返す重み FQN（`<module>.weight` / 根なら `weight`）→ モジュール FQN。
 
-    適格は 2 条件の積: ① `nn.Linear` であること（emit の i4 適格 = linear の重みスロット限定 —
-    ADR 0069 決定 5。外れたテンソルへ i4 を明示指定すると emit が fail loudly する）
-    ② 量子化軸が group 長で割り切れること（i4 は端数 group を作らない MUST — 同決定 2。
-    外れた重みは**構成ごと落とすのではなく対象から外す**〈`measure_quant.census_w4_targets`
-    と同じ扱い〉ので、非適格の linear は i8 側へ落ちる）。
+    `include` 述語（`fake_quant_int8` / `fake_quant_int4`）が見るのは**モジュール**の FQN で、
+    台帳のキーは**重み**の FQN — 2 つの空間を取り違えると述語が 1 本も当たらない。
+    `removesuffix` 1 発で書けないのは根モジュール（`""`）だけが `.` を持たないから。
+    """
+    return weight_fqn[: -len(".weight")] if weight_fqn.endswith(".weight") else ""
+
+
+def _i4_module_names(module: nn.Module) -> frozenset[str]:
+    """i4 group32 で丸めるモジュールの FQN 集合（混成の**排他割り**の唯一の源）。
+
+    適格は 3 条件の積: ① {@link I4_MODULE_TYPES} の型であること（emit の i4 適格 =
+    `emit.I4_WEIGHT_OPS` の重みスロット限定 — ADR 0069 決定 5 とその conv1d 追補。外れた
+    テンソルへ i4 を明示指定すると emit が fail loudly する）② `groups == 1`（conv1d の i4 は
+    igemm 変種だけが展開でき、depthwise〈`DDSConv` の `convs_sep`〉は direct カーネル =
+    i4 非対応）③ 平坦化後の行長が group 長で割り切れること（i4 は端数 group を作らない MUST —
+    同決定 2。外れた重みは**構成ごと落とすのではなく対象から外す**〈`measure_quant`
+    `census_w4_targets` と同じ扱い〉ので、非適格の linear / conv1d は i8 側へ落ちる）。
 
     対象列挙を core（`iter_quant_targets`）に通すのは、丸めが見る集合とここが数える集合を
     1 本の実装のままにするため。i8 側の述語を「この集合に居ない」で書くのも同じ理由で、
     2 つの述語を別々の綴りから作るとどちらにも入らない重みが**黙って f32 のまま残る**
     （二重丸め禁止の逆側の穴で、値は正しいままサイズだけが戻る）。
+
+    NOTE: `nn.ConvTranspose1d` は `nn.Conv1d` の派生ではないので、型で自然に落ちる
+    （`dec` の `ups` — 行軸が先頭でない重みは pack 順が合わず i4 にできない）。
     """
-    return frozenset(
-        fqn.removesuffix(".weight")
-        for fqn, weight, axis in iter_quant_targets(module, (nn.Linear,))
-        if channel_rows(weight, axis).shape[-1] % DEFAULT_GROUP_SIZE == 0
-    )
+    modules = dict(module.named_modules())
+    names: set[str] = set()
+    for fqn, weight, axis in iter_quant_targets(module, I4_MODULE_TYPES):
+        name = _module_name(fqn)
+        if getattr(modules[name], "groups", 1) != 1:
+            continue
+        if channel_rows(weight, axis).shape[-1] % DEFAULT_GROUP_SIZE == 0:
+            names.add(name)
+    return frozenset(names)
 
 
 def _fake_quant(
@@ -682,7 +710,7 @@ def _fake_quant(
     ADR 0006 / 0018（f16）/ 0019（i8）/ 0069（i4）の fake-quant。台帳のキーはモデル内 FQN で、
     emit 側が safetensors のテンソルキーとして突き合わせる（`id()` 突合は禁止 — ADR 0006）。
 
-    i4 系列は混成（適格 linear = i4 group32・残り = i8 per-channel）で、2 つの述語は
+    i4 系列は混成（適格な linear / conv1d = i4 group32・残り = i8 per-channel）で、2 つの述語は
     {@link _i4_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。返す override は
     「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を満たせなければ
     fail loudly する（`emit._plan_i4` — 沈黙 i8 へ落ちる経路は無い）。
@@ -722,15 +750,30 @@ def _fake_quant(
         report = round_weights_to_f16(module)
         print(f"[fake-quant] {target}: f16 表現可能値へ丸めた — {report.describe()}", flush=True)
         return {}, {}
-    linears = _i4_module_names(module)
-    rest = fake_quant_int8(module, include=lambda name: name not in linears)
-    int4 = fake_quant_int4(module, DEFAULT_GROUP_SIZE, include=lambda name: name in linears)
+    i4_names = _i4_module_names(module)
+    i8_names = {
+        _module_name(fqn) for fqn, _, _ in iter_quant_targets(module, QUANT_MODULE_TYPES)
+    } - i4_names
+    int4 = fake_quant_int4(
+        module, DEFAULT_GROUP_SIZE, include=lambda name: name in i4_names, op_types=I4_MODULE_TYPES
+    )
+    # MUST: 排他割りの**両側を列挙してから**丸める。i8 側を「i4 に居ない」の否定だけで書くと、
+    # 全ての量子化対象が i4 適格な系列（`flow` は conv1d だけで構成され、全本が groups == 1 かつ
+    # 整除する）で `fake_quant_int8` の「対象 0 本」が発火して export が落ちる — 0 本が
+    # **数え上げの結果**である以上、沈黙ではないので丸めごと飛ばす。
+    i8_scales: Mapping[str, torch.Tensor] = {}
+    if i8_names:
+        rest = fake_quant_int8(module, include=lambda name: name in i8_names)
+        i8_scales = rest.scales
+        remainder = f"残りは i8 per-channel — {rest.describe()}"
+    else:
+        remainder = "i8 側は対象 0 本（量子化対象が全て i4 適格）"
     print(
-        f"[fake-quant] {target}: 適格 linear を i4 group へ丸めた — {int4.describe()}"
-        f" / 残りは i8 per-channel — {rest.describe()}",
+        f"[fake-quant] {target}: 適格 linear / conv1d を i4 group へ丸めた —"
+        f" {int4.describe()} / {remainder}",
         flush=True,
     )
-    return {**rest.scales, **int4.scales}, dict.fromkeys(int4.scales, "i4")
+    return {**i8_scales, **int4.scales}, dict.fromkeys(int4.scales, "i4")
 
 
 def _summary(
@@ -1282,8 +1325,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=WEIGHT_DTYPES,
         default="f32",
         help="重みの格納 dtype（f16 / i8 は fake-quant してから適格スロットだけ圧縮格納する"
-        " — ADR 0018 / 0019。i4 は混成で、適格 linear だけ group32 の i4・残りは i8 —"
-        " ADR 0069〈linear を持たない dp / dec には掛からない〉。**emit 専用**で"
+        " — ADR 0018 / 0019。i4 は混成で、適格 linear / conv1d だけ group32 の i4・"
+        "残りは i8 — ADR 0069。**emit 専用**で"
         " --verify とは併用できない）",
     )
     parser.add_argument(

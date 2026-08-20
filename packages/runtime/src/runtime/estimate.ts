@@ -221,8 +221,8 @@ const weightEstimate = (
       uncompressed += toSizeClass(tensorByteLength(file, where, initializer.tensor));
       continue;
     }
-    // i4 の適格は f16 / i8 より狭い「重みスロットでの消費が linear / embedding だけ」
-    // （ADR 0069 決定 5）。
+    // i4 の適格は f16 / i8 より狭い「重みスロットでの消費が linear / embedding /
+    // conv1d(groups==1) だけ」（ADR 0069 決定 5 とその追補）。
     const residentEligible = storage === "i4"
       ? eligible.has(name) && i4Eligible.has(name)
       : eligible.has(name);

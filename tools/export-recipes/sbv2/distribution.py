@@ -10,8 +10,8 @@
 `text_encoder`（DeBERTa）に f16 席が無いのは `deberta/export.py` が f16 を持たないから
 （f32 の 1.32GB は配布に非現実的）。既定の i8 は ADR 0026 が聴感ゲート込みで受理済みで、
 i4 混成（linear と embedding が i4 group32）は `w8-bert4` quant の席として後から足した
-（perf-ledger Q-1 — 既定はまだ i8）。`front` / `voice` にも i4 混成席があり（そちらは適格
-linear だけが i4）、3 席とも i4 を選ぶのが `w4` quant（perf-ledger Q-1 の full-w4 側）。
+（perf-ledger Q-1）。`front` / `voice` にも i4 混成席があり（適格な linear と conv1d が i4 —
+conv1d は波 J-5b の追補）、3 席とも i4 を選ぶのが `w4` quant（2026-08-20 から既定 quant）。
 
 ホスト資産のうち `style_vectors` / `speaker_embeddings` は**表を配って実行時に行を引く**形。
 `front` / `voice` のグラフ入力 `style_vec[1,256]` / `g[1,512,1]` はこの 2 表から作られ、
@@ -165,7 +165,8 @@ SBV2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: weights の宣言（dtype ラベル → 役割名）。dtype キーは ADR 0041 §3 の統一形（v1 の `{file}` /
 #: `{variants}` の 2 形は消えた）。どの役割でも `i4` は**混成の系列**を指すラベルで、実体は
 #: 「i4 適格な重みが i4 group32・残りは i8」— 適格の範囲は台本ごとに違い、`text_encoder` は
-#: linear + 語彙表（`deberta/export.py`）、`front` / `voice` は linear だけ（`sbv2/export.py`）。
+#: linear + 語彙表（`deberta/export.py`）、`front` / `voice` は linear + conv1d
+#: （`sbv2/export.py` — groups == 1 かつ行長が group32 で割り切れるもの）。
 SBV2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     "text_encoder": {"i8": WeightFiles("text_encoder"), "i4": WeightFiles("text_encoder_i4")},
     "front": {
@@ -198,9 +199,10 @@ SBV2_ASSETS: Mapping[str, str] = {
 #: 数値は f32 同一性の指標では大きく動くが、聴感は一次通過（perf-ledger Q-1 /
 #: research 2026-08-19 §6 — net_g 全役割 rtn で明らかな劣化なし）。
 #:
-#: NOTE: net_g 側の i4 の**サイズ利得はほぼ無い**（適格 linear は front 2 本 + voice 4 本だけ
-#: で、配布形全体の 0.1% 未満 — research 2026-08-19 §3）。`w4` の意味は「配布形を丸ごと 4bit
-#: 格納で通す席」で、取得量の削減はほぼ `text_encoder` が担う。
+#: NOTE: net_g 側の i4 は conv1d 追補（波 J-5b・ADR 0069 追記 7）で**サイズ利得の本体**に
+#: なった — 適格 conv1d ≈56MiB が半減する（linear だけの時代は 6 本 = 配布形全体の 0.1% 未満で
+#: 利得ほぼゼロだった）。`text_encoder` の削減（Q-1 / J-5a）と合わせ、`w4` は名実ともに
+#: 「配布形を丸ごと 4bit 格納で通す席」。
 SBV2_QUANTS: Mapping[str, Any] = {
     "f16": {"weights": {"text_encoder": "i8", "front": "f16", "voice": "f16"}, "session": {}},
     "w8": {"weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"}, "session": {}},

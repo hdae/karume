@@ -2,6 +2,7 @@
 // グラフ単体の規則は ir.ts が済ませている前提で、ここは宣言と実テンソルの突合、および
 // ランタイム対応表との突合だけを持つ。
 
+import { groupScaleShape } from "./i4.ts";
 import { type IrDtype, type IrGraph, type IrStorageDtype, parseIrGraph } from "./ir.ts";
 import {
   parseSafetensors,
@@ -342,10 +343,9 @@ const assertNoRedefinedTensors = (seen: ReadonlySet<string>, file: SafetensorsFi
  * 2. 形（`groupSize` の有無で 2 通り — ADR 0069 決定 3）
  *    - per-channel（i8）: 重みと**同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値。
  *      1 軸だけがチャネル軸として残る形 — `torch.amax(..., keepdim=True)` の出力そのもの）
- *    - group（i4）: 重みと**同 rank・最終次元だけ group 数**（`lastDim / groupSize`）で
- *      他軸は重みと同値。keepdim broadcast 形とは受理集合が交わらないので**別分岐**にする
- *      （broadcast 形の規則で見ると group 数の取り違えが「1 でも同値でもない軸」として
- *      落ちるだけで、正しい group 形も一緒に落ちる）
+ *    - group（i4）: **rank 非依存の rank 2 形** {@link groupScaleShape}。keepdim broadcast 形
+ *      とは受理集合が交わらないので**別分岐**にする（broadcast 形の規則で見ると group 数の
+ *      取り違えが「1 でも同値でもない軸」として落ちるだけで、正しい group 形も一緒に落ちる）
  *
  * NOTE: 実在と名前衝突は別の層が持つ — 実在は co-shard 検査（{@link assertNoOrphanScale} と
  * intake の実体側）、衝突は {@link assertNoScaleKeyCollision}。どちらも「形」より前に決まる。
@@ -366,20 +366,17 @@ const assertScaleTensor = (
       `${where}: scale テンソル '${scaleKey}' が ${view.dtype}（F32 が必要）`,
     );
   }
-  const form = groupSize === undefined ? "keepdim broadcast" : "group";
-  if (view.shape.length !== weightShape.length) {
-    throw new ContainerError(
-      `${where}: scale [${view.shape.join(",")}] の rank が重み [${
-        weightShape.join(",")
-      }] と違う（${form} 形が必要）`,
-    );
-  }
   if (groupSize !== undefined) {
-    // 量子化軸（最終次元）が group 数に置き換わった形ちょうど。割り切れることは
+    // 行（先頭次元）× group 数ちょうどの rank 2。行長が group で割り切れることは
     // parseIrGraph が保証済み（ADR 0069 決定 2）。
-    const expected = weightShape.map((dim, axis) =>
-      axis === weightShape.length - 1 ? Number(dim) / groupSize : dim
-    );
+    const expected = groupScaleShape(weightShape, groupSize);
+    if (view.shape.length !== expected.length) {
+      throw new ContainerError(
+        `${where}: scale [${view.shape.join(",")}] の rank が group 形 [${
+          expected.join(",")
+        }] と違う（group 形は重みの rank に依らず rank 2）`,
+      );
+    }
     if (view.shape.some((dim, axis) => dim !== expected[axis])) {
       throw new ContainerError(
         `${where}: scale [${view.shape.join(",")}] が重み [${weightShape.join(",")}] の group 形 [${
@@ -388,6 +385,13 @@ const assertScaleTensor = (
       );
     }
     return;
+  }
+  if (view.shape.length !== weightShape.length) {
+    throw new ContainerError(
+      `${where}: scale [${view.shape.join(",")}] の rank が重み [${
+        weightShape.join(",")
+      }] と違う（keepdim broadcast 形が必要）`,
+    );
   }
   const broadcastable = view.shape.every((dim, axis) => dim === 1 || dim === weightShape[axis]);
   if (!broadcastable) {

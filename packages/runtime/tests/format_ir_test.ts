@@ -183,6 +183,19 @@ Deno.test("parseIrGraph: 格納 i4 の受理形（scale + group_size + 量子化
     "量子化軸が group_size で割り切れない",
     asI4({ dtype: "i4", scale: "enc.w.scale", group_size: 32 }, 48),
   );
+
+  // 波 J-5b: 量子化軸は「先頭次元を行・残りを平坦化した行長」。rank 2 では最終次元と同値で、
+  // conv1d の `[O,Cin,K]` では `Cin·K`（K 単体が group で割り切れる必要は無い）。
+  const asConv = (shape: readonly number[]) => (graph: GraphJson): void => {
+    graph.values["w"] = { dtype: "f32", shape: [...shape] };
+    graph.initializers["w"].storage = { dtype: "i4", scale: "enc.w.scale", group_size: 16 };
+  };
+  assertEquals(
+    parseMutated(asConv([4, 8, 2])).values["w"].shape,
+    [4, 8, 2],
+    "行長 16 = Cin·K は受理（K = 2 が group で割り切れないのは無関係）",
+  );
+  assertRejects("conv1d の行長が group_size で割り切れない", asConv([4, 8, 3]));
 });
 
 Deno.test("parseIrGraph: 量子化格納は宣言として受理する（実行可否は別の層）", () => {

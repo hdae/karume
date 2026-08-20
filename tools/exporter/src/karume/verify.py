@@ -530,22 +530,30 @@ def _check_group_quantized_shape(name: str, initializer: IrInitializer, value: I
     """group 量子化格納（i4）の宣言 shape と group 長の整合（ADR 0069 決定 2・
     TS 側 checkGroupQuantizedShape の鏡像）。
 
-    量子化軸は**最終次元**（linear `[O,I]` の in 軸・embedding `[V,D]` の D 軸）で、そこが
-    `group_size` で割り切れることが MUST。
-    端数 group を許すと最後の group だけ scale の担当範囲が短くなり、行境界が語境界からずれて
-    平坦添字の展開が黙って別の値を出す（端数を作らない制約で整列問題そのものを消す設計）。
+    量子化軸は**格納行**（先頭次元を除く残りの平坦化 — linear `[O,I]` の in 軸・embedding
+    `[V,D]` の D 軸・conv1d `[Cout,Cin,K]` の受容野 `Cin·K`）で、その行長が `group_size` で
+    割り切れることが MUST（rank2 の重みでは「最終次元」と同値 — ADR 0069 決定 3 の rank 非依存
+    規則）。端数 group を許すと最後の group だけ scale の担当範囲が短くなり、行境界が語境界から
+    ずれて平坦添字の展開が黙って別の値を出す（端数を作らない制約で整列問題そのものを消す設計）。
     """
     # 値域（2 冪かつ 16 以上）は _parse_storage が保証済み。存在は型の上でだけ optional なので、
     # 黙って読み飛ばさず言い直す（TS 側 checkGroupQuantizedShape と同じ流儀）。
     group_size = initializer.storage.group_size
     if group_size is None:
         raise IrError(f"graph.initializers['{name}']: 格納 i4 なのに group_size が無い")
-    if not value.shape:
-        raise IrError(f"graph.values['{name}']: 格納 i4 の initializer に量子化軸が無い（rank 0）")
-    last_dim = value.shape[-1]
-    if not isinstance(last_dim, int) or last_dim % group_size != 0:
+    if len(value.shape) < 2:
         raise IrError(
-            f"graph.values['{name}']: 格納 i4 の最終次元 {last_dim} が"
+            f"graph.values['{name}']: 格納 i4 の initializer に量子化軸が無い"
+            f"（rank {len(value.shape)} — 行軸と量子化軸で rank 2 以上が要る）"
+        )
+    row_length = 1
+    for dim in value.shape[1:]:
+        if not isinstance(dim, int):
+            raise IrError(f"graph.values['{name}']: 格納 i4 の shape に記号次元は使えない")
+        row_length *= dim
+    if row_length % group_size != 0:
+        raise IrError(
+            f"graph.values['{name}']: 格納 i4 の行長 {row_length} が"
             f" group_size {group_size} で割り切れない（ADR 0069 決定 2）"
         )
 
@@ -1100,10 +1108,12 @@ def _assert_scale_tensor(
     2. **F32**（scale を別 dtype のビット列として読むと全チャネルが桁違いの値になる）
     3. 形（`group_size` の有無で 2 通り — ADR 0069 決定 3）
        - per-channel（i8）: **重みと同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値）
-       - group（i4）: **重みと同 rank・最終次元だけ group 数**（`last_dim // group_size`）で
-         他軸は重みと同値。keepdim broadcast 形とは受理集合が交わらないので**別分岐**
+       - group（i4）: **rank2**（行数 = 重みの先頭次元・最終次元 = 行長 / `group_size`）。
+         rank2 の重みでは「同 rank・最終次元だけ group 数」と同値で、conv1d `[Cout,Cin,K]` は
+         `[Cout, (Cin·K)/g]`（`karume.quantize.storage_rows`）。keepdim broadcast 形とは
+         受理集合が交わらないので**別分岐**
     4. `channel_axis` が決まる（= 適格重み）なら、**その軸だけが伸びた keepdim 形ちょうど**
-       （group 形は量子化軸が最終次元に固定されているので 4 の対象外）
+       （group 形は行軸が先頭に固定されているので 4 の対象外）
     5. **他 initializer の実体との名前衝突が無い**（別の重みを scale として読む形）
 
     NOTE: 3 と 4 の切り分けはランタイムの 2 経路そのもの。適格外（ホストで f32 展開 —
@@ -1126,21 +1136,28 @@ def _assert_scale_tensor(
     if view.dtype != "F32":
         raise ContainerError(f"{where}: scale テンソル '{scale_key}' が {view.dtype}（F32 が必要）")
     shape = list(view.shape)
-    form = "keepdim broadcast" if group_size is None else "group"
-    if len(shape) != len(weight_shape):
-        raise ContainerError(
-            f"{where}: scale {shape} の rank が重み {weight_shape} と違う（{form} 形が必要）"
-        )
     if group_size is not None:
-        # 量子化軸（最終次元）が group 数に置き換わった形ちょうど。割り切れることは
-        # parse_ir_graph が保証済み（ADR 0069 決定 2）。
-        expected = [*weight_shape[:-1], weight_shape[-1] // group_size]
+        # 格納行（先頭次元を除く平坦化）が group 数に置き換わった rank2 形ちょうど。行長が
+        # 割り切れることは parse_ir_graph が保証済み（ADR 0069 決定 2）。
+        if len(shape) != 2:
+            raise ContainerError(
+                f"{where}: scale {shape} の rank が重み {weight_shape} の group 形（rank2）と違う"
+            )
+        row_length = 1
+        for dim in weight_shape[1:]:
+            row_length *= dim
+        expected = [weight_shape[0], row_length // group_size]
         if shape != expected:
             raise ContainerError(
                 f"{where}: scale {shape} が重み {weight_shape} の group 形 {expected}"
                 f"（group_size={group_size}）でない"
             )
         return
+    if len(shape) != len(weight_shape):
+        raise ContainerError(
+            f"{where}: scale {shape} の rank が重み {weight_shape} と違う"
+            "（keepdim broadcast 形が必要）"
+        )
     if any(dim != 1 and dim != weight_shape[axis] for axis, dim in enumerate(shape)):
         raise ContainerError(f"{where}: scale {shape} が重み {weight_shape} へ broadcast できない")
     if channel_axis is None:

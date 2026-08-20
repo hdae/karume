@@ -1,11 +1,13 @@
 // i4（K 方向 group symmetric packed 4bit）格納の実行経路（ADR 0069）— 適格判定
-// （linear / embedding 限定）・カーネル変種・group scale 添字・診断の通し検証。
+// （linear / embedding / conv1d(groups==1) 限定）・カーネル変種・group scale 添字・診断の
+// 通し検証。
 //
 // f16 / i8 と同じ 2 経路を踏む:
-//   適格（消費が **linear / embedding の重みスロットだけ** — i8 より狭い）→ packed のまま
-//     GPU 常駐し、dequant はカーネル内（`unpack4xU8` + マスク/シフト + group scale）
-//   適格外（展開経路の無い重みスロット〈conv 系〉と共有・グラフ出力 等）→ ロード時に CPU で
-//     f32 展開
+//   適格（消費が **linear / embedding / groups == 1 の conv1d の重みスロットだけ** — i8 より
+//     狭い）→ packed のまま GPU 常駐し、dequant はカーネル内（`unpack4xU8` + マスク/シフト +
+//     group scale）
+//   適格外（展開経路の無い重みスロット〈conv2d / conv_transpose1d / groups > 1 の conv1d〉と
+//     共有・グラフ出力 等）→ ロード時に CPU で f32 展開
 //
 // MUST: 重みは **group ごとに大きさを変える**（scale が全 group で同じだと、scale 添字の
 // 取り違え〈行/group の入れ替え・shift 誤り〉が一切値に出ない — i8 の行別 scale と同型の罠）。
@@ -13,12 +15,13 @@
 // 対称パターンでは値が合う — ADR 0069 決定 4 ①）。
 // MUST: 期待値は**丸め後の重み**（fake-quant — ADR 0006）で作る。
 
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { decodeI4 } from "../src/format/i4.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
+import { conv1dUsesVec4 } from "../src/kernels/conv1d.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import { i4EligibleInitializers } from "../src/runtime/plan.ts";
 import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
@@ -493,14 +496,427 @@ Deno.test({
 });
 
 // ---------------------------------------------------------------------------
+// conv1d の implicit GEMM（ADR 0069 決定 5 の conv1d 追補・波 J-5b）
+// ---------------------------------------------------------------------------
+
+type ConvAttrs = {
+  readonly stride: number;
+  readonly padding: number;
+  readonly dilation: number;
+};
+
+/** `conv1d(x, w, b)` 1 本のグラフ。`storage` で i4 常駐と f32 の双子を切り替える。 */
+const conv1dModel = (
+  x: FilledTensor,
+  weight: FilledTensor,
+  bias: FilledTensor,
+  quantized: ReturnType<typeof quantizeI4>,
+  groupSize: number,
+  attrs: ConvAttrs,
+  outShape: readonly number[],
+  {
+    storage = "i4",
+    wAsOutput = false,
+    groups = 1,
+  }: { storage?: "i4" | "f32"; wAsOutput?: boolean; groups?: number } = {},
+): ArrayBuffer => {
+  const graph: GraphJson = {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["conv1d"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [...x.shape] }],
+    outputs: wAsOutput ? ["y", "w"] : ["y"],
+    initializers: {
+      w: storage === "i4"
+        ? { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: groupSize } }
+        : { tensor: "m.w", storage: { dtype: "f32" } },
+      b: { tensor: "m.b", storage: { dtype: "f32" } },
+    },
+    values: {
+      w: { dtype: "f32", shape: [...weight.shape] },
+      b: { dtype: "f32", shape: [...bias.shape] },
+      y: { dtype: "f32", shape: [...outShape] },
+    },
+    nodes: [{ op: "conv1d", ins: ["x", "w", "b"], outs: ["y"], attrs: { ...attrs, groups } }],
+  };
+  const biasTensor = {
+    name: "m.b",
+    dtype: "F32",
+    shape: [...bias.shape],
+    data: f32Bytes([...bias.data]),
+  };
+  return buildSafetensors(
+    storage === "i4"
+      ? [
+        { name: "m.w", dtype: "I4", shape: [...weight.shape], data: quantized.bytes },
+        {
+          name: "m.s",
+          dtype: "F32",
+          shape: [...quantized.scaleShape],
+          data: f32Bytes([...quantized.scale]),
+        },
+        biasTensor,
+      ]
+      // 双子（f32 常駐）は**丸め後の重み**をそのまま f32 で積む。同じ igemm カーネルが同じ
+      // f32 の MAC 列を同じ順で畳むので、i4 の GPU dequant が CPU 展開とビット一致なら
+      // 出力もビット一致する。
+      : [
+        {
+          name: "m.w",
+          dtype: "F32",
+          shape: [...weight.shape],
+          data: f32Bytes([...quantized.values]),
+        },
+        biasTensor,
+      ],
+    { karume_ir: JSON.stringify(graph) },
+  );
+};
+
+const outLength = (
+  lengthIn: number,
+  { stride, padding, dilation }: ConvAttrs,
+  kernel: number,
+): number => Math.floor((lengthIn + 2 * padding - dilation * (kernel - 1) - 1) / stride) + 1;
+
+type ConvCase = {
+  readonly name: string;
+  readonly batch: number;
+  readonly channelsIn: number;
+  readonly channelsOut: number;
+  readonly lengthIn: number;
+  readonly kernel: number;
+  readonly groupSize: number;
+  readonly attrs: ConvAttrs;
+  /** 踏むはずの A 側変種（quad 展開か 4 要素の個別展開か）。 */
+  readonly expectVec4: boolean;
+};
+
+/**
+ * conv1d igemm の i4 変種の形状群。
+ *
+ * MUST: どの形も**行長 `Cin·K` に group が複数入る**（1 group / 行だと scale 添字の
+ * 取り違え〈行と group の入れ替え・shift 誤り〉が一切値に出ない）。
+ * NOTE: 適格な i4 conv の A 側は `kFlat % group_size == 0`（2 冪 ≥ 16）なので `kFlat % 4 == 0`
+ * が常に成立する — v4 / スカラを分けるのは `Lout % 4` と `stride` だけ（conv1dUsesVec4）。
+ */
+const CONV_CASES: readonly ConvCase[] = [
+  {
+    // v4 経路（Lout = 16・stride 1）。Cout = 70 は `70 % 64 = 6` なので **32 行 m タイル**を
+    // 選び、行が 3 枚に割れる（`arow` の代わりにタイル内相対の行を引く取り違えの検出器）。
+    // 行長 Cin·K = 96 に g32 が 3 つ。B = 2 でバッチ軸（z）も踏む。
+    name: "conv1d v4 [2,32,16] * W[70,32,3] pad1 g32",
+    batch: 2,
+    channelsIn: 32,
+    channelsOut: 70,
+    lengthIn: 16,
+    kernel: 3,
+    groupSize: 32,
+    attrs: { stride: 1, padding: 1, dilation: 1 },
+    expectVec4: true,
+  },
+  {
+    // スカラ経路（Lout = 13 が 4 の倍数でない）。行長 32 に g16 が 2 つ・Cout = 19。
+    name: "conv1d スカラ [1,16,14] * W[19,16,2] pad0 g16",
+    batch: 1,
+    channelsIn: 16,
+    channelsOut: 19,
+    lengthIn: 14,
+    kernel: 2,
+    groupSize: 16,
+    attrs: { stride: 1, padding: 0, dilation: 1 },
+    expectVec4: false,
+  },
+  {
+    // stride / padding / dilation が全て非自明。Lout = 10（スカラ）・行長 Cin·K = 48 に
+    // g16 が 3 つ・Cout = 36（`36 % 64 = 36` なので 64 行 m タイル）。
+    name: "conv1d stride2 dil3 pad2 [1,16,21] * W[36,16,3] g16",
+    batch: 1,
+    channelsIn: 16,
+    channelsOut: 36,
+    lengthIn: 21,
+    kernel: 3,
+    groupSize: 16,
+    attrs: { stride: 2, padding: 2, dilation: 3 },
+    expectVec4: false,
+  },
+];
+
+Deno.test({
+  name: "w=i4 の conv1d(igemm) が f32 双子（丸め後の重み）とビット単位で一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const testCase of CONV_CASES) {
+        const { batch, channelsIn, channelsOut, lengthIn, kernel, groupSize, attrs } = testCase;
+        const lengthOut = outLength(lengthIn, attrs, kernel);
+        // 踏む変種を明示的に固定する（判定の取り違えが「両方とも同じ変種」に紛れないため）
+        assertEquals(
+          conv1dUsesVec4(channelsIn * kernel, lengthOut, attrs.stride),
+          testCase.expectVec4,
+          `${testCase.name}: 踏んだ変種が想定と違う`,
+        );
+        const x = fill([batch, channelsIn, lengthIn], SIGNED);
+        const weight = fill(
+          [channelsOut, channelsIn, kernel],
+          groupVarying(channelsIn * kernel, groupSize),
+        );
+        const bias = fill([channelsOut], SIGNED);
+        const quantized = quantizeI4(weight.data, weight.shape, groupSize);
+        // scale は rank 非依存の rank 2 形（`[Cout, (Cin·K)/g]` — 波 J-5b の唯一の新形）
+        assertEquals(
+          quantized.scaleShape,
+          [channelsOut, (channelsIn * kernel) / groupSize],
+          `${testCase.name}: scale の group 形`,
+        );
+        const outShape = [batch, channelsOut, lengthOut];
+        const run = async (storage: "i4" | "f32") => {
+          const session = await createSession(
+            gpu,
+            openModel(
+              conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape, { storage }),
+            ),
+          );
+          try {
+            const outputs = await session.run({ x });
+            return {
+              y: Float32Array.from(outputs["y"].data as Float32Array),
+              shape: outputs["y"].shape,
+              resident: session.diagnostics().storage.residentCompressedBytes,
+            };
+          } finally {
+            await session.dispose();
+          }
+        };
+        const packed = await run("i4");
+        const twin = await run("f32");
+        // packed のまま常駐している（= CPU 展開に落ちていない）
+        assertEquals(
+          packed.resident,
+          quantized.bytes.byteLength + quantized.scale.byteLength,
+          `${testCase.name}: GPU 常駐圧縮バイト数（scale 込み）`,
+        );
+        assertEquals(twin.resident, 0, `${testCase.name}: f32 双子が圧縮常駐している`);
+        assertEquals(packed.shape, outShape, testCase.name);
+        assertEquals(
+          new Uint32Array(packed.y.buffer),
+          new Uint32Array(twin.y.buffer),
+          `${testCase.name}: i4 と f32 双子の出力がビット一致しない`,
+        );
+        // 恒真化の門（出力が定数なら一致は何も検証していない）
+        assert(new Set(packed.y).size > 1, `${testCase.name}: 出力が定数`);
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "conv1d(i4) も適格（GPU dequant）と適格外（CPU 展開 rank3）でビット一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // w をグラフ出力に足すと適格外になり、ロード時に `decodeI4` で f32 展開される。
+    // **rank 3 の重み × rank 2 の scale** を CPU 側が GPU と同じ添字式で読めることの門。
+    const testCase = CONV_CASES[1];
+    const { batch, channelsIn, channelsOut, lengthIn, kernel, groupSize, attrs } = testCase;
+    const x = fill([batch, channelsIn, lengthIn], SIGNED);
+    const weight = fill(
+      [channelsOut, channelsIn, kernel],
+      groupVarying(channelsIn * kernel, groupSize),
+    );
+    const bias = fill([channelsOut], SIGNED);
+    const quantized = quantizeI4(weight.data, weight.shape, groupSize);
+    const outShape = [batch, channelsOut, outLength(lengthIn, attrs, kernel)];
+    const gpu = await acquireGpu();
+    try {
+      const run = async (wAsOutput: boolean) => {
+        const session = await createSession(
+          gpu,
+          openModel(
+            conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape, { wAsOutput }),
+          ),
+        );
+        try {
+          const outputs = await session.run({ x });
+          return {
+            y: Float32Array.from(outputs["y"].data as Float32Array),
+            diagnostics: session.diagnostics().storage,
+          };
+        } finally {
+          await session.dispose();
+        }
+      };
+      const resident = await run(false);
+      const expanded = await run(true);
+      assert(resident.diagnostics.residentCompressedBytes > 0, "適格側が常駐していない");
+      assertEquals(expanded.diagnostics.residentCompressedBytes, 0, "適格外側が常駐している");
+      assert(expanded.diagnostics.hostExpandedBytes > 0, "適格外側が CPU 展開されていない");
+      assertEquals(resident.y, expanded.y, "GPU dequant と CPU 展開の出力がビット一致しない");
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "groups > 1 の conv1d は i4 を常駐させず CPU 展開へ落ちる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 直接カーネル（groups > 1）に展開経路は無い。適格判定が落とすので packed のまま
+    // 常駐せず、CPU 展開の受け皿へ回る（正しさは保たれ VRAM 削減はゼロ）。
+    const groupSize = 16;
+    const groups = 2;
+    const x = fill([1, 8, 12], SIGNED);
+    // 重みの第 2 軸は Cin/groups なので行長は 4·4 = 16（g16 が 1 つ）
+    const weight = fill([6, 4, 4], groupVarying(16, groupSize));
+    const bias = fill([6], SIGNED);
+    const quantized = quantizeI4(weight.data, weight.shape, groupSize);
+    const attrs: ConvAttrs = { stride: 1, padding: 0, dilation: 1 };
+    const outShape = [1, 6, outLength(12, attrs, 4)];
+    const gpu = await acquireGpu();
+    try {
+      const session = await createSession(
+        gpu,
+        openModel(
+          conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape, { groups }),
+        ),
+      );
+      try {
+        const output = await session.run({ x });
+        const diagnostics = session.diagnostics().storage;
+        assertEquals(diagnostics.residentCompressedBytes, 0, "groups > 1 なのに常駐している");
+        assert(diagnostics.hostExpandedBytes > 0, "CPU 展開されていない");
+        const expected = applyReferenceOp(
+          "conv1d",
+          [
+            x as RefTensor,
+            refTensor(weight.shape, quantized.values),
+            bias as RefTensor,
+          ],
+          { ...attrs, groups },
+          outShape,
+        );
+        const report = compareTensors(output["y"], expected);
+        assertEquals(report.pass, true, formatAllclose(report));
+      } finally {
+        await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * GEMM の **A 側**（conv1d igemm の重みタイル）の i4 展開が CPU の {@link decodeI4} と
+ * **全 15 nibble 値 × 語内 8 位置でビット一致**する（B 側 = linear の embedding 版
+ * 〈上の gather 門〉の conv 鏡像）。
+ *
+ * 運び方: `K = 1` / 入力を **one-hot**（`x[b, ic, l] = (ic == b) ? 1 : 0`）にすると
+ * `out[b, oc, l] = bias[oc] + Σ_ic x[b,ic,l]·w[oc,ic,0] = w[oc, b, 0]`（bias = 0）となり、
+ * **1 出力要素 = 1 重み要素**の恒等になる。0 を掛けた項は `+0.0` で、有限の acc に足しても
+ * ビットが動かない（符号付きゼロも `+0.0 + 0.0 = +0.0` で保たれる）。
+ * 重み `[16, 32, 1]` の量子化値を `((r + c) % 15) − 7` にすると、平坦添字 `r·32 + c` の
+ * 32 が 8 の倍数なので**同じ nibble 値が語内 8 位置すべてに現れる**。振幅は行 × group で
+ * 変えるので scale 添字の誤りも同時に検出できる。
+ * MUST: v4（`dequant4`）とスカラ（`dequant`）の**両方**を踏む — 分けるのは `Lout % 4` だけ。
+ */
+Deno.test({
+  name: "conv1d の A 側 i4 展開が全 15 nibble 値 × 語内 8 位置で CPU 展開とビット一致（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const channelsOut = 16;
+    const channelsIn = 32;
+    const groupSize = 16;
+    const weight = fill([channelsOut, channelsIn, 1], (i) => {
+      const row = Math.floor(i / channelsIn);
+      const col = i % channelsIn;
+      const q = ((row + col) % 15) - 7;
+      // scale が行 × group で違う値になる振幅（同じだと添字の取り違えが値に出ない）
+      return q * (0.1 + row * 0.017 + Math.floor(col / groupSize) * 0.31);
+    });
+    const quantized = quantizeI4(weight.data, weight.shape, groupSize);
+    // 恒真化の門: 語内 8 位置それぞれで nibble 値が 15 種すべて現れている
+    for (let position = 0; position < 8; position += 1) {
+      const seen = new Set<number>();
+      for (let i = position; i < channelsOut * channelsIn; i += 8) {
+        const byte = quantized.bytes[i >> 1];
+        seen.add((i & 1) === 1 ? byte >> 4 : byte & 0x0f);
+      }
+      assertEquals(seen.size, 15, `語内位置 ${position}: nibble 値が 15 種そろっていない`);
+    }
+    const expected = decodeI4(
+      quantized.bytes,
+      [...weight.shape],
+      quantized.scale,
+      quantized.scaleShape,
+      groupSize,
+    );
+    const bias = fill([channelsOut], () => 0);
+    const attrs: ConvAttrs = { stride: 1, padding: 0, dilation: 1 };
+    const gpu = await acquireGpu();
+    try {
+      // Lout = 4（v4 = `dequant4`）と Lout = 3（スカラ = `dequant`）の両方を踏む
+      for (const lengthIn of [4, 3]) {
+        const x = fill(
+          [channelsIn, channelsIn, lengthIn],
+          (i) =>
+            (Math.floor(i / (channelsIn * lengthIn)) === Math.floor(i / lengthIn) % channelsIn)
+              ? 1
+              : 0,
+        );
+        const outShape = [channelsIn, channelsOut, lengthIn];
+        assertEquals(
+          conv1dUsesVec4(channelsIn, lengthIn, 1),
+          lengthIn % 4 === 0,
+          `Lin=${lengthIn}: 踏んだ変種`,
+        );
+        const session = await createSession(
+          gpu,
+          openModel(conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape)),
+        );
+        let actual: Float32Array;
+        try {
+          actual = (await session.run({ x }))["y"].data as Float32Array;
+        } finally {
+          await session.dispose();
+        }
+        // out[b][oc][l] = w[oc][b][0]（one-hot の恒等）— 重み側の添字へ読み替えて突き合わせる
+        const actualBits = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
+        const expectedBits = new Uint32Array(
+          Float32Array.from(
+            { length: channelsIn * channelsOut * lengthIn },
+            (_, i) => {
+              const batch = Math.floor(i / (channelsOut * lengthIn));
+              const channel = Math.floor(i / lengthIn) % channelsOut;
+              return expected[channel * channelsIn + batch];
+            },
+          ).buffer,
+        );
+        assertEquals(actualBits, expectedBits, `Lin=${lengthIn}: A 側展開が CPU 展開と違う`);
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // 適格判定（i4 の狭め — GPU 非依存）
 // ---------------------------------------------------------------------------
 
-Deno.test("i4 の適格は linear / embedding の重みスロット限定（conv 系は落ちる）", () => {
-  // 展開経路（`unpack4xU8` + group scale）を持つカーネルは linear と embedding だけ。conv 系にも
-  // 食われる重みを常駐させると、そちらのカーネルが packed バイトを f32 として読む（例外は
-  // 出ない沈黙誤値）。ここは**適格判定だけ**を見るので、shape 契約の通らない組でも成立する
-  // 形（同じ実体を rank 2 と rank 3 の両方の重みスロットに置く形）を直接与える。
+/** conv1d の attrs（`groups` は既定値補完されない — ADR 0015）。 */
+const convAttrs = (groups: number) => ({ stride: 1, padding: 0, dilation: 1, groups });
+
+Deno.test("i4 の適格は linear / embedding / groups==1 の conv1d の重みスロット限定", () => {
+  // 展開経路（`unpack4xU8` + group scale）を持つカーネルは linear（GEMM の B タイル）・
+  // embedding・conv1d の implicit GEMM（GEMM の A タイル）だけ。それ以外にも食われる重みを
+  // 常駐させると、そちらのカーネルが packed バイトを f32 として読む（例外は出ない沈黙誤値）。
+  // ここは**適格判定だけ**を見るので、shape 契約の通らない組でも成立する形（同じ実体を
+  // rank 2 と rank 3 の両方の重みスロットに置く形）を直接与える。
   const eligible = (nodes: readonly unknown[]): readonly string[] =>
     [
       ...i4EligibleInitializers(
@@ -517,7 +933,34 @@ Deno.test("i4 の適格は linear / embedding の重みスロット限定（conv
     ]),
     ["w"],
   );
-  for (const op of ["conv1d", "conv2d", "conv_transpose1d"]) {
+  // conv1d は **groups == 1（implicit GEMM）だけ**が適格。groups > 1 は直接カーネルへ流れ、
+  // そちらに展開経路は無い（波 J-5b）。
+  assertEquals(
+    eligible([{ op: "conv1d", ins: ["x", "w", "b"], outs: ["y"], attrs: convAttrs(1) }]),
+    ["w"],
+  );
+  assertEquals(
+    eligible([{ op: "conv1d", ins: ["x", "w", "b"], outs: ["y"], attrs: convAttrs(2) }]),
+    [],
+  );
+  // linear と groups==1 conv1d の共有は両方に展開経路があるので適格のまま
+  assertEquals(
+    eligible([
+      { op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} },
+      { op: "conv1d", ins: ["x", "w", "b"], outs: ["z"], attrs: convAttrs(1) },
+    ]),
+    ["w"],
+  );
+  // 混在消費の排他 narrowing: 展開経路の無い側が 1 つでもあれば落ちる
+  assertEquals(
+    eligible([
+      { op: "conv1d", ins: ["x", "w", "b"], outs: ["y"], attrs: convAttrs(1) },
+      { op: "conv1d", ins: ["x", "w", "b"], outs: ["z"], attrs: convAttrs(4) },
+    ]),
+    [],
+    "groups 1 と groups 4 の共有",
+  );
+  for (const op of ["conv2d", "conv_transpose1d"]) {
     assertEquals(eligible([{ op, ins: ["x", "w", "b"], outs: ["y"], attrs: {} }]), [], op);
     assertEquals(
       eligible([
@@ -528,6 +971,19 @@ Deno.test("i4 の適格は linear / embedding の重みスロット限定（conv
       `linear と ${op} の共有`,
     );
   }
+  // MUST: conv1d の `groups` は既定値補完しない（欠けたら fail loudly — 黙って 1 を仮定すると
+  // depthwise の重みが i4 で常駐して直接カーネルが packed バイトを f32 として読む）
+  assertThrows(
+    () =>
+      eligible([{
+        op: "conv1d",
+        ins: ["x", "w", "b"],
+        outs: ["y"],
+        attrs: { stride: 1, padding: 0, dilation: 1 },
+      }]),
+    Error,
+    "attrs.groups",
+  );
   // 重みスロット**以外**の消費はここでは見ない（`eligibleCompressedInitializers` との積で使う）
   assertEquals(eligible([{ op: "add", ins: ["w", "w"], outs: ["y"], attrs: {} }]), []);
 });

@@ -296,6 +296,13 @@ type GemmSpec =
     readonly weight: WeightStorage;
     /** m タイルの行数（`conv2dIgemmMTile` が返す 64 行か {@link GEMM_MTILE_SMALL} の 32 行）。 */
     readonly mTile: number;
+    /**
+     * i4 の group 長の log2（`weight: "i4"` のとき**必須**・他では禁止 — ADR 0069 決定 5 の
+     * conv1d 追補）。conv は重みが **A 側**なので、scale 添字は linear の鏡映で
+     * `arow · (dims.k >> shift) + (ak0 >> shift)`（`dims.k = Cin·K` = 平坦後の行長）。
+     * MUST: **conv1d だけ**が取る（conv2d に i4 の適格判定は無い — {@link gemmWgsl} の門）。
+     */
+    readonly weightGroupShift?: number;
   };
 
 /**
@@ -1295,6 +1302,9 @@ fn xcol(xc: u32, ky: i32, kx: i32, n: u32) -> f32 {
  * MUST: i8 の scale は **行 = 出力チャネル**（ADR 0024 の MUST ④）。linear 側の `wcol`
  * （= 列）を持ってくると列 = ピクセルの scale を引く沈黙誤値になり、**m タイルが 2 枚以上
  * ある形**のテストだけが検出器になる。
+ *
+ * NOTE: i4 の group scale はここで束ねない（{@link weightScaleWgsl} が i4 で空文字を返す）—
+ * group は k 依存なので行不変の巻き上げが成立せず、引くのは充填側（{@link fillAConv}）。
  */
 const prologueAConv = (
   geometry: GemmGeometry,
@@ -1322,33 +1332,49 @@ const prologueAConv = (
 ${rows}`;
 };
 
-/** conv1d / conv2d の A タイル充填（{@link fillA} と {@link fillBLinear} を合成した形）。 */
+/**
+ * conv1d / conv2d の A タイル充填（{@link fillA} と {@link fillBLinear} を合成した形）。
+ *
+ * `groupShift` は i4（conv1d 限定 — ADR 0069 決定 5 の追補）の group 長の log2。linear が
+ * B 側でやっていることの **A 側への鏡映**で、group scale は k 依存なのでチャネル不変の
+ * 巻き上げ（{@link scaleVar}）が使えず **quad ごと**に 1 度引く。`ak0` は 4 整列・
+ * `group_size ≥ 16` なので quad は group を跨がない（ADR 0069 決定 3）。行長 `dims.k` が
+ * group で割り切れることは適格判定（plan.ts）と宣言層（format/ir.ts）が保証済み。
+ * MUST: 省略時（f32 / f16 / i8）の生成物は 1 バイトも動かない（スナップショットが検出器）。
+ */
 const fillAConv = (
   geometry: GemmGeometry,
   name: string,
   weight: WeightStorage,
   v4: boolean,
+  groupShift?: number,
 ): string => {
+  const groupScale = (slot: number): string =>
+    weight === "i4"
+      ? `
+      let ags${slot} = wscale[arow${slot} * (dims.k >> ${groupShift}u) + (ak0 >> ${groupShift}u)];`
+      : "";
+  const scaleExpr = (slot: number): string => weight === "i4" ? `ags${slot}` : scaleVar(slot);
   const filled = slots(gemmRowSlots(geometry)).map((slot) =>
     `    var av${slot} = vec4<f32>(0.0);
 ${
       v4
-        ? `    if (arow${slot} < dims.m && ak0 < dims.k) {
-      av${slot} = ${weightRead4(name, weight, `arow_base${slot} + ak0`, scaleVar(slot))};
+        ? `    if (arow${slot} < dims.m && ak0 < dims.k) {${groupScale(slot)}
+      av${slot} = ${weightRead4(name, weight, `arow_base${slot} + ak0`, scaleExpr(slot))};
     }`
         : `    if (arow${slot} < dims.m) {
-      let abase = arow_base${slot} + ak0;
+      let abase = arow_base${slot} + ak0;${groupScale(slot)}
       if (ak0 < dims.k) {
-        av${slot}.x = ${weightRead(name, weight, "abase", scaleVar(slot))};
+        av${slot}.x = ${weightRead(name, weight, "abase", scaleExpr(slot))};
       }
       if (ak0 + 1u < dims.k) {
-        av${slot}.y = ${weightRead(name, weight, "abase + 1u", scaleVar(slot))};
+        av${slot}.y = ${weightRead(name, weight, "abase + 1u", scaleExpr(slot))};
       }
       if (ak0 + 2u < dims.k) {
-        av${slot}.z = ${weightRead(name, weight, "abase + 2u", scaleVar(slot))};
+        av${slot}.z = ${weightRead(name, weight, "abase + 2u", scaleExpr(slot))};
       }
       if (ak0 + 3u < dims.k) {
-        av${slot}.w = ${weightRead(name, weight, "abase + 3u", scaleVar(slot))};
+        av${slot}.w = ${weightRead(name, weight, "abase + 3u", scaleExpr(slot))};
       }
     }`
     }
@@ -1632,11 +1658,15 @@ ${conv1dKDecode(slot)}
  * （`(ic, k)` の 2 段）と uniform の幾何欄だけ。store は 1 バッチぶんの `[Cout][Lout]`
  * 行優先 = NCL の平面そのものなので後段のレイアウト変換は要らない（バッチは z 軸 —
  * {@link BATCHED_OPS}）。
+ *
+ * `groupShift` は i4 変種（ADR 0069 決定 5 の conv1d 追補）の group 長の log2。差は
+ * {@link weightLoaderWgsl} が出す scale 束縛と、{@link fillAConv} が quad ごとに引く 1 行だけ。
  */
 const conv1dIgemmWgsl = (
   geometry: GemmGeometry,
   weight: WeightStorage,
   v4: boolean,
+  groupShift?: number,
 ): string =>
   skeleton(
     geometry,
@@ -1650,7 +1680,7 @@ const conv1dIgemmWgsl = (
     `${weightLoaderWgsl("w", weight, LINEAR_SCALE_BINDING, v4)}${CONV1D_XCOL_WGSL}`,
     `${v4 ? `  let n4 = dims.n / ${GEMM_QUAD}u;\n` : ""}${prologueAConv(geometry, weight)}
 ${prologueBConv1d(geometry, v4)}`,
-    `${fillAConv(geometry, "w", weight, v4)}
+    `${fillAConv(geometry, "w", weight, v4, groupShift)}
 ${fillBConv1d(geometry, v4)}`,
     store(geometry, "out", "conv1d", v4, false),
     CONV1D_DIMS_EXTRA,
@@ -1695,8 +1725,23 @@ export const gemmWgsl = (spec: GemmSpec): string => {
         spec.weightGroupShift,
       );
     case "conv1d":
-      return conv1dIgemmWgsl(geometry, spec.weight, spec.v4);
+      // MUST: group 長の log2 は i4 と 1 対 1（linear と同文 — 欠けたまま生成すると scale 添字が
+      // 壊れた WGSL が出る・i4 以外に付くのは呼び出し側の結線バグ）。
+      if ((spec.weight === "i4") !== (spec.weightGroupShift !== undefined)) {
+        throw new CodegenError(
+          `conv1d igemm: weightGroupShift は重み i4 格納と対で渡す（weight=${spec.weight} / shift=${spec.weightGroupShift}）`,
+        );
+      }
+      return conv1dIgemmWgsl(geometry, spec.weight, spec.v4, spec.weightGroupShift);
     case "conv2d":
+      // MUST: conv2d に i4 の実行経路は無い（ADR 0069 決定 5 の追補は conv1d まで）。A 側の
+      // 展開器は 1D / 2D で共有なので**生成が通ってしまう** — 適格判定（plan.ts）が閉じている
+      // 前提に乗らず、生成の入口でも落とす（直呼び経路の沈黙誤値を塞ぐ）。
+      if (spec.weight === "i4" || spec.weightGroupShift !== undefined) {
+        throw new CodegenError(
+          "conv2d: 重み i4 格納は未実装 — i4 の実行経路は linear / embedding / conv1d(groups==1) だけ（ADR 0069 決定 5）",
+        );
+      }
       return conv2dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "attention_qk":
       return attentionQkWgsl(geometry, spec.v4, spec.compute, spec.score, spec.mask, spec.gqa);

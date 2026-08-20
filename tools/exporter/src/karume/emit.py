@@ -13,10 +13,11 @@ initializer だけ**:
    （ランタイム側 `packages/runtime/src/runtime/plan.ts` の
    `eligibleCompressedInitializers` と同じ規則。
    bias も norm 系 weight も混在消費も消費ゼロも適格外 — ADR 0006）。
-   **i4 はさらに狭く {@link I4_WEIGHT_OPS}（`linear` / `embedding`）の重みスロット限定**
-   （ADR 0069 決定 5 と embedding 追補 — i4 の展開経路を持つ op はこの 2 つだけ。一般適格でも
-   conv 系の重みは f32 のまま残す — i8 の適格外と同じ受け皿で、ランタイム側の
-   eligible ∩ i4Eligible と対）。
+   **i4 はさらに狭く {@link I4_WEIGHT_OPS}（`linear` / `embedding` / `conv1d`）の重みスロット
+   限定**（ADR 0069 決定 5 と embedding / conv1d 追補 — i4 の展開経路を持つ op はこの 3 つ
+   だけで、conv1d はさらに `groups == 1` と格納行長の整除が要る）。一般適格でも conv2d /
+   conv_transpose1d の重みは f32 のまま残す — i8 の適格外と同じ受け皿で、ランタイム側の
+   eligible ∩ i4Eligible と対。
 2. **逆変換がビット一致**する（= fake-quant 済み）。f16 は `f32 → f16 → f32` の往復、
    i8 は `q8.to(f32) · scale`、i4 は `dequant(unpack(pack(q4)))`（`scale` は fake-quant が
    使った値を**そのまま**）。
@@ -34,9 +35,11 @@ scale は safetensors の**素のテンソル**として同じファイルに入
 そのキーを明示宣言する。キーは `_scale_key`（`karume.scale.<重みキー>`）で機械的に作り、
 **実テンソルとの衝突**を書き出し前に検査する（衝突すると「別の重みを scale として読む」
 形になり、ロードは通って値だけが壊れる）。形は格納で 2 通り — i8 は per-channel の keepdim
-broadcast 形、i4 は**同 rank・最終次元だけ group 数**の group 形で、後者は `storage.group_size`
-も宣言する。scale は fake-quant が使った値を `quantize.fake_quant_int8` /
-`quantize.fake_quant_int4` から受け取ってそのまま書く — ここで amax から引き直すと f32 の
+broadcast 形、i4 は **rank2（行数 = 重みの先頭次元・最終次元 = group 数）**の group 形で、
+後者は `storage.group_size` も宣言する（rank2 の重みでは「同 rank・最終次元だけ group 数」と
+同値で、conv1d `[Cout,Cin,K]` は `[Cout,(Cin·K)/g]` — `quantize.storage_rows`）。scale は
+fake-quant が使った値を `quantize.fake_quant_int8` / `quantize.fake_quant_int4` から
+受け取ってそのまま書く — ここで amax から引き直すと f32 の
 丸めで 1ulp 動きうるので、golden を採ったときの重みとの対応が壊れる。
 
 ## safetensors の並び順（ADR 0063 — docs/limitations.md）
@@ -61,9 +64,17 @@ from types import MappingProxyType
 
 import torch
 
-from karume.ir import IR_METADATA_KEY, MIN_GROUP_SIZE, IrGraph, IrInitializer, IrStorage
-from karume.ops import EMBEDDING_OP, LINEAR_OP, WEIGHT_CHANNEL_AXES, WEIGHT_SLOTS
+from karume.ir import IR_METADATA_KEY, MIN_GROUP_SIZE, IrGraph, IrInitializer, IrNode, IrStorage
+from karume.ops import (
+    CONV1D_OP,
+    EMBEDDING_OP,
+    LINEAR_OP,
+    WEIGHT_CHANNEL_AXES,
+    WEIGHT_SLOTS,
+    conv1d_attrs,
+)
 from karume.quantize import (
+    DEFAULT_GROUP_SIZE,
     QuantizeError,
     dequantize_int4,
     group_size_of,
@@ -75,14 +86,19 @@ from karume.quantize import (
 WEIGHT_DTYPES = ("f32", "f16", "i8", "i4")
 
 #: i4 の**実行経路を持つ** op（= i4 適格な重みスロットの消費先 — ADR 0069 決定 5 の linear と
-#: その embedding 追補）。ランタイム側 `packages/runtime/src/runtime/plan.ts` の `I4_WEIGHT_OPS`
-#: の鏡像で、両者が割れると「export は緑・ロードで CPU 展開に落ちる（VRAM 削減が黙って消える）」
-#: か、その逆に「宣言できない格納を要求して export だけが落ちる」形になる。
+#: その embedding / conv1d 追補）。ランタイム側 `packages/runtime/src/runtime/plan.ts` の
+#: `I4_WEIGHT_OPS` の鏡像で、両者が割れると「export は緑・ロードで CPU 展開に落ちる（VRAM 削減が
+#: 黙って消える）」か、その逆に「宣言できない格納を要求して export だけが落ちる」形になる。
 #:
-#: MUST: conv 系（conv1d / conv2d / conv_transpose1d）を入れない。group scale の束縛が
-#: linear の充填と embedding のカーネルにしか無く、conv の生成入力へ i4 を渡すと
-#: 不成立 WGSL になる（`packages/runtime/src/kernels/weight-storage.ts`）。
-I4_WEIGHT_OPS: frozenset[str] = frozenset({LINEAR_OP, EMBEDDING_OP})
+#: MUST: conv2d と conv_transpose1d を入れない。conv1d に付いた i4 は igemm 経路
+#: （`groups == 1` の変種）だけが展開でき、direct カーネル（`groups > 1`）と conv2d /
+#: conv_transpose1d の生成入力へ i4 を渡すと不成立 WGSL になる
+#: （`packages/runtime/src/kernels/weight-storage.ts`）。`groups == 1` の絞り込みは
+#: {@link i4_eligible_initializers} が node の attrs から見る。
+#: MUST: conv_transpose1d は**重み `[Cin,Cout,K]` の行軸が先頭でない**ぶん、pack のバイト列が
+#: 行の並びと食い違う（`quantize.storage_rows`）— 展開経路を足すだけでは適格にできない
+#: （2026-08-20 ユーザー裁定: permuted pack は買わない）。
+I4_WEIGHT_OPS: frozenset[str] = frozenset({LINEAR_OP, EMBEDDING_OP, CONV1D_OP})
 
 #: torch dtype → safetensors dtype 名 / 1 要素の **bit** 数。ここに無い dtype は fail loudly。
 #: bit 単位で持つのは packed 4bit（1 バイトに 2 要素 — ADR 0069 決定 2）が要素バイト数で
@@ -198,14 +214,57 @@ def weight_channel_axes(graph: IrGraph) -> dict[str, int]:
     return axes
 
 
-def i4_eligible_initializers(graph: IrGraph) -> set[str]:
-    """重みスロットでの消費が {@link I4_WEIGHT_OPS} **だけ**の initializer
-    （i4 の適格集合 — ADR 0069 決定 5）。
+def _has_i4_kernel(node: IrNode) -> bool:
+    """このノードが重みスロットの i4 を**展開できる**か（{@link I4_WEIGHT_OPS} の絞り込み）。
 
-    i4 の展開経路（`unpack4xU8` + group scale）を持つカーネルは linear と embedding だけなので、
-    それ以外の重みスロット（conv 系）でも消費される initializer は i4 で格納できない —
-    そのカーネルは packed バイトを f32 として読む（例外は出ない）。`weight_channel_axes` と
-    同じく**消費側の op** から引く（重みの shape だけでは区別できない）。
+    conv1d の i4 は igemm 変種（`groups == 1`）だけが展開でき、direct カーネル（`groups > 1`）は
+    i4 非対応のまま（ランタイム側 `plan.ts` の `i4Executable` の鏡像）。
+
+    MUST: `groups` は**既定値で補完しない**（ADR 0012）— 契約表の `ops.conv1d_attrs` を通して
+    欠落ごと落とす。ここで黙って 1 を仮定すると、depthwise の重みが i4 で常駐して direct
+    カーネルが packed バイトを f32 として読む（例外は出ない）。
+    """
+    if node.op not in I4_WEIGHT_OPS:
+        return False
+    if node.op != CONV1D_OP:
+        return True
+    return conv1d_attrs(node.attrs, f"graph.nodes ({node.op})")[3] == 1
+
+
+def _storage_row_length(graph: IrGraph, name: str) -> int | None:
+    """initializer の**格納行長**（`quantize.storage_rows` の行長 = 先頭次元を除く積）。
+
+    group scale の形が rank に依らずこの行長で決まる（ADR 0069 決定 3）ので、i4 の適格判定も
+    ここを除数に見る。rank 1 以下・記号次元を含む形・宣言の無い名前は None（格納 i4 の形を
+    そもそも持てない）。
+    """
+    value = graph.values.get(name)
+    if value is None or len(value.shape) < 2:
+        return None
+    length = 1
+    for dim in value.shape[1:]:
+        if not isinstance(dim, int):
+            return None
+        length *= dim
+    return length
+
+
+def i4_eligible_initializers(graph: IrGraph, group_size: int = DEFAULT_GROUP_SIZE) -> set[str]:
+    """重みスロットでの消費が {@link I4_WEIGHT_OPS} **だけ**で、格納行長が `group_size` で
+    割り切れる initializer（i4 の適格集合 — ADR 0069 決定 5 とその追補）。
+
+    i4 の展開経路（`unpack4xU8` + group scale）を持つカーネルは linear / embedding / conv1d
+    （`groups == 1`）だけなので、それ以外の重みスロット（conv2d / conv_transpose1d /
+    groups > 1 の conv1d）でも消費される initializer は i4 で格納できない — そのカーネルは
+    packed バイトを f32 として読む（例外は出ない）。`weight_channel_axes` と同じく**消費側の
+    op** から引く（重みの shape だけでは区別できない）。
+
+    行長の門（{@link _storage_row_length} % `group_size`）が要るのは、端数 group を作らない
+    MUST（ADR 0069 決定 2）で丸められない重みを**適格から外して静かに f32 に残す**ため。
+    ここで拾ってしまうと「fake-quant が届いていない重み」として export 全体が落ちる
+    （linear + 割り切れない conv1d を持つ普通のグラフが i4 で書けなくなる — I4-ELIG-01 と
+    同型）。既定の除数は出荷の既定 group 長（`quantize.DEFAULT_GROUP_SIZE`）で、別の g で
+    丸めた資産は同じ g を渡す。
     """
     executable: set[str] = set()
     other: set[str] = set()
@@ -216,8 +275,13 @@ def i4_eligible_initializers(graph: IrGraph) -> set[str]:
         name = node.ins[slot]
         if name not in graph.initializers:
             continue
-        (executable if node.op in I4_WEIGHT_OPS else other).add(name)
-    return executable - other
+        (executable if _has_i4_kernel(node) else other).add(name)
+    eligible: set[str] = set()
+    for name in executable - other:
+        row_length = _storage_row_length(graph, name)
+        if row_length is not None and row_length % group_size == 0:
+            eligible.add(name)
+    return eligible
 
 
 def _scale_key(tensor_key: str) -> str:
@@ -374,7 +438,8 @@ def _plan_i4(
         raise EmitError(
             f"initializer '{name}' ({key}): 格納 i4 は"
             f" {' / '.join(sorted(I4_WEIGHT_OPS))} の重みスロットだけ"
-            "（ADR 0069 決定 5 — i4 の展開経路を持つカーネルはこの 2 つ）"
+            "（ADR 0069 決定 5 とその追補 — conv1d は groups == 1 と格納行長が"
+            " group 長で割り切れることも要る）"
         )
     scale = scales.get(key)
     if scale is None:
@@ -500,7 +565,8 @@ def _plan_weight_dtype(
                 )
             continue
         # i4 の適格は **{@link I4_WEIGHT_OPS} の重みスロット限定**（ADR 0069 決定 5）— 既定 i4
-        # では conv 系の重みを f32 のまま静かに残す。i8 の適格外が f32 で残るのと同じ設計で、
+        # では適格外（conv2d / conv_transpose1d / groups > 1 の conv1d / 格納行長が group 長で
+        # 割り切れない重み）を f32 のまま静かに残す。i8 の適格外が f32 で残るのと同じ設計で、
         # ランタイム側（executor.ts の eligible ∩ i4Eligible）と対。ここで除外しないと、
         # conv を混ぜたグラフが「conv の重みを i4 にできない」で export 不能になる
         # （Codex 波 F 指摘 I4-ELIG-01）。明示指定の i4 × 適格外は `_plan_i4` 自身の門が
@@ -754,8 +820,9 @@ def write_model(
 
     `weight_dtype` が `"f16"` / `"i8"` / `"i4"` のとき、**適格な重みスロットだけ**が圧縮格納に
     なる（宣言と実体が 1 経路で決まる — 別々に決めると「宣言 f16 / 実体 f32」の沈黙誤読が
-    作れる）。i4 の適格は {@link I4_WEIGHT_OPS}（linear / embedding）の重みスロット限定
-    （ADR 0069 決定 5）。
+    作れる）。i4 の適格は {@link I4_WEIGHT_OPS}（linear / embedding / conv1d）の重みスロット
+    限定で、conv1d はさらに `groups == 1` と格納行長の整除が要る
+    （{@link i4_eligible_initializers} — ADR 0069 決定 5 とその追補）。
 
     `weight_dtype_overrides`（テンソルキー → 格納 dtype）は 1 本単位の明示指定で、既定
     `weight_dtype` に**優先**する（混成格納 — 意味と fail loudly の線引きは

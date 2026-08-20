@@ -2431,6 +2431,9 @@ export class RecipeBuilder {
    * m タイルの述語は conv2d と**同じ 1 本**（{@link conv2dIgemmMTile} — M = Cout の関数で
    * しかないので次元に依らない）。どちらのタイル形でも出力はビット同一なので、これは純粋な
    * dispatch の割り直しで数値契約に触れない。
+   *
+   * NOTE: i4 常駐の conv1d が着地するのは**この経路だけ**（適格判定が groups == 1 に閉じる —
+   * ADR 0069 決定 5 の conv1d 追補）。group 長は WGSL に焼くのでキーにも乗せる。
    */
   async #buildConv1dIgemm(
     step: NodePlan,
@@ -2446,10 +2449,12 @@ export class RecipeBuilder {
     const mTile = conv2dIgemmMTile(m);
     // 生成・キーと同じ解決点から幾何を引く（dispatch のタイル辺が WGSL の辺と構造的に一致）。
     const geometry = gemmMTileGeometry(mTile);
-    const key = conv1dIgemmKey(weightStorage, v4, mTile);
+    // i4 は group 長を WGSL に焼く（キーの g 部と対 — linear / embedding と同じ規律・ADR 0069）。
+    const groupSize = weightStorage === "i4" ? this.#weightGroupSize(step) : undefined;
+    const key = conv1dIgemmKey(weightStorage, v4, mTile, groupSize);
     const { pipeline, layout } = await this.#state.cache.get(
       key,
-      conv1dIgemmWgsl(weightStorage, v4, mTile),
+      conv1dIgemmWgsl(weightStorage, v4, mTile, groupSize),
     );
     const params = this.#writeParams(conv1dIgemmParams(dims), PARAMS_UNIFORM_USAGE);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;

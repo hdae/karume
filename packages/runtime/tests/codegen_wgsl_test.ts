@@ -473,6 +473,14 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["conv1d_igemm_m32_wf16_v4.wgsl", conv1dIgemmWgsl("f16", true, GEMM_MTILE_SMALL)],
     ["conv1d_igemm_m32_wi8.wgsl", conv1dIgemmWgsl("i8", false, GEMM_MTILE_SMALL)],
     ["conv1d_igemm_m32_wi8_v4.wgsl", conv1dIgemmWgsl("i8", true, GEMM_MTILE_SMALL)],
+    // conv1d の i4 変種（ADR 0069 決定 5 の conv1d 追補 — group 32 の shift を焼いた形）。
+    // **linear_wi4* と対で置く**のが条件で、i4 の group scale は linear が B 側・conv1d が
+    // A 側と別実装（`fillBLinear` / `fillAConv`）— 片方だけ動いた生成物が普通に組み上がる。
+    // MUST: conv2d 側に対の i4 は無い（実行経路そのものが無く、生成の入口が落とす）。
+    ["conv1d_igemm_wi4.wgsl", conv1dIgemmWgsl("i4", false, undefined, 32)],
+    ["conv1d_igemm_wi4_v4.wgsl", conv1dIgemmWgsl("i4", true, undefined, 32)],
+    ["conv1d_igemm_m32_wi4.wgsl", conv1dIgemmWgsl("i4", false, GEMM_MTILE_SMALL, 32)],
+    ["conv1d_igemm_m32_wi4_v4.wgsl", conv1dIgemmWgsl("i4", true, GEMM_MTILE_SMALL, 32)],
     // w8a8（活性 i8 化 + 整数内積）。**dp4a 版とエミュ版の両方**を置くのが条件で、
     // 「数値は同じで速度だけ違う」という主張は生成物が 2 つ別々に存在することが前提になる。
     ["quantize_rows.wgsl", QUANTIZE_ROWS_WGSL],
@@ -3590,6 +3598,46 @@ Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 �
   assertThrows(() => embeddingKey("i4"), CodegenError, "対で渡す");
   assertThrows(() => embeddingKey("i8", 32), CodegenError, "対で渡す");
   assertThrows(() => embeddingKey("i4", 8), CodegenError, "2 冪");
+});
+
+/**
+ * conv1d の i4 変種（ADR 0069 決定 5 の conv1d 追補）は **implicit GEMM 限定**。
+ *
+ * ① キーに group 部が乗る（linear と同じ流儀 — 焼き込んだ shift と対）
+ * ② group 長は i4 と 1 対 1（欠け / 余りはどちらも結線バグ）
+ * ③ 直接カーネル（groups > 1）と conv2d には展開経路が無く、**生成の入口が落とす**
+ *    — 適格判定（plan.ts）が閉じている前提に乗らず、直呼び経路も塞ぐ
+ */
+Deno.test("conv1d の i4 は implicit GEMM 限定で、キーに group 部が乗る", () => {
+  // ① f32 / i8 のキーは変種導入の前後で完全に同じ（実キーを直書きして固定する）
+  assertEquals(conv1dIgemmKey("f32", false), "conv1d:v3:f32:igemm64x128:wg16x8");
+  assertEquals(conv1dIgemmKey("i8", true), "conv1d:v3:f32:igemm64x128v4:wg16x8:wi8");
+  assertEquals(
+    conv1dIgemmKey("i4", true, undefined, 32),
+    "conv1d:v3:f32:igemm64x128v4:wg16x8:wi4g32",
+  );
+  // group 長が違えば別キー（同じ WGSL が group 違いの資産で走る沈黙誤値を塞ぐ）
+  assertNotEquals(
+    conv1dIgemmKey("i4", false, GEMM_MTILE_SMALL, 16),
+    conv1dIgemmKey("i4", false, GEMM_MTILE_SMALL, 32),
+  );
+  // ② i4 と group 長は 1 対 1（キーも生成も同じ門を通る）
+  assertThrows(() => conv1dIgemmKey("i4", false), CodegenError, "対で渡す");
+  assertThrows(() => conv1dIgemmKey("i8", false, GEMM_TILE, 32), CodegenError, "対で渡す");
+  assertThrows(() => conv1dIgemmKey("i4", false, GEMM_TILE, 24), CodegenError, "2 冪");
+  assertThrows(() => conv1dIgemmWgsl("i4", false), CodegenError, "対で渡す");
+  // ③ 直接カーネル（groups > 1 用）は i4 を受けない — キーも生成物も出さない
+  assertThrows(() => conv1dKey("i4"), CodegenError, "i4");
+  assertThrows(() => conv1dWgsl("i4"), CodegenError, "i4");
+  // ③' conv2d の implicit GEMM も同様（A 側の展開器は 1D / 2D 共有なので**生成は通ってしまう**
+  // — 落とさないと packed バイトに group scale 無しの添字が当たる）
+  assertThrows(() => conv2dIgemmWgsl("i4", false), CodegenError, "i4");
+  // i4 の生成物は group scale を A 側（重み側）の充填で quad ごとに引く
+  const wgsl = conv1dIgemmWgsl("i4", false, undefined, 32);
+  assertEquals(wgsl.includes("@group(0) @binding(5) var<storage, read> wscale: array<f32>;"), true);
+  assertEquals(wgsl.includes("let ags0 = wscale[arow0 * (dims.k >> 5u) + (ak0 >> 5u)];"), true);
+  // MUST: linear 側（B タイル = 列）の添字を持ってこない — conv は重みが A 側（行 = Cout）
+  assertEquals(wgsl.includes("wcol"), false);
 });
 
 /**

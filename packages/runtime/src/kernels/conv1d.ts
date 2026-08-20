@@ -1,10 +1,10 @@
 /**
  * conv1d（`x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout]`、f32）の 2 カーネル。
  *
- * | 経路          | キー                                                    | 条件        |
- * | ------------- | ------------------------------------------------------- | ----------- |
- * | implicit GEMM | `conv1d:v3:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}`  | groups == 1 |
- * | 直接畳み込み  | `conv1d:v2:f32:direct:wg256{:w…}`                       | groups > 1  |
+ * | 経路          | キー                                                        | 条件        |
+ * | ------------- | ----------------------------------------------------------- | ----------- |
+ * | implicit GEMM | `conv1d:v3:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}{g…}` | groups == 1 |
+ * | 直接畳み込み  | `conv1d:v2:f32:direct:wg256{:w…}`                           | groups > 1  |
  *
  * implicit GEMM のキーの辺と workgroup 形は**幾何から導く**（{@link conv1dIgemmKey} —
  * conv2d と同じ規律で、具体値を書き写すと幾何を差し替えたとき doc とキーだけが古い辺を名乗る）。
@@ -42,6 +42,12 @@
  * 重みは格納の変種を持つ（`w=f32` / `w=f16` / `w=i8` — ADR 0018 / 0019）。差は縮約内の
  * 読み出し 1 行と、i8 の per-channel scale（`oc` 単位でループ不変なので縮約の外へ巻き上げる）
  * だけ（src/kernels/weight-storage.ts）。
+ *
+ * **`w=i4` は implicit GEMM だけ**が持つ（ADR 0069 決定 5 の conv1d 追補・波 J-5b）。group
+ * scale は k = `Cin·K` 依存で `oc` 単位に巻き上げられないため、A タイル充填が quad ごとに
+ * 引く（gemm.ts の `fillAConv`）— 直接カーネル（groups > 1）に展開経路は無く、生成の入口が
+ * 落とす（{@link conv1dKey} / {@link conv1dWgsl}）。i4 変種は group 長を WGSL に焼くので
+ * キーに `g` 部が乗る（`:wi4g32` — linear と同じ流儀）。
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -49,6 +55,8 @@ import { assertU32Params } from "../codegen/params.ts";
 import { gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
 import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import {
+  i4GroupKeyPart,
+  i4GroupShift,
   WEIGHT_SCALE_VAR,
   weightArrayType,
   weightKeyPart,
@@ -61,12 +69,31 @@ import {
 
 export const CONV1D_WORKGROUP_SIZE = 256;
 
-/** i8 変種の scale 束縛（出力の次の番号 — executor の bind entries と対で使う）。 */
+/** i8 / i4 変種の scale 束縛（出力の次の番号 — executor の bind entries と対で使う）。 */
 export const CONV1D_SCALE_BINDING = 5;
 
+/**
+ * 直接カーネル（groups > 1）は **i4 を受けない**（ADR 0069 決定 5 の conv1d 追補は
+ * implicit GEMM = groups == 1 限定）。
+ *
+ * MUST: 適格判定（plan.ts の `i4EligibleInitializers`）が `groups > 1` の conv1d を i4 の
+ * 適格集合から落とすので通常は届かないが、**カーネル直呼びの経路も塞ぐ**（生成だけは
+ * 通ってしまう形で、group scale の添字が無いまま `dequant(i, scale)` が未定義識別子を
+ * 参照する不成立 WGSL になる — 既存の fail loudly 流儀）。
+ */
+const assertDirectWeight = (weight: WeightStorage): void => {
+  if (weight === "i4") {
+    throw new CodegenError(
+      "conv1d 直接カーネル: 重み i4 格納は未対応 — i4 の conv1d は groups == 1 の implicit GEMM 限定（ADR 0069 決定 5）",
+    );
+  }
+};
+
 /** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
-export const conv1dKey = (weight: WeightStorage): string =>
-  `conv1d:v2:f32:direct:wg${CONV1D_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
+export const conv1dKey = (weight: WeightStorage): string => {
+  assertDirectWeight(weight);
+  return `conv1d:v2:f32:direct:wg${CONV1D_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
+};
 
 /**
  * implicit GEMM の v4（vec4 読み書き）判定。
@@ -100,23 +127,38 @@ export const conv1dIgemmKey = (
   weight: WeightStorage,
   v4: boolean,
   mTile: number = GEMM_TILE,
+  groupSize?: number,
 ): string => {
+  i4GroupShift("conv1d igemm", weight, groupSize);
   // MUST: キーの幾何は生成と**同じ解決点**（`gemmMTileGeometry`）から導く。mTile を直に
   // 埋めると、幾何を差し替えたときにキーだけが古い辺を名乗って別物の WGSL へ衝突する。
   const geometry = gemmMTileGeometry(mTile);
   return `conv1d:v3:f32:igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}${
     v4 ? "v4" : ""
-  }:wg${geometry.wgX}x${geometry.wgY}${weightKeyPart(weight)}`;
+  }:wg${geometry.wgX}x${geometry.wgY}${weightKeyPart(weight)}${i4GroupKeyPart(groupSize)}`;
 };
 
+/**
+ * `groupSize` は i4 の group 長（i4 のとき必須 — ADR 0069 決定 5 の conv1d 追補）。shift を
+ * WGSL に焼くので**キーにも入れる**（`:wi4g32` — linear と同じ流儀）。
+ */
 export const conv1dIgemmWgsl = (
   weight: WeightStorage,
   v4: boolean,
   mTile: number = GEMM_TILE,
-): string => gemmWgsl({ op: "conv1d", v4, weight, mTile });
+  groupSize?: number,
+): string =>
+  gemmWgsl({
+    op: "conv1d",
+    v4,
+    weight,
+    mTile,
+    weightGroupShift: i4GroupShift("conv1d igemm", weight, groupSize),
+  });
 
-export const conv1dWgsl = (weight: WeightStorage): string =>
-  `// karume conv1d (x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout], f32${
+export const conv1dWgsl = (weight: WeightStorage): string => {
+  assertDirectWeight(weight);
+  return `// karume conv1d (x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout], f32${
     weightNote(weight)
   }, 直接畳み込み)
 struct Dims {
@@ -178,6 +220,7 @@ fn main(
   }
 }
 `;
+};
 
 /** conv1d の幾何（2 つの params 関数が共有する唯一の入力型）。 */
 export type Conv1dDims = {

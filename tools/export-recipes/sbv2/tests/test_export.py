@@ -479,13 +479,13 @@ class _TinyDp(nn.Module):
 
 
 class _TinyHybrid(nn.Module):
-    """i4 混成（適格 linear = i4 group32・残り = i8）の最小の骨格。
+    """i4 混成（適格な linear / conv1d = i4 group32・残り = i8）の最小の骨格。
 
     `fc` の in 軸を 64 にするのは i4 が端数 group を作らない MUST（ADR 0069 決定 2）のため。
     `odd`（in 軸 48）は**割り切れない linear**で、適格から外れて i8 側へ落ちる枝の検出器 —
-    実 net_g では 6 本とも割り切れる（FN4 実測）ので、ここでしか踏めない。conv を持たせるのは、
-    i8 側の対象が空だと `fake_quant_int8` が fail loudly して「排他に割れているか」を
-    観測できないから。
+    実 net_g では 6 本とも割り切れる（FN4 実測）ので、ここでしか踏めない。`conv` の行長
+    （`Cin·K` = 12）も割り切れないので i8 側に残り、「排他に割れているか」が観測できる
+    （i8 側が空だと `fake_quant_int8` の対象 0 本になって枝が見えない）。
     """
 
     def __init__(self) -> None:
@@ -493,6 +493,35 @@ class _TinyHybrid(nn.Module):
         self.conv = nn.Conv1d(4, 4, 3)
         self.fc = nn.Linear(64, 4)
         self.odd = nn.Linear(48, 4)
+
+
+class _TinyI4Census(nn.Module):
+    """i4 の適格集合を**過不足なしで数え上げる**ための骨格（枝ごとに落ちる理由を 1 つに絞る）。
+
+    適格 3 本（`fc` / `wide` / `deep`）に対し、非適格 4 本はそれぞれ**理由が 1 つだけ**成立
+    するように寸法を選んである（他の条件は全て満たす）— 落ちる理由が重なっていると、
+    どれか 1 つの門が消えても集合が変わらず、テストが門を守らなくなる。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(64, 4)  # 適格（既存の linear 枝・行長 64）
+        self.wide = nn.Conv1d(32, 4, kernel_size=1)  # 適格（行長 Cin·K = 32）
+        self.deep = nn.Conv1d(16, 4, kernel_size=2)  # 適格（行長 = 16·2 = 32）
+        self.narrow = nn.Linear(48, 4)  # 行長 48 が group32 で割り切れない
+        self.short = nn.Conv1d(4, 4, kernel_size=3)  # 行長 12 が割り切れない
+        self.depthwise = nn.Conv1d(64, 32, kernel_size=1, groups=2)  # 行長 32・groups > 1
+        self.up = nn.ConvTranspose1d(4, 32, kernel_size=1)  # 行長 32・型が違う
+        self.table = nn.Embedding(4, 32)  # 行長 32・今回のスコープ外（i8 のまま）
+
+
+class _TinyAllI4(nn.Module):
+    """量子化対象が**全て** i4 適格な骨格（実物では `flow` がこの形 — 全部 conv1d）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pre = nn.Conv1d(32, 4, kernel_size=1)
+        self.post = nn.Conv1d(16, 4, kernel_size=2)
 
 
 class _TinyNetG(nn.Module):
@@ -563,11 +592,11 @@ class TestWeightDtypeSeries:
         }
 
     def test_the_i4_series_is_stored_as_i8_by_default(self):
-        """i4 は**混成**（適格 linear だけ i4・残りは i8）— 単一 dtype の i4 系列は作れない。
+        """i4 は**混成**（適格な linear / conv1d だけ i4・残りは i8）— 単一 dtype にはできない。
 
-        i4 の実行経路が linear の重みスロット限定（ADR 0069 決定 5）である以上、既定を i4 に
-        すると conv / embedding が黙って f32 で残る。既定は i8 で、適格 linear だけ 1 本単位の
-        override で振るのが唯一の形。
+        i4 の実行経路が `emit.I4_WEIGHT_OPS` 限定（ADR 0069 決定 5 とその追補）である以上、
+        既定を i4 にすると適格外（embedding / `ConvTranspose1d` / depthwise conv）が黙って
+        f32 で残る。既定は i8 で、適格だけ 1 本単位の override で振るのが唯一の形。
         """
         assert set(export_sbv2.BASE_WEIGHT_DTYPES) == set(export_sbv2.WEIGHT_DTYPES)
         assert export_sbv2.BASE_WEIGHT_DTYPES["i4"] == "i8"
@@ -659,6 +688,45 @@ class TestWeightDtypeSeries:
         assert list(scales["fc.weight"].shape) == [4, 2]
         assert list(scales["odd.weight"].shape) == [4, 1]
         assert list(scales["conv.weight"].shape) == [4, 1, 1]
+
+    def test_the_i4_target_set_is_linears_plus_dense_conv1ds(self):
+        """適格 = 型 × `groups == 1` × 行長の整除（波 J-5b の conv1d 追補）。
+
+        集合を**丸ごと**突き合わせる（部分集合ではなく）— 過剰に拾えば emit が
+        fail loudly するが、取りこぼしは「i4 系列なのに対象が痩せた」として黙って通る。
+        """
+        assert export_sbv2._i4_module_names(_TinyI4Census()) == {"fc", "wide", "deep"}
+
+    def test_i4_rounds_a_conv1d_weight_with_a_rank2_group_scale(self):
+        """conv1d の scale は rank2（`[Cout, (Cin·K)/g]`）— i8 の keepdim 形 `[4,1,1]` と別形。
+
+        振り分け先が形で読めるのは linear と同じ流儀で、rank3 の重みに rank3 の scale が
+        付いていたら i8 側へ落ちている。
+        """
+        torch.manual_seed(0)
+        module = _TinyI4Census()
+
+        scales, overrides = export_sbv2._fake_quant("i4", module, export_sbv2.TARGET_VOICE)
+
+        assert set(overrides) == {"fc.weight", "wide.weight", "deep.weight"}
+        assert list(scales["deep.weight"].shape) == [4, 1]
+        assert list(scales["short.weight"].shape) == [4, 1, 1], "非適格 conv は i8 の keepdim 形"
+        assert list(scales["up.weight"].shape) == [1, 32, 1], "転置レイアウトの i8 軸は 1"
+        assert list(scales["table.weight"].shape) == [4, 1]  # embedding は i8（スコープ外）
+
+    def test_i4_skips_the_i8_pass_when_every_target_is_eligible(self):
+        """全対象が i4 適格な系列でも落ちない（`fake_quant_int8` の「対象 0 本」を踏まない）。
+
+        0 本が**数え上げの結果**であることを呼ぶ前に確かめる設計で、i8 側を「i4 に居ない」の
+        否定だけで書いていると conv1d だけで構成された系列（実物の `flow`）で export が死ぬ。
+        """
+        torch.manual_seed(0)
+        module = _TinyAllI4()
+
+        scales, overrides = export_sbv2._fake_quant("i4", module, export_sbv2.TARGET_FLOW)
+
+        assert set(scales) == {"pre.weight", "post.weight"}
+        assert set(overrides) == set(scales), "全本が i4 明示指定へ載る"
 
     def test_rounding_before_removing_the_weight_norm_leaves_the_grid(self):
         """MUST の裏付け: 丸めは `remove_weight_norm` の**後**（`ensure_dec_plain` の予告）。

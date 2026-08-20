@@ -209,7 +209,7 @@ Deno.test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（
   assertEquals(estimate.ioBytes, 64);
 });
 
-Deno.test("i4 適格は numel÷2 + group scale（linear / embedding の重みスロット限定）", () => {
+Deno.test("i4 適格は numel÷2 + group scale（展開経路を持つ重みスロット限定）", () => {
   const graph: GraphJson = {
     format: "karume-ir",
     version: 1,
@@ -269,11 +269,62 @@ Deno.test("i4 の embedding も packed のまま常駐する（ADR 0069 決定 5
   assertEquals(estimate.expandedWeightBytes, 0);
 });
 
+/** `conv1d(x, w, b)` 1 本のグラフ（w は i4 + rank 2 の group scale — 波 J-5b）。 */
+const i4Conv1dGraph = (groups: number): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["conv1d"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [1, 32, 6] }],
+  outputs: ["y"],
+  initializers: {
+    w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: 16 } },
+    b: { tensor: "m.b", storage: { dtype: "f32" } },
+  },
+  values: {
+    // 行長 = Cin/groups · K（groups == 1 なら 32·2 = 64 = g16 が 4 つ）
+    w: { dtype: "f32", shape: [4, 32 / groups, 2] },
+    b: { dtype: "f32", shape: [4] },
+    y: { dtype: "f32", shape: [1, 4, 5] },
+  },
+  nodes: [{
+    op: "conv1d",
+    ins: ["x", "w", "b"],
+    outs: ["y"],
+    attrs: { stride: 1, padding: 0, dilation: 1, groups },
+  }],
+});
+
+Deno.test("i4 の conv1d(groups==1) も packed のまま常駐する（ADR 0069 決定 5 の conv1d 追補）", () => {
+  const model = openGraph(i4Conv1dGraph(1), [
+    { name: "m.b", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
+    // scale は rank 非依存の rank 2 形 `[Cout, (Cin·K)/g]` = [4,4]（重みは rank 3）
+    { name: "m.s", dtype: "F32", shape: [4, 4], data: f32Bytes(new Array(16).fill(1)) },
+    { name: "m.w", dtype: "I4", shape: [4, 32, 2], data: new Uint8Array(128) },
+  ]);
+  const estimate = estimateSessionMemory(model);
+  // w numel 256 → 128 バイト + group scale 16×4 = 64
+  assertEquals(estimate.compressedWeightBytes, 192);
+  // b は f32 のまま 16
+  assertEquals(estimate.uncompressedWeightBytes, 16);
+  assertEquals(estimate.expandedWeightBytes, 0);
+});
+
+Deno.test("i4 の conv1d(groups>1) は適格外で f32 展開へ回る", () => {
+  // 直接カーネルに展開経路は無い（groups > 1 は igemm へ流れない — 波 J-5b）。
+  const model = openGraph(i4Conv1dGraph(2), [
+    { name: "m.b", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
+    { name: "m.s", dtype: "F32", shape: [4, 2], data: f32Bytes(new Array(8).fill(1)) },
+    { name: "m.w", dtype: "I4", shape: [4, 16, 2], data: new Uint8Array(64) },
+  ]);
+  const estimate = estimateSessionMemory(model);
+  assertEquals(estimate.compressedWeightBytes, 0);
+  assertEquals(estimate.uncompressedWeightBytes, 16);
+  // w numel 128 → f32 展開で 512 バイト
+  assertEquals(estimate.expandedWeightBytes, 128 * 4);
+});
+
 Deno.test("グラフ出力になった i4 は適格外で f32 展開へ回る", () => {
-  // 展開経路を持たない重みスロット（conv 系）との共有は**この層では作れない**（conv の重みは
-  // rank 3 以上で、embedding / linear と shape 契約が両立しない）ので、i4 の適格外の受け皿は
-  // グラフ出力の側で踏む。判定の 3 点自体は `i4EligibleInitializers` の単体
-  // （gpu_i4_weights_test.ts）が conv 込みで固定する。
   const graph: GraphJson = {
     format: "karume-ir",
     version: 1,

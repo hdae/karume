@@ -124,16 +124,13 @@ f32. The totals are f32 470.34MB → f16 237.57MB (50.5%) → **i8 121.81MB (25.
 companion scales are 505,576 B (0.42% of the compressed bytes).
 
 `--dtype i4` is a **mixed series** `outputs/series/sbv2-FN4-i4/<target>/`: eligible `nn.Linear`
-weights in group-32 i4 (ADR 0069), everything else — including linears whose quantization axis is
-not a multiple of 32 — in per-channel i8 exactly as in the i8 series. i4 only has an execution path
-for the linear weight slot, so a single-dtype i4 series cannot exist, and `dp` / `dec` (all conv,
-zero linear) fail loudly with "no eligible weights". Only `front` and `voice` are worth writing —
-they are the seats of the distribution's `w4` quant, and no other consumer reads this series.
-
-| Target  | i8 storage   | i4 storage   | i4 tensors | Elements rounded to i4 |
-| ------- | ------------ | ------------ | ---------: | ---------------------: |
-| `front` | 10,324,816 B | 10,268,024 B |          2 |                147,456 |
-| `voice` | 55,516,968 B | 55,366,504 B |          4 |                393,216 |
+and `nn.Conv1d` weights in group-32 i4 (ADR 0069 and its conv1d addendum — wave J-5b), everything
+else in per-channel i8 exactly as in the i8 series. A conv1d is eligible when `groups == 1` and
+its flattened row length `Cin·K` is a multiple of 32; depthwise convs, `ConvTranspose1d`
+(`dec`'s `ups` — transposed layout, permuted pack not worth 2.6MiB), and weights with indivisible
+rows stay i8, so a single-dtype i4 series cannot exist. Only `front` and `voice` are worth
+writing — they are the seats of the distribution's `w4` quant, and no other consumer reads this
+series.
 
 The gain is negligible on purpose: net_g carries only 6 linears (`enc_p.style_proj` /
 `enc_p.encoder.spk_emb_linear` in `front`, the 4 `flow_rev.flow.flows.<i>.enc.spk_emb_linear` in

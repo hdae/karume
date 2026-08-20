@@ -281,6 +281,24 @@ def restore_channel_rows(rows: torch.Tensor, weight: torch.Tensor, axis: int) ->
     return rows.reshape(moved).movedim(0, axis)
 
 
+def storage_rows(weight: torch.Tensor) -> torch.Tensor:
+    """格納形の rank2 畳み込み（**先頭次元 = 行・残りを平坦化**）= {@link channel_rows} の軸 0 版。
+
+    group scale の形は rank に依らずこの畳み込みで決まる（ADR 0069 決定 3 の rank 非依存化）:
+    `[weight.shape[0], (numel / weight.shape[0]) / group_size]`。linear `[O,I]` と
+    embedding `[V,D]` では「重みと同 rank・最終次元だけ group 数」と**同じ形**で、
+    conv1d `[Cout,Cin,K]` → `[Cout, (Cin·K)/g]` が唯一の新形（波 J-5b の追補）。
+
+    行の並びは**重みの連続メモリ順そのもの**（`[O,Cin,K]` の row-major = `[O, Cin·K]` の
+    平坦と同一バイト列）なので、pack のバイト列は rank に依らず 1 通りに決まる。
+
+    MUST: 行軸が先頭でない重み（`ConvTranspose1d` の `[Cin,Cout,K]`）をここへ通さない —
+    形は通るが行の並びがメモリ順と別物になる。i4 の適格集合（`emit.I4_WEIGHT_OPS`）が
+    conv_transpose1d を持たないことがその境界で、明示指定は emit が fail loudly で受ける。
+    """
+    return channel_rows(weight, 0)
+
+
 # ---- i4（K 方向 group symmetric）— ADR 0069 ---------------------------------
 
 #: 量子化幅の片側（**−8 は使わない**）。±7 に閉じると group の amax 要素が `q = ±7` に乗って
@@ -301,11 +319,14 @@ class Int4Report:
     `scales` のキーは i8 と同じ**モデル内 FQN**（`<module>.weight`）。値は
     {@link channel_rows} で畳んだ形の group scale = `[チャネル, group 数]` の F32。
 
+    形は rank に依らず {@link storage_rows} の rank2 規則（ADR 0069 決定 3・i8 の keepdim
+    broadcast 形とは受理集合が交わらない別の形）:
+
     - linear `W[O,I]` → `[O, I/group_size]` / embedding `W[V,D]` → `[V, D/group_size]` …
-      **重みと同 rank・最終次元だけ group 数**（ADR 0069 決定 3 の形 = emit が受ける形。
-      i8 の keepdim broadcast 形とは受理集合が交わらない別の形）
-    - conv 系 … 受容野を平坦化した rank 2 で、**重みと rank が合わない**（emit へは渡せない
-      — {@link fake_quant_int4} の docstring）
+      「重みと同 rank・最終次元だけ group 数」と同値
+    - conv1d `W[Cout,Cin,K]` → `[Cout, (Cin·K)/group_size]` … 受容野を平坦化した rank2
+      （**出荷可能形** — 波 J-5b で emit の適格へ追補。`emit.I4_WEIGHT_OPS`）
+    - conv2d / conv_transpose1d … 同じ rank2 だが i4 の適格 op ではない（測定専用）
     """
 
     #: FQN → scale（group 形 `[チャネル, group 数]`・F32）。
@@ -338,32 +359,40 @@ def grouped_view(weight: torch.Tensor, group_size: int, where: str) -> torch.Ten
 
 
 def group_size_of(weight: torch.Tensor, scale: torch.Tensor) -> int:
-    """group 形の scale から group 長を引く（`[…, groups]` → `in / groups`）。
+    """group 形の scale から group 長を引く（`[行, groups]` → `行長 / groups`）。
+
+    形の規則は {@link storage_rows} の rank2 形（ADR 0069 決定 3）— rank2 の重み
+    （linear / embedding）では「同 rank・最終次元だけ group 数」と同値で、rank3 の conv1d
+    `[Cout,Cin,K]` は `[Cout, (Cin·K)/g]` を受ける。
 
     MUST: group 長の源は**渡された scale** だけにする。別引数で受け取る形にすると
     「fake-quant が使った scale」と「格納で宣言する group 長」が独立に動けてしまい、
     食い違っても形と型は合うので沈黙誤値になる（ADR 0069 決定 3 の「scale 再計算禁止」と
     同じ穴）。格納側の宣言もここから引く（`emit._plan_i4`）。
     """
-    if scale.dim() != weight.dim() or list(scale.shape[:-1]) != list(weight.shape[:-1]):
+    if weight.dim() < 2 or scale.dim() != 2 or int(scale.shape[0]) != int(weight.shape[0]):
         raise QuantizeError(
             f"scale {list(scale.shape)} が重み {list(weight.shape)} の group 形"
-            "（同 rank・最終次元だけ group 数）でない"
+            "（rank2・行数 = 重みの先頭次元・最終次元 = group 数）でない"
         )
-    groups = int(scale.shape[-1])
-    in_axis = int(weight.shape[-1])
-    if groups < 1 or in_axis % groups:
-        raise QuantizeError(f"scale の group 数 {groups} が重みの量子化軸 {in_axis} を割り切らない")
-    return in_axis // groups
+    groups = int(scale.shape[1])
+    row_length = weight.numel() // int(weight.shape[0])
+    if groups < 1 or row_length % groups:
+        raise QuantizeError(f"scale の group 数 {groups} が重みの行長 {row_length} を割り切らない")
+    return row_length // groups
 
 
 def group_scale(weight: torch.Tensor, group_size: int, where: str = "重み") -> torch.Tensor:
-    """`scale = clamp(amax_group / 7, f32 tiny)` を group 形（`[…, in/group_size]`）で返す。
+    """`scale = clamp(amax_group / 7, f32 tiny)` を group 形（`[行, 行長/group_size]`）で返す。
+
+    行は {@link storage_rows}（先頭次元を除く平坦化）— rank2 の重みでは最終次元そのもので、
+    rank3 の conv1d は受容野 `Cin·K` を 1 行に畳む。最終次元（K）で割ると受容野をまたぐ
+    group が別の scale で丸められる。
 
     下限 clamp が要るのは全ゼロ group（`amax == 0`）— そのまま割ると NaN になる。clamp 後は
     `q = 0` に落ちて `q·scale = 0` が厳密に元値へ戻る（`channel_scale` と同文の 4bit 版）。
     """
-    grouped = grouped_view(weight, group_size, where)
+    grouped = grouped_view(storage_rows(weight), group_size, where)
     amax = grouped.abs().amax(dim=-1)
     return torch.clamp(amax / INT4_MAX, min=torch.finfo(torch.float32).tiny)
 
@@ -375,8 +404,12 @@ def quantize_to_int4(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     同文 — ここで amax から引き直すと f32 の丸めで 1ulp 動きうる）。torch に 4bit の器は
     無いので値は int8 に載せる。**1 バイトへ 2 要素を詰めるのは格納側**（`emit.pack_int4`）で、
     ここは pack 順を知らない。
+
+    rank3 以上（conv1d `[Cout,Cin,K]`）は {@link storage_rows} で行へ畳んでから group に割る
+    — 最終次元（K）で割ると受容野をまたぐ group が別の scale で丸められる。
     """
-    grouped = grouped_view(weight, group_size_of(weight, scale), "重み")
+    rows = storage_rows(weight)
+    grouped = grouped_view(rows, group_size_of(weight, scale), "重み")
     quantized = torch.round(grouped / scale.unsqueeze(-1)).clamp_(-INT4_MAX, INT4_MAX)
     return quantized.reshape(weight.shape).to(torch.int8)
 
@@ -387,7 +420,8 @@ def dequantize_int4(quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tenso
     fake-quant（下）と emit の逆変換ビット一致門（ADR 0069 決定 4 ③）が**同じ経路**を通る
     ための共通実装 — 別実装にすると「丸めに使った式」と「格納を検算する式」が独立に動く。
     """
-    grouped = grouped_view(quantized.to(torch.float32), group_size_of(quantized, scale), "量子化値")
+    rows = storage_rows(quantized.to(torch.float32))
+    grouped = grouped_view(rows, group_size_of(quantized, scale), "量子化値")
     return (grouped * scale.unsqueeze(-1)).reshape(quantized.shape)
 
 
@@ -404,12 +438,15 @@ def fake_quant_int4(
     {@link QUANT_MODULE_TYPES}（全 5 種）まで広げられる — ただし広げてよいのは**品質測定**
     まで。bias も norm 系 weight も触らないのは全対象で同じ。
 
-    MUST: **emit へ渡せるのは linear と embedding 分の scale だけ**（`emit._plan_i4` の適格は
-    消費 op が `emit.I4_WEIGHT_OPS` に載ること）。embedding は `[V,D]` で {@link channel_rows} が
-    恒等なので group scale も重みと同 rank になり、そのまま格納できる。conv 系は受容野を
-    平坦化した rank 2 の scale になり、そもそも重みと rank が合わない（渡すと emit 側が
-    fail loudly する）。広げた対象は「その方式ならどこまで戻るか」を測る側のためのもので、
-    出荷経路ではない（測定専用の方式群は `quant_methods`）。
+    MUST: **emit へ渡せるのは `emit.I4_WEIGHT_OPS`（linear / embedding / conv1d）分の scale
+    だけ**（`emit._plan_i4` の適格は消費 op がそこに載ること）。scale の形は rank に依らず
+    {@link storage_rows} の rank2 規則で 1 通りに決まる（{@link Int4Report}）。conv2d と
+    `ConvTranspose1d` は i4 の実行経路が無いので渡しても emit が fail loudly する — 広げた
+    対象は「その方式ならどこまで戻るか」を測る側のためのもので、出荷経路ではない
+    （測定専用の方式群は `quant_methods`）。
+
+    MUST: conv1d の group の並びは**重みの連続メモリ順**（{@link storage_rows}）— 行軸が
+    先頭でない `ConvTranspose1d` は測定でしか使えない（格納すると pack 順と食い違う）。
 
     group の軸は各 op の「in 軸」を一般化する（{@link channel_rows}）— linear は in 軸、
     conv は出力チャネルごとの受容野（`Cin·K` / `Cin·Kh·Kw`）、`ConvTranspose1d` は転置

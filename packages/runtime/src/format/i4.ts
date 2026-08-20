@@ -20,12 +20,45 @@ export class I4Error extends Error {
 }
 
 /**
+ * i4 の量子化行の長さ = **先頭次元を行・残りを平坦化**した長さ（`numel / shape[0]`）。
+ *
+ * 適格 op の `channel_rows`（エクスポータ `karume/quantize.py`）はどれもこの形
+ * （linear `[O,I]` → `I` / embedding `[V,D]` → `D` / conv1d `[O,Cin,K]` → `Cin·K`）で、
+ * rank 2 の重みでは「最終次元」と一致する。
+ */
+const rowLength = (shape: readonly number[]): number => numel(shape) / shape[0];
+
+/**
+ * group scale の論理形 = **rank 非依存の rank 2 規則**
+ * `[shape[0], (numel / shape[0]) / groupSize]`（ADR 0069 決定 3 / 波 J-5b の一般化）。
+ *
+ * rank 2 の重み（linear `[O,I]` / embedding `[V,D]`）では従来の「同 rank・最終次元だけ
+ * group 数」と**同値**なので、既存資産の検査結果は 1 件も変わらない。conv1d `[O,Cin,K]` →
+ * `[O, (Cin·K)/g]` が唯一の新しい形。
+ *
+ * MUST: 検査側（format/container.ts）と展開側（{@link decodeI4}）が**この 1 本を共有する**
+ * — 2 箇所に規則を書くと、受理した形と展開が読む形が静かに食い違う。
+ * NOTE: 割り切れない / 記号次元は非整数・NaN のまま返す（呼び出し側が「形が違う」として
+ * fail loudly にする — ここで投げると検査側のエラー型が混ざる）。
+ */
+export const groupScaleShape = (
+  shape: readonly (number | string)[],
+  groupSize: number,
+): readonly number[] => {
+  const dims = shape.map(Number);
+  return [dims[0], rowLength(dims) / groupSize];
+};
+
+/**
  * packed 4bit のバイト列を group 形 scale で f32 へ展開する。
  *
- * `scaleShape` は重みと**同 rank・最終次元だけ group 数**（`lastDim / groupSize`）の group 形
- * （ADR 0069 決定 3 — i8 の keepdim broadcast 形とは受理集合が交わらない別物。取り違えは
- * ここで fail loudly にする — 黙って broadcast 解釈すると group scale が 1 チャネル 1 値として
- * 配られる沈黙誤値になる）。
+ * `scaleShape` は {@link groupScaleShape} の rank 2 形（ADR 0069 決定 3 — i8 の keepdim
+ * broadcast 形とは受理集合が交わらない別物。取り違えはここで fail loudly にする — 黙って
+ * broadcast 解釈すると group scale が 1 チャネル 1 値として配られる沈黙誤値になる）。
+ *
+ * MUST: nibble の並びは**平坦メモリ順**（`[O,Cin,K]` row-major = `[O, Cin·K]` 平坦と同一
+ * バイト列）。行 = 先頭次元・group = 行内の連続 `groupSize` 要素で、GPU 側の平坦添字
+ * （`arow·(k>>shift) + (ak0>>shift)`）と同じ式になる。
  */
 export const decodeI4 = (
   bytes: Uint8Array<ArrayBuffer>,
@@ -44,14 +77,14 @@ export const decodeI4 = (
         `（numel / 2 = ${count / 2} バイトが要る）`,
     );
   }
-  const lastDim = shape[shape.length - 1];
-  if (!Number.isInteger(groupSize) || groupSize < 1 || lastDim % groupSize !== 0) {
-    throw new I4Error(`group_size ${groupSize} が量子化軸 ${lastDim} を割り切らない`);
+  const width = rowLength(shape);
+  if (!Number.isInteger(groupSize) || groupSize < 1 || width % groupSize !== 0) {
+    throw new I4Error(`group_size ${groupSize} が量子化軸（行長）${width} を割り切らない`);
   }
-  const groups = lastDim / groupSize;
-  const expected = [...shape.slice(0, -1), groups];
+  const groups = width / groupSize;
+  const expected = groupScaleShape(shape, groupSize);
   if (
-    scaleShape.length !== shape.length ||
+    scaleShape.length !== expected.length ||
     scaleShape.some((dim, axis) => dim !== expected[axis])
   ) {
     throw new I4Error(
@@ -66,7 +99,7 @@ export const decodeI4 = (
     );
   }
   const out = new Float32Array(count);
-  const rows = lastDim === 0 ? 0 : count / lastDim;
+  const rows = width === 0 ? 0 : count / width;
   let i = 0;
   for (let row = 0; row < rows; row += 1) {
     const scaleBase = row * groups;

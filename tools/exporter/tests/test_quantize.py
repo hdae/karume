@@ -632,11 +632,70 @@ class TestInt4InAxisPerOpType:
             fake_quant_int4(Weighted(), group_size=32, op_types=(nn.LayerNorm,))
 
 
+#: `[Cout=1, Cin=4, K=2]` の conv1d 重み — 平坦行は `[7,1,2,0, 14,3,0,0]`（`Cin·K` = 8）。
+#: group 4 で切ると amax は 7 と 14 = scale 1 と 2 になり、**K（=2）で切った場合と group 境界が
+#: 一致しない**ので、畳み方の取り違えが値で露見する。
+CONV_ROW_WEIGHT: tuple[tuple[tuple[float, ...], ...], ...] = (
+    ((7.0, 1.0), (2.0, 0.0), (14.0, 3.0), (0.0, 0.0)),
+)
+
+
+class TestInt4StorageRowsForRank3:
+    """格納の scale 規則は **rank 非依存**（ADR 0069 決定 3）— `[先頭次元, 行長/g]` の rank2。
+
+    conv1d `[Cout,Cin,K]` が唯一の新形（波 J-5b）。行は**連続メモリ順**の `Cin·K` で、
+    最終次元（K）で切ると受容野をまたぐ group が別の scale で丸められる（形もバイト長も
+    合ったままの沈黙誤値）。
+    """
+
+    def test_the_group_scale_of_a_conv1d_weight_is_rank2(self):
+        report = fake_quant_int4(conv1d_with_groups(), group_size=3, op_types=(nn.Conv1d,))
+
+        scale = report.scales["weight"]
+        assert list(scale.shape) == [2, 2], "重みは rank3 でも scale は rank2"
+
+    def test_the_row_is_flattened_in_contiguous_memory_order(self):
+        """期待値は手書き — 実装の畳み込みを期待値側で呼ぶと取り違えたまま緑になる。
+
+        平坦行 `[7,1,2,0 | 14,3,0,0]` の group scale は 1 と 2 で、`3.0` は 2 の格子へ
+        `round(3/2)·2 = 4` に落ちる。K（=2）で切る実装なら行長 8 が group 4 で割れず落ち、
+        列優先で畳む実装なら `3.0` が amax 7 の group に入って動かない。
+        """
+        weight = torch.tensor(CONV_ROW_WEIGHT)
+
+        scale = group_scale(weight, 4)
+
+        assert torch.equal(scale, torch.tensor([[1.0, 2.0]]))
+        assert torch.equal(
+            dequantize_int4(quantize_to_int4(weight, scale), scale),
+            torch.tensor((((7.0, 1.0), (2.0, 0.0), (14.0, 4.0), (0.0, 0.0)),)),
+        )
+
+    def test_the_round_trip_of_a_rank3_weight_is_bit_identical(self):
+        """emit の逆変換ビット一致門（ADR 0069 決定 4 ③）が rank3 でも立つ条件。"""
+        module = conv1d_with_groups()
+
+        report = fake_quant_int4(module, group_size=3, op_types=(nn.Conv1d,))
+
+        weight, scale = module.weight, report.scales["weight"]
+        assert weight.dim() == 3
+        assert torch.equal(dequantize_int4(quantize_to_int4(weight, scale), scale), weight)
+
+
 class TestInt4GroupSize:
     """group 長は**渡された scale の形**から引く（別引数で受けると宣言と実体が割れる）。"""
 
     def test_the_group_size_comes_from_the_scale_shape(self):
         assert group_size_of(torch.zeros(3, 64), torch.zeros(3, 2)) == 32
+
+    def test_the_group_size_of_a_rank3_weight_comes_from_the_flattened_row(self):
+        """`[3,2,16]` の行長は 32（`Cin·K`）— 最終次元 16 ではない。"""
+        assert group_size_of(torch.zeros(3, 2, 16), torch.zeros(3, 2)) == 16
+
+    def test_a_scale_with_the_same_rank_as_a_rank3_weight_fails_loudly(self):
+        """「重みと同 rank」は rank2 の重みでしか成り立たない規則（rank3 は rank2 の scale）。"""
+        with pytest.raises(QuantizeError, match="group 形"):
+            group_size_of(torch.zeros(3, 2, 16), torch.zeros(3, 2, 1))
 
     def test_a_scale_with_a_different_rank_fails_loudly(self):
         with pytest.raises(QuantizeError, match="group 形"):

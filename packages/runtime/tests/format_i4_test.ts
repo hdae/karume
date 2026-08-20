@@ -65,6 +65,36 @@ Deno.test("decodeI4: 語彙表 [V,D] は適格外でもそのまま展開でき�
   assertEquals([...decoded], expected);
 });
 
+Deno.test("decodeI4: conv1d の rank 3 重みは rank 2 scale で展開できる（行 = Cout・行長 = Cin·K）", () => {
+  // 波 J-5b: 適格 op の `channel_rows` はどれも「先頭次元 = 行・残りを平坦化」で、scale は
+  // rank に依らず rank 2 `[shape[0], (numel / shape[0]) / g]`。`[2,4,4]`（行長 16）× g8 →
+  // scale `[2,2]`。nibble の並びは平坦メモリ順（`[O,Cin,K]` row-major = `[O, Cin·K]` 平坦）
+  // なので、行 / group の取り違えが scale の値差でそのまま出る形にする。
+  const shape = [2, 4, 4];
+  const groupSize = 8;
+  const count = 2 * 4 * 4;
+  const q = Array.from({ length: count }, (_, i) => ((i % 15) - 7));
+  const bytes = new Uint8Array(count / 2);
+  for (const [i, value] of q.entries()) {
+    const u = value + 8;
+    bytes[i >> 1] |= (i & 1) === 1 ? u << 4 : u;
+  }
+  const scale = Float32Array.from([0.5, 0.25, 1, 2]);
+  const decoded = decodeI4(bytes, shape, scale, [2, 2], groupSize);
+  const expected = q.map((value, i) => {
+    const row = Math.floor(i / 16);
+    const group = Math.floor((i % 16) / groupSize);
+    return Math.fround(value * scale[row * 2 + group]);
+  });
+  assertEquals([...decoded], expected);
+  // 旧規則の形（重みと同 rank・最終次元だけ group 数 = `[2,4,1]`）は受理しない
+  assertThrows(
+    () => decodeI4(bytes, shape, Float32Array.from([1, 1, 1, 1, 1, 1, 1, 1]), [2, 4, 1], 4),
+    I4Error,
+    "group 形",
+  );
+});
+
 Deno.test("decodeI4: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と同値）", () => {
   // 0.1 は f32 で丸められる値（format/i8.ts の同型テストと同じ論証 — q は整数で f32 厳密、
   // 積は f64 で厳密なので 1 回丸めが f32 乗算の正しい丸めと一致する）。

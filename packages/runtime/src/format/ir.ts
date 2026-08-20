@@ -44,7 +44,8 @@ type IrStorage = {
   /**
    * 量子化格納の scale テンソルの safetensors キー（`dtype: "i8"` / `"i4"` では**必須** —
    * ADR 0019 / 0069）。実体は F32 で、形は i8 が「重みと同 rank の keepdim broadcast」・
-   * i4 が「最終次元だけ group 数に置換」（検証は format/container.ts）。
+   * i4 が「rank 非依存の rank 2 `[shape[0], (numel / shape[0]) / group_size]`」
+   * （検証は format/container.ts）。
    */
   readonly scale?: string;
   /** group 量子化の group 長（`dtype: "i4"` では**必須**・2 冪かつ 16 以上 — ADR 0069 決定 2）。 */
@@ -612,9 +613,11 @@ const checkDefinitions = (
 /**
  * group 量子化格納（i4）の宣言 shape と group 長の整合（ADR 0069 決定 2）。
  *
- * 量子化軸は**最終次元**（linear の in 軸）で、そこが `group_size` で割り切れることが MUST。
- * 端数 group を許すと最後の group だけ scale の担当範囲が短くなり、行境界が語境界からずれて
- * 平坦添字の展開が黙って別の値を出す（端数を作らない制約で整列問題そのものを消す設計）。
+ * 量子化軸は「**先頭次元を行・残りを平坦化**した行長」（`numel / shape[0]` — rank 2 の重みでは
+ * 最終次元そのもの。conv1d `[O,Cin,K]` では `Cin·K`）で、そこが `group_size` で割り切れる
+ * ことが MUST。端数 group を許すと最後の group だけ scale の担当範囲が短くなり、行境界が
+ * 語境界からずれて平坦添字の展開が黙って別の値を出す（端数を作らない制約で整列問題
+ * そのものを消す設計）。
  */
 const checkGroupQuantizedShape = (
   name: string,
@@ -627,13 +630,18 @@ const checkGroupQuantizedShape = (
   if (groupSize === undefined) {
     throw new IrError(`graph.initializers['${name}']: 格納 i4 なのに group_size が無い`);
   }
-  const lastDim = value.shape[value.shape.length - 1];
-  if (typeof lastDim !== "number") {
-    throw new IrError(`graph.values['${name}']: 格納 i4 の initializer に量子化軸が無い（rank 0）`);
-  }
-  if (lastDim % groupSize !== 0) {
+  if (value.shape.length === 0 || value.shape.some((dim) => typeof dim !== "number")) {
     throw new IrError(
-      `graph.values['${name}']: 格納 i4 の最終次元 ${lastDim} が group_size ${groupSize} で割り切れない（ADR 0069 決定 2）`,
+      `graph.values['${name}']: 格納 i4 の initializer は数値 shape の rank 1 以上が要る`,
+    );
+  }
+  const dims = value.shape.map(Number);
+  const width = dims.reduce((count, dim) => count * dim, 1) / dims[0];
+  if (width % groupSize !== 0) {
+    throw new IrError(
+      `graph.values['${name}']: 格納 i4 の行長 ${width}（= numel / ${
+        dims[0]
+      }）が group_size ${groupSize} で割り切れない（ADR 0069 決定 2）`,
     );
   }
 };
