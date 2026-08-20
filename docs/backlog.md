@@ -81,11 +81,12 @@ J-3（g 軸スイープ）が重いため、その前にリリースとモデル
   〈格納形の語彙〉で、丸め方式はモデルカードの quant 備考に記載 — 2026-08-20 命名裁定）— 実装中
 - **K-3: SBV2 トーン注入席**（ADR [0072](decisions/0072-sbv2-text-injection.md) — overlay
   辞書 + given_tone + `analyzeProsody`。非 breaking・0.4.0 同乗）— 実装中
-- **K-4: 4 リポの dist 再生成 + HF 公開**（fn / jvnv / irodori / anima ≈ 16.7GB。**FN は
-  出典表記つきで公開へ変更**〈2026-08-20 ユーザー裁定 — ADR 0041 の「クローズド運用」を
-  変更・出典 = rufflet17/voice_models・カード機構は実装済み〉。irodori / anima は既存 w8a8
-  系のまま — GPTQ/i4 席は J-4 後に quant 差分追加。断片化対策 = runbook §2 MUST・
-  ライセンス確認 = 人間ゲート → ユーザー Go でアップロード）
+- **K-4: dist 再生成 + HF 公開 — 対象は jvnv / irodori / anima の 3 リポ（≈14GB）**。
+  **FN は公開保留**（2026-08-20 再裁定 — 一時「出典表記つき公開」に振れたが、配布者の素性と
+  再配布可否が書面で確認できないため保留へ戻した。カード・notices は最小記述化済み・復活
+  条件は parked 節）。irodori / anima は既存 w8a8 系のまま — GPTQ/i4 席は J-4 後に quant
+  差分追加。断片化対策 = runbook §2 MUST・ライセンス確認 = 人間ゲート消化済み →
+  ユーザー Go でアップロード
 - **K-5: pin 焼き込み → JSR 0.4.0**（ADR [0073](decisions/0073-models-source-pin.md) —
   アップロード後に SHA を焼き、3 パッケージ lockstep で publish。**PyPI は未リリースのまま**
   〈2026-08-20 確認 — PyPI に karume は存在しない・ACTIVE_DESIGN の旧記述は誤りとして訂正〉）
@@ -169,6 +170,10 @@ autoregressive 波の**残項目（波外へ送り）**:
   導出・runtime 適合 fixture（packages/runtime/tests/fixtures/）の共有・goldens の出力先・
   uv workspace の解体。復活 = ユーザー裁定。
 
+- **karume-sbv2-fn の HF 公開**（2026-08-20 保留裁定 — 波 K で一時「出典表記つき公開」へ
+  振れたが撤回）。upstream の書面条件 = Booth 頒布ページの「商用可・クレジット不要・マージ
+  自由」のみで**再配布は未言及**・配布者の素性も未確認。復活 = 配布者への再配布可否の確認、
+  またはユーザーの再裁定。ローカル配布形・カード機構は維持（上げる作業だけが保留）
 - hub Range 並列 + prefetch — 復活 = 断片化リポの再来（perf L-3）
 - params / bind group キャッシュ（ADR 0032 案 2）・GPU timestamp 推定源化・全面 f16（案γ）・
   Vᵀ+列量子化融合・2048px DiT attention メモリ工事・SBV2 NFC チップ・f32 anima 系列再生成

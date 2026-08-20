@@ -51,9 +51,10 @@
   [0071](../docs/decisions/0071-manifest-v3-shards.md) — 公開前締切ぶんのみ・API 工事 4 件は
   残置）②SBV2 既定 quant = **`w8-bert4` へ再裁定**（ADR 0039 — w4 はテンション差が残るため
   品質優先・w4 は opt-in・丸め方式はカード備考へ）③トーン注入席（ADR
-  [0072](../docs/decisions/0072-sbv2-text-injection.md) — overlay + given_tone）④4 リポ
-  dist 再生成 → ライセンス人間ゲート → HF 公開（**FN も出典表記つき公開へ** — 断片化対策
-  MUST）⑤pin 焼き込み（ADR
+  [0072](../docs/decisions/0072-sbv2-text-injection.md) — overlay + given_tone）④dist
+  再生成 → ライセンス人間ゲート消化 → HF 公開は **jvnv / irodori / anima の 3 リポ**
+  （**FN は公開保留** — 再配布の書面根拠なし・backlog parked。断片化対策 MUST）⑤pin
+  焼き込み（ADR
   [0073](../docs/decisions/0073-models-source-pin.md)）→ JSR 0.4.0。手順の正本 =
   [release-runbook](../docs/release-runbook.md)（新設）。
 

@@ -24,10 +24,11 @@ models パッケージが読む内容が黙って変わる**（quant 席の増�
 
 各ファミリ config に `<FAMILY>_DEFAULT_SOURCE = { repo, revision: "<40hex>" } as const
 satisfies HubRepoRef` を置き、サブパス export で公開する。対象 = 公開リポが実在する
-ファミリのみ（sbv2 → `hdae/karume-sbv2-jvnv`（既定）+ `SBV2_FN_SOURCE` =
-`hdae/karume-sbv2-fn`・irodori → `hdae/karume-irodori-v4-small`・anima →
-`hdae/karume-anima-turbo`）。公開リポの無いファミリ（birefnet 等）は据え置き（ref 必須の
-まま）。これは **models が公式既定リポを知る初の結び付き**（従来は完全リポ非依存）—
+ファミリのみ（sbv2 → `hdae/karume-sbv2-jvnv`（既定）・irodori →
+`hdae/karume-irodori-v4-small`・anima → `hdae/karume-anima-turbo`）。公開リポの無い
+ファミリ（birefnet 等）は据え置き（ref 必須のまま）。fn の pin 定数は**作らない** —
+`karume-sbv2-fn` の公開自体が保留のため（2026-08-20 再裁定・backlog parked。公開されたら
+`SBV2_FN_SOURCE` として追加）。これは **models が公式既定リポを知る初の結び付き**（従来は完全リポ非依存）—
 利用者向けの既定体験（`fromPretrained()` だけで動く）を優先する裁定。
 
 ### 2. `fromPretrained` の ref を optional 化（pin のあるファミリのみ）
