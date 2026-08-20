@@ -45,6 +45,17 @@ ANIMA_METADATA = CardMetadata(
 
 ANIMA_TITLE = "Anima Turbo — Karume"
 
+#: 上流ライセンス §3(b) が**逐語での掲示**を求める Attribution Notice（1 字も変えない）。
+#: 配布リポ直下の `NOTICE.md`（`anima/distribution.py`）とこのカードの両方がここを引く —
+#: 同じ法的文言を 2 箇所で独立に持つと、片方だけが条件を満たさない形へ静かに割れる。
+ATTRIBUTION_NOTICE = (
+    "The CircleStone Model is licensed by CircleStone Labs LLC under the CircleStone"
+    " Non-Commercial License. Copyright CircleStone Labs LLC.\n"
+    "IN NO EVENT SHALL CIRCLESTONE LABS LLC BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,"
+    " WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION"
+    " WITH USE OF THIS MODEL."
+)
+
 #: `resolution` ノブの受理集合を 1 行で言ったもの（**manifest に無い事実** — 受理集合の正本は
 #: `packages/models/src/anima/resolution.ts` で、ADR 0038 §2 により manifest には書かない）。
 #: 刻み = 空間圧縮 8 × patch 2、下限は VAE タイル decoder の latent 64（= 512px）、上限は
@@ -103,6 +114,31 @@ def _merged_lora() -> list[str]:
         "Permissions listed on the source page (as of retrieval):",
         "",
         *(f"- `{name}`: {value}" for name, value in LORA_PERMISSIONS),
+    ]
+
+
+def _license() -> list[str]:
+    """ライセンス節 — 上流の再配布条件（§3(a) / (b) / (d)）を配布形のどこで満たしているか。
+
+    Notice の本文はカードにも**逐語で**出す: §3(b) は「Distribution と並べて目立つように
+    掲示する」ことを求めており、HF のリポジトリで最初に読まれるのはこのカードなので、
+    同梱の `NOTICE.md` を指すだけでは掲示したことにならない。
+    """
+    return [
+        "## License",
+        "",
+        "The weights derive from the CircleStone Anima base model and stay under the CircleStone",
+        "Non-Commercial License (non-commercial use only). This repository ships `LICENSE.md`"
+        " (the full",
+        "license text) and `NOTICE.md` (this attribution plus the list of modifications).",
+        "",
+        ATTRIBUTION_NOTICE,
+        "",
+        f"- Baked-in LoRA: the official {LORA_NAME} ([source]({LORA_SOURCE})), folded into the"
+        " weights at export.",
+        "- This is not an official product of CircleStone Labs LLC, and it is not endorsed,"
+        " approved or",
+        "  validated by CircleStone Labs LLC.",
     ]
 
 
@@ -191,6 +227,8 @@ def render_model_card(manifest: Mapping[str, Any], repo: str) -> str:
             _overview(manifest),
             [""],
             _merged_lora(),
+            [""],
+            _license(),
             [""],
             models(manifest),
             [""],

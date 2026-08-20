@@ -17,7 +17,13 @@ from typing import Any
 
 import pytest
 
-from anima.card import SUPPORTED_PIPELINE, render_model_card
+from anima.card import (
+    ATTRIBUTION_NOTICE,
+    LORA_NAME,
+    LORA_SOURCE,
+    SUPPORTED_PIPELINE,
+    render_model_card,
+)
 
 #: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
 REPO = "hdae/fake-repo"
@@ -142,6 +148,7 @@ class TestSections:
         assert headings == [
             "## What is this",
             "## Baked-in LoRA",
+            "## License",
             "## Models",
             "## Usage",
             "## Model: turbo",
@@ -163,6 +170,32 @@ class TestSections:
         assert "circlestone_labs" in card
         assert "https://civitai.com/models/2560840?modelVersionId=2979642" in card
         assert "1b55e40bdb1d0e5a78cb498f245fccfdaae97823265db957d2aabdcf4cd3caf1" in card
+
+    def test_the_license_section_displays_the_attribution_notice_verbatim(self, card: str) -> None:
+        """§3(b) は掲示を求める — HF で最初に読まれるカードに逐語で出す（要約は掲示でない）。"""
+        assert ATTRIBUTION_NOTICE in card
+
+    def test_the_license_section_points_at_the_two_files_shipped_alongside(
+        self, card: str
+    ) -> None:
+        """§3(a) のライセンス文と §3(d) の Notice は同梱物 — カードはその在り処を言う。"""
+        _, _, license_section = card.partition("## License")
+        section, _, _ = license_section.partition("## Models")
+        assert "`LICENSE.md`" in section
+        assert "`NOTICE.md`" in section
+
+    def test_the_license_section_names_the_baked_in_lora_and_denies_endorsement(
+        self, card: str
+    ) -> None:
+        """§3(d)(i) / (iii) — 何を焼いたかと、公式製品でないことを帰属の隣で言う。"""
+        _, _, license_section = card.partition("## License")
+        section, _, _ = license_section.partition("## Models")
+        assert f"the official {LORA_NAME} ([source]({LORA_SOURCE}))" in section
+        # 折り位置に依らず**文**で見る（法的文言の単位は文）。
+        assert (
+            "not an official product of CircleStone Labs LLC, and it is not endorsed, approved or"
+            " validated by CircleStone Labs LLC." in " ".join(section.split())
+        )
 
     def test_it_shows_the_minimal_typescript_entry_point(self, card: str) -> None:
         assert f'AnimaPipeline.fromPretrained("{REPO}", {{' in card

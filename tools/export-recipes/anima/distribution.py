@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from anima.card import LORA_SHA256, render_model_card
+from anima.card import ATTRIBUTION_NOTICE, LORA_NAME, LORA_SHA256, LORA_SOURCE, render_model_card
 from karume.dist import (
     Artifact,
     DistError,
@@ -43,6 +43,48 @@ ANIMA_TOKENIZER_SERIES = "anima-demo"
 #: 焼き込んだ LoRA の帰属を残すファイル（系列のターゲット直下）。系列レイアウトの綴りは
 #: 読み手（ここ）が持ち、書き手（`anima/export.py`）はここから引く — 2 箇所で独立に動かさない。
 LORA_PROVENANCE_FILE = "lora_provenance.json"
+
+#: 上流の重みライセンス原文（この recipe の隣に逐語で置いてある）。配布は Derivative の
+#: Distribution なので §3(a)（ライセンスのコピーを第三者へ提供する）が掛かる — 要約や
+#: 書き換えでは条件を満たさないため、**1 バイトも変えずに**配布リポ直下の `LICENSE.md` として
+#: 出す。`Path(__file__)` 基準で引くのは、cwd にも系列の置き場にも依存しないため。
+LICENSE_SOURCE_PATH = Path(__file__).parent / "circlestone_license.txt"
+
+#: 配布リポ直下の `NOTICE.md`。§3(b)（Attribution Notice の掲示）+ §3(d)(i)（改変した旨を
+#: Notice に含める）+ §3(d)(iii)（公式製品と誤認させない）を 1 枚で満たす。逐語ブロックは
+#: {@link ATTRIBUTION_NOTICE}（`anima/card.py` が正本）で、残りは Karume 側の事実の記述。
+NOTICE_MARKDOWN = (
+    "\n".join(
+        [
+            "# Notice",
+            "",
+            "## Attribution",
+            "",
+            ATTRIBUTION_NOTICE,
+            "",
+            "## Modifications",
+            "",
+            "This distribution is a Derivative of the CircleStone Anima model."
+            " It has been modified",
+            "as follows:",
+            "",
+            f"- The official {LORA_NAME} ({LORA_SOURCE}) was baked into the weights at export.",
+            "- The weights were converted into the container format of the WebGPU inference"
+            " runtime Karume",
+            "  (a single safetensors file holding the weights plus an inference graph in"
+            " `__metadata__`).",
+            "- An int8-quantized series of the transformer was added alongside the f16 one.",
+            "",
+            "## Not an official product",
+            "",
+            "This is not an official product of CircleStone Labs LLC, and it is not endorsed,",
+            "approved or validated by CircleStone Labs LLC.",
+            "",
+            "The full license text is distributed alongside this repository as LICENSE.md.",
+        ]
+    )
+    + "\n"
+)
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
 #: 役割名でだけ引くので、綴りが 2 箇所で独立に動くことは起きない。
@@ -256,6 +298,18 @@ def anima_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return anima_plan(anima_sources(series_dir, model), model)
 
 
+def root_files() -> dict[str, str]:
+    """配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
+
+    ライセンス原文は recipe に置いた現物（{@link LICENSE_SOURCE_PATH}）を**逐語で**読む —
+    ここで整形や差し替えをすると §3(a) の「このライセンスのコピー」ではなくなる。
+    """
+    return {
+        "LICENSE.md": LICENSE_SOURCE_PATH.read_text(encoding="utf-8"),
+        "NOTICE.md": NOTICE_MARKDOWN,
+    }
+
+
 #: `--pipeline anima` の 1 行（ドライバが core の PIPELINES へ合成する）。
 PIPELINE = Pipeline(
     default_model=ANIMA_MODEL_NAME,
@@ -264,4 +318,7 @@ PIPELINE = Pipeline(
     plan=anima_dist_plan,
     # 帰属は 1 通りだけ（LoRA を焼いた base 1 本）— 選択肢が無いので省略で通る。
     card_profiles={"anima": render_model_card},
+    # 上流ライセンスの再配布条件（§3）は配布リポ 1 つに掛かるので、読みも組み立ての回数に
+    # よらず**ここで 1 回**。
+    root_files=root_files(),
 )

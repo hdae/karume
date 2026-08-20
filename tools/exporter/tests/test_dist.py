@@ -409,6 +409,69 @@ class TestFamilyAssembly:
             assemble_family(plans, tmp_path / "models" / "family", "A")
 
 
+class TestRootFiles:
+    """配布リポ直下の法的テキスト（上流ライセンスが再配布の条件として要求するファイル）。
+
+    manifest はこれを宣言しない（どのモデルにも属さず、配布リポそのものに掛かる）ので、
+    宣言外ファイル検査の例外として名指しで通す席になる。
+    """
+
+    def test_it_writes_them_at_the_repository_root_and_verifies(self, tmp_path: Path) -> None:
+        """直下へ UTF-8 で置かれ、その状態のまま `verify_dist` を通る。"""
+        out_dir = tmp_path / "models" / "legal"
+        texts = {"LICENSE.md": "ライセンス原文\n", "NOTICE.md": "notice\n"}
+        assemble_family(
+            [_synthetic_plan("A", "w/model.safetensors", b"weights")],
+            out_dir,
+            "A",
+            root_files=texts,
+        )
+
+        for name, text in texts.items():
+            assert (out_dir / name).read_text(encoding="utf-8") == text
+        # manifest は 1 つも宣言していない（資産ではない）が、検査は通る。
+        assert sorted(verify_dist(out_dir)) == ["A/w/model.safetensors"]
+
+    def test_it_refuses_a_name_outside_the_legal_seat_before_writing_anything(
+        self, tmp_path: Path
+    ) -> None:
+        """席は法的テキストの 2 つだけ — 直下は「宣言外ファイルの不在」の網が届かない場所。"""
+        out_dir = tmp_path / "models" / "smuggled"
+        with pytest.raises(DistError, match="法的テキスト専用の席"):
+            assemble_family(
+                [_synthetic_plan("A", "w/model.safetensors", b"weights")],
+                out_dir,
+                "A",
+                root_files={"LICENSE.md": "ok", "config.json": "{}"},
+            )
+        assert not out_dir.exists()
+
+    def test_a_family_without_them_still_refuses_an_undeclared_root_file(
+        self, tmp_path: Path
+    ) -> None:
+        """例外は**その 2 つの名前**だけに掛かる — 席を使わない family の網は緩まない。"""
+        out_dir = tmp_path / "models" / "plain"
+        assemble_family([_synthetic_plan("A", "w/model.safetensors", b"weights")], out_dir, "A")
+        (out_dir / "leftover.safetensors").write_bytes(b"stale")
+
+        with pytest.raises(DistError, match=r"leftover\.safetensors"):
+            verify_dist(out_dir)
+
+    def test_the_exemption_does_not_reach_a_subdirectory(self, tmp_path: Path) -> None:
+        """例外は名前でなく**相対 path** — モデルサブツリーに紛れた同名は従来どおり落ちる。"""
+        out_dir = tmp_path / "models" / "nested"
+        assemble_family(
+            [_synthetic_plan("A", "w/model.safetensors", b"weights")],
+            out_dir,
+            "A",
+            root_files={"NOTICE.md": "notice\n"},
+        )
+        (out_dir / "A" / "NOTICE.md").write_text("notice\n", encoding="utf-8")
+
+        with pytest.raises(DistError, match=r"A/NOTICE\.md"):
+            verify_dist(out_dir)
+
+
 class TestAtomicReplacement:
     """組み立ては staging へ作って rename で据える — 既存の配布形に中途の形を一度も晒さない。"""
 

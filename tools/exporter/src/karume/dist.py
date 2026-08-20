@@ -100,6 +100,13 @@ SHARED_DIRNAME = "shared"
 #: （{@link verify_dist} はモデルカードを書く**前**に走るので、無いまま通る必要がある）。
 META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
 
+#: 配布リポ直下へ置ける**法的テキスト**の席（{@link Pipeline.root_files}）。上流の重み
+#: ライセンスが再配布の条件として要求するファイル — ライセンス文そのもののコピーと、帰属 /
+#: 改変を告げる Notice の 2 つだけ。名前を集合で縛るのは、ここが「任意ファイルを直下へ
+#: 持ち込む口」ではないことを**検査で**示すため（型では法的テキストかどうかを言えない）。
+#: {@link META_PATHS} と同じく**在ることは要求しない**（要求する pipeline だけが渡す）。
+LEGAL_PATHS = frozenset({"LICENSE.md", "NOTICE.md"})
+
 #: 規模上限（ADR 0041 §7）。hub が同じ値で弾くので、**焼く側で先に落とす**
 #: （配布してから利用者の手元で初めて分かる形にしない）。
 MAX_MODELS = 32
@@ -590,6 +597,22 @@ def assert_plan_sources(plans: Sequence[ModelPlan]) -> None:
                 raise DistError(f"{plan.name}.{role}: 組み立ての入力が無い: {artifact.source}")
 
 
+def assert_root_files(root_files: Mapping[str, str]) -> None:
+    """配布リポ直下へ書く名前が法的テキストの席（{@link LEGAL_PATHS}）に収まることを落とす。
+
+    MUST: 未知の名前は fail loudly — 直下は manifest が宣言しない唯一の場所なので、ここを
+    素通しにすると「宣言外ファイルの不在」（{@link verify_dist}）の網が名前 1 つぶんずつ
+    緩む。席の意味（上流ライセンスが要求する再配布条件のファイル）は型では言えないので、
+    受理集合を検査で綴る。
+    """
+    unknown = sorted(set(root_files) - LEGAL_PATHS)
+    if unknown:
+        raise DistError(
+            f"配布リポ直下へ書けるのは {sorted(LEGAL_PATHS)} だけ（法的テキスト専用の席）: "
+            + ", ".join(unknown)
+        )
+
+
 def assert_manifest_limits(manifest: Mapping[str, Any]) -> None:
     """規模上限（ADR 0041 §7）を焼く側で先に落とす。"""
     models = manifest["models"]
@@ -681,6 +704,7 @@ def assemble_family(
     out_dir: Path,
     default_model: str,
     render_card: Callable[[Mapping[str, Any]], str] | None = None,
+    root_files: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """計画済みのモデル群を 1 リポへ組み立て、`out_dir` をその形へ**丸ごと差し替える**。
 
@@ -696,6 +720,11 @@ def assemble_family(
     見つかるのではなく、そもそも残らない）。`README.md` も staging の中で描くので、据わった
     配布形はカードまで揃っている（`render_card` は**検証を通った** manifest を受け取る）。
 
+    `root_files`（ファイル名 → テキスト）は**リポ直下**へ UTF-8 で書かれる法的テキスト
+    （{@link LEGAL_PATHS}）— 上流の重みライセンスが再配布の条件として要求するもので、manifest が
+    宣言する資産ではない（どのモデルにも属さず、配布リポそのものに掛かる）。`karume.json` /
+    `README.md` と同じく {@link verify_dist} の宣言外ファイル検査の例外側に居る。
+
     MUST: `plans` 全体に掛かる検査は**最初の 1 バイトを書く前**に全部済ませる（staging すら
     作らない）— 途中で落ちると数 GB を並べ直すことになる。
     """
@@ -708,10 +737,15 @@ def assemble_family(
         raise DistError(f"既定モデル '{default_model}' が組み立て対象 {names} に無い")
     assert_plan_limits(plans)
     assert_plan_sources(plans)
+    assert_root_files(root_files or {})
 
     try:
         with staged_publication(out_dir) as staging:
             manifest = _materialize_family(plans, staging, default_model)
+            # 法的テキストは検証の**前**に置く — 例外側に居ることを組み立てのたびに
+            # {@link verify_dist} で通しておかないと、例外が外れた回に据わってから気づく。
+            for name, text in (root_files or {}).items():
+                (staging / name).write_text(text, encoding="utf-8")
             verify_dist(staging)
             if render_card is not None:
                 (staging / MODEL_CARD_FILENAME).write_text(render_card(manifest), encoding="utf-8")
@@ -828,9 +862,12 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
     sha256 は組み立て時に実ファイルから採っているので採り直さない（数 GB の再ハッシュは
     ここでは新しい事実を生まない）。見るのは「表が自分で閉じていて、現物を覆っているか」だけ。
 
-    宣言外ファイルの例外は {@link META_PATHS} の 2 つ（`karume.json` と `README.md`）だけ —
-    どちらも配布形そのものの説明で、manifest が宣言する資産ではない。それ以外は従来どおり
-    fail loudly（前回の組み立ての残骸や `io.*` の混入を後段へ見せない）。
+    宣言外ファイルの例外は {@link META_PATHS} の 2 つ（`karume.json` と `README.md`）と
+    {@link LEGAL_PATHS} の 2 つ（`LICENSE.md` / `NOTICE.md`）だけ — 前者は配布形そのものの説明、
+    後者は上流ライセンスが再配布の条件として要求する法的テキストで、どちらも manifest が
+    宣言する資産ではない。それ以外は従来どおり fail loudly（前回の組み立ての残骸や `io.*` の
+    混入を後段へ見せない）。例外を名前でなく相対 path で持つのは共通で、下位ディレクトリに
+    紛れ込んだ同名ファイルは従来どおり落ちる。
     """
     manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     _assert_manifest_shape(manifest)
@@ -842,10 +879,11 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
         actual = path.stat().st_size
         if actual != size:
             raise DistError(f"{rel_path}: size が manifest と違う（宣言 {size} / 現物 {actual}）")
+    exempt = META_PATHS | LEGAL_PATHS
     present = {
         relative
         for path in out_dir.rglob("*")
-        if path.is_file() and (relative := str(path.relative_to(out_dir))) not in META_PATHS
+        if path.is_file() and (relative := str(path.relative_to(out_dir))) not in exempt
     }
     extra = sorted(present - set(declared))
     if extra:
@@ -876,6 +914,10 @@ class Pipeline:
     #: モデルカードの**帰属プロファイル**（名前 → 描き手）。テンプレートは pipeline 固有でも、
     #: 帰属（出所・ライセンス・引用）は声のファミリーごとに別の事実になるため 1 対 1 ではない。
     card_profiles: Mapping[str, CardRenderer]
+    #: 配布リポ**直下**へ入れる法的テキスト（ファイル名 → 中身）。受理する名前は
+    #: {@link LEGAL_PATHS} だけ。上流の重みライセンスが再配布の条件としてライセンス文の
+    #: コピーや Attribution Notice を要求する pipeline だけが渡す（既定は空 = 何も置かない）。
+    root_files: Mapping[str, str] = field(default_factory=dict)
 
 
 def resolve_card_renderer(pipeline: Pipeline, profile: str | None) -> CardRenderer:
@@ -1027,11 +1069,12 @@ def main(
         out_dir,
         models[0],
         render_card=partial(render_card, repo=f"{HF_OWNER}/{out_dir.name}"),
+        root_files=pipeline.root_files,
     )
     verified = verify_dist(out_dir)
     for rel_path, size in sorted(verified.items()):
         print(f"{size:>12}  {rel_path}")
-    for rel_path in sorted(META_PATHS):
+    for rel_path in sorted(META_PATHS | LEGAL_PATHS):
         meta = out_dir / rel_path
         if meta.is_file():
             print(f"{meta.stat().st_size:>12}  {rel_path}")

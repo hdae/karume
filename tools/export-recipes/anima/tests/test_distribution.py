@@ -21,14 +21,16 @@ from typing import Any
 
 import pytest
 
-from anima.card import LORA_SHA256
+from anima.card import ATTRIBUTION_NOTICE, LORA_NAME, LORA_SHA256, LORA_SOURCE
 from anima.distribution import (
     ANIMA_DEFAULT_QUANT,
     ANIMA_MODEL_NAME,
     ANIMA_PIPELINE_CONFIG,
     ANIMA_QUANTS,
     ANIMA_WEIGHTS,
+    LICENSE_SOURCE_PATH,
     LORA_PROVENANCE_FILE,
+    NOTICE_MARKDOWN,
     OUTPUT_PATHS,
     PIPELINE,
     AnimaSources,
@@ -768,6 +770,81 @@ class TestModelCard:
         first = (out_dir / MODEL_CARD_FILENAME).read_bytes()
         main(["--series", str(tmp_path / "series"), "--out", str(out_dir)])
         assert (out_dir / MODEL_CARD_FILENAME).read_bytes() == first
+
+
+class TestLegalTexts:
+    """上流ライセンス（CircleStone Non-Commercial License）§3 の再配布条件を配布リポで満たす。
+
+    条件は「ライセンス文のコピーを提供する」(a)・「Attribution Notice を目立つように掲示する」
+    (b)・「改変した旨を Notice に含める」(d)(i)・「公式製品と誤認させない」(d)(iii) の 4 つで、
+    どれも**配布リポ 1 つ**に掛かる（モデルの資産ではない）ので直下の 2 ファイルが受け持つ。
+    """
+
+    #: 上流から取得した原文の sha256（2026-08-20 実測）。ここを固定するのは、整形や改行変換で
+    #: 1 バイトでも動けば「このライセンスのコピー」でなくなるため（§3(a)）。
+    LICENSE_SHA256 = "ee956174133d7c2cdcf220440c7726187eaf4b50e8e48ee32194353a22164d15"
+
+    def _run(self, tmp_path: Path) -> Path:
+        _build_series(tmp_path / "series")
+        out_dir = tmp_path / "dist"
+        main(["--series", str(tmp_path / "series"), "--out", str(out_dir)])
+        return out_dir
+
+    @staticmethod
+    def _flat(text: str) -> str:
+        """改行の折り位置に依存せず**文**を見るための平坦化（法的文言は文が単位）。"""
+        return " ".join(text.split())
+
+    def test_the_recipe_carries_the_license_verbatim(self) -> None:
+        source = LICENSE_SOURCE_PATH.read_bytes()
+        assert hashlib.sha256(source).hexdigest() == self.LICENSE_SHA256
+
+    def test_it_ships_the_license_text_byte_identical(self, tmp_path: Path) -> None:
+        """§3(a) — 提供するのは**このライセンスのコピー**（要約でも書き換えでもない）。"""
+        out_dir = self._run(tmp_path)
+        assert (out_dir / "LICENSE.md").read_bytes() == LICENSE_SOURCE_PATH.read_bytes()
+
+    def test_the_notice_displays_the_attribution_verbatim(self, tmp_path: Path) -> None:
+        """§3(b) — 掲示する文言は逐語（2 文とも）。"""
+        notice = (self._run(tmp_path) / "NOTICE.md").read_text(encoding="utf-8")
+        assert notice == NOTICE_MARKDOWN
+        for sentence in ATTRIBUTION_NOTICE.split("\n"):
+            assert sentence in notice
+
+    def test_the_notice_states_the_modifications_with_the_lora_source(
+        self, tmp_path: Path
+    ) -> None:
+        """§3(d)(i) — 改変した旨を Notice に含める（何を焼いたかの出所つき）。"""
+        text = (self._run(tmp_path) / "NOTICE.md").read_text(encoding="utf-8")
+        assert self._flat(text).count("It has been modified as follows:") == 1
+        assert f"The official {LORA_NAME} ({LORA_SOURCE}) was baked into the weights" in text
+        assert "https://civitai.com/models/2560840" in text
+
+    def test_the_notice_disclaims_any_official_standing(self, tmp_path: Path) -> None:
+        """§3(d)(iii) — 公式製品・承認済みと誤認させない。"""
+        text = (self._run(tmp_path) / "NOTICE.md").read_text(encoding="utf-8")
+        assert (
+            "This is not an official product of CircleStone Labs LLC, and it is not endorsed,"
+            " approved or validated by CircleStone Labs LLC." in self._flat(text)
+        )
+        assert text.endswith(
+            "The full license text is distributed alongside this repository as LICENSE.md.\n"
+        )
+
+    def test_the_assembled_card_displays_the_attribution_too(self, tmp_path: Path) -> None:
+        """§3(b) の掲示は**据わった配布形**で成立する必要がある（節の中身は test_card が見る）。"""
+        card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert ATTRIBUTION_NOTICE in card
+
+    def test_the_tree_still_verifies_with_the_legal_texts_in_place(self, tmp_path: Path) -> None:
+        """直下の 2 つは manifest が宣言しない — 宣言外ファイル検査の例外側に居る。"""
+        out_dir = self._run(tmp_path)
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(ANIMA_MODEL_NAME))
+        assert (out_dir / "LICENSE.md").is_file()
+        assert (out_dir / "NOTICE.md").is_file()
+
+    def test_the_pipeline_declares_exactly_the_two_legal_seats(self) -> None:
+        assert sorted(PIPELINE.root_files) == ["LICENSE.md", "NOTICE.md"]
 
 
 class TestPipelineEntry:
