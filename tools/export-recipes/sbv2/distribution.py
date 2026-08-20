@@ -196,8 +196,7 @@ SBV2_ASSETS: Mapping[str, str] = {
 #: group32 に落とす）。`w4` は**3 席とも i4 混成**（session は空 = f32 compute のまま — 活性は
 #: 動かさない）。
 #: 数値は f32 同一性の指標では大きく動くが、聴感は一次通過（perf-ledger Q-1 /
-#: research 2026-08-19 §6 — net_g 全役割 rtn で明らかな劣化なし）。既定はまだ `w8` —
-#: 既定化は速度と品質のバランスで別途裁定。
+#: research 2026-08-19 §6 — net_g 全役割 rtn で明らかな劣化なし）。
 #:
 #: NOTE: net_g 側の i4 の**サイズ利得はほぼ無い**（適格 linear は front 2 本 + voice 4 本だけ
 #: で、配布形全体の 0.1% 未満 — research 2026-08-19 §3）。`w4` の意味は「配布形を丸ごと 4bit
@@ -213,7 +212,11 @@ SBV2_QUANTS: Mapping[str, Any] = {
     "w4": {"weights": {"text_encoder": "i4", "front": "i4", "voice": "i4"}, "session": {}},
 }
 
-SBV2_DEFAULT_QUANT = "w8"
+#: 既定は `w4`（2026-08-20 ユーザー裁定 — GPTQ 校正付き丸めの結線後、聴感で「ほぼ違いが
+#: 分からない」+ 速度勝利〈取得 −30%・ロード 1.7 倍速・温間合成 ~4% 速〉。経緯と数値は
+#: perf-ledger Q-1 / Q-6 と research 2026-08-20 §7）。`w8` は opt-in の参照系として残す —
+#: 既定化前の既定で、WAV 参照門（e2e_sbv2_wav_test）の不変アンカーでもある。
+SBV2_DEFAULT_QUANT = "w4"
 
 #: `pipelineConfig.defaults` に載る実行時ノブ（`style_bert_vits2.constants` 由来）。綴りは
 #: `symbols.json` の `defaults` と共有する — 同じ源から引いた同じ値が配布形の 2 つの資産に
