@@ -22,14 +22,23 @@
   混成系列 + 3 席とも i4 の quant `w4` + WAV 門（perf-ledger Q-5 の SBV2 席）。net_g の適格
   linear は 6 本のみで削減は w8-bert4 比 −0.08% — 意味は「配布形を丸ごと 4bit で通す席」。
   聴感 = `outputs/demo/sbv2-FN4-w4.wav` の確認待ち。
-- **J-2: 校正ループ系（GPTQ / AWQ）** — core `quant_calib.py`（決定的・±7 グリッド共有）+
-  校正コーパス新設 + fake-quant スクリーニング {gptq, awq, awq→gptq} × {rtn, nf4, kmeans:shared}
-  を安いファミリ（minicpm5 / EG）→ 勝者を重いファミリ → 聴感/視認。GPTQ は格納 i4 g32 のまま
-  値の選びだけ賢くする系で runtime 0 行・AWQ の per-channel scale は格納に fold か companion が
-  要る（fake-quant は fold 理想形の上限を測る）。**波割り裁定待ち（2026-08-20 提案）**。
+- **J-2 第 1 段: 消化済み（2026-08-20）** — core `quant_calib.py`（`ce568b0`）+ minicpm5/EG
+  リグ結線・校正コーパス 48 文 ×2（`730c21b`）+ 実測 5 構成 × 2 ファミリ。実測の正本 =
+  [research/2026-08-20-gptq-awq-calibrated-rounding.md](research/2026-08-20-gptq-awq-calibrated-rounding.md)。
+  要旨: **GPTQ 大勝ち**（gptq-rtn = 今日の格納形のまま RTN 全面超え = perf-ledger Q-6 起票 /
+  gptq-kmeans = 全列最良・greedy 37/48 で Q-2 の席価値上昇）・**AWQ 不採用（Q-7 ❌）**。
+- **J-2 第 2 段（裁定待ち）**: 勝者を重いファミリへ — SBV2 BERT（DeBERTa encoder の stage
+  分解）+ irodori / anima（DiT block）→ 聴感/視認。net_g conv は GPTQ 対象外（H が linear の
+  in 軸形 — conv は im2col 要）。
+- **J-5（2026-08-20 ユーザー承認 — SBV2 縮小レバー 2 本）**: **J-5a** = embedding i4（gather
+  経路 — ADR 0069 決定 5 の「最初の追補候補」。BERT 語彙表 ≈−12.5 MiB）→ **J-5b** = net_g
+  conv1d i4（in 軸 = channel_rows 平坦の連続 group・scale rank2 の正式化 = ADR 0069 新決定。
+  ≈−27.5 MiB・合計で w8 比 −39% 見込み）。**convT は対象外**（2.6 MiB のために permuted pack を
+  買わない — 2026-08-20 ヘッダ実測: net_g I8 59.0 MiB 中 convT 4.4%）。系列再生成に伴い
+  `w8-bert4` / `w4` の WAV 参照は採り直し。
 - **J-3: g 軸の評価**（波 I は g=32 固定の裁定 — 方式勝者で g32/g64/g128 を再評価）。
-- **J-4: 格納席の実装裁定**（Q-2 kmeans companion 席 / Q-3 NF4 定数表席 — J-2 の結果を見てから。
-  codebook 系採用なら ADR 0069 の bit 表・整列表・view 型 3 面の reopen）。
+- **J-4: 格納席の実装裁定**（Q-2 kmeans companion 席 / Q-3 NF4 定数表席 — J-2 第 2 段の
+  結果を見てから。codebook 系採用なら ADR 0069 の bit 表・整列表・view 型 3 面の reopen）。
 
 **リリース準備波（release 節）はモデルの HF 公開も含み重いため後回し**（2026-08-19 裁定・据え置き）。
 
