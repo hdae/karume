@@ -32,10 +32,12 @@
   採否 = perf-ledger Q 節（RTN/NF4 全ファミリ一次通過・Q-4 mxfp4 不採用確定・Q-2 kmeans は
   LLM/埋め込み限定）。方式序列はモデル系統で割れる — 1 回の実測で一般化しない。既定化は
   速度と細かい品質のバランスで別途。
-- **波 J（量子化探索・第 2 段・2026-08-20 着手）が現行**: J-1（Q-1 = SBV2 BERT linear i4 の
-  配布配線 + 実 GPU WAV 門）は**消化済み** — deberta-i4 混成系列 + quant `w8-bert4`（既定は
-  w8 のまま・perf-ledger Q-1 ✅）。J-2（GPTQ/AWQ 校正付き丸め）・J-3（g 軸）・J-4（格納席の
-  実装裁定）は波割り裁定待ち（骨子 = backlog now 節）。
+- **波 J（量子化探索・第 2 段・2026-08-20 着手）が現行**: J-1（quant `w8-bert4`・Q-1 ✅・
+  配布 WAV 聴感確認済み）と J-1b（full-w4 quant `w4` — net_g 適格 linear 6 本のみ・意味は
+  「丸ごと 4bit 席」）は**消化済み**。J-2（GPTQ/AWQ）は波割り承認済みで進行中 — core
+  `quant_calib.py` 着地（act-order 不採用・rtn グリッドのみ出荷可・H=λI オラクル門）、
+  minicpm5/EG リグ結線 + 校正コーパスは実装中 → 実測スイープへ。J-3（g 軸）・J-4（格納席の
+  実装裁定 — J-2 の結果を見てから）が後続（骨子 = backlog now 節）。
 
 ## Open decisions
 

@@ -16,8 +16,12 @@
 追記 5。
 
 - **J-1: Q-1 実装 — 消化済み（2026-08-20）**: deberta-i4 混成系列（linear = i4 g32・残り i8）+
-  SBV2 quant `w8-bert4` + 実 GPU WAV 門（perf-ledger Q-1 ✅）。既定 quant は w8 のまま。
-  HF jvnv 上げ直しはリリース枠と同乗（資産は準備済み）。
+  SBV2 quant `w8-bert4` + 実 GPU WAV 門（perf-ledger Q-1 ✅・配布 WAV 聴感確認済み）。
+  既定 quant は w8 のまま。HF jvnv 上げ直しはリリース枠と同乗（資産は準備済み）。
+- **J-1b: SBV2 full-w4 — 消化済み（2026-08-20 ユーザー依頼）**: net_g（front/voice）の i4
+  混成系列 + 3 席とも i4 の quant `w4` + WAV 門（perf-ledger Q-5 の SBV2 席）。net_g の適格
+  linear は 6 本のみで削減は w8-bert4 比 −0.08% — 意味は「配布形を丸ごと 4bit で通す席」。
+  聴感 = `outputs/demo/sbv2-FN4-w4.wav` の確認待ち。
 - **J-2: 校正ループ系（GPTQ / AWQ）** — core `quant_calib.py`（決定的・±7 グリッド共有）+
   校正コーパス新設 + fake-quant スクリーニング {gptq, awq, awq→gptq} × {rtn, nf4, kmeans:shared}
   を安いファミリ（minicpm5 / EG）→ 勝者を重いファミリ → 聴感/視認。GPTQ は格納 i4 g32 のまま
