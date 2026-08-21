@@ -59,7 +59,7 @@
  * 入力なので、突合が割れたときのために `@hdae/yomi` の版をログに出す。
  */
 
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { parseManifest, resolveFiles } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
 import { VERSION as YOMI_VERSION } from "@hdae/yomi";
@@ -516,5 +516,36 @@ Deno.test({
         throw new Error(`${run.component} が計測なしの GPU で lastRunTiming を返した`);
       }
     }
+  },
+});
+
+Deno.test({
+  name: "e2e(実GPU): analyzeProsody は 3 欄ちょうどを返し、進行中の合成の後ろに並ばない",
+  ignore: !RUNNABLE,
+  fn: async () => {
+    const manifest = readManifest();
+    const assets = await loadLocalAssets(manifest);
+    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
+      model: MODEL,
+      quant: QUANT,
+    });
+
+    // MUST（ADR 0072 決定 4）: 公開するのは 3 欄だけ。word2ph / input_ids を足すと、DeBERTa の
+    // 語彙やトークナイザを差し替えた瞬間に外部が壊れる。
+    const draft = await pipeline.analyzeProsody(TEXT);
+    assertEquals(Object.keys(draft).sort(), ["phones", "prosody", "tones"]);
+    assertEquals(draft.tones.length, draft.phones.length, "派生 2 欄の長さが揃っていない");
+
+    // MUST（同 決定 7）: 生成の直列化鎖には載せない。GPU を張らない解析（サブ ms）が、
+    // 進行中の合成（秒オーダー）の後ろに並ばないこと — 鎖へ戻すと必ず後ろに回るので落ちる。
+    let synthesized = false;
+    const generating = pipeline.generate({ text: TEXT, seed: SEED }).then((audio) => {
+      synthesized = true;
+      return audio;
+    });
+    const duringSynthesis = await pipeline.analyzeProsody(TEXT);
+    assert(!synthesized, "analyzeProsody が合成の完了を待った（直列化鎖に載っている）");
+    assertEquals(duringSynthesis.phones, draft.phones);
+    await generating;
   },
 });

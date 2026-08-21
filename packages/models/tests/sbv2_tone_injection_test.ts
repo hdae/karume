@@ -231,6 +231,28 @@ Deno.test({
   },
 });
 
+Deno.test({
+  name:
+    "overlayFor: 受理できない overlay エントリは Sbv2InputError（yomi の素の Error のまま出さない）",
+  ignore: dictUrl === undefined,
+  fn: () => {
+    const dict = jtd();
+    const cache: {
+      defaultOverlay: readonly OverlayEntry[] | undefined;
+      defaultOverlayResolved: OverlayDictionary | undefined;
+    } = { defaultOverlay: undefined, defaultOverlayResolved: undefined };
+
+    // 呼び手が渡した入力の誤り（400）を、内部不変条件の破れ（500 = 素の Error）と分けられること。
+    const thrown = assertThrows(
+      () => overlayFor(cache, dict, [entry("カルメ", 99)]),
+      Sbv2InputError,
+      "overlay",
+    );
+    // MUST: 包み直しても診断の質を落とさない（cause に yomi の説明が残る）。
+    assert(thrown.cause instanceof Error, "cause が繋がっていない");
+  },
+});
+
 // ---- 下書き（句 / モーラ構造）の往復 ----------------------------------------
 
 /** 「カルメ」1 句ぶんの解析結果（辞書なしで門を叩くための最小の形）。 */
@@ -256,6 +278,31 @@ Deno.test("toSbv2Prosody: SBV2 が読む欄だけを出す（渡せるのに効�
   assertEquals(Object.keys(prosody.phrases[0]).sort(), ["accentNucleus", "moras", "punctuations"]);
   assertEquals(Object.keys(prosody.phrases[0].moras[0]).sort(), ["consonant", "kana", "vowel"]);
   assertEquals(prosody.phrases[0].punctuations, ["."]);
+});
+
+Deno.test("toSbv2Prosody: 子音なしモーラは consonant 欄そのものを出さない（撥音・促音・母音単独）", () => {
+  // `Sbv2Mora.consonant` は optional property であって `string | undefined` ではない。
+  // スプレッド条件が消えると値 undefined の欄が公開面に生え、「渡せるのに効かない欄を作らない」
+  // 責務（prosody.ts の doc）が破れる — 撥音 N / 促音 cl / 母音単独は日本語では通常経路。
+  const withMoraless: FrontendResult = {
+    ...karumeResult(1),
+    accentPhrases: [{
+      moras: [
+        { kana: "カ", consonant: "k", vowel: "a" },
+        { kana: "ン", vowel: "N" },
+      ],
+      accentNucleus: 1,
+      pauseAfter: "none",
+      punctuations: [],
+    }],
+  };
+
+  const prosody = toSbv2Prosody(withMoraless);
+
+  assertEquals(Object.keys(prosody.phrases[0].moras[0]).sort(), ["consonant", "kana", "vowel"]);
+  assertEquals(Object.keys(prosody.phrases[0].moras[1]).sort(), ["kana", "vowel"]);
+  // 子音なしモーラは音素 1 個ぶんしか出さない（`_` + k a N + `_`）。
+  assertEquals(toSbv2PhoneTone(prosody, "_").phones, ["_", "k", "a", "N", "_"]);
 });
 
 Deno.test("toSbv2Prosody: 範囲外の核は正規形へ丸めて出す（往復不能を作らない）", () => {
@@ -366,6 +413,14 @@ Deno.test({
     assert(
       edited.ids.toneIds.some((id, index) => id !== head.ids.toneIds[index]),
       "トーン ID が核の違いを反映していない",
+    );
+    // MUST: 戻り値の `prosody` は**注入席の適用前**（解析がそう読んだ形）。渡した下書きを
+    // そのまま返すようになると、`toSbv2Prosody` の正規化を迂回する往復経路が生まれ、
+    // ADR 0072 決定 4 の往復不変が黙って破れる。
+    assertEquals(
+      edited.prosody.phrases[0].accentNucleus,
+      1,
+      "返る prosody が「渡した下書き」になっている（適用前でなくなった）",
     );
   },
 });

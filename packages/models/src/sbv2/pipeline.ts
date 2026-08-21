@@ -212,7 +212,8 @@ export type Sbv2PipelineOptions = {
     diagnostics: SessionDiagnostics,
   ) => void;
   /**
-   * 日本語辞書の注入席。省略すると初回の `generate` で `fetchDictionaryBytes` が取りに出て、
+   * 日本語辞書の注入席。省略すると初回の `generate` / `analyzeProsody` で
+   * `fetchDictionaryBytes` が取りに出て、
    * 以降はインスタンスが保持する（モジュール doc の NOTE）。
    */
   readonly dictionary?: JtdDictionary;
@@ -552,12 +553,30 @@ export const ensureDictionary = (
   return state.dictionary;
 };
 
-/** 生のエントリ列なら辞書に対して解決する（解決済みならそのまま使う）。 */
+/**
+ * 生のエントリ列なら辞書に対して解決する（解決済みならそのまま使う）。
+ *
+ * MUST: 解決の失敗は {@link Sbv2InputError} へ包み直す。`overlay` は要求ごとに呼び手が渡す
+ * 入力（ユーザー辞書 UI 由来の表記ゆれ・アクセント型の範囲外はごく普通の 400）で、yomi が
+ * 投げる素の `Error` のままだと内部不変条件の破れ（500）と区別が付かない。`cause` を繋ぐので
+ * メッセージの質は落ちない（errors.ts の MUST）。
+ */
 const resolveOverlay = (
   dictionary: JtdDictionary,
   overlay: readonly OverlayEntry[] | OverlayDictionary,
-): OverlayDictionary =>
-  overlay instanceof OverlayDictionary ? overlay : new OverlayDictionary(dictionary, overlay);
+): OverlayDictionary => {
+  if (overlay instanceof OverlayDictionary) return overlay;
+  try {
+    return new OverlayDictionary(dictionary, overlay);
+  } catch (cause) {
+    throw new Sbv2InputError(
+      `Sbv2Pipeline: overlay の修正辞書エントリを解決できない（${
+        cause instanceof Error ? cause.message : String(cause)
+      }）`,
+      { cause },
+    );
+  }
+};
 
 /**
  * この 1 回の解析に効かせる修正辞書を決める。
