@@ -811,9 +811,7 @@ class TestLegalTexts:
         for sentence in ATTRIBUTION_NOTICE.split("\n"):
             assert sentence in notice
 
-    def test_the_notice_states_the_modifications_with_the_lora_source(
-        self, tmp_path: Path
-    ) -> None:
+    def test_the_notice_states_the_modifications_with_the_lora_source(self, tmp_path: Path) -> None:
         """§3(d)(i) — 改変した旨を **Attribution Notice の中に**含める（出所つき）。"""
         text = (self._run(tmp_path) / "NOTICE.md").read_text(encoding="utf-8")
         # 改変記載は独立節ではなく Attribution Notice 節の内側（次見出しの前）に居ること。

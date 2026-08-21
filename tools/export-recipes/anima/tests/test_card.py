@@ -175,9 +175,7 @@ class TestSections:
         """§3(b) は掲示を求める — HF で最初に読まれるカードに逐語で出す（要約は掲示でない）。"""
         assert ATTRIBUTION_NOTICE in card
 
-    def test_the_license_section_points_at_the_two_files_shipped_alongside(
-        self, card: str
-    ) -> None:
+    def test_the_license_section_points_at_the_two_files_shipped_alongside(self, card: str) -> None:
         """§3(a) のライセンス文と §3(d) の Notice は同梱物 — カードはその在り処を言う。"""
         _, _, license_section = card.partition("## License")
         section, _, _ = license_section.partition("## Models")
