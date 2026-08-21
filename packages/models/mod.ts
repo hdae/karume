@@ -9,6 +9,10 @@
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態・top-level 登録の禁止 —
  * CLAUDE.md）。barrel から 1 本だけ import したときに他ファミリが落ちるのは、この不変条件が
  * 成り立っているときだけ。
+ *
+ * NOTE: `fromPretrained` が読む配布 manifest の `format` は版ごとに固定で、**旧版は読まない**。
+ * 「パッケージ版 ⇔ `format`」の対応表は `@karume/hub` のモジュール doc（配布形を作り直す
+ * 段取りを事前に読むための表）。
  */
 
 export { BirefnetPipeline } from "./src/birefnet/pipeline.ts";
@@ -64,8 +68,12 @@ export type {
   Sbv2ProsodyDraft,
   Sbv2RunComponent,
 } from "./src/sbv2/pipeline.ts";
-/** 修正辞書エントリの綴りは `@hdae/yomi` が正本（`./sbv2` と同じく素通し — 変換層は作らない）。 */
-export type { OverlayEntry } from "@hdae/yomi";
+/** 下書き（アクセント句 / モーラ）の語彙 — SBV2 が読む欄だけを持つ（`./sbv2` を参照）。 */
+export type { Sbv2AccentPhrase, Sbv2Mora, Sbv2Prosody } from "./src/sbv2/text/prosody.ts";
+/** 入力起因の失敗（内部不変条件の破れは素の `Error` のまま — `./sbv2` を参照）。 */
+export { Sbv2InputError } from "./src/sbv2/errors.ts";
+/** 修正辞書の綴りは `@hdae/yomi` が正本（`./sbv2` と同じく素通し — 変換層は作らない）。 */
+export type { OverlayDictionary, OverlayEntry } from "@hdae/yomi";
 
 export { Siglip2Pipeline } from "./src/siglip2/pipeline.ts";
 export type {

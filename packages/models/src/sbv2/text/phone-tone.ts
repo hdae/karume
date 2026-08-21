@@ -1,5 +1,9 @@
 /**
- * yomi の `FrontendResult` → SBV2 の given_phone / given_tone。
+ * 下書き（句 / モーラ構造）→ SBV2 の given_phone / given_tone。
+ *
+ * MUST: 音素・トーンを組む経路は**ここ 1 本だけ**。解析どおりの合成も、外から戻された下書きを
+ * 使う合成も、同じ {@link Sbv2Prosody} を通してここへ来る（`prosody.ts` の `toSbv2Prosody`）—
+ * 二経路化すると、下書き経由のときだけ梱包規則がズレる。
  *
  * 責務境界（@hdae/yomi はモデル非依存）: yomi が提供するのは建材（`moraToPhones` /
  * `moraTones` / `punctuations` / `leadingPunctuations`）までで、SBV2 固有の梱包 —— 両端の
@@ -18,7 +22,8 @@
  * — word2ph の `sum(word2ph) === phones.length` がこの一致に依存する。
  */
 
-import { type FrontendResult, moraTones, moraToPhones } from "@hdae/yomi";
+import { moraTones, moraToPhones } from "@hdae/yomi";
+import type { Sbv2Prosody } from "./prosody.ts";
 
 type Sbv2PhoneTone = {
   /** given_phone（両端 PAD 込み、add_blank 前）。 */
@@ -27,18 +32,18 @@ type Sbv2PhoneTone = {
   readonly tones: readonly number[];
 };
 
-/** `FrontendResult` を given_phone / given_tone へ変換する（位置ごとに対応、tone は音素単位）。 */
-export const toSbv2PhoneTone = (result: FrontendResult, pad: string): Sbv2PhoneTone => {
+/** 下書きを given_phone / given_tone へ変換する（位置ごとに対応、tone は音素単位）。 */
+export const toSbv2PhoneTone = (prosody: Sbv2Prosody, pad: string): Sbv2PhoneTone => {
   const phones: string[] = [pad];
   const tones: number[] = [0];
 
   // 先頭句より前の実在記号（記号だけの入力は句が作られず全てここに入る）。
-  for (const punct of result.leadingPunctuations) {
+  for (const punct of prosody.leadingPunctuations) {
     phones.push(punct);
     tones.push(0);
   }
 
-  for (const phrase of result.accentPhrases) {
+  for (const phrase of prosody.phrases) {
     const perMoraTone = moraTones(phrase.accentNucleus, phrase.moras.length);
     for (const [index, mora] of phrase.moras.entries()) {
       const tone = perMoraTone[index];

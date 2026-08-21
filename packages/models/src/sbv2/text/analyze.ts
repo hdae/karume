@@ -15,7 +15,14 @@ import { analyzeWithWords, type JtdDictionary, type OverlayDictionary } from "@h
 import type { DebertaTokenizer } from "./tokenizer.ts";
 import { toBertText } from "./bert-text.ts";
 import { toSbv2PhoneTone } from "./phone-tone.ts";
+import {
+  assertProsodyPhones,
+  assertProsodyShape,
+  type Sbv2Prosody,
+  toSbv2Prosody,
+} from "./prosody.ts";
 import { buildBaseWord2ph } from "./word2ph.ts";
+import { Sbv2InputError } from "../errors.ts";
 import {
   addBlankWord2ph,
   type JpExtraRules,
@@ -26,8 +33,14 @@ import {
 export type Sbv2TextAnalysis = {
   /** given_phone（両端 PAD 込み、add_blank 前）。 */
   readonly phones: readonly string[];
-  /** given_tone（0/1、phones と同長）。 */
+  /** given_tone（0/1、phones と同長）。注入席（`prosody` / `givenTone`）の適用**後**。 */
   readonly tones: readonly number[];
+  /**
+   * 解析どおりの下書き（句 / モーラ構造）。注入席の適用**前** — `prosody` を渡した合成では、
+   * この欄は「渡した下書き」ではなく「解析がそう読んだ形」を指す（両者は音素列が一致すること
+   * だけが保証され、核は違い得る）。
+   */
+  readonly prosody: Sbv2Prosody;
   /** DeBERTa 入力テキスト（参照実装の sep_text 連結相当）。 */
   readonly bertText: string;
   /** add_blank 前の word2ph（両端の番兵込み）。 */
@@ -44,13 +57,42 @@ export type Sbv2TextAnalysis = {
 export type Sbv2AnalyzeOptions = {
   /** 修正辞書（読み・アクセントの差し替え）。解決済みのものを渡す。 */
   readonly overlay?: OverlayDictionary;
+  /** 編集済みの下書き（句 / モーラ構造）。同じ text・同じ overlay で採ったものを戻す。 */
+  readonly prosody?: Sbv2Prosody;
   /** トーンの直接指定（0/1 の生値・解析の `phones` と同長）。 */
   readonly givenTone?: readonly number[];
 };
 
 /**
- * トーンの直接指定を検める門。**差し替え点はここ 1 箇所**（解析の tones を置き換えてから
+ * トーンをどこから採るかを決める門。**差し替え点はここ 1 箇所**（解析の tones を置き換えてから
  * `phonesTonesToModelIds` へ渡す）。
+ *
+ * MUST: `prosody` と `givenTone` の同時指定は落とす。どちらが勝つかの規則を作ると、呼び手は
+ * 「渡したのに効かない席」を覚えることになる — 高い席（構造）と低い席（生のトーン列）は
+ * どちらか一方だけを使う。
+ */
+const resolveTones = (
+  analyzed: { readonly phones: readonly string[]; readonly tones: readonly number[] },
+  options: Sbv2AnalyzeOptions,
+  pad: string,
+): readonly number[] => {
+  if (options.prosody !== undefined && options.givenTone !== undefined) {
+    throw new Sbv2InputError(
+      "prosody と givenTone は同時に指定できない（構造で直すなら prosody、音素単位の生の" +
+        "トーン列で直すなら givenTone のどちらか一方）",
+    );
+  }
+  if (options.prosody !== undefined) {
+    assertProsodyShape(options.prosody);
+    const edited = toSbv2PhoneTone(options.prosody, pad);
+    assertProsodyPhones(analyzed.phones, edited.phones);
+    return edited.tones;
+  }
+  return resolveGivenTone(analyzed.tones, options.givenTone);
+};
+
+/**
+ * トーンの直接指定を検める門。
  *
  * MUST: 長さと値域を**呼び出し側の生値のまま**見る。`toneStart` を足した後で見ると、0/1 以外の
  * 値でも記号表の範囲には収まってしまい（例外が出ない）、別の tone 行を引いたまま音だけが崩れる。
@@ -64,14 +106,16 @@ export const resolveGivenTone = (
 ): readonly number[] => {
   if (given === undefined) return analyzed;
   if (given.length !== analyzed.length) {
-    throw new Error(
+    throw new Sbv2InputError(
       `givenTone の長さ ${given.length} が解析の音素数 ${analyzed.length} と違う` +
         "（add_blank 前・両端 PAD 込みの長さで与える — analyzeProsody が返す tones と同じ形）",
     );
   }
   for (const [index, tone] of given.entries()) {
     if (tone !== 0 && tone !== 1) {
-      throw new Error(`givenTone[${index}] = ${tone} が 0/1 でない（生の 2 値トーンで与える）`);
+      throw new Sbv2InputError(
+        `givenTone[${index}] = ${tone} が 0/1 でない（生の 2 値トーンで与える）`,
+      );
     }
   }
   return given;
@@ -89,9 +133,11 @@ export const analyzeSbv2Text = (
   options: Sbv2AnalyzeOptions = {},
 ): Sbv2TextAnalysis => {
   const { result, words } = analyzeWithWords(dictionary, text, options.overlay);
-  const { phones, tones: analyzed } = toSbv2PhoneTone(result, rules.pad);
+  const prosody = toSbv2Prosody(result);
+  const analyzed = toSbv2PhoneTone(prosody, rules.pad);
   // トーンだけを差し替える（音素列・語割りは解析のまま — bertText / word2ph はトーンを読まない）。
-  const tones = resolveGivenTone(analyzed, options.givenTone);
+  const phones = analyzed.phones;
+  const tones = resolveTones(analyzed, options, rules.pad);
   const bertText = toBertText(words, rules.punctuations);
   const baseWord2ph = buildBaseWord2ph(words, tokenizer, phones.length);
   const inputIds = tokenizer.encode(bertText);
@@ -106,6 +152,7 @@ export const analyzeSbv2Text = (
   return {
     phones,
     tones,
+    prosody,
     bertText,
     baseWord2ph,
     inputIds,

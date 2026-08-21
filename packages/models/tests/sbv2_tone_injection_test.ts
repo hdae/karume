@@ -9,8 +9,20 @@
 // 読み・アクセントの変化は実辞書が要るので、資産があるときだけ走らせる。
 
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
-import { JtdDictionary, OverlayDictionary, type OverlayEntry } from "@hdae/yomi";
+import {
+  type FrontendResult,
+  JtdDictionary,
+  OverlayDictionary,
+  type OverlayEntry,
+} from "@hdae/yomi";
 import { analyzeSbv2Text, resolveGivenTone } from "../src/sbv2/text/analyze.ts";
+import { Sbv2InputError } from "../src/sbv2/errors.ts";
+import { toSbv2PhoneTone } from "../src/sbv2/text/phone-tone.ts";
+import {
+  assertProsodyPhones,
+  assertProsodyShape,
+  toSbv2Prosody,
+} from "../src/sbv2/text/prosody.ts";
 import { type JpExtraRules, parseJpExtraRules } from "../src/sbv2/text/symbols.ts";
 import { DebertaTokenizer } from "../src/sbv2/text/tokenizer.ts";
 import { overlayFor } from "../src/sbv2/pipeline.ts";
@@ -51,6 +63,12 @@ const tinyTokenizer = (tokens: readonly string[]): DebertaTokenizer =>
 Deno.test("resolveGivenTone: 指定が無ければ解析のトーンをそのまま通す", () => {
   const analyzed = [0, 1, 1, 0];
   assertEquals(resolveGivenTone(analyzed, undefined), analyzed);
+});
+
+Deno.test("入力起因の失敗は Sbv2InputError で飛ぶ（HTTP なら 400 と 500 を分けられる）", () => {
+  // 型を分ける目的は分岐で、内部不変条件の破れ（素の Error）と混ざらないことがその条件。
+  assertThrows(() => resolveGivenTone([0, 1], [0]), Sbv2InputError);
+  assertThrows(() => resolveGivenTone([0, 1], [0, 2]), Sbv2InputError);
 });
 
 Deno.test("resolveGivenTone: 長さ不一致は期待と実際を添えて落とす", () => {
@@ -186,9 +204,9 @@ Deno.test({
     const rules = testRules();
     const tokenizer = textTokenizer();
     const cache: {
-      overlayEntries: readonly OverlayEntry[];
-      overlay: OverlayDictionary | undefined;
-    } = { overlayEntries: [entry("カルメ", 1)], overlay: undefined };
+      defaultOverlay: readonly OverlayEntry[];
+      defaultOverlayResolved: OverlayDictionary | undefined;
+    } = { defaultOverlay: [entry("カルメ", 1)], defaultOverlayResolved: undefined };
 
     const standing = overlayFor(cache, dict, undefined);
     assert(standing !== undefined, "既定席が解決されていない");
@@ -210,5 +228,244 @@ Deno.test({
       analyzeSbv2Text(dict, TEXT, tokenizer, rules, { overlay: after }).phones,
       ["_", "k", "a", "r", "u", "m", "e", "_"],
     );
+  },
+});
+
+// ---- 下書き（句 / モーラ構造）の往復 ----------------------------------------
+
+/** 「カルメ」1 句ぶんの解析結果（辞書なしで門を叩くための最小の形）。 */
+const karumeResult = (accentNucleus: number, punctuations: string[] = []): FrontendResult => ({
+  normalizedText: "カルメ",
+  leadingPunctuations: [],
+  accentPhrases: [{
+    moras: [
+      { kana: "カ", consonant: "k", vowel: "a" },
+      { kana: "ル", consonant: "r", vowel: "u" },
+      { kana: "メ", consonant: "m", vowel: "e" },
+    ],
+    accentNucleus,
+    pauseAfter: "none",
+    punctuations,
+  }],
+});
+
+Deno.test("toSbv2Prosody: SBV2 が読む欄だけを出す（渡せるのに効かない欄を作らない）", () => {
+  const prosody = toSbv2Prosody(karumeResult(1, ["."]));
+  // 解析結果に居た normalizedText / pauseAfter / devoiced は落ちている。
+  assertEquals(Object.keys(prosody).sort(), ["leadingPunctuations", "phrases"]);
+  assertEquals(Object.keys(prosody.phrases[0]).sort(), ["accentNucleus", "moras", "punctuations"]);
+  assertEquals(Object.keys(prosody.phrases[0].moras[0]).sort(), ["consonant", "kana", "vowel"]);
+  assertEquals(prosody.phrases[0].punctuations, ["."]);
+});
+
+Deno.test("toSbv2Prosody: 範囲外の核は正規形へ丸めて出す（往復不能を作らない）", () => {
+  // yomi の moraTones は範囲外核を尾高相当へ黙ってクランプするので、生値のまま下書きに載せると
+  // 「解析どおりの下書きを戻したのに範囲検査で落ちる」入力が作れてしまう。
+  const clamped = toSbv2Prosody(karumeResult(9));
+  assertEquals(clamped.phrases[0].accentNucleus, 3, "モーラ数へ丸めていない");
+  // 丸めてもトーン列は変わらない（音は同じまま、往復だけが通るようになる）。
+  assertEquals(
+    toSbv2PhoneTone(clamped, "_").tones,
+    toSbv2PhoneTone(toSbv2Prosody(karumeResult(3)), "_").tones,
+  );
+});
+
+Deno.test("下書きは文頭の記号を保つ（フラットな音素列からは復元できない情報）", () => {
+  // `{ phones, tones }` だけでは leadingPunctuations の個数も句境界も割り戻せない
+  // （文頭に記号がある入力で詰む）— 構造で返す理由そのもの。
+  const result: FrontendResult = { ...karumeResult(1), leadingPunctuations: ["…"] };
+  const prosody = toSbv2Prosody(result);
+  assertEquals(prosody.leadingPunctuations, ["…"]);
+  assertEquals(toSbv2PhoneTone(prosody, "_").phones, [
+    "_",
+    "…",
+    "k",
+    "a",
+    "r",
+    "u",
+    "m",
+    "e",
+    "_",
+  ]);
+  assertEquals(toSbv2PhoneTone(prosody, "_").tones, [0, 0, 1, 1, 0, 0, 0, 0, 0]);
+});
+
+Deno.test("assertProsodyShape: 核の範囲外は落とす（moraTones は黙ってクランプする）", () => {
+  const shifted = (accentNucleus: number) => ({
+    ...toSbv2Prosody(karumeResult(1)),
+    phrases: [{ ...toSbv2Prosody(karumeResult(1)).phrases[0], accentNucleus }],
+  });
+  assertThrows(() => assertProsodyShape(shifted(4)), Sbv2InputError, "0..3 の範囲外");
+  assertThrows(() => assertProsodyShape(shifted(-1)), Sbv2InputError, "0..3 の範囲外");
+  assertThrows(() => assertProsodyShape(shifted(1.5)), Sbv2InputError, "0..3 の範囲外");
+  // 平板 0 と尾高 3 は正当。
+  assertProsodyShape(shifted(0));
+  assertProsodyShape(shifted(3));
+});
+
+Deno.test("assertProsodyPhones: 長さが合っていても内容が違えば落とす", () => {
+  // 梱包規則を外部で再実装してズレたとき、長さ検査だけでは素通りする（音だけ崩れる）。
+  const analyzed = ["_", "k", "a", "r", "u", "m", "e", "_"];
+  assertProsodyPhones(analyzed, [...analyzed]);
+  assertThrows(
+    () => assertProsodyPhones(analyzed, ["_", "k", "a", "r", "u", "m", "o", "_"]),
+    Sbv2InputError,
+    "音素[6]",
+  );
+  assertThrows(
+    () => assertProsodyPhones(analyzed, analyzed.slice(0, 7)),
+    Sbv2InputError,
+    "音素数 7",
+  );
+});
+
+Deno.test({
+  name: "prosody: 解析どおりの下書きを戻すと恒等（無指定と同じ ID 列が出る）",
+  ignore: dictUrl === undefined,
+  fn: () => {
+    const dict = jtd();
+    const rules = testRules();
+    const tokenizer = textTokenizer();
+    const base = analyzeSbv2Text(dict, TEXT, tokenizer, rules);
+
+    const roundTrip = analyzeSbv2Text(dict, TEXT, tokenizer, rules, { prosody: base.prosody });
+    assertEquals(roundTrip.phones, base.phones);
+    assertEquals(roundTrip.tones, base.tones);
+    assertEquals(roundTrip.ids.phoneIds, base.ids.phoneIds);
+    assertEquals(roundTrip.ids.toneIds, base.ids.toneIds);
+    assertEquals(roundTrip.baseWord2ph, base.baseWord2ph);
+    assertEquals(roundTrip.bertText, base.bertText);
+  },
+});
+
+Deno.test({
+  name: "prosody: 核だけ直すとトーンだけが動く（overlay で型を変えたのと同じ列になる）",
+  ignore: dictUrl === undefined,
+  fn: () => {
+    const dict = jtd();
+    const rules = testRules();
+    const tokenizer = textTokenizer();
+    // 読みを固定して 1 句 3 モーラにする（頭高）。
+    const overlay = new OverlayDictionary(dict, [entry("カルメ", 1)]);
+    const head = analyzeSbv2Text(dict, TEXT, tokenizer, rules, { overlay });
+    assertEquals(head.prosody.phrases.length, 1, "1 句に畳まれていない");
+    assertEquals(head.prosody.phrases[0].accentNucleus, 1, "頭高になっていない");
+
+    // 核を平板へ直して戻す。
+    const flattened = {
+      ...head.prosody,
+      phrases: [{ ...head.prosody.phrases[0], accentNucleus: 0 }],
+    };
+    const edited = analyzeSbv2Text(dict, TEXT, tokenizer, rules, { overlay, prosody: flattened });
+
+    assertEquals(edited.tones, [0, 0, 0, 1, 1, 1, 1, 0], "平板のトーン列になっていない");
+    assertEquals(edited.phones, head.phones, "音素列が動いた");
+    assertEquals(edited.baseWord2ph, head.baseWord2ph, "word2ph はトーンを読まない");
+    assertEquals(edited.bertText, head.bertText, "BERT 入力はトーンを読まない");
+    assertEquals(edited.ids.phoneIds, head.ids.phoneIds, "音素 ID が動いた");
+    assert(
+      edited.ids.toneIds.some((id, index) => id !== head.ids.toneIds[index]),
+      "トーン ID が核の違いを反映していない",
+    );
+  },
+});
+
+Deno.test({
+  name: "prosody: 音素数が変わる編集・読み替え・text の取り違えは落とす",
+  ignore: dictUrl === undefined,
+  fn: () => {
+    const dict = jtd();
+    const rules = testRules();
+    const tokenizer = textTokenizer();
+    const overlay = new OverlayDictionary(dict, [entry("カルメ", 1)]);
+    const head = analyzeSbv2Text(dict, TEXT, tokenizer, rules, { overlay });
+    const phrase = head.prosody.phrases[0];
+    const withPhrase = (moras: typeof phrase.moras, punctuations = phrase.punctuations) => ({
+      ...head.prosody,
+      phrases: [{ ...phrase, moras, punctuations }],
+    });
+
+    // ① モーラの読み替え（音素数は変わらない = 長さ検査だけなら素通りする）。
+    assertThrows(
+      () =>
+        analyzeSbv2Text(dict, TEXT, tokenizer, rules, {
+          overlay,
+          prosody: withPhrase([
+            phrase.moras[0],
+            { kana: "ロ", consonant: "r", vowel: "o" },
+            phrase.moras[2],
+          ]),
+        }),
+      Sbv2InputError,
+      "音素[4]",
+    );
+
+    // ② モーラを 1 つ落とす（音素数が変わる）。
+    assertThrows(
+      () =>
+        analyzeSbv2Text(dict, TEXT, tokenizer, rules, {
+          overlay,
+          prosody: withPhrase(phrase.moras.slice(0, 2)),
+        }),
+      Sbv2InputError,
+      "音素数が変わる編集",
+    );
+
+    // ③ 記号を足す（疑問形の上げを句へ差し込もうとした場合）。
+    assertThrows(
+      () =>
+        analyzeSbv2Text(dict, TEXT, tokenizer, rules, {
+          overlay,
+          prosody: withPhrase(phrase.moras, ["."]),
+        }),
+      Sbv2InputError,
+      "音素数が変わる編集",
+    );
+
+    // ④ overlay を渡し忘れた（= 別の解析で採った下書きを戻した）。
+    assertThrows(
+      () => analyzeSbv2Text(dict, TEXT, tokenizer, rules, { prosody: head.prosody }),
+      Sbv2InputError,
+    );
+  },
+});
+
+Deno.test({
+  name: "prosody と givenTone の同時指定は落とす（優先規則を作らない）",
+  ignore: dictUrl === undefined,
+  fn: () => {
+    const dict = jtd();
+    const rules = testRules();
+    const tokenizer = textTokenizer();
+    const base = analyzeSbv2Text(dict, TEXT, tokenizer, rules);
+    assertThrows(
+      () =>
+        analyzeSbv2Text(dict, TEXT, tokenizer, rules, {
+          prosody: base.prosody,
+          givenTone: base.tones,
+        }),
+      Sbv2InputError,
+      "同時に指定できない",
+    );
+  },
+});
+
+Deno.test({
+  name: "overlayFor: 解決済み OverlayDictionary はそのまま使う（毎回作り直さない）",
+  ignore: dictUrl === undefined,
+  fn: () => {
+    const dict = jtd();
+    const cache: {
+      defaultOverlay: readonly OverlayEntry[] | OverlayDictionary | undefined;
+      defaultOverlayResolved: OverlayDictionary | undefined;
+    } = { defaultOverlay: undefined, defaultOverlayResolved: undefined };
+    const resolved = new OverlayDictionary(dict, [entry("カルメ", 1)]);
+
+    // 要求側: 解決し直さない（数千語の辞書を毎合成で解決しないための席）。
+    assertStrictEquals(overlayFor(cache, dict, resolved), resolved);
+    // 既定席: 解決済みで置いても同じものが返り続ける。
+    cache.defaultOverlay = resolved;
+    assertStrictEquals(overlayFor(cache, dict, undefined), resolved);
+    assertStrictEquals(overlayFor(cache, dict, undefined), resolved);
   },
 });

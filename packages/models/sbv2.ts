@@ -24,6 +24,19 @@ export type {
 } from "./src/sbv2/pipeline.ts";
 
 /**
+ * 下書き（アクセント句 / モーラ）の語彙。`analyzeProsody` が返し、核を直したものを `generate` の
+ * `prosody` へ戻す。**SBV2 が実際に読む欄だけ**を持つ（yomi の解析結果の部分集合 — 渡せるのに
+ * 効かない欄を公開面に作らないため）。
+ */
+export type { Sbv2AccentPhrase, Sbv2Mora, Sbv2Prosody } from "./src/sbv2/text/prosody.ts";
+
+/**
+ * 入力起因の失敗（呼び手が渡した要求が受理できない）。内部不変条件の破れは素の `Error` のまま
+ * 飛ぶので、HTTP サーバーなら `instanceof` で 400 と 500 を分けられる。
+ */
+export { Sbv2InputError } from "./src/sbv2/errors.ts";
+
+/**
  * 公開配布リポの既定ソース（pin 済み commit SHA — ADR 0073）。`ref` 省略の
  * {@link Sbv2Pipeline.fromPretrained} が読む値そのもので、追従へ切り替える利用者が
  * `{ ...SBV2_DEFAULT_SOURCE, revision: "main" }` と綴れるように面へ出す。
@@ -31,8 +44,12 @@ export type {
 export { SBV2_DEFAULT_SOURCE } from "./src/sbv2/config.ts";
 
 /**
- * 修正辞書エントリ（誤読・アクセントの差し替え）の綴りは `@hdae/yomi` が正本。**素通しで通す**
- * — ここで別名や変換層を作ると、辞書側の検証（読みのモーラ分割・アクセント型の範囲）と
+ * 修正辞書（誤読・アクセントの差し替え）の綴りは `@hdae/yomi` が正本。**素通しで通す** —
+ * ここで別名や変換層を作ると、辞書側の検証（読みのモーラ分割・アクセント型の範囲）と
  * 二重定義になる。
+ *
+ * `OverlayDictionary` は**型だけ**を通す（構築するなら `@hdae/yomi` から値を import する）。
+ * 常駐サーバーのように辞書が実行中に増減する側は、解決済みのものを持ち回って毎回の要求へ
+ * 載せる（`Sbv2PipelineOptions.overlay` の MUST）。
  */
-export type { OverlayEntry } from "@hdae/yomi";
+export type { OverlayDictionary, OverlayEntry } from "@hdae/yomi";

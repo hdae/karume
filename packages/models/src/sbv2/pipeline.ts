@@ -81,7 +81,9 @@ import {
   STYLE_TENSOR,
   styleVector,
 } from "./style.ts";
+import { Sbv2InputError } from "./errors.ts";
 import { analyzeSbv2Text, type Sbv2TextAnalysis } from "./text/analyze.ts";
+import type { Sbv2Prosody } from "./text/prosody.ts";
 import { bertHiddenOutput, tileBertToPhoneLevel, type TiledBert } from "./text/bert-tile.ts";
 import { buildRelPosTables } from "./text/rel-pos-tables.ts";
 import { type JpExtraRules, parseJpExtraRules, type Sbv2Knobs } from "./text/symbols.ts";
@@ -115,16 +117,22 @@ export type GeneratedAudio = {
 /**
  * テキスト解析の下書き（{@link Sbv2Pipeline.analyzeProsody} の返り値）。
  *
- * 形は `given_phone` / `given_tone` そのもの（**add_blank 前・両端 PAD 込み**）で、`tones` は
- * そのまま {@link Sbv2GenerateRequest.givenTone} へ渡せる。
+ * 編集して戻す面は {@link prosody}（句 / モーラ構造）で、`phones` / `tones` は**そこから
+ * 導出した確認用**（`given_phone` / `given_tone` そのもの・add_blank 前・両端 PAD 込み）。
  *
- * MUST: 公開するのはこの 2 欄だけ。word2ph・input_ids といった内部契約まで出すと、DeBERTa の
+ * MUST: 戻すのは `prosody` **だけ**（`generate({ text, prosody: draft.prosody })`）。派生欄まで
+ * 受け取る形にすると、核を直して戻す往復で古い `tones` が同梱され、受け側は「無視する（編集を
+ * 黙って捨てる）」か「落とす（正当な往復が通らない）」の二択になる。
+ *
+ * MUST: 公開するのはこの 3 欄だけ。word2ph・input_ids といった内部契約まで出すと、DeBERTa の
  * 語彙やトークナイザを差し替えた瞬間に外部が壊れる（それらは解析 1 回の中でしか整合しない）。
  */
 export type Sbv2ProsodyDraft = {
-  /** 音素列（両端 PAD 込み）。 */
+  /** 編集対象（アクセント核を直して {@link Sbv2GenerateRequest.prosody} へ戻す）。 */
+  readonly prosody: Sbv2Prosody;
+  /** 音素列（両端 PAD 込み）。`prosody` からの派生・読み取り専用。 */
   readonly phones: readonly string[];
-  /** トーン列（0/1、`phones` と同長）。 */
+  /** トーン列（0/1、`phones` と同長）。`prosody` からの派生・読み取り専用。 */
   readonly tones: readonly number[];
 };
 
@@ -150,13 +158,31 @@ export type Sbv2GenerateRequest = {
   /**
    * この 1 回だけ効かせる修正辞書。指定すると {@link Sbv2PipelineOptions.overlay} は**使わない**
    * （合成しない）— 1 回きりの語彙を既定の語彙へ足し込むと、次の合成にも効いたように見える。
+   *
+   * 解決済みの `OverlayDictionary` を渡せば毎回の解決を省ける（{@link Sbv2PipelineOptions.overlay}
+   * の MUST を参照 — 同じ辞書に対して解決したものであることは検証できない）。
    */
-  readonly overlay?: readonly OverlayEntry[];
+  readonly overlay?: readonly OverlayEntry[] | OverlayDictionary;
+  /**
+   * 編集済みの下書き（{@link Sbv2Pipeline.analyzeProsody} で採った {@link Sbv2ProsodyDraft.prosody}
+   * のアクセント核を直したもの）。
+   *
+   * MUST: 下書きは**同じ `text`・同じ `overlay`** で採ったものを戻す。解析が生む音素列と位置ごとに
+   * 一致しなければ落とす（長さだけでなく内容まで見る）ので、text の取り違え・梱包規則の外部
+   * 再実装のズレ・音素数が変わる編集（モーラの読み替え・記号の増減）はここで止まる。読みを
+   * 変えたいときは {@link overlay} で解析からやり直す。
+   *
+   * MUST: {@link givenTone} との同時指定は落とす（どちらが勝つかの規則を作らない）。
+   */
+  readonly prosody?: Sbv2Prosody;
   /**
    * トーンの直接指定（`given_tone`）。**0/1 の生値**で、長さは解析の音素列
    * （add_blank 前・両端 PAD 込み = {@link Sbv2ProsodyDraft.phones} と同長）と一致する MUST。
    * 長さ・値域が外れたら落とす（黙って切り詰めない）。下書きは
    * {@link Sbv2Pipeline.analyzeProsody} で採る。
+   *
+   * 音素単位の低レベル席（梱包規則を呼び手が知っている前提）。アクセント句・モーラ単位で
+   * 直すなら {@link prosody} を使う。
    */
   readonly givenTone?: readonly number[];
 };
@@ -192,10 +218,19 @@ export type Sbv2PipelineOptions = {
   readonly dictionary?: JtdDictionary;
   /**
    * 修正辞書（誤読・アクセントの差し替え）の既定席。このインスタンスの全ての解析に効く。
-   * 辞書に対して解決するので、実体化は辞書が揃ってから 1 度だけ（以降は使い回す）。
+   * エントリ列を渡した場合の実体化は辞書が揃ってから 1 度だけ（以降は使い回す）。
    * 1 回きりの差し替えは {@link Sbv2GenerateRequest.overlay} を使う。
+   *
+   * 実行中に増減するユーザー辞書は、呼び手が `OverlayDictionary` を作り直して毎回の要求へ
+   * 載せる運用になる（このインスタンスは可変状態を持たない）。解決済みのものを渡せば、
+   * 数千語の辞書でも合成ごとの解決コストは掛からない。
+   *
+   * MUST: 解決済みで渡すなら**同じ辞書に対して解決したもの**であること。`OverlayDictionary` は
+   * 構築元の辞書を保持しないので karume 側では検証できず、別の辞書で解決したものを渡すと
+   * 文脈 ID がずれたまま合成が通る（沈黙誤値）。{@link dictionary} に `JtdDictionary` を渡して
+   * 両側で 1 本を共有するのが確実。
    */
-  readonly overlay?: readonly OverlayEntry[];
+  readonly overlay?: readonly OverlayEntry[] | OverlayDictionary;
 };
 
 /** {@link Sbv2Pipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。 */
@@ -473,28 +508,56 @@ type Sbv2State = {
     component: Sbv2RunComponent,
     diagnostics: SessionDiagnostics,
   ) => void;
-  /** 既定の修正辞書エントリ（{@link Sbv2PipelineOptions.overlay}）。解決前の生の宣言。 */
-  readonly overlayEntries: readonly OverlayEntry[] | undefined;
-  /** 日本語辞書。初回の解析で埋まって以降は使い回す（可変欄 — インスタンス状態）。 */
-  dictionary: JtdDictionary | undefined;
+  /** 既定席の修正辞書（{@link Sbv2PipelineOptions.overlay}）。生のエントリ列か解決済みか。 */
+  readonly defaultOverlay: readonly OverlayEntry[] | OverlayDictionary | undefined;
   /**
-   * `overlayEntries` を辞書に対して解決したもの（可変欄）。辞書が揃うまで作れないので遅延で
-   * 埋める。**解決は (辞書, entries) の純関数**で、両者ともここから先は不変なので、値が
-   * 独立に動く余地は無い（1 度だけ作って持つ）。
+   * 日本語辞書の取得（可変欄 — インスタンス状態）。**値ではなく Promise** を持つ
+   * （{@link ensureDictionary} の MUST）。
    */
-  overlay: OverlayDictionary | undefined;
+  dictionary: Promise<JtdDictionary> | undefined;
+  /**
+   * `defaultOverlay` をエントリ列として辞書に対して解決したもの（可変欄）。辞書が揃うまで
+   * 作れないので遅延で埋める。**解決は (辞書, entries) の純関数**で、両者ともここから先は
+   * 不変なので、値が独立に動く余地は無い（1 度だけ作って持つ）。
+   */
+  defaultOverlayResolved: OverlayDictionary | undefined;
 };
+
+/** 辞書バイト列の取得（`fetchDictionaryBytes` と同型 — テストが差し替える席）。 */
+export type DictionaryLoader = () => Promise<Uint8Array>;
 
 /**
  * 日本語辞書を確保する（初回だけ取得に出て、以降はインスタンスが持つ — モジュール doc の NOTE）。
  * `generate` も `analyzeProsody` もここを通るので、19MB を取りに出るのは 1 度きり。
+ *
+ * MUST: 保持するのは**値ではなく Promise**。値で持つと「1 度きり」を直列化鎖でしか担保できず、
+ * GPU を使わない解析まで進行中の合成の後ろに並ぶ。取得を先に置けば、await 中に並行で入った
+ * 呼び出しも同じ取得へ合流する（鎖なしで 1 度きりが成り立つ）。
+ *
+ * MUST: 失敗した Promise は欄から捨てる。持ち続けると、1 度のネットワーク失敗が以後の全ての
+ * 合成・解析へ波及し続ける（値キャッシュには無かった失敗モード）。
+ *
+ * NOTE: `load` の差し替え席と `export` はテストのため（実取得は 19MB を取りに出る）。
  */
-const ensureDictionary = async (state: Sbv2State): Promise<JtdDictionary> => {
-  if (state.dictionary === undefined) {
-    state.dictionary = JtdDictionary.load(new Uint8Array(await fetchDictionaryBytes()).buffer);
-  }
+export const ensureDictionary = (
+  state: Pick<Sbv2State, "dictionary">,
+  load: DictionaryLoader = fetchDictionaryBytes,
+): Promise<JtdDictionary> => {
+  state.dictionary ??= load()
+    .then((bytes) => JtdDictionary.load(new Uint8Array(bytes).buffer))
+    .catch((error: unknown) => {
+      state.dictionary = undefined;
+      throw error;
+    });
   return state.dictionary;
 };
+
+/** 生のエントリ列なら辞書に対して解決する（解決済みならそのまま使う）。 */
+const resolveOverlay = (
+  dictionary: JtdDictionary,
+  overlay: readonly OverlayEntry[] | OverlayDictionary,
+): OverlayDictionary =>
+  overlay instanceof OverlayDictionary ? overlay : new OverlayDictionary(dictionary, overlay);
 
 /**
  * この 1 回の解析に効かせる修正辞書を決める。
@@ -503,18 +566,22 @@ const ensureDictionary = async (state: Sbv2State): Promise<JtdDictionary> => {
  * 足し込むと、1 回きりのつもりで渡した語彙が「既定にも入っていた」ように見え、次の合成で
  * 消えたのか残ったのかを呼び出し側が判別できない。
  *
+ * NOTE: 既定席のキャッシュ（`defaultOverlayResolved`）は鎖の外からも並行で埋まり得るが、解決は
+ * (辞書, entries) の純関数なので、競り合っても二重構築が起きるだけで値は同値（先に返した側も
+ * 同じ辞書を使い続ける）。
+ *
  * NOTE: 受けるのは状態の 2 欄だけ（`export` は門を直接叩くテストのため — 合成経路でここへ
  * 届くには実 IR コンテナ 3 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
  */
 export const overlayFor = (
-  cache: Pick<Sbv2State, "overlayEntries" | "overlay">,
+  cache: Pick<Sbv2State, "defaultOverlay" | "defaultOverlayResolved">,
   dictionary: JtdDictionary,
-  requested: readonly OverlayEntry[] | undefined,
+  requested: readonly OverlayEntry[] | OverlayDictionary | undefined,
 ): OverlayDictionary | undefined => {
-  if (requested !== undefined) return new OverlayDictionary(dictionary, requested);
-  if (cache.overlayEntries === undefined) return undefined;
-  cache.overlay ??= new OverlayDictionary(dictionary, cache.overlayEntries);
-  return cache.overlay;
+  if (requested !== undefined) return resolveOverlay(dictionary, requested);
+  if (cache.defaultOverlay === undefined) return undefined;
+  cache.defaultOverlayResolved ??= resolveOverlay(dictionary, cache.defaultOverlay);
+  return cache.defaultOverlayResolved;
 };
 
 /** 合成 1 回ぶんの中間値（dump 経路と診断だけが読む）。 */
@@ -549,7 +616,7 @@ const resolveRow = (
 ): number => {
   const row = names.get(name);
   if (row === undefined) {
-    throw new Error(
+    throw new Sbv2InputError(
       `${where} '${name}' は manifest に無い（利用可能: ${[...names.keys()].join(" / ")}）`,
     );
   }
@@ -557,7 +624,7 @@ const resolveRow = (
 };
 
 const finiteKnob = (value: number, name: string): number => {
-  if (!Number.isFinite(value)) throw new Error(`${name} ${value} が有限の数でない`);
+  if (!Number.isFinite(value)) throw new Sbv2InputError(`${name} ${value} が有限の数でない`);
   return value;
 };
 
@@ -572,7 +639,7 @@ const finiteKnob = (value: number, name: string): number => {
  */
 export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
   if (tokens > maxTokens) {
-    throw new Error(
+    throw new Sbv2InputError(
       `Sbv2Pipeline: トークン数 ${tokens} が配布形の上限 maxTokens=${maxTokens} を超えている` +
         "（text を短く分けて合成する）",
     );
@@ -595,7 +662,7 @@ export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
  */
 export const assertPhonemeLimit = (phonemes: number, maxTokens: number): void => {
   if (phonemes > maxTokens) {
-    throw new Error(
+    throw new Sbv2InputError(
       `Sbv2Pipeline: 音素数 ${phonemes} が配布形の上限 maxTokens=${maxTokens} を超えている` +
         "（text を短く分けて合成する）",
     );
@@ -717,9 +784,10 @@ export const openSbv2State = async (
     ...(options.onRunDiagnostics === undefined
       ? {}
       : { onRunDiagnostics: options.onRunDiagnostics }),
-    overlayEntries: options.overlay,
-    dictionary: options.dictionary,
-    overlay: undefined,
+    defaultOverlay: options.overlay,
+    // 注入された辞書は「取得済みの Promise」として持つ（欄の型を 1 本にして分岐を作らない）。
+    dictionary: options.dictionary === undefined ? undefined : Promise.resolve(options.dictionary),
+    defaultOverlayResolved: undefined,
   };
 };
 
@@ -739,7 +807,7 @@ export const synthesizeSbv2 = async (
   state: Sbv2State,
   request: Sbv2GenerateRequest,
 ): Promise<Sbv2Synthesis> => {
-  if (request.text.length === 0) throw new Error("Sbv2Pipeline: text が空");
+  if (request.text.length === 0) throw new Sbv2InputError("Sbv2Pipeline: text が空");
   const defaults = state.config.defaults;
   const speaker = request.speaker ?? defaults.speaker;
   const style = request.style ?? defaults.style;
@@ -750,7 +818,9 @@ export const synthesizeSbv2 = async (
     noiseScaleW: finiteKnob(request.noiseScaleW ?? defaults.noiseScaleW, "noiseScaleW"),
     lengthScale: finiteKnob(request.lengthScale ?? defaults.lengthScale, "lengthScale"),
   };
-  if (knobs.lengthScale <= 0) throw new Error(`lengthScale ${knobs.lengthScale} が正でない`);
+  if (knobs.lengthScale <= 0) {
+    throw new Sbv2InputError(`lengthScale ${knobs.lengthScale} が正でない`);
+  }
   const seed = request.seed ?? 0;
   const styleRow = resolveRow(state.config.styles, style, "スタイル");
   const speakerRow = resolveRow(state.config.speakers, speaker, "話者");
@@ -761,6 +831,7 @@ export const synthesizeSbv2 = async (
   const overlay = overlayFor(state, dictionary, request.overlay);
   const analysis = analyzeSbv2Text(dictionary, request.text, state.tokenizer, state.rules, {
     ...(overlay === undefined ? {} : { overlay }),
+    ...(request.prosody === undefined ? {} : { prosody: request.prosody }),
     ...(request.givenTone === undefined ? {} : { givenTone: request.givenTone }),
   });
   const phonemes = analysis.ids.phoneIds.length;
@@ -1010,32 +1081,33 @@ export class Sbv2Pipeline {
   }
 
   /**
-   * テキストを音素・トーンまで解析する（**GPU は張らない** — テキスト層だけを回す）。
+   * テキストを下書き（句 / モーラ構造 + 音素・トーン）まで解析する（**GPU は張らない** —
+   * テキスト層だけを回す）。
    *
-   * 返る `tones` はそのまま {@link Sbv2GenerateRequest.givenTone} へ渡せるので、「解析結果を
-   * 見て一部のトーンだけ直してから合成する」下書き経路になる。
+   * 返る {@link Sbv2ProsodyDraft.prosody} のアクセント核を直して
+   * {@link Sbv2GenerateRequest.prosody} へ戻せば、「解析結果を見て直してから合成する」往復に
+   * なる。`tones` をそのまま {@link Sbv2GenerateRequest.givenTone} へ渡す低レベル経路も残る。
    *
-   * MUST: 生成と同じ直列化鎖に載せる。鎖の外に出すと、辞書が未取得のうちに並行で呼ばれた
-   * ぶんだけ同じ 19MB を取りに出る（辞書取得の「1 度きり」は鎖が担保している）。
+   * MUST: 生成の直列化鎖には**載せない**。GPU を張らない解析が、進行中の合成（秒オーダー）の
+   * 後ろに並ぶ理由が無い — 辞書取得の「1 度きり」は {@link ensureDictionary} が Promise を
+   * 持つことで担保している（鎖ではない）。
    */
   async analyzeProsody(
     text: string,
-    options: { readonly overlay?: readonly OverlayEntry[] } = {},
+    options: { readonly overlay?: readonly OverlayEntry[] | OverlayDictionary } = {},
   ): Promise<Sbv2ProsodyDraft> {
-    // 判定は generate と同じく呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた
-    // 解析まで巻き添えで落ちる）。
+    // 判定は generate と同じく呼び出し時点で行う（in-flight の解析は GPU を触らないので、
+    // dispose と並走しても flush-before-destroy には関わらない）。
     if (this.#disposal !== undefined) {
       throw new Error("Sbv2Pipeline: dispose 済みでは解析できない");
     }
-    return await this.#chain(async () => {
-      const state = this.#state;
-      const dictionary = await ensureDictionary(state);
-      const overlay = overlayFor(state, dictionary, options.overlay);
-      const analysis = analyzeSbv2Text(dictionary, text, state.tokenizer, state.rules, {
-        ...(overlay === undefined ? {} : { overlay }),
-      });
-      return { phones: analysis.phones, tones: analysis.tones };
+    const state = this.#state;
+    const dictionary = await ensureDictionary(state);
+    const overlay = overlayFor(state, dictionary, options.overlay);
+    const analysis = analyzeSbv2Text(dictionary, text, state.tokenizer, state.rules, {
+      ...(overlay === undefined ? {} : { overlay }),
     });
+    return { prosody: analysis.prosody, phones: analysis.phones, tones: analysis.tones };
   }
 
   /**

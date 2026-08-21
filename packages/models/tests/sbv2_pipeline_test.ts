@@ -12,13 +12,16 @@
 //  ③ 運用上限（`maxTokens` / `maxFrames`）は配布形が宣言する — 欠けていれば読めない。
 //     ホスト側の `(T, T)` 表は 8·T² bytes 級なので、上限の無い配布形は無制限に膨らむ。
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
+import type { JtdDictionary } from "@hdae/yomi";
 import {
   assertPhonemeLimit,
   assertTiledBert,
   assertTokenLimit,
   assetJson,
+  type DictionaryLoader,
+  ensureDictionary,
   parseTokenizerAsset,
   Sbv2Pipeline,
 } from "../src/sbv2/pipeline.ts";
@@ -475,4 +478,41 @@ Deno.test("parseTokenizerAsset: 特殊 id は整数かつ語彙の行数未満",
     Error,
     "unkId 5 が語彙の行数 5 以上",
   );
+});
+
+// ---- 辞書の確保（19MB の取得を 1 度きりにする席）-----------------------------
+
+/** 必ず parse に失敗するバイト列（取得の回数だけを見たいので中身は要らない）。 */
+const brokenLoader = (): { load: DictionaryLoader; calls: () => number } => {
+  let calls = 0;
+  return {
+    load: () => {
+      calls += 1;
+      return Promise.resolve(new Uint8Array(8));
+    },
+    calls: () => calls,
+  };
+};
+
+Deno.test("ensureDictionary: 並行で入っても取得は 1 度きり（鎖に載せずに担保する）", async () => {
+  // 値で持つ実装だと、await 中に入った 2 本目が「まだ undefined」を見て同じ 19MB を取りに出る。
+  const state: { dictionary: Promise<JtdDictionary> | undefined } = { dictionary: undefined };
+  const { load, calls } = brokenLoader();
+
+  const first = ensureDictionary(state, load);
+  const second = ensureDictionary(state, load);
+  assertStrictEquals(first, second, "2 本目が別の取得を始めた");
+  await assertRejects(() => first);
+  assertEquals(calls(), 1);
+});
+
+Deno.test("ensureDictionary: 失敗した取得は欄に残さない（1 度の失敗を持ち越さない）", async () => {
+  // 失敗した Promise を持ち続けると、以後の全ての合成・解析が同じ失敗を返し続ける。
+  const state: { dictionary: Promise<JtdDictionary> | undefined } = { dictionary: undefined };
+  const { load, calls } = brokenLoader();
+
+  await assertRejects(() => ensureDictionary(state, load));
+  assertEquals(state.dictionary, undefined, "失敗した取得が欄に残っている");
+  await assertRejects(() => ensureDictionary(state, load));
+  assertEquals(calls(), 2, "2 度目が取りに出ていない");
 });

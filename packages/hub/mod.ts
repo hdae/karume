@@ -10,6 +10,20 @@
  * キャッシュを消して容量を空ける（{@link clearHubCache}）。
  *
  * 仕様の正本は `docs/decisions/0041-manifest-v2.md`（取得層は `0038-manifest-v1.md` §5）。
+ *
+ * ## 版と manifest の対応
+ *
+ * **旧版の manifest は読まない**（major が違えば unsupported format で落ちる — ADR 0041 §1）。
+ * パッケージは 3 本とも lockstep で上がるので、下の対応は `@karume/runtime` / `@karume/models`
+ * にもそのまま当てはまる。配布形（HF リポの `karume.json`）を作り直す段取りを事前に読むための表:
+ *
+ * | パッケージ版 | `format` | 主な変更 |
+ * | --- | --- | --- |
+ * | 0.1.x | `karume/1` | 初版 |
+ * | 0.2.x 〜 0.3.x | `karume/2` | model / quant の 2 軸（ADR 0041） |
+ * | 0.4.x | `karume/3` | dtype エントリの shard 欄（ADR 0071） |
+ *
+ * 配布形を上げ直す手順は `docs/release-runbook.md`。
  */
 
 export { MANIFEST_FILENAME, parseManifest } from "./src/manifest.ts";
