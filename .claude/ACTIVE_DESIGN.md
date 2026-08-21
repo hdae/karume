@@ -56,8 +56,17 @@
   修正の上アップロード・断片化検証 9/9 健全。**FN は公開保留** — 再配布の書面根拠なし・
   backlog parked）⑤**pin 焼き込み済み**（ADR
   [0073](../docs/decisions/0073-models-source-pin.md) — 3 定数 + ref optional 化）+ 0.4.0
-  lockstep bump 済み。**残 = push（ユーザー）→ CI → GitHub Release → JSR publish 確認**。
-  手順の正本 = [release-runbook](../docs/release-runbook.md)。
+  lockstep bump 済み。**CI 緑 → GitHub Release → JSR publish まで通過（2026-08-21 ユーザー
+  確認）= 波 K クローズ**。手順の正本 = [release-runbook](../docs/release-runbook.md)。
+- **波 J-4a（anima の i4 席・2026-08-21 着手）が現行**: J-4（格納席の実装裁定）から anima
+  だけ切り離す裁定を受けた先行波。第 1 段の速度実測は消化 — 正本 =
+  [research/2026-08-21-anima-i4-seat-speed.md](../docs/research/2026-08-21-anima-i4-seat-speed.md)。
+  素の RTN で i4 系列 + `w4` / `w4-a8-s16` を新設（適格 = 型 ∧ g32 整除の一般形のみ・DiT の
+  linear 453 本が i4・patchify 入口 1 本だけ i8）。**取得量 −21.2% と引き換えに DiT が既定の
+  約 2.0 倍遅い** — i4 常駐は `linearCompute: "i8a8"` の述語（i8 常駐が必要条件）から外れ、
+  fail loudly せず f32 計算経路へ流れるため。**i4 席に `linearCompute` を宣言してはいけない**
+  （選んでも挙動が変わらない嘘の席になる）。残は GPTQ 結線（校正コーパスの新設 = 現状の校正
+  入力は評価プロンプトと逐語同一）・席の位置づけ・w4a8（perf-ledger Q-8）・公開可否の裁定。
 
 ## Open decisions
 
