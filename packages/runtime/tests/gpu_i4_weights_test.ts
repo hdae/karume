@@ -24,10 +24,12 @@ import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/op
 import { conv1dUsesVec4 } from "../src/kernels/conv1d.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import { i4EligibleInitializers } from "../src/runtime/plan.ts";
+import { linearI8a8Key, linearI8a8UsesVec4 } from "../src/kernels/linear-i8a8.ts";
+import { quantizeRowsTieMargin, referenceLinearW4a8 } from "../src/reference/i8a8.ts";
 import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import { fill, type FilledTensor } from "./helpers/graph.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;
 
@@ -1019,14 +1021,41 @@ Deno.test({
 });
 
 Deno.test({
-  name: "linearCompute 'i8a8' でも i4 常駐は通常の f32 計算経路で正しく走る（実 GPU）",
+  name: "linearCompute 'i8a8' × i4 常駐は w4a8 経路（整数内積）で走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    // i8a8 は「i8 常駐」を条件に含む opt-in（ADR 0025 系）— i4 常駐は f32 / f16 常駐と同じく
-    // 通常経路で走る（縮退ではなく i4 の実装済み経路そのもの — 挙動をここで固定する）。
+    // ノブ `linearCompute: "i8a8"` の意味は「活性を i8 にして整数内積で計算する」で、重みの
+    // 格納形は別軸（i8 常駐 → w8a8 / i4 常駐 → w4a8 — perf-ledger Q-8）。**この組の挙動を
+    // ここで固定する**という意図は据え置いたまま、期待を w4a8 経路へ書き換えてある
+    //（以前は「i4 常駐は f32 計算経路へ流れる」を固定していた — その仕様は無くなった）。
+    // 経路そのものの網羅（v4 / タイル端 / group 2 種 / dp4a 対比）は
+    // tests/gpu_i8a8_test.ts の w4a8 節が持つ。
     const testCase = CASES[1];
+    const { m, n, k, groupSize } = {
+      m: testCase.x.shape[0],
+      n: testCase.weight.shape[0],
+      k: testCase.weight.shape[1],
+      groupSize: testCase.groupSize,
+    };
     const quantized = quantizeI4(testCase.weight.data, testCase.weight.shape, testCase.groupSize);
-    const gpu = await acquireGpu();
+    // MUST: 活性は**丸め境界から十分離れた**列にする。この節の SIGNED（0.75 刻み）は x/s が
+    // 半整数に乗り、GPU の除算に許された 2.5 ULP で量子化値が ±1 段揺れる（実測余裕
+    // 3.8e-6）。atol=0 は「境界から離れたデータでだけ成立する契約」なので、ここは i8a8 側と
+    // 同じ非共約の刻みを使い、余裕を毎回実測して門にする（src/reference/i8a8.ts の docstring）。
+    const x = fill([m, k], (i) => ((i % 29) - 14) * 0.3717 + 0.0131);
+    const margin = quantizeRowsTieMargin(x.data, m, k);
+    assert(margin > 1e-3, `丸め境界からの余裕が ${margin} しかない`);
+    const expected = referenceLinearW4a8({
+      x: x.data,
+      weight: quantized.q,
+      weightScale: quantized.scale,
+      bias: testCase.bias.data,
+      m,
+      n,
+      k,
+      groupSize,
+    });
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       const session = await createSession(
         gpu,
@@ -1034,9 +1063,28 @@ Deno.test({
         { linearCompute: "i8a8" },
       );
       try {
-        const output = (await session.run({ x: testCase.x }))["y"];
-        const report = compareTensors(output, expectedLinear(testCase, quantized));
-        assertEquals(report.pass, true, formatAllclose(report));
+        const output = (await session.run({ x }))["y"];
+        // MUST: atol=0（group の中は i32 の厳密内積で、浮動小数の演算は k/g + 1 回だけ）。
+        // tolerance で吸収する余地が構造的に無いので allclose では緩すぎる。
+        assertEquals(output.shape, [m, n], "出力の形");
+        for (let i = 0; i < expected.length; i += 1) {
+          assertEquals(output.data[i], expected[i], `w4a8 出力[${i}]`);
+        }
+        // 診断で w4a8 が走ったことが読める（格納判別子 + group 長 — ADR 0021 / 0069）
+        const diagnostics = session.diagnostics();
+        assertEquals(diagnostics.pipelineCount, 2, "quantize_rows + w4a8 GEMM の 2 本");
+        const keys = (diagnostics.lastRunTiming?.entries ?? []).map((entry) => entry.key);
+        if (keys.length > 0) {
+          assertEquals(
+            keys.includes(linearI8a8Key(linearI8a8UsesVec4(n), true, undefined, "i4", groupSize)),
+            true,
+            `走ったキー: ${keys.join(" / ")}`,
+          );
+          assert(
+            keys.some((key) => key.endsWith(`:wi4g${groupSize}`)),
+            "診断キーに i4 常駐の group 長が乗っていない",
+          );
+        }
       } finally {
         await session.dispose();
       }

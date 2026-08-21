@@ -14,6 +14,12 @@ import { F32_TINY } from "./i8.ts";
 export type QuantizedI4 = {
   /** safetensors に載せる I4 の生バイト列（numel / 2 バイト）。 */
   readonly bytes: Uint8Array<ArrayBuffer>;
+  /**
+   * 量子化後の**整数値** `q ∈ [−7, 7]`（平坦・pack 前）。w4a8 の CPU 参照
+   * （`referenceLinearW4a8`）が受け取る形で、`bytes` と同じループで作る — バイト列から
+   * 割り直すと nibble 順の仕様がテスト側にも 2 箇所できる。
+   */
+  readonly q: Int8Array<ArrayBuffer>;
   /** group ごとの scale（平坦 = 行 × group 順）。 */
   readonly scale: Float32Array<ArrayBuffer>;
   /** scale テンソルの group 形 shape（rank 非依存の rank 2 = `[shape[0], 行長 / g]`）。 */
@@ -59,14 +65,21 @@ export const quantizeI4 = (
 
   // pack: 要素 2i = 下位 nibble / 2i+1 = 上位・u = q + 8（正本 = emit.py の pack_int4）
   const bytes = new Uint8Array(values.length / 2);
+  const q = new Int8Array(values.length);
   for (let i = 0; i < values.length; i += 1) {
     const row = Math.floor(i / width);
     const group = Math.floor((i % width) / groupSize);
     const ratio = values[i] / scale[row * groups + group];
     const rounded = Math.sign(ratio) * Math.round(Math.abs(ratio));
-    const u = Math.max(-7, Math.min(7, rounded)) + 8;
-    bytes[i >> 1] |= (i & 1) === 1 ? u << 4 : u;
+    q[i] = Math.max(-7, Math.min(7, rounded));
+    bytes[i >> 1] |= (i & 1) === 1 ? (q[i] + 8) << 4 : q[i] + 8;
   }
   const scaleShape = [rows, groups];
-  return { bytes, scale, scaleShape, values: decodeI4(bytes, shape, scale, scaleShape, groupSize) };
+  return {
+    bytes,
+    q,
+    scale,
+    scaleShape,
+    values: decodeI4(bytes, shape, scale, scaleShape, groupSize),
+  };
 };

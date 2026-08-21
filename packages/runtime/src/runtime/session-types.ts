@@ -130,11 +130,19 @@ export type SessionOptions = {
   /**
    * linear の実行形（既定 `"f32"` = 従来どおり）。
    *
-   * `"i8a8"` は **i8 で GPU 常駐している重みの linear** だけに効き、活性を per-token i8 へ
-   * 量子化して整数内積で回す（設計 = docs/research/2026-08-03-dp4a-w8a8-design.md）。
+   * `"i8a8"` は **整数常駐（i8 / i4）の重みの linear** に効き、活性を per-token i8 へ
+   * 量子化して整数内積で回す。ノブが指すのは「活性の i8 化 + 整数内積」だけで、**重みの
+   * 格納形は別軸** — 格納形で数値契約の違う 2 変種に分かれる:
+   * - i8 常駐 → **w8a8**: 縮約全体が 1 つの i32 で丸めは dequant の 1 回、`xs · wscale` を
+   *   先に 1 つの f32 へ畳んでから掛ける（設計 = docs/research/2026-08-03-dp4a-w8a8-design.md）。
+   * - i4 常駐 → **w4a8**: group ごとに i32 内積して group 境界で f32 へ flush するので、
+   *   丸めは `k/g + 1` 回。wscale が group ごとに変わり畳めないため `xs` は**最後の fma
+   *   1 回**へ回る（この xs の掛け位置が w8a8 との唯一の数値契約差）。起票は
+   *   docs/perf-ledger.md の Q-8、契約は src/kernels/linear-i8a8.ts の「w4a8 変種」節。
+   *
    * `"f16"` は共有タイルを f16 に落とす計算変種（ADR 0028）で、重み格納が f32 / f16 の
    * linear に効く（**i8 常駐の重みとは組めない** — w8a16 は未実装なので fail loudly）。
-   * MUST: 既定は `"f32"` — i8 / f16 資産を自動で低精度実行にすると既存の PNG sha256 門と
+   * MUST: 既定は `"f32"` — i8 / i4 / f16 資産を自動で低精度実行にすると既存の PNG sha256 門と
    * E2E tolerance が黙って変わる。opt-in 以外はあり得ない。
    */
   readonly linearCompute?: "f32" | "i8a8" | "f16";

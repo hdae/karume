@@ -1,7 +1,9 @@
-// w8a8 linear（活性 per-token i8 × 重み per-channel i8 の整数内積）の実行経路。
+// w8a8 / w4a8 linear（活性 per-token i8 × 重み i8 per-channel / i4 group の整数内積）の
+// 実行経路。
 //
-// 設計 = docs/research/2026-08-03-dp4a-w8a8-design.md、実装 = src/kernels/quantize-rows.ts +
-// src/kernels/linear-i8a8.ts、opt-in = `SessionOptions.linearCompute: "i8a8"`（既定 "f32"）。
+// 設計 = docs/research/2026-08-03-dp4a-w8a8-design.md（w4a8 は perf-ledger Q-8）、実装 =
+// src/kernels/quantize-rows.ts + src/kernels/linear-i8a8.ts、opt-in =
+// `SessionOptions.linearCompute: "i8a8"`（既定 "f32"・重みの格納形は別軸）。
 //
 // ## このファイルが固定する数値契約
 //
@@ -10,6 +12,8 @@
 // 出力 1 要素あたり 3 つだけ（f32(acc) / xs·wscale / fma）」の 2 点だけ。したがって、
 // タイル分割・K 端数の 0 埋め・共有メモリの配置をどう変えても値は 1 ビットも動かないはずで、
 // 動いたらそれは実装の誤り — tolerance で吸収する余地が構造的に無い。
+// w4a8 も同じ性質だが根拠がずれる（group の中だけが i32 厳密で、浮動小数の演算は
+// `k/g + 1` 回）— 節ごとの docstring を参照。
 //
 // MUST: 比較は `compareTensors` ではなく {@link assertExact}（`===` の全数比較）で行う。
 // allclose は非有限を全て不合格にするので、NaN 行の伝播（設計の一部）を検証できない。
@@ -46,6 +50,7 @@ import {
   quantizeRowsReference,
   quantizeRowsTieMargin,
   referenceLinearI8a8,
+  referenceLinearW4a8,
   roundTiesToEven,
 } from "../src/reference/i8a8.ts";
 import {
@@ -59,6 +64,7 @@ import { linearKey } from "../src/kernels/linear.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { buildSafetensors, f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
+import { quantizeI4 } from "./helpers/i4.ts";
 import { fill, type FilledTensor } from "./helpers/graph.ts";
 import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
@@ -657,6 +663,260 @@ Deno.test({
       // 既定の f32 経路では同じモデルが普通に走る（門が i8a8 経路だけのものであること）
       const baseline = await runLinear(gpu, prepared, {});
       assertEquals(baseline.y.shape, [1, 4]);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// w4a8（i4 常駐の重み × per-token i8 活性 — perf-ledger Q-8）
+// ---------------------------------------------------------------------------
+
+/**
+ * この節が固定する数値契約は i8 変種と**同じ atol=0** で、成立の根拠だけが違う:
+ * group の中は i32 の厳密内積・group 境界でだけ f32 へ 1 回 flush・最後に xs を 1 回。
+ * したがって浮動小数の演算は出力 1 要素あたり `k/g + 1` 回に固定され、タイル分割・
+ * 充填の担当・dp4a / エミュのどれを変えても値は 1 ビットも動かない。
+ *
+ * MUST: 期待値に **f32 i4 経路（fake-quant 重みの f32 GEMM）を使わない**。あちらは
+ * 活性が f32 のままなので、一致してしまうなら活性量子化が効いていない — 恒真化そのもの。
+ * 下の「既定経路と値が割れる」門がその裏取りになる。
+ * MUST: 重みは**隣接要素の符号を交互**にする（nibble の上下を取り違えても対称パターンでは
+ * 値が合う — ADR 0069 決定 4 ①。i4lanes の並びに対する唯一の値の側の検出器）。
+ * MUST: 重みは **group ごとに振幅を変える**（全 group 同じ scale だと group 添字の
+ * 取り違え〈行/group の入れ替え・shift 誤り〉が一切値に出ない）。
+ */
+const groupVarying = (cols: number, groupSize: number) => (i: number): number => {
+  const group = Math.floor((i % cols) / groupSize);
+  const row = Math.floor(i / cols);
+  const base = (0.125 + (i % 11) * 0.5) * (i % 2 === 0 ? 1 : -1);
+  return base * (1 + group * 0.75 + (row % 5) * 0.25);
+};
+
+/** `linear(x, w, b)` 1 本のグラフ（w は i4 + group scale）。 */
+const i4LinearModel = (
+  m: number,
+  n: number,
+  k: number,
+  groupSize: number,
+  quantized: ReturnType<typeof quantizeI4>,
+  bias: FilledTensor,
+): ArrayBuffer => {
+  const graph: GraphJson = {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["linear"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
+    outputs: ["y"],
+    initializers: {
+      w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: groupSize } },
+      b: { tensor: "m.b", storage: { dtype: "f32" } },
+    },
+    values: {
+      w: { dtype: "f32", shape: [n, k] },
+      b: { dtype: "f32", shape: [n] },
+      y: { dtype: "f32", shape: [m, n] },
+    },
+    nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
+  };
+  return buildSafetensors(
+    [
+      { name: "m.w", dtype: "I4", shape: [n, k], data: quantized.bytes },
+      {
+        name: "m.s",
+        dtype: "F32",
+        shape: [...quantized.scaleShape],
+        data: f32Bytes([...quantized.scale]),
+      },
+      { name: "m.b", dtype: "F32", shape: [n], data: f32Bytes([...bias.data]) },
+    ],
+    { karume_ir: JSON.stringify(graph) },
+  );
+};
+
+type W4a8Case = {
+  readonly name: string;
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  readonly groupSize: number;
+};
+
+/**
+ * 形の踏み分け。
+ *
+ * MUST: **v4 経路とスカラ経路を対で持つ**（書き出しのガードが変種ごとに別の式）。
+ * MUST: **m / n をタイル辺（128 × 64）を跨がせる**（1 タイル未満に潰れるとガードが一度も
+ * 偽にならない）。
+ * MUST: **group が行内で 2 回以上変わる形**を含める（1 group / 行だと flush が 1 回きりに
+ * なり、group 添字も畳み順も検証されない）。
+ * MUST: **group = K タイル（g16）と 2 タイル / group（g32）の両方**を持つ（内側ループの
+ * 上限が 1 のときだけ通る誤り〈gbase の掛け忘れ〉を塞ぐ）。
+ */
+const W4A8_CASES: readonly W4a8Case[] = [
+  // v4 / m = 130 で行タイル 2 枚・n = 68 で列タイル 2 枚（最終タイルの有効 quad は 16 中 1）
+  // / k = 96 g32 = 行内 3 group・1 group が K タイル 2 枚
+  { name: "w4a8 v4 [130,96] × W[68,96] g32", m: 130, n: 68, k: 96, groupSize: 32 },
+  // スカラ（n % 4 != 0）/ m = 129・n = 67 でどちらもタイル辺を跨ぐ / k = 48 g16 = 行内
+  // 3 group・**1 group がちょうど K タイル 1 枚**
+  { name: "w4a8 スカラ [129,48] × W[67,48] g16", m: 129, n: 67, k: 48, groupSize: 16 },
+  // 1 タイルに収まる小さい形（ガードが全て真のまま通る経路）・行内 1 group
+  { name: "w4a8 v4 小 [3,32] × W[8,32] g32", m: 3, n: 8, k: 32, groupSize: 32 },
+  // スカラ小 / k = 96 g32 = 行内 3 group（v4 の A と group 構成だけ揃えた対照）
+  { name: "w4a8 スカラ 小 [17,96] × W[19,96] g32", m: 17, n: 19, k: 96, groupSize: 32 },
+];
+
+type PreparedW4a8 = {
+  readonly model: ArrayBuffer;
+  readonly x: Tensor;
+  readonly expected: Float32Array<ArrayBuffer>;
+};
+
+const prepareW4a8 = (testCase: W4a8Case): PreparedW4a8 => {
+  const { m, n, k, groupSize } = testCase;
+  const weight = fill([n, k], groupVarying(k, groupSize));
+  const quantized = quantizeI4(weight.data, [n, k], groupSize);
+  // 恒真化の門: 隣接要素の符号が交互でないと nibble の取り違えが値に出ない
+  let alternating = 0;
+  for (let i = 0; i + 1 < quantized.q.length; i += 1) {
+    if (quantized.q[i] > 0 && quantized.q[i + 1] < 0) alternating += 1;
+  }
+  if (alternating * 4 < quantized.q.length) {
+    throw new Error(`${testCase.name}: 符号が交互になっている隣接対が ${alternating} 組しかない`);
+  }
+  const bias = fill([n], SIGNED);
+  const x = fill([m, k], SIGNED);
+  // atol=0 を主張してよいデータであることの門（ファイル冒頭の {@link SIGNED} の MUST）
+  const margin = quantizeRowsTieMargin(x.data, m, k);
+  if (!(margin > TIE_MARGIN)) {
+    throw new Error(`${testCase.name}: 丸め境界からの余裕が ${margin} しかない`);
+  }
+  const expected = referenceLinearW4a8({
+    x: x.data,
+    weight: quantized.q,
+    weightScale: quantized.scale,
+    bias: bias.data,
+    m,
+    n,
+    k,
+    groupSize,
+  });
+  return { model: i4LinearModel(m, n, k, groupSize, quantized, bias), x, expected };
+};
+
+Deno.test({
+  name:
+    "linearCompute:'i8a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      for (const testCase of W4A8_CASES) {
+        const prepared = prepareW4a8(testCase);
+        const actual = await runLinear(gpu, prepared, { linearCompute: "i8a8" });
+        assertEquals(actual.y.shape, [testCase.m, testCase.n], testCase.name);
+        assertExact(actual.y.data, prepared.expected, testCase.name);
+        // 恒真化の門: 出力が定数なら「一致」は何も検証していない
+        assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: 出力が定数`);
+        // 実際に w4a8 経路を通っている（quantize_rows + w4a8 GEMM の 2 本）
+        assertEquals(actual.pipelineCount, 2, `${testCase.name}: パイプライン本数`);
+        if (actual.keys.length > 0) {
+          const key = linearI8a8Key(
+            linearI8a8UsesVec4(testCase.n),
+            true,
+            undefined,
+            "i4",
+            testCase.groupSize,
+          );
+          assertEquals(
+            actual.keys,
+            [key, QUANTIZE_ROWS_KEY].sort(),
+            `${testCase.name}: 走ったパイプラインキー`,
+          );
+          // 診断で「i4 常駐 × その group 長」が読めること（ADR 0021）
+          assertEquals(
+            key.endsWith(`:wi4g${testCase.groupSize}`),
+            true,
+            `${testCase.name}: 判別子`,
+          );
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "w4a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（i4 レーン展開は内積変種に依らない・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      const dots: readonly I8a8Dot[] = ["dp4a", "emu"];
+      for (const testCase of W4A8_CASES) {
+        const prepared = prepareW4a8(testCase);
+        const results: Record<string, Tensor> = {};
+        for (const dot of dots) {
+          const options: SessionOptions = { linearCompute: "i8a8", [I8A8_DOT]: dot };
+          const actual = await runLinear(gpu, prepared, options);
+          results[dot] = actual.y;
+          if (actual.keys.length > 0) {
+            assertEquals(
+              actual.keys.includes(
+                linearI8a8Key(
+                  linearI8a8UsesVec4(testCase.n),
+                  dot === "dp4a",
+                  undefined,
+                  "i4",
+                  testCase.groupSize,
+                ),
+              ),
+              true,
+              `${testCase.name}: ${dot} のキー`,
+            );
+          }
+        }
+        assertExact(results["emu"].data, results["dp4a"].data, `${testCase.name}: dp4a vs エミュ`);
+        // どちらも TS 参照と一致する（両者が同じだけずれている形を塞ぐ）
+        assertExact(results["emu"].data, prepared.expected, `${testCase.name}: エミュ vs 参照`);
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "w4a8 は opt-in のときだけ効き、既定の f32 i4 経路とは値が割れる（活性量子化の裏取り・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      const testCase = W4A8_CASES[3];
+      const prepared = prepareW4a8(testCase);
+      // ① 既定（linearCompute 省略）は i4 資産でも従来の f32 計算経路（linear 1 本だけ）
+      const baseline = await runLinear(gpu, prepared, {});
+      assertEquals(baseline.pipelineCount, 1, "既定はパイプライン 1 本（quantize_rows が出ない）");
+      if (baseline.keys.length > 0) {
+        assertEquals(
+          baseline.keys,
+          [linearKey("i4", false, "f32", testCase.m, testCase.groupSize)],
+          "既定のキー",
+        );
+      }
+      // MUST: 既定の値は活性 f32 のままなので w4a8 の参照とは**一致しない**。一致するなら
+      // 活性量子化が効いていない = 期待値に f32 i4 経路を使ったのと同じ恒真化。
+      const w4a8 = await runLinear(gpu, prepared, { linearCompute: "i8a8" });
+      assertEquals(
+        [...baseline.y.data].some((value, index) => value !== w4a8.y.data[index]),
+        true,
+        "活性量子化が出力を変えていない（opt-in が効いていない）",
+      );
     } finally {
       gpu.destroy();
     }

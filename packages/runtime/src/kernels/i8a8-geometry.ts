@@ -123,6 +123,28 @@ export const assertI8a8Geometry = (geometry: I8a8Geometry, where: string): void 
 };
 
 /**
+ * i4 group 長と K タイルの整合門（**w4a8 変種だけ**の門 — {@link "./linear-i8a8.ts"}）。
+ *
+ * MUST: `groupSize % tileK == 0`。1 枚の K タイルが group 境界を跨ぐと、そのタイルの整数
+ * 内積に 2 つの group の重みが混ざり、flush では片方の scale しか掛からない。形も型も
+ * 合ったまま値だけが狂う**沈黙誤値**なので、生成時の fail loudly が唯一の門になる。
+ *
+ * NOTE: 逆向き（tileK が group より大きい）は上の割り切れ条件が同時に落とす。
+ */
+export const assertI8a8GroupGeometry = (
+  geometry: I8a8Geometry,
+  groupSize: number,
+  where: string,
+): void => {
+  if (groupSize % geometry.tileK !== 0) {
+    throw new CodegenError(
+      `${where}: group_size ${groupSize} が K タイル ${geometry.tileK} の倍数でない` +
+        "（1 枚の K タイルが group 境界を跨ぐと scale が混ざる）",
+    );
+  }
+};
+
+/**
  * パイプラインキーの幾何判別子。`reg64x64r8x4w16v4`（f32 骨格の {@link "./gemm.ts"}
  * `gemmKeyPart`）の流儀を保ったまま、**タイル辺だけでは幾何が決まらなくなった**ぶんを足す
  * （`M128N64` は `r8×8 wg8×16` とも `r16×8 wg8×8` とも組めるので、タイル辺だけのキーは

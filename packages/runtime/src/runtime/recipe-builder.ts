@@ -1319,8 +1319,13 @@ export class RecipeBuilder {
     const k = weight[1];
     const m = numel(x.slice(0, -1));
     const weightStorage = this.#weightStorage(step);
-    // w8a8 は **opt-in × i8 常駐 × k > 0 × k % 4 == 0** の 4 条件が揃ったときだけ（ADR 0025 予定）。
-    // 既定の "f32" では 1 バイトも挙動が変わらない。
+    // 整数内積の経路は **opt-in × 整数常駐（i8 / i4）× k > 0 × k % 4 == 0** の 4 条件が
+    // 揃ったときだけ（ADR 0025 / w4a8 は perf-ledger Q-8）。既定の "f32" では 1 バイトも
+    // 挙動が変わらない。
+    // MUST: ノブ `linearCompute: "i8a8"` の意味は「**活性を i8 にして整数内積で計算する**」で、
+    // 重みの格納形は別軸（i8 常駐 → w8a8 / i4 常駐 → w4a8）。i4 を述語から外すと、選んでも
+    // 挙動が変わらない嘘の席になる（i4 常駐が黙って f32 計算経路へ流れて dp4a の利得だけを
+    // 失う — docs/research/2026-08-21-anima-i4-seat-speed.md）。
     // MUST: `k > 0` を含める。`k == 0` は契約上有効な退化 shape（src/ops.ts の linear は
     // in=0 を許す）だが、i8a8 経路の ① `quantize_rows` は `dim >= 1` を要求するので、拾うと
     // i8a8 固有の CodegenError になる — 縮約が空 = 量子化する活性がそもそも無く、i8a8 の門と
@@ -1328,9 +1333,10 @@ export class RecipeBuilder {
     // NOTE: K=0 自体は通常経路でも 0 バイト束縛が最小束縛サイズを割って落ちる（この述語とは
     // 無関係の別要因）。
     if (
-      this.#state.linearCompute === "i8a8" && weightStorage === "i8" && k > 0 && k % 4 === 0
+      this.#state.linearCompute === "i8a8" &&
+      (weightStorage === "i8" || weightStorage === "i4") && k > 0 && k % 4 === 0
     ) {
-      await this.#buildLinearI8a8(step, binds, outs, builder, m, n, k);
+      await this.#buildLinearI8a8(step, binds, outs, builder, m, n, k, weightStorage);
       return;
     }
     // f16 計算変種（ADR 0028）。**i8 常駐の重みとは組めない**（w8a16 は未実装）ので、
@@ -1345,14 +1351,11 @@ export class RecipeBuilder {
       );
     }
     // i4 も同型（w4a16 は未実装 — ADR 0069。黙って f32 計算へ落とさない理由は i8 と同文）。
-    // NOTE: linearCompute 'i8a8' × i4 常駐は**通常の f32 計算経路**へ流れる — i8a8 の述語が
-    // 「i8 常駐」を含む opt-in で、f32 / f16 常駐が通常経路で走るのと同じ扱い（縮退ではなく
-    // i4 の実装済み経路そのもの）。
     if (compute === "f16" && weightStorage === "i4") {
       throw new ExecutionError(
         `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
           "linearCompute 'f16' は i4 常駐の重みとは組めない（w4a16 は未実装 — ADR 0069）。" +
-          "linearCompute を 'f32' にするか、この重みを f32 / f16 格納で持つこと",
+          "linearCompute を 'i8a8' にするか、この重みを f32 / f16 格納で持つこと",
       );
     }
     const v4 = gemmUsesVec4(k, n);
@@ -1389,15 +1392,17 @@ export class RecipeBuilder {
   }
 
   /**
-   * linear の **w8a8 変種**（opt-in — {@link SessionOptions.linearCompute}）。**1 ノード =
-   * 2 dispatch**（融合 attention と同じ「複数 dispatch で 1 ノード」の扱い）:
+   * linear の **w8a8 / w4a8 変種**（opt-in — {@link SessionOptions.linearCompute}）。
+   * **1 ノード = 2 dispatch**（融合 attention と同じ「複数 dispatch で 1 ノード」の扱い）:
    *
-   * ① `quantize_rows`（活性を per-token i8 へ・行方向 grid-stride）→ ② i8a8 GEMM（整数内積・
-   * 1 workgroup = 1 出力タイルなので上限超過は fail loudly）。
+   * ① `quantize_rows`（活性を per-token i8 へ・行方向 grid-stride）→ ② 整数内積 GEMM
+   * （1 workgroup = 1 出力タイルなので上限超過は fail loudly）。①は重みの格納形に依らず同一。
    *
    * MUST: 一時バッファ（`xq` / `xs`）は宣言 → ノード末尾で解放する。これで実行相の参照計数が
    * 閉じ（`assertDrained`）、失敗経路でも `arena.destroy()` が拾う。
-   * MUST: `k` のオーバフロー門は fail loudly。黙って通すと i32 の巻き戻りで符号ごと化ける。
+   * MUST: i32 のオーバフロー門は fail loudly。黙って通すと i32 の巻き戻りで符号ごと化ける。
+   * 門の軸は格納形で違う — i8 は **k**（縮約全体が 1 つの i32）、i4 は **group 長**
+   * （flush が group ごとなので i32 に載るのは 1 group ぶんだけ）。
    */
   async #buildLinearI8a8(
     step: NodePlan,
@@ -1407,10 +1412,13 @@ export class RecipeBuilder {
     m: number,
     n: number,
     k: number,
+    weightStorage: WeightStorage,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
     const where = `linear i8a8 [${x.join(",")}] × [${weight.join(",")}]`;
-    if (k > LINEAR_I8A8_MAX_K) {
+    // i4 は group 長がキーと WGSL（shift の焼き込み）の両方に効く（ADR 0069）。
+    const groupSize = weightStorage === "i4" ? this.#weightGroupSize(step) : undefined;
+    if (groupSize === undefined && k > LINEAR_I8A8_MAX_K) {
       throw new ExecutionError(
         `${where}: k=${k} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
           "（linearCompute を 'f32' にするか、この linear を i8 常駐から外す）",
@@ -1444,22 +1452,25 @@ export class RecipeBuilder {
     // — キーに載るので「同一キー → バイト同一 WGSL」は保たれる。
     const v4 = linearI8a8UsesVec4(n);
     const geometry = defaultI8a8Geometry("linear");
-    const key = linearI8a8Key(v4, this.#state.i8a8Dot === "dp4a", geometry);
+    const dp4a = this.#state.i8a8Dot === "dp4a";
+    const key = linearI8a8Key(v4, dp4a, geometry, weightStorage, groupSize);
     const { pipeline, layout } = await this.#state.cache.get(
       key,
-      linearI8a8Wgsl(v4, this.#state.i8a8Dot === "dp4a", geometry),
+      linearI8a8Wgsl(v4, dp4a, geometry, weightStorage, groupSize),
     );
     builder.dispatch({
       key,
       pipeline,
       layout,
-      params: this.#writeParams(linearI8a8Params(m, n, k), PARAMS_UNIFORM_USAGE),
+      params: this.#writeParams(linearI8a8Params(m, n, k, groupSize), PARAMS_UNIFORM_USAGE),
       bindings: [
         { binding: 1, source: xq },
         { binding: 2, source: binds[1] },
         { binding: 3, source: binds[2] },
         { binding: 4, source: outs[0] },
-        ...this.#weightScaleBindings(step, "i8", LINEAR_SCALE_BINDING),
+        // MUST: scale の束縛は**実際の常駐形**で引く（i8 固定にすると i4 の group scale が
+        // per-channel として配られる沈黙誤値になる）。
+        ...this.#weightScaleBindings(step, weightStorage, LINEAR_SCALE_BINDING),
         { binding: LINEAR_ACT_SCALE_BINDING, source: xs },
       ],
       workgroups: [

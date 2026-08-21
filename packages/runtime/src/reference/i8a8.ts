@@ -172,6 +172,62 @@ export const referenceLinearI8a8 = (input: LinearI8a8Input): Float32Array<ArrayB
   return out;
 };
 
+type LinearW4a8Input = {
+  /** 活性 `[m, k]`（f32・量子化前）。 */
+  readonly x: ArrayLike<number>;
+  /** 重み `[n, k]` の**量子化済み整数値**（±7 — offset 8 は展開済み）。 */
+  readonly weight: ArrayLike<number>;
+  /** 重みの group scale（`[n, k/g]` の平坦）。 */
+  readonly weightScale: ArrayLike<number>;
+  /** bias `[n]`（常に f32 — ADR 0006）。 */
+  readonly bias: ArrayLike<number>;
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  /** K 方向の group 長（`k` を割り切る）。 */
+  readonly groupSize: number;
+};
+
+/**
+ * w4a8 linear の参照 — **group ごとに i32 で厳密に畳み、group 境界でだけ f32 へ flush**:
+ *
+ * ```
+ * accf = Σ_gi fma(f32(Σ_{i∈gi} xq·wq), wscale[col, gi], accf)   // 丸め k/g 回
+ * out  = fma(accf, xs[row], bias[col])                          // + 1 回
+ * ```
+ *
+ * MUST: `xs` を group の中へ持ち込まない（`xs·wscale` を先に畳む {@link referenceLinearI8a8}
+ * の MUST は **w4a8 では成立しない** — wscale が group ごとに変わるので、畳むと丸めが
+ * `k/g` 回ぶん増えて GPU（src/kernels/linear-i8a8.ts）と atol=0 が崩れる）。
+ * MUST: 畳み順は「group 昇順」。全 group を 1 本の整数和にまとめると丸め回数が 1 回に減り、
+ * 値が割れるデータが存在する（tests/i8a8_reference_test.ts が固定する）。
+ * MUST: GPU 側のタイル構造を写さない（素の 4 重ループ — {@link referenceLinearI8a8} と同じ
+ * 規律。group はタイルではなく**量子化軸**なので、これは構造の写しではなく仕様そのもの）。
+ * NOTE: `fma` の鏡像は {@link referenceLinearI8a8} と同文（`Math.fround(a * b + c)`）で、
+ * 厳密和が 54 ビットを超える組では倍精度の中間丸めが理論上効きうる。
+ */
+export const referenceLinearW4a8 = (input: LinearW4a8Input): Float32Array<ArrayBuffer> => {
+  const { x, weight, weightScale, bias, m, n, k, groupSize } = input;
+  const groups = k / groupSize;
+  const { q, scale } = quantizeRowsReference(x, m, k);
+  const out = new Float32Array(m * n);
+  for (let row = 0; row < m; row += 1) {
+    for (let col = 0; col < n; col += 1) {
+      let accf = 0;
+      for (let group = 0; group < groups; group += 1) {
+        // 整数の厳密和（|acci| ≤ g·127·8 は 2^53 に遠く及ばないので JS の number で厳密）
+        let acci = 0;
+        for (let i = group * groupSize; i < (group + 1) * groupSize; i += 1) {
+          acci += q[row * k + i] * weight[col * k + i];
+        }
+        accf = Math.fround(Math.fround(acci) * weightScale[col * groups + group] + accf);
+      }
+      out[row * n + col] = Math.fround(accf * scale[row] + bias[col]);
+    }
+  }
+  return out;
+};
+
 /**
  * P̃ の量子化格子の端と `1/127`。
  *

@@ -210,6 +210,36 @@ fn dequant(i: u32, scale: f32) -> f32 {
 };
 
 /**
+ * i4 格納の**整数レーン展開**（w4a8 経路専用 — {@link "./linear-i8a8.ts"}）。平坦要素
+ * `i`..`i+3`（`i` は 4 の倍数）を **i8 レーン 4 詰めの u32**（`idot` / `pack4xI8` と同じ
+ * バイト並び = レーン `j` が要素 `i+j`）へ落とす。
+ *
+ * MUST: scale は掛けない。w4a8 の数値契約は「group の中は i32 の厳密内積・group 境界で
+ * だけ f32 へ flush」で、ここで f32 を混ぜると丸めが要素ごとに増える（呼び出し側が group
+ * 境界で 1 回だけ掛ける）。{@link weightLoaderWgsl} の `dequant4`（f32 計算経路）とは
+ * **役割が別**で、共有できるのは nibble の並びだけ。
+ *
+ * MUST: nibble の展開順は `dequant4` と**同一**（要素 2i = 下位 / 2i+1 = 上位・格納値
+ * `u = q + 8` — ADR 0069 決定 4。正本はエクスポータ `karume/emit.py: pack_int4`）。この
+ * 1 ファイルに閉じているのが取り違えへの唯一の構造的な防波堤で、値の側の検出器は
+ * 「隣接要素の符号を交互にした非対称パターン」の GPU 門だけ（tests/gpu_i8a8_test.ts の
+ * w4a8 節 — 対称パターンでは上下を取り違えても値が合ってしまう）。
+ *
+ * MUST: `vec4` への動的添字を作らない（Metal で threadgroup / ローカル領域へ落ちる —
+ * ACTIVE_DESIGN の Metal 落とし穴）。4 nibble は 16bit のシフト抽出だけで取り出す。
+ */
+export const i4IntegerLanesWgsl = (name: string): string => `
+// i4 格納の整数レーン展開: 平坦要素 i..i+3（i は 4 の倍数）→ i8 レーン 4 詰めの u32。
+// 1 語 = 8 要素なので 4 要素は語の上下 16bit のどちらか（(i >> 2) & 1 が選ぶ）。復元は
+// q = u − 8 の**整数のまま**（scale は group 境界の f32 flush が掛ける — ADR 0069 決定 4）
+fn i4lanes(i: u32) -> u32 {
+  let half = (${name}[i >> 3u] >> (((i >> 2u) & 1u) * 16u)) & 0xFFFFu;
+  let u = vec4<u32>(half, half >> 4u, half >> 8u, half >> 12u) & vec4<u32>(0xFu);
+  return pack4xI8(vec4<i32>(u) - vec4<i32>(8));
+}
+`;
+
+/**
  * 出力チャネル `channel` の scale を**縮約の外で 1 度だけ**読む束縛（f32 / f16 は空文字）。
  *
  * 行末に置く前提で先頭に改行が入る（f32 / f16 では空文字になり、従来の行がそのまま残る）。

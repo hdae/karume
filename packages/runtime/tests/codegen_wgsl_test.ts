@@ -153,6 +153,7 @@ import {
   dp4aAvailable,
   LINEAR_ACT_SCALE_BINDING,
   LINEAR_I8A8_MAX_K,
+  LINEAR_W4A8_MAX_GROUP,
   linearI8a8Key,
   linearI8a8Params,
   linearI8a8UsesVec4,
@@ -488,6 +489,15 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["linear_i8a8_v4.wgsl", linearI8a8Wgsl(true, true)],
     ["linear_i8a8_emu.wgsl", linearI8a8Wgsl(false, false)],
     ["linear_i8a8_emu_v4.wgsl", linearI8a8Wgsl(true, false)],
+    // w4a8（i4 常駐の重み × per-token i8 活性・perf-ledger Q-8）。**上の linear_i8a8* 4 本と
+    // 対で置く**のが条件で、この 4 本を足したことで i8 側のバイト列が動くのが最大の事故
+    // （i8 経路は 1 バイトも変わらないことが w4a8 の実装契約そのもの）。K ループが
+    // 「group 外側 × タイル内置」の 2 段になるので、共有断片（内積ループ / A 側充填）が
+    // 1 段浅い字下げのまま入るのも含めてここで凍結する。
+    ["linear_w4a8_g32.wgsl", linearI8a8Wgsl(false, true, undefined, "i4", 32)],
+    ["linear_w4a8_g32_v4.wgsl", linearI8a8Wgsl(true, true, undefined, "i4", 32)],
+    ["linear_w4a8_g32_emu.wgsl", linearI8a8Wgsl(false, false, undefined, "i4", 32)],
+    ["linear_w4a8_g32_emu_v4.wgsl", linearI8a8Wgsl(true, false, undefined, "i4", 32)],
     // 融合 attention ①QK / ③PV の i8a8 変種（設計 §7 の波 1 / 波 2）。**上の f32 / :c16
     // 変種と対で置く**のが条件で、変種追加で既定経路のバイト列が動くのが最大の事故。
     ["attention_qk_i8a8.wgsl", attentionQkI8a8Wgsl(false, true)],
@@ -631,6 +641,13 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
         linearI8a8Wgsl(v4, dp4a),
         `linear i8a8:v4=${v4}:dp4a=${dp4a}`,
       );
+      for (const groupSize of [16, 32, 64]) {
+        assertEquals(
+          linearI8a8Wgsl(v4, dp4a, undefined, "i4", groupSize),
+          linearI8a8Wgsl(v4, dp4a, undefined, "i4", groupSize),
+          `linear w4a8:v4=${v4}:dp4a=${dp4a}:g=${groupSize}`,
+        );
+      }
       assertEquals(
         attentionQkI8a8Wgsl(v4, dp4a),
         attentionQkI8a8Wgsl(v4, dp4a),
@@ -703,6 +720,15 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     // w8a8: v4 × 整数内積変種の 4 本 + 活性量子化。**dp4a とエミュを別キーにする**のが条件で、
     // 同じキーに割り当たると診断でどちらが走ったか分からなくなる（設計 §4.4-5）。
     ...[false, true].flatMap((v4) => [linearI8a8Key(v4, false), linearI8a8Key(v4, true)]),
+    // w4a8 は **格納判別子 + group 長ごとに別キー**（g は WGSL に shift として焼かれる）。
+    // g 部が載っていないと group 32 のパイプラインが group 64 の資産で走り、scale 添字が
+    // ずれた沈黙誤値になる。i8 の同じ幾何・同じ v4 のキーとも衝突しないことが条件。
+    ...[false, true].flatMap((v4) =>
+      [16, 32, 64].flatMap((groupSize) => [
+        linearI8a8Key(v4, false, undefined, "i4", groupSize),
+        linearI8a8Key(v4, true, undefined, "i4", groupSize),
+      ])
+    ),
     // 融合 attention ①QK / ③PV の i8a8 変種も同じ規律
     // （f32 / :c16 / i8a8 の 3 系統 × 段の 2 本が全て別キー）
     ...[false, true].flatMap((v4) => [
@@ -2516,6 +2542,135 @@ Deno.test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を
   // 拡張の判定は WGSL 言語機能の列挙（device feature ではない）
   assertEquals(dp4aAvailable(new Set([DP4A_WGSL_FEATURE])), true);
   assertEquals(dp4aAvailable(new Set(["shader-f16"])), false);
+});
+
+/**
+ * w4a8（i4 常駐 × per-token i8 活性 — perf-ledger Q-8）。数値契約の担い手は
+ * 「**group 境界ちょうどの flush**」「i8 変種と非対称な xs の掛け位置」「nibble の並び」の
+ * 3 点しかないので、値ではなく生成物の構造の側で固定する（実 GPU の atol=0 突合は
+ * tests/gpu_i8a8_test.ts の w4a8 節）。
+ */
+Deno.test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最後の fma まで持ち越す", () => {
+  for (const v4 of [false, true]) {
+    for (const dp4a of [false, true]) {
+      const wgsl = linearI8a8Wgsl(v4, dp4a, undefined, "i4", 32);
+      const where = `w4a8 v4=${v4} dp4a=${dp4a}`;
+      // MUST: 動的添字はレジスタから落ちる（Metal で顕著）。i32 / f32 の**両方**の
+      // accumulator について、展開の目的そのものを見る。
+      assertEquals(wgsl.includes("acc["), false, `${where}: i32 accumulator の動的添字`);
+      assertEquals(wgsl.includes("accf["), false, `${where}: f32 accumulator の動的添字`);
+      // 内側の K タイルループは **group 長 / tileK = 2 の定数**（実行時値だと group 境界と
+      // flush の位置がずれうる）。外側だけが uniform の実行時値。
+      assertEquals(wgsl.includes("for (var gt = 0u; gt < 2u; gt = gt + 1u) {"), true, where);
+      assertEquals(wgsl.includes("for (var gi = 0u; gi < groups; gi = gi + 1u) {"), true, where);
+      assertEquals(wgsl.includes("let groups = dims.k >> 5u;"), true, `${where}: g=32 の shift`);
+      // MUST: flush は 8 行 × 2 列 quad の **16 組ちょうど 1 回ずつ**（group ごとに 1 回で、
+      // タイルごとでも出力ごとでもない — 丸めが k/g + 1 回であることの構造的な担保）。
+      for (let row = 0; row < 8; row += 1) {
+        for (const quad of [0, 1]) {
+          const flush =
+            `    accf${row}_${quad} = fma(vec4<f32>(acc${row}_${quad}), ws${quad}, accf${row}_${quad});`;
+          assertEquals(wgsl.split(flush).length, 2, `${where}: 行 ${row} quad ${quad} の flush`);
+        }
+      }
+      // group scale は [n, k/g] の平坦を列ごとの行頭 + group 番号で引く（列 scale の per-channel
+      // 解釈へ退行すると添字が gi に依らなくなる）
+      assertEquals(wgsl.includes("let wsb1 = (ocol + 1u) * groups;"), true, where);
+      assertEquals(
+        wgsl.includes(
+          "let ws0 = vec4<f32>(wscale[wsb0 + gi], wscale[wsb1 + gi], wscale[wsb2 + gi], wscale[wsb3 + gi]);",
+        ),
+        true,
+        where,
+      );
+      // MUST: nibble 抽出は 16bit のシフト（動的 vec4 添字ゼロ）で、格納値は u = q + 8。
+      // 並びは dequant4 と同一（要素 2i = 下位 / 2i+1 = 上位）。
+      assertEquals(
+        wgsl.includes(
+          "  let half = (w[i >> 3u] >> (((i >> 2u) & 1u) * 16u)) & 0xFFFFu;\n" +
+            "  let u = vec4<u32>(half, half >> 4u, half >> 8u, half >> 12u) & vec4<u32>(0xFu);\n" +
+            "  return pack4xI8(vec4<i32>(u) - vec4<i32>(8));",
+        ),
+        true,
+        `${where}: nibble 抽出`,
+      );
+      // B 側は平坦要素の添字（i8 の語添字 k4 と取り違えると 1/4 の位置を読む）
+      assertEquals(wgsl.includes("let wrow_base0 = wcol0 * dims.k;"), true, where);
+      assertEquals(wgsl.includes("let welem = t * 16u + wp * 4u;"), true, where);
+      assertEquals(wgsl.includes("wv0 = i4lanes(wrow_base0 + welem);"), true, where);
+      // MUST: xs は最後の fma へ（i8 変種の `xs * wscale` 畳みは w4a8 では成立しない）
+      assertEquals(
+        wgsl.includes(
+          v4
+            ? "out[orow0 * n4 + ocq0] = fma(accf0_0, vec4<f32>(xscale[orow0]), biasv);"
+            : "out[obase + ocol] = fma(accf0_0.x, xs, bias[ocol]);",
+        ),
+        true,
+        `${where}: xs の掛け位置`,
+      );
+      assertEquals(wgsl.includes("xs * wscale"), false, `${where}: i8 変種の畳み形が残っている`);
+      // 整数内積の変種は i8 と同じ 1 箇所だけ（共有断片 idot を使っていることの担保）
+      assertEquals(
+        wgsl.split("return dot4I8Packed(a, b);").length - 1,
+        dp4a ? 1 : 0,
+        `${where}: dot4I8Packed の出現数`,
+      );
+    }
+  }
+  // g は WGSL に焼かれるので生成物が group ごとに違う（キーの g 部と対 — 同じキーで違う
+  // 生成物、あるいは違うキーで同じ生成物になったらどちらも沈黙誤値の入口）
+  assertNotEquals(
+    linearI8a8Wgsl(true, true, undefined, "i4", 32),
+    linearI8a8Wgsl(true, true, undefined, "i4", 64),
+    "group 長が生成物に出ていない",
+  );
+  assertEquals(
+    linearI8a8Key(true, true, undefined, "i4", 32),
+    "linear:v4:i8a8:tile128x64r8x8w8x16k16v4:dp4a:wi4g32",
+  );
+  assertEquals(
+    linearI8a8Key(false, false, undefined, "i4", 64),
+    "linear:v4:i8a8:tile128x64r8x8w8x16k16:dp4aEmu:wi4g64",
+  );
+  // MUST: i8 のキーは既定引数で従来のまま（既存キーがバイト不変であることの直接の門）
+  assertEquals(linearI8a8Key(true, true, undefined, "i8"), linearI8a8Key(true, true));
+  // i4 と group 長は対（片方だけは結線バグ — weight-storage.ts の i4GroupShift）
+  assertThrows(
+    () => linearI8a8Wgsl(true, true, undefined, "i4"),
+    CodegenError,
+    "groupSize は重み i4 格納と対で渡す",
+  );
+  assertThrows(
+    () => linearI8a8Wgsl(true, true, undefined, "i8", 32),
+    CodegenError,
+    "groupSize は重み i4 格納と対で渡す",
+  );
+  // 整数内積に載らない格納形は fail loudly（f32 / f16 を渡す経路はそもそも無い）
+  assertThrows(() => linearI8a8Wgsl(true, true, undefined, "f16"), CodegenError, "i8 / i4 のみ");
+  // MUST: 1 枚の K タイル（16）が group 境界を跨ぐ形は生成時に落とす — 通すと 2 group の
+  // 重みが 1 つの i32 に混ざり、flush で片方の scale だけが掛かる沈黙誤値になる
+  assertThrows(
+    () => linearI8a8Wgsl(true, true, { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 32 }, "i4", 16),
+    CodegenError,
+    "K タイル 32 の倍数でない",
+  );
+  // params の門は k ではなく **group 長**（i8 の k 門は w4a8 に適用しない）
+  assertEquals([...linearI8a8Params(5, 8, 64, 32)], [5, 8, 64, 0]);
+  assertEquals(
+    [...linearI8a8Params(5, 8, LINEAR_I8A8_MAX_K + 32, 32)].length,
+    4,
+    "w4a8 では i8 の k 門を適用しない",
+  );
+  assertThrows(
+    () => linearI8a8Params(5, 8, 48, 32),
+    CodegenError,
+    "group_size 32 で割り切れない",
+  );
+  assertThrows(
+    () => linearI8a8Params(5, 8, LINEAR_W4A8_MAX_GROUP * 2, LINEAR_W4A8_MAX_GROUP * 2),
+    CodegenError,
+    "i32 縮約の門",
+  );
 });
 
 /**
