@@ -758,8 +758,9 @@ class TestIrodoriModelCard:
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "pipeline_tag: text-to-speech" in card
         assert "license: mit" in card
-        # 格納形を変えない配布形は 4 値のどれでもない（Hub の推論に任せる）。
-        assert "base_model_relation" not in card
+        # 既定 quant（w8a8）の DL 実体が int8 系列なので `quantized` を宣言する（sbv2 / anima と
+        # 同型。旧「f32 のまま・宣言しない」は i8 系列同梱前の陳腐化した前提だった）。
+        assert "base_model_relation: quantized" in card
         assert "Text in, waveform out" in card
         # 同梱したコーデックは帰属にも `base_model` にも並ぶ（再配布しているため）。
         assert "Semantic-DACVAE-Japanese-32dim" in card

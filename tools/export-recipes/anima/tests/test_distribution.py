@@ -814,9 +814,14 @@ class TestLegalTexts:
     def test_the_notice_states_the_modifications_with_the_lora_source(
         self, tmp_path: Path
     ) -> None:
-        """§3(d)(i) — 改変した旨を Notice に含める（何を焼いたかの出所つき）。"""
+        """§3(d)(i) — 改変した旨を **Attribution Notice の中に**含める（出所つき）。"""
         text = (self._run(tmp_path) / "NOTICE.md").read_text(encoding="utf-8")
-        assert self._flat(text).count("It has been modified as follows:") == 1
+        # 改変記載は独立節ではなく Attribution Notice 節の内側（次見出しの前）に居ること。
+        notice_section = text.split("## Not an official product")[0]
+        assert "## Attribution Notice" in notice_section
+        flat = self._flat(notice_section)
+        assert flat.count("this Attribution Notice also states that") == 1
+        assert flat.count("modified as follows:") == 1
         assert f"The official {LORA_NAME} ({LORA_SOURCE}) was baked into the weights" in text
         assert "https://civitai.com/models/2560840" in text
 

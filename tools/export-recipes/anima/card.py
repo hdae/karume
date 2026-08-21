@@ -114,6 +114,10 @@ def _merged_lora() -> list[str]:
         "Permissions listed on the source page (as of retrieval):",
         "",
         *(f"- `{name}`: {value}" for name, value in LORA_PERMISSIONS),
+        "",
+        "(These are the LoRA page's own permissions. The merged distribution in this",
+        "repository stays under the CircleStone Non-Commercial License — see the License"
+        " section below.)",
     ]
 
 

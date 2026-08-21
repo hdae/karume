@@ -51,22 +51,22 @@ LORA_PROVENANCE_FILE = "lora_provenance.json"
 LICENSE_SOURCE_PATH = Path(__file__).parent / "circlestone_license.txt"
 
 #: 配布リポ直下の `NOTICE.md`。§3(b)（Attribution Notice の掲示）+ §3(d)(i)（改変した旨を
-#: Notice に含める）+ §3(d)(iii)（公式製品と誤認させない）を 1 枚で満たす。逐語ブロックは
-#: {@link ATTRIBUTION_NOTICE}（`anima/card.py` が正本）で、残りは Karume 側の事実の記述。
+#: **Attribution Notice の中に**含める）+ §3(d)(iii)（公式製品と誤認させない）を 1 枚で満たす。
+#: 逐語ブロックは {@link ATTRIBUTION_NOTICE}（`anima/card.py` が正本）で、残りは Karume 側の
+#: 事実の記述。改変記載を独立節にせず Notice 節の内側へ置くのは §3(d)(i) の文言
+#: （"include in the Attribution Notice"）に厳格に合わせるため。
 NOTICE_MARKDOWN = (
     "\n".join(
         [
             "# Notice",
             "",
-            "## Attribution",
+            "## Attribution Notice",
             "",
             ATTRIBUTION_NOTICE,
             "",
-            "## Modifications",
-            "",
-            "This distribution is a Derivative of the CircleStone Anima model."
-            " It has been modified",
-            "as follows:",
+            "As required by the license, this Attribution Notice also states that the",
+            "applicable CircleStone Model has been modified: this distribution is a Derivative",
+            "of the CircleStone Anima model, modified as follows:",
             "",
             f"- The official {LORA_NAME} ({LORA_SOURCE}) was baked into the weights at export.",
             "- The weights were converted into the container format of the WebGPU inference"

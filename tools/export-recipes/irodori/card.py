@@ -53,8 +53,9 @@ IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 IRODORI_METADATA = CardMetadata(
     pipeline_tag=IRODORI_PIPELINE_TAG,
     base_model=(IRODORI_BASE_MODEL, IRODORI_TEXT_BACKBONE_MODEL, IRODORI_CODEC_MODEL),
-    # `base_model_relation` は置かない — この配布形は格納形を変えず（f32 のまま）コンテナだけを
-    # 移したもので、adapter / merge / quantized / finetune のどれでもない（CardMetadata の doc）。
+    # 既定 quant（w8a8）の DL 実体が int8 系列なので `quantized` を宣言する（sbv2 / anima と同型。
+    # 旧「f32 のまま・quantized ではない」は i8 系列同梱前の陳腐化した前提だった）。
+    base_model_relation="quantized",
     license="mit",
     tags=("text-to-speech", "webgpu", "japanese"),
 )
@@ -98,7 +99,7 @@ def _irodori_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _irodori_base_weights() -> list[str]:
-    """帰属節。格納形を変えていないので「変換したもの」としてだけ主張する。"""
+    """帰属節。変換 + 量子化（int8 系列の生成）を主張する — 再学習・fine-tune はしていない。"""
     return [
         "## Base weights and attribution",
         "",
@@ -119,9 +120,10 @@ def _irodori_base_weights() -> list[str]:
         "  (as of retrieval). Upstream ships it as a separate repository; it is redistributed here",
         "  in the container format as the `codec_decoder` / `codec_encoder` components so that",
         "  text-to-audio runs from this repository alone.",
-        "- **Changes made here**: conversion into the Karume container format only. No retraining,",
-        "  no fine-tuning and **no quantization** — the weights are the source checkpoint's own",
-        "  f32 values, re-laid out per graph.",
+        "- **Changes made here**: conversion into the Karume container format and **quantization**",
+        "  of the weights — every component is stored as `f32` / `f16` / `i8` series (the quant",
+        "  table below says which storage each quant selects). No retraining, no fine-tuning —",
+        "  the `f32` series is the source checkpoint's own values, re-laid out per graph.",
     ]
 
 

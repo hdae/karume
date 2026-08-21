@@ -67,7 +67,7 @@ SBV2_QUANT_ROUNDING: Mapping[str, tuple[str, ...]] = {
         "the same text encoder as `w8-bert4`, plus `front` / `voice` linear and conv1d",
         "  weights in `i4` group-32 with plain RTN. Smallest download and fastest warm",
         "  synthesis; the output is very close to `w8-bert4`, with slightly lower tension",
-        "  than `f32`.",
+        "  than the source checkpoint's unquantized f32 reference.",
     ),
 }
 
