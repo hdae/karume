@@ -108,8 +108,11 @@ J-3（g 軸スイープ）が重いため、その前にリリースとモデル
   アップロード後に SHA を焼き、3 パッケージ lockstep で publish。**PyPI は未リリースのまま**
   〈2026-08-20 確認 — PyPI に karume は存在しない・ACTIVE_DESIGN の旧記述は誤りとして訂正〉）—
   pin 焼き込み消化（`4c5e7e3` — 3 定数 + ref optional 化・pin SHA での manifest 疎通済み）・
-  0.4.0 lockstep bump 済み。**残 = push（ユーザー）→ CI 緑 → GitHub Release published →
-  JSR 3 パッケージの新 version 確認**
+  0.4.0 lockstep bump 済み → **CI 緑 → GitHub Release → JSR publish まで通過（2026-08-21
+  ユーザー確認）= 消化**
+- **0.4.1（2026-08-21・SBV2 注入席の再調整 — ADR 0072 追記 決定 4〜8）**: 追加のみ・非 breaking
+  なので配布形の作り直しは不要（`karume/3` のまま）。lockstep bump 済み。**残 = push（ユーザー）
+  → CI 緑 → GitHub Release published → JSR 3 パッケージの新 version 確認**
 
 autoregressive 波の**残項目（波外へ送り）**:
 

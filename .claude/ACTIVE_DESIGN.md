@@ -79,7 +79,8 @@
   `Error` のまま = 400/500 の分離）④`analyzeProsody` を直列化鎖の外へ（辞書は**値でなく
   Promise** を持ち、失敗は捨てる）。**音素数が変わる編集は受けない**裁定（決定 8）—
   `adjust_word2ph` は移植せず backlog parked。疑問形の上げは表現不能（limitations）。
-  **版は 0.4.1（追加のみ）で出す裁定 — lockstep bump と publish は未実施**。
+  **版は 0.4.1（追加のみ）で出す裁定 — lockstep bump 済み。残 = push（ユーザー）→ CI 緑 →
+  GitHub Release published → JSR 反映**（手順は [release-runbook](../docs/release-runbook.md) §4）。
 
 ## Open decisions
 
