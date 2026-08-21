@@ -75,21 +75,28 @@ J-3（g 軸スイープ）が重いため、その前にリリースとモデル
 
 - **K-1: manifest `karume/3` の shard 欄**（ADR [0071](decisions/0071-manifest-v3-shards.md) —
   HF 公開前締切ぶんの先行。hub 単一形パース + dist の 1 要素書き + verify_dist 追随。
-  R1 同席の API 工事 4 件と exporter 自動分割規則は release 節に残置）— 実装中
+  R1 同席の API 工事 4 件と exporter 自動分割規則は release 節に残置）— 消化（`50c4ef7`）
 - **K-2: SBV2 既定 quant を `w8-bert4` へ**（ADR 0039 決定 5 の再裁定 — w4 は f32 比
   テンション差が残るため既定は品質優先。w4 は速度/サイズ優先の opt-in。**w4 の名は据え置き**
-  〈格納形の語彙〉で、丸め方式はモデルカードの quant 備考に記載 — 2026-08-20 命名裁定）— 実装中
+  〈格納形の語彙〉で、丸め方式はモデルカードの quant 備考に記載 — 2026-08-20 命名裁定）—
+  消化（`4ad7c20`）
 - **K-3: SBV2 トーン注入席**（ADR [0072](decisions/0072-sbv2-text-injection.md) — overlay
-  辞書 + given_tone + `analyzeProsody`。非 breaking・0.4.0 同乗）— 実装中
+  辞書 + given_tone + `analyzeProsody`。非 breaking・0.4.0 同乗）— 消化（`551a7db`）
 - **K-4: dist 再生成 + HF 公開 — 対象は jvnv / irodori / anima の 3 リポ（≈14GB）**。
   **FN は公開保留**（2026-08-20 再裁定 — 一時「出典表記つき公開」に振れたが、配布者の素性と
   再配布可否が書面で確認できないため保留へ戻した。カード・notices は最小記述化済み・復活
   条件は parked 節）。irodori / anima は既存 w8a8 系のまま — GPTQ/i4 席は J-4 後に quant
   差分追加。断片化対策 = runbook §2 MUST・ライセンス確認 = 人間ゲート消化済み →
-  ユーザー Go でアップロード
+  **消化（2026-08-21 アップロード完了）**: 公開前レビュー（Codex ALL PASS + 独立レビューの
+  blocker 1 件 = irodori カードの陳腐化量子化前提を修正 `36164df`）→ 3 リポを断片化対策 env で
+  アップロード（HF main = jvnv `e766081` / irodori `5226438` / anima `5aa15e4`）→ 断片化検証
+  代表 9 ファイル全て 19.5〜62.4 MiB/term（目安 10 以上）で健全
 - **K-5: pin 焼き込み → JSR 0.4.0**（ADR [0073](decisions/0073-models-source-pin.md) —
   アップロード後に SHA を焼き、3 パッケージ lockstep で publish。**PyPI は未リリースのまま**
-  〈2026-08-20 確認 — PyPI に karume は存在しない・ACTIVE_DESIGN の旧記述は誤りとして訂正〉）
+  〈2026-08-20 確認 — PyPI に karume は存在しない・ACTIVE_DESIGN の旧記述は誤りとして訂正〉）—
+  pin 焼き込み消化（`4c5e7e3` — 3 定数 + ref optional 化・pin SHA での manifest 疎通済み）・
+  0.4.0 lockstep bump 済み。**残 = push（ユーザー）→ CI 緑 → GitHub Release published →
+  JSR 3 パッケージの新 version 確認**
 
 autoregressive 波の**残項目（波外へ送り）**:
 
@@ -115,6 +122,9 @@ autoregressive 波の**残項目（波外へ送り）**:
   実施したい意向）**: SBV2 パイプラインの入力を「yomi の解析結果だけ受ける」形へ再設計し、
   `@hdae/yomi` を models の依存から外す。ADR 0072 の注入席は結合を素通しに留めてあり、
   その際は overlay 解決が呼び手側へ移る。
+- **モデルカード定型文の条件出し**（公開前レビュー minor・2026-08-21）: `shared/` パスの
+  説明文が shared/ を持たないリポ（irodori / anima）でも出る — 空回りだが無害。core
+  `modelcard.py` の該当文を shared/ 実在時のみ出す形へ。
 - **モデル拡充の続き**: Kokoro-82M（LSTM = multi-output 待ち）・MobileSAM / SAM 2
   （conv_transpose2d）・BiRefNet_HR 2048² preset・DA-V2 可変解像度（upsample_bicubic2d）。
   候補調査の時点記録は [recon-2](research/2026-08-14-model-expansion-recon-2.md)。

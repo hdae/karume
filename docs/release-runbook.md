@@ -44,6 +44,9 @@ export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
 
 - [ ] 上の env 4 本を**同一シェルで** export してから `hf upload` を実行する
       （正本: [assets-layout.md](assets-layout.md) 公開節）
+- [ ] **書き込みトークンへ切替**: `hf auth switch --token-name "Karume Release"` —
+      既定の読み取りトークン（Karume Gated Read）のままだと LFS batch が 403 になる
+      （2026-08-21 実測）。アップロードが済んだら読み取りトークンへ戻す
 - [ ] **再アップロード時**は先に `~/.cache/huggingface/xet/*/shard-cache` を退避する
       （断片化した祖先 shard がローカルに残っていると dedup ヒットで元に戻る）
 - [ ] アップロード: `hf upload <owner>/<repo> models/<repo> . --repo-type model`

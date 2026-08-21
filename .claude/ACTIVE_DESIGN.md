@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-20
+> Last updated: 2026-08-21
 
 ## Now
 
@@ -46,17 +46,18 @@
   温間合成最速・聴感 = conv i4 で変化なし（f32 比の「テンション少し低め」は net_g RTN i4
   由来の想定内 — 品質ノブは g 軸のみ = J-3 の評価軸）。J-3（g 軸）→ J-4（格納席）は
   波 K の後へ。骨子 = backlog now 節。
-- **波 K（リリース + 公開・2026-08-20 着手）が現行**: J-3 が重いため先にリリースを挟む
-  ユーザー裁定（release 節の部分先行）。①manifest **`karume/3`** shard 欄（ADR
-  [0071](../docs/decisions/0071-manifest-v3-shards.md) — 公開前締切ぶんのみ・API 工事 4 件は
-  残置）②SBV2 既定 quant = **`w8-bert4` へ再裁定**（ADR 0039 — w4 はテンション差が残るため
-  品質優先・w4 は opt-in・丸め方式はカード備考へ）③トーン注入席（ADR
-  [0072](../docs/decisions/0072-sbv2-text-injection.md) — overlay + given_tone）④dist
-  再生成 → ライセンス人間ゲート消化 → HF 公開は **jvnv / irodori / anima の 3 リポ**
-  （**FN は公開保留** — 再配布の書面根拠なし・backlog parked。断片化対策 MUST）⑤pin
-  焼き込み（ADR
-  [0073](../docs/decisions/0073-models-source-pin.md)）→ JSR 0.4.0。手順の正本 =
-  [release-runbook](../docs/release-runbook.md)（新設）。
+- **波 K（リリース + 公開・2026-08-20 着手）はアップロードまで消化（2026-08-21）**: J-3 が
+  重いため先にリリースを挟むユーザー裁定（release 節の部分先行）。①manifest **`karume/3`**
+  shard 欄（ADR [0071](../docs/decisions/0071-manifest-v3-shards.md) — 公開前締切ぶんのみ・
+  API 工事 4 件は残置）②SBV2 既定 quant = **`w8-bert4` へ再裁定**（ADR 0039 — w4 は
+  テンション差が残るため品質優先・w4 は opt-in・丸め方式はカード備考へ）③トーン注入席（ADR
+  [0072](../docs/decisions/0072-sbv2-text-injection.md) — overlay + given_tone）④**HF 公開済み
+  = jvnv / irodori / anima の 3 リポ**（公開前レビューで irodori カードの陳腐化量子化前提を
+  修正の上アップロード・断片化検証 9/9 健全。**FN は公開保留** — 再配布の書面根拠なし・
+  backlog parked）⑤**pin 焼き込み済み**（ADR
+  [0073](../docs/decisions/0073-models-source-pin.md) — 3 定数 + ref optional 化）+ 0.4.0
+  lockstep bump 済み。**残 = push（ユーザー）→ CI → GitHub Release → JSR publish 確認**。
+  手順の正本 = [release-runbook](../docs/release-runbook.md)。
 
 ## Open decisions
 
