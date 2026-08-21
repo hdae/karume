@@ -774,7 +774,10 @@ type PreparedW4a8 = {
   readonly expected: Float32Array<ArrayBuffer>;
 };
 
-const prepareW4a8 = (testCase: W4a8Case): PreparedW4a8 => {
+const prepareW4a8 = (
+  testCase: W4a8Case,
+  xValue: (index: number, m: number, k: number) => number = SIGNED,
+): PreparedW4a8 => {
   const { m, n, k, groupSize } = testCase;
   const weight = fill([n, k], groupVarying(k, groupSize));
   const quantized = quantizeI4(weight.data, [n, k], groupSize);
@@ -787,9 +790,19 @@ const prepareW4a8 = (testCase: W4a8Case): PreparedW4a8 => {
     throw new Error(`${testCase.name}: 符号が交互になっている隣接対が ${alternating} 組しかない`);
   }
   const bias = fill([n], SIGNED);
-  const x = fill([m, k], SIGNED);
-  // atol=0 を主張してよいデータであることの門（ファイル冒頭の {@link SIGNED} の MUST）
-  const margin = quantizeRowsTieMargin(x.data, m, k);
+  const x = fill([m, k], (index) => xValue(index, m, k));
+  // atol=0 を主張してよいデータであることの門（ファイル冒頭の {@link SIGNED} の MUST）。
+  // 非有限行・全ゼロ行は丸めが走らないので対象外へ置き換える（門を残したまま非有限を通す）。
+  const gated = Float32Array.from(x.data);
+  for (let row = 0; row < m; row += 1) {
+    const slice = gated.subarray(row * k, row * k + k);
+    const exempt = slice.some((value) => !Number.isFinite(value)) ||
+      slice.every((value) => value === 0);
+    if (exempt) {
+      for (let i = 0; i < k; i += 1) slice[i] = SIGNED(row * k + i);
+    }
+  }
+  const margin = quantizeRowsTieMargin(gated, m, k);
   if (!(margin > TIE_MARGIN)) {
     throw new Error(`${testCase.name}: 丸め境界からの余裕が ${margin} しかない`);
   }
@@ -846,6 +859,54 @@ Deno.test({
     } finally {
       gpu.destroy();
     }
+  },
+});
+
+Deno.test({
+  name: "w4a8: NaN 行は行全体へ伝播し、ゼロ行と負値は厳密に一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 非有限の伝播は i8a8 と**同じ根拠に立たない** — w4a8 は `xs · wscale` の早期畳み込みを
+    // 使えず（wscale が group ごとに変わる）、`xs` を最後の fma 1 回へ回す。したがって
+    // `xs = ±Inf` かつ group 縮約が 0 の組で `fma(0, Inf, bias)` のような分岐が割れる余地があり、
+    // ファイル冒頭が全体の契約として書いている「NaN 行の伝播（設計の一部）」を新設変種でも
+    // 別に固定する。
+    const testCase = W4A8_CASES[0];
+    const { m, n } = testCase;
+    const nanRow = 2;
+    const zeroRow = 5;
+    const prepared = prepareW4a8(testCase, (index, _m, cols) => {
+      const row = Math.floor(index / cols);
+      if (row === zeroRow) return 0;
+      if (row === nanRow && index % cols === cols - 3) return Number.NaN;
+      return SIGNED(index);
+    });
+
+    const gpu = await acquireGpu();
+    let y: Tensor;
+    try {
+      y = (await runLinear(gpu, prepared, { linearCompute: "i8a8" })).y;
+    } finally {
+      gpu.destroy();
+    }
+
+    assertExact(y.data, prepared.expected, "w4a8 NaN / ゼロ行");
+    for (let col = 0; col < n; col += 1) {
+      assert(Number.isNaN(y.data[nanRow * n + col]), `NaN 行 col=${col}`);
+      assert(Number.isFinite(y.data[(nanRow + 1) * n + col]), `隣接行 col=${col}`);
+      assertEquals(
+        y.data[zeroRow * n + col],
+        prepared.expected[zeroRow * n + col],
+        `ゼロ行 col=${col}`,
+      );
+    }
+    // 恒真化の門: NaN 行・ゼロ行の外が定数なら「一致」は何も検証していない。
+    const others = [...y.data].filter((_value, index) => {
+      const row = Math.floor(index / n);
+      return row !== nanRow && row !== zeroRow;
+    });
+    assert(new Set(others).size > 1, "NaN / ゼロ行の外が定数");
+    assertEquals(y.shape, [m, n]);
   },
 });
 
