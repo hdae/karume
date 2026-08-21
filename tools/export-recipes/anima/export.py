@@ -72,6 +72,7 @@ MUST: `--lora` は **DiT の層切り詰め（`--num-layers`）より前**に焼
     <out>/<target>/model.safetensors      重み・定数 + __metadata__.karume_ir
     <out>/<target>/io.<case>.safetensors  入力と torch CPU での期待出力
     <out>/<target>/lora_provenance.json   焼き込んだ LoRA の帰属（`--lora` を焼いた対象のみ）
+    <out>/<target>/calib_provenance.json  i4 の丸め条件（`--dtype i4` の transformer のみ）
 """
 
 from __future__ import annotations
@@ -90,7 +91,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import SERIES_ROOT
-from anima.distribution import LORA_PROVENANCE_FILE
+from anima.distribution import CALIB_PROVENANCE_FILE, LORA_PROVENANCE_FILE
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -102,6 +103,7 @@ from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.quantize import (
     DEFAULT_GROUP_SIZE,
+    Int8Report,
     channel_rows,
     fake_quant_int4,
     fake_quant_int8,
@@ -126,7 +128,8 @@ WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 #: あるのは、上流が表引きを持ち込んでも**適格判定の一般形のまま**拾うため（表引きされない
 #: `nn.Embedding` が現れた場合は emit の明示指定の門が「適格でない」でその FQN を挙げて落ちる
 #: ので、deberta の `NON_LOOKUP_EMBEDDINGS` のような名指しの除外は先回りで置かない）。
-#: conv 系は i4 の展開経路が無い（conv1d は `groups == 1` 限定）ので入れない。
+#: conv 系は入れない — DiT に conv は実在しないため。core 側では conv1d も i4 適格
+#: （`groups == 1` ∧ 行長整除 — ADR 0069 追記 7）だが、ここに `nn.Conv1d` を足す実需が無い。
 I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Embedding)
 
 #: DiT block の**外**に居る i4 適格の重み（ラッパ内 FQN）。校正付き丸めは stage 逐次の駆動
@@ -659,7 +662,8 @@ def _round_i4_calibrated(
     target: str,
     i4_names: frozenset[str],
     probe: Sequence[torch.Tensor],
-) -> Mapping[str, torch.Tensor]:
+    round_int8: Callable[[], Int8Report],
+) -> tuple[Mapping[str, torch.Tensor], Int8Report]:
     """i4 適格を「block 外 = 素の RTN」「block 内 = GPTQ」へ排他に割って丸める。
 
     順序 MUST（① → ② → ③ → ④）:
@@ -669,7 +673,9 @@ def _round_i4_calibrated(
     2. **block 外の適格を先に RTN i4 で丸める** — 配布実行時に block へ入るのは i4 の
        `time_embed` が作った temb で、step をまたぐ latent も i4 の `norm_out` / `proj_out` を
        通った値。後に回すと「f32 の周辺を通った活性」で選んだ丸め先を、i4 の周辺と組んで
-       配ることになる。
+       配ることになる。**i8 側（`patch_embed.proj` 1 本）も同じ理由で校正入力の捕捉より前に
+       丸める**（{@link _fake_quant_i4} が `fake_quant_int8` を先に呼ぶ）— この 1 本は
+       patchify 入口で、block 0 の入力そのものを作る。
     3. 校正入力の生成（参照 denoise の捕捉）と経路一致門。
     4. block 内の linear を GPTQ × RTN 格子で丸める。
 
@@ -694,6 +700,7 @@ def _round_i4_calibrated(
         )
     graph_batch = calib.assert_stage_split(wrapper, probe, stages)
     plain = _round_i4_plain(wrapper, plain_names, target, "block 外の適格を")
+    int8 = round_int8()
     prompts = calibration_prompts(args.calib_prompts)
     batches = calib.capture_stage_batches(wrapper.model, prompts, repo=args.repo)
     calib.assert_calib_batches_match_graph(graph_batch, batches)
@@ -711,7 +718,7 @@ def _round_i4_calibrated(
         f"・{rig.tokens:,} トークン",
         flush=True,
     )
-    return {**plain, **calibrated}
+    return {**plain, **calibrated}, int8
 
 
 def _fake_quant_i4(
@@ -731,6 +738,10 @@ def _fake_quant_i4(
     「校正付きのつもりで校正なしを配った」が資産から読めないので診断行で明示する。
     """
     i4_names = _i4_module_names(model)
+
+    def round_int8() -> Int8Report:
+        return fake_quant_int8(model, include=lambda name: name not in i4_names)
+
     if args.no_calib:
         print(
             f"[fake-quant] {target}: --no-calib — 校正なしの素の RTN"
@@ -738,13 +749,18 @@ def _fake_quant_i4(
             flush=True,
         )
         int4_scales = _round_i4_plain(model, i4_names, target, "適格な重みを")
+        int8 = round_int8()
     else:
         if probe is None:
             raise AssertionError(
                 f"{target}: 校正付き i4 には stage 分解一致門の probe が要る"
                 "（builder が渡していない — 校正なしへ黙って落ちる分岐は持たない）"
             )
-        int4_scales = _round_i4_calibrated(args, model, target, i4_names, probe)
+        # 校正経路では i8 の丸めを**校正入力の捕捉より前**に差し込む（順序 MUST ② — 呼ぶ位置は
+        # {@link _round_i4_calibrated} が持つ）。適格判定の門より前に呼ぶと、適格の綻びより先に
+        # 「i8 の対象が 1 本も無い」で落ちて診断が入れ替わる。
+        int4_scales, int8 = _round_i4_calibrated(args, model, target, i4_names, probe, round_int8)
+    print(f"[fake-quant] {target}: 残りは i8 per-channel — {int8.describe()}", flush=True)
     # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「適格と数えたのに丸まって
     # いない」形で、i4 席に i8 の重みが混ざったまま緑になる（サイズだけが静かに戻る）。
     expected = {f"{name}.weight" for name in i4_names}
@@ -753,8 +769,6 @@ def _fake_quant_i4(
             f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(int4_scales)} 本"
             f"（過不足: {sorted(set(int4_scales) ^ expected)[:3]}）"
         )
-    int8 = fake_quant_int8(model, include=lambda name: name not in i4_names)
-    print(f"[fake-quant] {target}: 残りは i8 per-channel — {int8.describe()}", flush=True)
     return {**int8.scales, **int4_scales}, dict.fromkeys(int4_scales, "i4")
 
 
@@ -817,6 +831,38 @@ def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path)
         json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     return LORA_PROVENANCE_FILE
+
+
+def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path) -> str | None:
+    """i4 系列の丸め条件（方式・格子・コーパス・解像度・step）を系列へ書き、ファイル名を返す。
+
+    校正の有無は**格納形を 1 バイトも変えない**ので、資産からは復元できない — `--lora` と同じ形で
+    「書き出した側が事実を書き残す」しかない。`anima/distribution.py` の
+    `assert_calib_provenance` が組み立て時にこの記録と突き合わせ、`--no-calib` の生成物が配布へ
+    紛れるのを止める。
+
+    MUST: i4 以外では**古い記録を消す**（全域関数 — `_write_lora_provenance` と同じ理由）。
+    `emit_target` は系列ディレクトリを掃除しないので、i4 で採った系列を別 dtype で採り直すと
+    記録だけが前回のまま生き残り、「校正付き」という事実でない主張が残る。
+    """
+    if args.dtype != "i4" or target != TARGET_TRANSFORMER:
+        (out_dir / CALIB_PROVENANCE_FILE).unlink(missing_ok=True)
+        return None
+    # `--no-calib` でも**書く**（消すのではなく `rtn` と記録する）— 不在は「古い export」とも
+    # 読めてしまい、組み立て側が「校正なしを配ろうとした」を名指しで拒否できない。
+    record: dict[str, object] = {
+        "method": "rtn" if args.no_calib else calib.CALIB_METHOD,
+        "group_size": calib.CALIB_GRID.group_size,
+        "grid": calib.CALIB_GRID.kind,
+        "prompts": 0 if args.no_calib else args.calib_prompts,
+        "resolution": 0 if args.no_calib else calib.CALIB_RESOLUTION,
+        "steps": 0 if args.no_calib else calib.CALIB_STEPS,
+        "text_dtype": calib.CALIB_TEXT_DTYPE,
+    }
+    (out_dir / CALIB_PROVENANCE_FILE).write_text(
+        json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return CALIB_PROVENANCE_FILE
 
 
 def _apply_lora(args: argparse.Namespace, model: nn.Module, target: str) -> None:
@@ -893,14 +939,18 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
     provenance = _write_lora_provenance(args, target, out_dir)
     if provenance is not None:
         written.append(provenance)
+    calib_record = _write_calib_provenance(args, target, out_dir)
+    if calib_record is not None:
+        written.append(calib_record)
     breakdown = storage_breakdown(graph)
     return {
         "target": target,
         "dir": str(out_dir),
         "dtype": args.dtype,
         "dit_graph": args.dit_graph if target == TARGET_TRANSFORMER else "static",
-        # 校正付き丸めの条件（i4 以外・`--no-calib` は 0）— 資産の数値がどのコーパスと
-        # どの解像度から決まったかは重みからは復元できないので、書き出した側の要約に残す。
+        # 校正付き丸めの条件（i4 以外・`--no-calib` は 0）— この要約は stdout にしか出ないので
+        # **人が読むため**のもの。機械の突き合わせは `calib_provenance.json`
+        # （{@link _write_calib_provenance} → `distribution.assert_calib_provenance`）が持つ。
         "calib_prompts": 0 if args.dtype != "i4" or args.no_calib else args.calib_prompts,
         "calib_resolution": 0 if args.dtype != "i4" or args.no_calib else calib.CALIB_RESOLUTION,
         "nodes": len(graph.nodes),

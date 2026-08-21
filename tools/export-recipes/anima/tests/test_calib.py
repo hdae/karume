@@ -451,6 +451,24 @@ class TestCalibratedI4:
         for key in (name for name in before if name.startswith("model.transformer_blocks.")):
             assert torch.equal(before[key], at_capture[key]), f"{key} が捕捉前に丸まっている"
 
+    def test_the_capture_sees_the_i8_side_already_rounded(self, stub_capture):
+        """MUST: i8 側（patchify 入口）も捕捉より**前**に丸まっていること。
+
+        `patch_embed.proj` は量子化軸が g32 非整除で i4 に載らない唯一の linear（実 DiT でも
+        1 本）だが、**block 0 の入力そのものを作る**。捕捉より後に丸めると「f32 の patchify を
+        通った活性」で選んだ丸め先を i8 の patchify と組んで配ることになり、block 外の i4 を
+        先に丸める理由（順序 MUST ②）がこの 1 本にだけ効いていない状態になる。
+        """
+        wrapper = make_wrapper()
+        before = {name: p.detach().clone() for name, p in wrapper.named_parameters()}
+        _calls, at_capture = stub_capture(wrapper)
+
+        quantize(wrapper)
+
+        key = "model.patch_embed.proj.weight"
+        assert key in before, "i8 側の重みが縮図に無い（テストが空振りしている）"
+        assert not torch.equal(before[key], at_capture[key]), f"{key} が捕捉時に素のまま"
+
     def test_the_out_of_block_weights_are_rounded_by_the_plain_path_in_both_modes(
         self, stub_capture
     ):

@@ -20,7 +20,11 @@ from torch import nn
 
 from anima import export as export_anima
 from anima import patch as patch_anima
-from anima.distribution import LORA_PROVENANCE_FILE
+from anima.distribution import (
+    CALIB_PROVENANCE_FILE,
+    CALIB_SHIPPABLE_METHOD,
+    LORA_PROVENANCE_FILE,
+)
 from karume.quantize import DEFAULT_GROUP_SIZE, QuantizeError
 
 
@@ -103,6 +107,64 @@ class TestLoraProvenance:
         assert export_anima._write_lora_provenance(self._args(None), "transformer", out_dir) is None
 
         assert not (out_dir / LORA_PROVENANCE_FILE).exists()
+
+
+class TestCalibProvenance:
+    """i4 の丸め条件は系列に残す（校正の有無は格納形を 1 バイトも変えないので資産から読めない）。"""
+
+    @staticmethod
+    def _args(dtype, *, no_calib=False, calib_prompts=4):
+        return argparse.Namespace(dtype=dtype, no_calib=no_calib, calib_prompts=calib_prompts)
+
+    def test_it_records_the_shippable_method_and_the_corpus(self, tmp_path):
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        written = export_anima._write_calib_provenance(self._args("i4"), "transformer", out_dir)
+
+        assert written == CALIB_PROVENANCE_FILE
+        record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
+        assert record["method"] == CALIB_SHIPPABLE_METHOD
+        assert (record["prompts"], record["resolution"], record["steps"]) == (4, 512, 8)
+
+    def test_no_calib_is_recorded_rather_than_left_absent(self, tmp_path):
+        """不在は「古い export」とも読める — 名指しで拒否できるよう `rtn` と書き残す。"""
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        export_anima._write_calib_provenance(
+            self._args("i4", no_calib=True), "transformer", out_dir
+        )
+
+        record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
+        assert record["method"] == "rtn"
+        assert record["method"] != CALIB_SHIPPABLE_METHOD, "配布可として通ってしまう"
+        assert (record["prompts"], record["resolution"], record["steps"]) == (0, 0, 0)
+
+    def test_it_writes_nothing_for_a_series_that_is_not_i4(self, tmp_path):
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        assert (
+            export_anima._write_calib_provenance(self._args("i8"), "transformer", out_dir) is None
+        )
+        assert list(out_dir.iterdir()) == []
+
+    def test_re_exporting_at_another_dtype_removes_the_stale_record(self, tmp_path):
+        """記録の存在は「今の重みを校正付きで丸めた」と同値。
+
+        系列を別 dtype で採り直したときに残っていると、事実でない主張が生き残る。
+        """
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+        export_anima._write_calib_provenance(self._args("i4"), "transformer", out_dir)
+        assert (out_dir / CALIB_PROVENANCE_FILE).exists()
+
+        assert (
+            export_anima._write_calib_provenance(self._args("i8"), "transformer", out_dir) is None
+        )
+
+        assert not (out_dir / CALIB_PROVENANCE_FILE).exists()
 
 
 class TestFakeQuant:

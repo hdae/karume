@@ -29,6 +29,7 @@ from anima.distribution import (
     ANIMA_QUANTS,
     ANIMA_STORAGE_FORBIDDEN,
     ANIMA_WEIGHTS,
+    CALIB_PROVENANCE_FILE,
     LICENSE_SOURCE_PATH,
     LORA_PROVENANCE_FILE,
     NOTICE_MARKDOWN,
@@ -118,6 +119,21 @@ def _lora_record(sha256: str) -> bytes:
     )
 
 
+def _calib_record(method: str) -> bytes:
+    """`anima/export.py` が i4 系列へ残す校正条件の記録（実物と同じ形）。"""
+    return json.dumps(
+        {
+            "method": method,
+            "group_size": 32,
+            "grid": "rtn",
+            "prompts": 4,
+            "resolution": 512,
+            "steps": 8,
+            "text_dtype": "f16",
+        }
+    ).encode("utf-8")
+
+
 def _build_series(
     series_dir: Path,
     *,
@@ -126,6 +142,7 @@ def _build_series(
     i4_rope: bytes | None = None,
     mark: bytes = b"",
     lora_sha256: str | None = None,
+    calib_method: str = "gptq",
 ) -> AnimaSources:
     """系列レイアウト（`outputs/series/` 相当）を偽資産で再現する（`io.*` の混入込み）。
 
@@ -133,6 +150,7 @@ def _build_series(
     「モデル間で同一の base 資産」を作り分けるための軸。`lora_sha256` は帰属の記録を
     カードの宣言からずらす軸（既定は一致する値）。`i8_rope` / `i4_rope` は rope 素表を
     f16 系列からずらす軸（系列ごとに独立に振れる — 網が全系列に掛かっていることを見るため）。
+    `calib_method` は i4 系列の丸め方式をずらす軸（既定は配布可の `gptq`）。
     """
     sources = anima_sources(series_dir, model)
     _write(sources.base / "text_encoder" / "model.safetensors", _PAYLOADS["text_encoder"])
@@ -159,6 +177,10 @@ def _build_series(
             series / "transformer" / "rope_base.safetensors",
             _PAYLOADS["rope_base"] if rope is None else rope,
         )
+    # 校正条件は i4 系列だけが持つ（f16 / i8 は校正の対象外）。
+    _write(
+        sources.transformer_i4 / "transformer" / CALIB_PROVENANCE_FILE, _calib_record(calib_method)
+    )
     _write(sources.tokenizers / "qwen2-tokenizer.json", _PAYLOADS["tokenizer"])
     _write(sources.tokenizers / "t5-tokenizer.json", _PAYLOADS["tokenizer_2"])
     return sources
@@ -331,6 +353,50 @@ class TestLoraProvenance:
         assert not any(name.endswith(LORA_PROVENANCE_FILE) for name in _present(out_dir))
 
 
+class TestCalibProvenance:
+    """i4 系列が配布して良い丸め（GPTQ 校正付き）で作られたことを、組み立て時に突き合わせる。
+
+    校正の有無は**格納形を 1 バイトも変えない**（research 2026-08-21 §6 — ファイルサイズも
+    バイト単位で同じ）ので、ヘッダ dtype の門も `verify_dist` の構造検査も素通りする。
+    `--no-calib` は smoke 用の opt-out なのに、その生成物が配布へ紛れても資産からは読めず、
+    出るのは「全体的にぼやけた」絵だけ — LoRA 帰属と同じ規律をここにも敷く。
+    """
+
+    def test_it_stops_when_the_i4_series_was_rounded_without_calibration(
+        self, tmp_path: Path
+    ) -> None:
+        """`--no-calib` の生成物（method = rtn）を名指しで拒否する。"""
+        sources = _build_series(tmp_path / "series", calib_method="rtn")
+        out_dir = tmp_path / "models" / "anima-turbo"
+
+        with pytest.raises(DistError, match="配布して良い丸め方式で作られていない"):
+            _assemble_anima(sources, out_dir)
+
+        # 計画段の検査なので配布形は 1 ファイルも生えない。
+        assert not out_dir.exists()
+
+    def test_it_stops_when_the_i4_series_carries_no_record_at_all(self, tmp_path: Path) -> None:
+        """記録の無い系列（校正条件を突き合わせられない）も緑にしない。"""
+        sources = _build_series(tmp_path / "series")
+        (sources.transformer_i4 / "transformer" / CALIB_PROVENANCE_FILE).unlink()
+
+        with pytest.raises(DistError, match="校正条件の記録が無い"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+    def test_it_stops_when_the_record_is_not_readable_json(self, tmp_path: Path) -> None:
+        sources = _build_series(tmp_path / "series")
+        (sources.transformer_i4 / "transformer" / CALIB_PROVENANCE_FILE).write_bytes(b"{oops")
+
+        with pytest.raises(DistError, match="校正条件の記録を解析できない"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+    def test_the_record_never_reaches_the_distribution(self, assembled) -> None:
+        """記録は系列側の事実 — 配布形（HF リポ）には持ち出さない。"""
+        out_dir, _ = assembled
+
+        assert not any(name.endswith(CALIB_PROVENANCE_FILE) for name in _present(out_dir))
+
+
 class TestStorageGate:
     """格納 dtype の門（実測の事故が根拠 — `--dtype` 付け忘れの素 F32 は PNG 門まで沈黙した）。"""
 
@@ -366,8 +432,10 @@ class TestStorageGate:
         """逆向きの取り違え（i4 系列 → i8 席）— 存在検査だけでは**素通りする**。
 
         i4 系列は混成で既定格納が i8 なので必ず I8 を含み、「I8 を含む」を満たしてしまう。
-        既定 quant `w8a8-s16` が i4 常駐を掴むと、i8a8 の述語が外れて fail loudly せず
-        f32 計算経路へ黙って落ちる — 禁止表（`ANIMA_STORAGE_FORBIDDEN`）が唯一の検出器。
+        既定 quant `w8a8-s16` が i4 常駐を掴むと、`c285f97` 以降の i8a8 の述語は i4 も受ける
+        （ADR 0076）ので fail loudly せず w4a8 の数値契約で走る — ADR 0076 決定 6 が席に
+        載せないと決めた構成が既定席で沈黙して出る。禁止表（`ANIMA_STORAGE_FORBIDDEN`）が
+        唯一の検出器。
         """
         sources = _build_series(tmp_path / "series")
         (sources.transformer_i8 / "transformer" / "model.safetensors").write_bytes(
@@ -388,6 +456,12 @@ class TestStorageGate:
             "transformer_i8": {"F32", "I8"},
             "transformer_i4": {"F32", "I8", "I4"},
         }
+        # MUST: 列挙元を production の表へ縛る。ここをテスト内 dict のままにすると、4 本目の
+        # 系列が `STORAGE_REQUIREMENTS` に生えて `headers` に足されなかったとき、docstring が
+        # 名指しする失敗モードそのものを一度も見ないまま緑が残る。
+        assert set(headers) == {
+            role for role in STORAGE_REQUIREMENTS if role.startswith("transformer")
+        }
 
         for seat in headers:
             for series, found in headers.items():
@@ -395,6 +469,37 @@ class TestStorageGate:
                     dtype in found for dtype in ANIMA_STORAGE_FORBIDDEN.get(seat, ())
                 )
                 assert caught is (series != seat), f"{series} → {seat} 席"
+
+    def test_every_series_seat_mix_up_is_refused_by_the_real_gates(self, tmp_path: Path) -> None:
+        """上の表ではなく**実 gate**（`assert_storage` / `assert_storage_absent`）で 3×3 を回す。
+
+        上のテストは述語を再実装しているので、`anima_plan` から
+        `assert_storage_absent` の呼びが 1 行消えても落ちない。ここは組み立てを実際に通すので、
+        呼びが外れた瞬間に非対角が緑になって落ちる。
+        """
+        headers = {
+            "transformer_f16": ("F32", "F16"),
+            "transformer_i8": ("F32", "I8"),
+            "transformer_i4": ("F32", "I8", "I4"),
+        }
+        attr = {
+            "transformer_f16": "transformer_f16",
+            "transformer_i8": "transformer_i8",
+            "transformer_i4": "transformer_i4",
+        }
+
+        for seat, seat_attr in attr.items():
+            for series, dtypes in headers.items():
+                sources = _build_series(tmp_path / f"series-{seat}-{series}")
+                target = getattr(sources, seat_attr) / "transformer" / "model.safetensors"
+                target.write_bytes(_mixed_safetensors(dtypes, b"swapped-series"))
+                out_dir = tmp_path / "models" / f"{seat}-{series}"
+
+                if series == seat:
+                    _assemble_anima(sources, out_dir)  # 対角は通る（同じ系列を同じ席へ）
+                else:
+                    with pytest.raises(DistError):
+                        _assemble_anima(sources, out_dir)
 
     def test_it_stops_when_a_header_is_not_safetensors(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
@@ -477,7 +582,11 @@ class TestManifest:
 
 
 class TestI4Quants:
-    """i4 常駐の 2 席（`w4` / `w4-a8-s16`）— 波 J-4 先行の速度実測用。"""
+    """i4 常駐の 2 席（`w4` = 格納だけ / `w4-a8-s16` = **低 VRAM 席**）。
+
+    波 J-4a の視認裁定で `w4-a8-s16` を採用済み（既定は `w8a8-s16` 据え置き）。
+    位置づけの正本は `distribution.py` の `ANIMA_QUANTS` 直上コメント。
+    """
 
     @staticmethod
     def _i4_seats() -> dict[str, Any]:

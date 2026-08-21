@@ -45,6 +45,16 @@ ANIMA_TOKENIZER_SERIES = "anima-demo"
 #: 読み手（ここ）が持ち、書き手（`anima/export.py`）はここから引く — 2 箇所で独立に動かさない。
 LORA_PROVENANCE_FILE = "lora_provenance.json"
 
+#: i4 系列が記録する校正条件（{@link assert_calib_provenance}）。校正の有無は**格納形を 1 バイトも
+#: 変えない**ので、資産・manifest・ヘッダのどれからも判別できない。それでいて品質差は視認裁定を
+#: 分ける大きさ（素の RTN =「全体的にぼやけた印象」/ GPTQ =「高品質を維持」— research 2026-08-21
+#: §6）なので、LoRA 帰属と同じ規律で「書き出した側が事実を書き残す」。
+CALIB_PROVENANCE_FILE = "calib_provenance.json"
+
+#: 配布して良い丸め方式（{@link CALIB_PROVENANCE_FILE} の `method`）。`--no-calib` の素の RTN は
+#: smoke 用で、配布資産にしない（`anima/export.py` の該当 MUST）。
+CALIB_SHIPPABLE_METHOD = "gptq"
+
 #: 上流の重みライセンス原文（この recipe の隣に逐語で置いてある）。配布は Derivative の
 #: Distribution なので §3(a)（ライセンスのコピーを第三者へ提供する）が掛かる — 要約や
 #: 書き換えでは条件を満たさないため、**1 バイトも変えずに**配布リポ直下の `LICENSE.md` として
@@ -187,8 +197,9 @@ STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: （`anima/export.py` の `BASE_WEIGHT_DTYPES`）なので **必ず I8 を含む**。したがって i4 系列を
 #: `transformer_i8` へ挿し込む取り違えは「I8 を含む」を満たしてしまい、組み立ても verify_dist も
 #: ロードも通る。実害は既定 quant `w8a8-s16` に出る: 宣言した `linearCompute: "i8a8"` の述語は
-#: i8 常駐を必要条件に含むので、常駐が i4 だと fail loudly せず f32 計算経路へ黙って落ちる
-#: （`ANIMA_QUANTS` の w4 席が「嘘の席」として避けた挙動が、既定席で沈黙して起きる）。
+#: `c285f97` 以降 i4 常駐も受ける（ADR 0076）ので、常駐が i4 だと fail loudly せず **w4a8 の
+#: 数値契約**（group 部分縮約）で走る — ADR 0076 決定 6 が「画が荒れるので席に載せない」と
+#: 決めた構成が、席名 `w8a8-s16` のまま既定席で沈黙して出る。
 #: MUST: 禁止は**役割ごとに集合**で持つ（1 つだけだと 4 本目の系列が生えた日に、名指ししなかった
 #: ほうが黙って素通りする — irodori と同じ規律）。f16 席は I8 / I4 の不在で二重に締まる。
 ANIMA_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
@@ -305,6 +316,34 @@ def assert_lora_provenance(sources: AnimaSources) -> None:
             )
 
 
+def assert_calib_provenance(sources: AnimaSources) -> None:
+    """i4 系列が**校正付き**（GPTQ）で丸められたことを、書き出し側の記録で確かめる。
+
+    MUST: 校正の有無は格納形を 1 バイトも変えない（`research/2026-08-21-anima-i4-seat-speed.md`
+    §6 — ファイルサイズは RTN 版とバイト単位で同じ）。したがって `verify_dist` の構造検査も
+    ヘッダ dtype 検査も**素通りする**。`--no-calib` は smoke 用の opt-out なのに、その生成物が
+    配布へ紛れても資産からは判別できず、出るのは「全体的にぼやけた」絵だけ — LoRA 帰属
+    （{@link assert_lora_provenance}）と同じ「別々の台本が持つ同じ事実は組み立て時に必ず
+    突き合わせる」規律をここにも敷く。
+    """
+    path = sources.transformer_i4 / "transformer" / CALIB_PROVENANCE_FILE
+    if not path.is_file():
+        raise DistError(
+            f"i4 系列の校正条件の記録が無い: {path}"
+            "（`python -m anima.export --dtype i4` で再エクスポートすると書かれる）"
+        )
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as cause:
+        raise DistError(f"校正条件の記録を解析できない: {path} — {cause}") from cause
+    method = record.get("method") if isinstance(record, dict) else None
+    if method != CALIB_SHIPPABLE_METHOD:
+        raise DistError(
+            f"i4 系列が配布して良い丸め方式で作られていない: {path} は {method!r}、"
+            f"配布可は {CALIB_SHIPPABLE_METHOD!r} — `--no-calib` の生成物は配布に使わない"
+        )
+
+
 def anima_placements(sources: AnimaSources) -> dict[str, Path]:
     """役割名 → 出所のファイル。出力の path は {@link OUTPUT_PATHS} が持つ。
 
@@ -327,6 +366,7 @@ def anima_plan(sources: AnimaSources, model: str = ANIMA_MODEL_NAME) -> ModelPla
     """Anima 1 モデルぶんの計画を組む（検査はここで全部済ませる — 1 バイトも書かない）。"""
     assert_model_name(model)
     assert_lora_provenance(sources)
+    assert_calib_provenance(sources)
     placements = anima_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, STORAGE_REQUIREMENTS)
