@@ -121,16 +121,17 @@ ANIMA_QUANTS: Mapping[str, Any] = {
             "attentionScoreStorage": "f16",
         },
     },
-    # i4 常駐の 2 席（波 J-4 先行・速度実測の第 1 段）。
+    # i4 常駐の 2 席（波 J-4a — 低 VRAM 席）。
     #
-    # MUST: **`linearCompute` を宣言しない**。i8a8 経路の述語は i8 常駐を必要条件に含み
-    # （`packages/runtime/src/runtime/recipe-builder.ts` — `linearCompute === "i8a8" &&
-    # weightStorage === "i8" && k > 0 && k % 4 === 0`）、i4 常駐では fail loudly せず**通常の
-    # f32 計算経路**へ流れる（同ファイルの NOTE: 「linearCompute 'i8a8' × i4 常駐は通常の f32
-    # 計算経路へ流れる — 縮退ではなく i4 の実装済み経路そのもの」）。宣言すると manifest が
-    # 実挙動と食い違う「嘘の席」になる — 選んでも 1 バイトも挙動が変わらないノブを配ることに
-    # なり、後の実測がその席の名前で語られる。attention 側の 2 つは重みスロットを見ないので
-    # i4 常駐でもそのまま効く。
+    # MUST: **`linearCompute` を宣言しない**。**理由は 2026-08-21 に入れ替わった**ので注意 —
+    # 以前は「i8a8 の述語が i8 常駐を必要条件に含むので宣言しても 1 バイトも変わらない嘘の席に
+    # なる」だったが、w4a8 の実装（ADR 0076）で i4 常駐も整数内積の経路に乗るようになった。
+    # 今の理由は**品質**: 宣言すると linear の活性が per-token i8 になり、実 GPU の画で
+    # 「細部に破綻・線がラフ」というユーザー視認裁定が出た（2026-08-21・研究記録
+    # `docs/research/2026-08-21-anima-i4-seat-speed.md` §6）。速度は 1,640 → 955 ms/step と
+    # 大きく戻るが、この席の存在理由は**サイズと VRAM** であって速度ではない（速度が要るなら
+    # 既定の `w8a8-s16` が 823 ms/step で上）。attention 側の 2 つは重みスロットを見ないので
+    # i4 常駐でもそのまま効き、視認でも劣化は出ていないので宣言する。
     "w4": {"weights": {"transformer": "i4"}, "session": {}},
     "w4-a8-s16": {
         "weights": {"transformer": "i4"},

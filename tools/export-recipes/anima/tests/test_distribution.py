@@ -501,10 +501,11 @@ class TestI4Quants:
         }
 
     def test_no_i4_seat_declares_linear_compute(self) -> None:
-        """MUST: i8a8 経路の述語は **i8 常駐**を必要条件に含む（`recipe-builder.ts` の
-        `linearCompute === "i8a8" && weightStorage === "i8" && …`）。i4 常駐では fail loudly
-        せず通常の f32 計算経路へ流れるので、宣言すると「選んでも 1 バイトも挙動が変わらない
-        ノブ」を配ることになり、manifest が実挙動と食い違う嘘の席になる。
+        """MUST: i4 席に `linearCompute` を宣言しない。**この不変条件の理由は 2026-08-21 に
+        入れ替わっている** — 旧: 「i8a8 の述語が i8 常駐を要求するので宣言しても効かない」/
+        新: w4a8（ADR 0076）で効くようになったが、**掛けると画の細部が荒れる**という視認裁定
+        （research 2026-08-21 §6）。速度は戻る（1,640 → 955 ms/step）が、この席は
+        サイズ・VRAM のための席で、速度が要るなら既定の `w8a8-s16` が上。
         """
         for name, quant in self._i4_seats().items():
             assert "linearCompute" not in quant["session"], name
