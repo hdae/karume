@@ -25,11 +25,33 @@
  * NOTE: 実行時ノブの既定は `symbols.json` にも同じ値が並ぶ（exporter 側が両者の食い違いを
  * 組み立て時に落とす）。パイプラインが読むのは**こちら**だけで、`symbols.json` の `defaults`
  * は見ない — 導出元を二重に持たないため（`text/symbols.ts` の同節は optional）。
+ *
+ * NOTE: 公開配布リポの既定ソース（{@link SBV2_DEFAULT_SOURCE}）もここに置く。manifest から
+ * 導ける値ではなく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
  */
+
+import type { HubRepoRef } from "@karume/hub";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const SBV2_PIPELINE_NAME = "sbv2";
 export const SBV2_PIPELINE_MAJOR = 1;
+
+/**
+ * 公開配布リポの既定ソース（ADR 0073 決定 1）。`ref` を省略した `Sbv2Pipeline.fromPretrained`
+ * はここを読む。
+ *
+ * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
+ * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
+ * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
+ * 同時に成立する（ADR 0038）。追従が要る利用者は
+ * `{ ...SBV2_DEFAULT_SOURCE, revision: "main" }` を明示的に選ぶ。
+ */
+// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
+// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
+export const SBV2_DEFAULT_SOURCE = {
+  repo: "hdae/karume-sbv2-jvnv",
+  revision: "e76608130f5a1763d91e3ee5b376269dd810b517",
+} as const satisfies HubRepoRef;
 
 const ROOT_KEYS: readonly string[] = ["styles", "speakers", "maxTokens", "maxFrames", "defaults"];
 const DEFAULTS_KEYS: readonly string[] = [

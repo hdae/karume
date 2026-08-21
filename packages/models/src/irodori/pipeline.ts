@@ -87,6 +87,7 @@ import {
 } from "@karume/hub";
 
 import {
+  IRODORI_DEFAULT_SOURCE,
   IRODORI_PIPELINE_MAJOR,
   IRODORI_PIPELINE_NAME,
   type IrodoriPipelineConfig,
@@ -1408,10 +1409,11 @@ export class IrodoriPipeline {
 
   /**
    * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
-   * {@link IrodoriPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む。
+   * {@link IrodoriPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
+   * 追従）。省略時は pin 済みの {@link IRODORI_DEFAULT_SOURCE}（ADR 0073 決定 2）。
    */
   static async fromPretrained(
-    ref: string | HubRepoRef,
+    ref: string | HubRepoRef = IRODORI_DEFAULT_SOURCE,
     options: IrodoriFromPretrainedOptions = {},
   ): Promise<IrodoriPipeline> {
     const repoRef: HubRepoRef = typeof ref === "string" ? { repo: ref } : ref;

@@ -24,6 +24,13 @@ export type {
 } from "./src/sbv2/pipeline.ts";
 
 /**
+ * 公開配布リポの既定ソース（pin 済み commit SHA — ADR 0073）。`ref` 省略の
+ * {@link Sbv2Pipeline.fromPretrained} が読む値そのもので、追従へ切り替える利用者が
+ * `{ ...SBV2_DEFAULT_SOURCE, revision: "main" }` と綴れるように面へ出す。
+ */
+export { SBV2_DEFAULT_SOURCE } from "./src/sbv2/config.ts";
+
+/**
  * 修正辞書エントリ（誤読・アクセントの差し替え）の綴りは `@hdae/yomi` が正本。**素通しで通す**
  * — ここで別名や変換層を作ると、辞書側の検証（読みのモーラ分割・アクセント型の範囲）と
  * 二重定義になる。

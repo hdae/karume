@@ -68,6 +68,7 @@ import { fetchDictionaryBytes } from "@hdae/yomi/loader";
 
 import {
   parseSbv2PipelineConfig,
+  SBV2_DEFAULT_SOURCE,
   SBV2_PIPELINE_MAJOR,
   SBV2_PIPELINE_NAME,
   type Sbv2PipelineConfig,
@@ -942,10 +943,11 @@ export class Sbv2Pipeline {
 
   /**
    * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
-   * {@link Sbv2Pipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む。
+   * {@link Sbv2Pipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
+   * 追従）。省略時は pin 済みの {@link SBV2_DEFAULT_SOURCE}（ADR 0073 決定 2）。
    */
   static async fromPretrained(
-    ref: string | HubRepoRef,
+    ref: string | HubRepoRef = SBV2_DEFAULT_SOURCE,
     options: Sbv2FromPretrainedOptions = {},
   ): Promise<Sbv2Pipeline> {
     const repoRef: HubRepoRef = typeof ref === "string" ? { repo: ref } : ref;

@@ -21,11 +21,34 @@
  * `speaker_uncond_mode="mask"` かつ `cfg_guidance_mode="independent"` のときだけ。他のモード
  * （`"noise"` / `joint` / `alternating`）は同値が成り立たないので、分岐を持つのではなく
  * **受理しない**（型としても "mask" / "independent" しか表せない）。
+ *
+ * NOTE: 公開配布リポの既定ソース（{@link IRODORI_DEFAULT_SOURCE}）もここに置く。上の MUST が
+ * 禁じる「モデル固有の数」ではなく「どの manifest を取りに行くか」の側で、そもそも配布形が
+ * 持てない値だから（ADR 0073）。
  */
+
+import type { HubRepoRef } from "@karume/hub";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const IRODORI_PIPELINE_NAME = "irodori";
 export const IRODORI_PIPELINE_MAJOR = 1;
+
+/**
+ * 公開配布リポの既定ソース（ADR 0073 決定 1）。`ref` を省略した
+ * `IrodoriPipeline.fromPretrained` はここを読む。
+ *
+ * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
+ * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
+ * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
+ * 同時に成立する（ADR 0038）。追従が要る利用者は
+ * `{ ...IRODORI_DEFAULT_SOURCE, revision: "main" }` を明示的に選ぶ。
+ */
+// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
+// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
+export const IRODORI_DEFAULT_SOURCE = {
+  repo: "hdae/karume-irodori-v4-small",
+  revision: "522643804979a293ef95c19d901ceea4ddba5fa6",
+} as const satisfies HubRepoRef;
 
 const ROOT_KEYS: readonly string[] = [
   "maxTextLen",

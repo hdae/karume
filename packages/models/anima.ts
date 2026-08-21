@@ -24,6 +24,13 @@ export type {
 } from "./src/anima/pipeline.ts";
 
 /**
+ * 公開配布リポの既定ソース（pin 済み commit SHA — ADR 0073）。`ref` 省略の
+ * {@link AnimaPipeline.fromPretrained} が読む値そのもので、追従へ切り替える利用者が
+ * `{ ...ANIMA_DEFAULT_SOURCE, revision: "main" }` と綴れるように面へ出す。
+ */
+export { ANIMA_DEFAULT_SOURCE } from "./src/anima/config.ts";
+
+/**
  * 解像度の綴り（`1344x768` / 正方の略記 `512`）と受理集合。
  *
  * **受理集合の正本はこのパッケージ**（ADR 0038 §2 — manifest には書かない）なので、CLI や

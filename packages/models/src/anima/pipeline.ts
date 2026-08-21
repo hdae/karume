@@ -59,6 +59,7 @@ import {
 } from "@karume/hub";
 
 import {
+  ANIMA_DEFAULT_SOURCE,
   ANIMA_PIPELINE_MAJOR,
   ANIMA_PIPELINE_NAME,
   type AnimaPipelineConfig,
@@ -484,10 +485,11 @@ export class AnimaPipeline {
 
   /**
    * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
-   * {@link AnimaPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む。
+   * {@link AnimaPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
+   * 追従）。省略時は pin 済みの {@link ANIMA_DEFAULT_SOURCE}（ADR 0073 決定 2）。
    */
   static async fromPretrained(
-    ref: string | HubRepoRef,
+    ref: string | HubRepoRef = ANIMA_DEFAULT_SOURCE,
     options: AnimaFromPretrainedOptions = {},
   ): Promise<AnimaPipeline> {
     const repoRef: HubRepoRef = typeof ref === "string" ? { repo: ref } : ref;

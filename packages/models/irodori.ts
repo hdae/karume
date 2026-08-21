@@ -26,3 +26,10 @@ export type {
   IrodoriRunComponent,
   IrodoriSpeakerInput,
 } from "./src/irodori/pipeline.ts";
+
+/**
+ * 公開配布リポの既定ソース（pin 済み commit SHA — ADR 0073）。`ref` 省略の
+ * {@link IrodoriPipeline.fromPretrained} が読む値そのもので、追従へ切り替える利用者が
+ * `{ ...IRODORI_DEFAULT_SOURCE, revision: "main" }` と綴れるように面へ出す。
+ */
+export { IRODORI_DEFAULT_SOURCE } from "./src/irodori/config.ts";
