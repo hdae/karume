@@ -3,8 +3,11 @@
 - Status: accepted（2026-08-21 — ユーザー裁定「a の w4a8 も試してみたいので、お願いします」。
   実装・実測とも完了。**ただし anima の配布席では採らない** — 決定 6）
 - Date: 2026-08-21
-- 関連: ADR [0025](0025-w8a8-linear-execution.md)（w8a8 = i8 常駐の整数内積・本 ADR の親）/
-  [0069](0069-packed-w4-storage.md)（i4 格納・group scale）/
+- 関連: ADR [0025](0025-w8a8-linear-execution.md)（w8a8 = i8 常駐の整数内積・本 ADR の親 —
+  適格述語の拡張は同 ADR の 2026-08-21 追記）/
+  [0069](0069-packed-w4-storage.md)（i4 格納・group scale — 決定 5 の scale 適用形は同 ADR の
+  追記 8 で改訂）/ [0058](0058-numerics-opt-in-contract.md)（numerics opt-in の一般契約 —
+  席は活性の i8 化 1 つで、格納形は別軸）/
   [0074](0074-quant-seat-naming.md)（0.5.0 で `linearCompute` の値を `"a8"` へ改名）/
   perf-ledger Q-8 / 実測 =
   [research/2026-08-21-anima-i4-seat-speed.md](../research/2026-08-21-anima-i4-seat-speed.md)
@@ -16,7 +19,8 @@ i4 常駐の linear はこの述語を外れ、fail loudly せず通常の f32 �
 「縮退ではなく i4 の実装済み経路」と明記していた）。
 
 2026-08-21 の実測で、この設計が anima の i4 席に高い値段を付けていたことが分かった — 取得量
-−21.2% / VRAM −22.6% と引き換えに DiT が既定の **2.0 倍**（1,646 vs 823 ms/step）。しかも
+−21.2% / VRAM −22.6% と引き換えに DiT が既定の **2.0 倍**（1,646 vs 822 ms/step — research §3 の
+2 周中央値どうし）。しかも
 i4 の in-kernel dequant 自体はほぼ無料（f32 計算どうしの比較で +2%）で、**失っていたのは
 dp4a の利得だけ**だった。i8a8 既定を持つファミリ（anima `w8a8-s16` / irodori `w8a8`）では、
 i4 を選ぶと速度が半減する構図になる。
@@ -77,8 +81,9 @@ k の門を i4 にも適用するのは根拠のない過剰制約になる。
   （f32 計算 → 整数内積）。公開中の manifest 3 リポにこの組み合わせを宣言する席は無いので
   実害は無いが、手で `SessionOptions` を組む利用者には効く。
 - 既存 i8 経路の生成物は 4 変種ともバイト同一（fixture と直接突合で確認済み）。
-- 実測（RTX 3080 Ti・1024²・8 step）: **955〜972 ms/step**（既定 823〜836 の +16%）。
-  取得量 −21.2% / VRAM −22.6% は i4 席のまま。
+- 実測（RTX 3080 Ti・1024²・8 step）: **955 ms/step**（既定 823 の +16% — research §6）。
+  取得量 −21.2% は i4 席のまま。**VRAM は未測定** — 重み常駐は i4 席と同じだが活性量子化の
+  一時領域（`xq` / `xs`）が増える（research §8-8）。
 - 残る +16% の内訳は ①nibble 展開が内側ループに乗る ②group ごとの f32 flush が k/g 回
   ③accumulator が i32 16 本 + f32 16 本でレジスタ圧が i8 の 2 倍。**専用幾何**（`I8a8GemmOp` に
   `linear_w4a8` を足して regM を落とす）は未試行で、詰める余地として残る。

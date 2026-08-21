@@ -11,9 +11,16 @@
 
 ## Now
 
-- **0.3.0 リリース済み**（2026-08-16・**JSR 3 パッケージのみ** — PyPI `karume` は未リリース
-  〈2026-08-20 実確認・旧記述「+ PyPI」は誤りだった〉・CI 緑）。ポジショニングの正本 =
+- **0.4.1 リリース済み**（2026-08-21・**JSR 3 パッケージのみ** — PyPI `karume` は未リリース
+  〈2026-08-20 実確認〉・CI 緑）。**runtime は w4a8（`c285f97` / ADR
+  [0076](../docs/decisions/0076-w4a8-linear-execution.md)）を含む** — `linearCompute: "i8a8"` ×
+  i4 常駐の出力ビットが変わる破壊的変更だが、公開 manifest に該当席が無いため patch に載せた裁定。
+  ポジショニングの正本 =
   [research/2026-08-16-runtime-landscape.md](../docs/research/2026-08-16-runtime-landscape.md)。
+- **0.5.0 は breaking 波**（ADR [0074](../docs/decisions/0074-quant-seat-naming.md) /
+  [0075](../docs/decisions/0075-quant-presentation.md) は accepted・**実装未着手**）: quant 席名の
+  規則化 + `linearCompute` / `attentionCompute` の値改名 + 表示欄の `karume/4` 繰り上げ +
+  yomi 依存分離。**現行の席名・ノブ名は改名予定** — 骨子は [backlog](../docs/backlog.md) の該当節。
 - **autoregressive-ready 実装波 A〜H: 全消化（2026-08-17〜19）** — GQA 整除 broadcast・
   多出力 + argmax / topk・GenerationContext（第 5 寿命クラス）・states 形 attention +
   state_append・decode 台本 + greedy 検収・w4（i4 g32・linear 限定）・shard ロード +
@@ -89,6 +96,9 @@
 
 ## Pitfalls（現役のみ）
 
+- **`linearCompute: "i8a8"` は i8 常駐と i4 常駐で数値契約が別**（i8 = full-k 厳密 / i4 = group
+  部分縮約 — ADR [0076](../docs/decisions/0076-w4a8-linear-execution.md)）。取り違えると atol=0 の
+  主張が意味を失う。経路の識別はパイプラインキーの `:wi4g32` サフィックスと診断が担う。
 - **Metal**: threadgroup `vec4` への動的インデックス書きは黙って捨てられる（`gemm.ts` の
   `storeBTransposed` の switch 展開を新しい箇所で崩さない）。attention i8a8 / conv2d の
   Metal 数値差は known-issues・Metal は gpuTiming 不可（limitations）。

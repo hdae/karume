@@ -120,3 +120,16 @@
   executor `#encodeLinearI8a8` / tools/exporter `karume/act_quant.py`
 - 将来: SmoothQuant 級平滑化（要エクスポータ改訂）/ w8a16（shader-f16 と合流）/
   conv1d・conv2d への整数内積拡張
+
+## 追記（2026-08-21・適格述語の拡張 — ADR 0076 が i4 常駐を載せた）
+
+決定 1 の「適格 = **i8 常駐重みの linear** × k%4==0 ×（k ≤ 2^17）」は、ADR
+[0076](0076-w4a8-linear-execution.md)（w4a8）で**整数常駐一般（i8 / i4）**へ広がった。現行の述語は
+`recipe-builder.ts` の `linearCompute === "i8a8" && (weightStorage === "i8" || weightStorage === "i4")
+&& k > 0 && k % 4 === 0`。
+
+- **k 門（k ≤ 2^17）は i8 変種にだけ掛かる**。i4 変種は flush が group ごとなので i32 に載るのは
+  1 group ぶんで、門は group 長（`LINEAR_W4A8_MAX_GROUP`）へ置き換わる（0076 決定 4）。
+- **数値契約は i8 と i4 で別**（i8 = full-k 厳密 / i4 = group 部分縮約）。同じ `linearCompute: "i8a8"`
+  の下に 2 契約が並ぶので、経路の識別はパイプラインキーの `:wi4g32` サフィックスが担う。
+- したがって「i4 資産に `"i8a8"` を宣言しても効かない」は**もう成り立たない**（0076 以前の性質）。

@@ -14,8 +14,9 @@
  * ## 版と manifest の対応
  *
  * **旧版の manifest は読まない**（major が違えば unsupported format で落ちる — ADR 0041 §1）。
- * パッケージは 3 本とも lockstep で上がるので、下の対応は `@karume/runtime` / `@karume/models`
- * にもそのまま当てはまる。配布形（HF リポの `karume.json`）を作り直す段取りを事前に読むための表:
+ * JSR 3 本と PyPI `karume`（manifest を書く側）は lockstep で上がるので、下の対応は
+ * `@karume/runtime` / `@karume/models` / exporter にもそのまま当てはまる。配布形（HF リポの
+ * `karume.json`）を作り直す段取りを事前に読むための表:
  *
  * | パッケージ版 | `format` | 主な変更 |
  * | --- | --- | --- |

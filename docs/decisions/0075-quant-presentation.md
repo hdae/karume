@@ -22,8 +22,14 @@ quant 席は今のところ**機械名だけ**を持つ（`w8a8-s16` / `w8-bert4
 持ち、未知キーは fail loudly する（`QUANT_KEYS = ["weights", "session", "gpuFeatures"]` を
 `assertAllowedKeys` で検査 — `packages/hub/src/manifest.ts`）。したがって欄の追加は
 **optional であっても後方互換ではない** — 旧クライアントは新しい manifest を読めない。
-ADR 0038 決定 1 の「optional 拡張点の追加は format 据え置き」は、パーサが未知キーを黙って
-無視する設計を前提にした規則で、この allowlist とは噛み合わない。
+これは ADR [0038](0038-manifest-v1.md) 決定 1 と**矛盾しない** — 同 ADR は「エンベロープ内の
+未知キーは fail loudly で拒否する。additive 進化が許されるのは `pipelineConfig` の内側と §7 の
+明示列挙席だけ」と定め、§7 の見出し自身が「ここに無い追加は `karume/2`」と言っている。表示欄は
+その列挙に無いので、major 繰り上げは**0038 が最初から指定していた手順そのもの**である。
+
+NOTE: 本当の食い違いは別の位置にある — §7 が「据え置きで足せる」と列挙した 2 席（ファイル参照の
+`repo` / `revision`・preset の `requiredLimits`）は現行の `FILE_REF_KEYS` / `QUANT_KEYS` に席が無く、
+今足せばやはり旧クライアントが読めない。据え置きの約束が実装と食い違っている。
 
 ## Decision
 

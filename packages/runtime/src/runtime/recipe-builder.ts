@@ -1453,6 +1453,8 @@ export class RecipeBuilder {
     const v4 = linearI8a8UsesVec4(n);
     const geometry = defaultI8a8Geometry("linear");
     const dp4a = this.#state.i8a8Dot === "dp4a";
+    // MUST: key / wgsl とも **実際の常駐形**（`weightStorage`）で引く。i8 固定にすると i4 の
+    // group scale が per-channel として配られる沈黙誤値になる（数値契約が別 — ADR 0076）。
     const key = linearI8a8Key(v4, dp4a, geometry, weightStorage, groupSize);
     const { pipeline, layout } = await this.#state.cache.get(
       key,
@@ -1468,8 +1470,9 @@ export class RecipeBuilder {
         { binding: 2, source: binds[1] },
         { binding: 3, source: binds[2] },
         { binding: 4, source: outs[0] },
-        // MUST: scale の束縛は**実際の常駐形**で引く（i8 固定にすると i4 の group scale が
-        // per-channel として配られる沈黙誤値になる）。
+        // 束縛の**有無**だけが常駐形（i8 / i4）で決まる — バッファ自体は初期化子名で引くので
+        // i8 / i4 で同一。scale の**解釈**（per-channel か group か）を決めるのは上の
+        // `linearI8a8Wgsl` / `linearI8a8Key` の判別子で、そちらが本当の沈黙誤値の門。
         ...this.#weightScaleBindings(step, weightStorage, LINEAR_SCALE_BINDING),
         { binding: LINEAR_ACT_SCALE_BINDING, source: xs },
       ],

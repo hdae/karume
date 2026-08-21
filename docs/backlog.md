@@ -80,39 +80,24 @@
   もう 1 つの劣化機序 — いずれも「試してダメ」ではなく「試していない」）。irodori の席は
   J-4 のまま（kmeans 圧勝で別設計）。
 
-## now — リリース + 公開波（波 K・2026-08-20 着手 — release 節の部分先行）
+## 消化済み（波 K・リリース + 公開 — 2026-08-20〜21）
 
-J-3（g 軸スイープ）が重いため、その前にリリースとモデル公開を挟むユーザー裁定
-（2026-08-19 の「release 節は後回し」を部分変更）。手順の正本 =
-[release-runbook.md](release-runbook.md)（新設 — 特に pin と断片化対策）。
+**波 K はクローズ**（K-1〜K-5 + 0.4.1 の 6 項目すべて消化）。経緯は git と ADR / runbook が
+持つので、ここには結果だけ残す:
 
-- **K-1: manifest `karume/3` の shard 欄**（ADR [0071](decisions/0071-manifest-v3-shards.md) —
-  HF 公開前締切ぶんの先行。hub 単一形パース + dist の 1 要素書き + verify_dist 追随。
-  R1 同席の API 工事 4 件と exporter 自動分割規則は release 節に残置）— 消化（`50c4ef7`）
-- **K-2: SBV2 既定 quant を `w8-bert4` へ**（ADR 0039 決定 5 の再裁定 — w4 は f32 比
-  テンション差が残るため既定は品質優先。w4 は速度/サイズ優先の opt-in。**w4 の名は据え置き**
-  〈格納形の語彙〉で、丸め方式はモデルカードの quant 備考に記載 — 2026-08-20 命名裁定）—
-  消化（`4ad7c20`）
-- **K-3: SBV2 トーン注入席**（ADR [0072](decisions/0072-sbv2-text-injection.md) — overlay
-  辞書 + given_tone + `analyzeProsody`。非 breaking・0.4.0 同乗）— 消化（`551a7db`）
-- **K-4: dist 再生成 + HF 公開 — 対象は jvnv / irodori / anima の 3 リポ（≈14GB）**。
-  **FN は公開保留**（2026-08-20 再裁定 — 一時「出典表記つき公開」に振れたが、配布者の素性と
-  再配布可否が書面で確認できないため保留へ戻した。カード・notices は最小記述化済み・復活
-  条件は parked 節）。irodori / anima は既存 w8a8 系のまま — GPTQ/i4 席は J-4 後に quant
-  差分追加。断片化対策 = runbook §2 MUST・ライセンス確認 = 人間ゲート消化済み →
-  **消化（2026-08-21 アップロード完了）**: 公開前レビュー（Codex ALL PASS + 独立レビューの
-  blocker 1 件 = irodori カードの陳腐化量子化前提を修正 `36164df`）→ 3 リポを断片化対策 env で
-  アップロード（HF main = jvnv `e766081` / irodori `5226438` / anima `5aa15e4`）→ 断片化検証
-  代表 9 ファイル全て 19.5〜62.4 MiB/term（目安 10 以上）で健全
-- **K-5: pin 焼き込み → JSR 0.4.0**（ADR [0073](decisions/0073-models-source-pin.md) —
-  アップロード後に SHA を焼き、3 パッケージ lockstep で publish。**PyPI は未リリースのまま**
-  〈2026-08-20 確認 — PyPI に karume は存在しない・ACTIVE_DESIGN の旧記述は誤りとして訂正〉）—
-  pin 焼き込み消化（`4c5e7e3` — 3 定数 + ref optional 化・pin SHA での manifest 疎通済み）・
-  0.4.0 lockstep bump 済み → **CI 緑 → GitHub Release → JSR publish まで通過（2026-08-21
-  ユーザー確認）= 消化**
-- **0.4.1（2026-08-21・SBV2 注入席の再調整 — ADR 0072 追記 決定 4〜8）**: 追加のみ・非 breaking
-  なので配布形の作り直しは不要（`karume/3` のまま）。lockstep bump `2d9def0` → **CI 緑 →
-  GitHub Release → JSR publish まで通過（2026-08-21 ユーザー確認）= 消化**
+- 配布形 `karume/3`（ADR [0071](decisions/0071-manifest-v3-shards.md)）・SBV2 既定 quant =
+  `w8-bert4`（ADR 0039 決定 5 の再裁定）・SBV2 トーン注入席（ADR
+  [0072](decisions/0072-sbv2-text-injection.md)）・pin 焼き込み（ADR
+  [0073](decisions/0073-models-source-pin.md)）
+- **HF 公開 = jvnv / irodori / anima の 3 リポ**（2026-08-21・FN は parked）
+- **JSR publish = 0.4.0 → 0.4.1**（2026-08-21 ユーザー確認）。0.4.1 は models の公開面が追加
+  のみで配布形の作り直し不要だが、**runtime の w4a8（`c285f97` / ADR
+  [0076](decisions/0076-w4a8-linear-execution.md)）を含み `linearCompute: "i8a8"` × i4 常駐の
+  出力ビットが変わる破壊的変更**がこの版で初めて配られている（公開 manifest に該当席が無い
+  ため patch に載せた裁定 — 0.5.0 の breaking 波とは別枠）
+- 残置: R1 同席の API 工事 4 件と exporter の自動分割規則は release 節
+
+手順の正本 = [release-runbook.md](release-runbook.md)。
 
 autoregressive 波の**残項目（波外へ送り）**:
 
@@ -190,7 +175,8 @@ autoregressive 波の**残項目（波外へ送り）**:
   ④重み常駐の判別 union 化（`ResidentWeight` — 3 並列 map の統合）。
   exporter 側 shard 分割規則（co-shard 保証）は最初の LLM 級配布と同時。
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）
-- HF 公開: **models/ の 4 リポぶんは波 K で実施中**（K-4）。以後の新モデルは runbook に従う
+- HF 公開: **jvnv / irodori / anima の 3 リポは波 K-4 で公開済み**（2026-08-21）。FN は parked
+  （再配布の書面根拠なし）。以後の新モデルは runbook に従う
 - リポ直下 README の書き上げ・JSR npm 互換層の sideEffects 検証
 - ライセンス interview（export-recipes の family 別 provenance を upstream revision 単位で
   人間確認 — 再編の release gate。**公開 4 リポぶんは波 K-4 の人間ゲートで先行実施**）

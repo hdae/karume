@@ -4,7 +4,7 @@
   案 A を採用。「ライセンス的にも exporter は汎用モジュール + モデル別スクリプトへ再編すべき」
   はユーザー方針 2026-08-14）
 - 関連: ADR [0037](0037-karume-monorepo.md)（PyPI `karume` の親決定 — 本 ADR が「エクスポータ
-  CLI」の性格を「汎用 exporter / IR tooling」へ改める）/ [0052](0052-transactional-dist.md)
+  CLI」の性格を「汎用 exporter / IR tooling」へ改める）/ [0052](0052-exporter-transactional-artifacts.md)
   （dist の transactional 契約 — engine 側に残る）/ [0063](0063-safetensors-physical-layout.md)
   （emit の物理配置契約 — core の責務）
 

@@ -84,11 +84,13 @@ CALIB_RESOLUTION = 512
 #: 配布条件と揃えることが決定性（乱数ゼロ・分岐なし）にもそのまま効く。
 CALIB_GUIDANCE = 1.0
 
-#: 校正 1 バッチあたりの丸め所要（秒・CPU）。波 J-2 の実測（512px・1 プロンプト × 10 step =
-#: 10 バッチで gptq 933 秒 — `docs/research/2026-08-20-gptq-awq-calibrated-rounding.md` の
-#: anima 節）をバッチ数で割った**線形外挿の係数**で、開始時に見積りを 1 行出すためだけに使う
-#: （判断の根拠にはしない — 実機と stage 数が変われば当然ずれる）。
-CALIB_SECONDS_PER_BATCH = 93
+#: 校正 1 バッチあたりの丸め所要（秒・CPU）。**同じ recipe の配布 export 実測**（512px・
+#: 4 プロンプト × 8 step = 32 バッチで 2,287 秒 —
+#: `docs/research/2026-08-21-anima-i4-seat-speed.md` §6）をバッチ数で割った**線形外挿の係数**で、
+#: 開始時に見積りを 1 行出すためだけに使う（判断の根拠にはしない — 実機と stage 数が変われば
+#: 当然ずれる）。波 J-2 の別条件実測（10 バッチで 933 秒 = 93 秒/バッチ）より小さいが、
+#: そちらは 1 プロンプト × 10 step の測定で条件が違う。
+CALIB_SECONDS_PER_BATCH = 72
 
 #: トークナイザの `max_length`（パイプライン既定 — `pipeline_ref` の `--max-sequence-length`）。
 CALIB_MAX_SEQUENCE_LENGTH = 512
@@ -96,8 +98,9 @@ CALIB_MAX_SEQUENCE_LENGTH = 512
 #: 校正入力を作るときのテキスト前段の格納 dtype。**配布条件に合わせる** — 配布形の
 #: `text_encoder` / `text_conditioner` は F16（`anima.distribution.STORAGE_REQUIREMENTS`）で、
 #: 校正は「配布で実際に流れる活性」から丸め先を選ぶ機構だから、前段の丸めも揃える
-#: （block 外を先に RTN で丸めるのと同じ理由）。波 J-2 の計測は f32 前段だったが、f16 と f32 の
-#: 差は DiT 出力で相対 RMS 3e-4 級（2026-08-21 の golden 突合）で、H = Σ XᵀX の統計には出ない。
+#: （block 外を先に RTN で丸めるのと同じ理由）。波 J-2 の計測は f32 前段だったが、前段の
+#: f16 / f32 差が H = Σ XᵀX の統計に出るほどの大きさではないと見ている（**この見立ての実測は
+#: research に記録していない** — 条件を戻す / 広げる判断が出たら測り直す）。
 CALIB_TEXT_DTYPE = "f16"
 
 

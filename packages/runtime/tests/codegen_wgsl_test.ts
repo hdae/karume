@@ -492,7 +492,7 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // w4a8（i4 常駐の重み × per-token i8 活性・perf-ledger Q-8）。**上の linear_i8a8* 4 本と
     // 対で置く**のが条件で、この 4 本を足したことで i8 側のバイト列が動くのが最大の事故
     // （i8 経路は 1 バイトも変わらないことが w4a8 の実装契約そのもの）。K ループが
-    // 「group 外側 × タイル内置」の 2 段になるので、共有断片（内積ループ / A 側充填）が
+    // 「group 外側 × タイル内側」の 2 段になるので、共有断片（内積ループ / A 側充填）が
     // 1 段浅い字下げのまま入るのも含めてここで凍結する。
     ["linear_w4a8_g32.wgsl", linearI8a8Wgsl(false, true, undefined, "i4", 32)],
     ["linear_w4a8_g32_v4.wgsl", linearI8a8Wgsl(true, true, undefined, "i4", 32)],

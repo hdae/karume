@@ -1,7 +1,8 @@
 # 0074: quant 席の命名規則 — 格納語彙 1 本 + 軸ごとのノブ
 
 - Status: accepted（2026-08-21 — ユーザー裁定「起票お願いします」。**適用は 0.5.0 の breaking
-  波**で、`linearCompute: "i8a8"` → `"a8"` の改名・[0075](0075-quant-presentation.md) の
+  波**で、`linearCompute` / `attentionCompute` の値 `"i8a8"` → `"a8"` の改名・
+  [0075](0075-quant-presentation.md) の
   `karume/4` 繰り上げ・SBV2 の yomi 依存分離と同乗させる。実装は未着手）
 - Date: 2026-08-21
 - 関連: ADR [0041](0041-manifest-v2.md)（`presets` → `quants` の語彙）/
@@ -82,18 +83,31 @@ quant 表に対応を必ず出す**。[0075](0075-quant-presentation.md) の表�
 
 ### 6. 移行表（0.5.0 で一斉に）
 
-| 現行                                  | 0.5.0             | 備考                                     |
-| ------------------------------------- | ----------------- | ---------------------------------------- |
-| anima `i8` / sbv2 `w8` / irodori `w8` | `i8`              | 2 綴りの統合                             |
-| `w8a8`                                | `i8-a8`           |                                          |
-| anima `w8a8-a8`                       | `i8-a8-attn8`     |                                          |
-| anima `w8a8-s16`（既定）              | `i8-a8-attn8-s16` |                                          |
-| anima `w4-a8-s16`                     | `i4-attn8-s16`    | 現行名の `-a8` は attention の意味だった |
-| sbv2 / anima `w4`                     | `i4`              |                                          |
-| sbv2 `w8-bert4`（既定）               | `i8+bert4`        |                                          |
-| sbv2 `f16`                            | `f16+bert8`       | 実態（text_encoder だけ i8）に合わせる   |
-| anima `f16-c16`                       | `f16-c16`         | 変化なし                                 |
-| `f32`                                 | `f32`             | 変化なし                                 |
+`<格納>` は**全役割に共通の基底格納**（決定 1）を字句どおり採る。anima は text_encoder /
+text_conditioner / vae_decoder が f16 固定で、圧縮が掛かるのは transformer だけなので、基底は
+`f16` になり DiT ぶんは部品上書き `+dit<ビット>` で綴る。sbv2 / irodori は全役割が同じ格納を
+持つので基底 1 語で足りる（sbv2 の `f16` 席だけ text_encoder が i8 なので `+bert8`）。
+
+| 現行                        | 0.5.0                   | 備考                                                         |
+| --------------------------- | ----------------------- | ------------------------------------------------------------ |
+| sbv2 `w8` / irodori `w8`    | `i8`                    | 2 綴りの統合（全役割が i8）                                  |
+| sbv2 / irodori `w8a8`       | `i8-a8`                 |                                                              |
+| sbv2 `w8-bert4`（既定）     | `i8+bert4`              |                                                              |
+| sbv2 `w4`                   | `i4`                    | 全役割が i4                                                  |
+| sbv2 `f16`                  | `f16+bert8`             | 実態（text_encoder だけ i8）に合わせる                       |
+| anima `i8`                  | `f16+dit8`              | 実態に合わせる（i8 は transformer だけ・他 3 役は f16 固定） |
+| anima `w8a8`                | `f16+dit8-a8`           |                                                              |
+| anima `w8a8-a8`             | `f16+dit8-a8-attn8`     |                                                              |
+| anima `w8a8-s16`（既定）    | `f16+dit8-a8-attn8-s16` |                                                              |
+| anima `w4`                  | `f16+dit4`              |                                                              |
+| anima `w4-a8-s16`           | `f16+dit4-attn8-s16`    | 現行名の `-a8` は attention の意味だった                     |
+| anima `f16-c16`             | `f16-c16`               | 変化なし                                                     |
+| anima `f16` / `f32` / `f16` | 同名                    | 変化なし                                                     |
+
+**適用は 0.5.0 の breaking 波でまとめて行う**（Status 参照）— この表は「移行時にこう変える」の
+記録であって、現行コード（`ANIMA_QUANTS` / `SBV2_QUANTS` / `IRODORI_QUANT_SEATS`）はまだ旧名の
+まま。公開済み 3 リポの manifest は再アップロード + pin 更新（[0073](0073-models-source-pin.md)）
+と同時に切り替える。
 
 新しい名前は長くなる（`i8-a8-attn8-s16`）が、**id は機械の都合で、人が読むのは
 [0075](0075-quant-presentation.md) の `label` / `description`** という役割分担を取る。
@@ -103,8 +117,10 @@ quant 表に対応を必ず出す**。[0075](0075-quant-presentation.md) の表�
 - 公開済み 3 リポ（jvnv / irodori / anima）の manifest が全て変わる → 再アップロード + pin 更新
   （[0073](0073-models-source-pin.md)）が要る。0.5.0 の他の breaking と 1 回にまとめる。
 - hub / runtime のコード変更は**不要**（名前は不透明キー）。変わるのは recipe の quant 表・
-  examples・E2E テストの参照名・docs。`linearCompute` の値の改名だけは runtime の型と hub の
-  allowlist に触れる（[0075](0075-quant-presentation.md) の format 繰り上げと同じ波）。
+  examples・E2E テストの参照名・docs。**`linearCompute` / `attentionCompute` の値**の改名だけは
+  runtime の型（`ComputePrecision` / `SessionOptions`）と `recipe-builder.ts` の値比較 2 箇所、
+  hub の `LINEAR_COMPUTE` / `ATTENTION_COMPUTE` allowlist に触れる（型検査で全参照点が落ちる）。
+  [0075](0075-quant-presentation.md) の format 繰り上げと同じ波。
 - 旧名の互換シムは**作らない**。リリース済みだが、breaking 波でまとめて切り替える方が、
   「どちらの綴りも通る」期間を作るより誤解が少ない（旧名で pin された 0.4.0 クライアントは
   旧 revision を読み続けるので壊れない — pin が緩衝材になる）。

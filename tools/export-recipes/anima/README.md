@@ -357,6 +357,46 @@ effective weight / the axis is wrong / the formula is wrong", the scale silently
 one (② is exactly that case). This fixed-point property is pinned by
 `tools/exporter/tests/test_emit.py::test_recomputing_the_scale_from_a_quantized_weight_is_a_fixed_point`.
 
+### i4 storage emit (`--dtype i4` — ADR 0069 / perf-ledger Q-5, Q-6)
+
+`--dtype i4` produces a **mixed** series: the base storage stays i8 (`BASE_WEIGHT_DTYPES`) and only
+the eligible linears are overridden to group-wise int4 (`g32`). Eligibility is the general predicate
+only — **type ∧ quantization axis divisible by the group size** — with no per-name exclusions, so an
+upstream change to resolution, `patch_size`, or input channels cannot silently invalidate it. In the
+turbo DiT that selects 453 linears for i4 and leaves the patchify entrance (`patch_embed.proj`, in
+axis 68) on i8. Output goes to `outputs/series/anima-i4/`.
+
+```sh
+uv run --group anima python -m anima.export --dtype i4                  # GPTQ-calibrated (default)
+uv run --group anima python -m anima.export --dtype i4 --calib-prompts 12
+uv run --group anima python -m anima.export --dtype i4 --no-calib       # plain RTN, smoke only
+```
+
+**Rounding is GPTQ-calibrated by default** (`anima/calib.py`; the 448 linears inside the transformer
+blocks). There is no branch that swallows a calibration failure and falls back to plain RTN — the
+only opt-out is the explicit `--no-calib`, and **its output must not be shipped** (the storage layout
+is byte-identical either way, so no downstream check can tell the two apart; the diagnostic line is
+the only marker). The calibration corpus lives in `anima/calib_prompts.py` (24 danbooru-style tag
+prompts, the first `--calib-prompts N` of them, default 4) and is **kept disjoint from the evaluation
+inputs** — the gate collects the evaluation prompts from their sources and fails loudly on any
+overlap, including partial matches in either direction.
+
+Two constraints that do not apply to the other series:
+
+1. **`--resolution` is pinned to 512** while calibrating (the CLI rejects anything else). The 1024²
+   activation distribution is therefore not part of the calibration.
+2. **Cost is CPU-bound and non-trivial** — tens of minutes at the default 4 prompts, scaling linearly
+   with `--calib-prompts`. The figure is derived from `CALIB_SECONDS_PER_BATCH` in `anima/calib.py`;
+   read it there rather than copying a number here. Both the prompt count and the resolution are
+   quality upside axes that have **not** been measured beyond the default.
+
+The emit order is a **MUST**: decomposition gate → round the out-of-block eligible weights with plain
+RTN → capture the calibration inputs → run GPTQ on the in-block linears. Rounding the out-of-block
+weights first is what makes the captured activations match the shipping conditions (at run time the
+blocks see `temb` / `latent` that have already passed through the i4 `time_embed` / `norm_out` /
+`proj_out`). For the same reason the text front-end used to build the calibration inputs is run at
+the shipping dtype (F16).
+
 ### Patch layer (`anima/patch.py`)
 
 Unlike `sbv2.patch`, the goal is **not exportability but IR quality** (ADR 0016 / recon §5). All 4
