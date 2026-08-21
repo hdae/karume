@@ -21,6 +21,7 @@ docs/research/2026-08-02-anima-recon.md）。素の diffusers モジュールは
     uv run python -m anima.export --verify vae_decoder
     uv run python -m anima.export --dtype f16   # → outputs/series/anima-f16/
     uv run python -m anima.export --dtype i8    # → …/anima-i8/（DiT のみ）
+    uv run python -m anima.export --dtype i4    # → …/anima-i4/（DiT のみ・混成）
     uv run python -m anima.export --dtype f16 --dit-graph dyn  # → …-f16-dyn/
 
 MUST: `--dit-graph dyn` は **transformer 専用の追加系列**で、静的系列を置き換えない
@@ -33,6 +34,13 @@ text / cond / VAE は `outputs/series/anima-f16/` を共有する。加えて VA
 スライス」をパッチ適用時に行うため、丸めを先に当てると per-channel scale が**捨てられる要素の
 amax**まで数えた値になる（f16 の要素ごとの丸めと違い、scale は全要素の値を動かす）。他ターゲット
 への `--dtype i8` は CLI が機械的に拒否する。
+
+MUST: `--dtype i4` も **transformer 専用**（i8 と同じ理由・同じ表 — {@link DTYPE_TARGETS}）で、
+中身は**混成**（{@link I4_MODULE_TYPES} の適格な重み = i4 group32・残り = i8 per-channel）。
+i4 の実行経路は linear / embedding / conv1d の重みスロット限定（ADR 0069 決定 5 と追補）なので、
+単一 dtype の i4 系列は原理的に作れない — 系列の**既定**格納は i8 で（{@link BASE_WEIGHT_DTYPES}）、
+適格な 1 本ずつを `weight_dtype_overrides` で i4 へ振る（deberta / gemma4 の混成と同形）。
+丸めは**素の RTN**（校正なし）— 格納形は丸め方式に依らないので、速度実測はこれで足りる。
 
 MUST: `--dtype f16` は**重みを f16 表現可能値へ丸めてから**（fake-quant — ADR 0006）参照と
 golden を採り、適格な重みスロットだけを f16 で格納する（ADR 0018）。丸めは各 builder が
@@ -84,7 +92,14 @@ from karume.dist import sha256_file
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.quantize import fake_quant_int8, round_weights_to_f16
+from karume.quantize import (
+    DEFAULT_GROUP_SIZE,
+    channel_rows,
+    fake_quant_int4,
+    fake_quant_int8,
+    iter_quant_targets,
+    round_weights_to_f16,
+)
 
 from . import patch
 
@@ -93,7 +108,22 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 #: core の `karume.emit.WEIGHT_DTYPES` から引かない — core が書ける集合（i4 追加 —
 #: ADR 0069）と anima が系列・検収を持つ集合は別の判断で、結合すると core 側の拡張が
 #: そのままこの CLI の受理に化ける。
-WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
+WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
+
+#: i4 group32 で丸める**モジュール型**（= i4 の実行経路を持つ op と対 — `karume.emit` の
+#: `I4_WEIGHT_OPS`）。DiT に実在する量子化可能型は `nn.Linear` だけ（patchify も
+#: `CosmosPatchEmbed.proj` = `nn.Linear`・埋め込み表も conv も無い — `anima/measure_quant.py` の
+#: `W4_OP_TYPES` と同じ事実）だが、型で書くのは名前で書かないため。`nn.Embedding` を併記して
+#: あるのは、上流が表引きを持ち込んでも**適格判定の一般形のまま**拾うため（表引きされない
+#: `nn.Embedding` が現れた場合は emit の明示指定の門が「適格でない」でその FQN を挙げて落ちる
+#: ので、deberta の `NON_LOOKUP_EMBEDDINGS` のような名指しの除外は先回りで置かない）。
+#: conv 系は i4 の展開経路が無い（conv1d は `groups == 1` 限定）ので入れない。
+I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Embedding)
+
+#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格な重みは
+#: 1 本単位の `weight_dtype_overrides` で i4 へ振る（deberta の `BASE_WEIGHT_DTYPES` と同形）。
+BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "f16": "f16", "i8": "i8", "i4": "i8"}
+
 #: 実重みの取得元（HF Hub。ローカルキャッシュ済み — recon §7）。
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 #: 生成物の既定の置き場（格納 dtype 別の**系列**）。ターゲット名のサブディレクトリを 1 段掘る。
@@ -106,6 +136,7 @@ DEFAULT_OUT_ROOTS = {
     "f32": SERIES_ROOT / "anima",
     "f16": SERIES_ROOT / "anima-f16",
     "i8": SERIES_ROOT / "anima-i8",
+    "i4": SERIES_ROOT / "anima-i4",
 }
 
 TARGET_TEXT_ENCODER = "text_encoder"
@@ -119,12 +150,13 @@ TARGETS = (
     TARGET_VAE_DECODER,
 )
 
-#: 格納 dtype ごとに emit するターゲット（ADR 0019 — i8 系列は DiT のみ）。
+#: 格納 dtype ごとに emit するターゲット（ADR 0019 — i8 / i4 系列は DiT のみ）。
 #: MUST: 既定を絞るだけでなく `--target` の明示も拒否する（モジュール docstring の理由）。
 DTYPE_TARGETS = {
     "f32": TARGETS,
     "f16": TARGETS,
     "i8": (TARGET_TRANSFORMER,),
+    "i4": (TARGET_TRANSFORMER,),
 }
 
 #: DiT のグラフ形。`dyn` = トークン長 1 シンボル `S` の**追加系列**（#21 波 T2）。
@@ -189,9 +221,12 @@ class Component:
     cases: tuple[tuple[str, tuple[torch.Tensor, ...]], ...]
     reference: tuple[tuple[torch.Tensor, ...], ...] | None
     symbol_names: tuple[str, ...] = ("T",)
-    #: i8 の per-channel scale 台帳（FQN → scale）。キーは **`module` から見た FQN** で、
-    #: safetensors のテンソルキーと同じ空間になる（`--dtype i8` 以外では空）。
+    #: i8 / i4 の scale 台帳（FQN → scale）。キーは **`module` から見た FQN** で、
+    #: safetensors のテンソルキーと同じ空間になる（`--dtype i8` / `i4` 以外では空）。
     weight_scales: Mapping[str, torch.Tensor] = field(default_factory=dict)
+    #: 1 本単位の格納 dtype 指定（テンソルキー → dtype）。混成 i4 系列だけが埋める
+    #: （既定の {@link BASE_WEIGHT_DTYPES} に優先する — `karume.emit._plan_weight_dtype`）。
+    weight_dtype_overrides: Mapping[str, str] = field(default_factory=dict)
     #: `--verify` の突合に入る前にグラフ出力へ掛ける後段（**ホストへ出した段**の逐語再現）。
     #: S 形 DiT は unpatchify がホストなので、参照（パッチ前 diffusers の latent）と比べるには
     #: ここを通す必要がある。第 2 引数は**ケース番号** — ケースごとに解像度が違う系列では
@@ -323,7 +358,7 @@ def build_transformer(args: argparse.Namespace, verify: bool) -> Component:
     # 丸めは切り詰めの後で足りる（切った層は export にも参照にも現れない）。LoRA と違い
     # 「全層ぶんの取りこぼしを検査する」性質が無いので、順序の MUST は無い。
     module = patch.AnimaDit(model, latent, latent)
-    scales = _fake_quant(args, module, TARGET_TRANSFORMER)
+    scales, dtype_overrides = _fake_quant(args, module, TARGET_TRANSFORMER)
     generator = _generator(2)
     # timestep は 0〜1 の連続値（FlowMatch の sigma スケール）。2 点とも別の値にして、
     # timestep 埋め込みがグラフ入力として本当に効いていることを golden の数で踏む。
@@ -353,6 +388,7 @@ def build_transformer(args: argparse.Namespace, verify: bool) -> Component:
         cases=cases,
         reference=reference,
         weight_scales=scales,
+        weight_dtype_overrides=dtype_overrides,
     )
 
 
@@ -376,7 +412,7 @@ def _build_transformer_tokens(
     """
     patch_size = tuple(int(size) for size in model.config.patch_size)
     module = patch.AnimaDitTokens(model)
-    scales = _fake_quant(args, module, TARGET_TRANSFORMER)
+    scales, dtype_overrides = _fake_quant(args, module, TARGET_TRANSFORMER)
     generator = _generator(2)
     latents = [
         (
@@ -425,6 +461,7 @@ def _build_transformer_tokens(
         reference=reference,
         symbol_names=("S",),
         weight_scales=scales,
+        weight_dtype_overrides=dtype_overrides,
         verify_adapter=lambda output, index: patch.dit_unpatchify(
             output, sides[index], sides[index], patch_size
         ),
@@ -507,28 +544,85 @@ def _assert_vae_unpatched(where: str) -> None:
         )
 
 
+def _i4_module_names(model: nn.Module) -> frozenset[str]:
+    """i4 group32 で丸めるモジュールの FQN 集合（混成 i8+i4 の**排他割り**の唯一の源）。
+
+    適格は 2 条件の積: ① {@link I4_MODULE_TYPES} であること（emit の i4 適格 = linear /
+    embedding の重みスロット限定 — ADR 0069 決定 5 と追補。外れたテンソルへ i4 を明示指定すると
+    emit が fail loudly する）② 量子化軸が group 長で割り切れること（i4 は端数 group を作らない
+    MUST — 同決定 2。外れた重みは**構成ごと落とすのではなく対象から外す**ので i8 側へ落ちる）。
+
+    DiT で ② に落ちるのは patchify の入口 1 本だけ（`patch_embed.proj` の in 軸 = 17ch × 2×2 =
+    68 は g32 で割り切れない）だが、**名前で外さない** MUST — 解像度・patch_size・入力チャネルが
+    動けば整除も動くので、名指しの除外は上流が変わった瞬間に嘘になる。
+
+    対象列挙を core（`iter_quant_targets`）に通すのは、丸めが見る集合とここが数える集合を
+    1 本の実装のままにするため。i8 側の述語を「この集合に居ない」で書くのも同じ理由で、
+    2 つの述語を別々の綴りから作ると、どちらにも入らない重みが**黙って f32 のまま残る**
+    （値は正しいままサイズだけが戻るので、数字を見ない限り気づけない）。
+    """
+    return frozenset(
+        fqn.removesuffix(".weight")
+        for fqn, weight, axis in iter_quant_targets(model, I4_MODULE_TYPES)
+        if channel_rows(weight, axis).shape[-1] % DEFAULT_GROUP_SIZE == 0
+    )
+
+
+def _fake_quant_i4(
+    model: nn.Module, target: str
+) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
+    """混成 i4 系列の丸め（適格 = 素の RTN i4 g32・残り = i8 per-channel）。
+
+    2 つの述語は {@link _i4_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。
+    返す override は「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を
+    満たせなければ fail loudly する。
+
+    GPTQ（校正付き丸め）は結線しない — 格納形もカーネルも丸め値に依らないので、この段の
+    速度実測には素の RTN で足りる（品質を採るときに別途決める）。
+    """
+    i4_names = _i4_module_names(model)
+    report = fake_quant_int4(model, include=lambda name: name in i4_names, op_types=I4_MODULE_TYPES)
+    print(
+        f"[fake-quant] {target}: 適格な重みを i4 group へ丸めた（RTN） — {report.describe()}",
+        flush=True,
+    )
+    # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「適格と数えたのに丸まって
+    # いない」形で、i4 席に i8 の重みが混ざったまま緑になる（サイズだけが静かに戻る）。
+    expected = {f"{name}.weight" for name in i4_names}
+    if set(report.scales) != expected:
+        raise AssertionError(
+            f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(report.scales)} 本"
+            f"（過不足: {sorted(set(report.scales) ^ expected)[:3]}）"
+        )
+    int8 = fake_quant_int8(model, include=lambda name: name not in i4_names)
+    print(f"[fake-quant] {target}: 残りは i8 per-channel — {int8.describe()}", flush=True)
+    return {**int8.scales, **report.scales}, dict.fromkeys(report.scales, "i4")
+
+
 def _fake_quant(
     args: argparse.Namespace, model: nn.Module, target: str
-) -> Mapping[str, torch.Tensor]:
-    """格納 dtype の表現可能値へ重みを丸め、i8 の per-channel scale 台帳を返す（ADR 0006）。
+) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
+    """格納 dtype の表現可能値へ重みを丸め、scale 台帳と 1 本単位の格納指定を返す（ADR 0006）。
 
     MUST: 各 builder で **`reference` の採取より前**・`--lora` の焼き込みより**後**に呼ぶ。
     前後を逆にすると①参照だけが元の重みで計算されて E2E の差に量子化誤差が混ざる
     ②焼き込んだ ΔW が丸めを外して格納時の再丸めが golden との対応を壊す。
 
-    MUST（i8 のみ）: **export する `nn.Module` そのもの**に当てる。scale 台帳のキーは
+    MUST（i8 / i4 のみ）: **export する `nn.Module` そのもの**に当てる。scale 台帳のキーは
     ここで見た FQN で、safetensors のテンソルキー（= `torch.export` が見る FQN）と同じで
     なければ emit 側の突合が空振りする（`id()` 突合は禁止 — ADR 0006）。
     """
     if args.dtype == "f32":
-        return {}
+        return {}, {}
     if args.dtype == "i8":
         report = fake_quant_int8(model)
         print(f"[fake-quant] {target}: i8 per-channel へ丸めた — {report.describe()}", flush=True)
-        return report.scales
+        return report.scales, {}
+    if args.dtype == "i4":
+        return _fake_quant_i4(model, target)
     rounded = round_weights_to_f16(model)
     print(f"[fake-quant] {target}: f16 表現可能値へ丸めた — {rounded.describe()}", flush=True)
-    return {}
+    return {}, {}
 
 
 def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path) -> str | None:
@@ -618,8 +712,9 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
         out_dir / MODEL_FILE,
         dynamic_shapes=component.dynamic_shapes,
         symbol_names=component.symbol_names,
-        weight_dtype=args.dtype,
+        weight_dtype=BASE_WEIGHT_DTYPES[args.dtype],
         weight_scales=component.weight_scales,
+        weight_dtype_overrides=component.weight_dtype_overrides,
         preserved=TARGET_PRESERVED[target],
     )
     written = _write_io(component, graph, out_dir)
@@ -702,15 +797,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとに outputs/series/anima{,-f16}/ — ADR 0018 の別系列）",
+        help="出力先（既定は --dtype ごとの系列 — outputs/series/anima{,-f16,-i8,-i4}/・ADR 0018）",
     )
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f32",
         help=(
-            "重みの格納 dtype（f16 / i8 は fake-quant してから適格スロットだけ圧縮格納する。"
-            "i8 は transformer 専用 — ADR 0019）"
+            "重みの格納 dtype（f16 / i8 / i4 は fake-quant してから適格スロットだけ圧縮格納する。"
+            "i4 は混成で、適格な重みが group32 の i4・残りは i8 — ADR 0069。"
+            "i8 / i4 は transformer 専用 — ADR 0019）"
         ),
     )
     parser.add_argument(

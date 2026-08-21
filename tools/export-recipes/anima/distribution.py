@@ -25,6 +25,7 @@ from karume.dist import (
     WeightFiles,
     assert_model_name,
     assert_storage,
+    assert_storage_absent,
     complete_quant_weights,
     sha256_file,
 )
@@ -73,7 +74,8 @@ NOTICE_MARKDOWN = (
             " runtime Karume",
             "  (a single safetensors file holding the weights plus an inference graph in"
             " `__metadata__`).",
-            "- An int8-quantized series of the transformer was added alongside the f16 one.",
+            "- An int8-quantized series and an int4-quantized series of the transformer were added",
+            "  alongside the f16 one.",
             "",
             "## Not an official product",
             "",
@@ -93,6 +95,7 @@ OUTPUT_PATHS: Mapping[str, str] = {
     "text_conditioner": "text_conditioner/model.safetensors",
     "transformer_f16": "transformer/model.f16.safetensors",
     "transformer_i8": "transformer/model.i8.safetensors",
+    "transformer_i4": "transformer/model.i4.safetensors",
     "rope_base": "transformer/rope_base.safetensors",
     "vae_decoder": "vae_decoder/model.safetensors",
     "tokenizer": "tokenizer/qwen2-tokenizer.json",
@@ -117,6 +120,21 @@ ANIMA_QUANTS: Mapping[str, Any] = {
             "attentionCompute": "i8a8",
             "attentionScoreStorage": "f16",
         },
+    },
+    # i4 常駐の 2 席（波 J-4 先行・速度実測の第 1 段）。
+    #
+    # MUST: **`linearCompute` を宣言しない**。i8a8 経路の述語は i8 常駐を必要条件に含み
+    # （`packages/runtime/src/runtime/recipe-builder.ts` — `linearCompute === "i8a8" &&
+    # weightStorage === "i8" && k > 0 && k % 4 === 0`）、i4 常駐では fail loudly せず**通常の
+    # f32 計算経路**へ流れる（同ファイルの NOTE: 「linearCompute 'i8a8' × i4 常駐は通常の f32
+    # 計算経路へ流れる — 縮退ではなく i4 の実装済み経路そのもの」）。宣言すると manifest が
+    # 実挙動と食い違う「嘘の席」になる — 選んでも 1 バイトも挙動が変わらないノブを配ることに
+    # なり、後の実測がその席の名前で語られる。attention 側の 2 つは重みスロットを見ないので
+    # i4 常駐でもそのまま効く。
+    "w4": {"weights": {"transformer": "i4"}, "session": {}},
+    "w4-a8-s16": {
+        "weights": {"transformer": "i4"},
+        "session": {"attentionCompute": "i8a8", "attentionScoreStorage": "f16"},
     },
     "f16-c16": {
         "weights": {"transformer": "f16"},
@@ -151,22 +169,42 @@ ANIMA_PIPELINE_CONFIG: Mapping[str, Any] = {
 #: 通って**PNG の参照一致まで露見しなかった**。格納形は series ディレクトリ名でなくヘッダが正。
 #: f16 系列は fake-quant 対象だけが F16 になる（norm/bias 等は F32 のまま）ので「F16 を含む」
 #: を要求する。rope_base（F32 のみ）と tokenizer（JSON）はここに載せない。
+#: i4 系列は**混成**（F32 + I8 + I4 が同居する）なので **I4 を要求する** — {@link assert_storage}
+#: は「要求 dtype がヘッダに在る」を見るので、I8 を要求すると i8 系列が i4 席へ入っても素通りし、
+#: 席の取り違えが沈黙する（sbv2 の i4 席と同じ規律）。
 STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "text_encoder": "F16",
     "text_conditioner": "F16",
     "transformer_f16": "F16",
     "transformer_i8": "I8",
+    "transformer_i4": "I4",
     "vae_decoder": "F16",
 }
 
+#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: 存在検査だけでは**圧縮席どうしの取り違え**が素通りする — i4 系列は混成で、既定格納が i8
+#: （`anima/export.py` の `BASE_WEIGHT_DTYPES`）なので **必ず I8 を含む**。したがって i4 系列を
+#: `transformer_i8` へ挿し込む取り違えは「I8 を含む」を満たしてしまい、組み立ても verify_dist も
+#: ロードも通る。実害は既定 quant `w8a8-s16` に出る: 宣言した `linearCompute: "i8a8"` の述語は
+#: i8 常駐を必要条件に含むので、常駐が i4 だと fail loudly せず f32 計算経路へ黙って落ちる
+#: （`ANIMA_QUANTS` の w4 席が「嘘の席」として避けた挙動が、既定席で沈黙して起きる）。
+#: MUST: 禁止は**役割ごとに集合**で持つ（1 つだけだと 4 本目の系列が生えた日に、名指ししなかった
+#: ほうが黙って素通りする — irodori と同じ規律）。f16 席は I8 / I4 の不在で二重に締まる。
+ANIMA_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
+    "transformer_f16": ("I8", "I4"),
+    "transformer_i8": ("I4",),
+}
+
 #: weights の宣言（dtype ラベル → 役割名）。ラベルは**格納 dtype 語彙**で、
-#: {@link STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。
+#: {@link STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。`i4` は**混成の系列**を
+#: 指すラベルで、実体は「i4 適格な重みが i4 group32・残りは i8」（`anima/export.py`）。
 ANIMA_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     "text_encoder": {"f16": WeightFiles("text_encoder")},
     "text_conditioner": {"f16": WeightFiles("text_conditioner")},
     "transformer": {
         "f16": WeightFiles("transformer_f16", {"rope_base": "rope_base"}),
         "i8": WeightFiles("transformer_i8", {"rope_base": "rope_base"}),
+        "i4": WeightFiles("transformer_i4", {"rope_base": "rope_base"}),
     },
     "vae_decoder": {"f16": WeightFiles("vae_decoder")},
 }
@@ -180,39 +218,50 @@ class AnimaSources:
     """組み立ての入力となる系列ディレクトリ群。
 
     テキスト経路と VAE は DiT の格納 dtype に依らないので f16 系列 1 本を共有する
-    （ADR 0019）。transformer だけが f16 / i8 の 2 系列に分かれる。
+    （ADR 0019）。transformer だけが f16 / i8 / i4 の 3 系列に分かれる。
     """
 
     transformer_f16: Path
     transformer_i8: Path
+    transformer_i4: Path
     base: Path
     tokenizers: Path
 
 
 def anima_sources(series_dir: Path, model: str = ANIMA_MODEL_NAME) -> AnimaSources:
-    """系列の親ディレクトリ（`outputs/series/`）から Anima の 4 系列を引く。
+    """系列の親ディレクトリ（`outputs/series/`）から Anima の 5 系列を引く。
 
-    モデル名は transformer の 2 系列にだけ掛かる — base（text 経路 / VAE）と tokenizer は
+    モデル名は transformer の 3 系列にだけ掛かる — base（text 経路 / VAE）と tokenizer は
     素のアーキテクチャ側の出力で、turbo かどうかに依らない。
     """
     return AnimaSources(
         transformer_f16=series_dir / f"{model}-f16-dyn",
         transformer_i8=series_dir / f"{model}-i8-dyn",
+        transformer_i4=series_dir / f"{model}-i4-dyn",
         base=series_dir / ANIMA_BASE_SERIES,
         tokenizers=series_dir / ANIMA_TOKENIZER_SERIES / "text",
     )
 
 
-def shared_rope_base(sources: AnimaSources) -> Path:
-    """f16 / i8 系列の rope 素表がバイト同一であることを確かめ、1 本化する元を返す。
+def transformer_series(sources: AnimaSources) -> tuple[Path, ...]:
+    """格納 dtype 別の transformer 系列（**系列横断の突合はこの 1 本から引く** MUST）。
 
-    MUST: `rope_base.safetensors` は f16 / i8 の 2 系列に同名で並ぶ。両者のバイト同一を
-    sha256 で確かめてから 1 本化する — 食い違ったまま片方を選ぶと、選ばれなかった系列の
+    rope 素表のバイト同一検査と LoRA 帰属の突合はどちらも「全系列を舐める」検査で、列挙を
+    2 箇所に持つと格納席が増えた日に片方だけ更新される — 網から漏れた系列は検査を素通りし、
+    どちらの綻びも実行時には沈黙する（幾何違いは絵だけ壊れ、帰属違いは README だけが嘘になる）。
+    """
+    return (sources.transformer_f16, sources.transformer_i8, sources.transformer_i4)
+
+
+def shared_rope_base(sources: AnimaSources) -> Path:
+    """全 transformer 系列の rope 素表がバイト同一であることを確かめ、1 本化する元を返す。
+
+    MUST: `rope_base.safetensors` は f16 / i8 / i4 の各系列に同名で並ぶ。全てのバイト同一を
+    sha256 で確かめてから 1 本化する — 食い違ったまま 1 つを選ぶと、選ばれなかった系列の
     quant が「別の幾何の rope 表で走る」形になり、ロードも実行も通って絵だけが静かに壊れる。
     """
     candidates = [
-        series / "transformer" / "rope_base.safetensors"
-        for series in (sources.transformer_f16, sources.transformer_i8)
+        series / "transformer" / "rope_base.safetensors" for series in transformer_series(sources)
     ]
     for path in candidates:
         if not path.is_file():
@@ -236,7 +285,7 @@ def assert_lora_provenance(sources: AnimaSources) -> None:
     形式が妥当なので `verify_dist` の構造検査も通り、**沈黙する**。「別々の台本が持つ同じ
     事実は組み立て時に必ず突き合わせる」（rope_base のバイト同一検査と同じ規律）。
     """
-    for series in (sources.transformer_f16, sources.transformer_i8):
+    for series in transformer_series(sources):
         path = series / "transformer" / LORA_PROVENANCE_FILE
         if not path.is_file():
             raise DistError(
@@ -265,6 +314,7 @@ def anima_placements(sources: AnimaSources) -> dict[str, Path]:
         "text_conditioner": sources.base / "text_conditioner" / "model.safetensors",
         "transformer_f16": sources.transformer_f16 / "transformer" / "model.safetensors",
         "transformer_i8": sources.transformer_i8 / "transformer" / "model.safetensors",
+        "transformer_i4": sources.transformer_i4 / "transformer" / "model.safetensors",
         "rope_base": shared_rope_base(sources),
         "vae_decoder": sources.base / "vae_decoder" / "model.safetensors",
         "tokenizer": sources.tokenizers / "qwen2-tokenizer.json",
@@ -279,6 +329,7 @@ def anima_plan(sources: AnimaSources, model: str = ANIMA_MODEL_NAME) -> ModelPla
     placements = anima_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, STORAGE_REQUIREMENTS)
+        assert_storage_absent(role, source, ANIMA_STORAGE_FORBIDDEN)
     return ModelPlan(
         name=model,
         pipeline=ANIMA_PIPELINE,

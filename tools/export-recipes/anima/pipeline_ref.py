@@ -77,11 +77,16 @@ from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
-from .export import WEIGHT_DTYPES
 from .resolution import parse_resolution, resolution_meta
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
+#: この台本が参照を採れる系列。**`export.py` の `WEIGHT_DTYPES` から引かない** MUST — あちらは
+#: 「資産として書ける格納 dtype」の集合で、i4 のように**参照経路を持たない**（下の 3 表に席が
+#: 無い）系列が入る。結合すると argparse の受理だけが広がり、`component_dtype` / `DEFAULT_OUTS`
+#: の素の KeyError まで落ちない — text_encoder のロードまで数分走った末に診断文言ゼロで死ぬ形で、
+#: fail loudly（理由を挙げて落ちる）を満たさない。席を足すときは下の 3 表と同時に足す。
+REF_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
 #: 生成物の既定の置き場（格納 dtype 別）。**配布形 `models/` とは別の系列側**（上の MUST）。
 DEFAULT_OUTS = {
     "f32": SERIES_ROOT / "anima-pipeline",
@@ -390,7 +395,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--dtype",
-        choices=WEIGHT_DTYPES,
+        choices=REF_DTYPES,
         default="f32",
         help="圧縮系列は 4 コンポーネントとも fake-quant してから参照を採る（i8 は DiT のみ i8）",
     )

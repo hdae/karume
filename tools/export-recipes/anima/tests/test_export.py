@@ -21,6 +21,25 @@ from torch import nn
 from anima import export as export_anima
 from anima import patch as patch_anima
 from anima.distribution import LORA_PROVENANCE_FILE
+from karume.quantize import DEFAULT_GROUP_SIZE, QuantizeError
+
+
+class _DitLike(nn.Module):
+    """DiT の縮図 — i4 適格判定に効く形だけを持つ。
+
+    `patch_embed` の in 軸 68（= 17 チャネル × patch 2×2）は g32 で割り切れない。実 DiT で
+    唯一の非整列 linear（`CosmosPatchEmbed.proj`）と同じ形で、i4 の対象から落ちて i8 側へ
+    回る側。`attn` は整列した適格、`norm` は i4 の実行経路を持たない型。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.patch_embed = nn.Linear(68, 8)
+        self.attn = nn.Linear(64, 8)
+        self.norm = nn.LayerNorm(8)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.norm(self.attn(tokens))
 
 
 class TestTargets:
@@ -107,7 +126,7 @@ class TestFakeQuant:
     def test_i8_rounds_to_per_channel_representable_values(self):
         model = nn.Linear(4, 3)
 
-        scales = export_anima._fake_quant(argparse.Namespace(dtype="i8"), model, "t")
+        scales, _ = export_anima._fake_quant(argparse.Namespace(dtype="i8"), model, "t")
 
         scale = scales["weight"]
         assert list(scale.shape) == [3, 1]
@@ -117,8 +136,92 @@ class TestFakeQuant:
         """MUST: 圧縮系列は別ディレクトリ（ADR 0018 / 0019）— 同居させると f32 の網が消える。"""
         roots = export_anima.DEFAULT_OUT_ROOTS
 
-        assert set(roots) == set(export_anima.WEIGHT_DTYPES) == {"f32", "f16", "i8"}
+        assert set(roots) == set(export_anima.WEIGHT_DTYPES) == {"f32", "f16", "i8", "i4"}
         assert len(set(roots.values())) == len(roots)
+
+
+class TestFakeQuantI4:
+    """`--dtype i4` の混成（適格 = i4 group32・残り = i8 per-channel — ADR 0069）。
+
+    「適格なのに丸まっていない」も「適格でないのに i4 を要求した」も、ロードまで通って
+    **サイズだけが静かに戻る / 実行時に落ちる**壊れ方なので、丸めた集合と格納指定の一致を
+    ここで縛る。
+    """
+
+    @staticmethod
+    def _quantize(model: nn.Module):
+        return export_anima._fake_quant(argparse.Namespace(dtype="i4"), model, "t")
+
+    def test_the_series_is_stored_as_i8_with_the_eligible_weights_overridden(self):
+        """i4 の実行経路は適格スロット限定 — 系列の既定は i8 で、適格だけを 1 本ずつ i4 へ。"""
+        base = export_anima.BASE_WEIGHT_DTYPES
+
+        assert set(base) == set(export_anima.WEIGHT_DTYPES)
+        assert base["i4"] == "i8"
+        assert [dtype for dtype, stored in base.items() if dtype != stored] == ["i4"]
+
+    def test_it_rounds_an_aligned_linear_to_group_representable_values(self):
+        model = _DitLike()
+
+        scales, _ = self._quantize(model)
+
+        scale = scales["attn.weight"]
+        assert list(scale.shape) == [8, 64 // DEFAULT_GROUP_SIZE]
+        spread = scale.repeat_interleave(DEFAULT_GROUP_SIZE, dim=-1)
+        assert torch.equal(torch.round(model.attn.weight / spread) * spread, model.attn.weight)
+
+    def test_the_unaligned_linear_falls_back_to_i8_per_channel(self):
+        """端数 group は格納できない（ADR 0069 決定 2）— 対象から外れて i8 側が丸める。"""
+        model = _DitLike()
+
+        scales, overrides = self._quantize(model)
+
+        scale = scales["patch_embed.weight"]
+        assert list(scale.shape) == [8, 1]
+        assert torch.equal(
+            torch.round(model.patch_embed.weight / scale) * scale, model.patch_embed.weight
+        )
+        assert "patch_embed.weight" not in overrides
+
+    def test_every_quantizable_weight_lands_in_exactly_one_ledger(self):
+        """どちらの述語にも入らない重みは**黙って f32 のまま残る**（値は正しくサイズだけ戻る）。"""
+        model = _DitLike()
+
+        scales, overrides = self._quantize(model)
+
+        assert sorted(scales) == ["attn.weight", "patch_embed.weight"]
+        assert overrides == {"attn.weight": "i4"}
+
+    def test_the_exclusion_follows_the_axis_length_and_not_the_name(self):
+        """除外の理由は**量子化軸の長さ**であって名前ではない（名指しのハードコードは書かない）。
+
+        解像度 / patch_size / 入力チャネルが動けば整除も動くので、名指しの除外は上流が
+        変わった瞬間に嘘になる — 同じ `patch_embed` でも軸が整列すれば適格側に入ること。
+        """
+        assert export_anima._i4_module_names(_DitLike()) == frozenset({"attn"})
+
+        aligned = _DitLike()
+        aligned.patch_embed = nn.Linear(64, 8)
+
+        assert export_anima._i4_module_names(aligned) == frozenset({"attn", "patch_embed"})
+
+    def test_letting_an_unaligned_weight_into_the_i4_set_fails_loudly(self, monkeypatch):
+        """適格判定が壊れたら丸めが落ちる — 上の「i8 へ落ちる」が恒真でないことの確認。"""
+        monkeypatch.setattr(
+            export_anima, "_i4_module_names", lambda model: frozenset({"attn", "patch_embed"})
+        )
+
+        with pytest.raises(QuantizeError, match="割り切れない"):
+            self._quantize(_DitLike())
+
+    def test_a_name_the_rounding_never_reaches_is_reported(self, monkeypatch):
+        """空振りの門 — 丸めた集合と格納指定がずれると i4 席に i8 の重みが混ざったまま緑になる。"""
+        monkeypatch.setattr(
+            export_anima, "_i4_module_names", lambda model: frozenset({"attn", "norm"})
+        )
+
+        with pytest.raises(AssertionError, match="i4 適格"):
+            self._quantize(_DitLike())
 
 
 class TestDtypeTargets:
@@ -132,10 +235,21 @@ class TestDtypeTargets:
     def test_i8_covers_the_transformer_only(self):
         assert export_anima.DTYPE_TARGETS["i8"] == ("transformer",)
 
+    def test_i4_covers_the_transformer_only(self):
+        """i4 の対象は i8 と同じ（DiT が支配項・text / cond / VAE は f16 系列を共有する）。"""
+        assert export_anima.DTYPE_TARGETS["i4"] == ("transformer",)
+
     @pytest.mark.parametrize("flag", ["--target", "--verify"])
     def test_an_i8_target_outside_the_table_is_refused(self, monkeypatch, flag):
         """既定を絞るだけだと明示指定が通ってしまう（排除したはずの資産が黙って生える）。"""
         monkeypatch.setattr("sys.argv", ["export_anima.py", "--dtype", "i8", flag, "vae_decoder"])
+
+        with pytest.raises(SystemExit):
+            export_anima.main()
+
+    @pytest.mark.parametrize("flag", ["--target", "--verify"])
+    def test_an_i4_target_outside_the_table_is_refused(self, monkeypatch, flag):
+        monkeypatch.setattr("sys.argv", ["export_anima.py", "--dtype", "i4", flag, "vae_decoder"])
 
         with pytest.raises(SystemExit):
             export_anima.main()

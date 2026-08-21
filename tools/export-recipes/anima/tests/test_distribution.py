@@ -27,12 +27,14 @@ from anima.distribution import (
     ANIMA_MODEL_NAME,
     ANIMA_PIPELINE_CONFIG,
     ANIMA_QUANTS,
+    ANIMA_STORAGE_FORBIDDEN,
     ANIMA_WEIGHTS,
     LICENSE_SOURCE_PATH,
     LORA_PROVENANCE_FILE,
     NOTICE_MARKDOWN,
     OUTPUT_PATHS,
     PIPELINE,
+    STORAGE_REQUIREMENTS,
     AnimaSources,
     anima_plan,
     anima_sources,
@@ -70,6 +72,24 @@ def _fake_safetensors(
     return len(encoded).to_bytes(8, "little") + encoded + payload
 
 
+def _mixed_safetensors(dtypes: tuple[str, ...], payload: bytes) -> bytes:
+    """複数の格納 dtype が同居するヘッダ（混成系列 = i4 の実物の形）。
+
+    i4 系列は「適格な重みが I4・残りが I8・適格外と scale が F32」の 3 種が並ぶので、単一 dtype
+    の偽資産では**圧縮席どうしの取り違え**（i4 系列 → i8 席）を再現できない。
+    """
+    header: dict[str, Any] = {}
+    for index, dtype in enumerate(dtypes):
+        start = index * len(payload)
+        header[f"w{index}"] = {
+            "dtype": dtype,
+            "shape": [len(payload)],
+            "data_offsets": [start, start + len(payload)],
+        }
+    encoded = json.dumps(header).encode("utf-8")
+    return len(encoded).to_bytes(8, "little") + encoded + payload * len(dtypes)
+
+
 #: 偽資産の中身（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 5 役は
 #: `STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。rope_base はヘッダ検査の対象外
 #: だが、実物同様に正規形にしておく。
@@ -78,6 +98,7 @@ _PAYLOADS = {
     "text_conditioner": _fake_safetensors("F16", b"text-conditioner-weights"),
     "transformer_f16": _fake_safetensors("F16", b"transformer-f16-weights"),
     "transformer_i8": _fake_safetensors("I8", b"transformer-i8-weights"),
+    "transformer_i4": _fake_safetensors("I4", b"transformer-i4-weights"),
     "rope_base": _fake_safetensors("F32", b"rope-base-table"),
     "vae_decoder": _fake_safetensors("F16", b"vae-decoder-weights"),
     "tokenizer": b'{"qwen2": true}',
@@ -102,6 +123,7 @@ def _build_series(
     *,
     model: str = ANIMA_MODEL_NAME,
     i8_rope: bytes | None = None,
+    i4_rope: bytes | None = None,
     mark: bytes = b"",
     lora_sha256: str | None = None,
 ) -> AnimaSources:
@@ -109,7 +131,8 @@ def _build_series(
 
     `mark` は transformer 系列だけに混ぜる差分 — ファミリー組み立てで「モデルごとに違う重み」と
     「モデル間で同一の base 資産」を作り分けるための軸。`lora_sha256` は帰属の記録を
-    カードの宣言からずらす軸（既定は一致する値）。
+    カードの宣言からずらす軸（既定は一致する値）。`i8_rope` / `i4_rope` は rope 素表を
+    f16 系列からずらす軸（系列ごとに独立に振れる — 網が全系列に掛かっていることを見るため）。
     """
     sources = anima_sources(series_dir, model)
     _write(sources.base / "text_encoder" / "model.safetensors", _PAYLOADS["text_encoder"])
@@ -118,9 +141,10 @@ def _build_series(
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.base / "text_encoder" / "io.t005.safetensors", b"io-fixture")
     _write(sources.base / "vae_decoder" / "io.case0.safetensors", b"io-fixture")
-    for series, role, dtype in (
-        (sources.transformer_f16, "transformer_f16", "F16"),
-        (sources.transformer_i8, "transformer_i8", "I8"),
+    for series, role, dtype, rope in (
+        (sources.transformer_f16, "transformer_f16", "F16", None),
+        (sources.transformer_i8, "transformer_i8", "I8", i8_rope),
+        (sources.transformer_i4, "transformer_i4", "I4", i4_rope),
     ):
         payload = (
             _PAYLOADS[role] if not mark else _fake_safetensors(dtype, role.encode("utf-8") + mark)
@@ -131,13 +155,10 @@ def _build_series(
             series / "transformer" / LORA_PROVENANCE_FILE,
             _lora_record(LORA_SHA256 if lora_sha256 is None else lora_sha256),
         )
-    _write(
-        sources.transformer_f16 / "transformer" / "rope_base.safetensors", _PAYLOADS["rope_base"]
-    )
-    _write(
-        sources.transformer_i8 / "transformer" / "rope_base.safetensors",
-        _PAYLOADS["rope_base"] if i8_rope is None else i8_rope,
-    )
+        _write(
+            series / "transformer" / "rope_base.safetensors",
+            _PAYLOADS["rope_base"] if rope is None else rope,
+        )
     _write(sources.tokenizers / "qwen2-tokenizer.json", _PAYLOADS["tokenizer"])
     _write(sources.tokenizers / "t5-tokenizer.json", _PAYLOADS["tokenizer_2"])
     return sources
@@ -181,6 +202,13 @@ class TestLayout:
         subtree = out_dir / ANIMA_MODEL_NAME / "transformer"
         assert (subtree / "model.f16.safetensors").read_bytes() == _PAYLOADS["transformer_f16"]
         assert (subtree / "model.i8.safetensors").read_bytes() == _PAYLOADS["transformer_i8"]
+
+    def test_it_gives_the_i4_series_its_own_dtype_file(self, assembled) -> None:
+        """i4 は f16 / i8 と並ぶ 3 本目の格納席（同じ path へ載せると席が 1 つ消える）。"""
+        out_dir, _ = assembled
+        placed = out_dir / ANIMA_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]
+        assert placed.name == "model.i4.safetensors"
+        assert placed.read_bytes() == _PAYLOADS["transformer_i4"]
 
     def test_a_single_model_repository_has_no_shared_directory(self, assembled) -> None:
         """`shared/` は 2 モデル以上が同じ中身を持ったときだけ現れる席（ADR 0041 §5）。"""
@@ -252,6 +280,14 @@ class TestRopeBase:
         # 止めた以上、途中の配布形を残さない（片方だけ入った出力を後段に見せない）。
         assert not (out_dir / MANIFEST_FILENAME).exists()
 
+    def test_the_check_reaches_the_i4_series_too(self, tmp_path: Path) -> None:
+        """網が f16 / i8 の 2 系列に留まっていると、i4 席だけ別の幾何で走って絵が静かに壊れる。"""
+        sources = _build_series(tmp_path / "series", i4_rope=b"rope-base-table-DIFFERENT")
+        out_dir = tmp_path / "models" / "anima-turbo"
+        with pytest.raises(DistError, match="バイト同一でない"):
+            _assemble_anima(sources, out_dir)
+        assert not (out_dir / MANIFEST_FILENAME).exists()
+
 
 class TestLoraProvenance:
     """カードが印字する LoRA の帰属は、系列に残った記録と組み立て時に突き合わせる。
@@ -316,6 +352,49 @@ class TestStorageGate:
         )
         with pytest.raises(DistError, match=r"transformer_i8: .* I8 が無い"):
             _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+    def test_it_stops_when_the_i4_transformer_lacks_i4_storage(self, tmp_path: Path) -> None:
+        """i4 席へ i8 系列が入る取り違え — 要求が I8 のままだと素通りして沈黙する。"""
+        sources = _build_series(tmp_path / "series")
+        (sources.transformer_i4 / "transformer" / "model.safetensors").write_bytes(
+            _fake_safetensors("I8", b"transformer-i4-weights")
+        )
+        with pytest.raises(DistError, match=r"transformer_i4: .* I4 が無い"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+    def test_it_stops_when_the_i4_series_lands_in_the_i8_seat(self, tmp_path: Path) -> None:
+        """逆向きの取り違え（i4 系列 → i8 席）— 存在検査だけでは**素通りする**。
+
+        i4 系列は混成で既定格納が i8 なので必ず I8 を含み、「I8 を含む」を満たしてしまう。
+        既定 quant `w8a8-s16` が i4 常駐を掴むと、i8a8 の述語が外れて fail loudly せず
+        f32 計算経路へ黙って落ちる — 禁止表（`ANIMA_STORAGE_FORBIDDEN`）が唯一の検出器。
+        """
+        sources = _build_series(tmp_path / "series")
+        (sources.transformer_i8 / "transformer" / "model.safetensors").write_bytes(
+            _mixed_safetensors(("I4", "I8", "F32"), b"transformer-i4-weights")
+        )
+        with pytest.raises(DistError, match=r"transformer_i8: .* I4 がある"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+    def test_no_transformer_series_slips_into_another_series_seat(self) -> None:
+        """3 席 × 他 2 系列の**全ての**取り違えが、要求か禁止のどちらかで落ちる。
+
+        席が増えた日に片方の表だけ更新されると、網から漏れた組み合わせが黙って配布形に並ぶ
+        （系列 root の取り違えは数値の門では原理的に検出できない — ADR 0027 / 0029）。
+        """
+        #: 系列 → そのヘッダが**必ず含む**格納 dtype（i4 は混成で既定格納が i8 なので I8 も含む）。
+        headers = {
+            "transformer_f16": {"F32", "F16"},
+            "transformer_i8": {"F32", "I8"},
+            "transformer_i4": {"F32", "I8", "I4"},
+        }
+
+        for seat in headers:
+            for series, found in headers.items():
+                caught = STORAGE_REQUIREMENTS[seat] not in found or any(
+                    dtype in found for dtype in ANIMA_STORAGE_FORBIDDEN.get(seat, ())
+                )
+                assert caught is (series != seat), f"{series} → {seat} 席"
 
     def test_it_stops_when_a_header_is_not_safetensors(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
@@ -395,6 +474,53 @@ class TestManifest:
             assert set(quant["weights"]) == set(model["weights"]), name
             for weight, label in quant["weights"].items():
                 assert label in model["weights"][weight]
+
+
+class TestI4Quants:
+    """i4 常駐の 2 席（`w4` / `w4-a8-s16`）— 波 J-4 先行の速度実測用。"""
+
+    @staticmethod
+    def _i4_seats() -> dict[str, Any]:
+        return {
+            name: quant
+            for name, quant in ANIMA_QUANTS.items()
+            if quant["weights"].get("transformer") == "i4"
+        }
+
+    def test_it_declares_exactly_the_two_i4_seats(self) -> None:
+        assert sorted(self._i4_seats()) == ["w4", "w4-a8-s16"]
+
+    def test_the_plain_seat_leaves_the_session_untouched(self) -> None:
+        """`w4` は格納だけを動かす席（計算経路は f32 のまま）。"""
+        assert ANIMA_QUANTS["w4"]["session"] == {}
+
+    def test_the_attention_seat_declares_only_the_attention_knobs(self) -> None:
+        assert ANIMA_QUANTS["w4-a8-s16"]["session"] == {
+            "attentionCompute": "i8a8",
+            "attentionScoreStorage": "f16",
+        }
+
+    def test_no_i4_seat_declares_linear_compute(self) -> None:
+        """MUST: i8a8 経路の述語は **i8 常駐**を必要条件に含む（`recipe-builder.ts` の
+        `linearCompute === "i8a8" && weightStorage === "i8" && …`）。i4 常駐では fail loudly
+        せず通常の f32 計算経路へ流れるので、宣言すると「選んでも 1 バイトも挙動が変わらない
+        ノブ」を配ることになり、manifest が実挙動と食い違う嘘の席になる。
+        """
+        for name, quant in self._i4_seats().items():
+            assert "linearCompute" not in quant["session"], name
+
+    def test_the_default_quant_stays_on_the_i8_seat(self) -> None:
+        """席が増えても既定は動かさない（既定の変更は品質裁定を要する別の判断）。"""
+        assert ANIMA_DEFAULT_QUANT == "w8a8-s16"
+
+    def test_the_seats_reach_the_manifest_with_their_session_knobs(self, assembled) -> None:
+        """表に足しただけで配布形へ出ること（quant 表は manifest 由来 — ADR 0041 §3）。"""
+        _, manifest = assembled
+        quants = manifest["models"][ANIMA_MODEL_NAME]["quants"]
+
+        for name, quant in self._i4_seats().items():
+            assert quants[name]["weights"]["transformer"] == "i4"
+            assert quants[name]["session"] == dict(quant["session"])
 
 
 class TestVerifyDist:
@@ -575,7 +701,7 @@ class TestFamilyAssembly:
             "tokenizer_2",
             "rope_base",
         )
-        private_roles = ("transformer_f16", "transformer_i8")
+        private_roles = ("transformer_f16", "transformer_i8", "transformer_i4")
         expected = [f"{SHARED_DIRNAME}/{OUTPUT_PATHS[role]}" for role in shared_roles]
         expected += [
             f"{model}/{OUTPUT_PATHS[role]}"

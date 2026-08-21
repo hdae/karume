@@ -126,3 +126,15 @@ class TestComponentDtype:
 
         assert set(roots) == set(anima_pipeline.COMPONENT_DTYPES)
         assert len(set(roots.values())) == len(roots)
+
+    def test_the_cli_only_accepts_series_that_have_a_seat_in_every_table(self):
+        """受理集合 = 3 表のキー集合。ずれると `--dtype` が素の KeyError まで落ちる。
+
+        `export.py` 側の格納 dtype（i4 のような参照経路を持たない系列を含む）を argparse の
+        choices へ直結すると、text_encoder のロードまで走った末に診断文言ゼロで死ぬ。
+        """
+        accepted = set(anima_pipeline.REF_DTYPES)
+
+        assert accepted == set(anima_pipeline.COMPONENT_DTYPES)
+        assert accepted == set(anima_pipeline.DEFAULT_OUTS)
+        assert accepted == set(anima_pipeline._FALLBACK_DTYPE)
