@@ -66,6 +66,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -190,12 +191,24 @@ def sigma_schedule(steps: int, shift: float) -> np.ndarray:
     return np.concatenate([sigmas, np.zeros(1, dtype=np.float32)])
 
 
-def encode_text(repo: str, max_len: int, dtype: str) -> dict[str, torch.Tensor]:
-    """`AnimaTextEncoderStep` + `AnimaTextConditioningStep` の再現（素の diffusers 経路）。
+@dataclass(frozen=True)
+class TextStack:
+    """テキスト前段のロード済み一式（トークナイザ 2 本 + Qwen3 + conditioner）。
 
-    トークナイザは repo 同梱の `tokenizer.json`（Qwen2 BPE / T5 Unigram）。`padding="longest"`・
-    単一プロンプトなのでマスクは**全 1** になり、`prompt_embeds * mask` も conditioner の
-    マスク乗算もどちらも恒等 — ラッパ（`anima.patch`）がマスクを持たない根拠がここ。
+    まとめて持つのは「1 回ロードして複数プロンプトを通す」呼び出し（`anima.calib` の校正入力）
+    のため — プロンプトごとに `from_pretrained` を叩くと Qwen3 のロードがその回数だけ走る。
+    """
+
+    tokenizer: Any
+    t5_tokenizer: Any
+    encoder: torch.nn.Module
+    conditioner: torch.nn.Module
+
+
+def load_text_stack(repo: str, dtype: str) -> TextStack:
+    """テキスト前段をロードして系列の格納 dtype へ丸める（{@link encode_prompt} の前提）。
+
+    MUST: 丸めはここ（参照を採る前）— 後ろへ動かすと参照だけが元の重みで計算される。
     """
     from diffusers import AnimaTextConditioner
     from transformers import AutoTokenizer, Qwen3Model
@@ -209,38 +222,60 @@ def encode_text(repo: str, max_len: int, dtype: str) -> dict[str, torch.Tensor]:
     conditioner.to(torch.float32).eval()
     _fake_quant(dtype, encoder, "text_encoder")
     _fake_quant(dtype, conditioner, "text_conditioner")
+    return TextStack(
+        tokenizer=tokenizer, t5_tokenizer=t5_tokenizer, encoder=encoder, conditioner=conditioner
+    )
 
+
+def encode_prompt(stack: TextStack, max_len: int, text: str) -> dict[str, torch.Tensor]:
+    """1 プロンプトを `AnimaTextEncoderStep` + `AnimaTextConditioningStep` で通す。
+
+    トークナイザは repo 同梱の `tokenizer.json`（Qwen2 BPE / T5 Unigram）。`padding="longest"`・
+    単一プロンプトなのでマスクは**全 1** になり、`prompt_embeds * mask` も conditioner の
+    マスク乗算もどちらも恒等 — ラッパ（`anima.patch`）がマスクを持たない根拠がここ。
+
+    キーは接頭辞なし（`neg_` のような役割の綴りは呼び出し側が付ける）。
+    """
+    qwen = stack.tokenizer(
+        [text], padding="longest", max_length=max_len, truncation=True, return_tensors="pt"
+    )
+    t5 = stack.t5_tokenizer(
+        [text], padding="longest", max_length=max_len, truncation=True, return_tensors="pt"
+    )
+    with torch.no_grad():
+        hidden = stack.encoder(
+            input_ids=qwen.input_ids,
+            attention_mask=qwen.attention_mask,
+            output_hidden_states=False,
+        ).last_hidden_state
+        hidden = hidden * qwen.attention_mask.to(hidden).unsqueeze(-1)
+        embeds = stack.conditioner(
+            source_hidden_states=hidden,
+            target_input_ids=t5.input_ids,
+            target_attention_mask=t5.attention_mask,
+            source_attention_mask=qwen.attention_mask,
+        )
+    if embeds.shape[1] != MIN_SEQUENCE_LENGTH:
+        raise ValueError(
+            f"conditioner 出力長 {embeds.shape[1]} が {MIN_SEQUENCE_LENGTH} でない"
+            f"（T5 id 列 {t5.input_ids.shape[1]} が長すぎる）— DiT の入力形と合わない"
+        )
+    # MUST: id 列は IR の意味論 dtype（i32）へ落として書く — 変換点は 1 箇所（ADR 0009）。
+    return {
+        "qwen_input_ids": normalize_boundary_tensor(qwen.input_ids, "qwen id 列"),
+        "t5_input_ids": normalize_boundary_tensor(t5.input_ids, "t5 id 列"),
+        "qwen_hidden_states": hidden.contiguous(),
+        "encoder_hidden_states": embeds.contiguous(),
+    }
+
+
+def encode_text(repo: str, max_len: int, dtype: str) -> dict[str, torch.Tensor]:
+    """固定プロンプト 2 本（正 / ネガティブ）をフィクスチャのキー空間へ落とす。"""
+    stack = load_text_stack(repo, dtype)
     out: dict[str, torch.Tensor] = {}
     for tag, text in (("", PROMPT), ("neg_", NEGATIVE_PROMPT)):
-        qwen = tokenizer(
-            [text], padding="longest", max_length=max_len, truncation=True, return_tensors="pt"
-        )
-        t5 = t5_tokenizer(
-            [text], padding="longest", max_length=max_len, truncation=True, return_tensors="pt"
-        )
-        with torch.no_grad():
-            hidden = encoder(
-                input_ids=qwen.input_ids,
-                attention_mask=qwen.attention_mask,
-                output_hidden_states=False,
-            ).last_hidden_state
-            hidden = hidden * qwen.attention_mask.to(hidden).unsqueeze(-1)
-            embeds = conditioner(
-                source_hidden_states=hidden,
-                target_input_ids=t5.input_ids,
-                target_attention_mask=t5.attention_mask,
-                source_attention_mask=qwen.attention_mask,
-            )
-        if embeds.shape[1] != MIN_SEQUENCE_LENGTH:
-            raise ValueError(
-                f"conditioner 出力長 {embeds.shape[1]} が {MIN_SEQUENCE_LENGTH} でない"
-                f"（T5 id 列 {t5.input_ids.shape[1]} が長すぎる）— DiT の入力形と合わない"
-            )
-        # MUST: id 列は IR の意味論 dtype（i32）へ落として書く — 変換点は 1 箇所（ADR 0009）。
-        out[f"{tag}qwen_input_ids"] = normalize_boundary_tensor(qwen.input_ids, "qwen id 列")
-        out[f"{tag}t5_input_ids"] = normalize_boundary_tensor(t5.input_ids, "t5 id 列")
-        out[f"{tag}qwen_hidden_states"] = hidden.contiguous()
-        out[f"{tag}encoder_hidden_states"] = embeds.contiguous()
+        for key, value in encode_prompt(stack, max_len, text).items():
+            out[f"{tag}{key}"] = value
     return out
 
 

@@ -40,7 +40,15 @@ MUST: `--dtype i4` も **transformer 専用**（i8 と同じ理由・同じ表 �
 i4 の実行経路は linear / embedding / conv1d の重みスロット限定（ADR 0069 決定 5 と追補）なので、
 単一 dtype の i4 系列は原理的に作れない — 系列の**既定**格納は i8 で（{@link BASE_WEIGHT_DTYPES}）、
 適格な 1 本ずつを `weight_dtype_overrides` で i4 へ振る（deberta / gemma4 の混成と同形）。
-丸めは**素の RTN**（校正なし）— 格納形は丸め方式に依らないので、速度実測はこれで足りる。
+
+DiT block 内の linear は **GPTQ 校正付きで丸める**（既定 — perf-ledger Q-6 / `anima.calib`）。
+格納形は 1 バイトも変わらない（格子は RTN i4 g32 のまま）で、変わるのは丸め値と scale 台帳の
+中身だけ。校正入力は {@link anima.calib_prompts.CALIB_PROMPTS} の先頭
+`--calib-prompts` 本（既定 {@link DEFAULT_CALIB_PROMPTS} 本）を**参照 denoise**（512²・8 step・
+CFG 1・seed 固定）へ通して先頭 block の入力を step 横断で捕まえたもの。block の**外**に居る
+i4 適格（{@link NON_STAGE_I4_WEIGHTS}）は校正の駆動が届かないので**先に**素の RTN で丸める
+（配布実行時の条件へ校正入力を合わせる）。校正の失敗は fail loudly で、素の RTN へ黙って
+落ちる分岐は持たない — 明示の `--no-calib` だけが opt-out（配布資産には使わない）。
 
 MUST: `--dtype f16` は**重みを f16 表現可能値へ丸めてから**（fake-quant — ADR 0006）参照と
 golden を採り、適格な重みスロットだけを f16 で格納する（ADR 0018）。丸めは各 builder が
@@ -101,7 +109,8 @@ from karume.quantize import (
     round_weights_to_f16,
 )
 
-from . import patch
+from . import calib, patch
+from .calib_prompts import CALIB_PROMPTS, DEFAULT_CALIB_PROMPTS, calibration_prompts
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 #: この recipe が扱う格納 dtype（irodori / deberta と同じく **recipe 固有の集合**）。
@@ -119,6 +128,24 @@ WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 #: ので、deberta の `NON_LOOKUP_EMBEDDINGS` のような名指しの除外は先回りで置かない）。
 #: conv 系は i4 の展開経路が無い（conv1d は `groups == 1` 限定）ので入れない。
 I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Embedding)
+
+#: DiT block の**外**に居る i4 適格の重み（ラッパ内 FQN）。校正付き丸めは stage 逐次の駆動
+#: なので block の中しか丸められず、外の適格は素の RTN i4 が担う（{@link _round_i4_calibrated}）。
+#:
+#: 名前で宣言するのは「黙った分類替え」を作らないため — 実測（実重み・28 block）で block 外の
+#: i4 適格はこの 5 本（`patch_embed.proj` は量子化軸 68 が g32 非整除で適格外・rope は重み無し）。
+#: 上流の構成が変わって適格が増減したら、{@link _round_i4_calibrated} の門がその FQN を挙げて
+#: 落ちる（黙って RTN 側へ流す = 校正が痩せる、も黙って i8 へ落とす = サイズだけ戻る、も
+#: 数字からは読めない）。
+NON_STAGE_I4_WEIGHTS: frozenset[str] = frozenset(
+    {
+        "model.time_embed.t_embedder.linear_1",
+        "model.time_embed.t_embedder.linear_2",
+        "model.norm_out.linear_1",
+        "model.norm_out.linear_2",
+        "model.proj_out",
+    }
+)
 
 #: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格な重みは
 #: 1 本単位の `weight_dtype_overrides` で i4 へ振る（deberta の `BASE_WEIGHT_DTYPES` と同形）。
@@ -339,6 +366,42 @@ def build_text_conditioner(args: argparse.Namespace, verify: bool) -> Component:
 
 # ---- ③ CosmosDiT -----------------------------------------------------------
 
+#: 校正の stage 分解一致門（`anima.calib.assert_stage_split`）へ流すラッパ入力の乱数 salt。
+#: golden ケースの乱数列（salt 2）とは**別**にする — probe は資産に 1 バイトも出ない診断用の
+#: 入力なので、混ぜると golden の値が probe の有無（= `--dtype`）で動く。
+PROBE_SALT = 5
+
+#: probe の timestep（0〜1 の sigma スケール — 値そのものに意味は無い。門は同じ入力で
+#: 2 経路を比べるだけなので、golden の 2 点とは独立でよい）。
+PROBE_TIMESTEP = 0.5
+
+
+def _dit_probe(model: nn.Module, latent: int) -> tuple[torch.Tensor, ...]:
+    """静的形ラッパ（{@link patch.AnimaDit}）の probe 入力（`--dtype i4` のときだけ使う）。"""
+    generator = _generator(PROBE_SALT)
+    return (
+        torch.randn(1, model.config.in_channels, latent, latent, generator=generator),
+        patch.dit_timesteps_proj(model, torch.full((1,), PROBE_TIMESTEP)),
+        torch.randn(1, MIN_SEQUENCE_LENGTH, model.config.text_embed_dim, generator=generator),
+    )
+
+
+def _dit_tokens_probe(model: nn.Module, patch_size: tuple[int, ...]) -> tuple[torch.Tensor, ...]:
+    """S 形ラッパ（{@link patch.AnimaDitTokens}）の probe 入力。
+
+    解像度は S 形 golden の**小さい方**（= 校正の解像度でもある）— 門は block 列の経路一致を
+    見るだけなので 1 点で足り、大きい方を選ぶと門だけで数分伸びる。
+    """
+    generator = _generator(PROBE_SALT)
+    side = DIT_DYN_RESOLUTIONS[0] // SPATIAL_COMPRESSION
+    latents = torch.randn(1, model.config.in_channels, side, side, generator=generator)
+    return (
+        patch.dit_patchify(latents, patch_size),
+        patch.dit_timesteps_proj(model, torch.full((1,), PROBE_TIMESTEP)),
+        torch.randn(1, MIN_SEQUENCE_LENGTH, model.config.text_embed_dim, generator=generator),
+        *patch.dit_rope_tables(model, side, side),
+    )
+
 
 def build_transformer(args: argparse.Namespace, verify: bool) -> Component:
     from diffusers import CosmosTransformer3DModel
@@ -358,7 +421,9 @@ def build_transformer(args: argparse.Namespace, verify: bool) -> Component:
     # 丸めは切り詰めの後で足りる（切った層は export にも参照にも現れない）。LoRA と違い
     # 「全層ぶんの取りこぼしを検査する」性質が無いので、順序の MUST は無い。
     module = patch.AnimaDit(model, latent, latent)
-    scales, dtype_overrides = _fake_quant(args, module, TARGET_TRANSFORMER)
+    scales, dtype_overrides = _fake_quant(
+        args, module, TARGET_TRANSFORMER, calib_probe=_dit_probe(model, latent)
+    )
     generator = _generator(2)
     # timestep は 0〜1 の連続値（FlowMatch の sigma スケール）。2 点とも別の値にして、
     # timestep 埋め込みがグラフ入力として本当に効いていることを golden の数で踏む。
@@ -412,7 +477,12 @@ def _build_transformer_tokens(
     """
     patch_size = tuple(int(size) for size in model.config.patch_size)
     module = patch.AnimaDitTokens(model)
-    scales, dtype_overrides = _fake_quant(args, module, TARGET_TRANSFORMER)
+    scales, dtype_overrides = _fake_quant(
+        args,
+        module,
+        TARGET_TRANSFORMER,
+        calib_probe=_dit_tokens_probe(model, patch_size),
+    )
     generator = _generator(2)
     latents = [
         (
@@ -568,39 +638,132 @@ def _i4_module_names(model: nn.Module) -> frozenset[str]:
     )
 
 
+def _round_i4_plain(
+    model: nn.Module, names: frozenset[str], target: str, label: str
+) -> Mapping[str, torch.Tensor]:
+    """名指しの集合を素の RTN i4 g32 で丸める（校正を通さない 1 段目の格子そのもの）。
+
+    `label` は診断行の主語（助詞まで込み — 「〜を i4 group へ丸めた」に嵌まる形）。
+    """
+    report = fake_quant_int4(model, include=lambda name: name in names, op_types=I4_MODULE_TYPES)
+    print(
+        f"[fake-quant] {target}: {label} i4 group へ丸めた（RTN） — {report.describe()}",
+        flush=True,
+    )
+    return report.scales
+
+
+def _round_i4_calibrated(
+    args: argparse.Namespace,
+    wrapper: nn.Module,
+    target: str,
+    i4_names: frozenset[str],
+    probe: Sequence[torch.Tensor],
+) -> Mapping[str, torch.Tensor]:
+    """i4 適格を「block 外 = 素の RTN」「block 内 = GPTQ」へ排他に割って丸める。
+
+    順序 MUST（① → ② → ③ → ④）:
+
+    1. **stage 分解一致門を丸める前に通す**（`anima.calib.assert_stage_split`）— ずれた分解で
+       丸めると「別の経路の GPTQ」を出荷することになり、しかも数値は普通に出る。
+    2. **block 外の適格を先に RTN i4 で丸める** — 配布実行時に block へ入るのは i4 の
+       `time_embed` が作った temb で、step をまたぐ latent も i4 の `norm_out` / `proj_out` を
+       通った値。後に回すと「f32 の周辺を通った活性」で選んだ丸め先を、i4 の周辺と組んで
+       配ることになる。
+    3. 校正入力の生成（参照 denoise の捕捉）と経路一致門。
+    4. block 内の linear を GPTQ × RTN 格子で丸める。
+
+    MUST: block 外の適格は {@link NON_STAGE_I4_WEIGHTS} と一致し、block 内の linear は 1 本
+    残らず i4 適格であること — どちらも外れたら上流の構成が変わっている。
+    """
+    stages = calib.dit_stages(wrapper)
+    stage_names = calib.stage_linear_names(stages)
+    unaligned = sorted(stage_names - i4_names)
+    if unaligned:
+        raise AssertionError(
+            f"DiT block 内の linear {unaligned[:3]} が i4 適格でない（量子化軸が g"
+            f"{DEFAULT_GROUP_SIZE} 非整除）— 校正は stage を丸ごと駆動するので 1 本だけ外す"
+            "逃げ道が無い"
+        )
+    plain_names = i4_names - stage_names
+    if plain_names != NON_STAGE_I4_WEIGHTS:
+        raise AssertionError(
+            f"DiT block の外の i4 適格が {sorted(plain_names)} で、宣言"
+            f"（NON_STAGE_I4_WEIGHTS = {sorted(NON_STAGE_I4_WEIGHTS)}）と違う"
+            " — 上流の構成が変わって i4 の割り方が動いている"
+        )
+    graph_batch = calib.assert_stage_split(wrapper, probe, stages)
+    plain = _round_i4_plain(wrapper, plain_names, target, "block 外の適格を")
+    prompts = calibration_prompts(args.calib_prompts)
+    batches = calib.capture_stage_batches(wrapper.model, prompts, repo=args.repo)
+    calib.assert_calib_batches_match_graph(graph_batch, batches)
+    rig = calib.CalibRig(stages=stages, batches=batches)
+    report, ledger = calib.calibrate_i4(rig)
+    calib.assert_calib_covers_scan(report, stage_names)
+    calibrated = ledger.scales
+    # MUST: 2 経路は互いに素（重なれば同じ重みを 2 度丸めたことになり、値だけが静かに狂う）。
+    overlap = sorted(set(plain) & set(calibrated))
+    if overlap:
+        raise AssertionError(f"i4 の 2 経路が同じ重みを丸めている（二重丸め）: {overlap[:3]}")
+    print(
+        f"[fake-quant] {target}: DiT block の linear を GPTQ 校正付きで丸めた"
+        f" — {report.describe()} / 校正プロンプト {len(prompts)} 本・バッチ {len(batches)} 本"
+        f"・{rig.tokens:,} トークン",
+        flush=True,
+    )
+    return {**plain, **calibrated}
+
+
 def _fake_quant_i4(
-    model: nn.Module, target: str
+    args: argparse.Namespace,
+    model: nn.Module,
+    target: str,
+    probe: Sequence[torch.Tensor] | None,
 ) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
-    """混成 i4 系列の丸め（適格 = 素の RTN i4 g32・残り = i8 per-channel）。
+    """混成 i4 系列の丸め（適格 = i4 g32・残り = i8 per-channel）。
 
     2 つの述語は {@link _i4_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。
     返す override は「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を
     満たせなければ fail loudly する。
 
-    GPTQ（校正付き丸め）は結線しない — 格納形もカーネルも丸め値に依らないので、この段の
-    速度実測には素の RTN で足りる（品質を採るときに別途決める）。
+    適格の丸めは既定で校正付き（{@link _round_i4_calibrated}）。`--no-calib` のときだけ
+    全適格を素の RTN で丸める — **配布資産には使わない**テスト / smoke 用の opt-out で、
+    「校正付きのつもりで校正なしを配った」が資産から読めないので診断行で明示する。
     """
     i4_names = _i4_module_names(model)
-    report = fake_quant_int4(model, include=lambda name: name in i4_names, op_types=I4_MODULE_TYPES)
-    print(
-        f"[fake-quant] {target}: 適格な重みを i4 group へ丸めた（RTN） — {report.describe()}",
-        flush=True,
-    )
+    if args.no_calib:
+        print(
+            f"[fake-quant] {target}: --no-calib — 校正なしの素の RTN"
+            "（配布資産にしないこと・品質は perf-ledger Q-6 の基線より下）",
+            flush=True,
+        )
+        int4_scales = _round_i4_plain(model, i4_names, target, "適格な重みを")
+    else:
+        if probe is None:
+            raise AssertionError(
+                f"{target}: 校正付き i4 には stage 分解一致門の probe が要る"
+                "（builder が渡していない — 校正なしへ黙って落ちる分岐は持たない）"
+            )
+        int4_scales = _round_i4_calibrated(args, model, target, i4_names, probe)
     # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「適格と数えたのに丸まって
     # いない」形で、i4 席に i8 の重みが混ざったまま緑になる（サイズだけが静かに戻る）。
     expected = {f"{name}.weight" for name in i4_names}
-    if set(report.scales) != expected:
+    if set(int4_scales) != expected:
         raise AssertionError(
-            f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(report.scales)} 本"
-            f"（過不足: {sorted(set(report.scales) ^ expected)[:3]}）"
+            f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(int4_scales)} 本"
+            f"（過不足: {sorted(set(int4_scales) ^ expected)[:3]}）"
         )
     int8 = fake_quant_int8(model, include=lambda name: name not in i4_names)
     print(f"[fake-quant] {target}: 残りは i8 per-channel — {int8.describe()}", flush=True)
-    return {**int8.scales, **report.scales}, dict.fromkeys(report.scales, "i4")
+    return {**int8.scales, **int4_scales}, dict.fromkeys(int4_scales, "i4")
 
 
 def _fake_quant(
-    args: argparse.Namespace, model: nn.Module, target: str
+    args: argparse.Namespace,
+    model: nn.Module,
+    target: str,
+    *,
+    calib_probe: Sequence[torch.Tensor] | None = None,
 ) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
     """格納 dtype の表現可能値へ重みを丸め、scale 台帳と 1 本単位の格納指定を返す（ADR 0006）。
 
@@ -611,6 +774,10 @@ def _fake_quant(
     MUST（i8 / i4 のみ）: **export する `nn.Module` そのもの**に当てる。scale 台帳のキーは
     ここで見た FQN で、safetensors のテンソルキー（= `torch.export` が見る FQN）と同じで
     なければ emit 側の突合が空振りする（`id()` 突合は禁止 — ADR 0006）。
+
+    `calib_probe` は i4 の校正付き丸めが stage 分解一致門に流すラッパの入力（golden ケースの
+    乱数列を動かさないよう、builder が**別 salt**で組んだもの）。校正するのに欠けていたら
+    fail loudly — 「probe が無いから校正なし」で黙って落ちる分岐は作らない。
     """
     if args.dtype == "f32":
         return {}, {}
@@ -619,7 +786,7 @@ def _fake_quant(
         print(f"[fake-quant] {target}: i8 per-channel へ丸めた — {report.describe()}", flush=True)
         return report.scales, {}
     if args.dtype == "i4":
-        return _fake_quant_i4(model, target)
+        return _fake_quant_i4(args, model, target, calib_probe)
     rounded = round_weights_to_f16(model)
     print(f"[fake-quant] {target}: f16 表現可能値へ丸めた — {rounded.describe()}", flush=True)
     return {}, {}
@@ -732,6 +899,10 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
         "dir": str(out_dir),
         "dtype": args.dtype,
         "dit_graph": args.dit_graph if target == TARGET_TRANSFORMER else "static",
+        # 校正付き丸めの条件（i4 以外・`--no-calib` は 0）— 資産の数値がどのコーパスと
+        # どの解像度から決まったかは重みからは復元できないので、書き出した側の要約に残す。
+        "calib_prompts": 0 if args.dtype != "i4" or args.no_calib else args.calib_prompts,
+        "calib_resolution": 0 if args.dtype != "i4" or args.no_calib else calib.CALIB_RESOLUTION,
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
@@ -806,6 +977,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         help=(
             "重みの格納 dtype（f16 / i8 / i4 は fake-quant してから適格スロットだけ圧縮格納する。"
             "i4 は混成で、適格な重みが group32 の i4・残りは i8 — ADR 0069。"
+            "i4 の DiT block 内 linear は GPTQ 校正付きで丸める（perf-ledger Q-6）。"
             "i8 / i4 は transformer 専用 — ADR 0019）"
         ),
     )
@@ -846,6 +1018,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="export 前に重みへ焼き込む LoRA（transformer / text_conditioner に効く）",
     )
     parser.add_argument("--lora-scale", type=float, default=1.0, help="LoRA の倍率")
+    parser.add_argument(
+        "--calib-prompts",
+        type=int,
+        default=DEFAULT_CALIB_PROMPTS,
+        help=f"i4 の GPTQ 校正に使うプロンプト本数（先頭 N 本・既定 {DEFAULT_CALIB_PROMPTS}・"
+        f"上限 {len(CALIB_PROMPTS)} — 本数は品質の上振れ軸で、export の CPU 時間に線形に効く）",
+    )
+    parser.add_argument(
+        "--no-calib",
+        action="store_true",
+        help="i4 を校正なしの素の RTN で丸める（テスト / smoke 用 — 配布資産にしないこと）",
+    )
     args = parser.parse_args(argv)
     if args.out is None:
         root = DEFAULT_OUT_ROOTS[args.dtype]
@@ -872,6 +1056,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"（指定: {', '.join(outside)} — ADR 0019 の系列設計）"
         )
 
+    # MUST: 校正のノブは i4 だけに効く。他系列で受けると「校正を外したつもりの f16 資産」の
+    # ような読めない指定が通る（f16 / i8 / f32 に校正の経路は 1 本も無い）。
+    if args.dtype != "i4" and (args.no_calib or args.calib_prompts != DEFAULT_CALIB_PROMPTS):
+        parser.error(
+            f"--calib-prompts / --no-calib は --dtype i4 だけに効く（指定は {args.dtype}）"
+            " — 校正付き丸めは i4 系列の経路（perf-ledger Q-6）"
+        )
+
     # MUST: 効かないノブを黙って受けない。S 形は transformer 専用（他 3 ターゲットは解像度に
     # 依らないので共有）で、解像度はケース表 DIT_DYN_RESOLUTIONS が決める（`--resolution` は
     # 1 本も効かない）。受けてしまうと「512 のつもりの資産が実は無関係に生えた」形になる。
@@ -888,6 +1080,17 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
         if args.target is None and args.verify is None:
             args.target = [TARGET_TRANSFORMER]
+
+    # MUST: 校正の解像度はグラフの解像度と揃っていること。校正入力は
+    # `calib.CALIB_RESOLUTION` 固定（品質裁定が採られた条件を動かさないための設計 — あちらの
+    # NOTE）なので、`--resolution` を振ると「別の解像度で選んだ丸め先」を焼き込んだグラフが
+    # 黙って生える（活性のトークン数が変わるだけで数値は普通に出る）。dyn は `--resolution` を
+    # 上で既に弾いているので、ここに掛かるのは静的形だけ。
+    if args.dtype == "i4" and not args.no_calib and args.resolution != calib.CALIB_RESOLUTION:
+        parser.error(
+            f"--dtype i4 の校正は {calib.CALIB_RESOLUTION}px 固定（指定は {args.resolution}px）"
+            " — 品質裁定が採られた条件を動かすと根拠の採り直しになる（calib.CALIB_RESOLUTION）"
+        )
 
     if args.verify is not None:
         report = verify_target(args.verify, args)

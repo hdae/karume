@@ -150,7 +150,8 @@ class TestFakeQuantI4:
 
     @staticmethod
     def _quantize(model: nn.Module):
-        return export_anima._fake_quant(argparse.Namespace(dtype="i4"), model, "t")
+        """素の RTN 経路（`--no-calib`）— 校正付きの結線は `test_calib.py` が受け持つ。"""
+        return export_anima._fake_quant(argparse.Namespace(dtype="i4", no_calib=True), model, "t")
 
     def test_the_series_is_stored_as_i8_with_the_eligible_weights_overridden(self):
         """i4 の実行経路は適格スロット限定 — 系列の既定は i8 で、適格だけを 1 本ずつ i4 へ。"""
