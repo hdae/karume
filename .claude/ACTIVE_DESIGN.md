@@ -61,12 +61,15 @@
 - **波 J-4a（anima の i4 席・2026-08-21 着手）が現行**: J-4（格納席の実装裁定）から anima
   だけ切り離す裁定を受けた先行波。第 1 段の速度実測は消化 — 正本 =
   [research/2026-08-21-anima-i4-seat-speed.md](../docs/research/2026-08-21-anima-i4-seat-speed.md)。
-  素の RTN で i4 系列 + `w4` / `w4-a8-s16` を新設（適格 = 型 ∧ g32 整除の一般形のみ・DiT の
-  linear 453 本が i4・patchify 入口 1 本だけ i8）。**取得量 −21.2% と引き換えに DiT が既定の
-  約 2.0 倍遅い** — i4 常駐は `linearCompute: "i8a8"` の述語（i8 常駐が必要条件）から外れ、
-  fail loudly せず f32 計算経路へ流れるため。**i4 席に `linearCompute` を宣言してはいけない**
-  （選んでも挙動が変わらない嘘の席になる）。残は GPTQ 結線（校正コーパスの新設 = 現状の校正
-  入力は評価プロンプトと逐語同一）・席の位置づけ・w4a8（perf-ledger Q-8）・公開可否の裁定。
+  i4 系列 + `w4` / `w4-a8-s16` を新設し、**GPTQ 校正付き**へ結線（適格 = 型 ∧ g32 整除の
+  一般形のみ・DiT の linear 453 本が i4・patchify 入口 1 本だけ i8・校正は block 内 448 本）。
+  取得量 −21.2%（2.74GB）・VRAM −22.6%（2,637MiB）・DiT 1,640ms/step。視認裁定で
+  **`w4-a8-s16` を低 VRAM 席として採用**（品質重視 = `f16` / 速度重視 = 既定 `w8a8-s16` 据え置き）。
+  **w4a8**（i4 常駐を整数内積へ — ADR [0076](../docs/decisions/0076-w4a8-linear-execution.md)）は
+  runtime に載り 955ms/step まで戻すが、**画の細部が荒れるので anima の席には宣言しない**
+  （`distribution.py` の MUST は理由ごと差し替え済み — 旧「効かないから書くな」→ 新「効くが
+  品質で採らない」）。**残 = 公開可否だけ（保留）**。未検証で残した可能性は
+  [research §8](../docs/research/2026-08-21-anima-i4-seat-speed.md)。
 
 ## Open decisions
 
