@@ -21,8 +21,10 @@
 
 - [ ] `deno task verify` 緑（GPU テスト込み — アダプタ無し環境の SKIP はリリース判定では不可・
       ADR 0005）
-- [ ] exporter: `uv run --no-sync pytest` + `uv run --no-sync ruff check` を
-      **tools/exporter と tools/export-recipes の両方**で緑
+- [ ] exporter: `uv run --no-sync pytest` + `uv run --no-sync ruff check` +
+      `uv run --no-sync ruff format --check` を
+      **tools/exporter と tools/export-recipes の両方**で緑（CI は lint と format を
+      別ステップで回す — check だけ見て format を落とした実績 2026-08-21）
 - [ ] 配布形の再生成が要る変更（manifest 形式・quant 席・カード・既定 quant）があったなら
       `models/` 配下の対象リポを dist で再生成し、各ファミリの gate（WAV / PNG / verify_dist）緑
 - [ ] ライセンス確認: 各リポの `THIRD_PARTY_NOTICES.md` と生成カードの attribution が
