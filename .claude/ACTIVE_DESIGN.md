@@ -70,6 +70,16 @@
   （`distribution.py` の MUST は理由ごと差し替え済み — 旧「効かないから書くな」→ 新「効くが
   品質で採らない」）。**残 = 公開可否だけ（保留）**。未検証で残した可能性は
   [research §8](../docs/research/2026-08-21-anima-i4-seat-speed.md)。
+- **SBV2 注入席の再調整（2026-08-21）= 利用実装フィードバックへの対応**: VOICEVOX ENGINE 互換
+  サーバー側からの 8 項目に対応し、ADR
+  [0072](../docs/decisions/0072-sbv2-text-injection.md) に**追記（決定 4〜8）**。
+  ①下書きを句 / モーラ構造（`Sbv2Prosody`）で往復させる — 派生欄は同階層に置かず、門は
+  **音素列の内容一致**（長さ検査では梱包規則のズレが素通りする）②`overlay` は解決済み
+  `OverlayDictionary` も受ける③入力起因の失敗は `Sbv2InputError`（内部不変条件の破れは素の
+  `Error` のまま = 400/500 の分離）④`analyzeProsody` を直列化鎖の外へ（辞書は**値でなく
+  Promise** を持ち、失敗は捨てる）。**音素数が変わる編集は受けない**裁定（決定 8）—
+  `adjust_word2ph` は移植せず backlog parked。疑問形の上げは表現不能（limitations）。
+  **版は 0.4.1（追加のみ）で出す裁定 — lockstep bump と publish は未実施**。
 
 ## Open decisions
 

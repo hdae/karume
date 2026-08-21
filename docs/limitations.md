@@ -362,6 +362,42 @@ f32 マスクで、1 ずれても shape エラーにならない沈黙誤値ク�
 どちらも karume 単体の再現性（WAV sha256 門・段 1 / 段 2 経路の一致）には影響しない — f64 経路は
 決定的で、差は torch 参照との相対でのみ現れる。
 
+## SBV2: 下書きの編集で受けるのはアクセント核だけ（音素数が変わる編集は落とす）
+
+`Sbv2GenerateRequest.prosody` は下書き（句 / モーラ構造）を戻す席だが、動かせるのは
+`accentNucleus` だけ。モーラの読み替え・記号の増減は、組み上がった音素列が解析のそれと位置ごとに
+一致しないので `Sbv2InputError` で落ちる（ADR 0072 決定 4 / 8）。
+
+読みを変えたいときは `overlay`（修正辞書）で**解析からやり直す** — BERT 入力テキストと word2ph が
+正しく作り直されるので、音素だけ差し替える経路より品質が上。参照実装が持つ `adjust_word2ph`
+（LCS で word2ph を再配分する互換ハック）は移植しない: あちらでも BERT 特徴は元テキスト由来の
+ままで、不整合は解消しない。
+
+受けられない編集は 1 つだけ — **語境界に一致しない読みの差し替え**（句内の一部モーラだけを別の
+読みへ）。VOICEVOX 系の `/accent_phrases?is_kana=true` に相当する「句ごと読みを差し替える」操作は
+これに当たる。
+
+## SBV2: 疑問形の「末尾だけ上げる」は表現できない（トーンは 0/1 の 2 値）
+
+SBV2 の `tone` はアクセント句内の高低を表す **0/1 の 2 値**で、`front` の tone 埋め込みの行を
+引くだけの離散入力（`packages/models/src/sbv2/text/symbols.ts` の `toneStart` / `numTones`）。
+VOICEVOX 系の `is_interrogative` / `enable_interrogative_upspeak` は AudioQuery のモーラ f0 を
+後段で持ち上げる操作なので、この離散トーンには写像先が無い。JP のトーン基点の外へ出た値は
+**別言語のトーン行**を引くだけで、上げにはならない（だから `givenTone` は 0/1 以外を落とす）。
+
+疑問形が音に出る経路は 1 本だけ — テキストに実在した `?` が**音素として 1 個入る**こと
+（`toSbv2PhoneTone` が実在記号を tone 0 の音素にする）。上げ調子はモデルが学習済みの韻律として
+出す。参照実装も同じで、上げの機構は持たない（`?` を音素表の 1 記号として扱うだけ）。
+
+したがって:
+
+- 呼び手が疑問形を足したいなら、**読み上げテキストの側に `?` を入れる**（`generate` の `text`
+  を組む段）。`prosody` の `punctuations` へ足す経路は音素数が変わるので門で落ちる。
+- VOICEVOX 互換 API を模す層では `enable_interrogative_upspeak` は**受けて無視する**のが実態に
+  合う（AivisSpeech Engine も同じ扱い — 2026-08-21 のソース調査）。ただし
+  「`？` をモーラから剥がして `is_interrogative` フラグへ畳む」正規化を入れると疑問形の情報が
+  完全に消えるので、そちらは入れないこと。
+
 ## Anima: 生成中のプレビュー画像は出せない（途中結果は生 latent のみ）
 
 `AnimaGenerateRequest.onEvent` の `denoise-step` が渡せる途中結果は **latent の写し**
