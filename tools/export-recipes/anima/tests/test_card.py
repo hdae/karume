@@ -161,6 +161,18 @@ class TestBaseCard:
             assert upstream.author in base_card
             assert upstream.source in base_card
 
+    def test_it_lists_the_origins_in_manifest_order(self, base_card: str) -> None:
+        """出所節の並びは manifest のまま — `models` 表・モデル別節と同じ順序にする。
+
+        名前順に並べ替えると、既定モデルより先に第三者 fine-tune が来る（実際に
+        `anima-copycat-…` が先頭に出て指摘された）。同じカードの中で 2 通りの順序が
+        混在すると、読者は「この並びには意味がある」と読んでしまう。
+        """
+        order = [name for name in _base_manifest()["models"]]
+        assert order != sorted(order), "名前順と一致する並びでは順序の主張を検査できない"
+        positions = [base_card.index(f"### `{name}` — ") for name in order]
+        assert positions == sorted(positions)
+
     def test_it_never_lists_a_model_the_manifest_does_not_carry(self) -> None:
         """帰属を組み立ての引数から独立に持つと、入っていないモデルの出所が載る。"""
         manifest = _base_manifest()

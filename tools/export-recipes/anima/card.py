@@ -330,6 +330,11 @@ def _origins(manifest: Mapping[str, Any]) -> list[str]:
 
     MUST: 並びは manifest 由来にする — 出所の表を組み立ての引数と独立に持つと、モデルを
     1 つ落として組んだ日に「入っていないモデルの帰属」が載ったカードが出る。
+
+    MUST: **順序も manifest のまま**（名前順に並べ替えない）。`models` 表とモデル別節は
+    `karume.modelcard` が manifest の並びのまま組むので、ここだけ並べ替えると同じカードの中で
+    2 通りの順序が混在する（実際に `anima-copycat-…` が先頭へ来て指摘された — 2026-08-22）。
+    manifest の並びは既定モデルが先頭に来る組み立て順そのもので、読者にとっての推奨順でもある。
     """
     lines = [
         "## Models and their origins",
@@ -337,7 +342,7 @@ def _origins(manifest: Mapping[str, Any]) -> list[str]:
         "Each model below is either the CircleStone Anima base model itself or a community",
         "fine-tune of it. The text encoder, VAE and tokenizers are shared across them.",
     ]
-    for name in sorted(manifest["models"]):
+    for name in manifest["models"]:
         upstream = UPSTREAM_MODELS.get(name)
         if upstream is None:
             raise ValueError(f"モデル {name!r} の出所が card.py に無い — 帰属を書けない")
@@ -365,12 +370,13 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
 
     Notice の本文はカードにも逐語で出す（turbo 側と同じ理由 — §3(b) の掲示要件）。
     """
-    fine_tunes = sorted(name for name in manifest["models"] if UPSTREAM_MODELS[name].permissions)
-    same_license = sorted(
+    # 並びは出所節と同じく manifest のまま（同 MUST — カード内で順序を 2 通りにしない）。
+    fine_tunes = [name for name in manifest["models"] if UPSTREAM_MODELS[name].permissions]
+    same_license = [
         name
         for name in fine_tunes
         if dict(UPSTREAM_MODELS[name].permissions).get("allowDifferentLicense") == "false"
-    )
+    ]
     lines = [
         "## License",
         "",
