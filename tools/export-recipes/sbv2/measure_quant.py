@@ -16,15 +16,16 @@
     (4) w8a16  (3) + **対象 op の入力活性**を f16 へ丸め
     (5) w8a8   (3) + **対象 op の入力活性**を per-位置 symmetric i8 へ fake-quant
 
-w4 の 6 構成（方式スクリーニングの勝者 4 種・**g=32 固定** — ADR 0069 追記 5）。丸めは全て
-core（`karume.quantize` / `karume.quant_methods`）の共有で、台本ローカルの実装は持たない:
+w4 の 6 構成（方式スクリーニングの勝者 4 種・group 長 g は**既定 32 /`--w4-group-size` で
+可変** — ADR 0069 追記 5 / 波 J-3 の g 軸）。丸めは全て core（`karume.quantize` /
+`karume.quant_methods`）の共有で、台本ローカルの実装は持たない:
 
     (6) w4-rtn      net_g の**全役割**（conv1d / conv_transpose1d / linear / embedding）を
                     RTN group symmetric i4（`fake_quant_int4` の `op_types` opt-in）
-    (7) w4-nf4      同じ全役割を NF4 の固定表 × g32 absmax scale
-    (8) w4-mxfp4    同じ全役割を FP4 e2m1 表 × g32 の 2 のべき scale（OCP MX）
-    (9) w4-kmeans   同じ全役割を k-means codebook（層をまたぐ共有表 × g32 正規化）
-    (10) bert-w4-rtn  **BERT（DeBERTa）の linear だけ**を RTN i4 g32・net_g は f32 固定
+    (7) w4-nf4      同じ全役割を NF4 の固定表 × group absmax scale
+    (8) w4-mxfp4    同じ全役割を FP4 e2m1 表 × group の 2 のべき scale（OCP MX）
+    (9) w4-kmeans   同じ全役割を k-means codebook（層をまたぐ共有表 × group 正規化）
+    (10) bert-w4-rtn  **BERT（DeBERTa）の linear だけ**を RTN i4（group 長 g）・net_g は f32 固定
     (11) bert-w4-nf4  同上を NF4
 
 BERT 側の 2 本が**配布の本命** — `shared/text_encoder` は配布 karume-sbv2-jvnv の 3 割弱を
@@ -59,7 +60,9 @@ stage は**特徴を採る層まで**なので、対象は `bert:linear` の cen
     uv run --group sbv2 python -m sbv2.measure_quant
 
 出力は `outputs/demo/quant-sim/`（`<config>.wav` 14 本 + `report.json`）。`--configs` で
-主要構成を名前で絞れる（`f32` は SNR の基準なので常に走る）。
+主要構成を名前で絞れる（`f32` は SNR の基準なので常に走る）。w4 の group 長は
+`--w4-group-size`（2 冪かつ 16 以上・既定 32）で振れる — 適格判定・丸め・方式名の 3 つへ
+同じ g が流れる（校正付き構成の格子は 32 のまま = {@link CALIB_GROUP_SIZE}）。
 
 ## 活性量子化の粒度と適用点
 
@@ -132,6 +135,7 @@ from torch import nn
 from _shared.paths import DIST_ROOT, OUTPUTS_ROOT
 from deberta.calib_texts import CALIB_TEXTS
 from karume.act_quant import quantize_rows
+from karume.ir import MIN_GROUP_SIZE
 from karume.quant_calib import (
     CalibMethod,
     CalibReport,
@@ -171,10 +175,15 @@ DEFAULT_DIST_DIR = DIST_ROOT / "karume-sbv2-jvnv"
 
 # ---- w4 の語彙（方式・役割）— ADR 0069 追記 5 --------------------------------
 
-#: w4 の group 長。**32 固定**で g 軸は振らない — g の答えは ADR 0069 追記 1（Phase 0）が
-#: 出しており、ここで測りたいのは「同じ g で丸め方を変えたときの差」だけだから（2 軸を
-#: 同時に振ると方式の差と g の差が混ざる。追記 5 の位置づけ）。
-W4_GROUP_SIZE = DEFAULT_GROUP_SIZE
+# w4 の group 長 g は `--w4-group-size`（既定 = core の格納既定 `DEFAULT_GROUP_SIZE`）で振る —
+# 波 J-3 の g 軸。方式の差だけを見たいときは既定のまま走らせる（2 軸を同時に振ると方式の差と
+# g の差が混ざる — ADR 0069 追記 5 の位置づけ）。
+#
+# MUST: g は module 直下の定数ではなく**引数で流す**。適格判定（`census_w4_targets`）・丸め
+# （`w4_methods` が `fake_quant_*` へ渡す `group_size`）・方式名（`rtn_method_name`）の 3 つが
+# 1 個の値を共有すること — 片方だけ動かすと「g16 と書いてある g32 の測定」が黙って出る
+# （丸めだけ動けば端数 group で core が fail loudly するが、適格判定だけ動くと数字は出たまま
+# 格子が食い違う）。校正付き構成の格子はこの軸に**乗らない**（`CALIB_GROUP_SIZE`）。
 
 #: k-means の共有表 1 枚のビット数（16 準位 × f32）。品質だけ見ると**表の代金**が見えない
 #: ので、サイズ試算では表のコストを式へ明示的に載せる。
@@ -183,27 +192,37 @@ CODEBOOK_BITS = DEFAULT_CODEBOOK_LEVELS * 32
 
 @dataclass(frozen=True)
 class TargetCounts:
-    """w4 対象集合の計数（サイズ試算の入力）。"""
+    """w4 対象集合の計数（サイズ試算の入力）。
+
+    group 長を計数と同じ器に持つのは、**「数えた g」と「投影した g」が黙って割れない**ため —
+    bpw の投影は group 数から出るので、g を別引数で持ち回ると片方だけ古い値になれる。
+    """
 
     modules: int
     channels: int
     elements: int
+    group_size: int
 
     def __add__(self, other: TargetCounts) -> TargetCounts:
+        if self.group_size != other.group_size:
+            raise AssertionError(
+                f"group 長の違う計数は足せない（{self.group_size} と {other.group_size}）"
+            )
         return TargetCounts(
             modules=self.modules + other.modules,
             channels=self.channels + other.channels,
             elements=self.elements + other.elements,
+            group_size=self.group_size,
         )
 
     @property
     def groups(self) -> int:
-        """g32 group の総数（group ごとに scale 1 個が要る方式の試算に使う）。
+        """group の総数（group ごとに scale 1 個が要る方式の試算に使う）。
 
         `elements = Σ チャネル数 × in 軸`で、対象は in 軸が group 長で割り切れるものだけ
         （割り切れない重みは {@link census_w4_targets} が除外する）なので端数は出ない。
         """
-        return self.elements // W4_GROUP_SIZE
+        return self.elements // self.group_size
 
 
 class QuantReport(Protocol):
@@ -225,8 +244,11 @@ class W4Method:
     動きはじめる。
     """
 
+    #: 表と JSON に出る方式名（RTN だけ g を焼く — {@link rtn_method_name}）。表の**鍵**は
+    #: g に依らない方式の種なので、g を振っても構成表 {@link CONFIGS} の指す先は動かない。
     name: str
-    #: 丸めを model へ in-place で当てる（`(model, op_types, include)`）。
+    #: 丸めを model へ in-place で当てる（`(model, op_types, include)`）。group 長は
+    #: {@link w4_methods} が閉じ込むので、呼ぶ側が g を持ち回らなくても格子は 1 個に決まる。
     apply: Callable[[nn.Module, tuple[type[nn.Module], ...], Callable[[str], bool]], QuantReport]
     #: 量子化対象集合の投影ビット数。
     projected_bits: Callable[[TargetCounts], float]
@@ -234,50 +256,70 @@ class W4Method:
     formula: str
 
 
-#: RTN（= 唯一の格納形 `i4`）の方式名。方式列の**基準**で、他の 3 種はこれとの差で読む。
-RTN_METHOD = "rtn-i4-g32"
+#: RTN（= 唯一の格納形 `i4`）の**方式の種** = {@link w4_methods} の鍵。方式列の**基準**で、
+#: 他の 3 種はこれとの差で読む。
+RTN_KIND = "rtn"
 
-#: 方式 4 種（スクリーニングの勝者 — FP4 と k-means の per_tensor / per_channel は安い
-#: ファミリ 2 本の実測で落選済み）。
-W4_METHODS: Mapping[str, W4Method] = MappingProxyType(
-    {
-        method.name: method
-        for method in (
-            W4Method(
-                RTN_METHOD,
+
+def rtn_method_name(group_size: int) -> str:
+    """RTN の方式名（**g を名前に焼く**）。
+
+    MUST: 既定の 32 で従来と同じ `rtn-i4-g32` になること — 過去の研究記録（ADR 0069 追記 5 の
+    方式スクリーニング）がこの綴りで数値を残しており、既定の実行の突合先を動かさないため。
+    他の 3 種は名前に g を持たない（同じ理由で綴りを動かさない）ので、g は `w4` 節の
+    `group_size` と各方式の式（{@link W4Method.formula}）から読む。
+    """
+    return f"rtn-i4-g{group_size}"
+
+
+def w4_methods(group_size: int) -> Mapping[str, W4Method]:
+    """方式 4 種（スクリーニングの勝者）を group 長 `group_size` で束ねた表。
+
+    鍵は**方式の種**（g に依らない）で、値だけが g を担ぐ — 構成表 {@link CONFIGS} が指す先を
+    g で動かさないため。表を g から**作る**のは、丸めへ渡す `group_size`・表に出る式・方式名を
+    同じ 1 個の g から導くため（別々に持つと「g16 と書いてある g32 の測定」が作れる）。
+
+    落選済みで載せないもの: FP4 と k-means の per_tensor / per_channel（安いファミリ 2 本の
+    実測で落選 — ADR 0069 追記 5）。
+    """
+    return MappingProxyType(
+        {
+            RTN_KIND: W4Method(
+                rtn_method_name(group_size),
                 lambda model, op_types, include: fake_quant_int4(
-                    model, W4_GROUP_SIZE, include=include, op_types=op_types
+                    model, group_size, include=include, op_types=op_types
                 ),
                 lambda counts: 4 * counts.elements + 32 * counts.groups,
-                "4bit + g32 f32 scale = 5.0 bpw",
+                f"4bit + g{group_size} f32 scale = {4 + 32 / group_size} bpw",
             ),
-            W4Method(
+            "nf4": W4Method(
                 "nf4",
                 lambda model, op_types, include: fake_quant_nf4(
-                    model, W4_GROUP_SIZE, include=include, op_types=op_types
+                    model, group_size, include=include, op_types=op_types
                 ),
                 lambda counts: 4 * counts.elements + 32 * counts.groups,
-                "4bit + g32 f32 scale = 5.0 bpw（準位表は固定値なので模型に載らない）",
+                f"4bit + g{group_size} f32 scale = {4 + 32 / group_size} bpw"
+                "（準位表は固定値なので模型に載らない）",
             ),
-            W4Method(
+            "mxfp4": W4Method(
                 "mxfp4",
                 lambda model, op_types, include: fake_quant_mxfp4(
-                    model, W4_GROUP_SIZE, include=include, op_types=op_types
+                    model, group_size, include=include, op_types=op_types
                 ),
                 lambda counts: 4 * counts.elements + 8 * counts.groups,
-                "4bit + g32 E8M0 scale = 4.25 bpw",
+                f"4bit + g{group_size} E8M0 scale = {4 + 8 / group_size} bpw",
             ),
-            W4Method(
+            "kmeans:shared": W4Method(
                 "kmeans:shared",
                 lambda model, op_types, include: fake_quant_kmeans(
-                    model, "shared", W4_GROUP_SIZE, include=include, op_types=op_types
+                    model, "shared", group_size, include=include, op_types=op_types
                 ),
                 lambda counts: 4 * counts.elements + 32 * counts.groups + CODEBOOK_BITS,
-                f"4bit + g32 f32 scale + 表 {DEFAULT_CODEBOOK_LEVELS}×f32 を全体で 1 枚",
+                f"4bit + g{group_size} f32 scale + 表 {DEFAULT_CODEBOOK_LEVELS}×f32 を全体で 1 枚",
             ),
-        )
-    }
-)
+        }
+    )
+
 
 #: w4 の対象**役割** → `op_types`。`all` は i8 と同じ 5 op 種の表（`QUANT_MODULE_TYPES`）を
 #: そのまま渡す形で、net_g に居るのはうち 4 種（conv1d / conv_transpose1d / linear /
@@ -291,10 +333,12 @@ W4_ROLES: Mapping[str, tuple[type[nn.Module], ...]] = MappingProxyType(
 
 # ---- 校正付き丸めの語彙（波 J-2）--------------------------------------------
 
-#: 校正付き丸めの group 長 = 方式グリッドと同じ 32 固定。校正は**格子を 1 バイトも変えない**
-#: （同じ格子の中で丸め先を選び直すだけ — `karume.quant_calib` のモジュール docstring）ので、
-#: g 軸を振らない理由も {@link W4_GROUP_SIZE} と同文。
-CALIB_GROUP_SIZE = W4_GROUP_SIZE
+#: 校正付き丸めの group 長 = **32 に釘付け**（`--w4-group-size` の g 軸には乗らない）。校正は
+#: **格子を 1 バイトも変えない**（同じ格子の中で丸め先を選び直すだけ — `karume.quant_calib` の
+#: モジュール docstring）方式の比較なので、振るべきは方式であって g ではない。方式グリッド側の
+#: g を借りずに独立した定数にしてあるのは、g 軸を振ったときに校正の格子が**黙って一緒に動く**
+#: のを防ぐため — 食い違いは `w4.group_size` と `w4.calib.group_size` が別々に出ることで読める。
+CALIB_GROUP_SIZE = DEFAULT_GROUP_SIZE
 
 #: 校正付き構成の対象名（`w4` 節の対象列）。`bert:linear` の census とは**集合が違う** —
 #: 校正の stage は特徴を採る層までしか作らない（{@link bert_stages}）ので、それ以降の層の
@@ -392,7 +436,7 @@ class Recipe:
     weight: str | None
     act: str | None
     scope: tuple[str, ...] = ("front", "voice")
-    #: w4 の方式名（`weight == "w4"` のときだけ意味を持つ — {@link W4_METHODS} の鍵）。
+    #: w4 の方式の種（`weight == "w4"` のときだけ意味を持つ — {@link w4_methods} の鍵）。
     method: str | None = None
     #: w4 の対象役割（同上 — {@link W4_ROLES} の鍵）。
     roles: str = "all"
@@ -412,12 +456,12 @@ CONFIGS: Mapping[str, Recipe] = MappingProxyType(
         "w8a16": Recipe("i8", "f16"),
         "w8a8": Recipe("i8", "i8"),
         # net_g の全役割 w4（格納形は無い測定列 — モジュール docstring）。
-        "w4-rtn": Recipe("w4", None, method=RTN_METHOD),
+        "w4-rtn": Recipe("w4", None, method=RTN_KIND),
         "w4-nf4": Recipe("w4", None, method="nf4"),
         "w4-mxfp4": Recipe("w4", None, method="mxfp4"),
         "w4-kmeans": Recipe("w4", None, method="kmeans:shared"),
         # BERT の linear だけ（net_g は f32 固定 — 既存 5 構成と直交する分離軸）。
-        "bert-w4-rtn": Recipe(None, None, scope=(), bert_method=RTN_METHOD),
+        "bert-w4-rtn": Recipe(None, None, scope=(), bert_method=RTN_KIND),
         "bert-w4-nf4": Recipe(None, None, scope=(), bert_method="nf4"),
         # 上 2 本の校正版（GPTQ・net_g は f32 固定・格子は同じ — 波 J-2）。
         "bert-gptq-rtn": Recipe(None, None, scope=(), bert_calib="gptq-rtn"),
@@ -672,7 +716,7 @@ class W4Census:
     #: 適格としたモジュール FQN（配布形のテンソル名との突合に使う — 配布形は torch の FQN を
     #: そのまま担ぐので、この集合が「今日の i4 適格」の正本になる）。
     eligible: tuple[str, ...]
-    #: 除外したモジュール FQN（量子化軸が {@link W4_GROUP_SIZE} で割り切れない）。
+    #: 除外したモジュール FQN（量子化軸が group 長 = `counts.group_size` で割り切れない）。
     excluded: tuple[str, ...]
     excluded_elements: int
     #: モジュール型名 → 適格の計数（役割別の対象規模を報告へ出すため）。
@@ -684,12 +728,14 @@ class W4Census:
         return lambda name: name not in excluded
 
 
-def census_w4_targets(root: nn.Module, op_types: tuple[type[nn.Module], ...]) -> W4Census:
-    """`root` の w4 対象を役割別に数え、量子化軸が group 長で割り切れない重みを外す。
+def census_w4_targets(
+    root: nn.Module, op_types: tuple[type[nn.Module], ...], group_size: int
+) -> W4Census:
+    """`root` の w4 対象を役割別に数え、量子化軸が `group_size` で割り切れない重みを外す。
 
     MUST: 割り切れない重みは**構成ごと落とすのではなく対象から外す**（i4 は端数 group を
     作らない — ADR 0069 決定 2。core は割り切れなければ fail loudly するので、外さないと
-    測定そのものが立たない）。実測（FN4）で外れるのは受容野が 32 の倍数にならない conv
+    測定そのものが立たない）。実測（FN4・既定 g32）で外れるのは受容野が 32 の倍数にならない conv
     （sdp の分離 conv・入力 1 チャネルの 1x1・dec 末尾の 16 チャネル resblock）だけで、
     適格要素に対して 0.1% に満たない — 一覧と計数は `report.json` の `w4.census`
     （「黙って対象が痩せた」を読み手が検出できること）。
@@ -701,7 +747,7 @@ def census_w4_targets(root: nn.Module, op_types: tuple[type[nn.Module], ...]) ->
     excluded_elements = 0
     for fqn, weight, axis in iter_quant_targets(root, op_types):
         name = fqn[: -len(".weight")]
-        if channel_rows(weight, axis).shape[-1] % W4_GROUP_SIZE:
+        if channel_rows(weight, axis).shape[-1] % group_size:
             excluded.append(name)
             excluded_elements += weight.numel()
             continue
@@ -710,8 +756,10 @@ def census_w4_targets(root: nn.Module, op_types: tuple[type[nn.Module], ...]) ->
         row[0] += 1
         row[1] += int(weight.shape[axis])
         row[2] += weight.numel()
-    by_role = {kind: TargetCounts(*row) for kind, row in sorted(totals.items())}
-    total = TargetCounts(0, 0, 0)
+    by_role = {
+        kind: TargetCounts(*row, group_size=group_size) for kind, row in sorted(totals.items())
+    }
+    total = TargetCounts(0, 0, 0, group_size=group_size)
     for counts in by_role.values():
         total = total + counts
     return W4Census(
@@ -723,7 +771,7 @@ def census_w4_targets(root: nn.Module, op_types: tuple[type[nn.Module], ...]) ->
     )
 
 
-def net_g_census(model_dir: Path) -> Mapping[tuple[str, str], W4Census]:
+def net_g_census(model_dir: Path, group_size: int) -> Mapping[tuple[str, str], W4Census]:
     """net_g を 1 度だけ読んで、役割 × サブグラフの対象集合を採る（鍵は `(役割, タグ)`）。
 
     構成ごとに数え直さないのは `include` の由来を 1 箇所にするため — {@link run_config} は
@@ -735,7 +783,7 @@ def net_g_census(model_dir: Path) -> Mapping[tuple[str, str], W4Census]:
     export.ensure_dec_plain(net_g)
     roots = {"front": patch.Sbv2Front(net_g), "voice": patch.Sbv2Voice(net_g)}
     census = {
-        (roles, tag): census_w4_targets(root, op_types)
+        (roles, tag): census_w4_targets(root, op_types, group_size)
         for roles, op_types in W4_ROLES.items()
         for tag, root in roots.items()
     }
@@ -780,11 +828,14 @@ PROJECTION_TARGETS: Mapping[str, str] = MappingProxyType(
 )
 
 
-def build_projections(counts: Mapping[str, TargetCounts]) -> list[dict[str, Any]]:
+def build_projections(
+    counts: Mapping[str, TargetCounts], methods: Mapping[str, W4Method]
+) -> list[dict[str, Any]]:
     """対象集合 × 方式の全組み合わせのサイズ試算。
 
     どの行に品質測定が付くかは {@link CONFIGS} から**引く**（別表に書くと構成を足したときに
-    片方だけ更新される）。
+    片方だけ更新される）。突合は**方式の種**（= 表の鍵）で、行に出る `method` は g を焼いた
+    方式名の方。
     """
     measured: dict[tuple[str, str], str] = {}
     for name, recipe in CONFIGS.items():
@@ -794,7 +845,7 @@ def build_projections(counts: Mapping[str, TargetCounts]) -> list[dict[str, Any]
             measured[("bert:linear", recipe.bert_method)] = name
     rows: list[dict[str, Any]] = []
     for target, description in PROJECTION_TARGETS.items():
-        for method in W4_METHODS.values():
+        for kind, method in methods.items():
             projection = SizeProjection(
                 counts=counts[target],
                 bits=method.projected_bits(counts[target]),
@@ -805,7 +856,7 @@ def build_projections(counts: Mapping[str, TargetCounts]) -> list[dict[str, Any]
                     "target": target,
                     "target_description": description,
                     "method": method.name,
-                    "measured_by": measured.get((target, method.name)),
+                    "measured_by": measured.get((target, kind)),
                     "modules": projection.counts.modules,
                     "elements": projection.counts.elements,
                     "bits_per_weight": projection.bits_per_weight,
@@ -839,8 +890,10 @@ def read_safetensors_header(path: Path) -> dict[str, Any]:
     return header
 
 
-def project_distribution(dist_dir: Path, linear_fqns: frozenset[str]) -> dict[str, Any]:
-    """配布形の**実ファイル**に対する「i8 → i4 g32」の縮小試算。
+def project_distribution(
+    dist_dir: Path, linear_fqns: frozenset[str], group_size: int
+) -> dict[str, Any]:
+    """配布形の**実ファイル**に対する「i8 → i4（group 長 `group_size`）」の縮小試算。
 
     対象は**今日の配布対応形 = linear の重みスロットだけ**（conv / embedding の i4 は格納形も
     実行経路も無い — ADR 0069 決定 5 / 追記 5）。配布形はテンソル名に torch の FQN をそのまま
@@ -851,10 +904,13 @@ def project_distribution(dist_dir: Path, linear_fqns: frozenset[str]) -> dict[st
     式（テンソル 1 本 `[O,I]` あたり・逐語）:
 
         i8 … `O·I` バイト + scale `[O,1]` の `4·O` バイト（どちらも**配布形の実バイト**）
-        i4 … `O·I/2` バイト（nibble 詰め）+ scale `[O,I/32]` の `4·O·(I/32)` バイト
+        i4 … `O·I/2` バイト（nibble 詰め）+ scale `[O,I/g]` の `4·O·(I/g)` バイト
 
     分母は配布ディレクトリの実ファイル総バイト。`shared/` の下（話者間で 1 本の DeBERTa）と
     話者ごとの net_g を分けて出す — 前者は 1 本ぶん、後者は話者数ぶん効く。
+
+    `group_size` は適格判定（`linear_fqns` を作った census）と**同じ g** MUST — 別の g を渡すと
+    「census が外した重みがここでは割り切れる」形の食い違いが数字だけに現れる。
     """
     files = sorted(path for path in dist_dir.rglob("*") if path.is_file())
     total_bytes = sum(path.stat().st_size for path in files)
@@ -872,9 +928,9 @@ def project_distribution(dist_dir: Path, linear_fqns: frozenset[str]) -> dict[st
                 unmatched += 1
                 continue
             out_channels, in_axis = entry["shape"]
-            if in_axis % W4_GROUP_SIZE:
+            if in_axis % group_size:
                 raise AssertionError(
-                    f"{path}: '{key}' の in 軸 {in_axis} が group {W4_GROUP_SIZE} で割り切れない"
+                    f"{path}: '{key}' の in 軸 {in_axis} が group {group_size} で割り切れない"
                 )
             scale = header.get(DIST_SCALE_PREFIX + key)
             if scale is None:
@@ -882,10 +938,11 @@ def project_distribution(dist_dir: Path, linear_fqns: frozenset[str]) -> dict[st
             row = groups[bucket]
             row[0] += 1
             row[1] += tensor_bytes(entry) + tensor_bytes(scale)
-            row[2] += out_channels * in_axis // 2 + 4 * out_channels * (in_axis // W4_GROUP_SIZE)
+            row[2] += out_channels * in_axis // 2 + 4 * out_channels * (in_axis // group_size)
     delta = sum(row[1] - row[2] for row in groups.values())
     return {
         "root": str(dist_dir),
+        "group_size": group_size,
         "files": len(files),
         "total_bytes": total_bytes,
         "groups": {
@@ -901,7 +958,7 @@ def project_distribution(dist_dir: Path, linear_fqns: frozenset[str]) -> dict[st
         "rank2_i8_not_linear": unmatched,
         "delta_bytes": delta,
         "shrink_of_total": delta / total_bytes if total_bytes else 0.0,
-        "formula": "i8 = O·I + 4·O バイト / i4 = O·I/2 + 4·O·(I/32) バイト"
+        "formula": f"i8 = O·I + 4·O バイト / i4 = O·I/2 + 4·O·(I/{group_size}) バイト"
         "（linear の重みスロットだけ・分母は配布形の実ファイル総バイト）",
     }
 
@@ -953,7 +1010,7 @@ def bert_feature_of(bert: nn.Module, tensors: Mapping[str, torch.Tensor]) -> tor
     return demo.tile_bert(hidden, word2ph).unsqueeze(0)
 
 
-def prepare_inputs(dump_path: Path, assets_path: Path) -> ChainInputs:
+def prepare_inputs(dump_path: Path, assets_path: Path, group_size: int) -> ChainInputs:
     """dump / assets を読み、**f32 の BERT** を 1 回だけ走らせて特徴を作る。
 
     f32 の特徴を構成間で共有するのは契約（既存 5 構成 + net_g の w4 は BERT=f32 固定）
@@ -975,7 +1032,7 @@ def prepare_inputs(dump_path: Path, assets_path: Path) -> ChainInputs:
 
     bert = load_bert()
     # 対象集合は f32 の模型から採る（丸めても FQN と形は動かないので、読み直しは要らない）。
-    bert_census = census_w4_targets(bert, W4_ROLES["linear"])
+    bert_census = census_w4_targets(bert, W4_ROLES["linear"], group_size)
     bert_feature = bert_feature_of(bert, tensors)
     del bert
     gc.collect()
@@ -990,7 +1047,9 @@ def prepare_inputs(dump_path: Path, assets_path: Path) -> ChainInputs:
     )
 
 
-def quantized_bert_feature(method_name: str, inputs: ChainInputs) -> tuple[torch.Tensor, str]:
+def quantized_bert_feature(
+    kind: str, inputs: ChainInputs, methods: Mapping[str, W4Method]
+) -> tuple[torch.Tensor, str]:
     """BERT の **linear の重みだけ**を w4 方式で丸めてから特徴を採る（`(特徴, 計数)`）。
 
     MUST: 模型は**素の重みから読み直す**（方式を積み重ねない）— net_g 側が構成ごとに
@@ -999,7 +1058,7 @@ def quantized_bert_feature(method_name: str, inputs: ChainInputs) -> tuple[torch
     embedding（`word_embeddings` / `rel_embeddings`）と 1 本の conv は f32 のまま残る。
     """
     bert = load_bert()
-    report = W4_METHODS[method_name].apply(bert, W4_ROLES["linear"], inputs.bert_census.include())
+    report = methods[kind].apply(bert, W4_ROLES["linear"], inputs.bert_census.include())
     feature = bert_feature_of(bert, inputs.tensors)
     del bert
     gc.collect()
@@ -1121,7 +1180,9 @@ def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor],
             elements += int(weight.numel())
     if not weights:
         raise AssertionError("encoder stage に nn.Linear が 1 本も無い（模型の構成が想定と違う）")
-    return weights, TargetCounts(modules=len(weights), channels=channels, elements=elements)
+    return weights, TargetCounts(
+        modules=len(weights), channels=channels, elements=elements, group_size=CALIB_GROUP_SIZE
+    )
 
 
 def calib_corpus(limit: int | None) -> tuple[str, ...]:
@@ -1334,27 +1395,37 @@ def calibrated_bert_feature(
     return feature, detail
 
 
-def bert_variant(recipe: Recipe) -> str | None:
-    """BERT 特徴のキャッシュ鍵（`None` = f32 固定）。
+def bert_variant(recipe: Recipe, methods: Mapping[str, W4Method]) -> str | None:
+    """BERT 特徴のキャッシュ鍵 = **表に出る方式名**（`None` = f32 固定）。
 
-    素の方式（{@link W4_METHODS}）と校正付き（{@link CALIB_CONFIGS}）で名前空間は交わらない
+    素の方式（{@link w4_methods}）と校正付き（{@link CALIB_CONFIGS}）で名前空間は交わらない
     ので 1 本の鍵で足りる。両方を持つ Recipe は構成の書き間違いなので落とす。
+
+    鍵に種ではなく**名前**を採るのは、この鍵がそのまま `w4.bert_quant` と
+    `gates.bert_quant_effective` の欄名として出るから — g を振った 2 回の実行の欄名が同じだと
+    読み手が取り違える。
     """
     if recipe.bert_method is not None and recipe.bert_calib is not None:
         raise AssertionError("BERT の丸めは素の方式か校正付きのどちらか一方")
-    return recipe.bert_method or recipe.bert_calib
+    if recipe.bert_method is not None:
+        return methods[recipe.bert_method].name
+    return recipe.bert_calib
 
 
 def bert_feature_for(
-    recipe: Recipe, inputs: ChainInputs, calib_limit: int | None
+    recipe: Recipe, inputs: ChainInputs, calib_limit: int | None, methods: Mapping[str, W4Method]
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """構成の BERT 契約に合った特徴と、その丸めの報告を作る（f32 固定の構成では呼ばない）。"""
     if recipe.bert_calib is not None:
         return calibrated_bert_feature(recipe.bert_calib, inputs, calib_limit)
     if recipe.bert_method is None:
         raise AssertionError("BERT の丸めを持たない構成で特徴を作ろうとしている")
-    feature, described = quantized_bert_feature(recipe.bert_method, inputs)
-    return feature, {"quant": described, "method": recipe.bert_method, "target": "bert:linear"}
+    feature, described = quantized_bert_feature(recipe.bert_method, inputs, methods)
+    return feature, {
+        "quant": described,
+        "method": methods[recipe.bert_method].name,
+        "target": "bert:linear",
+    }
 
 
 def run_config(
@@ -1364,6 +1435,8 @@ def run_config(
     *,
     bert_feature: torch.Tensor,
     census: Mapping[tuple[str, str], W4Census],
+    methods: Mapping[str, W4Method],
+    group_size: int,
     inject: str | None,
 ) -> dict[str, Any]:
     """1 構成ぶんのチェーンを走らせ、波形と診断を返す。
@@ -1403,7 +1476,7 @@ def run_config(
             if recipe.method is None:
                 raise AssertionError(f"{name}: w4 構成なのに方式が指定されていない")
             scoped_census = census[(recipe.roles, tag)]
-            report = W4_METHODS[recipe.method].apply(
+            report = methods[recipe.method].apply(
                 module, W4_ROLES[recipe.roles], scoped_census.include()
             )
             weight_report[tag] = report.describe()
@@ -1469,12 +1542,14 @@ def run_config(
         "act_mode": recipe.act,
         "scope": list(recipe.scope),
         "w4": {
-            "method": recipe.method,
+            "method": methods[recipe.method].name if recipe.method is not None else None,
             "roles": recipe.roles if recipe.weight == "w4" else None,
-            "group_size": W4_GROUP_SIZE if recipe.weight == "w4" else None,
+            "group_size": group_size if recipe.weight == "w4" else None,
             "targets": w4_targets,
         },
-        "bert_method": recipe.bert_method,
+        "bert_method": (
+            methods[recipe.bert_method].name if recipe.bert_method is not None else None
+        ),
         "bert_calib": recipe.bert_calib,
         "version": hps.version,
         "frames": total_frames,
@@ -1592,7 +1667,8 @@ def build_report(
             f"（n_fft={STFT_N_FFT} hop={STFT_HOP}・床 −100dB・位相ずれに鈍い）。両方で読む",
             "diagnostics": "劣化の front / voice 直交分解（先行実験の既録 voice SNR とは"
             " `w8-voice-only` が比較相手）",
-            "w4": "方式は **g=32 固定**（ADR 0069 追記 5）。net_g は全役割・BERT は linear 限定で、"
+            "w4": f"方式は g={args.w4_group_size}（`--w4-group-size`・既定 {DEFAULT_GROUP_SIZE} —"
+            " ADR 0069 追記 5 の方式軸 / 波 J-3 の g 軸）。net_g は全役割・BERT は linear 限定で、"
             "丸めは core（karume.quantize / karume.quant_methods）の共有。サイズは実測ではなく"
             "**式による投影**で、格納形を持つのは RTN（`i4`）だけ",
             "bert_calib": "校正付き丸め（GPTQ）は core（karume.quant_calib）の共有で、**格子は"
@@ -1671,7 +1747,8 @@ def format_distribution(projection: dict[str, Any]) -> str:
     mib = 1024**2
     lines = [
         f"配布形 {projection['root']}（実ファイル {projection['files']} 本 /"
-        f" {projection['total_bytes'] / mib:.1f} MiB）に対する i8 → i4 g32 の縮小試算:",
+        f" {projection['total_bytes'] / mib:.1f} MiB）に対する"
+        f" i8 → i4 g{projection['group_size']} の縮小試算:",
         f"  式: {projection['formula']}",
     ]
     for name, group in projection["groups"].items():
@@ -1831,6 +1908,8 @@ def build_w4_section(
     bert_reports: Mapping[str, dict[str, Any]],
     dist_dir: Path,
     calib_limit: int | None,
+    methods: Mapping[str, W4Method],
+    group_size: int,
 ) -> dict[str, Any]:
     """report.json の `w4` 節 — 対象集合の census・サイズ試算・配布形への投影。
 
@@ -1853,15 +1932,15 @@ def build_w4_section(
         for name in source.eligible
     )
     section: dict[str, Any] = {
-        "group_size": W4_GROUP_SIZE,
-        "methods": {name: method.formula for name, method in W4_METHODS.items()},
+        "group_size": group_size,
+        "methods": {method.name: method.formula for method in methods.values()},
         "census": {
             "net_g": {
                 f"{roles}/{tag}": _census_entry(entry) for (roles, tag), entry in census.items()
             },
             "bert": _census_entry(inputs.bert_census),
         },
-        "projections": build_projections(counts),
+        "projections": build_projections(counts, methods),
         "bert_quant": dict(bert_reports),
         "calib": {
             "group_size": CALIB_GROUP_SIZE,
@@ -1874,7 +1953,7 @@ def build_w4_section(
         },
     }
     if dist_dir.is_dir():
-        section["distribution"] = project_distribution(dist_dir, linear_fqns)
+        section["distribution"] = project_distribution(dist_dir, linear_fqns, group_size)
     else:
         section["distribution"] = {"root": str(dist_dir), "checked": False}
     return section
@@ -1896,7 +1975,22 @@ def _census_entry(census: W4Census) -> dict[str, Any]:
     }
 
 
-def main() -> None:
+def parse_w4_group_size(raw: str) -> int:
+    """`--w4-group-size` の受理（**2 冪かつ {@link MIN_GROUP_SIZE} 以上**）。
+
+    値域は core の格納規則そのもの（ADR 0069 決定 2 — 行境界・group 境界が常にバイト整列する
+    条件）を `karume.ir` から借りる。ここで落とすのは、外れた g では**測っても出荷できない**
+    から — 実測が終わってから emit / verify が撥ねるのでは 1 本ぶん丸損する。
+    """
+    value = int(raw)
+    if value & (value - 1) or value < MIN_GROUP_SIZE:
+        raise argparse.ArgumentTypeError(
+            f"group 長 {value} が 2 冪かつ {MIN_GROUP_SIZE} 以上でない（ADR 0069 決定 2）"
+        )
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model-dir", type=Path, default=export.DEFAULT_MODEL_DIR)
     parser.add_argument("--dump", type=Path, default=DEFAULT_DUMP)
@@ -1910,6 +2004,13 @@ def main() -> None:
         default=None,
         help="主要構成のうち走らせるものをコンマ区切りで絞る（既定は全部）。"
         " f32 は SNR の基準なので常に走る",
+    )
+    parser.add_argument(
+        "--w4-group-size",
+        type=parse_w4_group_size,
+        default=DEFAULT_GROUP_SIZE,
+        help=f"w4 の group 長（2 冪かつ {MIN_GROUP_SIZE} 以上・既定 {DEFAULT_GROUP_SIZE}）。"
+        " 適格判定・丸め・方式名の 3 つへ同じ g が流れる。校正付き構成の格子は 32 のまま",
     )
     parser.add_argument(
         "--calib-limit",
@@ -1930,17 +2031,24 @@ def main() -> None:
         help="故障注入（検出器の検出力を実証する）— 活性量子化の op 差し替えをせずに"
         " w8a16 / w8a8 を作る（構成生成バグの再現）",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     configs = selected_configs(args.configs)
+    # MUST: g はここで 1 度だけ読み、以降は引数で流す（module 直下に持つと「適格判定は g16 /
+    # 丸めは g32」の黙った割れを作れる — {@link rtn_method_name} の MUST）。
+    methods = w4_methods(args.w4_group_size)
 
-    inputs = prepare_inputs(args.dump, args.assets)
+    inputs = prepare_inputs(args.dump, args.assets, args.w4_group_size)
     print(
         f"[inputs] text={inputs.meta['text']!r} bert={list(inputs.bert_feature.shape)}"
         f" bert_linear={inputs.bert_census.counts.modules}",
         flush=True,
     )
-    census = net_g_census(args.model_dir)
+    census = net_g_census(args.model_dir, args.w4_group_size)
     for roles in W4_ROLES:
         front, voice = census[(roles, "front")], census[(roles, "voice")]
         print(
@@ -1964,9 +2072,9 @@ def main() -> None:
     results: dict[str, dict[str, Any]] = {}
     wavs: dict[str, Path] = {}
     for name, directory in plan:
-        variant = bert_variant(RECIPES[name])
+        variant = bert_variant(RECIPES[name], methods)
         if variant is not None and variant not in features:
-            feature, detail = bert_feature_for(RECIPES[name], inputs, args.calib_limit)
+            feature, detail = bert_feature_for(RECIPES[name], inputs, args.calib_limit, methods)
             features[variant] = feature
             bert_reports[variant] = detail | {
                 "differs_from_f32": not bool(torch.equal(feature, inputs.bert_feature)),
@@ -1979,6 +2087,8 @@ def main() -> None:
             inputs,
             bert_feature=features[variant],
             census=census,
+            methods=methods,
+            group_size=args.w4_group_size,
             inject=args.inject,
         )
         audio = results[name]["audio"]
@@ -1993,7 +2103,15 @@ def main() -> None:
         )
 
     gates = run_gates(results, wavs, args.reference_wav, census, bert_reports)
-    w4 = build_w4_section(census, inputs, bert_reports, args.dist_dir, args.calib_limit)
+    w4 = build_w4_section(
+        census,
+        inputs,
+        bert_reports,
+        args.dist_dir,
+        args.calib_limit,
+        methods,
+        args.w4_group_size,
+    )
     report = build_report(args, inputs, results, wavs, gates, w4)
     # dump 側の波形（実 GPU の Karume 出力）との突合も残す — f32 経路の二重の裏取り。
     dump_audio = inputs.tensors["audio"].reshape(-1).to(torch.float32)
