@@ -314,13 +314,10 @@ def _base_overview(manifest: Mapping[str, Any]) -> list[str]:
         "safetensors file = weights + a graph JSON embedded in `__metadata__`). Runs as-is in the",
         "browser and in Deno.",
         "",
-        "- **No Turbo LoRA is baked in.** Sampling is the ordinary many-step kind"
-        f" (**{defaults['steps']} steps /"
-        f" guidance {defaults['guidanceScale']}** by default), which is what makes the",
-        "  **negative prompt take effect** — at guidance 1 the second branch is never computed."
-        " For the",
-        "  few-step distilled build see"
-        " [hdae/karume-anima-turbo](https://huggingface.co/hdae/karume-anima-turbo).",
+        f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
+        f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
+        "  what makes the **negative prompt take effect**. For a few-step distilled build see",
+        "  [hdae/karume-anima-turbo](https://huggingface.co/hdae/karume-anima-turbo).",
         "- Not readable by diffusers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
