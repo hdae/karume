@@ -28,9 +28,19 @@ Turbo LoRA を焼くと **negative prompt が効かない**（CFG=1 では uncon
   **モデル名は上流のバージョン込み**（`anima-v1.0` / `anima-wai-v1.0` /
   `anima-copycat-20260610`）— 版を並存させるための規約は ADR
   [0077](decisions/0077-model-version-naming.md)。
-- **L-4: 公開 + pin 焼き込み + JSR bump**: 新リポ `karume-anima` の公開と、同乗させる
-  `karume-anima-turbo` の pin 更新（`00c88039` — J-4a から持ち越し）→ 0.5.0 系の bump。
-  手順の正本は [release-runbook](release-runbook.md)（順序 MUST = HF → pin → JSR）。
+- **L-4: 公開 + pin 焼き込み + JSR bump — 消化（2026-08-22）**: 新リポ
+  `hdae/karume-anima` を公開（リビジョン `796ce27b`）。持ち越していた `karume-anima-turbo` の
+  pin も同乗で焼き（`5aa15e4b` → `00c88039`）、4 パッケージを **0.4.2** へ lockstep bump。
+  順序 MUST（HF → pin → JSR）どおり。**JSR publish は push → CI 緑 → GitHub Release で発火**
+  するのでユーザー操作待ち。手順の正本は [release-runbook](release-runbook.md)。
+  **断片化検証**: 12 本中 11 本が 38〜60 MiB/レンジで健全。`anima-v1.0` の f16 transformer
+  だけ 13.28 と外れ、`shard-cache` を退避して**同じバイト列のまま上げ直して 17.52** まで戻した
+  （バイト不変なのでコミットは増えない）。残る細かさの機序は「turbo の f16 と大半のチャンクを
+  共有するため CAS 側の dedup が効き続ける」で、目安 10 は満たすため打ち切った。
+  **実 DL 疎通**: `fromPretrained("hdae/karume-anima")` の既定（`anima-v1.0` / `w8a8-s16` /
+  20 step / CFG 4）で取得 → integrity 検証 → 実 GPU 描画まで 345s で通過。3 モデルを同一 seed で
+  描き分けて**別の絵になること**も確認（text_conditioner をモデル別にできていないと 3 つとも
+  同じ傾向になる — `outputs/demo/model-check/`）。
 - **保留: i4 席**（`CALIB_STEPS` / `CALIB_GUIDANCE` が turbo 前提でハードコードされており、
   素版で回すと運用条件と食い違う校正を焼くことになる — 校正条件のモデル別化と同時に J-4a の
   続きで裁く）。
