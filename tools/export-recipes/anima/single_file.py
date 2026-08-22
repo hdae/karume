@@ -30,11 +30,15 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import torch
-from diffusers.loaders.single_file_utils import (
-    convert_cosmos_transformer_checkpoint_to_diffusers,
-)
-from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
+
+# MUST: `diffusers` / `huggingface_hub` は**関数の中で import する**（この recipe の他の
+# モジュールと同じ作法 — `export.py` / `patch.py` / `lora.py` / `rope_tables.py` /
+# `pipeline_ref.py` はどれも module 直下では import しない）。どちらも `anima` 依存グループ
+# 側のもので、**既定の `uv sync` には入らない**（pyproject の同 NOTE）。module 直下で import
+# すると、このファイルを読むだけで `ModuleNotFoundError` になり、グループ非同期の環境では
+# **テストが collection ごと落ちる**（2026-08-22 に踏んだ）。ここで要るのは変換の実行時だけで、
+# 鍵の付け替えと突合（下の純関数）はどちらにも依存しない。
 
 #: 上流の diffusers リポ（`anima/export.py` の `DEFAULT_REPO` と同じもの）。
 BASE_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
@@ -100,6 +104,11 @@ def _link(target: Path, link: Path) -> None:
 
 
 def convert(checkpoint: Path, out: Path, base_repo: str = BASE_REPO) -> None:
+    from diffusers.loaders.single_file_utils import (
+        convert_cosmos_transformer_checkpoint_to_diffusers,
+    )
+    from huggingface_hub import snapshot_download
+
     base = Path(snapshot_download(base_repo))
     stripped = _strip_prefix(load_file(checkpoint))
     # MUST: text_conditioner は**変換表を通さない**、かつ**表を呼ぶ前に取り出す**。
