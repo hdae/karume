@@ -106,7 +106,7 @@ text_conditioner / vae_decoder が f16 固定で、圧縮が掛かるのは tran
 
 **適用は 0.5.0 の breaking 波でまとめて行う**（Status 参照）— この表は「移行時にこう変える」の
 記録であって、現行コード（`ANIMA_QUANTS` / `SBV2_QUANTS` / `IRODORI_QUANT_SEATS`）はまだ旧名の
-まま。公開済み 3 リポの manifest は再アップロード + pin 更新（[0073](0073-models-source-pin.md)）
+まま。公開済み 4 リポの manifest は再アップロード + pin 更新（[0073](0073-models-source-pin.md)）
 と同時に切り替える。
 
 新しい名前は長くなる（`i8-a8-attn8-s16`）が、**id は機械の都合で、人が読むのは
@@ -114,7 +114,8 @@ text_conditioner / vae_decoder が f16 固定で、圧縮が掛かるのは tran
 
 ## Consequences
 
-- 公開済み 3 リポ（jvnv / irodori / anima）の manifest が全て変わる → 再アップロード + pin 更新
+- 公開済み 4 リポ（jvnv / irodori / anima-turbo / anima — 起票後の波 L で 1 増）の manifest が
+  全て変わる → 再アップロード + pin 更新
   （[0073](0073-models-source-pin.md)）が要る。0.5.0 の他の breaking と 1 回にまとめる。
 - hub / runtime のコード変更は**不要**（名前は不透明キー）。変わるのは recipe の quant 表・
   examples・E2E テストの参照名・docs。**`linearCompute` / `attentionCompute` の値**の改名だけは

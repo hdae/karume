@@ -67,7 +67,7 @@ NOTE: 本当の食い違いは別の位置にある — §7 が「据え置き�
 
 Context の allowlist の性質上、欄を足した manifest は旧クライアントから読めない。
 **黙って読めない形にせず、format major で断絶を宣言する**（ADR 0041 §1 の「未知 major は
-fail loudly」に乗る）。0.5.0 の breaking 波にまとめ、公開 3 リポの再アップロードと pin 更新
+fail loudly」に乗る）。0.5.0 の breaking 波にまとめ、公開 4 リポの再アップロードと pin 更新
 （[0073](0073-models-source-pin.md)）を 1 回で済ませる。
 
 ### 5. モデルカードの quant 表も同じ文字列から出す

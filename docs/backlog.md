@@ -168,8 +168,9 @@ autoregressive 波の**残項目（波外へ送り）**:
   （`for await` の token イベント・EOS 停止・cancel・多ターン継続）+ `last_row` の runner 側
   導出（ADR 0068 追記 4 の所有関係のみ reopen）。`generateGreedy` は parity 検収用の内部
   ヘルパへ格下げ。LLM 実需（streaming / チャット）に直結する最大の API 波。
-- **0.5.0 breaking 波（起票 2026-08-21・ユーザー裁定）**: 破壊的変更を 1 回にまとめ、公開 3 リポ
-  の再アップロードと pin 更新（ADR 0073）を 1 度で済ませる束。①`linearCompute` の値を
+- **0.5.0 breaking 波（起票 2026-08-21・ユーザー裁定）**: 破壊的変更を 1 回にまとめ、公開 4 リポ
+  （jvnv / irodori / anima-turbo / anima — 波 L で 1 増）の再アップロードと pin 更新（ADR 0073）を
+  1 度で済ませる束。①`linearCompute` の値を
   `"i8a8"` → `"a8"` へ改名（ノブが決めているのは活性の扱いだけで、格納形は資産ヘッダが正 —
   `attentionCompute` も同値）②quant 席名の規則化（ADR
   [0074](decisions/0074-quant-seat-naming.md) — 格納語彙を `f32/f16/i8/i4` の 1 本へ・
