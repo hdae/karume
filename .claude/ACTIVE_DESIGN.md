@@ -65,7 +65,20 @@
   [0073](../docs/decisions/0073-models-source-pin.md) — 3 定数 + ref optional 化）+ 0.4.0
   lockstep bump 済み。**CI 緑 → GitHub Release → JSR publish まで通過（2026-08-21 ユーザー
   確認）= 波 K クローズ**。手順の正本 = [release-runbook](../docs/release-runbook.md)。
-- **波 J-4a（anima の i4 席・2026-08-21 着手）が現行**: J-4（格納席の実装裁定）から anima
+- **波 L（anima の素版 + バリアント同梱・2026-08-22 着手）が現行**: Turbo LoRA を焼くと
+  **negative prompt が効かない**（CFG=1 では uncond 側を計算しない）ので、素の base を
+  **別リポ `karume-anima`** で出し、同じ base の第三者 fine-tune（WAI / CopyCat）も同梱する。
+  正本 = [backlog L-1〜L-4](../docs/backlog.md) と
+  [research/2026-08-22-anima-base-steps.md](../docs/research/2026-08-22-anima-base-steps.md)。
+  **落とし穴 3 つ**: ①**Pipeline は 2 本**（`--pipeline anima` / `anima-turbo`）— リポ直下の
+  改変告知は Pipeline に固定で載る 1 組なので畳めない。既定 `--pipeline` は素版側へ移った。
+  ②素モデルでは **LoRA 記録の「不在」を検査する**（融合済みと素は資産の形が 1 バイトも
+  変わらないので、turbo 系列の挿し込みは他のどの検査にも掛からない）。③civitai の単一ファイルは
+  **DiT と llm_adapter しか持たない**ので text_encoder / VAE / tokenizer は base 共有。変換は
+  `anima/single_file.py`（**text_conditioner だけは diffusers の変換表を通さない** — 表は
+  llm_adapter の中まで改名するが基底は元の綴り。かつ表は入力 dict を pop で消費する）。
+  **i4 席は保留**（校正条件が turbo 前提でハードコード）・**サンプラーは Euler 固定**。
+- **波 J-4a（anima の i4 席・2026-08-21 着手）**: J-4（格納席の実装裁定）から anima
   だけ切り離す裁定を受けた先行波。第 1 段の速度実測は消化 — 正本 =
   [research/2026-08-21-anima-i4-seat-speed.md](../docs/research/2026-08-21-anima-i4-seat-speed.md)。
   i4 系列 + `w4` / `w4-a8-s16` を新設し、**GPTQ 校正付き**へ結線（適格 = 型 ∧ g32 整除の

@@ -7,7 +7,33 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 量子化方式の探索・第 2 段（波 J・2026-08-20 着手）
+## now — anima の素版 + バリアント同梱（波 L・2026-08-22 着手）
+
+Turbo LoRA を焼くと **negative prompt が効かない**（CFG=1 では uncond 側を 1 度も計算しない）。
+素の base を別リポで出し、同じ base の第三者 fine-tune 2 種も同梱する（2026-08-22 ユーザー
+裁定）。既定席は `w8a8-s16` 据え置き。実測と裁定の正本 =
+[research/2026-08-22-anima-base-steps.md](research/2026-08-22-anima-base-steps.md)。
+
+- **L-1: recipe のモデル別化 — 消化（2026-08-22）**: LoRA の有無 / 席の範囲 /
+  text_conditioner の出所 / 既定値をモデル属性（`ANIMA_MODELS`）へ。**Pipeline を 2 本へ分割**
+  （`--pipeline anima` / `--pipeline anima-turbo`）— リポ直下の改変告知は Pipeline に固定で
+  載る 1 組なので、畳むとどちらかの告知が中身と食い違う。素モデルでは LoRA 記録の**不在**を
+  検査する（融合済みと素は資産の形が 1 バイトも変わらず、他のどの検査にも掛からないため）。
+- **L-2: 素版の系列 + 配布形 — 消化（2026-08-22）**: LoRA 無しの transformer f16 / i8-dyn。
+  既定は **20 step / guidance 4**（視認裁定 — research §3）。
+- **L-3: バリアント 2 種（WAI / CopyCat）の同梱**: civitai の単一ファイル（ComfyUI 形）を
+  diffusers 形へ組み直す `anima/single_file.py` を新設。**DiT と llm_adapter しか入っていない**
+  ので text_encoder / VAE / tokenizer は base を共有（WAI が別配布している text encoder は
+  基底とバイト一致を実測で確認）。帰属と許諾欄はカードがモデルごとに持つ。
+- **L-4: 公開 + pin 焼き込み + JSR bump**: 新リポ `karume-anima` の公開と、同乗させる
+  `karume-anima-turbo` の pin 更新（`00c88039` — J-4a から持ち越し）→ 0.5.0 系の bump。
+  手順の正本は [release-runbook](release-runbook.md)（順序 MUST = HF → pin → JSR）。
+- **保留: i4 席**（`CALIB_STEPS` / `CALIB_GUIDANCE` が turbo 前提でハードコードされており、
+  素版で回すと運用条件と食い違う校正を焼くことになる — 校正条件のモデル別化と同時に J-4a の
+  続きで裁く）。
+- **保留: サンプラーの選択肢**（現状は Euler 固定・manifest に種別欄が無い — research §4）。
+
+## now（継続）— 量子化方式の探索・第 2 段（波 J・2026-08-20 着手）
 
 前段（波 I = w4 横展開 + 方式スクリーニング・聴感/視認込み）は**完全クローズ** — 実測の正本 =
 [research/2026-08-19-w4-method-screening.md](research/2026-08-19-w4-method-screening.md)、
