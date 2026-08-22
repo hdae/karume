@@ -19,7 +19,8 @@
 
 ```sh
 cd tools/export-recipes
-uv run python dist.py --model anima --model anima-wai --model anima-copycat \
+uv run python dist.py --model anima-v1.0 --model anima-wai-v1.0 \
+    --model anima-copycat-20260610 \
     --out ../../models/karume-anima                  # 素の base 系（多 step + CFG）
 uv run python dist.py --pipeline anima-turbo         # → models/karume-anima-turbo/（LoRA 焼き込み）
 uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/

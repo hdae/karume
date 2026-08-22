@@ -73,14 +73,14 @@ PERMISSIONS_RETRIEVED = "2026-08-22"
 #: モデル名 → 出所。`anima` は base そのものなので civitai の許諾欄を持たない
 #: （掛かるのは CircleStone のライセンス 1 本だけ）。
 UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
-    "anima": UpstreamModel(
+    "anima-v1.0": UpstreamModel(
         title="Anima Base v1.0",
         author="circlestone_labs",
         source="https://huggingface.co/circlestone-labs/Anima-Base-v1.0-Diffusers",
         file=None,
         permissions=(),
     ),
-    "anima-wai": UpstreamModel(
+    "anima-wai-v1.0": UpstreamModel(
         title="WAI-ANIMA v1.0 (base 1.0)",
         author="WAI0731",
         source="https://civitai.com/models/2544636/wai-anima",
@@ -92,7 +92,7 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
             ("allowDifferentLicense", "true"),
         ),
     ),
-    "anima-copycat": UpstreamModel(
+    "anima-copycat-20260610": UpstreamModel(
         title="copycat-anima 20260610",
         author="calculater",
         source="https://civitai.com/models/2377376/copycat-anima",

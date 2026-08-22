@@ -43,7 +43,7 @@ ANIMA_TURBO_MODEL_NAME = "anima-turbo"
 
 #: 素の base（LoRA を焼いていない）配布物のモデル名。多 step + CFG で使う席で、negative
 #: prompt が効くのはこちらだけ（turbo は CFG=1 運用なので uncond 側を計算しない）。
-ANIMA_BASE_MODEL_NAME = "anima"
+ANIMA_BASE_MODEL_NAME = "anima-v1.0"
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。
 ANIMA_PIPELINE = "anima/1"
@@ -337,13 +337,13 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
         own_text_conditioner=False,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
-    "anima-wai": AnimaModel(
+    "anima-wai-v1.0": AnimaModel(
         lora_sha256=None,
         storages=("f16", "i8"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
-    "anima-copycat": AnimaModel(
+    "anima-copycat-20260610": AnimaModel(
         lora_sha256=None,
         storages=("f16", "i8"),
         own_text_conditioner=True,
@@ -354,7 +354,7 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
 #: リポごとの受理集合。**Pipeline が違えば直下の法的テキスト（NOTICE）も違う**ので、
 #: 取り違えて組むと「改変告知が中身と食い違うリポ」が黙って出来上がる — 計画段で落とす。
 TURBO_MODELS: tuple[str, ...] = (ANIMA_TURBO_MODEL_NAME,)
-BASE_MODELS: tuple[str, ...] = (ANIMA_BASE_MODEL_NAME, "anima-wai", "anima-copycat")
+BASE_MODELS: tuple[str, ...] = (ANIMA_BASE_MODEL_NAME, "anima-wai-v1.0", "anima-copycat-20260610")
 
 
 @dataclass(frozen=True)

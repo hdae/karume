@@ -77,6 +77,9 @@
   **DiT と llm_adapter しか持たない**ので text_encoder / VAE / tokenizer は base 共有。変換は
   `anima/single_file.py`（**text_conditioner だけは diffusers の変換表を通さない** — 表は
   llm_adapter の中まで改名するが基底は元の綴り。かつ表は入力 dict を pop で消費する）。
+  ④**モデル名は上流のバージョン込み**（ADR
+  [0077](../docs/decisions/0077-model-version-naming.md) — 新版が出ても旧版を並存させる
+  ため。系列名もモデル名から導くので `anima-v1.0-f16-dyn` のようになる）。
   **i4 席は保留**（校正条件が turbo 前提でハードコード）・**サンプラーは Euler 固定**。
 - **波 J-4a（anima の i4 席・2026-08-21 着手）**: J-4（格納席の実装裁定）から anima
   だけ切り離す裁定を受けた先行波。第 1 段の速度実測は消化 — 正本 =

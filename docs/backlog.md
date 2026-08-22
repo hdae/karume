@@ -21,10 +21,13 @@ Turbo LoRA を焼くと **negative prompt が効かない**（CFG=1 では uncon
   検査する（融合済みと素は資産の形が 1 バイトも変わらず、他のどの検査にも掛からないため）。
 - **L-2: 素版の系列 + 配布形 — 消化（2026-08-22）**: LoRA 無しの transformer f16 / i8-dyn。
   既定は **20 step / guidance 4**（視認裁定 — research §3）。
-- **L-3: バリアント 2 種（WAI / CopyCat）の同梱**: civitai の単一ファイル（ComfyUI 形）を
+- **L-3: バリアント 2 種（WAI / CopyCat）の同梱 — 消化（2026-08-22）**: civitai の単一ファイル（ComfyUI 形）を
   diffusers 形へ組み直す `anima/single_file.py` を新設。**DiT と llm_adapter しか入っていない**
   ので text_encoder / VAE / tokenizer は base を共有（WAI が別配布している text encoder は
   基底とバイト一致を実測で確認）。帰属と許諾欄はカードがモデルごとに持つ。
+  **モデル名は上流のバージョン込み**（`anima-v1.0` / `anima-wai-v1.0` /
+  `anima-copycat-20260610`）— 版を並存させるための規約は ADR
+  [0077](decisions/0077-model-version-naming.md)。
 - **L-4: 公開 + pin 焼き込み + JSR bump**: 新リポ `karume-anima` の公開と、同乗させる
   `karume-anima-turbo` の pin 更新（`00c88039` — J-4a から持ち越し）→ 0.5.0 系の bump。
   手順の正本は [release-runbook](release-runbook.md)（順序 MUST = HF → pin → JSR）。

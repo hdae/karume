@@ -128,11 +128,11 @@ def _base_manifest() -> dict[str, Any]:
     """素の base 系リポの形（base 本体 + 第三者 fine-tune）— モデル名は出所表に在るものだけ。"""
     manifest = _manifest()
     models = manifest["models"]
-    models["anima"] = models.pop("turbo")
-    models["anima-copycat"] = models.pop("lite")
-    manifest["defaultModel"] = "anima"
-    models["anima"]["pipelineConfig"]["defaults"]["guidanceScale"] = 4
-    models["anima"]["pipelineConfig"]["defaults"]["steps"] = 28
+    models["anima-v1.0"] = models.pop("turbo")
+    models["anima-copycat-20260610"] = models.pop("lite")
+    manifest["defaultModel"] = "anima-v1.0"
+    models["anima-v1.0"]["pipelineConfig"]["defaults"]["guidanceScale"] = 4
+    models["anima-v1.0"]["pipelineConfig"]["defaults"]["steps"] = 28
     return manifest
 
 
@@ -155,7 +155,7 @@ class TestBaseCard:
         assert ATTRIBUTION_NOTICE in base_card
 
     def test_it_lists_the_origin_of_every_model_in_the_manifest(self, base_card: str) -> None:
-        for name in ("anima", "anima-copycat"):
+        for name in ("anima-v1.0", "anima-copycat-20260610"):
             upstream = UPSTREAM_MODELS[name]
             assert f"### `{name}` — {upstream.title}" in base_card
             assert upstream.author in base_card
@@ -164,11 +164,11 @@ class TestBaseCard:
     def test_it_never_lists_a_model_the_manifest_does_not_carry(self) -> None:
         """帰属を組み立ての引数から独立に持つと、入っていないモデルの出所が載る。"""
         manifest = _base_manifest()
-        del manifest["models"]["anima-copycat"]
+        del manifest["models"]["anima-copycat-20260610"]
         card = render_base_card(manifest, REPO)
 
-        assert UPSTREAM_MODELS["anima-copycat"].source not in card
-        assert UPSTREAM_MODELS["anima"].source in card
+        assert UPSTREAM_MODELS["anima-copycat-20260610"].source not in card
+        assert UPSTREAM_MODELS["anima-v1.0"].source in card
 
     def test_it_warns_when_a_source_forbids_relicensing(self, base_card: str) -> None:
         """`allowDifferentLicense` が false の出所は「同じ条件で配る」ことを要求する。"""
@@ -178,14 +178,14 @@ class TestBaseCard:
     def test_it_stays_silent_about_relicensing_when_no_source_forbids_it(self) -> None:
         """条件の無いリポにだけ効く注意書きが常時出ると、読み手が条件を取り違える。"""
         manifest = _base_manifest()
-        del manifest["models"]["anima-copycat"]
+        del manifest["models"]["anima-copycat-20260610"]
 
         assert "do not relicense it" not in render_base_card(manifest, REPO)
 
     def test_it_refuses_a_model_whose_origin_is_unknown(self) -> None:
         """出所表に無いモデルは**帰属を書けない** — 黙って省かず落とす。"""
         manifest = _base_manifest()
-        manifest["models"]["anima-nope"] = manifest["models"]["anima"]
+        manifest["models"]["anima-nope"] = manifest["models"]["anima-v1.0"]
 
         with pytest.raises(ValueError, match=r"出所が card\.py に無い"):
             render_base_card(manifest, REPO)
@@ -197,7 +197,7 @@ class TestBaseCard:
 
     def test_it_refuses_another_pipelines_manifest(self) -> None:
         manifest = _base_manifest()
-        manifest["models"]["anima"]["pipeline"] = "sbv2/1"
+        manifest["models"]["anima-v1.0"]["pipeline"] = "sbv2/1"
 
         with pytest.raises(ValueError):
             render_base_card(manifest, REPO)

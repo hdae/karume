@@ -273,12 +273,12 @@ class TestLayout:
 
     def test_the_model_name_moves_the_whole_subtree(self, tmp_path: Path) -> None:
         """`--model` はサブツリー名・系列名・manifest のキーを 1 語で動かす。"""
-        sources = _build_series(tmp_path / "series", model="anima-wai")
-        out_dir = tmp_path / "models" / "anima-wai"
-        manifest = _assemble_anima(sources, out_dir, "anima-wai")
-        assert list(manifest["models"]) == ["anima-wai"]
-        assert manifest["defaultModel"] == "anima-wai"
-        assert _present(out_dir) == sorted([*_in_subtree("anima-wai"), MANIFEST_FILENAME])
+        sources = _build_series(tmp_path / "series", model="anima-wai-v1.0")
+        out_dir = tmp_path / "models" / "anima-wai-v1.0"
+        manifest = _assemble_anima(sources, out_dir, "anima-wai-v1.0")
+        assert list(manifest["models"]) == ["anima-wai-v1.0"]
+        assert manifest["defaultModel"] == "anima-wai-v1.0"
+        assert _present(out_dir) == sorted([*_in_subtree("anima-wai-v1.0"), MANIFEST_FILENAME])
 
 
 class TestPlacementStrategy:
@@ -389,19 +389,19 @@ class TestBaseModels:
         「宣言しない」は quant 表とファイル一覧の**両方**で見る — 片方だけだと、席は消えたが
         ファイルは配られている（= 誰も参照しない 1.2GB）状態が緑になる。
         """
-        sources = _build_series(tmp_path / "series", model="anima")
-        out_dir = tmp_path / "models" / "anima"
-        manifest = _assemble_anima(sources, out_dir, "anima")
+        sources = _build_series(tmp_path / "series", model="anima-v1.0")
+        out_dir = tmp_path / "models" / "anima-v1.0"
+        manifest = _assemble_anima(sources, out_dir, "anima-v1.0")
 
-        entry = manifest["models"]["anima"]
+        entry = manifest["models"]["anima-v1.0"]
         assert sorted(entry["weights"]["transformer"]) == ["f16", "i8"]
         assert "w4" not in entry["quants"]
         assert "w4-a8-s16" not in entry["quants"]
-        assert not (out_dir / "anima" / OUTPUT_PATHS["transformer_i4"]).exists()
+        assert not (out_dir / "anima-v1.0" / OUTPUT_PATHS["transformer_i4"]).exists()
 
     def test_a_plain_model_never_asks_for_an_i4_series(self, tmp_path: Path) -> None:
         """i4 系列が存在しなくても組める（要求そのものが無い）。"""
-        sources = _build_series(tmp_path / "series", model="anima")
+        sources = _build_series(tmp_path / "series", model="anima-v1.0")
 
         assert "i4" not in sources.transformer
         assert not (tmp_path / "series" / "anima-i4-dyn").exists()
@@ -413,40 +413,40 @@ class TestBaseModels:
 
         融合済みと素の資産は形が 1 バイトも変わらないので、他のどの検査にも掛からない。
         """
-        sources = _build_series(tmp_path / "series", model="anima")
+        sources = _build_series(tmp_path / "series", model="anima-v1.0")
         _write(
             sources.transformer["f16"] / "transformer" / LORA_PROVENANCE_FILE,
             _lora_record(LORA_SHA256),
         )
-        out_dir = tmp_path / "models" / "anima"
+        out_dir = tmp_path / "models" / "anima-v1.0"
 
         with pytest.raises(DistError, match="焼いた記録のある系列が来ている"):
-            _assemble_anima(sources, out_dir, "anima")
+            _assemble_anima(sources, out_dir, "anima-v1.0")
 
         assert not out_dir.exists()
 
     def test_a_fine_tune_reads_its_own_text_conditioner(self, tmp_path: Path) -> None:
         """第三者 fine-tune は llm_adapter も焼き直しているので、共有系列を読ませない。"""
-        base = anima_sources(tmp_path / "series", "anima")
-        wai = anima_sources(tmp_path / "series", "anima-wai")
+        base = anima_sources(tmp_path / "series", "anima-v1.0")
+        wai = anima_sources(tmp_path / "series", "anima-wai-v1.0")
 
         assert base.text_conditioner == base.base
         assert wai.text_conditioner != wai.base
-        assert wai.text_conditioner.name == "anima-wai-f16"
+        assert wai.text_conditioner.name == "anima-wai-v1.0-f16"
 
     def test_the_default_quant_stays_the_same_seat(self, tmp_path: Path) -> None:
         """既定席は turbo と揃える（利用者が model を変えても既定の意味が動かない）。"""
-        sources = _build_series(tmp_path / "series", model="anima")
-        manifest = _assemble_anima(sources, tmp_path / "out", "anima")
+        sources = _build_series(tmp_path / "series", model="anima-v1.0")
+        manifest = _assemble_anima(sources, tmp_path / "out", "anima-v1.0")
 
-        assert manifest["models"]["anima"]["defaultQuant"] == ANIMA_DEFAULT_QUANT
+        assert manifest["models"]["anima-v1.0"]["defaultQuant"] == ANIMA_DEFAULT_QUANT
 
     def test_a_plain_model_defaults_to_many_steps_with_guidance(self, tmp_path: Path) -> None:
         """CFG を使う既定であること — negative prompt が効くのはこの経路だけ。"""
-        sources = _build_series(tmp_path / "series", model="anima")
-        manifest = _assemble_anima(sources, tmp_path / "out", "anima")
+        sources = _build_series(tmp_path / "series", model="anima-v1.0")
+        manifest = _assemble_anima(sources, tmp_path / "out", "anima-v1.0")
 
-        defaults = manifest["models"]["anima"]["pipelineConfig"]["defaults"]
+        defaults = manifest["models"]["anima-v1.0"]["pipelineConfig"]["defaults"]
         assert defaults["guidanceScale"] != 1
         assert defaults["steps"] > 8
         assert defaults["negativePrompt"]
@@ -461,7 +461,7 @@ class TestPipelineMembership:
 
     def test_the_turbo_pipeline_refuses_a_base_model(self, tmp_path: Path) -> None:
         with pytest.raises(DistError, match="この pipeline のリポに入らない"):
-            anima_dist_plan(tmp_path / "series", "anima-wai", TURBO_MODELS)
+            anima_dist_plan(tmp_path / "series", "anima-wai-v1.0", TURBO_MODELS)
 
     def test_the_two_repositories_declare_different_modifications(self) -> None:
         """告知が 1 本に畳まれていたら（= 同じ文面なら）どちらかが嘘になる。"""
@@ -883,20 +883,20 @@ class TestFamilyAssembly:
     def family(self, tmp_path: Path) -> tuple[Path, dict]:
         series = tmp_path / "series"
         # base（text 経路 / VAE / tokenizer）は共通、transformer だけモデルごとに違う中身。
-        first = _build_series(series, model="anima", mark=b"-base")
-        second = _build_series(series, model="anima-wai", mark=b"-wai")
+        first = _build_series(series, model="anima-v1.0", mark=b"-base")
+        second = _build_series(series, model="anima-wai-v1.0", mark=b"-wai")
         out_dir = tmp_path / "models" / "anima-family"
         manifest = assemble_family(
-            [anima_plan(first, "anima"), anima_plan(second, "anima-wai")],
+            [anima_plan(first, "anima-v1.0"), anima_plan(second, "anima-wai-v1.0")],
             out_dir,
-            "anima",
+            "anima-v1.0",
         )
         return out_dir, manifest
 
     def test_it_declares_every_model_with_the_first_as_default(self, family) -> None:
         _, manifest = family
-        assert list(manifest["models"]) == ["anima", "anima-wai"]
-        assert manifest["defaultModel"] == "anima"
+        assert list(manifest["models"]) == ["anima-v1.0", "anima-wai-v1.0"]
+        assert manifest["defaultModel"] == "anima-v1.0"
 
     def test_it_places_a_byte_identical_file_once_under_shared(self, family) -> None:
         out_dir, manifest = family
@@ -916,11 +916,11 @@ class TestFamilyAssembly:
             for name in manifest["models"]
         }
         assert paths == {
-            "anima": f"anima/{OUTPUT_PATHS['transformer_i8']}",
-            "anima-wai": f"anima-wai/{OUTPUT_PATHS['transformer_i8']}",
+            "anima-v1.0": f"anima-v1.0/{OUTPUT_PATHS['transformer_i8']}",
+            "anima-wai-v1.0": f"anima-wai-v1.0/{OUTPUT_PATHS['transformer_i8']}",
         }
-        assert (out_dir / paths["anima"]).read_bytes() != (
-            out_dir / paths["anima-wai"]
+        assert (out_dir / paths["anima-v1.0"]).read_bytes() != (
+            out_dir / paths["anima-wai-v1.0"]
         ).read_bytes()
 
     def test_the_shared_and_the_private_files_together_cover_the_tree(self, family) -> None:
@@ -939,7 +939,7 @@ class TestFamilyAssembly:
         expected = [f"{SHARED_DIRNAME}/{OUTPUT_PATHS[role]}" for role in shared_roles]
         expected += [
             f"{model}/{OUTPUT_PATHS[role]}"
-            for model in ("anima", "anima-wai")
+            for model in ("anima-v1.0", "anima-wai-v1.0")
             for role in private_roles
         ]
         assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
@@ -972,12 +972,12 @@ class TestFamilyAssembly:
     def test_it_reassembles_a_family_over_a_previous_run(self, tmp_path: Path) -> None:
         """畳んだ後の木をもう一度組んでも落ちない（`shared/` の既存ファイルを踏み直す経路）。"""
         series = tmp_path / "series"
-        first = _build_series(series, model="anima", mark=b"-base")
-        second = _build_series(series, model="anima-wai", mark=b"-wai")
+        first = _build_series(series, model="anima-v1.0", mark=b"-base")
+        second = _build_series(series, model="anima-wai-v1.0", mark=b"-wai")
         out_dir = tmp_path / "models" / "anima-family"
-        plans = [anima_plan(first, "anima"), anima_plan(second, "anima-wai")]
-        before = assemble_family(plans, out_dir, "anima")
-        after = assemble_family(plans, out_dir, "anima")
+        plans = [anima_plan(first, "anima-v1.0"), anima_plan(second, "anima-wai-v1.0")]
+        before = assemble_family(plans, out_dir, "anima-v1.0")
+        after = assemble_family(plans, out_dir, "anima-v1.0")
         assert before == after
         assert verify_dist(out_dir)
 
@@ -1048,23 +1048,23 @@ class TestAtomicReplacement:
     def test_reassembling_a_subset_replaces_the_whole_repository(self, tmp_path: Path) -> None:
         """再組み立ては plan に無いモデルごと丸ごと置き換える（前回の残骸が生き残らない）。"""
         series = tmp_path / "series"
-        first = _build_series(series, model="anima", mark=b"-base")
-        second = _build_series(series, model="anima-wai", mark=b"-wai")
+        first = _build_series(series, model="anima-v1.0", mark=b"-base")
+        second = _build_series(series, model="anima-wai-v1.0", mark=b"-wai")
         out_dir = tmp_path / "models" / "anima-family"
         assemble_family(
-            [anima_plan(first, "anima"), anima_plan(second, "anima-wai")],
+            [anima_plan(first, "anima-v1.0"), anima_plan(second, "anima-wai-v1.0")],
             out_dir,
-            "anima",
+            "anima-v1.0",
         )
 
-        manifest = assemble_family([anima_plan(first, "anima")], out_dir, "anima")
+        manifest = assemble_family([anima_plan(first, "anima-v1.0")], out_dir, "anima-v1.0")
 
-        assert list(manifest["models"]) == ["anima"]
-        assert not (out_dir / "anima-wai").exists()
+        assert list(manifest["models"]) == ["anima-v1.0"]
+        assert not (out_dir / "anima-wai-v1.0").exists()
         # 1 モデルだけなら畳む相手が居ない = `shared/` も残らない（ADR 0041 §5）。
         assert not (out_dir / SHARED_DIRNAME).exists()
-        assert _present(out_dir) == sorted([*_in_subtree("anima"), MANIFEST_FILENAME])
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree("anima"))
+        assert _present(out_dir) == sorted([*_in_subtree("anima-v1.0"), MANIFEST_FILENAME])
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree("anima-v1.0"))
 
     def test_it_discards_a_working_directory_left_by_an_interrupted_run(
         self, tmp_path: Path
@@ -1073,7 +1073,9 @@ class TestAtomicReplacement:
         sources = _build_series(tmp_path / "series")
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
         leftover = out_dir.with_name(out_dir.name + STAGING_SUFFIX)
-        _write(leftover / "anima-wai" / "transformer" / "model.f16.safetensors", b"interrupted")
+        _write(
+            leftover / "anima-wai-v1.0" / "transformer" / "model.f16.safetensors", b"interrupted"
+        )
 
         _assemble_anima(sources, out_dir)
 

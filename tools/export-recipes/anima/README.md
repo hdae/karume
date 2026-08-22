@@ -50,25 +50,25 @@ uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn \
 uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn --verify transformer \
   --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors
 
-# the plain (no LoRA) shipping series — just drop --lora; the default --out already matches
-# what the base distribution reads (`anima-{f16,i8}-dyn`)
+# the plain (no LoRA) shipping series — just drop --lora. --out is spelled out because the model
+# name carries the upstream version (ADR 0077), and the series name is derived from the model name
 uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn \
-  --out ../../outputs/series/anima-f16-dyn
+  --out ../../outputs/series/anima-v1.0-f16-dyn
 uv run --group anima python -m anima.export --dtype i8 --dit-graph dyn \
-  --out ../../outputs/series/anima-i8-dyn
+  --out ../../outputs/series/anima-v1.0-i8-dyn
 
 # a community fine-tune shipped as a single ComfyUI-style file: rebuild it into a diffusers
 # layout first, then export from that directory. Such a checkpoint carries its own llm_adapter,
 # so the text_conditioner has to be exported per model (the base one would be the wrong weights).
 uv run --group anima python -m anima.single_file \
   --checkpoint ../../inputs/anima/waiANIMA_v10Base10.safetensors \
-  --out ../../outputs/anima-diffusers/anima-wai
-uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai \
-  --target text_conditioner --dtype f16 --out ../../outputs/series/anima-wai-f16
-uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai \
-  --dtype f16 --dit-graph dyn --out ../../outputs/series/anima-wai-f16-dyn
-uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai \
-  --dtype i8 --dit-graph dyn --out ../../outputs/series/anima-wai-i8-dyn
+  --out ../../outputs/anima-diffusers/anima-wai-v1.0
+uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai-v1.0 \
+  --target text_conditioner --dtype f16 --out ../../outputs/series/anima-wai-v1.0-f16
+uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai-v1.0 \
+  --dtype f16 --dit-graph dyn --out ../../outputs/series/anima-wai-v1.0-f16-dyn
+uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai-v1.0 \
+  --dtype i8 --dit-graph dyn --out ../../outputs/series/anima-wai-v1.0-i8-dyn
 ```
 
 - **`--verify` and `--target` cannot be combined in the same process.** The VAE patches replace
