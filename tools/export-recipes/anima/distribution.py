@@ -4,7 +4,7 @@
 `karume.dist` が持つ。ここが持つのは **Anima 固有の事実**だけ: どの系列ディレクトリから
 何を拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
 
-公開面は {@link PIPELINE} 1 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
+公開面は Pipeline 2 つ（{@link TURBO_PIPELINE} / {@link BASE_PIPELINE}）— リポの dist ドライバ
 （`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
 """
 
@@ -16,7 +16,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from anima.card import ATTRIBUTION_NOTICE, LORA_NAME, LORA_SHA256, LORA_SOURCE, render_model_card
+from anima.card import (
+    ATTRIBUTION_NOTICE,
+    LORA_NAME,
+    LORA_SHA256,
+    LORA_SOURCE,
+    render_base_card,
+    render_model_card,
+)
 from karume.dist import (
     Artifact,
     DistError,
@@ -30,14 +37,21 @@ from karume.dist import (
     sha256_file,
 )
 
-#: 既定のモデル名（= 単一モデルなら既定のリポ名でもある）。turbo LoRA を焼き込んだ配布物で
-#: あることを名前に出す。
-ANIMA_MODEL_NAME = "anima-turbo"
+#: turbo LoRA を焼き込んだ配布物のモデル名（= そのリポの既定モデル）。焼いてあることを
+#: 名前に出す。
+ANIMA_TURBO_MODEL_NAME = "anima-turbo"
+
+#: 素の base（LoRA を焼いていない）配布物のモデル名。多 step + CFG で使う席で、negative
+#: prompt が効くのはこちらだけ（turbo は CFG=1 運用なので uncond 側を計算しない）。
+ANIMA_BASE_MODEL_NAME = "anima"
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。
 ANIMA_PIPELINE = "anima/1"
 
 #: モデル名に依らない系列（base の text 経路 / VAE と、tokenizer を書く台本の出力）。
+#: MUST: `anima-f16` は **LoRA を焼かずに** 焼いた系列である（`lora_provenance.json` が
+#: 無いことがその記録）。turbo の text_conditioner 成分は実測で lora_B が全ゼロ = noop
+#: （`anima/pipeline_ref.py` の同 NOTE）なので、turbo 席もここを共有して差し支えない。
 ANIMA_BASE_SERIES = "anima-f16"
 ANIMA_TOKENIZER_SERIES = "anima-demo"
 
@@ -61,41 +75,75 @@ CALIB_SHIPPABLE_METHOD = "gptq"
 #: 出す。`Path(__file__)` 基準で引くのは、cwd にも系列の置き場にも依存しないため。
 LICENSE_SOURCE_PATH = Path(__file__).parent / "circlestone_license.txt"
 
-#: 配布リポ直下の `NOTICE.md`。§3(b)（Attribution Notice の掲示）+ §3(d)(i)（改変した旨を
-#: **Attribution Notice の中に**含める）+ §3(d)(iii)（公式製品と誤認させない）を 1 枚で満たす。
-#: 逐語ブロックは {@link ATTRIBUTION_NOTICE}（`anima/card.py` が正本）で、残りは Karume 側の
-#: 事実の記述。改変記載を独立節にせず Notice 節の内側へ置くのは §3(d)(i) の文言
-#: （"include in the Attribution Notice"）に厳格に合わせるため。
-NOTICE_MARKDOWN = (
-    "\n".join(
-        [
-            "# Notice",
-            "",
-            "## Attribution Notice",
-            "",
-            ATTRIBUTION_NOTICE,
-            "",
-            "As required by the license, this Attribution Notice also states that the",
-            "applicable CircleStone Model has been modified: this distribution is a Derivative",
-            "of the CircleStone Anima model, modified as follows:",
-            "",
-            f"- The official {LORA_NAME} ({LORA_SOURCE}) was baked into the weights at export.",
-            "- The weights were converted into the container format of the WebGPU inference"
-            " runtime Karume",
-            "  (a single safetensors file holding the weights plus an inference graph in"
-            " `__metadata__`).",
-            "- An int8-quantized series and an int4-quantized series of the transformer were added",
-            "  alongside the f16 one.",
-            "",
-            "## Not an official product",
-            "",
-            "This is not an official product of CircleStone Labs LLC, and it is not endorsed,",
-            "approved or validated by CircleStone Labs LLC.",
-            "",
-            "The full license text is distributed alongside this repository as LICENSE.md.",
-        ]
+#: どのリポの告知にも載る改変（コンテナ形式への変換）。
+#:
+#: MUST: 改変の列挙は**リポごと**に持つ（1 本を使い回さない）。turbo リポと base リポでは
+#: 焼き込みの有無も格納系列の数も違うので、共有した瞬間にどちらかの告知が事実と食い違う —
+#: 値としては妥当な散文なので、`verify_dist` も manifest 検査も素通りして配ってから露見する。
+CONTAINER_MODIFICATION = (
+    "- The weights were converted into the container format of the WebGPU inference"
+    " runtime Karume\n"
+    "  (a single safetensors file holding the weights plus an inference graph in"
+    " `__metadata__`)."
+)
+
+
+def notice_markdown(modifications: tuple[str, ...]) -> str:
+    """配布リポ直下の `NOTICE.md`。
+
+    §3(b)（Attribution Notice の掲示）+ §3(d)(i)（改変した旨を **Attribution Notice の中に**
+    含める）+ §3(d)(iii)（公式製品と誤認させない）を 1 枚で満たす。逐語ブロックは
+    {@link ATTRIBUTION_NOTICE}（`anima/card.py` が正本）で、残りは Karume 側の事実の記述。
+    改変記載を独立節にせず Notice 節の内側へ置くのは §3(d)(i) の文言（"include in the
+    Attribution Notice"）に厳格に合わせるため。
+    """
+    return (
+        "\n".join(
+            [
+                "# Notice",
+                "",
+                "## Attribution Notice",
+                "",
+                ATTRIBUTION_NOTICE,
+                "",
+                "As required by the license, this Attribution Notice also states that the",
+                "applicable CircleStone Model has been modified: this distribution is a Derivative",
+                "of the CircleStone Anima model, modified as follows:",
+                "",
+                *modifications,
+                "",
+                "## Not an official product",
+                "",
+                "This is not an official product of CircleStone Labs LLC, and it is not endorsed,",
+                "approved or validated by CircleStone Labs LLC.",
+                "",
+                "The full license text is distributed alongside this repository as LICENSE.md.",
+            ]
+        )
+        + "\n"
     )
-    + "\n"
+
+
+TURBO_NOTICE_MARKDOWN = notice_markdown(
+    (
+        f"- The official {LORA_NAME} ({LORA_SOURCE}) was baked into the weights at export.",
+        CONTAINER_MODIFICATION,
+        "- An int8-quantized series and an int4-quantized series of the transformer were added",
+        "  alongside the f16 one.",
+    )
+)
+
+#: base リポの告知。第三者 fine-tune の同梱は「どのモデルがそうか」を README へ委ねる形で
+#: 書く — モデルの並びは組み立ての引数で変わるのに、この文面は Pipeline に固定で載るため、
+#: 並びに依存する書き方をすると片方の組み立てで嘘になる。
+BASE_NOTICE_MARKDOWN = notice_markdown(
+    (
+        CONTAINER_MODIFICATION,
+        "- An int8-quantized series of the transformer was added alongside the f16 one.",
+        "- Where a model in this repository is a community fine-tune of the same CircleStone",
+        "  Anima base model rather than the base model itself, its origin, author and license",
+        "  terms are stated in README.md.",
+    )
 )
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
@@ -165,13 +213,40 @@ ANIMA_DEFAULT_QUANT = "w8a8-s16"
 #: `resolution` だけは移行元 CLI の既定（512）を採らない — あちらの 512 は「静的資産の最小」
 #: であって推奨値ではなく、配布形は S 形 1 本（ADR 0038 §4）で解像度に依存しない。配布の
 #: 推奨既定は ADR 0038 Examples のとおり 1024²。
-ANIMA_PIPELINE_CONFIG: Mapping[str, Any] = {
-    "scheduler": {"shift": 3, "numTrainTimesteps": 1000},
+ANIMA_SCHEDULER: Mapping[str, Any] = {"shift": 3, "numTrainTimesteps": 1000}
+
+#: 既定のネガティブプロンプト。turbo 席では**使われない**（CFG=1 なので uncond 側を 1 度も
+#: 計算しない）が、欄自体は据え置く — 利用者が guidance を上げた瞬間に効く値だから。
+ANIMA_NEGATIVE_PROMPT = "low quality, worst quality, blurry, bad anatomy, jpeg artifacts"
+
+#: 配布の推奨解像度（ADR 0038 Examples）。移行元 CLI の 512 は「静的資産の最小」であって
+#: 推奨値ではなく、配布形は S 形 1 本（ADR 0038 §4）で解像度に依存しない。
+ANIMA_RESOLUTION: Mapping[str, int] = {"width": 1024, "height": 1024}
+
+ANIMA_TURBO_PIPELINE_CONFIG: Mapping[str, Any] = {
+    "scheduler": ANIMA_SCHEDULER,
     "defaults": {
         "steps": 8,
         "guidanceScale": 1,
-        "resolution": {"width": 1024, "height": 1024},
-        "negativePrompt": "low quality, worst quality, blurry, bad anatomy, jpeg artifacts",
+        "resolution": ANIMA_RESOLUTION,
+        "negativePrompt": ANIMA_NEGATIVE_PROMPT,
+    },
+}
+
+#: 素の base 系の既定。turbo と違い **CFG を使う**（= negative prompt が効く）ので、1 step が
+#: forward 2 本になり、step 数も蒸留前の相場へ戻る。
+#:
+#: step 数は 20〜32 を 3 プロンプト × 4 段で焼いて視認裁定した結果の **20**（2026-08-22）。
+#: 既定は「品質に問題の無い範囲で最速」を採る方針で、20 と 32 の差は題材によらず小さかった
+#: （step 数を変えると sigma 列ごと変わるので**同じ絵が精細になるのではなく別の絵になる** —
+#: 「どこから破綻が減って安定するか」で見る）。上げたい利用者は `steps` を渡せばよい。
+ANIMA_BASE_PIPELINE_CONFIG: Mapping[str, Any] = {
+    "scheduler": ANIMA_SCHEDULER,
+    "defaults": {
+        "steps": 20,
+        "guidanceScale": 4,
+        "resolution": ANIMA_RESOLUTION,
+        "negativePrompt": ANIMA_NEGATIVE_PROMPT,
     },
 }
 
@@ -226,6 +301,63 @@ ANIMA_ASSETS: Mapping[str, str] = {"tokenizer": "tokenizer", "tokenizer_2": "tok
 
 
 @dataclass(frozen=True)
+class AnimaModel:
+    """モデル 1 つぶんの Anima 固有の事実（系列の引き方・席の範囲・既定値の違い）。
+
+    MUST: **LoRA の有無を bool ではなく sha256 で持つ**。「焼いていない」と「焼いたが記録が
+    無い」は資産からは区別できないので、期待値を持たない側（`None`）は**記録が無いこと**を
+    積極的に検査する（{@link assert_lora_provenance}）。片方向の検査だけだと、turbo の系列を
+    素モデルの席へ挿し込む取り違えが素通りする。
+    """
+
+    #: 焼き込んだ LoRA の sha256。`None` = 素（焼いていない）。
+    lora_sha256: str | None
+    #: transformer の格納 dtype ラベル。ここに無い格納形の系列は**要求も宣言もしない**
+    #: （i4 席は校正条件が turbo 前提なので base 系にはまだ載せない — 波 J-4a の続き）。
+    storages: tuple[str, ...]
+    #: text_conditioner を自前で持つか。`False` = 素の共有系列（{@link ANIMA_BASE_SERIES}）。
+    #: 第三者 fine-tune は DiT だけでなく llm_adapter（= text_conditioner）も焼き直している
+    #: ので、共有すると**別のモデルのテキスト条件付け**で走る（絵だけが静かにずれる）。
+    own_text_conditioner: bool
+    #: manifest の `pipelineConfig`（step / guidance がモデルごとに違う）。
+    pipeline_config: Mapping[str, Any]
+
+
+#: モデル名 → 事実。リポの分かれ目でもある（{@link TURBO_MODELS} / {@link BASE_MODELS}）。
+ANIMA_MODELS: Mapping[str, AnimaModel] = {
+    ANIMA_TURBO_MODEL_NAME: AnimaModel(
+        lora_sha256=LORA_SHA256,
+        storages=("f16", "i8", "i4"),
+        own_text_conditioner=False,
+        pipeline_config=ANIMA_TURBO_PIPELINE_CONFIG,
+    ),
+    ANIMA_BASE_MODEL_NAME: AnimaModel(
+        lora_sha256=None,
+        storages=("f16", "i8"),
+        own_text_conditioner=False,
+        pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
+    ),
+    "anima-wai": AnimaModel(
+        lora_sha256=None,
+        storages=("f16", "i8"),
+        own_text_conditioner=True,
+        pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
+    ),
+    "anima-copycat": AnimaModel(
+        lora_sha256=None,
+        storages=("f16", "i8"),
+        own_text_conditioner=True,
+        pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
+    ),
+}
+
+#: リポごとの受理集合。**Pipeline が違えば直下の法的テキスト（NOTICE）も違う**ので、
+#: 取り違えて組むと「改変告知が中身と食い違うリポ」が黙って出来上がる — 計画段で落とす。
+TURBO_MODELS: tuple[str, ...] = (ANIMA_TURBO_MODEL_NAME,)
+BASE_MODELS: tuple[str, ...] = (ANIMA_BASE_MODEL_NAME, "anima-wai", "anima-copycat")
+
+
+@dataclass(frozen=True)
 class AnimaSources:
     """組み立ての入力となる系列ディレクトリ群。
 
@@ -233,26 +365,38 @@ class AnimaSources:
     （ADR 0019）。transformer だけが f16 / i8 / i4 の 3 系列に分かれる。
     """
 
-    transformer_f16: Path
-    transformer_i8: Path
-    transformer_i4: Path
+    #: 格納 dtype ラベル → transformer 系列（{@link AnimaModel.storages} の順）。
+    transformer: Mapping[str, Path]
     base: Path
+    #: text_conditioner を持つ系列（素は {@link base} と同じ）。
+    text_conditioner: Path
     tokenizers: Path
 
 
-def anima_sources(series_dir: Path, model: str = ANIMA_MODEL_NAME) -> AnimaSources:
-    """系列の親ディレクトリ（`outputs/series/`）から Anima の 5 系列を引く。
+def anima_sources(series_dir: Path, model: str = ANIMA_BASE_MODEL_NAME) -> AnimaSources:
+    """系列の親ディレクトリ（`outputs/series/`）から 1 モデルぶんの系列を引く。
 
-    モデル名は transformer の 3 系列にだけ掛かる — base（text 経路 / VAE）と tokenizer は
-    素のアーキテクチャ側の出力で、turbo かどうかに依らない。
+    モデル名は transformer の系列と、自前の text_conditioner を持つモデルの静的系列にだけ
+    掛かる — text_encoder / VAE / tokenizer は上流の fine-tune が触らない部分なので、
+    どのモデルでも共有系列 1 本から引く。
     """
+    spec = anima_model(model)
     return AnimaSources(
-        transformer_f16=series_dir / f"{model}-f16-dyn",
-        transformer_i8=series_dir / f"{model}-i8-dyn",
-        transformer_i4=series_dir / f"{model}-i4-dyn",
+        transformer={storage: series_dir / f"{model}-{storage}-dyn" for storage in spec.storages},
         base=series_dir / ANIMA_BASE_SERIES,
+        text_conditioner=series_dir
+        / (f"{model}-f16" if spec.own_text_conditioner else ANIMA_BASE_SERIES),
         tokenizers=series_dir / ANIMA_TOKENIZER_SERIES / "text",
     )
+
+
+def anima_model(model: str) -> AnimaModel:
+    """モデル名から事実を引く（知らない名前は選択肢を並べて落とす）。"""
+    spec = ANIMA_MODELS.get(model)
+    if spec is None:
+        choices = ", ".join(ANIMA_MODELS)
+        raise DistError(f"知らない Anima のモデル名: {model!r}（選択肢: {choices}）")
+    return spec
 
 
 def transformer_series(sources: AnimaSources) -> tuple[Path, ...]:
@@ -262,7 +406,7 @@ def transformer_series(sources: AnimaSources) -> tuple[Path, ...]:
     2 箇所に持つと格納席が増えた日に片方だけ更新される — 網から漏れた系列は検査を素通りし、
     どちらの綻びも実行時には沈黙する（幾何違いは絵だけ壊れ、帰属違いは README だけが嘘になる）。
     """
-    return (sources.transformer_f16, sources.transformer_i8, sources.transformer_i4)
+    return tuple(sources.transformer.values())
 
 
 def shared_rope_base(sources: AnimaSources) -> Path:
@@ -288,17 +432,29 @@ def shared_rope_base(sources: AnimaSources) -> Path:
     return candidates[0]
 
 
-def assert_lora_provenance(sources: AnimaSources) -> None:
-    """transformer 系列が記録した LoRA の sha256 が、カードの宣言と一致することを確かめる。
+def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
+    """transformer 系列が記録した LoRA の sha256 が、モデルの宣言と一致することを確かめる。
 
     MUST: カードの帰属節（`anima/card.py` の `LORA_SHA256`）は HF に公開される事実なのに、
     融合後の重みからは焼いた LoRA を復元できない。突き合わせが無いと、LoRA を差し替えて
     再エクスポートしても古い / 誤った sha256 がそのまま印字される — 値は 64 桁 hex として
     形式が妥当なので `verify_dist` の構造検査も通り、**沈黙する**。「別々の台本が持つ同じ
     事実は組み立て時に必ず突き合わせる」（rope_base のバイト同一検査と同じ規律）。
+
+    MUST: `expected is None`（素のモデル）では**記録が無いことを検査する**。融合済みの重みと
+    素の重みは資産の形が 1 バイトも変わらないので、turbo の系列を素モデルの席へ挿し込む
+    取り違えは他のどの検査にも掛からない。書き手（`anima/export.py`）は LoRA を焼かなかった
+    ターゲットの記録を消す（全域関数）ので、**記録の不在が「焼いていない」の証跡**になる。
     """
     for series in transformer_series(sources):
         path = series / "transformer" / LORA_PROVENANCE_FILE
+        if expected is None:
+            if path.is_file():
+                raise DistError(
+                    f"LoRA を焼いていないモデルの席に、焼いた記録のある系列が来ている: {path}"
+                    "（`--lora` を付けずに再エクスポートすると記録は消える）"
+                )
+            continue
         if not path.is_file():
             raise DistError(
                 f"焼き込んだ LoRA の記録が無い: {path}"
@@ -309,10 +465,10 @@ def assert_lora_provenance(sources: AnimaSources) -> None:
         except ValueError as cause:
             raise DistError(f"LoRA の記録を解析できない: {path} — {cause}") from cause
         digest = record.get("sha256") if isinstance(record, dict) else None
-        if digest != LORA_SHA256:
+        if digest != expected:
             raise DistError(
                 f"焼き込んだ LoRA がカードの宣言と違う: {path} は {digest!r}、"
-                f"anima/card.py は {LORA_SHA256!r} — どちらが正かはここでは決められない"
+                f"anima/card.py は {expected!r} — どちらが正かはここでは決められない"
             )
 
 
@@ -326,7 +482,7 @@ def assert_calib_provenance(sources: AnimaSources) -> None:
     （{@link assert_lora_provenance}）と同じ「別々の台本が持つ同じ事実は組み立て時に必ず
     突き合わせる」規律をここにも敷く。
     """
-    path = sources.transformer_i4 / "transformer" / CALIB_PROVENANCE_FILE
+    path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
     if not path.is_file():
         raise DistError(
             f"i4 系列の校正条件の記録が無い: {path}"
@@ -349,68 +505,125 @@ def anima_placements(sources: AnimaSources) -> dict[str, Path]:
 
     この表に無いものは出力へ入らない（`io.*.safetensors` を落とす仕掛けはこれで足りる）。
     """
-    return {
+    placements = {
         "text_encoder": sources.base / "text_encoder" / "model.safetensors",
-        "text_conditioner": sources.base / "text_conditioner" / "model.safetensors",
-        "transformer_f16": sources.transformer_f16 / "transformer" / "model.safetensors",
-        "transformer_i8": sources.transformer_i8 / "transformer" / "model.safetensors",
-        "transformer_i4": sources.transformer_i4 / "transformer" / "model.safetensors",
+        "text_conditioner": sources.text_conditioner / "text_conditioner" / "model.safetensors",
         "rope_base": shared_rope_base(sources),
         "vae_decoder": sources.base / "vae_decoder" / "model.safetensors",
         "tokenizer": sources.tokenizers / "qwen2-tokenizer.json",
         "tokenizer_2": sources.tokenizers / "t5-tokenizer.json",
     }
+    for storage, series in sources.transformer.items():
+        placements[f"transformer_{storage}"] = series / "transformer" / "model.safetensors"
+    return placements
 
 
-def anima_plan(sources: AnimaSources, model: str = ANIMA_MODEL_NAME) -> ModelPlan:
+def anima_weights(spec: AnimaModel) -> Mapping[str, Mapping[str, WeightFiles]]:
+    """モデルが持つ格納形だけへ絞った weights 宣言（席の無い dtype ラベルは載せない）。"""
+    return {
+        role: (
+            {label: files for label, files in labels.items() if label in spec.storages}
+            if role == "transformer"
+            else labels
+        )
+        for role, labels in ANIMA_WEIGHTS.items()
+    }
+
+
+def anima_quants(spec: AnimaModel) -> Mapping[str, Any]:
+    """モデルが持つ格納形で成立する quant 席だけへ絞る。
+
+    MUST: 席の取捨は**宣言した格納形から導く**（席名の直書きリストを別に持たない）。2 箇所に
+    分けて持つと、格納形を増やした日に席だけが増えない / 減らした日に席だけが残る。
+    """
+    return {
+        name: entry
+        for name, entry in ANIMA_QUANTS.items()
+        if entry["weights"]["transformer"] in spec.storages
+    }
+
+
+def anima_plan(sources: AnimaSources, model: str = ANIMA_BASE_MODEL_NAME) -> ModelPlan:
     """Anima 1 モデルぶんの計画を組む（検査はここで全部済ませる — 1 バイトも書かない）。"""
     assert_model_name(model)
-    assert_lora_provenance(sources)
-    assert_calib_provenance(sources)
+    spec = anima_model(model)
+    assert_lora_provenance(sources, spec.lora_sha256)
+    if "i4" in spec.storages:
+        assert_calib_provenance(sources)
     placements = anima_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, STORAGE_REQUIREMENTS)
         assert_storage_absent(role, source, ANIMA_STORAGE_FORBIDDEN)
+    weights = anima_weights(spec)
     return ModelPlan(
         name=model,
         pipeline=ANIMA_PIPELINE,
         artifacts={
             role: Artifact(OUTPUT_PATHS[role], source=source) for role, source in placements.items()
         },
-        weights=ANIMA_WEIGHTS,
+        weights=weights,
         assets=ANIMA_ASSETS,
-        quants=complete_quant_weights(ANIMA_WEIGHTS, ANIMA_QUANTS),
+        quants=complete_quant_weights(weights, anima_quants(spec)),
         default_quant=ANIMA_DEFAULT_QUANT,
-        pipeline_config=ANIMA_PIPELINE_CONFIG,
+        pipeline_config=spec.pipeline_config,
     )
 
 
-def anima_dist_plan(series_dir: Path, model: str) -> ModelPlan:
-    """`--series` の親から Anima 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+def anima_dist_plan(series_dir: Path, model: str, allowed: tuple[str, ...]) -> ModelPlan:
+    """`--series` の親から Anima 1 モデルの計画を組む（CLI のディスパッチ先）。
+
+    MUST: `allowed` は**その Pipeline のリポに入ってよいモデル**。Pipeline が違えばリポ直下の
+    NOTICE（改変告知）も違うので、取り違えて組むと「告知が中身と食い違うリポ」が黙って
+    出来上がる — manifest も verify_dist も構造としては正しいままなので、配ってからでないと
+    誰も気づけない。
+    """
+    if model not in allowed:
+        choices = ", ".join(allowed)
+        raise DistError(
+            f"モデル {model!r} はこの pipeline のリポに入らない（入るのは: {choices}）— "
+            "リポ直下の改変告知が中身と食い違うので組み立てを止める"
+        )
     return anima_plan(anima_sources(series_dir, model), model)
 
 
-def root_files() -> dict[str, str]:
+def root_files(notice: str) -> dict[str, str]:
     """配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
 
     ライセンス原文は recipe に置いた現物（{@link LICENSE_SOURCE_PATH}）を**逐語で**読む —
-    ここで整形や差し替えをすると §3(a) の「このライセンスのコピー」ではなくなる。
+    ここで整形や差し替えをすると §3(a) の「このライセンスのコピー」ではなくなる。改変告知
+    （`NOTICE.md`）だけがリポごとに違うので、そこだけ引数で受ける。
     """
     return {
         "LICENSE.md": LICENSE_SOURCE_PATH.read_text(encoding="utf-8"),
-        "NOTICE.md": NOTICE_MARKDOWN,
+        "NOTICE.md": notice,
     }
 
 
-#: `--pipeline anima` の 1 行（ドライバが core の PIPELINES へ合成する）。
-PIPELINE = Pipeline(
-    default_model=ANIMA_MODEL_NAME,
-    # `karume-` prefix はリポ名裁定（2026-08-09）— HF org の代わりの名前空間。
-    repo_name=lambda model: f"karume-{model}",
-    plan=anima_dist_plan,
+#: `karume-` prefix はリポ名裁定（2026-08-09）— HF org の代わりの名前空間。
+def _repo_name(model: str) -> str:
+    return f"karume-{model}"
+
+
+#: `--pipeline anima-turbo` の 1 行（既存の公開リポ — 蒸留済み・8 step / CFG=1）。
+TURBO_PIPELINE = Pipeline(
+    default_model=ANIMA_TURBO_MODEL_NAME,
+    repo_name=_repo_name,
+    plan=lambda series_dir, model: anima_dist_plan(series_dir, model, TURBO_MODELS),
     # 帰属は 1 通りだけ（LoRA を焼いた base 1 本）— 選択肢が無いので省略で通る。
-    card_profiles={"anima": render_model_card},
+    card_profiles={"anima-turbo": render_model_card},
     # 上流ライセンスの再配布条件（§3）は配布リポ 1 つに掛かるので、読みも組み立ての回数に
     # よらず**ここで 1 回**。
-    root_files=root_files(),
+    root_files=root_files(TURBO_NOTICE_MARKDOWN),
+)
+
+#: `--pipeline anima` の 1 行（素の base + 第三者 fine-tune — 多 step + CFG）。
+#:
+#: MUST: turbo と**別の Pipeline**にする。`root_files` は Pipeline に固定で載る 1 組なので、
+#: 1 つに畳むと改変告知が turbo 側か base 側のどちらかで嘘になる（§3(d)(i) の要件を落とす）。
+BASE_PIPELINE = Pipeline(
+    default_model=ANIMA_BASE_MODEL_NAME,
+    repo_name=_repo_name,
+    plan=lambda series_dir, model: anima_dist_plan(series_dir, model, BASE_MODELS),
+    card_profiles={"anima": render_base_card},
+    root_files=root_files(BASE_NOTICE_MARKDOWN),
 )

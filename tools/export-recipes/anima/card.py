@@ -12,6 +12,7 @@ MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残ら
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from karume.modelcard import (
@@ -45,6 +46,66 @@ ANIMA_METADATA = CardMetadata(
 
 ANIMA_TITLE = "Anima Turbo — Karume"
 
+ANIMA_BASE_TITLE = "Anima — Karume"
+
+
+@dataclass(frozen=True)
+class UpstreamModel:
+    """このリポの 1 モデルの出所（**manifest には現れない事実**なのでここが持つ）。
+
+    第三者 fine-tune は同じ base の Derivative なので上流ライセンスはそのまま流れてくるが、
+    配布ページ側の許諾欄は作者ごとに違う。特に `allowDifferentLicense` が false の出所は
+    「同じ条件で配ること」を要求するので、**出所ごとに逐語で載せる**。
+    """
+
+    title: str
+    author: str
+    source: str
+    #: 変換元のファイル名（`None` = 上流の diffusers リポそのもの）。
+    file: str | None
+    #: 出所ページの許諾欄（実地確認 — 取得日は下の {@link PERMISSIONS_RETRIEVED}）。
+    permissions: tuple[tuple[str, str], ...]
+
+
+#: 許諾欄を実地確認した日（カードに「as of」で出す — 後から変わりうる事実だから）。
+PERMISSIONS_RETRIEVED = "2026-08-22"
+
+#: モデル名 → 出所。`anima` は base そのものなので civitai の許諾欄を持たない
+#: （掛かるのは CircleStone のライセンス 1 本だけ）。
+UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
+    "anima": UpstreamModel(
+        title="Anima Base v1.0",
+        author="circlestone_labs",
+        source="https://huggingface.co/circlestone-labs/Anima-Base-v1.0-Diffusers",
+        file=None,
+        permissions=(),
+    ),
+    "anima-wai": UpstreamModel(
+        title="WAI-ANIMA v1.0 (base 1.0)",
+        author="WAI0731",
+        source="https://civitai.com/models/2544636/wai-anima",
+        file="waiANIMA_v10Base10.safetensors",
+        permissions=(
+            ("allowNoCredit", "true"),
+            ("allowCommercialUse", "Image / RentCivit"),
+            ("allowDerivatives", "true"),
+            ("allowDifferentLicense", "true"),
+        ),
+    ),
+    "anima-copycat": UpstreamModel(
+        title="copycat-anima 20260610",
+        author="calculater",
+        source="https://civitai.com/models/2377376/copycat-anima",
+        file="copycatAnima_20260610.safetensors",
+        permissions=(
+            ("allowNoCredit", "true"),
+            ("allowCommercialUse", "Image / RentCivit"),
+            ("allowDerivatives", "true"),
+            ("allowDifferentLicense", "false"),
+        ),
+    ),
+}
+
 #: 上流ライセンス §3(b) が**逐語での掲示**を求める Attribution Notice（1 字も変えない）。
 #: 配布リポ直下の `NOTICE.md`（`anima/distribution.py`）とこのカードの両方がここを引く —
 #: 同じ法的文言を 2 箇所で独立に持つと、片方だけが条件を満たさない形へ静かに割れる。
@@ -63,6 +124,10 @@ ATTRIBUTION_NOTICE = (
 RESOLUTION_NOTE = (
     "Resolution — non-square is fine; each side on a 16 px grid, between 512 and 2048 px:"
 )
+
+#: CFG の代償を 1 行で言ったもの（**両方のカードで同じ文面** — 定数にしないと、片方の行を
+#: 折り返した日にもう片方のカード本文まで動く）。
+CFG_NOTE = "  // Classifier-free guidance runs a second (uncond) branch — twice the work per step."
 
 #: 焼き込んだ LoRA（manifest には現れない — 重みの中に畳まれているため）。
 LORA_NAME = "Anima Turbo LoRA v0.2"
@@ -159,6 +224,28 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     quant_names = " / ".join(sorted(model["quants"]))
     defaults = model["pipelineConfig"]["defaults"]
     resolution = defaults["resolution"]
+    guidance = defaults["guidanceScale"]
+    steps_note = (
+        "the baked-in LoRA is distilled for few-step sampling"
+        if guidance == 1
+        else "more steps trade time for detail"
+    )
+    cfg_lines = (
+        [
+            CFG_NOTE,
+            "  // It is skipped at guidanceScale 1, where a negativePrompt is refused rather than",
+            "  // silently ignored, so the two lines below only make sense together:",
+            "  // guidanceScale: 5,",
+            f'  // negativePrompt: "{defaults["negativePrompt"]}",',
+        ]
+        if guidance == 1
+        else [
+            CFG_NOTE,
+            "  // It is on by default here, which is what makes the negative prompt take effect:",
+            f"  // guidanceScale: {guidance}, // default",
+            f'  // negativePrompt: "{defaults["negativePrompt"]}", // default',
+        ]
+    )
     return [
         "## Usage",
         "",
@@ -173,17 +260,12 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "const image = await pipeline.generate({",
         '  prompt: "1girl, solo, long hair, blue eyes, school uniform, masterpiece",',
         "",
-        f"  // steps: {defaults['steps']}, // default — the baked-in LoRA is distilled for"
-        " few-step sampling",
+        f"  // steps: {defaults['steps']}, // default — {steps_note}",
         f"  // {RESOLUTION_NOTE}",
         f"  // resolution: {{ width: {resolution['width']},"
         f" height: {resolution['height']} }}, // default",
         "",
-        "  // Classifier-free guidance runs a second (uncond) branch — twice the work per step.",
-        "  // It is skipped at guidanceScale 1, where a negativePrompt is refused rather than",
-        "  // silently ignored, so the two lines below only make sense together:",
-        "  // guidanceScale: 5,",
-        f'  // negativePrompt: "{defaults["negativePrompt"]}",',
+        *cfg_lines,
         "",
         "  seed: 42, // same seed + same request → same image",
         "});",
@@ -221,8 +303,111 @@ def _defaults(model: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _base_overview(manifest: Mapping[str, Any]) -> list[str]:
+    defaults = default_model(manifest)["pipelineConfig"]["defaults"]
+    base_model = ANIMA_METADATA.base_model[0]
+    return [
+        "## What is this",
+        "",
+        f"[{base_model}](https://huggingface.co/{base_model}) — and community fine-tunes of it —",
+        "converted into the WebGPU inference runtime **Karume**'s container format (a single",
+        "safetensors file = weights + a graph JSON embedded in `__metadata__`). Runs as-is in the",
+        "browser and in Deno.",
+        "",
+        "- **No Turbo LoRA is baked in.** Sampling is the ordinary many-step kind"
+        f" (**{defaults['steps']} steps /"
+        f" guidance {defaults['guidanceScale']}** by default), which is what makes the",
+        "  **negative prompt take effect** — at guidance 1 the second branch is never computed."
+        " For the",
+        "  few-step distilled build see"
+        " [hdae/karume-anima-turbo](https://huggingface.co/hdae/karume-anima-turbo).",
+        "- Not readable by diffusers (it's a different container with an embedded graph); the"
+        f" reader is a pipeline that implements `{SUPPORTED_PIPELINE}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
+        f" is `karume.json` (`{manifest['format']}`).",
+    ]
+
+
+def _origins(manifest: Mapping[str, Any]) -> list[str]:
+    """モデルごとの出所（**このリポに入っているモデルだけ**を manifest から引いて並べる）。
+
+    MUST: 並びは manifest 由来にする — 出所の表を組み立ての引数と独立に持つと、モデルを
+    1 つ落として組んだ日に「入っていないモデルの帰属」が載ったカードが出る。
+    """
+    lines = [
+        "## Models and their origins",
+        "",
+        "Each model below is either the CircleStone Anima base model itself or a community",
+        "fine-tune of it. The text encoder, VAE and tokenizers are shared across them.",
+    ]
+    for name in sorted(manifest["models"]):
+        upstream = UPSTREAM_MODELS.get(name)
+        if upstream is None:
+            raise ValueError(f"モデル {name!r} の出所が card.py に無い — 帰属を書けない")
+        lines += [
+            "",
+            f"### `{name}` — {upstream.title}",
+            "",
+            f"- **Author**: {upstream.author}",
+            f"- **Source**: {upstream.source}",
+        ]
+        if upstream.file is not None:
+            lines.append(f"- **Converted from**: `{upstream.file}`")
+        if upstream.permissions:
+            lines += [
+                "",
+                f"Permissions listed on the source page (as of {PERMISSIONS_RETRIEVED}):",
+                "",
+                *(f"- `{key}`: {value}" for key, value in upstream.permissions),
+            ]
+    return lines
+
+
+def _base_license(manifest: Mapping[str, Any]) -> list[str]:
+    """ライセンス節 — 上流の再配布条件と、第三者 fine-tune 側の許諾の**重ね合わせ**。
+
+    Notice の本文はカードにも逐語で出す（turbo 側と同じ理由 — §3(b) の掲示要件）。
+    """
+    fine_tunes = sorted(name for name in manifest["models"] if UPSTREAM_MODELS[name].permissions)
+    same_license = sorted(
+        name
+        for name in fine_tunes
+        if dict(UPSTREAM_MODELS[name].permissions).get("allowDifferentLicense") == "false"
+    )
+    lines = [
+        "## License",
+        "",
+        "Every model here derives from the CircleStone Anima base model and stays under the",
+        "CircleStone Non-Commercial License (non-commercial use only). This repository ships",
+        "`LICENSE.md` (the full license text) and `NOTICE.md` (this attribution plus the list of",
+        "modifications).",
+        "",
+        ATTRIBUTION_NOTICE,
+        "",
+    ]
+    if fine_tunes:
+        lines += [
+            "- The community fine-tunes are redistributed under the permissions their source"
+            " pages state",
+            "  (listed per model above); those permissions do not widen the base model's license.",
+        ]
+    if same_license:
+        listed = ", ".join(f"`{name}`" for name in same_license)
+        lines += [
+            f"- {listed}: the source page sets `allowDifferentLicense` to false, so this"
+            " redistribution",
+            "  keeps the same terms — do not relicense it.",
+        ]
+    lines += [
+        "- This is not an official product of CircleStone Labs LLC, and it is not endorsed,"
+        " approved or",
+        "  validated by CircleStone Labs LLC.",
+    ]
+    return lines
+
+
 def render_model_card(manifest: Mapping[str, Any], repo: str) -> str:
-    """Anima 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+    """Anima Turbo 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (
@@ -233,6 +418,27 @@ def render_model_card(manifest: Mapping[str, Any], repo: str) -> str:
             _merged_lora(),
             [""],
             _license(),
+            [""],
+            models(manifest),
+            [""],
+            _usage(manifest, repo),
+            *model_sections(manifest, (files, quants, _defaults)),
+        )
+    )
+
+
+def render_base_card(manifest: Mapping[str, Any], repo: str) -> str:
+    """素の base 系（LoRA 無し + 第三者 fine-tune）配布形の `README.md` 本文。"""
+    require_pipeline(manifest, SUPPORTED_PIPELINE)
+    return render(
+        (
+            frontmatter(ANIMA_METADATA),
+            ["", f"# {ANIMA_BASE_TITLE}", ""],
+            _base_overview(manifest),
+            [""],
+            _origins(manifest),
+            [""],
+            _base_license(manifest),
             [""],
             models(manifest),
             [""],

@@ -4,7 +4,8 @@
 あって全量ではない（ADR 0065 決定 2 — モデル別 recipe は wheel の外）。family の移行が全部
 終わった今、core の表は**空**なので、受理集合の正本はこの辞書だけになった。
 
-    uv run python dist.py                                  # 既定 = anima（export-recipes で）
+    uv run python dist.py                                  # 既定 = anima（素の base 系）
+    uv run python dist.py --pipeline anima-turbo           # 蒸留済み（LoRA 焼き込み）の別リポ
     uv run python dist.py --pipeline irodori
     uv run python dist.py --pipeline sbv2 --card-profile fn
     uv run python dist.py --pipeline sbv2 --card-profile jvnv \\
@@ -36,7 +37,8 @@ from vowel_detector import distribution as vowel_detector_distribution
 
 #: 受理集合の全量。並びは `--help` の並びでもあるので、既定を先頭に置く。
 PIPELINES: Mapping[str, Pipeline] = {
-    "anima": anima_distribution.PIPELINE,
+    "anima": anima_distribution.BASE_PIPELINE,
+    "anima-turbo": anima_distribution.TURBO_PIPELINE,
     "sbv2": sbv2_distribution.PIPELINE,
     "irodori": irodori_distribution.PIPELINE,
     "siglip2": siglip2_distribution.PIPELINE,

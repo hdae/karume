@@ -22,6 +22,8 @@ from anima.card import (
     LORA_NAME,
     LORA_SOURCE,
     SUPPORTED_PIPELINE,
+    UPSTREAM_MODELS,
+    render_base_card,
     render_model_card,
 )
 
@@ -120,6 +122,85 @@ def _manifest() -> dict[str, Any]:
 @pytest.fixture
 def card() -> str:
     return render_model_card(_manifest(), REPO)
+
+
+def _base_manifest() -> dict[str, Any]:
+    """素の base 系リポの形（base 本体 + 第三者 fine-tune）— モデル名は出所表に在るものだけ。"""
+    manifest = _manifest()
+    models = manifest["models"]
+    models["anima"] = models.pop("turbo")
+    models["anima-copycat"] = models.pop("lite")
+    manifest["defaultModel"] = "anima"
+    models["anima"]["pipelineConfig"]["defaults"]["guidanceScale"] = 4
+    models["anima"]["pipelineConfig"]["defaults"]["steps"] = 28
+    return manifest
+
+
+@pytest.fixture
+def base_card() -> str:
+    return render_base_card(_base_manifest(), REPO)
+
+
+class TestBaseCard:
+    """素の base 系カード — turbo 前提の記述が 1 つも残っていないこと + 出所の帰属。"""
+
+    def test_it_never_mentions_the_baked_lora(self, base_card: str) -> None:
+        """LoRA を焼いていない配布物で「Baked-in LoRA」を名乗ると帰属そのものが嘘になる。"""
+        assert LORA_NAME not in base_card
+        assert LORA_SOURCE not in base_card
+        assert "Baked-in LoRA" not in base_card
+
+    def test_it_shows_the_attribution_notice_verbatim(self, base_card: str) -> None:
+        """§3(b) の掲示要件は turbo 側と同じく逐語で満たす。"""
+        assert ATTRIBUTION_NOTICE in base_card
+
+    def test_it_lists_the_origin_of_every_model_in_the_manifest(self, base_card: str) -> None:
+        for name in ("anima", "anima-copycat"):
+            upstream = UPSTREAM_MODELS[name]
+            assert f"### `{name}` — {upstream.title}" in base_card
+            assert upstream.author in base_card
+            assert upstream.source in base_card
+
+    def test_it_never_lists_a_model_the_manifest_does_not_carry(self) -> None:
+        """帰属を組み立ての引数から独立に持つと、入っていないモデルの出所が載る。"""
+        manifest = _base_manifest()
+        del manifest["models"]["anima-copycat"]
+        card = render_base_card(manifest, REPO)
+
+        assert UPSTREAM_MODELS["anima-copycat"].source not in card
+        assert UPSTREAM_MODELS["anima"].source in card
+
+    def test_it_warns_when_a_source_forbids_relicensing(self, base_card: str) -> None:
+        """`allowDifferentLicense` が false の出所は「同じ条件で配る」ことを要求する。"""
+        assert "allowDifferentLicense`: false" in base_card
+        assert "do not relicense it" in base_card
+
+    def test_it_stays_silent_about_relicensing_when_no_source_forbids_it(self) -> None:
+        """条件の無いリポにだけ効く注意書きが常時出ると、読み手が条件を取り違える。"""
+        manifest = _base_manifest()
+        del manifest["models"]["anima-copycat"]
+
+        assert "do not relicense it" not in render_base_card(manifest, REPO)
+
+    def test_it_refuses_a_model_whose_origin_is_unknown(self) -> None:
+        """出所表に無いモデルは**帰属を書けない** — 黙って省かず落とす。"""
+        manifest = _base_manifest()
+        manifest["models"]["anima-nope"] = manifest["models"]["anima"]
+
+        with pytest.raises(ValueError, match=r"出所が card\.py に無い"):
+            render_base_card(manifest, REPO)
+
+    def test_its_usage_snippet_keeps_the_cfg_knobs_as_defaults(self, base_card: str) -> None:
+        """CFG が既定で入っている配布物では、guidance / negative を「省略可の既定」として出す。"""
+        assert "// guidanceScale: 4, // default" in base_card
+        assert "makes the negative prompt take effect" in base_card
+
+    def test_it_refuses_another_pipelines_manifest(self) -> None:
+        manifest = _base_manifest()
+        manifest["models"]["anima"]["pipeline"] = "sbv2/1"
+
+        with pytest.raises(ValueError):
+            render_base_card(manifest, REPO)
 
 
 class TestFrontmatter:

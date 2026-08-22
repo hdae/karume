@@ -15,7 +15,8 @@ import pytest
 
 import dist
 from _shared.paths import DIST_ROOT, SERIES_ROOT
-from anima.distribution import PIPELINE as ANIMA_PIPELINE
+from anima.distribution import BASE_PIPELINE as ANIMA_BASE_PIPELINE
+from anima.distribution import TURBO_PIPELINE as ANIMA_TURBO_PIPELINE
 from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
 from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
@@ -28,7 +29,8 @@ from vowel_detector.distribution import PIPELINE as VOWEL_DETECTOR_PIPELINE
 #: 配布 recipe を持つ family の全量（名前 → その family が公開する `PIPELINE`）。
 #: **ここが受理集合の期待値**で、`dist.PIPELINES` の載せ忘れも余剰も 1 つの表で検出する。
 RECIPE_PIPELINES = {
-    "anima": ANIMA_PIPELINE,
+    "anima": ANIMA_BASE_PIPELINE,
+    "anima-turbo": ANIMA_TURBO_PIPELINE,
     "sbv2": SBV2_PIPELINE,
     "irodori": IRODORI_PIPELINE,
     "siglip2": SIGLIP2_PIPELINE,
