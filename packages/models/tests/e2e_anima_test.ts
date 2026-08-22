@@ -7,8 +7,11 @@
  * 赤のまま止めて差分の内容（PNG バイト長 / 画素の統計 / 実物の PNG）を出す。ここを緩めると
  * 「移植できた」の意味が消える。
  *
- * MUST: 資産は `models/karume-anima-turbo/`（untracked・実 GPU 機のローカル資産）。無い環境と GPU 無し
- * 環境は理由を出して**明示 SKIP**する（テストを消して無音で緑にしない — ADR 0005）。
+ * MUST: 資産は `models/karume-anima-turbo/` と `models/karume-anima/`（untracked・実 GPU 機の
+ * ローカル資産）。前者が turbo（8 step / CFG 無し）の門で、後者が **CFG≠1 の門**（素の base
+ * 配布形 — 既定が CFG なので、そこだけが 2 本目の text 経路と `cfgEulerStep` を通る）。
+ * 無い環境と GPU 無し環境は理由を出して**明示 SKIP**する（テストを消して無音で緑にしない —
+ * ADR 0005）。
  *
  * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
  * のみ（fs を持ち込まない — 横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
@@ -90,6 +93,7 @@ const readManifest = (): Manifest => parseManifest(manifestText as string);
 const loadLocalAssets = async (
   manifest: Manifest,
   quant: string,
+  dir: URL = ASSETS_DIR,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
   const files = resolveFiles(manifest, { quant });
   const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
@@ -97,7 +101,7 @@ const loadLocalAssets = async (
   for (const key of Object.keys(files)) {
     const { path } = files[key];
     const cached = byPath.get(path);
-    const bytes = cached ?? await Deno.readFile(new URL(path, ASSETS_DIR));
+    const bytes = cached ?? await Deno.readFile(new URL(path, dir));
     if (cached === undefined) byPath.set(path, bytes);
     assets = { ...assets, [key]: bytes };
   }
@@ -190,6 +194,65 @@ for (const { quant, resolution, sha256 } of REFERENCE) {
     },
   });
 }
+
+// --- CFG（素の base 配布形）--------------------------------------------------
+//
+// MUST: **CFG≠1 の経路にも実 GPU の門を置く**。`guidanceScale === 1` は uncond 側を 1 度も
+// 計算しない（`needsUncond`）ので、上の 3 ケースは cond 1 本しか通っていない —
+// CFG の分岐・2 本目の text 経路・`cfgEulerStep` の合成は**どれも実 GPU で 1 度も走って
+// いなかった**（波 L で気付いた穴）。素の base 配布形は既定が CFG なので、そこを 1 ケース
+// だけ固定する（解像度 512 は所要時間の都合 — CFG は 1 step が forward 2 本）。
+
+/** 素の base 配布形の置き場（untracked・turbo とは別リポ）。 */
+const BASE_ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
+
+/** 参照値（2026-08-22 実測 — 変更禁止）。 */
+const BASE_REFERENCE = {
+  quant: "w8a8-s16",
+  resolution: { width: 512, height: 512 },
+  steps: 20,
+  guidanceScale: 4,
+  negativePrompt: "low quality, worst quality, blurry, bad anatomy, jpeg artifacts",
+  sha256: "071929c40e90628006eab593842080246140e771a82f8a35762507f4a12e9560",
+} as const;
+
+const baseManifestText = await Deno.readTextFile(new URL("karume.json", BASE_ASSETS_DIR)).catch(
+  () => undefined,
+);
+if (baseManifestText === undefined) {
+  console.warn(
+    `[karume] ${BASE_ASSETS_DIR.pathname} に karume.json が無いため CFG の e2e を SKIP する` +
+      "（exporter の dist.py --pipeline anima で焼く）",
+  );
+}
+
+Deno.test({
+  name: `e2e(実GPU): 素の base / CFG ${BASE_REFERENCE.guidanceScale} / ` +
+    `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
+  ignore: !GPU_AVAILABLE || baseManifestText === undefined,
+  fn: async () => {
+    const manifest = parseManifest(baseManifestText as string);
+    const { quant, resolution, steps, guidanceScale, negativePrompt, sha256 } = BASE_REFERENCE;
+    const assets = await loadLocalAssets(manifest, quant, BASE_ASSETS_DIR);
+    await using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
+    const started = performance.now();
+    const image = await pipeline.generate({
+      prompt: PROMPT,
+      resolution,
+      steps,
+      guidanceScale,
+      negativePrompt,
+      seed: SEED,
+    });
+    const png = await encodePng(image.data, image.width, image.height);
+    const actual = await sha256Hex(png);
+    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+    console.log(`[e2e] base-cfg: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
+    if (actual !== sha256) {
+      throw new Error(await mismatchReport("base-cfg", image, png, sha256, actual));
+    }
+  },
+});
 
 // --- fromPretrained（取得層込み）--------------------------------------------
 //

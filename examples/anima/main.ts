@@ -3,6 +3,7 @@
  *
  *     deno task demo:anima --prompt "1girl, solo, ..." --resolution 1344x768 --seed 42
  *     deno task demo:anima --source someone/anima --model anima-turbo --quant f16 --steps 8
+ *     deno task demo:anima --source models/karume-anima --steps 32 --guidance 6
  *
  * `--source` が `karume.json` を持つディレクトリならローカル読み（`fromAssets`）、それ以外は
  * HF リポジトリ名として `fromPretrained`。未指定のノブは manifest の `defaults` が埋める。
@@ -13,7 +14,7 @@ import { type AnimaAssets, AnimaPipeline, encodePng } from "../../packages/model
 import { parseResolution } from "../../packages/models/anima.ts";
 
 const USAGE = "--source <パス|HF repo> --prompt <文字列> --resolution <WxH> --model <名前>" +
-  " --quant <名前> --seed <整数> --steps <整数>";
+  " --quant <名前> --seed <整数> --steps <整数> --guidance <数> --negative <文字列>";
 const KNOWN = new Set([
   "source",
   "model",
@@ -22,6 +23,8 @@ const KNOWN = new Set([
   "resolution",
   "seed",
   "steps",
+  "guidance",
+  "negative",
 ]);
 const DEFAULT_PROMPT = "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms," +
   " outdoors, smile, upper body, masterpiece, best quality";
@@ -59,6 +62,17 @@ const seed = integer("seed") ?? 42;
 const steps = integer("steps");
 const spelled = args.get("resolution");
 const resolution = spelled === undefined ? undefined : parseResolution(spelled);
+/**
+ * CFG のノブ。`guidanceScale === 1` では uncond 側を 1 度も計算しないので、そこへ
+ * `negativePrompt` を渡すとパイプラインが fail loudly する — ここでは黙って落とさず、
+ * 指定をそのまま通して向こうの門に判定させる（デモが理由を隠すと使い方を学べない）。
+ */
+const rawGuidance = args.get("guidance");
+if (rawGuidance !== undefined && !Number.isFinite(Number(rawGuidance))) {
+  throw new Error(`--guidance ${rawGuidance} が数値でない`);
+}
+const guidanceScale = rawGuidance === undefined ? undefined : Number(rawGuidance);
+const negativePrompt = args.get("negative");
 
 /** ローカルディレクトリから manifest + 資産を読む（`fetchAssets` のローカル版）。 */
 const loadLocal = async (dir: string): Promise<AnimaAssets> => {
@@ -97,6 +111,8 @@ const image = await pipeline.generate({
   seed,
   ...(steps === undefined ? {} : { steps }),
   ...(resolution === undefined ? {} : { resolution }),
+  ...(guidanceScale === undefined ? {} : { guidanceScale }),
+  ...(negativePrompt === undefined ? {} : { negativePrompt }),
 });
 const png = await encodePng(image.data, image.width, image.height);
 const name = `anima-${quant ?? "default"}-${image.width}x${image.height}` +
