@@ -100,11 +100,15 @@ Turbo LoRA を焼くと **negative prompt が効かない**（CFG=1 では uncon
   品質門通過・J-5b クローズ**。f32 比の全体評 = `w8-bert4` はほぼ同一・`w4` はテンション
   少し低め（BERT 側 gptq はほぼ透明で、差は net_g の素の RTN i4 由来 — 想定内。conv は
   GPTQ 不適〈H が linear の in 軸形〉なので校正で縮める経路が今は無い）。
-- **J-3: g 軸の評価**（波 I は g=32 固定の裁定 — 方式勝者で g32/g64/g128 を再評価）。評価軸に
-  「`w4` の f32 比〈テンション少し低め〉（J-5b 聴感）が g を細かくして縮むか」を足す —
-  net_g は校正が使えないぶん g 軸が唯一の品質ノブ。
+- **J-3: g 軸の評価 — 消化（2026-08-22）**: SBV2 net_g の g16/g32/g64 実測 + 聴感で
+  **g32 据え置き確定**（g16 はテンションを逆方向へ動かす・波形指標は g の順序を運ばない —
+  正本 = [research/2026-08-22-sbv2-g-axis.md](research/2026-08-22-sbv2-g-axis.md) と ADR 0069
+  追記 9。リグの g 引数化 `--w4-group-size` は資産として残置）。
 - **J-4: 格納席の実装裁定**（Q-2 kmeans companion 席 / Q-3 NF4 定数表席 — J-2 第 2 段の
   結果を見てから。codebook 系採用なら ADR 0069 の bit 表・整列表・view 型 3 面の reopen）。
+  **anima の g16**（[anima-i4-seat-speed §8-5](research/2026-08-21-anima-i4-seat-speed.md)）も
+  ここで裁く — SBV2 の g 軸裁定は**モデル系統を跨いで一般化しない**（棄却記録のスコープ
+  原則）が、逆方向聴感を受けて優先度は低。
 - **J-4a: anima の i4 席（J-4 から切り離して先行 — 2026-08-21 ユーザー裁定）**: 第 1 段
   （速度実測）消化。素の RTN で i4 系列 + `w4` / `w4-a8-s16` を新設し実 GPU で実測 — 正本 =
   [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md)。
@@ -185,6 +189,10 @@ autoregressive 波の**残項目（波外へ送り）**:
 - **モデルカード定型文の条件出し**（公開前レビュー minor・2026-08-21）: `shared/` パスの
   説明文が shared/ を持たないリポ（irodori / anima）でも出る — 空回りだが無害。core
   `modelcard.py` の該当文を shared/ 実在時のみ出す形へ。
+- **measure_quant の配布試算の J-5b 追随**（J-3 中に発見・2026-08-22）: sbv2
+  `project_distribution` が「linear の重みスロットだけ・conv / embedding の i4 は格納形も
+  実行経路も無い」という pre-J-5b 前提のまま（実際は出荷済み — ADR 0069 追記 6/7）。相対
+  比較には無害だが試算が過小で docstring も陳腐化。対象集合と説明の追随を 1 件で。
 - **モデル拡充の続き**: Kokoro-82M（LSTM = multi-output 待ち）・MobileSAM / SAM 2
   （conv_transpose2d）・BiRefNet_HR 2048² preset・DA-V2 可変解像度（upsample_bicubic2d）。
   候補調査の時点記録は [recon-2](research/2026-08-14-model-expansion-recon-2.md)。

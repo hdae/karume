@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-21
+> Last updated: 2026-08-22
 
 ## Now
 
@@ -51,8 +51,11 @@
   **J-5b（net_g conv1d i4）も聴感込みでクローズ** — ADR 0069 追記 7（scale rank2 一般化・
   gemm A 側 i4・適格 = conv1d ∧ groups==1 ∧ 行長整除）で **w4 = 237.5MB（w8 比 −36.3%）**・
   温間合成最速・聴感 = conv i4 で変化なし（f32 比の「テンション少し低め」は net_g RTN i4
-  由来の想定内 — 品質ノブは g 軸のみ = J-3 の評価軸）。J-3（g 軸）→ J-4（格納席）は
-  波 K の後へ。骨子 = backlog now 節。
+  由来の想定内）。**J-3（g 軸）は消化（2026-08-22）** — SBV2 net_g の g16/g32/g64 実測 +
+  聴感で **g32 据え置き確定**（g16 は重み忠実度が −15% 良いのに波形指標・聴感とも逆方向 =
+  **波形指標は g の順序を運ばない**。テンション差は g では縮まない — 正本 =
+  [research/2026-08-22-sbv2-g-axis.md](../docs/research/2026-08-22-sbv2-g-axis.md)・ADR 0069
+  追記 9）。次 = J-4（格納席 + anima g16 の裁定同乗）。骨子 = backlog now 節。
 - **波 K（リリース + 公開・2026-08-20 着手）はアップロードまで消化（2026-08-21）**: J-3 が
   重いため先にリリースを挟むユーザー裁定（release 節の部分先行）。①manifest **`karume/3`**
   shard 欄（ADR [0071](../docs/decisions/0071-manifest-v3-shards.md) — 公開前締切ぶんのみ・
