@@ -121,9 +121,10 @@ def _irodori_base_weights() -> list[str]:
         "  in the container format as the `codec_decoder` / `codec_encoder` components so that",
         "  text-to-audio runs from this repository alone.",
         "- **Changes made here**: conversion into the Karume container format and **quantization**",
-        "  of the weights — every component is stored as `f32` / `f16` / `i8` series (the quant",
-        "  table below says which storage each quant selects). No retraining, no fine-tuning —",
-        "  the `f32` series is the source checkpoint's own values, re-laid out per graph.",
+        "  of the weights — every component is stored as `f32` / `f16` / `i8` series, and `dit`",
+        "  adds an `i4` series rounded with GPTQ calibration (the quant table below says which",
+        "  storage each quant selects). No retraining, no fine-tuning — the `f32` series is the",
+        "  source checkpoint's own values, re-laid out per graph.",
     ]
 
 
