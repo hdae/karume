@@ -104,11 +104,16 @@ Turbo LoRA を焼くと **negative prompt が効かない**（CFG=1 では uncon
   **g32 据え置き確定**（g16 はテンションを逆方向へ動かす・波形指標は g の順序を運ばない —
   正本 = [research/2026-08-22-sbv2-g-axis.md](research/2026-08-22-sbv2-g-axis.md) と ADR 0069
   追記 9。リグの g 引数化 `--w4-group-size` は資産として残置）。
-- **J-4: 格納席の実装裁定**（Q-2 kmeans companion 席 / Q-3 NF4 定数表席 — J-2 第 2 段の
-  結果を見てから。codebook 系採用なら ADR 0069 の bit 表・整列表・view 型 3 面の reopen）。
-  **anima の g16**（[anima-i4-seat-speed §8-5](research/2026-08-21-anima-i4-seat-speed.md)）も
-  ここで裁く — SBV2 の g 軸裁定は**モデル系統を跨いで一般化しない**（棄却記録のスコープ
-  原則）が、逆方向聴感を受けて優先度は低。
+- **J-4: GPTQ 適用拡大（2026-08-23 ユーザー裁定で再定義 — g の最適化より「多くのモデルで
+  GPTQ を採用できること」を優先）**: ①irodori の `w4` 席（gptq-rtn・現行格納形 = runtime
+  無改修・DiT のみ i4 の混成）— 過去裁定 2 件を同日変更:「rtn 席を先行させない」
+  （2026-08-20）は**撤回**（kmeans 席は席の追加で後から共存可能）、「混成なし」
+  （2026-08-12）は**緩和**（当時の根拠 S ドリフトは GPTQ で消滅 —
+  [research 2026-08-20 §6](research/2026-08-20-gptq-awq-calibrated-rounding.md) の S 完全一致。
+  校正コーパスは評価入力と分離して新設 = anima の 2026-08-21 裁定と同根）。②anima 素版
+  3 モデルの i4 席 = 校正条件（`CALIB_STEPS` / `CALIB_GUIDANCE`）のモデル別化（J-4a の
+  続き・波 L の保留解消）。**格納席（Q-2 kmeans companion / Q-3 NF4 定数表）は実需待ちへ
+  送り** — 復活条件は perf-ledger Q-2/Q-3 の前提欄。anima g16 は parked へ。
 - **J-4a: anima の i4 席（J-4 から切り離して先行 — 2026-08-21 ユーザー裁定）**: 第 1 段
   （速度実測）消化。素の RTN で i4 系列 + `w4` / `w4-a8-s16` を新設し実 GPU で実測 — 正本 =
   [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md)。
@@ -258,6 +263,10 @@ autoregressive 波の**残項目（波外へ送り）**:
   Style-Bert-VITS2 のセマンティクス（LCS 差分 + 1..6 クランプ・残差は例外）で、AivisSpeech が
   pin する fork の「均等増減で無理やり辻褄を合わせる」は採らない（黙って近似しない）。
   復活 = overlay で表現できない読み編集の実需。
+- **anima の g16 評価**（2026-08-23 送り — GPTQ 適用拡大を優先するユーザー裁定。SBV2 の
+  g 軸裁定はモデル系統を跨いで一般化しない〈research 2026-08-22〉ため評価自体の価値は残す。
+  復活 = 素版 i4 の視認で品質不満が出た場合。主作業と衝突しない裏実行での前倒しは可
+  〈同日ユーザー裁定・anima 校正リグを触る J-4 ②の着地後に流すのが安全〉）
 - hub Range 並列 + prefetch — 復活 = 断片化リポの再来（perf L-3）
 - params / bind group キャッシュ（ADR 0032 案 2）・GPU timestamp 推定源化・全面 f16（案γ）・
   Vᵀ+列量子化融合・2048px DiT attention メモリ工事・SBV2 NFC チップ・f32 anima 系列再生成
