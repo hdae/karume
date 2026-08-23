@@ -148,6 +148,35 @@ const F16_Z_ATOL: number | undefined = 1.5e-3;
  */
 const W8_Z_ATOL: number | undefined = 1e-2;
 
+/**
+ * **w4 席**（`--dtype i4` — `dit` だけ i4 g32・GPTQ 校正付き。他 7 役は `w8` と同じ i8 バイトを
+ * 共有する唯一の混成席）の `z` の許容誤差。
+ *
+ * golden は**出荷バイトから**焼かれる（`irodori.pipeline_ref` が export 済み i4 コンテナを
+ * 読み戻す — 校正を 2 度走らせない）ので、この差も他系列と同じ「実装差だけ」。
+ *
+ * 実測（`atol = rtol = 0` の素の突合 — この門が毎回ログに出す値。2026-08-23 / 実 GPU）:
+ *
+ * | ケース   | S   | 要素数 | z の maxAbs 差 | \|z\| 上端 | 比       |
+ * | -------- | --- | ------ | -------------- | ---------- | -------- |
+ * | full     | 161 | 5,152  | **1.1522e-3**  | 5.03657    | 1/4,371  |
+ * | no-ref   | 116 | 3,712  | 2.8908e-5      | 4.99839    | 1/172,907 |
+ *
+ * 6e-3 = 実測最悪 1.1522e-3 の **5.2 倍**（w8 の 5.4 倍と同じ採り方）・\|z\| 上端の約 1/839。
+ * 実測が w8（1.8429e-3）より小さいのは GPTQ 校正の帰結ではなく偶然の範囲 — 系列間に順序
+ * 関係は無い（w8 の同注記と同文）。
+ *
+ * MUST: **f32 / f16 / w8 の値を流用しない**（ADR 0027 / 0050 の型 — 系列ごとに素の実測から
+ * 独立導出する）。再導出の手順は w8 と同じ: ①i4 系列の資産を焼く（`--dtype i4` の export +
+ * `pipeline_ref --dtype i4` + `karume dist`）②この定数を `undefined` に戻してこの門を走らせ、
+ * ログの素の `maxAbs` を表へ書く ③実測最悪の 5〜10 倍を閾値に採り、値域との比を添える。
+ *
+ * NOTE: **S / forwards が割れた場合は tolerance の問題ではない**（w8 と同文)。i4 で S が
+ * 動かないことは J-2 第 2 段の実測（gptq 3 構成とも S 予測完全一致 —
+ * research 2026-08-20 §6）が根拠で、上の実測でも S / forwards は完全一致だった。
+ */
+const W4_Z_ATOL: number | undefined = 6e-3;
+
 /** 決定性の門で使う発話長（秒）。`duration` を回さず S を小さく固定して 2 回生成する。 */
 const DETERMINISM_SECONDS = 1;
 
@@ -189,6 +218,15 @@ const SERIES: readonly IrodoriSeries[] = [
     goldenDir: goldenDir("irodori-v4-small-i8"),
     zAtol: W8_Z_ATOL,
     generate: `${GOLDEN_COMMAND} --dtype i8`,
+  },
+  {
+    // 席の綴りは `w4`・系列 root は `-i4`。`dit` だけ i4 で他 7 役は `w8` の i8 バイトを共有する
+    // 唯一の混成席（席表の裁定 2026-08-23）。golden の生成は export 済み系列が前提
+    // （`pipeline_ref --dtype i4` が出荷バイトを読み戻す）。
+    name: "w4",
+    goldenDir: goldenDir("irodori-v4-small-i4"),
+    zAtol: W4_Z_ATOL,
+    generate: `${GOLDEN_COMMAND} --dtype i4`,
   },
 ];
 
