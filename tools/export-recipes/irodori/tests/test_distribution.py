@@ -26,10 +26,13 @@ import pytest
 
 from dist import default_out_dir, main
 from irodori.distribution import (
+    CALIB_PROVENANCE_FILE,
+    CALIB_SHIPPABLE_METHOD,
     IRODORI_CODEC_DIRS,
     IRODORI_CODEC_HALO_FRAMES,
     IRODORI_CODEC_NAME,
     IRODORI_DEFAULT_MODEL,
+    IRODORI_DTYPE_ROLES,
     IRODORI_GRAPH_ROLES,
     IRODORI_OUTPUT_PATHS,
     IRODORI_QUANT_SEATS,
@@ -120,6 +123,15 @@ _IRODORI_CODEC_METADATA: Mapping[str, Any] = {
 }
 _IRODORI_HOP_LENGTH = 480
 
+#: i4 系列の校正条件の記録（`irodori.export._write_calib_provenance` が書く形）。
+_IRODORI_CALIB_PROVENANCE: Mapping[str, Any] = {
+    "method": CALIB_SHIPPABLE_METHOD,
+    "grid": "rtn",
+    "group_size": 32,
+    "cases": 4,
+    "steps": 40,
+}
+
 #: `pipelineConfig` の欄名（TS 側 `packages/models/src/irodori/config.ts` の `ROOT_KEYS` の写し）。
 #: **ロード側は未知キーも欠落も parse 時に落とす**ので、焼く側とロード側の欄名は完全一致が要る。
 #: 写しをテストが持つのは、片方だけが動いたときに落ちる席がここしか無いため。
@@ -202,16 +214,21 @@ def _irodori_graphs() -> dict[str, str]:
     }
 
 
-def _irodori_container(dtype: str, role: str, graph: str) -> bytes:
+def _irodori_container(dtype: str, role: str, graph: str, extra: tuple[str, ...] = ()) -> bytes:
     """1 ターゲットぶんの偽コンテナ（格納 dtype の集合が系列と対応する形）。
 
-    圧縮系列は**適格スロットだけ**が F16 / I8 になり、bias / norm / グラフ定数（i8 なら
-    per-channel scale も）は F32 のまま残る（実物の圧縮コンテナのヘッダはこの 2 つが並ぶ）。
-    この形にしておかないと、f32 席へ圧縮資産を挿し込む取り違えが「F32 が無い」で落ちてしまい、
-    **圧縮 dtype の不在**を見る門（`assert_storage_absent`）が一度も試されない。
+    圧縮系列は**適格スロットだけ**が F16 / I8 / I4 になり、bias / norm / グラフ定数（i8 なら
+    per-channel scale・i4 なら group scale も）は F32 のまま残る（実物の圧縮コンテナのヘッダは
+    この 2 つが並ぶ）。この形にしておかないと、f32 席へ圧縮資産を挿し込む取り違えが
+    「F32 が無い」で落ちてしまい、**圧縮 dtype の不在**を見る門（`assert_storage_absent`）が
+    一度も試されない。
+
+    `extra` は混成コンテナを作る口（i4 系列に g32 非整除の linear が現れて I8 が混ざった形
+    — {@link IRODORI_STORAGE_FORBIDDEN} の MUST が名指しする失敗モード）。
     """
     payload = f"{role}-{dtype}-weights".encode()
     dtypes = ("F32",) if dtype == "f32" else (dtype.upper(), "F32")
+    dtypes = (*dtypes, *extra)
     header: dict[str, Any] = {"__metadata__": {IR_METADATA_KEY: graph}}
     for index, stored in enumerate(dtypes):
         start = index * len(payload)
@@ -231,13 +248,14 @@ def _build_irodori_sources(
     config: Mapping[str, Any] = _IRODORI_CONFIG,
     graphs: Mapping[str, str] | None = None,
     codec_metadata: Mapping[str, Any] | None = _IRODORI_CODEC_METADATA,
+    calib_provenance: Mapping[str, Any] | None = _IRODORI_CALIB_PROVENANCE,
 ) -> IrodoriSources:
     """系列 + チェックポイントの置き場を偽資産で再現する（配布しないものの混入込み）。
 
     並びは `_shared.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
     テストが root を差し替えるだけで同じ木を指せる形。コーデックは**別系列・別入力素材**
     （`dacvae-32dim`）なので、Irodori 本体とは別の 2 ディレクトリへ置く。系列は格納 dtype
-    ごとに 1 本ずつ（`IRODORI_WEIGHT_DTYPES` — f32 / f16 / i8）。
+    ごとに 1 本ずつ（`IRODORI_DTYPE_ROLES` — i4 だけは `dit` 1 役なので系列も 1 ディレクトリ）。
     """
     series_root = root / "outputs" / "series"
     suffix = {dtype: "" if dtype == "f32" else f"-{dtype}" for dtype in IRODORI_WEIGHT_DTYPES}
@@ -245,7 +263,9 @@ def _build_irodori_sources(
         dtype: series_root / f"{irodori_series_name(model)}{tail}" for dtype, tail in suffix.items()
     }
     codec_by_dtype = {
-        dtype: series_root / f"{IRODORI_CODEC_NAME}{tail}" for dtype, tail in suffix.items()
+        dtype: series_root / f"{IRODORI_CODEC_NAME}{tail}"
+        for dtype, tail in suffix.items()
+        if not set(IRODORI_DTYPE_ROLES[dtype]).isdisjoint(IRODORI_CODEC_DIRS)
     }
     sources = IrodoriSources(
         model=root / "inputs" / "irodori" / model,
@@ -254,22 +274,25 @@ def _build_irodori_sources(
         codec_series_by_dtype=codec_by_dtype,
     )
     resolved = graphs or _irodori_graphs()
-    for dtype in IRODORI_WEIGHT_DTYPES:
-        for role, directory in IRODORI_SERIES_DIRS.items():
-            series = sources.series_by_dtype[dtype]
+    for dtype, roles in IRODORI_DTYPE_ROLES.items():
+        for role in roles:
+            in_codec = role in IRODORI_CODEC_DIRS
+            series = (
+                sources.codec_series_by_dtype[dtype] if in_codec else sources.series_by_dtype[dtype]
+            )
+            directory = (IRODORI_SERIES_DIRS | IRODORI_CODEC_DIRS)[role]
             _write(
                 series / directory / "model.safetensors",
                 _irodori_container(dtype, role, resolved[role]),
             )
             # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
             _write(series / directory / "io.case0.safetensors", b"io-fixture")
-        for role, directory in IRODORI_CODEC_DIRS.items():
-            codec = sources.codec_series_by_dtype[dtype]
-            _write(
-                codec / directory / "model.safetensors",
-                _irodori_container(dtype, role, resolved[role]),
-            )
-            _write(codec / directory / "io.case0.safetensors", b"io-fixture")
+    if calib_provenance is not None:
+        # 校正条件の記録（`irodori.export._write_calib_provenance` が i4 の `dit` 直下へ書く）。
+        _write(
+            sources.series_by_dtype["i4"] / IRODORI_SERIES_DIRS["dit"] / CALIB_PROVENANCE_FILE,
+            json.dumps(calib_provenance, ensure_ascii=False).encode("utf-8"),
+        )
     if codec_metadata is not None:
         _write(
             sources.codec_model / "metadata.json",
@@ -335,34 +358,42 @@ class TestIrodoriLayout:
         ]
         assert sorted(model["assets"]) == ["tokenizer"]
 
-    def test_the_quants_are_the_four_seats_the_seat_table_spells(self, irodori_assembled) -> None:
-        """席は 4 つ（格納 3 系列 + w8a8 の実行形ノブ）。既定は `w8`（裁定 2026-08-12）。
+    def test_the_quants_are_the_five_seats_the_seat_table_spells(self, irodori_assembled) -> None:
+        """席は 5 つ（格納 3 系列 + w8a8 の実行形ノブ + `dit` だけ i4 の `w4`）。既定は `w8a8`。
 
         `w8` / `w8a8` は**同じ i8 バイトを共有**し、違うのは `session` だけ — 席が増えても
-        配布形のファイルは増えない、が席表の要点。
+        配布形のファイルは増えない、が席表の要点。`w4` はその例外で、`dit` の 1 本だけが
+        i4 系列を指す。
         """
         _, manifest = irodori_assembled
         model = _irodori_model(manifest)
         assert model["defaultQuant"] == "w8a8"
-        assert list(model["quants"]) == ["f32", "f16", "w8", "w8a8"]
-        for seat, (dtype, session) in IRODORI_QUANT_SEATS.items():
-            assert model["quants"][seat]["session"] == session
-            assert "gpuFeatures" not in model["quants"][seat]
-            # 完全写像（hub の受理要件）— 8 役全部が 1 つの dtype ラベルを指す。
-            assert model["quants"][seat]["weights"] == dict.fromkeys(model["weights"], dtype)
+        assert list(model["quants"]) == ["f32", "f16", "w8", "w8a8", "w4"]
+        for name, seat in IRODORI_QUANT_SEATS.items():
+            assert model["quants"][name]["session"] == seat.session
+            assert "gpuFeatures" not in model["quants"][name]
+            # 完全写像（hub の受理要件）— 8 役全部が dtype ラベルを 1 つずつ指す。
+            assert model["quants"][name]["weights"] == {
+                role: seat.roles.get(role, seat.dtype) for role in model["weights"]
+            }
         assert model["quants"]["w8"]["session"] == {}
         assert model["quants"]["w8a8"]["session"] == {"linearCompute": "i8a8"}
+        # MUST: `w4` は `linearCompute` を宣言しない（irodori では w4a8 経路が未測定 —
+        # 席表の同 MUST）。ここが緩むと「速いが荒い」構成が席名 `w4` のまま出る。
+        assert model["quants"]["w4"]["session"] == {}
+        assert model["quants"]["w4"]["weights"]["dit"] == "i4"
 
     def test_every_quant_points_at_its_own_storage_series(self, irodori_assembled) -> None:
-        """席と現物の対応（圧縮席のファイルが実際に F16 / I8 格納であることは組み立て門が
+        """席と現物の対応（圧縮席のファイルが実際に F16 / I8 / I4 格納であることは組み立て門が
         見るが、**宣言の側も**系列を跨がないことをここで固定する — 片方だけ動くと配布形の中で
         「f16 と名乗る f32」が並ぶ）。"""
         out_dir, manifest = irodori_assembled
         model = _irodori_model(manifest)
-        for seat, (dtype, _) in IRODORI_QUANT_SEATS.items():
-            for role, label in model["quants"][seat]["weights"].items():
+        for name, seat in IRODORI_QUANT_SEATS.items():
+            for role, label in model["quants"][name]["weights"].items():
+                dtype = seat.roles.get(role, seat.dtype)
                 path = model["weights"][role][label]["shards"][0]["path"]
-                assert path.endswith(f"model.{dtype}.safetensors"), (role, seat, path)
+                assert path.endswith(f"model.{dtype}.safetensors"), (role, name, path)
                 assert (out_dir / path).is_file()
 
     def test_the_two_i8_seats_share_one_set_of_bytes(self, irodori_assembled) -> None:
@@ -370,6 +401,20 @@ class TestIrodoriLayout:
         _, manifest = irodori_assembled
         model = _irodori_model(manifest)
         assert model["quants"]["w8"]["weights"] == model["quants"]["w8a8"]["weights"]
+
+    def test_the_w4_seat_shares_the_i8_bytes_for_the_other_seven_roles(
+        self, irodori_assembled
+    ) -> None:
+        """`w4` が新しく足すファイルは `dit` の 1 本だけ（他 7 役は `w8` とバイト共有）。"""
+        _, manifest = irodori_assembled
+        model = _irodori_model(manifest)
+        differing = {
+            role
+            for role, label in model["quants"]["w4"]["weights"].items()
+            if label != model["quants"]["w8"]["weights"][role]
+        }
+
+        assert differing == {"dit"}
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_irodori_sources(tmp_path)
@@ -684,6 +729,45 @@ class TestIrodoriStorageSeries:
         with pytest.raises(DistError, match="I8 が無い"):
             irodori_plan(sources)
 
+    def test_it_refuses_an_i4_series_asset_in_the_i8_seat(self, tmp_path: Path) -> None:
+        """MUST: i8 席は **I4 の不在**で締める（要求検査だけでは適格率次第で塞がらない）。
+
+        写すのは「i4 系列の linear が 1 本だけ g32 非整除になって I8 が混ざった」形 — その
+        コンテナは「I8 を含む」を満たすので、禁止表が無いと i8 席へ挿し込めてしまう。実害は
+        既定席 `w8a8` に出る（宣言した `linearCompute: "i8a8"` の述語は i4 常駐も受けるので、
+        ADR 0076 の w4a8 経路が席名 `w8a8` のまま黙って走る）。
+        """
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.series_by_dtype["i8"] / "dit" / "model.safetensors",
+            _irodori_container("i4", "dit", _irodori_graphs()["dit"], extra=("I8",)),
+        )
+
+        with pytest.raises(DistError, match="I4 がある"):
+            irodori_plan(sources)
+
+    def test_it_refuses_an_i8_series_asset_in_the_i4_seat(self, tmp_path: Path) -> None:
+        """逆向き（`--dtype i4` のつもりが i8 系列）は I4 の不在で落ちる。"""
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.series_by_dtype["i4"] / "dit" / "model.safetensors",
+            _irodori_container("i8", "dit", _irodori_graphs()["dit"]),
+        )
+
+        with pytest.raises(DistError, match="I4 が無い"):
+            irodori_plan(sources)
+
+    def test_it_refuses_an_i4_series_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
+        """i4 資産も F32（bias / norm / group scale）を持つので、**存在検査は真になる**。"""
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.series / "dit" / "model.safetensors",
+            _irodori_container("i4", "dit", _irodori_graphs()["dit"]),
+        )
+
+        with pytest.raises(DistError, match="I4 がある"):
+            irodori_plan(sources)
+
     def test_it_refuses_a_codec_series_mixup_too(self, tmp_path: Path) -> None:
         """コーデックは別系列（`dacvae-32dim{,-f16,-i8}`）— 同じ門が 8 役全部に掛かる。"""
         sources = _build_irodori_sources(tmp_path)
@@ -695,19 +779,28 @@ class TestIrodoriStorageSeries:
         with pytest.raises(DistError, match="F16 が無い"):
             irodori_plan(sources)
 
-    def test_every_graph_role_carries_every_seat(self) -> None:
-        """要求表 / 禁止表 / 宣言が同じ 8 × 3 の席を指す。
+    def test_every_graph_role_carries_every_seat_its_series_declares(self) -> None:
+        """要求表 / 禁止表 / 宣言が同じ席（8 役 × f32/f16/i8 + `dit` の i4）を指す。
 
         片方だけ席が増えると、増えたほうが黙って無検査のまま配布形に並ぶ。
         """
         expected = {
-            f"{role}_{dtype}" for role in IRODORI_GRAPH_ROLES for dtype in IRODORI_WEIGHT_DTYPES
+            f"{role}_{dtype}" for dtype, roles in IRODORI_DTYPE_ROLES.items() for role in roles
         }
 
         assert set(IRODORI_STORAGE_REQUIREMENTS) == expected
-        assert set(IRODORI_STORAGE_FORBIDDEN) == {f"{role}_f32" for role in IRODORI_GRAPH_ROLES}
+        assert set(IRODORI_STORAGE_FORBIDDEN) == {
+            *(f"{role}_f32" for role in IRODORI_GRAPH_ROLES),
+            "dit_i8",
+        }
         # 禁止は**圧縮系列ぶん全部**（1 つでも抜けると、抜けたほうの資産が f32 席を素通りする）。
-        assert set(IRODORI_STORAGE_FORBIDDEN[f"{IRODORI_GRAPH_ROLES[0]}_f32"]) == {"F16", "I8"}
+        assert set(IRODORI_STORAGE_FORBIDDEN[f"{IRODORI_GRAPH_ROLES[0]}_f32"]) == {
+            "F16",
+            "I8",
+            "I4",
+        }
+        # i8 席は I4 の不在で締める（i4 系列は I8 を含まないので、要求検査だけでは塞がらない）。
+        assert set(IRODORI_STORAGE_FORBIDDEN["dit_i8"]) == {"I4"}
         assert {
             files.file for labels in IRODORI_WEIGHTS.values() for files in labels.values()
         } == expected
@@ -717,8 +810,18 @@ class TestIrodoriStorageSeries:
 
         席名（`w8`）と系列 root（`-i8`）の対応を綴る箇所はここ 1 つきり — 2 箇所に分かれると、
         片方だけ動いたときに「存在しない系列を指す席」か「誰も指さない系列」が生える。
+        MUST: 役割ごとの例外（`w4` の `dit`）も同じ検査に載せる。
         """
-        assert {dtype for dtype, _ in IRODORI_QUANT_SEATS.values()} == set(IRODORI_WEIGHT_DTYPES)
+        named = {
+            seat.roles.get(role, seat.dtype)
+            for seat in IRODORI_QUANT_SEATS.values()
+            for role in IRODORI_GRAPH_ROLES
+        }
+
+        assert named == set(IRODORI_WEIGHT_DTYPES)
+        for seat in IRODORI_QUANT_SEATS.values():
+            for role, dtype in seat.roles.items():
+                assert role in IRODORI_DTYPE_ROLES[dtype], (role, dtype)
 
     def test_the_series_roots_match_the_exporter_spelling(self, tmp_path: Path) -> None:
         """系列 root の綴りは書き手（`export_*.default_out_root`）と 1 文字も違わない。"""
@@ -731,10 +834,53 @@ class TestIrodoriStorageSeries:
                 sources.series_by_dtype[dtype].name
                 == irodori.export.default_out_root(Path(IRODORI_DEFAULT_MODEL), dtype).name
             )
+        for dtype in sources.codec_series_by_dtype:
             assert (
                 sources.codec_series_by_dtype[dtype].name
                 == irodori.dacvae.export.default_out_root(Path(IRODORI_CODEC_NAME), dtype).name
             )
+        # コーデックは i4 系列を持たない（`IRODORI_DTYPE_ROLES` の i4 は `dit` だけ）。
+        assert set(sources.codec_series_by_dtype) == {"f32", "f16", "i8"}
+
+
+class TestIrodoriCalibProvenance:
+    """i4 系列の丸め条件の突合 — **資産からは判別できない**唯一の事実を機械で見る席。
+
+    MUST: 校正の有無は格納形を 1 バイトも変えないので、要求 dtype 検査もグラフ検査も
+    `verify_dist` も素通りする。`--no-calib` の生成物が配布へ紛れても出るのは音の劣化だけ。
+    """
+
+    def test_a_calibrated_series_passes(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(tmp_path)
+
+        assert irodori_plan(sources).quants["w4"]["weights"]["dit"] == "i4"
+
+    def test_a_missing_record_is_refused(self, tmp_path: Path) -> None:
+        """記録の不在は「古い export」— 名指しで再エクスポートを促す。"""
+        sources = _build_irodori_sources(tmp_path, calib_provenance=None)
+
+        with pytest.raises(DistError, match="校正条件の記録が無い"):
+            irodori_plan(sources)
+
+    def test_an_uncalibrated_series_is_refused(self, tmp_path: Path) -> None:
+        """`--no-calib` は `rtn` と記録される — 組み立てはそれを名指しで拒否する。"""
+        sources = _build_irodori_sources(
+            tmp_path,
+            calib_provenance={**_IRODORI_CALIB_PROVENANCE, "method": "rtn", "cases": 0, "steps": 0},
+        )
+
+        with pytest.raises(DistError, match="配布して良い丸め方式で作られていない"):
+            irodori_plan(sources)
+
+    def test_an_unparsable_record_is_refused(self, tmp_path: Path) -> None:
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.series_by_dtype["i4"] / IRODORI_SERIES_DIRS["dit"] / CALIB_PROVENANCE_FILE,
+            b"{ not json",
+        )
+
+        with pytest.raises(DistError, match="解析できない"):
+            irodori_plan(sources)
 
 
 class TestIrodoriModelCard:
@@ -776,10 +922,10 @@ class TestIrodoriModelCard:
         assert 'fromPretrained("hdae/dist"' in card
         # Usage は「コメントを外すだけで次の一歩へ進める」形（裁定 2026-08-12）: voice cloning の
         # 両形（audio / latent）と optional ノブがコメントアウトで併記され、選べる値は manifest
-        # から機械導出される（席が増えれば列挙も既定も追従する — ここでは 4 席・既定 w8）。
+        # から機械導出される（席が増えれば列挙も既定も追従する — ここでは 5 席・既定 w8a8）。
         assert '// speaker: { audio: decodeWav(await Deno.readFile("reference.wav")) },' in card
         assert "// speaker: { latent: savedLatent }," in card
-        assert '// quant: "w8a8", // default — available: f16 / f32 / w8 / w8a8' in card
+        assert '// quant: "w8a8", // default — available: f16 / f32 / w4 / w8 / w8a8' in card
         assert "// durationSeconds: 5," in card
 
     def test_it_derives_the_shape_section_from_the_manifest(

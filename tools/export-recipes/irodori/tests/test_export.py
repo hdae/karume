@@ -646,11 +646,12 @@ class TestWeightDtypeSeries:
             dtype: ir.default_out_root(tmp_path / "v4-small", dtype) for dtype in ir.WEIGHT_DTYPES
         }
 
-        assert set(roots) == {"f32", "f16", "i8"}
+        assert set(roots) == {"f32", "f16", "i8", "i4"}
         assert len(set(roots.values())) == len(roots)
         assert roots["f32"].name == "irodori-v4-small"
         assert roots["f16"].name == "irodori-v4-small-f16"
         assert roots["i8"].name == "irodori-v4-small-i8"
+        assert roots["i4"].name == "irodori-v4-small-i4"
 
     def test_the_series_name_carries_the_weights_directory_name(self, tmp_path):
         other = ir.default_out_root(tmp_path / "v9-large", "f16")

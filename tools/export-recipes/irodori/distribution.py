@@ -6,8 +6,10 @@
 
 配布するのは**実行に要る 8 グラフ + tokenizer 資産 1 本**だけ。8 のうち 2 本は波形 ↔ latent の
 コーデック（DACVAE — 上流では別リポ・別重みだが、テキストから音声まで 1 リポで完走させるため
-ここへ同梱する）。格納形は f32 / f16 / i8 の 3 系列で、quant 席は 4 つ（`f32` / `f16` /
-`w8` / `w8a8` — 後ろの 2 つは**同じ i8 バイトを共有**し、違うのは実行形ノブだけ）。
+ここへ同梱する）。格納形は f32 / f16 / i8 の 3 系列（`dit` だけ **i4 の 4 本目**を持つ）で、
+quant 席は 5 つ（`f32` / `f16` / `w8` / `w8a8` / `w4`）。`w8` と `w8a8` は**同じ i8 バイトを
+共有**し、違うのは実行形ノブだけ。`w4` は `dit` だけを i4 系列から採り、他 7 役は `w8` と
+同じ i8 バイトを共有する（唯一の混成席 — {@link IRODORI_QUANT_SEATS} の裁定）。
 
 `pipelineConfig` は 2 系統に割れる: **モデル固有の数**（条件 state の宣言長・話者行数・
 latent 幅・t_embed 幅）はチェックポイントの config から導出し、**実行時ノブ**（step 数・
@@ -105,15 +107,40 @@ IRODORI_CODEC_RATES_KEY = "encoder_rates"
 IRODORI_TOKENIZER_DIR = "tokenizer"
 IRODORI_TOKENIZER_FILE = "tokenizer.json"
 
-#: 配る格納 dtype（`irodori.export.WEIGHT_DTYPES` /
-#: `irodori.dacvae.export.WEIGHT_DTYPES` と同じ集合）。
-#: 役割名は `<グラフ役割>_<dtype>` で、系列 root と 1:1 に対応する。**quant 席の綴りとは別軸**
-#: （w8 / w8a8 はどちらも i8 系列を指す — 対応表は {@link IRODORI_QUANT_SEATS}）。
-IRODORI_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
+#: 配る格納 dtype。役割名は `<グラフ役割>_<dtype>` で、系列 root と 1:1 に対応する。
+#: **quant 席の綴りとは別軸**（w8 / w8a8 はどちらも i8 系列を指す — 対応表は
+#: {@link IRODORI_QUANT_SEATS}）。
+IRODORI_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
+
+#: 格納 dtype → その系列が持つ**役割**（`irodori.export.DTYPE_TARGETS` /
+#: `irodori.dacvae.export.WEIGHT_DTYPES` と対）。
+#:
+#: MUST: i4 は `dit` だけ。i4 の実行経路は linear の重みスロット限定（ADR 0069 決定 5）で、
+#: DiT 以外の 7 役は quant 席 `w4` でも **i8 系列のバイトをそのまま共有する**
+#: （{@link IRODORI_QUANT_SEATS}）— 他役割の i4 系列は書き出す側も持たない。表をここ 1 箇所に
+#: 置くのは、出力 path / 格納 dtype 要求 / weights 宣言 / 配置表の 4 つが「どの (役割, dtype) が
+#: 実在するか」で同じ判断をするため（別々に持つと、席を 1 つ足した日に片方だけ更新される）。
+IRODORI_DTYPE_ROLES: Mapping[str, tuple[str, ...]] = {
+    "f32": IRODORI_GRAPH_ROLES,
+    "f16": IRODORI_GRAPH_ROLES,
+    "i8": IRODORI_GRAPH_ROLES,
+    "i4": ("dit",),
+}
 
 #: 圧縮していない系列の dtype（系列 root に接尾が付かない唯一の席で、quant に依存しない
 #: 資産〈tokenizer〉の置き場でもある）。
 IRODORI_PLAIN_DTYPE = "f32"
+
+#: i4 系列が記録する校正条件（{@link assert_irodori_calib_provenance}）。校正の有無は**格納形を
+#: 1 バイトも変えない**（格子は RTN i4 g32 のまま — 変わるのは丸め値と scale 台帳だけ）ので、
+#: 資産・manifest・ヘッダのどれからも判別できない。それでいて品質差は裁定を分ける大きさなので、
+#: anima と同じ規律で「書き出した側が事実を書き残す」。系列レイアウトの綴りは読み手（ここ）が
+#: 持ち、書き手（`irodori/export.py`）はここから引く — 2 箇所で独立に動かさない。
+CALIB_PROVENANCE_FILE = "calib_provenance.json"
+
+#: 配布して良い丸め方式（{@link CALIB_PROVENANCE_FILE} の `method`）。`--no-calib` の素の RTN は
+#: smoke 用で、配布資産にしない（`irodori/export.py` の該当 MUST）。
+CALIB_SHIPPABLE_METHOD = "gptq"
 
 
 def irodori_role(role: str, dtype: str) -> str:
@@ -127,62 +154,106 @@ def irodori_role(role: str, dtype: str) -> str:
 IRODORI_OUTPUT_PATHS: Mapping[str, str] = {
     **{
         irodori_role(role, dtype): f"{role}/model.{dtype}.safetensors"
-        for role in IRODORI_GRAPH_ROLES
-        for dtype in IRODORI_WEIGHT_DTYPES
+        for dtype, roles in IRODORI_DTYPE_ROLES.items()
+        for role in roles
     },
     "tokenizer": f"{IRODORI_TOKENIZER_DIR}/{IRODORI_TOKENIZER_FILE}",
 }
 
 #: 各役割の safetensors ヘッダに**要求する**格納 dtype（Anima / SBV2 と同じ根拠 — 素の F32
 #: 資産が組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。圧縮系列は
-#: fake-quant 対象だけが F16 / I8 になる（bias / norm / グラフ定数、i8 の per-channel scale は
-#: F32 のまま）ので「その dtype を含む」を要求する。tokenizer は JSON なので載せない。
+#: fake-quant 対象だけが F16 / I8 / I4 になる（bias / norm / グラフ定数、i8 の per-channel scale と
+#: i4 の group scale は F32 のまま）ので「その dtype を含む」を要求する。tokenizer は JSON なので
+#: 載せない。
 IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     irodori_role(role, dtype): dtype.upper()
-    for role in IRODORI_GRAPH_ROLES
-    for dtype in IRODORI_WEIGHT_DTYPES
+    for dtype, roles in IRODORI_DTYPE_ROLES.items()
+    for role in roles
 }
 
 #: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
 #: f32 席は「F32 を含む」だけでは圧縮系列の資産と区別できない（圧縮系列も適格外の重み
-#: — bias / norm / グラフ定数 / i8 の per-channel scale — を F32 で持つ）ので、**圧縮側の
-#: 格納 dtype 全部**の不在を併せて要求して初めて系列 × 格納 dtype が集合として一意になる。
-#: 逆向き（圧縮席へ f32 資産）は {@link assert_storage} が要求 dtype の不在で落とす。
+#: — bias / norm / グラフ定数 / i8 の per-channel scale / i4 の group scale — を F32 で持つ）ので、
+#: **圧縮側の格納 dtype 全部**の不在を併せて要求して初めて系列 × 格納 dtype が集合として一意に
+#: なる。逆向き（圧縮席へ f32 資産）は {@link assert_storage} が要求 dtype の不在で落とす。
+#:
+#: MUST: **i8 席も I4 の不在を要求する**（`dit` だけが両方の系列を持つ）。i4 系列は DiT の適格
+#: linear だけが I4 で、残り（bias / norm / scale）は F32 なので、「I8 を含む」は満たさない —
+#: が、そこを頼りにすると **i4 系列が i8 系列を名乗れるかどうかが上流の適格率次第**になる
+#: （linear 1 本が g32 非整除になった途端 i8 が混ざり、既定席 `w8a8` の `linearCompute:
+#: "i8a8"` が i4 常駐で走る w4a8 経路〈ADR 0076〉へ黙って化ける）。禁止で締めれば、そこは
+#: 適格率に依らず塞がる。
 IRODORI_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    irodori_role(role, IRODORI_PLAIN_DTYPE): tuple(
-        dtype.upper() for dtype in IRODORI_WEIGHT_DTYPES if dtype != IRODORI_PLAIN_DTYPE
-    )
-    for role in IRODORI_GRAPH_ROLES
+    **{
+        irodori_role(role, IRODORI_PLAIN_DTYPE): tuple(
+            dtype.upper() for dtype in IRODORI_WEIGHT_DTYPES if dtype != IRODORI_PLAIN_DTYPE
+        )
+        for role in IRODORI_GRAPH_ROLES
+    },
+    **{irodori_role(role, "i8"): ("I4",) for role in IRODORI_DTYPE_ROLES["i4"]},
 }
 
-#: weights の宣言（dtype ラベル → 役割名）。8 グラフとも 3 系列ぶんの席を持つので、
-#: {@link complete_quant_weights} の自動補完は掛からず、quant 表が全役割を名指しする。
+#: weights の宣言（dtype ラベル → 役割名）。8 グラフとも f32 / f16 / i8 の 3 席を持ち（`dit` は
+#: さらに i4）、{@link complete_quant_weights} の自動補完は掛からないので quant 表が全役割を
+#: 名指しする。
 IRODORI_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    role: {dtype: WeightFiles(irodori_role(role, dtype)) for dtype in IRODORI_WEIGHT_DTYPES}
+    role: {
+        dtype: WeightFiles(irodori_role(role, dtype))
+        for dtype, roles in IRODORI_DTYPE_ROLES.items()
+        if role in roles
+    }
     for role in IRODORI_GRAPH_ROLES
 }
 
 #: assets の宣言（quant 選択に依存しない無条件ファイル）。
 IRODORI_ASSETS: Mapping[str, str] = {"tokenizer": "tokenizer"}
 
-#: quant 席の綴り → `(8 役全部の格納 dtype, 実行形ノブ)`。**席名と系列 root の対応をここ 1 箇所
-#: だけで綴る**（`w8` / `w8a8` はどちらも `-i8` 系列を指し、バイトは 1 組を共有する — 違うのは
-#: `session` だけ）。混成（役割ごとに違う dtype）にしないのはユーザー裁定 2026-08-12
-#: （i8 も一律 — S ドリフトの実測は `irodori/measure_quant.py` が持つ）。
+
+class QuantSeat(NamedTuple):
+    """quant 席 1 つ（既定の格納 dtype・実行形ノブ・役割ごとの例外）。
+
+    **席名と系列 root の対応をここ 1 箇所だけで綴る**（`w8` / `w8a8` はどちらも `-i8` 系列を
+    指し、バイトは 1 組を共有する — 違うのは `session` だけ）。
+    """
+
+    #: 例外に載らない役割の格納 dtype。
+    dtype: str
+    #: 実行形ノブ（`session` の語彙は manifest 所有）。
+    session: Mapping[str, str]
+    #: 役割ごとの例外（混成席のためだけの口 — 既定が全役割へ効く形は崩さない）。
+    roles: Mapping[str, str] = {}
+
+
+#: quant 席の綴り → {@link QuantSeat}。
+#:
+#: **8 役一律をやめるのは `w4` 席だけ**（2026-08-23 ユーザー裁定）。2026-08-12 の裁定は「i8 も
+#: 一律」で、当時の根拠は混成にすると S（発話長）が席ごとにドリフトする実測だったが、その
+#: ドリフトは **GPTQ 校正で消えた**（`docs/research/2026-08-20-gptq-awq-calibrated-rounding.md`
+#: §6 — 校正付き丸めで S は f32 と完全一致）。`w8` / `w8a8` の 8 役一律は従来どおり。
 #:
 #: MUST: `w8a8` の `linearCompute` は **`dit` の Session にだけ**降りる（models 側 `pipeline.ts`
 #: のモジュール doc）— DiT の linear 317 本が唯一の適格集合で、条件エンコーダ 5 本は 1 生成に
 #: 1 回しか走らない。
-IRODORI_QUANT_SEATS: Mapping[str, tuple[str, Mapping[str, str]]] = {
-    "f32": ("f32", {}),
-    "f16": ("f16", {}),
-    "w8": ("i8", {}),
-    "w8a8": ("i8", {"linearCompute": "i8a8"}),
+#:
+#: MUST: `w4` は **`linearCompute` を宣言しない**。i4 常駐 × i8 活性は w4a8 経路（ADR 0076・
+#: group 部分縮約）に乗るが、その構成は irodori では**一度も測っていない**（perf-ledger の
+#: 席は重み側のみ）。anima では同じ構成が実 GPU の画で品質裁定に落ちている（ADR 0076 決定 6 /
+#: `anima/distribution.py` の同 MUST）ので、測る前に宣言だけ足すと「速いが荒い」を既定の顔で
+#: 配ることになる。この席の存在理由は**サイズと VRAM**であって速度ではない。
+IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
+    "f32": QuantSeat("f32", {}),
+    "f16": QuantSeat("f16", {}),
+    "w8": QuantSeat("i8", {}),
+    "w8a8": QuantSeat("i8", {"linearCompute": "i8a8"}),
+    "w4": QuantSeat("i8", {}, {"dit": "i4"}),
 }
 
 IRODORI_QUANTS: Mapping[str, Any] = {
-    seat: {"weights": dict.fromkeys(IRODORI_GRAPH_ROLES, dtype), "session": dict(session)}
-    for seat, (dtype, session) in IRODORI_QUANT_SEATS.items()
+    name: {
+        "weights": {role: seat.roles.get(role, seat.dtype) for role in IRODORI_GRAPH_ROLES},
+        "session": dict(seat.session),
+    }
+    for name, seat in IRODORI_QUANT_SEATS.items()
 }
 
 #: 既定は `w8a8`（ユーザー聴感裁定 2026-08-12 — DAC + ヘッドホンで f32/f16/w8/w8a8 を通しで
@@ -302,8 +373,9 @@ class IrodoriSources:
 
     model: Path
     codec_model: Path
-    #: 格納 dtype → 系列 root（`IRODORI_WEIGHT_DTYPES` の全 dtype が必ず載る）。
+    #: 格納 dtype → 系列 root（{@link IRODORI_DTYPE_ROLES} が Irodori 側の役割を持つ dtype）。
     series_by_dtype: Mapping[str, Path]
+    #: 同・コーデック側（コーデックは i4 系列を持たないので f32 / f16 / i8 の 3 本）。
     codec_series_by_dtype: Mapping[str, Path]
 
     @property
@@ -334,7 +406,11 @@ def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> Iro
         dtype: series_dir / f"{irodori_series_name(model)}{tail}" for dtype, tail in suffix.items()
     }
     codec_by_dtype = {
-        dtype: series_dir / f"{IRODORI_CODEC_NAME}{tail}" for dtype, tail in suffix.items()
+        dtype: series_dir / f"{IRODORI_CODEC_NAME}{tail}"
+        for dtype, tail in suffix.items()
+        # コーデックが席を持たない dtype（i4）の root は**作らない** — 使わない path を配って
+        # おくと、i4 の役割が増えた日に「在ることになっている系列」が黙って参照される。
+        if not set(IRODORI_DTYPE_ROLES[dtype]).isdisjoint(IRODORI_CODEC_DIRS)
     }
     return IrodoriSources(
         model=INPUTS_ROOT / IRODORI_SERIES_PREFIX / model,
@@ -350,23 +426,17 @@ def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
     この表に無いものは出力へ入らない（`io.*.safetensors` と tokenizer の golden 3 本は
     これで落ちる）。
     """
-    return {
-        **{
-            irodori_role(role, dtype): sources.series_by_dtype[dtype]
-            / directory
-            / "model.safetensors"
-            for role, directory in IRODORI_SERIES_DIRS.items()
-            for dtype in IRODORI_WEIGHT_DTYPES
-        },
-        **{
-            irodori_role(role, dtype): sources.codec_series_by_dtype[dtype]
-            / directory
-            / "model.safetensors"
-            for role, directory in IRODORI_CODEC_DIRS.items()
-            for dtype in IRODORI_WEIGHT_DTYPES
-        },
-        "tokenizer": sources.series / IRODORI_TOKENIZER_DIR / IRODORI_TOKENIZER_FILE,
-    }
+    placements = {"tokenizer": sources.series / IRODORI_TOKENIZER_DIR / IRODORI_TOKENIZER_FILE}
+    for dtype, roles in IRODORI_DTYPE_ROLES.items():
+        for role in roles:
+            series = (
+                sources.series_by_dtype[dtype]
+                if role in IRODORI_SERIES_DIRS
+                else sources.codec_series_by_dtype[dtype]
+            )
+            directory = (IRODORI_SERIES_DIRS | IRODORI_CODEC_DIRS)[role]
+            placements[irodori_role(role, dtype)] = series / directory / "model.safetensors"
+    return placements
 
 
 def irodori_model_config(model_dir: Path) -> Mapping[str, Any]:
@@ -519,11 +589,12 @@ def assert_irodori_graphs(
 
     MUST: **格納 dtype の系列を 1 本残らず**掛ける。f16 系列は f32 とは別プロセスの emit なので、
     片方だけ検査すると「f32 は宣言どおりだが f16 だけ別の版」が素通りする（格納 dtype の一致は
-    {@link assert_storage} が見るが、あちらはグラフ宣言を一切見ない）。
+    {@link assert_storage} が見るが、あちらはグラフ宣言を一切見ない）。i4 系列は `dit` 1 本しか
+    持たない（{@link IRODORI_DTYPE_ROLES}）ので、その系列に**在る役割だけ**を掛ける。
     """
-    for dtype in IRODORI_WEIGHT_DTYPES:
+    for dtype, roles in IRODORI_DTYPE_ROLES.items():
         _assert_irodori_graph_set(
-            {role: placements[irodori_role(role, dtype)] for role in IRODORI_GRAPH_ROLES},
+            {role: placements[irodori_role(role, dtype)] for role in roles},
             pipeline_config,
         )
 
@@ -531,9 +602,16 @@ def assert_irodori_graphs(
 def _assert_irodori_graph_set(
     placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
 ) -> None:
-    """1 系列ぶんの 8 グラフを検査する（`placements` のキーは dtype 接尾の無いグラフ役割名）。"""
-    graphs = {role: ir_graph(placements[role]) for role in IRODORI_GRAPH_ROLES}
+    """1 系列ぶんのグラフを検査する（`placements` のキーは dtype 接尾の無いグラフ役割名）。
+
+    その系列に**在る役割だけ**を受ける（i4 系列は `dit` 1 本）。役割を跨ぐ突合（`speaker` の
+    patch 幅）は両方が在るときだけ掛ける — 片方しか無い系列で「掛からなかった」ことは
+    {@link assert_irodori_graphs} の全 dtype ループが他系列で埋める。
+    """
+    graphs = {role: ir_graph(path) for role, path in placements.items()}
     for role, (expected_inputs, expected_outputs) in IRODORI_GRAPH_SHAPES.items():
+        if role not in graphs:
+            continue
         path = placements[role]
         graph = graphs[role]
         names = tuple(graph_inputs(graph, path))
@@ -551,6 +629,8 @@ def _assert_irodori_graph_set(
                 "ない — 別のターゲットの資産が混ざっている"
             )
     for role, name, axis, field_name in IRODORI_STATIC_DIMS:
+        if role not in graphs:
+            continue
         declared = graph_inputs(graphs[role], placements[role])[name][axis]
         expected = pipeline_config[field_name]
         if declared != expected:
@@ -560,13 +640,14 @@ def _assert_irodori_graph_set(
                 "焼かれたグラフが別の版"
             )
     # 参照 latent は patch してから `speaker` へ渡す（ADR 0047 決定 4）ので、入力幅は 2 欄の積。
-    patched = pipeline_config["latentDim"] * pipeline_config["speakerPatchSize"]
-    width = graph_inputs(graphs["speaker"], placements["speaker"])["latent"][2]
-    if width != patched:
-        raise DistError(
-            f"{placements['speaker']} の入力 'latent' の軸 2 が {width!r}、pipelineConfig の"
-            f" latentDim × speakerPatchSize は {patched}"
-        )
+    if "speaker" in graphs:
+        patched = pipeline_config["latentDim"] * pipeline_config["speakerPatchSize"]
+        width = graph_inputs(graphs["speaker"], placements["speaker"])["latent"][2]
+        if width != patched:
+            raise DistError(
+                f"{placements['speaker']} の入力 'latent' の軸 2 が {width!r}、pipelineConfig の"
+                f" latentDim × speakerPatchSize は {patched}"
+            )
     # `dit` の `mask` は「latent S + 条件 3 区間」の長さで宣言される（ADR 0046 の派生次元）。
     # 区間の合計がずれると、マスクの区間割りだけが黙って別の位置を指す。
     symbols = graphs["dit"].get("symbols")
@@ -583,6 +664,35 @@ def _assert_irodori_graph_set(
         )
 
 
+def assert_irodori_calib_provenance(sources: IrodoriSources) -> None:
+    """i4 系列が**校正付き**（GPTQ）で丸められたことを、書き出し側の記録で確かめる。
+
+    MUST: 校正の有無は格納形を 1 バイトも変えない（格子は RTN i4 g32 のまま — 変わるのは
+    丸め値と scale 台帳だけ）。したがって `verify_dist` の構造検査もヘッダ dtype 検査も
+    {@link assert_irodori_graphs} も**素通りする**。`--no-calib` は smoke 用の opt-out なのに、
+    その生成物が配布へ紛れても資産からは判別できず、出るのは音の劣化だけ — anima の
+    `assert_calib_provenance` と同じ「別々の台本が持つ同じ事実は組み立て時に必ず突き合わせる」
+    規律をここにも敷く。
+    """
+    directory = IRODORI_SERIES_DIRS["dit"]
+    path = sources.series_by_dtype["i4"] / directory / CALIB_PROVENANCE_FILE
+    if not path.is_file():
+        raise DistError(
+            f"i4 系列の校正条件の記録が無い: {path}"
+            "（`python -m irodori.export --dtype i4` で再エクスポートすると書かれる）"
+        )
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as cause:
+        raise DistError(f"校正条件の記録を解析できない: {path} — {cause}") from cause
+    method = record.get("method") if isinstance(record, dict) else None
+    if method != CALIB_SHIPPABLE_METHOD:
+        raise DistError(
+            f"i4 系列が配布して良い丸め方式で作られていない: {path} は {method!r}、"
+            f"配布可は {CALIB_SHIPPABLE_METHOD!r} — `--no-calib` の生成物は配布に使わない"
+        )
+
+
 def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) -> ModelPlan:
     """Irodori 1 モデルぶんの計画を組む（検査と config の読み取りをここで全部済ませる）。"""
     assert_model_name(model)
@@ -590,6 +700,7 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
     pipeline_config = irodori_pipeline_config(
         irodori_model_config(sources.model), irodori_codec_numbers(sources.codec_model)
     )
+    assert_irodori_calib_provenance(sources)
     for role, source in placements.items():
         assert_storage(role, source, IRODORI_STORAGE_REQUIREMENTS)
         assert_storage_absent(role, source, IRODORI_STORAGE_FORBIDDEN)

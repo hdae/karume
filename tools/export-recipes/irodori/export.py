@@ -181,6 +181,13 @@ tolerance）が圧縮資産へ黙って掛かるため、系列は必ず分け�
 i8 は per-channel symmetric（ADR 0019）で、丸めと同時に採れる scale 台帳を emit へ渡す
 （{@link TARGET_SCALE_SOURCES} が「素のモジュール内 FQN → ラッパ内 FQN」の張り替えを持つ）。
 
+`--dtype i4` は **`dit` だけの系列**（{@link DTYPE_TARGETS}）で、DiT の適格 linear が group32
+symmetric int4（ADR 0069）・残りは i8。丸めは既定で **GPTQ 校正付き**（`irodori.calib` —
+block 外は素の RTN・block 内は参照 denoise から採った活性で丸め先を選び直す）で、`--no-calib`
+だけが opt-out。校正の有無は格納形を 1 バイトも変えないので、条件は `calib_provenance.json`
+（{@link _write_calib_provenance}）に残して組み立て側が突き合わせる。他 7 役は quant 席 `w4`
+でも i8 系列のバイトを共有するので、i4 系列は書かない。
+
 MUST: `--dtype` は emit 専用（`export_sbv2.py` の `--verify` 排他と同じ性格）。この台本は
 検証専用モードを持たないので機械的な排他は要らないが、丸めた重みで採った参照を
 「パッチ前の参照」以外の用途へ回さない規律は同じ。
@@ -200,9 +207,10 @@ import dataclasses
 import json
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 from safetensors import safe_open
@@ -218,17 +226,28 @@ from karume.convert import (
 )
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.quantize import QUANT_CHANNEL_AXES, fake_quant_int8, round_weights_to_f16
+from karume.quantize import (
+    QUANT_CHANNEL_AXES,
+    fake_quant_int4,
+    fake_quant_int8,
+    round_weights_to_f16,
+)
 from karume.rope import ROPE_BUFFER_NAMES, assert_rope_lifted
 
 from . import patch
+from .distribution import CALIB_PROVENANCE_FILE
+
+if TYPE_CHECKING:  # 実行時は遅延 import（下の {@link _fake_quant_i4} の NOTE）
+    from .calib import CalibContext
 
 #: 実重みの置き場（`hf download Aratako/Irodori-TTS-v4-Small` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "irodori" / "v4-small"
 
 #: 書き出せる格納 dtype。`i8` は波 2（ADR 0050 決定 6 の分岐点 = S ドリフトの実測材料）で
-#: 足した。**w8a8 は後続の波**（活性量子化は dist の席と判別帯 E2E が要る）。
-WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
+#: 足した。**w8a8 は後続の波**（活性量子化は dist の席と判別帯 E2E が要る）。`i4` は
+#: **`dit` だけの系列**（{@link DTYPE_TARGETS}）で、丸めは既定で GPTQ 校正付き
+#: （{@link _fake_quant_i4}）。
+WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 
 #: モデル実装（GitHub `Aratako/Irodori-TTS` の clone）の置き場。
 DEFAULT_SOURCE_DIR = INPUTS_ROOT / "irodori" / "Irodori-TTS"
@@ -278,6 +297,21 @@ TARGET_DIT = "dit"
 #: 同じ token 列 golden ケースを共有する 3 本（backbone を 2 つの projector が食う鎖）。
 TEXT_TARGETS = (TARGET_BACKBONE, TARGET_TEXT_PROJ, TARGET_CAPTION_PROJ)
 TARGETS = (*TEXT_TARGETS, TARGET_SPEAKER, TARGET_DURATION, TARGET_DIT)
+
+#: 格納 dtype ごとに書き出すターゲット。i4 系列が `dit` だけなのは、i4 の実行経路が linear の
+#: 重みスロット限定（ADR 0069 決定 5）で、DiT 以外の役割は quant 席 `w4` でも **i8 系列の
+#: バイトをそのまま共有する**から（`irodori.distribution.IRODORI_QUANT_SEATS`）— 他役割の
+#: i4 系列を書いても配布表が引かない。
+#:
+#: MUST: 既定を絞るだけでなく `--target` の明示も拒否する（{@link main}）。「書いたのに配布表が
+#: 引かない系列」が黙って残ると、次の波で「i4 の他役割も測ってある」という事実でない前提の
+#: 材料になる。
+DTYPE_TARGETS: Mapping[str, tuple[str, ...]] = {
+    "f32": TARGETS,
+    "f16": TARGETS,
+    "i8": TARGETS,
+    "i4": (TARGET_DIT,),
+}
 
 #: テキスト系 3 本の記号次元名（IR に載る名前）。
 TEXT_SYMBOL = "T"
@@ -1706,17 +1740,38 @@ def _graph_summary(graph: IrGraph, path: Path) -> dict[str, Any]:
 
 
 class FakeQuantResult(NamedTuple):
-    """{@link fake_quant} の戻り（丸めの要約と、i8 の per-channel scale 台帳）。"""
+    """{@link fake_quant} の戻り（丸めの要約と、i8 / i4 の scale 台帳と 1 本単位の格納指定）。"""
 
     #: 役割名 → 丸めた本数の要約（`--dtype` を渡したのに 0 本、を沈黙させないための計数）。
     reports: dict[str, str]
-    #: 役割名 → **素のモジュール内 FQN** → scale（i8 以外は空）。emit が引く**ラッパ内 FQN**
-    #: への張り替えは {@link target_scales} が行う。
+    #: 役割名 → **素のモジュール内 FQN** → scale（f32 / f16 では空）。emit が引く
+    #: **ラッパ内 FQN** への張り替えは {@link target_scales} が行う。
     scales: dict[str, Mapping[str, torch.Tensor]]
+    #: 役割名 → **素のモジュール内 FQN** → 格納 dtype の**明示指定**（i4 以外では空）。
+    #: 張り替えは {@link target_weight_dtypes}。既定 `weight_dtype` が適格外を静かに f32 で
+    #: 残すのに対し、明示指定は満たせなければ emit が fail loudly する（`karume.emit` の
+    #: `_plan_weight_dtype`）— i4 の 317 本を 1 本単位で名指しするのはそのため。
+    overrides: dict[str, Mapping[str, str]]
+
+
+@dataclass(frozen=True)
+class CalibPlan:
+    """i4 系列の丸めに要る「重み以外」（`--dtype i4` のときだけ渡る）。
+
+    `calibrated` が False = `--no-calib`（素の RTN・**配布資産にしない** smoke 用）。校正の
+    失敗を握って素の RTN へ落ちる分岐は持たない — opt-out は明示のこの 1 本きり。
+    """
+
+    context: CalibContext
+    #: 校正ケース（`irodori.calib_cases.calibration_cases` が分離検査つきで返したもの）。
+    cases: tuple[Any, ...]
+    #: 1 ケースあたりの捕捉 step 数。
+    steps: int
+    calibrated: bool = True
 
 
 #: ターゲット → そのグラフに載せる scale の出どころ `(役割, 素の FQN 接頭辞,
-#: ラッパ内 FQN 接頭辞)` の並び（i8 のみ使う）。
+#: ラッパ内 FQN 接頭辞)` の並び（i8 / i4 で使う）。
 #:
 #: MUST: グラフラッパのコンストラクタと同じ綴りにする — ラッパは `load_*` が返した
 #: モジュールを別の属性名で抱えるので、台帳のキー（素のモジュール内 FQN）は emit が引く
@@ -1745,39 +1800,250 @@ def _has_quantizable_weights(module: nn.Module) -> bool:
     return any(isinstance(child, types) for child in module.modules())
 
 
-def target_scales(
-    target: str, wrapper: nn.Module, scales: Mapping[str, Mapping[str, torch.Tensor]]
-) -> dict[str, torch.Tensor]:
-    """役割ごとの scale 台帳を、そのターゲットの**ラッパ内 FQN**へ張り替えて 1 本に束ねる。
+def _rebase_to_wrapper(
+    target: str, wrapper: nn.Module, by_role: Mapping[str, Mapping[str, Any]], what: str
+) -> dict[str, Any]:
+    """役割ごとの台帳を、そのターゲットの**ラッパ内 FQN**へ張り替えて 1 本に束ねる。
 
-    emit は initializer のテンソルキー（= export したモジュール内 FQN）で scale を引く
-    （`karume.emit._plan_i8`）ので、`load_*` が返す素のモジュール基準の台帳をそのまま
-    渡すと 1 本も当たらない。張り替え表は {@link TARGET_SCALE_SOURCES}。
+    emit は initializer のテンソルキー（= export したモジュール内 FQN）で scale も 1 本単位の
+    格納指定も引く（`karume.emit._plan_i8` / `_plan_weight_dtype`）ので、`load_*` が返す素の
+    モジュール基準のキーをそのまま渡すと 1 本も当たらない。張り替え表は
+    {@link TARGET_SCALE_SOURCES}。
 
     ここで落とすのは**ラッパに無い重み**だけ（`dit` の台帳は使わない内側のコピーまで含む）。
     逆向き（ラッパにあるのに台帳に無い）は emit が fail loudly で落とす — 適格な重みスロットに
-    scale が無ければ i8 格納にできないため、黙って f32 へ落ちる経路は無い。
+    scale が無ければ圧縮格納にできないため、黙って f32 へ落ちる経路は無い。
+
+    scale と格納指定で**同じ張り替えを 2 通り書かない**ためにここが 1 本の実装を持つ
+    （キーが割れると、i4 の指定だけがラッパの外を指したまま緑になる）。
     """
-    if not scales:
-        return {}
     owned = {name for name, _ in wrapper.named_parameters()}
-    picked: dict[str, torch.Tensor] = {}
+    picked: dict[str, Any] = {}
     for role, source, destination in TARGET_SCALE_SOURCES[target]:
-        for key, scale in scales.get(role, {}).items():
+        for key, value in by_role.get(role, {}).items():
             if not key.startswith(source):
                 continue
             rebased = destination + key[len(source) :]
             if rebased in owned:
-                picked[rebased] = scale
+                picked[rebased] = value
     if not picked:
         raise SystemExit(
-            f"{target}: scale 台帳が 1 本もラッパ内 FQN へ張り替えられなかった"
+            f"{target}: {what}が 1 本もラッパ内 FQN へ張り替えられなかった"
             f"（{TARGET_SCALE_SOURCES[target]} の接頭辞がラッパの構成と食い違っている）"
         )
     return picked
 
 
-def fake_quant(dtype: str, modules: Mapping[str, nn.Module]) -> FakeQuantResult:
+def target_scales(
+    target: str, wrapper: nn.Module, scales: Mapping[str, Mapping[str, torch.Tensor]]
+) -> dict[str, torch.Tensor]:
+    """役割ごとの scale 台帳をラッパ内 FQN へ張り替えて 1 本に束ねる（i8 / i4 共通）。"""
+    if not scales:
+        return {}
+    return _rebase_to_wrapper(target, wrapper, scales, "scale 台帳")
+
+
+def target_weight_dtypes(
+    target: str, wrapper: nn.Module, overrides: Mapping[str, Mapping[str, str]]
+) -> dict[str, str]:
+    """役割ごとの 1 本単位の格納指定をラッパ内 FQN へ張り替える（i4 系列でのみ非空）。"""
+    if not overrides:
+        return {}
+    return _rebase_to_wrapper(target, wrapper, overrides, "格納 dtype の明示指定")
+
+
+def _calib_plan(
+    model_dir: Path,
+    source: Any,
+    config: Any,
+    text_config: Mapping[str, Any],
+    model_config: Mapping[str, Any],
+    steps: int | None,
+    no_calib: bool,
+) -> CalibPlan:
+    """i4 系列の丸めの足場を組む（校正ケースは分離検査を通ったものだけ）。"""
+    from . import calib
+    from .calib_cases import calibration_cases
+
+    return CalibPlan(
+        context=calib.CalibContext(
+            model_dir=model_dir,
+            source=source,
+            config=config,
+            text_config=text_config,
+            model_config=model_config,
+        ),
+        cases=calibration_cases(),
+        steps=calib.CALIB_STEPS if steps is None else steps,
+        calibrated=not no_calib,
+    )
+
+
+def _write_calib_provenance(
+    dtype: str, plan: CalibPlan | None, target: str, target_dir: Path
+) -> str | None:
+    """i4 系列の丸め条件（方式・格子・ケース数・step 数）を系列へ書き、ファイル名を返す。
+
+    校正の有無は**格納形を 1 バイトも変えない**（格子は RTN i4 g32 のまま — 変わるのは丸め値と
+    scale 台帳だけ）ので、資産・manifest・ヘッダ検査のどれからも判別できない。それでいて
+    品質差は裁定を分ける大きさなので、`irodori.distribution.assert_irodori_calib_provenance`
+    が組み立て時にこの記録と突き合わせ、`--no-calib` の生成物が配布へ紛れるのを止める。
+
+    `--no-calib` でも**書く**（消すのではなく `rtn` と記録する）— 不在は「古い export」とも
+    読めてしまい、組み立て側が「校正なしを配ろうとした」を名指しで拒否できない。
+
+    MUST: i4 以外では**古い記録を消す**（全域関数）。`export_series` は系列ディレクトリを
+    掃除しないので、i4 で採った系列を別 dtype で採り直すと記録だけが前回のまま生き残り、
+    「校正付き」という事実でない主張が残る。
+    """
+    from . import calib
+
+    path = target_dir / CALIB_PROVENANCE_FILE
+    if dtype != "i4" or target != TARGET_DIT or plan is None:
+        path.unlink(missing_ok=True)
+        return None
+    record = {
+        "method": calib.CALIB_METHOD if plan.calibrated else "rtn",
+        "grid": calib.CALIB_GRID.kind,
+        "group_size": calib.CALIB_GRID.group_size,
+        "cases": len(plan.cases) if plan.calibrated else 0,
+        "steps": plan.steps if plan.calibrated else 0,
+    }
+    path.write_text(json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    return CALIB_PROVENANCE_FILE
+
+
+def _round_i4_calibrated(
+    dit: nn.Module,
+    i4_names: frozenset[str],
+    plan: CalibPlan,
+) -> tuple[Mapping[str, torch.Tensor], str]:
+    """DiT の i4 適格を「block 外 = 素の RTN」「block 内 = GPTQ」へ排他に割って丸める。
+
+    順序 MUST（① → ② → ③ → ④）:
+
+    1. **stage 分解一致門を丸める前に通す**（`irodori.calib.assert_stage_split`）— ずれた分解で
+       丸めると「別の経路の GPTQ」を出荷することになり、しかも数値は普通に出る。門に流す
+       forward は**丸め前の参照ループ 1 step**（校正入力と同じ作り方で採るので、形を捏造した
+       probe が上流とずれる余地が無い）。
+    2. **block 外の適格を先に RTN i4 で丸める** — 配布実行時に block へ入るのは i4 の
+       `in_proj` が作った hidden と i4 の `cond_module` が作った条件埋め込み。後に回すと
+       「f32 の周辺を通った活性」で選んだ丸め先を、i4 の周辺と組んで配ることになる。
+       **i8 側（DiT の外の 5 役割と、DiT が内側に持つコピー）も同じ理由で校正入力の捕捉より
+       前に丸める** — 呼び出し側（{@link fake_quant}）が i8 を先に済ませてからここへ来る。
+    3. 校正入力の生成（参照 denoise の捕捉）。
+    4. block 内の linear を GPTQ × RTN 格子で丸める。
+
+    MUST: block 内の linear は 1 本残らず i4 適格であること — 外れたら上流の構成が変わって
+    いる（校正は stage を丸ごと駆動するので 1 本だけ外す逃げ道が無い）。
+
+    戻りは `(i4 の scale 台帳, 診断の 1 行)`。
+    """
+    from . import calib
+
+    stages = calib.dit_stages(dit)
+    stage_names = calib.stage_linear_names(stages)
+    unaligned = sorted(stage_names - i4_names)
+    if unaligned:
+        raise SystemExit(
+            f"DiT block 内の linear {unaligned[:3]} が i4 適格でない"
+            "（校正は stage を丸ごと駆動するので 1 本だけ外す逃げ道が無い）"
+        )
+    probe = calib.capture_stage_batches(dit, plan.cases[:1], plan.context, steps=1, label="probe")[
+        0
+    ]
+    calib.assert_stage_split(stages, probe)
+    plain_names = i4_names - stage_names
+    plain = fake_quant_int4(dit, include=lambda name: name in plain_names)
+    print(
+        f"[fake-quant] {TARGET_DIT}: block 外の適格を i4 group へ丸めた（RTN）"
+        f" — {plain.describe()}",
+        flush=True,
+    )
+    runs = calib.capture_stage_batches(dit, plan.cases, plan.context, steps=plan.steps)
+    batches = tuple(batch for run in runs for batch in run.batches)
+    report, ledger = calib.calibrate_i4(stages, batches)
+    calib.assert_calib_covers_scan(report, stage_names)
+    # MUST: 2 経路は互いに素（重なれば同じ重みを 2 度丸めたことになり、値だけが静かに狂う）。
+    overlap = sorted(set(plain.scales) & set(ledger.scales))
+    if overlap:
+        raise SystemExit(f"i4 の 2 経路が同じ重みを丸めている（二重丸め）: {overlap[:3]}")
+    summary = (
+        f"格納 i4 へ丸めた — block 外 {plain.modules} 本は素の RTN /"
+        f" block 内は GPTQ 校正付き（{report.describe()}・"
+        f"ケース {len(plan.cases)} 件 × {plan.steps} step = バッチ {len(batches)} 本）"
+    )
+    return {**plain.scales, **ledger.scales}, summary
+
+
+def _fake_quant_i4(
+    modules: Mapping[str, nn.Module], plan: CalibPlan | None
+) -> tuple[dict[str, str], dict[str, Mapping[str, torch.Tensor]], dict[str, Mapping[str, str]]]:
+    """混成 i4 系列の丸め（DiT の適格 linear = i4 g32・残りは全て i8 per-channel）。
+
+    2 つの述語は {@link irodori.calib.dit_i4_names} から**排他に**割る（`quantize.py` の混成
+    MUST）。`dit` は `TextToLatentRFDiT` **丸ごと**（backbone / projector / speaker / duration の
+    コピーを内側に持つ）なので、i4 適格から外れた内側のコピーはここで i8 に落ちる — これは
+    配布の quant 席 `w4` が他 7 役に i8 系列のバイトを充てるのと同じ条件で、**校正入力を
+    配布条件へ合わせる**ための要（`irodori.distribution.IRODORI_QUANT_SEATS`）。
+
+    NOTE（遅延 import）: `irodori.calib` は `irodori.pipeline_ref` 経由でこのモジュールを
+    import し返すので、module 直下で読むと循環になる。同時に `irodori_tts` / `tokenizers` は
+    依存グループ側なので、この recipe 群の作法（要る関数の中で import する）にも合う。
+    """
+    from . import calib
+
+    if plan is None:
+        raise SystemExit(
+            "格納 i4 には校正の足場（CalibPlan）が要る"
+            "（`python -m irodori.export --dtype i4` から呼ぶ"
+            " — 素の RTN へ黙って落ちる分岐は持たない）"
+        )
+    dit = modules[TARGET_DIT]
+    i4_names = calib.dit_i4_names(dit, dit_sym_max(plan.context.config))
+    reports: dict[str, str] = {}
+    scales: dict[str, Mapping[str, torch.Tensor]] = {}
+    # MUST: i8 は**校正入力の捕捉より前**に当てる（順序 MUST ② — `_round_i4_calibrated`）。
+    for name, module in sorted(modules.items()):
+        include = (lambda key: key not in i4_names) if name == TARGET_DIT else None
+        if not _has_quantizable_weights(module):
+            reports[name] = "格納 f32 のまま（per-channel の対象型を持たない）"
+            continue
+        int8 = fake_quant_int8(module, include=include)
+        scales[name] = int8.scales
+        reports[name] = f"格納 i8 へ丸めた — {int8.describe()}"
+    for name, report in reports.items():
+        print(f"[fake-quant] {name}: {report}", flush=True)
+    if plan.calibrated:
+        int4_scales, summary = _round_i4_calibrated(dit, i4_names, plan)
+    else:
+        print(
+            f"[fake-quant] {TARGET_DIT}: --no-calib — 校正なしの素の RTN"
+            "（配布資産にしないこと・品質は perf-ledger Q-2 の基線より下）",
+            flush=True,
+        )
+        plain = fake_quant_int4(dit, include=lambda name: name in i4_names)
+        int4_scales = plain.scales
+        summary = f"格納 i4 へ丸めた（RTN・校正なし） — {plain.describe()}"
+    print(f"[fake-quant] {TARGET_DIT}: {summary}", flush=True)
+    # i8 の要約は**残す**（`dit` は 2 段掛かる — 内側の他役割コピーが i8・配布グラフの
+    # linear が i4）。上書きすると「i8 の対象が 0 本になった」退行が要約から読めなくなる。
+    reports[TARGET_DIT] = f"{reports[TARGET_DIT]} / {summary}"
+    # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「適格と数えたのに丸まって
+    # いない」形で、i4 席に i8 の重みが混ざったまま緑になる（サイズだけが静かに戻る）。
+    expected = {f"{name}.weight" for name in i4_names}
+    if set(int4_scales) != expected:
+        raise SystemExit(
+            f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(int4_scales)} 本"
+            f"（過不足: {sorted(set(int4_scales) ^ expected)[:3]}）"
+        )
+    scales[TARGET_DIT] = {**scales.get(TARGET_DIT, {}), **int4_scales}
+    return reports, scales, {TARGET_DIT: dict.fromkeys(int4_scales, "i4")}
+
+
+def fake_quant(
+    dtype: str, modules: Mapping[str, nn.Module], *, calib_plan: CalibPlan | None = None
+) -> FakeQuantResult:
     """格納 dtype の表現可能値へ**実効重み**を丸める（f32 は何もしない）。
 
     ADR 0006 / 0018 / 0019 / 0027 / 0050 の fake-quant。丸めた本数を役割名で引ける形にして
@@ -1803,9 +2069,16 @@ def fake_quant(dtype: str, modules: Mapping[str, nn.Module]) -> FakeQuantResult:
     （ADR 0019）。bias も norm 系の weight も**丸めない** — emit の適格判定でも重みスロット
     以外は f32 格納なので、両者は整合する。したがって 3 つの norm は i8 では素通りが正しく、
     「対象 0 本」を役割単位では落とさない（**全体で** 0 本なら落とす）。
+
+    NOTE: i4（`--dtype i4`）は {@link _fake_quant_i4} が受け持つ — DiT の適格 linear だけが
+    i4 group32 で、残りは全て i8。丸めは既定で GPTQ 校正付きなので `calib_plan` が要る。
     """
     if dtype == "f32":
-        return FakeQuantResult({}, {})
+        return FakeQuantResult({}, {}, {})
+    if not modules:
+        raise SystemExit(f"格納 {dtype} を指定したが丸める対象のモジュールが 1 本も無い")
+    if dtype == "i4":
+        return FakeQuantResult(*_fake_quant_i4(modules, calib_plan))
     reports: dict[str, str] = {}
     scales: dict[str, Mapping[str, torch.Tensor]] = {}
     for name, module in sorted(modules.items()):
@@ -1819,11 +2092,9 @@ def fake_quant(dtype: str, modules: Mapping[str, nn.Module]) -> FakeQuantResult:
             reports[name] = "格納 f32 のまま（per-channel の対象型を持たない）"
     for name, report in reports.items():
         print(f"[fake-quant] {name}: {report}", flush=True)
-    if not reports:
-        raise SystemExit(f"格納 {dtype} を指定したが丸める対象のモジュールが 1 本も無い")
     if dtype == "i8" and not scales:
         raise SystemExit("格納 i8 を指定したが per-channel 量子化できたモジュールが 1 本も無い")
-    return FakeQuantResult(reports, scales)
+    return FakeQuantResult(reports, scales, {})
 
 
 def export_series(
@@ -1834,6 +2105,8 @@ def export_series(
     targets: Sequence[str] = TARGETS,
     sym_max: int = SYM_MAX,
     dtype: str = "f32",
+    calib_steps: int | None = None,
+    no_calib: bool = False,
 ) -> dict[str, Any]:
     """IR コンテナと golden io を書き、要約を返す。"""
     source = IrodoriSource(source_dir)
@@ -1881,7 +2154,14 @@ def export_series(
     )
     duration = load_duration_predictor(source, state, config)
     dit = load_dit(source, state, config, text_config)
-    # MUST: 丸めは load の直後・参照の採取より前（{@link fake_quant} の順序 MUST）。
+    calib_plan = (
+        _calib_plan(model_dir, source, config, text_config, model_config, calib_steps, no_calib)
+        if dtype == "i4"
+        else None
+    )
+    # MUST: 丸めは load の直後・参照の採取より前（{@link fake_quant} の順序 MUST）。校正付き
+    # i4 の参照ループもこの時点で回る — 駆動が**素の DiT**（パッチ前でしか採れない参照の
+    # 手前）でなければならない理由は `irodori.calib` のモジュール docstring の MUST。
     quantized = fake_quant(
         dtype,
         {
@@ -1895,6 +2175,7 @@ def export_series(
             "text_norm": text_norm,
             "caption_norm": caption_norm,
         },
+        calib_plan=calib_plan,
     )
     cases = build_cases(model_dir, source, text_config, sym_max)
     speaker_max = speaker_sym_max(model_config)
@@ -2050,11 +2331,17 @@ def export_series(
             preserved=axis.preserved,
             weight_dtype=dtype,
             weight_scales=target_scales(target, graphs[target], quantized.scales),
+            weight_dtype_overrides=target_weight_dtypes(
+                target, graphs[target], quantized.overrides
+            ),
         )
         io_files = _write_io(graph, by_case, pristine[target], target_dir)
         written[target] = {
             **_graph_summary(graph, target_dir / MODEL_FILE),
             "io": io_files,
+            # 校正条件の記録（i4 の `dit` のみ）。**stdout の要約は人が読むためのもの**で、
+            # 機械の突き合わせは `calib_provenance.json` が持つ。
+            "calib_provenance": _write_calib_provenance(dtype, calib_plan, target, target_dir),
         }
     return {
         "dir": str(out_dir),
@@ -2079,7 +2366,7 @@ def export_series(
 
 
 def default_out_root(model_dir: Path, dtype: str = "f32") -> Path:
-    """生成物の既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16,-i8}/`）。
+    """生成物の既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16,-i8,-i4}/`）。
 
     ターゲット名のサブディレクトリは `export_series` が 1 段掘る（`export_sbv2.py` と同じ形）。
 
@@ -2100,31 +2387,60 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=Path,
         default=None,
         help="出力先（既定は --dtype ごとの系列 —"
-        " outputs/series/irodori-<--model-dir のディレクトリ名>{,-f16,-i8}/）",
+        " outputs/series/irodori-<--model-dir のディレクトリ名>{,-f16,-i8,-i4}/）",
     )
     parser.add_argument("--sym-max", type=int, default=SYM_MAX)
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f32",
-        help="重みの格納 dtype（f16 / i8 は fake-quant してから適格スロットだけ圧縮格納する"
-        " — ADR 0018 / 0019 / 0027 / 0050。**emit 専用**）",
+        help="重みの格納 dtype（f16 / i8 / i4 は fake-quant してから適格スロットだけ圧縮格納する"
+        " — ADR 0018 / 0019 / 0027 / 0050 / 0069。i4 は dit だけの系列で、丸めは既定で"
+        " GPTQ 校正付き。**emit 専用**）",
     )
     parser.add_argument(
         "--target",
         action="append",
         choices=TARGETS,
-        help="書き出すターゲット（繰り返し指定可。既定は全て）",
+        help="書き出すターゲット（繰り返し指定可。既定は --dtype ごとの全て）",
+    )
+    parser.add_argument(
+        "--calib-steps",
+        type=int,
+        default=None,
+        help="i4 の校正が 1 ケースあたり使う step 数（既定 = 参照ループ全 step）。"
+        "捕まえ切った時点で参照ループを畳むので、縮小 smoke ではここを下げる。"
+        "使った値は calib_provenance.json へ載る",
+    )
+    parser.add_argument(
+        "--no-calib",
+        action="store_true",
+        help="i4 の丸めを校正なしの素の RTN にする（smoke 用の明示 opt-out —"
+        " **配布資産には使わない**。組み立て側が calib_provenance.json で名指しで拒否する）",
     )
     args = parser.parse_args(argv)
+    allowed = DTYPE_TARGETS[args.dtype]
+    targets = tuple(args.target) if args.target else allowed
+    refused = sorted(set(targets) - set(allowed))
+    if refused:
+        parser.error(
+            f"--dtype {args.dtype} が書き出すのは {list(allowed)} だけ（指定 {refused}）"
+            " — 配布表が引かない系列を黙って書かない"
+        )
+    if args.dtype != "i4" and (args.no_calib or args.calib_steps is not None):
+        parser.error(f"--calib-steps / --no-calib は --dtype i4 だけに効く（指定は {args.dtype}）")
+    if args.calib_steps is not None and args.calib_steps < 1:
+        parser.error(f"--calib-steps は 1 以上（指定 {args.calib_steps}）")
     out_dir = default_out_root(args.model_dir, args.dtype) if args.out is None else args.out
     summary = export_series(
         args.model_dir,
         args.source_dir,
         out_dir,
-        targets=tuple(args.target) if args.target else TARGETS,
+        targets=targets,
         sym_max=args.sym_max,
         dtype=args.dtype,
+        calib_steps=args.calib_steps,
+        no_calib=args.no_calib,
     )
     print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
 

@@ -38,6 +38,18 @@ uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype f16 
 uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype f16  # 6'. codec
 ```
 
+The `w4` quant seat adds an **i4 series for `dit` only** — the other seven roles share the i8 bytes,
+so nothing else is re-exported for it. Step 7 requires this series; the rounding is GPTQ-calibrated
+by default and takes hours of CPU time (four calibration cases × the full reference loop):
+
+```sh
+uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i4   # 2''. dit only, calibrated
+```
+
+`--no-calib` swaps the calibration for plain RTN. It exists for smoke runs only: the storage form is
+byte-identical either way, so `dist` refuses the result by reading the `calib_provenance.json` the
+export writes next to the container.
+
 Order caveats measured in practice: step 2 reads step 5's real latent for the speaker cases
 (`SPEAKER_REAL_CASES`), and step 6 reads step 4's `z` for the decoder cases — so a **full** rebuild
 from scratch runs 2 once more after 5 (2 → 3 → 4 → 5 → 2 → 6 → 7). Incremental regeneration of a
