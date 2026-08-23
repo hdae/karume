@@ -134,6 +134,7 @@ def _calib_record(method: str) -> bytes:
             "prompts": 4,
             "resolution": 512,
             "steps": 8,
+            "guidance": 1.0,
             "text_dtype": "f16",
         }
     ).encode("utf-8")
@@ -383,28 +384,33 @@ class TestLoraProvenance:
 class TestBaseModels:
     """LoRA を焼かないモデル（`anima` / 第三者 fine-tune）— turbo とは席も検査も違う。"""
 
-    def test_a_plain_model_declares_no_i4_seat(self, tmp_path: Path) -> None:
-        """i4 席は校正条件が turbo 前提なので base 系には載せない（波 J-4a の続き）。
+    def test_a_plain_model_declares_the_i4_seat_like_turbo(self, tmp_path: Path) -> None:
+        """素版も turbo と同型の i4 席を持つ（波 J-4 ② — 校正条件がモデル別になった）。
 
-        「宣言しない」は quant 表とファイル一覧の**両方**で見る — 片方だけだと、席は消えたが
-        ファイルは配られている（= 誰も参照しない 1.2GB）状態が緑になる。
+        「宣言する」は quant 表とファイル一覧の**両方**で見る — 片方だけだと、席は在るが
+        ファイルが配られていない（= 選ぶと 404 になる quant）状態が緑になる。
         """
         sources = _build_series(tmp_path / "series", model="anima-v1.0")
         out_dir = tmp_path / "models" / "anima-v1.0"
         manifest = _assemble_anima(sources, out_dir, "anima-v1.0")
 
         entry = manifest["models"]["anima-v1.0"]
-        assert sorted(entry["weights"]["transformer"]) == ["f16", "i8"]
-        assert "w4" not in entry["quants"]
-        assert "w4-a8-s16" not in entry["quants"]
-        assert not (out_dir / "anima-v1.0" / OUTPUT_PATHS["transformer_i4"]).exists()
+        assert sorted(entry["weights"]["transformer"]) == ["f16", "i4", "i8"]
+        assert entry["quants"]["w4"]["weights"]["transformer"] == "i4"
+        assert entry["quants"]["w4-a8-s16"]["weights"]["transformer"] == "i4"
+        assert (out_dir / "anima-v1.0" / OUTPUT_PATHS["transformer_i4"]).exists()
 
-    def test_a_plain_model_never_asks_for_an_i4_series(self, tmp_path: Path) -> None:
-        """i4 系列が存在しなくても組める（要求そのものが無い）。"""
-        sources = _build_series(tmp_path / "series", model="anima-v1.0")
+    def test_a_plain_model_requires_a_calibrated_i4_series(self, tmp_path: Path) -> None:
+        """席を宣言した以上、素版の i4 系列も**校正付き**であることまで突き合わせる。
 
-        assert "i4" not in sources.transformer
-        assert not (tmp_path / "series" / "anima-i4-dyn").exists()
+        素版の校正は turbo と別条件（多 step・CFG）で回るが、配布可の判定は方式だけを見る —
+        条件がモデル別になったことが門を緩める側へ効いていないことを、モデルを変えて踏む。
+        """
+        sources = _build_series(tmp_path / "series", model="anima-v1.0", calib_method="rtn")
+
+        assert sources.transformer["i4"].name == "anima-v1.0-i4-dyn"
+        with pytest.raises(DistError, match="配布して良い丸め方式で作られていない"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-v1.0", "anima-v1.0")
 
     def test_it_stops_when_a_plain_model_gets_a_series_with_a_baked_lora(
         self, tmp_path: Path
@@ -510,6 +516,26 @@ class TestCalibProvenance:
 
         with pytest.raises(DistError, match="校正条件の記録を解析できない"):
             _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+    def test_a_record_written_before_the_guidance_field_is_still_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        """後方互換 MUST: 欄を足しても**既存の系列を作り直させない**。
+
+        `guidance` は校正条件をモデル別化した 2026-08-23 に足した欄で、それ以前に採った
+        turbo の i4 系列（HF へ上げた現物）には無い。読み手が欄の存在を要求すると、この 1 行の
+        追加が「丸め時間ぶんの再 export」を既存系列へ課すことになる — 読むのは `method` だけに
+        留める。
+        """
+        sources = _build_series(tmp_path / "series")
+        path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
+        legacy = json.loads(path.read_text(encoding="utf-8"))
+        del legacy["guidance"]
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        manifest = _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+        assert "w4" in manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]
 
     def test_the_record_never_reaches_the_distribution(self, assembled) -> None:
         """記録は系列側の事実 — 配布形（HF リポ）には持ち出さない。"""
@@ -935,12 +961,11 @@ class TestFamilyAssembly:
             "tokenizer_2",
             "rope_base",
         )
-        private_roles = ("transformer_f16", "transformer_i8")
         expected = [f"{SHARED_DIRNAME}/{OUTPUT_PATHS[role]}" for role in shared_roles]
         expected += [
-            f"{model}/{OUTPUT_PATHS[role]}"
+            f"{model}/{OUTPUT_PATHS[f'transformer_{storage}']}"
             for model in ("anima-v1.0", "anima-wai-v1.0")
-            for role in private_roles
+            for storage in anima_model(model).storages
         ]
         assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
 

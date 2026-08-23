@@ -56,6 +56,10 @@ uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn \
   --out ../../outputs/series/anima-v1.0-f16-dyn
 uv run --group anima python -m anima.export --dtype i8 --dit-graph dyn \
   --out ../../outputs/series/anima-v1.0-i8-dyn
+# the i4 series needs --model as well: the calibration conditions come from that model's shipped
+# defaults (20 steps, CFG 4 for the plain models — see the i4 section below)
+uv run --group anima python -m anima.export --dtype i4 --dit-graph dyn --model anima-v1.0 \
+  --out ../../outputs/series/anima-v1.0-i4-dyn
 
 # a community fine-tune shipped as a single ComfyUI-style file: rebuild it into a diffusers
 # layout first, then export from that directory. Such a checkpoint carries its own llm_adapter,
@@ -69,6 +73,9 @@ uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers
   --dtype f16 --dit-graph dyn --out ../../outputs/series/anima-wai-v1.0-f16-dyn
 uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai-v1.0 \
   --dtype i8 --dit-graph dyn --out ../../outputs/series/anima-wai-v1.0-i8-dyn
+uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai-v1.0 \
+  --dtype i4 --dit-graph dyn --model anima-wai-v1.0 \
+  --out ../../outputs/series/anima-wai-v1.0-i4-dyn
 ```
 
 - **`--verify` and `--target` cannot be combined in the same process.** The VAE patches replace
@@ -387,8 +394,9 @@ turbo DiT that selects 453 linears for i4 and leaves the patchify entrance (`pat
 axis 68) on i8. Output goes to `outputs/series/anima-i4/`.
 
 ```sh
-uv run --group anima python -m anima.export --dtype i4                  # GPTQ-calibrated (default)
-uv run --group anima python -m anima.export --dtype i4 --calib-prompts 12
+# GPTQ-calibrated (the default); --model names whose conditions to calibrate under
+uv run --group anima python -m anima.export --dtype i4 --model anima-turbo
+uv run --group anima python -m anima.export --dtype i4 --model anima-turbo --calib-prompts 12
 uv run --group anima python -m anima.export --dtype i4 --no-calib       # plain RTN, smoke only
 ```
 
@@ -401,14 +409,29 @@ prompts, the first `--calib-prompts N` of them, default 4) and is **kept disjoin
 inputs** — the gate collects the evaluation prompts from their sources and fails loudly on any
 overlap, including partial matches in either direction.
 
-Two constraints that do not apply to the other series:
+**The calibration conditions are per model, and `--model` has no default.** The step count, the CFG
+scale and the negative prompt are derived from that model's shipped defaults (`pipelineConfig`
+in `anima/distribution.py`, read by `anima.calib.calib_conditions`) so that the sigma schedule the
+calibration sees is the one the model is actually run under. A default value is deliberately absent:
+a forgotten flag would calibrate a plain model under the turbo conditions (8 steps, CFG 1), and the
+resulting series is byte-indistinguishable from a correct one — the `calib_provenance.json` record
+would even state the wrong conditions as fact. **With CFG > 1 the reference denoise runs the cond
+and the uncond branch, and the calibration takes both** (at run time both are what passes through
+the DiT), so the uncond side is encoded from the model's negative prompt rather than reusing the
+positive embedding.
+
+Three constraints that do not apply to the other series:
 
 1. **`--resolution` is pinned to 512** while calibrating (the CLI rejects anything else). The 1024²
    activation distribution is therefore not part of the calibration.
-2. **Cost is CPU-bound and non-trivial** — tens of minutes at the default 4 prompts, scaling linearly
-   with `--calib-prompts`. The figure is derived from `CALIB_SECONDS_PER_BATCH` in `anima/calib.py`;
-   read it there rather than copying a number here. Both the prompt count and the resolution are
-   quality upside axes that have **not** been measured beyond the default.
+2. **Cost is CPU-bound and non-trivial** — tens of minutes at the default 4 prompts for turbo,
+   scaling linearly with `--calib-prompts`. The figure is derived from `CALIB_SECONDS_PER_BATCH` in
+   `anima/calib.py`; read it there rather than copying a number here. Both the prompt count and the
+   resolution are quality upside axes that have **not** been measured beyond the default.
+3. **The plain models cost several times more than turbo**, because the batch count is
+   `prompts × steps × branches`: 4 × 8 × 1 = 32 batches for turbo against 4 × 20 × 2 = 160 for the
+   plain defaults. Budget the export accordingly; the estimate is printed when the calibration
+   starts.
 
 The emit order is a **MUST**: decomposition gate → round the out-of-block eligible weights with plain
 RTN → capture the calibration inputs → run GPTQ on the in-block linears. Rounding the out-of-block

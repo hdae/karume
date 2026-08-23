@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import inspect
 from dataclasses import replace
 
@@ -34,8 +35,14 @@ import pytest
 import torch
 from torch import nn
 
-from anima import calib
+from anima import calib, pipeline_ref
 from anima import export as export_anima
+from anima.distribution import (
+    ANIMA_BASE_MODEL_NAME,
+    ANIMA_MODELS,
+    ANIMA_TURBO_MODEL_NAME,
+    BASE_MODELS,
+)
 
 #: 量子化軸（= group 長）。i4 は端数 group を作らない（ADR 0069 決定 2）。
 HIDDEN = 32
@@ -43,6 +50,10 @@ HIDDEN = 32
 PATCH_IN = 68
 #: トークン数（校正の hidden は `[1, TOKENS, HIDDEN]`）。
 TOKENS = 4
+#: 捕捉テストの latent 辺と、それを産む解像度（実物の 512px は 64² トークンで、ここでは
+#: 8² で足りる — 見るのは分岐の数え方であって活性の分布ではない）。
+CAPTURE_LATENT = 8
+CAPTURE_RESOLUTION = CAPTURE_LATENT * pipeline_ref.SPATIAL_COMPRESSION
 
 
 class TinyBlock(nn.Module):
@@ -211,6 +222,62 @@ class TinyWrapper(nn.Module):
         return model.proj_out(hidden_states)
 
 
+class DenoiseDit(nn.Module):
+    """参照 denoise から**本物のまま**呼ばれる縮図（`CosmosTransformer3DModel` の呼ばれ方）。
+
+    {@link TinyRawDit} と別に要るのは、{@link anima.calib.capture_stage_batches} が
+    `pipeline_ref.reference_steps` を通して DiT を回すため — 入口は keyword 5 本、latent は
+    rank5 `[1, LATENT_CHANNELS, 1, h, w]` で、出力も同じ形（Euler 更新 `x + Δσ·pred` が成立
+    する形）である必要がある。
+
+    MUST: `reference_steps` を写しに差し替えない。CFG の分岐（`skip_uncond`）を写すと、
+    捕捉バッチ数の検算門が**テスト側の写し**を検算するだけになり、上流の分岐が変わった日に
+    テストも一緒にずれる。
+    """
+
+    def __init__(self, blocks: int = 2, seed: int = 11) -> None:
+        super().__init__()
+        torch.manual_seed(seed)
+        self.patch_embed = nn.Linear(pipeline_ref.LATENT_CHANNELS, HIDDEN)
+        self.time_embed = TinyEmbedding()
+        self.transformer_blocks = nn.ModuleList(TinyBlock() for _ in range(blocks))
+        self.norm_out = TinyAdaLayerNorm()
+        self.proj_out = nn.Linear(HIDDEN, pipeline_ref.LATENT_CHANNELS)
+        self.eval()
+
+    def forward(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        timestep: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        padding_mask: torch.Tensor,
+        return_dict: bool = True,
+    ):
+        batch, channels, frames, height, width = hidden_states.shape
+        tokens = hidden_states.reshape(batch, channels, height * width).transpose(1, 2)
+        hidden = self.patch_embed(tokens)
+        temb = self.time_embed.t_embedder(timestep.reshape(1, 1).expand(batch, HIDDEN))
+        embedded_timestep = self.time_embed.norm(temb)
+        for block in self.transformer_blocks:
+            hidden = block(
+                hidden, encoder_hidden_states, embedded_timestep, temb, None, None, None, None
+            )
+        hidden = self.norm_out(hidden, embedded_timestep, temb)
+        out = self.proj_out(hidden).transpose(1, 2).reshape(batch, channels, frames, height, width)
+        return out if return_dict else (out,)
+
+
+def embed_for(text: str) -> torch.Tensor:
+    """プロンプト → テキスト条件（決定的・文字列ごとに別のテンソル）。
+
+    cond と uncond が**別の埋め込み**であることを捕捉の中身から言うための足場 — 同じ値を
+    返す stub にすると、「uncond に cond をそのまま流す」壊れ方がテストから見えなくなる。
+    """
+    seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16)
+    return torch.randn(1, TOKENS, HIDDEN, generator=torch.Generator().manual_seed(seed))
+
+
 def make_wrapper(blocks: int = 3, seed: int = 0, dit: type[TinyRawDit] = TinyRawDit) -> TinyWrapper:
     torch.manual_seed(seed)
     wrapper = TinyWrapper(dit(blocks))
@@ -255,8 +322,10 @@ def capture_batches(raw: nn.Module, probes) -> tuple:
     return tuple(batches)
 
 
-def i4_args(*, no_calib: bool = False) -> argparse.Namespace:
-    return argparse.Namespace(dtype="i4", no_calib=no_calib, calib_prompts=2, repo="unused")
+def i4_args(*, no_calib: bool = False, model: str = ANIMA_TURBO_MODEL_NAME) -> argparse.Namespace:
+    return argparse.Namespace(
+        dtype="i4", no_calib=no_calib, calib_prompts=2, repo="unused", model=model
+    )
 
 
 @pytest.fixture
@@ -285,6 +354,34 @@ def stub_capture(monkeypatch):
     return install
 
 
+@pytest.fixture
+def stub_text_stack(monkeypatch):
+    """テキスト前段（Qwen3 + conditioner）**だけ**を差し替える（参照 denoise は本物を回す）。
+
+    戻り値は `encode_prompt` が受け取ったプロンプトの並び — uncond 側の埋め込みが本当に
+    negative prompt から作られているかを、呼ばれ方の側からも見るため。
+    """
+    seen: list[str] = []
+
+    def load_text_stack(repo: str, dtype: str) -> str:
+        return f"stack:{repo}:{dtype}"
+
+    def encode_prompt(_stack: str, _max_len: int, text: str) -> dict[str, torch.Tensor]:
+        seen.append(text)
+        return {"encoder_hidden_states": embed_for(text)}
+
+    monkeypatch.setattr(calib.pipeline_ref, "load_text_stack", load_text_stack)
+    monkeypatch.setattr(calib.pipeline_ref, "encode_prompt", encode_prompt)
+    return seen
+
+
+def capture(model: nn.Module, prompts, conditions: calib.CalibConditions):
+    """縮図の DiT に対する {@link anima.calib.capture_stage_batches}（解像度だけ縮める）。"""
+    return calib.capture_stage_batches(
+        model, prompts, repo="unused", conditions=conditions, resolution=CAPTURE_RESOLUTION
+    )
+
+
 def quantize(wrapper: nn.Module, args: argparse.Namespace | None = None):
     return export_anima._fake_quant(
         args if args is not None else i4_args(),
@@ -292,6 +389,158 @@ def quantize(wrapper: nn.Module, args: argparse.Namespace | None = None):
         "transformer",
         calib_probe=make_probes(count=1, seed=3)[0],
     )
+
+
+class TestCalibConditions:
+    """校正条件は配布形の既定から**導く**（波 J-4 ② — 2026-08-23）。
+
+    turbo 前提のモジュール定数（8 step / CFG 1）だった頃は、素版の i4 席がこの 1 点で
+    塞がっていた。導出へ移した以上、見るべきは「turbo が 1 ビットも動いていないこと」と
+    「素版が自分の既定で回ること」の 2 つ。
+    """
+
+    def test_turbo_derives_what_the_module_constants_used_to_hold(self) -> None:
+        """MUST: turbo の校正条件は据え置き（丸め結果が動くと配布済みの資産と食い違う）。"""
+        conditions = calib.calib_conditions(ANIMA_TURBO_MODEL_NAME)
+
+        assert (conditions.steps, conditions.guidance) == (8, 1.0)
+        assert conditions.branches == 1, "CFG=1 は uncond 分岐を計算しない"
+
+    def test_the_plain_models_derive_their_cfg_conditions(self) -> None:
+        """素版 3 モデルは多 step + CFG — 1 step が forward 2 本になる。"""
+        for model in BASE_MODELS:
+            conditions = calib.calib_conditions(model)
+
+            assert (conditions.steps, conditions.guidance) == (20, 4.0), model
+            assert conditions.branches == 2, model
+            assert conditions.negative_prompt, model
+
+    def test_every_model_reads_its_own_pipeline_config(self) -> None:
+        """MUST: 校正条件と配布既定を独立に持たない（写しがあれば片方だけ古くなる）。"""
+        for model, spec in ANIMA_MODELS.items():
+            defaults = spec.pipeline_config["defaults"]
+            conditions = calib.calib_conditions(model)
+
+            assert conditions.steps == defaults["steps"], model
+            assert conditions.guidance == defaults["guidanceScale"], model
+            assert conditions.negative_prompt == defaults["negativePrompt"], model
+
+    def test_it_follows_a_change_to_the_shipped_defaults(self, monkeypatch) -> None:
+        """故障注入: 配布既定を動かすと校正条件も動く（定数へ戻したら緑にならない）。"""
+        spec = ANIMA_MODELS[ANIMA_TURBO_MODEL_NAME]
+        moved = replace(
+            spec,
+            pipeline_config={
+                "defaults": {**spec.pipeline_config["defaults"], "steps": 12, "guidanceScale": 2.5}
+            },
+        )
+        monkeypatch.setitem(ANIMA_MODELS, ANIMA_TURBO_MODEL_NAME, moved)
+
+        conditions = calib.calib_conditions(ANIMA_TURBO_MODEL_NAME)
+
+        assert (conditions.steps, conditions.guidance, conditions.branches) == (12, 2.5, 2)
+
+
+class TestCaptureBranches:
+    """CFG > 1 の捕捉 — 配布実行時に DiT を通る活性は cond / uncond の**両方**。
+
+    cond に絞ると「実際に流れる活性の半分」で丸め先を選ぶことになり、しかも本数の帳尻は
+    合うので資産からも診断行からも読めない。分岐を作るのは `pipeline_ref.reference_steps`
+    （本物を回す）で、ここが見るのはその結果を捕捉と検算門がどう数えるか。
+    """
+
+    def test_cfg_one_captures_one_batch_per_step(self, stub_text_stack) -> None:
+        conditions = calib.CalibConditions(steps=3, guidance=1.0, negative_prompt="neg")
+
+        batches = capture(DenoiseDit(), ("a", "b"), conditions)
+
+        assert len(batches) == 2 * 3
+        assert stub_text_stack == ["a", "b", "neg"], "uncond 用の埋め込みは常に用意する"
+
+    def test_cfg_above_one_captures_both_branches(self, stub_text_stack) -> None:
+        conditions = calib.CalibConditions(steps=3, guidance=4.0, negative_prompt="neg")
+
+        batches = capture(DenoiseDit(), ("a", "b"), conditions)
+
+        assert len(batches) == 2 * 3 * 2
+
+    def test_the_uncond_branch_carries_the_negative_prompt(self, stub_text_stack) -> None:
+        """MUST: uncond へ cond と同じ埋め込みを流さない。
+
+        流すと `uncond == cond` になって CFG が恒等に退化し、**本数だけ 2 倍**の H に同じ
+        活性が積まれる。バッチ数の検算門は通り、丸めも完走し、記録にも CFG 4 と書かれる。
+        """
+        conditions = calib.CalibConditions(steps=2, guidance=4.0, negative_prompt="neg")
+
+        batches = capture(DenoiseDit(), ("a",), conditions)
+
+        embeds = [kwargs["encoder_hidden_states"] for _args, kwargs in batches]
+        assert sum(torch.equal(embed, embed_for("a")) for embed in embeds) == 2
+        assert sum(torch.equal(embed, embed_for("neg")) for embed in embeds) == 2
+
+    def test_the_turbo_conditions_capture_the_same_batches_as_before(self, stub_text_stack) -> None:
+        """導出後も turbo は プロンプト × 8 step × 1 分岐（定数だった頃と同じ本数）。"""
+        batches = capture(DenoiseDit(), ("a", "b"), calib.calib_conditions(ANIMA_TURBO_MODEL_NAME))
+
+        assert len(batches) == 2 * 8
+
+    def test_a_branch_count_that_disagrees_with_the_capture_fails_loudly(
+        self, monkeypatch, stub_text_stack
+    ) -> None:
+        """検算門: 想定の分岐数と実際の forward 本数が食い違ったら止まる。
+
+        壊れ方は「CFG > 1 でも uncond を回さなくなる」— H に積まれる標本が半分になるだけで、
+        丸めは普通に完走し格納形も本数も変わらない。
+        """
+        conditions = calib.CalibConditions(steps=2, guidance=4.0, negative_prompt="neg")
+        genuine = calib.pipeline_ref.reference_steps
+        monkeypatch.setattr(
+            calib.pipeline_ref, "reference_steps", lambda *args: genuine(*args[:-1], 1.0)
+        )
+
+        with pytest.raises(AssertionError, match="校正バッチが"):
+            capture(DenoiseDit(), ("a",), conditions)
+
+
+class TestModelSelection:
+    """`--model` は校正条件の引き先（既定を置かない — 黙って turbo の条件で回さない）。"""
+
+    def test_the_calibration_refuses_to_run_without_a_named_model(self, monkeypatch, capsys):
+        """MUST: 既定を置くと `--model` 忘れが「turbo の条件で校正した素版」を静かに産む。"""
+        monkeypatch.setattr("sys.argv", ["export.py", "--dtype", "i4"])
+
+        with pytest.raises(SystemExit):
+            export_anima.main()
+
+        assert "--model が要る" in capsys.readouterr().err
+
+    def test_the_knob_is_refused_where_no_calibration_runs(self, monkeypatch, capsys):
+        """効かないノブを黙って受けない（`--no-calib` に引くべき条件は無い）。"""
+        monkeypatch.setattr(
+            "sys.argv",
+            ["export.py", "--dtype", "i4", "--no-calib", "--model", ANIMA_TURBO_MODEL_NAME],
+        )
+
+        with pytest.raises(SystemExit):
+            export_anima.main()
+
+        assert "--model は" in capsys.readouterr().err
+
+    def test_the_export_path_hands_the_models_conditions_to_the_capture(self, monkeypatch):
+        """MUST: 捕捉が受け取る条件は `--model` のもの（turbo 固定へ戻ったら緑にならない）。"""
+        wrapper = make_wrapper()
+        batches = capture_batches(wrapper.model, make_probes())
+        seen: dict = {}
+
+        def stub(model, prompts, **kwargs):
+            seen.update(kwargs)
+            return batches
+
+        monkeypatch.setattr(calib, "capture_stage_batches", stub)
+
+        quantize(wrapper, i4_args(model=ANIMA_BASE_MODEL_NAME))
+
+        assert seen["conditions"] == calib.calib_conditions(ANIMA_BASE_MODEL_NAME)
 
 
 class TestStageSplit:
@@ -542,7 +791,7 @@ class TestCalibratedI4:
         wrapper = make_wrapper()
 
         with pytest.raises(AssertionError, match="校正プロンプトが 1 件も無い"):
-            calib.capture_stage_batches(wrapper.model, (), repo="unused")
+            capture(wrapper.model, (), calib.calib_conditions(ANIMA_TURBO_MODEL_NAME))
 
 
 class TestOptOut:
@@ -554,7 +803,9 @@ class TestOptOut:
             captured[target] = args
             return {"target": target}
 
-        monkeypatch.setattr("sys.argv", ["export.py", "--dtype", "i4"])
+        monkeypatch.setattr(
+            "sys.argv", ["export.py", "--dtype", "i4", "--model", ANIMA_TURBO_MODEL_NAME]
+        )
         monkeypatch.setattr(export_anima, "emit_target", stub)
 
         export_anima.main()
@@ -580,7 +831,18 @@ class TestOptOut:
 
     def test_a_resolution_off_the_calibration_condition_is_refused(self, monkeypatch, capsys):
         """MUST: 512px で選んだ丸め先を別解像度のグラフへ焼かない（数値は普通に出る壊れ方）。"""
-        monkeypatch.setattr("sys.argv", ["export.py", "--dtype", "i4", "--resolution", "1024"])
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "export.py",
+                "--dtype",
+                "i4",
+                "--model",
+                ANIMA_TURBO_MODEL_NAME,
+                "--resolution",
+                "1024",
+            ],
+        )
 
         with pytest.raises(SystemExit):
             export_anima.main()

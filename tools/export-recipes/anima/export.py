@@ -44,10 +44,11 @@ i4 の実行経路は linear / embedding / conv1d の重みスロット限定（
 DiT block 内の linear は **GPTQ 校正付きで丸める**（既定 — perf-ledger Q-6 / `anima.calib`）。
 格納形は 1 バイトも変わらない（格子は RTN i4 g32 のまま）で、変わるのは丸め値と scale 台帳の
 中身だけ。校正入力は {@link anima.calib_prompts.CALIB_PROMPTS} の先頭
-`--calib-prompts` 本（既定 {@link DEFAULT_CALIB_PROMPTS} 本）を**参照 denoise**（512²・8 step・
-CFG 1・seed 固定）へ通して先頭 block の入力を step 横断で捕まえたもの。block の**外**に居る
-i4 適格（{@link NON_STAGE_I4_WEIGHTS}）は校正の駆動が届かないので**先に**素の RTN で丸める
-（配布実行時の条件へ校正入力を合わせる）。校正の失敗は fail loudly で、素の RTN へ黙って
+`--calib-prompts` 本（既定 {@link DEFAULT_CALIB_PROMPTS} 本）を**参照 denoise**（512²・seed 固定・
+step 数と CFG は `--model` の配布既定から導く — {@link anima.calib.calib_conditions}）へ通して
+先頭 block の入力を step 横断で捕まえたもの（CFG > 1 では cond / uncond の両分岐）。block の
+**外**に居る i4 適格（{@link NON_STAGE_I4_WEIGHTS}）は校正の駆動が届かないので**先に**素の RTN で
+丸める（配布実行時の条件へ校正入力を合わせる）。校正の失敗は fail loudly で、素の RTN へ黙って
 落ちる分岐は持たない — 明示の `--no-calib` だけが opt-out（配布資産には使わない）。
 
 MUST: `--dtype f16` は**重みを f16 表現可能値へ丸めてから**（fake-quant — ADR 0006）参照と
@@ -91,7 +92,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import SERIES_ROOT
-from anima.distribution import CALIB_PROVENANCE_FILE, LORA_PROVENANCE_FILE
+from anima.distribution import ANIMA_MODELS, CALIB_PROVENANCE_FILE, LORA_PROVENANCE_FILE
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -702,7 +703,10 @@ def _round_i4_calibrated(
     plain = _round_i4_plain(wrapper, plain_names, target, "block 外の適格を")
     int8 = round_int8()
     prompts = calibration_prompts(args.calib_prompts)
-    batches = calib.capture_stage_batches(wrapper.model, prompts, repo=args.repo)
+    conditions = calib.calib_conditions(args.model)
+    batches = calib.capture_stage_batches(
+        wrapper.model, prompts, repo=args.repo, conditions=conditions
+    )
     calib.assert_calib_batches_match_graph(graph_batch, batches)
     rig = calib.CalibRig(stages=stages, batches=batches)
     report, ledger = calib.calibrate_i4(rig)
@@ -715,7 +719,8 @@ def _round_i4_calibrated(
     print(
         f"[fake-quant] {target}: DiT block の linear を GPTQ 校正付きで丸めた"
         f" — {report.describe()} / 校正プロンプト {len(prompts)} 本・バッチ {len(batches)} 本"
-        f"・{rig.tokens:,} トークン",
+        f"・{rig.tokens:,} トークン（{args.model}: {conditions.steps} step"
+        f"・CFG {conditions.guidance:g}・分岐 {conditions.branches}）",
         flush=True,
     )
     return {**plain, **calibrated}, int8
@@ -834,7 +839,7 @@ def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path)
 
 
 def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path) -> str | None:
-    """i4 系列の丸め条件（方式・格子・コーパス・解像度・step）を系列へ書き、ファイル名を返す。
+    """i4 系列の丸め条件（方式・格子・コーパス・解像度・step・CFG）を系列へ書き、ファイル名を返す。
 
     校正の有無は**格納形を 1 バイトも変えない**ので、資産からは復元できない — `--lora` と同じ形で
     「書き出した側が事実を書き残す」しかない。`anima/distribution.py` の
@@ -850,13 +855,20 @@ def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path
         return None
     # `--no-calib` でも**書く**（消すのではなく `rtn` と記録する）— 不在は「古い export」とも
     # 読めてしまい、組み立て側が「校正なしを配ろうとした」を名指しで拒否できない。
+    #
+    # `guidance` は校正条件をモデル別化した 2026-08-23（波 J-4 ②）に足した欄。読み手
+    # （`distribution.assert_calib_provenance`）が見るのは `method` だけなので、欄の追加は
+    # 既にある turbo 系列の記録（追加前の形）の受理を 1 つも変えない — 既存資産へ再 export を
+    # 要求しない形に留める MUST（記録は資産と違って作り直しの費用が丸め時間そのもの）。
+    conditions = None if args.no_calib else calib.calib_conditions(args.model)
     record: dict[str, object] = {
         "method": "rtn" if args.no_calib else calib.CALIB_METHOD,
         "group_size": calib.CALIB_GRID.group_size,
         "grid": calib.CALIB_GRID.kind,
         "prompts": 0 if args.no_calib else args.calib_prompts,
         "resolution": 0 if args.no_calib else calib.CALIB_RESOLUTION,
-        "steps": 0 if args.no_calib else calib.CALIB_STEPS,
+        "steps": 0 if conditions is None else conditions.steps,
+        "guidance": 0 if conditions is None else conditions.guidance,
         "text_dtype": calib.CALIB_TEXT_DTYPE,
     }
     (out_dir / CALIB_PROVENANCE_FILE).write_text(
@@ -1080,6 +1092,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         action="store_true",
         help="i4 を校正なしの素の RTN で丸める（テスト / smoke 用 — 配布資産にしないこと）",
     )
+    parser.add_argument(
+        "--model",
+        choices=tuple(ANIMA_MODELS),
+        default=None,
+        help="校正条件（step 数 / CFG / negative prompt）を引く配布モデル名"
+        "（--dtype i4 の校正で必須 — 既定値は置かない）",
+    )
     args = parser.parse_args(argv)
     if args.out is None:
         root = DEFAULT_OUT_ROOTS[args.dtype]
@@ -1113,6 +1132,21 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"--calib-prompts / --no-calib は --dtype i4 だけに効く（指定は {args.dtype}）"
             " — 校正付き丸めは i4 系列の経路（perf-ledger Q-6）"
         )
+
+    # MUST: 校正条件は**モデル別**に名指しさせる（既定を置かない）。step 数と CFG は配布形の
+    # 既定から導く（`calib.calib_conditions`）ので、`--model` を忘れた素版の i4 が turbo の
+    # 条件（8 step・CFG 1）で黙って校正される形にはできない — 出来上がる資産は格納形も本数も
+    # 正しく、`verify_dist` もヘッダ検査も素通りし、`calib_provenance.json` にはその条件が
+    # 事実として書かれる（記録が嘘をつくと突き合わせの機構ごと無意味になる）。
+    calibrating = args.dtype == "i4" and not args.no_calib
+    if calibrating and args.model is None:
+        parser.error(
+            f"--dtype i4 の校正は --model が要る（選択肢: {', '.join(ANIMA_MODELS)}）"
+            " — 校正の step 数 / CFG は配布形の既定から引く（anima.calib.calib_conditions）"
+        )
+    if args.model is not None and not calibrating:
+        knob = f"--dtype {args.dtype}" + ("・--no-calib" if args.no_calib else "")
+        parser.error(f"--model は --dtype i4 の校正条件を引くためだけのノブ（指定は {knob}）")
 
     # MUST: 効かないノブを黙って受けない。S 形は transformer 専用（他 3 ターゲットは解像度に
     # 依らないので共有）で、解像度はケース表 DIT_DYN_RESOLUTIONS が決める（`--resolution` は

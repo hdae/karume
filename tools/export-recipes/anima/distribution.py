@@ -139,7 +139,8 @@ TURBO_NOTICE_MARKDOWN = notice_markdown(
 BASE_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
-        "- An int8-quantized series of the transformer was added alongside the f16 one.",
+        "- An int8-quantized series and an int4-quantized series of the transformer were added",
+        "  alongside the f16 one.",
         "- Where a model in this repository is a community fine-tune of the same CircleStone",
         "  Anima base model rather than the base model itself, its origin, author and license",
         "  terms are stated in README.md.",
@@ -217,6 +218,7 @@ ANIMA_SCHEDULER: Mapping[str, Any] = {"shift": 3, "numTrainTimesteps": 1000}
 
 #: 既定のネガティブプロンプト。turbo 席では**使われない**（CFG=1 なので uncond 側を 1 度も
 #: 計算しない）が、欄自体は据え置く — 利用者が guidance を上げた瞬間に効く値だから。
+#: CFG 運用の素版では i4 の**校正入力**の uncond 分岐にもこれが通る（`anima.calib`）。
 ANIMA_NEGATIVE_PROMPT = "low quality, worst quality, blurry, bad anatomy, jpeg artifacts"
 
 #: 配布の推奨解像度（ADR 0038 Examples）。移行元 CLI の 512 は「静的資産の最小」であって
@@ -313,13 +315,17 @@ class AnimaModel:
     #: 焼き込んだ LoRA の sha256。`None` = 素（焼いていない）。
     lora_sha256: str | None
     #: transformer の格納 dtype ラベル。ここに無い格納形の系列は**要求も宣言もしない**
-    #: （i4 席は校正条件が turbo 前提なので base 系にはまだ載せない — 波 J-4a の続き）。
+    #: （2026-08-23・波 J-4 ②: 校正条件を {@link pipeline_config} から導く形にした
+    #: 〈`anima.calib.calib_conditions`〉ので、i4 席は turbo 専用ではなくなった）。
     storages: tuple[str, ...]
     #: text_conditioner を自前で持つか。`False` = 素の共有系列（{@link ANIMA_BASE_SERIES}）。
     #: 第三者 fine-tune は DiT だけでなく llm_adapter（= text_conditioner）も焼き直している
     #: ので、共有すると**別のモデルのテキスト条件付け**で走る（絵だけが静かにずれる）。
     own_text_conditioner: bool
-    #: manifest の `pipelineConfig`（step / guidance がモデルごとに違う）。
+    #: manifest の `pipelineConfig`（step / guidance がモデルごとに違う）。**i4 の校正条件も
+    #: ここから導く**（`anima.calib.calib_conditions`）— 校正が見る sigma 列と CFG 分岐を配布
+    #: 実行時の条件そのものにするため、export 側に写しを置かない。ここを動かすと次の i4
+    #: export の丸め先も動く。
     pipeline_config: Mapping[str, Any]
 
 
@@ -333,19 +339,19 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
     ),
     ANIMA_BASE_MODEL_NAME: AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "i4"),
         own_text_conditioner=False,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
     "anima-wai-v1.0": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "i4"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
     "anima-copycat-20260610": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "i4"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),

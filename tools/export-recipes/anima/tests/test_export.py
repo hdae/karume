@@ -21,6 +21,8 @@ from torch import nn
 from anima import export as export_anima
 from anima import patch as patch_anima
 from anima.distribution import (
+    ANIMA_BASE_MODEL_NAME,
+    ANIMA_TURBO_MODEL_NAME,
     CALIB_PROVENANCE_FILE,
     CALIB_SHIPPABLE_METHOD,
     LORA_PROVENANCE_FILE,
@@ -113,8 +115,10 @@ class TestCalibProvenance:
     """i4 の丸め条件は系列に残す（校正の有無は格納形を 1 バイトも変えないので資産から読めない）。"""
 
     @staticmethod
-    def _args(dtype, *, no_calib=False, calib_prompts=4):
-        return argparse.Namespace(dtype=dtype, no_calib=no_calib, calib_prompts=calib_prompts)
+    def _args(dtype, *, no_calib=False, calib_prompts=4, model=ANIMA_TURBO_MODEL_NAME):
+        return argparse.Namespace(
+            dtype=dtype, no_calib=no_calib, calib_prompts=calib_prompts, model=model
+        )
 
     def test_it_records_the_shippable_method_and_the_corpus(self, tmp_path):
         out_dir = tmp_path / "transformer"
@@ -126,20 +130,40 @@ class TestCalibProvenance:
         record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
         assert record["method"] == CALIB_SHIPPABLE_METHOD
         assert (record["prompts"], record["resolution"], record["steps"]) == (4, 512, 8)
+        assert record["guidance"] == 1.0
+
+    def test_it_records_the_conditions_of_the_model_that_was_calibrated(self, tmp_path):
+        """記録は**そのモデルの**条件（step / CFG）— turbo の値が素版の系列に残らないこと。
+
+        条件は資産から復元できないので、ここが turbo 固定に戻ると「素版を 8 step・CFG 1 で
+        校正した」のか「記録だけが古い」のかを、後から誰も区別できない。
+        """
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        export_anima._write_calib_provenance(
+            self._args("i4", model=ANIMA_BASE_MODEL_NAME), "transformer", out_dir
+        )
+
+        record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
+        assert (record["steps"], record["guidance"]) == (20, 4.0)
 
     def test_no_calib_is_recorded_rather_than_left_absent(self, tmp_path):
         """不在は「古い export」とも読める — 名指しで拒否できるよう `rtn` と書き残す。"""
         out_dir = tmp_path / "transformer"
         out_dir.mkdir()
 
+        # `--no-calib` では CLI が `--model` を受けない（条件を引く先が無い）— 記録側もそれで
+        # 書けることを、`model=None` のまま通して踏む。
         export_anima._write_calib_provenance(
-            self._args("i4", no_calib=True), "transformer", out_dir
+            self._args("i4", no_calib=True, model=None), "transformer", out_dir
         )
 
         record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
         assert record["method"] == "rtn"
         assert record["method"] != CALIB_SHIPPABLE_METHOD, "配布可として通ってしまう"
         assert (record["prompts"], record["resolution"], record["steps"]) == (0, 0, 0)
+        assert record["guidance"] == 0
 
     def test_it_writes_nothing_for_a_series_that_is_not_i4(self, tmp_path):
         out_dir = tmp_path / "transformer"

@@ -57,6 +57,7 @@ from karume.quant_calib import (
 from karume.quantize import DEFAULT_GROUP_SIZE, Int4Report, iter_quant_targets
 
 from . import pipeline_ref
+from .distribution import anima_model
 
 #: stage 列のモデル内 FQN 接頭辞。`patch.AnimaDit.model` / `patch.AnimaDitTokens.model` が
 #: `CosmosTransformer3DModel` なので、block の FQN は `model.transformer_blocks.<番号>.…`。
@@ -68,10 +69,6 @@ CALIB_METHOD = "gptq"
 #: 丸め先の格納グリッド。**`rtn` × g32 = 既存 i4 系列と同じ格子**（唯一の出荷経路）。
 CALIB_GRID = GridSpec(kind="rtn", group_size=DEFAULT_GROUP_SIZE)
 
-#: 校正の参照 denoise の step 数。**配布形の既定**（`models/karume-anima-turbo/karume.json` の
-#: `defaults.steps`）に合わせる — 校正で見る sigma 列を実運用の列そのものにするため。
-CALIB_STEPS = 8
-
 #: 校正の解像度（px・正方）。波 J-2 の実測条件と同じ（`docs/research/2026-08-20-…` §6）で、
 #: **`--resolution` には追随しない** — 品質裁定（f32 とほぼ同一）が採られた条件を固定して
 #: おかないと、解像度を動かすたびに根拠の採り直しになる。追随しない代わりに **CLI が食い違いを
@@ -79,10 +76,6 @@ CALIB_STEPS = 8
 #: 1 プロンプトあたりのトークン数 = GPTQ の `H = Σ XᵀX` の標本数なので、上げれば校正は効くが
 #: export の CPU 時間が線形に伸びる（本数と並ぶ品質の上振れ軸 — `calib_prompts` の NOTE）。
 CALIB_RESOLUTION = 512
-
-#: CFG 係数。Turbo LoRA は CFG=1 運用（`reference_steps` が uncond 分岐を計算しない）—
-#: 配布条件と揃えることが決定性（乱数ゼロ・分岐なし）にもそのまま効く。
-CALIB_GUIDANCE = 1.0
 
 #: 校正 1 バッチあたりの丸め所要（秒・CPU）。**同じ recipe の配布 export 実測**（512px・
 #: 4 プロンプト × 8 step = 32 バッチで 2,287 秒 —
@@ -102,6 +95,52 @@ CALIB_MAX_SEQUENCE_LENGTH = 512
 #: f16 / f32 差が H = Σ XᵀX の統計に出るほどの大きさではないと見ている（**この見立ての実測は
 #: research に記録していない** — 条件を戻す / 広げる判断が出たら測り直す）。
 CALIB_TEXT_DTYPE = "f16"
+
+
+@dataclass(frozen=True)
+class CalibConditions:
+    """参照 denoise の条件のうち**モデルごとに違う**もの（{@link calib_conditions} が導く）。
+
+    定数で持たないのは、turbo（8 step・CFG 1）と素の base 系（20 step・CFG 4）で校正が見る
+    sigma 列も分岐の顔ぶれも違うから — 片方を焼き込むと、もう片方は「配布実行時には通らない
+    条件」で選んだ丸め先を出荷することになる（格納形も本数も正しいままなので資産からは
+    読めない）。解像度・テキスト前段の dtype・トークン長はモデルに依らないので、ここには
+    載せずモジュール定数のまま。
+    """
+
+    #: 参照 denoise の step 数（配布形の `defaults.steps`）。
+    steps: int
+    #: CFG 係数（配布形の `defaults.guidanceScale`）。
+    guidance: float
+    #: uncond 分岐へ通すプロンプト（配布形の `defaults.negativePrompt`）。`guidance == 1.0` では
+    #: 1 度も使われない（{@link pipeline_ref.reference_steps} が uncond 分岐を計算しない）。
+    negative_prompt: str
+
+    @property
+    def branches(self) -> int:
+        """1 step で DiT を通る forward の本数（= 1 step が積む校正バッチ数）。
+
+        MUST: 述語は {@link pipeline_ref.reference_steps} の `skip_uncond` と**同じ形**
+        （`== 1.0`）。ずれると捕捉バッチ数の検算門が本物の分岐数と食い違い、正しい捕捉を
+        落とす / 誤った捕捉を通すのどちらにも倒れる。
+        """
+        return 1 if self.guidance == 1.0 else 2
+
+
+def calib_conditions(model: str) -> CalibConditions:
+    """配布形の既定（`anima.distribution` の `pipeline_config`）から校正条件を**導く**。
+
+    MUST: 写しを別に持たない。校正条件と配布既定を独立に更新できる形にすると、既定 step を
+    動かした日に校正だけが古い sigma 列で回り、その食い違いはどこにも出ない（格納形は 1 バイトも
+    変わらず、絵が少し眠くなるだけ）。turbo はここから 8 step / CFG 1 が出て、モジュール定数
+    だった頃と 1 ビットも変わらない。
+    """
+    defaults = anima_model(model).pipeline_config["defaults"]
+    return CalibConditions(
+        steps=int(defaults["steps"]),
+        guidance=float(defaults["guidanceScale"]),
+        negative_prompt=str(defaults["negativePrompt"]),
+    )
 
 
 def dit_stages(wrapper: nn.Module) -> tuple[StageSpec, ...]:
@@ -202,8 +241,8 @@ def capture_stage_batches(
     prompts: Sequence[str],
     *,
     repo: str,
+    conditions: CalibConditions,
     resolution: int = CALIB_RESOLUTION,
-    steps: int = CALIB_STEPS,
 ) -> tuple[StageBatch, ...]:
     """校正プロンプトごとに参照 denoise を回し、先頭 block への入力を step 横断で捕まえる。
 
@@ -214,8 +253,15 @@ def capture_stage_batches(
     **もう 1 体ロードする**入口で、ここには既に丸める対象の実体がある（timestep 埋め込みは
     `reference_steps` が素の forward の中で組む）。
 
-    決定的であること MUST: seed 固定（`pipeline_ref.SEED`）・CFG 1（uncond 分岐なし）・
-    乱数はここの `latents_init` 1 本きり。初期ノイズは**全プロンプト共通**（波 J-2 の条件を
+    MUST: **CFG > 1 では cond / uncond の両分岐を採る**。素の base 系は CFG 運用なので、配布
+    実行時に DiT を通る活性は cond だけではなく negative prompt 側も同数ある — cond に絞ると
+    「実際に流れる活性の半分」で丸め先を選ぶことになる。`reference_steps` は
+    `guidance != 1.0` のとき 1 step で forward を 2 回回すので、先頭 block の
+    forward_pre_hook が**両方をそのまま**採る（分岐をここで組み立てない）。検算門も
+    {@link CalibConditions.branches} 倍で数える。
+
+    決定的であること MUST: seed 固定（`pipeline_ref.SEED`）・乱数はここの `latents_init`
+    1 本きり（CFG 分岐は乱数を持たない）。初期ノイズは**全プロンプト共通**（波 J-2 の条件を
     そのまま広げた形 — 散らす軸はプロンプトと解像度に閉じる）。
 
     MUST: 呼び出し側は**block 内の丸めを 1 本も当てる前**に呼ぶ（当てた後だと、丸めた重みが
@@ -230,11 +276,18 @@ def capture_stage_batches(
         ]
         for prompt in prompts
     ]
+    # uncond 分岐のプロンプトは CFG=1 では 1 度も使われないが、分岐を作らず常に用意する —
+    # 「使う / 使わない」の判断は `reference_steps` の MUST 1 箇所に閉じる（2 箇所で持つと、
+    # 片方だけが CFG の扱いを変えた日に cond と同じ埋め込みで uncond を回すことになり、
+    # バッチ本数だけが正しいまま H に同じ活性が 2 倍積まれる）。
+    negative = pipeline_ref.encode_prompt(
+        stack, CALIB_MAX_SEQUENCE_LENGTH, conditions.negative_prompt
+    )["encoder_hidden_states"]
     # テキスト前段（Qwen3 + conditioner）は条件を作り終えたら手放す — DiT の常駐と重ねない。
     del stack
     gc.collect()
 
-    sigmas = pipeline_ref.sigma_schedule(steps, pipeline_ref.SHIFT)
+    sigmas = pipeline_ref.sigma_schedule(conditions.steps, pipeline_ref.SHIFT)
     latent = resolution // pipeline_ref.SPATIAL_COMPRESSION
     latents_init = torch.randn(
         (1, pipeline_ref.LATENT_CHANNELS, 1, latent, latent),
@@ -256,19 +309,21 @@ def capture_stage_batches(
                 model,
                 latents_init,
                 embed,
-                embed,
+                negative,
                 sigmas,
                 (resolution, resolution),
-                steps,
-                CALIB_GUIDANCE,
+                conditions.steps,
+                conditions.guidance,
             )
     finally:
         handle.remove()
-    expected = len(prompts) * steps
+    expected = len(prompts) * conditions.steps * conditions.branches
     if len(batches) != expected:
         raise AssertionError(
-            f"校正バッチが {len(batches)} 本で、プロンプト {len(prompts)} × step {steps}"
-            f" = {expected} 本と違う（DiT の block ループが台本の想定と食い違っている）"
+            f"校正バッチが {len(batches)} 本で、プロンプト {len(prompts)}"
+            f" × step {conditions.steps} × 分岐 {conditions.branches}"
+            f"（CFG {conditions.guidance}）= {expected} 本と違う"
+            "（DiT の block ループが台本の想定と食い違っている）"
         )
     return tuple(batches)
 
