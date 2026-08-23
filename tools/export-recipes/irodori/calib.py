@@ -21,7 +21,8 @@ scale 台帳の中身だけで、emit 側の格納経路も配布形のバイト
 3. **stage 分解一致門** — {@link assert_stage_split}。「stage 逐次で回した結果が、同じ
    forward で `out_norm` へ入った hidden とビット一致する」を見る（丸めを 1 本も当てる前に
    実測する MUST）。
-4. **過不足一致門** — {@link assert_calib_covers_scan}。校正が丸めた層 = stage の走査。
+4. **過不足一致門** — {@link assert_calib_covers_scan}。校正が丸めた層 = i4 で格納する集合
+   （stage の走査から adaLN を除いた 168 本 — {@link ADALN_SEGMENTS}）。
 
 MUST（駆動が**素の DiT** である理由 — この recipe 固有の制約）: `irodori.export` の丸めは
 「`load_*` の直後・パッチ前の参照より前」に置かれ（`irodori.export.fake_quant` の順序 MUST）、
@@ -48,7 +49,7 @@ export 側はパッチ前の素の経路・配布条件（stage 外を先に丸�
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -107,6 +108,13 @@ UNBATCHED_BLOCK_ARGS = frozenset({"freqs_cis", "self_mask", "context_kv"})
 
 #: hidden を運ぶ引数名（core の駆動は hidden を**位置引数**で渡すので kwargs から抜く）。
 HIDDEN_ARG = "x"
+
+#: adaLN（modulation の scale / shift / gate を作る層）を指す FQN セグメント。
+#:
+#: w4 席はここに載る block 内 144 本（12 block × 12 本）を i4 から外して **i8 で丸める** —
+#: 聴感裁定 2026-08-23: modulation の scale / shift / gate は量子化感度が高く、i8 へ戻すと
+#: 読み上げ方が f32 へ寄る（コスト +13.1 MiB = dit i4 payload +6.0%）。
+ADALN_SEGMENTS = frozenset({"attention_adaln", "mlp_adaln"})
 
 
 class _CalibStepsReached(Exception):  # noqa: N818 — 異常ではなく打ち切りの合図
@@ -173,15 +181,27 @@ def stage_linear_names(stages: Sequence[StageSpec]) -> frozenset[str]:
     )
 
 
+def is_adaln(name: str) -> bool:
+    """モジュール FQN が adaLN 配下か（{@link ADALN_SEGMENTS} を**セグメントとして**含むか）。
+
+    判定を `.` で割った要素の一致で採るのは、部分文字列一致だと `attention` が
+    `attention_adaln` を巻き込み、逆に接尾辞一致だと adaLN 配下の子（`attention_adaln.1`）を
+    取りこぼすため。stage 内の局所 FQN（`attention_adaln.1`）とモデル内 FQN
+    （`blocks.0.attention_adaln.1`）のどちらにも同じ答えを返すので、校正の `include` と
+    export 側の集合分割が 1 実装で決まる（写すと i4 に丸めた集合と i4 で格納する集合が割れる）。
+    """
+    return not ADALN_SEGMENTS.isdisjoint(name.split("."))
+
+
 def dit_i4_names(dit: nn.Module, sym_max: int) -> frozenset[str]:
     """DiT の i4 適格（= 配布グラフに載る `nn.Linear` 全部）のモジュール FQN。
 
-    NOTE: i4 系列が実際に **i4 で格納するのはこの内側の block 内 312 本だけ**（block 外の 5 本は
-    i8 格納 — 聴感裁定 2026-08-23 の帰属結果。`irodori.export._fake_quant_i4`）。ここが返すのは
-    その 2 つを合わせた「配布グラフに載る linear の全量」で、下の g32 整除条件は i8 へ回る
-    block 外にも掛かる — 格納が要求する以上に厳しいが、**緩めない**: 緩めると「block 外の
-    どれかが g32 非整除になった」構成変化が黙って通り、i4 席の中身が実行のたびに上流の
-    適格率で決まることになる。
+    NOTE: i4 系列が実際に **i4 で格納するのは block 内から adaLN を除いた 168 本だけ**（block 外の
+    5 本と adaLN 144 本は i8 格納 — 聴感裁定 2026-08-23 の帰属結果。{@link ADALN_SEGMENTS} /
+    `irodori.export._fake_quant_i4`）。ここが返すのはそれらを合わせた「配布グラフに載る linear の
+    全量」で、下の g32 整除条件は i8 へ回る 149 本にも掛かる — 格納が要求する以上に厳しいが、
+    **緩めない**: 緩めると「i8 へ回す側のどれかが g32 非整除になった」構成変化が黙って通り、
+    i4 席の中身が実行のたびに上流の適格率で決まることになる。
 
     適格は 2 条件の積で決まる:
 
@@ -401,11 +421,13 @@ def capture_stage_batches(
 ) -> tuple[CapturedRun, ...]:
     """校正ケースごとに参照 denoise を回して先頭 block への入力を集める。
 
-    MUST: 呼び出し側は**block 内の丸めを 1 本も当てる前**に呼ぶ（当てた後だと、丸めた重みが
-    作った活性から同じ重みの丸め先を選ぶ循環になる）。逆に **block の外は先に丸めておく**
-    — 配布実行時に block へ入るのは i8 の `in_proj` が作った hidden と i8 の `cond_module` が
-    作った条件埋め込みで、後に回すと「f32 の周辺で選んだ丸め先」を i8 の周辺と組んで配る
-    ことになる（`irodori.export._round_i4_calibrated` の順序 MUST）。
+    MUST: 呼び出し側は**GPTQ の対象（block 内 168 本）の丸めを 1 本も当てる前**に呼ぶ（当てた
+    後だと、丸めた重みが作った活性から同じ重みの丸め先を選ぶ循環になる）。逆に **i8 で配る側は
+    先に丸めておく**（block 外 5 本・adaLN 144 本・内側の他役割コピー）— 配布実行時に block へ
+    入るのは i8 の `in_proj` が作った hidden と i8 の `cond_module` が作った条件埋め込みで、
+    block 内でも adaLN が作る modulation は i8 の値で掛かる。後に回すと「f32 の周辺で選んだ
+    丸め先」を i8 の周辺と組んで配ることになる（`irodori.export._round_i4_calibrated` の
+    順序 MUST）。
     """
     if not cases:
         raise AssertionError("校正ケースが 1 件も無い（校正付き i4 は入力ゼロでは成立しない）")
@@ -468,13 +490,20 @@ def _announce_stages(stages: Sequence[StageSpec]) -> list[RemovableHandle]:
 
 
 def calibrate_i4(
-    stages: Sequence[StageSpec], batches: Sequence[StageBatch]
+    stages: Sequence[StageSpec],
+    batches: Sequence[StageBatch],
+    include: Callable[[str], bool] | None = None,
 ) -> tuple[CalibReport, Int4Report]:
     """stage 逐次の GPTQ を当て、`(レポート, scale 台帳)` を返す（丸めは in-place）。
 
-    `include` を渡さないのは、**stage 内の `nn.Linear` は 1 本残らず i4 適格**であることを
-    呼び出し側が先に門で確かめているから（適格でない 1 本だけ外す形にすると「走査の本数 =
-    丸めた本数」の門が張れなくなる — {@link dit_i4_names} と同じ判断）。
+    `include` は**stage 内の局所モジュール FQN** の述語で、core の `calibrate_stages` へ
+    そのまま渡る（None = stage 内の `nn.Linear` 全部）。w4 席は adaLN 144 本を i8 へ戻すので、
+    呼び出し側（`irodori.export._round_i4_calibrated`）は {@link is_adaln} の否定を渡して
+    block 内 168 本だけを GPTQ に載せる。
+
+    MUST: 渡した述語が選ぶ集合と i4 で格納する集合は**同一**であること — ずれると「走査の
+    本数 = 丸めた本数」の門が意味を失い、丸めていない重みに i4 の格納指定が付く。実測は
+    {@link assert_calib_covers_scan}（呼び出し側が i4 格納の集合を渡して突き合わせる）。
 
     MUST: 台帳の無いレポートは fail loudly — 出荷経路を持つのは `gptq` × `rtn` だけで
     （`karume.quant_calib` の MUST）、台帳が無いまま進むと i4 席に scale の無い重みが載る。
@@ -487,7 +516,9 @@ def calibrate_i4(
     )
     handles = _announce_stages(stages)
     try:
-        report = calibrate_stages(stages, batches, method=CALIB_METHOD, spec=CALIB_GRID)
+        report = calibrate_stages(
+            stages, batches, method=CALIB_METHOD, spec=CALIB_GRID, include=include
+        )
     finally:
         for handle in handles:
             handle.remove()
@@ -501,9 +532,10 @@ def calibrate_i4(
 
 
 def assert_calib_covers_scan(report: CalibReport, scan: frozenset[str]) -> None:
-    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+    """校正が丸めた層が **i4 で格納する集合**と過不足なく一致することを見る。
 
-    `scan` は `.weight` を落としたモジュール名の集合（{@link stage_linear_names} の形）。
+    `scan` は `.weight` を落としたモジュール名の集合（{@link stage_linear_names} の形で、w4 席
+    では adaLN を除いた 168 本 — {@link calibrate_i4} の `include` が選ぶ集合と同一）。
 
     MUST: fail loudly。stage の綴りや対象型が変わって block の一部が校正に載らなくなっても、
     丸め漏れのぶん品質は**良い側**に出る（素通りを数字から読めない）。しかも漏れた重みは

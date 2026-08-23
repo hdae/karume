@@ -13,8 +13,9 @@
   strip のみ）と、上流突合へ渡す caption が**上流の入口から**作られること
 - i4 席（`--dtype i4`）の**出荷バイトからの読み戻し**の門（provenance / 形 / 本数 / 席の効き）が
   1 つ残らず発火すること — ここが素通りすると「w8 の golden を w4 の golden と呼ぶ」事故が
-  数値も形も合ったまま通る。i4 席は **I4 + I8 + F32 の混成**（block 内 linear が i4・block 外が
-  i8 — 聴感裁定 2026-08-23）なので、i8 の逆変換と「効き門は i4 だけで数える」もここで固定する
+  数値も形も合ったまま通る。i4 席は **I4 + I8 + F32 の混成**（block 内の adaLN 以外が i4・
+  adaLN と block 外が i8 — 聴感裁定 2026-08-23）なので、i8 の逆変換と「効き門は i4 だけで
+  数える」もここで固定する
 """
 
 from __future__ import annotations
@@ -270,7 +271,9 @@ class TestCaptionGoldenStability:
 #: 合成コンテナの group 長（i4 は端数 group を作らない — ADR 0069 決定 2）。
 GROUP = 32
 
-#: block 内の席（i4 格納）と block 外の席（i8 格納 — 聴感裁定 2026-08-23 で i4 から外した）。
+#: i4 格納の席と i8 格納の席（聴感裁定 2026-08-23 で block 外 5 本と adaLN 144 本を i4 から
+#: 外した）。読み戻しはコンテナの宣言駆動なので合成コンテナは各 1 本で足りるが、実重みの
+#: 期待値は `meta.json` の `i4Source` に出る **int4Tensors 168 / int8Tensors 149**。
 I4_KEY = "in_proj.weight"
 SCALE_KEY = f"karume.scale.{I4_KEY}"
 I8_KEY = "out_proj.weight"

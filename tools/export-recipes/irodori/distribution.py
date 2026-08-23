@@ -178,8 +178,9 @@ IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: なる。逆向き（圧縮席へ f32 資産）は {@link assert_storage} が要求 dtype の不在で落とす。
 #:
 #: MUST: **i8 席も I4 の不在を要求する**（`dit` だけが両方の系列を持つ）。i4 系列は
-#: **I4 + I8 + F32 の混成**（block 内 linear が I4・block 外 5 本が I8・bias / norm / scale が
-#: F32 — 聴感裁定 2026-08-23 で block 外を i4 から外した。`irodori.export._fake_quant_i4`）なので、
+#: **I4 + I8 + F32 の混成**（block 内の adaLN 以外 168 本が I4・block 外 5 本 + adaLN 144 本が
+#: I8・bias / norm / scale が F32 — 聴感裁定 2026-08-23 で block 外と adaLN を i4 から外した。
+#: `irodori.export._fake_quant_i4`）なので、
 #: 「I8 を含む」という要求検査は i4 系列でも満たされてしまう。i8 席と i4 系列を分けているのは
 #: **この禁止表だけ**で、外すと既定席 `w8a8` の `linearCompute: "i8a8"` が i4 常駐で走る w4a8
 #: 経路（ADR 0076）へ黙って化ける。混成になる前も「i4 系列が i8 席を名乗れるかどうかが上流の

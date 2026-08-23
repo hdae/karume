@@ -671,7 +671,8 @@ def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) ->
 #:
 #: i4 は packed 4bit（1 バイトに 2 要素 — ADR 0069 決定 2）なので器は uint8 で、論理形へ戻すのは
 #: `karume.emit.unpack_int4`。i8 が並ぶのは **block 外の 5 本**（`in_proj` / `out_proj` /
-#: `cond_module.{0,2,4}` — 聴感裁定 2026-08-23 で i4 から外した。`irodori.export._fake_quant_i4`）。
+#: `cond_module.{0,2,4}`）と **adaLN 144 本**（`attention_adaln` / `mlp_adaln`）の計 149 本
+#: （どちらも聴感裁定 2026-08-23 で i4 から外した。`irodori.export._fake_quant_i4`）。
 #: ここに無い格納（f16 / bf16）が `dit` のコンテナに現れたら、w4 席の混成が想定と違う形で
 #: 出荷されている（{@link restore_dit_from_i4_series} が落とす）。
 _RESTORE_STORAGE: Mapping[str, tuple[str, torch.dtype]] = {
@@ -703,7 +704,8 @@ class RestoredDit(NamedTuple):
     calib: Mapping[str, Any]
     #: i4 格納だったパラメタの本数（コンテナが正 — 期待値をコードに焼かない）。
     int4: int
-    #: i8 格納だったパラメタの本数（block 外の `in_proj` / `out_proj` / `cond_module`）。
+    #: i8 格納だったパラメタの本数（block 外の `in_proj` / `out_proj` / `cond_module` と
+    #: block 内の adaLN — 実重みでは 149 本）。
     int8: int
     #: f32 格納のまま読み戻したパラメタの本数（bias / norm）。
     plain: int
@@ -845,7 +847,7 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
     校正が同じ丸めを出す」ことはどこも保証していない。golden が見た重みは配布バイトそのもの、
     を機械で言い切れる唯一の形が「エクスポート済みの系列を読み戻す」。
 
-    上書きは i4 格納だけでなく**ラッパ所有パラメタの全部**（block 外 5 本の i8 格納も、f32
+    上書きは i4 格納だけでなく**ラッパ所有パラメタの全部**（i8 格納の 149 本も、f32
     格納の bias / norm も、コンテナの値で書く）。元値と一致するはずの側もコンテナから書くことで、
     「golden が見た重み = 配布バイト」に例外席を作らない。
 
@@ -913,7 +915,7 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
                     f"{container}: '{key}' の形が コンテナ {list(value.shape)} /"
                     f" モジュール {list(parameter.shape)} で食い違う"
                 )
-            # MUST: 効き門に数えるのは **i4 の席だけ**。block 外の i8 5 本は段 1 の i8 丸めと
+            # MUST: 効き門に数えるのは **i4 の席だけ**。i8 の 149 本は段 1 の i8 丸めと
             # 同じ scale・同じ格子なので値が動かないのが正常で、数に入れると「i4 が 1 本も
             # 効いていない」を i8 の一致が埋め合わせて隠す。
             if dtype == "i4" and not torch.equal(parameter.detach(), value):

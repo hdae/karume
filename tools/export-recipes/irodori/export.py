@@ -181,10 +181,11 @@ tolerance）が圧縮資産へ黙って掛かるため、系列は必ず分け�
 i8 は per-channel symmetric（ADR 0019）で、丸めと同時に採れる scale 台帳を emit へ渡す
 （{@link TARGET_SCALE_SOURCES} が「素のモジュール内 FQN → ラッパ内 FQN」の張り替えを持つ）。
 
-`--dtype i4` は **`dit` だけの系列**（{@link DTYPE_TARGETS}）で、DiT の **block 内** linear が
-group32 symmetric int4（ADR 0069）・block 外（`in_proj` / `out_proj` / `cond_module`）と残りは
-i8 の混成。丸めは既定で **GPTQ 校正付き**（`irodori.calib` — 参照 denoise から採った活性で
-block 内の丸め先を選び直す）で、`--no-calib`
+`--dtype i4` は **`dit` だけの系列**（{@link DTYPE_TARGETS}）で、DiT の **block 内から adaLN を
+除いた** linear が group32 symmetric int4（ADR 0069）・adaLN（`attention_adaln` / `mlp_adaln`）と
+block 外（`in_proj` / `out_proj` / `cond_module`）と残りは i8 の混成。丸めは既定で
+**GPTQ 校正付き**（`irodori.calib` — 参照 denoise から採った活性で i4 側の丸め先を選び直す）で、
+`--no-calib`
 だけが opt-out。校正の有無は格納形を 1 バイトも変えないので、条件は `calib_provenance.json`
 （{@link _write_calib_provenance}）に残して組み立て側が突き合わせる。他 7 役は quant 席 `w4`
 でも i8 系列のバイトを共有するので、i4 系列は書かない。
@@ -1754,8 +1755,9 @@ class FakeQuantResult(NamedTuple):
     #: 張り替えは {@link target_weight_dtypes}。既定 `weight_dtype` が適格外を静かに f32 で
     #: 残すのに対し、明示指定は満たせなければ emit が fail loudly する（`karume.emit` の
     #: `_plan_weight_dtype`）— i4 系列で配布グラフの linear 317 本を 1 本単位で名指しする
-    #: （block 内 312 本が `i4` / block 外 5 本が `i8`）のはそのため。**block 外を明示 `i8` で
-    #: 名指しするのは必須**: 既定 `weight_dtype` が `i4` なので、指定を落とすと `_plan_weight_dtype`
+    #: （block 内から adaLN を除いた 168 本が `i4` / adaLN 144 本 + block 外 5 本 = 149 本が `i8`）
+    #: のはそのため。**i8 側を明示 `i8` で名指しするのは必須**: 既定 `weight_dtype` が `i4` な
+    #: ので、指定を落とすと `_plan_weight_dtype`
     #: が i4 適格の linear を既定で i4 計画へ流し、group scale が無い（i8 の per-channel scale
     #: しか無い）まま fail loudly で落ちる。
     overrides: dict[str, Mapping[str, str]]
@@ -1926,7 +1928,8 @@ def _round_i4_calibrated(
     i4_names: frozenset[str],
     plan: CalibPlan,
 ) -> tuple[Mapping[str, torch.Tensor], str]:
-    """DiT の block 内 linear（= i4 格納の全量）を GPTQ × RTN 格子で丸める。
+    """DiT の block 内 linear のうち **adaLN を除いた側**（= i4 格納の全量）を GPTQ × RTN 格子で
+    丸める。
 
     順序 MUST（① → ② → ③）:
 
@@ -1934,11 +1937,13 @@ def _round_i4_calibrated(
        丸めると「別の経路の GPTQ」を出荷することになり、しかも数値は普通に出る。門に流す
        forward は**丸め前の参照ループ 1 step**（校正入力と同じ作り方で採るので、形を捏造した
        probe が上流とずれる余地が無い）。
-    2. 校正入力の生成（参照 denoise の捕捉）。**block の外は先に丸まっている** — 呼び出し側
+    2. 校正入力の生成（参照 denoise の捕捉）。**i8 で配る側は先に丸まっている** — 呼び出し側
        （{@link _fake_quant_i4}）が i8 を全部先に済ませてからここへ来る。配布実行時に block へ
        入るのは i8 の `in_proj` が作った hidden と i8 の `cond_module` が作った条件埋め込みで、
-       後に回すと「f32 の周辺を通った活性」で選んだ丸め先を i8 の周辺と組んで配ることになる。
-    3. block 内の linear を GPTQ × RTN 格子で丸める。
+       block 内でも modulation は i8 の adaLN が作る。後に回すと「f32 の周辺を通った活性」で
+       選んだ丸め先を i8 の周辺と組んで配ることになる。
+    3. block 内の adaLN 以外の linear を GPTQ × RTN 格子で丸める。**除外は core の `include`
+       で排他に**（`irodori.calib.is_adaln` — 丸めた集合と i4 格納の集合を 1 実装で決める）。
 
     戻りは `(i4 の scale 台帳, 診断の 1 行)`。
     """
@@ -1950,10 +1955,12 @@ def _round_i4_calibrated(
     calib.assert_stage_split(stages, probe)
     runs = calib.capture_stage_batches(dit, plan.cases, plan.context, steps=plan.steps)
     batches = tuple(batch for run in runs for batch in run.batches)
-    report, ledger = calib.calibrate_i4(stages, batches)
+    report, ledger = calib.calibrate_i4(
+        stages, batches, include=lambda local: not calib.is_adaln(local)
+    )
     calib.assert_calib_covers_scan(report, i4_names)
     summary = (
-        f"格納 i4 へ丸めた — block 内 {len(i4_names)} 本を GPTQ 校正付きで"
+        f"格納 i4 へ丸めた — block 内の adaLN 以外 {len(i4_names)} 本を GPTQ 校正付きで"
         f"（{report.describe()}・"
         f"ケース {len(plan.cases)} 件 × {plan.steps} step = バッチ {len(batches)} 本）"
     )
@@ -1963,15 +1970,21 @@ def _round_i4_calibrated(
 def _fake_quant_i4(
     modules: Mapping[str, nn.Module], plan: CalibPlan | None
 ) -> tuple[dict[str, str], dict[str, Mapping[str, torch.Tensor]], dict[str, Mapping[str, str]]]:
-    """混成 i4 系列の丸め（DiT の **block 内** linear = i4 g32・残りは全て i8 per-channel）。
+    """混成 i4 系列の丸め（DiT の **block 内から adaLN を除いた** linear = i4 g32・残りは全て
+    i8 per-channel）。
 
     i4 を **block 内に絞る**のは聴感裁定 2026-08-23 の帰属結果。block 外の 5 本
     （`in_proj` / `out_proj` / `cond_module.{0,2,4}`）は校正の駆動が stage 単位である都合で
     GPTQ に載らず素の RTN i4 で丸まっていたが、それが w4 席のこもりの一因と実測で確定した
-    （残る 1 軸は校正コーパスの汎化 — {@link irodori.calib_cases}）。i4 格子そのものは
-    block 内 312 本で足りているので、5 本だけを i8 側の丸めへ移す。
+    （残る 1 軸は校正コーパスの汎化 — {@link irodori.calib_cases}）。
 
-    2 つの述語は {@link irodori.calib.stage_linear_names} を境に**排他に**割る（`quantize.py` の
+    さらに **adaLN 144 本も i8 へ戻す**（同 2026-08-23 の聴感裁定 — A/B sim で「読み上げ方が
+    明確に改善」）。modulation の scale / shift / gate は量子化感度が高く、i4 のままだと
+    block 外を i8 へ移した後も韻律のずれが残った。コストは +13.1 MiB（dit i4 payload の
+    +6.0%）。判定はセグメント一致（{@link irodori.calib.is_adaln}）で、i4 に残るのは block 内
+    168 本。
+
+    2 つの述語は「block 内 − adaLN」を境に**排他に**割る（`quantize.py` の
     混成 MUST）。`dit` は `TextToLatentRFDiT` **丸ごと**（backbone / projector / speaker /
     duration のコピーを内側に持つ）なので、block の外はどれもここで i8 に落ちる — これは配布の
     quant 席 `w4` が他 7 役に i8 系列のバイトを充てるのと同じ条件で、**校正入力を配布条件へ
@@ -1992,20 +2005,32 @@ def _fake_quant_i4(
     dit = modules[TARGET_DIT]
     graph_names = calib.dit_i4_names(dit, dit_sym_max(plan.context.config))
     stages = calib.dit_stages(dit)
-    i4_names = calib.stage_linear_names(stages)
+    stage_names = calib.stage_linear_names(stages)
+    adaln_names = frozenset(name for name in stage_names if calib.is_adaln(name))
+    i4_names = stage_names - adaln_names
     # MUST: block 内の linear は 1 本残らず配布グラフ側の適格であること — 外れたら上流の構成が
     # 変わっている（校正は stage を丸ごと駆動するので 1 本だけ外す逃げ道が無い）。
-    unaligned = sorted(i4_names - graph_names)
+    unaligned = sorted(stage_names - graph_names)
     if unaligned:
         raise SystemExit(
             f"DiT block 内の linear {unaligned[:3]} が i4 適格でない"
             "（校正は stage を丸ごと駆動するので 1 本だけ外す逃げ道が無い）"
         )
-    outer_names = graph_names - i4_names
+    # MUST: adaLN が 1 本も無いのは fail loudly — 聴感裁定で i8 へ戻した 144 本が上流の改名で
+    # 黙って i4 に戻ると、格納形も本数の門も正しいまま「裁定で棄却した構成」を配ることになる。
+    if not adaln_names:
+        raise SystemExit(
+            "DiT block 内に adaLN の linear が 1 本も無い"
+            f"（探した綴り: {sorted(calib.ADALN_SEGMENTS)}）"
+            "— 上流が modulation の属性名を変えている"
+        )
+    # i8 で配る側 = 配布グラフの適格から i4 の 168 本を除いた残り（block 外 5 本 + adaLN 144 本）。
+    i8_names = graph_names - i4_names
     reports: dict[str, str] = {}
     scales: dict[str, Mapping[str, torch.Tensor]] = {}
     # MUST: i8 は**校正入力の捕捉より前**に当てる（順序 MUST ② — `_round_i4_calibrated`）。
-    # `dit` の述語が落とすのは block 内だけなので、block 外の 5 本もここで i8 に丸まる。
+    # `dit` の述語が落とすのは i4 の 168 本だけなので、block 外の 5 本と adaLN 144 本も
+    # ここで i8 に丸まる。
     for name, module in sorted(modules.items()):
         include = (lambda key: key not in i4_names) if name == TARGET_DIT else None
         if not _has_quantizable_weights(module):
@@ -2028,8 +2053,8 @@ def _fake_quant_i4(
         int4_scales = plain.scales
         summary = f"格納 i4 へ丸めた（RTN・校正なし） — {plain.describe()}"
     print(f"[fake-quant] {TARGET_DIT}: {summary}", flush=True)
-    # i8 の要約は**残す**（`dit` は 2 段掛かる — block 外と内側の他役割コピーが i8・block 内の
-    # linear が i4）。上書きすると「i8 の対象が 0 本になった」退行が要約から読めなくなる。
+    # i8 の要約は**残す**（`dit` は 2 段掛かる — block 外と adaLN と内側の他役割コピーが i8・
+    # block 内の残りが i4）。上書きすると「i8 の対象が 0 本になった」退行が要約から読めなくなる。
     reports[TARGET_DIT] = f"{reports[TARGET_DIT]} / {summary}"
     # MUST: 2 経路は互いに素（重なれば同じ重みを 2 度丸めたことになり、値だけが静かに狂う）。
     # 下の過不足門より**先**に見る — 重なりは「同じ重みを 2 度丸めた」という別の診断で、
@@ -2037,20 +2062,20 @@ def _fake_quant_i4(
     overlap = sorted(set(scales.get(TARGET_DIT, {})) & set(int4_scales))
     if overlap:
         raise SystemExit(f"i8 と i4 が同じ重みを丸めている（二重丸め）: {overlap[:3]}")
-    # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「block 内と数えたのに丸まって
+    # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「i4 と数えたのに丸まって
     # いない」形で、i4 席に i8 の重みが混ざったまま緑になる（サイズだけが静かに戻る）。
     expected = {f"{name}.weight" for name in i4_names}
     if set(int4_scales) != expected:
         raise SystemExit(
-            f"block 内 {len(i4_names)} 本に対し i4 へ丸めたのは {len(int4_scales)} 本"
+            f"block 内の adaLN 以外 {len(i4_names)} 本に対し i4 へ丸めたのは {len(int4_scales)} 本"
             f"（過不足: {sorted(set(int4_scales) ^ expected)[:3]}）"
         )
     scales[TARGET_DIT] = {**scales.get(TARGET_DIT, {}), **int4_scales}
-    # MUST: block 外の 5 本は**明示 `i8`** で名指しする（{@link FakeQuantResult.overrides}）—
-    # 既定 `weight_dtype` が i4 なので、落とすと emit が i4 適格の linear を既定で i4 計画へ
-    # 流し、group scale の無いまま fail loudly で落ちる。
+    # MUST: i8 側の 149 本（block 外 5 + adaLN 144）は**明示 `i8`** で名指しする
+    # （{@link FakeQuantResult.overrides}）— 既定 `weight_dtype` が i4 なので、落とすと emit が
+    # i4 適格の linear を既定で i4 計画へ流し、group scale の無いまま fail loudly で落ちる。
     overrides: dict[str, str] = {
-        **{f"{name}.weight": "i8" for name in sorted(outer_names)},
+        **{f"{name}.weight": "i8" for name in sorted(i8_names)},
         **dict.fromkeys(int4_scales, "i4"),
     }
     return reports, scales, {TARGET_DIT: overrides}
@@ -2085,8 +2110,9 @@ def fake_quant(
     以外は f32 格納なので、両者は整合する。したがって 3 つの norm は i8 では素通りが正しく、
     「対象 0 本」を役割単位では落とさない（**全体で** 0 本なら落とす）。
 
-    NOTE: i4（`--dtype i4`）は {@link _fake_quant_i4} が受け持つ — DiT の **block 内** linear
-    だけが i4 group32 で、block 外を含む残りは全て i8。丸めは既定で GPTQ 校正付きなので
+    NOTE: i4（`--dtype i4`）は {@link _fake_quant_i4} が受け持つ — DiT の **block 内から adaLN を
+    除いた** linear だけが i4 group32 で、adaLN と block 外を含む残りは全て i8。丸めは既定で
+    GPTQ 校正付きなので
     `calib_plan` が要る。
     """
     if dtype == "f32":

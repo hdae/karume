@@ -39,10 +39,12 @@ uv run --with descript-audiotools --with einops python -m irodori.dacvae.export 
 ```
 
 The `w4` quant seat adds an **i4 series for `dit` only** — the other seven roles share the i8 bytes,
-so nothing else is re-exported for it. Only the DiT block weights are stored as i4; the five
+so nothing else is re-exported for it. Only the DiT block weights outside the adaLN modulation are
+stored as i4 (168 linears); the 144 adaLN linears (`attention_adaln`, `mlp_adaln`) and the five
 linears outside the blocks (`in_proj`, `out_proj`, `cond_module.{0,2,4}`) are stored as i8 in the
-same container. Step 7 requires this series; the rounding is GPTQ-calibrated by default and takes
-hours of CPU time (twelve calibration cases × the full reference loop):
+same container — both exclusions come from listening judgements. Step 7 requires this series; the
+rounding is GPTQ-calibrated by default and takes hours of CPU time (twelve calibration cases × the
+full reference loop):
 
 ```sh
 uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i4   # 2''. dit only, calibrated

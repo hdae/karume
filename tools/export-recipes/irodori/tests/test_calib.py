@@ -6,12 +6,14 @@
 - stage 逐次の block ループが素の DiT 1 回の forward とビット一致すること（ずれた経路で
   丸めても数値は普通に出る）
 - i4 適格が「配布グラフに載る linear だけ」で、g32 非整除が現れたら fail loudly すること
-- 配布グラフの linear が「block 内 = i4 格納 × 校正」「block 外 = i8 格納」へ**過不足なく
-  排他に**割れること（聴感裁定 2026-08-23 で block 外を i4 から外した）
+- 配布グラフの linear が「block 内の adaLN 以外 = i4 格納 × 校正」「block 外 + adaLN = i8 格納」
+  へ**過不足なく排他に**割れること（聴感裁定 2026-08-23 で block 外と adaLN を i4 から外した）
+- adaLN の判定が**セグメント一致**であること（`attention` が `attention_adaln` を巻き込まない・
+  adaLN 配下の子を取りこぼさない）と、adaLN が 1 本も無い日は fail loudly すること
 - scale 台帳と 1 本単位の格納指定のキーがラッパの FQN 空間（= safetensors のテンソルキー）に
   居ること
 - 校正が**実際に別の丸め**を産むこと（素通りしたら格納形が同じなので資産からは読めない）
-- 校正入力を**配布条件と同じ状態の重み**から採ること（i8 は全部丸めた後・block 内は
+- 校正入力を**配布条件と同じ状態の重み**から採ること（i8 は全部丸めた後・i4 側は
   丸める前）
 - 上流 `DiffusionBlock.forward` の引数が動いたら落ちること（cond 側の切り出しが黙って外れる）
 - 条件 K/V キャッシュ付きで回したら落ちること（1 つの kwargs を全 stage で使い回せない）
@@ -74,12 +76,18 @@ class TinyBlock(nn.Module):
 
     引数 11 本を全て keyword で受けて hidden を返す — 実物と同じなので、stage は包まずに
     そのまま並べられる（`irodori.calib.dit_stages`）。
+
+    adaLN は実物と同じ属性名（`attention_adaln` / `mlp_adaln`）で、**linear を子に持つ**形
+    （`…_adaln.1`）にする — 判定がセグメント一致であること（葉でも接尾辞でもない）を
+    模型の側からも踏むため。
     """
 
     def __init__(self, attention_width: int = HIDDEN) -> None:
         super().__init__()
         self.attention = TinyAttention(attention_width)
         self.mlp = nn.Linear(HIDDEN, HIDDEN, bias=False)
+        self.attention_adaln = nn.Sequential(nn.SiLU(), nn.Linear(HIDDEN, HIDDEN, bias=False))
+        self.mlp_adaln = nn.Sequential(nn.SiLU(), nn.Linear(HIDDEN, HIDDEN, bias=False))
 
     def forward(
         self,
@@ -101,7 +109,10 @@ class TinyBlock(nn.Module):
             + caption_state.mean(dim=1, keepdim=True)
         )
         attended = torch.tanh(self.attention.wq(x) + context)
-        return x + self.attention.wo(self.mlp(attended)) * cond_embed
+        return x + self.attention.wo(self.mlp(attended)) * self.modulation(cond_embed)
+
+    def modulation(self, cond_embed: torch.Tensor) -> torch.Tensor:
+        return self.attention_adaln(cond_embed) + self.mlp_adaln(cond_embed)
 
 
 class TinyDit(nn.Module):
@@ -179,6 +190,29 @@ class DriftingDit(TinyDit):
     def forward_with_encoded_conditions(self, x_t: torch.Tensor, **conditions: Any) -> torch.Tensor:
         conditions.pop("context_kv", None)
         return super().forward_with_encoded_conditions(x_t, **conditions)
+
+
+class RenamedAdalnBlock(TinyBlock):
+    """上流が modulation の属性名を変えた日の block（adaLN の綴りがどこにも無い）。
+
+    計算は 1 演算も変わらない — 変わるのは FQN だけなので、門が無ければ 144 本が黙って
+    i4 へ戻る（格納形も本数の門も正しいまま、裁定で棄却した構成が出荷される）。
+    """
+
+    def __init__(self, attention_width: int = HIDDEN) -> None:
+        super().__init__(attention_width)
+        self.attention_modulation = self.attention_adaln
+        self.mlp_modulation = self.mlp_adaln
+        del self.attention_adaln
+        del self.mlp_adaln
+
+    def modulation(self, cond_embed: torch.Tensor) -> torch.Tensor:
+        return self.attention_modulation(cond_embed) + self.mlp_modulation(cond_embed)
+
+
+class RenamedAdalnDit(TinyDit):
+    def __init__(self, blocks: int = 3) -> None:
+        super().__init__(blocks, block_type=RenamedAdalnBlock)
 
 
 class CachedKvDit(TinyDit):
@@ -302,17 +336,20 @@ def stub_capture(monkeypatch):
     差し替え先は**素の DiT を実際に走らせて**採るので、`(args, kwargs)` の形も捕捉元も実物と
     同じまま。返すのは `(呼び出しごとの step 数, 捕捉時点の重み)` で、後者は「どの重みが
     丸まった状態で校正入力を採ったか」を呼び出し側が主張するための写し。
+
+    MUST: 走らせるのは**呼ばれた時点**（実物と同じ）— 先に採っておくと、i8 で丸め済みの
+    block 内 adaLN が捕捉時の重みと食い違い、分解一致門が模型の都合で落ちる。
     """
 
     def install(dit: nn.Module) -> tuple[list[int], dict[str, torch.Tensor]]:
         calls: list[int] = []
         at_capture: dict[str, torch.Tensor] = {}
-        prepared = capture_run(dit)
 
         def stub(model, cases, context, *, steps=calib.CALIB_STEPS, label="calib"):
             calls.append(steps)
             at_capture.clear()
             at_capture.update({n: p.detach().clone() for n, p in model.named_parameters()})
+            prepared = capture_run(model)
             return tuple(prepared for _ in cases)
 
         monkeypatch.setattr(calib, "capture_stage_batches", stub)
@@ -358,7 +395,13 @@ class TestStageSplit:
         assert names == {
             f"blocks.{index}.{child}"
             for index in range(2)
-            for child in ("attention.wq", "attention.wo", "mlp")
+            for child in (
+                "attention.wq",
+                "attention.wo",
+                "mlp",
+                "attention_adaln.1",
+                "mlp_adaln.1",
+            )
         }
         assert names <= {name for name, _module in dit.named_modules()}
 
@@ -431,16 +474,17 @@ class TestEligibleSet:
             calib.dit_i4_names(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
 
     def test_the_eligible_set_is_split_exclusively_between_the_two_paths(self):
-        """block 内（i4 × 校正）と block 外（i8）で**過不足なく排他**。
+        """適格集合が block 内と block 外へ**過不足なく排他**に割れる（格納の割り方の土台）。
 
-        `quantize.py` の混成 MUST（同じ重みを 2 経路に通さない）。
+        `quantize.py` の混成 MUST（同じ重みを 2 経路に通さない）。適格集合そのものは
+        adaLN の裁定に依らない — 動くのは下の格納指定の割り方だけ。
         """
         dit = make_dit()
         stage_names = calib.stage_linear_names(calib.dit_stages(dit))
-        i4_names = calib.dit_i4_names(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
+        eligible = calib.dit_i4_names(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
 
-        assert stage_names <= i4_names, "block 内の linear が i4 適格から漏れている"
-        assert i4_names - stage_names == {"in_proj", "out_proj", "cond_module.0", "cond_module.2"}
+        assert stage_names <= eligible, "block 内の linear が i4 適格から漏れている"
+        assert eligible - stage_names == {"in_proj", "out_proj", "cond_module.0", "cond_module.2"}
 
     def test_a_block_linear_outside_the_i4_set_fails_loudly(self, monkeypatch, stub_capture):
         """block 内に非適格が混じると「走査の本数 = 丸めた本数」の門が張れない。"""
@@ -464,8 +508,8 @@ class TestEligibleSet:
         stub_capture(dit)
         genuine = calib.calibrate_i4
 
-        def short(stages, batches):
-            report, ledger = genuine(stages, batches)
+        def short(stages, batches, include=None):
+            report, ledger = genuine(stages, batches, include)
             return replace(report, layers=report.layers[:-1]), ledger
 
         monkeypatch.setattr(calib, "calibrate_i4", short)
@@ -485,14 +529,42 @@ class TestEligibleSet:
         stub_capture(dit)
         genuine = calib.calibrate_i4
 
-        def overlapping(stages, batches):
-            report, ledger = genuine(stages, batches)
+        def overlapping(stages, batches, include=None):
+            report, ledger = genuine(stages, batches, include)
             merged = dict(ledger.scales) | {"in_proj.weight": torch.ones(HIDDEN, 1)}
             return report, replace(ledger, scales=merged)
 
         monkeypatch.setattr(calib, "calibrate_i4", overlapping)
 
         with pytest.raises(SystemExit, match="二重丸め"):
+            quantize(dit)
+
+
+class TestAdalnBoundary:
+    """i4 と i8 を割る adaLN の境（聴感裁定 2026-08-23 — 144 本を i8 へ戻した）。"""
+
+    def test_the_match_is_by_segment_not_by_substring(self):
+        """`attention` が `attention_adaln` を巻き込まず、adaLN 配下の子も取りこぼさない。"""
+        assert calib.is_adaln("blocks.0.attention_adaln.1")
+        assert calib.is_adaln("blocks.0.mlp_adaln.1")
+        # stage 内の局所 FQN（校正の `include` が受け取る形）でも同じ答え。
+        assert calib.is_adaln("attention_adaln.1")
+        assert calib.is_adaln("mlp_adaln")
+        assert not calib.is_adaln("blocks.0.attention.wq")
+        assert not calib.is_adaln("blocks.0.attention.wo")
+        assert not calib.is_adaln("blocks.0.mlp")
+        assert not calib.is_adaln("in_proj")
+
+    def test_a_dit_without_adaln_fails_loudly(self, stub_capture):
+        """MUST: 上流が modulation の属性名を変えたら落とす。
+
+        判定が空振りすると 144 本が黙って i4 へ戻る — 格納形も本数の門も正しいままなので、
+        裁定で棄却した構成が緑のまま出荷される（読み上げ方の劣化だけが残る）。
+        """
+        dit = make_dit(dit_type=RenamedAdalnDit)
+        stub_capture(dit)
+
+        with pytest.raises(SystemExit, match="adaLN の linear が 1 本も無い"):
             quantize(dit)
 
 
@@ -515,11 +587,12 @@ class TestCalibratedI4:
             )
         }
 
-    def test_the_overrides_are_a_hybrid_of_i4_inside_and_i8_outside_the_blocks(self, stub_capture):
-        """MUST: block 外は**明示 `i8`** で名指しする — 落とすと emit の既定（i4）へ流れる。
+    def test_the_overrides_are_a_hybrid_of_i4_and_i8_by_block_and_adaln(self, stub_capture):
+        """MUST: i8 側（block 外 + adaLN）は**明示 `i8`** で名指しする — 落とすと emit の既定
+        （i4）へ流れる。
 
         既定 `weight_dtype` が i4 なので、`karume.emit._plan_weight_dtype` は override の無い
-        i4 適格を既定で i4 計画へ回す。そこへ per-channel scale しか無い block 外が来ると
+        i4 適格を既定で i4 計画へ回す。そこへ per-channel scale しか無い i8 側が来ると
         「group scale が無い」で落ちる（= 明示指定が要る側の門）。
         """
         dit = make_dit()
@@ -529,14 +602,17 @@ class TestCalibratedI4:
 
         overrides = result.overrides[ir.TARGET_DIT]
         stage_names = calib.stage_linear_names(calib.dit_stages(dit))
+        adaln_names = {name for name in stage_names if calib.is_adaln(name)}
+        assert adaln_names, "模型に adaLN が無い（この門が空振りしている）"
         assert {key for key, dtype in overrides.items() if dtype == "i4"} == {
-            f"{name}.weight" for name in stage_names
+            f"{name}.weight" for name in stage_names - adaln_names
         }
         assert {key for key, dtype in overrides.items() if dtype == "i8"} == {
             "in_proj.weight",
             "out_proj.weight",
             "cond_module.0.weight",
             "cond_module.2.weight",
+            *(f"{name}.weight" for name in adaln_names),
         }
         # i8 指定の block 外にも scale が要る（`karume.emit._plan_i8` は scale 不在を落とす）。
         scales = result.scales[ir.TARGET_DIT]
@@ -572,12 +648,15 @@ class TestCalibratedI4:
         )
         assert differing, "GPTQ が RTN と同じ値を出した（校正が効いていない）"
         assert all(name.startswith("blocks.") for name in differing)
+        # MUST: adaLN は GPTQ の `include` で外れている — 差が出たら i4 側で丸まっている。
+        assert not any(calib.is_adaln(name) for name in differing)
 
-    def test_the_out_of_block_weights_land_on_the_i8_grid(self, stub_capture):
-        """MUST: block 外は **i8 の格子**（`--no-calib` でも同じ — 校正は block 内にしか効かない）。
+    def test_the_i8_side_weights_land_on_the_i8_grid(self, stub_capture):
+        """MUST: i8 側は **i8 の格子**（`--no-calib` でも同じ — 校正は i4 側にしか効かない）。
 
-        聴感裁定 2026-08-23 で i4 から外した 4〜5 本。i4 の格子に乗ったままだと、格納指定を
-        i8 に替えても値だけが 4bit のこもりを保ったまま出荷される（形も本数も正しく見える）。
+        聴感裁定 2026-08-23 で i4 から外した block 外と adaLN。i4 の格子に乗ったままだと、
+        格納指定を i8 に替えても値だけが 4bit のこもりを保ったまま出荷される（形も本数も
+        正しく見える）。
         """
         calibrated = make_dit()
         plain = make_dit()
@@ -587,7 +666,12 @@ class TestCalibratedI4:
         quantize(plain, make_plan(calibrated=False))
 
         after = dict(calibrated.named_parameters())
-        for name in ("in_proj", "out_proj", "cond_module.0", "cond_module.2"):
+        adaln = sorted(
+            name
+            for name in calib.stage_linear_names(calib.dit_stages(calibrated))
+            if calib.is_adaln(name)
+        )
+        for name in ("in_proj", "out_proj", "cond_module.0", "cond_module.2", *adaln):
             key = f"{name}.weight"
             assert torch.equal(dict(plain.named_parameters())[key], after[key]), key
             scale = channel_scale(after[key], 0)
@@ -595,12 +679,13 @@ class TestCalibratedI4:
             assert torch.equal(restored, after[key]), f"{key} が i8 の格子に乗っていない"
 
     def test_the_capture_sees_the_shipped_condition(self, stub_capture):
-        """MUST: i8 側（block 外と内側の他役割コピー）は丸めた**後**・block 内は丸める**前**に
-        校正入力を採る。
+        """MUST: i8 側（block 外・adaLN・内側の他役割コピー）は丸めた**後**・i4 側は丸める
+        **前**に校正入力を採る。
 
-        後半（block 内が素のまま）が「丸めた重みが作った活性から同じ重みの丸め先を選ぶ
-        循環」を、前半（block 外が丸まっている）が「f32 の周辺で選んだ丸め先を i8 の周辺と
-        組んで配る」を、それぞれ捕まえる。
+        後半（i4 側が素のまま）が「丸めた重みが作った活性から同じ重みの丸め先を選ぶ
+        循環」を、前半（i8 側が丸まっている）が「f32 の周辺で選んだ丸め先を i8 の周辺と
+        組んで配る」を、それぞれ捕まえる。adaLN は block **内**の i8 なので、ここが
+        後回しになると modulation だけ f32 の活性で丸め先を選ぶことになる。
         """
         dit = make_dit()
         before = {name: p.detach().clone() for name, p in dit.named_parameters()}
@@ -615,7 +700,10 @@ class TestCalibratedI4:
         i8_key = "pretrained_text_backbone.weight"
         assert not torch.equal(before[i8_key], at_capture[i8_key]), f"{i8_key} が捕捉時に素のまま"
         for key in (name for name in before if name.startswith("blocks.")):
-            assert torch.equal(before[key], at_capture[key]), f"{key} が捕捉前に丸まっている"
+            if calib.is_adaln(key):
+                assert not torch.equal(before[key], at_capture[key]), f"{key} が捕捉時に素のまま"
+            else:
+                assert torch.equal(before[key], at_capture[key]), f"{key} が捕捉前に丸まっている"
 
     def test_the_probe_run_precedes_every_rounding(self, stub_capture):
         """順序 MUST ①: 分解一致門の probe は **1 step**・丸めの前（2 回目が本番の捕捉）。"""
