@@ -13,7 +13,8 @@
   strip のみ）と、上流突合へ渡す caption が**上流の入口から**作られること
 - i4 席（`--dtype i4`）の**出荷バイトからの読み戻し**の門（provenance / 形 / 本数 / 席の効き）が
   1 つ残らず発火すること — ここが素通りすると「w8 の golden を w4 の golden と呼ぶ」事故が
-  数値も形も合ったまま通る
+  数値も形も合ったまま通る。i4 席は **I4 + I8 + F32 の混成**（block 内 linear が i4・block 外が
+  i8 — 聴感裁定 2026-08-23）なので、i8 の逆変換と「効き門は i4 だけで数える」もここで固定する
 """
 
 from __future__ import annotations
@@ -32,7 +33,13 @@ from irodori import export as ex
 from irodori import pipeline_ref as ip
 from irodori.distribution import CALIB_PROVENANCE_FILE
 from karume.emit import pack_int4, unpack_int4
-from karume.quantize import dequantize_int4, group_scale, quantize_to_int4
+from karume.quantize import (
+    channel_scale,
+    dequantize_int4,
+    group_scale,
+    quantize_to_int4,
+    quantize_to_int8,
+)
 
 
 class TestTSchedule:
@@ -263,8 +270,11 @@ class TestCaptionGoldenStability:
 #: 合成コンテナの group 長（i4 は端数 group を作らない — ADR 0069 決定 2）。
 GROUP = 32
 
+#: block 内の席（i4 格納）と block 外の席（i8 格納 — 聴感裁定 2026-08-23 で i4 から外した）。
 I4_KEY = "in_proj.weight"
 SCALE_KEY = f"karume.scale.{I4_KEY}"
+I8_KEY = "out_proj.weight"
+I8_SCALE_KEY = f"karume.scale.{I8_KEY}"
 #: 持ち上げ定数の席（`karume.convert` の綴り）— 上書き対象から外れることを見るために置く。
 CONST_KEY = "const.0f0f0f0f0f0f0f0f"
 
@@ -272,14 +282,15 @@ CONST_KEY = "const.0f0f0f0f0f0f0f0f"
 class _DitWrapper(nn.Module):
     """`irodori.export.DitGraph` の身代わり（**所有パラメタの顔ぶれ**だけを写す）。
 
-    i4 席 1 本（`in_proj.weight` — 量子化軸が g32 で割り切れる）と f32 席 3 本
-    （bias / norm）。名前を実物と同じ綴りにするのは、読み戻しがラッパ内 FQN 空間で
-    動くことをそのまま試すため。
+    i4 席 1 本（`in_proj.weight` — 量子化軸が g32 で割り切れる）と i8 席 1 本
+    （`out_proj.weight` — block 外）と f32 席 4 本（bias / norm）。名前を実物と同じ綴りに
+    するのは、読み戻しがラッパ内 FQN 空間で動くことをそのまま試すため。
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.in_proj = nn.Linear(2 * GROUP, 4)
+        self.out_proj = nn.Linear(2 * GROUP, 4)
         self.out_norm = nn.LayerNorm(4)
 
 
@@ -297,6 +308,13 @@ def _shipped(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Te
     return packed, scale, dequantize_int4(unpack_int4(packed, weight.shape), scale)
 
 
+def _shipped_i8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """同・i8 席（`(int8, per-channel scale, 出荷バイトから戻した f32)`）。"""
+    scale = channel_scale(weight, 0)
+    quantized = quantize_to_int8(weight, scale)
+    return quantized, scale, quantized.to(torch.float32) * scale
+
+
 def _material(seed: int = 0) -> tuple[list[list[Any]], dict[str, Any], dict[str, torch.Tensor]]:
     """合成コンテナの素材 `(ヘッダ項目, IR の initializer 宣言, 期待値)`。
 
@@ -304,14 +322,18 @@ def _material(seed: int = 0) -> tuple[list[list[Any]], dict[str, Any], dict[str,
     """
     generator = torch.Generator().manual_seed(seed)
     packed, scale, restored = _shipped(torch.randn(4, 2 * GROUP, generator=generator))
+    stored8, scale8, restored8 = _shipped_i8(torch.randn(4, 2 * GROUP, generator=generator))
     plain = {
         "in_proj.bias": torch.randn(4, generator=generator),
+        "out_proj.bias": torch.randn(4, generator=generator),
         "out_norm.weight": torch.randn(4, generator=generator),
         "out_norm.bias": torch.randn(4, generator=generator),
     }
     entries: list[list[Any]] = [
         [I4_KEY, "I4", [4, 2 * GROUP], _raw(packed)],
         [SCALE_KEY, "F32", list(scale.shape), _raw(scale)],
+        [I8_KEY, "I8", [4, 2 * GROUP], _raw(stored8)],
+        [I8_SCALE_KEY, "F32", list(scale8.shape), _raw(scale8)],
         *([key, "F32", [4], _raw(value)] for key, value in plain.items()),
         [CONST_KEY, "F32", [2], _raw(torch.zeros(2))],
     ]
@@ -320,13 +342,17 @@ def _material(seed: int = 0) -> tuple[list[list[Any]], dict[str, Any], dict[str,
             "tensor": I4_KEY,
             "storage": {"dtype": "i4", "scale": SCALE_KEY, "group_size": GROUP},
         },
+        "p_out_proj_weight": {
+            "tensor": I8_KEY,
+            "storage": {"dtype": "i8", "scale": I8_SCALE_KEY},
+        },
         **{
             f"p_{key.replace('.', '_')}": {"tensor": key, "storage": {"dtype": "f32"}}
             for key in plain
         },
         "const_0f0f0f0f0f0f0f0f": {"tensor": CONST_KEY, "storage": {"dtype": "f32"}},
     }
-    return entries, initializers, {I4_KEY: restored, **plain}
+    return entries, initializers, {I4_KEY: restored, I8_KEY: restored8, **plain}
 
 
 def _write_series(
@@ -374,7 +400,7 @@ class TestRestoreDitFromI4Series:
 
         record = ip.restore_dit_from_i4_series(module, series)
 
-        assert (record.int4, record.plain, record.changed) == (1, 3, 1)
+        assert (record.int4, record.int8, record.plain, record.changed) == (1, 1, 4, 1)
         assert record.calib["method"] == "gptq"
         owned = dict(module.named_parameters())
         # 持ち上げ定数（`const.*`）は席から外れる — 在っても上書き対象にならない。
@@ -490,16 +516,44 @@ class TestRestoreDitFromI4Series:
             ip.restore_dit_from_i4_series(_DitWrapper(), series)
 
     def test_a_storage_dtype_outside_the_seat_fails_loudly(self, tmp_path):
-        """w4 席の dit に i8 は並ばない（並んだら混成が想定と違う形で出荷されている）。"""
+        """w4 席の dit に f16 は並ばない（並んだら混成が想定と違う形で出荷されている）。
+
+        受理するのは f32 / i8 / i4 の 3 つだけ（{@link irodori.pipeline_ref._RESTORE_STORAGE}）。
+        """
         entries, initializers, _shipped_values = _material()
-        initializers["p_out_norm_weight"]["storage"] = {
-            "dtype": "i8",
-            "scale": "karume.scale.out_norm.weight",
-        }
+        initializers["p_out_norm_weight"]["storage"] = {"dtype": "f16"}
         series = _write_series(tmp_path / "dit", entries, initializers)
 
         with pytest.raises(SystemExit, match="は読み戻せない"):
             ip.restore_dit_from_i4_series(_DitWrapper(), series)
+
+    def test_an_i8_tensor_without_a_scale_declaration_fails_loudly(self, tmp_path):
+        """i8 も逆変換に per-channel scale が要る（宣言が無ければ読み戻せない）。"""
+        entries, initializers, _shipped_values = _material()
+        del initializers["p_out_proj_weight"]["storage"]["scale"]
+        series = _write_series(tmp_path / "dit", entries, initializers)
+
+        with pytest.raises(SystemExit, match=r"i8 格納の .* に scale の宣言が無い"):
+            ip.restore_dit_from_i4_series(_DitWrapper(), series)
+
+    def test_the_i8_seat_does_not_count_as_the_i4_seat_working(self, tmp_path):
+        """MUST: 席の効き門は **i4 だけ**で数える。
+
+        block 外の i8 は段 1（i8 丸め）と同じ格子なので値が動かないのが正常だが、実行のたびに
+        必ず一致するとは限らない（段 1 は `dit` 丸ごと・段 2 はコンテナのバイト）。そこを効き門に
+        数えると、i4 が 1 本も効いていない事故を i8 の差が埋め合わせて隠す。
+        """
+        module = _DitWrapper()
+        entries, initializers, shipped = _material()
+        with torch.no_grad():
+            module.in_proj.weight.copy_(shipped[I4_KEY])
+        series = _write_series(tmp_path / "dit", entries, initializers)
+        assert not torch.equal(module.out_proj.weight.detach(), shipped[I8_KEY]), (
+            "i8 席が段 1 と同値では、効き門が i4 だけを数えていることを試せない"
+        )
+
+        with pytest.raises(SystemExit, match="i4 の読み戻しが効いていない"):
+            ip.restore_dit_from_i4_series(module, series)
 
     def test_a_missing_container_fails_loudly(self, tmp_path):
         with pytest.raises(SystemExit, match="i4 系列のコンテナが無い"):

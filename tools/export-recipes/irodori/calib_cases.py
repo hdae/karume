@@ -1,4 +1,4 @@
-"""Irodori の校正コーパス（GPTQ が見る活性を作る full-loop ケース 4 件）。
+"""Irodori の校正コーパス（GPTQ が見る活性を作る full-loop ケース 12 件）。
 
 `karume.quant_calib` の校正付き丸めは「その層に実際に流れる活性」から丸め先を選び直す方式
 なので、コーパスの性格がそのまま丸めの偏りになる。DiT の活性は**テキスト（自己 attention の
@@ -12,9 +12,12 @@
   そこから直に引いて {@link assert_calib_disjoint} が突き合わせる。分離は **text /
   caption / seed の 3 軸すべて**で見る — どれか 1 つでも共有すると、同じ軌道の活性が
   校正へ入る。
-- **Irodori の領域に寄せる** — 日本語 TTS なので校正も日本語の発話文で採り、**話体
-  （ナレーション / 会話 / 案内放送 / 語り聞かせ）・話者像（男女 × 年代）・テンポ**を散らす。
-  1 つの型へ寄せると、活性の偏りがその型に張り付く。
+- **Irodori の領域に寄せる** — 日本語 TTS なので校正も日本語の発話文で採り、**話体・話者像
+  （男女 × 年代）・テンポ**を散らす。1 つの型へ寄せると、活性の偏りがその型に張り付く。
+  話体は 12 通り（ナレーション / 会話 / 案内放送 / 語り聞かせ / ささやき / 感情の強い台詞 /
+  ニュース読み / スポーツ実況 / 子ども向け読み聞かせ / 事務的な早口 / 詩の朗読 / 独白）で、
+  声量（ささやき〜張り上げ）・抑揚（平板〜大振り）・テンポ（早口〜間の長い朗読）の 3 軸が
+  それぞれ両端まで届くように選んである。
 - **条件は 3 本とも有効にする**（参照 latent あり + caption 非空）— 配布の既定経路であり、
   DiT の交差 attention が 3 区間とも動く唯一の regime。参照なし / caption 空の regime を
   校正に入れないのは意図した線引きで、そちらは**評価側**（`no-ref` ケース）が担当する。
@@ -22,9 +25,12 @@
 NOTE（本数と step 数の位置づけ）: 校正の質は**ケース数**と**捕捉 step 数**で上がる（前者は
 ケース間の活性の散り・後者は 1 ケースあたりの t の網羅 = `H = Σ XᵀX` の標本数）。どちらも
 export の CPU 時間に線形で効く。step 数は {@link irodori.calib.CALIB_STEPS} が既定
-（= 参照ループ全長）で `--calib-steps` で下げられるが、**ケース数は固定 4 件** — 増やすなら
+（= 参照ループ全長）で `--calib-steps` で下げられるが、**ケース数は固定 12 件** — 増やすなら
 ここへ本文を足す（`--calib-cases` のようなノブは置かない。使う本数が動くと
 `calib_provenance.json` の `cases` が実行ごとに変わり、配布資産の丸め条件が読めなくなる）。
+4 件から 12 件へ増やしたのは聴感裁定 2026-08-23 — 評価文そのもので校正した sim がほぼ無劣化
+だった（= 4bit 格子の表現力は足りている）一方、4 件で校正した w4 は汎化がそこそこ落ちており、
+こもりの 2 軸目がコーパス側だと帰属された。
 """
 
 from __future__ import annotations
@@ -70,6 +76,70 @@ CALIB_CASES: tuple[PipelineCase, ...] = (
         caption="年配の男性の声。昔話を語り聞かせるように、間を長めに取ってゆったりと話している。",
         reference=ReferenceSpec(frames=84, seed=404),
         seed=2404,
+    ),
+    PipelineCase(
+        name="calib-whisper",
+        why="ささやき体（声量が最小・息成分が多い）+ 参照あり + caption あり",
+        text="そっと近づいて、誰にも聞こえないように耳元でささやいた。",
+        caption="二十代の女性の声。息を多く含んだ小さなささやき声で、秘密を打ち明けるように話している。",
+        reference=ReferenceSpec(frames=88, seed=405),
+        seed=2405,
+    ),
+    PipelineCase(
+        name="calib-emotional",
+        why="感情の強い台詞（声量が最大・抑揚が大きい）+ 参照あり + caption あり",
+        text="どうしてそんな大事なことを、今まで黙っていたんだ。",
+        caption="三十代の男性の声。怒りと戸惑いが混じった強い感情を込めて、声を張り上げて話している。",
+        reference=ReferenceSpec(frames=92, seed=406),
+        seed=2406,
+    ),
+    PipelineCase(
+        name="calib-news",
+        why="ニュース読み（明瞭・平板・漢語が多い）+ 参照あり + caption あり",
+        text="政府は昨日、来年度の予算案を閣議で正式に決定したと発表しました。",
+        caption="四十代の男性の声。ニュース番組の原稿を読むように、明瞭で平板な調子を保って読み上げている。",
+        reference=ReferenceSpec(frames=100, seed=407),
+        seed=2407,
+    ),
+    PipelineCase(
+        name="calib-sports",
+        why="スポーツ実況（早口 × 高揚・長音の伸ばし）+ 参照あり + caption あり",
+        text="残り十秒、ここでシュート、決まったあああ、逆転です。",
+        caption="三十代の男性の声。スポーツ中継の実況のように、興奮して声を高く張り上げ、一気にまくし立てている。",
+        reference=ReferenceSpec(frames=104, seed=408),
+        seed=2408,
+    ),
+    PipelineCase(
+        name="calib-kids",
+        why="子ども向け読み聞かせ（抑揚が大振り・擬音）+ 参照あり + caption あり",
+        text="うさぎさんはぴょんぴょん跳ねて、お花畑まで走っていきました。",
+        caption="二十代の女性の声。幼い子ども向けの絵本を読み聞かせるように、抑揚を大きく取って優しく話している。",
+        reference=ReferenceSpec(frames=112, seed=409),
+        seed=2409,
+    ),
+    PipelineCase(
+        name="calib-brisk",
+        why="事務的な早口（感情が最小・テンポが最速）+ 参照あり + caption あり",
+        text="資料は三部ずつ用意して、会議室の机に並べておいてください。",
+        caption="三十代の女性の声。職場で事務連絡を伝えるように、感情を抑えた早口で淡々と話している。",
+        reference=ReferenceSpec(frames=116, seed=410),
+        seed=2410,
+    ),
+    PipelineCase(
+        name="calib-poem",
+        why="詩の朗読（間が最長・語ごとに区切る）+ 参照あり + caption あり",
+        text="白い雲は流れ、風はやわらかく、季節はまた巡ってゆく。",
+        caption="五十代の女性の声。詩を朗読するように、一語ずつ間を置いて響かせながら読み上げている。",
+        reference=ReferenceSpec(frames=120, seed=411),
+        seed=2411,
+    ),
+    PipelineCase(
+        name="calib-monologue",
+        why="しみじみした独白（低く落とした声・ゆらぎ）+ 参照あり + caption あり",
+        text="あの頃はまだ、こんな日が来るなんて思ってもみなかったよ。",
+        caption="六十代の男性の声。昔を懐かしむように、しみじみと声を落として独りごちている。",
+        reference=ReferenceSpec(frames=96, seed=412),
+        seed=2412,
     ),
 )
 

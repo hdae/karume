@@ -223,8 +223,9 @@ def _irodori_container(dtype: str, role: str, graph: str, extra: tuple[str, ...]
     「F32 が無い」で落ちてしまい、**圧縮 dtype の不在**を見る門（`assert_storage_absent`）が
     一度も試されない。
 
-    `extra` は混成コンテナを作る口（i4 系列に g32 非整除の linear が現れて I8 が混ざった形
-    — {@link IRODORI_STORAGE_FORBIDDEN} の MUST が名指しする失敗モード）。
+    `extra` は混成コンテナを作る口。**実物の i4 系列がこの形**（block 内 linear が I4・block 外
+    5 本が I8 — 聴感裁定 2026-08-23）で、{@link IRODORI_STORAGE_FORBIDDEN} の MUST が名指しする
+    「I8 を含むという要求検査では i8 席と i4 系列を分けられない」失敗モードそのもの。
     """
     payload = f"{role}-{dtype}-weights".encode()
     dtypes = ("F32",) if dtype == "f32" else (dtype.upper(), "F32")
@@ -730,11 +731,11 @@ class TestIrodoriStorageSeries:
             irodori_plan(sources)
 
     def test_it_refuses_an_i4_series_asset_in_the_i8_seat(self, tmp_path: Path) -> None:
-        """MUST: i8 席は **I4 の不在**で締める（要求検査だけでは適格率次第で塞がらない）。
+        """MUST: i8 席は **I4 の不在**で締める（要求検査だけでは分けられない）。
 
-        写すのは「i4 系列の linear が 1 本だけ g32 非整除になって I8 が混ざった」形 — その
-        コンテナは「I8 を含む」を満たすので、禁止表が無いと i8 席へ挿し込めてしまう。実害は
-        既定席 `w8a8` に出る（宣言した `linearCompute: "i8a8"` の述語は i4 常駐も受けるので、
+        写すのは**実物の i4 系列**（block 内 linear が I4・block 外 5 本が I8）— そのコンテナは
+        「I8 を含む」を満たすので、禁止表が無いと i8 席へ挿し込めてしまう。実害は既定席
+        `w8a8` に出る（宣言した `linearCompute: "i8a8"` の述語は i4 常駐も受けるので、
         ADR 0076 の w4a8 経路が席名 `w8a8` のまま黙って走る）。
         """
         sources = _build_irodori_sources(tmp_path)
@@ -799,7 +800,7 @@ class TestIrodoriStorageSeries:
             "I8",
             "I4",
         }
-        # i8 席は I4 の不在で締める（i4 系列は I8 を含まないので、要求検査だけでは塞がらない）。
+        # i8 席は I4 の不在で締める（i4 系列も I8 を含むので、要求検査だけでは塞がらない）。
         assert set(IRODORI_STORAGE_FORBIDDEN["dit_i8"]) == {"I4"}
         assert {
             files.file for labels in IRODORI_WEIGHTS.values() for files in labels.values()

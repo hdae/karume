@@ -176,6 +176,13 @@ def stage_linear_names(stages: Sequence[StageSpec]) -> frozenset[str]:
 def dit_i4_names(dit: nn.Module, sym_max: int) -> frozenset[str]:
     """DiT の i4 適格（= 配布グラフに載る `nn.Linear` 全部）のモジュール FQN。
 
+    NOTE: i4 系列が実際に **i4 で格納するのはこの内側の block 内 312 本だけ**（block 外の 5 本は
+    i8 格納 — 聴感裁定 2026-08-23 の帰属結果。`irodori.export._fake_quant_i4`）。ここが返すのは
+    その 2 つを合わせた「配布グラフに載る linear の全量」で、下の g32 整除条件は i8 へ回る
+    block 外にも掛かる — 格納が要求する以上に厳しいが、**緩めない**: 緩めると「block 外の
+    どれかが g32 非整除になった」構成変化が黙って通り、i4 席の中身が実行のたびに上流の
+    適格率で決まることになる。
+
     適格は 2 条件の積で決まる:
 
     1. **配布グラフに載る重みであること** — 判定は `irodori.export.DitGraph` の
@@ -396,8 +403,8 @@ def capture_stage_batches(
 
     MUST: 呼び出し側は**block 内の丸めを 1 本も当てる前**に呼ぶ（当てた後だと、丸めた重みが
     作った活性から同じ重みの丸め先を選ぶ循環になる）。逆に **block の外は先に丸めておく**
-    — 配布実行時に block へ入るのは i4 の `in_proj` が作った hidden と i4 の `cond_module` が
-    作った条件埋め込みで、後に回すと「f32 の周辺で選んだ丸め先」を i4 の周辺と組んで配る
+    — 配布実行時に block へ入るのは i8 の `in_proj` が作った hidden と i8 の `cond_module` が
+    作った条件埋め込みで、後に回すと「f32 の周辺で選んだ丸め先」を i8 の周辺と組んで配る
     ことになる（`irodori.export._round_i4_calibrated` の順序 MUST）。
     """
     if not cases:

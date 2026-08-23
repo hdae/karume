@@ -177,12 +177,13 @@ IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: **圧縮側の格納 dtype 全部**の不在を併せて要求して初めて系列 × 格納 dtype が集合として一意に
 #: なる。逆向き（圧縮席へ f32 資産）は {@link assert_storage} が要求 dtype の不在で落とす。
 #:
-#: MUST: **i8 席も I4 の不在を要求する**（`dit` だけが両方の系列を持つ）。i4 系列は DiT の適格
-#: linear だけが I4 で、残り（bias / norm / scale）は F32 なので、「I8 を含む」は満たさない —
-#: が、そこを頼りにすると **i4 系列が i8 系列を名乗れるかどうかが上流の適格率次第**になる
-#: （linear 1 本が g32 非整除になった途端 i8 が混ざり、既定席 `w8a8` の `linearCompute:
-#: "i8a8"` が i4 常駐で走る w4a8 経路〈ADR 0076〉へ黙って化ける）。禁止で締めれば、そこは
-#: 適格率に依らず塞がる。
+#: MUST: **i8 席も I4 の不在を要求する**（`dit` だけが両方の系列を持つ）。i4 系列は
+#: **I4 + I8 + F32 の混成**（block 内 linear が I4・block 外 5 本が I8・bias / norm / scale が
+#: F32 — 聴感裁定 2026-08-23 で block 外を i4 から外した。`irodori.export._fake_quant_i4`）なので、
+#: 「I8 を含む」という要求検査は i4 系列でも満たされてしまう。i8 席と i4 系列を分けているのは
+#: **この禁止表だけ**で、外すと既定席 `w8a8` の `linearCompute: "i8a8"` が i4 常駐で走る w4a8
+#: 経路（ADR 0076）へ黙って化ける。混成になる前も「i4 系列が i8 席を名乗れるかどうかが上流の
+#: 適格率次第」で同じ穴が空いていた — 混成でその穴が常時開いた形になっただけ。
 IRODORI_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     **{
         irodori_role(role, IRODORI_PLAIN_DTYPE): tuple(

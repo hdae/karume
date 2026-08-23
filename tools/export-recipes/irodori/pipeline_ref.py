@@ -670,12 +670,18 @@ def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) ->
 #: i4 系列の読み戻しで受け付ける格納 dtype → `(safetensors の dtype 名, 生バイトを載せる器)`。
 #:
 #: i4 は packed 4bit（1 バイトに 2 要素 — ADR 0069 決定 2）なので器は uint8 で、論理形へ戻すのは
-#: `karume.emit.unpack_int4`。ここに無い格納（i8 / f16）が `dit` のコンテナに現れたら、w4 席の
-#: 混成が想定と違う形で出荷されている（{@link restore_dit_from_i4_series} が落とす）。
+#: `karume.emit.unpack_int4`。i8 が並ぶのは **block 外の 5 本**（`in_proj` / `out_proj` /
+#: `cond_module.{0,2,4}` — 聴感裁定 2026-08-23 で i4 から外した。`irodori.export._fake_quant_i4`）。
+#: ここに無い格納（f16 / bf16）が `dit` のコンテナに現れたら、w4 席の混成が想定と違う形で
+#: 出荷されている（{@link restore_dit_from_i4_series} が落とす）。
 _RESTORE_STORAGE: Mapping[str, tuple[str, torch.dtype]] = {
     "f32": ("F32", torch.float32),
+    "i8": ("I8", torch.int8),
     "i4": ("I4", torch.uint8),
 }
+
+#: 逆変換に scale が要る格納 dtype（宣言に scale が無ければ読み戻せない = 即エラー）。
+_SCALED_STORAGE = frozenset({"i8", "i4"})
 
 #: 持ち上げ定数のテンソルキーの接頭辞（`karume.convert` が `const.<digest16>` で振る）。
 #:
@@ -697,6 +703,8 @@ class RestoredDit(NamedTuple):
     calib: Mapping[str, Any]
     #: i4 格納だったパラメタの本数（コンテナが正 — 期待値をコードに焼かない）。
     int4: int
+    #: i8 格納だったパラメタの本数（block 外の `in_proj` / `out_proj` / `cond_module`）。
+    int8: int
     #: f32 格納のまま読み戻したパラメタの本数（bias / norm）。
     plain: int
     #: 読み戻しで**値が動いた** i4 パラメタの本数（席の効き門の実測値）。
@@ -736,7 +744,7 @@ def _stored_parameters(graph: Mapping[str, Any], where: Path) -> dict[str, tuple
 
     scale のキーを綴りから組み立てず**宣言から引く**のは、格納の正本が IR だから
     （`karume.emit` は `karume.scale.<重みキー>` で振るが、それは書き手側の実装詳細で、
-    読み手が写経すると 2 箇所で独立に動ける）。i4 なのに scale の宣言が無い席は即エラー
+    読み手が写経すると 2 箇所で独立に動ける）。i4 / i8 なのに scale の宣言が無い席は即エラー
     （逆変換の足場が無い = 読み戻せない）。
     """
     initializers = graph.get("initializers")
@@ -757,18 +765,18 @@ def _stored_parameters(graph: Mapping[str, Any], where: Path) -> dict[str, tuple
                 f"（w4 席の dit に並ぶのは {' / '.join(sorted(_RESTORE_STORAGE))} だけ）"
             )
         scale = storage.get("scale")
-        if dtype == "i4" and not isinstance(scale, str):
-            raise SystemExit(f"{where}: i4 格納の '{key}' に scale の宣言が無い")
+        if dtype in _SCALED_STORAGE and not isinstance(scale, str):
+            raise SystemExit(f"{where}: {dtype} 格納の '{key}' に scale の宣言が無い")
         if key in stored:
             raise SystemExit(f"{where}: テンソルキー '{key}' を 2 つの initializer が指している")
-        stored[key] = (dtype, scale if dtype == "i4" else None)
+        stored[key] = (dtype, scale if dtype in _SCALED_STORAGE else None)
     return stored
 
 
 def _read_stored(
     container: Path, header: Mapping[str, Any], expected: Mapping[str, str]
 ) -> dict[str, torch.Tensor]:
-    """コンテナの生バイトを論理形の torch テンソルへ読む（I4 は nibble 展開まで）。
+    """コンテナの生バイトを論理形の torch テンソルへ読む（I4 は nibble 展開まで・I8 は素の器）。
 
     MUST: `safetensors` のリーダを通さない — ライブラリ（0.8.0）の dtype 語彙に `I4` が無く、
     packed 4bit を含むコンテナは開く時点で落ちる（`karume.verify` が自前リーダを持つのと同じ
@@ -811,6 +819,22 @@ def _read_stored(
     return values
 
 
+def _dequantize_stored(dtype: str, raw: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """出荷バイト（i4 packed / i8）を scale で f32 の論理形へ戻す。
+
+    i4 は core の `karume.quantize.dequantize_int4` をそのまま呼ぶ（`karume.emit` が格納前に
+    「書くバイトから戻してビット一致」を実測しているのと**同じ経路** — ADR 0069 決定 4 ③）。
+
+    NOTE: i8 側に相当する関数は core に無い（`karume.quantize` は `quantize_to_int8` だけを
+    持ち、逆変換は `karume.emit._convert_for_storage` がビット一致検査の中で `quantized *
+    scale` と直に書いている）。ここも同じ 1 式で、per-channel scale は keepdim 形なので
+    ブロードキャストがそのまま軸に乗る。
+    """
+    if dtype == "i4":
+        return dequantize_int4(raw, scale)
+    return raw.to(torch.float32) * scale
+
+
 def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> RestoredDit:
     """i4 系列の**出荷バイト**で、`dit` のラッパ所有パラメタを丸ごと上書きする（丸めの段 2）。
 
@@ -821,9 +845,9 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
     校正が同じ丸めを出す」ことはどこも保証していない。golden が見た重みは配布バイトそのもの、
     を機械で言い切れる唯一の形が「エクスポート済みの系列を読み戻す」。
 
-    上書きは i4 格納だけでなく**ラッパ所有パラメタの全部**（f32 格納の bias / norm も
-    コンテナの値で書く）。元値と一致するはずの側もコンテナから書くことで、「golden が見た重み
-    = 配布バイト」に例外席を作らない。
+    上書きは i4 格納だけでなく**ラッパ所有パラメタの全部**（block 外 5 本の i8 格納も、f32
+    格納の bias / norm も、コンテナの値で書く）。元値と一致するはずの側もコンテナから書くことで、
+    「golden が見た重み = 配布バイト」に例外席を作らない。
 
     門（どれも fail loudly・1 つでも外れたら golden を 1 バイトも書かせない）:
 
@@ -832,7 +856,8 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
       モジュールに無い / 逆、どちらも即エラー）。ずれたまま通すと、上書きされなかった重みだけが
       i8 の値で golden に載る
     - **本数**: ヘッダの I4 テンソルの集合と、IR の宣言から i4 として上書きした集合が一致する
-      こと（本数はコンテナが正 — 期待値を焼かない）
+      こと（本数はコンテナが正 — 期待値を焼かない）。**I8 は数えない** — 段 1 と同じ丸めなので
+      「i4 系列を読んでいる」の証拠にならず、i4 側の集合一致だけがそれを言える
     - **席の効き**: 上書きで値が動いた i4 パラメタが 1 本も無い、を落とす（読み戻しが効いて
       いないのに w8 golden を w4 golden と呼ぶ事故は、数値も形も合うので他のどの門にも掛からない）
     """
@@ -879,18 +904,19 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
     # モジュールが golden を書くことはない。
     changed = 0
     with torch.no_grad():
-        for key, (_dtype, scale_key) in sorted(stored.items()):
-            # MUST: dequant は書き下ろさず core の逆変換を呼ぶ（`karume.emit` が格納前に
-            # 「書くバイトから戻してビット一致」を実測しているのと同じ経路 — ADR 0069 決定 4 ③）。
+        for key, (dtype, scale_key) in sorted(stored.items()):
             raw = values.pop(key)
-            value = raw if scale_key is None else dequantize_int4(raw, values[scale_key])
+            value = raw if scale_key is None else _dequantize_stored(dtype, raw, values[scale_key])
             parameter = owned[key]
             if tuple(value.shape) != tuple(parameter.shape):
                 raise SystemExit(
                     f"{container}: '{key}' の形が コンテナ {list(value.shape)} /"
                     f" モジュール {list(parameter.shape)} で食い違う"
                 )
-            if scale_key is not None and not torch.equal(parameter.detach(), value):
+            # MUST: 効き門に数えるのは **i4 の席だけ**。block 外の i8 5 本は段 1 の i8 丸めと
+            # 同じ scale・同じ格子なので値が動かないのが正常で、数に入れると「i4 が 1 本も
+            # 効いていない」を i8 の一致が埋め合わせて隠す。
+            if dtype == "i4" and not torch.equal(parameter.detach(), value):
                 changed += 1
             parameter.copy_(value)
             del raw, value
@@ -899,15 +925,21 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
             f"{container}: 読み戻した i4 {len(int4_keys)} 本が段 1（i8 丸め）の値と全て同じ"
             " — i4 の読み戻しが効いていない（w8 golden を w4 golden と呼ぶ事故）"
         )
-    plain = len(stored) - len(int4_keys)
+    int8 = sum(1 for dtype, _scale in stored.values() if dtype == "i8")
+    plain = len(stored) - len(int4_keys) - int8
     print(
         f"[fake-quant] {ex.TARGET_DIT}: i4 系列の出荷バイトで上書きした —"
         f" i4 {len(int4_keys)} 本（うち段 1 と値が違うもの {changed} 本）/"
-        f" f32 {plain} 本・校正 {calib}",
+        f" i8 {int8} 本 / f32 {plain} 本・校正 {calib}",
         flush=True,
     )
     return RestoredDit(
-        container=container, calib=calib, int4=len(int4_keys), plain=plain, changed=changed
+        container=container,
+        calib=calib,
+        int4=len(int4_keys),
+        int8=int8,
+        plain=plain,
+        changed=changed,
     )
 
 
@@ -1118,6 +1150,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             "container": str(restored.container),
             "calib": restored.calib,
             "int4Tensors": restored.int4,
+            "int8Tensors": restored.int8,
             "f32Tensors": restored.plain,
             "changedByRestore": restored.changed,
         }

@@ -6,11 +6,12 @@
 - stage 逐次の block ループが素の DiT 1 回の forward とビット一致すること（ずれた経路で
   丸めても数値は普通に出る）
 - i4 適格が「配布グラフに載る linear だけ」で、g32 非整除が現れたら fail loudly すること
-- i4 適格が「block 内 = 校正」「block 外 = 素の RTN」へ**過不足なく排他に**割れること
+- 配布グラフの linear が「block 内 = i4 格納 × 校正」「block 外 = i8 格納」へ**過不足なく
+  排他に**割れること（聴感裁定 2026-08-23 で block 外を i4 から外した）
 - scale 台帳と 1 本単位の格納指定のキーがラッパの FQN 空間（= safetensors のテンソルキー）に
   居ること
 - 校正が**実際に別の丸め**を産むこと（素通りしたら格納形が同じなので資産からは読めない）
-- 校正入力を**配布条件と同じ状態の重み**から採ること（block 外と i8 は丸めた後・block 内は
+- 校正入力を**配布条件と同じ状態の重み**から採ること（i8 は全部丸めた後・block 内は
   丸める前）
 - 上流 `DiffusionBlock.forward` の引数が動いたら落ちること（cond 側の切り出しが黙って外れる）
 - 条件 K/V キャッシュ付きで回したら落ちること（1 つの kwargs を全 stage で使い回せない）
@@ -36,6 +37,7 @@ from irodori import calib
 from irodori import export as ir
 from irodori import patch as ir_patch
 from irodori.calib_cases import CALIB_CASES
+from karume.quantize import channel_scale, quantize_to_int8
 
 #: 量子化軸（= group 長）。i4 は端数 group を作らない（ADR 0069 決定 2）。
 HIDDEN = 32
@@ -429,7 +431,10 @@ class TestEligibleSet:
             calib.dit_i4_names(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
 
     def test_the_eligible_set_is_split_exclusively_between_the_two_paths(self):
-        """block 内（校正）と block 外（RTN）で**過不足なく排他**（`quantize.py` の混成 MUST）。"""
+        """block 内（i4 × 校正）と block 外（i8）で**過不足なく排他**。
+
+        `quantize.py` の混成 MUST（同じ重みを 2 経路に通さない）。
+        """
         dit = make_dit()
         stage_names = calib.stage_linear_names(calib.dit_stages(dit))
         i4_names = calib.dit_i4_names(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
@@ -468,8 +473,12 @@ class TestEligibleSet:
         with pytest.raises(AssertionError, match="走査の"):
             quantize(dit)
 
-    def test_a_ledger_that_overlaps_the_plain_path_fails_loudly(self, monkeypatch, stub_capture):
-        """同じ重みを 2 経路で丸めると値だけが静かに狂う（格納形も本数も正しく見える）。"""
+    def test_a_ledger_that_overlaps_the_i8_path_fails_loudly(self, monkeypatch, stub_capture):
+        """同じ重みを 2 経路で丸めると値だけが静かに狂う（格納形も本数も正しく見える）。
+
+        注入するのは block 外の `in_proj`（= i8 で丸め済み）— 二重丸めの門は過不足門より先に
+        見るので、診断は本数のずれではなく「同じ重みを 2 度丸めた」で出る。
+        """
         from dataclasses import replace
 
         dit = make_dit()
@@ -499,13 +508,39 @@ class TestCalibratedI4:
         owned = {name for name, _p in graph.named_parameters()}
         overrides = result.overrides[ir.TARGET_DIT]
         assert set(overrides) <= owned, "i4 席のキーが配布グラフの FQN 空間に無い"
-        assert set(overrides.values()) == {"i4"}
         assert set(overrides) == {
             f"{name}.weight"
             for name in calib.dit_i4_names(
                 dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1))
             )
         }
+
+    def test_the_overrides_are_a_hybrid_of_i4_inside_and_i8_outside_the_blocks(self, stub_capture):
+        """MUST: block 外は**明示 `i8`** で名指しする — 落とすと emit の既定（i4）へ流れる。
+
+        既定 `weight_dtype` が i4 なので、`karume.emit._plan_weight_dtype` は override の無い
+        i4 適格を既定で i4 計画へ回す。そこへ per-channel scale しか無い block 外が来ると
+        「group scale が無い」で落ちる（= 明示指定が要る側の門）。
+        """
+        dit = make_dit()
+        stub_capture(dit)
+
+        result = quantize(dit)
+
+        overrides = result.overrides[ir.TARGET_DIT]
+        stage_names = calib.stage_linear_names(calib.dit_stages(dit))
+        assert {key for key, dtype in overrides.items() if dtype == "i4"} == {
+            f"{name}.weight" for name in stage_names
+        }
+        assert {key for key, dtype in overrides.items() if dtype == "i8"} == {
+            "in_proj.weight",
+            "out_proj.weight",
+            "cond_module.0.weight",
+            "cond_module.2.weight",
+        }
+        # i8 指定の block 外にも scale が要る（`karume.emit._plan_i8` は scale 不在を落とす）。
+        scales = result.scales[ir.TARGET_DIT]
+        assert set(overrides) <= set(scales), "格納指定のある重みに scale が無い（emit が落ちる）"
 
     def test_the_rebased_tables_reach_emit_with_the_same_keys(self, stub_capture):
         """MUST: emit へ渡る scale と格納指定が**同じキー空間**に居る（張り替えは 1 実装）。"""
@@ -538,10 +573,12 @@ class TestCalibratedI4:
         assert differing, "GPTQ が RTN と同じ値を出した（校正が効いていない）"
         assert all(name.startswith("blocks.") for name in differing)
 
-    def test_the_out_of_block_weights_are_rounded_by_the_plain_path_in_both_modes(
-        self, stub_capture
-    ):
-        """block 外はどちらの経路でも素の RTN（丸め値はビット一致）。"""
+    def test_the_out_of_block_weights_land_on_the_i8_grid(self, stub_capture):
+        """MUST: block 外は **i8 の格子**（`--no-calib` でも同じ — 校正は block 内にしか効かない）。
+
+        聴感裁定 2026-08-23 で i4 から外した 4〜5 本。i4 の格子に乗ったままだと、格納指定を
+        i8 に替えても値だけが 4bit のこもりを保ったまま出荷される（形も本数も正しく見える）。
+        """
         calibrated = make_dit()
         plain = make_dit()
         stub_capture(calibrated)
@@ -553,12 +590,16 @@ class TestCalibratedI4:
         for name in ("in_proj", "out_proj", "cond_module.0", "cond_module.2"):
             key = f"{name}.weight"
             assert torch.equal(dict(plain.named_parameters())[key], after[key]), key
+            scale = channel_scale(after[key], 0)
+            restored = quantize_to_int8(after[key], scale).to(torch.float32) * scale
+            assert torch.equal(restored, after[key]), f"{key} が i8 の格子に乗っていない"
 
     def test_the_capture_sees_the_shipped_condition(self, stub_capture):
-        """MUST: block 外と i8 は丸めた**後**・block 内は丸める**前**に校正入力を採る。
+        """MUST: i8 側（block 外と内側の他役割コピー）は丸めた**後**・block 内は丸める**前**に
+        校正入力を採る。
 
         後半（block 内が素のまま）が「丸めた重みが作った活性から同じ重みの丸め先を選ぶ
-        循環」を、前半（block 外が丸まっている）が「f32 の周辺で選んだ丸め先を i4 の周辺と
+        循環」を、前半（block 外が丸まっている）が「f32 の周辺で選んだ丸め先を i8 の周辺と
         組んで配る」を、それぞれ捕まえる。
         """
         dit = make_dit()
