@@ -44,11 +44,15 @@ by default and takes hours of CPU time (four calibration cases × the full refer
 
 ```sh
 uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i4   # 2''. dit only, calibrated
+uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i4  # 4''. full-loop goldens
 ```
 
+Step 4'' **reads the container step 2'' wrote** (it is the only series whose goldens are baked from
+the shipped bytes rather than from a second calibration run), so it must follow 2''.
+
 `--no-calib` swaps the calibration for plain RTN. It exists for smoke runs only: the storage form is
-byte-identical either way, so `dist` refuses the result by reading the `calib_provenance.json` the
-export writes next to the container.
+byte-identical either way, so `dist` — and step 4'' — refuse the result by reading the
+`calib_provenance.json` the export writes next to the container.
 
 Order caveats measured in practice: step 2 reads step 5's real latent for the speaker cases
 (`SPEAKER_REAL_CASES`), and step 6 reads step 4's `z` for the decoder cases — so a **full** rebuild

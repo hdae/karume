@@ -9,12 +9,19 @@ r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop
     uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref
     uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype f16
     uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i8
+    uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i4
 
-`--dtype f16` / `--dtype i8` は**別系列**（`outputs/series/irodori-v4-small-{f16,i8}/pipeline/`）
-へ書く。丸めは `irodori.export.fake_quant` を load 直後に当てるので、golden も上流突合の参照も
-**同じ丸めた重み**で計算される（ADR 0018 / 0019 / 0027 / 0050 — 系列ごとに golden を焼き直す形）。
+`--dtype f16` / `--dtype i8` / `--dtype i4` は**別系列**
+（`outputs/series/irodori-v4-small-{f16,i8,i4}/pipeline/`）へ書く。丸めは
+`irodori.export.fake_quant` を load 直後に当てるので、golden も上流突合の参照も**同じ丸めた
+重み**で計算される（ADR 0018 / 0019 / 0027 / 0050 — 系列ごとに golden を焼き直す形）。
 
-出力（既定 `outputs/series/irodori-v4-small{,-f16,-i8}/pipeline/`・`.gitignore` 配下）:
+`--dtype i4`（配布の quant 席 `w4`）だけは丸めが 2 段になる: 段 1 は全役割を **i8 席と同一の
+fake-quant**、段 2 は **`--dtype i4` で export 済みの `dit` コンテナを読み戻して**ラッパ所有
+パラメタを上書きする（{@link restore_dit_from_i4_series}）。したがってこの系列は
+**export を先に走らせてある**ことが前提。
+
+出力（既定 `outputs/series/irodori-v4-small{,-f16,-i8,-i4}/pipeline/`・`.gitignore` 配下）:
 
     meta.json                入力テキスト / caption / S / seed / CFG scale / forward 数 /
                              t スケジュール / 供給源、および常設門の実測値
@@ -68,9 +75,14 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 
 from karume.convert import normalize_boundary_tensor
+from karume.dist import ir_graph, safetensors_header
+from karume.emit import unpack_int4
+from karume.quantize import dequantize_int4
+from karume.verify import READER_DTYPE_BITS
 
 from . import export as ex
 from . import patch
+from .distribution import CALIB_PROVENANCE_FILE, CALIB_SHIPPABLE_METHOD
 
 META_FILE = "meta.json"
 CASE_PREFIX = "case."
@@ -106,9 +118,10 @@ MIN_SECONDS, MAX_SECONDS = 0.5, 30.0
 #: **式の取り違え**（CFG の符号・スケール・t スケジュール・マスクの区間割り）は値域と
 #: 同じ O(1) で出る — 実際、CFG の有無だけで z は 5.56 / 3.23 動く（`cfgEffectMaxAbs`）。
 #:
-#: **圧縮系列（`--dtype f16` / `i8`）でも同じ閾値を掛ける**: 丸めはグラフ経路と上流経路の**両方**へ
-#: 同じ 1 回だけ当たる（`fake_quant` が丸めた `dit` を上流 `sample_euler_rf_cfg` もそのまま
-#: 使う）ので、ここで測る差は f32 系列と同じ「実装差だけ」であり、量子化誤差は両辺で相殺する。
+#: **圧縮系列（`--dtype f16` / `i8` / `i4`）でも同じ閾値を掛ける**: 丸めはグラフ経路と上流経路の
+#: **両方**へ同じ 1 回だけ当たる（`fake_quant` が丸めた `dit` を上流 `sample_euler_rf_cfg` も
+#: そのまま使う。i4 の読み戻しも同じ `dit` の Parameter を上書きするので同様）ので、ここで測る
+#: 差は f32 系列と同じ「実装差だけ」であり、量子化誤差は両辺で相殺する。
 #: 桁が変わりうるのは丸めが条件数の悪い領域を踏んだ場合だけで、それは**実測で決着させる**
 #: （閾値を系列ごとに割るのは、実測が実際に外れてからにする — 先回りして緩めると、外れた
 #: ことが分からなくなる）。f16 の実測値はまだ無い。
@@ -654,6 +667,250 @@ def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) ->
     return torch.cat(rows, dim=0).contiguous()
 
 
+#: i4 系列の読み戻しで受け付ける格納 dtype → `(safetensors の dtype 名, 生バイトを載せる器)`。
+#:
+#: i4 は packed 4bit（1 バイトに 2 要素 — ADR 0069 決定 2）なので器は uint8 で、論理形へ戻すのは
+#: `karume.emit.unpack_int4`。ここに無い格納（i8 / f16）が `dit` のコンテナに現れたら、w4 席の
+#: 混成が想定と違う形で出荷されている（{@link restore_dit_from_i4_series} が落とす）。
+_RESTORE_STORAGE: Mapping[str, tuple[str, torch.dtype]] = {
+    "f32": ("F32", torch.float32),
+    "i4": ("I4", torch.uint8),
+}
+
+#: 持ち上げ定数のテンソルキーの接頭辞（`karume.convert` が `const.<digest16>` で振る）。
+#:
+#: コンテナに並ぶのは**ラッパ所有パラメタと持ち上げ定数の 2 種だけ**なので、上書き対象の席は
+#: これを除いた残りで決まる。綴りが core 側で動いたら、定数が「モジュールに無いパラメタ」として
+#: 形の門に掛かる — 黙って通る側には倒れない。
+_LIFTED_CONST_PREFIX = "const."
+
+#: safetensors のヘッダ長を書く先頭バイト数（データ節の開始位置 = これ + ヘッダ長）。
+_HEADER_LENGTH_BYTES = 8
+
+
+class RestoredDit(NamedTuple):
+    """i4 系列から読み戻した `dit` の記録（meta.json の `i4Source` に載る）。"""
+
+    #: 読んだコンテナ（= 配布へ入るバイトそのもの）。
+    container: Path
+    #: その系列の校正条件（`calib_provenance.json` — 方式・格子・ケース数・step 数）。
+    calib: Mapping[str, Any]
+    #: i4 格納だったパラメタの本数（コンテナが正 — 期待値をコードに焼かない）。
+    int4: int
+    #: f32 格納のまま読み戻したパラメタの本数（bias / norm）。
+    plain: int
+    #: 読み戻しで**値が動いた** i4 パラメタの本数（席の効き門の実測値）。
+    changed: int
+
+
+def _shippable_calib(series_dir: Path) -> Mapping[str, Any]:
+    """i4 系列の校正条件を読み、**配布して良い方式**（GPTQ）であることを確かめて返す。
+
+    MUST: `--no-calib`（素の RTN）の生成物から golden を焼かない。校正の有無は格納形を
+    1 バイトも変えない（格子は RTN i4 g32 のまま）ので、コンテナのどこを見ても判別できず、
+    出るのは音の劣化だけ — 配布の組み立てが `irodori.distribution.assert_irodori_calib_provenance`
+    で張っているのと同じ門を、golden の焼き直しにも張る（golden だけが smoke 用の丸めで
+    採られていると、配布資産との突合が「両辺が違う重み」のまま緑になる）。
+    """
+    path = series_dir / CALIB_PROVENANCE_FILE
+    if not path.is_file():
+        raise SystemExit(
+            f"i4 系列の校正条件の記録が無い: {path}"
+            "（`python -m irodori.export --dtype i4` で書かれる）"
+        )
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as cause:
+        raise SystemExit(f"校正条件の記録を解析できない: {path} — {cause}") from cause
+    method = record.get("method") if isinstance(record, dict) else None
+    if method != CALIB_SHIPPABLE_METHOD:
+        raise SystemExit(
+            f"i4 系列が配布して良い丸め方式で作られていない: {path} は {method!r}、"
+            f"配布可は {CALIB_SHIPPABLE_METHOD!r} — `--no-calib` の生成物から golden を焼かない"
+        )
+    return record
+
+
+def _stored_parameters(graph: Mapping[str, Any], where: Path) -> dict[str, tuple[str, str | None]]:
+    """IR の initializer 宣言から「パラメタ席のテンソルキー → `(格納 dtype, scale キー)`」を引く。
+
+    scale のキーを綴りから組み立てず**宣言から引く**のは、格納の正本が IR だから
+    （`karume.emit` は `karume.scale.<重みキー>` で振るが、それは書き手側の実装詳細で、
+    読み手が写経すると 2 箇所で独立に動ける）。i4 なのに scale の宣言が無い席は即エラー
+    （逆変換の足場が無い = 読み戻せない）。
+    """
+    initializers = graph.get("initializers")
+    if not isinstance(initializers, dict):
+        raise SystemExit(f"{where}: IR メタデータに initializers が無い")
+    stored: dict[str, tuple[str, str | None]] = {}
+    for name, raw in sorted(initializers.items()):
+        storage = raw.get("storage") if isinstance(raw, dict) else None
+        key = raw.get("tensor") if isinstance(raw, dict) else None
+        if not isinstance(key, str) or not isinstance(storage, dict):
+            raise SystemExit(f"{where}: initializer '{name}' の宣言が読めない")
+        if key.startswith(_LIFTED_CONST_PREFIX):
+            continue
+        dtype = storage.get("dtype")
+        if dtype not in _RESTORE_STORAGE:
+            raise SystemExit(
+                f"{where}: '{key}' の格納 {dtype!r} は読み戻せない"
+                f"（w4 席の dit に並ぶのは {' / '.join(sorted(_RESTORE_STORAGE))} だけ）"
+            )
+        scale = storage.get("scale")
+        if dtype == "i4" and not isinstance(scale, str):
+            raise SystemExit(f"{where}: i4 格納の '{key}' に scale の宣言が無い")
+        if key in stored:
+            raise SystemExit(f"{where}: テンソルキー '{key}' を 2 つの initializer が指している")
+        stored[key] = (dtype, scale if dtype == "i4" else None)
+    return stored
+
+
+def _read_stored(
+    container: Path, header: Mapping[str, Any], expected: Mapping[str, str]
+) -> dict[str, torch.Tensor]:
+    """コンテナの生バイトを論理形の torch テンソルへ読む（I4 は nibble 展開まで）。
+
+    MUST: `safetensors` のリーダを通さない — ライブラリ（0.8.0）の dtype 語彙に `I4` が無く、
+    packed 4bit を含むコンテナは開く時点で落ちる（`karume.verify` が自前リーダを持つのと同じ
+    理由）。展開そのものは**書き下ろさず** core（`karume.emit.unpack_int4`）を呼ぶ。
+
+    `expected` は「テンソルキー → IR が宣言した格納 dtype」。ヘッダの dtype が宣言と食い違う /
+    宣言した形と実バイト長が合わない、はどちらも即エラー（宣言と実体の 2 面を突き合わせる）。
+    """
+    values: dict[str, torch.Tensor] = {}
+    with container.open("rb") as stream:
+        head = stream.read(_HEADER_LENGTH_BYTES)
+        data_start = _HEADER_LENGTH_BYTES + int.from_bytes(head, "little")
+        for key, dtype in sorted(expected.items()):
+            name, container_dtype = _RESTORE_STORAGE[dtype]
+            entry = header.get(key)
+            if not isinstance(entry, dict):
+                raise SystemExit(f"{container}: テンソル '{key}' がコンテナに無い")
+            if entry.get("dtype") != name:
+                raise SystemExit(
+                    f"{container}: '{key}' は IR の宣言が {dtype} なのにヘッダは"
+                    f" {entry.get('dtype')!r}（宣言と実体が割れている）"
+                )
+            shape = entry.get("shape")
+            offsets = entry.get("data_offsets")
+            if not isinstance(shape, list) or not isinstance(offsets, list) or len(offsets) != 2:
+                raise SystemExit(f"{container}: '{key}' のヘッダ項目が読めない")
+            bits = math.prod(int(dim) for dim in shape) * READER_DTYPE_BITS[name]
+            begin, end = int(offsets[0]), int(offsets[1])
+            if bits % 8 or end - begin != bits // 8:
+                raise SystemExit(
+                    f"{container}: '{key}' の宣言 {shape} × {name} と実バイト {end - begin} が"
+                    "食い違う"
+                )
+            stream.seek(data_start + begin)
+            raw = stream.read(end - begin)
+            if len(raw) != end - begin:
+                raise SystemExit(f"{container}: '{key}' のデータ節がファイル末尾で切れている")
+            flat = torch.frombuffer(bytearray(raw), dtype=container_dtype)
+            values[key] = unpack_int4(flat, shape) if dtype == "i4" else flat.reshape(shape)
+    return values
+
+
+def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> RestoredDit:
+    """i4 系列の**出荷バイト**で、`dit` のラッパ所有パラメタを丸ごと上書きする（丸めの段 2）。
+
+    段 1（{@link emit}）は全役割を **w8 席と同一の fake-quant**（i8）で丸める — quant 席 `w4` は
+    他 7 役に w8 の i8 バイトを共有させる混成席（`irodori.distribution.IRODORI_QUANT_SEATS`）
+    なので、条件エンコーダ側の丸めは w8 golden と同一が正しい。ここはその上に `dit` だけを
+    重ねる段で、**校正をもう 1 度走らせない**: GPTQ の丸め先は捕捉した活性に依るので「2 回の
+    校正が同じ丸めを出す」ことはどこも保証していない。golden が見た重みは配布バイトそのもの、
+    を機械で言い切れる唯一の形が「エクスポート済みの系列を読み戻す」。
+
+    上書きは i4 格納だけでなく**ラッパ所有パラメタの全部**（f32 格納の bias / norm も
+    コンテナの値で書く）。元値と一致するはずの側もコンテナから書くことで、「golden が見た重み
+    = 配布バイト」に例外席を作らない。
+
+    門（どれも fail loudly・1 つでも外れたら golden を 1 バイトも書かせない）:
+
+    - **provenance**: 系列が GPTQ 校正付きで丸められたこと（{@link _shippable_calib}）
+    - **形**: 上書き対象の FQN がラッパ所有パラメタと過不足なく一致すること（コンテナに在るのに
+      モジュールに無い / 逆、どちらも即エラー）。ずれたまま通すと、上書きされなかった重みだけが
+      i8 の値で golden に載る
+    - **本数**: ヘッダの I4 テンソルの集合と、IR の宣言から i4 として上書きした集合が一致する
+      こと（本数はコンテナが正 — 期待値を焼かない）
+    - **席の効き**: 上書きで値が動いた i4 パラメタが 1 本も無い、を落とす（読み戻しが効いて
+      いないのに w8 golden を w4 golden と呼ぶ事故は、数値も形も合うので他のどの門にも掛からない）
+    """
+    container = series_dir / ex.MODEL_FILE
+    if not container.is_file():
+        raise SystemExit(
+            f"i4 系列のコンテナが無い: {container}"
+            "（`python -m irodori.export --dtype i4` を先に走らせる）"
+        )
+    calib = _shippable_calib(series_dir)
+    # ヘッダは 2 度読む（オフセット表と IR メタデータ）— IR の取り出しは core の `ir_graph` に
+    # 任せて綴りを写経しない。読むのはどちらもヘッダだけで、数 GB のデータ節は舐めない。
+    header = safetensors_header(container)
+    stored = _stored_parameters(ir_graph(container), container)
+    owned = dict(wrapper.named_parameters())
+    absent = sorted(set(owned) - set(stored))
+    extra = sorted(set(stored) - set(owned))
+    if absent or extra:
+        raise SystemExit(
+            f"{container}: 上書き対象がラッパ所有パラメタと一致しない —"
+            f" コンテナに無い {absent[:3]} / モジュールに無い {extra[:3]}"
+            "（DitGraph の構成と export した系列のどちらかが動いている）"
+        )
+    int4_keys = frozenset(key for key, (dtype, _scale) in stored.items() if dtype == "i4")
+    packed_keys = {
+        key
+        for key, entry in header.items()
+        if key != "__metadata__" and isinstance(entry, dict) and entry.get("dtype") == "I4"
+    }
+    if packed_keys != int4_keys:
+        raise SystemExit(
+            f"{container}: I4 格納のテンソル {len(packed_keys)} 本に対し、i4 として読み戻す宣言は"
+            f" {len(int4_keys)} 本（過不足: {sorted(packed_keys ^ int4_keys)[:3]}）"
+        )
+    if not int4_keys:
+        raise SystemExit(f"{container}: I4 格納のテンソルが 1 本も無い（i4 系列ではない）")
+    expected = {key: dtype for key, (dtype, _scale) in stored.items()}
+    expected.update({scale: "f32" for _dtype, scale in stored.values() if scale is not None})
+    values = _read_stored(container, header, expected)
+
+    # 1 本ずつ「戻して → 比べて → 書いて → 捨てる」。全部を f32 で持ってから書くと、`dit` の
+    # f32 一式（1.4GB 級）と同じ大きさの複製がもう 1 つ同時に生きる（`karume.emit` が格納側で
+    # 同じ理由の逐次化をしているのと対）。門に落ちた時点で例外なので、途中まで上書きされた
+    # モジュールが golden を書くことはない。
+    changed = 0
+    with torch.no_grad():
+        for key, (_dtype, scale_key) in sorted(stored.items()):
+            # MUST: dequant は書き下ろさず core の逆変換を呼ぶ（`karume.emit` が格納前に
+            # 「書くバイトから戻してビット一致」を実測しているのと同じ経路 — ADR 0069 決定 4 ③）。
+            raw = values.pop(key)
+            value = raw if scale_key is None else dequantize_int4(raw, values[scale_key])
+            parameter = owned[key]
+            if tuple(value.shape) != tuple(parameter.shape):
+                raise SystemExit(
+                    f"{container}: '{key}' の形が コンテナ {list(value.shape)} /"
+                    f" モジュール {list(parameter.shape)} で食い違う"
+                )
+            if scale_key is not None and not torch.equal(parameter.detach(), value):
+                changed += 1
+            parameter.copy_(value)
+            del raw, value
+    if changed == 0:
+        raise SystemExit(
+            f"{container}: 読み戻した i4 {len(int4_keys)} 本が段 1（i8 丸め）の値と全て同じ"
+            " — i4 の読み戻しが効いていない（w8 golden を w4 golden と呼ぶ事故）"
+        )
+    plain = len(stored) - len(int4_keys)
+    print(
+        f"[fake-quant] {ex.TARGET_DIT}: i4 系列の出荷バイトで上書きした —"
+        f" i4 {len(int4_keys)} 本（うち段 1 と値が違うもの {changed} 本）/"
+        f" f32 {plain} 本・校正 {calib}",
+        flush=True,
+    )
+    return RestoredDit(
+        container=container, calib=calib, int4=len(int4_keys), plain=plain, changed=changed
+    )
+
+
 def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -> dict[str, Any]:
     """full-loop golden を書き、要約を返す（検証に落ちたら 1 バイトも書かない）。"""
     from tokenizers import Tokenizer
@@ -696,8 +953,14 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     # `dit` は `TextToLatentRFDiT` **丸ごと**（backbone / projector / speaker / duration の
     # コピーを内側に持つ）なので、上流突合（`sample_euler_rf_cfg` / `predict_duration_log_frames`）
     # もここで丸めた重みで回る = グラフ経路と上流経路の両辺が同じ丸めを受ける。
+    #
+    # MUST（i4 = 配布の quant 席 `w4`）: 丸めを 2 段に割る。段 1 はここで **i8 席と同一の
+    # fake-quant**（w4 席は他 7 役に w8 の i8 バイトを共有させるので、条件エンコーダ側の丸めは
+    # w8 golden と同一が正しい）、段 2 は {@link restore_dit_from_i4_series} が `dit` のラッパ
+    # 所有パラメタだけを出荷バイトで上書きする。`irodori.export.fake_quant` の i4 経路を呼んで
+    # 校正をここでもう 1 度走らせない理由は段 2 の docstring。
     quantized = ex.fake_quant(
-        dtype,
+        "i8" if dtype == "i4" else dtype,
         {
             ex.TARGET_BACKBONE: backbone,
             ex.TARGET_TEXT_PROJ: text_projector,
@@ -709,6 +972,16 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             "text_norm": text_norm,
             "caption_norm": caption_norm,
         },
+    )
+    restored = (
+        restore_dit_from_i4_series(
+            # ラッパ所有パラメタは `dit` の Parameter そのもの（`DitGraph` は張り替えずに
+            # 同じ属性名で抱える）なので、ラッパ経由の上書きが `dit` 側にも通る。
+            ex.DitGraph(dit, ex.dit_sym_max(config)),
+            ex.default_out_root(model_dir, dtype) / ex.TARGET_DIT,
+        )
+        if dtype == "i4"
+        else None
     )
 
     # MUST: グラフラッパは**パッチ後**でしか正しく動かない（実数形 RoPE 表を渡すため）。
@@ -824,7 +1097,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     )
     written[T_EMBED_FILE] = (out_dir / T_EMBED_FILE).stat().st_size
 
-    meta_payload = {
+    meta_payload: dict[str, Any] = {
         "dtype": dtype,
         "fakeQuant": quantized.reports,
         "steps": NUM_STEPS,
@@ -838,6 +1111,16 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
         "caps": caps,
         "cases": cases,
     }
+    if restored is not None:
+        # MUST: 既存キーを 1 つも動かさない（deno 側の latent 門が読む）。i4 のときだけ足す
+        # 1 本で、`fakeQuant` が段 1（i8）しか語らないぶんの出所をここが受け持つ。
+        meta_payload["i4Source"] = {
+            "container": str(restored.container),
+            "calib": restored.calib,
+            "int4Tensors": restored.int4,
+            "f32Tensors": restored.plain,
+            "changedByRestore": restored.changed,
+        }
     (out_dir / META_FILE).write_text(
         json.dumps(meta_payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
     )
@@ -846,7 +1129,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
 
 
 def default_out_dir(model_dir: Path, dtype: str = "f32") -> Path:
-    """既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16,-i8}/pipeline/`）。
+    """既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16,-i8,-i4}/pipeline/`）。
 
     系列 root の綴りは `irodori.export.default_out_root` と同一 —
     `pipeline/` はその下の 1 段（グラフのターゲットと並ぶ席）。
@@ -864,7 +1147,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=ex.WEIGHT_DTYPES,
         default="f32",
         help="重みの格納 dtype（f16 / i8 は golden を fake-quant 後の重みで焼き直す"
-        " — ADR 0018 / 0019 / 0027 / 0050）",
+        " — ADR 0018 / 0019 / 0027 / 0050。i4 は i8 席と同じ丸めの上に、export 済みの"
+        " i4 系列（--model-dir から導く）の出荷バイトで dit を上書きする — ADR 0069）",
     )
     args = parser.parse_args(argv)
     out_dir = default_out_dir(args.model_dir, args.dtype) if args.out is None else args.out
