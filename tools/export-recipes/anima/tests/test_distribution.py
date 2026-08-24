@@ -395,33 +395,25 @@ class TestLoraProvenance:
 class TestBaseModels:
     """LoRA を焼かないモデル（`anima` / 第三者 fine-tune）— turbo とは席も検査も違う。"""
 
-    def test_a_plain_model_declares_the_i4_seat_like_turbo(self, tmp_path: Path) -> None:
-        """素版も turbo と同型の i4 席を持つ（波 J-4 ② — 校正条件がモデル別になった）。
+    def test_a_plain_model_excludes_the_i4_seat(self, tmp_path: Path) -> None:
+        """素版は i4 の席もファイルも**持たない**（0.5.0 の除外裁定 — `ANIMA_MODELS` の NOTE）。
 
-        「宣言する」は quant 表とファイル一覧の**両方**で見る — 片方だけだと、席は在るが
-        ファイルが配られていない（= 選ぶと 404 になる quant）状態が緑になる。
+        視認裁定（2026-08-24 配布スキップ → 2026-08-25 除外）の反転。「持たない」は quant 表と
+        ファイル一覧の**両方**で見る — 片方だけだと、席は消えたがファイルだけ配られる（無駄な
+        GB）/ ファイルは消えたが席が残る（選ぶと 404）のどちらかが緑になる。turbo が i4 を
+        持ち続けることは TestQuant 系の既存門が見ている（あちらは別裁定で公開済み）。
+        rtn 方式の校正門も turbo 側の既存門（丸め方式の受理検査）が被覆を保つ — 素版の i4 は
+        構成として組めなくなったので、素版側の校正門テストはこの裁定で削除した。
         """
         sources = _build_series(tmp_path / "series", model="anima-v1.0")
         out_dir = tmp_path / "models" / "anima-v1.0"
         manifest = _assemble_anima(sources, out_dir, "anima-v1.0")
 
         entry = manifest["models"]["anima-v1.0"]
-        assert sorted(entry["weights"]["transformer"]) == ["f16", "i4", "i8"]
-        assert entry["quants"]["f16+dit4"]["weights"]["transformer"] == "i4"
-        assert entry["quants"]["f16+dit4-attn8-s16"]["weights"]["transformer"] == "i4"
-        assert (out_dir / "anima-v1.0" / OUTPUT_PATHS["transformer_i4"]).exists()
-
-    def test_a_plain_model_requires_a_calibrated_i4_series(self, tmp_path: Path) -> None:
-        """席を宣言した以上、素版の i4 系列も**校正付き**であることまで突き合わせる。
-
-        素版の校正は turbo と別条件（多 step・CFG）で回るが、配布可の判定は方式だけを見る —
-        条件がモデル別になったことが門を緩める側へ効いていないことを、モデルを変えて踏む。
-        """
-        sources = _build_series(tmp_path / "series", model="anima-v1.0", calib_method="rtn")
-
-        assert sources.transformer["i4"].name == "anima-v1.0-i4-dyn"
-        with pytest.raises(DistError, match="配布して良い丸め方式で作られていない"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-v1.0", "anima-v1.0")
+        assert sorted(entry["weights"]["transformer"]) == ["f16", "i8"]
+        assert "f16+dit4" not in entry["quants"]
+        assert "f16+dit4-attn8-s16" not in entry["quants"]
+        assert not (out_dir / "anima-v1.0" / OUTPUT_PATHS["transformer_i4"]).exists()
 
     def test_it_stops_when_a_plain_model_gets_a_series_with_a_baked_lora(
         self, tmp_path: Path
@@ -568,16 +560,16 @@ class TestCalibProvenance:
     ) -> None:
         """`--model` の取り違えで焼いた i4 を名指しで拒否する。
 
-        `anima.export` の `--model` は**校正条件を引くためだけ**のノブなので、素版の重みを
-        `--model anima-turbo` で焼いた資産は「正しい素版 i4」に見える — 格納形も本数も
-        LoRA 記録の不在も全て正しく、turbo の 8 step・CFG 1 で校正されていることだけが違う。
+        `anima.export` の `--model` は**校正条件を引くためだけ**のノブなので、turbo の重みを
+        `--model anima-v1.0` で焼いた資産は「正しい turbo i4」に見える — 格納形も本数も
+        LoRA 記録も全て正しく、素版の多 step・CFG で校正されていることだけが違う。
+        （0.5.0 で素版が i4 を持たなくなったため、取り違えの向きを素版→turbo から
+        turbo→素版へ反転して同じ門を踏む。）
         """
-        sources = _build_series(
-            tmp_path / "series", model="anima-v1.0", calib_model=ANIMA_TURBO_MODEL_NAME
-        )
+        sources = _build_series(tmp_path / "series", calib_model="anima-v1.0")
 
         with pytest.raises(DistError, match="校正条件 'steps' がこのモデルの既定と違う"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-base", model="anima-v1.0")
+            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
     def test_it_stops_when_only_the_guidance_came_from_another_model(self, tmp_path: Path) -> None:
         """step が一致していても CFG がずれていれば落ちる（2 欄とも門に載っている）。"""

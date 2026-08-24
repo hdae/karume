@@ -262,7 +262,11 @@ ANIMA_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
 #: `resolution` だけは移行元 CLI の既定（512）を採らない — あちらの 512 は「静的資産の最小」
 #: であって推奨値ではなく、配布形は S 形 1 本（ADR 0038 §4）で解像度に依存しない。配布の
 #: 推奨既定は ADR 0038 Examples のとおり 1024²。
-ANIMA_SCHEDULER: Mapping[str, Any] = {"shift": 3, "numTrainTimesteps": 1000}
+#: `type`（サンプラ種別）は 0.5.0 の視認 A/B 裁定（2026-08-25）で **DPM++ 2M を base / turbo
+#: 両採用** — 同 step 数（= 同計算コスト）で品質が同等以上（seed 42 はほぼ互角・seed 7 は
+#: 構図と中景の解像で優位・破綻の追加なし）。省略時既定は "euler"（models 側 config.ts）なので
+#: 明示宣言で切り替える。
+ANIMA_SCHEDULER: Mapping[str, Any] = {"type": "dpmpp-2m", "shift": 3, "numTrainTimesteps": 1000}
 
 #: 既定のネガティブプロンプト。turbo 席では**使われない**（CFG=1 なので uncond 側を 1 度も
 #: 計算しない）が、欄自体は据え置く — 利用者が guidance を上げた瞬間に効く値だから。
@@ -378,6 +382,12 @@ class AnimaModel:
 
 
 #: モデル名 → 事実。リポの分かれ目でもある（{@link TURBO_MODELS} / {@link BASE_MODELS}）。
+#:
+#: NOTE: base 3 モデルは **"i4" を持たない**（席とファイルが {@link anima_quants} /
+#: {@link anima_weights} の導出で両方消える）— i4 の視認裁定（2026-08-24）で構図分岐が大きく
+#: 配布スキップ、0.5.0 の上げ直し（2026-08-25）でも除外の裁定。復活条件 = adaLN 関連で出て
+#: いた量子化感度の高い部分の特定（系列は outputs/series-archive/2026-08-23-anima-base-i4/
+#: と outputs/series/ の *-i4-dyn に温存）。turbo の i4 席は別裁定で公開済みのため維持。
 ANIMA_MODELS: Mapping[str, AnimaModel] = {
     ANIMA_TURBO_MODEL_NAME: AnimaModel(
         lora_sha256=LORA_SHA256,
@@ -387,19 +397,19 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
     ),
     ANIMA_BASE_MODEL_NAME: AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "i4"),
+        storages=("f16", "i8"),
         own_text_conditioner=False,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
     "anima-wai-v1.0": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "i4"),
+        storages=("f16", "i8"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
     "anima-copycat-20260610": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8", "i4"),
+        storages=("f16", "i8"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
