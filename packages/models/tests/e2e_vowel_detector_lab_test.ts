@@ -57,20 +57,50 @@ const VOWEL_SEQUENCE = ["a", "i", "u", "e", "o"];
 const INPUT_NAME = "features";
 const TIME_STRIDE = 2;
 
+/** 実音声の採り直しコマンド（`e2e_vowel_detector_chain_test.ts` の `AUDIO_COMMAND` と同じ）。 */
+const AUDIO_COMMAND = "deno task demo:eval-audio --source <Irodori 配布形のパス>";
+
+/**
+ * ファイルの有無。
+ * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、
+ * 実行されていない検証が SKIP として静かに緑になる。
+ */
+const exists = (url: URL): boolean => {
+  try {
+    return Deno.statSync(url).isFile;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+};
+
 const manifestText = await Deno.readTextFile(new URL("karume.json", DIST_DIR)).catch(
   () => undefined,
 );
 const seriesBytes = await Deno.readFile(new URL("model.safetensors", SERIES_DIR)).catch(
   () => undefined,
 );
-const ASSETS_AVAILABLE = manifestText !== undefined && seriesBytes !== undefined;
-if (!ASSETS_AVAILABLE) {
+const MODEL_AVAILABLE = manifestText !== undefined && seriesBytes !== undefined;
+if (!MODEL_AVAILABLE) {
   console.warn(
     `[karume] ${DIST_DIR.pathname} / ${SERIES_DIR.pathname} が揃っていないため母音検出の` +
       "配布形 E2E を SKIP する（生成: cd tools/exporter && uv run --frozen python " +
       "export_vowel_detector.py && uv run --frozen karume dist --pipeline vowel-detector）",
   );
 }
+/**
+ * 実音声も揃っていること。`outputs/demo/` は `rm -rf` で常に安全に消せる席
+ * （`docs/assets-layout.md`）なので、配布形と系列とは**別に**見る — ここを SKIP 条件へ
+ * 入れないと、消した直後の実行だけが `NotFound` で赤くなり「資産が無い」と読めない。
+ */
+const AUDIO_AVAILABLE = CASES.every((name) => exists(new URL(`vowel-${name}.wav`, DEMO_DIR)));
+if (MODEL_AVAILABLE && !AUDIO_AVAILABLE) {
+  console.warn(
+    `[karume] ${DEMO_DIR.pathname} に実音声 4 本が揃っていないため母音検出の配布形 E2E を ` +
+      `SKIP する（生成: ${AUDIO_COMMAND}）`,
+  );
+}
+const ASSETS_AVAILABLE = MODEL_AVAILABLE && AUDIO_AVAILABLE;
 const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
 
 /** 配布形の資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない）。 */
