@@ -74,6 +74,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
+from _shared.calib_provenance import calib_complaint
 from karume.convert import normalize_boundary_tensor
 from karume.dist import ir_graph, safetensors_header
 from karume.emit import unpack_int4
@@ -82,7 +83,7 @@ from karume.verify import READER_DTYPE_BITS
 
 from . import export as ex
 from . import patch
-from .distribution import CALIB_PROVENANCE_FILE, CALIB_SHIPPABLE_METHOD
+from .distribution import CALIB_PROVENANCE_FILE, CALIB_SHIPPABLE_METHOD, irodori_calib_floor
 
 META_FILE = "meta.json"
 CASE_PREFIX = "case."
@@ -714,13 +715,15 @@ class RestoredDit(NamedTuple):
 
 
 def _shippable_calib(series_dir: Path) -> Mapping[str, Any]:
-    """i4 系列の校正条件を読み、**配布して良い方式**（GPTQ）であることを確かめて返す。
+    """i4 系列の校正条件を読み、**配布して良い条件**（GPTQ × 下限以上の予算）であることを
+    確かめて返す。
 
-    MUST: `--no-calib`（素の RTN）の生成物から golden を焼かない。校正の有無は格納形を
-    1 バイトも変えない（格子は RTN i4 g32 のまま）ので、コンテナのどこを見ても判別できず、
-    出るのは音の劣化だけ — 配布の組み立てが `irodori.distribution.assert_irodori_calib_provenance`
-    で張っているのと同じ門を、golden の焼き直しにも張る（golden だけが smoke 用の丸めで
-    採られていると、配布資産との突合が「両辺が違う重み」のまま緑になる）。
+    MUST: `--no-calib`（素の RTN）や `--calib-steps 1`（smoke 予算）の生成物から golden を
+    焼かない。校正の方式も予算も格納形を 1 バイトも変えない（格子は RTN i4 g32 のまま）ので、
+    コンテナのどこを見ても判別できず、出るのは音の劣化だけ — 配布の組み立てが
+    `irodori.distribution.assert_irodori_calib_provenance` で張っているのと**同じ判定**
+    （`_shared.calib_provenance` が正本）を、golden の焼き直しにも張る（golden だけが smoke 用の
+    丸めで採られていると、配布資産との突合が「両辺が違う重み」のまま緑になる）。
     """
     path = series_dir / CALIB_PROVENANCE_FILE
     if not path.is_file():
@@ -732,11 +735,13 @@ def _shippable_calib(series_dir: Path) -> Mapping[str, Any]:
         record = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as cause:
         raise SystemExit(f"校正条件の記録を解析できない: {path} — {cause}") from cause
-    method = record.get("method") if isinstance(record, dict) else None
-    if method != CALIB_SHIPPABLE_METHOD:
+    complaint = calib_complaint(
+        record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor()
+    )
+    if complaint is not None:
         raise SystemExit(
-            f"i4 系列が配布して良い丸め方式で作られていない: {path} は {method!r}、"
-            f"配布可は {CALIB_SHIPPABLE_METHOD!r} — `--no-calib` の生成物から golden を焼かない"
+            f"i4 系列の校正条件が配布の条件を満たしていない: {path} は{complaint}"
+            " — `--no-calib` / smoke 予算の生成物から golden を焼かない"
         )
     return record
 

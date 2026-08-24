@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from _shared.calib_provenance import calib_complaint
 from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
@@ -141,6 +142,24 @@ CALIB_PROVENANCE_FILE = "calib_provenance.json"
 #: 配布して良い丸め方式（{@link CALIB_PROVENANCE_FILE} の `method`）。`--no-calib` の素の RTN は
 #: smoke 用で、配布資産にしない（`irodori/export.py` の該当 MUST）。
 CALIB_SHIPPABLE_METHOD = "gptq"
+
+
+def irodori_calib_floor() -> Mapping[str, int]:
+    """配布して良い校正予算の下限（{@link CALIB_PROVENANCE_FILE} の欄が**在るときだけ**要求する）。
+
+    値は写さず正本から引く — コーパスの件数は {@link irodori.calib_cases.CALIB_CASES}、
+    捕捉 step 数は参照ループ全長（`irodori.pipeline_ref.NUM_STEPS` = `irodori.calib.CALIB_STEPS`
+    の既定）。どちらも聴感裁定 2026-08-23 が採られた条件そのもので、`--calib-steps 1` の
+    smoke 予算で焼いた資産は「裁定より下の構成」を配ることになる（格納形は 1 バイトも
+    変わらないので、資産からは読めない）。
+
+    NOTE（遅延 import）: `irodori.pipeline_ref` はこのモジュールを import し返すので module
+    直下では読めない。`irodori.calib_cases` も pipeline_ref 経由で同じ環を作る。
+    """
+    from .calib_cases import CALIB_CASES
+    from .pipeline_ref import NUM_STEPS
+
+    return {"cases": len(CALIB_CASES), "steps": NUM_STEPS}
 
 
 def irodori_role(role: str, dtype: str) -> str:
@@ -667,14 +686,16 @@ def _assert_irodori_graph_set(
 
 
 def assert_irodori_calib_provenance(sources: IrodoriSources) -> None:
-    """i4 系列が**校正付き**（GPTQ）で丸められたことを、書き出し側の記録で確かめる。
+    """i4 系列が**配布して良い校正**（GPTQ × 下限以上の予算）で丸められたことを、書き出し側の
+    記録で確かめる。
 
-    MUST: 校正の有無は格納形を 1 バイトも変えない（格子は RTN i4 g32 のまま — 変わるのは
+    MUST: 校正の方式も予算も格納形を 1 バイトも変えない（格子は RTN i4 g32 のまま — 変わるのは
     丸め値と scale 台帳だけ）。したがって `verify_dist` の構造検査もヘッダ dtype 検査も
-    {@link assert_irodori_graphs} も**素通りする**。`--no-calib` は smoke 用の opt-out なのに、
-    その生成物が配布へ紛れても資産からは判別できず、出るのは音の劣化だけ — anima の
-    `assert_calib_provenance` と同じ「別々の台本が持つ同じ事実は組み立て時に必ず突き合わせる」
-    規律をここにも敷く。
+    {@link assert_irodori_graphs} も**素通りする**。`--no-calib` も `--calib-steps 1` も smoke 用の
+    opt-out なのに、その生成物が配布へ紛れても資産からは判別できず、出るのは音の劣化だけ —
+    anima の `assert_calib_provenance` と同じ「別々の台本が持つ同じ事実は組み立て時に必ず
+    突き合わせる」規律をここにも敷く。判定そのものは `_shared.calib_provenance` が正本
+    （golden 焼き直しの門〈`irodori.pipeline_ref._shippable_calib`〉と同じ 1 実装で決める）。
     """
     directory = IRODORI_SERIES_DIRS["dit"]
     path = sources.series_by_dtype["i4"] / directory / CALIB_PROVENANCE_FILE
@@ -687,11 +708,13 @@ def assert_irodori_calib_provenance(sources: IrodoriSources) -> None:
         record = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as cause:
         raise DistError(f"校正条件の記録を解析できない: {path} — {cause}") from cause
-    method = record.get("method") if isinstance(record, dict) else None
-    if method != CALIB_SHIPPABLE_METHOD:
+    complaint = calib_complaint(
+        record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor()
+    )
+    if complaint is not None:
         raise DistError(
-            f"i4 系列が配布して良い丸め方式で作られていない: {path} は {method!r}、"
-            f"配布可は {CALIB_SHIPPABLE_METHOD!r} — `--no-calib` の生成物は配布に使わない"
+            f"i4 系列の校正条件が配布の条件を満たしていない: {path} は{complaint}"
+            " — `--no-calib` / smoke 予算の生成物は配布に使わない"
         )
 
 

@@ -124,8 +124,14 @@ def _lora_record(sha256: str) -> bytes:
     )
 
 
-def _calib_record(method: str) -> bytes:
-    """`anima/export.py` が i4 系列へ残す校正条件の記録（実物と同じ形）。"""
+def _calib_record(method: str, model: str) -> bytes:
+    """`anima/export.py` が i4 系列へ残す校正条件の記録（実物と同じ形）。
+
+    step / CFG は**モデル別**（`anima.calib.calib_conditions` が `pipeline_config` から導く）
+    ので、身代わりも同じ 1 箇所から引く — 値を写すと「どのモデルの条件で焼いたか」を見る門を
+    試せない（`--model` を取り違えて焼いた系列がここでも作れなくなる）。
+    """
+    defaults = anima_model(model).pipeline_config["defaults"]
     return json.dumps(
         {
             "method": method,
@@ -133,8 +139,8 @@ def _calib_record(method: str) -> bytes:
             "grid": "rtn",
             "prompts": 4,
             "resolution": 512,
-            "steps": 8,
-            "guidance": 1.0,
+            "steps": int(defaults["steps"]),
+            "guidance": float(defaults["guidanceScale"]),
             "text_dtype": "f16",
         }
     ).encode("utf-8")
@@ -149,6 +155,7 @@ def _build_series(
     mark: bytes = b"",
     lora_sha256: str | None = None,
     calib_method: str = "gptq",
+    calib_model: str | None = None,
 ) -> AnimaSources:
     """系列レイアウト（`outputs/series/` 相当）を偽資産で再現する（`io.*` の混入込み）。
 
@@ -156,7 +163,9 @@ def _build_series(
     「モデル間で同一の base 資産」を作り分けるための軸。`lora_sha256` は帰属の記録を
     カードの宣言からずらす軸（既定は一致する値）。`i8_rope` / `i4_rope` は rope 素表を
     f16 系列からずらす軸（系列ごとに独立に振れる — 網が全系列に掛かっていることを見るため）。
-    `calib_method` は i4 系列の丸め方式をずらす軸（既定は配布可の `gptq`）。
+    `calib_method` は i4 系列の丸め方式をずらす軸（既定は配布可の `gptq`）。`calib_model` は
+    **校正条件だけ**を別モデルのものへずらす軸（`--model` を取り違えて焼いた系列 — 重みも
+    格納形も正しいまま条件だけが別）。
     """
     spec = anima_model(model)
     sources = anima_sources(series_dir, model)
@@ -195,7 +204,7 @@ def _build_series(
     if "i4" in sources.transformer:
         _write(
             sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE,
-            _calib_record(calib_method),
+            _calib_record(calib_method, model if calib_model is None else calib_model),
         )
     _write(sources.tokenizers / "qwen2-tokenizer.json", _PAYLOADS["tokenizer"])
     _write(sources.tokenizers / "t5-tokenizer.json", _PAYLOADS["tokenizer_2"])
@@ -481,12 +490,14 @@ class TestPipelineMembership:
 
 
 class TestCalibProvenance:
-    """i4 系列が配布して良い丸め（GPTQ 校正付き）で作られたことを、組み立て時に突き合わせる。
+    """i4 系列が配布して良い丸め（GPTQ 校正付き × 下限以上の予算 × このモデルの条件）で
+    作られたことを、組み立て時に突き合わせる。
 
-    校正の有無は**格納形を 1 バイトも変えない**（research 2026-08-21 §6 — ファイルサイズも
-    バイト単位で同じ）ので、ヘッダ dtype の門も `verify_dist` の構造検査も素通りする。
-    `--no-calib` は smoke 用の opt-out なのに、その生成物が配布へ紛れても資産からは読めず、
-    出るのは「全体的にぼやけた」絵だけ — LoRA 帰属と同じ規律をここにも敷く。
+    校正の方式も予算も条件も**格納形を 1 バイトも変えない**（research 2026-08-21 §6 —
+    ファイルサイズもバイト単位で同じ）ので、ヘッダ dtype の門も `verify_dist` の構造検査も
+    素通りする。`--no-calib` / `--calib-prompts 1` は smoke 用の opt-out・`--model` は条件を
+    引くだけのノブなのに、その生成物が配布へ紛れても資産からは読めず、出るのは
+    「全体的にぼやけた」絵だけ — LoRA 帰属と同じ規律をここにも敷く。
     """
 
     def test_it_stops_when_the_i4_series_was_rounded_without_calibration(
@@ -524,8 +535,8 @@ class TestCalibProvenance:
 
         `guidance` は校正条件をモデル別化した 2026-08-23 に足した欄で、それ以前に採った
         turbo の i4 系列（HF へ上げた現物）には無い。読み手が欄の存在を要求すると、この 1 行の
-        追加が「丸め時間ぶんの再 export」を既存系列へ課すことになる — 読むのは `method` だけに
-        留める。
+        追加が「丸め時間ぶんの再 export」を既存系列へ課すことになる — 見るのは**在る欄だけ**に
+        留める（`_shared.calib_provenance` の同 MUST）。
         """
         sources = _build_series(tmp_path / "series")
         path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
@@ -536,6 +547,45 @@ class TestCalibProvenance:
         manifest = _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
         assert "w4" in manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]
+
+    def test_it_stops_when_the_calibration_ran_on_a_smaller_budget(self, tmp_path: Path) -> None:
+        """`--calib-prompts 1` は `method` を `gptq` のまま残す — 予算欄まで見ないと通る。
+
+        丸めの格子は動かないのでファイルサイズは 1 バイトも変わらず、絵がぼやけるだけ。
+        """
+        sources = _build_series(tmp_path / "series")
+        path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
+        record = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**record, "prompts": 1}), encoding="utf-8")
+
+        with pytest.raises(DistError, match="校正予算 'prompts' が配布の下限を下回る"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+
+    def test_it_stops_when_the_series_was_calibrated_under_another_models_conditions(
+        self, tmp_path: Path
+    ) -> None:
+        """`--model` の取り違えで焼いた i4 を名指しで拒否する。
+
+        `anima.export` の `--model` は**校正条件を引くためだけ**のノブなので、素版の重みを
+        `--model anima-turbo` で焼いた資産は「正しい素版 i4」に見える — 格納形も本数も
+        LoRA 記録の不在も全て正しく、turbo の 8 step・CFG 1 で校正されていることだけが違う。
+        """
+        sources = _build_series(
+            tmp_path / "series", model="anima-v1.0", calib_model=ANIMA_TURBO_MODEL_NAME
+        )
+
+        with pytest.raises(DistError, match="校正条件 'steps' がこのモデルの既定と違う"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-base", model="anima-v1.0")
+
+    def test_it_stops_when_only_the_guidance_came_from_another_model(self, tmp_path: Path) -> None:
+        """step が一致していても CFG がずれていれば落ちる（2 欄とも門に載っている）。"""
+        sources = _build_series(tmp_path / "series")
+        path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
+        record = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**record, "guidance": 4.0}), encoding="utf-8")
+
+        with pytest.raises(DistError, match="校正条件 'guidance' がこのモデルの既定と違う"):
+            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
     def test_the_record_never_reaches_the_distribution(self, assembled) -> None:
         """記録は系列側の事実 — 配布形（HF リポ）には持ち出さない。"""

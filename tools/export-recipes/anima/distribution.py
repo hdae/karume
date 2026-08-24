@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from _shared.calib_provenance import calib_complaint
 from anima.card import (
     ATTRIBUTION_NOTICE,
     LORA_NAME,
@@ -478,16 +479,27 @@ def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
             )
 
 
-def assert_calib_provenance(sources: AnimaSources) -> None:
-    """i4 系列が**校正付き**（GPTQ）で丸められたことを、書き出し側の記録で確かめる。
+def assert_calib_provenance(sources: AnimaSources, spec: AnimaModel) -> None:
+    """i4 系列が**このモデルの条件で・配布して良い校正**（GPTQ × 下限以上の予算 × モデル別の
+    step / CFG）で丸められたことを、書き出し側の記録で確かめる。
 
-    MUST: 校正の有無は格納形を 1 バイトも変えない（`research/2026-08-21-anima-i4-seat-speed.md`
-    §6 — ファイルサイズは RTN 版とバイト単位で同じ）。したがって `verify_dist` の構造検査も
-    ヘッダ dtype 検査も**素通りする**。`--no-calib` は smoke 用の opt-out なのに、その生成物が
-    配布へ紛れても資産からは判別できず、出るのは「全体的にぼやけた」絵だけ — LoRA 帰属
-    （{@link assert_lora_provenance}）と同じ「別々の台本が持つ同じ事実は組み立て時に必ず
-    突き合わせる」規律をここにも敷く。
+    MUST: 校正の方式も予算も条件も格納形を 1 バイトも変えない
+    （`research/2026-08-21-anima-i4-seat-speed.md` §6 — ファイルサイズは RTN 版とバイト単位で
+    同じ）。したがって `verify_dist` の構造検査もヘッダ dtype 検査も**素通りする**。`--no-calib`
+    は smoke 用の opt-out なのに、その生成物が配布へ紛れても資産からは判別できず、出るのは
+    「全体的にぼやけた」絵だけ — LoRA 帰属（{@link assert_lora_provenance}）と同じ「別々の台本が
+    持つ同じ事実は組み立て時に必ず突き合わせる」規律をここにも敷く。
+
+    MUST: **`spec` を受け取って条件まで突き合わせる**。`anima.export` の `--model` は校正条件を
+    引くためだけのノブ（LoRA 焼き込みのような格納バイトへの影響が無い）なので、素版の重みを
+    `--model anima-turbo` で焼いた資産は「正しい素版 i4」に見える — 校正だけが turbo の
+    8 step・CFG 1 で回っている。条件はモデルの `pipeline_config` から導かれる
+    （`anima.calib.calib_conditions`）ので、同じ 1 箇所から引き直せば突き合わせられる。
+
+    判定そのものは `_shared.calib_provenance` が正本（irodori の 2 つの読み手と同じ 1 実装）。
     """
+    from .calib_prompts import DEFAULT_CALIB_PROMPTS
+
     path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
     if not path.is_file():
         raise DistError(
@@ -498,11 +510,17 @@ def assert_calib_provenance(sources: AnimaSources) -> None:
         record = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as cause:
         raise DistError(f"校正条件の記録を解析できない: {path} — {cause}") from cause
-    method = record.get("method") if isinstance(record, dict) else None
-    if method != CALIB_SHIPPABLE_METHOD:
+    defaults = spec.pipeline_config["defaults"]
+    complaint = calib_complaint(
+        record,
+        method=CALIB_SHIPPABLE_METHOD,
+        at_least={"prompts": DEFAULT_CALIB_PROMPTS},
+        exactly={"steps": int(defaults["steps"]), "guidance": float(defaults["guidanceScale"])},
+    )
+    if complaint is not None:
         raise DistError(
-            f"i4 系列が配布して良い丸め方式で作られていない: {path} は {method!r}、"
-            f"配布可は {CALIB_SHIPPABLE_METHOD!r} — `--no-calib` の生成物は配布に使わない"
+            f"i4 系列の校正条件が配布の条件を満たしていない: {path} は{complaint}"
+            " — `--no-calib` / smoke 予算 / 別モデルの条件で焼いた生成物は配布に使わない"
         )
 
 
@@ -555,7 +573,7 @@ def anima_plan(sources: AnimaSources, model: str = ANIMA_BASE_MODEL_NAME) -> Mod
     spec = anima_model(model)
     assert_lora_provenance(sources, spec.lora_sha256)
     if "i4" in spec.storages:
-        assert_calib_provenance(sources)
+        assert_calib_provenance(sources, spec)
     placements = anima_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, STORAGE_REQUIREMENTS)

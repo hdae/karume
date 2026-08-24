@@ -44,6 +44,7 @@ from irodori.distribution import (
     IRODORI_WEIGHTS,
     PIPELINE,
     IrodoriSources,
+    irodori_calib_floor,
     irodori_plan,
     irodori_repo_name,
     irodori_series_name,
@@ -124,11 +125,16 @@ _IRODORI_CODEC_METADATA: Mapping[str, Any] = {
 _IRODORI_HOP_LENGTH = 480
 
 #: i4 系列の校正条件の記録（`irodori.export._write_calib_provenance` が書く形）。
+#:
+#: 予算の 2 欄は**出荷済みの系列の現物と同じ値**（`outputs/series/irodori-v4-small-i4/` の
+#: `calib_provenance.json` = 12 件 × 40 step）。門が引く下限との一致は
+#: {@link TestIrodoriCalibProvenance.test_the_floor_is_the_condition_the_export_defaults_to} が
+#: 正本から見る — ここに写した値が古びたら、そちらが落ちる。
 _IRODORI_CALIB_PROVENANCE: Mapping[str, Any] = {
     "method": CALIB_SHIPPABLE_METHOD,
     "grid": "rtn",
     "group_size": 32,
-    "cases": 4,
+    "cases": 12,
     "steps": 40,
 }
 
@@ -849,8 +855,9 @@ class TestIrodoriStorageSeries:
 class TestIrodoriCalibProvenance:
     """i4 系列の丸め条件の突合 — **資産からは判別できない**唯一の事実を機械で見る席。
 
-    MUST: 校正の有無は格納形を 1 バイトも変えないので、要求 dtype 検査もグラフ検査も
-    `verify_dist` も素通りする。`--no-calib` の生成物が配布へ紛れても出るのは音の劣化だけ。
+    MUST: 校正の方式も予算も格納形を 1 バイトも変えないので、要求 dtype 検査もグラフ検査も
+    `verify_dist` も素通りする。`--no-calib` も `--calib-steps 1` も生成物が配布へ紛れれば
+    出るのは音の劣化だけ。
     """
 
     def test_a_calibrated_series_passes(self, tmp_path: Path) -> None:
@@ -884,6 +891,51 @@ class TestIrodoriCalibProvenance:
 
         with pytest.raises(DistError, match="解析できない"):
             irodori_plan(sources)
+
+    def test_a_smoke_budget_is_refused(self, tmp_path: Path) -> None:
+        """`--calib-steps 1` は `method` を `gptq` のまま残す — 予算の欄まで見ないと通る。
+
+        格納形は 1 バイトも変わらない（格子は RTN i4 g32 のまま）ので、ヘッダ検査も
+        `verify_dist` もこの資産を「正しい w4 席」と読む。
+        """
+        sources = _build_irodori_sources(
+            tmp_path, calib_provenance={**_IRODORI_CALIB_PROVENANCE, "steps": 1}
+        )
+
+        with pytest.raises(DistError, match="校正予算 'steps' が配布の下限を下回る"):
+            irodori_plan(sources)
+
+    def test_a_smaller_corpus_is_refused(self, tmp_path: Path) -> None:
+        """コーパスを削って焼いた系列も同じ席で落ちる（4 件 → 12 件は聴感裁定 2026-08-23）。"""
+        sources = _build_irodori_sources(
+            tmp_path, calib_provenance={**_IRODORI_CALIB_PROVENANCE, "cases": 4}
+        )
+
+        with pytest.raises(DistError, match="校正予算 'cases' が配布の下限を下回る"):
+            irodori_plan(sources)
+
+    def test_a_record_written_before_the_budget_fields_is_still_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        """後方互換 MUST: 欄の**不在**は受理する（記録の作り直し = 丸め時間ぶんの再 export）。"""
+        legacy = {
+            key: value
+            for key, value in _IRODORI_CALIB_PROVENANCE.items()
+            if key not in {"cases", "steps"}
+        }
+        sources = _build_irodori_sources(tmp_path, calib_provenance=legacy)
+
+        assert irodori_plan(sources).quants["w4"]["weights"]["dit"] == "i4"
+
+    def test_the_floor_is_the_condition_the_export_defaults_to(self) -> None:
+        """下限は写しではなく正本から引く（コーパスの本数と参照ループ全長）。"""
+        from irodori.calib_cases import CALIB_CASES
+        from irodori.pipeline_ref import NUM_STEPS
+
+        assert irodori_calib_floor() == {"cases": len(CALIB_CASES), "steps": NUM_STEPS}
+        # 出荷済みの系列（12 件 × 40 step）はこの下限をちょうど満たす形で焼かれている。
+        assert _IRODORI_CALIB_PROVENANCE["cases"] == len(CALIB_CASES)
+        assert _IRODORI_CALIB_PROVENANCE["steps"] == NUM_STEPS
 
 
 class TestIrodoriModelCard:

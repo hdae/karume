@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,7 +33,7 @@ from torch import nn
 
 from irodori import export as ex
 from irodori import pipeline_ref as ip
-from irodori.distribution import CALIB_PROVENANCE_FILE
+from irodori.distribution import CALIB_PROVENANCE_FILE, irodori_calib_floor
 from karume.emit import pack_int4, unpack_int4
 from karume.quantize import (
     channel_scale,
@@ -363,8 +364,12 @@ def _write_series(
     entries: list[list[Any]],
     initializers: dict[str, Any],
     method: str | None = "gptq",
+    budget: Mapping[str, int] | None = None,
 ) -> Path:
     """合成の i4 系列（コンテナ 1 本 + 校正記録）を書く（`method=None` で記録を落とす）。
+
+    `budget` は校正予算の 2 欄（既定は配布の下限ちょうど = 出荷済み系列と同じ形）。smoke 予算で
+    焼いた系列から golden を焼こうとする軸をここで振る。
 
     `safetensors` のライタは `I4` を知らないので、ヘッダ JSON とデータ節を素で組む
     （読み手も自前 — `irodori.pipeline_ref._read_stored` の MUST と対）。
@@ -386,10 +391,13 @@ def _write_series(
         len(raw).to_bytes(8, "little") + raw + bytes(blob),
     )
     if method is not None:
-        (directory / CALIB_PROVENANCE_FILE).write_text(
-            json.dumps({"method": method, "grid": "rtn", "group_size": GROUP, "cases": 4}),
-            encoding="utf-8",
-        )
+        record = {
+            "method": method,
+            "grid": "rtn",
+            "group_size": GROUP,
+            **(irodori_calib_floor() if budget is None else budget),
+        }
+        (directory / CALIB_PROVENANCE_FILE).write_text(json.dumps(record), encoding="utf-8")
     return directory
 
 
@@ -424,6 +432,20 @@ class TestRestoreDitFromI4Series:
         series = _write_series(tmp_path / "dit", entries, initializers, method=None)
 
         with pytest.raises(SystemExit, match="校正条件の記録が無い"):
+            ip.restore_dit_from_i4_series(_DitWrapper(), series)
+
+    def test_a_smoke_budget_series_is_refused(self, tmp_path):
+        """`--calib-steps 1` は `method` を `gptq` のまま残す — 予算欄まで見ないと通る。
+
+        golden だけが smoke 用の丸めで焼かれると、配布資産との突合が「両辺が違う重み」の
+        まま緑になる（格納形も本数も 1 つも動かない）。
+        """
+        entries, initializers, _shipped_values = _material()
+        series = _write_series(
+            tmp_path / "dit", entries, initializers, budget={**irodori_calib_floor(), "steps": 1}
+        )
+
+        with pytest.raises(SystemExit, match="校正予算 'steps' が配布の下限を下回る"):
             ip.restore_dit_from_i4_series(_DitWrapper(), series)
 
     def test_a_tensor_the_module_does_not_own_fails_loudly(self, tmp_path):
