@@ -88,3 +88,44 @@ f16/i8 格納実行・dist の quant 表・models の session 配線）は SBV2 
    実測の 54 倍 — 沈黙 f32 フォールバックは差が縮む側に出る〈ADR 0028 決定 6〉）③キー census
    （i8a8 linear 317 / quantize_rows 317 / **素の linear 0** — `lastRunTiming` 観測・計測無効
    run は fail loudly）で縛る。latent 門の w8 席（W8_Z_ATOL 1e-2 = 実測の 5.4 倍）と併存。
+
+## 追記（2026-08-23〜24）— 波 J-4: `w4` 席（DiT のみ i4 の混成・GPTQ 校正付き）
+
+品質イテレーション 3 ラウンド（R1〜R3）と裁定の実測記録は
+[research/2026-08-24-gptq-expansion-quality.md](../research/2026-08-24-gptq-expansion-quality.md)。
+
+### 過去裁定の変更 2 件（2026-08-23 ユーザー承認）
+
+- **決定 7 の「混成なし」を緩和**: 当時の根拠 S ドリフトは GPTQ で消滅
+  （[research 2026-08-20 §6](../research/2026-08-20-gptq-awq-calibrated-rounding.md) の
+  S 完全一致）。DiT のみ i4 の混成を席として認める。
+- **「rtn 席を先行させない」（2026-08-20・kmeans 圧勝を受けた裁定）を撤回**: GPTQ 適用拡大
+  （幅）を優先する再定義。kmeans 席（perf-ledger Q-2）は席の追加で後から共存できる。
+
+### 決定（追補 2）
+
+10. **quant 席は 5 つ**: 既存 4 席 + **`w4` = DiT のみ i4 g32 の混成**。DiT コンテナの内訳は
+    **block 内の adaLN 以外 168 本 = GPTQ i4（gptq-rtn 格子・校正 12 件 × 40 step）/
+    i8 149 本 = adaLN 144（`attention_adaln` / `mlp_adaln`）+ block 外 5（`in_proj` /
+    `out_proj` / `cond_module.{0,2,4}`）/ bias・norm f32**。他 7 役は w8 の i8 系列と
+    バイト共有・session = {}（`linearCompute` は宣言しない — w4a8 は irodori 未測定・anima は
+    品質で不採用〈ADR 0076 決定 6〉）。**既定は `w8a8` 据え置き**（w4 は温間合成が最遅
+    +38% — 存在理由はサイズと帯域）。
+11. **i4 の 3 分割は聴感の帰属実測で確定**（research §1）: block 外 5 本の素 RTN i4 と校正
+    コーパスの汎化不足がこもりの実因（→ i8 へ / 12 件へ増量・評価入力と部分一致まで分離）、
+    adaLN は量子化感度が高く i4 のままだと韻律がずれる（→ i8 へ・+13.1 MiB）。adaLN 判定は
+    `irodori.calib.is_adaln` の 1 実装を校正 include と格納分割で共有し、**adaLN 不在は
+    fail loudly**（上流改名で裁定済み構成が黙って壊れるのを防ぐ）。
+12. **golden は出荷バイトから焼く**: `pipeline_ref --dtype i4` は出荷コンテナ読み戻し
+    （`restore_dit_from_i4_series` — provenance = gptq 門・形 / 本数 / 席の効き門つき）。
+    latent 門の w4 系列は **W4_Z_ATOL 6e-3**（R2 実測 full 1.1522e-3 の 5.2 倍で導出・R3 実測
+    4.7213e-4）。校正 provenance（`calib_provenance.json`）は dist の plan 時に無条件検査
+    （method == "gptq" 必須 — 素 RTN 系列の混入を塞ぐ）。
+13. **sim → 出荷の転移限界を品質裁定の前提にする**（research §2）: 計測リグの A/B sim が
+    証明するのは同一リグ内の効果まで — 出荷リグでは GPTQ の丸め解が変わり発話実現が再抽選
+    される（z relRMS がセル間距離級）。**繊細な性質（韻律の実現）は sim から出荷へ転移しない**
+    前提で、最終裁定は必ず出荷バイトの聴感で行う。adaLN i8 の出荷リグでの寄与は未検証のまま
+    クローズ（載せ外し A/B は実需待ち — backlog）。
+14. **聴感裁定（2026-08-24 ユーザー）: R3 = こもり解消・配布可（opt-in）**。HF 公開済み
+    （コミット `67e9584c`・断片化 29.4 MiB/レンジ健全）。**pin は据え置き** — `w4` を使うには
+    `revision: "main"` の明示が要る（anima i4 と同じ形）。
