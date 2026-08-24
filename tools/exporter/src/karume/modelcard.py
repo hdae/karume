@@ -11,17 +11,19 @@ HF は `README.md` の YAML frontmatter をモデルの機械可読メタデー�
 
 NOTE: 描画部品（{@link frontmatter} / {@link models} / {@link files} / {@link quants} /
 {@link model_sections} / {@link render} / {@link require_pipeline} / {@link default_model} /
-{@link knob}）は **recipe 向けの公開面**（ADR 0065 段 6）。wheel の外にある `card.py` が名指しで
-呼ぶ以上、private 名のままにしておくと「private を跨いで呼ぶ」形が既定になる。`_` 始まりで
-残しているのはこのモジュールの中だけで閉じる部品（{@link _base_model} など）。
+{@link knob} / {@link from_pretrained}）は **recipe 向けの公開面**（ADR 0065 段 6）。wheel の
+外にある `card.py` が名指しで呼ぶ以上、private 名のままにしておくと「private を跨いで呼ぶ」
+形が既定になる。`_` 始まりで残しているのはこのモジュールの中だけで閉じる部品
+（{@link _base_model} など）。
 
 **帰属はテンプレートと別の軸**（{@link sbv2.card.Sbv2CardProfile}）。同じテンプレートでも、
 どのファミリーの重みを配るかで出所・ライセンス・引用が丸ごと変わる pipeline があるので、
 そこだけをプロファイルに分けて**呼び出し側に明示させる**（選ばせる規則は
 {@link karume.dist.resolve_card_renderer}）。
 
-manifest（現行は `karume/3` — ADR 0041 で複数モデル化し、ADR 0070 決定 1 で weights の
-dtype エントリが shard 列になった形）は **1 リポに複数モデル**を持てるので、カードも
+manifest（現行は `karume/4` — ADR 0041 で複数モデル化し、ADR 0070 決定 1 で weights の
+dtype エントリが shard 列になり、ADR 0075 決定 1 で quant へ表示欄が付いた形）は
+**1 リポに複数モデル**を持てるので、カードも
 「リポ全体の説明 → モデル一覧 → 使い方 → モデルごとの節」の形にする。モデルごとの節が
 `## Model: <name>` で、その中にファイル表・quant 表・（SBV2 は）スタイル表と話者表が並ぶ。
 単一モデルのリポでも同じ形で描く（配布形のレイアウトが一様なのと同じ理由 — 2 個目が増えた
@@ -194,17 +196,33 @@ def models(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _path_cell(ref: Mapping[str, Any]) -> str:
+    """ファイル表の Path 欄。越境参照（別リポの pin 済み revision）はその出所ごと出す。
+
+    自リポの path だけを綴ると、この配布形に**無い**ファイルが在るように読める（読み手は
+    「取ってくる場所」を知りたいので、指し先まで出して初めて表が事実になる）。
+    """
+    if "repo" not in ref:
+        return f"`{ref['path']}`"
+    return (
+        f"`{ref['path']}` in"
+        f" [`{ref['repo']}`](https://huggingface.co/{ref['repo']})"
+        f" at `{ref['revision'][:_SHA_DIGITS]}…`"
+    )
+
+
 def files(model: Mapping[str, Any]) -> list[str]:
+    rows = file_rows(model)
     lines = [
         "### Files",
         "",
         "| Key | Dtype | Path | Size | sha256 |",
         "| ---- | ----- | ---- | ------ | ------ |",
     ]
-    for key, labels, ref in file_rows(model):
+    for key, labels, ref in rows:
         dtype = " / ".join(labels) if labels else "—"
         lines.append(
-            f"| `{key}` | {dtype} | `{ref['path']}` | {format_size(ref['size'])} |"
+            f"| `{key}` | {dtype} | {_path_cell(ref)} | {format_size(ref['size'])} |"
             f" `{ref['sha256'][:_SHA_DIGITS]}…` |"
         )
     lines += [
@@ -216,6 +234,12 @@ def files(model: Mapping[str, Any]) -> list[str]:
         "A path under `shared/` is one this model shares byte for byte with another model in this"
         " repository (it is fetched and cached once).",
     ]
+    if any("repo" in ref for _, _, ref in rows):
+        lines.append(
+            "A row that names another repository is fetched from that repository at the pinned"
+            " commit shown — those bytes are identical to this model's own, so they are not"
+            " stored here a second time."
+        )
     return lines
 
 
@@ -227,25 +251,97 @@ def _session(quant: Mapping[str, Any]) -> str:
     return " / ".join(parts) if parts else "—"
 
 
-def quants(model: Mapping[str, Any]) -> list[str]:
+def _presentation(quant: Mapping[str, Any]) -> str:
+    """quant の表示欄（ADR 0075 決定 1 の `label` / `description`）を 1 セルに綴る。
+
+    どちらも optional なので 4 通りある。書いていない席は id をそのまま読ませる（`—`）—
+    ここで id を再掲すると、表の 1 列目と同じ文字列が 2 度並ぶだけになる。
+    """
+    label = quant.get("label")
+    description = quant.get("description")
+    if label and description:
+        return f"**{label}** — {description}"
+    if label:
+        return f"**{label}**"
+    return description or "—"
+
+
+def quants(
+    model: Mapping[str, Any], *, abbreviations: Mapping[str, str] | None = None
+) -> list[str]:
+    """quant 表（ADR 0074 の席名 + ADR 0075 の表示欄）。
+
+    `abbreviations` は席名の部品上書きトークン（`i8+bert4` の `bert`）→ その weights 名。
+    **略称は recipe が定めるので、対応をカードに必ず出す**（ADR 0074 決定 4）— 表の 1 列目と
+    3 列目の綴りが繋がるのはこの 1 行だけで、無いと `bert4` がどの部品の話か読めない。
+    略称を使っていない family は渡さない（トークンが weights 名そのものなら対応表は要らない）。
+    """
     default = model["defaultQuant"]
     lines = [
         "### Quants",
         "",
-        "| Quant | Weights | Compute |",
-        "| ----- | ---- | ---- |",
+        "| Quant | What it is | Weights | Compute |",
+        "| ----- | ---------- | ---- | ---- |",
     ]
     for name, quant in model["quants"].items():
         weights = " / ".join(
             f"`{weight}` = `{label}`" for weight, label in quant["weights"].items()
         )
         mark = " (default)" if name == default else ""
-        lines.append(f"| `{name}`{mark} | {weights} | {_session(quant)} |")
+        lines.append(f"| `{name}`{mark} | {_presentation(quant)} | {weights} | {_session(quant)} |")
     lines += [
         "",
         f"If no quant is given, it runs as `{default}` (this model's recommended default).",
     ]
+    if abbreviations:
+        lines.append(
+            "In a quant name, "
+            + " / ".join(
+                f"`{token}` is the `{name}` component" for token, name in abbreviations.items()
+            )
+            + "."
+        )
     return lines
+
+
+#: `fromPretrained` の source 側に添える **revision を pin する手順**（全 family 共通の 1 組）。
+#:
+#: 既定は `main` 追従で、そちらの方が「とりあえず動く」ので既定のまま書く。ただし配布リポは
+#: 上げ直す（ファイル名の変更・manifest の format 繰り上げ）ので、pin していない読み手は
+#: ある日突然壊れる — 既定の行の**すぐ隣**にコメントアウトで置き、外すだけで pin できる形に
+#: する（サンプルを 2 本に割ると、どちらが推奨か読めなくなる）。
+REVISION_PIN_COMMENT: tuple[str, ...] = (
+    "  // Pin a commit for reproducible builds — without it you track `main`, and a future",
+    "  // repo update (renamed files, new manifest format) may break your app.",
+    '  // Copy the full hash from this repo\'s "Files and versions" tab:',
+    '  // revision: "<full commit sha>",',
+)
+
+
+def from_pretrained(
+    pipeline_class: str,
+    repo: str,
+    options: Sequence[str],
+    *,
+    disposable: str = "using",
+) -> list[str]:
+    """使い方スニペットの `fromPretrained` 呼び出し 1 つ（**object ref 形** + pin の席）。
+
+    source を文字列 1 本ではなく `{ repo, revision? }` で綴るのは、revision を書く席がここ
+    以外に無いため（{@link REVISION_PIN_COMMENT}）。`options` は第 2 引数のオブジェクトへ
+    そのまま入る行の並び（family 固有のノブ — 2 スペース字下げ済みで渡す）。
+
+    `disposable` は宣言の綴り（`using` / `await using`）— pipeline が同期 / 非同期どちらの
+    dispose を持つかは family 側の事実なので、ここでは選ばない。
+    """
+    return [
+        f"{disposable} pipeline = await {pipeline_class}.fromPretrained({{",
+        f'  repo: "{repo}",',
+        *REVISION_PIN_COMMENT,
+        "}, {",
+        *options,
+        "});",
+    ]
 
 
 def default_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:

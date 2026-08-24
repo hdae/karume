@@ -38,7 +38,7 @@ uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype f16 
 uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype f16  # 6'. codec
 ```
 
-The `w4` quant seat adds an **i4 series for `dit` only** — the other seven roles share the i8 bytes,
+The `i8+dit4` quant seat adds an **i4 series for `dit` only** — the other seven roles share the i8 bytes,
 so nothing else is re-exported for it. Only the DiT block weights outside the adaLN modulation are
 stored as i4 (168 linears); the 144 adaLN linears (`attention_adaln`, `mlp_adaln`) and the five
 linears outside the blocks (`in_proj`, `out_proj`, `cond_module.{0,2,4}`) are stored as i8 in the

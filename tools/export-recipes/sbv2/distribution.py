@@ -9,9 +9,9 @@
 融合なので、`dp` / `flow` / `dec` は golden 検証専用の単体グラフで配布形には入らない。
 `text_encoder`（DeBERTa）に f16 席が無いのは `deberta/export.py` が f16 を持たないから
 （f32 の 1.32GB は配布に非現実的）。既定の i8 は ADR 0026 が聴感ゲート込みで受理済みで、
-i4 混成（linear と embedding が i4 group32）は `w8-bert4` quant の席として後から足した
+i4 混成（linear と embedding が i4 group32）は `i8+bert4` quant の席として後から足した
 （perf-ledger Q-1 — 2026-08-20 から既定 quant）。`front` / `voice` にも i4 混成席があり
-（適格な linear と conv1d が i4 — conv1d は波 J-5b の追補）、3 席とも i4 を選ぶのが `w4`
+（適格な linear と conv1d が i4 — conv1d は波 J-5b の追補）、3 席とも i4 を選ぶのが `i4`
 quant（速度 / サイズ優先の opt-in）。
 
 ホスト資産のうち `style_vectors` / `speaker_embeddings` は**表を配って実行時に行を引く**形。
@@ -69,7 +69,7 @@ SBV2_PIPELINE = "sbv2/1"
 #: （ファミリー組み立てでは全モデルが同じ text_encoder を指し、`shared/` へ 1 回だけ入る）。
 #: 22 層 variant なのは末尾 2 層が SBV2 の経路で死んでいるから（{@link SBV2_TEXT_ENCODER_LAYERS}）。
 #: i4 系列は**混成**（linear と語彙表 = i4 group32・conv と相対位置表 = i8 — `deberta/export.py`
-#: の `BASE_WEIGHT_DTYPES` / `I4_MODULE_TYPES`）で、`w8-bert4` quant の text_encoder 席になる。
+#: の `BASE_WEIGHT_DTYPES` / `I4_MODULE_TYPES`）で、`i8+bert4` quant の text_encoder 席になる。
 SBV2_TEXT_ENCODER_SERIES = "deberta-i8"
 SBV2_TEXT_ENCODER_I4_SERIES = "deberta-i4"
 SBV2_TEXT_ENCODER_VARIANT = "sbv2-22layer"
@@ -190,38 +190,76 @@ SBV2_ASSETS: Mapping[str, str] = {
     "speaker_embeddings": "speaker_embeddings",
 }
 
+#: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4 — **略称の定義は recipe が
+#: 持ち、生成モデルカードの quant 表に対応を必ず出す**）。`bert` は役割名 `text_encoder` より
+#: 短く読みやすいが、それ自体が語彙になるので対応を配布物へ必ず出す。
+SBV2_QUANT_ABBREVIATIONS: Mapping[str, str] = {"bert": "text_encoder"}
+
 #: quant 表。MUST: **dtype が 2 つ以上ある役割は全 quant が明示指定する**
 #: （{@link complete_quant_weights}）— `text_encoder` に i4 席が生えた時点で、既定を勝手に
 #: 選ぶ経路（黙って別の格納形が配られる）は塞がれている。
 #:
-#: `w8-bert4` は `w8` と同構成で `text_encoder` だけ i4 混成（BERT の linear と語彙表を i4
-#: group32 に落とす）。`w4` は**3 席とも i4 混成**（session は空 = f32 compute のまま — 活性は
+#: 席名は ADR 0074 の文法 `<格納>[+<部品><ビット>]…[-<ノブ>]…`。SBV2 は全役割が同じ格納を持つ
+#: ので基底 1 語で足り、`f16` 席だけ text_encoder が i8 なので `+bert8` が付く（実態に合わせる
+#: — f16 席に f16 の text_encoder は無い〈`deberta/export.py` が f16 を持たない〉）。
+#: `i8+bert4` は `i8` と同構成で `text_encoder` だけ i4 混成（BERT の linear と語彙表を i4
+#: group32 に落とす）。`i4` は**3 席とも i4 混成**（session は空 = f32 compute のまま — 活性は
 #: 動かさない）。
-#: 数値は f32 同一性の指標では大きく動く。聴感は一次通過だが、`w4` は f32 比でテンションが
+#: 数値は f32 同一性の指標では大きく動く。聴感は一次通過だが、`i4` は f32 比でテンションが
 #: 少し低め（perf-ledger Q-1 / research 2026-08-19 §6 — net_g の RTN i4 由来）で、これが
-#: 既定を `w8-bert4` に戻した根拠（{@link SBV2_DEFAULT_QUANT}）。
+#: 既定を `i8+bert4` に戻した根拠（{@link SBV2_DEFAULT_QUANT}）。
+#:
+#: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。
+#: 既定であることは書かない（`defaultQuant` が既に指している — ADR 0075 決定 3）。
 #:
 #: NOTE: net_g 側の i4 は conv1d 追補（波 J-5b・ADR 0069 追記 7）で**サイズ利得の本体**に
 #: なった — 適格 conv1d ≈56MiB が半減する（linear だけの時代は 6 本 = 配布形全体の 0.1% 未満で
-#: 利得ほぼゼロだった）。`text_encoder` の削減（Q-1 / J-5a）と合わせ、`w4` は名実ともに
+#: 利得ほぼゼロだった）。`text_encoder` の削減（Q-1 / J-5a）と合わせ、`i4` は名実ともに
 #: 「配布形を丸ごと 4bit 格納で通す席」。
 SBV2_QUANTS: Mapping[str, Any] = {
-    "f16": {"weights": {"text_encoder": "i8", "front": "f16", "voice": "f16"}, "session": {}},
-    "w8": {"weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"}, "session": {}},
-    "w8a8": {
-        "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
-        "session": {"linearCompute": "i8a8"},
+    "f16+bert8": {
+        "weights": {"text_encoder": "i8", "front": "f16", "voice": "f16"},
+        "session": {},
+        "label": "Highest fidelity (f16 synthesis)",
+        "description": "front and voice in f16 storage, with the int8 text encoder — the largest"
+        " download, and the closest match to the source checkpoint's audio.",
     },
-    "w8-bert4": {"weights": {"text_encoder": "i4", "front": "i8", "voice": "i8"}, "session": {}},
-    "w4": {"weights": {"text_encoder": "i4", "front": "i4", "voice": "i4"}, "session": {}},
+    "i8": {
+        "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
+        "session": {},
+        "label": "Half size (int8)",
+        "description": "Every component stored as int8 and computed in f32 — roughly half the f16"
+        " download, with the execution path left unchanged.",
+    },
+    "i8-a8": {
+        "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
+        "session": {"linearCompute": "a8"},
+        "label": "int8 with int8 linear activations",
+        "description": "The int8 weights with per-token int8 activations in the linear layers —"
+        " faster on GPUs with dp4a, same download as the plain int8 seat.",
+    },
+    "i8+bert4": {
+        "weights": {"text_encoder": "i4", "front": "i8", "voice": "i8"},
+        "session": {},
+        "label": "Balanced (int8 + int4 text encoder)",
+        "description": "int8 synthesis with the text encoder in GPTQ-calibrated int4 (group-32):"
+        " a markedly smaller download that stays audibly level with f32.",
+    },
+    "i4": {
+        "weights": {"text_encoder": "i4", "front": "i4", "voice": "i4"},
+        "session": {},
+        "label": "Smallest (int4)",
+        "description": "Text encoder, front and voice all in int4 group-32 — the smallest download"
+        " and the fastest warm start, with slightly lower tension than f32.",
+    },
 }
 
-#: 既定は `w8-bert4`（2026-08-20 ユーザー再裁定 — 既定は**品質最優先**。`w4` は聴感で f32 比の
+#: 既定は `i8+bert4`（2026-08-20 ユーザー再裁定 — 既定は**品質最優先**。`i4` は聴感で f32 比の
 #: 差が残る〈テンションが少し低め — net_g の RTN i4 由来〉ので、速度 / サイズを取りに行く人が
-#: 明示して選ぶ opt-in の席に置く。`w8-bert4` は BERT だけ GPTQ 校正付きの i4 で、聴感は f32
-#: とほぼ同一。経緯と数値は perf-ledger Q-1 / Q-6 と research 2026-08-20 §7）。`w8` は
+#: 明示して選ぶ opt-in の席に置く。`i8+bert4` は BERT だけ GPTQ 校正付きの i4 で、聴感は f32
+#: とほぼ同一。経緯と数値は perf-ledger Q-1 / Q-6 と research 2026-08-20 §7）。`i8` は
 #: opt-in の参照系として残る — WAV 参照門（e2e_sbv2_wav_test）の不変アンカー。
-SBV2_DEFAULT_QUANT = "w8-bert4"
+SBV2_DEFAULT_QUANT = "i8+bert4"
 
 #: `pipelineConfig.defaults` に載る実行時ノブ（`style_bert_vits2.constants` 由来）。綴りは
 #: `symbols.json` の `defaults` と共有する — 同じ源から引いた同じ値が配布形の 2 つの資産に
@@ -647,7 +685,9 @@ PIPELINE = Pipeline(
     repo_name=sbv2_repo_name,
     plan=sbv2_dist_plan,
     card_profiles={
-        name: partial(render_sbv2_model_card, profile=profile)
+        name: partial(
+            render_sbv2_model_card, profile=profile, abbreviations=SBV2_QUANT_ABBREVIATIONS
+        )
         for name, profile in SBV2_CARD_PROFILES.items()
     },
 )

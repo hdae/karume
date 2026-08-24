@@ -26,6 +26,7 @@ from anima.card import (
     render_base_card,
     render_model_card,
 )
+from anima.distribution import ANIMA_QUANT_ABBREVIATIONS
 
 #: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
 REPO = "hdae/fake-repo"
@@ -43,7 +44,7 @@ def _manifest() -> dict[str, Any]:
     shared_encoder = _ref("shared/text_encoder/model.safetensors", 111, "a")
     rope = _ref("turbo/transformer/rope_base.safetensors", 333, "c")
     return {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/9.9.9",
         "defaultModel": "turbo",
         "models": {
@@ -68,9 +69,11 @@ def _manifest() -> dict[str, Any]:
                         "weights": {"text_encoder": "f16", "transformer": "f16"},
                         "session": {},
                     },
-                    "w8a8": {
+                    "f16+dit8-a8": {
                         "weights": {"text_encoder": "f16", "transformer": "i8"},
-                        "session": {"linearCompute": "i8a8"},
+                        "session": {"linearCompute": "a8"},
+                        "label": "偽のラベル",
+                        "description": "偽の説明。",
                     },
                     "f16-c16": {
                         "weights": {"text_encoder": "f16", "transformer": "f16"},
@@ -78,7 +81,7 @@ def _manifest() -> dict[str, Any]:
                         "gpuFeatures": {"shaderF16": True},
                     },
                 },
-                "defaultQuant": "w8a8",
+                "defaultQuant": "f16+dit8-a8",
                 "pipelineConfig": {
                     "scheduler": {"shift": 3, "numTrainTimesteps": 1000},
                     "defaults": {
@@ -99,12 +102,12 @@ def _manifest() -> dict[str, Any]:
                 },
                 "assets": {"tokenizer": _ref("shared/tokenizer/qwen2.json", 555, "e")},
                 "quants": {
-                    "w8": {
+                    "f16+dit8": {
                         "weights": {"text_encoder": "f16", "transformer": "i8"},
                         "session": {},
                     }
                 },
-                "defaultQuant": "w8",
+                "defaultQuant": "f16+dit8",
                 "pipelineConfig": {
                     "scheduler": {"shift": 3, "numTrainTimesteps": 1000},
                     "defaults": {
@@ -121,7 +124,7 @@ def _manifest() -> dict[str, Any]:
 
 @pytest.fixture
 def card() -> str:
-    return render_model_card(_manifest(), REPO)
+    return render_model_card(_manifest(), REPO, ANIMA_QUANT_ABBREVIATIONS)
 
 
 def _base_manifest() -> dict[str, Any]:
@@ -138,7 +141,7 @@ def _base_manifest() -> dict[str, Any]:
 
 @pytest.fixture
 def base_card() -> str:
-    return render_base_card(_base_manifest(), REPO)
+    return render_base_card(_base_manifest(), REPO, ANIMA_QUANT_ABBREVIATIONS)
 
 
 class TestBaseCard:
@@ -177,7 +180,7 @@ class TestBaseCard:
         """帰属を組み立ての引数から独立に持つと、入っていないモデルの出所が載る。"""
         manifest = _base_manifest()
         del manifest["models"]["anima-copycat-20260610"]
-        card = render_base_card(manifest, REPO)
+        card = render_base_card(manifest, REPO, ANIMA_QUANT_ABBREVIATIONS)
 
         assert UPSTREAM_MODELS["anima-copycat-20260610"].source not in card
         assert UPSTREAM_MODELS["anima-v1.0"].source in card
@@ -192,7 +195,9 @@ class TestBaseCard:
         manifest = _base_manifest()
         del manifest["models"]["anima-copycat-20260610"]
 
-        assert "do not relicense it" not in render_base_card(manifest, REPO)
+        assert "do not relicense it" not in render_base_card(
+            manifest, REPO, ANIMA_QUANT_ABBREVIATIONS
+        )
 
     def test_it_refuses_a_model_whose_origin_is_unknown(self) -> None:
         """出所表に無いモデルは**帰属を書けない** — 黙って省かず落とす。"""
@@ -200,7 +205,7 @@ class TestBaseCard:
         manifest["models"]["anima-nope"] = manifest["models"]["anima-v1.0"]
 
         with pytest.raises(ValueError, match=r"出所が card\.py に無い"):
-            render_base_card(manifest, REPO)
+            render_base_card(manifest, REPO, ANIMA_QUANT_ABBREVIATIONS)
 
     def test_its_usage_snippet_keeps_the_cfg_knobs_as_defaults(self, base_card: str) -> None:
         """CFG が既定で入っている配布物では、guidance / negative を「省略可の既定」として出す。"""
@@ -212,7 +217,7 @@ class TestBaseCard:
         manifest["models"]["anima-v1.0"]["pipeline"] = "sbv2/1"
 
         with pytest.raises(ValueError):
-            render_base_card(manifest, REPO)
+            render_base_card(manifest, REPO, ANIMA_QUANT_ABBREVIATIONS)
 
 
 class TestFrontmatter:
@@ -289,9 +294,15 @@ class TestSections:
         )
 
     def test_it_shows_the_minimal_typescript_entry_point(self, card: str) -> None:
-        assert f'AnimaPipeline.fromPretrained("{REPO}", {{' in card
+        assert "AnimaPipeline.fromPretrained({" in card
+        assert f'  repo: "{REPO}",' in card
         assert "@karume/models" in card
         assert "using pipeline" in card
+
+    def test_the_usage_snippet_offers_the_revision_pin(self, card: str) -> None:
+        """source は object ref 形 — revision を書く席が無いと読み手は暗黙に `main` 追従になる。"""
+        assert '  // revision: "<full commit sha>",' in card
+        assert "Pin a commit for reproducible builds" in card
 
     def test_the_usage_snippet_carries_the_optional_knobs_commented_out(self, card: str) -> None:
         """裁定 2026-08-12 の形: 動く最小形 + `generate()` の optional をコメントで併記する
@@ -312,8 +323,8 @@ class TestModelSelection:
         table, _, _ = rest.partition("## Usage")
         rows = [line for line in table.splitlines() if line.startswith("| `")]
         assert rows == [
-            "| `turbo` (default) | `anima/1` | `f16` / `w8a8` / `f16-c16` | `w8a8` |",
-            "| `lite` | `anima/1` | `w8` | `w8` |",
+            "| `turbo` (default) | `anima/1` | `f16` / `f16+dit8-a8` / `f16-c16` | `f16+dit8-a8` |",
+            "| `lite` | `anima/1` | `f16+dit8` | `f16+dit8` |",
         ]
 
     def test_the_usage_snippet_names_the_default_model_and_its_quant(self, card: str) -> None:
@@ -321,14 +332,16 @@ class TestModelSelection:
         で、選べる値は同じ行に manifest から列挙される（モデル / quant が増えれば追従する）。
         """
         assert '  // model: "turbo", // default — available: lite / turbo' in card
-        assert '  // quant: "w8a8", // default — available: f16 / f16-c16 / w8a8' in card
+        assert (
+            '  // quant: "f16+dit8-a8", // default — available: f16 / f16+dit8-a8 / f16-c16'
+        ) in card
 
     def test_it_follows_the_manifest_when_the_default_moves(self) -> None:
         manifest = _manifest()
         manifest["defaultModel"] = "lite"
-        card = render_model_card(manifest, REPO)
+        card = render_model_card(manifest, REPO, ANIMA_QUANT_ABBREVIATIONS)
         assert '  // model: "lite", // default — available: lite / turbo' in card
-        assert '  // quant: "w8", // default — available: w8' in card
+        assert '  // quant: "f16+dit8", // default — available: f16+dit8' in card
         assert "| `lite` (default) |" in card
 
 
@@ -362,7 +375,7 @@ class TestDerivation:
     def test_it_takes_the_sizes_from_the_manifest(self, card: str) -> None:
         manifest = _manifest()
         manifest["models"]["turbo"]["weights"]["text_encoder"]["f16"]["shards"][0]["size"] = 999
-        moved = render_model_card(manifest, REPO)
+        moved = render_model_card(manifest, REPO, ANIMA_QUANT_ABBREVIATIONS)
         assert "111 B" in card
         assert "111 B" not in moved
         assert "999 B" in moved
@@ -373,7 +386,10 @@ class TestDerivation:
         turbo, _, lite = rest.partition("## Model: lite")
         marked = {
             section.partition("### Quants")[2].partition("###")[0]: expected
-            for section, expected in ((turbo, "| `w8a8` (default) |"), (lite, "| `w8` (default) |"))
+            for section, expected in (
+                (turbo, "| `f16+dit8-a8` (default) |"),
+                (lite, "| `f16+dit8` (default) |"),
+            )
         }
         for quants, expected in marked.items():
             rows = [line for line in quants.splitlines() if line.startswith("| `")]
@@ -381,12 +397,20 @@ class TestDerivation:
             assert len(default) == 1
             assert default[0].startswith(expected)
         # 表に「既定」列を持たない（印は名前の横だけ — 列が空欄で並ぶ形にしない）。
-        assert "| Quant | Weights | Compute |" in card
+        assert "| Quant | What it is | Weights | Compute |" in card
 
     def test_it_carries_every_quant_with_its_session_knobs(self, card: str) -> None:
-        assert "| `f16` | `text_encoder` = `f16` / `transformer` = `f16` | — |" in card
-        assert "`linearCompute` = `i8a8`" in card
+        assert "| `f16` | — | `text_encoder` = `f16` / `transformer` = `f16` | — |" in card
+        assert "`linearCompute` = `a8`" in card
         assert "requires `shaderF16`" in card
+
+    def test_it_prints_the_presentation_fields_the_manifest_carries(self, card: str) -> None:
+        """表示欄はカードにも同じ文字列で出る（ADR 0075 決定 5 — 説明が 2 箇所で育たない）。"""
+        assert "**偽のラベル** — 偽の説明。" in card
+
+    def test_it_explains_the_abbreviation_the_seat_names_use(self, card: str) -> None:
+        """略称の対応は**必ず**出す（ADR 0074 決定 4）— `dit8` がどの部品の話か読めるように。"""
+        assert "In a quant name, `dit` is the `transformer` component." in card
 
     def test_it_takes_the_defaults_from_each_models_pipeline_config(self, card: str) -> None:
         assert "- **steps**: 7" in card
@@ -401,19 +425,23 @@ class TestDerivation:
         assert card.count("the negative prompt is not used") == 1  # turbo だけ guidance 1
         manifest = _manifest()
         manifest["models"]["turbo"]["pipelineConfig"]["defaults"]["guidanceScale"] = 4
-        assert "the negative prompt is not used" not in render_model_card(manifest, REPO)
+        assert "the negative prompt is not used" not in render_model_card(
+            manifest, REPO, ANIMA_QUANT_ABBREVIATIONS
+        )
 
 
 class TestDeterminism:
     def test_it_renders_the_same_bytes_for_the_same_manifest(self) -> None:
-        first = render_model_card(_manifest(), REPO)
-        second = render_model_card(json.loads(json.dumps(_manifest())), REPO)
+        first = render_model_card(_manifest(), REPO, ANIMA_QUANT_ABBREVIATIONS)
+        second = render_model_card(
+            json.loads(json.dumps(_manifest())), REPO, ANIMA_QUANT_ABBREVIATIONS
+        )
         assert first.encode("utf-8") == second.encode("utf-8")
 
     def test_it_does_not_mutate_the_manifest(self) -> None:
         manifest = _manifest()
         before = copy.deepcopy(manifest)
-        render_model_card(manifest, REPO)
+        render_model_card(manifest, REPO, ANIMA_QUANT_ABBREVIATIONS)
         assert manifest == before
 
 
@@ -422,4 +450,4 @@ class TestPipelineGate:
         manifest = _manifest()
         manifest["models"]["lite"]["pipeline"] = "sbv2/1"
         with pytest.raises(ValueError, match="sbv2/1"):
-            render_model_card(manifest, REPO)
+            render_model_card(manifest, REPO, ANIMA_QUANT_ABBREVIATIONS)

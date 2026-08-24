@@ -7,9 +7,9 @@
 配布するのは**実行に要る 8 グラフ + tokenizer 資産 1 本**だけ。8 のうち 2 本は波形 ↔ latent の
 コーデック（DACVAE — 上流では別リポ・別重みだが、テキストから音声まで 1 リポで完走させるため
 ここへ同梱する）。格納形は f32 / f16 / i8 の 3 系列（`dit` だけ **i4 の 4 本目**を持つ）で、
-quant 席は 5 つ（`f32` / `f16` / `w8` / `w8a8` / `w4`）。`w8` と `w8a8` は**同じ i8 バイトを
-共有**し、違うのは実行形ノブだけ。`w4` は `dit` だけを i4 系列から採り、他 7 役は `w8` と
-同じ i8 バイトを共有する（唯一の混成席 — {@link IRODORI_QUANT_SEATS} の裁定）。
+quant 席は 5 つ（`f32` / `f16` / `i8` / `i8-a8` / `i8+dit4`）。`i8` と `i8-a8` は**同じ i8 バイト
+を共有**し、違うのは実行形ノブだけ。`i8+dit4` は `dit` だけを i4 系列から採り、他 7 役は `i8`
+と同じ i8 バイトを共有する（唯一の混成席 — {@link IRODORI_QUANT_SEATS} の裁定）。
 
 `pipelineConfig` は 2 系統に割れる: **モデル固有の数**（条件 state の宣言長・話者行数・
 latent 幅・t_embed 幅）はチェックポイントの config から導出し、**実行時ノブ**（step 数・
@@ -109,7 +109,7 @@ IRODORI_TOKENIZER_DIR = "tokenizer"
 IRODORI_TOKENIZER_FILE = "tokenizer.json"
 
 #: 配る格納 dtype。役割名は `<グラフ役割>_<dtype>` で、系列 root と 1:1 に対応する。
-#: **quant 席の綴りとは別軸**（w8 / w8a8 はどちらも i8 系列を指す — 対応表は
+#: **quant 席の綴りとは別軸**（`i8` / `i8-a8` はどちらも i8 系列を指す — 対応表は
 #: {@link IRODORI_QUANT_SEATS}）。
 IRODORI_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 
@@ -117,7 +117,7 @@ IRODORI_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 #: `irodori.dacvae.export.WEIGHT_DTYPES` と対）。
 #:
 #: MUST: i4 は `dit` だけ。i4 の実行経路は linear の重みスロット限定（ADR 0069 決定 5）で、
-#: DiT 以外の 7 役は quant 席 `w4` でも **i8 系列のバイトをそのまま共有する**
+#: DiT 以外の 7 役は quant 席 `i8+dit4` でも **i8 系列のバイトをそのまま共有する**
 #: （{@link IRODORI_QUANT_SEATS}）— 他役割の i4 系列は書き出す側も持たない。表をここ 1 箇所に
 #: 置くのは、出力 path / 格納 dtype 要求 / weights 宣言 / 配置表の 4 つが「どの (役割, dtype) が
 #: 実在するか」で同じ判断をするため（別々に持つと、席を 1 つ足した日に片方だけ更新される）。
@@ -201,7 +201,7 @@ IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: I8・bias / norm / scale が F32 — 聴感裁定 2026-08-23 で block 外と adaLN を i4 から外した。
 #: `irodori.export._fake_quant_i4`）なので、
 #: 「I8 を含む」という要求検査は i4 系列でも満たされてしまう。i8 席と i4 系列を分けているのは
-#: **この禁止表だけ**で、外すと既定席 `w8a8` の `linearCompute: "i8a8"` が i4 常駐で走る w4a8
+#: **この禁止表だけ**で、外すと既定席 `i8-a8` の `linearCompute: "a8"` が i4 常駐で走る w4a8
 #: 経路（ADR 0076）へ黙って化ける。混成になる前も「i4 系列が i8 席を名乗れるかどうかが上流の
 #: 適格率次第」で同じ穴が空いていた — 混成でその穴が常時開いた形になっただけ。
 IRODORI_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
@@ -231,9 +231,9 @@ IRODORI_ASSETS: Mapping[str, str] = {"tokenizer": "tokenizer"}
 
 
 class QuantSeat(NamedTuple):
-    """quant 席 1 つ（既定の格納 dtype・実行形ノブ・役割ごとの例外）。
+    """quant 席 1 つ（既定の格納 dtype・実行形ノブ・役割ごとの例外・表示欄）。
 
-    **席名と系列 root の対応をここ 1 箇所だけで綴る**（`w8` / `w8a8` はどちらも `-i8` 系列を
+    **席名と系列 root の対応をここ 1 箇所だけで綴る**（`i8` / `i8-a8` はどちらも `-i8` 系列を
     指し、バイトは 1 組を共有する — 違うのは `session` だけ）。
     """
 
@@ -241,47 +241,91 @@ class QuantSeat(NamedTuple):
     dtype: str
     #: 実行形ノブ（`session` の語彙は manifest 所有）。
     session: Mapping[str, str]
+    #: 選択 UI に出す短い表示名（ADR 0075 決定 1 — 64 字上限）。
+    label: str
+    #: 同・1 行の説明（200 字上限）。既定であることは書かない（`defaultQuant` が指している）。
+    description: str
     #: 役割ごとの例外（混成席のためだけの口 — 既定が全役割へ効く形は崩さない）。
     roles: Mapping[str, str] = {}
 
 
-#: quant 席の綴り → {@link QuantSeat}。
+#: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4）。**Irodori は空** — 混成席
+#: `i8+dit4` のトークン `dit` は weights 名そのもの（略称ではない）なので、対応表を出すと
+#: 「`dit` は `dit` です」という行がカードに生えるだけになる。
+IRODORI_QUANT_ABBREVIATIONS: Mapping[str, str] = {}
+
+#: quant 席の綴り → {@link QuantSeat}。席名は ADR 0074 の文法
+#: `<格納>[+<部品><ビット>]…[-<ノブ>]…` で、`<格納>` は**全役割に共通の基底格納**。
 #:
-#: **8 役一律をやめるのは `w4` 席だけ**（2026-08-23 ユーザー裁定）。2026-08-12 の裁定は「i8 も
-#: 一律」で、当時の根拠は混成にすると S（発話長）が席ごとにドリフトする実測だったが、その
-#: ドリフトは **GPTQ 校正で消えた**（`docs/research/2026-08-20-gptq-awq-calibrated-rounding.md`
-#: §6 — 校正付き丸めで S は f32 と完全一致）。`w8` / `w8a8` の 8 役一律は従来どおり。
+#: **8 役一律をやめるのは `i8+dit4` 席だけ**（2026-08-23 ユーザー裁定）。2026-08-12 の裁定は
+#: 「i8 も一律」で、当時の根拠は混成にすると S（発話長）が席ごとにドリフトする実測だったが、
+#: そのドリフトは **GPTQ 校正で消えた**（`docs/research/2026-08-20-gptq-awq-calibrated-rounding.md`
+#: §6 — 校正付き丸めで S は f32 と完全一致）。`i8` / `i8-a8` の 8 役一律は従来どおり。
 #:
-#: MUST: `w8a8` の `linearCompute` は **`dit` の Session にだけ**降りる（models 側 `pipeline.ts`
+#: MUST: `i8-a8` の `linearCompute` は **`dit` の Session にだけ**降りる（models 側 `pipeline.ts`
 #: のモジュール doc）— DiT の linear 317 本が唯一の適格集合で、条件エンコーダ 5 本は 1 生成に
 #: 1 回しか走らない。
 #:
-#: MUST: `w4` は **`linearCompute` を宣言しない**。i4 常駐 × i8 活性は w4a8 経路（ADR 0076・
-#: group 部分縮約）に乗るが、その構成は irodori では**一度も測っていない**（perf-ledger の
-#: 席は重み側のみ）。anima では同じ構成が実 GPU の画で品質裁定に落ちている（ADR 0076 決定 6 /
-#: `anima/distribution.py` の同 MUST）ので、測る前に宣言だけ足すと「速いが荒い」を既定の顔で
-#: 配ることになる。この席の存在理由は**サイズと VRAM**であって速度ではない。
+#: MUST: `i8+dit4` は **`linearCompute` を宣言しない**。i4 常駐 × i8 活性は w4a8 経路
+#: （ADR 0076・group 部分縮約）に乗るが、その構成は irodori では**一度も測っていない**
+#: （perf-ledger の席は重み側のみ）。anima では同じ構成が実 GPU の画で品質裁定に落ちている
+#: （ADR 0076 決定 6 / `anima/distribution.py` の同 MUST）ので、測る前に宣言だけ足すと
+#: 「速いが荒い」を既定の顔で配ることになる。この席の存在理由は**サイズと VRAM**であって
+#: 速度ではない。
 IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
-    "f32": QuantSeat("f32", {}),
-    "f16": QuantSeat("f16", {}),
-    "w8": QuantSeat("i8", {}),
-    "w8a8": QuantSeat("i8", {"linearCompute": "i8a8"}),
-    "w4": QuantSeat("i8", {}, {"dit": "i4"}),
+    "f32": QuantSeat(
+        "f32",
+        {},
+        label="Full precision (f32)",
+        description="Every graph in f32 storage — the largest download, and the source"
+        " checkpoint's own values re-laid out per graph.",
+    ),
+    "f16": QuantSeat(
+        "f16",
+        {},
+        label="Half size (f16)",
+        description="Every graph stored as f16 and computed in f32 — half the f32 download,"
+        " with no audible difference in the listening check.",
+    ),
+    "i8": QuantSeat(
+        "i8",
+        {},
+        label="Quarter size (int8)",
+        description="Every graph stored as int8 and computed in f32 — about a quarter of the f32"
+        " download, with the execution path left unchanged.",
+    ),
+    "i8-a8": QuantSeat(
+        "i8",
+        {"linearCompute": "a8"},
+        label="Balanced (int8, int8 linear)",
+        description="The int8 weights with per-token int8 activations in the DiT's linear layers"
+        " — the same download as plain int8, and faster per Euler step.",
+    ),
+    "i8+dit4": QuantSeat(
+        "i8",
+        {},
+        label="Lowest memory (int4 DiT)",
+        description="The DiT in GPTQ-calibrated int4 (group-32) while the other seven graphs stay"
+        " int8 — the smallest download and the least resident memory.",
+        roles={"dit": "i4"},
+    ),
 }
 
 IRODORI_QUANTS: Mapping[str, Any] = {
     name: {
         "weights": {role: seat.roles.get(role, seat.dtype) for role in IRODORI_GRAPH_ROLES},
         "session": dict(seat.session),
+        "label": seat.label,
+        "description": seat.description,
     }
     for name, seat in IRODORI_QUANT_SEATS.items()
 }
 
-#: 既定は `w8a8`（ユーザー聴感裁定 2026-08-12 — DAC + ヘッドホンで f32/f16/w8/w8a8 を通しで
-#: 確認し「音質的な劣化という感じはしない」。配布 25.2% / DiT 常駐 0.37GB / wall ×1.12 が
+#: 既定は `i8-a8`（ユーザー聴感裁定 2026-08-12 — DAC + ヘッドホンで 4 席を通しで確認し
+#: 「音質的な劣化という感じはしない」。配布 25.2% / DiT 常駐 0.37GB / wall ×1.12 が
 #: 既定で効き、最も忠実な `f32` 席は残したまま明示で選べる。数値上の帯（sim LSD 5.64・
-#: w8 golden との z maxAbs 2.97）は `e2e_irodori_w8a8_test.ts` の判別帯が持つ）。
-IRODORI_DEFAULT_QUANT = "w8a8"
+#: i8 golden との z maxAbs 2.97）は `e2e_irodori_w8a8_test.ts` の判別帯が持つ）。
+IRODORI_DEFAULT_QUANT = "i8-a8"
 
 #: DACVAE のフレームレート（Hz）— 48kHz / hop 1920 = 25。`irodori.export.CODEC_FRAME_RATE` と
 #: 同値で、コーデックが別リポ・別重みなのでチェックポイントの config には入っていない。

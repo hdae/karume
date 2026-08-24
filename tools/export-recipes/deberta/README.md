@@ -25,7 +25,7 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2 # 2 lay
 # 1b. i8 series (ADR 0019 storage + ADR 0025 w8a8 mirror goldens)
 uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i8 --act-quant
 
-# 1c. i4 series — the shipped variant only (the seat of the SBV2 `w8-bert4` quant)
+# 1c. i4 series — the shipped variant only (the seat of the SBV2 `i8+bert4` quant)
 uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layers 22
 
 # 2. real-GPU comparison: not available in this repository yet (see the note below)
@@ -41,7 +41,7 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layer
   quantization axis the group size does not divide) in per-channel i8 exactly as in the i8 series.
   i4 only has an execution path for the linear and embedding weight slots, so a single-dtype i4
   series cannot exist. Only `sbv2-22layer` is worth writing — it is the seat of the SBV2
-  distribution's `w8-bert4` quant, and no other consumer reads this series.
+  distribution's `i8+bert4` quant, and no other consumer reads this series.
 - **The i4 encoder linears are rounded with GPTQ calibration** (`deberta/calib.py`, always on — there
   is no flag). The stored bytes are unchanged: the grid stays RTN i4 g32, so only the rounded values
   and the scale ledger differ. The calibration inputs are the 48 sentences of
@@ -104,7 +104,7 @@ measured tolerances and the storage-declaration check that catches a series-root
 decision 3) remains unported, so the mirror is only guarded against leaking into the regular
 enumeration.
 
-The `io-i8a8.<case>` files written by `--act-quant` are the **w8a8** (`linearCompute: "i8a8"`)
+The `io-i8a8.<case>` files written by `--act-quant` are the **w8a8** (`linearCompute: "a8"`)
 mirror. The regular `io.<case>` MUST be taken **without the hook** (taking it with the hook still
 applied would contaminate the w8-side E2E expectations with activation quantization). The prefix is
 kept apart from `io.` so that a Deno-side enumeration of regular cases (startsWith `io.`) does not

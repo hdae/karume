@@ -35,6 +35,7 @@ from irodori.distribution import (
     IRODORI_DTYPE_ROLES,
     IRODORI_GRAPH_ROLES,
     IRODORI_OUTPUT_PATHS,
+    IRODORI_QUANT_ABBREVIATIONS,
     IRODORI_QUANT_SEATS,
     IRODORI_SAMPLING_DEFAULTS,
     IRODORI_SERIES_DIRS,
@@ -55,6 +56,7 @@ from karume.dist import (
     MODEL_CARD_FILENAME,
     DistError,
     assemble_family,
+    assert_quant_presentation,
     resolve_card_renderer,
     verify_dist,
 )
@@ -367,16 +369,17 @@ class TestIrodoriLayout:
         assert sorted(model["assets"]) == ["tokenizer"]
 
     def test_the_quants_are_the_five_seats_the_seat_table_spells(self, irodori_assembled) -> None:
-        """席は 5 つ（格納 3 系列 + w8a8 の実行形ノブ + `dit` だけ i4 の `w4`）。既定は `w8a8`。
+        """席は 5 つ（格納 3 系列 + `-a8` の実行形ノブ + `dit` だけ i4 の `i8+dit4`）。
+        既定は `i8-a8`。
 
-        `w8` / `w8a8` は**同じ i8 バイトを共有**し、違うのは `session` だけ — 席が増えても
-        配布形のファイルは増えない、が席表の要点。`w4` はその例外で、`dit` の 1 本だけが
+        `i8` / `i8-a8` は**同じ i8 バイトを共有**し、違うのは `session` だけ — 席が増えても
+        配布形のファイルは増えない、が席表の要点。`i8+dit4` はその例外で、`dit` の 1 本だけが
         i4 系列を指す。
         """
         _, manifest = irodori_assembled
         model = _irodori_model(manifest)
-        assert model["defaultQuant"] == "w8a8"
-        assert list(model["quants"]) == ["f32", "f16", "w8", "w8a8", "w4"]
+        assert model["defaultQuant"] == "i8-a8"
+        assert list(model["quants"]) == ["f32", "f16", "i8", "i8-a8", "i8+dit4"]
         for name, seat in IRODORI_QUANT_SEATS.items():
             assert model["quants"][name]["session"] == seat.session
             assert "gpuFeatures" not in model["quants"][name]
@@ -384,12 +387,12 @@ class TestIrodoriLayout:
             assert model["quants"][name]["weights"] == {
                 role: seat.roles.get(role, seat.dtype) for role in model["weights"]
             }
-        assert model["quants"]["w8"]["session"] == {}
-        assert model["quants"]["w8a8"]["session"] == {"linearCompute": "i8a8"}
-        # MUST: `w4` は `linearCompute` を宣言しない（irodori では w4a8 経路が未測定 —
-        # 席表の同 MUST）。ここが緩むと「速いが荒い」構成が席名 `w4` のまま出る。
-        assert model["quants"]["w4"]["session"] == {}
-        assert model["quants"]["w4"]["weights"]["dit"] == "i4"
+        assert model["quants"]["i8"]["session"] == {}
+        assert model["quants"]["i8-a8"]["session"] == {"linearCompute": "a8"}
+        # MUST: `i8+dit4` は `linearCompute` を宣言しない（irodori では w4a8 経路が未測定 —
+        # 席表の同 MUST）。ここが緩むと「速いが荒い」構成が int4 の席名のまま出る。
+        assert model["quants"]["i8+dit4"]["session"] == {}
+        assert model["quants"]["i8+dit4"]["weights"]["dit"] == "i4"
 
     def test_every_quant_points_at_its_own_storage_series(self, irodori_assembled) -> None:
         """席と現物の対応（圧縮席のファイルが実際に F16 / I8 / I4 格納であることは組み立て門が
@@ -405,21 +408,21 @@ class TestIrodoriLayout:
                 assert (out_dir / path).is_file()
 
     def test_the_two_i8_seats_share_one_set_of_bytes(self, irodori_assembled) -> None:
-        """`w8a8` は席を 1 行足すだけ（ADR 0050 波 2 — 配布サイズは 1 バイトも増えない）。"""
+        """`i8-a8` は席を 1 行足すだけ（ADR 0050 波 2 — 配布サイズは 1 バイトも増えない）。"""
         _, manifest = irodori_assembled
         model = _irodori_model(manifest)
-        assert model["quants"]["w8"]["weights"] == model["quants"]["w8a8"]["weights"]
+        assert model["quants"]["i8"]["weights"] == model["quants"]["i8-a8"]["weights"]
 
-    def test_the_w4_seat_shares_the_i8_bytes_for_the_other_seven_roles(
+    def test_the_dit4_seat_shares_the_i8_bytes_for_the_other_seven_roles(
         self, irodori_assembled
     ) -> None:
-        """`w4` が新しく足すファイルは `dit` の 1 本だけ（他 7 役は `w8` とバイト共有）。"""
+        """`i8+dit4` が新しく足すファイルは `dit` の 1 本だけ（他 7 役は `i8` とバイト共有）。"""
         _, manifest = irodori_assembled
         model = _irodori_model(manifest)
         differing = {
             role
-            for role, label in model["quants"]["w4"]["weights"].items()
-            if label != model["quants"]["w8"]["weights"][role]
+            for role, label in model["quants"]["i8+dit4"]["weights"].items()
+            if label != model["quants"]["i8"]["weights"][role]
         }
 
         assert differing == {"dit"}
@@ -743,8 +746,8 @@ class TestIrodoriStorageSeries:
         写すのは**実物の i4 系列**（block 内の adaLN 以外が I4・adaLN と block 外が I8）—
         そのコンテナは
         「I8 を含む」を満たすので、禁止表が無いと i8 席へ挿し込めてしまう。実害は既定席
-        `w8a8` に出る（宣言した `linearCompute: "i8a8"` の述語は i4 常駐も受けるので、
-        ADR 0076 の w4a8 経路が席名 `w8a8` のまま黙って走る）。
+        `i8-a8` に出る（宣言した `linearCompute: "a8"` の述語は i4 常駐も受けるので、
+        ADR 0076 の w4a8 経路が int8 を名乗る席のまま黙って走る）。
         """
         sources = _build_irodori_sources(tmp_path)
         _write(
@@ -814,12 +817,32 @@ class TestIrodoriStorageSeries:
             files.file for labels in IRODORI_WEIGHTS.values() for files in labels.values()
         } == expected
 
+    def test_every_seat_starts_from_a_storage_dtype_of_the_vocabulary(self) -> None:
+        """席名は ADR 0074 の文法 — `<格納>` は資産ヘッダの語彙（決定 2）。`w8` / `w4` は廃した。"""
+        for name, seat in IRODORI_QUANT_SEATS.items():
+            assert name.split("+")[0].split("-")[0] == seat.dtype, name
+
+    def test_it_needs_no_abbreviation_legend(self) -> None:
+        """`i8+dit4` のトークン `dit` は weights 名そのもの（略称ではない — ADR 0074 決定 4）。
+
+        対応表を空でないものにすると「`dit` は `dit` です」の行がカードに生える。
+        """
+        assert IRODORI_QUANT_ABBREVIATIONS == {}
+
+    def test_every_seat_carries_a_label_and_a_description_within_the_limits(self) -> None:
+        for name, seat in IRODORI_QUANT_SEATS.items():
+            assert seat.label and seat.description, name
+            assert_quant_presentation(
+                f"irodori.quants.{name}",
+                {"label": seat.label, "description": seat.description},
+            )
+
     def test_every_quant_seat_names_a_storage_series_that_exists(self) -> None:
         """席表（`IRODORI_QUANT_SEATS`）が指す dtype は必ず系列として焼かれている側にある。
 
-        席名（`w8`）と系列 root（`-i8`）の対応を綴る箇所はここ 1 つきり — 2 箇所に分かれると、
+        席名（`i8`）と系列 root（`-i8`）の対応を綴る箇所はここ 1 つきり — 2 箇所に分かれると、
         片方だけ動いたときに「存在しない系列を指す席」か「誰も指さない系列」が生える。
-        MUST: 役割ごとの例外（`w4` の `dit`）も同じ検査に載せる。
+        MUST: 役割ごとの例外（`i8+dit4` の `dit`）も同じ検査に載せる。
         """
         named = {
             seat.roles.get(role, seat.dtype)
@@ -863,7 +886,7 @@ class TestIrodoriCalibProvenance:
     def test_a_calibrated_series_passes(self, tmp_path: Path) -> None:
         sources = _build_irodori_sources(tmp_path)
 
-        assert irodori_plan(sources).quants["w4"]["weights"]["dit"] == "i4"
+        assert irodori_plan(sources).quants["i8+dit4"]["weights"]["dit"] == "i4"
 
     def test_a_missing_record_is_refused(self, tmp_path: Path) -> None:
         """記録の不在は「古い export」— 名指しで再エクスポートを促す。"""
@@ -925,7 +948,7 @@ class TestIrodoriCalibProvenance:
         }
         sources = _build_irodori_sources(tmp_path, calib_provenance=legacy)
 
-        assert irodori_plan(sources).quants["w4"]["weights"]["dit"] == "i4"
+        assert irodori_plan(sources).quants["i8+dit4"]["weights"]["dit"] == "i4"
 
     def test_the_floor_is_the_condition_the_export_defaults_to(self) -> None:
         """下限は写しではなく正本から引く（コーパスの本数と参照ループ全長）。"""
@@ -959,7 +982,7 @@ class TestIrodoriModelCard:
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "pipeline_tag: text-to-speech" in card
         assert "license: mit" in card
-        # 既定 quant（w8a8）の DL 実体が int8 系列なので `quantized` を宣言する（sbv2 / anima と
+        # 既定 quant（`i8-a8`）の DL 実体が int8 系列なので `quantized` を宣言する（sbv2 / anima と
         # 同型。旧「f32 のまま・宣言しない」は i8 系列同梱前の陳腐化した前提だった）。
         assert "base_model_relation: quantized" in card
         assert "Text in, waveform out" in card
@@ -974,13 +997,15 @@ class TestIrodoriModelCard:
         assert "there is no resampler" in card
         # 非タイルの encoder は長尺参照で落ちうる（limitations 起票済みの by-design 制約）。
         assert "`codec_encoder` is not tiled" in card
-        assert 'fromPretrained("hdae/dist"' in card
+        assert '  repo: "hdae/dist",' in card
+        # revision は object ref 形の中にコメントアウトで置く（外すだけで pin できる）。
+        assert '  // revision: "<full commit sha>",' in card
         # Usage は「コメントを外すだけで次の一歩へ進める」形（裁定 2026-08-12）: voice cloning の
         # 両形（audio / latent）と optional ノブがコメントアウトで併記され、選べる値は manifest
-        # から機械導出される（席が増えれば列挙も既定も追従する — ここでは 5 席・既定 w8a8）。
+        # から機械導出される（席が増えれば列挙も既定も追従する — ここでは 5 席・既定 `i8-a8`）。
         assert '// speaker: { audio: decodeWav(await Deno.readFile("reference.wav")) },' in card
         assert "// speaker: { latent: savedLatent }," in card
-        assert '// quant: "w8a8", // default — available: f16 / f32 / w4 / w8 / w8a8' in card
+        assert '// quant: "i8-a8", // default — available: f16 / f32 / i8 / i8+dit4 / i8-a8' in card
         assert "// durationSeconds: 5," in card
 
     def test_it_derives_the_shape_section_from_the_manifest(

@@ -33,6 +33,7 @@ from karume.dist import (
     SHARED_DIRNAME,
     DistError,
     assemble_family,
+    assert_quant_presentation,
     resolve_card_renderer,
     verify_dist,
 )
@@ -45,6 +46,7 @@ from sbv2.distribution import (
     SBV2_MAX_FRAMES,
     SBV2_MAX_TOKENS,
     SBV2_OUTPUT_PATHS,
+    SBV2_QUANT_ABBREVIATIONS,
     SBV2_QUANTS,
     SBV2_SPEAKER_KEY,
     SBV2_SPEAKER_TENSOR,
@@ -665,7 +667,7 @@ class TestSbv2Manifest:
         assert entry["i4"]["shards"][0]["path"].endswith("model.i4.safetensors")
 
     def test_every_dtype_seat_declares_a_single_shard(self, sbv2_assembled) -> None:
-        """`karume/3` の shard 列は、この配布形では常に 1 要素（= `karume_ir` を持つコンテナ）。
+        """`karume/4` の shard 列は、この配布形では常に 1 要素（= `karume_ir` を持つコンテナ）。
 
         exporter に分割規則が無いこと（ADR 0070 決定 1 は席だけ）の実 recipe 側の観測点 —
         列に移した後も「1 本のコンテナを 1 本として配る」形が変わっていないことを固定する。
@@ -689,7 +691,7 @@ class TestSbv2Manifest:
         既存 quant の text_encoder が黙って別の格納形へ動いた場合を捕まえるため
         （表から導くと恒真になる）。
         """
-        bert_i4_quants = {"w8-bert4", "w4"}
+        bert_i4_quants = {"i8+bert4", "i4"}
         _, manifest = sbv2_assembled
         model = _sbv2_model(manifest)
         assert bert_i4_quants <= set(model["quants"])
@@ -699,15 +701,15 @@ class TestSbv2Manifest:
                 name
             )
 
-    def test_the_bert4_quant_is_w8_with_only_the_text_encoder_swapped(self, sbv2_assembled) -> None:
-        """`w8-bert4` の意味は「`w8` と同構成で BERT だけ i4」— 差分が 1 席であることを固定する。
+    def test_the_bert4_quant_is_i8_with_only_the_text_encoder_swapped(self, sbv2_assembled) -> None:
+        """`i8+bert4` の意味は「`i8` と同構成で BERT だけ i4」— 差分が 1 席であることを固定する。
 
-        session ノブまで見るのは、`w8a8` のような**別軸**の変更が紛れ込んだまま「格納形だけの
+        session ノブまで見るのは、`i8-a8` のような**別軸**の変更が紛れ込んだまま「格納形だけの
         席」を名乗ると、聴感で採った裁定（perf-ledger Q-1）の対象が黙って変わるから。
         """
         _, manifest = sbv2_assembled
         quants = _sbv2_model(manifest)["quants"]
-        base, variant = quants["w8"], quants["w8-bert4"]
+        base, variant = quants["i8"], quants["i8+bert4"]
 
         assert variant["session"] == base["session"]
         differing = {
@@ -726,19 +728,43 @@ class TestSbv2Manifest:
                 path = entry[label]["shards"][0]["path"]
                 assert path.endswith(f"model.{label}.safetensors"), role
 
-    def test_the_w4_quant_takes_the_mixed_form_in_every_role(self, sbv2_assembled) -> None:
-        """`w4` の意味は「3 席とも i4 混成・session は `w8` のまま」— 軸が 1 つであることを固定。
+    def test_the_i4_quant_takes_the_mixed_form_in_every_role(self, sbv2_assembled) -> None:
+        """`i4` の意味は「3 席とも i4 混成・session は `i8` のまま」— 軸が 1 つであることを固定。
 
-        session まで見るのは `w8-bert4` の門と同じ理由 — 活性の量子化（`w8a8` 軸）が紛れ込むと、
+        session まで見るのは `i8+bert4` の門と同じ理由 — 活性の量子化（`-a8` 軸）が紛れ込むと、
         聴感で採った裁定（perf-ledger Q-1 / research 2026-08-19 §6）の対象が黙って変わる。
         """
         _, manifest = sbv2_assembled
         quants = _sbv2_model(manifest)["quants"]
-        base, variant = quants["w8"], quants["w4"]
+        base, variant = quants["i8"], quants["i4"]
 
         assert variant["session"] == base["session"]
         assert set(variant["weights"].values()) == {"i4"}
         assert set(variant["weights"]) == set(base["weights"])
+
+
+class TestSbv2QuantNaming:
+    """席名は ADR 0074 の文法（`<格納>[+<部品><ビット>]…[-<ノブ>]…`）と表示欄（ADR 0075）。"""
+
+    def test_every_seat_starts_from_a_storage_dtype_of_the_vocabulary(self) -> None:
+        """`<格納>` は資産ヘッダの語彙（ADR 0074 決定 2）— `w8` / `w4` の第 2 語彙は廃した。"""
+        for name in SBV2_QUANTS:
+            assert name.split("+")[0].split("-")[0] in ("f32", "f16", "i8", "i4"), name
+
+    def test_the_component_override_token_spells_the_text_encoder(self) -> None:
+        """略称は recipe が定める（ADR 0074 決定 4）— 対応はカードにも出る。"""
+        assert SBV2_QUANT_ABBREVIATIONS == {"bert": "text_encoder"}
+        assert set(SBV2_QUANT_ABBREVIATIONS.values()) <= set(SBV2_WEIGHTS)
+
+    def test_the_f16_seat_names_the_int8_text_encoder_it_actually_ships(self) -> None:
+        """実態に合わせる（ADR 0074 決定 6）— f16 席の text_encoder は i8（f16 系列が無い）。"""
+        assert SBV2_QUANTS["f16+bert8"]["weights"]["text_encoder"] == "i8"
+        assert "f16" not in SBV2_QUANTS
+
+    def test_every_seat_carries_a_label_and_a_description_within_the_limits(self) -> None:
+        for name, quant in SBV2_QUANTS.items():
+            assert quant["label"] and quant["description"], name
+            assert_quant_presentation(f"sbv2.quants.{name}", quant)
 
 
 class TestSbv2VerifyDist:
@@ -983,7 +1009,7 @@ class TestSbv2Cli:
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "## Model: F1" in card
         assert "## Model: F2" in card
-        assert 'fromPretrained("hdae/karume-sbv2-jvnv"' in card
+        assert '  repo: "hdae/karume-sbv2-jvnv",' in card
         # 帰属は選んだファミリーのもの（FN の出所が 1 語も混ざらない）。
         assert "base_model:\n  - litagin/style_bert_vits2_jvnv\n" in card
         assert "license: cc-by-sa-4.0" in card

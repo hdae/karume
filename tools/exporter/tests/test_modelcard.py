@@ -20,6 +20,7 @@ from karume.modelcard import (
     CardMetadata,
     file_rows,
     files,
+    from_pretrained,
     frontmatter,
     model_sections,
     models,
@@ -91,7 +92,7 @@ def _manifest() -> dict[str, Any]:
     `tables` は f16 / i8 の両 dtype が同一 path を指す形（rope_base の 1 本化と同型）。
     """
     return {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/9.9.9",
         "defaultModel": "zeta",
         "models": {
@@ -115,7 +116,9 @@ def _manifest() -> dict[str, Any]:
                     "f16": {"weights": {"front": "f16", "tables": "f16"}, "session": {}},
                     "w8": {
                         "weights": {"front": "i8", "tables": "i8"},
-                        "session": {"linearCompute": "i8a8"},
+                        "session": {"linearCompute": "a8"},
+                        "label": "Half size (int8)",
+                        "description": "Both components in int8 storage.",
                     },
                 },
                 "defaultQuant": "w8",
@@ -163,6 +166,29 @@ class TestFilesSection:
         assert any("`shared/tokenizer.json`" in line for line in lines)
         assert any(line.startswith("A path under `shared/`") for line in lines)
 
+    def test_a_borrowed_path_names_the_repository_it_comes_from(self) -> None:
+        """越境参照（ADR 0038 §7）の行は指し先ごと出す — 自リポの path だけだと在るように読める。"""
+        manifest = _manifest()
+        manifest["models"]["alpha"]["weights"]["front"]["f16"]["shards"] = [
+            {
+                "repo": "hdae/karume-source",
+                "revision": "9" * 40,
+                "path": "source/front.safetensors",
+                "size": 512,
+                "sha256": "f" * 64,
+            }
+        ]
+        lines = files(manifest["models"]["alpha"])
+
+        assert any("`source/front.safetensors` in [`hdae/karume-source`]" in line for line in lines)
+        assert any(line.startswith("A row that names another repository") for line in lines)
+
+    def test_a_self_contained_model_says_nothing_about_other_repositories(self) -> None:
+        assert not any(
+            line.startswith("A row that names another repository")
+            for line in files(_manifest()["models"]["zeta"])
+        )
+
 
 class TestQuantsSection:
     def test_the_default_mark_follows_default_quant(self) -> None:
@@ -170,8 +196,55 @@ class TestQuantsSection:
         lines = quants(_manifest()["models"]["zeta"])
 
         assert [line for line in lines if "(default)" in line] == [
-            "| `w8` (default) | `front` = `i8` / `tables` = `i8` | `linearCompute` = `i8a8` |"
+            "| `w8` (default) | **Half size (int8)** — Both components in int8 storage."
+            " | `front` = `i8` / `tables` = `i8` | `linearCompute` = `a8` |"
         ]
+
+    def test_a_seat_without_the_presentation_fields_keeps_an_empty_cell(self) -> None:
+        """表示欄は optional（ADR 0075 決定 1）— 書いていない席は id をそのまま読ませる。"""
+        lines = quants(_manifest()["models"]["alpha"])
+
+        assert "| `f16` (default) | — | `front` = `f16` | — |" in lines
+
+    def test_it_writes_the_abbreviation_legend_only_when_one_is_given(self) -> None:
+        """略称の対応は**カードに必ず出す**（ADR 0074 決定 4）が、略称のない family には出ない。
+
+        トークンが weights 名そのものの family（irodori）で「`dit` は `dit`」の行が生えると、
+        対応表そのものが読み飛ばされる注記になる。
+        """
+        model = _manifest()["models"]["zeta"]
+        legend = "In a quant name, `tbl` is the `tables` component."
+
+        assert legend in quants(model, abbreviations={"tbl": "tables"})
+        assert not any(line.startswith("In a quant name") for line in quants(model))
+
+
+class TestFromPretrained:
+    """使い方スニペットの `fromPretrained` 呼び出し — **object ref 形** + revision の pin の席。
+
+    source を文字列 1 本で綴っていた頃は revision を書く席そのものが無く、読み手は暗黙に
+    `main` 追従になっていた（リポを上げ直した日に他人のアプリが壊れる）。
+    """
+
+    def test_it_passes_the_repository_as_an_object_and_keeps_the_options_second(self) -> None:
+        lines = from_pretrained("AnimaPipeline", "hdae/karume-anima-turbo", ['  // quant: "f16",'])
+
+        assert lines[0] == "using pipeline = await AnimaPipeline.fromPretrained({"
+        assert lines[1] == '  repo: "hdae/karume-anima-turbo",'
+        assert lines[-3:] == ["}, {", '  // quant: "f16",', "});"]
+
+    def test_it_offers_the_pin_as_a_commented_out_line(self) -> None:
+        """既定は `main` 追従のまま — 外すだけで pin できる形にする（2 本のサンプルに割らない）。"""
+        lines = from_pretrained("AnimaPipeline", "hdae/x", [])
+
+        assert '  // revision: "<full commit sha>",' in lines
+        assert any("Pin a commit for reproducible builds" in line for line in lines)
+
+    def test_the_disposable_spelling_is_the_callers_fact(self) -> None:
+        """同期 dispose か非同期かは pipeline ごとの事実（ここでは選ばない）。"""
+        lines = from_pretrained("Siglip2Pipeline", "hdae/x", [], disposable="await using")
+
+        assert lines[0].startswith("await using pipeline = await Siglip2Pipeline")
 
 
 class TestRequirePipeline:

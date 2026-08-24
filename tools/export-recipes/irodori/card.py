@@ -22,6 +22,7 @@ from karume.modelcard import (
     CardMetadata,
     default_model,
     files,
+    from_pretrained,
     frontmatter,
     knob,
     model_sections,
@@ -53,7 +54,8 @@ IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 IRODORI_METADATA = CardMetadata(
     pipeline_tag=IRODORI_PIPELINE_TAG,
     base_model=(IRODORI_BASE_MODEL, IRODORI_TEXT_BACKBONE_MODEL, IRODORI_CODEC_MODEL),
-    # 既定 quant（w8a8）の DL 実体が int8 系列なので `quantized` を宣言する（sbv2 / anima と同型。
+    # 既定 quant（`i8-a8`）の DL 実体が int8 系列なので `quantized` を宣言する（sbv2 / anima と
+    # 同型。
     # 旧「f32 のまま・quantized ではない」は i8 系列同梱前の陳腐化した前提だった）。
     base_model_relation="quantized",
     license="mit",
@@ -145,10 +147,14 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "```ts",
         'import { decodeWav, encodeWav, IrodoriPipeline } from "jsr:@karume/models";',
         "",
-        f'using pipeline = await IrodoriPipeline.fromPretrained("{repo}", {{',
-        f'  // model: "{model_name}", // default — available: {model_names}',
-        f'  // quant: "{quant}", // default — available: {quant_names}',
-        "});",
+        *from_pretrained(
+            "IrodoriPipeline",
+            repo,
+            [
+                f'  // model: "{model_name}", // default — available: {model_names}',
+                f'  // quant: "{quant}", // default — available: {quant_names}',
+            ],
+        ),
         "",
         "const audio = await pipeline.generate({",
         f'  text: "{IRODORI_DEMO_TEXT}",',

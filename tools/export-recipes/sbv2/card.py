@@ -17,12 +17,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
     default_model,
     files,
+    from_pretrained,
     frontmatter,
     knob,
     model_sections,
@@ -57,16 +59,16 @@ SBV2_DEMO_TEXT = "こんにちは、これはテストです。"
 #: 既定マークは書かない — 既定は manifest の `defaultQuant` から引く（{@link _sbv2_quants}）。
 #: ここに書くと、既定が動いたときに表と説明が別々に嘘をつく。
 SBV2_QUANT_ROUNDING: Mapping[str, tuple[str, ...]] = {
-    "w8": ("every weight in `i8`, rounded per tensor (plain RTN).",),
-    "w8-bert4": (
+    "i8": ("every weight in `i8`, rounded per tensor (plain RTN).",),
+    "i8+bert4": (
         "`text_encoder` in `i4` group-32: its linear layers rounded with **GPTQ",
         "  calibration** (a 48-sentence Japanese corpus), its embedding table plain RTN.",
         "  `front` / `voice` stay `i8`.",
     ),
-    "w4": (
-        "the same text encoder as `w8-bert4`, plus `front` / `voice` linear and conv1d",
+    "i4": (
+        "the same text encoder as `i8+bert4`, plus `front` / `voice` linear and conv1d",
         "  weights in `i4` group-32 with plain RTN. Smallest download and fastest warm",
-        "  synthesis; the output is very close to `w8-bert4`, with slightly lower tension",
+        "  synthesis; the output is very close to `i8+bert4`, with slightly lower tension",
         "  than the source checkpoint's unquantized f32 reference.",
     ),
 }
@@ -234,15 +236,19 @@ def _sbv2_base_weights(profile: Sbv2CardProfile) -> list[str]:
     ]
 
 
-def _sbv2_quants(model: Mapping[str, Any]) -> list[str]:
+def _sbv2_quants(model: Mapping[str, Any], *, abbreviations: Mapping[str, str]) -> list[str]:
     """汎用の quant 表に、SBV2 の**丸め方**の備考を足した節。
 
     表は「どの席がどの格納 dtype か」しか言えない（manifest がそこまでしか持たない）ので、
     同じ `i4` でも GPTQ 校正付きか素の RTN かが読めない — 既定が品質で選ばれている理由が
     カードから消える。備考は**このモデルが宣言している quant だけ**に付ける（`_sbv2_knob` と
     同じ規律 — 配布形が持たない席を説明すると、カードが配れる値を超えて喋る）。
+
+    表示欄（`label` / `description`）とは責務が別 — あちらは「席 1 つが何か」を manifest から
+    出す 1 行で、こちらは「その格納をどう作ったか」という台本側の知識（ADR 0075 決定 5）。
     """
     default = model["defaultQuant"]
+    table = quants(model, abbreviations=abbreviations)
     notes: list[str] = []
     for name in model["quants"]:
         rounding = SBV2_QUANT_ROUNDING.get(name)
@@ -252,8 +258,8 @@ def _sbv2_quants(model: Mapping[str, Any]) -> list[str]:
         head, *rest = rounding
         notes += [f"- `{name}`{mark} — {head}", *rest]
     if not notes:
-        return quants(model)
-    return [*quants(model), "", "How the stored weights were rounded:", "", *notes]
+        return table
+    return [*table, "", "How the stored weights were rounded:", "", *notes]
 
 
 def _name_id_rows(table: Mapping[str, int]) -> list[str]:
@@ -325,10 +331,14 @@ def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "```ts",
         'import { encodeWav, Sbv2Pipeline } from "jsr:@karume/models";',
         "",
-        f'using pipeline = await Sbv2Pipeline.fromPretrained("{repo}", {{',
-        f'  // model: "{model_name}", // default — available: {model_names}',
-        f'  // quant: "{quant}", // default — available: {quant_names}',
-        "});",
+        *from_pretrained(
+            "Sbv2Pipeline",
+            repo,
+            [
+                f'  // model: "{model_name}", // default — available: {model_names}',
+                f'  // quant: "{quant}", // default — available: {quant_names}',
+            ],
+        ),
         "",
         "const audio = await pipeline.generate({",
         f'  text: "{SBV2_DEMO_TEXT}",',
@@ -375,11 +385,19 @@ def _sbv2_defaults(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def render_sbv2_model_card(manifest: Mapping[str, Any], repo: str, profile: Sbv2CardProfile) -> str:
+def render_sbv2_model_card(
+    manifest: Mapping[str, Any],
+    repo: str,
+    profile: Sbv2CardProfile,
+    abbreviations: Mapping[str, str],
+) -> str:
     """SBV2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
 
     `profile` に既定を置かないのは MUST — 帰属はファミリーごとに違う事実で、既定を持たせた
     瞬間に「別ファミリーのリポへ前のファミリーの帰属を描く」経路が黙って生える。
+
+    `abbreviations` は席名の部品上書きトークンの対応表（正本は `sbv2.distribution` —
+    ADR 0074 決定 4）。manifest に無い事実なので、定数として写さず引数で受ける。
     """
     require_pipeline(manifest, SBV2_SUPPORTED_PIPELINE)
     return render(
@@ -394,7 +412,14 @@ def render_sbv2_model_card(manifest: Mapping[str, Any], repo: str, profile: Sbv2
             [""],
             _sbv2_usage(manifest, repo),
             *model_sections(
-                manifest, (files, _sbv2_quants, _sbv2_styles, _sbv2_speakers, _sbv2_defaults)
+                manifest,
+                (
+                    files,
+                    partial(_sbv2_quants, abbreviations=abbreviations),
+                    _sbv2_styles,
+                    _sbv2_speakers,
+                    _sbv2_defaults,
+                ),
             ),
         )
     )

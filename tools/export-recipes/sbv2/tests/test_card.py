@@ -35,6 +35,7 @@ from sbv2.card import (
     Sbv2CardProfile,
     render_sbv2_model_card,
 )
+from sbv2.distribution import SBV2_QUANT_ABBREVIATIONS
 from siglip2.card import SIGLIP2_SUPPORTED_PIPELINE, render_siglip2_model_card
 
 #: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
@@ -48,7 +49,7 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
     """SigLIP2 の最小 manifest（テンプレート取り違えの門を両向きに見るための相手）。"""
     return {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
@@ -82,7 +83,7 @@ def _sbv2_manifest() -> dict[str, Any]:
     text_encoder = _ref("shared/text_encoder/model.i8.safetensors", 555, "e")
     tokenizer = _ref("shared/tokenizer/fake-tokenizer.json", 11, "3")
     return {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/9.9.9",
         "defaultModel": "ZA",
         "models": {
@@ -110,16 +111,18 @@ def _sbv2_manifest() -> dict[str, Any]:
                         "weights": {"text_encoder": "i8", "front": "f16", "voice": "f16"},
                         "session": {},
                     },
-                    "w8": {
+                    "i8": {
                         "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
                         "session": {},
                     },
-                    "w8a8": {
+                    "i8-a8": {
                         "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
-                        "session": {"linearCompute": "i8a8"},
+                        "session": {"linearCompute": "a8"},
+                        "label": "偽のラベル",
+                        "description": "偽の説明。",
                     },
                 },
-                "defaultQuant": "w8a8",
+                "defaultQuant": "i8-a8",
                 "pipelineConfig": {
                     "styles": {"Shout": 2, "Calm": 0, "Whisper": 1},
                     "speakers": {"ZZ9": 0, "ZZ8": 1},
@@ -148,12 +151,12 @@ def _sbv2_manifest() -> dict[str, Any]:
                     "speaker_embeddings": _ref("ZB/speakers/fake_spk.safetensors", 66, "a"),
                 },
                 "quants": {
-                    "w8": {
+                    "i8": {
                         "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
                         "session": {},
                     }
                 },
-                "defaultQuant": "w8",
+                "defaultQuant": "i8",
                 "pipelineConfig": {
                     "styles": {"Flat": 0},
                     "speakers": {"YY1": 0},
@@ -167,7 +170,7 @@ def _sbv2_manifest() -> dict[str, Any]:
 @pytest.fixture
 def sbv2_card() -> str:
     """`fn` プロファイルで描いたカード（manifest 導出の観測はプロファイルに依らない）。"""
-    return render_sbv2_model_card(_sbv2_manifest(), REPO, SBV2_FN_PROFILE)
+    return render_sbv2_model_card(_sbv2_manifest(), REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
 
 
 class TestSbv2Frontmatter:
@@ -219,7 +222,9 @@ class TestSbv2Sections:
 
     def test_it_shows_the_minimal_typescript_entry_point(self, sbv2_card: str) -> None:
         """実在する公開面だけを綴る（`packages/models/mod.ts` の 2 名 + 実シグネチャ）。"""
-        assert f'Sbv2Pipeline.fromPretrained("{REPO}", {{' in sbv2_card
+        assert "Sbv2Pipeline.fromPretrained({" in sbv2_card
+        assert f'  repo: "{REPO}",' in sbv2_card
+        assert '  // revision: "<full commit sha>",' in sbv2_card
         assert "@karume/models" in sbv2_card
         assert "using pipeline" in sbv2_card
         assert "encodeWav(audio.data, audio.sampleRate)" in sbv2_card
@@ -238,18 +243,18 @@ class TestSbv2QuantRounding:
     def test_it_explains_only_the_quants_the_model_declares(self, sbv2_card: str) -> None:
         """配布形が持たない席は説明しない（`_sbv2_knob` と同じ規律）。"""
         notes = self._notes(sbv2_card)
-        assert "- `w8` —" in notes
-        assert "`w8-bert4`" not in notes
-        assert "`w4`" not in notes
+        assert "- `i8` —" in notes
+        assert "`i8+bert4`" not in notes
+        assert "- `i4` —" not in notes
 
     def test_the_default_mark_follows_default_quant(self, sbv2_card: str) -> None:
         """既定マークは manifest 由来 — 備考に焼くと、既定が動いたとき表とだけ食い違う。"""
         assert "(default)" not in self._notes(sbv2_card)
 
         manifest = _sbv2_manifest()
-        manifest["models"]["ZA"]["defaultQuant"] = "w8"
-        moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE)
-        assert "- `w8` (default) —" in self._notes(moved)
+        manifest["models"]["ZA"]["defaultQuant"] = "i8"
+        moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+        assert "- `i8` (default) —" in self._notes(moved)
 
 
 class TestSbv2Derivation:
@@ -275,7 +280,7 @@ class TestSbv2Derivation:
     def test_it_takes_the_sizes_from_the_manifest(self, sbv2_card: str) -> None:
         manifest = _sbv2_manifest()
         manifest["models"]["ZA"]["weights"]["text_encoder"]["i8"]["shards"][0]["size"] = 12345
-        moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE)
+        moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         assert "555 B" in sbv2_card
         assert "555 B" not in moved
         assert "12,345 B" in moved
@@ -290,7 +295,7 @@ class TestSbv2Derivation:
         """並べ替えを挟まない — manifest の並びを変えると表の並びも変わる。"""
 
         def style_rows(manifest: dict[str, Any]) -> list[str]:
-            card = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE)
+            card = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
             head, _, rest = card.partition("### Styles")
             assert head  # 節が消えたら以下の抽出が無意味になる
             return [line for line in rest.splitlines() if line.startswith("| `")]
@@ -318,7 +323,7 @@ class TestSbv2Derivation:
         del manifest["models"]["ZB"]
         manifest["models"]["ZA"]["pipelineConfig"]["styles"] = {"Angry": 0}
         manifest["models"]["ZA"]["pipelineConfig"]["defaults"]["style"] = "Angry"
-        card = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE)
+        card = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         assert "| `Angry` | 0 |" in card
         for gone in ("Shout", "Calm", "Whisper"):
             assert gone not in card, gone
@@ -339,8 +344,18 @@ class TestSbv2Derivation:
         rows = [line for line in rest.partition("### Styles")[0].splitlines()]
         default = [line for line in rows if "(default)" in line]
         assert len(default) == 1
-        assert default[0].startswith("| `w8a8` (default) |")
-        assert "| `f16` | `text_encoder` = `i8` / `front` = `f16` / `voice` = `f16` | — |" in rows
+        assert default[0].startswith("| `i8-a8` (default) |")
+        assert (
+            "| `f16` | — | `text_encoder` = `i8` / `front` = `f16` / `voice` = `f16` | — |" in rows
+        )
+
+    def test_it_prints_the_presentation_fields_the_manifest_carries(self, sbv2_card: str) -> None:
+        """表示欄はカードにも同じ文字列で出る（ADR 0075 決定 5）。"""
+        assert "**偽のラベル** — 偽の説明。" in sbv2_card
+
+    def test_it_explains_the_abbreviation_the_seat_names_use(self, sbv2_card: str) -> None:
+        """略称の対応は**必ず**出す（ADR 0074 決定 4）— `bert4` がどの部品の話か読めるように。"""
+        assert "In a quant name, `bert` is the `text_encoder` component." in sbv2_card
 
     def test_it_takes_every_default_knob_from_the_pipeline_config(self, sbv2_card: str) -> None:
         for line in (
@@ -368,7 +383,7 @@ class TestSbv2Derivation:
         列挙も追従する）。
         """
         assert '  // model: "ZA", // default — available: ZA / ZB' in sbv2_card
-        assert '  // quant: "w8a8", // default — available: f16 / w8 / w8a8' in sbv2_card
+        assert '  // quant: "i8-a8", // default — available: f16 / i8 / i8-a8' in sbv2_card
         assert '  // style: "Whisper", // default — available: Calm / Shout / Whisper' in sbv2_card
         assert '  // speaker: "ZZ8", // default — available: ZZ8 / ZZ9' in sbv2_card
 
@@ -389,7 +404,9 @@ class TestSbv2Derivation:
         """`defaults` に無いノブは綴らない（`### Defaults` と同じ判断 — 値を捏造しない）。"""
         manifest = _sbv2_manifest()
         manifest["defaultModel"] = "ZB"  # noiseScaleW 等を持たないモデル
-        usage = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE).partition("## Usage")[2]
+        usage = render_sbv2_model_card(
+            manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS
+        ).partition("## Usage")[2]
         snippet = usage.partition("## Model:")[0]
         assert "  // lengthScale: 1.0, //" in snippet
         for absent in ("styleWeight", "sdpRatio", "noiseScale"):
@@ -398,16 +415,21 @@ class TestSbv2Derivation:
 
 class TestSbv2Determinism:
     def test_it_renders_the_same_bytes_for_the_same_manifest(self) -> None:
-        first = render_sbv2_model_card(_sbv2_manifest(), REPO, SBV2_FN_PROFILE)
+        first = render_sbv2_model_card(
+            _sbv2_manifest(), REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS
+        )
         second = render_sbv2_model_card(
-            json.loads(json.dumps(_sbv2_manifest())), REPO, SBV2_FN_PROFILE
+            json.loads(json.dumps(_sbv2_manifest())),
+            REPO,
+            SBV2_FN_PROFILE,
+            SBV2_QUANT_ABBREVIATIONS,
         )
         assert first.encode("utf-8") == second.encode("utf-8")
 
     def test_it_does_not_mutate_the_manifest(self) -> None:
         manifest = _sbv2_manifest()
         before = copy.deepcopy(manifest)
-        render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE)
+        render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         assert manifest == before
 
 
@@ -416,21 +438,23 @@ class TestSbv2PipelineGate:
         manifest = _sbv2_manifest()
         manifest["models"]["ZA"]["pipeline"] = SIGLIP2_SUPPORTED_PIPELINE
         with pytest.raises(ValueError, match=SIGLIP2_SUPPORTED_PIPELINE):
-            render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE)
+            render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
 
     def test_the_two_templates_do_not_answer_for_each_other(self) -> None:
         """テンプレートは pipeline 固有 — 取り違えると「表は合うが説明が別モデル」になる。"""
         with pytest.raises(ValueError, match=SBV2_SUPPORTED_PIPELINE):
             render_siglip2_model_card(_sbv2_manifest(), REPO)
         with pytest.raises(ValueError, match=SIGLIP2_SUPPORTED_PIPELINE):
-            render_sbv2_model_card(_siglip2_manifest(), REPO, SBV2_FN_PROFILE)
+            render_sbv2_model_card(
+                _siglip2_manifest(), REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS
+            )
 
 
 # ---- 帰属プロファイル（fn / jvnv）--------------------------------------
 
 
 def _profile_card(profile: Sbv2CardProfile) -> str:
-    return render_sbv2_model_card(_sbv2_manifest(), REPO, profile)
+    return render_sbv2_model_card(_sbv2_manifest(), REPO, profile, SBV2_QUANT_ABBREVIATIONS)
 
 
 class TestSbv2CardProfiles:
@@ -463,7 +487,7 @@ class TestSbv2CardProfiles:
             "## Model: ZB",
         ]
         assert "| `Whisper` | 1 |" in card
-        assert 'Sbv2Pipeline.fromPretrained("hdae/fake-repo", {' in card
+        assert '  repo: "hdae/fake-repo",' in card
 
     @pytest.mark.parametrize("name", sorted(SBV2_CARD_PROFILES))
     def test_every_profile_titles_the_card_after_its_own_family(self, name: str) -> None:
@@ -533,13 +557,15 @@ class TestSbv2CardProfiles:
     @pytest.mark.parametrize("name", sorted(SBV2_CARD_PROFILES))
     def test_every_profile_renders_the_same_bytes_for_the_same_manifest(self, name: str) -> None:
         profile = SBV2_CARD_PROFILES[name]
-        first = render_sbv2_model_card(_sbv2_manifest(), REPO, profile)
-        second = render_sbv2_model_card(json.loads(json.dumps(_sbv2_manifest())), REPO, profile)
+        first = render_sbv2_model_card(_sbv2_manifest(), REPO, profile, SBV2_QUANT_ABBREVIATIONS)
+        second = render_sbv2_model_card(
+            json.loads(json.dumps(_sbv2_manifest())), REPO, profile, SBV2_QUANT_ABBREVIATIONS
+        )
         assert first.encode("utf-8") == second.encode("utf-8")
 
     @pytest.mark.parametrize("name", sorted(SBV2_CARD_PROFILES))
     def test_no_profile_mutates_the_manifest(self, name: str) -> None:
         manifest = _sbv2_manifest()
         before = copy.deepcopy(manifest)
-        render_sbv2_model_card(manifest, REPO, SBV2_CARD_PROFILES[name])
+        render_sbv2_model_card(manifest, REPO, SBV2_CARD_PROFILES[name], SBV2_QUANT_ABBREVIATIONS)
         assert manifest == before

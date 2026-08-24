@@ -39,7 +39,7 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
         --guidance-scale 1.0 --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-f16
 
-`--act-quant` は **w8a8**（`SessionOptions.linearCompute: "i8a8"`）の鏡像で、DiT の適格
+`--act-quant` は **w8a8**（`SessionOptions.linearCompute: "a8"`）の鏡像で、DiT の適格
 `nn.Linear` の入力を per-token i8 へ fake-quant してから参照を採る（数値仕様の正本は
 `karume.act_quant`）。重み側の i8 と対なので `--dtype i8` との併用を強制する:
 
@@ -462,7 +462,7 @@ def main() -> None:
         "--act-quant",
         action="store_true",
         help="DiT の適格 linear の入力を per-token i8 へ fake-quant する"
-        "（ランタイムの linearCompute:'i8a8' の鏡像 — 重み側は --dtype i8 と併用する）",
+        "（ランタイムの linearCompute:'a8' の鏡像 — 重み側は --dtype i8 と併用する）",
     )
     args = parser.parse_args()
     try:
@@ -505,7 +505,7 @@ def main() -> None:
 
     proj, model = timesteps_proj_table(args.repo, sigmas, args.dtype, args.lora, args.lora_scale)
     tensors["timesteps_proj"] = proj
-    # w8a8（`SessionOptions.linearCompute: "i8a8"`）の鏡像。**DiT だけ**に掛ける — ランタイム
+    # w8a8（`SessionOptions.linearCompute: "a8"`）の鏡像。**DiT だけ**に掛ける — ランタイム
     # 側も transformer の Session にしかノブを立てないので、text / VAE まで掛けると参照だけが
     # 別のモデルの数になる（`_fake_quant` の COMPONENT_DTYPES と同じ規律）。
     act_handles: list[object] = []

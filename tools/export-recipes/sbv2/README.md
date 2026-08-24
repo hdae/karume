@@ -129,7 +129,7 @@ else in per-channel i8 exactly as in the i8 series. A conv1d is eligible when `g
 its flattened row length `Cin·K` is a multiple of 32; depthwise convs, `ConvTranspose1d`
 (`dec`'s `ups` — transposed layout, permuted pack not worth 2.6MiB), and weights with indivisible
 rows stay i8, so a single-dtype i4 series cannot exist. Only `front` and `voice` are worth
-writing — they are the seats of the distribution's `w4` quant, and no other consumer reads this
+writing — they are the seats of the distribution's `i4` quant, and no other consumer reads this
 series.
 
 | Target  | i8 storage   | i4 storage   | i4 tensors (linear + conv1d) | Elements rounded to i4 |

@@ -13,12 +13,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
     default_model,
     files,
+    from_pretrained,
     frontmatter,
     model_sections,
     models,
@@ -252,10 +254,14 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "```ts",
         'import { AnimaPipeline, encodePng } from "jsr:@karume/models";',
         "",
-        f'using pipeline = await AnimaPipeline.fromPretrained("{repo}", {{',
-        f'  // model: "{model_name}", // default — available: {model_names}',
-        f'  // quant: "{quant}", // default — available: {quant_names}',
-        "});",
+        *from_pretrained(
+            "AnimaPipeline",
+            repo,
+            [
+                f'  // model: "{model_name}", // default — available: {model_names}',
+                f'  // quant: "{quant}", // default — available: {quant_names}',
+            ],
+        ),
         "",
         "const image = await pipeline.generate({",
         '  prompt: "1girl, solo, long hair, blue eyes, school uniform, masterpiece",',
@@ -409,8 +415,14 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def render_model_card(manifest: Mapping[str, Any], repo: str) -> str:
-    """Anima Turbo 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+def render_model_card(
+    manifest: Mapping[str, Any], repo: str, abbreviations: Mapping[str, str]
+) -> str:
+    """Anima Turbo 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+
+    `abbreviations` は席名の部品上書きトークンの対応表（正本は `anima.distribution` —
+    ADR 0074 決定 4）。manifest に無い事実なので、定数として写さず引数で受ける。
+    """
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (
@@ -425,12 +437,17 @@ def render_model_card(manifest: Mapping[str, Any], repo: str) -> str:
             models(manifest),
             [""],
             _usage(manifest, repo),
-            *model_sections(manifest, (files, quants, _defaults)),
+            *model_sections(
+                manifest,
+                (files, partial(quants, abbreviations=abbreviations), _defaults),
+            ),
         )
     )
 
 
-def render_base_card(manifest: Mapping[str, Any], repo: str) -> str:
+def render_base_card(
+    manifest: Mapping[str, Any], repo: str, abbreviations: Mapping[str, str]
+) -> str:
     """素の base 系（LoRA 無し + 第三者 fine-tune）配布形の `README.md` 本文。"""
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
@@ -446,6 +463,9 @@ def render_base_card(manifest: Mapping[str, Any], repo: str) -> str:
             models(manifest),
             [""],
             _usage(manifest, repo),
-            *model_sections(manifest, (files, quants, _defaults)),
+            *model_sections(
+                manifest,
+                (files, partial(quants, abbreviations=abbreviations), _defaults),
+            ),
         )
     )

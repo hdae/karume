@@ -27,7 +27,7 @@ io のテンソルキー規約は tiny golden と同じ（`input.<グラフ入�
 f16 化と一体で決める話 — タスク #30 の領分）。
 
 `--dtype i4` も同じ理由で**別系列**（`outputs/series/deberta-i4/`）で、中身は**混成**
-（`nn.Linear` / `nn.Embedding` = i4 group32・残り = i8）。SBV2 配布形では `w8-bert4` quant の
+（`nn.Linear` / `nn.Embedding` = i4 group32・残り = i8）。SBV2 配布形では `i8+bert4` quant の
 `text_encoder` 席に入る（`sbv2/distribution.py`）。i4 の実行経路は linear / embedding の
 重みスロット限定（ADR 0069 決定 5）なので、単一 dtype の i4 系列は原理的に作れない。
 
@@ -37,7 +37,7 @@ i4 系列の encoder linear は **GPTQ 校正付きで丸める**（既定 — p
 構築経路**（{@link build_graph_inputs}）で通したもの。校正の失敗は fail loudly で、素の RTN へ
 黙って落ちる分岐は持たない（「校正付きのつもりで校正なしを配った」は資産から読めない）。
 
-`--act-quant` は w8a8（`SessionOptions.linearCompute: "i8a8"`）の torch 鏡像で、適格
+`--act-quant` は w8a8（`SessionOptions.linearCompute: "a8"`）の torch 鏡像で、適格
 `nn.Linear` の入力を per-token i8 へ落とした期待値を **`io-i8a8.<case>.safetensors`** という
 別 prefix で追加で書く。**通常の golden io はフックなしで採る** MUST — フックを掛けたまま
 `io.<case>` を書くと w8（f32 計算）E2E の期待値が活性量子化ごと汚染され、緑のまま検出力
@@ -619,7 +619,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--act-quant",
         action="store_true",
         help="適格 linear の入力を per-token i8 へ fake-quant した鏡像 io を追加で書く"
-        "（ランタイムの linearCompute:'i8a8' の鏡像 — 重み側は --dtype i8 と併用する）",
+        "（ランタイムの linearCompute:'a8' の鏡像 — 重み側は --dtype i8 と併用する）",
     )
     parser.add_argument(
         "--layers",

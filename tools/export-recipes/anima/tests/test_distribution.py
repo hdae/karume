@@ -24,6 +24,7 @@ import pytest
 from anima.card import ATTRIBUTION_NOTICE, LORA_NAME, LORA_SHA256, LORA_SOURCE
 from anima.distribution import (
     ANIMA_DEFAULT_QUANT,
+    ANIMA_QUANT_ABBREVIATIONS,
     ANIMA_QUANTS,
     ANIMA_STORAGE_FORBIDDEN,
     ANIMA_TURBO_MODEL_NAME,
@@ -56,6 +57,7 @@ from karume.dist import (
     DistError,
     assemble_family,
     assert_model_name,
+    assert_quant_presentation,
     materialize,
     resolve_card_renderer,
     verify_dist,
@@ -405,8 +407,8 @@ class TestBaseModels:
 
         entry = manifest["models"]["anima-v1.0"]
         assert sorted(entry["weights"]["transformer"]) == ["f16", "i4", "i8"]
-        assert entry["quants"]["w4"]["weights"]["transformer"] == "i4"
-        assert entry["quants"]["w4-a8-s16"]["weights"]["transformer"] == "i4"
+        assert entry["quants"]["f16+dit4"]["weights"]["transformer"] == "i4"
+        assert entry["quants"]["f16+dit4-attn8-s16"]["weights"]["transformer"] == "i4"
         assert (out_dir / "anima-v1.0" / OUTPUT_PATHS["transformer_i4"]).exists()
 
     def test_a_plain_model_requires_a_calibrated_i4_series(self, tmp_path: Path) -> None:
@@ -546,7 +548,7 @@ class TestCalibProvenance:
 
         manifest = _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
-        assert "w4" in manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]
+        assert "f16+dit4" in manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]
 
     def test_it_stops_when_the_calibration_ran_on_a_smaller_budget(self, tmp_path: Path) -> None:
         """`--calib-prompts 1` は `method` を `gptq` のまま残す — 予算欄まで見ないと通る。
@@ -629,7 +631,8 @@ class TestStorageGate:
         """逆向きの取り違え（i4 系列 → i8 席）— 存在検査だけでは**素通りする**。
 
         i4 系列は混成で既定格納が i8 なので必ず I8 を含み、「I8 を含む」を満たしてしまう。
-        既定 quant `w8a8-s16` が i4 常駐を掴むと、`c285f97` 以降の i8a8 の述語は i4 も受ける
+        既定 quant `f16+dit8-a8-attn8-s16` が i4 常駐を掴むと、`c285f97` 以降の `a8` の述語は
+        i4 も受ける
         （ADR 0076）ので fail loudly せず w4a8 の数値契約で走る — ADR 0076 決定 6 が席に
         載せないと決めた構成が既定席で沈黙して出る。禁止表（`ANIMA_STORAGE_FORBIDDEN`）が
         唯一の検出器。
@@ -775,11 +778,40 @@ class TestManifest:
                 assert label in model["weights"][weight]
 
 
-class TestI4Quants:
-    """i4 常駐の 2 席（`w4` = 格納だけ / `w4-a8-s16` = **低 VRAM 席**）。
+class TestQuantNaming:
+    """席名は ADR 0074 の文法（`<格納>[+<部品><ビット>]…[-<ノブ>]…`）と表示欄（ADR 0075）。"""
 
-    波 J-4a の視認裁定で `w4-a8-s16` を採用済み（既定は `w8a8-s16` 据え置き）。
-    位置づけの正本は `distribution.py` の `ANIMA_QUANTS` 直上コメント。
+    def test_every_seat_starts_from_the_shared_base_storage(self) -> None:
+        """Anima の基底格納は `f16` — text 経路 3 役が f16 固定なので、圧縮は `+dit…` で綴る。
+
+        `<格納>` を字句どおり全役割共通の基底に取る規則（ADR 0074 決定 1・決定 6）が破れると、
+        席名が「transformer の格納だけ」を名乗る旧綴りへ戻る。
+        """
+        assert all(name.startswith("f16") for name in ANIMA_QUANTS), sorted(ANIMA_QUANTS)
+
+    def test_the_component_override_token_spells_the_transformer(self) -> None:
+        """略称は recipe が定める（ADR 0074 決定 4）— 対応はカードにも出る。"""
+        assert ANIMA_QUANT_ABBREVIATIONS == {"dit": "transformer"}
+        assert set(ANIMA_QUANT_ABBREVIATIONS.values()) <= set(ANIMA_WEIGHTS)
+
+    def test_every_seat_carries_a_label_and_a_description_within_the_limits(self) -> None:
+        """表示欄は optional だが、Anima は 8 席とも書く（選択 UI に出す family なので）。"""
+        for name, quant in ANIMA_QUANTS.items():
+            assert quant["label"] and quant["description"], name
+            assert_quant_presentation(f"anima.quants.{name}", quant)
+
+    def test_no_description_repeats_which_seat_is_the_default(self) -> None:
+        """既定は `defaultQuant` が指している（ADR 0075 決定 3）— 散文に書くと二重持ちになる。"""
+        for name, quant in ANIMA_QUANTS.items():
+            assert "default" not in quant["description"].lower(), name
+
+
+class TestI4Quants:
+    """i4 常駐の 2 席（`f16+dit4` = 格納だけ / `f16+dit4-attn8-s16` = **低 VRAM 席**）。
+
+    波 J-4a の視認裁定で `f16+dit4-attn8-s16` を採用済み（既定は
+    `f16+dit8-a8-attn8-s16` 据え置き）。位置づけの正本は `distribution.py` の
+    `ANIMA_QUANTS` 直上コメント。
     """
 
     @staticmethod
@@ -791,31 +823,31 @@ class TestI4Quants:
         }
 
     def test_it_declares_exactly_the_two_i4_seats(self) -> None:
-        assert sorted(self._i4_seats()) == ["w4", "w4-a8-s16"]
+        assert sorted(self._i4_seats()) == ["f16+dit4", "f16+dit4-attn8-s16"]
 
     def test_the_plain_seat_leaves_the_session_untouched(self) -> None:
-        """`w4` は格納だけを動かす席（計算経路は f32 のまま）。"""
-        assert ANIMA_QUANTS["w4"]["session"] == {}
+        """`f16+dit4` は格納だけを動かす席（計算経路は f32 のまま）。"""
+        assert ANIMA_QUANTS["f16+dit4"]["session"] == {}
 
     def test_the_attention_seat_declares_only_the_attention_knobs(self) -> None:
-        assert ANIMA_QUANTS["w4-a8-s16"]["session"] == {
-            "attentionCompute": "i8a8",
+        assert ANIMA_QUANTS["f16+dit4-attn8-s16"]["session"] == {
+            "attentionCompute": "a8",
             "attentionScoreStorage": "f16",
         }
 
     def test_no_i4_seat_declares_linear_compute(self) -> None:
         """MUST: i4 席に `linearCompute` を宣言しない。**この不変条件の理由は 2026-08-21 に
-        入れ替わっている** — 旧: 「i8a8 の述語が i8 常駐を要求するので宣言しても効かない」/
+        入れ替わっている** — 旧: 「`a8` の述語が i8 常駐を要求するので宣言しても効かない」/
         新: w4a8（ADR 0076）で効くようになったが、**掛けると画の細部が荒れる**という視認裁定
         （research 2026-08-21 §6）。速度は戻る（1,640 → 955 ms/step）が、この席は
-        サイズ・VRAM のための席で、速度が要るなら既定の `w8a8-s16` が上。
+        サイズ・VRAM のための席で、速度が要るなら既定の `f16+dit8-a8-attn8-s16` が上。
         """
         for name, quant in self._i4_seats().items():
             assert "linearCompute" not in quant["session"], name
 
     def test_the_default_quant_stays_on_the_i8_seat(self) -> None:
         """席が増えても既定は動かさない（既定の変更は品質裁定を要する別の判断）。"""
-        assert ANIMA_DEFAULT_QUANT == "w8a8-s16"
+        assert ANIMA_DEFAULT_QUANT == "f16+dit8-a8-attn8-s16"
 
     def test_the_seats_reach_the_manifest_with_their_session_knobs(self, assembled) -> None:
         """表に足しただけで配布形へ出ること（quant 表は manifest 由来 — ADR 0041 §3）。"""
@@ -1210,7 +1242,7 @@ class TestModelCard:
     def test_it_names_the_repository_after_the_assembled_directory(self, tmp_path: Path) -> None:
         """ファミリーリポの ID は pipeline の定数にできない — 組み立て先から引く。"""
         card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert 'fromPretrained("hdae/dist"' in card
+        assert '  repo: "hdae/dist",' in card
 
     def test_it_leaves_the_tree_verifiable_after_writing_the_card(self, tmp_path: Path) -> None:
         out_dir = self._run(tmp_path)

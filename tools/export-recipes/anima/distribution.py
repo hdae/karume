@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -162,49 +163,95 @@ OUTPUT_PATHS: Mapping[str, str] = {
     "tokenizer_2": "tokenizer_2/t5-tokenizer.json",
 }
 
+#: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4 — **略称の定義は recipe が
+#: 持ち、生成モデルカードの quant 表に対応を必ず出す**）。Anima の基底格納は `f16`（text 経路
+#: 3 役が f16 固定）で、圧縮が掛かるのは transformer だけなので席名は `f16+dit<ビット>` になる。
+ANIMA_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": "transformer"}
+
 #: quant 表（v1 の `presets` — ADR 0041 §3 で改名）。`session` の語彙は manifest 所有。
-#: **dtype ラベルが 1 つしかない weights は書かない** — {@link complete_quant_weights} が
-#: 完全写像へ埋める（写せば済む席を quant の数だけ複製しない）。
+#: 席名は ADR 0074 の文法 `<格納>[+<部品><ビット>]…[-<ノブ>]…` で、`<格納>` は**全役割に共通の
+#: 基底格納**（Anima は f16）。**dtype ラベルが 1 つしかない weights は書かない** —
+#: {@link complete_quant_weights} が完全写像へ埋める（写せば済む席を quant の数だけ複製しない）。
+#:
+#: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。
+#: 席の実態（格納・ノブ・嬉しさ）から書く: id は機械の都合で、人が読むのはこの 2 欄という
+#: 役割分担を取る。既定であることは書かない（`defaultQuant` が既に指している — ADR 0075 決定 3）。
 ANIMA_QUANTS: Mapping[str, Any] = {
-    "f16": {"weights": {"transformer": "f16"}, "session": {}},
-    "i8": {"weights": {"transformer": "i8"}, "session": {}},
-    "w8a8": {"weights": {"transformer": "i8"}, "session": {"linearCompute": "i8a8"}},
-    "w8a8-a8": {
-        "weights": {"transformer": "i8"},
-        "session": {"linearCompute": "i8a8", "attentionCompute": "i8a8"},
+    "f16": {
+        "weights": {"transformer": "f16"},
+        "session": {},
+        "label": "Full quality (f16)",
+        "description": "Transformer in f16 storage with f32 compute — the largest download,"
+        " and the reference the other quants here are judged against.",
     },
-    "w8a8-s16": {
+    "f16+dit8": {
+        "weights": {"transformer": "i8"},
+        "session": {},
+        "label": "Half size (int8 transformer)",
+        "description": "Transformer stored as int8 and computed in f32: roughly half its f16"
+        " download, with the execution path left unchanged.",
+    },
+    "f16+dit8-a8": {
+        "weights": {"transformer": "i8"},
+        "session": {"linearCompute": "a8"},
+        "label": "Half size, int8 linear",
+        "description": "The int8 transformer with per-token int8 activations in its linear"
+        " layers — faster on GPUs with dp4a, same download.",
+    },
+    "f16+dit8-a8-attn8": {
+        "weights": {"transformer": "i8"},
+        "session": {"linearCompute": "a8", "attentionCompute": "a8"},
+        "label": "Half size, int8 linear and attention",
+        "description": "Adds int8 activations inside attention on top of the int8 linear path;"
+        " same weights, one more integer stage per step.",
+    },
+    "f16+dit8-a8-attn8-s16": {
         "weights": {"transformer": "i8"},
         "session": {
-            "linearCompute": "i8a8",
-            "attentionCompute": "i8a8",
+            "linearCompute": "a8",
+            "attentionCompute": "a8",
             "attentionScoreStorage": "f16",
         },
+        "label": "Balanced (int8)",
+        "description": "The int8 linear and attention path with attention scores held in f16 —"
+        " the fastest of the int8 seats here, at f16-level image quality.",
     },
     # i4 常駐の 2 席（波 J-4a — 低 VRAM 席）。
     #
     # MUST: **`linearCompute` を宣言しない**。**理由は 2026-08-21 に入れ替わった**ので注意 —
-    # 以前は「i8a8 の述語が i8 常駐を必要条件に含むので宣言しても 1 バイトも変わらない嘘の席に
+    # 以前は「a8 の述語が i8 常駐を必要条件に含むので宣言しても 1 バイトも変わらない嘘の席に
     # なる」だったが、w4a8 の実装（ADR 0076）で i4 常駐も整数内積の経路に乗るようになった。
     # 今の理由は**品質**: 宣言すると linear の活性が per-token i8 になり、実 GPU の画で
     # 「細部に破綻・線がラフ」というユーザー視認裁定が出た（2026-08-21・研究記録
     # `docs/research/2026-08-21-anima-i4-seat-speed.md` §6）。速度は 1,640 → 955 ms/step と
     # 大きく戻るが、この席の存在理由は**サイズと VRAM** であって速度ではない（速度が要るなら
-    # 既定の `w8a8-s16` が 823 ms/step で上）。attention 側の 2 つは重みスロットを見ないので
-    # i4 常駐でもそのまま効き、視認でも劣化は出ていないので宣言する。
-    "w4": {"weights": {"transformer": "i4"}, "session": {}},
-    "w4-a8-s16": {
+    # 既定の `f16+dit8-a8-attn8-s16` が 823 ms/step で上）。attention 側の 2 つは重みスロットを
+    # 見ないので i4 常駐でもそのまま効き、視認でも劣化は出ていないので宣言する。
+    "f16+dit4": {
         "weights": {"transformer": "i4"},
-        "session": {"attentionCompute": "i8a8", "attentionScoreStorage": "f16"},
+        "session": {},
+        "label": "Smallest (int4 transformer)",
+        "description": "Transformer weights in GPTQ-calibrated int4 (group-32) with f32 compute —"
+        " the smallest download and the least resident memory.",
+    },
+    "f16+dit4-attn8-s16": {
+        "weights": {"transformer": "i4"},
+        "session": {"attentionCompute": "a8", "attentionScoreStorage": "f16"},
+        "label": "Smallest, int8 attention",
+        "description": "The int4 transformer with int8 activations and f16 scores in attention:"
+        " the low-memory seat, without slowing down as much as plain int4.",
     },
     "f16-c16": {
         "weights": {"transformer": "f16"},
         "session": {"linearCompute": "f16", "attentionCompute": "f16"},
         "gpuFeatures": {"shaderF16": True},
+        "label": "Full quality, f16 compute",
+        "description": "f16 storage computed in f16 throughout. Needs the shader-f16 GPU feature,"
+        " and trades numerical headroom for speed.",
     },
 }
 
-ANIMA_DEFAULT_QUANT = "w8a8-s16"
+ANIMA_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
 
 #: パイプライン所有の設定（hub は素通し — ADR 0041 §2）。値は移行元の実装定数と一致する:
 #: `shift` / `numTrainTimesteps` は sampler の `ANIMA_SHIFT` / `ANIMA_NUM_TRAIN_TIMESTEPS`
@@ -274,10 +321,10 @@ STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: 存在検査だけでは**圧縮席どうしの取り違え**が素通りする — i4 系列は混成で、既定格納が i8
 #: （`anima/export.py` の `BASE_WEIGHT_DTYPES`）なので **必ず I8 を含む**。したがって i4 系列を
 #: `transformer_i8` へ挿し込む取り違えは「I8 を含む」を満たしてしまい、組み立ても verify_dist も
-#: ロードも通る。実害は既定 quant `w8a8-s16` に出る: 宣言した `linearCompute: "i8a8"` の述語は
-#: `c285f97` 以降 i4 常駐も受ける（ADR 0076）ので、常駐が i4 だと fail loudly せず **w4a8 の
-#: 数値契約**（group 部分縮約）で走る — ADR 0076 決定 6 が「画が荒れるので席に載せない」と
-#: 決めた構成が、席名 `w8a8-s16` のまま既定席で沈黙して出る。
+#: ロードも通る。実害は既定 quant `f16+dit8-a8-attn8-s16` に出る: 宣言した `linearCompute: "a8"`
+#: の述語は `c285f97` 以降 i4 常駐も受ける（ADR 0076）ので、常駐が i4 だと fail loudly せず
+#: **w4a8 の数値契約**（group 部分縮約）で走る — ADR 0076 決定 6 が「画が荒れるので席に載せない」
+#: と決めた構成が、席名が int8 を名乗ったまま既定席で沈黙して出る。
 #: MUST: 禁止は**役割ごとに集合**で持つ（1 つだけだと 4 本目の系列が生えた日に、名指ししなかった
 #: ほうが黙って素通りする — irodori と同じ規律）。f16 席は I8 / I4 の不在で二重に締まる。
 ANIMA_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
@@ -634,7 +681,9 @@ TURBO_PIPELINE = Pipeline(
     repo_name=_repo_name,
     plan=lambda series_dir, model: anima_dist_plan(series_dir, model, TURBO_MODELS),
     # 帰属は 1 通りだけ（LoRA を焼いた base 1 本）— 選択肢が無いので省略で通る。
-    card_profiles={"anima-turbo": render_model_card},
+    card_profiles={
+        "anima-turbo": partial(render_model_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)
+    },
     # 上流ライセンスの再配布条件（§3）は配布リポ 1 つに掛かるので、読みも組み立ての回数に
     # よらず**ここで 1 回**。
     root_files=root_files(TURBO_NOTICE_MARKDOWN),
@@ -648,6 +697,6 @@ BASE_PIPELINE = Pipeline(
     default_model=ANIMA_BASE_MODEL_NAME,
     repo_name=_repo_name,
     plan=lambda series_dir, model: anima_dist_plan(series_dir, model, BASE_MODELS),
-    card_profiles={"anima": render_base_card},
+    card_profiles={"anima": partial(render_base_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)},
     root_files=root_files(BASE_NOTICE_MARKDOWN),
 )

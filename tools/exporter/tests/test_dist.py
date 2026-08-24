@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -28,24 +29,30 @@ from karume.artifacts import SUPERSEDED_SUFFIX
 from karume.dist import (
     MANIFEST_FILENAME,
     MANIFEST_FORMAT,
+    MAX_QUANT_DESCRIPTION_CHARS,
+    MAX_QUANT_LABEL_CHARS,
     MAX_SHARDS,
     PIPELINES,
     SHARED_DIRNAME,
     Artifact,
     DistError,
+    ExternalComponents,
     ModelPlan,
     Pipeline,
     WeightFiles,
     assemble_family,
     assert_manifest_limits,
     assert_model_name,
+    assert_quant_presentation,
     build_parser,
     complete_quant_weights,
+    is_external_ref,
     main,
     manifest_text,
     materialize,
     preprocessor_channels,
     resolve_card_renderer,
+    resolve_external_components,
     verify_dist,
 )
 
@@ -125,12 +132,12 @@ class TestQuantCompletion:
         quants = {
             "w8a8": {
                 "weights": {"front": "i8"},
-                "session": {"linearCompute": "i8a8"},
+                "session": {"linearCompute": "a8"},
                 "gpuFeatures": {"shaderF16": True},
             }
         }
         completed = complete_quant_weights(self._weights, quants)
-        assert completed["w8a8"]["session"] == {"linearCompute": "i8a8"}
+        assert completed["w8a8"]["session"] == {"linearCompute": "a8"}
         assert completed["w8a8"]["gpuFeatures"] == {"shaderF16": True}
 
     def test_it_refuses_to_pick_a_dtype_when_the_weights_offer_a_choice(self) -> None:
@@ -189,7 +196,7 @@ class TestManifestLimits:
 
 
 class TestShardDeclaration:
-    """`karume/3` の weights は dtype ごとに **shard 列**を持つ（ADR 0070 決定 1 の欄）。
+    """`karume/4` の weights は dtype ごとに **shard 列**を持つ（ADR 0070 決定 1 の欄）。
 
     exporter は分割規則を持たない（{@link WeightFiles}）ので、書く列は常に 1 要素 —
     `karume_ir` を持つコンテナそのもの = 先頭のグラフ shard。
@@ -210,9 +217,14 @@ class TestShardDeclaration:
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
-    def test_the_format_identifier_names_the_third_manifest_version(self) -> None:
-        """形式識別子は hub と 1 文字も違えられない（hub は 1 形しか読まない）。"""
-        assert MANIFEST_FORMAT == "karume/3"
+    def test_the_format_identifier_names_the_fourth_manifest_version(self) -> None:
+        """形式識別子は hub と 1 文字も違えられない（hub は 1 形しか読まない）。
+
+        `karume/4` は quant の表示欄（ADR 0075 決定 1）を足した形 — 欄は optional でも hub の
+        allowlist が未知キーを拒否するので、major を上げずに足すと旧クライアントが黙って
+        読めなくなる（ADR 0075 決定 4）。
+        """
+        assert MANIFEST_FORMAT == "karume/4"
 
     def test_it_declares_the_container_as_a_one_element_shard_list(self, tmp_path: Path) -> None:
         out_dir, manifest = self._assemble(tmp_path)
@@ -328,6 +340,54 @@ class TestPlanGates:
         assert not out_dir.exists()
 
 
+class TestQuantPresentation:
+    """quant の表示欄（ADR 0075 決定 1 の `label` / `description`）— optional・上限つき 1 行。
+
+    hub は「manifest は外部入力」の前提で同じ境界検査を持つ（決定 2）ので、緩いまま焼くと
+    「組み上がったのに読めない配布形」ができる。
+    """
+
+    def test_a_seat_may_leave_both_fields_out(self) -> None:
+        assert_quant_presentation("m.quants.f16", {"weights": {}, "session": {}})
+
+    @pytest.mark.parametrize(
+        ("key", "limit"),
+        [("label", MAX_QUANT_LABEL_CHARS), ("description", MAX_QUANT_DESCRIPTION_CHARS)],
+    )
+    def test_it_accepts_the_longest_value_the_hub_reads(self, key: str, limit: int) -> None:
+        assert_quant_presentation("m.quants.f16", {key: "x" * limit})
+
+    @pytest.mark.parametrize(
+        ("key", "limit"),
+        [("label", MAX_QUANT_LABEL_CHARS), ("description", MAX_QUANT_DESCRIPTION_CHARS)],
+    )
+    def test_it_refuses_one_character_beyond_the_limit(self, key: str, limit: int) -> None:
+        with pytest.raises(DistError, match=f"{limit} を超えた"):
+            assert_quant_presentation("m.quants.f16", {key: "x" * (limit + 1)})
+
+    @pytest.mark.parametrize("value", ["", "   ", 42, ["a label"]])
+    def test_it_refuses_a_value_that_is_not_a_non_empty_string(self, value: Any) -> None:
+        with pytest.raises(DistError, match="非空の文字列でない"):
+            assert_quant_presentation("m.quants.f16", {"label": value})
+
+    def test_it_refuses_a_description_that_spans_two_lines(self) -> None:
+        """1 行の説明 — 選択 UI の 1 行にもカードの表の 1 セルにも改行は入れられない。"""
+        with pytest.raises(DistError, match="1 行でない"):
+            assert_quant_presentation("m.quants.f16", {"description": "first\nsecond"})
+
+    def test_the_plan_gate_catches_it_before_writing_anything(self, tmp_path: Path) -> None:
+        """計画段の門（ADR 0041 §7 の規模上限と同じ席）— 数 GB を並べてから落とさない。"""
+        plan = _synthetic_plan("A", "w/model.safetensors", b"weights")
+        oversized = {
+            "f16": {**plan.quants["f16"], "label": "x" * (MAX_QUANT_LABEL_CHARS + 1)},
+        }
+        out_dir = tmp_path / "models" / "loud"
+
+        with pytest.raises(DistError, match=r"A\.quants\.f16\.label"):
+            assemble_family([replace(plan, quants=oversized)], out_dir, "A")
+        assert not out_dir.exists()
+
+
 class TestManifestJsonLiterals:
     """manifest に載る綴りは**標準 JSON だけ** — hub の読み口はブラウザの `JSON.parse`。
 
@@ -341,7 +401,7 @@ class TestManifestJsonLiterals:
             manifest_text({"format": MANIFEST_FORMAT, "models": {"a": {"scale": float("inf")}}})
 
     def test_it_writes_a_finite_manifest_with_a_trailing_newline(self) -> None:
-        assert manifest_text({"format": MANIFEST_FORMAT}).endswith('"karume/3"\n}\n')
+        assert manifest_text({"format": MANIFEST_FORMAT}).endswith('"karume/4"\n}\n')
 
     @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
     def test_it_refuses_a_non_finite_preprocessor_channel(self, bad: float) -> None:
@@ -703,6 +763,213 @@ class TestAtomicReplacement:
 
         assert self._snapshot(out_dir) == before
         assert self._siblings(out_dir) == []
+
+
+class TestExternalComponents:
+    """越境コンポーネント参照（ADR 0038 §7 の `repo` / `revision` 席）— **opt-in**。
+
+    用途は「同じバイト列を 2 つのリポへ二重に上げない」こと 1 つで、指定が無ければ配布形は
+    完全に自己完結のまま（{@link test_a_plain_assembly_stays_self_contained}）。
+    """
+
+    _SHARED = b"text-encoder-bytes"
+    _OWN = b"transformer-bytes"
+    _REVISION = "0123456789abcdef0123456789abcdef01234567"
+
+    def _plan(self, name: str) -> ModelPlan:
+        """2 役のモデル（片方は他リポと同一バイト・片方はこのリポ固有）。"""
+        return ModelPlan(
+            name=name,
+            pipeline="anima/1",
+            artifacts={
+                "text_encoder": Artifact("text_encoder/model.safetensors", payload=self._SHARED),
+                "transformer": Artifact("transformer/model.safetensors", payload=self._OWN),
+            },
+            weights={
+                "text_encoder": {"f16": WeightFiles("text_encoder")},
+                "transformer": {"f16": WeightFiles("transformer")},
+            },
+            assets={},
+            quants={
+                "f16": {"weights": {"text_encoder": "f16", "transformer": "f16"}, "session": {}}
+            },
+            default_quant="f16",
+            pipeline_config={},
+        )
+
+    def _source_dist(self, tmp_path: Path) -> Path:
+        """参照元（既に組み上がっている別リポの配布形）。"""
+        source = tmp_path / "models" / "karume-source"
+        assemble_family([self._plan("source")], source, "source")
+        return source
+
+    def _components(self, source: Path, **overrides: Any) -> ExternalComponents:
+        return ExternalComponents(
+            **{
+                "repo": "hdae/karume-source",
+                "revision": self._REVISION,
+                "dist": source,
+                "model": "source",
+                "roles": ("text_encoder",),
+                **overrides,
+            }
+        )
+
+    def test_a_plain_assembly_stays_self_contained(self, tmp_path: Path) -> None:
+        """指定なしの組み立ては 1 バイトも変わらない — 参照は 1 つも生えず現物が全部揃う。"""
+        out_dir = tmp_path / "models" / "karume-plain"
+        manifest = assemble_family([self._plan("plain")], out_dir, "plain")
+
+        assert not any(is_external_ref(ref) for _, ref in dist._declared_refs(manifest))
+        assert sorted(verify_dist(out_dir)) == [
+            "plain/text_encoder/model.safetensors",
+            "plain/transformer/model.safetensors",
+        ]
+
+    def test_it_declares_the_named_role_as_a_pinned_reference(self, tmp_path: Path) -> None:
+        source = self._source_dist(tmp_path)
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        manifest = assemble_family(
+            [self._plan("borrower")],
+            out_dir,
+            "borrower",
+            external=self._components(source),
+        )
+
+        entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
+        assert entry["shards"] == [
+            {
+                "repo": "hdae/karume-source",
+                "revision": self._REVISION,
+                "path": "source/text_encoder/model.safetensors",
+                "size": len(self._SHARED),
+                "sha256": hashlib.sha256(self._SHARED).hexdigest(),
+            }
+        ]
+
+    def test_the_referenced_bytes_are_not_stored_here_a_second_time(self, tmp_path: Path) -> None:
+        """参照の存在理由そのもの — 置いた上で参照を書くと利得がゼロになる。"""
+        source = self._source_dist(tmp_path)
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        assemble_family(
+            [self._plan("borrower")], out_dir, "borrower", external=self._components(source)
+        )
+
+        assert not (out_dir / "borrower" / "text_encoder").exists()
+        # 越境参照は実在検査の対象外で、自リポ固有の役割だけが現物として残る。
+        assert sorted(verify_dist(out_dir)) == ["borrower/transformer/model.safetensors"]
+
+    @pytest.mark.parametrize("revision", ["main", "v0.4.3", "0123456789abcdef", "A" * 40, "0" * 41])
+    def test_it_refuses_a_revision_that_is_not_a_full_commit_sha(
+        self, tmp_path: Path, revision: str
+    ) -> None:
+        """ブランチ名やタグは pin にならない — 指し先が動けば size / sha256 と現物が食い違う。"""
+        with pytest.raises(DistError, match="40 桁の commit sha でない"):
+            self._components(tmp_path, revision=revision)
+
+    def test_it_refuses_a_role_the_source_distribution_does_not_declare(
+        self, tmp_path: Path
+    ) -> None:
+        """参照先に無いものは参照できない（**指定した役割**が向こうで欠けている形）。"""
+        source = tmp_path / "models" / "karume-source"
+        # 参照元は `transformer` しか持たない配布形。
+        assemble_family(
+            [_synthetic_plan("source", "transformer/model.safetensors", self._OWN)],
+            source,
+            "source",
+        )
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        with pytest.raises(DistError, match="役割 'text_encoder' のファイルが参照元"):
+            assemble_family(
+                [self._plan("borrower")], out_dir, "borrower", external=self._components(source)
+            )
+        assert not out_dir.exists()
+
+    def test_it_refuses_a_reference_whose_bytes_differ_from_the_local_ones(
+        self, tmp_path: Path
+    ) -> None:
+        """中身違いの参照は「別のモデルの重み」を自分のものとして配る形になる。
+
+        shape も manifest も正しいままなので、突き合わせをここで切ると沈黙する。
+        """
+        source = tmp_path / "models" / "karume-source"
+        other = replace(
+            self._plan("source"),
+            artifacts={
+                "text_encoder": Artifact("text_encoder/model.safetensors", payload=b"other-bytes!"),
+                "transformer": Artifact("transformer/model.safetensors", payload=self._OWN),
+            },
+        )
+        assemble_family([other], source, "source")
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        with pytest.raises(DistError, match="自分で組むバイト列と違う"):
+            assemble_family(
+                [self._plan("borrower")], out_dir, "borrower", external=self._components(source)
+            )
+        assert not out_dir.exists()
+
+    def test_it_refuses_to_apply_one_reference_to_a_whole_family(self, tmp_path: Path) -> None:
+        """役割名はモデルを跨いで同じ綴りなので、一括で掛けると指し先が曖昧になる。"""
+        source = self._source_dist(tmp_path)
+        out_dir = tmp_path / "models" / "karume-family"
+
+        with pytest.raises(DistError, match="1 モデルの組み立てにだけ許す"):
+            assemble_family(
+                [self._plan("A"), self._plan("B")],
+                out_dir,
+                "A",
+                external=self._components(source),
+            )
+        assert not out_dir.exists()
+
+    def test_the_cli_stays_inert_until_every_flag_is_given(self, tmp_path: Path) -> None:
+        """部分指定を黙って無視すると、参照するつもりの組み立てが自己完結形で静かに出来上がる。"""
+        assert (
+            resolve_external_components(repo=None, revision=None, dist=None, model=None, roles=None)
+            is None
+        )
+        with pytest.raises(DistError, match="--ref-model, --ref-revision, --ref-role"):
+            resolve_external_components(
+                repo="hdae/karume-source", revision=None, dist=tmp_path, model=None, roles=None
+            )
+
+    def test_the_cli_wires_the_five_flags_through(self, tmp_path: Path) -> None:
+        """`main` 経由の一本通し（合成 pipeline は 1 役 `w` の計画を返す）。"""
+        source = tmp_path / "models" / "karume-source"
+        assemble_family([_synthetic_plan("m", "w/model.safetensors", b"w")], source, "m")
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        main(
+            [
+                "--pipeline",
+                "solo",
+                "--series",
+                str(tmp_path),
+                "--out",
+                str(out_dir),
+                "--ref-repo",
+                "hdae/karume-source",
+                "--ref-revision",
+                self._REVISION,
+                "--ref-dist",
+                str(source),
+                "--ref-model",
+                "m",
+                "--ref-role",
+                "w",
+            ],
+            pipelines=_CALLER_REGISTRY,
+        )
+
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        ref = manifest["models"]["m"]["weights"]["w"]["f16"]["shards"][0]
+        assert ref["repo"] == "hdae/karume-source"
+        assert ref["path"] == "m/w/model.safetensors"
+        assert verify_dist(out_dir) == {}
 
 
 #: 帰属が 1 通りだけの合成 pipeline（実在 family の代わりに「表の形」だけを持つ被験体）。

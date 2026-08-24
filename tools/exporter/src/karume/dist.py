@@ -1,7 +1,7 @@
 """配布ディレクトリの組み立て — 系列ディレクトリ群 → HF へそのまま上げられる 1 リポ形。
 
 仕様の正本は ADR 0041（`docs/decisions/0041-manifest-v2.md`）。ここが作るのは §2 の形で
-並んだファイル群と、それを宣言する `karume.json`（`karume/3`）、そして manifest から機械導出
+並んだファイル群と、それを宣言する `karume.json`（`karume/4`）、そして manifest から機械導出
 したモデルカード `README.md`（ADR 0037 §3 の「そのまま HF リポとして上げられる形」）。
 
 **リポ内レイアウトは一律「モデル別サブツリー + `shared/` + 直下 `karume.json` / `README.md`」**
@@ -83,10 +83,15 @@ from karume.modelcard import HF_OWNER
 #: manifest のファイル名（ADR 0041 §1 — リポジトリ直下の固定名）。
 MANIFEST_FILENAME = "karume.json"
 
-#: manifest の形式識別子（ADR 0041 §1 — hub は 1 形しか読まない）。`karume/3` は weights の
-#: dtype エントリを **shard 列**（`{shards, extras?}`）にした形で、単一ファイルの資産は
-#: 1 要素の列として宣言される（ADR 0070 決定 1 の shard 欄の確定）。
-MANIFEST_FORMAT = "karume/3"
+#: manifest の形式識別子（ADR 0041 §1 — hub は 1 形しか読まない）。`karume/4` は quant エントリ
+#: へ表示欄（`label` / `description` — ADR 0075 決定 1）を足した形。weights の dtype エントリが
+#: **shard 列**（`{shards, extras?}`）である点は `karume/3`（ADR 0070 決定 1）から変わらず、
+#: 単一ファイルの資産は 1 要素の列として宣言される。
+#:
+#: MUST: 表示欄は optional でも**後方互換ではない** — hub の quant パーサは未知キーを fail
+#: loudly で拒否するので、欄を足した manifest は旧クライアントから読めない（ADR 0075 決定 4 —
+#: 黙って読めない形にせず major で断絶を宣言する）。
+MANIFEST_FORMAT = "karume/4"
 
 #: モデルカードのファイル名（ADR 0037 §3 — HF が frontmatter を読む固定名）。
 MODEL_CARD_FILENAME = "README.md"
@@ -114,12 +119,35 @@ MAX_MODELS = 32
 MAX_WEIGHTS = 32
 MAX_ASSETS = 32
 MAX_QUANTS = 32
-#: 1 dtype エントリが並べられる shard 数（`karume/3`）。exporter は分割規則を持たない
+#: 1 dtype エントリが並べられる shard 数（`karume/3` 以降）。exporter は分割規則を持たない
 #: （常に 1 要素を書く）が、検査は hub と同じ値で弾く — {@link verify_dist} は手元のどの
-#: 配布形にも掛けられる門なので、上限を知らない検査になっていると v3 の受理集合が 2 つに割れる。
+#: 配布形にも掛けられる門なので、上限を知らない検査になっていると受理集合が 2 つに割れる。
 MAX_SHARDS = 1024
 MAX_PIPELINE_CONFIG_BYTES = 256 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
+
+#: quant の表示欄（ADR 0075 決定 1）の文字数上限。`label` は選択肢に出す短い表示名、
+#: `description` は 1 行の説明で、どちらも optional。hub は同じ値で境界検査するので
+#: （manifest は外部入力 — ADR 0075 決定 2）、他の上限と同じく**焼く側で先に落とす**。
+MAX_QUANT_LABEL_CHARS = 64
+MAX_QUANT_DESCRIPTION_CHARS = 200
+
+#: 表示欄の席と上限（{@link assert_quant_presentation} が引く 1 箇所）。
+QUANT_PRESENTATION_LIMITS: Mapping[str, int] = {
+    "label": MAX_QUANT_LABEL_CHARS,
+    "description": MAX_QUANT_DESCRIPTION_CHARS,
+}
+
+#: 越境コンポーネント参照（ADR 0038 §7 の optional `repo` / `revision` 席）の revision の綴り
+#: — HF の**完全な commit sha**（40 桁 hex 小文字）。ブランチ名やタグは指し先が動くので
+#: pin にならない（{@link ExternalComponents}）。
+REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+#: 同・参照先リポの綴り（`<owner>/<name>` — hub の path 検査と同じ文字集合）。
+REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+#: 越境参照のファイル参照が持つ欄（3 点セット + 出所 2 席）。
+EXTERNAL_REF_KEYS = frozenset({"repo", "revision", "path", "size", "sha256"})
 
 #: モデル名の許可文字。モデル名は manifest のキーであると同時に**リポ内のディレクトリ名**
 #: なので、hub の path セグメント検査（ADR 0041 §6）と同じ集合に縛る。
@@ -339,7 +367,7 @@ def preprocessor_channels(
 
 @dataclass(frozen=True)
 class WeightFiles:
-    """weights の 1 dtype ぶん（`karume/3` の `{shards, extras?}`）。中身は**役割名**。
+    """weights の 1 dtype ぶん（`karume/3` 以降の `{shards, extras?}`）。中身は**役割名**。
 
     実 path は {@link Artifact} 側が持つ — 共有の畳み込みで path が `shared/…` へ動くので、
     宣言側が path を直に握っていると 2 箇所が独立に動く。
@@ -608,24 +636,48 @@ def _model_entry(plan: ModelPlan, refs: Mapping[str, dict[str, Any]]) -> dict:
     }
 
 
+def assert_quant_presentation(where: str, quant: Mapping[str, Any]) -> None:
+    """quant の表示欄（ADR 0075 決定 1 の `label` / `description`）の形と上限を落とす。
+
+    どちらも optional（設定の無い席は呼び手が id をそのまま出す）だが、**書いたなら 1 行の
+    非空文字列で上限以内**であることを要求する。hub は同じ境界検査を持つので、緩いまま配ると
+    「焼けたのに読めない manifest」になる。改行を弾くのは `description` が 1 行の説明だから
+    （選択 UI の 1 行にも、モデルカードの表の 1 セルにも改行は入れられない）。
+    """
+    for key, limit in QUANT_PRESENTATION_LIMITS.items():
+        value = quant.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise DistError(f"{where}.{key} が非空の文字列でない（{value!r}）")
+        if "\n" in value:
+            raise DistError(f"{where}.{key} が 1 行でない（改行を含む）: {value!r}")
+        if len(value) > limit:
+            raise DistError(f"{where}.{key} が {len(value)} 字で上限 {limit} を超えた")
+
+
 def _assert_model_scale(
     name: str,
     *,
     weights: int,
     assets: int,
-    quants: int,
+    quants: Mapping[str, Any],
     pipeline_config: Mapping[str, Any],
 ) -> None:
-    """1 モデルぶんの規模上限（ADR 0041 §7）。件数だけを受けるのは、同じ規則を計画
-    （{@link ModelPlan}）と manifest の両方から掛けるため — 上限の綴りは 1 箇所に置く。
+    """1 モデルぶんの規模上限（ADR 0041 §7）と quant の表示欄（ADR 0075 決定 1）。
+
+    件数以外に `quants` の中身まで受けるのは表示欄の上限を見るため。同じ規則を計画
+    （{@link ModelPlan}）と manifest の両方から掛けるので、上限の綴りは 1 箇所に置く。
     """
     for key, count, limit in (
         ("weights", weights, MAX_WEIGHTS),
         ("assets", assets, MAX_ASSETS),
-        ("quants", quants, MAX_QUANTS),
+        ("quants", len(quants), MAX_QUANTS),
     ):
         if count > limit:
             raise DistError(f"{name}.{key} が {count} 件で上限 {limit} を超えた")
+    for quant_name, quant in quants.items():
+        assert_quant_presentation(f"{name}.quants.{quant_name}", quant)
     config_bytes = len(json.dumps(dict(pipeline_config), ensure_ascii=False).encode("utf-8"))
     if config_bytes > MAX_PIPELINE_CONFIG_BYTES:
         raise DistError(
@@ -647,7 +699,7 @@ def assert_plan_limits(plans: Sequence[ModelPlan]) -> None:
             plan.name,
             weights=len(plan.weights),
             assets=len(plan.assets),
-            quants=len(plan.quants),
+            quants=plan.quants,
             pipeline_config=plan.pipeline_config,
         )
 
@@ -691,7 +743,7 @@ def assert_manifest_limits(manifest: Mapping[str, Any]) -> None:
             name,
             weights=len(model["weights"]),
             assets=len(model["assets"]),
-            quants=len(model["quants"]),
+            quants=model["quants"],
             pipeline_config=model["pipelineConfig"],
         )
     total = len(manifest_text(manifest).encode("utf-8"))
@@ -712,12 +764,18 @@ def manifest_text(manifest: Mapping[str, Any]) -> str:
 
 
 def _materialize_family(
-    plans: Sequence[ModelPlan], out_dir: Path, default_model: str
+    plans: Sequence[ModelPlan],
+    out_dir: Path,
+    default_model: str,
+    external: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     """検査済みの計画群を `out_dir` へ並べ、`karume.json` を書いて manifest を返す。
 
     ① 共有席を決める（{@link _plan_shared} — 出所の sha256 だけを見る）→ ② 共有席は
     `shared/` へ 1 回だけ・残りは各モデルのサブツリーへ置く → ③ 現物から manifest。
+
+    `external`（役割名 → 越境参照）に載った役割は**自リポへ置かない** — 参照にする意味が
+    「同じバイト列を 2 つのリポへ上げない」ことなので、置いた上で参照を書くと利得がゼロになる。
 
     MUST: 共有の判定は**置く前**に済ませる — 全モデルへ複製してから畳み直す形は、共有 1 本
     （サイズ S・M モデル）につき「複製 M 回 + hash M 回 + 移動 1 回」で ~3MS の論理 I/O を
@@ -747,6 +805,8 @@ def _materialize_family(
             folded[member] = target
     for plan in plans:
         for role, artifact in plan.artifacts.items():
+            if role in external:
+                continue
             target = folded.get((plan.name, role))
             if target is not None:
                 placed[(plan.name, role)] = target
@@ -760,6 +820,10 @@ def _materialize_family(
     for plan in plans:
         refs = {}
         for role in plan.artifacts:
+            reference = external.get(role)
+            if reference is not None:
+                refs[role] = dict(reference)
+                continue
             rel_path = placed[(plan.name, role)]
             refs[role] = file_ref(out_dir, rel_path, digests[rel_path])
         models[plan.name] = _model_entry(plan, refs)
@@ -780,6 +844,7 @@ def assemble_family(
     default_model: str,
     render_card: Callable[[Mapping[str, Any]], str] | None = None,
     root_files: Mapping[str, str] | None = None,
+    external: ExternalComponents | None = None,
 ) -> dict[str, Any]:
     """計画済みのモデル群を 1 リポへ組み立て、`out_dir` をその形へ**丸ごと差し替える**。
 
@@ -800,8 +865,13 @@ def assemble_family(
     宣言する資産ではない（どのモデルにも属さず、配布リポそのものに掛かる）。`karume.json` /
     `README.md` と同じく {@link verify_dist} の宣言外ファイル検査の例外側に居る。
 
+    `external`（{@link ExternalComponents}）を渡すと、指名された役割だけが**別リポの pin 済み
+    revision への参照**として宣言され、自リポには置かれない（ADR 0038 §7）。渡さない組み立ては
+    完全に自己完結で、1 バイトも変わらない。
+
     MUST: `plans` 全体に掛かる検査は**最初の 1 バイトを書く前**に全部済ませる（staging すら
-    作らない）— 途中で落ちると数 GB を並べ直すことになる。
+    作らない）— 途中で落ちると数 GB を並べ直すことになる。越境参照の解決（参照元 manifest の
+    読み・現物の hash）も同じ理由でここに置く。
     """
     if not plans:
         raise DistError("組み立てるモデルが 1 つも無い")
@@ -814,10 +884,20 @@ def assemble_family(
     assert_plan_limits(plans)
     assert_plan_sources(plans)
     assert_root_files(root_files or {})
+    # MUST: 越境参照は**単一モデルの組み立てだけ**に許す — 役割名はモデルを跨いで同じ綴りな
+    # ので、複数モデルへ一括で掛けると「どのモデルの席をどこへ向けるか」が曖昧なまま全モデル
+    # の同名役割が 1 つの参照先を指す（別モデルの重みを黙って配る形）。実需は release 時の
+    # 単一リポ焼きだけなので、曖昧さを許さずここで落とす。
+    if external is not None and len(plans) != 1:
+        raise DistError(
+            f"越境参照は 1 モデルの組み立てにだけ許す（対象 {names} は {len(plans)} モデル）"
+            " — 役割名はモデルを跨いで同じ綴りなので、一括で掛けると指し先が曖昧になる"
+        )
+    references = external_refs(external, plans[0]) if external is not None else {}
 
     try:
         with staged_publication(out_dir) as staging:
-            manifest = _materialize_family(plans, staging, default_model)
+            manifest = _materialize_family(plans, staging, default_model, references)
             # 法的テキストは検証の**前**に置く — 例外側に居ることを組み立てのたびに
             # {@link verify_dist} で通しておかないと、例外が外れた回に据わってから気づく。
             for name, text in (root_files or {}).items():
@@ -847,8 +927,17 @@ def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[s
             yield f"models.{model_name}.assets.{name}", ref
 
 
+def is_external_ref(ref: Mapping[str, Any]) -> bool:
+    """別リポを指すファイル参照か（ADR 0038 §7 の `repo` / `revision` 席を持つ形）。
+
+    自リポの 3 点セットと**同じ場所に並ぶ別の形**なので、判別子は欄の有無で持つ
+    （{@link ExternalComponents}）。手元の現物と突き合わせる層は全部この判別で外す。
+    """
+    return "repo" in ref
+
+
 def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
-    """`karume/3` の構造整合（hub のパーサが受理する形かを焼いた側でも見る）。
+    """`karume/4` の構造整合（hub のパーサが受理する形かを焼いた側でも見る）。
 
     ここが見るのは**この配布形が自分で閉じているか**だけ — `defaultModel` / `defaultQuant` の
     指し先、quant の weights 完全写像、weights の shard 列、そしてレイアウト（ADR 0041 §9）。
@@ -902,6 +991,11 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
                     )
     allowed_roots = set(models) | {SHARED_DIRNAME}
     for where, ref in _declared_refs(manifest):
+        if is_external_ref(ref):
+            # 越境参照の path は**参照先リポのレイアウト**なので、こちらの root 集合には
+            # 収まらない（形だけを見る）。
+            assert_external_ref(where, ref)
+            continue
         root = ref["path"].split("/")[0]
         if root not in allowed_roots:
             raise DistError(
@@ -911,14 +1005,21 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
 
 
 def _declared_sizes(manifest: Mapping[str, Any]) -> dict[str, int]:
-    """manifest が参照する全ファイルの `{path: size}`。重複 path は 3 点セットの一致を要求する。
+    """manifest が参照する**自リポの**全ファイルの `{path: size}`。重複 path は 3 点セットの
+    一致を要求する。
 
     同一 path の重複参照はモデル間の共有そのもの（ADR 0041 §5）なので合法だが、`{size, sha256}`
     が食い違えば取得層のキャッシュが振動する — hub と同じ規則をここでも落とす。
+
+    越境参照（{@link is_external_ref}）は**外す** — 手元に無いのが正しいファイルなので、
+    実在検査にも宣言外ファイル検査にも掛けない（path 空間も参照先リポのもので、こちらの
+    path とは別の名前空間）。
     """
     sizes: dict[str, int] = {}
     seen: dict[str, Mapping[str, Any]] = {}
     for where, ref in _declared_refs(manifest):
+        if is_external_ref(ref):
+            continue
         previous = seen.get(ref["path"])
         if previous is not None and (
             previous["size"] != ref["size"] or previous["sha256"] != ref["sha256"]
@@ -944,6 +1045,10 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
     宣言する資産ではない。それ以外は従来どおり fail loudly（前回の組み立ての残骸や `io.*` の
     混入を後段へ見せない）。例外を名前でなく相対 path で持つのは共通で、下位ディレクトリに
     紛れ込んだ同名ファイルは従来どおり落ちる。
+
+    越境参照（{@link ExternalComponents}）のファイルは**このリポに無いのが正しい**ので
+    実在検査の対象にならない（{@link _declared_sizes} が外す）。形の検査だけは
+    {@link _assert_manifest_shape} が {@link assert_external_ref} で掛ける。
     """
     manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     _assert_manifest_shape(manifest)
@@ -965,6 +1070,165 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
     if extra:
         raise DistError(f"manifest が宣言していないファイルが混ざっている: {', '.join(extra)}")
     return declared
+
+
+# ---- ②' 越境コンポーネント参照（別リポの pin 済み revision を指す席） ----------
+
+
+@dataclass(frozen=True)
+class ExternalComponents:
+    """指定した役割を、自リポへ格納する代わりに**別リポの pin 済み revision への参照**として
+    宣言する opt-in（ADR 0038 §7 の optional `repo` / `revision` 席）。
+
+    用途は「同じバイト列を 2 つのリポへ二重に上げない」こと 1 つだけ — 例えば turbo リポの
+    text encoder は素版リポのものとバイト単位で同一なので、参照にすれば数 GB の再アップロード
+    が要らなくなる。**指定が無ければ配布形は完全に自己完結**（既定の組み立ては 1 バイトも
+    変わらない）。
+
+    MUST: `revision` は **40 桁の commit sha**（{@link REVISION_RE}）。ブランチ名やタグを許すと
+    指し先が後から動き、こちらが宣言した `size` / `sha256` と現物が食い違う — 参照の側は
+    「不変のバイト列を指す」ことが成立条件そのものなので、pin でない綴りは受理しない。
+
+    MUST: `size` / `sha256` は**ローカルの参照元 dist の実ファイル**から採る
+    （{@link external_refs}）— 参照元の `karume.json` の値を写すと、表と現物が食い違う失敗様式が
+    そのまま越境で復活する（manifest を導出物にした意味が消える）。
+
+    `dist` / `model` は参照元の配布形（既に組み上がっているもの）とその中のモデル名。参照先の
+    path はリポごとのレイアウト（モデル別サブツリー / `shared/`）で決まるので、こちら側の
+    相対 path からは導けない — 参照元の `karume.json` が宣言している path を引く。
+    """
+
+    #: 参照先の HF リポジトリ（`<owner>/<name>`）。
+    repo: str
+    #: 参照先の commit sha（40 桁 hex）。
+    revision: str
+    #: ローカルに組み上がっている参照元の配布形（`size` / `sha256` の出所）。
+    dist: Path
+    #: 参照元 dist の中のモデル名（同じ相対 path をどのモデルの席から採るか）。
+    model: str
+    #: 参照へ差し替える役割名。
+    roles: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not REPO_RE.match(self.repo):
+            raise DistError(f"越境参照の repo '{self.repo}' が '<owner>/<name>' の形でない")
+        if not REVISION_RE.match(self.revision):
+            raise DistError(
+                f"越境参照の revision '{self.revision}' が 40 桁の commit sha でない"
+                " — ブランチ名やタグは pin にならない（指し先が動くと宣言と現物が食い違う）"
+            )
+        assert_model_name(self.model)
+        if not self.roles:
+            raise DistError("越境参照する役割が 1 つも無い")
+
+
+def assert_external_ref(where: str, ref: Mapping[str, Any]) -> None:
+    """越境参照 1 つの形（欄の集合・repo の綴り・40 桁 hex の revision・path の収まり）。"""
+    if set(ref) != set(EXTERNAL_REF_KEYS):
+        raise DistError(
+            f"{where}: 越境参照の欄が {sorted(EXTERNAL_REF_KEYS)} でない（実際: {sorted(ref)}）"
+        )
+    if not REPO_RE.match(str(ref["repo"])):
+        raise DistError(f"{where}: repo '{ref['repo']}' が '<owner>/<name>' の形でない")
+    if not REVISION_RE.match(str(ref["revision"])):
+        raise DistError(
+            f"{where}: revision '{ref['revision']}' が 40 桁の commit sha でない"
+            " — 参照は不変のバイト列を指すのが成立条件"
+        )
+    assert_rel_path(str(ref["path"]), where)
+
+
+def external_refs(components: ExternalComponents, plan: ModelPlan) -> dict[str, dict[str, Any]]:
+    """役割名 → 越境ファイル参照 `{repo, revision, path, size, sha256}`。
+
+    参照先の path は**参照元 dist の `karume.json` が宣言している path**から引く（モデル別
+    サブツリーか `shared/` かは向こうの組み立てが決めた事実で、こちらからは導けない）。
+    宣言に無い役割は fail loudly — 参照先に無いものは参照できない。
+
+    MUST: 宣言と現物の突合を越境でも切らさない。`size` / `sha256` はローカルの実ファイルから
+    採り、さらに**自分で組むはずだったバイト列と一致すること**まで確かめる — 一致しない参照は
+    「別のモデルの重みを自分のものとして配る」形になり、shape も manifest も正しいまま沈黙する。
+
+    NOTE: 参照元の参照（多段）は辿らない。{@link _declared_sizes} が越境参照を外すので、
+    参照元がさらに別リポを指している席はここで「宣言に無い」として落ちる。
+    """
+    manifest_path = components.dist / MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        raise DistError(f"越境参照の参照元に {MANIFEST_FILENAME} が無い: {manifest_path}")
+    declared = set(_declared_sizes(json.loads(manifest_path.read_text(encoding="utf-8"))))
+    memo: dict[Path, str] = {}
+    refs: dict[str, dict[str, Any]] = {}
+    for role in components.roles:
+        artifact = plan.artifacts.get(role)
+        if artifact is None:
+            raise DistError(
+                f"越境参照が知らない役割を指している: '{role}'"
+                f"（このモデルの役割: {sorted(plan.artifacts)}）"
+            )
+        seats = [
+            f"{components.model}/{artifact.rel_path}",
+            f"{SHARED_DIRNAME}/{artifact.rel_path}",
+        ]
+        found = [seat for seat in seats if seat in declared]
+        if not found:
+            raise DistError(
+                f"役割 '{role}' のファイルが参照元 {components.dist} に無い"
+                f"（{MANIFEST_FILENAME} は {seats} のどちらも宣言していない）"
+                " — 参照先に無いものは参照できない"
+            )
+        source = components.dist / found[0]
+        if not source.is_file():
+            raise DistError(f"参照元が宣言するファイルの現物が無い: {source}")
+        digest = sha256_file(source)
+        local = _source_digest(artifact, memo)
+        if digest != local:
+            raise DistError(
+                f"役割 '{role}' の参照先が自分で組むバイト列と違う: {source} は {digest}、"
+                f"{artifact.rel_path} の出所は {local}"
+                " — 中身の違う参照は「別のモデルの重み」を自分のものとして配る形になる"
+            )
+        refs[role] = {
+            "repo": components.repo,
+            "revision": components.revision,
+            "path": found[0],
+            "size": source.stat().st_size,
+            "sha256": digest,
+        }
+    return refs
+
+
+def resolve_external_components(
+    *,
+    repo: str | None,
+    revision: str | None,
+    dist: Path | None,
+    model: str | None,
+    roles: Sequence[str] | None,
+) -> ExternalComponents | None:
+    """CLI の 5 指定を {@link ExternalComponents} へ解決する（1 つも無ければ `None`）。
+
+    MUST: **全部揃うか 1 つも無いか**の 2 通りだけ。部分指定を黙って無視すると、参照するつもり
+    の組み立てが自己完結の配布形として静かに出来上がる（数 GB を上げ直してから気づく）。
+    """
+    given = {
+        "--ref-repo": repo,
+        "--ref-revision": revision,
+        "--ref-dist": dist,
+        "--ref-model": model,
+        "--ref-role": roles,
+    }
+    if all(value is None for value in given.values()):
+        return None
+    missing = sorted(name for name, value in given.items() if value is None)
+    if missing:
+        raise DistError(
+            f"越境参照は 5 つの指定が揃って初めて成立する（足りない: {', '.join(missing)}）"
+        )
+    assert repo is not None and revision is not None  # missing が空 = 全部揃っている
+    assert dist is not None and model is not None and roles is not None
+    return ExternalComponents(
+        repo=repo, revision=revision, dist=dist, model=model, roles=tuple(roles)
+    )
 
 
 # ---- ③ pipeline 別ディスパッチと CLI -----------------------------------------
@@ -1096,6 +1360,44 @@ def build_parser(
         )
         + "）",
     )
+    # 越境参照（ADR 0038 §7）— **5 つ揃って初めて成立する opt-in**（1 つも無ければ従来どおり
+    # 完全自己完結の配布形になる。部分指定は {@link resolve_external_components} が落とす）。
+    parser.add_argument(
+        "--ref-repo",
+        dest="ref_repo",
+        metavar="OWNER/NAME",
+        default=None,
+        help="越境参照する HF リポジトリ（指名した役割を自リポへ格納せずここへ向ける）",
+    )
+    parser.add_argument(
+        "--ref-revision",
+        dest="ref_revision",
+        metavar="SHA",
+        default=None,
+        help="同・参照先の commit sha（40 桁 hex — ブランチ名やタグは pin にならないので不可）",
+    )
+    parser.add_argument(
+        "--ref-dist",
+        dest="ref_dist",
+        type=Path,
+        default=None,
+        help="同・ローカルに組み上がっている参照元の配布形（size / sha256 の出所）",
+    )
+    parser.add_argument(
+        "--ref-model",
+        dest="ref_model",
+        metavar="NAME",
+        default=None,
+        help="同・参照元 dist の中のモデル名",
+    )
+    parser.add_argument(
+        "--ref-role",
+        action="append",
+        dest="ref_roles",
+        metavar="ROLE",
+        default=None,
+        help="同・参照へ差し替える役割名（繰り返し可）",
+    )
     return parser
 
 
@@ -1131,8 +1433,15 @@ def main(
     else:
         raise DistError("--out が要る（配布形の出力先）— 呼び出し側が既定を渡していない")
     # 帰属プロファイルは**組み立ての前**に解決する — 誤った / 足りない指定で数 GB を並べてから
-    # 最後の 1 枚で落ちる形にしない。
+    # 最後の 1 枚で落ちる形にしない。越境参照の指定も同じ理由でここで形だけ確かめる。
     render_card = resolve_card_renderer(pipeline, args.card_profile)
+    external = resolve_external_components(
+        repo=args.ref_repo,
+        revision=args.ref_revision,
+        dist=args.ref_dist,
+        model=args.ref_model,
+        roles=args.ref_roles,
+    )
     # MUST: 全モデルの計画（= 検査と読み取り）を配置の**前**に済ませる — 2 モデル目で落ちる
     # 形でも、1 モデル目だけ入った配布形を後段に見せない。
     plans = [pipeline.plan(args.series, model) for model in models]
@@ -1146,6 +1455,7 @@ def main(
         models[0],
         render_card=partial(render_card, repo=f"{HF_OWNER}/{out_dir.name}"),
         root_files=pipeline.root_files,
+        external=external,
     )
     verified = verify_dist(out_dir)
     for rel_path, size in sorted(verified.items()):
@@ -1154,6 +1464,16 @@ def main(
         meta = out_dir / rel_path
         if meta.is_file():
             print(f"{meta.stat().st_size:>12}  {rel_path}")
+    # 越境参照は手元に現物が無いので `verify_dist` の一覧には出ない — 何を他リポへ預けたかが
+    # 組み立ての出力から読めるように、指し先ごと 1 行で並べる（同じ席を複数の dtype 席が
+    # 指すので path で一意化する）。
+    borrowed = {
+        (ref["repo"], ref["revision"], ref["path"]): ref["size"]
+        for _, ref in _declared_refs(manifest)
+        if is_external_ref(ref)
+    }
+    for repo, revision, rel_path in sorted(borrowed):
+        print(f"{borrowed[(repo, revision, rel_path)]:>12}  {repo}@{revision[:12]} {rel_path}")
     listing = ", ".join(
         f"{name}({model['defaultQuant']})" for name, model in manifest["models"].items()
     )

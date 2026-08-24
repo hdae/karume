@@ -50,7 +50,7 @@ def quantize_rows(x: torch.Tensor) -> torch.Tensor:
 def is_eligible(module: nn.Module) -> bool:
     """ランタイムの適格条件の鏡像（`nn.Linear` で `k % 4 == 0`・bias の有無は問わない）。
 
-    ランタイム側はこれに加えて「重みが i8 で GPU 常駐」を要求する（`linearCompute: "i8a8"`）。
+    ランタイム側はこれに加えて「重みが i8 で GPU 常駐」を要求する（`linearCompute: "a8"`）。
     i8 系列では適格な `nn.Linear` の重みは全て i8 常駐になるので、本数はここの計数と一致する。
     """
     return isinstance(module, nn.Linear) and module.in_features % PACK_ALIGN == 0
