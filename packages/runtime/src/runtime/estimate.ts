@@ -32,6 +32,7 @@ import type { SafetensorsFile } from "../format/safetensors.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { assertGenerationBindings } from "./executor.ts";
+import { aliasesInput } from "./fusion.ts";
 import {
   assertChunkLength,
   LENGTHS_BYTES,
@@ -83,9 +84,9 @@ export type MemoryEstimate = {
    * 中間（transient）slot 表の必要バイト = prepared backing の必要側と同義（**近似**）。
    *
    * 融合前のノード列を宣言順に歩き、実行相と同じ確保規則（exact-size LIFO 再利用・
-   * 消費回数は `countUses`・グラフ出力は pinned で解放しない）で slot 表を再生した総バイト。
-   * 融合が消す中間・行ブロック分割やノード内の一時は勘定に入らない
-   * （{@link MemoryEstimate.unaccounted}）。
+   * 消費回数は `countUses`・グラフ出力は pinned で解放しない・reshape / 恒等 expand の出力は
+   * 確保せず入力の実体を別名で使う）で slot 表を再生した総バイト。融合が消す中間・行ブロック
+   * 分割やノード内の一時は勘定に入らない（{@link MemoryEstimate.unaccounted}）。
    */
   readonly transientBytes: number;
   /** 上記の合計。 */
@@ -111,7 +112,7 @@ export type EstimateOptions = {
  * ように読まれる（ADR 0070 決定 5 が unaccounted 欄を要求した理由そのもの）。
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
-  "融合による中間の別名化・削減と、行ブロック分割の一時（どちらも device limit と融合の成立に依存する）",
+  "融合が畳んで消す中間と、行ブロック分割の一時（どちらも device limit と融合の成立に依存する。reshape / 恒等 expand の別名は勘定に入っている）",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
 ]);
@@ -246,13 +247,6 @@ const weightEstimate = (
   return { compressed, uncompressed, expanded };
 };
 
-/** 生存区間シミュレーション中の 1 値（ノード出力のみが載る）。 */
-type LiveValue = {
-  readonly bytes: number;
-  /** 残りの消費回数（`countUses` の延べ計数から減らす）。 */
-  remaining: number;
-};
-
 /**
  * 中間（transient）slot 表の必要バイト（近似）。融合前のノード列を宣言順に歩き、実行相と
  * **同じ確保規則**を再生する: 解放済み slot の再利用は**サイズクラスの厳密一致だけ**
@@ -265,41 +259,66 @@ type LiveValue = {
  * （8→12→4 バイトの 3 段で 20 vs 24 — 断片化は unaccounted ではなく規則そのもの）。
  * MUST: 数えるのは**ノード出力だけ**。initializer / グラフ入力は重み・io の側で、state
  * スロットは context の側で数えており、ここで重ねると同じバイトが 2 回総計に乗る。
+ * MUST: 簿記の単位は**値名ではなく slot**（`derivePlanSlots` の写し）。reshape / 恒等 expand の
+ * 出力は確保を出さず入力の実体を指すだけなので（別名 — 判定は {@link aliasesInput} の 1 本）、
+ * 名前ごとに独立した生存区間を持たせると ①別名鎖の根が二重に数えられ ②別名越しの消費が
+ * 根へ届かず ③グラフ出力が別名名義のときに根の実体だけプールへ戻る。retain / release は
+ * **根の slot** へ合算する（実行相の「別名でも retain は実バッファに積む」— recipe.ts の
+ * `executeStepRecipe`）。
  */
 const transientSlotBytes = (graph: IrGraph, nodes: readonly NodePlan[]): number => {
   const uses = countUses(graph);
-  const pinned = new Set(graph.outputs);
-  const live = new Map<string, LiveValue>();
-  /** サイズクラス → 解放済み slot の本数（LIFO の中身は数だけで足りる — 取り出しは同サイズ）。 */
-  const pool = new Map<number, number>();
+  const outputNames = new Set(graph.outputs);
+  /** slot 添字 → サイズクラス（`derivePlanSlots` の `bytes` と同じ表）。 */
+  const bytes: number[] = [];
+  /** サイズクラス → 解放済み slot（LIFO — RunArena の `#pool` と同じ形）。 */
+  const pool = new Map<number, number[]>();
+  const refs = new Map<number, number>();
+  const pinned = new Set<number>();
+  /** 値名 → slot。別名は**根の slot**を指し、slot を持たない値（グラフ入力・重み）は載せない。 */
+  const env = new Map<string, number>();
   let total = 0;
-  const alloc = (size: number): void => {
-    const free = pool.get(size) ?? 0;
-    if (free > 0) pool.set(size, free - 1);
-    else total += size;
+
+  const alloc = (byteLength: number): number => {
+    const sizeClass = toSizeClass(byteLength);
+    const reused = pool.get(sizeClass)?.pop();
+    if (reused !== undefined) return reused;
+    bytes.push(sizeClass);
+    total += sizeClass;
+    return bytes.length - 1;
   };
-  const drop = (name: string): void => {
-    const value = live.get(name);
-    if (value === undefined || value.remaining > 0 || pinned.has(name)) return;
-    pool.set(value.bytes, (pool.get(value.bytes) ?? 0) + 1);
-    live.delete(name);
+  const retain = (slot: number | undefined, count: number, isPinned: boolean): void => {
+    if (slot === undefined) return;
+    if (isPinned) pinned.add(slot);
+    refs.set(slot, (refs.get(slot) ?? 0) + count + 1);
   };
+  const release = (slot: number | undefined): void => {
+    if (slot === undefined) return;
+    const left = (refs.get(slot) ?? 0) - 1;
+    if (left < 0) throw new ExecutionError("中間の見積り: 参照カウントが負（消費計数の誤り）");
+    refs.set(slot, left);
+    if (left > 0 || pinned.has(slot)) return;
+    const bucket = pool.get(bytes[slot]);
+    if (bucket === undefined) pool.set(bytes[slot], [slot]);
+    else bucket.push(slot);
+  };
+
   for (const node of nodes) {
-    for (const out of node.outputs) {
+    // MUST: 別名元は入力の先頭（recipe-builder の `#buildStep` が `binds[0]` を指す）。元が
+    // slot を持たない値（グラフ入力・重み）なら、この出力も slot を持たない。
+    const isAlias = aliasesInput(node);
+    const aliasSlot = isAlias ? env.get(node.node.ins[0]) : undefined;
+    const slots = node.outputs.map((out) => {
       // ステップ出力の確保サイズは常に numel×4（recipe-builder の `#buildStep`）。
-      const size = toSizeClass(numel(out.shape) * 4);
-      alloc(size);
-      live.set(out.name, { bytes: size, remaining: uses.get(out.name) ?? 0 });
-    }
-    for (const name of node.node.ins) {
-      const value = live.get(name);
-      // グラフ入力・initializer はプール対象外（ここには載っていない）。
-      if (value === undefined) continue;
-      value.remaining -= 1;
-      drop(name);
-    }
+      const slot = isAlias ? aliasSlot : alloc(numel(out.shape) * 4);
+      retain(slot, uses.get(out.name) ?? 0, outputNames.has(out.name));
+      if (slot === undefined) env.delete(out.name);
+      else env.set(out.name, slot);
+      return slot;
+    });
+    for (const name of node.node.ins) release(env.get(name));
     // 消費者ゼロの中間出力が解放されるのはこの 1 本だけ（実行相の「定義ぶんの解放」と同位置）。
-    for (const out of node.outputs) drop(out.name);
+    for (const slot of slots) release(slot);
   }
   return total;
 };

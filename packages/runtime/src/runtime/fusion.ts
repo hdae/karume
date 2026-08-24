@@ -1232,8 +1232,18 @@ export const FUSION_RULES: readonly FusionRule[] = [
   ROW_BLOCK_ATTENTION_RULE,
 ];
 
-/** 恒等 expand の別名化条件（ADR 0011 の追記）。1 軸でも複製があれば実体化コピーへ戻す。 */
-const aliasesInput = (plan: NodePlan): boolean =>
+/**
+ * 出力を入力バッファの別名にするか（0 dispatch — ADR 0011 とその 2026-08-08 追記）。reshape は
+ * 要素順を変えないので無条件、`expand` は束縛後の入出力 shape が rank を含め完全一致するとき
+ * （= 複製軸を持たない恒等写像）だけ。1 軸でも複製があれば strided 実体化コピーへ戻す。
+ *
+ * MUST: **別名規則の唯一の判定点**。判定は束縛済み shape と契約だけで決まる（device 非依存 =
+ * 実行相と見積り相で必ず同じ答えになる）ので、実行計画（{@link planFusions} →
+ * recipe-builder の `#buildStep`）と必要量 estimator（src/runtime/estimate.ts の
+ * `transientSlotBytes`）はこの 1 本を共有する。書き写すと、片方だけ直された実装に対して
+ * estimator が例外も警告も無く別の中間ピークを主張し続ける（レビュー R6V-2 の実際の姿）。
+ */
+export const aliasesInput = (plan: NodePlan): boolean =>
   plan.contract.kind === "reshape" ||
   (plan.contract.kind === "expand" && sameShape(plan.inputShapes[0], plan.outputs[0].shape));
 

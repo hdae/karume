@@ -12,10 +12,14 @@
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ContainerError, type KarumeModel, openModel } from "../src/format/container.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
+import { numel } from "../src/ops.ts";
 import { createSession } from "../src/runtime/executor.ts";
 import { estimateSessionMemory } from "../src/runtime/estimate.ts";
-import { ExecutionError } from "../src/runtime/plan.ts";
+import { type ExecStep, planFusions } from "../src/runtime/fusion.ts";
+import { countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
+import { derivePlanSlots, type StepOutput, type StepRecipe } from "../src/runtime/recipe.ts";
 import { f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
 import { f16BytesFromBits, f32ToF16Bits } from "./helpers/f16.ts";
 import { fill, graphModelBuffer } from "./helpers/graph.ts";
@@ -524,6 +528,238 @@ Deno.test("slot の再利用はサイズクラスの厳密一致だけ（断片�
     { name: "m.w3", dtype: "F32", shape: [3, 1], data: f32Bytes([1, 1, 1]) },
   ]);
   assertEquals(estimateSessionMemory(model).transientBytes, 24);
+});
+
+// ---------------------------------------------------------------------------
+// 中間ピークの別名（reshape / 恒等 expand — ADR 0011）
+// ---------------------------------------------------------------------------
+
+/**
+ * 別名の鎖（`reshape` → `reshape`）と、鎖の**根**が生きたままの消費。
+ *
+ * `h` は 2 度消費される（鎖の入口と末尾の `add`）ので、実行相では鎖のあいだ根の実体が
+ * プールへ返らない。別名を独立した値として確保すると、この重なりぶんだけ slot が余計に生える。
+ */
+const aliasChainGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["neg", "add", "reshape"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [64] }],
+  outputs: ["y"],
+  initializers: {},
+  values: {
+    h: { dtype: "f32", shape: [64] },
+    r1: { dtype: "f32", shape: [8, 8] },
+    r2: { dtype: "f32", shape: [64] },
+    y: { dtype: "f32", shape: [64] },
+  },
+  nodes: [
+    { op: "neg", ins: ["x"], outs: ["h"], attrs: {} },
+    { op: "reshape", ins: ["h"], outs: ["r1"], attrs: {} },
+    { op: "reshape", ins: ["r1"], outs: ["r2"], attrs: {} },
+    { op: "add", ins: ["h", "r2"], outs: ["y"], attrs: {} },
+  ],
+});
+
+Deno.test("別名の鎖は根の実体 1 本だけを数える（reshape → reshape）", () => {
+  // 確保が出るのは `h`（256）と `y`（256）の 2 本きり = 512。鎖の 2 本を確保すると、`h` が
+  // 生きている間は再利用できず 768 になる。
+  assertEquals(estimateSessionMemory(openGraph(aliasChainGraph())).transientBytes, 512);
+});
+
+/** `neg` → `expand` の 2 本。出力 shape で恒等 / 非恒等を切り替える。 */
+const aliasExpandGraph = (outShape: readonly number[]): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["neg", "expand"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [1, 4] }],
+  outputs: ["y"],
+  initializers: {},
+  values: {
+    h: { dtype: "f32", shape: [1, 4] },
+    y: { dtype: "f32", shape: [...outShape] },
+  },
+  nodes: [
+    { op: "neg", ins: ["x"], outs: ["h"], attrs: {} },
+    { op: "expand", ins: ["h"], outs: ["y"], attrs: {} },
+  ],
+});
+
+Deno.test("恒等 expand は確保を出さず、複製軸のある expand は実体化ぶんを数える", () => {
+  // 恒等（[1,4] → [1,4]）は別名 = `h` の 16 バイト 1 本だけ。
+  assertEquals(estimateSessionMemory(openGraph(aliasExpandGraph([1, 4]))).transientBytes, 16);
+  // 複製軸あり（[1,4] → [3,4]）は strided 実体化コピーへ戻る = 16 + 48。
+  assertEquals(estimateSessionMemory(openGraph(aliasExpandGraph([3, 4]))).transientBytes, 64);
+});
+
+/**
+ * グラフ出力が**別名名義**の形。`p` は `h` の実体そのものなので、pin が効くのは根の側。
+ * `h` の消費が尽きても根はプールへ戻らず、後続の `t` / `y` は新しい slot を掴む。
+ */
+const pinnedAliasGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["neg", "reshape"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [64] }],
+  outputs: ["p", "y"],
+  initializers: {},
+  values: {
+    h: { dtype: "f32", shape: [64] },
+    p: { dtype: "f32", shape: [8, 8] },
+    t: { dtype: "f32", shape: [64] },
+    y: { dtype: "f32", shape: [64] },
+  },
+  nodes: [
+    { op: "neg", ins: ["x"], outs: ["h"], attrs: {} },
+    { op: "reshape", ins: ["h"], outs: ["p"], attrs: {} },
+    { op: "neg", ins: ["x"], outs: ["t"], attrs: {} },
+    { op: "neg", ins: ["t"], outs: ["y"], attrs: {} },
+  ],
+});
+
+Deno.test("グラフ出力が別名名義でも pin が効くのは根の実体（プールへ返らない）", () => {
+  // `h`（pin された根）+ `t` + `y` の 3 本 = 768。pin が根へ届かないと `h` がプールへ戻って
+  // `t` に配り直され、512 に縮む（= readback 可能な実体を他の値と共有する誤り）。
+  assertEquals(estimateSessionMemory(openGraph(pinnedAliasGraph())).transientBytes, 768);
+});
+
+// ---------------------------------------------------------------------------
+// 実行計画（derivePlanSlots）との相互検証
+// ---------------------------------------------------------------------------
+
+/**
+ * 判定に使う device の能力（WebGPU core 既定 — 128MiB / 65535）。行ブロック分割の枚数だけが
+ * これを読む。
+ */
+const TEST_LIMITS = {
+  maxStorageBufferBindingSize: 128 * 1024 * 1024,
+  maxComputeWorkgroupsPerDimension: 65535,
+} as const;
+
+/**
+ * 素のノード列 → slot 導出用のレシピ列。GPU に触らずに recipe-builder の `#buildStep` の
+ * **簿記面だけ**（確保仕様・`uses` / `pinned`・消費の延べ列）を写す — dispatch と一時は
+ * slot 導出の別軸なので空で足りる。
+ *
+ * NOTE: 別名元は `#buildStep` と同じく入力の先頭。initializer を指す形だけは `#buildStep` が
+ * `{ kind: "resident" }` を作るが、`derivePlanSlots` は env に載らない値をどちらも
+ * 「slot 無し」と扱うので、slot 導出の観点では `{ kind: "value" }` と同値。
+ */
+const slotRecipes = (steps: readonly ExecStep[], graph: IrGraph): readonly StepRecipe[] => {
+  const uses = countUses(graph);
+  const outputNames = new Set(graph.outputs);
+  return steps.map((step) => {
+    if (step.kind !== "node") throw new Error("融合ステップの写しはここでは作らない");
+    const outputs: readonly StepOutput[] = step.plan.outputs.map(({ name, shape }) => {
+      const bookkeeping = { name, uses: uses.get(name) ?? 0, pinned: outputNames.has(name) };
+      return step.aliasesInput
+        ? {
+          ...bookkeeping,
+          kind: "alias" as const,
+          source: { kind: "value" as const, name: step.plan.node.ins[0] },
+        }
+        : { ...bookkeeping, kind: "alloc" as const, byteLength: numel(shape) * 4 };
+    });
+    return {
+      outputs,
+      temps: [],
+      dispatches: [],
+      releases: step.plan.node.ins,
+      writesState: false,
+    };
+  });
+};
+
+/**
+ * 別名 3 種（鎖 / 恒等 expand / pin された別名）と非恒等 expand を 1 本に混ぜた形。**5 ルールの
+ * どの先頭 op にも掛からない**ように組んである（`reshape` は upsample2x の先頭 op だが、続く
+ * 並びが合わないので窓を掴まない — テスト本体が機械的に確認する）。
+ */
+const aliasMixGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["neg", "add", "reshape", "expand"] },
+  symbols: [],
+  inputs: [
+    { name: "x", dtype: "f32", shape: [64] },
+    { name: "z", dtype: "f32", shape: [1, 4] },
+    { name: "q", dtype: "f32", shape: [5] },
+  ],
+  outputs: ["v", "yv", "kv", "m", "p1", "p2"],
+  initializers: {},
+  values: {
+    h: { dtype: "f32", shape: [64] },
+    r1: { dtype: "f32", shape: [8, 8] },
+    r2: { dtype: "f32", shape: [64] },
+    e1: { dtype: "f32", shape: [64] },
+    g: { dtype: "f32", shape: [1, 4] },
+    w: { dtype: "f32", shape: [3, 4] },
+    v: { dtype: "f32", shape: [3, 4] },
+    s: { dtype: "f32", shape: [64] },
+    y: { dtype: "f32", shape: [64] },
+    yv: { dtype: "f32", shape: [8, 8] },
+    k: { dtype: "f32", shape: [5] },
+    kv: { dtype: "f32", shape: [1, 5] },
+    m: { dtype: "f32", shape: [5] },
+    p1: { dtype: "f32", shape: [64] },
+    p2: { dtype: "f32", shape: [64] },
+  },
+  nodes: [
+    { op: "neg", ins: ["x"], outs: ["h"], attrs: {} },
+    // 別名の鎖（根は `h`）。
+    { op: "reshape", ins: ["h"], outs: ["r1"], attrs: {} },
+    { op: "reshape", ins: ["r1"], outs: ["r2"], attrs: {} },
+    // 恒等 expand（同じ根を指す 3 本目の別名）。
+    { op: "expand", ins: ["h"], outs: ["e1"], attrs: {} },
+    { op: "neg", ins: ["z"], outs: ["g"], attrs: {} },
+    // 複製軸あり = 実体化コピー（別名にならない）。
+    { op: "expand", ins: ["g"], outs: ["w"], attrs: {} },
+    { op: "neg", ins: ["w"], outs: ["v"], attrs: {} },
+    { op: "add", ins: ["h", "r2"], outs: ["s"], attrs: {} },
+    { op: "add", ins: ["s", "e1"], outs: ["y"], attrs: {} },
+    // グラフ出力が別名名義（pin は根の `y` の実体へ効く）。
+    { op: "reshape", ins: ["y"], outs: ["yv"], attrs: {} },
+    // 同じ形をこのグラフで唯一のサイズクラス（20 バイト）で作り直す。pin が根へ届かないと
+    // `k` の実体がプールへ戻って `m` に配り直され、slot が 1 本減る。
+    { op: "neg", ins: ["q"], outs: ["k"], attrs: {} },
+    { op: "reshape", ins: ["k"], outs: ["kv"], attrs: {} },
+    { op: "neg", ins: ["q"], outs: ["m"], attrs: {} },
+    // 末尾の 256 バイト 2 本は、鎖が返した slot を**ちょうど汲み尽くす**位置に置いてある。
+    // 別名の消費が根へ合算されないと 1 本足りず、ここで新しい slot が生える。
+    { op: "neg", ins: ["x"], outs: ["p1"], attrs: {} },
+    { op: "neg", ins: ["x"], outs: ["p2"], attrs: {} },
+  ],
+});
+
+/**
+ * estimator の中間総量と、実行計画の slot 表（`derivePlanSlots`）の総バイト数を突き合わせる。
+ *
+ * 融合が 1 本も掛からない形でだけ主張できる**厳密一致** — 融合が掴む形では実行側が中間を
+ * 消し、行ブロック分割が一時を足すので、estimator の `unaccounted` が認めている差になる。
+ * 別名の扱いが 2 実装で割れると、ここが例外なしで割れる（それが起票 R6V-2 の姿）。
+ */
+Deno.test("融合が掛からない形では estimator の中間総量と slot 表の総バイトが一致する", () => {
+  const model = openGraph(aliasMixGraph());
+  const plan = planGraph(model.graph, {});
+  const fusion = planFusions(plan.nodes, {
+    useCounts: countUses(model.graph),
+    outputNames: new Set(model.graph.outputs),
+    limits: TEST_LIMITS,
+  });
+  // 前提の確認: 融合が 1 本でも掛かると「融合前の列を歩く」estimator の勘定と比べられない。
+  assertEquals(fusion.steps.every((step) => step.kind === "node"), true, "融合が掛かっている");
+  assertEquals(fusion.counts.identityExpand, 1);
+
+  const slots = derivePlanSlots(slotRecipes(fusion.steps, model.graph));
+  const slotTotal = slots.bytes.reduce((sum, size) => sum + size, 0);
+  // 手計算: h 256 + g 16 + w 48 + v 48 + s 256 + y 256 + k 20 + m 20 = 920
+  // （別名 r1 / r2 / e1 / yv / kv は 1 本も生やさない）。
+  assertEquals(slots.bytes, [256, 16, 48, 48, 256, 256, 20, 20]);
+  assertEquals(slotTotal, 920);
+  assertEquals(estimateSessionMemory(model).transientBytes, slotTotal);
 });
 
 // ---------------------------------------------------------------------------
