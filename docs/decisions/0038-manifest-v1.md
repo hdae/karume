@@ -473,3 +473,12 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   （門を持つのは 2 家族だけだった — レビュー MD-1 C-1）。1 本化後は写像を
   `Required<SessionSpec>` の網羅レコードから組むため、キー追加はコンパイルエラーになる。
   門も `packages/models/tests/session_options_test.ts` の 1 本へ集約。
+- 2026-08-24: 進捗イベント `AssetProgress` に**ファイル単位の 2 欄**（`fileLoaded` /
+  `fileTotal`）を追加。§5 の進捗契約は集約（`loaded` / `total` = manifest `size` の合計）
+  だけを定めており、消費側がファイル別の進捗バーを描く材料が無かった（`loaded` の差分を
+  自前で持つと、キャッシュヒットで `downloading` が 1 度も出ないファイルや並行取得で崩れる）。
+  **optional ではない必須欄**にしたのは、欄の有無を消費側が分岐すると「時々描けない進捗バー」
+  ができるため。不変条件は `verifying` / `complete` で常に `fileLoaded === fileTotal`
+  （全量が揃った点なので、キャッシュヒット経路でも同じ）・`fileTotal` は `FileRef.size` で
+  `total` はその合計。`complete` 追加（上の 2026-08-13）と同格のスキーマ変更で、
+  `FetchAssetsOptions.onProgress` として公開面に出る。

@@ -125,7 +125,9 @@ full-write 対象外・ADR 0066 追記 6〉。sliding スロットは `position 
   no-op（queryLength が切る — ADR 0066 決定 4）の検証が単機能 op に閉じる ②attention 側は
   読み取り専用のままビット同一検証が単純 ③KV 共有層（append を持たない層）が
   「`state_append` ノードが無い」だけで表せる。ORT の kv_empty（present 出力なし）と同じ
-  表現力を op の不在で得る。
+  表現力を op の不在で得る。**append の不在は層単位の話で、スロット単位では終端
+  `state_append` が常にちょうど 1 本**（共有層はその 1 本を複数の読者で分け合う）— 検査の
+  粒度がスロットなのはこのため（決定 5b・`runtime/plan.ts` の `assertStateOrder`）。
 - why-not（staging / ring slack = ORT の WindowedKvCache 型）: 共有層のために append を
   読者より先に置く設計なら ring に `window + Q − 1` の slack か staging バッファが要る
   （refs/onnxruntime GQA cpu 実装が同種の staging 切替を持つ）。決定 4 の「全読者が ins で

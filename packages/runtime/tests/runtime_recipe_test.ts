@@ -64,11 +64,6 @@ Deno.test("単一出力ステップの slot 割当は alloc / alias / pin / LIFO
 });
 
 /**
- * 多出力ステップ（ADR 0068 決定 1 — 実装済みの多出力 op はまだ無いので、レシピ表現の側だけを
- * 純関数で固定する）。**出力 slot 昇順**の確保と、slot ごとに独立した `uses` / `pinned` の
- * 簿記が要点。
- */
-/**
  * `topk` の実形（ADR 0068 決定 3 の最初の入居者）。実 GPU 側の寿命門
  * （tests/runtime_executor_test.ts の「多出力ノードの slot ごとの uses / pin」）と**同じグラフ**
  * の slot 割当を、GPU に触らない純関数の側から手計算で固定する:
@@ -104,6 +99,11 @@ Deno.test("topk の実形（値 + 添字・同一サイズクラス）の slot �
   assertEquals(slots.pinned, new Set([1, 0]));
 });
 
+/**
+ * 多出力ステップ（ADR 0068 決定 1）の合成形。上の `topk` が実装済みの実形を押さえる一方、
+ * こちらは**サイズクラスの違う 2 本**でレシピ表現の側だけを純関数で固定する。**出力 slot 昇順**
+ * の確保と、slot ごとに独立した `uses` / `pinned` の簿記が要点。
+ */
 Deno.test("多出力ステップは出力 slot 昇順に確保し、slot ごとに独立して retain / pin する", () => {
   const slots = derivePlanSlots([
     // 値 [64B・消費者 1 本] と添字 [32B・グラフ出力] の 2 本を 1 ステップで定義する形。

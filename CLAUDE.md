@@ -45,6 +45,8 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 
 - **全モジュール副作用ゼロ**（top-level 登録・グローバル可変状態・import 時実行の禁止）—
   barrel 経由 tree-shaking の成立条件 MUST
+- WebGPU グローバル（`GPUBufferUsage` 等）はモジュールスコープで読まない — runtime は
+  `src/gpu/webgpu-constants.ts` 経由・裸参照禁止 MUST（import 安全性）
 - codegen 決定性: 同一キー → バイト単位同一 WGSL（スナップショットで固定）
 - elementwise / 行 reduce は grid-stride 前提。requiredLimits は compute 系まで明示 +
   `pushErrorScope('validation')` 常設

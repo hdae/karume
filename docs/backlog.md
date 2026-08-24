@@ -7,138 +7,31 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — anima の素版 + バリアント同梱（波 L・2026-08-22 着手）
+## now — レビュー消化 → 0.4.3 リリース → 0.5.0 breaking 波
 
-Turbo LoRA を焼くと **negative prompt が効かない**（CFG=1 では uncond 側を 1 度も計算しない）。
-素の base を別リポで出し、同じ base の第三者 fine-tune 2 種も同梱する（2026-08-22 ユーザー
-裁定）。既定席は `w8a8-s16` 据え置き。実測と裁定の正本 =
+波 J（量子化探索・第 2 段）と波 L（anima 素版 + バリアント同梱）は **2026-08-24 に全クローズ**。
+結果と実測の正本は ADR [0050](decisions/0050-irodori-quant-series.md) 追記 2 /
+[0077](decisions/0077-model-version-naming.md) と
+[research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) /
 [research/2026-08-22-anima-base-steps.md](research/2026-08-22-anima-base-steps.md)。
 
-- **L-1: recipe のモデル別化 — 消化（2026-08-22）**: LoRA の有無 / 席の範囲 /
-  text_conditioner の出所 / 既定値をモデル属性（`ANIMA_MODELS`）へ。**Pipeline を 2 本へ分割**
-  （`--pipeline anima` / `--pipeline anima-turbo`）— リポ直下の改変告知は Pipeline に固定で
-  載る 1 組なので、畳むとどちらかの告知が中身と食い違う。素モデルでは LoRA 記録の**不在**を
-  検査する（融合済みと素は資産の形が 1 バイトも変わらず、他のどの検査にも掛からないため）。
-- **L-2: 素版の系列 + 配布形 — 消化（2026-08-22）**: LoRA 無しの transformer f16 / i8-dyn。
-  既定は **20 step / guidance 4**（視認裁定 — research §3）。
-- **L-3: バリアント 2 種（WAI / CopyCat）の同梱 — 消化（2026-08-22）**: civitai の単一ファイル（ComfyUI 形）を
-  diffusers 形へ組み直す `anima/single_file.py` を新設。**DiT と llm_adapter しか入っていない**
-  ので text_encoder / VAE / tokenizer は base を共有（WAI が別配布している text encoder は
-  基底とバイト一致を実測で確認）。帰属と許諾欄はカードがモデルごとに持つ。
-  **モデル名は上流のバージョン込み**（`anima-v1.0` / `anima-wai-v1.0` /
-  `anima-copycat-20260610`）— 版を並存させるための規約は ADR
-  [0077](decisions/0077-model-version-naming.md)。
-- **L-4: 公開 + pin 焼き込み + JSR bump — 消化（2026-08-22）**: 新リポ
-  `hdae/karume-anima` を公開（リビジョン `796ce27b`）。持ち越していた `karume-anima-turbo` の
-  pin も同乗で焼き（`5aa15e4b` → `00c88039`）、4 パッケージを **0.4.2** へ lockstep bump。
-  順序 MUST（HF → pin → JSR）どおり。**0.4.2 の JSR publish は完了（2026-08-24 ユーザー
-  確認）**。手順の正本は [release-runbook](release-runbook.md)。
-  **断片化検証**: 12 本中 11 本が 38〜60 MiB/レンジで健全。`anima-v1.0` の f16 transformer
-  だけ 13.28 と外れ、`shard-cache` を退避して**同じバイト列のまま上げ直して 17.52** まで戻した
-  （バイト不変なのでコミットは増えない）。残る細かさの機序は「turbo の f16 と大半のチャンクを
-  共有するため CAS 側の dedup が効き続ける」で、目安 10 は満たすため打ち切った。
-  **実 DL 疎通**: `fromPretrained("hdae/karume-anima")` の既定（`anima-v1.0` / `w8a8-s16` /
-  20 step / CFG 4）で取得 → integrity 検証 → 実 GPU 描画まで 345s で通過。3 モデルを同一 seed で
-  描き分けて**別の絵になること**も確認（text_conditioner をモデル別にできていないと 3 つとも
-  同じ傾向になる — `outputs/demo/model-check/`）。
-- **i4 席の保留は J-4 ②で解消（2026-08-24）**: 校正条件のモデル別化 + 3 モデル export 済み。
-  ただし**視認裁定で配布スキップ** — karume-anima を再アップロードすると local dist の
-  `w4` / `w4-a8-s16` 席が混入することに注意（perf-ledger Q-5 /
-  [research 2026-08-24](research/2026-08-24-gptq-expansion-quality.md) §5）。
-- **保留: サンプラーの選択肢**（現状は Euler 固定・manifest に種別欄が無い — research §4）。
+- **広域レビュー（`.claude/reviews/2026-08-24_283669a`）の消化**: 外部フィードバック 7 件の
+  対応と併せて公開面が 4 件増えた（`ANIMA_BASE_SOURCE` / `animaLatents()` /
+  `approximatePreview` / `AssetProgress` の per-file 欄）。docs 同期までがこの波。
+- **0.4.3 の JSR リリース**: 0.4.2 以降の未リリース差分（上の公開面 4 件 + anima 構築経路の
+  AbortSignal 中断 + hub の進捗欄）を patch で出す。破壊的変更は載せない。手順の正本 =
+  [release-runbook](release-runbook.md)。
+- **0.5.0 breaking 波の準備**: 束の骨子は later 節の該当項目が正本（quant 席名の規則化 /
+  `linearCompute` の値改名 / 表示欄 + `karume/4` / yomi 依存分離）。**現行の席名・ノブ名は
+  改名予定**。
 
-## now（継続）— 量子化方式の探索・第 2 段（波 J・2026-08-20 着手）
+持ち越しの注意（次の再アップロード・次の波で先に思い出す）:
 
-前段（波 I = w4 横展開 + 方式スクリーニング・聴感/視認込み）は**完全クローズ** — 実測の正本 =
-[research/2026-08-19-w4-method-screening.md](research/2026-08-19-w4-method-screening.md)、
-採否 = [perf-ledger](perf-ledger.md) の量子化方式節（Q-1〜Q-5）、recipe 基盤 4 件 = ADR
-[0068](decisions/0068-decode-exit-multi-output.md) 追記 5 / [0069](decisions/0069-packed-w4-storage.md)
-追記 5。
-
-- **J-1: Q-1 実装 — 消化済み（2026-08-20）**: deberta-i4 混成系列（linear = i4 g32・残り i8）+
-  SBV2 quant `w8-bert4` + 実 GPU WAV 門（perf-ledger Q-1 ✅・配布 WAV 聴感確認済み）。
-  既定 quant はのちに w4 へ（J-2 第 3 段）。HF jvnv 上げ直しはリリース枠と同乗（資産は準備済み）。
-- **J-1b: SBV2 full-w4 — 消化済み（2026-08-20 ユーザー依頼）**: net_g（front/voice）の i4
-  混成系列 + 3 席とも i4 の quant `w4` + WAV 門（perf-ledger Q-5 の SBV2 席）。net_g の適格
-  linear は 6 本のみで削減は w8-bert4 比 −0.08% — 意味は「配布形を丸ごと 4bit で通す席」。
-  聴感 = 確認済み（2026-08-20 品質 OK・f32 比で微妙に硬い印象 — 第 3 段の gptq 結線後に再聴）。
-- **J-2 第 1 段: 消化済み（2026-08-20）** — core `quant_calib.py`（`ce568b0`）+ minicpm5/EG
-  リグ結線・校正コーパス 48 文 ×2（`730c21b`）+ 実測 5 構成 × 2 ファミリ。実測の正本 =
-  [research/2026-08-20-gptq-awq-calibrated-rounding.md](research/2026-08-20-gptq-awq-calibrated-rounding.md)。
-  要旨: **GPTQ 大勝ち**（gptq-rtn = 今日の格納形のまま RTN 全面超え = perf-ledger Q-6 起票 /
-  gptq-kmeans = 全列最良・greedy 37/48 で Q-2 の席価値上昇）・**AWQ 不採用（Q-7 ❌）**。
-- **J-2 第 2 段: 消化済み（2026-08-20）**: gptq 3 構成を SBV2 BERT（`3bf9cf8`）+
-  irodori/anima DiT（`fc89d29`）へ結線し本番実測（gates 全緑・正本 =
-  [research](research/2026-08-20-gptq-awq-calibrated-rounding.md) §6）。**DiT 2 ファミリは
-  数値が大幅改善**（irodori: S 予測が全構成一致 / anima: PSNR 12.3→22.7 dB）・SBV2 BERT は
-  数値判別不能（聴感のみ）。**聴感/視認裁定済み（research §6 裁定節）: 3 ファミリとも品質
-  OK → 採用確定**。net_g conv は GPTQ 対象外（H が linear の in 軸形 — conv は im2col 要）。
-- **J-2 第 3 段: Q-6 出荷結線 + 速度実測 — 結線消化（2026-08-20・`a1cf286` + `1379c3e`）**:
-  deberta-i4 export へ gptq-rtn を結線（encoder linear 132 本 = 校正付き・語彙表は先に RTN・
-  一致門 3 種・校正コーパスは deberta へ移管し計測と共有）→ fn/jvnv 再配布 + WAV 参照
-  採り直し（w8 門不変・verify 1629/0/5）。速度実測済み
-  （[research §7](research/2026-08-20-gptq-awq-calibrated-rounding.md) — 取得 −30%・ロード
-  1.7 倍速・温間合成 ~4% 速 = 基準の速度側は充足）。**再聴裁定済み（2026-08-20 ユーザー
-  「ほぼ違いが分からない」）→ 既定 quant = w4 へ変更**（ADR 0039 決定 5 更新・fn/jvnv
-  再配布・既定解決の実証 = quant 未指定合成が w4 参照 sha と一致・w8 は opt-in 参照系）
-  — **第 3 段クローズ**（既定はのちに波 K で `w8-bert4` へ再裁定 — ADR 0039 決定 5 の
-  再裁定 blockquote）。irodori / anima の配布 i4 席新設は J-4 と同時に裁定（irodori は
-  kmeans 圧勝のため rtn 席を先行させない）。
-- **J-5a: embedding i4 — 消化済み（2026-08-20・`0d8c6f6`）**: i4 適格を
-  `I4_WEIGHT_OPS = {linear, embedding}` へ一般化（ADR 0069 追記 6）。BERT 語彙表 i4 で系列
-  −8.15 MiB（group scale の f32 が半減益の約 3 割を食い、見込み −12.5 MiB から下方訂正）・
-  `w8-bert4` 取得量 = w8 比 **−30.33%**。WAV 参照 2 本採り直し済み（聴感確認済み 2026-08-20 —
-  品質 OK・硬さの印象は第 3 段で再聴）。
-  tied lm_head は適格へ反転（LLM 側の副次利得）。
-- **J-5b: net_g conv1d i4 — 消化済み（2026-08-20・`eac9d43` + 参照採り直し）**: conv1d
-  （groups == 1）を i4 適格へ追補（ADR 0069 **追記 7** — scale を rank 非依存の rank2 形へ
-  一般化・gemm A 側タイルローダに group scale・emit/plan 鏡像は同型で固定・convT / depthwise
-  は対象外）。SBV2 全 14 モデル再 export + 再配布で **w4 = 237.5MB（w8 比 −36.3%）**・温間合成
-  ~500ms で最速（実測は ADR 追記 7 / research 2026-08-20 §7 系）。見込み ≈−40% は scale 増分と
-  groups>1 残留の分だけ下振れ（正味 −22.2MB）。front の `SdpReverseNoiseIn` は「所有 = 使用」へ
-  再構成（census と graph の構造的一致 — `--verify front` 緑）。w4 WAV 参照は三度目の採り直し
-  （w8 / w8-bert4 門は不変）。**聴感済み（2026-08-20 ユーザー）: conv i4 追補で変化なし =
-  品質門通過・J-5b クローズ**。f32 比の全体評 = `w8-bert4` はほぼ同一・`w4` はテンション
-  少し低め（BERT 側 gptq はほぼ透明で、差は net_g の素の RTN i4 由来 — 想定内。conv は
-  GPTQ 不適〈H が linear の in 軸形〉なので校正で縮める経路が今は無い）。
-- **J-3: g 軸の評価 — 消化（2026-08-22）**: SBV2 net_g の g16/g32/g64 実測 + 聴感で
-  **g32 据え置き確定**（g16 はテンションを逆方向へ動かす・波形指標は g の順序を運ばない —
-  正本 = [research/2026-08-22-sbv2-g-axis.md](research/2026-08-22-sbv2-g-axis.md) と ADR 0069
-  追記 9。リグの g 引数化 `--w4-group-size` は資産として残置）。
-- **J-4: GPTQ 適用拡大 — 消化済み（2026-08-23〜24）で波 J は全クローズ**: ①irodori `w4`
-  席（DiT のみ i4 混成の GPTQ・品質 3 ラウンド〈こもり帰属 → block 外 i8 + 校正 12 件 →
-  adaLN 144 本 i8〉→ 聴感裁定「こもり解消・配布可」→ HF 公開〈`67e9584c`・**pin 据え置き** =
-  `w4` は `revision: "main"` 明示〉。裁定変更 2 件〈rtn 席先行の撤回・混成なしの緩和〉込みの
-  正本 = ADR [0050](decisions/0050-irodori-quant-series.md) 追記 2）②anima 素版 3 モデルの
-  校正条件モデル別化 + i4 export（各 ~3h）— **視認裁定（2026-08-24）で配布スキップ**（席は
-  local dist に残る・系列は `outputs/series-archive/2026-08-23-anima-base-i4/` へ退避・改善
-  候補は later 起票）。実測と教訓（**sim → 出荷は発話実現を運ばない**・adaLN の量子化感度）の
-  正本 =
-  [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md)。
-  格納席（Q-2 / Q-3）は実需待ちへ送り・anima g16 は parked（変わらず）。
-- **J-4a: anima の i4 席（J-4 から切り離して先行 — 2026-08-21 ユーザー裁定）**: 第 1 段
-  （速度実測）消化。素の RTN で i4 系列 + `w4` / `w4-a8-s16` を新設し実 GPU で実測 — 正本 =
-  [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md)。
-  取得量 −21.2%（3.48 → 2.74GB）・VRAM −22.6%（3,407 → 2,637MiB）。**同日中に①〜④まで消化**:
-  ①GPTQ 結線（`ae9fe31` — 校正コーパス 4 本を評価入力と分離）②w4a8 = i4 常駐を整数内積へ
-  （`c285f97` / ADR [0076](decisions/0076-w4a8-linear-execution.md) — 955ms/step まで戻るが
-  **視認で細部が荒れるため anima の席には載せない**）③視認裁定で **`w4-a8-s16`（GPTQ・活性
-  f32）を低 VRAM 席として採用**（品質重視 = `f16` / 速度重視 = 既定 `w8a8-s16` 据え置き）。
-  ④**校正入力の捕捉順序の修正**（`78ebe68` — グラフ唯一の i8 重み `patch_embed.proj` を
-  捕捉より前へ）で採り直し。golden 突合の f32 相対 RMS が 0.1857 → 0.1712（512²）/
-  0.1423 → 0.1382（1024²）へ改善し、5 ケースの視認裁定で採用（research §9・格納形は不変）。
-  ⑤**HF 公開まで消化（2026-08-22 — リビジョン `00c88039`）**: コミットに載ったのは i4 と
-  `karume.json` / `README.md` / `NOTICE.md` の 4 本だけで既存 5 本の重みは sha256 不変。
-  断片化検証は新規 i4 が **58.35 MiB/レンジ**（既存 51〜58 と同水準・目安 10 を大きく上回る）。
-  main から取得して描いた画が採用裁定の PNG と sha256 一致（`f595dc5a…`）。
-  **pin 更新（ADR [0073](decisions/0073-models-source-pin.md)）と JSR bump は次のモデル準備に
-  合わせて持ち越し**（2026-08-22 ユーザー裁定）— **公開済みの `@karume/models` が読むのは
-  pin 済みの旧リビジョン `5aa15e4b` なので、i4 席を使うには `revision: "main"` の明示が要る**
-  （順序 MUST の HF → pin → JSR は崩していない。pin を焼いた時点で JSR bump が連鎖する）。
-  **未検証で残した可能性の一覧は
-  [research §8](research/2026-08-21-anima-i4-seat-speed.md)**（専用幾何・g16・校正量・
-  もう 1 つの劣化機序 — いずれも「試してダメ」ではなく「試していない」）。irodori の席は
-  J-4 のまま（kmeans 圧勝で別設計）。
+- irodori の `w4` 席は HF 公開済み（`67e9584c`）だが **pin は据え置き** — 使うには
+  `revision: "main"` の明示が要る（0.5.0 の pin 更新で解消する）。
+- local の `models/karume-anima/` には**配布スキップ裁定（2026-08-24）の `w4` / `w4-a8-s16`
+  席が組み込まれたまま**なので、karume-anima を上げ直す前に裁定を確認する。
+- anima のサンプラーは Euler 固定（manifest に種別欄が無い — 波 L の残置）。
 
 ## 消化済み（波 K・リリース + 公開 — 2026-08-20〜21）
 
@@ -179,6 +72,9 @@ autoregressive 波の**残項目（波外へ送り）**:
   場所の特定。系列 + 視認物は `outputs/series-archive/2026-08-23-anima-base-i4/` に退避済みで
   校正結果は再利用可（正本 =
   [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) §5）。
+  turbo 側の i4 席で**未検証のまま残した可能性の一覧**（専用幾何・g16・校正量・もう 1 つの
+  劣化機序 — いずれも「試してダメ」ではなく「試していない」）は
+  [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md) §8。
 - **irodori adaLN i8 の出荷リグ A/B（起票 2026-08-24）**: sim で効いた adaLN i8（+13.1 MiB）が
   出荷リグでも読み上げ方を改善するかは未検証（sim → 出荷の転移限界 — 同 research §2）。
   復活 = w4 席の品質不満、またはサイズ最適化の実需。
@@ -231,8 +127,24 @@ autoregressive 波の**残項目（波外へ送り）**:
   freeDimensionOverrides / IO binding / EP 分断確認・native EP か JSEP かの記録）は
   [runtime-landscape §4](research/2026-08-16-runtime-landscape.md) が正本。
 - **生成イベントの横展開（需要待ち）**: sbv2 / birefnet / depth / siglip2 / vowel への stage
-  イベント（step ループが無く提供できるのは段遷移のみ）と、AbortSignal による中断席
-  （現状は onEvent の throw が step 粒度の中断手段 — 席は温存）。
+  イベント（step ループが無く提供できるのは段遷移のみ）と、**生成ループ**の AbortSignal 中断席
+  （現状は onEvent の throw が step 粒度の中断手段 — 席は温存）。**構築経路の AbortSignal は
+  anima で実装済み**（`AnimaPipelineOptions.signal` — 段境界での検査・取得層への透過・
+  `signal.reason` 素通し）なので、流儀の先例はそこ。
+- **構築 AbortSignal の他ファミリ横展開（起票 2026-08-24）**: irodori も GB 級資産で anima と
+  同じ「取得と組み立ての最中に中止したい」窓を持つ。移植は 3 点セット — `signal` を各
+  `*PipelineOptions` へ移設 / 段境界の検査 / 中断時の `ownsGpu` 解放。0.5.0 候補。
+- **estimate の `transientBytes` が恒等別名化を再現しない（起票 2026-08-24・レビュー R6V-2）**:
+  `estimateSessionMemory` は全ノード出力へ `alloc` を通すが、実行計画側（`derivePlanSlots`）は
+  reshape / 恒等 expand の出力を `alloc` せず元 slot へ `retain` する。中間ピークが過大に出る
+  うえ、`UNACCOUNTED`（入っていない項目を全部書く MUST）にも該当項が無い。0.5.0 で設計検討
+  （別名判定の源を estimator と共有するか、`UNACCOUNTED` に 1 項足すか）。
+- **anima 大解像度の省 RAM タイル逐次組み立て（起票 2026-08-24 裁定）**: VAE decode のタイルを
+  貯めずに順次合成できれば、E-2 の入口拒否で受理集合から外した 8 解像度
+  （1456/1488/1584/1648/1680/1776/1840/1936px）を受理へ戻せる。
+- **hub の sha256 同一ファイルのリポ跨ぎ重複 DL 解消（外部フィードバック提案⑥・優先度低）**:
+  content addressing でキャッシュを引けば、同じバイト列を別リポから取り直さずに済む。
+  ADR [0038](decisions/0038-manifest-v1.md) のキャッシュ設計（キーは URL）へ踏み込む変更。
 - Metal 数値差の原因確定（known-issues）・resident 経路の診断/計測制約の解消。
 - MoE の seam（fixed-k routing は静的形で表現可 — dense API に expert 非存在を焼かない）。
 

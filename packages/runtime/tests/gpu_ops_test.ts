@@ -116,7 +116,7 @@ const checkAll = async (cases: readonly OpCase[]): Promise<void> => {
 };
 
 Deno.test({
-  name: "unary 9 種が CPU 参照と一致する（実 GPU）",
+  name: "unary 11 種が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(UNARY_CASES),
 });

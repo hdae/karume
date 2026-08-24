@@ -11,30 +11,41 @@
 
 ## Now
 
-- **次 = 0.5.0 breaking 波の準備（2026-08-24 ユーザー裁定で着手）**: 破壊的変更を 1 回に
-  まとめる束 — ①quant 席名の規則化（ADR
+- **広域レビュー（`.claude/reviews/2026-08-24_283669a`）の消化中 — 次は 0.4.3 bump → 0.5.0**。
+  外部フィードバック 7 件は対応済み。E / C 群の修正は `283669a..HEAD` で消化が進んでおり、
+  残りは docs 同期。閉じたら **0.4.3 を lockstep bump**（0.4.2 以降の未リリース差分を patch で
+  出す・破壊的変更は載せない）、その先が 0.5.0 の breaking 波。手順の正本 =
+  [release-runbook](../docs/release-runbook.md)。
+- **0.4.2 以降に増えた公開面 4 件**（0.4.3 で初めて配られる面 — 消費側の doc はここが索引）:
+  - `ANIMA_BASE_SOURCE`（`@karume/models/anima`）— 素版 3 モデルが同居する**非既定**リポの
+    pin。pin の MUST は既定席と同じ（ADR [0073](../docs/decisions/0073-models-source-pin.md)
+    追記 2026-08-24）。
+  - `animaLatents()` — 途中 latent の逆正規化素材（mean / std）。**プレビューには要らない**。
+  - `approximatePreview()` — 途中 latent → RGB の線形近似。係数は**正規化空間**で較正済み
+    （2026-08-24 実測）なので `copyLatents()` の返り値をそのまま渡す。逆正規化した値を渡すと
+    白飛びする。
+  - `AssetProgress` の per-file 欄 `fileLoaded` / `fileTotal`（必須欄。`verifying` /
+    `complete` では常に等しい — ADR [0038](../docs/decisions/0038-manifest-v1.md) 追記
+    2026-08-24）。
+- **anima の受理解像度を 8 通り縮小した（E-2）**: VAE タイル本数の上限を入口の受理集合へ足し、
+  1456/1488/1584/1648/1680/1776/1840/1936px を名指しで拒否するようにした。**形式上は破壊的だが、
+  対象はホスト RAM 破裂で実行不能だった値のみ**。省 RAM の逐次組み立てで受理へ戻す案は
+  backlog later。
+- **0.5.0 breaking 波の骨子**: ①quant 席名の規則化（ADR
   [0074](../docs/decisions/0074-quant-seat-naming.md) — 格納語彙を `f32/f16/i8/i4` の 1 本へ・
   移行表は ADR が正本〈irodori `w4` → `i8+dit4` の行を 2026-08-24 に追記済み〉）
   ②`linearCompute` / `attentionCompute` の値 `"i8a8"` → `"a8"` 改名 ③表示欄 + `karume/4`
   繰り上げ（ADR [0075](../docs/decisions/0075-quant-presentation.md)）④SBV2 の yomi 依存分離。
-  公開リポの再アップロード + pin 更新（ADR 0073）を 1 度で済ませる。骨子 =
+  公開リポの再アップロード + pin 更新（ADR 0073）を 1 度で済ませる。詳細 =
   [backlog](../docs/backlog.md) later 節。**現行の席名・ノブ名は改名予定**。
-- **波 J（量子化探索・第 2 段）は J-4 で全クローズ（2026-08-24）**: irodori `w4` 席
-  （DiT のみ i4 混成の GPTQ・品質 3 ラウンド → 聴感裁定「配布可」→ **HF 公開済み
-  `67e9584c`・pin 据え置き** = `w4` は `revision: "main"` 明示が要る）+ anima 素版 3 モデルの
-  校正条件モデル別化 + i4 export（**視認裁定で配布スキップ** — 系列は
-  `outputs/series-archive/2026-08-23-anima-base-i4/` へ退避・改善候補は backlog later）。
-  設計の正本 = ADR [0050](../docs/decisions/0050-irodori-quant-series.md) 追記 2・実測 =
+- **波 J / 波 L はどちらも 2026-08-24 に全クローズ**（波順の正本 =
+  [backlog](../docs/backlog.md)）。**教訓 2 件**は現役: ①sim の A/B は同一リグ内でのみ有効 —
+  **出荷リグでは GPTQ の丸め解が変わり発話実現が再抽選される**（繊細な性質は転移しない・
+  最終裁定は必ず出荷バイトで）②adaLN（modulation の scale/shift/gate）は量子化感度が高い
+  （irodori 実測 — 他 DiT へは未実測の仮説）。実測の正本 =
   [research/2026-08-24-gptq-expansion-quality.md](../docs/research/2026-08-24-gptq-expansion-quality.md)。
-  **教訓 2 件**: ①sim の A/B は同一リグ内でのみ有効 — **出荷リグでは GPTQ の丸め解が変わり
-  発話実現が再抽選される**（繊細な性質は転移しない・最終裁定は必ず出荷バイトで）②adaLN
-  （modulation の scale/shift/gate）は量子化感度が高い（irodori 実測 — 他 DiT へは未実測の仮説）。
-- **波 L（anima 素版 + バリアント同梱）もクローズ**: L-1〜L-4 消化（`hdae/karume-anima`
-  公開・pin 焼き込み・0.4.2 lockstep）+ i4 席の保留は J-4 ②で解消（配布はスキップ）。
-  残置 = サンプラー Euler 固定（backlog）。
-- **0.4.2 まで JSR リリース済み**（2026-08-24 ユーザー確認。PyPI `karume` は未リリース）。
-  直近クローズ済みの波の履歴は [backlog](../docs/backlog.md) と各 ADR / research が正本
-  （autoregressive A〜H・全体レビュー・波 I / J / K / L・SBV2 注入席）。
+- **JSR は 0.4.2 まで公開済み**（PyPI `karume` は未リリース）。クローズ済みの波の履歴は
+  [backlog](../docs/backlog.md) と各 ADR / research が正本。
 
 ## Open decisions
 

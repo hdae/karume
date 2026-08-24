@@ -17,6 +17,11 @@
 させること。それまでの運用: **eval-images は turbo 配布形（`models/karume-anima-turbo`）
 以外を指さない**。
 
+**同型が `examples/irodori/eval-audio.ts` にもある**（出力 WAV 名 `vowel-<name>[-48k].wav` が
+`--source` を綴らない一方、`--source` は任意の Irodori 配布形を受ける）。こちらは母音検出の
+chain e2e が**実行前の sha256 検査**で全件赤になるため沈黙誤値ではなく、復旧も canonical
+source で焼き直すだけ — 埋め方は eval-images と同じ。
+
 ## Metal（Apple GPU）で attention i8a8 と conv2d の 2 経路一致が崩れる
 
 実機 **Apple M2 / Deno 2.9.4** で `deno test -A packages/runtime/tests/` が 6 本赤になる

@@ -74,15 +74,18 @@ IEEE 除算と 200,000 サンプル中 55,605 件で 1 ULP 割れた）。`q = r
 （E2E の tolerance を w8a8 系列で取り直す理由の 1 つ）。scale の側は `amax · (1/127)` の
 **乗算**で作るので厳密に一致する。
 
-## conv2d（groups==1）は 2048px 級で dispatch 上限により fail loudly になる
+## conv2d（groups==1）は dispatch 上限で fail loudly になる（Hout·Wout > 8,388,480）
 
 implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1 workgroup =
-1 出力タイルで縮退できないため、n = Hout·Wout のタイル数が 1 次元の dispatch 上限
-（65,535）を超える形は `DispatchLimitError` になる。VAE decoder の 3×3 conv では
-**2048×2048 出力（n タイル 65,536）が上限をちょうど 1 超える**。旧・直接カーネル
-（grid-stride）は走れた形なので意図的な機能の絞りだが、沈黙誤値ではなく例外で止まる。
+1 出力タイルで縮退できないため、n = Hout·Wout のタイル数（tileN=128）が 1 次元の dispatch 上限
+（65,535）を超える形 — **Hout·Wout > 8,388,480**（正方出力なら 2,897² 以上）— は
+`DispatchLimitError` になる。旧・直接カーネル（grid-stride）は走れた形なので意図的な機能の
+絞りだが、沈黙誤値ではなく例外で止まる。**この閾値は既定 GEMM 幾何から導かれる**（n の辺 =
+`gemmTileN` = regN·wgX）ので、既定を動かすと一緒に動く — 現行値は M128N128 になった `d0afc22`
+（2026-08-10）以降のもので、ADR 0024 が書いた「2048² で上限を 1 超える」は辺 64 前提の旧値。
 解消は動的解像度 recon の「固定タイル VAE」（研究記録
 [2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)）side で行う想定。
+枚数の固定は `packages/runtime/tests/codegen_dispatch_test.ts`。
 
 ## BiRefNet 系の配布形は 1024² だけ（2048² は未実測・組み立てが拒否する）
 
@@ -90,8 +93,10 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 それ以外の解像度は `DistError` で落ちる（`karume/dist.py` の `BIREFNET_RESOLUTION`）。export
 段（`export_birefnet.py --resolution 2048`）は通るので、系列を作ること自体はできる。
 
-配らないのは実行段が未実測だから: ①上の conv2d の dispatch 上限（n タイル 65,536）に
-decoder の 1×1 conv が当たる見込み ②中間テンソルが `[1, 192, 2048, 2048]` = 3.22GB になる。
+配らないのは実行段が未実測だから: 中間テンソルが `[1, 192, 2048, 2048]` = 3.22GB になる。
+（かつては「上の conv2d dispatch 上限に decoder の 1×1 conv が当たる」も理由に挙げていたが、
+既定幾何が M128N128 になった `d0afc22` 以降は 2048² の n タイルが 32,768 で上限の内側 —
+残る理由は資源側だけ。）
 本家（同梱 `handler.py` の General-HR）の推論解像度は 2048² なので、**上流と同じ設定では
 ない**点は配布形の制約として明示しておく。回避策は入れていない（実測して判断する側の話）。
 
@@ -411,7 +416,12 @@ VOICEVOX 系の `is_interrogative` / `enable_interrogative_upspeak` は AudioQue
 （`copyLatents()`）だけで、毎 step のプレビュー画像は by-design で提供しない。VAE decoder は
 DiT を解放した**後**にしかロードできない（4 本同時常駐は VRAM で不成立 — ADR 0016 /
 `anima/pipeline.ts` のモジュール doc）ため、denoise ループの途中で VAE を回す経路が構造的に
-存在しない。プレビューが要る消費側は latent から近似する（線形近似で足りる用途を想定）。
+存在しない。プレビューが要る消費側は latent から近似する — そのための公開ヘルパが
+`approximatePreview`（`@karume/models/anima`）で、`copyLatents()` の 2 欄を**そのまま**
+（逆正規化せずに）渡すと latent 解像度の RGBA が返る。係数は**正規化空間**で較正されている
+（2026-08-24 実測）ので、`animaLatents()` の mean / std で逆正規化した値を渡すと白飛びした
+別物になる。係数自体は `export` しない MUST なので、消費側が自前で写し取る経路は無い
+（16ch → 3ch の線形射影であって厳密な decode ではない — 詳細は実装 doc が正本）。
 `stage` イベント（段の Session 構築前 / 解放後）と `vae-tile` イベント（タイル 1 枚ごと）で
 GB 級ロードとタイル decode の進捗は観測できる。
 
@@ -604,6 +614,23 @@ loudly の横断規約）。
 呼び出しは先行フライトへ合流し、合流者に渡した `AbortSignal` は効かない（leader を abort
 すると合流者も巻き添えで落ちる）。同一資産を並行に取る複数の `fetchAssets` では、キャンセルは
 この粒度でしか働かない（ADR 0038 §5）。単一呼び出しの abort は全ワーカーへ正しく透過する。
+
+## hub: キャッシュの認証隔離は `authorization` ヘッダだけを材料にする
+
+gated 資産を無認証経路のヒットに供さないための名前空間分離（`cacheNameFor`）は、`headers` の
+**`authorization` の値**の sha256 だけを見る。したがって隔離されるのはその 1 本だけで、次の 2 つは
+同じ無認証名前空間へ落ちる:
+
+- **ミラー独自のトークンヘッダ**（`hubUrl` で別ホストを指し、`x-api-key` 等で認証する形）—
+  権限の違う credential 同士が同一 URL の写しを共有しうる。
+- **ambient cookie**（同一オリジンのミラーへ `fetch` 既定 `credentials: "same-origin"` で乗るもの）
+  — `Cookie` は Fetch 仕様の forbidden request header なので `headers` からは渡らないが、
+  ブラウザが自動で載せる経路は名前空間の材料に一切現れない。
+
+by-design（材料をヘッダ名 1 本に固定するのは、名前空間が決定的に決まることと、生の credential を
+CacheStorage の列挙可能な名前へ載せないことの両立のため）。名前空間を呼び出し側から指定する
+公開ノブは無いので、共有端末で複数 credential を混ぜる運用では**credential を `Authorization`
+ヘッダへ寄せる**のが唯一の隔離手段。
 
 ## 0 要素次元を持つ gemm 系の形は GPU 束縛の最小サイズで落ちる（未対応の退化域）
 
