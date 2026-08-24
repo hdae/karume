@@ -1,6 +1,6 @@
 [project]
 name = "karume"
-version = "0.4.2"
+version = "0.4.3"
 description = "torch.export -> Karume IR v1 exporter"
 requires-python = ">=3.12"
 # SPDX 式（PEP 639）— 実測でメタデータは `License-Expression: MIT` + `License-File: LICENSE`。
