@@ -143,8 +143,12 @@ type StateTouch = {
  * ため DAG のトポロジ順では順序が決まらず、契約は `nodes` **配列順**そのもの。束縛に依存
  * しないので Session 構築時に 1 回、スロットごとに 3 点を見る:
  *
- * 1. `state_append` は 1 スロットにつき**1 本まで**（1 step に 2 回書く形は ring の位置式が
- *    二重に進み、読者が見る過去が step の途中で変わる）
+ * 1. `state_append` は 1 スロットにつき**ちょうど 1 本**。2 本以上は 1 step に 2 回書く形で、
+ *    ring の位置式が二重に進み読者が見る過去が step の途中で変わる。0 本は誰もスロットへ
+ *    書かないまま `advance` で論理長だけ進む形で、読者が未初期化（ゼロ）行を過去として読み、
+ *    2 step 目以降が沈黙で誤値を返す。KV 共有層（ADR 0067 決定 5 の「`state_append` ノードが
+ *    無い層」）は**スロット単位で 1 本の append を複数の読者が共有する**形なので、スロット
+ *    単位のこの検査と両立する — 弾かれるのはスロット全体に書き手が居ない形だけ
  * 2. append が在るなら**そのスロットに触れる最後のノード**（append より後に読者が居ると、
  *    その読者は「今 step の k/v を過去として二重に読む」— 第 3 / 4 巡 high 指摘の閉鎖）
  * 3. 同一スロットに触れる全ノードの `window` は**存在有無も値も一致**（論理 col → 物理 row の
@@ -175,8 +179,17 @@ const assertStateOrder = (graph: IrGraph): void => {
         }]）— 1 step に 1 回まで（ADR 0067 決定 5b）`,
       );
     }
+    if (appends.length === 0) {
+      throw new ExecutionError(
+        `state スロット '${slot}': ${STATE_APPEND_OP} が 1 本も無い（読者 nodes[${
+          list.map((touch) => touch.index).join("], nodes[")
+        }] だけ）— 読者が居るスロットには終端 ${STATE_APPEND_OP} がちょうど 1 本 MUST` +
+          `（ADR 0067 決定 5b。書き手が居ないと未初期化の過去を読んで論理長だけ進む）`,
+      );
+    }
+    // ここに来た時点で append はちょうど 1 本（上の 2 枝が 0 本と 2 本以上を落としている）。
     const last = list[list.length - 1];
-    if (appends.length === 1 && !last.appends) {
+    if (!last.appends) {
       throw new ExecutionError(
         `state スロット '${slot}': ${STATE_APPEND_OP}（nodes[${
           appends[0].index

@@ -454,6 +454,33 @@ Deno.test("同一スロットへの state_append は 1 step に 1 本まで", ()
   );
 });
 
+// append ゼロのスロットは「未初期化（ゼロ）行を過去として読み、pastLength だけ進む」形で、
+// 誤りが値にしか出ない（実行前のここでしか止められない）。KV 共有（ADR 0067 決定 5 — スロット
+// 単位で 1 本の append を複数読者が共有）はこの検査と両立しなければならない。
+Deno.test("state を読むスロットには終端 state_append がちょうど 1 本要る", () => {
+  const base = stateGraph();
+  const reader = base.nodes[0];
+  const error = assertThrows(
+    () =>
+      validateGraphContracts(parse({
+        ...base,
+        requires: { ops: ["attention"] },
+        nodes: [reader],
+      })),
+    ExecutionError,
+    "state_append が 1 本も無い",
+  );
+  assert(error.message.includes("kv.k"), error.message);
+
+  // 同じスロットを 2 本の読者が共有する形（KV 共有層）は、終端 append が各スロット 1 本なら通る
+  validateGraphContracts(parse({
+    ...base,
+    outputs: ["o", "o2"],
+    values: { ...base.values, o2: { dtype: "f32", shape: [1, 8, "M", 4] } },
+    nodes: [reader, { ...reader, outs: ["o2"] }, base.nodes[1], base.nodes[2]],
+  }));
+});
+
 Deno.test("state_append より後に同じスロットの読者を置けない", () => {
   const nodes = stateGraph().nodes;
   const error = assertThrows(
