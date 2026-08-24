@@ -45,6 +45,34 @@ const VOWEL_OR_N: readonly number[] = (["a", "i", "u", "e", "o", "N"] as const).
 /** クラス列の連続区間 `[classId, start, end]`（start / end の単位は呼び出し側の倍率）。 */
 type ClassRun = readonly [classId: number, start: number, end: number];
 
+/**
+ * 格子 `[frames, 8]` に非有限値が 1 つでもあれば座標を添えて落とす。
+ *
+ * MUST: 通してはならない。非有限値は例外にならず**書式として正当な `.lab`** に化ける —
+ * NaN / `+Infinity` は log_softmax でその行の 8 要素すべてを NaN にし、`viterbiSmooth` の
+ * 比較（`score[cls] > best` / `stays`）が軒並み偽になって backpointer がゼロ初期化のまま残る。
+ * 結果は「発話全体が `a`」の 1 区間で、GPU の数値異常も壊れた資産もどこにも表面化しない。
+ * 横断の不変条件「未対応・想定外は fail loudly（黙って近似しない）」の側に倒す。
+ *
+ * @param where エラー文言の接頭辞（関数名 + 何の格子か）。
+ */
+const assertFiniteGrid = (
+  values: Float32Array | Float64Array,
+  frames: number,
+  where: string,
+): void => {
+  for (let frame = 0; frame < frames; frame += 1) {
+    for (let cls = 0; cls < CLASS_COUNT; cls += 1) {
+      const value = values[frame * CLASS_COUNT + cls];
+      if (!Number.isFinite(value)) {
+        throw new Error(
+          `${where} frame ${frame} / class ${cls}（${LIPSYNC_CLASSES[cls]}）が非有限（${value}）`,
+        );
+      }
+    }
+  }
+};
+
 /** `.lab` の 1 行（秒）。 */
 export type LabSegment = {
   readonly start: number;
@@ -69,6 +97,8 @@ export const viterbiSmooth = (logProbabilities: Float64Array, frames: number): I
     );
   }
   if (frames < 1) throw new Error(`viterbiSmooth: フレーム数 ${frames} が 1 未満`);
+  // 公開関数なので単体でも叩ける（`logitsToSegments` 経由なら入口で既に検査済み）。
+  assertFiniteGrid(logProbabilities, frames, "viterbiSmooth: log 事後確率");
 
   const score = new Float64Array(CLASS_COUNT);
   for (let cls = 0; cls < CLASS_COUNT; cls += 1) score[cls] = logProbabilities[cls];
@@ -208,6 +238,7 @@ export const logitsToSegments = (logits: Float32Array, frames: number): LabSegme
     );
   }
   if (frames < 1) throw new Error(`logitsToSegments: フレーム数 ${frames} が 1 未満`);
+  assertFiniteGrid(logits, frames, "logitsToSegments: ロジット");
 
   const logProbabilities = new Float64Array(frames * CLASS_COUNT);
   for (let frame = 0; frame < frames; frame += 1) {

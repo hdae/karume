@@ -188,6 +188,39 @@ Deno.test("後処理: ロジットの要素数がフレーム数と合わなけ�
   assertThrows(() => logitsToSegments(new Float32Array(0), 0), Error, "フレーム数");
 });
 
+Deno.test("後処理: 非有限ロジットは座標を添えて落とす（全区間 a の .lab に化けない）", () => {
+  // 門が無いと NaN / +Infinity は log_softmax でその行を全て NaN にし、Viterbi の比較が
+  // 軒並み偽になって「発話全体が a」の**書式として正当な** `.lab` が返る（数値異常が
+  // どこにも表面化しない）。落ちること自体と、座標が名指しされることを縛る。
+  const finite = Float32Array.from(fixture.logits.flat());
+  // 対: 汚していない同じ配列は参照どおりの `.lab` を返す（常に落ちる門になっていない）。
+  assertEquals(toLab(logitsToSegments(finite, fixture.logits.length)), fixture.lab);
+  const at = 7 * LIPSYNC_CLASSES.length + 5; // frame 7 / class 5 = "N"
+  for (const [poison, shown] of [[NaN, "NaN"], [Number.POSITIVE_INFINITY, "Infinity"]] as const) {
+    const logits = finite.slice();
+    logits[at] = poison;
+    assertThrows(
+      () => logitsToSegments(logits, fixture.logits.length),
+      Error,
+      `logitsToSegments: ロジット frame 7 / class 5（N）が非有限（${shown}）`,
+    );
+  }
+});
+
+Deno.test("Viterbi: 非有限の log 事後確率は座標を添えて落とす", () => {
+  // `viterbiSmooth` は公開されていて単体で叩けるので、`logitsToSegments` の入口とは別に
+  // ここでも塞ぐ（−Infinity は「あり得ないクラス」に見えて、格子全体を凍らせる）。
+  const frames = 5;
+  const logProbabilities = new Float64Array(frames * LIPSYNC_CLASSES.length);
+  assertEquals(viterbiSmooth(logProbabilities, frames).length, frames, "全て有限なら通る");
+  logProbabilities[3 * LIPSYNC_CLASSES.length + 6] = Number.NEGATIVE_INFINITY;
+  assertThrows(
+    () => viterbiSmooth(logProbabilities, frames),
+    Error,
+    "viterbiSmooth: log 事後確率 frame 3 / class 6（pau）が非有限（-Infinity）",
+  );
+});
+
 // ---- ③ 平滑化と区間化の挙動 -------------------------------------------------
 
 /**
