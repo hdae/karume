@@ -75,6 +75,8 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       `curl -sS "https://huggingface.co/api/models/<owner>/<repo>/revision/main"` の `sha` 欄
 - [ ] `packages/models` の各ファミリ既定ソース定数（`*_DEFAULT_SOURCE` — ADR 0073）の
       `revision` へ記入
+- [ ] anima の素版リポ（`hdae/karume-anima`）を上げ直したら `ANIMA_BASE_SOURCE` も同様に更新
+      （既定ではないが pin の MUST は同じ）
 - [ ] 疎通: pin 済み SHA での `fromPretrained` が実 URL で通ること（SHA 指定は revision 解決
       リクエストが発生しない = オフライン起動可 — ADR 0038）
 - [ ] `deno task verify` → コミット

@@ -8,8 +8,9 @@
  * 縮退すると、配布者の意図した既定と実行が食い違ったまま気づけない）。
  * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
  *
- * NOTE: 公開配布リポの既定ソース（{@link ANIMA_DEFAULT_SOURCE}）もここに置く。manifest から
- * 導ける値ではなく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
+ * NOTE: 公開配布リポの pin 定数（{@link ANIMA_DEFAULT_SOURCE} / {@link ANIMA_BASE_SOURCE}）も
+ * ここに置く。manifest から導ける値ではなく「どの manifest を取りに行くか」の側なので、
+ * 配布形が持てない（ADR 0073）。
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -35,6 +36,23 @@ export const ANIMA_PIPELINE_MAJOR = 1;
 export const ANIMA_DEFAULT_SOURCE = {
   repo: "hdae/karume-anima-turbo",
   revision: "00c88039d6722cf79f923334e3a5791eb01366a6",
+} as const satisfies HubRepoRef;
+
+/**
+ * 素版（非 turbo）3 モデルが**同居する**配布リポ。`fromPretrained` の既定ではないので、
+ * 素版を組む利用者が `ANIMA_BASE_SOURCE` を渡し、`model` でモデルを選ぶ
+ * （1 リポ = 3 モデルなので、リポ参照だけでは 1 本に決まらない）。
+ *
+ * MUST: {@link ANIMA_DEFAULT_SOURCE} と同じ理由で revision は commit SHA で固定する —
+ * ブランチ・タグは配布側で付け替えられるので、公開済みのこのパッケージが読むバイト列が
+ * ネットワーク側の都合で黙って変わる（回復不能側の事故）。SHA 指定は revision 解決要求
+ * そのものを消すため、完全キャッシュ時のオフライン起動も同時に成立する（ADR 0038）。
+ */
+// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
+// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
+export const ANIMA_BASE_SOURCE = {
+  repo: "hdae/karume-anima",
+  revision: "4b6730fd96520c132f2e34ee9fe1169757e107f2",
 } as const satisfies HubRepoRef;
 
 const ROOT_KEYS: readonly string[] = ["scheduler", "defaults"];

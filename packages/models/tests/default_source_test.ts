@@ -14,7 +14,7 @@
 // ref 必須のままなので、この門の対象外（ADR 0073 決定 1）。
 
 import { assertEquals, assertMatch, assertRejects } from "@std/assert";
-import { ANIMA_DEFAULT_SOURCE } from "../src/anima/config.ts";
+import { ANIMA_BASE_SOURCE, ANIMA_DEFAULT_SOURCE } from "../src/anima/config.ts";
 import { IRODORI_DEFAULT_SOURCE } from "../src/irodori/config.ts";
 import { SBV2_DEFAULT_SOURCE } from "../src/sbv2/config.ts";
 import { AnimaPipeline } from "../src/anima/pipeline.ts";
@@ -79,6 +79,22 @@ Deno.test("irodori: ref 省略の fromPretrained は IRODORI_DEFAULT_SOURCE を�
 Deno.test("anima: ref 省略の fromPretrained は ANIMA_DEFAULT_SOURCE を取りに行く", async () => {
   const paths = await requestedPaths((options) => AnimaPipeline.fromPretrained(undefined, options));
   assertEquals(paths, [manifestPath(ANIMA_DEFAULT_SOURCE)]);
+});
+
+// 素版 3 モデルの同居リポ（既定ではないが pin の MUST は同じ — 公開面へ出す以上、付け替え
+// 可能な ref に戻ったら公開済みパッケージの読むバイト列が黙って変わる）。
+Deno.test("anima: 素版リポの pin は pin 済みリポ + 40 桁 hex の commit SHA", () => {
+  assertEquals(ANIMA_BASE_SOURCE.repo, "hdae/karume-anima");
+  assertMatch(ANIMA_BASE_SOURCE.revision, COMMIT_SHA);
+});
+
+Deno.test("anima: ANIMA_BASE_SOURCE を渡すと素版リポの pin がそのまま取得 URL に載る", async () => {
+  // SHA 固定なので revision 解決 API を 1 往復もしない（= オフライン起動可）。ここが
+  // `/api/models/.../revision/...` から始まったら pin が ref へ戻っている。
+  const paths = await requestedPaths((options) =>
+    AnimaPipeline.fromPretrained(ANIMA_BASE_SOURCE, options)
+  );
+  assertEquals(paths, [manifestPath(ANIMA_BASE_SOURCE)]);
 });
 
 // 文字列 ref の意味（`{ repo }` = main 追従）は pin 導入後も不変（ADR 0073 決定 2）。main は
