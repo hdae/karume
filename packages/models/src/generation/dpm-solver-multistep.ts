@@ -9,8 +9,9 @@
  *
  * MUST: ファミリ側（`src/anima/` など）から何も import しない。梯子・CFG scale・step 数は
  * すべて引数で、この向きの依存（generation → ファミリ）を作った時点で共通処理でなくなる。
- * {@link needsUncond} が `src/anima/sampler.ts` の同名述語と同じ式なのはこの制約の帰結で、
- * 意図的な重複（1 行の不変条件を借りるために依存の向きを反転させない）。
+ * {@link needsUncond} はこの制約の下でも共有できる形（更新則に依らない 1 行の不変条件）なので
+ * **定義はここ 1 本**で、ファミリ側（`src/anima/sampler.ts`）が import する — 依存の向きは
+ * ファミリ → generation のままで、写しを置かない。
  *
  * MUST: f32 の丸めを 1 演算ずつ `Math.fround` で踏む（`src/anima/sampler.ts` と同じ規律）。
  * JS の数値は f64 なので、まとめて計算してから丸めると torch の f32 逐次計算と最終桁が変わる。

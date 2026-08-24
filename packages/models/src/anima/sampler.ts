@@ -1,8 +1,11 @@
 /**
  * Anima のサンプラ — IR に載らない段を TS で持つ。
  *
- * 中身は 4 つ: ①`FlowMatchEulerDiscreteScheduler` の sigma 列 ②timestep の正弦波埋め込み
- * ③CFG の要否判定 ④CFG 合成 + Euler 更新。
+ * 中身は 3 つ: ①`FlowMatchEulerDiscreteScheduler` の sigma 列 ②timestep の正弦波埋め込み
+ * ③CFG 合成 + Euler 更新。CFG の要否判定（{@link needsUncond}）は更新則に依らない 1 行の
+ * 不変条件なので、ファミリ非依存の `src/generation/` から借りる（写しを持たない）。Anima 側の
+ * 事情はここに残す — turbo 運用の 2× の出所は step 削減とは独立に**この分岐**で、参照
+ * フィクスチャ側も CFG=1 では uncond 分岐を実行していない。
  *
  * MUST: f32 の丸めを 1 演算ずつ `Math.fround` で踏む。JS の数値は f64 なので、まとめて
  * 計算してから丸めると torch / numpy の f32 逐次計算と最終桁が変わる。
@@ -10,6 +13,8 @@
  * NOTE: `shift` / `numTrainTimesteps` は **manifest の `pipelineConfig.scheduler` が正本**
  * （配布物ごとに変わりうる数なので、ここに定数として持たない — ADR 0038 §1）。
  */
+
+import { needsUncond } from "../generation/dpm-solver-multistep.ts";
 
 const f32 = Math.fround;
 
@@ -91,18 +96,6 @@ export const timestepsProj = (
   }
   return out;
 };
-
-/**
- * uncond 側（ネガティブプロンプトの text encode と、毎 step の DiT forward）が要るか。
- *
- * `guidance === 1` のとき CFG 式 `uncond + 1·(cond − uncond)` は数学的に `cond` へ潰れるので、
- * uncond 側の計算は**丸ごと不要**になる（turbo 運用の 2× の出所は step 削減とは独立にここ）。
- *
- * MUST: 素朴に「両方計算して合成する」に倒さない。浮動小数の丸めでは
- * `uncond + (cond − uncond)` が `cond` とビット一致する保証が無く（Sterbenz の補題は一般の
- * 値では成立しない）、参照フィクスチャ側も CFG=1 では uncond 分岐を実行していない。
- */
-export const needsUncond = (guidance: number): boolean => guidance !== 1;
 
 /**
  * CFG 混合（`uncond + scale·(cond − uncond)`）と Euler 更新（`x + Δσ·noise`）。

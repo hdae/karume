@@ -5,7 +5,8 @@
  *
  * 1. トークナイザ 2 本（Qwen2 BPE / T5 Unigram）でプロンプトを id 列にする
  * 2. `text_encoder`（Qwen3）→ `text_conditioner` → 512 ゼロ埋め
- * 3. `transformer`（S 形 DiT）を N step 回し、ホスト側で CFG 合成 + Euler 更新
+ * 3. `transformer`（S 形 DiT）を N step 回し、ホスト側で CFG 合成 + 更新（更新則は manifest の
+ *    `pipelineConfig.scheduler.type` — Euler / DPM++ 2M）
  * 4. latent を per-channel 逆正規化 → `vae_decoder` を**常時タイル**で通す
  * 5. RGBA 化して返す（PNG 化は `encodePng` — パイプライン非依存の共通処理）
  *
@@ -62,9 +63,15 @@ import {
   ANIMA_PIPELINE_MAJOR,
   ANIMA_PIPELINE_NAME,
   type AnimaPipelineConfig,
+  type AnimaSamplerType,
   parseAnimaPipelineConfig,
 } from "./config.ts";
-import { cfgEulerStep, needsUncond, sigmaSchedule, timestepsProj } from "./sampler.ts";
+import { cfgEulerStep, sigmaSchedule, timestepsProj } from "./sampler.ts";
+import {
+  type DpmSolverMultistepInput,
+  dpmSolverMultistepStep,
+  needsUncond,
+} from "../generation/dpm-solver-multistep.ts";
 import {
   ANIMA_LATENTS_MEAN,
   ANIMA_LATENTS_STD,
@@ -113,7 +120,7 @@ export type AnimaGenerateRequest = {
   readonly prompt: string;
   /**
    * ネガティブプロンプト。`guidanceScale === 1` では uncond 側を 1 度も計算しないので、
-   * **指定すると fail loudly**（効かないノブを黙って受けない — `sampler.ts` の `needsUncond`）。
+   * **指定すると fail loudly**（効かないノブを黙って受けない — {@link needsUncond}）。
    */
   readonly negativePrompt?: string;
   readonly steps?: number;
@@ -376,6 +383,56 @@ export const resolveNegativePrompt = (
     );
   }
   return negativePrompt;
+};
+
+/**
+ * 1 step ぶんの更新結果。`previousX0` は**そのまま次 step の入力へ持ち回る**状態で、
+ * DPM++ 2M の 2 次項が読む唯一の履歴（Euler は履歴を持たないので常に `undefined`）。
+ */
+export type AnimaDenoiseUpdate = {
+  readonly sample: Float32Array<ArrayBuffer>;
+  readonly previousX0: Float32Array<ArrayBuffer> | undefined;
+};
+
+/**
+ * サンプラ種別による更新則の選択点（denoise ループが 1 step ごとに呼ぶ**唯一の分岐**）。
+ *
+ * MUST: `"euler"` は `cfgEulerStep` と Δσ の綴りを 1 ビットも変えない — `scheduler.type` を
+ * 持たない既存の配布 manifest は既定 `"euler"` に落ちる（`config.ts`）ので、**配布済みリポの
+ * 出力画像がここでビット同一のまま**でなければならない。
+ *
+ * CFG 合成はどちらの更新則も自分の内側で行う（同じ式）。uncond 側 forward の要否は
+ * {@link needsUncond} が `guidance` だけから決めるので、**種別に依存しない** — 呼び出し側の
+ * 分岐は「何 step 回すか」も「uncond を計算するか」も共通のまま。
+ *
+ * NOTE: 入力の形は {@link DpmSolverMultistepInput} をそのまま借りる（Euler が読むのは
+ * `sigmas` / `index` / `guidance` / 出力 2 本で、DPM++ 2M の入力の部分集合）。
+ * NOTE: `export` は GPU 無しで選択を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
+ */
+export const denoiseStep = (
+  type: AnimaSamplerType,
+  input: DpmSolverMultistepInput,
+): AnimaDenoiseUpdate => {
+  switch (type) {
+    case "euler": {
+      const { sample, cond, uncond, guidance, sigmas, index } = input;
+      return {
+        sample: cfgEulerStep(
+          sample,
+          cond,
+          uncond,
+          Math.fround(sigmas[index + 1] - sigmas[index]),
+          guidance,
+        ),
+        previousX0: undefined,
+      };
+    }
+    case "dpmpp-2m": {
+      const update = dpmSolverMultistepStep(input);
+      return { sample: update.sample, previousX0: update.x0 };
+    }
+  }
 };
 
 /** S 形 DiT の step 間で変わらない材料（rope 表と patch 幾何は解像度だけの関数）。 */
@@ -812,6 +869,8 @@ export class AnimaPipeline {
         const padded = embeds.map((embed) => padSequence(embed, rows));
         const elements = plan.latentShape.reduce((a, b) => a * b, 1);
         let current = new Randn(seed).normals(elements);
+        // DPM++ 2M が読む唯一の履歴（step 0 では無い）。Euler 経路では常に undefined のまま。
+        let previousX0: Float32Array<ArrayBuffer> | undefined;
         for (let index = 0; index < steps; index += 1) {
           const proj: Tensor = {
             dtype: "f32",
@@ -824,13 +883,17 @@ export class AnimaPipeline {
           };
           const predictions: Float32Array[] = [];
           for (const embed of padded) predictions.push(await predict(current, proj, embed));
-          current = cfgEulerStep(
-            current,
-            predictions[0],
-            predictions[1],
-            Math.fround(sigmas[index + 1] - sigmas[index]),
+          const update = denoiseStep(state.config.scheduler.type, {
+            sample: current,
+            cond: predictions[0],
+            uncond: predictions[1],
             guidance,
-          );
+            sigmas,
+            index,
+            previousX0,
+          });
+          current = update.sample;
+          previousX0 = update.previousX0;
           await emit({
             kind: "denoise-step",
             step: index + 1,

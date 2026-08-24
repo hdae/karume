@@ -1,7 +1,7 @@
 // `AnimaPipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る
 // （実 GPU の E2E は P3 波 2）。
 //
-// ここで押さえるのは 4 つ:
+// ここで押さえるのは 5 つ:
 //  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反と資産の解析を落とす
 //     （未知 model / pipeline 名 / 未知 major / 未知 quant / 資産の不在）。落とす位置が
 //     ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
@@ -13,11 +13,16 @@
 //  ④ 構築の `signal` が**入口でも実行開始後でも**効く（DL 完了後の組み立てが中断不能だと、
 //     UI の中止ボタンが無反応になる窓ができる）。後者は「最初の段境界」までを空資産で見る
 //     — それより先の境界は実資産と GPU が要るのでここでは見られない。
+//  ⑤ denoise ループの更新則の選択点（`denoiseStep`）が `scheduler.type` どおりに分かれ、
+//     `"euler"` は履歴を持たない（実 GPU の PNG 門は既定の euler しか通らないので、
+//     dpmpp-2m 側は緑のままでも壊れうる）。
 //
 // NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
 // `session_options_test.ts` にある。
 
 import {
+  assert,
+  assertAlmostEquals,
   assertEquals,
   assertNotStrictEquals,
   assertRejects,
@@ -25,7 +30,12 @@ import {
   assertThrows,
 } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import { AnimaPipeline, latentSnapshot, resolveNegativePrompt } from "../src/anima/pipeline.ts";
+import {
+  AnimaPipeline,
+  denoiseStep,
+  latentSnapshot,
+  resolveNegativePrompt,
+} from "../src/anima/pipeline.ts";
 import { assertAcceptableSeed, Randn } from "../src/anima/random.ts";
 
 const FILE = {
@@ -88,6 +98,43 @@ Deno.test("fromAssets: pipelineConfig のスキーマ違反は構築時に落ち
     () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "pipelineConfig.scheduler: 無い",
+  );
+});
+
+/** `manifestText` が焼いている `pipelineConfig` と同じ形（`scheduler.type` を差し替えるため）。 */
+const pipelineConfig = (scheduler: Record<string, unknown>): Record<string, unknown> => ({
+  scheduler,
+  defaults: { steps: 10, guidanceScale: 1, resolution: { width: 1024, height: 1024 } },
+});
+
+Deno.test("fromAssets: scheduler.type を宣言した manifest も同じ位置まで進む（門の順序は不変）", async () => {
+  // 席を足しても構築段の順序（manifest 契約 → 資産 → GPU）が動いていないことを見る。
+  // 正しい type を宣言した manifest は契約検査を抜けて資産まで進み、「門の順序の対偶」と
+  // **同じ文言**で落ちる。
+  const manifest = parseManifest(
+    manifestText({
+      pipelineConfig: pipelineConfig({ type: "dpmpp-2m", shift: 3, numTrainTimesteps: 1000 }),
+    }),
+  );
+  await assertRejects(
+    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    Error,
+    "資産 'tokenizer' が無い",
+  );
+});
+
+Deno.test("fromAssets: scheduler.type の未知値は資産に触る前に落ちる", async () => {
+  // 綴り違いが既定の euler へ黙って縮退すると、配布者が宣言した更新則と実行が食い違ったまま
+  // 気づけない。資産が空でも**型の文言**で落ちる = 契約検査が資産解析より先にある。
+  const manifest = parseManifest(
+    manifestText({
+      pipelineConfig: pipelineConfig({ type: "dpm-solver++", shift: 3, numTrainTimesteps: 1000 }),
+    }),
+  );
+  await assertRejects(
+    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    Error,
+    "pipelineConfig.scheduler.type: 期待 'euler' / 'dpmpp-2m'",
   );
 });
 
@@ -155,7 +202,8 @@ Deno.test("fromAssets: 実行開始後に届いた中断も最初の段境界で
 
 Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら落とす", () => {
   // 効かないノブを黙って受けると、ユーザーは指定したつもりで実際は 1 文字も使われない
-  // （guidance=1 は uncond 分岐を丸ごと計算しない — `sampler.ts` の `needsUncond`）。
+  // （guidance=1 は uncond 分岐を丸ごと計算しない — `generation/dpm-solver-multistep.ts` の
+  // `needsUncond`）。
   assertThrows(
     () => resolveNegativePrompt("worst quality", undefined, 1),
     Error,
@@ -199,6 +247,40 @@ Deno.test("assertAcceptableSeed: 生成の入口と Randn が同じ受理集合�
     assertEquals(direct.message, viaRandn.message, `seed ${seed} の診断`);
   }
   for (const seed of [0, 42, Number.MAX_SAFE_INTEGER]) assertAcceptableSeed(seed);
+});
+
+Deno.test("denoiseStep: scheduler.type が更新則を選ぶ（同じ入力で euler と dpmpp-2m が割れる）", () => {
+  // 梯子と入力は手で置いた 1 要素・4 step。`index 2` は **2 次項が実際に効く唯一の位置** —
+  // 両端（0 / 3）は 1 次に落ち、`index 1` は λ_s1 = −inf（先頭 σ が厳密に 1）で 2 次項が
+  // ちょうど 0 に落ちる（更新則の doc の ∓inf 節）。
+  //
+  // 期待値は diffusers の式を f64 で解いた手計算（σ=[1,.5,.25,.125,0] / x=1 / v=2 / 直前 x0=0）:
+  //   x0 = x − σ_s0·v = 0.5
+  //   1 次項: x + (σ_t − σ_s0)·v = 0.75 —— flow matching では DPM++ の 1 次が Euler と恒等
+  //   2 次項: h = log(7/3)・r0 = (λ_s0 − λ_s1)/h → 0.75 + 0.0964055 = 0.8464055
+  // 2 つの経路の差は**2 次項ちょうど**なので、選択が逆さまでも 2 次項が落ちても値が動く。
+  const input = {
+    sample: Float32Array.from([1]),
+    cond: Float32Array.from([2]),
+    uncond: undefined,
+    guidance: 1,
+    sigmas: Float32Array.from([1, 0.5, 0.25, 0.125, 0]),
+    index: 2,
+    previousX0: Float32Array.from([0]),
+  };
+
+  // euler は履歴を渡されても読まない（配布済み manifest の既定経路がここで動かない）。
+  const euler = denoiseStep("euler", input);
+  assertEquals([...euler.sample], [0.75]);
+  assertEquals(euler.previousX0, undefined, "Euler は次 step へ渡す履歴を持たない");
+
+  const dpm = denoiseStep("dpmpp-2m", input);
+  assertAlmostEquals(dpm.sample[0], 0.8464055, 1e-6);
+  // 次 step へ渡すのはこの step の x0 予測そのもの。ここが切れると DPM++ 2M は黙って 1 次
+  // （= Euler と同じ値）へ落ちる。
+  const carried = dpm.previousX0;
+  assert(carried !== undefined, "DPM++ 2M は x0 を次 step へ持ち回る");
+  assertEquals([...carried], [0.5]);
 });
 
 Deno.test("latentSnapshot: 束縛した時点の latent を写す（step を進めても写しは変わらない）", () => {

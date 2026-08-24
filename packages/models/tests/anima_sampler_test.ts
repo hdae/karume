@@ -4,7 +4,9 @@
 // **実 GPU / 実資産の E2E と同じ波**で復帰させる（P3 波 2）。ここは形と不変条件を押さえる。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { cfgEulerStep, needsUncond, sigmaSchedule, timestepsProj } from "../src/anima/sampler.ts";
+import { cfgEulerStep, sigmaSchedule, timestepsProj } from "../src/anima/sampler.ts";
+// `needsUncond` の定義は更新則に依らない共通処理側にある（`sampler.ts` は import して使う）。
+import { needsUncond } from "../src/generation/dpm-solver-multistep.ts";
 
 /** `models/karume-anima-turbo/karume.json` の `pipelineConfig.scheduler` と同じ値（形の検査用）。 */
 const SHIFT = 3;

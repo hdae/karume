@@ -24,7 +24,8 @@ const withDefaults = (patch: Record<string, unknown>): Record<string, unknown> =
 
 Deno.test("parseAnimaPipelineConfig: 実配布物の形を読む", () => {
   const config = parseAnimaPipelineConfig(VALID);
-  assertEquals(config.scheduler, { shift: 3, numTrainTimesteps: 1000 });
+  // `type` を持たない実配布物は既定の `"euler"` に落ちる（下の「省略時は euler」も参照）。
+  assertEquals(config.scheduler, { type: "euler", shift: 3, numTrainTimesteps: 1000 });
   assertEquals(config.defaults.steps, 10);
   assertEquals(config.defaults.guidanceScale, 1);
   assertEquals(config.defaults.resolution, { width: 1024, height: 1024 });
@@ -42,6 +43,48 @@ Deno.test("parseAnimaPipelineConfig: negativePrompt は任意（欄ごと無く�
   });
   assertEquals(config.defaults.negativePrompt, undefined);
   assertEquals(config.defaults.resolution, { width: 1344, height: 768 });
+});
+
+Deno.test("parseAnimaPipelineConfig: scheduler.type は省略時 euler（配布済み manifest の挙動を固定）", () => {
+  // `type` は additive に足した optional 席（ADR 0038 §1）。既に配られたリポは migrate
+  // できないので、欄が無い manifest が別の更新則へ動いた瞬間に出力画像が黙って変わる。
+  assertEquals(parseAnimaPipelineConfig(VALID).scheduler.type, "euler");
+  assertEquals(
+    parseAnimaPipelineConfig({
+      ...VALID,
+      scheduler: { ...VALID.scheduler, type: "euler" },
+    }).scheduler.type,
+    "euler",
+  );
+});
+
+Deno.test("parseAnimaPipelineConfig: scheduler.type は 2 語だけを受ける", () => {
+  assertEquals(
+    parseAnimaPipelineConfig({
+      ...VALID,
+      scheduler: { ...VALID.scheduler, type: "dpmpp-2m" },
+    }).scheduler,
+    { type: "dpmpp-2m", shift: 3, numTrainTimesteps: 1000 },
+  );
+  // 未知値・非文字列は期待と実際を並べて落とす（黙って既定の euler へ縮退させない）。
+  const unknown = assertThrows(
+    () => parseAnimaPipelineConfig({ ...VALID, scheduler: { ...VALID.scheduler, type: "dpm++" } }),
+    Error,
+    "pipelineConfig.scheduler.type: 期待 'euler' / 'dpmpp-2m'",
+  );
+  assertEquals(unknown.message.includes("実際 'dpm++'"), true, unknown.message);
+  const notString = assertThrows(
+    () => parseAnimaPipelineConfig({ ...VALID, scheduler: { ...VALID.scheduler, type: 2 } }),
+    Error,
+    "pipelineConfig.scheduler.type: 期待",
+  );
+  assertEquals(notString.message.includes("実際 2"), true, notString.message);
+  // 大文字違い・前後の空白も受けない（受理集合は 2 語の完全一致）。
+  assertThrows(
+    () => parseAnimaPipelineConfig({ ...VALID, scheduler: { ...VALID.scheduler, type: "Euler" } }),
+    Error,
+    "実際 'Euler'",
+  );
 });
 
 Deno.test("parseAnimaPipelineConfig: 未知キーは fail loudly（綴り違いを既定へ縮退させない）", () => {

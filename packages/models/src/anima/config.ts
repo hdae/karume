@@ -58,7 +58,7 @@ export const ANIMA_CURRENT = {
 } as const satisfies HubRepoRef;
 
 const ROOT_KEYS: readonly string[] = ["scheduler", "defaults"];
-const SCHEDULER_KEYS: readonly string[] = ["shift", "numTrainTimesteps"];
+const SCHEDULER_KEYS: readonly string[] = ["type", "shift", "numTrainTimesteps"];
 const DEFAULTS_KEYS: readonly string[] = [
   "steps",
   "guidanceScale",
@@ -67,8 +67,34 @@ const DEFAULTS_KEYS: readonly string[] = [
 ];
 const RESOLUTION_KEYS: readonly string[] = ["width", "height"];
 
-/** `FlowMatchEulerDiscreteScheduler` の構成（配布物ごとに変わりうるので manifest が持つ）。 */
+/**
+ * denoise の更新則（サンプラ種別）。**manifest の宣言だけが決める** — 生成要求側に上書き席は
+ * 置かない（資産と対で配布者が選ぶノブなので、呼び出しごとに振れる口を作ると「配布者の推奨」と
+ * 「実際に走った更新則」が黙って割れる）。
+ *
+ * - `"euler"` — `FlowMatchEulerDiscreteScheduler` の 1 次更新（`sampler.ts` の `cfgEulerStep`）。
+ * - `"dpmpp-2m"` — DPM++ 2M（`src/generation/dpm-solver-multistep.ts`）。
+ */
+export type AnimaSamplerType = "euler" | "dpmpp-2m";
+
+const SAMPLER_TYPES: readonly AnimaSamplerType[] = ["euler", "dpmpp-2m"];
+
+/**
+ * `scheduler.type` 省略時の値。
+ *
+ * MUST: 既定は `"euler"` — `type` は additive に足した optional 席（ADR 0038 §1）なので、
+ * **この欄を持たない既存の配布 manifest は 1 バイトも変えずに従来の更新則のまま**でなければ
+ * ならない（既に配られたリポは migrate できない）。
+ */
+const DEFAULT_SAMPLER_TYPE: AnimaSamplerType = "euler";
+
+/**
+ * scheduler の構成（配布物ごとに変わりうるので manifest が持つ）。
+ * `type` は省略可（既定 {@link DEFAULT_SAMPLER_TYPE}）で、parse 済みの値は**常に埋まっている**
+ * — 既定の解決はこの 1 箇所に閉じ、消費側（pipeline）は分岐を持たない。
+ */
 type AnimaScheduler = {
+  readonly type: AnimaSamplerType;
   readonly shift: number;
   readonly numTrainTimesteps: number;
 };
@@ -163,11 +189,34 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
   return { steps, guidanceScale, resolution, negativePrompt };
 };
 
+/**
+ * `scheduler.type` を読む（欄ごと無ければ既定）。未知値は**期待と実際を並べて** fail loudly —
+ * 綴り違いが黙って既定へ縮退すると、配布者が宣言した更新則と実行が食い違ったまま気づけない。
+ */
+const parseSamplerType = (
+  record: Record<string, unknown>,
+  where: string,
+): AnimaSamplerType => {
+  if (!Object.hasOwn(record, "type")) return DEFAULT_SAMPLER_TYPE;
+  const value = record["type"];
+  const accepted = typeof value === "string"
+    ? SAMPLER_TYPES.find((candidate) => candidate === value)
+    : undefined;
+  if (accepted === undefined) {
+    throw new Error(
+      `${where}.type: 期待 ${SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
+        `（実際 ${typeof value === "string" ? `'${value}'` : String(value)}）`,
+    );
+  }
+  return accepted;
+};
+
 const parseScheduler = (raw: unknown): AnimaScheduler => {
   const where = "pipelineConfig.scheduler";
   const record = readRecord(raw, where);
   assertAllowedKeys(record, SCHEDULER_KEYS, where);
   return {
+    type: parseSamplerType(record, where),
     shift: readNumber(
       record,
       "shift",
