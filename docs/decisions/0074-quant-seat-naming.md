@@ -1,9 +1,11 @@
 # 0074: quant 席の命名規則 — 格納語彙 1 本 + 軸ごとのノブ
 
-- Status: accepted（2026-08-21 — ユーザー裁定「起票お願いします」。**適用は 0.5.0 の breaking
-  波**で、`linearCompute` / `attentionCompute` の値 `"i8a8"` → `"a8"` の改名・
-  [0075](0075-quant-presentation.md) の
-  `karume/4` 繰り上げ・SBV2 の yomi 依存分離と同乗させる。実装は未着手）
+- Status: implemented（2026-08-25・0.5.0 の breaking 波 — 決定 6 の移行表どおりに適用済み。
+  recipe 側の席名一斉改名と `karume/4` emit、deno 側の `linearCompute` / `attentionCompute` の値
+  `"i8a8"` → `"a8"` 改名まで完了し、[0075](0075-quant-presentation.md) の繰り上げと同乗した。
+  **公開 4 リポの再アップロードと pin 更新（[0073](0073-models-source-pin.md)）は未** —
+  リリース段で行う（[release-runbook](../release-runbook.md)）。SBV2 の yomi 依存分離は同乗せず
+  0.6.0 へ送った〈backlog〉。起票は 2026-08-21 のユーザー裁定「起票お願いします」）
 - Date: 2026-08-21
 - 関連: ADR [0041](0041-manifest-v2.md)（`presets` → `quants` の語彙）/
   [0025](0025-w8a8-linear-execution.md)・[0030](0030-attention-a8-execution.md)（`i8a8` の出自）/

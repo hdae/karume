@@ -22,6 +22,15 @@
 chain e2e が**実行前の sha256 検査**で全件赤になるため沈黙誤値ではなく、復旧も canonical
 source で焼き直すだけ — 埋め方は eval-images と同じ。
 
+## フル走行の `deno task verify` が GPU VRAM 圧で稀にフレークする
+
+12GiB の GPU に GB 級モデルを連続投入するため、**フル走行では稀に `GpuOutOfMemoryError` /
+`GpuDeviceLostError` でどれか 1 本が落ちる**。落ちるテストは毎回違い（特定の 1 本に固有の
+欠陥ではない）、**失敗したファイルを単独で再走すると常に緑**になる。2026-08-25 に
+verify を並行させた走りで 2 回観測（単独走行でも過去に観測あり）。
+
+運用の回避 = **失敗したファイルを単独で再走して確認する**（緑ならフレーク）。
+
 ## Metal（Apple GPU）で attention i8a8 と conv2d の 2 経路一致が崩れる
 
 実機 **Apple M2 / Deno 2.9.4** で `deno test -A packages/runtime/tests/` が 6 本赤になる

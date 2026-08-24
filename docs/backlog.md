@@ -7,31 +7,46 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — レビュー消化 → 0.4.3 リリース → 0.5.0 breaking 波
+## now — 0.5.0 breaking 波のリリース段
 
-波 J（量子化探索・第 2 段）と波 L（anima 素版 + バリアント同梱）は **2026-08-24 に全クローズ**。
-結果と実測の正本は ADR [0050](decisions/0050-irodori-quant-series.md) 追記 2 /
+波 J（量子化探索・第 2 段）と波 L（anima 素版 + バリアント同梱）・広域レビュー
+（`.claude/reviews/2026-08-24_283669a`）の消化はクローズ済み。結果と実測の正本は ADR
+[0050](decisions/0050-irodori-quant-series.md) 追記 2 /
 [0077](decisions/0077-model-version-naming.md) と
 [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) /
 [research/2026-08-22-anima-base-steps.md](research/2026-08-22-anima-base-steps.md)。
 
-- **広域レビュー（`.claude/reviews/2026-08-24_283669a`）の消化**: 外部フィードバック 7 件の
-  対応と併せて公開面が 4 件増えた（`ANIMA_BASE_SOURCE` / `animaLatents()` /
-  `approximatePreview` / `AssetProgress` の per-file 欄）。docs 同期までがこの波。
-- **0.4.3 の JSR リリース**: 0.4.2 以降の未リリース差分（上の公開面 4 件 + anima 構築経路の
-  AbortSignal 中断 + hub の進捗欄）を patch で出す。破壊的変更は載せない。手順の正本 =
-  [release-runbook](release-runbook.md)。
-- **0.5.0 breaking 波の準備**: 束の骨子は later 節の該当項目が正本（quant 席名の規則化 /
-  `linearCompute` の値改名 / 表示欄 + `karume/4` / yomi 依存分離）。**現行の席名・ノブ名は
-  改名予定**。
+**0.5.0 breaking 波の実装は完了**（2026-08-25）:
 
-持ち越しの注意（次の再アップロード・次の波で先に思い出す）:
+- quant 席名の一斉改名（ADR [0074](decisions/0074-quant-seat-naming.md) 移行表）・
+  `linearCompute` / `attentionCompute` の値 `"i8a8"` → `"a8"`・`karume/4` 繰り上げと表示欄
+  （ADR [0075](decisions/0075-quant-presentation.md)）
+- ADR [0038](decisions/0038-manifest-v1.md) §7 の据え置き席 2 つ（越境コンポーネント参照・
+  quant の `requiredLimits`。後者の DL 前チェック結線は後続 — release 節）
+- `fromPretrained` の `ref` 必須化・`*_CURRENT` 定数の公開・hub の revision 未指定 warn
+  （ADR [0073](decisions/0073-models-source-pin.md) 追記 2026-08-25）
+- anima の `scheduler.type` 席と DPM++ 2M の denoise 結線・estimate の恒等別名再現
+  （レビュー R6V-2）・irodori の構築 AbortSignal
 
-- irodori の `w4` 席は HF 公開済み（`67e9584c`）だが **pin は据え置き** — 使うには
-  `revision: "main"` の明示が要る（0.5.0 の pin 更新で解消する）。
-- local の `models/karume-anima/` には**配布スキップ裁定（2026-08-24）の `w4` / `w4-a8-s16`
-  席が組み込まれたまま**なので、karume-anima を上げ直す前に裁定を確認する。
-- anima のサンプラーは Euler 固定（manifest に種別欄が無い — 波 L の残置）。
+残りはリリース段の 4 手（手順の正本 = [release-runbook](release-runbook.md)）:
+
+1. **サンプラーの視認 A/B**（**出荷バイトで** — sim の A/B は同一リグ内でのみ有効）。採用裁定が
+   出たら recipe 側に `scheduler.type` を emit する席を足す（現状は未 emit = 省略 → euler）。
+2. **配布形 5 本の焼き直し → 公開 4 リポ（jvnv / irodori / anima-turbo / anima）の再アップ
+   ロード + pin 更新**。`karume/4` 断絶なので 4 リポ同時で、越境参照の公開順序 MUST は
+   runbook §0。5 本目の `karume-sbv2-fn` は非公開のまま焼き直しだけ（公開は parked）。
+3. **0.5.0 の lockstep bump**: 3 JSR パッケージ + exporter の version・`^` 依存・`deno.lock`
+   に加えて **`uv.lock` の再生成も同乗 MUST**（0.4.3 で落として CI 赤 → 追随コミットになった）。
+   焼き直しは bump の**後**（runbook §0）。JSR 公開済みは 0.4.3 まで（2026-08-25 Release 確認済み）
+   — 次に出るのが 0.5.0。
+4. push → CI 緑 → GitHub Release を published にして publish 発火。
+
+持ち越しの注意（次の再アップロードで先に思い出す）:
+
+- irodori の `i8+dit4` 席（旧 `w4`）は HF 公開済み（`67e9584c`）だが **pin は据え置き** —
+  使うには `revision: "main"` の明示が要る（この波の pin 更新で解消する）。
+- local の `models/karume-anima/` には**配布スキップ裁定（2026-08-24）の `f16+dit4` /
+  `f16+dit4-attn8-s16` 席が組み込まれたまま**なので、karume-anima を上げ直す前に裁定を確認する。
 
 ## 消化済み（波 K・リリース + 公開 — 2026-08-20〜21）
 
@@ -77,26 +92,25 @@ autoregressive 波の**残項目（波外へ送り）**:
   [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md) §8。
 - **irodori adaLN i8 の出荷リグ A/B（起票 2026-08-24）**: sim で効いた adaLN i8（+13.1 MiB）が
   出荷リグでも読み上げ方を改善するかは未検証（sim → 出荷の転移限界 — 同 research §2）。
-  復活 = w4 席の品質不満、またはサイズ最適化の実需。
+  復活 = `i8+dit4` 席（旧 `w4`）の品質不満、またはサイズ最適化の実需。
 - **生成 API 波（起票 2026-08-19 — 全体レビューの Codex 提案を採用裁定）**: 静的配線と
   リクエストを分離した `GenerationProgram`（setup 時に全結線を検証）+ stateful sequence API
   （`for await` の token イベント・EOS 停止・cancel・多ターン継続）+ `last_row` の runner 側
   導出（ADR 0068 追記 4 の所有関係のみ reopen）。`generateGreedy` は parity 検収用の内部
   ヘルパへ格下げ。LLM 実需（streaming / チャット）に直結する最大の API 波。
-- **0.5.0 breaking 波（起票 2026-08-21・ユーザー裁定）**: 破壊的変更を 1 回にまとめ、公開 4 リポ
-  （jvnv / irodori / anima-turbo / anima — 波 L で 1 増）の再アップロードと pin 更新（ADR 0073）を
-  1 度で済ませる束。①`linearCompute` の値を
-  `"i8a8"` → `"a8"` へ改名（ノブが決めているのは活性の扱いだけで、格納形は資産ヘッダが正 —
-  `attentionCompute` も同値）②quant 席名の規則化（ADR
-  [0074](decisions/0074-quant-seat-naming.md) — 格納語彙を `f32/f16/i8/i4` の 1 本へ・
-  attention の活性は `attn8`・移行表は ADR）③プリセットの表示名 / 説明欄と `karume/4`
-  繰り上げ（ADR [0075](decisions/0075-quant-presentation.md) — quant の allowlist が厳格なので
-  optional 追加でも旧クライアントは読めない）④下の yomi 依存分離。**format 断絶は 1 回だけ** —
-  ②③は同じ波でしか出さない。
-- **SBV2 の yomi 依存分離（ユーザー方針 2026-08-20・breaking・時期未定 — 早い段階で
-  実施したい意向）**: SBV2 パイプラインの入力を「yomi の解析結果だけ受ける」形へ再設計し、
-  `@hdae/yomi` を models の依存から外す。ADR 0072 の注入席は結合を素通しに留めてあり、
-  その際は overlay 解決が呼び手側へ移る。
+- **SBV2 の yomi 依存分離（0.6.0 波 — ユーザー方針 2026-08-20・breaking。0.5.0 からは
+  2026-08-25 に切り離し）**: SBV2 パイプラインの入力を「yomi の解析結果だけ受ける」形へ
+  再設計し、`@hdae/yomi` を models の依存から外す。ADR 0072 の注入席は結合を素通しに留めて
+  あり、その際は overlay 解決が呼び手側へ移る。0.5.0 の設計検討で出た知見（延期の理由でも
+  ある）:
+  - 入力は **yomi の返り値が構造的に満たす karume 所有型** `{ prosody: Sbv2Prosody, words:
+    Sbv2Word[] }` にできる — 変換関数を利用者に書かせる必要は無く、入口の門が核クランプ等の
+    正規化を担う（今 `toSbv2Prosody` がやっていること）。
+  - `moraTones` / `moraToPhones`（現状 yomi から import）は `Sbv2Mora` の `consonant` /
+    `vowel` から**吸収できる** — 言語テーブルを karume 側へ持つ必要は無く、意味論の正本は
+    上流 SBV2 の参照に置いたままでよい。
+  - 一方で「呼び手が yomi を直接叩いて渡す」だけだと生の手数が増えるため、ヘルパの整備余地が
+    残る。そこの設計が済んでいないので 0.5.0 には同乗させなかった。
 - **モデルカード定型文の条件出し**（公開前レビュー minor・2026-08-21）: `shared/` パスの
   説明文が shared/ を持たないリポ（irodori / anima）でも出る — 空回りだが無害。core
   `modelcard.py` の該当文を shared/ 実在時のみ出す形へ。
@@ -131,14 +145,12 @@ autoregressive 波の**残項目（波外へ送り）**:
   （現状は onEvent の throw が step 粒度の中断手段 — 席は温存）。**構築経路の AbortSignal は
   anima で実装済み**（`AnimaPipelineOptions.signal` — 段境界での検査・取得層への透過・
   `signal.reason` 素通し）なので、流儀の先例はそこ。
-- **構築 AbortSignal の他ファミリ横展開（起票 2026-08-24）**: irodori も GB 級資産で anima と
-  同じ「取得と組み立ての最中に中止したい」窓を持つ。移植は 3 点セット — `signal` を各
-  `*PipelineOptions` へ移設 / 段境界の検査 / 中断時の `ownsGpu` 解放。0.5.0 候補。
-- **estimate の `transientBytes` が恒等別名化を再現しない（起票 2026-08-24・レビュー R6V-2）**:
-  `estimateSessionMemory` は全ノード出力へ `alloc` を通すが、実行計画側（`derivePlanSlots`）は
-  reshape / 恒等 expand の出力を `alloc` せず元 slot へ `retain` する。中間ピークが過大に出る
-  うえ、`UNACCOUNTED`（入っていない項目を全部書く MUST）にも該当項が無い。0.5.0 で設計検討
-  （別名判定の源を estimator と共有するか、`UNACCOUNTED` に 1 項足すか）。
+- **`AssetProgress.path` が越境参照を識別できない（起票 2026-08-25・優先度低）**: 進捗イベントの
+  `path` は文字列 1 本で、越境コンポーネント参照（ADR
+  [0038](decisions/0038-manifest-v1.md) §7 追記）が入った以上**別リポの同名 path と区別が
+  付かない**（取得層の同一性キーは `fileRefKey` へ移ったが、公開イベント側は `path` のまま）。
+  消費側がファイル別の進捗を path でキーにすると 2 本が混ざる。埋め方は `repo` / `revision` を
+  イベントへ足すか `fileRefKey` を出すか — 公開面の追加なので breaking 波に乗せる。
 - **anima 大解像度の省 RAM タイル逐次組み立て（起票 2026-08-24 裁定）**: VAE decode のタイルを
   貯めずに順次合成できれば、E-2 の入口拒否で受理集合から外した 8 解像度
   （1456/1488/1584/1648/1680/1776/1840/1936px）を受理へ戻せる。

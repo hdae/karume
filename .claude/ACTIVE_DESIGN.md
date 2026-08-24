@@ -7,44 +7,47 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-24
+> Last updated: 2026-08-25
 
 ## Now
 
-- **広域レビュー（`.claude/reviews/2026-08-24_283669a`）の消化中 — 次は 0.4.3 bump → 0.5.0**。
-  外部フィードバック 7 件は対応済み。E / C 群の修正は `283669a..HEAD` で消化が進んでおり、
-  残りは docs 同期。閉じたら **0.4.3 を lockstep bump**（0.4.2 以降の未リリース差分を patch で
-  出す・破壊的変更は載せない）、その先が 0.5.0 の breaking 波。手順の正本 =
-  [release-runbook](../docs/release-runbook.md)。
-- **0.4.2 以降に増えた公開面 4 件**（0.4.3 で初めて配られる面 — 消費側の doc はここが索引）:
-  - `ANIMA_BASE_SOURCE`（`@karume/models/anima`）— 素版 3 モデルが同居する**非既定**リポの
-    pin。pin の MUST は既定席と同じ（ADR [0073](../docs/decisions/0073-models-source-pin.md)
-    追記 2026-08-24）。
-  - `animaLatents()` — 途中 latent の逆正規化素材（mean / std）。**プレビューには要らない**。
-  - `approximatePreview()` — 途中 latent → RGB の線形近似。係数は**正規化空間**で較正済み
-    （2026-08-24 実測）なので `copyLatents()` の返り値をそのまま渡す。逆正規化した値を渡すと
-    白飛びする。
-  - `AssetProgress` の per-file 欄 `fileLoaded` / `fileTotal`（必須欄。`verifying` /
-    `complete` では常に等しい — ADR [0038](../docs/decisions/0038-manifest-v1.md) 追記
-    2026-08-24）。
+- **0.5.0 breaking 波は実装完了 — 今はリリース段**。残りは 4 手: ①サンプラーの視認 A/B
+  （**出荷バイトで**・裁定次第で recipe に `scheduler.type` を emit）②HF 5 リポの再アップロード
+  （公開 4 + pin 更新）③0.5.0 の lockstep bump（`uv.lock` 追随 MUST・**焼き直しは bump の後**）
+  ④push → CI → GitHub Release。手順の正本 = [release-runbook](../docs/release-runbook.md)、
+  波の正本 = [backlog](../docs/backlog.md) now 節。JSR 公開済みは 0.4.3 まで（2026-08-25
+  Release 確認済み — 次に出るのが 0.5.0）。
+- **0.5.0 で変わった面**（消費側の doc はここが索引）:
+  - **quant 席名が全て改名された**（ADR [0074](../docs/decisions/0074-quant-seat-naming.md)
+    決定 6 の移行表が正本 — 例 `w8a8-s16` → `f16+dit8-a8-attn8-s16` / sbv2 `w8-bert4` →
+    `i8+bert4` / irodori `w4` → `i8+dit4`）。`linearCompute` / `attentionCompute` の**値**も
+    `"i8a8"` → `"a8"`（カーネル内部識別子・ファイル名・WGSL は実行変種の名前なので不変）。
+  - **manifest は `karume/4`**（ADR [0075](../docs/decisions/0075-quant-presentation.md)）—
+    quant の `label` / `description`、`requiredLimits`、ファイル参照の越境 `repo` / `revision`
+    （ADR [0038](../docs/decisions/0038-manifest-v1.md) 追記 2026-08-25）。旧 format は読めない。
+  - **`fromPretrained` の `ref` は必須**（既定ソースの廃止 — ADR
+    [0073](../docs/decisions/0073-models-source-pin.md) 追記 2026-08-25）。pin 定数は
+    `<FAMILY>[_<VARIANT>]_CURRENT` の 4 本で、位置づけは「**パッケージ版に合わせて自動追従したい
+    場合のオプトイン**」= bump のたびに pin 更新 + 動作確認の義務つき。hub は revision 未指定の
+    暗黙 `main` 解決に 1 回だけ warn（解決 SHA 印字 + pin / `*_CURRENT` の 2 択案内）。
+  - anima に `pipelineConfig.scheduler.type` 席（`euler` / `dpmpp-2m`・省略時 euler）。
+    **配布形はまだ宣言していない**（視認裁定待ち）。
+  - 0.4.3 で配られた面（消費側 doc の注意点）: `animaLatents()`（途中 latent の逆正規化素材
+    — プレビューには要らない）/ `approximatePreview()`（途中 latent → RGB の線形近似。係数は
+    **正規化空間**で較正済みなので `copyLatents()` の返り値をそのまま渡す — 逆正規化した値を
+    渡すと白飛びする）/ `AssetProgress` の per-file 欄 `fileLoaded` / `fileTotal`（必須欄・
+    `verifying` / `complete` では常に等しい）。
 - **anima の受理解像度を 8 通り縮小した（E-2）**: VAE タイル本数の上限を入口の受理集合へ足し、
   1456/1488/1584/1648/1680/1776/1840/1936px を名指しで拒否するようにした。**形式上は破壊的だが、
   対象はホスト RAM 破裂で実行不能だった値のみ**。省 RAM の逐次組み立てで受理へ戻す案は
   backlog later。
-- **0.5.0 breaking 波の骨子**: ①quant 席名の規則化（ADR
-  [0074](../docs/decisions/0074-quant-seat-naming.md) — 格納語彙を `f32/f16/i8/i4` の 1 本へ・
-  移行表は ADR が正本〈irodori `w4` → `i8+dit4` の行を 2026-08-24 に追記済み〉）
-  ②`linearCompute` / `attentionCompute` の値 `"i8a8"` → `"a8"` 改名 ③表示欄 + `karume/4`
-  繰り上げ（ADR [0075](../docs/decisions/0075-quant-presentation.md)）④SBV2 の yomi 依存分離。
-  公開リポの再アップロード + pin 更新（ADR 0073）を 1 度で済ませる。詳細 =
-  [backlog](../docs/backlog.md) later 節。**現行の席名・ノブ名は改名予定**。
 - **波 J / 波 L はどちらも 2026-08-24 に全クローズ**（波順の正本 =
   [backlog](../docs/backlog.md)）。**教訓 2 件**は現役: ①sim の A/B は同一リグ内でのみ有効 —
   **出荷リグでは GPTQ の丸め解が変わり発話実現が再抽選される**（繊細な性質は転移しない・
   最終裁定は必ず出荷バイトで）②adaLN（modulation の scale/shift/gate）は量子化感度が高い
   （irodori 実測 — 他 DiT へは未実測の仮説）。実測の正本 =
   [research/2026-08-24-gptq-expansion-quality.md](../docs/research/2026-08-24-gptq-expansion-quality.md)。
-- **JSR は 0.4.2 まで公開済み**（PyPI `karume` は未リリース）。クローズ済みの波の履歴は
+- PyPI `karume` は未リリース。クローズ済みの波の履歴は
   [backlog](../docs/backlog.md) と各 ADR / research が正本。
 
 ## Open decisions
@@ -54,12 +57,19 @@
 
 ## Pitfalls（現役のみ）
 
-- **local の `models/karume-anima/` には配布スキップ裁定（2026-08-24）の `w4` / `w4-a8-s16`
-  席が組み込まれたまま**（i4 は dist の宣言必須格納で外せない）— karume-anima を上げ直す時は
-  この裁定を先に思い出す。
+- **local の `models/karume-anima/` には配布スキップ裁定（2026-08-24）の i4 席 2 つ
+  （`f16+dit4` / `f16+dit4-attn8-s16`）が組み込まれたまま**（i4 は dist の宣言必須格納で
+  外せない）— **上げ直す前に「落とすのか載せるのか」を確認する**。
+- **irodori の `i8+dit4` 席（旧 `w4`）は HF 公開済みだが pin が据え置き** — 今は
+  `revision: "main"` を明示しないと使えない。0.5.0 の再アップロード + pin 更新で解消する予定。
+- **format 断絶中はローカル 5 dist（公開 4 + 非公開の `karume-sbv2-fn`）の焼き直しが
+  `deno task verify` の前提** — e2e が読むのは配布形なので、1 本でも旧 format のまま残ると赤に
+  なる。FN は公開 parked だが焼き直しの対象からは外れない。
+- **フル走行の verify は VRAM 圧で稀にフレークする**（毎回別のテストが落ち、単独再走は常に緑
+  — known-issues）。落ちたファイルの単独再走で切り分ける。
 - **eval-images は turbo 配布形以外を指さない**（出力名がソースリポを区別せず siglip2
   実画像門の入力を上書きする — known-issues）。
-- **`linearCompute: "i8a8"` は i8 常駐と i4 常駐で数値契約が別**（i8 = full-k 厳密 / i4 = group
+- **`linearCompute: "a8"` は i8 常駐と i4 常駐で数値契約が別**（i8 = full-k 厳密 / i4 = group
   部分縮約 — ADR [0076](../docs/decisions/0076-w4a8-linear-execution.md)）。取り違えると atol=0 の
   主張が意味を失う。経路の識別はパイプラインキーの `:wi4g32` サフィックスと診断が担う。
 - **Metal**: threadgroup `vec4` への動的インデックス書きは黙って捨てられる（`gemm.ts` の

@@ -482,3 +482,29 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   （全量が揃った点なので、キャッシュヒット経路でも同じ）・`fileTotal` は `FileRef.size` で
   `total` はその合計。`complete` 追加（上の 2026-08-13）と同格のスキーマ変更で、
   `FetchAssetsOptions.onProgress` として公開面に出る。
+- 2026-08-25: **§7 が据え置き席として列挙していた 2 つを `karume/4` で実装した**（0.5.0 の
+  breaking 波）。ADR [0075](0075-quant-presentation.md) の Context が NOTE で指摘していた
+  「据え置きの約束と実装の食い違い」（`FILE_REF_KEYS` / `QUANT_KEYS` に席が無い）はこれで解消。
+  - **ファイル参照の optional `repo` / `revision`（越境コンポーネント参照）**: §7 の原案より
+    **狭く**入れた — `revision` は **40 桁小文字 hex の commit SHA だけ**を受ける
+    （ブランチ・タグ・短縮形は fail loudly）。可変 ref を許すと §7 が言う「**不変**コンポーネント
+    参照」の成立条件そのものが壊れる（参照先が動けば、こちらが宣言した `sha256` と食い違う日が
+    来る）。`repo` と `revision` は**両方同時**にのみ現れ（片方だけは fail loudly）、`size` /
+    `sha256` は自リポ参照と同じく必須 = **二重 pin**。取得層は宣言された (repo, revision) から
+    取り、セッションの解決済み SHA は使わない。あわせて**ファイル参照の同一性キーを `path` から
+    `fileRefKey`（`repo@revision/path`・自リポ参照は `path` のまま）へ切り替えた** — 別リポの
+    同名 path は別のバイト列で、`path` で畳むと 3 点セット一致検査が正しい manifest を誤って
+    拒否し、取得層は別ファイルのバイト列を返す。一次利用は `karume-anima-turbo` →
+    `karume-anima` の text stack 共通化で、焼く側の opt-in は `tools/export-recipes/dist.py` の
+    5 指定（`--ref-repo` / `--ref-revision` / `--ref-dist` / `--ref-model` / `--ref-role`・
+    全部揃うか 1 つも無いかの 2 通りだけ）。**公開順序の制約**（参照先を先に上げて SHA を
+    確定させないと焼けない）は [release-runbook](../release-runbook.md) §0 が正本。
+  - **quant の optional `requiredLimits`**: WebGPU `GPUDeviceDescriptor.requiredLimits` と同型の
+    「名前 → 満たすべき最小値」の**部分写像**（書かれていない limit は要求しない = 消費側の
+    判定は `adapter.limits[name] >= value` の素の比較）。名前は 11 名の allowlist で、
+    `@karume/runtime` の `REQUIRED_LIMIT_KEYS` と 1:1 に保つ — hub は runtime に依存しないので
+    写しになるが、未知名は fail loudly なので綴りのずれが黙って無視されることはなく、語彙一致の
+    門は両方へ依存できる唯一の位置（`packages/models/tests/limit_vocabulary_test.ts`）に置いた。
+    今回の範囲は**受理と型面の露出まで**で、§7 が Consequences に書いた「DL 前チェックは feature
+    軸のみ」の解消（limits 不足を DL 後の fail loudly から前へ出す結線）は**後続タスク** —
+    [limitations](../limitations.md) の該当制約はまだ残っている。
