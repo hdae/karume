@@ -1,11 +1,15 @@
 /**
  * 母音検出（音声 → リップシンク用の `.lab`）の 1 画面デモ。
  *
- *     deno task demo:vowel-detector --audio outputs/demo/vowel-vowels.wav
- *     deno task demo:vowel-detector --audio voice.wav --out outputs/demo/voice.lab
+ *     deno task demo:vowel-detector --source models/karume-vowel-detector \
+ *         --audio outputs/demo/vowel-vowels.wav
+ *     deno task demo:vowel-detector --source models/karume-vowel-detector \
+ *         --audio voice.wav --out outputs/demo/voice.lab
  *
- * `--source` が `karume.json` を持つディレクトリならローカル読み（`fromAssets`）、それ以外は
- * HF リポジトリ名として `fromPretrained`。
+ * MUST: `--source` は必須（既定を置かない）。このファミリは公開配布リポを持たず pin 定数も
+ * 無い（ADR 0073 決定 1）ので、既定を書くと「存在しないリポの取得」に化ける。`karume.json` を
+ * 持つディレクトリならローカル読み（`fromAssets`）、それ以外は HF リポジトリ名として
+ * `fromPretrained`。
  *
  * MUST: 入力 WAV は **16kHz モノラル**（パイプラインはリサンプラを持たない — 周波数が違っても
  * 落ちずに別の母音列が出る）。この台本は `decodeWav` が読んだ周波数を宣言（`sampleRate`）と
@@ -13,12 +17,8 @@
  * `examples/irodori/eval-audio.ts`（3 分の 1 間引き）にある。
  */
 
-import { parseManifest, resolveFiles } from "../../packages/hub/mod.ts";
-import {
-  decodeWav,
-  type VowelDetectorAssets,
-  VowelDetectorPipeline,
-} from "../../packages/models/mod.ts";
+import { decodeWav, VowelDetectorPipeline } from "../../packages/models/mod.ts";
+import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
 
 const USAGE = "--audio <WAV パス> --source <パス|HF repo> --model <名前> --quant <名前>" +
   " --out <パス>";
@@ -39,7 +39,8 @@ for (let at = 0; at < Deno.args.length; at += 2) {
 
 const audioPath = args.get("audio");
 if (audioPath === undefined) throw new Error(`--audio が要る（使い方: ${USAGE}）`);
-const source = args.get("source") ?? "models/karume-vowel-detector";
+const source = args.get("source");
+if (source === undefined) throw new Error(`--source が要る（使い方: ${USAGE}）`);
 const model = args.get("model");
 const quant = args.get("quant");
 /** hub / パイプラインへ渡す選択軸（未指定の欄は manifest の既定が埋める）。 */
@@ -50,24 +51,9 @@ const selection = {
 
 const encoder = new TextEncoder();
 
-/** ローカルディレクトリから manifest + 資産を読む（`fetchAssets` のローカル版）。 */
-const loadLocal = async (dir: string): Promise<VowelDetectorAssets> => {
-  const manifest = parseManifest(await Deno.readTextFile(`${dir}/karume.json`));
-  const files = resolveFiles(manifest, selection);
-  const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
-  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of Object.keys(files)) {
-    const { path } = files[key];
-    const bytes = byPath.get(path) ?? await Deno.readFile(`${dir}/${path}`);
-    byPath.set(path, bytes);
-    assets = { ...assets, [key]: bytes };
-  }
-  return { manifest, assets };
-};
-
 const openPipeline = async (): Promise<VowelDetectorPipeline> => {
-  if (await Deno.stat(`${source}/karume.json`).then(() => true, () => false)) {
-    return VowelDetectorPipeline.fromAssets(await loadLocal(source), selection);
+  if (await isLocalDist(source)) {
+    return VowelDetectorPipeline.fromAssets(await loadLocalAssets(source, selection), selection);
   }
   return VowelDetectorPipeline.fromPretrained(source, {
     ...selection,
@@ -94,8 +80,10 @@ if (wav.sampleRate !== pipeline.sampleRate) {
 const { segments, lab } = await pipeline.detect(wav.data);
 
 const out = args.get("out") ?? `outputs/demo/${audioPath.split("/").at(-1)}.lab`;
-const parent = out.slice(0, out.lastIndexOf("/"));
-if (parent !== "") await Deno.mkdir(parent, { recursive: true });
+// MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
+// 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
+const cut = out.lastIndexOf("/");
+if (cut > 0) await Deno.mkdir(out.slice(0, cut), { recursive: true });
 await Deno.writeTextFile(out, lab);
 console.log(lab.trimEnd());
 console.log(

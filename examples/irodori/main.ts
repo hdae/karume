@@ -5,21 +5,22 @@
  *     deno task demo:irodori --caption "落ち着いた女性の声で、ゆっくりと話している。" --seed 7
  *     deno task demo:irodori --ref inputs/irodori/v4-small/samples/clone_ref1.wav
  *
- * `--source` が `karume.json` を持つディレクトリならローカル読み（`fromAssets`）、それ以外は
- * HF リポジトリ名として `fromPretrained`。`--ref` は参照音声（WAV — 配布形と同じ 48kHz の
- * mono/多ch PCM16 か IEEE float）で、渡すとその声質に寄る（voice cloning）。`--caption` は
+ * `--source` 未指定なら pin 済みの既定ソース（{@link IRODORI_DEFAULT_SOURCE} — ADR 0073）から
+ * 取る。明示したときだけ、`karume.json` を持つディレクトリならローカル読み（`fromAssets`）、
+ * それ以外は HF リポジトリ名として `fromPretrained`。`--ref` は参照音声（WAV — 配布形と同じ
+ * 48kHz の mono/多ch PCM16 か IEEE float）で、渡すとその声質に寄る（voice cloning）。`--caption` は
  * 声質の指示文（Voice Design）。サンプラのノブ（steps / CFG）は manifest の `pipelineConfig`
  * が固定していて、実行時には `--seed` と `--seconds`（発話長の直接指定）だけが動かせる。
  */
 
-import { parseManifest, resolveFiles } from "../../packages/hub/mod.ts";
 import {
   decodeWav,
   encodeWav,
-  type IrodoriAssets,
   IrodoriPipeline,
   type IrodoriSpeakerInput,
 } from "../../packages/models/mod.ts";
+import { IRODORI_DEFAULT_SOURCE } from "../../packages/models/irodori.ts";
+import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
 
 const USAGE = "--source <パス|HF repo> --text <文字列> --caption <文字列> --ref <WAV パス>" +
   " --model <名前> --quant <名前> --seconds <数> --seed <整数> --out <パス>";
@@ -63,7 +64,7 @@ const number = (key: string): number | undefined => {
   return value;
 };
 
-const source = args.get("source") ?? "models/karume-irodori-v4-small";
+const source = args.get("source");
 const model = args.get("model");
 const quant = args.get("quant");
 /** hub / パイプラインへ渡す選択軸（未指定の欄は manifest の既定が埋める）。 */
@@ -82,26 +83,11 @@ const speaker: IrodoriSpeakerInput | undefined = ref === undefined
   ? undefined
   : { audio: decodeWav(await Deno.readFile(ref)) };
 
-/** ローカルディレクトリから manifest + 資産を読む（`fetchAssets` のローカル版）。 */
-const loadLocal = async (dir: string): Promise<IrodoriAssets> => {
-  const manifest = parseManifest(await Deno.readTextFile(`${dir}/karume.json`));
-  const files = resolveFiles(manifest, selection);
-  const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
-  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of Object.keys(files)) {
-    const { path } = files[key];
-    const bytes = byPath.get(path) ?? await Deno.readFile(`${dir}/${path}`);
-    byPath.set(path, bytes);
-    assets = { ...assets, [key]: bytes };
-  }
-  return { manifest, assets };
-};
-
 const openPipeline = async (): Promise<IrodoriPipeline> => {
-  if (await Deno.stat(`${source}/karume.json`).then(() => true, () => false)) {
-    return IrodoriPipeline.fromAssets(await loadLocal(source), selection);
+  if (source !== undefined && await isLocalDist(source)) {
+    return IrodoriPipeline.fromAssets(await loadLocalAssets(source, selection), selection);
   }
-  return IrodoriPipeline.fromPretrained(source, {
+  return IrodoriPipeline.fromPretrained(source ?? IRODORI_DEFAULT_SOURCE, {
     ...selection,
     onProgress: ({ phase, loaded, total }) =>
       Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
@@ -109,7 +95,8 @@ const openPipeline = async (): Promise<IrodoriPipeline> => {
 };
 
 console.log(
-  `[irodori] ${source} / model ${model ?? "（manifest の既定）"}` +
+  `[irodori] ${source ?? `${IRODORI_DEFAULT_SOURCE.repo}（pin 済みの既定）`}` +
+    ` / model ${model ?? "（manifest の既定）"}` +
     ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}` +
     `${ref === undefined ? "" : ` / 参照 ${ref}`}\n` +
     `          ${JSON.stringify(text)}` +
@@ -127,8 +114,10 @@ const audio = await pipeline.generate({
 const name = `irodori-${quant ?? "default"}-${ref === undefined ? "no-ref" : "cloned"}` +
   `-seed${seed}.wav`;
 const out = args.get("out") ?? `outputs/demo/${name}`;
-const parent = out.slice(0, out.lastIndexOf("/"));
-if (parent !== "") await Deno.mkdir(parent, { recursive: true });
+// MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
+// 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
+const cut = out.lastIndexOf("/");
+if (cut > 0) await Deno.mkdir(out.slice(0, cut), { recursive: true });
 await Deno.writeFile(out, encodeWav(audio.data, audio.sampleRate));
 console.log(
   `[irodori] ${out}（${(audio.data.length / audio.sampleRate).toFixed(2)}s / S ${audio.frames}` +

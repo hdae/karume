@@ -1,19 +1,20 @@
 /**
  * SBV2（テキスト → 音声）の 1 画面デモ。資産の出所だけが分岐で、あとは `generate` のノブ。
  *
- *     deno task demo:sbv2 --text "こんにちは、これはテストです。"
+ *     deno task demo:sbv2 --source models/karume-sbv2-fn --text "こんにちは、これはテストです。"
  *     deno task demo:sbv2 --source someone/sbv2 --model FN4 --quant f16 --style high --seed 7
  *
- * `--source` が `karume.json` を持つディレクトリならローカル読み（`fromAssets`）、それ以外は
- * HF リポジトリ名として `fromPretrained`。未指定のノブは manifest の
- * `pipelineConfig.defaults` が埋める。
+ * MUST: `--source` は必須（既定を置かない）。この台本が想定する FN 系列の配布リポは公開保留で
+ * pin 定数を持たない（ADR 0073 決定 1）ので、既定を書くと「存在しないリポの取得」に化ける。
+ * `karume.json` を持つディレクトリならローカル読み（`fromAssets`）、それ以外は HF リポジトリ名
+ * として `fromPretrained`。未指定のノブは manifest の `pipelineConfig.defaults` が埋める。
  *
  * NOTE: torch 参照突合の dump（11 テンソル契約）は `dump.ts` にある — パイプライン利用者の
  * ストーリーではなく開発用の契約なので、面を分けてある。
  */
 
 import { encodeWav, Sbv2Pipeline } from "../../packages/models/mod.ts";
-import { isLocalDist, loadLocalAssets } from "./local-assets.ts";
+import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
 
 const USAGE = "--source <パス|HF repo> --text <文字列> --model <名前> --quant <名前>" +
   " --style <名前> --style-weight <数> --sdp-ratio <数> --noise-scale <数>" +
@@ -61,7 +62,8 @@ const integer = (key: string): number | undefined => {
   return raw === undefined ? undefined : Number(raw);
 };
 
-const source = args.get("source") ?? "models/karume-sbv2-fn";
+const source = args.get("source");
+if (source === undefined) throw new Error(`--source が要る（使い方: ${USAGE}）`);
 const model = args.get("model");
 const quant = args.get("quant");
 /** hub / パイプラインへ渡す選択軸（未指定の欄は manifest の既定が埋める）。 */
@@ -108,8 +110,10 @@ const audio = await pipeline.generate({
 });
 const name = `sbv2-${quant ?? "default"}-${style ?? "default"}-seed${seed}.wav`;
 const out = args.get("out") ?? `outputs/demo/${name}`;
-const parent = out.slice(0, out.lastIndexOf("/"));
-if (parent !== "") await Deno.mkdir(parent, { recursive: true });
+// MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
+// 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
+const cut = out.lastIndexOf("/");
+if (cut > 0) await Deno.mkdir(out.slice(0, cut), { recursive: true });
 await Deno.writeFile(out, encodeWav(audio.data, audio.sampleRate));
 console.log(
   `[sbv2] ${out}（${(audio.data.length / audio.sampleRate).toFixed(2)}s / ${
