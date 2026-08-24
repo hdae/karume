@@ -187,12 +187,52 @@ Deno.test("fetchAssets: 進捗総量は manifest の size 合計（path 一意�
   for (const event of events) {
     assertEquals(event.total, expectedTotal, "総量は重複排除された size 合計");
     assert(event.loaded <= event.total, "合計が総量を超えない");
+    assertEquals(
+      event.fileTotal,
+      uniqueSizes.get(event.path),
+      `${event.path}: fileTotal はそのファイル自身の manifest size`,
+    );
+    assert(
+      event.fileLoaded <= event.fileTotal,
+      `${event.path}: fileLoaded がそのファイルの size を超えた`,
+    );
+    if (event.phase !== "downloading") {
+      assertEquals(
+        event.fileLoaded,
+        event.fileTotal,
+        `${event.path}: ${event.phase} は全量が揃った点`,
+      );
+    }
   }
   assert(
     events.some((event) => event.phase === "verifying"),
     "sha256 照合中は verifying フェーズを出す",
   );
   assertEquals(events[events.length - 1].loaded, expectedTotal, "最後は総量に到達する");
+});
+
+Deno.test("fetchAssets: ファイル別の進捗は全体合計とは別に 1 ファイルぶんを表す", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll() }, caches);
+  const files = resolveFiles(loaded.manifest);
+  const events: AssetProgress[] = [];
+  await fetchAssets(loaded, files, {
+    fetch: mock.fetch,
+    caches,
+    onProgress: (progress) => events.push(progress),
+  });
+
+  // 受信途中（size 未満）の downloading が出ている = fileLoaded がそのファイルの受信実測である。
+  assert(
+    events.some((event) => event.phase === "downloading" && event.fileLoaded < event.fileTotal),
+    "受信途中の fileLoaded が 1 度も観測できない",
+  );
+  // 先に終わったファイルのぶんが loaded に積まれた後の downloading は、そのファイル 1 本ぶんの
+  // fileLoaded より必ず大きい（同値のままなら per-file 欄が全体合計の写しになっている）。
+  assert(
+    events.some((event) => event.phase === "downloading" && event.loaded > event.fileLoaded),
+    "複数ファイルを落としているのに全体 loaded とファイル別 fileLoaded が食い違わない",
+  );
 });
 
 /** phase の進む向き（大きいほど後）。 */
@@ -268,6 +308,14 @@ Deno.test("fetchAssets: キャッシュヒットの phase 列は verifying → c
       phases,
       ["verifying", "complete"],
       `${path}: DL していないのに downloading が出た`,
+    );
+  }
+  for (const event of events) {
+    // downloading が 1 度も出ない経路でも、この 2 相は全量が揃った点なので満たされる。
+    assertEquals(
+      event.fileLoaded,
+      event.fileTotal,
+      `${event.path}: キャッシュヒットの ${event.phase} で fileLoaded が size に届いていない`,
     );
   }
 });

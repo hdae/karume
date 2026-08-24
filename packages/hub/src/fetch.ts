@@ -103,6 +103,16 @@ export type AssetProgress = {
   readonly loaded: number;
   /** manifest の `size` 合計（path 一意化後）。 */
   readonly total: number;
+  /**
+   * `path` の**そのファイル自身**の受信済みバイト。`loaded` が全ファイルの合計なのに対し
+   * こちらは 1 ファイルぶんなので、ファイル別の進捗バーはこの値と {@link fileTotal} で描く。
+   *
+   * `verifying` / `complete` は全量が揃った点なので常に `fileLoaded === fileTotal`
+   * （`downloading` が 1 度も出ないキャッシュヒットでも同じ）。
+   */
+  readonly fileLoaded: number;
+  /** `path` のファイル自身の manifest 由来サイズ（`FileRef.size`）。`total` はこれの合計。 */
+  readonly fileTotal: number;
 };
 
 export type FetchAssetsOptions = LoadManifestOptions & {
@@ -271,6 +281,19 @@ export const loadManifest = async (
 };
 
 /**
+ * 進捗の `fileTotal` に載せる manifest 由来の size を引く。表は取得対象そのものから作るので
+ * 進捗に出る path は必ず引ける — 引けないのは内部の不変条件が破れているときだけなので落とす
+ * （0 で埋めるとファイル別の進捗バーが黙って壊れた値を描く）。
+ */
+const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, path: string): number => {
+  const ref = refs.get(path);
+  if (ref === undefined) {
+    throw new Error(`hub: ${path} の size が取得対象の表に無い（進捗集計の不変条件破れ）`);
+  }
+  return ref.size;
+};
+
+/**
  * 解決済みファイル表を取得する。取得と進捗総量は **path で一意化**され、同じ path を指す
  * 複数のキーには同一のバイト列が入る。
  *
@@ -300,9 +323,13 @@ export const fetchAssets = async (
   const fromNetwork = new Set<string>();
   const emit = (phase: AssetPhase, path: string): void => {
     if (options.onProgress === undefined) return;
+    const fileTotal = fileSizeOf(unique, path);
     let sum = 0;
     for (const bytes of received.values()) sum += bytes;
-    options.onProgress({ phase, path, loaded: sum, total });
+    // verifying / complete は全量が揃った点なので size をそのまま渡す（キャッシュヒットは
+    // downloading が 1 度も出ず `received` に載らないため、受信実績から引くと 0 に見える）。
+    const fileLoaded = phase === "downloading" ? received.get(path) ?? 0 : fileTotal;
+    options.onProgress({ phase, path, loaded: sum, total, fileLoaded, fileTotal });
   };
 
   const budgets = new Map<string, ByteBudget>();
@@ -482,7 +509,8 @@ export const streamAssets = async function* (
       { available },
     );
   }
-  const declared = new Set<string>();
+  // 重複検査の表はそのまま進捗の per-file 引き当て（`fileTotal`）にも使う。
+  const declared = new Map<string, FileRef>();
   for (const ref of refs) {
     if (declared.has(ref.path)) {
       throw new ManifestReferenceError(
@@ -491,7 +519,7 @@ export const streamAssets = async function* (
         { available },
       );
     }
-    declared.add(ref.path);
+    declared.set(ref.path, ref);
   }
 
   let total = 0;
@@ -501,9 +529,13 @@ export const streamAssets = async function* (
   const fromNetwork = new Set<string>();
   const emit = (phase: AssetPhase, path: string): void => {
     if (options.onProgress === undefined) return;
+    const fileTotal = fileSizeOf(declared, path);
     let sum = 0;
     for (const bytes of received.values()) sum += bytes;
-    options.onProgress({ phase, path, loaded: sum, total });
+    // verifying / complete は全量が揃った点なので size をそのまま渡す（相 1 が温めた分は
+    // 相 2 でキャッシュヒットになり downloading が出ないため、受信実績から引くと 0 に見える）。
+    const fileLoaded = phase === "downloading" ? received.get(path) ?? 0 : fileTotal;
+    options.onProgress({ phase, path, loaded: sum, total, fileLoaded, fileTotal });
   };
 
   const budgets = new Map<string, ByteBudget>();
@@ -635,6 +667,7 @@ export const streamAssets = async function* (
         // 相 1 が温めた分はキャッシュヒットなので、ここが発火するのは self-heal の取り直しだけ。
         // NOTE: self-heal は evict してから取り直すため、その 1 巡だけ `loaded` はそのファイル
         //       ぶん巻き戻る（phase 契約が認めている「最初からやり直し」と同じ 1 巡）。
+        //       `fileLoaded` も同じ 1 巡だけそのファイルの先頭から数え直しになる。
         onProgress: (progress) => {
           received.set(ref.path, progress.loaded);
           emit("downloading", ref.path);

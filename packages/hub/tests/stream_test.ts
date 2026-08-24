@@ -361,10 +361,27 @@ Deno.test("streamAssets: 進捗は phase 単調・total は size 合計・comple
 
   let expectedTotal = 0;
   for (const ref of refs) expectedTotal += ref.size;
+  const sizeByPath = new Map(refs.map((ref) => [ref.path, ref.size] as const));
   assert(events.length > 0, "進捗が 1 度も出ない");
   for (const event of events) {
     assertEquals(event.total, expectedTotal, "総量は refs の size 合計");
     assert(event.loaded <= event.total, "合計が総量を超えない");
+    assertEquals(
+      event.fileTotal,
+      sizeByPath.get(event.path),
+      `${event.path}: fileTotal はその shard 自身の manifest size`,
+    );
+    assert(
+      event.fileLoaded <= event.fileTotal,
+      `${event.path}: fileLoaded がその shard の size を超えた`,
+    );
+    if (event.phase !== "downloading") {
+      assertEquals(
+        event.fileLoaded,
+        event.fileTotal,
+        `${event.path}: ${event.phase} は全量が揃った点`,
+      );
+    }
   }
 
   const byPath = phasesByPath(events);
@@ -378,6 +395,30 @@ Deno.test("streamAssets: 進捗は phase 単調・total は size 合計・comple
     assertMonotonic(phases, path);
   }
   assertEquals(events[events.length - 1].loaded, expectedTotal, "最後は総量に到達する");
+});
+
+Deno.test("streamAssets: ファイル別の進捗は全体合計とは別に 1 shard ぶんを表す", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+  const events: AssetProgress[] = [];
+
+  await drain(streamAssets(loaded, refs, {
+    fetch: mock.fetch,
+    caches,
+    onProgress: (progress) => events.push(progress),
+  }));
+
+  // 受信途中（size 未満）の downloading が出ている = fileLoaded がその shard の受信実測である。
+  assert(
+    events.some((event) => event.phase === "downloading" && event.fileLoaded < event.fileTotal),
+    "受信途中の fileLoaded が 1 度も観測できない",
+  );
+  // 相 1 で先に終わった shard のぶんが loaded に積まれた後の downloading は、その shard 1 本ぶんの
+  // fileLoaded より必ず大きい（同値のままなら per-file 欄が全体合計の写しになっている）。
+  assert(
+    events.some((event) => event.phase === "downloading" && event.loaded > event.fileLoaded),
+    "複数 shard を落としているのに全体 loaded とファイル別 fileLoaded が食い違わない",
+  );
 });
 
 Deno.test("streamAssets: 2 回目は network に出ないが sha256 照合は走る", async () => {
@@ -404,6 +445,14 @@ Deno.test("streamAssets: 2 回目は network に出ないが sha256 照合は走
       phases,
       ["verifying", "complete"],
       `${path}: 相 1 が温め済みを取り直している / 照合が省かれている`,
+    );
+  }
+  for (const event of events) {
+    // downloading が 1 度も出ない経路でも、この 2 相は全量が揃った点なので満たされる。
+    assertEquals(
+      event.fileLoaded,
+      event.fileTotal,
+      `${event.path}: キャッシュヒットの ${event.phase} で fileLoaded が size に届いていない`,
     );
   }
 });
