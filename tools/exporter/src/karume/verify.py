@@ -1170,6 +1170,33 @@ def _assert_scale_tensor(
         )
 
 
+def _assert_no_surplus_tensors(graph: IrGraph, stored: Mapping[str, _StoredTensor]) -> None:
+    """ファイル中の全テンソルがどこかから参照されていることを検査する（宣言 → 実体の逆向き）。
+
+    MUST: fail loudly。宣言側の走査だけでは「使われなくなった重みが配布形に残っている」形が
+    素通りし、`karume verify` は緑なのにブラウザの `createSession`（shard intake の
+    `assertNoSurplusTensors` — `packages/runtime/src/format/container.ts`）で落ちる、という
+    非対称になる。書く側（`emit.write_model` の `declared != stored`）も dist 側（宣言外
+    ファイル検査）も既に両方向を見ているので、緩いのは読み返しのここだけだった。
+
+    突合集合は `initializer.tensor ∪ storage.scale`（ランタイムと同じ — ADR 0070 決定 1）。
+    scale は IR の値ではないので initializer だけを正本にすると i8 / i4 資産の scale が
+    全て「余剰」になる。
+
+    NOTE: 余剰は**全件列挙**する（1 件ずつ落とすと、削る側が何本余っているのか分からない）。
+    """
+    declared: set[str] = set()
+    for initializer in graph.initializers.values():
+        declared.add(initializer.tensor)
+        if initializer.storage.scale is not None:
+            declared.add(initializer.storage.scale)
+    surplus = sorted(set(stored) - declared)
+    if surplus:
+        raise ContainerError(
+            f"どの initializer からも参照されないテンソル ({len(surplus)}): {', '.join(surplus)}"
+        )
+
+
 def verify_model(path: str | Path) -> IrGraph:
     """配布形 1 ファイルを IR v1 の全規則で検証し、読めたグラフを返す。"""
     assert_reader_layout(path)
@@ -1215,6 +1242,7 @@ def verify_model(path: str | Path) -> IrGraph:
                 channel_axes.get(name) if name in eligible else None,
                 initializer.storage.group_size if initializer.storage.dtype == "i4" else None,
             )
+    _assert_no_surplus_tensors(graph, stored)
     assert_runtime_support(graph)
     assert_op_contracts(graph)
     return graph

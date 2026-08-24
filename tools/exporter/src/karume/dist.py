@@ -61,6 +61,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 import re
 import shutil
 from collections import Counter
@@ -123,6 +124,9 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 #: モデル名の許可文字。モデル名は manifest のキーであると同時に**リポ内のディレクトリ名**
 #: なので、hub の path セグメント検査（ADR 0041 §6）と同じ集合に縛る。
 MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
+
+#: モデルサブツリー内の相対 path の 1 セグメント（hub の `SEGMENT_RE` の鏡像 — ADR 0041 §6）。
+PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 #: sha256 の読み出し単位。数 GB を丸読みしないための唯一の要件で、値自体は素の I/O 単位。
 _CHUNK_BYTES = 1 << 20
@@ -312,6 +316,11 @@ def preprocessor_channels(
     `std` に 0 を通さないのは、0 除算が例外を出さずに `±Infinity` の `pixel_values` を作るため。
     チャネル数は**呼び出し側の recipe が持つ定数**を受ける（読み手だけを共有し、各 recipe の
     宣言はそれぞれの席に残す）。
+
+    有限性を別に見るのは、この値が `pipelineConfig` 経由で `karume.json` に載るため。上流の
+    config を読むのは Python の `json.loads` で、これは `NaN` / `Infinity` を**既定で受理する**
+    — 素通しすると標準 JSON に無いリテラルが manifest に焼かれ、ブラウザの `JSON.parse` が
+    落ちる（{@link manifest_text} と対）。`NaN` は `<= 0` が偽なので正数検査もすり抜ける。
     """
     value = raw.get(key)
     if not isinstance(value, list) or len(value) != channels:
@@ -320,6 +329,8 @@ def preprocessor_channels(
     for entry in value:
         if not isinstance(entry, int | float) or isinstance(entry, bool):
             raise DistError(f"{where} の {key} に数でない要素がある（{value!r}）")
+        if not math.isfinite(entry):
+            raise DistError(f"{where} の {key} に有限でない要素がある（{value!r}）")
         if positive and entry <= 0:
             raise DistError(f"{where} の {key} に正でない要素がある（{value!r}）")
         channels_out.append(float(entry))
@@ -377,6 +388,63 @@ def assert_model_name(name: str) -> str:
     if name == SHARED_DIRNAME:
         raise DistError(f"モデル名に '{SHARED_DIRNAME}' は使えない（共有ファイルの席と衝突する）")
     return name
+
+
+def assert_rel_path(rel_path: str, where: str) -> str:
+    """`Artifact.rel_path` がモデルサブツリーの中に収まることを検査して返す。
+
+    hub の `assertPath`（`packages/hub/src/manifest.ts`）と同じ**許可リスト**で見る。禁止列挙
+    （`..` を弾く）にしないのは hub と同じ理由 — 取得層はセグメントを percent-encode しても
+    ドットを透過するので、列挙の抜けがそのまま traversal になる。
+
+    組み立て側の実害は取得層より一段重い: 配置は `out_dir / f"{モデル名}/{rel_path}"` へ
+    書くので、`A/../../victim` のような形は **staging の外の既存ファイルを truncate で潰す**。
+    しかも manifest 側の root 検査（{@link _assert_manifest_shape}）は先頭セグメントしか見ず、
+    宣言外ファイル検査（{@link verify_dist}）は staging の中しか見ないので、
+    **書いた後の門は 1 つも鳴らない**。
+    """
+    for segment in rel_path.split("/"):
+        if not segment:
+            raise DistError(
+                f"{where}: rel_path '{rel_path}' に空セグメントがある"
+                "（先頭 / 末尾 / 連続スラッシュ）"
+            )
+        if segment.startswith("."):
+            raise DistError(
+                f"{where}: rel_path '{rel_path}' に先頭ドットのセグメント '{segment}' がある"
+            )
+        if not PATH_SEGMENT_RE.match(segment):
+            raise DistError(
+                f"{where}: rel_path '{rel_path}' のセグメント '{segment}' が"
+                "許可文字 [A-Za-z0-9._-] に一致しない"
+            )
+    return rel_path
+
+
+def assert_plan_paths(plans: Sequence[ModelPlan]) -> None:
+    """モデル名と `rel_path` の収まりを**配置の前**に落とす。
+
+    名前と path の検査だけが計画段の外に居たので、リポ内のプログラマ誤り（recipe の定数）が
+    そのまま staging 外への書き込みになりえた（{@link assert_rel_path}）。
+
+    MUST: **1 つの相対 path が持てる席はモデル内でも 1 つだけ** — モデル**間**には
+    {@link _plan_shared} が同じ MUST を張っているのに、モデル**内**だけが素通しだった。
+    2 役が同じ path を主張すると後の役が先の役の実体を上書きし、manifest は両役を**後の
+    digest** で宣言する。現物と表は一致するので {@link verify_dist} は沈黙し、先の役の
+    セッションが別のグラフを読む配布形がそのまま出荷される。
+    """
+    for plan in plans:
+        assert_model_name(plan.name)
+        seats: dict[str, str] = {}
+        for role, artifact in plan.artifacts.items():
+            assert_rel_path(artifact.rel_path, f"{plan.name}.{role}")
+            claimed = seats.setdefault(artifact.rel_path, role)
+            if claimed != role:
+                raise DistError(
+                    f"{plan.name}: 相対 path '{artifact.rel_path}' を役割 '{claimed}' と"
+                    f" '{role}' が両方主張している（1 つの相対 path が持てる席は 1 つだけ —"
+                    "後勝ちで上書きされ、manifest は両役を後の digest で宣言する）"
+                )
 
 
 def complete_quant_weights(
@@ -632,8 +700,15 @@ def assert_manifest_limits(manifest: Mapping[str, Any]) -> None:
 
 
 def manifest_text(manifest: Mapping[str, Any]) -> str:
-    """`karume.json` に書く綴り（末尾改行つき — 上限検査もこの綴りで測る）。"""
-    return json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+    """`karume.json` に書く綴り（末尾改行つき — 上限検査もこの綴りで測る）。
+
+    allow_nan=False は必須（`karume.ir.IrGraph.to_json` と同文）— NaN / Infinity は JSON の
+    標準リテラルに無く、ブラウザの `JSON.parse`（hub の読み口）が落ちる。Python の
+    `json.dumps` は既定でこれらを綴り、`json.loads` は既定で読み返すので、{@link verify_dist}
+    まで含めて焼く側の門は 1 つも鳴らない — 受理集合をランタイム側に揃えるため、書き出しの
+    時点で失敗させる。
+    """
+    return json.dumps(manifest, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
 
 
 def _materialize_family(
@@ -735,6 +810,7 @@ def assemble_family(
         raise DistError(f"モデル名が重複している: {names}")
     if default_model not in names:
         raise DistError(f"既定モデル '{default_model}' が組み立て対象 {names} に無い")
+    assert_plan_paths(plans)
     assert_plan_limits(plans)
     assert_plan_sources(plans)
     assert_root_files(root_files or {})

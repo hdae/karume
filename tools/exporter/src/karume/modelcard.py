@@ -20,7 +20,8 @@ NOTE: 描画部品（{@link frontmatter} / {@link models} / {@link files} / {@li
 そこだけをプロファイルに分けて**呼び出し側に明示させる**（選ばせる規則は
 {@link karume.dist.resolve_card_renderer}）。
 
-manifest v2（`karume/2` — ADR 0041）は **1 リポに複数モデル**を持てるので、カードも
+manifest（現行は `karume/3` — ADR 0041 で複数モデル化し、ADR 0070 決定 1 で weights の
+dtype エントリが shard 列になった形）は **1 リポに複数モデル**を持てるので、カードも
 「リポ全体の説明 → モデル一覧 → 使い方 → モデルごとの節」の形にする。モデルごとの節が
 `## Model: <name>` で、その中にファイル表・quant 表・（SBV2 は）スタイル表と話者表が並ぶ。
 単一モデルのリポでも同じ形で描く（配布形のレイアウトが一様なのと同じ理由 — 2 個目が増えた
@@ -210,8 +211,8 @@ def files(model: Mapping[str, Any]) -> list[str]:
         "",
         "Only the first 16 hex digits of the sha256 are shown (the full value and `size` live in"
         " `karume.json` — verify against that at the fetch layer).",
-        "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `i8`), not the"
-        " `fp16` spelling common elsewhere in the ecosystem.",
+        "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `i8` / `i4`), not"
+        " the `fp16` spelling common elsewhere in the ecosystem.",
         "A path under `shared/` is one this model shares byte for byte with another model in this"
         " repository (it is fetched and cached once).",
     ]

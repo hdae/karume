@@ -1455,6 +1455,33 @@ class TestContainer:
         with pytest.raises(ContainerError, match="格納 dtype"):
             verify_model(path)
 
+    def test_a_tensor_that_no_initializer_references_is_rejected(self, tmp_path):
+        """宣言 → 実体の片方向だけだと「使われなくなった重み」が残った配布形が素通りする。
+
+        データ節は隙間なく覆われるので `assert_reader_layout` も鳴らない。ランタイム側は
+        `container.ts` の `assertNoSurplusTensors` が拒むので、逆突合が無いと
+        「`karume verify` は緑・ブラウザの `createSession` だけ落ちる」非対称になる。
+        """
+        path = write_container(
+            tmp_path / "m.safetensors",
+            base_graph(),
+            {"enc.w": torch.ones(4), "enc.stale": torch.ones(8)},
+        )
+
+        with pytest.raises(ContainerError, match=r"参照されないテンソル \(1\): enc.stale"):
+            verify_model(path)
+
+    def test_it_lists_every_surplus_tensor_at_once(self, tmp_path):
+        """余剰は全件列挙する（1 件ずつ落とすと、削る側が何本余っているのか分からない）。"""
+        path = write_container(
+            tmp_path / "m.safetensors",
+            base_graph(),
+            {"enc.w": torch.ones(4), "enc.a": torch.ones(2), "enc.b": torch.ones(2)},
+        )
+
+        with pytest.raises(ContainerError, match=r"\(2\): enc.a, enc.b"):
+            verify_model(path)
+
 
 def write_raw_container(path, header: dict, data: bytes = b""):
     """ヘッダ JSON を直に組んだ safetensors（`save_file` では作れない不正形の故障注入用）。

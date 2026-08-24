@@ -42,7 +42,9 @@ from karume.dist import (
     build_parser,
     complete_quant_weights,
     main,
+    manifest_text,
     materialize,
+    preprocessor_channels,
     resolve_card_renderer,
     verify_dist,
 )
@@ -266,6 +268,101 @@ class TestPlanGates:
         with pytest.raises(DistError, match="models が 33 件"):
             assemble_family(plans, out_dir, "m0")
         assert not out_dir.exists()
+
+    def test_it_refuses_a_rel_path_that_climbs_out_of_the_model_subtree(
+        self, tmp_path: Path
+    ) -> None:
+        """`A/../../victim` は staging の外の既存ファイルを truncate で潰す。
+
+        書いた後の門は 1 つも鳴らない — manifest の root 検査は先頭セグメント（`A`）しか
+        見ず、宣言外ファイル検査は staging の中しか見ない。`out_dir / rel_path` は
+        `is_file()` も size も宣言と一致するので、`verify_dist` は最後まで緑で通る。
+        """
+        victim = tmp_path / "models" / "victim.bin"
+        victim.parent.mkdir(parents=True)
+        victim.write_bytes(b"someone-elses-bytes")
+        plans = [_synthetic_plan("A", "../../victim.bin", b"weights")]
+        out_dir = tmp_path / "models" / "escape"
+
+        with pytest.raises(DistError, match="先頭ドットのセグメント"):
+            assemble_family(plans, out_dir, "A")
+
+        assert victim.read_bytes() == b"someone-elses-bytes"
+        assert not out_dir.exists()
+
+    def test_it_refuses_a_model_name_that_is_not_a_path_segment(self, tmp_path: Path) -> None:
+        """名前検査は recipe 側にしか無かった（core の組み立て経路は素通しだった）。"""
+        plans = [_synthetic_plan("../escape", "w/model.safetensors", b"weights")]
+        out_dir = tmp_path / "models" / "bad-name"
+
+        with pytest.raises(DistError, match="許可文字"):
+            assemble_family(plans, out_dir, "../escape")
+        assert not out_dir.exists()
+
+    def test_it_refuses_two_roles_of_one_model_claiming_the_same_path(self, tmp_path: Path) -> None:
+        """同一モデル内の `rel_path` 衝突は後勝ちで沈黙する（モデル間には同じ MUST がある）。
+
+        後の役が先の役の実体を上書きし、manifest は**両役を後の digest** で宣言するので、
+        現物と表は一致したまま `encoder` のセッションが `decoder` のグラフを読む。
+        """
+        plan = ModelPlan(
+            name="A",
+            pipeline="anima/1",
+            artifacts={
+                "encoder": Artifact(rel_path="model.safetensors", payload=b"encoder-bytes"),
+                "decoder": Artifact(rel_path="model.safetensors", payload=b"decoder-bytes"),
+            },
+            weights={
+                "enc": {"f16": WeightFiles(file="encoder")},
+                "dec": {"f16": WeightFiles(file="decoder")},
+            },
+            assets={},
+            quants={"f16": {"weights": {"enc": "f16", "dec": "f16"}, "session": {}}},
+            default_quant="f16",
+            pipeline_config={},
+        )
+        out_dir = tmp_path / "models" / "collided"
+
+        with pytest.raises(DistError, match="両方主張している"):
+            assemble_family([plan], out_dir, "A")
+        assert not out_dir.exists()
+
+
+class TestManifestJsonLiterals:
+    """manifest に載る綴りは**標準 JSON だけ** — hub の読み口はブラウザの `JSON.parse`。
+
+    Python の `json` は `NaN` / `Infinity` を既定で書き、既定で読み返す（`verify_dist` の
+    読み返しも素通しする）ので、焼く側で落とさないと配布してから利用者の手元で初めて壊れる。
+    同じ MUST は IR 側（`karume.ir.IrGraph.to_json`）に既にある。
+    """
+
+    def test_it_refuses_a_non_finite_float_in_the_manifest(self) -> None:
+        with pytest.raises(ValueError, match="JSON compliant"):
+            manifest_text({"format": MANIFEST_FORMAT, "models": {"a": {"scale": float("inf")}}})
+
+    def test_it_writes_a_finite_manifest_with_a_trailing_newline(self) -> None:
+        assert manifest_text({"format": MANIFEST_FORMAT}).endswith('"karume/3"\n}\n')
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+    def test_it_refuses_a_non_finite_preprocessor_channel(self, bad: float) -> None:
+        """`NaN` は `<= 0` が偽なので、正数検査だけでは `image_std` すらすり抜ける。"""
+        with pytest.raises(DistError, match="有限でない"):
+            preprocessor_channels(
+                {"image_std": [0.5, bad, 0.5]},
+                "image_std",
+                "preprocessor_config.json",
+                channels=3,
+                positive=True,
+            )
+
+    def test_it_still_reads_the_finite_channels(self) -> None:
+        assert preprocessor_channels(
+            {"image_mean": [0.5, 0.25, 1]},
+            "image_mean",
+            "preprocessor_config.json",
+            channels=3,
+            positive=False,
+        ) == [0.5, 0.25, 1.0]
 
 
 class TestFamilyAssembly:

@@ -832,7 +832,7 @@ class GruScanBlock(nn.Module):
 
     入力側 GEMM は素の `nn.Linear`（= IR の `linear`）で、op が受け持つのは隠れ側の逐次だけ。
     eager の期待値は `karume/custom_ops.py` の本体が出す（`nn.GRU` の単方向 1 層と
-    `torch.equal` でビット一致することは同モジュールの docstring の実測）。踏むべき形:
+    `torch.equal` でビット完全一致することは ADR 0056 決定 6 の実測）。踏むべき形:
 
     MUST: **時間軸を記号にする**。この op の存在理由が「T を記号のまま通す」ことなので、
     静的 T の golden では分解形との差が出ない（`aten.gru.input` は T 回展開されて specialize
