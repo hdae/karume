@@ -130,7 +130,8 @@ export type AnimaGenerateRequest = {
    *
    * NOTE: 毎 step の VAE プレビューは提供しない。VAE は DiT を解放した**後**にしかロード
    * できない（VRAM の MUST — モジュール doc）ので、途中結果として渡せるのは生 latent
-   * （`copyLatents`）だけ。プレビューが要るなら latent から消費側で近似する。
+   * （`copyLatents`）だけ。プレビューは `approximatePreview`（`@karume/models/anima`）が
+   * この latent から近似する。
    *
    * MUST: `onEvent` の中で同じパイプラインの `generate` / `generateLatent` / `dispose` を
    * await してはならない（直列化鎖の自己デッドロック — 中断は throw で行う）。

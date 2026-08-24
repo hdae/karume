@@ -5,8 +5,7 @@
  * 面は利用者ストーリーに対応する — 組む（{@link AnimaPipeline.fromPretrained} /
  * {@link AnimaPipeline.fromAssets}）/ 生成する（`generate`）/ 生成の途中経過を購読する
  * （`onEvent` — {@link AnimaGenerateEvent}）/ **途中 latent からプレビューを近似する**
- * （{@link denormalizeLatents} + {@link ANIMA_LATENTS_MEAN} / {@link ANIMA_LATENTS_STD}）/
- * 解放する（`dispose`）/ 解像度の綴りを扱う
+ * （{@link approximatePreview}）/ 解放する（`dispose`）/ 解像度の綴りを扱う
  * （{@link parseResolution} / {@link formatResolution}）。
  *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
@@ -40,15 +39,25 @@ export { ANIMA_DEFAULT_SOURCE } from "./src/anima/config.ts";
 export { ANIMA_BASE_SOURCE } from "./src/anima/config.ts";
 
 /**
- * 途中 latent の逆正規化素材。`denoise-step` イベントの `copyLatents()`
- * （{@link AnimaLatentSnapshot}）が返すのは**正規化された**生 latent なので、そのまま色に
- * 起こしても意味のある絵にならない。
+ * 途中 latent からの RGB プレビュー近似。`denoise-step` イベントの `copyLatents()`
+ * （{@link AnimaLatentSnapshot}）の返り値を**そのまま**渡すと、latent 解像度（元画像の 1/8）の
+ * RGBA が返る。
  *
  * VAE は DiT を解放した**後**にしかロードできない（VRAM の MUST）ため、パイプラインは毎 step の
- * VAE プレビューを提供しない — ステップ毎プレビューが要る消費側は、この 3 本で latent を
- * 逆正規化してから自前の近似（チャネルの線形射影など）に通す、というのがここを出す理由。
- * 逆正規化を消費側で書き直すと定数が二重に持たれる（VAE config にしかない値で、IR にも
- * 配布資産にも入っていない）。
+ * VAE プレビューを提供しない — step ごとの経過を絵で見せる手段はこの近似だけなので、面に出す。
+ * 厳密な decode ではない（16ch → 3ch の線形射影）。係数の出所・較正空間の実測記録・限界は
+ * 実装の doc が持つ。
+ */
+export { approximatePreview } from "./src/anima/preview.ts";
+
+/**
+ * 途中 latent の逆正規化素材。**プレビューには要らない** — {@link approximatePreview} の係数は
+ * **正規化空間**で較正されている（2026-08-24 実測）ので、逆正規化した値を渡すと白飛びした
+ * 別物になる。`copyLatents()` の返り値はそのまま渡す。
+ *
+ * ここを出すのは、VAE decode と同じ土俵で latent を扱いたい消費側（自前の decode・latent の
+ * 解析・別の射影の較正）のため。この 2 本は VAE の config にしかなく、IR にも配布資産にも
+ * 入っていないので、逆正規化を消費側で書き直すと定数が二重に持たれる。
  */
 export { ANIMA_LATENTS_MEAN, ANIMA_LATENTS_STD, denormalizeLatents } from "./src/anima/latents.ts";
 
