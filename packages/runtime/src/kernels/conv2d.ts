@@ -38,8 +38,10 @@
  * groups は conv1d と同じ形（出力チャネル `oc` が属するグループの入力チャネル帯だけを
  * 縮約し、重みの第 2 軸はグループ内の相対番号で引く）。
  *
- * 重みは格納の変種を持つ（`w=f32` / `w=f16` — ADR 0018）。差は縮約内の読み出し 1 行だけ
- * （src/kernels/weight-storage.ts）。
+ * 重みは格納の変種を持つ（`w=f32` / `w=f16` / `w=i8` — ADR 0018 / 0019）。差は縮約内の
+ * 読み出し 1 行と、i8 の per-channel scale だけ（src/kernels/weight-storage.ts）。
+ * i4 は conv2d に実行経路が無い（ADR 0069 決定 5）— 直接カーネルは {@link assertDirectWeight}、
+ * implicit GEMM は gemm.ts の op 分岐が生成の入口で落とす。
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -66,9 +68,28 @@ export const CONV2D_WORKGROUP_SIZE = 256;
  */
 export const CONV2D_SCALE_BINDING = 5;
 
+/**
+ * 直接カーネルは **i4 を受けない**（ADR 0069 決定 5 — i4 の実行経路は linear / embedding /
+ * conv1d の implicit GEMM だけで、conv2d は implicit GEMM 側にも無い）。
+ *
+ * MUST: 適格判定（plan.ts の `i4EligibleInitializers`）が conv2d を i4 の適格集合から落とすので
+ * 通常は届かないが、**カーネル直呼びの経路も塞ぐ**（生成だけは通ってしまう形で、group scale の
+ * 束縛が無いまま `dequant(i, wscale_v)` が未定義識別子を参照する不成立 WGSL になる —
+ * conv1d 直接カーネルと同じ fail loudly の流儀）。
+ */
+const assertDirectWeight = (weight: WeightStorage): void => {
+  if (weight === "i4") {
+    throw new CodegenError(
+      "conv2d 直接カーネル: 重み i4 格納は未対応 — i4 の実行経路は linear / embedding / conv1d(groups==1) の implicit GEMM だけ（ADR 0069 決定 5）",
+    );
+  }
+};
+
 /** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
-export const conv2dKey = (weight: WeightStorage): string =>
-  `conv2d:v1:f32:direct:wg${CONV2D_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
+export const conv2dKey = (weight: WeightStorage): string => {
+  assertDirectWeight(weight);
+  return `conv2d:v1:f32:direct:wg${CONV2D_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
+};
 
 /**
  * implicit GEMM の v4（vec4 読み書き）判定。
@@ -132,8 +153,9 @@ export const conv2dIgemmMTile = (channelsOut: number): number => {
   return remainder >= 1 && remainder <= GEMM_MTILE_SMALL ? GEMM_MTILE_SMALL : GEMM_TILE;
 };
 
-export const conv2dWgsl = (weight: WeightStorage): string =>
-  `// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout], f32${
+export const conv2dWgsl = (weight: WeightStorage): string => {
+  assertDirectWeight(weight);
+  return `// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout], f32${
     weightNote(weight)
   }, 直接畳み込み)
 struct Dims {
@@ -213,6 +235,7 @@ fn main(
   }
 }
 `;
+};
 
 /** conv2d の幾何（2 つの params 関数が共有する唯一の入力型）。 */
 export type Conv2dDims = {

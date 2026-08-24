@@ -63,11 +63,33 @@ export const CONV_TRANSPOSE1D_WORKGROUP_SIZE = 256;
 /** i8 変種の scale 束縛（出力の次の番号 — executor の bind entries と対で使う）。 */
 export const CONV_TRANSPOSE1D_SCALE_BINDING = 5;
 
-export const convTranspose1dKey = (weight: WeightStorage): string =>
-  `conv_transpose1d:v2:f32:gather:wg${CONV_TRANSPOSE1D_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
+/**
+ * このカーネルは **i4 を受けない**（ADR 0069 決定 5 — i4 の実行経路は linear / embedding /
+ * conv1d(groups == 1) の implicit GEMM だけで、conv_transpose1d には展開経路が無い）。
+ *
+ * MUST: 適格判定（plan.ts の `i4EligibleInitializers`）が conv_transpose1d を i4 の適格集合から
+ * 落とすので通常は届かないが、**カーネル直呼びの経路も塞ぐ**（生成だけは通ってしまう形で、
+ * group scale の束縛が無いまま `dequant(i, wscale_v)` が未定義識別子を参照する不成立 WGSL に
+ * なる — conv1d 直接カーネルと同じ fail loudly の流儀）。
+ */
+const assertGatherWeight = (weight: WeightStorage): void => {
+  if (weight === "i4") {
+    throw new CodegenError(
+      "conv_transpose1d: 重み i4 格納は未対応 — i4 の実行経路は linear / embedding / conv1d(groups==1) の implicit GEMM だけ（ADR 0069 決定 5）",
+    );
+  }
+};
 
-export const convTranspose1dWgsl = (weight: WeightStorage): string =>
-  `// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32${
+export const convTranspose1dKey = (weight: WeightStorage): string => {
+  assertGatherWeight(weight);
+  return `conv_transpose1d:v2:f32:gather:wg${CONV_TRANSPOSE1D_WORKGROUP_SIZE}${
+    weightKeyPart(weight)
+  }`;
+};
+
+export const convTranspose1dWgsl = (weight: WeightStorage): string => {
+  assertGatherWeight(weight);
+  return `// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32${
     weightNote(weight)
   }, gather 形)
 struct Dims {
@@ -132,6 +154,7 @@ fn main(
   }
 }
 `;
+};
 
 /**
  * uniform の Dims。9 語なので 16 バイト整列に合わせて 12 語（48 バイト）確保する MUST

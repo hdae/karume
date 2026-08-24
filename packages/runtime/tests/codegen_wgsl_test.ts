@@ -1813,6 +1813,13 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
     CodegenError,
     "上限",
   );
+  // MUST: 被覆の突合より先に整数性を見る。生成側は非整数長を切り捨てて `1.5` を 1 スロット
+  // （256 要素）で展開する一方、被覆計算は 1.5 × 256 = 384 を名乗るので、この門が無いと
+  // dim 300 の 44 要素が縮約から黙って落ちる。
+  assertThrows(() => attentionStatsParams(4, 300, 1.5), CodegenError, "整数でない");
+  assertThrows(() => attentionStatsParams(4, 100, 0.5), CodegenError, "整数でない");
+  // 整数の正常形（切り捨てが起きない形）は通る
+  assertEquals([...attentionStatsParams(4, 300, 2)], [4, 300, 0, 0]);
   await Promise.resolve();
 });
 
@@ -3793,6 +3800,34 @@ Deno.test("conv1d の i4 は implicit GEMM 限定で、キーに group 部が乗
   assertEquals(wgsl.includes("let ags0 = wscale[arow0 * (dims.k >> 5u) + (ak0 >> 5u)];"), true);
   // MUST: linear 側（B タイル = 列）の添字を持ってこない — conv は重みが A 側（行 = Cout）
   assertEquals(wgsl.includes("wcol"), false);
+});
+
+/**
+ * i4 の展開経路を持たない残りの生成入口（conv2d の直接カーネル / conv_transpose1d）も
+ * **生成の入口で落とす**（weight-storage.ts の「残りの生成入口に i4 を渡す経路は各生成関数が
+ * 落とす」MUST）。
+ *
+ * 落とさないと `weightScaleWgsl` が i4 で空文字を返すぶん `wscale_v` が束縛されないまま
+ * `dequant(…, wscale_v)` が出て、**未定義識別子の不成立 WGSL** が遠くのシェーダコンパイルで
+ * 割れる（診断が生成の入口から離れる）。f32 / f16 / i8 の 3 変種は従来どおり通る。
+ */
+Deno.test("i4 の展開経路が無い conv2d 直接 / conv_transpose1d は生成の入口で落とす", () => {
+  assertThrows(() => conv2dKey("i4"), CodegenError, "i4");
+  assertThrows(() => conv2dWgsl("i4"), CodegenError, "i4");
+  assertThrows(() => convTranspose1dKey("i4"), CodegenError, "i4");
+  assertThrows(() => convTranspose1dWgsl("i4"), CodegenError, "i4");
+  // 門は i4 だけを落とす（共有 3 変種は素通り — キーも生成物も従来の形のまま）
+  for (const storage of WEIGHT_STORAGES) {
+    const suffix = storage === "f32" ? "" : storage === "f16" ? ":wf16" : ":wi8";
+    assertEquals(conv2dKey(storage), `conv2d:v1:f32:direct:wg256${suffix}`);
+    assertEquals(convTranspose1dKey(storage), `conv_transpose1d:v2:f32:gather:wg256${suffix}`);
+    assertEquals(conv2dWgsl(storage).includes("@compute @workgroup_size(256)"), true, storage);
+    assertEquals(
+      convTranspose1dWgsl(storage).includes("@compute @workgroup_size(256)"),
+      true,
+      storage,
+    );
+  }
 });
 
 /**

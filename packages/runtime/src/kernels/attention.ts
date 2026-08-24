@@ -377,6 +377,13 @@ export const attentionStatsParams = (
     throw new CodegenError(`attention_stats params: dim は正整数（${dim}）`);
   }
   if (regCache !== undefined) {
+    // MUST: 整数であることを先に見る。生成側の `Array.from({ length: regCache })` は非整数長を
+    // **切り捨てて**スロットを並べる一方、下の被覆計算は非整数のまま `regCache · 256` を主張する
+    // ので、`1.5` は「スロット 1 本 = 256 要素ぶんしか展開していないのに 384 要素まで担当」と
+    // 名乗って通り、余った要素が max にも Σ にも入らない沈黙誤値になる。
+    if (!Number.isInteger(regCache)) {
+      throw new CodegenError(`attention_stats params: regCache ${regCache} が整数でない`);
+    }
     if (regCache > ATTENTION_STATS_REG_CACHE_MAX) {
       throw new CodegenError(
         `attention_stats params: regCache ${regCache} が上限 ${ATTENTION_STATS_REG_CACHE_MAX} を超える`,
