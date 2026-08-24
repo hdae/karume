@@ -28,14 +28,25 @@ const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bi
   return { state: next, value: (z ^ (z >> 31n)) & MASK_64 };
 };
 
+/**
+ * seed の受理集合（非負の安全整数 — `BigInt` へ落とすので端数も負も表せない）。
+ *
+ * NOTE: `export` は**生成の入口**（`pipeline.ts` の `generate`）が同じ集合で先に落とすため。
+ * 生成器を作るのは DiT の段に入った後なので、ここだけに検査があると GB 級のロードを待たされた
+ * 末に落ちる。受理集合は 1 本しか持たない（両側に条件を書くと必ず割れる）。
+ */
+export const assertAcceptableSeed = (seed: number): void => {
+  if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError(`seed ${seed} が非負の安全整数でない`);
+  }
+};
+
 /** 決定的な標準正規列の生成器（`seed` が同じなら同じ列）。 */
 export class Randn {
   #state: bigint;
 
   constructor(seed: number) {
-    if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
-      throw new RangeError(`seed ${seed} が非負の安全整数でない`);
-    }
+    assertAcceptableSeed(seed);
     this.#state = BigInt(seed) & MASK_64;
   }
 

@@ -26,6 +26,7 @@ import {
 } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { AnimaPipeline, latentSnapshot, resolveNegativePrompt } from "../src/anima/pipeline.ts";
+import { assertAcceptableSeed, Randn } from "../src/anima/random.ts";
 
 const FILE = {
   path: "transformer/model.f16.safetensors",
@@ -188,6 +189,18 @@ Deno.test("resolveNegativePrompt: uncond を計算する設定で negativePrompt
   assertEquals(resolveNegativePrompt("要求のネガ", "既定のネガ", 7), "要求のネガ");
 });
 
+Deno.test("assertAcceptableSeed: 生成の入口と Randn が同じ受理集合を通る", () => {
+  // `generate` の入口はこの検査を呼ぶ（`Randn` を作るのは text encoder / conditioner を回して
+  // DiT の重みを上げ切った後なので、生成器側だけに検査があると GB 級のロードの末に落ちる）。
+  // 受理集合を 2 か所に書かないことを、同じ入力・同じ文言で確かめる。
+  for (const seed of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    const direct = assertThrows(() => assertAcceptableSeed(seed), RangeError, "非負の安全整数");
+    const viaRandn = assertThrows(() => new Randn(seed), RangeError, "非負の安全整数");
+    assertEquals(direct.message, viaRandn.message, `seed ${seed} の診断`);
+  }
+  for (const seed of [0, 42, Number.MAX_SAFE_INTEGER]) assertAcceptableSeed(seed);
+});
+
 Deno.test("latentSnapshot: 束縛した時点の latent を写す（step を進めても写しは変わらない）", () => {
   const shape = [1, 2, 1, 1];
   // denoise ループの再現: `cfgEulerStep` は純関数なので `current` は step ごとに**新しい
@@ -211,4 +224,11 @@ Deno.test("latentSnapshot: 束縛した時点の latent を写す（step を進�
   assertEquals(Array.from(first().data), [1, 2]);
   assertEquals(Array.from(step1), [1, 2]);
   assertNotStrictEquals(copy.data, first().data);
+
+  // shape も同じ扱い。実引数は `plan.latentShape` の**素の可変配列**なので、参照のまま返すと
+  // 購読側の書き換えが次 step の patchify / rope の対応を崩す（要素数は変わらないので末尾の
+  // 「出た画像の寸法 == 要求解像度」検査も通り、黙って別物が出る）。
+  assertNotStrictEquals(copy.shape, shape);
+  shape[2] = 99;
+  assertEquals(copy.shape, [1, 2, 1, 1]);
 });

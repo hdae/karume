@@ -86,7 +86,7 @@ import {
 } from "./dit-tokens.ts";
 import { parseRopeBase, type RopeBase, ropeWidth } from "./rope-base.ts";
 import { type AnimaTokenizers, createTokenizers } from "./text/tokenizer.ts";
-import { Randn } from "./random.ts";
+import { assertAcceptableSeed, Randn } from "./random.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import { toSessionOptions } from "../session/options.ts";
 
@@ -149,7 +149,7 @@ export type AnimaGenerateRequest = {
    * （`copyLatents`）だけ。プレビューは `approximatePreview`（`@karume/models/anima`）が
    * この latent から近似する。
    *
-   * MUST: `onEvent` の中で同じパイプラインの `generate` / `generateLatent` / `dispose` を
+   * MUST: `onEvent` の中で同じパイプラインの `generate` / `dispose` を
    * await してはならない（直列化鎖の自己デッドロック — 中断は throw で行う）。
    */
   readonly onEvent?: (event: AnimaGenerateEvent) => void | Promise<void>;
@@ -195,6 +195,10 @@ export type AnimaGenerateEvent =
  * 進捗だけを購読する消費側にコピー費用が一切かからず、内部の配列を渡さないので「次 step の
  * 入力を購読側に握られる」事故も構造的に起きない。
  *
+ * MUST: `data` だけでなく `shape` も写す。実引数は `plan.latentShape` の**素の可変配列**で、
+ * 参照を渡すと購読側の書き換えが次 step の patchify / rope の対応を崩す（要素数は変わらない
+ * ので末尾の「出た画像の寸法 == 要求解像度」検査も通り、黙って別物が出る）。
+ *
  * MUST: 呼ばれた時点ではなく**作った時点**の配列を写す（引数で束縛する）。denoise ループの
  * `current` は step ごとに**新しい配列へ差し替わる**ので、この束縛がそのまま「その step の
  * latent」になる。ループ変数を閉じ込めると、後から呼んだ購読側に別 step の latent が返る。
@@ -206,7 +210,7 @@ export const latentSnapshot = (
   latents: Float32Array<ArrayBuffer>,
   shape: readonly number[],
 ): () => AnimaLatentSnapshot =>
-(): AnimaLatentSnapshot => ({ data: new Float32Array(latents), shape });
+(): AnimaLatentSnapshot => ({ data: new Float32Array(latents), shape: [...shape] });
 
 /** 構築オプション（{@link AnimaPipeline.fromAssets} / {@link AnimaPipeline.fromPretrained} 共通）。 */
 export type AnimaPipelineOptions = {
@@ -700,6 +704,10 @@ export class AnimaPipeline {
     const resolution = request.resolution ?? defaults.resolution;
     const seed = request.seed ?? 0;
     assertAcceptableResolution(resolution);
+    // seed の検査も入口に置く。生成器を作るのは DiT の段（`new Randn(seed)`）で、そこは
+    // text encoder / conditioner を回して DiT の重みを上げ終えた後なので、`Randn` 側だけに
+    // 検査があると不正な seed が GB 級のロードの末に落ちる。
+    assertAcceptableSeed(seed);
     if (!Number.isInteger(steps) || steps < 2) {
       throw new Error(`steps ${steps} が 2 以上の整数でない（sigma の linspace が組めない）`);
     }

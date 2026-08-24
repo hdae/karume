@@ -40,8 +40,9 @@ export { ANIMA_BASE_SOURCE } from "./src/anima/config.ts";
 
 /**
  * 途中 latent からの RGB プレビュー近似。`denoise-step` イベントの `copyLatents()`
- * （{@link AnimaLatentSnapshot}）の返り値を**そのまま**渡すと、latent 解像度（元画像の 1/8）の
- * RGBA が返る。
+ * （{@link AnimaLatentSnapshot}）が返す 2 欄を**そのまま**（逆正規化せずに）渡すと、latent
+ * 解像度（元画像の 1/8）の RGBA が返る —
+ * `const { data, shape } = event.copyLatents(); approximatePreview(data, shape)`。
  *
  * VAE は DiT を解放した**後**にしかロードできない（VRAM の MUST）ため、パイプラインは毎 step の
  * VAE プレビューを提供しない — step ごとの経過を絵で見せる手段はこの近似だけなので、面に出す。
