@@ -23,10 +23,12 @@ scale 台帳の中身だけで、`emit` 側の格納経路も配布形のバイ�
    いるのでその形では degenerate になる。代わりに「ラッパの block ループを stage 逐次で
    回した結果が、ラッパを 1 回 forward したときの `norm_out` への入力とビット一致する」を
    見る（丸めを 1 本も当てる前に実測する MUST）。
-4. **校正入力とグラフの経路一致門** — {@link assert_calib_batches_match_graph}。捕捉は素の
+4. **校正入力とグラフの付随引数一致門** — {@link assert_calib_batches_match_graph}。捕捉は素の
    `CosmosTransformer3DModel` の forward から採るのに、丸めるのはラッパ（`patch.AnimaDit`）の
    重み。両者が block へ渡す付随引数の顔ぶれが違うと、「配布グラフとは別の条件で選んだ
-   丸め先」を出荷することになる（数値は普通に出るので golden も緑のまま通る）。
+   丸め先」を出荷することになる（数値は普通に出るので golden も緑のまま通る）。見るのは
+   **keyword 名の集合だけ**で、値・shape・位置引数は突き合わせない（「経路が同じ」までは
+   主張しない — 顔ぶれのずれだけを捕まえる門）。
 
 NOTE（`anima.measure_quant` のリグと共有しない理由）: あちらは 3 グリッド × 品質計測のための
 足場で、対象も駆動も「素のモデル」に閉じている。export 側はラッパの FQN 空間・配布条件
@@ -337,6 +339,10 @@ def assert_calib_batches_match_graph(
     ラッパの重み。両者が block へ渡す keyword の集合が違えば、「配布グラフとは別の条件で
     選んだ丸め先」を出荷することになる — しかも数値は普通に出る（golden も緑のまま通る）。
 
+    見るのは **keyword 名の集合**だけ。値・shape・位置引数は突き合わせないので、同じ顔ぶれの
+    まま中身が違う入力（例: 別の sigma で採った temb）は素通りする — この門が主張するのは
+    「引数の顔ぶれが同じ」までで、「経路が同じ」ではない。
+
     MUST: fail loudly。ここが黙ると、上流が block の引数を増やした日に校正だけがそれを見る
     （あるいは見ない）状態が資産から読めない形で入り込む。
     """
@@ -426,9 +432,14 @@ def assert_calib_covers_scan(report: CalibReport, scan: frozenset[str]) -> None:
 
     `scan` は `.weight` を落としたモジュール名の集合（{@link stage_linear_names} の形）。
 
-    MUST: fail loudly。stage の綴りや対象型が変わって block の一部が校正に載らなくなっても、
-    丸め漏れのぶん品質は**良い側**に出る（素通りを数字から読めない）。しかも漏れた重みは
-    その後 i8 側にも i4 側にも入らないまま格納指定だけが i4 を要求する形になる。
+    MUST: fail loudly。丸め漏れは品質を**良い側**へ動かすので、素通りを数字から読めない。
+    しかも漏れた重みはその後 i8 側にも i4 側にも入らないまま、格納指定だけが i4 を要求する
+    形になる。
+
+    捕まえられるのは「**校正の実走が走査からずれた**」形（core が対象を落とした / 別の
+    `stages` を渡した / 台帳の取り出しが層を落とした）まで。走査そのもの（`iter_quant_targets`
+    の対象型・stage 分解）が変わった場合は**両辺が一緒に動くのでこの門は黙る** — そちらは
+    `export.py` 側の「走査 == i4 適格集合」の突合（グラフ由来の独立な源）が受け持つ。
     """
     rounded = {layer.fqn for layer in report.layers}
     wanted = {f"{name}.weight" for name in scan}

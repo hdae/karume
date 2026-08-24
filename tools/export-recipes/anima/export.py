@@ -667,17 +667,19 @@ def _round_i4_calibrated(
 ) -> tuple[Mapping[str, torch.Tensor], Int8Report]:
     """i4 適格を「block 外 = 素の RTN」「block 内 = GPTQ」へ排他に割って丸める。
 
-    順序 MUST（① → ② → ③ → ④）:
+    順序（① → ② → ③ → ④。**②〜④ は MUST・① は SHOULD**）:
 
     1. **stage 分解一致門を丸める前に通す**（`anima.calib.assert_stage_split`）— ずれた分解で
-       丸めると「別の経路の GPTQ」を出荷することになり、しかも数値は普通に出る。
+       丸めると「別の経路の GPTQ」を出荷することになり、しかも数値は普通に出る。SHOULD どまり
+       なのは、この門が読み取り専用で**位置を後ろへ動かしても出荷バイトが変わらない**ため
+       （先頭に置く得は、数時間の校正を回す前に落ちること）。
     2. **block 外の適格を先に RTN i4 で丸める** — 配布実行時に block へ入るのは i4 の
        `time_embed` が作った temb で、step をまたぐ latent も i4 の `norm_out` / `proj_out` を
        通った値。後に回すと「f32 の周辺を通った活性」で選んだ丸め先を、i4 の周辺と組んで
        配ることになる。**i8 側（`patch_embed.proj` 1 本）も同じ理由で校正入力の捕捉より前に
        丸める**（{@link _fake_quant_i4} が `fake_quant_int8` を先に呼ぶ）— この 1 本は
        patchify 入口で、block 0 の入力そのものを作る。
-    3. 校正入力の生成（参照 denoise の捕捉）と経路一致門。
+    3. 校正入力の生成（参照 denoise の捕捉）と付随引数一致門。
     4. block 内の linear を GPTQ × RTN 格子で丸める。
 
     MUST: block 外の適格は {@link NON_STAGE_I4_WEIGHTS} と一致し、block 内の linear は 1 本

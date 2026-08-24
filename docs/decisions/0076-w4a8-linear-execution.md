@@ -43,9 +43,16 @@ k % 4 === 0`。ノブの意味は「**活性を i8 にして整数内積で計�
         accf = fma(f32(acci), wscale[col, gi], accf)   # group 境界ちょうどで flush
     out = fma(accf, xs[row], bias[col])
 
-丸めは厳密に `k/g + 1` 回。w8a8 の「`xs·wscale` を先に 1 つの f32 へ畳む」MUST は wscale が
-group ごとに変わるので**成立しない** — `xs` は最終 fma へ回す。この非対称は公開 API の
-docstring と両参照に明記する。
+丸めは **fma が `k/g + 1` 回**。数えているのは fma だけで、`f32(acci)` の i32→f32 変換は
+**`|acci| ≤ 2^24` の間は無損失**なので数に入れていない（実配布の `g` は 16〜64 で
+`|acci| ≤ g·1016 ≤ 65,024` = 上限の 1/258）。この前提が崩れるのは `g > 16,513` の側で、
+そこでは変換ぶんが上乗せされ「厳密に `k/g + 1`」ではなくなる — 門
+`LINEAR_W4A8_MAX_GROUP`（= 2,113,664）は i32 の巻き戻りだけを見ているのでこの領域を通す。
+atol=0 の主張が立つのは実配布の `g` の範囲。
+
+w8a8 の「`xs·wscale` を先に 1 つの f32 へ畳む」MUST は wscale が group ごとに変わるので
+**成立しない** — `xs` は最終 fma へ回す。同じ数え方で w8a8 は 2 回（`xs·wscale` の積 +
+最後の fma）。この非対称は公開 API の docstring と両参照に明記する。
 
 ### 3. flush は group 境界ちょうど（タイル境界ではない）
 

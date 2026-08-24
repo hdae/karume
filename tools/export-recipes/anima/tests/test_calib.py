@@ -303,7 +303,7 @@ def capture_batches(raw: nn.Module, probes) -> tuple:
 
     実物では `calib.capture_stage_batches` が参照 denoise で同じことをする（駆動されるのは
     `wrapper.model` = 素の `CosmosTransformer3DModel`）— ここでラッパを回してしまうと捕捉元と
-    グラフが同一コードパスになり、経路一致門が自明に通る入力しか作れない。
+    グラフが同一コードパスになり、付随引数一致門が自明に通る入力しか作れない。
     """
     blocks = raw.transformer_blocks
     names = tuple(inspect.signature(blocks[0].forward).parameters)

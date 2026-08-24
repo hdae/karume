@@ -54,10 +54,12 @@ export type Sbv2Prosody = {
 /**
  * yomi の解析結果を下書きへ落とす。
  *
- * MUST: 核を `0..moras.length` へクランプして出す。yomi の `moraTones` は範囲外核（辞書差・
- * オーバーレイ由来）を尾高相当へ黙ってクランプしてトーンを作るので、生値のまま下書きに載せると
- * 「解析どおりの下書きを戻したのに範囲検査で落ちる」往復不能が起きる。クランプ後の値は同じ
- * トーン列を生む（音は変わらない）。
+ * MUST: 核の**上端**を `moras.length` へクランプして出す（`Math.min` — 下端は見ていない。
+ * 負の核は実測で出ておらず、出たら受理側の {@link assertProsodyShape} が `0..moras.length` の
+ * 対称な範囲検査で落とす）。yomi の `moraTones` は範囲外核（辞書差・オーバーレイ由来）を尾高
+ * 相当へ黙ってクランプしてトーンを作るので、生値のまま下書きに載せると「解析どおりの下書きを
+ * 戻したのに範囲検査で落ちる」往復不能が起きる。クランプ後の値は同じトーン列を生む
+ * （音は変わらない）。
  */
 export const toSbv2Prosody = (result: FrontendResult): Sbv2Prosody => ({
   leadingPunctuations: [...result.leadingPunctuations],
