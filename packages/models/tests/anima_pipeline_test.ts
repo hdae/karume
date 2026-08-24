@@ -10,8 +10,9 @@
 //  ③ `denoise-step` の `copyLatents`（`latentSnapshot`）が「作った時点の latent の写し」を
 //     返す。ここが壊れると購読側には**別 step の latent が黙って**届く（実 GPU の PNG 門は
 //     観測席を通らないので緑のまま）。
-//  ④ 構築の `signal` が**入口で**効く（DL 完了後の組み立てが中断不能だと、UI の中止ボタンが
-//     無反応になる窓ができる）。中間段の検査は実資産と GPU が要るのでここでは見られない。
+//  ④ 構築の `signal` が**入口でも実行開始後でも**効く（DL 完了後の組み立てが中断不能だと、
+//     UI の中止ボタンが無反応になる窓ができる）。後者は「最初の段境界」までを空資産で見る
+//     — それより先の境界は実資産と GPU が要るのでここでは見られない。
 //
 // NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
 // `session_options_test.ts` にある。
@@ -133,6 +134,21 @@ Deno.test("fromAssets: 中断済み signal は資産へ触る前に reason そ�
     AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { signal: controller.signal })
   );
   // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
+  assertStrictEquals(error, reason);
+});
+
+Deno.test("fromAssets: 実行開始後に届いた中断も最初の段境界で効く", async () => {
+  // 上の門は「呼ぶ前に中断済み」だけを見る。中止ボタンは**組み立てが走っている最中**に
+  // 押されるので、段境界の検査はイベントループへ譲ってからでなければ死文になる
+  // （abort() の届き方はタスク配送 — 同期解析中は 1 度も観測されない）。
+  // 仕掛けてから呼ぶと、資産エラー（「資産 'tokenizer' が無い」）ではなく reason で落ちる。
+  const manifest = parseManifest(manifestText());
+  const controller = new AbortController();
+  const reason = new Error("中止ボタン（実行中）");
+  setTimeout(() => controller.abort(reason), 0);
+  const error = await assertRejects(() =>
+    AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { signal: controller.signal })
+  );
   assertStrictEquals(error, reason);
 });
 

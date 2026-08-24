@@ -90,6 +90,22 @@ import { Randn } from "./random.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import { toSessionOptions } from "../session/options.ts";
 
+/**
+ * 段の境目で中断を**観測できる形**に検査する（イベントループへ 1 度譲ってから `throwIfAborted`）。
+ *
+ * MUST: 譲り先は**マクロタスク**（`setTimeout`）でなければならない。`abort()` の届き方は
+ * クリック・timer・worker メッセージなどの**タスク**配送なので、`await Promise.resolve()`
+ * （マイクロタスク）では現在のタスクの中に留まったままで、まだ実行されていない中断タスクを
+ * 観測できない。譲らない検査は「呼ばれた時点で既に中断済み」しか拾えない死文になる。
+ *
+ * `signal` 未指定なら譲らない（購読していない呼び出しにタスク 1 往復のコストを乗せない）。
+ */
+const settleAbort = async (signal: AbortSignal | undefined): Promise<void> => {
+  if (signal === undefined) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  signal.throwIfAborted();
+};
+
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const TEXT_ENCODER = "text_encoder";
 const TEXT_CONDITIONER = "text_conditioner";
@@ -215,7 +231,9 @@ export type AnimaPipelineOptions = {
   ) => void;
   /**
    * 構築の中断。{@link AnimaPipeline.fromAssets} が段の境目（入口 / トークナイザ解釈 /
-   * 各 `openModel` の間 / GPU 取得の前後）で `throwIfAborted` を検査する。
+   * 各 `openModel` の間 / GPU 取得の前後）で検査する。入口を除く各境目では**イベントループへ
+   * 1 度譲ってから**検査するので、同期解析の最中に届いた中断も次の境目で効く
+   * （`options.gpu` を渡して await が 1 つも無い経路でも同じ）。
    * {@link AnimaPipeline.fromPretrained} は同じ 1 本を取得層へも渡すので、**DL と組み立ての
    * どちらの最中でも**同じノブで中断できる（DL 完了後だけ中止ボタンが無反応、を作らない）。
    *
@@ -550,7 +568,9 @@ export class AnimaPipeline {
    * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
    *
    * NOTE: 各段は不可分（3.7GiB の `openModel` を途中で畳む口は無い）なので、
-   * {@link AnimaPipelineOptions.signal} の検査は**段の境目**にだけ置く。
+   * {@link AnimaPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこで
+   * イベントループへ 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に
+   * 届いた中断は次の境目で効く（`options.gpu` 供給時も同様）。
    */
   static async fromAssets(
     input: AnimaAssets,
@@ -598,22 +618,22 @@ export class AnimaPipeline {
     // 資産の解析は GPU より前（docstring の順序 MUST）。3.7GiB の DiT を開くほうが device 生成
     // より重いが、壊れた配布形の真因を消さないほうを採る — GPU 無し環境では acquireGpu 自体が
     // 落ちるので、後ろに置くと「資産が無い」が永久に見えない。
-    options.signal?.throwIfAborted();
+    await settleAbort(options.signal);
     const tokenizers = createTokenizers(
       assetBytes(assets, TOKENIZER),
       assetBytes(assets, TOKENIZER_2),
     );
-    options.signal?.throwIfAborted();
+    await settleAbort(options.signal);
     const textEncoder = openModel(assetBuffer(assets, TEXT_ENCODER));
-    options.signal?.throwIfAborted();
+    await settleAbort(options.signal);
     const textConditioner = openModel(assetBuffer(assets, TEXT_CONDITIONER));
-    options.signal?.throwIfAborted();
+    await settleAbort(options.signal);
     const transformer = openModel(assetBuffer(assets, TRANSFORMER));
     const ropeBase = parseRopeBase(assetBuffer(assets, TRANSFORMER_ROPE_BASE));
-    options.signal?.throwIfAborted();
+    await settleAbort(options.signal);
     const vaeDecoder = openModel(assetBuffer(assets, VAE_DECODER));
 
-    options.signal?.throwIfAborted();
+    await settleAbort(options.signal);
 
     // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
     // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす — 通すと
@@ -624,7 +644,9 @@ export class AnimaPipeline {
     try {
       // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
       // 誰も解放できないまま抜ける（shader-f16 検査と同じ後始末に乗せる）。
-      options.signal?.throwIfAborted();
+      // ここでもマクロタスクへ譲る: `acquireGpu` の await 解決はマイクロタスク継続なので、
+      // 待機中に積まれたクリック由来の中断タスクはまだ実行されていない。
+      await settleAbort(options.signal);
       if (wantsShaderF16 && !gpu.shaderF16Enabled) {
         throw new Error(
           `AnimaPipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +
