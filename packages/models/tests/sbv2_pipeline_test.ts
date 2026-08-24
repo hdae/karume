@@ -480,6 +480,56 @@ Deno.test("parseTokenizerAsset: 特殊 id は整数かつ語彙の行数未満",
   );
 });
 
+// ---- トークナイザ資産の区間表（二分探索の前提を壊す形で沈黙誤値になる前に落とす）----
+
+/** `cleanRanges` だけ差し替えた骨格（`special` は正常系のまま）。 */
+const tokenizerRanges = (clean: Record<string, unknown>): Record<string, unknown> => ({
+  ...tokenizerAsset({}),
+  cleanRanges: clean,
+});
+
+Deno.test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなければ受け付けない", () => {
+  // 正常系（この形が通ることを先に固定 — 下の門が「常に落ちる」形になっていないように）。
+  parseTokenizerAsset(tokenizerRanges({ removed: [[0, 0], [8, 31]], spaced: [[32, 32]] }), "tok");
+  // `inRanges` は二分探索なので、前提が破れても例外は出ず**黙って外す**。除去/空白化の規則
+  // だけが変わった bertText から input_ids と baseWord2ph が同じ壊れ方で作られるため、
+  // `text/analyze.ts` の長さ突合門も通り、別の BERT 埋め込みで合成した音がそのまま出る。
+  assertThrows(
+    () => parseTokenizerAsset(tokenizerRanges({ removed: [[31, 8]], spaced: [] }), "tok"),
+    Error,
+    "tok.cleanRanges.removed[0]: 区間 [31, 8] の start が end より大きい",
+  );
+  assertThrows(
+    () =>
+      parseTokenizerAsset(tokenizerRanges({ removed: [[127, 159], [8, 31]], spaced: [] }), "tok"),
+    Error,
+    "tok.cleanRanges.removed[1]: 区間 [8, 31] が直前の終端 159 以下から始まる",
+  );
+  // 端点を共有するだけの重複でも探索は外しうる（境界を 1 つ緩めていない）。
+  assertThrows(
+    () => parseTokenizerAsset(tokenizerRanges({ removed: [[8, 31], [31, 40]], spaced: [] }), "tok"),
+    Error,
+    "tok.cleanRanges.removed[1]: 区間 [31, 40] が直前の終端 31 以下から始まる",
+  );
+  // 非整数はコードポイント比較の意味を失い、範囲外は資産の生成規則から外れる。
+  assertThrows(
+    () => parseTokenizerAsset(tokenizerRanges({ removed: [[0.5, 3]], spaced: [] }), "tok"),
+    Error,
+    "tok.cleanRanges.removed[0]: 区間 [0.5, 3] が 0..1114111 の整数対でない",
+  );
+  assertThrows(
+    () => parseTokenizerAsset(tokenizerRanges({ removed: [[0, 0x110000]], spaced: [] }), "tok"),
+    Error,
+    "tok.cleanRanges.removed[0]: 区間 [0, 1114112] が 0..1114111 の整数対でない",
+  );
+  // spaced 側も同じ門を通る（removed だけ塞いだ形になっていない）。
+  assertThrows(
+    () => parseTokenizerAsset(tokenizerRanges({ removed: [], spaced: [[5, 4]] }), "tok"),
+    Error,
+    "tok.cleanRanges.spaced[0]: 区間 [5, 4] の start が end より大きい",
+  );
+});
+
 // ---- 辞書の確保（19MB の取得を 1 度きりにする席）-----------------------------
 
 /** 必ず parse に失敗するバイト列（取得の回数だけを見たいので中身は要らない）。 */

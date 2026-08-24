@@ -7,6 +7,7 @@
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
+import { Sbv2InputError } from "../src/sbv2/errors.ts";
 import { durationsToFrames } from "../src/sbv2/host/duration.ts";
 import { buildZp } from "../src/sbv2/host/latent.ts";
 import { Randn } from "../src/sbv2/host/random.ts";
@@ -72,16 +73,20 @@ Deno.test("durationsToFrames: 故障注入 — sdp_ratio の混合が効いて�
 
 Deno.test("durationsToFrames: 長さ不一致・全 0 フレームは落とす", () => {
   const logw = logwFor([1, 1]);
-  assertThrows(
+  // どちらも front 出力が壊れている＝内部異常なので、素の `Error`（500 相当）のまま。
+  // 呼び手が text や lengthScale を直しても直らない = 入力起因の分岐へ流してはならない。
+  const mismatch = assertThrows(
     () => durationsToFrames(logw, logwFor([1]), new Float32Array([1, 1]), 0, 1, AMPLE_FRAMES),
     Error,
     "長さ不一致",
   );
-  assertThrows(
+  assert(!(mismatch instanceof Sbv2InputError), "長さ不一致は入力起因ではない");
+  const empty = assertThrows(
     () => durationsToFrames(logw, logw, new Float32Array([0, 0]), 0, 1, AMPLE_FRAMES),
     Error,
     "総フレーム数が 0",
   );
+  assert(!(empty instanceof Sbv2InputError), "総フレーム数 0 は入力起因ではない");
 });
 
 Deno.test("durationsToFrames: 総フレーム数が配布形の上限を超えたら展開列を確保する前に落とす", () => {
@@ -90,9 +95,11 @@ Deno.test("durationsToFrames: 総フレーム数が配布形の上限を超え�
   const logw = logwFor([1.2, 1.8, 0.3]);
   const mask = new Float32Array([1, 1, 1]);
   assertEquals(durationsToFrames(logw, logw, mask, 0.5, 1, 7).totalFrames, 5);
+  // 型は `Sbv2InputError`（400 相当）— text を短く分けるか lengthScale を下げれば通る要求で、
+  // 内部不変条件の破れ（素の `Error` = 500）とは呼び手の分岐先が違う（`errors.ts` の分類軸）。
   assertThrows(
     () => durationsToFrames(logw, logw, mask, 0.5, 2, 7),
-    Error,
+    Sbv2InputError,
     "総フレーム数 8 が配布形の上限 maxFrames=7 を超えている",
   );
 });

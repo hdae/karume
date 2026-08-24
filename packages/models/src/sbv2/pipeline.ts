@@ -403,8 +403,21 @@ const observer = (
   return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
 };
 
+/** Unicode コードポイントの上限（区間表はコードポイントの閉区間）。 */
+const MAX_CODE_POINT = 0x10FFFF;
+
+/**
+ * `cleanRanges` の区間表を検査して読む。
+ *
+ * MUST: 整数・コードポイント範囲・`start <= end`・**昇順かつ非重複**まで見る。`inRanges`
+ * （`text/tokenizer.ts`）は二分探索なので、この前提が破れても例外は出ず**黙って外す** —
+ * 除去 / 空白化の規則だけが変わった `bertText` から `inputIds` と `baseWord2ph` が同じ
+ * 壊れ方で作られるため、`text/analyze.ts` の長さ突合門も通り、別の BERT 埋め込みで合成した
+ * 音がそのまま出る。並べ替えて救わない（資産の不正として構築時に落とす）。
+ */
 const parseRanges = (raw: unknown, where: string): (readonly [number, number])[] => {
   if (!Array.isArray(raw)) throw new Error(`${where}: 区間表が配列でない`);
+  let previousEnd = -1;
   return raw.map((entry, index) => {
     if (
       !Array.isArray(entry) || entry.length !== 2 ||
@@ -412,7 +425,26 @@ const parseRanges = (raw: unknown, where: string): (readonly [number, number])[]
     ) {
       throw new Error(`${where}[${index}]: 区間が [start, end] の数値対でない`);
     }
-    return [entry[0], entry[1]] as const;
+    const [start, end]: [number, number] = [entry[0], entry[1]];
+    if (
+      !Number.isInteger(start) || !Number.isInteger(end) ||
+      start < 0 || end > MAX_CODE_POINT
+    ) {
+      throw new Error(
+        `${where}[${index}]: 区間 [${start}, ${end}] が 0..${MAX_CODE_POINT} の整数対でない`,
+      );
+    }
+    if (start > end) {
+      throw new Error(`${where}[${index}]: 区間 [${start}, ${end}] の start が end より大きい`);
+    }
+    if (start <= previousEnd) {
+      throw new Error(
+        `${where}[${index}]: 区間 [${start}, ${end}] が直前の終端 ${previousEnd} 以下から始まる` +
+          "（昇順・非重複でない — 二分探索が黙って外す）",
+      );
+    }
+    previousEnd = end;
+    return [start, end] as const;
   });
 };
 

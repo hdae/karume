@@ -20,6 +20,8 @@
  * `w_ceil_diffs` に載せる）。karume 単体の再現性（WAV sha256 門）は f64 経路が決定的なので無傷。
  */
 
+import { Sbv2InputError } from "../errors.ts";
+
 type DurationPlan = {
   /** 音素ごとのフレーム数（ceil 済み・マスク適用済み）。 */
   readonly wCeil: Int32Array<ArrayBuffer>;
@@ -72,7 +74,10 @@ export const durationsToFrames = (
     throw new Error("総フレーム数が 0（発話にならない — x_mask か front 出力を疑う）");
   }
   if (total > maxFrames) {
-    throw new Error(
+    // MUST: ここだけ `Sbv2InputError`。同ファイルの他の throw は front 出力が壊れている
+    // ＝内部異常（500）だが、上限超過は「渡した text / lengthScale が受理できない」＝
+    // 入力起因（400）で、呼び手が要求を直せば直る（`errors.ts` の分類軸）。
+    throw new Sbv2InputError(
       `総フレーム数 ${total} が配布形の上限 maxFrames=${maxFrames} を超えている` +
         "（text を短く分けるか lengthScale を下げる）",
     );
