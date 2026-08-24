@@ -3,7 +3,7 @@
 //
 // 設計 = docs/research/2026-08-04-attention-a8-design.md §2.2 / §2.3 / §4.2、実装 =
 // src/codegen/strided.ts（Vᵀ・無改変で再利用）+ src/kernels/quantize-rows.ts（無改変）+
-// src/kernels/attention-i8a8.ts、opt-in = `SessionOptions.attentionCompute: "i8a8"`（既定 "f32"）。
+// src/kernels/attention-i8a8.ts、opt-in = `SessionOptions.attentionCompute: "a8"`（既定 "f32"）。
 //
 // ## このファイルが固定する数値契約（①QK と決定的に違う — 設計 §4.2）
 //
@@ -626,7 +626,7 @@ Deno.test({
 });
 
 // ---------------------------------------------------------------------------
-// Session 経路（attentionCompute: "i8a8"）— 段ごとの適格判定と混成
+// Session 経路（attentionCompute: "a8"）— 段ごとの適格判定と混成
 // ---------------------------------------------------------------------------
 
 const QUERY = (i: number): number => (((i * 3) % 29) - 14) * 0.3717 + 0.0419;
@@ -682,7 +682,7 @@ const relativeRms = (actual: ArrayLike<number>, expected: ArrayLike<number>): nu
 };
 
 Deno.test({
-  name: "attentionCompute:'i8a8' は ①QK と ③PV を整数内積にし、②行統計は f32 のまま走る（実 GPU）",
+  name: "attentionCompute:'a8' は ①QK と ③PV を整数内積にし、②行統計は f32 のまま走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // MUST: **shader-f16 を要求しない既定の device** で走ること（i8a8 は feature ゲートの外）。
@@ -690,7 +690,7 @@ Deno.test({
     try {
       const shape = { b: 2, h: 3, m: 65, n: 68 };
       const d = 20;
-      const i8a8 = await runAttention(gpu, shape, d, { attentionCompute: "i8a8" });
+      const i8a8 = await runAttention(gpu, shape, d, { attentionCompute: "a8" });
       const plain = await runAttention(gpu, shape, d, {});
       assert(
         [...i8a8.output].some((value, index) => value !== plain.output[index]),
@@ -731,7 +731,7 @@ Deno.test({
 
       // 整数内積変種のノブは attention の**両段**に効く（linear と同じ 1 つのノブ）
       const emu = await runAttention(gpu, shape, d, {
-        attentionCompute: "i8a8",
+        attentionCompute: "a8",
         [I8A8_DOT]: "emu",
       });
       assertExact(emu.output, i8a8.output, "dp4a vs エミュ（Session 経路）");
@@ -748,14 +748,14 @@ Deno.test({
 
 Deno.test({
   name:
-    "attentionCompute:'i8a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
+    "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       // ① N % 4 != 0 → ③PV だけ f32（①QK は D=20 で i8a8 のまま）
       const mixedPv = { b: 1, h: 2, m: 17, n: 19 };
-      const pvF32 = await runAttention(gpu, mixedPv, 20, { attentionCompute: "i8a8" });
+      const pvF32 = await runAttention(gpu, mixedPv, 20, { attentionCompute: "a8" });
       if (pvF32.entries.length > 0) {
         const byKey = new Map(pvF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
         assertEquals(byKey.get(attentionQkI8a8Key(attentionQkI8a8UsesVec4(19), true)), 1);
@@ -770,7 +770,7 @@ Deno.test({
 
       // ② D % 4 != 0 → ①QK だけ f32（③PV は N=20 で i8a8 のまま）— 逆向きの混成
       const mixedQk = { b: 1, h: 2, m: 17, n: 20 };
-      const qkF32 = await runAttention(gpu, mixedQk, 13, { attentionCompute: "i8a8" });
+      const qkF32 = await runAttention(gpu, mixedQk, 13, { attentionCompute: "a8" });
       if (qkF32.entries.length > 0) {
         const byKey = new Map(qkF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
         assertEquals(byKey.get(attentionQkKey(gemmUsesVec4(13, 20))), 1, "①QK は f32 へ縮退する");
@@ -785,7 +785,7 @@ Deno.test({
 
       // ③ 両方満たさない形は f32 経路とビット同一（縮退は沈黙 — 検出器はキーと値の 2 本）
       const both = { b: 1, h: 2, m: 17, n: 19 };
-      const degraded = await runAttention(gpu, both, 13, { attentionCompute: "i8a8" });
+      const degraded = await runAttention(gpu, both, 13, { attentionCompute: "a8" });
       const plain = await runAttention(gpu, both, 13, {});
       assertExact(degraded.output, plain.output, "両段の縮退が f32 経路と一致しない");
       if (degraded.entries.length > 0) {
@@ -810,7 +810,7 @@ Deno.test({
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       await assertRejects(
-        () => runAttention(gpu, shape, 4, { attentionCompute: "i8a8" }),
+        () => runAttention(gpu, shape, 4, { attentionCompute: "a8" }),
         ExecutionError,
         "i32 縮約の門",
       );

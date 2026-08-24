@@ -4,75 +4,6 @@
       "name": "envelope-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
-        "generator": "karume/0.1.0",
-        "defaultModel": "m",
-        "models": {
-          "m": {
-            "pipeline": "anima/1",
-            "weights": {
-              "net": {
-                "f16": {
-                  "shards": [
-                    {
-                      "path": "net/model.f16.safetensors",
-                      "size": 8,
-                      "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
-                    }
-                  ]
-                },
-                "i8": {
-                  "shards": [
-                    {
-                      "path": "net/model.i8.safetensors",
-                      "size": 4,
-                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
-                    }
-                  ],
-                  "extras": {
-                    "rope_base": {
-                      "path": "net/rope_base.safetensors",
-                      "size": 6,
-                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
-                    }
-                  }
-                }
-              }
-            },
-            "assets": {
-              "tokenizer": {
-                "path": "tokenizer/tokenizer.json",
-                "size": 12,
-                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-              }
-            },
-            "quants": {
-              "f16": {
-                "weights": {
-                  "net": "f16"
-                },
-                "session": {}
-              },
-              "w8": {
-                "weights": {
-                  "net": "i8"
-                },
-                "session": {
-                  "linearCompute": "i8a8"
-                }
-              }
-            },
-            "defaultQuant": "w8",
-            "pipelineConfig": {}
-          }
-        },
-        "presets": {}
-      }
-    },
-    {
-      "name": "format-unknown-major",
-      "error": "ManifestFormatError",
-      "manifest": {
         "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
@@ -127,7 +58,76 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        },
+        "presets": {}
+      }
+    },
+    {
+      "name": "format-unknown-major",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/5",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "f16": {
+                  "shards": [
+                    {
+                      "path": "net/model.f16.safetensors",
+                      "size": 8,
+                      "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                    }
+                  ]
+                },
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ],
+                  "extras": {
+                    "rope_base": {
+                      "path": "net/rope_base.safetensors",
+                      "size": 6,
+                      "sha256": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+                    }
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -195,11 +195,49 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
             "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "format-v3-not-read",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/3",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
             "pipelineConfig": {}
           }
         }
@@ -259,7 +297,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -327,7 +365,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -394,7 +432,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -408,7 +446,7 @@
       "name": "generator-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "defaultModel": "m",
         "models": {
           "m": {
@@ -461,7 +499,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -475,7 +513,7 @@
       "name": "generator-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "",
         "defaultModel": "m",
         "models": {
@@ -529,7 +567,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -543,7 +581,7 @@
       "name": "default-model-not-string",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": 0,
         "models": {
@@ -597,7 +635,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -611,7 +649,7 @@
       "name": "default-model-dangling",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "absent",
         "models": {
@@ -665,7 +703,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -679,7 +717,7 @@
       "name": "models-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m"
       }
@@ -688,7 +726,7 @@
       "name": "models-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {}
@@ -698,7 +736,7 @@
       "name": "models-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": []
@@ -708,7 +746,7 @@
       "name": "model-entry-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -720,7 +758,7 @@
       "name": "proto-key-as-model-name",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -774,7 +812,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -831,7 +869,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -845,7 +883,7 @@
       "name": "proto-key-inside-pipeline-config",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -899,7 +937,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -924,7 +962,7 @@
       "name": "model-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -978,7 +1016,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -993,7 +1031,7 @@
       "name": "pipeline-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1046,7 +1084,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1060,7 +1098,7 @@
       "name": "pipeline-without-major",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1114,7 +1152,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1128,7 +1166,7 @@
       "name": "pipeline-non-integer-major",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1182,7 +1220,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1196,7 +1234,7 @@
       "name": "weights-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1221,7 +1259,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1235,7 +1273,7 @@
       "name": "weights-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1261,7 +1299,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1275,7 +1313,7 @@
       "name": "weights-entry-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1303,7 +1341,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1317,7 +1355,7 @@
       "name": "weights-entry-without-dtype-key",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1345,7 +1383,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1359,7 +1397,7 @@
       "name": "weights-v1-file-shape-rejected",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1393,7 +1431,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1407,7 +1445,7 @@
       "name": "weight-dtype-entry-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1462,7 +1500,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1476,7 +1514,7 @@
       "name": "weight-dtype-entry-missing-shards",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1522,7 +1560,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1536,7 +1574,7 @@
       "name": "shards-not-array",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1588,7 +1626,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1602,7 +1640,7 @@
       "name": "shards-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1650,7 +1688,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1664,7 +1702,7 @@
       "name": "shards-duplicate-path-mismatch",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1723,7 +1761,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1737,7 +1775,7 @@
       "name": "weight-extras-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1785,7 +1823,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1799,7 +1837,7 @@
       "name": "assets-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1846,7 +1884,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1860,7 +1898,7 @@
       "name": "assets-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1908,7 +1946,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1922,7 +1960,7 @@
       "name": "assets-entry-not-file-ref",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -1978,7 +2016,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -1992,7 +2030,7 @@
       "name": "quants-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2044,7 +2082,7 @@
       "name": "quants-empty",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2097,7 +2135,7 @@
       "name": "quant-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2158,7 +2196,7 @@
       "name": "default-quant-not-string",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2212,7 +2250,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2226,7 +2264,7 @@
       "name": "default-quant-dangling",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2280,7 +2318,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2294,7 +2332,7 @@
       "name": "pipeline-config-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2348,7 +2386,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2361,7 +2399,7 @@
       "name": "pipeline-config-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2415,7 +2453,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2429,7 +2467,7 @@
       "name": "quant-weights-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2480,7 +2518,7 @@
               },
               "w8": {
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2494,7 +2532,7 @@
       "name": "quant-weights-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2546,7 +2584,7 @@
               "w8": {
                 "weights": "i8",
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2560,7 +2598,7 @@
       "name": "quant-weights-incomplete",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2612,7 +2650,7 @@
               "w8": {
                 "weights": {},
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2626,7 +2664,7 @@
       "name": "quant-weights-unknown-name",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2681,7 +2719,7 @@
                   "absent": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2695,7 +2733,7 @@
       "name": "quant-weights-names-asset",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2750,7 +2788,7 @@
                   "tokenizer": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2764,7 +2802,7 @@
       "name": "quant-weights-unknown-dtype",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2818,7 +2856,7 @@
                   "net": "q4"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2832,7 +2870,7 @@
       "name": "quant-weights-label-not-string",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2886,7 +2924,7 @@
                   "net": 8
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -2900,7 +2938,7 @@
       "name": "quant-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -2954,7 +2992,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 },
                 "defaultQuant": "w8"
               }
@@ -2969,7 +3007,7 @@
       "name": "session-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3035,7 +3073,7 @@
       "name": "session-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3089,8 +3127,8 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8",
-                  "matmulCompute": "i8a8"
+                  "linearCompute": "a8",
+                  "matmulCompute": "a8"
                 }
               }
             },
@@ -3104,7 +3142,7 @@
       "name": "session-submit-policy-rejected",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3158,7 +3196,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8",
+                  "linearCompute": "a8",
                   "submitPolicy": "per-node"
                 }
               }
@@ -3173,7 +3211,7 @@
       "name": "session-unknown-value",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3241,7 +3279,7 @@
       "name": "gpu-features-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3295,7 +3333,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 },
                 "gpuFeatures": {
                   "subgroups": true
@@ -3312,7 +3350,7 @@
       "name": "gpu-features-non-boolean",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3366,7 +3404,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 },
                 "gpuFeatures": {
                   "shaderF16": "yes"
@@ -3383,7 +3421,7 @@
       "name": "file-ref-unknown-key",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3397,7 +3435,7 @@
                       "path": "net/model.f16.safetensors",
                       "size": 8,
                       "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
-                      "repo": "someone/other"
+                      "etag": "W/\"deadbeef\""
                     }
                   ]
                 },
@@ -3438,7 +3476,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -3452,7 +3490,7 @@
       "name": "file-ref-not-object",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3502,7 +3540,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -3516,7 +3554,7 @@
       "name": "sha256-uppercase",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3570,7 +3608,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -3584,7 +3622,7 @@
       "name": "sha256-too-short",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3638,7 +3676,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -3652,7 +3690,7 @@
       "name": "sha256-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3705,7 +3743,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -3719,7 +3757,7 @@
       "name": "size-missing",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3772,7 +3810,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -3786,7 +3824,7 @@
       "name": "size-zero",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3840,7 +3878,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -3854,7 +3892,7 @@
       "name": "size-negative",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3908,7 +3946,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -3922,7 +3960,7 @@
       "name": "size-fractional",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -3976,7 +4014,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -3990,7 +4028,7 @@
       "name": "size-over-16gib",
       "error": "ManifestFormatError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4044,7 +4082,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4058,7 +4096,7 @@
       "name": "path-parent-traversal",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4112,7 +4150,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4126,7 +4164,7 @@
       "name": "path-current-dir-segment",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4180,7 +4218,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4194,7 +4232,7 @@
       "name": "path-leading-slash",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4248,7 +4286,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4262,7 +4300,7 @@
       "name": "path-double-slash",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4316,7 +4354,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4330,7 +4368,7 @@
       "name": "path-trailing-slash",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4384,7 +4422,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4398,7 +4436,7 @@
       "name": "path-leading-dot-segment",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4452,7 +4490,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4466,7 +4504,7 @@
       "name": "path-forbidden-character",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4520,7 +4558,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4534,7 +4572,7 @@
       "name": "path-empty",
       "error": "ManifestPathError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4588,7 +4626,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4602,7 +4640,7 @@
       "name": "duplicate-path-size-mismatch",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4661,7 +4699,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4675,7 +4713,7 @@
       "name": "duplicate-path-sha256-mismatch",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4734,7 +4772,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4748,7 +4786,7 @@
       "name": "duplicate-path-cross-model-mismatch",
       "error": "ManifestReferenceError",
       "manifest": {
-        "format": "karume/3",
+        "format": "karume/4",
         "generator": "karume/0.1.0",
         "defaultModel": "m",
         "models": {
@@ -4802,7 +4840,7 @@
                   "net": "i8"
                 },
                 "session": {
-                  "linearCompute": "i8a8"
+                  "linearCompute": "a8"
                 }
               }
             },
@@ -4834,6 +4872,771 @@
               }
             },
             "defaultQuant": "f16",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-label-not-string",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "label": 12
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-label-too-long",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "label": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-description-not-string",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "description": {}
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-description-too-long",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "description": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-required-limits-not-object",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "requiredLimits": []
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-required-limits-unknown-name",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "requiredLimits": {
+                  "maxBufferSizes": 268435456
+                }
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-required-limits-zero",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "requiredLimits": {
+                  "maxBufferSize": 0
+                }
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-required-limits-negative",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "requiredLimits": {
+                  "maxStorageBufferBindingSize": -1
+                }
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-required-limits-fractional",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "requiredLimits": {
+                  "maxBufferSize": 1.5
+                }
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "quant-required-limits-not-number",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {},
+                "requiredLimits": {
+                  "maxBufferSize": "268435456"
+                }
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-repo-without-revision",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                      "repo": "other/repo"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-revision-without-repo",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                      "revision": "0123456789abcdef0123456789abcdef01234567"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-revision-branch",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                      "repo": "other/repo",
+                      "revision": "main"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-revision-short-sha",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                      "repo": "other/repo",
+                      "revision": "0123456"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-revision-uppercase",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                      "repo": "other/repo",
+                      "revision": "0123456789ABCDEF0123456789ABCDEF01234567"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-repo-single-segment",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                      "repo": "repo",
+                      "revision": "0123456789abcdef0123456789abcdef01234567"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-repo-parent-traversal",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                      "repo": "other/..",
+                      "revision": "0123456789abcdef0123456789abcdef01234567"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "file-ref-repo-forbidden-character",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "net/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                      "repo": "other/re po",
+                      "revision": "0123456789abcdef0123456789abcdef01234567"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "cross-repo-duplicate-mismatch",
+      "error": "ManifestReferenceError",
+      "manifest": {
+        "format": "karume/4",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/1",
+            "weights": {
+              "net": {
+                "i8": {
+                  "shards": [
+                    {
+                      "path": "shared/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+                      "repo": "other/repo",
+                      "revision": "0123456789abcdef0123456789abcdef01234567"
+                    },
+                    {
+                      "path": "shared/model.i8.safetensors",
+                      "size": 4,
+                      "sha256": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+                      "repo": "other/repo",
+                      "revision": "0123456789abcdef0123456789abcdef01234567"
+                    }
+                  ]
+                }
+              }
+            },
+            "assets": {},
+            "quants": {
+              "i8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {}
+              }
+            },
+            "defaultQuant": "i8",
             "pipelineConfig": {}
           }
         }

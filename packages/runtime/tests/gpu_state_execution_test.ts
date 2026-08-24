@@ -640,7 +640,7 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     const cases: readonly (readonly [string, SessionOptions, string])[] = [
-      ["attentionCompute i8a8", { attentionCompute: "i8a8" }, "attentionCompute"],
+      ["attentionCompute a8", { attentionCompute: "a8" }, "attentionCompute"],
       ["attentionScoreStorage f16", { attentionScoreStorage: "f16" }, "attentionScoreStorage"],
     ];
     try {

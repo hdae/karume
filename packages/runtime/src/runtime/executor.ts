@@ -609,7 +609,7 @@ type SessionState = {
   readonly weightGroupSizes: ReadonlyMap<string, number>;
   readonly storage: StorageDiagnostics;
   /** linear の実行形（opt-in — {@link SessionOptions.linearCompute}）。 */
-  readonly linearCompute: "f32" | "i8a8" | "f16";
+  readonly linearCompute: "f32" | "a8" | "f16";
   /** 融合 attention の実行形（opt-in — {@link SessionOptions.attentionCompute}）。 */
   readonly attentionCompute: ComputePrecision;
   /** S の格納形（opt-in — {@link SessionOptions.attentionScoreStorage}）。計算形と直交する軸。 */
@@ -761,7 +761,7 @@ export class Session {
       throw new ExecutionError(
         "attentionScoreStorage 'f16' と attentionCompute 'f16' は同時に指定できない" +
           "（attentionCompute 'f16' は S を array<f16> で持つ別の格納形 — " +
-          "shader-f16 無しで S を半分にするなら attentionCompute を 'f32' か 'i8a8' にすること）",
+          "shader-f16 無しで S を半分にするなら attentionCompute を 'f32' か 'a8' にすること）",
       );
     }
     // MUST: f16 計算を要求されたのに feature が無い device なら**ここで落とす**。黙って f32

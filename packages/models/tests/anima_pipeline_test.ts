@@ -47,7 +47,7 @@ const FILE = {
 /** `models/karume-anima-turbo/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/3",
+    format: "karume/4",
     generator: "karume/0.1.0",
     defaultModel: "anima-turbo",
     models: {
@@ -55,8 +55,8 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
         pipeline: "anima/1",
         weights: { transformer: { f16: { shards: [FILE] } } },
         assets: {},
-        quants: { "w8a8-s16": { weights: { transformer: "f16" }, session: {} } },
-        defaultQuant: "w8a8-s16",
+        quants: { "f16+dit8-a8-attn8-s16": { weights: { transformer: "f16" }, session: {} } },
+        defaultQuant: "f16+dit8-a8-attn8-s16",
         pipelineConfig: {
           scheduler: { shift: 3, numTrainTimesteps: 1000 },
           defaults: {
@@ -141,9 +141,9 @@ Deno.test("fromAssets: scheduler.type の未知値は資産に触る前に落ち
 Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { quant: "w8a8" }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { quant: "f16+dit8-a8" }),
     Error,
-    "利用可能: w8a8-s16",
+    "利用可能: f16+dit8-a8-attn8-s16",
   );
 });
 

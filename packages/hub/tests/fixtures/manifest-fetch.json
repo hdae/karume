@@ -1,5 +1,5 @@
 {
-  "format": "karume/3",
+  "format": "karume/4",
   "generator": "karume/0.1.0",
   "defaultModel": "anima-turbo",
   "models": {
@@ -104,8 +104,8 @@
             "vae_decoder": "f16"
           },
           "session": {
-            "linearCompute": "i8a8",
-            "attentionCompute": "i8a8",
+            "linearCompute": "a8",
+            "attentionCompute": "a8",
             "attentionScoreStorage": "f16"
           }
         },

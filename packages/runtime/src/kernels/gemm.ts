@@ -1197,7 +1197,7 @@ const linearVariantWgsl = (
   if (compute === "f16" && weight === "i8") {
     throw new CodegenError(
       "linear: 重み i8 格納 × f16 計算（w8a16）は未実装 — " +
-        "linearCompute を 'f32' か 'i8a8' にするか、重みを f32 / f16 格納で持つこと",
+        "linearCompute を 'f32' か 'a8' にするか、重みを f32 / f16 格納で持つこと",
     );
   }
   // i4 も同型（w4a16 は未実装 — ADR 0069。黙って f32 計算へ落とさない理由は i8 と同文）。

@@ -5,6 +5,8 @@
  * 契約:
  * - revision は**セッションあたり 1 回だけ**解決し、manifest も全ファイルも同一 commit SHA に
  *   固定して取得する（可変 ref のまま複数回解決すると manifest と重みが別コミットから来る）。
+ *   例外は manifest が明示した**越境参照**（`FileRef` の `repo` / `revision` — ADR 0038 §7）
+ *   だけで、その 1 本はセッションの SHA ではなく宣言された (repo, revision) から取る。
  * - キャッシュ名前空間は必ず明示（`karume/1`）。`Authorization` を伴う取得は
  *   `karume/1:auth:<credential の sha256 先頭 16 hex>` へ隔離する（gated 資産を無認証経路の
  *   ヒットに供さず、かつ別 credential の写しにも供さない）。
@@ -28,6 +30,7 @@ import {
 } from "./errors.ts";
 import {
   type FileRef,
+  fileRefKey,
   type Manifest,
   MANIFEST_FILENAME,
   MAX_MANIFEST_BYTES,
@@ -155,6 +158,33 @@ const hfRef = (
 });
 
 /**
+ * 1 ファイルの取得元を決める。**越境参照（`repo` + `revision`）を持つ ref はその
+ * (repo, revision) から取る** — セッションの解決済み revision ではない（ADR 0038 §7 の
+ * 別リポ参照席。参照先は commit SHA 固定が必須なので、可変 ref が混ざる余地はない）。
+ *
+ * `hubUrl`（ミラー指定）は**ホストの選択**なので越境先にも同じものを効かせる。キャッシュは
+ * 下層の URL キーのまま — SHA が URL に載るので不変性はそれで成立する。
+ */
+const originFor = (
+  loaded: LoadedManifest,
+  session: { repo: string; revision: string; hubUrl?: string },
+) =>
+(ref: FileRef): { repo: string; revision: string; hubUrl?: string } =>
+  ref.repo === undefined || ref.revision === undefined ? session : hfRef({
+    repo: ref.repo,
+    ...(loaded.hubUrl === undefined ? {} : { hubUrl: loaded.hubUrl }),
+  }, ref.revision);
+
+/**
+ * エラーに載せる取得元の文脈。越境参照は**実際に取りに行った (repo, SHA)** を名乗る
+ * （セッションの repo を名乗ると、そのリポには存在しない path を指す診断になる）。
+ */
+const fetchContext = (repo: string, revisionSha: string) => (ref: FileRef) => ({
+  repo: ref.repo ?? repo,
+  revisionSha: ref.revision ?? revisionSha,
+});
+
+/**
  * 中断（呼び出し側の `AbortSignal`）かどうか。中断は取得失敗ではないので `HubFetchError` に
  * 包まず素通しする — 包むと呼び出し側の「自分が止めたのか落ちたのか」の判別が壊れる。
  *
@@ -227,6 +257,22 @@ const resolveRevision = async (
 };
 
 /**
+ * revision を渡さずに `main` を暗黙解決したときの案内を 1 回だけ出す。
+ *
+ * 呼び手が revision を書いていない場合だけが対象で、`"main"` の**明示**指定・タグ・SHA 指定
+ * では出さない（明示は「可変 ref でよい」という呼び手の意思表示で、警告は誤検出になる）。
+ * 解決した SHA を印字するのは、その 1 行をコピーすればそのまま pin が完成するため。
+ */
+const warnImplicitMain = (repo: string, revisionSha: string): void => {
+  console.warn(
+    `@karume/hub: revision を指定していないため 'main' を解決した（repo ${repo} → ${revisionSha}）。\n` +
+      `main は付け替えられるので、同じコードが次の起動で別の重みを読み得る。次のどちらかで固定すること:\n` +
+      `  ① revision: "${revisionSha}" を渡す（この 1 行のコピーで pin が完成する）\n` +
+      `  ② @karume/models の *_CURRENT 定数（パッケージ検証済みの pin）を使う`,
+  );
+};
+
+/**
  * `karume.json` を取得して parse する。revision の解決はここで 1 回だけ行い、結果の SHA を
  * 返り値に載せる（{@link fetchAssets} はその SHA で取得する）。
  */
@@ -235,6 +281,9 @@ export const loadManifest = async (
   options: LoadManifestOptions = {},
 ): Promise<LoadedManifest> => {
   const revisionSha = await resolveRevision(ref, ref.revision ?? "main", options);
+  // 解決の**後**に出す — 印字する SHA が確定するのがここで、解決に失敗した場合は警告ではなく
+  // 失敗そのものが報告されるべきだから（fail loudly が先）。
+  if (ref.revision === undefined) warnImplicitMain(ref.repo, revisionSha);
   const target = hfRef(ref, revisionSha);
   const url = hfResolveUrl({ ...target, path: MANIFEST_FILENAME });
   const budget: ByteBudget = {
@@ -301,13 +350,13 @@ export const loadManifest = async (
 
 /**
  * 進捗の `fileTotal` に載せる manifest 由来の size を引く。表は取得対象そのものから作るので
- * 進捗に出る path は必ず引ける — 引けないのは内部の不変条件が破れているときだけなので落とす
+ * 取得中の ref は必ず引ける — 引けないのは内部の不変条件が破れているときだけなので落とす
  * （0 で埋めるとファイル別の進捗バーが黙って壊れた値を描く）。
  */
-const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, path: string): number => {
-  const ref = refs.get(path);
+const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, key: string): number => {
+  const ref = refs.get(key);
   if (ref === undefined) {
-    throw new Error(`hub: ${path} の size が取得対象の表に無い（進捗集計の不変条件破れ）`);
+    throw new Error(`hub: ${key} の size が取得対象の表に無い（進捗集計の不変条件破れ）`);
   }
   return ref.size;
 };
@@ -327,12 +376,17 @@ export const fetchAssets = async (
   const { repo, revisionSha, manifest } = loaded;
   const available = manifest.available;
   const target = hfRef(loaded, revisionSha);
+  const targetFor = originFor(loaded, target);
+  const contextFor = fetchContext(repo, revisionSha);
 
   const keys = Object.keys(files);
+  // MUST: 一意化は path ではなく {@link fileRefKey} で行う — 越境参照が入った以上、別リポの
+  // 同名 path は別のバイト列であり、path で畳むと片方の bytes がもう片方に配られる。
   const unique = new Map<string, FileRef>();
   for (const key of keys) {
     const ref = files[key];
-    if (!unique.has(ref.path)) unique.set(ref.path, ref);
+    const refKey = fileRefKey(ref);
+    if (!unique.has(refKey)) unique.set(refKey, ref);
   }
   const targets = [...unique.values()];
   let total = 0;
@@ -340,35 +394,36 @@ export const fetchAssets = async (
 
   const received = new Map<string, number>();
   const fromNetwork = new Set<string>();
-  const emit = (phase: AssetPhase, path: string): void => {
+  const emit = (phase: AssetPhase, ref: FileRef): void => {
     if (options.onProgress === undefined) return;
-    const fileTotal = fileSizeOf(unique, path);
+    const refKey = fileRefKey(ref);
+    const fileTotal = fileSizeOf(unique, refKey);
     // verifying / complete は全量が揃った点なので size をそのまま渡す（キャッシュヒットは
     // downloading が 1 度も出ず `received` に載らないため、受信実績から引くと 0 に見える）。
-    const fileLoaded = phase === "downloading" ? received.get(path) ?? 0 : fileTotal;
+    const fileLoaded = phase === "downloading" ? received.get(refKey) ?? 0 : fileTotal;
     // MUST: 全体 `loaded` にも同じ値を積む — このファイルぶんだけ `received` から引くと、
     // 同一イベントで fileLoaded が size なのに loaded がそれを数えない矛盾が出る（全ファイル
     // キャッシュ済みの起動では loaded が 0 のまま verifying が並ぶ）。downloading では
     // fileLoaded が `received` の値そのものなので二重計上にはならない。
     let sum = fileLoaded;
     for (const [other, bytes] of received) {
-      if (other !== path) sum += bytes;
+      if (other !== refKey) sum += bytes;
     }
-    options.onProgress({ phase, path, loaded: sum, total, fileLoaded, fileTotal });
+    options.onProgress({ phase, path: ref.path, loaded: sum, total, fileLoaded, fileTotal });
   };
 
   const budgets = new Map<string, ByteBudget>();
   for (const ref of targets) {
-    budgets.set(hfResolveUrl({ ...target, path: ref.path }), {
+    const refKey = fileRefKey(ref);
+    budgets.set(hfResolveUrl({ ...targetFor(ref), path: ref.path }), {
       maxBytes: ref.size,
       exact: true,
-      onRequest: () => fromNetwork.add(ref.path),
+      onRequest: () => fromNetwork.add(refKey),
       violation: (actual, where) =>
         new IntegrityError(
           `${ref.path}: ${where} が manifest の size と食い違う（期待 ${ref.size} / 実際 ${actual}）`,
           {
-            repo,
-            revisionSha,
+            ...contextFor(ref),
             path: ref.path,
             expected: String(ref.size),
             actual: String(actual),
@@ -386,17 +441,17 @@ export const fetchAssets = async (
   const guarded = createGuardedFetch(options.fetch ?? globalThis.fetch, budgets);
   // 名前空間の解決は headers が固定である入口で 1 回だけ（digest は非同期）。
   const cacheName = await cacheNameFor(options.headers);
-  const bytesByPath = new Map<string, Uint8Array<ArrayBuffer>>();
+  const bytesByRef = new Map<string, Uint8Array<ArrayBuffer>>();
 
   const fetchOne = async (ref: FileRef): Promise<void> => {
+    const refKey = fileRefKey(ref);
     const validate = async (bytes: Uint8Array): Promise<void> => {
-      const source = fromNetwork.has(ref.path) ? "network" : "cache";
+      const source = fromNetwork.has(refKey) ? "network" : "cache";
       if (bytes.byteLength !== ref.size) {
         throw new IntegrityError(
           `${ref.path}: バイト数が manifest と食い違う（期待 ${ref.size} / 実際 ${bytes.byteLength}）`,
           {
-            repo,
-            revisionSha,
+            ...contextFor(ref),
             path: ref.path,
             expected: String(ref.size),
             actual: String(bytes.byteLength),
@@ -405,14 +460,13 @@ export const fetchAssets = async (
           },
         );
       }
-      emit("verifying", ref.path);
+      emit("verifying", ref);
       const actual = await sha256Hex(bytes);
       if (actual !== ref.sha256) {
         throw new IntegrityError(
           `${ref.path}: sha256 が manifest と食い違う（期待 ${ref.sha256} / 実際 ${actual}）`,
           {
-            repo,
-            revisionSha,
+            ...contextFor(ref),
             path: ref.path,
             expected: ref.sha256,
             actual,
@@ -430,35 +484,33 @@ export const fetchAssets = async (
     signal.throwIfAborted();
     let bytes: Uint8Array;
     try {
-      bytes = await fetchHfFile(target, { path: ref.path, validate }, {
+      bytes = await fetchHfFile(targetFor(ref), { path: ref.path, validate }, {
         cacheName,
         init: requestInit(options.headers, signal),
         fetch: guarded,
         // network 側だけ発火する（キャッシュヒットは verifying → complete の 2 点で進む）。
         // `loaded` が `size` を超えないことは受信バイトの門（transport.ts）が保証する。
         onProgress: (progress) => {
-          received.set(ref.path, progress.loaded);
-          emit("downloading", ref.path);
+          received.set(refKey, progress.loaded);
+          emit("downloading", ref);
         },
         ...(options.caches === undefined ? {} : { caches: options.caches }),
         ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
       });
     } catch (error) {
       if (error instanceof HubError || isAborted(error, signal)) throw error;
-      throw new HubFetchError(`${ref.path} の取得に失敗した（repo ${repo} @ ${revisionSha}）`, {
-        repo,
-        revisionSha,
-        path: ref.path,
-        available,
-        cause: error,
-      });
+      const context = contextFor(ref);
+      throw new HubFetchError(
+        `${ref.path} の取得に失敗した（repo ${context.repo} @ ${context.revisionSha}）`,
+        { ...context, path: ref.path, available, cause: error },
+      );
     }
     // 検証を抜けた直後にも見る — 前段の確認だけだと「キャッシュ読出し + sha256 照合の最中に
     // 中断された」形が観測されず、取り消したはずのファイルが complete まで進む。
     signal.throwIfAborted();
-    bytesByPath.set(ref.path, assertTightView(bytes, ref.path));
-    received.set(ref.path, ref.size);
-    emit("complete", ref.path);
+    bytesByRef.set(refKey, assertTightView(bytes, ref.path));
+    received.set(refKey, ref.size);
+    emit("complete", ref);
   };
 
   let next = 0;
@@ -486,7 +538,7 @@ export const fetchAssets = async (
 
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   for (const key of keys) {
-    const bytes = bytesByPath.get(files[key].path);
+    const bytes = bytesByRef.get(fileRefKey(files[key]));
     if (bytes === undefined) {
       throw new Error(`hub: ${files[key].path} の bytes が揃っていない（取得層の不変条件破れ）`);
     }
@@ -537,6 +589,8 @@ export const streamAssets = async function* (
   const { repo, revisionSha, manifest } = loaded;
   const available = manifest.available;
   const target = hfRef(loaded, revisionSha);
+  const targetFor = originFor(loaded, target);
+  const contextFor = fetchContext(repo, revisionSha);
 
   // 入力検査は相 1 の前に済ませる（相 1 は全 shard を落としてしまうので、network に出た後で
   // 呼び出し側の誤りに気づいても帯域が戻らない）。
@@ -546,17 +600,19 @@ export const streamAssets = async function* (
       { available },
     );
   }
-  // 重複検査の表はそのまま進捗の per-file 引き当て（`fileTotal`）にも使う。
+  // 重複検査の表はそのまま進捗の per-file 引き当て（`fileTotal`）にも使う。同一性は
+  // {@link fileRefKey}（越境参照は別リポの同名 path を別の 1 本として数える）。
   const declared = new Map<string, FileRef>();
   for (const ref of refs) {
-    if (declared.has(ref.path)) {
+    const refKey = fileRefKey(ref);
+    if (declared.has(refKey)) {
       throw new ManifestReferenceError(
-        `streamAssets: path '${ref.path}' が重複している（逐次面は渡された列をそのまま引き渡す —` +
-          ` 同じ shard を 2 回受け取るのは呼び出し側の誤り。全量面 fetchAssets は path で一意化する）`,
+        `streamAssets: 参照 '${refKey}' が重複している（逐次面は渡された列をそのまま引き渡す —` +
+          ` 同じ shard を 2 回受け取るのは呼び出し側の誤り。全量面 fetchAssets は一意化する）`,
         { available },
       );
     }
-    declared.set(ref.path, ref);
+    declared.set(refKey, ref);
   }
 
   let total = 0;
@@ -564,35 +620,36 @@ export const streamAssets = async function* (
 
   const received = new Map<string, number>();
   const fromNetwork = new Set<string>();
-  const emit = (phase: AssetPhase, path: string): void => {
+  const emit = (phase: AssetPhase, ref: FileRef): void => {
     if (options.onProgress === undefined) return;
-    const fileTotal = fileSizeOf(declared, path);
+    const refKey = fileRefKey(ref);
+    const fileTotal = fileSizeOf(declared, refKey);
     // verifying / complete は全量が揃った点なので size をそのまま渡す（相 1 が温めた分は
     // 相 2 でキャッシュヒットになり downloading が出ないため、受信実績から引くと 0 に見える）。
-    const fileLoaded = phase === "downloading" ? received.get(path) ?? 0 : fileTotal;
+    const fileLoaded = phase === "downloading" ? received.get(refKey) ?? 0 : fileTotal;
     // MUST: 全体 `loaded` にも同じ値を積む — この shard ぶんだけ `received` から引くと、
     // 同一イベントで fileLoaded が size なのに loaded がそれを数えない矛盾が出る（全 shard が
     // 温まっている 2 回目以降の起動では loaded が 0 のまま verifying が並ぶ）。downloading では
     // fileLoaded が `received` の値そのものなので二重計上にはならない。
     let sum = fileLoaded;
     for (const [other, bytes] of received) {
-      if (other !== path) sum += bytes;
+      if (other !== refKey) sum += bytes;
     }
-    options.onProgress({ phase, path, loaded: sum, total, fileLoaded, fileTotal });
+    options.onProgress({ phase, path: ref.path, loaded: sum, total, fileLoaded, fileTotal });
   };
 
   const budgets = new Map<string, ByteBudget>();
   for (const ref of refs) {
-    budgets.set(hfResolveUrl({ ...target, path: ref.path }), {
+    const refKey = fileRefKey(ref);
+    budgets.set(hfResolveUrl({ ...targetFor(ref), path: ref.path }), {
       maxBytes: ref.size,
       exact: true,
-      onRequest: () => fromNetwork.add(ref.path),
+      onRequest: () => fromNetwork.add(refKey),
       violation: (actual, where) =>
         new IntegrityError(
           `${ref.path}: ${where} が manifest の size と食い違う（期待 ${ref.size} / 実際 ${actual}）`,
           {
-            repo,
-            revisionSha,
+            ...contextFor(ref),
             path: ref.path,
             expected: String(ref.size),
             actual: String(actual),
@@ -613,14 +670,15 @@ export const streamAssets = async function* (
 
   // ---- 相 1: 全 shard を永続キャッシュへ落とす（ここを抜けるまで 1 本も yield しない）。
   const prefetchOne = async (ref: FileRef): Promise<void> => {
+    const refKey = fileRefKey(ref);
     try {
-      await prefetchHfFile(target, { path: ref.path, sha256: ref.sha256 }, {
+      await prefetchHfFile(targetFor(ref), { path: ref.path, sha256: ref.sha256 }, {
         cacheName,
         init: requestInit(options.headers, prefetchSignal),
         fetch: guarded,
         onProgress: (progress) => {
-          received.set(ref.path, progress.loaded);
-          emit("downloading", ref.path);
+          received.set(refKey, progress.loaded);
+          emit("downloading", ref);
         },
         ...(options.caches === undefined ? {} : { caches: options.caches }),
       });
@@ -631,9 +689,10 @@ export const streamAssets = async function* (
       // 落ちていればその reason を素通しする（巻き添えなら reason は最初の失敗そのもので、
       // 全量面と同じく全ワーカーが同一の error に収束する）。
       if (prefetchSignal.aborted) throw prefetchSignal.reason;
+      const context = contextFor(ref);
       throw new HubFetchError(
-        `${ref.path} の事前取得に失敗した（repo ${repo} @ ${revisionSha}）`,
-        { repo, revisionSha, path: ref.path, available, cause: error },
+        `${ref.path} の事前取得に失敗した（repo ${context.repo} @ ${context.revisionSha}）`,
+        { ...context, path: ref.path, available, cause: error },
       );
     }
   };
@@ -668,14 +727,14 @@ export const streamAssets = async function* (
     // 回している最中に取り消しが効かないのは中断の透過が壊れているのと同じ）。
     options.signal?.throwIfAborted();
 
+    const refKey = fileRefKey(ref);
     const validate = async (bytes: Uint8Array): Promise<void> => {
-      const source = fromNetwork.has(ref.path) ? "network" : "cache";
+      const source = fromNetwork.has(refKey) ? "network" : "cache";
       if (bytes.byteLength !== ref.size) {
         throw new IntegrityError(
           `${ref.path}: バイト数が manifest と食い違う（期待 ${ref.size} / 実際 ${bytes.byteLength}）`,
           {
-            repo,
-            revisionSha,
+            ...contextFor(ref),
             path: ref.path,
             expected: String(ref.size),
             actual: String(bytes.byteLength),
@@ -684,14 +743,13 @@ export const streamAssets = async function* (
           },
         );
       }
-      emit("verifying", ref.path);
+      emit("verifying", ref);
       const actual = await sha256Hex(bytes);
       if (actual !== ref.sha256) {
         throw new IntegrityError(
           `${ref.path}: sha256 が manifest と食い違う（期待 ${ref.sha256} / 実際 ${actual}）`,
           {
-            repo,
-            revisionSha,
+            ...contextFor(ref),
             path: ref.path,
             expected: ref.sha256,
             actual,
@@ -703,7 +761,7 @@ export const streamAssets = async function* (
     };
     let bytes: Uint8Array;
     try {
-      bytes = await fetchHfFile(target, { path: ref.path, validate }, {
+      bytes = await fetchHfFile(targetFor(ref), { path: ref.path, validate }, {
         cacheName,
         init: requestInit(options.headers, options.signal),
         fetch: guarded,
@@ -712,29 +770,27 @@ export const streamAssets = async function* (
         //       ぶん巻き戻る（phase 契約が認めている「最初からやり直し」と同じ 1 巡）。
         //       `fileLoaded` も同じ 1 巡だけそのファイルの先頭から数え直しになる。
         onProgress: (progress) => {
-          received.set(ref.path, progress.loaded);
-          emit("downloading", ref.path);
+          received.set(refKey, progress.loaded);
+          emit("downloading", ref);
         },
         ...(options.caches === undefined ? {} : { caches: options.caches }),
         ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
       });
     } catch (error) {
       if (error instanceof HubError || isAborted(error, options.signal)) throw error;
-      throw new HubFetchError(`${ref.path} の取得に失敗した（repo ${repo} @ ${revisionSha}）`, {
-        repo,
-        revisionSha,
-        path: ref.path,
-        available,
-        cause: error,
-      });
+      const context = contextFor(ref);
+      throw new HubFetchError(
+        `${ref.path} の取得に失敗した（repo ${context.repo} @ ${context.revisionSha}）`,
+        { ...context, path: ref.path, available, cause: error },
+      );
     }
     // MUST: yield の直前にも中断を見る — 冒頭の確認だけだと「最終 shard のキャッシュ読出し +
     // sha256 検証の最中に中断された」形が観測されず、取り消したはずのロードが正常完了して
     // 下流の Session 構築まで走る（検証済みバイトを配ってから止まるのでは中断の意味が無い）。
     options.signal?.throwIfAborted();
     const asset = assertTightView(bytes, ref.path);
-    received.set(ref.path, ref.size);
-    emit("complete", ref.path);
+    received.set(refKey, ref.size);
+    emit("complete", ref);
     // MUST: ここで手放す — 引き渡したバイト列を generator 側の表に溜めない（溜めた瞬間に
     // 全量面と同じ RAM 特性に戻り、この面の存在理由が消える）。次の反復に入れば `bytes` の
     // 束縛ごと到達不能になるので、常駐するのは「今の 1 本」だけ。

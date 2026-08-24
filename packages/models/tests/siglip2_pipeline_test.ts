@@ -55,7 +55,7 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
 /** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["base"]` の中身を上書きする。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/3",
+    format: "karume/4",
     generator: "karume/0.1.0",
     defaultModel: "base",
     models: {

@@ -461,3 +461,64 @@ Deno.test("streamAssets: 2 回目は network に出ないが sha256 照合は走
     );
   }
 });
+
+// ---- 越境参照（`FileRef` の repo / revision — ADR 0038 §7）。逐次面も宣言された
+// (repo, revision) から取り、同じ path 文字列の自リポ / 越境を別の 1 本として扱う。
+
+const FOREIGN_REPO = "someone/text-stack";
+const FOREIGN_SHA = "89abcdef0123456789abcdef0123456789abcdef";
+const CROSS_PATH = "text_encoder/model.safetensors";
+
+const digestOf = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
+  Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+
+const localShard = new TextEncoder().encode("karume-test:local-shard");
+const foreignShard = new TextEncoder().encode("karume-test:foreign-shard-payload");
+
+const crossRepoRefs: FileRef[] = [
+  { path: CROSS_PATH, size: localShard.byteLength, sha256: await digestOf(localShard) },
+  {
+    path: CROSS_PATH,
+    size: foreignShard.byteLength,
+    sha256: await digestOf(foreignShard),
+    repo: FOREIGN_REPO,
+    revision: FOREIGN_SHA,
+  },
+];
+
+const crossRepoServe = (): Map<string, Uint8Array<ArrayBuffer>> =>
+  new Map([
+    [MANIFEST_PATH, manifestBytes],
+    [CROSS_PATH, localShard],
+    [`${FOREIGN_REPO}@${FOREIGN_SHA}/${CROSS_PATH}`, foreignShard],
+  ]);
+
+Deno.test("streamAssets: 越境参照は宣言された (repo, revision) から取り、path が同じでも混ざらない", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await prepare({ files: crossRepoServe() }, caches);
+
+  const seen = await drain(streamAssets(loaded, crossRepoRefs, { fetch: mock.fetch, caches }));
+
+  assertEquals(seen.map((asset) => asset.path), [CROSS_PATH, CROSS_PATH]);
+  assertEquals(seen[0].bytes, localShard, "自リポぶんが越境先のバイト列に化けている");
+  assertEquals(seen[1].bytes, foreignShard, "越境ぶんが自リポのバイト列に化けている");
+  assertEquals(
+    countCalls(mock.calls, `${HUB_URL}/${FOREIGN_REPO}/resolve/${FOREIGN_SHA}/${CROSS_PATH}`),
+    1,
+    "越境先の URL を叩いていない",
+  );
+  assertEquals(countCalls(mock.calls, resolveUrl(CROSS_PATH)), 1, "自リポの URL を叩いていない");
+});
+
+Deno.test("streamAssets: 同一の越境参照を 2 回渡すのは呼び出し側の誤りとして拒否する", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await prepare({ files: crossRepoServe() }, caches);
+  const duplicated = [crossRepoRefs[1], crossRepoRefs[1]];
+  await assertRejects(
+    () => drain(streamAssets(loaded, duplicated, { fetch: mock.fetch, caches })),
+    ManifestReferenceError,
+  );
+  assertEquals(mock.calls, [], "重複検査より先に network へ出ている");
+});

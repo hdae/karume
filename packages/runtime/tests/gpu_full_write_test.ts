@@ -579,7 +579,7 @@ Deno.test({
         ], {
           karume_ir: JSON.stringify(i8a8PoisonGraph(testCase.poisonCount, m, n, k)),
         }));
-        const session = await createSession(gpu, model, { linearCompute: "i8a8" });
+        const session = await createSession(gpu, model, { linearCompute: "a8" });
         try {
           const outputs = await session.run({
             seed: fill([testCase.poisonCount], () => POISON),

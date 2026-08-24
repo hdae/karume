@@ -25,7 +25,7 @@
 //
 // ## w8a8 の鏡像 io は拾わない
 //
-// `--act-quant` が書く `io-i8a8.<case>` は w8a8（`SessionOptions.linearCompute: "i8a8"`）の
+// `--act-quant` が書く `io-i8a8.<case>` は w8a8（`SessionOptions.linearCompute: "a8"`）の
 // torch 鏡像で、**この門の期待値ではない**（w8 = f32 計算の期待値として読むと活性量子化ごと
 // 汚染される）。通常ケースの列挙が `io.` の startsWith なのはそのため（正本は
 // `deberta/export.py` の `IO_PREFIX` / `ACT_IO_PREFIX` の docstring）。鏡像を消費する

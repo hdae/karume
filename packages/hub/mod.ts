@@ -1,5 +1,5 @@
 /**
- * `@karume/hub` — 配布 manifest v3（`karume.json` / `karume/3`）の解決と HF からの取得。
+ * `@karume/hub` — 配布 manifest v4（`karume.json` / `karume/4`）の解決と HF からの取得。
  *
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
  * 面は利用者ストーリーに対応する — manifest を読む（{@link parseManifest} /
@@ -23,6 +23,8 @@
  * | 0.1.x | `karume/1` | 初版 |
  * | 0.2.x 〜 0.3.x | `karume/2` | model / quant の 2 軸（ADR 0041） |
  * | 0.4.x | `karume/3` | dtype エントリの shard 欄（ADR 0071） |
+ * | 0.5.x | `karume/4` | quant の表示欄 + `requiredLimits`（ADR 0075 / 0038 §7）・ファイル参照の
+ * 越境席（`repo` / `revision`）・`session` の計算ノブ値 `i8a8` → `a8`（ADR 0074） |
  *
  * 配布形を上げ直す手順は `docs/release-runbook.md`。
  */
@@ -37,6 +39,8 @@ export type {
   ModelEntry,
   PipelineId,
   Quant,
+  RequiredLimitName,
+  RequiredLimitsSpec,
   ScoreStorage,
   SessionSpec,
   WeightEntry,

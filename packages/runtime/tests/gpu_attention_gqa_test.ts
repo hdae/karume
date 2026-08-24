@@ -421,14 +421,14 @@ Deno.test({
  */
 Deno.test({
   name:
-    "GQA × attentionCompute 'i8a8' は fail loudly（段別適格性に依らず・同形の非 GQA は走る・実 GPU）",
+    "GQA × attentionCompute 'a8' は fail loudly（段別適格性に依らず・同形の非 GQA は走る・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const shape = SHAPES[2];
     const gpu = await acquireGpu();
     try {
       const { q, k, v, kFull, vFull } = inputsFor(shape);
-      const options: SessionOptions = { attentionCompute: "i8a8" };
+      const options: SessionOptions = { attentionCompute: "a8" };
       const error = await assertRejects(
         () => runAttention(gpu, q, k, v, undefined, options),
         ExecutionError,

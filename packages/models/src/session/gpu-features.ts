@@ -60,7 +60,7 @@ export const toAcquireGpuOptions = (spec: GpuFeaturesSpec | undefined): AcquireG
  * しか要求できない — ADR 0028）ので、能力が足りないことを**ここで**名指しして落とす。通すと
  * Session 構築まで進んでから落ちるか、黙って別の経路へ縮退する。
  *
- * @param where 診断の主語（`"AnimaPipeline: quant 'w8a8-s16'"`）。
+ * @param where 診断の主語（`"AnimaPipeline: quant 'f16+dit8-a8-attn8-s16'"`）。
  */
 export const assertGpuFeaturesGranted = (
   spec: GpuFeaturesSpec | undefined,

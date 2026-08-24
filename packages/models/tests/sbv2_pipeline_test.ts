@@ -37,7 +37,7 @@ const FILE = {
 /** `models/karume-sbv2-fn/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/3",
+    format: "karume/4",
     generator: "karume/0.1.0",
     defaultModel: "FN4",
     models: {
@@ -45,8 +45,8 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
         pipeline: "sbv2/1",
         weights: { front: { i8: { shards: [FILE] } } },
         assets: {},
-        quants: { w8: { weights: { front: "i8" }, session: {} } },
-        defaultQuant: "w8",
+        quants: { i8: { weights: { front: "i8" }, session: {} } },
+        defaultQuant: "i8",
         pipelineConfig: {
           styles: { Neutral: 0, high: 1 },
           speakers: { FN4: 0 },
@@ -98,7 +98,7 @@ Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添え�
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }, { quant: "f16" }),
     Error,
-    "利用可能: w8",
+    "利用可能: i8",
   );
 });
 

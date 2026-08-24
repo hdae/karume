@@ -3,7 +3,7 @@
 //
 // 設計 = docs/research/2026-08-03-dp4a-w8a8-design.md（w4a8 は perf-ledger Q-8）、実装 =
 // src/kernels/quantize-rows.ts + src/kernels/linear-i8a8.ts、opt-in =
-// `SessionOptions.linearCompute: "i8a8"`（既定 "f32"・重みの格納形は別軸）。
+// `SessionOptions.linearCompute: "a8"`（既定 "f32"・重みの格納形は別軸）。
 //
 // ## このファイルが固定する数値契約
 //
@@ -327,7 +327,7 @@ Deno.test({
 });
 
 // ---------------------------------------------------------------------------
-// Session 経路（linearCompute: "i8a8"）
+// Session 経路（linearCompute: "a8"）
 // ---------------------------------------------------------------------------
 
 type LinearCase = {
@@ -445,14 +445,14 @@ const LINEAR_CASES: readonly LinearCase[] = [
 
 Deno.test({
   name:
-    "linearCompute:'i8a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
+    "linearCompute:'a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       for (const testCase of LINEAR_CASES) {
         const prepared = prepareLinear(testCase);
-        const actual = await runLinear(gpu, prepared, { linearCompute: "i8a8" });
+        const actual = await runLinear(gpu, prepared, { linearCompute: "a8" });
         assertEquals(actual.y.shape, [testCase.m, testCase.n], testCase.name);
         assertExact(actual.y.data, prepared.expected, testCase.name);
         // 恒真化の門: 出力が定数なら「一致」は何も検証していない
@@ -498,7 +498,7 @@ Deno.test({
     const gpu = await acquireGpu();
     let y: Tensor;
     try {
-      y = (await runLinear(gpu, prepared, { linearCompute: "i8a8" })).y;
+      y = (await runLinear(gpu, prepared, { linearCompute: "a8" })).y;
     } finally {
       gpu.destroy();
     }
@@ -536,7 +536,7 @@ Deno.test({
         const prepared = prepareLinear(testCase);
         const results: Record<string, Tensor> = {};
         for (const dot of dots) {
-          const options: SessionOptions = { linearCompute: "i8a8", [I8A8_DOT]: dot };
+          const options: SessionOptions = { linearCompute: "a8", [I8A8_DOT]: dot };
           const actual = await runLinear(gpu, prepared, options);
           results[dot] = actual.y;
           if (actual.keys.length > 0) {
@@ -575,7 +575,7 @@ Deno.test({
       }
       // 既定の値は w8（重みだけ量子化）なので、w8a8 の参照とは**一致しない**
       // （一致してしまうなら活性量子化が効いていない）
-      const i8a8 = await runLinear(gpu, prepared, { linearCompute: "i8a8" });
+      const i8a8 = await runLinear(gpu, prepared, { linearCompute: "a8" });
       assertEquals(
         [...baseline.y.data].some((value, index) => value !== i8a8.y.data[index]),
         true,
@@ -584,7 +584,7 @@ Deno.test({
 
       // ② k % 4 != 0 は opt-in でも従来経路へ落ちる（i8 ペイロードの語境界条件）
       const odd = prepareLinear({ name: "k=7", m: 5, n: 6, k: 7 });
-      const oddRun = await runLinear(gpu, odd, { linearCompute: "i8a8" });
+      const oddRun = await runLinear(gpu, odd, { linearCompute: "a8" });
       assertEquals(oddRun.pipelineCount, 1, "k % 4 != 0 は f32 経路");
     } finally {
       gpu.destroy();
@@ -625,7 +625,7 @@ Deno.test({
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       const baseline = await runK0(gpu, {});
-      const optIn = await runK0(gpu, { linearCompute: "i8a8" });
+      const optIn = await runK0(gpu, { linearCompute: "a8" });
       assertEquals(optIn.name, baseline.name, "K=0: opt-in で例外の種類が変わっている");
       assertEquals(optIn.message, baseline.message, "K=0: opt-in で失敗の理由が変わっている");
       // 恒真化の門: 述語が K=0 を拾っていたときに出る ① の門とは別物であること
@@ -649,7 +649,7 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       const session = await createSession(gpu, openModel(prepared.model), {
-        linearCompute: "i8a8",
+        linearCompute: "a8",
       });
       try {
         await assertRejects(
@@ -821,14 +821,14 @@ const prepareW4a8 = (
 
 Deno.test({
   name:
-    "linearCompute:'i8a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
+    "linearCompute:'a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       for (const testCase of W4A8_CASES) {
         const prepared = prepareW4a8(testCase);
-        const actual = await runLinear(gpu, prepared, { linearCompute: "i8a8" });
+        const actual = await runLinear(gpu, prepared, { linearCompute: "a8" });
         assertEquals(actual.y.shape, [testCase.m, testCase.n], testCase.name);
         assertExact(actual.y.data, prepared.expected, testCase.name);
         // 恒真化の門: 出力が定数なら「一致」は何も検証していない
@@ -885,7 +885,7 @@ Deno.test({
     const gpu = await acquireGpu();
     let y: Tensor;
     try {
-      y = (await runLinear(gpu, prepared, { linearCompute: "i8a8" })).y;
+      y = (await runLinear(gpu, prepared, { linearCompute: "a8" })).y;
     } finally {
       gpu.destroy();
     }
@@ -922,7 +922,7 @@ Deno.test({
         const prepared = prepareW4a8(testCase);
         const results: Record<string, Tensor> = {};
         for (const dot of dots) {
-          const options: SessionOptions = { linearCompute: "i8a8", [I8A8_DOT]: dot };
+          const options: SessionOptions = { linearCompute: "a8", [I8A8_DOT]: dot };
           const actual = await runLinear(gpu, prepared, options);
           results[dot] = actual.y;
           if (actual.keys.length > 0) {
@@ -972,7 +972,7 @@ Deno.test({
       }
       // MUST: 既定の値は活性 f32 のままなので w4a8 の参照とは**一致しない**。一致するなら
       // 活性量子化が効いていない = 期待値に f32 i4 経路を使ったのと同じ恒真化。
-      const w4a8 = await runLinear(gpu, prepared, { linearCompute: "i8a8" });
+      const w4a8 = await runLinear(gpu, prepared, { linearCompute: "a8" });
       assertEquals(
         [...baseline.y.data].some((value, index) => value !== w4a8.y.data[index]),
         true,

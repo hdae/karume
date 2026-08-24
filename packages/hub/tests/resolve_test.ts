@@ -73,7 +73,7 @@ Deno.test("resolveFiles: 複数 shard は宣言順のまま別々の取得キー
   const first = shard("weights-0.safetensors", 8, "b2");
   const second = shard("weights-1.safetensors", 4, "c3");
   const sharded = parseManifest(JSON.stringify({
-    format: "karume/3",
+    format: "karume/4",
     generator: "karume/0.1.0",
     defaultModel: "m",
     models: {

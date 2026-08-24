@@ -369,10 +369,10 @@ Deno.test({
 
       // i8a8 との組み合わせは fail loudly（縮退しない）
       const i8a8 = await createSession(gpu, openModel(graphModelBuffer(graph)), {
-        attentionCompute: "i8a8",
+        attentionCompute: "a8",
       });
       try {
-        await assertRejects(() => i8a8.run(inputs), ExecutionError, "i8a8");
+        await assertRejects(() => i8a8.run(inputs), ExecutionError, "attentionCompute 'a8'");
       } finally {
         await i8a8.dispose();
       }
@@ -383,7 +383,7 @@ Deno.test({
 });
 
 /**
- * mask × `attentionCompute: "i8a8"` の拒否は **D / N の 4 の倍数性に依らない**（ADR 0023 /
+ * mask × `attentionCompute: "a8"` の拒否は **D / N の 4 の倍数性に依らない**（ADR 0023 /
  * docs/limitations.md の「無条件 fail loudly」）。段ごとの適格判定（① は `D % 4`・③ は
  * `N % 4`）で拒否を決めると `D % 4 != 0` の形だけ素通りし、**f32 の ①QK と i8a8 の ③PV の
  * 混成**で走ってしまう — 値は正しくても「組めない」という契約が破れる。
@@ -392,7 +392,7 @@ Deno.test({
  * 「その形が i8a8 で走らない」ではないことを固定する）。
  */
 Deno.test({
-  name: "mask × attentionCompute 'i8a8' は D%4 / N%4 に依らず一貫して拒否される（実 GPU）",
+  name: "mask × attentionCompute 'a8' は D%4 / N%4 に依らず一貫して拒否される（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // ①QK 適格（D%4）× ③PV 適格（N%4）の 3 通り。真×真 は従来から拒否され、残り 2 つが
@@ -419,14 +419,14 @@ Deno.test({
               attrs,
             }),
           )),
-          { attentionCompute: "i8a8" },
+          { attentionCompute: "a8" },
         );
         try {
           // 文言・型は D%4==0 経路の拒否と同じもの（分岐ごとに別の拒否を作らない）
           await assertRejects(
             () => masked.run({ x0: q, x1: k, x2: v, x3: mask }),
             ExecutionError,
-            "加算 mask 付きの attention は attentionCompute 'i8a8' と組めない",
+            "加算 mask 付きの attention は attentionCompute 'a8' と組めない",
           );
         } finally {
           await masked.dispose();
@@ -437,7 +437,7 @@ Deno.test({
           openModel(graphModelBuffer(
             singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], { attrs }),
           )),
-          { attentionCompute: "i8a8" },
+          { attentionCompute: "a8" },
         );
         try {
           const y = (await plain.run({ x0: q, x1: k, x2: v }))["y"];

@@ -277,7 +277,7 @@ type RecipeBuilderContext = {
   readonly weightScaleBuffers: ReadonlyMap<string, GPUBuffer>;
   /** i4 で常駐した重みの group 長（キーと WGSL の shift の導出元 — ADR 0069）。 */
   readonly weightGroupSizes: ReadonlyMap<string, number>;
-  readonly linearCompute: "f32" | "i8a8" | "f16";
+  readonly linearCompute: "f32" | "a8" | "f16";
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
   readonly i8a8Dot: I8a8Dot;
@@ -1323,7 +1323,7 @@ export class RecipeBuilder {
     // 整数内積の経路は **opt-in × 整数常駐（i8 / i4）× k > 0 × k % 4 == 0** の 4 条件が
     // 揃ったときだけ（ADR 0025 / w4a8 は perf-ledger Q-8）。既定の "f32" では 1 バイトも
     // 挙動が変わらない。
-    // MUST: ノブ `linearCompute: "i8a8"` の意味は「**活性を i8 にして整数内積で計算する**」で、
+    // MUST: ノブ `linearCompute: "a8"` の意味は「**活性を i8 にして整数内積で計算する**」で、
     // 重みの格納形は別軸（i8 常駐 → w8a8 / i4 常駐 → w4a8）。i4 を述語から外すと、選んでも
     // 挙動が変わらない嘘の席になる（i4 常駐が黙って f32 計算経路へ流れて dp4a の利得だけを
     // 失う — docs/research/2026-08-21-anima-i4-seat-speed.md）。
@@ -1334,7 +1334,7 @@ export class RecipeBuilder {
     // NOTE: K=0 自体は通常経路でも 0 バイト束縛が最小束縛サイズを割って落ちる（この述語とは
     // 無関係の別要因）。
     if (
-      this.#state.linearCompute === "i8a8" &&
+      this.#state.linearCompute === "a8" &&
       (weightStorage === "i8" || weightStorage === "i4") && k > 0 && k % 4 === 0
     ) {
       await this.#buildLinearI8a8(step, binds, outs, builder, m, n, k, weightStorage);
@@ -1348,7 +1348,7 @@ export class RecipeBuilder {
       throw new ExecutionError(
         `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
           "linearCompute 'f16' は i8 常駐の重みとは組めない（w8a16 は未実装 — ADR 0028）。" +
-          "linearCompute を 'i8a8' にするか、この重みを f32 / f16 格納で持つこと",
+          "linearCompute を 'a8' にするか、この重みを f32 / f16 格納で持つこと",
       );
     }
     // i4 も同型（w4a16 は未実装 — ADR 0069。黙って f32 計算へ落とさない理由は i8 と同文）。
@@ -1356,7 +1356,7 @@ export class RecipeBuilder {
       throw new ExecutionError(
         `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
           "linearCompute 'f16' は i4 常駐の重みとは組めない（w4a16 は未実装 — ADR 0069）。" +
-          "linearCompute を 'i8a8' にするか、この重みを f32 / f16 格納で持つこと",
+          "linearCompute を 'a8' にするか、この重みを f32 / f16 格納で持つこと",
       );
     }
     const v4 = gemmUsesVec4(k, n);
@@ -1651,7 +1651,7 @@ export class RecipeBuilder {
     // ままなので、②③ が読む S は ① がどちらの経路で書いても同型）。
     // MUST: 適格判定は**段ごとに独立**。① は q / k のパック方向が D・③ は P̃ / Vᵀ の
     // パック方向が N なので、条件も別々になる（両方満たさない形・片方だけの形が実在する）。
-    const i8a8 = this.#state.attentionCompute === "i8a8";
+    const i8a8 = this.#state.attentionCompute === "a8";
     const qkI8a8 = i8a8 && depth % 4 === 0;
     const pvI8a8 = i8a8 && cols % 4 === 0;
     // S の**格納形**（案 γ 波 1 — 計算形と直交する第 2 の軸）。`pack2x16float` の 2 要素／語
@@ -1676,7 +1676,7 @@ export class RecipeBuilder {
     // しまう。「mask × i8a8 は無条件に fail loudly」が契約（ADR 0023 / docs/limitations.md）。
     if (mask !== undefined && i8a8) {
       throw new ExecutionError(
-        `${where}: 加算 mask 付きの attention は attentionCompute 'i8a8' と組めない` +
+        `${where}: 加算 mask 付きの attention は attentionCompute 'a8' と組めない` +
           "（①QK の i8a8 変種は mask の epilogue を持たない — attentionCompute を 'f32' か " +
           "'f16' にすること）",
       );

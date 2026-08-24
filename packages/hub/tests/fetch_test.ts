@@ -68,12 +68,28 @@ const hubCache = (caches: MemoryCacheStorage): MemoryCache => {
   return namespace;
 };
 
+/** `console.warn` を差し替えて `body` を走らせ、必ず元へ戻す（出た文言をそのまま返す）。 */
+const captureWarnings = async (body: () => Promise<void>): Promise<string[]> => {
+  const original = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => String(arg)).join(" "));
+  };
+  try {
+    await body();
+  } finally {
+    console.warn = original;
+  }
+  return warnings;
+};
+
 Deno.test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 SHA に固定される", async () => {
   const mock = createMockFetch({ sha: SHA, files: serveAll() });
   const caches = new MemoryCacheStorage();
-  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
-    fetch: mock.fetch,
-    caches,
+  // revision を渡さない経路なので pin の案内が出る（文言の検査は専用テスト側）。
+  let loaded!: LoadedManifest;
+  await captureWarnings(async () => {
+    loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL }, { fetch: mock.fetch, caches });
   });
   assertEquals(loaded.revisionSha, SHA);
   assertEquals(loaded.repo, REPO);
@@ -85,6 +101,58 @@ Deno.test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 S
   for (const call of mock.calls.slice(1)) {
     assert(call.includes(`/resolve/${SHA}/`), `${call} が解決済み SHA に固定されていない`);
   }
+});
+
+Deno.test("loadManifest: revision 未指定の main 解決だけを 1 回 warn する", async (t) => {
+  const load = async (revision?: string): Promise<string[]> => {
+    const mock = createMockFetch({ sha: SHA, files: serveAll() });
+    const caches = new MemoryCacheStorage();
+    return await captureWarnings(async () => {
+      await loadManifest({
+        repo: REPO,
+        hubUrl: HUB_URL,
+        ...(revision === undefined ? {} : { revision }),
+      }, { fetch: mock.fetch, caches });
+    });
+  };
+
+  await t.step("revision 省略なら 1 回だけ出て、解決した SHA と 2 択の案内を載せる", async () => {
+    const warnings = await load();
+    assertEquals(warnings.length, 1, "警告が出ない / 複数回出ている");
+    const [warning] = warnings;
+    // コピーでそのまま pin になる形（SHA が本文に無いと案内が実行不能になる）。
+    assert(warning.includes(SHA), `${warning} が解決した commit SHA を印字していない`);
+    assert(warning.includes(REPO), `${warning} がどのリポの話か示していない`);
+    assert(warning.includes(`revision: "${SHA}"`), `${warning} が pin の書き方を出していない`);
+    assert(warning.includes("_CURRENT"), `${warning} が models の pin 定数へ誘導していない`);
+  });
+
+  await t.step("'main' の明示指定では出さない（可変 ref でよいという意思表示）", async () => {
+    assertEquals(await load("main"), []);
+  });
+
+  await t.step("SHA 指定では出さない", async () => {
+    assertEquals(await load(SHA), []);
+  });
+
+  await t.step("タグ・ブランチの明示指定でも出さない", async () => {
+    assertEquals(await load("v1.0"), []);
+  });
+
+  await t.step("解決に失敗したときは warn ではなく失敗そのものが上がる", async () => {
+    const mock = createMockFetch({ files: serveAll() }); // sha 無し = 解決 API は 404
+    const warnings = await captureWarnings(async () => {
+      await assertRejects(
+        () =>
+          loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
+            fetch: mock.fetch,
+            caches: new MemoryCacheStorage(),
+          }),
+        HubFetchError,
+      );
+    });
+    assertEquals(warnings, [], "解決できていないのに pin を勧めている");
+  });
 });
 
 Deno.test("loadManifest: revision に SHA を渡すと解決リクエストが発生しない", async () => {
@@ -116,28 +184,33 @@ Deno.test("loadManifest: 1MiB を超える karume.json は受信前に弾く", a
     sha: SHA,
     files: serveAll(new Map([[MANIFEST_PATH, oversized]])),
   });
-  await assertRejects(
-    () =>
-      loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
-        fetch: mock.fetch,
-        caches: new MemoryCacheStorage(),
-      }),
-    ManifestFormatError,
-  );
+  await captureWarnings(async () => {
+    await assertRejects(
+      () =>
+        loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
+          fetch: mock.fetch,
+          caches: new MemoryCacheStorage(),
+        }),
+      ManifestFormatError,
+    );
+  });
 });
 
 Deno.test("loadManifest: 取得層の 404 は repo / SHA / path の文脈を付けて透過する", async () => {
   const files = serveAll();
   files.delete(MANIFEST_PATH);
   const mock = createMockFetch({ sha: SHA, files });
-  const error = await assertRejects(
-    () =>
-      loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
-        fetch: mock.fetch,
-        caches: new MemoryCacheStorage(),
-      }),
-    HubFetchError,
-  );
+  let error!: HubFetchError;
+  await captureWarnings(async () => {
+    error = await assertRejects(
+      () =>
+        loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
+          fetch: mock.fetch,
+          caches: new MemoryCacheStorage(),
+        }),
+      HubFetchError,
+    );
+  });
   assertEquals(error.repo, REPO);
   assertEquals(error.revisionSha, SHA);
   assertEquals(error.path, MANIFEST_PATH);
@@ -168,7 +241,7 @@ Deno.test("loadManifest: 破損した cached karume.json は self-heal で 1 往
   // ② decode は通るが JSON として壊れている。
   hubCache(caches).entries.set(
     resolveUrl(MANIFEST_PATH),
-    new TextEncoder().encode('{"format": "karume/3"'),
+    new TextEncoder().encode('{"format": "karume/4"'),
   );
   const healedParse = createMockFetch({ files: serveAll() });
   const afterParseBreak = await loadManifest(ref, { fetch: healedParse.fetch, caches });
@@ -182,7 +255,7 @@ Deno.test("loadManifest: 破損した cached karume.json は self-heal で 1 往
 
 Deno.test("loadManifest: 真実源の karume.json が壊れていれば ManifestFormatError（キャッシュにも残さない）", async () => {
   const caches = new MemoryCacheStorage();
-  const broken = new TextEncoder().encode('{"format": "karume/3"');
+  const broken = new TextEncoder().encode('{"format": "karume/4"');
   const mock = createMockFetch({ files: serveAll(new Map([[MANIFEST_PATH, broken]])) });
   await assertRejects(
     () =>
@@ -709,6 +782,124 @@ const populated = async (...names: readonly string[]): Promise<MemoryCacheStorag
   for (const name of names) await caches.open(name);
   return caches;
 };
+
+// ---- 越境参照（`FileRef` の repo / revision — ADR 0038 §7）。
+//
+// 押さえるのは「セッションの解決済み SHA ではなく、宣言された (repo, revision) から取る」ことと、
+// **同じ path 文字列でもリポが違えば別のバイト列**（path で畳むと取り違えが起きる）の 2 点。
+
+const FOREIGN_REPO = "someone/text-stack";
+const FOREIGN_SHA = "89abcdef0123456789abcdef0123456789abcdef";
+const CROSS_PATH = "text_encoder/model.safetensors";
+
+const digestOf = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
+  Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+
+const localBytes = new TextEncoder().encode("karume-test:local-text-encoder");
+const foreignBytes = new TextEncoder().encode("karume-test:foreign-text-encoder-payload");
+
+/** 自リポと越境先が**同じ path**を主張する manifest（取り違えの検出器）。 */
+const crossRepoManifest = JSON.stringify({
+  format: "karume/4",
+  generator: "karume/0.1.0",
+  defaultModel: "m",
+  models: {
+    m: {
+      pipeline: "anima/1",
+      weights: {
+        own: {
+          i8: {
+            shards: [{
+              path: CROSS_PATH,
+              size: localBytes.byteLength,
+              sha256: await digestOf(localBytes),
+            }],
+          },
+        },
+        borrowed: {
+          i8: {
+            shards: [{
+              path: CROSS_PATH,
+              size: foreignBytes.byteLength,
+              sha256: await digestOf(foreignBytes),
+              repo: FOREIGN_REPO,
+              revision: FOREIGN_SHA,
+            }],
+          },
+        },
+      },
+      assets: {},
+      quants: { i8: { weights: { own: "i8", borrowed: "i8" }, session: {} } },
+      defaultQuant: "i8",
+      pipelineConfig: {},
+    },
+  },
+});
+
+const crossRepoFiles = (
+  overrides: ReadonlyMap<string, Uint8Array<ArrayBuffer>> = new Map(),
+): Map<string, Uint8Array<ArrayBuffer>> =>
+  new Map([
+    [MANIFEST_PATH, new TextEncoder().encode(crossRepoManifest)],
+    [CROSS_PATH, localBytes],
+    [`${FOREIGN_REPO}@${FOREIGN_SHA}/${CROSS_PATH}`, foreignBytes],
+    ...overrides,
+  ]);
+
+const foreignUrl = `${HUB_URL}/${FOREIGN_REPO}/resolve/${FOREIGN_SHA}/${CROSS_PATH}`;
+
+Deno.test("fetchAssets: 越境参照は宣言された (repo, revision) から取る", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
+  const files = resolveFiles(loaded.manifest);
+  const assets = await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
+
+  assertEquals(assets["own"], localBytes, "自リポぶんが越境先のバイト列に化けている");
+  assertEquals(assets["borrowed"], foreignBytes, "越境ぶんが自リポのバイト列に化けている");
+  assertEquals(countCalls(mock.calls, foreignUrl), 1, "越境先の URL を叩いていない");
+  assertEquals(countCalls(mock.calls, resolveUrl(CROSS_PATH)), 1, "自リポの URL を叩いていない");
+  // キャッシュキーは URL のまま（SHA が URL に載るので不変性はそれで成立する）。
+  assertEquals(hubCache(caches).entries.has(foreignUrl), true);
+  assertEquals(hubCache(caches).entries.has(resolveUrl(CROSS_PATH)), true);
+});
+
+Deno.test("fetchAssets: 越境参照の検証失敗は越境先の repo / SHA を名乗る", async () => {
+  const caches = new MemoryCacheStorage();
+  const corrupt = tamper(foreignBytes);
+  const { mock, loaded } = await load({
+    files: crossRepoFiles(new Map([[`${FOREIGN_REPO}@${FOREIGN_SHA}/${CROSS_PATH}`, corrupt]])),
+  }, caches);
+  const error = await assertRejects(
+    () => fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches }),
+    IntegrityError,
+  );
+  // セッションの repo を名乗ると「そのリポには無い path」を指す診断になる。
+  assertEquals(error.repo, FOREIGN_REPO);
+  assertEquals(error.revisionSha, FOREIGN_SHA);
+  assertEquals(error.path, CROSS_PATH);
+});
+
+Deno.test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1 本として数える", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
+  const files = resolveFiles(loaded.manifest);
+  const events: AssetProgress[] = [];
+  await fetchAssets(loaded, files, {
+    fetch: mock.fetch,
+    caches,
+    onProgress: (progress) => events.push(progress),
+  });
+  const expectedTotal = localBytes.byteLength + foreignBytes.byteLength;
+  for (const event of events) assertEquals(event.total, expectedTotal, "総量が畳まれている");
+  assertEquals(events[events.length - 1].loaded, expectedTotal, "最後は総量に到達する");
+  assertEquals(
+    events.filter((event) => event.phase === "complete").length,
+    2,
+    "同じ path の 2 本が 1 本に畳まれている",
+  );
+});
 
 Deno.test("clearHubCache: karume の 2 名前空間だけを消す（他コードの名前空間は残す）", async () => {
   const caches = await populated("karume/1", "karume/1:auth", "other/1");

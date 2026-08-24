@@ -1021,10 +1021,10 @@ Deno.test({
 });
 
 Deno.test({
-  name: "linearCompute 'i8a8' × i4 常駐は w4a8 経路（整数内積）で走る（実 GPU）",
+  name: "linearCompute 'a8' × i4 常駐は w4a8 経路（整数内積）で走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    // ノブ `linearCompute: "i8a8"` の意味は「活性を i8 にして整数内積で計算する」で、重みの
+    // ノブ `linearCompute: "a8"` の意味は「活性を i8 にして整数内積で計算する」で、重みの
     // 格納形は別軸（i8 常駐 → w8a8 / i4 常駐 → w4a8 — perf-ledger Q-8）。**この組の挙動を
     // ここで固定する**という意図は据え置いたまま、期待を w4a8 経路へ書き換えてある
     //（以前は「i4 常駐は f32 計算経路へ流れる」を固定していた — その仕様は無くなった）。
@@ -1060,7 +1060,7 @@ Deno.test({
       const session = await createSession(
         gpu,
         openModel(i4LinearModel(testCase, quantized)),
-        { linearCompute: "i8a8" },
+        { linearCompute: "a8" },
       );
       try {
         const output = (await session.run({ x }))["y"];

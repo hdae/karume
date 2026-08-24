@@ -1,7 +1,7 @@
 /**
  * linear の **w8a8 変種**（活性 per-token i8 × 重み per-channel i8 の**整数内積**）—
  * 設計は docs/research/2026-08-03-dp4a-w8a8-design.md §4.3、opt-in は
- * `SessionOptions.linearCompute: "i8a8"`（既定 `"f32"`）。
+ * `SessionOptions.linearCompute: "a8"`（既定 `"f32"`）。
  *
  * ```
  * acc[i32] = Σ_k xq[m,k] · wq[n,k]                    （厳密な整数・丸め 0 回）

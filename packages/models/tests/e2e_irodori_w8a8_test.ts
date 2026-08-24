@@ -1,6 +1,6 @@
 /**
- * Irodori の **`w8a8` 席**の門（実 GPU）。重みは `w8` 席と**同じ i8 バイト**で、違いは `dit` の
- * Session に降りる `linearCompute: "i8a8"` だけ — DiT の linear 317 本が活性まで整数内積で走る。
+ * Irodori の **`i8-a8` 席**の門（実 GPU）。重みは `i8` 席と**同じ i8 バイト**で、違いは `dit` の
+ * Session に降りる `linearCompute: "a8"` だけ — DiT の linear 317 本が活性まで整数内積で走る。
  *
  * ## なぜ latent 門（`e2e_irodori_latent_test.ts`）に席を足さないのか
  *
@@ -12,7 +12,7 @@
  * 1. **整数の判断の完全一致** — S / forward 数 / latentDim。活性量子化は `dit` の Session の
  *    内側にしか掛からず、S を決める `duration` グラフは**その外**（quant の `session` は `dit`
  *    にだけ渡る — `pipeline.ts` のモジュール doc）。ここが割れたら席の配線が違う。
- * 2. **判別帯**（{@link MEASURED.zBand}）— `w8` golden との z maxAbs が \[下限, 上限\] に入る。
+ * 2. **判別帯**（{@link MEASURED.zBand}）— `i8` golden との z maxAbs が \[下限, 上限\] に入る。
  *    **下限が要る**のが肝で、`linearCompute` が黙って f32 経路へ落ちると差は**小さくなる**
  *    （ADR 0028 決定 6 — 沈黙フォールバックは誤差が小さい側に出る）。上限だけの門は
  *    「i8a8 が一度も走っていない」を緑で通す。
@@ -20,16 +20,16 @@
  *    `quantize_rows` を回し、f32 の linear カーネルを **1 回も**回していないこと。2 の下限が
  *    分布の話であるのに対し、こちらは実行そのものの直接観測。
  *
- * `w8` 席（重みだけ i8）の数値パリティは latent 門が持つ。**この門は `w8` 席の門を置き換え
+ * `i8` 席（重みだけ i8）の数値パリティは latent 門が持つ。**この門は `i8` 席の門を置き換え
  * ない**（併存 — ADR 0049 決定 5 の形をもう 1 軸伸ばしたもの）。
  *
- * ## golden は `w8` のもの（`outputs/series/irodori-v4-small-i8/pipeline/`）
+ * ## golden は `i8` のもの（`outputs/series/irodori-v4-small-i8/pipeline/`）
  *
  * 活性側に対応する torch 鏡像の golden は焼かない（焼いても「別標本」なので網にならない —
- * 上の 1 段目）。突き合わせる相手が `w8` golden であることが、判別帯の下限に
+ * 上の 1 段目）。突き合わせる相手が `i8` golden であることが、判別帯の下限に
  * 「重みだけ i8 のときの差」という具体的な意味を与えている。
  *
- * MUST: 資産は `models/karume-irodori-v4-small/` の `w8a8` 席（untracked・実 GPU 機のローカル
+ * MUST: 資産は `models/karume-irodori-v4-small/` の `i8-a8` 席（untracked・実 GPU 機のローカル
  * 資産）と上の golden。欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP** する
  * （テストを消して無音で緑にしない — ADR 0005）。
  */
@@ -55,8 +55,8 @@ import {
   worstDifference,
 } from "./helpers/irodori-assets.ts";
 
-/** 配布形の席の綴りと、その席が指す格納系列（`w8` と 1 組のバイトを共有する）。 */
-const QUANT = "w8a8";
+/** 配布形の席の綴りと、その席が指す格納系列（`i8` と 1 組のバイトを共有する）。 */
+const QUANT = "i8-a8";
 const GOLDEN_DIR = goldenDir("irodori-v4-small-i8");
 const GENERATE_GOLDEN = `${GOLDEN_COMMAND} --dtype i8`;
 
@@ -69,32 +69,32 @@ const GENERATE_GOLDEN = `${GOLDEN_COMMAND} --dtype i8`;
  */
 const MEASURED: {
   /**
-   * `w8` golden との z maxAbs 差が入るべき**判別帯** `[下限, 上限]`。
+   * `i8` golden との z maxAbs 差が入るべき**判別帯** `[下限, 上限]`。
    *
    * 実測（`atol = rtol = 0` の素の突合 — この門が毎回ログに出す値。2026-08-12 / 実 GPU）:
    *
-   * | ケース   | S    | w8 席の maxAbs | w8a8 席の maxAbs | \|z\| 上端 |
+   * | ケース   | S    | i8 席の maxAbs | i8-a8 席の maxAbs | \|z\| 上端 |
    * | -------- | ---- | -------------- | ---------------- | ---------- |
    * | full     | 161  | 1.8429e-3      | **2.9717**       | 5.11886    |
    * | no-ref   | 116  | 1.6475e-4      | **1.4349**       | 4.33821    |
    *
-   * 採った帯 [0.1, 6]: 下限 0.1 は w8 席の実測最悪 1.8429e-3 の **54 倍**（f32 フォールバックは
-   * この帯に届かない）かつ w8a8 実測最小 1.4349 の 1/14。上限 6 は w8a8 実測最大 2.9717 の
+   * 採った帯 [0.1, 6]: 下限 0.1 は i8 席の実測最悪 1.8429e-3 の **54 倍**（f32 フォールバックは
+   * この帯に届かない）かつ i8-a8 実測最小 1.4349 の 1/14。上限 6 は i8-a8 実測最大 2.9717 の
    * **2.0 倍**（\|z\| 上端 5.12 と同じ桁だが、崩壊は NaN / 発散で桁ごと超える）。
    *
    * 導出（ADR 0026 決定 3 と同じ採り方 — 「実測の 5〜10 倍」ではない）:
    *
-   * - **下限** = `w8` 席の実測 maxAbs（latent 門の `W8_Z_ATOL` の素の実測）より**大きく**採る。
+   * - **下限** = `i8` 席の実測 maxAbs（latent 門の `W8_Z_ATOL` の素の実測）より**大きく**採る。
    *   ここを 0 や小さい値にすると、`linearCompute` が効かずに f32 経路で走った run が緑で
-   *   通る（活性量子化を外すと差は `w8` 席の値まで**縮む** — ADR 0028 決定 6）。
-   * - **上限** = w8a8 の実測 maxAbs の 1.5〜2 倍程度。崩壊（NaN / 発散 / 別の声）の検出で
+   *   通る（活性量子化を外すと差は `i8` 席の値まで**縮む** — ADR 0028 決定 6）。
+   * - **上限** = i8-a8 の実測 maxAbs の 1.5〜2 倍程度。崩壊（NaN / 発散 / 別の声）の検出で
    *   あって数値パリティではないが、\|z\| 上端と同じ桁まで開いたら意味を失う。
    */
   readonly zBand: readonly [number, number] | undefined;
   /**
    * `dit` の 1 forward あたりに走る i8a8 系カーネルの dispatch 数。
    *
-   * DiT の linear は 317 本（k ∈ {32, 192, 512, 768, 1280, 3680} — 全て 4 の倍数で w8a8 適格・
+   * DiT の linear は 317 本（k ∈ {32, 192, 512, 768, 1280, 3680} — 全て 4 の倍数で i8-a8 適格・
    * 量子化 recon の sizeBreakdown）。i8a8 の linear は「活性を per-token i8 へ落とす
    * `quantize_rows` → 整数内積の GEMM」の対で走るので、期待は本数の関数として書ける。
    *
@@ -151,7 +151,7 @@ const AVAILABLE = manifestText !== undefined && metaText !== undefined && seated
 if (!AVAILABLE) {
   console.warn(
     `[karume] Irodori の e2e（${QUANT} 席）を SKIP する（配布形 ${ASSETS_DIR.pathname} の ` +
-      `quant 席 '${QUANT}' と w8 の full-loop golden ${GOLDEN_DIR.pathname} の両方が要る）。` +
+      `quant 席 '${QUANT}' と i8 の full-loop golden ${GOLDEN_DIR.pathname} の両方が要る）。` +
       `生成: ${manifestText === undefined || !seated ? DIST_COMMAND : GENERATE_GOLDEN}`,
   );
 }
@@ -165,7 +165,7 @@ const openPipeline = async (): Promise<IrodoriPipeline> => {
 };
 
 /**
- * golden の 1 ケースを `w8a8` 席で再現し、整数の判断の一致と判別帯を見る。
+ * golden の 1 ケースを `i8-a8` 席で再現し、整数の判断の一致と判別帯を見る。
  *
  * 入力の与え方は latent 門と同じ（参照 latent と初期ノイズだけ golden 由来・S は `duration`
  * グラフに決めさせる）。違うのは**突合の性格**だけ — こちらは帯であって tolerance ではない。
@@ -188,25 +188,25 @@ const runCase = async (
   const { maxAbs, at } = worstDifference(latent.data, z);
   console.log(
     `[e2e] irodori ${MODEL}/${QUANT} ${name}: ${elapsed}s / S ${latent.frames} / ` +
-      `forwards ${latent.forwards} / w8 golden との z maxAbs ${maxAbs.toExponential(4)} ` +
+      `forwards ${latent.forwards} / i8 golden との z maxAbs ${maxAbs.toExponential(4)} ` +
       `(判別帯 ${MEASURED.zBand?.join(" 〜 ") ?? "未導出"} / |z| 上端 ${expected.zAbsMax}）`,
   );
   // 活性量子化は整数の判断を 1 つも変えない（`duration` は `dit` の Session の外）。
-  assertEquals(latent.frames, expected.S, `${name}: S が w8 golden と違う`);
+  assertEquals(latent.frames, expected.S, `${name}: S が i8 golden と違う`);
   assertEquals(latent.forwards, expected.forwards, `${name}: dit の forward 数が違う`);
   assertEquals(latent.latentDim, z.length / expected.S, `${name}: latentDim が違う`);
   if (MEASURED.zBand === undefined) {
     throw new Error(
       `${QUANT} 席の判別帯が未導出（実測 maxAbs ${maxAbs.toExponential(4)} / ` +
-        `|z| 上端 ${expected.zAbsMax}）— 上のログの実測と latent 門の w8 席の実測を並べて ` +
-        "`MEASURED.zBand` を埋める（下限は w8 席の実測より大きく採る）",
+        `|z| 上端 ${expected.zAbsMax}）— 上のログの実測と latent 門の i8 席の実測を並べて ` +
+        "`MEASURED.zBand` を埋める（下限は i8 席の実測より大きく採る）",
     );
   }
   const [floor, ceiling] = MEASURED.zBand;
   if (maxAbs < floor) {
     throw new Error(
-      `${name}: w8 golden との差 ${maxAbs.toExponential(4)} が判別帯の下限 ${floor} を` +
-        '下回った — 活性量子化が走っていない疑い（`linearCompute: "i8a8"` が席から降りて' +
+      `${name}: i8 golden との差 ${maxAbs.toExponential(4)} が判別帯の下限 ${floor} を` +
+        '下回った — 活性量子化が走っていない疑い（`linearCompute: "a8"` が席から降りて' +
         "いないか、適格判定が外れて f32 経路へ落ちている）。差が**小さい**のは沈黙" +
         "フォールバックの兆候で、良化ではない（ADR 0028 決定 6）",
     );
@@ -214,7 +214,7 @@ const runCase = async (
   if (maxAbs > ceiling) {
     const frame = Math.floor(at / latent.latentDim);
     throw new Error(
-      `${name}: w8 golden との差 ${maxAbs.toExponential(4)} が判別帯の上限 ${ceiling} を` +
+      `${name}: i8 golden との差 ${maxAbs.toExponential(4)} が判別帯の上限 ${ceiling} を` +
         `超えた（崩壊の検出）\n  最悪は フレーム ${frame} / 列 ${at % latent.latentDim}: ` +
         `golden ${z[at]} → 実測 ${latent.data[at]}\n` +
         "  帯を広げるのではなく、i8a8 の scale / accumulator / 適格判定のどれが動いたかを" +
@@ -224,7 +224,7 @@ const runCase = async (
 };
 
 Deno.test({
-  name: `e2e(実GPU): w8a8 席の latent が w8 golden の判別帯に入る（参照 + caption あり）`,
+  name: `e2e(実GPU): i8-a8 席の latent が i8 golden の判別帯に入る（参照 + caption あり）`,
   ignore: !RUNNABLE,
   fn: async () => {
     await using pipeline = await openPipeline();
@@ -233,7 +233,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: `e2e(実GPU): 参照なし / caption 空でも w8a8 席が判別帯に入る`,
+  name: `e2e(実GPU): 参照なし / caption 空でも i8-a8 席が判別帯に入る`,
   ignore: !RUNNABLE,
   fn: async () => {
     await using pipeline = await openPipeline();
@@ -243,7 +243,7 @@ Deno.test({
 
 if (RUNNABLE && !TIMESTAMP_QUERY_AVAILABLE) {
   console.warn(
-    "[karume] アダプタが 'timestamp-query' を列挙しないため w8a8 のキー census を SKIP する" +
+    "[karume] アダプタが 'timestamp-query' を列挙しないため i8-a8 のキー census を SKIP する" +
       "（判別帯の 2 本は残る — ADR 0021 の計測は device 作成時にしか要求できない）",
   );
 }
@@ -302,7 +302,7 @@ Deno.test({
       );
       if (MEASURED.ditKeys === undefined) {
         throw new Error(
-          `w8a8 のキー本数が未導出（実測 i8a8 linear ${first.i8a8Linear} / ` +
+          `i8-a8 のキー本数が未導出（実測 i8a8 linear ${first.i8a8Linear} / ` +
             `quantize_rows ${first.quantizeRows}）— 上のログの実測を \`MEASURED.ditKeys\` へ書く`,
         );
       }

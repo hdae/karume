@@ -2,7 +2,7 @@
 //
 // 設計 = docs/research/2026-08-04-attention-a8-design.md §2.1 / §4.1、実装 =
 // src/kernels/quantize-rows.ts（無改変で再利用）+ src/kernels/attention-i8a8.ts、
-// opt-in = `SessionOptions.attentionCompute: "i8a8"`（既定 "f32"）。
+// opt-in = `SessionOptions.attentionCompute: "a8"`（既定 "f32"）。
 //
 // ## このファイルが固定する数値契約
 //
@@ -425,7 +425,7 @@ Deno.test({
 });
 
 // ---------------------------------------------------------------------------
-// Session 経路（attentionCompute: "i8a8"）— 経路選択と縮退
+// Session 経路（attentionCompute: "a8"）— 経路選択と縮退
 // ---------------------------------------------------------------------------
 
 type RunResult = {
@@ -464,7 +464,7 @@ const runAttention = async (
 };
 
 Deno.test({
-  name: "attentionCompute:'i8a8' は ①QK を整数内積にし、②行統計は f32 のまま走る（実 GPU）",
+  name: "attentionCompute:'a8' は ①QK を整数内積にし、②行統計は f32 のまま走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // MUST: **shader-f16 を要求しない既定の device** で走ること（i8a8 は feature ゲートの外）。
@@ -472,7 +472,7 @@ Deno.test({
     try {
       const shape = { b: 2, h: 3, m: 65, n: 68 };
       const d = 20;
-      const i8a8 = await runAttention(gpu, shape, d, { attentionCompute: "i8a8" });
+      const i8a8 = await runAttention(gpu, shape, d, { attentionCompute: "a8" });
       const plain = await runAttention(gpu, shape, d, {});
       // opt-in が実際に効いている（活性量子化が O を変える）
       assert(
@@ -505,7 +505,7 @@ Deno.test({
       // 整数内積変種のノブが attention 側にも結線されている（linear と同じ 1 つのノブ）。
       // **どちらでも O は 1 ビットも変わらない**（S が atol=0 で同じなら後段も同じ）。
       const emu = await runAttention(gpu, shape, d, {
-        attentionCompute: "i8a8",
+        attentionCompute: "a8",
         [I8A8_DOT]: "emu",
       });
       assertExact(emu.output, i8a8.output, "dp4a vs エミュ（Session 経路）");
@@ -522,7 +522,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "attentionCompute:'i8a8' は D % 4 != 0 で f32 経路へ縮退する（出力はビット同一・実 GPU）",
+  name: "attentionCompute:'a8' は D % 4 != 0 で f32 経路へ縮退する（出力はビット同一・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
@@ -533,7 +533,7 @@ Deno.test({
       // MUST: 縮退は**沈黙**（linear の k%4 と同じ流儀）なので、検出器はキーと「f32 と
       // ビット同一」の 2 本しかない。
       const shape = { b: 1, h: 2, m: 17, n: 19 };
-      const degraded = await runAttention(gpu, shape, 13, { attentionCompute: "i8a8" });
+      const degraded = await runAttention(gpu, shape, 13, { attentionCompute: "a8" });
       const plain = await runAttention(gpu, shape, 13, {});
       assertExact(degraded.output, plain.output, "D%4!=0 の縮退が f32 経路と一致しない");
       if (degraded.entries.length > 0) {
@@ -565,7 +565,7 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       await assertRejects(
-        () => runAttention(gpu, shape, d, { attentionCompute: "i8a8" }),
+        () => runAttention(gpu, shape, d, { attentionCompute: "a8" }),
         ExecutionError,
         "i32 縮約の門",
       );

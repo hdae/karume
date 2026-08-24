@@ -84,7 +84,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string => {
     mapping = { ...mapping, [name]: "f32" };
   }
   return JSON.stringify({
-    format: "karume/3",
+    format: "karume/4",
     generator: "karume/0.1.0",
     defaultModel: "v4-small",
     models: {

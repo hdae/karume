@@ -50,12 +50,12 @@ const SEED = 42;
 /** 参照値（移行元デモの実測 — 変更禁止）。 */
 const REFERENCE = [
   {
-    quant: "w8a8-s16",
+    quant: "f16+dit8-a8-attn8-s16",
     resolution: { width: 1024, height: 1024 },
     sha256: "aa013054d0ef6eefd6165462a089545574db227b0845057af52982d55753b608",
   },
   {
-    quant: "w8a8-s16",
+    quant: "f16+dit8-a8-attn8-s16",
     resolution: { width: 512, height: 512 },
     sha256: "dd4506de50f346676a35919d471ff7030514992cd337077c04c0dd2ffa332756",
   },
@@ -208,7 +208,7 @@ const BASE_ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url
 
 /** 参照値（2026-08-22 実測 — 変更禁止）。 */
 const BASE_REFERENCE = {
-  quant: "w8a8-s16",
+  quant: "f16+dit8-a8-attn8-s16",
   resolution: { width: 512, height: 512 },
   steps: 20,
   guidanceScale: 4,
@@ -289,7 +289,7 @@ Deno.test({
   name: "e2e(実GPU): fromPretrained（取得層 + integrity 検証）の PNG が参照 sha256 と一致する",
   ignore: !RUNNABLE,
   fn: async () => {
-    const quant = "w8a8-s16";
+    const quant = "f16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 512, height: 512 };
     const files = resolveFiles(readManifest(), { quant });
     const paths = new Set(["karume.json", ...Object.keys(files).map((key) => files[key].path)]);
@@ -358,7 +358,7 @@ Deno.test({
   name: "e2e(実GPU): onEvent の観測は数値に触らない（イベント列 / 途中 latent / 中断）",
   ignore: !RUNNABLE,
   fn: async (t) => {
-    const quant = "w8a8-s16";
+    const quant = "f16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 1024, height: 1024 };
     const manifest = readManifest();
     const { scheduler } = parseAnimaPipelineConfig(

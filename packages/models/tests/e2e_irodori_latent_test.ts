@@ -27,15 +27,15 @@
  *
  * ## 格納 dtype の系列でパラメタ化する（ADR 0018 / 0027 の型）
  *
- * 配布形の quant 席（`f32` / `f16` / `w8`）と full-loop golden の系列は **1 対 1** で、系列ごとに
+ * 配布形の quant 席（`f32` / `f16` / `i8`）と full-loop golden の系列は **1 対 1** で、系列ごとに
  * ①golden を fake-quant 済みの重みで焼き直し ②tolerance を**素の実測から独立導出**する
  * （系列間で流用しない — 片方の再導出がもう片方を黙って動かす）。圧縮系列の golden も
  * 丸めた重みで採ってあるので、どの系列でも見ているのは「実装差だけ」で、量子化そのものの
  * 質は聴感ゲート（ユーザー裁定）の領分。
  *
- * NOTE: 席名と系列 root の綴りは**必ずしも同じではない**（`w8` 席 ↔ `-i8` 系列 — 席名は
- * 実行構成の名前、系列 root は格納 dtype の名前で、`w8` / `w8a8` は同じバイトを共有する）。
- * この門が見るのは格納 dtype までの席で、活性量子化の `w8a8` 席は数値パリティ網に**できない**
+ * NOTE: 席名と系列 root の綴りは**必ずしも同じではない**（`i8+dit4` 席 ↔ `-i4` 系列 — 席名は
+ * 実行構成の名前、系列 root は格納 dtype の名前で、`i8` / `i8-a8` は同じバイトを共有する）。
+ * この門が見るのは格納 dtype までの席で、活性量子化の `i8-a8` 席は数値パリティ網に**できない**
  * ため別の門が持つ（`e2e_irodori_w8a8_test.ts` — ADR 0025 決定 6 / 0026）。
  *
  * **S と forward 数の完全一致は系列に依らず要求する** — 格納 dtype を落としても duration の
@@ -121,7 +121,7 @@ const Z_ATOL = 5e-3;
 const F16_Z_ATOL: number | undefined = 1.5e-3;
 
 /**
- * **w8 席**（`--dtype i8` — 適格な重みスロットだけ per-channel i8 格納・計算は f32）の `z` の
+ * **i8 席**（`--dtype i8` — 適格な重みスロットだけ per-channel i8 格納・計算は f32）の `z` の
  * 許容誤差。
  *
  * 実測（`atol = rtol = 0` の素の突合 — この門が毎回ログに出す値。2026-08-12 / 実 GPU）:
@@ -149,7 +149,7 @@ const F16_Z_ATOL: number | undefined = 1.5e-3;
 const W8_Z_ATOL: number | undefined = 1e-2;
 
 /**
- * **w4 席**（`--dtype i4` — `dit` だけ i4 g32・GPTQ 校正付き。他 7 役は `w8` と同じ i8 バイトを
+ * **i8+dit4 席**（`--dtype i4` — `dit` だけ i4 g32・GPTQ 校正付き。他 7 役は `i8` と同じ i8 バイトを
  * 共有する唯一の混成席）の `z` の許容誤差。
  *
  * golden は**出荷バイトから**焼かれる（`irodori.pipeline_ref` が export 済み i4 コンテナを
@@ -162,16 +162,16 @@ const W8_Z_ATOL: number | undefined = 1e-2;
  * | full     | 161 | 5,152  | **1.1522e-3**  | 5.03657    | 1/4,371  |
  * | no-ref   | 116 | 3,712  | 2.8908e-5      | 4.99839    | 1/172,907 |
  *
- * 6e-3 = 実測最悪 1.1522e-3 の **5.2 倍**（w8 の 5.4 倍と同じ採り方）・\|z\| 上端の約 1/839。
- * 実測が w8（1.8429e-3）より小さいのは GPTQ 校正の帰結ではなく偶然の範囲 — 系列間に順序
- * 関係は無い（w8 の同注記と同文）。
+ * 6e-3 = 実測最悪 1.1522e-3 の **5.2 倍**（i8 の 5.4 倍と同じ採り方）・\|z\| 上端の約 1/839。
+ * 実測が i8（1.8429e-3）より小さいのは GPTQ 校正の帰結ではなく偶然の範囲 — 系列間に順序
+ * 関係は無い（i8 の同注記と同文）。
  *
- * MUST: **f32 / f16 / w8 の値を流用しない**（ADR 0027 / 0050 の型 — 系列ごとに素の実測から
- * 独立導出する）。再導出の手順は w8 と同じ: ①i4 系列の資産を焼く（`--dtype i4` の export +
+ * MUST: **f32 / f16 / i8 の値を流用しない**（ADR 0027 / 0050 の型 — 系列ごとに素の実測から
+ * 独立導出する）。再導出の手順は i8 と同じ: ①i4 系列の資産を焼く（`--dtype i4` の export +
  * `pipeline_ref --dtype i4` + `karume dist`）②この定数を `undefined` に戻してこの門を走らせ、
  * ログの素の `maxAbs` を表へ書く ③実測最悪の 5〜10 倍を閾値に採り、値域との比を添える。
  *
- * NOTE: **S / forwards が割れた場合は tolerance の問題ではない**（w8 と同文)。i4 で S が
+ * NOTE: **S / forwards が割れた場合は tolerance の問題ではない**（i8 と同文)。i4 で S が
  * 動かないことは J-2 第 2 段の実測（gptq 3 構成とも S 予測完全一致 —
  * research 2026-08-20 §6）が根拠で、上の実測でも S / forwards は完全一致だった。
  */
@@ -212,18 +212,18 @@ const SERIES: readonly IrodoriSeries[] = [
     generate: `${GOLDEN_COMMAND} --dtype f16`,
   },
   {
-    // 席の綴りは `w8`・系列 root は `-i8`（`w8a8` 席も同じバイトを指すが、あちらは活性量子化が
+    // 席の綴りは `i8`・系列 root は `-i8`（`i8-a8` 席も同じバイトを指すが、あちらは活性量子化が
     // 効くので数値パリティ網にならず、別の門が持つ）。
-    name: "w8",
+    name: "i8",
     goldenDir: goldenDir("irodori-v4-small-i8"),
     zAtol: W8_Z_ATOL,
     generate: `${GOLDEN_COMMAND} --dtype i8`,
   },
   {
-    // 席の綴りは `w4`・系列 root は `-i4`。`dit` だけ i4 で他 7 役は `w8` の i8 バイトを共有する
+    // 席の綴りは `i8+dit4`・系列 root は `-i4`。`dit` だけ i4 で他 7 役は `i8` の i8 バイトを共有する
     // 唯一の混成席（席表の裁定 2026-08-23）。golden の生成は export 済み系列が前提
     // （`pipeline_ref --dtype i4` が出荷バイトを読み戻す）。
-    name: "w4",
+    name: "i8+dit4",
     goldenDir: goldenDir("irodori-v4-small-i4"),
     zAtol: W4_Z_ATOL,
     generate: `${GOLDEN_COMMAND} --dtype i4`,

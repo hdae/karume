@@ -88,7 +88,12 @@ export const payloadFor = (path: string): Uint8Array<ArrayBuffer> =>
 export type MockRoutes = {
   /** revision 解決 API が返す sha。undefined なら 404 を返す。 */
   readonly sha?: string;
-  /** path → 返すバイト列。無い path は 404。 */
+  /**
+   * path → 返すバイト列。無い path は 404。
+   *
+   * 越境参照（別リポ）のファイルは `"<repo>@<revision>/<path>"` の修飾キーで登録する
+   * （同じ path 文字列が repo ごとに別の実体を指すため — 修飾キーが無ければ素の path を引く）。
+   */
   readonly files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>;
   /** content-length ヘッダの上書き（食い違いの模擬）。 */
   readonly contentLength?: (path: string) => number | undefined;
@@ -133,8 +138,10 @@ export const createMockFetch = (routes: MockRoutes): MockFetch => {
     }
     const resolved = RESOLVE_RE.exec(url.pathname);
     if (resolved === null) return Promise.resolve(notFound());
+    const repo = resolved[1];
+    const pinned = decodeURIComponent(resolved[2]);
     const path = decodeURIComponent(resolved[3]);
-    const bytes = routes.files.get(path);
+    const bytes = routes.files.get(`${repo}@${pinned}/${path}`) ?? routes.files.get(path);
     if (bytes === undefined) return Promise.resolve(notFound());
     inFlight += 1;
     peak = Math.max(peak, inFlight);

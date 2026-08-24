@@ -4,7 +4,7 @@
  * （Anima の PNG 門 `e2e_anima_test.ts` と同じ哲学の音声版）。
  *
  * 参照値は ADR [0039](../../../docs/decisions/0039-sbv2-distribution.md) の Consequences 節が
- * 記録した実測 — 「配布形 + `w8` で出した WAV と、`outputs/series/` を直接読む段 1 経路
+ * 記録した実測 — 「配布形 + `i8` で出した WAV と、`outputs/series/` を直接読む段 1 経路
  * （i8 構成）で出した WAV が sha256 完全一致」。比較経路そのものはコミット 0bbfc65
  * （example を `Sbv2Pipeline` の 1 画面へ縮退）で消えており、digest は散文にしか残っていな
  * かった。ここが自動の門としての置き場になる。
@@ -15,7 +15,7 @@
  *
  * ## 参照値の生成条件（git 履歴から復元 — 推測で埋めない）
  *
- * - **モデル FN4 / quant `w8`**（front i8 + voice i8 + text_encoder i8）。ADR 0039 の
+ * - **モデル FN4 / quant `i8`**（front i8 + voice i8 + text_encoder i8）。ADR 0039 の
  *   Consequences 節の記述そのもの。
  * - **テキストは `examples/sbv2/main.ts` の `DEFAULT_TEXT`・seed 0** — 0bbfc65 が入れた
  *   既定値（`args.get("text") ?? DEFAULT_TEXT` / `integer("seed") ?? 0`）で、現在も同値。
@@ -28,18 +28,18 @@
  * - 実効値は {@link REFERENCE_KNOBS} に写してあり、**配布形の既定が動いたら門より先に**
  *   落ちる（「数値の回帰」と「資産の差し替え」を混同しないため）。
  *
- * ## 2 本目の門 — `w8-bert4`（BERT の linear を i4 混成で焼いた席）
+ * ## 2 本目の門 — `i8+bert4`（BERT の linear を i4 混成で焼いた席）
  *
- * 条件は `w8` と同一（FN4 / seed 0 / 配布形の既定ノブ）で、差し替えるのは quant だけ。参照値は
- * 2026-08-20 にこの参照環境で採取して凍結した（perf-ledger Q-1 の配布配線）。`w8` と**別の値に
- * なるのが正**なので、`w8` の digest と一致した場合も落とす — 一致は「i4 席が効いていない」
+ * 条件は `i8` と同一（FN4 / seed 0 / 配布形の既定ノブ）で、差し替えるのは quant だけ。参照値は
+ * 2026-08-20 にこの参照環境で採取して凍結した（perf-ledger Q-1 の配布配線）。`i8` と**別の値に
+ * なるのが正**なので、`i8` の digest と一致した場合も落とす — 一致は「i4 席が効いていない」
  * （quant 解決が既定へ落ちた / i4 席に i8 資産が入った）ことの証拠で、数値の網では捕まらない。
  *
- * ## 3 本目の門 — `w4`（3 席とも i4 混成で焼いた配布形）
+ * ## 3 本目の門 — `i4`（3 席とも i4 混成で焼いた配布形）
  *
- * 条件はやはり `w8` と同一で、差し替えるのは quant だけ。参照値は 2026-08-20 に採取して凍結した
- * （perf-ledger Q-1 の full-w4 側）。`w8` とも `w8-bert4` とも**別の値になるのが正**で、どちらかと
- * 一致したら落とす — `w8-bert4` との一致は「net_g 側の i4 席が効いていない」ことの証拠で、
+ * 条件はやはり `i8` と同一で、差し替えるのは quant だけ。参照値は 2026-08-20 に採取して凍結した
+ * （perf-ledger Q-1 の full-w4 側）。`i8` とも `i8+bert4` とも**別の値になるのが正**で、どちらかと
+ * 一致したら落とす — `i8+bert4` との一致は「net_g 側の i4 席が効いていない」ことの証拠で、
  * net_g の適格 linear は 6 本しかない（front 2 / voice 4）ぶん**資産サイズの差でも気づけない**。
  *
  * ## 参照 digest はこの参照環境専用（クロスデバイスのビット同一は保証しない）
@@ -79,24 +79,24 @@ const OUTPUTS_DIR = new URL("../../../outputs/demo/", import.meta.url);
 const REFERENCE_WAV = new URL("../../../outputs/sbv2-demo/out/out.wav", import.meta.url);
 
 const MODEL = "FN4";
-const QUANT = "w8";
+const QUANT = "i8";
 const TEXT = "こんにちは、これはテストです。";
 const SEED = 0;
 
 /**
- * `w8` と**同構成で `text_encoder` だけ i4 混成**（BERT の linear と語彙表が group32 の i4・
- * conv と相対位置表は i8）の quant。配布形の差分は 1 席だけで、session ノブは `w8` と同じ
+ * `i8` と**同構成で `text_encoder` だけ i4 混成**（BERT の linear と語彙表が group32 の i4・
+ * conv と相対位置表は i8）の quant。配布形の差分は 1 席だけで、session ノブは `i8` と同じ
  * （`sbv2/distribution.py` の `SBV2_QUANTS` がそれを固定する）。
  */
-const BERT4_QUANT = "w8-bert4";
+const BERT4_QUANT = "i8+bert4";
 
 /** 参照値（ADR 0039 の実測 — **変更禁止**）。 */
 const REFERENCE_SHA256 = "a82f72e2c18956ec725a3f692182e8c9a7dad4011e760dab9fb3d051653db2f4";
 
 /**
- * `w8-bert4` の参照値（2026-08-20 に参照環境で採取して凍結 — **変更禁止**）。
+ * `i8+bert4` の参照値（2026-08-20 に参照環境で採取して凍結 — **変更禁止**）。
  *
- * `w8` と**別の値になるのが正**（BERT の linear が i4 に落ちれば特徴量が動き、波形も動く）。
+ * `i8` と**別の値になるのが正**（BERT の linear が i4 に落ちれば特徴量が動き、波形も動く）。
  * 一致してしまったら i4 席が効いていない（i8 資産が i4 席に入った / quant 解決が既定へ落ちた）
  * ことを意味するので、そこも門に含める。実体は {@link REFERENCE_WAV} のような手元の材料が
  * 無いので、食い違ったときは WAV を落として人が聴ける形にするだけにする。
@@ -108,15 +108,15 @@ const REFERENCE_SHA256 = "a82f72e2c18956ec725a3f692182e8c9a7dad4011e760dab9fb3d0
 const BERT4_REFERENCE_SHA256 = "e1aabe02821962a4eff869a3aa1565d892b8b0eed235487741ffb485cb797ef4";
 
 /**
- * `w8-bert4` から**さらに `front` / `voice` も i4 混成**へ替えた quant（3 席とも i4）。session
- * ノブは `w8` と同じで、動かす軸は格納形だけ（`sbv2/distribution.py` の `SBV2_QUANTS`）。
+ * `i8+bert4` から**さらに `front` / `voice` も i4 混成**へ替えた quant（3 席とも i4）。session
+ * ノブは `i8` と同じで、動かす軸は格納形だけ（`sbv2/distribution.py` の `SBV2_QUANTS`）。
  */
-const W4_QUANT = "w4";
+const W4_QUANT = "i4";
 
 /**
- * `w4` の参照値（2026-08-20 に参照環境で採取して凍結 — **変更禁止**）。
+ * `i4` の参照値（2026-08-20 に参照環境で採取して凍結 — **変更禁止**）。
  *
- * `w8` とも `w8-bert4` とも**別の値になるのが正**。`w8-bert4` と一致したら net_g 側の i4 席が
+ * `i8` とも `i8+bert4` とも**別の値になるのが正**。`i8+bert4` と一致したら net_g 側の i4 席が
  * 効いていない（i4 席に i8 資産が入った / quant 解決が既定へ落ちた）ことを意味し、net_g の適格
  * linear は 6 本だけで配布バイトもほぼ変わらないため、**この門以外に検出手段が無い**。
  *
@@ -178,7 +178,7 @@ const modelEntry = (manifest: Manifest): ModelEntry => {
 };
 
 /**
- * FN4 / w8 が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない
+ * FN4 / i8 が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない
  * 経路で、パイプライン単体を門に掛ける）。同じ path を指すキーは 1 度だけ読む。
  */
 const loadLocalAssets = async (
@@ -325,7 +325,7 @@ Deno.test({
       model: MODEL,
       quant: BERT4_QUANT,
     });
-    // ノブは 1 つも渡さない — `w8` の門と同じ条件（差は text_encoder の格納形だけ）。
+    // ノブは 1 つも渡さない — `i8` の門と同じ条件（差は text_encoder の格納形だけ）。
     const audio = await pipeline.generate({ text: TEXT, seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
     const actual = await sha256Hex(wav);
@@ -370,7 +370,7 @@ Deno.test({
       model: MODEL,
       quant: W4_QUANT,
     });
-    // ノブは 1 つも渡さない — `w8` の門と同じ条件（差は 3 席の格納形だけ）。
+    // ノブは 1 つも渡さない — `i8` の門と同じ条件（差は 3 席の格納形だけ）。
     const audio = await pipeline.generate({ text: TEXT, seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
     const actual = await sha256Hex(wav);

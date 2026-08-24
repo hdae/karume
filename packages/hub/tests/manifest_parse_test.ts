@@ -61,7 +61,7 @@ const validManifestText = await Deno.readTextFile(
 const FILE = { path: "net/model.f16.safetensors", size: 4, sha256: "a1".repeat(32) };
 
 /**
- * 検査に要る欄だけを持つ最小の v3 manifest。`patch` は `models.m` の中身を、`envelope` は
+ * 検査に要る欄だけを持つ最小の v4 manifest。`patch` は `models.m` の中身を、`envelope` は
  * トップレベルを上書きする。
  */
 const withModel = (
@@ -69,7 +69,7 @@ const withModel = (
   envelope: Record<string, unknown> = {},
 ): string =>
   JSON.stringify({
-    format: "karume/3",
+    format: "karume/4",
     generator: "karume/0.1.0",
     defaultModel: "m",
     models: {
@@ -104,7 +104,7 @@ Deno.test("parseManifest: fixture の全違反ケースが宣言どおりのエ�
 
 Deno.test("parseManifest: JSON として壊れていれば ManifestFormatError に包んで再送出する", () => {
   const error = assertThrows(
-    () => parseManifest('{"format": "karume/3",}'),
+    () => parseManifest('{"format": "karume/4",}'),
     ManifestFormatError,
   );
   assert(error.cause instanceof SyntaxError, "元の SyntaxError を cause に残す");
@@ -127,15 +127,52 @@ Deno.test("parseManifest: v1（karume/1）は読まずに未対応 major とし�
     ManifestFormatError,
   );
   assert(
-    error.message.includes("karume/3"),
-    `${error.message} が「読めるのは karume/3」を名指ししていない`,
+    error.message.includes("karume/4"),
+    `${error.message} が「読めるのは karume/4」を名指ししていない`,
   );
 });
 
-Deno.test("parseManifest: 直前版（karume/2）も読まず、現行が karume/3 であることを名指しする", () => {
-  // v2 は weights の dtype エントリが `{file}`。綴りは v3 と 1 欄しか違わないので、format を
-  // 見ずに構造から入ると「未知キー 'file'」という枝葉の診断になり、本当の理由（この hub は
-  // karume/3 しか読まない）が隠れる。診断が版を名指しすることまでを観測値として固定する。
+Deno.test("parseManifest: 直前版（karume/3）も読まず、現行が karume/4 であることを名指しする", () => {
+  // v3 と v4 の差は optional な新席（label / description / requiredLimits / 越境参照）だけで、
+  // v3 の manifest は**構造としては v4 のパーサを素通りしてしまう**。だから断絶は format 文字列
+  // だけが宣言する（ADR 0075 決定 4）。診断が「拒否した版」と「この版が読む版」の両方を
+  // 名指しすることまでを観測値として固定する。
+  const error = assertThrows(
+    () =>
+      parseManifest(JSON.stringify({
+        format: "karume/3",
+        generator: "karume/0.1.0",
+        defaultModel: "m",
+        models: {
+          m: {
+            pipeline: "anima/1",
+            weights: { net: { f16: { shards: [FILE] } } },
+            assets: {},
+            quants: { q: { weights: { net: "f16" }, session: {} } },
+            defaultQuant: "q",
+            pipelineConfig: {},
+          },
+        },
+      })),
+    ManifestFormatError,
+  );
+  assert(
+    error.message.includes("karume/3"),
+    `${error.message} が拒否した版を名指ししていない`,
+  );
+  assert(
+    error.message.includes("karume/4"),
+    `${error.message} が「読めるのは karume/4」を名指ししていない`,
+  );
+  assert(
+    error.message.includes("旧版"),
+    `${error.message} が「旧版のパーサを持たない」ことを伝えていない`,
+  );
+});
+
+Deno.test("parseManifest: karume/2 の綴り（dtype エントリが {file}）も版で落とす", () => {
+  // 構造から入ると「未知キー 'file'」という枝葉の診断になり、本当の理由（この版は karume/4 のみ
+  // 読む）が隠れる — format を未知キー検査より先に見ていることの観測点。
   const error = assertThrows(
     () =>
       parseManifest(JSON.stringify({
@@ -155,14 +192,8 @@ Deno.test("parseManifest: 直前版（karume/2）も読まず、現行が karume
       })),
     ManifestFormatError,
   );
-  assert(
-    error.message.includes("karume/2"),
-    `${error.message} が拒否した版を名指ししていない`,
-  );
-  assert(
-    error.message.includes("karume/3"),
-    `${error.message} が「読めるのは karume/3」を名指ししていない`,
-  );
+  assert(error.message.includes("karume/2"), `${error.message} が拒否した版を名指ししていない`);
+  assert(!error.message.includes("'file'"), `${error.message} が枝葉の未知キーを主因にしている`);
 });
 
 Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
@@ -181,7 +212,7 @@ Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
       models = { ...models, [`m${index}`]: modelEntry("q") };
     }
     const text = JSON.stringify({
-      format: "karume/3",
+      format: "karume/4",
       generator: "karume/0.1.0",
       defaultModel: "m0",
       models,
@@ -285,7 +316,7 @@ Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラ�
   const error = assertThrows(
     () =>
       parseManifest(JSON.stringify({
-        format: "karume/3",
+        format: "karume/4",
         generator: "karume/0.1.0",
         defaultModel: "fast",
         models: {
@@ -337,7 +368,7 @@ Deno.test("parseManifest: トップレベルの違反にはモデル一覧だけ
 
 Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () => {
   const manifest = parseManifest(validManifestText);
-  assertEquals(manifest.format, "karume/3");
+  assertEquals(manifest.format, "karume/4");
   assertEquals(manifest.generator, "karume/0.1.0");
   assertEquals(manifest.defaultModel, "anima-turbo");
   assertEquals(Object.keys(manifest.models), ["anima-turbo", "anima-lite"]);
@@ -365,8 +396,8 @@ Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () =>
   assertEquals(turbo.assets["tokenizer"].path, "tokenizer/qwen2-tokenizer.json");
 
   assertEquals(turbo.quants["w8a8-s16"].session, {
-    linearCompute: "i8a8",
-    attentionCompute: "i8a8",
+    linearCompute: "a8",
+    attentionCompute: "a8",
     attentionScoreStorage: "f16",
   });
   assertEquals(turbo.quants["f16-c16"].gpuFeatures, { shaderF16: true });
@@ -464,4 +495,266 @@ Deno.test("parseManifest: pipeline の major は形だけ検査し、裁定は m
   // hub は綴りを検査して major を型で取り出すところまでを持つ。
   const manifest = parseManifest(withModel({ pipeline: "sbv2/7" }));
   assertEquals(manifest.models["m"].pipeline, { name: "sbv2", major: 7 });
+});
+
+/** quant 席を 1 つだけ差し替えた manifest（新席の観測用）。 */
+const withQuant = (patch: Record<string, unknown>): string =>
+  withModel({ quants: { q: { weights: { net: "f16" }, session: {}, ...patch } } });
+
+Deno.test("parseManifest: quant の表示欄 label / description（ADR 0075）", async (t) => {
+  await t.step("設定した文字列がそのまま型面へ出る", () => {
+    const manifest = parseManifest(withQuant({
+      label: "Balanced (int8)",
+      description: "Half the download of f16 with no visible difference.",
+    }));
+    const quant = manifest.models["m"].quants["q"];
+    assertEquals(quant.label, "Balanced (int8)");
+    assertEquals(quant.description, "Half the download of f16 with no visible difference.");
+  });
+
+  await t.step("未設定の席は欄を持たない（呼び手が id をそのまま出す）", () => {
+    const quant = parseManifest(withModel()).models["m"].quants["q"];
+    assertEquals(quant.label, undefined);
+    assertEquals(quant.description, undefined);
+  });
+
+  await t.step("上限ちょうどは通り、1 文字超で落ちる", () => {
+    // 片側だけだと「常に落ちる」実装でも緑になるので、境界の両側を観測する。
+    assertEquals(
+      parseManifest(withQuant({ label: "x".repeat(64) })).models["m"].quants["q"].label
+        ?.length,
+      64,
+    );
+    assertThrows(() => parseManifest(withQuant({ label: "x".repeat(65) })), ManifestFormatError);
+    assertEquals(
+      parseManifest(withQuant({ description: "x".repeat(200) })).models["m"].quants["q"]
+        .description?.length,
+      200,
+    );
+    assertThrows(
+      () => parseManifest(withQuant({ description: "x".repeat(201) })),
+      ManifestFormatError,
+    );
+  });
+
+  await t.step("上限超過は期待と実際を添えて落ちる", () => {
+    const error = assertThrows(
+      () => parseManifest(withQuant({ label: "x".repeat(70) })),
+      ManifestFormatError,
+    );
+    assert(error.message.includes("期待 64 文字以内"), `${error.message} が期待値を出していない`);
+    assert(error.message.includes("実際 70 文字"), `${error.message} が実際の長さを出していない`);
+  });
+
+  await t.step("非文字列は期待と実際を添えて落ちる", () => {
+    const error = assertThrows(() => parseManifest(withQuant({ label: 12 })), ManifestFormatError);
+    assert(error.message.includes("期待 文字列"), `${error.message} が期待の型を出していない`);
+    assert(error.message.includes("実際 number"), `${error.message} が実際の型を出していない`);
+  });
+
+  await t.step("内容の意味は解釈しない（上限内なら実態と食い違う説明も通る）", () => {
+    // ADR 0075 決定 2: 長さは境界検査、内容の妥当性は hub には判定できないし、しない。
+    const quant =
+      parseManifest(withQuant({ label: "f32 (lossless)", description: "🌀".repeat(64) }))
+        .models["m"].quants["q"];
+    assertEquals(quant.label, "f32 (lossless)");
+    // サロゲートペアはコードポイント 1 つとして数える（同じ見た目が綴りで通ったり落ちたりしない）。
+    assertEquals(quant.description, "🌀".repeat(64));
+  });
+});
+
+Deno.test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席）", async (t) => {
+  await t.step("limit 名 → 最小値の部分写像として型面へ出る", () => {
+    const manifest = parseManifest(withQuant({
+      requiredLimits: { maxBufferSize: 2147483648, maxStorageBufferBindingSize: 1073741824 },
+    }));
+    assertEquals(manifest.models["m"].quants["q"].requiredLimits, {
+      maxBufferSize: 2147483648,
+      maxStorageBufferBindingSize: 1073741824,
+    });
+  });
+
+  await t.step("未設定の席は欄を持たず、空の宣言は空のまま通る", () => {
+    assertEquals(parseManifest(withModel()).models["m"].quants["q"].requiredLimits, undefined);
+    assertEquals(
+      parseManifest(withQuant({ requiredLimits: {} })).models["m"].quants["q"]
+        .requiredLimits,
+      {},
+    );
+  });
+
+  await t.step("runtime の requiredLimits 語彙の名前を受ける", () => {
+    // 綴りが runtime（`REQUIRED_LIMIT_KEYS`）と 1 対 1 であることの観測点。compute 系まで
+    // 明示する語彙なので、workgroup 系が拒否されないことまで見る。
+    const manifest = parseManifest(withQuant({
+      requiredLimits: {
+        maxUniformBufferBindingSize: 65536,
+        maxStorageBuffersPerShaderStage: 10,
+        maxUniformBuffersPerShaderStage: 12,
+        maxComputeWorkgroupStorageSize: 32768,
+        maxComputeInvocationsPerWorkgroup: 1024,
+        maxComputeWorkgroupSizeX: 1024,
+        maxComputeWorkgroupSizeY: 1024,
+        maxComputeWorkgroupSizeZ: 64,
+        maxComputeWorkgroupsPerDimension: 65535,
+      },
+    }));
+    assertEquals(
+      Object.keys(manifest.models["m"].quants["q"].requiredLimits ?? {}).length,
+      9,
+    );
+  });
+
+  await t.step("未知の limit 名は許可一覧つきで落ちる（綴り違いを黙って無視しない）", () => {
+    const error = assertThrows(
+      () => parseManifest(withQuant({ requiredLimits: { maxBufferSizes: 1024 } })),
+      ManifestReferenceError,
+    );
+    assert(
+      error.message.includes("maxBufferSize"),
+      `${error.message} が許可される名前を出していない`,
+    );
+  });
+
+  await t.step("非正整数は期待と実際を添えて落ちる", () => {
+    for (const value of [0, -1, 1.5, "1024", null]) {
+      const error = assertThrows(
+        () => parseManifest(withQuant({ requiredLimits: { maxBufferSize: value } })),
+        ManifestFormatError,
+        undefined,
+        `requiredLimits.maxBufferSize = ${JSON.stringify(value)} が通ってしまった`,
+      );
+      assert(
+        error.message.includes("期待 正の安全整数"),
+        `${error.message} が期待を出していない`,
+      );
+    }
+  });
+});
+
+const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
+Deno.test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 §7）", async (t) => {
+  const foreign = (patch: Record<string, unknown> = {}) => ({
+    path: "text_encoder/model.safetensors",
+    size: 12,
+    sha256: "e5".repeat(32),
+    repo: "other/stack",
+    revision: COMMIT,
+    ...patch,
+  });
+
+  await t.step("shard 列の要素に載る（席は 3 点セットと同じ位置）", () => {
+    const manifest = parseManifest(
+      withModel({ weights: { net: { f16: { shards: [FILE, foreign()] } } } }),
+    );
+    const shards = manifest.models["m"].weights["net"]["f16"].shards;
+    assertEquals(shards[0].repo, undefined, "自リポ参照は席を持たない");
+    assertEquals(shards[1].repo, "other/stack");
+    assertEquals(shards[1].revision, COMMIT);
+  });
+
+  await t.step("extras / assets の参照にも同じ席が載る", () => {
+    const manifest = parseManifest(withModel({
+      weights: { net: { f16: { shards: [FILE], extras: { rope_base: foreign() } } } },
+      assets: { tokenizer: foreign({ path: "tokenizer/tokenizer.json", size: 9 }) },
+    }));
+    assertEquals(
+      manifest.models["m"].weights["net"]["f16"].extras["rope_base"].repo,
+      "other/stack",
+    );
+    assertEquals(manifest.models["m"].assets["tokenizer"].revision, COMMIT);
+  });
+
+  await t.step("片方だけの宣言は両方向とも落ちる", () => {
+    for (const half of [{ repo: "other/stack" }, { revision: COMMIT }]) {
+      const error = assertThrows(
+        () =>
+          parseManifest(withModel({
+            weights: { net: { f16: { shards: [{ ...FILE, ...half }] } } },
+          })),
+        ManifestFormatError,
+        undefined,
+        `${JSON.stringify(half)} だけの宣言が通ってしまった`,
+      );
+      assert(
+        error.message.includes("両方同時"),
+        `${error.message} が「両方同時」の要求を出していない`,
+      );
+    }
+  });
+
+  await t.step("revision はブランチ・タグ・短縮形・大文字を拒否する", () => {
+    for (const revision of ["main", "v1.0", COMMIT.slice(0, 7), COMMIT.toUpperCase()]) {
+      assertThrows(
+        () =>
+          parseManifest(withModel({
+            weights: { net: { f16: { shards: [foreign({ revision })] } } },
+          })),
+        ManifestFormatError,
+        undefined,
+        `revision '${revision}' が通ってしまった`,
+      );
+    }
+  });
+
+  await t.step("repo は owner/name の 2 セグメント許可リスト", () => {
+    for (const repo of ["stack", "other/stack/extra", "other/..", "other/.hidden", "other/re po"]) {
+      assertThrows(
+        () =>
+          parseManifest(withModel({ weights: { net: { f16: { shards: [foreign({ repo })] } } } })),
+        ManifestFormatError,
+        undefined,
+        `repo '${repo}' が通ってしまった`,
+      );
+    }
+  });
+
+  await t.step("同じ path でもリポが違えば別のファイル（3 点セット一致を要求しない）", () => {
+    // path だけで畳むと、正しい manifest が「重複 path の食い違い」で拒否され、取得層では
+    // 片方のバイト列がもう片方に配られる。同一性は (repo, revision, path) の 3 つ。
+    const manifest = parseManifest(withModel({
+      weights: {
+        net: {
+          f16: { shards: [{ path: "shared/model.safetensors", size: 4, sha256: "a1".repeat(32) }] },
+        },
+        text: {
+          f16: {
+            shards: [
+              {
+                path: "shared/model.safetensors",
+                size: 12,
+                sha256: "b2".repeat(32),
+                repo: "other/stack",
+                revision: COMMIT,
+              },
+            ],
+          },
+        },
+      },
+      quants: { q: { weights: { net: "f16", text: "f16" }, session: {} } },
+    }));
+    assertEquals(manifest.models["m"].weights["net"]["f16"].shards[0].size, 4);
+    assertEquals(manifest.models["m"].weights["text"]["f16"].shards[0].size, 12);
+  });
+
+  await t.step("同一の (repo, revision, path) は 1 本に畳まれる", () => {
+    const manifest = parseManifest(withModel({
+      weights: {
+        net: { f16: { shards: [foreign()], extras: { alias: foreign() } } },
+      },
+    }));
+    const entry = manifest.models["m"].weights["net"]["f16"];
+    assert(entry.shards[0] === entry.extras["alias"], "同一参照が畳まれていない");
+  });
+
+  await t.step("同一の (repo, revision, path) で 3 点セットが食い違えば拒否する", () => {
+    assertThrows(
+      () =>
+        parseManifest(withModel({
+          weights: { net: { f16: { shards: [foreign(), foreign({ size: 99 })] } } },
+        })),
+      ManifestReferenceError,
+    );
+  });
 });

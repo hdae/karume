@@ -572,7 +572,7 @@ Deno.test({
       const x = fill([m, k], XS);
       // MUST: i8a8 と f32 は通る（落とすのは w8a16 の組だけ）
       await runModel(gpu, buffer, { x }, {});
-      await runModel(gpu, buffer, { x }, { linearCompute: "i8a8" });
+      await runModel(gpu, buffer, { x }, { linearCompute: "a8" });
       const error = await assertRejects(
         () => runModel(gpu, buffer, { x }, { linearCompute: "f16" }),
         ExecutionError,

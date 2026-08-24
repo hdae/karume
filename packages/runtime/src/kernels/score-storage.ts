@@ -7,7 +7,7 @@
  *
  * f16 変種は S を **`array<u32>`** で束縛し、`unpack2x16float` / `pack2x16float` で 2 要素ずつ
  * 出し入れする（core WGSL・optional feature 依存ゼロ — ADR 0018 の重み f16 と同じ機序）。
- * したがって `attentionCompute: "i8a8"` が **`shader-f16` を要求しない**という規律（ADR 0030
+ * したがって `attentionCompute: "a8"` が **`shader-f16` を要求しない**という規律（ADR 0030
  * 決定 1）は無傷のまま、i8a8 と S f16 を直交して組める。
  *
  * **違うのは書き側を持つこと**。重み f16 は読み専用だったので `unpack2x16float` が無料だったが、

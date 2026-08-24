@@ -115,14 +115,18 @@ export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
 /**
  * op 族ごとの計算精度ノブ（ADR 0028 / attention の i8a8 は設計 §9.2）。**重み格納の f16
  * （ADR 0018）とは別の軸**で、`"f16"` は共有タイルを f16 に落として内積を回す変種
- * （累積は f32）、`"i8a8"` は活性を per-token i8 へ量子化して整数内積で回す変種を選ぶ。
+ * （累積は f32）、`"a8"` は活性を per-token i8 へ量子化して整数内積で回す変種を選ぶ。
  *
  * MUST: 3 値は**相互排他**（直積ではない）。attention の q/k/v は全て活性で格納軸を持たない
- * ので、「f16 かつ i8a8」という組み合わせは表現する対象がそもそも存在しない。
+ * ので、「f16 かつ a8」という組み合わせは表現する対象がそもそも存在しない。
  * MUST: `"f16"` は `acquireGpu({ shaderF16: true })` を伴う（Session 構築時に fail loudly）。
- * **`"i8a8"` は `shader-f16` を要求しない**（feature ゲートに混ぜないこと）。
+ * **`"a8"` は `shader-f16` を要求しない**（feature ゲートに混ぜないこと）。
+ *
+ * NOTE: 値の綴りは 0.5.0 で `"i8a8"` → `"a8"` へ改名した（ADR 0074 決定 3）— このノブが
+ * 決めているのは**活性の扱いだけ**で、重みの格納形は資産ヘッダが決める。カーネル側の内部
+ * 識別子（`linear-i8a8.ts` / パイプラインキーの `:i8a8:`）は実行変種の名前なので不変。
  */
-export type ComputePrecision = "f32" | "f16" | "i8a8";
+export type ComputePrecision = "f32" | "f16" | "a8";
 
 export type SessionOptions = {
   /** submit の時間予算政策（TDR / watchdog 対策 — ADR 0004）。既定は DEFAULT_SUBMIT_POLICY。 */
@@ -130,7 +134,7 @@ export type SessionOptions = {
   /**
    * linear の実行形（既定 `"f32"` = 従来どおり）。
    *
-   * `"i8a8"` は **整数常駐（i8 / i4）の重みの linear** に効き、活性を per-token i8 へ
+   * `"a8"` は **整数常駐（i8 / i4）の重みの linear** に効き、活性を per-token i8 へ
    * 量子化して整数内積で回す。ノブが指すのは「活性の i8 化 + 整数内積」だけで、**重みの
    * 格納形は別軸** — 格納形で数値契約の違う 2 変種に分かれる:
    * - i8 常駐 → **w8a8**: 縮約全体が 1 つの i32（整数部は丸め 0 回）で、dequant は
@@ -147,7 +151,7 @@ export type SessionOptions = {
    * MUST: 既定は `"f32"` — i8 / i4 / f16 資産を自動で低精度実行にすると既存の PNG sha256 門と
    * E2E tolerance が黙って変わる。opt-in 以外はあり得ない。
    */
-  readonly linearCompute?: "f32" | "i8a8" | "f16";
+  readonly linearCompute?: "f32" | "a8" | "f16";
   /**
    * 融合 attention（ADR 0023 の 3 カーネル）の実行形（既定 `"f32"` = 従来どおり）。
    *
@@ -155,7 +159,7 @@ export type SessionOptions = {
    * （① が書き ②③ が読む — transient が半減する）。`linearCompute` と**別の軸**なのは、
    * 1024px の内訳が attention 46% / linear 42% で片方だけ f16 にしたい場面が実際にあるため。
    *
-   * `"i8a8"` は q / k / v を i8 へ量子化して整数内積で回す変種
+   * `"a8"` は q / k / v を i8 へ量子化して整数内積で回す変種
    * （設計 = docs/research/2026-08-04-attention-a8-design.md）。**現時点の意味論は
    * 「①QK と ③PV が i8a8・②行統計は f32 のまま」**（③ の A 側 = P̃ は scale が 1/127 に
    * 構造縮退するので量子化カーネルを通らず、V だけが Vᵀ 経由の per-column i8 になる）。
@@ -176,7 +180,7 @@ export type SessionOptions = {
    *
    * `"f16"` は S を `array<u32>` に **`pack2x16float` で 2 要素／語**詰める（core WGSL・
    * **`shader-f16` を要求しない** — ADR 0030 決定 1「i8a8 は shader-f16 を要求しない」を
-   * 保ったまま `attentionCompute: "i8a8"` と組める。本命はこの組）。丸めは格納の 1 回だけで、
+   * 保ったまま `attentionCompute: "a8"` と組める。本命はこの組）。丸めは格納の 1 回だけで、
    * 読み側の `unpack2x16float` は厳密。したがって出力は「**S をホストで f16 に丸めた
    * f32 変種**」とビット単位で一致する。
    *

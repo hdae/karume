@@ -1,7 +1,7 @@
 /**
  * 融合 attention ①QK / ③PV の **i8a8 変種**（活性 i8 の**整数内積**）— 設計は
  * docs/research/2026-08-04-attention-a8-design.md §2.1 / §2.2 / §2.3 / §4.1 / §4.2、
- * opt-in は `SessionOptions.attentionCompute: "i8a8"`（既定 `"f32"`）。
+ * opt-in は `SessionOptions.attentionCompute: "a8"`（既定 `"f32"`）。
  *
  * ```
  * ①QK: acc[i32] = Σ_d qq[b,m,d] · kq[b,n,d]          （厳密な整数・丸め 0 回）

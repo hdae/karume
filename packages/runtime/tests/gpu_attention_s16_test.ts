@@ -603,17 +603,17 @@ Deno.test({
 
 Deno.test({
   name:
-    "attentionCompute:'i8a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
+    "attentionCompute:'a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       const shape: AttentionShape = { name: "B2 H3 M65 N68 D20", b: 2, h: 3, m: 65, n: 68, d: 20 };
       const both = await runAttention(gpu, shape, {
-        attentionCompute: "i8a8",
+        attentionCompute: "a8",
         attentionScoreStorage: "f16",
       });
-      const i8a8Only = await runAttention(gpu, shape, { attentionCompute: "i8a8" });
+      const i8a8Only = await runAttention(gpu, shape, { attentionCompute: "a8" });
       // S の丸めが 1 段増えるので値は動く（opt-in が効いていることの数値側の証拠）
       assertDiffers(both.output, i8a8Only.output, "i8a8 × s16");
       // S が半分になっている（i8a8 でも同じ 1 箇所の確保が効く）

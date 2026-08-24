@@ -2,7 +2,7 @@
  * Irodori の実 GPU E2E 門が共有する**読み口**（配布形の資産と full-loop golden）。
  *
  * 門そのものは席ごとに別ファイルへ分かれる（格納 dtype の席は数値パリティ網 =
- * `e2e_irodori_latent_test.ts`・活性量子化の `w8a8` 席は判別帯 + キー census =
+ * `e2e_irodori_latent_test.ts`・活性量子化の `i8-a8` 席は判別帯 + キー census =
  * `e2e_irodori_w8a8_test.ts` — 網の性格が違うので同じ表には乗らない）。共有するのは
  * 「どこから何を読むか」だけで、**何を要求するかは各門が持つ**。
  *
