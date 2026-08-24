@@ -51,7 +51,7 @@ export const IRODORI_PIPELINE_MAJOR = 1;
 // SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
 export const IRODORI_V4_SMALL_CURRENT = {
   repo: "hdae/karume-irodori-v4-small",
-  revision: "522643804979a293ef95c19d901ceea4ddba5fa6",
+  revision: "49b61517f8b69e27dc8e2e4dca030282932ce8ac",
 } as const satisfies HubRepoRef;
 
 const ROOT_KEYS: readonly string[] = [
