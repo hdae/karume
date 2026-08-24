@@ -227,8 +227,11 @@ export const parseMelBasis = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> =>
  * 「この配布形は 1 長でしか動かない」ことが読み手に伝わらない）。
  * MUST: 入力の時間軸が `2·T`・出力が `T` であることまで見る。倍率が抜けた配布形は、`.lab` の
  * 時間が 2 倍に伸びるだけで形は成立する。
+ *
+ * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
  */
-const assertGraph = (
+export const assertGraph = (
   model: KarumeModel,
   config: VowelDetectorPipelineConfig,
 ): string => {

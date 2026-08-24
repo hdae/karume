@@ -161,8 +161,11 @@ const assetBuffer = (
  * MUST: 落とさない。前処理は宣言の寸法へ resize するので、グラフが別の解像度で焼かれていても
  * **ホスト側は最後まで通る**（落ちるのは Session の shape 検査で、そのときには「どちらの数が
  * 正しいのか」が読み手に伝わらない）。base と so400m の資産取り違えはここが唯一の検出器。
+ *
+ * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
  */
-const assertStaticDim = (
+export const assertStaticDim = (
   model: KarumeModel,
   inputName: string,
   axis: number,
@@ -185,8 +188,11 @@ const assertStaticDim = (
  *
  * MUST: 落とさない。`hiddenDim` は前処理にも実行にも使われないので、ずれても埋め込みは
  * 何事もなく出る（読み手が「768 次元だ」と思って 1152 次元を配る形になる）。
+ *
+ * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
  */
-const assertOutputDim = (
+export const assertOutputDim = (
   model: KarumeModel,
   axis: number,
   expected: number,

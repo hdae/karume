@@ -2,7 +2,7 @@
 // 見る（実 GPU の突合は `packages/runtime/tests/e2e_birefnet_test.ts`〈golden 入力〉と
 // `e2e_birefnet_real_test.ts`〈実画像の前処理パリティと判別〉が持つ — 重複させない）。
 //
-// 押さえるのは 3 点:
+// 押さえるのは 4 点:
 //
 // ① `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を取りに行く前**に落とす
 //    （`src/birefnet/pipeline.ts` の `openBirefnetState` が掲げる MUST）。観測の仕掛けは
@@ -12,13 +12,19 @@
 //       後に初めて資産へ触る（上の対偶）
 //    の 2 つで門の順序そのものを縛る。
 //
-// ② 前処理の結線（`preprocessPixelValues`）が `pipelineConfig` の宣言どおりに
+// ② グラフ宣言との突合（`assertStaticDim` / `assertMatteShape`）の**拒否経路**。ここは
+//    `fromAssets` の中では実 GPU と実資産が揃わないと踏めないので、門を直接叩く
+//    （`tests/helpers/stub-model.ts` が宣言だけの `KarumeModel` を組む）。門自身の軸番号や
+//    期待形がずれても、正常系だけを走らせている限り緑のまま通るため、**壊れた宣言を名指しで
+//    落とすこと**を毎回踏む。
+//
+// ③ 前処理の結線（`preprocessPixelValues`）が `pipelineConfig` の宣言どおりに
 //    `resizeRgb8` → `normalizeToNchw` を通す。**参照は Python 正本のフィクスチャ**
 //    （`fixtures/image-preprocess/parity.json`）なので、ここが見るのは「宣言の 4 欄が正しい
 //    引数の位置へ届いているか」だけ。非正方のケースを使うのは、`imageWidth` / `imageHeight` の
 //    取り違えが正方形では**原理的に検出できない**ため。
 //
-// ③ 後処理（`matteFromLogits`）の**段の順序と量子化**。sigmoid → resize → 8bit の順序は
+// ④ 後処理（`matteFromLogits`）の**段の順序と量子化**。sigmoid → resize → 8bit の順序は
 //    上流の逐語で、入れ替えても shape も値域も合ったまま通る（順序違いは α が数十の差で
 //    ずれるだけ）。順序が入れ替わったら落ちる非対称なケースを置く。
 
@@ -26,11 +32,14 @@ import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows }
 import { parseManifest } from "@karume/hub";
 import { parseBirefnetPipelineConfig } from "../src/birefnet/config.ts";
 import {
+  assertMatteShape,
+  assertStaticDim,
   BirefnetPipeline,
   matteFromLogits,
   preprocessPixelValues,
 } from "../src/birefnet/pipeline.ts";
 import { resizePlaneF32, type Rgb8Image } from "../src/image/preprocess.ts";
+import { stubModel } from "./helpers/stub-model.ts";
 
 const FILE = {
   path: "hr/matte/model.f32.safetensors",
@@ -137,6 +146,88 @@ Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触
     () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "資産 'matte' が無い",
+  );
+});
+
+// ---- グラフ宣言との突合（拒否経路）------------------------------------------
+
+/** 実配布形（hr）と同じ宣言。`patch` で 1 点だけ壊す。 */
+const matteGraph = (
+  patch: {
+    readonly inputShape?: readonly (number | string)[];
+    readonly outputShape?: readonly (number | string)[];
+  } = {},
+) =>
+  stubModel({
+    inputs: [{ name: "pixel_values", shape: patch.inputShape ?? [1, 3, 1024, 1024] }],
+    outputs: ["matte"],
+    values: { matte: patch.outputShape ?? [1, 1, 1024, 1024] },
+  });
+
+const birefnetConfig = parseBirefnetPipelineConfig(PIPELINE_CONFIG);
+
+Deno.test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは名指しで落ちる", () => {
+  // 2048² の系列を 1024² の席へ置いた形。前処理は宣言の寸法へ resize するのでホスト側は
+  // 最後まで通り、落ちるのは Session の shape 検査 = どちらが正しいか読めない。
+  assertStaticDim(matteGraph(), "pixel_values", 3, birefnetConfig.imageWidth, "imageWidth");
+  const error = assertThrows(
+    () =>
+      assertStaticDim(
+        matteGraph({ inputShape: [1, 3, 2048, 2048] }),
+        "pixel_values",
+        3,
+        birefnetConfig.imageWidth,
+        "imageWidth",
+      ),
+    Error,
+    "birefnet: imageWidth — グラフ入力 'pixel_values' の軸 3 が 2048",
+  );
+  assert(error.message.includes("pipelineConfig は 1024"), error.message);
+});
+
+Deno.test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
+  assertThrows(
+    () => assertStaticDim(matteGraph(), "pixel", 3, birefnetConfig.imageWidth, "imageWidth"),
+    Error,
+    "birefnet: グラフ入力 'pixel' が無い（imageWidth）",
+  );
+});
+
+Deno.test("assertMatteShape: multi-scale で焼かれた出力は要素数でなく形で落ちる", () => {
+  // `[1, 3, S, S]` は中間予測込みの export。要素数だけを見る門だと**別の値を α として**通る。
+  assertMatteShape(matteGraph(), birefnetConfig, "マットの形");
+  assertThrows(
+    () =>
+      assertMatteShape(
+        matteGraph({ outputShape: [1, 3, 1024, 1024] }),
+        birefnetConfig,
+        "マットの形",
+      ),
+    Error,
+    "期待は [1, 1, 1024, 1024]",
+  );
+});
+
+Deno.test("assertMatteShape: 先頭が一致する短い宣言も落とす（軸ごとの比較だけでは通る）", () => {
+  // `[1, 1, 1024]` は宣言されている全軸が期待と一致するので、`shape.length` を見ない門は
+  // 素通しする（階数まで見る理由そのもの）。
+  assertThrows(
+    () => assertMatteShape(matteGraph({ outputShape: [1, 1, 1024] }), birefnetConfig, "マットの形"),
+    Error,
+    "グラフ出力 'matte' の形が [1, 1, 1024]",
+  );
+});
+
+Deno.test("assertMatteShape: 出力名の宣言が values に無ければ落とす", () => {
+  const model = stubModel({
+    inputs: [{ name: "pixel_values", shape: [1, 3, 1024, 1024] }],
+    outputs: ["matte"],
+    values: {},
+  });
+  assertThrows(
+    () => assertMatteShape(model, birefnetConfig, "マットの形"),
+    Error,
+    "birefnet: グラフ出力 'matte' の宣言が無い（マットの形）",
   );
 });
 

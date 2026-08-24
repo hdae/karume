@@ -195,8 +195,11 @@ const assetBuffer = (
  * **ホスト側は最後まで通る**（落ちるのは Session の shape 検査で、そのときには「どちらの数が
  * 正しいのか」が読み手に伝わらない）。解像度違いの系列（1024² / 2048²）の資産取り違えは
  * ここが唯一の検出器。
+ *
+ * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
  */
-const assertStaticDim = (
+export const assertStaticDim = (
   model: KarumeModel,
   inputName: string,
   axis: number,
@@ -220,8 +223,11 @@ const assertStaticDim = (
  * MUST: 落とさない。後段は「要素数が H×W」しか見ない形にもできるが、それだと multi-scale
  * supervision の中間予測込みで焼かれたグラフ（`[1, 3, S, S]` 相当）が**別の値を α として**
  * 通り抜ける。
+ *
+ * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
  */
-const assertMatteShape = (
+export const assertMatteShape = (
   model: KarumeModel,
   config: BirefnetPipelineConfig,
   where: string,

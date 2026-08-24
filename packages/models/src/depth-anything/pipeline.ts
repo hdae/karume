@@ -227,8 +227,11 @@ const assetBuffer = (
  * 正しいのか」が読み手に伝わらない）。DINOv2 の位置埋め込みはパッチ数に紐づいているので、
  * 事前学習解像度でないグラフはそもそも焼けない（`patch_depth_anything` の ②）— つまりここで
  * 落ちるのは常に**資産の取り違え**である。
+ *
+ * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
  */
-const assertStaticDim = (
+export const assertStaticDim = (
   model: KarumeModel,
   inputName: string,
   axis: number,
@@ -255,8 +258,11 @@ const assertStaticDim = (
  * 持ったまま焼かれたグラフ（`[1, 1, S, S]`）や、中間段まで出す別 export が**別の値を深度
  * として**通り抜ける。階数まで見るのは、`[1, S, S]` と `[1, 1, S, S]` が要素数では区別
  * できないため。
+ *
+ * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
  */
-const assertDepthShape = (
+export const assertDepthShape = (
   model: KarumeModel,
   config: DepthAnythingPipelineConfig,
   where: string,

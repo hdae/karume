@@ -88,17 +88,25 @@ Deno.test({
     const frequencies = timestepFrequencies(width);
     let worst = 0;
     let where = "";
+    let nonFinite = 0;
     for (let step = 0; step < steps; step += 1) {
       const row = timestepEmbedding(t.data[step], frequencies);
       assertEquals(row.length, width, `step ${step} の幅`);
       for (let column = 0; column < width; column += 1) {
-        const diff = Math.abs(row[column] - table.data[step * width + column]);
+        const golden = table.data[step * width + column];
+        if (!Number.isFinite(row[column]) || !Number.isFinite(golden)) {
+          nonFinite += 1;
+          continue;
+        }
+        const diff = Math.abs(row[column] - golden);
         if (diff > worst) {
           worst = diff;
           where = `step ${step}（t=${t.data[step]}）列 ${column}`;
         }
       }
     }
+    // MUST: NaN / ±Inf は不合格。素朴な差分判定だと NaN が「差 0」に化けて通る。
+    assertEquals(nonFinite, 0, "t_embed に非有限の標本");
     assert(
       worst <= T_EMBED_ATOL,
       `t_embed の最大絶対差 ${worst.toExponential(4)} が atol ${T_EMBED_ATOL} を超えた（${where}）`,

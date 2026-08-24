@@ -221,13 +221,20 @@ for (const series of SERIES) {
         assertEquals(got.length, expected.length, `${entry.name}: pixel_values の長さ`);
         let maxAbs = 0;
         let worst = 0;
+        let nonFinite = 0;
         for (let index = 0; index < got.length; index += 1) {
+          if (!Number.isFinite(got[index]) || !Number.isFinite(expected[index])) {
+            nonFinite += 1;
+            continue;
+          }
           const delta = Math.abs(got[index] - expected[index]);
           if (delta > maxAbs) {
             maxAbs = delta;
             worst = index;
           }
         }
+        // MUST: NaN / ±Inf は不合格。素朴な差分判定だと NaN が「差 0」に化けて通る。
+        assertEquals(nonFinite, 0, `${entry.name}: pixel_values に非有限の標本`);
         assert(
           maxAbs <= PIXEL_ATOL,
           `${series} / ${entry.name}: pixel_values の maxAbs=${maxAbs}` +

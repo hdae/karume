@@ -164,14 +164,22 @@ Deno.test("DebertaTokenizer: NFKC で 1 文字が複数トークンへ割れる�
 });
 
 Deno.test("DebertaTokenizer: clean 表の除去・スペース化が効く", () => {
+  // U+0000 を除去、U+200B（ZWSP）を空白へ。**スペース化に NBSP を使わない**のは、後段の
+  // 分割 `/\s+/` が NBSP を最初から空白として拾うため — spaced 規則を丸ごと落としても
+  // 同じ答えが出てしまい、門が恒真になる（ZWSP は `/\s/` が拾わない）。
+  const vocabText = ["[PAD]", "[CLS]", "[SEP]", "[UNK]", "a", "b"].join("\n");
+  const special = { clsId: 1, sepId: 2, unkId: 3 };
   const tokenizer = DebertaTokenizer.fromVocabText(
-    ["[PAD]", "[CLS]", "[SEP]", "[UNK]", "a", "b"].join("\n"),
-    // U+0000 を除去、U+00A0（NBSP）を空白へ。
-    { removed: [[0, 0]], spaced: [[0x00a0, 0x00a0]] },
-    { clsId: 1, sepId: 2, unkId: 3 },
+    vocabText,
+    { removed: [[0, 0]], spaced: [[0x200b, 0x200b]] },
+    special,
   );
-  assertEquals(tokenizer.tokenize("a b"), ["a", "b"]);
-  assertEquals(tokenizer.tokenize("a b"), ["a", "b"]);
+  assertEquals(tokenizer.tokenize("a\u0000b"), ["a", "b"]);
+  assertEquals(tokenizer.tokenize("a\u200bb"), ["a", "b"]);
+  // 対: clean 表が空なら同じ入力が割れない（上の 2 本が表そのものを踏んでいることの実証）。
+  const bare = DebertaTokenizer.fromVocabText(vocabText, { removed: [], spaced: [] }, special);
+  assertEquals(bare.tokenize("a\u0000b"), ["a", "\u0000", "b"]);
+  assertEquals(bare.tokenize("a\u200bb"), ["a", "\u200b", "b"]);
 });
 
 Deno.test("DebertaTokenizer: CRLF 混じりの語彙でも末尾 CR が残らない", () => {

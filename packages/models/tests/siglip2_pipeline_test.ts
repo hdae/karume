@@ -1,7 +1,7 @@
 // `Siglip2Pipeline` の**構築ガード**と**前処理の結線**。GPU も実資産も要らない範囲だけを見る
 // （実 GPU の突合は `packages/runtime/tests/e2e_siglip2_test.ts` が持つ — 重複させない）。
 //
-// 押さえるのは 2 点:
+// 押さえるのは 3 点:
 //
 // ① `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を取りに行く前**に落とす
 //    （`src/siglip2/pipeline.ts` の `openSiglip2State` が掲げる MUST）。観測の仕掛けは
@@ -9,10 +9,15 @@
 //     - 契約違反ケースが「その違反の文言」で落ちる = 資産解析より前に落ちている
 //     - 正しい manifest + 空 assets が `資産 'vision' が無い` で落ちる = 契約検査が全部済んだ
 //       後に初めて資産へ触る（上の対偶）
-//    の 2 つで門の順序そのものを縛る。グラフ宣言との突合はさらに後段なので、合成 IR コンテナを
-//    組む器（`tests/helpers/` に無い）が要る — ここでは扱わない。
+//    の 2 つで門の順序そのものを縛る。
 //
-// ② 前処理の結線（`preprocessPixelValues`）が `pipelineConfig` の宣言どおりに
+// ② グラフ宣言との突合（`assertStaticDim` / `assertOutputDim`）の**拒否経路**。ここは
+//    `fromAssets` の中では実 GPU と実資産が揃わないと踏めないので、門を直接叩く
+//    （`tests/helpers/stub-model.ts` が宣言だけの `KarumeModel` を組む）。門自身の綴りや
+//    軸番号がずれても、正常系だけを走らせている限り緑のまま通るため、**壊れた宣言を名指しで
+//    落とすこと**を毎回踏む。
+//
+// ③ 前処理の結線（`preprocessPixelValues`）が `pipelineConfig` の宣言どおりに
 //    `resizeRgb8` → `normalizeToNchw` を通す。**参照は Python 正本のフィクスチャ**
 //    （`fixtures/image-preprocess/parity.json` — 前処理層そのものの門は
 //    `image_preprocess_test.ts`）なので、ここが見るのは「宣言の 6 欄が正しい引数の位置へ
@@ -22,8 +27,14 @@
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { parseSiglip2PipelineConfig } from "../src/siglip2/config.ts";
-import { preprocessPixelValues, Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
+import {
+  assertOutputDim,
+  assertStaticDim,
+  preprocessPixelValues,
+  Siglip2Pipeline,
+} from "../src/siglip2/pipeline.ts";
 import type { Rgb8Image } from "../src/image/preprocess.ts";
+import { stubModel } from "./helpers/stub-model.ts";
 
 const FILE = {
   path: "vision/model.f32.safetensors",
@@ -173,6 +184,69 @@ Deno.test("parseSiglip2PipelineConfig: mean / std の要素数が 3 でなけれ
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageMean: [0.5, 0.5] }),
     Error,
     "pipelineConfig.imageMean: 長さ 3 の配列でない",
+  );
+});
+
+// ---- グラフ宣言との突合（拒否経路）------------------------------------------
+
+/** 実配布形（base）と同じ宣言。`patch` で 1 点だけ壊す。 */
+const visionGraph = (
+  patch: { readonly inputShape?: readonly (number | string)[]; readonly outputShape?: number[] } =
+    {},
+) =>
+  stubModel({
+    inputs: [{ name: "pixel_values", shape: patch.inputShape ?? [1, 3, 224, 224] }],
+    outputs: ["pooler_output"],
+    values: { pooler_output: patch.outputShape ?? [1, 768] },
+  });
+
+Deno.test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは名指しで落ちる", () => {
+  // so400m（384²）の資産を base（224²）の席へ置いた形。前処理は宣言の寸法へ resize するので
+  // ホスト側は最後まで通り、落ちるのは Session の shape 検査 = どちらが正しいか読めない。
+  assertStaticDim(visionGraph(), "pixel_values", 2, 224, "imageHeight");
+  const error = assertThrows(
+    () =>
+      assertStaticDim(
+        visionGraph({ inputShape: [1, 3, 384, 384] }),
+        "pixel_values",
+        2,
+        224,
+        "imageHeight",
+      ),
+    Error,
+    "siglip2: imageHeight — グラフ入力 'pixel_values' の軸 2 が 384",
+  );
+  assert(error.message.includes("pipelineConfig は 224"), error.message);
+});
+
+Deno.test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
+  assertThrows(
+    () => assertStaticDim(visionGraph(), "pixel", 2, 224, "imageHeight"),
+    Error,
+    "siglip2: グラフ入力 'pixel' が無い（imageHeight）",
+  );
+});
+
+Deno.test("assertOutputDim: 埋め込み次元の宣言違いは名指しで落ちる", () => {
+  // hiddenDim は前処理にも実行にも使われないので、ずれても埋め込みは何事もなく出る。
+  assertOutputDim(visionGraph(), 1, 768, "hiddenDim");
+  assertThrows(
+    () => assertOutputDim(visionGraph({ outputShape: [1, 1152] }), 1, 768, "hiddenDim"),
+    Error,
+    "siglip2: hiddenDim — グラフ出力 'pooler_output' の軸 1 が 1152",
+  );
+});
+
+Deno.test("assertOutputDim: 出力名の宣言が values に無ければ落とす", () => {
+  const model = stubModel({
+    inputs: [{ name: "pixel_values", shape: [1, 3, 224, 224] }],
+    outputs: ["pooler_output"],
+    values: {},
+  });
+  assertThrows(
+    () => assertOutputDim(model, 1, 768, "hiddenDim"),
+    Error,
+    "siglip2: グラフ出力 'pooler_output' の宣言が無い（hiddenDim）",
   );
 });
 

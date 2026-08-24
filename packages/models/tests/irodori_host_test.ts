@@ -147,11 +147,12 @@ Deno.test("tSchedule: 長さ steps+1・始点 0.999・終端 0・狭義単調減
 
 Deno.test("tSchedule: CFG の窓 [0.5, 1.0] に入るのは 40 step 中 20 本", () => {
   // これが cond 40 + uncond 20×(有効条件数) = 100 / 60 forward の出どころ（meta.json）。
+  // 掛け算の側（`40 + 20 * 3 === 100`）はここには置かない — リテラルどうしの恒真で、
+  // コードを 1 行も呼ばない。実 forward 数を縛るのは `e2e_irodori_latent_test.ts` の
+  // `latent.forwards` と golden の突合。
   const schedule = tSchedule(40, 0.999);
   const inWindow = [...schedule.slice(0, 40)].filter((t) => t >= 0.5 && t <= 1);
   assertEquals(inWindow.length, 20);
-  assertEquals(40 + 20 * 3, 100, "full ケース（text/speaker/caption の 3 本）");
-  assertEquals(40 + 20 * 1, 60, "no-ref ケース（text だけ）");
 });
 
 // ---- CFG 合成と Euler 更新 -----------------------------------------------

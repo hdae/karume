@@ -108,7 +108,14 @@ export const readCase = async (
   };
 };
 
-/** 全要素の最大絶対差と、その位置（差分の報告用）。 */
+/**
+ * 全要素の最大絶対差と、その位置（差分の報告用）。
+ *
+ * MUST: NaN / ±Inf は数えて落とす。`difference > maxAbs` は NaN で常に偽なので、素朴に書くと
+ * **全要素 NaN の出力が maxAbs 0 として tolerance 門を素通りする**（この戻り値だけを見る門が
+ * `e2e_irodori_latent_test.ts` / `e2e_irodori_w8a8_test.ts` にある）。対照は
+ * `e2e_depth_anything_real_test.ts` の pixel_values 突合。
+ */
 export const worstDifference = (
   actual: Float32Array,
   expected: Float32Array,
@@ -118,12 +125,25 @@ export const worstDifference = (
   }
   let maxAbs = 0;
   let at = 0;
+  let nonFinite = 0;
+  let firstNonFinite = -1;
   for (let index = 0; index < actual.length; index += 1) {
+    if (!Number.isFinite(actual[index]) || !Number.isFinite(expected[index])) {
+      nonFinite += 1;
+      if (firstNonFinite < 0) firstNonFinite = index;
+      continue;
+    }
     const difference = Math.abs(actual[index] - expected[index]);
     if (difference > maxAbs) {
       maxAbs = difference;
       at = index;
     }
+  }
+  if (nonFinite > 0) {
+    throw new Error(
+      `非有限の標本が ${nonFinite} 個ある（最初は ${firstNonFinite}: ` +
+        `実測 ${actual[firstNonFinite]} / golden ${expected[firstNonFinite]}）`,
+    );
   }
   return { maxAbs, at };
 };

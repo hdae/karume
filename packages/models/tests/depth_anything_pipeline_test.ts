@@ -2,7 +2,7 @@
 // を見る（実 GPU の突合は `packages/runtime/tests/e2e_depth_anything_test.ts`〈golden 入力〉と
 // `e2e_depth_anything_real_test.ts`〈実画像の前処理パリティと判別〉が持つ — 重複させない）。
 //
-// 押さえるのは 3 点:
+// 押さえるのは 4 点:
 //
 // ① `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を取りに行く前**に落とす
 //    （`src/depth-anything/pipeline.ts` の `openDepthAnythingState` が掲げる MUST）。観測の
@@ -12,7 +12,13 @@
 //       後に初めて資産へ触る（上の対偶）
 //    の 2 つで門の順序そのものを縛る。
 //
-// ② 前処理の結線（`preprocessPixelValues`）が `pipelineConfig` の宣言どおりに
+// ② グラフ宣言との突合（`assertStaticDim` / `assertDepthShape`）の**拒否経路**。ここは
+//    `fromAssets` の中では実 GPU と実資産が揃わないと踏めないので、門を直接叩く
+//    （`tests/helpers/stub-model.ts` が宣言だけの `KarumeModel` を組む）。門自身の軸番号や
+//    期待形がずれても、正常系だけを走らせている限り緑のまま通るため、**壊れた宣言を名指しで
+//    落とすこと**を毎回踏む。
+//
+// ③ 前処理の結線（`preprocessPixelValues`）が `pipelineConfig` の宣言どおりに
 //    `resizeRgb8`（**bicubic**）→ `normalizeToNchw` を通す。**Python 正本のフィクスチャは
 //    bicubic 枝にまだ無い**（bilinear 枝の `fixtures/image-preprocess/parity.json` は
 //    フィルタが違うので参照にならない）ので、ここは資産不要で**落ちうる**不変条件だけを見る:
@@ -22,19 +28,22 @@
 //    bicubic そのものの正しさは、①`image_preprocess_test.ts` のカーネル署名テストと
 //    ②実資産のある環境で毎回 `DPTImageProcessor` と突き合わせる E2E が持つ。
 //
-// ③ 後処理（`resampleDepth`）が**値に触らない**こと。深度を `[0, 1]` へ畳まない決定
+// ④ 後処理（`resampleDepth`）が**値に触らない**こと。深度を `[0, 1]` へ畳まない決定
 //    （`pipeline.ts` のモジュール doc）は、畳んでも shape も非負性も合ったまま通るので、
 //    「畳んだら落ちる」形の検査を置く。
 
-import { assert, assertAlmostEquals, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { parseDepthAnythingPipelineConfig } from "../src/depth-anything/config.ts";
 import {
+  assertDepthShape,
+  assertStaticDim,
   DepthAnythingPipeline,
   preprocessPixelValues,
   resampleDepth,
 } from "../src/depth-anything/pipeline.ts";
 import { normalizeToNchw, resizeRgb8, type Rgb8Image } from "../src/image/preprocess.ts";
+import { stubModel } from "./helpers/stub-model.ts";
 
 const FILE = {
   path: "small/depth/model.f32.safetensors",
@@ -141,6 +150,82 @@ Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "資産 'depth' が無い",
+  );
+});
+
+// ---- グラフ宣言との突合（拒否経路）------------------------------------------
+
+/** 実配布形（small）と同じ宣言。`patch` で 1 点だけ壊す。 */
+const depthGraph = (
+  patch: {
+    readonly inputShape?: readonly (number | string)[];
+    readonly outputShape?: readonly (number | string)[];
+  } = {},
+) =>
+  stubModel({
+    inputs: [{ name: "pixel_values", shape: patch.inputShape ?? [1, 3, 518, 518] }],
+    outputs: ["depth"],
+    values: { depth: patch.outputShape ?? [1, 518, 518] },
+  });
+
+const depthConfig = parseDepthAnythingPipelineConfig(PIPELINE_CONFIG);
+
+Deno.test("assertStaticDim: 宣言どおりのグラフは通り、事前学習解像度違いは名指しで落ちる", () => {
+  // DINOv2 の位置埋め込みはパッチ数に紐づくので、ここで落ちるのは常に**資産の取り違え**。
+  assertStaticDim(depthGraph(), "pixel_values", 2, depthConfig.imageHeight, "imageHeight");
+  const error = assertThrows(
+    () =>
+      assertStaticDim(
+        depthGraph({ inputShape: [1, 3, 384, 384] }),
+        "pixel_values",
+        2,
+        depthConfig.imageHeight,
+        "imageHeight",
+      ),
+    Error,
+    "depth-anything: imageHeight — グラフ入力 'pixel_values' の軸 2 が 384",
+  );
+  assert(error.message.includes("pipelineConfig は 518"), error.message);
+});
+
+Deno.test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
+  assertThrows(
+    () => assertStaticDim(depthGraph(), "pixel", 2, depthConfig.imageHeight, "imageHeight"),
+    Error,
+    "depth-anything: グラフ入力 'pixel' が無い（imageHeight）",
+  );
+});
+
+Deno.test("assertDepthShape: 宣言どおりなら通り、チャネル軸を持ったままの出力は落ちる", () => {
+  // `[1, 1, S, S]` は中間段まで出す別 export の形で、要素数では `[1, S, S]` と区別できない。
+  assertDepthShape(depthGraph(), depthConfig, "深度地図の形");
+  assertThrows(
+    () =>
+      assertDepthShape(depthGraph({ outputShape: [1, 1, 518, 518] }), depthConfig, "深度地図の形"),
+    Error,
+    "期待は [1, 518, 518]",
+  );
+});
+
+Deno.test("assertDepthShape: 先頭が一致する短い宣言も落とす（軸ごとの比較だけでは通る）", () => {
+  // `[1, 518]` は宣言されている全軸が期待と一致するので、`shape.length` を見ない門は素通しする。
+  assertThrows(
+    () => assertDepthShape(depthGraph({ outputShape: [1, 518] }), depthConfig, "深度地図の形"),
+    Error,
+    "グラフ出力 'depth' の形が [1, 518]",
+  );
+});
+
+Deno.test("assertDepthShape: 出力名の宣言が values に無ければ落とす", () => {
+  const model = stubModel({
+    inputs: [{ name: "pixel_values", shape: [1, 3, 518, 518] }],
+    outputs: ["depth"],
+    values: {},
+  });
+  assertThrows(
+    () => assertDepthShape(model, depthConfig, "深度地図の形"),
+    Error,
+    "depth-anything: グラフ出力 'depth' の宣言が無い（深度地図の形）",
   );
 });
 

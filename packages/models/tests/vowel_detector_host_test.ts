@@ -120,15 +120,24 @@ Deno.test("特徴パリティ: 同じ波形から Python と同じ 83 次元が�
   assertEquals(data.length, frames * FEATURE_DIM);
   let worst = 0;
   let worstAt = "";
+  let nonFinite = 0;
   for (let frame = 0; frame < frames; frame += 1) {
     for (let dim = 0; dim < FEATURE_DIM; dim += 1) {
-      const diff = Math.abs(data[frame * FEATURE_DIM + dim] - fixture.features[frame][dim]);
+      const got = data[frame * FEATURE_DIM + dim];
+      const golden = fixture.features[frame][dim];
+      if (!Number.isFinite(got) || !Number.isFinite(golden)) {
+        nonFinite += 1;
+        continue;
+      }
+      const diff = Math.abs(got - golden);
       if (diff > worst) {
         worst = diff;
         worstAt = `frame ${frame} / dim ${dim}`;
       }
     }
   }
+  // MUST: NaN / ±Inf は不合格。素朴な差分判定だと NaN が「差 0」に化けて通る。
+  assertEquals(nonFinite, 0, "特徴に非有限の標本");
   assert(worst <= FEATURE_ATOL, `特徴の max abs diff ${worst.toExponential(3)}（${worstAt}）`);
 });
 

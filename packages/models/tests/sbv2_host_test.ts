@@ -12,9 +12,9 @@ import { durationsToFrames } from "../src/sbv2/host/duration.ts";
 import { buildZp } from "../src/sbv2/host/latent.ts";
 import { Randn } from "../src/sbv2/host/random.ts";
 import { encodeWav } from "../src/audio/wav.ts";
-// dump の書き出しは**開発用の契約**（torch 参照へ渡す運搬形式）なので example 側に置いてある。
-// パッケージの公開面には出ないが、梱包が閉じていること自体はここで固定する。
-import { writeSafetensors } from "../../../examples/sbv2/host/safetensors-write.ts";
+// dump の書き出しは**開発用の契約**（torch 参照へ渡す運搬形式）なのでテスト側ヘルパに置いて
+// ある。パッケージの公開面には出ないが、梱包が閉じていること自体はここで固定する。
+import { writeSafetensors } from "./helpers/safetensors-write.ts";
 
 /**
  * `logw = log(w)` の逆算（テストが期待フレーム数を式ではなく値で書けるようにする）。

@@ -4,7 +4,7 @@
 // 持つ — 重複させない。ホスト層の Python 正本とのパリティは
 // `packages/models/tests/vowel_detector_host_test.ts`）。
 //
-// 押さえるのは 4 点:
+// 押さえるのは 5 点:
 //
 // ① `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を取りに行く前**に落とす
 //    （`src/vowel-detector/pipeline.ts` の `openVowelDetectorState` が掲げる MUST）。観測の
@@ -14,15 +14,20 @@
 //       済んだ後に初めて資産へ触る（上の対偶）
 //    の 2 つで門の順序そのものを縛る。
 //
-// ② `pipelineConfig` の**宣言 3 欄**（sampleRate / featureDim / classes）は受理集合が 1 値
+// ② グラフ宣言との突合（`assertGraph`）の**拒否経路**。`fromAssets` の中では実資産が
+//    揃わないと踏めないので、門を直接叩く（`tests/helpers/stub-model.ts` が宣言だけの
+//    `KarumeModel` を組む）。長さを固定して焼いた古い形は**入出力の名前も階数も同じ**なので、
+//    門の綴りが `format/dims.ts` の正準表記からずれても正常系だけなら緑のまま通る。
+//
+// ③ `pipelineConfig` の**宣言 3 欄**（sampleRate / featureDim / classes）は受理集合が 1 値
 //    きりで、外れた配布形はパース時に落ちる。とくに `classes` は**並びが id** なので、
 //    置換された宣言が通ると `.lab` は成立したままラベルだけが入れ替わる。
 //
-// ③ **運用上限**（`assertFrameLimit`）— 上限超過は fail loudly。ここは「黙って切り詰め
+// ④ **運用上限**（`assertFrameLimit`）— 上限超過は fail loudly。ここは「黙って切り詰め
 //    ない」という配布形の約束そのもので、境界（ちょうどの長さ・1 フレーム超過）を名指しで
 //    踏む。上限は配布形の宣言なので、TS 側に定数を持たない（`config.ts` の MUST）。
 //
-// ④ **mel 基底資産**（`parseMelBasis`）— テンソル名・dtype・形の 3 つを見る。基底がずれても
+// ⑤ **mel 基底資産**（`parseMelBasis`）— テンソル名・dtype・形の 3 つを見る。基底がずれても
 //    特徴は「それらしい別の値」になるだけで、shape も値域も合ったまま最後まで通る。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -33,12 +38,14 @@ import {
 } from "../src/vowel-detector/config.ts";
 import {
   assertFrameLimit,
+  assertGraph,
   parseMelBasis,
   VowelDetectorPipeline,
 } from "../src/vowel-detector/pipeline.ts";
 import { FEATURE_DIM, MEL_BINS, N_MELS, SAMPLE_RATE } from "../src/vowel-detector/features.ts";
 import { LIPSYNC_CLASSES } from "../src/vowel-detector/postprocess.ts";
-import { writeSafetensors } from "../../../examples/sbv2/host/safetensors-write.ts";
+import { writeSafetensors } from "./helpers/safetensors-write.ts";
+import { type StubDim, stubModel } from "./helpers/stub-model.ts";
 
 /** 配布形が宣言する運用上限（`karume/dist.py` の `VOWEL_DETECTOR_MAX_FRAMES` と同じ数）。 */
 const MAX_FRAMES = 60_000;
@@ -133,6 +140,77 @@ Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "資産 'crnn' が無い",
+  );
+});
+
+// ---- グラフ宣言との突合（拒否経路）------------------------------------------
+
+/** 実配布形と同じ pipelineConfig（この節は宣言の突合だけを見る）。 */
+const graphConfig = parseVowelDetectorPipelineConfig(PIPELINE_CONFIG);
+
+/** 記号長 1 グラフ（ADR 0056 / 0057）の宣言。`patch` で 1 点だけ壊す。 */
+const crnnGraph = (
+  patch: {
+    readonly symbols?: readonly string[];
+    readonly inputName?: string;
+    readonly inputShape?: readonly StubDim[];
+    readonly outputShape?: readonly StubDim[];
+  } = {},
+) =>
+  stubModel({
+    symbols: patch.symbols ?? ["T"],
+    inputs: [{
+      name: patch.inputName ?? "features",
+      shape: patch.inputShape ?? [1, "2T", FEATURE_DIM],
+    }],
+    outputs: ["logits"],
+    values: { logits: patch.outputShape ?? [1, "T", LIPSYNC_CLASSES.length] },
+  });
+
+Deno.test("assertGraph: 記号長で焼かれたグラフは時間軸の記号名を返す", () => {
+  assertEquals(assertGraph(crnnGraph(), graphConfig), "T");
+});
+
+Deno.test("assertGraph: 長さを固定して焼いた古い形は記号次元で落ちる", () => {
+  // 入出力の名前も階数も同じなので、同じ席に置かれても構築は通ってしまう形。
+  assertThrows(
+    () =>
+      assertGraph(
+        crnnGraph({
+          symbols: [],
+          inputShape: [1, 2000, FEATURE_DIM],
+          outputShape: [1, 1000, LIPSYNC_CLASSES.length],
+        }),
+        graphConfig,
+      ),
+    Error,
+    "VowelDetectorPipeline: グラフの記号次元が []",
+  );
+});
+
+Deno.test("assertGraph: 入力の時間軸から 2 倍の係数が抜けたら落とす", () => {
+  // 係数が抜けた配布形は `.lab` の時間が 2 倍に伸びるだけで、形は成立する。
+  assertThrows(
+    () => assertGraph(crnnGraph({ inputShape: [1, "T", FEATURE_DIM] }), graphConfig),
+    Error,
+    "VowelDetectorPipeline: グラフ入力の形が [1, T, 83]、期待は [1, 2T, 83]",
+  );
+});
+
+Deno.test("assertGraph: 入力名が features でなければ落とす", () => {
+  assertThrows(
+    () => assertGraph(crnnGraph({ inputName: "input" }), graphConfig),
+    Error,
+    "VowelDetectorPipeline: グラフ入力が 'input'",
+  );
+});
+
+Deno.test("assertGraph: 出力のクラス数が宣言と違えば落とす", () => {
+  // クラス数がずれると `.lab` は成立したままラベルの割り当てだけが崩れる。
+  assertThrows(
+    () => assertGraph(crnnGraph({ outputShape: [1, "T", 5] }), graphConfig),
+    Error,
+    "VowelDetectorPipeline: グラフ出力の形が [1, T, 5]",
   );
 });
 
