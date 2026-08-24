@@ -120,10 +120,26 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
+/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
+const fileExists = (url: URL): boolean => {
+  try {
+    return Deno.statSync(url).isFile;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+};
+
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
 const CASES = discoverCases(SERIES_ROOT);
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
 const AVAILABLE = CASES.length > 0;
+/**
+ * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
+ * io が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、`ignore: !AVAILABLE` だと
+ * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+ */
+const ANY_PRESENT = AVAILABLE || fileExists(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!AVAILABLE) {
   console.warn(
@@ -201,12 +217,12 @@ const assertGqaForm = (model: ReturnType<typeof openModel>): number => {
 
 Deno.test({
   name: "MiniCPM5 資産: 期待するケースとモデル本体が揃っている",
-  // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-  ignore: !AVAILABLE,
+  // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
+  //（モデルだけ残って golden が全滅した欠損も拾う — `ANY_PRESENT` の JSDoc）。
+  ignore: !ANY_PRESENT,
   fn: () => {
     assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
-    const model = new URL(MODEL_FILE, SERIES_ROOT);
-    assert(Deno.statSync(model).isFile, `${MODEL_FILE} が無い`);
+    assert(fileExists(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
   },
 });
 

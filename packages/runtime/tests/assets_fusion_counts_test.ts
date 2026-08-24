@@ -72,7 +72,21 @@ const readAnimaGraph = (relative: string): Promise<IrGraph> =>
 const readIrodoriGraph = (name: string): Promise<IrGraph> =>
   readIrGraph(new URL(`${name}/model.f32.safetensors`, IRODORI_DIR));
 
-const exists = (url: URL): Promise<boolean> => Deno.stat(url).then(() => true).catch(() => false);
+/**
+ * 資産の有無。
+ *
+ * MUST: NotFound 以外は伝播させる — 全 I/O エラーを「未生成」に丸めると、資産ルートの
+ * マウント異常（EIO 等）が SKIP に化けて、実行されていない検証が静かに緑になる。
+ */
+const exists = async (url: URL): Promise<boolean> => {
+  try {
+    await Deno.stat(url);
+    return true;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+};
 
 const ASSETS_AVAILABLE = await exists(new URL("transformer/", ASSETS_DIR));
 if (!ASSETS_AVAILABLE) {

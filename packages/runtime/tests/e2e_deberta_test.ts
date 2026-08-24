@@ -232,6 +232,16 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
+/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
+const fileExists = (url: URL): boolean => {
+  try {
+    return Deno.statSync(url).isFile;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+};
+
 Deno.test({
   name: "DeBERTa golden: w8a8 鏡像 io が通常ケースの列挙に紛れない",
   // 資産の有無に依らず走る（prefix の規約そのものを見るテスト）。
@@ -258,6 +268,12 @@ for (const variant of VARIANTS) {
   const files = goldenFiles(variant.root);
   /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
   const available = files.length > 0;
+  /**
+   * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
+   * golden が全滅してモデルだけ残った欠損は `available` では偽になり、`ignore: !available`
+   * だと完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+   */
+  const anyPresent = available || fileExists(new URL(MODEL_FILE, variant.root));
 
   if (!available) {
     console.warn(
@@ -269,16 +285,16 @@ for (const variant of VARIANTS) {
 
   Deno.test({
     name: `DeBERTa 資産（${variant.name}）: 期待するケースとモデル本体が揃っている`,
-    // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-    ignore: !available,
+    // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
+    //（モデルだけ残って golden が全滅した欠損も拾う — `anyPresent` の JSDoc）。
+    ignore: !anyPresent,
     fn: () => {
       assertEquals(
         files.map(caseNameOf),
         [...EXPECTED_CASES],
         `${variant.root.pathname} の golden ケース`,
       );
-      const model = new URL(MODEL_FILE, variant.root);
-      assert(Deno.statSync(model).isFile, `${MODEL_FILE} が無い`);
+      assert(fileExists(new URL(MODEL_FILE, variant.root)), `${MODEL_FILE} が無い`);
     },
   });
 

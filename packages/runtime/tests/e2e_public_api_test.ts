@@ -169,8 +169,12 @@ Deno.test("ランタイム内部の直列化プリミティブは公開型面に
   // 下の代入が型エラーになる（実行時の assert は恒真で、検出するのは deno check）。
   // 素で見えると `gpu.withScopeLock(() => session.run(...))` が書けてしまい、run が同じロックを
   // 取りに行って**例外も診断も出ないまま自己デッドロック**する（再入検出器は置けない）。
-  const hidden: ("withScopeLock" | "raceDeviceLost") extends keyof GpuContext ? false : true = true;
-  assertEquals(hidden, true);
+  // MUST: 1 名ずつ別々に否定する。union を左辺に置いた条件型は**裸の型引数ではない**ので
+  // 分配されず、片方だけが載っても union 全体は `keyof GpuContext` に代入不能 = 偽枝のまま
+  // 通ってしまう（片側漏出が素通りする）。
+  const scopeLockHidden: "withScopeLock" extends keyof GpuContext ? false : true = true;
+  const raceDeviceLostHidden: "raceDeviceLost" extends keyof GpuContext ? false : true = true;
+  assertEquals([scopeLockHidden, raceDeviceLostHidden], [true, true]);
 });
 
 Deno.test("生成 run の第 3 引数が公開型で名指しできる（ADR 0066 決定 6 の呼び出し形）", () => {

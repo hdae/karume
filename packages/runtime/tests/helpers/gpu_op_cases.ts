@@ -678,6 +678,50 @@ export const ARGMAX_CASES: readonly OpCase[] = [
 ];
 
 /**
+ * argmax のタイブレーク / NaN / 全 −inf 行（ADR 0068 決定 2 の 3 つの MUST）の入力表。
+ *
+ * 行の意味:
+ * 0. 同値が 2 つ（3.0 が index 1,2）→ **最小 index = 1**
+ * 1. 全要素が同値 → **index 0**（「最後の最大値」実装なら 3 になる）
+ * 2. 全要素 −inf → **index 0**（有限 sentinel の identity だと候補なしのまま番兵が漏れる）
+ * 3. NaN が 2 つ（index 1,3）→ **NaN は最大・最小 index = 1**（`amax` の NaN 伝播と族内で
+ *    整合する側）
+ * 4. 全要素 NaN → **index 0**
+ * 5. −inf と同値の最大が混在（2.0 が index 1,3）→ **1**
+ */
+const ARGMAX_TIEBREAK_ROWS: readonly (readonly number[])[] = [
+  [1, 3, 3, 2],
+  [5, 5, 5, 5],
+  [
+    Number.NEGATIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ],
+  [1, Number.NaN, 3, Number.NaN],
+  [Number.NaN, Number.NaN, Number.NaN, Number.NaN],
+  [Number.NEGATIVE_INFINITY, 2, Number.NEGATIVE_INFINITY, 2],
+];
+
+/**
+ * 上の表を `[6,4]` の f32 で持った入力。
+ *
+ * MUST: 実 GPU 側（gpu_ops_test.ts）と CPU 参照側（reference_ops_test.ts）の**両方**がこの
+ * 1 表を引く — 片側にだけ literal を置くと、アダプタ無しの環境で CPU 参照の向きを縛る門が
+ * 消える（GPU 突合では両側が同じ向きに間違えたときに緑になる）。
+ */
+export const ARGMAX_TIEBREAK_INPUT = fill(
+  [ARGMAX_TIEBREAK_ROWS.length, 4],
+  (index) => ARGMAX_TIEBREAK_ROWS[Math.floor(index / 4)][index % 4],
+);
+
+/**
+ * `ARGMAX_TIEBREAK_INPUT` に対する torch の実測値（実測 2026-08-17 / torch 2.13:
+ * `torch.argmax(x, dim=-1, keepdim=True)`）。
+ */
+export const ARGMAX_TIEBREAK_TORCH: readonly number[] = [1, 0, 0, 1, 0, 1];
+
+/**
  * topk（最終次元・static-k・**出力 2 本** — ADR 0068 決定 3）。突合は値が f32 の allclose・
  * 添字が i32 の厳密一致で、**2 本とも** CPU 参照と突き合わせる（`checkAll` が本数から見る）。
  * タイブレーク / NaN / 全 −inf 行の固定挙動は期待値リテラルを持つ専用門（gpu_ops_test.ts）が

@@ -206,12 +206,28 @@ const rampCorrelation = (depth: Float32Array, size: number): number => {
   return covariance / Math.sqrt(depthNorm * planeNorm);
 };
 
+/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
+const fileExists = (url: URL): boolean => {
+  try {
+    return Deno.statSync(url).isFile;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+};
+
 const DISCOVERED = discoverCases(SERIES_ROOT);
 const realNames = new Set<string>(REAL_CASES);
 const FOUND_SYNTHETIC = DISCOVERED.filter((name) => !realNames.has(name));
 const FOUND_REAL = DISCOVERED.filter((name) => realNames.has(name));
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
 const AVAILABLE = DISCOVERED.length > 0;
+/**
+ * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
+ * golden が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、`ignore: !AVAILABLE` だと
+ * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+ */
+const ANY_PRESENT = AVAILABLE || fileExists(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!AVAILABLE) {
   console.warn(
@@ -222,8 +238,9 @@ if (!AVAILABLE) {
 
 Deno.test({
   name: "Depth Anything 資産: 期待するケースとモデル本体が揃っている",
-  // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-  ignore: !AVAILABLE,
+  // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
+  //（モデルだけ残って golden が全滅した欠損も拾う — `ANY_PRESENT` の JSDoc）。
+  ignore: !ANY_PRESENT,
   fn: () => {
     assertEquals(
       FOUND_SYNTHETIC,
@@ -237,7 +254,7 @@ Deno.test({
       `${SERIES_ROOT.pathname} の実画像 golden が ${FOUND_REAL.length}/${REAL_CASES.length} 本` +
         `（採り直す: ${GENERATE}）`,
     );
-    assert(Deno.statSync(new URL(MODEL_FILE, SERIES_ROOT)).isFile, `${MODEL_FILE} が無い`);
+    assert(fileExists(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
   },
 });
 

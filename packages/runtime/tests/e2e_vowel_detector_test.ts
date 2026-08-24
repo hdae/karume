@@ -177,6 +177,12 @@ const assertSymbolicTimeAxis = (parsed: KarumeModel): void => {
 const golden = discoverGolden(SERIES_ROOT);
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
 const available = golden.length > 0;
+/**
+ * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
+ * golden が全滅してモデルだけ残った欠損は `available` では偽になり、`ignore: !available` だと
+ * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+ */
+const anyPresent = available || exists(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!available) {
   console.warn(
@@ -187,8 +193,9 @@ if (!available) {
 
 Deno.test({
   name: `母音検出 資産: ${SERIES_NAME} — 期待するケースとモデル本体が揃っている`,
-  // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-  ignore: !available,
+  // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
+  //（モデルだけ残って golden が全滅した欠損も拾う — `anyPresent` の JSDoc）。
+  ignore: !anyPresent,
   fn: () => {
     assertEquals(golden, [...EXPECTED_GOLDEN], `${SERIES_ROOT.pathname} の golden ケース`);
     assert(exists(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);

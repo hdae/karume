@@ -17,6 +17,8 @@ import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import {
   ARGMAX_CASES,
+  ARGMAX_TIEBREAK_INPUT,
+  ARGMAX_TIEBREAK_TORCH,
   ATTENTION_CASES,
   BINARY_CASES,
   BMM_CASES,
@@ -384,49 +386,31 @@ Deno.test({
  *
  * MUST: CPU 参照との突合（checkAll）では代替できない。両側が同じ向きに間違えれば緑になる
  * 軸（タイブレークの向き・NaN の扱い・全 −inf 行の答え）なので、torch の実測値そのものを
- * リテラルで置く（実測 2026-08-17 / torch 2.13: `torch.argmax(x, dim=-1, keepdim=True)`）。
- *
- * 行の意味:
- * 0. 同値が 2 つ（3.0 が index 1,2）→ **最小 index = 1**
- * 1. 全要素が同値 → **index 0**（「最後の最大値」実装なら 3 になる）
- * 2. 全要素 −inf → **index 0**（有限 sentinel の identity だと候補なしのまま番兵が漏れる）
- * 3. NaN が 2 つ（index 1,3）→ **NaN は最大・最小 index = 1**（`amax` の NaN 伝播と族内で
- *    整合する側）
- * 4. 全要素 NaN → **index 0**
- * 5. −inf と同値の最大が混在（2.0 が index 1,3）→ **1**
+ * リテラルで置く（表と行の意味は `helpers/gpu_op_cases.ts` の `ARGMAX_TIEBREAK_INPUT`）。
+ * ここは **GPU の出力**だけを見る — 同じ表に対する CPU 参照の向きは、アダプタ無しの環境でも
+ * 走る `reference_ops_test.ts` 側の門が縛る。
  */
 Deno.test({
   name: "argmax のタイブレーク / NaN / 全 −inf 行が torch の実測値と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const NEGATIVE_INFINITY = Number.NEGATIVE_INFINITY;
-    const NAN = Number.NaN;
-    const rows = [
-      [1, 3, 3, 2],
-      [5, 5, 5, 5],
-      [NEGATIVE_INFINITY, NEGATIVE_INFINITY, NEGATIVE_INFINITY, NEGATIVE_INFINITY],
-      [1, NAN, 3, NAN],
-      [NAN, NAN, NAN, NAN],
-      [NEGATIVE_INFINITY, 2, NEGATIVE_INFINITY, 2],
-    ];
-    // torch 実測値（同じ表を CPU 参照にも当てて、オラクル側の向きも同時に固定する）
-    const TORCH = [1, 0, 0, 1, 0, 1];
-    const input = fill([rows.length, 4], (i) => rows[Math.floor(i / 4)][i % 4]);
     const gpu = await acquireGpu();
     try {
       const actual = await runCase(gpu, {
         name: "argmax tie-break",
         op: "argmax",
-        inputs: [input],
-        outShapes: [[rows.length, 1]],
+        inputs: [ARGMAX_TIEBREAK_INPUT],
+        outShapes: [[ARGMAX_TIEBREAK_TORCH.length, 1]],
         outDtypes: ["i32"],
       });
-      assertEquals([...actual.data], TORCH, "GPU の argmax が torch の実測値と違う");
+      assertEquals(
+        [...actual.data],
+        [...ARGMAX_TIEBREAK_TORCH],
+        "GPU の argmax が torch の実測値と違う",
+      );
     } finally {
       gpu.destroy();
     }
-    const expected = applyReferenceOp("argmax", [input], {}, [rows.length, 1]);
-    assertEquals([...expected.data], TORCH, "CPU 参照の argmax が torch の実測値と違う");
   },
 });
 

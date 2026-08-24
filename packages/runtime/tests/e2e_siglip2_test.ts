@@ -277,6 +277,16 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
+/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
+const fileExists = (url: URL): boolean => {
+  try {
+    return Deno.statSync(url).isFile;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+};
+
 /** golden の入力を宣言 dtype の view で組む（記号次元が無いので明示 bindings も不要）。 */
 const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, Tensor> => {
   const inputs: Record<string, Tensor> = {};
@@ -311,6 +321,12 @@ for (const series of SERIES) {
   const available = discovered.length > 0;
   /** 実画像の群（`--real-images` を付けずに emit した資産には無い）。 */
   const realAvailable = available && realCases.length > 0;
+  /**
+   * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
+   * golden が全滅してモデルだけ残った欠損は `available` では偽になり、`ignore: !available`
+   * だと完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+   */
+  const anyPresent = available || fileExists(new URL(MODEL_FILE, root));
 
   if (!available) {
     console.warn(
@@ -327,8 +343,9 @@ for (const series of SERIES) {
 
   Deno.test({
     name: `SigLIP2 資産: ${series.name} — 期待するケースとモデル本体が揃っている`,
-    // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-    ignore: !available,
+    // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
+    //（モデルだけ残って golden が全滅した欠損も拾う — `anyPresent` の JSDoc）。
+    ignore: !anyPresent,
     fn: () => {
       assertEquals(cases, [...EXPECTED_CASES], `${root.pathname} の合成画像 golden ケース`);
       // 実画像は**任意だが全部か 0 か**（`--real-images` を付けた emit は 4 本まとめて書く）。
@@ -338,8 +355,7 @@ for (const series of SERIES) {
         `${root.pathname} の実画像 golden が ${realCases.length}/${REAL_CASES.length} 本` +
           `（採り直す: ${realGenerateCommand(series)}）`,
       );
-      const model = new URL(MODEL_FILE, root);
-      assert(Deno.statSync(model).isFile, `${MODEL_FILE} が無い`);
+      assert(fileExists(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
     },
   });
 

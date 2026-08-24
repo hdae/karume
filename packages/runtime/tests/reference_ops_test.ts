@@ -46,6 +46,7 @@ import {
   refTensor,
 } from "../src/reference/ops.ts";
 import { OpContractError, type UnaryOpName } from "../src/ops.ts";
+import { ARGMAX_TIEBREAK_INPUT, ARGMAX_TIEBREAK_TORCH } from "./helpers/gpu_op_cases.ts";
 
 const t = (shape: readonly number[], values: readonly number[]): RefTensor =>
   refTensor(shape, Float32Array.from(values));
@@ -341,6 +342,26 @@ Deno.test("reduce は attrs.dim の軸だけを畳む（軸ごとに答えが割
   // 宣言必須（既定値補完をしない）
   assertThrows(() => applyReferenceOp("sum", [x]), OpContractError);
   assertThrows(() => applyReferenceOp("sum", [x], { dim: 3 }), OpContractError);
+});
+
+/**
+ * argmax の CPU 参照（ADR 0068 決定 2）— タイブレーク / NaN / 全 −inf 行を torch の実測値
+ * リテラルで固定する。
+ *
+ * MUST: 実 GPU 突合の内側に置かない。オラクル側の向きは GPU との突合では決まらない（両側が
+ * 同じ向きに間違えれば緑になる）ので、アダプタの有無に依らず走るここが CPU 参照の値の唯一の
+ * 門。同じ表を実 GPU 側（tests/gpu_ops_test.ts）が GPU の出力に当てる。
+ */
+Deno.test("argmax の CPU 参照はタイブレーク / NaN / 全 −inf 行が torch の実測値と一致する", () => {
+  const rows = ARGMAX_TIEBREAK_INPUT.shape[0];
+  const out = applyReferenceOp("argmax", [ARGMAX_TIEBREAK_INPUT], {}, [rows, 1]);
+  assertEquals(out.dtype, "i32");
+  assertEquals(out.shape, [rows, 1]);
+  assertEquals(
+    [...out.data],
+    [...ARGMAX_TIEBREAK_TORCH],
+    "CPU 参照の argmax が torch の実測値と違う",
+  );
 });
 
 /**
@@ -762,7 +783,12 @@ Deno.test("attention は scale を q と k の両方へ掛け、safe-softmax で
   assertEquals([...batched.data], [5, 7]);
 
   // 契約違反（rank-3 / D 不一致 / scale 欠落）はオラクル側でも落ちる
-  assertThrows(() => referenceAttention(t([1, 1, 1], [1]), key, value, { scale: 1 }), Error);
+  // MUST: 3 件とも `OpContractError`。基底 `Error` を期待にすると、rank 検査が消えて後続の
+  // shape 分解が TypeError / RangeError を投げる形になっても緑のまま通る。
+  assertThrows(
+    () => referenceAttention(t([1, 1, 1], [1]), key, value, { scale: 1 }),
+    OpContractError,
+  );
   assertThrows(
     () => referenceAttention(q, key, t([1, 1, 2, 3], [1, 2, 3, 4, 5, 6]), { scale: 1 }),
     OpContractError,

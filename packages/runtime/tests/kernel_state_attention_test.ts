@@ -301,12 +301,29 @@ Deno.test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 �
   const small = stateAttentionParams({ ...GEOMETRY, capacity: 64, colCap: 64 });
   const large = stateAttentionParams({ ...GEOMETRY, capacity: 65536, colCap: 65536 });
   assertNotEquals([...small], [...large], "params 側では容量が動いている");
+  // 容量欄を**載せた**表を 3 族へそのまま渡す（構造的部分型で余分な欄は通る）。今は幾何が
+  // 容量を読まないので 1024 倍の差は出力に出ない — 容量が幾何に入り込んだ瞬間（列軸を
+  // ⌈C/16⌉ にする等）小 / 大がここで割れる。
+  const smallCapacity = { ...DISPATCH, capacity: 64, colCap: 64 };
+  const largeCapacity = { ...DISPATCH, capacity: 65536, colCap: 65536 };
   for (const [past, query] of [[0, 1], [7, 4], [513, 16]] as const) {
+    const where = `(P,Q)=(${past},${query})`;
     assertEquals(
-      stateQkWorkgroups(DISPATCH, past, query, LIMIT, "t"),
-      stateQkWorkgroups(DISPATCH, past, query, LIMIT, "t"),
+      stateQkWorkgroups(smallCapacity, past, query, LIMIT, "t"),
+      stateQkWorkgroups(largeCapacity, past, query, LIMIT, "t"),
+      `①QK ${where}`,
+    );
+    assertEquals(
+      stateStatsWorkgroups(smallCapacity, query, LIMIT, "t"),
+      stateStatsWorkgroups(largeCapacity, query, LIMIT, "t"),
+      `②stats ${where}`,
     );
   }
+  assertEquals(
+    statePvWorkgroups(smallCapacity, LIMIT, "t"),
+    statePvWorkgroups(largeCapacity, LIMIT, "t"),
+    "③PV",
+  );
   assertEquals(Object.keys(DISPATCH).includes("capacity"), false);
   assertEquals(Object.keys(DISPATCH).includes("colCap"), false);
   assertEquals(Object.keys(DISPATCH).includes("chunkRows"), false, "M も渡らない");
