@@ -401,6 +401,18 @@ const assertScaleTensor = (
       }] へ broadcast できない`,
     );
   }
+  // MUST: 残る非 1 軸は**高々 1 本**（= keepdim 形の「チャネル軸だけが残る」）。broadcast 可能性
+  // だけでは重みと同形の per-element scale（`[O,I]`）も通り、GPU 常駐経路は `wscale[チャネル]` の
+  // 平坦添字で先頭要素しか読まない = 沈黙誤値になる。全軸 1（単一チャネルの退化形）は
+  // `torch.amax(..., keepdim=True)` の正当な出力なので受理する。
+  const channelAxes = view.shape.filter((dim) => dim !== 1).length;
+  if (channelAxes > 1) {
+    throw new ContainerError(
+      `${where}: scale [${
+        view.shape.join(",")
+      }] の非 1 軸が ${channelAxes} 本（per-channel scale は 1 本まで — チャネル軸だけが残る keepdim 形）`,
+    );
+  }
 };
 
 /**

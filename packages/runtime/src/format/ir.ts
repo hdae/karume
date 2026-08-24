@@ -448,6 +448,10 @@ export const parseIrGraph = (json: string): IrGraph => {
   // 再現しないが、ブラウザ（対象実行系の一方）では起きる。
   const values: Record<string, IrValueInfo> = Object.create(null);
   for (const [name, raw] of Object.entries(asPlainObject(root["values"], "graph.values"))) {
+    // 空の値名は states のスロット名と同じ理由で拒否する — 参照側（inputs[].name / ins / outs /
+    // outputs）はどれも空でない文字列だけを受理するので、通すと「宣言はできるが原理的に参照
+    // できない値」になる。孤立宣言検査は空名 initializer と対で書かれると素通りする。
+    asNonEmptyString(name, "graph.values の値名");
     const where = `graph.values['${name}']`;
     const obj = asPlainObject(raw, where);
     checkKeys(obj, ["dtype", "shape"], [], where);
@@ -462,6 +466,10 @@ export const parseIrGraph = (json: string): IrGraph => {
   for (
     const [name, raw] of Object.entries(asPlainObject(root["initializers"], "graph.initializers"))
   ) {
+    // 空の initializer 名も同じく拒否する（values 側のコメント参照 — 空名 value と対で書かれた
+    // 空名 initializer は宣言完全性検査の両側を満たしてしまい、参照不能な実テンソル 1 本が
+    // 配布形に居座る）。
+    asNonEmptyString(name, "graph.initializers の initializer 名");
     const where = `graph.initializers['${name}']`;
     const obj = asPlainObject(raw, where);
     checkKeys(obj, ["tensor", "storage"], [], where);

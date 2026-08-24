@@ -284,11 +284,23 @@ const assertNormalizedShape = (value: unknown, where: string): readonly number[]
 /**
  * 正規化 op（layer_norm / rms_norm）の eps。**有限の正数**のみ（0 を許すと分散 0・
  * 全要素 0 の行で `1/sqrt(0)` が inf になり、「定数行の正規化」が黙って NaN を吐く）。
+ *
+ * MUST: **f32 へ丸めても 0 にならない**こと（`1e-50` のような非正規化域の eps）。GPU は
+ * eps を params の f32 語で運ぶ（kernels/layer-norm.ts / rms-norm.ts）ので丸めた先が 0 になる
+ * 一方、CPU 参照は f64 のまま `1/sqrt(… + eps)` を計算する（reference/ops.ts）。上の「0 を
+ * 許さない」理由が GPU 側だけで復活し、**全ゼロ行で GPU が NaN・CPU が 0** と意味が分岐する。
  */
 const assertEps = (value: unknown, where: string, what: string): number => {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new OpContractError(
       `${where}: ${what} の eps は有限の正数でない: ${JSON.stringify(value)}`,
+    );
+  }
+  if (Math.fround(value) === 0) {
+    throw new OpContractError(
+      `${where}: ${what} の eps が f32 へ丸めると 0 になる（GPU 側だけ eps=0 で走る）: ${
+        JSON.stringify(value)
+      }`,
     );
   }
   return value;

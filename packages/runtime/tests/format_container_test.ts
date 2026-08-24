@@ -153,6 +153,44 @@ Deno.test("openModel: 量子化 initializer の scale テンソルは余剰扱�
   assertEquals(openModel(buffer).file.tensors.size, 3);
 });
 
+/**
+ * per-channel（i8）の scale は「チャネル軸 1 本だけが残る keepdim 形」= 非 1 軸は**高々 1 本**。
+ *
+ * broadcast 可能性だけでは重みと同形の per-element scale（`[O,I]`）も通る。適格経路は
+ * executor の keepdim 検査が塞ぐが、**適格外（CPU 展開 decodeI8）経路はコンテナ層より後ろに
+ * 形の門が無い** — `scaleStrides` は rank 一致と軸ごとの broadcast 可能性しか見ない。
+ */
+Deno.test("openModel: per-channel scale の非 1 軸が 2 本以上のものを拒否する", () => {
+  const i8Model = (
+    weightShape: readonly number[],
+    scaleShape: readonly number[],
+  ): ArrayBuffer => {
+    const graph = baseGraph();
+    graph.values["w"] = { dtype: "f32", shape: [...weightShape] };
+    graph.initializers["w"].storage = { dtype: "i8", scale: "enc.w.scale" };
+    const numel = (shape: readonly number[]) => shape.reduce((product, dim) => product * dim, 1);
+    return baseModelBuffer(graph, [
+      { name: "enc.w", dtype: "I8", shape: weightShape, data: i8Bytes(numel(weightShape)) },
+      {
+        name: "enc.w.scale",
+        dtype: "F32",
+        shape: scaleShape,
+        data: f32Bytes(new Array(numel(scaleShape)).fill(1)),
+      },
+      { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+    ]);
+  };
+  // 重みと同形（per-element scale）— broadcast 可能なので rank / broadcast の門は素通りする
+  assertThrows(() => openModel(i8Model([4, 3], [4, 3])), ContainerError, "非 1 軸が 2 本");
+  assertThrows(() => openModel(i8Model([4, 3, 2], [1, 3, 2])), ContainerError, "非 1 軸が 2 本");
+  // 対: チャネル軸 1 本の keepdim 形は軸の位置に依らず通る
+  assertEquals(openModel(i8Model([4, 3], [4, 1])).file.tensors.get("enc.w.scale")?.shape, [4, 1]);
+  assertEquals(openModel(i8Model([4, 3], [1, 3])).file.tensors.get("enc.w.scale")?.shape, [1, 3]);
+  // 対: チャネル数 1 の退化形は `torch.amax(…, keepdim=True)` の出力が全軸 1 になる —
+  // 「ちょうど 1 本」で締めると、この正当な形まで落ちる（executor 側の keepdim 検査も受理する）
+  assertEquals(openModel(i8Model([1, 4], [1, 1])).file.tensors.get("enc.w.scale")?.shape, [1, 1]);
+});
+
 // ADR 0069 決定 3: group 量子化の scale は「重みと同 rank・最終次元だけ group 数」で、
 // per-channel の keepdim broadcast 形とは受理集合が交わらない別分岐。
 Deno.test("openModel: 格納 i4 は group 形の scale を受理する", () => {

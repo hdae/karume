@@ -492,6 +492,43 @@ Deno.test("parseIrGraph: JSON の整数値 float 次元を受理し、非整数�
   );
 });
 
+/**
+ * 空の値名 / initializer 名は states のスロット名と同じ理由で拒否する（参照側の欄 —
+ * inputs[].name / ins / outs / outputs — はどれも空でない文字列だけを受理するので、通すと
+ * 「宣言はできるが原理的に参照できない」declaration になる）。
+ *
+ * MUST: 空名 value **単独**なら孤立宣言検査が塞ぐが、空名 initializer と**対で**書かれると
+ * 定義集合に入って孤立宣言検査も逆参照検査も満たす — 参照不能な実テンソル 1 本が配布形に
+ * 居座る。この組が門の唯一の検出対象。
+ */
+Deno.test("parseIrGraph: 値名 / initializer 名の空文字列を拒否する", () => {
+  assertThrows(
+    () =>
+      parseMutated((g) => {
+        g.values[""] = { dtype: "f32", shape: [4, 3] };
+        g.initializers[""] = { tensor: "enc.ghost", storage: { dtype: "f32" } };
+      }),
+    IrError,
+    "graph.values の値名: 空でない文字列でない",
+  );
+  // initializer 側だけが空の形も落ちる（名前検査は宣言の両側に掛かる）
+  assertThrows(
+    () =>
+      parseMutated((g) => {
+        g.initializers[""] = { tensor: "enc.ghost", storage: { dtype: "f32" } };
+      }),
+    IrError,
+    "graph.initializers の initializer 名: 空でない文字列でない",
+  );
+  // 対: 名前が空でなければ同じ組は受理される（= 落としているのは空名だけで、宣言完全性の
+  // 2 検査はどちらもこの組を通す — それがこの門が要る理由そのもの）
+  const graph = parseMutated((g) => {
+    g.values["ghost"] = { dtype: "f32", shape: [4, 3] };
+    g.initializers["ghost"] = { tensor: "enc.ghost", storage: { dtype: "f32" } };
+  });
+  assertEquals(graph.initializers["ghost"], { tensor: "enc.ghost", storage: { dtype: "f32" } });
+});
+
 Deno.test("parseIrGraph: states の構造", () => {
   assertStatesReject([], "graph.states: オブジェクトでない");
   assertStatesReject({ cache: 4 }, "graph.states['cache']: オブジェクトでない");

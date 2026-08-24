@@ -1007,12 +1007,21 @@ Deno.test("融合 op の attrs スキーマが値域まで検査する", () => {
   reject("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: 0 });
   reject("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: -1e-7 });
   reject("layer_norm", ["x", "w", "b"], { normalized_shape: [8] });
+  // f32 へ丸めると 0 になる eps は「0 を許さない」理由が GPU 側だけで復活する（GPU は params の
+  // f32 語で運び、CPU 参照は f64 のまま計算する）— 全ゼロ行で GPU が NaN・CPU が 0 に分岐する
+  reject("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: 1e-50 });
+  // f32 の非正規化域でも丸めた先が 0 でなければ両側の意味は一致するので通す
+  assertEquals(
+    accept("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: 1e-45 }).kind,
+    "layerNorm",
+  );
 
   // rms_norm — attrs は eps だけ（正規化長の正本は weight — ADR 0017）
   assertEquals(accept("rms_norm", ["x", "w"], { eps: 1e-6 }).kind, "rmsNorm");
   assertEquals(rmsNormEps({ eps: 1e-6 }, "t"), 1e-6);
   reject("rms_norm", ["x", "w"], { eps: 0 });
   reject("rms_norm", ["x", "w"], { eps: -1e-6 });
+  reject("rms_norm", ["x", "w"], { eps: 1e-50 });
   reject("rms_norm", ["x", "w"], {});
   // MUST: normalized_shape の欄は無い（layer_norm から欄ごと写した IR を通さない）
   reject("rms_norm", ["x", "w"], { eps: 1e-6, normalized_shape: [8] });
