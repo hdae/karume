@@ -35,7 +35,10 @@ import {
   type Sbv2GenerateRequest,
   synthesizeSbv2,
 } from "../../packages/models/src/sbv2/pipeline.ts";
-import { type DumpTensor, writeSafetensors } from "./host/safetensors-write.ts";
+import {
+  type DumpTensor,
+  writeSafetensors,
+} from "../../packages/models/tests/helpers/safetensors-write.ts";
 import { isLocalDist, loadLocalAssets } from "./local-assets.ts";
 
 const USAGE = "--source <パス> --text <文字列> --model <名前> --quant <名前> --style <名前>" +
