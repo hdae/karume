@@ -26,7 +26,7 @@
  * 組み立て時に落とす）。パイプラインが読むのは**こちら**だけで、`symbols.json` の `defaults`
  * は見ない — 導出元を二重に持たないため（`text/symbols.ts` の同節は optional）。
  *
- * NOTE: 公開配布リポの既定ソース（{@link SBV2_DEFAULT_SOURCE}）もここに置く。manifest から
+ * NOTE: 公開配布リポの pin 定数（{@link SBV2_JVNV_CURRENT}）もここに置く。manifest から
  * 導ける値ではなく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
  */
 
@@ -37,18 +37,22 @@ export const SBV2_PIPELINE_NAME = "sbv2";
 export const SBV2_PIPELINE_MAJOR = 1;
 
 /**
- * 公開配布リポの既定ソース（ADR 0073 決定 1）。`ref` を省略した `Sbv2Pipeline.fromPretrained`
- * はここを読む。
+ * `hdae/karume-sbv2-jvnv` を**このパッケージ版が検証した取得元**
+ * （pin 済み commit SHA — ADR 0073）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
+ * 固定したい場合は、この定数ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
+ * 既定は無い）。
  *
  * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
  * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
  * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
- * 同時に成立する（ADR 0038）。追従が要る利用者は
- * `{ ...SBV2_DEFAULT_SOURCE, revision: "main" }` を明示的に選ぶ。
+ * 同時に成立する（ADR 0038）。main 追従が要る利用者は
+ * `{ ...SBV2_JVNV_CURRENT, revision: "main" }` を明示的に選ぶ。
  */
 // NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
 // SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
-export const SBV2_DEFAULT_SOURCE = {
+export const SBV2_JVNV_CURRENT = {
   repo: "hdae/karume-sbv2-jvnv",
   revision: "e76608130f5a1763d91e3ee5b376269dd810b517",
 } as const satisfies HubRepoRef;

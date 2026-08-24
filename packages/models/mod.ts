@@ -43,6 +43,15 @@ export type {
   GeneratedImage,
 } from "./src/anima/pipeline.ts";
 export type { ImageSize } from "./src/anima/resolution.ts";
+/**
+ * 途中 latent → RGB の線形近似。`denoise-step` の `copyLatents()`
+ * （{@link AnimaLatentSnapshot}）が返す 2 欄をそのまま渡す。VAE は DiT を解放した**後**にしか
+ * ロードできない（VRAM の MUST）ので、step ごとの経過を絵で見せる手段はこれだけ — snapshot 型を
+ * 出しておいて近似を出さないと、購読側は受け取った latent を使えない（`./anima` を参照）。
+ */
+export { approximatePreview } from "./src/anima/preview.ts";
+/** このパッケージ版が検証した取得元（`./anima` を参照 — 追従したい場合のオプトイン）。 */
+export { ANIMA_CURRENT, ANIMA_TURBO_CURRENT } from "./src/anima/config.ts";
 
 export { IrodoriPipeline } from "./src/irodori/pipeline.ts";
 export type {
@@ -57,6 +66,8 @@ export type {
   IrodoriRunComponent,
   IrodoriSpeakerInput,
 } from "./src/irodori/pipeline.ts";
+/** このパッケージ版が検証した取得元（`./irodori` を参照 — 追従したい場合のオプトイン）。 */
+export { IRODORI_V4_SMALL_CURRENT } from "./src/irodori/config.ts";
 
 export { Sbv2Pipeline } from "./src/sbv2/pipeline.ts";
 export type {
@@ -72,6 +83,8 @@ export type {
 export type { Sbv2AccentPhrase, Sbv2Mora, Sbv2Prosody } from "./src/sbv2/text/prosody.ts";
 /** 入力起因の失敗（内部不変条件の破れは素の `Error` のまま — `./sbv2` を参照）。 */
 export { Sbv2InputError } from "./src/sbv2/errors.ts";
+/** このパッケージ版が検証した取得元（`./sbv2` を参照 — 追従したい場合のオプトイン）。 */
+export { SBV2_JVNV_CURRENT } from "./src/sbv2/config.ts";
 /** 修正辞書の綴りは `@hdae/yomi` が正本（`./sbv2` と同じく素通し — 変換層は作らない）。 */
 export type { OverlayDictionary, OverlayEntry } from "@hdae/yomi";
 

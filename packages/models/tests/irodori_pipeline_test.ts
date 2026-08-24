@@ -1,9 +1,13 @@
 // `IrodoriPipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る（実 GPU の突合は
 // `e2e_irodori_*_test.ts` 群が持つ）。
 //
-// ここで押さえるのは 1 点だけ: `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を
-// 取りに行く前**に落とす（`src/irodori/pipeline.ts` の `openIrodoriState` が掲げる MUST）。
-// 順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+// ここで押さえるのは 2 点:
+//  ① `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を取りに行く前**に落とす
+//     （`src/irodori/pipeline.ts` の `openIrodoriState` が掲げる MUST）。順序がずれると、GPU の
+//     無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+//  ② 構築の `signal` が**入口でも実行開始後でも**効く（DL 完了後の組み立てが中断不能だと、
+//     UI の中止ボタンが無反応になる窓ができる）。後者は「最初の段境界」までを空資産で見る —
+//     それより先の境界は実資産と GPU が要るのでここでは見られない。
 //
 // 観測の仕掛け: **全ケースで `assets` は空**。したがって
 //  - manifest 契約の違反ケースが「その違反の文言」で落ちる  = 資産解析より前に落ちている
@@ -16,7 +20,13 @@
 // 縛れる純関数なので、最後の 1 本で同じく直接叩く — ここが壊れると購読側へ**別 step の潜在が
 // 黙って**届き、実 GPU の WAV 門は観測席を通らないので緑のままになる。
 
-import { assertEquals, assertNotStrictEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assertEquals,
+  assertNotStrictEquals,
+  assertRejects,
+  assertStrictEquals,
+  assertThrows,
+} from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { assetJson, IrodoriPipeline, latentSnapshot } from "../src/irodori/pipeline.ts";
 
@@ -165,6 +175,39 @@ Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触
     Error,
     "資産 'backbone' が無い",
   );
+});
+
+// ---- 構築の中断（`options.signal`）----------------------------------------
+//
+// UI の中止ボタンは DL 完了後の組み立て（資産解析 → acquireGpu）にも効かなければならない。
+// 上の門と同じ manifest + 空資産で見る: signal 無しなら「資産 'backbone' が無い」で落ちる形が、
+// 中断済み / 実行中の中断では `signal.reason` で落ちる。
+
+Deno.test("fromAssets: 中断済み signal は資産へ触る前に reason そのままで reject する", async () => {
+  const manifest = parseManifest(manifestText());
+  const controller = new AbortController();
+  const reason = new Error("中止ボタン");
+  controller.abort(reason);
+  const error = await assertRejects(() =>
+    IrodoriPipeline.fromAssets({ manifest, assets: emptyAssets }, { signal: controller.signal })
+  );
+  // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
+  assertStrictEquals(error, reason);
+});
+
+Deno.test("fromAssets: 実行開始後に届いた中断も最初の段境界で効く", async () => {
+  // 上の門は「呼ぶ前に中断済み」だけを見る。中止ボタンは**組み立てが走っている最中**に
+  // 押されるので、段境界の検査はイベントループへ譲ってからでなければ死文になる
+  // （abort() の届き方はタスク配送 — 同期解析中は 1 度も観測されない）。
+  // 仕掛けてから呼ぶと、資産エラー（「資産 'backbone' が無い」）ではなく reason で落ちる。
+  const manifest = parseManifest(manifestText());
+  const controller = new AbortController();
+  const reason = new Error("中止ボタン（実行中）");
+  setTimeout(() => controller.abort(reason), 0);
+  const error = await assertRejects(() =>
+    IrodoriPipeline.fromAssets({ manifest, assets: emptyAssets }, { signal: controller.signal })
+  );
+  assertStrictEquals(error, reason);
 });
 
 // ---- 資産 JSON の decode（不正 UTF-8 を黙って置換しない）------------------

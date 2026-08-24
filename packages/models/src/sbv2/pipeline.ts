@@ -68,7 +68,6 @@ import { fetchDictionaryBytes } from "@hdae/yomi/loader";
 
 import {
   parseSbv2PipelineConfig,
-  SBV2_DEFAULT_SOURCE,
   SBV2_PIPELINE_MAJOR,
   SBV2_PIPELINE_NAME,
   type Sbv2PipelineConfig,
@@ -93,7 +92,9 @@ import { buildZp } from "./host/latent.ts";
 import { Randn } from "./host/random.ts";
 import { buildRelattnTables } from "./relattn-tables.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
+import { toRepoRef } from "../hub/repo-ref.ts";
 
 /**
  * manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。
@@ -786,7 +787,6 @@ export const openSbv2State = async (
     );
   }
   const quant = entry.quants[quantName];
-  const wantsShaderF16 = quant.gpuFeatures?.shaderF16 === true;
 
   const front = openModel(assetBuffer(assets, FRONT));
   const voice = openModel(assetBuffer(assets, VOICE));
@@ -808,17 +808,17 @@ export const openSbv2State = async (
   // 低精度ノブは front / voice の Session にだけ効かせる（モジュール doc の MUST）。
   const sessionOptions = toSessionOptions(quant.session);
 
-  // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
-  // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。
-  const gpu = options.gpu ?? await acquireGpu(wantsShaderF16 ? { shaderF16: true } : {});
+  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
+  // 渡された場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。要求と
+  // 検査の網羅表は `session/gpu-features.ts`（7 家族で 1 本）。
+  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
   const ownsGpu = options.gpu === undefined;
-  if (wantsShaderF16 && !gpu.shaderF16Enabled) {
+  try {
+    assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `Sbv2Pipeline: quant '${quantName}'`);
+  } catch (error) {
     // 内部で取った GPU は、ここで投げると誰も解放できなくなるので返してから落とす。
     if (ownsGpu) gpu.destroy();
-    throw new Error(
-      `Sbv2Pipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +
-        " GpuContext で有効になっていない（acquireGpu({ shaderF16: true }) で取り直す）",
-    );
+    throw error;
   }
   return {
     gpu,
@@ -1066,13 +1066,17 @@ export class Sbv2Pipeline {
   /**
    * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
    * {@link Sbv2Pipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
-   * 追従）。省略時は pin 済みの {@link SBV2_DEFAULT_SOURCE}（ADR 0073 決定 2）。
+   * 追従）。**`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。
    */
   static async fromPretrained(
-    ref: string | HubRepoRef = SBV2_DEFAULT_SOURCE,
+    ref: string | HubRepoRef,
     options: Sbv2FromPretrainedOptions = {},
   ): Promise<Sbv2Pipeline> {
-    const repoRef: HubRepoRef = typeof ref === "string" ? { repo: ref } : ref;
+    const repoRef = toRepoRef(
+      ref,
+      "Sbv2Pipeline.fromPretrained",
+      "SBV2_JVNV_CURRENT（@karume/models/sbv2）",
+    );
     const hubOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),

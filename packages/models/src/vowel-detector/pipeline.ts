@@ -92,7 +92,9 @@ import {
 import { extractFeatures, HOP, MEL_BINS, N_MELS, SAMPLE_RATE } from "./features.ts";
 import { type LabSegment, logitsToSegments, toLab } from "./postprocess.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
+import { toRepoRef } from "../hub/repo-ref.ts";
 
 /** manifest の assets 表に現れる取得キーと、その safetensors のテンソル名（`dist.py` と対）。 */
 const MEL_BASIS = "mel_basis";
@@ -364,23 +366,22 @@ const openVowelDetectorState = async (
     );
   }
   const quant = entry.quants[quantName];
-  const wantsShaderF16 = quant.gpuFeatures?.shaderF16 === true;
 
   const graph = openModel(assetBuffer(assets, GRAPH_ROLE));
   const symbol = assertGraph(graph, config);
   const melBasis = parseMelBasis(assetBuffer(assets, MEL_BASIS));
 
-  // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
-  // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。
-  const gpu = options.gpu ?? await acquireGpu(wantsShaderF16 ? { shaderF16: true } : {});
+  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
+  // 渡された場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。要求と
+  // 検査の網羅表は `session/gpu-features.ts`（7 家族で 1 本）。
+  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
   const ownsGpu = options.gpu === undefined;
-  if (wantsShaderF16 && !gpu.shaderF16Enabled) {
+  try {
+    assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `VowelDetectorPipeline: quant '${quantName}'`);
+  } catch (error) {
     // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
     if (ownsGpu) gpu.destroy();
-    throw new Error(
-      `VowelDetectorPipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +
-        " GpuContext で有効になっていない（acquireGpu({ shaderF16: true }) で取り直す）",
-    );
+    throw error;
   }
   return {
     gpu,
@@ -488,13 +489,15 @@ export class VowelDetectorPipeline {
 
   /**
    * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
-   * {@link VowelDetectorPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む。
+   * {@link VowelDetectorPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む
+   * （= `main` 追従）。**`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST。
+   * このファミリは公開配布リポを持たないので pin 定数も無い）。
    */
   static async fromPretrained(
     ref: string | HubRepoRef,
     options: VowelDetectorFromPretrainedOptions = {},
   ): Promise<VowelDetectorPipeline> {
-    const repoRef: HubRepoRef = typeof ref === "string" ? { repo: ref } : ref;
+    const repoRef = toRepoRef(ref, "VowelDetectorPipeline.fromPretrained");
     const hubOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),

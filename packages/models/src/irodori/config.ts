@@ -22,7 +22,7 @@
  * （`"noise"` / `joint` / `alternating`）は同値が成り立たないので、分岐を持つのではなく
  * **受理しない**（型としても "mask" / "independent" しか表せない）。
  *
- * NOTE: 公開配布リポの既定ソース（{@link IRODORI_DEFAULT_SOURCE}）もここに置く。上の MUST が
+ * NOTE: 公開配布リポの pin 定数（{@link IRODORI_V4_SMALL_CURRENT}）もここに置く。上の MUST が
  * 禁じる「モデル固有の数」ではなく「どの manifest を取りに行くか」の側で、そもそも配布形が
  * 持てない値だから（ADR 0073）。
  */
@@ -34,18 +34,22 @@ export const IRODORI_PIPELINE_NAME = "irodori";
 export const IRODORI_PIPELINE_MAJOR = 1;
 
 /**
- * 公開配布リポの既定ソース（ADR 0073 決定 1）。`ref` を省略した
- * `IrodoriPipeline.fromPretrained` はここを読む。
+ * `hdae/karume-irodori-v4-small` を**このパッケージ版が検証した取得元**
+ * （pin 済み commit SHA — ADR 0073）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
+ * 固定したい場合は、この定数ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
+ * 既定は無い）。
  *
  * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
  * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
  * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
- * 同時に成立する（ADR 0038）。追従が要る利用者は
- * `{ ...IRODORI_DEFAULT_SOURCE, revision: "main" }` を明示的に選ぶ。
+ * 同時に成立する（ADR 0038）。main 追従が要る利用者は
+ * `{ ...IRODORI_V4_SMALL_CURRENT, revision: "main" }` を明示的に選ぶ。
  */
 // NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
 // SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
-export const IRODORI_DEFAULT_SOURCE = {
+export const IRODORI_V4_SMALL_CURRENT = {
   repo: "hdae/karume-irodori-v4-small",
   revision: "522643804979a293ef95c19d901ceea4ddba5fa6",
 } as const satisfies HubRepoRef;

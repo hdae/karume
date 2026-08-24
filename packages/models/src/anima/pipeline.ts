@@ -59,7 +59,6 @@ import {
 } from "@karume/hub";
 
 import {
-  ANIMA_DEFAULT_SOURCE,
   ANIMA_PIPELINE_MAJOR,
   ANIMA_PIPELINE_NAME,
   type AnimaPipelineConfig,
@@ -87,24 +86,11 @@ import {
 import { parseRopeBase, type RopeBase, ropeWidth } from "./rope-base.ts";
 import { type AnimaTokenizers, createTokenizers } from "./text/tokenizer.ts";
 import { assertAcceptableSeed, Randn } from "./random.ts";
+import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
-
-/**
- * 段の境目で中断を**観測できる形**に検査する（イベントループへ 1 度譲ってから `throwIfAborted`）。
- *
- * MUST: 譲り先は**マクロタスク**（`setTimeout`）でなければならない。`abort()` の届き方は
- * クリック・timer・worker メッセージなどの**タスク**配送なので、`await Promise.resolve()`
- * （マイクロタスク）では現在のタスクの中に留まったままで、まだ実行されていない中断タスクを
- * 観測できない。譲らない検査は「呼ばれた時点で既に中断済み」しか拾えない死文になる。
- *
- * `signal` 未指定なら譲らない（購読していない呼び出しにタスク 1 往復のコストを乗せない）。
- */
-const settleAbort = async (signal: AbortSignal | undefined): Promise<void> => {
-  if (signal === undefined) return;
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  signal.throwIfAborted();
-};
+import { toRepoRef } from "../hub/repo-ref.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const TEXT_ENCODER = "text_encoder";
@@ -521,13 +507,17 @@ export class AnimaPipeline {
   /**
    * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
    * {@link AnimaPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
-   * 追従）。省略時は pin 済みの {@link ANIMA_DEFAULT_SOURCE}（ADR 0073 決定 2）。
+   * 追従）。**`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。
    */
   static async fromPretrained(
-    ref: string | HubRepoRef = ANIMA_DEFAULT_SOURCE,
+    ref: string | HubRepoRef,
     options: AnimaFromPretrainedOptions = {},
   ): Promise<AnimaPipeline> {
-    const repoRef: HubRepoRef = typeof ref === "string" ? { repo: ref } : ref;
+    const repoRef = toRepoRef(
+      ref,
+      "AnimaPipeline.fromPretrained",
+      "ANIMA_TURBO_CURRENT / ANIMA_CURRENT（@karume/models/anima）",
+    );
     const hubOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),
@@ -616,7 +606,6 @@ export class AnimaPipeline {
       );
     }
     const quant = entry.quants[quantName];
-    const wantsShaderF16 = quant.gpuFeatures?.shaderF16 === true;
     const sessionOptions = toSessionOptions(quant.session);
 
     // 資産の解析は GPU より前（docstring の順序 MUST）。3.7GiB の DiT を開くほうが device 生成
@@ -639,24 +628,19 @@ export class AnimaPipeline {
 
     await settleAbort(options.signal);
 
-    // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
-    // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす — 通すと
-    // Session 構築まで進んでから落ちる（あるいは黙って別の経路へ縮退する）。
-    const gpu = options.gpu ??
-      await acquireGpu(wantsShaderF16 ? { shaderF16: true } : {});
+    // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
+    // 渡された場合は要求できないので、能力が足りないことを**ここで**名指しして落とす — 通すと
+    // Session 構築まで進んでから落ちる（あるいは黙って別の経路へ縮退する）。要求と検査の
+    // 網羅表は `session/gpu-features.ts`（7 家族で 1 本）。
+    const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
     const ownsGpu = options.gpu === undefined;
     try {
       // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
-      // 誰も解放できないまま抜ける（shader-f16 検査と同じ後始末に乗せる）。
+      // 誰も解放できないまま抜ける（feature 検査と同じ後始末に乗せる）。
       // ここでもマクロタスクへ譲る: `acquireGpu` の await 解決はマイクロタスク継続なので、
       // 待機中に積まれたクリック由来の中断タスクはまだ実行されていない。
       await settleAbort(options.signal);
-      if (wantsShaderF16 && !gpu.shaderF16Enabled) {
-        throw new Error(
-          `AnimaPipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +
-            " GpuContext で有効になっていない（acquireGpu({ shaderF16: true }) で取り直す）",
-        );
-      }
+      assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `AnimaPipeline: quant '${quantName}'`);
       return new AnimaPipeline({
         gpu,
         ownsGpu,

@@ -87,7 +87,6 @@ import {
 } from "@karume/hub";
 
 import {
-  IRODORI_DEFAULT_SOURCE,
   IRODORI_PIPELINE_MAJOR,
   IRODORI_PIPELINE_NAME,
   type IrodoriPipelineConfig,
@@ -123,8 +122,11 @@ import {
 } from "./host/sampler-graph.ts";
 import { timestepEmbedding, timestepFrequencies } from "./host/t-embed.ts";
 import { findFlatteningPoint, trimmedSampleCount } from "./host/trim.ts";
+import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
+import { toRepoRef } from "../hub/repo-ref.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const BACKBONE = "backbone";
@@ -340,11 +342,25 @@ export type IrodoriPipelineOptions = {
     component: IrodoriRunComponent,
     diagnostics: SessionDiagnostics,
   ) => void;
+  /**
+   * 構築の中断。{@link IrodoriPipeline.fromAssets} が段の境目（入口 / 各 `openModel` の間 /
+   * トークナイザ解釈 / GPU 取得の前後）で検査する。入口を除く各境目では**イベントループへ
+   * 1 度譲ってから**検査するので、同期解析の最中に届いた中断も次の境目で効く
+   * （`options.gpu` を渡して await が 1 つも無い経路でも同じ）。
+   * {@link IrodoriPipeline.fromPretrained} は同じ 1 本を取得層へも渡すので、**DL と組み立ての
+   * どちらの最中でも**同じノブで中断できる（DL 完了後だけ中止ボタンが無反応、を作らない）。
+   *
+   * 中断の例外は `signal.reason` を**そのまま**投げる（包まない — 消費側が
+   * `error === controller.signal.reason` で自分の中断を識別できる）。
+   */
+  readonly signal?: AbortSignal;
 };
 
-/** {@link IrodoriPipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。 */
+/**
+ * {@link IrodoriPipeline.fromPretrained} が追加で受ける取得層のオプション（hub へ透過する）。
+ * `signal` は構築側と共有なので {@link IrodoriPipelineOptions} が持つ。
+ */
 export type IrodoriFromPretrainedOptions = IrodoriPipelineOptions & {
-  readonly signal?: AbortSignal;
   /** `Authorization` 等。付けた取得は認証専用のキャッシュ名前空間へ隔離される。 */
   readonly headers?: HeadersInit;
   readonly onProgress?: (progress: AssetProgress) => void;
@@ -668,12 +684,21 @@ const rightPad = (
  * 順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に
  * 伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ（ADR 0028）。
  * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
+ *
+ * NOTE: 各段は不可分（`openModel` を途中で畳む口は無い）なので、
+ * {@link IrodoriPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこでイベントループへ
+ * 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に届いた中断は次の境目で効く
+ * （`options.gpu` 供給時も同様）。グラフとの突合（`assertStaticDim` 群）は開いたコンテナの
+ * ヘッダを読むだけで、`openModel` 1 本より桁で軽いので境目を割らない。
  */
 const openIrodoriState = async (
   input: IrodoriAssets,
   options: IrodoriPipelineOptions = {},
 ): Promise<IrodoriState> => {
   const { manifest, assets } = input;
+  // 中断の検査は**段の境目**に置く。入口が最初の 1 本: 中断済みで呼ばれたら manifest にも
+  // 資産にも触らずに返す。
+  options.signal?.throwIfAborted();
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
@@ -706,16 +731,26 @@ const openIrodoriState = async (
     );
   }
   const quant = entry.quants[quantName];
-  const wantsShaderF16 = quant.gpuFeatures?.shaderF16 === true;
 
+  // 資産の解析は GPU より前（docstring の順序 MUST）。8 本の `openModel` はそれぞれ不可分なので、
+  // 中断の検査はその境目に置く。
+  await settleAbort(options.signal);
   const backbone = openModel(assetBuffer(assets, BACKBONE));
+  await settleAbort(options.signal);
   const textProj = openModel(assetBuffer(assets, TEXT_PROJ));
+  await settleAbort(options.signal);
   const captionProj = openModel(assetBuffer(assets, CAPTION_PROJ));
+  await settleAbort(options.signal);
   const speaker = openModel(assetBuffer(assets, SPEAKER));
+  await settleAbort(options.signal);
   const duration = openModel(assetBuffer(assets, DURATION));
+  await settleAbort(options.signal);
   const dit = openModel(assetBuffer(assets, DIT));
+  await settleAbort(options.signal);
   const codecDecoder = openModel(assetBuffer(assets, CODEC_DECODER));
+  await settleAbort(options.signal);
   const codecEncoder = openModel(assetBuffer(assets, CODEC_ENCODER));
+  await settleAbort(options.signal);
   const tokenizer = new IrodoriTokenizer(
     parseIrodoriTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER),
   );
@@ -752,36 +787,43 @@ const openIrodoriState = async (
 
   const ditSessionOptions = toSessionOptions(quant.session);
 
-  // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
-  // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。
-  const gpu = options.gpu ?? await acquireGpu(wantsShaderF16 ? { shaderF16: true } : {});
+  await settleAbort(options.signal);
+
+  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
+  // 渡された場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。要求と
+  // 検査の網羅表は `session/gpu-features.ts`（7 家族で 1 本）。
+  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
   const ownsGpu = options.gpu === undefined;
-  if (wantsShaderF16 && !gpu.shaderF16Enabled) {
-    // 内部で取った GPU は、ここで投げると誰も解放できなくなるので返してから落とす。
+  try {
+    // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
+    // 誰も解放できないまま抜ける（feature 検査と同じ後始末に乗せる）。ここでもマクロタスクへ
+    // 譲る: `acquireGpu` の await 解決はマイクロタスク継続なので、待機中に積まれたクリック
+    // 由来の中断タスクはまだ実行されていない。
+    await settleAbort(options.signal);
+    assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `IrodoriPipeline: quant '${quantName}'`);
+    return {
+      gpu,
+      ownsGpu,
+      config,
+      tokenizer,
+      backbone,
+      textProj,
+      captionProj,
+      speaker,
+      duration,
+      dit,
+      codecEncoder,
+      codecDecoder,
+      ditSessionOptions,
+      ...(options.onRunDiagnostics === undefined
+        ? {}
+        : { onRunDiagnostics: options.onRunDiagnostics }),
+    };
+  } catch (error) {
+    // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
     if (ownsGpu) gpu.destroy();
-    throw new Error(
-      `IrodoriPipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +
-        " GpuContext で有効になっていない（acquireGpu({ shaderF16: true }) で取り直す）",
-    );
+    throw error;
   }
-  return {
-    gpu,
-    ownsGpu,
-    config,
-    tokenizer,
-    backbone,
-    textProj,
-    captionProj,
-    speaker,
-    duration,
-    dit,
-    codecEncoder,
-    codecDecoder,
-    ditSessionOptions,
-    ...(options.onRunDiagnostics === undefined
-      ? {}
-      : { onRunDiagnostics: options.onRunDiagnostics }),
-  };
 };
 
 /**
@@ -1410,13 +1452,17 @@ export class IrodoriPipeline {
   /**
    * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
    * {@link IrodoriPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
-   * 追従）。省略時は pin 済みの {@link IRODORI_DEFAULT_SOURCE}（ADR 0073 決定 2）。
+   * 追従）。**`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。
    */
   static async fromPretrained(
-    ref: string | HubRepoRef = IRODORI_DEFAULT_SOURCE,
+    ref: string | HubRepoRef,
     options: IrodoriFromPretrainedOptions = {},
   ): Promise<IrodoriPipeline> {
-    const repoRef: HubRepoRef = typeof ref === "string" ? { repo: ref } : ref;
+    const repoRef = toRepoRef(
+      ref,
+      "IrodoriPipeline.fromPretrained",
+      "IRODORI_V4_SMALL_CURRENT（@karume/models/irodori）",
+    );
     const hubOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),
@@ -1434,18 +1480,21 @@ export class IrodoriPipeline {
       ...hubOptions,
       ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     });
+    // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
     return IrodoriPipeline.fromAssets({ manifest: loaded.manifest, assets }, {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...selection,
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
   }
 
   /**
    * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel` を全てここで済ませ、
-   * **Session は 1 本も張らない**。
+   * **Session は 1 本も張らない**。{@link IrodoriPipelineOptions.signal} を渡すと段の境目で
+   * 中断できる（`openIrodoriState` の NOTE）。
    */
   static async fromAssets(
     input: IrodoriAssets,

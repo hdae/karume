@@ -25,18 +25,15 @@ export type {
 } from "./src/anima/pipeline.ts";
 
 /**
- * 公開配布リポの既定ソース（pin 済み commit SHA — ADR 0073）。`ref` 省略の
- * {@link AnimaPipeline.fromPretrained} が読む値そのもので、追従へ切り替える利用者が
- * `{ ...ANIMA_DEFAULT_SOURCE, revision: "main" }` と綴れるように面へ出す。
+ * **このパッケージ版が検証した取得元**（公開配布リポ 1 つにつき 1 定数・pin 済み commit SHA —
+ * ADR 0073）。`ANIMA_TURBO_CURRENT` = `hdae/karume-anima-turbo`（turbo 1 モデル）/
+ * `ANIMA_CURRENT` = `hdae/karume-anima`（素版 3 モデルが同居 — `{ model }` で選ぶ）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン** — `fromPretrained` の第 1 引数へ
+ * そのまま渡す。再現性を自分で固定したい場合は、この定数ではなく自分の `{ repo, revision }` を
+ * 書く（`fromPretrained` に既定は無い）。
  */
-export { ANIMA_DEFAULT_SOURCE } from "./src/anima/config.ts";
-
-/**
- * 素版（非 turbo）3 モデルが同居する配布リポの pin（ADR 0073）。既定ではないので、素版を組む
- * 利用者が `fromPretrained(ANIMA_BASE_SOURCE, { model })` と綴る（1 リポ = 3 モデルなので
- * リポ参照だけでは 1 本に決まらない）。pin の MUST は {@link ANIMA_DEFAULT_SOURCE} と同じ。
- */
-export { ANIMA_BASE_SOURCE } from "./src/anima/config.ts";
+export { ANIMA_CURRENT, ANIMA_TURBO_CURRENT } from "./src/anima/config.ts";
 
 /**
  * 途中 latent からの RGB プレビュー近似。`denoise-step` イベントの `copyLatents()`

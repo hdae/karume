@@ -28,8 +28,11 @@ export type {
 } from "./src/irodori/pipeline.ts";
 
 /**
- * 公開配布リポの既定ソース（pin 済み commit SHA — ADR 0073）。`ref` 省略の
- * {@link IrodoriPipeline.fromPretrained} が読む値そのもので、追従へ切り替える利用者が
- * `{ ...IRODORI_DEFAULT_SOURCE, revision: "main" }` と綴れるように面へ出す。
+ * **このパッケージ版が検証した取得元**（`hdae/karume-irodori-v4-small` の pin 済み commit SHA —
+ * ADR 0073）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link IrodoriPipeline.fromPretrained}
+ * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この定数ではなく自分の
+ * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
  */
-export { IRODORI_DEFAULT_SOURCE } from "./src/irodori/config.ts";
+export { IRODORI_V4_SMALL_CURRENT } from "./src/irodori/config.ts";

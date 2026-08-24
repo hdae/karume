@@ -5,14 +5,15 @@
  *     deno task demo:anima --source someone/anima --model anima-turbo --quant f16 --steps 8
  *     deno task demo:anima --source models/karume-anima --steps 32 --guidance 6
  *
- * `--source` 未指定なら pin 済みの既定ソース（{@link ANIMA_DEFAULT_SOURCE} — ADR 0073）から
- * 取る。明示したときだけ、`karume.json` を持つディレクトリならローカル読み（`fromAssets`）、
+ * `--source` 未指定ならこの台本が {@link ANIMA_TURBO_CURRENT}（このパッケージ版が検証した
+ * 取得元 — ADR 0073）を渡す。`fromPretrained` 自体に既定は無いので、取得元を綴るのは常に
+ * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリならローカル読み（`fromAssets`）、
  * それ以外は HF リポジトリ名として `fromPretrained`。未指定のノブは manifest の `defaults`
  * が埋める。
  */
 
 import { AnimaPipeline, encodePng } from "../../packages/models/mod.ts";
-import { ANIMA_DEFAULT_SOURCE, parseResolution } from "../../packages/models/anima.ts";
+import { ANIMA_TURBO_CURRENT, parseResolution } from "../../packages/models/anima.ts";
 import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
 
 const USAGE = "--source <パス|HF repo> --prompt <文字列> --resolution <WxH> --model <名前>" +
@@ -80,7 +81,7 @@ const openPipeline = async (): Promise<AnimaPipeline> => {
   if (source !== undefined && await isLocalDist(source)) {
     return AnimaPipeline.fromAssets(await loadLocalAssets(source, selection), selection);
   }
-  return AnimaPipeline.fromPretrained(source ?? ANIMA_DEFAULT_SOURCE, {
+  return AnimaPipeline.fromPretrained(source ?? ANIMA_TURBO_CURRENT, {
     ...selection,
     onProgress: ({ phase, loaded, total }) =>
       Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
@@ -88,7 +89,7 @@ const openPipeline = async (): Promise<AnimaPipeline> => {
 };
 
 console.log(
-  `[anima] ${source ?? `${ANIMA_DEFAULT_SOURCE.repo}（pin 済みの既定）`}` +
+  `[anima] ${source ?? `${ANIMA_TURBO_CURRENT.repo}（台本の既定 = 検証済み pin）`}` +
     ` / model ${model ?? "（manifest の既定）"}` +
     ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}`,
 );

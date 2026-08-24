@@ -37,11 +37,14 @@ export type { Sbv2AccentPhrase, Sbv2Mora, Sbv2Prosody } from "./src/sbv2/text/pr
 export { Sbv2InputError } from "./src/sbv2/errors.ts";
 
 /**
- * 公開配布リポの既定ソース（pin 済み commit SHA — ADR 0073）。`ref` 省略の
- * {@link Sbv2Pipeline.fromPretrained} が読む値そのもので、追従へ切り替える利用者が
- * `{ ...SBV2_DEFAULT_SOURCE, revision: "main" }` と綴れるように面へ出す。
+ * **このパッケージ版が検証した取得元**（`hdae/karume-sbv2-jvnv` の pin 済み commit SHA —
+ * ADR 0073）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link Sbv2Pipeline.fromPretrained}
+ * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この定数ではなく自分の
+ * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
  */
-export { SBV2_DEFAULT_SOURCE } from "./src/sbv2/config.ts";
+export { SBV2_JVNV_CURRENT } from "./src/sbv2/config.ts";
 
 /**
  * 修正辞書（誤読・アクセントの差し替え）の綴りは `@hdae/yomi` が正本。**素通しで通す** —

@@ -5,8 +5,9 @@
  *     deno task demo:irodori --caption "落ち着いた女性の声で、ゆっくりと話している。" --seed 7
  *     deno task demo:irodori --ref inputs/irodori/v4-small/samples/clone_ref1.wav
  *
- * `--source` 未指定なら pin 済みの既定ソース（{@link IRODORI_DEFAULT_SOURCE} — ADR 0073）から
- * 取る。明示したときだけ、`karume.json` を持つディレクトリならローカル読み（`fromAssets`）、
+ * `--source` 未指定ならこの台本が {@link IRODORI_V4_SMALL_CURRENT}（このパッケージ版が検証した
+ * 取得元 — ADR 0073）を渡す。`fromPretrained` 自体に既定は無いので、取得元を綴るのは常に
+ * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリならローカル読み（`fromAssets`）、
  * それ以外は HF リポジトリ名として `fromPretrained`。`--ref` は参照音声（WAV — 配布形と同じ
  * 48kHz の mono/多ch PCM16 か IEEE float）で、渡すとその声質に寄る（voice cloning）。`--caption` は
  * 声質の指示文（Voice Design）。サンプラのノブ（steps / CFG）は manifest の `pipelineConfig`
@@ -19,7 +20,7 @@ import {
   IrodoriPipeline,
   type IrodoriSpeakerInput,
 } from "../../packages/models/mod.ts";
-import { IRODORI_DEFAULT_SOURCE } from "../../packages/models/irodori.ts";
+import { IRODORI_V4_SMALL_CURRENT } from "../../packages/models/irodori.ts";
 import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
 
 const USAGE = "--source <パス|HF repo> --text <文字列> --caption <文字列> --ref <WAV パス>" +
@@ -87,7 +88,7 @@ const openPipeline = async (): Promise<IrodoriPipeline> => {
   if (source !== undefined && await isLocalDist(source)) {
     return IrodoriPipeline.fromAssets(await loadLocalAssets(source, selection), selection);
   }
-  return IrodoriPipeline.fromPretrained(source ?? IRODORI_DEFAULT_SOURCE, {
+  return IrodoriPipeline.fromPretrained(source ?? IRODORI_V4_SMALL_CURRENT, {
     ...selection,
     onProgress: ({ phase, loaded, total }) =>
       Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
@@ -95,7 +96,7 @@ const openPipeline = async (): Promise<IrodoriPipeline> => {
 };
 
 console.log(
-  `[irodori] ${source ?? `${IRODORI_DEFAULT_SOURCE.repo}（pin 済みの既定）`}` +
+  `[irodori] ${source ?? `${IRODORI_V4_SMALL_CURRENT.repo}（台本の既定 = 検証済み pin）`}` +
     ` / model ${model ?? "（manifest の既定）"}` +
     ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}` +
     `${ref === undefined ? "" : ` / 参照 ${ref}`}\n` +
