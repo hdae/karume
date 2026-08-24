@@ -46,8 +46,11 @@ const f32 = Math.fround;
  * 上流の既定ブレンド幅（`tile_sample_min − tile_sample_stride` = 256−192 = 64px）と同じ
  * オーダーに合わせてある。decoder は 3×3 conv 12 本 + upsample 3 段で sample 空間の実効
  * 受容野が数十 px なので、これを下回ると継ぎ目がランプで隠しきれなくなる。
+ *
+ * NOTE: `export` は受理集合（`resolution.ts`）が**同じ重なりで**タイル本数を数えるため
+ * （既定値を写すと、片方だけ動かしたときに受理集合と実際の分割が黙ってずれる）。
  */
-const MIN_TILE_OVERLAP_LATENT = 8;
+export const MIN_TILE_OVERLAP_LATENT = 8;
 
 /** latent の 1 軸ぶんのタイル配置。 */
 type TileAxis = {
