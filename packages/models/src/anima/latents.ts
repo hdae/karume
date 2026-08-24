@@ -17,6 +17,11 @@ const f32 = Math.fround;
  *
  * MUST: 手写しの数を検証なしで置かない。参照フィクスチャの `latents_mean` / `latents_std` との
  * ビット一致をテストが固定する。値を差し替えるモデルを使うならその 1 本が落ちる。
+ *
+ * MUST: この 2 本を**公開面（barrel）へは出さない** — TypedArray は可変なので、実体を配ると
+ * 消費側の書き換えが `generate` の逆正規化へ黙って波及する（グローバル可変状態の禁止 —
+ * CLAUDE.md 横断不変条件）。`export` はモジュール間の内部利用（`pipeline.ts`）のためで、
+ * barrel が出すのは写しを返す {@link animaLatents}。
  */
 export const ANIMA_LATENTS_MEAN: Float32Array<ArrayBuffer> = Float32Array.from([
   -0.7571,
@@ -56,6 +61,23 @@ export const ANIMA_LATENTS_STD: Float32Array<ArrayBuffer> = Float32Array.from([
   2.8251,
   1.916,
 ]);
+
+/**
+ * 逆正規化の定数対を**呼び出しごとに独立した写しで**返す（公開面が出すのはこちら）。
+ *
+ * MUST: 実体（{@link ANIMA_LATENTS_MEAN} / {@link ANIMA_LATENTS_STD}）を返さない。返り値を
+ * 消費側が書き換えても、`generate` の逆正規化にも次の呼び出しの返り値にも波及しない。
+ *
+ * NOTE: 「凍らせて出す」は成立しない — 要素を持つ TypedArray は `Object.freeze` が
+ * TypeError を投げる。写しを返すアクセサが唯一の形。
+ */
+export const animaLatents = (): {
+  mean: Float32Array<ArrayBuffer>;
+  std: Float32Array<ArrayBuffer>;
+} => ({
+  mean: ANIMA_LATENTS_MEAN.slice(),
+  std: ANIMA_LATENTS_STD.slice(),
+});
 
 /**
  * latent の per-channel 逆正規化。

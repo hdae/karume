@@ -51,15 +51,21 @@ export { ANIMA_BASE_SOURCE } from "./src/anima/config.ts";
 export { approximatePreview } from "./src/anima/preview.ts";
 
 /**
- * 途中 latent の逆正規化素材。**プレビューには要らない** — {@link approximatePreview} の係数は
- * **正規化空間**で較正されている（2026-08-24 実測）ので、逆正規化した値を渡すと白飛びした
- * 別物になる。`copyLatents()` の返り値はそのまま渡す。
+ * 途中 latent の逆正規化素材（`const { mean, std } = animaLatents()` で取り、
+ * `denormalizeLatents(latents, shape, mean, std)` へ渡す）。**プレビューには要らない** —
+ * {@link approximatePreview} の係数は**正規化空間**で較正されている（2026-08-24 実測）ので、
+ * 逆正規化した値を渡すと白飛びした別物になる。`copyLatents()` の返り値はそのまま渡す。
  *
  * ここを出すのは、VAE decode と同じ土俵で latent を扱いたい消費側（自前の decode・latent の
  * 解析・別の射影の較正）のため。この 2 本は VAE の config にしかなく、IR にも配布資産にも
  * 入っていないので、逆正規化を消費側で書き直すと定数が二重に持たれる。
+ *
+ * MUST: 定数の実体ではなく**アクセサ**を出す — {@link animaLatents} は呼び出しごとに独立した
+ * 写しを返す。可変な TypedArray の実体を配ると、消費側の書き換えが `generate` の逆正規化へ
+ * 黙って波及する（グローバル可変状態の禁止 — CLAUDE.md 横断不変条件）。
+ * {@link denormalizeLatents} は mean / std を引数で受ける純関数なのでそのまま出す。
  */
-export { ANIMA_LATENTS_MEAN, ANIMA_LATENTS_STD, denormalizeLatents } from "./src/anima/latents.ts";
+export { animaLatents, denormalizeLatents } from "./src/anima/latents.ts";
 
 /**
  * 解像度の綴り（`1344x768` / 正方の略記 `512`）と受理集合。

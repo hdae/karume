@@ -1,9 +1,16 @@
 // latent / 条件テンソルの整形と RGBA 化の挙動テスト。GPU も資産も要らない純関数。
 
-import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotStrictEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import {
   ANIMA_LATENTS_MEAN,
   ANIMA_LATENTS_STD,
+  animaLatents,
   denormalizeLatents,
   padSequence,
 } from "../src/anima/latents.ts";
@@ -47,6 +54,31 @@ Deno.test("デモ定数: latents_mean / latents_std は 16 チャネル対で揃
   assertEquals(ANIMA_LATENTS_MEAN.length, 16);
   assertEquals(ANIMA_LATENTS_STD.length, ANIMA_LATENTS_MEAN.length);
   assert(ANIMA_LATENTS_STD.every((value) => value > 0), "std に非正の値がある");
+});
+
+Deno.test("animaLatents: 呼ぶたびに独立した写し（消費側の書き換えが実体へ波及しない）", () => {
+  // 公開面が出すのはこのアクセサだけ。実体を配ると、消費側が 1 要素書き換えただけで
+  // 以後の全 `generate` の逆正規化が黙って変わる（グローバル可変状態）。
+  const first = animaLatents();
+  assertEquals([...first.mean], [...ANIMA_LATENTS_MEAN]);
+  assertEquals([...first.std], [...ANIMA_LATENTS_STD]);
+  // 実体そのものではない。
+  assertNotStrictEquals(first.mean, ANIMA_LATENTS_MEAN);
+  assertNotStrictEquals(first.std, ANIMA_LATENTS_STD);
+
+  const meanBefore = ANIMA_LATENTS_MEAN[0];
+  const stdBefore = ANIMA_LATENTS_STD[0];
+  first.mean[0] = 999;
+  first.std[0] = 999;
+
+  // 内部実体も、次に取り直した写しも変わらない。
+  assertEquals(ANIMA_LATENTS_MEAN[0], meanBefore);
+  assertEquals(ANIMA_LATENTS_STD[0], stdBefore);
+  const second = animaLatents();
+  assertEquals(second.mean[0], meanBefore);
+  assertEquals(second.std[0], stdBefore);
+  assertNotStrictEquals(second.mean, first.mean);
+  assertNotStrictEquals(second.std, first.std);
 });
 
 Deno.test("padSequence: 余白はゼロ・B>1 と行数超過は落とす", () => {
