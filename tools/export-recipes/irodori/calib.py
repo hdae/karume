@@ -49,7 +49,7 @@ export 側はパッチ前の素の経路・配布条件（stage 外を先に丸�
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -191,6 +191,21 @@ def is_adaln(name: str) -> bool:
     export 側の集合分割が 1 実装で決まる（写すと i4 に丸めた集合と i4 で格納する集合が割れる）。
     """
     return not ADALN_SEGMENTS.isdisjoint(name.split("."))
+
+
+def adaln_segments_seen(names: Iterable[str]) -> frozenset[str]:
+    """`names` の中に**セグメントとして**現れた {@link ADALN_SEGMENTS} の綴り。
+
+    {@link is_adaln} が「どれか 1 つでも当たったか」を返すのに対し、こちらは**どれが当たったか**
+    を返す。両方を数える理由は、i8 へ戻す 144 本が 2 セグメントの**和**で決まるから — 上流が
+    片側（例: `mlp_adaln`）だけを改名すると、`is_adaln` は残る側で真を返し続けるので「adaLN が
+    1 本も無い」門は素通りし、i4 の本数の門も同じ分類器から両辺を作るので自己整合したまま
+    緑になる（= 聴感裁定で棄却した構成が黙って配られる）。
+    """
+    seen: set[str] = set()
+    for name in names:
+        seen.update(ADALN_SEGMENTS.intersection(name.split(".")))
+    return frozenset(seen)
 
 
 def dit_i4_names(dit: nn.Module, sym_max: int) -> frozenset[str]:

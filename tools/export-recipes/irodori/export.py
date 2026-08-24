@@ -2018,11 +2018,15 @@ def _fake_quant_i4(
         )
     # MUST: adaLN が 1 本も無いのは fail loudly — 聴感裁定で i8 へ戻した 144 本が上流の改名で
     # 黙って i4 に戻ると、格納形も本数の門も正しいまま「裁定で棄却した構成」を配ることになる。
-    if not adaln_names:
+    # MUST: 見るのは**綴りごと**（{@link irodori.calib.adaln_segments_seen}）— 片側だけの改名は
+    # 集合が空にならないので「1 本も無い」だけを見る門を素通りし、後段の過不足門も同じ分類器
+    # から両辺を作るので自己整合したまま緑になる（半分の 72 本だけが黙って i4 へ戻る）。
+    missing = sorted(calib.ADALN_SEGMENTS - calib.adaln_segments_seen(stage_names))
+    if missing:
         raise SystemExit(
-            "DiT block 内に adaLN の linear が 1 本も無い"
-            f"（探した綴り: {sorted(calib.ADALN_SEGMENTS)}）"
-            "— 上流が modulation の属性名を変えている"
+            f"DiT block 内に adaLN の linear が 1 本も無い綴り: {missing}"
+            f"（探した綴り: {sorted(calib.ADALN_SEGMENTS)}・見つかった adaLN は"
+            f" {len(adaln_names)} 本）— 上流が modulation の属性名を変えている"
         )
     # i8 で配る側 = 配布グラフの適格から i4 の 168 本を除いた残り（block 外 5 本 + adaLN 144 本）。
     i8_names = graph_names - i4_names
@@ -2471,8 +2475,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     if args.dtype != "i4" and (args.no_calib or args.calib_steps is not None):
         parser.error(f"--calib-steps / --no-calib は --dtype i4 だけに効く（指定は {args.dtype}）")
-    if args.calib_steps is not None and args.calib_steps < 1:
-        parser.error(f"--calib-steps は 1 以上（指定 {args.calib_steps}）")
+    # 上限が要るのは、超過が**完走してから別の診断で落ちる**から: 打ち切り番兵は
+    # `len(batches) >= steps` でしか飛ばない（`irodori.calib.capture_stage_batches`）ので、
+    # 参照ループ全長を超えた指定は 1 度も飛ばず、実重み 1 ケースぶんの denoise を回し切った
+    # 後に「上流 `sample_euler_rf_cfg` の綴りが台本の想定と食い違っている」という**主語違いの**
+    # 診断で落ちる。`irodori.measure_quant` の同じノブは最初からこの形（両側の範囲検査）。
+    from .pipeline_ref import NUM_STEPS
+
+    if args.calib_steps is not None and not 1 <= args.calib_steps <= NUM_STEPS:
+        parser.error(
+            f"--calib-steps は 1〜{NUM_STEPS}（参照ループの step 数・指定 {args.calib_steps}）"
+        )
     out_dir = default_out_root(args.model_dir, args.dtype) if args.out is None else args.out
     summary = export_series(
         args.model_dir,

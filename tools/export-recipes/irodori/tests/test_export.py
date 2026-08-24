@@ -29,6 +29,7 @@ from torch import nn
 
 from irodori import export as ir
 from irodori import patch as patch_irodori
+from irodori import pipeline_ref as ip
 from karume.ir import IrGraph, IrValue
 from karume.pipeline import export_to_file
 from karume.quantize import quantize_to_int8
@@ -626,6 +627,31 @@ class TestTargetCli:
         ir.main(["--dtype", dtype])
 
         assert seen["dtype"] == dtype
+
+    @pytest.mark.parametrize("steps", ["0", "41"])
+    def test_a_calib_step_count_outside_the_reference_loop_is_refused_at_the_entrance(
+        self, monkeypatch, capsys, steps
+    ):
+        """MUST: 上限は**入口**で見る（超過は完走してから主語違いの診断で落ちる）。
+
+        打ち切り番兵は `len(batches) >= steps` でしか飛ばないので、参照ループ全長を超えた
+        指定は 1 度も飛ばず、実重み 1 ケースぶんの denoise を回し切った後に「上流の綴りが
+        台本の想定と食い違っている」で落ちる — 原因の違う診断で、しかも一番高くつく。
+        """
+        monkeypatch.setattr(ir, "export_series", lambda *_a, **_kw: {"dir": "x"})
+
+        with pytest.raises(SystemExit):
+            ir.main(["--dtype", "i4", "--calib-steps", steps])
+
+        assert f"--calib-steps は 1〜{ip.NUM_STEPS}" in capsys.readouterr().err
+
+    def test_a_calib_step_count_inside_the_reference_loop_is_forwarded(self, monkeypatch):
+        """縮小 smoke の窓は塞がない（配布へ載せる側は組み立ての予算門が拒否する）。"""
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(ir, "export_series", lambda *_a, **kw: seen.update(kw) or {"dir": "x"})
+        ir.main(["--dtype", "i4", "--calib-steps", str(ip.NUM_STEPS)])
+
+        assert seen["calib_steps"] == ip.NUM_STEPS
 
 
 def _is_f16_exact(tensor: torch.Tensor) -> bool:

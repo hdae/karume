@@ -9,7 +9,8 @@
 - 配布グラフの linear が「block 内の adaLN 以外 = i4 格納 × 校正」「block 外 + adaLN = i8 格納」
   へ**過不足なく排他に**割れること（聴感裁定 2026-08-23 で block 外と adaLN を i4 から外した）
 - adaLN の判定が**セグメント一致**であること（`attention` が `attention_adaln` を巻き込まない・
-  adaLN 配下の子を取りこぼさない）と、adaLN が 1 本も無い日は fail loudly すること
+  adaLN 配下の子を取りこぼさない）と、adaLN が 1 本も無い日**も片側だけ改名された日も**
+  fail loudly すること
 - scale 台帳と 1 本単位の格納指定のキーがラッパの FQN 空間（= safetensors のテンソルキー）に
   居ること
 - 校正が**実際に別の丸め**を産むこと（素通りしたら格納形が同じなので資産からは読めない）
@@ -213,6 +214,28 @@ class RenamedAdalnBlock(TinyBlock):
 class RenamedAdalnDit(TinyDit):
     def __init__(self, blocks: int = 3) -> None:
         super().__init__(blocks, block_type=RenamedAdalnBlock)
+
+
+class HalfRenamedAdalnBlock(TinyBlock):
+    """上流が modulation の**片側だけ**を改名した日の block（`mlp_adaln` だけが消える）。
+
+    集合は空にならないので「adaLN が 1 本も無い」だけを見る門は素通りし、i4 の過不足門も
+    同じ分類器から両辺を作るので自己整合したまま緑になる — 落ちる網が 1 枚も無いまま、
+    i8 へ戻したはずの半分が i4 へ戻る。
+    """
+
+    def __init__(self, attention_width: int = HIDDEN) -> None:
+        super().__init__(attention_width)
+        self.mlp_modulation = self.mlp_adaln
+        del self.mlp_adaln
+
+    def modulation(self, cond_embed: torch.Tensor) -> torch.Tensor:
+        return self.attention_adaln(cond_embed) + self.mlp_modulation(cond_embed)
+
+
+class HalfRenamedAdalnDit(TinyDit):
+    def __init__(self, blocks: int = 3) -> None:
+        super().__init__(blocks, block_type=HalfRenamedAdalnBlock)
 
 
 class CachedKvDit(TinyDit):
@@ -565,6 +588,27 @@ class TestAdalnBoundary:
         stub_capture(dit)
 
         with pytest.raises(SystemExit, match="adaLN の linear が 1 本も無い"):
+            quantize(dit)
+
+    def test_the_seen_segments_are_reported_one_by_one(self):
+        """MUST: 「どれか当たったか」ではなく**どれが当たったか**を返す（片側改名の検出源）。"""
+        both = ["blocks.0.attention_adaln.1", "blocks.0.mlp_adaln.1", "blocks.0.attention.wq"]
+
+        assert calib.adaln_segments_seen(both) == calib.ADALN_SEGMENTS
+        assert calib.adaln_segments_seen(both[:1]) == {"attention_adaln"}
+        assert calib.adaln_segments_seen(["blocks.0.mlp_adaln"]) == {"mlp_adaln"}
+        assert calib.adaln_segments_seen(["blocks.0.attention.wq"]) == frozenset()
+
+    def test_a_dit_that_renamed_only_one_side_fails_loudly(self, stub_capture):
+        """MUST: 片側だけの改名も落とす（空集合にならないので「1 本も無い」門は素通りする）。
+
+        `mlp_adaln` だけが消えると、i8 へ戻したはずの 144 本のうち半分が i4 へ戻る。格納形も
+        本数の過不足門も緑のまま（両辺が同じ分類器から作られる）なので、落ちる網はここしかない。
+        """
+        dit = make_dit(dit_type=HalfRenamedAdalnDit)
+        stub_capture(dit)
+
+        with pytest.raises(SystemExit, match=r"1 本も無い綴り: \['mlp_adaln'\]"):
             quantize(dit)
 
 

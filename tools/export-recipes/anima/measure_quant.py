@@ -83,6 +83,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
+from _shared.paths import INPUTS_ROOT
 from karume.act_quant import (
     attach_act_quant,
     detach_act_quant,
@@ -128,9 +129,8 @@ from .pipeline_ref import (
     timesteps_proj_table,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-DEFAULT_LORA = REPO_ROOT / "inputs" / "anima" / "anima-turbo-lora-v0.2.safetensors"
+DEFAULT_LORA = INPUTS_ROOT / "anima" / "anima-turbo-lora-v0.2.safetensors"
 
 #: turbo 運用値（CFG=1 は uncond 分岐を計算しない — anima/pipeline_ref.py の MUST と同じ形）。
 GUIDANCE = 1.0
