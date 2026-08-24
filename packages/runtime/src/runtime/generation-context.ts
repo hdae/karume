@@ -27,6 +27,7 @@ import {
   pushFailureScopes,
   RUNTIME_INTERNAL,
 } from "../gpu/device.ts";
+import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import { numel, stateWindow } from "../ops.ts";
 import { ExecutionError, type SymbolBindings } from "./plan.ts";
 import type { BakedGroups } from "./recipe.ts";
@@ -48,7 +49,7 @@ export const LENGTHS_BYTES: number = 8;
  * 無効なバッファや整列違反に対して警告すら出さない no-op になるので、「書いた値が実際に
  * 載っているか」は読み戻す以外に確かめる手段が無い（実行経路はこのコピーを出さない）。
  */
-const LENGTHS_USAGE = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+const LENGTHS_USAGE = BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST | BUFFER_USAGE.COPY_SRC;
 
 /** state スロットの dtype は f32 のみ（`STATE_DTYPES` — f16 席は ADR 0066 追記 5 の予約）。 */
 export const STATE_ELEMENT_BYTES: number = 4;

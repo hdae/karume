@@ -46,6 +46,7 @@ import {
 } from "../gpu/device.ts";
 import { PipelineCache } from "../gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../gpu/submit.ts";
+import { BUFFER_USAGE, MAP_MODE } from "../gpu/webgpu-constants.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 /** S の格納形（{@link SessionOptions.attentionScoreStorage} — 公開面で名前を持てるように再輸出）。 */
@@ -160,8 +161,8 @@ const hostTensor = (
 };
 
 /** MUST: `queue.writeBuffer` で書くバッファはプール外（アリーナの不変条件）。 */
-const HOST_WRITTEN_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST |
-  GPUBufferUsage.COPY_SRC;
+const HOST_WRITTEN_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST |
+  BUFFER_USAGE.COPY_SRC;
 
 /**
  * 入力の束を「ホスト配列の shape 表」と「常駐入力の表」に分ける。
@@ -2195,7 +2196,7 @@ export class Session {
    */
   async #awaitStaged(staged: readonly StagedOutput[]): Promise<void> {
     await this.#state.gpu[RUNTIME_INTERNAL].raceDeviceLost(
-      Promise.all(staged.map((item) => item.staging.mapAsync(GPUMapMode.READ))),
+      Promise.all(staged.map((item) => item.staging.mapAsync(MAP_MODE.READ))),
       "readback",
     );
   }

@@ -63,6 +63,7 @@
  */
 
 import { type GpuContext, RUNTIME_INTERNAL } from "./device.ts";
+import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
 /** SubmitPolicy の値が実行不能（ハングを含む）な構成である。 */
 export class SubmitPolicyError extends Error {
@@ -615,11 +616,11 @@ export class SubmitScheduler {
     const querySet = this.#device.createQuerySet({ type: "timestamp", count });
     const resolveBuffer = this.#device.createBuffer({
       size: byteLength,
-      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      usage: BUFFER_USAGE.QUERY_RESOLVE | BUFFER_USAGE.COPY_SRC,
     });
     const readBuffer = this.#device.createBuffer({
       size: byteLength,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
     });
     let index = 0;
     for (const item of chunk) {
@@ -671,7 +672,7 @@ export class SubmitScheduler {
     try {
       // MUST: 消失後の mapAsync が解決しない実装がありうる（readback と同じ理由で競わせる）。
       await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
-        Promise.all(pending.map((item) => item.readBuffer.mapAsync(GPUMapMode.READ))),
+        Promise.all(pending.map((item) => item.readBuffer.mapAsync(MAP_MODE.READ))),
         "timestamp の回収",
       );
       for (const item of pending) {

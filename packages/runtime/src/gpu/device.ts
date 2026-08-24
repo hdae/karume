@@ -16,6 +16,7 @@
  */
 
 import { STORAGE_USAGE } from "./arena.ts";
+import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
 /** navigator.gpu が無い / アダプタを取得できない。 */
 export class GpuUnavailableError extends Error {
@@ -337,11 +338,11 @@ export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> 
   const byteLength = SHADER_F16_CANARY_EXPECTED.length * 4;
   const out = device.createBuffer({
     size: byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC,
   });
   const staging = device.createBuffer({
     size: byteLength,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
   });
   try {
     const pipeline = await raceCanaryDeviceLost(
@@ -372,7 +373,7 @@ export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> 
     pass.end();
     encoder.copyBufferToBuffer(out, 0, staging, 0, byteLength);
     device.queue.submit([encoder.finish()]);
-    await raceCanaryDeviceLost(device, staging.mapAsync(GPUMapMode.READ), "読み戻し");
+    await raceCanaryDeviceLost(device, staging.mapAsync(MAP_MODE.READ), "読み戻し");
     const observed = [...new Float32Array(staging.getMappedRange().slice(0))];
     staging.unmap();
     const matches = SHADER_F16_CANARY_EXPECTED.every((value, index) => observed[index] === value);
@@ -950,7 +951,7 @@ export class ResidentTensor {
     try {
       staging = device.createBuffer({
         size: this.byteLength,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
       });
       const encoder = device.createCommandEncoder();
       encoder.copyBufferToBuffer(this.#buffer, 0, staging, 0, this.byteLength);
@@ -961,7 +962,7 @@ export class ResidentTensor {
       if (failure !== undefined) throw failure;
       // MUST: 消失後の mapAsync が解決しない実装がありうる（実測は raceCanaryDeviceLost の
       // doc）ため競わせる — ハングを失敗に変換する保険。
-      await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(staging.mapAsync(GPUMapMode.READ), where);
+      await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(staging.mapAsync(MAP_MODE.READ), where);
       const copy = staging.getMappedRange().slice(0);
       staging.unmap();
       return copy;

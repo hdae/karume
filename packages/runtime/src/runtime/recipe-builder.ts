@@ -191,6 +191,7 @@ import type { IrDtype, IrGraph } from "../format/ir.ts";
 import type { RunArena } from "../gpu/arena.ts";
 import type { GpuContext } from "../gpu/device.ts";
 import type { PipelineCache } from "../gpu/pipeline-cache.ts";
+import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../kernels/bmm.ts";
 import {
   ATTENTION_QK_MASK_BINDING,
@@ -252,8 +253,8 @@ type ElementwiseOp =
   | { readonly op: UnaryOpName | BinaryOpName | typeof WHERE_OP; readonly dtype: IrDtype }
   | { readonly op: typeof CAST_OP; readonly dtype: IrDtype; readonly to: IrDtype };
 
-const PARAMS_STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
-const PARAMS_UNIFORM_USAGE = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
+const PARAMS_STORAGE_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST;
+const PARAMS_UNIFORM_USAGE = BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST;
 
 /**
  * 導出相が読む Session の状態（**必要な欄だけ**の構造的な面）。

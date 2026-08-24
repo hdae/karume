@@ -31,6 +31,8 @@
  *   成立しており、別名の数を数える状態を持たない。
  */
 
+import { BUFFER_USAGE } from "./webgpu-constants.ts";
+
 /** アリーナの不変条件違反（参照計数の破れ・破棄後利用など）。 */
 export class ArenaError extends Error {
   override readonly name = "ArenaError";
@@ -42,8 +44,8 @@ export class ArenaError extends Error {
  * {@link ResidentTensor}（src/gpu/device.ts）も**この定数**で作る。別立てにすると、同じ役割の
  * バッファが 2 つの usage を持つ形になる。
  */
-export const STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST |
-  GPUBufferUsage.COPY_SRC;
+export const STORAGE_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST |
+  BUFFER_USAGE.COPY_SRC;
 
 /**
  * サイズクラスは「4 バイト整列した実バイト数そのもの」とする。
@@ -138,7 +140,7 @@ export class RunArena {
    */
   allocHostWritten(bytes: number, usage: number): GPUBuffer {
     this.#assertUsable();
-    if ((usage & GPUBufferUsage.COPY_DST) === 0) {
+    if ((usage & BUFFER_USAGE.COPY_DST) === 0) {
       throw new ArenaError("writeBuffer で書くバッファには COPY_DST が必要");
     }
     const buffer = this.#device.createBuffer({ size: toSizeClass(bytes), usage });
@@ -158,7 +160,7 @@ export class RunArena {
     this.#assertUsable();
     const buffer = this.#device.createBuffer({
       size: toSizeClass(bytes),
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
     });
     this.#owned.push(buffer);
     this.#allocCount += 1;
