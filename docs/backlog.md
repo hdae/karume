@@ -41,9 +41,10 @@ Turbo LoRA を焼くと **negative prompt が効かない**（CFG=1 では uncon
   20 step / CFG 4）で取得 → integrity 検証 → 実 GPU 描画まで 345s で通過。3 モデルを同一 seed で
   描き分けて**別の絵になること**も確認（text_conditioner をモデル別にできていないと 3 つとも
   同じ傾向になる — `outputs/demo/model-check/`）。
-- **保留: i4 席**（`CALIB_STEPS` / `CALIB_GUIDANCE` が turbo 前提でハードコードされており、
-  素版で回すと運用条件と食い違う校正を焼くことになる — 校正条件のモデル別化と同時に J-4a の
-  続きで裁く）。
+- **i4 席の保留は J-4 ②で解消（2026-08-24）**: 校正条件のモデル別化 + 3 モデル export 済み。
+  ただし**視認裁定で配布スキップ** — karume-anima を再アップロードすると local dist の
+  `w4` / `w4-a8-s16` 席が混入することに注意（perf-ledger Q-5 /
+  [research 2026-08-24](research/2026-08-24-gptq-expansion-quality.md) §5）。
 - **保留: サンプラーの選択肢**（現状は Euler 固定・manifest に種別欄が無い — research §4）。
 
 ## now（継続）— 量子化方式の探索・第 2 段（波 J・2026-08-20 着手）
@@ -104,16 +105,17 @@ Turbo LoRA を焼くと **negative prompt が効かない**（CFG=1 では uncon
   **g32 据え置き確定**（g16 はテンションを逆方向へ動かす・波形指標は g の順序を運ばない —
   正本 = [research/2026-08-22-sbv2-g-axis.md](research/2026-08-22-sbv2-g-axis.md) と ADR 0069
   追記 9。リグの g 引数化 `--w4-group-size` は資産として残置）。
-- **J-4: GPTQ 適用拡大（2026-08-23 ユーザー裁定で再定義 — g の最適化より「多くのモデルで
-  GPTQ を採用できること」を優先）**: ①irodori の `w4` 席（gptq-rtn・現行格納形 = runtime
-  無改修・DiT のみ i4 の混成）— 過去裁定 2 件を同日変更:「rtn 席を先行させない」
-  （2026-08-20）は**撤回**（kmeans 席は席の追加で後から共存可能）、「混成なし」
-  （2026-08-12）は**緩和**（当時の根拠 S ドリフトは GPTQ で消滅 —
-  [research 2026-08-20 §6](research/2026-08-20-gptq-awq-calibrated-rounding.md) の S 完全一致。
-  校正コーパスは評価入力と分離して新設 = anima の 2026-08-21 裁定と同根）。②anima 素版
-  3 モデルの i4 席 = 校正条件（`CALIB_STEPS` / `CALIB_GUIDANCE`）のモデル別化（J-4a の
-  続き・波 L の保留解消）。**格納席（Q-2 kmeans companion / Q-3 NF4 定数表）は実需待ちへ
-  送り** — 復活条件は perf-ledger Q-2/Q-3 の前提欄。anima g16 は parked へ。
+- **J-4: GPTQ 適用拡大 — 消化済み（2026-08-23〜24）で波 J は全クローズ**: ①irodori `w4`
+  席（DiT のみ i4 混成の GPTQ・品質 3 ラウンド〈こもり帰属 → block 外 i8 + 校正 12 件 →
+  adaLN 144 本 i8〉→ 聴感裁定「こもり解消・配布可」→ HF 公開〈`67e9584c`・**pin 据え置き** =
+  `w4` は `revision: "main"` 明示〉。裁定変更 2 件〈rtn 席先行の撤回・混成なしの緩和〉込みの
+  正本 = ADR [0050](decisions/0050-irodori-quant-series.md) 追記 2）②anima 素版 3 モデルの
+  校正条件モデル別化 + i4 export（各 ~3h）— **視認裁定（2026-08-24）で配布スキップ**（席は
+  local dist に残る・系列は `outputs/series-archive/2026-08-23-anima-base-i4/` へ退避・改善
+  候補は later 起票）。実測と教訓（**sim → 出荷は発話実現を運ばない**・adaLN の量子化感度）の
+  正本 =
+  [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md)。
+  格納席（Q-2 / Q-3）は実需待ちへ送り・anima g16 は parked（変わらず）。
 - **J-4a: anima の i4 席（J-4 から切り離して先行 — 2026-08-21 ユーザー裁定）**: 第 1 段
   （速度実測）消化。素の RTN で i4 系列 + `w4` / `w4-a8-s16` を新設し実 GPU で実測 — 正本 =
   [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md)。
@@ -172,6 +174,14 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## later
 
+- **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: adaLN の
+  i8 化（irodori の帰属で効いた知見の移植 — anima では**未実測の仮説**）と量子化感度の高い
+  場所の特定。系列 + 視認物は `outputs/series-archive/2026-08-23-anima-base-i4/` に退避済みで
+  校正結果は再利用可（正本 =
+  [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) §5）。
+- **irodori adaLN i8 の出荷リグ A/B（起票 2026-08-24）**: sim で効いた adaLN i8（+13.1 MiB）が
+  出荷リグでも読み上げ方を改善するかは未検証（sim → 出荷の転移限界 — 同 research §2）。
+  復活 = w4 席の品質不満、またはサイズ最適化の実需。
 - **生成 API 波（起票 2026-08-19 — 全体レビューの Codex 提案を採用裁定）**: 静的配線と
   リクエストを分離した `GenerationProgram`（setup 時に全結線を検証）+ stateful sequence API
   （`for await` の token イベント・EOS 停止・cancel・多ターン継続）+ `last_row` の runner 側
