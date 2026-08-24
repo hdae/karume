@@ -15,7 +15,7 @@
  * 渡した瞬間に別名で焼かれ、golden（`io.photo-*.safetensors`）とは無関係の画像が
  * `outputs/demo/` に増えるだけになる。
  *
- * 画像を焼き直したら **golden も採り直す**（`tools/exporter/export_siglip2.py`）。採り直しを
+ * 画像を焼き直したら **golden も採り直す**（`tools/export-recipes/siglip2/export.py`）。採り直しを
  * 忘れた場合は e2e が落ちる（`io.photo-*.safetensors` に焼いた元画像の sha256 が入っており、
  * 突合するのは実 GPU 実行の前）。
  */
@@ -30,7 +30,7 @@ const QUALITY_SUFFIX = "masterpiece, best quality";
 /**
  * 焼く 4 枚。**人物 2 枚（42 / 45）と人物なし 2 枚（43 / 44）** の 2 群になっているのが要で、
  * SigLIP2 e2e の判別検査（人物どうしの cosine > 人物と風景の cosine）はこの群分けを見る。
- * ケース名（`photo-*`）は golden の綴りで、正本は `tools/exporter/export_siglip2.py` の
+ * ケース名（`photo-*`）は golden の綴りで、正本は `tools/export-recipes/siglip2/export.py` の
  * `REAL_CASES`（あちらがこのファイル名で PNG を読む）。
  */
 const CASES: readonly { seed: number; case: string; subject: string; why: string }[] = [
@@ -88,8 +88,14 @@ if (source === undefined) throw new Error(`--source が無い（使い方: ${USA
 const main = new URL("./main.ts", import.meta.url);
 
 for (const entry of CASES) {
-  const name = outputName(entry.seed);
+  // 置き場が cwd 相対なのは `main.ts` の作法（リポジトリ直下から回す）。
+  const path = `outputs/demo/${outputName(entry.seed)}`;
   console.log(`[eval-images] ${entry.case} — ${entry.why}`);
+  // MUST: 焼く前に前回実行の残骸を消す。存在検査だけでは、`main.ts` の綴りが変わったときに
+  // 古い同名 PNG が門を通り、「成功表示のまま golden が別の画像から採られる」に落ちる。
+  await Deno.remove(path).catch((error: unknown) => {
+    if (!(error instanceof Deno.errors.NotFound)) throw error;
+  });
   const { code } = await new Deno.Command(Deno.execPath(), {
     args: [
       "run",
@@ -109,9 +115,8 @@ for (const entry of CASES) {
   }).output();
   if (code !== 0) throw new Error(`${entry.case}（seed ${entry.seed}）の生成が終了コード ${code}`);
   // MUST: 名前まで検査する。`main.ts` の綴りが変わっても生成自体は成功するので、ここで
-  // 落とさないと「焼けているのに golden 側が読めない」形で後から気づくことになる。
-  // 置き場が cwd 相対なのも `main.ts` の作法（リポジトリ直下から回す）。
-  const path = `outputs/demo/${name}`;
+  // 落とさないと「焼けているのに golden 側が読めない」形で後から気づくことになる。事前に
+  // 消してあるので、通るのは**この子プロセスが書いた**ときだけ。
   if (!(await Deno.stat(path).then((stat) => stat.isFile, () => false))) {
     throw new Error(`${path} が生成されていない（examples/anima/main.ts の命名が変わった）`);
   }
@@ -120,6 +125,6 @@ for (const entry of CASES) {
 
 console.log(
   `[eval-images] ${CASES.length} 枚。golden を採り直す: ` +
-    "cd tools/exporter && uv run --group siglip2 python export_siglip2.py" +
-    " --model-dir ../../inputs/siglip2/<系列名>",
+    "cd tools/export-recipes && uv run --group siglip2-preprocess python -m siglip2.export" +
+    " --real-images --model-dir ../../inputs/siglip2/<系列名>",
 );

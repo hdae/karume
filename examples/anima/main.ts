@@ -5,13 +5,15 @@
  *     deno task demo:anima --source someone/anima --model anima-turbo --quant f16 --steps 8
  *     deno task demo:anima --source models/karume-anima --steps 32 --guidance 6
  *
- * `--source` が `karume.json` を持つディレクトリならローカル読み（`fromAssets`）、それ以外は
- * HF リポジトリ名として `fromPretrained`。未指定のノブは manifest の `defaults` が埋める。
+ * `--source` 未指定なら pin 済みの既定ソース（{@link ANIMA_DEFAULT_SOURCE} — ADR 0073）から
+ * 取る。明示したときだけ、`karume.json` を持つディレクトリならローカル読み（`fromAssets`）、
+ * それ以外は HF リポジトリ名として `fromPretrained`。未指定のノブは manifest の `defaults`
+ * が埋める。
  */
 
-import { parseManifest, resolveFiles } from "../../packages/hub/mod.ts";
-import { type AnimaAssets, AnimaPipeline, encodePng } from "../../packages/models/mod.ts";
-import { parseResolution } from "../../packages/models/anima.ts";
+import { AnimaPipeline, encodePng } from "../../packages/models/mod.ts";
+import { ANIMA_DEFAULT_SOURCE, parseResolution } from "../../packages/models/anima.ts";
+import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
 
 const USAGE = "--source <パス|HF repo> --prompt <文字列> --resolution <WxH> --model <名前>" +
   " --quant <名前> --seed <整数> --steps <整数> --guidance <数> --negative <文字列>";
@@ -49,7 +51,7 @@ const integer = (key: string): number | undefined => {
   return raw === undefined ? undefined : Number(raw);
 };
 
-const source = args.get("source") ?? "models/karume-anima-turbo";
+const source = args.get("source");
 const model = args.get("model");
 const quant = args.get("quant");
 /** hub / パイプラインへ渡す選択軸（未指定の欄は manifest の既定が埋める）。 */
@@ -74,26 +76,11 @@ if (rawGuidance !== undefined && !Number.isFinite(Number(rawGuidance))) {
 const guidanceScale = rawGuidance === undefined ? undefined : Number(rawGuidance);
 const negativePrompt = args.get("negative");
 
-/** ローカルディレクトリから manifest + 資産を読む（`fetchAssets` のローカル版）。 */
-const loadLocal = async (dir: string): Promise<AnimaAssets> => {
-  const manifest = parseManifest(await Deno.readTextFile(`${dir}/karume.json`));
-  const files = resolveFiles(manifest, selection);
-  const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
-  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of Object.keys(files)) {
-    const { path } = files[key];
-    const bytes = byPath.get(path) ?? await Deno.readFile(`${dir}/${path}`);
-    byPath.set(path, bytes);
-    assets = { ...assets, [key]: bytes };
-  }
-  return { manifest, assets };
-};
-
 const openPipeline = async (): Promise<AnimaPipeline> => {
-  if (await Deno.stat(`${source}/karume.json`).then(() => true, () => false)) {
-    return AnimaPipeline.fromAssets(await loadLocal(source), selection);
+  if (source !== undefined && await isLocalDist(source)) {
+    return AnimaPipeline.fromAssets(await loadLocalAssets(source, selection), selection);
   }
-  return AnimaPipeline.fromPretrained(source, {
+  return AnimaPipeline.fromPretrained(source ?? ANIMA_DEFAULT_SOURCE, {
     ...selection,
     onProgress: ({ phase, loaded, total }) =>
       Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
@@ -101,7 +88,8 @@ const openPipeline = async (): Promise<AnimaPipeline> => {
 };
 
 console.log(
-  `[anima] ${source} / model ${model ?? "（manifest の既定）"}` +
+  `[anima] ${source ?? `${ANIMA_DEFAULT_SOURCE.repo}（pin 済みの既定）`}` +
+    ` / model ${model ?? "（manifest の既定）"}` +
     ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}`,
 );
 const started = performance.now();

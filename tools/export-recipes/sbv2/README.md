@@ -347,7 +347,8 @@ graphs (neither the emit path nor the goldens change).
 uv run --group sbv2 python -m sbv2.demo assets
 
 # ② run the demo (from the repository root) → out.wav and dump.safetensors
-cd ../.. && deno task demo:sbv2 --text "こんにちは、これはテストです。" && cd tools/export-recipes
+cd ../.. && deno task demo:sbv2 --source models/karume-sbv2-fn \
+    --text "こんにちは、これはテストです。" && cd tools/export-recipes
 
 # ③ torch reference (rerun the same chain on the dump's discrete inputs and random sequence) → reference.wav + numbers
 uv run --group sbv2 python -m sbv2.demo reference --dump ../../outputs/demo/sbv2-dump/dump.safetensors

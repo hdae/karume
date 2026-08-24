@@ -3,12 +3,12 @@
  * `dump.safetensors` へ書き出す。
  *
  *     deno task dump:sbv2 --text "こんにちは、これはテストです。"
- *     cd tools/exporter && uv run --group sbv2 python sbv2_demo.py reference \
+ *     cd tools/export-recipes && uv run --group sbv2 python -m sbv2.demo reference \
  *         --dump ../../outputs/demo/sbv2-dump/dump.safetensors
  *
  * ## なぜ `main.ts` と別なのか
  *
- * dump の 11 テンソルは `sbv2_demo.py reference` と対になる**開発用の契約**で、パイプライン
+ * dump の 11 テンソルは `sbv2.demo reference` と対になる**開発用の契約**で、パイプライン
  * 利用者のストーリー（テキストを渡すと音が返る）ではない。したがって `generate` の返り値を
  * 診断で膨らませず、面を分ける。
  *
@@ -22,7 +22,7 @@
  *
  * ## NOTE: `reference` はスタイル資産を dump から読まない
  *
- * `sbv2_demo.py reference` は `style_vec` / `g` を `outputs/sbv2-demo/assets.safetensors`
+ * `sbv2.demo reference` は `style_vec` / `g` を `outputs/sbv2-demo/assets.safetensors`
  * から読む（`--assets`）。その資産は既定スタイル / 既定話者で焼かれているので、
  * `--style` / `--style-weight` を既定から動かした dump をそのまま突き合わせると、
  * **Karume 側と torch 側で別のスタイルベクトルを使った比較**になる。
@@ -39,7 +39,7 @@ import {
   type DumpTensor,
   writeSafetensors,
 } from "../../packages/models/tests/helpers/safetensors-write.ts";
-import { isLocalDist, loadLocalAssets } from "./local-assets.ts";
+import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
 
 const USAGE = "--source <パス> --text <文字列> --model <名前> --quant <名前> --style <名前>" +
   " --style-weight <数> --sdp-ratio <数> --noise-scale <数> --noise-scale-w <数>" +
