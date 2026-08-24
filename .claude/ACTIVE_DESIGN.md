@@ -32,8 +32,7 @@
 - **波 L（anima 素版 + バリアント同梱）もクローズ**: L-1〜L-4 消化（`hdae/karume-anima`
   公開・pin 焼き込み・0.4.2 lockstep）+ i4 席の保留は J-4 ②で解消（配布はスキップ）。
   残置 = サンプラー Euler 固定（backlog）。
-- **0.4.1 は JSR リリース済み・0.4.2 は lockstep bump 済みで publish はユーザー操作待ち**
-  （push → CI 緑 → GitHub Release で発火 — runbook §4。PyPI `karume` は未リリース）。
+- **0.4.2 まで JSR リリース済み**（2026-08-24 ユーザー確認。PyPI `karume` は未リリース）。
   直近クローズ済みの波の履歴は [backlog](../docs/backlog.md) と各 ADR / research が正本
   （autoregressive A〜H・全体レビュー・波 I / J / K / L・SBV2 注入席）。
 

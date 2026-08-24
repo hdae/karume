@@ -31,8 +31,8 @@ Turbo LoRA を焼くと **negative prompt が効かない**（CFG=1 では uncon
 - **L-4: 公開 + pin 焼き込み + JSR bump — 消化（2026-08-22）**: 新リポ
   `hdae/karume-anima` を公開（リビジョン `796ce27b`）。持ち越していた `karume-anima-turbo` の
   pin も同乗で焼き（`5aa15e4b` → `00c88039`）、4 パッケージを **0.4.2** へ lockstep bump。
-  順序 MUST（HF → pin → JSR）どおり。**JSR publish は push → CI 緑 → GitHub Release で発火**
-  するのでユーザー操作待ち。手順の正本は [release-runbook](release-runbook.md)。
+  順序 MUST（HF → pin → JSR）どおり。**0.4.2 の JSR publish は完了（2026-08-24 ユーザー
+  確認）**。手順の正本は [release-runbook](release-runbook.md)。
   **断片化検証**: 12 本中 11 本が 38〜60 MiB/レンジで健全。`anima-v1.0` の f16 transformer
   だけ 13.28 と外れ、`shard-cache` を退避して**同じバイト列のまま上げ直して 17.52** まで戻した
   （バイト不変なのでコミットは増えない）。残る細かさの機序は「turbo の f16 と大半のチャンクを
