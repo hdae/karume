@@ -54,6 +54,20 @@ const revisionUrl = (ref: string): string => `${HUB_URL}/api/models/${REPO}/revi
 const countCalls = (calls: readonly string[], url: string): number =>
   calls.filter((call) => call === url).length;
 
+/** 長さは保ったまま中身だけ変える（size ではなく sha256 の門を踏ませる）。 */
+const tamper = (bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
+  const copy = new Uint8Array(bytes);
+  copy[copy.length - 1] ^= 0xff;
+  return copy;
+};
+
+/** 無認証名前空間の中身（キャッシュを直に壊して self-heal を観測するため）。 */
+const hubCache = (caches: MemoryCacheStorage): MemoryCache => {
+  const namespace = caches.namespaces.get("karume/1");
+  if (namespace === undefined) throw new Error("test: karume/1 の名前空間がまだ無い");
+  return namespace;
+};
+
 Deno.test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 SHA に固定される", async () => {
   const mock = createMockFetch({ sha: SHA, files: serveAll() });
   const caches = new MemoryCacheStorage();
@@ -128,6 +142,80 @@ Deno.test("loadManifest: 取得層の 404 は repo / SHA / path の文脈を付�
   assertEquals(error.revisionSha, SHA);
   assertEquals(error.path, MANIFEST_PATH);
   assert(error.cause instanceof Error, "取得層のエラーを cause に残す");
+});
+
+Deno.test("loadManifest: 破損した cached karume.json は self-heal で 1 往復だけ取り直す", async () => {
+  const caches = new MemoryCacheStorage();
+  const ref = { repo: REPO, hubUrl: HUB_URL, revision: SHA };
+  const first = createMockFetch({ files: serveAll() });
+  await loadManifest(ref, { fetch: first.fetch, caches });
+
+  // ① UTF-8 として読めないバイト列（0xff は UTF-8 に現れない）。
+  hubCache(caches).entries.set(resolveUrl(MANIFEST_PATH), new Uint8Array([0xff, 0xfe, 0xff]));
+  const healedDecode = createMockFetch({ files: serveAll() });
+  const afterDecodeBreak = await loadManifest(ref, { fetch: healedDecode.fetch, caches });
+  assertEquals(
+    afterDecodeBreak.manifest.available.models,
+    ["anima-turbo", "anima-lite"],
+    "破損キャッシュから復帰できていない",
+  );
+  assertEquals(
+    countCalls(healedDecode.calls, resolveUrl(MANIFEST_PATH)),
+    1,
+    "self-heal は 1 往復だけ",
+  );
+
+  // ② decode は通るが JSON として壊れている。
+  hubCache(caches).entries.set(
+    resolveUrl(MANIFEST_PATH),
+    new TextEncoder().encode('{"format": "karume/3"'),
+  );
+  const healedParse = createMockFetch({ files: serveAll() });
+  const afterParseBreak = await loadManifest(ref, { fetch: healedParse.fetch, caches });
+  assertEquals(afterParseBreak.manifest.available.models, ["anima-turbo", "anima-lite"]);
+  assertEquals(
+    countCalls(healedParse.calls, resolveUrl(MANIFEST_PATH)),
+    1,
+    "self-heal は 1 往復だけ",
+  );
+});
+
+Deno.test("loadManifest: 真実源の karume.json が壊れていれば ManifestFormatError（キャッシュにも残さない）", async () => {
+  const caches = new MemoryCacheStorage();
+  const broken = new TextEncoder().encode('{"format": "karume/3"');
+  const mock = createMockFetch({ files: serveAll(new Map([[MANIFEST_PATH, broken]])) });
+  await assertRejects(
+    () =>
+      loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, { fetch: mock.fetch, caches }),
+    ManifestFormatError,
+  );
+  assertEquals(
+    hubCache(caches).entries.has(resolveUrl(MANIFEST_PATH)),
+    false,
+    "壊れた manifest をキャッシュに残している",
+  );
+});
+
+Deno.test("loadManifest: 完全キャッシュ済みでも中断済み signal なら manifest を返さない", async () => {
+  const caches = new MemoryCacheStorage();
+  const ref = { repo: REPO, hubUrl: HUB_URL, revision: SHA };
+  const first = createMockFetch({ files: serveAll() });
+  await loadManifest(ref, { fetch: first.fetch, caches });
+
+  const controller = new AbortController();
+  const reason = new Error("app: 起動を取り消した");
+  controller.abort(reason);
+  const second = createMockFetch({ files: serveAll() });
+  const error = await assertRejects(() =>
+    loadManifest(ref, { fetch: second.fetch, caches, signal: controller.signal })
+  );
+  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
+  assertEquals(second.calls, [], "中断済みなのに network へ出ている");
+  assertEquals(
+    hubCache(caches).entries.has(resolveUrl(MANIFEST_PATH)),
+    true,
+    "中断を破損と取り違えてキャッシュを捨てている",
+  );
 });
 
 const load = async (routes: MockRoutes, caches: MemoryCacheStorage) => {
@@ -317,6 +405,11 @@ Deno.test("fetchAssets: キャッシュヒットの phase 列は verifying → c
       event.fileTotal,
       `${event.path}: キャッシュヒットの ${event.phase} で fileLoaded が size に届いていない`,
     );
+    // 全体 loaded は「取得済みバイトの合計」なので、同一イベントの fileLoaded を必ず含む。
+    assert(
+      event.loaded >= event.fileLoaded,
+      `${event.path}: ${event.phase} の全体 loaded がこのファイルぶんを数えていない`,
+    );
   }
 });
 
@@ -347,6 +440,75 @@ Deno.test("fetchAssets: 2 回目はキャッシュから返り network に出な
   assert(
     events.some((event) => event.phase === "verifying"),
     "キャッシュヒットでも sha256 検証は走る",
+  );
+});
+
+Deno.test("fetchAssets: 破損したキャッシュエントリは照合が捕まえ、1 往復で治る", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll() }, caches);
+  const files = resolveFiles(loaded.manifest);
+  await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
+
+  const path = "vae_decoder/model.safetensors";
+  hubCache(caches).entries.set(resolveUrl(path), tamper(payloadFor(path)));
+
+  const second = createMockFetch({ files: serveAll() });
+  const assets = await fetchAssets(loaded, files, { fetch: second.fetch, caches });
+
+  assertEquals(assets["vae_decoder"], payloadFor(path), "破損キャッシュが素通りしている");
+  assertEquals(countCalls(second.calls, resolveUrl(path)), 1, "self-heal は 1 往復だけ");
+  assertEquals(second.calls.length, 1, "壊れていないファイルまで取り直している");
+});
+
+Deno.test("fetchAssets: 完全キャッシュ済みでも中断済み signal なら資産を返さない", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll() }, caches);
+  const files = resolveFiles(loaded.manifest);
+  await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
+  const cached = hubCache(caches).entries.size;
+
+  const controller = new AbortController();
+  const reason = new Error("app: 起動を取り消した");
+  controller.abort(reason);
+  const second = createMockFetch({ files: serveAll() });
+  const error = await assertRejects(() =>
+    fetchAssets(loaded, files, { fetch: second.fetch, caches, signal: controller.signal })
+  );
+  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
+  assertEquals(second.calls, [], "中断済みなのに network へ出ている");
+  assertEquals(
+    hubCache(caches).entries.size,
+    cached,
+    "中断を破損と取り違えてキャッシュを捨てている",
+  );
+});
+
+Deno.test("fetchAssets: キャッシュ検証中の中断でも資産を返さずに素通しする", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll() }, caches);
+  const files = resolveFiles(loaded.manifest);
+  await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
+
+  const controller = new AbortController();
+  const reason = new Error("app: 検証中に取り消した");
+  const second = createMockFetch({ files: serveAll() });
+  const events: AssetProgress[] = [];
+  const error = await assertRejects(() =>
+    fetchAssets(loaded, files, {
+      fetch: second.fetch,
+      caches,
+      signal: controller.signal,
+      // 全キャッシュ済みなので downloading は出ない（verifying が唯一の観測点）。
+      onProgress: (progress) => {
+        events.push(progress);
+        if (progress.phase === "verifying") controller.abort(reason);
+      },
+    })
+  );
+  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
+  assert(
+    events.every((event) => event.phase !== "complete"),
+    "取り消したのに検証済みファイルを complete まで進めている",
   );
 });
 

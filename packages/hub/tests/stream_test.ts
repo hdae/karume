@@ -454,5 +454,10 @@ Deno.test("streamAssets: 2 回目は network に出ないが sha256 照合は走
       event.fileTotal,
       `${event.path}: キャッシュヒットの ${event.phase} で fileLoaded が size に届いていない`,
     );
+    // 全体 loaded は「取得済みバイトの合計」なので、同一イベントの fileLoaded を必ず含む。
+    assert(
+      event.loaded >= event.fileLoaded,
+      `${event.path}: ${event.phase} の全体 loaded がこの shard ぶんを数えていない`,
+    );
   }
 });

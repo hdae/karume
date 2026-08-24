@@ -248,9 +248,29 @@ export const loadManifest = async (
   };
   // 名前空間の解決は headers が固定である入口で 1 回だけ（digest は非同期）。
   const cacheName = await cacheNameFor(options.headers);
-  let bytes: Uint8Array;
+  // MUST: SHA 固定 URL のキャッシュヒットは network に出ない＝下層の signal 監視が効かないので、
+  // 取得の前後で明示的に中断を見る（見ないと中断済みの signal で呼んでも manifest が返り、
+  // 取り消したはずのロードがそのまま先へ進む）。
+  options.signal?.throwIfAborted();
+  // MUST: UTF-8 decode と parse は取得層の `validate` フックの中で行う — 取得の外でやると
+  // 破損したキャッシュエントリが evict されず、`clearHubCache` を手で叩くまで毎回同じ
+  // ManifestFormatError を返し続ける（資産側と同じ self-heal 経路に揃える）。
+  // MUST NOT: このフックへ中断確認を混ぜない — フックの throw は下層で「破損」と解釈され、
+  // 健全なキャッシュエントリの evict と取り直しを招く。
+  let manifest: Manifest | undefined;
+  const validate = (bytes: Uint8Array): void => {
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch (error) {
+      throw new ManifestFormatError(`manifest: ${MANIFEST_FILENAME} が UTF-8 として読めない`, {
+        cause: error,
+      });
+    }
+    manifest = parseManifest(text);
+  };
   try {
-    bytes = await fetchHfFile(target, { path: MANIFEST_FILENAME }, {
+    await fetchHfFile(target, { path: MANIFEST_FILENAME, validate }, {
       cacheName,
       init: requestInit(options.headers, options.signal),
       fetch: createGuardedFetch(options.fetch ?? globalThis.fetch, new Map([[url, budget]])),
@@ -264,19 +284,18 @@ export const loadManifest = async (
       { repo: ref.repo, revisionSha, path: MANIFEST_FILENAME, cause: error },
     );
   }
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch (error) {
-    throw new ManifestFormatError(`manifest: ${MANIFEST_FILENAME} が UTF-8 として読めない`, {
-      cause: error,
-    });
+  // 取得を抜けた直後にも見る（この後は同期の組み立てだけなので、これが返却前の最後の関門）。
+  options.signal?.throwIfAborted();
+  if (manifest === undefined) {
+    throw new Error(
+      `hub: ${MANIFEST_FILENAME} の検証フックが走っていない（取得層の不変条件破れ）`,
+    );
   }
   return {
     repo: ref.repo,
     revisionSha,
     ...(ref.hubUrl === undefined ? {} : { hubUrl: ref.hubUrl }),
-    manifest: parseManifest(text),
+    manifest,
   };
 };
 
@@ -324,11 +343,17 @@ export const fetchAssets = async (
   const emit = (phase: AssetPhase, path: string): void => {
     if (options.onProgress === undefined) return;
     const fileTotal = fileSizeOf(unique, path);
-    let sum = 0;
-    for (const bytes of received.values()) sum += bytes;
     // verifying / complete は全量が揃った点なので size をそのまま渡す（キャッシュヒットは
     // downloading が 1 度も出ず `received` に載らないため、受信実績から引くと 0 に見える）。
     const fileLoaded = phase === "downloading" ? received.get(path) ?? 0 : fileTotal;
+    // MUST: 全体 `loaded` にも同じ値を積む — このファイルぶんだけ `received` から引くと、
+    // 同一イベントで fileLoaded が size なのに loaded がそれを数えない矛盾が出る（全ファイル
+    // キャッシュ済みの起動では loaded が 0 のまま verifying が並ぶ）。downloading では
+    // fileLoaded が `received` の値そのものなので二重計上にはならない。
+    let sum = fileLoaded;
+    for (const [other, bytes] of received) {
+      if (other !== path) sum += bytes;
+    }
     options.onProgress({ phase, path, loaded: sum, total, fileLoaded, fileTotal });
   };
 
@@ -397,6 +422,12 @@ export const fetchAssets = async (
         );
       }
     };
+    // MUST: キャッシュヒットは network に出ない＝下層の signal 監視が効かない区間なので、
+    // 取得の前後で明示的に中断を見る（数 GB の sha256 照合を回している最中に取り消しが効かない
+    // のは中断の透過が壊れているのと同じ — 逐次面 streamAssets と同型の確認）。
+    // MUST NOT: この確認を上の `validate` の中へ入れない — フックの throw は下層で「破損」と
+    // 解釈され、健全なキャッシュエントリの evict と取り直しを招く。
+    signal.throwIfAborted();
     let bytes: Uint8Array;
     try {
       bytes = await fetchHfFile(target, { path: ref.path, validate }, {
@@ -422,6 +453,9 @@ export const fetchAssets = async (
         cause: error,
       });
     }
+    // 検証を抜けた直後にも見る — 前段の確認だけだと「キャッシュ読出し + sha256 照合の最中に
+    // 中断された」形が観測されず、取り消したはずのファイルが complete まで進む。
+    signal.throwIfAborted();
     bytesByPath.set(ref.path, assertTightView(bytes, ref.path));
     received.set(ref.path, ref.size);
     emit("complete", ref.path);
@@ -446,6 +480,9 @@ export const fetchAssets = async (
   for (const result of settled) {
     if (result.status === "rejected") throw result.reason;
   }
+  // MUST: 全ファイルがキャッシュ済みの起動は 1 度も network に出ないため、決着後にも中断を見る
+  // （この後は同期の組み立てだけなので、これが返却前の最後の関門になる）。
+  signal.throwIfAborted();
 
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   for (const key of keys) {
@@ -530,11 +567,17 @@ export const streamAssets = async function* (
   const emit = (phase: AssetPhase, path: string): void => {
     if (options.onProgress === undefined) return;
     const fileTotal = fileSizeOf(declared, path);
-    let sum = 0;
-    for (const bytes of received.values()) sum += bytes;
     // verifying / complete は全量が揃った点なので size をそのまま渡す（相 1 が温めた分は
     // 相 2 でキャッシュヒットになり downloading が出ないため、受信実績から引くと 0 に見える）。
     const fileLoaded = phase === "downloading" ? received.get(path) ?? 0 : fileTotal;
+    // MUST: 全体 `loaded` にも同じ値を積む — この shard ぶんだけ `received` から引くと、
+    // 同一イベントで fileLoaded が size なのに loaded がそれを数えない矛盾が出る（全 shard が
+    // 温まっている 2 回目以降の起動では loaded が 0 のまま verifying が並ぶ）。downloading では
+    // fileLoaded が `received` の値そのものなので二重計上にはならない。
+    let sum = fileLoaded;
+    for (const [other, bytes] of received) {
+      if (other !== path) sum += bytes;
+    }
     options.onProgress({ phase, path, loaded: sum, total, fileLoaded, fileTotal });
   };
 
