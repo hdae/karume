@@ -212,11 +212,23 @@ export type AnimaPipelineOptions = {
     component: AnimaRunComponent,
     diagnostics: SessionDiagnostics,
   ) => void;
+  /**
+   * 構築の中断。{@link AnimaPipeline.fromAssets} が段の境目（入口 / トークナイザ解釈 /
+   * 各 `openModel` の間 / GPU 取得の前後）で `throwIfAborted` を検査する。
+   * {@link AnimaPipeline.fromPretrained} は同じ 1 本を取得層へも渡すので、**DL と組み立ての
+   * どちらの最中でも**同じノブで中断できる（DL 完了後だけ中止ボタンが無反応、を作らない）。
+   *
+   * 中断の例外は `signal.reason` を**そのまま**投げる（包まない — 消費側が
+   * `error === controller.signal.reason` で自分の中断を識別できる）。
+   */
+  readonly signal?: AbortSignal;
 };
 
-/** {@link AnimaPipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。 */
+/**
+ * {@link AnimaPipeline.fromPretrained} が追加で受ける取得層のオプション（hub へ透過する）。
+ * `signal` は構築側と共有なので {@link AnimaPipelineOptions} が持つ。
+ */
 export type AnimaFromPretrainedOptions = AnimaPipelineOptions & {
-  readonly signal?: AbortSignal;
   /** `Authorization` 等。付けた取得は認証専用のキャッシュ名前空間へ隔離される。 */
   readonly headers?: HeadersInit;
   readonly onProgress?: (progress: AssetProgress) => void;
@@ -510,12 +522,14 @@ export class AnimaPipeline {
       ...hubOptions,
       ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     });
+    // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
     return AnimaPipeline.fromAssets({ manifest: loaded.manifest, assets }, {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...selection,
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
   }
 
@@ -533,12 +547,18 @@ export class AnimaPipeline {
    * 同じ順序）。順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が
    * 読み手に伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ。
    * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
+   *
+   * NOTE: 各段は不可分（3.7GiB の `openModel` を途中で畳む口は無い）なので、
+   * {@link AnimaPipelineOptions.signal} の検査は**段の境目**にだけ置く。
    */
   static async fromAssets(
     input: AnimaAssets,
     options: AnimaPipelineOptions = {},
   ): Promise<AnimaPipeline> {
     const { manifest, assets } = input;
+    // 中断の検査は**段の境目**に置く（各段は不可分 — 3.7GiB の openModel を途中で畳む口は無い）。
+    // 入口が最初の 1 本: 中断済みで呼ばれたら資産に 1 バイトも触らずに返す。
+    options.signal?.throwIfAborted();
     const modelName = options.model ?? manifest.defaultModel;
     if (!Object.hasOwn(manifest.models, modelName)) {
       throw new Error(
@@ -577,15 +597,22 @@ export class AnimaPipeline {
     // 資産の解析は GPU より前（docstring の順序 MUST）。3.7GiB の DiT を開くほうが device 生成
     // より重いが、壊れた配布形の真因を消さないほうを採る — GPU 無し環境では acquireGpu 自体が
     // 落ちるので、後ろに置くと「資産が無い」が永久に見えない。
+    options.signal?.throwIfAborted();
     const tokenizers = createTokenizers(
       assetBytes(assets, TOKENIZER),
       assetBytes(assets, TOKENIZER_2),
     );
+    options.signal?.throwIfAborted();
     const textEncoder = openModel(assetBuffer(assets, TEXT_ENCODER));
+    options.signal?.throwIfAborted();
     const textConditioner = openModel(assetBuffer(assets, TEXT_CONDITIONER));
+    options.signal?.throwIfAborted();
     const transformer = openModel(assetBuffer(assets, TRANSFORMER));
     const ropeBase = parseRopeBase(assetBuffer(assets, TRANSFORMER_ROPE_BASE));
+    options.signal?.throwIfAborted();
     const vaeDecoder = openModel(assetBuffer(assets, VAE_DECODER));
+
+    options.signal?.throwIfAborted();
 
     // MUST: `shader-f16` は device 作成時にしか要求できない（ADR 0028）。共有 GPU を渡された
     // 場合は要求できないので、能力が足りないことを**ここで**名指しして落とす — 通すと
@@ -594,6 +621,9 @@ export class AnimaPipeline {
       await acquireGpu(wantsShaderF16 ? { shaderF16: true } : {});
     const ownsGpu = options.gpu === undefined;
     try {
+      // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
+      // 誰も解放できないまま抜ける（shader-f16 検査と同じ後始末に乗せる）。
+      options.signal?.throwIfAborted();
       if (wantsShaderF16 && !gpu.shaderF16Enabled) {
         throw new Error(
           `AnimaPipeline: quant '${quantName}' は shader-f16 を要求するが、渡された` +

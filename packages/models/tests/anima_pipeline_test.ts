@@ -1,7 +1,7 @@
 // `AnimaPipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る
 // （実 GPU の E2E は P3 波 2）。
 //
-// ここで押さえるのは 3 つ:
+// ここで押さえるのは 4 つ:
 //  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反と資産の解析を落とす
 //     （未知 model / pipeline 名 / 未知 major / 未知 quant / 資産の不在）。落とす位置が
 //     ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
@@ -10,11 +10,19 @@
 //  ③ `denoise-step` の `copyLatents`（`latentSnapshot`）が「作った時点の latent の写し」を
 //     返す。ここが壊れると購読側には**別 step の latent が黙って**届く（実 GPU の PNG 門は
 //     観測席を通らないので緑のまま）。
+//  ④ 構築の `signal` が**入口で**効く（DL 完了後の組み立てが中断不能だと、UI の中止ボタンが
+//     無反応になる窓ができる）。中間段の検査は実資産と GPU が要るのでここでは見られない。
 //
 // NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
 // `session_options_test.ts` にある。
 
-import { assertEquals, assertNotStrictEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assertEquals,
+  assertNotStrictEquals,
+  assertRejects,
+  assertStrictEquals,
+  assertThrows,
+} from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { AnimaPipeline, latentSnapshot, resolveNegativePrompt } from "../src/anima/pipeline.ts";
 
@@ -111,6 +119,21 @@ Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触
     Error,
     "資産 'tokenizer' が無い",
   );
+});
+
+Deno.test("fromAssets: 中断済み signal は資産へ触る前に reason そのままで reject する", async () => {
+  // UI の中止ボタンは DL 完了後の組み立て（資産解析 → acquireGpu）にも効かなければならない。
+  // 入口の検査が資産解析より**先**にあることを、上の門と同じ manifest + 空資産で見る:
+  // signal 無しなら「資産 'tokenizer' が無い」で落ちる形が、中断済みなら reason で落ちる。
+  const manifest = parseManifest(manifestText());
+  const controller = new AbortController();
+  const reason = new Error("中止ボタン");
+  controller.abort(reason);
+  const error = await assertRejects(() =>
+    AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { signal: controller.signal })
+  );
+  // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
+  assertStrictEquals(error, reason);
 });
 
 Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら落とす", () => {
