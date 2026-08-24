@@ -518,6 +518,28 @@ type GpuContextInternals = {
 };
 
 /**
+ * device が使える状態かの同期判定（常駐テンソル経路の受付門 — ADR 0054）。
+ *
+ * MUST: `lost` だけでなく `destroyRequested` も見る。`destroy()` はフラグを同期に立てるのに
+ * `device.lost` の reaction が走るのは以後のタスクなので、`lost` だけだとその窓で操作が通る。
+ * 通したときの現れ方が沈黙なのがここを置く理由 — {@link ResidentTensor.write} は破棄済み
+ * バッファへの**沈黙 no-op**（警告すら出ない）になり、{@link GpuContext.createResident} は
+ * 消失後の `popErrorScope` が null で resolve する（`docs/research/2026-08-16-device-lost-wait-settlement.md`）
+ * ため**無効なバッファを掴んだまま成功として返る**。どちらも loud になるのは次のフェンスで、
+ * その間の診断は誤導的になる。
+ * MUST: 型は {@link GpuDeviceLostError}（`runtime/generation-context.ts` の `assertDeviceUsable`
+ * と同じ規律 — lost device 由来の GPU 資源は WebGPU 仕様上回復不能で、意図的な破棄と予期しない
+ * 消失で復旧手段は変わらないので型は分けない）。
+ */
+const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
+  if (gpu.destroyRequested || gpu.lost !== undefined) {
+    throw new GpuDeviceLostError(
+      `${where}: device が失われた（device を取り直して作り直すこと）`,
+    );
+  }
+};
+
+/**
  * 取得済み device と正規化済み能力の束。
  *
  * `device.lost` の購読はコンストラクタで**無条件に、かつ 1 回だけ**行う。消失を未処理の
@@ -716,8 +738,11 @@ export class GpuContext {
    * 例外を投げず**無効なバッファを返す**ので、囲まないと以後の `writeBuffer` が警告すら
    * 出さない no-op になり、空の常駐テンソルのまま生成ループが回る。
    * MUST: `byteLength` は 4 の倍数（要素は全型 4 バイト — ADR 0009 の意味論 dtype）。
+   * MUST: 消失済み device では受け付けない（{@link assertDeviceUsable} — errorScope は
+   * 消失を捕らえないので、囲んでいても無効なバッファが成功として返る）。
    */
   async createResident(byteLength: number, label = "resident"): Promise<ResidentTensor> {
+    assertDeviceUsable(this, `resident '${label}' の確保`);
     if (!Number.isInteger(byteLength) || byteLength <= 0 || byteLength % 4 !== 0) {
       throw new ResidentTensorError(
         `resident '${label}': byteLength は 4 の倍数の正の整数である必要がある: ${byteLength}`,
@@ -919,9 +944,13 @@ export class ResidentTensor {
    * MUST: この `writeBuffer` は issue 順で queue timeline に載るので、**先に submit 済みの
    * dispatch を追い越さない**。追い越すのは未 submit のエンコードだけ（ADR 0004 不変条件④）
    * で、`enqueue` はその末尾で必ず submit するため両者は競合しない。
+   * MUST: 消失済み device では書かない（{@link assertDeviceUsable}）。`queue.writeBuffer` は
+   * 破棄済みバッファに対して例外も警告も出さない no-op なので、ここで止めないと空の条件の
+   * まま生成ループが回る。
    */
   write(data: ResidentData): void {
     this.#assertUsable("write");
+    assertDeviceUsable(this.#gpu, `resident '${this.label}' の write`);
     if (data.byteLength !== this.byteLength) {
       throw new ResidentTensorError(
         `resident '${this.label}': write のバイト数 ${data.byteLength} が確保 ${this.byteLength} と合わない`,

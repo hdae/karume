@@ -8,12 +8,13 @@
 // ② が無いと、内部で flush へ退避していても値は正しいまま緑になる（例外も警告も出ない）。
 // ③ が無いと、前後の enqueue の入力が入れ替わっても「どちらも計算はされている」ので気づけない。
 
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import {
   acquireGpu,
   BatchScopeError,
   type GpuContext,
+  GpuDeviceLostError,
   ResidentTensorError,
   RUNTIME_INTERNAL,
 } from "../src/gpu/device.ts";
@@ -311,6 +312,42 @@ Deno.test({
       await session.dispose();
       gpu.destroy();
     }
+  },
+});
+
+// 消失した device では `queue.writeBuffer` が破棄済みバッファへの**沈黙 no-op**（警告すら
+// 出ない）になり、`createBuffer` の errorScope も消失を捕らえない（pop は null で resolve）ため
+// 無効なバッファを掴んだ resident が成功として返る。どちらも loud になるのは次のフェンスで、
+// その間の診断は誤導的 — 入口の同期検査でしか止められない。
+Deno.test({
+  name: "device.destroy() 直後（lost の反応前）から常駐テンソルの受付を拒否する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // この case は device を壊すので専用の GpuContext を取る。
+    const gpu = await acquireGpu();
+    const resident = await gpu.createResident(BYTES, "victim");
+
+    gpu.destroy();
+    // MUST: ここで lost が**未記録**であること。記録済みなら既存の lost 判定だけで通ってしまい、
+    // 「destroy の同期フラグを見ている」ことの証拠にならない（門が恒真になる）。
+    assertStrictEquals(gpu.lost, undefined, "destroy 直後に lost の reaction が走っている");
+    assert(gpu.destroyRequested, "destroy 要求が同期に立っていない");
+
+    assertThrows(
+      () => resident.write(new Float32Array(COUNT)),
+      GpuDeviceLostError,
+      "device が失われた",
+    );
+    await assertRejects(
+      () => gpu.createResident(BYTES, "after-destroy"),
+      GpuDeviceLostError,
+      "device が失われた",
+    );
+
+    await gpu.device.lost;
+    assert(gpu.lost !== undefined, "消失が記録されていない（門が空振りする）");
+    assertThrows(() => resident.write(new Float32Array(COUNT)), GpuDeviceLostError);
+    await assertRejects(() => gpu.createResident(BYTES, "after-lost"), GpuDeviceLostError);
   },
 });
 
