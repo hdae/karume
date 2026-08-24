@@ -655,6 +655,7 @@ def int4_weight_graph(
     *,
     embedding: bool = False,
     conv: bool = False,
+    wide: bool = False,
     group_size: int = 16,
     conv_shape: tuple[int, ...] = (3, 2, 16),
     conv_groups: int = 1,
@@ -666,7 +667,8 @@ def int4_weight_graph(
     `embedding` を立てると **embedding 表**（i4 適格の 2 つ目の重みスロット — ADR 0069
     決定 5 の追補）が、`conv` を立てると **conv の重み**（既定は `groups == 1` の conv1d
     `[3,2,16]` = i4 適格の 3 つ目。`conv_shape` / `conv_groups` / `conv_op` で適格から
-    外れる枝も踏める）が増える。
+    外れる枝も踏める）が増える。`wide` を立てると **行長 48 の linear**（出荷 g 16 では
+    割り切れるが `quantize.DEFAULT_GROUP_SIZE` = 32 では割り切れない形）が増える。
 
     conv の重みは**適格な形のときだけ**丸めて台帳に載せる（適格外は emit が f32 のまま
     残すので、丸めても台帳が使われない）。
@@ -694,6 +696,17 @@ def int4_weight_graph(
         values["e"] = IrValue(dtype="f32", shape=["T", 32])
         tensors["enc.emb"] = torch.randn(3, 32)
         outputs.append("e")
+    if wide:
+        nodes.append(IrNode(op="linear", ins=["xw", "ww", "bw"], outs=["hw"], attrs={}))
+        inputs.append(IrInput(name="xw", dtype="f32", shape=["T", 48]))
+        initializers["ww"] = IrInitializer(tensor="enc.ww", storage=IrStorage(dtype="f32"))
+        initializers["bw"] = IrInitializer(tensor="enc.bw", storage=IrStorage(dtype="f32"))
+        values["ww"] = IrValue(dtype="f32", shape=[3, 48])
+        values["bw"] = IrValue(dtype="f32", shape=[3])
+        values["hw"] = IrValue(dtype="f32", shape=["T", 3])
+        tensors["enc.ww"] = torch.randn(3, 48)
+        tensors["enc.bw"] = torch.randn(3)
+        outputs.append("hw")
     if conv:
         # conv の入力は rank 3（`x[B,Cin,L]`）— L = K + 1 なので出力長は 2
         # （stride / dilation 1・padding 0）。verify の shape 推論まで通す形にしておく。
@@ -718,7 +731,7 @@ def int4_weight_graph(
         nodes=nodes,
     )
     scales = {}
-    for key in ["enc.w"] + (["enc.cw"] if conv else []):
+    for key in ["enc.w"] + (["enc.ww"] if wide else []) + (["enc.cw"] if conv else []):
         weight = tensors[key]
         if weight.numel() // weight.shape[0] % group_size:
             continue  # 端数 group（ADR 0069 決定 2）— 丸められない = 適格でもない
@@ -958,6 +971,25 @@ class TestI4Storage:
         declared = written_graph(path).initializers
         assert declared["w"].storage.dtype == "i4"
         assert declared["cw"].storage.dtype == "f32"
+
+    def test_a_row_only_the_shipped_group_length_divides_is_still_stored_as_i4(self, tmp_path):
+        """g16 で丸めた行長 48 の linear も i4 で格納される（除数は出荷の実 g）。
+
+        適格判定の除数を既定 g（32）に固定すると、`48 % 32 != 0` でこの重みだけが適格から
+        外れ、値は i4 グリッドへ丸められたまま **f32 で格納**される — 行長 32 の linear が
+        1 本でもあれば「適格 0 本」の門も鳴らないので、品質劣化だけ乗ってサイズが縮まない
+        配布形が例外も診断も無しに出る（ADR 0006 の「圧縮指定なのに実質 f32」）。
+        """
+        graph, tensors, scales = int4_weight_graph(wide=True)
+
+        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+
+        declared = verify_model(path).initializers
+        assert declared["w"].storage.dtype == "i4", "行長 32 側（既定 g でも割り切れる）"
+        assert declared["ww"].storage.dtype == "i4", "行長 48 側（出荷 g 16 でだけ割り切れる）"
+        assert declared["ww"].storage.group_size == 16
+        # scale は 48 / 16 = 3 group（既定 g を使っていれば宣言そのものが立たない）。
+        assert container_header(path)["karume.scale.enc.ww"]["shape"] == [3, 3]
 
     def test_an_embedding_table_is_stored_as_i4_with_a_group_scale(self, tmp_path):
         """embedding 表 `[V,D]` も i4 で格納される（ADR 0069 決定 5 の embedding 追補）。

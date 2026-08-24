@@ -249,8 +249,33 @@ def _storage_row_length(graph: IrGraph, name: str) -> int | None:
     return length
 
 
-def i4_eligible_initializers(graph: IrGraph, group_size: int = DEFAULT_GROUP_SIZE) -> set[str]:
-    """重みスロットでの消費が {@link I4_WEIGHT_OPS} **だけ**で、格納行長が `group_size` で
+def _scale_group_size(
+    graph: IrGraph, scales: Mapping[str, torch.Tensor], name: str, row_length: int
+) -> int | None:
+    """その重み自身の group scale が宣言している group 長（引けなければ None）。
+
+    源は `quantize.group_size_of` と同じ「**渡された scale の形**だけ」（`[行, group 数]` →
+    行長 / group 数）。適格判定と格納宣言が別の源を持つと、fake-quant が使った g と判定に
+    使った g が独立に動ける — 食い違っても形も型も合うので沈黙する。
+
+    台帳に無い / group 形でない scale は None を返して呼び手の既定へ委ねる（「適格なのに
+    scale が無い」は `_plan_i4` が fail loudly で受けるので、ここで適格から外さない）。
+    """
+    scale = scales.get(graph.initializers[name].tensor)
+    if scale is None or scale.dim() != 2:
+        return None
+    groups = int(scale.shape[1])
+    if groups < 1 or row_length % groups:
+        return None
+    return row_length // groups
+
+
+def i4_eligible_initializers(
+    graph: IrGraph,
+    group_size: int = DEFAULT_GROUP_SIZE,
+    scales: Mapping[str, torch.Tensor] | None = None,
+) -> set[str]:
+    """重みスロットでの消費が {@link I4_WEIGHT_OPS} **だけ**で、格納行長が group 長で
     割り切れる initializer（i4 の適格集合 — ADR 0069 決定 5 とその追補）。
 
     i4 の展開経路（`unpack4xU8` + group scale）を持つカーネルは linear / embedding / conv1d
@@ -259,12 +284,18 @@ def i4_eligible_initializers(graph: IrGraph, group_size: int = DEFAULT_GROUP_SIZ
     packed バイトを f32 として読む（例外は出ない）。`weight_channel_axes` と同じく**消費側の
     op** から引く（重みの shape だけでは区別できない）。
 
-    行長の門（{@link _storage_row_length} % `group_size`）が要るのは、端数 group を作らない
+    行長の門（{@link _storage_row_length} % group 長）が要るのは、端数 group を作らない
     MUST（ADR 0069 決定 2）で丸められない重みを**適格から外して静かに f32 に残す**ため。
     ここで拾ってしまうと「fake-quant が届いていない重み」として export 全体が落ちる
     （linear + 割り切れない conv1d を持つ普通のグラフが i4 で書けなくなる — I4-ELIG-01 と
-    同型）。既定の除数は出荷の既定 group 長（`quantize.DEFAULT_GROUP_SIZE`）で、別の g で
-    丸めた資産は同じ g を渡す。
+    同型）。
+
+    MUST: 除数は **1 本ずつその重み自身の group scale から引く**（`scales` の台帳 →
+    {@link _scale_group_size}）。除数を出荷の既定 group 長（`quantize.DEFAULT_GROUP_SIZE`）に
+    固定すると、g16 で丸めた行長 48 の重みが `48 % 32 != 0` で適格から外れ、値は i4 グリッド
+    へ丸められたまま **f32 で格納**される — 品質劣化だけ乗ってサイズは 1 バイトも縮まず、
+    例外も診断も出ない（ADR 0006 が名指しした「圧縮指定なのに実質 f32」の沈黙）。
+    `group_size` は scale を引けない名前だけに掛かる後詰めの既定。
     """
     executable: set[str] = set()
     other: set[str] = set()
@@ -276,10 +307,14 @@ def i4_eligible_initializers(graph: IrGraph, group_size: int = DEFAULT_GROUP_SIZ
         if name not in graph.initializers:
             continue
         (executable if _has_i4_kernel(node) else other).add(name)
+    ledger = scales or {}
     eligible: set[str] = set()
     for name in executable - other:
         row_length = _storage_row_length(graph, name)
-        if row_length is not None and row_length % group_size == 0:
+        if row_length is None:
+            continue
+        divisor = _scale_group_size(graph, ledger, name, row_length) or group_size
+        if row_length % divisor == 0:
             eligible.add(name)
     return eligible
 
@@ -547,7 +582,11 @@ def _plan_weight_dtype(
             )
     requested = {weight_dtype, *weight_dtype_overrides.values()}
     axes = weight_channel_axes(graph) if "i8" in requested else {}
-    i4_eligible = i4_eligible_initializers(graph) if "i4" in requested else set()
+    # 適格判定の除数は出荷の実 g（= `weight_scales` の形）から引く — `_plan_i4` が
+    # `group_size_of` で宣言する値と同じ源にしないと、g16 資産の一部が黙って f32 で残る。
+    i4_eligible = (
+        i4_eligible_initializers(graph, scales=weight_scales) if "i4" in requested else set()
+    )
     reserved = set(tensors)
     for name in sorted(eligible):
         key = graph.initializers[name].tensor
