@@ -178,3 +178,13 @@ Promise は欄から捨てる**（持ち続けると 1 度のネットワーク�
 - ❌ 語境界に一致しない読みの差し替え（句内の一部モーラだけを別の読みへ）→ `Sbv2InputError`
 
 復活条件つきで backlog parked（`adjust_word2ph` 移植 — 参照は**上流**セマンティクス）。
+
+## 追記（2026-08-25）— 0.6.0 で注入席を 2 層入力へ再設計（superseded）
+
+本 ADR の注入席一式（`text` を受けた内部解析・`overlay` / `dictionary` / `prosody` /
+`givenTone` / `analyzeProsody`）は、0.6.0 の yomi 依存分離で**シム無しに撤去**した。後継は
+ADR [0079](0079-sbv2-two-layer-input.md) が正本 — テキスト解析は呼び手の責務になり、
+`generate` は解析済みの発話（`Sbv2Utterance` — モーラ 2 値トーン直持ち）を第 1 引数に受ける。
+下書き往復（決定 4〜7 の `Sbv2Prosody`）と生トーン注入（`givenTone`）はモーラ層の `tone`
+直編集に吸収。決定 8（adjust_word2ph 不採用 — 読みの変更は修正辞書で解析からやり直す）の
+原則と `Sbv2InputError`（決定 3 の 400/500 分離）は存続する。

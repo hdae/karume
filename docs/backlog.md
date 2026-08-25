@@ -7,13 +7,17 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 次波の裁定待ち（0.5.1 まで出荷済み）
+## now — 0.6.0 波（yomi 依存分離）実装完了・リリース段待ち
 
-**0.5.0 と 0.5.1（サンプラー再裁定 — ADR
-[0078](decisions/0078-anima-sampler-selection.md)）はどちらも 2026-08-25 にクローズ**
-（結果は下の消化済み節）。次の大波はユーザー裁定待ち。候補（詳細は各節）:
+**SBV2 入力の 2 層化と `@hdae/yomi` 分離は実装済み**（2026-08-25 `7cd82c8` — 設計の正本 =
+ADR [0079](decisions/0079-sbv2-two-layer-input.md)・ADR 0072 は supersede 追記済み）。
+検証 = **WAV 門 3 sha 不変**（吸収のビット同一性の出荷バイト証明）・verify 1771/0/5・
+publish dry-run 緑。残り = 0.6.0 リリース段（lockstep bump → push → CI → Release → JSR。
+**配布形・pin 値は不変** — HF 再アップロード不要。事後疎通で公開 meta.json から yomi が
+消えたことを確定する）。
 
-- SBV2 の yomi 依存分離（later 節 — 0.6.0 想定・breaking。ユーザー意向「早い段階で」）
+0.6.0 後の次波候補（詳細は各節）:
+
 - 生成 API 波（later 節 — `GenerationProgram` + sequence API。LLM 実需に直結する最大の API 波）
 - R1 のロード面 API 工事 4 件 + exporter 自動分割規則（release 節）
 - モデル拡充の続き・EmbeddingGemma の完成（later 節）
@@ -110,19 +114,13 @@ autoregressive 波の**残項目（波外へ送り）**:
   （`for await` の token イベント・EOS 停止・cancel・多ターン継続）+ `last_row` の runner 側
   導出（ADR 0068 追記 4 の所有関係のみ reopen）。`generateGreedy` は parity 検収用の内部
   ヘルパへ格下げ。LLM 実需（streaming / チャット）に直結する最大の API 波。
-- **SBV2 の yomi 依存分離（0.6.0 波 — ユーザー方針 2026-08-20・breaking。0.5.0 からは
-  2026-08-25 に切り離し）**: SBV2 パイプラインの入力を「yomi の解析結果だけ受ける」形へ
-  再設計し、`@hdae/yomi` を models の依存から外す。ADR 0072 の注入席は結合を素通しに留めて
-  あり、その際は overlay 解決が呼び手側へ移る。0.5.0 の設計検討で出た知見（延期の理由でも
-  ある）:
-  - 入力は **yomi の返り値が構造的に満たす karume 所有型** `{ prosody: Sbv2Prosody, words:
-    Sbv2Word[] }` にできる — 変換関数を利用者に書かせる必要は無く、入口の門が核クランプ等の
-    正規化を担う（今 `toSbv2Prosody` がやっていること）。
-  - `moraTones` / `moraToPhones`（現状 yomi から import）は `Sbv2Mora` の `consonant` /
-    `vowel` から**吸収できる** — 言語テーブルを karume 側へ持つ必要は無く、意味論の正本は
-    上流 SBV2 の参照に置いたままでよい。
-  - 一方で「呼び手が yomi を直接叩いて渡す」だけだと生の手数が増えるため、ヘルパの整備余地が
-    残る。そこの設計が済んでいないので 0.5.0 には同乗させなかった。
+- **バレル・ファミリープレフィックスの見直し（起票 2026-08-25 — ユーザー意向「今後見直し
+  たい」）**: `mod.ts` の全ファミリ平面 export のためにシンボルへ族名プレフィックスが付くが、
+  SBV2 族では「2」が変換イディオム（x2y）に誤読される実害が出た（`sbv2Utterance` →
+  `toSbv2Utterance` へ命名回避 — ADR
+  [0079](decisions/0079-sbv2-two-layer-input.md) 決定 2）。サブパス面での素名 export や
+  namespace オブジェクト化などの選択肢を全ファミリ横断で再設計する（プレフィックスが外れれば
+  `toUtterance` へ収斂できる）。breaking なので次の breaking 波に同乗させる。
 - **モデルカード定型文の条件出し**（公開前レビュー minor・2026-08-21）: `shared/` パスの
   説明文が shared/ を持たないリポ（irodori / anima）でも出る — 空回りだが無害。core
   `modelcard.py` の該当文を shared/ 実在時のみ出す形へ。

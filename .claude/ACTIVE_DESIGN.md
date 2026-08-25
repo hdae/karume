@@ -11,12 +11,22 @@
 
 ## Now
 
-- **0.5.1 まで出荷済み（2026-08-25）**: サンプラー再裁定（ADR
-  [0078](../docs/decisions/0078-anima-sampler-selection.md) — 既定 **Euler 維持**・DPM++ 2M
-  は `AnimaGenerateRequest.sampler` で選ぶ）を同日実装〜リリース。JSR 3 パッケージ = 0.5.1・
-  Release v0.5.1・pin = anima `2682441a` / turbo `88357344`・事後疎通緑。0.5.0 も同日クローズ
-  （記録 = [backlog](../docs/backlog.md) 消化済み節）。**次波はユーザー裁定待ち**
-  （候補 = backlog now 節）。
+- **0.6.0 波（yomi 依存分離）実装完了 — リリース段待ち**（2026-08-25 `7cd82c8`・設計の正本 =
+  ADR [0079](../docs/decisions/0079-sbv2-two-layer-input.md)）。**0.6.0 で変わる面**
+  （breaking・SBV2 のみ）:
+  - `Sbv2Pipeline.generate(utterance, options?)` — 第 1 引数は解析済みの `Sbv2Utterance`
+    （フレーズ層 `Sbv2Phrases` = yomi `analyzeWithWords` の返り値が構造的に満たす →
+    `toSbv2Utterance` で変換）。テキスト解析・辞書 19MB・修正辞書は**呼び手の責務**。
+  - 撤去（シム無し）: `text` / `dictionary` / `overlay` 席・`analyzeProsody`・`Sbv2Prosody` /
+    下書き型・`givenTone`・`OverlayDictionary` 再 export。編集は「フレーズ層で核を直して
+    再変換」or「モーラ層で `tone` を直指定」。写経見本 = `examples/sbv2/`。
+  - 検証 = **WAV 門 3 sha 不変**（吸収のビット同一性）・verify 1771/0/5。配布形・pin 値は不変。
+  - 残り = lockstep bump → push → CI → Release v0.6.0 → JSR → 事後疎通（公開 meta.json から
+    yomi 消滅の確定）。
+- **0.5.x は全てクローズ**（0.5.1 = サンプラー再裁定 ADR
+  [0078](../docs/decisions/0078-anima-sampler-selection.md) — 既定 Euler 維持・
+  `AnimaGenerateRequest.sampler` で DPM++ 2M。記録 = [backlog](../docs/backlog.md)
+  消化済み節）。
 - **0.5.0 で変わった面**（消費側の doc はここが索引）:
   - **quant 席名が全て改名された**（ADR [0074](../docs/decisions/0074-quant-seat-naming.md)
     決定 6 の移行表が正本 — 例 `w8a8-s16` → `f16+dit8-a8-attn8-s16` / sbv2 `w8-bert4` →
