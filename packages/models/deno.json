@@ -1,6 +1,6 @@
 {
   "name": "@karume/models",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "license": "MIT",
   "exports": {
     ".": "./mod.ts",
@@ -13,8 +13,8 @@
     "./vowel-detector": "./vowel-detector.ts"
   },
   "imports": {
-    "@karume/hub": "jsr:@karume/hub@^0.5.1",
-    "@karume/runtime": "jsr:@karume/runtime@^0.5.1",
+    "@karume/hub": "jsr:@karume/hub@^0.6.0",
+    "@karume/runtime": "jsr:@karume/runtime@^0.6.0",
     "@hdae/yomi": "jsr:@hdae/yomi@^0.4.2",
     "@hdae/yomi/loader": "jsr:@hdae/yomi@^0.4.2/loader"
   },
