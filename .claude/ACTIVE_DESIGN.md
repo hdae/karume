@@ -11,6 +11,18 @@
 
 ## Now
 
+- **Hub CAS 化は退避中（2026-08-25）**: fetch-cache 0.5.0（`cacheKey`）が議論の末**いったん
+  却下**され設計詰め直しになったため、それを前提にした karume 側 3 コミット（CAS 化
+  `a68e4e6`・ADR 0080 docs `272c0e9`・hub fix `ed3bf14`）を **`archive/hub-cas-0.5.0`
+  ブランチへ退避**し main を `62abf43` へ巻き戻した（fetch-cache 側の対応ブランチ =
+  `archive/cachekey-string-draft`）。ADR 0080 の裁定内容自体は生きている — fetch-cache の
+  新 API が決まり次第、退避ブランチを土台に再適用する。`ed3bf14` の hub fix（真因復元 +
+  バイト予算）だけは 0.5.0 非依存なので pre-CAS main へ移植して再適用する。
+- **既知問題 3 件 + anima 素版 i4 感度の波（2026-08-25 進行中）**: ①Pixel の
+  BodyStreamBuffer abort（真因マスキング解消 + RAM 予算制 — hub）②NVIDIA の 2GiB 天井
+  （融合 attention の行ブロック化 — runtime）③Chromium の単一 ArrayBuffer 上限
+  2,145,386,496B で Base f16 が原理的に不可（即効 = 事前判定・根本 = R1 shard 配布の
+  優先度昇格）④素版 i4 の役割別掃引（adaLN + block 外 → i8 変種を v1.0 で export → 視認）。
 - **0.6.0（yomi 依存分離）リリース完了（2026-08-25）**: JSR 3 パッケージ = 0.6.0・Release
   v0.6.0・**公開依存から `@hdae/yomi` の消滅を API 実測で確定**（hub / runtime の 2 本のみ）・
   消費者ストーリー疎通緑。設計の正本 = ADR
