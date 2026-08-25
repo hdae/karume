@@ -13,6 +13,7 @@ import {
   type StreamedAsset,
 } from "../mod.ts";
 import {
+  abortWhileAwaitingResponse,
   createMockFetch,
   HUB_URL,
   type MemoryCache,
@@ -206,6 +207,33 @@ Deno.test("streamAssets: 相 1 の sha256 不一致は fail loud で、キャッ
     false,
     "不一致のバイト列がキャッシュに残っている",
   );
+});
+
+Deno.test("streamAssets: 相 1 は巻き添えではなく真の第一失敗を表面化する", async () => {
+  const caches = new MemoryCacheStorage();
+  const served = serveAll();
+  const { loaded, refs, mock } = await prepare({ files: served, delayMs: 5 }, caches);
+  // **先頭以外**の 1 本だけを 404 にする。1 本の失敗は残り全部を abort するので、巻き添え側は
+  // 生の AbortError として決着する — ワーカーの配列位置で拾うと、真犯人が worker[0] 以外の
+  // ときに巻き添えが表面化して真因（どのファイルがなぜ落ちたか）が消える。
+  const victim = refs[1].path;
+  assert(refs[0].path !== victim, "先頭以外が落ちる形になっていない");
+  served.delete(victim);
+
+  const error = await assertRejects(
+    () =>
+      drain(
+        streamAssets(loaded, refs, {
+          fetch: abortWhileAwaitingResponse(mock.fetch, victim),
+          caches,
+        }),
+      ),
+    HubFetchError,
+  );
+  assertEquals(error.path, victim, "落ちたのとは別の shard が報告されている");
+  assertEquals(error.repo, REPO);
+  assertEquals(error.revisionSha, SHA);
+  assert(error.message.includes(victim), `${error.message} が落ちた path を名乗っていない`);
 });
 
 Deno.test("streamAssets: 取得対象が空なら network に出る前に ManifestReferenceError", async () => {

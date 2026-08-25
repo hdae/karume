@@ -10,7 +10,8 @@
  * - キャッシュ名前空間は必ず明示（`karume/1`）。`Authorization` を伴う取得は
  *   `karume/1:auth:<credential の sha256 先頭 16 hex>` へ隔離する（gated 資産を無認証経路の
  *   ヒットに供さず、かつ別 credential の写しにも供さない）。
- * - 同時取得は 4 本まで。`AbortSignal` は全取得へ透過。
+ * - 同時取得の律速は面ごとに違う（全量面はバイト予算・逐次面の相 1 は本数 4）。`AbortSignal` は
+ *   全取得へ透過。
  * - 進捗総量は content-length ではなく manifest の `size` 合計（path 一意化後）。
  */
 
@@ -21,6 +22,7 @@ import {
   prefetchHfFile,
   resolveHfRevision,
 } from "@hdae/fetch-cache/hf";
+import { createByteAdmission, createSerializer } from "./concurrency.ts";
 import {
   HubError,
   HubFetchError,
@@ -43,8 +45,28 @@ import { type ByteBudget, createGuardedFetch } from "./transport.ts";
 const CACHE_NAMESPACE = "karume/1";
 /** `Authorization` 付き取得の隔離先の前置き（この後ろに credential 由来の suffix が付く）。 */
 const AUTH_CACHE_PREFIX = `${CACHE_NAMESPACE}:auth:`;
-/** 同時取得数（数十コンポーネントの manifest で接続と RAM を破綻させない）。 */
+/**
+ * 逐次面 {@link streamAssets} 相 1 の同時取得数（数十コンポーネントの manifest で接続を
+ * 破綻させない）。相 1 は body をそのままキャッシュへ流す streaming なので、受信バッファの
+ * 前確保が無い＝本数だけで RAM が決まらない。
+ */
 const CONCURRENCY = 4;
+
+/**
+ * 全量面 {@link fetchAssets} の in-flight バイト予算（1.5GiB = 1,610,612,736 バイト）。
+ *
+ * 全量面は 1 ファイルにつき `ref.size` ぶんの受信バッファを**受信前に**確保するので、律速を
+ * 本数にすると RAM ピークが「同時本数 × その時点で一番大きいファイル」で決まってしまう
+ * （実測: anima turbo i4 の先頭 4 本で計 2.503GiB を同時前確保 — 8GB 機ターゲットでは
+ * ブラウザごと落ちる）。予算は前確保の合計に課すもので、これに加えて完走済みファイルの保持と
+ * 検証の一時コピー（Chrome の `crypto.subtle.digest` は入力を Blink 内部へ全量コピーする）が
+ * 乗るため、単一 ArrayBuffer の上限（Chromium は 2,145,386,496 バイトで打ち切る）よりも
+ * 明確に下へ置く。
+ *
+ * 公開ノブにはしない — 「安全側へ下げる」以外の使い道が無い値であり、上げれば上のピークが
+ * そのまま戻る。合わない配布が出たら定数ごと裁定し直す。
+ */
+const BYTE_BUDGET = 1.5 * 1024 * 1024 * 1024;
 
 /** 取得対象リポジトリ。`hubUrl` は**アプリが明示指定した場合のみ**有効（manifest からは来ない）。 */
 export type HubRepoRef = {
@@ -200,10 +222,16 @@ const isAborted = (error: unknown, signal?: AbortSignal): boolean =>
 /**
  * バイト列を小文字 hex の sha256 にする。
  *
- * MUST: 全量コピーしない — 数 GB 級ではコピー 1 回が一時 RAM を倍増させる（8GB 機ターゲットに
- * 実害）。取得層の返す bytes は ArrayBuffer 背面なのでそのまま digest へ渡せる。万一
- * SharedArrayBuffer 背面や部分ビューが来た場合だけコピーで背面を保証する（WebCrypto は
+ * MUST: JS 側で全量コピーしない — 数 GB 級ではコピー 1 回が一時 RAM を倍増させる（8GB 機
+ * ターゲットに実害）。取得層の返す bytes は ArrayBuffer 背面なのでそのまま digest へ渡せる。
+ * 万一 SharedArrayBuffer 背面や部分ビューが来た場合だけコピーで背面を保証する（WebCrypto は
  * SAB を拒否する）。
+ *
+ * NOTE: **これで一時ピークが消えるのは JS ヒープの中だけ**。Chrome の `crypto.subtle.digest` は
+ * 入力を Blink 内部へ全量コピーしてからハッシュするため、1 本の検証につき +N のピークが
+ * プロセス側に必ず立つ（実装挙動であって仕様保証ではない）。数 GB 級の検証が近接すると
+ * その +N が積み上がるので、全量面はこの関数を含む `validate` を同時 1 本へ直列化している
+ * （{@link fetchAssets}）。
  */
 const sha256Hex = async (bytes: Uint8Array): Promise<string> => {
   const source = isTightView(bytes) ? bytes : new Uint8Array(bytes);
@@ -442,40 +470,51 @@ export const fetchAssets = async (
   // 名前空間の解決は headers が固定である入口で 1 回だけ（digest は非同期）。
   const cacheName = await cacheNameFor(options.headers);
   const bytesByRef = new Map<string, Uint8Array<ArrayBuffer>>();
+  /**
+   * 検証（全量 sha256）を同時 1 本へ直列化する。Chrome の `crypto.subtle.digest` は入力を
+   * Blink 内部へ全量コピーするので（{@link sha256Hex}）、完走が近接した複数ファイルの検証が
+   * 重なるとその一時ピークが積み上がる。バイト予算（{@link BYTE_BUDGET}）は前確保の合計しか
+   * 見ていないため、ここを開けたままだと予算の外側でピークが伸びる。
+   *
+   * 検証は CPU 律速で並べても速くならない（並べて得るのは重なりだけ）ので、失うのは
+   * 「digest を待つ間に別ファイルの digest も進む」ぶんだけ。
+   */
+  const serializeValidation = createSerializer();
 
   const fetchOne = async (ref: FileRef): Promise<void> => {
     const refKey = fileRefKey(ref);
-    const validate = async (bytes: Uint8Array): Promise<void> => {
-      const source = fromNetwork.has(refKey) ? "network" : "cache";
-      if (bytes.byteLength !== ref.size) {
-        throw new IntegrityError(
-          `${ref.path}: バイト数が manifest と食い違う（期待 ${ref.size} / 実際 ${bytes.byteLength}）`,
-          {
-            ...contextFor(ref),
-            path: ref.path,
-            expected: String(ref.size),
-            actual: String(bytes.byteLength),
-            source,
-            available,
-          },
-        );
-      }
-      emit("verifying", ref);
-      const actual = await sha256Hex(bytes);
-      if (actual !== ref.sha256) {
-        throw new IntegrityError(
-          `${ref.path}: sha256 が manifest と食い違う（期待 ${ref.sha256} / 実際 ${actual}）`,
-          {
-            ...contextFor(ref),
-            path: ref.path,
-            expected: ref.sha256,
-            actual,
-            source,
-            available,
-          },
-        );
-      }
-    };
+    const validate = (bytes: Uint8Array): Promise<void> =>
+      serializeValidation(async () => {
+        const source = fromNetwork.has(refKey) ? "network" : "cache";
+        if (bytes.byteLength !== ref.size) {
+          throw new IntegrityError(
+            `${ref.path}: バイト数が manifest と食い違う（期待 ${ref.size} / 実際 ${bytes.byteLength}）`,
+            {
+              ...contextFor(ref),
+              path: ref.path,
+              expected: String(ref.size),
+              actual: String(bytes.byteLength),
+              source,
+              available,
+            },
+          );
+        }
+        emit("verifying", ref);
+        const actual = await sha256Hex(bytes);
+        if (actual !== ref.sha256) {
+          throw new IntegrityError(
+            `${ref.path}: sha256 が manifest と食い違う（期待 ${ref.sha256} / 実際 ${actual}）`,
+            {
+              ...contextFor(ref),
+              path: ref.path,
+              expected: ref.sha256,
+              actual,
+              source,
+              available,
+            },
+          );
+        }
+      });
     // MUST: キャッシュヒットは network に出ない＝下層の signal 監視が効かない区間なので、
     // 取得の前後で明示的に中断を見る（数 GB の sha256 照合を回している最中に取り消しが効かない
     // のは中断の透過が壊れているのと同じ — 逐次面 streamAssets と同型の確認）。
@@ -513,25 +552,43 @@ export const fetchAssets = async (
     emit("complete", ref);
   };
 
-  let next = 0;
-  const worker = async (): Promise<void> => {
+  // 送出は「本数」ではなく「in-flight の `ref.size` 合計」で律速する（{@link BYTE_BUDGET}）。
+  // 待つのはこのループ 1 本だけなので、`targets`（= resolveFiles の順）の head-of-line
+  // blocking がそのまま送出順になる — 後続の小さいファイルに追い越させないので、同じ
+  // manifest なら同じ順に出る。
+  const admission = createByteAdmission(BYTE_BUDGET);
+  const running: Promise<void>[] = [];
+  const run = async (ref: FileRef): Promise<void> => {
     try {
-      while (next < targets.length) await fetchOne(targets[next++]);
+      await fetchOne(ref);
     } catch (error) {
       // 1 本でも落ちたら残りを止める（fail loud — 全体が reject するのに DL を続ける意味はない）。
+      // MUST: ここで reject を外へ漏らさない — 決着を待つのは全送出の後なので、漏らすと
+      // 送出待ちの間に unhandled rejection になる。真の失敗理由は `failure` の reason が持つ。
       failure.abort(error);
-      throw error;
+    } finally {
+      // 成否を問わず席を返す（返さないと後続が永久に待つ）。
+      admission.release(ref.size);
     }
   };
-  // MUST: 失敗しても全ワーカーの決着を待ってから抜ける（`Promise.all` の早期 reject だと
-  // 呼び出し側が catch した後も取得が背後で走り続け、abort の意味が無くなる）。失敗時は
-  // 全員が同じ理由（`failure.abort(error)` の reason = その error）で落ちる。
-  const settled = await Promise.allSettled(
-    Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () => worker()),
-  );
-  for (const result of settled) {
-    if (result.status === "rejected") throw result.reason;
+  for (const ref of targets) {
+    // 失敗・中断の後に新しい取得を起こさない（`fetchOne` 冒頭の確認より前に止める）。
+    if (signal.aborted) break;
+    await admission.admit(ref.size);
+    running.push(run(ref));
   }
+  // MUST: 失敗しても送出済み全本の決着を待ってから抜ける（早期 reject だと呼び出し側が
+  // catch した後も取得が背後で走り続け、abort の意味が無くなる）。`run` は reject しないので
+  // ここは常に成功で返る。
+  await Promise.all(running);
+  // MUST: 巻き添えの失敗ではなく**真の第一失敗**を上げる。`failure.abort()` は最初の 1 回だけが
+  // reason を決めるので、`failure.signal.reason` は必ず最初に落ちた 1 本の理由になる。ワーカーの
+  // reject をそのまま拾うと、巻き添え側が先に決着した場合にそちらが表面化する — しかも巻き添えは
+  // 中断由来なので `isAborted` で `HubFetchError` に包まれず（生の AbortError）、Chrome では
+  // 理由の文言まで固定文言（"BodyStreamBuffer was aborted"）へ差し替えられて真因が消える。
+  // 呼び手渡しの外部 signal による中断も、その reason がそのまま `failure` に載るので素通しの
+  // ままになる（中断が取得失敗に化けない）。
+  if (failure.signal.aborted) throw failure.signal.reason;
   // MUST: 全ファイルがキャッシュ済みの起動は 1 度も network に出ないため、決着後にも中断を見る
   // （この後は同期の組み立てだけなので、これが返却前の最後の関門になる）。
   signal.throwIfAborted();
@@ -686,8 +743,9 @@ export const streamAssets = async function* (
       if (error instanceof HubError || isAborted(error, prefetchSignal)) throw error;
       // MUST: 捕まえた値の同一性だけで中断を判定しない — prefetch はバイト列を手元に持たない
       // 面なので、転送中断も put の reject として現れ、`cause` に沈めて包まれる。signal が
-      // 落ちていればその reason を素通しする（巻き添えなら reason は最初の失敗そのもので、
-      // 全量面と同じく全ワーカーが同一の error に収束する）。
+      // 落ちていればその reason（巻き添えなら最初の失敗そのもの）を素通しする。
+      // NOTE: 上の `isAborted` を先に通る形（生の AbortError）ではここに来ないので、これだけでは
+      //       真因の復元にならない。最終的な決着は相 1 の allSettled の後で reason から取る。
       if (prefetchSignal.aborted) throw prefetchSignal.reason;
       const context = contextFor(ref);
       throw new HubFetchError(
@@ -709,12 +767,12 @@ export const streamAssets = async function* (
   };
   // MUST: 失敗しても全ワーカーの決着を待ってから抜ける（全量面と同じ理由 — 早期 reject だと
   // 呼び出し側が catch した後も取得が背後で走り続ける）。
-  const settled = await Promise.allSettled(
+  await Promise.allSettled(
     Array.from({ length: Math.min(CONCURRENCY, refs.length) }, () => worker()),
   );
-  for (const result of settled) {
-    if (result.status === "rejected") throw result.reason;
-  }
+  // MUST: 巻き添えではなく**真の第一失敗**を上げる（全量面と同じ理由）。ワーカーの reject を
+  // 配列順に拾うと、真犯人が worker[0] 以外だったときに巻き添え側が表面化する。
+  if (failure.signal.aborted) throw failure.signal.reason;
 
   // 相 1 の network 実績は相 2 の帰属へ持ち越さない。相 2 で network に出るのは破損キャッシュの
   // self-heal だけなので、持ち越すとキャッシュ読出し由来の不一致まで source "network" に化ける。

@@ -21,6 +21,7 @@ import {
   payloadFor,
   REPO,
   SHA,
+  withChromeAbortShape,
 } from "./helpers/mock.ts";
 
 const MANIFEST_PATH = "karume.json";
@@ -486,13 +487,68 @@ Deno.test("fetchAssets: キャッシュヒットの phase 列は verifying → c
   }
 });
 
-Deno.test("fetchAssets: 同時取得は 4 本までに絞る", async () => {
+// 律速は「本数」ではなく「in-flight の size 合計」（バイト予算）。予算そのものの境界挙動は
+// tests/concurrency_test.ts が単体で凍結し、ここは面としての観測 — 予算に収まる限り本数では
+// 絞らないこと・送出順が resolveFiles の順に決まることを見る。
+Deno.test("fetchAssets: 予算に収まる限り本数では絞らない（律速はバイト予算）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const files = resolveFiles(loaded.manifest);
+  // fixture の全ファイルを足しても予算（1.5GiB）に遠く及ばないので、全本が同時に走る。
+  const uniquePaths = new Set(Object.values(files).map((ref) => ref.path));
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
-  assert(mock.peakConcurrency() > 1, "そもそも並行していない");
-  assert(mock.peakConcurrency() <= 4, `同時 ${mock.peakConcurrency()} 本まで走った`);
+  assertEquals(
+    mock.peakConcurrency(),
+    uniquePaths.size,
+    `予算に収まるのに同時 ${mock.peakConcurrency()} 本で頭打ちになった`,
+  );
+});
+
+Deno.test("fetchAssets: 送出順は resolveFiles の順（予算待ちを後続に追い越させない）", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
+  const files = resolveFiles(loaded.manifest);
+  // path 一意化の後、宣言順に 1 回ずつ。
+  const expected: string[] = [];
+  for (const ref of Object.values(files)) {
+    const url = resolveUrl(ref.path);
+    if (!expected.includes(url)) expected.push(url);
+  }
+  await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
+  // calls[0] は load() が出した manifest 取得。
+  assertEquals(mock.calls.slice(1), expected);
+});
+
+/** 取得対象の path を送出順（= resolveFiles 順の path 一意化）に並べる。 */
+const dispatchOrder = (files: Readonly<Record<string, { path: string }>>): string[] => {
+  const order: string[] = [];
+  for (const ref of Object.values(files)) {
+    if (!order.includes(ref.path)) order.push(ref.path);
+  }
+  return order;
+};
+
+Deno.test("fetchAssets: 巻き添えではなく真の第一失敗が表面化する", async () => {
+  const caches = new MemoryCacheStorage();
+  const served = serveAll();
+  const { mock, loaded } = await load({ files: served, delayMs: 5 }, caches);
+  const files = resolveFiles(loaded.manifest);
+  const order = dispatchOrder(files);
+  // **先頭以外**の 1 本だけを 404 にする。1 本の失敗は残り全部を abort するので、巻き添え側は
+  // 生の AbortError（Chrome ではさらに固定文言へ差し替えられる）として決着する — 決着順や
+  // ワーカーの配列位置で拾うと、真犯人ではないその 1 つが表面化して真因が消える。
+  const victim = order[order.length - 1];
+  assert(order.indexOf(victim) > 0, "先頭以外が落ちる形になっていない");
+  served.delete(victim);
+
+  const error = await assertRejects(
+    () => fetchAssets(loaded, files, { fetch: withChromeAbortShape(mock.fetch), caches }),
+    HubFetchError,
+  );
+  assertEquals(error.path, victim, "落ちたのとは別のファイルが報告されている");
+  assertEquals(error.repo, REPO);
+  assertEquals(error.revisionSha, SHA);
+  assert(error.message.includes(victim), `${error.message} が落ちた path を名乗っていない`);
 });
 
 Deno.test("fetchAssets: 2 回目はキャッシュから返り network に出ない", async () => {
