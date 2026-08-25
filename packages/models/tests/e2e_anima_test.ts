@@ -47,22 +47,22 @@ const PROMPT = "1girl, solo, long hair, blue eyes, school uniform, cherry blosso
 const STEPS = 8;
 const SEED = 42;
 
-/** 参照値（DPM++ 2M 採用後の実測 — 2026-08-25 の視認裁定に伴う意図した更新。変更禁止）。 */
+/** 参照値（移行元デモの実測 — 変更禁止）。 */
 const REFERENCE = [
   {
     quant: "f16+dit8-a8-attn8-s16",
     resolution: { width: 1024, height: 1024 },
-    sha256: "367d82369a7fef947a90cdead354e09c6e9a66493ab62b700033ef58a6852723",
+    sha256: "aa013054d0ef6eefd6165462a089545574db227b0845057af52982d55753b608",
   },
   {
     quant: "f16+dit8-a8-attn8-s16",
     resolution: { width: 512, height: 512 },
-    sha256: "bb9b5c81fdf42d033035a91582c3f6e5200152cbbdc1cc2398096bd7309a3979",
+    sha256: "dd4506de50f346676a35919d471ff7030514992cd337077c04c0dd2ffa332756",
   },
   {
     quant: "f16",
     resolution: { width: 1024, height: 1024 },
-    sha256: "f6a3f91c702386f179db44c6a0f78fc13590bf5943e631d65da81101ded04a46",
+    sha256: "6943b541a21e3e22c40661d007bbc638f23365c17a95dd3e8363460abfc610db",
   },
 ] as const satisfies readonly { quant: string; resolution: ImageSize; sha256: string }[];
 
@@ -213,7 +213,7 @@ const BASE_REFERENCE = {
   steps: 20,
   guidanceScale: 4,
   negativePrompt: "low quality, worst quality, blurry, bad anatomy, jpeg artifacts",
-  sha256: "97dad23f6d3bede37b259cbf323b28de6bea60433a431ff859ab3815a08d571c",
+  sha256: "071929c40e90628006eab593842080246140e771a82f8a35762507f4a12e9560",
 } as const;
 
 const baseManifestText = await Deno.readTextFile(new URL("karume.json", BASE_ASSETS_DIR)).catch(
