@@ -33,7 +33,11 @@ text stack を参照する現行の組では:
 2. その **main の commit SHA を確定**させる（§3 と同じ取り方）
 3. その SHA を渡して **`karume-anima-turbo` を越境参照で焼く** — `tools/export-recipes/dist.py`
    の 5 指定（`--ref-repo` / `--ref-revision` / `--ref-dist` / `--ref-model` / `--ref-role`）は
-   **全部揃うか 1 つも無いか**の 2 通りだけで、部分指定は落ちる
+   **全部揃うか 1 つも無いか**の 2 通りだけで、部分指定は落ちる。
+   **ステージングの `--out` は必ずリポ名と同名のディレクトリにする** — カードの Usage 例の
+   repo 名は出力ディレクトリ名から導出されるため、別名で焼くと誤った repo 名がカードに載る
+   （0.5.0 で `-release` 付きステージング名がそのまま公開カードに写った実害 — 2026-08-25 に
+   修正。恒久策は backlog later）
 4. **`karume-anima-turbo` を上げる**
 
 参照先を後から上げ直すと SHA が変わり、turbo の manifest は**古い revision を指したまま**に

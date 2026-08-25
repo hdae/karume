@@ -7,10 +7,18 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 次波の裁定待ち（0.5.0 リリース完了）
+## now — 0.5.1 リリース段（サンプラー再裁定）
 
-**0.5.0 breaking 波は 2026-08-25 にクローズ**（実装〜リリース〜事後疎通まで消化 — 結果は下の
-消化済み節）。次の大波はユーザー裁定待ち。候補（詳細は各節）:
+**0.5.0 は 2026-08-25 にクローズ**（結果は下の消化済み節）。直後にサンプラーの再裁定
+（ADR [0078](decisions/0078-anima-sampler-selection.md) — 既定 Euler 維持・DPM++ 2M は
+request の `sampler` 席で選ぶ）を消化した:
+
+- HF 側は**上げ直し済み**: anima `2682441a` / turbo `88357344`（euler 化・越境参照追随・
+  カード Usage の repo 誤記修正）— `revision: "main"` 追従の利用者は復旧済み
+- コード側 = `sampler` 席（`74febe7`）+ pin 更新（`7ea134d`）— **0.5.1 の中身はこの 2 点**
+- 残り: push → CI 緑 → GitHub Release v0.5.1 → JSR publish（0.5.0 の pin 利用者はここで解消）
+
+**0.5.1 が出たら次の大波はユーザー裁定待ち**。候補（詳細は各節）:
 
 - SBV2 の yomi 依存分離（later 節 — 0.6.0 想定・breaking。ユーザー意向「早い段階で」）
 - 生成 API 波（later 節 — `GenerationProgram` + sequence API。LLM 実需に直結する最大の API 波）
@@ -74,6 +82,14 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## later
 
+- **カードの Usage repo 導出の硬化（起票 2026-08-25）**: `karume.dist` はカードの Usage 例の
+  repo 名を**出力ディレクトリ名**から導出するため、越境参照のステージング焼き（`--out` が
+  別名）で誤った repo 名がカードに載る（実害 = turbo カードに `-release` 付き誤名が公開されて
+  いた — ADR [0078](decisions/0078-anima-sampler-selection.md) Consequences・runbook §0 に
+  運用注意を追記済み）。恒久策 = `Pipeline.repo_name` 系の正本から導出し `--out` 名へ依存
+  しない形。
+- **examples/anima に `--sampler` ノブ（起票 2026-08-25）**: request 側 `sampler` 席
+  （ADR 0078）を CLI デモから振れるようにする小改修。
 - **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: adaLN の
   i8 化（irodori の帰属で効いた知見の移植 — anima では**未実測の仮説**）と量子化感度の高い
   場所の特定。系列 + 視認物は `outputs/series-archive/2026-08-23-anima-base-i4/` に退避済みで

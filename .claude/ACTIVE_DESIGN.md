@@ -11,10 +11,13 @@
 
 ## Now
 
-- **0.5.0 リリース完了（2026-08-25）**: JSR 3 パッケージ = 0.5.0・GitHub Release v0.5.0・
-  HF 4 リポ再アップロード + `*_CURRENT` pin 更新・事後疎通（JSR 消費グラフ + pin 実 DL 合成
-  4 ファミリ）まで消化。リリース記録は [backlog](../docs/backlog.md) 消化済み節。
-  **次波はユーザー裁定待ち**（候補 = backlog now 節）。
+- **0.5.1 リリース段（サンプラー再裁定 — ADR
+  [0078](../docs/decisions/0078-anima-sampler-selection.md)）**: anima の既定サンプラーは
+  **Euler 維持**へ再裁定（0.5.0 の dpmpp-2m 宣言は同日戻し）。HF は上げ直し済み（anima
+  `2682441a` / turbo `88357344` — main 追従の利用者は復旧済み）。0.5.1 = `sampler` 席 +
+  pin 更新の 2 点で、残りは push → CI → Release v0.5.1 → JSR。0.5.0 自体は同日クローズ済み
+  （リリース記録 = [backlog](../docs/backlog.md) 消化済み節）。**0.5.1 後の次波はユーザー
+  裁定待ち**（候補 = backlog now 節）。
 - **0.5.0 で変わった面**（消費側の doc はここが索引）:
   - **quant 席名が全て改名された**（ADR [0074](../docs/decisions/0074-quant-seat-naming.md)
     決定 6 の移行表が正本 — 例 `w8a8-s16` → `f16+dit8-a8-attn8-s16` / sbv2 `w8-bert4` →
@@ -29,8 +32,9 @@
     場合のオプトイン**」= bump のたびに pin 更新 + 動作確認の義務つき。hub は revision 未指定の
     暗黙 `main` 解決に 1 回だけ warn（解決 SHA 印字 + pin / `*_CURRENT` の 2 択案内）。
   - anima に `pipelineConfig.scheduler.type` 席（`euler` / `dpmpp-2m`・省略時 euler）。
-    **配布形は base / turbo とも `dpmpp-2m` を宣言済み**（出荷バイトの視認 A/B 裁定 —
-    seed 固定でも 0.4.x と画が変わる）。
+    **配布既定は euler**（再裁定 2026-08-25 — ADR 0078。0.5.0 期の公開 revision
+    `ebb27bc4` / `6215f965` だけが dpmpp-2m 宣言）。DPM++ 2M は 0.5.1 の
+    `AnimaGenerateRequest.sampler` で選ぶ。
   - 0.4.3 で配られた面（消費側 doc の注意点）: `animaLatents()`（途中 latent の逆正規化素材
     — プレビューには要らない）/ `approximatePreview()`（途中 latent → RGB の線形近似。係数は
     **正規化空間**で較正済みなので `copyLatents()` の返り値をそのまま渡す — 逆正規化した値を
