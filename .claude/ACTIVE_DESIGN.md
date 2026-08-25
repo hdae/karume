@@ -11,13 +11,12 @@
 
 ## Now
 
-- **0.5.1 リリース段（サンプラー再裁定 — ADR
-  [0078](../docs/decisions/0078-anima-sampler-selection.md)）**: anima の既定サンプラーは
-  **Euler 維持**へ再裁定（0.5.0 の dpmpp-2m 宣言は同日戻し）。HF は上げ直し済み（anima
-  `2682441a` / turbo `88357344` — main 追従の利用者は復旧済み）。0.5.1 = `sampler` 席 +
-  pin 更新の 2 点で、残りは push → CI → Release v0.5.1 → JSR。0.5.0 自体は同日クローズ済み
-  （リリース記録 = [backlog](../docs/backlog.md) 消化済み節）。**0.5.1 後の次波はユーザー
-  裁定待ち**（候補 = backlog now 節）。
+- **0.5.1 まで出荷済み（2026-08-25）**: サンプラー再裁定（ADR
+  [0078](../docs/decisions/0078-anima-sampler-selection.md) — 既定 **Euler 維持**・DPM++ 2M
+  は `AnimaGenerateRequest.sampler` で選ぶ）を同日実装〜リリース。JSR 3 パッケージ = 0.5.1・
+  Release v0.5.1・pin = anima `2682441a` / turbo `88357344`・事後疎通緑。0.5.0 も同日クローズ
+  （記録 = [backlog](../docs/backlog.md) 消化済み節）。**次波はユーザー裁定待ち**
+  （候補 = backlog now 節）。
 - **0.5.0 で変わった面**（消費側の doc はここが索引）:
   - **quant 席名が全て改名された**（ADR [0074](../docs/decisions/0074-quant-seat-naming.md)
     決定 6 の移行表が正本 — 例 `w8a8-s16` → `f16+dit8-a8-attn8-s16` / sbv2 `w8-bert4` →

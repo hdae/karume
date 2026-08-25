@@ -7,18 +7,11 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.5.1 リリース段（サンプラー再裁定）
+## now — 次波の裁定待ち（0.5.1 まで出荷済み）
 
-**0.5.0 は 2026-08-25 にクローズ**（結果は下の消化済み節）。直後にサンプラーの再裁定
-（ADR [0078](decisions/0078-anima-sampler-selection.md) — 既定 Euler 維持・DPM++ 2M は
-request の `sampler` 席で選ぶ）を消化した:
-
-- HF 側は**上げ直し済み**: anima `2682441a` / turbo `88357344`（euler 化・越境参照追随・
-  カード Usage の repo 誤記修正）— `revision: "main"` 追従の利用者は復旧済み
-- コード側 = `sampler` 席（`74febe7`）+ pin 更新（`7ea134d`）— **0.5.1 の中身はこの 2 点**
-- 残り: push → CI 緑 → GitHub Release v0.5.1 → JSR publish（0.5.0 の pin 利用者はここで解消）
-
-**0.5.1 が出たら次の大波はユーザー裁定待ち**。候補（詳細は各節）:
+**0.5.0 と 0.5.1（サンプラー再裁定 — ADR
+[0078](decisions/0078-anima-sampler-selection.md)）はどちらも 2026-08-25 にクローズ**
+（結果は下の消化済み節）。次の大波はユーザー裁定待ち。候補（詳細は各節）:
 
 - SBV2 の yomi 依存分離（later 節 — 0.6.0 想定・breaking。ユーザー意向「早い段階で」）
 - 生成 API 波（later 節 — `GenerationProgram` + sequence API。LLM 実需に直結する最大の API 波）
@@ -26,9 +19,20 @@ request の `sampler` 席で選ぶ）を消化した:
 - モデル拡充の続き・EmbeddingGemma の完成（later 節）
 - anima 素版 i4 の品質改善（later 節 — 配布スキップ裁定の復活レバー）
 
-## 消化済み（0.5.0 breaking 波 — 2026-08-25）
+## 消化済み（0.5.0 breaking 波 + 0.5.1 サンプラー再裁定 — 2026-08-25）
 
 結果だけ残す（経緯は git / 各 ADR / [release-runbook](release-runbook.md)）:
+
+**0.5.1（ADR [0078](decisions/0078-anima-sampler-selection.md)）**:
+
+- anima の配布既定サンプラーを Euler へ戻し（HF 上げ直し = anima `2682441a` / turbo
+  `88357344`〈越境参照を追随・カード Usage の repo 誤記も修正〉・重みバイト不変を sha256
+  全数突合で証明）+ `AnimaGenerateRequest.sampler` 席（DPM++ 2M は選択肢）+ anima 2 pin 更新
+- CI 緑 → GitHub Release v0.5.1 → JSR publish（hub / runtime / models = 0.5.1）。事後疎通 =
+  0.5.1 消費グラフ解決 + pin 4 定数の期待値一致 + `fromPretrained(*_CURRENT)` 実 DL 構築 +
+  公開バイトからの e2e golden ビット再現（pin 更新前の同一 revision 実測）
+
+**0.5.0**:
 
 - quant 席名の一斉改名（ADR [0074](decisions/0074-quant-seat-naming.md)）・`linearCompute` /
   `attentionCompute` の値 `"i8a8"` → `"a8"`・`karume/4` 繰り上げ + 表示欄 + `requiredLimits` +
