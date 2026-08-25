@@ -11,9 +11,12 @@
 
 ## Now
 
-- **0.6.0 波（yomi 依存分離）実装完了 — リリース段待ち**（2026-08-25 `7cd82c8`・設計の正本 =
-  ADR [0079](../docs/decisions/0079-sbv2-two-layer-input.md)）。**0.6.0 で変わる面**
-  （breaking・SBV2 のみ）:
+- **0.6.0（yomi 依存分離）リリース完了（2026-08-25）**: JSR 3 パッケージ = 0.6.0・Release
+  v0.6.0・**公開依存から `@hdae/yomi` の消滅を API 実測で確定**（hub / runtime の 2 本のみ）・
+  消費者ストーリー疎通緑。設計の正本 = ADR
+  [0079](../docs/decisions/0079-sbv2-two-layer-input.md)。**次波はユーザー裁定待ち**
+  （候補 = [backlog](../docs/backlog.md) now 節）。**0.6.0 で変わった面**（breaking・SBV2 のみ
+  — 消費側の doc はここが索引）:
   - `Sbv2Pipeline.generate(utterance, options?)` — 第 1 引数は解析済みの `Sbv2Utterance`
     （フレーズ層 `Sbv2Phrases` = yomi `analyzeWithWords` の返り値が構造的に満たす →
     `toSbv2Utterance` で変換）。テキスト解析・辞書 19MB・修正辞書は**呼び手の責務**。
@@ -21,8 +24,6 @@
     下書き型・`givenTone`・`OverlayDictionary` 再 export。編集は「フレーズ層で核を直して
     再変換」or「モーラ層で `tone` を直指定」。写経見本 = `examples/sbv2/`。
   - 検証 = **WAV 門 3 sha 不変**（吸収のビット同一性）・verify 1771/0/5。配布形・pin 値は不変。
-  - 残り = lockstep bump → push → CI → Release v0.6.0 → JSR → 事後疎通（公開 meta.json から
-    yomi 消滅の確定）。
 - **0.5.x は全てクローズ**（0.5.1 = サンプラー再裁定 ADR
   [0078](../docs/decisions/0078-anima-sampler-selection.md) — 既定 Euler 維持・
   `AnimaGenerateRequest.sampler` で DPM++ 2M。記録 = [backlog](../docs/backlog.md)

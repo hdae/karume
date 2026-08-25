@@ -7,21 +7,28 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.6.0 波（yomi 依存分離）実装完了・リリース段待ち
+## now — 次波の裁定待ち（0.6.0 まで出荷済み）
 
-**SBV2 入力の 2 層化と `@hdae/yomi` 分離は実装済み**（2026-08-25 `7cd82c8` — 設計の正本 =
-ADR [0079](decisions/0079-sbv2-two-layer-input.md)・ADR 0072 は supersede 追記済み）。
-検証 = **WAV 門 3 sha 不変**（吸収のビット同一性の出荷バイト証明）・verify 1771/0/5・
-publish dry-run 緑。残り = 0.6.0 リリース段（lockstep bump → push → CI → Release → JSR。
-**配布形・pin 値は不変** — HF 再アップロード不要。事後疎通で公開 meta.json から yomi が
-消えたことを確定する）。
-
-0.6.0 後の次波候補（詳細は各節）:
+**0.6.0（yomi 依存分離）は 2026-08-25 にクローズ**（結果は下の消化済み節）。次の大波は
+ユーザー裁定待ち。候補（詳細は各節）:
 
 - 生成 API 波（later 節 — `GenerationProgram` + sequence API。LLM 実需に直結する最大の API 波）
 - R1 のロード面 API 工事 4 件 + exporter 自動分割規則（release 節）
 - モデル拡充の続き・EmbeddingGemma の完成（later 節）
 - anima 素版 i4 の品質改善（later 節 — 配布スキップ裁定の復活レバー）
+
+## 消化済み（0.6.0 yomi 依存分離 — 2026-08-25）
+
+結果だけ残す（設計の正本 = ADR [0079](decisions/0079-sbv2-two-layer-input.md)・経緯は git）:
+
+- SBV2 入力の 2 層化（`Sbv2Phrases` → `toSbv2Utterance` → `Sbv2Utterance` →
+  `generate(utterance, options?)` 第一引数）・注入席/辞書席の全廃（ADR 0072 supersede）
+- 検証 = **WAV 門 3 sha 不変**（moraTones / moraToPhones 吸収のビット同一性の出荷バイト証明）・
+  verify 1771/0/5・配布形 / manifest / pin 不変（HF 再アップロードなし）
+- lockstep 0.6.0 → CI 緑 → Release v0.6.0 → JSR publish（3 パッケージ = 0.6.0）。事後疎通 =
+  **公開依存リストから `@hdae/yomi` の消滅を API 実測で確定**（0.5.1 の 4 本 → 0.6.0 は
+  hub / runtime の 2 本のみ）+ 消費者ストーリー E2E（公開 JSR + yomi 呼び手側 → 構造互換 →
+  合成・モーラ tone 編集が波形へ到達）
 
 ## 消化済み（0.5.0 breaking 波 + 0.5.1 サンプラー再裁定 — 2026-08-25）
 
