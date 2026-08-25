@@ -12,16 +12,13 @@
 //  ③ 運用上限（`maxTokens` / `maxFrames`）は配布形が宣言する — 欠けていれば読めない。
 //     ホスト側の `(T, T)` 表は 8·T² bytes 級なので、上限の無い配布形は無制限に膨らむ。
 
-import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import type { JtdDictionary } from "@hdae/yomi";
 import {
   assertPhonemeLimit,
   assertTiledBert,
   assertTokenLimit,
   assetJson,
-  type DictionaryLoader,
-  ensureDictionary,
   parseTokenizerAsset,
   Sbv2Pipeline,
 } from "../src/sbv2/pipeline.ts";
@@ -493,7 +490,7 @@ Deno.test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でな
   parseTokenizerAsset(tokenizerRanges({ removed: [[0, 0], [8, 31]], spaced: [[32, 32]] }), "tok");
   // `inRanges` は二分探索なので、前提が破れても例外は出ず**黙って外す**。除去/空白化の規則
   // だけが変わった bertText から input_ids と baseWord2ph が同じ壊れ方で作られるため、
-  // `text/analyze.ts` の長さ突合門も通り、別の BERT 埋め込みで合成した音がそのまま出る。
+  // `text/model-input.ts` の長さ突合門も通り、別の BERT 埋め込みで合成した音がそのまま出る。
   assertThrows(
     () => parseTokenizerAsset(tokenizerRanges({ removed: [[31, 8]], spaced: [] }), "tok"),
     Error,
@@ -528,41 +525,4 @@ Deno.test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でな
     Error,
     "tok.cleanRanges.spaced[0]: 区間 [5, 4] の start が end より大きい",
   );
-});
-
-// ---- 辞書の確保（19MB の取得を 1 度きりにする席）-----------------------------
-
-/** 必ず parse に失敗するバイト列（取得の回数だけを見たいので中身は要らない）。 */
-const brokenLoader = (): { load: DictionaryLoader; calls: () => number } => {
-  let calls = 0;
-  return {
-    load: () => {
-      calls += 1;
-      return Promise.resolve(new Uint8Array(8));
-    },
-    calls: () => calls,
-  };
-};
-
-Deno.test("ensureDictionary: 並行で入っても取得は 1 度きり（鎖に載せずに担保する）", async () => {
-  // 値で持つ実装だと、await 中に入った 2 本目が「まだ undefined」を見て同じ 19MB を取りに出る。
-  const state: { dictionary: Promise<JtdDictionary> | undefined } = { dictionary: undefined };
-  const { load, calls } = brokenLoader();
-
-  const first = ensureDictionary(state, load);
-  const second = ensureDictionary(state, load);
-  assertStrictEquals(first, second, "2 本目が別の取得を始めた");
-  await assertRejects(() => first);
-  assertEquals(calls(), 1);
-});
-
-Deno.test("ensureDictionary: 失敗した取得は欄に残さない（1 度の失敗を持ち越さない）", async () => {
-  // 失敗した Promise を持ち続けると、以後の全ての合成・解析が同じ失敗を返し続ける。
-  const state: { dictionary: Promise<JtdDictionary> | undefined } = { dictionary: undefined };
-  const { load, calls } = brokenLoader();
-
-  await assertRejects(() => ensureDictionary(state, load));
-  assertEquals(state.dictionary, undefined, "失敗した取得が欄に残っている");
-  await assertRejects(() => ensureDictionary(state, load));
-  assertEquals(calls(), 2, "2 度目が取りに出ていない");
 });

@@ -3,7 +3,13 @@
  *
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
  * 面は利用者ストーリーに対応する — 組む（{@link Sbv2Pipeline.fromPretrained} /
- * {@link Sbv2Pipeline.fromAssets}）/ 合成する（`generate`）/ 解放する（`dispose`）。
+ * {@link Sbv2Pipeline.fromAssets}）/ 発話にする（{@link toSbv2Utterance}）/ 合成する
+ * （`generate`）/ 解放する（`dispose`）。
+ *
+ * **0.6.0 の再裁定（breaking）**: テキスト解析（辞書・修正辞書）は呼び手の責務になり、
+ * `generate` は解析済みの {@link Sbv2Utterance} を第 1 引数に受ける。ADR 0072 の注入席
+ * （`text` / `overlay` / `prosody` / `givenTone` / `analyzeProsody`）とその語彙はシム無しで
+ * 撤去した — 解析器を持たないぶん、入口は「渡された構造が自己整合していること」だけを見る。
  *
  * スタイル名・話者名の受理集合は**配布形の `pipelineConfig`** が持つ（ADR 0038 §1）ので、
  * Anima の `parseResolution` に相当する「綴りの正本」はこのファミリには無い。
@@ -17,18 +23,23 @@ export type {
   GeneratedAudio,
   Sbv2Assets,
   Sbv2FromPretrainedOptions,
-  Sbv2GenerateRequest,
+  Sbv2GenerateOptions,
   Sbv2PipelineOptions,
-  Sbv2ProsodyDraft,
   Sbv2RunComponent,
 } from "./src/sbv2/pipeline.ts";
 
 /**
- * 下書き（アクセント句 / モーラ）の語彙。`analyzeProsody` が返し、核を直したものを `generate` の
- * `prosody` へ戻す。**SBV2 が実際に読む欄だけ**を持つ（yomi の解析結果の部分集合 — 渡せるのに
- * 効かない欄を公開面に作らないため）。
+ * 句構造の解析結果 → 発話の変換（純関数・GPU 不要）。核をモーラごとの 2 値トーンへ展開し、
+ * 句の記号を末尾モーラへ寄せる。**アクセント句と核で読みを返す解析器の出力**は
+ * {@link Sbv2Phrases} を構造的に満たすので、そのまま渡せる。
  */
-export type { Sbv2AccentPhrase, Sbv2Mora, Sbv2Prosody } from "./src/sbv2/text/prosody.ts";
+export { toSbv2Utterance } from "./src/sbv2/text/utterance.ts";
+
+/**
+ * 発話の語彙。`moras` が編集面（`tone` を直すとアクセントが動く）で、`words` は読み取り専用。
+ * **SBV2 が実際に読む欄だけ**を持つ（渡せるのに効かない欄を公開面に作らないため）。
+ */
+export type { Sbv2Mora, Sbv2Phrases, Sbv2Utterance, Sbv2Word } from "./src/sbv2/text/utterance.ts";
 
 /**
  * 入力起因の失敗（呼び手が渡した要求が受理できない）。内部不変条件の破れは素の `Error` のまま
@@ -45,14 +56,3 @@ export { Sbv2InputError } from "./src/sbv2/errors.ts";
  * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
  */
 export { SBV2_JVNV_CURRENT } from "./src/sbv2/config.ts";
-
-/**
- * 修正辞書（誤読・アクセントの差し替え）の綴りは `@hdae/yomi` が正本。**素通しで通す** —
- * ここで別名や変換層を作ると、辞書側の検証（読みのモーラ分割・アクセント型の範囲）と
- * 二重定義になる。
- *
- * `OverlayDictionary` は**型だけ**を通す（構築するなら `@hdae/yomi` から値を import する）。
- * 常駐サーバーのように辞書が実行中に増減する側は、解決済みのものを持ち回って毎回の要求へ
- * 載せる（`Sbv2PipelineOptions.overlay` の MUST）。
- */
-export type { OverlayDictionary, OverlayEntry } from "@hdae/yomi";

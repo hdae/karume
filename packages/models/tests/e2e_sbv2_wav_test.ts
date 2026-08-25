@@ -53,17 +53,25 @@
  * GPU 無し環境は理由を出して**明示 SKIP** する（テストを消して無音で緑にしない — ADR 0005）。
  *
  * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
- * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。日本語辞書だけは
- * パイプラインが自分で取りに出る（hub 非経由の唯一の経路 — `pipeline.ts` のモジュール doc）
- * ので、初回だけネットワークが要る（以降は Cache API から返る）。辞書の版も波形を決める
- * 入力なので、突合が割れたときのために `@hdae/yomi` の版をログに出す。
+ * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。**テキスト解析は 0.6.0 で
+ * 呼び手の責務になった**ので、日本語辞書を取りに出るのはこのテスト自身（`@hdae/yomi` は
+ * models の依存ではなく、ここでは「呼び手」として使う）— 初回だけネットワークが要る
+ * （以降は Cache API から返る）。辞書の版も波形を決める入力なので、突合が割れたときのために
+ * `@hdae/yomi` の版をログに出す。
  */
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { parseManifest, resolveFiles } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
-import { VERSION as YOMI_VERSION } from "@hdae/yomi";
-import { encodeWav, type GeneratedAudio, Sbv2Pipeline } from "../mod.ts";
+import { analyzeWithWords, VERSION as YOMI_VERSION } from "@hdae/yomi";
+import { getDictionary } from "@hdae/yomi/loader";
+import {
+  encodeWav,
+  type GeneratedAudio,
+  Sbv2Pipeline,
+  type Sbv2Utterance,
+  toSbv2Utterance,
+} from "../mod.ts";
 import { parseSbv2PipelineConfig, type Sbv2Defaults } from "../src/sbv2/config.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
@@ -160,6 +168,21 @@ if (!ASSETS_AVAILABLE) {
 }
 
 const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
+
+/**
+ * 参照 WAV と同じテキストを発話へ落とす（呼び手側の解析 — 全ての門が同じ 1 本を使う）。
+ *
+ * MUST: 解析は 1 度きり。辞書の取得（初回だけネットワーク）を門ごとに繰り返さない。
+ */
+const utteranceOnce = (() => {
+  let cached: Promise<Sbv2Utterance> | undefined;
+  return (): Promise<Sbv2Utterance> => {
+    cached ??= getDictionary().then((dictionary) =>
+      toSbv2Utterance(analyzeWithWords(dictionary, TEXT))
+    );
+    return cached;
+  };
+})();
 
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
@@ -297,7 +320,7 @@ Deno.test({
       quant: QUANT,
     });
     // ノブは 1 つも渡さない — 参照 WAV と同じく `pipelineConfig.defaults` に埋めさせる。
-    const audio = await pipeline.generate({ text: TEXT, seed: SEED });
+    const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
     const actual = await sha256Hex(wav);
     const elapsed = ((performance.now() - started) / 1000).toFixed(1);
@@ -326,7 +349,7 @@ Deno.test({
       quant: BERT4_QUANT,
     });
     // ノブは 1 つも渡さない — `i8` の門と同じ条件（差は text_encoder の格納形だけ）。
-    const audio = await pipeline.generate({ text: TEXT, seed: SEED });
+    const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
     const actual = await sha256Hex(wav);
     const elapsed = ((performance.now() - started) / 1000).toFixed(1);
@@ -371,7 +394,7 @@ Deno.test({
       quant: W4_QUANT,
     });
     // ノブは 1 つも渡さない — `i8` の門と同じ条件（差は 3 席の格納形だけ）。
-    const audio = await pipeline.generate({ text: TEXT, seed: SEED });
+    const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
     const actual = await sha256Hex(wav);
     const elapsed = ((performance.now() - started) / 1000).toFixed(1);
@@ -437,12 +460,13 @@ Deno.test({
       );
 
     await using pipeline = await open();
+    const utterance = await utteranceOnce();
 
     await t.step(
       "未知のスタイルは利用可能な一覧を添えて落ちる（既定へ黙って落ちない）",
       async () => {
         await assertRejects(
-          () => pipeline.generate({ text: TEXT, style: "Angry" }),
+          () => pipeline.generate(utterance, { style: "Angry" }),
           Error,
           "スタイル 'Angry' は manifest に無い",
         );
@@ -451,7 +475,7 @@ Deno.test({
 
     await t.step("未知の話者も同じく落ちる", async () => {
       await assertRejects(
-        () => pipeline.generate({ text: TEXT, speaker: "FN1" }),
+        () => pipeline.generate(utterance, { speaker: "FN1" }),
         Error,
         "話者 'FN1' は manifest に無い",
       );
@@ -501,7 +525,7 @@ Deno.test({
           timed: diagnostics.lastRunTiming !== undefined,
         }),
     });
-    await pipeline.generate({ text: TEXT, seed: SEED });
+    await pipeline.generate(await utteranceOnce(), { seed: SEED });
     assertEquals(seen.map((run) => run.component), ["text_encoder", "front", "voice"]);
     for (const run of seen) {
       if (run.dispatches <= 0 || !run.ran) {
@@ -520,7 +544,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "e2e(実GPU): analyzeProsody は 3 欄ちょうどを返し、進行中の合成の後ろに並ばない",
+  name: "e2e(実GPU): 発話は呼び手側で組み、models は解析器を持たない（0.6.0 の入口）",
   ignore: !RUNNABLE,
   fn: async () => {
     const manifest = readManifest();
@@ -530,22 +554,39 @@ Deno.test({
       quant: QUANT,
     });
 
-    // MUST（ADR 0072 決定 4）: 公開するのは 3 欄だけ。word2ph / input_ids を足すと、DeBERTa の
-    // 語彙やトークナイザを差し替えた瞬間に外部が壊れる。
-    const draft = await pipeline.analyzeProsody(TEXT);
-    assertEquals(Object.keys(draft).sort(), ["phones", "prosody", "tones"]);
-    assertEquals(draft.tones.length, draft.phones.length, "派生 2 欄の長さが揃っていない");
+    // 参照 WAV と同じ発話（門 3 本が使っているもの）。tone を全部反転させれば、同じ資産・
+    // 同じ seed でも別の波形が出る — 「発話が実際に読まれている」ことの実証。
+    const utterance = await utteranceOnce();
+    assert(utterance.moras.length > 0, "解析がモーラを 1 つも返していない");
+    const flipped = {
+      ...utterance,
+      moras: utterance.moras.map((mora) => ({ ...mora, tone: (1 - mora.tone) as 0 | 1 })),
+    };
+    const [reference, edited] = [
+      await pipeline.generate(utterance, { seed: SEED }),
+      await pipeline.generate(flipped, { seed: SEED }),
+    ];
+    assertEquals(reference.sampleRate, edited.sampleRate);
+    assert(
+      reference.data.length !== edited.data.length ||
+        reference.data.some((sample, index) => sample !== edited.data[index]),
+      "tone を全反転しても同じ波形が出た（発話の tone が読まれていない）",
+    );
 
-    // MUST（同 決定 7）: 生成の直列化鎖には載せない。GPU を張らない解析（サブ ms）が、
-    // 進行中の合成（秒オーダー）の後ろに並ばないこと — 鎖へ戻すと必ず後ろに回るので落ちる。
-    let synthesized = false;
-    const generating = pipeline.generate({ text: TEXT, seed: SEED }).then((audio) => {
-      synthesized = true;
-      return audio;
-    });
-    const duringSynthesis = await pipeline.analyzeProsody(TEXT);
-    assert(!synthesized, "analyzeProsody が合成の完了を待った（直列化鎖に載っている）");
-    assertEquals(duringSynthesis.phones, draft.phones);
-    await generating;
+    // 音素を変える編集は入口の門で止まる（words と食い違うため）。母音は必ず別の値へ
+    // 差し替える（解析結果に依らず「変わった」ことを保証する）。
+    const first = utterance.moras[0];
+    await assertRejects(
+      () =>
+        pipeline.generate({
+          ...utterance,
+          moras: [
+            { ...first, vowel: first.vowel === "a" ? "i" : "a" },
+            ...utterance.moras.slice(1),
+          ],
+        }, { seed: SEED }),
+      Error,
+      "が words の",
+    );
   },
 });

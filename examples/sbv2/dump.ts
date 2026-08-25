@@ -28,11 +28,13 @@
  * **Karume 側と torch 側で別のスタイルベクトルを使った比較**になる。
  */
 
-import { encodeWav } from "../../packages/models/mod.ts";
+import { analyzeWithWords } from "@hdae/yomi";
+import { getDictionary } from "@hdae/yomi/loader";
+import { encodeWav, toSbv2Utterance } from "../../packages/models/mod.ts";
 import {
   closeSbv2State,
   openSbv2State,
-  type Sbv2GenerateRequest,
+  type Sbv2GenerateOptions,
   synthesizeSbv2,
 } from "../../packages/models/src/sbv2/pipeline.ts";
 import {
@@ -100,8 +102,7 @@ const sdpRatio = number("sdp-ratio");
 const noiseScale = number("noise-scale");
 const noiseScaleW = number("noise-scale-w");
 const lengthScale = number("length-scale");
-const request: Sbv2GenerateRequest = {
-  text,
+const options: Sbv2GenerateOptions = {
   seed: rawSeed === undefined ? 0 : Number(rawSeed),
   ...(style === undefined ? {} : { style }),
   ...(styleWeight === undefined ? {} : { styleWeight }),
@@ -118,14 +119,16 @@ if (!await isLocalDist(source)) {
 }
 
 const started = performance.now();
+// テキスト → 発話は呼び手側（`main.ts` と同じ写経 — models は解析器を持たない）。
+const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(), text));
 const state = await openSbv2State(await loadLocalAssets(source, selection), selection);
 try {
-  const { sampleRate, audio, trace } = await synthesizeSbv2(state, request);
-  const { analysis } = trace;
-  const tokens = analysis.inputIds.length;
-  const phonemes = analysis.ids.phoneIds.length;
+  const { sampleRate, audio, trace } = await synthesizeSbv2(state, utterance, options);
+  const { input } = trace;
+  const tokens = input.inputIds.length;
+  const phonemes = input.ids.phoneIds.length;
   console.log(
-    `[dump] ${JSON.stringify(text)} → 音素 ${analysis.phones.length}（add_blank 後 ${phonemes}）` +
+    `[dump] ${JSON.stringify(text)} → 音素 ${input.phones.length}（add_blank 後 ${phonemes}）` +
       ` / DeBERTa トークン ${tokens} / ${trace.bertHiddenOutput}\n` +
       `       Ty=${trace.frames} フレーム / samples=${audio.length}`,
   );
@@ -134,14 +137,14 @@ try {
   await Deno.writeFile(`${outDir}/${WAV_FILE}`, encodeWav(audio, sampleRate));
 
   const tensors = new Map<string, DumpTensor>([
-    ["input_ids", { dtype: "I32", shape: [1, tokens], data: Int32Array.from(analysis.inputIds) }],
+    ["input_ids", { dtype: "I32", shape: [1, tokens], data: Int32Array.from(input.inputIds) }],
     ["attention_mask", { dtype: "I32", shape: [1, tokens], data: new Int32Array(tokens).fill(1) }],
-    ["word2ph", { dtype: "I32", shape: [tokens], data: Int32Array.from(analysis.word2ph) }],
-    ["x", { dtype: "I32", shape: [1, phonemes], data: Int32Array.from(analysis.ids.phoneIds) }],
-    ["tone", { dtype: "I32", shape: [1, phonemes], data: Int32Array.from(analysis.ids.toneIds) }],
+    ["word2ph", { dtype: "I32", shape: [tokens], data: Int32Array.from(input.word2ph) }],
+    ["x", { dtype: "I32", shape: [1, phonemes], data: Int32Array.from(input.ids.phoneIds) }],
+    ["tone", { dtype: "I32", shape: [1, phonemes], data: Int32Array.from(input.ids.toneIds) }],
     [
       "language",
-      { dtype: "I32", shape: [1, phonemes], data: Int32Array.from(analysis.ids.languageIds) },
+      { dtype: "I32", shape: [1, phonemes], data: Int32Array.from(input.ids.languageIds) },
     ],
     ["x_mask", { dtype: "F32", shape: [1, 1, phonemes], data: trace.xMask }],
     ["z_noise", { dtype: "F32", shape: [1, 2, phonemes], data: trace.zNoise }],
@@ -155,9 +158,9 @@ try {
   const metadata = {
     demo: JSON.stringify({
       text,
-      bertText: analysis.bertText,
-      phones: analysis.phones,
-      tones: analysis.tones,
+      bertText: input.bertText,
+      phones: input.phones,
+      tones: input.tones,
       knobs: trace.knobs,
       seed: trace.seed,
       samplingRate: sampleRate,

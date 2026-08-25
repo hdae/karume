@@ -9,11 +9,21 @@
  * `karume.json` を持つディレクトリならローカル読み（`fromAssets`）、それ以外は HF リポジトリ名
  * として `fromPretrained`。未指定のノブは manifest の `pipelineConfig.defaults` が埋める。
  *
+ * ## テキスト解析は呼び手の責務（0.6.0）
+ *
+ * `@karume/models` は発話（解析済みのモーラ列 + 語アライメント）だけを受ける。ここは
+ * **その写経見本**で、日本語解析には `@hdae/yomi` を使う（辞書 ~19MB は初回だけ取得され、
+ * 以降は Cache API から返る）。`analyzeWithWords` の返り値はそのまま `toSbv2Utterance` に
+ * 渡せる（karume 所有の型を構造的に満たす）。読みの修正が要るなら、ここで yomi の
+ * `OverlayDictionary` を噛ませる — 修正辞書の綴りは解析器側が正本になった。
+ *
  * NOTE: torch 参照突合の dump（11 テンソル契約）は `dump.ts` にある — パイプライン利用者の
  * ストーリーではなく開発用の契約なので、面を分けてある。
  */
 
-import { encodeWav, Sbv2Pipeline } from "../../packages/models/mod.ts";
+import { analyzeWithWords } from "@hdae/yomi";
+import { getDictionary } from "@hdae/yomi/loader";
+import { encodeWav, Sbv2Pipeline, toSbv2Utterance } from "../../packages/models/mod.ts";
 import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
 
 const USAGE = "--source <パス|HF repo> --text <文字列> --model <名前> --quant <名前>" +
@@ -97,9 +107,10 @@ console.log(
     `       ${JSON.stringify(text)}`,
 );
 const started = performance.now();
+// テキスト → 発話（読み・アクセント）は呼び手側。karume には解析済みの構造だけを渡す。
+const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(), text));
 await using pipeline = await openPipeline();
-const audio = await pipeline.generate({
-  text,
+const audio = await pipeline.generate(utterance, {
   seed,
   ...(style === undefined ? {} : { style }),
   ...(styleWeight === undefined ? {} : { styleWeight }),

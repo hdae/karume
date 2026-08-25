@@ -76,19 +76,21 @@ export type {
   GeneratedAudio,
   Sbv2Assets,
   Sbv2FromPretrainedOptions,
-  Sbv2GenerateRequest,
+  Sbv2GenerateOptions,
   Sbv2PipelineOptions,
-  Sbv2ProsodyDraft,
   Sbv2RunComponent,
 } from "./src/sbv2/pipeline.ts";
-/** 下書き（アクセント句 / モーラ）の語彙 — SBV2 が読む欄だけを持つ（`./sbv2` を参照）。 */
-export type { Sbv2AccentPhrase, Sbv2Mora, Sbv2Prosody } from "./src/sbv2/text/prosody.ts";
+/**
+ * 句構造の解析結果 → 発話の変換（`./sbv2` を参照）。0.6.0 でテキスト解析は呼び手の責務に
+ * なり、`generate` は発話を第 1 引数に受ける（ADR 0072 の注入席はシム無しで撤去）。
+ */
+export { toSbv2Utterance } from "./src/sbv2/text/utterance.ts";
+/** 発話（モーラ列 + 語アライメント）の語彙 — SBV2 が読む欄だけを持つ（`./sbv2` を参照）。 */
+export type { Sbv2Mora, Sbv2Phrases, Sbv2Utterance, Sbv2Word } from "./src/sbv2/text/utterance.ts";
 /** 入力起因の失敗（内部不変条件の破れは素の `Error` のまま — `./sbv2` を参照）。 */
 export { Sbv2InputError } from "./src/sbv2/errors.ts";
 /** このパッケージ版が検証した取得元（`./sbv2` を参照 — 追従したい場合のオプトイン）。 */
 export { SBV2_JVNV_CURRENT } from "./src/sbv2/config.ts";
-/** 修正辞書の綴りは `@hdae/yomi` が正本（`./sbv2` と同じく素通し — 変換層は作らない）。 */
-export type { OverlayDictionary, OverlayEntry } from "@hdae/yomi";
 
 export { Siglip2Pipeline } from "./src/siglip2/pipeline.ts";
 export type {

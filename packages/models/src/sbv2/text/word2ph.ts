@@ -13,8 +13,8 @@
  * add_blank の `*2` / `[0]+=1` は `symbols.ts` の `addBlankWord2ph` の責務。
  */
 
-import type { WordPhones } from "@hdae/yomi";
 import type { DebertaTokenizer } from "./tokenizer.ts";
+import type { Sbv2Word } from "./utterance.ts";
 
 /**
  * n 個の音素を `wordLength` 文字へ均等分配する（`g2p.py __distribute_phone` の忠実移植）。
@@ -51,15 +51,15 @@ export const distributePhone = (phoneCount: number, wordLength: number): number[
  *
  * NOTE: 参照実装は句読点語だけトークナイズを省いて 1 文字扱いにするが、こちらは全語を
  * トークナイズする。参照側は `normalize_text` が "…" を "..." へ潰しているので実質同値で、
- * yomi は "…" を 1 記号のまま残すため、トークナイズ側に揃えないと DeBERTa の実トークン数
+ * 上流の解析が "…" を 1 記号のまま残す場合、トークナイズ側に揃えないと DeBERTa の実トークン数
  * （NFKC で "..." の 3 個）と長さが合わなくなる。
  *
- * @param words `analyzeWithWords(...).words`（両端 PAD を含まない）。
+ * @param words 語アライメント（`Sbv2Utterance.words` — 両端 PAD を含まない）。
  * @param tokenizer DeBERTa 文字トークナイザ（各語 surface のトークン数算出に使う）。
  * @param givenPhoneLength `toSbv2PhoneTone(...).phones.length`（両端 PAD 込み）。
  */
 export const buildBaseWord2ph = (
-  words: readonly WordPhones[],
+  words: readonly Sbv2Word[],
   tokenizer: DebertaTokenizer,
   givenPhoneLength: number,
 ): number[] => {

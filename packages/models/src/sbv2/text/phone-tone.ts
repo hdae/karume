@@ -1,29 +1,26 @@
 /**
- * 下書き（句 / モーラ構造）→ SBV2 の given_phone / given_tone。
+ * 発話（モーラ列）→ SBV2 の given_phone / given_tone。
  *
- * MUST: 音素・トーンを組む経路は**ここ 1 本だけ**。解析どおりの合成も、外から戻された下書きを
- * 使う合成も、同じ {@link Sbv2Prosody} を通してここへ来る（`prosody.ts` の `toSbv2Prosody`）—
- * 二経路化すると、下書き経由のときだけ梱包規則がズレる。
- *
- * 責務境界（@hdae/yomi はモデル非依存）: yomi が提供するのは建材（`moraToPhones` /
- * `moraTones` / `punctuations` / `leadingPunctuations`）までで、SBV2 固有の梱包 —— 両端の
- * PAD、トーンの音素単位割当、実在記号の音素化 —— は呼び出し側（= ここ）で組む。
+ * MUST: 音素・トーンを組む経路は**ここ 1 本だけ**。二経路化すると、経路ごとに梱包規則が
+ * ズレる（長さは合うのに音だけ崩れる）。
  *
  * SBV2 の音素・トーン規約:
  *
  * - 音素列は先頭・末尾に PAD（記号表の `pad`、tone 0）を必ず含む完全な列。
- * - 促音は "q" 1 個・撥音は "N" 1 個（`moraToPhones` が畳む）。長音は直前母音に解決済み。
- * - トーンは 0/1 の 2 値。各アクセント句で独立に 0 から立ち上がる（`moraTones`）。
+ * - 1 モーラは `consonant` があれば `[consonant, vowel]`、無ければ `[vowel]`。促音は `"q"`
+ *   1 個・撥音は `"N"` 1 個（`Sbv2Mora.vowel` が音素そのものを持つ）。
+ * - トーンは 0/1 の 2 値で、子音・母音とも同一トーン（モーラ単位の値を音素へ配る）。
  * - 記号はテキストに実在した句読点（正規形）だけを tone 0 で出す。実在しない記号は
  *   合成しない（参照実装 g2p と同方針）。
  *
- * MUST: 出力の非 PAD 部分は yomi の `wordPhoneAlignment` と完全一致させる
- * （`flatMap(w => w.phones)` === `leadingPunctuations` + Σ 句の（モーラ音素 + punctuations））
- * — word2ph の `sum(word2ph) === phones.length` がこの一致に依存する。
+ * MUST: 出力の非 PAD 部分は語アライメントと完全一致する（`words.flatMap(w => w.phones)` ===
+ * `leadingPunctuations` + Σ（モーラ音素 + そのモーラの punctuations））— word2ph の
+ * `sum(word2ph) === phones.length` がこの一致に依存する。突合は `model-input.ts` の
+ * `assertWordPhones` が持つ。
  */
 
-import { moraTones, moraToPhones } from "@hdae/yomi";
-import type { Sbv2Prosody } from "./prosody.ts";
+import { Sbv2InputError } from "../errors.ts";
+import type { Sbv2Utterance } from "./utterance.ts";
 
 type Sbv2PhoneTone = {
   /** given_phone（両端 PAD 込み、add_blank 前）。 */
@@ -32,32 +29,44 @@ type Sbv2PhoneTone = {
   readonly tones: readonly number[];
 };
 
-/** 下書きを given_phone / given_tone へ変換する（位置ごとに対応、tone は音素単位）。 */
-export const toSbv2PhoneTone = (prosody: Sbv2Prosody, pad: string): Sbv2PhoneTone => {
+/**
+ * 発話を given_phone / given_tone へ変換する（位置ごとに対応、tone は音素単位）。
+ *
+ * MUST: `tone` の値域を**ここで**見る。型は 0|1 だが JS からの呼び出しには効かず、`toneStart`
+ * を足した後では 0/1 以外でも記号表の範囲に収まってしまう（例外が出ないまま別の tone 行を
+ * 引く）。
+ */
+export const toSbv2PhoneTone = (utterance: Sbv2Utterance, pad: string): Sbv2PhoneTone => {
   const phones: string[] = [pad];
   const tones: number[] = [0];
 
-  // 先頭句より前の実在記号（記号だけの入力は句が作られず全てここに入る）。
-  for (const punct of prosody.leadingPunctuations) {
-    phones.push(punct);
-    tones.push(0);
-  }
-
-  for (const phrase of prosody.phrases) {
-    const perMoraTone = moraTones(phrase.accentNucleus, phrase.moras.length);
-    for (const [index, mora] of phrase.moras.entries()) {
-      const tone = perMoraTone[index];
-      // 1 モーラを [consonant, vowel] に展開したとき、子音・母音とも同一トーンを振る。
-      for (const phone of moraToPhones(mora)) {
-        phones.push(phone);
-        tones.push(tone);
-      }
-    }
-    // 句直後にテキスト上実在した記号（正規形・出現順）。pauseAfter からの合成はしない。
-    for (const punct of phrase.punctuations) {
-      phones.push(punct);
+  const pushPunctuations = (punctuations: readonly string[]): void => {
+    for (const punctuation of punctuations) {
+      phones.push(punctuation);
       tones.push(0);
     }
+  };
+
+  // 先頭モーラより前の実在記号（記号だけの入力ではモーラが無く全てここに入る）。
+  pushPunctuations(utterance.leadingPunctuations);
+
+  for (const [index, mora] of utterance.moras.entries()) {
+    const { tone } = mora;
+    if (tone !== 0 && tone !== 1) {
+      throw new Sbv2InputError(
+        `moras[${index}]（${mora.kana}）の tone = ${tone} が 0/1 でない` +
+          "（生の 2 値トーンで与える）",
+      );
+    }
+    // 1 モーラを [consonant, vowel] に展開したとき、子音・母音とも同一トーンを振る。
+    if (mora.consonant !== undefined) {
+      phones.push(mora.consonant);
+      tones.push(tone);
+    }
+    phones.push(mora.vowel);
+    tones.push(tone);
+    // モーラ直後にテキスト上実在した記号（正規形・出現順）。
+    if (mora.punctuations !== undefined) pushPunctuations(mora.punctuations);
   }
 
   phones.push(pad);
