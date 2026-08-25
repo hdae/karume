@@ -5,8 +5,8 @@
  *
  * 1. トークナイザ 2 本（Qwen2 BPE / T5 Unigram）でプロンプトを id 列にする
  * 2. `text_encoder`（Qwen3）→ `text_conditioner` → 512 ゼロ埋め
- * 3. `transformer`（S 形 DiT）を N step 回し、ホスト側で CFG 合成 + 更新（更新則は manifest の
- *    `pipelineConfig.scheduler.type` — Euler / DPM++ 2M）
+ * 3. `transformer`（S 形 DiT）を N step 回し、ホスト側で CFG 合成 + 更新（更新則は request の
+ *    `sampler`、省略時は manifest の `pipelineConfig.scheduler.type` — Euler / DPM++ 2M）
  * 4. latent を per-channel 逆正規化 → `vae_decoder` を**常時タイル**で通す
  * 5. RGBA 化して返す（PNG 化は `encodePng` — パイプライン非依存の共通処理）
  *
@@ -64,6 +64,7 @@ import {
   ANIMA_PIPELINE_NAME,
   type AnimaPipelineConfig,
   type AnimaSamplerType,
+  assertAnimaSamplerType,
   parseAnimaPipelineConfig,
 } from "./config.ts";
 import { cfgEulerStep, sigmaSchedule, timestepsProj } from "./sampler.ts";
@@ -128,6 +129,16 @@ export type AnimaGenerateRequest = {
   readonly resolution?: ImageSize;
   /** 初期ノイズの seed（既定 0 — 同じ seed なら同じ画像）。 */
   readonly seed?: number;
+  /**
+   * denoise の更新則（{@link AnimaSamplerType}）。省略時は manifest の
+   * `pipelineConfig.scheduler.type`（公式配布は `"euler"`）。
+   *
+   * DPM++ 2M は**選択肢の一つ**であって配布既定ではない（再裁定 2026-08-25）。更新則は資産に
+   * 依らないホスト側の式なので、**どちらの値も配布物によらず常に有効** — 同じ資産・同じ seed
+   * でも値が違えば出る画素は変わる（`euler` の指定は manifest 既定が euler の配布物とビット
+   * 同一）。
+   */
+  readonly sampler?: AnimaSamplerType;
   /**
    * 生成イベントの観測席（{@link AnimaGenerateEvent}）— 段の開始 / 終了・denoise の 1 step
    * 完了・VAE タイル 1 枚の完了ごとに呼ばれる。
@@ -744,6 +755,11 @@ export class AnimaPipeline {
     const guidance = request.guidanceScale ?? defaults.guidanceScale;
     const resolution = request.resolution ?? defaults.resolution;
     const seed = request.seed ?? 0;
+    // 更新則は request が優先で、省略時だけ配布者の宣言に落ちる。未知の綴りは GPU に触る前に
+    // 期待と実際を並べて落とす（TS 型を通らない JS 呼び出し向け — 既定への無言の縮退を作らない）。
+    const sampler = request.sampler === undefined
+      ? state.config.scheduler.type
+      : assertAnimaSamplerType(request.sampler, "sampler");
     assertAcceptableResolution(resolution);
     // seed の検査も入口に置く。生成器を作るのは DiT の段（`new Randn(seed)`）で、そこは
     // text encoder / conditioner を回して DiT の重みを上げ終えた後なので、`Randn` 側だけに
@@ -883,7 +899,7 @@ export class AnimaPipeline {
           };
           const predictions: Float32Array[] = [];
           for (const embed of padded) predictions.push(await predict(current, proj, embed));
-          const update = denoiseStep(state.config.scheduler.type, {
+          const update = denoiseStep(sampler, {
             sample: current,
             cond: predictions[0],
             uncond: predictions[1],

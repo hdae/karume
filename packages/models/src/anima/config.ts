@@ -68,9 +68,9 @@ const DEFAULTS_KEYS: readonly string[] = [
 const RESOLUTION_KEYS: readonly string[] = ["width", "height"];
 
 /**
- * denoise の更新則（サンプラ種別）。**manifest の宣言だけが決める** — 生成要求側に上書き席は
- * 置かない（資産と対で配布者が選ぶノブなので、呼び出しごとに振れる口を作ると「配布者の推奨」と
- * 「実際に走った更新則」が黙って割れる）。
+ * denoise の更新則（サンプラ種別）。manifest の宣言が**既定**を決め、生成要求側の `sampler`
+ * 席（`AnimaGenerateRequest`）が呼び出しごとに上書きする（再裁定 2026-08-25 — 配布既定は
+ * 配布者の推奨、更新則の選択は利用者のノブ）。どちらの値も資産に依らず常に有効。
  *
  * - `"euler"` — `FlowMatchEulerDiscreteScheduler` の 1 次更新（`sampler.ts` の `cfgEulerStep`）。
  * - `"dpmpp-2m"` — DPM++ 2M（`src/generation/dpm-solver-multistep.ts`）。
@@ -190,26 +190,33 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
 };
 
 /**
- * `scheduler.type` を読む（欄ごと無ければ既定）。未知値は**期待と実際を並べて** fail loudly —
- * 綴り違いが黙って既定へ縮退すると、配布者が宣言した更新則と実行が食い違ったまま気づけない。
+ * サンプラ種別の綴りを**期待と実際を並べて**検査する（manifest 側 / 生成要求側の共通口）。
+ *
+ * MUST: 語彙の正本は {@link SAMPLER_TYPES} 1 本 — 綴り違いが黙って既定へ縮退すると、宣言・
+ * 指定した更新則と実行が食い違ったまま気づけない。`where` は綴りの出所（`scheduler.type` /
+ * request の `sampler`）を指す。
  */
-const parseSamplerType = (
-  record: Record<string, unknown>,
-  where: string,
-): AnimaSamplerType => {
-  if (!Object.hasOwn(record, "type")) return DEFAULT_SAMPLER_TYPE;
-  const value = record["type"];
+export const assertAnimaSamplerType = (value: unknown, where: string): AnimaSamplerType => {
   const accepted = typeof value === "string"
     ? SAMPLER_TYPES.find((candidate) => candidate === value)
     : undefined;
   if (accepted === undefined) {
     throw new Error(
-      `${where}.type: 期待 ${SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
+      `${where}: 期待 ${SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
         `（実際 ${typeof value === "string" ? `'${value}'` : String(value)}）`,
     );
   }
   return accepted;
 };
+
+/** `scheduler.type` を読む（欄ごと無ければ既定 — 未知値は {@link assertAnimaSamplerType} が落とす）。 */
+const parseSamplerType = (
+  record: Record<string, unknown>,
+  where: string,
+): AnimaSamplerType =>
+  Object.hasOwn(record, "type")
+    ? assertAnimaSamplerType(record["type"], `${where}.type`)
+    : DEFAULT_SAMPLER_TYPE;
 
 const parseScheduler = (raw: unknown): AnimaScheduler => {
   const where = "pipelineConfig.scheduler";

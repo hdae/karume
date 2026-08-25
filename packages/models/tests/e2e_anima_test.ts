@@ -23,6 +23,7 @@ import type { Manifest } from "@karume/hub";
 import {
   type AnimaGenerateEvent,
   AnimaPipeline,
+  type AnimaSamplerType,
   encodePng,
   type GeneratedImage,
   type ImageSize,
@@ -153,21 +154,27 @@ const mismatchReport = async (
  * 生成 → PNG → sha 突合。一致しない場合は緩めず、診断を付けて落とす。
  *
  * `onEvent` を渡した呼びも**同じ参照値**で突き合わせる — 観測席が数値に 1 ビットも触って
- * いないことの直接証拠になる（下の onEvent 門）。
+ * いないことの直接証拠になる（下の onEvent 門）。`sampler` は request 側の上書き席
+ * （省略時は manifest の `scheduler.type`）。
  */
 const assertReferencePng = async (
   label: string,
   pipeline: AnimaPipeline,
   resolution: ImageSize,
   expected: string,
-  onEvent?: (event: AnimaGenerateEvent) => void,
+  options: {
+    readonly sampler?: AnimaSamplerType;
+    readonly onEvent?: (event: AnimaGenerateEvent) => void;
+  } = {},
 ): Promise<void> => {
+  const { sampler, onEvent } = options;
   const started = performance.now();
   const image = await pipeline.generate({
     prompt: PROMPT,
     resolution,
     steps: STEPS,
     seed: SEED,
+    ...(sampler === undefined ? {} : { sampler }),
     ...(onEvent === undefined ? {} : { onEvent }),
   });
   const png = await encodePng(image.data, image.width, image.height);
@@ -181,19 +188,59 @@ const assertReferencePng = async (
 
 for (const { quant, resolution, sha256 } of REFERENCE) {
   const label = `${quant}-${formatResolution(resolution)}`;
+  // request 側 `sampler:"euler"` の明示が manifest 既定（= 公式配布の宣言）とビット同一である
+  // ことは、**生成を 1 本も増やさず**最短の 512 ケースだけを明示に振り替えて見る。既定経路の
+  // 門は残り 2 ケースと fromPretrained（同じ quant/512 を既定で回して同じ sha を要求する）が
+  // 保つので、どちらの経路も裸のまま残らない。
+  const sampler: AnimaSamplerType | undefined = resolution.width === 512 ? "euler" : undefined;
   Deno.test({
     name: `e2e(実GPU): quant ${quant} / ${formatResolution(resolution)} / ${STEPS}step / ` +
-      `seed ${SEED} の PNG が参照 sha256 と一致する`,
+      `seed ${SEED} の PNG が参照 sha256 と一致する` +
+      (sampler === undefined ? "" : `（sampler:"${sampler}" 明示）`),
     ignore: !RUNNABLE,
     fn: async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, quant);
       // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
       await using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
-      await assertReferencePng(label, pipeline, resolution, sha256);
+      await assertReferencePng(label, pipeline, resolution, sha256, {
+        ...(sampler === undefined ? {} : { sampler }),
+      });
     },
   });
 }
+
+// --- request 側 sampler の上書き（DPM++ 2M）-----------------------------------
+//
+// 公式配布の manifest は `scheduler.type: "euler"` を宣言している（再裁定 2026-08-25）。この
+// 席が**数理まで届いている**ことは、request で `"dpmpp-2m"` を指定した出力が、同じ更新則を
+// manifest 側で宣言して実測した golden（d2e0484 — daf86af で退役）と**ビット一致**することで
+// 示す。上書き経路と宣言経路が同じバイトを産む ⇒ 実効サンプラーの決まり方だけが違い、数値の
+// 綴りは 1 ビットも分岐していない。
+//
+// MUST: 1024² の上書きは足さない（GPU 時間の上限 — 更新則はホスト側の式で解像度に依らない）。
+
+/** turbo 512²（`REFERENCE[1]` と同じ quant / 解像度 / steps / seed）を DPM++ 2M で回した実測。変更禁止。 */
+const TURBO_DPMPP_SHA256 = "bb9b5c81fdf42d033035a91582c3f6e5200152cbbdc1cc2398096bd7309a3979";
+
+Deno.test({
+  name: `e2e(実GPU): turbo ${formatResolution(REFERENCE[1].resolution)} を request の ` +
+    `sampler:"dpmpp-2m" で回すと DPM++ 2M の参照 sha256 と一致する`,
+  ignore: !RUNNABLE,
+  fn: async () => {
+    const { quant, resolution } = REFERENCE[1];
+    const manifest = readManifest();
+    const assets = await loadLocalAssets(manifest, quant);
+    await using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
+    await assertReferencePng(
+      `${quant}-${formatResolution(resolution)}-dpmpp`,
+      pipeline,
+      resolution,
+      TURBO_DPMPP_SHA256,
+      { sampler: "dpmpp-2m" },
+    );
+  },
+});
 
 // --- CFG（素の base 配布形）--------------------------------------------------
 //
@@ -250,6 +297,46 @@ Deno.test({
     console.log(`[e2e] base-cfg: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
     if (actual !== sha256) {
       throw new Error(await mismatchReport("base-cfg", image, png, sha256, actual));
+    }
+  },
+});
+
+/**
+ * 素の base を {@link BASE_REFERENCE} と同じノブ（CFG 4 / 20step / seed 42 / 同じネガティブ）で
+ * DPM++ 2M へ振ったときの実測（d2e0484 の golden — daf86af で退役）。変更禁止。
+ *
+ * CFG≠1 の経路にも上書き席の門を置く — DPM++ 2M の 2 次項は cond/uncond の**合成後**の値を
+ * 履歴に持つので、turbo（CFG 無し）の一致だけでは合成と履歴の噛み合わせが裸のまま残る。
+ */
+const BASE_DPMPP_SHA256 = "97dad23f6d3bede37b259cbf323b28de6bea60433a431ff859ab3815a08d571c";
+
+Deno.test({
+  name: `e2e(実GPU): 素の base を request の sampler:"dpmpp-2m" で回すと ` +
+    `DPM++ 2M の参照 sha256 と一致する`,
+  ignore: !GPU_AVAILABLE || baseManifestText === undefined,
+  fn: async () => {
+    const manifest = parseManifest(baseManifestText as string);
+    const { quant, resolution, steps, guidanceScale, negativePrompt } = BASE_REFERENCE;
+    const assets = await loadLocalAssets(manifest, quant, BASE_ASSETS_DIR);
+    await using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
+    const started = performance.now();
+    const image = await pipeline.generate({
+      prompt: PROMPT,
+      resolution,
+      steps,
+      guidanceScale,
+      negativePrompt,
+      seed: SEED,
+      sampler: "dpmpp-2m",
+    });
+    const png = await encodePng(image.data, image.width, image.height);
+    const actual = await sha256Hex(png);
+    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+    console.log(`[e2e] base-cfg-dpmpp: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
+    if (actual !== BASE_DPMPP_SHA256) {
+      throw new Error(
+        await mismatchReport("base-cfg-dpmpp", image, png, BASE_DPMPP_SHA256, actual),
+      );
     }
   },
 });
@@ -377,27 +464,27 @@ Deno.test({
         const lengths: number[] = [];
         let firstStep: (() => { data: Float32Array<ArrayBuffer> }) | undefined;
         let firstStepData: Float32Array | undefined;
-        await assertReferencePng("onEvent-1024", pipeline, resolution, REFERENCE[0].sha256, (
-          event,
-        ) => {
-          if (event.kind === "stage") {
-            log.push(`stage:${event.component}:${event.at}`);
-            return;
-          }
-          if (event.kind === "vae-tile") {
-            log.push(`tile:${event.tile}/${event.tiles}`);
-            return;
-          }
-          log.push(`step:${event.step}/${event.steps}@${event.sigma}`);
-          const snapshot = event.copyLatents();
-          shapes.push(snapshot.shape.join("x"));
-          lengths.push(snapshot.data.length);
-          // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、PNG の sha が割れる。
-          snapshot.data.fill(Number.NaN);
-          if (event.step === 1) {
-            firstStep = event.copyLatents;
-            firstStepData = event.copyLatents().data;
-          }
+        await assertReferencePng("onEvent-1024", pipeline, resolution, REFERENCE[0].sha256, {
+          onEvent: (event) => {
+            if (event.kind === "stage") {
+              log.push(`stage:${event.component}:${event.at}`);
+              return;
+            }
+            if (event.kind === "vae-tile") {
+              log.push(`tile:${event.tile}/${event.tiles}`);
+              return;
+            }
+            log.push(`step:${event.step}/${event.steps}@${event.sigma}`);
+            const snapshot = event.copyLatents();
+            shapes.push(snapshot.shape.join("x"));
+            lengths.push(snapshot.data.length);
+            // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、PNG の sha が割れる。
+            snapshot.data.fill(Number.NaN);
+            if (event.step === 1) {
+              firstStep = event.copyLatents;
+              firstStepData = event.copyLatents().data;
+            }
+          },
         });
 
         // ① 実行構造との完全一致。VAE タイル数は診断側の run 数から採る（独立な観測）。

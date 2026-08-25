@@ -25,6 +25,13 @@ export type {
 } from "./src/anima/pipeline.ts";
 
 /**
+ * denoise の更新則の語彙（`AnimaGenerateRequest.sampler` が受ける値）。省略時は manifest の
+ * `pipelineConfig.scheduler.type` が既定を決めるので、**指定は配布者の推奨からの明示的な離脱**
+ * になる。型を出さないと消費側（CLI / UI）が選択肢を綴り直すことになるので面に出す。
+ */
+export type { AnimaSamplerType } from "./src/anima/config.ts";
+
+/**
  * **このパッケージ版が検証した取得元**（公開配布リポ 1 つにつき 1 定数・pin 済み commit SHA —
  * ADR 0073）。`ANIMA_TURBO_CURRENT` = `hdae/karume-anima-turbo`（turbo 1 モデル）/
  * `ANIMA_CURRENT` = `hdae/karume-anima`（素版 3 モデルが同居 — `{ model }` で選ぶ）。

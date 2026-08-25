@@ -13,9 +13,9 @@
 //  ④ 構築の `signal` が**入口でも実行開始後でも**効く（DL 完了後の組み立てが中断不能だと、
 //     UI の中止ボタンが無反応になる窓ができる）。後者は「最初の段境界」までを空資産で見る
 //     — それより先の境界は実資産と GPU が要るのでここでは見られない。
-//  ⑤ denoise ループの更新則の選択点（`denoiseStep`）が `scheduler.type` どおりに分かれ、
-//     `"euler"` は履歴を持たない（実 GPU の PNG 門は既定の euler しか通らないので、
-//     dpmpp-2m 側は緑のままでも壊れうる）。
+//  ⑤ denoise ループの更新則の選択点（`denoiseStep`）が実効サンプラー（request の `sampler`
+//     ↩ manifest の `scheduler.type`）どおりに分かれ、`"euler"` は履歴を持たない（実 GPU の
+//     PNG 門は両方の更新則を通るが、あちらは資産と GPU が要る）。
 //
 // NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
 // `session_options_test.ts` にある。

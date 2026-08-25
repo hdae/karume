@@ -42,6 +42,8 @@ export type {
   AnimaRunComponent,
   GeneratedImage,
 } from "./src/anima/pipeline.ts";
+/** `AnimaGenerateRequest.sampler` の語彙（`./anima` を参照）。 */
+export type { AnimaSamplerType } from "./src/anima/config.ts";
 export type { ImageSize } from "./src/anima/resolution.ts";
 /**
  * 途中 latent → RGB の線形近似。`denoise-step` の `copyLatents()`
