@@ -7,15 +7,27 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 次波の裁定待ち（0.6.0 まで出荷済み）
+## now — 既知問題 3 件 + anima 素版 i4 感度（2026-08-25 着手）
 
-**0.6.0（yomi 依存分離）は 2026-08-25 にクローズ**（結果は下の消化済み節）。次の大波は
-ユーザー裁定待ち。候補（詳細は各節）:
+Anima Web アプリからの既知問題 3 件（調査で機序確定済み — 経緯は git / ACTIVE_DESIGN）と、
+素版 i4 の量子化感度特定（later 節からの前倒し — 配布スキップ裁定の復活レバー）:
 
-- 生成 API 波（later 節 — `GenerationProgram` + sequence API。LLM 実需に直結する最大の API 波）
-- R1 のロード面 API 工事 4 件 + exporter 自動分割規則（release 節）
-- モデル拡充の続き・EmbeddingGemma の完成（later 節）
-- anima 素版 i4 の品質改善（later 節 — 配布スキップ裁定の復活レバー）
+- ①Pixel の "BodyStreamBuffer was aborted" — hub の真因マスキング解消 + バイト予算 +
+  検証直列化は**済**。実機での真因再判定（err.cause 観測）はリリース後 —
+  [known-issues](known-issues.md)
+- ②NVIDIA の 2GiB 天井（Dawn D3D12 固定値）— 融合 attention の行ブロック化は**済**
+  （parked「2048px DiT attention メモリ工事」の消化）
+- ③Chromium の単一 ArrayBuffer 上限で Base f16 がロード不能
+  （[limitations](limitations.md)）— 根本 = next の R1 shard 配布。DL 前の即エラー
+  （hub 入口プローブ）は裁定待ち
+- ④素版 i4 感度 — adaLN + block 外 i8 変種（`--i4-adaln-i8`）を anima-v1.0 で export →
+  視認 A/B（進行中）。裁定後に research / perf-ledger へ追随
+
+## next — R1 ロード面工事 + shard 配布（2026-08-25 昇格）
+
+release 節の「R1 の残り: ロード面 API 工事 4 件 + exporter 自動分割規則」を次の大波へ昇格
+（項目詳細は release 節のまま）。理由: Chromium の ArrayBuffer 上限で Base f16 が現配布形の
+まま恒久に開けない + モバイルの常駐 RAM 削減（streamAssets 接続）の根本もここ。
 
 ## 消化済み（0.6.0 yomi 依存分離 — 2026-08-25）
 
@@ -220,6 +232,6 @@ autoregressive 波の**残項目（波外へ送り）**:
   〈同日ユーザー裁定・anima 校正リグを触る J-4 ②の着地後に流すのが安全〉）
 - hub Range 並列 + prefetch — 復活 = 断片化リポの再来（perf L-3）
 - params / bind group キャッシュ（ADR 0032 案 2）・GPU timestamp 推定源化・全面 f16（案γ）・
-  Vᵀ+列量子化融合・2048px DiT attention メモリ工事・SBV2 NFC チップ・f32 anima 系列再生成
+  Vᵀ+列量子化融合・SBV2 NFC チップ・f32 anima 系列再生成
 - by-design 制約群（rank≤4 / OOB NaN / 非有限入力 / 0 要素次元 / cancellation 粒度ほか）は
   limitations.md が正本 — 実需が出た項目だけここへ昇格させる

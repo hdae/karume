@@ -693,6 +693,17 @@ quant が宣言できる GPU 前提は `gpuFeatures`（現行は `shaderF16`）�
 fail loudly で判明する（数 GB を落とし切ってから落ちる）。`requiredLimits` は**現行の
 manifest v2 schema には存在しない将来拡張候補**（ADR 0038 §7 の拡張席）。
 
+## ブラウザ: Chromium は単一 ArrayBuffer を 2,145,386,496 バイトで打ち切る — Base f16 は開けない
+
+Chromium（Chrome / Edge — 全 OS 共通・Mac も同じ）は PartitionAlloc の意図的なセキュリティ
+設計として 2³¹ − 2MiB = 2,145,386,496 バイトを超える単一 ArrayBuffer の確保を必ず失敗させる
+（フラグで緩和不可）。これを超える配布ファイル — 例: Base 系 f16 の transformer
+3,913,609,588 B — は全量面 / 逐次面のどちらでも materialize できず、**原理的にロード不能**
+（実測は 2026-08-25 調査 — 経緯は git）。消費側の判定条件は「manifest の各ファイル `size` が
+この値を超える quant 席を選択肢から外す」。i8（1,962,502,636 B）は壁の内側だが余裕は
+約 183MB しかなく、重み増で同じ壁に当たる。恒久解は shard 分割配布 + ロード面接続
+（backlog next の R1）。
+
 ## sha256 参照門は参照環境専用 — クロスデバイスのビット同一は保証しない
 
 e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` /
