@@ -688,10 +688,12 @@ wgpu-hal metal の `check_if_oom()` は `Ok(())` を返す no-op（[wgpu#7460](h
 
 ## hub: DL 前の適合チェックは GPU feature 軸のみ（limits は DL 後に fail loudly）
 
-quant が宣言できる GPU 前提は `gpuFeatures`（現行は `shaderF16`）だけで、`maxBufferSize` /
-`maxStorageBufferBindingSize` 等の limits 不足は**ダウンロード後**の device / Session 構築時に
-fail loudly で判明する（数 GB を落とし切ってから落ちる）。`requiredLimits` は**現行の
-manifest v2 schema には存在しない将来拡張候補**（ADR 0038 §7 の拡張席）。
+quant が宣言できる GPU 前提のうち、DL 前に突き合わせるのは `gpuFeatures`（現行は
+`shaderF16`）だけ。`requiredLimits` は manifest `karume/4` で**宣言可能になった**
+（ADR 0038 追記 2026-08-25 / ADR 0075）が、hub はまだこれをデバイス実測値と突き合わせて
+いない — `maxBufferSize` / `maxStorageBufferBindingSize` 等の limits 不足は
+**ダウンロード後**の device / Session 構築時に fail loudly で判明する（数 GB を
+落とし切ってから落ちる）。宣言の消費（DL 前判定）は将来課題。
 
 ## ブラウザ: Chromium は単一 ArrayBuffer を 2,145,386,496 バイトで打ち切る — Base f16 は開けない
 
