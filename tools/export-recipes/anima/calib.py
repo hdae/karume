@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import gc
 import inspect
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,6 +67,17 @@ STAGE_PREFIX = "model.transformer_blocks"
 
 #: 校正付き丸めの方式。GPTQ 以外は scale 台帳を返さない（`karume.quant_calib` の MUST）。
 CALIB_METHOD = "gptq"
+
+#: adaLN（modulation の shift / scale / gate を作る層）を指す block 内 FQN セグメント。
+#:
+#: `CosmosTransformerBlock` は block ごとに `norm1` / `norm2` / `norm3` の
+#: `CosmosAdaLayerNormZero` を持ち、各々が `linear_1` / `linear_2` を抱える
+#: （anima-v1.0 = 28 block × 3 × 2 = **168 本**。実 checkpoint のヘッダ走査で確認）。
+#: 感度実験変種（`anima.export` の `--i4-adaln-i8`）はこの 168 本を i4 から外して i8 で丸める
+#: — irodori の w4 席で同型の構成が聴感を回復させた実績があり（research
+#: `2026-08-24-gptq-expansion-quality.md` §1）、素版 i4 の視認裁定（同 §5 = 配布スキップ）の
+#: 改善候補として名指しされた側。
+ADALN_SEGMENTS = frozenset({"norm1", "norm2", "norm3"})
 
 #: 丸め先の格納グリッド。**`rtn` × g32 = 既存 i4 系列と同じ格子**（唯一の出荷経路）。
 CALIB_GRID = GridSpec(kind="rtn", group_size=DEFAULT_GROUP_SIZE)
@@ -168,6 +179,38 @@ def stage_linear_names(stages: Sequence[StageSpec]) -> frozenset[str]:
         for prefix, stage in stages
         for local, _weight, _axis in iter_quant_targets(stage, (nn.Linear,))
     )
+
+
+def is_adaln(name: str) -> bool:
+    """モジュール FQN が adaLN 配下か（{@link ADALN_SEGMENTS} を**セグメントとして**含むか）。
+
+    判定を `.` で割った要素の一致で採るのは、部分文字列一致だと `norm_out` の綴りに引っ張られる
+    ような取り違えを招き、逆に接尾辞一致だと adaLN 配下の子（`norm1.linear_1`）を取りこぼす
+    ため。stage 内の局所 FQN（`norm1.linear_1`）とラッパ内 FQN
+    （`model.transformer_blocks.0.norm1.linear_1`）のどちらにも同じ答えを返すので、校正の
+    `include` と export 側の集合分割が 1 実装で決まる（写すと i4 に丸めた集合と i4 で格納する
+    集合が割れる）。
+
+    NOTE: 判定は **block の中でだけ**使う。DiT には block の外にも `norm_out`
+    （`CosmosAdaLayerNorm` = 同じ modulation の役割）が居るが、あちらは
+    {@link anima.export.NON_STAGE_I4_WEIGHTS} が名指しで持つ側で、セグメントの綴りも違う。
+    """
+    return not ADALN_SEGMENTS.isdisjoint(name.split("."))
+
+
+def adaln_segments_seen(names: Iterable[str]) -> frozenset[str]:
+    """`names` の中に**セグメントとして**現れた {@link ADALN_SEGMENTS} の綴り。
+
+    {@link is_adaln} が「どれか 1 つでも当たったか」を返すのに対し、こちらは**どれが当たったか**
+    を返す。両方を数える理由は、i8 へ戻す 168 本が 3 セグメントの**和**で決まるから — 上流が
+    一部（例: `norm3`）だけを改名すると、`is_adaln` は残る綴りで真を返し続けるので「adaLN が
+    1 本も無い」だけを見る門は素通りし、本数の門も同じ分類器から両辺を作るので自己整合した
+    まま緑になる（= 除外したはずの 56 本だけが黙って i4 へ戻る）。
+    """
+    seen: set[str] = set()
+    for name in names:
+        seen.update(ADALN_SEGMENTS.intersection(name.split(".")))
+    return frozenset(seen)
 
 
 def _block_kwargs(
@@ -396,12 +439,19 @@ def _announce_stages(stages: Sequence[StageSpec]) -> list[RemovableHandle]:
     ]
 
 
-def calibrate_i4(rig: CalibRig) -> tuple[CalibReport, Int4Report]:
+def calibrate_i4(
+    rig: CalibRig, include: Callable[[str], bool] | None = None
+) -> tuple[CalibReport, Int4Report]:
     """stage 逐次の GPTQ を当て、`(レポート, scale 台帳)` を返す（丸めは in-place）。
 
-    `include` を渡さないのは、**stage 内の `nn.Linear` は 1 本残らず i4 適格**であることを
-    呼び出し側が先に門で確かめているから（適格でない 1 本だけ外す形にすると「走査の本数 =
-    丸めた本数」の門が張れなくなる — `anima.measure_quant.scan_calib_targets` と同じ判断）。
+    `include` は **stage 内の局所モジュール FQN** の述語で、core の `calibrate_stages` へ
+    そのまま渡る（`None` = stage 内の `nn.Linear` 全部 = 既定の配布経路）。感度実験変種
+    （`anima.export` の `--i4-adaln-i8`）だけが述語を渡し、adaLN 168 本を GPTQ から外して
+    i8 側へ回す。
+
+    MUST: 渡した述語が選ぶ集合と i4 で格納する集合は**同一**であること — ずれると「走査の
+    本数 = 丸めた本数」の門が意味を失い、丸めていない重みに i4 の格納指定が付く。実測は
+    {@link assert_calib_covers_scan}（呼び出し側が i4 格納の集合を渡して突き合わせる）。
 
     MUST: 台帳の無いレポートは fail loudly — 出荷経路を持つのは `gptq` × `rtn` だけで
     （`karume.quant_calib` の MUST）、台帳が無いまま進むと i4 席に scale の無い重みが載る。
@@ -414,7 +464,9 @@ def calibrate_i4(rig: CalibRig) -> tuple[CalibReport, Int4Report]:
     )
     handles = _announce_stages(rig.stages)
     try:
-        report = calibrate_stages(rig.stages, rig.batches, method=CALIB_METHOD, spec=CALIB_GRID)
+        report = calibrate_stages(
+            rig.stages, rig.batches, method=CALIB_METHOD, spec=CALIB_GRID, include=include
+        )
     finally:
         for handle in handles:
             handle.remove()
@@ -428,9 +480,11 @@ def calibrate_i4(rig: CalibRig) -> tuple[CalibReport, Int4Report]:
 
 
 def assert_calib_covers_scan(report: CalibReport, scan: frozenset[str]) -> None:
-    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+    """校正が丸めた層が **i4 で格納する block 内の集合**と過不足なく一致することを見る。
 
-    `scan` は `.weight` を落としたモジュール名の集合（{@link stage_linear_names} の形）。
+    `scan` は `.weight` を落としたモジュール名の集合（{@link stage_linear_names} の形。既定は
+    stage の走査そのもの・感度実験変種では adaLN を除いた側 = {@link calibrate_i4} の
+    `include` が選ぶ集合と同一）。
 
     MUST: fail loudly。丸め漏れは品質を**良い側**へ動かすので、素通りを数字から読めない。
     しかも漏れた重みはその後 i8 側にも i4 側にも入らないまま、格納指定だけが i4 を要求する

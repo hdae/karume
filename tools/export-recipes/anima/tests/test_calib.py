@@ -6,6 +6,8 @@
 - stage 逐次の block ループがラッパ 1 回の forward とビット一致すること（ずれた経路で
   丸めても数値は普通に出る）
 - i4 適格が「block 内 = 校正」「block 外 = 素の RTN」へ**過不足なく排他に**割れること
+- 感度実験変種（`--i4-adaln-i8`）が adaLN + block 外を i8 へ役割で割ること、そして
+  **既定 OFF が集合も経路も値も従来と 1 ビットも変わらない**こと
 - scale 台帳のキーがラッパの FQN 空間（= safetensors のテンソルキー）に居ること
 - 校正が**実際に別の丸め**を産むこと（素通りしたら格納形が同じなので資産からは読めない）
 - 校正入力とグラフで block の呼ばれ方が同じこと
@@ -43,6 +45,7 @@ from anima.distribution import (
     ANIMA_TURBO_MODEL_NAME,
     BASE_MODELS,
 )
+from karume.quantize import fake_quant_int4, fake_quant_int8
 
 #: 量子化軸（= group 長）。i4 は端数 group を作らない（ADR 0069 決定 2）。
 HIDDEN = 32
@@ -56,16 +59,42 @@ CAPTURE_LATENT = 8
 CAPTURE_RESOLUTION = CAPTURE_LATENT * pipeline_ref.SPATIAL_COMPRESSION
 
 
+class TinyAdaLayerNormZero(nn.Module):
+    """block の `norm1` / `norm2` / `norm3`（`CosmosAdaLayerNormZero`）の席。
+
+    実物と同じく `linear_1` / `linear_2` の **2 本**を持ち、入力は hidden ではなく
+    `embedded_timestep`（rank2）— 感度実験変種（`--i4-adaln-i8`）が i4 から外すのはこの綴りで、
+    GPTQ が見る `H = Σ XᵀX` の標本も block あたり 1 本ぶんしか積まれない側。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(HIDDEN, elementwise_affine=False)
+        self.linear_1 = nn.Linear(HIDDEN, HIDDEN)
+        self.linear_2 = nn.Linear(HIDDEN, HIDDEN)
+
+    def forward(self, hidden_states: torch.Tensor, embedded_timestep: torch.Tensor):
+        scale = self.linear_2(torch.nn.functional.silu(self.linear_1(embedded_timestep)))
+        return self.norm(hidden_states) * (1 + scale.unsqueeze(1))
+
+
 class TinyBlock(nn.Module):
     """`CosmosTransformerBlock` の**呼び出しの形**だけを写した block。
 
     位置引数 8 本（hidden + 付随 7 本）で呼ばれ hidden を返す — 実物と同じなので、stage は
     包まずにそのまま並べられる（`anima.calib.dit_stages`）。
+
+    modulation（`norm1` / `norm2` / `norm3`）まで写すのは、実物向けのセグメント定数
+    （{@link anima.calib.ADALN_SEGMENTS}）を差し替えずに変種の割り方を試すため — block 内の
+    linear は adaLN 6 本 + それ以外 2 本になる。
     """
 
     def __init__(self) -> None:
         super().__init__()
+        self.norm1 = TinyAdaLayerNormZero()
         self.attn = nn.Linear(HIDDEN, HIDDEN)
+        self.norm2 = TinyAdaLayerNormZero()
+        self.norm3 = TinyAdaLayerNormZero()
         self.ff = nn.Linear(HIDDEN, HIDDEN)
 
     def forward(
@@ -80,9 +109,10 @@ class TinyBlock(nn.Module):
         controlnet_residual: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attended = torch.tanh(
-            self.attn(hidden_states) + encoder_hidden_states.mean(dim=1, keepdim=True)
+            self.attn(self.norm1(hidden_states, embedded_timestep))
+            + self.norm2(encoder_hidden_states, embedded_timestep).mean(dim=1, keepdim=True)
         )
-        return hidden_states + self.ff(attended) * temb.unsqueeze(1)
+        return hidden_states + self.ff(self.norm3(attended, embedded_timestep)) * temb.unsqueeze(1)
 
 
 class TinyTimestepEmbedding(nn.Module):
@@ -322,9 +352,19 @@ def capture_batches(raw: nn.Module, probes) -> tuple:
     return tuple(batches)
 
 
-def i4_args(*, no_calib: bool = False, model: str = ANIMA_TURBO_MODEL_NAME) -> argparse.Namespace:
+def i4_args(
+    *,
+    no_calib: bool = False,
+    model: str = ANIMA_TURBO_MODEL_NAME,
+    adaln_i8: bool = False,
+) -> argparse.Namespace:
     return argparse.Namespace(
-        dtype="i4", no_calib=no_calib, calib_prompts=2, repo="unused", model=model
+        dtype="i4",
+        no_calib=no_calib,
+        calib_prompts=2,
+        repo="unused",
+        model=model,
+        i4_adaln_i8=adaln_i8,
     )
 
 
@@ -588,7 +628,11 @@ class TestStageSplit:
         assert names == {
             f"model.transformer_blocks.{index}.{child}"
             for index in range(2)
-            for child in ("attn", "ff")
+            for child in (
+                "attn",
+                "ff",
+                *(f"norm{at}.linear_{part}" for at in (1, 2, 3) for part in (1, 2)),
+            )
         }
         assert names <= {name for name, _module in wrapper.named_modules()}
 
@@ -761,8 +805,8 @@ class TestCalibratedI4:
         genuine = calib.calibrate_i4
         outside = f"{sorted(export_anima.NON_STAGE_I4_WEIGHTS)[0]}.weight"
 
-        def overlapping(rig):
-            report, ledger = genuine(rig)
+        def overlapping(rig, include=None):
+            report, ledger = genuine(rig, include)
             merged = dict(ledger.scales) | {outside: torch.ones(HIDDEN, 1)}
             return report, replace(ledger, scales=merged)
 
@@ -777,8 +821,8 @@ class TestCalibratedI4:
         stub_capture(wrapper)
         genuine = calib.calibrate_i4
 
-        def short(rig):
-            report, ledger = genuine(rig)
+        def short(rig, include=None):
+            report, ledger = genuine(rig, include)
             return replace(report, layers=report.layers[:-1]), ledger
 
         monkeypatch.setattr(calib, "calibrate_i4", short)
@@ -865,3 +909,226 @@ class TestOptOut:
         export_anima.main()
 
         assert captured["transformer"].resolution == 1024
+
+
+class TestAdalnSegments:
+    """adaLN の判定は**セグメント一致**（`.` で割った要素）— 部分文字列でも接尾辞でもない。"""
+
+    def test_it_matches_a_segment_and_not_a_substring(self):
+        assert calib.is_adaln("norm1.linear_1")
+        assert calib.is_adaln("norm3.linear_2")
+        # 部分文字列一致だと `norm1x` のような綴りを巻き込み、接尾辞一致だと adaLN 配下の子を
+        # 取りこぼす — どちらも「除外したつもりの本数」が黙ってずれる。
+        assert not calib.is_adaln("norm1x.linear_1")
+        assert not calib.is_adaln("norm_out.linear_1")
+        assert not calib.is_adaln("attn")
+
+    def test_it_answers_alike_for_stage_local_and_wrapper_fqns(self):
+        """MUST: 校正の `include`（局所名）と export の集合分割（ラッパ内 FQN）が同じ 1 実装。"""
+        assert calib.is_adaln("norm2.linear_1")
+        assert calib.is_adaln("model.transformer_blocks.7.norm2.linear_1")
+
+    def test_it_reports_which_spellings_were_seen(self):
+        """片側だけの改名を捕まえる網 — 「1 本も無い」だけを見る門は素通りする。"""
+        names = {"model.transformer_blocks.0.norm1.linear_1", "model.transformer_blocks.0.attn"}
+
+        assert calib.adaln_segments_seen(names) == frozenset({"norm1"})
+        assert calib.adaln_segments_seen(()) == frozenset()
+
+
+class TestAdalnI8Variant:
+    """`--i4-adaln-i8`（既定 OFF）= adaLN + block 外を i8 格納へ回す感度実験変種。
+
+    既定を 1 ビットも動かさないこと（集合・経路・値）と、変種が**本当に**役割で割れている
+    ことの両方を見る。格納形は変種でも「i4 と i8 が混ざった系列」のままなので、資産からは
+    どちらで焼いたか読めない — 割り方の綻びは全部ここで捕まえるしかない。
+    """
+
+    @staticmethod
+    def _split(wrapper: nn.Module) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+        """`(適格, block 内 adaLN, block 内 adaLN 以外)`。"""
+        eligible = export_anima._i4_module_names(wrapper)
+        stage_names = calib.stage_linear_names(calib.dit_stages(wrapper))
+        adaln = frozenset(name for name in stage_names if calib.is_adaln(name))
+        return eligible, adaln, stage_names - adaln
+
+    def test_the_default_stores_every_eligible_weight_as_i4(self, stub_capture):
+        """既定 OFF の格納集合 = 適格の全量（変種の配管が既定の割り方へ触っていない）。"""
+        wrapper = make_wrapper()
+        stub_capture(wrapper)
+        eligible, _adaln, _rest = self._split(wrapper)
+
+        _scales, overrides = quantize(wrapper)
+
+        assert set(overrides) == {f"{name}.weight" for name in eligible}
+
+    def test_the_default_hands_no_include_predicate_to_the_calibration(self, stub_capture):
+        """MUST: 既定は述語を**持たない**（`None`）— 「全部」を綴り直した述語は走査の定義が
+        動いた日に片側だけ追随して黙ってずれる。"""
+        wrapper = make_wrapper()
+        stub_capture(wrapper)
+        genuine = calib.calibrate_i4
+        seen: list[object] = []
+
+        def spy(rig, include=None):
+            seen.append(include)
+            return genuine(rig, include)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(calib, "calibrate_i4", spy)
+            quantize(wrapper)
+
+        assert seen == [None]
+
+    def test_the_default_matches_an_independently_expressed_plain_rounding(self):
+        """既定 OFF（`--no-calib`）が「適格全部を素の RTN → 残りを i8」と**ビット一致**する。
+
+        変種の配管は集合の引き算を 1 つ挟むだけで、既定では引く側が空 — それが値の側でも
+        成り立っていることを、台本を通さない直接の丸めと突き合わせて実測する
+        （格納形は変種でも同じなので、ずれたら資産からは読めない）。
+        """
+        through_export = make_wrapper()
+        direct = make_wrapper()
+        eligible = export_anima._i4_module_names(direct)
+
+        quantize(through_export, i4_args(no_calib=True))
+        fake_quant_int4(
+            direct,
+            include=lambda name: name in eligible,
+            op_types=export_anima.I4_MODULE_TYPES,
+        )
+        fake_quant_int8(direct, include=lambda name: name not in eligible)
+
+        after = dict(through_export.named_parameters())
+        assert {name for name, _ in direct.named_parameters()} == set(after)
+        for name, weight in direct.named_parameters():
+            assert torch.equal(weight, after[name]), name
+
+    def test_the_variant_keeps_only_the_non_adaln_block_linears_in_i4(self, stub_capture):
+        wrapper = make_wrapper()
+        stub_capture(wrapper)
+        _eligible, _adaln, rest = self._split(wrapper)
+
+        _scales, overrides = quantize(wrapper, i4_args(adaln_i8=True))
+
+        assert set(overrides) == {f"{name}.weight" for name in rest}
+        assert all(dtype == "i4" for dtype in overrides.values())
+
+    def test_the_excluded_count_is_the_adaln_rows_plus_the_out_of_block_five(self):
+        """勘定: block 数 × (セグメント 3 × linear 2) + block 外 {@link NON_STAGE_I4_WEIGHTS}。
+
+        実物（anima-v1.0 = 28 block）ではこれが 28 × 6 + 5 = **173 本**（adaLN 168 + 5）。
+        本数を焼き込まないのは `--num-layers` の縮小 export でも同じ式で通るため。
+        """
+        blocks = 4
+        wrapper = make_wrapper(blocks=blocks)
+
+        excluded = export_anima._adaln_i8_names(wrapper)
+
+        per_block = len(calib.ADALN_SEGMENTS) * 2
+        assert len(excluded) == blocks * per_block + len(export_anima.NON_STAGE_I4_WEIGHTS)
+        assert excluded >= export_anima.NON_STAGE_I4_WEIGHTS
+        assert len(excluded - export_anima.NON_STAGE_I4_WEIGHTS) == blocks * per_block
+
+    def test_the_variant_rounds_the_excluded_weights_as_i8(self, stub_capture):
+        """MUST: 外した側は i8 で丸まる（i4 からも i8 からも漏れて f32 のまま、を潰す）。"""
+        wrapper = make_wrapper()
+        before = {name: p.detach().clone() for name, p in wrapper.named_parameters()}
+        stub_capture(wrapper)
+
+        scales, overrides = quantize(wrapper, i4_args(adaln_i8=True))
+
+        after = dict(wrapper.named_parameters())
+        for name in export_anima._adaln_i8_names(wrapper):
+            key = f"{name}.weight"
+            assert key in scales, f"{key} の scale が台帳に無い"
+            assert key not in overrides, f"{key} が i4 の格納指定を持っている"
+            # per-channel の scale は行ごと 1 本（group scale は行 × group 数）。
+            assert list(scales[key].shape) == [after[key].shape[0], 1]
+            assert not torch.equal(before[key], after[key]), f"{key} が丸まっていない"
+
+    def test_the_calibration_rounds_only_the_non_adaln_block_linears(self, stub_capture):
+        """GPTQ に載る集合が「block 内 − adaLN」と過不足なく一致する（述語と格納集合の同一性）。"""
+        wrapper = make_wrapper()
+        stub_capture(wrapper)
+        _eligible, adaln, rest = self._split(wrapper)
+        genuine = calib.calibrate_i4
+        rounded: list[frozenset[str]] = []
+
+        def spy(rig, include=None):
+            report, ledger = genuine(rig, include)
+            rounded.append(frozenset(layer.fqn for layer in report.layers))
+            return report, ledger
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(calib, "calibrate_i4", spy)
+            quantize(wrapper, i4_args(adaln_i8=True))
+
+        assert rounded == [frozenset(f"{name}.weight" for name in rest)]
+        assert adaln, "縮図に adaLN が無い（テストが空振りしている）"
+
+    def test_the_capture_sees_the_adaln_side_already_rounded(self, stub_capture):
+        """MUST: 変種では adaLN も**捕捉より前**に i8 で丸まっていること。
+
+        配布実行時に modulation を作るのは i8 の adaLN なので、後に回すと「f32 の
+        modulation を通った活性」で選んだ丸め先を i8 の modulation と組んで配ることになる
+        （block 外を先に丸める理由と同じ — 順序 MUST ②）。
+        """
+        wrapper = make_wrapper()
+        before = {name: p.detach().clone() for name, p in wrapper.named_parameters()}
+        _calls, at_capture = stub_capture(wrapper)
+        _eligible, adaln, rest = self._split(wrapper)
+
+        quantize(wrapper, i4_args(adaln_i8=True))
+
+        for name in adaln:
+            key = f"{name}.weight"
+            assert not torch.equal(before[key], at_capture[key]), f"{key} が捕捉時に素のまま"
+        for name in rest:
+            key = f"{name}.weight"
+            assert torch.equal(before[key], at_capture[key]), f"{key} が捕捉前に丸まっている"
+
+    def test_the_plain_rtn_mode_splits_the_same_way(self):
+        """`--no-calib` でも割り方は同じ（変種は格納の割りであって校正の有無とは直交）。"""
+        wrapper = make_wrapper()
+        _eligible, _adaln, rest = self._split(wrapper)
+
+        _scales, overrides = quantize(wrapper, i4_args(no_calib=True, adaln_i8=True))
+
+        assert set(overrides) == {f"{name}.weight" for name in rest}
+
+    def test_a_renamed_adaln_segment_fails_loudly(self, monkeypatch, stub_capture):
+        """MUST: 綴りが 1 つでも見つからなければ落ちる — 片側だけの改名は本数の門を素通りする。"""
+        wrapper = make_wrapper()
+        stub_capture(wrapper)
+        monkeypatch.setattr(calib, "ADALN_SEGMENTS", calib.ADALN_SEGMENTS | {"norm4"})
+
+        with pytest.raises(AssertionError, match="adaLN の linear が 1 本も無い綴り"):
+            quantize(wrapper, i4_args(adaln_i8=True))
+
+    def test_an_exclusion_outside_the_eligible_set_fails_loudly(self, monkeypatch, stub_capture):
+        """除外の綴りが適格に無い = 上流の構成が動いた合図（黙って引き算を空振りさせない）。"""
+        wrapper = make_wrapper()
+        stub_capture(wrapper)
+        monkeypatch.setattr(
+            export_anima, "_adaln_i8_names", lambda model: frozenset({"model.nowhere"})
+        )
+
+        with pytest.raises(AssertionError, match="が i4 適格に無い"):
+            quantize(wrapper, i4_args(adaln_i8=True))
+
+    def test_the_out_of_block_weights_leave_the_plain_i4_path_entirely(self, stub_capture):
+        """変種では素の RTN i4 の経路が**1 本も丸めない**（block 外は全部 i8 へ移る）。"""
+        wrapper = make_wrapper()
+        stub_capture(wrapper)
+        calls: list[frozenset[str]] = []
+
+        def spy(model, names, target, label):
+            calls.append(frozenset(names))
+            return export_anima._round_i4_plain(model, names, target, label)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(export_anima, "_round_i4_plain", spy)
+            quantize(wrapper, i4_args(adaln_i8=True))
+
+        assert calls == []

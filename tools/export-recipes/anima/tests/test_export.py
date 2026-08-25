@@ -21,6 +21,8 @@ from torch import nn
 from anima import export as export_anima
 from anima import patch as patch_anima
 from anima.distribution import (
+    ADALN_I8_CALIB_METHOD,
+    ADALN_I8_TAG,
     ANIMA_BASE_MODEL_NAME,
     ANIMA_TURBO_MODEL_NAME,
     CALIB_PROVENANCE_FILE,
@@ -115,9 +117,15 @@ class TestCalibProvenance:
     """i4 の丸め条件は系列に残す（校正の有無は格納形を 1 バイトも変えないので資産から読めない）。"""
 
     @staticmethod
-    def _args(dtype, *, no_calib=False, calib_prompts=4, model=ANIMA_TURBO_MODEL_NAME):
+    def _args(
+        dtype, *, no_calib=False, calib_prompts=4, model=ANIMA_TURBO_MODEL_NAME, adaln_i8=False
+    ):
         return argparse.Namespace(
-            dtype=dtype, no_calib=no_calib, calib_prompts=calib_prompts, model=model
+            dtype=dtype,
+            no_calib=no_calib,
+            calib_prompts=calib_prompts,
+            model=model,
+            i4_adaln_i8=adaln_i8,
         )
 
     def test_it_records_the_shippable_method_and_the_corpus(self, tmp_path):
@@ -164,6 +172,40 @@ class TestCalibProvenance:
         assert record["method"] != CALIB_SHIPPABLE_METHOD, "配布可として通ってしまう"
         assert (record["prompts"], record["resolution"], record["steps"]) == (0, 0, 0)
         assert record["guidance"] == 0
+
+    def test_the_sensitivity_variant_is_recorded_as_its_own_method(self, tmp_path):
+        """MUST: 変種は配布の受理集合から**外れる綴り**で記録する。
+
+        丸め方式が同じ `gptq` でも「どの重みに当てたか」が違えば別の丸め方で、格納形からは
+        1 バイトも判別できない（i4 と i8 の混成という形は既定と同じ）。方式一致の門
+        （`distribution.assert_calib_provenance`）が名指しで拒否できる綴りにしておくのが、
+        視認用に焼いた変種を配布経路から締め出す唯一の網。
+        """
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        export_anima._write_calib_provenance(
+            self._args("i4", adaln_i8=True), "transformer", out_dir
+        )
+
+        record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
+        assert record["method"] == ADALN_I8_CALIB_METHOD
+        assert record["method"] != CALIB_SHIPPABLE_METHOD, "配布可として通ってしまう"
+        # 条件（予算・step・CFG）は既定と同じ — 変わったのは割り方だけ。
+        assert (record["prompts"], record["resolution"], record["steps"]) == (4, 512, 8)
+
+    def test_the_variant_and_no_calib_compose_in_the_method(self, tmp_path):
+        """2 つの opt-out は独立 — 片方が他方を隠さない（`rtn-adaln8` も配布可ではない）。"""
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        export_anima._write_calib_provenance(
+            self._args("i4", no_calib=True, model=None, adaln_i8=True), "transformer", out_dir
+        )
+
+        record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
+        assert record["method"] == f"rtn-{ADALN_I8_TAG}"
+        assert record["method"] not in (CALIB_SHIPPABLE_METHOD, ADALN_I8_CALIB_METHOD)
 
     def test_it_writes_nothing_for_a_series_that_is_not_i4(self, tmp_path):
         out_dir = tmp_path / "transformer"
@@ -237,7 +279,9 @@ class TestFakeQuantI4:
     @staticmethod
     def _quantize(model: nn.Module):
         """素の RTN 経路（`--no-calib`）— 校正付きの結線は `test_calib.py` が受け持つ。"""
-        return export_anima._fake_quant(argparse.Namespace(dtype="i4", no_calib=True), model, "t")
+        return export_anima._fake_quant(
+            argparse.Namespace(dtype="i4", no_calib=True, i4_adaln_i8=False), model, "t"
+        )
 
     def test_the_series_is_stored_as_i8_with_the_eligible_weights_overridden(self):
         """i4 の実行経路は適格スロット限定 — 系列の既定は i8 で、適格だけを 1 本ずつ i4 へ。"""
@@ -307,7 +351,7 @@ class TestFakeQuantI4:
             export_anima, "_i4_module_names", lambda model: frozenset({"attn", "norm"})
         )
 
-        with pytest.raises(AssertionError, match="i4 適格"):
+        with pytest.raises(AssertionError, match="格納 i4 の"):
             self._quantize(_DitLike())
 
 
@@ -435,3 +479,56 @@ class TestDitGraph:
         """2 点評価の中身: 解像度が 2 つとも違う（同じ S を並べると束縛の穴が数に出ない）。"""
         assert len(set(export_anima.DIT_DYN_RESOLUTIONS)) == len(export_anima.DIT_DYN_RESOLUTIONS)
         assert export_anima.DIT_DYN_RESOLUTIONS[0] == export_anima.RESOLUTION
+
+
+class TestAdalnI8Cli:
+    """`--i4-adaln-i8`（感度実験変種）の CLI 側の約束（既定 OFF・i4 限定・別系列）。"""
+
+    @staticmethod
+    def _run(monkeypatch, argv: list[str]) -> argparse.Namespace:
+        captured: dict[str, argparse.Namespace] = {}
+
+        def stub(target, args, out_dir):
+            captured[target] = args
+            return {"target": target}
+
+        monkeypatch.setattr("sys.argv", ["export.py", *argv])
+        monkeypatch.setattr(export_anima, "emit_target", stub)
+        export_anima.main()
+        return captured["transformer"]
+
+    def test_the_variant_is_off_by_default(self, monkeypatch):
+        args = self._run(monkeypatch, ["--dtype", "i4", "--model", ANIMA_TURBO_MODEL_NAME])
+
+        assert args.i4_adaln_i8 is False
+
+    def test_the_variant_writes_to_its_own_series_directory(self, monkeypatch):
+        """MUST: 配布条件で焼いた i4 系列を視認用の変種が**上書きしない**（既定 out でも別席）。"""
+        plain = self._run(
+            monkeypatch, ["--dtype", "i4", "--dit-graph", "dyn", "--model", ANIMA_TURBO_MODEL_NAME]
+        )
+        variant = self._run(
+            monkeypatch,
+            [
+                "--dtype",
+                "i4",
+                "--dit-graph",
+                "dyn",
+                "--i4-adaln-i8",
+                "--model",
+                ANIMA_TURBO_MODEL_NAME,
+            ],
+        )
+
+        assert plain.out != variant.out
+        assert variant.out.name == f"{plain.out.name.removesuffix('-dyn')}-{ADALN_I8_TAG}-dyn"
+
+    @pytest.mark.parametrize("dtype", ["f32", "f16", "i8"])
+    def test_the_variant_is_refused_outside_i4(self, monkeypatch, capsys, dtype):
+        """効かないノブを黙って受けない（i4 以外に i4 / i8 の割り方は 1 通りも無い）。"""
+        monkeypatch.setattr("sys.argv", ["export.py", "--dtype", dtype, "--i4-adaln-i8"])
+
+        with pytest.raises(SystemExit):
+            export_anima.main()
+
+        assert "--i4-adaln-i8" in capsys.readouterr().err

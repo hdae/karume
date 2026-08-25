@@ -71,6 +71,18 @@ CALIB_PROVENANCE_FILE = "calib_provenance.json"
 #: smoke 用で、配布資産にしない（`anima/export.py` の該当 MUST）。
 CALIB_SHIPPABLE_METHOD = "gptq"
 
+#: i4 の量子化感度実験変種（block 内 adaLN + block 外を i8 格納へ）の綴り。系列ディレクトリの
+#: 接尾辞と {@link CALIB_PROVENANCE_FILE} の `method` 接尾辞を**同じ 1 語**から作る。
+#: 書き手は `anima/export.py` の `--i4-adaln-i8`（綴りは LoRA / 校正の記録と同じ規律で読み手が
+#: 持つ — 2 箇所で独立に動かさない）。
+ADALN_I8_TAG = "adaln8"
+
+#: 同・変種が記録する丸め方式。**{@link CALIB_SHIPPABLE_METHOD} と一致しない**綴りであることが
+#: 要（格納形も本数も `verify_dist` もヘッダ検査も素通りする変種なので、配布経路から締め出す
+#: 網は {@link assert_calib_provenance} の方式一致 1 つきり）。これを要求するのは視認評価専用の
+#: 組み立て（`anima.eval_dist`）だけ。
+ADALN_I8_CALIB_METHOD = f"{CALIB_SHIPPABLE_METHOD}-{ADALN_I8_TAG}"
+
 #: 上流の重みライセンス原文（この recipe の隣に逐語で置いてある）。配布は Derivative の
 #: Distribution なので §3(a)（ライセンスのコピーを第三者へ提供する）が掛かる — 要約や
 #: 書き換えでは条件を満たさないため、**1 バイトも変えずに**配布リポ直下の `LICENSE.md` として
@@ -382,6 +394,11 @@ class AnimaModel:
     #: 実行時の条件そのものにするため、export 側に写しを置かない。ここを動かすと次の i4
     #: export の丸め先も動く。
     pipeline_config: Mapping[str, Any]
+    #: i4 系列に要求する丸め方式（`calib_provenance.json` の `method`）。配布は 1 通りだけ
+    #: （{@link CALIB_SHIPPABLE_METHOD}）で、**動かすのは視認評価専用の席だけ**
+    #: （`anima.eval_dist` — 量子化感度の実験変種を手元で組んで見るための spec）。既定を
+    #: 定数のままにしてあるので、配布経路の 4 モデルはこの欄を 1 度も綴らない。
+    calib_method: str = CALIB_SHIPPABLE_METHOD
 
 
 #: モデル名 → 事実。リポの分かれ目でもある（{@link TURBO_MODELS} / {@link BASE_MODELS}）。
@@ -550,7 +567,9 @@ def assert_calib_provenance(sources: AnimaSources, spec: AnimaModel) -> None:
     「全体的にぼやけた」絵だけ — LoRA 帰属（{@link assert_lora_provenance}）と同じ「別々の台本が
     持つ同じ事実は組み立て時に必ず突き合わせる」規律をここにも敷く。
 
-    MUST: **`spec` を受け取って条件まで突き合わせる**。`anima.export` の `--model` は校正条件を
+    MUST: **`spec` を受け取って条件まで突き合わせる**（要求する丸め方式も {@link
+    AnimaModel.calib_method} から引く — 配布は 1 通りで、動くのは視認評価専用の席だけ）。
+    `anima.export` の `--model` は校正条件を
     引くためだけのノブ（LoRA 焼き込みのような格納バイトへの影響が無い）なので、素版の重みを
     `--model anima-turbo` で焼いた資産は「正しい素版 i4」に見える — 校正だけが turbo の
     8 step・CFG 1 で回っている。条件はモデルの `pipeline_config` から導かれる
@@ -573,14 +592,15 @@ def assert_calib_provenance(sources: AnimaSources, spec: AnimaModel) -> None:
     defaults = spec.pipeline_config["defaults"]
     complaint = calib_complaint(
         record,
-        method=CALIB_SHIPPABLE_METHOD,
+        method=spec.calib_method,
         at_least={"prompts": DEFAULT_CALIB_PROMPTS},
         exactly={"steps": int(defaults["steps"]), "guidance": float(defaults["guidanceScale"])},
     )
     if complaint is not None:
         raise DistError(
-            f"i4 系列の校正条件が配布の条件を満たしていない: {path} は{complaint}"
-            " — `--no-calib` / smoke 予算 / 別モデルの条件で焼いた生成物は配布に使わない"
+            f"i4 系列の校正条件が要求と食い違う: {path} は{complaint}"
+            " — `--no-calib` / smoke 予算 / 別モデルの条件 / 役割別の実験変種で焼いた生成物は"
+            "配布に使わない"
         )
 
 
@@ -627,10 +647,21 @@ def anima_quants(spec: AnimaModel) -> Mapping[str, Any]:
     }
 
 
-def anima_plan(sources: AnimaSources, model: str = ANIMA_BASE_MODEL_NAME) -> ModelPlan:
-    """Anima 1 モデルぶんの計画を組む（検査はここで全部済ませる — 1 バイトも書かない）。"""
+def anima_plan(
+    sources: AnimaSources,
+    model: str = ANIMA_BASE_MODEL_NAME,
+    *,
+    spec: AnimaModel | None = None,
+) -> ModelPlan:
+    """Anima 1 モデルぶんの計画を組む（検査はここで全部済ませる — 1 バイトも書かない）。
+
+    `spec` は**明示で差し替える席**（省略時はモデル名から引く = 配布経路）。差し替えるのは
+    視認評価専用の組み立て（`anima.eval_dist`）だけで、そちらは「素版に i4 席を戻し、要求する
+    丸め方式を実験変種の綴りにした」spec を渡す — 配布の受理集合（{@link ANIMA_MODELS}）を
+    実験のために動かさないための口で、逆向き（配布経路が spec を綴る）には使わない。
+    """
     assert_model_name(model)
-    spec = anima_model(model)
+    spec = anima_model(model) if spec is None else spec
     assert_lora_provenance(sources, spec.lora_sha256)
     if "i4" in spec.storages:
         assert_calib_provenance(sources, spec)

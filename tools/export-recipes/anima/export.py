@@ -51,6 +51,14 @@ step 数と CFG は `--model` の配布既定から導く — {@link anima.calib
 丸める（配布実行時の条件へ校正入力を合わせる）。校正の失敗は fail loudly で、素の RTN へ黙って
 落ちる分岐は持たない — 明示の `--no-calib` だけが opt-out（配布資産には使わない）。
 
+`--i4-adaln-i8`（既定 OFF）は**量子化感度の実験変種**で、block 内 adaLN（`norm1` / `norm2` /
+`norm3` の `linear_1` / `linear_2` = anima-v1.0 で 168 本）と block 外の 5 本を i8 格納へ回し、
+残る block 内 linear だけを GPTQ i4 にする（{@link _adaln_i8_names}）。素版 3 モデルの i4 が
+視認裁定で配布スキップになった（research `2026-08-24-gptq-expansion-quality.md` §5）ときの
+改善候補で、irodori の w4 席では同型の構成が聴感を回復させている（同 §1 の R3）。系列名にも
+`calib_provenance.json` の `method` にも `-adaln8` が付き、**配布の一致検査に落ちる**
+（視認評価専用 — 組み立ては `python -m anima.eval_dist`）。
+
 MUST: `--dtype f16` は**重みを f16 表現可能値へ丸めてから**（fake-quant — ADR 0006）参照と
 golden を採り、適格な重みスロットだけを f16 で格納する（ADR 0018）。丸めは各 builder が
 モデルを組んだ直後に掛かる — 参照より後ろへ動かすと「参照だけ元の重み」になり、E2E の差が
@@ -92,7 +100,12 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import SERIES_ROOT
-from anima.distribution import ANIMA_MODELS, CALIB_PROVENANCE_FILE, LORA_PROVENANCE_FILE
+from anima.distribution import (
+    ADALN_I8_TAG,
+    ANIMA_MODELS,
+    CALIB_PROVENANCE_FILE,
+    LORA_PROVENANCE_FILE,
+)
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -642,6 +655,36 @@ def _i4_module_names(model: nn.Module) -> frozenset[str]:
     )
 
 
+def _adaln_i8_names(model: nn.Module) -> frozenset[str]:
+    """感度実験変種（`--i4-adaln-i8`）が i4 から外して **i8 で丸める**重みの FQN 集合。
+
+    中身は 2 群の和で、どちらも「modulation を作る側」= 量子化感度が高いと目された役割:
+
+    1. **block 内の adaLN**（`norm1` / `norm2` / `norm3` の `linear_1` / `linear_2` —
+       anima-v1.0 で 28 block × 6 = 168 本）。判定はセグメント一致
+       （{@link anima.calib.is_adaln}）で、名指しの一覧は持たない。
+    2. **block の外の 5 本**（{@link NON_STAGE_I4_WEIGHTS}）。うち 4 本は modulation の
+       系譜そのもの（`time_embed.t_embedder` が全 adaLN へ渡る temb を作り、`norm_out` は
+       最終段の `CosmosAdaLayerNorm`）で、残る `proj_out` は校正の駆動が stage 単位である
+       都合で GPTQ に載らず素の RTN i4 で丸まっていた側 — irodori の w4 席では**この 2 群を
+       まとめて i8 へ戻した構成**（research `2026-08-24-gptq-expansion-quality.md` §1 の R3）が
+       採用されており、片方だけを動かした構成はどこでも検証されていない。
+
+    MUST: adaLN の綴りが 1 つでも見つからなければ fail loudly（{@link
+    anima.calib.adaln_segments_seen}）— 上流が一部だけを改名すると、除外したはずの本数だけが
+    黙って i4 へ戻り、格納形も本数の門も自己整合したまま緑になる。
+    """
+    stage_names = calib.stage_linear_names(calib.dit_stages(model))
+    missing = sorted(calib.ADALN_SEGMENTS - calib.adaln_segments_seen(stage_names))
+    if missing:
+        raise AssertionError(
+            f"DiT block 内に adaLN の linear が 1 本も無い綴り: {missing}"
+            f"（探した綴り: {sorted(calib.ADALN_SEGMENTS)}）— 上流が modulation の属性名を"
+            "変えている"
+        )
+    return frozenset(name for name in stage_names if calib.is_adaln(name)) | NON_STAGE_I4_WEIGHTS
+
+
 def _round_i4_plain(
     model: nn.Module, names: frozenset[str], target: str, label: str
 ) -> Mapping[str, torch.Tensor]:
@@ -662,10 +705,16 @@ def _round_i4_calibrated(
     wrapper: nn.Module,
     target: str,
     i4_names: frozenset[str],
+    excluded: frozenset[str],
     probe: Sequence[torch.Tensor],
     round_int8: Callable[[], Int8Report],
 ) -> tuple[Mapping[str, torch.Tensor], Int8Report]:
-    """i4 適格を「block 外 = 素の RTN」「block 内 = GPTQ」へ排他に割って丸める。
+    """i4 で格納する重みを「block 外 = 素の RTN」「block 内 = GPTQ」へ排他に割って丸める。
+
+    `i4_names` は**格納 i4 の全量**、`excluded` は i4 適格でありながら i8 へ回す側
+    （既定は空・感度実験変種では {@link _adaln_i8_names} の 173 本）。適格の全量は 2 つの和で、
+    下の 2 つの門はそちら（= グラフが決める事実）に対して掛かる — 変種で動くのは割り方だけで、
+    「上流の構成が変わっていないか」を見る網は 1 つも緩めない。
 
     順序（① → ② → ③ → ④。**②〜④ は MUST・① は SHOULD**）:
 
@@ -673,36 +722,41 @@ def _round_i4_calibrated(
        丸めると「別の経路の GPTQ」を出荷することになり、しかも数値は普通に出る。SHOULD どまり
        なのは、この門が読み取り専用で**位置を後ろへ動かしても出荷バイトが変わらない**ため
        （先頭に置く得は、数時間の校正を回す前に落ちること）。
-    2. **block 外の適格を先に RTN i4 で丸める** — 配布実行時に block へ入るのは i4 の
+    2. **block 外を先に丸める** — 既定はここが RTN i4（配布実行時に block へ入るのは i4 の
        `time_embed` が作った temb で、step をまたぐ latent も i4 の `norm_out` / `proj_out` を
-       通った値。後に回すと「f32 の周辺を通った活性」で選んだ丸め先を、i4 の周辺と組んで
-       配ることになる。**i8 側（`patch_embed.proj` 1 本）も同じ理由で校正入力の捕捉より前に
-       丸める**（{@link _fake_quant_i4} が `fake_quant_int8` を先に呼ぶ）— この 1 本は
-       patchify 入口で、block 0 の入力そのものを作る。
+       通った値）。後に回すと「f32 の周辺を通った活性」で選んだ丸め先を、丸めた周辺と組んで
+       配ることになる。**i8 側も同じ理由で校正入力の捕捉より前に丸める**
+       （{@link _fake_quant_i4} の `round_int8` をここで呼ぶ）— 既定では `patch_embed.proj`
+       1 本（patchify 入口 = block 0 の入力そのもの）、変種ではそこへ除外した 173 本が加わり、
+       block 内の adaLN もこの時点で i8 になる（配布実行時に modulation を作るのは i8 の
+       adaLN だから、その状態で校正入力を採る）。
     3. 校正入力の生成（参照 denoise の捕捉）と付随引数一致門。
-    4. block 内の linear を GPTQ × RTN 格子で丸める。
+    4. block 内の linear を GPTQ × RTN 格子で丸める。**除外は core の `include` で排他に**
+       （`anima.calib.is_adaln` — 丸めた集合と i4 格納の集合を 1 実装で決める）。
 
     MUST: block 外の適格は {@link NON_STAGE_I4_WEIGHTS} と一致し、block 内の linear は 1 本
     残らず i4 適格であること — どちらも外れたら上流の構成が変わっている。
     """
     stages = calib.dit_stages(wrapper)
     stage_names = calib.stage_linear_names(stages)
-    unaligned = sorted(stage_names - i4_names)
+    eligible = i4_names | excluded
+    unaligned = sorted(stage_names - eligible)
     if unaligned:
         raise AssertionError(
             f"DiT block 内の linear {unaligned[:3]} が i4 適格でない（量子化軸が g"
             f"{DEFAULT_GROUP_SIZE} 非整除）— 校正は stage を丸ごと駆動するので 1 本だけ外す"
             "逃げ道が無い"
         )
-    plain_names = i4_names - stage_names
-    if plain_names != NON_STAGE_I4_WEIGHTS:
+    non_stage = eligible - stage_names
+    if non_stage != NON_STAGE_I4_WEIGHTS:
         raise AssertionError(
-            f"DiT block の外の i4 適格が {sorted(plain_names)} で、宣言"
+            f"DiT block の外の i4 適格が {sorted(non_stage)} で、宣言"
             f"（NON_STAGE_I4_WEIGHTS = {sorted(NON_STAGE_I4_WEIGHTS)}）と違う"
             " — 上流の構成が変わって i4 の割り方が動いている"
         )
     graph_batch = calib.assert_stage_split(wrapper, probe, stages)
-    plain = _round_i4_plain(wrapper, plain_names, target, "block 外の適格を")
+    plain_names = non_stage - excluded
+    plain = _round_i4_plain(wrapper, plain_names, target, "block 外の適格を") if plain_names else {}
     int8 = round_int8()
     prompts = calibration_prompts(args.calib_prompts)
     conditions = calib.calib_conditions(args.model)
@@ -711,15 +765,28 @@ def _round_i4_calibrated(
     )
     calib.assert_calib_batches_match_graph(graph_batch, batches)
     rig = calib.CalibRig(stages=stages, batches=batches)
-    report, ledger = calib.calibrate_i4(rig)
-    calib.assert_calib_covers_scan(report, stage_names)
+    # MUST: 述語が選ぶ集合 = i4 で格納する block 内の集合。既定（除外なし）は `None` を渡して
+    # **述語そのものを持たない** — 「全部」を綴り直した述語は、走査の定義が動いた日に片側だけ
+    # 追随して黙ってずれる。
+    stage_i4 = stage_names - excluded
+    report, ledger = calib.calibrate_i4(
+        rig, None if not excluded else lambda local: not calib.is_adaln(local)
+    )
+    calib.assert_calib_covers_scan(report, stage_i4)
     calibrated = ledger.scales
     # MUST: 2 経路は互いに素（重なれば同じ重みを 2 度丸めたことになり、値だけが静かに狂う）。
     overlap = sorted(set(plain) & set(calibrated))
     if overlap:
         raise AssertionError(f"i4 の 2 経路が同じ重みを丸めている（二重丸め）: {overlap[:3]}")
+    scope = (
+        "DiT block の linear"
+        if not excluded
+        else f"DiT block の adaLN 以外 {len(stage_i4)} 本"
+        f"（adaLN {len(excluded - NON_STAGE_I4_WEIGHTS)} 本 + block 外"
+        f" {len(NON_STAGE_I4_WEIGHTS)} 本は i8 格納 — --i4-adaln-i8）"
+    )
     print(
-        f"[fake-quant] {target}: DiT block の linear を GPTQ 校正付きで丸めた"
+        f"[fake-quant] {target}: {scope}を GPTQ 校正付きで丸めた"
         f" — {report.describe()} / 校正プロンプト {len(prompts)} 本・バッチ {len(batches)} 本"
         f"・{rig.tokens:,} トークン（{args.model}: {conditions.steps} step"
         f"・CFG {conditions.guidance:g}・分岐 {conditions.branches}）",
@@ -734,17 +801,32 @@ def _fake_quant_i4(
     target: str,
     probe: Sequence[torch.Tensor] | None,
 ) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
-    """混成 i4 系列の丸め（適格 = i4 g32・残り = i8 per-channel）。
+    """混成 i4 系列の丸め（格納 i4 = 適格 − 除外・残り = i8 per-channel）。
 
-    2 つの述語は {@link _i4_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。
-    返す override は「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を
-    満たせなければ fail loudly する。
+    2 つの述語は {@link _i4_module_names} の適格から**排他に**割る（`quantize.py` の混成
+    MUST）。返す override は「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示
+    指定を満たせなければ fail loudly する（系列の既定格納は i8 なので、i8 へ回した側は
+    override に載せない = 既定のまま）。
+
+    `--i4-adaln-i8`（既定 OFF）は適格から {@link _adaln_i8_names} を**引いて** i4 の集合を
+    決める感度実験変種で、引いた側は i8 の述語（`name not in i4_names`）が自動で拾う。
+    既定では除外が空なので、この関数が通る経路も丸める集合も従来と 1 バイトも変わらない。
 
     適格の丸めは既定で校正付き（{@link _round_i4_calibrated}）。`--no-calib` のときだけ
-    全適格を素の RTN で丸める — **配布資産には使わない**テスト / smoke 用の opt-out で、
-    「校正付きのつもりで校正なしを配った」が資産から読めないので診断行で明示する。
+    格納 i4 の全量を素の RTN で丸める — **配布資産には使わない**テスト / smoke 用の opt-out
+    で、「校正付きのつもりで校正なしを配った」が資産から読めないので診断行で明示する。
     """
-    i4_names = _i4_module_names(model)
+    eligible = _i4_module_names(model)
+    # MUST: 除外は**適格を計算した後**に引く（適格判定より前に名前で削ると、上流の構成が
+    # 変わって適格から落ちた重みと「意図して外した重み」が区別できなくなる）。
+    excluded = _adaln_i8_names(model) if args.i4_adaln_i8 else frozenset()
+    outside = sorted(excluded - eligible)
+    if outside:
+        raise AssertionError(
+            f"i8 へ回す指定 {outside[:3]} が i4 適格に無い（適格 {len(eligible)} 本 /"
+            f" 除外 {len(excluded)} 本）— 上流の構成が変わって除外の綴りが空振りしている"
+        )
+    i4_names = eligible - excluded
 
     def round_int8() -> Int8Report:
         return fake_quant_int8(model, include=lambda name: name not in i4_names)
@@ -755,7 +837,7 @@ def _fake_quant_i4(
             "（配布資産にしないこと・品質は perf-ledger Q-6 の基線より下）",
             flush=True,
         )
-        int4_scales = _round_i4_plain(model, i4_names, target, "適格な重みを")
+        int4_scales = _round_i4_plain(model, i4_names, target, "格納 i4 の重みを")
         int8 = round_int8()
     else:
         if probe is None:
@@ -766,15 +848,26 @@ def _fake_quant_i4(
         # 校正経路では i8 の丸めを**校正入力の捕捉より前**に差し込む（順序 MUST ② — 呼ぶ位置は
         # {@link _round_i4_calibrated} が持つ）。適格判定の門より前に呼ぶと、適格の綻びより先に
         # 「i8 の対象が 1 本も無い」で落ちて診断が入れ替わる。
-        int4_scales, int8 = _round_i4_calibrated(args, model, target, i4_names, probe, round_int8)
+        int4_scales, int8 = _round_i4_calibrated(
+            args, model, target, i4_names, excluded, probe, round_int8
+        )
     print(f"[fake-quant] {target}: 残りは i8 per-channel — {int8.describe()}", flush=True)
-    # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「適格と数えたのに丸まって
+    # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「i4 と数えたのに丸まって
     # いない」形で、i4 席に i8 の重みが混ざったまま緑になる（サイズだけが静かに戻る）。
     expected = {f"{name}.weight" for name in i4_names}
     if set(int4_scales) != expected:
         raise AssertionError(
-            f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(int4_scales)} 本"
+            f"格納 i4 の {len(i4_names)} 本に対し丸めたのは {len(int4_scales)} 本"
             f"（過不足: {sorted(set(int4_scales) ^ expected)[:3]}）"
+        )
+    # MUST: 除外した側は i8 で丸まっていること。i8 の述語は `i4_names` の否定なので構造上は
+    # 落ちないが、ここが空振りすると「i4 からも i8 からも漏れて f32 のまま」— 値は正しく
+    # サイズだけが戻る壊れ方で、格納指定にも本数の門にも出ない。
+    unrounded = sorted(f"{name}.weight" for name in excluded if f"{name}.weight" not in int8.scales)
+    if unrounded:
+        raise AssertionError(
+            f"i4 から外した {len(excluded)} 本のうち {unrounded[:3]} が i8 でも丸まっていない"
+            "（i4 側にも i8 側にも入らず f32 のまま残っている）"
         )
     return {**int8.scales, **int4_scales}, dict.fromkeys(int4_scales, "i4")
 
@@ -863,8 +956,14 @@ def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path
     # 既にある turbo 系列の記録（追加前の形）の受理を 1 つも変えない — 既存資産へ再 export を
     # 要求しない形に留める MUST（記録は資産と違って作り直しの費用が丸め時間そのもの）。
     conditions = None if args.no_calib else calib.calib_conditions(args.model)
+    # 感度実験変種は**方式の綴りごと**変える（`gptq` → `gptq-adaln8`）。丸め方式が同じでも
+    # 「どの重みに当てたか」が違えば別の丸め方で、格納形からは 1 バイトも判別できない —
+    # 配布側の一致検査（`distribution.CALIB_SHIPPABLE_METHOD`）がそのまま名指しで拒否する
+    # 綴りにしておくのが、視認用に焼いた変種を配布経路から締め出す唯一の手（{@link
+    # ADALN_I8_TAG}）。
+    method = "rtn" if args.no_calib else calib.CALIB_METHOD
     record: dict[str, object] = {
-        "method": "rtn" if args.no_calib else calib.CALIB_METHOD,
+        "method": f"{method}-{ADALN_I8_TAG}" if args.i4_adaln_i8 else method,
         "group_size": calib.CALIB_GRID.group_size,
         "grid": calib.CALIB_GRID.kind,
         "prompts": 0 if args.no_calib else args.calib_prompts,
@@ -967,6 +1066,9 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
         # （{@link _write_calib_provenance} → `distribution.assert_calib_provenance`）が持つ。
         "calib_prompts": 0 if args.dtype != "i4" or args.no_calib else args.calib_prompts,
         "calib_resolution": 0 if args.dtype != "i4" or args.no_calib else calib.CALIB_RESOLUTION,
+        # 役割別の格納割り（感度実験変種）。数時間の export の記録が要約 1 枚で読めるように
+        # 出す — 機械の突き合わせは `calib_provenance.json` の `method` が持つ。
+        "i4_adaln_i8": args.dtype == "i4" and args.i4_adaln_i8,
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
@@ -1095,6 +1197,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="i4 を校正なしの素の RTN で丸める（テスト / smoke 用 — 配布資産にしないこと）",
     )
     parser.add_argument(
+        "--i4-adaln-i8",
+        action="store_true",
+        help="i4 の量子化感度実験変種: block 内 adaLN（norm1/2/3 の linear_1/2）と block 外の"
+        f" {len(NON_STAGE_I4_WEIGHTS)} 本を i8 格納へ回し、残りだけを i4 にする"
+        f"（既定 OFF・系列名と calib_provenance の method に -{ADALN_I8_TAG} が付き、"
+        "配布の一致検査に落ちる = 視認評価専用）",
+    )
+    parser.add_argument(
         "--model",
         choices=tuple(ANIMA_MODELS),
         default=None,
@@ -1103,8 +1213,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
     if args.out is None:
+        # MUST: 変種は既定 out でも**別ディレクトリ**（配布条件で焼いた i4 系列を、視認用の
+        # 変種が同じ path へ上書きしない）。接尾辞の順は `-adaln8` → `-dyn` で、grep したとき
+        # グラフ形が末尾に揃う。
         root = DEFAULT_OUT_ROOTS[args.dtype]
-        args.out = root.with_name(f"{root.name}{DYN_SUFFIX}") if args.dit_graph == "dyn" else root
+        name = root.name + (f"-{ADALN_I8_TAG}" if args.i4_adaln_i8 else "")
+        args.out = root.with_name(name + (DYN_SUFFIX if args.dit_graph == "dyn" else ""))
 
     # MUST: 同一プロセスでの併用を機械的に拒否する。VAE パッチはプロセス全域の差し替えなので、
     # emit 側が先に当てると「パッチ前の参照」が汚染され、同値検証が恒真化して偽 PASS する
@@ -1134,6 +1248,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"--calib-prompts / --no-calib は --dtype i4 だけに効く（指定は {args.dtype}）"
             " — 校正付き丸めは i4 系列の経路（perf-ledger Q-6）"
         )
+
+    # MUST: 役割別の格納割りも i4 だけに効く（他系列に i4 / i8 の割り方は 1 通りも無い）。
+    # 受けてしまうと「adaLN を i8 にしたつもりの f16 資産」という読めない指定が通る。
+    if args.dtype != "i4" and args.i4_adaln_i8:
+        parser.error(f"--i4-adaln-i8 は --dtype i4 だけに効く（指定は {args.dtype}）")
 
     # MUST: 校正条件は**モデル別**に名指しさせる（既定を置かない）。step 数と CFG は配布形の
     # 既定から導く（`calib.calib_conditions`）ので、`--model` を忘れた素版の i4 が turbo の
