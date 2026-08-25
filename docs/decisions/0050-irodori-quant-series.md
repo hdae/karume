@@ -129,3 +129,9 @@ f16/i8 格納実行・dist の quant 表・models の session 配線）は SBV2 
 14. **聴感裁定（2026-08-24 ユーザー）: R3 = こもり解消・配布可（opt-in）**。HF 公開済み
     （コミット `67e9584c`・断片化 29.4 MiB/レンジ健全）。**pin は据え置き** — `w4` を使うには
     `revision: "main"` の明示が要る（anima i4 と同じ形）。
+
+## 追記（2026-08-25）— 0.5.0 で pin 解消・席名は `i8+dit4` へ
+
+決定 14 の「pin は据え置き」は 0.5.0 リリースで解消した — `IRODORI_V4_SMALL_CURRENT` が
+席名改名後の revision `49b61517` を指し、`revision: "main"` の明示は不要になった。席名は
+ADR [0074](0074-quant-seat-naming.md) の移行表どおり `w4` → `i8+dit4`。

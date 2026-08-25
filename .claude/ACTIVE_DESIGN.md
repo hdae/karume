@@ -11,12 +11,10 @@
 
 ## Now
 
-- **0.5.0 breaking 波は実装完了 — 今はリリース段**。残りは 4 手: ①サンプラーの視認 A/B
-  （**出荷バイトで**・裁定次第で recipe に `scheduler.type` を emit）②HF 5 リポの再アップロード
-  （公開 4 + pin 更新）③0.5.0 の lockstep bump（`uv.lock` 追随 MUST・**焼き直しは bump の後**）
-  ④push → CI → GitHub Release。手順の正本 = [release-runbook](../docs/release-runbook.md)、
-  波の正本 = [backlog](../docs/backlog.md) now 節。JSR 公開済みは 0.4.3 まで（2026-08-25
-  Release 確認済み — 次に出るのが 0.5.0）。
+- **0.5.0 リリース完了（2026-08-25）**: JSR 3 パッケージ = 0.5.0・GitHub Release v0.5.0・
+  HF 4 リポ再アップロード + `*_CURRENT` pin 更新・事後疎通（JSR 消費グラフ + pin 実 DL 合成
+  4 ファミリ）まで消化。リリース記録は [backlog](../docs/backlog.md) 消化済み節。
+  **次波はユーザー裁定待ち**（候補 = backlog now 節）。
 - **0.5.0 で変わった面**（消費側の doc はここが索引）:
   - **quant 席名が全て改名された**（ADR [0074](../docs/decisions/0074-quant-seat-naming.md)
     決定 6 の移行表が正本 — 例 `w8a8-s16` → `f16+dit8-a8-attn8-s16` / sbv2 `w8-bert4` →
@@ -31,7 +29,8 @@
     場合のオプトイン**」= bump のたびに pin 更新 + 動作確認の義務つき。hub は revision 未指定の
     暗黙 `main` 解決に 1 回だけ warn（解決 SHA 印字 + pin / `*_CURRENT` の 2 択案内）。
   - anima に `pipelineConfig.scheduler.type` 席（`euler` / `dpmpp-2m`・省略時 euler）。
-    **配布形はまだ宣言していない**（視認裁定待ち）。
+    **配布形は base / turbo とも `dpmpp-2m` を宣言済み**（出荷バイトの視認 A/B 裁定 —
+    seed 固定でも 0.4.x と画が変わる）。
   - 0.4.3 で配られた面（消費側 doc の注意点）: `animaLatents()`（途中 latent の逆正規化素材
     — プレビューには要らない）/ `approximatePreview()`（途中 latent → RGB の線形近似。係数は
     **正規化空間**で較正済みなので `copyLatents()` の返り値をそのまま渡す — 逆正規化した値を
@@ -57,14 +56,6 @@
 
 ## Pitfalls（現役のみ）
 
-- **local の `models/karume-anima/` には配布スキップ裁定（2026-08-24）の i4 席 2 つ
-  （`f16+dit4` / `f16+dit4-attn8-s16`）が組み込まれたまま**（i4 は dist の宣言必須格納で
-  外せない）— **上げ直す前に「落とすのか載せるのか」を確認する**。
-- **irodori の `i8+dit4` 席（旧 `w4`）は HF 公開済みだが pin が据え置き** — 今は
-  `revision: "main"` を明示しないと使えない。0.5.0 の再アップロード + pin 更新で解消する予定。
-- **format 断絶中はローカル 5 dist（公開 4 + 非公開の `karume-sbv2-fn`）の焼き直しが
-  `deno task verify` の前提** — e2e が読むのは配布形なので、1 本でも旧 format のまま残ると赤に
-  なる。FN は公開 parked だが焼き直しの対象からは外れない。
 - **フル走行の verify は VRAM 圧で稀にフレークする**（毎回別のテストが落ち、単独再走は常に緑
   — known-issues）。落ちたファイルの単独再走で切り分ける。
 - **eval-images は turbo 配布形以外を指さない**（出力名がソースリポを区別せず siglip2

@@ -7,46 +7,38 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.5.0 breaking 波のリリース段
+## now — 次波の裁定待ち（0.5.0 リリース完了）
 
-波 J（量子化探索・第 2 段）と波 L（anima 素版 + バリアント同梱）・広域レビュー
-（`.claude/reviews/2026-08-24_283669a`）の消化はクローズ済み。結果と実測の正本は ADR
-[0050](decisions/0050-irodori-quant-series.md) 追記 2 /
-[0077](decisions/0077-model-version-naming.md) と
-[research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) /
-[research/2026-08-22-anima-base-steps.md](research/2026-08-22-anima-base-steps.md)。
+**0.5.0 breaking 波は 2026-08-25 にクローズ**（実装〜リリース〜事後疎通まで消化 — 結果は下の
+消化済み節）。次の大波はユーザー裁定待ち。候補（詳細は各節）:
 
-**0.5.0 breaking 波の実装は完了**（2026-08-25）:
+- SBV2 の yomi 依存分離（later 節 — 0.6.0 想定・breaking。ユーザー意向「早い段階で」）
+- 生成 API 波（later 節 — `GenerationProgram` + sequence API。LLM 実需に直結する最大の API 波）
+- R1 のロード面 API 工事 4 件 + exporter 自動分割規則（release 節）
+- モデル拡充の続き・EmbeddingGemma の完成（later 節）
+- anima 素版 i4 の品質改善（later 節 — 配布スキップ裁定の復活レバー）
 
-- quant 席名の一斉改名（ADR [0074](decisions/0074-quant-seat-naming.md) 移行表）・
-  `linearCompute` / `attentionCompute` の値 `"i8a8"` → `"a8"`・`karume/4` 繰り上げと表示欄
-  （ADR [0075](decisions/0075-quant-presentation.md)）
-- ADR [0038](decisions/0038-manifest-v1.md) §7 の据え置き席 2 つ（越境コンポーネント参照・
-  quant の `requiredLimits`。後者の DL 前チェック結線は後続 — release 節）
-- `fromPretrained` の `ref` 必須化・`*_CURRENT` 定数の公開・hub の revision 未指定 warn
-  （ADR [0073](decisions/0073-models-source-pin.md) 追記 2026-08-25）
-- anima の `scheduler.type` 席と DPM++ 2M の denoise 結線・estimate の恒等別名再現
-  （レビュー R6V-2）・irodori の構築 AbortSignal
+## 消化済み（0.5.0 breaking 波 — 2026-08-25）
 
-残りはリリース段の 4 手（手順の正本 = [release-runbook](release-runbook.md)）:
+結果だけ残す（経緯は git / 各 ADR / [release-runbook](release-runbook.md)）:
 
-1. **サンプラーの視認 A/B**（**出荷バイトで** — sim の A/B は同一リグ内でのみ有効）。採用裁定が
-   出たら recipe 側に `scheduler.type` を emit する席を足す（現状は未 emit = 省略 → euler）。
-2. **配布形 5 本の焼き直し → 公開 4 リポ（jvnv / irodori / anima-turbo / anima）の再アップ
-   ロード + pin 更新**。`karume/4` 断絶なので 4 リポ同時で、越境参照の公開順序 MUST は
-   runbook §0。5 本目の `karume-sbv2-fn` は非公開のまま焼き直しだけ（公開は parked）。
-3. **0.5.0 の lockstep bump**: 3 JSR パッケージ + exporter の version・`^` 依存・`deno.lock`
-   に加えて **`uv.lock` の再生成も同乗 MUST**（0.4.3 で落として CI 赤 → 追随コミットになった）。
-   焼き直しは bump の**後**（runbook §0）。JSR 公開済みは 0.4.3 まで（2026-08-25 Release 確認済み）
-   — 次に出るのが 0.5.0。
-4. push → CI 緑 → GitHub Release を published にして publish 発火。
-
-持ち越しの注意（次の再アップロードで先に思い出す）:
-
-- irodori の `i8+dit4` 席（旧 `w4`）は HF 公開済み（`67e9584c`）だが **pin は据え置き** —
-  使うには `revision: "main"` の明示が要る（この波の pin 更新で解消する）。
-- local の `models/karume-anima/` には**配布スキップ裁定（2026-08-24）の `f16+dit4` /
-  `f16+dit4-attn8-s16` 席が組み込まれたまま**なので、karume-anima を上げ直す前に裁定を確認する。
+- quant 席名の一斉改名（ADR [0074](decisions/0074-quant-seat-naming.md)）・`linearCompute` /
+  `attentionCompute` の値 `"i8a8"` → `"a8"`・`karume/4` 繰り上げ + 表示欄 + `requiredLimits` +
+  越境コンポーネント参照（ADR [0075](decisions/0075-quant-presentation.md) /
+  [0038](decisions/0038-manifest-v1.md) 追記。`requiredLimits` の DL 前チェック結線は
+  release 節に残置）・`fromPretrained` の `ref` 必須化 + `*_CURRENT` 公開 + 暗黙 main warn
+  （ADR [0073](decisions/0073-models-source-pin.md) 追記）
+- anima の `scheduler.type` 席 + DPM++ 2M（出荷バイトの視認 A/B で base / turbo 両採用）・
+  base の i4 席 2 つは配布から除外（復活条件つき — later 節）・受理解像度 8 通り縮小（E-2）・
+  estimate の恒等別名再現（レビュー R6V-2）・irodori の構築 AbortSignal
+- HF 再アップロード 4 リポ: anima `ebb27bc4` / anima-turbo `6215f965`（text stack 5 役を
+  anima へ越境参照 — 8.1G → 6.7G）/ jvnv `be752c63` / irodori `49b61517`（`i8+dit4` の pin
+  据え置きを解消）。断片化 26〜32 MiB/term（anima の f16 transformer のみ 9.1 = 不変ファイル
+  の既存水準で受理）。非公開 `karume-sbv2-fn` も焼き直しのみ実施（公開は parked のまま）
+- lockstep 0.5.0（`uv.lock` 追随込み）→ CI 緑 → GitHub Release v0.5.0 → JSR publish
+  （hub / runtime / models = 0.5.0）
+- 事後疎通（runbook §5）: JSR 0.5.0 の消費グラフ解決と `fromPretrained(*_CURRENT)` の
+  実 DL + 合成を 4 ファミリで確認
 
 ## 消化済み（波 K・リリース + 公開 — 2026-08-20〜21）
 
