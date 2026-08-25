@@ -206,10 +206,10 @@ export type GemmCompute = "f32" | "f16";
 export const gemmComputeKeyPart = (compute: GemmCompute): string => compute === "f16" ? ":c16" : "";
 
 /**
- * **bmm 専用**の行窓変種。分解 attention の行ブロック実行（src/runtime/fusion.ts の
- * `rowBlockAttention`）で、`[B,M,K] × [B,K,N]` の M を行ブロック 1 枚ぶんに縮めたまま、
- * **片側だけ**を元の全 M（`rows_full`）のストライドで数えて行オフセット（`row_offset`）から
- * 読み書きするための 1 ビット。
+ * 行窓変種。クエリ行のブロック実行（分解 attention は src/runtime/fusion.ts の
+ * `rowBlockAttention`・融合 attention は src/runtime/recipe-builder.ts の `#buildAttention`）で、
+ * `[B,M,K] × [B,K,N]` の M を行ブロック 1 枚ぶんに縮めたまま、**片側だけ**を元の全 M
+ * （`rows_full`）のストライドで数えて行オフセット（`row_offset`）から読み書きするための 1 ビット。
  *
  * - `"a"` = QK 側。A（q）を全 M の中の `row_offset` 行目から読み、C（scores）は
  *   `m` 行のブロックとして 0 から書く。
@@ -218,14 +218,18 @@ export const gemmComputeKeyPart = (compute: GemmCompute): string => compute === 
  *
  * MUST: 効くのは**バッチ base の算術 1 行だけ**（{@link batchPrologue}）。行内の K 縮約順も
  * 積和の字面も 1 文字も動かないので、行ブロック実行は 1 枚実行と**ビット同一**になる
- * （src/kernels/gemm-geometry.ts の数値契約）。
+ * （src/kernels/gemm-geometry.ts の数値契約）。唯一の例外が ①QK の加算 mask で、mask の行は
+ * 全 M の添字なので `row_offset` を足す（{@link store}）。
  * MUST: オフセットと全 M は **uniform 値**でキーには載せない（キーに載せると同じ WGSL が
  * ブロックの本数だけパイプラインへ複製される）。キーに載るのはこの 1 ビットだけ。
  * MUST: 共有の {@link gemmParams}（3 語 `{m,n,k}`）には足さない — 足すと全 op の uniform
- * レイアウトとスナップショットが総取っ替えになる。追加 2 語は bmm 専用の
- * `bmmRowWindowParams`（src/kernels/bmm.ts）が持つ。
+ * レイアウトとスナップショットが総取っ替えになる。追加 2 語は変種を持つ op の params
+ * （`bmmRowWindowParams` / `attentionQkParams` / `attentionPvParams`）が末尾に足す。
+ * MUST: 融合 attention では**側が op から決まる**（`attention_qk` は必ず `"a"`・
+ * `attention_pv` は必ず `"c"`）ので、生成入力は側ではなく真偽で受ける。取り違えると
+ * S と O のどちらかが全 M ストライドで読み書きされる例外なしの誤値になる。
  */
-export type BmmRowWindow = "a" | "c";
+export type GemmRowWindow = "a" | "c";
 
 /**
  * 生成入力。`weight` は重みスロットを持つ op（linear / conv2d）だけが取る（matmul / bmm /
@@ -249,8 +253,8 @@ type GemmSpec =
     readonly v4: boolean;
     /** 出力の行数 M（幾何のバケット — 省略時は既定幾何）。 */
     readonly rows?: number;
-    /** 行窓変種（{@link BmmRowWindow} — 省略時の生成物は 1 バイトも動かない）。 */
-    readonly rowWindow?: BmmRowWindow;
+    /** 行窓変種（{@link GemmRowWindow} — 省略時の生成物は 1 バイトも動かない）。 */
+    readonly rowWindow?: GemmRowWindow;
   }
   | {
     readonly op: "attention_qk" | "attention_pv";
@@ -269,6 +273,12 @@ type GemmSpec =
      * 1 バイトも動かない MUST — 既存スナップショットとビット同一門がその検出器。
      */
     readonly gqa?: boolean;
+    /**
+     * 行窓変種（{@link GemmRowWindow}）を立てるか。**側は op が決める**（①QK は必ず `"a"`・
+     * ③PV は必ず `"c"`）ので、bmm と違い側ではなく真偽で受ける。省略時の生成物は
+     * 1 バイトも動かない MUST。
+     */
+    readonly rowWindow?: boolean;
   }
   | {
     readonly op: "linear";
@@ -324,6 +334,34 @@ export const gemmParams = (
   params[1] = n;
   params[2] = k;
   return params;
+};
+
+/**
+ * 行窓変種が uniform の**末尾**へ足す 2 語（{@link ROW_WINDOW_DIMS_EXTRA} と対）。
+ * `rowsFull` は行窓側の元の全 M、`offset` はそのうちこのブロックが担当する先頭行。
+ */
+export type GemmRowWindowSpan = {
+  readonly offset: number;
+  readonly rowsFull: number;
+};
+
+/**
+ * 行窓 2 語の門（bmm / 融合 attention の params が共有する唯一の検査）。
+ *
+ * MUST: `offset + m ≤ rowsFull`。超えた形は隣のバッチの行を読み書きするだけで例外を出さない
+ * ので、ここで落とさないと検出器が残らない。
+ */
+export const assertGemmRowWindow = (
+  where: string,
+  m: number,
+  window: GemmRowWindowSpan,
+): void => {
+  assertU32Params(where, { row_offset: window.offset, rows_full: window.rowsFull });
+  if (window.offset + m > window.rowsFull) {
+    throw new CodegenError(
+      `${where}: 行 [${window.offset}, ${window.offset + m}) が全 M ${window.rowsFull} をはみ出す`,
+    );
+  }
 };
 
 /**
@@ -403,7 +441,7 @@ const scaleVar = (slot: number): string =>
 const batchPrologue = (
   op: GemmSpec["op"],
   v4: boolean,
-  rowWindow?: BmmRowWindow,
+  rowWindow?: GemmRowWindow,
   gqa = false,
 ): string => {
   const kUnit = v4 ? "k4" : "dims.k";
@@ -825,6 +863,9 @@ ${rows}`;
  * `S' = fl(acc + mask[m·N + n])` を 1 度足すだけ**で、縮約ループには一切触れない。
  * MUST: mask の添字に**バッチ base を足さない**（契約は `[1,1,M,N]` で B·H 全体へ broadcast
  * する — 足すと 2 バッチ目以降が範囲外／別の行を読む）。
+ * MUST: 行窓（`maskRowOffset`）が立つときだけ mask の**行**に `row_offset` を足す。mask は
+ * S と違い全 M ぶんの実体なので、ブロック相対の行で引くと 2 枚目以降が先頭ブロックの
+ * mask を読む（例外の出ない誤値）。列は S も mask も同じ N なので触らない。
  * MUST: 加算は f32 で行い、`outF16` / `score` の丸めはその**後**に来る（分解経路の
  * `bmm → add` と丸めの位置と回数が一致することがビット同一の根拠）。
  * MUST: `bias` とは同時に立たない（bias を持つのは linear / conv2d だけ）。
@@ -842,8 +883,12 @@ const store = (
   outF16 = false,
   score: ScoreStorage = "f32",
   mask = false,
+  maskRowOffset = false,
 ): string => {
   const base = batchBase(op, "cbase");
+  /** mask の行（行窓のときだけ全 M の添字へ戻す）。 */
+  const maskRow = (row: number): string =>
+    maskRowOffset ? `(orow${row} + dims.row_offset)` : `orow${row}`;
   const quads = gemmQuadsPerThread(geometry);
   const rows = slots(geometry.regM).map((row) =>
     row === 0
@@ -873,7 +918,9 @@ const store = (
         const value = bias ? `${summed} + biasv` : outF16 ? `vec4<f16>(${summed})` : summed;
         // 加算 mask は行 m・列 n の平坦添字（バッチ base 無し）。quad 単位で数えるのは
         // 出力と同じ `n % 4 == 0` が v4 の条件だから（mask の行頭も quad 境界にある）。
-        const maskAdd = mask ? `      let sv = ${acc} + mask[orow${row} * n4 + ocq${quad}];\n` : "";
+        const maskAdd = mask
+          ? `      let sv = ${acc} + mask[${maskRow(row)} * n4 + ocq${quad}];\n`
+          : "";
         return `    if (orow${row} < dims.m) {
 ${maskAdd}      ${scoreStoreQuad(name, score, `${base}orow${row} * n4 + ocq${quad}`, value)}
     }`;
@@ -900,7 +947,7 @@ ${maskAdd}      ${name}[obase + ocol${at(col)}] = ${outF16 ? `f16(${summed})` : 
   const rowStores = slots(geometry.regM).map((row) =>
     `  if (orow${row} < dims.m) {
     let obase = ${base}orow${row} * dims.n;
-${mask ? `    let mbase = orow${row} * dims.n;\n` : ""}${
+${mask ? `    let mbase = ${maskRow(row)} * dims.n;\n` : ""}${
       slots(geometry.regN).map((col) => write(row, col)).join("\n")
     }
   }`
@@ -1025,10 +1072,12 @@ ${storeTile}
 };
 
 /**
- * 行窓変種の uniform 追加欄（4〜5 語目）。MUST: 並びは `bmmRowWindowParams`
- * （src/kernels/bmm.ts）と対。
+ * 行窓変種の uniform 追加欄。MUST: **常に追加欄の末尾**へ置く（bmm では 4〜5 語目・融合
+ * attention では `scale` / `kv_repeat` の**後ろ**）。位置を op ごとに動かすと、既存の
+ * GQA 変種の語位置が行窓の有無で変わる。MUST: 並びは `bmmRowWindowParams`
+ * （src/kernels/bmm.ts）/ `attentionQkParams` / `attentionPvParams`（src/kernels/attention.ts）と対。
  */
-const BMM_ROW_WINDOW_DIMS_EXTRA = `  row_offset: u32,
+export const ROW_WINDOW_DIMS_EXTRA = `  row_offset: u32,
   rows_full: u32,
 `;
 
@@ -1043,14 +1092,15 @@ const GQA_DIMS_EXTRA = `  kv_repeat: u32,
 `;
 
 /**
- * `rowWindow` を立てられるのは bmm だけ（{@link BmmRowWindow}）。uniform の 4〜5 語目に
- * `row_offset` / `rows_full` が増え、生成物の差は {@link batchPrologue} の base 2 行に閉じる。
+ * dense 側で `rowWindow` を立てられるのは bmm だけ（{@link GemmRowWindow} — matmul にバッチ軸が
+ * 無い）。uniform の 4〜5 語目に `row_offset` / `rows_full` が増え、生成物の差は
+ * {@link batchPrologue} の base 2 行に閉じる。
  */
 const denseWgsl = (
   geometry: GemmGeometry,
   op: "matmul" | "bmm",
   v4: boolean,
-  rowWindow?: BmmRowWindow,
+  rowWindow?: GemmRowWindow,
 ): string => {
   const element = v4 ? "vec4<f32>" : "f32";
   const signature = op === "bmm" ? "a[b,m,k] · b[b,k,n]" : "a[m,k] · b[k,n]";
@@ -1070,7 +1120,7 @@ ${prologueBDense(geometry, v4)}`,
     `${fillA(geometry, "a", v4)}
 ${fillBDense(geometry, "b", op, v4)}`,
     store(geometry, "c", op, v4, false),
-    rowWindow === undefined ? "" : BMM_ROW_WINDOW_DIMS_EXTRA,
+    rowWindow === undefined ? "" : ROW_WINDOW_DIMS_EXTRA,
   );
 };
 
@@ -1087,6 +1137,9 @@ ${fillBDense(geometry, "b", op, v4)}`,
  *
  * `gqa` 変種は **k の base 1 行と uniform 1 語**だけが違う（ADR 0067 決定 2）。共有タイル充填も
  * 縮約ループも 1 文字も動かないので、同じ k を実体化（repeat_kv）した非 GQA 形とビット同一。
+ *
+ * `rowWindow` 変種（{@link GemmRowWindow} の `"a"`）は **q の base 1 行と mask の行添字**だけが
+ * 違う。S はブロックとして 0 行目から書くので、②③ から見た形は 1 枚実行と同じ。
  */
 const attentionQkWgsl = (
   geometry: GemmGeometry,
@@ -1095,6 +1148,7 @@ const attentionQkWgsl = (
   score: ScoreStorage = "f32",
   mask = false,
   gqa = false,
+  rowWindow = false,
 ): string => {
   const f16 = compute === "f16";
   assertScoreStorageSupported("attention_qk", score, v4, f16);
@@ -1105,7 +1159,7 @@ const attentionQkWgsl = (
       mask ? " + mask[m,n]" : ""
     }, f32${f16 ? ", f16 タイル計算・S も f16" : ""}${scoreNote(score)}${
       gqa ? ", GQA（k は kv-head へ整数除算で写す）" : ""
-    }, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
+    }${rowWindow ? ", 行窓 a" : ""}, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> q: array<${element}>;
 @group(0) @binding(2) var<storage, read> k: array<${element}>;
 @group(0) @binding(3) var<storage, read_write> s: array<${
@@ -1118,14 +1172,14 @@ const attentionQkWgsl = (
         : ""
     }`,
     scoreStoreWgsl("s", score),
-    `${quadDims(v4)}${batchPrologue("attention_qk", v4, undefined, gqa)}${
+    `${quadDims(v4)}${batchPrologue("attention_qk", v4, rowWindow ? "a" : undefined, gqa)}${
       prologueA(geometry, "attention_qk", v4)
     }
 ${prologueBAttentionQk(geometry)}`,
     `${fillA(geometry, "q", v4, (expr) => `${expr} * dims.scale`, compute)}
 ${fillBAttentionQk(geometry, v4, compute)}`,
-    store(geometry, "s", "attention_qk", v4, false, f16, score, mask),
-    `  scale: f32,\n${gqa ? GQA_DIMS_EXTRA : ""}`,
+    store(geometry, "s", "attention_qk", v4, false, f16, score, mask, rowWindow),
+    `  scale: f32,\n${gqa ? GQA_DIMS_EXTRA : ""}${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}`,
     gemmAccumulatorInit(geometry),
     compute,
   );
@@ -1142,6 +1196,9 @@ ${fillBAttentionQk(geometry, v4, compute)}`,
  * `gqa` 変種は **v の base 1 行と uniform 1 語**だけが違う（ADR 0067 決定 2）。①QK 側だけを
  * 写して ③PV を写し忘れると、P は正しいのに V だけ別 head を読む沈黙誤値になる
  * （検出器は tests/gpu_attention_gqa_test.ts の故障注入 ②）。
+ *
+ * `rowWindow` 変種（{@link GemmRowWindow} の `"c"`）は **O の base 1 行**だけが違う。S も
+ * 行統計もブロック相対（`dims.m` = ブロック行数）のままなので、`rbase` は触らない。
  */
 const attentionPvWgsl = (
   geometry: GemmGeometry,
@@ -1149,6 +1206,7 @@ const attentionPvWgsl = (
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
   gqa = false,
+  rowWindow = false,
 ): string => {
   const f16 = compute === "f16";
   assertScoreStorageSupported("attention_pv", score, v4, f16);
@@ -1160,9 +1218,9 @@ const attentionPvWgsl = (
     geometry,
     `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv は非実体化, f32${
       f16 ? ", f16 タイル計算・S は f16" : ""
-    }${scoreNote(score)}${gqa ? ", GQA（v は kv-head へ整数除算で写す）" : ""}, ${
-      gemmGeometryNote(geometry)
-    }${v4 ? " + vec4" : ""})`,
+    }${scoreNote(score)}${gqa ? ", GQA（v は kv-head へ整数除算で写す）" : ""}${
+      rowWindow ? ", 行窓 c" : ""
+    }, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> s: array<${
       scoreArrayType(score, v4 ? tileQuadType(compute) : tileScalarType(compute))
     }>;
@@ -1170,7 +1228,7 @@ const attentionPvWgsl = (
 @group(0) @binding(3) var<storage, read> stats: array<f32>;
 @group(0) @binding(4) var<storage, read_write> o: array<${v4 ? "vec4<f32>" : "f32"}>;`,
     scoreQuadLoaderWgsl("s", score),
-    `${quadDims(v4)}${batchPrologue("attention_pv", v4, undefined, gqa)}${
+    `${quadDims(v4)}${batchPrologue("attention_pv", v4, rowWindow ? "c" : undefined, gqa)}${
       prologueA(geometry, "attention_pv", v4)
     }
 ${prologueAttentionStats(geometry)}
@@ -1178,7 +1236,7 @@ ${prologueBDense(geometry, v4)}`,
     `${fillA(geometry, "s", v4, probability, compute, score)}
 ${fillBDense(geometry, "v", "attention_pv", v4, compute)}`,
     store(geometry, "o", "attention_pv", v4, false),
-    gqa ? GQA_DIMS_EXTRA : "",
+    `${gqa ? GQA_DIMS_EXTRA : ""}${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}`,
     gemmAccumulatorInit(geometry),
     compute,
   );
@@ -1744,9 +1802,17 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       }
       return conv2dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "attention_qk":
-      return attentionQkWgsl(geometry, spec.v4, spec.compute, spec.score, spec.mask, spec.gqa);
+      return attentionQkWgsl(
+        geometry,
+        spec.v4,
+        spec.compute,
+        spec.score,
+        spec.mask,
+        spec.gqa,
+        spec.rowWindow,
+      );
     case "attention_pv":
-      return attentionPvWgsl(geometry, spec.v4, spec.compute, spec.score, spec.gqa);
+      return attentionPvWgsl(geometry, spec.v4, spec.compute, spec.score, spec.gqa, spec.rowWindow);
     case "bmm":
       return denseWgsl(geometry, spec.op, spec.v4, spec.rowWindow);
     default:

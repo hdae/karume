@@ -147,7 +147,12 @@ import {
   attentionStatsRegCache,
   attentionStatsWgsl,
 } from "../kernels/attention.ts";
-import { defaultI8a8Geometry, i8a8TileM, i8a8TileN } from "../kernels/i8a8-geometry.ts";
+import {
+  defaultI8a8Geometry,
+  type I8a8Geometry,
+  i8a8TileM,
+  i8a8TileN,
+} from "../kernels/i8a8-geometry.ts";
 import {
   ATTENTION_PV_V_SCALE_BINDING,
   ATTENTION_QK_K_SCALE_BINDING,
@@ -304,6 +309,48 @@ type StateBuildContext = {
   readonly chunkRows: Set<number>;
   readonly fullCapacities: Map<string, number>;
 };
+
+/** 融合 attention の解決済み形（B·H を畳んだバッチ軸 / クエリ行 M / キー列 N / head 幅 D）。 */
+type AttentionShape = {
+  readonly batch: number;
+  readonly rows: number;
+  readonly cols: number;
+  readonly depth: number;
+};
+
+/** 段（①QK / ③PV）の解決済みパイプライン。 */
+type AttentionStagePipeline = {
+  readonly key: string;
+  readonly pipeline: GPUComputePipeline;
+  readonly layout: GPUBindGroupLayout;
+};
+
+/**
+ * ①QK の実行段。**行ブロックのループより外で 1 度だけ**解決する（i8a8 の量子化は列側が
+ * ブロックに依らず、行側も総量が変わらないので、ループへ入れると仕事が枚数倍になるだけ）。
+ * 一時（`qq` / `qs` / `kq` / `ks`）はループを跨いで生きるので、解放はノード末尾。
+ */
+type AttentionQkStage =
+  | (AttentionStagePipeline & { readonly kind: "dense" })
+  | (AttentionStagePipeline & {
+    readonly kind: "i8a8";
+    readonly geometry: I8a8Geometry;
+    readonly qq: TempSource;
+    readonly qs: TempSource;
+    readonly kq: TempSource;
+    readonly ks: TempSource;
+  });
+
+/** ③PV の実行段（①QK と同じ規律 — `vt` / `vq` / `vs` はループを跨いで生きる）。 */
+type AttentionPvStage =
+  | (AttentionStagePipeline & { readonly kind: "dense" })
+  | (AttentionStagePipeline & {
+    readonly kind: "i8a8";
+    readonly geometry: I8a8Geometry;
+    readonly vt: TempSource;
+    readonly vq: TempSource;
+    readonly vs: TempSource;
+  });
 
 /**
  * 導出相の本体。Session は 1 個だけ持ち、run / enqueue のミス経路から
@@ -1595,11 +1642,26 @@ export class RecipeBuilder {
   }
 
   /**
-   * 融合 attention（ADR 0023）。**1 ノード = 3 dispatch**（`cat` と同じ「複数 dispatch で
-   * 1 ノード」の扱い。full-write は**ノードの出力 O について**成立する）:
+   * 融合 attention（ADR 0023）。**1 ノード = 行ブロック 1 枚あたり 3 dispatch**（`cat` と同じ
+   * 「複数 dispatch で 1 ノード」の扱い。full-write は**ノードの出力 O について**成立する）:
    *
    * ① QK gemm（S を実体化・scale はタイル充填時に q/k 両方へ）→ ② 行統計（m と 1/Σexp）→
    * ③ PV gemm（A タイル充填時に `exp(S−m)·inv` を評価 = P 非実体化）。
+   *
+   * ## クエリ行のブロック実行（S の実体化幅の上限対策）
+   *
+   * S は `B·H · M · N · 格納幅` バイトで、**シンボリック次元 S に対して 2 乗**で伸びる
+   * （1824×1248 の DiT で S = 8892 → s16 でも 2.53GB = D3D12 の 2GiB 固定上限超え）。そこで
+   * クエリ行を {@link planRowBlocks}（ADR 0060 / states 形 attention と同じ純関数）で
+   * 「1 枚が `maxStorageBufferBindingSize` に収まる最小枚数」へ等分し、①②③ をブロックごとに
+   * 撃つ。実行時オートチューンは持たない（ADR 0022）— 枚数は device の granted limit と
+   * 解決済み shape だけから決まる。
+   *
+   * ビット同一の根拠は分解経路の行ブロック（fusion.ts の `rowBlockAttention`）と同じ:
+   * ①③ は**行の担当割り**だけを変え（{@link "../kernels/gemm.ts"} `GemmRowWindow`）、②と
+   * ③の `exp(S−m)·inv` は**行内で閉じる**ので 1 行あたりの演算列も丸めの並びも動かない。
+   * MUST: **n = 1 では行窓を立てない** — キー・uniform・生成 WGSL・dispatch 列が分割前と
+   * 完全に同一になる（既存のスナップショットとビット同一門がその検出器）。
    *
    * 省略可能な第 4 入力 `mask[1,1,M,N]`（加算型）は **① の束縛が 1 本増えるだけ**で、
    * dispatch 数も ②③ の経路も変わらない（S が mask 済みで出てくる）。
@@ -1608,7 +1670,8 @@ export class RecipeBuilder {
    * 確保も変わらない（K / V の base だけが `wid.z / r` で kv-head へ写る）。i8a8 との組は
    * 未対応で fail loudly（決定 3）。
    *
-   * i8a8 変種（opt-in）では ① が 3 dispatch・③ が 3 dispatch に増える（最大 7）。**適格判定は
+   * i8a8 変種（opt-in）では **量子化の 4 dispatch がブロックループの外**へ出て、ループ内は
+   * 3 dispatch のまま（① と ③ の GEMM が i8a8 カーネルに替わる）。**適格判定は
    * 段ごとに独立**（① は `D % 4 == 0`・③ は `N % 4 == 0`）なので、片方だけ i8a8 の**混成**が
    * 起こりうる — 満たさない段だけが f32 経路へ**沈黙で**縮退する（linear の `k % 4` と同じ
    * 流儀で、落ちたことは診断のパイプラインキーにだけ出る）。
@@ -1616,9 +1679,10 @@ export class RecipeBuilder {
    * MUST: ① と ③ は 1 workgroup = 1 タイルなので、3 軸とも上限超過は fail loudly
    * （{@link tiledWorkgroups}）。縮退させるとタイルが欠落し、例外なしに O の一部が
    * 未書き込み（プール再利用なら前の値）で残る。② だけが行方向 grid-stride。
-   * MUST: 一時バッファ（S / 行統計）は宣言 → ノード末尾で解放する。これで実行相の参照計数が
-   * 閉じ（`assertDrained`）、失敗経路でも `arena.destroy()` が拾う（確保と破棄を 1 箇所へ —
-   * ADR 0004）。
+   * MUST: 一時バッファ（S / 行統計）は**ブロックごとに**確保して返す（全ブロックぶんまとめて
+   * 取ると、上限を越えない形にした意味が消える）。量子化の一時だけがループを跨ぎ、ノード末尾で
+   * 確保の逆順に返る。これで実行相の参照計数が閉じ（`assertDrained`）、失敗経路でも
+   * `arena.destroy()` が拾う（確保と破棄を 1 箇所へ — ADR 0004）。
    */
   async #buildAttention(
     step: NodePlan,
@@ -1694,124 +1758,228 @@ export class RecipeBuilder {
       );
     }
 
-    // S[batch, M, N] と行統計 [batch·M, 2]。O は実行相が確保済みなので、峰は
-    // O + S + 統計（分解経路の S + P + 恒等 expand の 3 枚から 1 枚ぶん減る）。
-    // f16 変種（`:c16` の array<f16> / s16 の pack2x16float）では S が半分のバイト数になる
-    // （1024px の DiT で 1,073.7MB → 536.9MB）。
-    const scores = builder.allocTemp(
-      batch * rows * cols * (compute === "f16" ? 2 : scoreStorageBytes(scoreStorage)),
+    // クエリ行のブロック分割（ADR 0060 と同じ純関数 — states 形 attention と同じ流儀）。
+    // S 1 枚 = `B·H · block · N · 格納幅` バイトがストレージ束縛の上限に収まる最小枚数の等分で、
+    // 実行時オートチューンは持たない（ADR 0022）。1 行でも収まらない形は fail loudly。
+    // MUST: **n = 1 の機は分割前と完全に同一**（行窓を立てないのでキーも uniform も WGSL も
+    // dispatch 列も 1 バイト動かない）。既存のスナップショットとビット同一門がその検出器。
+    const scoreBytes = compute === "f16" ? 2 : scoreStorageBytes(scoreStorage);
+    const blocks = planRowBlocks(
+      rows,
+      batch * cols * scoreBytes,
+      this.#state.gpu.limits.maxStorageBufferBindingSize,
+      this.#state.rowBlockSplit,
     );
-    const stats = builder.allocTemp(batch * rows * ATTENTION_STATS_STRIDE * 4);
+    const windowed = blocks.length > 1;
 
-    // ① QK gemm — 縮約次元は D、出力の列は N。
-    if (qkI8a8) {
-      await this.#buildAttentionQkI8a8(
+    // 幾何はブロック行数に依らず既定（`defaultGemmGeometry` / `defaultI8a8Geometry`）なので、
+    // ①③ のパイプラインは全ブロックで共有する（ブロック間の差は uniform の
+    // `row_offset` / `m` だけ）。
+    const geometry = defaultGemmGeometry();
+    const hasMask = mask !== undefined;
+    const qkV4 = gemmUsesVec4(depth, cols);
+    const qkKey = attentionQkKey(qkV4, compute, scoreStorage, hasMask, gqa, windowed);
+    // i8a8 の量子化（①の k / ③の Vᵀ = **列側**）はブロックに依存しないので**ループ外で 1 回**。
+    // MUST: ループ内へ入れない（値は同じまま仕事が枚数倍になる純粋な性能退行）。
+    // q 側（qq / qs）も行に比例する仕事で総量は変わらないため同じくループ外に置き、①QK が
+    // 行窓で全 M ストライドから読む（ブロックごとに量子化すると `quantize_rows` に全 M
+    // ストライドの行 gather が要り、linear と共有している 1 本を触ることになる）。
+    // NOTE: 量子化の一時がループを跨いで生きるので、n = 1 でも同時生存が増える。増分は
+    // `O(B·H·(M+N)·D)` で S の `O(B·H·M·N)` より 1 次低い（実測 = anima DiT の自己注意
+    // S=8892 で 122.8MiB 対 S 1 枚 2,413.0MiB = +5.1%）。**上限に効くのはバッファ 1 本ごとの
+    // サイズ**なので、束縛上限に対する峰は S のブロック 1 枚のまま動かない。
+    const qk: AttentionQkStage = qkI8a8
+      ? await this.#prepareAttentionQkI8a8(
         builder,
         binds,
-        scores,
         scoreStorage,
         { batch, rows, cols, depth },
-        scale,
         where,
-      );
-    } else {
-      const qkV4 = gemmUsesVec4(depth, cols);
-      const hasMask = mask !== undefined;
-      const qkKey = attentionQkKey(qkV4, compute, scoreStorage, hasMask, gqa);
-      const { pipeline: qkPipeline, layout: qkLayout } = await this.#state.cache.get(
-        qkKey,
-        attentionQkWgsl(qkV4, compute, scoreStorage, hasMask, gqa),
-      );
-      const geometry = defaultGemmGeometry();
-      builder.dispatch({
+        windowed,
+      )
+      : {
+        kind: "dense",
         key: qkKey,
-        pipeline: qkPipeline,
-        layout: qkLayout,
-        params: this.#writeParams(
-          attentionQkParams(rows, cols, depth, scale, gqa ? kvRepeat : undefined),
-          PARAMS_UNIFORM_USAGE,
+        ...await this.#state.cache.get(
+          qkKey,
+          attentionQkWgsl(qkV4, compute, scoreStorage, hasMask, gqa, windowed),
         ),
-        bindings: [
-          { binding: 1, source: binds[0] },
-          { binding: 2, source: binds[1] },
-          { binding: 3, source: scores },
-          ...(mask === undefined ? [] : [{ binding: ATTENTION_QK_MASK_BINDING, source: mask }]),
-        ],
-        workgroups: [
-          tiledWorkgroups(cols, gemmTileN(geometry), limit, `${where} ①QK`),
-          tiledWorkgroups(rows, gemmTileM(geometry), limit, `${where} ①QK`),
-          tiledWorkgroups(batch, 1, limit, `${where} ①QK`),
-        ],
-      });
-    }
-
+      };
+    const pvV4 = gemmUsesVec4(cols, depth);
+    const pvKey = attentionPvKey(pvV4, compute, scoreStorage, gqa, windowed);
+    const pv: AttentionPvStage = pvI8a8
+      ? await this.#prepareAttentionPvI8a8(
+        builder,
+        binds,
+        scoreStorage,
+        { batch, rows, cols, depth },
+        where,
+        windowed,
+      )
+      : {
+        kind: "dense",
+        key: pvKey,
+        ...await this.#state.cache.get(
+          pvKey,
+          attentionPvWgsl(pvV4, compute, scoreStorage, gqa, windowed),
+        ),
+      };
     // ② 行統計 — 1 行 = 1 workgroup で、行方向は grid-stride（softmax と同じ形）。
     // S を 1 回だけ読む regcache 変種は dim 依存の生成なので、`epc` がキー軸に増える
-    // （値はどちらもビット同一 — src/kernels/attention.ts）。
+    // （値はどちらもビット同一 — src/kernels/attention.ts）。ブロック化しても**行内で閉じる**
+    // ので、S も行統計もブロック相対のまま素のカーネルがそのまま撃てる（行オフセットは要らない）。
     const statsRegCache = attentionStatsRegCache(cols);
     const statsKey = attentionStatsKey(compute, scoreStorage, statsRegCache);
-    const { pipeline: statsPipeline, layout: statsLayout } = await this.#state.cache.get(
+    const stats = await this.#state.cache.get(
       statsKey,
       attentionStatsWgsl(compute, scoreStorage, statsRegCache),
     );
-    builder.dispatch({
-      key: statsKey,
-      pipeline: statsPipeline,
-      layout: statsLayout,
-      params: this.#writeParams(
-        attentionStatsParams(batch * rows, cols, statsRegCache),
-        PARAMS_UNIFORM_USAGE,
-      ),
-      bindings: [{ binding: 1, source: scores }, { binding: 2, source: stats }],
-      workgroups: [gridStrideWorkgroups(batch * rows, 1, limit), 1, 1],
-    });
 
-    // ③ PV gemm — 縮約次元は N、出力の列は D。
-    if (pvI8a8) {
-      await this.#buildAttentionPvI8a8(
-        builder,
-        binds,
-        scores,
-        scoreStorage,
-        stats,
-        outs,
-        { batch, rows, cols, depth },
-        where,
-      );
-    } else {
-      const pvV4 = gemmUsesVec4(cols, depth);
-      const pvKey = attentionPvKey(pvV4, compute, scoreStorage, gqa);
-      const { pipeline: pvPipeline, layout: pvLayout } = await this.#state.cache.get(
-        pvKey,
-        attentionPvWgsl(pvV4, compute, scoreStorage, gqa),
-      );
-      const geometry = defaultGemmGeometry();
+    for (const block of blocks) {
+      // S[batch, block, N] と行統計 [batch·block, 2]。O は実行相が確保済みなので、峰は
+      // O + S + 統計（分解経路の S + P + 恒等 expand の 3 枚から 1 枚ぶん減る）。
+      // f16 変種（`:c16` の array<f16> / s16 の pack2x16float）では S が半分のバイト数になる
+      // （1024px の DiT で 1,073.7MB → 536.9MB）。
+      // MUST: 一時は**ブロックごとに**確保して返す（全ブロックぶんまとめて取ると、上限を
+      // 越えない形にした意味が消える — states 形 attention と同じ規律）。
+      const scores = builder.allocTemp(batch * block.rows * cols * scoreBytes);
+      const rowStats = builder.allocTemp(batch * block.rows * ATTENTION_STATS_STRIDE * 4);
+      // 行窓 2 語（n = 1 では渡さない = uniform のバイト列も従来どおり）。
+      const window = windowed ? { offset: block.offset, rowsFull: rows } : undefined;
+
+      // ① QK gemm — 縮約次元は D、出力の列は N。行窓 `"a"` は q を全 M ストライドの
+      // `row_offset` 行目から読むだけで、S はブロックとして 0 行目から書く。
+      if (qk.kind === "i8a8") {
+        builder.dispatch({
+          key: qk.key,
+          pipeline: qk.pipeline,
+          layout: qk.layout,
+          params: this.#writeParams(
+            attentionQkI8a8Params(block.rows, cols, depth, scale, window),
+            PARAMS_UNIFORM_USAGE,
+          ),
+          bindings: [
+            { binding: 1, source: qk.qq },
+            { binding: 2, source: qk.kq },
+            { binding: 3, source: scores },
+            { binding: ATTENTION_QK_Q_SCALE_BINDING, source: qk.qs },
+            { binding: ATTENTION_QK_K_SCALE_BINDING, source: qk.ks },
+          ],
+          workgroups: [
+            tiledWorkgroups(cols, i8a8TileN(qk.geometry), limit, `${where} ①QK i8a8`),
+            tiledWorkgroups(block.rows, i8a8TileM(qk.geometry), limit, `${where} ①QK i8a8`),
+            tiledWorkgroups(batch, 1, limit, `${where} ①QK i8a8`),
+          ],
+        });
+      } else {
+        builder.dispatch({
+          key: qk.key,
+          pipeline: qk.pipeline,
+          layout: qk.layout,
+          params: this.#writeParams(
+            attentionQkParams(
+              block.rows,
+              cols,
+              depth,
+              scale,
+              gqa ? kvRepeat : undefined,
+              window,
+            ),
+            PARAMS_UNIFORM_USAGE,
+          ),
+          bindings: [
+            { binding: 1, source: binds[0] },
+            { binding: 2, source: binds[1] },
+            { binding: 3, source: scores },
+            ...(mask === undefined ? [] : [{ binding: ATTENTION_QK_MASK_BINDING, source: mask }]),
+          ],
+          workgroups: [
+            tiledWorkgroups(cols, gemmTileN(geometry), limit, `${where} ①QK`),
+            tiledWorkgroups(block.rows, gemmTileM(geometry), limit, `${where} ①QK`),
+            tiledWorkgroups(batch, 1, limit, `${where} ①QK`),
+          ],
+        });
+      }
+
+      // ② 行統計（ブロック相対 — 行内で閉じるので行を切っても 1 行の演算列は変わらない）。
       builder.dispatch({
-        key: pvKey,
-        pipeline: pvPipeline,
-        layout: pvLayout,
+        key: statsKey,
+        pipeline: stats.pipeline,
+        layout: stats.layout,
         params: this.#writeParams(
-          attentionPvParams(rows, depth, cols, gqa ? kvRepeat : undefined),
+          attentionStatsParams(batch * block.rows, cols, statsRegCache),
           PARAMS_UNIFORM_USAGE,
         ),
-        bindings: [
-          { binding: 1, source: scores },
-          { binding: 2, source: binds[2] },
-          { binding: 3, source: stats },
-          { binding: 4, source: outs[0] },
-        ],
-        workgroups: [
-          tiledWorkgroups(depth, gemmTileN(geometry), limit, `${where} ③PV`),
-          tiledWorkgroups(rows, gemmTileM(geometry), limit, `${where} ③PV`),
-          tiledWorkgroups(batch, 1, limit, `${where} ③PV`),
-        ],
+        bindings: [{ binding: 1, source: scores }, { binding: 2, source: rowStats }],
+        workgroups: [gridStrideWorkgroups(batch * block.rows, 1, limit), 1, 1],
       });
+
+      // ③ PV gemm — 縮約次元は N、出力の列は D。行窓 `"c"` は O を全 M ストライドの
+      // `row_offset` 行目へ書くだけで、S も行統計もブロック相対のまま読む。
+      if (pv.kind === "i8a8") {
+        builder.dispatch({
+          key: pv.key,
+          pipeline: pv.pipeline,
+          layout: pv.layout,
+          params: this.#writeParams(
+            attentionPvI8a8Params(block.rows, depth, cols, window),
+            PARAMS_UNIFORM_USAGE,
+          ),
+          bindings: [
+            { binding: 1, source: scores },
+            { binding: 2, source: pv.vq },
+            { binding: 3, source: rowStats },
+            { binding: 4, source: outs[0] },
+            { binding: ATTENTION_PV_V_SCALE_BINDING, source: pv.vs },
+          ],
+          workgroups: [
+            tiledWorkgroups(depth, i8a8TileN(pv.geometry), limit, `${where} ③PV i8a8`),
+            tiledWorkgroups(block.rows, i8a8TileM(pv.geometry), limit, `${where} ③PV i8a8`),
+            tiledWorkgroups(batch, 1, limit, `${where} ③PV i8a8`),
+          ],
+        });
+      } else {
+        builder.dispatch({
+          key: pv.key,
+          pipeline: pv.pipeline,
+          layout: pv.layout,
+          params: this.#writeParams(
+            attentionPvParams(block.rows, depth, cols, gqa ? kvRepeat : undefined, window),
+            PARAMS_UNIFORM_USAGE,
+          ),
+          bindings: [
+            { binding: 1, source: scores },
+            { binding: 2, source: binds[2] },
+            { binding: 3, source: rowStats },
+            { binding: 4, source: outs[0] },
+          ],
+          workgroups: [
+            tiledWorkgroups(depth, gemmTileN(geometry), limit, `${where} ③PV`),
+            tiledWorkgroups(block.rows, gemmTileM(geometry), limit, `${where} ③PV`),
+            tiledWorkgroups(batch, 1, limit, `${where} ③PV`),
+          ],
+        });
+      }
+
+      // MUST: ノード境界で一時バッファを返す（アリーナの不変条件 — 抜けると assertDrained で
+      // 落ちるか、プール再利用から外れて peak が過大に出る）。確保の逆順（LIFO）。
+      builder.releaseTemp(rowStats);
+      builder.releaseTemp(scores);
     }
 
-    // MUST: ノード境界で一時バッファを返す（アリーナの不変条件 — 抜けると assertDrained で
-    // 落ちるか、プール再利用から外れて peak が過大に出る）。
-    builder.releaseTemp(stats);
-    builder.releaseTemp(scores);
+    // MUST: 量子化の一時も確保の逆順で返す（`#prepare*` が取ったぶんをここで閉じる — 確保と
+    // 破棄はノードの中で対になっている。ADR 0004）。
+    if (pv.kind === "i8a8") {
+      builder.releaseTemp(pv.vs);
+      builder.releaseTemp(pv.vq);
+      builder.releaseTemp(pv.vt);
+    }
+    if (qk.kind === "i8a8") {
+      builder.releaseTemp(qk.ks);
+      builder.releaseTemp(qk.kq);
+      builder.releaseTemp(qk.qs);
+      builder.releaseTemp(qk.qq);
+    }
   }
 
   /**
@@ -2049,34 +2217,34 @@ export class RecipeBuilder {
   }
 
   /**
-   * 融合 attention ①QK の **i8a8 変種**（opt-in — {@link SessionOptions.attentionCompute}）。
-   * ① が 1 dispatch から **3 dispatch** に増える（ノード全体では 3 → 5）:
+   * 融合 attention ①QK の **i8a8 変種**（opt-in — {@link SessionOptions.attentionCompute}）の
+   * **前段**。① が 1 dispatch から **3 dispatch** に増える（行ブロック n 枚ならノード全体で
+   * 2 + 3n）:
    *
    * (a) `quantize_rows`（q を per-token i8 へ）→ (b) `quantize_rows`（k を per-token i8 へ）→
-   * (c) i8a8 GEMM（整数内積 + dequant）。
+   * (c) i8a8 GEMM（整数内積 + dequant — **ブロックごと**に撃つので呼び手が持つ）。
    *
    * 量子化カーネルは linear の w8a8 と**同じ 1 本**（`QUANTIZE_ROWS_KEY` を共有する — 縮約軸
    * D が q / k とも最内連続なので、行 = token の per-token 量子化がそのまま要求どおりの形に
    * なる）。診断では linear の活性量子化と合算されるので、内訳は E2E のキー本数検査で担保する。
    *
-   * MUST: 一時バッファ（`qq` / `qs` / `kq` / `ks`）は宣言 → 末尾で解放する。
+   * MUST: (a)(b) とも**行ブロックのループ外**（= 全 M / 全 N を 1 度）。k 側はブロックに
+   * 依存しないので枚数倍は純損、q 側は総量こそ変わらないが、ブロックごとに撃つには
+   * `quantize_rows` が全 M ストライドの行 gather を要求する（linear と共有の 1 本を触る）。
+   * 代わりに (c) が **A 側の行窓**で `qq` / `qs` を全 M ストライドから読む。
+   * MUST: 一時バッファ（`qq` / `qs` / `kq` / `ks`）はここで宣言し、**ノード末尾**（呼び手）で
+   * 確保の逆順に解放する。
    * MUST: `D` のオーバフロー門は fail loudly（黙って通すと i32 の巻き戻りで符号ごと化ける。
    * 実測形の D ≤ 384 に対して門は桁で余裕があるが、置かないと退行の受け皿が消える）。
    */
-  async #buildAttentionQkI8a8(
+  async #prepareAttentionQkI8a8(
     builder: StepRecipeBuilder,
     binds: readonly BindingSource[],
-    scores: TempSource,
     scoreStorage: ScoreStorage,
-    shape: {
-      readonly batch: number;
-      readonly rows: number;
-      readonly cols: number;
-      readonly depth: number;
-    },
-    scale: number,
+    shape: AttentionShape,
     where: string,
-  ): Promise<void> {
+    rowWindow: boolean,
+  ): Promise<AttentionQkStage> {
     const { batch, rows, cols, depth } = shape;
     if (depth > LINEAR_I8A8_MAX_K) {
       throw new ExecutionError(
@@ -2121,50 +2289,27 @@ export class RecipeBuilder {
     quantize(binds[1], kq, ks, batch * cols);
 
     // (c) 整数内積の GEMM（半スケールは dequant 側で q / k の両方へ — 設計 §2.1）。
-    // 幾何は ③PV と**別に**選ぶ（③ だけ N = D の 1 タイル化が勝つ — 実測）。
+    // 幾何は ③PV と**別に**選ぶ（③ だけ N = D の 1 タイル化が勝つ — 実測）。dispatch は
+    // ブロックごとなので、ここでは解決だけして呼び手へ返す。
     const v4 = attentionQkI8a8UsesVec4(cols);
     const dp4a = this.#state.i8a8Dot === "dp4a";
     const geometry = defaultI8a8Geometry("attention_qk");
-    const key = attentionQkI8a8Key(v4, dp4a, scoreStorage, geometry);
+    const key = attentionQkI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
     const { pipeline, layout } = await this.#state.cache.get(
       key,
-      attentionQkI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
+      attentionQkI8a8Wgsl(v4, dp4a, scoreStorage, geometry, rowWindow),
     );
-    builder.dispatch({
-      key,
-      pipeline,
-      layout,
-      params: this.#writeParams(
-        attentionQkI8a8Params(rows, cols, depth, scale),
-        PARAMS_UNIFORM_USAGE,
-      ),
-      bindings: [
-        { binding: 1, source: qq },
-        { binding: 2, source: kq },
-        { binding: 3, source: scores },
-        { binding: ATTENTION_QK_Q_SCALE_BINDING, source: qs },
-        { binding: ATTENTION_QK_K_SCALE_BINDING, source: ks },
-      ],
-      workgroups: [
-        tiledWorkgroups(cols, i8a8TileN(geometry), limit, `${where} ①QK i8a8`),
-        tiledWorkgroups(rows, i8a8TileM(geometry), limit, `${where} ①QK i8a8`),
-        tiledWorkgroups(batch, 1, limit, `${where} ①QK i8a8`),
-      ],
-    });
-
-    // MUST: ノード境界で一時バッファを返す（確保と破棄を 1 箇所へ — ADR 0004）。
-    builder.releaseTemp(ks);
-    builder.releaseTemp(kq);
-    builder.releaseTemp(qs);
-    builder.releaseTemp(qq);
+    return { kind: "i8a8", key, pipeline, layout, geometry, qq, qs, kq, ks };
   }
 
   /**
-   * 融合 attention ③PV の **i8a8 変種**（opt-in — {@link SessionOptions.attentionCompute}）。
-   * ③ が 1 dispatch から **3 dispatch** に増える（①も i8a8 ならノード全体で 3 → 7）:
+   * 融合 attention ③PV の **i8a8 変種**（opt-in — {@link SessionOptions.attentionCompute}）の
+   * **前段**。③ が 1 dispatch から **3 dispatch** に増える（①も i8a8・行ブロック n 枚なら
+   * ノード全体で 4 + 3n）:
    *
    * (a) `strided`（v`[B·H,N,D]` → Vᵀ`[B·H,D,N]` の permute）→ (b) `quantize_rows`
-   * （Vᵀ を行 = `(b,h,d)` で量子化）→ (c) i8a8 GEMM（整数内積 + dequant）。
+   * （Vᵀ を行 = `(b,h,d)` で量子化）→ (c) i8a8 GEMM（整数内積 + dequant — **ブロックごと**に
+   * 撃つので呼び手が持つ）。
    *
    * **新カーネルを 1 本も作らずに per-column 量子化が得られる**のがこの並びの要点（設計 §2.3）:
    * Vᵀ の「行」は `(b,h,d)` なので `quantize_rows` の per-token 量子化がそのまま
@@ -2175,26 +2320,23 @@ export class RecipeBuilder {
    * P̃ 側は量子化カーネルを通らない（A タイル充填が `round(127·exp(S−m))` を作る）ので、
    * dispatch も一時バッファも増えない — ②行統計は f32 のまま 1 バイトも変えない。
    *
-   * MUST: 一時バッファ（`vt` / `vq` / `vs`）は宣言 → 末尾で解放する。
+   * MUST: (a)(b) は**行ブロックのループ外**（Vᵀ は列側 = ブロックに依存しないので、ループへ
+   * 入れると permute と量子化が枚数倍になる純粋な性能退行）。ブロック相対なのは S と行統計
+   * だけで、(c) は **C 側の行窓**で O の行だけを全 M ストライドへ書く。
+   * MUST: 一時バッファ（`vt` / `vq` / `vs`）はここで宣言し、**ノード末尾**（呼び手）で
+   * 確保の逆順に解放する。
    * MUST: `N` のオーバフロー門は fail loudly（|acc| ≤ N·127²。実測形の最大 N = 16,384 に対し
    * 門は桁で余裕があるが、置かないと退行の受け皿が消える）。
    */
-  async #buildAttentionPvI8a8(
+  async #prepareAttentionPvI8a8(
     builder: StepRecipeBuilder,
     binds: readonly BindingSource[],
-    scores: TempSource,
     scoreStorage: ScoreStorage,
-    stats: TempSource,
-    outs: readonly BindingSource[],
-    shape: {
-      readonly batch: number;
-      readonly rows: number;
-      readonly cols: number;
-      readonly depth: number;
-    },
+    shape: AttentionShape,
     where: string,
-  ): Promise<void> {
-    const { batch, rows, cols, depth } = shape;
+    rowWindow: boolean,
+  ): Promise<AttentionPvStage> {
+    const { batch, cols, depth } = shape;
     if (cols > LINEAR_I8A8_MAX_K) {
       throw new ExecutionError(
         `${where}: N=${cols} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
@@ -2255,38 +2397,17 @@ export class RecipeBuilder {
       workgroups: [gridStrideWorkgroups(batch * depth, 1, limit), 1, 1],
     });
 
-    // (c) 整数内積の GEMM（P̃ は A タイル充填で作る = 非実体化のまま）
+    // (c) 整数内積の GEMM（P̃ は A タイル充填で作る = 非実体化のまま）。dispatch はブロック
+    // ごとなので、ここでは解決だけして呼び手へ返す。
     const v4 = attentionPvI8a8UsesVec4(depth);
     const dp4a = this.#state.i8a8Dot === "dp4a";
     const geometry = defaultI8a8Geometry("attention_pv");
-    const key = attentionPvI8a8Key(v4, dp4a, scoreStorage, geometry);
+    const key = attentionPvI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
     const { pipeline, layout } = await this.#state.cache.get(
       key,
-      attentionPvI8a8Wgsl(v4, dp4a, scoreStorage, geometry),
+      attentionPvI8a8Wgsl(v4, dp4a, scoreStorage, geometry, rowWindow),
     );
-    builder.dispatch({
-      key,
-      pipeline,
-      layout,
-      params: this.#writeParams(attentionPvI8a8Params(rows, depth, cols), PARAMS_UNIFORM_USAGE),
-      bindings: [
-        { binding: 1, source: scores },
-        { binding: 2, source: vq },
-        { binding: 3, source: stats },
-        { binding: 4, source: outs[0] },
-        { binding: ATTENTION_PV_V_SCALE_BINDING, source: vs },
-      ],
-      workgroups: [
-        tiledWorkgroups(depth, i8a8TileN(geometry), limit, `${where} ③PV i8a8`),
-        tiledWorkgroups(rows, i8a8TileM(geometry), limit, `${where} ③PV i8a8`),
-        tiledWorkgroups(batch, 1, limit, `${where} ③PV i8a8`),
-      ],
-    });
-
-    // MUST: ノード境界で一時バッファを返す（確保と破棄を 1 箇所へ — ADR 0004）。
-    builder.releaseTemp(vs);
-    builder.releaseTemp(vq);
-    builder.releaseTemp(vt);
+    return { kind: "i8a8", key, pipeline, layout, geometry, vt, vq, vs };
   }
 
   /**

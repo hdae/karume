@@ -377,6 +377,18 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_qk_gqa_v4.wgsl", attentionQkWgsl(true, "f32", "f32", false, true)],
     ["attention_pv_gqa.wgsl", attentionPvWgsl(false, "f32", "f32", true)],
     ["attention_pv_gqa_v4.wgsl", attentionPvWgsl(true, "f32", "f32", true)],
+    // **行窓変種**（クエリ行のブロック実行 — src/runtime/recipe-builder.ts の `#buildAttention`）。
+    // ①QK は A 側（q）・③PV は C 側（O）が全 M ストライド + 行オフセットになる。**mask 付きを
+    // 対で置く**のが条件で、行窓で唯一 base 算術の外へ出るのが mask の**行**添字だから
+    // （S はブロック相対・mask は全 M ぶんの実体）。この 6 本を足すことより **上の
+    // attention_qk*.wgsl / attention_pv*.wgsl が 1 バイトも動かない**（= n=1 は行窓を立てない
+    // ので分割前と完全に同一）が列挙の主目的。
+    ["attention_qk_rwa.wgsl", attentionQkWgsl(false, "f32", "f32", false, false, true)],
+    ["attention_qk_rwa_v4.wgsl", attentionQkWgsl(true, "f32", "f32", false, false, true)],
+    ["attention_qk_mask_rwa.wgsl", attentionQkWgsl(false, "f32", "f32", true, false, true)],
+    ["attention_qk_mask_rwa_v4.wgsl", attentionQkWgsl(true, "f32", "f32", true, false, true)],
+    ["attention_pv_rwc.wgsl", attentionPvWgsl(false, "f32", "f32", false, true)],
+    ["attention_pv_rwc_v4.wgsl", attentionPvWgsl(true, "f32", "f32", false, true)],
     ["gather.wgsl", GATHER_WGSL],
     ["strided_copy_f32.wgsl", stridedWgsl({ dtype: "f32" })],
     ["strided_copy_i32.wgsl", stridedWgsl({ dtype: "i32" })],
@@ -508,6 +520,11 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_pv_i8a8_v4.wgsl", attentionPvI8a8Wgsl(true, true)],
     ["attention_pv_i8a8_emu.wgsl", attentionPvI8a8Wgsl(false, false)],
     ["attention_pv_i8a8_emu_v4.wgsl", attentionPvI8a8Wgsl(true, false)],
+    // i8a8 の**行窓変種**（実測形の v4 側を代表に 1 本ずつ — スカラ側との差は base の単位だけで、
+    // その踏み分けは上の素の 4 本と下の構造テストが見る）。①QK は量子化済み q とその行 scale の
+    // 2 本、③PV は O の 1 本だけが全 M ストライドになる。
+    ["attention_qk_i8a8_rwa_v4.wgsl", attentionQkI8a8Wgsl(true, true, "f32", undefined, true)],
+    ["attention_pv_i8a8_rwc_v4.wgsl", attentionPvI8a8Wgsl(true, true, "f32", undefined, true)],
     // f16 **計算**変種（ADR 0028）。上の f32 変種と対で置くのが条件で、変種追加で f32 側の
     // バイト列が動くのが最大の事故（既定経路の数値契約が全部そこに掛かっている）。
     // 語彙は格納 f16 の `wf16` と別の `c16` — `linear_wf16_c16*` は「重み f16 格納 × f16 計算」。
@@ -2055,6 +2072,173 @@ Deno.test("attention の GQA 変種は K / V の base 1 行と uniform 1 語だ�
   assertThrows(() => attentionQkParams(5, 7, 4, 0.5, 0), CodegenError, "kv_repeat");
   assertThrows(() => attentionPvParams(5, 4, 7, 0), CodegenError, "kv_repeat");
   assertThrows(() => attentionQkParams(5, 7, 4, 0.5, 1.5), CodegenError, "kv_repeat");
+});
+
+/**
+ * **行窓変種**（クエリ行のブロック実行 — src/runtime/recipe-builder.ts の `#buildAttention`）の
+ * 構造。スナップショットが凍結するのは 8 本の代表だけなので、「どの base が動き、どれが動いて
+ * はいけないか」はここで全変種（v4 × 段 × i8a8）に対して機械確認する。
+ *
+ * MUST: 動くのは**片側だけ**（①QK は A = q / ③PV は C = O）。反対側と行統計はブロック相対の
+ * ままで、写し間違えると S の一部が未書き込みか、別ブロックの行統計を掛けた沈黙誤値になる。
+ * MUST: mask の**行**だけが base 算術の外で `row_offset` を要る（S はブロック相対の実体・
+ * mask は全 M ぶんの実体）。
+ */
+Deno.test("融合 attention の行窓変種は片側の base と mask の行添字だけを変える", () => {
+  for (const v4 of [false, true]) {
+    const kUnit = v4 ? "k4" : "dims.k";
+    const nUnit = v4 ? "n4" : "dims.n";
+    // ①QK: A（q）だけが全 M ストライド + 行オフセット。C（S）はブロック相対のまま。
+    const qkPlain = attentionQkWgsl(v4);
+    const qkWindow = attentionQkWgsl(v4, "f32", "f32", false, false, true);
+    assertEquals(qkPlain.includes("row_offset"), false, `①QK 素 v4=${v4}`);
+    assertEquals(
+      qkWindow.includes(
+        `  let abase = wid.z * dims.rows_full * ${kUnit} + dims.row_offset * ${kUnit};`,
+      ),
+      true,
+      `①QK 行窓 v4=${v4}: q の base が全 M ストライドになっていない`,
+    );
+    assertEquals(
+      qkWindow.includes(`  let cbase = wid.z * dims.m * ${nUnit};`),
+      true,
+      `①QK 行窓 v4=${v4}: S がブロック相対でない`,
+    );
+    // ③PV: C（O）だけが全 M ストライド + 行オフセット。A（S）も行統計もブロック相対のまま。
+    const pvPlain = attentionPvWgsl(v4);
+    const pvWindow = attentionPvWgsl(v4, "f32", "f32", false, true);
+    assertEquals(pvPlain.includes("row_offset"), false, `③PV 素 v4=${v4}`);
+    assertEquals(
+      pvWindow.includes(
+        `  let cbase = wid.z * dims.rows_full * ${nUnit} + dims.row_offset * ${nUnit};`,
+      ),
+      true,
+      `③PV 行窓 v4=${v4}: O の base が全 M ストライドになっていない`,
+    );
+    for (const prefix of ["  let abase", "  let rbase"]) {
+      const line = pvWindow.split("\n").find((text) => text.startsWith(prefix)) ?? "";
+      assertEquals(line.includes("row_offset"), false, `③PV 行窓 v4=${v4}: ${line}`);
+    }
+    // mask は全 M ぶんの実体なので、行だけ `row_offset` を足して引く（列は S と同じ N）。
+    const maskPlain = attentionQkWgsl(v4, "f32", "f32", true);
+    const maskWindow = attentionQkWgsl(v4, "f32", "f32", true, false, true);
+    assertEquals(
+      maskPlain.includes("mask[(orow"),
+      false,
+      `①QK mask 素 v4=${v4}: 行にオフセットが入っている`,
+    );
+    assertEquals(
+      maskWindow.includes(
+        v4
+          ? "mask[(orow0 + dims.row_offset) * n4 + ocq0]"
+          : "let mbase = (orow0 + dims.row_offset)",
+      ),
+      true,
+      `①QK mask 行窓 v4=${v4}: mask の行が全 M の添字になっていない`,
+    );
+    // i8a8: ①QK は量子化済み q と**その行 scale**の 2 本（片方だけ写すと別の行の scale が
+    // 乗る沈黙誤値）。k / S 側はブロックに依らないので触らない。
+    const qkI8a8Plain = attentionQkI8a8Wgsl(v4, true);
+    const qkI8a8Window = attentionQkI8a8Wgsl(v4, true, "f32", undefined, true);
+    assertEquals(qkI8a8Plain.includes("row_offset"), false, `①QK i8a8 素 v4=${v4}`);
+    assertEquals(
+      qkI8a8Window.includes("  let qbase = wid.z * dims.rows_full * k4 + dims.row_offset * k4;") &&
+        qkI8a8Window.includes("  let qsbase = wid.z * dims.rows_full + dims.row_offset;"),
+      true,
+      `①QK i8a8 行窓 v4=${v4}: q ペイロードと行 scale の base が対で動いていない`,
+    );
+    for (const prefix of ["  let kbase", "  let ksbase", "  let sbase"]) {
+      const line = qkI8a8Window.split("\n").find((text) => text.startsWith(prefix)) ?? "";
+      assertEquals(line.includes("row_offset"), false, `①QK i8a8 行窓 v4=${v4}: ${line}`);
+    }
+    // i8a8 ③PV は O の 1 本だけ（S / 行統計 / Vᵀ はブロック相対）。
+    const pvI8a8Plain = attentionPvI8a8Wgsl(v4, true);
+    const pvI8a8Window = attentionPvI8a8Wgsl(v4, true, "f32", undefined, true);
+    assertEquals(pvI8a8Plain.includes("row_offset"), false, `③PV i8a8 素 v4=${v4}`);
+    assertEquals(
+      pvI8a8Window.includes(
+        `  let obase = wid.z * dims.rows_full * ${nUnit} + dims.row_offset * ${nUnit};`,
+      ),
+      true,
+      `③PV i8a8 行窓 v4=${v4}: O の base が全 M ストライドになっていない`,
+    );
+    for (const prefix of ["  let sbase", "  let rbase", "  let vbase", "  let vsbase"]) {
+      const line = pvI8a8Window.split("\n").find((text) => text.startsWith(prefix)) ?? "";
+      assertEquals(line.includes("row_offset"), false, `③PV i8a8 行窓 v4=${v4}: ${line}`);
+    }
+  }
+  // ② 行統計は行窓の軸をそもそも持たない（S も統計もブロック相対で、行内で閉じる）。
+  assertEquals(ATTENTION_STATS_WGSL.includes("row_offset"), false);
+
+  // キーは GQA の**さらに後ろ**に 1 語（n=1 の既存キーは 1 文字も動かない）。
+  assertEquals(
+    attentionQkKey(true, "f32", "f16", true, true, true),
+    "attention_qk:v1:f32:reg128x128r8x8w16v4:s16:mask:gqa:rwa",
+  );
+  assertEquals(
+    attentionPvKey(true, "f32", "f32", true, true),
+    "attention_pv:v1:f32:reg128x128r8x8w16v4:gqa:rwc",
+  );
+  assertEquals(
+    attentionQkI8a8Key(true, true, "f16", undefined, true).endsWith(":s16:rwa"),
+    true,
+    "①QK i8a8 の行窓語は末尾",
+  );
+  assertEquals(
+    attentionPvI8a8Key(true, true, "f16", undefined, true).endsWith(":s16:rwc"),
+    true,
+    "③PV i8a8 の行窓語は末尾",
+  );
+  // 同一構成が 2 通りのキーを持たない（v4 × mask × gqa × 行窓の全数が一意）。
+  const allKeys = [false, true].flatMap((v4) =>
+    [false, true].flatMap((mask) =>
+      [false, true].flatMap((gqa) =>
+        [false, true].flatMap((window) => [
+          attentionQkKey(v4, "f32", "f32", mask, gqa, window),
+          attentionPvKey(v4, "f32", "f32", gqa, window),
+        ])
+      )
+    )
+  );
+  assertEquals(
+    new Set(allKeys).size,
+    2 * 2 * 2 * 2 + 2 * 2 * 2,
+    "①は mask×gqa×窓×v4 / ③は gqa×窓×v4",
+  );
+
+  // params: 行窓の 2 語は**追加欄の末尾**（GQA の語位置を行窓の有無で動かさない）。
+  const window = { offset: 2, rowsFull: 9 } as const;
+  assertEquals(attentionQkParams(5, 7, 4, 0.5).byteLength, 16, "窓なしは従来どおり 16B");
+  const qkWindowed = attentionQkParams(5, 7, 4, 0.5, undefined, window);
+  assertEquals(qkWindowed.byteLength, 32);
+  assertEquals([...qkWindowed.slice(0, 3)], [5, 7, 4]);
+  assertEquals(new Float32Array(qkWindowed.buffer)[3], 0.5);
+  assertEquals([qkWindowed[4], qkWindowed[5]], [2, 9]);
+  const qkBoth = attentionQkParams(5, 7, 4, 0.5, 8, window);
+  assertEquals([qkBoth[4], qkBoth[5], qkBoth[6]], [8, 2, 9], "GQA と併用しても kv_repeat が先");
+  const pvWindowed = attentionPvParams(5, 4, 7, undefined, window);
+  assertEquals(pvWindowed.byteLength, 32);
+  assertEquals([...pvWindowed.slice(0, 5)], [5, 4, 7, 2, 9]);
+  assertEquals([...attentionPvParams(5, 4, 7, 8, window).slice(0, 6)], [5, 4, 7, 8, 2, 9]);
+  const qkI8a8Windowed = attentionQkI8a8Params(5, 12, 4, 0.5, window);
+  assertEquals(qkI8a8Windowed.byteLength, 32);
+  assertEquals([qkI8a8Windowed[4], qkI8a8Windowed[5]], [2, 9]);
+  assertEquals(new Float32Array(qkI8a8Windowed.buffer)[3], 0.5);
+  const pvI8a8Windowed = attentionPvI8a8Params(5, 4, 8, window);
+  assertEquals([...pvI8a8Windowed.slice(0, 5)], [5, 4, 8, 2, 9]);
+  assertEquals(attentionQkI8a8Params(5, 12, 4, 0.5).byteLength, 16, "窓なしは従来どおり 16B");
+  assertEquals(attentionPvI8a8Params(5, 4, 8).byteLength, 16, "窓なしは従来どおり 16B");
+  // MUST: ブロックが全 M をはみ出す組は fail loudly（黙って通すと隣のバッチを読み書きする）。
+  for (
+    const build of [
+      () => attentionQkParams(5, 7, 4, 0.5, undefined, { offset: 5, rowsFull: 9 }),
+      () => attentionPvParams(5, 4, 7, undefined, { offset: 5, rowsFull: 9 }),
+      () => attentionQkI8a8Params(8, 12, 4, 0.5, { offset: 4, rowsFull: 9 }),
+      () => attentionPvI8a8Params(8, 4, 8, { offset: 4, rowsFull: 9 }),
+    ]
+  ) {
+    assertThrows(build, CodegenError, "をはみ出す");
+  }
 });
 
 /**

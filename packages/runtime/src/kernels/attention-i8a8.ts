@@ -91,7 +91,12 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
-import { gemmParams } from "./gemm.ts";
+import {
+  assertGemmRowWindow,
+  gemmParams,
+  type GemmRowWindowSpan,
+  ROW_WINDOW_DIMS_EXTRA,
+} from "./gemm.ts";
 import {
   assertI8a8Geometry,
   defaultI8a8Geometry,
@@ -251,10 +256,11 @@ export const attentionQkI8a8Key = (
   dp4a: boolean,
   score: ScoreStorage = "f32",
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_qk"),
+  rowWindow = false,
 ): string =>
   `attention_qk:v3:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}${
     scoreKeyPart(score)
-  }`;
+  }${rowWindow ? ":rwa" : ""}`;
 
 /**
  * S を `vec4<f32>` で書けるか。**D 側の条件は適格判定（`D % 4 == 0`）が既に担っている**ので
@@ -328,21 +334,27 @@ export const attentionQkI8a8Wgsl = (
   dp4a: boolean,
   score: ScoreStorage = "f32",
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_qk"),
+  rowWindow = false,
 ): string => {
   assertScoreStorageSupported("attention_qk i8a8", score, v4);
   assertI8a8Geometry(geometry, "attention_qk i8a8");
   const kPacks = i8a8KPacks(geometry);
+  // 行窓（{@link "./gemm.ts"} `GemmRowWindow` の `"a"`）: **量子化済み q の base 2 本**だけが
+  // 全 M ストライド + 行オフセットで数える。S / 行統計はブロック相対のままなので、内積ループ・
+  // 共有タイル充填・dequant は 1 文字も動かない = 1 枚実行とビット同一。
+  // MUST: ペイロードは pack 単位・scale は行数単位（単位を取り違えると隣の head を読む）。
+  const qRows = rowWindow ? "dims.rows_full" : "dims.m";
   return `// karume attention_qk (S[b,m,n] = q[b,m,d] · k[b,n,d]ᵀ, q/k とも per-token i8 の整数内積${
     dp4a ? "" : "・エミュ"
-  }, 半スケールは dequant 側${scoreNote(score)}, ${i8a8GeometryNote(geometry)}${
-    v4 ? " + vec4" : ""
-  })
+  }, 半スケールは dequant 側${scoreNote(score)}${rowWindow ? ", 行窓 a" : ""}, ${
+    i8a8GeometryNote(geometry)
+  }${v4 ? " + vec4" : ""})
 struct Dims {
   m: u32,
   n: u32,
   k: u32,
   scale: f32,
-}
+${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}}
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> qq: array<u32>;
 @group(0) @binding(2) var<storage, read> kq: array<u32>;
@@ -375,9 +387,9 @@ ${
   // 一様性要件を満たすための前提）。MUST: q / k のペイロードは **pack 単位**、scale は行数
   // 単位、S は要素${v4 ? "（v4 では quad）" : ""}単位で数える — 単位を取り違えると B·H ≥ 2 で
   // 隣の head を読み書きする（例外なしの誤値で、B=H=1 のテストには出ない）
-  let qbase = wid.z * dims.m * k4;
+  let qbase = wid.z * ${qRows} * k4${rowWindow ? " + dims.row_offset * k4" : ""};
   let kbase = wid.z * dims.n * k4;
-  let qsbase = wid.z * dims.m;
+  let qsbase = wid.z * ${qRows}${rowWindow ? " + dims.row_offset" : ""};
   let ksbase = wid.z * dims.n;
   let sbase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
 ${prologueA(geometry, "qbase", "q タイルの担当")}
@@ -411,12 +423,16 @@ ${store(geometry, v4, score)}
  * {@link "./attention.ts"} `attentionQkParams` と同じ並び）。
  *
  * MUST: scale を WGSL に焼かない（値の種類だけパイプラインが増える）。
+ *
+ * `window` は **行窓変種だけ**が渡す 5〜6 語目（f32 変種の `attentionQkParams` と同じ規律で、
+ * struct は 32 バイトへ伸びる）。MUST: `m` はブロック行数（全 M ではない）。
  */
 export const attentionQkI8a8Params = (
   m: number,
   n: number,
   k: number,
   scale: number,
+  window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
   if (!Number.isFinite(scale)) {
     throw new CodegenError(`attention_qk i8a8 params: scale は有限の数値（${scale}）`);
@@ -430,8 +446,17 @@ export const attentionQkI8a8Params = (
     );
   }
   const params = gemmParams("attention_qk", m, n, k);
-  new Float32Array(params.buffer)[3] = scale;
-  return params;
+  if (window === undefined) {
+    new Float32Array(params.buffer)[3] = scale;
+    return params;
+  }
+  assertGemmRowWindow("attention_qk i8a8 行窓 params", m, window);
+  const wide = new Uint32Array(8);
+  wide.set(params.subarray(0, 3));
+  new Float32Array(wide.buffer)[3] = scale;
+  wide[4] = window.offset;
+  wide[5] = window.rowsFull;
+  return wide;
 };
 
 // ---------------------------------------------------------------------------
@@ -444,10 +469,11 @@ export const attentionPvI8a8Key = (
   dp4a: boolean,
   score: ScoreStorage = "f32",
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_pv"),
+  rowWindow = false,
 ): string =>
   `attention_pv:v3:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}${
     scoreKeyPart(score)
-  }`;
+  }${rowWindow ? ":rwc" : ""}`;
 
 /**
  * O を `vec4<f32>` で書けるか。**縮約側（N）の条件は適格判定（`N % 4 == 0`）が既に担っている**
@@ -564,19 +590,24 @@ export const attentionPvI8a8Wgsl = (
   dp4a: boolean,
   score: ScoreStorage = "f32",
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_pv"),
+  rowWindow = false,
 ): string => {
   assertI8a8Geometry(geometry, "attention_pv i8a8");
   const kPacks = i8a8KPacks(geometry);
+  // 行窓（{@link "./gemm.ts"} `GemmRowWindow` の `"c"`）: **O の base 1 本**だけが全 M
+  // ストライド + 行オフセットで数える。S / 行統計 / Vᵀ はブロック相対のままなので、
+  // P̃ の生成も dequant も 1 文字も動かない = 1 枚実行とビット同一。
+  const oUnit = v4 ? "n4" : "dims.n";
   return `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P̃ = round(127·exp(S − m)) は非実体化${
     dp4a ? "" : "・エミュ"
-  }, v は per-column i8（Vᵀ 連続）${scoreNote(score)}, ${i8a8GeometryNote(geometry)}${
-    v4 ? " + vec4" : ""
-  })
+  }, v は per-column i8（Vᵀ 連続）${scoreNote(score)}${rowWindow ? ", 行窓 c" : ""}, ${
+    i8a8GeometryNote(geometry)
+  }${v4 ? " + vec4" : ""})
 struct Dims {
   m: u32,
   n: u32,
   k: u32,
-}
+${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}}
 @group(0) @binding(0) var<uniform> dims: Dims;
 // 適格条件で N % 4 == 0 なので、S の行頭は常に quad 境界に来る（P̃ の 4 詰めと同じ刻み）
 @group(0) @binding(1) var<storage, read> s: array<${scoreArrayType(score, "vec4<f32>")}>;
@@ -612,7 +643,9 @@ ${
   let vbase = wid.z * dims.n * k4;
   let rbase = wid.z * dims.m;
   let vsbase = wid.z * dims.n;
-  let obase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
+  let obase = wid.z * ${rowWindow ? "dims.rows_full" : "dims.m"} * ${oUnit}${
+    rowWindow ? ` + dims.row_offset * ${oUnit}` : ""
+  };
 ${prologueA(geometry, "sbase", "P̃ タイルの担当")}
   // 行の最大 m（K タイルループ不変なので 1 度だけ引く）。端タイルでは arow >= M がありうるので
   // 添字を 0 へ倒す（読んだ値は arow < M の枝でしか使われない）
@@ -644,11 +677,15 @@ ${pvStore(geometry, v4)}
 /**
  * uniform の Dims（`{m, n, k}` = `{M, D, N}` — f32 変種の {@link "./attention.ts"}
  * `attentionPvParams` と同じ並び。③PV に半スケールは登場しない）。
+ *
+ * `window` は **行窓変種だけ**が渡す 4〜5 語目（struct は 32 バイトへ伸びる）。
+ * MUST: `m` はブロック行数（全 M ではない）。
  */
 export const attentionPvI8a8Params = (
   m: number,
   n: number,
   k: number,
+  window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
   if (!Number.isSafeInteger(k) || k < 0 || k % 4 !== 0) {
     throw new CodegenError(`attention_pv i8a8 params: k（= N）は 4 の倍数の非負整数（${k}）`);
@@ -658,5 +695,12 @@ export const attentionPvI8a8Params = (
       `attention_pv i8a8 params: k=${k} が i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える`,
     );
   }
-  return gemmParams("attention_pv", m, n, k);
+  const params = gemmParams("attention_pv", m, n, k);
+  if (window === undefined) return params;
+  assertGemmRowWindow("attention_pv i8a8 行窓 params", m, window);
+  const wide = new Uint32Array(8);
+  wide.set(params.subarray(0, 3));
+  wide[3] = window.offset;
+  wide[4] = window.rowsFull;
+  return wide;
 };

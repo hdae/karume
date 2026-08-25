@@ -6,16 +6,20 @@
  * uniform は matmul / linear と同じ 3 語 `{m,n,k}`。バッチ数はシェーダが `wid.z` から導くので
  * uniform に載せない（載せても一度も読まない死んだフィールドになる）。
  *
- * **行窓変種**（{@link BmmRowWindow}）だけが uniform を 5 語へ広げる。分解 attention の
+ * **行窓変種**（{@link GemmRowWindow}）だけが uniform を 5 語へ広げる。分解 attention の
  * 行ブロック実行（src/runtime/fusion.ts）専用で、共有の `gemmParams` には 1 語も足さない
  * — 足すと全 op の uniform レイアウトとスナップショットが総取っ替えになる。
  */
 
-import { type BmmRowWindow, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
-import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "../codegen/params.ts";
+import {
+  assertGemmRowWindow,
+  gemmKeyPart,
+  gemmParams,
+  type GemmRowWindow,
+  gemmWgsl,
+} from "./gemm.ts";
 
-export type { BmmRowWindow };
+export type { GemmRowWindow };
 
 /**
  * `rows` は**行列 1 枚の M**（バッチ軸は含めない — バッチは dispatch の z で、タイル幾何とは
@@ -25,10 +29,10 @@ export type { BmmRowWindow };
  * 全 M は uniform 値なのでキーに載せない** — 載せるとブロックの本数だけ同じ WGSL が
  * パイプラインへ複製される。
  */
-export const bmmKey = (v4: boolean, rows?: number, window?: BmmRowWindow): string =>
+export const bmmKey = (v4: boolean, rows?: number, window?: GemmRowWindow): string =>
   `bmm:v2:f32:${gemmKeyPart(v4, rows)}${window === undefined ? "" : `:rw${window}`}`;
 
-export const bmmWgsl = (v4: boolean, rows?: number, window?: BmmRowWindow): string =>
+export const bmmWgsl = (v4: boolean, rows?: number, window?: GemmRowWindow): string =>
   gemmWgsl({ op: "bmm", v4, rows, rowWindow: window });
 
 export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>
@@ -39,10 +43,10 @@ export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuf
  *
  * uniform アドレス空間の struct は 16 バイト整列なので、5 語ぶんの内容でも **32 バイト**確保
  * する（不足すると binding が validation で落ちる）。MUST: 並びは gemm.ts の
- * `BMM_ROW_WINDOW_DIMS_EXTRA` と対。
+ * `ROW_WINDOW_DIMS_EXTRA` と対。
  *
- * `rowsFull` は行窓側の**元の全 M**、`rowOffset` はそのうちこのブロックが担当する先頭行。
- * MUST: `rowOffset + m ≤ rowsFull`（超えると隣のバッチの行を読み書きする — 例外は出ない）。
+ * `rowsFull` は行窓側の**元の全 M**、`rowOffset` はそのうちこのブロックが担当する先頭行
+ * （門は {@link assertGemmRowWindow} — 融合 attention の params と共有）。
  */
 export const bmmRowWindowParams = (
   m: number,
@@ -51,12 +55,7 @@ export const bmmRowWindowParams = (
   rowOffset: number,
   rowsFull: number,
 ): Uint32Array<ArrayBuffer> => {
-  assertU32Params("bmm 行窓 params", { row_offset: rowOffset, rows_full: rowsFull });
-  if (rowOffset + m > rowsFull) {
-    throw new CodegenError(
-      `bmm 行窓 params: 行 [${rowOffset}, ${rowOffset + m}) が全 M ${rowsFull} をはみ出す`,
-    );
-  }
+  assertGemmRowWindow("bmm 行窓 params", m, { offset: rowOffset, rowsFull });
   const base = gemmParams("bmm", m, n, k);
   const params = new Uint32Array(8);
   params.set(base.subarray(0, 3));

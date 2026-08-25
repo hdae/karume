@@ -46,7 +46,15 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
-import { type GemmCompute, gemmComputeKeyPart, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
+import {
+  assertGemmRowWindow,
+  type GemmCompute,
+  gemmComputeKeyPart,
+  gemmKeyPart,
+  gemmParams,
+  type GemmRowWindowSpan,
+  gemmWgsl,
+} from "./gemm.ts";
 import {
   assertScoreStorageSupported,
   scoreArrayType,
@@ -83,26 +91,41 @@ const maskKeyPart = (mask: boolean): string => mask ? ":mask" : "";
  */
 const gqaKeyPart = (gqa: boolean): string => gqa ? ":gqa" : "";
 
+/**
+ * **行窓**（クエリ行のブロック実行 — {@link "./gemm.ts"} `GemmRowWindow`）の判別子。
+ *
+ * MUST: 無しは空文字（n = 1 の機は既存キーと 1 文字も変わらない — 行ブロック化の
+ * 「分割が発火しない形は既存と完全一致」がキー側にも掛かる）。MUST: 語は GQA の**さらに
+ * 後ろ**（並び順をここ 1 箇所で固定する）。MUST: 側（`a` / `c`）は op から決まるので綴りは
+ * 固定 — bmm の `:rwa` / `:rwc` と同じ語彙にして、診断のキー一覧で並べて読める形に保つ。
+ * MUST: 行オフセットと全 M は載せない（uniform で運ぶ — 載せるとブロックの本数だけ
+ * パイプラインが増える）。
+ */
+const rowWindowKeyPart = (side: "a" | "c", rowWindow: boolean): string =>
+  rowWindow ? `:rw${side}` : "";
+
 export const attentionQkKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
   mask = false,
   gqa = false,
+  rowWindow = false,
 ): string =>
   `attention_qk:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}${
     maskKeyPart(mask)
-  }${gqaKeyPart(gqa)}`;
+  }${gqaKeyPart(gqa)}${rowWindowKeyPart("a", rowWindow)}`;
 
 export const attentionPvKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
   gqa = false,
+  rowWindow = false,
 ): string =>
   `attention_pv:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}${
     gqaKeyPart(gqa)
-  }`;
+  }${rowWindowKeyPart("c", rowWindow)}`;
 
 /**
  * ② の **regcache 変種**（S を 1 回だけ読んでレジスタに残す）が受け持てる 1 スレッドあたりの
@@ -144,14 +167,16 @@ export const attentionQkWgsl = (
   score: ScoreStorage = "f32",
   mask = false,
   gqa = false,
-): string => gemmWgsl({ op: "attention_qk", v4, compute, score, mask, gqa });
+  rowWindow = false,
+): string => gemmWgsl({ op: "attention_qk", v4, compute, score, mask, gqa, rowWindow });
 
 export const attentionPvWgsl = (
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
   gqa = false,
-): string => gemmWgsl({ op: "attention_pv", v4, compute, score, gqa });
+  rowWindow = false,
+): string => gemmWgsl({ op: "attention_pv", v4, compute, score, gqa, rowWindow });
 
 /** f32 の最大有限値。WGSL に無限大リテラルが無いため amax の identity にこれを使う（softmax と同じ）。 */
 const F32_MAX = "3.402823466e38";
@@ -313,6 +338,10 @@ const assertKvRepeat = (where: string, kvRepeat: number): void => {
  * `kvRepeat` は **GQA 変種だけ**が渡す 5 語目（ADR 0067 決定 2）。uniform struct の整列で
  * 32 バイトに伸びる（bmm の行窓変種と同じ形）。MUST: 省略時のバイト列は従来どおり 16 バイト
  * ちょうど — `r = 1` の既存経路が 1 バイトも動かないことがこの分岐の目的。
+ *
+ * `window` は **行窓変種だけ**が渡す末尾 2 語（{@link "./gemm.ts"} `ROW_WINDOW_DIMS_EXTRA` と対）。
+ * MUST: 位置は `kv_repeat` の**後ろ**（GQA の語位置を行窓の有無で動かさない — 生成側の
+ * dimsExtra が同じ順で綴る）。MUST: `m` はブロック行数（全 M ではない）。
  */
 export const attentionQkParams = (
   m: number,
@@ -320,20 +349,27 @@ export const attentionQkParams = (
   k: number,
   scale: number,
   kvRepeat?: number,
+  window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
   if (!Number.isFinite(scale)) {
     throw new CodegenError(`attention_qk params: scale は有限の数値（${scale}）`);
   }
+  if (kvRepeat !== undefined) assertKvRepeat("attention_qk params", kvRepeat);
+  if (window !== undefined) assertGemmRowWindow("attention_qk 行窓 params", m, window);
   const base = gemmParams("attention_qk", m, n, k);
-  if (kvRepeat === undefined) {
+  if (kvRepeat === undefined && window === undefined) {
     new Float32Array(base.buffer)[3] = scale;
     return base;
   }
-  assertKvRepeat("attention_qk params", kvRepeat);
   const params = new Uint32Array(8);
   params.set(base.subarray(0, 3));
   new Float32Array(params.buffer)[3] = scale;
-  params[4] = kvRepeat;
+  if (kvRepeat !== undefined) params[4] = kvRepeat;
+  if (window !== undefined) {
+    const at = kvRepeat === undefined ? 4 : 5;
+    params[at] = window.offset;
+    params[at + 1] = window.rowsFull;
+  }
   return params;
 };
 
@@ -342,20 +378,31 @@ export const attentionQkParams = (
  *
  * `kvRepeat` は **GQA 変種だけ**が渡す 4 語目（ADR 0067 決定 2）。16 バイト整列の余りに収まる
  * ので、GQA でもバイト数は変わらない（省略時は従来どおり 4 語目が 0）。
+ *
+ * `window` は **行窓変種だけ**が渡す末尾 2 語（①QK と同じ規律 — `kv_repeat` の後ろ）。ここで
+ * だけ struct が 16 バイトを越えるので 32 バイト確保する。MUST: `m` はブロック行数。
  */
 export const attentionPvParams = (
   m: number,
   n: number,
   k: number,
   kvRepeat?: number,
+  window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
+  if (kvRepeat !== undefined) assertKvRepeat("attention_pv params", kvRepeat);
+  if (window !== undefined) assertGemmRowWindow("attention_pv 行窓 params", m, window);
   const params = gemmParams("attention_pv", m, n, k);
-  if (kvRepeat === undefined) {
+  if (window === undefined) {
+    if (kvRepeat !== undefined) params[3] = kvRepeat;
     return params;
   }
-  assertKvRepeat("attention_pv params", kvRepeat);
-  params[3] = kvRepeat;
-  return params;
+  const wide = new Uint32Array(8);
+  wide.set(params.subarray(0, 3));
+  if (kvRepeat !== undefined) wide[3] = kvRepeat;
+  const at = kvRepeat === undefined ? 3 : 4;
+  wide[at] = window.offset;
+  wide[at + 1] = window.rowsFull;
+  return wide;
 };
 
 /**
