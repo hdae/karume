@@ -23,7 +23,8 @@
   （実機再判定はリリース後 — known-issues）②NVIDIA の 2GiB 天井 — 融合 attention の
   行ブロック化**コミット済み**（1824×1248 実生成 27.9s 完走を確認）③Chromium の単一
   ArrayBuffer 上限 2,145,386,496B で Base f16 が原理的に不可（limitations 恒久記載。根本 =
-  R1 shard 配布を next へ昇格・DL 前即エラーは裁定待ち）④素版 i4 — `--i4-adaln-i8` 変種を
+  R1 shard 配布を next へ昇格・DL 前即エラーは hub 側では実装しない — プローブは
+  fetch-cache 次版で実装予定〈2026-08-25 裁定〉）④素版 i4 — `--i4-adaln-i8` 変種を
   v1.0 で export 中（~3.2h）→ 視認 A/B はユーザー裁定。verify 1786/0/5。
 - **0.6.0（yomi 依存分離）リリース完了（2026-08-25）**: JSR 3 パッケージ = 0.6.0・Release
   v0.6.0・**公開依存から `@hdae/yomi` の消滅を API 実測で確定**（hub / runtime の 2 本のみ）・

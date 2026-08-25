@@ -18,8 +18,9 @@ Anima Web アプリからの既知問題 3 件（調査で機序確定済み —
 - ②NVIDIA の 2GiB 天井（Dawn D3D12 固定値）— 融合 attention の行ブロック化は**済**
   （parked「2048px DiT attention メモリ工事」の消化）
 - ③Chromium の単一 ArrayBuffer 上限で Base f16 がロード不能
-  （[limitations](limitations.md)）— 根本 = next の R1 shard 配布。DL 前の即エラー
-  （hub 入口プローブ）は裁定待ち
+  （[limitations](limitations.md)）— 根本 = next の R1 shard 配布を優先（2026-08-25 裁定）。
+  DL 前の即エラーは **hub 側では実装しない** — 確保プローブは fetch-cache の次版で
+  実装予定（同裁定）
 - ④素版 i4 感度 — adaLN + block 外 i8 変種（`--i4-adaln-i8`）を anima-v1.0 で export →
   視認 A/B（進行中）。裁定後に research / perf-ledger へ追随
 
