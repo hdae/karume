@@ -262,11 +262,14 @@ ANIMA_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
 #: `resolution` だけは移行元 CLI の既定（512）を採らない — あちらの 512 は「静的資産の最小」
 #: であって推奨値ではなく、配布形は S 形 1 本（ADR 0038 §4）で解像度に依存しない。配布の
 #: 推奨既定は ADR 0038 Examples のとおり 1024²。
-#: `type`（サンプラ種別）は 0.5.0 の視認 A/B 裁定（2026-08-25）で **DPM++ 2M を base / turbo
-#: 両採用** — 同 step 数（= 同計算コスト）で品質が同等以上（seed 42 はほぼ互角・seed 7 は
-#: 構図と中景の解像で優位・破綻の追加なし）。省略時既定は "euler"（models 側 config.ts）なので
-#: 明示宣言で切り替える。
-ANIMA_SCHEDULER: Mapping[str, Any] = {"type": "dpmpp-2m", "shift": 3, "numTrainTimesteps": 1000}
+#: `type`（サンプラ種別）は **Euler を配布既定に維持する**（再裁定 2026-08-25 — 上流 Anima の
+#: 推奨サンプラーに合わせる・ユーザー方針「DPM++ 2M は選択肢の一つ」）。0.5.0 で一度
+#: dpmpp-2m を宣言したが同日戻した。視認 A/B の観測（同 step 数で dpmpp-2m が同等以上 —
+#: seed 42 ほぼ互角・seed 7 は構図と中景の解像で優位・破綻の追加なし）は観測として有効なまま
+#: で、既定の裁定だけが上流推奨側に立つ。DPM++ 2M は request 側の `sampler` 席（0.5.1）で
+#: 選ぶ。省略時既定も "euler"（models 側 config.ts）だが、裁定済みであることが読めるよう
+#: 明示宣言する。
+ANIMA_SCHEDULER: Mapping[str, Any] = {"type": "euler", "shift": 3, "numTrainTimesteps": 1000}
 
 #: 既定のネガティブプロンプト。turbo 席では**使われない**（CFG=1 なので uncond 側を 1 度も
 #: 計算しない）が、欄自体は据え置く — 利用者が guidance を上げた瞬間に効く値だから。
