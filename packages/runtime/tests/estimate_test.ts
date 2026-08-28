@@ -5,6 +5,11 @@
 // 期待値は全て**手計算した定数**で置く — 実装と同じ式で組み直すと恒真化して、算式がずれた
 // ときに 1 件も落ちない。
 //
+// 報告は常駐（`resident`）+ run の形ごと（`scenarios`）の 2 段。generation を渡さない見積りは
+// `"run"` の 1 本で、渡すと ADR 0066 決定 4 の実行 2 形（`"prefill"` / `"decode"`）が別々に
+// 並ぶ。`peakAccountedBytes` は常駐 + シナリオ側の**最大**（和ではない — slot backing が
+// 同時に 1 本だから）。
+//
 // 実 GPU 突合は 1 本だけ置く（アダプタ無しは明示 SKIP）。厳密一致を主張できるのは診断が
 // 実測している 2 カテゴリ（圧縮常駐・展開）と state 容量で、中間ピークは**近似**なので
 // 突合しない（融合が中間を消し、行ブロック分割が一時を足す — どちらも estimator の
@@ -16,7 +21,11 @@ import type { IrGraph } from "../src/format/ir.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { numel } from "../src/ops.ts";
 import { createSession } from "../src/runtime/executor.ts";
-import { estimateSessionMemory } from "../src/runtime/estimate.ts";
+import {
+  type AdmissionReport,
+  type AdmissionScenario,
+  estimateSessionMemory,
+} from "../src/runtime/estimate.ts";
 import { type ExecStep, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
 import { derivePlanSlots, type StepOutput, type StepRecipe } from "../src/runtime/recipe.ts";
@@ -35,6 +44,17 @@ const f16Zeros = (count: number): Uint8Array<ArrayBuffer> =>
 
 const i32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Int32Array.from(values).buffer);
+
+/**
+ * シナリオが `"run"` の 1 本だけであることを確かめて、その 1 本を返す。
+ *
+ * generation を渡さない見積りの io / workspace を引く唯一の口 — 「1 本だけ」の主張を
+ * 引くたびに一緒に押さえる（2 本に増えたら黙って先頭だけ見る形にしない）。
+ */
+const runScenario = (report: AdmissionReport): AdmissionScenario => {
+  assertEquals(report.scenarios.map((scenario) => scenario.name), ["run"]);
+  return report.scenarios[0];
+};
 
 // ---------------------------------------------------------------------------
 // 重みのカテゴリ分け
@@ -77,12 +97,14 @@ const plainModel = (): KarumeModel =>
   ]);
 
 Deno.test("圧縮しない格納（f32 / i32）は実バイトのまま非圧縮の欄に数える", () => {
-  const estimate = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  const { resident } = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
   // w 4×3×4=48 + emb 5×3×4=60 + idx 2×4=8（いずれも 4 バイト整列済み）
-  assertEquals(estimate.uncompressedWeightBytes, 116);
-  assertEquals(estimate.compressedWeightBytes, 0);
-  assertEquals(estimate.expandedWeightBytes, 0);
-  assertEquals(estimate.stateBytes, 0);
+  assertEquals(resident.weights.uncompressedBytes, 116);
+  assertEquals(resident.weights.compressedBytes, 0);
+  assertEquals(resident.weights.expandedBytes, 0);
+  // 3 欄の和が weights.totalBytes
+  assertEquals(resident.weights.totalBytes, 116);
+  assertEquals(resident.stateBytes, 0);
 });
 
 /**
@@ -115,21 +137,21 @@ Deno.test("実構築が拒否する格納 dtype（bf16）に見積りを返さ�
 Deno.test("io は入力バッファ + 出力 readback staging（0 要素は 4 バイト床）", () => {
   const model = plainModel();
   // x[7,4]=112 + h[7,3]=84 + g[2,3]=24
-  assertEquals(estimateSessionMemory(model, { bindings: { T: 7 } }).ioBytes, 220);
+  assertEquals(runScenario(estimateSessionMemory(model, { bindings: { T: 7 } })).ioBytes, 220);
   // T=0 では x も h も 0 要素 → 床の 4 バイトずつ。g は 24 のまま
-  assertEquals(estimateSessionMemory(model, { bindings: { T: 0 } }).ioBytes, 32);
+  assertEquals(runScenario(estimateSessionMemory(model, { bindings: { T: 0 } })).ioBytes, 32);
 });
 
-Deno.test("totalBytes は全カテゴリの合計", () => {
-  const estimate = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+Deno.test("peakAccountedBytes は常駐の総和 + シナリオ側の最大", () => {
+  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  const scenario = runScenario(report);
   assertEquals(
-    estimate.totalBytes,
-    estimate.compressedWeightBytes + estimate.uncompressedWeightBytes +
-      estimate.expandedWeightBytes + estimate.stateBytes +
-      estimate.ioBytes + estimate.transientBytes,
+    report.peakAccountedBytes,
+    report.resident.weights.totalBytes + report.resident.stateBytes +
+      scenario.ioBytes + scenario.workspaceBytes,
   );
-  // 0 + 116 + 0 + 0 + 220 + 108
-  assertEquals(estimate.totalBytes, 444);
+  // 116（非圧縮常駐）+ 0（state）+ 220（io）+ 108（workspace）
+  assertEquals(report.peakAccountedBytes, 444);
 });
 
 /** linear の重み（適格）と mul の被演算子（適格外）に同じ格納 dtype を置くグラフ。 */
@@ -171,13 +193,13 @@ Deno.test("f16 は適格なら 4 バイト切り上げで常駐・適格外な�
       { name: "m.g", dtype: "F16", shape: [3], data: f16Zeros(3) },
     ],
   );
-  const estimate = estimateSessionMemory(model);
+  const { weights } = estimateSessionMemory(model).resident;
   // w は numel 9 → 18 バイトを 4 バイトへ切り上げて 20
-  assertEquals(estimate.compressedWeightBytes, 20);
+  assertEquals(weights.compressedBytes, 20);
   // b は f32 のまま 12（非圧縮の欄）
-  assertEquals(estimate.uncompressedWeightBytes, 12);
+  assertEquals(weights.uncompressedBytes, 12);
   // g は mul の被演算子なので適格外 → 3×4
-  assertEquals(estimate.expandedWeightBytes, 12);
+  assertEquals(weights.expandedBytes, 12);
 });
 
 Deno.test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（奇数 numel）", () => {
@@ -204,13 +226,13 @@ Deno.test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（
     { name: "m.s", dtype: "F32", shape: [3, 1], data: f32Bytes([1, 1, 1]) },
     { name: "m.w", dtype: "I8", shape: [3, 5], data: new Uint8Array(15) },
   ]);
-  const estimate = estimateSessionMemory(model);
+  const report = estimateSessionMemory(model);
   // w numel 15 → 16（切り上げ）+ scale 3×4=12
-  assertEquals(estimate.compressedWeightBytes, 28);
-  assertEquals(estimate.uncompressedWeightBytes, 12);
-  assertEquals(estimate.expandedWeightBytes, 0);
+  assertEquals(report.resident.weights.compressedBytes, 28);
+  assertEquals(report.resident.weights.uncompressedBytes, 12);
+  assertEquals(report.resident.weights.expandedBytes, 0);
   // x[2,5]=40 + y[2,3]=24
-  assertEquals(estimate.ioBytes, 64);
+  assertEquals(runScenario(report).ioBytes, 64);
 });
 
 Deno.test("i4 適格は numel÷2 + group scale（展開経路を持つ重みスロット限定）", () => {
@@ -237,12 +259,12 @@ Deno.test("i4 適格は numel÷2 + group scale（展開経路を持つ重みス�
     { name: "m.s", dtype: "F32", shape: [2, 1], data: f32Bytes([1, 1]) },
     { name: "m.w", dtype: "I4", shape: [2, 16], data: new Uint8Array(16) },
   ]);
-  const estimate = estimateSessionMemory(model);
+  const { weights } = estimateSessionMemory(model).resident;
   // w numel 32 → 16 バイト + group scale 2×4=8
-  assertEquals(estimate.compressedWeightBytes, 24);
+  assertEquals(weights.compressedBytes, 24);
   // b は f32 のまま 8
-  assertEquals(estimate.uncompressedWeightBytes, 8);
-  assertEquals(estimate.expandedWeightBytes, 0);
+  assertEquals(weights.uncompressedBytes, 8);
+  assertEquals(weights.expandedBytes, 0);
 });
 
 Deno.test("i4 の embedding も packed のまま常駐する（ADR 0069 決定 5 の embedding 追補）", () => {
@@ -266,11 +288,11 @@ Deno.test("i4 の embedding も packed のまま常駐する（ADR 0069 決定 5
     { name: "m.s", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
     { name: "m.w", dtype: "I4", shape: [4, 16], data: new Uint8Array(32) },
   ]);
-  const estimate = estimateSessionMemory(model);
+  const { weights } = estimateSessionMemory(model).resident;
   // 語彙表 numel 64 → 32 バイト + group scale 4×4=16（展開経路は embedding カーネルにもある）
-  assertEquals(estimate.compressedWeightBytes, 48);
-  assertEquals(estimate.uncompressedWeightBytes, 0);
-  assertEquals(estimate.expandedWeightBytes, 0);
+  assertEquals(weights.compressedBytes, 48);
+  assertEquals(weights.uncompressedBytes, 0);
+  assertEquals(weights.expandedBytes, 0);
 });
 
 /** `conv1d(x, w, b)` 1 本のグラフ（w は i4 + rank 2 の group scale — 波 J-5b）。 */
@@ -306,12 +328,12 @@ Deno.test("i4 の conv1d(groups==1) も packed のまま常駐する（ADR 0069 
     { name: "m.s", dtype: "F32", shape: [4, 4], data: f32Bytes(new Array(16).fill(1)) },
     { name: "m.w", dtype: "I4", shape: [4, 32, 2], data: new Uint8Array(128) },
   ]);
-  const estimate = estimateSessionMemory(model);
+  const { weights } = estimateSessionMemory(model).resident;
   // w numel 256 → 128 バイト + group scale 16×4 = 64
-  assertEquals(estimate.compressedWeightBytes, 192);
+  assertEquals(weights.compressedBytes, 192);
   // b は f32 のまま 16
-  assertEquals(estimate.uncompressedWeightBytes, 16);
-  assertEquals(estimate.expandedWeightBytes, 0);
+  assertEquals(weights.uncompressedBytes, 16);
+  assertEquals(weights.expandedBytes, 0);
 });
 
 Deno.test("i4 の conv1d(groups>1) は適格外で f32 展開へ回る", () => {
@@ -321,11 +343,11 @@ Deno.test("i4 の conv1d(groups>1) は適格外で f32 展開へ回る", () => {
     { name: "m.s", dtype: "F32", shape: [4, 2], data: f32Bytes(new Array(8).fill(1)) },
     { name: "m.w", dtype: "I4", shape: [4, 16, 2], data: new Uint8Array(64) },
   ]);
-  const estimate = estimateSessionMemory(model);
-  assertEquals(estimate.compressedWeightBytes, 0);
-  assertEquals(estimate.uncompressedWeightBytes, 16);
+  const { weights } = estimateSessionMemory(model).resident;
+  assertEquals(weights.compressedBytes, 0);
+  assertEquals(weights.uncompressedBytes, 16);
   // w numel 128 → f32 展開で 512 バイト
-  assertEquals(estimate.expandedWeightBytes, 128 * 4);
+  assertEquals(weights.expandedBytes, 128 * 4);
 });
 
 Deno.test("グラフ出力になった i4 は適格外で f32 展開へ回る", () => {
@@ -349,10 +371,10 @@ Deno.test("グラフ出力になった i4 は適格外で f32 展開へ回る", 
     { name: "m.s", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
     { name: "m.w", dtype: "I4", shape: [4, 16], data: new Uint8Array(32) },
   ]);
-  const estimate = estimateSessionMemory(model);
-  assertEquals(estimate.compressedWeightBytes, 0);
-  assertEquals(estimate.uncompressedWeightBytes, 0);
-  assertEquals(estimate.expandedWeightBytes, 64 * 4);
+  const { weights } = estimateSessionMemory(model).resident;
+  assertEquals(weights.compressedBytes, 0);
+  assertEquals(weights.uncompressedBytes, 0);
+  assertEquals(weights.expandedBytes, 64 * 4);
 });
 
 // ---------------------------------------------------------------------------
@@ -399,12 +421,12 @@ const stateModel = (): KarumeModel =>
   ]);
 
 Deno.test("state は記号容量を解決したスロット合計 + 論理長 uniform", () => {
-  const estimate = estimateSessionMemory(stateModel(), {
+  const report = estimateSessionMemory(stateModel(), {
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
   });
   // k 1×2×8×4=64 要素 + v 1×2×6×4=48 要素 → (64+48)×4 = 448、論理長 uniform 8
-  assertEquals(estimate.stateBytes, 456);
+  assertEquals(report.resident.stateBytes, 456);
 });
 
 Deno.test("state の記号容量は generation.bindings でしか動かない", () => {
@@ -413,14 +435,105 @@ Deno.test("state の記号容量は generation.bindings でしか動かない", 
     estimateSessionMemory(model, {
       bindings: { T: 2 },
       generation: { chunkLength: 4, bindings: { C: capacity } },
-    }).stateBytes;
+    }).resident.stateBytes;
   // C だけが動く（v の 48 要素 + uniform 8 は固定）
   assertEquals(at(16), (1 * 2 * 16 * 4 + 48) * 4 + 8);
   assertEquals(at(1), (1 * 2 * 1 * 4 + 48) * 4 + 8);
 });
 
 Deno.test("generation を渡さなければ state は数えない", () => {
-  assertEquals(estimateSessionMemory(plainModel(), { bindings: { T: 7 } }).stateBytes, 0);
+  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  assertEquals(report.resident.stateBytes, 0);
+});
+
+// ---------------------------------------------------------------------------
+// シナリオ（ADR 0066 決定 4 の実行 2 形）
+// ---------------------------------------------------------------------------
+
+/**
+ * 物理 chunk 行が**記号**で載っているグラフ（`state_append` の入力 `h` が `[1,2,M,4]`）。
+ *
+ * `stateGraph` の `chunk` は数値次元なので、prefill / decode で shape が動くのはこちら。
+ * `M` は入力にも現れる（states 専用記号ではない）ので、束縛点が chunkLength 側であることも
+ * この形でだけ観測できる。
+ */
+const chunkSymbolGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["neg", "state_append"] },
+  symbols: ["M", "C"],
+  inputs: [{ name: "x", dtype: "f32", shape: [1, 2, "M", 4] }],
+  outputs: ["y"],
+  initializers: {},
+  values: {
+    h: { dtype: "f32", shape: [1, 2, "M", 4] },
+    y: { dtype: "f32", shape: [1, 2, "M", 4] },
+  },
+  states: { k: { dtype: "f32", shape: [1, 2, "C", 4] } },
+  nodes: [
+    { op: "neg", ins: ["x"], outs: ["h"], attrs: {} },
+    { op: "state_append", ins: ["h"], outs: [], attrs: {}, states: { slot: "k" } },
+    { op: "neg", ins: ["h"], outs: ["y"], attrs: {} },
+  ],
+});
+
+Deno.test("generation ありは prefill / decode の 2 本を自動導出する（chunk 記号だけが動く）", () => {
+  const report = estimateSessionMemory(openGraph(chunkSymbolGraph()), {
+    generation: { chunkLength: 4, bindings: { C: 8 } },
+  });
+  // prefill は M=4: x / y とも 1×2×4×4=32 要素 → io 128+128、中間は h と y の 128 ずつ
+  // （h は append と 2 本目の neg に消費されるので、y の確保時点でプールへ返っていない）。
+  // decode は M=1: 全て 1/4 の 8 要素ぶん。
+  assertEquals(report.scenarios, [
+    { name: "prefill", ioBytes: 256, workspaceBytes: 256 },
+    { name: "decode", ioBytes: 64, workspaceBytes: 64 },
+  ]);
+  // k 1×2×8×4=64 要素 ×4 = 256 + 論理長 uniform 8
+  assertEquals(report.resident.stateBytes, 264);
+  assertEquals(report.resident.weights.totalBytes, 0);
+  // 常駐 264 + max(512, 128) = 776。和で足すと 904 になる（backing は同時に 1 本）。
+  assertEquals(report.peakAccountedBytes, 776);
+});
+
+Deno.test("chunk 行が数値次元のグラフでは prefill と decode が同じ数字になる", () => {
+  // `stateGraph` の append 入力は initializer の `[1,2,4,4]`。記号で動かない形の decode step は
+  // 物理 chunk 行を prefill と同じまま queryLength=1 で回る（assertGenerationRun は
+  // rows === chunkLength を decode でも許す）ので、2 本が一致するのが正しい。
+  const report = estimateSessionMemory(stateModel(), {
+    bindings: { T: 2 },
+    generation: { chunkLength: 4, bindings: { C: 8 } },
+  });
+  const [prefill, decode] = report.scenarios;
+  assertEquals(prefill.name, "prefill");
+  assertEquals(decode.name, "decode");
+  assertEquals(prefill.ioBytes, decode.ioBytes);
+  assertEquals(prefill.workspaceBytes, decode.workspaceBytes);
+});
+
+Deno.test("generation なしの見積りはシナリオ 1 本（io / 中間の導出は従来と同じ）", () => {
+  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  // x[7,4]=112 + h[7,3]=84 + g[2,3]=24 = 220 / 中間は h 84 + g 24 = 108（改名前と同値）
+  assertEquals(report.scenarios, [{ name: "run", ioBytes: 220, workspaceBytes: 108 }]);
+});
+
+Deno.test("chunk 行の記号を options.bindings で受けない（束縛点は chunkLength と decode の 1）", () => {
+  assertThrows(
+    () =>
+      estimateSessionMemory(openGraph(chunkSymbolGraph()), {
+        bindings: { M: 4 },
+        generation: { chunkLength: 4, bindings: { C: 8 } },
+      }),
+    ExecutionError,
+    "物理 chunk 行 M の記号",
+  );
+});
+
+Deno.test("chunk 記号を持つグラフを generation 無しで見積らない", () => {
+  assertThrows(
+    () => estimateSessionMemory(openGraph(chunkSymbolGraph())),
+    ExecutionError,
+    "options.generation.chunkLength で",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -475,22 +588,27 @@ const fanOutGraph = (): GraphJson => ({
 
 Deno.test("直列チェーンのピークは同時生存 2 本ぶん（消費が尽きた中間は解放される）", () => {
   // 64 要素 = 256 バイト。t2 を確保した時点が 2 本 = 512
-  assertEquals(estimateSessionMemory(openGraph(chainGraph(["y"]))).transientBytes, 512);
+  assertEquals(
+    runScenario(estimateSessionMemory(openGraph(chainGraph(["y"])))).workspaceBytes,
+    512,
+  );
 });
 
 Deno.test("幅広 fan-out のピークは同時生存 4 本ぶん（解放が効いても畳む直前で重なる）", () => {
   // s を確保した時点で t1 / t2 / t3 / s の 4 本 = 1024
-  assertEquals(estimateSessionMemory(openGraph(fanOutGraph())).transientBytes, 1024);
+  assertEquals(runScenario(estimateSessionMemory(openGraph(fanOutGraph()))).workspaceBytes, 1024);
 });
 
 Deno.test("グラフ出力は消費が尽きても pinned のまま（解放されない）", () => {
   // t1 を graph.outputs に載せると、t2 の消費後も t1 が居座って 3 本ぶん重なる
-  assertEquals(estimateSessionMemory(openGraph(chainGraph(["t1", "y"]))).transientBytes, 768);
+  const report = estimateSessionMemory(openGraph(chainGraph(["t1", "y"])));
+  assertEquals(runScenario(report).workspaceBytes, 768);
 });
 
 Deno.test("initializer とグラフ入力は中間ピークに数えない（重み・io 側の勘定）", () => {
   // matmul の h（T=7 → 84）と embedding の g（24）だけが中間。x / w / emb / idx は数えない
-  assertEquals(estimateSessionMemory(plainModel(), { bindings: { T: 7 } }).transientBytes, 108);
+  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  assertEquals(runScenario(report).workspaceBytes, 108);
 });
 
 Deno.test("slot の再利用はサイズクラスの厳密一致だけ（断片化ぶんを過小に数えない）", () => {
@@ -527,7 +645,7 @@ Deno.test("slot の再利用はサイズクラスの厳密一致だけ（断片�
     { name: "m.w2", dtype: "F32", shape: [2, 3], data: f32Bytes(new Array(6).fill(1)) },
     { name: "m.w3", dtype: "F32", shape: [3, 1], data: f32Bytes([1, 1, 1]) },
   ]);
-  assertEquals(estimateSessionMemory(model).transientBytes, 24);
+  assertEquals(runScenario(estimateSessionMemory(model)).workspaceBytes, 24);
 });
 
 // ---------------------------------------------------------------------------
@@ -565,7 +683,8 @@ const aliasChainGraph = (): GraphJson => ({
 Deno.test("別名の鎖は根の実体 1 本だけを数える（reshape → reshape）", () => {
   // 確保が出るのは `h`（256）と `y`（256）の 2 本きり = 512。鎖の 2 本を確保すると、`h` が
   // 生きている間は再利用できず 768 になる。
-  assertEquals(estimateSessionMemory(openGraph(aliasChainGraph())).transientBytes, 512);
+  const report = estimateSessionMemory(openGraph(aliasChainGraph()));
+  assertEquals(runScenario(report).workspaceBytes, 512);
 });
 
 /** `neg` → `expand` の 2 本。出力 shape で恒等 / 非恒等を切り替える。 */
@@ -588,10 +707,12 @@ const aliasExpandGraph = (outShape: readonly number[]): GraphJson => ({
 });
 
 Deno.test("恒等 expand は確保を出さず、複製軸のある expand は実体化ぶんを数える", () => {
+  const workspaceOf = (outShape: readonly number[]): number =>
+    runScenario(estimateSessionMemory(openGraph(aliasExpandGraph(outShape)))).workspaceBytes;
   // 恒等（[1,4] → [1,4]）は別名 = `h` の 16 バイト 1 本だけ。
-  assertEquals(estimateSessionMemory(openGraph(aliasExpandGraph([1, 4]))).transientBytes, 16);
+  assertEquals(workspaceOf([1, 4]), 16);
   // 複製軸あり（[1,4] → [3,4]）は strided 実体化コピーへ戻る = 16 + 48。
-  assertEquals(estimateSessionMemory(openGraph(aliasExpandGraph([3, 4]))).transientBytes, 64);
+  assertEquals(workspaceOf([3, 4]), 64);
 });
 
 /**
@@ -623,7 +744,8 @@ const pinnedAliasGraph = (): GraphJson => ({
 Deno.test("グラフ出力が別名名義でも pin が効くのは根の実体（プールへ返らない）", () => {
   // `h`（pin された根）+ `t` + `y` の 3 本 = 768。pin が根へ届かないと `h` がプールへ戻って
   // `t` に配り直され、512 に縮む（= readback 可能な実体を他の値と共有する誤り）。
-  assertEquals(estimateSessionMemory(openGraph(pinnedAliasGraph())).transientBytes, 768);
+  const report = estimateSessionMemory(openGraph(pinnedAliasGraph()));
+  assertEquals(runScenario(report).workspaceBytes, 768);
 });
 
 // ---------------------------------------------------------------------------
@@ -759,7 +881,7 @@ Deno.test("融合が掛からない形では estimator の中間総量と slot �
   // （別名 r1 / r2 / e1 / yv / kv は 1 本も生やさない）。
   assertEquals(slots.bytes, [256, 16, 48, 48, 256, 256, 20, 20]);
   assertEquals(slotTotal, 920);
-  assertEquals(estimateSessionMemory(model).transientBytes, slotTotal);
+  assertEquals(runScenario(estimateSessionMemory(model)).workspaceBytes, slotTotal);
 });
 
 // ---------------------------------------------------------------------------
@@ -870,7 +992,7 @@ Deno.test("unaccounted は勘定に入っていないものを明示する（見
  * mul 被演算子（適格外 = f32 展開）・f32 の add 被演算子（非圧縮のまま常駐）。
  *
  * 圧縮 / 展開の 2 欄は診断 `storage` と厳密一致を主張でき、f32 は診断に現れない
- * （`uncompressedWeightBytes` の欄を分けている理由そのもの）ので手計算定数と突合する。
+ * （`weights.uncompressedBytes` の欄を分けている理由そのもの）ので手計算定数と突合する。
  */
 const gpuWeightModel = (): KarumeModel => {
   const table = fill([5, 3], (i) => (i % 7) - 3);
@@ -921,10 +1043,11 @@ Deno.test({
       try {
         await session.run({ ids: fill([2], (i) => i, "i32") });
         const storage = session.diagnostics().storage;
-        assertEquals(estimate.compressedWeightBytes, storage.residentCompressedBytes);
-        assertEquals(estimate.expandedWeightBytes, storage.hostExpandedBytes);
+        const { weights } = estimate.resident;
+        assertEquals(weights.compressedBytes, storage.residentCompressedBytes);
+        assertEquals(weights.expandedBytes, storage.hostExpandedBytes);
         // f32 の c は診断に現れない（ADR 0006 の storage 診断は低精度格納だけ）— 手計算 3×4
-        assertEquals(estimate.uncompressedWeightBytes, 12);
+        assertEquals(weights.uncompressedBytes, 12);
       } finally {
         await session.dispose();
       }
@@ -936,14 +1059,14 @@ Deno.test({
       try {
         const context = await stateSession.createGenerationContext(generation);
         assertEquals(
-          stateEstimate.stateBytes,
+          stateEstimate.resident.stateBytes,
           stateSession.diagnostics().stateBacking.residentBytes,
         );
         await context.dispose();
       } finally {
         await stateSession.dispose();
       }
-      // transientBytes は突合しない — 融合が中間を消し、行ブロック分割が一時を足すので
+      // workspaceBytes は突合しない — 融合が中間を消し、行ブロック分割が一時を足すので
       // 実測（planBacking.residentBytes / lastRun.peakTransientBytes）とは原理的にずれる
       // （estimator の unaccounted 欄が認めている差そのもの）。
     } finally {

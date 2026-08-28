@@ -38,9 +38,13 @@ Deno.test("prepareModel の見積りは重み shard 抜きで全量面と一致�
   assertEquals(estimate, estimateSessionMemory(openModel(fixture.fullBuffer())));
   // 恒真化の防波堤: 4 格納混在の fixture なので圧縮常駐と非圧縮常駐がどちらも 0 でない
   // （全欄 0 どうしの一致で通ってしまう形を塞ぐ）。
-  assert(estimate.compressedWeightBytes > 0, "圧縮常駐が 0（fixture が壊れている）");
-  assert(estimate.uncompressedWeightBytes > 0, "非圧縮常駐が 0（fixture が壊れている）");
-  assert(estimate.totalBytes > estimate.compressedWeightBytes, "合計が重みだけになっている");
+  const { weights } = estimate.resident;
+  assert(weights.compressedBytes > 0, "圧縮常駐が 0（fixture が壊れている）");
+  assert(weights.uncompressedBytes > 0, "非圧縮常駐が 0（fixture が壊れている）");
+  assert(
+    estimate.peakAccountedBytes > weights.totalBytes,
+    "ピークが重み常駐だけになっている（シナリオ側が乗っていない）",
+  );
   // 同じ PreparedModel から何度呼んでも同じ（prepare 相は消費されない）
   assertEquals(prepared.estimate(), estimate);
 });

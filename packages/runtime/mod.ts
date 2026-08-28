@@ -93,7 +93,12 @@ export type { ModelShard } from "./src/runtime/executor.ts";
  * バイト数だけを出す — 空き側との比較・可否判定はしない（最終門は out-of-memory errorScope）。
  */
 export { estimateSessionMemory } from "./src/runtime/estimate.ts";
-export type { EstimateOptions, MemoryEstimate } from "./src/runtime/estimate.ts";
+export type {
+  AdmissionReport,
+  AdmissionScenario,
+  AdmissionScenarioName,
+  EstimateOptions,
+} from "./src/runtime/estimate.ts";
 /**
  * Session の構築は {@link createSession} だけを入口にするため、型としてのみ公開する。
  *

@@ -52,7 +52,7 @@ import type { ScoreStorage } from "../kernels/score-storage.ts";
 /** S の格納形（{@link SessionOptions.attentionScoreStorage} — 公開面で名前を持てるように再輸出）。 */
 export type { ScoreStorage } from "../kernels/score-storage.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
-import { estimateGraphMemory, type EstimateOptions, type MemoryEstimate } from "./estimate.ts";
+import { type AdmissionReport, estimateGraphMemory, type EstimateOptions } from "./estimate.ts";
 import { type ExecStep, type FusionCounts, planFusions } from "./fusion.ts";
 import { GenerationContext, type GenerationContextHost } from "./generation-context.ts";
 /**
@@ -2336,7 +2336,7 @@ export class PreparedModel {
    * バイト数と勘定に入っていないものの列だけ。可否の判定はしない（最終門は out-of-memory
    * errorScope のまま）。全量面 `estimateSessionMemory` と**同じ実装 1 本**。
    */
-  estimate(options: EstimateOptions = {}): MemoryEstimate {
+  estimate(options: EstimateOptions = {}): AdmissionReport {
     return estimateGraphMemory(this.#graph, this.#residency, options);
   }
 

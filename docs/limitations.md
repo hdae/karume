@@ -184,9 +184,10 @@ hub は 2 形パースをしない = ADR 0041）。shard 列は手元で組ん�
 - hub の相 1（streaming prefetch）は CacheStorage 必須で fail loud（バイト列を手元に持たない
   面なので素 fetch へ縮退する余地が無い — ADR 0070 追記）。`onCacheError` 診断が届くのは
   相 2 のみ。
-- `estimateSessionMemory` の `transientBytes` は**近似**（融合前ノード列の生存区間
-  シミュレーション）。融合・行ブロック分割・params は `unaccounted` 欄が明示する非勘定で、
-  可否の最終門はこれまでどおり out-of-memory errorScope。
+- `estimateSessionMemory` の `scenarios[].workspaceBytes` は**近似**（融合前ノード列の生存区間
+  シミュレーション）。融合・行ブロック分割・params・シナリオ切替の窓は `unaccounted` 欄が
+  明示する非勘定で、可否の最終門はこれまでどおり out-of-memory errorScope。
+  `peakAccountedBytes` も名前どおり「勘定に入れた分のピーク」で、上限保証ではない。
 
 ## 要素数が奇数の f16 テンソル・I8 テンソルは safetensors 上の並び順に制約がある
 

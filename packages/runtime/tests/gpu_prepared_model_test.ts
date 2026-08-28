@@ -56,7 +56,7 @@ Deno.test({
         assert(storage.residentCompressedBytes > 0, "圧縮常駐が 1 本も無い");
         // 重み shard を 1 バイトも取る前に出した数字が、実測の圧縮常駐と厳密一致する
         // （ADR 0070 決定 5 の対応表 — 2 段境界にした意味がここに出る）
-        assertEquals(estimate.compressedWeightBytes, storage.residentCompressedBytes);
+        assertEquals(estimate.resident.weights.compressedBytes, storage.residentCompressedBytes);
       } finally {
         await twoPhase.dispose();
         await composed.dispose();

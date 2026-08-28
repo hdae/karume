@@ -6,28 +6,36 @@
  * 瞬間に「予算が取れない環境での当て推量」になる（ADR 0070 決定 5 — llama.cpp の 0/0 デバイス
  * 除外と同型の前例）。ここが返すのは数字だけで、可否の判定は一切しない。
  * MUST: 見積りは**絶対保証ではない**。勘定に入っていないものは
- * {@link MemoryEstimate.unaccounted} が形式として認め、実際の**最終門は out-of-memory
+ * {@link AdmissionReport.unaccounted} が形式として認め、実際の**最終門は out-of-memory
  * errorScope**（src/gpu/device.ts の 2 本組）のまま — estimator は Session 構築 /
  * `createGenerationContext` の事前診断であって、超えていても実行は止めない。
  *
+ * 報告の形は**常駐 + シナリオ**の 2 段（ADR 0070 決定 5 の再具体化）。Session が寿命を通じて
+ * 抱えるもの（重み・state スロット）は {@link AdmissionReport.resident} の 1 組で、run の形
+ * （prefill / decode）ごとに変わるものは {@link AdmissionReport.scenarios} に**別々の計算**
+ * として並ぶ。同じ数字を 1 本に潰すと、prefill 形でしか出ない中間の山を decode しか回さない
+ * 呼び手に押しつけるか、その逆に decode の数字で prefill を通すかのどちらかになる。
+ *
  * 実測（{@link SessionDiagnostics}）との対応:
- * - {@link MemoryEstimate.compressedWeightBytes} ↔ `storage.residentCompressedBytes`
- * - {@link MemoryEstimate.expandedWeightBytes} ↔ `storage.hostExpandedBytes`
- * - {@link MemoryEstimate.uncompressedWeightBytes} — 対応する診断欄は無い（ADR 0006 の
- *   `storage` 診断は低精度格納の実績だけを数える。実測の総量は `weights.allocatedBytes` —
- *   params 込み — でしか観測できない）
- * - {@link MemoryEstimate.stateBytes} ↔ `stateBacking.residentBytes`（context 1 本のとき）
- * - {@link MemoryEstimate.transientBytes} ↔ `planBacking.residentBytes` /
- *   `lastRun.peakTransientBytes`
+ * - {@link AdmissionReport.resident}`.weights.compressedBytes` ↔ `storage.residentCompressedBytes`
+ * - {@link AdmissionReport.resident}`.weights.expandedBytes` ↔ `storage.hostExpandedBytes`
+ * - {@link AdmissionReport.resident}`.weights.uncompressedBytes` — 対応する診断欄は無い
+ *   （ADR 0006 の `storage` 診断は低精度格納の実績だけを数える。実測の総量は
+ *   `weights.allocatedBytes` — params 込み — でしか観測できない）
+ * - {@link AdmissionReport.resident}`.stateBytes` ↔ `stateBacking.residentBytes`（context 1 本のとき）
+ * - {@link AdmissionScenario.workspaceBytes} ↔ `planBacking.residentBytes` /
+ *   `lastRun.peakTransientBytes`（そのシナリオの形で回した run のもの）
  *
  * MUST: 分類も算式も**実装と同じ導出元**から引く（重みの席と宣言由来バイト数は
  * weight-residency.ts の純関数プランナ、整列とサイズクラスは `toSizeClass`、state の 1 要素
- * バイト数と論理長 uniform は generation-context.ts の定数）。式をここで書き直すと、片方だけ
- * 直された実装に対して estimator が例外も警告も無く別の数を主張し続ける。
+ * バイト数と論理長 uniform は generation-context.ts の定数、物理 chunk 行 `M` の載る軸は
+ * ops/shapes.ts の op 契約）。式をここで書き直すと、片方だけ直された実装に対して estimator が
+ * 例外も警告も無く別の数を主張し続ける。
  */
 
 import { assertRuntimeSupport, type KarumeModel } from "../format/container.ts";
-import type { IrGraph } from "../format/ir.ts";
+import { parseDim, solveDim } from "../format/dims.ts";
+import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { aliasesInput } from "./fusion.ts";
@@ -50,32 +58,20 @@ import {
 import type { GenerationContextSpec } from "./session-types.ts";
 import { planWeightResidency, type WeightResidency } from "./weight-residency.ts";
 
-/** カテゴリ別の必要バイト数（{@link estimateSessionMemory} の戻り）。 */
-export type MemoryEstimate = {
-  /**
-   * 圧縮のまま GPU 常駐する重み + companion scale のバイト数（整列詰め物込み — 厳密）。
-   * 診断の `storage.residentCompressedBytes` と厳密に対応する（0 要素テンソルの 4 バイト床
-   * だけが唯一の差 — 診断側は床なしの実バイトを数える）。
-   */
-  readonly compressedWeightBytes: number;
-  /**
-   * 圧縮しない格納（f32 / i32）のまま常駐する重みのバイト数（厳密）。
-   *
-   * MUST: 圧縮 / 展開と別の欄で持つ — 診断の `storage` は低精度格納の実績だけを数える
-   * （ADR 0006）ので、ここを {@link MemoryEstimate.compressedWeightBytes} に混ぜると
-   * 「診断との厳密一致」が f32 重みを持つモデルで沈黙して崩れる。
-   */
-  readonly uncompressedWeightBytes: number;
-  /** 適格外でロード時に f32 展開して常駐する重みの展開後バイト数（厳密）。 */
-  readonly expandedWeightBytes: number;
-  /**
-   * `GenerationContext` 1 本ぶんの state スロット + 論理長 uniform（厳密）。
-   *
-   * NOTE: `options.generation` を省略すると 0。`graph.states` が非空なグラフでは
-   * {@link MemoryEstimate.transientBytes} の計画が state スロットの解決済み shape を要求する
-   * ので、そもそも generation 無しでは見積れず fail loudly になる（黙って 0 を返す窓は無い）。
-   */
-  readonly stateBytes: number;
+/**
+ * シナリオの名前。`generation` を渡さない見積りは `"run"` の 1 本、渡した見積りは
+ * ADR 0066 決定 4 の実行 2 形（`"prefill"` / `"decode"`）。
+ */
+export type AdmissionScenarioName = "run" | "prefill" | "decode";
+
+/**
+ * run の形 1 つぶんの必要バイト数（{@link AdmissionReport.scenarios} の 1 要素）。
+ *
+ * ここに入るのは**run の形で変わるものだけ** — 重みと state スロットは形に依らないので
+ * {@link AdmissionReport.resident} の側にある。
+ */
+export type AdmissionScenario = {
+  readonly name: AdmissionScenarioName;
   /** グラフ入力バッファ + 出力 readback staging（厳密）。 */
   readonly ioBytes: number;
   /**
@@ -84,19 +80,68 @@ export type MemoryEstimate = {
    * 融合前のノード列を宣言順に歩き、実行相と同じ確保規則（exact-size LIFO 再利用・
    * 消費回数は `countUses`・グラフ出力は pinned で解放しない・reshape / 恒等 expand の出力は
    * 確保せず入力の実体を別名で使う）で slot 表を再生した総バイト。融合が消す中間・行ブロック
-   * 分割やノード内の一時は勘定に入らない（{@link MemoryEstimate.unaccounted}）。
+   * 分割やノード内の一時は勘定に入らない（{@link AdmissionReport.unaccounted}）。
    */
-  readonly transientBytes: number;
-  /** 上記の合計。 */
-  readonly totalBytes: number;
+  readonly workspaceBytes: number;
+};
+
+/** 必要バイト数の報告（{@link estimateSessionMemory} / `PreparedModel.estimate` の戻り）。 */
+export type AdmissionReport = {
+  /** run の形に依らず Session の寿命ぶん抱えるもの。 */
+  readonly resident: {
+    readonly weights: {
+      /**
+       * 圧縮のまま GPU 常駐する重み + companion scale のバイト数（整列詰め物込み — 厳密）。
+       * 診断の `storage.residentCompressedBytes` と厳密に対応する（0 要素テンソルの 4 バイト床
+       * だけが唯一の差 — 診断側は床なしの実バイトを数える）。
+       */
+      readonly compressedBytes: number;
+      /**
+       * 圧縮しない格納（f32 / i32）のまま常駐する重みのバイト数（厳密）。
+       *
+       * MUST: 圧縮 / 展開と別の欄で持つ — 診断の `storage` は低精度格納の実績だけを数える
+       * （ADR 0006）ので、ここを `compressedBytes` に混ぜると「診断との厳密一致」が f32 重みを
+       * 持つモデルで沈黙して崩れる。
+       */
+      readonly uncompressedBytes: number;
+      /** 適格外でロード時に f32 展開して常駐する重みの展開後バイト数（厳密）。 */
+      readonly expandedBytes: number;
+      /** 上記 3 欄の和。 */
+      readonly totalBytes: number;
+    };
+    /**
+     * `GenerationContext` 1 本ぶんの state スロット + 論理長 uniform（厳密）。
+     *
+     * NOTE: `options.generation` を省略すると 0。`graph.states` が非空なグラフでは
+     * {@link AdmissionScenario.workspaceBytes} の計画が state スロットの解決済み shape を
+     * 要求するので、そもそも generation 無しでは見積れず fail loudly になる（黙って 0 を返す
+     * 窓は無い）。
+     */
+    readonly stateBytes: number;
+  };
+  /** run の形ごとの必要バイト数（1 要素以上 — 名前の決まり方は {@link AdmissionScenarioName}）。 */
+  readonly scenarios: readonly AdmissionScenario[];
+  /**
+   * 常駐の総和 + シナリオ側の最大（= `resident.weights.totalBytes + resident.stateBytes +
+   * max(ioBytes + workspaceBytes)`）。
+   *
+   * **上限保証ではなく「勘定に入れた分のピーク」**を名乗る欄（名前の由来）。シナリオ側を和では
+   * なく max で足すのは、Session が抱える slot backing が**同時に 1 本**だから — 計画
+   * （`PreparedPlan`）は `PREPARED_PLAN_CAPACITY = 4` 本まで LRU で残るが、実体を持つ
+   * `ActiveBacking` は容量 1 で、別 signature の run はまず現行 backing を退役させてから
+   * 確保し直す（executor の `Session.#activateBacking` / `#retireBacking`）。退役から実際の
+   * `destroy()` までの窓で 2 本ぶんが同時に載る点は {@link AdmissionReport.unaccounted} 側。
+   */
+  readonly peakAccountedBytes: number;
   /** 勘定に入っていないもの（見積りが絶対保証でないことを形式が認める欄 — ADR 0070 決定 5）。 */
   readonly unaccounted: readonly string[];
 };
 
 export type EstimateOptions = {
   /**
-   * 記号次元の値（グラフ入力側 — run に渡すのと同じ束縛）。states 専用記号は
-   * {@link EstimateOptions.generation} の側で与える。
+   * 記号次元の値（グラフ入力側 — run に渡すのと同じ束縛）。states 専用記号（容量）と
+   * 物理 chunk 行 `M` の記号は、どちらも {@link EstimateOptions.generation} の側から決まるので
+   * ここでは受けない（前者は `generation.bindings`・後者は `generation.chunkLength`）。
    */
   readonly bindings?: SymbolBindings;
   /** 見積る `GenerationContext` の仕様（省略すると state を数えない）。 */
@@ -113,6 +158,7 @@ const UNACCOUNTED: readonly string[] = Object.freeze([
   "融合が畳んで消す中間と、行ブロック分割の一時（どちらも device limit と融合の成立に依存する。reshape / 恒等 expand の別名は勘定に入っている）",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
+  "シナリオ切替の窓（退役した slot backing は次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、prefill ⇄ decode の切替 run では 2 シナリオぶんの io + workspace が同時に載る）",
 ]);
 
 /** 解決済み shape を引く（planGraph が全値を載せているので、欠けは簿記の破れ）。 */
@@ -126,30 +172,114 @@ const shapeOf = (
 };
 
 /**
+ * 物理 chunk 行 `M` が載る軸。
+ *
+ * MUST: 位置の正本は **op 契約**（ops/shapes.ts）。states 形の attention は
+ * `q[B,H,M,D]` / `k`,`v``[B,Hkv,M,D]`（M は q / k / v で一致することも契約が見ている）、
+ * `state_append` は `x[B,Hkv,M,D]` で、どちらも軸 2。ここで別の軸を書くと、estimator だけが
+ * 実行と違う次元を chunk 行と見なして prefill / decode を取り違える。
+ */
+const CHUNK_ROW_AXIS = 2;
+
+/**
+ * 物理 chunk 行 `M` を決めている**次元宣言**（記号を含むものだけ・重複排除済み）。
+ *
+ * 判別は「states 欄が非空なノードの入力」= states 形の判別そのもの（ADR 0067 決定 4 —
+ * recipe-builder の `#buildStateAttention` / `#buildStateAppend` が `states.chunkRows` へ
+ * 積むのと同じノード集合）。数値次元は記号で動かない形なので拾わない — その形の decode step は
+ * 物理 chunk 行を prefill と同じまま `queryLength = 1` で回る（`assertGenerationRun` は
+ * `rows === chunkLength` を decode でも許す）ので、2 シナリオが同じ数字になるのが正しい。
+ */
+const chunkRowDims = (graph: IrGraph): readonly string[] => {
+  const declared = new Map<string, readonly IrDim[]>();
+  for (const spec of graph.inputs) declared.set(spec.name, spec.shape);
+  for (const [name, value] of Object.entries(graph.values)) declared.set(name, value.shape);
+  const dims = new Set<string>();
+  for (const node of graph.nodes) {
+    if (Object.keys(node.states).length === 0) continue;
+    // 宣言が引けない名前（initializer だけの値など）は planGraph が落とす — ここでは飛ばす。
+    for (const name of node.ins) {
+      const dim = declared.get(name)?.[CHUNK_ROW_AXIS];
+      if (typeof dim === "string") dims.add(dim);
+    }
+  }
+  return [...dims];
+};
+
+/**
  * 値 shape の解決に使う束縛を検査して写す。
  *
  * MUST: states 専用記号をここで受けない（`bindSymbols` と同じ分担 — 容量の正本は
  * `createGenerationContext` の側で、ここで受けると「state 容量を渡したのに 0 と出る」
  * 沈黙誤答になる）。未束縛は fail loudly（黙って 0 で埋めない）。
+ * MUST: chunk 行の記号もここで受けない（束縛点は `options.generation.chunkLength` と decode 形の
+ * 1 で、シナリオごとに値が変わる第 3 の束縛点）。受けて上書きすると「prefill と決め打った値を
+ * 渡したのに decode の数字が返る」沈黙上書きになり、受けて優先すると 2 本のシナリオが同じ形に
+ * 潰れる。
  */
-const planBindings = (graph: IrGraph, bindings: SymbolBindings | undefined): SymbolBindings => {
+const planBindings = (
+  graph: IrGraph,
+  bindings: SymbolBindings | undefined,
+  chunkSymbols: ReadonlySet<string>,
+): SymbolBindings => {
   // 記号の実在と非負整数の検査、および null プロトタイプの器は resolveBindings が持つ。
   const resolved = resolveBindings(graph, bindings);
   const statesOnly = statesOnlySymbols(graph);
   for (const sym of Object.keys(resolved)) {
-    if (!statesOnly.has(sym)) continue;
-    throw new ExecutionError(
-      `束縛 '${sym}' は states 専用記号 — options.generation.bindings で与えること` +
-        "（ADR 0066 追記 7 の束縛点 2）",
-    );
+    if (statesOnly.has(sym)) {
+      throw new ExecutionError(
+        `束縛 '${sym}' は states 専用記号 — options.generation.bindings で与えること` +
+          "（ADR 0066 追記 7 の束縛点 2）",
+      );
+    }
+    if (chunkSymbols.has(sym)) {
+      throw new ExecutionError(
+        `束縛 '${sym}' は物理 chunk 行 M の記号 — 値は options.generation.chunkLength` +
+          "（prefill 形）と 1（decode 形）から導く（ADR 0066 決定 4 の実行 2 形）",
+      );
+    }
   }
   for (const sym of graph.symbols) {
-    if (statesOnly.has(sym) || Object.hasOwn(resolved, sym)) continue;
+    if (statesOnly.has(sym) || chunkSymbols.has(sym) || Object.hasOwn(resolved, sym)) continue;
     throw new ExecutionError(
       `シンボル '${sym}' が束縛されていない（options.bindings で与えること）`,
     );
   }
   return resolved;
+};
+
+/**
+ * chunk 行を `rows` 行にしたシナリオの束縛（`base` の写しに chunk 記号を足す）。
+ *
+ * MUST: 逆解きは実行と同じ 1 本（{@link solveDim} — `bindSymbols` が実入力の実寸から束縛を
+ * 解くのに使うのと同じ関数）。派生形（`2M`）を丸めて受けると、宣言と 1 行ずれた chunk を
+ * 見積った数字が「その形で走る」顔をして返る。
+ */
+const bindChunkRows = (
+  base: SymbolBindings,
+  dims: readonly string[],
+  rows: number,
+  scenario: AdmissionScenarioName,
+): SymbolBindings => {
+  const bindings: Record<string, number> = Object.assign(Object.create(null), base);
+  for (const dim of dims) {
+    const expr = parseDim(dim);
+    const solved = solveDim(expr, rows);
+    if (solved === undefined) {
+      throw new ExecutionError(
+        `シナリオ '${scenario}': 物理 chunk 行 ${rows} が宣言 '${dim}' の形をしていない` +
+          `（${expr.coeff} で割り切れる ${expr.offset} 以上の行数が要る — ADR 0066 決定 4）`,
+      );
+    }
+    if (Object.hasOwn(bindings, expr.sym) && bindings[expr.sym] !== solved) {
+      throw new ExecutionError(
+        `シナリオ '${scenario}': 記号 '${expr.sym}' の束縛が衝突（${bindings[expr.sym]} と ` +
+          `${solved}） — chunk 行の宣言が 1 グラフ内で割れている`,
+      );
+    }
+    bindings[expr.sym] = solved;
+  }
+  return bindings;
 };
 
 /** state スロットの見積り（{@link GenerationContext} の確保と同じ式 — 値の複製はしない）。 */
@@ -307,15 +437,17 @@ const transientSlotBytes = (graph: IrGraph, nodes: readonly NodePlan[]): number 
  * 最終門は out-of-memory errorScope のままで、この見積りを超えていても実行は止まらない。
  *
  * @param options.bindings グラフ入力側の記号次元（run に渡すのと同じ束縛）。未束縛の記号が
- *   要る形は fail loudly。
+ *   要る形は fail loudly。物理 chunk 行 `M` の記号だけは**ここでは受けない**（束縛点は
+ *   `options.generation.chunkLength` と decode 形の 1 — {@link planBindings}）。
  * @param options.generation 見積る `GenerationContext` の仕様。省略すると
- *   {@link MemoryEstimate.stateBytes} は 0（states 形グラフでは省略できない — 中間ピークの
- *   計画がスロットの解決済み shape を要求する）。
+ *   `resident.stateBytes` は 0・シナリオは `"run"` の 1 本（states 形グラフでは省略できない —
+ *   中間ピークの計画がスロットの解決済み shape を要求する）。渡すとシナリオは
+ *   `"prefill"` / `"decode"` の 2 本になる。
  */
 export const estimateSessionMemory = (
   model: KarumeModel,
   options: EstimateOptions = {},
-): MemoryEstimate => estimateGraphMemory(model.graph, planWeightResidency(model.graph), options);
+): AdmissionReport => estimateGraphMemory(model.graph, planWeightResidency(model.graph), options);
 
 /**
  * 見積りの本体（グラフと常駐計画だけで完結する — 全量面 {@link estimateSessionMemory} と
@@ -329,7 +461,7 @@ export const estimateGraphMemory = (
   graph: IrGraph,
   residency: ReadonlyMap<string, WeightResidency>,
   options: EstimateOptions,
-): MemoryEstimate => {
+): AdmissionReport => {
   // MUST: 実構築（`createSession` / `createSessionFromShards`）と**同じ門**を先に通す。
   // 作れない構成へ見積りを返すと、格納 dtype や op が非対応のモデルに対して estimator だけが
   // もっともらしい総量を主張する（例: 格納 `bf16` は IR の語彙にはあるが RUNTIME_SUPPORT に
@@ -337,32 +469,61 @@ export const estimateGraphMemory = (
   // NOTE: これは capability 検査であって空き側との比較ではないので、ADR 0070 決定 5 の
   // 「比較をしない」規律には抵触しない（GPU にも触らず純関数のまま）。
   assertRuntimeSupport(graph, RUNTIME_SUPPORT);
-  const bindings = planBindings(graph, options.bindings);
+  const chunkDims = chunkRowDims(graph);
+  const chunkSymbols = new Set(chunkDims.map((dim) => parseDim(dim).sym));
+  const bindings = planBindings(graph, options.bindings, chunkSymbols);
   const state = stateEstimate(graph, options.generation);
-  // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —
-  // ADR 0066 追記 7 — に見積りだけが正常値を返さない）。
-  if (state.bindings !== undefined) assertGenerationBindings(state.bindings, bindings);
   const weights = weightEstimate(residency);
-  const plan = planGraph(graph, bindings, state.shapes);
 
-  // 入力バッファと出力 readback staging は同じ床つきの式（executor の `#bindInput` /
-  // `#activateBacking` / `#stageOutputs` — `Math.max(4, numel×4)` は toSizeClass と同値）。
-  let ioBytes = 0;
-  for (const spec of graph.inputs) {
-    ioBytes += toSizeClass(numel(shapeOf(plan.shapes, spec.name)) * 4);
+  const chunkLength = options.generation?.chunkLength;
+  if (chunkLength === undefined && chunkDims.length > 0) {
+    // states 形ノードを持つグラフは GenerationContext 無しでは走らない（ADR 0066 決定 1）。
+    // ここで落とさないと、chunk 記号が未束縛のまま planGraph の次元評価で落ちて、束縛点を
+    // 名乗らない DimError になる。
+    throw new ExecutionError(
+      `物理 chunk 行 M の記号 [${chunkDims.join(", ")}] は options.generation.chunkLength で` +
+        "しか束縛できない（states 形ノードを持つグラフは GenerationContext が要る）",
+    );
   }
-  for (const name of graph.outputs) ioBytes += toSizeClass(numel(shapeOf(plan.shapes, name)) * 4);
-  const transientBytes = transientSlotBytes(graph, plan.nodes);
+  // ADR 0066 決定 4 の実行 2 形をそれぞれ独立に計算する（chunk 行だけが違う同じグラフ）。
+  const plans: readonly (readonly [AdmissionScenarioName, SymbolBindings])[] =
+    chunkLength === undefined ? [["run", bindings]] : [
+      ["prefill", bindChunkRows(bindings, chunkDims, chunkLength, "prefill")],
+      ["decode", bindChunkRows(bindings, chunkDims, 1, "decode")],
+    ];
 
+  const scenarios = plans.map(([name, scenarioBindings]): AdmissionScenario => {
+    // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —
+    // ADR 0066 追記 7 — に見積りだけが正常値を返さない）。シナリオごとに解決値が変わるので
+    // 照合もシナリオごと。
+    if (state.bindings !== undefined) assertGenerationBindings(state.bindings, scenarioBindings);
+    const plan = planGraph(graph, scenarioBindings, state.shapes);
+    // 入力バッファと出力 readback staging は同じ床つきの式（executor の `#bindInput` /
+    // `#activateBacking` / `#stageOutputs` — `Math.max(4, numel×4)` は toSizeClass と同値）。
+    let ioBytes = 0;
+    for (const spec of graph.inputs) {
+      ioBytes += toSizeClass(numel(shapeOf(plan.shapes, spec.name)) * 4);
+    }
+    for (const name of graph.outputs) ioBytes += toSizeClass(numel(shapeOf(plan.shapes, name)) * 4);
+    return { name, ioBytes, workspaceBytes: transientSlotBytes(graph, plan.nodes) };
+  });
+
+  const weightBytes = weights.compressed + weights.uncompressed + weights.expanded;
+  const peakScenarioBytes = Math.max(
+    ...scenarios.map((scenario) => scenario.ioBytes + scenario.workspaceBytes),
+  );
   return {
-    compressedWeightBytes: weights.compressed,
-    uncompressedWeightBytes: weights.uncompressed,
-    expandedWeightBytes: weights.expanded,
-    stateBytes: state.bytes,
-    ioBytes,
-    transientBytes,
-    totalBytes: weights.compressed + weights.uncompressed + weights.expanded + state.bytes +
-      ioBytes + transientBytes,
+    resident: {
+      weights: {
+        compressedBytes: weights.compressed,
+        uncompressedBytes: weights.uncompressed,
+        expandedBytes: weights.expanded,
+        totalBytes: weightBytes,
+      },
+      stateBytes: state.bytes,
+    },
+    scenarios,
+    peakAccountedBytes: weightBytes + state.bytes + peakScenarioBytes,
     unaccounted: UNACCOUNTED,
   };
 };
