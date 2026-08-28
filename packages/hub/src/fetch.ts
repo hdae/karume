@@ -584,10 +584,16 @@ export const fetchAssets = async (
   return assets;
 };
 
-/** {@link streamAssets} が 1 本ずつ引き渡す shard。 */
+/**
+ * {@link streamAssets} が 1 本ずつ引き渡す shard。runtime の `ModelShard` と**構造互換**で、
+ * `streamAssets(...)` をそのまま `createSessionFromShards` へ渡せる。
+ */
 export type StreamedAsset = {
-  /** manifest が宣言していた path（`refs` に渡した順で届く）。 */
-  readonly path: string;
+  /**
+   * id = manifest の path（`refs` に渡した順で届く）。runtime 側はこれを失敗とフェンスの
+   * 帰属先に使う — 到着順の連番では配布形のどのファイルかが決まらない。
+   */
+  readonly id: string;
   /** 検証（size / sha256）を通ったバイト列。buffer 全体を占める。 */
   readonly bytes: Uint8Array<ArrayBuffer>;
 };
@@ -800,7 +806,7 @@ export const streamAssets = async function* (
     // MUST: ここで手放す — 引き渡したバイト列を generator 側の表に溜めない（溜めた瞬間に
     // 全量面と同じ RAM 特性に戻り、この面の存在理由が消える）。次の反復に入れば `bytes` の
     // 束縛ごと到達不能になるので、常駐するのは「今の 1 本」だけ。
-    yield { path: ref.path, bytes: asset };
+    yield { id: ref.path, bytes: asset };
   }
 };
 

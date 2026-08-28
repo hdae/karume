@@ -352,20 +352,63 @@ const assertChannelScale = (
 };
 
 /**
- * Session 構築（{@link Session.#build}）が消費する shard 1 本。`label` はエラーとフェンスの
- * 帰属先（全量面は従来文言・shard 面は `shard [n] の…`）で、粒度が変わっても既存面の
- * エラー文言が変わらないようにする。
+ * shard 逐次面（{@link createSessionFromShards}）が 1 本ずつ受け取る shard。
+ *
+ * hub の `StreamedAsset`（`id` = manifest の path）と**構造互換**の型を runtime 側で独立に
+ * 持つ — runtime → hub の依存を作らずに、配布形のファイル名を失敗の帰属先へ通すため。
+ */
+export type ModelShard = {
+  /**
+   * 資産の実名（hub 経由なら manifest の path）。
+   *
+   * MUST: 失敗とフェンスの帰属はこの id を名乗る。届いた順の連番だけでは「配布形のどの
+   * ファイルが壊れているか」が呼び手にも利用者にも決まらない（列の組み方は呼び手側にあり、
+   * 連番は runtime から見た到着順でしかない）。
+   */
+  readonly id: string;
+  /** shard のバイト列。buffer 全体を占める view MUST（slice で辻褄を合わせると RAM ピークが倍増する）。 */
+  readonly bytes: Uint8Array<ArrayBuffer>;
+};
+
+/**
+ * Session 構築（{@link Session.#build}）が消費する shard 1 本。`origin` はエラーとフェンスの
+ * 帰属先で、**全量面は undefined**（帰属先が 1 つしかない単一ファイル面の文言を変えない
+ * MUST — ADR 0070 受入①の契約。合成 id を作ると shard 面の語彙が全量面へ漏れる）。
  */
 type WeightShard = {
   readonly file: SafetensorsFile;
-  readonly label: string;
+  readonly origin: string | undefined;
+};
+
+/** 失敗・フェンスの帰属先。連番は到着順の補助で、実名（{@link ModelShard.id}）が本体。 */
+const shardOrigin = (index: number, id: string): string => `shard [${index}] '${id}'`;
+
+/**
+ * 重みアップロード区間のラベル（errorScope とフェンスの帰属先）。`origin` から導出する —
+ * shard 側と別々に持つと、片方だけ名乗り方が変わったときに 2 つの名前で同じ失敗が出る。
+ */
+const uploadLabel = (origin: string | undefined): string =>
+  origin === undefined ? "重みのアップロード" : `${origin} の重みアップロード`;
+
+/**
+ * shard 由来の失敗に帰属先を足して**同じエラーを返す**（`origin` が無い全量面は素通し —
+ * 文言が 1 文字も変わらない）。
+ *
+ * MUST: 新しい Error で包み直さない。呼び出し側はクラスで分岐しており（宣言違反 =
+ * `ContainerError` / パーサ門 = `SafetensorsError`）、包むと分岐が壊れて stack も切れる。
+ */
+const attributeToShard = (origin: string | undefined, cause: unknown): unknown => {
+  if (origin !== undefined && cause instanceof Error) {
+    cause.message = `${origin}: ${cause.message}`;
+  }
+  return cause;
 };
 
 /** 全量面を shard 経路に載せる 1 要素の列（ADR 0070 受入① — 2 面で経路を分岐させない）。 */
 const wholeFileShards = async function* (
   file: SafetensorsFile,
 ): AsyncGenerator<WeightShard, void, unknown> {
-  yield { file, label: "重みのアップロード" };
+  yield { file, origin: undefined };
 };
 
 /**
@@ -379,8 +422,9 @@ const followingShards = async function* (
   // 引数束縛が全 shard の処理中ずっと生き、グラフ shard のバイト列が固定されて RAM ピークが
   // 「最大 shard 1 本」でなく「グラフ shard + 現在 shard」になる（グラフ shard に大テンソルを
   // 同居させた合法な列で実害 — フェンス後解放の契約は先頭 shard にも適用する）。
-  handoff: { file: SafetensorsFile | undefined },
-  iterator: AsyncIterator<Uint8Array<ArrayBuffer>>,
+  // `origin` は箱ごと渡す（バイト列を持たないので手放す対象ではない）。
+  handoff: { file: SafetensorsFile | undefined; readonly origin: string },
+  iterator: AsyncIterator<ModelShard>,
 ): AsyncGenerator<WeightShard, void, unknown> {
   {
     const graphFile = handoff.file;
@@ -389,36 +433,44 @@ const followingShards = async function* (
     }
     handoff.file = undefined;
     // ブロックスコープに閉じる（yield から戻った後は束縛ごと回収可能になる）
-    yield { file: graphFile, label: "shard [0] の重みアップロード" };
+    yield { file: graphFile, origin: handoff.origin };
   }
   let index = 1;
   while (true) {
     const next = await iterator.next();
     if (next.done === true) return;
-    const file = parseSafetensors(shardBuffer(next.value, index));
+    const origin = shardOrigin(index, next.value.id);
+    const file = parseShard(next.value.bytes, origin);
     if (file.metadata.has(IR_METADATA_KEY)) {
       throw new ExecutionError(
-        `shard [${index}]: __metadata__.${IR_METADATA_KEY} を持つグラフ shard が複数ある` +
+        `${origin}: __metadata__.${IR_METADATA_KEY} を持つグラフ shard が複数ある` +
           "（グラフ shard は最初の 1 本だけ — ADR 0070 決定 3）",
       );
     }
-    yield { file, label: `shard [${index}] の重みアップロード` };
+    yield { file, origin };
     index += 1;
   }
 };
 
 /**
- * shard bytes が buffer 全体を占めることを確かめて ArrayBuffer を取り出す（ADR 0038 §5 の
- * `openModel` への受け渡しと同じ規律 — slice で辻褄を合わせると RAM ピークが倍増する）。
+ * shard のバイト列を parse する。bytes が buffer 全体を占めることの確認は ADR 0038 §5 の
+ * `openModel` への受け渡しと同じ規律（slice で辻褄を合わせると RAM ピークが倍増する）。
+ *
+ * 非 tight view もパーサ門（`SafetensorsError`）も**その shard を名乗って**落ちる —
+ * 壊れた 1 本を配布形から特定するのに要るのは連番ではなくファイル名。
  */
-const shardBuffer = (bytes: Uint8Array<ArrayBuffer>, index: number): ArrayBuffer => {
+const parseShard = (bytes: Uint8Array<ArrayBuffer>, origin: string): SafetensorsFile => {
   if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
     throw new ExecutionError(
-      `shard [${index}]: bytes が buffer 全体を占めていない（byteOffset ${bytes.byteOffset} / ` +
+      `${origin}: bytes が buffer 全体を占めていない（byteOffset ${bytes.byteOffset} / ` +
         `byteLength ${bytes.byteLength} / buffer ${bytes.buffer.byteLength}）`,
     );
   }
-  return bytes.buffer;
+  try {
+    return parseSafetensors(bytes.buffer);
+  } catch (cause) {
+    throw attributeToShard(origin, cause);
+  }
 };
 
 /**
@@ -704,7 +756,7 @@ export class Session {
    */
   static async createFromShards(
     gpu: GpuContext,
-    shards: AsyncIterable<Uint8Array<ArrayBuffer>>,
+    shards: AsyncIterable<ModelShard>,
     options: SessionOptions = {},
   ): Promise<Session> {
     const iterator = shards[Symbol.asyncIterator]();
@@ -713,17 +765,26 @@ export class Session {
       if (first.done === true) {
         throw new ExecutionError("shard 列が空（最初の shard はグラフ shard — ADR 0070 決定 3）");
       }
+      const origin = shardOrigin(0, first.value.id);
       // MUST: グラフ shard への参照をこのフレームに残さない（`#build` の完了を await する間
       // ずっと固定される — followingShards 側の「箱」と同じ理由）。graph は parseIrGraph が
       // 組む独立のオブジェクトで、file を参照しない。
-      let graphFile: SafetensorsFile | undefined = parseSafetensors(shardBuffer(first.value, 0));
+      let graphFile: SafetensorsFile | undefined = parseShard(first.value.bytes, origin);
       first = { done: true, value: undefined };
-      const graph = extractIrGraph(graphFile);
+      let graph: IrGraph;
+      try {
+        graph = extractIrGraph(graphFile);
+      } catch (cause) {
+        // 「先頭がグラフ shard でない」も shard の取り違え — どの資産を先頭に置いたのかを名乗る。
+        throw attributeToShard(origin, cause);
+      }
       // 非対応 op / 格納 dtype の全件列挙門はグラフ shard の時点で通す（重み shard を
       // アップロードし始める前に「実行できない」が分かる）。
+      // NOTE: capability 不足はモデル（グラフ）の性質で shard 由来ではないので帰属を足さない
+      // — 全量面と同じ文言のままにする。
       assertRuntimeSupport(graph, RUNTIME_SUPPORT);
       validateGraphContracts(graph);
-      const files = followingShards({ file: graphFile }, iterator);
+      const files = followingShards({ file: graphFile, origin }, iterator);
       graphFile = undefined;
       return await Session.#build(gpu, graph, files, options);
     } catch (cause) {
@@ -783,7 +844,17 @@ export class Session {
     const validator = createShardValidator(graph);
     try {
       for await (const shard of shards) {
-        const ready = validator.intake(shard.file);
+        // errorScope とフェンスは同じラベルを名乗る MUST（別々に組むと同じアップロード区間の
+        // 失敗が 2 つの名前で出る）。
+        const label = uploadLabel(shard.origin);
+        let ready: readonly ReadyInitializer[];
+        try {
+          ready = validator.intake(shard.file);
+        } catch (cause) {
+          // 宣言違反・co-shard・余剰・shard 横断重複はその shard の中身を直す話なので、
+          // 帰属先はファイル名（全量面は素通し = 従来文言）。
+          throw attributeToShard(shard.origin, cause);
+        }
         // MUST: 重みアップロードも errorScope で囲む（ADR 0004 の「errorScope 常設」）。上限超過の
         // createBuffer は同期例外を投げずに無効バッファを返し、無効バッファ / 整列違反への
         // writeBuffer も警告すら出さない no-op になるため、包まないと重みが空のまま走り出す。
@@ -905,9 +976,9 @@ export class Session {
           // スコープに吸われ、エラーが恒久的に見えなくなる）。破棄は外側の transaction 境界が
           // 1 箇所で持つ。
           await discardFailureScopes(gpu.device);
-          throw cause;
+          throw attributeToShard(shard.origin, cause);
         }
-        const failure = await popFailureScopes(gpu.device, shard.label);
+        const failure = await popFailureScopes(gpu.device, label);
         if (failure !== undefined) throw failure;
 
         // MUST: shard ごとに**実際の submit を 1 回**出して完了まで待つ（ADR 0070 決定 3）。
@@ -931,7 +1002,7 @@ export class Session {
         // raceCanaryDeviceLost の doc）ため競わせる — ハングを失敗に変換する保険。
         await gpu[RUNTIME_INTERNAL].raceDeviceLost(
           gpu.device.queue.onSubmittedWorkDone(),
-          shard.label,
+          label,
         );
       }
       // 宣言完全性（欠け）は全 shard を読み終えて初めて判定できる（ADR 0070 決定 1）。
@@ -2297,14 +2368,17 @@ export const createSession = (
 ): Promise<Session> => Session.create(gpu, model, options);
 
 /**
- * shard 列（各要素 = 独立に整合な safetensors 1 本の bytes）から Session を作る
- * （ADR 0070 決定 3 の shard 逐次面）。最初の shard はグラフ shard
+ * shard 列（各要素 = 実名 + 独立に整合な safetensors 1 本の bytes = {@link ModelShard}）から
+ * Session を作る（ADR 0070 決定 3 の shard 逐次面）。最初の shard はグラフ shard
  * （`__metadata__.karume_ir` 持ち）で、重み shard は届いた順に「検査 → アップロード →
  * フェンス → 参照を手放す」で消費する。同一資産なら {@link createSession}（全量面）と
  * GPU 常駐バイト列・診断が一致する（受入① — 経路自体を共有している）。
+ *
+ * shard 由来の失敗（parse・宣言違反・co-shard・アップロード）は `shard [n] 'id'` を名乗る。
+ * hub の `streamAssets` はそのまま渡せる（`StreamedAsset` と構造互換）。
  */
 export const createSessionFromShards = (
   gpu: GpuContext,
-  shards: AsyncIterable<Uint8Array<ArrayBuffer>>,
+  shards: AsyncIterable<ModelShard>,
   options: SessionOptions = {},
 ): Promise<Session> => Session.createFromShards(gpu, shards, options);

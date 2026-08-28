@@ -116,7 +116,7 @@ Deno.test("streamAssets: 呼んだだけでは何も起きず、相 1 は最初�
   const afterPhase1 = mock.calls.length;
 
   const rest = await drain(stream);
-  assertEquals(rest.map((asset) => asset.path), refs.slice(1).map((ref) => ref.path));
+  assertEquals(rest.map((asset) => asset.id), refs.slice(1).map((ref) => ref.path));
   assertEquals(mock.calls.length, afterPhase1, "相 2 は温めたキャッシュだけを読む");
 });
 
@@ -128,9 +128,9 @@ Deno.test("streamAssets: yield は refs の入力順で、bytes は宣言どお�
 
   const seen = await drain(streamAssets(loaded, order, { fetch: mock.fetch, caches }));
 
-  assertEquals(seen.map((asset) => asset.path), order.map((ref) => ref.path));
+  assertEquals(seen.map((asset) => asset.id), order.map((ref) => ref.path));
   for (const asset of seen) {
-    assertEquals(asset.bytes, payloadFor(asset.path));
+    assertEquals(asset.bytes, payloadFor(asset.id));
     assertEquals(asset.bytes.byteOffset, 0);
     assertEquals(asset.bytes.byteLength, asset.bytes.buffer.byteLength);
   }
@@ -152,7 +152,7 @@ Deno.test("streamAssets: 記録の無い破損エントリは相 2 が捕まえ�
   const second = createMockFetch({ files: serveAll() });
   const seen = await drain(streamAssets(loaded, refs, { fetch: second.fetch, caches }));
 
-  const healed = seen.find((asset) => asset.path === ref.path);
+  const healed = seen.find((asset) => asset.id === ref.path);
   assertEquals(healed?.bytes, payloadFor(ref.path), "破損キャッシュが素通りしている");
   assertEquals(countCalls(second.calls, resolveUrl(ref.path)), 1, "self-heal は 1 往復だけ");
   assertEquals(second.calls.length, 1, "壊れていない shard まで取り直している");
@@ -316,7 +316,7 @@ Deno.test("streamAssets: 相 2 中の中断は shard の切れ目で素通しす
           if (progress.phase === "complete") controller.abort(reason);
         },
       })
-    ) seen.push(asset.path);
+    ) seen.push(asset.id);
   });
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
   assert(seen.length < refs.length, "中断したのに全 shard を配り切っている");
@@ -347,7 +347,7 @@ Deno.test("streamAssets: 最終 shard の読出し中の中断でも配り切ら
         caches,
         signal: controller.signal,
       })
-    ) seen.push(asset.path);
+    ) seen.push(asset.id);
   });
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
   assertEquals(matches, 2, "相 2 の読出しに到達していない（窓を狙えていない）");
@@ -472,7 +472,7 @@ Deno.test("streamAssets: 2 回目は相 1 も相 2 も network に出ない（�
 
   assertEquals(second.calls, [], "全キャッシュ済みなのに network へ出ている");
   assertEquals(mock.calls.length, before, "1 回目の mock も追加で呼ばれていない");
-  assertEquals(seen.map((asset) => asset.path), refs.map((ref) => ref.path));
+  assertEquals(seen.map((asset) => asset.id), refs.map((ref) => ref.path));
   const byPath = phasesByPath(events);
   assertEquals(byPath.size, refs.length);
   for (const [path, phases] of byPath) {
@@ -536,7 +536,7 @@ Deno.test("streamAssets: 越境参照は宣言された (repo, revision) から�
 
   const seen = await drain(streamAssets(loaded, crossRepoRefs, { fetch: mock.fetch, caches }));
 
-  assertEquals(seen.map((asset) => asset.path), [CROSS_PATH, CROSS_PATH]);
+  assertEquals(seen.map((asset) => asset.id), [CROSS_PATH, CROSS_PATH]);
   assertEquals(seen[0].bytes, localShard, "自リポぶんが越境先のバイト列に化けている");
   assertEquals(seen[1].bytes, foreignShard, "越境ぶんが自リポのバイト列に化けている");
   assertEquals(

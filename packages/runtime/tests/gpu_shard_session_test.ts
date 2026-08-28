@@ -10,8 +10,14 @@
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { ContainerError, openModel } from "../src/format/container.ts";
+import { SafetensorsError } from "../src/format/safetensors.ts";
 import { acquireGpu, popFailureScopes, pushFailureScopes } from "../src/gpu/device.ts";
-import { createSession, createSessionFromShards, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSession,
+  createSessionFromShards,
+  type ModelShard,
+  type Tensor,
+} from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { buildSafetensors, type TensorSpec } from "./helpers/format.ts";
 import { fill } from "./helpers/graph.ts";
@@ -115,11 +121,20 @@ const buildFixture = () => {
   };
 };
 
-/** ArrayBuffer 列を shard 面の入力（tight view の逐次列）にする。 */
+/**
+ * ArrayBuffer 列を shard 面の入力（実名 + tight view の逐次列）にする。id は既定で
+ * 「配布形のファイル名らしい実名」を振る（帰属の検出器が連番と取り違えないため）。
+ */
 const shardStream = async function* (
   buffers: readonly ArrayBuffer[],
-): AsyncGenerator<Uint8Array<ArrayBuffer>, void, unknown> {
-  for (const buffer of buffers) yield new Uint8Array(buffer);
+  ids?: readonly string[],
+): AsyncGenerator<ModelShard, void, unknown> {
+  for (const [index, buffer] of buffers.entries()) {
+    yield {
+      id: ids?.[index] ?? `fixture/model-0000${index}.safetensors`,
+      bytes: new Uint8Array(buffer),
+    };
+  }
 };
 
 const bitsOf = (tensor: Tensor): readonly number[] => [
@@ -170,6 +185,68 @@ Deno.test({
         await whole.dispose();
         await single.dispose();
       }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "shard 由来の失敗は連番でなく資産名（id）を名乗る（宣言違反 / parse 不能・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const fixture = buildFixture();
+    // 「連番と取り違えない」ことが見えるよう、実名側は配布形のファイル名にする。
+    const ids = [
+      "fixture-v1.0/transformer/model-00001.safetensors",
+      "fixture-v1.0/transformer/model-00002.safetensors",
+      "fixture-v1.0/transformer/model-00003.safetensors",
+    ];
+    const gpu = await acquireGpu();
+    try {
+      // 宣言違反: どの initializer からも参照されない余剰テンソルが 3 本目に混ざる
+      const surplus: TensorSpec = {
+        name: "m.unused",
+        dtype: "F32",
+        shape: [4],
+        data: new Uint8Array(new Float32Array([1, 2, 3, 4]).buffer),
+      };
+      const violation = await assertRejects(
+        () =>
+          createSessionFromShards(
+            gpu,
+            shardStream([
+              buildSafetensors(fixture.biases, fixture.metadata),
+              buildSafetensors([fixture.tensors.s1, fixture.tensors.w1], undefined),
+              buildSafetensors(
+                [fixture.tensors.s3, surplus, fixture.tensors.w2, fixture.tensors.w3],
+                undefined,
+              ),
+            ], ids),
+          ),
+        ContainerError,
+        "m.unused",
+      );
+      assert(violation.message.includes(ids[2]), violation.message);
+      // 帰属は**落ちた shard** 1 本（別の shard の名前が混ざったら帰属が壊れている）
+      assert(!violation.message.includes(ids[1]), violation.message);
+      // 連番は補助として残す（届いた順は id と別の情報）
+      assert(violation.message.includes("shard [2]"), violation.message);
+
+      // parse 不能: safetensors ですらないバイト列が 2 本目に来る（帰属を足してもパーサ門の
+      // クラスは保つ — 包み直すと呼び出し側の分岐が壊れる）
+      const broken = await assertRejects(
+        () =>
+          createSessionFromShards(
+            gpu,
+            shardStream([
+              buildSafetensors(fixture.biases, fixture.metadata),
+              new Uint8Array(64).buffer,
+            ], ids),
+          ),
+        SafetensorsError,
+      );
+      assert(broken.message.includes(ids[1]), broken.message);
     } finally {
       gpu.destroy();
     }
@@ -249,7 +326,7 @@ Deno.test({
           createSessionFromShards(
             gpu,
             (async function* () {
-              yield loose as Uint8Array<ArrayBuffer>;
+              yield { id: "fixture/loose.safetensors", bytes: loose as Uint8Array<ArrayBuffer> };
             })(),
           ),
         ExecutionError,
