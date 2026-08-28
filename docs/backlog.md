@@ -27,8 +27,11 @@ Anima Web アプリからの既知問題 3 件（調査で機序確定済み —
   `karume/1` 系 purge・`clearHubCache` の対象変更。正本 = ADR
   [0080](decisions/0080-hub-fetch-cache-050.md)（旧 CAS ドラフトを置換 — `archive/hub-cas-0.5.0`
   の再適用は不要になった）
-- ④素版 i4 感度 — adaLN + block 外 i8 変種（`--i4-adaln-i8`）を anima-v1.0 で export →
-  視認 A/B（進行中）。裁定後に research / perf-ledger へ追随
+- ④素版 i4 感度 — adaLN + block 外 i8 変種は**視認スイープで不採用**（2026-08-28 裁定 —
+  perf-ledger Q-9 /
+  [research](research/2026-08-28-anima-adaln8-visual.md)。教訓: 視認 A/B は seed 4 本以上）。
+  未検証軸（校正標本増・Hessian rank 仮説ほか）は research に列挙 — 追試は GPU 校正
+  （`--calib-device cuda`・等価性検証中）が通ってから数十分オーダーで回せる
 
 ## next — R1 ロード面工事 + shard 配布（2026-08-25 昇格・2026-08-28 統合裁定）
 

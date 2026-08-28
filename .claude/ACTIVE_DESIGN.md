@@ -26,10 +26,9 @@
   行ブロック化**コミット済み**（1824×1248 実生成 27.9s 完走を確認）③Chromium の単一
   ArrayBuffer 上限 2,145,386,496B で Base f16 が原理的に不可（limitations 恒久記載。根本 =
   R1 shard 配布を next へ昇格・DL 前即エラーは hub 側では実装しない — プローブは
-  fetch-cache 次版で実装予定〈2026-08-25 裁定〉）④素版 i4 — `--i4-adaln-i8` 変種の v1.0 export **済**（2h28m・`gptq-adaln8`）→ eval_dist →
-  同条件 3 枚（変種/既定席/旧 i4・seed42/20step/CFG4/1024²）を提示済み・**視認裁定待ち**。
-  裁定後に research / perf-ledger 追随。GPU 校正（`--calib-device cuda` — `50f094d`）の
-  妥当性検証はその後。
+  fetch-cache 次版で実装予定〈2026-08-25 裁定〉）④素版 i4 — adaLN-i8 変種は**不採用**（2026-08-28 視認スイープ裁定 — perf-ledger Q-9 /
+  research 2026-08-28。教訓: 視認 A/B は seed 4 本以上）。GPU 校正
+  （`--calib-device cuda` — `50f094d`）の等価性検証は独立に実験中（インフラ）。
 - **0.6.0（yomi 依存分離）リリース完了（2026-08-25）**: JSR 3 パッケージ = 0.6.0・Release
   v0.6.0・**公開依存から `@hdae/yomi` の消滅を API 実測で確定**（hub / runtime の 2 本のみ）・
   消費者ストーリー疎通緑。設計の正本 = ADR
