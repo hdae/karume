@@ -445,7 +445,7 @@ export class GenerationContext {
       );
       return context;
     } finally {
-      // MUST: 後始末の失敗で本体の例外を上書きしない（Session.create と同じ規律）。push した
+      // MUST: 後始末の失敗で本体の例外を上書きしない（Session 構築と同じ規律）。push した
       // 2 本は必ず pop する（pop 発行前に抜けた場合だけ — 二重 pop は他所のスコープを取る）。
       if (!popped) await discardFailureScopes(gpu.device);
       // MUST: context を返す場合**以外**は確保済みを 1 本残らず返す（同期 throw・pop の

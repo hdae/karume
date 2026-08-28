@@ -70,7 +70,18 @@ export type { RuntimeCapabilities } from "./src/ops.ts";
 
 export { DispatchLimitError } from "./src/codegen/errors.ts";
 
-export { createSession, createSessionFromShards } from "./src/runtime/executor.ts";
+export { createSession, createSessionFromShards, prepareModel } from "./src/runtime/executor.ts";
+/**
+ * 重み DL 前の admission の入口（ADR 0070 決定 5 / graph-first）。グラフ shard
+ * （配布形の先頭 shard = `karume_ir` + 小テンソル）だけで「実行できない」を先に落とし、
+ * 必要メモリを見積り、そのまま重み shard 列を渡して Session にする 2 段境界:
+ * `prepareModel(graphShard) → estimate() → createSession(gpu, weightShards)`。
+ *
+ * `PreparedModel` は**型としてのみ**公開する — 入口は {@link prepareModel} だけで、直接構築
+ * すると capability 門と IR 契約検査を迂回した「実行できないモデルの Session」が作れてしまう
+ * （`Session` / `GpuContext` と同じ流儀）。
+ */
+export type { PreparedModel } from "./src/runtime/executor.ts";
 /**
  * shard 逐次面の入力 1 本（{@link createSessionFromShards}）。hub の `StreamedAsset` と
  * **構造互換**の型で、runtime は hub に依存しないため独立に持つ — 失敗とフェンスは連番では

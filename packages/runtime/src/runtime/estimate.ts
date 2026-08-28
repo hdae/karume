@@ -30,7 +30,6 @@ import { assertRuntimeSupport, type KarumeModel } from "../format/container.ts";
 import type { IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
-import { assertGenerationBindings } from "./executor.ts";
 import { aliasesInput } from "./fusion.ts";
 import {
   assertChunkLength,
@@ -40,6 +39,7 @@ import {
   STATE_ELEMENT_BYTES,
 } from "./generation-context.ts";
 import {
+  assertGenerationBindings,
   countUses,
   ExecutionError,
   type NodePlan,
@@ -48,7 +48,7 @@ import {
   type SymbolBindings,
 } from "./plan.ts";
 import type { GenerationContextSpec } from "./session-types.ts";
-import { planWeightResidency } from "./weight-residency.ts";
+import { planWeightResidency, type WeightResidency } from "./weight-residency.ts";
 
 /** カテゴリ別の必要バイト数（{@link estimateSessionMemory} の戻り）。 */
 export type MemoryEstimate = {
@@ -187,20 +187,20 @@ const stateEstimate = (
 
 /**
  * 重みの見積り。分類も宣言由来のバイト数も **Session 構築と同じプランナ**
- * （{@link planWeightResidency}）から引く — ここで分類を書き直すと、片方だけ直された実装に
- * 対して estimator が例外も警告も無く別の数を主張し続ける（モジュール doc の MUST）。
+ * （{@link planWeightResidency}）の結果を受け取る — ここで分類を書き直すと、片方だけ直された
+ * 実装に対して estimator が例外も警告も無く別の数を主張し続ける（モジュール doc の MUST）。
  *
  * ここが足すのは席ごとのカテゴリ分けと整列だけ。整列詰め物とバッファ床は {@link toSizeClass}
  * が持つ — `alignF16Payload` / `alignI8Payload` の 4 バイト切り上げと `allocHostWritten` の
  * `Math.max(4, …)` を合わせた値と同じ。
  */
 const weightEstimate = (
-  graph: IrGraph,
+  residency: ReadonlyMap<string, WeightResidency>,
 ): { readonly compressed: number; readonly uncompressed: number; readonly expanded: number } => {
   let compressed = 0;
   let uncompressed = 0;
   let expanded = 0;
-  for (const seat of planWeightResidency(graph).values()) {
+  for (const seat of residency.values()) {
     switch (seat.seat) {
       case "raw":
         // 圧縮しない格納は生バイトがそのまま GPU 表現（executor の分岐 3 本目）。
@@ -315,8 +315,21 @@ const transientSlotBytes = (graph: IrGraph, nodes: readonly NodePlan[]): number 
 export const estimateSessionMemory = (
   model: KarumeModel,
   options: EstimateOptions = {},
+): MemoryEstimate => estimateGraphMemory(model.graph, planWeightResidency(model.graph), options);
+
+/**
+ * 見積りの本体（グラフと常駐計画だけで完結する — 全量面 {@link estimateSessionMemory} と
+ * `PreparedModel.estimate` が共有する 1 本）。
+ *
+ * MUST: 常駐計画は**呼び手が持っているものを渡す**（`PreparedModel` は prepare 時に 1 回だけ
+ * 計算して構築とも共有する）。ここで引き直すと「見積りに使った席」と「実際に上げた席」が
+ * 別の計算結果になりうる形が復活する。
+ */
+export const estimateGraphMemory = (
+  graph: IrGraph,
+  residency: ReadonlyMap<string, WeightResidency>,
+  options: EstimateOptions,
 ): MemoryEstimate => {
-  const graph = model.graph;
   // MUST: 実構築（`createSession` / `createSessionFromShards`）と**同じ門**を先に通す。
   // 作れない構成へ見積りを返すと、格納 dtype や op が非対応のモデルに対して estimator だけが
   // もっともらしい総量を主張する（例: 格納 `bf16` は IR の語彙にはあるが RUNTIME_SUPPORT に
@@ -329,7 +342,7 @@ export const estimateSessionMemory = (
   // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —
   // ADR 0066 追記 7 — に見積りだけが正常値を返さない）。
   if (state.bindings !== undefined) assertGenerationBindings(state.bindings, bindings);
-  const weights = weightEstimate(graph);
+  const weights = weightEstimate(residency);
   const plan = planGraph(graph, bindings, state.shapes);
 
   // 入力バッファと出力 readback staging は同じ床つきの式（executor の `#bindInput` /

@@ -486,6 +486,35 @@ export const statesOnlySymbols = (graph: IrGraph): ReadonlySet<string> => {
 };
 
 /**
+ * context の容量束縛と run の解決済み束縛が、**両方に現れる記号**で一致することを確かめる
+ * （ADR 0066 追記 7 の「効く範囲の分担」の実行時執行）。
+ *
+ * 記号は 2 つの束縛点を持つ: 入力 shape（run — {@link bindSymbols}）と `spec.bindings`（context）。
+ * states と入力の**両方**に現れる記号はその 2 箇所で独立に決まるので、割れたまま走ると
+ * 「確保容量は C=4・計画と dispatch は C=3」のような分裂が例外も警告も無く成立する
+ * （state の読み書きが宣言 shape の外へ落ちる = robustness で捨てられる沈黙誤読）。
+ *
+ * MUST: エンコードの前に落とす（この段の失敗は state に届かないので poison しない）。
+ * NOTE: 片方にしか現れない記号は対象外 — states 専用記号は run の bindings で与えられない
+ * （{@link bindSymbols} が拒否）し、値 shape 専用の記号は context が知らない。
+ */
+export const assertGenerationBindings = (
+  contextBindings: SymbolBindings,
+  runBindings: SymbolBindings,
+): void => {
+  for (const [sym, value] of Object.entries(contextBindings)) {
+    if (!Object.hasOwn(runBindings, sym)) continue;
+    if (runBindings[sym] !== value) {
+      throw new ExecutionError(
+        `記号 '${sym}' が GenerationContext の束縛 ${value} と run の解決値 ` +
+          `${runBindings[sym]} で食い違う（states と入力の両方に現れる記号は 2 つの束縛点で` +
+          "同じ値でなければならない — ADR 0066 追記 7）",
+      );
+    }
+  }
+};
+
+/**
  * 実入力の shape からシンボルを束縛する。
  *
  * MUST: 束縛は**入力 shape の次元位置**から取る（要素数からの逆算はしない — 複数シンボルが

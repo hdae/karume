@@ -52,6 +52,7 @@ import type { ScoreStorage } from "../kernels/score-storage.ts";
 /** S の格納形（{@link SessionOptions.attentionScoreStorage} — 公開面で名前を持てるように再輸出）。 */
 export type { ScoreStorage } from "../kernels/score-storage.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
+import { estimateGraphMemory, type EstimateOptions, type MemoryEstimate } from "./estimate.ts";
 import { type ExecStep, type FusionCounts, planFusions } from "./fusion.ts";
 import { GenerationContext, type GenerationContextHost } from "./generation-context.ts";
 /**
@@ -71,6 +72,7 @@ export type { GenerationContext } from "./generation-context.ts";
  */
 export type { FusionCounts } from "./fusion.ts";
 import {
+  assertGenerationBindings,
   bindSymbols,
   countUses,
   declaredDtypes,
@@ -94,7 +96,11 @@ import {
   type StepRecipe,
 } from "./recipe.ts";
 import { RecipeBuilder } from "./recipe-builder.ts";
-import { planWeightResidency, type ResidentWeight } from "./weight-residency.ts";
+import {
+  planWeightResidency,
+  type ResidentWeight,
+  type WeightResidency,
+} from "./weight-residency.ts";
 import {
   type ComputePrecision,
   type EnqueueOptions,
@@ -237,35 +243,6 @@ const generationEncoding = (
 });
 
 /**
- * context の容量束縛と run の解決済み束縛が、**両方に現れる記号**で一致することを確かめる
- * （ADR 0066 追記 7 の「効く範囲の分担」の実行時執行）。
- *
- * 記号は 2 つの束縛点を持つ: 入力 shape（run — `bindSymbols`）と `spec.bindings`（context）。
- * states と入力の**両方**に現れる記号はその 2 箇所で独立に決まるので、割れたまま走ると
- * 「確保容量は C=4・計画と dispatch は C=3」のような分裂が例外も警告も無く成立する
- * （state の読み書きが宣言 shape の外へ落ちる = robustness で捨てられる沈黙誤読）。
- *
- * MUST: エンコードの前に落とす（この段の失敗は state に届かないので poison しない）。
- * NOTE: 片方にしか現れない記号は対象外 — states 専用記号は run の bindings で与えられない
- * （`bindSymbols` が拒否）し、値 shape 専用の記号は context が知らない。
- */
-export const assertGenerationBindings = (
-  contextBindings: SymbolBindings,
-  runBindings: SymbolBindings,
-): void => {
-  for (const [sym, value] of Object.entries(contextBindings)) {
-    if (!Object.hasOwn(runBindings, sym)) continue;
-    if (runBindings[sym] !== value) {
-      throw new ExecutionError(
-        `記号 '${sym}' が GenerationContext の束縛 ${value} と run の解決値 ` +
-          `${runBindings[sym]} で食い違う（states と入力の両方に現れる記号は 2 つの束縛点で` +
-          "同じ値でなければならない — ADR 0066 追記 7）",
-      );
-    }
-  }
-};
-
-/**
  * 進行中 run の常駐入力束縛を全て返す（{@link ResidentTensor.dispose} の予約を解く）。
  *
  * MUST: 成功・失敗のどちらの経路でも必ず 1 度呼ぶ。返し損ねるとその常駐テンソルは
@@ -371,7 +348,7 @@ export type ModelShard = {
 };
 
 /**
- * Session 構築（{@link Session.#build}）が消費する shard 1 本。`origin` はエラーとフェンスの
+ * Session 構築（{@link Session.build}）が消費する shard 1 本。`origin` はエラーとフェンスの
  * 帰属先で、**全量面は undefined**（帰属先が 1 つしかない単一ファイル面の文言を変えない
  * MUST — ADR 0070 受入①の契約。合成 id を作ると shard 面の語彙が全量面へ漏れる）。
  */
@@ -404,37 +381,22 @@ const attributeToShard = (origin: string | undefined, cause: unknown): unknown =
   return cause;
 };
 
-/** 全量面を shard 経路に載せる 1 要素の列（ADR 0070 受入① — 2 面で経路を分岐させない）。 */
-const wholeFileShards = async function* (
-  file: SafetensorsFile,
-): AsyncGenerator<WeightShard, void, unknown> {
-  yield { file, origin: undefined };
-};
-
 /**
  * shard 面の消費列: 検証済みのグラフ shard を先頭に、残り shard を parse して流す。
  *
  * MUST: グラフ shard は最初の 1 本だけ（ADR 0070 決定 3）。後続に `karume_ir` 持ちが
  * 現れたら取り違え（別モデルの混入・並び順の崩れ）の徴候なので fail loudly。
+ * NOTE: グラフ shard のバイト列は {@link PreparedModel} が持ち主で、この generator の寿命では
+ * 手放せない（2 段境界の代償 — ADR 0070 決定 3 がグラフ shard を「karume_ir + 小テンソル」と
+ * 規定しているので、RAM ピーク目標「O(最大**重み** shard)」は崩れない）。
+ * NOTE: 後続の連番は 1 から振る（グラフ shard が [0] — 帰属ラベルの通し番号は 2 段境界の
+ * 前後で変わらない）。
  */
 const followingShards = async function* (
-  // MUST: グラフ shard は「箱」で受けて最初の yield で手放す。素の引数で受けると generator の
-  // 引数束縛が全 shard の処理中ずっと生き、グラフ shard のバイト列が固定されて RAM ピークが
-  // 「最大 shard 1 本」でなく「グラフ shard + 現在 shard」になる（グラフ shard に大テンソルを
-  // 同居させた合法な列で実害 — フェンス後解放の契約は先頭 shard にも適用する）。
-  // `origin` は箱ごと渡す（バイト列を持たないので手放す対象ではない）。
-  handoff: { file: SafetensorsFile | undefined; readonly origin: string },
+  graphShard: WeightShard,
   iterator: AsyncIterator<ModelShard>,
 ): AsyncGenerator<WeightShard, void, unknown> {
-  {
-    const graphFile = handoff.file;
-    if (graphFile === undefined) {
-      throw new ExecutionError("グラフ shard の受け渡し箱が空（内部不変条件の破れ）");
-    }
-    handoff.file = undefined;
-    // ブロックスコープに閉じる（yield から戻った後は束縛ごと回収可能になる）
-    yield { file: graphFile, origin: handoff.origin };
-  }
+  yield graphShard;
   let index = 1;
   while (true) {
     const next = await iterator.next();
@@ -729,79 +691,21 @@ export class Session {
     this.#recipeBuilder = new RecipeBuilder(state);
   }
 
-  /** MUST: 構築の入口はここだけ（重みアップロードを含む明示 async ステージ）。 */
-  static async create(
-    gpu: GpuContext,
-    model: KarumeModel,
-    options: SessionOptions = {},
-  ): Promise<Session> {
-    // 非対応 op / 格納 dtype は全件列挙して落とす（1 件ずつ落とすと何本足りないか分からない）
-    assertRuntimeSupport(model.graph, RUNTIME_SUPPORT);
-    validateGraphContracts(model.graph);
-    // MUST: 全量面も shard 経路（1 要素の列）で構築する — 検査・アップロード・errorScope
-    // 規律を 2 面で分岐させない（ADR 0070 受入①の構造的根拠）。1 shard の列では従来どおり
-    // 「1 同期区間 + 末尾 submit 1 回 + フェンス」になり、挙動もエラー文言も変わらない。
-    return await Session.#build(gpu, model.graph, wholeFileShards(model.file), options);
-  }
-
   /**
-   * shard 逐次面（ADR 0070 決定 3）。最初の shard はグラフ shard（`__metadata__.karume_ir`
-   * 持ち）で、以降の重み shard を**届いた順に**「進行検証 → CPU 展開（適格外のみ）→ GPU
-   * アップロード → フェンス → 参照を手放す」で消費する。RAM ピーク目標 = O(最大 shard)。
+   * 構築の共通経路（全量面 = グラフ shard 1 本の列 / shard 面 = グラフ shard + N 重み shard）。
+   * shard ごとに「進行検証 → errorScope 同期区間でアップロード → 明示 submit + フェンス」を
+   * 刻み、全 shard 読了後に宣言完全性を検査する（ADR 0070 決定 3・4）。
    *
-   * MUST: 各 shard の bytes は buffer 全体を占める（ADR 0038 §5 と同じ規律 — slice で辻褄を
-   * 合わせると RAM ピークが倍増する）。
-   * MUST: 途中で失敗したら部分 Session を公開しない（transaction 境界 — {@link Session.#build}）。
-   * 消費されなかった入力側 iterator も明示的に閉じる（hub の async generator の後始末）。
+   * MUST: 構築の入口は {@link PreparedModel.createSession} ただ 1 つ（重みアップロードを含む
+   * 明示 async ステージ）。クラス外から呼べる形なのは PreparedModel が別クラスだからで、
+   * 公開面ではない — mod.ts は Session を型としてのみ出す。
+   * MUST: 常駐計画（席）は prepare 相が求めた 1 個を受け取る — 構築側で引き直すと、見積りが
+   * 見た席と実際に上げる席が別の計算結果になりうる形が戻る。
    */
-  static async createFromShards(
-    gpu: GpuContext,
-    shards: AsyncIterable<ModelShard>,
-    options: SessionOptions = {},
-  ): Promise<Session> {
-    const iterator = shards[Symbol.asyncIterator]();
-    try {
-      let first = await iterator.next();
-      if (first.done === true) {
-        throw new ExecutionError("shard 列が空（最初の shard はグラフ shard — ADR 0070 決定 3）");
-      }
-      const origin = shardOrigin(0, first.value.id);
-      // MUST: グラフ shard への参照をこのフレームに残さない（`#build` の完了を await する間
-      // ずっと固定される — followingShards 側の「箱」と同じ理由）。graph は parseIrGraph が
-      // 組む独立のオブジェクトで、file を参照しない。
-      let graphFile: SafetensorsFile | undefined = parseShard(first.value.bytes, origin);
-      first = { done: true, value: undefined };
-      let graph: IrGraph;
-      try {
-        graph = extractIrGraph(graphFile);
-      } catch (cause) {
-        // 「先頭がグラフ shard でない」も shard の取り違え — どの資産を先頭に置いたのかを名乗る。
-        throw attributeToShard(origin, cause);
-      }
-      // 非対応 op / 格納 dtype の全件列挙門はグラフ shard の時点で通す（重み shard を
-      // アップロードし始める前に「実行できない」が分かる）。
-      // NOTE: capability 不足はモデル（グラフ）の性質で shard 由来ではないので帰属を足さない
-      // — 全量面と同じ文言のままにする。
-      assertRuntimeSupport(graph, RUNTIME_SUPPORT);
-      validateGraphContracts(graph);
-      const files = followingShards({ file: graphFile, origin }, iterator);
-      graphFile = undefined;
-      return await Session.#build(gpu, graph, files, options);
-    } catch (cause) {
-      // MUST: 後始末の失敗で本体の例外を上書きしない（run 側と同じ規律）。
-      await iterator.return?.().catch(() => undefined);
-      throw cause;
-    }
-  }
-
-  /**
-   * 構築の共通経路（全量面 = 1 shard の列 / shard 面 = N shard）。shard ごとに「進行検証 →
-   * errorScope 同期区間でアップロード → 明示 submit + フェンス」を刻み、全 shard 読了後に
-   * 宣言完全性を検査する（ADR 0070 決定 3・4）。
-   */
-  static async #build(
+  static async build(
     gpu: GpuContext,
     graph: IrGraph,
+    residency: ReadonlyMap<string, WeightResidency>,
     shards: AsyncIterable<WeightShard>,
     options: SessionOptions,
   ): Promise<Session> {
@@ -833,9 +737,6 @@ export class Session {
     const scheduler = new SubmitScheduler(gpu, options.submitPolicy);
     const weights = new RunArena(gpu.device, () => scheduler.flush());
     const weightBuffers = new Map<string, GPUBuffer>();
-    // 常駐分類（席）は純関数プランナが正本 — 見積り（estimate.ts）と同じ 1 本を通す。
-    // グラフ構造だけで決まるので契約検査の直後に 1 度求めれば足りる。
-    const residency = planWeightResidency(graph);
     const residentWeights = new Map<string, ResidentWeight>();
     let residentCompressedBytes = 0;
     let hostExpandedBytes = 0;
@@ -2359,13 +2260,144 @@ export class Session {
 }
 
 /**
+ * 重み shard が 1 本も無い列（全量面 = 全テンソルがグラフ shard に同居した列）。
+ *
+ * MUST: 呼ぶたびに新しい iterator を返す（使い切った generator を使い回すと、2 本目の
+ * Session 構築が「既に done」の列を受けたのか空列なのか区別できない）。
+ */
+const noWeightShards = (): AsyncIterable<ModelShard> => ({
+  [Symbol.asyncIterator]: () => ({
+    next: (): Promise<IteratorResult<ModelShard, undefined>> =>
+      Promise.resolve({ done: true, value: undefined }),
+  }),
+});
+
+/**
+ * 重み DL 前の admission 相の成果物（ADR 0070 決定 5 / graph-first）— グラフ shard だけで
+ * 「実行できるか」を決め、必要メモリを見積り、そのまま Session 構築の入口になる。
+ *
+ * 保持するのは ①parse 済みグラフ shard（小テンソルの正本）②`IrGraph` ③常駐計画（席）の 3 つ
+ * だけで、**GPU 資源は一切持たない**（`estimate` は純関数のまま — 決定 5 の「GPU 非依存」）。
+ * グラフ shard のバイト列を createSession まで抱えるのは ADR 0070 決定 3 がグラフ shard を
+ * 「karume_ir + 小テンソル」と規定しているからで、RAM ピーク目標「O(最大**重み** shard)」は
+ * 崩れない（全量面は元から呼び手が `KarumeModel` を持っているので増分ゼロ）。
+ *
+ * MUST: 構築は {@link PreparedModel.createSession} だけを入口にするため、mod.ts では**型として
+ * のみ**公開する（`Session` / `GpuContext` と同じ流儀 — 直接構築すると capability 門と
+ * 契約検査を迂回した「実行できないモデルの Session」が作れてしまう）。
+ */
+export class PreparedModel {
+  /** グラフ shard の parse 結果（小テンソルの正本 — validator.intake が重みとして消費する）。 */
+  readonly #file: SafetensorsFile;
+  readonly #graph: IrGraph;
+  /**
+   * 失敗とフェンスの帰属先。**全量面は undefined**（帰属先が 1 つしかない単一ファイル面の
+   * 文言を変えない MUST — ADR 0070 受入①の契約）。
+   */
+  readonly #origin: string | undefined;
+  /** 席とバイト数（グラフだけで決まる）— 見積りと構築が共有する 1 個。 */
+  readonly #residency: ReadonlyMap<string, WeightResidency>;
+
+  private constructor(file: SafetensorsFile, graph: IrGraph, origin: string | undefined) {
+    // 非対応 op / 格納 dtype は全件列挙して落とす（1 件ずつ落とすと何本足りないか分からない）。
+    // MUST: この 2 門は**重み shard に触れる前**に通す（2 段境界の存在理由そのもの — 実行
+    // できないモデルの重みを DL してから落とすことがなくなる）。
+    // NOTE: capability 不足も契約違反もモデル（グラフ）の性質で shard 由来ではないので帰属を
+    // 足さない — 全量面と同じ文言のままにする。
+    assertRuntimeSupport(graph, RUNTIME_SUPPORT);
+    validateGraphContracts(graph);
+    this.#file = file;
+    this.#graph = graph;
+    this.#origin = origin;
+    this.#residency = planWeightResidency(graph);
+  }
+
+  /** グラフ shard（`__metadata__.karume_ir` 持ちの先頭 shard）から prepare する。 */
+  static fromGraphShard(graphShard: ModelShard): PreparedModel {
+    const origin = shardOrigin(0, graphShard.id);
+    const file = parseShard(graphShard.bytes, origin);
+    let graph: IrGraph;
+    try {
+      graph = extractIrGraph(file);
+    } catch (cause) {
+      // 「先頭がグラフ shard でない」も shard の取り違え — どの資産を先頭に置いたのかを名乗る。
+      throw attributeToShard(origin, cause);
+    }
+    return new PreparedModel(file, graph, origin);
+  }
+
+  /** 全量面（openModel 済み）から prepare する（= 全テンソル同居のグラフ shard 1 本）。 */
+  static fromModel(model: KarumeModel): PreparedModel {
+    return new PreparedModel(model.file, model.graph, undefined);
+  }
+
+  /**
+   * 必要メモリの見積り（ADR 0070 決定 5）— GPU に触れない純関数で、返るのはカテゴリ別の
+   * バイト数と勘定に入っていないものの列だけ。可否の判定はしない（最終門は out-of-memory
+   * errorScope のまま）。全量面 `estimateSessionMemory` と**同じ実装 1 本**。
+   */
+  estimate(options: EstimateOptions = {}): MemoryEstimate {
+    return estimateGraphMemory(this.#graph, this.#residency, options);
+  }
+
+  /**
+   * 重み shard 列（グラフ shard を**含まない**）を消費して Session を作る。届いた順に
+   * 「進行検証 → CPU 展開（適格外のみ）→ GPU アップロード → フェンス → 参照を手放す」。
+   *
+   * MUST: 各 shard の bytes は buffer 全体を占める（ADR 0038 §5 と同じ規律 — slice で辻褄を
+   * 合わせると RAM ピークが倍増する）。
+   * MUST: 途中で失敗したら部分 Session を公開しない（transaction 境界 — {@link Session.build}）。
+   * 消費されなかった入力側 iterator も明示的に閉じる（hub の async generator の後始末）。
+   */
+  async createSession(
+    gpu: GpuContext,
+    weightShards: AsyncIterable<ModelShard>,
+    options: SessionOptions = {},
+  ): Promise<Session> {
+    const iterator = weightShards[Symbol.asyncIterator]();
+    try {
+      // MUST: グラフ shard 自身のテンソルも重みとして同じ門を通す（ADR 0070 決定 1 — 検査・
+      // アップロード・errorScope 規律を 2 面で分岐させない）。
+      const files = followingShards({ file: this.#file, origin: this.#origin }, iterator);
+      return await Session.build(gpu, this.#graph, this.#residency, files, options);
+    } catch (cause) {
+      // MUST: 後始末の失敗で本体の例外を上書きしない（run 側と同じ規律）。
+      await iterator.return?.().catch(() => undefined);
+      throw cause;
+    }
+  }
+}
+
+/**
+ * グラフ shard（配布形の先頭 shard = `__metadata__.karume_ir` + 小テンソル）だけで admission を
+ * 済ませる 2 段境界の入口（ADR 0070 決定 5 / graph-first）。
+ *
+ * 「非対応 op / 格納 dtype」「IR 契約違反」は**ここで**落ちる — 重み shard を 1 バイトも
+ * 取得する前に「実行できない」が分かる。続けて {@link PreparedModel.estimate} で必要側の
+ * バイト数を、{@link PreparedModel.createSession} で重み shard 列を渡して Session を得る。
+ *
+ * shard 由来の失敗（parse 不能・グラフ shard でない・IR として壊れている）は `shard [0] 'id'` を
+ * 名乗る。capability 不足と契約違反は**帰属を足さない** — モデル（グラフ）の性質であって
+ * shard の中身の話ではないので、全量面と同じ文言のままにする。
+ */
+export const prepareModel = (graphShard: ModelShard): PreparedModel =>
+  PreparedModel.fromGraphShard(graphShard);
+
+/**
  * モデルを実行可能な Session にする。重みの GPU アップロードはこの async ステージで行う。
  */
-export const createSession = (
+export const createSession = async (
   gpu: GpuContext,
   model: KarumeModel,
   options: SessionOptions = {},
-): Promise<Session> => Session.create(gpu, model, options);
+): Promise<Session> =>
+  // MUST: 全量面も shard 経路（グラフ shard 1 本 + 重み shard 0 本の列）で構築する — 検査・
+  // アップロード・errorScope 規律を 2 面で分岐させない（ADR 0070 受入①の構造的根拠）。
+  // 1 shard の列では従来どおり「1 同期区間 + 末尾 submit 1 回 + フェンス」になり、挙動も
+  // エラー文言も変わらない。
+  // MUST: `async` を外さない — prepare 相（capability 門・契約検査）の失敗は**同期 throw では
+  // なく reject** で届ける契約（既存の呼び手は Promise の失敗として捌いている）。
+  await PreparedModel.fromModel(model).createSession(gpu, noWeightShards(), options);
 
 /**
  * shard 列（各要素 = 実名 + 独立に整合な safetensors 1 本の bytes = {@link ModelShard}）から
@@ -2374,11 +2406,31 @@ export const createSession = (
  * フェンス → 参照を手放す」で消費する。同一資産なら {@link createSession}（全量面）と
  * GPU 常駐バイト列・診断が一致する（受入① — 経路自体を共有している）。
  *
+ * {@link prepareModel} + {@link PreparedModel.createSession} の薄い合成（列の先頭を自分で
+ * 取るだけ）。admission を重み取得の前に挟みたい呼び手は 2 段の面を直接使う。
+ *
  * shard 由来の失敗（parse・宣言違反・co-shard・アップロード）は `shard [n] 'id'` を名乗る。
  * hub の `streamAssets` はそのまま渡せる（`StreamedAsset` と構造互換）。
  */
-export const createSessionFromShards = (
+export const createSessionFromShards = async (
   gpu: GpuContext,
   shards: AsyncIterable<ModelShard>,
   options: SessionOptions = {},
-): Promise<Session> => Session.createFromShards(gpu, shards, options);
+): Promise<Session> => {
+  const iterator = shards[Symbol.asyncIterator]();
+  let prepared: PreparedModel;
+  try {
+    const first = await iterator.next();
+    if (first.done === true) {
+      throw new ExecutionError("shard 列が空（最初の shard はグラフ shard — ADR 0070 決定 3）");
+    }
+    prepared = prepareModel(first.value);
+  } catch (cause) {
+    // MUST: 後始末の失敗で本体の例外を上書きしない（run 側と同じ規律）。
+    await iterator.return?.().catch(() => undefined);
+    throw cause;
+  }
+  // MUST: 残りの shard は**同じ iterator** をそのまま渡す（別の generator で包むと、構築が
+  // 失敗したときの `return()` が元の列（hub の async generator）まで届かない）。
+  return await prepared.createSession(gpu, { [Symbol.asyncIterator]: () => iterator }, options);
+};
