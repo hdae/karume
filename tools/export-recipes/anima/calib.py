@@ -213,6 +213,23 @@ def adaln_segments_seen(names: Iterable[str]) -> frozenset[str]:
     return frozenset(seen)
 
 
+def _on_cpu(value: Any) -> Any:
+    """捕捉した付随引数を CPU へ落とす（Tensor と**素の** tuple / list の中身だけ）。
+
+    組の中まで見るのは、block が rope を `(cos, sin)` の組で受けるから — 素通しにすると
+    `--calib-device cuda` で校正バッチの一部だけが VRAM に残り続ける。戻す側（stage 実行直前の
+    デバイス移動）は core の `karume.quant_calib` が同じ形で持つ。CPU 経路では `Tensor.cpu()` が
+    self を返すので、既定の捕捉は 1bit も変わらない。
+    """
+    if isinstance(value, torch.Tensor):
+        return value.cpu()
+    if type(value) is tuple:
+        return tuple(_on_cpu(item) for item in value)
+    if type(value) is list:
+        return [_on_cpu(item) for item in value]
+    return value
+
+
 def _block_kwargs(
     names: Sequence[str], args: Sequence[Any], kwargs: dict[str, Any]
 ) -> dict[str, Any]:
@@ -311,6 +328,14 @@ def capture_stage_batches(
 
     MUST: 呼び出し側は**block 内の丸めを 1 本も当てる前**に呼ぶ（当てた後だと、丸めた重みが
     作った活性から同じ重みの丸め先を選ぶ循環になる）。
+
+    NOTE（デバイス）: 参照 denoise は `model` が居るデバイスで回す（`--calib-device cuda` の
+    感度実験経路では DiT が GPU に居る）。**テキスト前段は CPU のまま**動かす — Qwen3 +
+    conditioner と f32 の DiT は同じ VRAM に同居できないので、GPU へ運ぶのは条件が出来上がった
+    後の `embeds` / `negative` / `latents_init` だけ。初期ノイズは **CPU で生成してから移す**
+    （`torch.randn` の乱数列はデバイスごとに別物なので、生成をデバイス側に寄せると CPU 経路と
+    ビットが割れる）。捕捉したバッチは常に CPU へ落として持つ（校正バッチの置き場は CPU 一択 —
+    stage 実行時の運搬は `karume.quant_calib` の JIT 移動が担う）。
     """
     if not prompts:
         raise AssertionError("校正プロンプトが 1 件も無い（校正付き i4 は入力ゼロでは成立しない）")
@@ -339,12 +364,24 @@ def capture_stage_batches(
         generator=torch.Generator().manual_seed(pipeline_ref.SEED),
         dtype=torch.float32,
     )
+    device = next(model.parameters()).device
+    embeds = [embed.to(device) for embed in embeds]
+    negative = negative.to(device)
+    latents_init = latents_init.to(device)
     blocks = model.transformer_blocks
     names = tuple(inspect.signature(blocks[0].forward).parameters)
     batches: list[StageBatch] = []
 
     def catch(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
-        batches.append(((args[0].detach(),), _block_kwargs(names, args, kwargs)))
+        # 捕捉は CPU へ落として溜める（バッチ数 × hidden を VRAM に常駐させない）。CPU 経路では
+        # `Tensor.cpu()` が self を返すので、既定の捕捉は 1bit も変わらない。
+        captured = _block_kwargs(names, args, kwargs)
+        batches.append(
+            (
+                (args[0].detach().cpu(),),
+                {name: _on_cpu(value) for name, value in captured.items()},
+            )
+        )
 
     handle = blocks[0].register_forward_pre_hook(catch, with_kwargs=True)
     try:
@@ -456,8 +493,13 @@ def calibrate_i4(
     MUST: 台帳の無いレポートは fail loudly — 出荷経路を持つのは `gptq` × `rtn` だけで
     （`karume.quant_calib` の MUST）、台帳が無いまま進むと i4 席に scale の無い重みが載る。
     """
+    # デバイスは stage から読む（core が計算デバイスを導くのと同じ源 — 印字だけ別の綴りから
+    # 作ると、実際に回った場所と診断行が食い違いうる）。見積りの係数は CPU 実測なので、
+    # `device=cuda` の行では桁が合わない（そちらは感度実験専用の経路）。
+    device = next(rig.stages[0][1].parameters()).device
     print(
-        f"[calib] GPTQ 校正を開始 — stage {len(rig.stages)} × バッチ {len(rig.batches)} 本"
+        f"[calib] GPTQ 校正を開始（device={device.type}）"
+        f" — stage {len(rig.stages)} × バッチ {len(rig.batches)} 本"
         f"（見積り約 {len(rig.batches) * CALIB_SECONDS_PER_BATCH / 60:.0f} 分"
         " — 波 J-2 実測からの線形外挿）",
         flush=True,

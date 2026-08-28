@@ -83,6 +83,16 @@ ADALN_I8_TAG = "adaln8"
 #: 組み立て（`anima.eval_dist`）だけ。
 ADALN_I8_CALIB_METHOD = f"{CALIB_SHIPPABLE_METHOD}-{ADALN_I8_TAG}"
 
+#: GPTQ 校正（捕捉 + 丸め）を回せるデバイス（書き手は `anima/export.py` の `--calib-device`）。
+CALIB_DEVICES = ("cpu", "cuda")
+
+#: **配布して良い校正デバイス**。これ以外で焼いた i4 は {@link CALIB_PROVENANCE_FILE} の `method`
+#: へデバイス名が付き（`gptq-cuda`）、{@link assert_calib_provenance} の方式一致に名指しで落ちる。
+#: 綴りを変えるのは {@link ADALN_I8_TAG} と同じ理由 — **GPTQ の丸め解はデバイスで変わる**
+#: （f64 縮約の順序も linalg の実装も違う）のに、格納形も本数も 1 バイト違わないので
+#: `verify_dist` もヘッダ検査も素通りする。配布経路から締め出す網は方式一致 1 つきり。
+CALIB_SHIPPABLE_DEVICE = "cpu"
+
 #: 上流の重みライセンス原文（この recipe の隣に逐語で置いてある）。配布は Derivative の
 #: Distribution なので §3(a)（ライセンスのコピーを第三者へ提供する）が掛かる — 要約や
 #: 書き換えでは条件を満たさないため、**1 バイトも変えずに**配布リポ直下の `LICENSE.md` として

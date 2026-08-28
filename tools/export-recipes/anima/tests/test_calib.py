@@ -44,6 +44,7 @@ from anima.distribution import (
     ANIMA_MODELS,
     ANIMA_TURBO_MODEL_NAME,
     BASE_MODELS,
+    CALIB_SHIPPABLE_DEVICE,
 )
 from karume.quantize import fake_quant_int4, fake_quant_int8
 
@@ -357,6 +358,7 @@ def i4_args(
     no_calib: bool = False,
     model: str = ANIMA_TURBO_MODEL_NAME,
     adaln_i8: bool = False,
+    calib_device: str = CALIB_SHIPPABLE_DEVICE,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         dtype="i4",
@@ -365,6 +367,7 @@ def i4_args(
         repo="unused",
         model=model,
         i4_adaln_i8=adaln_i8,
+        calib_device=calib_device,
     )
 
 

@@ -26,6 +26,7 @@ from anima.distribution import (
     ANIMA_BASE_MODEL_NAME,
     ANIMA_TURBO_MODEL_NAME,
     CALIB_PROVENANCE_FILE,
+    CALIB_SHIPPABLE_DEVICE,
     CALIB_SHIPPABLE_METHOD,
     LORA_PROVENANCE_FILE,
 )
@@ -118,7 +119,13 @@ class TestCalibProvenance:
 
     @staticmethod
     def _args(
-        dtype, *, no_calib=False, calib_prompts=4, model=ANIMA_TURBO_MODEL_NAME, adaln_i8=False
+        dtype,
+        *,
+        no_calib=False,
+        calib_prompts=4,
+        model=ANIMA_TURBO_MODEL_NAME,
+        adaln_i8=False,
+        calib_device=CALIB_SHIPPABLE_DEVICE,
     ):
         return argparse.Namespace(
             dtype=dtype,
@@ -126,6 +133,7 @@ class TestCalibProvenance:
             calib_prompts=calib_prompts,
             model=model,
             i4_adaln_i8=adaln_i8,
+            calib_device=calib_device,
         )
 
     def test_it_records_the_shippable_method_and_the_corpus(self, tmp_path):
@@ -205,6 +213,49 @@ class TestCalibProvenance:
 
         record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
         assert record["method"] == f"rtn-{ADALN_I8_TAG}"
+        assert record["method"] not in (CALIB_SHIPPABLE_METHOD, ADALN_I8_CALIB_METHOD)
+
+    def test_the_shippable_device_is_recorded_without_touching_the_method(self, tmp_path):
+        """既定（CPU）の記録は綴りが従来のまま — `device` 欄の追加が既存系列を落とさない。"""
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        export_anima._write_calib_provenance(self._args("i4"), "transformer", out_dir)
+
+        record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
+        assert record["device"] == CALIB_SHIPPABLE_DEVICE
+        assert record["method"] == CALIB_SHIPPABLE_METHOD
+
+    def test_another_calibration_device_is_recorded_as_its_own_method(self, tmp_path):
+        """MUST: cuda で焼いた i4 は配布の受理集合から**外れる綴り**で記録する。
+
+        GPTQ の丸め解はデバイスで変わるのに、格納形からは 1 バイトも判別できない
+        （`--i4-adaln-i8` と同じ形の穴）。`device` 欄だけを足しても方式一致の門は `method`
+        しか見ないので、綴りの側で名指しさせる。
+        """
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        export_anima._write_calib_provenance(
+            self._args("i4", calib_device="cuda"), "transformer", out_dir
+        )
+
+        record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
+        assert record["device"] == "cuda"
+        assert record["method"] == f"{CALIB_SHIPPABLE_METHOD}-cuda"
+        assert record["method"] != CALIB_SHIPPABLE_METHOD, "配布可として通ってしまう"
+
+    def test_the_device_and_the_variant_compose_in_the_method(self, tmp_path):
+        """2 つの逸脱は独立 — 片方が他方を隠さない。"""
+        out_dir = tmp_path / "transformer"
+        out_dir.mkdir()
+
+        export_anima._write_calib_provenance(
+            self._args("i4", adaln_i8=True, calib_device="cuda"), "transformer", out_dir
+        )
+
+        record = json.loads((out_dir / CALIB_PROVENANCE_FILE).read_text(encoding="utf-8"))
+        assert record["method"] == f"{ADALN_I8_CALIB_METHOD}-cuda"
         assert record["method"] not in (CALIB_SHIPPABLE_METHOD, ADALN_I8_CALIB_METHOD)
 
     def test_it_writes_nothing_for_a_series_that_is_not_i4(self, tmp_path):
@@ -532,3 +583,83 @@ class TestAdalnI8Cli:
             export_anima.main()
 
         assert "--i4-adaln-i8" in capsys.readouterr().err
+
+
+class TestCalibDeviceCli:
+    """`--calib-device`（校正を回すデバイス）の CLI 側の約束（既定 cpu・校正時のみ・実在検査）。"""
+
+    def test_the_default_is_the_shippable_device(self, monkeypatch):
+        args = TestAdalnI8Cli._run(
+            monkeypatch, ["--dtype", "i4", "--model", ANIMA_TURBO_MODEL_NAME]
+        )
+
+        assert args.calib_device == CALIB_SHIPPABLE_DEVICE
+
+    def test_another_device_writes_to_its_own_series_directory(self, monkeypatch):
+        """MUST: 配布条件で焼いた i4 系列を cuda 産が**上書きしない**（既定 out でも別席）。
+
+        丸め解がデバイスで変わるのに格納形は 1 バイトも違わないので、同じ path を共有すると
+        「配布条件の系列」が黙って cuda 産に化ける（provenance で配布は落ちるが資産は失われる）。
+        """
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        plain = TestAdalnI8Cli._run(
+            monkeypatch, ["--dtype", "i4", "--dit-graph", "dyn", "--model", ANIMA_TURBO_MODEL_NAME]
+        )
+        moved = TestAdalnI8Cli._run(
+            monkeypatch,
+            [
+                "--dtype",
+                "i4",
+                "--dit-graph",
+                "dyn",
+                "--calib-device",
+                "cuda",
+                "--model",
+                ANIMA_TURBO_MODEL_NAME,
+            ],
+        )
+
+        assert plain.out != moved.out
+        assert moved.out.name == f"{plain.out.name.removesuffix('-dyn')}-cuda-dyn"
+
+    def test_a_device_torch_cannot_see_is_refused_before_any_work(self, monkeypatch, capsys):
+        """MUST: 使えない CUDA は**校正を始める前**に落とす（CPU へ黙って落ちる分岐は無い）。
+
+        共有 venv の torch は CPU 版なので、この経路がそのまま踏まれる。実 GPU の環境では
+        `is_available()` が真になり CLI を通る（そちらは実機でしか確かめられない）。
+        """
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "export.py",
+                "--dtype",
+                "i4",
+                "--model",
+                ANIMA_TURBO_MODEL_NAME,
+                "--calib-device",
+                "cuda",
+            ],
+        )
+
+        with pytest.raises(SystemExit):
+            export_anima.main()
+
+        assert "CUDA" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--dtype", "f16"],
+            ["--dtype", "i4", "--no-calib"],
+        ],
+    )
+    def test_it_is_refused_where_no_calibration_runs(self, monkeypatch, capsys, argv):
+        """効かないノブを黙って受けない（校正しない経路に GPU の出番は 1 つも無い）。"""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr("sys.argv", ["export.py", *argv, "--calib-device", "cuda"])
+
+        with pytest.raises(SystemExit):
+            export_anima.main()
+
+        assert "--calib-device" in capsys.readouterr().err

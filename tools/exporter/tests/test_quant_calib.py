@@ -91,6 +91,18 @@ class Chain(nn.Module):
         return self.proj(x + shift), "state"
 
 
+class Roped(nn.Module):
+    """rope の `(cos, sin)` のような**組**を keyword で受ける stage（実 DiT block と同じ形）。"""
+
+    def __init__(self, features: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(features, features)
+
+    def forward(self, x: torch.Tensor, rotary: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        cos, sin = rotary
+        return self.proj(x * cos + sin)
+
+
 class Pair(nn.Module):
     """1 つの stage に 2 本の linear（`include` の効きを見るための形）。"""
 
@@ -438,6 +450,81 @@ class TestCalibrateStages:
         torch.manual_seed(35)
         with pytest.raises(QuantizeError, match="1 行も流れていない"):
             calibrate_stages([("d", Detour())], self.batch(), spec=GRID)
+
+
+class TestCalibrateStagesDevice:
+    """計算デバイスは **stage から導き**、校正バッチは呼び出し側の置き場に留める（JIT 移動）。
+
+    校正バッチは stage あたり数百本 × 数十 MB になりうるので、駆動が勝手に計算デバイスへ
+    引き上げると重みと同じ VRAM を取り合う。ここが固定するのは「バッチの置き場は動かない」
+    「stage が居るデバイスで計算が回る」の 2 点で、全 CPU の既定経路が no-op になることは
+    上のビット同一テストが受け持つ。
+    """
+
+    def test_the_batches_reach_the_stage_without_a_copy(self):
+        """CPU の既定経路では `Tensor.to` が self を返す — 写しすら作らない。
+
+        stage が**実際に受け取った**テンソルで見る（呼び出し側のリストを見るだけでは、駆動が
+        入力を書き換えないことしか言えず恒真化する）。
+        """
+        stages = TestCalibrateStages.two_stages()
+        batches = TestCalibrateStages.batch()
+        given = batches[0][0][0]
+        seen: list[torch.Tensor] = []
+        stages[0][1].register_forward_pre_hook(lambda _module, args: seen.append(args[0]))
+
+        calibrate_stages(stages, batches, spec=GRID)
+
+        assert seen, "先頭 stage が 1 度も呼ばれていない"
+        assert all(tensor is given for tensor in seen)
+
+    def test_a_stage_without_parameters_fails_loudly(self):
+        """デバイスの導出元が無い stage を黙って CPU 扱いにしない。"""
+        with pytest.raises(QuantizeError, match="パラメータを 1 つも持たない"):
+            calibrate_stages([("act", nn.ReLU())], TestCalibrateStages.batch(), spec=GRID)
+
+    def test_a_tuple_keyword_reaches_the_stage_without_a_copy(self):
+        """組で渡る kwargs（rope の `(cos, sin)`）も CPU 経路では写しを作らない。"""
+        torch.manual_seed(46)
+        stages: list[tuple[str, nn.Module]] = [("block.0", Roped(32))]
+        rotary = (torch.ones(32), torch.zeros(32))
+        seen: list[object] = []
+        stages[0][1].register_forward_pre_hook(
+            lambda _module, _args, kwargs: seen.append(kwargs["rotary"]), with_kwargs=True
+        )
+
+        calibrate_stages(
+            stages, [((correlated_inputs(24, 32, seed=47),), {"rotary": rotary})], spec=GRID
+        )
+
+        assert seen, "stage が 1 度も呼ばれていない"
+        assert all(tuple(given) == rotary for given in seen)
+        assert all(given[0] is rotary[0] and given[1] is rotary[1] for given in seen)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA が無い環境では検証できない")
+    def test_a_cuda_stage_runs_from_cpu_batches(self):
+        """GPU の stage × CPU のバッチ（組の kwargs 込み）で完走し、バッチは CPU に置かれたまま。
+
+        共有 venv の torch は CPU 版なので既定では skip される（GPTQ 校正を CUDA で回すのは
+        感度実験用の経路で、配布経路は CPU のまま）。
+        """
+        torch.manual_seed(44)
+        stages: list[tuple[str, nn.Module]] = [
+            ("block.0", Roped(64).cuda()),
+            ("block.1", Roped(64).cuda()),
+        ]
+        rotary = (torch.ones(64), torch.zeros(64))
+        batches = [((correlated_inputs(48, 64, seed=45),), {"rotary": rotary})]
+
+        report = calibrate_stages(stages, batches, spec=GRID)
+
+        assert report.modules == 2
+        assert report.int4 is not None
+        assert sorted(report.int4.scales) == ["block.0.proj.weight", "block.1.proj.weight"]
+        assert all(scale.device.type == "cuda" for scale in report.int4.scales.values())
+        assert all(module.proj.weight.device.type == "cuda" for _prefix, module in stages)
+        assert batches[0][0][0].device.type == "cpu"
+        assert all(part.device.type == "cpu" for part in rotary)
 
 
 class TestCalibrateStagesMethods:

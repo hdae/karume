@@ -321,9 +321,13 @@ def gptq_quantize_rows(
     block = spec.group_size * max(1, block_size // spec.group_size)
 
     work = rows.to(torch.float64)
-    rounded = torch.empty(rows.shape, dtype=torch.float32)
+    # 受け皿は**入力と同じデバイス**に作る（既定の `torch.empty` は CPU 固定なので、GPU の重みを
+    # 渡された瞬間に列の書き込みでデバイス不一致になる）。全 CPU なら従来と同じ置き場。
+    rounded = torch.empty(rows.shape, dtype=torch.float32, device=rows.device)
     ledger = (
-        torch.empty((int(rows.shape[0]), groups), dtype=torch.float32) if spec.shippable else None
+        torch.empty((int(rows.shape[0]), groups), dtype=torch.float32, device=rows.device)
+        if spec.shippable
+        else None
     )
     for start in range(0, in_axis, block):
         stop = min(start + block, in_axis)
@@ -512,6 +516,76 @@ def _qualify(prefix: str, local: str) -> str:
     return f"{prefix}.{local}" if prefix else local
 
 
+def _stage_device(stage: nn.Module) -> torch.device:
+    """stage の計算デバイス（先頭パラメータの置き場）。
+
+    デバイスを引数で受けずに **stage から導く**のは、丸める重みが載っている場所と観測 forward を
+    回す場所が構造的に同じであることを保つため（引数で受ける形にすると、片方だけを動かした
+    呼び出しが「CPU の重みへ GPU の活性で選んだ丸め先」を書き戻せてしまう）。
+    """
+    parameter = next(stage.parameters(), None)
+    if parameter is None:
+        raise QuantizeError(
+            "stage がパラメータを 1 つも持たない — 校正の計算デバイスを導けない"
+            "（校正対象を抱える nn.Module を stage として渡す）"
+        )
+    return parameter.device
+
+
+def _moved(value: object, device: torch.device) -> object:
+    """バッチの 1 要素を `device` へ移す（Tensor と**素の** tuple / list の中身だけ）。
+
+    組の中まで見るのは、実モデルの stage が rope の `(cos, sin)` のような**組**を keyword で
+    受けるから — 素通しにすると、置き場を揃えたはずのバッチの一部だけが計算デバイスへ運ばれず、
+    stage の中でデバイス不一致になる。逆に tuple の**派生**（namedtuple 等）は素通しにする
+    （再構築でフィールドの顔ぶれが壊れる形があり、運べない組は torch 側が fail loudly する）。
+    """
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if type(value) is tuple:
+        return tuple(_moved(item, device) for item in value)
+    if type(value) is list:
+        return [_moved(item, device) for item in value]
+    return value
+
+
+def _batch_on(batch: StageBatch, device: torch.device) -> StageBatch:
+    """1 バッチ中の Tensor だけを stage のデバイスへ移した写しを返す。
+
+    校正バッチの置き場は**呼び出し側が決めたまま**にして、stage を回す直前にだけ運ぶ
+    （JIT 移動）。バッチ全部を計算デバイスへ常駐させる形にすると、GPU 校正では重みと校正入力が
+    同じ VRAM を取り合う。`Tensor.to` は同一デバイスなら self を返す no-op なので、全 CPU の
+    既定経路は 1bit も動かない。
+    """
+    args, kwargs = batch
+    return (
+        tuple(_moved(value, device) for value in args),
+        {name: _moved(value, device) for name, value in kwargs.items()},
+    )
+
+
+def _advance_batch(
+    stage: nn.Module,
+    batch: StageBatch,
+    device: torch.device,
+    select_output: Callable[[object], torch.Tensor],
+) -> torch.Tensor:
+    """丸め済みの stage へ 1 バッチを通し、次 stage の入力を**元のデバイスへ戻して**返す。
+
+    戻すのは校正バッチの置き場を不変にするため — 次 stage の入力を計算デバイスに置いたままに
+    すると、バッチ数ぶんの活性が丸ごと常駐して {@link _batch_on} の JIT 移動が無意味になる。
+    往復は 1 バッチにつき 1 回で、stage 1 つぶんの forward と GPTQ 解に対して無視できる。
+    """
+    args = batch[0]
+    if not args or not isinstance(args[0], torch.Tensor):
+        raise QuantizeError(
+            "校正バッチの先頭位置引数が Tensor でない"
+            "（stage 間の受け渡しは唯一の位置引数 = Tensor という形に閉じている）"
+        )
+    moved_args, moved_kwargs = _batch_on(batch, device)
+    return select_output(stage(*moved_args, **moved_kwargs)).detach().to(args[0].device)
+
+
 def _make_pre_hook(
     stats: _LayerStats, needs_hessian: bool, needs_act: bool, sample_limit: int
 ) -> Callable[[nn.Module, tuple[object, ...]], None]:
@@ -588,6 +662,13 @@ def calibrate_stages(
     NOTE（メモリ）: 同時に生きるのは「現 stage の入力バッチ全部 + 次 stage の入力バッチ全部
     + 現 stage の `H`（対象 linear ごとに `in²` の F64）」。`in = 4096` の linear なら
     `H` 1 本で 128MiB なので、stage あたりの対象本数が効く。
+
+    NOTE（デバイス）: 計算デバイスは **stage 自身（先頭パラメータの置き場）から導く** —
+    引数では受けない。バッチは呼び出し側が置いた場所（既定運用では CPU）に留め、観測・前進の
+    forward の直前にだけ stage のデバイスへ運ぶ（{@link _batch_on}）。前進の出力も元のデバイスへ
+    戻す（{@link _advance_batch}）ので、常駐するのは「重み + `H` + 1 バッチ」だけで、GPU 校正でも
+    バッチ本数がメモリに効かない。全 CPU では `Tensor.to` が self を返す no-op なので、既定経路の
+    値も演算順も 1bit も変わらない。
     """
     if method not in CALIB_METHODS:
         raise QuantizeError(f"方式 '{method}' は未対応（{', '.join(CALIB_METHODS)}）")
@@ -620,9 +701,10 @@ def calibrate_stages(
                 elements += weight.numel()
             stats.clear()
             if index + 1 < len(stages):
+                device = _stage_device(stage)
                 current = [
                     (
-                        (select_output(stage(*args, **kwargs)).detach(),),
+                        (_advance_batch(stage, (args, kwargs), device, select_output),),
                         dict(advance_kwargs(index + 1, kwargs) if advance_kwargs else kwargs),
                     )
                     for args, kwargs in current
@@ -660,6 +742,7 @@ def _observe_stage(
     sample_limit: int,
 ) -> dict[str, _LayerStats]:
     """フックを掛けて全バッチを 1 周し、対象ごとの校正統計を採って**必ず外す**。"""
+    device = _stage_device(stage)
     lookup = dict(stage.named_modules())
     stats: dict[str, _LayerStats] = {}
     handles = []
@@ -672,8 +755,9 @@ def _observe_stage(
             )
         )
     try:
-        for args, kwargs in batches:
-            stage(*args, **kwargs)
+        for batch in batches:
+            moved_args, moved_kwargs = _batch_on(batch, device)
+            stage(*moved_args, **moved_kwargs)
     finally:
         for handle in handles:
             handle.remove()

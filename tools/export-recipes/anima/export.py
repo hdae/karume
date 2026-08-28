@@ -59,6 +59,12 @@ step 数と CFG は `--model` の配布既定から導く — {@link anima.calib
 `calib_provenance.json` の `method` にも `-adaln8` が付き、**配布の一致検査に落ちる**
 （視認評価専用 — 組み立ては `python -m anima.eval_dist`）。
 
+`--calib-device`（既定 `cpu`）は校正の**捕捉 + GPTQ だけ**を別デバイスへ出すノブ。`cuda` は
+感度実験の回転を上げるための経路で、**丸め解が CPU と変わる**（f64 縮約の順序も linalg の実装も
+違う）ため配布には使わない — `calib_provenance.json` の `method` にデバイス名が付き
+（`gptq-cuda`）、`-adaln8` と同じく配布の一致検査に落ちる。stage 分解一致門・block 外の RTN・
+i8 の丸めは CPU のまま（デバイス差の交絡を丸めの側だけに閉じる）。
+
 MUST: `--dtype f16` は**重みを f16 表現可能値へ丸めてから**（fake-quant — ADR 0006）参照と
 golden を採り、適格な重みスロットだけを f16 で格納する（ADR 0018）。丸めは各 builder が
 モデルを組んだ直後に掛かる — 参照より後ろへ動かすと「参照だけ元の重み」になり、E2E の差が
@@ -103,7 +109,9 @@ from _shared.paths import SERIES_ROOT
 from anima.distribution import (
     ADALN_I8_TAG,
     ANIMA_MODELS,
+    CALIB_DEVICES,
     CALIB_PROVENANCE_FILE,
+    CALIB_SHIPPABLE_DEVICE,
     LORA_PROVENANCE_FILE,
 )
 from karume.convert import (
@@ -736,6 +744,11 @@ def _round_i4_calibrated(
 
     MUST: block 外の適格は {@link NON_STAGE_I4_WEIGHTS} と一致し、block 内の linear は 1 本
     残らず i4 適格であること — どちらも外れたら上流の構成が変わっている。
+
+    NOTE（デバイス）: `--calib-device` が動かすのは ③④（捕捉 + GPTQ）だけで、①② は CPU のまま
+    回す（デバイス差の交絡を丸め方式の側だけに閉じ込める）。戻りは try/finally で必ず CPU —
+    emit も golden も CPU 経路で、GPU に残った重みは後続の診断を別の形で壊す。既定 `cpu` では
+    `Module.to` も `Tensor.to` も no-op なので、配布経路のバイトは 1 つも動かない。
     """
     stages = calib.dit_stages(wrapper)
     stage_names = calib.stage_linear_names(stages)
@@ -760,20 +773,33 @@ def _round_i4_calibrated(
     int8 = round_int8()
     prompts = calibration_prompts(args.calib_prompts)
     conditions = calib.calib_conditions(args.model)
-    batches = calib.capture_stage_batches(
-        wrapper.model, prompts, repo=args.repo, conditions=conditions
-    )
-    calib.assert_calib_batches_match_graph(graph_batch, batches)
-    rig = calib.CalibRig(stages=stages, batches=batches)
-    # MUST: 述語が選ぶ集合 = i4 で格納する block 内の集合。既定（除外なし）は `None` を渡して
-    # **述語そのものを持たない** — 「全部」を綴り直した述語は、走査の定義が動いた日に片側だけ
-    # 追随して黙ってずれる。
-    stage_i4 = stage_names - excluded
-    report, ledger = calib.calibrate_i4(
-        rig, None if not excluded else lambda local: not calib.is_adaln(local)
-    )
+    # デバイスの継ぎ目は**ここ**（i8 丸めの直後）— 上の ①②（stage 分解一致門・block 外 RTN・
+    # i8 丸め）は CPU のまま回す。GPTQ の丸め解はデバイスで変わるので、デバイス差が混ざる範囲を
+    # 「捕捉 + GPTQ」だけに隔離しておかないと、視認 A/B が何の差を見ているのか言えなくなる。
+    wrapper.to(args.calib_device)
+    try:
+        batches = calib.capture_stage_batches(
+            wrapper.model, prompts, repo=args.repo, conditions=conditions
+        )
+        calib.assert_calib_batches_match_graph(graph_batch, batches)
+        rig = calib.CalibRig(stages=stages, batches=batches)
+        # MUST: 述語が選ぶ集合 = i4 で格納する block 内の集合。既定（除外なし）は `None` を渡して
+        # **述語そのものを持たない** — 「全部」を綴り直した述語は、走査の定義が動いた日に片側だけ
+        # 追随して黙ってずれる。
+        stage_i4 = stage_names - excluded
+        report, ledger = calib.calibrate_i4(
+            rig, None if not excluded else lambda local: not calib.is_adaln(local)
+        )
+    finally:
+        # MUST: emit へ渡すのは CPU の重み（グラフ採取も golden も CPU 経路）。例外で抜けた
+        # ときも戻す — 失敗したまま GPU に残ると、後続の診断が「重みが無い」形で化ける。
+        wrapper.to("cpu")
+        if args.calib_device == "cuda":
+            torch.cuda.empty_cache()
     calib.assert_calib_covers_scan(report, stage_i4)
-    calibrated = ledger.scales
+    # 台帳は丸めが走ったデバイスに載って返る — 格納側（emit）は CPU のテンソルを前提にするので
+    # ここで回収する（`plain` は CPU 産のまま）。
+    calibrated = {fqn: scale.cpu() for fqn, scale in ledger.scales.items()}
     # MUST: 2 経路は互いに素（重なれば同じ重みを 2 度丸めたことになり、値だけが静かに狂う）。
     overlap = sorted(set(plain) & set(calibrated))
     if overlap:
@@ -934,7 +960,8 @@ def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path)
 
 
 def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path) -> str | None:
-    """i4 系列の丸め条件（方式・格子・コーパス・解像度・step・CFG）を系列へ書き、ファイル名を返す。
+    """i4 系列の丸め条件（方式・格子・コーパス・解像度・step・CFG・デバイス）を系列へ書き、
+    ファイル名を返す。
 
     校正の有無は**格納形を 1 バイトも変えない**ので、資産からは復元できない — `--lora` と同じ形で
     「書き出した側が事実を書き残す」しかない。`anima/distribution.py` の
@@ -962,8 +989,17 @@ def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path
     # 綴りにしておくのが、視認用に焼いた変種を配布経路から締め出す唯一の手（{@link
     # ADALN_I8_TAG}）。
     method = "rtn" if args.no_calib else calib.CALIB_METHOD
+    if args.i4_adaln_i8:
+        method = f"{method}-{ADALN_I8_TAG}"
+    # 校正デバイスも**方式の綴りごと**変える（`gptq` → `gptq-cuda`）。GPTQ の丸め解は
+    # デバイスで変わる（f64 縮約の順序も linalg の実装も違う）ので、cuda で焼いた i4 は
+    # 「配布条件で焼いた i4」ではない — しかも格納形からは 1 バイトも判別できない。
+    # `device` 欄は人と後の突き合わせのための事実で、配布を止めるのは綴りの側（{@link
+    # anima.distribution.CALIB_SHIPPABLE_DEVICE}）。
+    if args.calib_device != CALIB_SHIPPABLE_DEVICE:
+        method = f"{method}-{args.calib_device}"
     record: dict[str, object] = {
-        "method": f"{method}-{ADALN_I8_TAG}" if args.i4_adaln_i8 else method,
+        "method": method,
         "group_size": calib.CALIB_GRID.group_size,
         "grid": calib.CALIB_GRID.kind,
         "prompts": 0 if args.no_calib else args.calib_prompts,
@@ -971,6 +1007,7 @@ def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path
         "steps": 0 if conditions is None else conditions.steps,
         "guidance": 0 if conditions is None else conditions.guidance,
         "text_dtype": calib.CALIB_TEXT_DTYPE,
+        "device": args.calib_device,
     }
     (out_dir / CALIB_PROVENANCE_FILE).write_text(
         json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -1197,6 +1234,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="i4 を校正なしの素の RTN で丸める（テスト / smoke 用 — 配布資産にしないこと）",
     )
     parser.add_argument(
+        "--calib-device",
+        choices=CALIB_DEVICES,
+        default=CALIB_SHIPPABLE_DEVICE,
+        help="GPTQ 校正（捕捉 + 丸め）を回すデバイス"
+        f"（既定 {CALIB_SHIPPABLE_DEVICE}）。cuda は感度実験用 — 丸め解が CPU と変わるので"
+        "配布経路には使わない（calib_provenance の method にデバイス名が付き、"
+        "配布の一致検査に落ちる）",
+    )
+    parser.add_argument(
         "--i4-adaln-i8",
         action="store_true",
         help="i4 の量子化感度実験変種: block 内 adaLN（norm1/2/3 の linear_1/2）と block 外の"
@@ -1214,10 +1260,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.out is None:
         # MUST: 変種は既定 out でも**別ディレクトリ**（配布条件で焼いた i4 系列を、視認用の
-        # 変種が同じ path へ上書きしない）。接尾辞の順は `-adaln8` → `-dyn` で、grep したとき
-        # グラフ形が末尾に揃う。
+        # 変種が同じ path へ上書きしない）。校正デバイスも同じ穴 — cuda で焼いた i4 は丸め解が
+        # 別物なのに、既定 out を共有すると配布条件の系列を黙って潰す。接尾辞の順は
+        # `-adaln8` → `-cuda` → `-dyn` で、grep したときグラフ形が末尾に揃う。
         root = DEFAULT_OUT_ROOTS[args.dtype]
         name = root.name + (f"-{ADALN_I8_TAG}" if args.i4_adaln_i8 else "")
+        if args.calib_device != CALIB_SHIPPABLE_DEVICE:
+            name += f"-{args.calib_device}"
         args.out = root.with_name(name + (DYN_SUFFIX if args.dit_graph == "dyn" else ""))
 
     # MUST: 同一プロセスでの併用を機械的に拒否する。VAE パッチはプロセス全域の差し替えなので、
@@ -1268,6 +1317,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.model is not None and not calibrating:
         knob = f"--dtype {args.dtype}" + ("・--no-calib" if args.no_calib else "")
         parser.error(f"--model は --dtype i4 の校正条件を引くためだけのノブ（指定は {knob}）")
+
+    # MUST: 校正デバイスも校正するときだけ効くノブ（`--calib-prompts` / `--no-calib` と同文）。
+    # 受けてしまうと「GPU で焼いたつもりの f16 資産」という読めない指定が通る。
+    if args.calib_device != CALIB_SHIPPABLE_DEVICE and not calibrating:
+        knob = f"--dtype {args.dtype}" + ("・--no-calib" if args.no_calib else "")
+        parser.error(f"--calib-device は --dtype i4 の校正だけに効く（指定は {knob}）")
+
+    # MUST: 使えないデバイスは**校正を始める前**に落とす。校正は数十分〜数時間の経路で、
+    # 途中の `Module.to` で落ちると block 外 RTN と i8 丸めまで済んだ状態を捨てることになる。
+    if args.calib_device == "cuda" and not torch.cuda.is_available():
+        parser.error(
+            "--calib-device cuda を指定したが torch から CUDA が見えない"
+            "（CPU 版 torch / ドライバ未検出 — CPU へ黙って落ちる分岐は持たない）"
+        )
 
     # MUST: 効かないノブを黙って受けない。S 形は transformer 専用（他 3 ターゲットは解像度に
     # 依らないので共有）で、解像度はケース表 DIT_DYN_RESOLUTIONS が決める（`--resolution` は
