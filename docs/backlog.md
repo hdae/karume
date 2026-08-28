@@ -19,16 +19,28 @@ Anima Web アプリからの既知問題 3 件（調査で機序確定済み —
   （parked「2048px DiT attention メモリ工事」の消化）
 - ③Chromium の単一 ArrayBuffer 上限で Base f16 がロード不能
   （[limitations](limitations.md)）— 根本 = next の R1 shard 配布を優先（2026-08-25 裁定）。
-  DL 前の即エラーは **hub 側では実装しない** — 確保プローブは fetch-cache の次版で
-  実装予定（同裁定）
+  DL 前の即エラーは fetch-cache 0.5.0 の `expectedBytes` 即 throw + hub 追従で**済**
+  （2026-08-28 — 受信前に `cause` = RangeError で落ちる。ADR
+  [0080](decisions/0080-hub-fetch-cache-050.md)）
+- ⑤fetch-cache 0.5.0 追従（hub）— 検証責務の移譲（記録ハッシュ信頼・knob なし）・認証隔離の
+  撤去（ユーザー裁定: gated 運用予定なし）・`AssetPhase` から `verifying` 撤去・旧名前空間
+  `karume/1` 系 purge・`clearHubCache` の対象変更。正本 = ADR
+  [0080](decisions/0080-hub-fetch-cache-050.md)（旧 CAS ドラフトを置換 — `archive/hub-cas-0.5.0`
+  の再適用は不要になった）
 - ④素版 i4 感度 — adaLN + block 外 i8 変種（`--i4-adaln-i8`）を anima-v1.0 で export →
   視認 A/B（進行中）。裁定後に research / perf-ledger へ追随
 
-## next — R1 ロード面工事 + shard 配布（2026-08-25 昇格）
+## next — R1 ロード面工事 + shard 配布（2026-08-25 昇格・2026-08-28 統合裁定）
 
 release 節の「R1 の残り: ロード面 API 工事 4 件 + exporter 自動分割規則」を次の大波へ昇格
 （項目詳細は release 節のまま）。理由: Chromium の ArrayBuffer 上限で Base f16 が現配布形の
 まま恒久に開けない + モバイルの常駐 RAM 削減（streamAssets 接続）の根本もここ。
+
+2026-08-28 ユーザー裁定: API 工事 4 件と shard 配布は**1 波に統合**し、順序は API 工事が先
+（models 接続後に 2 段境界化で同じ継ぎ目を 2 度触らないため）: ①`ResidentWeight` union →
+②estimator 改名/シナリオ別 → ③identity 境界 + 2 段境界 → ④models 7 pipelines の shard 面
+接続 → ⑤exporter 自動分割（**閾値 1GiB**・co-shard 保証・決定的分割）→ ⑥Base f16 再 dist。
+受け入れ = Base f16 が実ブラウザ相当の制約下でロード可能（E2E）。HF 上げ直しは許可ゲート。
 
 ## 消化済み（0.6.0 yomi 依存分離 — 2026-08-25）
 

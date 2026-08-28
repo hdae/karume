@@ -706,6 +706,19 @@ Chromium（Chrome / Edge — 全 OS 共通・Mac も同じ）は PartitionAlloc 
 約 183MB しかなく、重み増で同じ壁に当たる。恒久解は shard 分割配布 + ロード面接続
 （backlog next の R1）。
 
+なお 2026-08-28（fetch-cache 0.5.0 追従 — ADR 0080）から、この壁は**ダウンロード前に**
+落ちる: hub が `expectedBytes`（manifest `size`）を渡すため、受信バッファの確保に失敗する
+大きさは 1 バイトも受信せず throw される（`cause` = RangeError — 帯域と時間を捨てた後に
+落ちる事故が消えた）。
+
+## hub: キャッシュは credential で隔離しない（by-design — 2026-08-28 裁定）
+
+資産キャッシュのキーは内容キー（`Authorization` を含まない）で、名前空間も取得層の固定
+1 個。認証付きで取得した gated 資産の写しは、同一端末・同一 origin の無認証呼び出しにも
+ヒットする。gated 資産の運用予定が無く、credential 別の名前空間隔離は過剰防御だったため
+撤去した（ADR [0080](decisions/0080-hub-fetch-cache-050.md) 決定 3 — 将来 gated 運用を
+始める場合は custom `caches` ラッパで隔離を再導入できる）。
+
 ## sha256 参照門は参照環境専用 — クロスデバイスのビット同一は保証しない
 
 e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` /

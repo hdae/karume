@@ -11,21 +11,25 @@
 
 ## Now
 
-- **Hub CAS 化は退避中（2026-08-25）**: fetch-cache 0.5.0（`cacheKey`）が議論の末**いったん
-  却下**され設計詰め直しになったため、それを前提にした karume 側 3 コミット（CAS 化
-  `a68e4e6`・ADR 0080 docs `272c0e9`・hub fix `ed3bf14`）を **`archive/hub-cas-0.5.0`
-  ブランチへ退避**し main を `62abf43` へ巻き戻した（fetch-cache 側の対応ブランチ =
-  `archive/cachekey-string-draft`）。ADR 0080 の裁定内容自体は生きている — fetch-cache の
-  新 API が決まり次第、退避ブランチを土台に再適用する。`ed3bf14` の hub fix（真因復元 +
-  バイト予算）だけは 0.5.0 非依存なので pre-CAS main へ移植して再適用する。
+- **fetch-cache 0.5.0 追従（2026-08-28 実装済み）**: 検証責務を取得層へ移譲（spec の
+  `sha256`/`expectedBytes`・記録ハッシュ信頼・knob なし）・認証隔離の撤去（ユーザー裁定）・
+  `AssetPhase` から `verifying` 撤去・旧名前空間 `karume/1` 系 purge・`clearHubCache` は
+  取得層名前空間まるごと。正本 = ADR
+  [0080](../docs/decisions/0080-hub-fetch-cache-050.md)（**旧 CAS ドラフトを置換** —
+  `archive/hub-cas-0.5.0` の再適用は不要になった。内容キーは 0.5.0 が natively 提供）。
+  anima-web への追随点 3 つ（`verifying` 消滅・sha256 不一致が `HubFetchError`+`cause`・
+  `clearHubCache` の対象拡大）は完了報告参照。次波 = R1 統合波（backlog next — API 工事
+  4 件先行 → models shard 面接続 → exporter 1GiB 分割 → Base f16 再 dist）。
 - **既知問題 3 件 + anima 素版 i4 感度の波（2026-08-25 進行中）**: ①Pixel の
   BodyStreamBuffer abort — 真因マスキング解消 + バイト予算 1.5GiB + 検証直列化**コミット済み**
   （実機再判定はリリース後 — known-issues）②NVIDIA の 2GiB 天井 — 融合 attention の
   行ブロック化**コミット済み**（1824×1248 実生成 27.9s 完走を確認）③Chromium の単一
   ArrayBuffer 上限 2,145,386,496B で Base f16 が原理的に不可（limitations 恒久記載。根本 =
   R1 shard 配布を next へ昇格・DL 前即エラーは hub 側では実装しない — プローブは
-  fetch-cache 次版で実装予定〈2026-08-25 裁定〉）④素版 i4 — `--i4-adaln-i8` 変種を
-  v1.0 で export 中（~3.2h）→ 視認 A/B はユーザー裁定。verify 1786/0/5。
+  fetch-cache 次版で実装予定〈2026-08-25 裁定〉）④素版 i4 — `--i4-adaln-i8` 変種の v1.0 export **済**（2h28m・`gptq-adaln8`）→ eval_dist →
+  同条件 3 枚（変種/既定席/旧 i4・seed42/20step/CFG4/1024²）を提示済み・**視認裁定待ち**。
+  裁定後に research / perf-ledger 追随。GPU 校正（`--calib-device cuda` — `50f094d`）の
+  妥当性検証はその後。
 - **0.6.0（yomi 依存分離）リリース完了（2026-08-25）**: JSR 3 パッケージ = 0.6.0・Release
   v0.6.0・**公開依存から `@hdae/yomi` の消滅を API 実測で確定**（hub / runtime の 2 本のみ）・
   消費者ストーリー疎通緑。設計の正本 = ADR
