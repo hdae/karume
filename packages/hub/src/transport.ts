@@ -14,8 +14,6 @@ export type ByteBudget = {
   readonly exact: boolean;
   /** 違反時に投げるエラー（エラー型の選択は呼び出し側の責務）。 */
   readonly violation: (actual: number, where: "content-length" | "body") => Error;
-  /** network 取得が実際に発火したことの通知（キャッシュヒットとの区別に使う）。 */
-  readonly onRequest?: () => void;
 };
 
 const urlOf = (input: string | URL | Request): string =>
@@ -32,7 +30,6 @@ async (input, init) => {
   const url = urlOf(input);
   const budget = budgets.get(url);
   if (budget === undefined) return await base(input, init);
-  budget.onRequest?.();
 
   // 上流の signal と合成する。違反時にこの controller を落とせば、上流を巻き込まずに
   // この 1 本だけを止められる。

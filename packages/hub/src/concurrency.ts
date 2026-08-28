@@ -1,12 +1,11 @@
 /**
- * 全量面 {@link ../src/fetch.ts fetchAssets} の送出を律速する 2 つの小さな並行プリミティブ。
+ * 全量面 {@link ../src/fetch.ts fetchAssets} の送出を律速する小さな並行プリミティブ。
  *
- * どちらも呼び手は 1 箇所しかないが、破れても「たまに詰まる / たまに落ちる」としか見えない
- * 不変条件（lost wakeup・例外の伝染）を持つ。単体で観測できる形に切り出して、テストで
- * 挙動そのものを凍結するために独立させてある。
+ * 呼び手は 1 箇所しかないが、破れても「たまに詰まる」としか見えない不変条件（lost wakeup）を
+ * 持つ。単体で観測できる形に切り出して、テストで挙動そのものを凍結するために独立させてある。
  *
  * MUST: モジュール副作用ゼロ — 状態は必ず create* の呼び出しごとに閉じる（top-level の可変
- * 状態を置くと、無関係な 2 つの取得が同じ予算・同じ直列化列を共有してしまう）。
+ * 状態を置くと、無関係な 2 つの取得が同じ予算を共有してしまう）。
  */
 
 /** {@link createByteAdmission} が返す席の貸し借り。 */
@@ -52,24 +51,5 @@ export const createByteAdmission = (maxBytes: number): ByteAdmission => {
       waiting = undefined;
       resume?.();
     },
-  };
-};
-
-/** {@link createSerializer} が返す実行口。 */
-export type Serializer = <T>(task: () => Promise<T>) => Promise<T>;
-
-/**
- * 渡した非同期処理を**同時 1 本**に直列化する（先着順）。返り値は task 自身の結果・失敗を
- * そのまま伝える。
- *
- * MUST: 直前の task の失敗を後続へ伝染させない — 列は常に成功側で繋ぎ直す。1 本の破損検出が
- * 後続ファイルの検証をまとめて落とすと、真犯人ではないファイルが失敗として報告される。
- */
-export const createSerializer = (): Serializer => {
-  let tail: Promise<void> = Promise.resolve();
-  return <T>(task: () => Promise<T>): Promise<T> => {
-    const started = tail.then(task);
-    tail = started.then(() => {}, () => {});
-    return started;
   };
 };

@@ -1,5 +1,5 @@
-import { assert, assertEquals, assertRejects } from "@std/assert";
-import { createByteAdmission, createSerializer } from "../src/concurrency.ts";
+import { assert, assertEquals } from "@std/assert";
+import { createByteAdmission } from "../src/concurrency.ts";
 
 /**
  * バイト予算の観測台。`fetchAssets` の送出ループと同じ形（1 本のループが admit → 送出、
@@ -64,43 +64,4 @@ Deno.test("createByteAdmission: release が 2 連続でも待機者を取りこ�
   admission.release(50);
   await pending;
   assertEquals(admitted, true, "release を取りこぼして詰まった（lost wakeup）");
-});
-
-Deno.test("createSerializer: 同時に 1 本しか走らせない", async () => {
-  const serialize = createSerializer();
-  let running = 0;
-  let peak = 0;
-  const task = async (): Promise<void> => {
-    running += 1;
-    peak = Math.max(peak, running);
-    await new Promise((resolve) => setTimeout(resolve, 1));
-    running -= 1;
-  };
-  await Promise.all([serialize(task), serialize(task), serialize(task)]);
-  assertEquals(peak, 1, `同時 ${peak} 本走った`);
-});
-
-Deno.test("createSerializer: 先着順に実行し、結果は呼び出し元へそのまま返る", async () => {
-  const serialize = createSerializer();
-  const done: string[] = [];
-  const task = (name: string) => async (): Promise<string> => {
-    await new Promise((resolve) => setTimeout(resolve, 1));
-    done.push(name);
-    return name;
-  };
-  const results = await Promise.all([
-    serialize(task("a")),
-    serialize(task("b")),
-    serialize(task("c")),
-  ]);
-  assertEquals(done, ["a", "b", "c"]);
-  assertEquals(results, ["a", "b", "c"]);
-});
-
-Deno.test("createSerializer: 1 本の失敗を後続へ伝染させない", async () => {
-  const serialize = createSerializer();
-  const failing = serialize(() => Promise.reject(new Error("boom")));
-  const following = serialize(() => Promise.resolve("ok"));
-  await assertRejects(() => failing, Error, "boom");
-  assertEquals(await following, "ok", "先行の失敗が後続を巻き添えにした");
 });

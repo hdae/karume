@@ -6,21 +6,42 @@
  * （ディスク）に書きに行く。
  */
 
+/**
+ * キャッシュエントリ 1 件。**ヘッダは put されたものをそのまま持つ** — 取得層は記録ハッシュを
+ * レスポンスヘッダへ載せるので、ヘッダを落とすモックは「記録が毎回消えるキャッシュ」になり、
+ * 実環境では起きない全量再ハッシュ経路ばかりをテストすることになる。
+ *
+ * MUST: ヘッダの綴りをテスト側で解釈しない（取得層の内部仕様に寄りかからない）。put された
+ * ものを返すだけに徹し、「記録あり / なし」を作りたいテストは `headers` を丸ごと持ち回るか
+ * 空にする。
+ */
+export type CacheEntry = {
+  readonly bytes: Uint8Array<ArrayBuffer>;
+  readonly headers: Headers;
+};
+
 /** メモリ上の Cache（`Cache` の実装は hub が使う match / put / delete / keys だけ）。 */
 export class MemoryCache implements Cache {
-  readonly entries = new Map<string, Uint8Array<ArrayBuffer>>();
+  readonly entries = new Map<string, CacheEntry>();
   /** put を失敗させる（quota 超過の模擬）。 */
   failPut = false;
+  /** 読出しが起きた瞬間の観測席（読出し中の中断を差し込むために使う）。 */
+  onMatch?: (key: string) => void;
 
   match(request: RequestInfo | URL): Promise<Response | undefined> {
     const key = urlOf(request);
-    const bytes = this.entries.get(key);
-    return Promise.resolve(bytes === undefined ? undefined : new Response(bytes));
+    this.onMatch?.(key);
+    const entry = this.entries.get(key);
+    if (entry === undefined) return Promise.resolve(undefined);
+    return Promise.resolve(new Response(entry.bytes, { headers: entry.headers }));
   }
 
   async put(request: RequestInfo | URL, response: Response): Promise<void> {
     if (this.failPut) throw new Error("mock: quota exceeded");
-    this.entries.set(urlOf(request), new Uint8Array(await response.arrayBuffer()));
+    // 実 Cache API はヘッダごと格納するので、ヘッダもエントリと同じ寿命で保持する。
+    const headers = new Headers(response.headers);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    this.entries.set(urlOf(request), { bytes, headers });
   }
 
   delete(request: RequestInfo | URL): Promise<boolean> {
@@ -45,14 +66,22 @@ export class MemoryCache implements Cache {
   }
 }
 
-/** メモリ上の CacheStorage。名前空間ごとの分離を観測するために名前をそのまま持つ。 */
+/**
+ * メモリ上の CacheStorage。名前空間の名前は**取得層が所有する**（0.5.0 で内部固定 1 個）ので、
+ * テストは名前を名指しせず {@link hubCache} で引く。名前をそのまま持つのは、旧名前空間の回収と
+ * 「他コードの名前空間に触らない」ことを観測するため。
+ */
 export class MemoryCacheStorage implements CacheStorage {
   readonly namespaces = new Map<string, MemoryCache>();
+
+  /** `failPut` は以後 open される全名前空間へ効く（名前を知らずに quota 失敗を模擬する）。 */
+  constructor(private readonly defaults: { readonly failPut?: boolean } = {}) {}
 
   open(cacheName: string): Promise<Cache> {
     const existing = this.namespaces.get(cacheName);
     if (existing !== undefined) return Promise.resolve(existing);
     const created = new MemoryCache();
+    created.failPut = this.defaults.failPut ?? false;
     this.namespaces.set(cacheName, created);
     return Promise.resolve(created);
   }
@@ -76,6 +105,59 @@ export class MemoryCacheStorage implements CacheStorage {
 
 const urlOf = (request: RequestInfo | URL): string =>
   typeof request === "string" ? request : request instanceof URL ? request.href : request.url;
+
+/**
+ * hub が使っている唯一の名前空間を取り出す。名前空間の**名前は取得層が所有する**ので、テストは
+ * 綴りを名指しせず「hub が触った名前空間はこれ 1 つ」という観測可能な事実で引く。
+ */
+export const hubCache = (caches: MemoryCacheStorage): MemoryCache => {
+  const found = [...caches.namespaces.values()];
+  if (found.length !== 1) {
+    throw new Error(
+      `test: hub の名前空間が 1 つに定まらない（${JSON.stringify([...caches.namespaces.keys()])}）`,
+    );
+  }
+  return found[0];
+};
+
+/**
+ * `bytes` を格納しているエントリのキーを引く。**キーの綴りは取得層が所有する**（内容キーは
+ * 予約 origin へ畳まれた不透明な URL）ので、テストは中身から引き当てる。
+ */
+const keyOf = (cache: MemoryCache, bytes: Uint8Array): string | undefined => {
+  for (const [key, entry] of cache.entries) {
+    if (entry.bytes.byteLength !== bytes.byteLength) continue;
+    if (entry.bytes.every((byte, index) => byte === bytes[index])) return key;
+  }
+  return undefined;
+};
+
+/** `bytes` を格納しているエントリがあるか。 */
+export const hasEntry = (cache: MemoryCache, bytes: Uint8Array): boolean =>
+  keyOf(cache, bytes) !== undefined;
+
+/**
+ * キャッシュ済みの `original` を `replacement` へ差し替える（キャッシュ破損の模擬）。
+ *
+ * `keepRecord` が真なら取得層が焼いたヘッダをそのまま残す（= 記録は一致したまま中身だけ壊れた
+ * エントリ）、偽なら落とす（= 記録の無いエントリ。無検証 prefetch 由来・旧版の形）。この 2 つは
+ * 読出し側の分岐がまったく違う（前者は信じられ、後者は実ハッシュで突合される）。
+ */
+export const overwriteEntry = (
+  cache: MemoryCache,
+  original: Uint8Array,
+  replacement: Uint8Array<ArrayBuffer>,
+  options: { readonly keepRecord: boolean },
+): void => {
+  const key = keyOf(cache, original);
+  if (key === undefined) throw new Error("test: 指定のバイト列を持つキャッシュエントリが無い");
+  const entry = cache.entries.get(key);
+  if (entry === undefined) throw new Error(`test: ${key} のエントリが消えている`);
+  cache.entries.set(key, {
+    bytes: replacement,
+    headers: options.keepRecord ? entry.headers : new Headers(),
+  });
+};
 
 export const HUB_URL = "https://hub.test";
 export const REPO = "someone/anima";
@@ -105,6 +187,8 @@ export type MockFetch = {
   readonly fetch: typeof globalThis.fetch;
   /** 発行された URL（順序どおり）。 */
   readonly calls: string[];
+  /** 発行された `Authorization` ヘッダ（`calls` と同じ順・無ければ `null`）。 */
+  readonly authorizations: (string | null)[];
   /** 同時に走った取得の最大数。 */
   readonly peakConcurrency: () => number;
 };
@@ -118,6 +202,7 @@ const RESOLVE_RE = /^\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
  */
 export const createMockFetch = (routes: MockRoutes): MockFetch => {
   const calls: string[] = [];
+  const authorizations: (string | null)[] = [];
   let inFlight = 0;
   let peak = 0;
   const fetchImpl = (
@@ -126,6 +211,7 @@ export const createMockFetch = (routes: MockRoutes): MockFetch => {
   ): Promise<Response> => {
     const href = urlOf(input);
     calls.push(href);
+    authorizations.push(new Headers(init?.headers).get("authorization"));
     const url = new URL(href);
     const revision = REVISION_RE.exec(url.pathname);
     if (revision !== null) {
@@ -179,7 +265,7 @@ export const createMockFetch = (routes: MockRoutes): MockFetch => {
       new Response(body, { headers: { "content-length": String(declared) } }),
     );
   };
-  return { fetch: fetchImpl, calls, peakConcurrency: () => peak };
+  return { fetch: fetchImpl, calls, authorizations, peakConcurrency: () => peak };
 };
 
 const notFound = (): Response =>

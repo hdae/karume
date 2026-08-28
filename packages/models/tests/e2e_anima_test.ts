@@ -413,14 +413,15 @@ Deno.test({
             `vae_decoder ${runsOf("vae_decoder")}（期待 1 以上）`,
         );
       }
-      // 取得したものは全て `karume/1` 名前空間へ入る（無認証経路）。注入した側に現物があることで、
-      // 注入席が末端の取得層まで届いていること（= 実キャッシュを汚していないこと）を示す。
-      const cached = await caches.open("karume/1");
-      const entries = (await cached.keys()).length;
-      if (entries !== paths.size) {
-        throw new Error(
-          `キャッシュ名前空間 karume/1 のエントリ数が ${entries}（期待 ${paths.size}）`,
-        );
+      // 注入した側に現物があることで、注入席が末端の取得層まで届いていること（= 実キャッシュを
+      // 汚していないこと）を示す。名前空間の名前は取得層が所有するので数えるのは全名前空間ぶん。
+      // 期待は **manifest 1 本 + 一意 sha256 の本数** — 資産のキーは内容キーなので、同一バイトの
+      // 複数 path は 1 エントリに畳まれる。
+      let entries = 0;
+      for (const namespace of caches.namespaces.values()) entries += namespace.entries.size;
+      const expected = new Set(Object.keys(files).map((key) => files[key].sha256)).size + 1;
+      if (entries !== expected) {
+        throw new Error(`注入したキャッシュのエントリ数が ${entries}（期待 ${expected}）`);
       }
     } finally {
       await server.shutdown();

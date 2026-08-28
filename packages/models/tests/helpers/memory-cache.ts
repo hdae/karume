@@ -9,15 +9,22 @@
  * パッケージのテストが他パッケージのテスト内部に依存すると、向こうの都合がこちらへ漏れる。
  */
 export class MemoryCache implements Cache {
-  readonly entries = new Map<string, Uint8Array<ArrayBuffer>>();
+  readonly entries = new Map<string, { bytes: Uint8Array<ArrayBuffer>; headers: Headers }>();
 
   match(request: RequestInfo | URL): Promise<Response | undefined> {
-    const bytes = this.entries.get(urlOf(request));
-    return Promise.resolve(bytes === undefined ? undefined : new Response(bytes));
+    const entry = this.entries.get(urlOf(request));
+    if (entry === undefined) return Promise.resolve(undefined);
+    return Promise.resolve(new Response(entry.bytes, { headers: entry.headers }));
   }
 
   async put(request: RequestInfo | URL, response: Response): Promise<void> {
-    this.entries.set(urlOf(request), new Uint8Array(await response.arrayBuffer()));
+    // MUST: ヘッダごと保持する — 取得層は記録ハッシュをレスポンスヘッダへ載せるので、落とすと
+    // 「記録が毎回消えるキャッシュ」になり、実環境では起きない全量再ハッシュ経路を測ることになる。
+    const headers = new Headers(response.headers);
+    this.entries.set(urlOf(request), {
+      bytes: new Uint8Array(await response.arrayBuffer()),
+      headers,
+    });
   }
 
   delete(request: RequestInfo | URL): Promise<boolean> {

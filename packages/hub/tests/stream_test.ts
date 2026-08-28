@@ -4,7 +4,6 @@ import {
   type AssetProgress,
   type FileRef,
   HubFetchError,
-  IntegrityError,
   type LoadedManifest,
   loadManifest,
   ManifestReferenceError,
@@ -15,10 +14,12 @@ import {
 import {
   abortWhileAwaitingResponse,
   createMockFetch,
+  hasEntry,
   HUB_URL,
-  type MemoryCache,
+  hubCache,
   MemoryCacheStorage,
   type MockRoutes,
+  overwriteEntry,
   payloadFor,
   REPO,
   SHA,
@@ -90,12 +91,6 @@ const prepare = async (
   return { loaded, refs: shardRefs(loaded), mock: createMockFetch(routes) };
 };
 
-const hubCache = (caches: MemoryCacheStorage): MemoryCache => {
-  const namespace = caches.namespaces.get("karume/1");
-  if (namespace === undefined) throw new Error("test: karume/1 の名前空間がまだ無い");
-  return namespace;
-};
-
 const drain = async (
   stream: AsyncGenerator<StreamedAsset, void, unknown>,
 ): Promise<StreamedAsset[]> => {
@@ -141,45 +136,50 @@ Deno.test("streamAssets: yield は refs の入力順で、bytes は宣言どお�
   }
 });
 
-Deno.test("streamAssets: 破損したキャッシュエントリは相 2 の照合が捕まえ、1 往復で治る", async () => {
+Deno.test("streamAssets: 記録の無い破損エントリは相 2 が捕まえ、1 往復で治る", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   const ref = refs[2];
-  // 相 1 は既存エントリを見て network に出ない（＝相 2 の照合だけが最後の門になる）。
-  hubCache(caches).entries.set(resolveUrl(ref.path), tamper(payloadFor(ref.path)));
+  // まず正規経路で温めてから、記録ごと落として中身を壊す（旧版 / 無検証 prefetch 由来の形）。
+  // 記録が無いエントリは相 1 が「陳腐化」として温め直そうとするので、network に出るのは
+  // その 1 往復だけになる。
+  await drain(streamAssets(loaded, refs, { fetch: mock.fetch, caches }));
+  const before = mock.calls.length;
+  overwriteEntry(hubCache(caches), payloadFor(ref.path), tamper(payloadFor(ref.path)), {
+    keepRecord: false,
+  });
 
-  const seen = await drain(streamAssets(loaded, refs, { fetch: mock.fetch, caches }));
+  const second = createMockFetch({ files: serveAll() });
+  const seen = await drain(streamAssets(loaded, refs, { fetch: second.fetch, caches }));
 
   const healed = seen.find((asset) => asset.path === ref.path);
   assertEquals(healed?.bytes, payloadFor(ref.path), "破損キャッシュが素通りしている");
-  assertEquals(
-    countCalls(mock.calls, resolveUrl(ref.path)),
-    1,
-    "self-heal は 1 往復だけ（相 1 は温め済みとして飛ばす）",
-  );
+  assertEquals(countCalls(second.calls, resolveUrl(ref.path)), 1, "self-heal は 1 往復だけ");
+  assertEquals(second.calls.length, 1, "壊れていない shard まで取り直している");
+  assertEquals(mock.calls.length, before, "1 回目の mock も追加で呼ばれていない");
 });
 
-Deno.test("streamAssets: キャッシュも真実源も壊れていれば IntegrityError（source は network）", async () => {
+Deno.test("streamAssets: キャッシュも真実源も壊れていれば fail loudly", async () => {
   const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+  await drain(streamAssets(loaded, refs, { fetch: mock.fetch, caches }));
+
+  // 記録を落として中身を壊す = 相 1 が「陳腐化」と見て温め直しに行く形。その取り直し先
+  // （真実源）も壊れているので、通過中の照合で落ちてエントリは成立しない。
   const path = "vae_decoder/model.safetensors";
   const corrupt = tamper(payloadFor(path));
-  const { loaded, refs, mock } = await prepare(
-    { files: serveAll(new Map([[path, corrupt]])) },
-    caches,
-  );
-  hubCache(caches).entries.set(resolveUrl(path), corrupt);
+  overwriteEntry(hubCache(caches), payloadFor(path), corrupt, { keepRecord: false });
 
+  const broken = createMockFetch({ files: serveAll(new Map([[path, corrupt]])) });
   const error = await assertRejects(
-    () => drain(streamAssets(loaded, refs, { fetch: mock.fetch, caches })),
-    IntegrityError,
+    () => drain(streamAssets(loaded, refs, { fetch: broken.fetch, caches })),
+    HubFetchError,
   );
   assertEquals(error.path, path);
   assertEquals(error.repo, REPO);
   assertEquals(error.revisionSha, SHA);
-  assertEquals(error.source, "network", "self-heal の取り直し先は network");
-  assertEquals(error.expected.length, 64);
-  assert(error.expected !== error.actual);
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
+  assert(error.cause instanceof Error, "取得層の不一致を cause に残す");
 });
 
 Deno.test("streamAssets: 相 1 の sha256 不一致は fail loud で、キャッシュにエントリを残さない", async () => {
@@ -203,7 +203,7 @@ Deno.test("streamAssets: 相 1 の sha256 不一致は fail loud で、キャッ
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
   assert(error.cause instanceof Error, "下層の不一致を cause に残す");
   assertEquals(
-    hubCache(caches).entries.has(resolveUrl(path)),
+    hasEntry(hubCache(caches), tamper(payloadFor(path))),
     false,
     "不一致のバイト列がキャッシュに残っている",
   );
@@ -288,7 +288,7 @@ Deno.test("streamAssets: 相 1 中の中断は HubFetchError に包まれず素�
       fetch: mock.fetch,
       caches,
       signal: controller.signal,
-      // downloading が出るのは相 1 だけ（prefetch に verifying は無い）。
+      // downloading が出るのは相 1 だけ（相 2 はキャッシュヒットなので complete しか出ない）。
       onProgress: (progress) => {
         if (progress.phase === "downloading") controller.abort(reason);
       },
@@ -310,9 +310,10 @@ Deno.test("streamAssets: 相 2 中の中断は shard の切れ目で素通しす
         fetch: mock.fetch,
         caches,
         signal: controller.signal,
-        // verifying が出るのは相 2 だけ（相 1 は照合を通過中に済ませる）。
+        // complete が出るのは相 2 だけ（相 1 は downloading しか出さない）。1 本目を配った
+        // 直後に取り消すと、次の shard は冒頭の確認で止まる。
         onProgress: (progress) => {
-          if (progress.phase === "verifying") controller.abort(reason);
+          if (progress.phase === "complete") controller.abort(reason);
         },
       })
     ) seen.push(asset.path);
@@ -321,15 +322,23 @@ Deno.test("streamAssets: 相 2 中の中断は shard の切れ目で素通しす
   assert(seen.length < refs.length, "中断したのに全 shard を配り切っている");
 });
 
-Deno.test("streamAssets: 最終 shard の検証中の中断でも配り切らずに素通しする", async () => {
+Deno.test("streamAssets: 最終 shard の読出し中の中断でも配り切らずに素通しする", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   const controller = new AbortController();
-  const reason = new Error("app: 検証中に取り消した");
-  // 1 shard だけの列 = その shard が最終 shard。冒頭の中断確認は通過済みなので、
-  // verifying 中の中断は yield 直前の確認だけが観測できる。
+  const reason = new Error("app: 読出し中に取り消した");
+  // 1 shard だけの列 = その shard が最終 shard。冒頭の中断確認は通過済みなので、読出し中の
+  // 中断を捉えられるのは yield 直前の確認だけになる。
   const only = [refs[0]];
   const seen: string[] = [];
+
+  // キャッシュ読出しの瞬間に取り消す。1 回目の match は相 1 の既存エントリ検査、2 回目が
+  // 相 2 の読出し — その内側で落とすことで「冒頭の確認は通過済み」の窓を狙う。
+  let matches = 0;
+  hubCache(caches).onMatch = () => {
+    matches += 1;
+    if (matches === 2) controller.abort(reason);
+  };
 
   const error = await assertRejects(async () => {
     for await (
@@ -337,18 +346,16 @@ Deno.test("streamAssets: 最終 shard の検証中の中断でも配り切らず
         fetch: mock.fetch,
         caches,
         signal: controller.signal,
-        onProgress: (progress) => {
-          if (progress.phase === "verifying") controller.abort(reason);
-        },
       })
     ) seen.push(asset.path);
   });
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
+  assertEquals(matches, 2, "相 2 の読出しに到達していない（窓を狙えていない）");
   assertEquals(seen, [], "取り消したのに検証済みバイトを配っている");
 });
 
 /** phase の進む向き（大きいほど後）。 */
-const PHASE_RANK: Record<AssetPhase, number> = { downloading: 0, verifying: 1, complete: 2 };
+const PHASE_RANK: Record<AssetPhase, number> = { downloading: 0, complete: 1 };
 
 /** path ごとの phase 列（相 1 の進捗は交錯して届くので path で束ね直す）。 */
 const phasesByPath = (events: readonly AssetProgress[]): Map<string, AssetPhase[]> => {
@@ -449,7 +456,7 @@ Deno.test("streamAssets: ファイル別の進捗は全体合計とは別に 1 s
   );
 });
 
-Deno.test("streamAssets: 2 回目は network に出ないが sha256 照合は走る", async () => {
+Deno.test("streamAssets: 2 回目は相 1 も相 2 も network に出ない（記録ハッシュのヒット）", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   await drain(streamAssets(loaded, refs, { fetch: mock.fetch, caches }));
@@ -471,12 +478,12 @@ Deno.test("streamAssets: 2 回目は network に出ないが sha256 照合は走
   for (const [path, phases] of byPath) {
     assertEquals(
       phases,
-      ["verifying", "complete"],
-      `${path}: 相 1 が温め済みを取り直している / 照合が省かれている`,
+      ["complete"],
+      `${path}: 相 1 が温め済みを取り直している / 観測できない照合を名乗っている`,
     );
   }
   for (const event of events) {
-    // downloading が 1 度も出ない経路でも、この 2 相は全量が揃った点なので満たされる。
+    // downloading が 1 度も出ない経路でも、complete は全量が揃った点なので満たされる。
     assertEquals(
       event.fileLoaded,
       event.fileTotal,

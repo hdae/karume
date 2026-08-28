@@ -7,14 +7,18 @@
  *   固定して取得する（可変 ref のまま複数回解決すると manifest と重みが別コミットから来る）。
  *   例外は manifest が明示した**越境参照**（`FileRef` の `repo` / `revision` — ADR 0038 §7）
  *   だけで、その 1 本はセッションの SHA ではなく宣言された (repo, revision) から取る。
- * - キャッシュ名前空間は必ず明示（`karume/1`）。`Authorization` を伴う取得は
- *   `karume/1:auth:<credential の sha256 先頭 16 hex>` へ隔離する（gated 資産を無認証経路の
- *   ヒットに供さず、かつ別 credential の写しにも供さない）。
+ * - キャッシュの所有は取得層（0.5.0 で名前空間が内部固定 1 個になった）。資産のキーは内容キー
+ *   `["hf", kind, repo, path, sha256]` なので、revision が動いてもバイト不変のファイルはヒットの
+ *   まま読める。manifest だけは事前の期待 sha が無いので SHA 固定 resolve URL がキー。
+ * - **資産の完全性検証は取得層へ委ねる**（spec の `sha256` / `expectedBytes`）。取得時に検証して
+ *   記録ハッシュをエントリへ焼き、以後のヒットは記録との文字列比較だけで済ませる（全量ハッシュ
+ *   0 回）。記録が食い違うエントリは自動で evict → 取り直し（self-heal）。
  * - 同時取得の律速は面ごとに違う（全量面はバイト予算・逐次面の相 1 は本数 4）。`AbortSignal` は
  *   全取得へ透過。
  * - 進捗総量は content-length ではなく manifest の `size` 合計（path 一意化後）。
  */
 
+import { clearCache } from "@hdae/fetch-cache";
 import {
   fetchHfFile,
   hfResolveUrl,
@@ -22,7 +26,7 @@ import {
   prefetchHfFile,
   resolveHfRevision,
 } from "@hdae/fetch-cache/hf";
-import { createByteAdmission, createSerializer } from "./concurrency.ts";
+import { createByteAdmission } from "./concurrency.ts";
 import {
   HubError,
   HubFetchError,
@@ -41,10 +45,12 @@ import {
 import type { ResolvedFiles } from "./resolve.ts";
 import { type ByteBudget, createGuardedFetch } from "./transport.ts";
 
-/** 専用キャッシュ名前空間（ライブラリ既定名は他コードと共有されるため使わない）。 */
-const CACHE_NAMESPACE = "karume/1";
-/** `Authorization` 付き取得の隔離先の前置き（この後ろに credential 由来の suffix が付く）。 */
-const AUTH_CACHE_PREFIX = `${CACHE_NAMESPACE}:auth:`;
+/**
+ * 取得層が名前空間を自前で持つ前（`@hdae/fetch-cache` 0.4 以前）に hub が使っていた名前空間。
+ * 本体 `karume/1` と、認証隔離だった `karume/1:*` の両系列を指す。
+ */
+const LEGACY_CACHE_NAMESPACE = "karume/1";
+
 /**
  * 逐次面 {@link streamAssets} 相 1 の同時取得数（数十コンポーネントの manifest で接続を
  * 破綻させない）。相 1 は body をそのままキャッシュへ流す streaming なので、受信バッファの
@@ -62,6 +68,10 @@ const CONCURRENCY = 4;
  * 検証の一時コピー（Chrome の `crypto.subtle.digest` は入力を Blink 内部へ全量コピーする）が
  * 乗るため、単一 ArrayBuffer の上限（Chromium は 2,145,386,496 バイトで打ち切る）よりも
  * 明確に下へ置く。
+ *
+ * NOTE: その digest は取得層の中（network 取得の検証）にあり、hub からは直列化できない — 検証を
+ * 委ねた以上、同時に走る本数を決めるのはこの予算だけになった。キャッシュヒットは記録ハッシュの
+ * 文字列比較で済むので digest ごと起きない（2 回目以降の起動でこのピークは立たない）。
  *
  * 公開ノブにはしない — 「安全側へ下げる」以外の使い道が無い値であり、上げれば上のピークが
  * そのまま戻る。合わない配布が出たら定数ごと裁定し直す。
@@ -87,7 +97,13 @@ export type CacheDiagnostic = {
 
 export type LoadManifestOptions = {
   readonly signal?: AbortSignal;
-  /** `Authorization` 等。付けた取得は credential ごとの認証専用キャッシュ名前空間へ隔離される。 */
+  /**
+   * `Authorization` 等。取得（revision 解決・ファイル）へそのまま透過する。
+   *
+   * NOTE: キャッシュは credential で分けない（by-design）— キーにヘッダは入らないので、認証付きで
+   * 取得したバイト列は以後の無認証呼び出しにもヒットする。gated 資産の運用予定が無い以上、
+   * 隔離は過剰防御だった（詳細は `docs/limitations.md`）。
+   */
   readonly headers?: HeadersInit;
   /**
    * cache I/O 失敗の通知先。無指定だと「毎起動フル再 DL が黙って常態化」するため、
@@ -110,15 +126,18 @@ export type LoadedManifest = {
 };
 
 /**
- * 進捗のフェーズ。`verifying` は sha256 照合中（3.7GB で数秒 — 無言のハングにしない）、
- * `complete` は 1 ファイルの終端（検証を通って bytes が確定した点）。
+ * 進捗のフェーズ。`complete` は 1 ファイルの終端（bytes が確定した点）。
  *
- * MUST: 1 ファイルの phase は `downloading`* → `verifying` → `complete` の順にだけ進み、
- * 逆行しない（`complete` はファイルごとに 1 回だけ・以降そのファイルの通知は出ない）。
- * 例外は破損キャッシュの self-heal で、`verifying` が拒否した後に network から取り直すため
- * この 1 巡が最初からやり直しになる（`complete` が終端であることは変わらない）。
+ * MUST: 1 ファイルの phase は `downloading`* → `complete` の順にだけ進み、逆行しない
+ * （`complete` はファイルごとに 1 回だけ・以降そのファイルの通知は出ない）。例外は破損キャッシュ
+ * の self-heal で、取得層が拒否した後に network から取り直すためこの 1 巡が最初からやり直しに
+ * なる（`complete` が終端であることは変わらない）。
+ *
+ * NOTE: 照合中を表す `verifying` は持たない — 資産の検証は取得層の内部（受信中のハッシュ / 記録
+ * ハッシュの突合）に埋まっていて hub からは観測できないため。観測できないフェーズを推測で
+ * 名乗ると、実際には終わっている照合を「進行中」と表示する嘘になる。
  */
-export type AssetPhase = "downloading" | "verifying" | "complete";
+export type AssetPhase = "downloading" | "complete";
 
 export type AssetProgress = {
   readonly phase: AssetPhase;
@@ -132,8 +151,8 @@ export type AssetProgress = {
    * `path` の**そのファイル自身**の受信済みバイト。`loaded` が全ファイルの合計なのに対し
    * こちらは 1 ファイルぶんなので、ファイル別の進捗バーはこの値と {@link fileTotal} で描く。
    *
-   * `verifying` / `complete` は全量が揃った点なので常に `fileLoaded === fileTotal`
-   * （`downloading` が 1 度も出ないキャッシュヒットでも同じ）。
+   * `complete` は全量が揃った点なので常に `fileLoaded === fileTotal`（`downloading` が 1 度も
+   * 出ないキャッシュヒットでは `complete` の 1 点だけが出る）。
    */
   readonly fileLoaded: number;
   /** `path` のファイル自身の manifest 由来サイズ（`FileRef.size`）。`total` はこれの合計。 */
@@ -144,26 +163,38 @@ export type FetchAssetsOptions = LoadManifestOptions & {
   readonly onProgress?: (progress: AssetProgress) => void;
 };
 
-/**
- * 取得に使うキャッシュ名前空間。
- *
- * MUST: 認証付きは credential ごとに分ける — 下層のキャッシュキーは URL のみなので、名前が
- * `Authorization` の**有無**だけだと token A で埋めた写しに token B の同一 URL 要求がヒットする
- * （権限の違う 2 人が同じ端末を使う場面で gated 資産が漏れる）。名前には生の credential を出さず
- * sha256 の先頭 16 hex だけを載せる（CacheStorage の名前は列挙可能なため）。
- */
-const cacheNameFor = async (headers?: HeadersInit): Promise<string> => {
-  const authorization = headers === undefined
-    ? undefined
-    : new Headers(headers).get("authorization") ?? undefined;
-  if (authorization === undefined) return CACHE_NAMESPACE;
-  const digest = await sha256Hex(new TextEncoder().encode(authorization));
-  return `${AUTH_CACHE_PREFIX}${digest.slice(0, 16)}`;
-};
+/** 旧名前空間（本体 `karume/1` と、認証隔離だった `karume/1:*`）の名前を列挙する。 */
+const legacyCacheNames = async (storage: CacheStorage): Promise<string[]> =>
+  (await storage.keys()).filter((name) =>
+    name === LEGACY_CACHE_NAMESPACE || name.startsWith(`${LEGACY_CACHE_NAMESPACE}:`)
+  );
 
-/** karume 自身の名前空間か（無認証本体と `karume/1:` 配下の認証隔離すべて）。 */
-const isHubCacheName = (name: string): boolean =>
-  name === CACHE_NAMESPACE || name.startsWith(`${CACHE_NAMESPACE}:`);
+/**
+ * 旧名前空間を回収する。新コードは二度と読まないので、置いておいても容量を占めるだけ
+ * （中身は取得層 0.4 以前の形式で、キーも記録ハッシュも現行と互換が無い）。
+ *
+ * キャッシュは正しさの要件ではなく最適化なので、ここは決してロードを落とさない —
+ * `caches` が無い環境（Deno 等）は黙って素通りし、列挙・削除の失敗は診断へ流して続行する。
+ */
+const purgeLegacyCaches = async (options: LoadManifestOptions): Promise<void> => {
+  const storage = options.caches ?? globalThis.caches;
+  if (storage === undefined) return;
+  let names: readonly string[];
+  try {
+    names = await legacyCacheNames(storage);
+  } catch (error) {
+    options.onCacheError?.({ op: "delete", url: LEGACY_CACHE_NAMESPACE, error });
+    return;
+  }
+  for (const name of names) {
+    try {
+      await storage.delete(name);
+    } catch (error) {
+      // 失敗した名前空間そのものを名乗る（この診断の `url` はキャッシュ名 — 取得元ではない）。
+      options.onCacheError?.({ op: "delete", url: name, error });
+    }
+  }
+};
 
 const requestInit = (headers?: HeadersInit, signal?: AbortSignal): RequestInit => ({
   ...(headers === undefined ? {} : { headers }),
@@ -184,8 +215,9 @@ const hfRef = (
  * (repo, revision) から取る** — セッションの解決済み revision ではない（ADR 0038 §7 の
  * 別リポ参照席。参照先は commit SHA 固定が必須なので、可変 ref が混ざる余地はない）。
  *
- * `hubUrl`（ミラー指定）は**ホストの選択**なので越境先にも同じものを効かせる。キャッシュは
- * 下層の URL キーのまま — SHA が URL に載るので不変性はそれで成立する。
+ * `hubUrl`（ミラー指定）は**ホストの選択**なので越境先にも同じものを効かせる。資産のキャッシュ
+ * キーは内容キー（`hubUrl` を含まない）なので、同じバイト列ならミラーを跨いでも 1 エントリを
+ * 共有する。別リポの同名 path はキーに `repo` が入るぶん別エントリのまま。
  */
 const originFor = (
   loaded: LoadedManifest,
@@ -218,26 +250,6 @@ const fetchContext = (repo: string, revisionSha: string) => (ref: FileRef) => ({
 const isAborted = (error: unknown, signal?: AbortSignal): boolean =>
   (error instanceof DOMException && error.name === "AbortError") ||
   (signal?.aborted === true && error === signal.reason);
-
-/**
- * バイト列を小文字 hex の sha256 にする。
- *
- * MUST: JS 側で全量コピーしない — 数 GB 級ではコピー 1 回が一時 RAM を倍増させる（8GB 機
- * ターゲットに実害）。取得層の返す bytes は ArrayBuffer 背面なのでそのまま digest へ渡せる。
- * 万一 SharedArrayBuffer 背面や部分ビューが来た場合だけコピーで背面を保証する（WebCrypto は
- * SAB を拒否する）。
- *
- * NOTE: **これで一時ピークが消えるのは JS ヒープの中だけ**。Chrome の `crypto.subtle.digest` は
- * 入力を Blink 内部へ全量コピーしてからハッシュするため、1 本の検証につき +N のピークが
- * プロセス側に必ず立つ（実装挙動であって仕様保証ではない）。数 GB 級の検証が近接すると
- * その +N が積み上がるので、全量面はこの関数を含む `validate` を同時 1 本へ直列化している
- * （{@link fetchAssets}）。
- */
-const sha256Hex = async (bytes: Uint8Array): Promise<string> => {
-  const source = isTightView(bytes) ? bytes : new Uint8Array(bytes);
-  const digest = await crypto.subtle.digest("SHA-256", source);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-};
 
 /**
  * `openModel` は全量 ArrayBuffer を要求するため、返す bytes は buffer 全体を占めていなければ
@@ -303,11 +315,18 @@ const warnImplicitMain = (repo: string, revisionSha: string): void => {
 /**
  * `karume.json` を取得して parse する。revision の解決はここで 1 回だけ行い、結果の SHA を
  * 返り値に載せる（{@link fetchAssets} はその SHA で取得する）。
+ *
+ * セッションの入口でもあるので、ここで旧名前空間（`karume/1` 系）を 1 回だけ回収する。
+ *
+ * NOTE: manifest は資産と違い**期待 sha256 を事前に持てない**（正本の根なので）。したがって
+ * キーは SHA 固定 resolve URL のままで、`validate` = UTF-8 decode + parse がバイト列 →
+ * `Manifest` の唯一の変換点として残る（資産側の検証だけが取得層へ移った）。
  */
 export const loadManifest = async (
   ref: HubRepoRef,
   options: LoadManifestOptions = {},
 ): Promise<LoadedManifest> => {
+  await purgeLegacyCaches(options);
   const revisionSha = await resolveRevision(ref, ref.revision ?? "main", options);
   // 解決の**後**に出す — 印字する SHA が確定するのがここで、解決に失敗した場合は警告ではなく
   // 失敗そのものが報告されるべきだから（fail loudly が先）。
@@ -323,8 +342,6 @@ export const loadManifest = async (
           `（${where} = ${actual} — repo ${ref.repo} @ ${revisionSha}）`,
       ),
   };
-  // 名前空間の解決は headers が固定である入口で 1 回だけ（digest は非同期）。
-  const cacheName = await cacheNameFor(options.headers);
   // MUST: SHA 固定 URL のキャッシュヒットは network に出ない＝下層の signal 監視が効かないので、
   // 取得の前後で明示的に中断を見る（見ないと中断済みの signal で呼んでも manifest が返り、
   // 取り消したはずのロードがそのまま先へ進む）。
@@ -348,7 +365,6 @@ export const loadManifest = async (
   };
   try {
     await fetchHfFile(target, { path: MANIFEST_FILENAME, validate }, {
-      cacheName,
       init: requestInit(options.headers, options.signal),
       fetch: createGuardedFetch(options.fetch ?? globalThis.fetch, new Map([[url, budget]])),
       ...(options.caches === undefined ? {} : { caches: options.caches }),
@@ -393,8 +409,10 @@ const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, key: string): number => 
  * 解決済みファイル表を取得する。取得と進捗総量は **path で一意化**され、同じ path を指す
  * 複数のキーには同一のバイト列が入る。
  *
- * MUST: 検証（size / sha256）はキャッシュヒット側にも走る（取得層の `validate` フック経由 —
- * 破損キャッシュは self-heal で 1 往復だけ取り直す）。
+ * 検証（size / sha256）は取得層へ委ねる — manifest の `sha256` / `size` を spec に載せるので、
+ * network 取得は受信中に照合され、通ったエントリには記録ハッシュが焼かれる。以後のヒットは記録
+ * との文字列比較だけで済み（全量ハッシュ 0 回）、記録が食い違う・記録が無いのに実ハッシュが
+ * 合わないエントリは evict → 取り直し（self-heal）になる。
  */
 export const fetchAssets = async (
   loaded: LoadedManifest,
@@ -421,17 +439,16 @@ export const fetchAssets = async (
   for (const ref of targets) total += ref.size;
 
   const received = new Map<string, number>();
-  const fromNetwork = new Set<string>();
   const emit = (phase: AssetPhase, ref: FileRef): void => {
     if (options.onProgress === undefined) return;
     const refKey = fileRefKey(ref);
     const fileTotal = fileSizeOf(unique, refKey);
-    // verifying / complete は全量が揃った点なので size をそのまま渡す（キャッシュヒットは
-    // downloading が 1 度も出ず `received` に載らないため、受信実績から引くと 0 に見える）。
+    // complete は全量が揃った点なので size をそのまま渡す（キャッシュヒットは downloading が
+    // 1 度も出ず `received` に載らないため、受信実績から引くと 0 に見える）。
     const fileLoaded = phase === "downloading" ? received.get(refKey) ?? 0 : fileTotal;
     // MUST: 全体 `loaded` にも同じ値を積む — このファイルぶんだけ `received` から引くと、
     // 同一イベントで fileLoaded が size なのに loaded がそれを数えない矛盾が出る（全ファイル
-    // キャッシュ済みの起動では loaded が 0 のまま verifying が並ぶ）。downloading では
+    // キャッシュ済みの起動では loaded が 0 のまま complete が並ぶ）。downloading では
     // fileLoaded が `received` の値そのものなので二重計上にはならない。
     let sum = fileLoaded;
     for (const [other, bytes] of received) {
@@ -442,11 +459,9 @@ export const fetchAssets = async (
 
   const budgets = new Map<string, ByteBudget>();
   for (const ref of targets) {
-    const refKey = fileRefKey(ref);
     budgets.set(hfResolveUrl({ ...targetFor(ref), path: ref.path }), {
       maxBytes: ref.size,
       exact: true,
-      onRequest: () => fromNetwork.add(refKey),
       violation: (actual, where) =>
         new IntegrityError(
           `${ref.path}: ${where} が manifest の size と食い違う（期待 ${ref.size} / 実際 ${actual}）`,
@@ -467,75 +482,40 @@ export const fetchAssets = async (
     ? failure.signal
     : AbortSignal.any([failure.signal, options.signal]);
   const guarded = createGuardedFetch(options.fetch ?? globalThis.fetch, budgets);
-  // 名前空間の解決は headers が固定である入口で 1 回だけ（digest は非同期）。
-  const cacheName = await cacheNameFor(options.headers);
   const bytesByRef = new Map<string, Uint8Array<ArrayBuffer>>();
-  /**
-   * 検証（全量 sha256）を同時 1 本へ直列化する。Chrome の `crypto.subtle.digest` は入力を
-   * Blink 内部へ全量コピーするので（{@link sha256Hex}）、完走が近接した複数ファイルの検証が
-   * 重なるとその一時ピークが積み上がる。バイト予算（{@link BYTE_BUDGET}）は前確保の合計しか
-   * 見ていないため、ここを開けたままだと予算の外側でピークが伸びる。
-   *
-   * 検証は CPU 律速で並べても速くならない（並べて得るのは重なりだけ）ので、失うのは
-   * 「digest を待つ間に別ファイルの digest も進む」ぶんだけ。
-   */
-  const serializeValidation = createSerializer();
 
   const fetchOne = async (ref: FileRef): Promise<void> => {
     const refKey = fileRefKey(ref);
-    const validate = (bytes: Uint8Array): Promise<void> =>
-      serializeValidation(async () => {
-        const source = fromNetwork.has(refKey) ? "network" : "cache";
-        if (bytes.byteLength !== ref.size) {
-          throw new IntegrityError(
-            `${ref.path}: バイト数が manifest と食い違う（期待 ${ref.size} / 実際 ${bytes.byteLength}）`,
-            {
-              ...contextFor(ref),
-              path: ref.path,
-              expected: String(ref.size),
-              actual: String(bytes.byteLength),
-              source,
-              available,
-            },
-          );
-        }
-        emit("verifying", ref);
-        const actual = await sha256Hex(bytes);
-        if (actual !== ref.sha256) {
-          throw new IntegrityError(
-            `${ref.path}: sha256 が manifest と食い違う（期待 ${ref.sha256} / 実際 ${actual}）`,
-            {
-              ...contextFor(ref),
-              path: ref.path,
-              expected: ref.sha256,
-              actual,
-              source,
-              available,
-            },
-          );
-        }
-      });
     // MUST: キャッシュヒットは network に出ない＝下層の signal 監視が効かない区間なので、
-    // 取得の前後で明示的に中断を見る（数 GB の sha256 照合を回している最中に取り消しが効かない
-    // のは中断の透過が壊れているのと同じ — 逐次面 streamAssets と同型の確認）。
-    // MUST NOT: この確認を上の `validate` の中へ入れない — フックの throw は下層で「破損」と
-    // 解釈され、健全なキャッシュエントリの evict と取り直しを招く。
+    // 取得の前後で明示的に中断を見る（数 GB の読出しを回している最中に取り消しが効かないのは
+    // 中断の透過が壊れているのと同じ — 逐次面 streamAssets と同型の確認）。
     signal.throwIfAborted();
     let bytes: Uint8Array;
     try {
-      bytes = await fetchHfFile(targetFor(ref), { path: ref.path, validate }, {
-        cacheName,
-        init: requestInit(options.headers, signal),
-        fetch: guarded,
-        // network 側だけ発火する（キャッシュヒットは verifying → complete の 2 点で進む）。
-        // `loaded` が `size` を超えないことは受信バイトの門（transport.ts）が保証する。
-        onProgress: (progress) => {
-          received.set(refKey, progress.loaded);
-          emit("downloading", ref);
+      bytes = await fetchHfFile(
+        targetFor(ref),
+        {
+          path: ref.path,
+          // 検証は取得層が持つ（受信中のハッシュ / 記録ハッシュの突合 / 不一致の self-heal）。
+          sha256: ref.sha256,
+          // バイト数の門であり、同時に受信バッファの前確保サイズでもある。確保自体が失敗する
+          // 大きさ（Chromium の単一 ArrayBuffer 上限超え）なら受信前に throw されるので、
+          // 数 GB を撃ち終わってから落ちることがない。
+          expectedBytes: ref.size,
         },
-        ...(options.caches === undefined ? {} : { caches: options.caches }),
-        ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
-      });
+        {
+          init: requestInit(options.headers, signal),
+          fetch: guarded,
+          // network 側だけ発火する（キャッシュヒットは complete の 1 点だけで進む）。
+          // `loaded` が `size` を超えないことは受信バイトの門（transport.ts）が保証する。
+          onProgress: (progress) => {
+            received.set(refKey, progress.loaded);
+            emit("downloading", ref);
+          },
+          ...(options.caches === undefined ? {} : { caches: options.caches }),
+          ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
+        },
+      );
     } catch (error) {
       if (error instanceof HubError || isAborted(error, signal)) throw error;
       const context = contextFor(ref);
@@ -544,8 +524,8 @@ export const fetchAssets = async (
         { ...context, path: ref.path, available, cause: error },
       );
     }
-    // 検証を抜けた直後にも見る — 前段の確認だけだと「キャッシュ読出し + sha256 照合の最中に
-    // 中断された」形が観測されず、取り消したはずのファイルが complete まで進む。
+    // 取得を抜けた直後にも見る — 前段の確認だけだと「キャッシュ読出しの最中に中断された」形が
+    // 観測されず、取り消したはずのファイルが complete まで進む。
     signal.throwIfAborted();
     bytesByRef.set(refKey, assertTightView(bytes, ref.path));
     received.set(refKey, ref.size);
@@ -620,10 +600,11 @@ export type StreamAssetsOptions = FetchAssetsOptions;
  *
  * - **相 1（prefetch）**: 最初の yield の前に、全 shard を永続キャッシュへ落とす
  *   （streaming — RAM に全量を載せない・同時 4 本）。`sha256` は通過中に照合され、
- *   不一致はエントリ不成立で fail loud（帯域を捨てた後に全量を握って落ちない）。
- * - **相 2（逐次引き渡し）**: `refs` の順に 1 本ずつ「キャッシュから取得 → size / sha256 照合
- *   （**キャッシュヒット側でも走る** — ADR 0070 の非交渉条件。破損は self-heal で 1 往復だけ
- *   取り直す）→ 呼び手へ渡す → 参照を手放す」。
+ *   不一致はエントリ不成立で fail loud（帯域を捨てた後に全量を握って落ちない）。通ったエントリ
+ *   には記録ハッシュが焼かれ、既に記録が一致するエントリは network に出ずそのまま温存される。
+ * - **相 2（逐次引き渡し）**: `refs` の順に 1 本ずつ「キャッシュから取得 → 呼び手へ渡す →
+ *   参照を手放す」。相 1 が焼いた記録と期待 sha256 の突合は取得層が行い（全量ハッシュ 0 回）、
+ *   記録が食い違う・バイト数が合わないエントリは self-heal で 1 往復だけ取り直す。
  *
  * 全量面 {@link fetchAssets} との違いは**渡したバイト列への参照を残さない**ことで、RAM ピークが
  * O(最大 shard) に収まる（全量ホスト保持が成立しない検収モデル級のための面）。全量面は温存して
@@ -676,17 +657,16 @@ export const streamAssets = async function* (
   for (const ref of refs) total += ref.size;
 
   const received = new Map<string, number>();
-  const fromNetwork = new Set<string>();
   const emit = (phase: AssetPhase, ref: FileRef): void => {
     if (options.onProgress === undefined) return;
     const refKey = fileRefKey(ref);
     const fileTotal = fileSizeOf(declared, refKey);
-    // verifying / complete は全量が揃った点なので size をそのまま渡す（相 1 が温めた分は
-    // 相 2 でキャッシュヒットになり downloading が出ないため、受信実績から引くと 0 に見える）。
+    // complete は全量が揃った点なので size をそのまま渡す（相 1 が温めた分は相 2 でキャッシュ
+    // ヒットになり downloading が出ないため、受信実績から引くと 0 に見える）。
     const fileLoaded = phase === "downloading" ? received.get(refKey) ?? 0 : fileTotal;
     // MUST: 全体 `loaded` にも同じ値を積む — この shard ぶんだけ `received` から引くと、
     // 同一イベントで fileLoaded が size なのに loaded がそれを数えない矛盾が出る（全 shard が
-    // 温まっている 2 回目以降の起動では loaded が 0 のまま verifying が並ぶ）。downloading では
+    // 温まっている 2 回目以降の起動では loaded が 0 のまま complete が並ぶ）。downloading では
     // fileLoaded が `received` の値そのものなので二重計上にはならない。
     let sum = fileLoaded;
     for (const [other, bytes] of received) {
@@ -697,11 +677,9 @@ export const streamAssets = async function* (
 
   const budgets = new Map<string, ByteBudget>();
   for (const ref of refs) {
-    const refKey = fileRefKey(ref);
     budgets.set(hfResolveUrl({ ...targetFor(ref), path: ref.path }), {
       maxBytes: ref.size,
       exact: true,
-      onRequest: () => fromNetwork.add(refKey),
       violation: (actual, where) =>
         new IntegrityError(
           `${ref.path}: ${where} が manifest の size と食い違う（期待 ${ref.size} / 実際 ${actual}）`,
@@ -722,15 +700,15 @@ export const streamAssets = async function* (
     ? failure.signal
     : AbortSignal.any([failure.signal, options.signal]);
   const guarded = createGuardedFetch(options.fetch ?? globalThis.fetch, budgets);
-  // 名前空間の解決は headers が固定である入口で 1 回だけ（digest は非同期）。
-  const cacheName = await cacheNameFor(options.headers);
 
   // ---- 相 1: 全 shard を永続キャッシュへ落とす（ここを抜けるまで 1 本も yield しない）。
+  //
+  // 既存エントリの扱いは記録ハッシュとの突合で決まる（取得層 0.5.0）— 記録が期待 sha256 と
+  // 一致すれば network に出ずそのまま温存し、記録が無い / 食い違うエントリは検証付きで温め直す。
   const prefetchOne = async (ref: FileRef): Promise<void> => {
     const refKey = fileRefKey(ref);
     try {
       await prefetchHfFile(targetFor(ref), { path: ref.path, sha256: ref.sha256 }, {
-        cacheName,
         init: requestInit(options.headers, prefetchSignal),
         fetch: guarded,
         onProgress: (progress) => {
@@ -774,66 +752,36 @@ export const streamAssets = async function* (
   // 配列順に拾うと、真犯人が worker[0] 以外だったときに巻き添え側が表面化する。
   if (failure.signal.aborted) throw failure.signal.reason;
 
-  // 相 1 の network 実績は相 2 の帰属へ持ち越さない。相 2 で network に出るのは破損キャッシュの
-  // self-heal だけなので、持ち越すとキャッシュ読出し由来の不一致まで source "network" に化ける。
-  fromNetwork.clear();
-
-  // ---- 相 2: 1 本ずつ照合して引き渡す。
+  // ---- 相 2: 1 本ずつ引き渡す。
   for (const ref of refs) {
-    // 相 2 は大半が「キャッシュ読出し + ハッシュ」で network に出ない＝下層の signal 監視が
-    // 効かない区間なので、shard の切れ目で明示的に中断を見る（数 GB のハッシュを何本も
-    // 回している最中に取り消しが効かないのは中断の透過が壊れているのと同じ）。
+    // 相 2 は大半がキャッシュ読出しで network に出ない＝下層の signal 監視が効かない区間なので、
+    // shard の切れ目で明示的に中断を見る（数 GB の読出しを何本も回している最中に取り消しが
+    // 効かないのは中断の透過が壊れているのと同じ）。
     options.signal?.throwIfAborted();
 
     const refKey = fileRefKey(ref);
-    const validate = async (bytes: Uint8Array): Promise<void> => {
-      const source = fromNetwork.has(refKey) ? "network" : "cache";
-      if (bytes.byteLength !== ref.size) {
-        throw new IntegrityError(
-          `${ref.path}: バイト数が manifest と食い違う（期待 ${ref.size} / 実際 ${bytes.byteLength}）`,
-          {
-            ...contextFor(ref),
-            path: ref.path,
-            expected: String(ref.size),
-            actual: String(bytes.byteLength),
-            source,
-            available,
-          },
-        );
-      }
-      emit("verifying", ref);
-      const actual = await sha256Hex(bytes);
-      if (actual !== ref.sha256) {
-        throw new IntegrityError(
-          `${ref.path}: sha256 が manifest と食い違う（期待 ${ref.sha256} / 実際 ${actual}）`,
-          {
-            ...contextFor(ref),
-            path: ref.path,
-            expected: ref.sha256,
-            actual,
-            source,
-            available,
-          },
-        );
-      }
-    };
     let bytes: Uint8Array;
     try {
-      bytes = await fetchHfFile(targetFor(ref), { path: ref.path, validate }, {
-        cacheName,
-        init: requestInit(options.headers, options.signal),
-        fetch: guarded,
-        // 相 1 が温めた分はキャッシュヒットなので、ここが発火するのは self-heal の取り直しだけ。
-        // NOTE: self-heal は evict してから取り直すため、その 1 巡だけ `loaded` はそのファイル
-        //       ぶん巻き戻る（phase 契約が認めている「最初からやり直し」と同じ 1 巡）。
-        //       `fileLoaded` も同じ 1 巡だけそのファイルの先頭から数え直しになる。
-        onProgress: (progress) => {
-          received.set(refKey, progress.loaded);
-          emit("downloading", ref);
+      bytes = await fetchHfFile(
+        targetFor(ref),
+        // 相 1 と同じ内容キーになる spec（sha256 が一致するので相 1 が温めたエントリに当たる）。
+        // 検証は取得層が記録ハッシュとの突合で済ませる — 全量ハッシュは走らない。
+        { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size },
+        {
+          init: requestInit(options.headers, options.signal),
+          fetch: guarded,
+          // 相 1 が温めた分はキャッシュヒットなので、ここが発火するのは self-heal の取り直しだけ。
+          // NOTE: self-heal は evict してから取り直すため、その 1 巡だけ `loaded` はそのファイル
+          //       ぶん巻き戻る（phase 契約が認めている「最初からやり直し」と同じ 1 巡）。
+          //       `fileLoaded` も同じ 1 巡だけそのファイルの先頭から数え直しになる。
+          onProgress: (progress) => {
+            received.set(refKey, progress.loaded);
+            emit("downloading", ref);
+          },
+          ...(options.caches === undefined ? {} : { caches: options.caches }),
+          ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
         },
-        ...(options.caches === undefined ? {} : { caches: options.caches }),
-        ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
-      });
+      );
     } catch (error) {
       if (error instanceof HubError || isAborted(error, options.signal)) throw error;
       const context = contextFor(ref);
@@ -842,9 +790,9 @@ export const streamAssets = async function* (
         { ...context, path: ref.path, available, cause: error },
       );
     }
-    // MUST: yield の直前にも中断を見る — 冒頭の確認だけだと「最終 shard のキャッシュ読出し +
-    // sha256 検証の最中に中断された」形が観測されず、取り消したはずのロードが正常完了して
-    // 下流の Session 構築まで走る（検証済みバイトを配ってから止まるのでは中断の意味が無い）。
+    // MUST: yield の直前にも中断を見る — 冒頭の確認だけだと「最終 shard のキャッシュ読出しの
+    // 最中に中断された」形が観測されず、取り消したはずのロードが正常完了して下流の Session
+    // 構築まで走る（検証済みバイトを配ってから止まるのでは中断の意味が無い）。
     options.signal?.throwIfAborted();
     const asset = assertTightView(bytes, ref.path);
     received.set(refKey, ref.size);
@@ -857,14 +805,16 @@ export const streamAssets = async function* (
 };
 
 /**
- * karume が使うキャッシュ名前空間を**全て**消す（無認証 `karume/1` と、credential ごとに
- * 分かれた認証隔離 `karume/1:auth:*`）。認証側の名前は credential 由来で事前に列挙できないため
- * `CacheStorage.keys()` から拾う。「モデルを消して容量を空ける」に対応する面で、他コードの
- * 名前空間には触らない。
+ * ダウンロード済みの資産を消して容量を空ける。対象は**取得層の名前空間まるごと**と、まだ
+ * 残っているなら旧名前空間（`karume/1` 系）。記録ハッシュを信じる既定を疑ったときの回復手段も
+ * これ（`recheck` 相当のノブは持たない — DECIDED: `docs/decisions/0080-hub-fetch-cache-050.md`）。
  *
- * MUST: 認証側を 1 つも残さない — gated 資産の写しが端末に残り続ける。
+ * NOTE: 取得層 0.5.0 の名前空間は内部固定 1 個で、キーに「どのアプリが温めたか」は入らない。
+ * したがって**同じ origin のアプリが `@hdae/fetch-cache` を直接使って温めたものも一緒に消える**
+ * （分離する手段がライブラリ側に無い）。repo 単位の細粒度掃除はキャッシュ保守波へ送り、ここは
+ * 「全部消す」の 1 択に留める。
  *
- * @returns 少なくとも 1 つが実在して消えたら `true`（元から 1 つも無ければ `false`）。
+ * @returns 何かが実在して消えたら `true`（元から 1 つも無ければ `false`）。
  */
 export const clearHubCache = async (
   options: { readonly caches?: CacheStorage } = {},
@@ -878,7 +828,11 @@ export const clearHubCache = async (
         "（options.caches で明示的に渡す）",
     );
   }
-  const names = (await storage.keys()).filter(isHubCacheName);
-  const deleted = await Promise.all(names.map((name) => storage.delete(name)));
-  return deleted.includes(true);
+  // 旧名前空間はここでも回収する（{@link loadManifest} を 1 度も通さずに掃除だけする呼び方が
+  // あるため）。こちらは掃除そのものが仕事なので、失敗を握り潰さず素通しする。
+  const legacy = await legacyCacheNames(storage);
+  const deleted = await Promise.all(legacy.map((name) => storage.delete(name)));
+  // 名前空間の名前は取得層が所有するので、綴りを hub に焼かず掃除 API へ委ねる。
+  const cleared = await clearCache({ caches: storage });
+  return cleared || deleted.includes(true);
 };
