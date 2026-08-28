@@ -65,9 +65,7 @@
 
 import {
   acquireGpu,
-  createSession,
   type GpuContext,
-  type KarumeModel,
   openModel,
   type ResidentTensor,
   type Session,
@@ -78,7 +76,6 @@ import {
 import {
   type AssetProgress,
   type CacheDiagnostic,
-  fetchAssets,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -127,6 +124,13 @@ import { createOperationChain } from "../concurrency/serial.ts";
 import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toRepoRef } from "../hub/repo-ref.ts";
+import {
+  type ComponentOpener,
+  type GraphOwner,
+  loadShardComponents,
+  type ModelComponent,
+  wholeComponent,
+} from "../hub/components.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const BACKBONE = "backbone";
@@ -405,6 +409,13 @@ const assetBuffer = (
 };
 
 /**
+ * 全量面（`fromAssets`）のコンポーネント供給口。取得済みバイト列を `openModel` で開き、Session は
+ * 従来どおり全量面で組む（shard 面との違いは「どこからバイト列が来たか」だけ）。
+ */
+const assetOpener = (assets: IrodoriAssets["assets"]): ComponentOpener => (key) =>
+  wholeComponent(openModel(assetBuffer(assets, key)));
+
+/**
  * MUST: `fatal: true` で decode する。既定の TextDecoder は不正 UTF-8 を U+FFFD へ黙って
  * 置換するので、壊れたバイト列が「内容の違う valid JSON」として通ってしまう（hub の
  * manifest・anima tokenizer・safetensors ヘッダと同じ流儀で fail loudly）。
@@ -437,7 +448,7 @@ export const assetJson = (
  * そのまま通り（shape は合う）、**別の位置の条件を読んだ**結果が沈黙で出る。
  */
 const assertStaticDim = (
-  model: KarumeModel,
+  model: GraphOwner,
   inputName: string,
   axis: number,
   expected: number,
@@ -461,7 +472,7 @@ const assertStaticDim = (
  * 出力は「それらしい長さの波形」になり、秒指定の切り出しと末尾トリムだけが別の位置を指す。
  */
 const assertOutputScale = (
-  model: KarumeModel,
+  model: GraphOwner,
   axis: number,
   expected: number,
   where: string,
@@ -492,7 +503,7 @@ const assertOutputScale = (
  * 読んだ**結果が沈黙で出る。
  */
 const assertOutputDim = (
-  model: KarumeModel,
+  model: GraphOwner,
   axis: number,
   expected: number,
   where: string,
@@ -536,7 +547,7 @@ const bool = (value: boolean): Tensor => ({
 });
 
 /** グラフ出力**名**を位置で引く（IR v1 の出力名は `output.<i>` — 名前を決め打ちしない）。 */
-const outputNameAt = (model: KarumeModel, index: number): string => {
+const outputNameAt = (model: GraphOwner, index: number): string => {
   const name = model.graph.outputs[index];
   if (name === undefined) {
     throw new Error(`グラフ出力 ${index} が無い（${model.graph.outputs.length} 本しかない）`);
@@ -546,7 +557,7 @@ const outputNameAt = (model: KarumeModel, index: number): string => {
 
 /** グラフ出力を**位置**で引く。 */
 const outputAt = (
-  model: KarumeModel,
+  model: GraphOwner,
   outputs: Readonly<Record<string, Tensor>>,
   index: number,
 ): Tensor => {
@@ -567,7 +578,7 @@ const outputAt = (
  */
 const withSession = async <T>(
   gpu: GpuContext,
-  model: KarumeModel,
+  model: ModelComponent,
   sessionOptions: SessionOptions,
   observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
   body: (
@@ -575,7 +586,7 @@ const withSession = async <T>(
     session: Session,
   ) => Promise<T>,
 ): Promise<T> => {
-  const session = await createSession(gpu, model, sessionOptions);
+  const session = await model.createSession(gpu, sessionOptions);
   try {
     const run = async (inputs: Record<string, Tensor>): Promise<Record<string, Tensor>> => {
       const outputs = await session.run(inputs);
@@ -605,7 +616,7 @@ const withStageSession = async <T>(
   state: IrodoriState,
   emit: EmitEvent,
   component: IrodoriRunComponent,
-  model: KarumeModel,
+  model: ModelComponent,
   sessionOptions: SessionOptions,
   body: (
     run: (inputs: Record<string, Tensor>) => Promise<Record<string, Tensor>>,
@@ -630,14 +641,14 @@ type IrodoriState = {
   readonly ownsGpu: boolean;
   readonly config: IrodoriPipelineConfig;
   readonly tokenizer: IrodoriTokenizer;
-  readonly backbone: KarumeModel;
-  readonly textProj: KarumeModel;
-  readonly captionProj: KarumeModel;
-  readonly speaker: KarumeModel;
-  readonly duration: KarumeModel;
-  readonly dit: KarumeModel;
-  readonly codecEncoder: KarumeModel;
-  readonly codecDecoder: KarumeModel;
+  readonly backbone: ModelComponent;
+  readonly textProj: ModelComponent;
+  readonly captionProj: ModelComponent;
+  readonly speaker: ModelComponent;
+  readonly duration: ModelComponent;
+  readonly dit: ModelComponent;
+  readonly codecEncoder: ModelComponent;
+  readonly codecDecoder: ModelComponent;
   /** 低精度ノブ。**`dit` の Session にだけ**渡す（モジュール doc の MUST）。 */
   readonly ditSessionOptions: SessionOptions;
   readonly onRunDiagnostics?: (
@@ -693,6 +704,7 @@ const rightPad = (
  */
 const openIrodoriState = async (
   input: IrodoriAssets,
+  open: ComponentOpener,
   options: IrodoriPipelineOptions = {},
 ): Promise<IrodoriState> => {
   const { manifest, assets } = input;
@@ -735,21 +747,21 @@ const openIrodoriState = async (
   // 資産の解析は GPU より前（docstring の順序 MUST）。8 本の `openModel` はそれぞれ不可分なので、
   // 中断の検査はその境目に置く。
   await settleAbort(options.signal);
-  const backbone = openModel(assetBuffer(assets, BACKBONE));
+  const backbone = open(BACKBONE);
   await settleAbort(options.signal);
-  const textProj = openModel(assetBuffer(assets, TEXT_PROJ));
+  const textProj = open(TEXT_PROJ);
   await settleAbort(options.signal);
-  const captionProj = openModel(assetBuffer(assets, CAPTION_PROJ));
+  const captionProj = open(CAPTION_PROJ);
   await settleAbort(options.signal);
-  const speaker = openModel(assetBuffer(assets, SPEAKER));
+  const speaker = open(SPEAKER);
   await settleAbort(options.signal);
-  const duration = openModel(assetBuffer(assets, DURATION));
+  const duration = open(DURATION);
   await settleAbort(options.signal);
-  const dit = openModel(assetBuffer(assets, DIT));
+  const dit = open(DIT);
   await settleAbort(options.signal);
-  const codecDecoder = openModel(assetBuffer(assets, CODEC_DECODER));
+  const codecDecoder = open(CODEC_DECODER);
   await settleAbort(options.signal);
-  const codecEncoder = openModel(assetBuffer(assets, CODEC_ENCODER));
+  const codecEncoder = open(CODEC_ENCODER);
   await settleAbort(options.signal);
   const tokenizer = new IrodoriTokenizer(
     parseIrodoriTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER),
@@ -1081,14 +1093,18 @@ const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<D
       tensor.write(values);
       conditions[name] = tensor;
     }
-    const open = async (model: KarumeModel, options: SessionOptions): Promise<Session> => {
-      const session = await createSession(gpu, model, options);
+    const open = async (model: ModelComponent, options: SessionOptions): Promise<Session> => {
+      const session = await model.createSession(gpu, options);
       sessions.push(session);
       return session;
     };
     const dit = await open(state.dit, state.ditSessionOptions);
-    const combine = await open(openModel(combineGraph(frames, config.latentDim)), {});
-    const euler = await open(openModel(eulerGraph(frames, config.latentDim)), {});
+    // ホストが組んだ小グラフ 2 本は取得層を通らない（バイト列がその場にある）ので全量面のまま。
+    const combine = await open(
+      wholeComponent(openModel(combineGraph(frames, config.latentDim))),
+      {},
+    );
+    const euler = await open(wholeComponent(openModel(eulerGraph(frames, config.latentDim))), {});
     // 強さは step に依らないので 1 度だけ作る。
     const scales = loop.uncondVariants.map((variant) => f32(Float32Array.of(variant.scale), [1]));
 
@@ -1450,9 +1466,11 @@ export class IrodoriPipeline {
   }
 
   /**
-   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
-   * {@link IrodoriPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
-   * 追従）。**`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。
+   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
+   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
+   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
+   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
+   * `src/hub/repo-ref.ts` の MUST）。
    */
   static async fromPretrained(
     ref: string | HubRepoRef,
@@ -1476,19 +1494,27 @@ export class IrodoriPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const files = resolveFiles(loaded.manifest, selection);
-    const assets = await fetchAssets(loaded, files, {
-      ...hubOptions,
-      ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
-    });
+    const { open, assets } = await loadShardComponents(
+      "IrodoriPipeline.fromPretrained",
+      loaded,
+      files,
+      [BACKBONE, TEXT_PROJ, CAPTION_PROJ, SPEAKER, DURATION, DIT, CODEC_DECODER, CODEC_ENCODER],
+      {
+        ...hubOptions,
+        ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+      },
+    );
     // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
-    return IrodoriPipeline.fromAssets({ manifest: loaded.manifest, assets }, {
-      ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
-      ...(options.onRunDiagnostics === undefined
-        ? {}
-        : { onRunDiagnostics: options.onRunDiagnostics }),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
+    return new IrodoriPipeline(
+      await openIrodoriState({ manifest: loaded.manifest, assets }, open, {
+        ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+        ...selection,
+        ...(options.onRunDiagnostics === undefined
+          ? {}
+          : { onRunDiagnostics: options.onRunDiagnostics }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      }),
+    );
   }
 
   /**
@@ -1500,7 +1526,7 @@ export class IrodoriPipeline {
     input: IrodoriAssets,
     options: IrodoriPipelineOptions = {},
   ): Promise<IrodoriPipeline> {
-    return new IrodoriPipeline(await openIrodoriState(input, options));
+    return new IrodoriPipeline(await openIrodoriState(input, assetOpener(input.assets), options));
   }
 
   /**

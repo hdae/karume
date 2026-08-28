@@ -62,9 +62,7 @@
 
 import {
   acquireGpu,
-  createSession,
   type GpuContext,
-  type KarumeModel,
   openModel,
   parseSafetensors,
   type Session,
@@ -75,7 +73,6 @@ import {
 import {
   type AssetProgress,
   type CacheDiagnostic,
-  fetchAssets,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -95,6 +92,13 @@ import { createOperationChain } from "../concurrency/serial.ts";
 import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toRepoRef } from "../hub/repo-ref.ts";
+import {
+  type ComponentOpener,
+  type GraphOwner,
+  loadShardComponents,
+  type ModelComponent,
+  wholeComponent,
+} from "../hub/components.ts";
 
 /** manifest の assets 表に現れる取得キーと、その safetensors のテンソル名（`dist.py` と対）。 */
 const MEL_BASIS = "mel_basis";
@@ -191,6 +195,13 @@ const assetBuffer = (
 };
 
 /**
+ * 全量面（`fromAssets`）のコンポーネント供給口。取得済みバイト列を `openModel` で開き、Session は
+ * 従来どおり全量面で組む（shard 面との違いは「どこからバイト列が来たか」だけ）。
+ */
+const assetOpener = (assets: VowelDetectorAssets["assets"]): ComponentOpener => (key) =>
+  wholeComponent(openModel(assetBuffer(assets, key)));
+
+/**
  * mel 基底の資産（1 テンソルの f32 safetensors `[80, 257]`）を読む。
  *
  * 資産は外部境界なので、テンソル名・dtype・形を全て検査してから使う。**行列が転置していても
@@ -234,7 +245,7 @@ export const parseMelBasis = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> =>
  * ADR 0008）。
  */
 export const assertGraph = (
-  model: KarumeModel,
+  model: GraphOwner,
   config: VowelDetectorPipelineConfig,
 ): string => {
   if (model.graph.inputs.length !== 1 || model.graph.outputs.length !== 1) {
@@ -313,7 +324,7 @@ type VowelDetectorState = {
   readonly ownsGpu: boolean;
   readonly config: VowelDetectorPipelineConfig;
   /** 開いた CRNN グラフ（Session はここには持たない — モジュール doc）。 */
-  readonly graph: KarumeModel;
+  readonly graph: ModelComponent;
   /** 時間軸の記号名（`assertGraph` がグラフから読んだもの — 束縛のキー）。 */
   readonly symbol: string;
   readonly sessionOptions: SessionOptions;
@@ -330,6 +341,7 @@ type VowelDetectorState = {
  */
 const openVowelDetectorState = async (
   input: VowelDetectorAssets,
+  open: ComponentOpener,
   options: VowelDetectorPipelineOptions = {},
 ): Promise<VowelDetectorState> => {
   const { manifest, assets } = input;
@@ -367,7 +379,7 @@ const openVowelDetectorState = async (
   }
   const quant = entry.quants[quantName];
 
-  const graph = openModel(assetBuffer(assets, GRAPH_ROLE));
+  const graph = open(GRAPH_ROLE);
   const symbol = assertGraph(graph, config);
   const melBasis = parseMelBasis(assetBuffer(assets, MEL_BASIS));
 
@@ -408,7 +420,7 @@ const runGraph = async (
   rows: number,
 ): Promise<Float32Array> => {
   const model = state.graph;
-  const session: Session = await createSession(state.gpu, model, state.sessionOptions);
+  const session: Session = await model.createSession(state.gpu, state.sessionOptions);
   try {
     // 記号 `T` は 20ms 格子の本数。入力軸は `2T` の派生次元なので実 shape からも解けるが
     // （ADR 0057）、ホストが数えた本数を明示で渡して食い違いを実行前に落とす。
@@ -488,10 +500,11 @@ export class VowelDetectorPipeline {
   }
 
   /**
-   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
-   * {@link VowelDetectorPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む
-   * （= `main` 追従）。**`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST。
-   * このファミリは公開配布リポを持たないので pin 定数も無い）。
+   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
+   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
+   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
+   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
+   * `src/hub/repo-ref.ts` の MUST。このファミリは公開配布リポを持たないので pin 定数も無い）。
    */
   static async fromPretrained(
     ref: string | HubRepoRef,
@@ -511,17 +524,25 @@ export class VowelDetectorPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const files = resolveFiles(loaded.manifest, selection);
-    const assets = await fetchAssets(loaded, files, {
-      ...hubOptions,
-      ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
-    });
-    return VowelDetectorPipeline.fromAssets({ manifest: loaded.manifest, assets }, {
-      ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
-      ...(options.onRunDiagnostics === undefined
-        ? {}
-        : { onRunDiagnostics: options.onRunDiagnostics }),
-    });
+    const { open, assets } = await loadShardComponents(
+      "VowelDetectorPipeline.fromPretrained",
+      loaded,
+      files,
+      [GRAPH_ROLE],
+      {
+        ...hubOptions,
+        ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+      },
+    );
+    return new VowelDetectorPipeline(
+      await openVowelDetectorState({ manifest: loaded.manifest, assets }, open, {
+        ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+        ...selection,
+        ...(options.onRunDiagnostics === undefined
+          ? {}
+          : { onRunDiagnostics: options.onRunDiagnostics }),
+      }),
+    );
   }
 
   /**
@@ -532,7 +553,9 @@ export class VowelDetectorPipeline {
     input: VowelDetectorAssets,
     options: VowelDetectorPipelineOptions = {},
   ): Promise<VowelDetectorPipeline> {
-    return new VowelDetectorPipeline(await openVowelDetectorState(input, options));
+    return new VowelDetectorPipeline(
+      await openVowelDetectorState(input, assetOpener(input.assets), options),
+    );
   }
 
   /**

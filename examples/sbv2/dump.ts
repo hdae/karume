@@ -32,6 +32,7 @@ import { analyzeWithWords } from "@hdae/yomi";
 import { getDictionary } from "@hdae/yomi/loader";
 import { encodeWav, toSbv2Utterance } from "../../packages/models/mod.ts";
 import {
+  assetOpener,
   closeSbv2State,
   openSbv2State,
   type Sbv2GenerateOptions,
@@ -121,7 +122,8 @@ if (!await isLocalDist(source)) {
 const started = performance.now();
 // テキスト → 発話は呼び手側（`main.ts` と同じ写経 — models は解析器を持たない）。
 const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(), text));
-const state = await openSbv2State(await loadLocalAssets(source, selection), selection);
+const dumpAssets = await loadLocalAssets(source, selection);
+const state = await openSbv2State(dumpAssets, assetOpener(dumpAssets.assets), selection);
 try {
   const { sampleRate, audio, trace } = await synthesizeSbv2(state, utterance, options);
   const { input } = trace;

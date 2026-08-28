@@ -44,9 +44,7 @@
 
 import {
   acquireGpu,
-  createSession,
   type GpuContext,
-  type KarumeModel,
   openModel,
   type Session,
   type SessionDiagnostics,
@@ -56,7 +54,6 @@ import {
 import {
   type AssetProgress,
   type CacheDiagnostic,
-  fetchAssets,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -92,6 +89,13 @@ import { createOperationChain } from "../concurrency/serial.ts";
 import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toRepoRef } from "../hub/repo-ref.ts";
+import {
+  type ComponentOpener,
+  type GraphOwner,
+  loadShardComponents,
+  type ModelComponent,
+  wholeComponent,
+} from "../hub/components.ts";
 
 /**
  * manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。
@@ -205,6 +209,16 @@ const assetBuffer = (
 };
 
 /**
+ * 全量面（`fromAssets`）のコンポーネント供給口。取得済みバイト列を `openModel` で開き、Session は
+ * 従来どおり全量面で組む（shard 面との違いは「どこからバイト列が来たか」だけ）。
+ *
+ * NOTE: `export` は {@link openSbv2State} と同じ理由（dump 経路が全量面で state を組む —
+ * `examples/sbv2/dump.ts`）。`mod.ts` / サブパス面には出さない。
+ */
+export const assetOpener = (assets: Sbv2Assets["assets"]): ComponentOpener => (key) =>
+  wholeComponent(openModel(assetBuffer(assets, key)));
+
+/**
  * MUST: `fatal: true` で decode する。既定の TextDecoder は不正 UTF-8 を U+FFFD へ黙って
  * 置換するので、壊れたバイト列が「内容の違う valid JSON」として通ってしまう（hub の
  * manifest・anima tokenizer・safetensors ヘッダと同じ流儀で fail loudly）。
@@ -237,7 +251,7 @@ export const assetJson = (
  * MUST: 形全体を静的と要求しない。`bert` は `[1, 1024, P]` で P が記号次元（音素数はデータ
  * 依存）なので、要る軸だけを見る。
  */
-const staticInputDim = (model: KarumeModel, inputName: string, axis: number): number => {
+const staticInputDim = (model: GraphOwner, inputName: string, axis: number): number => {
   const spec = model.graph.inputs.find((input) => input.name === inputName);
   if (spec === undefined) throw new Error(`グラフ入力 '${inputName}' が無い`);
   const dim = spec.shape[axis];
@@ -248,7 +262,7 @@ const staticInputDim = (model: KarumeModel, inputName: string, axis: number): nu
 };
 
 /** グラフ入力の軸 1（特徴幅）。`bert` の 1024・`style_vec` の 256・`g` の 512 を引く。 */
-const featureWidth = (model: KarumeModel, inputName: string): number =>
+const featureWidth = (model: GraphOwner, inputName: string): number =>
   staticInputDim(model, inputName, 1);
 
 const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
@@ -272,7 +286,7 @@ const ones = (count: number): Float32Array<ArrayBuffer> => new Float32Array(coun
 
 /** グラフ出力を**位置**で引く（IR v1 の出力名は `output.<i>` — 名前を決め打ちしない）。 */
 const outputAt = (
-  model: KarumeModel,
+  model: GraphOwner,
   outputs: Readonly<Record<string, Tensor>>,
   index: number,
 ): Tensor => {
@@ -297,7 +311,7 @@ const outputAt = (
  */
 const withSession = async <T>(
   gpu: GpuContext,
-  model: KarumeModel,
+  model: ModelComponent,
   sessionOptions: SessionOptions,
   observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
   body: (
@@ -305,7 +319,7 @@ const withSession = async <T>(
     session: Session,
   ) => Promise<T>,
 ): Promise<T> => {
-  const session = await createSession(gpu, model, sessionOptions);
+  const session = await model.createSession(gpu, sessionOptions);
   try {
     const run = async (inputs: Record<string, Tensor>): Promise<Record<string, Tensor>> => {
       const outputs = await session.run(inputs);
@@ -457,9 +471,9 @@ type Sbv2State = {
   readonly tokenizer: DebertaTokenizer;
   readonly styles: Sbv2Table;
   readonly speakers: Sbv2Table;
-  readonly textEncoder: KarumeModel;
-  readonly front: KarumeModel;
-  readonly voice: KarumeModel;
+  readonly textEncoder: ModelComponent;
+  readonly front: ModelComponent;
+  readonly voice: ModelComponent;
   readonly sessionOptions: SessionOptions;
   readonly onRunDiagnostics?: (
     component: Sbv2RunComponent,
@@ -583,6 +597,7 @@ export const assertTiledBert = (tiled: TiledBert, phonemes: number): void => {
  */
 export const openSbv2State = async (
   input: Sbv2Assets,
+  open: ComponentOpener,
   options: Sbv2PipelineOptions = {},
 ): Promise<Sbv2State> => {
   const { manifest, assets } = input;
@@ -619,9 +634,9 @@ export const openSbv2State = async (
   }
   const quant = entry.quants[quantName];
 
-  const front = openModel(assetBuffer(assets, FRONT));
-  const voice = openModel(assetBuffer(assets, VOICE));
-  const textEncoder = openModel(assetBuffer(assets, TEXT_ENCODER));
+  const front = open(FRONT);
+  const voice = open(VOICE);
+  const textEncoder = open(TEXT_ENCODER);
   const rules = parseJpExtraRules(assetJson(assets, SYMBOLS), SYMBOLS);
   const tokenizer = parseTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER);
   const styles = parseSbv2Table(assetBuffer(assets, STYLE_VECTORS), STYLE_TENSOR);
@@ -888,9 +903,11 @@ export class Sbv2Pipeline {
   }
 
   /**
-   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
-   * {@link Sbv2Pipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
-   * 追従）。**`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。
+   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
+   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
+   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
+   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
+   * `src/hub/repo-ref.ts` の MUST）。
    */
   static async fromPretrained(
     ref: string | HubRepoRef,
@@ -914,17 +931,25 @@ export class Sbv2Pipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const files = resolveFiles(loaded.manifest, selection);
-    const assets = await fetchAssets(loaded, files, {
-      ...hubOptions,
-      ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
-    });
-    return Sbv2Pipeline.fromAssets({ manifest: loaded.manifest, assets }, {
-      ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
-      ...(options.onRunDiagnostics === undefined
-        ? {}
-        : { onRunDiagnostics: options.onRunDiagnostics }),
-    });
+    const { open, assets } = await loadShardComponents(
+      "Sbv2Pipeline.fromPretrained",
+      loaded,
+      files,
+      [FRONT, VOICE, TEXT_ENCODER],
+      {
+        ...hubOptions,
+        ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+      },
+    );
+    return new Sbv2Pipeline(
+      await openSbv2State({ manifest: loaded.manifest, assets }, open, {
+        ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+        ...selection,
+        ...(options.onRunDiagnostics === undefined
+          ? {}
+          : { onRunDiagnostics: options.onRunDiagnostics }),
+      }),
+    );
   }
 
   /**
@@ -935,7 +960,7 @@ export class Sbv2Pipeline {
     input: Sbv2Assets,
     options: Sbv2PipelineOptions = {},
   ): Promise<Sbv2Pipeline> {
-    return new Sbv2Pipeline(await openSbv2State(input, options));
+    return new Sbv2Pipeline(await openSbv2State(input, assetOpener(input.assets), options));
   }
 
   /**

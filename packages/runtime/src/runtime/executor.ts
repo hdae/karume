@@ -2332,6 +2332,18 @@ export class PreparedModel {
   }
 
   /**
+   * グラフの**宣言**（入出力・記号次元・値の shape）。
+   *
+   * 呼び手（models のパイプライン）は「グラフ宣言と自分の設定の突合」を admission 相で
+   * 済ませたい — グラフ shard しか手元に無い段階では `openModel`（全量 1 本を前提に宣言の
+   * 完全性まで見る面）が使えないので、宣言の読み口はここにしかない。全量面が
+   * `KarumeModel.graph` から得ているものと同一物。
+   */
+  get graph(): IrGraph {
+    return this.#graph;
+  }
+
+  /**
    * 必要メモリの見積り（ADR 0070 決定 5）— GPU に触れない純関数で、返るのはカテゴリ別の
    * バイト数と勘定に入っていないものの列だけ。可否の判定はしない（最終門は out-of-memory
    * errorScope のまま）。全量面 `estimateSessionMemory` と**同じ実装 1 本**。

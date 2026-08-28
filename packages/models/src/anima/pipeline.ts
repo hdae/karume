@@ -39,9 +39,7 @@
 
 import {
   acquireGpu,
-  createSession,
   type GpuContext,
-  type KarumeModel,
   openModel,
   type Session,
   type SessionDiagnostics,
@@ -51,7 +49,6 @@ import {
 import {
   type AssetProgress,
   type CacheDiagnostic,
-  fetchAssets,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -99,6 +96,13 @@ import { createOperationChain } from "../concurrency/serial.ts";
 import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toRepoRef } from "../hub/repo-ref.ts";
+import {
+  type ComponentOpener,
+  type GraphOwner,
+  loadShardComponents,
+  type ModelComponent,
+  wholeComponent,
+} from "../hub/components.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const TEXT_ENCODER = "text_encoder";
@@ -299,6 +303,13 @@ const assetBuffer = (
   return bytes.buffer;
 };
 
+/**
+ * 全量面（`fromAssets`）のコンポーネント供給口。取得済みバイト列を `openModel` で開き、Session は
+ * 従来どおり全量面で組む（shard 面との違いは「どこからバイト列が来たか」だけ）。
+ */
+const assetOpener = (assets: AnimaAssets["assets"]): ComponentOpener => (key) =>
+  wholeComponent(openModel(assetBuffer(assets, key)));
+
 const assetBytes = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
@@ -312,7 +323,7 @@ const assetBytes = (
  * MUST: パイプライン側に literal を置かない — コンテナが正で、モデルを差し替えたら値も追随する。
  */
 const graphInputShape = (
-  model: KarumeModel,
+  model: GraphOwner,
   inputName: string,
 ): readonly (number | string)[] => {
   const spec = model.graph.inputs.find((input) => input.name === inputName);
@@ -320,7 +331,7 @@ const graphInputShape = (
   return spec.shape;
 };
 
-const staticInputShape = (model: KarumeModel, inputName: string): readonly number[] =>
+const staticInputShape = (model: GraphOwner, inputName: string): readonly number[] =>
   graphInputShape(model, inputName).map((dim, axis) => {
     if (typeof dim !== "number") {
       throw new Error(`グラフ入力 '${inputName}' の軸 ${axis} が静的次元でない（${String(dim)}）`);
@@ -328,10 +339,10 @@ const staticInputShape = (model: KarumeModel, inputName: string): readonly numbe
     return dim;
   });
 
-const graphOutputShape = (model: KarumeModel): readonly (number | string)[] =>
+const graphOutputShape = (model: GraphOwner): readonly (number | string)[] =>
   model.graph.values[model.graph.outputs[0]].shape;
 
-const staticOutputShape = (model: KarumeModel): readonly number[] => {
+const staticOutputShape = (model: GraphOwner): readonly number[] => {
   const name = model.graph.outputs[0];
   return graphOutputShape(model).map((dim, axis) => {
     if (typeof dim !== "number") {
@@ -461,7 +472,7 @@ type DynDitPlan = {
  * 1024px で 4MB×2 の無駄が step ごとに乗る）。
  */
 const planDynDit = (
-  model: KarumeModel,
+  model: GraphOwner,
   ropeBase: RopeBase,
   resolution: ImageSize,
 ): DynDitPlan => {
@@ -501,7 +512,7 @@ const planDynDit = (
  */
 const withSession = async <T>(
   gpu: GpuContext,
-  model: KarumeModel,
+  model: ModelComponent,
   sessionOptions: SessionOptions,
   observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
   body: (
@@ -509,7 +520,7 @@ const withSession = async <T>(
     session: Session,
   ) => Promise<T>,
 ): Promise<T> => {
-  const session = await createSession(gpu, model, sessionOptions);
+  const session = await model.createSession(gpu, sessionOptions);
   try {
     const outputName = model.graph.outputs[0];
     const run = async (inputs: Record<string, Tensor>): Promise<Tensor> => {
@@ -539,11 +550,11 @@ type AnimaState = {
   readonly config: AnimaPipelineConfig;
   readonly sessionOptions: SessionOptions;
   readonly tokenizers: AnimaTokenizers;
-  readonly textEncoder: KarumeModel;
-  readonly textConditioner: KarumeModel;
-  readonly transformer: KarumeModel;
+  readonly textEncoder: ModelComponent;
+  readonly textConditioner: ModelComponent;
+  readonly transformer: ModelComponent;
   readonly ropeBase: RopeBase;
-  readonly vaeDecoder: KarumeModel;
+  readonly vaeDecoder: ModelComponent;
   readonly onRunDiagnostics?: (
     component: AnimaRunComponent,
     diagnostics: SessionDiagnostics,
@@ -573,9 +584,11 @@ export class AnimaPipeline {
   }
 
   /**
-   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
-   * {@link AnimaPipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
-   * 追従）。**`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。
+   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
+   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
+   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
+   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
+   * `src/hub/repo-ref.ts` の MUST）。
    */
   static async fromPretrained(
     ref: string | HubRepoRef,
@@ -599,12 +612,18 @@ export class AnimaPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const files = resolveFiles(loaded.manifest, selection);
-    const assets = await fetchAssets(loaded, files, {
-      ...hubOptions,
-      ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
-    });
+    const { open, assets } = await loadShardComponents(
+      "AnimaPipeline.fromPretrained",
+      loaded,
+      files,
+      [TEXT_ENCODER, TEXT_CONDITIONER, TRANSFORMER, VAE_DECODER],
+      {
+        ...hubOptions,
+        ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+      },
+    );
     // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
-    return AnimaPipeline.fromAssets({ manifest: loaded.manifest, assets }, {
+    return await AnimaPipeline.#build({ manifest: loaded.manifest, assets }, open, {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...selection,
       ...(options.onRunDiagnostics === undefined
@@ -615,28 +634,13 @@ export class AnimaPipeline {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。**ここが核**で、以下を全て構築時に済ませる:
-   *
-   * - `model` の選択（未知のモデル名は利用可能な一覧つきで fail loudly — ADR 0041 §8）
-   * - `pipeline` の契約名と major の検査（**未知 major は fail loudly** — 検査責務は
-   *   models 側。ADR 0038 §1）
-   * - `pipelineConfig` の手書きスキーマ検証（未知キーも fail loudly）
-   * - quant の `session` → runtime `SessionOptions` の**明示写像**と `gpuFeatures` の解釈
-   * - 全 weights / assets の `openModel` / rope 素表 / トークナイザ 2 本の解釈
-   *
-   * MUST: manifest の契約違反と**資産の解析**は **GPU を取りに行く前**に落とす（他 6 家族と
-   * 同じ順序）。順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が
-   * 読み手に伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ。
-   * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
-   *
-   * NOTE: 各段は不可分（3.7GiB の `openModel` を途中で畳む口は無い）なので、
-   * {@link AnimaPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこで
-   * イベントループへ 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に
-   * 届いた中断は次の境目で効く（`options.gpu` 供給時も同様）。
+   * 構築の共通実装（{@link AnimaPipeline.fromAssets} と `fromPretrained` が共有する 1 本）。
+   * 2 面の違いは `open`（コンポーネントの供給口）だけで、検査も順序も同じものを通る。
    */
-  static async fromAssets(
+  static async #build(
     input: AnimaAssets,
-    options: AnimaPipelineOptions = {},
+    open: ComponentOpener,
+    options: AnimaPipelineOptions,
   ): Promise<AnimaPipeline> {
     const { manifest, assets } = input;
     // 中断の検査は**段の境目**に置く（各段は不可分 — 3.7GiB の openModel を途中で畳む口は無い）。
@@ -685,14 +689,14 @@ export class AnimaPipeline {
       assetBytes(assets, TOKENIZER_2),
     );
     await settleAbort(options.signal);
-    const textEncoder = openModel(assetBuffer(assets, TEXT_ENCODER));
+    const textEncoder = open(TEXT_ENCODER);
     await settleAbort(options.signal);
-    const textConditioner = openModel(assetBuffer(assets, TEXT_CONDITIONER));
+    const textConditioner = open(TEXT_CONDITIONER);
     await settleAbort(options.signal);
-    const transformer = openModel(assetBuffer(assets, TRANSFORMER));
+    const transformer = open(TRANSFORMER);
     const ropeBase = parseRopeBase(assetBuffer(assets, TRANSFORMER_ROPE_BASE));
     await settleAbort(options.signal);
-    const vaeDecoder = openModel(assetBuffer(assets, VAE_DECODER));
+    const vaeDecoder = open(VAE_DECODER);
 
     await settleAbort(options.signal);
 
@@ -729,6 +733,33 @@ export class AnimaPipeline {
       if (ownsGpu) gpu.destroy();
       throw error;
     }
+  }
+
+  /**
+   * 取得済みの manifest + 資産から組む。**ここが核**で、以下を全て構築時に済ませる:
+   *
+   * - `model` の選択（未知のモデル名は利用可能な一覧つきで fail loudly — ADR 0041 §8）
+   * - `pipeline` の契約名と major の検査（**未知 major は fail loudly** — 検査責務は
+   *   models 側。ADR 0038 §1）
+   * - `pipelineConfig` の手書きスキーマ検証（未知キーも fail loudly）
+   * - quant の `session` → runtime `SessionOptions` の**明示写像**と `gpuFeatures` の解釈
+   * - 全 weights / assets の `openModel` / rope 素表 / トークナイザ 2 本の解釈
+   *
+   * MUST: manifest の契約違反と**資産の解析**は **GPU を取りに行く前**に落とす（他 6 家族と
+   * 同じ順序）。順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が
+   * 読み手に伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ。
+   * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
+   *
+   * NOTE: 各段は不可分（3.7GiB の `openModel` を途中で畳む口は無い）なので、
+   * {@link AnimaPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこで
+   * イベントループへ 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に
+   * 届いた中断は次の境目で効く（`options.gpu` 供給時も同様）。
+   */
+  static async fromAssets(
+    input: AnimaAssets,
+    options: AnimaPipelineOptions = {},
+  ): Promise<AnimaPipeline> {
+    return await AnimaPipeline.#build(input, assetOpener(input.assets), options);
   }
 
   /**
@@ -787,7 +818,7 @@ export class AnimaPipeline {
     /** 段 1 本を回す（`stage` を Session 構築の前と解放の後に挟む — 途中で落ちたら `end` は出ない）。 */
     const withStage = async <T>(
       component: AnimaRunComponent,
-      model: KarumeModel,
+      model: ModelComponent,
       sessionOptions: SessionOptions,
       body: (
         run: (inputs: Record<string, Tensor>) => Promise<Tensor>,

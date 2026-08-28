@@ -47,9 +47,7 @@
 
 import {
   acquireGpu,
-  createSession,
   type GpuContext,
-  type KarumeModel,
   openModel,
   type Session,
   type SessionDiagnostics,
@@ -58,7 +56,6 @@ import {
 import {
   type AssetProgress,
   type CacheDiagnostic,
-  fetchAssets,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -77,6 +74,13 @@ import { createOperationChain } from "../concurrency/serial.ts";
 import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toRepoRef } from "../hub/repo-ref.ts";
+import {
+  type ComponentOpener,
+  type GraphOwner,
+  loadShardComponents,
+  type ModelComponent,
+  wholeComponent,
+} from "../hub/components.ts";
 
 /** manifest の weights 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const VISION = "vision";
@@ -158,6 +162,13 @@ const assetBuffer = (
 };
 
 /**
+ * 全量面（`fromAssets`）のコンポーネント供給口。取得済みバイト列を `openModel` で開き、Session は
+ * 従来どおり全量面で組む（shard 面との違いは「どこからバイト列が来たか」だけ）。
+ */
+const assetOpener = (assets: Siglip2Assets["assets"]): ComponentOpener => (key) =>
+  wholeComponent(openModel(assetBuffer(assets, key)));
+
+/**
  * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
  *
  * MUST: 落とさない。前処理は宣言の寸法へ resize するので、グラフが別の解像度で焼かれていても
@@ -168,7 +179,7 @@ const assetBuffer = (
  * ADR 0008）。
  */
 export const assertStaticDim = (
-  model: KarumeModel,
+  model: GraphOwner,
   inputName: string,
   axis: number,
   expected: number,
@@ -195,7 +206,7 @@ export const assertStaticDim = (
  * ADR 0008）。
  */
 export const assertOutputDim = (
-  model: KarumeModel,
+  model: GraphOwner,
   axis: number,
   expected: number,
   where: string,
@@ -244,7 +255,7 @@ type Siglip2State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: Siglip2PipelineConfig;
-  readonly vision: KarumeModel;
+  readonly vision: ModelComponent;
   /** 構築時に張って `dispose` まで持つ 1 本（モジュール doc の MUST）。 */
   readonly session: Session;
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
@@ -259,9 +270,10 @@ type Siglip2State = {
  */
 const openSiglip2State = async (
   input: Siglip2Assets,
+  open: ComponentOpener,
   options: Siglip2PipelineOptions = {},
 ): Promise<Siglip2State> => {
-  const { manifest, assets } = input;
+  const { manifest } = input;
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
@@ -295,7 +307,7 @@ const openSiglip2State = async (
   }
   const quant = entry.quants[quantName];
 
-  const vision = openModel(assetBuffer(assets, VISION));
+  const vision = open(VISION);
   // グラフの宣言と pipelineConfig の突合。入出力が 1 本ずつであることまで見るのは、text tower
   // 込みの別グラフや golden 用の多出力版が混ざると、位置で引く後段が黙って別の値を読むため。
   if (vision.graph.inputs.length !== 1 || vision.graph.outputs.length !== 1) {
@@ -322,7 +334,7 @@ const openSiglip2State = async (
       ownsGpu,
       config,
       vision,
-      session: await createSession(gpu, vision, toSessionOptions(quant.session)),
+      session: await vision.createSession(gpu, toSessionOptions(quant.session)),
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
@@ -382,10 +394,11 @@ export class Siglip2Pipeline {
   }
 
   /**
-   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → `fetchAssets` →
-   * {@link Siglip2Pipeline.fromAssets} の糖衣）。文字列の `ref` は `{ repo }` と読む（= `main`
-   * 追従）。**`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST。このファミリは
-   * 公開配布リポを持たないので pin 定数も無い）。
+   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
+   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
+   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
+   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
+   * `src/hub/repo-ref.ts` の MUST。このファミリは公開配布リポを持たないので pin 定数も無い）。
    */
   static async fromPretrained(
     ref: string | HubRepoRef,
@@ -405,17 +418,25 @@ export class Siglip2Pipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const files = resolveFiles(loaded.manifest, selection);
-    const assets = await fetchAssets(loaded, files, {
-      ...hubOptions,
-      ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
-    });
-    return Siglip2Pipeline.fromAssets({ manifest: loaded.manifest, assets }, {
-      ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
-      ...(options.onRunDiagnostics === undefined
-        ? {}
-        : { onRunDiagnostics: options.onRunDiagnostics }),
-    });
+    const { open, assets } = await loadShardComponents(
+      "Siglip2Pipeline.fromPretrained",
+      loaded,
+      files,
+      [VISION],
+      {
+        ...hubOptions,
+        ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+      },
+    );
+    return new Siglip2Pipeline(
+      await openSiglip2State({ manifest: loaded.manifest, assets }, open, {
+        ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+        ...selection,
+        ...(options.onRunDiagnostics === undefined
+          ? {}
+          : { onRunDiagnostics: options.onRunDiagnostics }),
+      }),
+    );
   }
 
   /**
@@ -426,7 +447,7 @@ export class Siglip2Pipeline {
     input: Siglip2Assets,
     options: Siglip2PipelineOptions = {},
   ): Promise<Siglip2Pipeline> {
-    return new Siglip2Pipeline(await openSiglip2State(input, options));
+    return new Siglip2Pipeline(await openSiglip2State(input, assetOpener(input.assets), options));
   }
 
   /**
