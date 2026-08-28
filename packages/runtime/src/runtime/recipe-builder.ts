@@ -252,6 +252,7 @@ import {
   type ValueSource,
 } from "./recipe.ts";
 import type { ComputePrecision, I8a8Dot, ParamsCacheStats } from "./session-types.ts";
+import type { ResidentWeight } from "./weight-residency.ts";
 
 /** elementwise 族の生成入力のうち rank に依らない部分（rank はエンコード時に決まる）。 */
 type ElementwiseOp =
@@ -278,10 +279,11 @@ type RecipeBuilderContext = {
   readonly weights: RunArena;
   readonly weightBuffers: ReadonlyMap<string, GPUBuffer>;
   readonly paramsCache: Map<string, GPUBuffer>;
-  readonly weightStorages: ReadonlyMap<string, WeightStorage>;
-  readonly weightScaleBuffers: ReadonlyMap<string, GPUBuffer>;
-  /** i4 で常駐した重みの group 長（キーと WGSL の shift の導出元 — ADR 0069）。 */
-  readonly weightGroupSizes: ReadonlyMap<string, number>;
+  /**
+   * 圧縮のまま常駐した重み（席・scale・group 長 — カーネル変種の選択と追加束縛の導出元。
+   * 表に無い値は f32 として読む）。
+   */
+  readonly residentWeights: ReadonlyMap<string, ResidentWeight>;
   readonly linearCompute: "f32" | "a8" | "f16";
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
@@ -1429,7 +1431,7 @@ export class RecipeBuilder {
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
         { binding: 4, source: outs[0] },
-        ...this.#weightScaleBindings(step, weightStorage, LINEAR_SCALE_BINDING),
+        ...this.#weightScaleBindings(step, LINEAR_SCALE_BINDING),
       ],
       workgroups: [
         tiledWorkgroups(n, gemmTileN(geometry), limit, where),
@@ -1521,7 +1523,7 @@ export class RecipeBuilder {
         // 束縛の**有無**だけが常駐形（i8 / i4）で決まる — バッファ自体は初期化子名で引くので
         // i8 / i4 で同一。scale の**解釈**（per-channel か group か）を決めるのは上の
         // `linearI8a8Wgsl` / `linearI8a8Key` の判別子で、そちらが本当の沈黙誤値の門。
-        ...this.#weightScaleBindings(step, weightStorage, LINEAR_SCALE_BINDING),
+        ...this.#weightScaleBindings(step, LINEAR_SCALE_BINDING),
         { binding: LINEAR_ACT_SCALE_BINDING, source: xs },
       ],
       workgroups: [
@@ -2449,7 +2451,7 @@ export class RecipeBuilder {
         { binding: 1, source: binds[0] },
         { binding: 2, source: binds[1] },
         { binding: 3, source: outs[0] },
-        ...this.#weightScaleBindings(step, weightStorage, EMBEDDING_SCALE_BINDING),
+        ...this.#weightScaleBindings(step, EMBEDDING_SCALE_BINDING),
       ],
       workgroups: [groups, 1, 1],
     });
@@ -2550,7 +2552,7 @@ export class RecipeBuilder {
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
         { binding: 4, source: outs[0] },
-        ...this.#weightScaleBindings(step, weightStorage, CONV1D_SCALE_BINDING),
+        ...this.#weightScaleBindings(step, CONV1D_SCALE_BINDING),
       ],
       workgroups: [workgroups, 1, 1],
     });
@@ -2603,7 +2605,7 @@ export class RecipeBuilder {
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
         { binding: 4, source: outs[0] },
-        ...this.#weightScaleBindings(step, weightStorage, CONV1D_SCALE_BINDING),
+        ...this.#weightScaleBindings(step, CONV1D_SCALE_BINDING),
       ],
       workgroups: [
         tiledWorkgroups(dims.lengthOut, gemmTileN(geometry), limit, where),
@@ -2671,7 +2673,7 @@ export class RecipeBuilder {
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
         { binding: 4, source: outs[0] },
-        ...this.#weightScaleBindings(step, weightStorage, CONV2D_SCALE_BINDING),
+        ...this.#weightScaleBindings(step, CONV2D_SCALE_BINDING),
       ],
       workgroups: [workgroups, 1, 1],
     });
@@ -2720,7 +2722,7 @@ export class RecipeBuilder {
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
         { binding: 4, source: outs[0] },
-        ...this.#weightScaleBindings(step, weightStorage, CONV2D_SCALE_BINDING),
+        ...this.#weightScaleBindings(step, CONV2D_SCALE_BINDING),
       ],
       workgroups: [
         tiledWorkgroups(n, gemmTileN(geometry), limit, where),
@@ -2777,25 +2779,36 @@ export class RecipeBuilder {
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
         { binding: 4, source: outs[0] },
-        ...this.#weightScaleBindings(step, weightStorage, CONV_TRANSPOSE1D_SCALE_BINDING),
+        ...this.#weightScaleBindings(step, CONV_TRANSPOSE1D_SCALE_BINDING),
       ],
       workgroups: [workgroups, 1, 1],
     });
   }
 
   /**
-   * このノードの重みスロットの格納形（カーネル変種の選択 — ADR 0018）。
+   * このノードの重みスロットに常駐している重み（席・scale・group 長）。圧縮常駐していない
+   * 値では `undefined`（= f32 として読む）。
    *
    * MUST: スロット位置は適格判定と**同じ表**（{@link WEIGHT_SLOTS}）から引く。片方だけ
    * ずれると、圧縮のまま上げた重みを f32 カーネルが読む（あるいはその逆）ビット列の
    * 読み替えになり、例外は 1 つも出ない。
    */
-  #weightStorage(step: NodePlan): WeightStorage {
+  #residentWeight(step: NodePlan): ResidentWeight | undefined {
+    return this.#state.residentWeights.get(this.#weightSlotName(step));
+  }
+
+  /** このノードの重みスロットに束縛された値名（{@link WEIGHT_SLOTS} が正本）。 */
+  #weightSlotName(step: NodePlan): string {
     const slot = WEIGHT_SLOTS.get(step.node.op);
     if (slot === undefined) {
       throw new ExecutionError(`op '${step.node.op}' に重みスロットの定義が無い`);
     }
-    return this.#state.weightStorages.get(step.node.ins[slot]) ?? "f32";
+    return step.node.ins[slot];
+  }
+
+  /** このノードの重みスロットの格納形（カーネル変種の選択 — ADR 0018）。 */
+  #weightStorage(step: NodePlan): WeightStorage {
+    return this.#residentWeight(step)?.storage ?? "f32";
   }
 
   /**
@@ -2804,43 +2817,30 @@ export class RecipeBuilder {
    *
    * MUST: 束縛番号はカーネル側の定数（`*_SCALE_BINDING`）から引く。WGSL の宣言と executor が
    * 別々に番号を持つと、変種を足したときに片方だけずれる。
+   * NOTE: 「i8 / i4 常駐なのに scale バッファが無い」の実行時検査は要らない —
+   * {@link ResidentWeight} が席と対で scale を要求しており、型が保証している。
    */
-  #weightScaleBindings(
-    step: NodePlan,
-    storage: WeightStorage,
-    binding: number,
-  ): readonly BindingRecipe[] {
-    if (storage !== "i8" && storage !== "i4") return [];
-    const slot = WEIGHT_SLOTS.get(step.node.op);
-    if (slot === undefined) {
-      throw new ExecutionError(`op '${step.node.op}' に重みスロットの定義が無い`);
-    }
-    const name = step.node.ins[slot];
-    const buffer = this.#state.weightScaleBuffers.get(name);
-    if (buffer === undefined) {
-      throw new ExecutionError(`initializer '${name}': ${storage} 常駐なのに scale バッファが無い`);
-    }
-    return [{ binding, source: { kind: "resident", buffer } }];
+  #weightScaleBindings(step: NodePlan, binding: number): readonly BindingRecipe[] {
+    const resident = this.#residentWeight(step);
+    if (resident === undefined || resident.storage === "f16") return [];
+    return [{ binding, source: { kind: "resident", buffer: resident.scale } }];
   }
 
   /**
-   * i4 常駐の重みの group 長（executor が宣言から写した表 — ADR 0069）。
+   * i4 常駐の重みの group 長（executor が宣言から写した値 — ADR 0069）。
    *
-   * 存在は結線の不変条件（i4 を weightStorages に載せた executor が必ず対で載せる）なので、
-   * 欠けは黙って既定へ落とさず fail loudly にする — 既定で埋めると「group 64 の資産が
-   * group 32 のパイプラインで走る」沈黙誤値になる。
+   * 呼ぶのは席が i4 と分かっている経路だけなので、それ以外は黙って既定へ落とさず
+   * fail loudly にする — 既定で埋めると「group 64 の資産が group 32 のパイプラインで走る」
+   * 沈黙誤値になる。
    */
   #weightGroupSize(step: NodePlan): number {
-    const slot = WEIGHT_SLOTS.get(step.node.op);
-    if (slot === undefined) {
-      throw new ExecutionError(`op '${step.node.op}' に重みスロットの定義が無い`);
+    const resident = this.#residentWeight(step);
+    if (resident?.storage !== "i4") {
+      throw new ExecutionError(
+        `initializer '${this.#weightSlotName(step)}': i4 常駐なのに group_size が無い`,
+      );
     }
-    const name = step.node.ins[slot];
-    const groupSize = this.#state.weightGroupSizes.get(name);
-    if (groupSize === undefined) {
-      throw new ExecutionError(`initializer '${name}': i4 常駐なのに group_size が無い`);
-    }
-    return groupSize;
+    return resident.groupSize;
   }
 
   /**

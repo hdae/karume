@@ -51,7 +51,6 @@ import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 /** S の格納形（{@link SessionOptions.attentionScoreStorage} — 公開面で名前を持てるように再輸出）。 */
 export type { ScoreStorage } from "../kernels/score-storage.ts";
-import type { WeightStorage } from "../kernels/weight-storage.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { type ExecStep, type FusionCounts, planFusions } from "./fusion.ts";
 import { GenerationContext, type GenerationContextHost } from "./generation-context.ts";
@@ -75,14 +74,11 @@ import {
   bindSymbols,
   countUses,
   declaredDtypes,
-  eligibleCompressedInitializers,
   ExecutionError,
-  i4EligibleInitializers,
   planGraph,
   statesOnlySymbols,
   type SymbolBindings,
   validateGraphContracts,
-  weightChannelAxes,
 } from "./plan.ts";
 import {
   assertGenerationRun,
@@ -98,6 +94,7 @@ import {
   type StepRecipe,
 } from "./recipe.ts";
 import { RecipeBuilder } from "./recipe-builder.ts";
+import { planWeightResidency, type ResidentWeight } from "./weight-residency.ts";
 import {
   type ComputePrecision,
   type EnqueueOptions,
@@ -333,16 +330,16 @@ const scaleTensor = (
  * keepdim 形（`[Cout,1,1]` 等）でなければならない。broadcast 可能なだけの形（例: 重み
  * `[1,5]` に対する `[1,5]`）は openModel を通ってしまうが、カーネルは先頭要素しか読まない
  * ため**沈黙誤値**になる — 適格経路ではここが唯一の門。
+ *
+ * NOTE: 軸が決まらない形（消費側が食い違う / 軸の定義が無い）はプランナ
+ * （{@link planWeightResidency}）が先に落とすので、ここは `number` を受ける。
  */
 const assertChannelScale = (
   name: string,
   weightShape: readonly number[],
   scaleShape: readonly number[],
-  axis: number | undefined,
+  axis: number,
 ): void => {
-  if (axis === undefined) {
-    throw new ExecutionError(`initializer '${name}': per-channel scale のチャネル軸が決まらない`);
-  }
   const ok = scaleShape.length === weightShape.length &&
     scaleShape.every((dim, index) => dim === (index === axis ? weightShape[axis] : 1));
   if (!ok) {
@@ -595,18 +592,14 @@ type SessionState = {
    */
   readonly prepared: Map<string, PreparedPlan>;
   /**
-   * 重みスロットの格納形（圧縮のまま常駐した initializer だけが載る）。ここに無い値は
-   * f32 として読む — カーネル変種の選択はこの表 1 つで決まる。
+   * 圧縮のまま常駐した重み（席と付随実体 — ADR 0018 / 0019 / 0069）。ここに無い値は f32 と
+   * して読む — カーネル変種の選択も追加束縛もこの表 1 つで決まる。
+   *
+   * MUST: 席・scale・group 長を並列 Map に割らない（{@link ResidentWeight} の doc）。載せるのは
+   * Session 構築の 1 箇所だけで、group 長は宣言（graph）から写す — 別の値を渡せる形にすると
+   * 「group 64 の資産が group 32 のパイプラインで走る」沈黙誤値になる。
    */
-  readonly weightStorages: ReadonlyMap<string, WeightStorage>;
-  /** i8 / i4 で常駐した重みの scale バッファ（変種の追加束縛 — ADR 0019 / 0069）。 */
-  readonly weightScaleBuffers: ReadonlyMap<string, GPUBuffer>;
-  /**
-   * i4 で常駐した重みの group 長（ADR 0069 決定 2）。WGSL に shift を焼くのでキー・生成の
-   * 両方がこの表から引く — 宣言（graph）と別の値を渡せる形にすると沈黙誤値になるため、
-   * 載せるのは executor（宣言から写した 1 箇所）だけ。
-   */
-  readonly weightGroupSizes: ReadonlyMap<string, number>;
+  readonly residentWeights: ReadonlyMap<string, ResidentWeight>;
   readonly storage: StorageDiagnostics;
   /** linear の実行形（opt-in — {@link SessionOptions.linearCompute}）。 */
   readonly linearCompute: "f32" | "a8" | "f16";
@@ -779,17 +772,10 @@ export class Session {
     const scheduler = new SubmitScheduler(gpu, options.submitPolicy);
     const weights = new RunArena(gpu.device, () => scheduler.flush());
     const weightBuffers = new Map<string, GPUBuffer>();
-    // 圧縮格納のまま上げてよい initializer（消費が重みスロットだけ — ADR 0018）。
+    // 常駐分類（席）は純関数プランナが正本 — 見積り（estimate.ts）と同じ 1 本を通す。
     // グラフ構造だけで決まるので契約検査の直後に 1 度求めれば足りる。
-    const eligible = eligibleCompressedInitializers(graph);
-    // i8 の per-channel scale が掛かる軸（消費側 op から決まる — ADR 0019）。
-    const channelAxes = weightChannelAxes(graph);
-    // i4 の適格はさらに狭く「重みスロットでの消費が linear / embedding / conv1d(groups==1) だけ」
-    // （ADR 0069 決定 5 とその追補 — 展開経路を持つカーネルはこの 3 つ）。
-    const i4Eligible = i4EligibleInitializers(graph);
-    const weightStorages = new Map<string, WeightStorage>();
-    const weightScaleBuffers = new Map<string, GPUBuffer>();
-    const weightGroupSizes = new Map<string, number>();
+    const residency = planWeightResidency(graph);
+    const residentWeights = new Map<string, ResidentWeight>();
     let residentCompressedBytes = 0;
     let hostExpandedBytes = 0;
     // 宣言と実テンソルの突合・完全性は shard 進行検証に一本化（ADR 0070 決定 1 — 全量面も
@@ -811,17 +797,30 @@ export class Session {
             const name = item.name;
             const initializer = graph.initializers[name];
             const raw = tensorBytes(item.file, item.view);
+            // 席はプランナが正本（全 initializer を載せる契約 — 欠けは簿記の破れ）。
+            const seat = residency.get(name);
+            if (seat === undefined) {
+              throw new ExecutionError(`initializer '${name}': 常駐分類が無い`);
+            }
+            // MUST: 宣言由来のバイト長と現物が食い違ったら落とす。プランナ（と見積り）は実
+            // テンソルを見ずに宣言だけで数えるので、ここが「宣言 = 現物」を実際に確かめる唯一の
+            // 点になる（container の突合門が成立していれば発火しない — 二重の網）。
+            if (raw.byteLength !== seat.payloadBytes) {
+              throw new ExecutionError(
+                `initializer '${name}': 宣言由来 ${seat.payloadBytes} バイトに対し実テンソルが ${raw.byteLength} バイト`,
+              );
+            }
             // 格納 f16 / i8 / i4 だけが 2 経路に分かれる（ADR 0018 / 0019 / 0069）。適格なら
             // 生バイトのまま常駐させ dequant はカーネル内（VRAM 削減はこれで初めて成立する）、
             // 適格外はここで f32 へ展開する（正しさは保たれ VRAM 削減はゼロ）。他の格納 dtype は
             // 生バイトがそのまま GPU 表現。
             let payload: Uint8Array<ArrayBuffer> | Float32Array<ArrayBuffer> = raw;
             if (initializer.storage.dtype === "f16") {
-              if (eligible.has(name)) {
+              if (seat.seat === "f16") {
                 // MUST: 奇数要素長は末尾 2 バイトのゼロ詰めで 4 バイト整列させる。writeBuffer は
                 // 4 の倍数でないサイズを validation で拒む（= 重みが空のまま走り出す）。
                 payload = alignF16Payload(raw);
-                weightStorages.set(name, "f16");
+                residentWeights.set(name, { storage: "f16" });
                 residentCompressedBytes += payload.byteLength;
               } else {
                 payload = decodeF16(raw);
@@ -832,12 +831,11 @@ export class Session {
               const scale = scaleTensor(item, "i8");
               // initializer の宣言 shape は数値のみ（parseIrGraph が保証 — 記号次元は拒否）。
               const shape = graph.values[name].shape.map(Number);
-              if (eligible.has(name)) {
-                assertChannelScale(name, shape, scale.shape, channelAxes.get(name));
+              if (seat.seat === "i8") {
+                assertChannelScale(name, shape, scale.shape, seat.channelAxis);
                 // MUST: 要素数が 4 の倍数でない重みは末尾をゼロ詰めして 4 バイト整列させる
                 // （f16 の 2 バイト詰めと同じ理由 — writeBuffer が validation で落ちる）。
                 payload = alignI8Payload(raw);
-                weightStorages.set(name, "i8");
                 // MUST: scale のバッファも「GPU 常駐圧縮」に数える（実際に抱えるバイト数）。
                 residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
                 const scaleBuffer = weights.allocHostWritten(
@@ -847,7 +845,7 @@ export class Session {
                 if (scale.bytes.byteLength > 0) {
                   gpu.device.queue.writeBuffer(scaleBuffer, 0, scale.bytes);
                 }
-                weightScaleBuffers.set(name, scaleBuffer);
+                residentWeights.set(name, { storage: "i8", scale: scaleBuffer });
               } else {
                 payload = decodeI8(raw, shape, scale.values, scale.shape);
                 hostExpandedBytes += payload.byteLength;
@@ -856,23 +854,15 @@ export class Session {
             if (initializer.storage.dtype === "i4") {
               const scale = scaleTensor(item, "i4");
               const shape = graph.values[name].shape.map(Number);
-              // 値域（2 冪 ≥ 16・整除）は parseIrGraph が保証済み。存在は型の上でだけ optional
-              // なので、黙って読み飛ばさず言い直す（「格納 i8 なのに scale が無い」と同じ流儀）。
-              const groupSize = initializer.storage.groupSize;
-              if (groupSize === undefined) {
-                throw new ExecutionError(`initializer '${name}': 格納 i4 なのに group_size が無い`);
-              }
               // 適格は f16 / i8 より狭い「消費が linear / embedding / conv1d(groups==1) の
               // 重みスロットのみ」（ADR 0069 決定 5 とその追補 — 展開経路が GEMM 骨格のタイル
               // 読み〈linear は B 側・conv1d igemm は A 側〉と embedding のカーネルにしか無い）。
               // 展開経路の無い重みスロット（conv2d / conv_transpose1d / groups > 1 の conv1d）と
               // 共有される i4 は CPU 展開の受け皿へ（正しさは保たれ VRAM 削減はゼロ —
-              // i8 の適格外と同じ設計）。
-              if (eligible.has(name) && i4Eligible.has(name)) {
+              // i8 の適格外と同じ設計）。判定はプランナが済ませている。
+              if (seat.seat === "i4") {
                 // ペイロードは詰め物不要で常に 4 バイト整列 — バイト長 = numel / 2 で、numel は
                 // group_size（2 冪 ≥ 16）の倍数だからバイト長は 8 の倍数（ADR 0069 決定 2）。
-                weightStorages.set(name, "i4");
-                weightGroupSizes.set(name, groupSize);
                 // MUST: scale のバッファも「GPU 常駐圧縮」に数える（i8 と同じ — 実際に抱える
                 // バイト数。exporter の storage_breakdown と診断の意味を揃える）。
                 residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
@@ -883,8 +873,22 @@ export class Session {
                 if (scale.bytes.byteLength > 0) {
                   gpu.device.queue.writeBuffer(scaleBuffer, 0, scale.bytes);
                 }
-                weightScaleBuffers.set(name, scaleBuffer);
+                // group 長は宣言から写した 1 箇所（プランナ）だけが決める — 別経路で渡せる形に
+                // すると「group 64 の資産が group 32 のパイプラインで走る」沈黙誤値になる。
+                residentWeights.set(name, {
+                  storage: "i4",
+                  scale: scaleBuffer,
+                  groupSize: seat.groupSize,
+                });
               } else {
+                // 値域（2 冪 ≥ 16・整除）は parseIrGraph が保証済み。存在は型の上でだけ optional
+                // なので、黙って読み飛ばさず言い直す（「格納 i8 なのに scale が無い」と同じ流儀）。
+                const groupSize = initializer.storage.groupSize;
+                if (groupSize === undefined) {
+                  throw new ExecutionError(
+                    `initializer '${name}': 格納 i4 なのに group_size が無い`,
+                  );
+                }
                 payload = decodeI4(raw, shape, scale.values, scale.shape, groupSize);
                 hostExpandedBytes += payload.byteLength;
               }
@@ -951,9 +955,7 @@ export class Session {
       weightBuffers,
       paramsCache: new Map(),
       prepared: new Map(),
-      weightStorages,
-      weightScaleBuffers,
-      weightGroupSizes,
+      residentWeights,
       storage: { residentCompressedBytes, hostExpandedBytes },
       linearCompute,
       attentionCompute,

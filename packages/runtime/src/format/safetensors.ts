@@ -110,6 +110,32 @@ const elementCount = (shape: readonly number[], where: string): number => {
   return count;
 };
 
+/**
+ * 宣言（dtype + 要素数）から決まるテンソルのバイト長。
+ *
+ * MUST: 宣言由来のバイト長を求める側（実バイトを見ない見積り・常駐プランナ）は**この 1 本を
+ * 通す** — パーサの実バイト検証（下の「サイズ不一致」門）が使うのと同じ式なので、両者が
+ * 食い違うことが原理的に起きない。別式で書くと I4 の 4bit 詰めのような非自明な dtype で
+ * 片方だけが腐る。
+ */
+export const declaredByteLength = (
+  dtype: SafetensorsDtype,
+  count: number,
+  where: string,
+): number => {
+  const bits = count * DTYPE_BITS[dtype];
+  // MUST: bit 総量が byte 境界に乗らない形（I4 の要素数が奇数）は fail loudly。末尾要素が
+  // 半バイトだけ突き出すので、テンソルの長さが宣言から一意に決まらない。
+  if (bits % 8 !== 0) {
+    throw new SafetensorsError(
+      `${where}: ${dtype}（1 要素 ${
+        DTYPE_BITS[dtype]
+      }bit）の要素数 ${count} が奇数で byte 境界に乗らない`,
+    );
+  }
+  return bits / 8;
+};
+
 const parseDeclaration = (name: string, raw: unknown): DeclaredTensor => {
   const where = `tensor '${name}'`;
   if (!isPlainObject(raw)) throw new SafetensorsError(`${where}: ヘッダ項目がオブジェクトでない`);
@@ -139,17 +165,7 @@ const parseDeclaration = (name: string, raw: unknown): DeclaredTensor => {
   }
 
   const count = elementCount(shape, where);
-  const bits = count * DTYPE_BITS[dtype];
-  // MUST: bit 総量が byte 境界に乗らない形（I4 の要素数が奇数）は fail loudly。末尾要素が
-  // 半バイトだけ突き出すので、テンソルの長さが宣言から一意に決まらない。
-  if (bits % 8 !== 0) {
-    throw new SafetensorsError(
-      `${where}: ${dtype}（1 要素 ${
-        DTYPE_BITS[dtype]
-      }bit）の要素数 ${count} が奇数で byte 境界に乗らない`,
-    );
-  }
-  const expected = bits / 8;
+  const expected = declaredByteLength(dtype, count, where);
   if (end - begin !== expected) {
     throw new SafetensorsError(
       `${where}: サイズ不一致 offsets=${end - begin} 期待=${expected}（${dtype} [${

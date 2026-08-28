@@ -5,6 +5,7 @@
 import { groupScaleShape } from "./i4.ts";
 import { type IrDtype, type IrGraph, type IrStorageDtype, parseIrGraph } from "./ir.ts";
 import {
+  declaredByteLength,
   parseSafetensors,
   type SafetensorsDtype,
   type SafetensorsFile,
@@ -96,6 +97,30 @@ const STORAGE_ENCODING: Readonly<Record<IrStorageDtype, SafetensorsDtype>> = {
   i4: "I4",
   i32: "I32",
 };
+
+/**
+ * companion scale の格納 dtype（ADR 0019）。scale を f16 のビット列として読むと全チャネルが
+ * 桁違いの値になるため、形の検査（{@link assertScaleTensor}）もバイト数の導出
+ * （{@link declaredScaleBytes}）もこの 1 本から引く。
+ */
+const SCALE_DTYPE: SafetensorsDtype = "F32";
+
+/**
+ * 格納 dtype と要素数から決まる payload のバイト長（**宣言由来** — 実テンソルを見ない）。
+ *
+ * 実バイトとの一致は突合門が保証している: {@link ShardValidator.intake} が dtype と shape を
+ * 実テンソルと突き合わせ、safetensors パーサが「実バイト長 = 宣言由来バイト長」を見ているので、
+ * 開けたモデルではこの値が現物と厳密に一致する。
+ */
+export const declaredPayloadBytes = (
+  storage: IrStorageDtype,
+  count: number,
+  where: string,
+): number => declaredByteLength(STORAGE_ENCODING[storage], count, where);
+
+/** companion scale の宣言由来バイト長（要素数 → バイト数 — {@link declaredPayloadBytes} の scale 版）。 */
+export const declaredScaleBytes = (count: number, where: string): number =>
+  declaredByteLength(SCALE_DTYPE, count, where);
 
 export const openModel = (buffer: ArrayBuffer): KarumeModel =>
   openModelFile(parseSafetensors(buffer));
@@ -361,9 +386,9 @@ const assertScaleTensor = (
   groupSize: number | undefined,
 ): void => {
   const where = `initializer '${name}'`;
-  if (view.dtype !== "F32") {
+  if (view.dtype !== SCALE_DTYPE) {
     throw new ContainerError(
-      `${where}: scale テンソル '${scaleKey}' が ${view.dtype}（F32 が必要）`,
+      `${where}: scale テンソル '${scaleKey}' が ${view.dtype}（${SCALE_DTYPE} が必要）`,
     );
   }
   if (groupSize !== undefined) {

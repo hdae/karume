@@ -20,15 +20,14 @@
  * - {@link MemoryEstimate.transientBytes} ↔ `planBacking.residentBytes` /
  *   `lastRun.peakTransientBytes`
  *
- * MUST: 分類も算式も**実装と同じ導出元**から引く（適格判定は plan.ts の純関数 2 本、整列と
- * サイズクラスは `toSizeClass`、state の 1 要素バイト数と論理長 uniform は
- * generation-context.ts の定数）。式をここで書き直すと、片方だけ直された実装に対して
- * estimator が例外も警告も無く別の数を主張し続ける。
+ * MUST: 分類も算式も**実装と同じ導出元**から引く（重みの席と宣言由来バイト数は
+ * weight-residency.ts の純関数プランナ、整列とサイズクラスは `toSizeClass`、state の 1 要素
+ * バイト数と論理長 uniform は generation-context.ts の定数）。式をここで書き直すと、片方だけ
+ * 直された実装に対して estimator が例外も警告も無く別の数を主張し続ける。
  */
 
 import { assertRuntimeSupport, type KarumeModel } from "../format/container.ts";
 import type { IrGraph } from "../format/ir.ts";
-import type { SafetensorsFile } from "../format/safetensors.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { assertGenerationBindings } from "./executor.ts";
@@ -42,15 +41,14 @@ import {
 } from "./generation-context.ts";
 import {
   countUses,
-  eligibleCompressedInitializers,
   ExecutionError,
-  i4EligibleInitializers,
   type NodePlan,
   planGraph,
   statesOnlySymbols,
   type SymbolBindings,
 } from "./plan.ts";
 import type { GenerationContextSpec } from "./session-types.ts";
+import { planWeightResidency } from "./weight-residency.ts";
 
 /** カテゴリ別の必要バイト数（{@link estimateSessionMemory} の戻り）。 */
 export type MemoryEstimate = {
@@ -127,13 +125,6 @@ const shapeOf = (
   return shape;
 };
 
-/** safetensors 実テンソルのバイト数（container が「実バイト = 宣言由来バイト」を保証済み）。 */
-const tensorByteLength = (file: SafetensorsFile, where: string, key: string): number => {
-  const view = file.tensors.get(key);
-  if (view === undefined) throw new ExecutionError(`${where}: テンソル '${key}' が無い`);
-  return view.byteLength;
-};
-
 /**
  * 値 shape の解決に使う束縛を検査して写す。
  *
@@ -195,54 +186,40 @@ const stateEstimate = (
 };
 
 /**
- * 重みの見積り。分類は Session 構築（executor.ts の `Session.create`）と同じ 3 点 —
- * 適格判定 {@link eligibleCompressedInitializers}、i4 だけ {@link i4EligibleInitializers}
- * との積（ADR 0069 決定 5）、格納 dtype ごとの分岐。
+ * 重みの見積り。分類も宣言由来のバイト数も **Session 構築と同じプランナ**
+ * （{@link planWeightResidency}）から引く — ここで分類を書き直すと、片方だけ直された実装に
+ * 対して estimator が例外も警告も無く別の数を主張し続ける（モジュール doc の MUST）。
  *
- * バイト数は宣言 shape から求める（container の突合が「実バイト = 宣言由来バイト」を保証済み）。
- * 整列詰め物とバッファ床は {@link toSizeClass} が持つ — `alignF16Payload` / `alignI8Payload` の
- * 4 バイト切り上げと `allocHostWritten` の `Math.max(4, …)` を合わせた値と同じ。
+ * ここが足すのは席ごとのカテゴリ分けと整列だけ。整列詰め物とバッファ床は {@link toSizeClass}
+ * が持つ — `alignF16Payload` / `alignI8Payload` の 4 バイト切り上げと `allocHostWritten` の
+ * `Math.max(4, …)` を合わせた値と同じ。
  */
 const weightEstimate = (
-  model: KarumeModel,
+  graph: IrGraph,
 ): { readonly compressed: number; readonly uncompressed: number; readonly expanded: number } => {
-  const { graph, file } = model;
-  const eligible = eligibleCompressedInitializers(graph);
-  const i4Eligible = i4EligibleInitializers(graph);
   let compressed = 0;
   let uncompressed = 0;
   let expanded = 0;
-  for (const [name, initializer] of Object.entries(graph.initializers)) {
-    const where = `initializer '${name}'`;
-    // initializer の宣言 shape は数値のみ（parseIrGraph が保証 — 記号次元は拒否）。
-    const count = numel(graph.values[name].shape.map(Number));
-    const storage = initializer.storage.dtype;
-    if (storage === "f32" || storage === "i32" || storage === "bf16") {
-      // 圧縮しない格納は生バイトがそのまま GPU 表現（executor の分岐 3 本目）。
-      uncompressed += toSizeClass(tensorByteLength(file, where, initializer.tensor));
-      continue;
+  for (const seat of planWeightResidency(graph).values()) {
+    switch (seat.seat) {
+      case "raw":
+        // 圧縮しない格納は生バイトがそのまま GPU 表現（executor の分岐 3 本目）。
+        uncompressed += toSizeClass(seat.payloadBytes);
+        break;
+      case "expanded":
+        // 適格外はロード時に CPU で f32 展開する（VRAM 削減はゼロ）。
+        expanded += seat.expandedBytes;
+        break;
+      case "f16":
+        compressed += toSizeClass(seat.payloadBytes);
+        break;
+      case "i8":
+      case "i4":
+        // MUST: companion scale のバッファも数える（executor の residentCompressedBytes と同じ
+        // 規律 — 実際に GPU が抱えるバイト数を表す欄なので、scale を除くと実績と食い違う）。
+        compressed += toSizeClass(seat.payloadBytes) + toSizeClass(seat.scaleBytes);
+        break;
     }
-    // i4 の適格は f16 / i8 より狭い「重みスロットでの消費が linear / embedding /
-    // conv1d(groups==1) だけ」（ADR 0069 決定 5 とその追補）。
-    const residentEligible = storage === "i4"
-      ? eligible.has(name) && i4Eligible.has(name)
-      : eligible.has(name);
-    if (!residentEligible) {
-      // 適格外はロード時に CPU で f32 展開する（VRAM 削減はゼロ）。
-      expanded += count * 4;
-      continue;
-    }
-    // f16 は numel×2 / i8 は numel / i4 は numel÷2（packed nibble — ADR 0069 決定 2）。
-    const payload = storage === "f16" ? count * 2 : storage === "i8" ? count : count / 2;
-    compressed += toSizeClass(payload);
-    if (storage === "f16") continue;
-    // MUST: companion scale のバッファも数える（executor の residentCompressedBytes と同じ
-    // 規律 — 実際に GPU が抱えるバイト数を表す欄なので、scale を除くと実績と食い違う）。
-    const scaleKey = initializer.storage.scale;
-    if (scaleKey === undefined) {
-      throw new ExecutionError(`${where}: 格納 ${storage} なのに storage.scale が無い`);
-    }
-    compressed += toSizeClass(tensorByteLength(file, where, scaleKey));
   }
   return { compressed, uncompressed, expanded };
 };
@@ -352,7 +329,7 @@ export const estimateSessionMemory = (
   // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —
   // ADR 0066 追記 7 — に見積りだけが正常値を返さない）。
   if (state.bindings !== undefined) assertGenerationBindings(state.bindings, bindings);
-  const weights = weightEstimate(model);
+  const weights = weightEstimate(graph);
   const plan = planGraph(graph, bindings, state.shapes);
 
   // 入力バッファと出力 readback staging は同じ床つきの式（executor の `#bindInput` /
