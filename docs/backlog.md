@@ -30,8 +30,10 @@ Anima Web アプリからの既知問題 3 件（調査で機序確定済み —
 - ④素版 i4 感度 — adaLN + block 外 i8 変種は**視認スイープで不採用**（2026-08-28 裁定 —
   perf-ledger Q-9 /
   [research](research/2026-08-28-anima-adaln8-visual.md)。教訓: 視認 A/B は seed 4 本以上）。
-  未検証軸（校正標本増・Hessian rank 仮説ほか）は research に列挙 — 追試は GPU 校正
-  （`--calib-device cuda`・等価性検証中）が通ってから数十分オーダーで回せる
+  **anima DiT i4 系はしばらく保留（2026-08-28 ユーザー裁定）** — 動機だった「サイズ起因の
+  DL 不能」は R1 shard 化が根治し、速度は i4 経路がむしろ遅い（~2 倍）ため優先度が立たない。
+  未検証軸は research に列挙のまま（復活時は GPU 校正 =
+  [実用可・3.6 倍速](research/2026-08-28-cuda-calibration.md)で回す — 配布焼きは CPU）
 
 ## next — R1 ロード面工事 + shard 配布（2026-08-25 昇格・2026-08-28 統合裁定）
 
