@@ -16,8 +16,11 @@
   の graph-first 接続 + exporter 1GiB 分割（`karume.shards`）+ デモの疑似 HF サーバ化。
   **受け入れ実証済み**: Base f16 3.9GB → 4 shard で実ロード + 生成完走。正本 = ADR
   [0070](../docs/decisions/0070-shard-loading-admission.md) 追記 2026-08-29。
-  **次 = 0.7.0 リリース**（backlog next — 要判断: i8 も分割再 export するか / turbo f16 /
-  pin 範囲。models/ の HF ミラーは未変更・E2E dist は `outputs/eval/karume-anima-split-e2e`）。
+  **HF 更新系まで完了（2026-08-29）**: 全席分割ビット同一・base `7be81011` / turbo `1a6e907a`
+  公開・**shard ごとの越境参照**（ADR 0038 §7 追記 2026-08-29）初適用・pin 焼き込み + 実 DL
+  疎通済み。実資産テストとローカル配信は越境 + 分割ミラーへ追随済み（fromAssets の実 GPU
+  生成経路は anima e2e から消滅 — 契約面と他家族が担保）。**残り = GitHub Release →
+  publish のみ**（要判断 3 件は backlog next）。
 - **fetch-cache 0.5.0 追従（2026-08-28 実装済み）**: 検証責務を取得層へ移譲（記録ハッシュ
   信頼・knob なし）・認証隔離の撤去・`verifying` 撤去・旧名前空間 purge。正本 = ADR
   [0080](../docs/decisions/0080-hub-fetch-cache-050.md)（旧 CAS ドラフトを置換 —

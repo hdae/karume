@@ -35,17 +35,23 @@ Anima Web アプリからの既知問題 3 件（調査で機序確定済み —
   未検証軸は research に列挙のまま（復活時は GPU 校正 =
   [実用可・3.6 倍速](research/2026-08-28-cuda-calibration.md)で回す — 配布焼きは CPU）
 
-## next — 0.7.0 リリース（R1 完了を受けて）
+## next — 0.7.0 リリース（残り = Release 作成 → publish のみ）
 
-R1 統合波は**コード完了**（下の消化済み節）。残り = リリース準備:
+HF 更新系は**完了（2026-08-29）**: 全席分割の再 export 8 本（**全テンソルビット同一証明** —
+LoRA scale=1.0 も同時証明）→ base 3 モデル family 再生成 → HF 上げ（`7be81011`）→ turbo を
+**shard ごとの越境参照**（新機構の初適用）で焼き直し → HF 上げ（`1a6e907a`）→ pin 2 本
+焼き込み + 実 DL 疎通（turbo = demo 完走 / base = fromPretrained + 生成完走）。断片化検証:
+全 shard 26.5〜30.4 MiB/term（健全）— 例外は base の `shared/text_encoder` shard1 =
+**4.5 MiB/term（旧公開バイトの xorb へ部分ヒットした継承断片化** — 同バイト再アップは
+hf CLI が転送スキップするため runbook の処方が効かない。恒久対処候補 = 旧 revision 込みの
+履歴整理 or delete→再 up の 2 コミット法〈未検証〉）。
 
-- lockstep 0.7.0（hub / runtime / models — hub 0.5.0 追従と R1 の breaking を同梱）・CI 緑・
-  Release・JSR publish（手順 = [release-runbook](release-runbook.md)。fetch-cache 0.5.0 の
-  JSR minimum dependency age はコールド環境で 2026-08-29 18:22Z まで解決失敗しうる）
-- **models/（HF ミラー）の dist 再生成 + HF 上げ直し（許可ゲート）** — E2E 済みの分割 dist は
-  `outputs/eval/karume-anima-split-e2e`（models/ は未変更のまま）。**要判断**: ①i8 席
-  （1,962,502,636B — 壁の内側だが余裕 183MB）も分割再 export するか ②turbo リポの f16 も
-  上げ直すか ③pin 更新の範囲
+- 残り: **GitHub Release v0.7.0 作成 → publish.yml 発火 → JSR 3 パッケージ確認**（ユーザー。
+  fetch-cache 0.5.0 の min-dep-age は `jsr:@hdae/*` 除外済みで CI は無風）
+- **要判断（非ブロッキング）**: ①demo/ の実画像コーパス（seed42-45 PNG）を分割後ビルドで
+  一括再生成して揃えるか ②text_encoder 断片化の恒久対処 ③turbo の i4 席（1.14GiB 単一 —
+  GPTQ はスレッド非決定の再現リスクがあり無検証の焼き直しを避けた祖父条項。次回 i4 再校正時に
+  分割へ吸収）
 - リリース後 = ChatGPT 全体レビュー消化（ユーザー持参）・Pixel 実機 err.cause 再判定
 
 ## 消化済み（R1 統合波 — ロード面 API 工事 + shard 配布・2026-08-28〜29）
