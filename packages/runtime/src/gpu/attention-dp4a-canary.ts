@@ -375,6 +375,7 @@ const compareToReference = (
   let maxAbsError = 0;
   let maxBandRatio = 0;
   let mismatch: string | undefined;
+  let bandMismatch: string | undefined;
   for (let i = 0; i < expected.length; i += 1) {
     if (actual[i] !== expected[i]) {
       exact = false;
@@ -385,11 +386,25 @@ const compareToReference = (
       Math.abs(expected[i]) * SANITY_RELATIVE_TOLERANCE,
       SANITY_ABSOLUTE_FLOOR,
     );
-    if (!(diff <= tolerance)) withinBand = false;
+    if (!(diff <= tolerance)) {
+      withinBand = false;
+      bandMismatch ??= `${key}[${i}]: 実測 ${actual[i]} / 既知解 ${expected[i]}`;
+    }
     maxAbsError = Math.max(maxAbsError, diff);
     maxBandRatio = Math.max(maxBandRatio, diff / tolerance);
   }
-  return { key, exact, withinBand, maxAbsError, maxBandRatio, mismatch, output };
+  // MUST: 診断は**帯外の要素を優先**する。厳密不一致だが帯内の要素（M2 の 1 ULP 差）を先頭に
+  // 立てると、帯外の故障が別にあるとき「無関係な微小差」と「帯余裕 10 倍」が同じ行に並んで
+  // 誤読させる（M2 実機で実害を確認 — 帯外テストの期待キーが読めなかった）。
+  return {
+    key,
+    exact,
+    withinBand,
+    maxAbsError,
+    maxBandRatio,
+    mismatch: bandMismatch ?? mismatch,
+    output,
+  };
 };
 
 /** 1 変種ぶんの実走計画（パイプライン生成は済み・バッファ確保はこれから）。 */
@@ -651,7 +666,10 @@ export const probeAttentionI8a8Dot = async (
       withinBand: outcomes.every((outcome) => outcome.withinBand),
       maxAbsError: outcomes.reduce((worst, o) => Math.max(worst, o.maxAbsError), 0),
       maxBandRatio: outcomes.reduce((worst, o) => Math.max(worst, o.maxBandRatio), 0),
-      mismatch: outcomes.find((outcome) => outcome.mismatch !== undefined)?.mismatch,
+      // 変種を跨いだ集約も帯外を優先する（compareToReference と同じ理由 — 帯外の変種が
+      // あるのに、並び順が先の帯内変種の 1 ULP 差を代表にしない）。
+      mismatch: (outcomes.find((outcome) => !outcome.withinBand) ??
+        outcomes.find((outcome) => outcome.mismatch !== undefined))?.mismatch,
       variants: outcomes,
     };
   } finally {

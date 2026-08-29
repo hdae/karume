@@ -216,24 +216,38 @@ Deno.test("判定の根拠 1 行は分岐と最大誤差を持つ（警告文言
 // ---------------------------------------------------------------------------
 
 Deno.test({
-  name: "健全な device では両腕とも既知解と一致し、カナリアは dp4a を選ぶ（実 GPU）",
+  name: "素の判定は dp4a を選び、分岐と厳密一致フラグが整合する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
     try {
       const decision = await decideAttentionI8a8Dot(gpu);
-      assertEquals(decision.dot, "dp4a", "健全な機で dp4a が選ばれない");
-      assertEquals(decision.branch, "dp4a-exact", "帯の分岐を踏んでいる（厳密一致していない）");
-      assert(decision.exact, "厳密一致フラグが立っていない");
-      assertEquals(decision.maxAbsError, 0, "厳密一致なのに誤差が乗っている");
-      // エミュ側も既知解に乗る（= カナリアの沈黙が「両方同じだけずれている」形ではない）。
-      // MUST: 直接呼ぶときも device 単位の errorScope 区間ロックの中で（probe の doc）。
-      const emu = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
-        probeAttentionI8a8Dot(gpu, "emu")
+      // 期待はプラットフォームで分かれる: 参照機（Linux / NVIDIA）は dp4a-exact、Apple M2 は
+      // 共有エピローグの 1 ULP 差により band-both-identical（known-issues の Metal 節）。
+      // どちらでも**選ばれる腕は dp4a** — それがこのテストの主題。参照機のビット厳密性
+      // そのものは attention parity 門（atol=0）が別途固定している。
+      assertEquals(decision.dot, "dp4a", "素の判定で dp4a が選ばれない");
+      assert(
+        decision.branch === "dp4a-exact" || decision.branch === "band-both-identical",
+        `素の判定が想定外の分岐: ${decision.branch}`,
       );
-      assertEquals(emu.mismatch, undefined, "エミュ変種が既知解を外した");
-      assert(emu.exact, "エミュ変種が atol=0 で一致していない");
-      assertEquals(emu.variants.length, 6, "撃った変種が 6 本でない");
+      assertEquals(
+        decision.exact,
+        decision.branch === "dp4a-exact",
+        "厳密一致フラグと分岐が食い違っている",
+      );
+      if (decision.exact) {
+        assertEquals(decision.maxAbsError, 0, "厳密一致なのに誤差が乗っている");
+        // 参照機ではエミュ側も既知解に乗る（= カナリアの沈黙が「両方同じだけずれている」形で
+        // はない）。band 機では非対象 — 両腕の同一性は band-both-identical 分岐自体が検証済み。
+        // MUST: 直接呼ぶときも device 単位の errorScope 区間ロックの中で（probe の doc）。
+        const emu = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
+          probeAttentionI8a8Dot(gpu, "emu")
+        );
+        assertEquals(emu.mismatch, undefined, "エミュ変種が既知解を外した");
+        assert(emu.exact, "エミュ変種が atol=0 で一致していない");
+        assertEquals(emu.variants.length, 6, "撃った変種が 6 本でない");
+      }
     } finally {
       gpu.destroy();
     }
@@ -252,8 +266,17 @@ Deno.test({
     try {
       const decision = await decideAttentionI8a8Dot(gpu, BREAK_DP4A);
       assertEquals(decision.dot, "emu");
-      assertEquals(decision.branch, "emu-exact");
-      assert(decision.exact, "エミュ側は厳密一致しているのにフラグが落ちている");
+      // 参照機は emu-exact、Apple M2 はエミュ側も 1 ULP 差なので band-single-arm 経由で emu
+      // （どちらも「壊れた dp4a を捨てて emu を採る」という主題は同じ）。
+      assert(
+        decision.branch === "emu-exact" || decision.branch === "band-single-arm",
+        `想定外の分岐: ${decision.branch}`,
+      );
+      assertEquals(
+        decision.exact,
+        decision.branch === "emu-exact",
+        "厳密一致フラグと分岐が食い違っている",
+      );
     } finally {
       gpu.destroy();
     }
