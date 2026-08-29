@@ -92,15 +92,13 @@ import {
   referenceAttentionQkI8a8,
 } from "../reference/i8a8.ts";
 import type { I8a8Dot } from "../runtime/session-types.ts";
+import { type GpuContext, GpuFeatureError, RUNTIME_INTERNAL } from "./device.ts";
 import {
   discardFailureScopes,
-  type GpuContext,
-  GpuFeatureError,
   popFailureScopes,
   pushFailureScopes,
-  RUNTIME_INTERNAL,
   withPipelineScope,
-} from "./device.ts";
+} from "./error-scope.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
 /** 診断とエラー文言に使う名前（この 1 本で「どのカナリアが落ちたか」が読める）。 */

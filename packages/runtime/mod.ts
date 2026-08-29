@@ -27,13 +27,16 @@ export {
   BatchScopeError,
   GpuDeviceLostError,
   GpuFeatureError,
-  GpuInternalError,
   GpuLimitError,
-  GpuOutOfMemoryError,
   GpuUnavailableError,
-  GpuValidationError,
   ResidentTensorError,
 } from "./src/gpu/device.ts";
+/** errorScope の規律から出る型付きエラー（置き場は `src/gpu/error-scope.ts` — 公開面は不変）。 */
+export {
+  GpuInternalError,
+  GpuOutOfMemoryError,
+  GpuValidationError,
+} from "./src/gpu/error-scope.ts";
 /**
  * GpuContext の構築は {@link acquireGpu} だけを入口にするため、型としてのみ公開する
  * （Session と同じ形）。値として公開すると `new GpuContext(...)` で planRequiredLimits /

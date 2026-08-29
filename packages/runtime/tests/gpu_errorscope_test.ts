@@ -1,13 +1,12 @@
 import { assert, assertEquals, assertInstanceOf, assertRejects } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
+import { acquireGpu, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import {
-  acquireGpu,
   GpuValidationError,
   popFailureScopes,
   pushFailureScopes,
-  RUNTIME_INTERNAL,
   withPipelineScope,
-} from "../src/gpu/device.ts";
+} from "../src/gpu/error-scope.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { applyReferenceOp } from "../src/reference/ops.ts";
 import { createSession } from "../src/runtime/executor.ts";

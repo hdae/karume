@@ -1,6 +1,15 @@
-import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
-import { GpuValidationError } from "../src/gpu/device.ts";
-import { PipelineCache, PipelineKeyConflictError } from "../src/gpu/pipeline-cache.ts";
+import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
+import { openModel } from "../src/format/container.ts";
+import { acquireGpu } from "../src/gpu/device.ts";
+import { GpuValidationError } from "../src/gpu/error-scope.ts";
+import {
+  PipelineCache,
+  PipelineKeyConflictError,
+  SessionPipelines,
+} from "../src/gpu/pipeline-cache.ts";
+import { createSession } from "../src/runtime/executor.ts";
+import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** PipelineCache が触る面だけを持つフェイク。DOM 型全体は再現しないため cast で渡す。 */
 type FakeGpu = {
@@ -144,4 +153,105 @@ Deno.test("PipelineCache は errorScope が捕捉した検証エラーを例外�
     "workgroup size exceeds limit",
   );
   assertEquals(cache.size, 0);
+});
+
+Deno.test("SessionPipelines は device 寿命の 1 本を共有し、2 本目の Session で再コンパイルしない", async () => {
+  const gpu = createFakeGpu();
+  const cache = new PipelineCache(gpu.device);
+  const first = new SessionPipelines(cache);
+  const second = new SessionPipelines(cache);
+
+  await first.get("elementwise:add:f32", WGSL_A);
+  await second.get("elementwise:add:f32", WGSL_A);
+
+  assertEquals(gpu.modules, [WGSL_A], "2 本目の Session はシェーダモジュールを作らない");
+  assertEquals(first.usedCount, 1);
+  assertEquals(second.usedCount, 1, "共有していても『自分が使った本数』は自分ぶんだけ");
+  assertEquals(second.deviceCount, 1, "device 合計は和集合");
+});
+
+Deno.test("SessionPipelines の使用本数はキー集合の大きさ（引いた回数ではない）", async () => {
+  const gpu = createFakeGpu();
+  const use = new SessionPipelines(new PipelineCache(gpu.device));
+
+  await use.get("k1", WGSL_A);
+  await use.get("k1", WGSL_A);
+  await use.get("k2", WGSL_B);
+
+  assertEquals(use.usedCount, 2);
+});
+
+Deno.test("SessionPipelines は失敗したキーを使用集合に数えない", async () => {
+  const error = { message: "shader compile failed" } as unknown as GPUError;
+  const gpu = createFakeGpu(error);
+  const use = new SessionPipelines(new PipelineCache(gpu.device));
+
+  await assertRejects(() => use.get("broken", WGSL_A), GpuValidationError);
+
+  assertEquals(use.usedCount, 0, "device に残らないキーを Session だけが使ったことにしない");
+  assertEquals(use.deviceCount, 0);
+});
+
+Deno.test("PipelineKeyConflictError は Session を跨いで検出される（同一 device・同一キー）", async () => {
+  const gpu = createFakeGpu();
+  // 決定性の破れは「同じキーに別の WGSL」で起きる。キャッシュが Session ごとだった頃は
+  // 別 Session 同士の衝突がそもそも突き合わされず、後発の Session が黙って別カーネルを
+  // 走らせられた（ブラウザの暗黙キャッシュは WGSL 文字列がキーなので警告も出ない）。
+  const cache = new PipelineCache(gpu.device);
+  await new SessionPipelines(cache).get("matmul:v4", WGSL_A);
+
+  await assertRejects(
+    () => new SessionPipelines(cache).get("matmul:v4", WGSL_B),
+    PipelineKeyConflictError,
+    "matmul:v4",
+  );
+  assertEquals(gpu.modules, [WGSL_A], "衝突時は device に触らない");
+});
+
+Deno.test({
+  name: "パイプラインキャッシュは device 寿命で、dispose 済み Session のキーも残る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const model = () => openModel(graphModelBuffer(singleOpGraph("relu", [[8, 8]], [[8, 8]])));
+    const x = fill([8, 8], (i) => (i % 13) - 6);
+
+    try {
+      const first = await createSession(gpu, model());
+      assertEquals(
+        first.diagnostics().pipelineCount,
+        0,
+        "構築相はパイプラインを 1 本も引かない（生成は初回 run のミス経路）",
+      );
+      await first.run({ x0: x });
+      const used = first.diagnostics().pipelineCount;
+      assert(used > 0, "run でパイプラインが立つ");
+      assertEquals(
+        first.diagnostics().devicePipelineCount,
+        used,
+        "この device には 1 本目ぶんだけ",
+      );
+      await first.dispose();
+
+      const second = await createSession(gpu, model());
+      assertEquals(
+        second.diagnostics().devicePipelineCount,
+        used,
+        "dispose 済み Session のキーは device 合計に残る（寿命は GpuContext と一致）",
+      );
+      assertEquals(second.diagnostics().pipelineCount, 0, "使用本数は Session ごとに 0 から");
+
+      await second.run({ x0: x });
+
+      assertEquals(second.diagnostics().pipelineCount, used, "使った本数は 1 本目と同じ");
+      assertEquals(
+        second.diagnostics().devicePipelineCount,
+        used,
+        "2 本目は device 合計を 1 本も増やさない = 同じ WGSL を再コンパイルしていない",
+      );
+      await second.dispose();
+    } finally {
+      gpu.destroy();
+    }
+  },
 });

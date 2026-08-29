@@ -14,18 +14,20 @@ import {
   GpuDeviceLostError,
   GpuFeatureError,
   GpuLimitError,
-  GpuOutOfMemoryError,
-  GpuValidationError,
   planRequiredLimits,
   planShaderF16Feature,
-  popFailureScopes,
-  pushFailureScopes,
   readAdapterInfo,
   REQUIRED_LIMIT_KEYS,
   type RequiredLimits,
   RUNTIME_INTERNAL,
   SHADER_F16_FEATURE,
 } from "../src/gpu/device.ts";
+import {
+  GpuOutOfMemoryError,
+  GpuValidationError,
+  popFailureScopes,
+  pushFailureScopes,
+} from "../src/gpu/error-scope.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { fakeDevice, fakeGpuContext, losableGpuContext } from "./helpers/fake-gpu.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";

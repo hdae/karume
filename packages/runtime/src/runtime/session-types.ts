@@ -385,7 +385,26 @@ export type StateBackingStats = {
 };
 
 export type SessionDiagnostics = {
+  /**
+   * **この Session が使った**パイプラインキーの本数（グラフと opt-in の組み合わせに対して
+   * 何本のカーネルが立ったか）。
+   *
+   * MUST: 定義は「使ったキーの本数」であって「この Session が生成させた本数」ではない。
+   * パイプラインキャッシュは device 寿命（GpuContext 所有）なので、同一 device の先行 Session が
+   * 既に作っていればこの Session は 1 本も生成しない — 生成側の定義にすると、同じグラフの
+   * Session が「1 本目は 3・2 本目は 0」と報告する形になり、カーネル本数の観測点として使えない。
+   * NOTE: パイプラインは初回 run で作られるので、構築直後は 0（{@link SessionBuildStats}）。
+   */
   readonly pipelineCount: number;
+  /**
+   * この device 上のキャッシュが抱えるパイプラインキーの総本数（全 Session の和集合）。
+   *
+   * dispose 済み Session が使ったキーもここには残る（キャッシュの寿命は GpuContext と一致し、
+   * 解放は `GpuContext.destroy` のみ）。{@link SessionDiagnostics.pipelineCount} との差が
+   * 「同一 device の他 Session ぶん」で、run を跨いで単調に増え続ける形は codegen 決定性の破れ
+   * （キーに載せるべきでない値が載っている）の唯一の観測点になる。
+   */
+  readonly devicePipelineCount: number;
   readonly submit: SubmitStats;
   /**
    * 重み（initializer）アリーナの実績。**params キャッシュ（Session 常駐）の実体もここが

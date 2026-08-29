@@ -19,14 +19,8 @@
 import { evalDim, parseDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { STORAGE_USAGE } from "../gpu/arena.ts";
-import {
-  discardFailureScopes,
-  type GpuContext,
-  GpuDeviceLostError,
-  popFailureScopes,
-  pushFailureScopes,
-  RUNTIME_INTERNAL,
-} from "../gpu/device.ts";
+import { type GpuContext, GpuDeviceLostError, RUNTIME_INTERNAL } from "../gpu/device.ts";
+import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import { numel, stateWindow } from "../ops.ts";
 import { ExecutionError, type SymbolBindings } from "./plan.ts";

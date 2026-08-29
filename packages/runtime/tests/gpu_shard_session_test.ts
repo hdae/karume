@@ -11,7 +11,8 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { ContainerError, openModel } from "../src/format/container.ts";
 import { SafetensorsError } from "../src/format/safetensors.ts";
-import { acquireGpu, popFailureScopes, pushFailureScopes } from "../src/gpu/device.ts";
+import { acquireGpu } from "../src/gpu/device.ts";
+import { popFailureScopes, pushFailureScopes } from "../src/gpu/error-scope.ts";
 import {
   createSession,
   createSessionFromShards,

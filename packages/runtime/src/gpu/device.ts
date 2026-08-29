@@ -9,10 +9,12 @@
  * なる。device を握る層（PipelineCache / SubmitScheduler / RunArena）は全て GpuContext と
  * 同じ寿命で作り直せる構造でなければならない。
  *
- * この層はさらに 2 つ、**device と同じ寿命で GpuContext が所有する**器を持つ:
+ * この層はさらに 3 つ、**device と同じ寿命で GpuContext が所有する**器を持つ:
  * {@link ResidentTensor}（Session を跨いで共有できる第 4 の寿命クラス）と
- * {@link BatchScope}（フェンス 1 本で閉じる enqueue 区間）。どちらも errorScope 区間と
- * 消失レースの規律がそのまま効くため、GPU バッファの器でありながらここに置いてある。
+ * {@link BatchScope}（フェンス 1 本で閉じる enqueue 区間）、そして
+ * {@link GpuContextInternals.pipelines}（コンパイル済み compute pipeline のキャッシュ）。
+ * 前 2 者は errorScope 区間と消失レースの規律がそのまま効くため、GPU バッファの器でありながら
+ * ここに置いてある。
  */
 
 // MUST: 型だけを取る（実体を import すると device.ts → カナリア → kernels / reference の
@@ -21,6 +23,13 @@
 // 実行時の import グラフは今までどおり一方向のまま。
 import type { AttentionI8a8Decision } from "./attention-dp4a-canary.ts";
 import { STORAGE_USAGE } from "./arena.ts";
+import {
+  discardFailureScopes,
+  popFailureScopes,
+  pushFailureScopes,
+  withPipelineScope,
+} from "./error-scope.ts";
+import { PipelineCache } from "./pipeline-cache.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
 /** navigator.gpu が無い / アダプタを取得できない。 */
@@ -31,29 +40,6 @@ export class GpuUnavailableError extends Error {
 /** 要求した limit を device が満たさない（要求漏れ・仕様既定値への降格の検出）。 */
 export class GpuLimitError extends Error {
   override readonly name = "GpuLimitError";
-}
-
-/** errorScope が捕捉した validation エラー（無効パイプライン等）。 */
-export class GpuValidationError extends Error {
-  override readonly name = "GpuValidationError";
-}
-
-/**
- * errorScope が捕捉した out-of-memory エラー（確保要求が device の余力を超えた）。
- * validation と違い利用者のモデルサイズと実行環境で決まるため、別型で分岐可能にする。
- */
-export class GpuOutOfMemoryError extends Error {
-  override readonly name = "GpuOutOfMemoryError";
-}
-
-/**
- * errorScope が捕捉した internal エラー（実装側の都合で操作が失敗した — シェーダが複雑すぎて
- * コンパイルできない等）。WGSL 自体は妥当なので validation とは分岐先が違う: 利用者にとって
- * 「記述が不正」ではなく「この環境ではこの形のカーネルが通らない」であり、別型で区別できないと
- * codegen のバグと環境の限界が同じ報告に潰れる。
- */
-export class GpuInternalError extends Error {
-  override readonly name = "GpuInternalError";
 }
 
 /** device が失われた状態での操作。待ち続ける代わりに必ずこれを投げる。 */
@@ -548,6 +534,23 @@ type GpuContextInternals = {
    * 警告を出せなくなる。
    */
   attentionI8a8Dot(run: () => Promise<AttentionI8a8Decision>): Promise<AttentionI8a8Decision>;
+  /**
+   * コンパイル済み compute pipeline のキャッシュ（**device 1 個につき 1 個** — 初回参照で生成）。
+   *
+   * 寿命が device 単位なのは、パイプラインの再利用可能性が device 単位だから — 同一 device 上の
+   * Session はブラウザ側の暗黙キャッシュ（WGSL 文字列がキー）に当たるだけで、明示キャッシュを
+   * Session ごとに割ると `createShaderModule` / `createComputePipeline` の呼び出しと
+   * `getBindGroupLayout` の解決を Session の本数だけ払い直すことになる。
+   *
+   * MUST: 破棄・消失で明示的に捨てない（**GpuContext インスタンスと心中する** — ADR 0004 の
+   * 再構築規律）。lazy 生成なので、destroy で undefined に戻すと次の参照が「死んだ device の
+   * キャッシュ」を新品として作り直してしまう。作り直しの唯一の入口は `acquireGpu()` からの
+   * GpuContext 再構築で、その時点で新しい空のキャッシュになる。
+   * MUST: 呼び手（executor）は **Session の構築相からは触らない** — 構築相はスコープロックの
+   * 外にあり、そこでパイプラインを生成すると並行構築の errorScope が誤帰属する
+   * （{@link GpuContext} 冒頭「errorScope 区間の不変条件」）。
+   */
+  pipelines(): PipelineCache;
 };
 
 /**
@@ -628,6 +631,11 @@ export class GpuContext {
    * 不変条件）— GpuContext ごとに別空間で足りる（resident は device を跨がない）。
    */
   #residentSeq = 0;
+  /**
+   * device 寿命のパイプラインキャッシュ（{@link GpuContextInternals.pipelines}）。
+   * 未参照なら undefined のまま = 1 本も作らない（Session を作らない利用者はコストを払わない）。
+   */
+  #pipelines: PipelineCache | undefined;
 
   constructor(
     device: GPUDevice,
@@ -650,6 +658,10 @@ export class GpuContext {
       ): Promise<AttentionI8a8Decision> => {
         this.#attentionI8a8Dot ??= run();
         return this.#attentionI8a8Dot;
+      },
+      pipelines: (): PipelineCache => {
+        this.#pipelines ??= new PipelineCache(this.device);
+        return this.#pipelines;
       },
     };
     if (onDeviceLost !== undefined) {
@@ -1291,112 +1303,4 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
     readWgslLanguageFeatures(gpu),
     options.onDeviceLost,
   );
-};
-
-/**
- * internal + validation の 2 本を張って `body`（パイプライン生成）を実行し、捕捉したエラーを
- * 例外に変換する。**パイプライン生成経路はこちらを使う**（validation 1 本では internal
- * エラーが素通りする）。
- *
- * 両方が要るのは失敗の出方が違うため — 上限超過や型不整合は validation、実装側の都合
- * （シェーダが複雑すぎてコンパイルできない等）は internal で、どちらも同期例外にならず
- * **無効なパイプラインが返るだけ**。囲まないと dispatch が no-op 化して出力が全て 0 になる。
- *
- * MUST NOT: `body` の中で非同期処理を待たない。errorScope はスタックで、pop は body の同期
- * 実行直後に起きるため、await 後にエンコードした操作は別のスコープに吸われる。
- */
-export const withPipelineScope = async <T>(
-  device: GPUDevice,
-  label: string,
-  body: () => T,
-): Promise<T> => {
-  device.pushErrorScope("internal");
-  device.pushErrorScope("validation");
-  let value: T;
-  try {
-    value = body();
-  } catch (cause) {
-    // MUST: body が throw しても 2 本とも pop する。片方でも積み残すと後続の検証結果が誤った
-    // スコープに吸われ、以後のエラーが恒久的に見えなくなる。pop 自体の失敗は握り潰す
-    // （後始末で本体の例外を上書きしない — discardFailureScopes と同じ規律）。
-    const validation = device.popErrorScope().catch(() => null);
-    const internal = device.popErrorScope().catch(() => null);
-    await Promise.all([validation, internal]);
-    throw cause;
-  }
-  // MUST: 2 本の pop は**同一同期区間で発行**する（await するのは発行済みの promise だけ）。
-  // pop はスタック先頭を無条件に取るため、発行の間に await を挟むと、その隙に他所が push した
-  // スコープを 2 本目が取り、失敗が誤帰属する（popFailureScopes と同じ規律）。
-  const validation = device.popErrorScope();
-  const internal = device.popErrorScope();
-  const [validationError, internalError] = await Promise.all([validation, internal]);
-  // MUST: 両方が捕捉されたときは internal を返す。internal で無効化されたパイプラインを触る
-  // 後続の操作（`getBindGroupLayout` 等）は**派生の** validation エラーを立てるため、
-  // validation を先に返すと根因の internal が捨てられ、原因の分からない「無効パイプライン」
-  // として報告される。OOM を validation より先に返すのと同型の判断
-  // （docs/research/2026-08-08-vram-oom-misreport.md）。
-  if (internalError !== null) {
-    throw new GpuInternalError(`${label}: ${internalError.message}`);
-  }
-  if (validationError !== null) {
-    throw new GpuValidationError(`${label}: ${validationError.message}`);
-  }
-  return value;
-};
-
-/**
- * out-of-memory + validation の 2 本を張る。確保を伴う区間はこの両建てで囲む。
- *
- * 両方が要るのは失敗の出方が違うため — 上限超過の `createBuffer` は validation、device の
- * 余力切れは out-of-memory で、どちらも同期例外にはならず**無効なバッファが返るだけ**。
- * 囲まないと、そこへの `writeBuffer` が警告すら出さない no-op になり、空の重みや空の中間
- * バッファのまま処理が続く。対応する pop は必ず {@link popFailureScopes} /
- * {@link discardFailureScopes} を使う（pop の順序と同期性がここに閉じている）。
- */
-export const pushFailureScopes = (device: GPUDevice): void => {
-  device.pushErrorScope("out-of-memory");
-  device.pushErrorScope("validation");
-};
-
-/**
- * {@link pushFailureScopes} の 2 本を pop し、捕捉した失敗を型付き例外にして返す
- * （何も捕捉しなければ undefined）。
- *
- * MUST: 2 本の pop は**同一同期区間で発行**する（await するのは発行済みの promise だけ）。
- * pop はスタック先頭を無条件に取るため、発行の間に await を挟むと、その隙に他所が push した
- * スコープを 2 本目が取り、失敗が誤帰属する。
- *
- * MUST: 両方が捕捉されたときは out-of-memory を返す。確保が余力切れで失敗すると `createBuffer`
- * は無効なバッファを返し、それを使う後続の `createBindGroup` / `writeBuffer` が
- * `Buffer with '' label is invalid` という**派生の** validation エラーを立てる。validation を
- * 先に返すと根因の OOM が捨てられ、区別のつかない「無効バッファ」として報告される
- * （docs/research/2026-08-08-vram-oom-misreport.md）。
- */
-export const popFailureScopes = async (
-  device: GPUDevice,
-  label: string,
-): Promise<GpuValidationError | GpuOutOfMemoryError | undefined> => {
-  const validation = device.popErrorScope();
-  const outOfMemory = device.popErrorScope();
-  const [validationError, outOfMemoryError] = await Promise.all([validation, outOfMemory]);
-  if (outOfMemoryError !== null) {
-    return new GpuOutOfMemoryError(`${label}: ${outOfMemoryError.message}`);
-  }
-  if (validationError !== null) {
-    return new GpuValidationError(`${label}: ${validationError.message}`);
-  }
-  return undefined;
-};
-
-/**
- * 失敗経路の後始末。{@link pushFailureScopes} の 2 本を pop して結果を捨てる。
- *
- * MUST: 本体が例外で抜けてもスコープは必ず 2 本とも pop する。積み残すと以後の検証結果が
- * 誤ったスコープに吸われ、エラーが恒久的に見えなくなる。pop 自体の失敗も握り潰す
- * （後始末で本体の例外を上書きしない）。
- */
-export const discardFailureScopes = async (device: GPUDevice): Promise<void> => {
-  const validation = device.popErrorScope().catch(() => null);
-  const outOfMemory = device.popErrorScope().catch(() => null);
-  await Promise.all([validation, outOfMemory]);
 };

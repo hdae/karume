@@ -7,9 +7,10 @@
  * 選択・融合ルールの replay・i8a8 / f16 の opt-in 経路）はこのモジュールに閉じる。
  *
  * MUST: 導出相は **run 寿命の状態に触れない**（{@link RunArena} の確保も dispatch の発行も
- * しない）。触れるのは Session 常駐の実体（重み・per-channel scale・params キャッシュ・
- * {@link PipelineCache}）だけで、これが「導出相の成果物を解決済み bindings をキーに Session へ
- * 常駐させてよい」根拠そのもの（executor.ts の PreparedPlan）。
+ * しない）。触れるのは Session 以上の寿命を持つ実体（重み・per-channel scale・params キャッシュ
+ * = Session 常駐、パイプライン = device 常駐の {@link SessionPipelines}）だけで、これが
+ * 「導出相の成果物を解決済み bindings をキーに Session へ常駐させてよい」根拠そのもの
+ * （executor.ts の PreparedPlan）。
  * MUST: 依存は executor.ts → ここの**一方向**（型 import を含めて逆辺を作らない）。Session の
  * 状態は {@link RecipeBuilderContext} という構造的な面だけで受け取る。
  */
@@ -195,7 +196,7 @@ import {
 import type { IrDtype, IrGraph } from "../format/ir.ts";
 import type { RunArena } from "../gpu/arena.ts";
 import type { GpuContext } from "../gpu/device.ts";
-import type { PipelineCache } from "../gpu/pipeline-cache.ts";
+import type { SessionPipelines } from "../gpu/pipeline-cache.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../kernels/bmm.ts";
 import {
@@ -275,7 +276,12 @@ const PARAMS_UNIFORM_USAGE = BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST;
 type RecipeBuilderContext = {
   readonly gpu: GpuContext;
   readonly graph: IrGraph;
-  readonly cache: PipelineCache;
+  /**
+   * パイプラインの引き先（device 寿命のキャッシュ + この Session の使用記録 —
+   * {@link SessionPipelines}）。実体は device 側にあるので、run 寿命の器を載せない規律
+   * （下の MUST）とは無関係に Session を跨いで生き残る。
+   */
+  readonly cache: SessionPipelines;
   /** params の確保先（**Session 常駐**の weights アリーナ — `#writeParams` の MUST）。 */
   readonly weights: RunArena;
   readonly weightBuffers: ReadonlyMap<string, GPUBuffer>;

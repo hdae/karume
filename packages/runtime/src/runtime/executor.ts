@@ -41,15 +41,13 @@ import {
 } from "../gpu/attention-dp4a-canary.ts";
 import {
   BatchScopeError,
-  discardFailureScopes,
   type GpuContext,
-  popFailureScopes,
-  pushFailureScopes,
   ResidentTensor,
   ResidentTensorError,
   RUNTIME_INTERNAL,
 } from "../gpu/device.ts";
-import { PipelineCache } from "../gpu/pipeline-cache.ts";
+import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
+import { SessionPipelines } from "../gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../gpu/submit.ts";
 import { BUFFER_USAGE, MAP_MODE } from "../gpu/webgpu-constants.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
@@ -670,7 +668,11 @@ type SessionState = {
    * （ADR 0070 決定 3）の「参照を手放す」契約が成立しない。構築後に要るのは graph だけ。
    */
   readonly graph: IrGraph;
-  readonly cache: PipelineCache;
+  /**
+   * device 寿命のパイプラインキャッシュ（GpuContext 所有）への、この Session ぶんの使用記録つき
+   * の面。**キャッシュ自体は Session 常駐ではない** — 同一 device の Session は 1 本を共有する。
+   */
+  readonly cache: SessionPipelines;
   readonly scheduler: SubmitScheduler;
   readonly weights: RunArena;
   readonly weightBuffers: ReadonlyMap<string, GPUBuffer>;
@@ -1059,7 +1061,14 @@ export class Session {
     return new Session({
       gpu,
       graph,
-      cache: new PipelineCache(gpu.device),
+      // MUST: パイプラインキャッシュは GpuContext 所有の 1 本を借りる（device 寿命 —
+      // `GpuContextInternals.pipelines`）。ここで新しく割ると、同一 device の Session ごとに
+      // 同じ WGSL のコンパイルと getBindGroupLayout の解決を払い直す。
+      // MUST: 借りるのは**構築の決着点だけ**で、構築相の途中では 1 本も引かない。構築相は
+      // GpuContext のスコープロックの外なので、ここでパイプラインを生成すると並行構築の
+      // errorScope が誤帰属する（gpu/device.ts「errorScope 区間の不変条件」）。実際の生成は
+      // 全て初回 run のミス経路（RecipeBuilder）= ロックの内側で起きる。
+      cache: new SessionPipelines(gpu[RUNTIME_INTERNAL].pipelines()),
       scheduler,
       weights,
       weightBuffers,
@@ -1325,7 +1334,8 @@ export class Session {
 
   diagnostics(): SessionDiagnostics {
     return {
-      pipelineCount: this.#state.cache.size,
+      pipelineCount: this.#state.cache.usedCount,
+      devicePipelineCount: this.#state.cache.deviceCount,
       submit: this.#state.scheduler.stats,
       weights: this.#state.weights.stats,
       storage: this.#state.storage,
@@ -1995,10 +2005,11 @@ export class Session {
    * 導出済み計画を載せ、上限を超えたら最も古いものを落とす。
    *
    * NOTE: 追い出しで捨てるのは**ホスト側のオブジェクトだけ**で、GPU 資源の破棄は伴わない。
-   * レシピが直参照している実体（params バッファは paramsCache が持つ weights アリーナ、
-   * pipeline / layout は {@link PipelineCache}）はいずれも Session 常駐で、寿命は
-   * `Session.dispose` に一本化されている（ADR 0004「確保と破棄を 1 箇所へ」）。ここで
-   * destroy すると、同じ実体を指す別の計画や次の導出が破棄済みバッファを掴む。
+   * レシピが直参照している実体（params バッファは paramsCache が持つ weights アリーナ = Session
+   * 常駐、pipeline / layout は GpuContext 所有のキャッシュ = device 常駐）はいずれもこの計画より
+   * 長生きで、破棄は `Session.dispose` / `GpuContext.destroy` に一本化されている（ADR 0004
+   * 「確保と破棄を 1 箇所へ」）。ここで destroy すると、同じ実体を指す別の計画や次の導出が
+   * 破棄済みバッファを掴む。
    */
   #registerPrepared(key: string, plan: PreparedPlan): void {
     this.#state.prepared.set(key, plan);

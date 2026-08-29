@@ -21,7 +21,8 @@
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
-import { acquireGpu, type GpuContext, GpuValidationError, LIMIT_CAPS } from "../src/gpu/device.ts";
+import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
+import { GpuValidationError } from "../src/gpu/error-scope.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
 import { createSession, ROW_BLOCK_SPLIT, type Tensor } from "../src/runtime/executor.ts";
 import type { GraphJson } from "./helpers/format.ts";

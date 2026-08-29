@@ -18,10 +18,10 @@ import {
   acquireGpu,
   type GpuContext,
   GpuDeviceLostError,
-  GpuOutOfMemoryError,
   LIMIT_CAPS,
   RUNTIME_INTERNAL,
 } from "../src/gpu/device.ts";
+import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
 import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
 import {
   GenerationContext,

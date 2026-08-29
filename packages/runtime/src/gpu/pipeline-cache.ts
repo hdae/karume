@@ -7,10 +7,14 @@
  * 別のカーネルが走る（キャッシュヒット時に古い WGSL が使われる）ため、下の実行時ガードで
  * 不一致を即座に落とす。
  *
- * device と同じ寿命で作り直す。device 消失後に持ち越したパイプラインは使えない。
+ * **device 1 個につき 1 個**（所有者は GpuContext — `GpuContextInternals.pipelines`）。同一
+ * device 上の Session はこの 1 本を共有し、Session ごとに割り直さない — パイプラインの再利用
+ * 可能性は device 単位で決まるので、Session ごとに持つと同じ WGSL のコンパイルと
+ * `getBindGroupLayout` の解決を Session の本数だけ払い直すことになる。device 消失後に持ち越した
+ * パイプラインは使えないので、作り直しの入口は `acquireGpu()` からの GpuContext 再構築だけ。
  */
 
-import { withPipelineScope } from "./device.ts";
+import { withPipelineScope } from "./error-scope.ts";
 
 /** 同一キーに異なる WGSL が渡された（決定性の破れ）。 */
 export class PipelineKeyConflictError extends Error {
@@ -98,5 +102,49 @@ export class PipelineCache {
     });
     this.#entries.set(key, { wgsl, resolved });
     return await resolved;
+  }
+}
+
+/**
+ * 1 Session ぶんの使用記録を付けた {@link PipelineCache} への薄い委譲。
+ *
+ * キャッシュが device 寿命になったことで「この device に載っているパイプラインの本数」と
+ * 「この Session が使ったパイプラインの本数」が別の量になった。後者は診断
+ * （`SessionDiagnostics.pipelineCount`）が答える問い — グラフと opt-in の組み合わせに対して
+ * 何本のカーネルが立ったかは Session ごとの事実で、同一 device に別の Session が居るかどうかで
+ * 変わってはいけない。前者は `SessionDiagnostics.devicePipelineCount` が答える。
+ *
+ * MUST: 本数は使用キー集合から導出する（独立に更新するカウンタを持たない）。同じキーを
+ * 複数のステップが引くのが通常形なので、加算カウンタでは「使ったキーの本数」ではなく
+ * 「引いた回数」になり、しかもズレても例外も警告も出ない。
+ */
+export class SessionPipelines {
+  readonly #cache: PipelineCache;
+  readonly #usedKeys = new Set<string>();
+
+  constructor(cache: PipelineCache) {
+    this.#cache = cache;
+  }
+
+  /** この Session が使ったパイプラインキーの本数（集合から導出）。 */
+  get usedCount(): number {
+    return this.#usedKeys.size;
+  }
+
+  /** 委譲先が抱える本数 = この device 上の全 Session の合計。 */
+  get deviceCount(): number {
+    return this.#cache.size;
+  }
+
+  /**
+   * {@link PipelineCache.get} へ委譲し、**解決したキーだけ**を使用集合へ記録する。
+   *
+   * MUST: 記録は解決後（失敗したキーは数えない）。委譲先は失敗したエントリを残さないので、
+   * 発行時点で記録すると「device には無いのに Session は使ったことになっている」形が残る。
+   */
+  async get(key: string, wgsl: string): Promise<CachedPipeline> {
+    const resolved = await this.#cache.get(key, wgsl);
+    this.#usedKeys.add(key);
+    return resolved;
   }
 }
