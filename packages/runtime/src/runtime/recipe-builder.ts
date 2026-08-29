@@ -249,6 +249,7 @@ import {
   type StepRecipe,
   StepRecipeBuilder,
   type TempSource,
+  validateStepRecipe,
   type ValueSource,
 } from "./recipe.ts";
 import type { ComputePrecision, I8a8Dot, ParamsCacheStats } from "./session-types.ts";
@@ -481,7 +482,7 @@ export class RecipeBuilder {
     }
     for (const output of outputs) defined.add(output.name);
 
-    return {
+    const recipe: StepRecipe = {
       outputs,
       temps: builder.temps,
       dispatches: builder.dispatches,
@@ -490,6 +491,11 @@ export class RecipeBuilder {
       // state を触るノードを含めない（fusion.ts の窓ガード）ので常に false。
       writesState: step.kind === "node" && step.plan.contract.kind === "stateAppend",
     };
+    // MUST: 宣言の静的検査はこの 1 箇所（レシピが外へ出る唯一の口）。素のノードの各 `#build*` と
+    // 融合の replay が同じ器（{@link StepRecipeBuilder}）へ宣言するので、経路ごとに検査を置くと
+    // 追加した経路だけ無検査で通る形になる。
+    validateStepRecipe(recipe);
+    return recipe;
   }
 
   /**

@@ -199,6 +199,50 @@ export class StepRecipeBuilder {
 }
 
 /**
+ * 組み上がったステップレシピの**宣言**が、それ自身の dispatch 列の内側で閉じているかを見る
+ * （GPU に触らない静的検査）。
+ *
+ * MUST: 一時の寿命は `0 ≤ allocBefore ≤ releaseAfter < dispatch 数`。外れた宣言は実行相で
+ * 「未確保の一時を束ねる」（`temps[id]` が `undefined` のまま createBindGroup へ渡り、真因から
+ * 遠い validation エラーになる）か「解放されない一時が残る」（アリーナ経路では run 末尾の
+ * `assertDrained` まで、slot 経路では {@link derivePlanSlots} の閉包検査まで気づけない）に化ける。
+ * MUST: 束縛が指す一時の添字は宣言済みの範囲内。範囲外は上と同じ `undefined` 束縛で、
+ * 「どの dispatch がどの一時を読み損ねたか」が診断から消える。
+ * MUST: 呼び口は**レシピの宣言の受け口 1 箇所**（recipe-builder の `#buildStep` の戻り）。
+ * 素のノードと融合再演の両方がそこを通るので、経路ごとに手書きの検査を置かずに済む
+ * （融合ルールの宣言自体は src/runtime/fusion.ts の `assertTempLifetimes` が受け口で落とし、
+ * ここは**再演した結果**を同じ強度で見る）。
+ */
+export const validateStepRecipe = (recipe: StepRecipe): void => {
+  const where = `ステップ '${recipe.outputs.map((output) => output.name).join(", ")}'`;
+  const dispatchCount = recipe.dispatches.length;
+  recipe.temps.forEach((temp, id) => {
+    if (
+      !Number.isSafeInteger(temp.byteLength) || temp.byteLength < 1 ||
+      temp.allocBefore < 0 || temp.releaseAfter < temp.allocBefore ||
+      temp.releaseAfter >= dispatchCount
+    ) {
+      throw new ExecutionError(
+        `${where}: 一時 ${id} の寿命宣言 [${temp.allocBefore}, ${temp.releaseAfter}] が` +
+          ` dispatch ${dispatchCount} 本の内側で閉じていない（${temp.byteLength}B）`,
+      );
+    }
+  });
+  for (const dispatch of recipe.dispatches) {
+    for (const entry of dispatch.bindings) {
+      const { source } = entry;
+      if (source.kind !== "temp") continue;
+      if (source.id < 0 || source.id >= recipe.temps.length) {
+        throw new ExecutionError(
+          `${where}: dispatch '${dispatch.key}' の束縛 ${entry.binding} が一時 ${source.id} を` +
+            `指すが、宣言は ${recipe.temps.length} 本`,
+        );
+      }
+    }
+  }
+};
+
+/**
  * generation run 1 回ぶんの context 側の実体と論理長（ADR 0066 決定 5 / 追記 4）。
  *
  * MUST: 論理長は**エンコード時の値**（`lengths` uniform に書いた値と同じ組）。dispatch 数を
@@ -610,6 +654,20 @@ export const derivePlanSlots = (recipes: readonly StepRecipe[]): PlanSlots => {
       ),
       temps,
     });
+  }
+  // MUST: 非 pinned の slot に参照が残っていないこと（{@link RunArena.assertDrained} と同じ
+  // 判定）。過多の解放は上の `release` が負値で即落とす一方、**足りない解放**はここまで無症状で
+  // 通り、その slot だけがプール再利用から外れたまま backing に居座る（VRAM が静かに増え、
+  // 症状は「同じグラフなのに enqueue 経路だけ footprint が大きい」になる）。run 経路は
+  // アリーナの `assertDrained` が同じ破れを見るが、`#enqueueOnce` は初回から backing を作って
+  // アリーナを 1 度も通さないので、この 1 本が無いと enqueue だけ検査の外に落ちる。
+  for (const [slot, count] of refs) {
+    if (count > 0 && !pinned.has(slot)) {
+      throw new ExecutionError(
+        `slot 導出: 未解放の参照が残存（slot ${slot}, refs=${count}, ${bytes[slot]}B — ` +
+          "消費計数が実際の解放より多い）",
+      );
+    }
   }
   return { bytes, steps, pinned };
 };

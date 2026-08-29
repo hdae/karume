@@ -1,6 +1,6 @@
 /**
- * レシピの **slot 導出**（src/runtime/recipe.ts の `derivePlanSlots`）の構造テスト。GPU を
- * 1 つも触らないので、アダプタ無し環境でも走る。
+ * レシピの **slot 導出**（src/runtime/recipe.ts の `derivePlanSlots`）と**宣言の静的検査**
+ * （同 `validateStepRecipe`）の構造テスト。GPU を 1 つも触らないので、アダプタ無し環境でも走る。
  *
  * 見ているのは「{@link StepRecipe.outputs} の列から、確保・retain・解放の簿記が
  * {@link RunArena} のサイズクラス LIFO どおりに再生されるか」— 実 GPU の footprint 門
@@ -10,8 +10,16 @@
  * ADR 0068 決定 1 の受入条件「単一出力ノードのレシピ表現は列化前と同値」がここの 1 本目。
  */
 
-import { assertEquals } from "@std/assert";
-import { derivePlanSlots, type StepOutput, type StepRecipe } from "../src/runtime/recipe.ts";
+import { assertEquals, assertThrows } from "@std/assert";
+import { ExecutionError } from "../src/runtime/plan.ts";
+import {
+  type BindingRecipe,
+  derivePlanSlots,
+  type StepOutput,
+  type StepRecipe,
+  type TempRecipe,
+  validateStepRecipe,
+} from "../src/runtime/recipe.ts";
 
 /** 出力列だけのステップ（dispatch と一時は slot 導出の別軸なので空で足りる）。 */
 const step = (
@@ -116,4 +124,82 @@ Deno.test("多出力ステップは出力 slot 昇順に確保し、slot ごと�
   assertEquals(slots.bytes, [64, 32, 64]);
   assertEquals(slots.steps.map((assigned) => assigned.outputs), [[0, 1], [2]]);
   assertEquals(slots.pinned, new Set([1, 2]));
+});
+
+// ---------------------------------------------------------------------------
+// 宣言の静的検査（validateStepRecipe）と slot 導出の閉包検査
+// ---------------------------------------------------------------------------
+
+/** `DispatchRecipe` は非公開型なので、レシピ列の要素型として引く。 */
+type Dispatch = StepRecipe["dispatches"][number];
+
+/**
+ * dispatch のスタブ。宣言の静的検査が読むのは `key` と `bindings` だけで、パイプラインと
+ * bind group layout は GPU 資源なので持たせない（型を満たすためだけの実体化を避ける）。
+ */
+const dispatch = (key: string, bindings: readonly BindingRecipe[] = []): Dispatch =>
+  ({ key, bindings }) as unknown as Dispatch;
+
+/** 一時と dispatch だけを差し替えるステップ（出力簿記は宣言検査の別軸なので固定）。 */
+const tempStep = (temps: readonly TempRecipe[], dispatches: readonly Dispatch[]): StepRecipe => ({
+  outputs: [alloc("y", 64, 0)],
+  temps,
+  dispatches,
+  releases: [],
+  writesState: false,
+});
+
+Deno.test("dispatch 列の内側で閉じていない一時の寿命宣言は宣言の受け口で落ちる", () => {
+  const two = [dispatch("k0"), dispatch("k1")];
+  const broken: readonly (readonly [TempRecipe, string])[] = [
+    // 解放が来ないまま組み上がった一時（`releaseTemp` の呼び忘れ = 実行相で漏れる）。
+    [{ byteLength: 64, allocBefore: 0, releaseAfter: -1 }, "一時 0 の寿命宣言 [0, -1]"],
+    // 確保より前の dispatch で解放する形（束ねる dispatch が確保前に並ぶ）。
+    [{ byteLength: 64, allocBefore: 1, releaseAfter: 0 }, "一時 0 の寿命宣言 [1, 0]"],
+    // allocBefore が列の外（負）。
+    [{ byteLength: 64, allocBefore: -1, releaseAfter: 1 }, "一時 0 の寿命宣言 [-1, 1]"],
+    // releaseAfter が列の外（dispatch 2 本に対する添字 2）。
+    [{ byteLength: 64, allocBefore: 0, releaseAfter: 2 }, "一時 0 の寿命宣言 [0, 2]"],
+    // 確保仕様として意味を成さないバイト数。
+    [{ byteLength: 0, allocBefore: 0, releaseAfter: 1 }, "（0B）"],
+  ];
+  for (const [temp, message] of broken) {
+    assertThrows(() => validateStepRecipe(tempStep([temp], two)), ExecutionError, message);
+  }
+  // 対照: 列の内側で閉じた宣言は通る（上の 5 本は寿命宣言だけが違う）。
+  validateStepRecipe(tempStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 1 }], two));
+});
+
+Deno.test("宣言外の一時を束ねる dispatch は宣言の受け口で落ちる", () => {
+  const temps: readonly TempRecipe[] = [{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }];
+  const bind = (id: number): readonly Dispatch[] => [
+    dispatch("gemm", [{ binding: 1, source: { kind: "temp", id } }]),
+  ];
+  assertThrows(
+    () => validateStepRecipe(tempStep(temps, bind(1))),
+    ExecutionError,
+    "dispatch 'gemm' の束縛 1 が一時 1 を指すが、宣言は 1 本",
+  );
+  // 対照: 宣言済みの添字なら通る（束縛の並びは同じで添字だけが違う）。
+  validateStepRecipe(tempStep(temps, bind(0)));
+});
+
+Deno.test("消費計数が実際の解放より多いレシピ列は slot 導出の閉包検査で落ちる", () => {
+  assertThrows(
+    // 消費者 1 本を宣言しながら、その値を解放するステップがどこにも無い形
+    // （run 経路のアリーナなら assertDrained が見る破れ）。
+    () => derivePlanSlots([step([alloc("a", 64, 1)])]),
+    ExecutionError,
+    "未解放の参照が残存（slot 0, refs=1, 64B",
+  );
+  // 対照: 消費者ぶんの解放が来れば閉じる（同じ列に消費ステップを 1 本足すだけ）。
+  assertEquals(derivePlanSlots([step([alloc("a", 64, 1)]), step([], ["a"])]).bytes, [64]);
+});
+
+Deno.test("同じ値を二重に解放するレシピ列は参照カウントが負で落ちる", () => {
+  assertThrows(
+    () => derivePlanSlots([step([alloc("a", 64, 0)]), step([], ["a", "a"])]),
+    ExecutionError,
+    "参照カウントが負",
+  );
 });
