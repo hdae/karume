@@ -1707,13 +1707,14 @@ class TestShardBoundary:
 class TestShardSplitting:
     """上限を超えたら決定的な逐次詰めで分ける（規則の正本は `karume.shards`）。
 
-    上限は合成の小テンソルへ人工的に下げて踏む（`_shard_byte_limit` — テスト専用の差し込み。
-    実データで 1GiB を踏むテストは書けない）。`fixed_int8_weight_graph` の payload は
+    上限は合成の小テンソルへ人工的に下げて踏む（`_shard_byte_limit` / `_shard_tail_limit` —
+    テスト専用の差し込み。実データで 1GiB を踏むテストは書けない）。既定の `split` は尾部
+    スラック無し（尾部 = 切り口）で素のカット規則を見る。`fixed_int8_weight_graph` の payload は
     F32 群が `enc.b` 12B → `karume.scale.enc.emb` 12B → `karume.scale.enc.w` 12B、
     I8 群が `enc.emb` 15B → `enc.w` 12B（並びは ADR 0063 の書き出し順）。
     """
 
-    def split(self, tmp_path, limit: int) -> list:
+    def split(self, tmp_path, limit: int, tail_limit: int | None = None) -> list:
         graph, tensors, scales = fixed_int8_weight_graph()
         return write_model(
             tmp_path / "model.safetensors",
@@ -1722,6 +1723,7 @@ class TestShardSplitting:
             weight_dtype="i8",
             weight_scales=scales,
             _shard_byte_limit=limit,
+            _shard_tail_limit=limit if tail_limit is None else tail_limit,
         )
 
     def tensors_of(self, path) -> set[str]:
@@ -1789,6 +1791,19 @@ class TestShardSplitting:
             {"enc.b"},
             {"karume.scale.enc.emb", "enc.emb"},
             {"karume.scale.enc.w", "enc.w"},
+        ]
+
+    def test_the_tail_slack_folds_the_last_shard(self, tmp_path):
+        """尾部スラック（`karume.shards` の規則 4）が書き手まで届いている。
+
+        payload 63B・切り口 30B なら 3 本に割れる（上のテスト）が、尾部 60B を許すと
+        2 本目のカット判定で未閉 51B ≤ 60B になり、残りが 1 本へ畳まれる。
+        """
+        written = self.split(tmp_path, 30, tail_limit=60)
+
+        assert [self.tensors_of(shard) for shard in written] == [
+            {"enc.b"},
+            {"karume.scale.enc.emb", "enc.emb", "karume.scale.enc.w", "enc.w"},
         ]
 
     def test_the_same_input_produces_the_same_shards_byte_for_byte(self, tmp_path):

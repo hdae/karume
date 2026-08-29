@@ -16,7 +16,12 @@
 3. **payload 合計が {@link SHARD_BYTE_LIMIT} を超える手前で次の shard を開く**。総量が上限
    以下なら shard は 1 本のまま = **従来どおり単一ファイル**（既存資産の再 dist はバイト単位で
    不変）。
-4. 単一の対だけで上限を超える場合は fail loudly（黙って上限を破らない）。
+4. **尾部スラック**: カットを打つ直前に「まだ閉じていないバイト」（今の shard に積んだぶん +
+   未割り付けの残り全部）を見て、それが {@link SHARD_TAIL_LIMIT} 以下ならカットを打たず、
+   残りを今の shard へ詰め切って終わる。中途半端な端数 shard（数百 MB）を作らないための規則で、
+   1.5GiB 以下の資産は分割ゼロになる。
+5. 単一の対だけで上限を超える場合は fail loudly（黙って上限を破らない）。**尾部スラックは
+   この門を緩めない**（判定は {@link SHARD_BYTE_LIMIT} 基準のまま）。
 
 ## ヘッダを勘定に入れない理由
 
@@ -48,6 +53,19 @@ from pathlib import Path, PurePosixPath
 #: 3. hub 側の同時 RAM 予算 1.5GiB（2026-08-25 の取得層 fix）と整合する — 1 shard を持ちながら
 #:    次を取りに行っても予算内に収まる。
 SHARD_BYTE_LIMIT = 1_073_741_824
+
+#: **最後の** shard だけに許すデータ節の上限（1.5GiB）。ここまでなら端数を切らずに詰め切る
+#: （モジュール doc の規則 4）。`SHARD_BYTE_LIMIT` と同じく固定定数で、公開ノブにしない。
+#:
+#: 根拠 3 点:
+#:
+#: 1. hub の同時 RAM 予算 1.5GiB（2026-08-25 の取得層 fix）と**同値**。1 shard を持ちながら
+#:    次を取りに行ける上限をそのまま尾部の上限に据える（予算を 1 バイトも広げない）。
+#: 2. Chromium の単一 `ArrayBuffer` 上限 2,145,386,496 バイトの約 75%。壁までの余裕は 500MB 級
+#:    あり、ヘッダ（上限に数えない — 上のモジュール doc）を吸収してなお届かない。
+#: 3. 端数 shard（数百 MB）を作らない。1.5GiB 以下の資産は分割ゼロで据わる
+#:    （例: 1.11GiB の text_encoder・1.14GiB の turbo i4 は単一ファイルのまま）。
+SHARD_TAIL_LIMIT = 1_610_612_736
 
 #: 1 dtype エントリが並べられる shard 数（ADR 0071 決定 2 — hub の `MAX_SHARDS` と同値）。
 #: 焼く側で先に落とすため、書き手（分割）と宣言側（manifest 検査）が同じ綴りを引く。
@@ -160,42 +178,71 @@ def pack_shards(
     payload_bytes: Mapping[str, int],
     companions: Mapping[str, str],
     limit: int = SHARD_BYTE_LIMIT,
+    tail_limit: int = SHARD_TAIL_LIMIT,
 ) -> list[tuple[str, ...]]:
-    """書き出し順を shard へ逐次詰めする（モジュール doc の規則 1〜4）。
+    """書き出し順を shard へ逐次詰めする（モジュール doc の規則 1〜5）。
 
     `order` は書き手が決めた**全体の**書き出し順、`payload_bytes` は名前 → データ節の
     バイト数、`companions` は原子対の**対称**写像（weight → scale と scale → weight の両方）。
     返すのは shard ごとの名前列で、**並びは `order` の部分列 + 引き寄せた相方**（shard の中の
     最終的な書き出し順は書き手が自分の規約で決め直す）。
 
+    カットの判定は 2 段。①今の shard が非空で `used + size` が `limit` を超える（従来）
+    ②かつ**まだ閉じていないバイト**（`used` + 未割り付けの残り全部）が `tail_limit` を
+    超える。②が偽なら残りは全部この shard に入り切って `tail_limit` 以下で収まるので、
+    カットを打たずに詰め切る（= 端数 shard を作らない）。`used` を判定に含めるのが要で、
+    未割り付けぶんだけを見ると「今の shard に積んだぶん + 残り」が `tail_limit` を破る
+    畳み方を許してしまう。
+
+    検算（規則の逐語 — テストと対で固定する）:
+
+    - 3.2GiB → `[1GiB, 1GiB, 1.2GiB]`。1 本目・2 本目のカット判定では未閉が 3.2 / 2.2GiB で
+      1.5GiB を超えるので普通に切り、3 本目の判定で未閉 1.2GiB ≤ 1.5GiB になって畳む。
+    - 2.6GiB → `[1GiB, 1GiB, 0.6GiB]`。判定時の未閉は 2.6 / 1.6GiB でどちらも 1.5GiB 超なので
+      従来どおり切る。端数 0.6GiB は残るが、1.6GiB を最後の shard にすると尾部上限を破る
+      ので、これが正しい帰結。
+    - 総量 1.11GiB → 単一（最初のカット判定で未閉 1.11GiB ≤ 1.5GiB）。
+
+    従来と差が出るのは「未閉が (limit, tail_limit] に入る判定点」だけで、総量が `limit` 以下の
+    資産（= 既存の単一ファイル配布）はカット判定自体が起きないのでバイト単位で不変。
+
     MUST: 空の shard を作らない。上限を超えるのは「今の shard が非空のとき」だけ新しい shard を
-    開く条件で、単独で上限を超える対は次の shard へ送っても同じなので fail loudly。**唯一の
-    例外が `order` 自体が空の場合**で、そのときは空の shard 1 本を返す — グラフ shard は
-    テンソルが 1 本も無くても必ず在る（`karume_ir` を載せる器そのもの）。
+    開く条件で、単独で上限を超える対は次の shard へ送っても同じなので fail loudly（尾部
+    スラックはこの門を緩めない — 判定は `limit` 基準のまま）。**唯一の例外が `order` 自体が
+    空の場合**で、そのときは空の shard 1 本を返す — グラフ shard はテンソルが 1 本も無くても
+    必ず在る（`karume_ir` を載せる器そのもの）。
     """
     if limit <= 0:
         raise ShardError(f"shard の上限 {limit} が正でない")
-    groups: list[tuple[str, ...]] = []
-    current: list[str] = []
-    used = 0
+    if tail_limit < limit:
+        raise ShardError(f"尾部の上限 {tail_limit:,} が shard 上限 {limit:,} を下回っている")
+    units: list[tuple[tuple[str, ...], int]] = []
     assigned: set[str] = set()
     for name in order:
         if name in assigned:
             continue
         partner = companions.get(name)
-        unit = [name] if partner is None or partner in assigned else [name, partner]
+        unit = (name,) if partner is None or partner in assigned else (name, partner)
         size = sum(payload_bytes[member] for member in unit)
         if size > limit:
             raise ShardError(
                 f"{' + '.join(unit)} だけで {size:,} バイト = shard 上限 {limit:,} を超える"
                 "（1 対は分割できない — co-shard MUST）"
             )
-        if current and used + size > limit:
+        assigned.update(unit)
+        units.append((unit, size))
+    groups: list[tuple[str, ...]] = []
+    current: list[str] = []
+    used = 0
+    # まだ閉じていないバイト（= 総量 − 確定した shard のバイト）。カットのたびに減る。
+    unclosed = sum(size for _, size in units)
+    for unit, size in units:
+        if current and used + size > limit and unclosed > tail_limit:
             groups.append(tuple(current))
+            unclosed -= used
             current = []
             used = 0
         current.extend(unit)
-        assigned.update(unit)
         used += size
     if current or not groups:
         groups.append(tuple(current))

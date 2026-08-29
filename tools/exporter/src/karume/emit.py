@@ -57,7 +57,8 @@ F32 / I32 / **I4** が 4 バイト整列群（I4 の節は必ず 8 の倍数バ�
 
 データ節の総量が `shards.SHARD_BYTE_LIMIT` を超えるコンポーネントは、書き出し順のまま
 複数ファイルへ逐次詰めされる（先頭 = グラフ shard = `karume_ir` + 先頭から詰めたぶん）。
-上限以下なら**従来どおり 1 ファイル**で、バイト列も名前も 1 バイトも変わらない。並び順の
+上限以下なら**従来どおり 1 ファイル**で、バイト列も名前も 1 バイトも変わらない。最後の
+shard だけは `shards.SHARD_TAIL_LIMIT` まで許して端数を作らない（同 doc の規則 4）。並び順の
 規約（上節）は shard の**中**で閉じて満たす — 各 shard は自分のテンソルだけを宣言する
 独立に整合な safetensors なので、リーダ規則は shard 単位で写せる。
 """
@@ -91,6 +92,7 @@ from karume.quantize import (
 )
 from karume.shards import (
     SHARD_BYTE_LIMIT,
+    SHARD_TAIL_LIMIT,
     assert_co_shard,
     assert_shard_partition,
     pack_shards,
@@ -882,6 +884,7 @@ def _shard_groups(
     order: Sequence[str],
     conversions: Mapping[str, _Conversion],
     limit: int,
+    tail_limit: int,
 ) -> list[tuple[str, ...]]:
     """書き出し順を shard へ割り付ける（規則の正本は `karume.shards`）。
 
@@ -894,7 +897,7 @@ def _shard_groups(
         dtype_name, bits = _stored_dtype_of(name, tensor, conversions.get(name))
         payload_bytes[name] = _payload_bytes(name, dtype_name, tensor.numel(), bits)
     companions = _companion_pairs(conversions)
-    groups = pack_shards(order, payload_bytes, companions, limit)
+    groups = pack_shards(order, payload_bytes, companions, limit, tail_limit)
     # 規則（pack_shards）と検査（下 2 本）を分けて持つ — 割り付けの入口が増えた日に、
     # 規則の写経ではなく検査が受け止める（ADR 0070 決定 1 の受入条件⑤と同じ集合）。
     assert_shard_partition(groups, order)
@@ -911,6 +914,7 @@ def write_model(
     weight_scales: Mapping[str, torch.Tensor] | None = None,
     weight_dtype_overrides: Mapping[str, str] | None = None,
     _shard_byte_limit: int | None = None,
+    _shard_tail_limit: int | None = None,
 ) -> list[Path]:
     """グラフと格納テンソルを配布形へ書き、書いた shard の path を**順に**返す。
 
@@ -919,9 +923,11 @@ def write_model(
     `<拡張子の前>-NNNNN-of-NNNNN<拡張子>` の連番へ分かれ、**先頭だけが `karume_ir` を持つ**
     （ADR 0070 決定 1 / 決定 3）。`path` 自身はそのとき 1 バイトも書かれない。
 
-    `_shard_byte_limit` は**テストからのみ触る**上限の差し込み（合成の小テンソルで分割を
-    起こすため）。公開ノブではない — 配布形の不変条件なので、既定は定数 1 本
-    （`shards.SHARD_BYTE_LIMIT`）で、呼び出しのたびにモジュール属性として引く。
+    `_shard_byte_limit` / `_shard_tail_limit` は**テストからのみ触る**上限の差し込み（合成の
+    小テンソルで分割を起こすため）。公開ノブではない — 配布形の不変条件なので、既定は定数
+    （`shards.SHARD_BYTE_LIMIT` / `shards.SHARD_TAIL_LIMIT`）で、呼び出しのたびにモジュール
+    属性として引く。後者は**最後の shard だけに許す上限**で、端数 shard を作らないための
+    尾部スラック（規則の正本は `karume.shards`）。
 
     `weight_dtype` が `"f16"` / `"i8"` / `"i4"` のとき、**適格な重みスロットだけ**が圧縮格納に
     なる（宣言と実体が 1 経路で決まる — 別々に決めると「宣言 f16 / 実体 f32」の沈黙誤読が
@@ -973,7 +979,8 @@ def write_model(
     metadata = {IR_METADATA_KEY: committed.to_json()}
     order = _write_order(source, plan.conversions)
     limit = SHARD_BYTE_LIMIT if _shard_byte_limit is None else _shard_byte_limit
-    groups = _shard_groups(source, order, plan.conversions, limit)
+    tail_limit = SHARD_TAIL_LIMIT if _shard_tail_limit is None else _shard_tail_limit
+    groups = _shard_groups(source, order, plan.conversions, limit, tail_limit)
     if len(groups) == 1:
         # MUST: 分割不要のときは `path` へ従来の順序のまま 1 本で書く（既存資産の再 dist が
         # バイト単位で不変であること — 分割規則の導入は配布形の再ハッシュを起こさない）。

@@ -116,8 +116,9 @@ class TestShardedPublication:
     """
 
     def tiny_limit(self, monkeypatch: pytest.MonkeyPatch, limit: int) -> None:
-        """`emit` が呼び出しのたびに引くモジュール定数を下げる。"""
+        """`emit` が呼び出しのたびに引くモジュール定数を下げる（尾部スラックは無しに揃える）。"""
         monkeypatch.setattr(emit, "SHARD_BYTE_LIMIT", limit)
+        monkeypatch.setattr(emit, "SHARD_TAIL_LIMIT", limit)
 
     def test_it_publishes_the_numbered_sequence(self, tmp_path, monkeypatch):
         # `TwoWeights` の格納テンソルは 16 バイト × 2 本。上限 16 で 1 本ずつに割れる。

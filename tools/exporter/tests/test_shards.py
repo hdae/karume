@@ -13,6 +13,7 @@ import pytest
 from karume.shards import (
     MAX_SHARDS,
     SHARD_BYTE_LIMIT,
+    SHARD_TAIL_LIMIT,
     ShardError,
     assert_co_shard,
     assert_shard_partition,
@@ -25,6 +26,19 @@ from karume.shards import (
 
 #: 対の写像は**対称**で持つ（weight → scale と scale → weight）。
 PAIR = {"w": "karume.scale.w", "karume.scale.w": "w"}
+
+MIB = 1024 * 1024
+
+
+def uniform(total_mib: int) -> tuple[list[str], dict[str, int]]:
+    """1MiB のテンソル `total_mib` 本（GiB 規模の分割を実データ無しで踏むための合成）。"""
+    order = [f"t{index:05d}" for index in range(total_mib)]
+    return order, dict.fromkeys(order, MIB)
+
+
+def shard_mib(groups: list[tuple[str, ...]], sizes: dict[str, int]) -> list[int]:
+    """shard ごとのデータ節を MiB で（`1024` = 1GiB）。"""
+    return [sum(sizes[name] for name in group) // MIB for group in groups]
 
 
 class TestTheByteLimit:
@@ -43,6 +57,24 @@ class TestTheByteLimit:
         ceiling = 2_145_386_496
 
         assert ceiling - SHARD_BYTE_LIMIT >= 1_000_000_000
+
+
+class TestTheTailLimit:
+    """最後の shard にだけ許す上限（端数 shard を作らないための尾部スラック）。"""
+
+    def test_it_is_the_same_1_5_gibibytes_as_the_hub_ram_budget(self) -> None:
+        """hub の同時 RAM 予算（`fetch.ts` の in-flight バイト予算）と**同値** — 予算を広げない。"""
+        assert SHARD_TAIL_LIMIT == 1_610_612_736
+
+    def test_it_is_wider_than_the_cut_limit(self) -> None:
+        """尾部が切り口より狭いと「畳んだ結果が上限超え」になる（規則が成り立つ必要条件）。"""
+        assert SHARD_TAIL_LIMIT > SHARD_BYTE_LIMIT
+
+    def test_it_still_leaves_room_under_the_single_arraybuffer_ceiling(self) -> None:
+        """壁の約 75%。最大の shard がこの値になるので、天井を割るのはここでも必要条件。"""
+        ceiling = 2_145_386_496
+
+        assert ceiling - SHARD_TAIL_LIMIT >= 500_000_000
 
 
 class TestShardNames:
@@ -72,7 +104,11 @@ class TestShardNames:
 
 
 class TestSequentialPacking:
-    """順序は変えず、対は原子、上限を超える手前で次を開く。"""
+    """順序は変えず、対は原子、上限を超える手前で次を開く。
+
+    尾部スラックを外した素のカット規則を見るので、`tail_limit` は `limit` と同値で渡す
+    （スラックそのものは {@link TestTheTailSlack}）。
+    """
 
     def test_everything_stays_in_one_shard_under_the_limit(self) -> None:
         """総量が上限以下なら 1 本のまま（= 単一ファイル配布の形が変わらない）。"""
@@ -81,13 +117,13 @@ class TestSequentialPacking:
         assert groups == [("a", "b", "c")]
 
     def test_it_opens_a_new_shard_at_the_byte_where_the_limit_would_break(self) -> None:
-        groups = pack_shards(["a", "b", "c"], {"a": 4, "b": 4, "c": 4}, {}, limit=8)
+        groups = pack_shards(["a", "b", "c"], {"a": 4, "b": 4, "c": 4}, {}, limit=8, tail_limit=8)
 
         assert groups == [("a", "b"), ("c",)]
 
     def test_a_tensor_that_exactly_fills_the_limit_stays_in_place(self) -> None:
         """境界は「超えたら」であって「届いたら」ではない（`used + size > limit`）。"""
-        groups = pack_shards(["a", "b"], {"a": 8, "b": 1}, {}, limit=8)
+        groups = pack_shards(["a", "b"], {"a": 8, "b": 1}, {}, limit=8, tail_limit=8)
 
         assert groups == [("a",), ("b",)]
 
@@ -102,8 +138,8 @@ class TestSequentialPacking:
         order = ["a", "w", "b", "karume.scale.w", "c"]
         sizes = {"a": 3, "w": 5, "b": 3, "karume.scale.w": 2, "c": 4}
 
-        first = pack_shards(order, sizes, PAIR, limit=8)
-        second = pack_shards(order, sizes, PAIR, limit=8)
+        first = pack_shards(order, sizes, PAIR, limit=8, tail_limit=8)
+        second = pack_shards(order, sizes, PAIR, limit=8, tail_limit=8)
 
         assert first == second
 
@@ -112,13 +148,89 @@ class TestSequentialPacking:
         assert pack_shards([], {}, {}, limit=8) == [()]
 
 
+class TestTheTailSlack:
+    """最後の shard は {@link SHARD_TAIL_LIMIT} まで許して端数を作らない（規則 4）。
+
+    実 GiB を踏むテストは書けないので、1MiB のテンソルを並べて総量だけ実寸に合わせる
+    （上限は既定 = 実際に配布で使う 1GiB / 1.5GiB のまま）。
+    """
+
+    def test_it_folds_the_tail_into_the_last_shard_instead_of_a_stub(self) -> None:
+        """3.2GiB → `[1GiB, 1GiB, 1.2GiB]`（ユーザー裁定 2026-08-29 の検算 1）。"""
+        order, sizes = uniform(3277)
+
+        groups = pack_shards(order, sizes, {})
+
+        assert shard_mib(groups, sizes) == [1024, 1024, 1229]
+
+    def test_a_tail_still_over_the_slack_is_cut_as_before(self) -> None:
+        """2.6GiB → `[1GiB, 1GiB, 0.6GiB]`（検算 2）。
+
+        端数 0.6GiB は残る — 1.6GiB を最後の shard にすると尾部上限を破るので、これが
+        正しい帰結（判定点での未閉は 2.6 / 1.6GiB でどちらも 1.5GiB 超）。
+        """
+        order, sizes = uniform(2662)
+
+        groups = pack_shards(order, sizes, {})
+
+        assert shard_mib(groups, sizes) == [1024, 1024, 614]
+
+    def test_an_asset_under_the_slack_is_never_split(self) -> None:
+        """1.11GiB（text_encoder 相当）は単一のまま — 1GiB 超でも分割ゼロ。"""
+        order, sizes = uniform(1137)
+
+        groups = pack_shards(order, sizes, {})
+
+        assert shard_mib(groups, sizes) == [1137]
+
+    def test_a_tail_that_was_already_whole_is_untouched(self) -> None:
+        """1.96GiB → `[1GiB, 0.96GiB]` は従来と同一（スラック無しの割り付けと一致する）。"""
+        order, sizes = uniform(2007)
+
+        groups = pack_shards(order, sizes, {})
+
+        assert shard_mib(groups, sizes) == [1024, 983]
+        assert groups == pack_shards(order, sizes, {}, tail_limit=SHARD_BYTE_LIMIT)
+
+    def test_an_asset_under_the_cut_limit_keeps_its_single_shard(self) -> None:
+        """総量が 1GiB 以下ならカット判定自体が起きない（既存資産の再 dist がバイト不変）。"""
+        order, sizes = uniform(1024)
+
+        assert pack_shards(order, sizes, {}) == [tuple(order)]
+
+    def test_the_folded_tail_keeps_a_pair_together(self) -> None:
+        """畳んだ尾部でも対は原子（畳みを「新しい shard を開く」で書くと対を割りうる）。"""
+        order = ["a", "karume.scale.w", "b", "w"]
+        sizes = {"a": 5, "karume.scale.w": 2, "b": 4, "w": 3}
+
+        folded = pack_shards(order, sizes, PAIR, limit=8, tail_limit=12)
+
+        assert folded == [("a",), ("karume.scale.w", "w", "b")]
+        assert_co_shard(folded, PAIR)
+        # スラック無しなら端数の `b` が 3 本目に落ちる（= 畳みが効いていることの対照）。
+        assert pack_shards(order, sizes, PAIR, limit=8, tail_limit=8) == [
+            ("a",),
+            ("karume.scale.w", "w"),
+            ("b",),
+        ]
+
+    def test_a_tail_limit_under_the_cut_limit_fails_loudly(self) -> None:
+        """尾部が切り口より狭い割り付けは、畳んだ瞬間に自分の上限を破る（規則が壊れる）。"""
+        with pytest.raises(ShardError, match="尾部の上限"):
+            pack_shards(["a"], {"a": 1}, {}, limit=8, tail_limit=7)
+
+
 class TestCoShard:
     """weight と companion scale は同一 shard MUST（ADR 0070 決定 1）。"""
 
     def test_the_partner_is_pulled_into_the_same_shard(self) -> None:
         """順序上あとに居る相方を引き寄せる（scale は F32 群で weight より前に来る）。"""
         groups = pack_shards(
-            ["karume.scale.w", "b", "w"], {"karume.scale.w": 2, "b": 3, "w": 5}, PAIR, limit=8
+            ["karume.scale.w", "b", "w"],
+            {"karume.scale.w": 2, "b": 3, "w": 5},
+            PAIR,
+            limit=8,
+            tail_limit=8,
         )
 
         assert groups == [("karume.scale.w", "w"), ("b",)]
@@ -150,7 +262,7 @@ class TestPartition:
 
     def test_the_packed_groups_cover_every_tensor_exactly_once(self) -> None:
         order = ["karume.scale.w", "b", "w", "c"]
-        groups = pack_shards(order, dict.fromkeys(order, 3), PAIR, limit=6)
+        groups = pack_shards(order, dict.fromkeys(order, 3), PAIR, limit=6, tail_limit=6)
 
         assert_shard_partition(groups, order)
         assert sorted(name for group in groups for name in group) == sorted(order)
