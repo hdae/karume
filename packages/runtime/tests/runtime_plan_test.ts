@@ -167,6 +167,23 @@ Deno.test("宣言 shape と計算 shape の不一致・未束縛シンボルは 
   assertEquals(resolveShape([2, "T+1"], { T: 3 }), [2, 4]);
 });
 
+/**
+ * 要素数が 2^53 を超える shape は計画の時点で落とす。通すと `numel` の素の積が丸まった値を
+ * 返し、確保バイト数と dispatch 数がその丸め値で組まれる（例外は 1 つも出ないまま宣言範囲の
+ * 外を読み書きする）。
+ */
+Deno.test("要素数が安全整数を超える shape は planGraph が fail loudly（丸めない）", () => {
+  const graph = parse(linearGraph());
+  // T·4 = 2^54（束縛 1 つが大きいだけで、次元それぞれは安全整数のまま）。
+  assertThrows(
+    () => planGraph(graph, { T: 2 ** 52 }),
+    ExecutionError,
+    "値 'x': shape [4503599627370496,4] の要素数が安全整数を超える",
+  );
+  // 対照: 同じグラフで積が安全整数に収まる束縛は通る（2^50·4 = 2^52）。
+  assertEquals(planGraph(graph, { T: 2 ** 50 }).shapes.get("x"), [2 ** 50, 4]);
+});
+
 Deno.test("useCounts は node.ins の厳密な延べ計数（同じ値を 2 回取れば 2）", () => {
   const source = linearGraph();
   source.requires.ops = ["matmul", "add", "mul"];

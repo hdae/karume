@@ -55,10 +55,13 @@ export const STORAGE_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST |
  * 静かに変わり、誤った値が例外なしで出る。
  * MUST: slot 導出（`derivePlanSlots`）も**この関数**を使う。サイズクラスの定義が 2 つに
  * 分かれると、slot の大きさが実行時の確保とずれ、同じ理由で沈黙誤値になる。
+ * MUST: 値域は**安全整数**（`Number.isInteger` では足りない）。2^53 を超えた要求は
+ * `Math.ceil(bytes / 4) * 4` が端数を落とした別の値を返し、要求より小さいバッファを
+ * 「切り上げた」顔で配ってしまう（上の MUST が例外なしに破れる）。
  */
 export const toSizeClass = (bytes: number): number => {
-  if (!Number.isInteger(bytes) || bytes < 0) {
-    throw new ArenaError(`確保サイズは 0 以上の整数である必要がある: ${bytes}`);
+  if (!Number.isSafeInteger(bytes) || bytes < 0) {
+    throw new ArenaError(`確保サイズは 0 以上の安全整数である必要がある: ${bytes}`);
   }
   return Math.max(4, Math.ceil(bytes / 4) * 4);
 };

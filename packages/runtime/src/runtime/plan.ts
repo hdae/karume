@@ -647,6 +647,22 @@ export const planGraph = (
   for (const [name, value] of Object.entries(graph.values)) {
     shapes.set(name, resolveShape(value.shape, bindings));
   }
+  // MUST: 解決済み shape の要素数が安全整数に収まることを、値が 1 つの表に揃うこの位置で
+  // 一度だけ見る（format/safetensors.ts の `elementCount` と同型の**逐次**検査 — 積を最後に
+  // 見るのでは、途中の桁あふれが端数を落とした後の値しか残らない）。`numel` は素の積を返す
+  // ので、2^53 を超えた時点で確保バイト数も dispatch 数も丸まった値になり、例外なしに
+  // 宣言範囲の外を読み書きする形へ落ちる。
+  for (const [name, shape] of shapes) {
+    let count = 1;
+    for (const dim of shape) {
+      count *= dim;
+      if (!Number.isSafeInteger(count)) {
+        throw new ExecutionError(
+          `値 '${name}': shape [${shape.join(",")}] の要素数が安全整数を超える`,
+        );
+      }
+    }
+  }
 
   const nodes = graph.nodes.map((node, index): NodePlan => {
     const where = `nodes[${index}] (${node.op})`;

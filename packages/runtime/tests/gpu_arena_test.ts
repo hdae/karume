@@ -5,7 +5,7 @@ import {
   assertStrictEquals,
   assertThrows,
 } from "@std/assert";
-import { ArenaError, RunArena } from "../src/gpu/arena.ts";
+import { ArenaError, RunArena, toSizeClass } from "../src/gpu/arena.ts";
 
 /** RunArena が触る面だけを持つフェイク。DOM 型全体は再現しないため cast で渡す。 */
 type FakeGpu = {
@@ -37,6 +37,21 @@ const createFakeGpu = (): FakeGpu => {
 };
 
 const noopFlush = (): Promise<void> => Promise.resolve();
+
+/**
+ * 非安全整数のバイト数は切り上げが端数を落とすため、サイズクラスにできない。
+ * `Number.isInteger` は 2^53 以上でも真になるので、そこを通すと「要求より小さいバッファを
+ * 切り上げた顔で配る」形になる（`toSizeClass` の MUST が例外なしに破れる）。
+ */
+Deno.test("toSizeClass は安全整数を超えるバイト数を拒否する（切り上げで丸めない）", () => {
+  assertThrows(() => toSizeClass(2 ** 53), ArenaError, "0 以上の安全整数");
+  assertThrows(() => toSizeClass(2 ** 53 + 4), ArenaError, "0 以上の安全整数");
+  assertThrows(() => toSizeClass(-4), ArenaError, "0 以上の安全整数");
+  assertThrows(() => toSizeClass(1.5), ArenaError, "0 以上の安全整数");
+  // 対照: 安全整数の上限直下は 4 バイト整列へ切り上げて通る。
+  assertEquals(toSizeClass(Number.MAX_SAFE_INTEGER - 6), 2 ** 53 - 4);
+  assertEquals(toSizeClass(0), 4);
+});
 
 Deno.test("RunArena は最終消費で解放したバッファを同一サイズクラスで再利用する", () => {
   const gpu = createFakeGpu();
