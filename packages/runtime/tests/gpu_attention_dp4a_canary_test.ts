@@ -6,20 +6,24 @@
 // 崩れる。アダプタ能力から数値を変える経路を自動選択しない（ADR 0058 決定 2）を保つには、
 // 列挙ではなく**既知解との突合**で変種を決めるほかない。
 //
-// ## このファイルが固定する契約
+// ## このファイルが固定する契約（判定則 v2）
 //
 // 1. 健全な device では **dp4a / emu の両腕とも既知解と atol=0 で一致**し、カナリアは dp4a を
 //    選ぶ（= 従来と 1 ビットも変わらない挙動）。
-// 2. dp4a だけが既知解を外す device では attention だけ emu へ落ちる。**両腕とも外したら
-//    fail loudly**（変種の選び方の問題ではないので縮退先が無い）。
-// 3. 判定は **device 単位に 1 度**（Promise メモ化）。a8 でない Session は 1 dispatch も払わない。
-// 4. 判定結果は診断（パイプラインキーの `:dp4aEmu`）に現れる（ADR 0058 決定 3）。
+// 2. dp4a だけが既知解を外す device では attention だけ emu へ落ちる。
+// 3. **どちらの腕も厳密一致しない**ときは sanity 帯で裁く — 片腕だけ帯内ならその腕、両腕とも
+//    帯内で腕同士がビット同一なら dp4a（Apple M2 の正常経路。共有 f32 エピローグの丸めが
+//    既知解と数 ULP ずれるだけで、変種選択は数値に無関係）。判定は「厳密一致ではなかった」
+//    事実を戻り値に載せる。
+// 4. **両腕とも帯を外したら fail loudly**（変種の選び方の問題ではないので縮退先が無い）。
+// 5. 判定は **device 単位に 1 度**（Promise メモ化）。a8 でない Session は 1 dispatch も払わない。
+// 6. 判定結果は診断（パイプラインキーの `:dp4aEmu`）に現れる（ADR 0058 決定 3）。
 //
 // ## 故障注入について
 //
-// 不一致経路と両不一致経路は健全な実機では作れない（src/gpu/device.ts の shader-f16 カナリアと
-// 同じ事情）。そこで**生成 WGSL を意図的に壊す差し替え口**（`CanaryWgslPatch`）を通して、
-// 判定の分岐そのものを実 GPU 上で踏む。MUST: 注入が効いていること自体を先に門にする
+// 不一致経路・帯内経路・両不一致経路は健全な実機では作れない（src/gpu/device.ts の shader-f16
+// カナリアと同じ事情）。そこで**生成 WGSL を意図的に壊す差し替え口**（`CanaryWgslPatch`）を
+// 通して、判定の分岐そのものを実 GPU 上で踏む。MUST: 注入が効いていること自体を先に門にする
 // （置換が空振りすると「壊したのに一致した」= 恒真テストになる）。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
@@ -32,16 +36,19 @@ import {
   RUNTIME_INTERNAL,
 } from "../src/gpu/device.ts";
 import {
+  type AttentionI8a8Decision,
   buildPvCase,
   buildQkCase,
   type CanaryWgslPatch,
   decideAttentionI8a8Dot,
+  formatAttentionI8a8Decision,
   packScoresF16,
   probeAttentionI8a8Dot,
 } from "../src/gpu/attention-dp4a-canary.ts";
 import {
   attentionPvI8a8Key,
   attentionPvI8a8UsesVec4,
+  attentionPvI8a8Wgsl,
   attentionQkI8a8Key,
   attentionQkI8a8UsesVec4,
   attentionQkI8a8Wgsl,
@@ -53,6 +60,7 @@ import {
   i8a8TileN,
 } from "../src/kernels/i8a8-geometry.ts";
 import { createSession, type SessionOptions } from "../src/runtime/executor.ts";
+import type { I8a8Dot } from "../src/runtime/session-types.ts";
 import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
 import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
@@ -65,6 +73,30 @@ const BREAK_DP4A: CanaryWgslPatch = (wgsl) =>
 
 /** 両変種を壊す（`idot` の本体はどちらも `  return dot` で始まる）。 */
 const BREAK_BOTH: CanaryWgslPatch = (wgsl) => wgsl.replace("  return dot", "  return 1 + dot");
+
+/**
+ * **③PV のエピローグだけ**に相対 `factor − 1` の摂動を入れる（両腕に等しく効く — この綴りは
+ * dp4a / emu のどちらの生成物にも同じ形で現れる）。
+ *
+ * なぜ ③PV だけか: ①QK の s16 変種は出力を f16 に丸めて格納するので、微小摂動が丸め境界を
+ * 跨ぐと**差が f16 の 1 ULP（相対 ~1e-3）に化けて帯外へ飛ぶ**。固定入力の ①QK 既知解には
+ * 境界まで相対 1.8e-7 しかない要素が実在する（実測）ので、微小摂動の実験にならない。③PV は
+ * 3 変種とも O を f32 で書くため、入れた摂動がそのままの倍率で観測できる。
+ */
+const nudgePv = (factor: string): CanaryWgslPatch => (wgsl) =>
+  wgsl.replaceAll("let prow = stats[", `let prow = ${factor} * stats[`);
+
+/**
+ * 帯**内**の摂動（両腕・同一）。`1.0000001` は f32 で 1 + 1 ULP に丸まるので、掛けると出力は
+ * 必ず 1〜2 ULP 動く（= 厳密一致は必ず外れる）が、相対 ~1.2e-7 は帯（1e-5）の 2 桁下。
+ */
+const NUDGE_BOTH = nudgePv("1.0000001");
+
+/** 帯**外**の摂動（両腕・同一）。相対 1e-4 は帯の 1 桁上 — M2 の故障注入実測 9.5e-5 と同水準。 */
+const SKEW_BOTH = nudgePv("1.0001");
+
+/** 片腕（emu）だけが帯内に残る形 = M2 で dp4a が本当に壊れている device の姿。 */
+const NUDGE_BOTH_BREAK_DP4A: CanaryWgslPatch = (wgsl) => BREAK_DP4A(NUDGE_BOTH(wgsl));
 
 // ---------------------------------------------------------------------------
 // (0) 固定入力の性質（既知解が atol=0 で立つ前提 — GPU 不要）
@@ -147,6 +179,38 @@ Deno.test("故障注入の置換は狙った変種にだけ効く（注入の空
   assert(BREAK_BOTH(emuWgsl) !== emuWgsl, "両変種注入がエミュに効いていない");
 });
 
+Deno.test("エピローグ摂動は ③PV の 3 変種すべてに、両腕へ等しく効く（①QK は素通し）", () => {
+  const pvGeometry = defaultI8a8Geometry("attention_pv");
+  for (const patch of [NUDGE_BOTH, SKEW_BOTH]) {
+    for (const score of ["f32", "f16"] as const) {
+      for (const v4 of score === "f16" ? [true] : [true, false]) {
+        for (const dp4a of [true, false]) {
+          const wgsl = attentionPvI8a8Wgsl(v4, dp4a, score, pvGeometry);
+          assert(patch(wgsl) !== wgsl, `③PV v4=${v4} score=${score} dp4a=${dp4a} に効いていない`);
+        }
+      }
+    }
+    // ①QK は f16 格納が丸め境界を跨ぐ危険があるので、摂動の対象外であることを門にする
+    const qkWgsl = attentionQkI8a8Wgsl(true, true, "f16", defaultI8a8Geometry("attention_qk"));
+    assertEquals(patch(qkWgsl), qkWgsl, "エピローグ摂動が ①QK にも効いている");
+  }
+});
+
+Deno.test("判定の根拠 1 行は分岐と最大誤差を持つ（警告文言がそのまま使う本文）", () => {
+  const decision: AttentionI8a8Decision = {
+    dot: "dp4a",
+    exact: false,
+    branch: "band-both-identical",
+    maxAbsError: 1.9073486328125e-6,
+    maxBandRatio: 0.0067,
+  };
+  const line = formatAttentionI8a8Decision(decision);
+  assert(line.includes("ビット同一"), line);
+  assert(line.includes("'dp4a'"), line);
+  assert(line.includes(String(decision.maxAbsError)), line);
+  assert(line.includes(String(decision.maxBandRatio)), line);
+});
+
 // ---------------------------------------------------------------------------
 // (1) 健全な device（この Linux / NVIDIA）
 // ---------------------------------------------------------------------------
@@ -157,13 +221,19 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      assertEquals(await decideAttentionI8a8Dot(gpu), "dp4a", "健全な機で dp4a が選ばれない");
+      const decision = await decideAttentionI8a8Dot(gpu);
+      assertEquals(decision.dot, "dp4a", "健全な機で dp4a が選ばれない");
+      assertEquals(decision.branch, "dp4a-exact", "帯の分岐を踏んでいる（厳密一致していない）");
+      assert(decision.exact, "厳密一致フラグが立っていない");
+      assertEquals(decision.maxAbsError, 0, "厳密一致なのに誤差が乗っている");
       // エミュ側も既知解に乗る（= カナリアの沈黙が「両方同じだけずれている」形ではない）。
       // MUST: 直接呼ぶときも device 単位の errorScope 区間ロックの中で（probe の doc）。
-      const emuMismatch = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
+      const emu = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
         probeAttentionI8a8Dot(gpu, "emu")
       );
-      assertEquals(emuMismatch, undefined, "エミュ変種が既知解を外した");
+      assertEquals(emu.mismatch, undefined, "エミュ変種が既知解を外した");
+      assert(emu.exact, "エミュ変種が atol=0 で一致していない");
+      assertEquals(emu.variants.length, 6, "撃った変種が 6 本でない");
     } finally {
       gpu.destroy();
     }
@@ -180,7 +250,10 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      assertEquals(await decideAttentionI8a8Dot(gpu, BREAK_DP4A), "emu");
+      const decision = await decideAttentionI8a8Dot(gpu, BREAK_DP4A);
+      assertEquals(decision.dot, "emu");
+      assertEquals(decision.branch, "emu-exact");
+      assert(decision.exact, "エミュ側は厳密一致しているのにフラグが落ちている");
     } finally {
       gpu.destroy();
     }
@@ -201,6 +274,68 @@ Deno.test({
       assert(error.message.includes("attention_qk:v3:i8a8:"), error.message);
       assert(error.message.includes("dp4a:"), error.message);
       assert(error.message.includes("emu:"), error.message);
+      // 「帯は既に許容した上で外している」ことが読める（v2 の裁定順が診断に出る）
+      assert(error.message.includes("sanity 帯"), error.message);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// (2') 故障注入（判定則 v2 の帯の分岐 — Apple M2 の実測が要求した経路）
+// ---------------------------------------------------------------------------
+
+Deno.test({
+  name: "両腕が同一の微小エピローグ摂動で帯内に留まると dp4a のまま通る（実 GPU・故障注入）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      const decision = await decideAttentionI8a8Dot(gpu, NUDGE_BOTH);
+      // 腕同士がビット同一 = 変種選択は数値に無関係（ADR 0058 決定 2）→ 既定の dp4a を採る
+      assertEquals(decision.branch, "band-both-identical");
+      assertEquals(decision.dot, "dp4a");
+      // MUST: 厳密一致ではなかった事実が戻り値に残る（呼び手が警告を出せる形）
+      assert(!decision.exact, "帯内で通したのに厳密一致フラグが立っている");
+      assert(decision.maxAbsError > 0, "摂動が空振りしている（誤差 0）");
+      assert(decision.maxBandRatio <= 1, `帯余裕 ${decision.maxBandRatio} が帯を超えている`);
+      // 摂動は相対 ~1.2e-7 = 帯の 2 桁下（帯幅を緩めなくても収まることの実測）
+      assert(decision.maxBandRatio < 0.1, `帯余裕 ${decision.maxBandRatio} が想定より大きい`);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "両腕が同一でも帯外の摂動なら GpuFeatureError（ビット同一は免罪符でない・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      const error = await assertRejects(
+        () => decideAttentionI8a8Dot(gpu, SKEW_BOTH),
+        GpuFeatureError,
+      );
+      assert(error.message.includes("attention_pv:v3:i8a8:"), error.message);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "片腕だけが帯内ならその腕を採る（M2 + dp4a 故障の姿・実 GPU・故障注入）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      const decision = await decideAttentionI8a8Dot(gpu, NUDGE_BOTH_BREAK_DP4A);
+      assertEquals(decision.branch, "band-single-arm");
+      assertEquals(decision.dot, "emu");
+      assert(!decision.exact, "帯内で通したのに厳密一致フラグが立っている");
+      assert(decision.maxBandRatio <= 1, `選んだ腕の帯余裕 ${decision.maxBandRatio} が帯外`);
     } finally {
       gpu.destroy();
     }
@@ -210,6 +345,15 @@ Deno.test({
 // ---------------------------------------------------------------------------
 // (3) Session からの利用（メモ化 1 回 / 席の反映 / a8 でない Session は払わない）
 // ---------------------------------------------------------------------------
+
+/** メモの席へ直に置く判定（カナリアを走らせずに席そのものの挙動を見るための実体）。 */
+const seatDecision = (dot: I8a8Dot): AttentionI8a8Decision => ({
+  dot,
+  exact: true,
+  branch: dot === "dp4a" ? "dp4a-exact" : "emu-exact",
+  maxAbsError: 0,
+  maxBandRatio: 0,
+});
 
 const QUERY = (i: number): number => (((i * 3) % 29) - 14) * 0.3717 + 0.0419;
 const KEY = (i: number): number => (((i * 3) % 41) - 20) * 0.2917 - 0.0173;
@@ -247,7 +391,7 @@ Deno.test({
       const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
         decideAttentionI8a8Dot(gpu, BREAK_DP4A)
       );
-      assertEquals(seeded, "emu");
+      assertEquals(seeded.dot, "emu");
 
       for (const pass of [1, 2]) {
         const keys = new Set(await runAttention(gpu, { attentionCompute: "a8" }));
@@ -264,10 +408,10 @@ Deno.test({
       let extraRuns = 0;
       const memoized = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
         extraRuns += 1;
-        return Promise.resolve("dp4a" as const);
+        return Promise.resolve(seatDecision("dp4a"));
       });
       assertEquals(extraRuns, 0, "Session ごとにカナリアが走り直している");
-      assertEquals(memoized, "emu", "メモが最初の判定を配っていない");
+      assertEquals(memoized.dot, "emu", "メモが最初の判定を配っていない");
     } finally {
       gpu.destroy();
     }
@@ -286,10 +430,10 @@ Deno.test({
       let ran = 0;
       const verdict = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
         ran += 1;
-        return Promise.resolve("emu" as const);
+        return Promise.resolve(seatDecision("emu"));
       });
       assertEquals(ran, 1, "a8 でない Session がカナリアを走らせている");
-      assertEquals(verdict, "emu");
+      assertEquals(verdict.dot, "emu");
     } finally {
       gpu.destroy();
     }

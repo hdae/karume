@@ -34,7 +34,11 @@ import { alignI8Payload, decodeI8 } from "../format/i8.ts";
 import type { IrDtype, IrGraph } from "../format/ir.ts";
 import { parseSafetensors, type SafetensorsFile, tensorBytes } from "../format/safetensors.ts";
 import { type ArenaStats, RunArena, STORAGE_USAGE } from "../gpu/arena.ts";
-import { decideAttentionI8a8Dot } from "../gpu/attention-dp4a-canary.ts";
+import {
+  type AttentionI8a8Decision,
+  decideAttentionI8a8Dot,
+  formatAttentionI8a8Decision,
+} from "../gpu/attention-dp4a-canary.ts";
 import {
   BatchScopeError,
   discardFailureScopes,
@@ -618,6 +622,10 @@ type ResolvedCopy = {
  * - a8 以外 → i8a8 の attention カーネルが 1 本も出ないので、この席の値は 1 度も読まれない。
  *   「使わない機能の初回コスト」を全 Session に配らないための門で、判定は最初に a8 を要求した
  *   Session が払い、以後は device 単位でメモ化される。
+ *
+ * カナリアが「既知解と厳密一致ではないが sanity 帯には収まった」で決めた場合は**黙って
+ * 通さない** — 警告をメモの実体の中で出すことで、device 単位に 1 度だけになる（Session ごとに
+ * 出すと a8 の Session を並べただけで同じ 1 事実が繰り返し流れる）。
  */
 const resolveAttentionI8a8Dot = async (
   gpu: GpuContext,
@@ -628,7 +636,30 @@ const resolveAttentionI8a8Dot = async (
   if (forced !== undefined) return forced;
   if (!dp4a) return "emu";
   if (attentionCompute !== "a8") return "dp4a";
-  return await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => decideAttentionI8a8Dot(gpu));
+  const decision = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(async () => {
+    const decided = await decideAttentionI8a8Dot(gpu);
+    if (!decided.exact) warnInexactAttentionCanary(decided);
+    return decided;
+  });
+  return decision.dot;
+};
+
+/**
+ * カナリアが厳密一致を得られないまま帯内で決めたことを 1 回だけ知らせる。
+ *
+ * 止めないのは、この形が実在の健全な device（Apple M2 — 共有 f32 エピローグの丸めが既知解と
+ * 数 ULP ずれるだけ）だからで、黙らないのは「帯内だから通した」が**測定に効く事実**だから
+ * （a8 の出力はこの device で他機とビット同一にならない）。文言は @karume/hub の main 追従警告
+ * と同じ流儀 — 何が起きたか・何をすれば消えるかを 1 本の console.warn で出す。
+ */
+const warnInexactAttentionCanary = (decision: AttentionI8a8Decision): void => {
+  console.warn(
+    `@karume/runtime: 融合 attention の i8a8 カナリアが既知解と厳密一致しなかった。\n` +
+      `  ${formatAttentionI8a8Decision(decision)}\n` +
+      `この device の a8 attention は他機とビット同一にはならない（差は sanity 帯の内側で、\n` +
+      `共有 f32 エピローグの丸め差の水準）。ビット同一が要るなら attentionCompute を 'f32' か\n` +
+      `'f16' にすること。`,
+  );
 };
 
 type SessionState = {

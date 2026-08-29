@@ -15,9 +15,11 @@
  * 消失レースの規律がそのまま効くため、GPU バッファの器でありながらここに置いてある。
  */
 
-// MUST: 型だけを取る（実体を import すると gpu 層 → runtime 層の依存が生まれる）。
-// この型は Session の面の語彙で、カナリアの判定結果を置く席の型でもある。
-import type { I8a8Dot } from "../runtime/session-types.ts";
+// MUST: 型だけを取る（実体を import すると device.ts → カナリア → kernels / reference の
+// 依存が生まれ、「この層から kernels / reference への import を作らない」規律が崩れる —
+// {@link GpuContextInternals.attentionI8a8Dot}）。`import type` は消去されるので、
+// 実行時の import グラフは今までどおり一方向のまま。
+import type { AttentionI8a8Decision } from "./attention-dp4a-canary.ts";
 import { STORAGE_USAGE } from "./arena.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
@@ -538,10 +540,14 @@ type GpuContextInternals = {
    *
    * MUST: メモするのは **Promise そのもの**（値ではない）。attentionCompute "a8" の Session を
    * 並行構築すると、値でメモする形ではカナリアが 2 本走って device 単位 1 回の契約が崩れる。
-   * 失敗（両腕とも既知解を外した / device 消失）も同じ Promise のまま配る — device の性質は
+   * 失敗（両腕とも sanity 帯を外した / device 消失）も同じ Promise のまま配る — device の性質は
    * 走らせ直しても変わらないので、再試行は同じ結論を得るためだけに 1 submit を払う。
+   *
+   * 席が持つのは変種 1 値ではなく**判定まるごと**（{@link AttentionI8a8Decision}）。「既知解と
+   * 厳密一致ではなかったが帯内なので通した」という事実は判定と同じ寿命で、値に潰すと呼び手が
+   * 警告を出せなくなる。
    */
-  attentionI8a8Dot(run: () => Promise<I8a8Dot>): Promise<I8a8Dot>;
+  attentionI8a8Dot(run: () => Promise<AttentionI8a8Decision>): Promise<AttentionI8a8Decision>;
 };
 
 /**
@@ -616,7 +622,7 @@ export class GpuContext {
    * 融合 attention の内積変種カナリアの結果（{@link GpuContextInternals.attentionI8a8Dot}）。
    * 未要求なら undefined のまま = 1 dispatch も出ない（a8 を使わない利用者はコストを払わない）。
    */
-  #attentionI8a8Dot: Promise<I8a8Dot> | undefined;
+  #attentionI8a8Dot: Promise<AttentionI8a8Decision> | undefined;
   /**
    * {@link ResidentTensor} の識別子の発番。**モジュールスコープに置かない**（副作用ゼロの
    * 不変条件）— GpuContext ごとに別空間で足りる（resident は device を跨がない）。
@@ -639,7 +645,9 @@ export class GpuContext {
       raceDeviceLost: <T>(work: Promise<T>, where: string): Promise<T> =>
         this.#raceDeviceLost(work, where),
       withScopeLock: <T>(body: () => Promise<T>): Promise<T> => this.#withScopeLock(body),
-      attentionI8a8Dot: (run: () => Promise<I8a8Dot>): Promise<I8a8Dot> => {
+      attentionI8a8Dot: (
+        run: () => Promise<AttentionI8a8Decision>,
+      ): Promise<AttentionI8a8Decision> => {
         this.#attentionI8a8Dot ??= run();
         return this.#attentionI8a8Dot;
       },

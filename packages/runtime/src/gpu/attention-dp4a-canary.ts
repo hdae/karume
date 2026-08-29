@@ -12,15 +12,40 @@
  *
  * - MUST: カナリアは **production の幾何で最低 1 タイル全域**を埋める形で撃つ。極小形は
  *   タイル充填の担当割りも K タイルの巡回も踏まないので、故障を素通りする。
- * - MUST: 突合は **既知解**（TS 参照 src/reference/i8a8.ts）と行う。dp4a と emu の**相互**
- *   比較にすると、emu の側が壊れている device で「両方同じ誤値 → 一致 → 健全」と判定する
- *   （M2 でどちらが壊れているかは未確定なので、この可能性は排除できない）。
- * - MUST: 両腕とも既知解を外したら {@link GpuFeatureError} で落とす。変種選択の問題ではなく
- *   「この device の整数 attention が壊れている」ので、黙って片方を選ぶと ADR 0058 決定 2
+ * - MUST: 突合の**一次判定**は **既知解**（TS 参照 src/reference/i8a8.ts）と行う。腕同士の
+ *   相互比較を一次判定にすると、emu の側が壊れている device で「両方同じ誤値 → 一致 →
+ *   健全」と判定する（M2 でどちらが壊れているかは未確定なので、この可能性は排除できない）。
+ *   相互比較を使うのは**両腕とも既知解の sanity 帯に収まった後**の腕選びだけ（下記 3）。
+ * - MUST: 両腕とも sanity 帯を外したら {@link GpuFeatureError} で落とす。変種選択の問題では
+ *   なく「この device の整数 attention が壊れている」ので、黙って片方を選ぶと ADR 0058 決定 2
  *   （アダプタ能力から数値を変える経路を自動選択しない）を守ったまま誤値を配ることになる。
  *
  * 縮退したことは診断に出る — emu を選べばパイプラインキーに `:dp4aEmu` が載る
  * （src/kernels/attention-i8a8.ts・ADR 0058 決定 3）。
+ *
+ * ## 判定則 v2 — なぜ atol=0 だけでは足りないか
+ *
+ * 初版は「既知解と atol=0 で一致した腕」しか採らなかった。ところが Apple M2 の実測
+ * （2026-08-29 / Deno 2.9.6 — docs/research/2026-08-29-chatgpt-review-verification.md）は
+ * **dp4a と emu が 1 ビットも違わない**（カナリア ①QK v4 の実測は両腕とも
+ * 28.433290481567383）のに、既知解 28.43328857421875 とは**ちょうど 1 ULP** ずれる。整数段
+ * （③PV の qP）は 62,088 要素で不一致 0% なので、ずれているのは整数内積ではなく**両変種が
+ * 共有する f32 エピローグの丸め**（仮説: naga→MSL の FMA 契約差 — 未確定）。初版はこれを
+ * 「両腕とも既知解を外した」と読んで落とし、M2 で `attentionCompute: "a8"` を丸ごと殺していた。
+ *
+ * そこで判定は次の順で行う（{@link decideAttentionI8a8Dot}）:
+ *
+ * 1. dp4a が既知解と厳密一致 → `"dp4a"`（健全機は従来どおり 1 submit で終わる）。
+ * 2. emu が既知解と厳密一致 → `"emu"`（片腕だけ壊れた device）。
+ * 3. どちらも厳密一致しないなら **sanity 帯**（{@link SANITY_RELATIVE_TOLERANCE}）で裁く。
+ *    片腕だけ帯内ならその腕。両腕とも帯内なら**腕同士が全 6 変種の全要素でビット同一か**を
+ *    見て、同一なら `"dp4a"`（= 変種選択が数値に無関係であることを機械検証できたので
+ *    ADR 0058 決定 2 は満たされる）、相違なら既知解に近い腕（同点は dp4a）。
+ * 4. 両腕とも帯外 → {@link GpuFeatureError}（本当に壊れている device だけがここへ来る）。
+ *
+ * 3 と 4 で決まった判定は「厳密一致ではなかった」事実を戻り値
+ * （{@link AttentionI8a8Decision.exact}）に載せる。呼び手（src/runtime/executor.ts）は
+ * device 単位に 1 度だけ警告を出す — 黙って通さないが、実行は止めない。
  *
  * ## 撃つ変種（生成物のキー軸の最小代表集合）
  *
@@ -85,6 +110,33 @@ const WHERE = "attention i8a8 カナリア";
 export type CanaryWgslPatch = (wgsl: string) => string;
 
 const IDENTITY_PATCH: CanaryWgslPatch = (wgsl) => wgsl;
+
+/**
+ * sanity 帯の相対幅。要素ごとの許容は `max(|既知解| · この値, {@link SANITY_ABSOLUTE_FLOOR})`。
+ *
+ * 導出（M2 実測 2026-08-29 — docs/research/2026-08-29-chatgpt-review-verification.md）:
+ *
+ * - **許容したい側** = 両変種が共有する f32 エピローグの丸め差。実測は 1 ULP
+ *   （28.433290481567383 vs 既知解 28.43328857421875 = 相対 6.7e-8）で、数 ULP を見ても
+ *   1.2e-7 相対。帯の **2 桁下**に収まる。
+ * - **弾きたい側** = 実際の整数故障。故障注入（dp4a の WGSL 破壊）の実測は 28.435983657836914
+ *   = 相対 9.5e-5 で、帯の **1 桁上**。
+ *
+ * つまり 1e-5 は両者の間に 3 桁あいた谷の底に置いてある。MUST NOT: 緩める — 1e-3 まで広げると
+ * f16 格納 1 ULP（相対 ~1e-3）級の実害まで帯に入り、s16 変種の検出器が死ぬ。
+ */
+const SANITY_RELATIVE_TOLERANCE = 1e-5;
+
+/**
+ * sanity 帯の絶対床。相対だけで裁くと `|既知解| → 0` で許容も 0 に潰れ、0 近傍の要素だけが
+ * 事実上 atol=0 のまま残る（帯が要素ごとにまだらになる）。
+ *
+ * 1e-7 の根拠: 現在の固定入力の最小振幅は ③PV の |O| = 6.2e-4（f32 の ULP は ~6e-11）なので
+ * 床が効く要素は今は無い — 相対側だけで既に ~100 ULP の余裕がある。効き始めるのは既知解を
+ * 作り直して 0 近傍が現れたときで、そこでも 1e-7 は「数 ULP の丸め差は飲むが、整数故障は
+ * 飲まない」位置にある（③PV の acc が 1 ずれると |O| は最小でも 5e-4 動く — prow·vs の下限）。
+ */
+const SANITY_ABSOLUTE_FLOOR = 1e-7;
 
 // ---------------------------------------------------------------------------
 // 固定入力（凍結 — 値を動かしたらテストの余裕実測をやり直すこと）
@@ -290,18 +342,56 @@ const unpackScoresF16 = (words: Uint32Array<ArrayBuffer>): Float32Array<ArrayBuf
 const STORAGE_IN = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST;
 const STORAGE_OUT = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC;
 
-/** 既知解との全数比較（atol=0）。最初の不一致だけを文字列にして返す。 */
-const firstMismatch = (
-  label: string,
+/** 1 変種を既知解と突き合わせた結果（{@link compareToReference}）。 */
+export type CanaryVariantOutcome = {
+  /** production のパイプラインキーそのもの（どの生成物の話か診断で読める）。 */
+  readonly key: string;
+  /** 既知解と atol=0 で一致したか。 */
+  readonly exact: boolean;
+  /** 全要素が sanity 帯に収まったか。 */
+  readonly withinBand: boolean;
+  /** 既知解との最大絶対誤差。 */
+  readonly maxAbsError: number;
+  /** 帯余裕の最大（`|誤差| / 許容`）。1 以下が帯内。 */
+  readonly maxBandRatio: number;
+  /** 最初の不一致の診断（厳密一致なら undefined）。 */
+  readonly mismatch: string | undefined;
+  /** 読み戻した出力そのもの。**腕同士のビット同一比較に要る**ので保持する（数 KB）。 */
+  readonly output: Uint8Array<ArrayBuffer>;
+};
+
+/**
+ * 既知解との全数比較。厳密一致（atol=0）と sanity 帯の 2 つを 1 走査で採る。
+ *
+ * MUST: 帯・最大の更新は `!(diff <= x)` / {@link Math.max} の形で書く。`diff > x` で書くと
+ * NaN が黙って「帯内」に落ちる（無効 dispatch や未初期化の読み戻しが健全と判定される）。
+ */
+const compareToReference = (
+  key: string,
   actual: ArrayLike<number>,
   expected: ArrayLike<number>,
-): string | undefined => {
+  output: Uint8Array<ArrayBuffer>,
+): CanaryVariantOutcome => {
+  let exact = true;
+  let withinBand = true;
+  let maxAbsError = 0;
+  let maxBandRatio = 0;
+  let mismatch: string | undefined;
   for (let i = 0; i < expected.length; i += 1) {
     if (actual[i] !== expected[i]) {
-      return `${label}[${i}]: 実測 ${actual[i]} / 既知解 ${expected[i]}`;
+      exact = false;
+      mismatch ??= `${key}[${i}]: 実測 ${actual[i]} / 既知解 ${expected[i]}`;
     }
+    const diff = Math.abs(actual[i] - expected[i]);
+    const tolerance = Math.max(
+      Math.abs(expected[i]) * SANITY_RELATIVE_TOLERANCE,
+      SANITY_ABSOLUTE_FLOOR,
+    );
+    if (!(diff <= tolerance)) withinBand = false;
+    maxAbsError = Math.max(maxAbsError, diff);
+    maxBandRatio = Math.max(maxBandRatio, diff / tolerance);
   }
-  return undefined;
+  return { key, exact, withinBand, maxAbsError, maxBandRatio, mismatch, output };
 };
 
 /** 1 変種ぶんの実走計画（パイプライン生成は済み・バッファ確保はこれから）。 */
@@ -316,12 +406,31 @@ type Variant = {
   readonly outputBytes: number;
   readonly workgroups: readonly [number, number, number];
   /** 読み戻したバイト列を既知解と突き合わせる。 */
-  readonly check: (bytes: ArrayBuffer) => string | undefined;
+  readonly compare: (bytes: ArrayBuffer) => CanaryVariantOutcome;
+};
+
+/** 片腕（dp4a か emu のどちらか）を 6 変種とも撃った結果（{@link probeAttentionI8a8Dot}）。 */
+export type CanaryProbe = {
+  readonly dot: I8a8Dot;
+  /** 6 変種**全て**が既知解と atol=0 で一致したか。 */
+  readonly exact: boolean;
+  /** 6 変種**全て**が sanity 帯に収まったか。 */
+  readonly withinBand: boolean;
+  /** 6 変種を通した最大絶対誤差。 */
+  readonly maxAbsError: number;
+  /** 6 変種を通した最大の帯余裕（1 以下が帯内）。 */
+  readonly maxBandRatio: number;
+  /** 最初に既知解を外した変種の診断（{@link exact} なら undefined）。 */
+  readonly mismatch: string | undefined;
+  /** 変種ごとの内訳（順序は生成順で、腕を跨いで同じ）。 */
+  readonly variants: readonly CanaryVariantOutcome[];
 };
 
 /**
- * 6 変種を 1 submit で撃ち、**最初に既知解を外した変種**を返す（全一致なら undefined）。
+ * 6 変種を 1 submit で撃ち、**全変種の突合結果**を返す。
  *
+ * MUST: 途中で打ち切らない（初版は最初の不一致で return していた）。腕同士のビット同一比較
+ * （{@link decideAttentionI8a8Dot} の 3）に全変種の出力が要り、帯判定にも全要素の走査が要る。
  * MUST: 呼び手は device 単位の errorScope 区間ロックの中で呼ぶ（{@link decideAttentionI8a8Dot}）。
  * `await` を跨いで errorScope を張るため、裸で走らせると並行 Session の run と交差して失敗が
  * 誤帰属する。
@@ -330,7 +439,7 @@ export const probeAttentionI8a8Dot = async (
   gpu: GpuContext,
   dot: I8a8Dot,
   patch: CanaryWgslPatch = IDENTITY_PATCH,
-): Promise<string | undefined> => {
+): Promise<CanaryProbe> => {
   const device = gpu.device;
   const dp4a = dot === "dp4a";
   const qk = buildQkCase();
@@ -433,15 +542,21 @@ export const probeAttentionI8a8Dot = async (
             tiledWorkgroups(qk.rows, i8a8TileM(qkGeometry), limit, WHERE),
             1,
           ],
-          check: (bytes) =>
+          compare: (bytes) =>
             score === "f16"
               // s16 変種の出力 ≡ S をホストで f16 に丸めた f32 変種（丸めは格納の 1 回だけ）
-              ? firstMismatch(
+              ? compareToReference(
                 key,
                 unpackScoresF16(new Uint32Array(bytes)),
                 Float32Array.from(qk.expected, roundToF16),
+                new Uint8Array(bytes),
               )
-              : firstMismatch(key, new Float32Array(bytes), qk.expected),
+              : compareToReference(
+                key,
+                new Float32Array(bytes),
+                qk.expected,
+                new Uint8Array(bytes),
+              ),
         };
       });
       const pvVariants = pvPipelines.map(({ key, pipeline, score }): Variant => {
@@ -467,7 +582,8 @@ export const probeAttentionI8a8Dot = async (
           ],
           // S の格納形は入力側の話なので、③ の既知解は 3 変種とも同じ 1 本（固定 S は f16
           // ちょうどで表せる = 詰め直しで 1 ビットも動かない）。
-          check: (bytes) => firstMismatch(key, new Float32Array(bytes), pv.expected),
+          compare: (bytes) =>
+            compareToReference(key, new Float32Array(bytes), pv.expected, new Uint8Array(bytes)),
         };
       });
       variants = [...qkVariants, ...pvVariants];
@@ -526,25 +642,99 @@ export const probeAttentionI8a8Dot = async (
     const mapped = staging.getMappedRange().slice(0);
     staging.unmap();
     let offset = 0;
+    const outcomes: CanaryVariantOutcome[] = [];
     for (const variant of variants) {
-      const mismatch = variant.check(mapped.slice(offset, offset + variant.outputBytes));
-      if (mismatch !== undefined) return mismatch;
+      outcomes.push(variant.compare(mapped.slice(offset, offset + variant.outputBytes)));
       offset += variant.outputBytes;
     }
-    return undefined;
+    return {
+      dot,
+      exact: outcomes.every((outcome) => outcome.exact),
+      withinBand: outcomes.every((outcome) => outcome.withinBand),
+      maxAbsError: outcomes.reduce((worst, o) => Math.max(worst, o.maxAbsError), 0),
+      maxBandRatio: outcomes.reduce((worst, o) => Math.max(worst, o.maxBandRatio), 0),
+      mismatch: outcomes.find((outcome) => outcome.mismatch !== undefined)?.mismatch,
+      variants: outcomes,
+    };
   } finally {
     for (const buffer of buffers) buffer.destroy();
   }
 };
 
+/** {@link AttentionI8a8Decision} がどの分岐で決まったか（判定則 v2 — モジュール冒頭 §判定則 v2）。 */
+export type CanaryBranch =
+  | "dp4a-exact"
+  | "emu-exact"
+  | "band-single-arm"
+  | "band-both-identical"
+  | "band-both-differ";
+
+/** 分岐ごとの日本語の根拠（警告文言の頭 — {@link formatAttentionI8a8Decision}）。 */
+const BRANCH_NOTE: Record<CanaryBranch, string> = {
+  "dp4a-exact": "dot4I8Packed 版が既知解と厳密一致した",
+  "emu-exact": "dot4I8Packed 版だけが既知解を外し、エミュ版は厳密一致した",
+  "band-single-arm": "厳密一致した腕が無く、sanity 帯に収まったのは 1 腕だけだった",
+  "band-both-identical":
+    "両腕とも厳密一致は外したが sanity 帯に収まり、腕同士は全 6 変種でビット同一だった",
+  "band-both-differ":
+    "両腕とも厳密一致は外したが sanity 帯に収まり、腕同士は相違したので既知解に近い側を採った",
+};
+
+/** カナリアの判定（{@link decideAttentionI8a8Dot}）。 */
+export type AttentionI8a8Decision = {
+  readonly dot: I8a8Dot;
+  /**
+   * 選んだ腕が既知解と **atol=0** で一致したか。false は「帯内だが厳密ではない」— 呼び手は
+   * 実行を止めず、device 単位に 1 度だけ警告を出す（黙って通さない）。
+   */
+  readonly exact: boolean;
+  readonly branch: CanaryBranch;
+  /** 選んだ腕の既知解との最大絶対誤差（{@link exact} なら 0）。 */
+  readonly maxAbsError: number;
+  /** 選んだ腕の最大の帯余裕（`|誤差| / 許容` — 1 以下が帯内）。 */
+  readonly maxBandRatio: number;
+};
+
+/** 判定の根拠 1 行（警告と診断の共通の言い回し）。 */
+export const formatAttentionI8a8Decision = (decision: AttentionI8a8Decision): string =>
+  `${BRANCH_NOTE[decision.branch]}ので '${decision.dot}' を選んだ` +
+  `（既知解との最大絶対誤差 ${decision.maxAbsError} / 帯余裕 ${decision.maxBandRatio}）`;
+
+const decide = (
+  probe: CanaryProbe,
+  branch: CanaryBranch,
+): AttentionI8a8Decision => ({
+  dot: probe.dot,
+  exact: probe.exact,
+  branch,
+  maxAbsError: probe.maxAbsError,
+  maxBandRatio: probe.maxBandRatio,
+});
+
+/**
+ * 腕同士が**全 6 変種の全要素**でビット同一か。1 変種でも 1 バイトでも違えば「相違」。
+ *
+ * 読み戻したバイト列をそのまま比べる（f32 も f16 格納も同じ規律で見られる）。変種の並びは
+ * 生成順で腕を跨いで同じなので、添字で対にできる。
+ */
+const armsBitIdentical = (a: CanaryProbe, b: CanaryProbe): boolean =>
+  a.variants.length === b.variants.length &&
+  a.variants.every((variant, index) => {
+    const other = b.variants[index].output;
+    return variant.output.length === other.length &&
+      variant.output.every((byte, at) => byte === other[at]);
+  });
+
 /**
  * 融合 attention の整数内積変種を**この device の実走**で決める（device 単位に 1 度 —
- * メモ化は {@link GpuContext} 側）。
+ * メモ化は {@link GpuContext} 側）。手順はモジュール冒頭 §判定則 v2 の 1〜4 そのもの:
  *
- * - dp4a が既知解と一致 → `"dp4a"`（**この経路では emu 側を撃たない** — 健全な機で払う
+ * - dp4a が既知解と厳密一致 → `"dp4a"`（**この経路では emu 側を撃たない** — 健全な機で払う
  *   コストを 1 submit に留める。emu が壊れている機は dp4a を選んだ時点で無関係）。
  * - dp4a だけ不一致 → `"emu"`（linear の席は別なので、linear は dp4a のまま維持される）。
- * - 両方不一致 → {@link GpuFeatureError}。変種の選び方の問題ではないので縮退先が無い。
+ * - どちらも厳密一致しない → sanity 帯で裁く（片腕だけ帯内 / 両腕帯内でビット同一 /
+ *   両腕帯内で相違）。
+ * - 両腕とも帯外 → {@link GpuFeatureError}。変種の選び方の問題ではないので縮退先が無い。
  *
  * `patch` は**故障注入テスト専用**の生成物差し替え口（不一致経路と両不一致経路は健全な実機
  * では作れない — src/gpu/device.ts の shader-f16 カナリアと同じ事情）。
@@ -552,15 +742,30 @@ export const probeAttentionI8a8Dot = async (
 export const decideAttentionI8a8Dot = (
   gpu: GpuContext,
   patch: CanaryWgslPatch = IDENTITY_PATCH,
-): Promise<I8a8Dot> =>
+): Promise<AttentionI8a8Decision> =>
   gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
-    const dp4aMismatch = await probeAttentionI8a8Dot(gpu, "dp4a", patch);
-    if (dp4aMismatch === undefined) return "dp4a";
-    const emuMismatch = await probeAttentionI8a8Dot(gpu, "emu", patch);
-    if (emuMismatch === undefined) return "emu";
+    const dp4a = await probeAttentionI8a8Dot(gpu, "dp4a", patch);
+    if (dp4a.exact) return decide(dp4a, "dp4a-exact");
+    const emu = await probeAttentionI8a8Dot(gpu, "emu", patch);
+    if (emu.exact) return decide(emu, "emu-exact");
+    if (dp4a.withinBand !== emu.withinBand) {
+      return decide(dp4a.withinBand ? dp4a : emu, "band-single-arm");
+    }
+    if (dp4a.withinBand) {
+      // 腕同士がビット同一 = 「変種選択は数値に無関係」（ADR 0058 決定 2）が**この device で
+      // 機械検証できた**ということなので、既定の dp4a をそのまま採る。共有エピローグの丸めが
+      // 既知解と数 ULP ずれているだけの M2 はここへ来る。
+      if (armsBitIdentical(dp4a, emu)) return decide(dp4a, "band-both-identical");
+      // 相違するなら変種選択が数値を動かしている。帯内なので実行は止めないが、既知解に近い
+      // 腕を採る（同点は dp4a — 既定を動かす根拠が無い）。
+      return decide(emu.maxAbsError < dp4a.maxAbsError ? emu : dp4a, "band-both-differ");
+    }
     throw new GpuFeatureError(
-      `融合 attention の i8a8 カーネルが dot4I8Packed 版・エミュ版とも既知解を外した` +
-        `（dp4a: ${dp4aMismatch} / emu: ${emuMismatch}）。` +
+      `融合 attention の i8a8 カーネルが dot4I8Packed 版・エミュ版とも既知解の sanity 帯` +
+        `（相対 ${SANITY_RELATIVE_TOLERANCE} / 絶対床 ${SANITY_ABSOLUTE_FLOOR}）を外した` +
+        `（dp4a: ${dp4a.mismatch} 帯余裕 ${dp4a.maxBandRatio} / ` +
+        `emu: ${emu.mismatch} 帯余裕 ${emu.maxBandRatio}）。` +
+        "共有 f32 エピローグの丸め差（帯内）は既に許容した上で外しているので、" +
         "整数内積の変種選択の問題ではなく、この device の整数 attention 自体が信用できない — " +
         "attentionCompute を 'f32' か 'f16' にして実行すること",
     );
