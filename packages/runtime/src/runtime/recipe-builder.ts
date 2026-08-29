@@ -288,7 +288,12 @@ type RecipeBuilderContext = {
   readonly linearCompute: "f32" | "a8" | "f16";
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
-  readonly i8a8Dot: I8a8Dot;
+  /**
+   * i8a8 の整数内積変種（**族ごとに別席** — 「両変種はビット同一」が attention だけ実機で
+   * 反証されているため。executor の {@link SessionState} が既定を決める）。
+   */
+  readonly linearI8a8Dot: I8a8Dot;
+  readonly attentionI8a8Dot: I8a8Dot;
   /**
    * 行ブロック枚数の強制（**テスト専用** — executor の `ROW_BLOCK_SPLIT`）。分解経路は
    * 融合ルールが受け取るが、states 形の行ブロック（ADR 0067 決定 7）は導出相が直接割るので
@@ -1508,7 +1513,7 @@ export class RecipeBuilder {
     // — キーに載るので「同一キー → バイト同一 WGSL」は保たれる。
     const v4 = linearI8a8UsesVec4(n);
     const geometry = defaultI8a8Geometry("linear");
-    const dp4a = this.#state.i8a8Dot === "dp4a";
+    const dp4a = this.#state.linearI8a8Dot === "dp4a";
     // MUST: key / wgsl とも **実際の常駐形**（`weightStorage`）で引く。i8 固定にすると i4 の
     // group scale が per-channel として配られる沈黙誤値になる（数値契約が別 — ADR 0076）。
     const key = linearI8a8Key(v4, dp4a, geometry, weightStorage, groupSize);
@@ -2300,7 +2305,7 @@ export class RecipeBuilder {
     // 幾何は ③PV と**別に**選ぶ（③ だけ N = D の 1 タイル化が勝つ — 実測）。dispatch は
     // ブロックごとなので、ここでは解決だけして呼び手へ返す。
     const v4 = attentionQkI8a8UsesVec4(cols);
-    const dp4a = this.#state.i8a8Dot === "dp4a";
+    const dp4a = this.#state.attentionI8a8Dot === "dp4a";
     const geometry = defaultI8a8Geometry("attention_qk");
     const key = attentionQkI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
     const { pipeline, layout } = await this.#state.cache.get(
@@ -2408,7 +2413,7 @@ export class RecipeBuilder {
     // (c) 整数内積の GEMM（P̃ は A タイル充填で作る = 非実体化のまま）。dispatch はブロック
     // ごとなので、ここでは解決だけして呼び手へ返す。
     const v4 = attentionPvI8a8UsesVec4(depth);
-    const dp4a = this.#state.i8a8Dot === "dp4a";
+    const dp4a = this.#state.attentionI8a8Dot === "dp4a";
     const geometry = defaultI8a8Geometry("attention_pv");
     const key = attentionPvI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
     const { pipeline, layout } = await this.#state.cache.get(

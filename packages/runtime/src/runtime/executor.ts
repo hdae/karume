@@ -34,6 +34,7 @@ import { alignI8Payload, decodeI8 } from "../format/i8.ts";
 import type { IrDtype, IrGraph } from "../format/ir.ts";
 import { parseSafetensors, type SafetensorsFile, tensorBytes } from "../format/safetensors.ts";
 import { type ArenaStats, RunArena, STORAGE_USAGE } from "../gpu/arena.ts";
+import { decideAttentionI8a8Dot } from "../gpu/attention-dp4a-canary.ts";
 import {
   BatchScopeError,
   discardFailureScopes,
@@ -603,6 +604,31 @@ type ResolvedCopy = {
   readonly size: number;
 };
 
+/**
+ * 融合 attention の整数内積変種を決める（{@link SessionState.attentionI8a8Dot} の入口）。
+ *
+ * カナリア（src/gpu/attention-dp4a-canary.ts）を走らせるのは「拡張を広告していて、かつ a8 を
+ * 要求された」ときだけ:
+ *
+ * - `I8A8_DOT` 指定時は走らせない — テストが変種を強制している最中に環境判定を挟むと、
+ *   何を測ったのかが診断からも数値からも消える。
+ * - 非広告 → dp4a 変種は生成すらされないので判定する対象が無い（従来どおり emu 直行）。
+ * - a8 以外 → i8a8 の attention カーネルが 1 本も出ないので、この席の値は 1 度も読まれない。
+ *   「使わない機能の初回コスト」を全 Session に配らないための門で、判定は最初に a8 を要求した
+ *   Session が払い、以後は device 単位でメモ化される。
+ */
+const resolveAttentionI8a8Dot = async (
+  gpu: GpuContext,
+  forced: I8a8Dot | undefined,
+  attentionCompute: ComputePrecision,
+  dp4a: boolean,
+): Promise<I8a8Dot> => {
+  if (forced !== undefined) return forced;
+  if (!dp4a) return "emu";
+  if (attentionCompute !== "a8") return "dp4a";
+  return await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => decideAttentionI8a8Dot(gpu));
+};
+
 type SessionState = {
   readonly gpu: GpuContext;
   /**
@@ -646,10 +672,18 @@ type SessionState = {
   /** S の格納形（opt-in — {@link SessionOptions.attentionScoreStorage}）。計算形と直交する軸。 */
   readonly attentionScoreStorage: ScoreStorage;
   /**
-   * i8a8 の整数内積変種。既定は `navigator.gpu.wgslLanguageFeatures` の列挙から決まり、
-   * テストは {@link I8A8_DOT} で強制できる。**どちらでも数値は 1 ビットも変わらない**。
+   * **linear の** i8a8 整数内積変種。既定は `navigator.gpu.wgslLanguageFeatures` の列挙から
+   * 決まり、テストは {@link I8A8_DOT} で強制できる。**どちらでも数値は 1 ビットも変わらない**
+   * （linear は Metal を含めて実走で反証されていない — docs/known-issues.md）。
    */
-  readonly i8a8Dot: I8a8Dot;
+  readonly linearI8a8Dot: I8a8Dot;
+  /**
+   * **融合 attention の** i8a8 整数内積変種（①QK / ③PV）。linear と席を分けてあるのは、
+   * 「両変種はビット同一」が attention だけ実機で反証されている（Metal / Apple M2 —
+   * docs/known-issues.md）ため。既定は device 単位の実走カナリア
+   * （src/gpu/attention-dp4a-canary.ts）が決め、テストは {@link I8A8_DOT} で強制できる。
+   */
+  readonly attentionI8a8Dot: I8a8Dot;
   /** 行ブロック枚数の強制（テスト専用 — {@link ROW_BLOCK_SPLIT}）。 */
   readonly rowBlockSplit: number | undefined;
   readonly useCounts: ReadonlyMap<string, number>;
@@ -757,6 +791,16 @@ export class Session {
           "（feature は device 作成時にしか要求できない）",
       );
     }
+
+    // 整数内積変種は **linear と attention で別席**（{@link SessionState}）。どちらも
+    // `I8A8_DOT` の指定が最優先で、指定が無ければ族ごとの既定に落ちる。
+    const dp4a = dp4aAvailable(gpu.wgslLanguageFeatures);
+    const attentionI8a8Dot = await resolveAttentionI8a8Dot(
+      gpu,
+      options[I8A8_DOT],
+      attentionCompute,
+      dp4a,
+    );
 
     const scheduler = new SubmitScheduler(gpu, options.submitPolicy);
     const weights = new RunArena(gpu.device, () => scheduler.flush());
@@ -956,10 +1000,12 @@ export class Session {
       linearCompute,
       attentionCompute,
       attentionScoreStorage,
-      // 拡張の有無は**速度にしか効かない**（両変種は同じ整数を返す）ので、機能検出ではなく
-      // 経路選択としてここで 1 度だけ決める（src/kernels/linear-i8a8.ts の docstring）。
-      i8a8Dot: options[I8A8_DOT] ??
-        (dp4aAvailable(gpu.wgslLanguageFeatures) ? "dp4a" : "emu"),
+      // linear の拡張の有無は**速度にしか効かない**（両変種は同じ整数を返す）ので、機能検出では
+      // なく経路選択としてここで 1 度だけ決める（src/kernels/linear-i8a8.ts の docstring）。
+      linearI8a8Dot: options[I8A8_DOT] ?? (dp4a ? "dp4a" : "emu"),
+      // attention は同じ主張が実機で反証されている（Metal / Apple M2）ので、列挙ではなく
+      // **実走カナリアの判定**（上の `attentionI8a8Dot`）で決める。
+      attentionI8a8Dot,
       rowBlockSplit: options[ROW_BLOCK_SPLIT],
       useCounts: countUses(graph),
       dtypes: declaredDtypes(graph),

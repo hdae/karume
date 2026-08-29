@@ -15,6 +15,9 @@
  * 消失レースの規律がそのまま効くため、GPU バッファの器でありながらここに置いてある。
  */
 
+// MUST: 型だけを取る（実体を import すると gpu 層 → runtime 層の依存が生まれる）。
+// この型は Session の面の語彙で、カナリアの判定結果を置く席の型でもある。
+import type { I8a8Dot } from "../runtime/session-types.ts";
 import { STORAGE_USAGE } from "./arena.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
@@ -525,6 +528,20 @@ type GpuContextInternals = {
    * **診断も例外も出ないまま自己デッドロック**する（再入検出器は置けない — 下記 doc）。
    */
   withScopeLock<T>(body: () => Promise<T>): Promise<T>;
+  /**
+   * 融合 attention の整数内積変種を **device 単位で 1 度だけ**決める（遅延・メモ化）。
+   *
+   * `run` は判定の実体（{@link "./attention-dp4a-canary.ts"} の `decideAttentionI8a8Dot`）を
+   * 呼び手が渡す形にしてある — この層から kernels / reference 層への import を作らないため
+   * （逆向きの import は canary 側が張る）。MUST: 呼び出し点は Session 構築の 1 箇所だけ
+   * （複数の実体を渡せる形にすると、メモが「最初に渡された判定」を意味するだけの席になる）。
+   *
+   * MUST: メモするのは **Promise そのもの**（値ではない）。attentionCompute "a8" の Session を
+   * 並行構築すると、値でメモする形ではカナリアが 2 本走って device 単位 1 回の契約が崩れる。
+   * 失敗（両腕とも既知解を外した / device 消失）も同じ Promise のまま配る — device の性質は
+   * 走らせ直しても変わらないので、再試行は同じ結論を得るためだけに 1 submit を払う。
+   */
+  attentionI8a8Dot(run: () => Promise<I8a8Dot>): Promise<I8a8Dot>;
 };
 
 /**
@@ -596,6 +613,11 @@ export class GpuContext {
    */
   #scopeChain: Promise<void> = Promise.resolve();
   /**
+   * 融合 attention の内積変種カナリアの結果（{@link GpuContextInternals.attentionI8a8Dot}）。
+   * 未要求なら undefined のまま = 1 dispatch も出ない（a8 を使わない利用者はコストを払わない）。
+   */
+  #attentionI8a8Dot: Promise<I8a8Dot> | undefined;
+  /**
    * {@link ResidentTensor} の識別子の発番。**モジュールスコープに置かない**（副作用ゼロの
    * 不変条件）— GpuContext ごとに別空間で足りる（resident は device を跨がない）。
    */
@@ -617,6 +639,10 @@ export class GpuContext {
       raceDeviceLost: <T>(work: Promise<T>, where: string): Promise<T> =>
         this.#raceDeviceLost(work, where),
       withScopeLock: <T>(body: () => Promise<T>): Promise<T> => this.#withScopeLock(body),
+      attentionI8a8Dot: (run: () => Promise<I8a8Dot>): Promise<I8a8Dot> => {
+        this.#attentionI8a8Dot ??= run();
+        return this.#attentionI8a8Dot;
+      },
     };
     if (onDeviceLost !== undefined) {
       this.onLost((info) => {
@@ -793,7 +819,9 @@ export class GpuContext {
    * 変換する。
    * NOTE: 閉路にならない形でも、**区間中に await する Session 操作全般**（`session.dispose()` /
    * `context.dispose()`）は先行に未決着 run があると `finish()` まで返らず、利用者からは
-   * ハングに見える。batch 中は `enqueue` と `finish` だけを使うこと。
+   * ハングに見える。batch 中は `enqueue` と `finish` だけを使うこと。**Session の構築も同じ**
+   * — `attentionCompute: "a8"` の初回構築はカナリア（{@link GpuContextInternals.attentionI8a8Dot}）
+   * で区間ロックを取りに行くため、区間中に構築すると `finish()` まで返らない。
    * MUST: 計測が有効な device では開けない。1 dispatch = 1 pass に開いた timestamp は
    * flush でしか回収されないため、batch の間 N run 分が未回収で溜まる（内訳を取るなら
    * 通常の run で計測すること — ADR 0021）。
