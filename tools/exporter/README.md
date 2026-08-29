@@ -70,7 +70,7 @@ and the repository's own spellings for `--series` and `--out`. The seat stays he
 assembly engine itself is core (ADR 0065 decision 1).
 
 ```sh
-uv run karume verify ../../models/karume-anima-turbo/anima-turbo/transformer/model.f16.safetensors
+uv run karume verify ../../models/karume-anima-turbo/anima-turbo/transformer/model.f16-00001-of-00004.safetensors
 ```
 
 ### `karume dist` — the assembly engine
