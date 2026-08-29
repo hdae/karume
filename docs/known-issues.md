@@ -31,37 +31,34 @@ verify を並行させた走りで 2 回観測（単独走行でも過去に観�
 
 運用の回避 = **失敗したファイルを単独で再走して確認する**（緑ならフレーク）。
 
-## Metal（Apple GPU）で attention i8a8 と conv2d の 2 経路一致が崩れる
+## Metal（Apple GPU）で attention i8a8 の GPU 出力が TS 参照と 1 ULP ずれる（+ conv2d parity 2 本）
 
-実機 **Apple M2 / Deno 2.9.4** で `deno test -A packages/runtime/tests/` が 6 本赤になる
-（Linux / Vulkan は全緑）。GEMM の共有タイル書き込みを静的成分へ直した後も残ったもので、
-**その機序では説明できない**別の Metal 差。調査の全体は
-[research/2026-08-06-metal-silent-miscompute.md](research/2026-08-06-metal-silent-miscompute.md)。
+実機 **Apple M2**（初出 Deno 2.9.4・2026-08-29 に 2.9.6 で再検証）で attention i8a8 系 4 本 +
+conv2d parity 2 本が赤（Linux / Vulkan は全緑）。**2026-08-29 のカナリア実機検証で機序の理解が
+更新された**:
 
-- **attention i8a8 系 4 本**（`gpu_attention_i8a8_test.ts` / `gpu_attention_pv_i8a8_test.ts`）。
-  `attention-i8a8.ts` の共有配列は `array<u32>` のスカラで動的成分書き込みを持たず、しかも
-  **同じ `dot4I8Packed` を使う linear i8a8（`gpu_i8a8_test.ts`）は全通過**する。それでも
-  `dot4I8Packed 版とエミュ版が atol=0 で一致する` が落ちるので、整数演算に丸め差が無い以上
-  QK / PV では実際に違う値が出ている。
-- **conv2d parity 2 本**（`gpu_conv2d_parity_test.ts`）。implicit GEMM ↔ 直接カーネルの
-  ビット一致。conv2d の B タイルは `sb[bk * 16u + bcq] = bv4` と vec4 を丸ごと書く形で、
-  上記の修正対象ではない。ただし `conv2d_block` golden（atol 1e-6 / rtol 1e-5）は通るので、
-  値そのものは概ね正しく**ビット一致だけが崩れている**。
+- **dp4a とエミュの両変種は M2 でもビット同一**（カナリア両腕が同値・PV の相互一致テスト緑・
+  qP 整数段 62,088 要素で不一致 0%）。旧記述「整数演算に丸め差が無い以上 QK / PV では実際に
+  違う値が出ている」（変種間不一致という推論）は**誤りだった** — 落ちていた比較は
+  **GPU vs TS 参照**で、旧観測も同じ形だった可能性が高い（撤回 2026-08-29）。
+- 実態は**両変種が共有する f32 エピローグ（scale 適用）の出力が TS 参照とちょうど 1 ULP
+  ずれる**（QK 28.4 近傍で 1.9e-6・12.0 近傍で 9.5e-7・PV 0.2 近傍で 1.5e-8）。整数段は厳密
+  一致。仮説（未確定）: naga → MSL の FMA 契約差で乗算連鎖の丸めが変わる。
+- 実害は **atol=0 のクロスプラットフォーム parity 門が Metal で立たない**ことのみ。品質影響は
+  1 ULP で無視できる（Mac で正常な画像が生成できている実績どおり）。ブラウザ実行は
+  Dawn / Tint 系で naga を通らないため同じ症状とは限らない（未検証）。
+- 変種選択は実走カナリア（ADR [0058](decisions/0058-numerics-opt-in-contract.md) 追記）の
+  **判定則 v2** が扱う — 「両腕ビット同一・参照とは帯内（rtol 1e-5）の差」は dp4a を選び
+  警告 1 回で実行継続（a8 は動く）。帯外だけが `GpuFeatureError`。
+- **conv2d parity 2 本**（implicit GEMM ↔ 直接カーネルのビット一致・golden の tolerance 判定は
+  緑）は従来どおり原因未特定 — 同種のエピローグ丸め差の可能性が高いが未検証。
 
-実運用への影響は未確定（この状態でも Mac で正常な画像が生成できている）。ブラウザ実行は
-Dawn / Tint 系で naga を通らないため、同じ症状が出るとは限らない（未検証）。
-
-再検証は **Deno 2.9.6**（現行ピン）で行うが期待値は低い: 2.9.5 のリリースノートで WebGPU は
-mapped range の修正 1 件のみ（denoland/deno#36257）・2.9.6 は WebGPU 関連の項目ゼロで、
-Metal / naga / wgpu の更新の形跡が無い。
-
-2026-08-29 封じ込めを実装（ADR [0058](decisions/0058-numerics-opt-in-contract.md) 追記）:
-整数内積 knob を linear / attention で分離し、attention 側は device 単位の実走カナリア
-（`src/gpu/attention-dp4a-canary.ts` — 既知解と atol=0 突合）が決める。dp4a のみ不一致なら
-attention だけ emu へ縮退（キーに `:dp4aEmu`）・両不一致は `GpuFeatureError`。**カナリアが
-M2 の実故障を検出できるかは未確認**（B·H=1 の固定形が再現条件を外す可能性あり）— 実機判定は
-`gpu_attention_dp4a_canary_test.ts` の実行結果と attention i8a8 系 4 本の突き合わせで読む。
-原因確定は引き続き未了。
+Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36257 = mapped range の
+み）。根治候補 = TS 参照の FMA 許容化 or WGSL 側で丸めを固定する手段の調査（未着手）。記録 =
+[research/2026-08-06-metal-silent-miscompute.md](research/2026-08-06-metal-silent-miscompute.md)
+（時点）と
+[research/2026-08-29-chatgpt-review-verification.md](research/2026-08-29-chatgpt-review-verification.md)
+（M2 再検証）。
 
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 
