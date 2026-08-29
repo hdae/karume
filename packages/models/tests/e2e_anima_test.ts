@@ -10,14 +10,17 @@
  * MUST: 資産は `models/karume-anima-turbo/` と `models/karume-anima/`（untracked・実 GPU 機の
  * ローカル資産）。前者が turbo（8 step / CFG 無し）の門で、後者が **CFG≠1 の門**（素の base
  * 配布形 — 既定が CFG なので、そこだけが 2 本目の text 経路と `cfgEulerStep` を通る）。
- * 無い環境と GPU 無し環境は理由を出して**明示 SKIP**する（テストを消して無音で緑にしない —
- * ADR 0005）。
+ * **turbo の門も 2 リポ揃って初めて走る** — turbo の共有コンポーネント（text_encoder /
+ * text_conditioner / vae_decoder / tokenizer 2 本）は base リポへの越境参照（ADR 0038 §7）で
+ * 焼かれていて、現物が turbo ミラー側に無いため。無い環境と GPU 無し環境は理由を出して
+ * **明示 SKIP**する（テストを消して無音で緑にしない — ADR 0005）。
  *
- * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
- * のみ（fs を持ち込まない — 横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
- * 素の base（`models/karume-anima/`）は 1GiB 超のコンポーネントが **shard 分割**された配布形で、
- * 全量面（1 コンポーネント = 1 ファイルの前提）では開けない — そこだけローカル HTTP を立てて
- * `fromPretrained`（shard 面）で読む（下の「CFG」節）。
+ * NOTE: 実配布形はどちらのリポも**全量面（`fromAssets`）では開けない**。1GiB 超のコンポーネント
+ * は shard 分割されていて「1 コンポーネント = 1 ファイル」の前提が崩れ、越境参照は別リポの
+ * (repo, commit SHA) からしか取れない — どちらも解けるのは取得層だけ。そこでローカル HTTP を
+ * HF の URL 形で立て、全ての実資産の門を `fromPretrained` 経由で通す（下の「ローカル HTTP」節）。
+ * ファイルを `Deno.open` で読むのはそのサーバの中だけで、パッケージ本体は Web 標準 API のみ
+ * （fs を持ち込まない — 横断不変条件）。
  */
 
 import { assertEquals, assertFalse, assertRejects } from "@std/assert";
@@ -40,6 +43,13 @@ import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-anima-turbo/`）。 */
 const ASSETS_DIR = new URL("../../../models/karume-anima-turbo/", import.meta.url);
+/**
+ * 素の base 配布形の置き場（untracked・turbo とは別リポ）。CFG の門（下の「CFG」節）に使う
+ * ほか、**turbo の共有コンポーネントの現物もここにしか無い** — turbo の manifest は
+ * text_encoder / text_conditioner / vae_decoder / tokenizer 2 本を base リポへの越境参照
+ * （ADR 0038 §7）で焼くので、turbo ミラー側には transformer しか置かれない。
+ */
+const BASE_ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 const OUTPUTS_DIR = new URL("../../../outputs/demo/", import.meta.url);
 
 /**
@@ -81,7 +91,21 @@ if (!ASSETS_AVAILABLE) {
   );
 }
 
-const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
+const baseManifestText = await Deno.readTextFile(new URL("karume.json", BASE_ASSETS_DIR)).catch(
+  () => undefined,
+);
+if (baseManifestText === undefined) {
+  console.warn(
+    `[karume] ${BASE_ASSETS_DIR.pathname} に karume.json が無いため CFG の e2e を SKIP する` +
+      "（exporter の dist.py --pipeline anima で焼く）",
+  );
+}
+
+/**
+ * turbo の門も **base ミラーを要求する** — 共有コンポーネントは越境参照なので、turbo ミラー
+ * だけでは text_encoder / vae_decoder の現物が 1 バイトも揃わない（{@link BASE_ASSETS_DIR}）。
+ */
+const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE && baseManifestText !== undefined;
 
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
@@ -90,62 +114,94 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
 
 const readManifest = (): Manifest => parseManifest(manifestText as string);
 
-/**
- * quant が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない
- * 経路で、パイプライン単体を門に掛ける）。同じ path を指すキーは 1 度だけ読む。
- */
-const loadLocalAssets = async (
-  manifest: Manifest,
-  quant: string,
-): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
-  const files = resolveFiles(manifest, { quant });
-  const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
-  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of Object.keys(files)) {
-    const { path } = files[key];
-    const cached = byPath.get(path);
-    const bytes = cached ?? await Deno.readFile(new URL(path, ASSETS_DIR));
-    if (cached === undefined) byPath.set(path, bytes);
-    assets = { ...assets, [key]: bytes };
-  }
-  return assets;
-};
-
 // --- ローカル HTTP（HF 形の使い捨てサーバ）------------------------------------
 //
-// 取得層を通す 2 種類の門が土台を共有する: ①`fromPretrained` そのものの門（下の
-// 「fromPretrained」節）②**分割された配布形**を読む唯一の手段（素の base — 全量面では
-// 開けない）。喋るのは hub が実際に叩く 2 経路（revision 解決 API・resolve URL）だけ。
+// 実資産の門は**全て**この土台に載る。実配布形はどちらのリポも全量面（`Deno.readFile` +
+// `fromAssets`）では開けない: ①1GiB 超のコンポーネントが shard 分割されていて「1 コンポーネント
+// = 1 ファイル」の前提が崩れている ②turbo の共有コンポーネントは base リポへの**越境参照**
+// （ADR 0038 §7）で、turbo ミラーには現物が無い。どちらも解けるのは取得層だけなので、
+// 全量面ではなく取得層 + `fromPretrained` を通す。
+// 喋るのは hub が実際に叩く 2 経路（revision 解決 API・resolve URL）だけ。
 
 const REPO = "karume-test/anima";
 const REVISION_SHA = "1234567890abcdef1234567890abcdef12345678";
 const REVISION_RE = /^\/api\/models\/(.+)\/revision\/(.+)$/;
 const RESOLVE_RE = /^\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
 
-/** `dir` の `paths` だけを HF の URL 形で配る一時サーバ（ポート自動割当・127.0.0.1 束縛）。 */
+/**
+ * 越境参照の repo → ローカルミラー。turbo の共有コンポーネントは base リポの
+ * (repo, commit SHA) を名乗るので、その 1 本だけ別の dir から配る必要がある。
+ */
+const CROSS_REPO_MIRRORS: ReadonlyMap<string, URL> = new Map([
+  ["hdae/karume-anima", BASE_ASSETS_DIR],
+]);
+
+/** 取得元 1 つ（repo + revision）が配る内容。 */
+type ServedOrigin = { readonly dir: URL; readonly paths: Set<string> };
+
+/**
+ * 取得元のキー。**repo だけでは足りない** — 同じ repo が別 revision で現れても取り違えない
+ * （越境参照は宣言された commit SHA から取られ、セッションの SHA とは無関係）。
+ */
+const originKey = (repo: string, revision: string): string => `${repo}@${revision}`;
+
+/** 取得元の表どおりに HF の URL 形で配る一時サーバ（ポート自動割当・127.0.0.1 束縛）。 */
 const serveAssets = (
-  paths: ReadonlySet<string>,
-  dir: URL,
+  origins: ReadonlyMap<string, ServedOrigin>,
 ): Deno.HttpServer<Deno.NetAddr> =>
   Deno.serve({ port: 0, hostname: "127.0.0.1", onListen: () => {} }, async (request) => {
     const { pathname } = new URL(request.url);
+    // revision 解決を要求するのはセッション repo だけ（越境参照は commit SHA 固定なので、
+    // 取得層が解決要求そのものを出さない）。
     if (REVISION_RE.test(pathname)) return Response.json({ sha: REVISION_SHA });
     const resolved = RESOLVE_RE.exec(pathname);
     if (resolved === null) return new Response("not found", { status: 404 });
     const [, repo, revision, rawPath] = resolved;
+    const served = origins.get(originKey(repo, revision));
     const path = decodeURIComponent(rawPath);
-    if (repo !== REPO || revision !== REVISION_SHA || !paths.has(path)) {
+    if (served === undefined || !served.paths.has(path)) {
       return new Response("not found", { status: 404 });
     }
-    const file = await Deno.open(new URL(path, dir));
+    const file = await Deno.open(new URL(path, served.dir));
     const { size } = await file.stat();
     return new Response(file.readable, { headers: { "content-length": String(size) } });
   });
 
-/** `fromPretrained` がこの配布形 / quant で取りに来る path 全部（manifest 自身を含む）。 */
-const servedPaths = (manifest: Manifest, quant: string): Set<string> => {
+/**
+ * `fromPretrained` がこの配布形 / quant で取りに来る path 全部（manifest 自身を含む）を、
+ * **取りに行く取得元ごと**に束ねる。セッション repo は `dir` から、越境参照は宣言された
+ * (repo, revision) のまま {@link CROSS_REPO_MIRRORS} のミラーから配る。
+ */
+const servedOrigins = (
+  manifest: Manifest,
+  quant: string,
+  dir: URL,
+): Map<string, ServedOrigin> => {
+  const origins = new Map<string, ServedOrigin>();
+  const add = (repo: string, revision: string, mirror: URL, path: string): void => {
+    const key = originKey(repo, revision);
+    const served = origins.get(key) ?? { dir: mirror, paths: new Set<string>() };
+    served.paths.add(path);
+    origins.set(key, served);
+  };
+  add(REPO, REVISION_SHA, dir, "karume.json");
   const files = resolveFiles(manifest, { quant });
-  return new Set(["karume.json", ...Object.keys(files).map((key) => files[key].path)]);
+  for (const key of Object.keys(files)) {
+    const ref = files[key];
+    if (ref.repo === undefined || ref.revision === undefined) {
+      add(REPO, REVISION_SHA, dir, ref.path);
+      continue;
+    }
+    const mirror = CROSS_REPO_MIRRORS.get(ref.repo);
+    if (mirror === undefined) {
+      throw new Error(
+        `越境参照 '${ref.repo}' に対応するローカルミラーが無い` +
+          `（既知: ${[...CROSS_REPO_MIRRORS.keys()].join(" / ")}）`,
+      );
+    }
+    add(ref.repo, ref.revision, mirror, ref.path);
+  }
+  return origins;
 };
 
 /** 画素の要約（参照 sha と食い違ったときに「どれくらい違う絵なのか」を言うため）。 */
@@ -225,6 +281,43 @@ const assertReferencePng = async (
   }
 };
 
+/**
+ * turbo の配布形を**取得層経由**（ローカル HTTP + `fromPretrained`）で組み、`body` に渡す。
+ * 戻り値は body を抜けた後の pipeline — **既に dispose 済み**で、解放後の面を検査する門
+ * （下の onEvent 節）だけがこれを使う。
+ *
+ * MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。呼び手が
+ * 自分のインスタンスを渡した場合は、body を抜けた後にその中身を検査できる。
+ */
+const withTurbo = async (
+  quant: string,
+  options: {
+    readonly caches?: CacheStorage;
+    readonly onRunDiagnostics?: (component: string) => void;
+  },
+  body: (pipeline: AnimaPipeline) => Promise<void>,
+): Promise<AnimaPipeline> => {
+  const manifest = readManifest();
+  const server = serveAssets(servedOrigins(manifest, quant, ASSETS_DIR));
+  try {
+    // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
+    await using pipeline = await AnimaPipeline.fromPretrained(
+      { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` },
+      {
+        quant,
+        caches: options.caches ?? new MemoryCacheStorage(),
+        ...(options.onRunDiagnostics === undefined
+          ? {}
+          : { onRunDiagnostics: options.onRunDiagnostics }),
+      },
+    );
+    await body(pipeline);
+    return pipeline;
+  } finally {
+    await server.shutdown();
+  }
+};
+
 for (const { quant, resolution, sha256 } of REFERENCE) {
   const label = `${quant}-${formatResolution(resolution)}`;
   // request 側 `sampler:"euler"` の明示が manifest 既定（= 公式配布の宣言）とビット同一である
@@ -238,13 +331,14 @@ for (const { quant, resolution, sha256 } of REFERENCE) {
       (sampler === undefined ? "" : `（sampler:"${sampler}" 明示）`),
     ignore: !RUNNABLE,
     fn: async () => {
-      const manifest = readManifest();
-      const assets = await loadLocalAssets(manifest, quant);
-      // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-      await using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
-      await assertReferencePng(label, pipeline, resolution, sha256, {
-        ...(sampler === undefined ? {} : { sampler }),
-      });
+      await withTurbo(
+        quant,
+        {},
+        (pipeline) =>
+          assertReferencePng(label, pipeline, resolution, sha256, {
+            ...(sampler === undefined ? {} : { sampler }),
+          }),
+      );
     },
   });
 }
@@ -268,16 +362,14 @@ Deno.test({
   ignore: !RUNNABLE,
   fn: async () => {
     const { quant, resolution } = REFERENCE[1];
-    const manifest = readManifest();
-    const assets = await loadLocalAssets(manifest, quant);
-    await using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
-    await assertReferencePng(
-      `${quant}-${formatResolution(resolution)}-dpmpp`,
-      pipeline,
-      resolution,
-      TURBO_DPMPP_SHA256,
-      { sampler: "dpmpp-2m" },
-    );
+    await withTurbo(quant, {}, (pipeline) =>
+      assertReferencePng(
+        `${quant}-${formatResolution(resolution)}-dpmpp`,
+        pipeline,
+        resolution,
+        TURBO_DPMPP_SHA256,
+        { sampler: "dpmpp-2m" },
+      ));
   },
 });
 
@@ -289,9 +381,6 @@ Deno.test({
 // いなかった**（波 L で気付いた穴）。素の base 配布形は既定が CFG なので、そこを 1 ケース
 // だけ固定する（解像度 512 は所要時間の都合 — CFG は 1 step が forward 2 本）。
 
-/** 素の base 配布形の置き場（untracked・turbo とは別リポ）。 */
-const BASE_ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
-
 /** 参照値（2026-08-22 実測 — 変更禁止）。 */
 const BASE_REFERENCE = {
   quant: "f16+dit8-a8-attn8-s16",
@@ -302,24 +391,14 @@ const BASE_REFERENCE = {
   sha256: "071929c40e90628006eab593842080246140e771a82f8a35762507f4a12e9560",
 } as const;
 
-const baseManifestText = await Deno.readTextFile(new URL("karume.json", BASE_ASSETS_DIR)).catch(
-  () => undefined,
-);
-if (baseManifestText === undefined) {
-  console.warn(
-    `[karume] ${BASE_ASSETS_DIR.pathname} に karume.json が無いため CFG の e2e を SKIP する` +
-      "（exporter の dist.py --pipeline anima で焼く）",
-  );
-}
-
 /**
  * 素の base を {@link BASE_REFERENCE} のノブで 1 枚焼き、参照 sha256 と突き合わせる。
  *
  * MUST: **取得層経由**（ローカル HTTP + `fromPretrained`）で組む。この配布形の text_encoder と
- * transformer は 1GiB 超で shard 分割されていて、全量面（`loadLocalAssets` + `fromAssets`）は
- * 「1 コンポーネント = 1 ファイル」の前提なので開けない — shard 面を持つ取得層だけが読める
- * （デモの `--source` と同型 — `examples/shared/local-dist-server.ts`）。分割はテンソル単位で
- * ビット同一なので、経路が変わっても参照 sha は 1 ビットも動かない。
+ * transformer は 1GiB 超で shard 分割されていて、全量面（`fromAssets`）は「1 コンポーネント =
+ * 1 ファイル」の前提なので開けない — shard 面を持つ取得層だけが読める（デモの `--source` と
+ * 同型 — `examples/shared/local-dist-server.ts`）。分割はテンソル単位でビット同一なので、
+ * 経路が変わっても参照 sha は 1 ビットも動かない。
  */
 const assertBaseReferencePng = async (
   label: string,
@@ -328,7 +407,7 @@ const assertBaseReferencePng = async (
 ): Promise<void> => {
   const manifest = parseManifest(baseManifestText as string);
   const { quant, resolution, steps, guidanceScale, negativePrompt } = BASE_REFERENCE;
-  const server = serveAssets(servedPaths(manifest, quant), BASE_ASSETS_DIR);
+  const server = serveAssets(servedOrigins(manifest, quant, BASE_ASSETS_DIR));
   try {
     // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
     await using pipeline = await AnimaPipeline.fromPretrained(
@@ -382,9 +461,10 @@ Deno.test({
 
 // --- fromPretrained（取得層込み）--------------------------------------------
 //
-// ローカル HTTP を HF の URL 形で立て、`loadManifest` → `resolveFiles` → `fetchAssets` →
-// `fromAssets` の**実経路**を通す。ここだけが manifest の実 sha256 による integrity 検証を
-// 実際に走らせる経路で、資産の 3 点セット（path/size/sha256）が現物と合っていることの門でもある。
+// `loadManifest` → `resolveFiles` → 取得 → 構築の**実経路**は turbo の門が全て通るように
+// なったが、そこに**注入席とキャッシュの実体**を突き合わせるのはこの 1 本だけ。manifest の実
+// sha256 による integrity 検証が走る経路でもあり、資産の 3 点セット（path/size/sha256）が
+// 現物と合っていることの門を兼ねる。
 //
 // 解像度が 512 なのは RAM の都合（取得層のメモリキャッシュが資産の写しを持つ）。ビット一致の
 // 門としては 1024 と同格 — 参照 sha は上の 512 ケースと同じ値を使う。
@@ -395,53 +475,41 @@ Deno.test({
   fn: async () => {
     const quant = "f16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 512, height: 512 };
-    const manifest = readManifest();
-    const files = resolveFiles(manifest, { quant });
-    const server = serveAssets(servedPaths(manifest, quant), ASSETS_DIR);
-    try {
-      const hubUrl = `http://127.0.0.1:${server.addr.port}`;
-      // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
-      const caches = new MemoryCacheStorage();
-      // 観測席（onRunDiagnostics）の run 回数もこの実生成で併せて固定する（DiT は 1 step =
-      // 1 run・text 系は各 1 run）。門の sha256 判定には一切影響しない追加観測。
-      const observed: string[] = [];
-      const pipeline = await AnimaPipeline.fromPretrained({ repo: REPO, hubUrl }, {
-        quant,
-        caches,
-        onRunDiagnostics: (component) => observed.push(component),
-      });
-      try {
-        await assertReferencePng("fromPretrained-512", pipeline, resolution, REFERENCE[1].sha256);
-      } finally {
-        await pipeline.dispose();
-      }
-      const counts = new Map<string, number>();
-      for (const component of observed) counts.set(component, (counts.get(component) ?? 0) + 1);
-      const runsOf = (component: string): number => counts.get(component) ?? 0;
-      if (
-        runsOf("text_encoder") !== 1 || runsOf("text_conditioner") !== 1 ||
-        runsOf("transformer") !== STEPS || runsOf("vae_decoder") < 1
-      ) {
-        throw new Error(
-          "観測席の run 数が実行構造と合わない: " +
-            `text_encoder ${runsOf("text_encoder")}（期待 1）/ ` +
-            `text_conditioner ${runsOf("text_conditioner")}（期待 1）/ ` +
-            `transformer ${runsOf("transformer")}（期待 ${STEPS}）/ ` +
-            `vae_decoder ${runsOf("vae_decoder")}（期待 1 以上）`,
-        );
-      }
-      // 注入した側に現物があることで、注入席が末端の取得層まで届いていること（= 実キャッシュを
-      // 汚していないこと）を示す。名前空間の名前は取得層が所有するので数えるのは全名前空間ぶん。
-      // 期待は **manifest 1 本 + 一意 sha256 の本数** — 資産のキーは内容キーなので、同一バイトの
-      // 複数 path は 1 エントリに畳まれる。
-      let entries = 0;
-      for (const namespace of caches.namespaces.values()) entries += namespace.entries.size;
-      const expected = new Set(Object.keys(files).map((key) => files[key].sha256)).size + 1;
-      if (entries !== expected) {
-        throw new Error(`注入したキャッシュのエントリ数が ${entries}（期待 ${expected}）`);
-      }
-    } finally {
-      await server.shutdown();
+    const files = resolveFiles(readManifest(), { quant });
+    const caches = new MemoryCacheStorage();
+    // 観測席（onRunDiagnostics）の run 回数もこの実生成で併せて固定する（DiT は 1 step =
+    // 1 run・text 系は各 1 run）。門の sha256 判定には一切影響しない追加観測。
+    const observed: string[] = [];
+    await withTurbo(
+      quant,
+      { caches, onRunDiagnostics: (component) => observed.push(component) },
+      (pipeline) =>
+        assertReferencePng("fromPretrained-512", pipeline, resolution, REFERENCE[1].sha256),
+    );
+    const counts = new Map<string, number>();
+    for (const component of observed) counts.set(component, (counts.get(component) ?? 0) + 1);
+    const runsOf = (component: string): number => counts.get(component) ?? 0;
+    if (
+      runsOf("text_encoder") !== 1 || runsOf("text_conditioner") !== 1 ||
+      runsOf("transformer") !== STEPS || runsOf("vae_decoder") < 1
+    ) {
+      throw new Error(
+        "観測席の run 数が実行構造と合わない: " +
+          `text_encoder ${runsOf("text_encoder")}（期待 1）/ ` +
+          `text_conditioner ${runsOf("text_conditioner")}（期待 1）/ ` +
+          `transformer ${runsOf("transformer")}（期待 ${STEPS}）/ ` +
+          `vae_decoder ${runsOf("vae_decoder")}（期待 1 以上）`,
+      );
+    }
+    // 注入した側に現物があることで、注入席が末端の取得層まで届いていること（= 実キャッシュを
+    // 汚していないこと）を示す。名前空間の名前は取得層が所有するので数えるのは全名前空間ぶん。
+    // 期待は **manifest 1 本 + 一意 sha256 の本数** — 資産のキーは内容キーなので、同一バイトの
+    // 複数 path は 1 エントリに畳まれる（越境参照ぶんも同じキーの作り方で、リポが違うだけ）。
+    let entries = 0;
+    for (const namespace of caches.namespaces.values()) entries += namespace.entries.size;
+    const expected = new Set(Object.keys(files).map((key) => files[key].sha256)).size + 1;
+    if (entries !== expected) {
+      throw new Error(`注入したキャッシュのエントリ数が ${entries}（期待 ${expected}）`);
     }
   },
 });
@@ -469,13 +537,12 @@ Deno.test({
     const { scheduler } = parseAnimaPipelineConfig(
       manifest.models[manifest.defaultModel].pipelineConfig,
     );
-    const assets = await loadLocalAssets(manifest, quant);
     const runs: string[] = [];
-    const pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, {
-      quant,
+    // 戻りは**解放済み**の本体（`withTurbo` を抜けた時点で dispose が走っている）。中断した
+    // 生成の後でも解放が正常に効くこと（直列化鎖は失敗を次へ持ち越さない）はここで通る。
+    const disposed = await withTurbo(quant, {
       onRunDiagnostics: (component) => runs.push(component),
-    });
-    try {
+    }, async (pipeline) => {
       await t.step("イベント列と途中 latent を固定し、PNG は参照 sha256 のまま", async () => {
         const log: string[] = [];
         const shapes: string[] = [];
@@ -582,12 +649,9 @@ Deno.test({
           "中断したのに VAE 段へ入っている",
         );
       });
-    } finally {
-      // 中断した生成の後でも解放は正常に効く（直列化鎖は失敗を次へ持ち越さない）。
-      await pipeline.dispose();
-    }
+    });
     await assertRejects(
-      () => pipeline.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
+      () => disposed.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
       Error,
       "dispose 済み",
     );

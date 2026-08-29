@@ -9,9 +9,12 @@
  * 出さない）。安全のため safetensors の**ヘッダだけ**を読む — 実体は合計 7GB 級で、
  * IR は `__metadata__.karume_ir` に載っている。
  *
- * MUST: 資産は `models/karume-anima-turbo/` と `outputs/series/embeddinggemma-300m/` と
- * `models/karume-irodori-v4-small/`（いずれも untracked・ローカル資産）。無い環境は理由を
- * 出して**明示 SKIP** する（テストを消して無音で緑にしない — ADR 0005）。
+ * MUST: 資産は `models/karume-anima-turbo/` + `models/karume-anima/` と
+ * `outputs/series/embeddinggemma-300m/` と `models/karume-irodori-v4-small/`（いずれも
+ * untracked・ローカル資産）。無い環境は理由を出して**明示 SKIP** する（テストを消して無音で
+ * 緑にしない — ADR 0005）。turbo が 2 リポ要るのは、共有コンポーネント（text_encoder /
+ * text_conditioner / vae_decoder）が base リポへの**越境参照**（ADR 0038 §7）で焼かれていて、
+ * 現物が turbo ミラー側に 1 バイトも無いため。
  *
  * NOTE: ここで固定するのは **run 1 回あたり**の値（`lastRunFusions` と同じ寿命）。ADR 0040 の
  * 実測欄が載せている predict 1 回ぶんの合計は、これらをパイプラインの run 回数で畳んだもの:
@@ -29,7 +32,8 @@ import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { type FusionCounts, planFusions } from "../src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../src/runtime/plan.ts";
 
-const ASSETS_DIR = new URL("../../../models/karume-anima-turbo/anima-turbo/", import.meta.url);
+const TURBO_DIR = new URL("../../../models/karume-anima-turbo/", import.meta.url);
+const BASE_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 const GEMMA_MODEL = new URL(
   "../../../outputs/series/embeddinggemma-300m/model.safetensors",
   import.meta.url,
@@ -61,9 +65,6 @@ const readIrGraph = async (source: URL): Promise<IrGraph> => {
   }
 };
 
-const readAnimaGraph = (relative: string): Promise<IrGraph> =>
-  readIrGraph(new URL(relative, ASSETS_DIR));
-
 /**
  * 融合ヒット数は**ノード列だけ**で決まる（格納 dtype はどの initializer をどう読むかしか
  * 変えない）ので、系列が増えても f32 の 1 本を見れば足りる — 見ているのはエクスポータの
@@ -88,13 +89,63 @@ const exists = async (url: URL): Promise<boolean> => {
   }
 };
 
-const ASSETS_AVAILABLE = await exists(new URL("transformer/", ASSETS_DIR));
+const ASSETS_AVAILABLE = await exists(new URL("karume.json", TURBO_DIR)) &&
+  await exists(new URL("karume.json", BASE_DIR));
 if (!ASSETS_AVAILABLE) {
   console.warn(
-    `[karume] ${ASSETS_DIR.pathname} が無いため実資産の融合ヒット数を SKIP する` +
-      "（エクスポータのノード発行順の退行は実資産でしか検出できない）",
+    `[karume] ${TURBO_DIR.pathname} と ${BASE_DIR.pathname} が揃っていないため実資産の` +
+      "融合ヒット数を SKIP する（エクスポータのノード発行順の退行は実資産でしか検出できない）",
   );
 }
+
+/**
+ * 越境参照（ADR 0038 §7）の repo → ローカルミラー。turbo の共有コンポーネントは base リポの
+ * (repo, commit SHA) を名乗るので、現物はこちらから読む。
+ */
+const MIRRORS: ReadonlyMap<string, URL> = new Map([["hdae/karume-anima", BASE_DIR]]);
+
+/**
+ * manifest のうちこのファイルが引く欄だけ。**綴りを持つのは配布形**（shard 本数・path・越境の
+ * 有無はエクスポータが決める）なので、テスト側に焼かずここから引く — 焼くと分割数が動いた
+ * 瞬間に融合ヒット数の門が NotFound で落ちて、退行検出そのものが止まる。
+ */
+type TurboManifest = {
+  readonly defaultModel: string;
+  readonly models: Readonly<
+    Record<string, {
+      readonly weights: Readonly<
+        Record<
+          string,
+          Readonly<Record<string, { readonly shards: readonly ShardRef[] }>>
+        >
+      >;
+    }>
+  >;
+};
+type ShardRef = { readonly path: string; readonly repo?: string };
+
+// 資産が無い環境では 1 バイトも読まない（この定数を触るのは ignore を抜けたテストだけ）。
+const TURBO_MANIFEST: TurboManifest | undefined = ASSETS_AVAILABLE
+  ? JSON.parse(await Deno.readTextFile(new URL("karume.json", TURBO_DIR)))
+  : undefined;
+
+/**
+ * コンポーネントの**グラフ shard**（`karume_ir` を持つ先頭 shard — ADR 0070 決定 3）を読む。
+ * 後続の重み shard は metadata を持たないので、融合の計画に要るのはこの 1 本だけ。
+ */
+const readAnimaGraph = (component: string, dtype: string): Promise<IrGraph> => {
+  const manifest = TURBO_MANIFEST as TurboManifest;
+  const [head] = manifest.models[manifest.defaultModel].weights[component][dtype].shards;
+  if (head.repo === undefined) return readIrGraph(new URL(head.path, TURBO_DIR));
+  const mirror = MIRRORS.get(head.repo);
+  if (mirror === undefined) {
+    throw new Error(
+      `${component}/${dtype} の越境先 '${head.repo}' に対応するローカルミラーが無い` +
+        `（既知: ${[...MIRRORS.keys()].join(" / ")}）`,
+    );
+  }
+  return readIrGraph(new URL(head.path, mirror));
+};
 
 const GEMMA_AVAILABLE = await exists(GEMMA_MODEL);
 if (!GEMMA_AVAILABLE) {
@@ -154,7 +205,7 @@ Deno.test({
   fn: async () => {
     const expected: FusionCounts = { ...NONE, silu: 2, rope: 56, adaln: 85 };
     for (const quant of ["i8", "f16"] as const) {
-      const graph = await readAnimaGraph(`transformer/model.${quant}.safetensors`);
+      const graph = await readAnimaGraph("transformer", quant);
       // 融合は f32 の計算経路だけを見るので、重みの格納形が変わってもヒット数は動かない。
       assertEquals(fusionCounts(graph, ditShapes(4096)), expected, `${quant}: 1024px（S=4096）`);
       assertEquals(fusionCounts(graph, ditShapes(1024)), expected, `${quant}: 512px（S=1024）`);
@@ -166,13 +217,13 @@ Deno.test({
   name: "実資産の text encoder / conditioner / VAE decoder の融合ヒット数",
   ignore: !ASSETS_AVAILABLE,
   fn: async () => {
-    const textEncoder = await readAnimaGraph("text_encoder/model.safetensors");
+    const textEncoder = await readAnimaGraph("text_encoder", "f16");
     assertEquals(
       fusionCounts(textEncoder, { input_ids: [1, 64] }),
       { ...NONE, silu: 28, rope: 56, identityExpand: 112 },
       "text encoder",
     );
-    const conditioner = await readAnimaGraph("text_conditioner/model.safetensors");
+    const conditioner = await readAnimaGraph("text_conditioner", "f16");
     assertEquals(
       fusionCounts(conditioner, {
         source_hidden_states: [1, 64, 1024],
@@ -181,7 +232,7 @@ Deno.test({
       { ...NONE, identityExpand: 48 },
       "conditioner",
     );
-    const vae = await readAnimaGraph("vae_decoder/model.safetensors");
+    const vae = await readAnimaGraph("vae_decoder", "f16");
     assertEquals(
       fusionCounts(vae, { latents: [1, 16, 64, 64] }),
       { ...NONE, silu: 29, upsample2x: 3 },
