@@ -55,6 +55,14 @@ Dawn / Tint 系で naga を通らないため、同じ症状が出るとは限�
 mapped range の修正 1 件のみ（denoland/deno#36257）・2.9.6 は WebGPU 関連の項目ゼロで、
 Metal / naga / wgpu の更新の形跡が無い。
 
+2026-08-29 封じ込めを実装（ADR [0058](decisions/0058-numerics-opt-in-contract.md) 追記）:
+整数内積 knob を linear / attention で分離し、attention 側は device 単位の実走カナリア
+（`src/gpu/attention-dp4a-canary.ts` — 既知解と atol=0 突合）が決める。dp4a のみ不一致なら
+attention だけ emu へ縮退（キーに `:dp4aEmu`）・両不一致は `GpuFeatureError`。**カナリアが
+M2 の実故障を検出できるかは未確認**（B·H=1 の固定形が再現条件を外す可能性あり）— 実機判定は
+`gpu_attention_dp4a_canary_test.ts` の実行結果と attention i8a8 系 4 本の突き合わせで読む。
+原因確定は引き続き未了。
+
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 
 `karume export-embeddinggemma --batch N`（N>1）は `karume/convert.py` で fail loudly する

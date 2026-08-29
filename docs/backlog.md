@@ -7,7 +7,29 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 既知問題 3 件 + anima 素版 i4 感度（2026-08-25 着手）
+## now — ChatGPT レビュー消化波（2026-08-29 着手）
+
+外部レビュー 4 本（`.claude/reviews/2026-08-29_chatgpt-reviews/` — git 追跡外・v0.6.0 時点の
+静的監査）の統合指摘 13 件。波 0（検証・19 判定 = holds 18 / refuted 1 — 実測の正本 =
+[research](research/2026-08-29-chatgpt-review-verification.md)）→ 波 1（バグ修正）まで消化済み:
+
+- 波 1 **済**: pipeline errorScope の internal 捕捉（`withPipelineScope`）/ recipe 宣言の
+  静的検証 / safe-integer 門 / regcache epc≥2 の parity 門 / run・enqueue 入力の borrowed
+  契約（発行時 metadata snapshot）/ SubmitScheduler の overshoot 観測席 / attention dp4a
+  実走カナリア（ADR [0058](decisions/0058-numerics-opt-in-contract.md) 追記）/ CI Deno pin
+  2.9.6
+- **波 2（実装予定）**: SessionBuildDiagnostics（= perf-ledger L-1 の計測器）・PipelineCache
+  の device 寿命化（error-scope utility 分離が前段）・arena の MAP_READ コメント訂正
+- 起票のみ: perf-ledger **H-8〜H-10 / L-7 / L-8**（cost proxy / readback 共有 / metadata
+  compile / async pipeline / params 有界化）
+- **M2 実機判定（ユーザー実行）**: カナリアが実故障を検出できるかの確認 —
+  `gpu_attention_dp4a_canary_test.ts` + attention i8a8 系の既存赤 4 本の突き合わせ
+  （読み方 = [known-issues](known-issues.md) Metal 節）
+- 波 2 後: **Opus+Codex 全体レビュー**（並行なし）→ anima-web の cold ロード DL スロット
+  改善（提案 b+a = ADR 0070 決定 5 不変のまま admission を graph shard 完了ごとに前倒し +
+  extras の並行開始。opt-in の c 案は再裁定が要るため保留）
+
+## 消化済み（既知問題 3 件 + anima 素版 i4 感度 — 2026-08-25〜28）
 
 Anima Web アプリからの既知問題 3 件（調査で機序確定済み — 経緯は git / ACTIVE_DESIGN）と、
 素版 i4 の量子化感度特定（later 節からの前倒し — 配布スキップ裁定の復活レバー）:
@@ -35,7 +57,7 @@ Anima Web アプリからの既知問題 3 件（調査で機序確定済み —
   未検証軸は research に列挙のまま（復活時は GPU 校正 =
   [実用可・3.6 倍速](research/2026-08-28-cuda-calibration.md)で回す — 配布焼きは CPU）
 
-## next — 0.7.0 リリース（残り = Release 作成 → publish のみ）
+## 消化済み（0.7.0 リリース — 2026-08-29 完了）
 
 HF 更新系は**完了（2026-08-29）**: 全席分割の再 export 8 本（**全テンソルビット同一証明** —
 LoRA scale=1.0 も同時証明）→ base 3 モデル family 再生成 → HF 上げ（`7be81011`）→ turbo を
@@ -46,8 +68,9 @@ LoRA scale=1.0 も同時証明）→ base 3 モデル family 再生成 → HF �
 hf CLI が転送スキップするため runbook の処方が効かない。恒久対処候補 = 旧 revision 込みの
 履歴整理 or delete→再 up の 2 コミット法〈未検証〉）。
 
-- 残り: **GitHub Release v0.7.0 作成 → publish.yml 発火 → JSR 3 パッケージ確認**（ユーザー。
-  fetch-cache 0.5.0 の min-dep-age は `jsr:@hdae/*` 除外済みで CI は無風）
+- **Release v0.7.0 published → JSR 3 パッケージ publish 完了（2026-08-29 ユーザー確認）**。
+  リリースノートは公開前に検証ワークフロー（主張突合 + 両方向網羅）を通した — 修正 2 +
+  Breaking 追記 1（`from*Assets` は分割リポを開けない）+ 補足 4 を反映
 - 2026-08-29 裁定 3 件は**消化済み**: ①コーパスは `demo:eval-images --source
   models/karume-anima-turbo`（正本の役割別プロンプト）で再生成し 3 ファミリの golden を
   採り直した（意味論門込み緑）②断片化は**クライアント退行で現状の手が尽きた**ことを実測で

@@ -11,6 +11,15 @@
 
 ## Now
 
+- **ChatGPT レビュー消化波（2026-08-29 進行中）**: 外部レビュー 4 本の統合指摘 13 件を
+  波 0（検証 — holds 18 / refuted 1・実測正本 =
+  [research](../docs/research/2026-08-29-chatgpt-review-verification.md)）→ 波 1（バグ修正
+  8 件 — errorScope internal / recipe 静的検証 / safe-integer / regcache parity /
+  **run・enqueue 入力の borrowed 契約** / overshoot 観測席 / **attention dp4a 実走カナリア** =
+  ADR [0058](../docs/decisions/0058-numerics-opt-in-contract.md) 追記 / CI Deno 2.9.6）まで
+  消化。残り = 波 2（構築診断・PipelineCache device 寿命化）→ Opus+Codex 全体レビュー →
+  anima-web DL スロット改善。**M2 実機のカナリア検出力確認はユーザー実行待ち**
+  （known-issues Metal 節に読み方）。波順の正本 = [backlog](../docs/backlog.md) now。
 - **R1 統合波はコード完了（2026-08-29）**: API 工事 4 件（union/プランナ・`ModelShard` 実名
   帰属・`prepareModel` 2 段境界・`AdmissionReport`）+ hub `prefetchAssets` + models 7 pipelines
   の graph-first 接続 + exporter 1GiB 分割（`karume.shards`）+ デモの疑似 HF サーバ化。
@@ -19,8 +28,8 @@
   **HF 更新系まで完了（2026-08-29）**: 全席分割ビット同一・base `7be81011` / turbo `1a6e907a`
   公開・**shard ごとの越境参照**（ADR 0038 §7 追記 2026-08-29）初適用・pin 焼き込み + 実 DL
   疎通済み。実資産テストとローカル配信は越境 + 分割ミラーへ追随済み（fromAssets の実 GPU
-  生成経路は anima e2e から消滅 — 契約面と他家族が担保）。**残り = GitHub Release →
-  publish のみ**（要判断 3 件は backlog next）。
+  生成経路は anima e2e から消滅 — 契約面と他家族が担保）。**0.7.0 は Release → JSR publish
+  まで完了（2026-08-29・リリースノートは検証ワークフロー通過済み）**。
 - **fetch-cache 0.5.0 追従（2026-08-28 実装済み）**: 検証責務を取得層へ移譲（記録ハッシュ
   信頼・knob なし）・認証隔離の撤去・`verifying` 撤去・旧名前空間 purge。正本 = ADR
   [0080](../docs/decisions/0080-hub-fetch-cache-050.md)（旧 CAS ドラフトを置換 —
