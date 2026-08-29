@@ -155,9 +155,14 @@ export class RunArena {
 
   /**
    * ホストが `mapAsync` で読む staging（`COPY_DST | MAP_READ`）を確保する。
-   * MUST: この経路のバッファもプール対象外 — MAP_READ は STORAGE と併用できず、マップ状態が
-   * 寿命に絡むため使い回せない（1 回の readback で使い捨て）。それでもアリーナが所有するのは
+   * MUST: この経路のバッファもプール対象外 — MAP_READ は STORAGE と併用できないので汎用
+   * プールに入れられない。使い**回さない**（1 回の readback で使い捨て）のは設計判断で、
+   * 仕様上の不能ではない（`unmap()` 後の再利用は可能 — 2026-08-29 実 GPU で確認済み）。
+   * 使い捨てにしておくとアリーナの一括破棄が後始末の唯一の口になり、失敗経路で `mapAsync` が
+   * pending のまま残っても次 run に汚染が持ち越されない。それでもアリーナが所有するのは
    * 「確保と破棄を 1 箇所へ」（ADR 0004）— 破棄が flush-before-destroy に自動で乗る。
+   * NOTE: 共有 staging 化（perf-ledger H-9）を採る場合は、失敗経路で pending の staging を
+   * 破棄して作り直す復帰規律が必須（無いと以後の全 readback が OperationError の恒久故障）。
    */
   allocHostRead(bytes: number): GPUBuffer {
     this.#assertUsable();
