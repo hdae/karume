@@ -71,24 +71,6 @@ Dawn / Tint 系で naga を通らないため、同じ症状が出るとは限�
 batch>1 のマスク畳み込み対応）で、コア変換基盤への設計判断が要る。`--batch` フラグ自体は
 一般化が入ればそのまま使える形で維持している。
 
-## 融合 attention ② の regcache 変種（epc ≥ 2）に実 GPU 門が無い
-
-`attention_stats` の regcache 変種は `dim > 256`（epc ≥ 2）で初めて 2 スロット以上の静的展開に
-なるが、現行の GPU テストで融合 attention を N > 256 で踏むものが 1 本も無い
-（`gpu_attention_parity_test.ts` の SHAPES は最大 N=64 → epc は常に 1）。
-スナップショットは `attention_stats_rc16.wgsl`（dim 4096 相当）を凍結しているので生成物の
-固定はあるが、**実 GPU での値の一致は epc=1 の形でしか確認されていない**。
-
-2026-08-16 に `attentionStatsParams` へ `dim ≤ regCache · 256` の門を入れた際、故障注入で
-この空白が判明した（`SHAPES` に N=512 を一時追加してはじめて門が発火した）。
-parity テストへ N > 256 の形を 1 本足すのが最小の埋め方。
-
-2026-08-19 追記: 波 H の `e2e_gemma4_test.ts`（`context-en`・T=598）が epc=3
-（ceil(598/256)）の regcache 変種を実 GPU で踏み、tolerance 判定（atol 1e-2・実測
-maxAbs 2.23e-3）を通過している（同日再実行で確認）。「N > 256 を踏むテストが 1 本も無い」
-状態は解消したが、これは**弱い数値検証**であり、ビット単位の恒久 parity 門は依然無い —
-最小の埋め方（parity テストへ N > 256 を 1 本）は変わらず有効。
-
 ## Pixel（8GB 級 Android Chrome）で anima turbo i4 のロードが失敗する — 真因未特定
 
 実機報告のエラー文言 "BodyStreamBuffer was aborted" は Chrome が巻き添え中断の reason を

@@ -157,6 +157,12 @@ const SHAPES: readonly Shape[] = [
   { name: "v4 B1 H2 M68 N20 D12", b: 1, h: 2, m: 68, n: 20, d: 12 },
   // ① が v4 で ③ がスカラに落ちる形（変種の踏み分けが ① と ③ で違うことの固定）
   { name: "混成 B2 H2 M9 N8 D6", b: 2, h: 2, m: 9, n: 8, d: 6 },
+  // N > 256 = ② attention_stats の regcache 変種で epc ≥ 2 を実 GPU で踏む形
+  // （epc = ceil(N / 256) — `attentionStatsRegCache`・src/kernels/attention.ts:147-150）。
+  // epc=1 の形だけでは、静的展開されたレジスタ 2 スロット以上の畳み込み順が値に出ない。
+  { name: "regcache epc2 B1 H2 M64 N512 D128", b: 1, h: 2, m: 64, n: 512, d: 128 },
+  // 同じ regcache だが端数（N % 256 ≠ 0 で最終スロットが部分埋め）かつスカラ変種（N % 4 ≠ 0）
+  { name: "regcache epc3 B1 H2 M17 N598 D64", b: 1, h: 2, m: 17, n: 598, d: 64 },
   // DiT の self-attention を縮めた形（D=128・M/N とも 64 の倍数 = 実モデルの経路）
   { name: "DiT 形 B1 H4 M64 N64 D128", b: 1, h: 4, m: 64, n: 64, d: 128 },
 ];
