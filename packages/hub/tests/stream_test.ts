@@ -7,6 +7,7 @@ import {
   type LoadedManifest,
   loadManifest,
   ManifestReferenceError,
+  prefetchAssets,
   resolveFiles,
   streamAssets,
   type StreamedAsset,
@@ -556,4 +557,119 @@ Deno.test("streamAssets: 同一の越境参照を 2 回渡すのは呼び出し�
     ManifestReferenceError,
   );
   assertEquals(mock.calls, [], "重複検査より先に network へ出ている");
+});
+
+// ---- 相 1 単体の面（prefetchAssets）。逐次面と機構を共有するので、ここで見るのは共有部の
+// 挙動ではなく**この面だけの契約** — 「complete の発行者はここ」「落とした後の逐次面は
+// network に出ない」の 2 点。
+
+Deno.test("prefetchAssets: complete をファイル 1 本につき 1 回出し、loaded は合計へ着地する", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+  const events: AssetProgress[] = [];
+
+  await prefetchAssets(loaded, refs, {
+    fetch: mock.fetch,
+    caches,
+    onProgress: (progress) => events.push(progress),
+  });
+
+  let total = 0;
+  for (const ref of refs) total += ref.size;
+  const completes = events.filter((event) => event.phase === "complete");
+  assertEquals(completes.length, refs.length, "complete がファイル数と一致しない");
+  assertEquals(
+    new Set(completes.map((event) => event.path)),
+    new Set(refs.map((ref) => ref.path)),
+    "complete を出していないファイルがある",
+  );
+  for (const event of completes) assertEquals(event.fileLoaded, event.fileTotal);
+  assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
+  assertEquals(events[events.length - 1].loaded, total, "最後のイベントが合計に着地していない");
+  // 1 ファイルの phase は downloading* → complete の順で、complete の後は出ない。
+  const lastPhase = new Map<string, AssetPhase>();
+  for (const event of events) {
+    if (lastPhase.get(event.path) === "complete") {
+      throw new Error(`complete の後に ${event.phase} が出ている（${event.path}）`);
+    }
+    lastPhase.set(event.path, event.phase);
+  }
+});
+
+Deno.test("prefetchAssets: 落とした後の streamAssets は 1 度も network に出ない", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+
+  await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
+  const warmed = mock.calls.length;
+  assert(warmed > 0, "prefetch が 1 本も取得していない");
+
+  const second = createMockFetch({ files: serveAll() });
+  const seen = await drain(streamAssets(loaded, refs, { fetch: second.fetch, caches }));
+
+  assertEquals(seen.map((asset) => asset.id), refs.map((ref) => ref.path));
+  for (const asset of seen) assertEquals(asset.bytes, payloadFor(asset.id));
+  assertEquals(second.calls, [], "相 1 / 相 2 のどちらかが network に出ている");
+  assertEquals(mock.calls.length, warmed, "1 回目の mock も追加で呼ばれている");
+});
+
+Deno.test("prefetchAssets: キャッシュ済みのファイルは complete 1 点だけを出す", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+  await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
+
+  const second = createMockFetch({ files: serveAll() });
+  const events: AssetProgress[] = [];
+  await prefetchAssets(loaded, refs, {
+    fetch: second.fetch,
+    caches,
+    onProgress: (progress) => events.push(progress),
+  });
+
+  assertEquals(second.calls, [], "温まっているのに network へ出ている");
+  assertEquals(events.length, refs.length, "downloading が混ざっている（キャッシュヒットの列）");
+  assertEquals(new Set(events.map((event) => event.phase)), new Set<AssetPhase>(["complete"]));
+});
+
+Deno.test("prefetchAssets: 1 本の失敗は真因を復元して HubFetchError で上がる", async () => {
+  const caches = new MemoryCacheStorage();
+  const served = serveAll();
+  const { loaded, refs, mock } = await prepare({ files: served, delayMs: 5 }, caches);
+  // 逐次面と同じく、先頭以外を落として巻き添え（生の AbortError）が表面化しないことを見る。
+  const victim = refs[1].path;
+  assert(refs[0].path !== victim, "先頭以外が落ちる形になっていない");
+  served.delete(victim);
+
+  const error = await assertRejects(
+    () =>
+      prefetchAssets(loaded, refs, {
+        fetch: abortWhileAwaitingResponse(mock.fetch, victim),
+        caches,
+      }),
+    HubFetchError,
+  );
+  assertEquals(error.path, victim, "落ちたのとは別のファイルが報告されている");
+  assertEquals(error.repo, REPO);
+  assertEquals(error.revisionSha, SHA);
+});
+
+Deno.test("prefetchAssets: 空・重複は network に出る前に ManifestReferenceError", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+
+  const empty = await assertRejects(
+    () => prefetchAssets(loaded, [], { fetch: mock.fetch, caches }),
+    ManifestReferenceError,
+  );
+  assert(empty.message.includes("prefetchAssets"), `${empty.message} が面の名前を名乗っていない`);
+
+  const duplicated = await assertRejects(
+    () => prefetchAssets(loaded, [refs[0], refs[0]], { fetch: mock.fetch, caches }),
+    ManifestReferenceError,
+  );
+  assert(
+    duplicated.message.includes(refs[0].path),
+    `${duplicated.message} が重複 path を名指ししていない`,
+  );
+  assertEquals(mock.calls, [], "入力検査より先に network へ出ている");
 });

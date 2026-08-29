@@ -1,11 +1,15 @@
 /**
- * shard 面のロード経路（`src/hub/components.ts`）の門 — GPU も実資産も使わず、取得層だけを
- * 差し替えて 2 点を固定する:
+ * shard 面のロード経路（`src/hub/components.ts`）の門 — 取得層だけを差し替えて 4 点を固定する:
  *
  * ① **進捗はモデル全体で 1 本のまま**（取得が「グラフ shard の逐次面 + 残り資産の全量面」へ
  *    割れても `loaded` は単調増加で全ファイルの size 合計に着地し、`complete` はファイル数ぶん）。
  * ② **admission は重み shard を取る前に落ちる**（グラフ shard だけで capability 違反が決まり、
- *    重み shard の URL は 1 度も叩かれない — ADR 0070 決定 5 の存在理由そのもの）。
+ *    重み shard の URL は 1 度も叩かれない — ADR 0070 決定 5 の存在理由そのもの）。この門は
+ *    prefetch が admission の**後**に置かれていることの門でもある。
+ * ③ **重み shard はロード時に落ち切る**（Session を 1 本も張らないうちに DL 済み — 遅延構築の
+ *    家族で「初回実行まで DL が遅れ、ロード進捗にも現れない」形を無くす）。
+ * ④ **Session 構築は進捗を動かさない**（prefetch 済みキャッシュの読み直しで `complete` が
+ *    もう一度飛ぶと、集約 `loaded` が二重計上になる）。④ だけは実 GPU が要る。
  *
  * NOTE: hub / runtime のテスト helper は import しない（向こうの都合がこちらへ漏れる —
  * `helpers/memory-cache.ts` と同じ規律）。モックはこのファイル内で最小限だけ組む。
@@ -13,7 +17,9 @@
 
 import { assertEquals, assertRejects } from "@std/assert";
 import { type AssetProgress, loadManifest, resolveFiles } from "@karume/hub";
+import { acquireGpu } from "@karume/runtime";
 import { loadShardComponents } from "../src/hub/components.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 import { type DumpTensor, writeSafetensors } from "./helpers/safetensors-write.ts";
 
@@ -241,8 +247,98 @@ Deno.test(
     if (!error.message.includes("karume_test_unsupported_op")) {
       throw new Error(`capability 門の文言でない: ${error.message}`);
     }
-    // 重み shard の URL は 1 度も叩かれていない（= 重み DL 前 admission）。
+    // 重み shard の URL は 1 度も叩かれていない（= 重み DL 前 admission。ロード時 prefetch が
+    // admission の後に置かれていることの門でもある — 前に出ると落ちるモデルの重みまで落ちる）。
     assertEquals(mock.paths.includes(refs.weights.path), false);
     assertEquals(mock.paths.includes(refs.graph.path), true);
   },
 );
+
+/**
+ * 実行可能な 1 コンポーネント（`linear` 1 段）を **グラフ shard + 重み shard の 2 本**へ割った
+ * 配布形を組み、manifest まで解決して返す。重み `m.w` は 2 本目にしか無いので、Session が
+ * 張れること自体が「重み shard が届いている」ことの証拠になる。
+ */
+const prepareTwoShard = async () => {
+  const graph = graphShardBytes("linear", [["m.b", f32Tensor([2], 0.25)]]);
+  const weights = weightShardBytes([["m.w", f32Tensor([2, 2], 0.5)]]);
+  const refs = {
+    graph: await fileRef("dit/model-00000.safetensors", graph),
+    weights: await fileRef("dit/model-00001.safetensors", weights),
+  };
+  const manifest = manifestBytes({
+    test: {
+      pipeline: "test/1",
+      weights: { dit: { f32: { shards: [refs.graph, refs.weights] } } },
+      assets: {},
+      quants: { f32: { weights: { dit: "f32" }, session: {} } },
+      defaultQuant: "f32",
+      pipelineConfig: {},
+    },
+  });
+  const mock = createMockFetch(
+    new Map([
+      [MANIFEST_PATH, manifest],
+      [refs.graph.path, graph],
+      [refs.weights.path, weights],
+    ]),
+  );
+  const caches = new MemoryCacheStorage();
+  const hubOptions = { fetch: mock.fetch, caches };
+  const loaded = await loadManifest({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, hubOptions);
+  return { loaded, files: resolveFiles(loaded.manifest), refs, mock, hubOptions };
+};
+
+Deno.test(
+  "loadShardComponents: 重み shard は Session を張る前（ロード時）に落ち切り、進捗にも現れる",
+  async () => {
+    const { loaded, files, refs, mock, hubOptions } = await prepareTwoShard();
+
+    const events: AssetProgress[] = [];
+    await loadShardComponents("test.fromPretrained", loaded, files, ["dit"], {
+      ...hubOptions,
+      onProgress: (progress) => events.push(progress),
+    });
+
+    // Session は 1 本も張っていない。それでも重み shard の URL は叩かれている。
+    assertEquals(mock.paths.includes(refs.weights.path), true, "重み shard がロード時に落ちない");
+    assertEquals(mock.paths.includes(refs.graph.path), true);
+    // 進捗にも 2 本ぶんが乗る（遅延構築の家族でも「ロード = 全 DL」の表示が成立する）。
+    const completes = events.filter((event) => event.phase === "complete");
+    assertEquals(
+      new Set(completes.map((event) => event.path)),
+      new Set([refs.graph.path, refs.weights.path]),
+    );
+    assertEquals(events[events.length - 1].loaded, refs.graph.size + refs.weights.size);
+  },
+);
+
+Deno.test({
+  name: "loadShardComponents: Session 構築は進捗を 1 イベントも動かさない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const { loaded, files, mock, hubOptions } = await prepareTwoShard();
+
+    const events: AssetProgress[] = [];
+    const { open } = await loadShardComponents("test.fromPretrained", loaded, files, ["dit"], {
+      ...hubOptions,
+      onProgress: (progress) => events.push(progress),
+    });
+    const afterLoad = events.length;
+    const calls = mock.paths.length;
+    // complete はファイル数ぶんちょうど（ロードを抜けた時点で全ファイルが終端に達している）。
+    assertEquals(events.filter((event) => event.phase === "complete").length, 2);
+
+    const gpu = await acquireGpu();
+    try {
+      // 重み shard は 2 本目にしかないので、Session が張れた時点で shard 列は流れている。
+      const session = await open("dit").createSession(gpu);
+      await session.dispose();
+    } finally {
+      gpu.destroy();
+    }
+
+    assertEquals(events.length, afterLoad, "Session 構築が進捗イベントを追加している");
+    assertEquals(mock.paths.length, calls, "Session 構築が network へ出ている");
+  },
+});

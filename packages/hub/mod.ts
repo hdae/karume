@@ -5,7 +5,8 @@
  * 面は利用者ストーリーに対応する — manifest を読む（{@link parseManifest} /
  * {@link loadManifest}）/ モデルと実行構成を選ぶ（{@link resolveFiles}）/ 資産を取る
  * （{@link fetchAssets}）/ shard を 2 相で逐次受け取る（{@link streamAssets} — RAM ピーク
- * O(最大 shard)。`docs/decisions/0070-shard-loading-admission.md` 決定 2）/ 失敗を型で捌く
+ * O(最大 shard)。`docs/decisions/0070-shard-loading-admission.md` 決定 2）/ 資産を先に永続
+ * キャッシュへ落とす（{@link prefetchAssets} — 逐次面の相 1 単体）/ 失敗を型で捌く
  * （{@link HubError} 以下）/ キャッシュの診断を受け取る（{@link CacheDiagnostic}）/
  * キャッシュを消して容量を空ける（{@link clearHubCache}）。
  *
@@ -50,7 +51,13 @@ export type {
 export { resolveFiles } from "./src/resolve.ts";
 export type { ResolvedFiles, ResolveOptions } from "./src/resolve.ts";
 
-export { clearHubCache, fetchAssets, loadManifest, streamAssets } from "./src/fetch.ts";
+export {
+  clearHubCache,
+  fetchAssets,
+  loadManifest,
+  prefetchAssets,
+  streamAssets,
+} from "./src/fetch.ts";
 export type {
   AssetPhase,
   AssetProgress,

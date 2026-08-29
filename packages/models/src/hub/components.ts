@@ -10,7 +10,8 @@
  * いた。そのため ①実行できないモデル（非対応 op / 契約違反）でも重みを全部落とすまで分からず
  * ②ホスト RAM のピークがモデル全量だった。ここでは各コンポーネントの**先頭 shard（= グラフ
  * shard）だけ**を先に取って {@link prepareModel} に通し（capability 門と契約検査はこの時点で
- * 落ちる）、重み shard は Session を組むその瞬間に 1 本ずつ流す。
+ * 落ちる）、重み shard は admission を通った直後にキャッシュへ落としておき、Session を組む
+ * その瞬間にキャッシュから 1 本ずつ流す（ホスト RAM に載るのは常に「今の 1 本」だけ）。
  *
  * ## 全量面（`from*Assets`）は温存する
  *
@@ -34,6 +35,7 @@ import {
   fetchAssets,
   type FileRef,
   type LoadedManifest,
+  prefetchAssets,
   type ResolvedFiles,
   streamAssets,
   type StreamAssetsOptions,
@@ -93,8 +95,8 @@ const noWeightShards: AsyncIterable<ModelShard> = {
 };
 
 /**
- * Session 構築のたびに重み shard を流す列。取得層は相 1 で全 shard を永続キャッシュへ落として
- * あるので、2 回目以降の構築は network に出ずキャッシュから 1 本ずつ読み直す。
+ * Session 構築のたびに重み shard を流す列。ロード時に {@link prefetchAssets} で全 shard を
+ * 永続キャッシュへ落としてあるので、この列は network に出ずキャッシュから 1 本ずつ読み直す。
  */
 const weightShardStream = (
   loaded: LoadedManifest,
@@ -166,7 +168,8 @@ const aggregateProgress = (
 };
 
 /**
- * グラフ shard だけを取って admission を通し、残りの資産（extras / assets）を全量で取る。
+ * グラフ shard だけを取って admission を通し、通った後に重み shard を永続キャッシュへ落とし、
+ * 残りの資産（extras / assets）を全量で取る。
  *
  * MUST: グラフ shard は**全コンポーネントぶんを 1 回の `streamAssets`** で流す — 家族ごとに
  * 呼び分けると取得層の同時取得が効かず、直列 DL に落ちる。同じ shard を 2 つのコンポーネントが
@@ -209,14 +212,30 @@ export const loadShardComponents = async (
     );
   }
 
+  // MUST: 重み shard の prefetch は admission の**後**に置く（決定 5 — 実行できないモデルの
+  // 重みは 1 バイトも落とさない）。ここで全コンポーネントぶんを 1 回で落とすのは、Session を
+  // 遅延構築する家族で「重みの DL が初回実行まで遅れ、ロード進捗にも現れない」形を無くすため
+  // （進捗の `total` は元から全ファイルの合計なので、集約は追加の細工なしで整合する）。
+  const weights = componentKeys.map((_key, index) => shards[index].slice(1));
+  const weightRefs = weights.flat();
+  if (weightRefs.length > 0) await prefetchAssets(loaded, weightRefs, hubOptions);
+
+  // Session 構築時の相 2 は prefetch 済みキャッシュの読み直しなので、**進捗は流さない** —
+  // 流すと `complete` がロード完了の後にもう一度出て、集約 `loaded` が二重計上になる
+  // （「ロードが終わったのに進捗が動く」列になる）。
+  const { onProgress: _loadProgress, ...weightStreamOptions } = hubOptions;
+
   const components = new Map<string, ModelComponent>();
   componentKeys.forEach((key, index) => {
     const model = prepared[index];
-    const weights = shards[index].slice(1);
     components.set(key, {
       graph: model.graph,
       createSession: (gpu, sessionOptions = {}) =>
-        model.createSession(gpu, weightShardStream(loaded, weights, hubOptions), sessionOptions),
+        model.createSession(
+          gpu,
+          weightShardStream(loaded, weights[index], weightStreamOptions),
+          sessionOptions,
+        ),
     });
   });
 

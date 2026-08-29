@@ -601,46 +601,46 @@ export type StreamedAsset = {
 /** {@link streamAssets} のオプション（全量面 {@link fetchAssets} と同じ透過）。 */
 export type StreamAssetsOptions = FetchAssetsOptions;
 
+/** 相 1（prefetch）を抜けた時点の道具一式 — 相 2 を持つ面（{@link streamAssets}）が引き継ぐ。 */
+type PrefetchedPhase = {
+  /** ファイル別の受信済みバイト（キーは {@link fileRefKey}）。相 2 の self-heal も同じ表を更新する。 */
+  readonly received: Map<string, number>;
+  /** 進捗の発火口。`total` は渡した `refs` の size 合計に固定されている。 */
+  readonly emit: (phase: AssetPhase, ref: FileRef) => void;
+  /** 受信バイトの門を被せた `fetch`。budget の表が同じなので相 2 もこれをそのまま使う。 */
+  readonly guarded: typeof globalThis.fetch;
+};
+
 /**
- * shard を **2 相**で読み、1 本ずつ引き渡す逐次面（ADR 0070 決定 2）。
+ * 全 ref を永続キャッシュへ落とす**相 1** の実体。{@link streamAssets} の相 1 と
+ * {@link prefetchAssets} の本体はこの 1 本（同じ機構を 2 つ書くと、同時取得数・真因の復元・
+ * 進捗の綴りが片方だけ直る）。
  *
- * - **相 1（prefetch）**: 最初の yield の前に、全 shard を永続キャッシュへ落とす
- *   （streaming — RAM に全量を載せない・同時 4 本）。`sha256` は通過中に照合され、
- *   不一致はエントリ不成立で fail loud（帯域を捨てた後に全量を握って落ちない）。通ったエントリ
- *   には記録ハッシュが焼かれ、既に記録が一致するエントリは network に出ずそのまま温存される。
- * - **相 2（逐次引き渡し）**: `refs` の順に 1 本ずつ「キャッシュから取得 → 呼び手へ渡す →
- *   参照を手放す」。相 1 が焼いた記録と期待 sha256 の突合は取得層が行い（全量ハッシュ 0 回）、
- *   記録が食い違う・バイト数が合わないエントリは self-heal で 1 往復だけ取り直す。
+ * `emitComplete` は「この面が `complete` の発行者か」— 相 2 を持つ逐次面では引き渡しの直前が
+ * 終端なので `false`（両方が出すと `downloading`* → `complete` を 1 ファイル 1 回とする
+ * {@link AssetPhase} の契約が破れる）、相 2 を持たない {@link prefetchAssets} では終端がここしか
+ * ないので `true`。
  *
- * 全量面 {@link fetchAssets} との違いは**渡したバイト列への参照を残さない**ことで、RAM ピークが
- * O(最大 shard) に収まる（全量ホスト保持が成立しない検収モデル級のための面）。全量面は温存して
- * あるので、小モデルは従来どおりそちらを使う。
- *
- * MUST: 相 1 は**最初の `next()` まで開始されない**（async generator の遅延）。呼んだだけでは
- * 何も起きず、`for await` に入るか `next()` を呼んだ時点で DL が始まる。空の `refs`・重複 path も
- * その時点（network に出る前）に {@link ManifestReferenceError} で弾く。
- *
- * NOTE: 相 1 は `caches` が無い環境・キャッシュ書込み失敗（quota 超過等）で **fail loud** になる
- * （下層 prefetch の契約 — バイト列を手元に持たない面なので素 fetch へ縮退する余地が無い。黙って
- * 縮退させると RAM ピークの目標が壊れる）。`onCacheError` の診断が届くのは相 2 だけで、相 1 の
- * cache I/O 失敗は {@link HubFetchError} として上がる。
+ * `where` は入力検査の文言に載る面の名前（呼び出し側の誤りをどの面で弾いたかが分かる）。
  */
-export const streamAssets = async function* (
+const runPrefetchPhase = async (
+  where: string,
   loaded: LoadedManifest,
   refs: readonly FileRef[],
-  options: StreamAssetsOptions = {},
-): AsyncGenerator<StreamedAsset, void, unknown> {
+  options: FetchAssetsOptions,
+  { emitComplete }: { readonly emitComplete: boolean },
+): Promise<PrefetchedPhase> => {
   const { repo, revisionSha, manifest } = loaded;
   const available = manifest.available;
   const target = hfRef(loaded, revisionSha);
   const targetFor = originFor(loaded, target);
   const contextFor = fetchContext(repo, revisionSha);
 
-  // 入力検査は相 1 の前に済ませる（相 1 は全 shard を落としてしまうので、network に出た後で
+  // 入力検査は取得の前に済ませる（相 1 は全 shard を落としてしまうので、network に出た後で
   // 呼び出し側の誤りに気づいても帯域が戻らない）。
   if (refs.length === 0) {
     throw new ManifestReferenceError(
-      `streamAssets: 取得対象が 1 つも無い（repo ${repo} @ ${revisionSha}）`,
+      `${where}: 取得対象が 1 つも無い（repo ${repo} @ ${revisionSha}）`,
       { available },
     );
   }
@@ -651,8 +651,8 @@ export const streamAssets = async function* (
     const refKey = fileRefKey(ref);
     if (declared.has(refKey)) {
       throw new ManifestReferenceError(
-        `streamAssets: 参照 '${refKey}' が重複している（逐次面は渡された列をそのまま引き渡す —` +
-          ` 同じ shard を 2 回受け取るのは呼び出し側の誤り。全量面 fetchAssets は一意化する）`,
+        `${where}: 参照 '${refKey}' が重複している（この面は渡された列をそのまま扱う —` +
+          ` 同じ shard を 2 回渡すのは呼び出し側の誤り。全量面 fetchAssets は一意化する）`,
         { available },
       );
     }
@@ -707,8 +707,6 @@ export const streamAssets = async function* (
     : AbortSignal.any([failure.signal, options.signal]);
   const guarded = createGuardedFetch(options.fetch ?? globalThis.fetch, budgets);
 
-  // ---- 相 1: 全 shard を永続キャッシュへ落とす（ここを抜けるまで 1 本も yield しない）。
-  //
   // 既存エントリの扱いは記録ハッシュとの突合で決まる（取得層 0.5.0）— 記録が期待 sha256 と
   // 一致すれば network に出ずそのまま温存し、記録が無い / 食い違うエントリは検証付きで温め直す。
   const prefetchOne = async (ref: FileRef): Promise<void> => {
@@ -737,6 +735,13 @@ export const streamAssets = async function* (
         { ...context, path: ref.path, available, cause: error },
       );
     }
+    if (emitComplete) {
+      // MUST: `received` にも size を書く — 書かずに complete だけ出すと、キャッシュヒット
+      // （downloading が 1 度も出ない）だったファイルが後続イベントの `loaded` 合計から抜け、
+      // 全体の進捗が巻き戻って見える。
+      received.set(refKey, ref.size);
+      emit("complete", ref);
+    }
   };
 
   let next = 0;
@@ -757,6 +762,83 @@ export const streamAssets = async function* (
   // MUST: 巻き添えではなく**真の第一失敗**を上げる（全量面と同じ理由）。ワーカーの reject を
   // 配列順に拾うと、真犯人が worker[0] 以外だったときに巻き添え側が表面化する。
   if (failure.signal.aborted) throw failure.signal.reason;
+
+  return { received, emit, guarded };
+};
+
+/**
+ * 資産を永続キャッシュへ**落とすだけ**の面（逐次面 {@link streamAssets} の相 1 単体）。重み
+ * shard を先に永続キャッシュへ落とす面 — 後続の {@link streamAssets} 相 2 は network に出ない。
+ *
+ * 使いどころは「Session を遅延構築するパイプラインのロード時」— 構築が初回の実行まで遅れると
+ * 重み shard の DL もそこまで遅れ、ロード進捗にも現れない。ここで先に落としておけば、進捗は
+ * ロード中に出揃い、構築はキャッシュ読出しだけで済む。
+ *
+ * 機構は逐次面の相 1 と同一（同時 {@link CONCURRENCY} 本・`sha256` は通過中に照合・失敗は
+ * 真因を復元して {@link HubFetchError}）。バイト列は返さない（RAM に載せない面なので、欲しい
+ * ときは {@link streamAssets} / {@link fetchAssets} で読み直す — キャッシュヒットになる）。
+ *
+ * 進捗は `downloading`* に続けて**ファイルごとに `complete` を 1 回**出す（相 2 を伴わない
+ * この面が終端 — {@link AssetPhase} の契約。キャッシュ済みのファイルは `complete` 1 点だけ）。
+ *
+ * NOTE: `caches` が無い環境・キャッシュ書込み失敗（quota 超過等）では **fail loud**（相 1 と
+ * 同じ理由 — バイト列を手元に持たない面なので素 fetch へ縮退する余地が無い）。
+ */
+export const prefetchAssets = async (
+  loaded: LoadedManifest,
+  refs: readonly FileRef[],
+  options: FetchAssetsOptions = {},
+): Promise<void> => {
+  await runPrefetchPhase("prefetchAssets", loaded, refs, options, { emitComplete: true });
+  // MUST: 全ファイルがキャッシュ済みの呼び出しは 1 度も network に出ない＝下層の signal 監視が
+  // 効かないので、決着後にも中断を見る（これが返却前の最後の関門）。
+  options.signal?.throwIfAborted();
+};
+
+/**
+ * shard を **2 相**で読み、1 本ずつ引き渡す逐次面（ADR 0070 決定 2）。
+ *
+ * - **相 1（prefetch）**: 最初の yield の前に、全 shard を永続キャッシュへ落とす
+ *   （streaming — RAM に全量を載せない・同時 4 本）。`sha256` は通過中に照合され、
+ *   不一致はエントリ不成立で fail loud（帯域を捨てた後に全量を握って落ちない）。通ったエントリ
+ *   には記録ハッシュが焼かれ、既に記録が一致するエントリは network に出ずそのまま温存される。
+ * - **相 2（逐次引き渡し）**: `refs` の順に 1 本ずつ「キャッシュから取得 → 呼び手へ渡す →
+ *   参照を手放す」。相 1 が焼いた記録と期待 sha256 の突合は取得層が行い（全量ハッシュ 0 回）、
+ *   記録が食い違う・バイト数が合わないエントリは self-heal で 1 往復だけ取り直す。
+ *
+ * 全量面 {@link fetchAssets} との違いは**渡したバイト列への参照を残さない**ことで、RAM ピークが
+ * O(最大 shard) に収まる（全量ホスト保持が成立しない検収モデル級のための面）。全量面は温存して
+ * あるので、小モデルは従来どおりそちらを使う。
+ *
+ * MUST: 相 1 は**最初の `next()` まで開始されない**（async generator の遅延）。呼んだだけでは
+ * 何も起きず、`for await` に入るか `next()` を呼んだ時点で DL が始まる。空の `refs`・重複 path も
+ * その時点（network に出る前）に {@link ManifestReferenceError} で弾く。
+ *
+ * NOTE: 相 1 は `caches` が無い環境・キャッシュ書込み失敗（quota 超過等）で **fail loud** になる
+ * （下層 prefetch の契約 — バイト列を手元に持たない面なので素 fetch へ縮退する余地が無い。黙って
+ * 縮退させると RAM ピークの目標が壊れる）。`onCacheError` の診断が届くのは相 2 だけで、相 1 の
+ * cache I/O 失敗は {@link HubFetchError} として上がる。
+ */
+export const streamAssets = async function* (
+  loaded: LoadedManifest,
+  refs: readonly FileRef[],
+  options: StreamAssetsOptions = {},
+): AsyncGenerator<StreamedAsset, void, unknown> {
+  const { repo, revisionSha, manifest } = loaded;
+  const available = manifest.available;
+  const target = hfRef(loaded, revisionSha);
+  const targetFor = originFor(loaded, target);
+  const contextFor = fetchContext(repo, revisionSha);
+
+  // ---- 相 1: 全 shard を永続キャッシュへ落とす（ここを抜けるまで 1 本も yield しない）。
+  // 入力検査もこの中（network に出る前）で済む。`complete` は相 2 が出すので発行しない。
+  const { received, emit, guarded } = await runPrefetchPhase(
+    "streamAssets",
+    loaded,
+    refs,
+    options,
+    { emitComplete: false },
+  );
 
   // ---- 相 2: 1 本ずつ引き渡す。
   for (const ref of refs) {
