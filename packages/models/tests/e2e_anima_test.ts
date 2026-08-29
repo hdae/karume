@@ -15,6 +15,9 @@
  *
  * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
  * のみ（fs を持ち込まない — 横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
+ * 素の base（`models/karume-anima/`）は 1GiB 超のコンポーネントが **shard 分割**された配布形で、
+ * 全量面（1 コンポーネント = 1 ファイルの前提）では開けない — そこだけローカル HTTP を立てて
+ * `fromPretrained`（shard 面）で読む（下の「CFG」節）。
  */
 
 import { assertEquals, assertFalse, assertRejects } from "@std/assert";
@@ -94,7 +97,6 @@ const readManifest = (): Manifest => parseManifest(manifestText as string);
 const loadLocalAssets = async (
   manifest: Manifest,
   quant: string,
-  dir: URL = ASSETS_DIR,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
   const files = resolveFiles(manifest, { quant });
   const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
@@ -102,11 +104,48 @@ const loadLocalAssets = async (
   for (const key of Object.keys(files)) {
     const { path } = files[key];
     const cached = byPath.get(path);
-    const bytes = cached ?? await Deno.readFile(new URL(path, dir));
+    const bytes = cached ?? await Deno.readFile(new URL(path, ASSETS_DIR));
     if (cached === undefined) byPath.set(path, bytes);
     assets = { ...assets, [key]: bytes };
   }
   return assets;
+};
+
+// --- ローカル HTTP（HF 形の使い捨てサーバ）------------------------------------
+//
+// 取得層を通す 2 種類の門が土台を共有する: ①`fromPretrained` そのものの門（下の
+// 「fromPretrained」節）②**分割された配布形**を読む唯一の手段（素の base — 全量面では
+// 開けない）。喋るのは hub が実際に叩く 2 経路（revision 解決 API・resolve URL）だけ。
+
+const REPO = "karume-test/anima";
+const REVISION_SHA = "1234567890abcdef1234567890abcdef12345678";
+const REVISION_RE = /^\/api\/models\/(.+)\/revision\/(.+)$/;
+const RESOLVE_RE = /^\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
+
+/** `dir` の `paths` だけを HF の URL 形で配る一時サーバ（ポート自動割当・127.0.0.1 束縛）。 */
+const serveAssets = (
+  paths: ReadonlySet<string>,
+  dir: URL,
+): Deno.HttpServer<Deno.NetAddr> =>
+  Deno.serve({ port: 0, hostname: "127.0.0.1", onListen: () => {} }, async (request) => {
+    const { pathname } = new URL(request.url);
+    if (REVISION_RE.test(pathname)) return Response.json({ sha: REVISION_SHA });
+    const resolved = RESOLVE_RE.exec(pathname);
+    if (resolved === null) return new Response("not found", { status: 404 });
+    const [, repo, revision, rawPath] = resolved;
+    const path = decodeURIComponent(rawPath);
+    if (repo !== REPO || revision !== REVISION_SHA || !paths.has(path)) {
+      return new Response("not found", { status: 404 });
+    }
+    const file = await Deno.open(new URL(path, dir));
+    const { size } = await file.stat();
+    return new Response(file.readable, { headers: { "content-length": String(size) } });
+  });
+
+/** `fromPretrained` がこの配布形 / quant で取りに来る path 全部（manifest 自身を含む）。 */
+const servedPaths = (manifest: Manifest, quant: string): Set<string> => {
+  const files = resolveFiles(manifest, { quant });
+  return new Set(["karume.json", ...Object.keys(files).map((key) => files[key].path)]);
 };
 
 /** 画素の要約（参照 sha と食い違ったときに「どれくらい違う絵なのか」を言うため）。 */
@@ -273,15 +312,29 @@ if (baseManifestText === undefined) {
   );
 }
 
-Deno.test({
-  name: `e2e(実GPU): 素の base / CFG ${BASE_REFERENCE.guidanceScale} / ` +
-    `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
-  ignore: !GPU_AVAILABLE || baseManifestText === undefined,
-  fn: async () => {
-    const manifest = parseManifest(baseManifestText as string);
-    const { quant, resolution, steps, guidanceScale, negativePrompt, sha256 } = BASE_REFERENCE;
-    const assets = await loadLocalAssets(manifest, quant, BASE_ASSETS_DIR);
-    await using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
+/**
+ * 素の base を {@link BASE_REFERENCE} のノブで 1 枚焼き、参照 sha256 と突き合わせる。
+ *
+ * MUST: **取得層経由**（ローカル HTTP + `fromPretrained`）で組む。この配布形の text_encoder と
+ * transformer は 1GiB 超で shard 分割されていて、全量面（`loadLocalAssets` + `fromAssets`）は
+ * 「1 コンポーネント = 1 ファイル」の前提なので開けない — shard 面を持つ取得層だけが読める
+ * （デモの `--source` と同型 — `examples/shared/local-dist-server.ts`）。分割はテンソル単位で
+ * ビット同一なので、経路が変わっても参照 sha は 1 ビットも動かない。
+ */
+const assertBaseReferencePng = async (
+  label: string,
+  expected: string,
+  options: { readonly sampler?: AnimaSamplerType } = {},
+): Promise<void> => {
+  const manifest = parseManifest(baseManifestText as string);
+  const { quant, resolution, steps, guidanceScale, negativePrompt } = BASE_REFERENCE;
+  const server = serveAssets(servedPaths(manifest, quant), BASE_ASSETS_DIR);
+  try {
+    // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
+    await using pipeline = await AnimaPipeline.fromPretrained(
+      { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` },
+      { quant, caches: new MemoryCacheStorage() },
+    );
     const started = performance.now();
     const image = await pipeline.generate({
       prompt: PROMPT,
@@ -290,15 +343,25 @@ Deno.test({
       guidanceScale,
       negativePrompt,
       seed: SEED,
+      ...(options.sampler === undefined ? {} : { sampler: options.sampler }),
     });
     const png = await encodePng(image.data, image.width, image.height);
     const actual = await sha256Hex(png);
     const elapsed = ((performance.now() - started) / 1000).toFixed(1);
-    console.log(`[e2e] base-cfg: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
-    if (actual !== sha256) {
-      throw new Error(await mismatchReport("base-cfg", image, png, sha256, actual));
+    console.log(`[e2e] ${label}: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
+    if (actual !== expected) {
+      throw new Error(await mismatchReport(label, image, png, expected, actual));
     }
-  },
+  } finally {
+    await server.shutdown();
+  }
+};
+
+Deno.test({
+  name: `e2e(実GPU): 素の base / CFG ${BASE_REFERENCE.guidanceScale} / ` +
+    `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
+  ignore: !GPU_AVAILABLE || baseManifestText === undefined,
+  fn: () => assertBaseReferencePng("base-cfg", BASE_REFERENCE.sha256),
 });
 
 /**
@@ -314,31 +377,7 @@ Deno.test({
   name: `e2e(実GPU): 素の base を request の sampler:"dpmpp-2m" で回すと ` +
     `DPM++ 2M の参照 sha256 と一致する`,
   ignore: !GPU_AVAILABLE || baseManifestText === undefined,
-  fn: async () => {
-    const manifest = parseManifest(baseManifestText as string);
-    const { quant, resolution, steps, guidanceScale, negativePrompt } = BASE_REFERENCE;
-    const assets = await loadLocalAssets(manifest, quant, BASE_ASSETS_DIR);
-    await using pipeline = await AnimaPipeline.fromAssets({ manifest, assets }, { quant });
-    const started = performance.now();
-    const image = await pipeline.generate({
-      prompt: PROMPT,
-      resolution,
-      steps,
-      guidanceScale,
-      negativePrompt,
-      seed: SEED,
-      sampler: "dpmpp-2m",
-    });
-    const png = await encodePng(image.data, image.width, image.height);
-    const actual = await sha256Hex(png);
-    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
-    console.log(`[e2e] base-cfg-dpmpp: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
-    if (actual !== BASE_DPMPP_SHA256) {
-      throw new Error(
-        await mismatchReport("base-cfg-dpmpp", image, png, BASE_DPMPP_SHA256, actual),
-      );
-    }
-  },
+  fn: () => assertBaseReferencePng("base-cfg-dpmpp", BASE_DPMPP_SHA256, { sampler: "dpmpp-2m" }),
 });
 
 // --- fromPretrained（取得層込み）--------------------------------------------
@@ -350,37 +389,15 @@ Deno.test({
 // 解像度が 512 なのは RAM の都合（取得層のメモリキャッシュが資産の写しを持つ）。ビット一致の
 // 門としては 1024 と同格 — 参照 sha は上の 512 ケースと同じ値を使う。
 
-const REPO = "karume-test/anima";
-const REVISION_SHA = "1234567890abcdef1234567890abcdef12345678";
-const REVISION_RE = /^\/api\/models\/(.+)\/revision\/(.+)$/;
-const RESOLVE_RE = /^\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
-
-/** HF の 2 経路（revision 解決 API・resolve URL）だけを喋る一時サーバ。 */
-const serveAssets = (paths: ReadonlySet<string>): Deno.HttpServer<Deno.NetAddr> =>
-  Deno.serve({ port: 0, hostname: "127.0.0.1", onListen: () => {} }, async (request) => {
-    const { pathname } = new URL(request.url);
-    if (REVISION_RE.test(pathname)) return Response.json({ sha: REVISION_SHA });
-    const resolved = RESOLVE_RE.exec(pathname);
-    if (resolved === null) return new Response("not found", { status: 404 });
-    const [, repo, revision, rawPath] = resolved;
-    const path = decodeURIComponent(rawPath);
-    if (repo !== REPO || revision !== REVISION_SHA || !paths.has(path)) {
-      return new Response("not found", { status: 404 });
-    }
-    const file = await Deno.open(new URL(path, ASSETS_DIR));
-    const { size } = await file.stat();
-    return new Response(file.readable, { headers: { "content-length": String(size) } });
-  });
-
 Deno.test({
   name: "e2e(実GPU): fromPretrained（取得層 + integrity 検証）の PNG が参照 sha256 と一致する",
   ignore: !RUNNABLE,
   fn: async () => {
     const quant = "f16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 512, height: 512 };
-    const files = resolveFiles(readManifest(), { quant });
-    const paths = new Set(["karume.json", ...Object.keys(files).map((key) => files[key].path)]);
-    const server = serveAssets(paths);
+    const manifest = readManifest();
+    const files = resolveFiles(manifest, { quant });
+    const server = serveAssets(servedPaths(manifest, quant), ASSETS_DIR);
     try {
       const hubUrl = `http://127.0.0.1:${server.addr.port}`;
       // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
