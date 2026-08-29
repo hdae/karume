@@ -22,9 +22,9 @@
   の device 寿命化（error-scope utility 分離が前段）・arena の MAP_READ コメント訂正
 - 起票のみ: perf-ledger **H-8〜H-10 / L-7 / L-8**（cost proxy / readback 共有 / metadata
   compile / async pipeline / params 有界化）
-- **M2 実機判定（ユーザー実行）**: カナリアが実故障を検出できるかの確認 —
-  `gpu_attention_dp4a_canary_test.ts` + attention i8a8 系の既存赤 4 本の突き合わせ
-  （読み方 = [known-issues](known-issues.md) Metal 節）
+- **M2 実機判定は完了（3 往復・2026-08-29）**: カナリアは発火 → 機序の再理解（変種間不一致
+  ではなく共有エピローグの 1 ULP 差 — 旧推論撤回）→ 判定則 v2 + v2.1 で **15/15 全緑・
+  a8 復活・警告 1 回**を実機確認。残る M2 の赤は従来の既知 6 本のみ
 - 波 2 後: **Opus+Codex 全体レビュー**（並行なし）→ anima-web の cold ロード DL スロット
   改善（提案 b+a = ADR 0070 決定 5 不変のまま admission を graph shard 完了ごとに前倒し +
   extras の並行開始。opt-in の c 案は再裁定が要るため保留）
