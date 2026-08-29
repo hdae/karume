@@ -72,6 +72,21 @@
   getCompilationInfo で補完が条件。
 - reason: "internal" は本機では再現不能（未検証のまま）。
 
+## SessionBuildStats の初回実測（L-1 の分解材料 — 2026-08-29 波 2 で席を実装）
+
+テスト fixture（4 格納混在・重み総量 800B・3 shard）での採取:
+
+- shard 面: `shardWaitMs 0.08-0.17 / decodeMs 0 / bufferCreateMs 0.19-0.26 /
+  writeBufferIssueMs 0.15-0.34 / uploadedBytes 800 / uploadFenceMs 33.3-34.1`
+- 全量面（1 shard）: `uploadFenceMs 11.1`・適格外変種（f16 CPU 展開）: `decodeMs 0.017-0.039 /
+  uploadedBytes 1056`
+- 読み: **フェンス待ちが shard 本数にほぼ線形（≈11ms/本）で単独支配的**（ホスト費用 4 席の
+  合計 0.4-0.8ms に対し 1:50 超）。L-1 の 2.50s も「shard 本数 × フェンス固定費 + 実転送」が
+  主項という**仮説**が立つ（この席群では実転送とキュー待ちは分離できない — 帰属の限界は型の
+  docstring どおり）。次の材料 = 実モデル（anima base 4 shard 等）での buildStats 採取。
+- decodeMs は 256B の f16 展開でも 0.017ms 以上を安定して刻む（`performance.now()` 分解能に
+  埋もれない — テスト門はフレークしない）。
+
 ## attention dp4a カナリア（ADR 0058 追記の実測）
 
 - 6 変種 1 submit の判定コスト: 初回のみ **39〜55ms**（同一 GpuContext 3 連続で 54.5 / 38.6 /
