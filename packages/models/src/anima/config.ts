@@ -39,7 +39,7 @@ export const ANIMA_PIPELINE_MAJOR = 1;
 // SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
 export const ANIMA_TURBO_CURRENT = {
   repo: "hdae/karume-anima-turbo",
-  revision: "88357344a2013644e4a32dbe44280a8f6ca4e144",
+  revision: "1a6e907af85a0b262080f3d4159009d150307639",
 } as const satisfies HubRepoRef;
 
 /**
@@ -54,7 +54,7 @@ export const ANIMA_TURBO_CURRENT = {
 // SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
 export const ANIMA_CURRENT = {
   repo: "hdae/karume-anima",
-  revision: "2682441ac9c6156a74bd7f6adf10db225420d99c",
+  revision: "7be81011fab207e7a2340cca47b7858a006ca32f",
 } as const satisfies HubRepoRef;
 
 const ROOT_KEYS: readonly string[] = ["scheduler", "defaults"];
