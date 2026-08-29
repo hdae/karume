@@ -25,7 +25,7 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           # ローカル開発機と同一にピン（fmt の挙動はバージョンで変わり得るため）。
-          deno-version: "2.9.4"
+          deno-version: "2.9.6"
       - name: Format
         run: deno fmt --check
       - name: Lint
