@@ -41,6 +41,16 @@ export class GpuOutOfMemoryError extends Error {
   override readonly name = "GpuOutOfMemoryError";
 }
 
+/**
+ * errorScope が捕捉した internal エラー（実装側の都合で操作が失敗した — シェーダが複雑すぎて
+ * コンパイルできない等）。WGSL 自体は妥当なので validation とは分岐先が違う: 利用者にとって
+ * 「記述が不正」ではなく「この環境ではこの形のカーネルが通らない」であり、別型で区別できないと
+ * codegen のバグと環境の限界が同じ報告に潰れる。
+ */
+export class GpuInternalError extends Error {
+  override readonly name = "GpuInternalError";
+}
+
 /** device が失われた状態での操作。待ち続ける代わりに必ずこれを投げる。 */
 export class GpuDeviceLostError extends Error {
   override readonly name = "GpuDeviceLostError";
@@ -75,7 +85,7 @@ export class GpuFeatureError extends Error {
  * MUST: `maxComputeWorkgroupSizeX/Y/Z` は `maxComputeInvocationsPerWorkgroup` とは別の limit。
  * invocations だけ引き上げても `@workgroup_size(512)` は通らず、しかも**失敗の仕方が静か**
  * （`createComputePipeline` は throw せず、無効パイプラインへの dispatch が no-op になって
- * 出力が全て 0 になる）。この沈黙故障は {@link withValidationScope} でのみ可視化できる。
+ * 出力が全て 0 になる）。この沈黙故障は {@link withPipelineScope} でのみ可視化できる。
  */
 export const REQUIRED_LIMIT_KEYS = [
   "maxBufferSize",
@@ -347,7 +357,7 @@ export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> 
   try {
     const pipeline = await raceCanaryDeviceLost(
       device,
-      withValidationScope(
+      withPipelineScope(
         device,
         "shader-f16 カナリア",
         () =>
@@ -562,7 +572,7 @@ const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
  *   呼び出しを跨ぐ実行コンテキスト追跡が要る。Web 標準 API のみという制約（ADR 0002）の下で
  *   純粋な手段が無いため、取得点を executor の 1 箇所に限定し、その内側の層（PipelineCache /
  *   SubmitScheduler / RunArena）は同期区間で完結するスコープしか使わない、という層規約で守る。
- * - 同期区間だけで完結するスコープ（{@link withValidationScope} /
+ * - 同期区間だけで完結するスコープ（{@link withPipelineScope} /
  *   {@link pushFailureScopes}〜{@link popFailureScopes}）はロック不要。他のタスクが割り込む
  *   余地が無く、LIFO の入れ子が必ず均衡するため。ロック内から呼ばれる層（PipelineCache 等）
  *   はこの形でなければならない。
@@ -1248,32 +1258,52 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
 };
 
 /**
- * validation errorScope を張って `body` を実行し、捕捉したエラーを例外に変換する。
+ * internal + validation の 2 本を張って `body`（パイプライン生成）を実行し、捕捉したエラーを
+ * 例外に変換する。**パイプライン生成経路はこちらを使う**（validation 1 本では internal
+ * エラーが素通りする）。
  *
- * MUST: パイプライン生成経路には常設する。無効なシェーダ / パイプラインは同期例外にならず、
- * 生成は成功したように見えて dispatch が no-op になり、出力が全て 0 のまま処理が続く。
+ * 両方が要るのは失敗の出方が違うため — 上限超過や型不整合は validation、実装側の都合
+ * （シェーダが複雑すぎてコンパイルできない等）は internal で、どちらも同期例外にならず
+ * **無効なパイプラインが返るだけ**。囲まないと dispatch が no-op 化して出力が全て 0 になる。
+ *
  * MUST NOT: `body` の中で非同期処理を待たない。errorScope はスタックで、pop は body の同期
  * 実行直後に起きるため、await 後にエンコードした操作は別のスコープに吸われる。
  */
-export const withValidationScope = async <T>(
+export const withPipelineScope = async <T>(
   device: GPUDevice,
   label: string,
   body: () => T,
 ): Promise<T> => {
+  device.pushErrorScope("internal");
   device.pushErrorScope("validation");
   let value: T;
   try {
     value = body();
   } catch (cause) {
-    // MUST: body が throw してもスコープは必ず pop する。積み残すと後続の検証結果が
-    // 誤ったスコープに吸われ、以後のエラーが恒久的に見えなくなる。pop 自体の失敗は握り潰す
+    // MUST: body が throw しても 2 本とも pop する。片方でも積み残すと後続の検証結果が誤った
+    // スコープに吸われ、以後のエラーが恒久的に見えなくなる。pop 自体の失敗は握り潰す
     // （後始末で本体の例外を上書きしない — discardFailureScopes と同じ規律）。
-    await device.popErrorScope().catch(() => null);
+    const validation = device.popErrorScope().catch(() => null);
+    const internal = device.popErrorScope().catch(() => null);
+    await Promise.all([validation, internal]);
     throw cause;
   }
-  const error = await device.popErrorScope();
-  if (error !== null) {
-    throw new GpuValidationError(`${label}: ${error.message}`);
+  // MUST: 2 本の pop は**同一同期区間で発行**する（await するのは発行済みの promise だけ）。
+  // pop はスタック先頭を無条件に取るため、発行の間に await を挟むと、その隙に他所が push した
+  // スコープを 2 本目が取り、失敗が誤帰属する（popFailureScopes と同じ規律）。
+  const validation = device.popErrorScope();
+  const internal = device.popErrorScope();
+  const [validationError, internalError] = await Promise.all([validation, internal]);
+  // MUST: 両方が捕捉されたときは internal を返す。internal で無効化されたパイプラインを触る
+  // 後続の操作（`getBindGroupLayout` 等）は**派生の** validation エラーを立てるため、
+  // validation を先に返すと根因の internal が捨てられ、原因の分からない「無効パイプライン」
+  // として報告される。OOM を validation より先に返すのと同型の判断
+  // （docs/research/2026-08-08-vram-oom-misreport.md）。
+  if (internalError !== null) {
+    throw new GpuInternalError(`${label}: ${internalError.message}`);
+  }
+  if (validationError !== null) {
+    throw new GpuValidationError(`${label}: ${validationError.message}`);
   }
   return value;
 };

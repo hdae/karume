@@ -15,13 +15,19 @@ type FakeGpu = {
 const createFakeGpu = (scopeError: GPUError | null = null): FakeGpu => {
   const calls: string[] = [];
   const modules: string[] = [];
+  // 実 device はフィルタに一致したスコープのエラーしか返さないため、フェイクも push された
+  // フィルタを LIFO で追跡し、validation スコープの pop にだけ scopeError を返す（internal
+  // スコープにも同じエラーを返すと、withPipelineScope の internal 優先規則が誤発火する）。
+  const filters: string[] = [];
   const device = {
     pushErrorScope: (filter: string): void => {
       calls.push(`push:${filter}`);
+      filters.push(filter);
     },
     popErrorScope: (): Promise<GPUError | null> => {
       calls.push("pop");
-      return Promise.resolve(fake.scopeError);
+      const filter = filters.pop();
+      return Promise.resolve(filter === "validation" ? fake.scopeError : null);
     },
     createShaderModule: (descriptor: { readonly code: string }) => {
       calls.push("createShaderModule");
@@ -111,16 +117,18 @@ Deno.test("PipelineCache は同一キーに異なる WGSL が来たら即例外�
   assertEquals(gpu.modules, [WGSL_A], "衝突時は device に触らない");
 });
 
-Deno.test("PipelineCache はパイプライン生成を validation errorScope で囲む", async () => {
+Deno.test("PipelineCache はパイプライン生成を internal + validation の 2 スコープで囲む", async () => {
   const gpu = createFakeGpu();
   const cache = new PipelineCache(gpu.device);
 
   await cache.get("k", WGSL_A);
 
   assertEquals(gpu.calls, [
+    "push:internal",
     "push:validation",
     "createShaderModule",
     "createComputePipeline",
+    "pop",
     "pop",
   ]);
 });

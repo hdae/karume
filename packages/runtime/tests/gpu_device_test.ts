@@ -228,6 +228,16 @@ const CANARY_SOLUTION = [4.0029296875, 1] as const;
 const loss = (): Promise<GPUDeviceLostInfo> =>
   Promise.resolve({ reason: "destroyed", message: "テストによる消失" });
 
+/**
+ * マクロタスクで決着する消失。マイクロタスクだけで進む段（パイプライン生成の errorScope pop
+ * 等）を必ず先に通し、競合点を「解決しない待ち」だけに固定する — 即決着の消失だと勝敗が
+ * 各段の tick 数へ結合し、pop の本数が変わるだけでテストが割れる（2 スコープ化で実際に割れた）。
+ */
+const lossAfterMacrotask = (): Promise<GPUDeviceLostInfo> =>
+  new Promise((resolve) =>
+    setTimeout(() => resolve({ reason: "destroyed", message: "テストによる消失" }), 0)
+  );
+
 Deno.test("shader-f16 カナリアは既知解と一致したときだけ通る", async () => {
   await assertShaderF16Executes(canaryDevice({ mapped: CANARY_SOLUTION }));
 
@@ -247,7 +257,7 @@ Deno.test("shader-f16 カナリアは device 消失で待ち続けずに落ち�
   // reject するので、これは実挙動の再現ではなく「未検証の実装（実 TDR / ブラウザ）が解決を
   // 返さなかった場合」の窓。競わせていない待ちが 1 つでも残っていると、その環境ではこの
   // await が永久に返らず acquireGpu がハングする — それをここで固定する。
-  const readback = assertShaderF16Executes(canaryDevice({ lost: loss() }));
+  const readback = assertShaderF16Executes(canaryDevice({ lost: lossAfterMacrotask() }));
   const readbackError = await assertRejects(() => readback, GpuDeviceLostError);
   assert(readbackError.message.includes("読み戻し"), readbackError.message);
 

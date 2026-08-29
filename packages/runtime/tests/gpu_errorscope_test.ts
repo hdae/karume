@@ -6,7 +6,7 @@ import {
   popFailureScopes,
   pushFailureScopes,
   RUNTIME_INTERNAL,
-  withValidationScope,
+  withPipelineScope,
 } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { applyReferenceOp } from "../src/reference/ops.ts";
@@ -64,30 +64,64 @@ Deno.test({
 });
 
 Deno.test({
-  name: "withValidationScope は body の同期例外でもスコープを積み残さない（実 GPU）",
+  name: "withPipelineScope は body の同期例外でも 2 本とも pop する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
     try {
+      // 積み残し / 過剰 pop はスコープの中身を見ても分からない（自分の push と pop は LIFO で
+      // 必ず対応する）ので、**外側の番兵スコープ**で間接的に門にする。番兵には先にエラーを
+      // 1 つ入れておき、withPipelineScope の後にそれを取り返せるかを見る。
+      const { layout } = await new PipelineCache(gpu.device).get(
+        "pipeline-scope-probe",
+        wgslWithWorkgroupSize(64),
+      );
+      gpu.device.pushErrorScope("validation");
+      // binding 0 が欠落した bindGroup は同期例外にならず errorScope にだけ現れる
+      gpu.device.createBindGroup({ layout, entries: [] });
+
       const thrown = new Error("body 側の失敗");
       const caught = await assertRejects(() =>
-        withValidationScope(gpu.device, "body-throws", () => {
+        withPipelineScope(gpu.device, "body-throws", () => {
           throw thrown;
         })
       );
       assertEquals(caught, thrown, "body の例外はそのまま伝播する");
 
-      // スコープが均衡していれば、この検証は無効パイプラインを正しく捕まえる
-      await assertRejects(
-        () =>
-          withValidationScope(gpu.device, "after-throw", () => {
-            const module = gpu.device.createShaderModule({
-              code: wgslWithWorkgroupSize(gpu.limits.maxComputeWorkgroupSizeX + 1),
-            });
-            return gpu.device.createComputePipeline({ layout: "auto", compute: { module } });
-          }),
+      // 1 本しか pop していなければ、この pop が取るのは積み残された空のスコープ（= null）。
+      // 3 本 pop していれば番兵は既に消えており、この pop 自体が失敗して落ちる。
+      const sentinel = await gpu.device.popErrorScope();
+      assert(
+        sentinel !== null,
+        "番兵スコープのエラーが取り返せない = withPipelineScope がスコープを積み残した",
+      );
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "無効パイプラインは internal ではなく validation として返る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const cache = new PipelineCache(gpu.device);
+    try {
+      // internal エラー自体は実 GPU では作れないため、2 本張りの導入で「validation だった
+      // ものが internal 扱いに化けない」ことだけを門にする（優先順位の誤りの検出）。
+      const tooLarge = gpu.limits.maxComputeWorkgroupSizeX + 1;
+      const error = await assertRejects(
+        () => cache.get("test:internal-misfire", wgslWithWorkgroupSize(tooLarge)),
         GpuValidationError,
       );
+      assertEquals(error.name, "GpuValidationError", "internal 分岐が誤爆している");
+      assertEquals(cache.size, 0, "失敗したパイプラインはキャッシュしない");
+
+      // 失敗経路でも 2 本とも pop されていること（積み残しがあると後続の検証が誤ったスコープに
+      // 吸われる）。直後の正常な生成が通ることで間接的に確かめる。
+      const valid = await cache.get("test:internal-misfire-after", wgslWithWorkgroupSize(64));
+      assert(valid !== undefined);
     } finally {
       gpu.destroy();
     }

@@ -10,7 +10,7 @@
  * device と同じ寿命で作り直す。device 消失後に持ち越したパイプラインは使えない。
  */
 
-import { withValidationScope } from "./device.ts";
+import { withPipelineScope } from "./device.ts";
 
 /** 同一キーに異なる WGSL が渡された（決定性の破れ）。 */
 export class PipelineKeyConflictError extends Error {
@@ -57,10 +57,10 @@ export class PipelineCache {
    *
    * WGSL 不一致の判定は生成の完了を待たない（キャッシュに載った瞬間から効く）。
    *
-   * 生成は必ず validation errorScope の中で行う。無効なシェーダ / パイプラインは同期例外に
-   * ならず、生成成功に見えたまま dispatch が no-op 化して出力が全て 0 になる。layout は
-   * パイプライン生成解決時に `getBindGroupLayout(0)` を 1 回だけ呼んで一緒に保持する
-   * （呼び出し側が毎 dispatch で呼び直さずに済む）。
+   * 生成は必ず errorScope（internal + validation の 2 本 = {@link withPipelineScope}）の中で
+   * 行う。無効なシェーダ / パイプラインは同期例外にならず、生成成功に見えたまま dispatch が
+   * no-op 化して出力が全て 0 になる。layout はパイプライン生成解決時に `getBindGroupLayout(0)`
+   * を 1 回だけ呼んで一緒に保持する（呼び出し側が毎 dispatch で呼び直さずに済む）。
    */
   async get(key: string, wgsl: string): Promise<CachedPipeline> {
     const cached = this.#entries.get(key);
@@ -75,7 +75,7 @@ export class PipelineCache {
     // MUST: 失敗したエントリは残さない（残すと同じ拒否 Promise を全員が受け取り続け、
     // 再試行の余地が消える）。この handler は生成時に登録済みなので、待ち手が拒否を
     // 観測するより先に走る = 削除の後に来た get() だけが作り直す。
-    const resolved = withValidationScope(
+    const resolved = withPipelineScope(
       this.#device,
       `createComputePipeline(${key})`,
       () => {
@@ -85,6 +85,11 @@ export class PipelineCache {
           layout: "auto",
           compute: { module },
         });
+        // MUST: `getBindGroupLayout(0)` はスコープの**内側**で呼ぶ。層の取得は本来ただの
+        // 付随処理だが、無効なパイプラインに対して呼ぶと派生の validation エラーが立つため、
+        // 生成の検出網を二重化する役目を兼ねている（例えば internal エラーで無効化された
+        // パイプラインは、ここで立つ派生エラーによっても捕捉され、下の eviction 経路へ落ちる）。
+        // スコープの外へ出すとこの偶然の防御が黙って消える。
         return { pipeline, layout: pipeline.getBindGroupLayout(0) };
       },
     ).catch((cause: unknown) => {

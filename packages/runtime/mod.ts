@@ -27,6 +27,7 @@ export {
   BatchScopeError,
   GpuDeviceLostError,
   GpuFeatureError,
+  GpuInternalError,
   GpuLimitError,
   GpuOutOfMemoryError,
   GpuUnavailableError,
