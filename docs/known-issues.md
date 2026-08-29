@@ -98,3 +98,14 @@ maxAbs 2.23e-3）を通過している（同日再実行で確認）。「N > 25
 あり）だが、回線切断・アプリ側 abort と見え方が同一のため、修正版で `err.cause` を実機
 観測するまで確定できない。常駐そのものの削減は shard 配布 + streamAssets 接続
 （backlog next の R1）まで残る。
+
+## HF: base リポの shared/text_encoder が中程度の断片化（4.1 MiB/term — 2026-08-29）
+
+`hdae/karume-anima` の `shared/text_encoder/model.safetensors` の Xet reconstruction が
+259〜280 terms（4.1〜4.6 MiB/term・目安は ≥10）。原因は分割 shard 時代のアップロードで
+リポ履歴に入った chunk 群への部分 dedup（継承断片化）。runbook §2 の対策 env は
+**hf_xet 1.4.3 で退行**しており（`HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED` が消滅・
+後継 `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` も本件の repo 内 dedup には無効）、
+delete→再 up の 2 コミット法でも治らないことを実測済み。実害 = 当該 1 ファイル（1.1GiB）の
+DL が数倍遅い。恒久対処候補 = hf_xet の版固定での再検証 / `HF_HUB_DISABLE_XET=1`（素 LFS）
+での上げ直し検証 / 履歴整理（越境 pin を巻き込むため turbo と同時に計画）。

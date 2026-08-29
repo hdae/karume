@@ -192,7 +192,10 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
   - **exporter の分割規則（決定 1 の書き手側 — ADR 0071 決定 4 の解除）**: 正本 =
     `karume.shards`。データ節 1GiB（`SHARD_BYTE_LIMIT` 固定・ヘッダ非計上）・書き出し順の
     逐次詰め・weight/scale 原子対・連番名 `<stem>-NNNNN-of-NNNNN<suffix>`・上限以下は単一
-    ファイルでバイト不変（git archive 対照 sha256 で実証）。
+    ファイルでバイト不変（git archive 対照 sha256 で実証）。**尾部スラック（2026-08-29
+    ユーザー裁定）**: 未閉バイト（現 shard の used + 残量）が `SHARD_TAIL_LIMIT`（1.5GiB =
+    hub の同時 RAM 予算と同値）以下ならカットせず詰め切る — 端数 shard を作らず、1.5GiB
+    以下の資産は分割ゼロ（例: 3.2GiB → 1+1+1.2）。
   - **受入の実測（2026-08-29）**: anima Base f16 transformer 3,913,609,588B → 4 shard
     （最大ファイル 1,073,756,928B = データ節 1GiB + ヘッダ）で dist 全門通過・実ロード +
     512² 生成完走（従来は Chromium の単一 ArrayBuffer 上限で原理的に不能 — limitations 追随）。

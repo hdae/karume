@@ -48,10 +48,12 @@ hf CLI が転送スキップするため runbook の処方が効かない。恒�
 
 - 残り: **GitHub Release v0.7.0 作成 → publish.yml 発火 → JSR 3 パッケージ確認**（ユーザー。
   fetch-cache 0.5.0 の min-dep-age は `jsr:@hdae/*` 除外済みで CI は無風）
-- **要判断（非ブロッキング）**: ①demo/ の実画像コーパス（seed42-45 PNG）を分割後ビルドで
-  一括再生成して揃えるか ②text_encoder 断片化の恒久対処 ③turbo の i4 席（1.14GiB 単一 —
-  GPTQ はスレッド非決定の再現リスクがあり無検証の焼き直しを避けた祖父条項。次回 i4 再校正時に
-  分割へ吸収）
+- 2026-08-29 裁定 3 件は**消化済み**: ①コーパスは `demo:eval-images --source
+  models/karume-anima-turbo`（正本の役割別プロンプト）で再生成し 3 ファミリの golden を
+  採り直した（意味論門込み緑）②断片化は**クライアント退行で現状の手が尽きた**ことを実測で
+  確定し記録（[known-issues](known-issues.md)・runbook §2 NOTE — 恒久候補 3 案は
+  known-issues）③尾部スラック則（未閉 ≤1.5GiB は詰め切る — `SHARD_TAIL_LIMIT`）で端数
+  shard を廃し、turbo i4 の祖父条項は**規則上の正会員**になった（1.14GiB ≤ 1.5GiB）
 - リリース後 = ChatGPT 全体レビュー消化（ユーザー持参）・Pixel 実機 err.cause 再判定
 
 ## 消化済み（R1 統合波 — ロード面 API 工事 + shard 配布・2026-08-28〜29）

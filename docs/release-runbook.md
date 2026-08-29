@@ -75,7 +75,14 @@ export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
 ```
 
 - [ ] 上の env 4 本を**同一シェルで** export してから `hf upload` を実行する
-      （正本: [assets-layout.md](assets-layout.md) 公開節）
+      （正本: [assets-layout.md](assets-layout.md) 公開節）。
+      **NOTE（2026-08-29 退行）**: hf_xet 1.4.3 では 1 本目
+      （`GLOBAL_DEDUP_QUERY_ENABLED`）が**存在しない**（後継 =
+      `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` を巨大値に）。さらに**リポ自身の
+      履歴に同一 chunk がある場合の repo 内 dedup はどのノブでも止まらず**、下の
+      「同バイト上げ直し」も hf CLI が転送ごとスキップするため効かない（delete→再 up の
+      2 コミット法でも不発を実測 — [known-issues](known-issues.md) の text_encoder 断片化）。
+      新規バイトのアップロードは env 併用で健全（26〜30 MiB/term 実測）。
 - [ ] **書き込みトークンへ切替**: `hf auth switch --token-name "Karume Release"` —
       既定の読み取りトークン（Karume Gated Read）のままだと LFS batch が 403 になる
       （2026-08-21 実測）。アップロードが済んだら読み取りトークンへ戻す
