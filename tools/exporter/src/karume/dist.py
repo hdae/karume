@@ -1015,18 +1015,11 @@ def assemble_family(
             f"越境参照は 1 モデルの組み立てにだけ許す（対象 {names} は {len(plans)} モデル）"
             " — 役割名はモデルを跨いで同じ綴りなので、一括で掛けると指し先が曖昧になる"
         )
-    if external is not None:
-        # MUST: 分割されたコンポーネントは越境参照に載せない — 1 役が複数ファイルへ割れた
-        # 時点で「どのバイト列を向こうへ預けたか」が 1 つの参照で書けない。展開で役割が
-        # 消えているだけなので、素通しすると自リポへ置いた上に参照も書かれない（黙って
-        # 自己完結に戻る）形になる。
-        split = [role for role in external.roles if len(sharded[0].shards.get(role, ())) > 1]
-        if split:
-            raise DistError(
-                f"越境参照は分割されたコンポーネントに掛けられない: {split}"
-                "（1 役が複数 shard へ割れているので 1 つの参照では指せない）"
-            )
-    references = external_refs(external, plans[0]) if external is not None else {}
+    # 分割されたコンポーネントも越境参照にできる — `shards` は**要素ごとに**従来の FileRef
+    # 検査を通る配列なので（ADR 0038 §7 / ADR 0071 決定 2）、shard 1 本を参照 1 つで指せる。
+    # 展開（{@link expand_weight_shards}）が代表役割を shard 役割へ割った後にここへ来るので、
+    # {@link external_refs} は shard ごとに参照先の現物を引き当てる。
+    references = external_refs(external, sharded[0]) if external is not None else {}
 
     try:
         with staged_publication(out_dir) as staging:
@@ -1239,7 +1232,8 @@ class ExternalComponents:
     dist: Path
     #: 参照元 dist の中のモデル名（同じ相対 path をどのモデルの席から採るか）。
     model: str
-    #: 参照へ差し替える役割名。
+    #: 参照へ差し替える役割名。分割されたコンポーネントを指す役割は、shard 1 本ごとの参照
+    #: （manifest の `shards` 配列の各要素）へ展開される（{@link external_refs}）。
     roles: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -1271,16 +1265,81 @@ def assert_external_ref(where: str, ref: Mapping[str, Any]) -> None:
     assert_rel_path(str(ref["path"]), where)
 
 
-def external_refs(components: ExternalComponents, plan: ModelPlan) -> dict[str, dict[str, Any]]:
+def _external_ref(
+    components: ExternalComponents,
+    declared: set[str],
+    role: str,
+    artifact: Artifact,
+    memo: dict[Path, str],
+    *,
+    sharded_seat: bool,
+) -> dict[str, Any]:
+    """越境ファイル参照 1 つ（{@link external_refs} の 1 要素）。
+
+    `sharded_seat` は「この席が shard 列を書けるか」— weights の dtype エントリだけが真で、
+    assets / extras は偽（1 ファイル参照しか書けない席）。偽の席で参照先が分割されていたら
+    fail loudly: 黙って先頭 shard だけを指すと、残りのバイト列がどこからも取れない配布形が
+    出来上がる。
+    """
+    seats = [
+        f"{components.model}/{artifact.rel_path}",
+        f"{SHARED_DIRNAME}/{artifact.rel_path}",
+    ]
+    found = [seat for seat in seats if seat in declared]
+    if not found:
+        if not sharded_seat and any(
+            len(component_shards(components.dist / seat)) > 1 for seat in seats
+        ):
+            raise DistError(
+                f"越境参照は分割されたコンポーネントに掛けられない: ['{role}']"
+                "（1 役が複数 shard へ割れているので 1 つの参照では指せない）"
+                " — assets / extras の席は 1 ファイル参照しか書けない"
+            )
+        raise DistError(
+            f"役割 '{role}' のファイルが参照元 {components.dist} に無い"
+            f"（{MANIFEST_FILENAME} は {seats} のどちらも宣言していない）"
+            " — 参照先に無いものは参照できない"
+        )
+    source = components.dist / found[0]
+    if not source.is_file():
+        raise DistError(f"参照元が宣言するファイルの現物が無い: {source}")
+    digest = sha256_file(source)
+    local = _source_digest(artifact, memo)
+    if digest != local:
+        raise DistError(
+            f"役割 '{role}' の参照先が自分で組むバイト列と違う: {source} は {digest}、"
+            f"{artifact.rel_path} の出所は {local}"
+            " — 中身の違う参照は「別のモデルの重み」を自分のものとして配る形になる"
+        )
+    return {
+        "repo": components.repo,
+        "revision": components.revision,
+        "path": found[0],
+        "size": source.stat().st_size,
+        "sha256": digest,
+    }
+
+
+def external_refs(
+    components: ExternalComponents, sharded: ShardedPlan
+) -> dict[str, dict[str, Any]]:
     """役割名 → 越境ファイル参照 `{repo, revision, path, size, sha256}`。
 
     参照先の path は**参照元 dist の `karume.json` が宣言している path**から引く（モデル別
     サブツリーか `shared/` かは向こうの組み立てが決めた事実で、こちらからは導けない）。
     宣言に無い役割は fail loudly — 参照先に無いものは参照できない。
 
+    **分割されたコンポーネントは shard 役割ごとに 1 つの参照**を返す（manifest の `shards`
+    配列の各要素が参照になる — ADR 0038 §7 / ADR 0071 決定 2）。`repo` / `revision` は全要素
+    同一で、`path` / `size` / `sha256` は shard ごとに別。並びは {@link expand_weight_shards}
+    が**現物から**解決した shard 番号順そのままなので、先頭 = グラフ shard の規約は参照でも
+    変わらない。shard のファイル名は連番と総数を綴りに持つ（`-NNNNN-of-NNNNN`）ので、参照先の
+    分割数がこちらと違えば「参照元に無い」で必ず落ちる（本数の食い違いは黙って解決しない）。
+
     MUST: 宣言と現物の突合を越境でも切らさない。`size` / `sha256` はローカルの実ファイルから
     採り、さらに**自分で組むはずだったバイト列と一致すること**まで確かめる — 一致しない参照は
     「別のモデルの重みを自分のものとして配る」形になり、shape も manifest も正しいまま沈黙する。
+    分割されている役割はこの突合を**shard 列の全要素**へ掛ける。
 
     NOTE: 参照元の参照（多段）は辿らない。{@link _declared_sizes} が越境参照を外すので、
     参照元がさらに別リポを指している席はここで「宣言に無い」として落ちる。
@@ -1289,44 +1348,28 @@ def external_refs(components: ExternalComponents, plan: ModelPlan) -> dict[str, 
     if not manifest_path.is_file():
         raise DistError(f"越境参照の参照元に {MANIFEST_FILENAME} が無い: {manifest_path}")
     declared = set(_declared_sizes(json.loads(manifest_path.read_text(encoding="utf-8"))))
+    plan = sharded.plan
     memo: dict[Path, str] = {}
     refs: dict[str, dict[str, Any]] = {}
     for role in components.roles:
-        artifact = plan.artifacts.get(role)
-        if artifact is None:
-            raise DistError(
-                f"越境参照が知らない役割を指している: '{role}'"
-                f"（このモデルの役割: {sorted(plan.artifacts)}）"
+        # weights の役割は振り分け表に載っている（分割されていれば shard 役割へ割れていて、
+        # 代表役割は artifacts から消えている）。載っていない役割は assets / extras の席
+        # なので代表役割のまま 1 ファイル参照を引く。
+        for member in sharded.shards.get(role, (role,)):
+            artifact = plan.artifacts.get(member)
+            if artifact is None:
+                raise DistError(
+                    f"越境参照が知らない役割を指している: '{role}'"
+                    f"（このモデルの役割: {sorted(plan.artifacts)}）"
+                )
+            refs[member] = _external_ref(
+                components,
+                declared,
+                member,
+                artifact,
+                memo,
+                sharded_seat=role in sharded.shards,
             )
-        seats = [
-            f"{components.model}/{artifact.rel_path}",
-            f"{SHARED_DIRNAME}/{artifact.rel_path}",
-        ]
-        found = [seat for seat in seats if seat in declared]
-        if not found:
-            raise DistError(
-                f"役割 '{role}' のファイルが参照元 {components.dist} に無い"
-                f"（{MANIFEST_FILENAME} は {seats} のどちらも宣言していない）"
-                " — 参照先に無いものは参照できない"
-            )
-        source = components.dist / found[0]
-        if not source.is_file():
-            raise DistError(f"参照元が宣言するファイルの現物が無い: {source}")
-        digest = sha256_file(source)
-        local = _source_digest(artifact, memo)
-        if digest != local:
-            raise DistError(
-                f"役割 '{role}' の参照先が自分で組むバイト列と違う: {source} は {digest}、"
-                f"{artifact.rel_path} の出所は {local}"
-                " — 中身の違う参照は「別のモデルの重み」を自分のものとして配る形になる"
-            )
-        refs[role] = {
-            "repo": components.repo,
-            "revision": components.revision,
-            "path": found[0],
-            "size": source.stat().st_size,
-            "sha256": digest,
-        }
     return refs
 
 

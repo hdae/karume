@@ -1206,20 +1206,6 @@ class TestShardExpansion:
         with pytest.raises(DistError, match="同居"):
             assemble_family([plan], tmp_path / "models" / "mixed", "A")
 
-    def test_a_cross_repo_reference_to_a_split_component_fails_loudly(self, tmp_path: Path) -> None:
-        """1 役が複数 shard へ割れた時点で、1 つの参照では指せない（黙って自リポへ置かない）。"""
-        plan = self._plan(tmp_path / "series", [b"graph-shard", b"weights-2"])
-        external = ExternalComponents(
-            repo="owner/name",
-            revision="a" * 40,
-            dist=tmp_path / "source",
-            model="A",
-            roles=("w",),
-        )
-
-        with pytest.raises(DistError, match="分割されたコンポーネント"):
-            assemble_family([plan], tmp_path / "models" / "borrowed", "A", external=external)
-
     def test_a_split_component_that_another_seat_also_names_fails_loudly(
         self, tmp_path: Path
     ) -> None:
@@ -1229,3 +1215,184 @@ class TestShardExpansion:
 
         with pytest.raises(DistError, match="assets / extras も"):
             assemble_family([plan], tmp_path / "models" / "aliased", "A")
+
+
+class TestExternalShardedComponents:
+    """**分割されたコンポーネントへの越境参照** — `shards` 配列の各要素が 1 つの参照になる
+    （ADR 0038 §7 / ADR 0071 決定 2「各要素は従来の FileRef 検査をそのまま通す」）。
+
+    実需は turbo リポの共有 text_encoder（1GiB 超で複数本へ割れる）で、1 役 = 1 参照しか
+    書けないと「同じバイト列を 2 つのリポへ上げない」という参照の存在理由そのものが、
+    分割された資産にだけ届かなくなる。
+    """
+
+    _REVISION = "0123456789abcdef0123456789abcdef01234567"
+    _REPO = "hdae/karume-source"
+    _SHARDS = (b"graph-shard-bytes", b"weights-shard-2", b"weights-shard-3")
+    _OWN = b"transformer-bytes"
+
+    def _series(self, root: Path, payloads: Sequence[bytes]) -> Path:
+        """系列出力を書いて**代表 path** を返す（2 本以上なら連番 = 分割済みの資産）。"""
+        root.mkdir(parents=True, exist_ok=True)
+        total = len(payloads)
+        for index, payload in enumerate(payloads, start=1):
+            name = (
+                "model.safetensors"
+                if total == 1
+                else f"model-{index:05d}-of-{total:05d}.safetensors"
+            )
+            (root / name).write_bytes(payload)
+        return root / "model.safetensors"
+
+    def _plan(self, name: str, series: Path) -> ModelPlan:
+        """2 役のモデル（`text_encoder` は他リポと同一バイト・`transformer` はこのリポ固有）。"""
+        return ModelPlan(
+            name=name,
+            pipeline="anima/1",
+            artifacts={
+                "text_encoder": Artifact("text_encoder/model.safetensors", source=series),
+                "transformer": Artifact("transformer/model.safetensors", payload=self._OWN),
+            },
+            weights={
+                "text_encoder": {"f16": WeightFiles("text_encoder")},
+                "transformer": {"f16": WeightFiles("transformer")},
+            },
+            assets={},
+            quants={
+                "f16": {"weights": {"text_encoder": "f16", "transformer": "f16"}, "session": {}}
+            },
+            default_quant="f16",
+            pipeline_config={},
+        )
+
+    def _source_dist(self, tmp_path: Path, series: Path) -> Path:
+        """参照元（既に組み上がっている別リポの配布形 — 向こうでも同じ本数に割れている）。"""
+        source = tmp_path / "models" / "karume-source"
+        assemble_family([self._plan("source", series)], source, "source")
+        return source
+
+    def _components(self, source: Path, **overrides: Any) -> ExternalComponents:
+        return ExternalComponents(
+            **{
+                "repo": self._REPO,
+                "revision": self._REVISION,
+                "dist": source,
+                "model": "source",
+                "roles": ("text_encoder",),
+                **overrides,
+            }
+        )
+
+    def test_every_shard_becomes_its_own_pinned_reference(self, tmp_path: Path) -> None:
+        """repo / revision は全要素同一・path / size / sha256 は shard ごと・並びは番号順。"""
+        series = self._series(tmp_path / "series", self._SHARDS)
+        source = self._source_dist(tmp_path, series)
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        manifest = assemble_family(
+            [self._plan("borrower", series)],
+            out_dir,
+            "borrower",
+            external=self._components(source),
+        )
+
+        entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
+        assert entry["shards"] == [
+            {
+                "repo": self._REPO,
+                "revision": self._REVISION,
+                "path": f"source/text_encoder/model-{index:05d}-of-00003.safetensors",
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            for index, payload in enumerate(self._SHARDS, start=1)
+        ]
+
+    def test_the_referenced_shards_are_not_stored_here_a_second_time(self, tmp_path: Path) -> None:
+        """参照の存在理由そのもの — 全 shard が向こう側に残り、自リポは固有の役割だけ持つ。"""
+        series = self._series(tmp_path / "series", self._SHARDS)
+        source = self._source_dist(tmp_path, series)
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        assemble_family(
+            [self._plan("borrower", series)],
+            out_dir,
+            "borrower",
+            external=self._components(source),
+        )
+
+        assert not (out_dir / "borrower" / "text_encoder").exists()
+        assert sorted(verify_dist(out_dir)) == ["borrower/transformer/model.safetensors"]
+
+    @pytest.mark.parametrize("victim", [0, 1, 2])
+    def test_it_checks_every_shard_against_the_source_distribution(
+        self, tmp_path: Path, victim: int
+    ) -> None:
+        """突合は shard 列の**全要素**へ届く（先頭だけ見る形なら後続の改竄が沈黙する）。"""
+        series = self._series(tmp_path / "series", self._SHARDS)
+        source = self._source_dist(tmp_path, series)
+        # 参照元の現物だけを、長さを保ったまま書き換える（size ではなく sha256 の門を踏む）。
+        tampered = (
+            source / "source" / "text_encoder" / (f"model-{victim + 1:05d}-of-00003.safetensors")
+        )
+        tampered.write_bytes(bytes(len(self._SHARDS[victim])))
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        with pytest.raises(DistError, match="自分で組むバイト列と違う"):
+            assemble_family(
+                [self._plan("borrower", series)],
+                out_dir,
+                "borrower",
+                external=self._components(source),
+            )
+        assert not out_dir.exists()
+
+    def test_an_unsplit_component_still_declares_one_reference(self, tmp_path: Path) -> None:
+        """分割されていない役割の宣言は 1 バイトも変わらない（従来どおり 1 要素の列）。"""
+        whole = (b"whole-text-encoder",)
+        series = self._series(tmp_path / "series", whole)
+        source = self._source_dist(tmp_path, series)
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        manifest = assemble_family(
+            [self._plan("borrower", series)],
+            out_dir,
+            "borrower",
+            external=self._components(source),
+        )
+
+        entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
+        assert entry["shards"] == [
+            {
+                "repo": self._REPO,
+                "revision": self._REVISION,
+                "path": "source/text_encoder/model.safetensors",
+                "size": len(whole[0]),
+                "sha256": hashlib.sha256(whole[0]).hexdigest(),
+            }
+        ]
+
+    def test_an_asset_seat_cannot_point_at_a_split_component(self, tmp_path: Path) -> None:
+        """assets / extras は 1 ファイル参照しか書けない席 — 先頭 shard だけを黙って指さない。
+
+        参照元では weights の役割として分割されているコンポーネントを、こちら側では assets の
+        席から指した形（席が違えば同じ綴りの役割が別の意味を持つ）。
+        """
+        series = self._series(tmp_path / "series", self._SHARDS)
+        source = self._source_dist(tmp_path, series)
+        out_dir = tmp_path / "models" / "karume-borrower"
+        # 自リポ側は単一ファイル（分割は参照先の事実）。参照は assets の席から掛ける。
+        borrower = replace(
+            self._plan("borrower", series),
+            artifacts={
+                "text_encoder": Artifact("text_encoder/model.safetensors", payload=b"local-copy"),
+                "transformer": Artifact("transformer/model.safetensors", payload=self._OWN),
+            },
+            weights={"transformer": {"f16": WeightFiles("transformer")}},
+            assets={"encoder": "text_encoder"},
+            quants={"f16": {"weights": {"transformer": "f16"}, "session": {}}},
+        )
+
+        with pytest.raises(DistError, match="越境参照は分割されたコンポーネントに掛けられない"):
+            assemble_family([borrower], out_dir, "borrower", external=self._components(source))
+        assert not out_dir.exists()

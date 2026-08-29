@@ -1014,6 +1014,81 @@ Deno.test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1
   );
 });
 
+// ---- 分割されたコンポーネントへの越境参照（ADR 0038 §7 / ADR 0071 決定 2 —「shards の各要素は
+// 従来の FileRef 検査をそのまま通す」）。exporter は 1GiB 超の共有コンポーネントを
+// **shard 1 本 = 参照 1 つ**の形で焼くので、受け側は列の全要素を参照先の URL から取れなければ
+// ならない（先頭だけ越境する / 列を畳むと、残りの shard がセッションの repo に無くて落ちる）。
+
+const SPLIT_PATHS = [
+  "text_encoder/model-00001-of-00002.safetensors",
+  "text_encoder/model-00002-of-00002.safetensors",
+];
+
+const splitBytes = SPLIT_PATHS.map((path) =>
+  new TextEncoder().encode(`karume-test:foreign-shard:${path}`)
+);
+
+const splitShardManifest = JSON.stringify({
+  format: "karume/4",
+  generator: "karume/0.1.0",
+  defaultModel: "m",
+  models: {
+    m: {
+      pipeline: "anima/1",
+      weights: {
+        borrowed: {
+          f16: {
+            shards: await Promise.all(SPLIT_PATHS.map(async (path, index) => ({
+              path,
+              size: splitBytes[index].byteLength,
+              sha256: await digestOf(splitBytes[index]),
+              repo: FOREIGN_REPO,
+              revision: FOREIGN_SHA,
+            }))),
+          },
+        },
+      },
+      assets: {},
+      quants: { f16: { weights: { borrowed: "f16" }, session: {} } },
+      defaultQuant: "f16",
+      pipelineConfig: {},
+    },
+  },
+});
+
+const splitShardFiles = (): Map<string, Uint8Array<ArrayBuffer>> =>
+  new Map([
+    [MANIFEST_PATH, new TextEncoder().encode(splitShardManifest)],
+    ...SPLIT_PATHS.map((path, index) =>
+      [`${FOREIGN_REPO}@${FOREIGN_SHA}/${path}`, splitBytes[index]] as const
+    ),
+  ]);
+
+Deno.test("fetchAssets: 分割コンポーネントは shard ごとに越境先の URL から取る", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: splitShardFiles() }, caches);
+  const files = resolveFiles(loaded.manifest);
+
+  // 取得キーは shard の位置つき（列の位置が shard の id — ADR 0071 決定 2）。
+  assertEquals(Object.keys(files), ["borrowed[0]", "borrowed[1]"]);
+  const assets = await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
+
+  assertEquals(assets["borrowed[0]"], splitBytes[0], "先頭 shard のバイト列が違う");
+  assertEquals(assets["borrowed[1]"], splitBytes[1], "後続 shard のバイト列が違う");
+  for (const path of SPLIT_PATHS) {
+    assertEquals(
+      countCalls(mock.calls, `${HUB_URL}/${FOREIGN_REPO}/resolve/${FOREIGN_SHA}/${path}`),
+      1,
+      `${path} を越境先から取っていない`,
+    );
+    assertEquals(
+      countCalls(mock.calls, resolveUrl(path)),
+      0,
+      `${path} をセッションの repo へ取りに行っている（そこには無い）`,
+    );
+  }
+});
+
 Deno.test("clearHubCache: 温めた資産を消す（次の取得は network に出る）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);

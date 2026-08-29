@@ -508,3 +508,10 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
     今回の範囲は**受理と型面の露出まで**で、§7 が Consequences に書いた「DL 前チェックは feature
     軸のみ」の解消（limits 不足を DL 後の fail loudly から前へ出す結線）は**後続タスク** —
     [limitations](../limitations.md) の該当制約はまだ残っている。
+- 2026-08-29: **越境参照を分割コンポーネントへ拡張**（R1 の shard 分割で共有 text_encoder が
+  2 shard になり、1 参照で指せなくなった実需）。`shards` 配列の**要素ごと**に
+  `{repo, revision, path, size, sha256}` の越境 FileRef を書く（`repo`/`revision` は全要素同一・
+  並びは shard 番号順 = 先頭グラフ shard の規約は参照でも不変）。hub は元々 ref 単位で越境を
+  解決するため**受け側は 0 行変更**（受理はテストで固定）。assets / extras の席（1 ファイル
+  参照のみ）は従来どおり分割参照を fail loudly。焼く側の突合（参照先現物 = 自分で組むバイト列）
+  は shard 全要素へ適用。
