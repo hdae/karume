@@ -367,3 +367,68 @@ Deno.test("遅いチャンクを踏んだら次のチャンクが縮む", async 
   dispatchMany(scheduler, 3);
   assertEquals(gpu.submitted, [4, 1, 1], "予算超過の見込みが立った時点で切る");
 });
+
+// chunkBudget（推定側）: cost proxy 起票の着手条件「予算超過チャンクが観測されたか」を
+// 数える席。切りようが無かったチャンク（単独で予算を超える dispatch）だけが上がる。
+Deno.test("チャンク診断は推定時間の最大と予算超過チャンク数を数える", async () => {
+  const clock = gpuTimeClock(() => 8);
+  const gpu = createFakeGpu({ workDone: clock.workDone });
+  const scheduler = new SubmitScheduler(gpu.context, adaptivePolicy, clock.now);
+
+  dispatchMany(scheduler, 4);
+  await scheduler.flush();
+  assertEquals(scheduler.stats.msPerWorkgroup, 2, "8ms / 4 workgroup");
+  assertEquals(scheduler.stats.chunkBudget.budgetMs, 50, "100ms × 安全率 0.5");
+  // 1 本目のチャンクは裏付けが付く前に出ている = 推定時間を持たない（0ms として数えない）。
+  assertEquals(
+    scheduler.stats.chunkBudget.maxEstimatedMs,
+    undefined,
+    "裏付け前のチャンクは推定側に載せない",
+  );
+  assertEquals(scheduler.stats.chunkBudget.overBudgetChunks, 0);
+
+  // 3 workgroup（推定 6ms）で締めてから、単独 30 workgroup（推定 60ms > 予算 50ms）を出す。
+  dispatchMany(scheduler, 3);
+  scheduler.dispatch(fakePipeline, fakeBindGroup, [30, 1, 1], "test:fake");
+  assertEquals(scheduler.stats.chunkBudget.maxEstimatedMs, 6, "締めた 3 workgroup ぶん");
+  assertEquals(scheduler.stats.chunkBudget.overBudgetChunks, 0, "予算内のチャンクは数えない");
+
+  dispatchMany(scheduler, 1);
+  assertEquals(gpu.submitted, [4, 3, 1], "分割できない 1 本はそれだけで 1 チャンク");
+  assertEquals(scheduler.stats.chunkBudget.maxEstimatedMs, 60, "30 workgroup × 2ms");
+  assertEquals(scheduler.stats.chunkBudget.overBudgetChunks, 1, "切りようが無かった 1 本を数える");
+
+  // 制御は 1 ビットも変わっていない（診断は分割境界に影響しない）。
+  await scheduler.flush();
+  assertEquals(gpu.submitted, [4, 3, 1, 1], "flush が端数を出し切るだけ");
+  assertEquals(scheduler.stats.chunkBudget.overBudgetChunks, 1, "端数チャンクは予算内");
+});
+
+// chunkBudget（実測側）: 「workgroup 数 = 仕事量」のプロキシがずれると、推定側の席は
+// 予算内だと言い続ける（同じプロキシで見積もった値を比べているだけなので原理的に見えない）。
+// 窓平均は帰属に依存せず求まり、最大チャンク時間の**下界**になる。
+Deno.test("窓平均チャンク時間は推定が見落とす予算超過を下界として捉える", async () => {
+  let elapsed = 1;
+  const clock = gpuTimeClock(() => elapsed);
+  const gpu = createFakeGpu({ workDone: clock.workDone });
+  // 1 dispatch = 1 チャンク（窓のチャンク数を決定的にする）。
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(1), clock.now);
+
+  // 1 workgroup が 1ms、という軽いカーネルで裏付けを付ける。
+  dispatchMany(scheduler, 1);
+  await scheduler.flush();
+  assertEquals(scheduler.stats.msPerWorkgroup, 1, "1ms / 1 workgroup");
+  assertEquals(scheduler.stats.chunkBudget.maxWindowMeanMs, 1, "1 チャンクの窓は平均 = 実測");
+
+  // 同じ workgroup 数なのに 1 窓 300ms 掛かる（= プロキシが桁で外れている状況）。
+  elapsed = 300;
+  dispatchMany(scheduler, 2);
+  await scheduler.flush();
+
+  const budget = scheduler.stats.chunkBudget;
+  assertEquals(budget.maxWindowMeanMs, 150, "300ms / 2 チャンク");
+  // 150ms > 予算 50ms なので「予算を超えたチャンクが少なくとも 1 本あった」と言い切れる。
+  assertLess(budget.budgetMs, budget.maxWindowMeanMs ?? 0, "窓平均だけで超過を断定できる");
+  assertEquals(budget.maxEstimatedMs, 1, "推定側は 1ms のまま（プロキシのずれは見えない）");
+  assertEquals(budget.overBudgetChunks, 0, "推定側の席はここでは 1 件も上がらない");
+});

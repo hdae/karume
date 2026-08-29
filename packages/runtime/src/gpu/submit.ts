@@ -175,6 +175,56 @@ export type SubmitStats = {
    * 1 チャンクの workgroup 予算は `timeBudgetMs * CHUNK_TIME_SAFETY / msPerWorkgroup`。
    */
   readonly msPerWorkgroup?: number;
+  /** チャンクが時間予算をどれだけ使っているかの観測席（{@link ChunkBudgetStats}）。 */
+  readonly chunkBudget: ChunkBudgetStats;
+};
+
+/**
+ * チャンクの時間予算の消費具合（**診断専用** — 制御には 1 バイトも使わない）。
+ *
+ * WHY: 時間予算の比例配分は「workgroup 数 = 仕事量」という均質仮定に乗っているが、この仮定は
+ * カーネル間で最大 3 桁以上崩れる（1 workgroup あたりの実コストが桁で違う）。仮定を捨てて
+ * op 別の cost proxy を推定器に入れる案は **perf-ledger 側の別起票**で、着手条件は
+ * 「**予算を超えるチャンクが実際に観測されてから**」という裁定になっている（出荷 3
+ * パイプラインの実測では超過は無く、安全率 {@link CHUNK_TIME_SAFETY} の枠内に収まっていた）。
+ * ここはその**着手条件を判定するための観測点**であって、予算則そのものではない。
+ *
+ * MUST: チャンク単位の実時間帰属をここに持ち込まない（ADR 0004 不変条件④ — 重なった submit の
+ * 完了通知は先頭 1 本に集中し、チャンクごとの壁時計は意味を持たない）。載せているのは
+ * ① 推定側の分布（切る側が予算をどう見積もっていたか）と ② 窓単位の平均という**帰属に
+ * 依存しない**2 面だけ。
+ */
+export type ChunkBudgetStats = {
+  /**
+   * 1 チャンクを切る基準時間（ms）= `timeBudgetMs * CHUNK_TIME_SAFETY`。以下の値を読む
+   * ときの参照点（政策と安全率を突き合わせ直さずに比較できるようにするためだけの再掲）。
+   */
+  readonly budgetMs: number;
+  /**
+   * 全期間で submit したチャンクの**推定時間**（`workgroup 合計 × msPerWorkgroup`）の最大値。
+   * 実測の裏付けが無い間（`msPerWorkgroup === undefined`）に出したチャンクは推定できないので
+   * 数えない — 1 度も裏付けが付かないまま終われば undefined。
+   */
+  readonly maxEstimatedMs?: number;
+  /**
+   * 推定時間が {@link ChunkBudgetStats.budgetMs} を超えたまま submit されたチャンクの累計件数。
+   *
+   * NOTE: 不変条件 2（積む前に切る）が効いている限り、ここが増えるのは切りようが無かった
+   * ときだけ — 単独で予算を超える dispatch か、{@link SubmitPolicy.minChunkSize} の下限に
+   * 当たった場合。0 でなくなったら cost proxy 起票の着手条件が満たされたことを意味する。
+   */
+  readonly overBudgetChunks: number;
+  /**
+   * 閉じた窓の「実測 ÷ その窓のチャンク数」の全期間最大値（ms）。
+   *
+   * WHY: 推定側だけを見ると、**仕事量プロキシ自体がずれている**故障が原理的に見えない
+   * （同じプロキシで見積もった値を同じ予算と比べているだけになる）。窓平均は帰属に依存せず
+   * 求まり、しかも「最大チャンク時間 ≥ 窓平均」なので、これが
+   * {@link ChunkBudgetStats.budgetMs} を超えたなら**予算超過チャンクが確実に 1 本はあった**と
+   * 言い切れる（下界としてだけ読む席 — 超えていないことは何も保証しない）。窓はホスト側の
+   * エンコード時間も含むため過大側（モジュール doc）。
+   */
+  readonly maxWindowMeanMs?: number;
 };
 
 /** パイプラインキー 1 本ぶんの GPU 実時間の内訳（ADR 0021）。 */
@@ -293,6 +343,14 @@ export class SubmitScheduler {
   #windowStartedAt: number | undefined;
   /** 開いている窓に積んだ workgroup の合計。 */
   #windowWork = 0;
+  /** 開いている窓で submit したチャンク数（窓平均を出す分母 — {@link ChunkBudgetStats}）。 */
+  #windowChunks = 0;
+  /** 推定時間が最大だったチャンク（診断専用）。undefined = 裏付けの付いたチャンクがまだ無い。 */
+  #maxEstimatedChunkMs: number | undefined;
+  /** 推定時間が予算を超えたまま出したチャンクの累計（診断専用）。 */
+  #overBudgetChunks = 0;
+  /** 窓平均チャンク時間の全期間最大（診断専用）。undefined = まだ 1 窓も閉じていない。 */
+  #maxWindowMeanMs: number | undefined;
   /** 実測に裏付けられた 1 workgroup あたりの推定時間。undefined = 裏付けがまだ無い。 */
   #msPerWorkgroup: number | undefined;
   /** GPU 側時間計測が有効か（device の feature で決まる — ADR 0021）。 */
@@ -506,7 +564,19 @@ export class SubmitScheduler {
       discardedDispatches: this.#discardedDispatches,
       currentChunkSize: this.#chunkSizeLimit(),
       msPerWorkgroup: this.#msPerWorkgroup,
+      chunkBudget: {
+        // 独立に更新するフィールドを持たず、読むたびに政策と安全率から導く。
+        budgetMs: this.#chunkBudgetMs(),
+        maxEstimatedMs: this.#maxEstimatedChunkMs,
+        overBudgetChunks: this.#overBudgetChunks,
+        maxWindowMeanMs: this.#maxWindowMeanMs,
+      },
     };
+  }
+
+  /** 1 チャンクを切る基準時間（{@link #exceedsTimeBudget} が比べているのと同じ値）。 */
+  #chunkBudgetMs(): number {
+    return this.#policy.timeBudgetMs * CHUNK_TIME_SAFETY;
   }
 
   /**
@@ -529,7 +599,7 @@ export class SubmitScheduler {
     // 予算で切るのは minChunkSize 以上を積んでからにする（submit 回数の歯止め）。単独で
     // 予算を超える dispatch はここで分割できない — チャンク 1 本ぶんとして出すしかない。
     if (this.#pending.length < this.#policy.minChunkSize) return false;
-    return work * perWorkgroup > this.#policy.timeBudgetMs * CHUNK_TIME_SAFETY;
+    return work * perWorkgroup > this.#chunkBudgetMs();
   }
 
   #submitChunk(): void {
@@ -553,6 +623,27 @@ export class SubmitScheduler {
     // 直列化）。計測の起点だけを残し、閉じるのは flush 側。
     this.#windowStartedAt ??= submittedAt;
     this.#windowWork += chunkWork;
+    this.#windowChunks += 1;
+    this.#observeChunkBudget(chunkWork);
+  }
+
+  /**
+   * 出したチャンク 1 本を診断へ記録する（**観測のみ** — ここから制御へ戻る線は無い）。
+   *
+   * 使うのは「切った時点で効いていた推定」そのもの。閉じた後の窓で推定が動いても遡って
+   * 上書きしない — 見たいのは「その切れ目を決めた側が予算をどう見積もっていたか」で、
+   * 事後の推定で塗り直すとその情報が消える。
+   */
+  #observeChunkBudget(chunkWork: number): void {
+    const perWorkgroup = this.#msPerWorkgroup;
+    // 裏付けが無い間のチャンクは推定時間を持たない（予算で切ってもいない）ので数えない。
+    if (perWorkgroup === undefined) return;
+    const estimatedMs = chunkWork * perWorkgroup;
+    if (this.#maxEstimatedChunkMs === undefined || estimatedMs > this.#maxEstimatedChunkMs) {
+      this.#maxEstimatedChunkMs = estimatedMs;
+    }
+    // 比較は制御と同じ向き（超過は「予算より大きい」— ちょうど予算のチャンクは切らずに通る）。
+    if (estimatedMs > this.#chunkBudgetMs()) this.#overBudgetChunks += 1;
   }
 
   /**
@@ -719,8 +810,15 @@ export class SubmitScheduler {
     if (startedAt === undefined) return;
     const measured = this.#now() - startedAt;
     const work = this.#windowWork;
+    // 窓の起点とチャンク数は #submitChunk で同時に立つので、窓が開いていれば必ず 1 以上
+    // （0 除算にはならない）。
+    const meanChunkMs = measured / this.#windowChunks;
+    if (this.#maxWindowMeanMs === undefined || meanChunkMs > this.#maxWindowMeanMs) {
+      this.#maxWindowMeanMs = meanChunkMs;
+    }
     this.#windowStartedAt = undefined;
     this.#windowWork = 0;
+    this.#windowChunks = 0;
     this.#measuredMs.push(measured);
     if (this.#measuredMs.length > MEASURED_HISTORY) {
       this.#measuredMs.shift();

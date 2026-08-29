@@ -60,6 +60,7 @@ export { DEFAULT_SUBMIT_POLICY, SubmitPolicyError } from "./src/gpu/submit.ts";
  * `Session.diagnostics().lastRunTiming`（計測が無効なら undefined）1 つに閉じる。
  */
 export type {
+  ChunkBudgetStats,
   GpuTimingEntry,
   GpuTimingStats,
   SubmitPolicy,
@@ -106,6 +107,11 @@ export type {
  * `Tensor` は意味論 dtype の判別ユニオン（ADR 0009 による ADR 0008 の部分改訂）:
  * `{ dtype: "f32", data: Float32Array }` / `{ dtype: "i32", data: Int32Array }` /
  * `{ dtype: "bool", data: Uint32Array }`（bool は u32 の 0 / 1）。入出力で対称。
+ *
+ * 入力の寿命は面の一部: `run` / `enqueue` は `inputs` Record の member 構成・各入力の shape・
+ * `bindings` を**発行の同期区間で写し取る**が、`Tensor.data` は写さず**借りる** —
+ * MUST NOT: 戻り Promise が settle するまで `data` を書き換える（沈黙誤値になる）。詳細は
+ * `Session.run` の「入力の寿命」節。
  *
  * `GenerationContext`（1 生成ぶんの可変 state の所有者 — ADR 0066）も同じ理由で型のみ:
  * 入口は `Session.createGenerationContext` だけで、直接構築すると確保の errorScope と容量
