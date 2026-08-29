@@ -51,6 +51,10 @@ verify を並行させた走りで 2 回観測（単独走行でも過去に観�
 実運用への影響は未確定（この状態でも Mac で正常な画像が生成できている）。ブラウザ実行は
 Dawn / Tint 系で naga を通らないため、同じ症状が出るとは限らない（未検証）。
 
+再検証は **Deno 2.9.6**（現行ピン）で行うが期待値は低い: 2.9.5 のリリースノートで WebGPU は
+mapped range の修正 1 件のみ（denoland/deno#36257）・2.9.6 は WebGPU 関連の項目ゼロで、
+Metal / naga / wgpu の更新の形跡が無い。
+
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 
 `karume export-embeddinggemma --batch N`（N>1）は `karume/convert.py` で fail loudly する
