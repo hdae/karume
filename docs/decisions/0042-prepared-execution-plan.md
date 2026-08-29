@@ -128,3 +128,12 @@ ADR [0066](0066-generation-context-state-slots.md) 決定 5 の実装（`22b5f64
    バッファは当該 run の後始末（flush 後の destroy）まで生存する**ため、照合を欠いた古い束は
    validation を通ったまま**値だけが静かに変わる**（波 D-4 の故障注入で実測: 出力全要素不一致・
    例外ゼロ）。診断は `stateBacking.rebindCount`（run 数に比例しないことが分離の観測点）。
+
+## 追記（2026-08-29）— PipelineCache の所有者変更
+
+決定 2 の「GPU 資源は paramsCache / PipelineCache が所有」のうち PipelineCache は
+**GpuContext 所有（device 寿命・device 1 個につき 1 本）**へ移した。同一 device 上の Session が
+キャッシュを共有し、`PipelineKeyConflictError`（同一キー・異 WGSL の即死）は Session を跨いで
+効くようになる。paramsCache は従来どおり Session 常駐。診断は `pipelineCount` = その Session の
+**使用**キー本数 / `devicePipelineCount` = device 合計、の 2 席に分離（外部レビュー消化波 —
+経緯は backlog 2026-08-29）。
