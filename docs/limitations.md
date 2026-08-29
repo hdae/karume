@@ -712,6 +712,12 @@ Chromium（Chrome / Edge — 全 OS 共通・Mac も同じ）は PartitionAlloc 
 大きさは 1 バイトも受信せず throw される（`cause` = RangeError — 帯域と時間を捨てた後に
 落ちる事故が消えた）。
 
+**根本解は 2026-08-29 の R1 統合波で実装済み**: exporter が 1GiB 超のコンポーネントを
+shard 分割し（`karume.shards` — ADR 0070 追記 2026-08-29）、ロードは shard 逐次面が
+1 shard ずつ materialize する（単一バッファは常に ≤ 1GiB + ヘッダ）。Base f16 の実ロード +
+生成は分割配布形で実証済み。**この制約が残るのは「分割前に焼かれた既存資産」だけ** —
+公開済み HF リポの上げ直しまでは、そこの Base f16 は従来どおり開けない。
+
 ## hub: キャッシュは credential で隔離しない（by-design — 2026-08-28 裁定）
 
 資産キャッシュのキーは内容キー（`Authorization` を含まない）で、名前空間も取得層の固定

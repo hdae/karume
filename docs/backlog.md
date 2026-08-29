@@ -35,17 +35,35 @@ Anima Web アプリからの既知問題 3 件（調査で機序確定済み —
   未検証軸は research に列挙のまま（復活時は GPU 校正 =
   [実用可・3.6 倍速](research/2026-08-28-cuda-calibration.md)で回す — 配布焼きは CPU）
 
-## next — R1 ロード面工事 + shard 配布（2026-08-25 昇格・2026-08-28 統合裁定）
+## next — 0.7.0 リリース（R1 完了を受けて）
 
-release 節の「R1 の残り: ロード面 API 工事 4 件 + exporter 自動分割規則」を次の大波へ昇格
-（項目詳細は release 節のまま）。理由: Chromium の ArrayBuffer 上限で Base f16 が現配布形の
-まま恒久に開けない + モバイルの常駐 RAM 削減（streamAssets 接続）の根本もここ。
+R1 統合波は**コード完了**（下の消化済み節）。残り = リリース準備:
 
-2026-08-28 ユーザー裁定: API 工事 4 件と shard 配布は**1 波に統合**し、順序は API 工事が先
-（models 接続後に 2 段境界化で同じ継ぎ目を 2 度触らないため）: ①`ResidentWeight` union →
-②estimator 改名/シナリオ別 → ③identity 境界 + 2 段境界 → ④models 7 pipelines の shard 面
-接続 → ⑤exporter 自動分割（**閾値 1GiB**・co-shard 保証・決定的分割）→ ⑥Base f16 再 dist。
-受け入れ = Base f16 が実ブラウザ相当の制約下でロード可能（E2E）。HF 上げ直しは許可ゲート。
+- lockstep 0.7.0（hub / runtime / models — hub 0.5.0 追従と R1 の breaking を同梱）・CI 緑・
+  Release・JSR publish（手順 = [release-runbook](release-runbook.md)。fetch-cache 0.5.0 の
+  JSR minimum dependency age はコールド環境で 2026-08-29 18:22Z まで解決失敗しうる）
+- **models/（HF ミラー）の dist 再生成 + HF 上げ直し（許可ゲート）** — E2E 済みの分割 dist は
+  `outputs/eval/karume-anima-split-e2e`（models/ は未変更のまま）。**要判断**: ①i8 席
+  （1,962,502,636B — 壁の内側だが余裕 183MB）も分割再 export するか ②turbo リポの f16 も
+  上げ直すか ③pin 更新の範囲
+- リリース後 = ChatGPT 全体レビュー消化（ユーザー持参）・Pixel 実機 err.cause 再判定
+
+## 消化済み（R1 統合波 — ロード面 API 工事 + shard 配布・2026-08-28〜29）
+
+結果だけ残す（設計の正本 = ADR [0070](decisions/0070-shard-loading-admission.md)
+追記 2026-08-29 / [0071](decisions/0071-manifest-v3-shards.md) 決定 4 撤回・経緯は git）:
+
+- API 工事 4 件（2026-08-19 採択 CX-4.1/4.2/4.3/3.2）: `ResidentWeight` union +
+  `planWeightResidency` 純関数プランナ / `ModelShard {id, bytes}` と失敗の実名帰属 /
+  `prepareModel → estimate → createSession` の 2 段境界（既存 3 面も内部一本化）/
+  `AdmissionReport`（prefill / decode シナリオ + `peakAccountedBytes`）
+- hub `prefetchAssets`（相 1 単体面）+ models 7 pipelines の graph-first 接続（admission が
+  重み DL 前・進捗はモデル全体 1 本・ロード時に重み shard を落とし切る）
+- exporter 自動分割（`karume.shards` — 1GiB・co-shard・決定的・1GiB 以下はバイト不変）+
+  dist の複数 shards 要素・デモのローカル読みを疑似 HF サーバで本番経路と 1 本化
+  （PNG バイト一致で無風を証明）
+- **受け入れ実証**: Base f16 3.9GB → 4 shard の dist 全門通過・実ロード + 512² 生成完走
+  （従来は Chromium 上限で原理的に不能）。フル verify 1815/0/5 時点 + 各フェーズ実 GPU 緑
 
 ## 消化済み（0.6.0 yomi 依存分離 — 2026-08-25）
 
@@ -209,15 +227,8 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## release — リリース準備波（しばらく先）
 
-- **R1 の残り: ロード面 API 工事 4 件 + exporter 自動分割規則**（manifest の shard 欄自体は
-  波 K で消化 — ADR [0071](decisions/0071-manifest-v3-shards.md)。凍結が要る資産側の形は
-  済み、コード API は公開後も動かせる）。
-  **同席裁定（2026-08-19 全体レビュー — Codex 提案の採用）**: ①shard identity
-  （`{id, bytes}`）の hub↔runtime 境界保存 ②`prepareModel(graphShard) → estimate →
-  createSession(weightShards)` の 2 段境界（admission を重み DL 前へ — ADR 0070 の
-  graph-first に沿う）③estimator のシナリオ別報告 + `peakAccountedBytes` 改名
-  ④重み常駐の判別 union 化（`ResidentWeight` — 3 並列 map の統合）。
-  exporter 側 shard 分割規則（co-shard 保証）は最初の LLM 級配布と同時。
+- ~~R1 の残り~~ **消化済み（2026-08-29 — R1 統合波の節を参照）**: ロード面 API 工事 4 件も
+  exporter 自動分割規則も実装完了（ADR 0070 追記 2026-08-29 / ADR 0071 決定 4 撤回）。
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）
 - HF 公開: **jvnv / irodori / anima の 3 リポは波 K-4 で公開済み**（2026-08-21）。FN は parked
   （再配布の書面根拠なし）。以後の新モデルは runbook に従う

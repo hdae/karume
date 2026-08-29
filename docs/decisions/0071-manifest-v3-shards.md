@@ -57,6 +57,12 @@ safetensors ヘッダが正（dist の門が検査 — 既に `i4` ラベルの�
 dist は常に 1 要素の `shards` を書く。複数 shard への分割規則（co-shard 保証・分割閾値 —
 ADR 0070 決定 1）は最初の実需（LLM 級の配布）まで実装しない。
 
+> **撤回（2026-08-29 — R1 統合波）**: 実需が LLM 級より先に来た（Chromium の単一 ArrayBuffer
+> 上限で anima Base f16 がロード不能 — limitations）。分割規則は `karume.shards`
+> （データ節 1GiB 固定・書き出し順逐次詰め・weight/scale 原子対・連番名）として実装し、dist は
+> 現物から解決した複数要素を書く。1GiB 以下の資産は従来どおり単一ファイルでバイト不変。
+> 詳細は ADR 0070 追記 2026-08-29。
+
 ### 5. R1 同席の API 工事 4 件は切り離し
 
 shard identity API・`prepareModel → estimate → createSession` の 2 段境界・estimator 報告

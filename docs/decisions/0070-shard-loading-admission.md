@@ -161,3 +161,38 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
     実構築と同じ門で検査する（作れない構成に見積りを返さない）。report-only: 0 要素重みの
     4 バイト床が診断と見積りで食い違う縮退角（波 F の I4-DIAG-03 と同族 — 診断側の意味変更を
     要するため裁定待ち）。
+
+- 2026-08-29（R1 統合波 — 同席裁定 4 件〈CX-4.1/4.2/4.3/3.2〉+ 分割規則 + models 接続の実装で
+  確定した面。裁定の原文 = `.claude/reviews/2026-08-19_b04f589/`）:
+  - **shard identity（CX-4.1）**: `createSessionFromShards(gpu, shards: AsyncIterable<ModelShard>,
+    options)` — `ModelShard = {id, bytes}`（hub `StreamedAsset` の `path` は `id` へ改名・構造
+    互換）。shard 由来の失敗（parse・宣言違反・co-shard・アップロード）は `shard [n] 'id'` を
+    名乗る（連番は補助）。帰属はエラークラスと stack を保つ message 前置で、全量面の文言は
+    不変（受入①の契約維持）。追記 2026-08-19 の「shard [n] の重みアップロード」記述は本追記が
+    置換する。
+  - **2 段境界（CX-4.2・決定 5 の graph-first を公開面へ）**: `prepareModel(graphShard) →
+    PreparedModel.estimate() → PreparedModel.createSession(gpu, weightShards)`。capability 門と
+    IR 契約検査・常駐計画（`planWeightResidency` — CX-3.2 の純関数プランナ）は prepare 相で
+    確定し、重み shard を 1 バイトも取得する前に「実行できない」が落ちる。既存 3 面
+    （`createSession` / `createSessionFromShards` / `estimateSessionMemory`）は全て
+    PreparedModel 経由の薄い合成へ一本化（全量面 = 全テンソル同居のグラフ shard 1 本 + 重み
+    0 本の列）。**代償**: PreparedModel はグラフ shard を寿命いっぱい保持する — 決定 3 が
+    グラフ shard を「karume_ir + 小テンソル」と規定するので RAM ピーク目標
+    「O(最大**重み** shard)」は崩れない（受入③の文面はこの読みで更新）。
+  - **estimator（CX-4.3）**: 返り値は `AdmissionReport`（`resident`〈重み内訳 + state〉+
+    `scenarios[]`〈generation 指定時は prefill / decode を chunk 記号の再束縛で独立計算〉+
+    `peakAccountedBytes` = resident + max(シナリオ)）。max の根拠 = `ActiveBacking` 同時 1 本。
+    切替窓（退役 backing が flush 後始末まで生きる）は unaccounted へ明文化。追記 2026-08-19 の
+    カテゴリ写像は欄名だけ読み替え（導出式は不変・診断との厳密一致門は新欄名で維持）。
+  - **hub `prefetchAssets`（相 1 単体の公開面）+ models 接続**: 7 pipelines の `fromPretrained`
+    は「全コンポーネントのグラフ shard 1 回取得 → admission → 重み shard を 1 回で prefetch →
+    Session 構築時にキャッシュから逐次流し」。進捗はモデル全体 1 本のストリームを維持
+    （models 側で集約）。デモのローカル読みは疑似 HF サーバ経由で同一経路
+    （`examples/shared/local-dist-server.ts`）。
+  - **exporter の分割規則（決定 1 の書き手側 — ADR 0071 決定 4 の解除）**: 正本 =
+    `karume.shards`。データ節 1GiB（`SHARD_BYTE_LIMIT` 固定・ヘッダ非計上）・書き出し順の
+    逐次詰め・weight/scale 原子対・連番名 `<stem>-NNNNN-of-NNNNN<suffix>`・上限以下は単一
+    ファイルでバイト不変（git archive 対照 sha256 で実証）。
+  - **受入の実測（2026-08-29）**: anima Base f16 transformer 3,913,609,588B → 4 shard
+    （最大ファイル 1,073,756,928B = データ節 1GiB + ヘッダ）で dist 全門通過・実ロード +
+    512² 生成完走（従来は Chromium の単一 ArrayBuffer 上限で原理的に不能 — limitations 追随）。

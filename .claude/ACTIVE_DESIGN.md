@@ -7,19 +7,23 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-25
+> Last updated: 2026-08-29
 
 ## Now
 
-- **fetch-cache 0.5.0 追従（2026-08-28 実装済み）**: 検証責務を取得層へ移譲（spec の
-  `sha256`/`expectedBytes`・記録ハッシュ信頼・knob なし）・認証隔離の撤去（ユーザー裁定）・
-  `AssetPhase` から `verifying` 撤去・旧名前空間 `karume/1` 系 purge・`clearHubCache` は
-  取得層名前空間まるごと。正本 = ADR
-  [0080](../docs/decisions/0080-hub-fetch-cache-050.md)（**旧 CAS ドラフトを置換** —
-  `archive/hub-cas-0.5.0` の再適用は不要になった。内容キーは 0.5.0 が natively 提供）。
-  anima-web への追随点 3 つ（`verifying` 消滅・sha256 不一致が `HubFetchError`+`cause`・
-  `clearHubCache` の対象拡大）は完了報告参照。次波 = R1 統合波（backlog next — API 工事
-  4 件先行 → models shard 面接続 → exporter 1GiB 分割 → Base f16 再 dist）。
+- **R1 統合波はコード完了（2026-08-29）**: API 工事 4 件（union/プランナ・`ModelShard` 実名
+  帰属・`prepareModel` 2 段境界・`AdmissionReport`）+ hub `prefetchAssets` + models 7 pipelines
+  の graph-first 接続 + exporter 1GiB 分割（`karume.shards`）+ デモの疑似 HF サーバ化。
+  **受け入れ実証済み**: Base f16 3.9GB → 4 shard で実ロード + 生成完走。正本 = ADR
+  [0070](../docs/decisions/0070-shard-loading-admission.md) 追記 2026-08-29。
+  **次 = 0.7.0 リリース**（backlog next — 要判断: i8 も分割再 export するか / turbo f16 /
+  pin 範囲。models/ の HF ミラーは未変更・E2E dist は `outputs/eval/karume-anima-split-e2e`）。
+- **fetch-cache 0.5.0 追従（2026-08-28 実装済み）**: 検証責務を取得層へ移譲（記録ハッシュ
+  信頼・knob なし）・認証隔離の撤去・`verifying` 撤去・旧名前空間 purge。正本 = ADR
+  [0080](../docs/decisions/0080-hub-fetch-cache-050.md)（旧 CAS ドラフトを置換 —
+  `archive/hub-cas-0.5.0` の再適用は不要）。anima-web への追随 3 点（`verifying` 消滅・
+  sha256 不一致が `HubFetchError`+`cause`・`clearHubCache` の対象拡大）+ R1 分の 1 点
+  （`StreamedAsset.path`→`id`）。
 - **既知問題 3 件 + anima 素版 i4 感度の波（2026-08-25 進行中）**: ①Pixel の
   BodyStreamBuffer abort — 真因マスキング解消 + バイト予算 1.5GiB + 検証直列化**コミット済み**
   （実機再判定はリリース後 — known-issues）②NVIDIA の 2GiB 天井 — 融合 attention の
