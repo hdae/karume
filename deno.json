@@ -1,6 +1,9 @@
 {
   "workspace": ["./packages/runtime", "./packages/hub", "./packages/models"],
   "exclude": ["inputs/", "outputs/", "models/"],
+  "minimumDependencyAge": {
+    "exclude": ["jsr:@hdae/*"]
+  },
   "tasks": {
     "check": "deno check packages/runtime/mod.ts packages/hub/mod.ts packages/models/mod.ts examples/anima/main.ts examples/anima/eval-images.ts examples/sbv2/main.ts examples/sbv2/dump.ts examples/irodori/main.ts examples/irodori/eval-audio.ts examples/vowel-detector/main.ts",
     "verify": "deno fmt --check && deno lint && deno task check && deno test -A",
