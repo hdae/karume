@@ -50,6 +50,7 @@ from karume.ops import (
     sym_prefix_slice_attrs,
 )
 from karume.shapes import assert_graph_shapes, declared_shape
+from karume.shards import resolve_shards
 
 
 class IrError(ValueError):
@@ -1197,13 +1198,60 @@ def _assert_no_surplus_tensors(graph: IrGraph, stored: Mapping[str, _StoredTenso
         )
 
 
+def _read_shard_set(
+    paths: Sequence[str | Path],
+) -> tuple[str, dict[str, _StoredTensor], dict[str, int]]:
+    """shard 列を読み、`(グラフ JSON, 全テンソルの宣言, テンソル → 所属 shard 添字)` を返す。
+
+    MUST: レイアウト規則は **shard ごと**に張る（各 shard は独立に整合な safetensors —
+    ADR 0070 決定 1）。`karume_ir` を持つのは先頭 1 本だけで、後続への再登場も、shard を
+    跨いだ同名テンソルの重複も fail loudly（ランタイム側 `createShardValidator` の鏡像）。
+    """
+    if not paths:
+        raise ContainerError("検証する shard が 1 本も無い")
+    text: str | None = None
+    stored: dict[str, _StoredTensor] = {}
+    owner: dict[str, int] = {}
+    for index, path in enumerate(paths):
+        assert_reader_layout(path)
+        metadata, tensors = _read_container(path)
+        embedded = metadata.get(IR_METADATA_KEY)
+        if index == 0:
+            if embedded is None:
+                raise ContainerError(
+                    f"__metadata__.{IR_METADATA_KEY} が無い（Karume モデルではない）"
+                )
+            text = embedded
+        elif embedded is not None:
+            raise ContainerError(
+                f"shard[{index}] ({path}): {IR_METADATA_KEY} を持っている"
+                " — グラフ shard は先頭 1 本だけ（ADR 0070 決定 3）"
+            )
+        for name, view in tensors.items():
+            if name in owner:
+                raise ContainerError(
+                    f"テンソル '{name}' が shard[{owner[name]}] と shard[{index}] に重複している"
+                )
+            stored[name] = view
+            owner[name] = index
+    assert text is not None  # 先頭 shard の分岐が保証する
+    return text, stored, owner
+
+
 def verify_model(path: str | Path) -> IrGraph:
     """配布形 1 ファイルを IR v1 の全規則で検証し、読めたグラフを返す。"""
-    assert_reader_layout(path)
-    metadata, stored = _read_container(path)
-    text = metadata.get(IR_METADATA_KEY)
-    if text is None:
-        raise ContainerError(f"__metadata__.{IR_METADATA_KEY} が無い（Karume モデルではない）")
+    return verify_shards([path])
+
+
+def verify_shards(paths: Sequence[str | Path]) -> IrGraph:
+    """配布形の shard 列（1 本なら単一ファイル）を IR v1 の全規則で検証する。
+
+    見る集合は分割前と同一 — 宣言と実体の突合・scale の 5 点・余剰テンソル・ランタイム支援・
+    op 契約は**全 shard の和**に対して掛かる（ADR 0070 決定 1 の宣言完全性を書いた直後に
+    確かめる）。分割で増える門は 3 つだけ: shard ごとのレイアウト規則・`karume_ir` の在処・
+    **co-shard**（weight と companion scale が同じ shard に居る MUST）。
+    """
+    text, stored, owner = _read_shard_set(paths)
     graph = parse_ir_graph(text)
     # per-channel scale の受理形は「圧縮のまま GPU 常駐するか」で 2 通りに分かれる
     # （_assert_scale_tensor の 3 / 4）。判定も軸の導出もランタイム
@@ -1242,6 +1290,16 @@ def verify_model(path: str | Path) -> IrGraph:
                 channel_axes.get(name) if name in eligible else None,
                 initializer.storage.group_size if initializer.storage.dtype == "i4" else None,
             )
+            if owner[scale] != owner[initializer.tensor]:
+                # MUST: 逐次消費（ADR 0070 決定 3）は weight と scale を同時に要求するので、
+                # 跨いだ配布形は「参照を手放す」契約と両立しない。書く側の割り付け
+                # （`karume.shards.pack_shards`）は構造的に破れないが、読み返しでも見る
+                # — 手で組んだ / 別実装が書いた shard 列がここを通る。
+                raise ContainerError(
+                    f"{where}: 重み '{initializer.tensor}' が shard"
+                    f"[{owner[initializer.tensor]}]・scale '{scale}' が shard[{owner[scale]}] に"
+                    "分かれている（co-shard MUST — ADR 0070 決定 1）"
+                )
     _assert_no_surplus_tensors(graph, stored)
     assert_runtime_support(graph)
     assert_op_contracts(graph)
@@ -1254,22 +1312,32 @@ def verify_model(path: str | Path) -> IrGraph:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="配布形 safetensors を IR v1 の全規則で検証する")
     parser.add_argument(
-        "models", type=Path, nargs="+", help="検証する model.safetensors（複数指定可）"
+        "models",
+        type=Path,
+        nargs="+",
+        help="検証する model.safetensors（複数指定可。分割された資産は**代表 path**を渡す"
+        " — 連番の shard 列としてまとめて検証する）",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """指定された配布形を 1 本ずつ検証する。
+    """指定された配布形を 1 コンポーネントずつ検証する。
+
+    引数は**コンポーネントの代表 path** で、分割されていれば連番の shard 列へ解決してから
+    まとめて検証する（`karume.shards.resolve_shards`）— shard 1 本だけを単体で検証しても
+    「グラフが無い」「テンソルが足りない」としか言えず、宣言完全性も co-shard も見られない。
 
     MUST: 落ちたファイルで止める（残りを検証して最後にまとめない）— 例外は規則違反の
     位置まで綴ってあるので、そのまま送出するのが最も情報量が多い。
     """
     args = build_parser().parse_args(argv)
     for path in args.models:
-        graph = verify_model(path)
+        shards = resolve_shards(path)
+        graph = verify_shards(shards)
+        split = f" shards={len(shards)}" if len(shards) > 1 else ""
         print(
-            f"{path}: nodes={len(graph.nodes)} initializers={len(graph.initializers)}"
+            f"{path}:{split} nodes={len(graph.nodes)} initializers={len(graph.initializers)}"
             f" inputs={len(graph.inputs)} outputs={len(graph.outputs)}"
             f" symbols={','.join(graph.symbols) if graph.symbols else '（静的）'}"
         )

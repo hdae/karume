@@ -66,7 +66,7 @@ import re
 import shutil
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -77,6 +77,7 @@ from safetensors.numpy import save
 from karume.artifacts import ArtifactSwapError, staged_publication
 from karume.ir import IR_METADATA_KEY
 from karume.modelcard import HF_OWNER
+from karume.shards import MAX_SHARDS, ShardError, resolve_shards, shard_name
 
 # ---- ① 共有部: 置き場の綴り・共有席の決定・配置・ハッシュ・宣言と現物の突合 -------
 
@@ -119,10 +120,9 @@ MAX_MODELS = 32
 MAX_WEIGHTS = 32
 MAX_ASSETS = 32
 MAX_QUANTS = 32
-#: 1 dtype エントリが並べられる shard 数（`karume/3` 以降）。exporter は分割規則を持たない
-#: （常に 1 要素を書く）が、検査は hub と同じ値で弾く — {@link verify_dist} は手元のどの
-#: 配布形にも掛けられる門なので、上限を知らない検査になっていると受理集合が 2 つに割れる。
-MAX_SHARDS = 1024
+#: 1 dtype エントリが並べられる shard 数の上限（`karume.shards.MAX_SHARDS` を再輸出 — 書く側
+#: 〈分割〉と宣言側〈manifest 検査〉が同じ綴りを引く）。{@link verify_dist} は手元のどの配布形に
+#: も掛けられる門なので、上限を知らない検査になっていると受理集合が 2 つに割れる。
 MAX_PIPELINE_CONFIG_BYTES = 256 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 
@@ -184,10 +184,40 @@ def safetensors_header(path: Path) -> Mapping[str, Any]:
     return header
 
 
+def component_shards(path: Path) -> tuple[Path, ...]:
+    """コンポーネントの代表 path → 実在する shard 列（分割前は 1 要素）。
+
+    分割規則（`karume.shards`）の失敗を組み立ての語彙へ翻訳するだけの薄い層。組み立て側の
+    入口はここ 1 箇所で、格納 dtype の門も IR メタデータの読みも計画の展開も同じ列を見る。
+    """
+    try:
+        return resolve_shards(path)
+    except ShardError as cause:
+        raise DistError(str(cause)) from cause
+
+
+def assert_component_present(path: Path) -> None:
+    """コンポーネントの現物（単一ファイル or shard 列）が在ることを落とす。
+
+    綴りを 1 箇所に持つのは、不在の診断が「代表 path」で出続けるようにするため — 分割の
+    有無で診断のファイル名が変わると、系列を焼き直す側が何を探せばよいか分からなくなる。
+    """
+    if not all(shard.is_file() for shard in component_shards(path)):
+        raise DistError(f"組み立ての入力が無い: {path}")
+
+
 def storage_dtypes(path: Path) -> set[str]:
-    """safetensors ヘッダのテンソル dtype 集合（ヘッダだけ読む — 数 GB を舐めない）。"""
-    header = safetensors_header(path)
-    return {spec["dtype"] for name, spec in header.items() if name != "__metadata__"}
+    """コンポーネントのテンソル dtype 集合（**全 shard の和**・ヘッダだけ読む）。
+
+    和で見るのは、混成 dtype の資産が分割されると dtype が shard ごとに散るため（`i4` 系列の
+    scale は F32・重みは I4 で、同じ shard に居るとは限らない）。1 本目だけを見る形にすると、
+    {@link assert_storage} の要求 dtype が「たまたま先頭に居たか」で通ったり落ちたりする。
+    """
+    found: set[str] = set()
+    for shard in component_shards(path):
+        header = safetensors_header(shard)
+        found |= {spec["dtype"] for name, spec in header.items() if name != "__metadata__"}
+    return found
 
 
 def assert_storage(role: str, path: Path, requirements: Mapping[str, str]) -> None:
@@ -200,8 +230,7 @@ def assert_storage(role: str, path: Path, requirements: Mapping[str, str]) -> No
     required = requirements.get(role)
     if required is None:
         return
-    if not path.is_file():
-        raise DistError(f"組み立ての入力が無い: {path}")
+    assert_component_present(path)
     found = storage_dtypes(path)
     if required not in found:
         raise DistError(
@@ -227,8 +256,7 @@ def assert_storage_absent(role: str, path: Path, forbidden: Mapping[str, tuple[s
     banned = forbidden.get(role)
     if not banned:
         return
-    if not path.is_file():
-        raise DistError(f"組み立ての入力が無い: {path}")
+    assert_component_present(path)
     found = storage_dtypes(path)
     intruders = [dtype for dtype in banned if dtype in found]
     if intruders:
@@ -297,8 +325,13 @@ def table_payload(key: str, table: np.ndarray) -> bytes:
 
 
 def ir_graph(path: Path) -> Mapping[str, Any]:
-    """コンテナの `__metadata__` から IR グラフの JSON を読む（ヘッダだけ読む）。"""
-    metadata = safetensors_header(path).get("__metadata__")
+    """コンテナの `__metadata__` から IR グラフの JSON を読む（ヘッダだけ読む）。
+
+    分割されたコンポーネントでは**グラフ shard（先頭）**から読む（ADR 0070 決定 1 — 後続の
+    shard は `karume_ir` を持たない）。
+    """
+    graph_shard = component_shards(path)[0]
+    metadata = safetensors_header(graph_shard).get("__metadata__")
     if not isinstance(metadata, dict) or IR_METADATA_KEY not in metadata:
         raise DistError(f"{path}: IR メタデータ（{IR_METADATA_KEY}）が無い")
     try:
@@ -372,9 +405,11 @@ class WeightFiles:
     実 path は {@link Artifact} 側が持つ — 共有の畳み込みで path が `shared/…` へ動くので、
     宣言側が path を直に握っていると 2 箇所が独立に動く。
 
-    `file` が単数なのは、**exporter に shard 分割規則を持たせない**ため（ADR 0070 決定 1 —
-    分割の実需は LLM 配布で、そこまでは席だけ）。現行資産のコンテナは `karume_ir` を持つ
-    1 本なので、そのまま「先頭 = グラフ shard」の 1 要素 shard 列として宣言される。
+    `file` が単数なのは、**分割は表ではなく現物が決める**ため（ADR 0070 決定 1 — 何本に
+    割れるかは書いたバイト数で決まり、pipeline の表には書けない）。ここが指すのは
+    コンポーネントの**代表 1 役**で、実際に何本の shard として宣言されるかは
+    {@link expand_weight_shards} が組み立て時に現物から解決する。分割されていない資産は
+    従来どおり 1 要素の shard 列（= 先頭のグラフ shard そのもの）。
     """
 
     file: str
@@ -399,6 +434,78 @@ class ModelPlan:
     quants: Mapping[str, Any]
     default_quant: str
     pipeline_config: Mapping[str, Any]
+
+
+class ShardedPlan(NamedTuple):
+    """{@link expand_weight_shards} の出力 — shard 展開済みの計画と、その振り分け表。"""
+
+    plan: ModelPlan
+    #: weights の代表役割名 → **順序付き**の shard 役割名（分割前は 1 要素 = 代表役割そのもの）。
+    shards: Mapping[str, tuple[str, ...]]
+
+
+#: 展開で作る shard 役割名の綴り（`<代表役割>#<1 始まりの番号>`）。役割名は manifest に出ない
+#: 内部キーなので、`#` は「recipe が書いた役割名」と衝突しないための区切りでしかない。
+SHARD_ROLE_SEPARATOR = "#"
+
+
+def expand_weight_shards(plan: ModelPlan) -> ShardedPlan:
+    """weights の役割が**分割されたコンポーネント**を指しているとき、shard ごとの役割へ展開する。
+
+    MUST: 分割の有無は**現物から**解決する（{@link component_shards}）— 何本に割れるかは
+    書いたバイト数で決まるので、pipeline の表にも recipe の定数にも書けない。表に書かせると
+    「再 export で本数が変わったのに宣言は前回のまま」という、形も型も合う沈黙誤宣言が作れる。
+
+    分割されていない役割（と生成物 `payload` の役割）は 1 要素の列として素通しする — その
+    経路のバイト列も manifest も 1 バイトも変わらない。展開が起きた役割は代表役割を
+    **artifacts から外し**、shard 1 本ごとに `Artifact` を作る（相対 path は代表 path へ
+    同じ連番規則を掛けたもの — 系列側のファイル名と配布形のファイル名が同じ 1 本の綴りから
+    出る）。
+    """
+    roles = sorted({files.file for labels in plan.weights.values() for files in labels.values()})
+    # weights 以外の席（assets / extras）から**同じ役割**を指している綴りは、展開で役割名が
+    # 消えると宣言の側だけが行き場を失う。数は数本なので、集めて名指しで落とす。
+    elsewhere = set(plan.assets.values()) | {
+        role
+        for labels in plan.weights.values()
+        for files in labels.values()
+        for role in files.extras.values()
+    }
+    artifacts = dict(plan.artifacts)
+    shards: dict[str, tuple[str, ...]] = {}
+    for role in roles:
+        artifact = plan.artifacts.get(role)
+        if artifact is None:
+            raise DistError(
+                f"{plan.name}: weights が役割 '{role}' を指しているが artifacts に無い"
+                f"（役割: {sorted(plan.artifacts)}）"
+            )
+        if artifact.source is None:
+            shards[role] = (role,)
+            continue
+        sources = component_shards(artifact.source)
+        if len(sources) == 1:
+            shards[role] = (role,)
+            continue
+        if role in elsewhere:
+            raise DistError(
+                f"{plan.name}: 分割されたコンポーネントの役割 '{role}' を assets / extras も"
+                "指している（それらの席は 1 ファイル参照なので、複数 shard を宣言できない）"
+            )
+        del artifacts[role]
+        members: list[str] = []
+        total = len(sources)
+        for index, source in enumerate(sources, start=1):
+            member = f"{role}{SHARD_ROLE_SEPARATOR}{index}"
+            if member in artifacts:
+                raise DistError(
+                    f"{plan.name}: shard 役割名 '{member}' が既存の役割と衝突する"
+                    f"（'{SHARD_ROLE_SEPARATOR}' を含む役割名は使えない）"
+                )
+            artifacts[member] = Artifact(shard_name(artifact.rel_path, index, total), source=source)
+            members.append(member)
+        shards[role] = tuple(members)
+    return ShardedPlan(replace(plan, artifacts=artifacts), shards)
 
 
 def generator_tag() -> str:
@@ -612,17 +719,26 @@ def _plan_shared(plans: Sequence[ModelPlan]) -> list[_SharedSeat]:
     return shared
 
 
-def _model_entry(plan: ModelPlan, refs: Mapping[str, dict[str, Any]]) -> dict:
-    """1 モデルぶんの manifest エントリ（ADR 0041 §2）。`refs` は役割名 → 3 点セット。"""
+def _model_entry(
+    plan: ModelPlan,
+    refs: Mapping[str, dict[str, Any]],
+    shards: Mapping[str, tuple[str, ...]],
+) -> dict:
+    """1 モデルぶんの manifest エントリ（ADR 0041 §2）。`refs` は役割名 → 3 点セット。
+
+    `shards` は {@link expand_weight_shards} が現物から解決した振り分け表（代表役割 →
+    順序付き shard 役割）。
+    """
     weights: dict[str, Any] = {}
     for name, labels in plan.weights.items():
         entry: dict[str, Any] = {}
         for label, files in labels.items():
             extras = {extra: refs[role] for extra, role in files.extras.items()}
             # `shards` は順序付きの列で、**先頭がグラフ shard**（`karume_ir` を持つコンテナ）。
-            # 分割規則を持たない現状は常に 1 要素 = そのコンテナそのもの（{@link WeightFiles}）。
+            # 並びは shard 番号順 MUST — hub は順序を保存し、runtime は先頭を graph shard と
+            # して受ける（ADR 0071 決定 2）。
             entry[label] = {
-                "shards": [refs[files.file]],
+                "shards": [refs[role] for role in shards[files.file]],
                 **({"extras": extras} if extras else {}),
             }
         weights[name] = entry
@@ -764,7 +880,7 @@ def manifest_text(manifest: Mapping[str, Any]) -> str:
 
 
 def _materialize_family(
-    plans: Sequence[ModelPlan],
+    sharded: Sequence[ShardedPlan],
     out_dir: Path,
     default_model: str,
     external: Mapping[str, Mapping[str, Any]],
@@ -785,6 +901,7 @@ def _materialize_family(
     （配布先を直接更新しないので、途中で落ちても捨てるだけで済む）。
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    plans = [item.plan for item in sharded]
     placed: dict[tuple[str, str], str] = {}
     digests: dict[str, str] = {}
     folded: dict[tuple[str, str], str] = {}
@@ -817,7 +934,8 @@ def _materialize_family(
             digests[rel_path] = sha256_file(out_dir / rel_path)
 
     models: dict[str, Any] = {}
-    for plan in plans:
+    for item in sharded:
+        plan = item.plan
         refs = {}
         for role in plan.artifacts:
             reference = external.get(role)
@@ -826,7 +944,7 @@ def _materialize_family(
                 continue
             rel_path = placed[(plan.name, role)]
             refs[role] = file_ref(out_dir, rel_path, digests[rel_path])
-        models[plan.name] = _model_entry(plan, refs)
+        models[plan.name] = _model_entry(plan, refs, item.shards)
     manifest = {
         "format": MANIFEST_FORMAT,
         "generator": generator_tag(),
@@ -875,6 +993,10 @@ def assemble_family(
     """
     if not plans:
         raise DistError("組み立てるモデルが 1 つも無い")
+    # MUST: 展開は**全ての門より前**（1 バイトも書く前）— 展開後の役割が持つ相対 path も
+    # 出所も、以降の検査（path の収まり・入力の実在・共有の畳み込み）に掛かる必要がある。
+    sharded = [expand_weight_shards(plan) for plan in plans]
+    plans = [item.plan for item in sharded]
     names = [plan.name for plan in plans]
     if len(set(names)) != len(names):
         raise DistError(f"モデル名が重複している: {names}")
@@ -893,11 +1015,22 @@ def assemble_family(
             f"越境参照は 1 モデルの組み立てにだけ許す（対象 {names} は {len(plans)} モデル）"
             " — 役割名はモデルを跨いで同じ綴りなので、一括で掛けると指し先が曖昧になる"
         )
+    if external is not None:
+        # MUST: 分割されたコンポーネントは越境参照に載せない — 1 役が複数ファイルへ割れた
+        # 時点で「どのバイト列を向こうへ預けたか」が 1 つの参照で書けない。展開で役割が
+        # 消えているだけなので、素通しすると自リポへ置いた上に参照も書かれない（黙って
+        # 自己完結に戻る）形になる。
+        split = [role for role in external.roles if len(sharded[0].shards.get(role, ())) > 1]
+        if split:
+            raise DistError(
+                f"越境参照は分割されたコンポーネントに掛けられない: {split}"
+                "（1 役が複数 shard へ割れているので 1 つの参照では指せない）"
+            )
     references = external_refs(external, plans[0]) if external is not None else {}
 
     try:
         with staged_publication(out_dir) as staging:
-            manifest = _materialize_family(plans, staging, default_model, references)
+            manifest = _materialize_family(sharded, staging, default_model, references)
             # 法的テキストは検証の**前**に置く — 例外側に居ることを組み立てのたびに
             # {@link verify_dist} で通しておかないと、例外が外れた回に据わってから気づく。
             for name, text in (root_files or {}).items():

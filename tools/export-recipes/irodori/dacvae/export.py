@@ -132,6 +132,7 @@ from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
+from karume.shards import resolve_shards
 
 #: 実重みの置き場（`hf download Aratako/Semantic-DACVAE-Japanese-32dim` の展開先を
 #: `irodori/dacvae/convert.py` で safetensors 化したもの）。
@@ -927,7 +928,7 @@ def _graph_summary(graph: IrGraph, path: Path) -> dict[str, Any]:
         "symbols": list(graph.symbols),
         "inputs": [[spec.name, list(spec.shape)] for spec in graph.inputs],
         "output_shapes": [list(graph.values[name].shape) for name in graph.outputs],
-        "model_bytes": path.stat().st_size,
+        "model_bytes": sum(p.stat().st_size for p in resolve_shards(path)),
     }
 
 

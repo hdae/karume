@@ -97,6 +97,7 @@ from karume.quantize import (
     iter_quant_targets,
     round_weights_to_f16,
 )
+from karume.shards import resolve_shards
 
 from . import patch
 
@@ -804,7 +805,7 @@ def _summary(
         "plain_bytes": breakdown.plain_bytes,
         # i8 の companion scale（ADR 0019）。f32 / f16 では 0。
         "scale_bytes": breakdown.scale_bytes,
-        "model_bytes": (out_dir / MODEL_FILE).stat().st_size,
+        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": list(written),

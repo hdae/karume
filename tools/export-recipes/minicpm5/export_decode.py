@@ -60,12 +60,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import torch
 from safetensors.torch import save_file
@@ -77,13 +75,12 @@ from _shared.decode_series import _write_greedy, assert_case_room, positions_for
 from _shared.paths import SERIES_ROOT
 from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
-from karume.emit import write_model
 from karume.ir import IrGraph
 from karume.ops import ARGMAX_OP, ATTENTION_OP, STATE_APPEND_OP
-from karume.pipeline import export_module
+from karume.pipeline import export_module, publish_model
 from karume.shapes import declared_shape
+from karume.shards import resolve_shards
 from karume.states import StateAttentionSpec, StatesPlan, to_states_form
-from karume.verify import verify_model
 from minicpm5 import export as one_shot
 
 #: 生成物の既定の置き場（1-shot 系列とは別ディレクトリ — グラフの形が違う別資産）。
@@ -428,27 +425,18 @@ def assert_ir_form_decode(
 
 
 def _write_container(graph: IrGraph, tensors: Mapping[str, torch.Tensor], path: Path) -> IrGraph:
-    """手術済みグラフを書いて検証する（`pipeline.export_to_file` の書き出し段と同じ原子性）。
+    """手術済みグラフを書いて検証する（公開の 3 段は `pipeline.publish_model` に預ける）。
 
-    `export_to_file` は export → 書き出しが 1 本道で手術を挟む隙間が無いので、同じ 3 段
-    （一時ファイルへ書く → `verify_model` → `os.replace`）をここで組む。**規則は再実装しない**
-    — states 節・順序・shape の検査は `verify_model` 1 本に預ける。
+    `export_to_file` は export → 書き出しが 1 本道で手術を挟む隙間が無いので、書き出し以降
+    だけを core の入口から呼ぶ。**規則も原子性も再実装しない** — states 節・順序・shape の
+    検査も、shard 分割（ADR 0070 決定 1）とその据え替え・後始末も core が持つ。
 
     刈り込みで死んだ initializer（mask の Tmax² 定数）は格納テンソルからも落とす —
     `write_model` は宣言と格納の**完全一致**を要求する。
     """
     declared = {init.tensor for init in graph.initializers.values()}
     stored = {name: tensor for name, tensor in tensors.items() if name in declared}
-    final = Path(path)
-    staged = final.with_name(f"{final.name}.{uuid4().hex}.partial")
-    try:
-        write_model(staged, graph, stored)
-        verified = verify_model(staged)
-        os.replace(staged, final)
-    except BaseException:
-        staged.unlink(missing_ok=True)
-        raise
-    return verified
+    return publish_model(path, graph, stored)
 
 
 def _write_io(
@@ -557,7 +545,7 @@ def export_series(
         "outputs": len(verified.outputs),
         "initializers": len(verified.initializers),
         "pruned_initializers": len(graph.initializers) - len(verified.initializers),
-        "model_bytes": (out_dir / one_shot.MODEL_FILE).stat().st_size,
+        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / one_shot.MODEL_FILE)),
         "ops": sorted(verified.required_ops),
         "symbols": list(verified.symbols),
         "io": io_written,

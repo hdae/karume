@@ -1,4 +1,4 @@
-"""配布形（safetensors 1 ファイル + `__metadata__` へのグラフ JSON 埋め込み）の書き出し。
+"""配布形（safetensors + `__metadata__` へのグラフ JSON 埋め込み）の書き出し。
 
 格納の分岐は **f16（ADR 0018）と i8（ADR 0019）と i4（ADR 0069）**。分岐が増えても「格納形式
 = ランタイムが受理する形式」の対応が 1 箇所で決まるよう、書き出し経路はこの関数だけにする
@@ -52,6 +52,14 @@ Karume のリーダはデータ節を「隙間なく・型ごとの整列単位�
 F32 / I32 / **I4** が 4 バイト整列群（I4 の節は必ず 8 の倍数バイトなので、後続の整列を崩さない
 — ADR 0069 追記 2）、次に F16、**I8 は要素サイズ 1 で整列制約が無いぶん任意長を作れる**ので
 末尾。書いた直後の `verify.assert_reader_layout` がリーダ規則を写して検査する。
+
+## shard 分割（ADR 0070 決定 1 — 規則の正本は `karume.shards`）
+
+データ節の総量が `shards.SHARD_BYTE_LIMIT` を超えるコンポーネントは、書き出し順のまま
+複数ファイルへ逐次詰めされる（先頭 = グラフ shard = `karume_ir` + 先頭から詰めたぶん）。
+上限以下なら**従来どおり 1 ファイル**で、バイト列も名前も 1 バイトも変わらない。並び順の
+規約（上節）は shard の**中**で閉じて満たす — 各 shard は自分のテンソルだけを宣言する
+独立に整合な safetensors なので、リーダ規則は shard 単位で写せる。
 """
 
 from __future__ import annotations
@@ -80,6 +88,13 @@ from karume.quantize import (
     group_size_of,
     quantize_to_int4,
     quantize_to_int8,
+)
+from karume.shards import (
+    SHARD_BYTE_LIMIT,
+    assert_co_shard,
+    assert_shard_partition,
+    pack_shards,
+    shard_path,
 )
 
 #: 書き出せる格納 dtype（重みスロット向け）。bf16 は実行経路が無い（ADR 0006）。
@@ -846,6 +861,47 @@ def _save_ordered(
             del tensor
 
 
+def _companion_pairs(conversions: Mapping[str, _Conversion]) -> dict[str, str]:
+    """weight ↔ companion scale の**対称**写像（原子対の綴りはここ 1 箇所）。
+
+    scale を持つのは i8 / i4 の計画だけ（f16 は scale を持たない）。キーの導出は
+    {@link _scale_key} と同じ 1 本道で、別々に綴ると「対だと思っていない対」が生まれる。
+    """
+    pairs: dict[str, str] = {}
+    for key, conversion in conversions.items():
+        if conversion.scale is None:
+            continue
+        scale_key = _scale_key(key)
+        pairs[key] = scale_key
+        pairs[scale_key] = key
+    return pairs
+
+
+def _shard_groups(
+    tensors: Mapping[str, torch.Tensor],
+    order: Sequence[str],
+    conversions: Mapping[str, _Conversion],
+    limit: int,
+) -> list[tuple[str, ...]]:
+    """書き出し順を shard へ割り付ける（規則の正本は `karume.shards`）。
+
+    バイト数は**実データを読まずに**出る（論理要素数 × 格納 bit 幅 — `_stored_dtype_of` が
+    ヘッダを変換前に決めるのと同じ導出）ので、割り付けはピーク RAM に一切載らない。
+    """
+    payload_bytes: dict[str, int] = {}
+    for name in order:
+        tensor = tensors[name]
+        dtype_name, bits = _stored_dtype_of(name, tensor, conversions.get(name))
+        payload_bytes[name] = _payload_bytes(name, dtype_name, tensor.numel(), bits)
+    companions = _companion_pairs(conversions)
+    groups = pack_shards(order, payload_bytes, companions, limit)
+    # 規則（pack_shards）と検査（下 2 本）を分けて持つ — 割り付けの入口が増えた日に、
+    # 規則の写経ではなく検査が受け止める（ADR 0070 決定 1 の受入条件⑤と同じ集合）。
+    assert_shard_partition(groups, order)
+    assert_co_shard(groups, companions)
+    return groups
+
+
 def write_model(
     path: str | Path,
     graph: IrGraph,
@@ -854,8 +910,18 @@ def write_model(
     weight_dtype: str = "f32",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
     weight_dtype_overrides: Mapping[str, str] | None = None,
-) -> Path:
-    """グラフと格納テンソルを 1 ファイルに書き、書いたパスを返す。
+    _shard_byte_limit: int | None = None,
+) -> list[Path]:
+    """グラフと格納テンソルを配布形へ書き、書いた shard の path を**順に**返す。
+
+    データ節の総量が `shards.SHARD_BYTE_LIMIT` 以下なら書くのは `path` 1 本だけ（返り値も
+    1 要素）で、バイト列は分割規則が入る前と同一。超えると
+    `<拡張子の前>-NNNNN-of-NNNNN<拡張子>` の連番へ分かれ、**先頭だけが `karume_ir` を持つ**
+    （ADR 0070 決定 1 / 決定 3）。`path` 自身はそのとき 1 バイトも書かれない。
+
+    `_shard_byte_limit` は**テストからのみ触る**上限の差し込み（合成の小テンソルで分割を
+    起こすため）。公開ノブではない — 配布形の不変条件なので、既定は定数 1 本
+    （`shards.SHARD_BYTE_LIMIT`）で、呼び出しのたびにモジュール属性として引く。
 
     `weight_dtype` が `"f16"` / `"i8"` / `"i4"` のとき、**適格な重みスロットだけ**が圧縮格納に
     なる（宣言と実体が 1 経路で決まる — 別々に決めると「宣言 f16 / 実体 f32」の沈黙誤読が
@@ -904,11 +970,28 @@ def write_model(
     )
     source = {**contiguous, **plan.scales}
     committed = replace(graph, initializers={**graph.initializers, **plan.declarations})
-    _save_ordered(
-        out,
-        source,
-        _write_order(source, plan.conversions),
-        {IR_METADATA_KEY: committed.to_json()},
-        plan.conversions,
-    )
-    return out
+    metadata = {IR_METADATA_KEY: committed.to_json()}
+    order = _write_order(source, plan.conversions)
+    limit = SHARD_BYTE_LIMIT if _shard_byte_limit is None else _shard_byte_limit
+    groups = _shard_groups(source, order, plan.conversions, limit)
+    if len(groups) == 1:
+        # MUST: 分割不要のときは `path` へ従来の順序のまま 1 本で書く（既存資産の再 dist が
+        # バイト単位で不変であること — 分割規則の導入は配布形の再ハッシュを起こさない）。
+        _save_ordered(out, source, order, metadata, plan.conversions)
+        return [out]
+    total = len(groups)
+    written: list[Path] = []
+    for index, group in enumerate(groups, start=1):
+        members = {name: source[name] for name in group}
+        target = shard_path(out, index, total)
+        # MUST: `karume_ir` は**先頭 shard だけ**（ADR 0070 決定 3 — 後続への再登場は
+        # ランタイムが fail loudly で拒否する）。後続の `__metadata__` は空で書く。
+        _save_ordered(
+            target,
+            members,
+            _write_order(members, plan.conversions),
+            metadata if index == 1 else {},
+            plan.conversions,
+        )
+        written.append(target)
+    return written

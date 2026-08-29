@@ -79,6 +79,7 @@ from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.rope import assert_rope_lifted
 from karume.shapes import declared_shape
+from karume.shards import resolve_shards
 
 #: 公式重みの置き場（`hf download openbmb/MiniCPM5-1B` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "minicpm5" / "MiniCPM5-1B"
@@ -489,7 +490,7 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": (out_dir / MODEL_FILE).stat().st_size,
+        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

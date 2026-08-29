@@ -198,8 +198,9 @@ class TestManifestLimits:
 class TestShardDeclaration:
     """`karume/4` の weights は dtype ごとに **shard 列**を持つ（ADR 0070 決定 1 の欄）。
 
-    exporter は分割規則を持たない（{@link WeightFiles}）ので、書く列は常に 1 要素 —
-    `karume_ir` を持つコンテナそのもの = 先頭のグラフ shard。
+    ここが見るのは**単一コンテナ**（= 上限以下で分割されなかった資産）の側 — 列は 1 要素で、
+    `karume_ir` を持つコンテナそのもの = 先頭のグラフ shard。複数要素になる側は
+    {@link TestShardExpansion}。
     """
 
     _PAYLOAD = b"weights-A"
@@ -1120,3 +1121,111 @@ class TestCardProfile:
         assert sorted(profiles) == ["fn", "jvnv"]
         assert resolve_card_renderer(_TWO_PROFILE_PIPELINE, "jvnv") is profiles["jvnv"]
         assert profiles["fn"] is not profiles["jvnv"]
+
+
+class TestShardExpansion:
+    """分割されたコンポーネントは、現物から解決した**複数要素の shard 列**として宣言される。
+
+    何本に割れるかは書いたバイト数で決まる（`karume.shards`）ので、pipeline の表には書けない
+    — 組み立ては代表 path から現物を辿る（{@link karume.dist.expand_weight_shards}）。
+    """
+
+    def _plan(self, series: Path, sources: Sequence[bytes]) -> ModelPlan:
+        """1 役だけの計画。`sources` が 2 本以上なら系列側を連番で作る（= 分割済みの資産）。"""
+        series.mkdir(parents=True, exist_ok=True)
+        total = len(sources)
+        for index, payload in enumerate(sources, start=1):
+            name = (
+                "model.safetensors"
+                if total == 1
+                else f"model-{index:05d}-of-{total:05d}.safetensors"
+            )
+            (series / name).write_bytes(payload)
+        return ModelPlan(
+            name="A",
+            pipeline="anima/1",
+            artifacts={
+                "w": Artifact(rel_path="w/model.safetensors", source=series / "model.safetensors")
+            },
+            weights={"w": {"f16": WeightFiles(file="w")}},
+            assets={},
+            quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
+            default_quant="f16",
+            pipeline_config={},
+        )
+
+    def test_a_split_component_is_declared_as_an_ordered_shard_list(self, tmp_path: Path) -> None:
+        payloads = [b"graph-shard", b"weights-2", b"weights-3"]
+        plan = self._plan(tmp_path / "series", payloads)
+        out_dir = tmp_path / "models" / "sharded"
+
+        manifest = assemble_family([plan], out_dir, "A")
+
+        entry = manifest["models"]["A"]["weights"]["w"]["f16"]
+        assert [ref["path"] for ref in entry["shards"]] == [
+            "A/w/model-00001-of-00003.safetensors",
+            "A/w/model-00002-of-00003.safetensors",
+            "A/w/model-00003-of-00003.safetensors",
+        ]
+        # 並びは shard 番号順 MUST（先頭 = グラフ shard）。中身も番号どおりに置かれている。
+        assert [ref["size"] for ref in entry["shards"]] == [len(item) for item in payloads]
+        assert [ref["sha256"] for ref in entry["shards"]] == [
+            hashlib.sha256(item).hexdigest() for item in payloads
+        ]
+        for ref, payload in zip(entry["shards"], payloads, strict=True):
+            assert (out_dir / ref["path"]).read_bytes() == payload
+
+    def test_the_shards_are_covered_by_the_declaration_check(self, tmp_path: Path) -> None:
+        """突合は列を辿って現物へ届く（宣言外ファイル検査に落ちない）。"""
+        plan = self._plan(tmp_path / "series", [b"graph-shard", b"weights-2"])
+        out_dir = tmp_path / "models" / "sharded"
+
+        assemble_family([plan], out_dir, "A")
+
+        assert verify_dist(out_dir) == {
+            "A/w/model-00001-of-00002.safetensors": len(b"graph-shard"),
+            "A/w/model-00002-of-00002.safetensors": len(b"weights-2"),
+        }
+
+    def test_an_unsplit_component_still_declares_a_single_element(self, tmp_path: Path) -> None:
+        """分割されていない資産の宣言は 1 バイトも変わらない（代表 path のまま 1 要素）。"""
+        plan = self._plan(tmp_path / "series", [b"whole"])
+        out_dir = tmp_path / "models" / "whole"
+
+        manifest = assemble_family([plan], out_dir, "A")
+
+        entry = manifest["models"]["A"]["weights"]["w"]["f16"]
+        assert [ref["path"] for ref in entry["shards"]] == ["A/w/model.safetensors"]
+
+    def test_the_leftovers_of_a_previous_export_fail_loudly(self, tmp_path: Path) -> None:
+        """単一ファイルと連番の同居は「どちらを配るか」が一意に決まらない。"""
+        series = tmp_path / "series"
+        plan = self._plan(series, [b"graph-shard", b"weights-2"])
+        (series / "model.safetensors").write_bytes(b"stale")
+
+        with pytest.raises(DistError, match="同居"):
+            assemble_family([plan], tmp_path / "models" / "mixed", "A")
+
+    def test_a_cross_repo_reference_to_a_split_component_fails_loudly(self, tmp_path: Path) -> None:
+        """1 役が複数 shard へ割れた時点で、1 つの参照では指せない（黙って自リポへ置かない）。"""
+        plan = self._plan(tmp_path / "series", [b"graph-shard", b"weights-2"])
+        external = ExternalComponents(
+            repo="owner/name",
+            revision="a" * 40,
+            dist=tmp_path / "source",
+            model="A",
+            roles=("w",),
+        )
+
+        with pytest.raises(DistError, match="分割されたコンポーネント"):
+            assemble_family([plan], tmp_path / "models" / "borrowed", "A", external=external)
+
+    def test_a_split_component_that_another_seat_also_names_fails_loudly(
+        self, tmp_path: Path
+    ) -> None:
+        """assets / extras の席は 1 ファイル参照 — 複数 shard になった役割は指せない。"""
+        plan = self._plan(tmp_path / "series", [b"graph-shard", b"weights-2"])
+        plan = replace(plan, assets={"table": "w"})
+
+        with pytest.raises(DistError, match="assets / extras も"):
+            assemble_family([plan], tmp_path / "models" / "aliased", "A")

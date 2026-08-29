@@ -108,14 +108,12 @@ causal も窓も**述語計算**になるので mask tensor は要らない。�
 
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import torch
 from safetensors.torch import save_file
@@ -129,13 +127,12 @@ from gemma4 import export as one_shot
 from gemma4 import ple, provenance
 from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
-from karume.emit import write_model
 from karume.ir import IrGraph, IrNode
 from karume.ops import ARGMAX_OP, ATTENTION_OP, STATE_APPEND_OP
-from karume.pipeline import export_module
+from karume.pipeline import export_module, publish_model
 from karume.shapes import declared_shape
+from karume.shards import resolve_shards
 from karume.states import StateAttentionSpec, StatesPlan, to_states_form
-from karume.verify import verify_model
 
 #: 生成物の既定の置き場（1-shot 系列とは別ディレクトリ — グラフの形が違う別資産）。
 #: 素材（`--model-dir` の既定）は 1-shot 形と同じで、綴りは共通の CLI 骨組みが持つ
@@ -772,11 +769,11 @@ def _write_container(
     weight_scales: Mapping[str, torch.Tensor],
     weight_dtype_overrides: Mapping[str, str],
 ) -> IrGraph:
-    """手術済みグラフを書いて検証する（`pipeline.export_to_file` の書き出し段と同じ原子性）。
+    """手術済みグラフを書いて検証する（公開の 3 段は `pipeline.publish_model` に預ける）。
 
-    `export_to_file` は export → 書き出しが 1 本道で手術を挟む隙間が無いので、同じ 3 段
-    （一時ファイルへ書く → `verify_model` → `os.replace`）をここで組む。**規則は再実装しない**
-    — states 節・順序・shape の検査は `verify_model` 1 本に預ける。
+    `export_to_file` は export → 書き出しが 1 本道で手術を挟む隙間が無いので、書き出し以降
+    だけを core の入口から呼ぶ。**規則も原子性も再実装しない** — states 節・順序・shape の
+    検査も、shard 分割（ADR 0070 決定 1）とその据え替え・後始末も core が持つ。
 
     刈り込みで死んだ initializer（mask の Tmax² 定数）は格納テンソルからも落とす —
     `write_model` は宣言と格納の**完全一致**を要求する。scale 台帳（`weight_scales`）は
@@ -786,23 +783,14 @@ def _write_container(
     """
     declared = {init.tensor for init in graph.initializers.values()}
     stored = {name: tensor for name, tensor in tensors.items() if name in declared}
-    final = Path(path)
-    staged = final.with_name(f"{final.name}.{uuid4().hex}.partial")
-    try:
-        write_model(
-            staged,
-            graph,
-            stored,
-            weight_dtype=weight_dtype,
-            weight_scales=weight_scales,
-            weight_dtype_overrides=weight_dtype_overrides,
-        )
-        verified = verify_model(staged)
-        os.replace(staged, final)
-    except BaseException:
-        staged.unlink(missing_ok=True)
-        raise
-    return verified
+    return publish_model(
+        path,
+        graph,
+        stored,
+        weight_dtype=weight_dtype,
+        weight_scales=weight_scales,
+        weight_dtype_overrides=weight_dtype_overrides,
+    )
 
 
 def _write_io(
@@ -1005,7 +993,7 @@ def export_series(
         "outputs": len(verified.outputs),
         "initializers": len(verified.initializers),
         **pruned,
-        "model_bytes": (out_dir / one_shot.MODEL_FILE).stat().st_size,
+        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / one_shot.MODEL_FILE)),
         "ops": sorted(verified.required_ops),
         "symbols": list(verified.symbols),
         **written,

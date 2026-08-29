@@ -107,6 +107,7 @@ from _shared.paths import INPUTS_ROOT, OUTPUTS_ROOT, SERIES_ROOT
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
+from karume.shards import resolve_shards
 
 from . import patch
 
@@ -569,7 +570,7 @@ def export_series(
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": (out_dir / MODEL_FILE).stat().st_size,
+        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

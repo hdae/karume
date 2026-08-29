@@ -235,6 +235,7 @@ from karume.quantize import (
     round_weights_to_f16,
 )
 from karume.rope import ROPE_BUFFER_NAMES, assert_rope_lifted
+from karume.shards import resolve_shards
 
 from . import patch
 from .distribution import CALIB_PROVENANCE_FILE
@@ -1739,7 +1740,7 @@ def _graph_summary(graph: IrGraph, path: Path) -> dict[str, Any]:
         "initializers": len(graph.initializers),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
-        "model_bytes": path.stat().st_size,
+        "model_bytes": sum(p.stat().st_size for p in resolve_shards(path)),
     }
 
 

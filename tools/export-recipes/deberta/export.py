@@ -71,6 +71,7 @@ from karume.quantize import (
     fake_quant_int8,
     iter_quant_targets,
 )
+from karume.shards import resolve_shards
 
 from . import calib, patch
 from .calib_texts import CALIB_TEXTS
@@ -579,7 +580,7 @@ def export_variant(
     if act_quant:
         mirror, attached = _write_mirror_io(wrapper, graph, cases, out_dir)
 
-    model_bytes = (out_dir / MODEL_FILE).stat().st_size
+    model_bytes = sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE))
     return {
         "layers": num_layers,
         "dir": str(out_dir),

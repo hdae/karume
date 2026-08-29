@@ -73,6 +73,7 @@ from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_bound
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.rope import assert_rope_lifted
+from karume.shards import resolve_shards
 
 #: 公式重みの置き場（`hf download google/embeddinggemma-300m` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "embeddinggemma" / "google-300m"
@@ -407,7 +408,7 @@ def export_series(
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": (out_dir / MODEL_FILE).stat().st_size,
+        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

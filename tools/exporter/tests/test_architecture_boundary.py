@@ -51,6 +51,8 @@ CORE_MODULES: tuple[str, ...] = (
     "quant_calib",
     "act_quant",
     "emit",
+    # 配布コンテナの shard 分割規則（ADR 0070 決定 1）。path とバイト数しか知らない。
+    "shards",
     "verify",
     "pipeline",
     "goldens",
