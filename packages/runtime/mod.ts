@@ -132,6 +132,7 @@ export type {
   RunOutputs,
   ScoreStorage,
   Session,
+  SessionBuildStats,
   SessionDiagnostics,
   SessionOptions,
   StateBackingStats,

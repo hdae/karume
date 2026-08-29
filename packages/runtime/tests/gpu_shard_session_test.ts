@@ -12,7 +12,12 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { ContainerError, openModel } from "../src/format/container.ts";
 import { SafetensorsError } from "../src/format/safetensors.ts";
 import { acquireGpu, popFailureScopes, pushFailureScopes } from "../src/gpu/device.ts";
-import { createSession, createSessionFromShards, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSession,
+  createSessionFromShards,
+  type SessionBuildStats,
+  type Tensor,
+} from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { buildSafetensors, type TensorSpec } from "./helpers/format.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -65,6 +70,109 @@ Deno.test({
       } finally {
         await whole.dispose();
         await single.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+// 構築相の診断（SessionBuildStats — perf-ledger L-1「構築 gap の分解」の計測器）。
+//
+// MUST: 門はバイト数と本数だけで張る。時間値は環境依存でフレークするので閾値を置かず、
+// 「非負」「合計が構築の壁時計を超えない」という**壊れたら必ず出る**不変条件だけを見る
+// （壁時計より大きい合計は、区間の重複・時刻源の取り違え・二重計上のいずれかの証拠になる）。
+
+/** writeBuffer で実際に流れるバイト数（= 各テンソルのペイロード総和・整列の詰め物は無い形）。 */
+const payloadBytes = (fixture: ReturnType<typeof buildFixture>): number =>
+  [
+    ...fixture.biases,
+    fixture.tensors.s1,
+    fixture.tensors.s3,
+    fixture.tensors.w1,
+    fixture.tensors.w2,
+    fixture.tensors.w3,
+  ].reduce((total, tensor) => total + tensor.data.byteLength, 0);
+
+/** ホスト費用 4 席 + 完了待ち 1 席の総和（帰属の 2 区分 — SessionBuildStats の docstring）。 */
+const timeSeatsSum = (stats: SessionBuildStats): number =>
+  stats.shardWaitMs + stats.decodeMs + stats.bufferCreateMs + stats.writeBufferIssueMs +
+  stats.uploadFenceMs;
+
+Deno.test({
+  name: "buildStats は shard 本数と実ペイロード総和を報告する（全量面 1 本との A/B・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const fixture = buildFixture();
+    const expectedBytes = payloadBytes(fixture);
+    const gpu = await acquireGpu();
+    try {
+      const shardedStart = performance.now();
+      const sharded = await createSessionFromShards(gpu, shardStream(fixture.shards()));
+      const shardedWall = performance.now() - shardedStart;
+      const whole = await createSession(gpu, openModel(fixture.fullBuffer()));
+      try {
+        const shardedStats = sharded.diagnostics().buildStats;
+        const wholeStats = whole.diagnostics().buildStats;
+        // 本数は「消費した shard」そのもの（全量面はグラフ shard 1 本の列）
+        assertEquals(shardedStats.shardCount, 3);
+        assertEquals(wholeStats.shardCount, 1);
+        // バイト数は分割粒度に依らない（同じ資産 = 同じバイトが流れる）
+        assertEquals(shardedStats.uploadedBytes, expectedBytes);
+        assertEquals(wholeStats.uploadedBytes, expectedBytes);
+        // この fixture は 4 格納とも適格 = CPU 展開が 1 バイトも走らない（decode 席との表裏）
+        assertEquals(sharded.diagnostics().storage.hostExpandedBytes, 0);
+        assertEquals(shardedStats.decodeMs, 0, "適格のみのはずが CPU 展開が走っている");
+        // 全席が非負 + 時間席の合計が壁時計に収まる（閾値は置かない — 上のコメント）
+        for (const [seat, value] of Object.entries(shardedStats)) {
+          assert(value >= 0, `${seat} が負: ${value}`);
+        }
+        assert(
+          timeSeatsSum(shardedStats) <= shardedWall,
+          `時間席の合計 ${timeSeatsSum(shardedStats)}ms が構築の壁時計 ${shardedWall}ms を超えた`,
+        );
+      } finally {
+        await sharded.dispose();
+        await whole.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "buildStats.decodeMs は適格なら 0・適格外なら正（同一資産の A/B・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const fixture = buildFixture();
+    // f16 の w2 をグラフ出力に足すと「消費が重みスロット以外にもある」= 適格外になり、
+    // ロード時に decodeF16 で f32 展開される（gpu_i4_weights_test の A/B と同じ作り）。
+    const graph = JSON.parse(fixture.metadata.karume_ir) as { outputs: string[] };
+    graph.outputs = ["y", "w2"];
+    const expandedShards = [
+      buildSafetensors(fixture.biases, { karume_ir: JSON.stringify(graph) }),
+      buildSafetensors([fixture.tensors.s1, fixture.tensors.w1], undefined),
+      buildSafetensors([fixture.tensors.s3, fixture.tensors.w2, fixture.tensors.w3], undefined),
+    ];
+    const gpu = await acquireGpu();
+    try {
+      const eligible = await createSessionFromShards(gpu, shardStream(fixture.shards()));
+      const expanded = await createSessionFromShards(gpu, shardStream(expandedShards));
+      try {
+        const eligibleStats = eligible.diagnostics().buildStats;
+        const expandedStats = expanded.diagnostics().buildStats;
+        assertEquals(eligibleStats.decodeMs, 0, "適格側で CPU 展開が走っている");
+        assert(expandedStats.decodeMs > 0, "適格外側で CPU 展開が計測されていない");
+        assert(expanded.diagnostics().storage.hostExpandedBytes > 0, "適格外側が展開されていない");
+        // 展開すると流すバイトも増える（f16 のペイロードが f32 = 2 倍で writeBuffer に載る）
+        assertEquals(
+          expandedStats.uploadedBytes,
+          eligibleStats.uploadedBytes + fixture.tensors.w2.data.byteLength,
+        );
+      } finally {
+        await eligible.dispose();
+        await expanded.dispose();
       }
     } finally {
       gpu.destroy();

@@ -114,6 +114,7 @@ import {
   type RunInput,
   type RunInputs,
   type RunOutputs,
+  type SessionBuildStats,
   type SessionDiagnostics,
   type SessionOptions,
   type StorageDiagnostics,
@@ -130,6 +131,7 @@ export type {
   RunInput,
   RunInputs,
   RunOutputs,
+  SessionBuildStats,
   SessionDiagnostics,
   SessionOptions,
   StateBackingStats,
@@ -665,6 +667,8 @@ type SessionState = {
    */
   readonly residentWeights: ReadonlyMap<string, ResidentWeight>;
   readonly storage: StorageDiagnostics;
+  /** 構築相の費用内訳（{@link SessionBuildStats}）。構築の決着で確定し、以後不変。 */
+  readonly buildStats: SessionBuildStats;
   /** linear の実行形（opt-in — {@link SessionOptions.linearCompute}）。 */
   readonly linearCompute: "f32" | "a8" | "f16";
   /** 融合 attention の実行形（opt-in — {@link SessionOptions.attentionCompute}）。 */
@@ -808,11 +812,50 @@ export class Session {
     const residentWeights = new Map<string, ResidentWeight>();
     let residentCompressedBytes = 0;
     let hostExpandedBytes = 0;
+    // 構築相の費用内訳（{@link SessionBuildStats}）。ホスト時計だけで刻む集計器で、
+    // MUST NOT: 計測のために GPU フェンスを足さない・submit の位置を動かさない
+    // （shard ごと submit 1 回という ADR 0070 決定 3 の契約が崩れると、瞬間ピークが重み 1 本ぶん
+    // 押し上がる）。よって writeBuffer の実転送時間は uploadFenceMs に吸われたままになる。
+    let shardCount = 0;
+    let shardWaitMs = 0;
+    let decodeMs = 0;
+    let bufferCreateMs = 0;
+    let writeBufferIssueMs = 0;
+    let uploadedBytes = 0;
+    let uploadFenceMs = 0;
+    // 計測の巻き付けは 3 経路（decode / createBuffer / writeBuffer）とも呼び出し点が複数あるので
+    // 局所ヘルパに畳む。**呼び出しの順序も引数も 1 つも変えない**（計測は素通しの薄い層）。
+    const timedDecode = (decode: () => Float32Array<ArrayBuffer>): Float32Array<ArrayBuffer> => {
+      const start = performance.now();
+      const expanded = decode();
+      decodeMs += performance.now() - start;
+      return expanded;
+    };
+    const timedAlloc = (bytes: number): GPUBuffer => {
+      const start = performance.now();
+      const buffer = weights.allocHostWritten(bytes, HOST_WRITTEN_USAGE);
+      bufferCreateMs += performance.now() - start;
+      return buffer;
+    };
+    const timedWrite = (
+      buffer: GPUBuffer,
+      data: Uint8Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+    ): void => {
+      const start = performance.now();
+      gpu.device.queue.writeBuffer(buffer, 0, data);
+      writeBufferIssueMs += performance.now() - start;
+      uploadedBytes += data.byteLength;
+    };
     // 宣言と実テンソルの突合・完全性は shard 進行検証に一本化（ADR 0070 決定 1 — 全量面も
     // 同じ門を通る。openModel 済みの入力には冪等）。
     const validator = createShardValidator(graph);
     try {
+      // shard の反復待ち（= 供給側の費用）は for await が隠すので、**前の shard を処理し終えた
+      // 時刻**との差で測る（次の shard が届くまでの間はこの 2 点の間にしか無い）。
+      let shardBoundary = performance.now();
       for await (const shard of shards) {
+        shardWaitMs += performance.now() - shardBoundary;
+        shardCount += 1;
         // errorScope とフェンスは同じラベルを名乗る MUST（別々に組むと同じアップロード区間の
         // 失敗が 2 つの名前で出る）。
         const label = uploadLabel(shard.origin);
@@ -863,7 +906,7 @@ export class Session {
                 residentWeights.set(name, { storage: "f16" });
                 residentCompressedBytes += payload.byteLength;
               } else {
-                payload = decodeF16(raw);
+                payload = timedDecode(() => decodeF16(raw));
                 hostExpandedBytes += payload.byteLength;
               }
             }
@@ -878,16 +921,13 @@ export class Session {
                 payload = alignI8Payload(raw);
                 // MUST: scale のバッファも「GPU 常駐圧縮」に数える（実際に抱えるバイト数）。
                 residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
-                const scaleBuffer = weights.allocHostWritten(
-                  Math.max(4, scale.bytes.byteLength),
-                  HOST_WRITTEN_USAGE,
-                );
+                const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
                 if (scale.bytes.byteLength > 0) {
-                  gpu.device.queue.writeBuffer(scaleBuffer, 0, scale.bytes);
+                  timedWrite(scaleBuffer, scale.bytes);
                 }
                 residentWeights.set(name, { storage: "i8", scale: scaleBuffer });
               } else {
-                payload = decodeI8(raw, shape, scale.values, scale.shape);
+                payload = timedDecode(() => decodeI8(raw, shape, scale.values, scale.shape));
                 hostExpandedBytes += payload.byteLength;
               }
             }
@@ -906,12 +946,9 @@ export class Session {
                 // MUST: scale のバッファも「GPU 常駐圧縮」に数える（i8 と同じ — 実際に抱える
                 // バイト数。exporter の storage_breakdown と診断の意味を揃える）。
                 residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
-                const scaleBuffer = weights.allocHostWritten(
-                  Math.max(4, scale.bytes.byteLength),
-                  HOST_WRITTEN_USAGE,
-                );
+                const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
                 if (scale.bytes.byteLength > 0) {
-                  gpu.device.queue.writeBuffer(scaleBuffer, 0, scale.bytes);
+                  timedWrite(scaleBuffer, scale.bytes);
                 }
                 // group 長は宣言から写した 1 箇所（プランナ）だけが決める — 別経路で渡せる形に
                 // すると「group 64 の資産が group 32 のパイプラインで走る」沈黙誤値になる。
@@ -929,15 +966,14 @@ export class Session {
                     `initializer '${name}': 格納 i4 なのに group_size が無い`,
                   );
                 }
-                payload = decodeI4(raw, shape, scale.values, scale.shape, groupSize);
+                payload = timedDecode(() =>
+                  decodeI4(raw, shape, scale.values, scale.shape, groupSize)
+                );
                 hostExpandedBytes += payload.byteLength;
               }
             }
-            const buffer = weights.allocHostWritten(
-              Math.max(4, payload.byteLength),
-              HOST_WRITTEN_USAGE,
-            );
-            if (payload.byteLength > 0) gpu.device.queue.writeBuffer(buffer, 0, payload);
+            const buffer = timedAlloc(Math.max(4, payload.byteLength));
+            if (payload.byteLength > 0) timedWrite(buffer, payload);
             weightBuffers.set(name, buffer);
           }
         } catch (cause) {
@@ -969,10 +1005,13 @@ export class Session {
         gpu.device.queue.submit([]);
         // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
         // raceCanaryDeviceLost の doc）ため競わせる — ハングを失敗に変換する保険。
+        const fenceStart = performance.now();
         await gpu[RUNTIME_INTERNAL].raceDeviceLost(
           gpu.device.queue.onSubmittedWorkDone(),
           label,
         );
+        uploadFenceMs += performance.now() - fenceStart;
+        shardBoundary = performance.now();
       }
       // 宣言完全性（欠け）は全 shard を読み終えて初めて判定できる（ADR 0070 決定 1）。
       validator.finish();
@@ -997,6 +1036,15 @@ export class Session {
       prepared: new Map(),
       residentWeights,
       storage: { residentCompressedBytes, hostExpandedBytes },
+      buildStats: {
+        shardCount,
+        shardWaitMs,
+        decodeMs,
+        bufferCreateMs,
+        writeBufferIssueMs,
+        uploadedBytes,
+        uploadFenceMs,
+      },
       linearCompute,
       attentionCompute,
       attentionScoreStorage,
@@ -1250,6 +1298,7 @@ export class Session {
       submit: this.#state.scheduler.stats,
       weights: this.#state.weights.stats,
       storage: this.#state.storage,
+      buildStats: this.#state.buildStats,
       lastRun: this.#lastRun,
       lastRunTiming: this.#state.scheduler.timing,
       lastRunFusions: this.#lastRunFusions,

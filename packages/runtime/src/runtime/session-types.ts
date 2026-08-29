@@ -243,6 +243,66 @@ export type StorageDiagnostics = {
 };
 
 /**
+ * Session 構築相（`Session.build` = 重みアップロードの明示 async ステージ）の費用内訳。
+ * 「構築に 2.50s 掛かった」を**どこで消えたか**へ分解するための常設診断で、値は Session の
+ * 寿命を通じて不変（構築が終わった時点で確定し、run では 1 つも動かない）。
+ *
+ * ## 帰属の限界（この分解が到達できる上限）
+ *
+ * 計測はホスト時計（`performance.now()`）だけで、**GPU フェンスを 1 本も追加しない**
+ * （追加すると shard ごとの submit 1 回という契約が崩れ、瞬間ピークが重み 1 本ぶん押し上がる —
+ * ADR 0070 決定 3）。したがって `queue.writeBuffer` の**実 GPU 転送時間はホスト時計から分離
+ * できず**、shard 末尾のフェンス待ち（{@link SessionBuildStats.uploadFenceMs}）に丸ごと吸われる。
+ * MUST: この 7 席から「転送そのものの速度」を読まないこと。分解の上限は
+ * **「ホストが費やした時間」（shardWait / decode / bufferCreate / writeBufferIssue）と
+ * 「GPU の完了を待った時間」（uploadFence）の 2 区分**で、後者の内訳（実転送 / キュー待ち /
+ * ドライバの都合）はランタイムからは見えない。
+ *
+ * NOTE: バイト数・本数の席は**既存の診断を流用する**（ここには置かない）— CPU 展開後のバイト数は
+ * {@link StorageDiagnostics.hostExpandedBytes}、圧縮常駐のバイト数は
+ * {@link StorageDiagnostics.residentCompressedBytes}、確保したバッファ本数は
+ * {@link SessionDiagnostics.weights} の `allocCount`。
+ * NOTE: グラフ検証・パイプライン生成の費用はここに**入らない** — 前者は構築相の外
+ * （`prepareModel` 相）で、後者は構築相にそもそも存在しない（パイプラインは初回 run で作られる。
+ * 構築直後の `pipelineCount` は 0）。混ぜると「構築費」の定義が濁る。
+ */
+export type SessionBuildStats = {
+  /** 消費した shard の本数（全量面は 1）。 */
+  readonly shardCount: number;
+  /**
+   * shard 列の**次の 1 本を待った**時間の総和（`for await` の反復待ち）。shard 面では
+   * ネットワーク / ディスクの費用がここに集まるので、この席が構築費からその帰属を分離する
+   * 唯一の点になる（大きければ遅いのは Karume ではなく供給側）。
+   */
+  readonly shardWaitMs: number;
+  /**
+   * 適格外の重みを CPU で f32 展開した時間の総和（f16 / i8 / i4 の decode）。
+   * **適格判定に全部通っていれば 0** — 0 でないことは VRAM 削減が落ちている
+   * （{@link StorageDiagnostics.hostExpandedBytes} が正）ことと表裏。
+   */
+  readonly decodeMs: number;
+  /** `createBuffer`（重み本体 + scale）に費やした時間の総和。 */
+  readonly bufferCreateMs: number;
+  /**
+   * `queue.writeBuffer` の**発行**に費やした時間の総和。呼び出しは staging への複製を伴うが
+   * GPU 転送の完了は待たないので、これは「ホスト側の複製費用」であって転送時間ではない
+   * （上の「帰属の限界」）。
+   */
+  readonly writeBufferIssueMs: number;
+  /**
+   * `queue.writeBuffer` で実際に渡したバイト数の総和（重み本体 + scale・整列のゼロ詰め込み）。
+   * {@link StorageDiagnostics} の 2 席の和とは一致しない — あちらは GPU が抱えるバイト数で、
+   * こちらは**ホストから流したバイト数**（適格外の重みは展開後の f32 を流すので後者が膨らむ）。
+   */
+  readonly uploadedBytes: number;
+  /**
+   * shard ごとの明示 submit の完了を待った時間の総和（ADR 0070 決定 3 のフェンス）。
+   * 実 GPU 転送時間はここに吸われている（上の「帰属の限界」）。
+   */
+  readonly uploadFenceMs: number;
+};
+
+/**
  * params バッファの内容アドレスキャッシュの実績（1 run ぶん）。params は実行時のテンソル値に
  * 依存しないので、shape が変わらない限り 2 run 目以降の `allocCount` は 0 に落ちる。
  *
@@ -334,6 +394,11 @@ export type SessionDiagnostics = {
   readonly weights: ArenaStats;
   /** 低精度格納の適格 / 適格外の内訳（ADR 0006 の常設診断）。 */
   readonly storage: StorageDiagnostics;
+  /**
+   * 構築相の費用内訳（Session の寿命を通じて不変 — 構築が終わった時点で確定する）。
+   * 帰属の限界は {@link SessionBuildStats} の docstring。
+   */
+  readonly buildStats: SessionBuildStats;
   /**
    * 直近 run の中間バッファ実績。未実行なら undefined。
    *
