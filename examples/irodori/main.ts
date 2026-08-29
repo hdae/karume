@@ -7,11 +7,13 @@
  *
  * `--source` 未指定ならこの台本が {@link IRODORI_V4_SMALL_CURRENT}（このパッケージ版が検証した
  * 取得元 — ADR 0073）を渡す。`fromPretrained` 自体に既定は無いので、取得元を綴るのは常に
- * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリならローカル読み（`fromAssets`）、
- * それ以外は HF リポジトリ名として `fromPretrained`。`--ref` は参照音声（WAV — 配布形と同じ
- * 48kHz の mono/多ch PCM16 か IEEE float）で、渡すとその声質に寄る（voice cloning）。`--caption` は
- * 声質の指示文（Voice Design）。サンプラのノブ（steps / CFG）は manifest の `pipelineConfig`
- * が固定していて、実行時には `--seed` と `--seconds`（発話長の直接指定）だけが動かせる。
+ * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリなら使い捨ての HF 形サーバ
+ * （`serveLocalDist`）越しに読み、それ以外は HF リポジトリ名として読む（どちらも
+ * `fromPretrained` の 1 本 — shard 分割された配布形もそのまま通る）。`--ref` は参照音声
+ * （WAV — 配布形と同じ 48kHz の mono/多ch PCM16 か IEEE float）で、渡すとその声質に寄る
+ * （voice cloning）。`--caption` は声質の指示文（Voice Design）。サンプラのノブ（steps / CFG）は
+ * manifest の `pipelineConfig` が固定していて、実行時には `--seed` と `--seconds`（発話長の
+ * 直接指定）だけが動かせる。
  */
 
 import {
@@ -21,7 +23,8 @@ import {
   type IrodoriSpeakerInput,
 } from "../../packages/models/mod.ts";
 import { IRODORI_V4_SMALL_CURRENT } from "../../packages/models/irodori.ts";
-import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
+import { isLocalDist } from "../shared/local-assets.ts";
+import { serveLocalDist } from "../shared/local-dist-server.ts";
 
 const USAGE = "--source <パス|HF repo> --text <文字列> --caption <文字列> --ref <WAV パス>" +
   " --model <名前> --quant <名前> --seconds <数> --seed <整数> --out <パス>";
@@ -84,16 +87,14 @@ const speaker: IrodoriSpeakerInput | undefined = ref === undefined
   ? undefined
   : { audio: decodeWav(await Deno.readFile(ref)) };
 
-const openPipeline = async (): Promise<IrodoriPipeline> => {
-  if (source !== undefined && await isLocalDist(source)) {
-    return IrodoriPipeline.fromAssets(await loadLocalAssets(source, selection), selection);
-  }
-  return IrodoriPipeline.fromPretrained(source ?? IRODORI_V4_SMALL_CURRENT, {
-    ...selection,
-    onProgress: ({ phase, loaded, total }) =>
-      Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
-  });
-};
+/**
+ * ローカルの配布形は使い捨ての HF 形サーバ越しに読む。サーバは台本の最後まで畳まない —
+ * 重み shard は Session を組むその瞬間に流れ、破損キャッシュの取り直し（self-heal）は
+ * そこで network に出る。
+ */
+await using served = source !== undefined && await isLocalDist(source)
+  ? serveLocalDist(source)
+  : undefined;
 
 console.log(
   `[irodori] ${source ?? `${IRODORI_V4_SMALL_CURRENT.repo}（台本の既定 = 検証済み pin）`}` +
@@ -104,7 +105,14 @@ console.log(
     `${caption === undefined ? "" : `\n          caption ${JSON.stringify(caption)}`}`,
 );
 const started = performance.now();
-await using pipeline = await openPipeline();
+await using pipeline = await IrodoriPipeline.fromPretrained(
+  served?.source ?? source ?? IRODORI_V4_SMALL_CURRENT,
+  {
+    ...selection,
+    onProgress: ({ phase, loaded, total }) =>
+      Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
+  },
+);
 const audio = await pipeline.generate({
   text,
   seed,

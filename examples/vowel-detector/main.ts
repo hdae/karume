@@ -8,8 +8,9 @@
  *
  * MUST: `--source` は必須（既定を置かない）。このファミリは公開配布リポを持たず pin 定数も
  * 無い（ADR 0073 決定 1）ので、既定を書くと「存在しないリポの取得」に化ける。`karume.json` を
- * 持つディレクトリならローカル読み（`fromAssets`）、それ以外は HF リポジトリ名として
- * `fromPretrained`。
+ * 持つディレクトリなら使い捨ての HF 形サーバ（`serveLocalDist`）越しに読み、それ以外は HF
+ * リポジトリ名として読む（どちらも `fromPretrained` の 1 本 — shard 分割された配布形も
+ * そのまま通る）。
  *
  * MUST: 入力 WAV は **16kHz モノラル**（パイプラインはリサンプラを持たない — 周波数が違っても
  * 落ちずに別の母音列が出る）。この台本は `decodeWav` が読んだ周波数を宣言（`sampleRate`）と
@@ -18,7 +19,8 @@
  */
 
 import { decodeWav, VowelDetectorPipeline } from "../../packages/models/mod.ts";
-import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
+import { isLocalDist } from "../shared/local-assets.ts";
+import { serveLocalDist } from "../shared/local-dist-server.ts";
 
 const USAGE = "--audio <WAV パス> --source <パス|HF repo> --model <名前> --quant <名前>" +
   " --out <パス>";
@@ -51,16 +53,12 @@ const selection = {
 
 const encoder = new TextEncoder();
 
-const openPipeline = async (): Promise<VowelDetectorPipeline> => {
-  if (await isLocalDist(source)) {
-    return VowelDetectorPipeline.fromAssets(await loadLocalAssets(source, selection), selection);
-  }
-  return VowelDetectorPipeline.fromPretrained(source, {
-    ...selection,
-    onProgress: ({ phase, loaded, total }) =>
-      Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
-  });
-};
+/**
+ * ローカルの配布形は使い捨ての HF 形サーバ越しに読む。サーバは台本の最後まで畳まない —
+ * 重み shard は Session を組むその瞬間に流れ、破損キャッシュの取り直し（self-heal）は
+ * そこで network に出る。
+ */
+await using served = await isLocalDist(source) ? serveLocalDist(source) : undefined;
 
 const wav = decodeWav(await Deno.readFile(audioPath));
 console.log(
@@ -70,7 +68,11 @@ console.log(
     ` ${wav.sampleRate}Hz）`,
 );
 const started = performance.now();
-await using pipeline = await openPipeline();
+await using pipeline = await VowelDetectorPipeline.fromPretrained(served?.source ?? source, {
+  ...selection,
+  onProgress: ({ phase, loaded, total }) =>
+    Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
+});
 if (wav.sampleRate !== pipeline.sampleRate) {
   throw new Error(
     `${audioPath} は ${wav.sampleRate}Hz — この配布形は ${pipeline.sampleRate}Hz` +

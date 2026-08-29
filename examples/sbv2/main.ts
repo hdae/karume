@@ -6,8 +6,9 @@
  *
  * MUST: `--source` は必須（既定を置かない）。この台本が想定する FN 系列の配布リポは公開保留で
  * pin 定数を持たない（ADR 0073 決定 1）ので、既定を書くと「存在しないリポの取得」に化ける。
- * `karume.json` を持つディレクトリならローカル読み（`fromAssets`）、それ以外は HF リポジトリ名
- * として `fromPretrained`。未指定のノブは manifest の `pipelineConfig.defaults` が埋める。
+ * `karume.json` を持つディレクトリなら使い捨ての HF 形サーバ（`serveLocalDist`）越しに読み、
+ * それ以外は HF リポジトリ名として読む。どちらも `fromPretrained` の 1 本なので、shard 分割
+ * された配布形もそのまま通る。未指定のノブは manifest の `pipelineConfig.defaults` が埋める。
  *
  * ## テキスト解析は呼び手の責務（0.6.0）
  *
@@ -24,7 +25,8 @@
 import { analyzeWithWords } from "@hdae/yomi";
 import { getDictionary } from "@hdae/yomi/loader";
 import { encodeWav, Sbv2Pipeline, toSbv2Utterance } from "../../packages/models/mod.ts";
-import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
+import { isLocalDist } from "../shared/local-assets.ts";
+import { serveLocalDist } from "../shared/local-dist-server.ts";
 
 const USAGE = "--source <パス|HF repo> --text <文字列> --model <名前> --quant <名前>" +
   " --style <名前> --style-weight <数> --sdp-ratio <数> --noise-scale <数>" +
@@ -90,16 +92,12 @@ const noiseScale = number("noise-scale");
 const noiseScaleW = number("noise-scale-w");
 const lengthScale = number("length-scale");
 
-const openPipeline = async (): Promise<Sbv2Pipeline> => {
-  if (await isLocalDist(source)) {
-    return Sbv2Pipeline.fromAssets(await loadLocalAssets(source, selection), selection);
-  }
-  return Sbv2Pipeline.fromPretrained(source, {
-    ...selection,
-    onProgress: ({ phase, loaded, total }) =>
-      Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
-  });
-};
+/**
+ * ローカルの配布形は使い捨ての HF 形サーバ越しに読む。サーバは台本の最後まで畳まない —
+ * 重み shard は Session を組むその瞬間に流れ、破損キャッシュの取り直し（self-heal）は
+ * そこで network に出る。
+ */
+await using served = await isLocalDist(source) ? serveLocalDist(source) : undefined;
 
 console.log(
   `[sbv2] ${source} / model ${model ?? "（manifest の既定）"}` +
@@ -109,7 +107,11 @@ console.log(
 const started = performance.now();
 // テキスト → 発話（読み・アクセント）は呼び手側。karume には解析済みの構造だけを渡す。
 const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(), text));
-await using pipeline = await openPipeline();
+await using pipeline = await Sbv2Pipeline.fromPretrained(served?.source ?? source, {
+  ...selection,
+  onProgress: ({ phase, loaded, total }) =>
+    Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
+});
 const audio = await pipeline.generate(utterance, {
   seed,
   ...(style === undefined ? {} : { style }),

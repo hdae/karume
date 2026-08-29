@@ -2,9 +2,16 @@
  * ローカルディレクトリ（`karume.json` を持つ配布形）から manifest + 資産を読む
  * — `fetchAssets` のローカル版。
  *
- * 4 ファミリのデモ（`examples/<ファミリ>/main.ts`）と torch 参照突合の dump 経路
- * （`examples/sbv2/dump.ts`）が共有する。同じ資産の読み方が複数本に割れると、「同じ quant
- * なのに片方だけ別のファイルを開いていた」形の差が突合（波形・画像）に混ざる。
+ * ## 役割は 2 つに割れている
+ *
+ * - {@link isLocalDist}（ローカル配布形かの判定）は**デモと dump の共有**。デモはこれで
+ *   使い捨ての HF 形サーバ（`local-dist-server.ts`）へ回すかを決める。
+ * - {@link loadLocalAssets}（全量読み）は **`examples/sbv2/dump.ts` 専用**。torch 参照突合の
+ *   dump は分割対象外の小資産しか触らないので、この面のままでよい。
+ *
+ * MUST: 全量読みを分割資産へ広げない。1GiB 超のコンポーネントは shard 分割されていて、
+ * shard は独立ヘッダの safetensors なので連結できない（`openModel` は単一コンテナ前提）。
+ * デモが `fromPretrained` 越しになったのはこのため — 分割を読む経路は取得層の shard 面だけ。
  */
 
 import {

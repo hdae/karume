@@ -7,14 +7,16 @@
  *
  * `--source` 未指定ならこの台本が {@link ANIMA_TURBO_CURRENT}（このパッケージ版が検証した
  * 取得元 — ADR 0073）を渡す。`fromPretrained` 自体に既定は無いので、取得元を綴るのは常に
- * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリならローカル読み（`fromAssets`）、
- * それ以外は HF リポジトリ名として `fromPretrained`。未指定のノブは manifest の `defaults`
- * が埋める。
+ * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリなら使い捨ての HF 形サーバ
+ * （`serveLocalDist`）越しに読み、それ以外は HF リポジトリ名として読む。どちらも
+ * `fromPretrained` の 1 本なので、shard 分割された配布形もそのまま通る。未指定のノブは
+ * manifest の `defaults` が埋める。
  */
 
 import { AnimaPipeline, encodePng } from "../../packages/models/mod.ts";
 import { ANIMA_TURBO_CURRENT, parseResolution } from "../../packages/models/anima.ts";
-import { isLocalDist, loadLocalAssets } from "../shared/local-assets.ts";
+import { isLocalDist } from "../shared/local-assets.ts";
+import { serveLocalDist } from "../shared/local-dist-server.ts";
 
 const USAGE = "--source <パス|HF repo> --prompt <文字列> --resolution <WxH> --model <名前>" +
   " --quant <名前> --seed <整数> --steps <整数> --guidance <数> --negative <文字列>";
@@ -77,16 +79,14 @@ if (rawGuidance !== undefined && !Number.isFinite(Number(rawGuidance))) {
 const guidanceScale = rawGuidance === undefined ? undefined : Number(rawGuidance);
 const negativePrompt = args.get("negative");
 
-const openPipeline = async (): Promise<AnimaPipeline> => {
-  if (source !== undefined && await isLocalDist(source)) {
-    return AnimaPipeline.fromAssets(await loadLocalAssets(source, selection), selection);
-  }
-  return AnimaPipeline.fromPretrained(source ?? ANIMA_TURBO_CURRENT, {
-    ...selection,
-    onProgress: ({ phase, loaded, total }) =>
-      Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
-  });
-};
+/**
+ * ローカルの配布形は使い捨ての HF 形サーバ越しに読む。サーバは台本の最後まで畳まない —
+ * 重み shard は Session を組むその瞬間に流れ、破損キャッシュの取り直し（self-heal）は
+ * そこで network に出る。
+ */
+await using served = source !== undefined && await isLocalDist(source)
+  ? serveLocalDist(source)
+  : undefined;
 
 console.log(
   `[anima] ${source ?? `${ANIMA_TURBO_CURRENT.repo}（台本の既定 = 検証済み pin）`}` +
@@ -94,7 +94,14 @@ console.log(
     ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}`,
 );
 const started = performance.now();
-await using pipeline = await openPipeline();
+await using pipeline = await AnimaPipeline.fromPretrained(
+  served?.source ?? source ?? ANIMA_TURBO_CURRENT,
+  {
+    ...selection,
+    onProgress: ({ phase, loaded, total }) =>
+      Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
+  },
+);
 const image = await pipeline.generate({
   prompt,
   seed,
