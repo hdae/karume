@@ -24,6 +24,13 @@ type TensorOf<D extends IrDtype, A> = {
  *
  * 要素は全型 4 バイトで、**bool は u32 の 0 / 1**（WebGPU のストレージバッファに 1bit 型が
  * 無いため。GPU 側の格納と同じ規約）。入力・出力とも同じ形で扱う。
+ *
+ * MUST NOT: **入力として渡した `data` は `run` / `enqueue` の戻り Promise が settle するまで
+ * 書き換えない**（borrowed — ランタイムは写しを取らない）。GPU への `writeBuffer` は発行の
+ * 同期区間ではなくマイクロタスクの先で出るので、書き換えは例外も警告も無い沈黙誤値になる。
+ * `shape` の方は発行時に複製されるため、書き換えても実行中の run には影響しない（契約の全体は
+ * `Session.run` の「入力の寿命」節）。出力として受け取った `Tensor` は呼び出し側の所有物で、
+ * この制約は掛からない。
  */
 export type Tensor =
   | TensorOf<"f32", Float32Array<ArrayBuffer>>
@@ -40,6 +47,14 @@ export type Tensor =
  * `bindings` で決まっていなければ fail loudly（{@link bindSymbols} の `deferredInputs`）。
  */
 export type RunInput = Tensor | ResidentTensor;
+/**
+ * 実行の入力の束（名前 → 入力 1 本）。
+ *
+ * **この Record の member 構成は `run` / `enqueue` の発行時に写し取られる**ので、戻り Promise を
+ * 待たずに差し替えても、その実行は発行時点の顔ぶれで走る（同じく shape と `bindings` も固定
+ * される）。写すのは metadata だけで、{@link Tensor} の `data` は borrowed のまま — 契約の全体は
+ * `Session.run` の「入力の寿命」節。
+ */
 export type RunInputs = Readonly<Record<string, RunInput>>;
 export type RunOutputs = Readonly<Record<string, Tensor>>;
 

@@ -168,24 +168,48 @@ const HOST_WRITTEN_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST |
   BUFFER_USAGE.COPY_SRC;
 
 /**
- * 入力の束を「ホスト配列の shape 表」と「常駐入力の表」に分ける。
+ * 発行時点で固定した入力の束（{@link captureInputs} の成果物）。実行本体が読むのは**この写し
+ * だけ**で、利用者の `inputs` Record は 1 度も引き直さない。
+ */
+type CapturedInputs = {
+  /**
+   * 名前 → 入力の実体。**Record の member identity をここで固定する**のが目的で、器が `Map`
+   * なのは入力名 "__proto__" でも素直に引けるため（`inputs[name]` の索引はプロトタイプ由来の
+   * 値を拾いうる）。
+   */
+  readonly values: ReadonlyMap<string, RunInput>;
+  /** ホスト配列入力の shape の**複製**（束縛解決 = {@link bindSymbols} の唯一の材料）。 */
+  readonly inputShapes: Record<string, readonly number[]>;
+  /** 常駐入力だけの表（束縛予約・計画キー・`deferredInputs`）。 */
+  readonly residentInputs: ReadonlyMap<string, ResidentTensor>;
+};
+
+/**
+ * 入力の束を発行時点で写し取り、「ホスト配列の shape 表」と「常駐入力の表」に分ける。
  *
+ * MUST: 呼ぶのは {@link Session.run} / {@link Session.enqueue} の**同期区間**。実行本体は
+ * `#serialize` 越し（1 マイクロタスク以降）に走るので、ここで写さないと「発行直後に呼び出し側が
+ * 触った Record / shape 配列」が本体から見えてしまう — member 差し替えは沈黙誤値、shape の
+ * 書き換えは「たまたま fail loudly」になる（どちらも run の JSDoc が勧める非 await 並行発行で
+ * 素直に踏める形）。写すのは安価な metadata だけで、`Tensor.data`（TypedArray の実体）は
+ * **借りたまま** — 契約は run の「入力の寿命」節。
  * MUST: 利用者の inputs 由来のキーを蓄積する器は null プロトタイプ（理由は plan.ts の
  * bindSymbols と同じ）。素の `{}` では入力名が "__proto__" のとき shape 配列が [[Prototype]] に
  * 化け、own property が作られないまま「入力が渡されていない」で落ちる。常駐入力側は `Map` な
  * ので同じ穴が無い。
  */
-const splitInputs = (inputs: RunInputs): {
-  readonly inputShapes: Record<string, readonly number[]>;
-  readonly residentInputs: ReadonlyMap<string, ResidentTensor>;
-} => {
+const captureInputs = (inputs: RunInputs): CapturedInputs => {
+  const values = new Map<string, RunInput>();
   const inputShapes: Record<string, readonly number[]> = Object.create(null);
   const residentInputs = new Map<string, ResidentTensor>();
   for (const [name, value] of Object.entries(inputs)) {
+    values.set(name, value);
     if (value instanceof ResidentTensor) residentInputs.set(name, value);
-    else inputShapes[name] = value.shape;
+    // MUST: shape は**複製**して持つ（借りたままだと、発行直後の書き換えが束縛解決の材料を
+    // 変える）。常駐入力はホスト側に shape を持たない寿命クラスなので写す対象が無い。
+    else inputShapes[name] = [...value.shape];
   }
-  return { inputShapes, residentInputs };
+  return { values, inputShapes, residentInputs };
 };
 
 /** 常駐入力の名前集合（{@link bindSymbols} の `deferredInputs`）。空なら渡さない。 */
@@ -956,6 +980,20 @@ export class Session {
    *
    * `generation` を渡した run は **state 参照グラフの 1 step**（ADR 0066 決定 4 の prefill-chunk
    * または decode）になる。渡さない run は 1 バイトも挙動が変わらない。
+   *
+   * ## 入力の寿命（発行時 snapshot と borrowed な data）
+   *
+   * 実行本体は `#serialize` 越し（1 マイクロタスク以降）に走るので、「非 await の並行発行」と
+   * 「発行直後の書き換え」の組は素直に踏める形になっている。そこで **metadata は発行の同期区間で
+   * 固定する**（{@link captureInputs}）— `inputs` Record の member 構成・各入力の shape・
+   * `bindings` は写しを取るので、戻り Promise を待たずに呼び出し側が書き換えても、この run は
+   * **発行時点の形**で走る。
+   *
+   * MUST NOT: `Tensor.data`（TypedArray の実体）は写さず**借りる**ので、戻り Promise が settle
+   * するまで書き換えない。GPU への `writeBuffer` はマイクロタスクの先で出るため、書き換えは
+   * 例外も警告も無い沈黙誤値になる。GiB 級の複製を毎 run 払わないための意図的な線引きで、
+   * 「借りる」ことそのものが契約（常駐入力 {@link ResidentTensor} が束縛予約と破棄済み検査で
+   * 守られているのと同じ規律を、ホスト配列では呼び出し側が守る）。
    */
   run(
     inputs: RunInputs,
@@ -972,7 +1010,15 @@ export class Session {
     // `context.rewind()`」が「進行中 run が居ない」と判定され、捕捉済み P と uniform が分裂する）。
     // 検査の失敗は従来どおり戻り Promise の reject で返す（同期 throw に変えない）。
     const lease = generation?.context[RUNTIME_INTERNAL];
+    let captured: CapturedInputs;
+    let capturedBindings: SymbolBindings;
     try {
+      // MUST: 入力の写しはリース取得より**前**（写しが落ちた後に返し手の居ないリースが 1 本
+      // 残ると、以後の `rewind()` が永久に拒否される）。
+      captured = captureInputs(inputs);
+      // 束縛も発行時に固定する（本体で読むと、発行直後の書き換えが「シンボルの束縛が衝突」
+      // という無関係な失敗に化ける）。
+      capturedBindings = { ...bindings };
       lease?.acquireRun();
     } catch (cause) {
       return Promise.reject(cause);
@@ -982,7 +1028,7 @@ export class Session {
     this.#pendingRuns += 1;
     return this.#serialize(async () => {
       try {
-        return await this.#runOnce(inputs, bindings, generation);
+        return await this.#runOnce(captured, capturedBindings, generation);
       } finally {
         // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると以後の rewind が永久に拒否される）。
         lease?.releaseRun();
@@ -1016,6 +1062,11 @@ export class Session {
    * NOTE: 戻り Promise を await せずに {@link BatchScope.finish} を呼んでも取りこぼさない。
    * batch の in-flight リースをこの**同期区間**で取り、finish は未返却リースが全て返るまで
    * フェンスへ進まない（機構は `BatchInternals.enter`）。
+   *
+   * 入力の寿命は `run` と**同型**（{@link Session.run} の「入力の寿命」節）— `inputs` Record の
+   * member 構成・shape・`bindings` / `copyOutputs` の形は発行の同期区間で固定し、`Tensor.data`
+   * は戻り Promise が settle するまで borrowed（MUST NOT: 書き換えない）。非 await 発行が
+   * 前提の面なので、踏みやすさは run より高い。
    */
   enqueue(inputs: RunInputs, options: EnqueueOptions): Promise<void> {
     if (this.#disposal !== undefined) {
@@ -1038,14 +1089,28 @@ export class Session {
     // タスクを 1 段挟むので、本体で取ると「未 await の enqueue を積んだ直後に finish()」で
     // finish が先に決着し、積んだぶんが 1 本も dispatch されないまま区間が成功で終わる。
     // 検査の失敗は従来どおり戻り Promise の reject で返す（同期 throw に変えない）。
+    let captured: CapturedInputs;
+    let capturedOptions: EnqueueOptions;
     try {
+      // MUST: 入力の写しはリース取得より**前**（写しが落ちた後に返し手の居ないリースが 1 本
+      // 残ると `finish()` が永久に待つ）。`batch` は実体そのものを持つ（写す対象ではない）。
+      captured = captureInputs(inputs);
+      capturedOptions = {
+        batch: options.batch,
+        bindings: { ...options.bindings },
+        ...(options.copyOutputs === undefined
+          ? {}
+          // 写し先の Record も member 差し替えを固定する（入力と同じ理由 — 差し替えが通ると
+          // 「書けたのに別の常駐テンソルへ」の沈黙誤値になる）。実体は借りたまま。
+          : { copyOutputs: { ...options.copyOutputs } }),
+      };
       batch.enter(this.#state.gpu);
     } catch (cause) {
       return Promise.reject(cause);
     }
     return this.#serialize(async () => {
       try {
-        await this.#enqueueOnce(inputs, options);
+        await this.#enqueueOnce(captured, capturedOptions);
       } finally {
         // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると finish がハングする）。
         batch.leave();
@@ -1165,8 +1230,12 @@ export class Session {
     return result;
   }
 
+  /**
+   * run 1 本の本体。**入力は発行時の写し**（{@link CapturedInputs}）で受け取る — ここは
+   * 1 マイクロタスク以降に走るので、利用者の Record を引き直すと発行後の書き換えを読む。
+   */
   async #runOnce(
-    inputs: RunInputs,
+    captured: CapturedInputs,
     bindings: SymbolBindings,
     generation: GenerationRun | undefined,
   ): Promise<RunOutputs> {
@@ -1211,7 +1280,7 @@ export class Session {
      */
     let stateWriteSubmits: number | undefined;
 
-    const { inputShapes, residentInputs } = splitInputs(inputs);
+    const { inputShapes, residentInputs } = captured;
     // MUST: 束縛の解決（= 入力 shape の検証）はヒット・ミスに関わらず**毎 run 走らせる**。
     // ここが飛ぶと、キャッシュに当たった run だけ入力 shape の宣言不一致を素通りする。
     const resolved = bindSymbols(graph, inputShapes, bindings, residentNames(residentInputs));
@@ -1303,7 +1372,7 @@ export class Session {
               // MUST: 入力の検査（値依存 — 毎 run）は backing 構築より前。ここで落ちる run に
               // slot（DiT で ~GiB 規模）の構築を払わせない。
               const data = graph.inputs.map((spec) =>
-                this.#checkInput(spec.name, inputs[spec.name], shapes)
+                this.#checkInput(spec.name, captured.values.get(spec.name), shapes)
               );
               // MUST: backing を作るのは**ヒット run だけ**。単発 run（1 回しか走らない
               // ワークロード）に slot メモリを払わせないための唯一の門で、ミス run の挙動と
@@ -1326,7 +1395,7 @@ export class Session {
                 if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
               });
             } else {
-              this.#bindInputs(inputs, shapes, arena, env, boundResidents);
+              this.#bindInputs(captured, shapes, arena, env, boundResidents);
               const built = await this.#recipeBuilder.buildRecipes(derived.steps, stateShapes);
               recipes = built.recipes;
               limits = built.generation;
@@ -1512,14 +1581,15 @@ export class Session {
    * 非 backed のミス run と generation run が共有する 1 本。
    */
   #bindInputs(
-    inputs: RunInputs,
+    captured: CapturedInputs,
     shapes: ReadonlyMap<string, readonly number[]>,
     arena: RunArena,
     env: Map<string, GPUBuffer>,
     bound: ResidentTensor[],
   ): void {
     for (const spec of this.#state.graph.inputs) {
-      env.set(spec.name, this.#bindInput(spec.name, inputs[spec.name], shapes, arena, bound));
+      const value = captured.values.get(spec.name);
+      env.set(spec.name, this.#bindInput(spec.name, value, shapes, arena, bound));
     }
   }
 
@@ -1536,19 +1606,22 @@ export class Session {
    * - **{@link RunArena} を作らない**。通る経路は slot backing だけで、run 寿命の確保が
    *   1 バイトも出ない（readback staging すら出ない）。
    *
+   * 入力は run と同じく**発行時の写し**（{@link CapturedInputs}）で受け取る — ここも
+   * 1 マイクロタスク以降に走るため、利用者の Record を引き直すと発行後の書き換えを読む。
+   *
    * MUST: 初回（導出済み計画が無い）でも backing を作る。run は「ヒット run だけ backing を
    * 作る」— 単発 run に slot メモリを払わせないため — が、enqueue は最初から繰り返し前提の面
    * なので、この門を持ち込むと 1 本目が非 backed（= フェンスを伴うアリーナ経路）に落ちる。
    * 黙って落とさないのがこの面の契約なので、初回はここで払う。
    */
-  async #enqueueOnce(inputs: RunInputs, options: EnqueueOptions): Promise<void> {
+  async #enqueueOnce(captured: CapturedInputs, options: EnqueueOptions): Promise<void> {
     const { graph, scheduler } = this.#state;
     // 受け口の検査とリース取得は {@link Session.enqueue} の同期区間で済んでいる（本体で
     // やると finish との競走が閉じない）。ここは決着の相手として登録するだけ。
     // MUST: 区間の決着で「未 submit を出し切る」「計測窓を閉じる」の相手として登録する。
     options.batch[RUNTIME_INTERNAL].join(scheduler);
 
-    const { inputShapes, residentInputs } = splitInputs(inputs);
+    const { inputShapes, residentInputs } = captured;
     // MUST: 束縛の解決（= 入力 shape の検証）は run と同じく毎回走らせる。
     const resolved = bindSymbols(
       graph,
@@ -1585,7 +1658,7 @@ export class Session {
       // MUST: 入力と写し先の検査（値依存）は backing 構築より前。ここで落ちる enqueue に
       // slot の構築を払わせない。
       const data = graph.inputs.map((spec) =>
-        this.#checkInput(spec.name, inputs[spec.name], shapes)
+        this.#checkInput(spec.name, captured.values.get(spec.name), shapes)
       );
       const copies = this.#planCopyOutputs(options.copyOutputs, shapes);
       const activated = this.#activateBacking(preparedKey, recipes, shapes, residentInputs);
