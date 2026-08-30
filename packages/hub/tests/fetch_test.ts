@@ -790,6 +790,38 @@ Deno.test("fetchAssets: content-length が size と食い違えば受信前に�
   assert(error.message.includes("content-length"));
 });
 
+Deno.test("fetchAssets: ミラー URL の表記が正規化を跨いでも size の門は生きている", async (t) => {
+  // 予算表のキーは hubUrl をそのまま載せた `hfResolveUrl` の出力だが、下層が `fetch` へ渡すのは
+  // 正規化済みの文字列。門が外れると「全量受信してから落ちる」どころか、size の食い違いが
+  // content-length にしか出ない形は**沈黙で通ってしまう**。
+  const path = "tokenizer/qwen2-tokenizer.json";
+  const mirrors: readonly (readonly [string, string])[] = [
+    ["既定ポートの明記", `${HUB_URL}:443`],
+    ["大文字ホスト", "https://HUB.test"],
+  ];
+
+  for (const [label, hubUrl] of mirrors) {
+    await t.step(label, async () => {
+      const caches = new MemoryCacheStorage();
+      const mock = createMockFetch({
+        files: serveAll(),
+        contentLength: (target) => target === path ? payloadFor(path).byteLength + 1 : undefined,
+      });
+      const loaded = await loadManifest({ repo: REPO, hubUrl, revision: SHA }, {
+        fetch: mock.fetch,
+        caches,
+      });
+
+      const error = await assertRejects(
+        () => fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches }),
+        IntegrityError,
+      );
+      assertEquals(error.path, path);
+      assert(error.message.includes("content-length"), `${error.message} が門の由来を示していない`);
+    });
+  }
+});
+
 Deno.test("fetchAssets: 受信バイトが size を超えた時点で abort する", async () => {
   const caches = new MemoryCacheStorage();
   const path = "text_encoder/model.safetensors";
