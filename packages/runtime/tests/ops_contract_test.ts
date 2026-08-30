@@ -1362,6 +1362,127 @@ Deno.test("strided コピー族の rank 上限（1..4）は契約層で落ちる
 });
 
 /**
+ * **params 層が持つ門は契約層にも同じだけある**（カーネル側 doc が「契約検査と二重」と
+ * 書いている門は特に）。片側にしか無いと受理集合が層で割れ、`computeOutputShape` を通る
+ * CPU 参照だけが実行できる形（GPU は params で例外）が作れる。eps の f32 上振れに至っては
+ * 例外すら出ず、GPU（`1/sqrt(x + Inf) = 0` で bias 一色）と参照（有限 f64 で正規化）が
+ * 黙って別の値を出す。
+ *
+ * MUST: 診断は**原因の値**を名乗る（層が割れていた頃の症状は「契約は通ったのに実行段で
+ * 内部エラー」で、どの attr / どの軸が域外なのかが利用者に残らなかった）。
+ */
+Deno.test("params 層の値域門は契約層にも揃っている（f32 域 / カーネル長 / 幾何 / 隠れ幅）", () => {
+  const shape = (
+    op: string,
+    ins: readonly (readonly number[])[],
+    attrs: Record<string, unknown> = {},
+  ) => computeOutputShape(resolveOpContract(op), ins, "t", { attrs })[0];
+  const reject = (op: string, ins: readonly string[], attrs: Record<string, unknown>) =>
+    assertThrows(() => assertNodeContract(node(op, ins, attrs), "t"), OpContractError, "1e+39");
+
+  // eps は **f32 として**有限（下振れ 1e-50 の対で、上振れ 1e39 も落とす）
+  reject("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: 1e39 });
+  reject("rms_norm", ["x", "w"], { eps: 1e39 });
+  assertThrows(
+    () => shape("layer_norm", [[3, 8], [8], [8]], { normalized_shape: [8], eps: 1e39 }),
+    OpContractError,
+    "無限大",
+  );
+  assertThrows(() => shape("rms_norm", [[3, 8], [8]], { eps: 1e39 }), OpContractError, "無限大");
+  // 正常な eps はどちらも通る（門を広げすぎていないことの対）
+  assertEquals(shape("layer_norm", [[3, 8], [8], [8]], { normalized_shape: [8], eps: 1e-5 }), [
+    3,
+    8,
+  ]);
+  assertEquals(shape("rms_norm", [[3, 8], [8]], { eps: 1e-5 }), [3, 8]);
+
+  // params の f32 語へ載るスカラ attr も同じ門（「有限の f32 スカラ」の宣言どおり）
+  reject("attention", ["q", "k", "v"], { scale: 1e39 });
+  reject("masked_fill", ["x", "m"], { value: 1e39 });
+  reject("clamp", ["x"], { min: -1e39, max: 1 });
+  reject("clamp", ["x"], { min: 0, max: 1e39 });
+  reject("clamp_min", ["x"], { min: 1e39 });
+  reject("leaky_relu", ["x"], { negative_slope: 1e39 });
+  reject("ge_scalar", ["x"], { value: 1e39 });
+  // f32 へ普通に丸まる値・f32 の最大有限値ちょうどは通る（適用時に丸める規約で両側が一致する）
+  assertEquals(
+    assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.1 }), "t").kind,
+    "attention",
+  );
+  assertEquals(
+    assertNodeContract(node("clamp", ["x"], { min: -3.4028234663852886e+38, max: 0.1 }), "t").kind,
+    "unary",
+  );
+
+  // conv1d / conv2d の K = 0 は**出力長式より前**に落とす（`D·(K−1)` が負に転ぶと、出力が
+  // 入力より長い形が導出される — params 側は正整数として落とすので契約層だけが受理していた）
+  const conv1 = { stride: 1, padding: 0, dilation: 1, groups: 1 };
+  assertThrows(
+    () => shape("conv1d", [[1, 1, 4], [1, 1, 0], [1]], conv1),
+    OpContractError,
+    "カーネル長 K は正整数",
+  );
+  assertEquals(shape("conv1d", [[1, 1, 4], [1, 1, 1], [1]], conv1), [1, 1, 4]);
+  const conv2 = { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 1 };
+  assertThrows(
+    () => shape("conv2d", [[1, 1, 4, 4], [1, 1, 0, 1], [1]], conv2),
+    OpContractError,
+    "カーネル長 Kh は正整数",
+  );
+  assertThrows(
+    () => shape("conv2d", [[1, 1, 4, 4], [1, 1, 1, 0], [1]], conv2),
+    OpContractError,
+    "カーネル長 Kw は正整数",
+  );
+  assertEquals(shape("conv2d", [[1, 1, 4, 4], [1, 1, 1, 1], [1]], conv2), [1, 1, 4, 4]);
+
+  // deform_conv2d — 静的な幾何は params の positive 集合と同じ集合（空間長 0 は padding 次第で
+  // 正の出力形まで導出でき、全タップ範囲外 = bias 一色を参照が有効値として返していた）
+  assertThrows(
+    () =>
+      shape("deform_conv2d", [[1, 1, 0, 4], [1, 1, 1, 1], [1, 2, 2, 4], [1, 1, 2, 4], [1]], {
+        padding: [1, 0],
+      }),
+    OpContractError,
+    "height_in は正整数",
+  );
+  assertThrows(
+    () =>
+      shape("deform_conv2d", [[1, 1, 2, 4], [1, 1, 0, 1], [1, 0, 5, 4], [1, 0, 5, 4], [1]], {
+        padding: [1, 0],
+      }),
+    OpContractError,
+    "kernel_h は正整数",
+  );
+  assertEquals(
+    shape("deform_conv2d", [[1, 2, 4, 4], [3, 2, 3, 3], [1, 18, 4, 4], [1, 9, 4, 4], [3]], {
+      padding: [1, 1],
+    }),
+    [1, 3, 4, 4],
+  );
+
+  // gru_scan — H の域（1 〜 256）は docs/limitations.md が公開している by-design 制約で、
+  // params だけが見ていた（H=0 / H=257 は契約を通り、参照だけが実行できていた）
+  assertThrows(
+    () => shape("gru_scan", [[1, 1, 0], [1, 0], [0, 0], [0]]),
+    OpContractError,
+    "隠れ幅 H 0",
+  );
+  assertThrows(
+    () => shape("gru_scan", [[1, 1, 771], [1, 257], [771, 257], [771]]),
+    OpContractError,
+    "隠れ幅 H 257",
+  );
+  assertThrows(
+    () => shape("gru_scan_reverse", [[1, 1, 771], [1, 257], [771, 257], [771]]),
+    OpContractError,
+    "隠れ幅 H 257",
+  );
+  // 上限ちょうどは通る（上限を下げる誤りもここで赤くなる）
+  assertEquals(shape("gru_scan", [[1, 1, 768], [1, 256], [768, 256], [768]]), [1, 1, 256]);
+});
+
+/**
  * 融合 attention の**省略可能な第 4 入力 = 加算 mask**（ADR 0023 改訂）。
  *
  * カーネルは mask を `[1,1,M,N]` としてバッチ base 抜きの平坦添字で読む（B·H 全体へ

@@ -630,8 +630,10 @@ const assertStateGeometry = (where: string, geometry: StateAttentionGeometry): v
       `${where}: col_cap ${colCap} が full の live 上限 ${capacity}（= C）に足りない`,
     );
   }
-  if (!Number.isFinite(geometry.scale)) {
-    throw new CodegenError(`${where}: scale は有限の数値（${geometry.scale}）`);
+  // MUST: 有限判定は **f32 として**行う（attention_qk params と同じ門 — f64 で有限な `1e39` は
+  // f32 語で `+Inf` になり、`0 * Inf = NaN` でスコアが黙って壊れる）。
+  if (!Number.isFinite(Math.fround(geometry.scale))) {
+    throw new CodegenError(`${where}: scale は f32 として有限の数値（${geometry.scale}）`);
   }
 };
 

@@ -93,8 +93,10 @@ export const maskedFillParams = (
       `masked_fill params: mask の stride 本数 ${maskStrides.length} が出力 rank ${outShape.length} と違う`,
     );
   }
-  if (!Number.isFinite(value)) {
-    throw new CodegenError(`masked_fill params: 埋め値が有限でない（${value}）`);
+  // MUST: 有限判定は **f32 として**行う（f64 で有限な `1e39` は f32 語で `+Inf` になり、
+  // 「有限の埋め値」を指定したはずの出力へ非有限値が書かれる — 契約層と同じ門）。
+  if (!Number.isFinite(Math.fround(value))) {
+    throw new CodegenError(`masked_fill params: 埋め値が f32 として有限でない（${value}）`);
   }
   const n = outShape.reduce((count, dim) => count * dim, 1);
   assertU32Params("masked_fill params", {

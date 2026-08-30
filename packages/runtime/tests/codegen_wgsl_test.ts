@@ -7,6 +7,7 @@ import {
   elementwiseWgsl,
 } from "../src/codegen/elementwise.ts";
 import { CodegenError } from "../src/codegen/errors.ts";
+import { GRU_SCAN_MAX_HIDDEN } from "../src/codegen/limits.ts";
 import {
   axisReduceKey,
   axisReduceParams,
@@ -105,7 +106,6 @@ import {
   deformConv2dParams,
 } from "../src/kernels/deform-conv2d.ts";
 import {
-  GRU_SCAN_MAX_HIDDEN,
   GRU_SCAN_WORKGROUP_SIZE,
   type GruScanDirection,
   gruScanKey,
@@ -1627,6 +1627,19 @@ Deno.test("elementwise params はスカラ attr を末尾に f32 のビット列
     () => elementwiseParams({ op: "clamp_min", rank: 1, dtype: "f32" }, [2], [[2]], [Number.NaN]),
     CodegenError,
   );
+  // MUST: 有限判定は f32 として（載せ先が f32 語なので、f64 で有限な 1e39 は黙って +Inf になる）
+  assertThrows(
+    () => elementwiseParams({ op: "clamp_min", rank: 1, dtype: "f32" }, [2], [[2]], [1e39]),
+    CodegenError,
+    "f32 として有限でない",
+  );
+  // f32 へ普通に丸まる値は通る（門を広げすぎていないことの対）
+  assertEquals(
+    new Float32Array(
+      elementwiseParams({ op: "clamp_min", rank: 1, dtype: "f32" }, [2], [[2]], [0.1]).buffer,
+    )[3],
+    Math.fround(0.1),
+  );
   // MUST: 入力の本数は生成時のアリティと照合する。食い違うと WGSL 側の
   // `1 + rank + arity·rank + index` とスカラの書き込み位置がずれ、範囲外読みの沈黙誤値になる。
   assertThrows(
@@ -1819,6 +1832,12 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
   assertEquals(attentionStatsParams(30, 7).byteLength, 16);
   assertThrows(() => attentionQkParams(5, 7, 4, Number.NaN), CodegenError);
   assertThrows(() => attentionQkParams(-1, 7, 4, 1), CodegenError);
+  // MUST: scale の有限判定も f32 として（1e39 は f32 語で +Inf になり、`0 * Inf = NaN`）
+  assertThrows(
+    () => attentionQkParams(5, 7, 4, 1e39),
+    CodegenError,
+    "scale は f32 として有限の数値",
+  );
   assertThrows(() => attentionStatsParams(30, 0), CodegenError);
   assertThrows(() => attentionStatsParams(-1, 7), CodegenError);
   // MUST: regcache 変種は `dim <= epc · 256` をここでも見る（生成側と二重だが、カーネル
@@ -4052,6 +4071,12 @@ Deno.test("融合カーネルの params は契約外の値を fail loudly にす
   assertThrows(() => layerNormParams(4, 0, 1e-7), CodegenError);
   assertThrows(() => layerNormParams(4, 8, 0), CodegenError);
   assertThrows(() => layerNormParams(4, 8, Number.POSITIVE_INFINITY), CodegenError);
+  // MUST: 値域は **f32 として**見る（f64 で有限正でも、f32 語へ落とすと ±0 / ±Inf に化ける）。
+  // 上振れ 1e39 は `1/sqrt(x + Inf) = 0` で GPU だけ bias 一色になる沈黙誤値の入口。
+  assertThrows(() => layerNormParams(4, 8, 1e39), CodegenError, "f32 として有限の正数");
+  assertThrows(() => layerNormParams(4, 8, 1e-50), CodegenError, "f32 として有限の正数");
+  // 正常な eps は通る（門を広げすぎていないことの対）
+  assertEquals(new Float32Array(layerNormParams(4, 8, 1e-5).buffer)[2], Math.fround(1e-5));
 
   // rms_norm も eps は f32 のビット列（layer_norm と同じ規約）
   const rms = rmsNormParams(6, 10, 1e-6);
@@ -4061,6 +4086,9 @@ Deno.test("融合カーネルの params は契約外の値を fail loudly にす
   assertThrows(() => rmsNormParams(6, 0, 1e-6), CodegenError);
   assertThrows(() => rmsNormParams(6, 10, 0), CodegenError);
   assertThrows(() => rmsNormParams(6, 10, Number.NaN), CodegenError);
+  assertThrows(() => rmsNormParams(6, 10, 1e39), CodegenError, "f32 として有限の正数");
+  assertThrows(() => rmsNormParams(6, 10, 1e-50), CodegenError, "f32 として有限の正数");
+  assertEquals(new Float32Array(rmsNormParams(6, 10, 1e-5).buffer)[2], Math.fround(1e-5));
 
   assertEquals([...softmaxParams(4, 9)], [4, 9, 0, 0]);
   assertThrows(() => softmaxParams(4, 0), CodegenError);
@@ -4081,6 +4109,12 @@ Deno.test("融合カーネルの params は契約外の値を fail loudly にす
   assertThrows(() => maskedFillParams([3, 4], [1], 0), CodegenError);
   assertThrows(() => maskedFillParams([], [], 0), CodegenError);
   assertThrows(() => maskedFillParams([2, 3], [1, 1], Number.NaN), CodegenError);
+  // MUST: 埋め値の有限判定も f32 として（f32 最小有限値ちょうどは通り、1e39 は落ちる）
+  assertThrows(
+    () => maskedFillParams([2, 3], [1, 1], 1e39),
+    CodegenError,
+    "f32 として有限でない",
+  );
 
   const conv = conv1dParams({
     batch: 2,

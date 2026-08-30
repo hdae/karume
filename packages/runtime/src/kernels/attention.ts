@@ -351,8 +351,10 @@ export const attentionQkParams = (
   kvRepeat?: number,
   window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
-  if (!Number.isFinite(scale)) {
-    throw new CodegenError(`attention_qk params: scale は有限の数値（${scale}）`);
+  // MUST: 有限判定は **f32 として**行う（載せ先が f32 語 — f64 で有限な `1e39` は `+Inf` に
+  // なり、`0 * Inf = NaN` でスコアが黙って壊れる。契約層 `assertFiniteAttr` と同じ門）。
+  if (!Number.isFinite(Math.fround(scale))) {
+    throw new CodegenError(`attention_qk params: scale は f32 として有限の数値（${scale}）`);
   }
   if (kvRepeat !== undefined) assertKvRepeat("attention_qk params", kvRepeat);
   if (window !== undefined) assertGemmRowWindow("attention_qk 行窓 params", m, window);

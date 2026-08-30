@@ -47,18 +47,16 @@
 
 import { SIGMOID_STABLE_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
+import { GRU_SCAN_MAX_HIDDEN } from "../codegen/limits.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
-export const GRU_SCAN_WORKGROUP_SIZE = 256;
-
 /**
- * 1 lane = 1 隠れユニットの割り当て上限（= workgroup サイズ）。
- *
- * MUST: 超過は {@link gruScanParams} が `CodegenError` で落とす（黙って縮退させない）。
- * 実測に出ている形は H = 128（vowel-detector の 2 層 BiGRU）だけで、上限を上げるには
- * workgroup 内 grid-stride と `h` の二重化が要る = 別の設計判断（ADR 0056 決定 5）。
+ * 1 workgroup の lane 数。**1 lane = 1 隠れユニット**なので隠れ幅の上限
+ * {@link GRU_SCAN_MAX_HIDDEN} と同じ数で、そこから導いて 2 か所に数を持たない。
+ * 上限そのものは契約層（ops/shapes.ts）も見るので中立な codegen/limits.ts に置く
+ * （実測に出ている形は H = 128 の vowel-detector 2 層 BiGRU だけ — ADR 0056 決定 5）。
  */
-export const GRU_SCAN_MAX_HIDDEN = GRU_SCAN_WORKGROUP_SIZE;
+export const GRU_SCAN_WORKGROUP_SIZE = GRU_SCAN_MAX_HIDDEN;
 
 /** 走査方向（`gru_scan` / `gru_scan_reverse` の 2 op に 1 対 1 で対応する）。 */
 export type GruScanDirection = "forward" | "reverse";

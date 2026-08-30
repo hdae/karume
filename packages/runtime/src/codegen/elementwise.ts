@@ -522,8 +522,10 @@ export const elementwiseParams = (
   });
   const floats = new Float32Array(params.buffer);
   scalars.forEach((value, index) => {
-    if (!Number.isFinite(value)) {
-      throw new CodegenError(`elementwise params: スカラ attr が有限でない（${value}）`);
+    // MUST: 有限判定は **f32 として**行う（載せ先が f32 語なので、f64 で有限な `1e39` は
+    // 黙って `+Inf` に化ける — 契約層 `assertFiniteAttr` と同じ門）。
+    if (!Number.isFinite(Math.fround(value))) {
+      throw new CodegenError(`elementwise params: スカラ attr が f32 として有限でない（${value}）`);
     }
     floats[1 + rank + inputShapes.length * rank + index] = value;
   });

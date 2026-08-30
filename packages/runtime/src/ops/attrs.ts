@@ -289,6 +289,9 @@ const assertNormalizedShape = (value: unknown, where: string): readonly number[]
  * eps を params の f32 語で運ぶ（kernels/layer-norm.ts / rms-norm.ts）ので丸めた先が 0 になる
  * 一方、CPU 参照は f64 のまま `1/sqrt(… + eps)` を計算する（reference/ops.ts）。上の「0 を
  * 許さない」理由が GPU 側だけで復活し、**全ゼロ行で GPU が NaN・CPU が 0** と意味が分岐する。
+ * MUST: **f32 へ丸めても無限大にならない**こと（`1e39` のような上振れ）。丸めた先が `+Inf` に
+ * なると GPU は `1/sqrt(… + Inf) = 0` で出力が bias 一色になる一方、CPU 参照は有限の f64 で
+ * 正規化を続ける — 下振れと同じ分岐が逆向きに起きる（どちらも例外なしの沈黙誤値）。
  */
 const assertEps = (value: unknown, where: string, what: string): number => {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
@@ -303,6 +306,13 @@ const assertEps = (value: unknown, where: string, what: string): number => {
       }`,
     );
   }
+  if (!Number.isFinite(Math.fround(value))) {
+    throw new OpContractError(
+      `${where}: ${what} の eps が f32 へ丸めると無限大になる（GPU 側だけ eps=Inf で走る）: ${
+        JSON.stringify(value)
+      }`,
+    );
+  }
   return value;
 };
 
@@ -312,10 +322,20 @@ const assertEps = (value: unknown, where: string, what: string): number => {
  *
  * NOTE: f32 に厳密表現できる値だけに絞りはしない — 適用時に f32 へ丸める規約（GPU は
  * params の f32 語、CPU 参照は `Math.fround`）で両側が一致する。
+ *
+ * MUST: 丸めた先も**有限**であること。f64 では有限でも `1e39` は f32 で `+Inf` になり、
+ * 「有限の f32 スカラ」と宣言した契約が非有限値を黙って通す（両側が揃って `Inf` で走るので
+ * 値の分岐は無いが、`0 * Inf = NaN` のように別の op で誤値へ化ける）。上限に張り付かせたい
+ * 意図なら f32 の最大有限値を書けるので、受理集合を広げる理由も無い。
  */
 export const assertFiniteAttr = (value: unknown, where: string, what: string): number => {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new OpContractError(`${where}: ${what} は有限の数値でない: ${JSON.stringify(value)}`);
+  }
+  if (!Number.isFinite(Math.fround(value))) {
+    throw new OpContractError(
+      `${where}: ${what} が f32 へ丸めると無限大になる: ${JSON.stringify(value)}`,
+    );
   }
   return value;
 };

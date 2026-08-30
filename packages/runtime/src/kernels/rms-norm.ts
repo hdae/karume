@@ -96,6 +96,9 @@ fn main(
  *
  * MUST: eps は f32 のビット列として載せる。u32 として書くと指数部が整数値に化けて、
  * 例外なしに「eps ≈ 0」で走る。
+ *
+ * MUST: eps の値域は **f32 として**見る（layer_norm params と同じ二重の門）。f64 で有限正でも
+ * `1e-50` は f32 で 0、`1e39` は `+Inf` になり、どちらも f64 のまま計算する CPU 参照と分岐する。
  */
 export const rmsNormParams = (
   rows: number,
@@ -106,8 +109,9 @@ export const rmsNormParams = (
   if (dim < 1) {
     throw new CodegenError(`rms_norm params: dim は正整数（${dim}）`);
   }
-  if (!Number.isFinite(eps) || eps <= 0) {
-    throw new CodegenError(`rms_norm params: eps は有限の正数（${eps}）`);
+  const eps32 = Math.fround(eps);
+  if (!Number.isFinite(eps32) || eps32 <= 0) {
+    throw new CodegenError(`rms_norm params: eps は f32 として有限の正数（${eps}）`);
   }
   const params = new Uint32Array(4);
   params[0] = rows;

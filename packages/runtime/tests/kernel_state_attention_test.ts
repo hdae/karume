@@ -216,6 +216,12 @@ Deno.test("①③ の params 門が沈黙誤値になる幾何を全て拒否す
     CodegenError,
     "scale",
   );
+  // MUST: 有限判定は f32 として（f64 で有限な 1e39 は f32 語で +Inf になり、`0 * Inf = NaN`）
+  assertThrows(
+    () => stateAttentionParams({ ...GEOMETRY, scale: 1e39 }),
+    CodegenError,
+    "scale は f32 として有限の数値",
+  );
   assertThrows(
     () => stateAttentionParams({ ...GEOMETRY, depth: 2 ** 32 }),
     CodegenError,

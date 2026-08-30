@@ -194,9 +194,10 @@ type DeformConv2dDims = {
  * uniform Dims（13 語ぶんの内容を **16 語 = 64 バイト**確保する — WGSL の uniform struct は
  * 16 バイト整列 MUST）。先頭は出力の全要素数・末尾の欄が {@link DEFORM_CONV2D_OOB_BITS}。
  *
- * MUST: カーネル直呼びの経路でも幾何を見る（契約検査と二重だが、conv_transpose1d / conv2d と
- * 同じ二重の門）。空間長 0 の入力は `f32(dims.height_in)` が 0 になり、範囲判定が全タップで
- * false = 出力が bias 一色になる沈黙誤値を作る。
+ * MUST: カーネル直呼びの経路でも幾何を見る（契約検査 = ops/shapes.ts の同名の positive 集合と
+ * 二重だが、conv_transpose1d / conv2d と同じ二重の門）。空間長 0 の入力は
+ * `f32(dims.height_in)` が 0 になり、範囲判定が全タップで false = 出力が bias 一色になる
+ * 沈黙誤値を作る。
  */
 export const deformConv2dParams = (dims: DeformConv2dDims): Uint32Array<ArrayBuffer> => {
   // 名前は WGSL の Dims 欄名（`n` の次から）と対。並びがそのまま uniform の語順になる。

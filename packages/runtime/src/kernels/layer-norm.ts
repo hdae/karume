@@ -140,6 +140,10 @@ ${LAYER_NORM_ROW_STATS_WGSL}
  *
  * MUST: eps は f32 のビット列として載せる。u32 として書くと指数部が整数値に化けて、
  * 例外なしに「eps ≈ 0」で走る。
+ *
+ * MUST: eps の値域は **f32 として**見る（契約検査と二重だが、カーネル直呼びの経路も通る門）。
+ * f64 で有限正でも `1e-50` は f32 で 0、`1e39` は `+Inf` になり、どちらも f64 のまま計算する
+ * CPU 参照（reference/ops.ts）と黙って分岐する。
  */
 export const layerNormParams = (
   rows: number,
@@ -150,8 +154,9 @@ export const layerNormParams = (
   if (dim < 1) {
     throw new CodegenError(`layer_norm params: dim は正整数（${dim}）`);
   }
-  if (!Number.isFinite(eps) || eps <= 0) {
-    throw new CodegenError(`layer_norm params: eps は有限の正数（${eps}）`);
+  const eps32 = Math.fround(eps);
+  if (!Number.isFinite(eps32) || eps32 <= 0) {
+    throw new CodegenError(`layer_norm params: eps は f32 として有限の正数（${eps}）`);
   }
   const params = new Uint32Array(4);
   params[0] = rows;

@@ -1,3 +1,4 @@
+import { GRU_SCAN_MAX_HIDDEN } from "../codegen/limits.ts";
 import { STRIDED_RANK } from "../codegen/strided.ts";
 import {
   attentionScale,
@@ -605,6 +606,15 @@ export const computeOutputShape = (
       const spatial = (axis: 0 | 1, name: string): number => {
         const length = x[2 + axis];
         const kernel = weight[2 + axis];
+        // MUST: conv1d と同じ理由で K = 0 は出力長式より前に落とす（`dilation·(K−1)` が負に
+        // 転んで出力が入力より長くなる — params 側は正整数として落とす）。
+        if (kernel < 1) {
+          throw new OpContractError(
+            `${where}: conv2d のカーネル長 K${name.toLowerCase()} は正整数（重み [${
+              weight.join(",")
+            }]）`,
+          );
+        }
         const span = length + 2 * padding[axis] - dilation[axis] * (kernel - 1) - 1;
         if (span < 0) {
           throw new OpContractError(
@@ -837,6 +847,14 @@ export const computeOutputShape = (
           `${where}: conv1d の bias 長 ${bias[0]} が出力チャネル ${channelsOut} と違う`,
         );
       }
+      // MUST: K = 0 を出力長式へ入れない（`dilation·(K−1)` が負に転び、出力が入力より**長く**
+      // なる形が導出される）。params（kernels/conv1d.ts）は正整数として落とすので、ここが
+      // 抜けていると契約層と params 層で受理集合が割れる。
+      if (kernel < 1) {
+        throw new OpContractError(
+          `${where}: conv1d のカーネル長 K は正整数（重み [${weight.join(",")}]）`,
+        );
+      }
       // dilation の一般形。K=1 でも d·(K−1) = 0 なので従来式と一致する。
       const span = length + 2 * padding - dilation * (kernel - 1) - 1;
       if (span < 0) {
@@ -901,6 +919,30 @@ export const computeOutputShape = (
       }
       const [batch, channelsIn] = x;
       const [channelsOut, weightIn, kernelH, kernelW] = weight;
+      // MUST: 静的な幾何は全て正整数（params `deformConv2dParams` の positive 集合と**同じ門** —
+      // カーネル側 doc が主張する「契約検査と二重」を事実にする）。特に空間長 0 は padding 次第で
+      // 正の出力形まで導出でき、全タップが範囲外判定に落ちて **bias 一色**の沈黙誤値になる
+      // （GPU は params で落ちるが、CPU 参照はその値を有効な結果として返す）。
+      // Hout / Wout は下の `spatial` が `length < 1` で見るので、ここでは静的な入力側だけ。
+      for (
+        const [name, value] of [
+          ["batch", batch],
+          ["channels_in", channelsIn],
+          ["channels_out", channelsOut],
+          ["height_in", x[2]],
+          ["width_in", x[3]],
+          ["kernel_h", kernelH],
+          ["kernel_w", kernelW],
+        ] as const
+      ) {
+        if (value < 1) {
+          throw new OpContractError(
+            `${where}: deform_conv2d の ${name} は正整数（x [${x.join(",")}] / W [${
+              weight.join(",")
+            }]）`,
+          );
+        }
+      }
       // MUST: groups の欄が無い = 1 固定なので、重みの第 2 軸は Cin そのもの。取り違え
       // （[Cin, Cout, Kh, Kw]）は要素数が合う形が作れるので、テストは Cin ≠ Cout で固定する。
       if (weightIn !== channelsIn) {
@@ -987,6 +1029,17 @@ export const computeOutputShape = (
       const [initialBatch, hidden] = initial;
       // MUST: 隠れ幅の正本は h0 の最終次元 1 か所（gi / W_hh / b_hh とは**突き合わせるだけ**）。
       // 同じ事実を 2 か所から取ると、3H と H の取り違えが素通りする形が作れる。
+      // MUST: H の値域もここで見る（カーネルは 1 lane = 1 隠れユニットで、上限は
+      // codegen/limits.ts が正本 — docs/limitations.md が公開している by-design 制約）。
+      // 契約層に無いと H=0 / H>256 が params まで素通りし、`computeOutputShape` を通る
+      // CPU 参照だけが実行できる形になる。
+      if (hidden < 1 || hidden > GRU_SCAN_MAX_HIDDEN) {
+        throw new OpContractError(
+          `${where}: ${found.name} の隠れ幅 H ${hidden} が 1 〜 ${GRU_SCAN_MAX_HIDDEN} の外（h0 [${
+            initial.join(",")
+          }] — 1 lane = 1 隠れユニットの割り当て上限。ADR 0056 決定 5）`,
+        );
+      }
       if (batch !== initialBatch) {
         throw new OpContractError(
           `${where}: ${found.name} のバッチが gi [${gi.join(",")}] と h0 [${
