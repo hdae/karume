@@ -1,27 +1,42 @@
-"""配布コンテナの shard 分割規則（ADR 0070 決定 1 / ADR 0071 決定 4 の解除）。
+"""配布コンテナの shard 分割規則（ADR 0081 — ADR 0070 決定 1 / ADR 0071 決定 4 の改訂）。
 
-1 コンポーネントの safetensors を**グラフ shard（`karume_ir` + 先頭から詰めたテンソル）+
-後続 shard 群**へ決定的に割り付ける層。持つのは規則だけ（テンソルの実体も torch も知らない）
-— 書き手は {@link karume.emit}、配布形の宣言は {@link karume.dist}、読み返しの門は
+1 コンポーネントの safetensors を**グラフ shard（`karume_ir` だけ・データ節は空）+ weight
+shard 列**へ決定的に割り付ける層。持つのは規則だけ（テンソルの実体も torch も知らない）—
+書き手は {@link karume.emit}、配布形の宣言は {@link karume.dist}、読み返しの門は
 {@link karume.verify} が、この 1 箇所の綴りを共有する。
 
-## 割り付けの規則
+規則は 2 層で、**読み手契約**（配布形の不変条件 — verify が門にする）と**書き手ポリシー**
+（本数と cut 位置の決め方 — ここの裁量）は別物。後者を変えても既存の配布形は読めるままで、
+前者を変えると読み手ごと動く。
 
-1. **順序は変えない**: 詰める順は書き手が決めた書き出し順（ADR 0063 の整列規約）そのまま。
+## 読み手契約（フォーマット）
+
+1. **shard 0 = グラフ shard**: `karume_ir` メタデータだけを持ち、データ節は**0 テンソル**
+   （器は safetensors のまま）。グラフだけを先に取れる形にするのが目的で、admission
+   （ADR 0070 決定 5）が「グラフ 1 本ぶんの DL / RAM」で判断できる。
+2. **全 shard のデータ節が {@link SHARD_BYTE_LIMIT} 以下**（上限はこの 1 本だけ）。単独で
+   上限を超える対の reject は「1 shard に入らない」から自動で従うので、独立の定数にしない。
+3. **順序は変えない**: 詰める順は書き手が決めた書き出し順（ADR 0063 の整列規約）そのまま。
    並べ替えは shard の**中**でだけ起きる（各 shard は自分のテンソルだけで同じ規約を満たす
    独立に整合な safetensors になる）。
-2. **weight と companion scale は原子対**（co-shard MUST — ADR 0070 決定 1）: 逐次消費は
+4. **weight と companion scale は原子対**（co-shard MUST — ADR 0070 決定 1）: 逐次消費は
    両方を同時に要求するので、shard を跨ぐと「参照を手放す」契約と両立しない。対の片方に
    到達した時点で相方ごと同じ shard へ入れる（= 相方が順序上あとに居ても引き寄せる）。
-3. **payload 合計が {@link SHARD_BYTE_LIMIT} を超える手前で次の shard を開く**。総量が上限
-   以下なら shard は 1 本のまま = **従来どおり単一ファイル**（既存資産の再 dist はバイト単位で
-   不変）。
-4. **尾部スラック**: カットを打つ直前に「まだ閉じていないバイト」（今の shard に積んだぶん +
-   未割り付けの残り全部）を見て、それが {@link SHARD_TAIL_LIMIT} 以下ならカットを打たず、
-   残りを今の shard へ詰め切って終わる。中途半端な端数 shard（数百 MB）を作らないための規則で、
-   1.5GiB 以下の資産は分割ゼロになる。
-5. 単一の対だけで上限を超える場合は fail loudly（黙って上限を破らない）。**尾部スラックは
-   この門を緩めない**（判定は {@link SHARD_BYTE_LIMIT} 基準のまま）。
+5. 重複禁止・`karume_ir` は shard 0 だけ・本数は {@link MAX_SHARDS} 以下。
+6. **常時分割**（ADR 0081）: fat グラフ shard（shard 0 に実重みを載せる形）と単一ファイル
+   配布形は**廃止**。テンソルを 1 本でも持つコンポーネントは「グラフ shard + weight shard
+   1 本以上」になる。
+
+## 書き手ポリシー（本数と cut 位置）
+
+- 本数 k = 上限の下での**最小連続分割数**（貪欲に詰めて数える — 連続分割では貪欲が最小）。
+  NOTE: 連続順序 + 対の原子性の下では k が `ceil(総量 / 上限)` を上回る並びが理論上ある
+  （例: 0.6GiB の対が 3 つ → 総量 1.8GiB でも 3 本）。ここは正直に受け入れる。
+- k を固定して**均す**: 各 shard の目標 = 残量 ÷ 残 shard 数。単位（weight + scale の対）を
+  跨がず、**suffix 実行可能性ガード**（残りの単位が残りの shard へ上限内で収まる位置でだけ
+  cut を打つ）を掛けるので、全 shard が上限以下に収まることは構造的に保たれる。
+- cut 位置の選好（層割り・MoE のエキスパート割り等）は**将来の書き手ポリシー拡張**で、
+  読み手契約を 1 文字も変えずに足せる（ADR 0081 の扉 — 今は実装しない）。
 
 ## ヘッダを勘定に入れない理由
 
@@ -39,8 +54,8 @@ import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-#: 1 shard のデータ節の上限（1GiB）。**固定定数で、公開ノブにしない** — 配布形の不変条件で
-#: あって呼び手の好みではない（緩めた資産は特定の環境でだけ読めなくなる）。
+#: 1 shard のデータ節の上限（1GiB）。**配布形の唯一の上限**で、固定定数・公開ノブにしない —
+#: 不変条件であって呼び手の好みではない（緩めた資産は特定の環境でだけ読めなくなる）。
 #:
 #: 根拠 3 点:
 #:
@@ -53,19 +68,6 @@ from pathlib import Path, PurePosixPath
 #: 3. hub 側の同時 RAM 予算 1.5GiB（2026-08-25 の取得層 fix）と整合する — 1 shard を持ちながら
 #:    次を取りに行っても予算内に収まる。
 SHARD_BYTE_LIMIT = 1_073_741_824
-
-#: **最後の** shard だけに許すデータ節の上限（1.5GiB）。ここまでなら端数を切らずに詰め切る
-#: （モジュール doc の規則 4）。`SHARD_BYTE_LIMIT` と同じく固定定数で、公開ノブにしない。
-#:
-#: 根拠 3 点:
-#:
-#: 1. hub の同時 RAM 予算 1.5GiB（2026-08-25 の取得層 fix）と**同値**。1 shard を持ちながら
-#:    次を取りに行ける上限をそのまま尾部の上限に据える（予算を 1 バイトも広げない）。
-#: 2. Chromium の単一 `ArrayBuffer` 上限 2,145,386,496 バイトの約 75%。壁までの余裕は 500MB 級
-#:    あり、ヘッダ（上限に数えない — 上のモジュール doc）を吸収してなお届かない。
-#: 3. 端数 shard（数百 MB）を作らない。1.5GiB 以下の資産は分割ゼロで据わる
-#:    （例: 1.11GiB の text_encoder・1.14GiB の turbo i4 は単一ファイルのまま）。
-SHARD_TAIL_LIMIT = 1_610_612_736
 
 #: 1 dtype エントリが並べられる shard 数（ADR 0071 決定 2 — hub の `MAX_SHARDS` と同値）。
 #: 焼く側で先に落とすため、書き手（分割）と宣言側（manifest 検査）が同じ綴りを引く。
@@ -173,49 +175,17 @@ def shard_siblings(path: Path) -> tuple[Path, ...]:
     return tuple(siblings)
 
 
-def pack_shards(
+def _atomic_units(
     order: Sequence[str],
     payload_bytes: Mapping[str, int],
     companions: Mapping[str, str],
-    limit: int = SHARD_BYTE_LIMIT,
-    tail_limit: int = SHARD_TAIL_LIMIT,
-) -> list[tuple[str, ...]]:
-    """書き出し順を shard へ逐次詰めする（モジュール doc の規則 1〜5）。
+    limit: int,
+) -> list[tuple[tuple[str, ...], int]]:
+    """書き出し順を**跨げない単位**（単独テンソル / weight + companion scale の対）へ畳む。
 
-    `order` は書き手が決めた**全体の**書き出し順、`payload_bytes` は名前 → データ節の
-    バイト数、`companions` は原子対の**対称**写像（weight → scale と scale → weight の両方）。
-    返すのは shard ごとの名前列で、**並びは `order` の部分列 + 引き寄せた相方**（shard の中の
-    最終的な書き出し順は書き手が自分の規約で決め直す）。
-
-    カットの判定は 2 段。①今の shard が非空で `used + size` が `limit` を超える（従来）
-    ②かつ**まだ閉じていないバイト**（`used` + 未割り付けの残り全部）が `tail_limit` を
-    超える。②が偽なら残りは全部この shard に入り切って `tail_limit` 以下で収まるので、
-    カットを打たずに詰め切る（= 端数 shard を作らない）。`used` を判定に含めるのが要で、
-    未割り付けぶんだけを見ると「今の shard に積んだぶん + 残り」が `tail_limit` を破る
-    畳み方を許してしまう。
-
-    検算（規則の逐語 — テストと対で固定する）:
-
-    - 3.2GiB → `[1GiB, 1GiB, 1.2GiB]`。1 本目・2 本目のカット判定では未閉が 3.2 / 2.2GiB で
-      1.5GiB を超えるので普通に切り、3 本目の判定で未閉 1.2GiB ≤ 1.5GiB になって畳む。
-    - 2.6GiB → `[1GiB, 1GiB, 0.6GiB]`。判定時の未閉は 2.6 / 1.6GiB でどちらも 1.5GiB 超なので
-      従来どおり切る。端数 0.6GiB は残るが、1.6GiB を最後の shard にすると尾部上限を破る
-      ので、これが正しい帰結。
-    - 総量 1.11GiB → 単一（最初のカット判定で未閉 1.11GiB ≤ 1.5GiB）。
-
-    従来と差が出るのは「未閉が (limit, tail_limit] に入る判定点」だけで、総量が `limit` 以下の
-    資産（= 既存の単一ファイル配布）はカット判定自体が起きないのでバイト単位で不変。
-
-    MUST: 空の shard を作らない。上限を超えるのは「今の shard が非空のとき」だけ新しい shard を
-    開く条件で、単独で上限を超える対は次の shard へ送っても同じなので fail loudly（尾部
-    スラックはこの門を緩めない — 判定は `limit` 基準のまま）。**唯一の例外が `order` 自体が
-    空の場合**で、そのときは空の shard 1 本を返す — グラフ shard はテンソルが 1 本も無くても
-    必ず在る（`karume_ir` を載せる器そのもの）。
+    対の片方に到達した時点で相方ごと 1 単位にする（相方が順序上あとに居ても引き寄せる —
+    読み手契約の 4）。単独で上限を超える単位は次の shard へ送っても同じなので fail loudly。
     """
-    if limit <= 0:
-        raise ShardError(f"shard の上限 {limit} が正でない")
-    if tail_limit < limit:
-        raise ShardError(f"尾部の上限 {tail_limit:,} が shard 上限 {limit:,} を下回っている")
     units: list[tuple[tuple[str, ...], int]] = []
     assigned: set[str] = set()
     for name in order:
@@ -231,21 +201,88 @@ def pack_shards(
             )
         assigned.update(unit)
         units.append((unit, size))
-    groups: list[tuple[str, ...]] = []
-    current: list[str] = []
-    used = 0
-    # まだ閉じていないバイト（= 総量 − 確定した shard のバイト）。カットのたびに減る。
-    unclosed = sum(size for _, size in units)
-    for unit, size in units:
-        if current and used + size > limit and unclosed > tail_limit:
-            groups.append(tuple(current))
-            unclosed -= used
-            current = []
+    return units
+
+
+def _suffix_shard_counts(sizes: Sequence[int], limit: int) -> list[int]:
+    """`counts[i]` = `sizes[i:]` を上限内の**連続**分割へ収める最小本数（`counts[n] = 0`）。
+
+    貪欲（入るだけ詰めて切る）が連続分割の最小本数そのものなので、各 i について貪欲の
+    右端 `end` を取り `1 + counts[end]` で数える。`end` は i が減れば単調に減るので、
+    右から 1 度なめるだけで全 i ぶんが出る（二重ループにしない）。
+
+    使い道は 2 つで、`counts[0]` が本数 k、`counts[i]` が均しの**suffix 実行可能性ガード**
+    （「ここで cut を打っても残りが残り shard に収まるか」）。
+    """
+    counts = [0] * (len(sizes) + 1)
+    end = len(sizes)
+    window = 0
+    for start in range(len(sizes) - 1, -1, -1):
+        window += sizes[start]
+        while window > limit:
+            end -= 1
+            window -= sizes[end]
+        counts[start] = 1 + counts[end]
+    return counts
+
+
+def pack_shards(
+    order: Sequence[str],
+    payload_bytes: Mapping[str, int],
+    companions: Mapping[str, str],
+    limit: int = SHARD_BYTE_LIMIT,
+) -> list[tuple[str, ...]]:
+    """書き出し順を shard 列へ割り付ける（規則はモジュール doc）。
+
+    `order` は書き手が決めた**全体の**書き出し順、`payload_bytes` は名前 → データ節の
+    バイト数、`companions` は原子対の**対称**写像（weight → scale と scale → weight の両方）。
+    返すのは shard ごとの名前列で、**先頭は必ず空**（= グラフ shard・読み手契約の 1）。
+    以降が weight shard で、並びは `order` の部分列 + 引き寄せた相方（shard の中の最終的な
+    書き出し順は書き手が自分の規約で決め直す）。
+
+    割り付けは 2 段。①**最小本数** k を貪欲で数える（`_suffix_shard_counts`）②k を固定して
+    **均す** — 各 shard の目標を「残量 ÷ 残 shard 数」に取り、目標に届いたら cut を打つ。
+    cut を打てるのは suffix 実行可能性ガード（`counts[i] <= 残 shard 数 - 1`）が立つ位置だけ
+    なので、均しても最後の 1 本が上限を破ることはない。上限に届いてしまった場合は目標に
+    関係なく cut（そこがちょうど貪欲の右端で、ガードは必ず立っている）。
+
+    検算（規則の逐語 — テストと対で固定する）:
+
+    - 3.2GiB → `[0.8GiB × 4]`。k = 4 を先に決めてから均すので端数 shard が出ない
+      （旧・尾部スラック則の `[1GiB, 1GiB, 1.2GiB]` を置き換える形）。
+    - 0.6GiB の単位 3 つ → `[0.6, 0.6, 0.6]`。総量 1.8GiB でも 2 本には詰め替えられない
+      （連続順序 + 原子性の下では k > ceil(総量 / 上限) がありうる — モジュール doc）。
+
+    MUST: weight shard を空で作らない。k は「全単位を上限内で覆う最小本数」なので、均しの
+    ガードが立つ位置は常に残り単位が残っている位置になる。**テンソルが 1 本も無い**
+    コンポーネントだけが例外で、そのときはグラフ shard 1 本（`[()]`）を返す。
+    """
+    if limit <= 0:
+        raise ShardError(f"shard の上限 {limit} が正でない")
+    units = _atomic_units(order, payload_bytes, companions, limit)
+    groups: list[tuple[str, ...]] = [()]
+    if units:
+        sizes = [size for _, size in units]
+        counts = _suffix_shard_counts(sizes, limit)
+        total = counts[0]
+        remaining = sum(sizes)
+        index = 0
+        for opened in range(total):
+            left = total - opened
+            # 残量を残 shard 数で割った目標（切り上げ — 端数は手前の shard が引き受ける）。
+            target = -(-remaining // left)
+            members: list[str] = []
             used = 0
-        current.extend(unit)
-        used += size
-    if current or not groups:
-        groups.append(tuple(current))
+            while index < len(units):
+                unit, size = units[index]
+                closable = bool(members) and counts[index] <= left - 1
+                if closable and (used + size > limit or used >= target):
+                    break
+                members.extend(unit)
+                used += size
+                index += 1
+            groups.append(tuple(members))
+            remaining -= used
     if len(groups) > MAX_SHARDS:
         raise ShardError(f"shard が {len(groups)} 本で上限 {MAX_SHARDS} を超えた")
     return groups

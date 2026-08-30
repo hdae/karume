@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from karume import cli, dist, verify
+from karume import cli, dist, repack, verify
 
 
 def _spy(monkeypatch: pytest.MonkeyPatch, target: object, name: str) -> list[list[str]]:
@@ -32,6 +32,11 @@ class TestDispatch:
         seen = _spy(monkeypatch, verify, "main")
         cli.main(["verify", "a/model.safetensors", "b/model.safetensors"])
         assert seen == [["a/model.safetensors", "b/model.safetensors"]]
+
+    def test_it_forwards_the_rest_of_argv_to_repack(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen = _spy(monkeypatch, repack, "main")
+        cli.main(["repack", "a/model.safetensors", "--out", "/tmp/out"])
+        assert seen == [["a/model.safetensors", "--out", "/tmp/out"]]
 
     def test_it_passes_help_through_to_the_body_parser(
         self, monkeypatch: pytest.MonkeyPatch
@@ -60,9 +65,9 @@ class TestUsage:
         assert raised.value.code == 2
 
     def test_the_export_commands_are_gone(self) -> None:
-        """名簿は dist / verify の 2 つだけ — 台本は wheel の外（ADR 0065 段 3+4）。
+        """名簿は dist / repack / verify の 3 つだけ — 台本は wheel の外（ADR 0065 段 3+4）。
 
         `karume export-siglip2` が残っていると、wheel に無い台本を wheel の CLI が読む形が
         「たまたま作業ツリーでだけ動く」経路として復活する。
         """
-        assert sorted(cli.COMMANDS) == ["dist", "verify"]
+        assert sorted(cli.COMMANDS) == ["dist", "repack", "verify"]

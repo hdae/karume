@@ -94,7 +94,8 @@ known-issues の 3 案（版固定再検証 / `HF_HUB_DISABLE_XET=1` / 履歴整
   採り直した（意味論門込み緑）②断片化は**クライアント退行で現状の手が尽きた**ことを実測で
   確定し記録（[known-issues](known-issues.md)・runbook §2 NOTE — 恒久候補 3 案は
   known-issues）③尾部スラック則（未閉 ≤1.5GiB は詰め切る — `SHARD_TAIL_LIMIT`）で端数
-  shard を廃し、turbo i4 の祖父条項は**規則上の正会員**になった（1.14GiB ≤ 1.5GiB）
+  shard を廃し、turbo i4 の祖父条項は**規則上の正会員**になった（1.14GiB ≤ 1.5GiB。
+  → 尾部スラック則自体は 2026-08-30 の shard 仕様 v2 で廃止 — ADR 0081）
 - リリース後 = ChatGPT 全体レビュー消化（ユーザー持参）・Pixel 実機 err.cause 再判定
 
 ## 消化済み（R1 統合波 — ロード面 API 工事 + shard 配布・2026-08-28〜29）

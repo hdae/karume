@@ -60,6 +60,20 @@ from karume.dist import (
     verify_dist,
 )
 from karume.ir import IR_METADATA_KEY
+from karume.shards import shard_name
+
+
+def _write_series(root: Path, payloads: Sequence[bytes], name: str = "model.safetensors") -> Path:
+    """shard 列を系列ディレクトリへ連番で書き、**代表 path** を返す。
+
+    配布形は常に分割される（ADR 0081）ので、系列側の現物も常に連番 — 代表 path 自身は
+    書かない（書くと「単一ファイルと連番の同居」になり、組み立てが fail loudly する）。
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    total = len(payloads)
+    for index, payload in enumerate(payloads, start=1):
+        (root / shard_name(name, index, total)).write_bytes(payload)
+    return root / name
 
 
 def _ref(path: str) -> dict[str, Any]:
@@ -1136,22 +1150,12 @@ class TestShardExpansion:
     """
 
     def _plan(self, series: Path, sources: Sequence[bytes]) -> ModelPlan:
-        """1 役だけの計画。`sources` が 2 本以上なら系列側を連番で作る（= 分割済みの資産）。"""
-        series.mkdir(parents=True, exist_ok=True)
-        total = len(sources)
-        for index, payload in enumerate(sources, start=1):
-            name = (
-                "model.safetensors"
-                if total == 1
-                else f"model-{index:05d}-of-{total:05d}.safetensors"
-            )
-            (series / name).write_bytes(payload)
+        """1 役だけの計画。系列側は shard 列（先頭 = グラフ shard）を連番で持つ。"""
+        source = _write_series(series, sources)
         return ModelPlan(
             name="A",
             pipeline="anima/1",
-            artifacts={
-                "w": Artifact(rel_path="w/model.safetensors", source=series / "model.safetensors")
-            },
+            artifacts={"w": Artifact(rel_path="w/model.safetensors", source=source)},
             weights={"w": {"f16": WeightFiles(file="w")}},
             assets={},
             quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
@@ -1193,15 +1197,18 @@ class TestShardExpansion:
             "A/w/model-00002-of-00002.safetensors": len(payloads[1]),
         }
 
-    def test_an_unsplit_component_still_declares_a_single_element(self, tmp_path: Path) -> None:
-        """分割されていない資産の宣言は 1 バイトも変わらない（代表 path のまま 1 要素）。"""
-        plan = self._plan(tmp_path / "series", [ir_container(mark="w")])
+    def test_the_smallest_component_still_declares_two_elements(self, tmp_path: Path) -> None:
+        """数 KB の資産でも「グラフ shard + weight shard」の 2 要素（常時分割 — ADR 0081）。"""
+        plan = self._plan(tmp_path / "series", ir_container(mark="w"))
         out_dir = tmp_path / "models" / "whole"
 
         manifest = assemble_family([plan], out_dir, "A")
 
         entry = manifest["models"]["A"]["weights"]["w"]["f16"]
-        assert [ref["path"] for ref in entry["shards"]] == ["A/w/model.safetensors"]
+        assert [ref["path"] for ref in entry["shards"]] == [
+            "A/w/model-00001-of-00002.safetensors",
+            "A/w/model-00002-of-00002.safetensors",
+        ]
 
     def test_the_leftovers_of_a_previous_export_fail_loudly(self, tmp_path: Path) -> None:
         """単一ファイルと連番の同居は「どちらを配るか」が一意に決まらない。"""
@@ -1236,14 +1243,15 @@ class TestInputContainerVerification:
     #: — 落ちる先は**ランタイム支援の突合**であって JSON の形ではない。
     _UNSUPPORTED: ClassVar[str] = "linear_v2"
 
-    def _tampered(self, payload: bytes) -> bytes:
-        """テンソルと data 節はそのままで、`karume_ir` の op だけを差し替えたコンテナ。
+    def _tampered(self, payloads: Sequence[bytes]) -> list[bytes]:
+        """weight shard はそのままで、**グラフ shard** の `karume_ir` の op だけを差し替えた列。
 
         4.md の失敗シナリオそのもの（手作業の改竄 / 別実装の出力）— 格納 dtype の門も
         宣言の門も通り、`verify_dist` も緑になる形。
         """
-        header_length = int.from_bytes(payload[:8], "little")
-        header = json.loads(payload[8 : 8 + header_length])
+        graph_shard, *rest = payloads
+        header_length = int.from_bytes(graph_shard[:8], "little")
+        header = json.loads(graph_shard[8 : 8 + header_length])
         graph = json.loads(header["__metadata__"][IR_METADATA_KEY])
         swapped = {node["op"] for node in graph["nodes"]}
         for node in graph["nodes"]:
@@ -1251,12 +1259,11 @@ class TestInputContainerVerification:
         graph["requires"]["ops"] = sorted(
             {self._UNSUPPORTED if op in swapped else op for op in graph["requires"]["ops"]}
         )
-        tensors = load(payload)
-        return save(tensors, {IR_METADATA_KEY: json.dumps(graph)})
+        tensors = load(graph_shard)
+        return [save(tensors, {IR_METADATA_KEY: json.dumps(graph)}), *rest]
 
-    def _plan(self, source: Path, payload: bytes) -> ModelPlan:
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_bytes(payload)
+    def _plan(self, series: Path, payloads: Sequence[bytes]) -> ModelPlan:
+        source = _write_series(series, payloads)
         return ModelPlan(
             name="A",
             pipeline="anima/1",
@@ -1271,7 +1278,7 @@ class TestInputContainerVerification:
     def test_a_weights_container_the_runtime_cannot_execute_fails_loudly(
         self, tmp_path: Path
     ) -> None:
-        plan = self._plan(tmp_path / "series" / "model.safetensors", self._tampered(ir_container()))
+        plan = self._plan(tmp_path / "series", self._tampered(ir_container()))
         out_dir = tmp_path / "models" / "tampered"
 
         # 落ちる層まで見る — 「JSON が読めない」ではなく**ランタイム支援の突合**で落ちること
@@ -1291,7 +1298,7 @@ class TestInputContainerVerification:
         が上の 1 本の意味そのもの。
         """
         monkeypatch.setattr(dist, "assert_weight_components_verified", lambda sharded: None)
-        plan = self._plan(tmp_path / "series" / "model.safetensors", self._tampered(ir_container()))
+        plan = self._plan(tmp_path / "series", self._tampered(ir_container()))
         out_dir = tmp_path / "models" / "tampered"
 
         assemble_family([plan], out_dir, "A")
@@ -1332,17 +1339,8 @@ class TestExternalShardedComponents:
     _OWN = b"transformer-bytes"
 
     def _series(self, root: Path, payloads: Sequence[bytes]) -> Path:
-        """系列出力を書いて**代表 path** を返す（2 本以上なら連番 = 分割済みの資産）。"""
-        root.mkdir(parents=True, exist_ok=True)
-        total = len(payloads)
-        for index, payload in enumerate(payloads, start=1):
-            name = (
-                "model.safetensors"
-                if total == 1
-                else f"model-{index:05d}-of-{total:05d}.safetensors"
-            )
-            (root / name).write_bytes(payload)
-        return root / "model.safetensors"
+        """系列出力を書いて**代表 path** を返す（連番 = 現物が決める shard 列）。"""
+        return _write_series(root, payloads)
 
     def _plan(self, name: str, series: Path) -> ModelPlan:
         """2 役のモデル（`text_encoder` は他リポと同一バイト・`transformer` はこのリポ固有）。"""
@@ -1447,9 +1445,9 @@ class TestExternalShardedComponents:
             )
         assert not out_dir.exists()
 
-    def test_an_unsplit_component_still_declares_one_reference(self, tmp_path: Path) -> None:
-        """分割されていない役割の宣言は 1 バイトも変わらない（従来どおり 1 要素の列）。"""
-        whole = (ir_container(mark="whole-text-encoder"),)
+    def test_the_smallest_component_is_referenced_shard_by_shard(self, tmp_path: Path) -> None:
+        """数 KB の役割でも参照は shard ごと（常時分割 — 代表 path 1 本の参照は無い）。"""
+        whole = tuple(ir_container(mark="whole-text-encoder"))
         series = self._series(tmp_path / "series", whole)
         source = self._source_dist(tmp_path, series)
         out_dir = tmp_path / "models" / "karume-borrower"
@@ -1466,10 +1464,11 @@ class TestExternalShardedComponents:
             {
                 "repo": self._REPO,
                 "revision": self._REVISION,
-                "path": "source/text_encoder/model.safetensors",
-                "size": len(whole[0]),
-                "sha256": hashlib.sha256(whole[0]).hexdigest(),
+                "path": f"source/text_encoder/model-{index:05d}-of-00002.safetensors",
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
             }
+            for index, payload in enumerate(whole, start=1)
         ]
 
     def test_an_asset_seat_cannot_point_at_a_split_component(self, tmp_path: Path) -> None:

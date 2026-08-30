@@ -34,6 +34,12 @@ def run_dist(argv: Sequence[str]) -> None:
     return dist.main(argv)
 
 
+def run_repack(argv: Sequence[str]) -> None:
+    from karume import repack
+
+    return repack.main(argv)
+
+
 def run_verify(argv: Sequence[str]) -> None:
     from karume import verify
 
@@ -43,6 +49,7 @@ def run_verify(argv: Sequence[str]) -> None:
 #: サブコマンド名 → （ハンドラ, 一覧に出す 1 行）。順序がそのまま `--help` の並び。
 COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     "dist": (run_dist, "配布ディレクトリを組み立てて karume.json / README.md を書く"),
+    "repack": (run_repack, "既存の配布形を shard 仕様 v2 へ詰め替える（バイトは変えない）"),
     "verify": (run_verify, "配布形 safetensors を IR v1 の全規則で検証する"),
 }
 

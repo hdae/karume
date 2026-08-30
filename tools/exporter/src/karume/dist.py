@@ -92,8 +92,8 @@ MANIFEST_FILENAME = "karume.json"
 
 #: manifest の形式識別子（ADR 0041 §1 — hub は 1 形しか読まない）。`karume/4` は quant エントリ
 #: へ表示欄（`label` / `description` — ADR 0075 決定 1）を足した形。weights の dtype エントリが
-#: **shard 列**（`{shards, extras?}`）である点は `karume/3`（ADR 0070 決定 1）から変わらず、
-#: 単一ファイルの資産は 1 要素の列として宣言される。
+#: **shard 列**（`{shards, extras?}`）である点は `karume/3`（ADR 0070 決定 1）から変わらない。
+#: 列の先頭は必ずグラフ shard で、実重みは後続に載る（常時分割 — ADR 0081）。
 #:
 #: MUST: 表示欄は optional でも**後方互換ではない** — hub の quant パーサは未知キーを fail
 #: loudly で拒否するので、欄を足した manifest は旧クライアントから読めない（ADR 0075 決定 4 —
@@ -191,7 +191,7 @@ def safetensors_header(path: Path) -> Mapping[str, Any]:
 
 
 def component_shards(path: Path) -> tuple[Path, ...]:
-    """コンポーネントの代表 path → 実在する shard 列（分割前は 1 要素）。
+    """コンポーネントの代表 path → 実在する shard 列（連番が無ければ代表 path 自身の 1 要素）。
 
     分割規則（`karume.shards`）の失敗を組み立ての語彙へ翻訳するだけの薄い層。組み立て側の
     入口はここ 1 箇所で、格納 dtype の門も IR メタデータの読みも計画の展開も同じ列を見る。
@@ -414,8 +414,8 @@ class WeightFiles:
     `file` が単数なのは、**分割は表ではなく現物が決める**ため（ADR 0070 決定 1 — 何本に
     割れるかは書いたバイト数で決まり、pipeline の表には書けない）。ここが指すのは
     コンポーネントの**代表 1 役**で、実際に何本の shard として宣言されるかは
-    {@link expand_weight_shards} が組み立て時に現物から解決する。分割されていない資産は
-    従来どおり 1 要素の shard 列（= 先頭のグラフ shard そのもの）。
+    {@link expand_weight_shards} が組み立て時に現物から解決する（先頭がグラフ shard・
+    実重みは後続 — ADR 0081）。
     """
 
     file: str
@@ -462,11 +462,12 @@ def expand_weight_shards(plan: ModelPlan) -> ShardedPlan:
     書いたバイト数で決まるので、pipeline の表にも recipe の定数にも書けない。表に書かせると
     「再 export で本数が変わったのに宣言は前回のまま」という、形も型も合う沈黙誤宣言が作れる。
 
-    分割されていない役割（と生成物 `payload` の役割）は 1 要素の列として素通しする — その
-    経路のバイト列も manifest も 1 バイトも変わらない。展開が起きた役割は代表役割を
-    **artifacts から外し**、shard 1 本ごとに `Artifact` を作る（相対 path は代表 path へ
-    同じ連番規則を掛けたもの — 系列側のファイル名と配布形のファイル名が同じ 1 本の綴りから
-    出る）。
+    連番になっていない役割（生成物 `payload` の役割と、旧規則で焼かれた単一ファイルの系列）は
+    1 要素の列として素通しする — 後者は組み立ての IR v1 全検証
+    （{@link assert_weight_components_verified} のグラフ shard 空の門）が名指しで落とす。
+    展開が起きた役割は代表役割を**artifacts から外し**、shard 1 本ごとに `Artifact` を作る
+    （相対 path は代表 path へ同じ連番規則を掛けたもの — 系列側のファイル名と配布形の
+    ファイル名が同じ 1 本の綴りから出る）。
     """
     roles = sorted({files.file for labels in plan.weights.values() for files in labels.values()})
     # weights 以外の席（assets / extras）から**同じ役割**を指している綴りは、展開で役割名が

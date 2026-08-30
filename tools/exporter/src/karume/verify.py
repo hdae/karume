@@ -50,7 +50,7 @@ from karume.ops import (
     sym_prefix_slice_attrs,
 )
 from karume.shapes import assert_graph_shapes, declared_shape
-from karume.shards import SHARD_BYTE_LIMIT, SHARD_TAIL_LIMIT, resolve_shards
+from karume.shards import SHARD_BYTE_LIMIT, resolve_shards
 
 
 class IrError(ValueError):
@@ -1229,11 +1229,10 @@ def _assert_no_surplus_tensors(graph: IrGraph, stored: Mapping[str, _StoredTenso
 
 
 def assert_shard_byte_limits(shards: Sequence[tuple[str | Path, int]]) -> None:
-    """shard 列のデータ節が分割規則の上限に収まっていることを落とす（`karume.shards` の鏡像）。
+    """全 shard のデータ節が上限に収まっていることを落とす（`karume.shards` の鏡像）。
 
-    非末尾の各 shard は {@link karume.shards.SHARD_BYTE_LIMIT} 以下・**最後の 1 本だけ**
-    {@link karume.shards.SHARD_TAIL_LIMIT} まで（尾部スラック則）。単一ファイルは「最後の
-    shard」なので尾部の上限で見る。
+    上限は {@link karume.shards.SHARD_BYTE_LIMIT} **1 本だけ**で、席（先頭 / 末尾）による
+    例外は無い（ADR 0081 — 尾部スラック則の廃止）。
 
     MUST: 読み返し側にも張る。上限は書く側（`shards.pack_shards`）にしか門が無く、規則を
     守っていない shard 列（手で組んだ / 別実装が書いた / 外部ツールの出力）は `karume verify`
@@ -1242,15 +1241,31 @@ def assert_shard_byte_limits(shards: Sequence[tuple[str | Path, int]]) -> None:
 
     `shards` は読む順（= shard 番号順）の `(path, データ節のバイト長)`。
     """
-    last = len(shards) - 1
     for index, (path, size) in enumerate(shards):
-        limit = SHARD_TAIL_LIMIT if index == last else SHARD_BYTE_LIMIT
-        if size > limit:
-            seat = "最後の shard" if index == last else f"shard[{index}]"
+        if size > SHARD_BYTE_LIMIT:
             raise ContainerError(
-                f"{path}: {seat} のデータ節が {size:,} バイトで上限 {limit:,} を超える"
-                "（分割規則 — ADR 0070 決定 1・尾部スラックは最後の 1 本だけ）"
+                f"{path}: shard[{index}] のデータ節が {size:,} バイトで"
+                f"上限 {SHARD_BYTE_LIMIT:,} を超える（分割規則 — ADR 0081）"
             )
+
+
+def assert_empty_graph_shard(path: str | Path, names: Sequence[str]) -> None:
+    """先頭 shard が**グラフ専用**（テンソル 0 本）であることを落とす（ADR 0081 の読み手契約 1）。
+
+    MUST: 読み返しで張る。グラフ shard に実重みが載った配布形（旧規則の fat グラフ shard・
+    単一ファイル）は、グラフ 1 本ぶんで admission を判断する経路（ADR 0070 決定 5）に対して
+    「グラフを読むには数 GB を取り切るしかない」形になる。ここが緩いと、**書き手だけを直しても
+    旧規則で焼いた資産が黙って配れてしまう**。
+
+    データ節に宣言外のバイトが残っている形は {@link assert_reader_layout} の担当（呼び出し側が
+    先に通す）なので、ここが見るのは宣言の本数だけ。
+    """
+    if names:
+        raise ContainerError(
+            f"{path}: グラフ shard がテンソルを {len(names)} 本持っている"
+            f"（{', '.join(sorted(names)[:3])}… — 先頭 shard は `{IR_METADATA_KEY}` だけを"
+            "載せる器で、データ節は空 MUST・ADR 0081）"
+        )
 
 
 def _read_shard_set(
@@ -1259,10 +1274,11 @@ def _read_shard_set(
     """shard 列を読み、`(グラフ JSON, 全テンソルの宣言, テンソル → 所属 shard 添字)` を返す。
 
     MUST: レイアウト規則は **shard ごと**に張る（各 shard は独立に整合な safetensors —
-    ADR 0070 決定 1）。`karume_ir` を持つのは先頭 1 本だけで、後続への再登場も、shard を
-    跨いだ同名テンソルの重複も fail loudly（ランタイム側 `createShardValidator` の鏡像）。
-    バイト上限（{@link assert_shard_byte_limits}）は列全体の並びで決まるので、全 shard の
-    ヘッダを読んでから 1 回だけ見る。
+    ADR 0070 決定 1）。`karume_ir` を持つのは先頭 1 本だけで、その先頭はテンソルを 1 本も
+    持たない（ADR 0081）。後続への `karume_ir` 再登場も、shard を跨いだ同名テンソルの重複も
+    fail loudly（ランタイム側 `createShardValidator` の鏡像）。バイト上限
+    （{@link assert_shard_byte_limits}）は列全体の並びで決まるので、全 shard のヘッダを
+    読んでから 1 回だけ見る。
     """
     if not paths:
         raise ContainerError("検証する shard が 1 本も無い")
@@ -1281,6 +1297,7 @@ def _read_shard_set(
                     f"__metadata__.{IR_METADATA_KEY} が無い（Karume モデルではない）"
                 )
             text = embedded
+            assert_empty_graph_shard(path, list(tensors))
         elif embedded is not None:
             raise ContainerError(
                 f"shard[{index}] ({path}): {IR_METADATA_KEY} を持っている"
@@ -1299,18 +1316,24 @@ def _read_shard_set(
 
 
 def verify_model(path: str | Path) -> IrGraph:
-    """配布形 1 ファイルを IR v1 の全規則で検証し、読めたグラフを返す。"""
-    return verify_shards([path])
+    """コンポーネントの**代表 path** を shard 列へ解決して IR v1 の全規則で検証する。
+
+    配布形は常に連番の shard 列なので（ADR 0081）、入口は「代表 path 1 本」で、実際に何本へ
+    割れているかは現物が決める（{@link karume.shards.resolve_shards}）。列を自分で持っている
+    呼び手は {@link verify_shards} を直に呼ぶ。
+    """
+    return verify_shards(resolve_shards(Path(path)))
 
 
 def verify_shards(paths: Sequence[str | Path]) -> IrGraph:
-    """配布形の shard 列（1 本なら単一ファイル）を IR v1 の全規則で検証する。
+    """配布形の shard 列（先頭 = グラフ shard）を IR v1 の全規則で検証する。
 
     見る集合は分割前と同一 — 宣言と実体の突合・scale の 5 点・余剰テンソル・ランタイム支援・
     op 契約は**全 shard の和**に対して掛かる（ADR 0070 決定 1 の宣言完全性を書いた直後に
-    確かめる）。分割で増える門は 4 つだけ: shard ごとのレイアウト規則・`karume_ir` の在処・
-    **データ節のバイト上限**（{@link assert_shard_byte_limits} — 単一ファイルにも掛かる）・
-    **co-shard**（weight と companion scale が同じ shard に居る MUST）。
+    確かめる）。分割で増える門は 5 つ: shard ごとのレイアウト規則・`karume_ir` の在処・
+    **グラフ shard が空**（{@link assert_empty_graph_shard} — ADR 0081）・**データ節のバイト
+    上限**（{@link assert_shard_byte_limits}）・**co-shard**（weight と companion scale が
+    同じ shard に居る MUST）。
     """
     text, stored, owner = _read_shard_set(paths)
     graph = parse_ir_graph(text)

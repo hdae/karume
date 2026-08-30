@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 import torch
@@ -17,7 +18,7 @@ from safetensors.torch import save_file
 from karume import verify
 from karume.ir import IR_METADATA_KEY
 from karume.ops import OpContractError, state_window
-from karume.shards import SHARD_BYTE_LIMIT, SHARD_TAIL_LIMIT
+from karume.shards import SHARD_BYTE_LIMIT, shard_path
 from karume.verify import (
     ContainerError,
     IrError,
@@ -55,7 +56,15 @@ def parse(**overrides):
 
 
 def write_container(path, graph: dict, tensors: dict[str, torch.Tensor], key=IR_METADATA_KEY):
-    save_file(tensors, str(path), metadata={key: json.dumps(graph)})
+    """配布形 1 コンポーネント（グラフ shard + weight shard 1 本）を書いて**代表 path** を返す。
+
+    配布形は常に連番の shard 列なので（ADR 0081）、規則 1 本ずつを見るここでも実物と同じ形で
+    書く — 単一ファイルで書くと、どの検査も「グラフ shard が空でない」で先に落ちてしまう。
+    `verify_model` は代表 path から現物の shard 列を解決する。
+    """
+    graph_shard = shard_path(Path(path), 1, 2)
+    save_file({}, str(graph_shard), metadata={key: json.dumps(graph)})
+    save_file(tensors, str(shard_path(Path(path), 2, 2)))
     return path
 
 
@@ -1581,7 +1590,7 @@ class TestContainer:
 
 
 class TestShardByteLimits:
-    """shard 1 本のデータ節の上限（`karume.shards` の規則 3 / 4）を**読み返し側でも**見る。
+    """shard 1 本のデータ節の上限（`karume.shards` の読み手契約 2）を**読み返し側でも**見る。
 
     上限は書く側（`pack_shards`）にしか門が無かったので、規則を守らない shard 列（手で組んだ /
     別実装が書いた / 外部ツールの出力・越境参照で別リポから引いたもの）は `karume verify` も
@@ -1592,26 +1601,18 @@ class TestShardByteLimits:
     掛け、`verify_shards` への配線は上限を差し替えた故障注入で見る。
     """
 
-    def test_a_non_tail_shard_at_the_limit_passes(self):
+    def test_a_shard_at_the_limit_passes(self):
         assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", 1)])
 
-    def test_a_non_tail_shard_one_byte_over_the_limit_is_rejected(self):
+    def test_a_shard_one_byte_over_the_limit_is_rejected(self):
         with pytest.raises(ContainerError, match=r"shard\[0\] のデータ節"):
             assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT + 1), ("b", 1)])
 
-    def test_the_tail_shard_may_use_the_slack(self):
-        """最後の 1 本だけは尾部スラック（端数 shard を作らないための規則 4）まで許す。"""
-        assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", SHARD_TAIL_LIMIT)])
-
-    def test_the_tail_shard_one_byte_over_the_slack_is_rejected(self):
-        with pytest.raises(ContainerError, match="最後の shard のデータ節"):
-            assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", SHARD_TAIL_LIMIT + 1)])
-
-    def test_a_single_file_is_judged_by_the_tail_limit(self):
-        """単一ファイル = 「最後の shard」（1.5GiB 以下の資産は分割ゼロで据わる）。"""
-        assert_shard_byte_limits([("only", SHARD_TAIL_LIMIT)])
-        with pytest.raises(ContainerError, match="最後の shard のデータ節"):
-            assert_shard_byte_limits([("only", SHARD_TAIL_LIMIT + 1)])
+    def test_the_last_shard_gets_no_slack_of_its_own(self):
+        """上限は 1 本だけ（尾部スラックは廃止 — ADR 0081 決定 2）。"""
+        assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", SHARD_BYTE_LIMIT)])
+        with pytest.raises(ContainerError, match=r"shard\[1\] のデータ節"):
+            assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", SHARD_BYTE_LIMIT + 1)])
 
     def test_verify_shards_actually_applies_the_gate(self, tmp_path, monkeypatch):
         """配線の故障注入 — 上限を差し込むと実ファイルの検証がその門で落ちる。
@@ -1620,12 +1621,34 @@ class TestShardByteLimits:
         （門が呼ばれていなければ緑のまま通り、この検査は空振りになる）。
         """
         path = write_container(tmp_path / "m.safetensors", base_graph(), {"enc.w": torch.ones(4)})
-        # データ節は f32×4 = 16 バイト。境界（= 上限ちょうど）は通る。
-        monkeypatch.setattr(verify, "SHARD_TAIL_LIMIT", 16)
+        # weight shard のデータ節は f32×4 = 16 バイト。境界（= 上限ちょうど）は通る。
+        monkeypatch.setattr(verify, "SHARD_BYTE_LIMIT", 16)
         assert verify_model(path).initializers["w"].storage.dtype == "f32"
 
-        monkeypatch.setattr(verify, "SHARD_TAIL_LIMIT", 15)
-        with pytest.raises(ContainerError, match="最後の shard のデータ節が 16 バイト"):
+        monkeypatch.setattr(verify, "SHARD_BYTE_LIMIT", 15)
+        with pytest.raises(ContainerError, match=r"shard\[1\] のデータ節が 16 バイト"):
+            verify_model(path)
+
+
+class TestTheGraphShard:
+    """先頭 shard は `karume_ir` だけを載せる器（データ節 0 テンソル — ADR 0081 決定 1）。"""
+
+    def test_a_component_written_by_the_writer_passes(self, tmp_path):
+        """{@link write_container} は実物と同じ形（グラフ shard + weight shard）で書く。"""
+        path = write_container(tmp_path / "m.safetensors", base_graph(), {"enc.w": torch.ones(4)})
+
+        assert verify_model(path).initializers["w"].storage.dtype == "f32"
+
+    def test_a_graph_shard_carrying_weights_is_rejected(self, tmp_path):
+        """旧規則（fat グラフ shard・単一ファイル）で焼かれた資産はここで落ちる。"""
+        path = tmp_path / "m.safetensors"
+        save_file(
+            {"enc.w": torch.ones(4)},
+            str(path),
+            metadata={IR_METADATA_KEY: json.dumps(base_graph())},
+        )
+
+        with pytest.raises(ContainerError, match="グラフ shard がテンソルを 1 本持っている"):
             verify_model(path)
 
 
@@ -1866,10 +1889,11 @@ class TestQuantizedScaleTensor:
 
 
 def i4_container(path, *, scale_shape: list[int], group_size: int = 16):
-    """packed 4bit を含む配布形をヘッダ JSON から直に組む。
+    """packed 4bit を含む配布形（グラフ shard + weight shard）をヘッダ JSON から直に組む。
 
     `save_file` では作れない（`safetensors` 0.8.0 の dtype 語彙に `I4` が無い）ので、
     データ節も自前で並べる。並びは F32 → F32 → I4（整列単位の降順 — ADR 0063 / 0069 追記 2）。
+    グラフ shard は `karume_ir` だけの空コンテナ（ADR 0081）。
     """
     graph = base_graph()
     graph["requires"] = {"ops": ["linear"]}
@@ -1891,7 +1915,6 @@ def i4_container(path, *, scale_shape: list[int], group_size: int = 16):
     for dim in scale_shape:
         scale_bytes *= dim
     header = {
-        "__metadata__": {IR_METADATA_KEY: json.dumps(graph)},
         "enc.b": {"dtype": "F32", "shape": [3], "data_offsets": [0, 12]},
         "enc.s": {"dtype": "F32", "shape": scale_shape, "data_offsets": [12, 12 + scale_bytes]},
         "enc.w": {
@@ -1900,8 +1923,13 @@ def i4_container(path, *, scale_shape: list[int], group_size: int = 16):
             "data_offsets": [12 + scale_bytes, 12 + scale_bytes + 48],
         },
     }
+    graph_shard = {"__metadata__": {IR_METADATA_KEY: json.dumps(graph)}}
+    write_raw_container(shard_path(Path(path), 1, 2), graph_shard)
     # payload の中身は読まれない（規則は宣言とレイアウトだけ）— nibble は 0 を避けて 8 で埋める。
-    return write_raw_container(path, header, b"\0" * (12 + scale_bytes) + b"\x88" * 48)
+    write_raw_container(
+        shard_path(Path(path), 2, 2), header, b"\0" * (12 + scale_bytes) + b"\x88" * 48
+    )
+    return path
 
 
 class TestSelfReader:

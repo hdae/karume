@@ -8,6 +8,7 @@ import re
 import struct
 import weakref
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 import torch
@@ -42,7 +43,7 @@ from karume.quantize import (
     quantize_to_int4,
     quantize_to_int8,
 )
-from karume.shards import ShardError
+from karume.shards import ShardError, resolve_shards, shard_path, shard_siblings
 from karume.verify import (
     ContainerError,
     assert_reader_layout,
@@ -69,18 +70,22 @@ def sample_graph() -> tuple[IrGraph, dict[str, torch.Tensor]]:
 
 class TestRoundTrip:
     def test_the_graph_is_embedded_under_the_metadata_key(self, tmp_path):
+        """グラフはグラフ shard の `__metadata__` に載り、テンソルは weight shard に載る。"""
         graph, tensors = sample_graph()
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors)
+        path = write_component(tmp_path / "model.safetensors", graph, tensors)
 
-        with safe_open(str(path), framework="pt") as handle:
+        with safe_open(str(graph_shard(path)), framework="pt") as handle:
             assert json.loads(handle.metadata()[IR_METADATA_KEY]) == graph.to_dict()
+            assert set(handle.keys()) == set()
+        with safe_open(str(weight_shard(path)), framework="pt") as handle:
+            assert handle.metadata() == {}
             assert set(handle.keys()) == {"enc.w"}
 
     def test_the_written_file_passes_the_full_verification(self, tmp_path):
         graph, tensors = sample_graph()
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors)
+        path = write_component(tmp_path / "model.safetensors", graph, tensors)
 
         assert verify_model(path).to_dict() == graph.to_dict()
 
@@ -218,7 +223,7 @@ class TestF16Storage:
     def test_eligible_weights_are_stored_as_f16_and_bias_stays_f32(self, tmp_path):
         graph, tensors = weight_graph()
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
         # 宣言の観測点はファイル側（`write_model` は呼び手の graph を書き換えない）。
         declared = verify_model(path).initializers
@@ -226,7 +231,7 @@ class TestF16Storage:
         assert declared["emb"].storage.dtype == "f16"
         # MUST: bias は常に f32（プロトタイプの f16 降格バグの根治形 — ADR 0006）。
         assert declared["b"].storage.dtype == "f32"
-        with safe_open(str(path), framework="pt") as handle:
+        with safe_open(str(weight_shard(path)), framework="pt") as handle:
             assert handle.get_slice("enc.w").get_dtype() == "F16"
             assert handle.get_slice("enc.b").get_dtype() == "F32"
 
@@ -238,12 +243,12 @@ class TestF16Storage:
         """
         graph, tensors = weight_graph(output_weight=True)
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
         declared = verify_model(path).initializers
         assert declared["w"].storage.dtype == "f32"
         assert declared["emb"].storage.dtype == "f16"
-        with safe_open(str(path), framework="pt") as handle:
+        with safe_open(str(weight_shard(path)), framework="pt") as handle:
             assert handle.get_slice("enc.w").get_dtype() == "F32"
             assert handle.get_slice("enc.emb").get_dtype() == "F16"
         assert verify_model(path).to_dict() == compressed_view(graph, {"emb": "f16"}).to_dict()
@@ -251,7 +256,7 @@ class TestF16Storage:
     def test_the_f16_file_passes_the_full_verification(self, tmp_path):
         graph, tensors = weight_graph()
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
         expected = compressed_view(graph, {"w": "f16", "emb": "f16"})
         assert verify_model(path).to_dict() == expected.to_dict()
@@ -260,9 +265,9 @@ class TestF16Storage:
         graph, tensors = weight_graph()
         expected = tensors["enc.w"].clone()
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
-        with safe_open(str(path), framework="pt") as handle:
+        with safe_open(str(weight_shard(path)), framework="pt") as handle:
             stored = handle.get_tensor("enc.w").to(torch.float32)
         assert torch.equal(stored, expected)
 
@@ -295,7 +300,7 @@ class TestF16Storage:
     def test_the_breakdown_counts_eligible_and_plain_bytes(self, tmp_path):
         graph, tensors = weight_graph()
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
         # 内訳は**書いたファイルの宣言**から数える（呼び手の graph は圧縮宣言を持たない）。
         breakdown = storage_breakdown(verify_model(path))
 
@@ -369,7 +374,7 @@ class TestI8Storage:
     def test_eligible_weights_are_stored_as_i8_with_a_scale_and_bias_stays_f32(self, tmp_path):
         graph, tensors, scales = int8_weight_graph()
 
-        [path] = write_model(
+        path = write_component(
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
@@ -379,7 +384,7 @@ class TestI8Storage:
         assert declared["emb"].storage.dtype == "i8"
         # MUST: bias は常に f32（プロトタイプの降格バグの根治形 — ADR 0006）。
         assert declared["b"].storage.dtype == "f32"
-        with safe_open(str(path), framework="pt") as handle:
+        with safe_open(str(weight_shard(path)), framework="pt") as handle:
             assert handle.get_slice("enc.w").get_dtype() == "I8"
             assert handle.get_slice("enc.b").get_dtype() == "F32"
             assert handle.get_slice("karume.scale.enc.w").get_dtype() == "F32"
@@ -388,7 +393,7 @@ class TestI8Storage:
     def test_the_i8_file_passes_the_full_verification(self, tmp_path):
         graph, tensors, scales = int8_weight_graph()
 
-        [path] = write_model(
+        path = write_component(
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
@@ -400,11 +405,11 @@ class TestI8Storage:
         graph, tensors, scales = int8_weight_graph()
         expected = tensors["enc.w"].clone()
 
-        [path] = write_model(
+        path = write_component(
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
-        with safe_open(str(path), framework="pt") as handle:
+        with safe_open(str(weight_shard(path)), framework="pt") as handle:
             stored = handle.get_tensor("enc.w").to(torch.float32)
             scale = handle.get_tensor("karume.scale.enc.w")
         assert torch.equal(stored * scale, expected)
@@ -531,7 +536,7 @@ class TestI8Storage:
     def test_the_breakdown_counts_i8_bytes_and_the_scale_overhead(self, tmp_path):
         graph, tensors, scales = int8_weight_graph()
 
-        [path] = write_model(
+        path = write_component(
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
         # 内訳は**書いたファイルの宣言**から数える（呼び手の graph は圧縮宣言を持たない）。
@@ -543,6 +548,29 @@ class TestI8Storage:
         assert breakdown.scale_bytes == (3 + 3) * 4
         assert breakdown.plain_tensors == 1
         assert breakdown.plain_bytes == 3 * 4
+
+
+def write_component(path, *args, **kwargs) -> Path:
+    """書いて**代表 path** を返す（現物は連番の shard 列 — ADR 0081）。
+
+    配布形は常に「グラフ shard + weight shard 列」なので、書いた `path` 自身は存在しない。
+    観測点は席で違う — 宣言（`karume_ir`）は {@link graph_shard}、テンソルは
+    {@link weight_shard}、両者をまたぐ検証は代表 path のまま `verify_model` が解決する。
+    """
+    write_model(path, *args, **kwargs)
+    return Path(path)
+
+
+def graph_shard(path) -> Path:
+    """コンポーネントの先頭 shard（`karume_ir` を載せる器・データ節は空）。"""
+    return resolve_shards(Path(path))[0]
+
+
+def weight_shard(path) -> Path:
+    """コンポーネントの weight shard（合成のテンソルは小さいので常に 1 本）。"""
+    shards = resolve_shards(Path(path))
+    assert len(shards) == 2, f"weight shard が 1 本でない: {[p.name for p in shards]}"
+    return shards[1]
 
 
 def container_header(path) -> dict:
@@ -557,8 +585,8 @@ def container_header(path) -> dict:
 
 
 def stored_payload(path, name: str) -> torch.Tensor:
-    """データ節から 1 本ぶんの生バイトを uint8 テンソルで取り出す。"""
-    raw = path.read_bytes()
+    """データ節から 1 本ぶんの生バイトを uint8 テンソルで取り出す（代表 path を受ける）。"""
+    raw = weight_shard(path).read_bytes()
     length = struct.unpack("<Q", raw[:8])[0]
     begin, end = json.loads(raw[8 : 8 + length])[name]["data_offsets"]
     start = 8 + length
@@ -572,7 +600,7 @@ def written_graph(path) -> IrGraph:
     通らない — 宣言の観測点をここに置く。読むのは verify の正規のパーサなので、i4 の宣言規則
     （scale + group_size 必須・2 冪 ≥ 16・量子化軸の整除）はこの経路でも掛かる。
     """
-    return parse_ir_graph(container_header(path)["__metadata__"][IR_METADATA_KEY])
+    return parse_ir_graph(container_header(graph_shard(path))["__metadata__"][IR_METADATA_KEY])
 
 
 def asymmetric_nibbles(count: int) -> torch.Tensor:
@@ -750,8 +778,7 @@ def int4_weight_graph(
 
 
 def write_int4(path, graph: IrGraph, tensors, scales):
-    [written] = write_model(path, graph, tensors, weight_dtype="i4", weight_scales=scales)
-    return written
+    return write_component(path, graph, tensors, weight_dtype="i4", weight_scales=scales)
 
 
 def int4_embedding_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -857,7 +884,7 @@ class TestI4Storage:
         assert declared["w"].storage.group_size == 16
         # MUST: bias は常に f32（プロトタイプの降格バグの根治形 — ADR 0006）。
         assert declared["b"].storage.dtype == "f32"
-        header = container_header(path)
+        header = container_header(weight_shard(path))
         assert header["enc.w"]["dtype"] == "I4"
         assert header["enc.w"]["shape"] == [3, 32]  # shape は論理形のまま
         begin, end = header["enc.w"]["data_offsets"]
@@ -885,7 +912,8 @@ class TestI4Storage:
 
         path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
 
-        assert_reader_layout(path)  # 例外が出なければ合格（I4 の先頭 4 バイト整列を含む）
+        # 例外が出なければ合格（I4 の先頭 4 バイト整列を含む）。
+        assert_reader_layout(weight_shard(path))
 
     def test_the_i4_file_passes_the_full_verification(self, tmp_path):
         """emit → verify_model の往復が i4 で最後まで通る（実行 capability は第 3 便で開放済み）。
@@ -927,7 +955,7 @@ class TestI4Storage:
         declared = written_graph(path).initializers
         assert declared["cw"].storage.dtype == "i4"
         assert declared["cw"].storage.group_size == 16
-        header = container_header(path)
+        header = container_header(weight_shard(path))
         assert header["enc.cw"]["dtype"] == "I4"
         assert header["enc.cw"]["shape"] == [3, 2, 16]  # shape は論理形のまま
         begin, end = header["enc.cw"]["data_offsets"]
@@ -998,7 +1026,7 @@ class TestI4Storage:
         assert declared["ww"].storage.dtype == "i4", "行長 48 側（出荷 g 16 でだけ割り切れる）"
         assert declared["ww"].storage.group_size == 16
         # scale は 48 / 16 = 3 group（既定 g を使っていれば宣言そのものが立たない）。
-        assert container_header(path)["karume.scale.enc.ww"]["shape"] == [3, 3]
+        assert container_header(weight_shard(path))["karume.scale.enc.ww"]["shape"] == [3, 3]
 
     def test_an_embedding_table_is_stored_as_i4_with_a_group_scale(self, tmp_path):
         """embedding 表 `[V,D]` も i4 で格納される（ADR 0069 決定 5 の embedding 追補）。
@@ -1014,7 +1042,7 @@ class TestI4Storage:
         assert declared["emb"].storage.dtype == "i4"
         assert declared["emb"].storage.scale == "karume.scale.enc.emb"
         assert declared["emb"].storage.group_size == 16
-        header = container_header(path)
+        header = container_header(weight_shard(path))
         assert header["enc.emb"]["dtype"] == "I4"
         assert header["enc.emb"]["shape"] == [3, 32]  # shape は論理形のまま
         begin, end = header["enc.emb"]["data_offsets"]
@@ -1039,7 +1067,7 @@ class TestI4Storage:
 
         path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
 
-        assert_reader_layout(path)
+        assert_reader_layout(weight_shard(path))
 
     def test_the_embedding_i4_file_passes_the_full_verification(self, tmp_path):
         """emit → verify_model の往復が embedding の i4 でも最後まで通る。
@@ -1206,7 +1234,9 @@ class TestFailureLeavesTheGraphUntouched:
         with pytest.raises(EmitError, match="ビット一致しない"):
             write_model(path, graph, tensors, weight_dtype="i8", weight_scales=scales)
 
-        assert path.exists()  # 書きかけ — 捨てるのは呼び出し側の層
+        # 書きかけの shard は残る — 捨てるのは呼び出し側の層（代表 path 自身は書かれない）。
+        assert shard_siblings(path)
+        assert not path.exists()
         assert json.loads(graph.to_json()) == before
 
 
@@ -1231,9 +1261,9 @@ class TestSuccessLeavesTheGraphUntouched:
         graph, tensors = weight_graph()
 
         write_model(tmp_path / "half.safetensors", graph, tensors, weight_dtype="f16")
-        [plain] = write_model(tmp_path / "plain.safetensors", graph, tensors)
+        plain = write_component(tmp_path / "plain.safetensors", graph, tensors)
 
-        with safe_open(str(plain), framework="pt") as handle:
+        with safe_open(str(weight_shard(plain)), framework="pt") as handle:
             assert handle.get_slice("enc.w").get_dtype() == "F32"
         # 宣言と実体が食い違っていれば verify_model がここで落ちる。
         assert verify_model(plain).to_dict() == graph.to_dict()
@@ -1282,15 +1312,19 @@ class TestStreamingConversion:
             for key, value in tensors.items()
         }
 
-        [streamed] = write_model(
+        streamed = write_component(
             tmp_path / "streamed.safetensors", graph, tensors, weight_dtype="f16"
         )
 
-        reference = tmp_path / "reference.safetensors"
-        # ヘッダに載るのは commit 済みの宣言ビュー（呼び手の graph は f32 のまま）。
+        # 対照は shard 2 本ぶん — グラフ shard（commit 済みの宣言ビューだけ）と weight shard
+        # （テンソルだけ）。呼び手の graph は f32 のままなので、宣言は書き出し側が commit する。
         committed = compressed_view(graph, {"w": "f16", "emb": "f16"})
-        _save_ordered(reference, pre, _write_order(pre), {IR_METADATA_KEY: committed.to_json()})
-        assert streamed.read_bytes() == reference.read_bytes()
+        reference_graph = tmp_path / "reference-graph.safetensors"
+        reference = tmp_path / "reference.safetensors"
+        _save_ordered(reference_graph, {}, [], {IR_METADATA_KEY: committed.to_json()})
+        _save_ordered(reference, pre, _write_order(pre), {})
+        assert graph_shard(streamed).read_bytes() == reference_graph.read_bytes()
+        assert weight_shard(streamed).read_bytes() == reference.read_bytes()
 
     def test_the_streamed_i8_bytes_match_a_pre_converted_write(self, tmp_path):
         """i8 も同じ（companion scale が増える形と I8 群の順序を踏む）。"""
@@ -1302,7 +1336,7 @@ class TestStreamingConversion:
             pre[key] = quantize_to_int8(tensors[key], scale)
             pre[f"karume.scale.{key}"] = scale
 
-        [streamed] = write_model(
+        streamed = write_component(
             tmp_path / "streamed.safetensors",
             graph,
             tensors,
@@ -1310,15 +1344,18 @@ class TestStreamingConversion:
             weight_scales=scales,
         )
 
-        reference = tmp_path / "reference.safetensors"
         committed = compressed_view(graph, {"w": "i8", "emb": "i8"})
-        _save_ordered(reference, pre, _write_order(pre), {IR_METADATA_KEY: committed.to_json()})
-        assert streamed.read_bytes() == reference.read_bytes()
+        reference_graph = tmp_path / "reference-graph.safetensors"
+        reference = tmp_path / "reference.safetensors"
+        _save_ordered(reference_graph, {}, [], {IR_METADATA_KEY: committed.to_json()})
+        _save_ordered(reference, pre, _write_order(pre), {})
+        assert graph_shard(streamed).read_bytes() == reference_graph.read_bytes()
+        assert weight_shard(streamed).read_bytes() == reference.read_bytes()
 
 
 def data_layout(path) -> list[tuple[int, str, str]]:
     """safetensors のデータ節に並ぶ順（開始 offset / 名前 / dtype）。"""
-    header = container_header(path)
+    header = container_header(weight_shard(path))
     entries = [
         (entry["data_offsets"][0], name, entry["dtype"])
         for name, entry in header.items()
@@ -1336,7 +1373,7 @@ class TestWriteOrder:
     def test_odd_element_f16_tensors_are_written_last(self, tmp_path):
         graph, tensors = weight_graph()
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
         # enc.emb は 15 要素 = 30 バイト（≡ 2 mod 4）なので末尾へ寄る。
         assert [name for _, name, _ in data_layout(path)][-1] == "enc.emb"
@@ -1349,7 +1386,7 @@ class TestWriteOrder:
         """
         graph, tensors, scales = int8_weight_graph()
 
-        [path] = write_model(
+        path = write_component(
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
@@ -1387,23 +1424,23 @@ class TestWriteOrder:
 
         dtypes = [dtype for _, _, dtype in data_layout(path)]
         assert dtypes == ["F32", "F32", "I4"]
-        assert_reader_layout(path)
+        assert_reader_layout(weight_shard(path))
 
     def test_the_emitted_file_satisfies_the_reader_layout_rules(self, tmp_path):
         graph, tensors = weight_graph()
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
-        assert_reader_layout(path)  # 例外が出なければ合格
+        assert_reader_layout(weight_shard(path))  # 例外が出なければ合格
 
     def test_the_emitted_i8_file_satisfies_the_reader_layout_rules(self, tmp_path):
         graph, tensors, scales = int8_weight_graph()
 
-        [path] = write_model(
+        path = write_component(
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
-        assert_reader_layout(path)  # 例外が出なければ合格
+        assert_reader_layout(weight_shard(path))  # 例外が出なければ合格
 
     def test_an_i8_tensor_placed_first_is_caught_by_the_reader_rules(self, tmp_path):
         """故障注入: 奇数長の I8 を先頭へ置くと後続 F32 の絶対 offset が 4 の倍数から外れる。"""
@@ -1442,13 +1479,14 @@ class TestWriteOrder:
         別バイトになるのを避けるための不変条件。
         """
         graph, tensors = weight_graph()
-        metadata = {IR_METADATA_KEY: graph.to_json()}
         reference = tmp_path / "reference.safetensors"
-        save_file({k: v.contiguous() for k, v in tensors.items()}, str(reference), metadata)
+        # 対照は weight shard（テンソルだけ）— 宣言はグラフ shard 側に居る（ADR 0081）。
+        # `metadata={}` は weight shard と同じ空の `__metadata__` 欄を作る。
+        save_file({k: v.contiguous() for k, v in tensors.items()}, str(reference), metadata={})
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors)
+        path = write_component(tmp_path / "model.safetensors", graph, tensors)
 
-        assert path.read_bytes() == reference.read_bytes()
+        assert weight_shard(path).read_bytes() == reference.read_bytes()
 
 
 class TestJsonCompliance:
@@ -1488,7 +1526,7 @@ class TestMixedStorage:
     def test_an_override_mixes_i8_into_an_i4_default(self, tmp_path):
         graph, tensors, scales = mixed_weight_graph()
 
-        [path] = write_model(
+        path = write_component(
             tmp_path / "model.safetensors",
             graph,
             tensors,
@@ -1503,7 +1541,7 @@ class TestMixedStorage:
         assert declared["emb"].storage.dtype == "i8"
         assert declared["emb"].storage.scale == "karume.scale.enc.emb"
         assert declared["b"].storage.dtype == "f32"
-        header = container_header(path)
+        header = container_header(weight_shard(path))
         assert header["enc.w"]["dtype"] == "I4"
         assert header["enc.emb"]["dtype"] == "I8"
 
@@ -1511,7 +1549,7 @@ class TestMixedStorage:
         """既定 f32 は従来「空プランで即返し」だった — 明示指定だけの圧縮も通ること。"""
         graph, tensors, scales = mixed_weight_graph()
 
-        [path] = write_model(
+        path = write_component(
             tmp_path / "model.safetensors",
             graph,
             tensors,
@@ -1526,7 +1564,7 @@ class TestMixedStorage:
     def test_an_override_to_f32_exempts_a_weight_from_the_default(self, tmp_path):
         graph, tensors = weight_graph()
 
-        [path] = write_model(
+        path = write_component(
             tmp_path / "model.safetensors",
             graph,
             tensors,
@@ -1653,68 +1691,84 @@ def fixed_int8_weight_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[st
     return graph, tensors, scales
 
 
-class TestShardBoundary:
-    """上限以下のコンポーネントは**従来どおり単一ファイル**（ADR 0070 決定 1 の解除の境界）。
+class TestTheWrittenShardSet:
+    """コンポーネントは**常に**連番の shard 列として書かれる（ADR 0081 — 常時分割）。
 
-    分割規則の導入が既存資産の再 dist を 1 バイトも動かさないことが受入条件そのものなので、
-    実測の sha256 を**分割規則が入る前のコード**（`git archive HEAD` の writer）から採って
-    固定する。ここが割れたら、配布リポの全ファイルが再ハッシュ・再アップロードになる。
+    バイト列は配布物そのものなので、上限に遠く及ばない最小のコンポーネントの sha256 を
+    ここで固定する（**新規則の実測値** — 旧規則の「単一ファイルでバイト不変」の pin は
+    ADR 0081 が放棄した。ここが割れたら、配布リポの全ファイルが再ハッシュ・再アップロード
+    になるという性格は変わらない）。
     """
 
-    #: 分割規則を入れる前の writer が `sample_graph()` に対して書いたバイト列。
-    PLAIN_SHA256 = "b73b7f7b8280e706498db19de2939c7b6adc0ffc8a00d5baa699f0c260424278"
+    #: `sample_graph()` の (グラフ shard, weight shard) の sha256。
+    PLAIN_SHA256 = (
+        "5e6dee6f15f9bc6aa40319a79e7dc7b63a087c86bdd8e17b8c720c82de9c55b7",
+        "638caa270359830d8bcb9d500c6fbcd9cea3018069a40d4afbef059bc5f5437f",
+    )
     #: 同・`fixed_int8_weight_graph()`（i8 + companion scale の並びまで含む）。
-    INT8_SHA256 = "7e278416805d95894b85bb4751fb17a782d0e3625b75e659a52782817892cd40"
+    INT8_SHA256 = (
+        "4c78a499c3d5fc5c22327fc3bfbcf4540bf81a42581e9432831741b867dff337",
+        "5d41fd9468c68eb5630bbf18fe7579414a534f736573c849a9a9f889f7b8f2f1",
+    )
 
-    def test_a_small_model_is_written_as_a_single_file_at_the_given_path(self, tmp_path):
+    def test_a_small_model_is_written_as_a_numbered_pair(self, tmp_path):
         graph, tensors = sample_graph()
         final = tmp_path / "model.safetensors"
 
         written = write_model(final, graph, tensors)
 
-        # 連番は付かない（`-00001-of-00001` へ改名すると全配布形の path が動く）。
-        assert written == [final]
-        assert [entry.name for entry in tmp_path.iterdir()] == ["model.safetensors"]
+        # 代表 path 自身は 1 バイトも書かれない（現物は連番だけ）。
+        assert written == [shard_path(final, 1, 2), shard_path(final, 2, 2)]
+        assert sorted(entry.name for entry in tmp_path.iterdir()) == [
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+        ]
 
-    def test_the_plain_bytes_are_the_ones_the_previous_writer_produced(self, tmp_path):
+    def test_the_plain_bytes_stay_what_they_are(self, tmp_path):
         graph, tensors = sample_graph()
 
-        [path] = write_model(tmp_path / "model.safetensors", graph, tensors)
+        written = write_model(tmp_path / "model.safetensors", graph, tensors)
 
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == self.PLAIN_SHA256
+        assert tuple(hashlib.sha256(p.read_bytes()).hexdigest() for p in written) == (
+            self.PLAIN_SHA256
+        )
 
-    def test_the_int8_bytes_are_the_ones_the_previous_writer_produced(self, tmp_path):
+    def test_the_int8_bytes_stay_what_they_are(self, tmp_path):
         graph, tensors, scales = fixed_int8_weight_graph()
 
-        [path] = write_model(
+        written = write_model(
             tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == self.INT8_SHA256
+        assert tuple(hashlib.sha256(p.read_bytes()).hexdigest() for p in written) == (
+            self.INT8_SHA256
+        )
 
-    def test_a_limit_that_the_payload_exactly_fills_still_writes_one_file(self, tmp_path):
-        """境界は「超えたら分ける」— ちょうど収まるコンポーネントは分けない。"""
+    def test_a_limit_that_the_payload_exactly_fills_keeps_one_weight_shard(self, tmp_path):
+        """境界は「超えたら分ける」— ちょうど収まるコンポーネントは weight shard 1 本のまま。"""
         graph, tensors = sample_graph()
         final = tmp_path / "model.safetensors"
 
         # `enc.w` は f32 4 要素 = 16 バイト（ヘッダは上限に数えない）。
         written = write_model(final, graph, tensors, _shard_byte_limit=16)
 
-        assert written == [final]
-        assert hashlib.sha256(final.read_bytes()).hexdigest() == self.PLAIN_SHA256
+        assert written == [shard_path(final, 1, 2), shard_path(final, 2, 2)]
+        assert tuple(hashlib.sha256(p.read_bytes()).hexdigest() for p in written) == (
+            self.PLAIN_SHA256
+        )
 
 
 class TestShardSplitting:
-    """上限を超えたら決定的な逐次詰めで分ける（規則の正本は `karume.shards`）。
+    """weight shard は決定的に割り付けられる（規則の正本は `karume.shards`）。
 
-    上限は合成の小テンソルへ人工的に下げて踏む（`_shard_byte_limit` / `_shard_tail_limit` —
-    テスト専用の差し込み。実データで 1GiB を踏むテストは書けない）。既定の `split` は尾部
-    スラック無し（尾部 = 切り口）で素のカット規則を見る。`fixed_int8_weight_graph` の payload は
+    上限は合成の小テンソルへ人工的に下げて踏む（`_shard_byte_limit` — テスト専用の差し込み。
+    実データで 1GiB を踏むテストは書けない）。`fixed_int8_weight_graph` の payload は
     F32 群が `enc.b` 12B → `karume.scale.enc.emb` 12B → `karume.scale.enc.w` 12B、
-    I8 群が `enc.emb` 15B → `enc.w` 12B（並びは ADR 0063 の書き出し順）。
+    I8 群が `enc.emb` 15B → `enc.w` 12B（並びは ADR 0063 の書き出し順）で、跨げない単位は
+    `enc.b` 12B / `scale.emb + enc.emb` 27B / `scale.w + enc.w` 24B の 3 つ。
     """
 
-    def split(self, tmp_path, limit: int, tail_limit: int | None = None) -> list:
+    def split(self, tmp_path, limit: int) -> list:
         graph, tensors, scales = fixed_int8_weight_graph()
         return write_model(
             tmp_path / "model.safetensors",
@@ -1723,7 +1777,6 @@ class TestShardSplitting:
             weight_dtype="i8",
             weight_scales=scales,
             _shard_byte_limit=limit,
-            _shard_tail_limit=limit if tail_limit is None else tail_limit,
         )
 
     def tensors_of(self, path) -> set[str]:
@@ -1733,8 +1786,9 @@ class TestShardSplitting:
         written = self.split(tmp_path, 40)
 
         assert [path.name for path in written] == [
-            "model-00001-of-00002.safetensors",
-            "model-00002-of-00002.safetensors",
+            "model-00001-of-00003.safetensors",
+            "model-00002-of-00003.safetensors",
+            "model-00003-of-00003.safetensors",
         ]
         assert not (tmp_path / "model.safetensors").exists()
 
@@ -1743,6 +1797,10 @@ class TestShardSplitting:
         first, *rest = self.split(tmp_path, 40)
 
         assert IR_METADATA_KEY in container_header(first)["__metadata__"]
+        # グラフ shard はテンソルを 1 本も持たない（ADR 0081 の読み手契約 1）。
+        assert self.tensors_of(first) == set()
+        # データ節そのものが空（ファイルは 8 バイトのヘッダ長 + ヘッダ JSON で終わる）。
+        assert first.stat().st_size == 8 + struct.unpack("<Q", first.read_bytes()[:8])[0]
         for shard in rest:
             assert container_header(shard)["__metadata__"] == {}
 
@@ -1778,32 +1836,20 @@ class TestShardSplitting:
 
     def test_the_scale_is_pulled_forward_into_the_weights_shard(self, tmp_path):
         """対は原子 — 書き出し順で離れていても（scale は F32 群・重みは I8 群）同居する。"""
-        first, second = self.split(tmp_path, 40)
+        _, first, second = self.split(tmp_path, 40)
 
         assert self.tensors_of(first) == {"enc.b", "karume.scale.enc.emb", "enc.emb"}
         assert self.tensors_of(second) == {"karume.scale.enc.w", "enc.w"}
 
     def test_a_tighter_limit_opens_more_shards(self, tmp_path):
-        """対 1 つずつまで詰まる（先頭 shard は `karume_ir` + 入り切ったぶん）。"""
+        """対 1 つずつまで詰まる（先頭のグラフ shard は空のまま）。"""
         written = self.split(tmp_path, 30)
 
         assert [self.tensors_of(shard) for shard in written] == [
+            set(),
             {"enc.b"},
             {"karume.scale.enc.emb", "enc.emb"},
             {"karume.scale.enc.w", "enc.w"},
-        ]
-
-    def test_the_tail_slack_folds_the_last_shard(self, tmp_path):
-        """尾部スラック（`karume.shards` の規則 4）が書き手まで届いている。
-
-        payload 63B・切り口 30B なら 3 本に割れる（上のテスト）が、尾部 60B を許すと
-        2 本目のカット判定で未閉 51B ≤ 60B になり、残りが 1 本へ畳まれる。
-        """
-        written = self.split(tmp_path, 30, tail_limit=60)
-
-        assert [self.tensors_of(shard) for shard in written] == [
-            {"enc.b"},
-            {"karume.scale.enc.emb", "enc.emb", "karume.scale.enc.w", "enc.w"},
         ]
 
     def test_the_same_input_produces_the_same_shards_byte_for_byte(self, tmp_path):
@@ -1830,29 +1876,28 @@ class TestShardSplitting:
     def test_it_refuses_to_read_a_shard_set_that_split_a_pair(self, tmp_path):
         """規則が作れない形も**読み返し**では受け止める（手組み / 別実装の shard 列）。
 
-        合成の作り方は「2 本に割った上で scale だけを後ろの shard へ移す」— 書き手の割り付けを
+        合成の作り方は「割った上で scale だけを別の weight shard へ移す」— 書き手の割り付けを
         迂回するため、`_save_ordered` 相当をテスト側で組まずに**片方の shard から scale を
-        落とし、もう片方へ足す**形にする。
+        落とし、もう片方へ足す**形にする（グラフ shard はそのまま使う）。
         """
-        first, second = self.split(tmp_path, 40)
+        head, first, second = self.split(tmp_path, 40)
         # `enc.w` は second に居る。その scale だけを first と同じ集合へ動かした列を作る。
         moved = tmp_path / "moved.safetensors"
         with safe_open(str(second), framework="pt") as handle:
             payload = {name: handle.get_tensor(name) for name in handle.keys()}  # noqa: SIM118
         save_file({"enc.w": payload["enc.w"]}, str(moved))
-        graph_shard = tmp_path / "graph.safetensors"
+        merged = tmp_path / "merged.safetensors"
         with safe_open(str(first), framework="pt") as handle:
             kept = {name: handle.get_tensor(name) for name in handle.keys()}  # noqa: SIM118
-            metadata = dict(handle.metadata())
         kept["karume.scale.enc.w"] = payload["karume.scale.enc.w"]
-        save_file(kept, str(graph_shard), metadata=metadata)
+        save_file(kept, str(merged))
 
         with pytest.raises(ContainerError, match="co-shard MUST"):
-            verify_shards([graph_shard, moved])
+            verify_shards([head, merged, moved])
 
     def test_it_refuses_a_shard_set_that_repeats_the_graph(self, tmp_path):
         """`karume_ir` を持つ shard が 2 本ある列は「どちらのグラフか」が決まらない。"""
-        first, _ = self.split(tmp_path, 40)
+        head, *_ = self.split(tmp_path, 40)
 
         with pytest.raises(ContainerError, match="グラフ shard は先頭 1 本だけ"):
-            verify_shards([first, first])
+            verify_shards([head, head])

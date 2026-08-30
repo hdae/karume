@@ -1,4 +1,8 @@
-"""組み立て層のテストが入力に使う**正当な最小 IR コンテナ**の合成。
+"""組み立て層のテストが入力に使う**正当な最小 IR コンポーネント**の合成。
+
+返すのは 1 ファイルではなく **shard 列**（先頭 = グラフ shard・以降 = weight shard）— 配布形は
+常に分割されるので（ADR 0081）、単一ファイルのフィクスチャは実物と同じ形ではない
+（グラフ shard 空の門に落ちる）。
 
 `karume.dist` の組み立ては入力コンテナを IR v1 の全規則で見る
 （{@link karume.dist.assert_weight_components_verified}）ので、weights の席へ挿すフィクスチャは
@@ -101,7 +105,6 @@ def _write(
             weight_scales=scales,
             weight_dtype_overrides=overrides,
             _shard_byte_limit=limit,
-            _shard_tail_limit=limit,
         )
         verify_shards(written)
         return [path.read_bytes() for path in written]
@@ -115,8 +118,13 @@ def ir_container(
     outputs: Sequence[Shape] = ([1],),
     weights: Sequence[str] = ("weight",),
     baked: tuple[str, int] | None = None,
-) -> bytes:
-    """正当な IR コンテナ 1 ファイルぶんのバイト列。
+) -> list[bytes]:
+    """正当な IR コンポーネント 1 つぶんの shard バイト列（読む順 — 先頭がグラフ shard）。
+
+    配布形は常に分割されるので（ADR 0081）、返るのは**必ず 2 要素以上**: 先頭が
+    `karume_ir` だけを持つグラフ shard（データ節は空）、以降が weight shard。合成の資産は
+    小さいので weight shard は 1 本に収まり、戻り値は 2 要素になる。呼び出し側は
+    `karume.shards.shard_name` で連番のファイル名を作って書き出す。
 
     `storage` は系列の格納形（`f32` / `f16` / `i8` / `i4`）。実物と同じく**適格な重みスロット
     だけ**が圧縮格納になり、bias やグラフ定数（i8 / i4 の scale も）は F32 のまま残るので、
@@ -133,21 +141,23 @@ def ir_container(
     （記号は `inputs` の次元位置で束縛されている必要がある）。
     """
     graph, tensors, scales, overrides = _spec(mark, storage, inputs, outputs, weights, baked)
-    [payload] = _write(graph, tensors, storage=storage, scales=scales, overrides=overrides)
-    return payload
+    return _write(graph, tensors, storage=storage, scales=scales, overrides=overrides)
 
 
 def ir_shards(count: int, *, mark: str) -> list[bytes]:
-    """`count` 本へ分割された正当なコンポーネント（読む順 — 先頭がグラフ shard）。
+    """`count` 本の shard 列になる正当なコンポーネント（読む順 — 先頭がグラフ shard）。
 
     何本に割れるかは現物のバイト数が決める（`karume.shards`）ので、同じ大きさのテンソルを
-    `count` 本並べ、テスト用の上限差し込み（`write_model` の `_shard_byte_limit`）をその 1 本
-    ぶんに合わせて **1 shard = 1 テンソル**へ割り付ける。
+    `count - 1` 本並べ、テスト用の上限差し込み（`write_model` の `_shard_byte_limit`）を
+    その 1 本ぶんに合わせて **1 weight shard = 1 テンソル**へ割り付ける。`count` は
+    グラフ shard を含む総数なので 2 以上（グラフだけの列は weights の席に置けない）。
     """
+    if count < 2:
+        raise ValueError(f"shard 数 {count} は 2 以上（先頭はテンソルを持たないグラフ shard）")
     initializers = {}
     values = {}
     tensors = {}
-    names = [f"{_OWN}fill{index}" for index in range(count)]
+    names = [f"{_OWN}fill{index}" for index in range(count - 1)]
     for name in names:
         initializers[name] = IrInitializer(tensor=f"{mark}.{name}", storage=IrStorage(dtype="f32"))
         values[name] = IrValue(dtype="f32", shape=[_FILL_ELEMENTS])

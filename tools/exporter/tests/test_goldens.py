@@ -27,6 +27,7 @@ from karume.goldens import (
 )
 from karume.ir import IrGraph
 from karume.ops import EMITTABLE_OPS
+from karume.shards import resolve_shards
 from karume.verify import verify_model
 
 #: コミット済み golden の置き場。**リポの綴りはテスト側が持つ** — 生成側（`karume.goldens`）は
@@ -232,13 +233,30 @@ def _declared_shape(graph: IrGraph, name: str) -> list:
     return graph.values[name].shape
 
 
+def _model_shards(root: Path, name: str) -> tuple[Path, ...]:
+    """モデルの現物（グラフ shard + weight shard 列）。
+
+    配布形は常に連番へ分割されるので（ADR 0081）、代表 path `model.safetensors` 自身は
+    書かれない — 現物を数えるのは `resolve_shards` の役目。
+    """
+    return resolve_shards(root / name / MODEL_FILE)
+
+
 class TestLayout:
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
-    def test_each_model_directory_has_both_files(self, generated, spec):
-        root, _ = generated
+    def test_each_model_directory_has_the_shards_and_the_io(self, generated, spec):
+        root, graphs = generated
 
-        assert (root / spec.name / MODEL_FILE).is_file()
+        shards = _model_shards(root, spec.name)
+        assert all(shard.is_file() for shard in shards)
         assert (root / spec.name / IO_FILE).is_file()
+        if graphs[spec.name].initializers:
+            # 先頭 = グラフ shard・以降 = weight shard（重みがあれば 2 本以上 — ADR 0081）。
+            assert len(shards) >= 2
+            assert not (root / spec.name / MODEL_FILE).exists()
+        else:
+            # 重みが 1 本も無い golden はグラフ shard だけ（weight shard を空で作らない）。
+            assert shards == (root / spec.name / MODEL_FILE,)
 
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
     def test_each_model_passes_the_full_verification(self, generated, spec):
@@ -301,8 +319,8 @@ class TestLayout:
     def test_fixtures_stay_small(self, generated, spec):
         root, _ = generated
 
-        for name in (MODEL_FILE, IO_FILE):
-            assert (root / spec.name / name).stat().st_size < MAX_FILE_BYTES
+        for path in (*_model_shards(root, spec.name), root / spec.name / IO_FILE):
+            assert path.stat().st_size < MAX_FILE_BYTES
 
 
 class TestDeterminism:
@@ -320,9 +338,14 @@ class TestDeterminism:
     def test_regeneration_matches_the_committed_model(self, generated, spec):
         root, _ = generated
 
-        committed = GOLDEN_ROOT / spec.name / MODEL_FILE
-        assert committed.is_file(), f"生成物が未コミット: {committed}"
-        assert committed.read_bytes() == (root / spec.name / MODEL_FILE).read_bytes()
+        generated_shards = _model_shards(root, spec.name)
+        committed = _model_shards(GOLDEN_ROOT, spec.name)
+        assert [path.name for path in committed] == [path.name for path in generated_shards], (
+            f"生成物が未コミット（ADR 0081 の分割へ再生成が要る）: {GOLDEN_ROOT / spec.name}"
+        )
+        assert [path.read_bytes() for path in committed] == [
+            path.read_bytes() for path in generated_shards
+        ]
 
     @pytest.mark.skipif(
         os.environ.get("CI") == "true",
