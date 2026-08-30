@@ -126,7 +126,9 @@ type GenerationContextInternals = {
   readonly bindings: SymbolBindings;
   /**
    * 進行中の generation run を 1 本受け付ける（**`Session.run` の同期区間で**取り、run の決着で
-   * 必ず返す）。取れなければ fail loudly（dispose 要求後・汚染後・device 消失後）。
+   * 必ず返す）。取れなければ fail loudly（dispose 要求後・汚染後・device 消失後、および
+   * **同一 context に未決着 run が既に 1 本ある**とき — {@link GenerationContext.rewind} の doc と
+   * 同じ「論理長が横から動く」形が、2 本目の発行そのもので起きる）。
    */
   acquireRun(): void;
   /** 進行中の generation run を返す（成功・失敗の両経路で必ず 1 度）。 */
@@ -290,6 +292,9 @@ export class GenerationContext {
   /**
    * 進行中の generation run の本数（**リース**）。`Session.run` の同期区間で取り、run の決着で
    * 返す。0 でない間は {@link GenerationContext.rewind} を拒否する。
+   *
+   * MUST: 取れるのは高々 1 本（2 本目の発行は `acquireRun` が拒否する）。本数のまま持つのは
+   * 「返し損ね」を releaseRun が簿記の破れとして落とせるようにするため。
    */
   #runs = 0;
   /**
@@ -324,6 +329,19 @@ export class GenerationContext {
       bindings,
       acquireRun: (): void => {
         this.#assertUsable("run");
+        // MUST: 同一 context への未決着 run は 1 本まで。2 本目は 1 本目が進めた論理長 P' で
+        // uniform と dispatch を組むが、位置入力（RoPE の position_ids 等）は**呼び出し側が
+        // 発行時に組んだ通常のグラフ入力**で、ランタイムは中身を見ない。つまり KV の論理長は
+        // 正しいまま位置だけが静かにずれる（例外も警告も出ない沈黙誤値）。1 本ずつ await して
+        // 発行すること — 並行させたい生成は context を分ける。
+        if (this.#runs > 0) {
+          throw new ExecutionError(
+            "run: 進行中の generation run がある GenerationContext へ並行発行された" +
+              "（2 本目は 1 本目の進行後の論理長で走る一方、位置入力は発行時の論理長のままなので、" +
+              "例外の出ない位置ずれになる）。前の run の決着を await してから発行するか、" +
+              "context を分けること",
+          );
+        }
         this.#runs += 1;
       },
       releaseRun: (): void => {

@@ -1120,8 +1120,13 @@ export class Session {
    * 実行本体は `#serialize` 越し（1 マイクロタスク以降）に走るので、「非 await の並行発行」と
    * 「発行直後の書き換え」の組は素直に踏める形になっている。そこで **metadata は発行の同期区間で
    * 固定する**（{@link captureInputs}）— `inputs` Record の member 構成・各入力の shape・
-   * `bindings` は写しを取るので、戻り Promise を待たずに呼び出し側が書き換えても、この run は
-   * **発行時点の形**で走る。
+   * `bindings`・`generation` の 2 欄（`context` / `queryLength`）は写しを取るので、戻り Promise を
+   * 待たずに呼び出し側が書き換えても、この run は**発行時点の形**で走る。
+   *
+   * MUST: **同一 context への未決着 run は 1 本まで**（2 本目は発行の同期区間で fail loudly）。
+   * 2 本目は 1 本目が進めた論理長で uniform と dispatch を組む一方、呼び出し側が発行時に組んだ
+   * 位置入力は古い論理長のままになるため、例外も警告も無い位置ずれになる。**別 context への
+   * 並行発行**と、generation を伴わない run の非 await 並行発行は従来どおり通る。
    *
    * MUST NOT: `Tensor.data`（TypedArray の実体）は写さず**借りる**ので、戻り Promise が settle
    * するまで書き換えない。GPU への `writeBuffer` はマイクロタスクの先で出るため、書き換えは
@@ -1143,7 +1148,16 @@ export class Session {
     // 同じ理由 — 本体はマイクロタスクを 1 段挟むので、本体で取ると「未 await の run の直後に
     // `context.rewind()`」が「進行中 run が居ない」と判定され、捕捉済み P と uniform が分裂する）。
     // 検査の失敗は従来どおり戻り Promise の reject で返す（同期 throw に変えない）。
-    const lease = generation?.context[RUNTIME_INTERNAL];
+    //
+    // MUST: 第 3 引数も**発行の同期区間で写す**（`inputs` / `bindings` と同じ規律）。本体は
+    // マイクロタスクを 1 段挟み、しかも `context` / `queryLength` を await を跨いだ複数の時点で
+    // 読むので、参照のまま持ち回ると発行直後の書き換えが「dispatch 数の算出元と uniform に載る
+    // 値の分裂」「リースは A に立っているが KV を書くのは B」という沈黙誤値になる。リースも
+    // この写しから取る（同期区間の取得と本体の読みが同じ 1 つの値から出るのが根拠）。
+    const capturedGeneration: GenerationRun | undefined = generation === undefined
+      ? undefined
+      : { context: generation.context, queryLength: generation.queryLength };
+    const lease = capturedGeneration?.context[RUNTIME_INTERNAL];
     let captured: CapturedInputs;
     let capturedBindings: SymbolBindings;
     try {
@@ -1162,7 +1176,7 @@ export class Session {
     this.#pendingRuns += 1;
     return this.#serialize(async () => {
       try {
-        return await this.#runOnce(captured, capturedBindings, generation);
+        return await this.#runOnce(captured, capturedBindings, capturedGeneration);
       } finally {
         // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると以後の rewind が永久に拒否される）。
         lease?.releaseRun();
@@ -1369,6 +1383,7 @@ export class Session {
   /**
    * run 1 本の本体。**入力は発行時の写し**（{@link CapturedInputs}）で受け取る — ここは
    * 1 マイクロタスク以降に走るので、利用者の Record を引き直すと発行後の書き換えを読む。
+   * `generation` も同じ理由で**発行時の写し**（`Session.run` が組んだ 2 欄）で受け取る。
    */
   async #runOnce(
     captured: CapturedInputs,

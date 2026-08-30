@@ -5,7 +5,8 @@
 // ①所有権と寿命（確保 → dispose・二重 dispose・Session との順序独立）②受け口のゲート
 // （states 無しグラフ・chunkLength・記号容量・容量の束縛上限）③確保失敗が errorScope で
 // fail loudly になること ④論理長の進行と巻き戻しの境界 ⑤汚染と device 消失の拒否
-// ⑥論理長 uniform が**実際に GPU 上へ載っている**こと ⑦context が計画鍵に一切効かないこと。
+// ⑥論理長 uniform が**実際に GPU 上へ載っている**こと ⑦context が計画鍵に一切効かないこと
+// ⑧`Session.run` の第 3 引数の寿命契約（発行時 snapshot / 同一 context への並行発行の拒否）。
 //
 // ⑥ が無いと writeBuffer の no-op（無効バッファ・整列違反では警告すら出ない）を検出できない。
 // ⑦ が無いと、波 D で context を鍵に混ぜる実装が「値は正しいまま decode が毎 step 再導出」と
@@ -875,6 +876,117 @@ Deno.test({
         for (const context of contexts) await context.dispose();
       }
     } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+// `Session.run` の第 3 引数の寿命契約（R6-1 / CG5-2）。run 本体は `#serialize` 越し
+// （1 マイクロタスク以降）に走り、`context` / `queryLength` を await を跨いだ複数の時点で読むので、
+// ここが固定するのは 2 点:
+//   ①**発行時 snapshot**（`inputs` / `bindings` と同じ規律）— 発行後に引数オブジェクトを
+//     書き換えても、この run は発行時点の 2 欄で走る（リースも同じ写しから立つ）。
+//   ②**同一 context への未決着 run は 1 本まで**（2 本目は発行の同期区間で fail loudly）。
+// どちらも破れは例外も警告も出ない位置ずれ / 論理長の分裂になるので、値ではなく契約で縛る。
+
+/** 発行時 snapshot 用の可変な第 3 引数（`GenerationRun` の 2 欄は readonly なので写しを持つ）。 */
+type MutableGenerationRun = { context: GenerationContext; queryLength: number };
+
+const RUN_INPUT: Tensor = {
+  dtype: "f32",
+  shape: [2, 4],
+  data: Float32Array.from([1, 2, 3, 4, 5, 6, 7, 8]),
+};
+
+Deno.test({
+  name: "run の queryLength は発行時に固定される（発行後の書き換えを読まない・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    try {
+      const generation: MutableGenerationRun = { context, queryLength: 4 };
+      const running = session.run({ x: RUN_INPUT }, {}, generation);
+      // 本体が走る前（同じ tick）に書き換える。参照のまま持ち回る実装は、dispatch 数を 4 行ぶん
+      // 撃ったまま uniform と進行だけ 1 になる（= GPU の走査範囲とホストの簿記が分裂する）。
+      generation.queryLength = 1;
+      await running;
+      assertEquals(context.pastLength, 4, "発行時の queryLength で走り、その値だけ進む");
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "run の context は発行時に固定され、リースも同じ写しに立つ（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const first = await session.createGenerationContext({ chunkLength: 4 });
+    const second = await session.createGenerationContext({ chunkLength: 4 });
+    try {
+      const generation: MutableGenerationRun = { context: first, queryLength: 1 };
+      const running = session.run({ x: RUN_INPUT }, {}, generation);
+      generation.context = second;
+      // リースは発行時の写し（= first）に立つ。書き換え後もこちらが「進行中 run あり」で落ちる。
+      const blocked = assertThrows(() => first.rewind(0), ExecutionError);
+      assert(blocked.message.includes("進行中の generation run"), blocked.message);
+      // 差し替え先は run に一切関与しないので、巻き戻しは素通りする（リースが漏れていない証拠）。
+      second.rewind(0);
+      await running;
+      assertEquals(first.pastLength, 1, "KV を書いたのは発行時の context");
+      assertEquals(second.pastLength, 0, "差し替え先は 1 行も進まない");
+    } finally {
+      await first.dispose();
+      await second.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "同一 context への未 await 並行発行は 2 本目を拒否する（別 context は通る・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    const other = await session.createGenerationContext({ chunkLength: 4 });
+    try {
+      // MUST: 2 本まとめて settle させる（拒否は発行の同期区間で立つので、await を挟むと
+      // 未処理拒否として観測される前にテストが落ちる）。
+      const [first, second] = await Promise.allSettled([
+        session.run({ x: RUN_INPUT }, {}, { context, queryLength: 1 }),
+        session.run({ x: RUN_INPUT }, {}, { context, queryLength: 1 }),
+      ]);
+      assertEquals(first.status, "fulfilled", "1 本目は従来どおり通る");
+      assertEquals(second.status, "rejected");
+      assert(second.status === "rejected");
+      assert(
+        second.reason instanceof ExecutionError,
+        `拒否の型が違う: ${String(second.reason)}`,
+      );
+      assert(second.reason.message.includes("並行発行"), second.reason.message);
+      assertEquals(context.pastLength, 1, "進んだのは 1 本目のぶんだけ");
+
+      // 別 context への並行発行は従来どおり成立する（塞ぐのは同一 context だけ）。
+      const parallel = await Promise.allSettled([
+        session.run({ x: RUN_INPUT }, {}, { context, queryLength: 1 }),
+        session.run({ x: RUN_INPUT }, {}, { context: other, queryLength: 1 }),
+      ]);
+      assertEquals(parallel.map((result) => result.status), ["fulfilled", "fulfilled"]);
+      assertEquals(context.pastLength, 2);
+      assertEquals(other.pastLength, 1);
+    } finally {
+      await context.dispose();
+      await other.dispose();
       await session.dispose();
       gpu.destroy();
     }
