@@ -11,12 +11,21 @@
 
 ## Now
 
+- **LLM（gemma4 E2B）先行波クローズ（2026-08-30）**: decode の初回実測で **1 token ≈85ms・
+  `linear:wi4g32`（M=1）カーネル律速**が確定 — 「フェンス床 ≈11ms が支配」の読みは覆った
+  （正本 = [research 2026-08-30](../docs/research/2026-08-30-gemma4-decode-wallclock.md)・
+  perf-ledger **K-11** 起票・着手はユーザー裁定待ち）。sliding スロット容量は window 実数へ
+  （ADR [0066](../docs/decisions/0066-generation-context-state-slots.md) 追記 9 — decode +
+  token 2 系列再 export・token 列 parity 不変で機能不変を証明）・融合カウント門を gemma4 /
+  minicpm5 decode 資産へ拡張（gemma4 の rope 融合は 15/50 のみ適合 — 機序未特定の隣接、
+  性能寄与 1ms 級）。次 = **生成 API 設計波**（design-review 型 — backlog now）。L-11 裁定済み:
+  技術先行 = gemma4 E2B・公開はライセンス門（ADR 0065 stage 6）後。
 - **全体レビューの修正波 A〜E クローズ（2026-08-30）**: 網羅レビュー（Opus 15 + レンズ 2 →
   敵対検証 → Codex / ブラウザ第 2 波）の確定 50 件（E4 / W46）+ 追補を 5 波で全消化。裁定と
   台帳の正本 = `.claude/reviews/2026-08-29_9614ba9/`（git 追跡外）。**破壊的変更 2 件**
   （`BatchScope.finish()` のホスト側失敗 throw / 同一 `GenerationContext` への並行発行拒否）と
   **`fromAssets` の shard 分割形受け口**（追加）は [limitations](../docs/limitations.md) が
-  消費側 doc。残り = レンズ E-1 / E-2 裁定・**L-11（最初の出荷 LLM 選定）**・
+  消費側 doc。レンズ E-1 / E-2 / L-11 は裁定済み（backlog now に反映）。残り =
   **M2 実機の手動確認 2 点**（カナリア 16 本 + NaN パリティ 4 本 — known-issues Metal 節）・
   anima-web DL スロット改善（`FamilyAdmission` 席は実装済み）。残件と隣接発見の一覧 =
   [backlog](../docs/backlog.md) now。

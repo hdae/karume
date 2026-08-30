@@ -32,13 +32,17 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   `--sym-max` 門（CG4-3 の同型）
 - **カード統一（実装中）**: 全家族から fromAssets 案内を削除（anima は済 — 削除理由は
   家族非依存のため統一）
-- **LLM 先行波（承認済み・小 3 件・無依存）**: L-0 = decode 実測 1 回（**全性能提案の採否
-  基準 — 最初に**）→ L-1 = sliding スロット容量の実数宣言（−180MiB・機能不変）→ L-10 =
-  融合カウント門を gemma4 / minicpm5 decode 資産へ（沈黙劣化の唯一の検出線）
+- ~~LLM 先行波~~ **消化済み（2026-08-30）**: L-0 = decode 初回実測（**≈85ms/token・
+  `wi4g32` カーネル律速が確定** — フェンス床支配の読みは覆った。正本 =
+  [research/2026-08-30-gemma4-decode-wallclock.md](research/2026-08-30-gemma4-decode-wallclock.md)・
+  K-11 起票）/ L-1 = sliding スロット容量の window 実数宣言（ADR 0066 追記 9・decode +
+  token 2 系列再 export・token 列 parity 不変）/ L-10 = 融合カウント門を gemma4 /
+  minicpm5 decode 資産へ（実数固定: gemma4 rope 15@M=1・minicpm5 rope 48 + silu 24）
 - **生成 API 波 = 設計フェーズとして起票**（design-review 型）: PLE ホスト gather
   （GPU 常駐 3.70→1.51GiB）/ 最終行 logits 出口 / EOS 停止・token イベント・streaming /
   tokenizer + detokenizer / chat template。入力 = レビューの検証済み設計資料
-  （GenerationSequence / PLE sidecar / topk 製品グラフ / tokenizer compile-to-asset）+ lens-llm
+  （GenerationSequence / PLE sidecar / topk 製品グラフ / tokenizer compile-to-asset）+
+  lens-llm + **L-0 実測**（decode 律速は K-11 のカーネル側 — API 設計の性能前提はそちらを見る）
 - **L-11 裁定（2026-08-30）**: 技術先行 = **gemma4 E2B**（品質実証済み — tokenizer / L-5 の
   実装対象）。**公開はライセンス門（ADR 0065 stage 6 = Gemma ToU）の確認後**。配布経路の
   検証だけは minicpm5 で先行可
@@ -48,7 +52,9 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   残りは admission 前倒しの graph shard 単位化 + extras の並行開始。shard 仕様 v2 で
   graph shard が数 MB になり前倒しの価値が確定する。opt-in の c 案は再裁定要）
 - perf: レンズ E-1 は裁定済み — **P-1〜P-3 スパイク承認・P-4 起票・P-5 計測のみ** +
-  M1-2 代償の L-9（いずれも [perf-ledger](perf-ledger.md)）。既存起票 H-8〜H-10 / L-7 / L-8
+  M1-2 代償の L-9（いずれも [perf-ledger](perf-ledger.md)）。既存起票 H-8〜H-10 / L-7 / L-8。
+  **新規 K-11（2026-08-30 L-0 実測から起票・未裁定）**: decode `wi4g32` の M=1 変種 —
+  decode 壁の 8 割超を握る最優先候補（着手順はユーザー裁定待ち）
 
 ## 消化済み（既知問題 3 件 + anima 素版 i4 感度 — 2026-08-25〜28）
 
