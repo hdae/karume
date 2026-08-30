@@ -11,6 +11,13 @@
  * バイト列を受けるだけで I/O を持たない（ブラウザでも Deno でも同じ経路）。
  */
 
+import {
+  asFiniteNumber,
+  asPositiveInteger,
+  assertCodePoint,
+  assertUniqueLines,
+  setUnique,
+} from "../../text/asset-gates.ts";
 import { parseCodeRanges } from "./code-ranges.ts";
 import {
   type Qwen2Assets,
@@ -150,7 +157,7 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
     }
     // NOTE: 語彙の行数では縛らない — Qwen2 の追加トークンは語彙表の**外**へ採番される
     // （実資産で 151643..151668 / 語彙 151643 行）。ここで見るのは i32 として健全なことだけ。
-    out.set(asString(entry[0], label), asId(entry[1], label));
+    setUnique(out, asString(entry[0], label), asId(entry[1], label), label);
   }
   return out;
 };
@@ -169,10 +176,15 @@ const parseCaseFold = (raw: unknown, label: string): Qwen2CaseFold => {
   if (!Array.isArray(raw)) throw new Error(`${label}: 配列でない`);
   const out = new Map<number, number>();
   for (const entry of raw) {
-    if (!Array.isArray(entry) || typeof entry[0] !== "number" || typeof entry[1] !== "number") {
+    if (
+      !Array.isArray(entry) || entry.length !== 2 ||
+      typeof entry[0] !== "number" || typeof entry[1] !== "number"
+    ) {
       throw new Error(`${label}: [cp, cp] でない`);
     }
-    out.set(entry[0], entry[1]);
+    assertCodePoint(entry[0], label);
+    assertCodePoint(entry[1], label);
+    setUnique(out, entry[0], entry[1], label);
   }
   return out;
 };
@@ -204,28 +216,24 @@ const parseLines = (
 const parseQwen2Asset = (raw: unknown, label: string = "tokenizer"): Qwen2Assets => {
   const obj = asRecord(raw, label);
   // 行番号 0-origin = id / rank。byte-level 語彙は改行も空白も含まない（emit 時に検査済み）。
+  const vocabLines = parseLines(
+    obj["vocabText"],
+    obj["vocabCount"],
+    `${label}.vocabText`,
+    `${label}.vocabCount`,
+  );
+  assertUniqueLines(vocabLines, `${label}.vocabText`);
   const vocab = new Map<string, number>();
-  for (
-    const [id, token] of parseLines(
-      obj["vocabText"],
-      obj["vocabCount"],
-      `${label}.vocabText`,
-      `${label}.vocabCount`,
-    ).entries()
-  ) {
-    vocab.set(token, id);
-  }
+  for (const [id, token] of vocabLines.entries()) vocab.set(token, id);
+  const mergesLines = parseLines(
+    obj["mergesText"],
+    obj["mergesCount"],
+    `${label}.mergesText`,
+    `${label}.mergesCount`,
+  );
+  assertUniqueLines(mergesLines, `${label}.mergesText`);
   const merges = new Map<string, number>();
-  for (
-    const [rank, line] of parseLines(
-      obj["mergesText"],
-      obj["mergesCount"],
-      `${label}.mergesText`,
-      `${label}.mergesCount`,
-    ).entries()
-  ) {
-    merges.set(line, rank);
-  }
+  for (const [rank, line] of mergesLines.entries()) merges.set(line, rank);
   return {
     vocab,
     merges,
@@ -233,7 +241,7 @@ const parseQwen2Asset = (raw: unknown, label: string = "tokenizer"): Qwen2Assets
     classes: parseClasses(obj["classes"], `${label}.classes`),
     caseFold: parseCaseFold(obj["caseFold"], `${label}.caseFold`),
     nfcSegments: parseCodeRanges(obj["nfcSegments"], `${label}.nfcSegments`),
-    maxLength: asNumber(obj["maxLength"], `${label}.maxLength`),
+    maxLength: asPositiveInteger(obj["maxLength"], `${label}.maxLength`),
   };
 };
 
@@ -245,11 +253,12 @@ const parseT5Asset = (raw: unknown, label: string = "tokenizer_2"): T5Assets => 
   if (!Array.isArray(rawScores) || rawScores.length !== tokens.length) {
     throw new Error(`${label}: scores の長さが語彙数 ${tokens.length} と合わない`);
   }
+  assertUniqueLines(tokens, `${label}.vocabText`);
   const vocab = new Map<string, T5VocabEntry>();
   let minScore = Number.POSITIVE_INFINITY;
   let maxTokenLength = 0;
   for (const [id, token] of tokens.entries()) {
-    const score = asNumber(rawScores[id], `${label}.scores[${id}]`);
+    const score = asFiniteNumber(rawScores[id], `${label}.scores[${id}]`);
     vocab.set(token, { id, score });
     minScore = Math.min(minScore, score);
     maxTokenLength = Math.max(maxTokenLength, Array.from(token).length);
@@ -263,7 +272,7 @@ const parseT5Asset = (raw: unknown, label: string = "tokenizer_2"): T5Assets => 
     addedTokens: parseAddedTokens(obj["addedTokens"], `${label}.addedTokens`),
     space: parseCodeRanges(obj["space"], `${label}.space`),
     normalizer: parseSpmTables(obj["normalizer"], `${label}.normalizer`),
-    maxLength: asNumber(obj["maxLength"], `${label}.maxLength`),
+    maxLength: asPositiveInteger(obj["maxLength"], `${label}.maxLength`),
   };
 };
 

@@ -6,6 +6,8 @@
  * ここが引くだけにする。判定の実装がここ 1 つなので、表さえ正しければ分類はずれない。
  */
 
+import { assertCodePoint } from "../../text/asset-gates.ts";
+
 /** 両端を含むコードポイント区間の昇順リスト。 */
 export type CodeRanges = readonly (readonly [number, number])[];
 
@@ -26,9 +28,10 @@ export const inCodeRanges = (ranges: CodeRanges, cp: number): boolean => {
 /**
  * 外部境界（資産 JSON）の構造検査。壊れた表を黙って空表として使わない。
  *
- * MUST: **昇順・非重複**まで見る。{@link inCodeRanges} は二分探索なので、順序が崩れた表は
- * 例外にならず「静かに別の文字分類」になる（`\p{L}` の判定が 1 区間ぶん抜けるだけで
- * pre-token の切れ目が変わり、id 列が別物になる）。
+ * MUST: **整数・コードポイント範囲・昇順・非重複**まで見る。{@link inCodeRanges} は二分探索
+ * なので、この前提が破れても例外にならず「静かに別の文字分類」になる（`[65.5, 90]` は境界だけ
+ * を半端にずらし、順序が崩れた表は `\p{L}` の判定が 1 区間ぶん抜ける — どちらも pre-token の
+ * 切れ目が変わって id 列が別物になる）。値域の規律は sbv2 の同型 `parseRanges` と同じ。
  */
 export const parseCodeRanges = (raw: unknown, label: string): CodeRanges => {
   if (!Array.isArray(raw)) throw new Error(`${label}: 区間表が配列でない`);
@@ -40,6 +43,8 @@ export const parseCodeRanges = (raw: unknown, label: string): CodeRanges => {
     ) {
       throw new Error(`${label}[${index}]: 区間が [start, end] の数値対でない`);
     }
+    assertCodePoint(entry[0], `${label}[${index}]`);
+    assertCodePoint(entry[1], `${label}[${index}]`);
     if (entry[0] > entry[1]) {
       throw new Error(`${label}[${index}]: 区間 [${entry[0]}, ${entry[1]}] の始端が終端より大きい`);
     }

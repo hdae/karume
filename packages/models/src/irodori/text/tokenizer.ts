@@ -16,6 +16,7 @@
  */
 
 import { splitAddedTokens } from "../../text/added-tokens.ts";
+import { asFiniteNumber, assertUniqueLines, setUnique } from "../../text/asset-gates.ts";
 import { toCodePoints } from "../../text/code-points.ts";
 import { type UnigramModel, unigramTokenize, type UnigramVocabEntry } from "../../text/unigram.ts";
 
@@ -169,7 +170,7 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
     }
     // NOTE: 語彙の行数では縛らない — 追加トークンは語彙表の外へ採番される形もある
     // （anima の Qwen2 が実際にそれ）。ここで見るのは i32 として健全なことだけ。
-    out.set(asString(entry[0], label), asId(entry[1], label));
+    setUnique(out, asString(entry[0], label), asId(entry[1], label), label);
   }
   return out;
 };
@@ -179,6 +180,7 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
  *
  * MUST: 語彙の行数と `scores` の本数を突き合わせる。ずれたまま通すと id が総ずれするが、
  * Viterbi は落ちない（語彙に無い断片はバイト展開へ逃げる）ので**沈黙誤値**になる。
+ * MUST: 行の一意性も見る（{@link assertUniqueLines} — 行数の突合では重複を捕まえられない）。
  * MUST: 単独の特殊 id は整数かつ語彙の行数未満（{@link asVocabId} — 理由は同 doc）。
  * MUST: `byteBaseId` は単独 id ではないので {@link asVocabId} では足りない —
  * 256 本連番の全体が語彙内であること（{@link asByteBaseId} — 理由は同 doc）。
@@ -194,11 +196,12 @@ export const parseIrodoriTokenizerAsset = (
   if (!Array.isArray(rawScores) || rawScores.length !== tokens.length) {
     throw new Error(`${label}: scores の長さが語彙の行数 ${tokens.length} と合わない`);
   }
+  assertUniqueLines(tokens, `${label}.vocabText`);
   const vocab = new Map<string, UnigramVocabEntry>();
   let minScore = Number.POSITIVE_INFINITY;
   let maxTokenLength = 0;
   for (const [id, token] of tokens.entries()) {
-    const score = asNumber(rawScores[id], `${label}.scores[${id}]`);
+    const score = asFiniteNumber(rawScores[id], `${label}.scores[${id}]`);
     vocab.set(token, { id, score });
     minScore = Math.min(minScore, score);
     maxTokenLength = Math.max(maxTokenLength, toCodePoints(token).length);

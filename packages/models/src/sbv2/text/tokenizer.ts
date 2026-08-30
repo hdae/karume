@@ -25,6 +25,8 @@
  * 実データ突合する。
  */
 
+import { assertUniqueLines } from "../../text/asset-gates.ts";
+
 /** `clean_text` の除去・スペース化コードポイント範囲（両端含む閉区間の昇順リスト）。 */
 export type CleanRanges = {
   /** 除去する（出力しない）コードポイント範囲。 */
@@ -70,23 +72,23 @@ export class DebertaTokenizer {
    *
    * MUST: 特殊 ID が語彙表の行を指すことを検査する。範囲外の ID は id 列へそのまま乗り、
    * グラフの embedding gather が範囲外添字を引く（GPU では NaN 汚染）まで表面化しない。
+   * MUST: 行の一意性も検査する。重複行は `Map` の後勝ちで先の ID を引けなくし、lookup が
+   * **合法な別の行**へ静かに移る（例外は出ず BERT 特徴だけが変わる）。
    */
   static fromVocabText(
     vocabText: string,
     clean: CleanRanges,
     special: SpecialTokens,
   ): DebertaTokenizer {
-    const vocab = new Map<string, number>();
     // CRLF 混在で split("\n") だけにすると全トークン末尾に "\r" が残り、全 lookup が
     // [UNK] に落ちる（エラーは出ず BERT 特徴だけ静かに壊れる）。
     const lines = vocabText.split(/\r?\n/);
-    let size = 0;
-    for (const [id, line] of lines.entries()) {
-      // 末尾改行由来の空行はトークンではない。行内に空トークンは存在しない。
-      if (line === "" && id === lines.length - 1) break;
-      vocab.set(line, id);
-      size = id + 1;
-    }
+    // 末尾改行由来の空行はトークンではない。行内に空トークンは存在しない。
+    if (lines[lines.length - 1] === "") lines.pop();
+    assertUniqueLines(lines, "vocabText");
+    const vocab = new Map<string, number>();
+    for (const [id, line] of lines.entries()) vocab.set(line, id);
+    const size = lines.length;
     for (const [name, id] of Object.entries(special)) {
       if (id >= size) throw new Error(`${name} ${id} が語彙の行数 ${size} 以上`);
     }

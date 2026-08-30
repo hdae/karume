@@ -21,6 +21,7 @@
  * に畳んだものをここが引く。畳み込みの同値は emit のたびに網羅 + 乱択で検査される。
  */
 
+import { assertCodePoint, setUnique } from "../../text/asset-gates.ts";
 import { toCodePoints } from "../../text/code-points.ts";
 import { type CodeRanges, inCodeRanges, parseCodeRanges, utf8Length } from "./code-ranges.ts";
 
@@ -96,26 +97,38 @@ const clusterEnd = (tables: SpmTables, cps: readonly number[], i: number): numbe
   return j;
 };
 
-/** 資産 / フィクスチャの JSON 形（Python 側 `SpmTables.to_json` と対）。 */
+/**
+ * 資産 / フィクスチャの JSON 形（Python 側 `SpmTables.to_json` と対）。
+ *
+ * MUST: 鍵のコードポイント域と重複まで見る。{@link pairKey} の一意性は「鍵が 0x10FFFF 以下」
+ * が前提で、域外の値が入ると別の対と同じ合成鍵に潰れる。重複鍵も `Map` の後勝ちで通るが、
+ * どちらも例外にならず**正規化の結果だけ**が静かに変わる（tokenize の id 列が別物になる）。
+ */
 export const parseSpmTables = (raw: unknown, label: string): SpmTables => {
   if (typeof raw !== "object" || raw === null) throw new Error(`${label}: オブジェクトでない`);
   const obj = raw as Record<string, unknown>;
   const single = new Map<number, string>();
   for (const entry of asArray(obj["single"], `${label}.single`)) {
-    if (!Array.isArray(entry) || typeof entry[0] !== "number" || typeof entry[1] !== "string") {
+    if (
+      !Array.isArray(entry) || entry.length !== 2 ||
+      typeof entry[0] !== "number" || typeof entry[1] !== "string"
+    ) {
       throw new Error(`${label}.single: [cp, 文字列] でない`);
     }
-    single.set(entry[0], entry[1]);
+    assertCodePoint(entry[0], `${label}.single`);
+    setUnique(single, entry[0], entry[1], `${label}.single`);
   }
   const multi = new Map<number, string>();
   for (const entry of asArray(obj["multi"], `${label}.multi`)) {
     if (
-      !Array.isArray(entry) || typeof entry[0] !== "number" ||
+      !Array.isArray(entry) || entry.length !== 3 || typeof entry[0] !== "number" ||
       typeof entry[1] !== "number" || typeof entry[2] !== "string"
     ) {
       throw new Error(`${label}.multi: [cp, cp, 文字列] でない`);
     }
-    multi.set(pairKey(entry[0], entry[1]), entry[2]);
+    assertCodePoint(entry[0], `${label}.multi`);
+    assertCodePoint(entry[1], `${label}.multi`);
+    setUnique(multi, pairKey(entry[0], entry[1]), entry[2], `${label}.multi`);
   }
   return {
     single,

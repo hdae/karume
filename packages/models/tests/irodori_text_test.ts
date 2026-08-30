@@ -387,6 +387,63 @@ Deno.test("資産パーサ: byteBaseId はバイト 256 本の連番全体が語
   assertEquals(parsed.byteBaseId, 44);
 });
 
+Deno.test("資産パーサ: 語彙の重複行・追加語彙の重複鍵は落とす（`Map` の後勝ちを禁じる）", () => {
+  const VOCAB_SIZE = 300;
+  const base = {
+    vocabText: Array.from({ length: VOCAB_SIZE }, (_, i) => `t${i}`).join("\n"),
+    scores: Array.from({ length: VOCAB_SIZE }, () => 0),
+    addedTokens: [["t0", 0]],
+    bosId: 0,
+    padId: 0,
+    unkId: 0,
+    byteBaseId: 44,
+  };
+  // 正例（門が恒真でないことの対）。
+  assertEquals(parseIrodoriTokenizerAsset(base).vocab.size, VOCAB_SIZE);
+
+  // 行番号 = id なので、重複行は先の id を引けなくする。行数の突合（scores の本数）は
+  // 重複で変わらないため、そちらでは 1 件も捕まらない。
+  const duplicated = [...Array.from({ length: VOCAB_SIZE - 1 }, (_, i) => `t${i}`), "t0"];
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, vocabText: duplicated.join("\n") }),
+    Error,
+    `tokenizer.vocabText: 行 ${VOCAB_SIZE - 1} が行 0 と同じトークン`,
+  );
+  // 追加語彙は正規化の**前**に切り出されるので、後勝ちは切り出し先 id を静かに変える。
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["t0", 0], ["t0", 1]] }),
+    Error,
+    "tokenizer.addedTokens: 鍵 ",
+  );
+});
+
+Deno.test("資産パーサ: scores は有限（minScore が汚れると未知ノードの重みが潰れる）", () => {
+  const VOCAB_SIZE = 300;
+  const scores = Array.from({ length: VOCAB_SIZE }, () => 0);
+  const base = {
+    vocabText: Array.from({ length: VOCAB_SIZE }, (_, i) => `t${i}`).join("\n"),
+    scores,
+    addedTokens: [],
+    bosId: 0,
+    padId: 0,
+    unkId: 0,
+    byteBaseId: 44,
+  };
+  // NaN は `Math.min` を通して minScore を汚し、±Infinity は全経路を同値へ潰す。どちらも
+  // 例外にならず「別の分割」になるだけ（本数の突合では捕まらない）。
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assertThrows(
+      () =>
+        parseIrodoriTokenizerAsset({
+          ...base,
+          scores: scores.map((value, index) => (index === 7 ? bad : value)),
+        }),
+      Error,
+      "tokenizer.scores[7]: 有限の数値でない",
+    );
+  }
+});
+
 // ---- 境界（golden のケースが実際に叩いているもの）----------------------------
 
 Deno.test("対にならないサロゲートは受け付けない（正本に無い入力を黙って通さない）", () => {

@@ -458,3 +458,183 @@ Deno.test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2
     "語彙の行数（3）と同じ id の追加語彙は通る",
   );
 });
+
+// ---- 資産の値域門（外部境界）-------------------------------------------------
+//
+// `fromPretrained(ref)` は任意の repo を指せるので、資産 JSON は信用できない外部入力。
+// ここで縛るのは「壊れた表が例外にならず、静かに別の id 列へ化ける」形だけ。
+
+/** 値域門を踏むための最小資産（正しい形を 1 つ書いて、各テストが 1 点だけ壊す）。 */
+const gateQwen2Json = {
+  vocabText: "a\nb\nab",
+  vocabCount: 3,
+  mergesText: "a b",
+  mergesCount: 1,
+  addedTokens: [],
+  classes: { letter: [[0x61, 0x7a]], number: [], space: [[0x20, 0x20]] },
+  caseFold: [],
+  nfcSegments: [],
+  maxLength: 8,
+};
+
+const gateT5Json = {
+  vocabText: "<pad>\n</s>\n<unk>\n▁\na\nb",
+  scores: [0, 0, 0, -1, -1, -2],
+  unkId: 2,
+  eosId: 1,
+  addedTokens: [],
+  space: [[0x20, 0x20]],
+  normalizer: { single: [], multi: [], extend: [], breakAfter: [], prepend: [] },
+  maxLength: 8,
+};
+
+const gateEncode = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+
+/** 片方だけ壊した資産対（もう片方は必ず正しい形 — 落ちた側が特定できる）。 */
+const brokenQwen2 = (patch: Record<string, unknown>): [Uint8Array, Uint8Array] => [
+  gateEncode({ ...gateQwen2Json, ...patch }),
+  gateEncode(gateT5Json),
+];
+const brokenT5 = (patch: Record<string, unknown>): [Uint8Array, Uint8Array] => [
+  gateEncode(gateQwen2Json),
+  gateEncode({ ...gateT5Json, ...patch }),
+];
+
+Deno.test("資産の値域門: maxLength は正の安全整数（壊れた資産が別の診断に化けない）", () => {
+  // maxLength: 0 は Qwen2 の id 列を空にするので、届く診断は「プロンプトが空」= **嘘**に
+  // なる（壊れているのは資産）。maxLength を名指しして parse 時に落とす。
+  assertThrows(
+    () => createTokenizers(...brokenQwen2({ maxLength: 0 })),
+    Error,
+    "tokenizer.maxLength: 正の安全整数でない（0）",
+  );
+  // 非整数は `slice` が切り捨てるので、長いプロンプトでだけ id 列長が 1 ずれる。
+  assertThrows(
+    () => createTokenizers(...brokenQwen2({ maxLength: 1.5 })),
+    Error,
+    "tokenizer.maxLength: 正の安全整数でない（1.5）",
+  );
+  assertThrows(
+    () => createTokenizers(...brokenT5({ maxLength: -1 })),
+    Error,
+    "tokenizer_2.maxLength: 正の安全整数でない（-1）",
+  );
+  // 2^53 超は切り詰めが一度も効かない状態（比較が精度を落とす）。
+  assertThrows(
+    () => createTokenizers(...brokenQwen2({ maxLength: Number.MAX_VALUE })),
+    Error,
+    "tokenizer.maxLength: 正の安全整数でない",
+  );
+});
+
+Deno.test("資産の値域門: T5 の scores は有限（minScore が汚染されると Viterbi が潰れる）", () => {
+  // NaN / ±Infinity は minScore を汚し、未知ノードの重みが「全経路同値」へ潰れる。
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assertThrows(
+      () => createTokenizers(...brokenT5({ scores: [0, 0, 0, -1, bad, -2] })),
+      Error,
+      "tokenizer_2.scores[4]: 有限の数値でない",
+    );
+  }
+});
+
+Deno.test("資産の値域門: 行番号 = id の表に重複行があれば落とす（後勝ちで別の行を引く）", () => {
+  // 行数の突合（vocabCount / scores の本数）では重複を捕まえられない — 重複は行数を変えない。
+  assertThrows(
+    () => createTokenizers(...brokenQwen2({ vocabText: "a\nb\na", vocabCount: 3 })),
+    Error,
+    "tokenizer.vocabText: 行 2 が行 0 と同じトークン",
+  );
+  // merges は rank が BPE の優先順位そのもの。重複すると分割規則だけが静かに変わる。
+  assertThrows(
+    () => createTokenizers(...brokenQwen2({ mergesText: "a b\na b", mergesCount: 2 })),
+    Error,
+    "tokenizer.mergesText: 行 1 が行 0 と同じトークン",
+  );
+  assertThrows(
+    () =>
+      createTokenizers(
+        ...brokenT5({ vocabText: "<pad>\n</s>\n<unk>\n▁\na\na", scores: [0, 0, 0, -1, -1, -2] }),
+      ),
+    Error,
+    "tokenizer_2.vocabText: 行 5 が行 4 と同じトークン",
+  );
+});
+
+Deno.test("資産の値域門: 鍵つき写像の重複鍵は落とす（addedTokens / caseFold）", () => {
+  assertThrows(
+    () => createTokenizers(...brokenQwen2({ addedTokens: [["<|x|>", 3], ["<|x|>", 4]] })),
+    Error,
+    '鍵 "<|x|>" が重複している',
+  );
+  assertThrows(
+    () => createTokenizers(...brokenQwen2({ caseFold: [[0x41, 0x61], [0x41, 0x62]] })),
+    Error,
+    "tokenizer.caseFold: 鍵 65 が重複している",
+  );
+  assertThrows(
+    () => createTokenizers(...brokenT5({ addedTokens: [["<x>", 3], ["<x>", 4]] })),
+    Error,
+    "tokenizer_2.addedTokens: 鍵 ",
+  );
+  // caseFold の鍵もコードポイント（表と同じ規律に揃える）。
+  assertThrows(
+    () => createTokenizers(...brokenQwen2({ caseFold: [[0x110000, 0x61]] })),
+    Error,
+    "tokenizer.caseFold: コードポイントが 0..1114111 の整数でない",
+  );
+});
+
+Deno.test("区間表: 非整数・コードポイント域外は受け付けない（sbv2 の parseRanges と同じ規律）", () => {
+  // `[65.5, 90]` は二分探索を例外にせず境界だけ半端にずらす → 文字分類が変わり、pre-token の
+  // 切れ目 → id 列が黙って別物になる。
+  assertThrows(() => parseCodeRanges([[65.5, 90]], "表"), Error, "コードポイントが");
+  assertThrows(() => parseCodeRanges([[-1, 90]], "表"), Error, "コードポイントが");
+  assertThrows(() => parseCodeRanges([[65, 0x110000]], "表"), Error, "コードポイントが");
+  // 端点ちょうど（0 と 0x10FFFF）は受理集合の内側。
+  assertEquals(parseCodeRanges([[0, 0x10FFFF]], "表"), [[0, 0x10FFFF]]);
+});
+
+Deno.test("正規化表: 重複鍵・域外コードポイント・tuple 長違反は落とす", () => {
+  const tables = (patch: Record<string, unknown>): unknown => ({
+    single: [],
+    multi: [],
+    extend: [],
+    breakAfter: [],
+    prepend: [],
+    ...patch,
+  });
+  // 後勝ちで通すと、正規化の結果だけが静かに変わる（tokenize の id 列が別物になる）。
+  assertThrows(
+    () => parseSpmTables(tables({ single: [[0x41, "a"], [0x41, "b"]] }), "表"),
+    Error,
+    "表.single: 鍵 65 が重複している",
+  );
+  assertThrows(
+    () => parseSpmTables(tables({ multi: [[0x41, 0x42, "x"], [0x41, 0x42, "y"]] }), "表"),
+    Error,
+    "表.multi: 鍵 ",
+  );
+  // 合成鍵 `cp * 0x110000 + cp` の一意性は「鍵が 0x10FFFF 以下」が前提。
+  assertThrows(
+    () => parseSpmTables(tables({ single: [[0x110000, "a"]] }), "表"),
+    Error,
+    "表.single: コードポイントが",
+  );
+  assertThrows(
+    () => parseSpmTables(tables({ multi: [[0x41, -1, "x"]] }), "表"),
+    Error,
+    "表.multi: コードポイントが",
+  );
+  // tuple 長は schema どおり固定（余った要素は読まれないまま資産の破損を隠す）。
+  assertThrows(
+    () => parseSpmTables(tables({ single: [[0x41, "a", "b"]] }), "表"),
+    Error,
+    "表.single: [cp, 文字列] でない",
+  );
+  assertThrows(
+    () => parseSpmTables(tables({ multi: [[0x41, 0x42, "x", "y"]] }), "表"),
+    Error,
+    "表.multi: [cp, cp, 文字列] でない",
+  );
+});

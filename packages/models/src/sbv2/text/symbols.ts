@@ -16,6 +16,8 @@
  * - `addBlankWord2ph` = 同分岐の `word2ph[i] *= 2; word2ph[0] += 1`
  */
 
+import { asPositiveInteger } from "../../text/asset-gates.ts";
+
 /**
  * 相対位置の添字表を作るためのバケット規則（DeBERTa の config 由来）。
  *
@@ -162,12 +164,19 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
     punctuations: new Set(asStringArray(root["punctuations"], `${where}.punctuations`)),
     toneStart: asInteger(root["toneStart"], `${where}.toneStart`),
     languageId: asInteger(root["languageId"], `${where}.languageId`),
-    numTones: asInteger(root["numTones"], `${where}.numTones`),
-    numLanguages: asInteger(root["numLanguages"], `${where}.numLanguages`),
+    numTones: asPositiveInteger(root["numTones"], `${where}.numTones`),
+    numLanguages: asPositiveInteger(root["numLanguages"], `${where}.numLanguages`),
     blankId: asInteger(root["blankId"], `${where}.blankId`),
-    samplingRate: asInteger(root["samplingRate"], `${where}.samplingRate`),
-    hopLength: asInteger(root["hopLength"], `${where}.hopLength`),
-    bertHiddenFromEnd: asInteger(root["bertHiddenFromEnd"], `${where}.bertHiddenFromEnd`),
+    // MUST: 正値まで見る。`samplingRate` は `Sbv2Pipeline.generate` の `sampleRate` として
+    // **そのまま公開結果へ出る**（唯一の消費者が呼び手）ので、負値や 0 はどこでも例外に
+    // ならず「正常に見える壊れた WAV」になる。`hopLength` / `bertHiddenFromEnd` は遅れて
+    // fail loudly するが、門をここへ揃えて資産の不正として構築時に落とす。
+    samplingRate: asPositiveInteger(root["samplingRate"], `${where}.samplingRate`),
+    hopLength: asPositiveInteger(root["hopLength"], `${where}.hopLength`),
+    bertHiddenFromEnd: asPositiveInteger(
+      root["bertHiddenFromEnd"],
+      `${where}.bertHiddenFromEnd`,
+    ),
     bertRelPos: parseBertRelPos(root["bertRelPos"], `${where}.bertRelPos`),
     ...(root["defaults"] === undefined
       ? {}
@@ -180,6 +189,12 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
   }
   if (rules.blankId < 0 || rules.blankId >= symbols.length) {
     throw new Error(`${where}.blankId: 記号表の範囲外（${rules.blankId}）`);
+  }
+  if (rules.languageId < 0 || rules.languageId >= rules.numLanguages) {
+    throw new Error(
+      `${where}.languageId: language 埋め込みの範囲外（${rules.languageId} / ` +
+        `0..${rules.numLanguages - 1}）`,
+    );
   }
   return rules;
 };

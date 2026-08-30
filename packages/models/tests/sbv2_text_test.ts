@@ -125,6 +125,35 @@ Deno.test("parseJpExtraRules: 壊れた資産を黙って使わない", () => {
   );
 });
 
+Deno.test("parseJpExtraRules: 実行定数の値域を構築時に見る（整数だけでは通さない）", () => {
+  // 決め手は samplingRate — `Sbv2Pipeline.generate` の `sampleRate` として**そのまま公開結果
+  // へ出る**唯一の欄なので、負値や 0 はどこでも例外にならず「正常に見える壊れた WAV」に
+  // なる。残りは遅れて fail loudly するだけだが、門をここへ揃える。
+  for (
+    const key of ["samplingRate", "hopLength", "bertHiddenFromEnd", "numTones", "numLanguages"]
+  ) {
+    for (const bad of [0, -1, 1.5]) {
+      assertThrows(
+        () => parseJpExtraRules({ ...TEST_RULES_JSON, [key]: bad }, "x"),
+        Error,
+        `x.${key}: 正の安全整数でない（${bad}）`,
+      );
+    }
+  }
+  // languageId は language 埋め込みの行を指すので、numLanguages 未満まで見る（0 は正当）。
+  assertThrows(
+    () => parseJpExtraRules({ ...TEST_RULES_JSON, languageId: TEST_RULES_JSON.numLanguages }, "x"),
+    Error,
+    "x.languageId: language 埋め込みの範囲外",
+  );
+  assertThrows(
+    () => parseJpExtraRules({ ...TEST_RULES_JSON, languageId: -1 }, "x"),
+    Error,
+    "x.languageId: language 埋め込みの範囲外",
+  );
+  assertEquals(parseJpExtraRules({ ...TEST_RULES_JSON, languageId: 0 }, "x").languageId, 0);
+});
+
 Deno.test("distributePhone: 音素を文字へ均等分配する（余りは左から）", () => {
   assertEquals(distributePhone(5, 2), [3, 2]);
   assertEquals(distributePhone(1, 3), [1, 0, 0]);
@@ -190,6 +219,21 @@ Deno.test("DebertaTokenizer: CRLF 混じりの語彙でも末尾 CR が残らな
     { clsId: 1, sepId: 2, unkId: 3 },
   );
   assertEquals(tokenizer.encode("あ"), [1, 4, 2]);
+});
+
+Deno.test("DebertaTokenizer: 語彙の重複行は落とす（後勝ちで別の行を引かせない）", () => {
+  // 行番号 = ID なので、重複行は先の ID を引けなくする。例外は出ず BERT 特徴だけが
+  // 「合法な別の行」に変わるため、id 列の長さ検査でも word2ph の突合でも捕まらない。
+  assertThrows(
+    () =>
+      DebertaTokenizer.fromVocabText(
+        "[PAD]\n[CLS]\n[SEP]\n[UNK]\nあ\nあ",
+        { removed: [], spaced: [] },
+        { clsId: 1, sepId: 2, unkId: 3 },
+      ),
+    Error,
+    "vocabText: 行 5 が行 4 と同じトークン",
+  );
 });
 
 Deno.test("toBertText: 記号語だけ正規形へ写して連結する", () => {
