@@ -972,6 +972,78 @@ Deno.test("グラフに無い記号の束縛は fail loudly", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 実構築と同じ門（グラフ全体を見ないと決まらない契約）
+// ---------------------------------------------------------------------------
+
+// 全量面は `PreparedModel` を経由しないので、契約検査を estimator 側で通していないと
+// 「createSession が必ず落ちるモデル」に完全な AdmissionReport を返す（admission の目的と逆）。
+
+/** `kv` スロットに読者だけが居て `state_append` を 1 本も持たないグラフ（決定 5b 違反）。 */
+const readerOnlyStateGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["attention"] },
+  symbols: ["M", "C"],
+  inputs: [
+    { name: "q", dtype: "f32", shape: [1, 8, "M", 4] },
+    { name: "k", dtype: "f32", shape: [1, 2, "M", 4] },
+    { name: "v", dtype: "f32", shape: [1, 2, "M", 4] },
+  ],
+  outputs: ["o"],
+  initializers: {},
+  values: { o: { dtype: "f32", shape: [1, 8, "M", 4] } },
+  states: {
+    "kv.k": { dtype: "f32", shape: [1, 2, "C", 4] },
+    "kv.v": { dtype: "f32", shape: [1, 2, "C", 4] },
+  },
+  nodes: [
+    {
+      op: "attention",
+      ins: ["q", "k", "v"],
+      outs: ["o"],
+      attrs: { scale: 0.5 },
+      states: { k: "kv.k", v: "kv.v" },
+    },
+  ],
+});
+
+Deno.test("読者だけの state スロットを持つグラフに見積りを返さない（実構築と同じ契約検査）", () => {
+  const error = assertThrows(
+    () =>
+      estimateSessionMemory(openGraph(readerOnlyStateGraph()), {
+        generation: { chunkLength: 4, bindings: { C: 8 } },
+      }),
+    ExecutionError,
+    "state_append が 1 本も無い",
+  );
+  assert(error.message.includes("kv.k"), error.message);
+});
+
+/** 連結軸に異なるシンボルが混ざった cat（ADR 0046 の残る拒否）。 */
+const mixedSymbolCatGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["cat"] },
+  symbols: ["T", "U"],
+  inputs: [
+    { name: "a", dtype: "f32", shape: ["T", 2] },
+    { name: "b", dtype: "f32", shape: ["U", 2] },
+  ],
+  outputs: ["y"],
+  initializers: {},
+  values: { y: { dtype: "f32", shape: ["T", 2] } },
+  nodes: [{ op: "cat", ins: ["a", "b"], outs: ["y"], attrs: { dim: 0 } }],
+});
+
+Deno.test("cat の連結軸に異なるシンボルが混ざるグラフに見積りを返さない", () => {
+  assertThrows(
+    () => estimateSessionMemory(openGraph(mixedSymbolCatGraph()), { bindings: { T: 2, U: 3 } }),
+    ExecutionError,
+    "異なるシンボル",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // unaccounted
 // ---------------------------------------------------------------------------
 
@@ -981,6 +1053,18 @@ Deno.test("unaccounted は勘定に入っていないものを明示する（見
   assert(joined.includes("融合"), joined);
   assert(joined.includes("params"), joined);
   assert(joined.includes("writeBuffer"), joined);
+});
+
+// states 形 attention の一時（S / 行統計）は**融合の成立に依存せず必ず出る**ので、融合の項の
+// 文言では覆えない。`transientSlotBytes` はノード出力しか歩かないため勘定にも入っていない。
+Deno.test("unaccounted は states 形 attention のノード内一時を名指しする", () => {
+  const { unaccounted } = estimateSessionMemory(stateModel(), {
+    bindings: { T: 2 },
+    generation: { chunkLength: 4, bindings: { C: 8 } },
+  });
+  const joined = unaccounted.join("\n");
+  assert(joined.includes("states 形 attention のノード内一時"), joined);
+  assert(joined.includes("行ブロック 1 枚"), joined);
 });
 
 // ---------------------------------------------------------------------------

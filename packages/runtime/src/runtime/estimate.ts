@@ -54,6 +54,7 @@ import {
   planGraph,
   statesOnlySymbols,
   type SymbolBindings,
+  validateGraphContracts,
 } from "./plan.ts";
 import type { GenerationContextSpec } from "./session-types.ts";
 import { planWeightResidency, type WeightResidency } from "./weight-residency.ts";
@@ -156,6 +157,7 @@ export type EstimateOptions = {
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
   "融合が畳んで消す中間と、行ブロック分割の一時（どちらも device limit と融合の成立に依存する。reshape / 恒等 expand の別名は勘定に入っている）",
+  "states 形 attention のノード内一時（スコア S と行統計）— 融合の成立に依存せず必ず出る。行ブロック 1 枚ぶんが同時生存し、大きさは B·H × 行ブロック行数 × 列容量 × 4 バイト（行統計は列容量の代わりに固定 stride）",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
   "シナリオ切替の窓（退役した slot backing は次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、prefill ⇄ decode の切替 run では 2 シナリオぶんの io + workspace が同時に載る）",
@@ -469,6 +471,10 @@ export const estimateGraphMemory = (
   // NOTE: これは capability 検査であって空き側との比較ではないので、ADR 0070 決定 5 の
   // 「比較をしない」規律には抵触しない（GPU にも触らず純関数のまま）。
   assertRuntimeSupport(graph, RUNTIME_SUPPORT);
+  // グラフ全体を見ないと決まらない契約（state_append の本数と終端・Tmax 形・slice / flip の
+  // 静的軸・cat の連結軸・入力の意味論 dtype）も同じ位置で通す。`PreparedModel.estimate` は
+  // 構築時と二重に通ることになるが、どちらも純関数・冪等でグラフ 1 走査ぶんの費用しかない。
+  validateGraphContracts(graph);
   const chunkDims = chunkRowDims(graph);
   const chunkSymbols = new Set(chunkDims.map((dim) => parseDim(dim).sym));
   const bindings = planBindings(graph, options.bindings, chunkSymbols);
