@@ -55,10 +55,11 @@ F32 / I32 / **I4** が 4 バイト整列群（I4 の節は必ず 8 の倍数バ�
 
 ## shard 分割（ADR 0070 決定 1 — 規則の正本は `karume.shards`）
 
-データ節の総量が `shards.SHARD_BYTE_LIMIT` を超えるコンポーネントは、書き出し順のまま
+データ節の総量が `shards.SHARD_TAIL_LIMIT` を超えるコンポーネントだけが、書き出し順のまま
 複数ファイルへ逐次詰めされる（先頭 = グラフ shard = `karume_ir` + 先頭から詰めたぶん）。
-上限以下なら**従来どおり 1 ファイル**で、バイト列も名前も 1 バイトも変わらない。最後の
-shard だけは `shards.SHARD_TAIL_LIMIT` まで許して端数を作らない（同 doc の規則 4）。並び順の
+総量がそれ以下なら**従来どおり 1 ファイル**で、バイト列も名前も 1 バイトも変わらない
+（尾部スラック則 — 同 doc の規則 4）。割れたときの各 shard は非末尾が
+`shards.SHARD_BYTE_LIMIT` 以下・最後の 1 本だけ `shards.SHARD_TAIL_LIMIT` まで。並び順の
 規約（上節）は shard の**中**で閉じて満たす — 各 shard は自分のテンソルだけを宣言する
 独立に整合な safetensors なので、リーダ規則は shard 単位で写せる。
 """
@@ -918,9 +919,10 @@ def write_model(
 ) -> list[Path]:
     """グラフと格納テンソルを配布形へ書き、書いた shard の path を**順に**返す。
 
-    データ節の総量が `shards.SHARD_BYTE_LIMIT` 以下なら書くのは `path` 1 本だけ（返り値も
+    データ節の総量が `shards.SHARD_TAIL_LIMIT` 以下なら書くのは `path` 1 本だけ（返り値も
     1 要素）で、バイト列は分割規則が入る前と同一。超えると
-    `<拡張子の前>-NNNNN-of-NNNNN<拡張子>` の連番へ分かれ、**先頭だけが `karume_ir` を持つ**
+    `<拡張子の前>-NNNNN-of-NNNNN<拡張子>` の連番（非末尾は `shards.SHARD_BYTE_LIMIT` 以下・
+    最後の 1 本だけ `shards.SHARD_TAIL_LIMIT` まで）へ分かれ、**先頭だけが `karume_ir` を持つ**
     （ADR 0070 決定 1 / 決定 3）。`path` 自身はそのとき 1 バイトも書かれない。
 
     `_shard_byte_limit` / `_shard_tail_limit` は**テストからのみ触る**上限の差し込み（合成の
