@@ -351,19 +351,25 @@ The script that provides the **host-side assets** required by `examples/sbv2/` (
 real text to WAV) and takes on the **numerical parity** of its output. It does not touch the model
 graphs (neither the emit path nor the goldens change).
 
+The torch side reads the raw ckpt via `--model-dir` (default `inputs/sbv2/FN4`) — **pair it
+explicitly with the dist / model the Deno side uses**, or the comparison silently runs two
+different voices (the style assets from ① are also baked per ckpt).
+
 ```sh
 # ① runtime assets (3 files into outputs/sbv2-demo/)
-uv run --group sbv2 python -m sbv2.demo assets
+uv run --group sbv2 python -m sbv2.demo assets --model-dir ../../inputs/sbv2/F1
 
-# ② run the demo (from the repository root) → out.wav and dump.safetensors
-cd ../.. && deno task demo:sbv2 --source models/karume-sbv2-fn \
+# ② run the dump demo (from the repository root) → out.wav and dump.safetensors
+cd ../.. && deno task dump:sbv2 --source models/karume-sbv2-jvnv --model F1 \
     --text "こんにちは、これはテストです。" && cd tools/export-recipes
 
 # ③ torch reference (rerun the same chain on the dump's discrete inputs and random sequence) → reference.wav + numbers
-uv run --group sbv2 python -m sbv2.demo reference --dump ../../outputs/demo/sbv2-dump/dump.safetensors
+uv run --group sbv2 python -m sbv2.demo reference --model-dir ../../inputs/sbv2/F1 \
+    --dump ../../outputs/demo/sbv2-dump/dump.safetensors
 
 # ④ official infer (the pyopenjtalk path) → official.wav (for listening comparisons of the accent)
-uv run --group sbv2 python -m sbv2.demo official --text "こんにちは、これはテストです。"
+uv run --group sbv2 python -m sbv2.demo official --model-dir ../../inputs/sbv2/F1 \
+    --text "こんにちは、これはテストです。"
 ```
 
 ### What `assets` produces

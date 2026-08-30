@@ -25,7 +25,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   **アップロードと SHA 更新まで含めて Claude が実施**（ユーザー明示許可済み — hf upload の
   分類器拒否はこの許可で通す）。リリース判定は turbo 再焼き後の e2e 全緑（現在の ignored +8 =
   turbo ミラー不在の想定内 SKIP）が条件。karume-sbv2-fn は**アップしない**（非公開のまま —
-  ローカル e2e の WAV sha 門が読むためミラー自体は維持。生成 = assets-layout の dist コマンド）
+  e2e の WAV sha 門と parity は 2026-08-30 に jvnv へ付け替え済みで、fn ローカルミラーは削除。
+  再生成 = assets-layout の dist コマンドで `inputs/sbv2/FN*` から）
 - **配布門の水平展開（実装中）**: 4 家族の `*_STORAGE_FORBIDDEN`（f32 席へ f16 系列の
   挿し込みが素通り — 実測確認済み・X2-102 の兄弟穴）+ deberta（text_encoder 席）の
   `--sym-max` 門（CG4-3 の同型）
@@ -304,7 +305,9 @@ autoregressive 波の**残項目（波外へ送り）**:
 - **karume-sbv2-fn の HF 公開**（2026-08-20 保留裁定 — 波 K で一時「出典表記つき公開」へ
   振れたが撤回）。upstream の書面条件 = Booth 頒布ページの「商用可・クレジット不要・マージ
   自由」のみで**再配布は未言及**・配布者の素性も未確認。復活 = 配布者への再配布可否の確認、
-  またはユーザーの再裁定。ローカル配布形・カード機構は維持（上げる作業だけが保留）
+  またはユーザーの再裁定。カード機構（`--card-profile fn`）は維持。ローカルミラーは常設
+  しない（2026-08-30 裁定 — e2e の門はライセンス記述が正の jvnv へ付け替え・fn ミラー削除。
+  再生成 = assets-layout の dist コマンドで `inputs/sbv2/FN*` から）
 - **SBV2 `adjust_word2ph` の移植**（2026-08-21 不採用裁定 — ADR 0072 決定 8）。音素数が変わる
   編集（語境界に一致しない読みの差し替え）を受けるための word2ph 再配分。参照は**上流**
   Style-Bert-VITS2 のセマンティクス（LCS 差分 + 1..6 クランプ・残差は例外）で、AivisSpeech が

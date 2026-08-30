@@ -55,8 +55,9 @@ text stack を参照する現行の組では:
 - [ ] 配布形の再生成が要る変更（manifest 形式・quant 席・カード・既定 quant）があったなら
       `models/` 配下の対象リポを dist で再生成し、各ファミリの gate（WAV / PNG / verify_dist）緑。
       **公開ぶんの焼き直しは §4 の bump コミットの後**（§0 の順序 — `generator` がパッケージ版を
-      写す）。format 断絶時は**非公開・parked の `karume-sbv2-fn` も焼き直しが要る** —
-      ローカル e2e が読む配布形なので、放置すると `deno task verify` が赤になる
+      写す）。ローカル e2e の SBV2 門は公開ミラー `karume-sbv2-jvnv` が正本（2026-08-30 に
+      非公開 fn から付け替え — fn ミラーは常設せず、必要時のみ assets-layout の dist コマンドで
+      `inputs/sbv2/FN*` から再生成する）
 - [ ] ライセンス確認: 各リポの `THIRD_PARTY_NOTICES.md` と生成カードの attribution が
       upstream の現物と一致（per-revision の人間確認 — release gate）
 - [ ] git: 全てコミット済み・push はユーザー
