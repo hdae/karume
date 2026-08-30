@@ -13,6 +13,30 @@ GPU 操作全体（エンコード〜readback〜アリーナ破棄）を device 
 device（= `acquireGpu()`）を分けること。解除は WebGPU 側に「スコープ付き submit」相当が
 入らない限り予定なし。
 
+## 同一 `GenerationContext` への run は 1 本ずつ（未決着のまま 2 本目を発行すると拒否される）
+
+`Session.run` は「戻り Promise を await せずに次を発行してよい」を公開契約に持つが、**第 3 引数
+`generation` の `context` が同じ run だけは例外**で、未決着の 1 本目がある間の 2 本目は
+`ExecutionError` で落ちる（`GenerationContext` の run リースが 1 本上限）。理由は沈黙誤値:
+2 本目は 1 本目が進めた論理長で uniform と dispatch を組む一方、位置入力（RoPE の
+`position_ids` 等）は**呼び出し側が発行時に組んだ普通のグラフ入力**でランタイムは中身を見ない —
+KV の論理長は正しいまま位置だけが静かにずれる。並行させたい生成は **context を分ける**
+（別 context 同士と、generation 面を持たない 1-shot run の並行発行は従来どおり通る）。
+
+なお第 3 引数の 2 欄（`context` / `queryLength`）は `inputs` / `bindings` / `copyOutputs` と同じく
+**発行の同期区間で写し取る**ので、発行後にそのオブジェクトを書き換えても実行中の run には効かない。
+
+## `BatchScope.finish()` は区間の最初の**ホスト側**失敗も投げる
+
+`Session.enqueue` を非 await で積む区間では、enqueue 本体（ホスト側の検査・レシピ構築）の失敗は
+戻り Promise にしか出ない — 握っていなければ未処理拒否として抜け、区間は「dispatch が 1 本
+少ないまま成功」で決着していた。現在は `BatchScope` が区間の**最初の 1 件**を記録し、
+`finish()` がそれを投げる（errorScope 側の失敗もあるときは errorScope 側を投げて記録を `cause` に
+載せる。2 件目以降は捨てる — 派生失敗が並ぶと根因が読めなくなるため）。
+
+同じ失敗は enqueue の戻り Promise にも従来どおり出る（1 つの事実が 2 経路で見えるのは `run` と
+同じ）。`finish()` から `ExecutionError` 等が出るのは 0.7.0 までに対する**破壊的な挙動変更**。
+
 ## params キャッシュは Session 寿命で無界（by-design）
 
 params バッファの内容アドレスキャッシュ（`RecipeBuilder.#writeParams`）には追い出しが無く、
@@ -172,22 +196,34 @@ i8 は `storage.scale`（重みと同 rank の keepdim broadcast 形・F32）の
 チャネル軸は出力チャネル（`conv_transpose1d` だけ軸 1）。scale の欠落・dtype 違い・
 broadcast できない形・実テンソルとの名前衝突・チャネル軸違いはすべてロード時に落ちる。
 
-## shard 逐次面の消費者は当面ローカル実験に限られる（manifest の shard 欄は R1）
+## hub: 相 1（streaming prefetch）は CacheStorage 必須で fail loud
 
-runtime の `createSessionFromShards` と hub の `streamAssets`（ADR
-[0070](decisions/0070-shard-loading-admission.md) — 2026-08-19 実装）は動くが、**manifest v2 に
-shard の欄がまだ無い**ため HF 配布資産は単一ファイルのまま（欄の確定は R1・HF 公開前締切 —
-hub は 2 形パースをしない = ADR 0041）。shard 列は手元で組んだ `FileRef` 列 / ファイル列を
-渡す形でだけ使える。exporter も shard 分割を**吐かない**（co-shard を吐く側の保証は R1 と
-同席 — リーダ側の co-shard / 完全性検査は実装済み）。付帯の制約 2 点:
+`prefetchAssets` の相 1 はバイト列を手元に持たない面なので、CacheStorage が使えない環境で
+素 fetch へ縮退する余地が構造的に無く、fail loud で落ちる（ADR
+[0070](decisions/0070-shard-loading-admission.md) 追記）。`onCacheError` 診断が届くのは相 2 のみ。
 
-- hub の相 1（streaming prefetch）は CacheStorage 必須で fail loud（バイト列を手元に持たない
-  面なので素 fetch へ縮退する余地が無い — ADR 0070 追記）。`onCacheError` 診断が届くのは
-  相 2 のみ。
-- `estimateSessionMemory` の `scenarios[].workspaceBytes` は**近似**（融合前ノード列の生存区間
-  シミュレーション）。融合・行ブロック分割・params・シナリオ切替の窓は `unaccounted` 欄が
-  明示する非勘定で、可否の最終門はこれまでどおり out-of-memory errorScope。
-  `peakAccountedBytes` も名前どおり「勘定に入れた分のピーク」で、上限保証ではない。
+## `estimateSessionMemory` の `workspaceBytes` は近似（非勘定は `unaccounted` が列挙する）
+
+`scenarios[].workspaceBytes` は融合**前**のノード列に対する生存区間シミュレーションで、実構築が
+畳む / 割る形は勘定に入らない。非勘定は `unaccounted` 欄が逐語で列挙する — ①融合が畳んで消す
+中間と行ブロック分割の一時 ②states 形 attention のノード内一時（スコア S と行統計 — 融合の
+成立に依存せず必ず出る）③params バッファ ④`queue.writeBuffer` の実装 staging ⑤シナリオ切替の窓。
+可否の最終門はこれまでどおり out-of-memory errorScope で、`peakAccountedBytes` も名前どおり
+「勘定に入れた分のピーク」= 上限保証ではない。
+
+## `fromAssets`（全量面）に分割配布形を渡すと、全 shard がホスト RAM に同時常駐する
+
+`fromPretrained` で読める配布形は `fromAssets` でも読める（取得キーが `<役割>[i]` の shard 列は
+連結せず、`fromPretrained` と同じ shard 逐次面へ流す — `packages/models/src/hub/components.ts` の
+`assetComponentOpener`）。ただし全量面の入口は**取得済みバイト列の Record** なので、呼び出し側が
+Record を組んだ時点で**全 shard がホスト RAM へ同時に載っている**。R1 が獲得した
+「ホスト RAM に載るのは今の 1 本だけ」という性質が成り立つのは取得層を通る面
+（`fromPretrained` / `prefetchAssets` + `streamAssets`）だけで、全量面で縮むのは**単一
+ArrayBuffer の大きさ**（Chromium の壁 — 下記）であって合計の常駐量ではない。ローカルの
+デバッグ・`examples/` 用途を想定した面という位置づけは変わらない。
+
+添字の欠番や、素キー（`transformer`）と分割キー（`transformer[0]`）の混在は **shard の語を含む
+診断**で fail loudly（黙って片方を採らない）。
 
 ## 要素数が奇数の f16 テンソル・I8 テンソルは safetensors 上の並び順に制約がある
 
@@ -305,9 +341,11 @@ fail loudly（実行上限そのものは緩めない）。
 ## GRU スキャンは隠れ幅 256 まで・入力側 GEMM を含まない・`h_n` を返さない（ADR 0056）
 
 - `gru_scan` / `gru_scan_reverse` の隠れ幅は **`H ≤ 256`**（1 lane = 1 隠れユニットの割り当て。
-  超過は `CodegenError` で fail loudly — 黙って縮退させると workgroup 共有の範囲外書き込みで
-  別ユニットの状態が例外なしに壊れる）。実測に出ている形は H = 128 だけで、上限を上げるには
-  workgroup 内 grid-stride と状態の二重化が要る = 別の設計判断。
+  黙って縮退させると workgroup 共有の範囲外書き込みで別ユニットの状態が例外なしに壊れるので
+  fail loudly）。門は**二重**で、値域外は契約層が `OpContractError`（`ops/shapes.ts`）、
+  カーネル直呼びの経路は params が `CodegenError`（`kernels/gru-scan.ts`）で落とす — 上限定数の
+  置き場は `codegen/limits.ts` の `GRU_SCAN_MAX_HIDDEN` 1 か所。実測に出ている形は H = 128 だけで、
+  上限を上げるには workgroup 内 grid-stride と状態の二重化が要る = 別の設計判断。
 - op が持つのは**隠れ側の逐次だけ**。入力側 GEMM（`x·W_ihᵀ + b_ih`）は**呼び手が既存 `linear`
   で用意する**（IR 上は別ノード）。この分割のおかげで入力側の重みは f16 / i8 格納の適格の
   ままだが、**`W_hh` は op 内スロットなので低精度格納の適格外**（`WEIGHT_SLOTS` に載らない）。
@@ -368,23 +406,30 @@ f32 マスクで、1 ずれても shape エラーにならない沈黙誤値ク�
 どちらも karume 単体の再現性（WAV sha256 門・段 1 / 段 2 経路の一致）には影響しない — f64 経路は
 決定的で、差は torch 参照との相対でのみ現れる。
 
-## SBV2: 下書きの編集で受けるのは「音素列を変えない範囲」（音素数が変わる編集は落とす）
+## SBV2: 発話の編集で受けるのは「音素列を変えない範囲」（音素数が変わる編集は落とす）
 
-`Sbv2GenerateRequest.prosody` は下書き（句 / モーラ構造）を戻す席で、門は**組み上がった音素列が
-解析のそれと位置ごとに一致するか**だけを見る（ADR 0072 決定 4 / 8）。したがって:
+0.6.0（ADR [0079](decisions/0079-sbv2-two-layer-input.md)）以降、テキスト解析は**呼び手の責務**で、
+`generate` が受けるのは解析済みの発話 `Sbv2Utterance`（モーラ層）1 本。編集面は 2 つあり、門は
+**`moras` から組み上がった音素列が `words` の音素列と位置ごとに一致するか**だけを見る
+（`packages/models/src/sbv2/text/model-input.ts` の `assertWordPhones`）。したがって:
 
-- **通る**: `accentNucleus` の変更、および**句の再分割・結合とモーラの組み替え**（VOICEVOX 互換の
-  アクセント句編集はここに入る）。句 / モーラの境界そのものは門が見ていないため。
-- **落ちる**（`Sbv2InputError`）: モーラの読み替え・記号の増減など、音素列が変わる編集。
+- **通る**: フレーズ層 `Sbv2Phrases` 側の `result.accentPhrases[i].accentNucleus` の変更と**句の
+  再分割・結合**（`toSbv2Utterance` で再変換するだけ — VOICEVOX 互換のアクセント句編集はここ）、
+  およびモーラ層 `Sbv2Utterance` の **`tone` 直編集**（核で書けない任意の 0/1 パターン）。
+  句 / モーラの境界そのものは門が見ていないため。
+- **落ちる**（`Sbv2InputError`）: モーラの読み替え（`vowel` / `consonant` の書き換え）・記号の
+  増減など、音素列が変わる編集。`moras` と `words` を別々の解析から採って混ぜた発話もここで止まる。
 
 NOTE: 句 / モーラの組み替えは、1 モーラの子音と母音に**別のトーンが載る**列を作れる（通常の解析
 経路では起きない形）。不変条件は破れず（`sum(word2ph) === P` は保たれ、BERT 入力と word2ph は
-解析由来のまま）、影響は出力音のみ。
+`words` 由来のまま）、影響は出力音のみ。
 
-読みを変えたいときは `overlay`（修正辞書）で**解析からやり直す** — BERT 入力テキストと word2ph が
-正しく作り直されるので、音素だけ差し替える経路より品質が上。参照実装が持つ `adjust_word2ph`
-（LCS で word2ph を再配分する互換ハック）は移植しない: あちらでも BERT 特徴は元テキスト由来の
-ままで、不整合は解消しない。
+読みを変えたいときは**呼び手の解析器側で修正辞書を当てて解析からやり直す**（`@hdae/yomi` の
+`analyzeWithWords(dict, text, overlay?)` 等）— BERT 入力テキストと word2ph が正しく作り直されるので、
+音素だけ差し替える経路より品質が上。karume 側に修正辞書の席は無い（0.6.0 で撤去 — 辞書の取得も
+解析も models の外）。参照実装が持つ `adjust_word2ph`（LCS で word2ph を再配分する互換ハック）は
+移植しない: あちらでも BERT 特徴は元テキスト由来のままで、不整合は解消しない（ADR 0072 決定 8 の
+原則は 0079 でも存続）。
 
 受けられない編集は 1 つだけ — **語境界に一致しない読みの差し替え**（句内の一部モーラだけを別の
 読みへ）。VOICEVOX 系の `/accent_phrases?is_kana=true` に相当する「句ごと読みを差し替える」操作は
@@ -396,7 +441,9 @@ SBV2 の `tone` はアクセント句内の高低を表す **0/1 の 2 値**で�
 引くだけの離散入力（`packages/models/src/sbv2/text/symbols.ts` の `toneStart` / `numTones`）。
 VOICEVOX 系の `is_interrogative` / `enable_interrogative_upspeak` は AudioQuery のモーラ f0 を
 後段で持ち上げる操作なので、この離散トーンには写像先が無い。JP のトーン基点の外へ出た値は
-**別言語のトーン行**を引くだけで、上げにはならない（だから `givenTone` は 0/1 以外を落とす）。
+**別言語のトーン行**を引くだけで、上げにはならない（だから `toSbv2PhoneTone` は
+`Sbv2Mora.tone` が 0/1 以外なら `Sbv2InputError` で落とす — 型は `0 | 1` だが JS からの
+呼び出しには効かない）。
 
 疑問形が音に出る経路は 1 本だけ — テキストに実在した `?` が**音素として 1 個入る**こと
 （`toSbv2PhoneTone` が実在記号を tone 0 の音素にする）。上げ調子はモデルが学習済みの韻律として
@@ -404,8 +451,9 @@ VOICEVOX 系の `is_interrogative` / `enable_interrogative_upspeak` は AudioQue
 
 したがって:
 
-- 呼び手が疑問形を足したいなら、**読み上げテキストの側に `?` を入れる**（`generate` の `text`
-  を組む段）。`prosody` の `punctuations` へ足す経路は音素数が変わるので門で落ちる。
+- 呼び手が疑問形を足したいなら、**読み上げテキストの側に `?` を入れて解析からやり直す**
+  （解析器を呼ぶ段）。解析済みの発話の `punctuations` へ後から足す経路は、`words` 側の音素列が
+  追随しないので門（`assertWordPhones`）で落ちる。
 - VOICEVOX 互換 API を模す層では `enable_interrogative_upspeak` は**受けて無視する**のが実態に
   合う（AivisSpeech Engine も同じ扱い — 2026-08-21 のソース調査）。ただし
   「`？` をモーラから剥がして `is_interrogative` フラグへ畳む」正規化を入れると疑問形の情報が
@@ -611,27 +659,11 @@ loudly の横断規約）。
 
 ## hub: 並行取得のキャンセル粒度は single-flight の leader 単位
 
-取得層（`@hdae/fetch-cache`）の single-flight では、同一 (cacheName, URL) への 2 本目以降の
-呼び出しは先行フライトへ合流し、合流者に渡した `AbortSignal` は効かない（leader を abort
-すると合流者も巻き添えで落ちる）。同一資産を並行に取る複数の `fetchAssets` では、キャンセルは
-この粒度でしか働かない（ADR 0038 §5）。単一呼び出しの abort は全ワーカーへ正しく透過する。
-
-## hub: キャッシュの認証隔離は `authorization` ヘッダだけを材料にする
-
-gated 資産を無認証経路のヒットに供さないための名前空間分離（`cacheNameFor`）は、`headers` の
-**`authorization` の値**の sha256 だけを見る。したがって隔離されるのはその 1 本だけで、次の 2 つは
-同じ無認証名前空間へ落ちる:
-
-- **ミラー独自のトークンヘッダ**（`hubUrl` で別ホストを指し、`x-api-key` 等で認証する形）—
-  権限の違う credential 同士が同一 URL の写しを共有しうる。
-- **ambient cookie**（同一オリジンのミラーへ `fetch` 既定 `credentials: "same-origin"` で乗るもの）
-  — `Cookie` は Fetch 仕様の forbidden request header なので `headers` からは渡らないが、
-  ブラウザが自動で載せる経路は名前空間の材料に一切現れない。
-
-by-design（材料をヘッダ名 1 本に固定するのは、名前空間が決定的に決まることと、生の credential を
-CacheStorage の列挙可能な名前へ載せないことの両立のため）。名前空間を呼び出し側から指定する
-公開ノブは無いので、共有端末で複数 credential を混ぜる運用では**credential を `Authorization`
-ヘッダへ寄せる**のが唯一の隔離手段。
+取得層（`@hdae/fetch-cache`）の single-flight では、同一の**内容キー**
+（`["hf", kind, repo, path, sha256]`）への 2 本目以降の呼び出しは先行フライトへ合流し、
+合流者に渡した `AbortSignal` は効かない（leader を abort すると合流者も巻き添えで落ちる）。
+同一資産を並行に取る複数の `fetchAssets` では、キャンセルはこの粒度でしか働かない
+（ADR 0038 §5）。単一呼び出しの abort は全ワーカーへ正しく透過する。
 
 ## 0 要素次元を持つ gemm 系の形は GPU 束縛の最小サイズで落ちる（未対応の退化域）
 
@@ -696,7 +728,7 @@ quant が宣言できる GPU 前提のうち、DL 前に突き合わせるのは
 **ダウンロード後**の device / Session 構築時に fail loudly で判明する（数 GB を
 落とし切ってから落ちる）。宣言の消費（DL 前判定）は将来課題。
 
-## ブラウザ: Chromium は単一 ArrayBuffer を 2,145,386,496 バイトで打ち切る — Base f16 は開けない
+## ブラウザ: Chromium は単一 ArrayBuffer を 2,145,386,496 バイトで打ち切る（分割前の旧資産のみ該当）
 
 Chromium（Chrome / Edge — 全 OS 共通・Mac も同じ）は PartitionAlloc の意図的なセキュリティ
 設計として 2³¹ − 2MiB = 2,145,386,496 バイトを超える単一 ArrayBuffer の確保を必ず失敗させる
@@ -704,8 +736,8 @@ Chromium（Chrome / Edge — 全 OS 共通・Mac も同じ）は PartitionAlloc 
 3,913,609,588 B — は全量面 / 逐次面のどちらでも materialize できず、**原理的にロード不能**
 （実測は 2026-08-25 調査 — 経緯は git）。消費側の判定条件は「manifest の各ファイル `size` が
 この値を超える quant 席を選択肢から外す」。i8（1,962,502,636 B）は壁の内側だが余裕は
-約 183MB しかなく、重み増で同じ壁に当たる。恒久解は shard 分割配布 + ロード面接続
-（backlog next の R1）。
+約 183MB しかなく、重み増で同じ壁に当たる。恒久解（shard 分割配布 + ロード面接続 = R1）は
+下記のとおり実装・公開済み。
 
 なお 2026-08-28（fetch-cache 0.5.0 追従 — ADR 0080）から、この壁は**ダウンロード前に**
 落ちる: hub が `expectedBytes`（manifest `size`）を渡すため、受信バッファの確保に失敗する
@@ -715,8 +747,9 @@ Chromium（Chrome / Edge — 全 OS 共通・Mac も同じ）は PartitionAlloc 
 **根本解は 2026-08-29 の R1 統合波で実装済み**: exporter が 1GiB 超のコンポーネントを
 shard 分割し（`karume.shards` — ADR 0070 追記 2026-08-29）、ロードは shard 逐次面が
 1 shard ずつ materialize する（単一バッファは常に ≤ 1GiB + ヘッダ）。Base f16 の実ロード +
-生成は分割配布形で実証済み。**この制約が残るのは「分割前に焼かれた既存資産」だけ** —
-公開済み HF リポの上げ直しまでは、そこの Base f16 は従来どおり開けない。
+生成は分割配布形で実証済み。公開 HF リポ 2 本（anima / anima-turbo）も 2026-08-29 に分割形で
+上げ直し済み。**この制約が残るのは「分割前に焼かれた手元の旧資産」だけ**（`outputs/` の
+旧 series 等 — 再 export で自動的に規則内へ入る）。
 
 ## hub: キャッシュは credential で隔離しない（by-design — 2026-08-28 裁定）
 

@@ -7,26 +7,28 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-29
+> Last updated: 2026-08-30
 
 ## Now
 
-- **ChatGPT レビュー消化波（2026-08-29 進行中）**: 外部レビュー 4 本の統合指摘 13 件を
-  波 0（検証 — holds 18 / refuted 1・実測正本 =
-  [research](../docs/research/2026-08-29-chatgpt-review-verification.md)）→ 波 1（バグ修正
-  8 件 — errorScope internal / recipe 静的検証 / safe-integer / regcache parity /
-  **run・enqueue 入力の borrowed 契約** / overshoot 観測席 / **attention dp4a 実走カナリア** =
-  ADR [0058](../docs/decisions/0058-numerics-opt-in-contract.md) 追記 / CI Deno 2.9.6）まで
-  消化。残り = 波 2（構築診断・PipelineCache device 寿命化）→ Opus+Codex 全体レビュー →
-  anima-web DL スロット改善。**M2 実機のカナリア検出力確認はユーザー実行待ち**
-  （known-issues Metal 節に読み方）。波順の正本 = [backlog](../docs/backlog.md) now。
+- **全体レビューの修正波 A〜E クローズ（2026-08-30）**: 網羅レビュー（Opus 15 + レンズ 2 →
+  敵対検証 → Codex / ブラウザ第 2 波）の確定 50 件（E4 / W46）+ 追補を 5 波で全消化。裁定と
+  台帳の正本 = `.claude/reviews/2026-08-29_9614ba9/`（git 追跡外）。**破壊的変更 2 件**
+  （`BatchScope.finish()` のホスト側失敗 throw / 同一 `GenerationContext` への並行発行拒否）と
+  **`fromAssets` の shard 分割形受け口**（追加）は [limitations](../docs/limitations.md) が
+  消費側 doc。残り = レンズ E-1 / E-2 裁定・**L-11（最初の出荷 LLM 選定）**・
+  **M2 実機の手動確認 2 点**（カナリア 16 本 + NaN パリティ 4 本 — known-issues Metal 節）・
+  anima-web DL スロット改善（`FamilyAdmission` 席は実装済み）。残件と隣接発見の一覧 =
+  [backlog](../docs/backlog.md) now。
 - **R1 統合波はコード完了（2026-08-29）**: API 工事 4 件（union/プランナ・`ModelShard` 実名
   帰属・`prepareModel` 2 段境界・`AdmissionReport`）+ hub `prefetchAssets` + models 7 pipelines
   の graph-first 接続 + exporter 1GiB 分割（`karume.shards`）+ デモの疑似 HF サーバ化。
   **受け入れ実証済み**: Base f16 3.9GB → 4 shard で実ロード + 生成完走。正本 = ADR
   [0070](../docs/decisions/0070-shard-loading-admission.md) 追記 2026-08-29。
-  **HF 更新系まで完了（2026-08-29）**: 全席分割ビット同一・base `7be81011` / turbo `1a6e907a`
-  公開・**shard ごとの越境参照**（ADR 0038 §7 追記 2026-08-29）初適用・pin 焼き込み + 実 DL
+  **HF 更新系まで完了（2026-08-29）**: 全席分割ビット同一・base / turbo とも公開済み
+  （**公開 revision の正本は pin 定数** `ANIMA_CURRENT` / `ANIMA_TURBO_CURRENT` — 値は
+  `packages/models/src/anima/config.ts` を見る。docs に SHA を写さない）・**shard ごとの
+  越境参照**（ADR 0038 §7 追記 2026-08-29）初適用・pin 焼き込み + 実 DL
   疎通済み。実資産テストとローカル配信は越境 + 分割ミラーへ追随済み（fromAssets の実 GPU
   生成経路は anima e2e から消滅 — 契約面と他家族が担保）。**0.7.0 は Release → JSR publish
   まで完了（2026-08-29・リリースノートは検証ワークフロー通過済み）**。

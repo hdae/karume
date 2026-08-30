@@ -64,25 +64,23 @@ text stack を参照する現行の組では:
 ## 2. HF アップロード（断片化対策 — MUST）
 
 **背景**: env を付けずに上げると Xet の chunk dedup が効きすぎて再構成が断片化し、DL が
-5〜6 倍遅くなる。断片化は一度 CAS に載ると既定設定の再アップロードでは戻らない
-（**片道ラチェット** — 初回で防ぐのが唯一の低コストな手）。
+5〜6 倍遅くなる。断片化は一度 CAS に載ると戻らない（**片道ラチェット** — 初回で防ぐのが
+唯一の手）。
 
 ```sh
-export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE=1000000
 export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE_HYSTERESIS_FACTOR=1.0
 export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
 ```
 
-- [ ] 上の env 4 本を**同一シェルで** export してから `hf upload` を実行する
-      （正本: [assets-layout.md](assets-layout.md) 公開節）。
-      **NOTE（2026-08-29 退行）**: hf_xet 1.4.3 では 1 本目
-      （`GLOBAL_DEDUP_QUERY_ENABLED`）が**存在しない**（後継 =
-      `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` を巨大値に）。さらに**リポ自身の
-      履歴に同一 chunk がある場合の repo 内 dedup はどのノブでも止まらず**、下の
-      「同バイト上げ直し」も hf CLI が転送ごとスキップするため効かない（delete→再 up の
-      2 コミット法でも不発を実測 — [known-issues](known-issues.md) の text_encoder 断片化）。
-      新規バイトのアップロードは env 併用で健全（26〜30 MiB/term 実測）。
+- [ ] 上の env 3 本を**同一シェルで** export してから `hf upload` を実行する
+      （正本: [assets-layout.md](assets-layout.md) 公開節）。**新規バイトにはこれで効く**
+      （26〜30 MiB/term 実測）。
+      **NOTE（2026-08-29 退行・hf_xet 1.4.3）**: 旧・4 本目
+      （`GLOBAL_DEDUP_QUERY_ENABLED`）は**存在しない**（後継 =
+      `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` を巨大値に — ただし下記には効かない）。
+      さらに**リポ自身の履歴に同一 chunk がある場合の repo 内 dedup はどのノブでも止まらない**
+      （[known-issues](known-issues.md) の text_encoder 断片化）。
 - [ ] **書き込みトークンへ切替**: `hf auth switch --token-name "Karume Release"` —
       既定の読み取りトークン（Karume Gated Read）のままだと LFS batch が 403 になる
       （2026-08-21 実測）。アップロードが済んだら読み取りトークンへ戻す
@@ -103,8 +101,10 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
 ```
 
 - [ ] `terms[]` を数え **MiB/レンジ ≥ 10 目安**（健全なら 1 xorb = 1 term に近い）。
-      大きく下回っていたら断片化 — **同じバイト列のまま同じパスへ上げ直すと治る**
-      （バイト不変なのでコミットは増えない。shard-cache 退避を忘れない）
+      大きく下回っていたら断片化 — **現行クライアント（hf_xet 1.4.3）では回復手段が無い**。
+      同バイト上げ直しは hf CLI が転送ごとスキップして効かず、delete→再 up の 2 コミット法でも
+      不発（2026-08-29 実測 — 上の NOTE と同じ結論）。恒久対処の候補 3 案は
+      [known-issues](known-issues.md)。観測値は §5 の記録へ残す
 
 ## 3. pin 焼き込み（ADR 0073）
 
@@ -119,6 +119,10 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       動作テストまで通してから「検証した」と名乗る
 - [ ] 疎通: pin 済み SHA での `fromPretrained` が実 URL で通ること（SHA 指定は revision 解決
       リクエストが発生しない = オフライン起動可 — ADR 0038）
+- [ ] **pin 定数が公開 revision の唯一の在処**であること: `rg '\b[0-9a-f]{8,40}\b' docs
+      .claude/ACTIVE_DESIGN.md` 相当で、docs 側へ SHA を写していないか確認する（写しは焼き直しの
+      たびに古びる — 記録は `ANIMA_CURRENT` のような定数名で綴る。2 リリース連続で食い違った
+      2026-08-24 / 08-29 の再発防止）
 - [ ] `deno task verify` → コミット
 
 ## 4. JSR publish

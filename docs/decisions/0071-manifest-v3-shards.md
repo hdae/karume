@@ -87,3 +87,16 @@ backlog release 節に残置。凍結が要るのは資産側の形だけで、�
   パッケージ↔資産の版ずれは以後 pin が吸収する。
 - LLM 級モデルの複数 shard 配布は「exporter の分割規則 + dist の複数要素書き」だけで
   可能になる（hub / runtime / manifest は本 ADR + ADR 0070 で受け口完備）。
+
+## 追記（2026-08-30 — 分割が新しい family へ及ぶときのカード / NOTICE 追随）
+
+recipe のカード散文と `NOTICE.md` の改変列挙は「コンテナ = 1 個の safetensors ファイル」と
+綴られていた。anima が分割された 2026-08-29 以降、この文は anima の 2 リポで**事実と食い違い**、
+§3(d)(i) が求める改変告知が改変内容を述べていない状態になった（X2-103・2026-08-30 修正）。
+
+MUST: **分割が新しい family へ及んだら、その family の `card.py` の overview と
+`distribution.py` の改変列挙も同時に書き換える**。anima 以外は 2026-08-30 時点で分割が
+発生しておらず（手元ミラーの実測: `karume-irodori-v4-small` / `karume-sbv2-jvnv` /
+`karume-sbv2-fn` とも `maxShards = 1`）現行の文面が正しいが、この追随には機械検査が無い —
+`verify_dist` も manifest 検査も散文を見ないので、配ってから露見する類の破れである。
+anima の文面（分割の有無に依らず正しい 1 本）が雛形。

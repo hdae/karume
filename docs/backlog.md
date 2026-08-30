@@ -7,27 +7,26 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — ChatGPT レビュー消化波（2026-08-29 着手）
+## now — 全体レビュー修正波クローズ後の残件（2026-08-30）
 
-外部レビュー 4 本（`.claude/reviews/2026-08-29_chatgpt-reviews/` — git 追跡外・v0.6.0 時点の
-静的監査）の統合指摘 13 件。波 0（検証・19 判定 = holds 18 / refuted 1 — 実測の正本 =
-[research](research/2026-08-29-chatgpt-review-verification.md)）→ 波 1（バグ修正）まで消化済み:
+網羅レビュー（正本 = `.claude/reviews/2026-08-29_9614ba9/` — git 追跡外）の確定 50 件 + 追補は
+**修正波 A〜E で全消化（2026-08-30）**。破壊的変更 2 件（`BatchScope.finish()` のホスト側失敗
+throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](limitations.md) に記載。残件:
 
-- 波 1 **済**: pipeline errorScope の internal 捕捉（`withPipelineScope`）/ recipe 宣言の
-  静的検証 / safe-integer 門 / regcache epc≥2 の parity 門 / run・enqueue 入力の borrowed
-  契約（発行時 metadata snapshot）/ SubmitScheduler の overshoot 観測席 / attention dp4a
-  実走カナリア（ADR [0058](decisions/0058-numerics-opt-in-contract.md) 追記）/ CI Deno pin
-  2.9.6
-- **波 2（実装予定）**: SessionBuildDiagnostics（= perf-ledger L-1 の計測器）・PipelineCache
-  の device 寿命化（error-scope utility 分離が前段）・arena の MAP_READ コメント訂正
+- **レンズ裁定（未裁定のまま保留）**: E-1 = 最適化候補 P-1〜P-5 の perf-ledger 起票裁定 /
+  E-2 = Gemma/LLM 改善 L-0〜L-12（生成 API 波の設計資料込み）/ **L-11 = 最初の出荷 LLM 選定**
+- **M2 実機の手動確認 2 点**: dp4a カナリア（①QK f16 格子化後の 16 本）と軸 reduce NaN
+  パリティ 4 本（[known-issues](known-issues.md) Metal 節に読み方）
+- anima-web の cold ロード DL スロット改善（提案 b+a — `FamilyAdmission` 席は実装済みで、
+  残りは admission 前倒しの graph shard 単位化 + extras の並行開始。opt-in の c 案は再裁定要）
+- **修正波の隣接発見（裁定待ちの起票候補）**: ①siglip2 / birefnet / depth-anything /
+  vowel-detector の `*_STORAGE_FORBIDDEN` 不在（f32 席へ f16 系列の挿し込みが実物 fixture で
+  素通り — 実測確認済み・X2-102 の兄弟穴）②deberta（text_encoder 席）の `--sym-max` 門なし
+  （CG4-3 の同型）③M1-2 是正の Session 構築レイテンシ +4s/generate（perf-ledger 候補 —
+  緩和の芽は ADR 0070 追記 2026-08-30）④exporter 分割規則の是正（ADR 0070 の c 案 —
+  リリース波のユーザー裁定）⑤他家族カードの fromAssets 案内の扱い（anima のみ削除裁定済み）
 - 起票のみ: perf-ledger **H-8〜H-10 / L-7 / L-8**（cost proxy / readback 共有 / metadata
   compile / async pipeline / params 有界化）
-- **M2 実機判定は完了（3 往復・2026-08-29）**: カナリアは発火 → 機序の再理解（変種間不一致
-  ではなく共有エピローグの 1 ULP 差 — 旧推論撤回）→ 判定則 v2 + v2.1 で **15/15 全緑・
-  a8 復活・警告 1 回**を実機確認。残る M2 の赤は従来の既知 6 本のみ
-- 波 2 後: **Opus+Codex 全体レビュー**（並行なし）→ anima-web の cold ロード DL スロット
-  改善（提案 b+a = ADR 0070 決定 5 不変のまま admission を graph shard 完了ごとに前倒し +
-  extras の並行開始。opt-in の c 案は再裁定が要るため保留）
 
 ## 消化済み（既知問題 3 件 + anima 素版 i4 感度 — 2026-08-25〜28）
 
@@ -60,13 +59,16 @@ Anima Web アプリからの既知問題 3 件（調査で機序確定済み —
 ## 消化済み（0.7.0 リリース — 2026-08-29 完了）
 
 HF 更新系は**完了（2026-08-29）**: 全席分割の再 export 8 本（**全テンソルビット同一証明** —
-LoRA scale=1.0 も同時証明）→ base 3 モデル family 再生成 → HF 上げ（`7be81011`）→ turbo を
-**shard ごとの越境参照**（新機構の初適用）で焼き直し → HF 上げ（`1a6e907a`）→ pin 2 本
-焼き込み + 実 DL 疎通（turbo = demo 完走 / base = fromPretrained + 生成完走）。断片化検証:
+LoRA scale=1.0 も同時証明）→ base 3 モデル family 再生成 → HF 上げ → turbo を**shard ごとの
+越境参照**（新機構の初適用）で焼き直し → HF 上げ → pin 2 本焼き込み + 実 DL 疎通
+（turbo = demo 完走 / base = fromPretrained + 生成完走）。**公開 revision の正本は pin 定数**
+（`ANIMA_CURRENT` / `ANIMA_TURBO_CURRENT` — `packages/models/src/anima/config.ts`）で、docs には
+写さない（尾部スラック則の反映で両リポとも焼き直したように、SHA は後から動く）。断片化検証:
 全 shard 26.5〜30.4 MiB/term（健全）— 例外は base の `shared/text_encoder` shard1 =
 **4.5 MiB/term（旧公開バイトの xorb へ部分ヒットした継承断片化** — 同バイト再アップは
-hf CLI が転送スキップするため runbook の処方が効かない。恒久対処候補 = 旧 revision 込みの
-履歴整理 or delete→再 up の 2 コミット法〈未検証〉）。
+hf CLI が転送スキップするため runbook の処方が効かない。delete→再 up の 2 コミット法も
+**不発を実測済み**（hf_xet 1.4.3 退行 — [known-issues](known-issues.md)）。恒久対処候補 =
+known-issues の 3 案（版固定再検証 / `HF_HUB_DISABLE_XET=1` / 履歴整理）に集約）。
 
 - **Release v0.7.0 published → JSR 3 パッケージ publish 完了（2026-08-29 ユーザー確認）**。
   リリースノートは公開前に検証ワークフロー（主張突合 + 両方向網羅）を通した — 修正 2 +

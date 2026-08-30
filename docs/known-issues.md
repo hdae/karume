@@ -50,6 +50,13 @@ conv2d parity 2 本が赤（Linux / Vulkan は全緑）。**2026-08-29 のカナ
 - 変種選択は実走カナリア（ADR [0058](decisions/0058-numerics-opt-in-contract.md) 追記）の
   **判定則 v2** が扱う — 「両腕ビット同一・参照とは帯内（rtol 1e-5）の差」は dp4a を選び
   警告 1 回で実行継続（a8 は動く）。帯外だけが `GpuFeatureError`。
+- **カナリア①QK の固定入力は f16 格子へ載せ直した**（2026-08-30・RC1-1）: 倍率を 2 の冪に閉じ
+  `acc` の有効桁を f16 仮数に収めることで、既知解 8,192 要素が全て f16 ちょうどになり、
+  エピローグに**丸めが 1 度も起きない**。よって①QK は健全な device でも M2 でも既知解と厳密
+  一致する見込みで、**この 1 ULP 差が今後観測されるのは③PV 側だけ**になる（③PV は
+  `qP = round(127·exp(S−m))` を GPU が作るため丸めが残る）。**M2 実機での再確認は未了** —
+  実機の判定分岐が「両腕帯内かつビット同一」から「dp4a 厳密一致」へ移るかは、次に M2 で
+  `deno test packages/runtime/tests/gpu_attention_dp4a_canary_test.ts` を回して確かめる。
 - **conv2d parity 2 本**（implicit GEMM ↔ 直接カーネルのビット一致・golden の tolerance 判定は
   緑）は従来どおり原因未特定 — 同種のエピローグ丸め差の可能性が高いが未検証。
 
