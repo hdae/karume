@@ -15,8 +15,6 @@ decode 系列の 2 台本が `karume.artifacts.staged_publication` で守って�
 ため。ここが見るのは「呼びの位置関係」だけで、据え替えそのものの規律（退避 → 昇格 →
 失敗時の戻し）は core の `tools/exporter/tests/` が実測で持つ。
 
-NOTE: `irodori/export.py`（DiT 側）だけは**まだ作業席を通していない**（同じ形で final へ直接
-書く）。表に載っていないのは「見なくてよい」ではなく未追随という意味で、追随したらここへ足す。
 """
 
 from __future__ import annotations
@@ -47,8 +45,9 @@ WRITER_CALLS = frozenset(
     }
 )
 
-#: (台本, emit を行う関数)。1-shot 台本 11 本 + 手本の decode 台本 2 本。
+#: (台本, emit を行う関数)。1-shot 台本 12 本 + 手本の decode 台本 2 本。
 EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
+    ("irodori/export.py", "export_series"),
     ("gemma4/export.py", "export_series"),
     ("gemma4/export_decode.py", "export_series"),
     ("minicpm5/export.py", "export_series"),

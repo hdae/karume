@@ -221,6 +221,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from karume.artifacts import staged_publication
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -2362,33 +2363,40 @@ def export_series(
     for target in targets:
         axis = axes[target]
         target_dir = out_dir / target
-        target_dir.mkdir(parents=True, exist_ok=True)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
         by_case = graph_args[target]
         longest = max(by_case, key=lambda name: next(iter(by_case[name].values())).shape[1])
         example = tuple(by_case[longest].values())
         seq = Dim(axis.torch_dim, min=MIN_SYM_LENGTH, max=axis.upper)
-        graph = export_to_file(
-            graphs[target],
-            example,
-            target_dir / MODEL_FILE,
-            dynamic_shapes=tuple(
-                _dynamic_axis(axis.dynamic.get(index), seq) for index in range(len(example))
-            ),
-            symbol_names=(axis.symbol,),
-            preserved=axis.preserved,
-            weight_dtype=dtype,
-            weight_scales=target_scales(target, graphs[target], quantized.scales),
-            weight_dtype_overrides=target_weight_dtypes(
-                target, graphs[target], quantized.overrides
-            ),
-        )
-        io_files = _write_io(graph, by_case, pristine[target], target_dir)
+        # MUST: 生成物はターゲットごとの作業席へ書き、揃ってから据える（門より前に final へ
+        # 置かない — dacvae 側 `export_series` と同じ規律・原語は
+        # `karume.artifacts.staged_publication`）。
+        with staged_publication(target_dir) as staged:
+            # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+            staged.mkdir()
+            graph = export_to_file(
+                graphs[target],
+                example,
+                staged / MODEL_FILE,
+                dynamic_shapes=tuple(
+                    _dynamic_axis(axis.dynamic.get(index), seq) for index in range(len(example))
+                ),
+                symbol_names=(axis.symbol,),
+                preserved=axis.preserved,
+                weight_dtype=dtype,
+                weight_scales=target_scales(target, graphs[target], quantized.scales),
+                weight_dtype_overrides=target_weight_dtypes(
+                    target, graphs[target], quantized.overrides
+                ),
+            )
+            io_files = _write_io(graph, by_case, pristine[target], staged)
+            # 校正条件の記録（i4 の `dit` のみ）。**stdout の要約は人が読むためのもの**で、
+            # 機械の突き合わせは `calib_provenance.json` が持つ。
+            calib_provenance = _write_calib_provenance(dtype, calib_plan, target, staged)
         written[target] = {
             **_graph_summary(graph, target_dir / MODEL_FILE),
             "io": io_files,
-            # 校正条件の記録（i4 の `dit` のみ）。**stdout の要約は人が読むためのもの**で、
-            # 機械の突き合わせは `calib_provenance.json` が持つ。
-            "calib_provenance": _write_calib_provenance(dtype, calib_plan, target, target_dir),
+            "calib_provenance": calib_provenance,
         }
     return {
         "dir": str(out_dir),
