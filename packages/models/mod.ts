@@ -44,6 +44,12 @@ export type {
 } from "./src/anima/pipeline.ts";
 /** `AnimaGenerateRequest.sampler` の語彙（`./anima` を参照）。 */
 export type { AnimaSamplerType } from "./src/anima/config.ts";
+/**
+ * 解像度の綴り（`1344x768` / 正方の略記 `512`）と受理集合。**受理集合の正本はこのパッケージ**
+ * （ADR 0038 §2）なので、{@link ImageSize} だけ出して生成器を出さないと、CLI / UI が `WxH` の
+ * 綴り契約を書き直すことになる（`./anima` を参照）。
+ */
+export { formatResolution, parseResolution } from "./src/anima/resolution.ts";
 export type { ImageSize } from "./src/anima/resolution.ts";
 /**
  * 途中 latent → RGB の線形近似。`denoise-step` の `copyLatents()`
@@ -52,6 +58,12 @@ export type { ImageSize } from "./src/anima/resolution.ts";
  * 出しておいて近似を出さないと、購読側は受け取った latent を使えない（`./anima` を参照）。
  */
 export { approximatePreview } from "./src/anima/preview.ts";
+/**
+ * 途中 latent の逆正規化素材（`const { mean, std } = animaLatents()` → `denormalizeLatents`）。
+ * **プレビューには要らない** — VAE decode と同じ土俵で latent を扱いたい消費側のための面で、
+ * 出さないと 2 本の定数が消費側に二重持ちされる（`./anima` を参照）。
+ */
+export { animaLatents, denormalizeLatents } from "./src/anima/latents.ts";
 /** このパッケージ版が検証した取得元（`./anima` を参照 — 追従したい場合のオプトイン）。 */
 export { ANIMA_CURRENT, ANIMA_TURBO_CURRENT } from "./src/anima/config.ts";
 
