@@ -80,6 +80,7 @@ import {
   loadManifest,
   type Manifest,
   type ModelEntry,
+  type Quant,
   resolveFiles,
 } from "@karume/hub";
 
@@ -688,26 +689,45 @@ const rightPad = (
   return padded;
 };
 
+/** 家族 admission（{@link admitIrodori}）が確定させる材料。 */
+type IrodoriAdmission = {
+  readonly config: IrodoriPipelineConfig;
+  readonly quantName: string;
+  readonly quant: Quant;
+  readonly ditSessionOptions: SessionOptions;
+  readonly backbone: ModelComponent;
+  readonly textProj: ModelComponent;
+  readonly captionProj: ModelComponent;
+  readonly speaker: ModelComponent;
+  readonly duration: ModelComponent;
+  readonly dit: ModelComponent;
+  readonly codecDecoder: ModelComponent;
+  readonly codecEncoder: ModelComponent;
+};
+
 /**
- * manifest + 資産から実行状態を組む（{@link IrodoriPipeline.fromAssets} の中身）。
+ * この manifest とこのグラフを irodori として実行できるかを見る（`hub/components.ts` の
+ * 家族 admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
  *
- * MUST: manifest の契約違反と**資産の解析・グラフとの突合**は **GPU を取りに行く前**に落とす。
- * 順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に
- * 伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ（ADR 0028）。
- * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
+ * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+ * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
+ * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
+ * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
  *
  * NOTE: 各段は不可分（`openModel` を途中で畳む口は無い）なので、
  * {@link IrodoriPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこでイベントループへ
  * 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に届いた中断は次の境目で効く
  * （`options.gpu` 供給時も同様）。グラフとの突合（`assertStaticDim` 群）は開いたコンテナの
  * ヘッダを読むだけで、`openModel` 1 本より桁で軽いので境目を割らない。
+ * NOTE: 資産（tokenizer）の解析はこの席へ置けない — admission の時点では extras をまだ
+ * 取っていない（取ってからでは重み prefetch より前という位置が保てない）ので
+ * {@link buildIrodoriState} に残る。
  */
-const openIrodoriState = async (
-  input: IrodoriAssets,
+const admitIrodori = async (
+  manifest: Manifest,
   open: ComponentOpener,
-  options: IrodoriPipelineOptions = {},
-): Promise<IrodoriState> => {
-  const { manifest, assets } = input;
+  options: IrodoriPipelineOptions,
+): Promise<IrodoriAdmission> => {
   // 中断の検査は**段の境目**に置く。入口が最初の 1 本: 中断済みで呼ばれたら manifest にも
   // 資産にも触らずに返す。
   options.signal?.throwIfAborted();
@@ -762,10 +782,6 @@ const openIrodoriState = async (
   const codecDecoder = open(CODEC_DECODER);
   await settleAbort(options.signal);
   const codecEncoder = open(CODEC_ENCODER);
-  await settleAbort(options.signal);
-  const tokenizer = new IrodoriTokenizer(
-    parseIrodoriTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER),
-  );
 
   // グラフの宣言と pipelineConfig の突合（ホストの式が読む数は全て config 由来）。
   assertStaticDim(dit, "x_t", 2, config.latentDim, "latentDim");
@@ -799,11 +815,71 @@ const openIrodoriState = async (
 
   const ditSessionOptions = toSessionOptions(quant.session);
 
+  // MUST: 共有 GPU の能力不足はこの席で落とす — 自前で取る場合と違って `acquireGpu` を
+  // 待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の網羅表は
+  // `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  if (options.gpu !== undefined) {
+    assertGpuFeaturesGranted(
+      quant.gpuFeatures,
+      options.gpu,
+      `IrodoriPipeline: quant '${quantName}'`,
+    );
+  }
+
+  return {
+    config,
+    quantName,
+    quant,
+    ditSessionOptions,
+    backbone,
+    textProj,
+    captionProj,
+    speaker,
+    duration,
+    dit,
+    codecDecoder,
+    codecEncoder,
+  };
+};
+
+/**
+ * admission を通った材料 + 資産から実行状態を組む。
+ *
+ * MUST: 資産の解析は **GPU を取りに行く前**に落とす。順序がずれると、GPU の無い環境では
+ * 別の例外に化けて「何が悪かったのか」が読み手に伝わらない。GPU 取得後に許される検査は
+ * GPU の能力（shader-f16）だけ（ADR 0028）。
+ * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
+ */
+const buildIrodoriState = async (
+  admitted: IrodoriAdmission,
+  assets: IrodoriAssets["assets"],
+  options: IrodoriPipelineOptions = {},
+): Promise<IrodoriState> => {
+  const {
+    config,
+    quant,
+    quantName,
+    ditSessionOptions,
+    backbone,
+    textProj,
+    captionProj,
+    speaker,
+    duration,
+    dit,
+    codecDecoder,
+    codecEncoder,
+  } = admitted;
+
+  await settleAbort(options.signal);
+  const tokenizer = new IrodoriTokenizer(
+    parseIrodoriTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER),
+  );
+
   await settleAbort(options.signal);
 
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-  // 渡された場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。要求と
-  // 検査の網羅表は `session/gpu-features.ts`（7 家族で 1 本）。
+  // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
+  // {@link admitIrodori} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
   const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
   const ownsGpu = options.gpu === undefined;
   try {
@@ -1494,39 +1570,41 @@ export class IrodoriPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const files = resolveFiles(loaded.manifest, selection);
-    const { open, assets } = await loadShardComponents(
+    // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
+    const buildOptions: IrodoriPipelineOptions = {
+      ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+      ...selection,
+      ...(options.onRunDiagnostics === undefined
+        ? {}
+        : { onRunDiagnostics: options.onRunDiagnostics }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    };
+    // 家族の門は admission 席で通す（重み shard を取る前 — `hub/components.ts`）。
+    const { admitted, assets } = await loadShardComponents(
       "IrodoriPipeline.fromPretrained",
       loaded,
       files,
       [BACKBONE, TEXT_PROJ, CAPTION_PROJ, SPEAKER, DURATION, DIT, CODEC_DECODER, CODEC_ENCODER],
+      (open) => admitIrodori(loaded.manifest, open, buildOptions),
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
       },
     );
-    // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
-    return new IrodoriPipeline(
-      await openIrodoriState({ manifest: loaded.manifest, assets }, open, {
-        ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-        ...selection,
-        ...(options.onRunDiagnostics === undefined
-          ? {}
-          : { onRunDiagnostics: options.onRunDiagnostics }),
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      }),
-    );
+    return new IrodoriPipeline(await buildIrodoriState(admitted, assets, buildOptions));
   }
 
   /**
    * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel` を全てここで済ませ、
    * **Session は 1 本も張らない**。{@link IrodoriPipelineOptions.signal} を渡すと段の境目で
-   * 中断できる（`openIrodoriState` の NOTE）。
+   * 中断できる（`admitIrodori` の NOTE）。
    */
   static async fromAssets(
     input: IrodoriAssets,
     options: IrodoriPipelineOptions = {},
   ): Promise<IrodoriPipeline> {
-    return new IrodoriPipeline(await openIrodoriState(input, assetOpener(input.assets), options));
+    const admitted = await admitIrodori(input.manifest, assetOpener(input.assets), options);
+    return new IrodoriPipeline(await buildIrodoriState(admitted, input.assets, options));
   }
 
   /**

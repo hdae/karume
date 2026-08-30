@@ -16,6 +16,10 @@
  * ⑥ **グラフ shard のバイト列を握らない**（コンポーネントの供給口を保持したままでも常駐
  *    ゼロ）。gc を強制する必要があるので別プロセスの台本
  *    （`helpers/graph-shard-retention.ts`）へ出し、ここでは終了コードだけを見る。
+ * ⑦ **家族 admission の違反でも重み shard は取得されない**（②の家族版）。② は runtime の
+ *    capability 門だけを踏むので、「実行できないモデルの重みは 1 バイトも落とさない」の
+ *    うち家族側（pipeline major / `pipelineConfig`）が前段に居ることは縛れない。実家族
+ *    （siglip2 = コンポーネント 1 本の最小形）を `fromPretrained` で通して同じ観測法で見る。
  *
  * NOTE: hub / runtime のテスト helper は import しない（向こうの都合がこちらへ漏れる —
  * `helpers/memory-cache.ts` と同じ規律）。モックはこのファイル内で最小限だけ組む。
@@ -25,9 +29,16 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { type AssetProgress, loadManifest, resolveFiles } from "@karume/hub";
 import { acquireGpu } from "@karume/runtime";
 import { loadShardComponents } from "../src/hub/components.ts";
+import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 import { type DumpTensor, writeSafetensors } from "./helpers/safetensors-write.ts";
+
+/**
+ * 家族 admission の席（この機構だけを見るテストは家族の門を 1 つも置かない）。実家族の門が
+ * 席に載っていることは ⑦ が別に縛る。
+ */
+const NO_FAMILY_GATE = (): undefined => undefined;
 
 const HUB_URL = "https://hub.test";
 const REPO = "karume-test/shards";
@@ -178,6 +189,7 @@ Deno.test(
       loaded,
       files,
       ["front", "voice"],
+      NO_FAMILY_GATE,
       { ...hubOptions, onProgress: (progress) => events.push(progress) },
     );
 
@@ -246,7 +258,15 @@ Deno.test(
     const files = resolveFiles(loaded.manifest);
 
     const error = await assertRejects(
-      () => loadShardComponents("test.fromPretrained", loaded, files, ["dit"], hubOptions),
+      () =>
+        loadShardComponents(
+          "test.fromPretrained",
+          loaded,
+          files,
+          ["dit"],
+          NO_FAMILY_GATE,
+          hubOptions,
+        ),
       Error,
     );
     // 落ちた理由が capability 門であること（別の失敗で「重みを取らなかった」が成立しない）。
@@ -301,7 +321,7 @@ Deno.test(
     const { loaded, files, refs, mock, hubOptions } = await prepareTwoShard();
 
     const events: AssetProgress[] = [];
-    await loadShardComponents("test.fromPretrained", loaded, files, ["dit"], {
+    await loadShardComponents("test.fromPretrained", loaded, files, ["dit"], NO_FAMILY_GATE, {
       ...hubOptions,
       onProgress: (progress) => events.push(progress),
     });
@@ -326,10 +346,14 @@ Deno.test({
     const { loaded, files, mock, hubOptions } = await prepareTwoShard();
 
     const events: AssetProgress[] = [];
-    const { open } = await loadShardComponents("test.fromPretrained", loaded, files, ["dit"], {
-      ...hubOptions,
-      onProgress: (progress) => events.push(progress),
-    });
+    const { open } = await loadShardComponents(
+      "test.fromPretrained",
+      loaded,
+      files,
+      ["dit"],
+      NO_FAMILY_GATE,
+      { ...hubOptions, onProgress: (progress) => events.push(progress) },
+    );
     const afterLoad = events.length;
     const calls = mock.paths.length;
     // complete はファイル数ぶんちょうど（ロードを抜けた時点で全ファイルが終端に達している）。
@@ -359,6 +383,7 @@ Deno.test({
       loaded,
       files,
       ["dit"],
+      NO_FAMILY_GATE,
       hubOptions,
     );
 
@@ -383,10 +408,14 @@ Deno.test({
   fn: async () => {
     const { loaded, files, hubOptions } = await prepareTwoShard();
     const controller = new AbortController();
-    const { open } = await loadShardComponents("test.fromPretrained", loaded, files, ["dit"], {
-      ...hubOptions,
-      signal: controller.signal,
-    });
+    const { open } = await loadShardComponents(
+      "test.fromPretrained",
+      loaded,
+      files,
+      ["dit"],
+      NO_FAMILY_GATE,
+      { ...hubOptions, signal: controller.signal },
+    );
 
     // 呼び手の中断ノブは「このロード 1 回」の寿命のもの — ロード成功の後に発火するのは
     // `AbortSignal.timeout` でも画面のアンマウントでもごく普通の綴り。
@@ -411,12 +440,104 @@ Deno.test(
 
     const error = await assertRejects(
       () =>
-        loadShardComponents("test.fromPretrained", loaded, files, ["dit"], {
+        loadShardComponents("test.fromPretrained", loaded, files, ["dit"], NO_FAMILY_GATE, {
           ...hubOptions,
           signal: AbortSignal.abort(reason),
         }),
     );
     assertEquals(error, reason);
+  },
+);
+
+/** `models/karume-siglip2-base/karume.json` の `pipelineConfig` 実物（6 欄）。 */
+const SIGLIP2_CONFIG: Record<string, unknown> = {
+  imageWidth: 224,
+  imageHeight: 224,
+  imageMean: [0.5, 0.5, 0.5],
+  imageStd: [0.5, 0.5, 0.5],
+  hiddenDim: 768,
+  interpolation: "bilinear",
+};
+
+/**
+ * siglip2 の配布形（グラフ shard + 重み shard の 2 本）を疑似 HF に載せる。`patch` で
+ * `models["test"]` の欄を差し替えて**家族 admission だけ**が落ちる形を作る。
+ *
+ * MUST: グラフは実行可能な `linear` 1 段のまま — 非対応 op にすると runtime の capability 門
+ * （②が既に縛る側）で落ちてしまい、家族の門を通ったことの証明にならない。
+ */
+const prepareSiglip2 = async (patch: Record<string, unknown>) => {
+  const graph = graphShardBytes("linear", [["m.b", f32Tensor([2], 0.25)]]);
+  const weights = weightShardBytes([["m.w", f32Tensor([2, 2], 0.5)]]);
+  const refs = {
+    graph: await fileRef("vision/model-00000.safetensors", graph),
+    weights: await fileRef("vision/model-00001.safetensors", weights),
+  };
+  const manifest = manifestBytes({
+    test: {
+      pipeline: "siglip2/1",
+      weights: { vision: { f32: { shards: [refs.graph, refs.weights] } } },
+      assets: {},
+      quants: { f32: { weights: { vision: "f32" }, session: {} } },
+      defaultQuant: "f32",
+      pipelineConfig: SIGLIP2_CONFIG,
+      ...patch,
+    },
+  });
+  const mock = createMockFetch(
+    new Map([
+      [MANIFEST_PATH, manifest],
+      [refs.graph.path, graph],
+      [refs.weights.path, weights],
+    ]),
+  );
+  return { refs, mock, caches: new MemoryCacheStorage() };
+};
+
+Deno.test(
+  "家族 admission（pipeline major 不一致）はグラフ shard だけで落ち、重み shard は取得されない",
+  async () => {
+    const { refs, mock, caches } = await prepareSiglip2({ pipeline: "siglip2/99" });
+
+    const error = await assertRejects(
+      () =>
+        Siglip2Pipeline.fromPretrained(
+          { repo: REPO, revision: SHA, hubUrl: HUB_URL },
+          { fetch: mock.fetch, caches },
+        ),
+      Error,
+    );
+    // 落ちた理由が家族の major 門であること（別の失敗で「重みを取らなかった」が成立しない）。
+    if (!error.message.includes("major に未対応")) {
+      throw new Error(`家族 admission の文言でない: ${error.message}`);
+    }
+    // グラフ shard は取りに行き、重み shard は 1 度も叩いていない（ADR 0070 決定 5 の文面
+    // 「実行できないモデルの重みは 1 バイトも落とさない」が家族の門にも及んでいる）。
+    assertEquals(mock.paths.includes(refs.graph.path), true);
+    assertEquals(mock.paths.includes(refs.weights.path), false);
+  },
+);
+
+Deno.test(
+  "家族 admission（pipelineConfig の schema 違反）でも重み shard は取得されない",
+  async () => {
+    const { refs, mock, caches } = await prepareSiglip2({
+      pipelineConfig: { ...SIGLIP2_CONFIG, karumeUnknownKey: 1 },
+    });
+
+    const error = await assertRejects(
+      () =>
+        Siglip2Pipeline.fromPretrained(
+          { repo: REPO, revision: SHA, hubUrl: HUB_URL },
+          { fetch: mock.fetch, caches },
+        ),
+      Error,
+    );
+    if (!error.message.includes("karumeUnknownKey")) {
+      throw new Error(`pipelineConfig の門の文言でない: ${error.message}`);
+    }
+    assertEquals(mock.paths.includes(refs.graph.path), true);
+    assertEquals(mock.paths.includes(refs.weights.path), false);
   },
 );
 

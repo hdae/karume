@@ -10,8 +10,9 @@
  * いた。そのため ①実行できないモデル（非対応 op / 契約違反）でも重みを全部落とすまで分からず
  * ②ホスト RAM のピークがモデル全量だった。ここでは各コンポーネントの**先頭 shard（= グラフ
  * shard）だけ**を先に取って {@link prepareModel} に通し（capability 門と契約検査はこの時点で
- * 落ちる）、重み shard は admission を通った直後にキャッシュへ落としておき、Session を組む
- * その瞬間にキャッシュから 1 本ずつ流す（ホスト RAM に載るのは常に「今の 1 本」だけ）。
+ * 落ちる）、続けて家族側の門（{@link FamilyAdmission}）を通し、重み shard は admission を
+ * 通った直後にキャッシュへ落としておき、Session を組むその瞬間にキャッシュから 1 本ずつ流す
+ * （ホスト RAM に載るのは常に「今の 1 本」だけ）。
  *
  * MUST: admission を通したら `PreparedModel` は**その場で捨てる**（グラフ shard のバイト列を
  * 握り続けない）。配布形のグラフ shard は「`karume_ir` + 小テンソル」ではなく実重みを最大
@@ -78,12 +79,32 @@ export const wholeComponent = (model: KarumeModel): ModelComponent => ({
   createSession: (gpu, options = {}) => createSession(gpu, model, options),
 });
 
+/**
+ * 家族側の admission — 「この manifest / このグラフでは、この家族として実行できない」を
+ * **重み shard を 1 バイトも取る前に**落とすための席（ADR 0070 決定 5 / CG3-1）。
+ *
+ * グラフ admission（{@link prepareModel}）の直後・`prefetchAssets` の**前**に 1 度だけ呼ばれ、
+ * 手元にあるのは各コンポーネントの `IrGraph`（{@link ComponentOpener} 経由）と、家族が閉包で
+ * 持ち込む manifest / 構築オプションだけ。extras / assets のバイト列はまだ無い（あれを待つと
+ * 重み prefetch より前という位置が保てない）ので、資産を要る検査は後段に残る。
+ *
+ * MUST: 家族はここで**自分の門を全部**通し、戻り値（parse 済み config / quant / 開いた
+ * コンポーネント）を後段の状態構築へそのまま渡す — 同じ検査を前段と後段に 2 実装持つと、
+ * 片方だけ更新された瞬間に「前は通るが後で落ちる」形へ戻る。
+ *
+ * NOTE: この席は将来「admission の前倒しで extras の取得を並行に始める」拡張（DL スロット
+ * 改善）が同居する予定の場所でもある。
+ */
+export type FamilyAdmission<Admitted> = (open: ComponentOpener) => Admitted | Promise<Admitted>;
+
 /** {@link loadShardComponents} の戻り。 */
-export type ShardComponents = {
+export type ShardComponents<Admitted> = {
   /** weights コンポーネントの供給口（渡した `componentKeys` 以外は fail loudly）。 */
   readonly open: ComponentOpener;
   /** コンポーネント以外の資産（extras / assets）のバイト列 — 従来どおり全量で受け取る。 */
   readonly assets: Record<string, Uint8Array<ArrayBuffer>>;
+  /** 家族 admission（{@link FamilyAdmission}）が確定させた材料。 */
+  readonly admitted: Admitted;
 };
 
 /**
@@ -161,24 +182,30 @@ const aggregateProgress = (
 };
 
 /**
- * グラフ shard だけを取って admission を通し、通った後に重み shard を永続キャッシュへ落とし、
- * 残りの資産（extras / assets）を全量で取る。
+ * グラフ shard だけを取って admission（グラフ + 家族）を通し、通った後に重み shard を永続
+ * キャッシュへ落とし、残りの資産（extras / assets）を全量で取る。
  *
  * MUST: グラフ shard は**全コンポーネントぶんを 1 回の `streamAssets`** で流す — 家族ごとに
  * 呼び分けると取得層の同時取得が効かず、直列 DL に落ちる。同じ shard を 2 つのコンポーネントが
  * 共有する manifest は逐次面が重複として落とす（現行の配布形には存在しない）。
  *
+ * MUST: `admit`（{@link FamilyAdmission}）は省略できない席にする — 「実行できないモデルの
+ * 重みは 1 バイトも落とさない」（決定 5）は runtime の capability 門だけでは満たせず、家族の
+ * 門（pipeline 名 / major・`pipelineConfig` の schema・グラフと config の突合・共有 GPU の
+ * feature）まで前段に揃って初めて文面どおりになる。
+ *
  * NOTE: 逐次面は相 1 で渡した ref を全部キャッシュへ落としてから相 2 で 1 本ずつ引き渡すので、
  * 1 本目の admission が走るのは「全コンポーネントのグラフ shard が揃った後」になる。
  * 「実行できないモデルの**重み**を落とさない」という決定 5 の目的は満たす。
  */
-export const loadShardComponents = async (
+export const loadShardComponents = async <Admitted>(
   where: string,
   loaded: LoadedManifest,
   files: ResolvedFiles,
   componentKeys: readonly string[],
+  admit: FamilyAdmission<Admitted>,
   options: StreamAssetsOptions = {},
-): Promise<ShardComponents> => {
+): Promise<ShardComponents<Admitted>> => {
   const aggregated = aggregateProgress(files, options.onProgress);
   const hubOptions: StreamAssetsOptions = {
     ...options,
@@ -209,15 +236,6 @@ export const loadShardComponents = async (
     );
   }
 
-  // MUST: 重み shard の prefetch は admission の**後**に置く（決定 5 — 実行できないモデルの
-  // 重みは 1 バイトも落とさない）。ここで全コンポーネントぶんを 1 回で落とすのは、Session を
-  // 遅延構築する家族で「重みの DL が初回実行まで遅れ、ロード進捗にも現れない」形を無くすため
-  // （進捗の `total` は元から全ファイルの合計なので、集約は追加の細工なしで整合する）。
-  // グラフ shard は上の `streamAssets` の相 1 が既にキャッシュへ落としているので、ここで
-  // 落とすのは 2 本目以降だけでよい。
-  const weightRefs = shards.flatMap((componentRefs) => componentRefs.slice(1));
-  if (weightRefs.length > 0) await prefetchAssets(loaded, weightRefs, hubOptions);
-
   // Session 構築時の相 2 は prefetch 済みキャッシュの読み直しなので、**進捗は流さない** —
   // 流すと `complete` がロード完了の後にもう一度出て、集約 `loaded` が二重計上になる
   // （「ロードが終わったのに進捗が動く」列になる）。
@@ -246,6 +264,33 @@ export const loadShardComponents = async (
     });
   });
 
+  const open: ComponentOpener = (key) => {
+    const component = components.get(key);
+    if (component === undefined) {
+      throw new Error(
+        `${where}: コンポーネント '${key}' は取得していない` +
+          `（取得済み: ${[...components.keys()].join(" / ")}）`,
+      );
+    }
+    return component;
+  };
+
+  // 家族 admission — グラフ admission の直後・重み prefetch の前（{@link FamilyAdmission}）。
+  // 供給口は下で返すものと**同じ 1 本**を渡す（前段だけ別の開き方をすると、後段が握るのと
+  // 別のコンポーネントを検査したことになる）。
+  const admitted = await admit(open);
+
+  // MUST: 重み shard の prefetch は admission **2 つとも**（グラフ = `prepareModel` / 家族 =
+  // 上の `admit`）の後に置く（決定 5 — 実行できないモデルの重みは 1 バイトも落とさない。
+  // 文面が無限定なので、家族の門が後段に残っていると実装がこの MUST より狭くなる — CG3-1）。
+  // ここで全コンポーネントぶんを 1 回で落とすのは、Session を遅延構築する家族で
+  // 「重みの DL が初回実行まで遅れ、ロード進捗にも現れない」形を無くすため
+  // （進捗の `total` は元から全ファイルの合計なので、集約は追加の細工なしで整合する）。
+  // グラフ shard は上の `streamAssets` の相 1 が既にキャッシュへ落としているので、ここで
+  // 落とすのは 2 本目以降だけでよい。
+  const weightRefs = shards.flatMap((componentRefs) => componentRefs.slice(1));
+  if (weightRefs.length > 0) await prefetchAssets(loaded, weightRefs, hubOptions);
+
   // 残りは extras（`<weights>.<extra>`）と assets — IR コンテナとは限らないので全量面のまま。
   let rest: ResolvedFiles = {};
   for (const key of Object.keys(files)) {
@@ -253,17 +298,5 @@ export const loadShardComponents = async (
   }
   const assets = Object.keys(rest).length === 0 ? {} : await fetchAssets(loaded, rest, hubOptions);
 
-  return {
-    open: (key) => {
-      const component = components.get(key);
-      if (component === undefined) {
-        throw new Error(
-          `${where}: コンポーネント '${key}' は取得していない` +
-            `（取得済み: ${[...components.keys()].join(" / ")}）`,
-        );
-      }
-      return component;
-    },
-    assets,
-  };
+  return { open, assets, admitted };
 };

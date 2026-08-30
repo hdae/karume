@@ -77,6 +77,7 @@ import {
   loadManifest,
   type Manifest,
   type ModelEntry,
+  type Quant,
   resolveFiles,
 } from "@karume/hub";
 
@@ -332,19 +333,33 @@ type VowelDetectorState = {
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
+/** 家族 admission（{@link admitVowelDetector}）が確定させる材料。 */
+type VowelDetectorAdmission = {
+  readonly config: VowelDetectorPipelineConfig;
+  readonly quantName: string;
+  readonly quant: Quant;
+  readonly graph: ModelComponent;
+  /** 時間軸の記号名（`assertGraph` がグラフから読んだもの）。 */
+  readonly symbol: string;
+};
+
 /**
- * manifest + 資産から実行状態を組む（{@link VowelDetectorPipeline.fromAssets} の中身）。
+ * この manifest とこのグラフを vowel-detector として実行できるかを見る（`hub/components.ts`
+ * の家族 admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
  *
- * MUST: manifest の契約違反と**資産の解析・グラフとの突合**は **GPU を取りに行く前**に落とす。
- * 順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に
- * 伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ（ADR 0028）。
+ * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+ * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
+ * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
+ * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+ *
+ * NOTE: 資産（`mel_basis`）の解析はこの席へ置けない — admission の時点では extras を
+ * まだ取っていない（取ってからでは重み prefetch より前という位置が保てない）。
  */
-const openVowelDetectorState = async (
-  input: VowelDetectorAssets,
+const admitVowelDetector = (
+  manifest: Manifest,
   open: ComponentOpener,
-  options: VowelDetectorPipelineOptions = {},
-): Promise<VowelDetectorState> => {
-  const { manifest, assets } = input;
+  options: VowelDetectorPipelineOptions,
+): VowelDetectorAdmission => {
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
@@ -381,11 +396,40 @@ const openVowelDetectorState = async (
 
   const graph = open(GRAPH_ROLE);
   const symbol = assertGraph(graph, config);
+
+  // MUST: 共有 GPU の能力不足はこの席で落とす — 自前で取る場合と違って `acquireGpu` を
+  // 待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の網羅表は
+  // `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  if (options.gpu !== undefined) {
+    assertGpuFeaturesGranted(
+      quant.gpuFeatures,
+      options.gpu,
+      `VowelDetectorPipeline: quant '${quantName}'`,
+    );
+  }
+
+  return { config, quantName, quant, graph, symbol };
+};
+
+/**
+ * admission を通った材料 + 資産から実行状態を組む。
+ *
+ * MUST: 資産の解析は **GPU を取りに行く前**に落とす。順序がずれると、GPU の無い環境では
+ * 別の例外に化けて「何が悪かったのか」が読み手に伝わらない。GPU 取得後に許される検査は
+ * GPU の能力（shader-f16）だけ（ADR 0028）。
+ */
+const openVowelDetectorState = async (
+  admitted: VowelDetectorAdmission,
+  assets: VowelDetectorAssets["assets"],
+  options: VowelDetectorPipelineOptions = {},
+): Promise<VowelDetectorState> => {
+  const { config, quant, quantName, graph, symbol } = admitted;
   const melBasis = parseMelBasis(assetBuffer(assets, MEL_BASIS));
 
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-  // 渡された場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。要求と
-  // 検査の網羅表は `session/gpu-features.ts`（7 家族で 1 本）。
+  // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
+  // {@link admitVowelDetector} が既に同じ 1 本で見ているが、自前で取った device は
+  // ここが唯一の門）。
   const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
   const ownsGpu = options.gpu === undefined;
   try {
@@ -524,24 +568,27 @@ export class VowelDetectorPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const files = resolveFiles(loaded.manifest, selection);
-    const { open, assets } = await loadShardComponents(
+    const buildOptions: VowelDetectorPipelineOptions = {
+      ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+      ...selection,
+      ...(options.onRunDiagnostics === undefined
+        ? {}
+        : { onRunDiagnostics: options.onRunDiagnostics }),
+    };
+    // 家族の門は admission 席で通す（重み shard を取る前 — `hub/components.ts`）。
+    const { admitted, assets } = await loadShardComponents(
       "VowelDetectorPipeline.fromPretrained",
       loaded,
       files,
       [GRAPH_ROLE],
+      (open) => admitVowelDetector(loaded.manifest, open, buildOptions),
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
       },
     );
     return new VowelDetectorPipeline(
-      await openVowelDetectorState({ manifest: loaded.manifest, assets }, open, {
-        ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-        ...selection,
-        ...(options.onRunDiagnostics === undefined
-          ? {}
-          : { onRunDiagnostics: options.onRunDiagnostics }),
-      }),
+      await openVowelDetectorState(admitted, assets, buildOptions),
     );
   }
 
@@ -553,8 +600,9 @@ export class VowelDetectorPipeline {
     input: VowelDetectorAssets,
     options: VowelDetectorPipelineOptions = {},
   ): Promise<VowelDetectorPipeline> {
+    const admitted = admitVowelDetector(input.manifest, assetOpener(input.assets), options);
     return new VowelDetectorPipeline(
-      await openVowelDetectorState(input, assetOpener(input.assets), options),
+      await openVowelDetectorState(admitted, input.assets, options),
     );
   }
 

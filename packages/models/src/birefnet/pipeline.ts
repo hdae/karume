@@ -74,6 +74,7 @@ import {
   loadManifest,
   type Manifest,
   type ModelEntry,
+  type Quant,
   resolveFiles,
 } from "@karume/hub";
 
@@ -336,19 +337,28 @@ type BirefnetState = {
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
+/** 家族 admission（{@link admitBirefnet}）が確定させる材料。 */
+type BirefnetAdmission = {
+  readonly config: BirefnetPipelineConfig;
+  readonly quantName: string;
+  readonly quant: Quant;
+  readonly matte: ModelComponent;
+};
+
 /**
- * manifest + 資産から実行状態を組む（{@link BirefnetPipeline.fromAssets} の中身）。
+ * この manifest とこのグラフを birefnet として実行できるかを見る（`hub/components.ts` の
+ * 家族 admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
  *
- * MUST: manifest の契約違反と**資産の解析・グラフとの突合**は **GPU を取りに行く前**に落とす。
- * 順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に
- * 伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ（ADR 0028）。
+ * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+ * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
+ * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
+ * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
  */
-const openBirefnetState = async (
-  input: BirefnetAssets,
+const admitBirefnet = (
+  manifest: Manifest,
   open: ComponentOpener,
-  options: BirefnetPipelineOptions = {},
-): Promise<BirefnetState> => {
-  const { manifest } = input;
+  options: BirefnetPipelineOptions,
+): BirefnetAdmission => {
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
@@ -398,9 +408,33 @@ const openBirefnetState = async (
   assertStaticDim(matte, PIXEL_VALUES, 3, config.imageWidth, "imageWidth");
   assertMatteShape(matte, config, "マットの形");
 
+  // MUST: 共有 GPU の能力不足はこの席で落とす — 自前で取る場合と違って `acquireGpu` を
+  // 待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の網羅表は
+  // `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  if (options.gpu !== undefined) {
+    assertGpuFeaturesGranted(
+      quant.gpuFeatures,
+      options.gpu,
+      `BirefnetPipeline: quant '${quantName}'`,
+    );
+  }
+
+  return { config, quantName, quant, matte };
+};
+
+/**
+ * admission を通った材料から実行状態を組む（GPU 取得と Session 構築だけ）。
+ *
+ * MUST: GPU 取得後に許される検査は GPU の能力（shader-f16）だけ（ADR 0028）。
+ */
+const openBirefnetState = async (
+  admitted: BirefnetAdmission,
+  options: BirefnetPipelineOptions = {},
+): Promise<BirefnetState> => {
+  const { config, quant, quantName, matte } = admitted;
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-  // 渡された場合は要求できないので、能力が足りないことを**ここで**名指しして落とす。要求と
-  // 検査の網羅表は `session/gpu-features.ts`（7 家族で 1 本）。
+  // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
+  // {@link admitBirefnet} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
   const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
   const ownsGpu = options.gpu === undefined;
   try {
@@ -499,25 +533,26 @@ export class BirefnetPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const files = resolveFiles(loaded.manifest, selection);
-    const { open, assets } = await loadShardComponents(
+    const buildOptions: BirefnetPipelineOptions = {
+      ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+      ...selection,
+      ...(options.onRunDiagnostics === undefined
+        ? {}
+        : { onRunDiagnostics: options.onRunDiagnostics }),
+    };
+    // 家族の門は admission 席で通す（重み shard を取る前 — `hub/components.ts`）。
+    const { admitted } = await loadShardComponents(
       "BirefnetPipeline.fromPretrained",
       loaded,
       files,
       [MATTE],
+      (open) => admitBirefnet(loaded.manifest, open, buildOptions),
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
       },
     );
-    return new BirefnetPipeline(
-      await openBirefnetState({ manifest: loaded.manifest, assets }, open, {
-        ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-        ...selection,
-        ...(options.onRunDiagnostics === undefined
-          ? {}
-          : { onRunDiagnostics: options.onRunDiagnostics }),
-      }),
-    );
+    return new BirefnetPipeline(await openBirefnetState(admitted, buildOptions));
   }
 
   /**
@@ -528,7 +563,8 @@ export class BirefnetPipeline {
     input: BirefnetAssets,
     options: BirefnetPipelineOptions = {},
   ): Promise<BirefnetPipeline> {
-    return new BirefnetPipeline(await openBirefnetState(input, assetOpener(input.assets), options));
+    const admitted = admitBirefnet(input.manifest, assetOpener(input.assets), options);
+    return new BirefnetPipeline(await openBirefnetState(admitted, options));
   }
 
   /**

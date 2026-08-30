@@ -53,6 +53,7 @@ import {
   loadManifest,
   type Manifest,
   type ModelEntry,
+  type Quant,
   resolveFiles,
 } from "@karume/hub";
 
@@ -561,6 +562,14 @@ type AnimaState = {
   ) => void;
 };
 
+/** 家族 admission（`AnimaPipeline.#admit`）が確定させる材料。 */
+type AnimaAdmission = {
+  readonly config: AnimaPipelineConfig;
+  readonly quantName: string;
+  readonly quant: Quant;
+  readonly sessionOptions: SessionOptions;
+};
+
 /**
  * Anima のテキスト → 画像パイプライン。
  *
@@ -612,37 +621,48 @@ export class AnimaPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const files = resolveFiles(loaded.manifest, selection);
-    const { open, assets } = await loadShardComponents(
-      "AnimaPipeline.fromPretrained",
-      loaded,
-      files,
-      [TEXT_ENCODER, TEXT_CONDITIONER, TRANSFORMER, VAE_DECODER],
-      {
-        ...hubOptions,
-        ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
-      },
-    );
     // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
-    return await AnimaPipeline.#build({ manifest: loaded.manifest, assets }, open, {
+    const buildOptions: AnimaPipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...selection,
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
+    };
+    // 家族の門は admission 席で通す（重み shard を取る前 — `src/hub/components.ts`）。
+    const { admitted, assets, open } = await loadShardComponents(
+      "AnimaPipeline.fromPretrained",
+      loaded,
+      files,
+      [TEXT_ENCODER, TEXT_CONDITIONER, TRANSFORMER, VAE_DECODER],
+      () => AnimaPipeline.#admit(loaded.manifest, buildOptions),
+      {
+        ...hubOptions,
+        ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+      },
+    );
+    return await AnimaPipeline.#build(admitted, assets, open, buildOptions);
   }
 
   /**
-   * 構築の共通実装（{@link AnimaPipeline.fromAssets} と `fromPretrained` が共有する 1 本）。
-   * 2 面の違いは `open`（コンポーネントの供給口）だけで、検査も順序も同じものを通る。
+   * この manifest を anima として実行できるかを見る（`src/hub/components.ts` の家族
+   * admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
+   *
+   * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+   * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
+   * MUST: manifest の契約違反は **GPU を取りに行く前**に落とす（他 6 家族と同じ順序）。
+   *
+   * NOTE: グラフを受け取らないのは、この家族が「グラフ宣言 × pipelineConfig」の突合を構築時に
+   * 持たないため（patch 幾何と rope は解像度ごとに `planDynDit` が生成時に導く）。資産
+   * （tokenizer 2 本 / rope 素表）の解析もこの席へは置けない — admission の時点では extras を
+   * まだ取っていない（取ってからでは重み prefetch より前という位置が保てない）ので
+   * {@link AnimaPipeline.#build} に残る。
    */
-  static async #build(
-    input: AnimaAssets,
-    open: ComponentOpener,
+  static #admit(
+    manifest: Manifest,
     options: AnimaPipelineOptions,
-  ): Promise<AnimaPipeline> {
-    const { manifest, assets } = input;
+  ): AnimaAdmission {
     // 中断の検査は**段の境目**に置く（各段は不可分 — 3.7GiB の openModel を途中で畳む口は無い）。
     // 入口が最初の 1 本: 中断済みで呼ばれたら資産に 1 バイトも触らずに返す。
     options.signal?.throwIfAborted();
@@ -680,6 +700,35 @@ export class AnimaPipeline {
     const quant = entry.quants[quantName];
     const sessionOptions = toSessionOptions(quant.session);
 
+    // MUST: 共有 GPU の能力不足はこの席で落とす — 自前で取る場合と違って `acquireGpu` を
+    // 待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の網羅表は
+    // `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+    if (options.gpu !== undefined) {
+      assertGpuFeaturesGranted(
+        quant.gpuFeatures,
+        options.gpu,
+        `AnimaPipeline: quant '${quantName}'`,
+      );
+    }
+
+    return { config, quantName, quant, sessionOptions };
+  }
+
+  /**
+   * admission を通った材料 + 資産から組む（{@link AnimaPipeline.fromAssets} と
+   * `fromPretrained` が共有する 1 本）。2 面の違いは `open`（コンポーネントの供給口）だけで、
+   * 検査も順序も同じものを通る。
+   *
+   * MUST: 資産の解析は **GPU を取りに行く前**（docstring の順序 MUST）。
+   */
+  static async #build(
+    admitted: AnimaAdmission,
+    assets: AnimaAssets["assets"],
+    open: ComponentOpener,
+    options: AnimaPipelineOptions,
+  ): Promise<AnimaPipeline> {
+    const { config, quant, quantName, sessionOptions } = admitted;
+
     // 資産の解析は GPU より前（docstring の順序 MUST）。3.7GiB の DiT を開くほうが device 生成
     // より重いが、壊れた配布形の真因を消さないほうを採る — GPU 無し環境では acquireGpu 自体が
     // 落ちるので、後ろに置くと「資産が無い」が永久に見えない。
@@ -701,9 +750,10 @@ export class AnimaPipeline {
     await settleAbort(options.signal);
 
     // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-    // 渡された場合は要求できないので、能力が足りないことを**ここで**名指しして落とす — 通すと
-    // Session 構築まで進んでから落ちる（あるいは黙って別の経路へ縮退する）。要求と検査の
-    // 網羅表は `session/gpu-features.ts`（7 家族で 1 本）。
+    // 渡された場合は要求できないので、能力が足りないことを名指しして落とす — 通すと Session
+    // 構築まで進んでから落ちる（あるいは黙って別の経路へ縮退する）。共有 GPU は
+    // {@link AnimaPipeline.#admit} が既に同じ 1 本で見ているが、自前で取った device は
+    // ここが唯一の門。
     const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
     const ownsGpu = options.gpu === undefined;
     try {
@@ -759,7 +809,13 @@ export class AnimaPipeline {
     input: AnimaAssets,
     options: AnimaPipelineOptions = {},
   ): Promise<AnimaPipeline> {
-    return await AnimaPipeline.#build(input, assetOpener(input.assets), options);
+    const admitted = AnimaPipeline.#admit(input.manifest, options);
+    return await AnimaPipeline.#build(
+      admitted,
+      input.assets,
+      assetOpener(input.assets),
+      options,
+    );
   }
 
   /**

@@ -148,6 +148,8 @@ const main = async (): Promise<void> => {
     loaded,
     files,
     ["dit"],
+    // 家族 admission の席（この台本が測るのは常駐量なので、門は 1 つも置かない）。
+    () => undefined,
     hubOptions,
   );
 
