@@ -20,10 +20,17 @@
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, createSession, openModel, parseSafetensors, type Tensor } from "../mod.ts";
+import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import {
+  modelPresent,
+  readShard,
+  resolveShards,
+  shardTensorNames,
+  streamShards,
+} from "./helpers/shard-files.ts";
 
 /**
  * 実重み SBV2 dp の torch CPU 期待値との突合に使う許容誤差。
@@ -555,6 +562,9 @@ const readBuffer = async (root: URL, target: string, file: string): Promise<Arra
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
+/** ターゲットの代表 path（配布形は shard 列 — 見つけ方は `resolveShards` が持つ）。 */
+const modelUrl = (root: URL, target: string): URL => new URL(`${target}/${MODEL_FILE}`, root);
+
 for (const series of SERIES) {
   const targets = discoverTargets(series.root);
   const cases = targets.flatMap((target) => discoverCases(series.root, target));
@@ -588,8 +598,7 @@ for (const series of SERIES) {
           [...EXPECTED_CASES],
           `${target} の golden ケース`,
         );
-        const model = new URL(`${target}/${MODEL_FILE}`, series.root);
-        assert(Deno.statSync(model).isFile, `${target}/${MODEL_FILE} が無い`);
+        assert(modelPresent(modelUrl(series.root, target)), `${target}/${MODEL_FILE} が無い`);
       }
     },
   });
@@ -600,11 +609,12 @@ for (const series of SERIES) {
         `SBV2 golden 突合: ${series.name} / ${target} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: !available || !GPU_AVAILABLE,
       fn: async () => {
-        const [modelBytes, ioBytes] = await Promise.all([
-          readBuffer(series.root, target, MODEL_FILE),
+        const shards = resolveShards(modelUrl(series.root, target));
+        const [graphShard, ioBytes] = await Promise.all([
+          readShard(shards[0]),
           readBuffer(series.root, target, ioFile),
         ]);
-        const parsed = openModel(modelBytes);
+        const parsed = prepareModel(graphShard);
         const io = parseSafetensors(ioBytes);
         // Object.hasOwn で見る（素の `tolerances[target]` はプロトタイプ由来のキーを拾う）。
         assert(
@@ -633,12 +643,15 @@ for (const series of SERIES) {
         // i8 は companion scale が無いと値が復元できない（ADR 0019）。宣言と実体の両方を見る
         // — 宣言だけならキーが実在しない形が、実体だけなら別の重みの scale を読む形が通る。
         if (series.compressedStorage === "i8") {
+          // 実体は shard 列のどこかに居るので、名前の和で見る（どの shard に居るかまでは
+          // ここの関心ではない — co-shard 契約は container の shard 進行検証が持つ）。
+          const present = await shardTensorNames(shards);
           for (const [name, initializer] of Object.entries(parsed.graph.initializers)) {
             if (initializer.storage.dtype !== "i8") continue;
             const scale = initializer.storage.scale;
             assert(scale !== undefined, `${series.name}/${target}: '${name}' に scale 宣言が無い`);
             assert(
-              parsed.file.tensors.has(scale),
+              present.has(scale),
               `${series.name}/${target}: '${name}' の scale '${scale}' が資産に無い`,
             );
           }
@@ -662,7 +675,7 @@ for (const series of SERIES) {
         }
 
         const gpu = await acquireGpu();
-        const session = await createSession(gpu, parsed);
+        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
         try {
           const outputs = await session.run(inputs);
           assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

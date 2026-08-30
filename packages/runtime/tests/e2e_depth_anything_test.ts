@@ -52,16 +52,16 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
-  createSession,
-  type KarumeModel,
-  openModel,
   parseSafetensors,
+  type PreparedModel,
+  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
  * **golden の入力で回した**ときの許容誤差（合成 4 + 実画像 4 の全 8 ケース共通）。
@@ -160,7 +160,7 @@ const readBuffer = async (file: string): Promise<ArrayBuffer> => {
 };
 
 /** golden の入力を宣言 dtype の view で組む（記号次元が無いので明示 bindings も不要）。 */
-const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, Tensor> => {
+const goldenInputs = (parsed: PreparedModel, io: SafetensorsFile): Record<string, Tensor> => {
   const inputs: Record<string, Tensor> = {};
   for (const spec of parsed.graph.inputs) {
     const view = io.tensors.get(`input.${spec.name}`);
@@ -171,7 +171,7 @@ const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, 
 };
 
 /** グラフ入力の静的次元（記号次元は無い — `depth_anything/export.py` の `symbol_names=()`）。 */
-const staticDim = (parsed: KarumeModel, axis: number): number => {
+const staticDim = (parsed: PreparedModel, axis: number): number => {
   const dim = parsed.graph.inputs[0].shape[axis];
   assert(typeof dim === "number", `pixel_values の軸 ${axis} が記号次元 '${String(dim)}'`);
   return dim;
@@ -206,16 +206,6 @@ const rampCorrelation = (depth: Float32Array, size: number): number => {
   return covariance / Math.sqrt(depthNorm * planeNorm);
 };
 
-/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
-const fileExists = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
 const DISCOVERED = discoverCases(SERIES_ROOT);
 const realNames = new Set<string>(REAL_CASES);
 const FOUND_SYNTHETIC = DISCOVERED.filter((name) => !realNames.has(name));
@@ -227,7 +217,7 @@ const AVAILABLE = DISCOVERED.length > 0;
  * golden が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、`ignore: !AVAILABLE` だと
  * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
  */
-const ANY_PRESENT = AVAILABLE || fileExists(new URL(MODEL_FILE, SERIES_ROOT));
+const ANY_PRESENT = AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!AVAILABLE) {
   console.warn(
@@ -254,7 +244,7 @@ Deno.test({
       `${SERIES_ROOT.pathname} の実画像 golden が ${FOUND_REAL.length}/${REAL_CASES.length} 本` +
         `（採り直す: ${GENERATE}）`,
     );
-    assert(fileExists(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
+    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
   },
 });
 
@@ -263,11 +253,12 @@ for (const caseName of DISCOVERED) {
     name: `Depth Anything golden 突合: ${caseName}（golden 入力 / 実 GPU 対 torch CPU 期待値）`,
     ignore: !AVAILABLE || !GPU_AVAILABLE,
     fn: async () => {
-      const [modelBytes, ioBytes] = await Promise.all([
-        readBuffer(MODEL_FILE),
+      const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+      const [graphShard, ioBytes] = await Promise.all([
+        readShard(shards[0]),
         readBuffer(`${IO_PREFIX}${caseName}${IO_SUFFIX}`),
       ]);
-      const parsed = openModel(modelBytes);
+      const parsed = prepareModel(graphShard);
       const io = parseSafetensors(ioBytes);
 
       // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -280,7 +271,7 @@ for (const caseName of DISCOVERED) {
       const inputs = goldenInputs(parsed, io);
 
       const gpu = await acquireGpu();
-      const session = await createSession(gpu, parsed);
+      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
       try {
         const outputs = await session.run(inputs);
         assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
@@ -313,14 +304,14 @@ Deno.test({
     // いなければ落ちる。閾値は置かない（順序そのものが検査対象 — `depth_anything/export.py`
     // の `_sanity` と同じ形で、あちらは torch 側に掛かっている）。実測は
     // ramp 0.7705 / noise 0.4128 / checker 0.0414 / disc −0.1837（torch 側と 4 桁一致）。
-    const modelBytes = await readBuffer(MODEL_FILE);
-    const parsed = openModel(modelBytes);
+    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+    const parsed = prepareModel(await readShard(shards[0]));
     const size = staticDim(parsed, 3);
     assertEquals(size, staticDim(parsed, 2), "相関は正方形の入力を前提にする");
     const [name] = parsed.graph.outputs;
 
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, parsed);
+    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
     const correlations = new Map<string, number>();
     try {
       for (const caseName of SYNTHETIC_CASES) {

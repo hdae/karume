@@ -14,7 +14,8 @@
 // `symbols.json` が無い環境では SKIP する。
 
 import { assert, assertEquals } from "@std/assert";
-import { openModel, parseSafetensors } from "@karume/runtime";
+import { parseSafetensors, prepareModel } from "@karume/runtime";
+import { readShard, resolveShards } from "../../runtime/tests/helpers/shard-files.ts";
 import { buildRelPosTables } from "../src/sbv2/text/rel-pos-tables.ts";
 import { parseJpExtraRules } from "../src/sbv2/text/symbols.ts";
 
@@ -133,10 +134,8 @@ Deno.test({
     // 昇格が効いていれば、T で切り出す `sym_prefix_slice` は 1 本も残らない（残っていたら
     // Tmax=512 の `[1,512,512]` を抱えたまま = 2MiB の死荷重）。値は正しいまま容量だけが
     // 戻る類なので、E2E では捕まらない。
-    const bytes = await Deno.readFile(new URL(MODEL_FILE, SERIES_ROOT));
-    const model = openModel(
-      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-    );
+    // グラフを持つのは配布形の**先頭 shard** だけ（ADR 0081）。
+    const model = prepareModel(await readShard(resolveShards(new URL(MODEL_FILE, SERIES_ROOT))[0]));
     const baked = model.graph.nodes.filter((node) => node.op === "sym_prefix_slice");
     assertEquals(baked.length, 0, "焼き込み表（sym_prefix_slice）の本数");
     assertEquals(

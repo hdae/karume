@@ -32,16 +32,16 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
-  createSession,
-  type KarumeModel,
-  openModel,
   parseSafetensors,
+  type PreparedModel,
+  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
  * 合成 golden（torch CPU 期待値）との突合に使う許容誤差。
@@ -122,16 +122,6 @@ const discoverGolden = (root: URL): readonly string[] =>
     .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
     .sort();
 
-/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
-const exists = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
 const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   const bytes = await Deno.readFile(new URL(file, root));
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -143,7 +133,7 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
  * MUST: 明示 bindings を渡さない — この門は `2T` の派生次元から `T` を解く経路（ADR 0057）
  * そのものを踏む席で、seed を渡すと解かせる相手が消える。
  */
-const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, Tensor> => {
+const goldenInputs = (parsed: PreparedModel, io: SafetensorsFile): Record<string, Tensor> => {
   const inputs: Record<string, Tensor> = {};
   for (const spec of parsed.graph.inputs) {
     const view = io.tensors.get(`input.${spec.name}`);
@@ -159,7 +149,7 @@ const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, 
  * MUST: 落とさない。長さを固定して焼いた古い形は入出力の名前も階数も同じなので、置き換わって
  * いても「その 1 長のケースだけ」は緑のまま通る。
  */
-const assertSymbolicTimeAxis = (parsed: KarumeModel): void => {
+const assertSymbolicTimeAxis = (parsed: PreparedModel): void => {
   assertEquals(parsed.graph.symbols, ["T"], `${SERIES_NAME} の記号次元`);
   assertEquals(
     parsed.graph.inputs[0].shape,
@@ -182,7 +172,7 @@ const available = golden.length > 0;
  * golden が全滅してモデルだけ残った欠損は `available` では偽になり、`ignore: !available` だと
  * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
  */
-const anyPresent = available || exists(new URL(MODEL_FILE, SERIES_ROOT));
+const anyPresent = available || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!available) {
   console.warn(
@@ -198,7 +188,7 @@ Deno.test({
   ignore: !anyPresent,
   fn: () => {
     assertEquals(golden, [...EXPECTED_GOLDEN], `${SERIES_ROOT.pathname} の golden ケース`);
-    assert(exists(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
+    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
   },
 });
 
@@ -207,11 +197,12 @@ for (const caseName of golden) {
     name: `母音検出 golden 突合: ${caseName}（実 GPU / torch CPU 期待値）`,
     ignore: !available || !GPU_AVAILABLE,
     fn: async () => {
-      const [modelBytes, ioBytes] = await Promise.all([
-        readBuffer(SERIES_ROOT, MODEL_FILE),
+      const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+      const [graphShard, ioBytes] = await Promise.all([
+        readShard(shards[0]),
         readBuffer(SERIES_ROOT, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
       ]);
-      const parsed = openModel(modelBytes);
+      const parsed = prepareModel(graphShard);
       const io = parseSafetensors(ioBytes);
 
       // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -227,7 +218,7 @@ for (const caseName of golden) {
       assertSymbolicTimeAxis(parsed);
 
       const gpu = await acquireGpu();
-      const session = await createSession(gpu, parsed);
+      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
       try {
         const outputs = await session.run(goldenInputs(parsed, io));
         assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

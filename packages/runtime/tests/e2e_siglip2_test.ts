@@ -49,16 +49,16 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
-  createSession,
-  type KarumeModel,
-  openModel,
   parseSafetensors,
+  type PreparedModel,
+  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
  * 実重み SigLIP2 **base**（`patch16-224`）の torch CPU 期待値との突合に使う許容誤差。
@@ -277,18 +277,8 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
-const fileExists = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
 /** golden の入力を宣言 dtype の view で組む（記号次元が無いので明示 bindings も不要）。 */
-const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, Tensor> => {
+const goldenInputs = (parsed: PreparedModel, io: SafetensorsFile): Record<string, Tensor> => {
   const inputs: Record<string, Tensor> = {};
   for (const spec of parsed.graph.inputs) {
     const view = io.tensors.get(`input.${spec.name}`);
@@ -326,7 +316,7 @@ for (const series of SERIES) {
    * golden が全滅してモデルだけ残った欠損は `available` では偽になり、`ignore: !available`
    * だと完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
    */
-  const anyPresent = available || fileExists(new URL(MODEL_FILE, root));
+  const anyPresent = available || modelPresent(new URL(MODEL_FILE, root));
 
   if (!available) {
     console.warn(
@@ -355,7 +345,7 @@ for (const series of SERIES) {
         `${root.pathname} の実画像 golden が ${realCases.length}/${REAL_CASES.length} 本` +
           `（採り直す: ${realGenerateCommand(series)}）`,
       );
-      assert(fileExists(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
+      assert(modelPresent(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
     },
   });
 
@@ -384,11 +374,12 @@ for (const series of SERIES) {
       name: `SigLIP2 ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: entry.ignore || !GPU_AVAILABLE,
       fn: async () => {
-        const [modelBytes, ioBytes] = await Promise.all([
-          readBuffer(root, MODEL_FILE),
+        const shards = resolveShards(new URL(MODEL_FILE, root));
+        const [graphShard, ioBytes] = await Promise.all([
+          readShard(shards[0]),
           readBuffer(root, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
         ]);
-        const parsed = openModel(modelBytes);
+        const parsed = prepareModel(graphShard);
         const io = parseSafetensors(ioBytes);
 
         // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -401,7 +392,7 @@ for (const series of SERIES) {
         const inputs = goldenInputs(parsed, io);
 
         const gpu = await acquireGpu();
-        const session = await createSession(gpu, parsed);
+        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
         try {
           const outputs = await session.run(inputs);
           assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
@@ -444,12 +435,12 @@ for (const series of SERIES) {
       // その幅では順序が反転しないことを実測してある（2026-08-14: 人物対と最悪の交差対の差は
       // base 0.1196 / so400m 0.0747 なのに対し、入力を TS 前処理へ差し替えたときの各 cosine の
       // 動きは最大 1.6e-3 —— 2 桁小さい）。
-      const modelBytes = await readBuffer(root, MODEL_FILE);
-      const parsed = openModel(modelBytes);
+      const shards = resolveShards(new URL(MODEL_FILE, root));
+      const parsed = prepareModel(await readShard(shards[0]));
       const [outputName] = parsed.graph.outputs;
 
       const gpu = await acquireGpu();
-      const session = await createSession(gpu, parsed);
+      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
       const pooled = new Map<string, Float32Array>();
       try {
         // 4 ケースを 1 Session で回す（重みは 350MB〜1.7GB — ケースごとに組み直す理由が無い）。

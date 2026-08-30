@@ -13,14 +13,14 @@
 // 資産が欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。
 
 import { assertEquals } from "@std/assert";
-import {
-  acquireGpu,
-  createSession,
-  openModel,
-  parseSafetensors,
-  type Tensor,
-} from "@karume/runtime";
+import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "@karume/runtime";
 import { decodeTiles, planCodecTiles } from "../src/irodori/codec.ts";
+import {
+  modelPresent,
+  readShard,
+  resolveShards,
+  streamShards,
+} from "../../runtime/tests/helpers/shard-files.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
@@ -55,13 +55,15 @@ const readFile = async (url: URL): Promise<ArrayBuffer | undefined> => {
     : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-const decoderBytes = await readFile(DECODER_URL);
+/** decoder の配布形（先頭がグラフ shard — ADR 0081。分割されていなければ 1 本）。 */
+const DECODER_SHARDS = resolveShards(DECODER_URL);
+const DECODER_PRESENT = modelPresent(DECODER_URL);
 const latentBytes = await readFile(LATENT_URL);
-const ASSETS_AVAILABLE = decoderBytes !== undefined && latentBytes !== undefined;
+const ASSETS_AVAILABLE = DECODER_PRESENT && latentBytes !== undefined;
 if (!ASSETS_AVAILABLE) {
   console.warn(
     "[karume] codec タイル同値門を SKIP する（decoder 資産と full-loop golden の両方が要る）。" +
-      `生成: ${decoderBytes === undefined ? DECODER_COMMAND : LATENT_COMMAND}`,
+      `生成: ${DECODER_PRESENT ? LATENT_COMMAND : DECODER_COMMAND}`,
   );
 }
 
@@ -83,10 +85,10 @@ Deno.test({
   fn: async () => {
     const latent = readLatent();
     const frames = latent.length / LATENT_DIM;
-    const model = openModel(decoderBytes as ArrayBuffer);
+    const prepared = prepareModel(await readShard(DECODER_SHARDS[0]));
     const gpu = await acquireGpu();
     try {
-      const session = await createSession(gpu, model, {});
+      const session = await prepared.createSession(gpu, streamShards(DECODER_SHARDS.slice(1)), {});
       try {
         const run = async (
           slice: Float32Array<ArrayBuffer>,
@@ -98,7 +100,7 @@ Deno.test({
             data: slice,
           };
           const outputs = await session.run({ latent: input });
-          const tensor = outputs[model.graph.outputs[0]];
+          const tensor = outputs[prepared.graph.outputs[0]];
           if (tensor.dtype !== "f32") throw new Error(`decoder の出力が ${tensor.dtype}`);
           return tensor.data;
         };

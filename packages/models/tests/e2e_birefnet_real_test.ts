@@ -33,13 +33,7 @@
 // 独立。
 
 import { assert, assertEquals } from "@std/assert";
-import {
-  acquireGpu,
-  createSession,
-  type KarumeModel,
-  openModel,
-  parseSafetensors,
-} from "@karume/runtime";
+import { acquireGpu, parseSafetensors, type PreparedModel, prepareModel } from "@karume/runtime";
 import { normalizeToNchw, resizeRgb8 } from "../src/image/preprocess.ts";
 import { encodePng } from "../src/image/png.ts";
 // NOTE: PNG デコーダは karume 本体が持たない設計（preprocess.ts のモジュール doc —— 入口は
@@ -47,6 +41,7 @@ import { encodePng } from "../src/image/png.ts";
 // models → runtime は**正方向**の依存で、かつ両者とも `tests/` は publish から除外される
 // （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
 import { decodePng } from "../../runtime/tests/helpers/png-decode.ts";
+import { readShard, resolveShards, streamShards } from "../../runtime/tests/helpers/shard-files.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -191,7 +186,7 @@ const readImage = (file: string): Promise<Uint8Array<ArrayBuffer>> =>
   Deno.readFile(new URL(file, DEMO_DIR));
 
 /** グラフ入力の静的次元（記号次元は無い — `birefnet/export.py` の `symbol_names=()`）。 */
-const staticDim = (parsed: KarumeModel, axis: number): number => {
+const staticDim = (parsed: PreparedModel, axis: number): number => {
   const dim = parsed.graph.inputs[0].shape[axis];
   assert(typeof dim === "number", `pixel_values の軸 ${axis} が記号次元 '${String(dim)}'`);
   return dim;
@@ -334,8 +329,8 @@ for (const series of SERIES) {
       // 入力は**実画像を TS 前処理で通したもの**（golden の入力ではない）— 「PNG を渡したら
       // 意味のあるマットが返る」ところまでを検査にする。ついでに α マットと白地合成を PNG で
       // 書き出す（数値の門だけでは形が見えないため — 目視確認用の成果物であって、門ではない）。
-      const modelBytes = await readBuffer(new URL(MODEL_FILE, seriesRoot(series)));
-      const parsed = openModel(modelBytes);
+      const shards = resolveShards(new URL(MODEL_FILE, seriesRoot(series)));
+      const parsed = prepareModel(await readShard(shards[0]));
       const [outputName] = parsed.graph.outputs;
       const width = staticDim(parsed, 3);
       const height = staticDim(parsed, 2);
@@ -344,7 +339,7 @@ for (const series of SERIES) {
       await Deno.mkdir(artifacts, { recursive: true });
 
       const gpu = await acquireGpu();
-      const session = await createSession(gpu, parsed);
+      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
       const ratios = new Map<string, number>();
       try {
         // 4 枚を 1 Session で回す（重みは 964MB — 画像ごとに組み直す理由が無い）。

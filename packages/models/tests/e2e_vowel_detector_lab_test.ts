@@ -32,11 +32,17 @@
 import { assert, assertEquals } from "@std/assert";
 import { parseManifest, resolveFiles } from "@karume/hub";
 import type { Manifest } from "@karume/hub";
-import { acquireGpu, createSession, type KarumeModel, openModel } from "@karume/runtime";
+import { acquireGpu, prepareModel } from "@karume/runtime";
 import { decodeWav, VowelDetectorPipeline } from "../mod.ts";
 import { parseMelBasis } from "../src/vowel-detector/pipeline.ts";
 import { extractFeatures, FEATURE_DIM } from "../src/vowel-detector/features.ts";
 import { logitsToSegments, toLab } from "../src/vowel-detector/postprocess.ts";
+import {
+  modelPresent,
+  readShard,
+  resolveShards,
+  streamShards,
+} from "../../runtime/tests/helpers/shard-files.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 配布形（`karume dist --pipeline vowel-detector` の出力）。 */
@@ -46,6 +52,8 @@ const SERIES_DIR = new URL(
   "../../../outputs/series/vowel-detector-crnn-epoch3/",
   import.meta.url,
 );
+/** 系列コンポーネントの代表 path（実体は shard 列 — 見つけ方は `resolveShards` が持つ）。 */
+const SERIES_MODEL = new URL("model.safetensors", SERIES_DIR);
 const DEMO_DIR = new URL("../../../outputs/demo/", import.meta.url);
 
 /** 実音声（`e2e_vowel_detector_chain_test.ts` の `CASES` と同じ 4 本）。 */
@@ -77,10 +85,7 @@ const exists = (url: URL): boolean => {
 const manifestText = await Deno.readTextFile(new URL("karume.json", DIST_DIR)).catch(
   () => undefined,
 );
-const seriesBytes = await Deno.readFile(new URL("model.safetensors", SERIES_DIR)).catch(
-  () => undefined,
-);
-const MODEL_AVAILABLE = manifestText !== undefined && seriesBytes !== undefined;
+const MODEL_AVAILABLE = manifestText !== undefined && modelPresent(SERIES_MODEL);
 if (!MODEL_AVAILABLE) {
   console.warn(
     `[karume] ${DIST_DIR.pathname} / ${SERIES_DIR.pathname} が揃っていないため母音検出の` +
@@ -115,26 +120,19 @@ const loadLocalAssets = async (
   return assets;
 };
 
-const openSeries = (): KarumeModel => {
-  const bytes = seriesBytes as Uint8Array<ArrayBuffer>;
-  return openModel(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-};
-
 /**
  * 系列のグラフを実長で 1 回回して `.lab` を作る（配布形を通さない直接経路）。
  *
  * 特徴抽出と後処理はパイプラインと同じホスト実装を呼ぶ — ここで別実装を書くと、
  * 比べているものが「配布形経路 vs 直接経路」ではなく「実装 A vs 実装 B」になる。
  */
-const directLab = async (
-  model: KarumeModel,
-  audio: Float32Array,
-  melBasis: Float32Array,
-): Promise<string> => {
+const directLab = async (audio: Float32Array, melBasis: Float32Array): Promise<string> => {
   const features = extractFeatures(audio, melBasis);
   const usable = features.frames - (features.frames % TIME_STRIDE);
+  const shards = resolveShards(SERIES_MODEL);
+  const prepared = prepareModel(await readShard(shards[0]));
   const gpu = await acquireGpu();
-  const session = await createSession(gpu, model);
+  const session = await prepared.createSession(gpu, streamShards(shards.slice(1)));
   try {
     const outputs = await session.run({
       [INPUT_NAME]: {
@@ -143,7 +141,7 @@ const directLab = async (
         data: features.data.slice(0, usable * FEATURE_DIM),
       },
     });
-    const tensor = outputs[model.graph.outputs[0]];
+    const tensor = outputs[prepared.graph.outputs[0]];
     assert(tensor.dtype === "f32", `ロジットの dtype が ${tensor.dtype}`);
     return toLab(logitsToSegments(tensor.data, usable / TIME_STRIDE));
   } finally {
@@ -158,7 +156,6 @@ Deno.test({
   fn: async () => {
     const manifest = parseManifest(manifestText as string);
     const assets = await loadLocalAssets(manifest);
-    const series = openSeries();
     // mel 基底は配布形の資産そのものを使う（直接経路も同じ行列で特徴を採る）。
     const melBytes = assets["mel_basis"];
     const melBasis = parseMelBasis(
@@ -171,7 +168,7 @@ Deno.test({
       const result = await pipeline.detect(wav.data);
       assertEquals(
         result.lab,
-        await directLab(series, wav.data, melBasis),
+        await directLab(wav.data, melBasis),
         `${name}: 配布形経由の .lab が実長の直接経路と違う`,
       );
       assert(result.segments.length > 1, `${name}: 区間が 1 本しか出ていない`);

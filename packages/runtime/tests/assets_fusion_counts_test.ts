@@ -31,13 +31,17 @@ import { assertEquals } from "@std/assert";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { type FusionCounts, planFusions } from "../src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../src/runtime/plan.ts";
+import { resolveShards } from "./helpers/shard-files.ts";
 
 const TURBO_DIR = new URL("../../../models/karume-anima-turbo/", import.meta.url);
 const BASE_DIR = new URL("../../../models/karume-anima/", import.meta.url);
-const GEMMA_MODEL = new URL(
-  "../../../outputs/series/embeddinggemma-300m/model.safetensors",
-  import.meta.url,
-);
+/**
+ * グラフを持つのは配布形の**先頭 shard** だけ（ADR 0081）。分割されていない資産では代表 path
+ * そのものが返るので、どちらの形でも同じ 1 行で足りる。
+ */
+const GEMMA_MODEL = resolveShards(
+  new URL("../../../outputs/series/embeddinggemma-300m/model.safetensors", import.meta.url),
+)[0];
 const IRODORI_DIR = new URL(
   "../../../models/karume-irodori-v4-small/v4-small/",
   import.meta.url,
@@ -71,7 +75,7 @@ const readIrGraph = async (source: URL): Promise<IrGraph> => {
  * ノード発行順で、それは系列を跨いで同じ 1 回の変換から出る。
  */
 const readIrodoriGraph = (name: string): Promise<IrGraph> =>
-  readIrGraph(new URL(`${name}/model.f32.safetensors`, IRODORI_DIR));
+  readIrGraph(resolveShards(new URL(`${name}/model.f32.safetensors`, IRODORI_DIR))[0]);
 
 /**
  * 資産の有無。
@@ -156,7 +160,9 @@ if (!GEMMA_AVAILABLE) {
 
 // 見るのは**ファイル**（ディレクトリではない）— 配布形の綴りが動いたときに、空でない
 // ディレクトリだけを見て「資産あり」と判断すると、読めない path で FAIL する形になる。
-const IRODORI_AVAILABLE = await exists(new URL("dit/model.f32.safetensors", IRODORI_DIR));
+const IRODORI_AVAILABLE = await exists(
+  resolveShards(new URL("dit/model.f32.safetensors", IRODORI_DIR))[0],
+);
 if (!IRODORI_AVAILABLE) {
   console.warn(
     `[karume] ${IRODORI_DIR.pathname} が無いため Irodori の融合ヒット数を SKIP する`,

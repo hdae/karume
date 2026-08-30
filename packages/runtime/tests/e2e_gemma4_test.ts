@@ -34,15 +34,15 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
-  createSession,
-  type KarumeModel,
-  openModel,
   parseSafetensors,
+  type PreparedModel,
+  prepareModel,
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
  * 生 logits（`[1,T,262144]`）の torch CPU 期待値との突合に使う許容誤差。
@@ -173,15 +173,6 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
 const CASES = discoverCases(SERIES_ROOT);
 
-const fileExists = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
 const AVAILABLE = CASES.length > 0;
 /**
@@ -189,7 +180,7 @@ const AVAILABLE = CASES.length > 0;
  * io が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、`ignore: !AVAILABLE` だと
  * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
  */
-const ANY_PRESENT = AVAILABLE || fileExists(new URL(MODEL_FILE, SERIES_ROOT));
+const ANY_PRESENT = AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!AVAILABLE) {
   console.warn(
@@ -260,7 +251,7 @@ const greedyTop = (
  * 層種別 D と格納内訳も同じ性質 — 前者は T ≤ 512 のケースだけなら数値が合い、後者は
  * f32 に落ちても正しい値が出る。
  */
-const assertGemma4Form = (model: KarumeModel): number => {
+const assertGemma4Form = (model: PreparedModel): number => {
   const graph = model.graph;
   const attentions = graph.nodes.filter((node) => node.op === "attention");
   assertEquals(attentions.length, LAYERS, "attention ノードの本数（= 層数）");
@@ -303,8 +294,7 @@ Deno.test({
   ignore: !ANY_PRESENT,
   fn: () => {
     assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
-    const model = new URL(MODEL_FILE, SERIES_ROOT);
-    assert(Deno.statSync(model).isFile, `${MODEL_FILE} が無い`);
+    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
   },
 });
 
@@ -322,7 +312,8 @@ Deno.test({
   name: "Gemma 4 E2B golden 突合: 3 ケースの logits と最終位置 greedy（実 GPU / torch CPU 期待値）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async () => {
-    const parsed = openModel(await readBuffer(SERIES_ROOT, MODEL_FILE));
+    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+    const parsed = prepareModel(await readShard(shards[0]));
     assertEquals(parsed.graph.inputs.map((spec) => spec.name), ["input_ids"], "グラフ入力");
     assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
     const outputName = parsed.graph.outputs[0];
@@ -333,7 +324,7 @@ Deno.test({
     assertGemma4Form(parsed);
 
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, parsed);
+    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
     try {
       /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
       const tops: number[] = [];
@@ -444,11 +435,12 @@ Deno.test({
   name: "Gemma 4 E2B census: MQA 35 本と混成格納のキー（実 GPU / timestamp-query）",
   ignore: !AVAILABLE || !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
-    const parsed = openModel(await readBuffer(SERIES_ROOT, MODEL_FILE));
+    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+    const parsed = prepareModel(await readShard(shards[0]));
     const layers = assertGemma4Form(parsed);
 
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
-    const session = await createSession(gpu, parsed);
+    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
     try {
       // 混成格納の常駐そのもの（ADR 0069 の検収条件 — キー検査と独立の実測線）。適格落ちは
       // 例外を出さず CPU で f32 展開されるだけなので、hostExpandedBytes が唯一の直接観測。

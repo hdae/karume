@@ -37,10 +37,17 @@
 // 「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, createSession, openModel, parseSafetensors, type Tensor } from "../mod.ts";
+import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import {
+  modelPresent,
+  readShard,
+  resolveShards,
+  shardTensorNames,
+  streamShards,
+} from "./helpers/shard-files.ts";
 
 /**
  * **f32 系列 / full-24layer**（全層 hidden_states 25 本出し）の torch CPU 期待値との突合に
@@ -232,16 +239,6 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
-const fileExists = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
 Deno.test({
   name: "DeBERTa golden: w8a8 鏡像 io が通常ケースの列挙に紛れない",
   // 資産の有無に依らず走る（prefix の規約そのものを見るテスト）。
@@ -273,7 +270,7 @@ for (const variant of VARIANTS) {
    * golden が全滅してモデルだけ残った欠損は `available` では偽になり、`ignore: !available`
    * だと完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
    */
-  const anyPresent = available || fileExists(new URL(MODEL_FILE, variant.root));
+  const anyPresent = available || modelPresent(new URL(MODEL_FILE, variant.root));
 
   if (!available) {
     console.warn(
@@ -294,7 +291,7 @@ for (const variant of VARIANTS) {
         [...EXPECTED_CASES],
         `${variant.root.pathname} の golden ケース`,
       );
-      assert(fileExists(new URL(MODEL_FILE, variant.root)), `${MODEL_FILE} が無い`);
+      assert(modelPresent(new URL(MODEL_FILE, variant.root)), `${MODEL_FILE} が無い`);
     },
   });
 
@@ -304,11 +301,12 @@ for (const variant of VARIANTS) {
       name: `DeBERTa golden 突合: ${variant.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: !available || !GPU_AVAILABLE,
       fn: async () => {
-        const [modelBytes, ioBytes] = await Promise.all([
-          readBuffer(variant.root, MODEL_FILE),
+        const shards = resolveShards(new URL(MODEL_FILE, variant.root));
+        const [graphShard, ioBytes] = await Promise.all([
+          readShard(shards[0]),
           readBuffer(variant.root, file),
         ]);
-        const parsed = openModel(modelBytes);
+        const parsed = prepareModel(graphShard);
         const io = parseSafetensors(ioBytes);
 
         // 出力の本数で variant を見分ける（配布形 1 本出しと検証用 25 本出しの取り違えは
@@ -339,12 +337,15 @@ for (const variant of VARIANTS) {
         // i8 は companion scale が無いと値が復元できない（ADR 0019）。宣言と実体の両方を見る
         // — 宣言だけならキーが実在しない形が、実体だけなら別の重みの scale を読む形が通る。
         if (variant.compressedStorage === "i8") {
+          // 実体は shard 列のどこかに居るので、名前の和で見る（どの shard に居るかまでは
+          // ここの関心ではない — co-shard 契約は container の shard 進行検証が持つ）。
+          const present = await shardTensorNames(shards);
           for (const [name, initializer] of Object.entries(parsed.graph.initializers)) {
             if (initializer.storage.dtype !== "i8") continue;
             const scale = initializer.storage.scale;
             assert(scale !== undefined, `${variant.name}: '${name}' に scale 宣言が無い`);
             assert(
-              parsed.file.tensors.has(scale),
+              present.has(scale),
               `${variant.name}: '${name}' の scale '${scale}' が資産に無い`,
             );
           }
@@ -368,7 +369,7 @@ for (const variant of VARIANTS) {
         }
 
         const gpu = await acquireGpu();
-        const session = await createSession(gpu, parsed);
+        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
         try {
           const outputs = await session.run(inputs);
           assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

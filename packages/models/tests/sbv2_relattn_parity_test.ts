@@ -13,7 +13,8 @@
 // SKIP し、生成器そのものの性質を見るテスト（故障注入）は常に走る。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { openModel, parseSafetensors } from "@karume/runtime";
+import { parseSafetensors, prepareModel } from "@karume/runtime";
+import { readShard, resolveShards } from "../../runtime/tests/helpers/shard-files.ts";
 import { buildRelattnTables, RELATTN_WINDOW_SIZE } from "../src/sbv2/relattn-tables.ts";
 
 /**
@@ -123,10 +124,9 @@ for (const target of TABLE_INPUT_TARGETS) {
       // `idx_v` はコンテナに焼き込まれていて幅が `2w+1`**。ここが TS の窓幅定数と食い違えば
       // ホストは違う幅の埋め込みを前提に添字を作っている — shape エラーにならず黙って
       // 誤るクラスなので、コンテナから読んだ幅で TS 側の定数を検算する。
-      const bytes = await Deno.readFile(new URL(`${target}/${MODEL_FILE}`, MODELS_ROOT));
-      const model = openModel(
-        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-      );
+      // グラフを持つのは配布形の**先頭 shard** だけ（ADR 0081）。
+      const shards = resolveShards(new URL(`${target}/${MODEL_FILE}`, MODELS_ROOT));
+      const model = prepareModel(await readShard(shards[0]));
       const baked = model.graph.nodes
         .filter((node) => node.op === "sym_prefix_slice")
         .map((node) => model.graph.values[node.ins[0]].shape);

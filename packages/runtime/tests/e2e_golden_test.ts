@@ -9,11 +9,12 @@
 // テスト側のフィクスチャ読みなので src/format/safetensors.ts を直に使う。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, capabilities, createSession, openModel, type Tensor } from "../mod.ts";
+import { acquireGpu, capabilities, prepareModel, type Tensor } from "../mod.ts";
 import { parseSafetensors } from "../src/format/safetensors.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
  * torch CPU 期待値との突合に使う許容誤差。
@@ -58,6 +59,13 @@ const readBuffer = async (model: string, file: string): Promise<ArrayBuffer> => 
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
+/**
+ * golden 1 件の配布形 shard 列（先頭がグラフ shard — ADR 0081）。テンソルを 1 本も持たない
+ * spec は分割されないので `model.safetensors` 1 本のまま来る（見つけ方はどちらも同じ）。
+ */
+const modelShards = (model: string): readonly URL[] =>
+  resolveShards(new URL(`${model}/model.safetensors`, GOLDEN_ROOT));
+
 Deno.test("golden fixtures が 1 件以上あり、全件がテストとして登録される", () => {
   // 列挙が空でも「テストが 0 本で緑」になるだけなので、ここで下限を固定する（ADR 0005）。
   assert(MODELS.length > 0, `${GOLDEN_ROOT.pathname} に golden モデルが 1 件も無い`);
@@ -85,7 +93,7 @@ const OPS_WITHOUT_GOLDEN: readonly string[] = ["state_append", "topk"];
 Deno.test("全 golden の requires.ops が実行可能な op 集合を覆う", async () => {
   const covered = new Set<string>();
   for (const model of MODELS) {
-    const graph = openModel(await readBuffer(model, "model.safetensors")).graph;
+    const graph = prepareModel(await readShard(modelShards(model)[0])).graph;
     for (const op of graph.requires.ops) covered.add(op);
   }
   const uncovered = capabilities().ops.filter((op) => !covered.has(op));
@@ -101,11 +109,12 @@ for (const model of MODELS) {
     name: `golden 突合: ${model}（実 GPU / torch CPU 期待値）`,
     ignore: !GPU_AVAILABLE,
     fn: async () => {
-      const [modelBytes, ioBytes] = await Promise.all([
-        readBuffer(model, "model.safetensors"),
+      const shards = modelShards(model);
+      const [graphShard, ioBytes] = await Promise.all([
+        readShard(shards[0]),
         readBuffer(model, "io.safetensors"),
       ]);
-      const parsed = openModel(modelBytes);
+      const parsed = prepareModel(graphShard);
       const io = parseSafetensors(ioBytes);
 
       // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -125,7 +134,7 @@ for (const model of MODELS) {
       }
 
       const gpu = await acquireGpu();
-      const session = await createSession(gpu, parsed);
+      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
       try {
         const outputs = await session.run(inputs);
         assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

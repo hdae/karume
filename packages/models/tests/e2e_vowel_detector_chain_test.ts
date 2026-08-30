@@ -50,10 +50,16 @@
 // 要るのはグラフ本体と WAV だけなので、系列の有無も `model.safetensors` の有無で見る。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, createSession, type KarumeModel, openModel } from "@karume/runtime";
+import { acquireGpu, type PreparedModel, prepareModel } from "@karume/runtime";
 import { decodeWav } from "../src/audio/wav.ts";
 import { extractFeatures, FEATURE_DIM, SAMPLE_RATE } from "../src/vowel-detector/features.ts";
 import { logitsToSegments, toLab } from "../src/vowel-detector/postprocess.ts";
+import {
+  modelPresent,
+  readShard,
+  resolveShards,
+  streamShards,
+} from "../../runtime/tests/helpers/shard-files.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -286,11 +292,6 @@ const exists = (url: URL): boolean => {
   }
 };
 
-const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
-  const bytes = await Deno.readFile(url);
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-};
-
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
     .map((byte) => byte.toString(16).padStart(2, "0"))
@@ -305,7 +306,7 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
  * NOTE: runtime 側 e2e にも同じ検査がある（あちらは合成 golden の側で踏む）。**共有しない**
  * のは、片方が消えたときにもう片方が黙って通る形にしないため。
  */
-const assertSymbolicTimeAxis = (parsed: KarumeModel): void => {
+const assertSymbolicTimeAxis = (parsed: PreparedModel): void => {
   assertEquals(parsed.graph.symbols, ["T"], `${SERIES_NAME} の記号次元`);
   assertEquals(
     parsed.graph.inputs[0].shape,
@@ -320,7 +321,7 @@ const assertSymbolicTimeAxis = (parsed: KarumeModel): void => {
 };
 
 /** 資産の有無（登録時点で必要なので同期で見る）。 */
-const available = exists(new URL(MODEL_FILE, SERIES_ROOT));
+const available = modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!available) {
   console.warn(
@@ -362,12 +363,13 @@ for (const entry of CASES) {
       const usable = features.frames - (features.frames % 2);
       assertEquals(usable, entry.length, `${entry.name} の偶数化フレーム数`);
 
-      const parsed = openModel(await readBuffer(new URL(MODEL_FILE, SERIES_ROOT)));
+      const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+      const parsed = prepareModel(await readShard(shards[0]));
       assertSymbolicTimeAxis(parsed);
       const [outputName] = parsed.graph.outputs;
 
       const gpu = await acquireGpu();
-      const session = await createSession(gpu, parsed);
+      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
       let logits: Float32Array;
       try {
         const output = (await session.run({

@@ -57,16 +57,16 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
-  createSession,
-  type KarumeModel,
-  openModel,
   parseSafetensors,
+  type PreparedModel,
+  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
  * **BiRefNet_HR / 合成画像**ケース（入力が golden とビット同一）の突合に使う許容誤差。
@@ -277,7 +277,7 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
 };
 
 /** golden の入力を宣言 dtype の view で組む（記号次元が無いので明示 bindings も不要）。 */
-const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, Tensor> => {
+const goldenInputs = (parsed: PreparedModel, io: SafetensorsFile): Record<string, Tensor> => {
   const inputs: Record<string, Tensor> = {};
   for (const spec of parsed.graph.inputs) {
     const view = io.tensors.get(`input.${spec.name}`);
@@ -288,7 +288,7 @@ const goldenInputs = (parsed: KarumeModel, io: SafetensorsFile): Record<string, 
 };
 
 /** グラフ入力の静的次元（記号次元は無い — `birefnet/export.py` の `symbol_names=()`）。 */
-const staticDim = (parsed: KarumeModel, axis: number): number => {
+const staticDim = (parsed: PreparedModel, axis: number): number => {
   const dim = parsed.graph.inputs[0].shape[axis];
   assert(typeof dim === "number", `pixel_values の軸 ${axis} が記号次元 '${String(dim)}'`);
   return dim;
@@ -357,16 +357,6 @@ type Discovery = {
 
 const realNames = new Set<string>(REAL_CASES);
 
-/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
-const fileExists = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
 const discover = (series: Series): Discovery => {
   const root = seriesRoot(series);
   const discovered = discoverCases(root);
@@ -377,7 +367,7 @@ const discover = (series: Series): Discovery => {
     realCases,
     available,
     realAvailable: available && realCases.length > 0,
-    anyPresent: available || fileExists(new URL(MODEL_FILE, root)),
+    anyPresent: available || modelPresent(new URL(MODEL_FILE, root)),
   };
 };
 
@@ -424,7 +414,7 @@ for (const series of SERIES) {
         `${root.pathname} の実画像 golden が ${found.realCases.length}/${REAL_CASES.length} 本` +
           `（採り直す: ${series.generate}）`,
       );
-      assert(fileExists(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
+      assert(modelPresent(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
     },
   });
 
@@ -453,11 +443,12 @@ for (const series of SERIES) {
       name: `BiRefNet ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: entry.ignore || !GPU_AVAILABLE,
       fn: async () => {
-        const [modelBytes, ioBytes] = await Promise.all([
-          readBuffer(root, MODEL_FILE),
+        const shards = resolveShards(new URL(MODEL_FILE, root));
+        const [graphShard, ioBytes] = await Promise.all([
+          readShard(shards[0]),
           readBuffer(root, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
         ]);
-        const parsed = openModel(modelBytes);
+        const parsed = prepareModel(graphShard);
         const io = parseSafetensors(ioBytes);
 
         // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -470,7 +461,7 @@ for (const series of SERIES) {
         const inputs = goldenInputs(parsed, io);
 
         const gpu = await acquireGpu();
-        const session = await createSession(gpu, parsed);
+        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
         try {
           const outputs = await session.run(inputs);
           assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
@@ -512,15 +503,16 @@ for (const series of SERIES) {
       // （順序そのものが検査対象 — `birefnet/export.py` の `_sanity` と同じ形で、あちらは
       // torch 側に掛かっている）。実測は円内 / 円外が BiRefNet_HR で +10.96 / −9.64、
       // Lucida で +3.37 / −9.69（合成画像に対する応答の深さが系列で違う）。
-      const modelBytes = await readBuffer(root, MODEL_FILE);
+      const shards = resolveShards(new URL(MODEL_FILE, root));
+      const graphShard = await readShard(shards[0]);
       const ioBytes = await readBuffer(root, `${IO_PREFIX}${DISC_CASE}${IO_SUFFIX}`);
-      const parsed = openModel(modelBytes);
+      const parsed = prepareModel(graphShard);
       const io = parseSafetensors(ioBytes);
       const size = staticDim(parsed, 3);
       assertEquals(size, staticDim(parsed, 2), "円の判別は正方形の入力を前提にする");
 
       const gpu = await acquireGpu();
-      const session = await createSession(gpu, parsed);
+      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
       try {
         const [name] = parsed.graph.outputs;
         const output = (await session.run(goldenInputs(parsed, io)))[name];

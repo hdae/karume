@@ -33,10 +33,11 @@
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, createSession, openModel, parseSafetensors, type Tensor } from "../mod.ts";
+import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
  * DACVAE decoder（`out_proj` + 4 段 upsample + 波形ヘッド）の torch CPU 期待値との突合に使う
@@ -173,6 +174,9 @@ const readBuffer = async (root: URL, target: string, file: string): Promise<Arra
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
+/** ターゲットの代表 path（配布形は shard 列 — 見つけ方は `resolveShards` が持つ）。 */
+const modelUrl = (target: string): URL => new URL(`${target}/${MODEL_FILE}`, SERIES_ROOT);
+
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
 const TARGETS = discoverTargets(SERIES_ROOT);
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
@@ -200,8 +204,7 @@ Deno.test({
         [...EXPECTED_CASES[target]],
         `${target} の golden ケース`,
       );
-      const model = new URL(`${target}/${MODEL_FILE}`, SERIES_ROOT);
-      assert(Deno.statSync(model).isFile, `${target}/${MODEL_FILE} が無い`);
+      assert(modelPresent(modelUrl(target)), `${target}/${MODEL_FILE} が無い`);
     }
   },
 });
@@ -213,11 +216,12 @@ for (const target of TARGETS) {
       ignore: !AVAILABLE || !GPU_AVAILABLE,
       fn: async () => {
         const ioFile = `${IO_PREFIX}${caseName}${IO_SUFFIX}`;
-        const [modelBytes, ioBytes] = await Promise.all([
-          readBuffer(SERIES_ROOT, target, MODEL_FILE),
+        const shards = resolveShards(modelUrl(target));
+        const [graphShard, ioBytes] = await Promise.all([
+          readShard(shards[0]),
           readBuffer(SERIES_ROOT, target, ioFile),
         ]);
-        const parsed = openModel(modelBytes);
+        const parsed = prepareModel(graphShard);
         const io = parseSafetensors(ioBytes);
         // Object.hasOwn で見る（素の `TOLERANCES[target]` はプロトタイプ由来のキーを拾う）。
         assert(Object.hasOwn(TOLERANCES, target), `${target} の tolerance が無い`);
@@ -248,7 +252,7 @@ for (const target of TARGETS) {
         }
 
         const gpu = await acquireGpu();
-        const session = await createSession(gpu, parsed);
+        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
         try {
           const outputs = await session.run(inputs);
           assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

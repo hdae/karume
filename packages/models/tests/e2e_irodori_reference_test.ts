@@ -14,8 +14,14 @@
 // 資産が欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。
 
 import { assertEquals } from "@std/assert";
-import { acquireGpu, createSession, openModel, parseSafetensors } from "@karume/runtime";
+import { acquireGpu, parseSafetensors, prepareModel } from "@karume/runtime";
 import { normalizeReference, reflectPadToHop } from "../src/irodori/host/reference.ts";
+import {
+  modelPresent,
+  readShard,
+  resolveShards,
+  streamShards,
+} from "../../runtime/tests/helpers/shard-files.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
@@ -71,17 +77,19 @@ const readBytes = async (url: URL): Promise<ArrayBuffer | undefined> => {
     : (bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
 };
 
-const encoderBytes = await readBytes(ENCODER_URL);
+/** encoder の配布形（先頭がグラフ shard — ADR 0081。分割されていなければ 1 本）。 */
+const ENCODER_SHARDS = resolveShards(ENCODER_URL);
+const ENCODER_PRESENT = modelPresent(ENCODER_URL);
 const caseBytes = new Map<string, ArrayBuffer>();
 for (const name of CASES) {
   const bytes = await readBytes(new URL(`case.${name}.safetensors`, GOLDEN_DIR));
   if (bytes !== undefined) caseBytes.set(name, bytes);
 }
-const ASSETS_AVAILABLE = encoderBytes !== undefined && caseBytes.size === CASES.length;
+const ASSETS_AVAILABLE = ENCODER_PRESENT && caseBytes.size === CASES.length;
 if (!ASSETS_AVAILABLE) {
   console.warn(
     "[karume] 参照音声 → latent の e2e を SKIP する（encoder 資産とホスト golden の両方が要る）。" +
-      `生成: ${encoderBytes === undefined ? ENCODER_COMMAND : HOST_COMMAND}`,
+      `生成: ${ENCODER_PRESENT ? HOST_COMMAND : ENCODER_COMMAND}`,
   );
 }
 
@@ -100,10 +108,10 @@ Deno.test({
   name: "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder が golden の latent と一致する",
   ignore: !RUNNABLE,
   fn: async () => {
-    const model = openModel(encoderBytes as ArrayBuffer);
+    const prepared = prepareModel(await readShard(ENCODER_SHARDS[0]));
     const gpu = await acquireGpu();
     try {
-      const session = await createSession(gpu, model, {});
+      const session = await prepared.createSession(gpu, streamShards(ENCODER_SHARDS.slice(1)), {});
       try {
         let worst = 0;
         for (const name of CASES) {
@@ -117,7 +125,7 @@ Deno.test({
           const outputs = await session.run({
             wav: { dtype: "f32", shape: [1, frames, HOP_LENGTH], data: padded },
           });
-          const tensor = outputs[model.graph.outputs[0]];
+          const tensor = outputs[prepared.graph.outputs[0]];
           if (tensor.dtype !== "f32") throw new Error(`encoder の出力が ${tensor.dtype}`);
           const actual = tensor.data;
 

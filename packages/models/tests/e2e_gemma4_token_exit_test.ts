@@ -27,13 +27,18 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
-  createSession,
-  type KarumeModel,
-  openModel,
   parseSafetensors,
+  type PreparedModel,
+  prepareModel,
   type SafetensorsFile,
 } from "@karume/runtime";
 import { generateGreedy } from "../src/generation/greedy.ts";
+import {
+  modelPresent,
+  readShard,
+  resolveShards,
+  streamShards,
+} from "../../runtime/tests/helpers/shard-files.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const TOKEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode-token/", import.meta.url);
@@ -74,7 +79,7 @@ const exists = (url: URL): boolean => {
   }
 };
 
-const MODEL_PRESENT = exists(new URL(MODEL_FILE, TOKEN_ROOT));
+const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, TOKEN_ROOT));
 const GOLDENS_PRESENT = EXPECTED_CASES.every((name) =>
   exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT))
 );
@@ -227,7 +232,7 @@ const goldenI32 = (file: SafetensorsFile, name: string): Int32Array<ArrayBuffer>
  * states / 層種別 / 格納の本体検査は書き手側（`export_decode.assert_ir_form_decode` の
  * `token_only=True`）と opt-in 門が持つ。
  */
-const assertTokenOnlyForm = (parsed: KarumeModel): void => {
+const assertTokenOnlyForm = (parsed: PreparedModel): void => {
   const graph = parsed.graph;
   assertEquals(
     graph.inputs.map((spec) => spec.name),
@@ -292,7 +297,8 @@ Deno.test({
   name: "Gemma 4 E2B token-only 検収: 系列間交差 parity（実 GPU / opt-in 系列の期待列）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
-    const parsed = openModel(await readBuffer(TOKEN_ROOT, MODEL_FILE));
+    const shards = resolveShards(new URL(MODEL_FILE, TOKEN_ROOT));
+    const parsed = prepareModel(await readShard(shards[0]));
     const tokenName = parsed.graph.outputs[0];
 
     await t.step("① 形の前提: token-only 出口である", () => {
@@ -300,7 +306,7 @@ Deno.test({
     });
 
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, parsed);
+    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
     try {
       // 混成格納の常駐（ADR 0069 の検収条件 — 適格落ちは例外を出さず CPU 展開されるだけ
       // なので、hostExpandedBytes が唯一の直接観測）。

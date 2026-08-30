@@ -10,30 +10,53 @@
 //    `[Cin,Cout,K]` は軸 1 — 軸 0 と読むと golden の実 scale と一致しない）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { type KarumeModel, openModel } from "../src/format/container.ts";
-import { parseIrGraph } from "../src/format/ir.ts";
+import { extractIrGraph, openModel } from "../src/format/container.ts";
+import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
+import { parseSafetensors, type TensorView } from "../src/format/safetensors.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { planWeightResidency, type WeightResidency } from "../src/runtime/weight-residency.ts";
 import { f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
 import { f16BytesFromBits, f32ToF16Bits } from "./helpers/f16.ts";
 import { graphModelBuffer } from "./helpers/graph.ts";
+import { resolveShards } from "./helpers/shard-files.ts";
 
 const GOLDEN_ROOT = new URL("./fixtures/golden/", import.meta.url);
 
-const openGolden = (model: string): KarumeModel => {
-  const bytes = Deno.readFileSync(new URL(`${model}/model.safetensors`, GOLDEN_ROOT));
-  return openModel(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+/**
+ * 席とバイト数の突合に要るぶんだけの面。shard 列（ADR 0081 の配布形）でも単一ファイルでも
+ * 同じ形にして、テスト側が「何本のファイルから来たか」を意識しないで済むようにする。
+ */
+type ResidencyTarget = {
+  readonly graph: IrGraph;
+  /** shard 横断のテンソル表（同名の再定義は配布形の門が別途落とす）。 */
+  readonly tensors: ReadonlyMap<string, TensorView>;
 };
 
-const openGraph = (graph: GraphJson, tensors: readonly TensorSpec[] = []): KarumeModel =>
-  openModel(graphModelBuffer(graph, tensors));
+/**
+ * golden 1 件を shard 列として開く（先頭がグラフ shard・重みは後続 shard に居る）。
+ * ここは GPU も Session も通さないので、`prepareModel` ではなく素の container 面で開く。
+ */
+const openGolden = (model: string): ResidencyTarget => {
+  const files = resolveShards(new URL(`${model}/model.safetensors`, GOLDEN_ROOT))
+    .map((file) => parseSafetensors(Deno.readFileSync(file).buffer));
+  const tensors = new Map<string, TensorView>();
+  for (const file of files) {
+    for (const [name, view] of file.tensors) tensors.set(name, view);
+  }
+  return { graph: extractIrGraph(files[0]), tensors };
+};
+
+const openGraph = (graph: GraphJson, tensors: readonly TensorSpec[] = []): ResidencyTarget => {
+  const model = openModel(graphModelBuffer(graph, tensors));
+  return { graph: model.graph, tensors: model.file.tensors };
+};
 
 /** f16 のバイト列（値そのものは見ないので 0 で埋める — 見るのはバイト数と席だけ）。 */
 const f16Zeros = (count: number): Uint8Array<ArrayBuffer> =>
   f16BytesFromBits(new Array(count).fill(f32ToF16Bits(0)));
 
 /** 名前 → 席（期待値との突合は席だけを見る — バイト数は現物との突合が別に見る）。 */
-const seats = (model: KarumeModel): Record<string, WeightResidency["seat"]> =>
+const seats = (model: ResidencyTarget): Record<string, WeightResidency["seat"]> =>
   Object.fromEntries(
     [...planWeightResidency(model.graph)].map(([name, plan]) => [name, plan.seat]),
   );
@@ -42,19 +65,19 @@ const seats = (model: KarumeModel): Record<string, WeightResidency["seat"]> =>
  * 宣言由来のバイト数を実テンソルと突き合わせる（全 initializer・payload と scale の両方）。
  * 圧縮常駐しない席にも payload の突合は掛かる（宣言由来の数え方は席に依らない）。
  */
-const assertDeclaredBytesMatchFile = (model: KarumeModel): void => {
-  const { graph, file } = model;
+const assertDeclaredBytesMatchFile = (model: ResidencyTarget): void => {
+  const { graph, tensors } = model;
   const plan = planWeightResidency(graph);
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     const seat = plan.get(name);
     assert(seat !== undefined, `initializer '${name}' の席が無い`);
-    const view = file.tensors.get(initializer.tensor);
+    const view = tensors.get(initializer.tensor);
     assert(view !== undefined, `テンソル '${initializer.tensor}' が無い`);
     assertEquals(seat.payloadBytes, view.byteLength, `${name} の payload バイト数`);
     if (seat.seat !== "i8" && seat.seat !== "i4") continue;
     const scaleKey = initializer.storage.scale;
     assert(scaleKey !== undefined, `initializer '${name}' に scale が無い`);
-    const scale = file.tensors.get(scaleKey);
+    const scale = tensors.get(scaleKey);
     assert(scale !== undefined, `scale テンソル '${scaleKey}' が無い`);
     assertEquals(seat.scaleBytes, scale.byteLength, `${name} の scale バイト数`);
   }
@@ -185,7 +208,7 @@ const i4Conv1dGraph = (groups: number): GraphJson => ({
   }],
 });
 
-const i4Conv1dModel = (groups: number): KarumeModel => {
+const i4Conv1dModel = (groups: number): ResidencyTarget => {
   const rowLength = (32 / groups) * 2;
   return openGraph(i4Conv1dGraph(groups), [
     { name: "m.b", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },

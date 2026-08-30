@@ -17,10 +17,11 @@
 // （下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, createSession, openModel, parseSafetensors, type Tensor } from "../mod.ts";
+import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
  * 実重み EmbeddingGemma-300m の torch CPU 期待値との突合に使う許容誤差。
@@ -97,16 +98,6 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** ファイルの有無。MUST: NotFound 以外は伝播させる（`listDir` と同じ理由）。 */
-const fileExists = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
 const CASES = discoverCases(SERIES_ROOT);
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
@@ -116,7 +107,7 @@ const AVAILABLE = CASES.length > 0;
  * io が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、`ignore: !AVAILABLE` だと
  * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
  */
-const ANY_PRESENT = AVAILABLE || fileExists(new URL(MODEL_FILE, SERIES_ROOT));
+const ANY_PRESENT = AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
 
 if (!AVAILABLE) {
   console.warn(
@@ -132,7 +123,7 @@ Deno.test({
   ignore: !ANY_PRESENT,
   fn: () => {
     assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
-    assert(fileExists(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
+    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
   },
 });
 
@@ -141,11 +132,12 @@ for (const caseName of CASES) {
     name: `EmbeddingGemma golden 突合: ${caseName}（実 GPU / torch CPU 期待値）`,
     ignore: !AVAILABLE || !GPU_AVAILABLE,
     fn: async () => {
-      const [modelBytes, ioBytes] = await Promise.all([
-        readBuffer(SERIES_ROOT, MODEL_FILE),
+      const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+      const [graphShard, ioBytes] = await Promise.all([
+        readShard(shards[0]),
         readBuffer(SERIES_ROOT, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
       ]);
-      const parsed = openModel(modelBytes);
+      const parsed = prepareModel(graphShard);
       const io = parseSafetensors(ioBytes);
 
       // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -167,7 +159,7 @@ for (const caseName of CASES) {
       }
 
       const gpu = await acquireGpu();
-      const session = await createSession(gpu, parsed);
+      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
       try {
         const outputs = await session.run(inputs);
         assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
