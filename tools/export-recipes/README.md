@@ -21,8 +21,16 @@ good enough to ship).
 lock and one virtualenv (no second copy of torch for the recipes).
 
 ```sh
-uv sync --all-groups   # run once in tools/
+cd tools/export-recipes
+uv sync --all-groups   # MUST be run from here, not from tools/exporter/
 ```
+
+The virtualenv is shared, so a bare `uv sync` run in [`../exporter/`](../exporter/README.md)
+afterwards resolves the exporter's dependencies alone and **prunes the family groups back out of the
+environment** (measured: it drops `style-bert-vits2`, `transformers`, `timm`, …). That failure is
+silent rather than red — the recipe tests guard every upstream package with `pytest.importorskip` /
+`skipif`, so `uv run pytest` still passes green while none of the model cases actually run. Whenever
+the environment has been rebuilt, re-run the `--all-groups` command above from this directory.
 
 The family dependency groups (`anima` / `sbv2` / `siglip2` / `siglip2-preprocess` / `birefnet` /
 `depth-anything` / `depth-anything-preprocess`) are declared in this directory's
