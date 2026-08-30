@@ -281,24 +281,46 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
 };
 
 /**
- * scale キーが**どの** initializer の実体キーとも衝突しないことを検査する。
+ * scale キーが**どの** initializer の実体キーとも衝突せず、かつ 2 本の initializer で
+ * **共有されていない**ことを検査する。
  *
  * MUST: 別の initializer の実体を scale として読むと、dtype も shape も偶然合う組で沈黙誤値に
- * なる。グラフ単体で決まる規則なので shard を見る前（validator 構築時）に 1 回だけ掛ける —
+ * なる。共有も同じ機序で、チャネル数（i4 なら行数と group 数）さえ揃えば形検査を両方が通り、
+ * 後発の重みが先発の scale で逆量子化される。IR v1 は重み tying を表現する語彙を持たない
+ * （`storage.scale` はキー 1 本きり）ので、共有形は取り違えだけを意味する。
+ * グラフ単体で決まる規則なので shard を見る前（validator 構築時）に 1 回だけ掛ける —
  * shard ごとに掛けると、衝突相手が別 shard にいる配布形で検出が「たまたま同居したときだけ」に
  * なる。
  */
 const assertNoScaleKeyCollision = (graph: IrGraph): void => {
+  // 実体キー / scale キーの持ち主を記録しながら 1 走査で両向きを見る（宣言順のどちらが先でも
+  // 同じ帰属で落ちる）。どの診断も**相手の initializer 名**を名乗る MUST — 名前が出ないと
+  // 直す側はどちらを改名するか決められない。
+  const entityOwner = new Map<string, string>();
+  const scaleOwner = new Map<string, string>();
   for (const [name, initializer] of Object.entries(graph.initializers)) {
+    const earlierScale = scaleOwner.get(initializer.tensor);
+    if (earlierScale !== undefined) {
+      throw new ContainerError(
+        `initializer '${earlierScale}': scale テンソル '${initializer.tensor}' が initializer '${name}' の実体と同じキー`,
+      );
+    }
+    entityOwner.set(initializer.tensor, name);
     const scaleKey = initializer.storage.scale;
     if (scaleKey === undefined) continue;
-    for (const [other, candidate] of Object.entries(graph.initializers)) {
-      if (candidate.tensor === scaleKey) {
-        throw new ContainerError(
-          `initializer '${name}': scale テンソル '${scaleKey}' が initializer '${other}' の実体と同じキー`,
-        );
-      }
+    const entity = entityOwner.get(scaleKey);
+    if (entity !== undefined) {
+      throw new ContainerError(
+        `initializer '${name}': scale テンソル '${scaleKey}' が initializer '${entity}' の実体と同じキー`,
+      );
     }
+    const sharedWith = scaleOwner.get(scaleKey);
+    if (sharedWith !== undefined) {
+      throw new ContainerError(
+        `initializer '${name}': scale テンソル '${scaleKey}' が initializer '${sharedWith}' と共有されている（1 重み 1 scale MUST）`,
+      );
+    }
+    scaleOwner.set(scaleKey, name);
   }
 };
 

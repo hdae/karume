@@ -273,3 +273,79 @@ Deno.test("createShardValidator: scale キーが他 initializer の実体と衝�
     "initializer 'b' の実体と同じキー",
   );
 });
+
+// 共有は衝突と同じ機序（後発の重みが先発の scale で逆量子化される沈黙誤値）で、チャネル数さえ
+// 揃えば形検査・余剰・欠け・co-shard の全てを素通りする。IR v1 は重み tying の語彙を持たない
+// ので、共有形は取り違えだけを意味する。
+const sharedScaleGraph = (
+  storage: (name: string) => Record<string, unknown>,
+  shapes: { readonly wa: (number | string)[]; readonly wb: (number | string)[] },
+): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["matmul"] },
+  symbols: ["T"],
+  inputs: [{ name: "x", dtype: "f32", shape: ["T", 3] }],
+  outputs: ["ha", "hb"],
+  initializers: {
+    wa: { tensor: "m.wa", storage: storage("m.wa") },
+    wb: { tensor: "m.wb", storage: storage("m.wb") },
+  },
+  values: {
+    wa: { dtype: "f32", shape: shapes.wa },
+    wb: { dtype: "f32", shape: shapes.wb },
+    ha: { dtype: "f32", shape: ["T", shapes.wa[1]] },
+    hb: { dtype: "f32", shape: ["T", shapes.wb[1]] },
+  },
+  nodes: [
+    { op: "matmul", ins: ["x", "wa"], outs: ["ha"], attrs: {} },
+    { op: "matmul", ins: ["x", "wb"], outs: ["hb"], attrs: {} },
+  ],
+});
+
+Deno.test("createShardValidator: 2 本の i8 initializer が scale を共有するグラフを構築時に落とす", () => {
+  // per-channel scale はどちらも [3,1] になるので、形検査は両方を通してしまう
+  const graph = extractIrGraph(graphShard(
+    sharedScaleGraph(() => ({ dtype: "i8", scale: "m.s" }), { wa: [3, 4], wb: [3, 8] }),
+  ));
+
+  const error = assertThrows(() => createShardValidator(graph), ContainerError, "共有されている");
+  // 帰属が分かる診断 MUST — 名前が出ないと直す側はどちらを改名するか決められない
+  assertEquals(error.message.includes("'m.s'"), true, error.message);
+  assertEquals(error.message.includes("'wa'"), true, error.message);
+  assertEquals(error.message.includes("'wb'"), true, error.message);
+});
+
+Deno.test("createShardValidator: 行数と group 数が一致する 2 本の i4 initializer の scale 共有も落とす", () => {
+  // wa [4,64] group 32 と wb [4,128] group 64 は scale がどちらも [4,2]
+  const graph = extractIrGraph(graphShard(
+    sharedScaleGraph(
+      (tensor) => ({ dtype: "i4", scale: "m.s", group_size: tensor === "m.wa" ? 32 : 64 }),
+      { wa: [4, 64], wb: [4, 128] },
+    ),
+  ));
+
+  assertThrows(() => createShardValidator(graph), ContainerError, "共有されている");
+});
+
+// 共有検査が常に鳴る退行の裏取り（scale が別々なら従来どおり構築でき、intake も 2 件返す）。
+Deno.test("createShardValidator: scale キーが別々の 2 本は従来どおり構築・受理できる", () => {
+  const graph = extractIrGraph(graphShard(
+    sharedScaleGraph(
+      (tensor) => ({ dtype: "i8", scale: `${tensor}.scale` }),
+      { wa: [3, 4], wb: [3, 8] },
+    ),
+  ));
+  const validator = createShardValidator(graph);
+
+  const ready = validator.intake(weightShard([
+    { name: "m.wa", dtype: "I8", shape: [3, 4], data: new Uint8Array(12) },
+    { name: "m.wa.scale", dtype: "F32", shape: [3, 1], data: f32Bytes([1, 1, 1]) },
+    { name: "m.wb", dtype: "I8", shape: [3, 8], data: new Uint8Array(24) },
+    { name: "m.wb.scale", dtype: "F32", shape: [3, 1], data: f32Bytes([1, 1, 1]) },
+  ]));
+  assertEquals(ready.map((item) => item.name), ["wa", "wb"]);
+  assertEquals(ready[0].scale?.shape, [3, 1]);
+  assertEquals(ready[1].scale?.shape, [3, 1]);
+  validator.finish();
+});
