@@ -829,6 +829,19 @@ Deno.test({
         { context, queryLength: golden.prompt.length },
       );
       const prefillCensus = assertStateCensus(session.diagnostics(), "prefill");
+      // run 1 回の dispatch 総数・GPU 実時間・融合ヒット数の記録（門ではない — 融合の期待値は
+      // assets_fusion_counts_test 側の静的門が持つ）。融合が外れると dispatch は値が正しいまま
+      // 増える側に動くので、census と同じ run から総数を残す。
+      const runRecord = (diagnostics: SessionDiagnostics): string => {
+        const timing = diagnostics.lastRunTiming;
+        if (timing === undefined) return "（計測なし）";
+        const top = timing.entries.slice(0, 8)
+          .map((entry) => `${entry.key}×${entry.dispatchCount}=${(entry.ns / 1e6).toFixed(2)}ms`)
+          .join(" / ");
+        return `dispatch ${timing.dispatchCount} 本 GPU ${(timing.totalNs / 1e6).toFixed(2)}ms ` +
+          `融合 ${JSON.stringify(diagnostics.lastRunFusions)} 上位: ${top}`;
+      };
+      const prefillRecord = runRecord(session.diagnostics());
 
       // decode 形（M=1）は prefill とは別の計画なので、キーの検査も 1 度ずつ要る。
       const first = prefill[tokenName].data[golden.prompt.length - 1];
@@ -846,6 +859,8 @@ Deno.test({
         `[e2e] gemma4 decode census: prefill ${JSON.stringify(prefillCensus)} / ` +
           `decode ${JSON.stringify(decodeCensus)}`,
       );
+      console.log(`[e2e] gemma4 decode prefill 内訳: ${prefillRecord}`);
+      console.log(`[e2e] gemma4 decode decode 内訳: ${runRecord(session.diagnostics())}`);
     } finally {
       await context.dispose();
       await session.dispose();
