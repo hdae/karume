@@ -10,6 +10,12 @@
  *    家族で「初回実行まで DL が遅れ、ロード進捗にも現れない」形を無くす）。
  * ④ **Session 構築は進捗を動かさない**（prefetch 済みキャッシュの読み直しで `complete` が
  *    もう一度飛ぶと、集約 `loaded` が二重計上になる）。④ だけは実 GPU が要る。
+ * ⑤ **ロード時の `signal` は Session 構築へ持ち越さない**（`AbortSignal.timeout` や画面の
+ *    アンマウントで「ロードは成功したのに以後の生成が全部落ちる」形を作らない）。対で
+ *    「abort 済みで始めたロードは落ちる」も置き、ロード中の中断契約が消えていないことを見る。
+ * ⑥ **グラフ shard のバイト列を握らない**（コンポーネントの供給口を保持したままでも常駐
+ *    ゼロ）。gc を強制する必要があるので別プロセスの台本
+ *    （`helpers/graph-shard-retention.ts`）へ出し、ここでは終了コードだけを見る。
  *
  * NOTE: hub / runtime のテスト helper は import しない（向こうの都合がこちらへ漏れる —
  * `helpers/memory-cache.ts` と同じ規律）。モックはこのファイル内で最小限だけ組む。
@@ -342,3 +348,94 @@ Deno.test({
     assertEquals(mock.paths.length, calls, "Session 構築が network へ出ている");
   },
 });
+
+Deno.test({
+  name: "loadShardComponents: 同じ供給口から Session を 2 本続けて張れる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const { loaded, files, hubOptions } = await prepareTwoShard();
+    const { open } = await loadShardComponents(
+      "test.fromPretrained",
+      loaded,
+      files,
+      ["dit"],
+      hubOptions,
+    );
+
+    const gpu = await acquireGpu();
+    try {
+      // 2 本目が張れるのは、shard 列を**呼ぶたびに**新しく作っているとき（使い切った列を
+      // 使い回すと 2 本目が空の列を受けて「重みが足りない」で落ちる）。グラフ shard も列に
+      // 含むようになった後も同じ規律が要る。
+      for (let index = 0; index < 2; index += 1) {
+        const session = await open("dit").createSession(gpu);
+        await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "loadShardComponents: ロード時の signal は Session 構築へ持ち越さない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const { loaded, files, hubOptions } = await prepareTwoShard();
+    const controller = new AbortController();
+    const { open } = await loadShardComponents("test.fromPretrained", loaded, files, ["dit"], {
+      ...hubOptions,
+      signal: controller.signal,
+    });
+
+    // 呼び手の中断ノブは「このロード 1 回」の寿命のもの — ロード成功の後に発火するのは
+    // `AbortSignal.timeout` でも画面のアンマウントでもごく普通の綴り。
+    controller.abort();
+
+    const gpu = await acquireGpu();
+    try {
+      // 持ち越していると相 2 の `throwIfAborted()` で落ちる（キャッシュ完備でも確実に）。
+      const session = await open("dit").createSession(gpu);
+      await session.dispose();
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test(
+  "loadShardComponents: abort 済みの signal で始めたロードは落ちる（中断契約の維持）",
+  async () => {
+    const { loaded, files, hubOptions } = await prepareTwoShard();
+    const reason = new Error("test: ロード開始前に中断済み");
+
+    const error = await assertRejects(
+      () =>
+        loadShardComponents("test.fromPretrained", loaded, files, ["dit"], {
+          ...hubOptions,
+          signal: AbortSignal.abort(reason),
+        }),
+    );
+    assertEquals(error, reason);
+  },
+);
+
+Deno.test(
+  "loadShardComponents: グラフ shard のバイト列を握らない（別プロセスで gc 観測）",
+  async () => {
+    // MUST: 別プロセス — 到達不能なだけの状態と握られた状態を区別するには gc の強制が要り、
+    // `deno test` に `--v8-flags` を渡す口が無い。
+    const script = new URL("./helpers/graph-shard-retention.ts", import.meta.url);
+    const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", "--v8-flags=--expose-gc", script.href],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const decoder = new TextDecoder();
+    assertEquals(
+      code,
+      0,
+      `${decoder.decode(stdout)}${decoder.decode(stderr)}`,
+    );
+  },
+);

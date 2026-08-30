@@ -176,9 +176,13 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
     確定し、重み shard を 1 バイトも取得する前に「実行できない」が落ちる。既存 3 面
     （`createSession` / `createSessionFromShards` / `estimateSessionMemory`）は全て
     PreparedModel 経由の薄い合成へ一本化（全量面 = 全テンソル同居のグラフ shard 1 本 + 重み
-    0 本の列）。**代償**: PreparedModel はグラフ shard を寿命いっぱい保持する — 決定 3 が
-    グラフ shard を「karume_ir + 小テンソル」と規定するので RAM ピーク目標
-    「O(最大**重み** shard)」は崩れない（受入③の文面はこの読みで更新）。
+    0 本の列）。**代償**: PreparedModel はグラフ shard を寿命いっぱい保持する。
+    **訂正（2026-08-30）**: ここに書いていた「決定 3 がグラフ shard を『karume_ir + 小テンソル』
+    と規定するので RAM ピーク目標『O(最大**重み** shard)』は崩れない」は**誤り**だった —
+    同じ追記で確定した分割規則（`karume.shards` の規則 3/4）は先頭 shard にも実重みを
+    データ節 1GiB まで詰め、1.5GiB 以下の資産は分割ゼロ（= 全量が単一のグラフ shard）になる。
+    したがってグラフ shard は最大 1GiB の実重みを含みうる。保持する側の対処は下の
+    2026-08-30 追記（models 側が握らない）を参照。
   - **estimator（CX-4.3）**: 返り値は `AdmissionReport`（`resident`〈重み内訳 + state〉+
     `scenarios[]`〈generation 指定時は prefill / decode を chunk 記号の再束縛で独立計算〉+
     `peakAccountedBytes` = resident + max(シナリオ)）。max の根拠 = `ActiveBacking` 同時 1 本。
@@ -199,3 +203,25 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
   - **受入の実測（2026-08-29）**: anima Base f16 transformer 3,913,609,588B → 4 shard
     （最大ファイル 1,073,756,928B = データ節 1GiB + ヘッダ）で dist 全門通過・実ロード +
     512² 生成完走（従来は Chromium の単一 ArrayBuffer 上限で原理的に不能 — limitations 追随）。
+
+- 2026-08-30（レビュー M1-2 の是正 — **models 側はグラフ shard を握らない**。裁定の原文 =
+  `.claude/reviews/2026-08-29_9614ba9/` の M1-2）:
+  - **食い違いの実測**: `AnimaPipeline.fromPretrained`（anima Base f16・4 コンポーネント）直後の
+    常駐を Deno で測ると `memoryUsage().external` = **2,461.6MiB**（rss 差分 +2,738MiB）で、
+    内訳は 4 本のグラフ shard のファイルサイズ合計 2,460.9MiB（text_encoder 1,138.9 +
+    text_conditioner 257.3 + transformer shard[0] 1,016.3 + vae_decoder 48.4）と一致した。
+    CX-4.2 が前提にしていた「グラフ shard = karume_ir + 小テンソル」は成立しておらず、
+    RAM ピーク目標「O(最大**重み** shard)」は**この経路では崩れていた**。
+  - **決定**: `loadShardComponents`（models）は admission（`prepareModel` の capability 門 +
+    契約検査）を通したら `PreparedModel` を**その場で捨て**、残すのは `IrGraph`（JSON 由来の
+    純データ）だけにする。`ModelComponent.createSession` は shard 列**全部**（先頭のグラフ
+    shard を含む）をキャッシュから流し直す `createSessionFromShards` へ載せ替える。
+    runtime / hub / 配布形 / pin はいずれも無改変（`PreparedModel` がグラフ shard を保持する
+    こと自体は Session を張り直せる面として正しい — 握る側が models だったのが誤り）。
+  - **実測（同条件・是正後）**: `external` = **0.7MiB**（rss 差分 +210〜226MiB）。代償は
+    Session 構築のたびにグラフ shard 2.46GiB をキャッシュから読み直して再 parse する時間で、
+    512²・2 step の `generate` 実測は 5,993 / 6,045ms → 7,773 / 9,756 / 9,966 / 12,584ms
+    （ローカルのディスク実体キャッシュ・OS ページキャッシュ冷。読み直し量 2,716MiB → 5,176MiB）。
+  - **未是正として残るもの**: 分割規則そのもの（グラフ shard に実重みを詰める規則 3/4）は
+    そのまま。全配布形の再 dist + HF 再アップロード + pin 更新 + 越境参照の焼き直しを伴うので、
+    リリース波の判断としてユーザー裁定に上げる（レビュー M1-2 の c 案）。

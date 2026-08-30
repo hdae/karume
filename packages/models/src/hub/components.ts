@@ -13,6 +13,12 @@
  * 落ちる）、重み shard は admission を通った直後にキャッシュへ落としておき、Session を組む
  * その瞬間にキャッシュから 1 本ずつ流す（ホスト RAM に載るのは常に「今の 1 本」だけ）。
  *
+ * MUST: admission を通したら `PreparedModel` は**その場で捨てる**（グラフ shard のバイト列を
+ * 握り続けない）。配布形のグラフ shard は「`karume_ir` + 小テンソル」ではなく実重みを最大
+ * 1GiB 含む（exporter の分割規則 3/4）ので、握ると anima 4 コンポーネントで **2.4GiB** が
+ * パイプラインの寿命いっぱい常駐する（実測 — ADR 0070 追記 CX-4.2）。残すのは `IrGraph`
+ * （JSON 由来の純データ）だけにして、Session はグラフ shard も含めた列を毎回流し直す。
+ *
  * ## 全量面（`from*Assets`）は温存する
  *
  * 取得済みバイト列から組む入口は {@link wholeComponent} で同じ姿（{@link ModelComponent}）に
@@ -22,10 +28,10 @@
 
 import {
   createSession,
+  createSessionFromShards,
   type GpuContext,
   type KarumeModel,
   type ModelShard,
-  type PreparedModel,
   prepareModel,
   type Session,
   type SessionOptions,
@@ -54,8 +60,8 @@ export type GraphOwner = {
 /** コンポーネント 1 本の「実行前の姿」= グラフ宣言 + Session の入口。 */
 export type ModelComponent = GraphOwner & {
   /**
-   * Session を 1 本張る。shard 面では**呼ぶたびに**重み shard 列を新しく流す
-   * （使い切った列を再利用できないため。全量面は `KarumeModel` からそのまま組む）。
+   * Session を 1 本張る。shard 面では**呼ぶたびに** shard 列（先頭のグラフ shard を含む）を
+   * 新しく流す（使い切った列を再利用できないため。全量面は `KarumeModel` からそのまま組む）。
    */
   readonly createSession: (gpu: GpuContext, options?: SessionOptions) => Promise<Session>;
 };
@@ -81,33 +87,20 @@ export type ShardComponents = {
 };
 
 /**
- * 重み shard が 1 本も無い列（現行の配布形は全コンポーネントが 1 shard = グラフ shard だけ）。
- *
- * MUST: 呼ぶたびに新しい iterator を返す（使い切った列を使い回すと、2 本目の Session 構築が
- * 「既に done」なのか空列なのか区別できない）。空の `refs` で `streamAssets` を呼ばないのは、
- * 逐次面が空の取得対象を呼び出し側の誤りとして拒否するため。
+ * Session 構築のたびにコンポーネントの shard 列**全部**（先頭 = グラフ shard）を流す列。
+ * ロード時に {@link streamAssets}（グラフ shard）と {@link prefetchAssets}（重み shard）で
+ * 全 shard を永続キャッシュへ落としてあるので、この列は network に出ずキャッシュから 1 本ずつ
+ * 読み直す。列は空になりえない（{@link componentShards} が 0 本を拒否する）。
  */
-const noWeightShards: AsyncIterable<ModelShard> = {
-  [Symbol.asyncIterator]: () => ({
-    next: (): Promise<IteratorResult<ModelShard, undefined>> =>
-      Promise.resolve({ done: true, value: undefined }),
-  }),
-};
-
-/**
- * Session 構築のたびに重み shard を流す列。ロード時に {@link prefetchAssets} で全 shard を
- * 永続キャッシュへ落としてあるので、この列は network に出ずキャッシュから 1 本ずつ読み直す。
- */
-const weightShardStream = (
+const componentShardStream = (
   loaded: LoadedManifest,
   refs: readonly FileRef[],
   options: StreamAssetsOptions,
-): AsyncIterable<ModelShard> =>
-  refs.length === 0 ? noWeightShards : {
-    // MUST: `streamAssets` の呼び出しは iterator を取る**その時**に置く（生成器を 1 本作って
-    // 使い回すと 2 本目の Session 構築が空の列を受ける）。
-    [Symbol.asyncIterator]: () => streamAssets(loaded, refs, options),
-  };
+): AsyncIterable<ModelShard> => ({
+  // MUST: `streamAssets` の呼び出しは iterator を取る**その時**に置く（生成器を 1 本作って
+  // 使い回すと 2 本目の Session 構築が空の列を受ける）。
+  [Symbol.asyncIterator]: () => streamAssets(loaded, refs, options),
+});
 
 /**
  * コンポーネント 1 本の shard 列（宣言順 — 先頭がグラフ shard・ADR 0071）を取得キーの表から
@@ -196,18 +189,22 @@ export const loadShardComponents = async (
   const shards = componentKeys.map((key) => componentShards(where, files, key, consumed));
 
   // グラフ shard は宣言順に届く（相 2 は渡した `refs` の順）ので、位置で引き当てる。
-  const prepared: PreparedModel[] = [];
+  //
+  // MUST: 取り出すのは `PreparedModel.graph`（`IrGraph` = JSON 由来の純データ）だけで、
+  // `PreparedModel` 自体はこの式を抜けた時点で到達不能にする — 束縛に残すとグラフ shard の
+  // バイト列がパイプラインの寿命いっぱい常駐する（モジュール doc の MUST）。
+  const graphs: GraphOwner["graph"][] = [];
   for await (const asset of streamAssets(loaded, shards.map(([graph]) => graph), hubOptions)) {
     // hub の `StreamedAsset` が runtime の `ModelShard` を**構造的に満たす**ことの門
     // （両パッケージに同時に依存できるのは models だけなので、境界の構造互換はここでしか
     // 型に固定できない）。構造が割れたらこの代入が赤くなる。
     const graphShard: ModelShard = asset;
-    prepared.push(prepareModel(graphShard));
+    graphs.push(prepareModel(graphShard).graph);
   }
-  if (prepared.length !== componentKeys.length) {
+  if (graphs.length !== componentKeys.length) {
     // 位置で引き当てるので、本数が合わないまま進むと**別のコンポーネントのグラフ**を配る。
     throw new Error(
-      `${where}: グラフ shard が ${prepared.length} 本しか届いていない` +
+      `${where}: グラフ shard が ${graphs.length} 本しか届いていない` +
         `（期待 ${componentKeys.length} 本 — 逐次面の不変条件破れ）`,
     );
   }
@@ -216,24 +213,34 @@ export const loadShardComponents = async (
   // 重みは 1 バイトも落とさない）。ここで全コンポーネントぶんを 1 回で落とすのは、Session を
   // 遅延構築する家族で「重みの DL が初回実行まで遅れ、ロード進捗にも現れない」形を無くすため
   // （進捗の `total` は元から全ファイルの合計なので、集約は追加の細工なしで整合する）。
-  const weights = componentKeys.map((_key, index) => shards[index].slice(1));
-  const weightRefs = weights.flat();
+  // グラフ shard は上の `streamAssets` の相 1 が既にキャッシュへ落としているので、ここで
+  // 落とすのは 2 本目以降だけでよい。
+  const weightRefs = shards.flatMap((componentRefs) => componentRefs.slice(1));
   if (weightRefs.length > 0) await prefetchAssets(loaded, weightRefs, hubOptions);
 
   // Session 構築時の相 2 は prefetch 済みキャッシュの読み直しなので、**進捗は流さない** —
   // 流すと `complete` がロード完了の後にもう一度出て、集約 `loaded` が二重計上になる
   // （「ロードが終わったのに進捗が動く」列になる）。
-  const { onProgress: _loadProgress, ...weightStreamOptions } = hubOptions;
+  //
+  // MUST: `signal` も落とす — 呼び手が渡す signal は「このロード 1 回」の寿命を表す値で、
+  // Session 構築面へ持ち越すと `AbortSignal.timeout(120_000)` やアンマウント時の `abort()` が
+  // 「ロードは成功したのに以後の生成が全部落ちる」形になる（相 2 は shard ごとに
+  // `throwIfAborted()` を踏むので、キャッシュ完備でも確実に落ちる）。`headers` / `fetch` /
+  // `caches` / `onCacheError` は「取得の道具」なので寿命いっぱい持つのが正しく、`signal` だけが
+  // 別種の値。ロード**中**の中断は `hubOptions` 側が従来どおり担う。
+  const { onProgress: _loadProgress, signal: _loadSignal, ...sessionStreamOptions } = hubOptions;
 
   const components = new Map<string, ModelComponent>();
   componentKeys.forEach((key, index) => {
-    const model = prepared[index];
+    const componentRefs = shards[index];
     components.set(key, {
-      graph: model.graph,
+      graph: graphs[index],
       createSession: (gpu, sessionOptions = {}) =>
-        model.createSession(
+        // MUST: 流すのは shard 列**全部**（先頭のグラフ shard を含む）— admission 済みの
+        // `PreparedModel` を握らない代わりに、構築のたびにグラフ shard から組み直す。
+        createSessionFromShards(
           gpu,
-          weightShardStream(loaded, weights[index], weightStreamOptions),
+          componentShardStream(loaded, componentRefs, sessionStreamOptions),
           sessionOptions,
         ),
     });
