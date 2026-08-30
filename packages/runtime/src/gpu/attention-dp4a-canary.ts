@@ -68,6 +68,24 @@
  * **`127·exp(S−m)` が丸め境界（半整数）から 0.30 以上離れる S しか使わない**
  * （WGSL の `exp` 誤差は数 ULP = 1e-5 のオーダーなので桁で安全）。この余裕は
  * tests/gpu_attention_dp4a_canary_test.ts が固定入力の全値で実測して門にする。
+ *
+ * ①QK は既知解を **f16 の格子そのもの**に載せる。s16 変種は「既知解をホストで f16 に丸めた
+ * 列」と突き合わせるので、既知解が f16 の丸め境界の近くにあると、GPU の S が sanity 帯の
+ * 内側で違うだけでも格納後の値が 1 段ずれ、差が f16 の 1 ULP（帯の 55 倍）へ増幅されて
+ * **両腕とも帯外**になる（旧固定入力の最小余裕は相対 1.78e-7 = 帯の 1/56 しか無かった）。
+ * 載せ方は 2 つ:
+ *
+ * 1. **倍率を 2 の冪に閉じる** — `S = f32(acc)·((qscale·scale)·(kscale·scale))` の 3 因子を
+ *    全て 2 の冪にする（{@link QK_DEPTH} 256 で半スケールは 0.25 / 値を `整数 × 2⁻ᵉ` で作ると
+ *    `amax·(1/127)` がちょうど `2⁻ᵉ`）。積の丸めが 1 度も起きないので `S = acc·2⁻ᵏ` が厳密。
+ * 2. **acc の有効桁を f16 の仮数（11 ビット）に収める** — k の行 max 以外を ±64 に固定すると
+ *    `acc = 64·M` になり、`|M| ≤ 2047` なら S は f16 ちょうど。設計の実測最大は **|M| = 519**。
+ *
+ * さらに **M を奇数**に固定して `S = 0` を締め出す（0 は相対の余裕が定義できず、帯の絶対床
+ * だけが残って f16 の subnormal 1 段に負ける）。M の偶奇は「q の奇数要素の個数」で決まるので、
+ * 奇数要素を **2 つだけ**（行 max と col 1）に固定する。余裕は
+ * tests/gpu_attention_dp4a_canary_test.ts が既知解 8,192 要素の全数で実測して門にする
+ * （実測は帯の **24.4 倍** — 旧固定入力は 0.018 倍だった）。
  */
 
 import { defaultI8a8Geometry, i8a8TileM, i8a8TileN } from "../kernels/i8a8-geometry.ts";
@@ -122,8 +140,12 @@ const IDENTITY_PATCH: CanaryWgslPatch = (wgsl) => wgsl;
  *
  * つまり 1e-5 は両者の間に 3 桁あいた谷の底に置いてある。MUST NOT: 緩める — 1e-3 まで広げると
  * f16 格納 1 ULP（相対 ~1e-3）級の実害まで帯に入り、s16 変種の検出器が死ぬ。
+ *
+ * 帯が許すのは **f32 エピローグの差**だけで、s16 変種では格納の丸めが「帯の内側の差」を
+ * f16 の 1 段（帯の 55 倍）へ増幅する — つまり丸めが帯を跨ぐ増幅器になる。したがって帯が
+ * s16 でも閉じることは帯幅ではなく**固定入力の f16 境界からの余裕**が担保する（§固定入力）。
  */
-const SANITY_RELATIVE_TOLERANCE = 1e-5;
+export const SANITY_RELATIVE_TOLERANCE = 1e-5;
 
 /**
  * sanity 帯の絶対床。相対だけで裁くと `|既知解| → 0` で許容も 0 に潰れ、0 近傍の要素だけが
@@ -134,16 +156,64 @@ const SANITY_RELATIVE_TOLERANCE = 1e-5;
  * 作り直して 0 近傍が現れたときで、そこでも 1e-7 は「数 ULP の丸め差は飲むが、整数故障は
  * 飲まない」位置にある（③PV の acc が 1 ずれると |O| は最小でも 5e-4 動く — prow·vs の下限）。
  */
-const SANITY_ABSOLUTE_FLOOR = 1e-7;
+export const SANITY_ABSOLUTE_FLOOR = 1e-7;
 
 // ---------------------------------------------------------------------------
 // 固定入力（凍結 — 値を動かしたらテストの余裕実測をやり直すこと）
 // ---------------------------------------------------------------------------
 
-/** ①QK の q（f32・量子化前）。刻みが scale の格子と共約にならない形。 */
-const QK_QUERY = (i: number): number => (((i * 7) % 29) - 14) * 0.3719 + 0.0417;
-/** ①QK の k（f32・量子化前）。q とは別周期にして行 / 列 scale の取り違えを値に出す。 */
-const QK_KEY = (i: number): number => (((i * 5) % 41) - 20) * 0.2917 - 0.0173;
+/**
+ * ①QK の縮約長。**16 の冪**であること MUST — 半スケール `√(1/√depth)` が 2 の冪になり
+ * （256 → 0.25）、dequant の倍率に丸めが 1 度も入らない（§固定入力 の 1）。既定幾何では
+ * K タイル 16 枚ぶんで、「2 タイル以上」の要件（テストが門にする）を大きく満たす。
+ */
+const QK_DEPTH = 256;
+
+/**
+ * ①QK の行 scale の指数（`qscale = 2⁻ᵉ`）。**行ごとに変える** — 行 scale の取り違えが値に
+ * 出る形にする（旧固定入力の行 scale は 128 行とも同値で、行の取り違えが素通りしていた）。
+ */
+const QK_ROW_EXPONENT = (row: number): number => row % 3;
+
+/** ①QK の列 scale の指数（`kscale = 2⁻ᶠ`）。行側と別周期にする。 */
+const QK_COL_EXPONENT = (col: number): number => col % 4;
+
+/** q の行 max（±127）が載る位置。col 0（k の行 max と当たる席）と col 1（奇数枠）は避ける。 */
+const QK_SPIKE_COLUMN = (row: number): number => 2 + ((row * 37) % (QK_DEPTH - 2));
+
+/**
+ * ①QK の q の量子化値（§固定入力 の 2 — `acc = 64·M` と M の奇数性はここで決まる）。
+ *
+ * - col 0 = ±64: k の行 max（±127）と当たる席。**64 の倍数 MUST** — ここだけ 64 を括り
+ *   出せないと `acc` が 64 の倍数でなくなり、`|acc| ≤ 2047` を強いられて設計が破れる。
+ * - col {@link QK_SPIKE_COLUMN} = ±127: 行 max（= 量子化が 127 を返す唯一の席）。奇数 1 つめ。
+ * - col 1 = ±31 の奇数: 奇数 2 つめ。**奇数がちょうど 2 つ**なので M は必ず奇数になる。
+ * - 残り = ±30 の偶数（M の偶奇に効かない席）。
+ */
+const QK_QUERY_QUANT = (row: number, col: number): number => {
+  if (col === 0) return row % 2 === 0 ? 64 : -64;
+  if (col === QK_SPIKE_COLUMN(row)) return row % 4 < 2 ? 127 : -127;
+  if (col === 1) return ((row * 11) % 31) * 2 - 31;
+  return 2 * (((row * 13 + col * 5) % 31) - 15);
+};
+
+/**
+ * ①QK の k の量子化値。行 max（i = 0）だけが ±127 で、残りは **±64 に固定**する
+ * （`acc = 64·M` の 64 はここから括り出る）。符号の周期 67 は列数 64 より大きいので、
+ * 64 列の符号列は全て相異なる（列の取り違えが値に出る）。
+ */
+const QK_KEY_QUANT = (col: number, i: number): number => {
+  if (i === 0) return col % 2 === 0 ? 127 : -127;
+  return ((i * 7 + col * 5) % 67) < 34 ? 64 : -64;
+};
+
+/** ①QK の q（f32・量子化前 = 量子化値 × 行 scale）。 */
+const QK_QUERY = (row: number, col: number): number =>
+  QK_QUERY_QUANT(row, col) * 2 ** -QK_ROW_EXPONENT(row);
+
+/** ①QK の k（f32・量子化前 = 量子化値 × 列 scale）。 */
+const QK_KEY = (col: number, i: number): number =>
+  QK_KEY_QUANT(col, i) * 2 ** -QK_COL_EXPONENT(col);
 
 /**
  * ③PV の S が行 max から下がる幅（1/64 刻み）。**16 本とも f16 ちょうどで表せて**、
@@ -171,6 +241,19 @@ const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt
 const fillBy = (length: number, value: (i: number) => number): Float32Array<ArrayBuffer> => {
   const data = new Float32Array(length);
   for (let i = 0; i < length; i += 1) data[i] = value(i);
+  return data;
+};
+
+/** 行優先の 2 次元版（①QK の値は「行 / 列のどちらの席か」で決まるので添字を分けて渡す）。 */
+const fillRowsBy = (
+  rows: number,
+  cols: number,
+  value: (row: number, col: number) => number,
+): Float32Array<ArrayBuffer> => {
+  const data = new Float32Array(rows * cols);
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) data[row * cols + col] = value(row, col);
+  }
   return data;
 };
 
@@ -207,15 +290,16 @@ type PvCase = {
 
 /**
  * ①QK の固定入力（**タイル辺は幾何から導く** — 既定の幾何を替えてもカナリアは 1 タイル
- * 全域を埋め続ける）。K は必ず 2 タイル以上（1 タイルだと巡回そのものが踏まれない）。
+ * 全域を埋め続ける）。K は {@link QK_DEPTH} 固定で、既定の幾何では 16 タイル
+ * （1 タイルだと巡回そのものが踏まれないので 2 タイル以上が要件 — テストが門にする）。
  */
 export const buildQkCase = (): QkCase => {
   const geometry = defaultI8a8Geometry("attention_qk");
   const rows = i8a8TileM(geometry);
   const cols = i8a8TileN(geometry);
-  const depth = geometry.tileK * 2;
-  const query = fillBy(rows * depth, QK_QUERY);
-  const key = fillBy(cols * depth, QK_KEY);
+  const depth = QK_DEPTH;
+  const query = fillRowsBy(rows, depth, QK_QUERY);
+  const key = fillRowsBy(cols, depth, QK_KEY);
   const quantizedQuery = quantizeRowsReference(query, rows, depth);
   const quantizedKey = quantizeRowsReference(key, cols, depth);
   const scale = halfScale(depth);

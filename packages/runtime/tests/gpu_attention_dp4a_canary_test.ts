@@ -44,6 +44,8 @@ import {
   formatAttentionI8a8Decision,
   packScoresF16,
   probeAttentionI8a8Dot,
+  SANITY_ABSOLUTE_FLOOR,
+  SANITY_RELATIVE_TOLERANCE,
 } from "../src/gpu/attention-dp4a-canary.ts";
 import {
   attentionPvI8a8Key,
@@ -67,6 +69,27 @@ import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 /** `127·exp(S−m)` が半整数から離れているべき最小の余裕（WGSL の `exp` 誤差 ~1e-5 の桁上）。 */
 const QUANT_MARGIN = 0.3;
 
+/**
+ * `value` から f16 の丸め境界（隣接する f16 値との中点）までの距離が、その要素の
+ * **sanity 帯の許容の何倍**か。1 を超えていれば「帯の内側の差では f16 の段が動かない」—
+ * s16 変種でも帯が閉じることの十分条件そのもの（RC1-1）。
+ *
+ * f16 の刻みは二進指数ごとに一定で、境界は `h ± 刻み/2`（`h` がちょうど 2 の冪のときだけ
+ * 下側の刻みが半分）。subnormal 域は刻みが `2⁻²⁴` で一定なので下限で押さえる。
+ */
+const f16BoundaryBandRatio = (value: number): number => {
+  const magnitude = Math.abs(value);
+  const step = roundToF16(magnitude);
+  const exponent = Math.floor(Math.log2(step));
+  const above = Math.max(2 ** (exponent - 10), 2 ** -24);
+  const below = step === 2 ** exponent ? Math.max(2 ** (exponent - 11), 2 ** -24) : above;
+  const distance = Math.min(
+    Math.abs(magnitude - (step + above / 2)),
+    Math.abs(magnitude - (step - below / 2)),
+  );
+  return distance / Math.max(magnitude * SANITY_RELATIVE_TOLERANCE, SANITY_ABSOLUTE_FLOOR);
+};
+
 /** dp4a 変種**だけ**を壊す（エミュ側の生成物にこの綴りは現れない）。 */
 const BREAK_DP4A: CanaryWgslPatch = (wgsl) =>
   wgsl.replace("return dot4I8Packed(a, b);", "return dot4I8Packed(a, b) + 1;");
@@ -78,10 +101,10 @@ const BREAK_BOTH: CanaryWgslPatch = (wgsl) => wgsl.replace("  return dot", "  re
  * **③PV のエピローグだけ**に相対 `factor − 1` の摂動を入れる（両腕に等しく効く — この綴りは
  * dp4a / emu のどちらの生成物にも同じ形で現れる）。
  *
- * なぜ ③PV だけか: ①QK の s16 変種は出力を f16 に丸めて格納するので、微小摂動が丸め境界を
- * 跨ぐと**差が f16 の 1 ULP（相対 ~1e-3）に化けて帯外へ飛ぶ**。固定入力の ①QK 既知解には
- * 境界まで相対 1.8e-7 しかない要素が実在する（実測）ので、微小摂動の実験にならない。③PV は
- * 3 変種とも O を f32 で書くため、入れた摂動がそのままの倍率で観測できる。
+ * なぜ ③PV だけか: ①QK の s16 変種は出力を f16 に丸めて格納するので、**帯の内側の摂動は
+ * 格納の丸めに吸収されて 1 ビットも動かない**（固定入力の ①QK 既知解は f16 の格子ちょうどに
+ * 載せてあり、丸め境界まで帯の 24 倍離れている — RC1-1・下の余裕門）。摂動が「入れた倍率
+ * そのままで観測できる」のは O を 3 変種とも f32 で書く ③PV だけ。
  */
 const nudgePv = (factor: string): CanaryWgslPatch => (wgsl) =>
   wgsl.replaceAll("let prow = stats[", `let prow = ${factor} * stats[`);
@@ -167,6 +190,27 @@ Deno.test("①QK の既知解は f16 格納の可視域に収まり、定数に�
     }
   }
   assert(distinct > 100, `既知解 S が ${distinct} 種類しかない（比較が恒真になりうる）`);
+});
+
+Deno.test("①QK の既知解は f16 の丸め境界から sanity 帯より遠い（s16 変種で帯が閉じる前提）", () => {
+  // s16 変種は「既知解をホストで f16 に丸めた列」と突き合わせるので、既知解が丸め境界の
+  // 近くにあると **帯の内側の差が f16 の 1 段（帯の 55 倍）へ増幅されて両腕とも帯外**になる。
+  // 全要素でこの門が立つと「帯内の f32 差 ⇒ f16 の段は同じ」が固定入力に対する定理になる。
+  const qk = buildQkCase();
+  let worst = Number.POSITIVE_INFINITY;
+  let at = -1;
+  for (let i = 0; i < qk.expected.length; i += 1) {
+    const ratio = f16BoundaryBandRatio(qk.expected[i]);
+    if (ratio < worst) {
+      worst = ratio;
+      at = i;
+    }
+  }
+  assert(
+    worst > 1,
+    `既知解 S[${at}] = ${qk.expected[at]} の f16 境界余裕が帯の ${worst} 倍しかない` +
+      "（固定入力を選び直すこと — src/gpu/attention-dp4a-canary.ts の §固定入力）",
+  );
 });
 
 Deno.test("故障注入の置換は狙った変種にだけ効く（注入の空振りを先に塞ぐ）", () => {
