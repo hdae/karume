@@ -18,9 +18,14 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   のみ・データ節空）+ **上限 1GiB の単一定数**（尾部スラック 1.5GiB 廃止・本数 = 上限下の
   最小分割 → 均し詰め）+ 常時分割（fat graph shard と単一ファイル配布形は廃止・受理保証
   なし）。読み手契約と書き手ポリシーの 2 層構造で、層/MoE 境界の cut 選好はポリシー側の
-  将来拡張（正本 = 新 ADR・実装中）。**後続 = 全 5 リポ再 dist（テンソル単位ビット同一証明）
-  → turbo 越境焼き直し → カード再生成 → HF 一括アップ + pin 更新**（カード修正のアップは
-  ここに同梱 — ユーザー裁定）
+  将来拡張（正本 = ADR [0081](decisions/0081-shard-spec-v2.md)）。ローカルは完了（2026-08-30 —
+  series 241 本 repack・dist 4 リポ再生成・新旧 59,803 テンソルのビット同一証明・lockstep
+  0.8.0）。**後続 = 次リリース時に一括（2026-08-30 ユーザー裁定）**: HF アップ（anima /
+  irodori / jvnv）→ base SHA で turbo 越境焼き → turbo アップ → pin 4 本更新、を
+  **アップロードと SHA 更新まで含めて Claude が実施**（ユーザー明示許可済み — hf upload の
+  分類器拒否はこの許可で通す）。リリース判定は turbo 再焼き後の e2e 全緑（現在の ignored +8 =
+  turbo ミラー不在の想定内 SKIP）が条件。karume-sbv2-fn は**アップしない**（非公開のまま —
+  ローカル e2e の WAV sha 門が読むためミラー自体は維持。生成 = assets-layout の dist コマンド）
 - **配布門の水平展開（実装中）**: 4 家族の `*_STORAGE_FORBIDDEN`（f32 席へ f16 系列の
   挿し込みが素通り — 実測確認済み・X2-102 の兄弟穴）+ deberta（text_encoder 席）の
   `--sym-max` 門（CG4-3 の同型）
