@@ -7,26 +7,42 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 全体レビュー修正波クローズ後の残件（2026-08-30）
+## now — shard 仕様 v2 波 + レビュー後続（2026-08-30 裁定・着手）
 
 網羅レビュー（正本 = `.claude/reviews/2026-08-29_9614ba9/` — git 追跡外）の確定 50 件 + 追補は
 **修正波 A〜E で全消化（2026-08-30）**。破壊的変更 2 件（`BatchScope.finish()` のホスト側失敗
-throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](limitations.md) に記載。残件:
+throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](limitations.md) に記載。
+残件の裁定は 2026-08-30 に出揃った:
 
-- **レンズ裁定（未裁定のまま保留）**: E-1 = 最適化候補 P-1〜P-5 の perf-ledger 起票裁定 /
-  E-2 = Gemma/LLM 改善 L-0〜L-12（生成 API 波の設計資料込み）/ **L-11 = 最初の出荷 LLM 選定**
+- **shard 仕様 v2（対話裁定 2026-08-30・実装中）**: グラフ専用 shard（shard 0 = `karume_ir`
+  のみ・データ節空）+ **上限 1GiB の単一定数**（尾部スラック 1.5GiB 廃止・本数 = 上限下の
+  最小分割 → 均し詰め）+ 常時分割（fat graph shard と単一ファイル配布形は廃止・受理保証
+  なし）。読み手契約と書き手ポリシーの 2 層構造で、層/MoE 境界の cut 選好はポリシー側の
+  将来拡張（正本 = 新 ADR・実装中）。**後続 = 全 5 リポ再 dist（テンソル単位ビット同一証明）
+  → turbo 越境焼き直し → カード再生成 → HF 一括アップ + pin 更新**（カード修正のアップは
+  ここに同梱 — ユーザー裁定）
+- **配布門の水平展開（実装中）**: 4 家族の `*_STORAGE_FORBIDDEN`（f32 席へ f16 系列の
+  挿し込みが素通り — 実測確認済み・X2-102 の兄弟穴）+ deberta（text_encoder 席）の
+  `--sym-max` 門（CG4-3 の同型）
+- **カード統一（実装中）**: 全家族から fromAssets 案内を削除（anima は済 — 削除理由は
+  家族非依存のため統一）
+- **LLM 先行波（承認済み・小 3 件・無依存）**: L-0 = decode 実測 1 回（**全性能提案の採否
+  基準 — 最初に**）→ L-1 = sliding スロット容量の実数宣言（−180MiB・機能不変）→ L-10 =
+  融合カウント門を gemma4 / minicpm5 decode 資産へ（沈黙劣化の唯一の検出線）
+- **生成 API 波 = 設計フェーズとして起票**（design-review 型）: PLE ホスト gather
+  （GPU 常駐 3.70→1.51GiB）/ 最終行 logits 出口 / EOS 停止・token イベント・streaming /
+  tokenizer + detokenizer / chat template。入力 = レビューの検証済み設計資料
+  （GenerationSequence / PLE sidecar / topk 製品グラフ / tokenizer compile-to-asset）+ lens-llm
+- **L-11 裁定（2026-08-30）**: 技術先行 = **gemma4 E2B**（品質実証済み — tokenizer / L-5 の
+  実装対象）。**公開はライセンス門（ADR 0065 stage 6 = Gemma ToU）の確認後**。配布経路の
+  検証だけは minicpm5 で先行可
 - **M2 実機の手動確認 2 点**: dp4a カナリア（①QK f16 格子化後の 16 本）と軸 reduce NaN
   パリティ 4 本（[known-issues](known-issues.md) Metal 節に読み方）
 - anima-web の cold ロード DL スロット改善（提案 b+a — `FamilyAdmission` 席は実装済みで、
-  残りは admission 前倒しの graph shard 単位化 + extras の並行開始。opt-in の c 案は再裁定要）
-- **修正波の隣接発見（裁定待ちの起票候補）**: ①siglip2 / birefnet / depth-anything /
-  vowel-detector の `*_STORAGE_FORBIDDEN` 不在（f32 席へ f16 系列の挿し込みが実物 fixture で
-  素通り — 実測確認済み・X2-102 の兄弟穴）②deberta（text_encoder 席）の `--sym-max` 門なし
-  （CG4-3 の同型）③M1-2 是正の Session 構築レイテンシ +4s/generate（perf-ledger 候補 —
-  緩和の芽は ADR 0070 追記 2026-08-30）④exporter 分割規則の是正（ADR 0070 の c 案 —
-  リリース波のユーザー裁定）⑤他家族カードの fromAssets 案内の扱い（anima のみ削除裁定済み）
-- 起票のみ: perf-ledger **H-8〜H-10 / L-7 / L-8**（cost proxy / readback 共有 / metadata
-  compile / async pipeline / params 有界化）
+  残りは admission 前倒しの graph shard 単位化 + extras の並行開始。shard 仕様 v2 で
+  graph shard が数 MB になり前倒しの価値が確定する。opt-in の c 案は再裁定要）
+- perf: レンズ E-1 は裁定済み — **P-1〜P-3 スパイク承認・P-4 起票・P-5 計測のみ** +
+  M1-2 代償の L-9（いずれも [perf-ledger](perf-ledger.md)）。既存起票 H-8〜H-10 / L-7 / L-8
 
 ## 消化済み（既知問題 3 件 + anima 素版 i4 感度 — 2026-08-25〜28）
 
