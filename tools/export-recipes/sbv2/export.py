@@ -16,8 +16,8 @@
     uv sync --all-groups                                    # tools/export-recipes/ で 1 回
     uv run --group sbv2 python -m sbv2.export               # 全ターゲットを emit
     uv run --group sbv2 python -m sbv2.export --target front
-    uv run --group sbv2 python -m sbv2.export --dtype f16   # → outputs/series/sbv2-FN4-f16/
-    uv run --group sbv2 python -m sbv2.export --dtype i8    # → outputs/series/sbv2-FN4-i8/
+    uv run --group sbv2 python -m sbv2.export --dtype f16   # → outputs/series/sbv2-F1-f16/
+    uv run --group sbv2 python -m sbv2.export --dtype i8    # → outputs/series/sbv2-F1-i8/
     uv run --group sbv2 python -m sbv2.export --dtype i4 --target front --target voice
     uv run --group sbv2 python -m sbv2.export --verify flow  # 参照実装との eager 同値検証
 
@@ -39,18 +39,18 @@ MUST: `--verify` は**ターゲットを 1 つだけ取る**（`--verify front` 
 重みは配布物に含まれない（`inputs/` は `.gitignore` 済み）。入手手順は README を参照。
 
 出力レイアウト（Deno 側 `packages/runtime/tests/e2e_sbv2_test.ts` が列挙する）。系列名は
-`--model-dir` のディレクトリ名から導く（既定の `inputs/sbv2/FN4/` なら `sbv2-FN4`）:
+`--model-dir` のディレクトリ名から導く（既定の `inputs/sbv2/F1/` なら `sbv2-F1`）:
 
-    outputs/series/sbv2-FN4/<target>/model.safetensors     重み・定数 + __metadata__.karume_ir
-    outputs/series/sbv2-FN4/<target>/io.<case>.safetensors 入力と torch CPU での期待出力
+    outputs/series/sbv2-F1/<target>/model.safetensors     重み・定数 + __metadata__.karume_ir
+    outputs/series/sbv2-F1/<target>/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グラフ入力名>` /
 `output.<位置>`）。
 
 ## 格納 dtype の系列（ADR 0018 / 0019 / 0069）
 
-`--dtype f16` / `--dtype i8` / `--dtype i4` はそれぞれ**別系列**（`sbv2-FN4-f16/` /
-`sbv2-FN4-i8/` / `sbv2-FN4-i4/`）へ書く — f32 系列と同居させると既存 E2E の網（f32 の
+`--dtype f16` / `--dtype i8` / `--dtype i4` はそれぞれ**別系列**（`sbv2-F1-f16/` /
+`sbv2-F1-i8/` / `sbv2-F1-i4/`）へ書く — f32 系列と同居させると既存 E2E の網（f32 の
 tolerance）が黙って別の資産に掛かる。丸め（fake-quant）は共有の
 `quantize.round_weights_to_f16` / `quantize.fake_quant_int8` / `quantize.fake_quant_int4` を
 **remove_weight_norm / パッチ適用の後・参照と golden の採取の前**に当てる
@@ -109,7 +109,7 @@ from sbv2.distribution import EXPORT_PROVENANCE_FILE
 from . import patch
 
 #: 実重みの置き場。リポジトリ管理外（`.gitignore` の `inputs/`）で、手で配置する。
-DEFAULT_MODEL_DIR = INPUTS_ROOT / "sbv2" / "FN4"
+DEFAULT_MODEL_DIR = INPUTS_ROOT / "sbv2" / "F1"
 
 #: 書き出せる格納 dtype。`i8` は **2026-08-04 のユーザー裁定**で足した（ADR 0027 決定 1 の
 #: 「i8 は足さない」の上書き — 記録は SBV2 w8 系列の ADR）。**w8a8 の受け皿ではない**点は

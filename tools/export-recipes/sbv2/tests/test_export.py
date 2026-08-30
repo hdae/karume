@@ -1,6 +1,6 @@
 """SBV2 export 台本（dp / front / flow / dec / voice）の約束事の固定（M1-P3 波 1・6・7）。
 
-前半（golden 入力の作りと CLI の排他）は実重み不要で常に走る。後半は `inputs/sbv2/FN4/` の
+前半（golden 入力の作りと CLI の排他）は実重み不要で常に走る。後半は `inputs/sbv2/F1/` の
 実重みと `sbv2` dependency-group が揃っている環境でだけ走り、無ければ SKIP する — 重みは
 251MB 級でリポジトリ管理外、依存も既定の `uv sync` には入らないため。
 
@@ -645,10 +645,10 @@ class TestWeightDtypeSeries:
         assert len(set(roots.values())) == len(roots)
         # 系列は `outputs/series/` 側（`models/` は配布形だけの場所 — ADR 0037）。
         assert roots == {
-            "f32": SERIES_ROOT / "sbv2-FN4",
-            "f16": SERIES_ROOT / "sbv2-FN4-f16",
-            "i8": SERIES_ROOT / "sbv2-FN4-i8",
-            "i4": SERIES_ROOT / "sbv2-FN4-i4",
+            "f32": SERIES_ROOT / "sbv2-F1",
+            "f16": SERIES_ROOT / "sbv2-F1-f16",
+            "i8": SERIES_ROOT / "sbv2-F1-i8",
+            "i4": SERIES_ROOT / "sbv2-F1-i4",
         }
 
     def test_the_i4_series_is_stored_as_i8_by_default(self):
