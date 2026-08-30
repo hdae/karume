@@ -283,6 +283,50 @@ const releaseBoundResidents = (bound: ResidentTensor[]): void => {
 };
 
 /**
+ * 発行の同期区間で常駐テンソルの使用予約を積む（実体は device.ts の `ResidentInternals.retainUse`）。
+ *
+ * MUST: 呼ぶのは {@link Session.run} / {@link Session.enqueue} の**同期区間**。束縛予約
+ * （{@link Session.#bindInput}）は実行本体まで遅れるので、それだけでは「API が受理した run が
+ * 居るのに同じ tick の `dispose()` が通る」窓が `bakedRefs === 0` の resident に開く。
+ * MUST: 対象は入力の常駐テンソルと `copyOutputs` の写し先の**両方**（どちらも受理した run が
+ * 実体を使う）。同じ実体が 2 口に現れる形（写し先を次の入力に取るループ）は 2 本積んで 2 本返す。
+ * MUST: 途中の 1 本が落ちたら取得済みを**逆順に**返してから投げ直す（取得の逆順で解くのが
+ * リースの規律 — 返し損ねるとその常駐テンソルは以後永久に破棄できなくなる）。
+ */
+const retainUsedResidents = (
+  targets: readonly (readonly [where: string, resident: ResidentTensor])[],
+  gpu: GpuContext,
+): ResidentTensor[] => {
+  const used: ResidentTensor[] = [];
+  try {
+    for (const [where, resident] of targets) {
+      // 破棄済み / 別 context は予約を取る前に落とす（本体の検査と同じ文言で、失敗地点だけが
+      // 発行の同期区間へ前倒しになる）。
+      assertResidentUsable(resident, gpu, where);
+      resident[RUNTIME_INTERNAL].retainUse();
+      used.push(resident);
+    }
+  } catch (cause) {
+    releaseUsedResidents(used);
+    throw cause;
+  }
+  return used;
+};
+
+/**
+ * 使用予約を全て返す（取得の逆順）。
+ *
+ * MUST: run / enqueue の決着で成功・失敗のどちらの経路でも必ず 1 度呼ぶ（返し損ねるとその
+ * 常駐テンソルは破棄できなくなり、二度返すと簿記の破れとして fail loudly になる）。
+ */
+const releaseUsedResidents = (used: ResidentTensor[]): void => {
+  for (let index = used.length - 1; index >= 0; index -= 1) {
+    used[index][RUNTIME_INTERNAL].releaseUse();
+  }
+  used.length = 0;
+};
+
+/**
  * 実行計画から解決済み shape を引く。plan.shapes は入力・initializer・全ノード出力を漏れなく
  * 持つ（planGraph の不変条件）ため、引けないのはランタイム内部の不変条件破れ。
  * MUST: 空 shape（スカラ）へ縮退させない — 要素数 1 として素通りし、確保サイズも要素数検査も
@@ -1131,8 +1175,9 @@ export class Session {
    * MUST NOT: `Tensor.data`（TypedArray の実体）は写さず**借りる**ので、戻り Promise が settle
    * するまで書き換えない。GPU への `writeBuffer` はマイクロタスクの先で出るため、書き換えは
    * 例外も警告も無い沈黙誤値になる。GiB 級の複製を毎 run 払わないための意図的な線引きで、
-   * 「借りる」ことそのものが契約（常駐入力 {@link ResidentTensor} が束縛予約と破棄済み検査で
-   * 守られているのと同じ規律を、ホスト配列では呼び出し側が守る）。
+   * 「借りる」ことそのものが契約（常駐入力 {@link ResidentTensor} が使用予約・束縛予約と
+   * 破棄済み検査で守られているのと同じ規律を、ホスト配列では呼び出し側が守る。常駐入力でも
+   * **中身の書き換え**は同じ borrowed 側の契約 — {@link ResidentTensor.write}）。
    */
   run(
     inputs: RunInputs,
@@ -1160,6 +1205,7 @@ export class Session {
     const lease = capturedGeneration?.context[RUNTIME_INTERNAL];
     let captured: CapturedInputs;
     let capturedBindings: SymbolBindings;
+    let used: ResidentTensor[];
     try {
       // MUST: 入力の写しはリース取得より**前**（写しが落ちた後に返し手の居ないリースが 1 本
       // 残ると、以後の `rewind()` が永久に拒否される）。
@@ -1167,8 +1213,21 @@ export class Session {
       // 束縛も発行時に固定する（本体で読むと、発行直後の書き換えが「シンボルの束縛が衝突」
       // という無関係な失敗に化ける）。
       capturedBindings = { ...bindings };
+      // MUST: 常駐入力の使用予約も**発行の同期区間**で取る（本体の束縛予約だけでは、受理済みの
+      // run が居るのに同じ tick の `dispose()` が通る — {@link retainUsedResidents}）。
+      const targets: [where: string, resident: ResidentTensor][] = [];
+      for (const [name, resident] of captured.residentInputs) {
+        targets.push([`入力 '${name}'`, resident]);
+      }
+      used = retainUsedResidents(targets, this.#state.gpu);
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+    try {
       lease?.acquireRun();
     } catch (cause) {
+      // 取得済みの使用予約は返してから落ちる（本体が走らない = 返し手が居ない）。
+      releaseUsedResidents(used);
       return Promise.reject(cause);
     }
     // MUST: 同期区間で数える（本体はマイクロタスクを 1 段挟むので、本体で数えると同じ tick に
@@ -1178,7 +1237,10 @@ export class Session {
       try {
         return await this.#runOnce(captured, capturedBindings, capturedGeneration);
       } finally {
-        // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると以後の rewind が永久に拒否される）。
+        // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると以後の rewind が永久に拒否される /
+        // その常駐テンソルが破棄できなくなる）。この時点で全ての GPU 操作は submit 済みなので、
+        // 以後の `dispose()` は WebGPU 的に安全（`releaseBoundResidents` と同じ根拠）。
+        releaseUsedResidents(used);
         lease?.releaseRun();
         this.#pendingRuns -= 1;
       }
@@ -1210,6 +1272,11 @@ export class Session {
    * NOTE: 戻り Promise を await せずに {@link BatchScope.finish} を呼んでも取りこぼさない。
    * batch の in-flight リースをこの**同期区間**で取り、finish は未返却リースが全て返るまで
    * フェンスへ進まない（機構は `BatchInternals.enter`）。
+   * MUST: 非 await 形では**ホスト側の失敗も `finish()` に帰属する**（区間の最初の 1 件 —
+   * `BatchInternals.leave`）。errorScope が捕らえるのは GPU 側の失敗だけなので、これが無いと
+   * 「本体で落ちた enqueue のぶんだけ dispatch が少ないまま区間が成功で決着する」。同じ失敗は
+   * 戻り Promise 側にも出るので、**捨てるなら `void p.catch(...)` ではなく `Promise.all` で
+   * 受けること**（`catch` で握り潰すと、その 1 本が落ちたことは finish からしか分からない）。
    *
    * 入力の寿命は `run` と**同型**（{@link Session.run} の「入力の寿命」節）— `inputs` Record の
    * member 構成・shape・`bindings` / `copyOutputs` の形は発行の同期区間で固定し、`Tensor.data`
@@ -1239,6 +1306,7 @@ export class Session {
     // 検査の失敗は従来どおり戻り Promise の reject で返す（同期 throw に変えない）。
     let captured: CapturedInputs;
     let capturedOptions: EnqueueOptions;
+    let used: ResidentTensor[];
     try {
       // MUST: 入力の写しはリース取得より**前**（写しが落ちた後に返し手の居ないリースが 1 本
       // 残ると `finish()` が永久に待つ）。`batch` は実体そのものを持つ（写す対象ではない）。
@@ -1252,16 +1320,42 @@ export class Session {
           // 「書けたのに別の常駐テンソルへ」の沈黙誤値になる）。実体は借りたまま。
           : { copyOutputs: { ...options.copyOutputs } }),
       };
-      batch.enter(this.#state.gpu);
+      // MUST: 使用予約は写し先も含めて**発行の同期区間**で取る（run と同じ理由 —
+      // {@link retainUsedResidents}）。写しの相手も受理済みの enqueue が使う実体なので、
+      // 入力と同じ寿命の保護が要る。
+      const targets: [where: string, resident: ResidentTensor][] = [];
+      for (const [name, resident] of captured.residentInputs) {
+        targets.push([`入力 '${name}'`, resident]);
+      }
+      for (const [name, target] of Object.entries(capturedOptions.copyOutputs ?? {})) {
+        targets.push([`copyOutputs '${name}'`, target]);
+      }
+      used = retainUsedResidents(targets, this.#state.gpu);
     } catch (cause) {
       return Promise.reject(cause);
     }
+    try {
+      batch.enter(this.#state.gpu);
+    } catch (cause) {
+      // 取得済みの使用予約は返してから落ちる（この enqueue は区間に入らない）。
+      releaseUsedResidents(used);
+      return Promise.reject(cause);
+    }
     return this.#serialize(async () => {
+      // ホスト側の失敗は戻り Promise にしか出ない（errorScope は GPU 側の失敗しか捕らえない）
+      // ので、区間にも渡して `finish()` の帰属先にする。器で包むのは「失敗が無い」と
+      // 「undefined が投げられた」を区別するため。
+      let failure: { readonly cause: unknown } | undefined;
       try {
         await this.#enqueueOnce(captured, capturedOptions);
+      } catch (cause) {
+        failure = { cause };
+        throw cause;
       } finally {
-        // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると finish がハングする）。
-        batch.leave();
+        // MUST: 成功・失敗のどちらでも必ず返す（返し損ねると finish がハングする / その常駐
+        // テンソルが破棄できなくなる）。
+        releaseUsedResidents(used);
+        batch.leave(failure);
       }
     });
   }

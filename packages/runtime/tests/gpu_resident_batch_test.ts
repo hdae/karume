@@ -375,9 +375,11 @@ Deno.test({
           ExecutionError,
           "グラフ出力ではない",
         );
-        // 落ちた enqueue の後も区間そのものは決着できる（残骸は discard 済み）。
       } finally {
-        await batch.finish();
+        // 落ちた enqueue の後も区間そのものは決着できる（残骸は discard 済み）。ただし決着は
+        // **最初のホスト側失敗**を帰属する — 2 本目の「グラフ出力ではない」ではなく 1 本目の
+        // 大きさ不一致が出るのが、記録を 1 件に絞っている根拠（派生失敗で根因が隠れない）。
+        await assertRejects(() => batch.finish(), ExecutionError, "バイトと合わない");
       }
     } finally {
       await session.dispose();
@@ -593,7 +595,8 @@ Deno.test({
           "写し元と写し先が同じバッファ",
         );
       } finally {
-        await batch.finish();
+        // 落ちた enqueue はこの区間の最初のホスト側失敗として決着にも帰属する（RC1-2）。
+        await assertRejects(() => batch.finish(), ExecutionError, "写し元と写し先が同じバッファ");
       }
     } finally {
       await session.dispose();
@@ -646,6 +649,156 @@ Deno.test({
       assertEquals(bound.disposed, true);
     } finally {
       device.createComputePipeline = original;
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/** 2x（PRODUCER の出力）の参照値。 */
+const doubled = (phase: number): Float32Array<ArrayBuffer> => {
+  const x = input(phase).data;
+  return Float32Array.from({ length: COUNT }, (_, i) => Math.fround(x[i] + x[i]));
+};
+
+// 非 await の enqueue が本体で落ちても、区間は「dispatch が 1 本少ないまま成功」で決着して
+// いた（errorScope が捕らえるのは GPU 側の失敗だけで、ホスト側の throw は戻り Promise にしか
+// 出ない = 握っていなければ未処理拒否として抜けるだけ）。この門はその帰属を固定する。
+Deno.test({
+  name: "非 await の enqueue の失敗は finish() に帰属する（最初の 1 件・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await producerSession(gpu);
+    const wrong = await gpu.createResident(BYTES + 4, "wrong");
+    const sink = await gpu.createResident(BYTES, "sink");
+    try {
+      const batch = await gpu.beginBatch();
+      // MUST: どちらも await しない（この面が明示的に許している形）。1 本目は写し先の大きさが
+      // 合わずに本体で落ち、2 本目は正常に積まれる。
+      const pending = [
+        session.enqueue({ x: input(0) }, { batch, copyOutputs: { y: wrong } }),
+        session.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } }),
+      ];
+      // 未処理拒否を作らないよう、発行と同じ同期区間でハンドラを付ける。
+      const settled = Promise.allSettled(pending);
+
+      const attributed = await assertRejects(
+        () => batch.finish(),
+        ExecutionError,
+        "バイトと合わない",
+      );
+
+      const results = await settled;
+      assert(results[0].status === "rejected", "落ちた enqueue の戻り Promise は reject する");
+      assertStrictEquals(
+        results[0].reason,
+        attributed,
+        "finish が投げるのは enqueue が落ちたその例外そのもの（同じ 1 事実が 2 経路で見える）",
+      );
+      assertEquals(results[1].status, "fulfilled", "正常な enqueue は巻き添えで落ちない");
+
+      // 恒真化の門: 期待値が全 0 なら「写しが起きた」ことを確かめられない。
+      assert(
+        bits(doubled(1)).some((word) => word !== 0),
+        "期待値が全 0（写しの有無を判定できない）",
+      );
+      assertEquals(bits(await sink.read()), bits(doubled(1)), "正常な enqueue の写し先は更新済み");
+    } finally {
+      await session.dispose();
+      wrong.dispose();
+      sink.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+// 束縛予約（`#bindInput`）が立つのは実行本体 = マイクロタスク 1 段後なので、焼き込みも束縛も
+// 0 本の resident には「API が受理した直後の同じ tick に dispose が通る」窓が開いていた。
+// dispose の doc が謳う「誤りは dispose の呼び出し点で真因のまま落ちる」を、受理済みの
+// run / enqueue に対しても成り立たせるのが発行時の使用予約。
+Deno.test({
+  name: "発行済み run / enqueue が使う常駐テンソルは同じ tick でも破棄できない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await producerSession(gpu);
+    const fresh = await gpu.createResident(BYTES, "fresh");
+    const sink = await gpu.createResident(BYTES, "sink");
+    try {
+      fresh.write(input(0).data);
+      // 1 run 目はミス経路（backing 無し）— 焼き込み参照が 1 本も立たない窓であることの確認。
+      assertEquals(fresh.bakedReferences, 0, "焼き込み参照が既に立っている（門が空振りする）");
+
+      const pending = session.run({ x: fresh });
+      assertEquals(fresh.useReferences, 1, "発行の同期区間で使用予約が立っていない");
+      assertEquals(fresh.boundReferences, 0, "束縛予約は本体まで立たない（この窓の証拠）");
+      assertThrows(() => fresh.dispose(), ResidentTensorError, "使用中");
+      assertEquals(fresh.disposed, false, "拒否した破棄で状態を壊さない");
+
+      // 拒否した dispose は run を壊さない（受理済みの実行はそのまま完走する）。
+      assertEquals(bits((await pending)["y"].data), bits(doubled(0)));
+      assertEquals(fresh.useReferences, 0, "決着で使用予約が返っていない");
+
+      // 写し先（copyOutputs）も同じ寿命の保護を受ける。
+      const batch = await gpu.beginBatch();
+      const queued = session.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } });
+      assertEquals(sink.useReferences, 1, "写し先に使用予約が立っていない");
+      assertThrows(() => sink.dispose(), ResidentTensorError, "使用中");
+      await queued;
+      await batch.finish();
+      assertEquals(sink.useReferences, 0);
+      assertEquals(bits(await sink.read()), bits(doubled(1)));
+
+      // 決着後は通る（予約が返っていることの裏 — 検査が恒真になっていない）。
+      fresh.dispose();
+      sink.dispose();
+      assertEquals(fresh.disposed, true);
+      assertEquals(sink.disposed, true);
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "使用予約の取得が途中で落ちても取得済みは漏れない（rollback の門・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await producerSession(gpu);
+    const alive = await gpu.createResident(BYTES, "alive");
+    const spare = await gpu.createResident(BYTES, "spare");
+    const dead = await gpu.createResident(BYTES, "dead");
+    try {
+      dead.dispose();
+      const batch = await gpu.beginBatch();
+      // 入力（alive）の予約を取った後に写し先（dead）で落ちる形。巻き戻さないと alive は
+      // 以後ずっと破棄できない。
+      await assertRejects(
+        () => session.enqueue({ x: alive }, { batch, copyOutputs: { y: dead } }),
+        ExecutionError,
+        "破棄済み",
+      );
+      assertEquals(alive.useReferences, 0, "取得済みの使用予約が巻き戻っていない");
+      // 区間に入る前に落ちた enqueue は区間の失敗ではない（リースを取っていない）。
+      await batch.finish();
+
+      // batch.enter() が落ちる経路でも同じ（ここでは入力と写し先の 2 本を取った後に落ちる）。
+      await assertRejects(
+        () => session.enqueue({ x: alive }, { batch, copyOutputs: { y: spare } }),
+        BatchScopeError,
+        "finish() 済み",
+      );
+      assertEquals(alive.useReferences, 0, "enter 失敗で使用予約が漏れている");
+      assertEquals(spare.useReferences, 0, "enter 失敗で使用予約が漏れている");
+
+      alive.dispose();
+      spare.dispose();
+      assertEquals(alive.disposed, true);
+      assertEquals(spare.disposed, true);
+    } finally {
       await session.dispose();
       gpu.destroy();
     }

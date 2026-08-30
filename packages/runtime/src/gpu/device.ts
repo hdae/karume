@@ -907,6 +907,20 @@ type ResidentInternals = {
   retainBound(): void;
   /** 進行中 run の束縛予約を 1 本返す（run のエンコードと submit が済んだ時点）。 */
   releaseBound(): void;
+  /**
+   * **発行済み（未決着）の run / enqueue が使う**ことを 1 本積む（焼き込み・束縛とは別枠）。
+   *
+   * MUST: 取るのは `Session.run` / `Session.enqueue` の**発行の同期区間**。実行本体は
+   * マイクロタスクを 1 段挟むので、本体（束縛予約 {@link retainBound}）で取ると、焼き込みも
+   * 束縛もまだ 1 本も立っていない `bakedRefs === 0` の resident では「API が受理した run が
+   * 居るのに同じ tick の `dispose()` が通る」窓が開く。その run は後で fail loudly になるが、
+   * 失敗地点が dispose の呼び出し点から run の決着へずれ、{@link ResidentTensor.dispose} の
+   * doc が謳う「誤りは dispose の呼び出し点で真因のまま落ちる」が受理済み run に対して
+   * 成り立たなくなる。入力だけでなく `copyOutputs` の写し先も対象。
+   */
+  retainUse(): void;
+  /** 使用予約を 1 本返す（run / enqueue の決着時 — 成功・失敗のどちらの経路でも必ず）。 */
+  releaseUse(): void;
 };
 
 /** ホストから常駐テンソルへ書ける配列（要素は全型 4 バイト — ADR 0009 と同じ規約）。 */
@@ -941,6 +955,7 @@ export class ResidentTensor {
   #disposed = false;
   #bakedRefs = 0;
   #boundRefs = 0;
+  #useRefs = 0;
 
   /** MUST: 構築の入口は {@link GpuContext.createResident} だけ（errorScope の門を迂回させない）。 */
   constructor(gpu: GpuContext, id: number, buffer: GPUBuffer, byteLength: number, label: string) {
@@ -976,6 +991,18 @@ export class ResidentTensor {
         }
         this.#boundRefs -= 1;
       },
+      retainUse: () => {
+        this.#assertUsable("使用");
+        this.#useRefs += 1;
+      },
+      releaseUse: () => {
+        if (this.#useRefs === 0) {
+          throw new ResidentTensorError(
+            `resident '${this.label}': 使用予約の解放が過多（ランタイム内部の簿記の破れ）`,
+          );
+        }
+        this.#useRefs -= 1;
+      },
     };
   }
 
@@ -995,13 +1022,30 @@ export class ResidentTensor {
   }
 
   /**
+   * 発行済み（未決着）の run / enqueue が入力または `copyOutputs` の写し先として使っている
+   * 本数（0 でなければ破棄できない）。
+   */
+  get useReferences(): number {
+    return this.#useRefs;
+  }
+
+  /**
    * ホストから全域を書く（`queue.writeBuffer`）。生成ループに入る**前**の条件テンソル投入用。
    *
    * MUST: 大きさは厳密一致。部分書きを許すと残りのバイトが前の内容のまま残り、例外も警告も
    * 出ないまま古い条件で回る（full-write — ADR 0014 と同じ思想）。
+   * MUST NOT: **発行済み（未決着）の run / enqueue がこの実体を入力に取っている間は書かない**。
+   * 実行本体は 1 マイクロタスク以降に走るので、発行直後の同一 tick の write はその dispatch より
+   * 先に queue へ載り、**発行時に意図した値ではなく後から書いた値**を dispatch に読ませる
+   * （例外も警告も出ない）。書いてよいのは戻り Promise が settle した後 — 非 await で回す
+   * `enqueue` なら {@link BatchScope.finish} の後。ホスト入力 `Tensor.data`（`Session.run` の
+   * 「入力の寿命」節の MUST NOT）と**同じ borrowed 側の契約**で、機構の門は置かない（値の
+   * 複製を毎回払わないための線引きも同じ）。
    * MUST: この `writeBuffer` は issue 順で queue timeline に載るので、**先に submit 済みの
    * dispatch を追い越さない**。追い越すのは未 submit のエンコードだけ（ADR 0004 不変条件④）
-   * で、`enqueue` はその末尾で必ず submit するため両者は競合しない。
+   * で、`enqueue` はその末尾で必ず submit してから戻るため、**決着済みの** enqueue とは
+   * 競合しない。これは queue timeline の順序の主張であって、上の MUST NOT が言う「発行したが
+   * 本体がまだ走っていない窓」を守るものではない（そちらは呼び出し側の契約）。
    * MUST: 消失済み device では書かない（{@link assertDeviceUsable}）。`queue.writeBuffer` は
    * 破棄済みバッファに対して例外も警告も出さない no-op なので、ここで止めないと空の条件の
    * まま生成ループが回る。
@@ -1073,6 +1117,11 @@ export class ResidentTensor {
    * エンコード」の窓は焼き込み参照だけでは守れない（その窓で破棄すると、再開したエンコードが
    * 破棄済みバッファを掴んで run が validation で落ちる）。この予約があると、誤りは
    * dispose の呼び出し点で真因のまま落ちる。
+   * MUST: **発行済み（未決着）の run / enqueue が入力または `copyOutputs` の写し先として
+   * 使っている間**も同じく fail loudly。束縛予約が立つのは実行本体（マイクロタスク以降）なので、
+   * 「API が受理した直後の同じ tick」は焼き込みも束縛も 0 本 — その窓を塞ぐのは発行の同期区間で
+   * 取る使用予約（{@link ResidentInternals.retainUse}）だけで、上の保証が受理済みの run / enqueue
+   * に対して成り立つ根拠もそこにある。
    */
   dispose(): void {
     if (this.#disposed) return;
@@ -1086,6 +1135,15 @@ export class ResidentTensor {
       throw new ResidentTensorError(
         `resident '${this.label}': 進行中の run が入力として束縛中（${this.#boundRefs} 本）のため破棄できない。` +
           "その run の完了を await してから破棄すること",
+      );
+    }
+    // 焼き込み・束縛より後に見る（どちらもこれより狭い窓を名指しするので、診断としては
+    // そちらが先に出る方が近い）。
+    if (this.#useRefs > 0) {
+      throw new ResidentTensorError(
+        `resident '${this.label}': 発行済みの run / enqueue が入力または写し先として使用中` +
+          `（${this.#useRefs} 本）のため破棄できない。` +
+          "その run / enqueue の決着を await してから破棄すること",
       );
     }
     this.#disposed = true;
@@ -1132,8 +1190,18 @@ type BatchInternals = {
    * 正常終了に見える（沈黙の空振り）。
    */
   enter(owner: GpuContext): void;
-  /** in-flight リースを 1 本返す（enqueue 本体の成功・失敗どちらの経路でも必ず）。 */
-  leave(): void;
+  /**
+   * in-flight リースを 1 本返す（enqueue 本体の成功・失敗どちらの経路でも必ず）。
+   *
+   * `failure` を渡すと、その区間の**最初の 1 件だけ**をホスト側の失敗として記録し、
+   * {@link BatchScope.finish} が帰属先になる（渡さなければ従来どおり何も記録しない）。
+   * 記録が要るのは、非 await の `enqueue` が本体で落ちたときに「区間は 0 dispatch 少ないまま
+   * 成功」で決着してしまうため — errorScope に載るのは GPU 側の失敗だけで、ホスト側の throw は
+   * 戻り Promise にしか出ない（握っていなければ未処理拒否として抜ける）。
+   * MUST: 2 件目以降は捨てる。1 件目に引きずられた派生失敗が並ぶと根因が読めなくなる
+   * （errorScope が internal / out-of-memory を優先するのと同じ判断）。
+   */
+  leave(failure?: { readonly cause: unknown }): void;
 };
 
 /**
@@ -1163,6 +1231,10 @@ export class BatchScope {
   readonly #drained = Promise.withResolvers<void>();
   #leases = 0;
   #finished = false;
+  /** 区間で最初に起きたホスト側の失敗（{@link BatchInternals.leave}）。2 件目以降は捨てる。 */
+  #failure: { readonly cause: unknown } | undefined;
+  /** {@link BatchScope.finish} が返す決着（errorScope の結果と {@link #failure} の合流）。 */
+  #settled: Promise<void> | undefined;
 
   /** MUST: 構築の入口は {@link GpuContext.beginBatch} だけ（計測との併用の門をここに置く）。 */
   constructor(gpu: GpuContext) {
@@ -1226,10 +1298,12 @@ export class BatchScope {
         }
         this.#leases += 1;
       },
-      leave: () => {
+      leave: (failure) => {
         if (this.#leases === 0) {
           throw new BatchScopeError("batch の in-flight リースの返却が過多（内部の簿記の破れ）");
         }
+        // MUST: 記録は `#drained` を解決する前（区間本体はその解決の先で pop と合流する）。
+        this.#failure ??= failure;
         this.#leases -= 1;
         if (this.#leases === 0 && this.#finished) this.#drained.resolve();
       },
@@ -1248,18 +1322,43 @@ export class BatchScope {
    *
    * MUST: 2 度目以降も同じ完了を返す（先に返すと呼び出し側が破棄へ進み、ロックと errorScope が
    * 開いたまま残る）。
+   * MUST: 区間の中で起きた**最初のホスト側失敗**もここへ帰属する（{@link BatchInternals.leave}）
+   * — errorScope が何も捕らえていなければその失敗を、両方あるときは errorScope 側を投げて
+   * 記録を `cause` に載せる。**破壊的な挙動変更**（0.7.0 まではホスト側の失敗が
+   * `ExecutionError` 等として `finish()` から出ることは無かった）だが、これが無いと「非 await の
+   * `enqueue` が本体で落ちた区間が、dispatch を 1 本落としたまま成功で決着する」— しかも
+   * 戻り Promise を握っていなければ未処理拒否として抜けるだけになる。同じ失敗は enqueue の
+   * 戻り Promise 側にも従来どおり出る（1 つの事実が 2 経路で見えるのは `run` と同じ）。
    * NOTE: in-flight を待つので、`enqueue()` の戻り Promise を await せずに `finish()` を
    * 呼んでも積んだぶんは必ず区間に入って完了する（リースの機構は {@link BatchInternals.enter}）。
    */
   finish(): Promise<void> {
-    if (!this.#finished) {
+    if (this.#settled === undefined) {
       this.#finished = true;
       // in-flight が 1 本も無ければここで決着させる（enqueue を 1 本も出していない区間・
       // 全て await 済みの区間は従来どおり待ちが増えない）。
       if (this.#leases === 0) this.#drained.resolve();
       this.#release();
+      this.#settled = this.#settle();
+      // 決着を呼び出し側が受け取るまで未処理拒否にしない（中身は finish がそのまま返す）。
+      void this.#settled.catch(() => undefined);
     }
-    return this.#completion;
+    return this.#settled;
+  }
+
+  /** errorScope の pop 結果と記録したホスト側失敗を 1 本の決着にまとめる。 */
+  async #settle(): Promise<void> {
+    try {
+      await this.#completion;
+    } catch (cause) {
+      // MUST: errorScope 側を優先し、包み直さずそのまま投げる（型で分岐する呼び手が居る）。
+      // 記録があれば cause に載せて、2 つの事実が 1 度に見えるようにする。
+      if (this.#failure !== undefined && cause instanceof Error && cause.cause === undefined) {
+        cause.cause = this.#failure.cause;
+      }
+      throw cause;
+    }
+    if (this.#failure !== undefined) throw this.#failure.cause;
   }
 }
 
