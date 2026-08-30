@@ -10,11 +10,11 @@
  * IR は `__metadata__.karume_ir` に載っている。
  *
  * MUST: 資産は `models/karume-anima-turbo/` + `models/karume-anima/` と
- * `outputs/series/embeddinggemma-300m/` と `models/karume-irodori-v4-small/`（いずれも
- * untracked・ローカル資産）。無い環境は理由を出して**明示 SKIP** する（テストを消して無音で
- * 緑にしない — ADR 0005）。turbo が 2 リポ要るのは、共有コンポーネント（text_encoder /
- * text_conditioner / vae_decoder）が base リポへの**越境参照**（ADR 0038 §7）で焼かれていて、
- * 現物が turbo ミラー側に 1 バイトも無いため。
+ * `outputs/series/embeddinggemma-300m/` / `gemma4-e2b-decode{,-token}` / `minicpm5-1b-decode` と
+ * `models/karume-irodori-v4-small/`（いずれも untracked・ローカル資産）。無い環境は理由を
+ * 出して**明示 SKIP** する（テストを消して無音で緑にしない — ADR 0005）。turbo が 2 リポ
+ * 要るのは、共有コンポーネント（text_encoder / text_conditioner / vae_decoder）が base リポ
+ * への**越境参照**（ADR 0038 §7）で焼かれていて、現物が turbo ミラー側に 1 バイトも無いため。
  *
  * NOTE: ここで固定するのは **run 1 回あたり**の値（`lastRunFusions` と同じ寿命）。ADR 0040 の
  * 実測欄が載せている predict 1 回ぶんの合計は、これらをパイプラインの run 回数で畳んだもの:
@@ -172,8 +172,9 @@ if (!IRODORI_AVAILABLE) {
 const fusionCounts = (
   graph: IrGraph,
   inputShapes: Readonly<Record<string, readonly number[]>>,
+  stateShapes?: ReadonlyMap<string, readonly number[]>,
 ): FusionCounts =>
-  planFusions(planGraph(graph, bindSymbols(graph, inputShapes)).nodes, {
+  planFusions(planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes, {
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
     // WebGPU core 既定（128MiB）を判定に使う。行ブロック枚数はヒット数に効かないが、
@@ -183,6 +184,29 @@ const fusionCounts = (
       maxComputeWorkgroupsPerDimension: 65535,
     },
   }).counts;
+
+/**
+ * states 形 decode グラフの融合ヒット数（物理 chunk 行数 M を振って計画する）。
+ *
+ * スロットの容量記号は 640 で解く — 融合はノード列と**値**の shape で決まり、スロット容量の
+ * 値には依存しない（e2e の検収値と同じ 640 を使うのは読み合わせやすさだけ）。入力は全て
+ * `[1, M]`（token-only 形の `last_row[1]` は数値次元なのでそのまま）。
+ */
+const decodeFusionCounts = (graph: IrGraph, rows: number): FusionCounts => {
+  const inputShapes = Object.fromEntries(
+    graph.inputs.map((spec) => [
+      spec.name,
+      spec.shape.map((dim) => (typeof dim === "number" ? dim : rows)),
+    ]),
+  );
+  const stateShapes = new Map(
+    Object.entries(graph.states).map(([name, slot]) => [
+      name,
+      slot.shape.map((dim) => (typeof dim === "number" ? dim : 640)),
+    ]),
+  );
+  return fusionCounts(graph, inputShapes, stateShapes);
+};
 
 /**
  * DiT の入力 shape（S = パッチトークン数。1024px = 64×64 = 4096）。ヒット数は S に依存しない
@@ -269,6 +293,81 @@ Deno.test({
         expected,
         `T=${sequence}`,
       );
+    }
+  },
+});
+
+const GEMMA4_DECODE_MODEL = resolveShards(
+  new URL("../../../outputs/series/gemma4-e2b-decode/model.safetensors", import.meta.url),
+)[0];
+const GEMMA4_TOKEN_MODEL = resolveShards(
+  new URL("../../../outputs/series/gemma4-e2b-decode-token/model.safetensors", import.meta.url),
+)[0];
+const MINICPM5_DECODE_MODEL = resolveShards(
+  new URL("../../../outputs/series/minicpm5-1b-decode/model.safetensors", import.meta.url),
+)[0];
+
+const GEMMA4_DECODE_AVAILABLE = await exists(GEMMA4_DECODE_MODEL) &&
+  await exists(GEMMA4_TOKEN_MODEL);
+if (!GEMMA4_DECODE_AVAILABLE) {
+  console.warn(
+    `[karume] ${GEMMA4_DECODE_MODEL.pathname} と ${GEMMA4_TOKEN_MODEL.pathname} が揃っていない` +
+      "ため Gemma 4 decode の融合ヒット数を SKIP する",
+  );
+}
+
+const MINICPM5_DECODE_AVAILABLE = await exists(MINICPM5_DECODE_MODEL);
+if (!MINICPM5_DECODE_AVAILABLE) {
+  console.warn(
+    `[karume] ${MINICPM5_DECODE_MODEL.pathname} が無いため MiniCPM5 decode の融合ヒット数を` +
+      " SKIP する",
+  );
+}
+
+/**
+ * Gemma 4 E2B decode（states 形・35 層）。**rope はヒット 15 本・prefill 形（M=32）は 0 本**で、
+ * これは全 50 鎖（q 側 35 + k 側 15 所有層）が掴めている状態ではない — op 名列は 50 箇所とも
+ * matcher の窓（`mul,slice,slice,neg,cat,mul,add`）に並ぶが、計画では大半が外れる。同じ
+ * 表引き RoPE の MiniCPM5 が M 非依存で全鎖適合する（下のテスト）ので、gemma4 固有の発行形が
+ * 原因と見られる — 機序は未特定（実測の記録 =
+ * docs/research/2026-08-30-gemma4-decode-wallclock.md §4。GPU 時間への寄与は 1ms 級なので
+ * 追跡は性能実需待ち）。
+ *
+ * この門が守るのは他と同じ 2 方向: **掴めている 15 本が黙って外れない**こと（exporter の
+ * 発行順退行 — dispatch が値の正しいまま +200 本級に増える）と、**数字が動いたら受理集合か
+ * 発行形が変わった**と気づけること（増える側は改善 — その時この期待値を更新する）。
+ */
+Deno.test({
+  name: "実資産の Gemma 4 E2B decode は M=1 で rope 15 を掴む（token-only 形も同一・M=32 は 0）",
+  ignore: !GEMMA4_DECODE_AVAILABLE,
+  fn: async () => {
+    for (
+      const [name, source] of [
+        ["logits opt-in", GEMMA4_DECODE_MODEL],
+        ["token-only", GEMMA4_TOKEN_MODEL],
+      ] as const
+    ) {
+      const graph = await readIrGraph(source);
+      assertEquals(decodeFusionCounts(graph, 1), { ...NONE, rope: 15 }, `${name} decode（M=1）`);
+      assertEquals(decodeFusionCounts(graph, 32), NONE, `${name} prefill 形（M=32）`);
+    }
+  },
+});
+
+/**
+ * MiniCPM5-1B decode（24 層 × q/k = 48 鎖・KV 共有なし）。gemma4 と違い**全鎖が M 非依存で
+ * 適合する** — 同じ表引き RoPE でもここまで割れる、という gemma4 側の対照実証でもある
+ * （片方だけ動いたら、どちらの発行形が変わったのかがこの対で割れる）。silu 24 は 24 層の
+ * gate MLP。
+ */
+Deno.test({
+  name: "実資産の MiniCPM5 decode は rope 48 / silu 24 を掴む（M 非依存）",
+  ignore: !MINICPM5_DECODE_AVAILABLE,
+  fn: async () => {
+    const graph = await readIrGraph(MINICPM5_DECODE_MODEL);
+    const expected: FusionCounts = { ...NONE, rope: 48, silu: 24 };
+    for (const rows of [1, 32]) {
+      assertEquals(decodeFusionCounts(graph, rows), expected, `M=${rows}`);
     }
   },
 });
