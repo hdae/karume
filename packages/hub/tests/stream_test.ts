@@ -631,6 +631,41 @@ Deno.test("prefetchAssets: キャッシュ済みのファイルは complete 1 �
   assertEquals(new Set(events.map((event) => event.phase)), new Set<AssetPhase>(["complete"]));
 });
 
+Deno.test("prefetchAssets: 全ファイルがキャッシュ済みでも中断は 1 ファイルごとに効く", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+  await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
+
+  const second = createMockFetch({ files: serveAll() });
+  const controller = new AbortController();
+  const reason = new Error("app: ユーザーがロードを取り消した");
+  const completes: string[] = [];
+
+  const error = await assertRejects(() =>
+    prefetchAssets(loaded, refs, {
+      fetch: second.fetch,
+      caches,
+      signal: controller.signal,
+      // 全ファイルが温まっているので downloading は出ない（complete 1 点だけの列）。最初の
+      // 1 本を終えた直後に取り消す。
+      onProgress: (progress) => {
+        completes.push(progress.path);
+        controller.abort(reason);
+      },
+    })
+  );
+
+  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
+  assertEquals(second.calls, [], "温まっているのに network へ出ている（中断の穴を隠している）");
+  // 中断確認が下層（network）にしか無いと、残り全 ref をキャッシュから舐め切ってから決着する。
+  // 同時 4 本ぶんは既に飛び込み済みで最後まで進むので、上限ではなく「舐め切らない」を見る。
+  assert(refs.length > 4, `同時本数より多い列で試していない（refs ${refs.length}）`);
+  assert(
+    completes.length < refs.length,
+    `取り消し後も残りを舐め切っている（complete ${completes.length} / ${refs.length}）`,
+  );
+});
+
 Deno.test("prefetchAssets: 1 本の失敗は真因を復元して HubFetchError で上がる", async () => {
   const caches = new MemoryCacheStorage();
   const served = serveAll();

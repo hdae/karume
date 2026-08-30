@@ -711,6 +711,11 @@ const runPrefetchPhase = async (
   // 一致すれば network に出ずそのまま温存し、記録が無い / 食い違うエントリは検証付きで温め直す。
   const prefetchOne = async (ref: FileRef): Promise<void> => {
     const refKey = fileRefKey(ref);
+    // MUST: 記録ハッシュが一致するエントリは network に出ない＝下層の signal 監視が効かない
+    // 区間なので、ファイルごとに明示的に中断を見る（見ないと、取り消しも第一失敗も温まっている
+    // ファイルに対してだけ効かず、残り全 ref を舐め切ってから決着する）。全量面 fetchOne・
+    // 相 2 と同じ綴り。
+    prefetchSignal.throwIfAborted();
     try {
       await prefetchHfFile(targetFor(ref), { path: ref.path, sha256: ref.sha256 }, {
         init: requestInit(options.headers, prefetchSignal),
