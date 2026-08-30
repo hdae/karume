@@ -1,11 +1,12 @@
 /**
  * SBV2（テキスト → 音声）の 1 画面デモ。資産の出所だけが分岐で、あとは `generate` のノブ。
  *
- *     deno task demo:sbv2 --source models/karume-sbv2-fn --text "こんにちは、これはテストです。"
- *     deno task demo:sbv2 --source someone/sbv2 --model FN4 --quant f16 --style high --seed 7
+ *     deno task demo:sbv2 --source models/karume-sbv2-jvnv --text "こんにちは、これはテストです。"
+ *     deno task demo:sbv2 --source someone/sbv2 --model F2 --quant f16+bert8 --style Happy --seed 7
  *
- * MUST: `--source` は必須（既定を置かない）。この台本が想定する FN 系列の配布リポは公開保留で
- * pin 定数を持たない（ADR 0073 決定 1）ので、既定を書くと「存在しないリポの取得」に化ける。
+ * MUST: `--source` は必須（既定を置かない）。ローカルミラーは環境ごとの生成物で、公開保留の
+ * 系列（FN 等）は pin 定数も持たない（ADR 0073 決定 1）— 既定を書くと環境によって
+ * 「存在しないパス / リポの取得」に化ける。
  * `karume.json` を持つディレクトリなら使い捨ての HF 形サーバ（`serveLocalDist`）越しに読み、
  * それ以外は HF リポジトリ名として読む。どちらも `fromPretrained` の 1 本なので、shard 分割
  * された配布形もそのまま通る。未指定のノブは manifest の `pipelineConfig.defaults` が埋める。

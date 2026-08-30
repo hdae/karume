@@ -25,7 +25,9 @@
  * `sbv2.demo reference` は `style_vec` / `g` を `outputs/sbv2-demo/assets.safetensors`
  * から読む（`--assets`）。その資産は既定スタイル / 既定話者で焼かれているので、
  * `--style` / `--style-weight` を既定から動かした dump をそのまま突き合わせると、
- * **Karume 側と torch 側で別のスタイルベクトルを使った比較**になる。
+ * **Karume 側と torch 側で別のスタイルベクトルを使った比較**になる。同じ理由で、torch 側の
+ * ckpt（`--model-dir`・既定は `inputs/sbv2/FN4`）は**この台本の `--source` / `--model` と
+ * 対になるもの**を明示的に合わせる（既定どうしは対にならない — 既定 source は jvnv の F1）。
  */
 
 import { analyzeWithWords } from "@hdae/yomi";
@@ -82,7 +84,7 @@ const number = (key: string): number | undefined => {
   return value;
 };
 
-const source = args.get("source") ?? "models/karume-sbv2-fn";
+const source = args.get("source") ?? "models/karume-sbv2-jvnv";
 const model = args.get("model");
 const quant = args.get("quant");
 /** hub / パイプラインへ渡す選択軸（未指定の欄は manifest の既定が埋める）。 */
