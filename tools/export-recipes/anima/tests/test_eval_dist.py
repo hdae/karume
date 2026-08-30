@@ -159,7 +159,8 @@ class TestEvalPlan:
         """MUST: `models/` は配布形だけの場所（`_shared.paths` の DECIDED）。"""
         out = eval_dist.default_out_dir(eval_dist.PIPELINE, [MODEL])
 
-        assert out.parent == eval_dist.EVAL_ROOT
+        # 既定 out = `<EVAL_ROOT>/<リポ名>/<日付>_eval/`（bench の日付席 — assets-layout）。
+        assert out.parent.parent == eval_dist.EVAL_ROOT
         assert "models" not in out.parts
 
     def test_more_than_one_model_needs_an_explicit_output(self):

@@ -421,8 +421,9 @@ class AnimaModel:
 #: NOTE: base 3 モデルは **"i4" を持たない**（席とファイルが {@link anima_quants} /
 #: {@link anima_weights} の導出で両方消える）— i4 の視認裁定（2026-08-24）で構図分岐が大きく
 #: 配布スキップ、0.5.0 の上げ直し（2026-08-25）でも除外の裁定。復活条件 = adaLN 関連で出て
-#: いた量子化感度の高い部分の特定（系列は outputs/series-archive/2026-08-23-anima-base-i4/
-#: と outputs/series/ の *-i4-dyn に温存）。turbo の i4 席は別裁定で公開済みのため維持。
+#: いた量子化感度の高い部分の特定（系列は outputs/series/ の *-i4-dyn に温存 — 校正済み退避の
+#: series-archive は 2026-08-30 の掃除裁定で削除済み）。turbo の i4 席は別裁定で公開済みのため
+#: 維持。
 ANIMA_MODELS: Mapping[str, AnimaModel] = {
     ANIMA_TURBO_MODEL_NAME: AnimaModel(
         lora_sha256=LORA_SHA256,

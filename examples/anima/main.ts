@@ -113,8 +113,12 @@ const image = await pipeline.generate({
 const png = await encodePng(image.data, image.width, image.height);
 const name = `anima-${quant ?? "default"}-${image.width}x${image.height}` +
   `-${steps ?? "default"}step-seed${seed}.png`;
-await Deno.mkdir("outputs/demo", { recursive: true });
-await Deno.writeFile(`outputs/demo/${name}`, png);
+/** 既定の出力先に使うモデル名（取得元の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
+const sourceRef = source ?? ANIMA_TURBO_CURRENT.repo;
+const sourceName = sourceRef.replace(/\/+$/, "").split("/").at(-1) ?? sourceRef;
+const outDir = `outputs/examples/${sourceName}`;
+await Deno.mkdir(outDir, { recursive: true });
+await Deno.writeFile(`${outDir}/${name}`, png);
 console.log(
-  `[anima] outputs/demo/${name}（${((performance.now() - started) / 1000).toFixed(1)}s）`,
+  `[anima] ${outDir}/${name}（${((performance.now() - started) / 1000).toFixed(1)}s）`,
 );

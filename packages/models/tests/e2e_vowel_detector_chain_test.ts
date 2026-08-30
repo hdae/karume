@@ -36,10 +36,12 @@
 //
 // - グラフ: `outputs/series/vowel-detector-crnn-epoch3/`（`.gitignore` の `outputs/`）。
 //   生成コマンドは {@link GENERATE_COMMAND} がそのまま正本。
-// - 実音声: `outputs/demo/vowel-<ケース>.wav`（16kHz mono）。生成台本は
+// - 実音声: `outputs/misc/corpus/vowel-<ケース>.wav`（16kHz mono）。生成台本は
 //   `examples/irodori/eval-audio.ts`（テキスト / seed / リサンプルの正本はあちら）で、日本語
-//   TTS（Irodori）が焼いた 48kHz を 1/3 に間引いたもの。**素材の同一性は sha256 で固定する** —
-//   焼き直したら期待 `.lab` も採り直しになる。
+//   TTS（Irodori）が焼いた 48kHz を 1/3 に間引いたもの。台本の出力先は
+//   `outputs/bench/vowel-detector/<日付>_eval-audio/` で、採用分を**人手で `misc/corpus/` へ
+//   凍結コピー**したものがこの門の入力になる。**素材の同一性は sha256 で固定する** —
+//   焼き直して凍結し直したら期待 `.lab` も採り直しになる。
 // - mel 基底: `tests/fixtures/vowel-detector/parity.json`（git 追跡・上流
 //   `assets/feature_config.json` そのまま）。配布形は同じ行列を `assets` 席の safetensors で
 //   配る（`dist.py --pipeline vowel-detector`）が、この門は配布形を経由しない。
@@ -258,7 +260,8 @@ const CLASS_COUNT = 8;
 
 const SERIES_NAME = "vowel-detector-crnn-epoch3";
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
-const DEMO_DIR = new URL("../../../outputs/demo/", import.meta.url);
+/** 実音声コーパス（凍結コピー — ホスト資産なので消すと焼き直し + 凍結し直しが要る）。 */
+const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 const FIXTURE_PATH = new URL("./fixtures/vowel-detector/parity.json", import.meta.url);
 const MODEL_FILE = "model.safetensors";
 const INPUT_NAME = "features";
@@ -268,7 +271,11 @@ const audioFile = (entry: Case): string => `vowel-${entry.name}.wav`;
 /** SKIP 時にそのまま貼れる生成コマンド（グラフは 1 本 — 長さの指定は要らない）。 */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run python -m vowel_detector.export";
 
-/** 実音声そのものを焼き直すコマンド（テキスト / seed の正本は台本側）。 */
+/**
+ * 実音声そのものを焼き直すコマンド（テキスト / seed の正本は台本側）。台本は
+ * `outputs/bench/vowel-detector/<日付>_eval-audio/` へ焼くので、採用分は {@link CORPUS_DIR}
+ * へ**人手で凍結コピー**する。
+ */
 const AUDIO_COMMAND = "deno task demo:eval-audio --source <Irodori 配布形のパス>";
 
 /** mel 基底のフィクスチャ（`melBasis` 以外の欄はこの門では使わない）。 */
@@ -332,7 +339,7 @@ if (!available) {
 
 for (const entry of CASES) {
   /** 実音声の門。系列と WAV の**両方**が揃ってはじめて実走する。 */
-  const audioAvailable = available && exists(new URL(audioFile(entry), DEMO_DIR));
+  const audioAvailable = available && exists(new URL(audioFile(entry), CORPUS_DIR));
 
   if (available && !audioAvailable) {
     console.warn(
@@ -345,7 +352,7 @@ for (const entry of CASES) {
     name: `母音検出 実音声の全鎖: ${entry.name} — WAV → 特徴 → 実 GPU → .lab（${entry.why}）`,
     ignore: !audioAvailable || !GPU_AVAILABLE,
     fn: async () => {
-      const wavBytes = await Deno.readFile(new URL(audioFile(entry), DEMO_DIR));
+      const wavBytes = await Deno.readFile(new URL(audioFile(entry), CORPUS_DIR));
       // ① 期待 `.lab` を採った音声と、いま読んでいる音声が同一であること。**tolerance では
       // 吸収されない差**（台本を回し直して期待値を採り直していない）を、実行の前に名指しで落とす。
       assertEquals(

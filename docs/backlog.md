@@ -211,8 +211,8 @@ autoregressive 波の**残項目（波外へ送り）**:
   （ADR 0078）を CLI デモから振れるようにする小改修。
 - **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: adaLN の
   i8 化（irodori の帰属で効いた知見の移植 — anima では**未実測の仮説**）と量子化感度の高い
-  場所の特定。系列 + 視認物は `outputs/series-archive/2026-08-23-anima-base-i4/` に退避済みで
-  校正結果は再利用可（正本 =
+  場所の特定。校正済み系列は `outputs/series/` の `*-i4-dyn` に温存（旧 series-archive の
+  退避分と視認物は 2026-08-30 の掃除裁定で削除 — i4 は結局再調整が要るため。実測記録の正本 =
   [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) §5）。
   turbo 側の i4 席で**未検証のまま残した可能性の一覧**（専用幾何・g16・校正量・もう 1 つの
   劣化機序 — いずれも「試してダメ」ではなく「試していない」）は

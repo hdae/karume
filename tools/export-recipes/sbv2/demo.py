@@ -6,7 +6,7 @@
 
     uv run --group sbv2 python -m sbv2.demo assets
     uv run --group sbv2 python -m sbv2.demo reference \\
-        --dump ../../outputs/demo/sbv2-dump/dump.safetensors
+        --dump ../../outputs/examples/karume-sbv2-jvnv/sbv2-dump/dump.safetensors
     uv run --group sbv2 python -m sbv2.demo official --text "こんにちは。"
 
 MUST（1 プロセス 1 サブコマンド）: `sbv2.patch` のパッチはクラス属性のプロセス全域差し替えで、
@@ -42,15 +42,15 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
-from _shared.paths import OUTPUTS_ROOT
+from _shared.paths import MISC_ROOT
 
 from . import export, patch
 
 #: 実重みの置き場（`sbv2/export.py` と同じ — 綴りは向こうが持つ）。
 DEFAULT_MODEL_DIR = export.DEFAULT_MODEL_DIR
-#: デモ資産の置き場。系列（IR + io）ではないので `outputs/series/` の下ではない。
-#: `outputs/` は `.gitignore` 済み。
-DEFAULT_DEMO_DIR = OUTPUTS_ROOT / "sbv2-demo"
+#: デモ資産の置き場。系列（IR + io）でもベンチ生成物でもなく、消すと再エミットが要る
+#: ホスト資産なので `outputs/misc/` の下。`outputs/` は `.gitignore` 済み。
+DEFAULT_DEMO_DIR = MISC_ROOT / "sbv2-demo"
 
 #: SBV2 JP-Extra の text front が使う BERT（`deberta/export.py` の MODEL_ID と同一）。
 BERT_REPO = "ku-nlp/deberta-v2-large-japanese-char-wwm"

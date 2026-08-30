@@ -26,9 +26,12 @@
 //
 // ## 資産が無い環境
 //
-// golden（`outputs/series/`）も PNG（`outputs/demo/`）もリポジトリ管理外で、`rm -rf` で消せる
-// 席。**1 件も無ければ明示 SKIP**、**golden が中途半端に欠けていれば FAIL**（欠けの FAIL は
-// runtime 側の「資産の完全性」テストが名指しで出す —— 系列ディレクトリの列挙はあちらが持つ）。
+// golden（`outputs/series/`）も入力の実画像（`outputs/misc/corpus/`）もマット PNG の書き出し先
+// （`outputs/bench/`）もリポジトリ管理外。ただし性格は割れていて、**読み**の corpus はホスト
+// 資産（消すと台本での焼き直しと凍結コピーが要る）、**書き**の bench は `rm -rf` で常に安全に
+// 消せる席である。**1 件も無ければ明示 SKIP**、**golden が中途半端に欠けていれば FAIL**
+// （欠けの FAIL は runtime 側の「資産の完全性」テストが名指しで出す —— 系列ディレクトリの
+// 列挙はあちらが持つ）。
 // ADR 0005 の「全 SKIP は明示 FAIL」門番は *GPU アダプタの有無* だけを見ており、この SKIP とは
 // 独立。
 
@@ -89,8 +92,17 @@ const SERIES: readonly Series[] = [
   },
 ];
 
+/** 実行日（モジュールロード時に 1 回だけ確定 — 書き出し先の日付ディレクトリに使う）。 */
+const TODAY = new Date().toISOString().slice(0, 10);
+
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
-const DEMO_DIR = new URL("../../../outputs/demo/", import.meta.url);
+/** 入力の実画像コーパス（凍結コピー — ホスト資産なので消すと焼き直しが要る）。 */
+const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
+/** マット PNG の書き出し先の根（`outputs/bench/` は消して安全な席）。 */
+const BENCH_DIR = new URL(
+  `../../../outputs/bench/birefnet/${TODAY}_e2e-mismatch/`,
+  import.meta.url,
+);
 const MODEL_FILE = "model.safetensors";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
@@ -101,9 +113,13 @@ const seriesRoot = (series: Series): URL => new URL(`${series.name}/`, SERIES_PA
  * マット PNG（目視確認用の成果物）の置き場。`outputs/` 配下なので git 追跡外。**系列ごとに
  * 分ける** — 同じ席へ書くと、後に走った系列のマットが先の系列のものを黙って置き換える。
  */
-const artifactDir = (series: Series): URL => new URL(`birefnet/${series.name}/`, DEMO_DIR);
+const artifactDir = (series: Series): URL => new URL(`${series.name}/`, BENCH_DIR);
 
-/** 実画像そのものを焼き直すコマンド（プロンプト / seed の正本は台本側）。 */
+/**
+ * 実画像そのものを焼き直すコマンド（プロンプト / seed の正本は台本側）。台本は
+ * `outputs/bench/<model>/<日付>_eval-images/` へ焼くので、採用分は {@link CORPUS_DIR} へ
+ * **人手で凍結コピー**する。
+ */
 const IMAGE_COMMAND = "deno task demo:eval-images --source <Anima 配布形のパス>";
 
 /**
@@ -166,10 +182,12 @@ const goldenCount = (series: Series): number =>
   REAL_CASES.filter((entry) => exists(goldenUrl(series, entry.name))).length;
 
 /**
- * 実画像が 4 枚とも揃っているか（`outputs/demo/` は `rm -rf` で消せる席）。
+ * 実画像が 4 枚とも揃っているか（`outputs/misc/corpus/` は人手で凍結コピーする席）。
  * MUST: NotFound 以外は伝播させる（`exists` と同じ理由）。
  */
-const IMAGES_PRESENT: boolean = REAL_CASES.every((entry) => exists(new URL(entry.file, DEMO_DIR)));
+const IMAGES_PRESENT: boolean = REAL_CASES.every((entry) =>
+  exists(new URL(entry.file, CORPUS_DIR))
+);
 
 const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
   const bytes = await Deno.readFile(url);
@@ -183,7 +201,7 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
 
 /** 実画像 1 枚のバイト列（decode 前 — sha256 の突合にも使うので生のまま持つ）。 */
 const readImage = (file: string): Promise<Uint8Array<ArrayBuffer>> =>
-  Deno.readFile(new URL(file, DEMO_DIR));
+  Deno.readFile(new URL(file, CORPUS_DIR));
 
 /** グラフ入力の静的次元（記号次元は無い — `birefnet/export.py` の `symbol_names=()`）。 */
 const staticDim = (parsed: PreparedModel, axis: number): number => {

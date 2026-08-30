@@ -66,14 +66,14 @@ uv run --group anima python -m anima.export --dtype i4 --dit-graph dyn --model a
 # so the text_conditioner has to be exported per model (the base one would be the wrong weights).
 uv run --group anima python -m anima.single_file \
   --checkpoint ../../inputs/anima/waiANIMA_v10Base10.safetensors \
-  --out ../../outputs/anima-diffusers/anima-wai-v1.0
-uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai-v1.0 \
+  --out ../../outputs/misc/anima-diffusers/anima-wai-v1.0
+uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-wai-v1.0 \
   --target text_conditioner --dtype f16 --out ../../outputs/series/anima-wai-v1.0-f16
-uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai-v1.0 \
+uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-wai-v1.0 \
   --dtype f16 --dit-graph dyn --out ../../outputs/series/anima-wai-v1.0-f16-dyn
-uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai-v1.0 \
+uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-wai-v1.0 \
   --dtype i8 --dit-graph dyn --out ../../outputs/series/anima-wai-v1.0-i8-dyn
-uv run --group anima python -m anima.export --repo ../../outputs/anima-diffusers/anima-wai-v1.0 \
+uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-wai-v1.0 \
   --dtype i4 --dit-graph dyn --model anima-wai-v1.0 \
   --out ../../outputs/series/anima-wai-v1.0-i4-dyn
 ```
@@ -501,7 +501,7 @@ uv run --group anima python -m anima.pipeline_ref --resolution 1344x768 …   # 
   tensor).
 - **Not placed directly under the distribution tree `models/anima-turbo/`** — that one holds exactly
   the files the manifest declares and is uploaded to HF as-is, and an undeclared file stops
-  `verify_dist` (the same reason `outputs/sbv2-demo/` is kept separate).
+  `verify_dist` (the same reason `outputs/misc/sbv2-demo/` is kept separate).
 - The prompt is a single fixed English string (danbooru-style tags). **The negative prompt is not
   the empty string** — an empty T5 id sequence has length 1 and falls outside the conditioner's
   accepted set `Dim("Ttgt", min=2)`.

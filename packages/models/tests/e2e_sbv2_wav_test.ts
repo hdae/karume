@@ -78,13 +78,19 @@ import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-sbv2-jvnv/`）。 */
 const ASSETS_DIR = new URL("../../../models/karume-sbv2-jvnv/", import.meta.url);
-const OUTPUTS_DIR = new URL("../../../outputs/demo/", import.meta.url);
+/** 実行日（モジュールロード時に 1 回だけ確定 — ダンプ先の日付ディレクトリに使う）。 */
+const TODAY = new Date().toISOString().slice(0, 10);
+/** ミスマッチ時の実物ダンプ先（`outputs/bench/` は消して安全な席 — docs/assets-layout.md）。 */
+const OUTPUTS_DIR = new URL(
+  `../../../outputs/bench/karume-sbv2-jvnv/${TODAY}_e2e-mismatch/`,
+  import.meta.url,
+);
 /**
  * 参照 WAV の**実体**があれば置かれている場所（凍結時に採った実物 — ホスト資産）。
  * 門は sha256 だけで閉じており、ここは**差分位置を出すためだけ**の任意の材料 —
  * 無くても、sha256 が {@link REFERENCE_SHA256} でなくても、門の判定は変わらない。
  */
-const REFERENCE_WAV = new URL("../../../outputs/sbv2-demo/freeze/F1-i8.wav", import.meta.url);
+const REFERENCE_WAV = new URL("../../../outputs/misc/sbv2-demo/freeze/F1-i8.wav", import.meta.url);
 
 const MODEL = "F1";
 const QUANT = "i8";
@@ -306,8 +312,9 @@ const describeFirstDifference = async (actual: Uint8Array<ArrayBuffer>): Promise
 /**
  * 参照 sha と食い違ったときの報告（全門共通）。
  *
- * MUST: ここで tolerance に逃げない。実物を `outputs/demo/` へ落として、人が聴き比べ・
- * 突き合わせできる形にする（`outputs/demo/` は「消して安全」な置き場 — docs/assets-layout.md）。
+ * MUST: ここで tolerance に逃げない。実物を {@link OUTPUTS_DIR} へ落として、人が聴き比べ・
+ * 突き合わせできる形にする（`outputs/bench/` は「消して安全」な置き場 —
+ * docs/assets-layout.md）。
  */
 const mismatchReport = async (
   audio: GeneratedAudio,

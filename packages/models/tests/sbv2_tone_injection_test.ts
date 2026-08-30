@@ -396,9 +396,9 @@ Deno.test("音素を変える編集・記号の増減・words の取り違えは
 // 0.6.0 で解析はパッケージの外へ出た。ここで押さえるのは「解析器の返り値がそのまま
 // `toSbv2Utterance` に渡せること」と「呼び手側の修正辞書が最終 ID まで届くこと」。
 
-const DICT_DIR = new URL("../../../outputs/yomi/", import.meta.url);
+const DICT_DIR = new URL("../../../outputs/misc/yomi/", import.meta.url);
 
-/** `outputs/yomi/` に置かれた JTD1 辞書（版が上がると綴りが変わるので拡張子で拾う）。 */
+/** `outputs/misc/yomi/` に置かれた JTD1 辞書（版が上がると綴りが変わるので拡張子で拾う）。 */
 const dictUrl = ((): URL | undefined => {
   let found: string | undefined;
   try {

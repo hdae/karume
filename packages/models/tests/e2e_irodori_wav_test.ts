@@ -81,8 +81,13 @@ const REFERENCE_AUDIO = new URL(
   "../../../inputs/irodori/v4-small/samples/clone_ref1.wav",
   import.meta.url,
 );
-/** ミスマッチ時の実物ダンプ先（`rm -rf outputs/demo` で常に安全に消せる — docs/assets-layout.md）。 */
-const OUTPUTS_DIR = new URL("../../../outputs/demo/", import.meta.url);
+/** 実行日（モジュールロード時に 1 回だけ確定 — ダンプ先の日付ディレクトリに使う）。 */
+const TODAY = new Date().toISOString().slice(0, 10);
+/** ミスマッチ時の実物ダンプ先（`rm -rf outputs/bench` で常に安全に消せる — docs/assets-layout.md）。 */
+const OUTPUTS_DIR = new URL(
+  `../../../outputs/bench/karume-irodori-v4-small/${TODAY}_e2e-mismatch/`,
+  import.meta.url,
+);
 
 /** SKIP 時にそのまま貼れる生成コマンド。 */
 const DIST_COMMAND = "cd tools/exporter && uv run karume dist --pipeline irodori";
@@ -297,7 +302,7 @@ const describeFirstDifference = async (
 /**
  * 参照 sha と食い違ったときの報告。
  *
- * MUST: ここで tolerance に逃げない。実物を `outputs/demo/` へ落として、人が聴き比べ・
+ * MUST: ここで tolerance に逃げない。実物を {@link OUTPUTS_DIR} へ落として、人が聴き比べ・
  * 突き合わせできる形にする。
  */
 const mismatchReport = async (

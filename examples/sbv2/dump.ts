@@ -4,7 +4,7 @@
  *
  *     deno task dump:sbv2 --text "こんにちは、これはテストです。"
  *     cd tools/export-recipes && uv run --group sbv2 python -m sbv2.demo reference \
- *         --dump ../../outputs/demo/sbv2-dump/dump.safetensors
+ *         --dump ../../outputs/examples/karume-sbv2-jvnv/sbv2-dump/dump.safetensors
  *
  * ## なぜ `main.ts` と別なのか
  *
@@ -22,12 +22,12 @@
  *
  * ## NOTE: `reference` はスタイル資産を dump から読まない
  *
- * `sbv2.demo reference` は `style_vec` / `g` を `outputs/sbv2-demo/assets.safetensors`
+ * `sbv2.demo reference` は `style_vec` / `g` を `outputs/misc/sbv2-demo/assets.safetensors`
  * から読む（`--assets`）。その資産は既定スタイル / 既定話者で焼かれているので、
  * `--style` / `--style-weight` を既定から動かした dump をそのまま突き合わせると、
  * **Karume 側と torch 側で別のスタイルベクトルを使った比較**になる。同じ理由で、torch 側の
- * ckpt（`--model-dir`・既定は `inputs/sbv2/FN4`）は**この台本の `--source` / `--model` と
- * 対になるもの**を明示的に合わせる（既定どうしは対にならない — 既定 source は jvnv の F1）。
+ * ckpt（`--model-dir`・既定は `inputs/sbv2/F1` = この台本の既定 source と同じ F1）は、
+ * `--source` / `--model` を動かしたら**対になるもの**を明示的に合わせる。
  */
 
 import { analyzeWithWords } from "@hdae/yomi";
@@ -94,7 +94,9 @@ const selection = {
 };
 const text = args.get("text");
 if (text === undefined || text.length === 0) throw new Error(`--text が必要（使い方: ${USAGE}）`);
-const outDir = args.get("out") ?? "outputs/demo/sbv2-dump";
+/** 既定の出力先に使うモデル名（`--source` の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
+const sourceName = source.replace(/\/+$/, "").split("/").at(-1) ?? source;
+const outDir = args.get("out") ?? `outputs/examples/${sourceName}/sbv2-dump`;
 const rawSeed = args.get("seed");
 if (rawSeed !== undefined && !/^\d+$/.test(rawSeed)) {
   throw new Error(`--seed ${rawSeed} が非負整数でない`);

@@ -4,7 +4,7 @@
 // 通り、BERT 特徴が別の音素へ配られても波形は出る。数値の正は golden E2E が担保できない
 // 領域なので、ここでは「不変条件が実際に破れを捕まえること」を故障注入で実証する。
 //
-// 資産（outputs/sbv2-demo/）に依存するのは末尾の 1 本だけで、それ以外は資産なしで走る。
+// 資産（outputs/misc/sbv2-demo/）に依存するのは末尾の 1 本だけで、それ以外は資産なしで走る。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
@@ -283,7 +283,7 @@ Deno.test("tileBertToPhoneLevel: トークン数と word2ph 長の不一致は�
 
 // ---- 実資産（あれば）--------------------------------------------------------
 
-const SYMBOLS_PATH = new URL("../../../outputs/sbv2-demo/symbols.json", import.meta.url);
+const SYMBOLS_PATH = new URL("../../../outputs/misc/sbv2-demo/symbols.json", import.meta.url);
 const assetAvailable = (() => {
   try {
     return Deno.statSync(SYMBOLS_PATH).isFile;

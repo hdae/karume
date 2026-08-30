@@ -13,13 +13,13 @@
 - 要求する丸め方式は {@link anima.distribution.ADALN_I8_CALIB_METHOD}。配布経路の
   `gptq` とは綴りが違うので、変種を `dist.py` で組もうとしても方式一致で落ちるし、逆に
   配布条件で焼いた系列をここへ渡しても落ちる（**両方向**で取り違えが止まる）。
-- 出力先の既定は {@link EVAL_ROOT}（`outputs/` 側）。`models/` は配布形だけの場所
-  （`_shared.paths` の DECIDED）なので、既定では 1 度も触らない。
+- 出力先の既定は {@link EVAL_ROOT}（`outputs/bench/` 側 = 消して安全な席）。`models/` は
+  配布形だけの場所（`_shared.paths` の DECIDED）なので、既定では 1 度も触らない。
 
-    # ① 変種の i4 系列を焼く（GPTQ 校正込み・実測 ~3h）
+    # ① 変種の i4 系列を焼く（GPTQ 校正込み・実測 ~3h）。系列名の綴りは {@link EVAL_SERIES}。
     uv run python -m anima.export --dtype i4 --dit-graph dyn --i4-adaln-i8 \\
         --model anima-v1.0 --out ../../outputs/series/anima-v1.0-i4-adaln8-dyn
-    # ② 視認用に組む（既定 out = outputs/eval/karume-anima-v1.0-adaln8/）
+    # ② 視認用に組む（既定 out = outputs/bench/karume-anima-v1.0-adaln8/<日付>_eval/）
     uv run python -m anima.eval_dist --model anima-v1.0
 
 MUST: 出来上がった配布形を HF へ上げない・`models/` へ移さない。quant 席名は配布と同じ
@@ -31,10 +31,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import date
 from functools import partial
 from pathlib import Path
 
-from _shared.paths import OUTPUTS_ROOT, SERIES_ROOT
+from _shared.paths import BENCH_ROOT, SERIES_ROOT
 from anima.card import render_base_card
 from anima.distribution import (
     ADALN_I8_CALIB_METHOD,
@@ -56,8 +57,9 @@ from karume.dist import main as dist_main
 #: モデル名で分かれる（{@link anima.distribution.anima_sources} の綴りに合わせる）。
 EVAL_SERIES = f"{{model}}-i4-{ADALN_I8_TAG}-dyn"
 
-#: 評価用の組み立て先の親。**`models/` へは置かない**（配布形だけの場所 — `_shared.paths`）。
-EVAL_ROOT = OUTPUTS_ROOT / "eval"
+#: 評価用の組み立て先の親（`<EVAL_ROOT>/<リポ名>/<日付>_eval/`）。**`models/` へは置かない**
+#: （配布形だけの場所 — `_shared.paths`）。ベンチ生成物なので消して安全な席に置く。
+EVAL_ROOT = BENCH_ROOT
 
 #: `--pipeline` の綴り（受理集合はこの 1 つきり — 配布の表〈`tools/export-recipes/dist.py`〉に
 #: 混ぜないのは、あちらが「HF へ上げてよい pipeline の全量」だから）。
@@ -112,7 +114,7 @@ PIPELINE = Pipeline(
 
 
 def default_out_dir(pipeline: Pipeline, models: Sequence[str]) -> Path:
-    """`--out` 省略時の出力先（`outputs/eval/<リポ名>/`）。
+    """`--out` 省略時の出力先（`outputs/bench/<リポ名>/<日付>_eval/`）。
 
     複数モデルのリポ名は導出できない（`dist.py` の同名関数と同じ理由）— 明示を求めて落とす。
     """
@@ -120,7 +122,7 @@ def default_out_dir(pipeline: Pipeline, models: Sequence[str]) -> Path:
         raise DistError(
             f"モデルを {len(models)} 個組む場合はリポ名を導出できない — --out で出力先を指定する"
         )
-    return EVAL_ROOT / pipeline.repo_name(models[0])
+    return EVAL_ROOT / pipeline.repo_name(models[0]) / f"{date.today().isoformat()}_eval"
 
 
 def main(argv: Sequence[str] | None = None) -> None:

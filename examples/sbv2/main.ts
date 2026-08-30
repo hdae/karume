@@ -123,7 +123,9 @@ const audio = await pipeline.generate(utterance, {
   ...(lengthScale === undefined ? {} : { lengthScale }),
 });
 const name = `sbv2-${quant ?? "default"}-${style ?? "default"}-seed${seed}.wav`;
-const out = args.get("out") ?? `outputs/demo/${name}`;
+/** 既定の出力先に使うモデル名（`--source` の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
+const sourceName = source.replace(/\/+$/, "").split("/").at(-1) ?? source;
+const out = args.get("out") ?? `outputs/examples/${sourceName}/${name}`;
 // MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
 // 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
 const cut = out.lastIndexOf("/");

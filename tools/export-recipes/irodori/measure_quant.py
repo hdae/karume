@@ -159,6 +159,7 @@ import time
 import wave
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple
@@ -167,7 +168,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
-from _shared.paths import OUTPUTS_ROOT, SERIES_ROOT
+from _shared.paths import BENCH_ROOT, SERIES_ROOT
 from karume import act_quant
 from karume.quant_calib import (
     CalibMethod,
@@ -195,8 +196,10 @@ from . import patch
 from . import pipeline_ref as ip
 from .dacvae import export as dv
 
-#: デモ・ベンチの生成物置き場（資産と分離する — `rm -rf outputs/demo` が系列を巻き込まない）。
-DEFAULT_OUT = OUTPUTS_ROOT / "demo" / "irodori-quant-sim"
+#: ベンチの生成物置き場（資産と分離する — `rm -rf outputs/bench` が系列を巻き込まない）。
+#: NOTE: 日付はプロセス起動時に決まる。**1 実行 = 1 構成**なので、構成を跨いで突き合わせる
+#: 実行が日付を跨ぐときは `--out` を明示して同じ席へ揃える。
+DEFAULT_OUT = BENCH_ROOT / "karume-irodori-v4-small" / f"{date.today().isoformat()}_quant-sim"
 
 #: 恒真化防止の突合先（`irodori/pipeline_ref.py` が f32 系列へ書く full-loop golden）。
 DEFAULT_GOLDEN_DIR = SERIES_ROOT / "irodori-v4-small" / "pipeline"

@@ -8,7 +8,7 @@
  *
  * ## 受理するのは `encodePng` が書く形だけ（それ以外は fail loudly）
  *
- * 読む相手は `packages/models/src/image/png.ts` が焼いた PNG（`outputs/demo/*.png`）だけなので、
+ * 読む相手は `packages/models/src/image/png.ts` が焼いた PNG（examples / bench の生成物）だけなので、
  * 汎用デコーダにはしない — **8bit / truecolor RGB（color type 2）/ 非インタレース / 全
  * スキャンラインの filter type が None** の 1 形のみを受け、外れたら例外にする。Paeth などの
  * 行フィルタや palette / gray / アルファ付きを「一応通す」形にすると、対応していない経路を

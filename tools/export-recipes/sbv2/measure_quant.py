@@ -5,8 +5,9 @@
 0 行で、ここで測るのは**量子化そのものの質**（ADR 0006 の fake-quant 方法論では E2E は
 実装誤差しか測らないため、品質は別軸で測る必要がある）。
 
-14 構成を**同一発話・同一乱数**（`outputs/demo/sbv2-dump/dump.safetensors` の離散入力・ノイズ列）で
-走らせる。既存 5 構成は**生成ネット側だけ**を振る（**BERT は f32 固定**）:
+14 構成を**同一発話・同一乱数**（`outputs/examples/karume-sbv2-jvnv/sbv2-dump/dump.safetensors`
+の離散入力・ノイズ列）で走らせる。既存 5 構成は**生成ネット側だけ**を振る
+（**BERT は f32 固定**）:
 
     (1) f32    基準。`sbv2.demo reference` と同じ経路（既存 reference.wav とビット一致）
     (2) f16    適格重みを f16 表現可能値へ丸め（`quantize.round_weights_to_f16`）。活性は f32
@@ -59,8 +60,9 @@ stage は**特徴を採る層まで**なので、対象は `bert:linear` の cen
 
     uv run --group sbv2 python -m sbv2.measure_quant
 
-出力は `outputs/demo/quant-sim/`（`<config>.wav` 14 本 + `report.json`）。`--configs` で
-主要構成を名前で絞れる（`f32` は SNR の基準なので常に走る）。w4 の group 長は
+出力は `outputs/bench/karume-sbv2-jvnv/<日付>_quant-sim/`（`<config>.wav` 14 本 +
+`report.json`）。`--configs` で主要構成を名前で絞れる（`f32` は SNR の基準なので常に走る）。
+w4 の group 長は
 `--w4-group-size`（2 冪かつ 16 以上・既定 32）で振れる — 適格判定・丸め・方式名の 3 つへ
 同じ g が流れる（校正付き構成の格子は 32 のまま = {@link CALIB_GROUP_SIZE}）。
 
@@ -123,6 +125,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from itertools import combinations
 from pathlib import Path
 from types import MappingProxyType
@@ -132,7 +135,7 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
-from _shared.paths import DIST_ROOT, OUTPUTS_ROOT
+from _shared.paths import BENCH_ROOT, DIST_ROOT, EXAMPLES_ROOT
 from deberta.calib_texts import CALIB_TEXTS
 from karume.act_quant import quantize_rows
 from karume.ir import MIN_GROUP_SIZE
@@ -162,13 +165,14 @@ from karume.quantize import (
 
 from . import demo, export, patch
 
-#: デモ・ベンチの生成物置き場。資産（`sbv2.demo.DEFAULT_DEMO_DIR`）と分離する —
-#: 生成物の掃除（`rm -rf outputs/demo`）が資産や系列を巻き込まないため（docs/assets-layout.md）。
-DEMO_OUT_ROOT = OUTPUTS_ROOT / "demo"
-DEFAULT_DUMP = DEMO_OUT_ROOT / "sbv2-dump" / "dump.safetensors"
+#: dump の既定入力（`examples/sbv2/dump.ts` の既定出力先 — 綴りは向こうが正本）。
+DEFAULT_DUMP_DIR = EXAMPLES_ROOT / "karume-sbv2-jvnv" / "sbv2-dump"
+DEFAULT_DUMP = DEFAULT_DUMP_DIR / "dump.safetensors"
 #: f32 構成の恒真化を防ぐ突合先（`sbv2.demo reference` が同じ dump から書いた WAV）。
-DEFAULT_REFERENCE_WAV = DEMO_OUT_ROOT / "sbv2-dump" / "reference.wav"
-DEFAULT_OUT = DEMO_OUT_ROOT / "quant-sim"
+DEFAULT_REFERENCE_WAV = DEFAULT_DUMP_DIR / "reference.wav"
+#: 測定結果の置き場。ベンチ生成物なので資産（`sbv2.demo.DEFAULT_DEMO_DIR`）とも系列とも
+#: 分離する — 掃除（`rm -rf outputs/bench`）がそれらを巻き込まないため（docs/assets-layout.md）。
+DEFAULT_OUT = BENCH_ROOT / "karume-sbv2-jvnv" / f"{date.today().isoformat()}_quant-sim"
 #: サイズ縮小率の分母になる配布形（`karume dist` の生成物 — 実バイトを読むだけで書かない）。
 DEFAULT_DIST_DIR = DIST_ROOT / "karume-sbv2-jvnv"
 

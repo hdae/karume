@@ -4,8 +4,15 @@
  *     deno task demo:eval-images --source models/karume-anima-turbo
  *
  * 中身は `examples/anima/main.ts` を seed とプロンプトを変えて 4 回呼ぶだけ。**プロンプト /
- * seed / 解像度の正本はこのファイル**で、生成物は `outputs/demo/` 直下（`rm -rf` で安全に
- * 消せる席 — docs/assets-layout.md）。
+ * seed / 解像度の正本はこのファイル**で、生成物は `outputs/bench/<model>/<日付>_eval-images/`
+ * （`rm -rf` で安全に消せる席 — docs/assets-layout.md）。
+ *
+ * ## 実画像コーパスの正本はこの台本の出力
+ *
+ * テストが読む実画像コーパス（seed 42..45 の 4 枚）の正本は**ここが焼いたバイト列**で、
+ * 採用した回の出力を `outputs/misc/corpus/` へ**人手で凍結コピー**したものがコーパスになる
+ * （テストは `outputs/misc/corpus/` だけを読む — bench 側は日付ごとに増えて消される席なので、
+ * 直接読ませると「掃除したら赤くなる」形になる）。凍結し直したら golden も採り直し。
  *
  * MUST: `--source` は必須にする（既定を置かない）。Anima の配布形は untracked のローカル資産で
  * 置き場が環境ごとに違い、`main.ts` は `karume.json` を持たないパスを **HF リポジトリ名**と
@@ -13,7 +20,7 @@
  *
  * MUST: quant / steps は渡さない。ファイル名がその 2 つを綴る（{@link outputName}）ので、
  * 渡した瞬間に別名で焼かれ、golden（`io.photo-*.safetensors`）とは無関係の画像が
- * `outputs/demo/` に増えるだけになる。
+ * 日付席に増えるだけになる。
  *
  * 画像を焼き直したら **golden も採り直す**（`tools/export-recipes/siglip2/export.py`）。採り直しを
  * 忘れた場合は e2e が落ちる（`io.photo-*.safetensors` に焼いた元画像の sha256 が入っており、
@@ -87,13 +94,22 @@ if (source === undefined) throw new Error(`--source が無い（使い方: ${USA
 
 const main = new URL("./main.ts", import.meta.url);
 
+/** 実行日（台本のロード時に 1 回だけ確定 — 出力の日付ディレクトリに使う）。 */
+const TODAY = new Date().toISOString().slice(0, 10);
+/** 置き場に使うモデル名（`--source` の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
+const sourceName = source.replace(/\/+$/, "").split("/").at(-1) ?? source;
+/** 4 枚の置き場（cwd 相対なのは `main.ts` の作法 — リポジトリ直下から回す）。 */
+const outDir = `outputs/bench/${sourceName}/${TODAY}_eval-images`;
+await Deno.mkdir(outDir, { recursive: true });
+
 for (const entry of CASES) {
-  // 置き場が cwd 相対なのは `main.ts` の作法（リポジトリ直下から回す）。
-  const path = `outputs/demo/${outputName(entry.seed)}`;
+  // `main.ts` は `--out` を持たない（既定の examples 席へ焼く）ので、焼かせてから日付席へ移す。
+  const staged = `outputs/examples/${sourceName}/${outputName(entry.seed)}`;
+  const path = `${outDir}/${outputName(entry.seed)}`;
   console.log(`[eval-images] ${entry.case} — ${entry.why}`);
   // MUST: 焼く前に前回実行の残骸を消す。存在検査だけでは、`main.ts` の綴りが変わったときに
   // 古い同名 PNG が門を通り、「成功表示のまま golden が別の画像から採られる」に落ちる。
-  await Deno.remove(path).catch((error: unknown) => {
+  await Deno.remove(staged).catch((error: unknown) => {
     if (!(error instanceof Deno.errors.NotFound)) throw error;
   });
   const { code } = await new Deno.Command(Deno.execPath(), {
@@ -117,9 +133,10 @@ for (const entry of CASES) {
   // MUST: 名前まで検査する。`main.ts` の綴りが変わっても生成自体は成功するので、ここで
   // 落とさないと「焼けているのに golden 側が読めない」形で後から気づくことになる。事前に
   // 消してあるので、通るのは**この子プロセスが書いた**ときだけ。
-  if (!(await Deno.stat(path).then((stat) => stat.isFile, () => false))) {
-    throw new Error(`${path} が生成されていない（examples/anima/main.ts の命名が変わった）`);
+  if (!(await Deno.stat(staged).then((stat) => stat.isFile, () => false))) {
+    throw new Error(`${staged} が生成されていない（examples/anima/main.ts の命名が変わった）`);
   }
+  await Deno.rename(staged, path);
   console.log(`[eval-images] ${path}`);
 }
 

@@ -75,13 +75,14 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import torch
 from torch import nn
 
-from _shared.paths import OUTPUTS_ROOT
+from _shared.paths import BENCH_ROOT
 from karume.quant_calib import (
     CalibMethod,
     CalibReport,
@@ -103,7 +104,7 @@ from . import export as eg
 from .calib_texts import CALIB_TEXTS
 
 #: 生成物の既定の置き場（デモ・測定の生成物は系列と分ける — `irodori/measure_quant.py` と同じ）。
-DEFAULT_OUT = OUTPUTS_ROOT / "demo" / "embeddinggemma-quant-screen"
+DEFAULT_OUT = BENCH_ROOT / "embeddinggemma-300m" / f"{date.today().isoformat()}_quant-screen"
 
 REPORT_FILE = "report.json"
 

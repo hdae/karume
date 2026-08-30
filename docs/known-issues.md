@@ -3,25 +3,6 @@
 > 置き場の規約: 未解決のバグ（意図した設計制約は [limitations.md](limitations.md)）。
 > 解決したら該当節を削除し、修正コミットへのポインタを残さない（履歴は git が持つ）。
 
-## eval-images の出力名がソースリポを区別せず、siglip2 実画像門の入力を上書きできる
-
-`examples/anima/eval-images.ts` の出力 PNG 名は quant / steps / 解像度 / seed を綴るが
-**`--source`（どの配布形から焼いたか）を綴らない**。siglip2 の実画像 e2e は
-`outputs/demo/` のこの PNG を名前で読んで golden（`io.photo-*.safetensors` 内の sha256）と
-突合するため、**turbo 以外の配布形で eval-images を実行すると同名で上書きされ、門が
-10 本赤になる**（2026-08-23 実発生 — 波 L 後は素版 `models/karume-anima` を指しても
-コマンドが成立するため踏みやすくなった。turbo 配布形から焼き直して復旧・golden 不変・
-パリティ門が同一内容の復元を証明）。
-
-最小の埋め方はファイル名（または置き場）へソース識別子を入れて golden 側の読み口を追随
-させること。それまでの運用: **eval-images は turbo 配布形（`models/karume-anima-turbo`）
-以外を指さない**。
-
-**同型が `examples/irodori/eval-audio.ts` にもある**（出力 WAV 名 `vowel-<name>[-48k].wav` が
-`--source` を綴らない一方、`--source` は任意の Irodori 配布形を受ける）。こちらは母音検出の
-chain e2e が**実行前の sha256 検査**で全件赤になるため沈黙誤値ではなく、復旧も canonical
-source で焼き直すだけ — 埋め方は eval-images と同じ。
-
 ## フル走行の `deno task verify` が GPU VRAM 圧で稀にフレークする
 
 12GiB の GPU に GB 級モデルを連続投入するため、**フル走行では稀に `GpuOutOfMemoryError` /

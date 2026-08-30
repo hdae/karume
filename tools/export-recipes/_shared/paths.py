@@ -31,3 +31,14 @@ OUTPUTS_ROOT = REPO_ROOT / "outputs"
 #: エクスポータの系列出力の親（IR + io フィクスチャ）。系列でない生成物（デモ資産など）は
 #: `OUTPUTS_ROOT` の直下へ置き、ここへは混ぜない。
 SERIES_ROOT = OUTPUTS_ROOT / "series"
+
+#: ベンチ・評価・ダンプの親（`<BENCH_ROOT>/<モデル>/<日付>_<目的>/`）。**消して安全**な席で、
+#: ここに残るものは全て台本の再実行で作り直せる。
+BENCH_ROOT = OUTPUTS_ROOT / "bench"
+
+#: ホスト資産の親（`<MISC_ROOT>/<名前>/`）。消すと再取得・再エミットが要るので `BENCH_ROOT`
+#: とは分ける（デモ資産・辞書・実コーパスの凍結コピー）。
+MISC_ROOT = OUTPUTS_ROOT / "misc"
+
+#: `examples/` の台本の既定出力先の親（`<EXAMPLES_ROOT>/<モデル>/`）。
+EXAMPLES_ROOT = OUTPUTS_ROOT / "examples"

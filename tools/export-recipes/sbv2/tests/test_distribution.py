@@ -367,7 +367,7 @@ def _build_sbv2_sources(
         series_i4=series / f"{stem}-i4",
         text_encoder=series / "deberta-i8" / "sbv2-22layer",
         text_encoder_i4=series / "deberta-i4" / "sbv2-22layer",
-        demo=root / "outputs" / "sbv2-demo",
+        demo=root / "outputs" / "misc" / "sbv2-demo",
         model=root / "inputs" / "sbv2" / model,
     )
     write_component(sources.text_encoder / "model.safetensors", _SBV2_PAYLOADS["text_encoder"])
@@ -1369,10 +1369,10 @@ class TestSbv2Cli:
         import dist
         from sbv2 import distribution
 
-        # `DIST_ROOT` は既定の出力先を決めるドライバ側（`dist.default_out_dir`）、`OUTPUTS_ROOT` /
+        # `DIST_ROOT` は既定の出力先を決めるドライバ側（`dist.default_out_dir`）、`MISC_ROOT` /
         # `INPUTS_ROOT` は系列の外の入力を引く recipe 側 — 別モジュールの束縛を別々に外す。
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
-        monkeypatch.setattr(distribution, "OUTPUTS_ROOT", tmp_path / "outputs")
+        monkeypatch.setattr(distribution, "MISC_ROOT", tmp_path / "outputs" / "misc")
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
 
     def test_it_assembles_into_the_pipeline_default_directory(

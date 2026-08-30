@@ -88,7 +88,7 @@ MUST: `--verify` は emit しない（同一プロセスでは併用できない
 **顕著物体**で、{@link _sanity} が「円内の logit 平均 > 円外の logit 平均」という**順序**を
 見る（閾値は置かない）— セグメンテーションとして死んだ出力（一様・入力非依存）はここで落ちる。
 
-`--real-images` を付けると、それに加えて `outputs/demo/` の**実画像** 4 枚
+`--real-images` を付けると、それに加えて `outputs/misc/corpus/` の**実画像** 4 枚
 （{@link REAL_CASES}）を通した golden も書く:
 
     uv run --group birefnet python -m birefnet.export --real-images
@@ -104,8 +104,9 @@ NOTE: 実画像は 1024×1024 なので、1024² 系列に対しては resize �
 `packages/models/tests/image_preprocess_test.ts` が受け持つ。
 
 MUST: 実画像 golden には**元画像の sha256** を `__metadata__` に載せる。画像は
-`examples/anima/eval-images.ts` でいつでも焼き直せる生成物なので、焼き直したのに golden を
-採り直していない環境では、突合ではなく**入力が違う**（そして値は一見それらしく出る）。
+`examples/anima/eval-images.ts` が焼いた出力を `outputs/misc/corpus/` へ**人手で凍結コピー**
+したものなので、コーパスを差し替えたのに golden を採り直していない環境では、突合ではなく
+**入力が違う**（そして値は一見それらしく出る）。
 
 NOTE: `--real-images` も同じ `birefnet` グループで回る（SigLIP2 が `siglip2-preprocess` を
 分けているのは、あちらの export が torchvision を要らないため — こちらは `deform_conv2d` の
@@ -134,7 +135,7 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
-from _shared.paths import INPUTS_ROOT, OUTPUTS_ROOT, SERIES_ROOT
+from _shared.paths import INPUTS_ROOT, MISC_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
@@ -146,8 +147,9 @@ from . import patch
 #: 実重みの親（`inputs/birefnet/<名前>/` に HF の 7 ファイルを展開した先）。
 MODELS_ROOT = INPUTS_ROOT / "birefnet"
 
-#: 実画像の置き場（`rm -rf` で安全に消せる席 — docs/assets-layout.md）。
-DEMO_ROOT = OUTPUTS_ROOT / "demo"
+#: 実画像コーパスの置き場（凍結コピー = ホスト資産なので、消すと焼き直しが要る —
+#: docs/assets-layout.md）。
+CORPUS_ROOT = MISC_ROOT / "corpus"
 
 #: 既定のモデル（`--model-dir` 未指定のとき）。
 DEFAULT_MODEL_DIR = MODELS_ROOT / "BiRefNet_HR"
@@ -190,10 +192,10 @@ CHECKER_CELL = 40
 #: {@link _sanity} が判別に使うケース名（顕著物体を置いた 1 枚）。
 DISC_CASE = "disc"
 
-#: 実画像ケース = (ケース名, `outputs/demo/` のファイル名, 内容)。**画像の正本は
+#: 実画像ケース = (ケース名, `outputs/misc/corpus/` のファイル名, 内容)。**画像の正本は
 #: `examples/anima/eval-images.ts`**（プロンプト / seed / 解像度を持つのはあちらで、
-#: `deno task demo:eval-images` でいつでも同じ 4 枚が焼き直せる）。ケース名は SigLIP2 の
-#: `REAL_CASES` と同じ綴り（同じ 4 枚を別の系列ディレクトリで読むだけ）。
+#: `deno task demo:eval-images` で同じ 4 枚が焼き直せる — 採用分を人手で凍結コピーする）。
+#: ケース名は SigLIP2 の `REAL_CASES` と同じ綴り（同じ 4 枚を別の系列ディレクトリで読むだけ）。
 REAL_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "photo-portrait",
@@ -315,7 +317,7 @@ def build_cases(resolution: int) -> tuple[tuple[str, torch.Tensor], ...]:
 
 
 def build_real_cases(
-    resolution: int, demo_root: Path
+    resolution: int, corpus_root: Path
 ) -> tuple[tuple[str, torch.Tensor, dict[str, str]], ...]:
     """実画像 4 枚の `(名前, pixel_values, __metadata__)`（{@link REAL_CASES}）。
 
@@ -334,11 +336,11 @@ def build_real_cases(
     """
     paths: list[tuple[str, str, Path]] = []
     for name, file_name, _why in REAL_CASES:
-        path = demo_root / file_name
+        path = corpus_root / file_name
         if not path.is_file():
             raise SystemExit(
-                f"実画像 {path} が無い（生成: deno task demo:eval-images"
-                " --source <Anima 配布形のパス>）"
+                f"実画像 {path} が無い（焼く: deno task demo:eval-images"
+                " --source <Anima 配布形のパス> → 採用分を outputs/misc/corpus/ へ凍結コピー）"
             )
         paths.append((name, file_name, path))
 
@@ -523,7 +525,7 @@ def export_series(
     out_dir: Path,
     resolution: int,
     real_images: bool = False,
-    demo_root: Path = DEMO_ROOT,
+    corpus_root: Path = CORPUS_ROOT,
 ) -> dict[str, Any]:
     """IR コンテナと golden io を書き、要約を返す。
 
@@ -541,7 +543,7 @@ def export_series(
     synthetic = build_cases(resolution)
     # MUST: 実画像は emit より先に組む（画像が欠けているなら、964MB を書き切ってから落とすの
     # ではなくここで止める）。
-    real = build_real_cases(resolution, demo_root) if real_images else ()
+    real = build_real_cases(resolution, corpus_root) if real_images else ()
     cases = [*synthetic, *((name, pixel_values) for name, pixel_values, _md in real)]
     metadata = {name: md for name, _pixel_values, md in real}
     out_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -653,7 +655,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--real-images",
         action="store_true",
-        help=f"`{DEMO_ROOT.name}/` の実画像 4 枚を通した golden も書く（合成 4 ケースに"
+        help=f"`{CORPUS_ROOT.name}/` の実画像 4 枚を通した golden も書く（合成 4 ケースに"
         "足す）。前処理は同梱 handler.py の逐語で、元画像の sha256 を __metadata__ に載せる",
     )
     parser.add_argument(

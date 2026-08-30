@@ -38,7 +38,7 @@ from typing import Any, NamedTuple
 import numpy as np
 from safetensors import safe_open
 
-from _shared.paths import INPUTS_ROOT, OUTPUTS_ROOT
+from _shared.paths import INPUTS_ROOT, MISC_ROOT
 from karume.dist import (
     Artifact,
     DistError,
@@ -54,10 +54,10 @@ from karume.dist import (
 )
 from sbv2.card import SBV2_CARD_PROFILES, render_sbv2_model_card
 
-#: 既定のモデル名 — 系列の綴り（`sbv2-FN4{,-f16,-i8}`）と実重みの置き場を束ねる 1 語。
+#: 既定のモデル名 — 系列の綴り（`sbv2-F1{,-f16,-i8}`）と実重みの置き場を束ねる 1 語。
 #: `sbv2.export.default_out_root` が `--model-dir` のディレクトリ名から系列名を作るので、
 #: 読み手のこちらも同じ 1 語から組む。
-SBV2_DEFAULT_MODEL = "FN4"
+SBV2_DEFAULT_MODEL = "F1"
 
 #: 系列名とリポ名の接頭辞（`sbv2-<モデル名>`）。
 SBV2_SERIES_PREFIX = "sbv2"
@@ -400,7 +400,7 @@ def sbv2_sources(series_dir: Path, model: str = SBV2_DEFAULT_MODEL) -> Sbv2Sourc
         series_i4=series_dir / f"{sbv2_series_name(model)}-i4",
         text_encoder=series_dir / SBV2_TEXT_ENCODER_SERIES / SBV2_TEXT_ENCODER_VARIANT,
         text_encoder_i4=series_dir / SBV2_TEXT_ENCODER_I4_SERIES / SBV2_TEXT_ENCODER_VARIANT,
-        demo=OUTPUTS_ROOT / SBV2_DEMO_DIRNAME,
+        demo=MISC_ROOT / SBV2_DEMO_DIRNAME,
         model=INPUTS_ROOT / SBV2_SERIES_PREFIX / model,
     )
 

@@ -43,8 +43,13 @@ uv sync --group sbv2   # style-bert-vits2==2.5.0 / huggingface-hub
 
 ### Obtaining the weights
 
-**The real weights are not part of the repository.** The default speaker is `FN4` of HF
-`rufflet17/voice_models`, whose `FN/FN4/` directory carries `FN4.safetensors` / `config.json` /
+**The real weights are not part of the repository.** Since 2026-08-30 the default `--model-dir` is
+`inputs/sbv2/F1` — the jvnv speaker the distribution (`karume-sbv2-jvnv`) and the E2E gates use;
+its provenance is on the jvnv model card. The FN description below is kept as the record for the
+non-public FN series (the mirrors and series are no longer kept locally — re-export from
+`inputs/sbv2/FN*` when needed).
+
+The FN speaker `FN4` comes from HF `rufflet17/voice_models`, whose `FN/FN4/` directory carries `FN4.safetensors` / `config.json` /
 `style_vectors.npy` / `style_settings.json` (the same content is also packed in `zip/FN_sbv2.zip`,
 but the unpacked directory can be fetched file by file, so the zip is unnecessary). The publisher
 declares the model free to modify. Place the 3 files the exporter reads under `inputs/sbv2/FN4/` —
@@ -63,7 +68,7 @@ The ckpt is required to be the **unique** match of `<model-dir>/*.safetensors` (
 one was read would change silently), and the glob is non-recursive. Nothing generated is written
 next to it: the exports go to a **separate root**, `outputs/series/`. Another speaker or another
 model therefore needs nothing but `--model-dir` pointing at its directory — the series name is
-derived from that directory's name (`inputs/sbv2/FN4/` → `outputs/series/sbv2-FN4/`), so two
+derived from that directory's name (`inputs/sbv2/F1/` → `outputs/series/sbv2-F1/`), so two
 speakers cannot silently overwrite each other's assets.
 
 ### Generation and comparison
@@ -73,8 +78,8 @@ speakers cannot silently overwrite each other's assets.
 cd tools/export-recipes
 uv run --group sbv2 python -m sbv2.export                # all targets
 uv run --group sbv2 python -m sbv2.export --target front # one target only
-uv run --group sbv2 python -m sbv2.export --dtype f16    # f16 series → outputs/series/sbv2-FN4-f16/
-uv run --group sbv2 python -m sbv2.export --dtype i8     # i8 series  → outputs/series/sbv2-FN4-i8/
+uv run --group sbv2 python -m sbv2.export --dtype f16    # f16 series → outputs/series/sbv2-F1-f16/
+uv run --group sbv2 python -m sbv2.export --dtype i8     # i8 series  → outputs/series/sbv2-F1-i8/
 # mixed i4 series — only the two targets the distribution ships (dp / dec carry no linear at all)
 uv run --group sbv2 python -m sbv2.export --dtype i4 --target front --target voice
 
@@ -356,7 +361,7 @@ explicitly with the dist / model the Deno side uses**, or the comparison silentl
 different voices (the style assets from ① are also baked per ckpt).
 
 ```sh
-# ① runtime assets (3 files into outputs/sbv2-demo/)
+# ① runtime assets (3 files into outputs/misc/sbv2-demo/)
 uv run --group sbv2 python -m sbv2.demo assets --model-dir ../../inputs/sbv2/F1
 
 # ② run the dump demo (from the repository root) → out.wav and dump.safetensors
@@ -365,7 +370,7 @@ cd ../.. && deno task dump:sbv2 --source models/karume-sbv2-jvnv --model F1 \
 
 # ③ torch reference (rerun the same chain on the dump's discrete inputs and random sequence) → reference.wav + numbers
 uv run --group sbv2 python -m sbv2.demo reference --model-dir ../../inputs/sbv2/F1 \
-    --dump ../../outputs/demo/sbv2-dump/dump.safetensors
+    --dump ../../outputs/examples/karume-sbv2-jvnv/sbv2-dump/dump.safetensors
 
 # ④ official infer (the pyopenjtalk path) → official.wav (for listening comparisons of the accent)
 uv run --group sbv2 python -m sbv2.demo official --model-dir ../../inputs/sbv2/F1 \

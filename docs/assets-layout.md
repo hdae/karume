@@ -1,24 +1,32 @@
 # 資産の置き場（models / outputs / inputs）
 
-ローカル資産 3 根の規約。綴りの正本は `tools/export-recipes/_shared/paths.py`（`DIST_ROOT` /
-`SERIES_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。**3 根とも git 追跡しない**（全て再生成
-可能な生成物か手置きの実重みで、リポジトリが持つのは作り方だけ）。
+ローカル資産 3 根の規約（outputs の 4 分割は 2026-08-30 裁定）。綴りの正本は
+`tools/export-recipes/_shared/paths.py`（`DIST_ROOT` / `SERIES_ROOT` / `EXAMPLES_ROOT` /
+`BENCH_ROOT` / `MISC_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。**3 根とも git 追跡しない**
+（全て再生成可能な生成物か手置きの実重みで、リポジトリが持つのは作り方だけ）。
 
-| 根                        | 中身                                                                 | 例                                                                           |
-| ------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `models/`                 | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）     | `models/karume-anima-turbo/` / `models/karume-sbv2-jvnv/`                    |
-| `outputs/series/`         | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）         | `outputs/series/sbv2-F1-f16/`                                                |
-| `outputs/series-archive/` | **裁定済みの系列の退避先**（消すと数時間の校正が消える — 下記）      | `outputs/series-archive/2026-08-23-anima-base-i4/`                           |
-| `outputs/demo/`           | **デモ・ベンチの生成物**（`rm -rf outputs/demo` で常に安全に消せる） | `outputs/demo/*.png` / `outputs/demo/sbv2-dump/` / `outputs/demo/quant-sim/` |
-| `outputs/`（その他）      | ホスト資産（消すと再取得・再エミットが要る）                         | `outputs/sbv2-demo/` / `outputs/yomi/`                                       |
-| `inputs/<family>/<name>/` | 手置きの実重み（ckpt・config — 生成物ではない）                      | `inputs/sbv2/F1/`                                                            |
+| 根                                     | 中身                                                               | 例                                                        |
+| -------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------- |
+| `models/`                              | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）   | `models/karume-anima-turbo/` / `models/karume-sbv2-jvnv/` |
+| `outputs/series/`                      | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）       | `outputs/series/sbv2-F1-f16/`                             |
+| `outputs/examples/<model>/`            | examples 台本の既定出力先（`<model>` = `--source` の basename）    | `outputs/examples/karume-sbv2-jvnv/*.wav`                 |
+| `outputs/bench/<model>/<日付>_<目的>/` | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継） | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`     |
+| `outputs/misc/<名前>/`                 | ホスト資産（**消すと再取得・再エミットが要る**）                   | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`        |
+| `inputs/<family>/<name>/`              | 手置きの実重み（ckpt・config — 生成物ではない）                    | `inputs/sbv2/F1/`                                         |
 
-- `outputs/yomi/` の日本語辞書（`*.jtd`）の取得: HF dataset `hdae/yomi-dict` の
+- `bench/` の `<日付>_<目的>` は実行日 YYYY-MM-DD + 短い識別スラグ（`e2e-mismatch` /
+  `eval-images` / `quant-sim` 等）。ファイル取り違え防止のための規約で、機械（テスト・台本）も
+  この形で書く。
+- `outputs/misc/corpus/` は**テスト入力の凍結コピー**（実画像 4 枚 = depth-anything / birefnet /
+  siglip2 の実画像門・golden 生成の入力。実音声 `vowel-*.wav` も同様）。正本の生成は
+  `examples/anima/eval-images.ts` / `examples/irodori/eval-audio.ts`（bench へ出る）で、採用分を
+  **人手でここへコピー**する — 生成先と凍結先を分けることで、ベンチ再実行がコーパスを黙って
+  上書きする事故を断つ。
+- `outputs/misc/yomi/` の日本語辞書（`*.jtd`）の取得: HF dataset `hdae/yomi-dict` の
   `naist-jdic.jtd.gz` を解いて置く（無いと models の修正辞書テストは SKIP される）。
-- `outputs/series-archive/<日付>-<件名>/` は、**配布しない裁定が出た系列を人手で退避する場所**。
-  `series/` と違って `dist.py` からは再生成されず（校正に数時間かかる系列を「再生成可能」と
-  誤読して掃除されるのを防ぐための別根）、`paths.py` にも定数を持たない — 退避も参照も手作業。
-  復活レバーとしての位置づけは [backlog](backlog.md) later 節が持つ。
+- 旧 `outputs/series-archive/`（裁定済み系列の退避先）は 2026-08-30 の掃除裁定で**廃止**
+  （base i4 の復活レバーは `outputs/series/` の `*-i4-dyn` 系列が引き続き担う —
+  `anima/distribution.py` の NOTE）。
 
 ## 組み立て（系列 → 配布形）
 

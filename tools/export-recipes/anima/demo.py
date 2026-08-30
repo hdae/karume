@@ -18,7 +18,7 @@ r"""examples/anima デモのプロンプト層（トークナイザ）の資産 
 
 MUST: 資産を `models/anima-turbo/`（配布形）直下に置かない。あちらは manifest が宣言した
 ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
-止まる（`outputs/sbv2-demo/` / 系列 `anima-pipeline/` を分けたのと同じ理由）。
+止まる（`outputs/misc/sbv2-demo/` / 系列 `anima-pipeline/` を分けたのと同じ理由）。
 
 畳み方の根拠と検証は `anima/text.py` の docstring が正本。要点だけ:
 **Unicode 判定は TS で再実装しないし標準 API にも委ねない** — 正本（Rust の `tokenizers` /

@@ -48,7 +48,8 @@
 //
 // ## 資産が無い環境
 //
-// golden（`outputs/`）も PNG（`outputs/demo/`）もリポジトリ管理外で、`rm -rf` で消せる席。
+// golden（`outputs/series/`）も PNG（`outputs/misc/corpus/`）もリポジトリ管理外。golden は
+// export の再実行で作り直せるが、PNG はホスト資産（消すと台本での焼き直しと凍結コピーが要る）。
 // **1 件も無ければ明示 SKIP**、**中途半端に欠けていれば FAIL**（欠けを SKIP に丸めると、
 // 採り直しの途中で落ちた資産が黙って通る）。runtime 側 e2e と同じ流儀。
 
@@ -108,7 +109,8 @@ const SOURCE_IMAGE_KEY = "source_image";
 const SOURCE_SHA256_KEY = "source_sha256";
 
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
-const DEMO_DIR = new URL("../../../outputs/demo/", import.meta.url);
+/** 入力の実画像コーパス（凍結コピー — ホスト資産なので消すと焼き直しが要る）。 */
+const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 
 const goldenUrl = (series: string, caseName: string): URL =>
   new URL(`${series}/io.${caseName}.safetensors`, SERIES_PARENT);
@@ -118,7 +120,11 @@ const generateCommand = (series: string): string =>
   "cd tools/exporter && uv run --group siglip2-preprocess python export_siglip2.py" +
   ` --real-images --model-dir ../../inputs/siglip2/${series}`;
 
-/** 実画像そのものを焼き直すコマンド（プロンプト / seed の正本は台本側）。 */
+/**
+ * 実画像そのものを焼き直すコマンド（プロンプト / seed の正本は台本側）。台本は
+ * `outputs/bench/<model>/<日付>_eval-images/` へ焼くので、採用分は {@link CORPUS_DIR} へ
+ * **人手で凍結コピー**する。
+ */
 const IMAGE_COMMAND = "deno task demo:eval-images --source <Anima 配布形のパス>";
 
 /**
@@ -139,7 +145,7 @@ const exists = (url: URL): boolean => {
 const goldenCount = (series: string): number =>
   REAL_CASES.filter((entry) => exists(goldenUrl(series, entry.name))).length;
 
-const imageCount = REAL_CASES.filter((entry) => exists(new URL(entry.file, DEMO_DIR))).length;
+const imageCount = REAL_CASES.filter((entry) => exists(new URL(entry.file, CORPUS_DIR))).length;
 
 const readBytes = (url: URL): Promise<Uint8Array<ArrayBuffer>> => Deno.readFile(url);
 
@@ -174,7 +180,7 @@ for (const series of SERIES) {
       );
       assert(
         imageCount === 0 || imageCount === REAL_CASES.length,
-        `${DEMO_DIR.pathname} の実画像が ${imageCount}/${REAL_CASES.length} 枚` +
+        `${CORPUS_DIR.pathname} の実画像が ${imageCount}/${REAL_CASES.length} 枚` +
           `（焼き直す: ${IMAGE_COMMAND}）`,
       );
     },
@@ -187,7 +193,7 @@ for (const series of SERIES) {
       fn: async () => {
         const [goldenBytes, png] = await Promise.all([
           readBytes(goldenUrl(series, entry.name)),
-          readBytes(new URL(entry.file, DEMO_DIR)),
+          readBytes(new URL(entry.file, CORPUS_DIR)),
         ]);
         const io = parseSafetensors(
           goldenBytes.buffer.slice(

@@ -25,7 +25,7 @@
  * （5 母音が順に出る = 両経路が揃って壊れている形の検出）。
  *
  * MUST: 資産は `models/karume-vowel-detector/`（配布形・untracked）と
- * `outputs/series/vowel-detector-crnn-epoch3/`（系列）と `outputs/demo/vowel-*.wav`。
+ * `outputs/series/vowel-detector-crnn-epoch3/`（系列）と `outputs/misc/corpus/vowel-*.wav`。
  * 無い環境と GPU 無し環境は理由を出して**明示 SKIP** する（ADR 0005）。
  */
 
@@ -54,7 +54,8 @@ const SERIES_DIR = new URL(
 );
 /** 系列コンポーネントの代表 path（実体は shard 列 — 見つけ方は `resolveShards` が持つ）。 */
 const SERIES_MODEL = new URL("model.safetensors", SERIES_DIR);
-const DEMO_DIR = new URL("../../../outputs/demo/", import.meta.url);
+/** 実音声コーパス（凍結コピー — ホスト資産なので消すと焼き直し + 凍結し直しが要る）。 */
+const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 
 /** 実音声（`e2e_vowel_detector_chain_test.ts` の `CASES` と同じ 4 本）。 */
 const CASES = ["short", "vowels", "mid", "long"] as const;
@@ -65,7 +66,11 @@ const VOWEL_SEQUENCE = ["a", "i", "u", "e", "o"];
 const INPUT_NAME = "features";
 const TIME_STRIDE = 2;
 
-/** 実音声の採り直しコマンド（`e2e_vowel_detector_chain_test.ts` の `AUDIO_COMMAND` と同じ）。 */
+/**
+ * 実音声の採り直しコマンド（`e2e_vowel_detector_chain_test.ts` の `AUDIO_COMMAND` と同じ）。
+ * 台本は `outputs/bench/vowel-detector/<日付>_eval-audio/` へ焼くので、採用分は
+ * {@link CORPUS_DIR} へ**人手で凍結コピー**する（テストが読むのは凍結側だけ）。
+ */
 const AUDIO_COMMAND = "deno task demo:eval-audio --source <Irodori 配布形のパス>";
 
 /**
@@ -94,14 +99,15 @@ if (!MODEL_AVAILABLE) {
   );
 }
 /**
- * 実音声も揃っていること。`outputs/demo/` は `rm -rf` で常に安全に消せる席
- * （`docs/assets-layout.md`）なので、配布形と系列とは**別に**見る — ここを SKIP 条件へ
- * 入れないと、消した直後の実行だけが `NotFound` で赤くなり「資産が無い」と読めない。
+ * 実音声も揃っていること。`outputs/misc/corpus/` はホスト資産（消すと台本での焼き直しと
+ * 凍結コピーが要る — `docs/assets-layout.md`）で、配布形とも系列とも別の手で置かれるので
+ * **別に**見る — ここを SKIP 条件へ入れないと、未凍結の環境だけが `NotFound` で赤くなり
+ * 「資産が無い」と読めない。
  */
-const AUDIO_AVAILABLE = CASES.every((name) => exists(new URL(`vowel-${name}.wav`, DEMO_DIR)));
+const AUDIO_AVAILABLE = CASES.every((name) => exists(new URL(`vowel-${name}.wav`, CORPUS_DIR)));
 if (MODEL_AVAILABLE && !AUDIO_AVAILABLE) {
   console.warn(
-    `[karume] ${DEMO_DIR.pathname} に実音声 4 本が揃っていないため母音検出の配布形 E2E を ` +
+    `[karume] ${CORPUS_DIR.pathname} に実音声 4 本が揃っていないため母音検出の配布形 E2E を ` +
       `SKIP する（生成: ${AUDIO_COMMAND}）`,
   );
 }
@@ -164,7 +170,7 @@ Deno.test({
 
     await using pipeline = await VowelDetectorPipeline.fromAssets({ manifest, assets });
     for (const name of CASES) {
-      const wav = decodeWav(await Deno.readFile(new URL(`vowel-${name}.wav`, DEMO_DIR)));
+      const wav = decodeWav(await Deno.readFile(new URL(`vowel-${name}.wav`, CORPUS_DIR)));
       const result = await pipeline.detect(wav.data);
       assertEquals(
         result.lab,

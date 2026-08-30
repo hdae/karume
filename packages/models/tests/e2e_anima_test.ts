@@ -50,7 +50,13 @@ const ASSETS_DIR = new URL("../../../models/karume-anima-turbo/", import.meta.ur
  * （ADR 0038 §7）で焼くので、turbo ミラー側には transformer しか置かれない。
  */
 const BASE_ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
-const OUTPUTS_DIR = new URL("../../../outputs/demo/", import.meta.url);
+/** 実行日（モジュールロード時に 1 回だけ確定 — ダンプ先の日付ディレクトリに使う）。 */
+const TODAY = new Date().toISOString().slice(0, 10);
+/** ミスマッチ時の実物ダンプ先（`outputs/bench/` は消して安全な席 — docs/assets-layout.md）。 */
+const OUTPUTS_DIR = new URL(
+  `../../../outputs/bench/karume-anima/${TODAY}_e2e-mismatch/`,
+  import.meta.url,
+);
 
 /**
  * 移行元デモの既定プロンプト（参照 PNG を焼いた時の文字列そのもの）。
@@ -224,8 +230,8 @@ const describePixels = (image: GeneratedImage): string => {
  * 参照 sha と食い違ったときの報告。
  *
  * MUST: ここで tolerance に逃げない。参照は sha256 しか無い（参照 PNG のバイト列は持って
- * いない）ので**先頭差分位置は原理的に出せない** — 代わりに実物を `outputs/demo/` へ落として、
- * バイト長・画素統計と併せて人が突き合わせられる形にする。
+ * いない）ので**先頭差分位置は原理的に出せない** — 代わりに実物を {@link OUTPUTS_DIR} へ
+ * 落として、バイト長・画素統計と併せて人が突き合わせられる形にする。
  */
 const mismatchReport = async (
   label: string,

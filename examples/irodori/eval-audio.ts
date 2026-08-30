@@ -5,9 +5,18 @@
  *
  * 中身は `examples/irodori/main.ts` をテキストと seed を変えて 4 回呼び、**48kHz の生成物を
  * 16kHz へ落とす**だけ。**テキスト / seed / ケース名の正本はこのファイル**で、生成物は
- * `outputs/demo/` 直下（`rm -rf` で安全に消せる席 — docs/assets-layout.md）。置き場が
- * `examples/irodori/` なのは `examples/anima/eval-images.ts` と同じ理由で、**焼く側の家族**に
- * 属するため（読む側は母音検出）。
+ * 48kHz / 16kHz とも `outputs/bench/vowel-detector/<日付>_eval-audio/`（`rm -rf` で安全に
+ * 消せる席 — docs/assets-layout.md）。置き場が `examples/irodori/` なのは
+ * `examples/anima/eval-images.ts` と同じ理由で、**焼く側の家族**に属するため
+ * （読む側は母音検出）。
+ *
+ * ## 実音声コーパスの正本はこの台本の出力
+ *
+ * 母音検出 e2e が読むのは `outputs/misc/corpus/vowel-<ケース>.wav` で、採用した回の 16kHz を
+ * bench の日付席から**人手で凍結コピー**したものである（機械が misc/corpus へ直接書くと、
+ * 別 source での再実行が凍結素材を黙って上書きする — bench と凍結先を分ける理由そのもの。
+ * 素材の 48kHz も残したければ同様に人手でコピーする）。凍結し直したら e2e の期待 `.lab` と
+ * sha256 も採り直し。
  *
  * MUST: `--source` は必須にする（既定を置かない）。Irodori の配布形は untracked のローカル資産で
  * 置き場が環境ごとに違い、`main.ts` は `karume.json` を持たないパスを **HF リポジトリ名**と
@@ -69,10 +78,14 @@ const CASES: readonly { name: string; seed: number; text: string; why: string }[
   },
 ];
 
-/** `main.ts` へ渡す 48kHz の置き場（素材の出所が判るように残す）。 */
-const sourcePath = (name: string): string => `outputs/demo/vowel-${name}-48k.wav`;
-/** 母音検出が読む 16kHz の置き場。 */
-const targetPath = (name: string): string => `outputs/demo/vowel-${name}.wav`;
+/** 実行日（台本のロード時に 1 回だけ確定 — 出力の日付ディレクトリに使う）。 */
+const TODAY = new Date().toISOString().slice(0, 10);
+
+/** 書き出し先（採用分をここから `outputs/misc/corpus/` へ凍結コピーする）。 */
+const TARGET_DIR = `outputs/bench/vowel-detector/${TODAY}_eval-audio`;
+/** `main.ts` へ渡す 48kHz の置き場（素材の出所が判るように 16kHz と同じ日付席へ残す）。 */
+const sourcePath = (name: string): string => `${TARGET_DIR}/vowel-${name}-48k.wav`;
+const targetPath = (name: string): string => `${TARGET_DIR}/vowel-${name}.wav`;
 
 const USAGE = "--source <Irodori 配布形のパス|HF repo>";
 
@@ -148,6 +161,7 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
 const main = new URL("./main.ts", import.meta.url);
 const factor = SOURCE_RATE / TARGET_RATE;
 const filter = lowpassTaps(TARGET_RATE * 0.475, SOURCE_RATE, 193);
+await Deno.mkdir(TARGET_DIR, { recursive: true });
 
 for (const entry of CASES) {
   console.log(`[eval-audio] ${entry.name} — ${entry.why}`);
@@ -190,6 +204,7 @@ for (const entry of CASES) {
 }
 
 console.log(
-  `[eval-audio] ${CASES.length} 本。長さが変わったら母音検出 e2e の期待 \`.lab\` と sha256 を` +
+  `[eval-audio] ${CASES.length} 本。採用するなら outputs/misc/corpus/ へ凍結コピーする` +
+    "（母音検出 e2e が読むのはそちら）。長さが変わったら期待 `.lab` と sha256 も" +
     "採り直す（packages/models/tests/e2e_vowel_detector_chain_test.ts）",
 );

@@ -122,7 +122,10 @@ const audio = await pipeline.generate({
 });
 const name = `irodori-${quant ?? "default"}-${ref === undefined ? "no-ref" : "cloned"}` +
   `-seed${seed}.wav`;
-const out = args.get("out") ?? `outputs/demo/${name}`;
+/** 既定の出力先に使うモデル名（取得元の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
+const sourceRef = source ?? IRODORI_V4_SMALL_CURRENT.repo;
+const sourceName = sourceRef.replace(/\/+$/, "").split("/").at(-1) ?? sourceRef;
+const out = args.get("out") ?? `outputs/examples/${sourceName}/${name}`;
 // MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
 // 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
 const cut = out.lastIndexOf("/");

@@ -2,7 +2,7 @@
 
     uv run --group anima python -m anima.single_file \
         --checkpoint ../../inputs/anima/waiANIMA_v10Base10.safetensors \
-        --out ../../outputs/anima-diffusers/anima-wai
+        --out ../../outputs/misc/anima-diffusers/anima-wai
 
 `anima.export` の `--repo` は `from_pretrained(repo, subfolder=...)` にそのまま渡る文字列なので、
 受けられるのは **diffusers レイアウトのリポ / ディレクトリ**だけ（単一ファイルを読む経路は

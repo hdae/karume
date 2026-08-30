@@ -2,9 +2,9 @@
  * 母音検出（音声 → リップシンク用の `.lab`）の 1 画面デモ。
  *
  *     deno task demo:vowel-detector --source models/karume-vowel-detector \
- *         --audio outputs/demo/vowel-vowels.wav
+ *         --audio outputs/misc/corpus/vowel-vowels.wav
  *     deno task demo:vowel-detector --source models/karume-vowel-detector \
- *         --audio voice.wav --out outputs/demo/voice.lab
+ *         --audio voice.wav --out outputs/examples/karume-vowel-detector/voice.lab
  *
  * MUST: `--source` は必須（既定を置かない）。このファミリは公開配布リポを持たず pin 定数も
  * 無い（ADR 0073 決定 1）ので、既定を書くと「存在しないリポの取得」に化ける。`karume.json` を
@@ -81,7 +81,10 @@ if (wav.sampleRate !== pipeline.sampleRate) {
 }
 const { segments, lab } = await pipeline.detect(wav.data);
 
-const out = args.get("out") ?? `outputs/demo/${audioPath.split("/").at(-1)}.lab`;
+/** 既定の出力先に使うモデル名（`--source` の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
+const sourceName = source.replace(/\/+$/, "").split("/").at(-1) ?? source;
+const out = args.get("out") ??
+  `outputs/examples/${sourceName}/${audioPath.split("/").at(-1)}.lab`;
 // MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
 // 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
 const cut = out.lastIndexOf("/");
