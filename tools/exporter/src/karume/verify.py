@@ -50,7 +50,7 @@ from karume.ops import (
     sym_prefix_slice_attrs,
 )
 from karume.shapes import assert_graph_shapes, declared_shape
-from karume.shards import resolve_shards
+from karume.shards import SHARD_BYTE_LIMIT, SHARD_TAIL_LIMIT, resolve_shards
 
 
 class IrError(ValueError):
@@ -293,6 +293,14 @@ def _parse_storage(value: Any, where: str) -> IrStorage:
     group_size = None
     if has_group_size:
         raw = obj["group_size"]
+        # MUST: JSON の `32.0` / `3.2e1` は int へ正規化する（`_parse_shape` と同じ理由・同じ
+        # 1 行）。TS 側は JSON.parse が単一の number を返すので整数値の float という区別が
+        # 無く（`Number.isSafeInteger(32.0)` は true）、Python が float を丸ごと拒むと
+        # **ランタイムが読める graph をエクスポータの検証だけが読めない**乖離になる。非整数値
+        # （`32.5`）は `is_integer()` が False なので下の「正整数でない」で従来どおり落ち、
+        # 非有限値は parse_graph_json が JSON 読みの時点で弾く。
+        if isinstance(raw, float) and raw.is_integer():
+            raw = int(raw)
         if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
             raise IrError(f"{where}.group_size: 正整数でない")
         # TS 側は JSON の数値として読むので 2^53−1 を超える値は整数として持てない
@@ -380,6 +388,12 @@ def parse_ir_graph(text: str) -> IrGraph:
 
     values: dict[str, IrValue] = {}
     for name, raw in _as_object(root["values"], "graph.values").items():
+        # 空の値名は拒否する（TS 側 packages/runtime/src/format/ir.ts の鏡像）— 参照側
+        # （入力名・ノードの入出力・グラフ出力）はどれも空でない文字列しか受理しないので、
+        # 通すと「宣言はできるが原理的に参照できない値」になる。空名の values と空名の
+        # initializers を**対で**書かれると孤立宣言の門が互いに満たされて発火しないため、
+        # ここを緩めると参照不能な実テンソルが配布形に居座る。
+        _as_nonempty_str(name, "graph.values の値名")
         where = f"graph.values['{name}']"
         obj = _as_object(raw, where)
         _check_keys(obj, ["dtype", "shape"], [], where)
@@ -390,6 +404,9 @@ def parse_ir_graph(text: str) -> IrGraph:
 
     initializers: dict[str, IrInitializer] = {}
     for name, raw in _as_object(root["initializers"], "graph.initializers").items():
+        # 空の initializer 名も同じ理由で拒否する（上の values と対 — 片方だけ塞ぐと
+        # 「空名の対」がそのまま通る）。
+        _as_nonempty_str(name, "graph.initializers の initializer 名")
         where = f"graph.initializers['{name}']"
         obj = _as_object(raw, where)
         _check_keys(obj, ["tensor", "storage"], [], where)
@@ -987,8 +1004,10 @@ def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
     return header, data_start, file_size - data_start
 
 
-def _read_container(path: str | Path) -> tuple[Mapping[str, str], Mapping[str, _StoredTensor]]:
-    """配布形を**自前で**読み、`(__metadata__, テンソルキー → 宣言)` を返す。
+def _read_container(
+    path: str | Path,
+) -> tuple[Mapping[str, str], Mapping[str, _StoredTensor], int]:
+    """配布形を**自前で**読み、`(__metadata__, テンソルキー → 宣言, データ節のバイト長)` を返す。
 
     MUST: `safetensors` のリーダを通さない。ライブラリ（0.8.0）の dtype 語彙に `I4` が無く、
     packed 4bit を含む配布形は `safe_open` の時点で開けない（ADR 0069 決定 2）— verify は
@@ -999,7 +1018,7 @@ def _read_container(path: str | Path) -> tuple[Mapping[str, str], Mapping[str, _
     NOTE: レイアウト規則（隙間なし・整列・宣言バイト長の一致）は `assert_reader_layout` の
     担当で、呼び出し側（`verify_model`）が**先に**通す。ここは宣言の読み取りだけ。
     """
-    header, _, _ = _read_header(path)
+    header, _, data_length = _read_header(path)
     raw = header.get("__metadata__", {})
     if not isinstance(raw, dict) or any(
         not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
@@ -1016,7 +1035,7 @@ def _read_container(path: str | Path) -> tuple[Mapping[str, str], Mapping[str, _
             for axis, dim in enumerate(entry["shape"])
         ]
         tensors[name] = _StoredTensor(dtype=entry["dtype"], shape=shape)
-    return raw, tensors
+    return raw, tensors, data_length
 
 
 def assert_reader_layout(path: str | Path) -> None:
@@ -1108,7 +1127,8 @@ def _assert_scale_tensor(
     1. **実在**する
     2. **F32**（scale を別 dtype のビット列として読むと全チャネルが桁違いの値になる）
     3. 形（`group_size` の有無で 2 通り — ADR 0069 決定 3）
-       - per-channel（i8）: **重みと同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値）
+       - per-channel（i8）: **重みと同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値・
+         残る非 1 軸は高々 1 本 — 重みと同形の per-element scale は適格外でも受理しない）
        - group（i4）: **rank2**（行数 = 重みの先頭次元・最終次元 = 行長 / `group_size`）。
          rank2 の重みでは「同 rank・最終次元だけ group 数」と同値で、conv1d `[Cout,Cin,K]` は
          `[Cout, (Cin·K)/g]`（`karume.quantize.storage_rows`）。keepdim broadcast 形とは
@@ -1161,6 +1181,16 @@ def _assert_scale_tensor(
         )
     if any(dim != 1 and dim != weight_shape[axis] for axis, dim in enumerate(shape)):
         raise ContainerError(f"{where}: scale {shape} が重み {weight_shape} へ broadcast できない")
+    # MUST: 残る非 1 軸は**高々 1 本**（TS 側 container.ts の鏡像 — 適格・適格外の区別なく
+    # 掛かる）。broadcast 可能性だけでは重みと同形の per-element scale（`[O,I]`）も通り、
+    # ロードの入口（`createSession`）だけが落ちる配布形が作れる。全軸 1（単一チャネルの
+    # 退化形）は `torch.amax(..., keepdim=True)` の正当な出力なので受理する。
+    channel_axes = sum(1 for dim in shape if dim != 1)
+    if channel_axes > 1:
+        raise ContainerError(
+            f"{where}: scale {shape} の非 1 軸が {channel_axes} 本"
+            "（per-channel scale は 1 本まで — チャネル軸だけが残る keepdim 形）"
+        )
     if channel_axis is None:
         return
     expected = [dim if axis == channel_axis else 1 for axis, dim in enumerate(weight_shape)]
@@ -1198,6 +1228,31 @@ def _assert_no_surplus_tensors(graph: IrGraph, stored: Mapping[str, _StoredTenso
         )
 
 
+def assert_shard_byte_limits(shards: Sequence[tuple[str | Path, int]]) -> None:
+    """shard 列のデータ節が分割規則の上限に収まっていることを落とす（`karume.shards` の鏡像）。
+
+    非末尾の各 shard は {@link karume.shards.SHARD_BYTE_LIMIT} 以下・**最後の 1 本だけ**
+    {@link karume.shards.SHARD_TAIL_LIMIT} まで（尾部スラック則）。単一ファイルは「最後の
+    shard」なので尾部の上限で見る。
+
+    MUST: 読み返し側にも張る。上限は書く側（`shards.pack_shards`）にしか門が無く、規則を
+    守っていない shard 列（手で組んだ / 別実装が書いた / 外部ツールの出力）は `karume verify`
+    も `karume dist` も緑で通り、**ブラウザで初めて落ちる**（Chromium の単一 ArrayBuffer 上限・
+    取得層のバイト予算）。co-shard の門（{@link verify_shards}）と同じ層・同じ理由づけ。
+
+    `shards` は読む順（= shard 番号順）の `(path, データ節のバイト長)`。
+    """
+    last = len(shards) - 1
+    for index, (path, size) in enumerate(shards):
+        limit = SHARD_TAIL_LIMIT if index == last else SHARD_BYTE_LIMIT
+        if size > limit:
+            seat = "最後の shard" if index == last else f"shard[{index}]"
+            raise ContainerError(
+                f"{path}: {seat} のデータ節が {size:,} バイトで上限 {limit:,} を超える"
+                "（分割規則 — ADR 0070 決定 1・尾部スラックは最後の 1 本だけ）"
+            )
+
+
 def _read_shard_set(
     paths: Sequence[str | Path],
 ) -> tuple[str, dict[str, _StoredTensor], dict[str, int]]:
@@ -1206,15 +1261,19 @@ def _read_shard_set(
     MUST: レイアウト規則は **shard ごと**に張る（各 shard は独立に整合な safetensors —
     ADR 0070 決定 1）。`karume_ir` を持つのは先頭 1 本だけで、後続への再登場も、shard を
     跨いだ同名テンソルの重複も fail loudly（ランタイム側 `createShardValidator` の鏡像）。
+    バイト上限（{@link assert_shard_byte_limits}）は列全体の並びで決まるので、全 shard の
+    ヘッダを読んでから 1 回だけ見る。
     """
     if not paths:
         raise ContainerError("検証する shard が 1 本も無い")
     text: str | None = None
     stored: dict[str, _StoredTensor] = {}
     owner: dict[str, int] = {}
+    sizes: list[tuple[str | Path, int]] = []
     for index, path in enumerate(paths):
         assert_reader_layout(path)
-        metadata, tensors = _read_container(path)
+        metadata, tensors, data_length = _read_container(path)
+        sizes.append((path, data_length))
         embedded = metadata.get(IR_METADATA_KEY)
         if index == 0:
             if embedded is None:
@@ -1234,6 +1293,7 @@ def _read_shard_set(
                 )
             stored[name] = view
             owner[name] = index
+    assert_shard_byte_limits(sizes)
     assert text is not None  # 先頭 shard の分岐が保証する
     return text, stored, owner
 
@@ -1248,7 +1308,8 @@ def verify_shards(paths: Sequence[str | Path]) -> IrGraph:
 
     見る集合は分割前と同一 — 宣言と実体の突合・scale の 5 点・余剰テンソル・ランタイム支援・
     op 契約は**全 shard の和**に対して掛かる（ADR 0070 決定 1 の宣言完全性を書いた直後に
-    確かめる）。分割で増える門は 3 つだけ: shard ごとのレイアウト規則・`karume_ir` の在処・
+    確かめる）。分割で増える門は 4 つだけ: shard ごとのレイアウト規則・`karume_ir` の在処・
+    **データ節のバイト上限**（{@link assert_shard_byte_limits} — 単一ファイルにも掛かる）・
     **co-shard**（weight と companion scale が同じ shard に居る MUST）。
     """
     text, stored, owner = _read_shard_set(paths)

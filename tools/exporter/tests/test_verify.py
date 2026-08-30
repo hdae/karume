@@ -14,8 +14,10 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from karume import verify
 from karume.ir import IR_METADATA_KEY
 from karume.ops import OpContractError, state_window
+from karume.shards import SHARD_BYTE_LIMIT, SHARD_TAIL_LIMIT
 from karume.verify import (
     ContainerError,
     IrError,
@@ -24,6 +26,7 @@ from karume.verify import (
     assert_op_contracts,
     assert_reader_layout,
     assert_runtime_support,
+    assert_shard_byte_limits,
     parse_ir_graph,
     verify_model,
 )
@@ -309,6 +312,54 @@ class TestDeclarationCompleteness:
                     "w": {"dtype": "f32", "shape": ["T"]},
                     "y": {"dtype": "f32", "shape": ["T", 4]},
                 }
+            )
+
+
+class TestEmptyDeclarationNames:
+    """空文字の値名は宣言できない（TS 側 packages/runtime/src/format/ir.ts の鏡像）。
+
+    参照側（入力名・ノードの入出力・グラフ出力）は空でない文字列しか受理しないので、空名の
+    宣言は原理的に参照できない値になる。`states` は既にこの門を持っていた。
+    """
+
+    def test_an_empty_value_name_is_rejected(self):
+        with pytest.raises(IrError, match=r"graph\.values の値名"):
+            parse(
+                values={
+                    "": {"dtype": "f32", "shape": [1]},
+                    "w": {"dtype": "f32", "shape": [4]},
+                    "y": {"dtype": "f32", "shape": ["T", 4]},
+                }
+            )
+
+    def test_an_empty_initializer_name_is_rejected(self):
+        with pytest.raises(IrError, match=r"graph\.initializers の initializer 名"):
+            parse(
+                initializers={
+                    "w": {"tensor": "enc.w", "storage": {"dtype": "f32"}},
+                    "": {"tensor": "enc.empty", "storage": {"dtype": "f32"}},
+                }
+            )
+
+    def test_the_pair_that_neutralizes_both_orphan_checks_is_rejected(self):
+        """空名の `values` と空名の `initializers` を**対で**書いた形。
+
+        孤立宣言の門は互いに満たされて発火せず（values 側は「initializer が定義する」・
+        initializer 側は「values に宣言がある」）、余剰テンソル検査も initializer から
+        参照されているので鳴らない — 空名の門が無いと、参照不能な実テンソル 1 本が
+        `karume verify` 緑のまま配布形に居座る。
+        """
+        with pytest.raises(IrError, match="空でない文字列でない"):
+            parse(
+                initializers={
+                    "w": {"tensor": "enc.w", "storage": {"dtype": "f32"}},
+                    "": {"tensor": "enc.empty", "storage": {"dtype": "f32"}},
+                },
+                values={
+                    "": {"dtype": "f32", "shape": [2]},
+                    "w": {"dtype": "f32", "shape": [4]},
+                    "y": {"dtype": "f32", "shape": ["T", 4]},
+                },
             )
 
 
@@ -1010,6 +1061,52 @@ class TestIntegralFloatDimensions:
             )
 
 
+class TestIntegralFloatGroupSize:
+    """`group_size` も次元と同じく整数値 float を受理する（受理集合の向きを揃える）。
+
+    TS 側は `Number.isSafeInteger(32.0)` が true なので `32.0` と書かれた i4 グラフを読める。
+    Python だけが「正整数でない」で落とすと、**ランタイムが読める配布形をエクスポータの
+    検証だけが読めない**乖離になる（`_parse_shape` の正規化と同じ理由）。
+    """
+
+    @staticmethod
+    def parse_raw_group_size(raw: str):
+        """`group_size` だけを生の JSON テキストで差し込む（json.dumps は `32.0` へ畳む）。"""
+        graph = {
+            **base_graph(),
+            "initializers": {
+                "w": {
+                    "tensor": "enc.w",
+                    "storage": {"dtype": "i4", "scale": "enc.s", "group_size": "__GS__"},
+                }
+            },
+            "values": {
+                "w": {"dtype": "f32", "shape": [4, 32]},
+                "y": {"dtype": "f32", "shape": ["T", 4]},
+            },
+        }
+        text = json.dumps(graph)
+        assert '"__GS__"' in text
+        return parse_ir_graph(text.replace('"__GS__"', raw))
+
+    @pytest.mark.parametrize("raw", ["32.0", "3.2e1"])
+    def test_an_integral_float_group_size_is_accepted_as_int(self, raw):
+        group_size = self.parse_raw_group_size(raw).initializers["w"].storage.group_size
+
+        assert group_size == 32
+        # int で持つ（float のまま持つと to_dict が `32.0` を書き戻して往復が壊れる）。
+        assert isinstance(group_size, int)
+
+    def test_a_non_integral_group_size_is_still_rejected(self):
+        with pytest.raises(IrError, match="正整数でない"):
+            self.parse_raw_group_size("32.5")
+
+    def test_an_integral_float_beyond_the_safe_range_is_still_rejected(self):
+        """`Number.isSafeInteger` と同じ上限（TS だけが読めない値は通さない）。"""
+        with pytest.raises(IrError, match="安全整数"):
+            self.parse_raw_group_size("1e300")
+
+
 class TestJsonLiterals:
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
     def test_non_standard_literals_are_rejected(self, literal):
@@ -1483,6 +1580,55 @@ class TestContainer:
             verify_model(path)
 
 
+class TestShardByteLimits:
+    """shard 1 本のデータ節の上限（`karume.shards` の規則 3 / 4）を**読み返し側でも**見る。
+
+    上限は書く側（`pack_shards`）にしか門が無かったので、規則を守らない shard 列（手で組んだ /
+    別実装が書いた / 外部ツールの出力・越境参照で別リポから引いたもの）は `karume verify` も
+    `karume dist` も緑で通り、ブラウザで初めて落ちていた（Chromium の単一 ArrayBuffer 上限・
+    取得層のバイト予算）。co-shard と同じ「書く側にだけ門がある非対称」の型。
+
+    判定は実 GiB を積まずに済むよう規則そのもの（{@link assert_shard_byte_limits}）へ直に
+    掛け、`verify_shards` への配線は上限を差し替えた故障注入で見る。
+    """
+
+    def test_a_non_tail_shard_at_the_limit_passes(self):
+        assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", 1)])
+
+    def test_a_non_tail_shard_one_byte_over_the_limit_is_rejected(self):
+        with pytest.raises(ContainerError, match=r"shard\[0\] のデータ節"):
+            assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT + 1), ("b", 1)])
+
+    def test_the_tail_shard_may_use_the_slack(self):
+        """最後の 1 本だけは尾部スラック（端数 shard を作らないための規則 4）まで許す。"""
+        assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", SHARD_TAIL_LIMIT)])
+
+    def test_the_tail_shard_one_byte_over_the_slack_is_rejected(self):
+        with pytest.raises(ContainerError, match="最後の shard のデータ節"):
+            assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", SHARD_TAIL_LIMIT + 1)])
+
+    def test_a_single_file_is_judged_by_the_tail_limit(self):
+        """単一ファイル = 「最後の shard」（1.5GiB 以下の資産は分割ゼロで据わる）。"""
+        assert_shard_byte_limits([("only", SHARD_TAIL_LIMIT)])
+        with pytest.raises(ContainerError, match="最後の shard のデータ節"):
+            assert_shard_byte_limits([("only", SHARD_TAIL_LIMIT + 1)])
+
+    def test_verify_shards_actually_applies_the_gate(self, tmp_path, monkeypatch):
+        """配線の故障注入 — 上限を差し込むと実ファイルの検証がその門で落ちる。
+
+        規則を実寸で踏むには 1GiB 超の合成資産が要るので、上限側を動かして同じ判定へ届かせる
+        （門が呼ばれていなければ緑のまま通り、この検査は空振りになる）。
+        """
+        path = write_container(tmp_path / "m.safetensors", base_graph(), {"enc.w": torch.ones(4)})
+        # データ節は f32×4 = 16 バイト。境界（= 上限ちょうど）は通る。
+        monkeypatch.setattr(verify, "SHARD_TAIL_LIMIT", 16)
+        assert verify_model(path).initializers["w"].storage.dtype == "f32"
+
+        monkeypatch.setattr(verify, "SHARD_TAIL_LIMIT", 15)
+        with pytest.raises(ContainerError, match="最後の shard のデータ節が 16 バイト"):
+            verify_model(path)
+
+
 def write_raw_container(path, header: dict, data: bytes = b""):
     """ヘッダ JSON を直に組んだ safetensors（`save_file` では作れない不正形の故障注入用）。
 
@@ -1913,6 +2059,32 @@ def conv_i8_tensors(op: str, scale: torch.Tensor) -> dict[str, torch.Tensor]:
     }
 
 
+def ineligible_i8_graph() -> dict:
+    """i8 重みを**重みスロット以外**（`mul` の被演算子）で消費する最小グラフ。
+
+    適格判定（`emit.eligible_compressed_initializers`）から外れるので、ロード時に CPU で
+    f32 展開される経路に乗る = チャネル軸の概念を持たない。
+    """
+    return {
+        "format": "karume-ir",
+        "version": 1,
+        "requires": {"ops": ["mul"]},
+        "symbols": [],
+        "inputs": [{"name": "x", "dtype": "f32", "shape": [3, 4]}],
+        "outputs": ["y"],
+        "initializers": {"w": {"tensor": "enc.w", "storage": {"dtype": "i8", "scale": "enc.s"}}},
+        "values": {
+            "w": {"dtype": "f32", "shape": [3, 4]},
+            "y": {"dtype": "f32", "shape": [3, 4]},
+        },
+        "nodes": [{"op": "mul", "ins": ["x", "w"], "outs": ["y"], "attrs": {}}],
+    }
+
+
+def ineligible_i8_tensors(scale: torch.Tensor) -> dict[str, torch.Tensor]:
+    return {"enc.w": torch.ones(3, 4, dtype=torch.int8), "enc.s": scale}
+
+
 class TestQuantizedScaleChannelAxis:
     """適格重みの scale はチャネル軸ちょうどの keepdim 形だけ
     （`packages/runtime/src/runtime/executor.ts` の assertChannelScale の鏡像）。
@@ -1957,29 +2129,30 @@ class TestQuantizedScaleChannelAxis:
         展開は `packages/runtime/src/format/i8.ts` の decodeI8 で、keepdim broadcast を
         stride で引く — 軸を要求すると**ランタイムが読めるファイルを verify が落とす**。
         """
-        graph = {
-            "format": "karume-ir",
-            "version": 1,
-            "requires": {"ops": ["mul"]},
-            "symbols": [],
-            "inputs": [{"name": "x", "dtype": "f32", "shape": [3, 4]}],
-            "outputs": ["y"],
-            "initializers": {
-                "w": {"tensor": "enc.w", "storage": {"dtype": "i8", "scale": "enc.s"}}
-            },
-            "values": {
-                "w": {"dtype": "f32", "shape": [3, 4]},
-                "y": {"dtype": "f32", "shape": [3, 4]},
-            },
-            "nodes": [{"op": "mul", "ins": ["x", "w"], "outs": ["y"], "attrs": {}}],
-        }
         path = write_container(
             tmp_path / "m.safetensors",
-            graph,
-            {"enc.w": torch.ones(3, 4, dtype=torch.int8), "enc.s": torch.ones(1, 4)},
+            ineligible_i8_graph(),
+            ineligible_i8_tensors(torch.ones(1, 4)),
         )
 
         assert verify_model(path).initializers["w"].storage.scale == "enc.s"
+
+    def test_an_ineligible_weight_still_refuses_a_per_element_scale(self, tmp_path):
+        """`[3,4]`（重みと同形 = 要素ごとの scale）は適格外でも受理しない。
+
+        broadcast 検査だけでは通ってしまうが、TS 側は `container.ts` がロードの入口で
+        **適格・適格外の区別なく**「非 1 軸は高々 1 本」を要求する（GPU 常駐経路が
+        `wscale[チャネル]` の平坦添字で先頭要素しか読まないため）。ここが緩いと
+        「`karume verify` は緑・ブラウザの `createSession` だけ落ちる」配布形が作れる。
+        """
+        path = write_container(
+            tmp_path / "m.safetensors",
+            ineligible_i8_graph(),
+            ineligible_i8_tensors(torch.ones(3, 4)),
+        )
+
+        with pytest.raises(ContainerError, match="非 1 軸が 2 本"):
+            verify_model(path)
 
 
 class TestStridedRank:
