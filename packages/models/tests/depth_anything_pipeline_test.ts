@@ -366,3 +366,31 @@ Deno.test("後処理: 横方向だけの勾配は拡大しても横方向だけ�
   }
   assert(map.data[0] < map.data[2], "横方向の単調性が失われた（軸が入れ替わっている）");
 });
+
+Deno.test("後処理: 非有限の深度は resize の前に画素座標つきで落ちる（真っ黒な地図にしない）", () => {
+  // モジュール doc が配っている可視化レシピは `value < min` / `value > max` で走査するので、
+  // NaN は比較を素通りして `span` が非正になり、**全画素 0 = 一様な真っ黒の深度地図**が
+  // 正常値の顔で出る。BiRefNet の `matteFromLogits` と逐語同型の検査点を持つ。
+  const width = 4;
+  const height = 3;
+  for (const [index, bad] of [[6, Number.NaN], [11, Number.POSITIVE_INFINITY]] as const) {
+    const plane = new Float32Array(width * height).fill(1);
+    plane[index] = bad;
+    // 座標まで文言に出ることを縛る — 要素数だけの検査だと resize の**後**へ移しても緑のまま
+    // 通る（NaN が近傍へ広がってから見ることになり、発生源が特定できない）。
+    assertThrows(
+      () => resampleDepth(plane, width, height, width, height),
+      Error,
+      `depth-anything: 深度値 (x=${index % width}, y=${Math.floor(index / width)}) が非有限値`,
+    );
+    // 拡大する呼び出し（`resizePlaneF32` が重み付き和で NaN を広げる経路）でも同じ座標。
+    assertThrows(
+      () => resampleDepth(plane, width, height, 9, 7),
+      Error,
+      `(x=${index % width}, y=${Math.floor(index / width)})`,
+    );
+  }
+  // 対: 有限な平面はそのまま通る（門が恒真でないことの実証）。
+  const clean = Float32Array.from([0, 0.25, 1.5, 4.75, 2, 0]);
+  assertEquals([...resampleDepth(clean, 3, 2, 3, 2).data], [...clean]);
+});

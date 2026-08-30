@@ -336,6 +336,12 @@ export const preprocessPixelValues = (
  * （`resizePlaneF32` の台が近傍 1 点へ縮む — 前処理層のテストが固定している）ので、
  * 「元解像度 = 焼かれた解像度」の呼び出しに丸め損失は入らない。
  *
+ * MUST: 非有限値は resize の**前**（発生源に一番近い位置）で画素座標つきに落とす。
+ * `resizePlaneF32` は重み付き和なので NaN を近傍へ広げてから返し、この doc が配っている
+ * 可視化レシピの min / max 走査は NaN 比較が常に偽で素通りする（`span` が非正になり
+ * **全画素 0 = 一様な真っ黒の深度地図**が正常値の顔で出る）。birefnet の `matteFromLogits`・
+ * sbv2 の波形 gate・`anima/image.ts` と同じ検査点。
+ *
  * NOTE: `export` はテストのため（{@link preprocessPixelValues} と同じ理由）。
  */
 export const resampleDepth = (
@@ -344,11 +350,20 @@ export const resampleDepth = (
   sourceHeight: number,
   width: number,
   height: number,
-): DepthMap => ({
-  data: resizePlaneF32(depth, sourceWidth, sourceHeight, width, height),
-  width,
-  height,
-});
+): DepthMap => {
+  for (let index = 0; index < depth.length; index += 1) {
+    if (!Number.isFinite(depth[index])) {
+      const x = index % sourceWidth;
+      const y = Math.floor(index / sourceWidth);
+      throw new Error(`depth-anything: 深度値 (x=${x}, y=${y}) が非有限値`);
+    }
+  }
+  return {
+    data: resizePlaneF32(depth, sourceWidth, sourceHeight, width, height),
+    width,
+    height,
+  };
+};
 
 /** {@link DepthAnythingPipeline} の内部状態（公開面には出さない）。 */
 type DepthAnythingState = {
