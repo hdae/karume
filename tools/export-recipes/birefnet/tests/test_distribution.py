@@ -1,7 +1,7 @@
 """BiRefNet 系の配布 recipe（`birefnet.distribution`）— 組み立て 1 周ぶんの単体テスト。
 
-実資産は使わない — dist が safetensors から読むのは**ヘッダの dtype 集合**と IR メタデータ
-（`__metadata__`）だけなので、数十バイトの正規ヘッダ付き偽資産で層の振る舞いは全て観測できる。
+実資産は使わない。組み立てへ届く入力は数 KB の**正当な最小 IR コンテナ**（`ir_fixtures`）で、
+門に落とされることを見るケースだけが従来の偽資産のまま（{@link _birefnet_container}）。
 
 manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
 `shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from ir_fixtures import ir_container
 
 from birefnet.card import BIREFNET_UPSTREAM
 from birefnet.distribution import (
@@ -116,6 +117,30 @@ def _birefnet_graph(
     )
 
 
+def _birefnet_container(dtype: str, graph: str | None) -> bytes:
+    """系列に置くマット推定グラフの中身。
+
+    組み立てへ届く既定の形は**正当な IR コンテナ**でなければならない（組み立ては入力を
+    IR v1 の全規則で見る — `karume.dist.assert_weight_components_verified`）。
+
+    門に落とされることを見るケース（合成メタデータ / 別 dtype の系列）は計画段
+    （`birefnet_plan`）で止まって組み立てへ届かないので、従来の偽コンテナのままにする —
+    実物どおりの f16 コンテナ（適格外の重みと bias が F32 で残る）にすると「F32 が無い」では
+    落ちなくなる。閉じ方は禁止 dtype 表（Anima / Irodori の `*_STORAGE_FORBIDDEN`）で、
+    この family はまだ持っていない。
+    """
+    if graph is None and dtype == "F32":
+        return ir_container(
+            mark="birefnet-matte",
+            storage=dtype.lower(),
+            inputs=(("pixel_values", (1, 3, BIREFNET_RESOLUTION, BIREFNET_RESOLUTION)),),
+            outputs=([1, 1, BIREFNET_RESOLUTION, BIREFNET_RESOLUTION],),
+        )
+    return _fake_safetensors(
+        dtype, b"birefnet-matte-weights", {IR_METADATA_KEY: graph or _birefnet_graph()}
+    )
+
+
 def _build_birefnet_sources(
     root: Path,
     *,
@@ -129,14 +154,7 @@ def _build_birefnet_sources(
     root を差し替えるだけで同じ木を指せる形。
     """
     sources = BirefnetSources(series=root / "outputs" / "series" / birefnet_series_name(model))
-    _write(
-        sources.series / "model.safetensors",
-        _fake_safetensors(
-            dtype,
-            b"birefnet-matte-weights",
-            {IR_METADATA_KEY: graph if graph is not None else _birefnet_graph()},
-        ),
-    )
+    _write(sources.series / "model.safetensors", _birefnet_container(dtype, graph))
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.series / "io.ramp.safetensors", b"io-fixture")
     return sources

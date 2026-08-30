@@ -1,7 +1,7 @@
 """Irodori の配布 recipe（`irodori.distribution`）— 組み立て 1 周ぶんの単体テスト。
 
-実資産は使わない — dist が safetensors から読むのは**ヘッダの dtype 集合**と IR メタデータ
-（`__metadata__`）だけなので、数十バイトの正規ヘッダ付き偽資産で層の振る舞いは全て観測できる。
+実資産は使わない。組み立てへ届く入力は数 KB の**正当な最小 IR コンテナ**（`ir_fixtures`）で、
+門に落とされることを見るケースだけが従来の偽資産のまま（{@link _irodori_container}）。
 Irodori は加えてチェックポイントの `config_json` とコーデックの `metadata.json` を読むが、
 どちらも合成 JSON で足りる（**合成 config は実重み v4-small と全ての数が違う** — 数を焼き
 込んでいれば落ちる）。
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from ir_fixtures import ir_container
 
 from dist import default_out_dir, main
 from irodori.distribution import (
@@ -181,20 +182,26 @@ def _irodori_graph(inputs: Sequence[tuple[str, list[Any]]], outputs: int, symbol
     )
 
 
-def _irodori_graphs() -> dict[str, str]:
-    """8 グラフの IR メタデータ（{@link _IRODORI_CONFIG} と噛み合う形）。"""
+def _irodori_specs() -> dict[str, tuple[list[tuple[str, list[Any]]], int, str]]:
+    """8 グラフの形（入力の名前と shape・出力本数・記号名）— {@link _IRODORI_CONFIG} と噛み合う。
+
+    合成メタデータ（{@link _irodori_graphs}）も正当なコンテナ（{@link _irodori_input}）も
+    ここから作る — 形の正本を 2 つ持つと、片方だけ動いた日に門が黙って別の形を見る。
+    """
     latent_dim = _IRODORI_CONFIG["latent_dim"]
     speaker_dim = _IRODORI_CONFIG["speaker_dim"]
     text_dim = _IRODORI_CONFIG["text_dim"]
     caption_dim = _IRODORI_CONFIG["caption_dim"]
     return {
-        "backbone": _irodori_graph([("input_ids", [1, "T"])], 1),
-        "text_proj": _irodori_graph([("hidden", [1, "T", _IRODORI_HIDDEN])], 1),
-        "caption_proj": _irodori_graph([("hidden", [1, "T", _IRODORI_HIDDEN])], 2),
-        "speaker": _irodori_graph(
-            [("latent", [1, "S", latent_dim * _IRODORI_CONFIG["speaker_patch_size"]])], 1, "S"
+        "backbone": ([("input_ids", [1, "T"])], 1, "T"),
+        "text_proj": ([("hidden", [1, "T", _IRODORI_HIDDEN])], 1, "T"),
+        "caption_proj": ([("hidden", [1, "T", _IRODORI_HIDDEN])], 2, "T"),
+        "speaker": (
+            [("latent", [1, "S", latent_dim * _IRODORI_CONFIG["speaker_patch_size"]])],
+            1,
+            "S",
         ),
-        "duration": _irodori_graph(
+        "duration": (
             [
                 ("text_state", [1, "T", text_dim]),
                 ("speaker_vec", [1, speaker_dim]),
@@ -203,8 +210,9 @@ def _irodori_graphs() -> dict[str, str]:
                 ("has_caption", [1, 1]),
             ],
             1,
+            "T",
         ),
-        "dit": _irodori_graph(
+        "dit": (
             [
                 ("x_t", [1, "S", latent_dim]),
                 ("t_embed", [1, _IRODORI_CONFIG["timestep_embed_dim"]]),
@@ -217,9 +225,35 @@ def _irodori_graphs() -> dict[str, str]:
             "S",
         ),
         # コーデック 2 本（別系列・純畳み込み）。入力幅が latentDim / hopLength と噛み合う。
-        "codec_decoder": _irodori_graph([("latent", [1, "S", latent_dim])], 1, "S"),
-        "codec_encoder": _irodori_graph([("wav", [1, "T", _IRODORI_HOP_LENGTH])], 1),
+        "codec_decoder": ([("latent", [1, "S", latent_dim])], 1, "S"),
+        "codec_encoder": ([("wav", [1, "T", _IRODORI_HOP_LENGTH])], 1, "T"),
     }
+
+
+def _irodori_graphs() -> dict[str, str]:
+    """8 グラフの IR メタデータ（{@link _IRODORI_CONFIG} と噛み合う形）。"""
+    return {
+        role: _irodori_graph(inputs, outputs, symbol)
+        for role, (inputs, outputs, symbol) in _irodori_specs().items()
+    }
+
+
+def _irodori_input(dtype: str, role: str) -> bytes:
+    """組み立てへ届く系列 1 本ぶんの入力（**正当な IR コンテナ**）。
+
+    組み立ては入力コンテナを IR v1 の全規則で見る
+    （`karume.dist.assert_weight_components_verified`）ので、既定の系列は本物でなければ
+    ならない。格納 dtype の集合は実物と同じ形になる（適格な重みだけが圧縮・bias / 定数 /
+    scale は F32・i4 は I4 + I8 + F32 の混成）ので、席の取り違えを見る門
+    （{@link IRODORI_STORAGE_FORBIDDEN}）はこの形にも同じように掛かる。
+    """
+    inputs, outputs, _ = _irodori_specs()[role]
+    return ir_container(
+        mark=f"irodori-{role}-{dtype}",
+        storage=dtype,
+        inputs=tuple((name, shape) for name, shape in inputs),
+        outputs=[[1] for _ in range(outputs)],
+    )
 
 
 def _irodori_container(dtype: str, role: str, graph: str, extra: tuple[str, ...] = ()) -> bytes:
@@ -283,7 +317,6 @@ def _build_irodori_sources(
         series_by_dtype=by_dtype,
         codec_series_by_dtype=codec_by_dtype,
     )
-    resolved = graphs or _irodori_graphs()
     for dtype, roles in IRODORI_DTYPE_ROLES.items():
         for role in roles:
             in_codec = role in IRODORI_CODEC_DIRS
@@ -291,10 +324,14 @@ def _build_irodori_sources(
                 sources.codec_series_by_dtype[dtype] if in_codec else sources.series_by_dtype[dtype]
             )
             directory = (IRODORI_SERIES_DIRS | IRODORI_CODEC_DIRS)[role]
-            _write(
-                series / directory / "model.safetensors",
-                _irodori_container(dtype, role, resolved[role]),
+            # 合成メタデータを名指しした形（門を試すケース）は計画段で止まって組み立てへ
+            # 届かないので、従来の偽コンテナのままでよい。
+            payload = (
+                _irodori_input(dtype, role)
+                if graphs is None
+                else _irodori_container(dtype, role, graphs[role])
             )
+            _write(series / directory / "model.safetensors", payload)
             # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
             _write(series / directory / "io.case0.safetensors", b"io-fixture")
     if calib_provenance is not None:

@@ -33,10 +33,16 @@ MUST: 系列に散らばる `io.*.safetensors`（E2E の入出力フィクスチ
 出力へ入るのは pipeline ごとの出力 path 表に載ったファイルだけで、表に無いものは黙って
 混ざらない。
 
-MUST: 検査（格納 dtype / rope 素表のバイト同一 / スタイル表・話者表の行数）は**配置の前**に
-**全モデルぶん**済ませる — 落ちるなら途中の配布形を 1 ファイルも残さない。組み立ては
-「計画（{@link ModelPlan} を組む = 検査と読み取りの全部）→ 実体化（{@link assemble_family}）」の
-2 段で、前段は 1 バイトも書かない。
+MUST: 検査（weights コンテナの IR v1 全検証 / 格納 dtype / rope 素表のバイト同一 /
+スタイル表・話者表の行数）は**配置の前**に**全モデルぶん**済ませる — 落ちるなら途中の配布形を
+1 ファイルも残さない。組み立ては「計画（{@link ModelPlan} を組む = 検査と読み取りの全部）→
+実体化（{@link assemble_family}）」の 2 段で、前段は 1 バイトも書かない。
+
+MUST: **入力コンテナは「過去に検証済み」と信頼しない** — weights が指すコンポーネントは
+{@link assert_weight_components_verified} が `karume.verify.verify_shards` で丸ごと見る
+（読むのは safetensors のヘッダだけ）。組み立てが自前で読むのは格納 dtype と IR メタデータの
+一部（{@link ir_graph}）でしかないので、ここを省くと node / op / storage の壊れた系列が
+family 固有の門をすり抜けて配布形に据わり、利用者の `createSession` で初めて落ちる。
 
 配置は常に**独立したコピー**（ハードリンク禁止 — 2026-08-09 裁定・ADR 0041 追記）。系列の
 書き手は既存ファイルを truncate で上書きするため、リンク共有した配布形は系列の再 export で
@@ -833,6 +839,64 @@ def assert_plan_sources(plans: Sequence[ModelPlan]) -> None:
                 raise DistError(f"{plan.name}.{role}: 組み立ての入力が無い: {artifact.source}")
 
 
+def weight_components(sharded: Sequence[ShardedPlan]) -> list[tuple[Path, ...]]:
+    """weights が指す**ローカル**コンポーネントの shard 列（読む順）を全部集める。
+
+    共有コンポーネント（複数モデルが同じ系列を指す席）は shard 列**そのもの**で dedupe する
+    — 同じバイト列を 2 度検証しても結論は変わらない。出所が生成物（`payload`）の役割は
+    対象外（IR コンテナではない）。
+
+    NOTE: 見るのは weights だけ。`assets` / `extras`（tokenizer・スタイル表・rope 素表などの
+    table safetensors）は IR コンテナではないので、IR の門を掛ける先ではない。
+    """
+    components: list[tuple[Path, ...]] = []
+    seen: set[tuple[Path, ...]] = set()
+    for item in sharded:
+        roles = sorted(
+            {files.file for labels in item.plan.weights.values() for files in labels.values()}
+        )
+        for role in roles:
+            sources = [
+                artifact.source
+                for member in item.shards[role]
+                if (artifact := item.plan.artifacts[member]).source is not None
+            ]
+            shards = tuple(sources)
+            if not shards or shards in seen:
+                continue
+            seen.add(shards)
+            components.append(shards)
+    return components
+
+
+def assert_weight_components_verified(sharded: Sequence[ShardedPlan]) -> None:
+    """weights の全コンポーネントを **IR v1 の全規則**で検証する（配置の前）。
+
+    MUST: 組み立ては入力コンテナを「過去に検証済み」と信頼しない。系列ディレクトリは
+    truncate で上書きされる可変な場所（モジュール doc）なので、**古いエクスポータで焼いた系列を
+    `--series` で指す**運用事故が現実にありうる。組み立てが自前で見るのは格納 dtype と
+    IR メタデータの一部（{@link ir_graph} は `karume_ir` を `json.loads` するだけ）なので、
+    node / op / storage の壊れは family 固有の門をすり抜けて配布形に据わり、利用者の
+    `createSession` で初めて落ちる。
+
+    読むのは safetensors の**ヘッダだけ**（`verify._read_shard_set`）なので、数 GB の再読みは
+    起きない。
+
+    NOTE: `karume.verify` の import は関数の中に置く — `karume.dist` の import グラフへ
+    `karume.emit` 経由の torch を引き込まないため（`karume.cli` の遅延ディスパッチと同じ規律）。
+    """
+    from karume.ops import OpContractError
+    from karume.verify import ContainerError, IrError, verify_shards
+
+    for shards in weight_components(sharded):
+        try:
+            verify_shards(shards)
+        except (ContainerError, IrError, OpContractError) as cause:
+            raise DistError(
+                f"{shards[0]}: 組み立ての入力が IR v1 の規則を満たさない: {cause}"
+            ) from cause
+
+
 def assert_root_files(root_files: Mapping[str, str]) -> None:
     """配布リポ直下へ書く名前が法的テキストの席（{@link LEGAL_PATHS}）に収まることを落とす。
 
@@ -1006,6 +1070,9 @@ def assemble_family(
     assert_plan_limits(plans)
     assert_plan_sources(plans)
     assert_root_files(root_files or {})
+    # 入力コンテナの全検証は**実在検査の後・1 バイトも書く前**（ヘッダしか読まないので、
+    # ここに置いても数 GB の再読みにはならない）。
+    assert_weight_components_verified(sharded)
     # MUST: 越境参照は**単一モデルの組み立てだけ**に許す — 役割名はモデルを跨いで同じ綴りな
     # ので、複数モデルへ一括で掛けると「どのモデルの席をどこへ向けるか」が曖昧なまま全モデル
     # の同名役割が 1 つの参照先を指す（別モデルの重みを黙って配る形）。実需は release 時の

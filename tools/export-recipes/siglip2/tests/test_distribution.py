@@ -1,7 +1,7 @@
 """SigLIP2 の配布 recipe（`siglip2.distribution`）— 組み立て 1 周ぶんの単体テスト。
 
-実資産は使わない — dist が safetensors から読むのは**ヘッダの dtype 集合**と IR メタデータ
-（`__metadata__`）だけなので、数十バイトの正規ヘッダ付き偽資産で層の振る舞いは全て観測できる。
+実資産は使わない。組み立てへ届く入力は数 KB の**正当な最小 IR コンテナ**（`ir_fixtures`）で、
+門に落とされることを見るケースだけが従来の偽資産のまま（{@link _siglip2_container}）。
 前処理定数の出どころ（`preprocessor_config.json`）も合成 JSON で足りる。
 
 manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from ir_fixtures import ir_container
 
 from dist import default_out_dir, main
 from karume.dist import (
@@ -130,6 +131,30 @@ def _siglip2_graph(
     )
 
 
+def _siglip2_container(dtype: str, graph: str | None) -> bytes:
+    """系列に置く vision tower の中身。
+
+    組み立てへ届く既定の形は**正当な IR コンテナ**でなければならない（組み立ては入力を
+    IR v1 の全規則で見る — `karume.dist.assert_weight_components_verified`）。
+
+    門に落とされることを見るケース（合成メタデータ / 別 dtype の系列）は計画段
+    （`siglip2_plan`）で止まって組み立てへ届かないので、従来の偽コンテナのままにする —
+    実物どおりの f16 コンテナ（適格外の重みと bias が F32 で残る）にすると「F32 が無い」では
+    落ちなくなる。閉じ方は禁止 dtype 表（Anima / Irodori の `*_STORAGE_FORBIDDEN`）で、
+    この family はまだ持っていない。
+    """
+    if graph is None and dtype == "F32":
+        return ir_container(
+            mark="siglip2-vision",
+            storage=dtype.lower(),
+            inputs=(("pixel_values", (1, 3, _SIGLIP2_HEIGHT, _SIGLIP2_WIDTH)),),
+            outputs=([1, _SIGLIP2_HIDDEN],),
+        )
+    return _fake_safetensors(
+        dtype, b"siglip2-vision-weights", {IR_METADATA_KEY: graph or _siglip2_graph()}
+    )
+
+
 def _build_siglip2_sources(
     root: Path,
     *,
@@ -148,14 +173,7 @@ def _build_siglip2_sources(
         series=root / "outputs" / "series" / checkpoint,
         model=root / "inputs" / "siglip2" / checkpoint,
     )
-    _write(
-        sources.series / "model.safetensors",
-        _fake_safetensors(
-            dtype,
-            b"siglip2-vision-weights",
-            {IR_METADATA_KEY: graph if graph is not None else _siglip2_graph()},
-        ),
-    )
+    _write(sources.series / "model.safetensors", _siglip2_container(dtype, graph))
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.series / "io.ramp.safetensors", b"io-fixture")
     if preprocessor is not None:

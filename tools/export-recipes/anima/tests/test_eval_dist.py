@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from ir_fixtures import ir_container
 
 from anima import eval_dist
 from anima.distribution import (
@@ -75,24 +76,38 @@ def _calib_record(method: str, model: str) -> bytes:
 
 
 def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> Path:
-    """素版 1 モデルの系列（f16 / i8 の配布系列 + **変種の i4 系列**）を偽資産で作る。"""
+    """素版 1 モデルの系列（f16 / i8 の配布系列 + **変種の i4 系列**）を偽資産で作る。
+
+    weights の席だけは**正当な IR コンテナ**（組み立ては入力を IR v1 の全規則で見る —
+    `karume.dist.assert_weight_components_verified`）。rope 素表は extras の席なので
+    IR コンテナではなく、従来どおりヘッダだけの偽資産でよい。
+    """
     sources = anima_sources(series_dir, MODEL)
-    _write(sources.base / "text_encoder" / "model.safetensors", _fake_safetensors("F16", b"te"))
+    _write(
+        sources.base / "text_encoder" / "model.safetensors",
+        ir_container(mark="te", storage="f16"),
+    )
     _write(
         sources.text_conditioner / "text_conditioner" / "model.safetensors",
-        _fake_safetensors("F16", b"tc"),
+        ir_container(mark="tc", storage="f16"),
     )
-    _write(sources.base / "vae_decoder" / "model.safetensors", _fake_safetensors("F16", b"vae"))
+    _write(
+        sources.base / "vae_decoder" / "model.safetensors",
+        ir_container(mark="vae", storage="f16"),
+    )
     _write(sources.tokenizers / "qwen2-tokenizer.json", b'{"qwen2": true}')
     _write(sources.tokenizers / "t5-tokenizer.json", b'{"t5": true}')
     rope = _fake_safetensors("F32", b"rope")
     variant = series_dir / eval_dist.EVAL_SERIES.format(model=MODEL)
-    for series, dtype in (
-        (sources.transformer["f16"], "F16"),
-        (sources.transformer["i8"], "I8"),
-        (variant, "I4"),
+    for series, storage in (
+        (sources.transformer["f16"], "f16"),
+        (sources.transformer["i8"], "i8"),
+        (variant, "i4"),
     ):
-        _write(series / "transformer" / "model.safetensors", _fake_safetensors(dtype, b"dit"))
+        _write(
+            series / "transformer" / "model.safetensors",
+            ir_container(mark=f"dit-{storage}", storage=storage),
+        )
         _write(series / "transformer" / "rope_base.safetensors", rope)
     _write(variant / "transformer" / CALIB_PROVENANCE_FILE, _calib_record(method, MODEL))
     return variant

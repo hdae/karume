@@ -1,7 +1,7 @@
 """SBV2 の配布 recipe（`sbv2.distribution`）— 組み立て 1 周ぶんの単体テスト。
 
-実資産は使わない — dist が safetensors から読むのは**ヘッダの dtype 集合だけ**（格納形の門）
-なので、数十バイトの正規ヘッダ付き偽資産で層の振る舞いは全て観測できる。SBV2 は加えて
+実資産は使わない。weights の席へ挿すのは数 KB の**正当な最小 IR コンテナ**（`ir_fixtures` —
+{@link _sbv2_container}）で、門に落とされることを見るケースだけが従来の偽資産のまま。SBV2 は加えて
 `config.json` と `style_vectors.npy` を読むが、どちらも数行 / 数 KB の合成物で足りる
 （**合成 config の style2id は実重み FN4 と別の並び**にしてある — 表を焼き込んでいれば落ちる）。
 
@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from ir_fixtures import ir_container
 from safetensors.numpy import load_file, save_file
 
 from dist import main
@@ -193,27 +194,58 @@ _SBV2_IR_METADATA: Mapping[str, Mapping[str, str]] = {
     },
 }
 
-#: 偽資産（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 8 役は
-#: `SBV2_STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持ち、IR コンテナとしても読まれる
-#: （{@link _SBV2_IR_METADATA}）。
-_SBV2_PAYLOADS = {
-    "text_encoder": _fake_safetensors(
-        "I8", b"deberta-i8-weights", _SBV2_IR_METADATA["text_encoder"]
-    ),
-    "text_encoder_i4": _fake_safetensors(
-        "I4", b"deberta-i4-weights", _SBV2_IR_METADATA["text_encoder_i4"]
-    ),
-    "front_f16": _fake_safetensors("F16", b"front-f16-weights", _SBV2_IR_METADATA["front_f16"]),
-    "front_i8": _fake_safetensors("I8", b"front-i8-weights", _SBV2_IR_METADATA["front_i8"]),
-    "front_i4": _fake_safetensors("I4", b"front-i4-weights", _SBV2_IR_METADATA["front_i4"]),
-    "voice_f16": _fake_safetensors("F16", b"voice-f16-weights", _SBV2_IR_METADATA["voice_f16"]),
-    "voice_i8": _fake_safetensors("I8", b"voice-i8-weights", _SBV2_IR_METADATA["voice_i8"]),
-    "voice_i4": _fake_safetensors("I4", b"voice-i4-weights", _SBV2_IR_METADATA["voice_i4"]),
-    "tokenizer": b'{"deberta": true}',
+#: 役割 → その系列の格納 dtype（IR の語彙）。
+_SBV2_STORAGES: Mapping[str, str] = {
+    "text_encoder": "i8",
+    "text_encoder_i4": "i4",
+    **{
+        f"{target}_{label}": label for target in ("front", "voice") for label in ("f16", "i8", "i4")
+    },
 }
 
-#: 系列ラベル → 偽資産のヘッダ dtype（`SBV2_STORAGE_REQUIREMENTS` が要求する側）。
-_SBV2_SERIES_DTYPES: Mapping[str, str] = {"f16": "F16", "i8": "I8", "i4": "I4"}
+
+def _sbv2_container(role: str, *, storage: str | None = None, model: str = "") -> bytes:
+    """weights の席へ挿す**正当な IR コンテナ**（役割ごとに違うバイト列）。
+
+    組み立ては入力コンテナを IR v1 の全規則で見る
+    （`karume.dist.assert_weight_components_verified`）ので、weights の席は本物でなければ
+    ならない。合わせて family 固有の門が読む形もここが持つ — text_encoder は層番号つき
+    initializer 名 22 本 × 出力 1 本 × 入力の並び（{@link assert_bert_hidden}）、front / voice は
+    焼き込み定数の静的次元（{@link assert_baked_sym_max}）。
+
+    格納 dtype の集合は実物と同じ形（適格な重みだけが圧縮・bias / 定数 / scale は F32・i4 は
+    I4 + I8 + F32 の混成 — {@link _SBV2_SERIES_HEADERS}）になるので、席の取り違えを見る門
+    もこの形に掛かる。`storage` を渡すと**形は席のまま格納だけ別系列**にできる（3×3 の
+    取り違えを実 gate で回すため）。`model` はモデルごとにバイト列をずらす軸。
+    """
+    mark = f"{role}-{model}" if model else role
+    dtype = storage if storage is not None else _SBV2_STORAGES[role]
+    if role.startswith("text_encoder"):
+        return ir_container(
+            mark=mark,
+            storage=dtype,
+            inputs=tuple((name, (1, 4)) for name in SBV2_TEXT_ENCODER_INPUTS),
+            outputs=[[1, 4]] * _SBV2_GRAPH_OUTPUTS,
+            weights=[
+                f"p_model_encoder_layer_{index}_attention_self_query_proj_weight"
+                for index in range(_SBV2_GRAPH_LAYERS)
+            ],
+        )
+    expectation = SBV2_SYM_EXPECTATIONS[role]
+    return ir_container(
+        mark=mark,
+        storage=dtype,
+        inputs=(("x", (expectation.symbol,)),),
+        baked=(expectation.symbol, expectation.sym_max),
+    )
+
+
+#: 偽資産（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 8 役は
+#: `SBV2_STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持ち、IR コンテナとしても読まれる。
+_SBV2_PAYLOADS = {
+    **{role: _sbv2_container(role) for role in _SBV2_STORAGES},
+    "tokenizer": b'{"deberta": true}',
+}
 
 #: 席 → その系列のヘッダが**必ず含む**格納 dtype（実配布資産の実測 — i4 は混成で、i4 適格外の
 #: 重みが I8 のまま残るので I8 も含む）。取り違えを再現するときはこの集合ごと差し替える。
@@ -326,13 +358,7 @@ def _build_sbv2_sources(
     ):
         for target in ("front", "voice"):
             role = f"{target}_{label}"
-            payload = _SBV2_PAYLOADS[role]
-            if offset:
-                payload = _fake_safetensors(
-                    _SBV2_SERIES_DTYPES[label],
-                    f"{role}-{model}".encode(),
-                    _SBV2_IR_METADATA[role],
-                )
+            payload = _SBV2_PAYLOADS[role] if not offset else _sbv2_container(role, model=model)
             _write(series_dir / target / "model.safetensors", payload)
             _write(series_dir / target / "io.p2.safetensors", b"io-fixture")
         # 配布しない単体グラフ（golden 検証専用）も系列には並ぶ。
@@ -736,14 +762,13 @@ class TestSbv2StorageGate:
             for seat in group:
                 for series in group:
                     sources = _build_sbv2_sources(tmp_path / f"{seat}-{series}")
-                    # IR メタデータは**席側**を名乗らせる（記号次元の門〈CG4-3〉ではなく
+                    # グラフの形は**席側**を名乗らせる（記号次元の門〈CG4-3〉ではなく
                     # 格納 dtype の門だけを回すため — 席と系列の両方を動かすと、どちらの門で
-                    # 落ちたのか分からなくなる）。
+                    # 落ちたのか分からなくなる）。動かすのは格納 dtype だけで、その集合は
+                    # {@link _SBV2_SERIES_HEADERS} が名指しする実物の形になる。
                     sbv2_placements(sources)[seat].write_bytes(
-                        _mixed_safetensors(
-                            _SBV2_SERIES_HEADERS[series],
-                            b"swapped-series",
-                            _SBV2_IR_METADATA[seat],
+                        _sbv2_container(
+                            seat, storage=_SBV2_STORAGES[series], model="swapped-series"
                         )
                     )
                     out_dir = tmp_path / "out" / f"{seat}-{series}"

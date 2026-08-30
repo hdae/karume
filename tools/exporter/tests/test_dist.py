@@ -1,7 +1,9 @@
 """配布ディレクトリ組み立て（`karume.dist`）の単体テスト。
 
-実資産は使わない — dist が safetensors から読むのは**ヘッダの dtype 集合だけ**（格納形の門）
-なので、数十バイトの正規ヘッダ付き偽資産で層の振る舞いは全て観測できる。
+実資産は使わない。ただし weights の席へ挿す入力は**正当な IR コンテナ**でなければならない —
+組み立ては配置の前に入力コンテナを IR v1 の全規則で見る
+（`dist.assert_weight_components_verified`）。その合成は {@link ir_fixtures}（数 KB のグラフ
+1 本ぶん）で、生成物（`payload`）で持つ席は IR コンテナではないので従来どおり生バイト列でよい。
 
 manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
 `shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
@@ -23,6 +25,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
+from ir_fixtures import ir_container, ir_shards
+from safetensors.numpy import load, save
 
 from karume import dist
 from karume.artifacts import SUPERSEDED_SUFFIX
@@ -55,6 +59,7 @@ from karume.dist import (
     resolve_external_components,
     verify_dist,
 )
+from karume.ir import IR_METADATA_KEY
 
 
 def _ref(path: str) -> dict[str, Any]:
@@ -1155,7 +1160,7 @@ class TestShardExpansion:
         )
 
     def test_a_split_component_is_declared_as_an_ordered_shard_list(self, tmp_path: Path) -> None:
-        payloads = [b"graph-shard", b"weights-2", b"weights-3"]
+        payloads = ir_shards(3, mark="w")
         plan = self._plan(tmp_path / "series", payloads)
         out_dir = tmp_path / "models" / "sharded"
 
@@ -1177,19 +1182,20 @@ class TestShardExpansion:
 
     def test_the_shards_are_covered_by_the_declaration_check(self, tmp_path: Path) -> None:
         """突合は列を辿って現物へ届く（宣言外ファイル検査に落ちない）。"""
-        plan = self._plan(tmp_path / "series", [b"graph-shard", b"weights-2"])
+        payloads = ir_shards(2, mark="w")
+        plan = self._plan(tmp_path / "series", payloads)
         out_dir = tmp_path / "models" / "sharded"
 
         assemble_family([plan], out_dir, "A")
 
         assert verify_dist(out_dir) == {
-            "A/w/model-00001-of-00002.safetensors": len(b"graph-shard"),
-            "A/w/model-00002-of-00002.safetensors": len(b"weights-2"),
+            "A/w/model-00001-of-00002.safetensors": len(payloads[0]),
+            "A/w/model-00002-of-00002.safetensors": len(payloads[1]),
         }
 
     def test_an_unsplit_component_still_declares_a_single_element(self, tmp_path: Path) -> None:
         """分割されていない資産の宣言は 1 バイトも変わらない（代表 path のまま 1 要素）。"""
-        plan = self._plan(tmp_path / "series", [b"whole"])
+        plan = self._plan(tmp_path / "series", [ir_container(mark="w")])
         out_dir = tmp_path / "models" / "whole"
 
         manifest = assemble_family([plan], out_dir, "A")
@@ -1200,7 +1206,7 @@ class TestShardExpansion:
     def test_the_leftovers_of_a_previous_export_fail_loudly(self, tmp_path: Path) -> None:
         """単一ファイルと連番の同居は「どちらを配るか」が一意に決まらない。"""
         series = tmp_path / "series"
-        plan = self._plan(series, [b"graph-shard", b"weights-2"])
+        plan = self._plan(series, ir_shards(2, mark="w"))
         (series / "model.safetensors").write_bytes(b"stale")
 
         with pytest.raises(DistError, match="同居"):
@@ -1210,11 +1216,105 @@ class TestShardExpansion:
         self, tmp_path: Path
     ) -> None:
         """assets / extras の席は 1 ファイル参照 — 複数 shard になった役割は指せない。"""
-        plan = self._plan(tmp_path / "series", [b"graph-shard", b"weights-2"])
+        plan = self._plan(tmp_path / "series", ir_shards(2, mark="w"))
         plan = replace(plan, assets={"table": "w"})
 
         with pytest.raises(DistError, match="assets / extras も"):
             assemble_family([plan], tmp_path / "models" / "aliased", "A")
+
+
+class TestInputContainerVerification:
+    """組み立ては入力コンテナを「過去に検証済み」と信頼しない（CG4-1）。
+
+    系列ディレクトリは truncate で上書きされる可変な場所（`dist` のモジュール doc）なので、
+    **古いエクスポータで焼いた系列を `--series` で指す**運用事故が現実にありうる。組み立てが
+    自前で読むのは格納 dtype と IR メタデータの一部だけなので、node / op / storage の壊れは
+    family 固有の門をすり抜けて配布形に据わり、利用者の `createSession` で初めて落ちる。
+    """
+
+    #: 語彙に無い op（差し替え先）。`requires.ops` ごと差し替えるので、宣言の整合は保たれる
+    #: — 落ちる先は**ランタイム支援の突合**であって JSON の形ではない。
+    _UNSUPPORTED: ClassVar[str] = "linear_v2"
+
+    def _tampered(self, payload: bytes) -> bytes:
+        """テンソルと data 節はそのままで、`karume_ir` の op だけを差し替えたコンテナ。
+
+        4.md の失敗シナリオそのもの（手作業の改竄 / 別実装の出力）— 格納 dtype の門も
+        宣言の門も通り、`verify_dist` も緑になる形。
+        """
+        header_length = int.from_bytes(payload[:8], "little")
+        header = json.loads(payload[8 : 8 + header_length])
+        graph = json.loads(header["__metadata__"][IR_METADATA_KEY])
+        swapped = {node["op"] for node in graph["nodes"]}
+        for node in graph["nodes"]:
+            node["op"] = self._UNSUPPORTED
+        graph["requires"]["ops"] = sorted(
+            {self._UNSUPPORTED if op in swapped else op for op in graph["requires"]["ops"]}
+        )
+        tensors = load(payload)
+        return save(tensors, {IR_METADATA_KEY: json.dumps(graph)})
+
+    def _plan(self, source: Path, payload: bytes) -> ModelPlan:
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(payload)
+        return ModelPlan(
+            name="A",
+            pipeline="anima/1",
+            artifacts={"w": Artifact(rel_path="w/model.safetensors", source=source)},
+            weights={"w": {"f16": WeightFiles(file="w")}},
+            assets={},
+            quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
+            default_quant="f16",
+            pipeline_config={},
+        )
+
+    def test_a_weights_container_the_runtime_cannot_execute_fails_loudly(
+        self, tmp_path: Path
+    ) -> None:
+        plan = self._plan(tmp_path / "series" / "model.safetensors", self._tampered(ir_container()))
+        out_dir = tmp_path / "models" / "tampered"
+
+        # 落ちる層まで見る — 「JSON が読めない」ではなく**ランタイム支援の突合**で落ちること
+        # そのものが、この門が閉じている穴（形も宣言も整った非実行グラフ）の定義。
+        with pytest.raises(
+            DistError, match="IR v1 の規則を満たさない: ランタイムの capability 不足 — 非対応 op"
+        ):
+            assemble_family([plan], out_dir, "A")
+        assert not out_dir.exists()
+
+    def test_without_the_preflight_the_same_distribution_is_assembled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """故障注入 — 門を外すと壊れたコンテナがそのまま据わる（恒真化していないことの証明）。
+
+        他の門（格納 dtype・宣言と現物の突合・宣言外ファイル検査）はどれもこの改竄を見ない、
+        が上の 1 本の意味そのもの。
+        """
+        monkeypatch.setattr(dist, "assert_weight_components_verified", lambda sharded: None)
+        plan = self._plan(tmp_path / "series" / "model.safetensors", self._tampered(ir_container()))
+        out_dir = tmp_path / "models" / "tampered"
+
+        assemble_family([plan], out_dir, "A")
+
+        assert (out_dir / MANIFEST_FILENAME).is_file()
+
+    def test_a_generated_payload_is_not_read_as_a_container(self, tmp_path: Path) -> None:
+        """生成物（`payload`）の席は IR コンテナではない — 門の対象外（rope 素表・表 2 本）。"""
+        plan = ModelPlan(
+            name="A",
+            pipeline="anima/1",
+            artifacts={"w": Artifact(rel_path="w/model.safetensors", payload=b"not-a-container")},
+            weights={"w": {"f16": WeightFiles(file="w")}},
+            assets={},
+            quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
+            default_quant="f16",
+            pipeline_config={},
+        )
+
+        manifest = assemble_family([plan], tmp_path / "models" / "generated", "A")
+
+        entry = manifest["models"]["A"]["weights"]["w"]["f16"]
+        assert [ref["path"] for ref in entry["shards"]] == ["A/w/model.safetensors"]
 
 
 class TestExternalShardedComponents:
@@ -1228,7 +1328,7 @@ class TestExternalShardedComponents:
 
     _REVISION = "0123456789abcdef0123456789abcdef01234567"
     _REPO = "hdae/karume-source"
-    _SHARDS = (b"graph-shard-bytes", b"weights-shard-2", b"weights-shard-3")
+    _SHARDS = tuple(ir_shards(3, mark="text-encoder"))
     _OWN = b"transformer-bytes"
 
     def _series(self, root: Path, payloads: Sequence[bytes]) -> Path:
@@ -1349,7 +1449,7 @@ class TestExternalShardedComponents:
 
     def test_an_unsplit_component_still_declares_one_reference(self, tmp_path: Path) -> None:
         """分割されていない役割の宣言は 1 バイトも変わらない（従来どおり 1 要素の列）。"""
-        whole = (b"whole-text-encoder",)
+        whole = (ir_container(mark="whole-text-encoder"),)
         series = self._series(tmp_path / "series", whole)
         source = self._source_dist(tmp_path, series)
         out_dir = tmp_path / "models" / "karume-borrower"

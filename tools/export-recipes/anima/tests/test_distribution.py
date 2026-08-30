@@ -1,7 +1,8 @@
 """Anima の配布 recipe（`anima.distribution`）— 系列 → 配布形の組み立て。
 
-実資産は使わない — dist が safetensors から読むのは**ヘッダの dtype 集合だけ**（格納形の門）
-なので、数十バイトの正規ヘッダ付き偽資産で層の振る舞いは全て観測できる。
+実資産は使わない。weights の席へ挿すのは数 KB の**正当な最小 IR コンテナ**（`ir_fixtures` —
+{@link _weights_container}）で、rope 素表のような extras の席と、門に落とされることを見る
+ケースだけが従来の偽資産のまま。
 
 manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
 `shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from ir_fixtures import ir_container
 
 from anima.card import ATTRIBUTION_NOTICE, LORA_NAME, LORA_SHA256, LORA_SOURCE
 from anima.distribution import (
@@ -98,17 +100,29 @@ def _mixed_safetensors(dtypes: tuple[str, ...], payload: bytes) -> bytes:
     return len(encoded).to_bytes(8, "little") + encoded + payload * len(dtypes)
 
 
+def _weights_container(role: str, storage: str) -> bytes:
+    """weights の席へ挿す**正当な IR コンテナ**（役割ごとに違うバイト列）。
+
+    組み立ては入力コンテナを IR v1 の全規則で見る
+    （`karume.dist.assert_weight_components_verified`）ので、weights の席は本物でなければ
+    ならない。格納 dtype の集合は実物と同じ形（適格な重みだけが圧縮・bias / 定数 / scale は
+    F32・i4 は I4 + I8 + F32 の混成）になるので、{@link ANIMA_STORAGE_FORBIDDEN} の
+    不在検査もこの形に掛かる。
+    """
+    return ir_container(mark=role, storage=storage)
+
+
 #: 偽資産の中身（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 5 役は
-#: `STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。rope_base はヘッダ検査の対象外
-#: だが、実物同様に正規形にしておく。
+#: `STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。rope_base は weights ではなく
+#: extras の席（IR コンテナではない）なので、ヘッダだけの偽資産のままでよい。
 _PAYLOADS = {
-    "text_encoder": _fake_safetensors("F16", b"text-encoder-weights"),
-    "text_conditioner": _fake_safetensors("F16", b"text-conditioner-weights"),
-    "transformer_f16": _fake_safetensors("F16", b"transformer-f16-weights"),
-    "transformer_i8": _fake_safetensors("I8", b"transformer-i8-weights"),
-    "transformer_i4": _fake_safetensors("I4", b"transformer-i4-weights"),
+    "text_encoder": _weights_container("text-encoder", "f16"),
+    "text_conditioner": _weights_container("text-conditioner", "f16"),
+    "transformer_f16": _weights_container("transformer-f16", "f16"),
+    "transformer_i8": _weights_container("transformer-i8", "i8"),
+    "transformer_i4": _weights_container("transformer-i4", "i4"),
     "rope_base": _fake_safetensors("F32", b"rope-base-table"),
-    "vae_decoder": _fake_safetensors("F16", b"vae-decoder-weights"),
+    "vae_decoder": _weights_container("vae-decoder", "f16"),
     "tokenizer": b'{"qwen2": true}',
     "tokenizer_2": b'{"t5": true}',
 }
@@ -180,14 +194,13 @@ def _build_series(
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.base / "text_encoder" / "io.t005.safetensors", b"io-fixture")
     _write(sources.base / "vae_decoder" / "io.case0.safetensors", b"io-fixture")
-    dtypes = {"f16": "F16", "i8": "I8", "i4": "I4"}
     ropes = {"f16": None, "i8": i8_rope, "i4": i4_rope}
     for storage, series in sources.transformer.items():
         role = f"transformer_{storage}"
         payload = (
             _PAYLOADS[role]
             if not mark
-            else _fake_safetensors(dtypes[storage], role.encode("utf-8") + mark)
+            else _weights_container(f"{role}{mark.decode('utf-8')}", storage)
         )
         _write(series / "transformer" / "model.safetensors", payload)
         _write(series / "transformer" / "io.s01024t0699.safetensors", b"io-fixture")
@@ -669,17 +682,17 @@ class TestStorageGate:
         `assert_storage_absent` の呼びが 1 行消えても落ちない。ここは組み立てを実際に通すので、
         呼びが外れた瞬間に非対角が緑になって落ちる。
         """
-        headers = {
-            "transformer_f16": ("F32", "F16"),
-            "transformer_i8": ("F32", "I8"),
-            "transformer_i4": ("F32", "I8", "I4"),
-        }
-        for seat in headers:
-            for series, dtypes in headers.items():
+        # 挿し込むのは**正当な IR コンテナ**（対角は組み立てまで通るので本物が要る）。格納 dtype
+        # の集合は系列そのままで、f16 = {F32, F16} / i8 = {F32, I8} / i4 = {F32, I8, I4}。
+        seats = ["transformer_f16", "transformer_i8", "transformer_i4"]
+        for seat in seats:
+            for series in seats:
                 sources = _build_series(tmp_path / f"series-{seat}-{series}")
                 storage = seat.removeprefix("transformer_")
                 target = sources.transformer[storage] / "transformer" / "model.safetensors"
-                target.write_bytes(_mixed_safetensors(dtypes, b"swapped-series"))
+                target.write_bytes(
+                    _weights_container("swapped-series", series.removeprefix("transformer_"))
+                )
                 out_dir = tmp_path / "models" / f"{seat}-{series}"
 
                 if series == seat:
