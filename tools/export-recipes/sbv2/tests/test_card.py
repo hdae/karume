@@ -569,3 +569,21 @@ class TestSbv2CardProfiles:
         before = copy.deepcopy(manifest)
         render_sbv2_model_card(manifest, REPO, SBV2_CARD_PROFILES[name], SBV2_QUANT_ABBREVIATIONS)
         assert manifest == before
+
+
+class TestSbv2EntryPoint:
+    """カードが案内するロード入口 — `fromPretrained` の 1 本だけ。"""
+
+    @pytest.mark.parametrize("name", sorted(SBV2_CARD_PROFILES))
+    def test_it_does_not_advertise_the_local_asset_entry_point(self, name: str) -> None:
+        """`fromAssets` は案内しない（2026-08-29 裁定）。
+
+        分割配布形も読めるようになった（X2-101）が、あちらはバイト列を自分で持っている前提の
+        ローカルデバッグ向けの面で、HF から使う読者の普通の入口は `fromPretrained`。両方を
+        並べると「どちらを使うのか」を読者に判断させることになる。`fromPretrained` 側も併せて
+        見るのは、Usage ごと消えても通る門にしないため。Usage 節はプロファイル共有なので、
+        片方のプロファイルにだけ案内が生えることも含めて全プロファイルで見る。
+        """
+        card = _profile_card(SBV2_CARD_PROFILES[name])
+        assert "fromAssets" not in card
+        assert "Sbv2Pipeline.fromPretrained" in card

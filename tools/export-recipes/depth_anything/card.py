@@ -177,6 +177,11 @@ def _depth_anything_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     `estimate()` は画像 1 枚しか受けない（解像度は事前学習の正方形でグラフに焼かれていて実行時
     に選べない — `DepthAnythingPipeline` の公開面）ので、この pipeline の optional ノブは
     model / quant の 2 つだけである。
+
+    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
+    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
+    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
+    判断させることになる。
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -217,8 +222,7 @@ def _depth_anything_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "`estimate()` keeps one GPU session alive for the lifetime of the pipeline, so processing",
         "many images uploads the weights once; concurrent calls are queued rather than run side by",
         "side. Weights are fetched once and cached (verified against `karume.json`'s `size` /",
-        "`sha256`). You can also build from bytes you fetched yourself",
-        "(`DepthAnythingPipeline.fromAssets`).",
+        "`sha256`).",
     ]
 
 

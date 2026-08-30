@@ -134,6 +134,11 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
     コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
     ので、系列が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ進める形。
+
+    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
+    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
+    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
+    判断させることになる。
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -185,7 +190,6 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "`caption` and `speaker` are both optional: without them the voice is picked by the model",
         "alone, and the guidance branches for the missing conditions are skipped.",
         "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
-        "You can also build from bytes you fetched yourself (`IrodoriPipeline.fromAssets`).",
     ]
 
 

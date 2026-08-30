@@ -142,6 +142,11 @@ def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 
     `embed()` は画像 1 枚しか受けない（前処理は配布形の定数で固定 — `Siglip2Pipeline` の
     公開面）ので、この pipeline の optional ノブは model / quant の 2 つだけである。
+
+    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
+    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
+    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
+    判断させることになる。
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -176,7 +181,6 @@ def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "It keeps one GPU session alive for the lifetime of the pipeline, so embedding many images",
         "uploads the weights once; concurrent calls are queued rather than run side by side.",
         "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
-        "You can also build from bytes you fetched yourself (`Siglip2Pipeline.fromAssets`).",
     ]
 
 

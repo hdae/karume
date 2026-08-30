@@ -6,7 +6,8 @@
 
 manifest からの導出（表・数・使い方）は `depth_anything/tests/test_distribution.py` の
 `TestDepthAnythingModelCard` が**組み立て 1 周ぶん**で見る。ここが持つのはカード側にしか無い
-門 — テンプレートの pipeline 固有性と、帰属表に無いサイズを描かないこと。
+門 — テンプレートの pipeline 固有性と、帰属表に無いサイズを描かないこと、そして案内する
+ロード入口。
 """
 
 from __future__ import annotations
@@ -99,3 +100,19 @@ class TestDepthAnythingCardGate:
         """見出しのサイズは帰属表 1 本から導く（2 表にすると別サイズとして売れてしまう）。"""
         card = render_depth_anything_model_card(_depth_anything_manifest(), REPO)
         assert "# Depth Anything V2 Small — Karume" in card
+
+
+class TestDepthAnythingEntryPoint:
+    """カードが案内するロード入口 — `fromPretrained` の 1 本だけ。"""
+
+    def test_it_does_not_advertise_the_local_asset_entry_point(self) -> None:
+        """`fromAssets` は案内しない（2026-08-29 裁定）。
+
+        分割配布形も読めるようになった（X2-101）が、あちらはバイト列を自分で持っている前提の
+        ローカルデバッグ向けの面で、HF から使う読者の普通の入口は `fromPretrained`。両方を
+        並べると「どちらを使うのか」を読者に判断させることになる。`fromPretrained` 側も併せて
+        見るのは、Usage ごと消えても通る門にしないため。
+        """
+        card = render_depth_anything_model_card(_depth_anything_manifest(), REPO)
+        assert "fromAssets" not in card
+        assert "DepthAnythingPipeline.fromPretrained" in card

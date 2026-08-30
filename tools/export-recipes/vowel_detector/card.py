@@ -158,6 +158,11 @@ def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     `detect()` は波形 1 本しか受けない（後処理の閾値も含めて実行時に選べる欄が無い —
     `VowelDetectorPipeline` の公開面）ので、この pipeline の optional ノブは model / quant の
     2 つだけである。
+
+    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
+    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
+    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
+    判断させることになる。
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -192,8 +197,7 @@ def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "`detect()` builds a GPU session per call and tears it down afterwards; concurrent calls",
         "are queued rather than run side by side.",
         "Weights are fetched once and cached (verified against `karume.json`'s `size` /",
-        "`sha256`). You can also build from bytes you fetched yourself",
-        "(`VowelDetectorPipeline.fromAssets`).",
+        "`sha256`).",
     ]
 
 
