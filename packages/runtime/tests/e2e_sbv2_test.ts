@@ -4,9 +4,9 @@
 //
 // tiny golden（tests/e2e_golden_test.ts）が「op 契約の被覆」を、実重み DeBERTa
 // （tests/e2e_deberta_test.ts）が「テキスト側 24 層の数値一致」を受け持つのに対し、こちらは
-// **音響チェーン側の実重み**を受け持つ。対象は `outputs/series/sbv2-FN4/<target>/` 配下で、
+// **音響チェーン側の実重み**を受け持つ。対象は `outputs/series/sbv2-F1/<target>/` 配下で、
 // 重み 251MB 級のためリポジトリ管理外（`.gitignore` の `outputs/`）。生成は
-// `tools/exporter/export_sbv2.py`（コマンドは下の GENERATE_COMMAND がそのまま正本）。
+// `tools/export-recipes/sbv2/export.py`（コマンドは下の GENERATE_COMMAND がそのまま正本）。
 //
 // **系列（格納 dtype）でパラメタ化**してある — f32 系列 / f16 系列（ADR 0018）/ i8 系列
 // （ADR 0019 の per-channel w8 格納・計算は f32）を同じ構造で回し、**ターゲット別 tolerance
@@ -449,8 +449,9 @@ const MODEL_FILE = "model.safetensors";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
-/** SKIP 時にそのまま貼れる生成コマンド（tools/exporter/README.md と同じもの）。 */
-const GENERATE_COMMAND = "cd tools/exporter && uv run --group sbv2 python export_sbv2.py";
+/** SKIP 時にそのまま貼れる生成コマンド（`sbv2/export.py` の docstring と同じもの）。 */
+const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group sbv2 python -m sbv2.export" +
+  " --model-dir ../../inputs/sbv2/F1";
 
 /** 格納 dtype ごとの資産系列（ADR 0018 — 同居させない）。 */
 type Sbv2Series = {
@@ -473,27 +474,32 @@ type Sbv2Series = {
 };
 
 /**
- * 系列 root。綴りの `sbv2-FN4` は `export_sbv2.py` の `default_out_root()` が `--model-dir` の
+ * 系列 root。綴りの `sbv2-F1` は `sbv2/export.py` の `default_out_root()` が `--model-dir` の
  * ディレクトリ名から導いたもの（話者ごとに系列を分ける — 綴りを共有すると別話者の書き出しが
  * 先の資産を黙って上書きする）。**当面この 1 話者を決め打ち**する。
+ *
+ * NOTE: 2026-08-30 に FN4 系列から jvnv の F1 系列へ付け替えた（fn 撤去の裁定）。tolerance の
+ * 値は FN4 時代の実測導出のまま — F1 でも全ターゲット・全ケースが成立することを実測で確認して
+ * 据え置いた（同一アーキテクチャ・同一値域クラス。再導出はしていないので、余裕が薄い箇所が
+ * 割れたら FN4 の表を流用せず F1 で採り直すこと）。
  */
 const SERIES: readonly Sbv2Series[] = [
   {
     name: "f32",
-    root: new URL("../../../outputs/series/sbv2-FN4/", import.meta.url),
+    root: new URL("../../../outputs/series/sbv2-F1/", import.meta.url),
     tolerances: TOLERANCES,
     generate: GENERATE_COMMAND,
   },
   {
     name: "f16",
-    root: new URL("../../../outputs/series/sbv2-FN4-f16/", import.meta.url),
+    root: new URL("../../../outputs/series/sbv2-F1-f16/", import.meta.url),
     tolerances: F16_TOLERANCES,
     compressedStorage: "f16",
     generate: `${GENERATE_COMMAND} --dtype f16`,
   },
   {
     name: "i8",
-    root: new URL("../../../outputs/series/sbv2-FN4-i8/", import.meta.url),
+    root: new URL("../../../outputs/series/sbv2-F1-i8/", import.meta.url),
     tolerances: I8_TOLERANCES,
     compressedStorage: "i8",
     generate: `${GENERATE_COMMAND} --dtype i8`,
@@ -539,7 +545,7 @@ type Sbv2Case = {
 
 /**
  * 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。生の重み
- * （config.json / ckpt / style_vectors.npy）は `inputs/sbv2/FN4/` 側に分かれていて系列 root
+ * （config.json / ckpt / style_vectors.npy）は `inputs/sbv2/F1/` 側に分かれていて系列 root
  * には来ないが、ターゲットの実体はディレクトリなので **ディレクトリだけ**を見る形は据え置く。
  */
 const discoverTargets = (root: URL): readonly string[] =>

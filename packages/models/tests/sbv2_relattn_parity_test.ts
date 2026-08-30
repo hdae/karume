@@ -9,7 +9,7 @@
 // このテストが緑である限り、E2E がゴールデン由来の表で走ることと、ホスト生成の表で走る
 // ことは**同じ計算**になる（バイト一致なので入れ替えても値が動かない）。
 //
-// GPU は使わない。資産（`outputs/series/sbv2-FN4/{flow,voice}/`）が無い環境では該当ケースを
+// GPU は使わない。資産（`outputs/series/sbv2-F1/{flow,voice}/`）が無い環境では該当ケースを
 // SKIP し、生成器そのものの性質を見るテスト（故障注入）は常に走る。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -18,10 +18,10 @@ import { readShard, resolveShards } from "../../runtime/tests/helpers/shard-file
 import { buildRelattnTables, RELATTN_WINDOW_SIZE } from "../src/sbv2/relattn-tables.ts";
 
 /**
- * 系列 root。綴りの `sbv2-FN4` は `export_sbv2.py` の `default_out_root()` が `--model-dir` の
+ * 系列 root。綴りの `sbv2-F1` は `sbv2/export.py` の `default_out_root()` が `--model-dir` の
  * ディレクトリ名から導いたもので、**当面この 1 話者を決め打ち**する。
  */
-const MODELS_ROOT = new URL("../../../outputs/series/sbv2-FN4/", import.meta.url);
+const MODELS_ROOT = new URL("../../../outputs/series/sbv2-F1/", import.meta.url);
 const MODEL_FILE = "model.safetensors";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
