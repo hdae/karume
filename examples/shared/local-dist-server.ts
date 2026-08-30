@@ -4,12 +4,12 @@
  *
  * ## なぜローカル読みを HTTP へ回すのか
  *
- * 1GiB 超のコンポーネントは配布形の時点で **shard 分割**されている（shard は独立ヘッダの
- * safetensors なので連結できない）。全量読み（`local-assets.ts`）は「1 コンポーネント =
- * 1 ファイル」の前提でバイト列を `openModel` へ渡す面なので、分割された配布形をそもそも
- * 開けない。取得層を通せば shard 面（グラフ shard → `prepareModel` → 重み shard の逐次流し）が
- * そのまま効くので、デモのロード経路が**本番（hub + prefetch + streamAssets）と 1 本になり**、
- * 分割の有無を気にしなくてよくなる。
+ * 1GiB 超のコンポーネントは配布形の時点で **shard 分割**されている。全量読み
+ * （`local-assets.ts` + `from*Assets`）でも分割形は読めるが、その面は**全 shard を同時に
+ * ホスト RAM へ載せる**（3.7GiB の DiT がそのまま常駐する）。取得層を通せば shard 面
+ * （グラフ shard → `prepareModel` → 重み shard の逐次流し）がそのまま効いて RAM に載るのは
+ * 常に「今の 1 本」だけになり、デモのロード経路が**本番（hub + prefetch + streamAssets）と
+ * 1 本になる**。越境参照（下の節）を解けるのも取得層だけ。
  *
  * 喋るのは hub が実際に叩く 2 経路だけ（revision 解決 API と resolve URL — 綴りの正本は
  * `@hdae/fetch-cache/hf` の `resolveHfRevision` / `hfResolveUrl`）。Range も HEAD も要らない

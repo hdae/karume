@@ -62,7 +62,6 @@
 import {
   acquireGpu,
   type GpuContext,
-  openModel,
   type Session,
   type SessionDiagnostics,
   type Tensor,
@@ -95,11 +94,11 @@ import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-fe
 import { toSessionOptions } from "../session/options.ts";
 import { toRepoRef } from "../hub/repo-ref.ts";
 import {
+  assetComponentOpener,
   type ComponentOpener,
   type GraphOwner,
   loadShardComponents,
   type ModelComponent,
-  wholeComponent,
 } from "../hub/components.ts";
 
 /** manifest の weights 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
@@ -196,11 +195,12 @@ const assetBuffer = (
 };
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口。取得済みバイト列を `openModel` で開き、Session は
- * 従来どおり全量面で組む（shard 面との違いは「どこからバイト列が来たか」だけ）。
+ * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
+ * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
+ * （`matte[0]` / `matte[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
  */
-const assetOpener = (assets: BirefnetAssets["assets"]): ComponentOpener => (key) =>
-  wholeComponent(openModel(assetBuffer(assets, key)));
+const assetOpener = (assets: BirefnetAssets["assets"]): ComponentOpener =>
+  assetComponentOpener("birefnet", assets, (key) => assetBuffer(assets, key));
 
 /**
  * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
@@ -558,6 +558,11 @@ export class BirefnetPipeline {
   /**
    * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel`・グラフとの突合を
    * 全てここで済ませ、**`matte` の Session を 1 本張って**返す（モジュール doc の MUST）。
+   *
+   * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`matte`）と、
+   * 1GiB 超のコンポーネントの shard 分割形（`matte[0]` / `matte[1]` / …）。分割形は
+   * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
+   * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
    */
   static async fromAssets(
     input: BirefnetAssets,

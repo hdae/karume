@@ -126,6 +126,7 @@ import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-fe
 import { toSessionOptions } from "../session/options.ts";
 import { toRepoRef } from "../hub/repo-ref.ts";
 import {
+  assetComponentOpener,
   type ComponentOpener,
   type GraphOwner,
   loadShardComponents,
@@ -410,11 +411,12 @@ const assetBuffer = (
 };
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口。取得済みバイト列を `openModel` で開き、Session は
- * 従来どおり全量面で組む（shard 面との違いは「どこからバイト列が来たか」だけ）。
+ * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
+ * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
+ * （`dit[0]` / `dit[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
  */
-const assetOpener = (assets: IrodoriAssets["assets"]): ComponentOpener => (key) =>
-  wholeComponent(openModel(assetBuffer(assets, key)));
+const assetOpener = (assets: IrodoriAssets["assets"]): ComponentOpener =>
+  assetComponentOpener("irodori", assets, (key) => assetBuffer(assets, key));
 
 /**
  * MUST: `fatal: true` で decode する。既定の TextDecoder は不正 UTF-8 を U+FFFD へ黙って
@@ -1598,6 +1600,11 @@ export class IrodoriPipeline {
    * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel` を全てここで済ませ、
    * **Session は 1 本も張らない**。{@link IrodoriPipelineOptions.signal} を渡すと段の境目で
    * 中断できる（`admitIrodori` の NOTE）。
+   *
+   * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`dit`）と、
+   * 1GiB 超のコンポーネントの shard 分割形（`dit[0]` / `dit[1]` / …）。分割形は
+   * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
+   * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
    */
   static async fromAssets(
     input: IrodoriAssets,

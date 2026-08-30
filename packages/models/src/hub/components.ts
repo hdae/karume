@@ -25,6 +25,12 @@
  * 取得済みバイト列から組む入口は {@link wholeComponent} で同じ姿（{@link ModelComponent}）に
  * 畳む。Session の構築は全量面 `createSession` のままなので、失敗の帰属も文言も 1 文字も
  * 変わらない（ADR 0070 受入①の契約 — 全量面は `origin` を名乗らない）。
+ *
+ * ただし取得キーが `<役割>[i]` の **shard 分割形**（`resolveFiles` の規約 — 1GiB 超の
+ * コンポーネント）で届いた役割だけは、全量面でも shard 逐次面へ流す（{@link
+ * assetComponentOpener}）— 「`fromPretrained` で読める配布形は `fromAssets` でも読める」が
+ * 全量面の契約（X2-101）。バイト列の連結はしない（shard は独立ヘッダの safetensors 1 本ずつで、
+ * 連結しても単一コンテナにはならない）。
  */
 
 import {
@@ -33,6 +39,7 @@ import {
   type GpuContext,
   type KarumeModel,
   type ModelShard,
+  openModel,
   prepareModel,
   type Session,
   type SessionOptions,
@@ -78,6 +85,110 @@ export const wholeComponent = (model: KarumeModel): ModelComponent => ({
   graph: model.graph,
   createSession: (gpu, options = {}) => createSession(gpu, model, options),
 });
+
+/** `<役割>[<添字>]` の添字部分（10 進整数のみ）。 */
+const SHARD_INDEX = /^\d+$/;
+
+/**
+ * 取得済み資産の中で `<役割>[i]` を `[0]` から**連続する範囲だけ**拾う。1 本も無ければ空
+ * （= 素の 1 本の配布形）。
+ */
+const assetShardKeys = (
+  assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
+  componentKey: string,
+): readonly string[] => {
+  const keys: string[] = [];
+  for (let index = 0; Object.hasOwn(assets, `${componentKey}[${index}]`); index += 1) {
+    keys.push(`${componentKey}[${index}]`);
+  }
+  return keys;
+};
+
+/** `<役割>[<添字>]` の形をした取得キーの総数（{@link assetShardKeys} との差が欠番の本数）。 */
+const indexedKeyCount = (
+  assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
+  componentKey: string,
+): number => {
+  const prefix = `${componentKey}[`;
+  let count = 0;
+  for (const key of Object.keys(assets)) {
+    if (!key.startsWith(prefix) || !key.endsWith("]")) continue;
+    if (SHARD_INDEX.test(key.slice(prefix.length, -1))) count += 1;
+  }
+  return count;
+};
+
+/**
+ * 手元の shard 列を Session 構築のたびに新しい iterator で流す。
+ *
+ * MUST: 呼ぶたびに新しい iterator を返す（{@link componentShardStream} と同じ理由 — 使い切った
+ * 列を使い回すと 2 本目の Session 構築が空の列を受ける）。バイト列は呼び手の Record が持って
+ * いるので、ここは参照を並べ直すだけ（全量面はホスト RAM に全量が載っている面 — shard 面の
+ * 「今の 1 本だけ」の性質はここでは得られない）。
+ */
+const assetShardStream = (shards: readonly ModelShard[]): AsyncIterable<ModelShard> => ({
+  [Symbol.asyncIterator]: async function* () {
+    for (const shard of shards) yield shard;
+  },
+});
+
+/**
+ * 全量面（`from*Assets`）のコンポーネント供給口 — 7 家族が共有する 1 本。
+ *
+ * 取得キーの形は `resolveFiles` の規約そのままで、2 形とも受ける:
+ *
+ * - 素の 1 本（`transformer`）… 従来どおり {@link wholeComponent}（全量面 `createSession`・
+ *   失敗は `origin` を名乗らない）。
+ * - **shard 分割形**（`transformer[0]` / `transformer[1]` / …）… 宣言順（= 添字順）の shard 列を
+ *   そのまま {@link createSessionFromShards} へ流す（`fromPretrained` と同じ逐次面）。バイト列は
+ *   連結しない — shard は独立ヘッダの safetensors 1 本ずつで、連結しても単一コンテナにならない。
+ *   失敗とフェンスは shard 面の綴り（`shard [n] 'transformer[0]'`）で帰属する（帰属先が複数
+ *   あるので名乗るのが正しい）。
+ *
+ * MUST: 添字は `[0]` から欠番なく連続していること・素キーと `[i]` を混ぜないこと。どちらも
+ * 取得キーの作り方が壊れている印で、黙って読み飛ばすと遠くの層から「重みが足りない」の形で
+ * 落ちる（未対応・想定外は fail loudly）。
+ *
+ * `buffer` は家族側の資産アクセサ（`assetBuffer`）— 「資産が無い」「bytes が buffer 全体を
+ * 占めていない」の文言を家族側に残すため、shard 1 本ずつも同じ門を通す。
+ */
+export const assetComponentOpener = (
+  where: string,
+  assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
+  buffer: (key: string) => ArrayBuffer,
+): ComponentOpener =>
+(key) => {
+  const shardKeys = assetShardKeys(assets, key);
+  // 素の 1 本（キーごと無い場合も含む — 「資産 X が無い」は家族側が揃っているキーつきで言う）。
+  if (shardKeys.length === 0) return wholeComponent(openModel(buffer(key)));
+  if (Object.hasOwn(assets, key)) {
+    throw new Error(
+      `${where}: 資産 '${key}' が素のキーと shard 分割キー（'${key}[0]'）の両方で届いている` +
+        `（どちらか一方 MUST — 揃っているキー: ${Object.keys(assets).join(" / ")}）`,
+    );
+  }
+  const indexed = indexedKeyCount(assets, key);
+  if (indexed !== shardKeys.length) {
+    throw new Error(
+      `${where}: 資産 '${key}' の shard 添字が [0] から連続していない` +
+        `（連続しているのは ${shardKeys.length} 本 / 添字つきのキーは ${indexed} 本）` +
+        `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
+    );
+  }
+  const shards = shardKeys.map((shardKey) => {
+    // 家族の門（bytes が buffer 全体を占めるか）を shard 1 本ずつにも通す。返る buffer は
+    // その view の buffer そのものなので、view を作り直しても写しは 1 バイトも起きない。
+    const bytes = buffer(shardKey);
+    return { id: shardKey, bytes: new Uint8Array(bytes) } satisfies ModelShard;
+  });
+  return {
+    // MUST: `PreparedModel` は握らず `IrGraph` だけ残す（モジュール doc の MUST と同じ規律 —
+    // Session はグラフ shard も含めた列を毎回流し直す）。
+    graph: prepareModel(shards[0]).graph,
+    createSession: (gpu, options = {}) =>
+      createSessionFromShards(gpu, assetShardStream(shards), options),
+  };
+};
 
 /**
  * 家族側の admission — 「この manifest / このグラフでは、この家族として実行できない」を

@@ -63,7 +63,6 @@
 import {
   acquireGpu,
   type GpuContext,
-  openModel,
   parseSafetensors,
   type Session,
   type SessionDiagnostics,
@@ -94,11 +93,11 @@ import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-fe
 import { toSessionOptions } from "../session/options.ts";
 import { toRepoRef } from "../hub/repo-ref.ts";
 import {
+  assetComponentOpener,
   type ComponentOpener,
   type GraphOwner,
   loadShardComponents,
   type ModelComponent,
-  wholeComponent,
 } from "../hub/components.ts";
 
 /** manifest の assets 表に現れる取得キーと、その safetensors のテンソル名（`dist.py` と対）。 */
@@ -196,11 +195,12 @@ const assetBuffer = (
 };
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口。取得済みバイト列を `openModel` で開き、Session は
- * 従来どおり全量面で組む（shard 面との違いは「どこからバイト列が来たか」だけ）。
+ * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
+ * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
+ * （`crnn[0]` / `crnn[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
  */
-const assetOpener = (assets: VowelDetectorAssets["assets"]): ComponentOpener => (key) =>
-  wholeComponent(openModel(assetBuffer(assets, key)));
+const assetOpener = (assets: VowelDetectorAssets["assets"]): ComponentOpener =>
+  assetComponentOpener("vowel-detector", assets, (key) => assetBuffer(assets, key));
 
 /**
  * mel 基底の資産（1 テンソルの f32 safetensors `[80, 257]`）を読む。
@@ -595,6 +595,11 @@ export class VowelDetectorPipeline {
   /**
    * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel`・グラフとの突合を
    * 全てここで済ませる（Session はまだ張らない — モジュール doc の MUST）。
+   *
+   * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`crnn`）と、
+   * 1GiB 超のコンポーネントの shard 分割形（`crnn[0]` / `crnn[1]` / …）。分割形は
+   * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
+   * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
    */
   static async fromAssets(
     input: VowelDetectorAssets,

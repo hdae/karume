@@ -40,7 +40,6 @@
 import {
   acquireGpu,
   type GpuContext,
-  openModel,
   type Session,
   type SessionDiagnostics,
   type SessionOptions,
@@ -98,11 +97,11 @@ import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-fe
 import { toSessionOptions } from "../session/options.ts";
 import { toRepoRef } from "../hub/repo-ref.ts";
 import {
+  assetComponentOpener,
   type ComponentOpener,
   type GraphOwner,
   loadShardComponents,
   type ModelComponent,
-  wholeComponent,
 } from "../hub/components.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
@@ -305,11 +304,12 @@ const assetBuffer = (
 };
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口。取得済みバイト列を `openModel` で開き、Session は
- * 従来どおり全量面で組む（shard 面との違いは「どこからバイト列が来たか」だけ）。
+ * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
+ * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
+ * （`transformer[0]` / `transformer[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
  */
-const assetOpener = (assets: AnimaAssets["assets"]): ComponentOpener => (key) =>
-  wholeComponent(openModel(assetBuffer(assets, key)));
+const assetOpener = (assets: AnimaAssets["assets"]): ComponentOpener =>
+  assetComponentOpener("anima", assets, (key) => assetBuffer(assets, key));
 
 const assetBytes = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -794,6 +794,11 @@ export class AnimaPipeline {
    * - `pipelineConfig` の手書きスキーマ検証（未知キーも fail loudly）
    * - quant の `session` → runtime `SessionOptions` の**明示写像**と `gpuFeatures` の解釈
    * - 全 weights / assets の `openModel` / rope 素表 / トークナイザ 2 本の解釈
+   *
+   * weights の取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本
+   * （`transformer`）と、1GiB 超のコンポーネントの shard 分割形（`transformer[0]` /
+   * `transformer[1]` / …）。分割形はバイト列を連結せず `fromPretrained` と同じ shard 逐次面へ
+   * 流す。添字の欠番と素キーとの混在は fail loudly（受け口の実装は `src/hub/components.ts`）。
    *
    * MUST: manifest の契約違反と**資産の解析**は **GPU を取りに行く前**に落とす（他 6 家族と
    * 同じ順序）。順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が

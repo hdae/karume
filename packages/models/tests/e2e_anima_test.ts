@@ -15,12 +15,12 @@
  * 焼かれていて、現物が turbo ミラー側に無いため。無い環境と GPU 無し環境は理由を出して
  * **明示 SKIP**する（テストを消して無音で緑にしない — ADR 0005）。
  *
- * NOTE: 実配布形はどちらのリポも**全量面（`fromAssets`）では開けない**。1GiB 超のコンポーネント
- * は shard 分割されていて「1 コンポーネント = 1 ファイル」の前提が崩れ、越境参照は別リポの
- * (repo, commit SHA) からしか取れない — どちらも解けるのは取得層だけ。そこでローカル HTTP を
- * HF の URL 形で立て、全ての実資産の門を `fromPretrained` 経由で通す（下の「ローカル HTTP」節）。
- * ファイルを `Deno.open` で読むのはそのサーバの中だけで、パッケージ本体は Web 標準 API のみ
- * （fs を持ち込まない — 横断不変条件）。
+ * NOTE: 実配布形の門は基本ぜんぶ**取得層経由**（ローカル HTTP + `fromPretrained`）で通す。
+ * turbo は越境参照（別リポの (repo, commit SHA)）を含み、それを解けるのは取得層だけだから。
+ * shard 分割そのものは全量面（`fromAssets`）でも読めるので、その 1 本だけ base を
+ * `Deno.readFile` + `fromAssets` で通し、取得層経由と**同じ参照 sha256** を要求する
+ * （下の「全量面」節 — X2-101）。ファイルを `Deno.open` / `Deno.readFile` で読むのはテスト側
+ * だけで、パッケージ本体は Web 標準 API のみ（fs を持ち込まない — 横断不変条件）。
  */
 
 import { assertEquals, assertFalse, assertRejects } from "@std/assert";
@@ -116,11 +116,10 @@ const readManifest = (): Manifest => parseManifest(manifestText as string);
 
 // --- ローカル HTTP（HF 形の使い捨てサーバ）------------------------------------
 //
-// 実資産の門は**全て**この土台に載る。実配布形はどちらのリポも全量面（`Deno.readFile` +
-// `fromAssets`）では開けない: ①1GiB 超のコンポーネントが shard 分割されていて「1 コンポーネント
-// = 1 ファイル」の前提が崩れている ②turbo の共有コンポーネントは base リポへの**越境参照**
-// （ADR 0038 §7）で、turbo ミラーには現物が無い。どちらも解けるのは取得層だけなので、
-// 全量面ではなく取得層 + `fromPretrained` を通す。
+// 実資産の門はほぼ全てこの土台に載る。turbo の共有コンポーネントは base リポへの**越境参照**
+// （ADR 0038 §7）で turbo ミラーには現物が無く、宣言された (repo, commit SHA) から取れるのは
+// 取得層だけだからで、shard 分割された base も本番と同じ経路（graph-first + 逐次流し）で
+// 通したいため。全量面（`Deno.readFile` + `fromAssets`）は下の「全量面」節が 1 本だけ持つ。
 // 喋るのは hub が実際に叩く 2 経路（revision 解決 API・resolve URL）だけ。
 
 const REPO = "karume-test/anima";
@@ -391,14 +390,41 @@ const BASE_REFERENCE = {
   sha256: "071929c40e90628006eab593842080246140e771a82f8a35762507f4a12e9560",
 } as const;
 
+/** 組み上がった base の pipeline を {@link BASE_REFERENCE} のノブで 1 枚焼き、sha を突き合わせる。 */
+const assertBasePng = async (
+  label: string,
+  pipeline: AnimaPipeline,
+  expected: string,
+  options: { readonly sampler?: AnimaSamplerType } = {},
+): Promise<void> => {
+  const { resolution, steps, guidanceScale, negativePrompt } = BASE_REFERENCE;
+  const started = performance.now();
+  const image = await pipeline.generate({
+    prompt: PROMPT,
+    resolution,
+    steps,
+    guidanceScale,
+    negativePrompt,
+    seed: SEED,
+    ...(options.sampler === undefined ? {} : { sampler: options.sampler }),
+  });
+  const png = await encodePng(image.data, image.width, image.height);
+  const actual = await sha256Hex(png);
+  const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+  console.log(`[e2e] ${label}: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
+  if (actual !== expected) {
+    throw new Error(await mismatchReport(label, image, png, expected, actual));
+  }
+};
+
 /**
  * 素の base を {@link BASE_REFERENCE} のノブで 1 枚焼き、参照 sha256 と突き合わせる。
  *
- * MUST: **取得層経由**（ローカル HTTP + `fromPretrained`）で組む。この配布形の text_encoder と
- * transformer は 1GiB 超で shard 分割されていて、全量面（`fromAssets`）は「1 コンポーネント =
- * 1 ファイル」の前提なので開けない — shard 面を持つ取得層だけが読める（デモの `--source` と
- * 同型 — `examples/shared/local-dist-server.ts`）。分割はテンソル単位でビット同一なので、
- * 経路が変わっても参照 sha は 1 ビットも動かない。
+ * 経路は**取得層経由**（ローカル HTTP + `fromPretrained`）— この配布形の text_encoder と
+ * transformer は 1GiB 超で shard 分割されていて、越境参照と併せて解けるのは取得層だけ
+ * （デモの `--source` と同型 — `examples/shared/local-dist-server.ts`）。分割形は全量面
+ * （`fromAssets`）でも読めるが、そちらは全 shard がホスト RAM に同時に載る面で、門としては
+ * 下の 1 本（同じ参照 sha を要求する）で別に閉じる。
  */
 const assertBaseReferencePng = async (
   label: string,
@@ -406,7 +432,7 @@ const assertBaseReferencePng = async (
   options: { readonly sampler?: AnimaSamplerType } = {},
 ): Promise<void> => {
   const manifest = parseManifest(baseManifestText as string);
-  const { quant, resolution, steps, guidanceScale, negativePrompt } = BASE_REFERENCE;
+  const { quant } = BASE_REFERENCE;
   const server = serveAssets(servedOrigins(manifest, quant, BASE_ASSETS_DIR));
   try {
     // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
@@ -414,23 +440,7 @@ const assertBaseReferencePng = async (
       { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` },
       { quant, caches: new MemoryCacheStorage() },
     );
-    const started = performance.now();
-    const image = await pipeline.generate({
-      prompt: PROMPT,
-      resolution,
-      steps,
-      guidanceScale,
-      negativePrompt,
-      seed: SEED,
-      ...(options.sampler === undefined ? {} : { sampler: options.sampler }),
-    });
-    const png = await encodePng(image.data, image.width, image.height);
-    const actual = await sha256Hex(png);
-    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
-    console.log(`[e2e] ${label}: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
-    if (actual !== expected) {
-      throw new Error(await mismatchReport(label, image, png, expected, actual));
-    }
+    await assertBasePng(label, pipeline, expected, options);
   } finally {
     await server.shutdown();
   }
@@ -441,6 +451,60 @@ Deno.test({
     `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
   ignore: !GPU_AVAILABLE || baseManifestText === undefined,
   fn: () => assertBaseReferencePng("base-cfg", BASE_REFERENCE.sha256),
+});
+
+// --- 全量面（fromAssets）で分割配布形を読む -----------------------------------
+//
+// 「`fromPretrained` で読める配布形は `fromAssets` でも読める」（X2-101）の門。実配布形の
+// transformer は quant `i8` でも 2 shard に割れていて、`resolveFiles` は `transformer[0]` /
+// `transformer[1]` を返す — その Record をそのまま全量面へ渡し、**上の CFG の門と同じ参照
+// sha256** を要求する。同じバイトを別の面から流し込んでいるだけなので、1 ビットも動かないのが
+// 正しい（動いたら shard 列の順序かグラフ shard の扱いが壊れている）。
+
+/** ローカル配布形を全量読みする（`examples/shared/local-assets.ts` と同型の面）。 */
+const readLocalAssets = async (
+  dir: URL,
+  manifest: Manifest,
+  quant: string,
+): Promise<{ manifest: Manifest; assets: Record<string, Uint8Array<ArrayBuffer>> }> => {
+  const files = resolveFiles(manifest, { quant });
+  const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
+  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
+  for (const key of Object.keys(files)) {
+    const ref = files[key];
+    // 越境参照は (repo, commit SHA) からしか取れない — 全量面では解けないので fail loudly。
+    if (ref.repo !== undefined) {
+      throw new Error(`全量面では越境参照 '${ref.repo}' を解けない（取得キー ${key}）`);
+    }
+    const bytes = byPath.get(ref.path) ?? await Deno.readFile(new URL(ref.path, dir));
+    byPath.set(ref.path, bytes);
+    assets = { ...assets, [key]: bytes };
+  }
+  return { manifest, assets };
+};
+
+Deno.test({
+  name:
+    "e2e(実GPU): 分割配布形を fromAssets（全量面）で組んでも 素の base の参照 sha256 と一致する",
+  ignore: !GPU_AVAILABLE || baseManifestText === undefined,
+  fn: async () => {
+    const { quant } = BASE_REFERENCE;
+    const input = await readLocalAssets(
+      BASE_ASSETS_DIR,
+      parseManifest(baseManifestText as string),
+      quant,
+    );
+    // 分割形であること自体をこの門で確かめる — 1 shard の配布形へ戻った日には、黙って
+    // 「全量面の門」に化けるのではなく理由を出して落とす（門の意味が消える方が危ない）。
+    const shardKeys = Object.keys(input.assets).filter((key) => key.endsWith("]"));
+    if (shardKeys.length < 2) {
+      throw new Error(
+        `この配布形は shard 分割されていない（取得キー: ${Object.keys(input.assets).join(" / ")}）`,
+      );
+    }
+    await using pipeline = await AnimaPipeline.fromAssets(input, { quant });
+    await assertBasePng("base-cfg-fromAssets-shards", pipeline, BASE_REFERENCE.sha256);
+  },
 });
 
 /**

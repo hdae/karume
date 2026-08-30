@@ -9,9 +9,11 @@
  * - {@link loadLocalAssets}（全量読み）は **`examples/sbv2/dump.ts` 専用**。torch 参照突合の
  *   dump は分割対象外の小資産しか触らないので、この面のままでよい。
  *
- * MUST: 全量読みを分割資産へ広げない。1GiB 超のコンポーネントは shard 分割されていて、
- * shard は独立ヘッダの safetensors なので連結できない（`openModel` は単一コンテナ前提）。
- * デモが `fromPretrained` 越しになったのはこのため — 分割を読む経路は取得層の shard 面だけ。
+ * NOTE: 全量読みは shard 分割された配布形も読める（`resolveFiles` が返す `<役割>[i]` の
+ * キーをそのまま並べるだけ — 連結はしない）。`from*Assets` はその形の Record を受けて
+ * shard 逐次面へ流す（X2-101 — `packages/models/src/hub/components.ts`）。ただし**ホスト RAM に
+ * 全 shard が同時に載る**面であることは変わらないので、デモは従来どおり `fromPretrained`
+ * （取得層の shard 面 = 常に「今の 1 本」だけ）越しに回す。
  */
 
 import {
