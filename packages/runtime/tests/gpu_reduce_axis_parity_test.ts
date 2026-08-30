@@ -18,6 +18,9 @@
 // permute は全て対合」対策 — 軸並べ替えの取り違えが対合ケースだけでは空振りする）。
 // MUST: rows（= 出力要素数）が 65,535 の**両側**を踏む。行 reduce 側は行数がそのまま
 // workgroup 数になるので、上限超えは縮退経路（本番経路）になる。
+// MUST: `amax` / `amin` の **NaN 入りケース**を持つ（縮約長が 256 の両側で 1 本ずつ）。
+// ADR 0020 決定 1 の「実 GPU で実走して確かめる」水準は、軸変種についてはここにしか無い
+// （tests/gpu_ops_test.ts の NaN ケースは rank 2 の最終次元 = 行変種しか踏まない）。
 
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
@@ -57,7 +60,7 @@ const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
  * CPU 参照との突合の許容誤差。参照は JS の f64 で縮約するので f32 の 2 段縮約とは丸めが違い、
  * ビット一致は原理的に成立しない（`amax` / `amin` / bool の `sum` は丸めが無いので実測 0）。
  *
- * 実測（2026-08-04・`atol=rtol=0` の素の突合、下の {@link CASES} 全 9 本）:
+ * 実測（2026-08-04・`atol=rtol=0` の素の突合、下の {@link CASES} の NaN 無し 9 本）:
  * `[300,7] axis=0` maxAbs **7.15e-7** / maxRel **2.37e-6**（最悪）、
  * `[1,96,255,257]` 5.96e-7 / 1.67e-6、`[1,384,128,128]` 5.36e-7 / 7.01e-7。
  * atol 5e-6 は最悪の約 7.0 倍・rtol 2e-5 は約 8.4 倍。**実装バグの誤差は O(1)** なので
@@ -70,6 +73,29 @@ const SIGNED = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
 /** bool 入力（真の個数を数える形 — 0/1 が偏らないように 3 要素周期にしない）。 */
 const BOOLEAN = (i: number): number => ((i * 5) % 7 < 3 ? 1 : 0);
 
+/**
+ * 縮約軸に沿って NaN を散らす入力生成器（`amax` / `amin` の NaN 伝播 — ADR 0020 決定 1）。
+ *
+ * 出力 1 要素ぶんの縮約列ごとに NaN の位置を **先頭 / 中間 / 末尾 / 無し**の 4 通りへ
+ * 振り分ける。MUST: **NaN を含まない対照列**を必ず混ぜる — 位置の一致だけを見ると
+ * 「常に NaN を返す」実装が落ちない（tests/gpu_ops_test.ts の `NAN_REDUCE_ROWS` と同じ理由）。
+ */
+const nanAlongAxis = (
+  shape: readonly number[],
+  axis: number,
+): (i: number) => number => {
+  const axisLen = shape[axis];
+  const inner = numel(shape.slice(axis + 1));
+  /** 縮約列ごとの NaN の位置（-1 = NaN 無しの対照）。 */
+  const positions = [0, axisLen >> 1, axisLen - 1, -1];
+  return (i: number): number => {
+    // 入力添字 i = (outer·axis_len + c)·inner + j を分解する
+    const c = Math.floor(i / inner) % axisLen;
+    const out = Math.floor(i / (axisLen * inner)) * inner + (i % inner);
+    return c === positions[out % positions.length] ? Number.NaN : SIGNED(i);
+  };
+};
+
 type ParityCase = {
   readonly name: string;
   readonly shape: readonly number[];
@@ -77,6 +103,8 @@ type ParityCase = {
   readonly axis: number;
   readonly op: ReduceOpName;
   readonly dtype: IrDtype;
+  /** NaN 入り入力（{@link nanAlongAxis}）を使うか。既定は NaN を含まない決定的な列。 */
+  readonly nan?: true;
 };
 
 const readbackBits = async (
@@ -120,11 +148,12 @@ const runBoth = async (
   const cache = new PipelineCache(gpu.device);
   const arena = new RunArena(gpu.device, () => scheduler.flush());
   try {
-    const x = fill(
-      shape,
-      dtype === "bool" ? BOOLEAN : SIGNED,
-      dtype === "bool" ? "bool" : "f32",
-    );
+    const generator = testCase.nan === true
+      ? nanAlongAxis(shape, axis)
+      : dtype === "bool"
+      ? BOOLEAN
+      : SIGNED;
+    const x = fill(shape, generator, dtype === "bool" ? "bool" : "f32");
     const upload = (data: ArrayBufferView<ArrayBuffer>): GPUBuffer => {
       const buffer = arena.allocHostWritten(Math.max(4, data.byteLength), STORAGE_IN);
       gpu.device.queue.writeBuffer(buffer, 0, data);
@@ -317,6 +346,45 @@ const CASES: readonly ParityCase[] = [
     dtype: "f32",
   },
   {
+    // **NaN 伝播の実 GPU の門（ADR 0020 決定 1・4）**。生成 WGSL の文字列の門は軸変種にも
+    // 掛かっているが、ADR 0020 が「文字列では足りない」と名指しした畳み込みの故障
+    // （バックエンドが `nan_max` を素の `max` へ畳む）は実走でしか見えない。縮約長 9 < 256 =
+    // slot ごとの走査は 1 周（葉が 1 要素）。
+    name: "amax NaN [5,9,11] axis=1（縮約長 9 < 256 / 走査 1 周）",
+    shape: [5, 9, 11],
+    axis: 1,
+    op: "amax",
+    dtype: "f32",
+    nan: true,
+  },
+  {
+    // amin も同じ骨格（NaN を飲むと identity の +F32_MAX に化ける）
+    name: "amin NaN [5,9,11] axis=1（縮約長 9 < 256 / 走査 1 周）",
+    shape: [5, 9, 11],
+    axis: 1,
+    op: "amin",
+    dtype: "f32",
+    nan: true,
+  },
+  {
+    // 縮約長 300 > 256 = slot ごとの走査が 2 周し、carry-stack が実際に段を積む形。
+    // 走査ループと畳み込みループの**両方**を NaN が通ることをここで見る。
+    name: "amax NaN [300,7] axis=0（縮約長 300 > 256 / 走査 2 周）",
+    shape: [300, 7],
+    axis: 0,
+    op: "amax",
+    dtype: "f32",
+    nan: true,
+  },
+  {
+    name: "amin NaN [300,7] axis=0（縮約長 300 > 256 / 走査 2 周）",
+    shape: [300, 7],
+    axis: 0,
+    op: "amin",
+    dtype: "f32",
+    nan: true,
+  },
+  {
     // bool → i32（真の個数）。累算器の型と `load` の真偽化が軸変種にも入っていること。
     name: "bool sum [3,13,5] axis=1（真の個数 → i32）",
     shape: [3, 13, 5],
@@ -359,11 +427,36 @@ Deno.test({
         const values = testCase.dtype === "bool"
           ? new Int32Array(viaAxis.buffer, viaAxis.byteOffset, viaAxis.length)
           : new Float32Array(viaAxis.buffer, viaAxis.byteOffset, viaAxis.length);
-        const report = allclose(values, reference, CPU_REFERENCE_TOLERANCE);
-        assert(
-          report.pass,
-          `${testCase.name}: CPU 参照と食い違う（maxAbs ${report.maxAbsError} @${report.worstIndex} / 破り ${report.failCount}）`,
-        );
+        if (testCase.nan === true) {
+          // MUST: allclose は NaN をどちらの側でも不合格にするので NaN ケースには使えない —
+          // **isNaN パターンの一致 + 非 NaN 要素の厳密一致**で突き合わせる
+          // （tests/gpu_ops_test.ts の行変種の NaN 判定と同じ形）。
+          const actualValues = [...values];
+          const expectedValues = [...reference];
+          const actualNan = actualValues.map((value) => Number.isNaN(value));
+          const expectedNan = expectedValues.map((value) => Number.isNaN(value));
+          assert(expectedNan.includes(true), `${testCase.name}: 参照に NaN が 1 つも無い`);
+          // MUST: 対照要素を持つこと（「常に NaN を返す」実装は位置の一致では落ちない）
+          assert(expectedNan.includes(false), `${testCase.name}: 対照要素が無い`);
+          assertEquals(actualNan, expectedNan, `${testCase.name}: NaN の位置`);
+          // 非 NaN 側は `amax` / `amin` なので丸め差が入らない（NaN 同士は比較が成立しない
+          // ので該当要素だけ 0 に潰してから見る）
+          const finiteOnly = (
+            source: readonly number[],
+            isNan: readonly boolean[],
+          ): readonly number[] => source.map((value, index) => (isNan[index] ? 0 : value));
+          assertEquals(
+            finiteOnly(actualValues, actualNan),
+            finiteOnly(expectedValues, expectedNan),
+            `${testCase.name}: 非 NaN の値`,
+          );
+        } else {
+          const report = allclose(values, reference, CPU_REFERENCE_TOLERANCE);
+          assert(
+            report.pass,
+            `${testCase.name}: CPU 参照と食い違う（maxAbs ${report.maxAbsError} @${report.worstIndex} / 破り ${report.failCount}）`,
+          );
+        }
         // 巡回長 3 以上（逆置換が自分自身でない）を 1 本以上踏んでいること
         const inverse = permuteDims.map((_, d) => permuteDims.indexOf(d));
         if (inverse.some((value, index) => value !== permuteDims[index])) sawNonInvolution = true;
