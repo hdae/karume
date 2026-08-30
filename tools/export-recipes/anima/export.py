@@ -114,6 +114,7 @@ from anima.distribution import (
     CALIB_SHIPPABLE_DEVICE,
     LORA_PROVENANCE_FILE,
 )
+from karume.artifacts import staged_publication
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -944,11 +945,13 @@ def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path)
     「このモデルにも焼いた」という事実でない主張になる）。配布形には入らない —
     `anima/distribution.py` の配置表が許可した役割だけが出力へ渡る。
 
-    MUST: 焼いていない側で**古い記録を消す**（全域関数）。`emit_target` は系列ディレクトリを
-    掃除しないので、`--lora` 付きで採った系列へ `--lora` 無しで採り直すと、重みだけ素に戻って
-    記録が前回のまま生き残る。`assert_lora_provenance` は「記録が在る × sha 一致」しか見ない
-    ので、その状態は「取り下げ」を素通しして配布 README に嘘の帰属を印字させる。記録の存在が
-    「今の `model.safetensors` に焼いた」と同値であることが、この機構の唯一の拠り所。
+    MUST: 焼いていない側で**古い記録を消す**（全域関数）。`--lora` 付きで採った系列へ `--lora`
+    無しで採り直したとき、重みだけ素に戻って記録が前回のまま生き残ると、
+    `assert_lora_provenance` は「記録が在る × sha 一致」しか見ないので「取り下げ」を素通しして
+    配布 README に嘘の帰属を印字させる。記録の存在が「今の `model.safetensors` に焼いた」と
+    同値であることが、この機構の唯一の拠り所。NOTE: `emit_target` が作業席ごと据え替えるように
+    なった今、CLI 経路では席が毎回まっさらなのでここは実質空振りする — それでも全域関数のまま
+    残すのは、直接呼ぶ書き手（テスト・将来の別入口）にとって不変条件が変わらないため。
     """
     if args.lora is None or target not in LORA_PREFIXES:
         (out_dir / LORA_PROVENANCE_FILE).unlink(missing_ok=True)
@@ -969,9 +972,9 @@ def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path
     `assert_calib_provenance` が組み立て時にこの記録と突き合わせ、`--no-calib` の生成物が配布へ
     紛れるのを止める。
 
-    MUST: i4 以外では**古い記録を消す**（全域関数 — `_write_lora_provenance` と同じ理由）。
-    `emit_target` は系列ディレクトリを掃除しないので、i4 で採った系列を別 dtype で採り直すと
-    記録だけが前回のまま生き残り、「校正付き」という事実でない主張が残る。
+    MUST: i4 以外では**古い記録を消す**（全域関数 — `_write_lora_provenance` と同じ理由・
+    据え替えで空振りする点も同じ）。i4 で採った系列を別 dtype で採り直したとき記録だけが前回の
+    まま生き残ると、「校正付き」という事実でない主張が残る。
     """
     if args.dtype != "i4" or target != TARGET_TRANSFORMER:
         (out_dir / CALIB_PROVENANCE_FILE).unlink(missing_ok=True)
@@ -1066,33 +1069,44 @@ def _write_io(component: Component, graph: IrGraph, out_dir: Path) -> list[str]:
 
 
 def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[str, Any]:
-    """1 ターゲットの IR コンテナと golden io を書き、要約を返す。"""
+    """1 ターゲットの IR コンテナと golden io を書き、要約を返す。
+
+    MUST: 生成物は作業席へ書き、**全ての門**（出力本数・境界正規化）を通してから据える。門より
+    前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れた
+    コンポーネントから採るので互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の
+    綴りは {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
+    {@link karume.artifacts.staged_publication}）。据える単位が**ターゲットのディレクトリ丸ごと**
+    なので、容器と出所記録（LoRA / 校正）が食い違った組も作れない。
+    """
     started = time.perf_counter()
     component = BUILDERS[target](args, False)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    graph = export_to_file(
-        component.module,
-        component.example,
-        out_dir / MODEL_FILE,
-        dynamic_shapes=component.dynamic_shapes,
-        symbol_names=component.symbol_names,
-        weight_dtype=BASE_WEIGHT_DTYPES[args.dtype],
-        weight_scales=component.weight_scales,
-        weight_dtype_overrides=component.weight_dtype_overrides,
-        preserved=TARGET_PRESERVED[target],
-    )
-    written = _write_io(component, graph, out_dir)
-    if component.host_tables:
-        # ホスト素表は IR コンテナの外に置く（グラフが使わないテンソルを model.safetensors へ
-        # 混ぜると、initializer とテンソルキーの 1:1 検査〈verify_model〉が壊れる）。
-        save_file(dict(component.host_tables), str(out_dir / ROPE_BASE_FILE))
-        written.append(ROPE_BASE_FILE)
-    provenance = _write_lora_provenance(args, target, out_dir)
-    if provenance is not None:
-        written.append(provenance)
-    calib_record = _write_calib_provenance(args, target, out_dir)
-    if calib_record is not None:
-        written.append(calib_record)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    with staged_publication(out_dir) as staged:
+        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        staged.mkdir()
+        graph = export_to_file(
+            component.module,
+            component.example,
+            staged / MODEL_FILE,
+            dynamic_shapes=component.dynamic_shapes,
+            symbol_names=component.symbol_names,
+            weight_dtype=BASE_WEIGHT_DTYPES[args.dtype],
+            weight_scales=component.weight_scales,
+            weight_dtype_overrides=component.weight_dtype_overrides,
+            preserved=TARGET_PRESERVED[target],
+        )
+        written = _write_io(component, graph, staged)
+        if component.host_tables:
+            # ホスト素表は IR コンテナの外に置く（グラフが使わないテンソルを model.safetensors へ
+            # 混ぜると、initializer とテンソルキーの 1:1 検査〈verify_model〉が壊れる）。
+            save_file(dict(component.host_tables), str(staged / ROPE_BASE_FILE))
+            written.append(ROPE_BASE_FILE)
+        provenance = _write_lora_provenance(args, target, staged)
+        if provenance is not None:
+            written.append(provenance)
+        calib_record = _write_calib_provenance(args, target, staged)
+        if calib_record is not None:
+            written.append(calib_record)
     breakdown = storage_breakdown(graph)
     return {
         "target": target,

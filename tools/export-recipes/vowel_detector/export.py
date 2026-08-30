@@ -109,6 +109,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from karume.artifacts import staged_publication
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
@@ -459,30 +460,42 @@ def assert_checkpoint_bytes(path: Path, state_dict: Mapping[str, torch.Tensor]) 
 
 
 def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
-    """IR コンテナと golden io を書き、要約を返す。"""
+    """IR コンテナと golden io を書き、要約を返す。
+
+    MUST: 生成物は作業席へ書き、**全ての門**（入力の並び・ckpt バイト一致・sanity）を通してから
+    据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は
+    同じ壊れたモジュールから採るので互いに整合し、TS 側の突合は**緑になる**（「いつ公開して
+    よいか」の綴りは {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の
+    原語 {@link karume.artifacts.staged_publication}）。
+    """
     assert_length(length)
     state_dict = load_checkpoint(ckpt)
     module = load_module(state_dict)
     cases = build_cases(length)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
 
     _, example = cases[0]
     started = time.monotonic()
-    graph = export_to_file(
-        module,
-        (example,),
-        out_dir / MODEL_FILE,
-        # MUST: 記号は出力の 20ms 格子側に置く（`2*Dim("T")` — モジュール docstring の
-        # 「長さ軸」）。素の `Dim("T")` だと conv の出力が床除算になり次元言語に載らない。
-        dynamic_shapes={INPUT_NAME: {1: 2 * Dim("T", min=SYM_MIN, max=SYM_MAX)}},
-        symbol_names=("T",),
-    )
-    elapsed = time.monotonic() - started
-    declared = tuple(item.name for item in graph.inputs)
-    if declared != (INPUT_NAME,):
-        raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
-    matched = assert_checkpoint_bytes(out_dir / MODEL_FILE, state_dict)
-    written, logits = _write_io(module, graph, cases, out_dir)
+    with staged_publication(out_dir) as staged:
+        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        staged.mkdir()
+        graph = export_to_file(
+            module,
+            (example,),
+            staged / MODEL_FILE,
+            # MUST: 記号は出力の 20ms 格子側に置く（`2*Dim("T")` — モジュール docstring の
+            # 「長さ軸」）。素の `Dim("T")` だと conv の出力が床除算になり次元言語に載らない。
+            dynamic_shapes={INPUT_NAME: {1: 2 * Dim("T", min=SYM_MIN, max=SYM_MAX)}},
+            symbol_names=("T",),
+        )
+        elapsed = time.monotonic() - started
+        declared = tuple(item.name for item in graph.inputs)
+        if declared != (INPUT_NAME,):
+            raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
+        matched = assert_checkpoint_bytes(staged / MODEL_FILE, state_dict)
+        written, logits = _write_io(module, graph, cases, staged)
+        # MUST: 公開より前に評価する（この系列で唯一の非恒真な検査 — 落ちたら席ごと消える）。
+        sanity = _sanity(logits)
     return {
         "dir": str(out_dir),
         "length": length,
@@ -499,7 +512,7 @@ def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
         "output_shape": list(logits[cases[0][0]].shape),
         "symbol_range": [SYM_MIN, SYM_MAX],
         "checkpoint_tensors_byte_identical": matched,
-        "sanity": _sanity(logits),
+        "sanity": sanity,
     }
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import math
 import re
 import subprocess
@@ -457,6 +458,65 @@ class TestSymMaxPerTarget:
             export_sbv2.main()
 
         assert raised.value.code == 2
+
+
+class TestStagedTarget:
+    """作業席の規律（X2-104）と、記号次元の出所記録（CG4-3）— どちらも実重み不要。
+
+    守るのは「門より前に final へ置かない」1 つ。落ちた実走が final に資産を残すと、io golden は
+    同じ壊れたモジュールから採られているので互いに整合し、TS 側の突合は**緑になる**。
+    """
+
+    def test_it_publishes_the_seat_and_leaves_the_provenance_record(self, tmp_path: Path):
+        out_dir = tmp_path / "series" / export_sbv2.TARGET_VOICE
+
+        with export_sbv2._staged_target(
+            export_sbv2.TARGET_VOICE, out_dir, export_sbv2.FLOW_SYM_MAX
+        ) as staged:
+            assert staged != out_dir
+            (staged / export_sbv2.MODEL_FILE).write_bytes(b"container")
+
+        assert (out_dir / export_sbv2.MODEL_FILE).read_bytes() == b"container"
+        record = json.loads(
+            (out_dir / export_sbv2.EXPORT_PROVENANCE_FILE).read_text(encoding="utf-8")
+        )
+        assert record == {
+            "target": export_sbv2.TARGET_VOICE,
+            "sym_max": export_sbv2.FLOW_SYM_MAX,
+        }
+        # 作業席も退避席も残らない（据え替えの後片付けは core の原語の担当）。
+        assert sorted(path.name for path in out_dir.parent.iterdir()) == [out_dir.name]
+
+    def test_a_failing_gate_leaves_the_previous_series_untouched(self, tmp_path: Path):
+        """門が落ちた実走は final を 1 バイトも動かさない（前回の資産がそのまま残る）。"""
+        out_dir = tmp_path / "series" / export_sbv2.TARGET_FRONT
+        out_dir.mkdir(parents=True)
+        (out_dir / export_sbv2.MODEL_FILE).write_bytes(b"previous")
+
+        with (
+            pytest.raises(AssertionError, match="sanity"),
+            export_sbv2._staged_target(
+                export_sbv2.TARGET_FRONT, out_dir, export_sbv2.SYM_MAX
+            ) as staged,
+        ):
+            (staged / export_sbv2.MODEL_FILE).write_bytes(b"broken")
+            raise AssertionError("sanity が落ちた")
+
+        assert (out_dir / export_sbv2.MODEL_FILE).read_bytes() == b"previous"
+        assert not (out_dir / export_sbv2.EXPORT_PROVENANCE_FILE).exists()
+        assert sorted(path.name for path in out_dir.parent.iterdir()) == [out_dir.name]
+
+    def test_the_record_carries_a_non_default_sym_max(self, tmp_path: Path):
+        """`--sym-max` の逸脱は記録に残る（配布側の突合はこの値を見る — CG4-3）。"""
+        out_dir = tmp_path / "series" / export_sbv2.TARGET_VOICE
+
+        with export_sbv2._staged_target(export_sbv2.TARGET_VOICE, out_dir, 1024):
+            pass
+
+        record = json.loads(
+            (out_dir / export_sbv2.EXPORT_PROVENANCE_FILE).read_text(encoding="utf-8")
+        )
+        assert record["sym_max"] == 1024
 
 
 class _TinyDp(nn.Module):

@@ -99,6 +99,7 @@ from safetensors.torch import save_file
 from torch import nn
 
 from _shared.paths import INPUTS_ROOT, OUTPUTS_ROOT, SERIES_ROOT
+from karume.artifacts import staged_publication
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
@@ -439,6 +440,12 @@ def export_series(
 
     `real_images` を立てると合成 4 ケースに実画像 4 ケースを**足す**（置き換えない —
     モジュール docstring の「golden の 2 群」）。
+
+    MUST: 生成物は作業席へ書き、**全ての門**（入力の並び・sanity）を通してから据える。門より前に
+    final へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れたラッパから
+    採るので互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の綴りは
+    {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
+    {@link karume.artifacts.staged_publication}）。
     """
     wrapper = load_wrapper(model_dir)
     synthetic = build_cases(wrapper.model.config)
@@ -447,15 +454,20 @@ def export_series(
     real = build_real_cases(model_dir, wrapper.model.config, demo_root) if real_images else ()
     cases = [*synthetic, *((name, pixel_values) for name, pixel_values, _md in real)]
     metadata = {name: md for name, _pixel_values, md in real}
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
 
     _, example = synthetic[0]
-    # 動的軸は無い（解像度もパッチ数も固定 — モジュール docstring）。
-    graph = export_to_file(wrapper, (example,), out_dir / MODEL_FILE, symbol_names=())
-    declared = tuple(item.name for item in graph.inputs)
-    if declared != (INPUT_NAME,):
-        raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
-    written, pooled = _write_io(wrapper, graph, cases, out_dir, metadata)
+    with staged_publication(out_dir) as staged:
+        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        staged.mkdir()
+        # 動的軸は無い（解像度もパッチ数も固定 — モジュール docstring）。
+        graph = export_to_file(wrapper, (example,), staged / MODEL_FILE, symbol_names=())
+        declared = tuple(item.name for item in graph.inputs)
+        if declared != (INPUT_NAME,):
+            raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
+        written, pooled = _write_io(wrapper, graph, cases, staged, metadata)
+        # MUST: 公開より前に評価する（この系列で唯一の非恒真な検査 — 落ちたら席ごと消える）。
+        sanity = _sanity(pooled)
     return {
         "dir": str(out_dir),
         "nodes": len(graph.nodes),
@@ -467,7 +479,7 @@ def export_series(
         "io": written,
         "input_shape": list(example.shape),
         "real_images": {name: md[SOURCE_IMAGE_KEY] for name, md in metadata.items()},
-        "sanity": _sanity(pooled),
+        "sanity": sanity,
     }
 
 

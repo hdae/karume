@@ -61,6 +61,7 @@ from torch.export import Dim
 
 from _shared.paths import SERIES_ROOT
 from karume.act_quant import attach_act_quant, detach_act_quant
+from karume.artifacts import staged_publication
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
@@ -537,6 +538,12 @@ def export_variant(
     `calib_texts` は **i4 系列だけ**が読む校正コーパス（既定 = 全 48 文）。`None` にすると
     校正なしの素の RTN i4 に戻る — テスト用の opt-out で、CLI からは届かない
     （`--dtype i4` は必ず校正付き）。
+
+    MUST: 生成物は作業席へ書き、**全ての門**（入力の並び）を通してから据える。門より前に final
+    へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れたラッパから採るので
+    互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の綴りは
+    {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
+    {@link karume.artifacts.staged_publication}）。
     """
     from transformers import AutoTokenizer
 
@@ -560,25 +567,29 @@ def export_variant(
     # ため、max は Tmax 畳み込みの評価点そのもの（ADR 0010 — 別ノブで二重管理しない）。
     _, example_args = cases[-1]
     seq = Dim("T", min=2, max=sym_max)
-    graph = export_to_file(
-        wrapper,
-        tuple(example_args[key] for key in INPUT_ORDER),
-        out_dir / MODEL_FILE,
-        # 添字表は `[T, T]` — 両軸が同じ記号（正方であることを export の段で縛る）。
-        dynamic_shapes=({1: seq}, {1: seq}, {0: seq, 1: seq}, {0: seq, 1: seq}),
-        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
-        weight_scales=scales,
-        weight_dtype_overrides=dtype_overrides,
-    )
-    declared = tuple(item.name for item in graph.inputs)
-    if declared != INPUT_ORDER:
-        raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {INPUT_ORDER} と違う")
-    # MUST: 通常の golden io は**フックなし**で採る（`_write_mirror_io` の docstring）。
-    written = _write_io(wrapper, graph, cases, out_dir)
-    mirror: list[str] = []
-    attached = 0
-    if act_quant:
-        mirror, attached = _write_mirror_io(wrapper, graph, cases, out_dir)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    with staged_publication(out_dir) as staged:
+        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        staged.mkdir()
+        graph = export_to_file(
+            wrapper,
+            tuple(example_args[key] for key in INPUT_ORDER),
+            staged / MODEL_FILE,
+            # 添字表は `[T, T]` — 両軸が同じ記号（正方であることを export の段で縛る）。
+            dynamic_shapes=({1: seq}, {1: seq}, {0: seq, 1: seq}, {0: seq, 1: seq}),
+            weight_dtype=BASE_WEIGHT_DTYPES[dtype],
+            weight_scales=scales,
+            weight_dtype_overrides=dtype_overrides,
+        )
+        declared = tuple(item.name for item in graph.inputs)
+        if declared != INPUT_ORDER:
+            raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {INPUT_ORDER} と違う")
+        # MUST: 通常の golden io は**フックなし**で採る（`_write_mirror_io` の docstring）。
+        written = _write_io(wrapper, graph, cases, staged)
+        mirror: list[str] = []
+        attached = 0
+        if act_quant:
+            mirror, attached = _write_mirror_io(wrapper, graph, cases, staged)
 
     model_bytes = sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE))
     return {

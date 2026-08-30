@@ -69,6 +69,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
@@ -381,6 +382,12 @@ def export_series(
     `batch` は torch.export の**静的次元**（既定 1 = 従来どおり全 5 ケース）。T は
     従来どおり動的次元のまま。`batch > 1` のときは `query-en` を `batch` 行に複製した
     単一ケースだけを golden にする（linear の occupancy 不足仮説の検証用資産）。
+
+    MUST: 生成物は作業席へ書き、**全ての門**（sanity）を通してから据える。門より前に final へ
+    置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れたラッパから採るので
+    互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の綴りは
+    {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
+    {@link karume.artifacts.staged_publication}）。
     """
     wrapper = load_wrapper(model_dir)
     cases = (
@@ -388,21 +395,27 @@ def export_series(
         if batch == 1
         else (build_batch_case(model_dir, sym_max, batch),)
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
 
     # 例示入力は最長ケース（T が上限に近いほど 0/1 特殊化から遠い）。min=2 は 0/1 特殊化を
     # 避けるため、max は Tmax 畳み込みの評価点そのもの（ADR 0010 — 別ノブで二重管理しない）。
     _, example_ids, example_mask = max(cases, key=lambda case: case[1].shape[1])
     seq = Dim("T", min=2, max=sym_max)
-    graph = export_to_file(
-        wrapper,
-        (example_ids, example_mask),
-        out_dir / MODEL_FILE,
-        dynamic_shapes=({1: seq}, {1: seq}),
-        preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-    )
-    written, embeddings = _write_io(wrapper, graph, cases, out_dir)
-    sanity = _sanity(embeddings) if batch == 1 else _sanity_batch(next(iter(embeddings.values())))
+    with staged_publication(out_dir) as staged:
+        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        staged.mkdir()
+        graph = export_to_file(
+            wrapper,
+            (example_ids, example_mask),
+            staged / MODEL_FILE,
+            dynamic_shapes=({1: seq}, {1: seq}),
+            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+        )
+        written, embeddings = _write_io(wrapper, graph, cases, staged)
+        # MUST: 公開より前に評価する（この系列で唯一の非恒真な検査 — 落ちたら席ごと消える）。
+        sanity = (
+            _sanity(embeddings) if batch == 1 else _sanity_batch(next(iter(embeddings.values())))
+        )
     return {
         "dir": str(out_dir),
         "nodes": len(graph.nodes),

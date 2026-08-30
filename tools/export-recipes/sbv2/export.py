@@ -73,7 +73,8 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +85,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from karume.artifacts import staged_publication
 from karume.convert import normalize_boundary_tensor
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
@@ -98,6 +100,11 @@ from karume.quantize import (
     round_weights_to_f16,
 )
 from karume.shards import resolve_shards
+
+# 出所記録のファイル名は**読み手側**（配布の組み立て）が持つ — 綴りを 2 箇所に置くと、
+# 片方だけ動いた日に「書いたのに読まれない記録」が黙って生える（anima の
+# `CALIB_PROVENANCE_FILE` と同じ向き）。
+from sbv2.distribution import EXPORT_PROVENANCE_FILE
 
 from . import patch
 
@@ -777,6 +784,49 @@ def _fake_quant(
     return {**i8_scales, **int4.scales}, dict.fromkeys(int4.scales, "i4")
 
 
+@contextmanager
+def _staged_target(target: str, out_dir: Path, sym_max: int) -> Iterator[Path]:
+    """ターゲット 1 本ぶんの作業席を渡し、門を全部通ってから `out_dir` へ据える。
+
+    MUST: 生成物は作業席へ書き、**全ての門**（出力本数・境界正規化）を通してから据える。門より
+    前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れた
+    モジュールから採るので互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の
+    綴りは {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
+    {@link karume.artifacts.staged_publication}）。
+
+    出所記録（{@link _write_export_provenance}）は席を抜ける直前に同じ席へ書く — 据え替えが
+    1 回なので、新しい容器と古い記録という組は作れない。
+    """
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    with staged_publication(out_dir) as staged:
+        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        staged.mkdir()
+        yield staged
+        _write_export_provenance(target, sym_max, staged)
+
+
+def _write_export_provenance(target: str, sym_max: int, out_dir: Path) -> None:
+    """このターゲットを**どの記号次元の上限で**焼いたかを系列へ書き残す。
+
+    `--sym-max` は単一ターゲット限定で任意の値を通す（研究用途 — {@link TARGET_SYM_MAX}）。
+    その値は `Dim` の max としてそのまま焼き込み定数の静的次元になるので、既定から外して
+    書き出した系列は「グラフの受理する上限」が既定と違う。ところが配布側の
+    `pipelineConfig.maxTokens` / `maxFrames` は定数で焼かれる（`sbv2/distribution.py`）ため、
+    ずれても**export は緑・配布も緑**で、消費側で初めて `sym_prefix_slice` の Tmax 超過に
+    当たる。したがって書き出した側が事実を書き残し、組み立て時に
+    {@link sbv2.distribution.assert_sym_provenance} が突き合わせる
+    （`--lora` / `calib_provenance.json` と同じ「別々の台本が持つ同じ事実は組み立て時に必ず
+    突き合わせる」規律）。
+
+    MUST: 書くのは**作業席の中**（`staged_publication` の `with` の内側）— 据え替えが 1 回に
+    なるので、新しい容器と古い記録という組が作れない。
+    """
+    record = {"target": target, "sym_max": sym_max}
+    (out_dir / EXPORT_PROVENANCE_FILE).write_text(
+        json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
 def _summary(
     target: str,
     out_dir: Path,
@@ -822,7 +872,11 @@ def export_dp(
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
     dtype: str = "f32",
 ) -> dict[str, Any]:
-    """dp の IR コンテナと golden io を書き、要約を返す。"""
+    """dp の IR コンテナと golden io を書き、要約を返す。
+
+    MUST: 生成物は作業席へ書き、全ての門（出力本数・境界正規化）を通してから据える
+    （{@link _staged_target} が理由を綴る）。
+    """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
     module = DurationPredictorGraph(net_g.dp)
@@ -835,18 +889,18 @@ def export_dp(
     # max は宣言そのもの（ADR 0010 — 畳み込みの評価点は range_constraints から取る）。
     example = dict(built[-1][1])
     phonemes = Dim("P", min=2, max=sym_max)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    graph = export_to_file(
-        module,
-        (example["h"], example["x_mask"], example["g"]),
-        out_dir / MODEL_FILE,
-        dynamic_shapes=({2: phonemes}, {2: phonemes}, {}),
-        symbol_names=("P",),
-        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
-        weight_scales=scales,
-        weight_dtype_overrides=dtype_overrides,
-    )
-    written = _write_io(module, graph, built, out_dir)
+    with _staged_target(TARGET_DP, out_dir, sym_max) as staged:
+        graph = export_to_file(
+            module,
+            (example["h"], example["x_mask"], example["g"]),
+            staged / MODEL_FILE,
+            dynamic_shapes=({2: phonemes}, {2: phonemes}, {}),
+            symbol_names=("P",),
+            weight_dtype=BASE_WEIGHT_DTYPES[dtype],
+            weight_scales=scales,
+            weight_dtype_overrides=dtype_overrides,
+        )
+        written = _write_io(module, graph, built, staged)
     return _summary(
         TARGET_DP,
         out_dir,
@@ -873,6 +927,8 @@ def export_front(
     パッチ層をここで当てる — golden は**パッチ適用後**の eager 出力（= IR が計算すべき数の
     正）で、パッチ前の参照実装との差は `--verify` が別プロセスで実測する二層構造
     （ADR 0013）。
+
+    MUST: 生成物は作業席へ書き、全ての門を通してから据える（{@link _staged_target}）。
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
@@ -896,18 +952,18 @@ def export_front(
         {},
         {2: phonemes},
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    graph = export_to_file(
-        module,
-        tuple(example[declared] for declared in FRONT_INPUT_ORDER),
-        out_dir / MODEL_FILE,
-        dynamic_shapes=dynamic_shapes,
-        symbol_names=("P",),
-        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
-        weight_scales=scales,
-        weight_dtype_overrides=dtype_overrides,
-    )
-    written = _write_io(module, graph, built, out_dir)
+    with _staged_target(TARGET_FRONT, out_dir, sym_max) as staged:
+        graph = export_to_file(
+            module,
+            tuple(example[declared] for declared in FRONT_INPUT_ORDER),
+            staged / MODEL_FILE,
+            dynamic_shapes=dynamic_shapes,
+            symbol_names=("P",),
+            weight_dtype=BASE_WEIGHT_DTYPES[dtype],
+            weight_scales=scales,
+            weight_dtype_overrides=dtype_overrides,
+        )
+        written = _write_io(module, graph, built, staged)
     return _summary(
         TARGET_FRONT,
         out_dir,
@@ -953,6 +1009,8 @@ def export_flow(
 
     相対位置注意の `(T,T)` 表は**グラフ入力**（`idx_k` / `valid`）。front の焼き込み方式と
     違うのは sym_max が桁違いだから（4096 で O(T²) = 134MB — ADR 0013）。
+
+    MUST: 生成物は作業席へ書き、全ての門を通してから据える（{@link _staged_target}）。
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
@@ -971,18 +1029,18 @@ def export_flow(
         {0: frames, 1: frames},
         {0: frames, 1: frames},
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    graph = export_to_file(
-        module,
-        tuple(example[declared] for declared in FLOW_INPUT_ORDER),
-        out_dir / MODEL_FILE,
-        dynamic_shapes=dynamic_shapes,
-        symbol_names=("T",),
-        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
-        weight_scales=scales,
-        weight_dtype_overrides=dtype_overrides,
-    )
-    written = _write_io(module, graph, built, out_dir)
+    with _staged_target(TARGET_FLOW, out_dir, sym_max) as staged:
+        graph = export_to_file(
+            module,
+            tuple(example[declared] for declared in FLOW_INPUT_ORDER),
+            staged / MODEL_FILE,
+            dynamic_shapes=dynamic_shapes,
+            symbol_names=("T",),
+            weight_dtype=BASE_WEIGHT_DTYPES[dtype],
+            weight_scales=scales,
+            weight_dtype_overrides=dtype_overrides,
+        )
+        written = _write_io(module, graph, built, staged)
     return _summary(
         TARGET_FLOW,
         out_dir,
@@ -1008,6 +1066,8 @@ def export_dec(
 
     パッチ層は要らない（注意も spline も通らない）。前処理は `remove_weight_norm` だけで、
     ラッパも置かない — `Generator.forward(x, g)` の引数名がそのまま IR の入力名になる。
+
+    MUST: 生成物は作業席へ書き、全ての門を通してから据える（{@link _staged_target}）。
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
@@ -1019,18 +1079,18 @@ def export_dec(
 
     example = dict(built[-1][1])
     frames = Dim("T", min=2, max=sym_max)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    graph = export_to_file(
-        module,
-        tuple(example[declared] for declared in DEC_INPUT_ORDER),
-        out_dir / MODEL_FILE,
-        dynamic_shapes=({2: frames}, {}),
-        symbol_names=("T",),
-        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
-        weight_scales=scales,
-        weight_dtype_overrides=dtype_overrides,
-    )
-    written = _write_io(module, graph, built, out_dir)
+    with _staged_target(TARGET_DEC, out_dir, sym_max) as staged:
+        graph = export_to_file(
+            module,
+            tuple(example[declared] for declared in DEC_INPUT_ORDER),
+            staged / MODEL_FILE,
+            dynamic_shapes=({2: frames}, {}),
+            symbol_names=("T",),
+            weight_dtype=BASE_WEIGHT_DTYPES[dtype],
+            weight_scales=scales,
+            weight_dtype_overrides=dtype_overrides,
+        )
+        written = _write_io(module, graph, built, staged)
     return _summary(
         TARGET_DEC,
         out_dir,
@@ -1057,6 +1117,8 @@ def export_voice(
     **このターゲットの E2E が緑になった時点で SBV2 の全チェーンが成立する**（front で
     durations を出し、ホスト側で z_p を組み、ここで波形になる）。融合の利得は中間 z の
     readback 往復の排除で、代わりに z のデバッグ突合は flow 単体側でしかできない。
+
+    MUST: 生成物は作業席へ書き、全ての門を通してから据える（{@link _staged_target}）。
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
@@ -1076,18 +1138,18 @@ def export_voice(
         {0: frames, 1: frames},
         {0: frames, 1: frames},
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    graph = export_to_file(
-        module,
-        tuple(example[declared] for declared in FLOW_INPUT_ORDER),
-        out_dir / MODEL_FILE,
-        dynamic_shapes=dynamic_shapes,
-        symbol_names=("T",),
-        weight_dtype=BASE_WEIGHT_DTYPES[dtype],
-        weight_scales=scales,
-        weight_dtype_overrides=dtype_overrides,
-    )
-    written = _write_io(module, graph, built, out_dir)
+    with _staged_target(TARGET_VOICE, out_dir, sym_max) as staged:
+        graph = export_to_file(
+            module,
+            tuple(example[declared] for declared in FLOW_INPUT_ORDER),
+            staged / MODEL_FILE,
+            dynamic_shapes=dynamic_shapes,
+            symbol_names=("T",),
+            weight_dtype=BASE_WEIGHT_DTYPES[dtype],
+            weight_scales=scales,
+            weight_dtype_overrides=dtype_overrides,
+        )
+        written = _write_io(module, graph, built, staged)
     return _summary(
         TARGET_VOICE,
         out_dir,

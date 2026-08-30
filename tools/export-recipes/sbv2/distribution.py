@@ -33,7 +33,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from safetensors import safe_open
@@ -47,6 +47,7 @@ from karume.dist import (
     WeightFiles,
     assert_model_name,
     assert_storage,
+    assert_storage_absent,
     complete_quant_weights,
     safetensors_header,
     table_payload,
@@ -161,6 +162,24 @@ SBV2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "voice_f16": "F16",
     "voice_i8": "I8",
     "voice_i4": "I4",
+}
+
+#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: {@link SBV2_STORAGE_REQUIREMENTS} の存在検査は片方向なので、**圧縮席どうしの取り違え**が
+#: 素通りする — i4 系列は混成（F32 + I8 + I4）で、i4 適格外の重みは i8 のまま残るので
+#: **必ず I8 を含む**。したがって i4 系列を `text_encoder` / `front_i8` / `voice_i8` の i8 席へ
+#: 挿し込むと「I8 を含む」を満たしてしまい、組み立ても verify_dist も manifest 検査も全部通る。
+#: 出来上がるのは「席名も path も `model.i8.safetensors` なのに中身は i4 混成」という配布形で、
+#: i8 席は f32 compute なので実行も例外を出さず、音が i4 の品質で出るだけで沈黙する。
+#: MUST: 禁止は**役割ごとに集合**で持つ（1 dtype だけ書くと 4 本目の系列が生えた日に、名指し
+#: しなかったほうが黙って素通りする — anima / irodori と同じ規律）。f16 席は I8 / I4 の
+#: 両方の不在で二重に締める。
+SBV2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
+    "text_encoder": ("I4",),
+    "front_f16": ("I8", "I4"),
+    "front_i8": ("I4",),
+    "voice_f16": ("I8", "I4"),
+    "voice_i8": ("I4",),
 }
 
 #: weights の宣言（dtype ラベル → 役割名）。dtype キーは ADR 0041 §3 の統一形（v1 の `{file}` /
@@ -285,6 +304,36 @@ SBV2_KNOB_KEYS: tuple[str, ...] = (
 SBV2_MAX_TOKENS = 512
 SBV2_MAX_FRAMES = 4096
 
+#: 記号次元の上限を系列へ書き残す出所記録（`sbv2.export` が作業席の中で書く）。
+EXPORT_PROVENANCE_FILE = "export_provenance.json"
+
+
+class Sbv2SymExpectation(NamedTuple):
+    """席が焼かれているべき記号次元の宣言（台本のターゲット名・IR の記号名・上限）。"""
+
+    target: str
+    symbol: str
+    sym_max: int
+
+
+#: 席 → 記号次元の期待。`sbv2.export` の `--sym-max` は**単一ターゲット限定で任意の値**を通す
+#: 研究用ノブで、渡した値はそのまま `Dim` の max = 焼き込み定数の静的次元になる。ところが上の
+#: {@link SBV2_MAX_TOKENS} / {@link SBV2_MAX_FRAMES} は定数で manifest へ焼かれるので、既定から
+#: 外して採り直した系列を挿すと **export は緑・配布も緑**のまま `pipelineConfig` だけが嘘になり、
+#: 消費側で初めて `sym_prefix_slice` の Tmax 超過に当たる（host 側の `maxFrames` 門は通過する）。
+#: 2 つの門で塞ぐ: {@link assert_sym_provenance}（書き出した側の記録）と
+#: {@link assert_baked_sym_max}（**artifact 自身**の焼き込み定数）。
+#: MUST: 列挙元は {@link SBV2_WEIGHTS} — dtype 席が 1 本増えた日に、名指ししなかった席だけが
+#: 黙って素通りする形にしない。
+SBV2_SYM_EXPECTATIONS: Mapping[str, Sbv2SymExpectation] = {
+    files.file: expectation
+    for name, expectation in (
+        ("front", Sbv2SymExpectation("front", "P", SBV2_MAX_TOKENS)),
+        ("voice", Sbv2SymExpectation("voice", "T", SBV2_MAX_FRAMES)),
+    )
+    for files in SBV2_WEIGHTS[name].values()
+}
+
 
 def sbv2_series_name(model: str) -> str:
     """系列名の幹（`outputs/series/<この名前>-{f16,i8}/`）。
@@ -402,6 +451,111 @@ def sbv2_knob_defaults(symbols_path: Path) -> dict[str, Any]:
     return knobs
 
 
+def sbv2_ir_graph(path: Path) -> Mapping[str, Any]:
+    """配布候補の safetensors ヘッダから IR のグラフ JSON を読む（テンソルは 1 バイトも読まない）。
+
+    グラフを見る門が 2 つある（{@link assert_bert_hidden} の層 / 出力 / 入力と、
+    {@link assert_baked_sym_max} の焼き込み次元）ので、読み取りと不整合の名指しはここ 1 本。
+    """
+    header = safetensors_header(path)
+    metadata = header.get("__metadata__")
+    if not isinstance(metadata, dict) or IR_METADATA_KEY not in metadata:
+        raise DistError(f"{path}: IR メタデータ（{IR_METADATA_KEY}）が無い")
+    try:
+        graph = json.loads(metadata[IR_METADATA_KEY])
+    except json.JSONDecodeError as error:
+        raise DistError(f"{path}: IR メタデータが JSON として読めない") from error
+    if not isinstance(graph, dict):
+        raise DistError(f"{path}: IR メタデータが最上位オブジェクトでない")
+    return graph
+
+
+def sbv2_baked_sym_max(role: str, path: Path, symbol: str) -> int:
+    """焼き込み定数の静的次元から、そのグラフが実際に受理する記号次元の上限を読む。
+
+    `sym_prefix_slice` は「Tmax で焼いた静的形の先頭 `coeff·sym+offset` を切り出す」op
+    （ADR 0010）で、切り出し元の定数次元がそのまま**受理できる sym の上限**になる
+    （超過はランタイムの `shapes.ts` が「Tmax 超過」で落とす）。したがって台本の `--sym-max`
+    は資産の中に残っていて、記録を信じずに artifact だけから読める。
+
+    MUST: 対象ノードが 1 本も無ければ落とす（恒真化の門）— 相対位置の表が入力へ昇格するなど
+    グラフの形が変わると、この門は「何も見ずに緑」へ静かに退化する。
+    """
+    graph = sbv2_ir_graph(path)
+    values = graph.get("values")
+    nodes = graph.get("nodes")
+    if not isinstance(values, dict) or not isinstance(nodes, list):
+        raise DistError(f"{role}: {path} の IR メタデータに values / nodes が無い")
+    bounds: list[int] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        attrs = node.get("attrs")
+        if node.get("op") != "sym_prefix_slice" or not isinstance(attrs, dict):
+            continue
+        if attrs.get("sym") != symbol:
+            continue
+        try:
+            shape = values[node["ins"][0]]["shape"]
+            for entry in attrs["slices"]:
+                bounds.append((shape[entry["dim"]] - entry["offset"]) // entry["coeff"])
+        except (KeyError, IndexError, TypeError, ZeroDivisionError) as error:
+            raise DistError(f"{role}: {path} の sym_prefix_slice が読めない — {error}") from error
+    if not bounds:
+        raise DistError(
+            f"{role}: {path} に記号 {symbol!r} の sym_prefix_slice が 1 本も無い —"
+            "焼き込み定数から上限を読む門が恒真化している（グラフの形が変わった）"
+        )
+    return min(bounds)
+
+
+def assert_baked_sym_max(role: str, path: Path, expectation: Sbv2SymExpectation) -> None:
+    """焼いたグラフの記号次元の上限が `pipelineConfig` の宣言と一致することを見る。
+
+    manifest の `maxTokens` / `maxFrames` は「焼いたグラフの記号次元の上限そのもの」と自称して
+    いる（{@link SBV2_MAX_TOKENS}）のに、値は定数で焼かれていて artifact を一切見ていなかった
+    — その切断をここで閉じる。記録（{@link assert_sym_provenance}）と違い、こちらは**現物の
+    バイト**から導くので、記録の無い古い系列にも効く。
+    """
+    baked = sbv2_baked_sym_max(role, path, expectation.symbol)
+    if baked != expectation.sym_max:
+        raise DistError(
+            f"{role}: {path} は記号 {expectation.symbol!r} を上限 {baked} で焼いているが、"
+            f"配布の宣言は {expectation.sym_max}"
+            f"（`sbv2.export --target {expectation.target} --sym-max` の非既定値で採った系列）—"
+            "export も配布も緑のまま、消費側だけが Tmax 超過で落ちる形になる"
+        )
+
+
+def assert_sym_provenance(role: str, path: Path, expectation: Sbv2SymExpectation) -> None:
+    """書き出した側が残した記録（`export_provenance.json`）を宣言と突き合わせる。
+
+    NOTE: 記録が無い系列は受理する。同じ事実を artifact から導く {@link assert_baked_sym_max}
+    が**常に**掛かっていて、こちらが上乗せするのは「どのターゲットとして焼いたか」だけ —
+    記録の不在を拒否に倒すと、記録が生える前に焼いた全系列へ再 export（= 出荷済み配布形の
+    sha が動く作業）を課すことになり、閉じる穴に見合わない。
+    """
+    record_path = path.parent / EXPORT_PROVENANCE_FILE
+    if not record_path.is_file():
+        return
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except ValueError as error:
+        raise DistError(f"{role}: 出所記録を解析できない: {record_path} — {error}") from error
+    if not isinstance(record, Mapping):
+        raise DistError(f"{role}: 出所記録 {record_path} が最上位オブジェクトでない")
+    if record.get("target") != expectation.target:
+        raise DistError(
+            f"{role}: 出所記録の target が {record.get('target')!r} で、この席が要求する"
+            f" {expectation.target!r} と違う（別ターゲットの系列を挿している）: {record_path}"
+        )
+    if record.get("sym_max") != expectation.sym_max:
+        raise DistError(
+            f"{role}: 出所記録の sym_max が {record.get('sym_max')!r} で、配布の宣言"
+            f" {expectation.sym_max} と違う: {record_path}"
+        )
+
+
 def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
     """配布 text_encoder が「SBV2 が使う層の出力を 1 本だけ出す」形であることを検査する。
 
@@ -414,16 +568,7 @@ def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
     別の取り違えを捕まえるため — 層数は「どの層の出力か」、出力本数は「検証用の全層出し資産が
     混ざっていないか」、位置は「symbols.json だけ古いか」。
     """
-    header = safetensors_header(text_encoder)
-    metadata = header.get("__metadata__")
-    if not isinstance(metadata, dict) or IR_METADATA_KEY not in metadata:
-        raise DistError(f"{text_encoder}: IR メタデータ（{IR_METADATA_KEY}）が無い")
-    try:
-        graph = json.loads(metadata[IR_METADATA_KEY])
-    except json.JSONDecodeError as error:
-        raise DistError(f"{text_encoder}: IR メタデータが JSON として読めない") from error
-    if not isinstance(graph, dict):
-        raise DistError(f"{text_encoder}: IR メタデータが最上位オブジェクトでない")
+    graph = sbv2_ir_graph(text_encoder)
 
     initializers = graph.get("initializers")
     if not isinstance(initializers, dict) or not initializers:
@@ -647,6 +792,11 @@ def sbv2_plan(
     speaker_embeddings = sbv2_speaker_embeddings(sources.model, config)
     for role, source in placements.items():
         assert_storage(role, source, SBV2_STORAGE_REQUIREMENTS)
+        assert_storage_absent(role, source, SBV2_STORAGE_FORBIDDEN)
+        expectation = SBV2_SYM_EXPECTATIONS.get(role)
+        if expectation is not None:
+            assert_baked_sym_max(role, source, expectation)
+            assert_sym_provenance(role, source, expectation)
     for role in SBV2_TEXT_ENCODER_ROLES:
         assert_bert_hidden(placements[role], placements["symbols"])
     artifacts = {

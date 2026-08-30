@@ -39,6 +39,7 @@ from karume.dist import (
 )
 from karume.ir import IR_METADATA_KEY
 from sbv2.distribution import (
+    EXPORT_PROVENANCE_FILE,
     PIPELINE,
     SBV2_DEFAULT_MODEL,
     SBV2_DEFAULT_QUANT,
@@ -50,12 +51,16 @@ from sbv2.distribution import (
     SBV2_QUANTS,
     SBV2_SPEAKER_KEY,
     SBV2_SPEAKER_TENSOR,
+    SBV2_STORAGE_FORBIDDEN,
+    SBV2_STORAGE_REQUIREMENTS,
     SBV2_STYLE_KEY,
+    SBV2_SYM_EXPECTATIONS,
     SBV2_TEXT_ENCODER_INPUTS,
     SBV2_WEIGHTS,
     Sbv2Sources,
     sbv2_knob_defaults,
     sbv2_pipeline_config,
+    sbv2_placements,
     sbv2_plan,
     sbv2_repo_name,
     sbv2_series_name,
@@ -79,6 +84,28 @@ def _fake_safetensors(
         header["__metadata__"] = dict(metadata)
     encoded = json.dumps(header).encode("utf-8")
     return len(encoded).to_bytes(8, "little") + encoded + payload
+
+
+def _mixed_safetensors(
+    dtypes: tuple[str, ...], payload: bytes, metadata: Mapping[str, str] | None = None
+) -> bytes:
+    """複数の格納 dtype が同居するヘッダ（混成系列 = i4 の実物の形）。
+
+    i4 系列は「i4 適格な重みが I4・適格外が I8・bias / norm / scale が F32」の 3 種が並ぶので、
+    単一 dtype の偽資産では**圧縮席どうしの取り違え**（i4 系列 → i8 席）を再現できない。
+    """
+    header: dict[str, Any] = {}
+    for index, dtype in enumerate(dtypes):
+        start = index * len(payload)
+        header[f"w{index}"] = {
+            "dtype": dtype,
+            "shape": [len(payload)],
+            "data_offsets": [start, start + len(payload)],
+        }
+    if metadata is not None:
+        header["__metadata__"] = dict(metadata)
+    encoded = json.dumps(header).encode("utf-8")
+    return len(encoded).to_bytes(8, "little") + encoded + payload * len(dtypes)
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -127,25 +154,88 @@ def _fake_ir(
     )
 
 
-#: 偽資産（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 5 役は
-#: `SBV2_STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。text_encoder だけは
-#: IR コンテナとしても読まれる（層数と出力本数の門）ので `__metadata__` を持つ。
+def _fake_sym_ir(symbol: str, sym_max: int, window: int = 9) -> str:
+    """記号次元の焼き込み定数だけを持つ最小の IR メタデータ（`assert_baked_sym_max` の入力）。
+
+    実物の front / voice は相対位置の添字表を `Tmax` で焼き、`sym_prefix_slice` で先頭を
+    切り出す（ADR 0010）。門が読むのは「切り出し元の静的次元」1 点なので、その 1 ノードで足りる。
+    """
+    return json.dumps(
+        {
+            "values": {
+                "const_idx_v": {"dtype": "i32", "shape": [1, 1, sym_max, window]},
+                "idx_v": {"dtype": "i32", "shape": [1, 1, symbol, window]},
+            },
+            "nodes": [
+                {
+                    "op": "sym_prefix_slice",
+                    "ins": ["const_idx_v"],
+                    "outs": ["idx_v"],
+                    "attrs": {"sym": symbol, "slices": [{"dim": 2, "coeff": 1, "offset": 0}]},
+                }
+            ],
+        }
+    )
+
+
+#: 役割 → 偽資産が名乗る IR メタデータ。text_encoder は層数・出力本数・入力の並びの門が読み、
+#: front / voice は焼き込み次元の門（`assert_baked_sym_max`）が読む。
+_SBV2_IR_METADATA: Mapping[str, Mapping[str, str]] = {
+    "text_encoder": {IR_METADATA_KEY: _fake_ir()},
+    "text_encoder_i4": {IR_METADATA_KEY: _fake_ir()},
+    **{
+        f"front_{label}": {IR_METADATA_KEY: _fake_sym_ir("P", SBV2_MAX_TOKENS)}
+        for label in ("f16", "i8", "i4")
+    },
+    **{
+        f"voice_{label}": {IR_METADATA_KEY: _fake_sym_ir("T", SBV2_MAX_FRAMES)}
+        for label in ("f16", "i8", "i4")
+    },
+}
+
+#: 偽資産（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 8 役は
+#: `SBV2_STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持ち、IR コンテナとしても読まれる
+#: （{@link _SBV2_IR_METADATA}）。
 _SBV2_PAYLOADS = {
-    "text_encoder": _fake_safetensors("I8", b"deberta-i8-weights", {IR_METADATA_KEY: _fake_ir()}),
-    "text_encoder_i4": _fake_safetensors(
-        "I4", b"deberta-i4-weights", {IR_METADATA_KEY: _fake_ir()}
+    "text_encoder": _fake_safetensors(
+        "I8", b"deberta-i8-weights", _SBV2_IR_METADATA["text_encoder"]
     ),
-    "front_f16": _fake_safetensors("F16", b"front-f16-weights"),
-    "front_i8": _fake_safetensors("I8", b"front-i8-weights"),
-    "front_i4": _fake_safetensors("I4", b"front-i4-weights"),
-    "voice_f16": _fake_safetensors("F16", b"voice-f16-weights"),
-    "voice_i8": _fake_safetensors("I8", b"voice-i8-weights"),
-    "voice_i4": _fake_safetensors("I4", b"voice-i4-weights"),
+    "text_encoder_i4": _fake_safetensors(
+        "I4", b"deberta-i4-weights", _SBV2_IR_METADATA["text_encoder_i4"]
+    ),
+    "front_f16": _fake_safetensors("F16", b"front-f16-weights", _SBV2_IR_METADATA["front_f16"]),
+    "front_i8": _fake_safetensors("I8", b"front-i8-weights", _SBV2_IR_METADATA["front_i8"]),
+    "front_i4": _fake_safetensors("I4", b"front-i4-weights", _SBV2_IR_METADATA["front_i4"]),
+    "voice_f16": _fake_safetensors("F16", b"voice-f16-weights", _SBV2_IR_METADATA["voice_f16"]),
+    "voice_i8": _fake_safetensors("I8", b"voice-i8-weights", _SBV2_IR_METADATA["voice_i8"]),
+    "voice_i4": _fake_safetensors("I4", b"voice-i4-weights", _SBV2_IR_METADATA["voice_i4"]),
     "tokenizer": b'{"deberta": true}',
 }
 
 #: 系列ラベル → 偽資産のヘッダ dtype（`SBV2_STORAGE_REQUIREMENTS` が要求する側）。
 _SBV2_SERIES_DTYPES: Mapping[str, str] = {"f16": "F16", "i8": "I8", "i4": "I4"}
+
+#: 席 → その系列のヘッダが**必ず含む**格納 dtype（実配布資産の実測 — i4 は混成で、i4 適格外の
+#: 重みが I8 のまま残るので I8 も含む）。取り違えを再現するときはこの集合ごと差し替える。
+_SBV2_SERIES_HEADERS: Mapping[str, tuple[str, ...]] = {
+    "text_encoder": ("F32", "I8"),
+    "text_encoder_i4": ("F32", "I8", "I4"),
+    "front_f16": ("F32", "F16"),
+    "front_i8": ("F32", "I8"),
+    "front_i4": ("F32", "I8", "I4"),
+    "voice_f16": ("F32", "F16"),
+    "voice_i8": ("F32", "I8"),
+    "voice_i4": ("F32", "I8", "I4"),
+}
+
+#: 同じグラフの席どうし（格納 dtype だけで区別できる範囲）。`front_i8` → `voice_i8` のような
+#: **別グラフ**の取り違えは格納形が同じなので dtype の門では原理的に見えない — そちらは
+#: 出所 path（{@link sbv2_placements}）と形の門の担当で、ここでは扱わない。
+_SBV2_SERIES_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("text_encoder", "text_encoder_i4"),
+    ("front_f16", "front_i8", "front_i4"),
+    ("voice_f16", "voice_i8", "voice_i4"),
+)
 
 #: 実行時ノブの既定。**実際の `style_bert_vits2` の値とは別の数**にしてある — 組み立てが
 #: 引数のノブを配るのか自分の表を配るのかを、値そのもので見分けるため。
@@ -238,7 +328,11 @@ def _build_sbv2_sources(
             role = f"{target}_{label}"
             payload = _SBV2_PAYLOADS[role]
             if offset:
-                payload = _fake_safetensors(_SBV2_SERIES_DTYPES[label], f"{role}-{model}".encode())
+                payload = _fake_safetensors(
+                    _SBV2_SERIES_DTYPES[label],
+                    f"{role}-{model}".encode(),
+                    _SBV2_IR_METADATA[role],
+                )
             _write(series_dir / target / "model.safetensors", payload)
             _write(series_dir / target / "io.p2.safetensors", b"io-fixture")
         # 配布しない単体グラフ（golden 検証専用）も系列には並ぶ。
@@ -571,6 +665,211 @@ class TestSbv2StorageGate:
         sources = _build_sbv2_sources(tmp_path)
         (sources.series_i4 / "voice" / "model.safetensors").write_bytes(_SBV2_PAYLOADS["voice_i8"])
         with pytest.raises(DistError, match=r"voice_i4: .* I4 が無い"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_it_stops_when_the_i4_series_lands_in_the_voice_i8_seat(self, tmp_path: Path) -> None:
+        """逆向きの取り違え（i4 系列 → i8 席）— 存在検査だけでは**素通りする**。
+
+        i4 系列は混成で、i4 適格外の重みは i8 のまま残るので必ず I8 を含み、「I8 を含む」を
+        満たしてしまう。i8 席は f32 compute なので実行も例外を出さず、席名も path も
+        `model.i8.safetensors` のまま音だけが i4 の品質で出る。禁止表
+        （`SBV2_STORAGE_FORBIDDEN`）が唯一の検出器。
+        """
+        sources = _build_sbv2_sources(tmp_path)
+        (sources.series_i8 / "voice" / "model.safetensors").write_bytes(
+            _mixed_safetensors(
+                ("F32", "I8", "I4"), b"voice-i4-weights", _SBV2_IR_METADATA["voice_i4"]
+            )
+        )
+        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+        with pytest.raises(DistError, match=r"voice_i8: .* I4 がある"):
+            _assemble_sbv2(sources, out_dir)
+        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        assert not out_dir.exists()
+
+    def test_it_stops_when_the_i4_series_lands_in_the_text_encoder_seat(
+        self, tmp_path: Path
+    ) -> None:
+        """DeBERTa の i8 席も同じ — 2 本は同じ 22 層なので形の門は両方とも通る。"""
+        sources = _build_sbv2_sources(tmp_path)
+        (sources.text_encoder / "model.safetensors").write_bytes(
+            _mixed_safetensors(
+                ("F32", "I8", "I4"), b"deberta-i4-weights", _SBV2_IR_METADATA["text_encoder_i4"]
+            )
+        )
+        with pytest.raises(DistError, match=r"text_encoder: .* I4 がある"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_no_series_slips_into_another_seat_of_the_same_graph(self) -> None:
+        """同じグラフの席 × 他系列の**全ての**取り違えが、要求か禁止のどちらかで落ちる。
+
+        席が増えた日に片方の表だけ更新されると、網から漏れた組み合わせが黙って配布形に並ぶ
+        （系列 root の取り違えは数値の門では原理的に検出できない — ADR 0027 / 0029）。
+        """
+        # MUST: 列挙元を production の表へ縛る。テスト内 dict のままにすると、4 本目の系列が
+        # `SBV2_STORAGE_REQUIREMENTS` に生えてここへ足されなかったとき、docstring が名指しする
+        # 失敗モードそのものを一度も見ないまま緑が残る。
+        assert set(_SBV2_SERIES_HEADERS) == set(SBV2_STORAGE_REQUIREMENTS)
+        assert {role for group in _SBV2_SERIES_GROUPS for role in group} == set(
+            SBV2_STORAGE_REQUIREMENTS
+        )
+
+        for group in _SBV2_SERIES_GROUPS:
+            for seat in group:
+                for series in group:
+                    found = _SBV2_SERIES_HEADERS[series]
+                    caught = SBV2_STORAGE_REQUIREMENTS[seat] not in found or any(
+                        dtype in found for dtype in SBV2_STORAGE_FORBIDDEN.get(seat, ())
+                    )
+                    assert caught is (series != seat), f"{series} → {seat} 席"
+
+    def test_every_same_graph_seat_mix_up_is_refused_by_the_real_gates(
+        self, tmp_path: Path
+    ) -> None:
+        """上の表ではなく**実 gate**（`assert_storage` / `assert_storage_absent`）で回す。
+
+        上のテストは述語を再実装しているので、`sbv2_plan` から `assert_storage_absent` の呼びが
+        1 行消えても落ちない。ここは組み立てを実際に通すので、呼びが外れた瞬間に非対角が緑に
+        なって落ちる。
+        """
+        for group in _SBV2_SERIES_GROUPS:
+            for seat in group:
+                for series in group:
+                    sources = _build_sbv2_sources(tmp_path / f"{seat}-{series}")
+                    # IR メタデータは**席側**を名乗らせる（記号次元の門〈CG4-3〉ではなく
+                    # 格納 dtype の門だけを回すため — 席と系列の両方を動かすと、どちらの門で
+                    # 落ちたのか分からなくなる）。
+                    sbv2_placements(sources)[seat].write_bytes(
+                        _mixed_safetensors(
+                            _SBV2_SERIES_HEADERS[series],
+                            b"swapped-series",
+                            _SBV2_IR_METADATA[seat],
+                        )
+                    )
+                    out_dir = tmp_path / "out" / f"{seat}-{series}"
+
+                    if series == seat:
+                        _assemble_sbv2(sources, out_dir)  # 対角は通る（同じ系列を同じ席へ）
+                    else:
+                        with pytest.raises(DistError):
+                            _assemble_sbv2(sources, out_dir)
+
+
+class TestSbv2SymGate:
+    """記号次元の上限の門（CG4-3）— `--sym-max` の非既定値と manifest の定数の切断を塞ぐ。
+
+    `sbv2.export --target voice --sym-max 1024` は公式 CLI で通り、golden も 512 までなので
+    export は成立する。配布側は `maxFrames` を 4096 で焼くので**配布も緑**になり、利用者が
+    1025〜4096 フレームの発話を頼んだときに初めて `sym_prefix_slice` の Tmax 超過で落ちる。
+    """
+
+    @staticmethod
+    def _rebake(sources: Sbv2Sources, role: str, symbol: str, sym_max: int) -> None:
+        """席の資産だけを別の記号次元で焼き直した形にする（格納 dtype は正しいまま）。"""
+        sbv2_placements(sources)[role].write_bytes(
+            _fake_safetensors(
+                SBV2_STORAGE_REQUIREMENTS[role],
+                f"{role}-rebaked".encode(),
+                {IR_METADATA_KEY: _fake_sym_ir(symbol, sym_max)},
+            )
+        )
+
+    def test_it_stops_when_the_voice_graph_is_baked_at_another_frame_max(
+        self, tmp_path: Path
+    ) -> None:
+        sources = _build_sbv2_sources(tmp_path)
+        self._rebake(sources, "voice_i8", "T", 1024)
+        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+
+        with pytest.raises(DistError, match=r"voice_i8: .*上限 1024 .*宣言は 4096"):
+            _assemble_sbv2(sources, out_dir)
+        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        assert not out_dir.exists()
+
+    def test_it_stops_when_the_front_graph_is_baked_at_another_token_max(
+        self, tmp_path: Path
+    ) -> None:
+        """front / maxTokens 側にも同型の穴がある（`--target front --sym-max` は同じく通る）。"""
+        sources = _build_sbv2_sources(tmp_path)
+        self._rebake(sources, "front_f16", "P", 256)
+
+        with pytest.raises(DistError, match=r"front_f16: .*上限 256 .*宣言は 512"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_it_stops_when_the_graph_has_no_baked_symbol_slice(self, tmp_path: Path) -> None:
+        """恒真化の門 — 表が入力へ昇格するなどして対象ノードが消えたら、黙って緑にしない。"""
+        promoted = json.dumps(
+            {
+                "values": {"w": {"dtype": "f32", "shape": [4, 4]}},
+                "nodes": [{"op": "linear", "ins": ["w"], "outs": ["y"], "attrs": {}}],
+            }
+        )
+        sources = _build_sbv2_sources(tmp_path)
+        sbv2_placements(sources)["front_i4"].write_bytes(
+            _fake_safetensors("I4", b"front-i4-weights", {IR_METADATA_KEY: promoted})
+        )
+
+        with pytest.raises(DistError, match=r"front_i4: .* sym_prefix_slice が 1 本も無い"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_the_expectations_cover_every_front_and_voice_seat(self) -> None:
+        """dtype 席が 1 本増えた日に、名指ししなかった席だけが黙って素通りする形にしない。"""
+        expected = {
+            files.file for name in ("front", "voice") for files in SBV2_WEIGHTS[name].values()
+        }
+
+        assert set(SBV2_SYM_EXPECTATIONS) == expected
+        assert {entry.sym_max for role, entry in SBV2_SYM_EXPECTATIONS.items()} == {
+            SBV2_MAX_TOKENS,
+            SBV2_MAX_FRAMES,
+        }
+
+
+class TestSbv2SymProvenance:
+    """書き出した側の記録（`export_provenance.json`）と席の宣言の突き合わせ。"""
+
+    @staticmethod
+    def _record(sources: Sbv2Sources, role: str, record: Mapping[str, Any]) -> Path:
+        path = sbv2_placements(sources)[role].parent / EXPORT_PROVENANCE_FILE
+        path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_a_matching_record_changes_nothing(self, tmp_path: Path) -> None:
+        sources = _build_sbv2_sources(tmp_path)
+        self._record(sources, "voice_i8", {"target": "voice", "sym_max": SBV2_MAX_FRAMES})
+
+        _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_a_series_without_a_record_is_accepted(self, tmp_path: Path) -> None:
+        """記録が生える前に焼いた系列に再 export を課さない（同じ事実は焼き込み次元が持つ）。"""
+        sources = _build_sbv2_sources(tmp_path)
+
+        _assemble_sbv2(sources, tmp_path / "out")
+
+        assert not (sbv2_placements(sources)["voice_i8"].parent / EXPORT_PROVENANCE_FILE).exists()
+
+    def test_it_stops_when_the_record_names_another_sym_max(self, tmp_path: Path) -> None:
+        sources = _build_sbv2_sources(tmp_path)
+        self._record(sources, "voice_f16", {"target": "voice", "sym_max": 1024})
+
+        with pytest.raises(DistError, match=r"voice_f16: 出所記録の sym_max が 1024"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_it_stops_when_the_record_names_another_target(self, tmp_path: Path) -> None:
+        """`front` として焼いたものを voice 席へ置く取り違え（記録だけが名指しできる）。"""
+        sources = _build_sbv2_sources(tmp_path)
+        self._record(sources, "voice_i4", {"target": "front", "sym_max": SBV2_MAX_FRAMES})
+
+        with pytest.raises(DistError, match=r"voice_i4: 出所記録の target が 'front'"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_it_stops_when_the_record_is_not_json(self, tmp_path: Path) -> None:
+        sources = _build_sbv2_sources(tmp_path)
+        (sbv2_placements(sources)["front_i8"].parent / EXPORT_PROVENANCE_FILE).write_text(
+            "not-json", encoding="utf-8"
+        )
+
+        with pytest.raises(DistError, match=r"front_i8: 出所記録を解析できない"):
             _assemble_sbv2(sources, tmp_path / "out")
 
 

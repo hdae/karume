@@ -128,6 +128,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from karume.artifacts import staged_publication
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
@@ -943,7 +944,14 @@ def export_series(
     normalize_db: float = REFERENCE_NORMALIZE_DB,
     dtype: str = "f32",
 ) -> dict[str, Any]:
-    """IR コンテナと golden io を書き、要約を返す。"""
+    """IR コンテナと golden io を書き、要約を返す。
+
+    MUST: 生成物は**ターゲットごとの作業席**へ書き、全ての門（snake 畳み込み・境界正規化）を
+    通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す —
+    io golden は同じ壊れたグラフから採るので互いに整合し、TS 側の突合は**緑になる**
+    （「いつ公開してよいか」の綴りは {@link _shared.decode_series._publish}・据え替えと
+    後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
+    """
     source = DacvaeSource(source_dir)
     model = load_codec(source, model_dir)
     bypass_watermark(model.decoder)
@@ -1001,21 +1009,24 @@ def export_series(
     for target in targets:
         axis = axes[target]
         target_dir = out_dir / target
-        target_dir.mkdir(parents=True, exist_ok=True)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
         by_case = graph_args[target]
         longest = max(by_case, key=lambda name: by_case[name].shape[axis.axis])
         sequence = Dim(axis.symbol, min=MIN_SYM_LENGTH, max=axis.upper)
-        graph = export_to_file(
-            graphs[target],
-            (by_case[longest],),
-            target_dir / MODEL_FILE,
-            dynamic_shapes=({axis.axis: sequence},),
-            symbol_names=(axis.symbol,),
-            weight_dtype=dtype,
-            weight_scales=_target_scales(target, graphs[target], quantized.scales),
-        )
-        assert_snake_folded(graph, target)
-        io_files = _write_io(graph, by_case, pristine[target], target_dir)
+        with staged_publication(target_dir) as staged:
+            # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+            staged.mkdir()
+            graph = export_to_file(
+                graphs[target],
+                (by_case[longest],),
+                staged / MODEL_FILE,
+                dynamic_shapes=({axis.axis: sequence},),
+                symbol_names=(axis.symbol,),
+                weight_dtype=dtype,
+                weight_scales=_target_scales(target, graphs[target], quantized.scales),
+            )
+            assert_snake_folded(graph, target)
+            io_files = _write_io(graph, by_case, pristine[target], staged)
         written[target] = {**_graph_summary(graph, target_dir / MODEL_FILE), "io": io_files}
     return {
         "dir": str(out_dir),
