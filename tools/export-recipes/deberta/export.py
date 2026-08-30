@@ -147,6 +147,16 @@ OUTPUT_PREFIX = "output."
 #: 評価点はここから torch の range_constraints 経由で決まる — ADR 0010）。
 SYM_MAX = 512
 
+#: 記号次元の上限を系列へ書き残す出所記録（{@link _write_export_provenance}）。
+#:
+#: MUST: 綴りは読み手（`sbv2.distribution.EXPORT_PROVENANCE_FILE` /
+#: `sbv2.distribution.assert_sym_provenance`）と一致させる。写しを持つのは、`deberta` が SBV2 の
+#: **消費者ではない**から — 配布形の text_encoder 席は資産の共有であって結合ではないので
+#: （`sbv2/distribution.py` のモジュール doc）、produce 側が consume 側を import する向きは
+#: 作らない。2 表が独立に動く形にしないため、一致は `deberta/tests/test_export.py` が毎回
+#: 突き合わせる（`birefnet` の正規化定数と同じ規律）。
+EXPORT_PROVENANCE_FILE = "export_provenance.json"
+
 
 @dataclass(frozen=True)
 class Variant:
@@ -522,6 +532,33 @@ def _fake_quant(
     return {**int8.scales, **int4_scales}, dict.fromkeys(int4_scales, "i4")
 
 
+def _write_export_provenance(target: str, sym_max: int, out_dir: Path) -> None:
+    """この variant を**どの記号次元の上限で**焼いたかを系列へ書き残す。
+
+    `--sym-max` は任意の値を通す研究用ノブで、渡した値はそのまま `Dim` の max になる。ところが
+    SBV2 配布形の `pipelineConfig.maxTokens` は定数で焼かれる（`sbv2/distribution.py` の
+    `SBV2_MAX_TOKENS`）ため、既定から外して採り直した系列を text_encoder 席へ挿すと
+    **export は緑・配布も緑**のまま宣言だけが嘘になり、利用者の手元で初めて長い入力が落ちる。
+
+    MUST: この事実は**記録でしか運べない**。front / voice は上限を `sym_prefix_slice` の
+    焼き込み定数として持つので artifact から読み直せる（`sbv2.distribution.assert_baked_sym_max`）
+    が、DeBERTa は相対位置の添字表を ADR 0045 波 3 でグラフ**入力**へ昇格させたので、上限を運ぶ
+    定数がグラフに 1 本も残っていない。突合は `sbv2.distribution.assert_sym_provenance` が行う。
+
+    `target` は variant 名（層数 × 出力形 — {@link VARIANTS}）。`deberta/export.py` に `--target`
+    は無く、「どの形として焼いたか」を名乗れるのがこれ 1 つきりで、配布側もその綴りで席を引く
+    （`sbv2.distribution.SBV2_TEXT_ENCODER_VARIANT`）。
+
+    MUST: 書くのは**作業席の中**（`staged_publication` の `with` の内側）— 据え替えが 1 回に
+    なるので、新しい容器と古い記録という組が作れない（`sbv2/export.py` の `_staged_target` と
+    同じ規律。席の外に出ていないことは `tests/test_staged_publication.py` が AST で機械強制する）。
+    """
+    record = {"target": target, "sym_max": sym_max}
+    (out_dir / EXPORT_PROVENANCE_FILE).write_text(
+        json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
 def export_variant(
     model_id: str,
     num_layers: int,
@@ -543,7 +580,8 @@ def export_variant(
     へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れたラッパから採るので
     互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の綴りは
     {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
-    {@link karume.artifacts.staged_publication}）。
+    {@link karume.artifacts.staged_publication}）。出所記録
+    （{@link _write_export_provenance}）は席を抜ける直前に同じ席へ書く。
     """
     from transformers import AutoTokenizer
 
@@ -590,6 +628,7 @@ def export_variant(
         attached = 0
         if act_quant:
             mirror, attached = _write_mirror_io(wrapper, graph, cases, staged)
+        _write_export_provenance(out_dir.name, sym_max, staged)
 
     model_bytes = sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE))
     return {

@@ -49,10 +49,9 @@ from karume.dist import (
     assert_storage,
     assert_storage_absent,
     complete_quant_weights,
-    safetensors_header,
+    ir_graph,
     table_payload,
 )
-from karume.ir import IR_METADATA_KEY
 from sbv2.card import SBV2_CARD_PROFILES, render_sbv2_model_card
 
 #: 既定のモデル名 — 系列の綴り（`sbv2-FN4{,-f16,-i8}`）と実重みの置き場を束ねる 1 語。
@@ -304,30 +303,53 @@ SBV2_KNOB_KEYS: tuple[str, ...] = (
 SBV2_MAX_TOKENS = 512
 SBV2_MAX_FRAMES = 4096
 
-#: 記号次元の上限を系列へ書き残す出所記録（`sbv2.export` が作業席の中で書く）。
+#: 記号次元の上限を系列へ書き残す出所記録（`sbv2.export` と `deberta.export` が作業席の中で
+#: 書く）。綴りは書き手 2 つと読み手 1 つで一致していなければならないが、`deberta` は SBV2 の
+#: 消費者ではないので**こちらを import しない**（shared 席は資産の共有であって結合ではない —
+#: モジュール doc）。一致は `deberta/tests/test_export.py` が毎回突き合わせる。
 EXPORT_PROVENANCE_FILE = "export_provenance.json"
 
 
 class Sbv2SymExpectation(NamedTuple):
-    """席が焼かれているべき記号次元の宣言（台本のターゲット名・IR の記号名・上限）。"""
+    """席が焼かれているべき記号次元の宣言（台本のターゲット名・IR の記号名・上限）。
+
+    `baked` は「その上限が **artifact のバイトから読めるか**」— front / voice は相対位置の
+    添字表を Tmax で焼いて `sym_prefix_slice` で切り出すので読めるが、text_encoder（DeBERTa）は
+    その表が ADR 0045 波 3 でグラフ**入力**へ昇格したため、上限を運ぶ焼き込み定数を 1 本も
+    持たない（2026-08-30 の出荷 4 コンテナ実測 — `sym_prefix_slice` は 0 本）。読めない席では
+    {@link assert_baked_sym_max} の代わりに {@link assert_baked_sym_max_absent} を掛け、
+    上限そのものの突合は {@link assert_sym_provenance}（記録）だけが持つ。
+    """
 
     target: str
     symbol: str
     sym_max: int
+    baked: bool = True
 
 
-#: 席 → 記号次元の期待。`sbv2.export` の `--sym-max` は**単一ターゲット限定で任意の値**を通す
-#: 研究用ノブで、渡した値はそのまま `Dim` の max = 焼き込み定数の静的次元になる。ところが上の
-#: {@link SBV2_MAX_TOKENS} / {@link SBV2_MAX_FRAMES} は定数で manifest へ焼かれるので、既定から
-#: 外して採り直した系列を挿すと **export は緑・配布も緑**のまま `pipelineConfig` だけが嘘になり、
-#: 消費側で初めて `sym_prefix_slice` の Tmax 超過に当たる（host 側の `maxFrames` 門は通過する）。
-#: 2 つの門で塞ぐ: {@link assert_sym_provenance}（書き出した側の記録）と
-#: {@link assert_baked_sym_max}（**artifact 自身**の焼き込み定数）。
+#: 席 → 記号次元の期待。`sbv2.export` / `deberta.export` の `--sym-max` は任意の値を通す研究用
+#: ノブで、渡した値はそのまま `Dim` の max になる。ところが上の {@link SBV2_MAX_TOKENS} /
+#: {@link SBV2_MAX_FRAMES} は定数で manifest へ焼かれるので、既定から外して採り直した系列を挿すと
+#: **export は緑・配布も緑**のまま `pipelineConfig` だけが嘘になり、消費側で初めて上限超過に
+#: 当たる（host 側の `maxFrames` 門は通過する）。2 つの門で塞ぐ:
+#: {@link assert_sym_provenance}（書き出した側の記録）と {@link assert_baked_sym_max}
+#: （**artifact 自身**の焼き込み定数 — `baked` の席だけ）。
+#:
 #: MUST: 列挙元は {@link SBV2_WEIGHTS} — dtype 席が 1 本増えた日に、名指ししなかった席だけが
 #: 黙って素通りする形にしない。
+#:
+#: `text_encoder` の上限が {@link SBV2_MAX_TOKENS} なのは、この定数が front の音素次元 P と
+#: DeBERTa のトークン次元 T の**両方**の上限を兼務しているから（`deberta.export.SYM_MAX` も同値）。
+#: ターゲット名に variant 名を使うのは、`deberta/export.py` に `--target` が無く、どの形として
+#: 焼いたかを名乗るのが variant（層数 × 出力形）1 つきりだから — dev-2layer / full-24layer を
+#: 22 層の席名のディレクトリへ写した取り違えは、この記録だけが名指しできる。
 SBV2_SYM_EXPECTATIONS: Mapping[str, Sbv2SymExpectation] = {
     files.file: expectation
     for name, expectation in (
+        (
+            "text_encoder",
+            Sbv2SymExpectation(SBV2_TEXT_ENCODER_VARIANT, "T", SBV2_MAX_TOKENS, baked=False),
+        ),
         ("front", Sbv2SymExpectation("front", "P", SBV2_MAX_TOKENS)),
         ("voice", Sbv2SymExpectation("voice", "T", SBV2_MAX_FRAMES)),
     )
@@ -456,30 +478,26 @@ def sbv2_ir_graph(path: Path) -> Mapping[str, Any]:
 
     グラフを見る門が 2 つある（{@link assert_bert_hidden} の層 / 出力 / 入力と、
     {@link assert_baked_sym_max} の焼き込み次元）ので、読み取りと不整合の名指しはここ 1 本。
+
+    実体は core の {@link karume.dist.ir_graph} をそのまま呼ぶ — 以前はここに同じ読み取りを
+    写していたが、配布形が常時分割になった（ADR 0081）ときに**写しの側だけが代表 path を
+    直接開いたまま**残った（グラフ shard を名指しで読むのは core 側だけ）。名前を残すのは
+    上の 2 門が同じ綴りで引くため。
     """
-    header = safetensors_header(path)
-    metadata = header.get("__metadata__")
-    if not isinstance(metadata, dict) or IR_METADATA_KEY not in metadata:
-        raise DistError(f"{path}: IR メタデータ（{IR_METADATA_KEY}）が無い")
-    try:
-        graph = json.loads(metadata[IR_METADATA_KEY])
-    except json.JSONDecodeError as error:
-        raise DistError(f"{path}: IR メタデータが JSON として読めない") from error
-    if not isinstance(graph, dict):
-        raise DistError(f"{path}: IR メタデータが最上位オブジェクトでない")
-    return graph
+    return ir_graph(path)
 
 
-def sbv2_baked_sym_max(role: str, path: Path, symbol: str) -> int:
-    """焼き込み定数の静的次元から、そのグラフが実際に受理する記号次元の上限を読む。
+def sbv2_baked_sym_bounds(role: str, path: Path, symbol: str) -> list[int]:
+    """焼き込み定数の静的次元から、そのグラフが受理する記号次元の上限を**全部**拾う。
 
     `sym_prefix_slice` は「Tmax で焼いた静的形の先頭 `coeff·sym+offset` を切り出す」op
     （ADR 0010）で、切り出し元の定数次元がそのまま**受理できる sym の上限**になる
     （超過はランタイムの `shapes.ts` が「Tmax 超過」で落とす）。したがって台本の `--sym-max`
     は資産の中に残っていて、記録を信じずに artifact だけから読める。
 
-    MUST: 対象ノードが 1 本も無ければ落とす（恒真化の門）— 相対位置の表が入力へ昇格するなど
-    グラフの形が変わると、この門は「何も見ずに緑」へ静かに退化する。
+    「1 本も無い」を空リストで返して呼び手に判断を預けるのは、席によって意味が逆だから —
+    front / voice では恒真化の兆候（{@link assert_baked_sym_max}）、text_encoder では
+    **在るべき状態**（{@link assert_baked_sym_max_absent}）。
     """
     graph = sbv2_ir_graph(path)
     values = graph.get("values")
@@ -501,6 +519,16 @@ def sbv2_baked_sym_max(role: str, path: Path, symbol: str) -> int:
                 bounds.append((shape[entry["dim"]] - entry["offset"]) // entry["coeff"])
         except (KeyError, IndexError, TypeError, ZeroDivisionError) as error:
             raise DistError(f"{role}: {path} の sym_prefix_slice が読めない — {error}") from error
+    return bounds
+
+
+def sbv2_baked_sym_max(role: str, path: Path, symbol: str) -> int:
+    """そのグラフが実際に受理する記号次元の上限（複数あれば最も厳しいもの）。
+
+    MUST: 対象ノードが 1 本も無ければ落とす（恒真化の門）— 相対位置の表が入力へ昇格するなど
+    グラフの形が変わると、この門は「何も見ずに緑」へ静かに退化する。
+    """
+    bounds = sbv2_baked_sym_bounds(role, path, symbol)
     if not bounds:
         raise DistError(
             f"{role}: {path} に記号 {symbol!r} の sym_prefix_slice が 1 本も無い —"
@@ -524,6 +552,30 @@ def assert_baked_sym_max(role: str, path: Path, expectation: Sbv2SymExpectation)
             f"配布の宣言は {expectation.sym_max}"
             f"（`sbv2.export --target {expectation.target} --sym-max` の非既定値で採った系列）—"
             "export も配布も緑のまま、消費側だけが Tmax 超過で落ちる形になる"
+        )
+
+
+def assert_baked_sym_max_absent(role: str, path: Path, expectation: Sbv2SymExpectation) -> None:
+    """`baked=False` の席が、本当に上限を運ぶ焼き込み定数を持たないことを見る。
+
+    text_encoder の上限は artifact から読めない（相対位置の表がグラフ入力 — ADR 0045 波 3）ので、
+    突合は記録（{@link assert_sym_provenance}）だけが持ち、記録の無い系列は受理される。その
+    「読めない」は**グラフの形の事実**であって恒久の保証ではないので、形が戻った日に席の分類が
+    黙って古びる — 表が焼き戻れば `sym_prefix_slice` が生え、そのときは
+    {@link assert_baked_sym_max} 側（`baked=True`）へ移すのが正しい。ここが落ちるのはその合図。
+
+    NOTE: 読めない席で唯一 512 に見える静的次元は `rel_embeddings` の `[512, 1024]` だが、これは
+    `2 × position_buckets`（= 256）で、`max_position_embeddings` と値が一致しているだけの別物
+    （`deberta/patch.py` の対数バケット化）。上限の出どころとして読むと**偶然の一致に門を建てる**
+    ことになるので、代わりにここは「上限を運ぶノードが無い」ことだけを見る。
+    """
+    bounds = sbv2_baked_sym_bounds(role, path, expectation.symbol)
+    if bounds:
+        raise DistError(
+            f"{role}: {path} に記号 {expectation.symbol!r} の sym_prefix_slice が"
+            f" {len(bounds)} 本ある（上限 {sorted(set(bounds))}）— この席は"
+            "「上限は artifact から読めない」前提で記録だけを突き合わせている。"
+            "焼き込みが戻ったなら SBV2_SYM_EXPECTATIONS の baked を真へ移す"
         )
 
 
@@ -795,7 +847,10 @@ def sbv2_plan(
         assert_storage_absent(role, source, SBV2_STORAGE_FORBIDDEN)
         expectation = SBV2_SYM_EXPECTATIONS.get(role)
         if expectation is not None:
-            assert_baked_sym_max(role, source, expectation)
+            if expectation.baked:
+                assert_baked_sym_max(role, source, expectation)
+            else:
+                assert_baked_sym_max_absent(role, source, expectation)
             assert_sym_provenance(role, source, expectation)
     for role in SBV2_TEXT_ENCODER_ROLES:
         assert_bert_hidden(placements[role], placements["symbols"])

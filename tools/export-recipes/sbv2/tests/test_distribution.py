@@ -25,6 +25,13 @@ import numpy as np
 import pytest
 from ir_fixtures import ir_container
 from safetensors.numpy import load_file, save_file
+from shard_series import (
+    placed_paths,
+    read_component,
+    replace_component,
+    shard_paths,
+    write_component,
+)
 
 from dist import main
 from karume.dist import (
@@ -57,6 +64,7 @@ from sbv2.distribution import (
     SBV2_STYLE_KEY,
     SBV2_SYM_EXPECTATIONS,
     SBV2_TEXT_ENCODER_INPUTS,
+    SBV2_TEXT_ENCODER_VARIANT,
     SBV2_WEIGHTS,
     Sbv2Sources,
     sbv2_knob_defaults,
@@ -119,6 +127,14 @@ def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
     return [f"{model}/{rel}" for rel in paths]
 
 
+def _placed_paths() -> list[str]:
+    """配布形に現れる相対 path — **weights の席だけ**が shard 連番に展開される（ADR 0081）。
+
+    tokenizer / symbols / 2 表は assets の席（1 ファイル参照）なので分割されない。
+    """
+    return placed_paths(SBV2_OUTPUT_PATHS, SBV2_WEIGHTS)
+
+
 def _present(out_dir: Path) -> list[str]:
     return sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
 
@@ -142,7 +158,12 @@ def _fake_ir(
     outputs: int = _SBV2_GRAPH_OUTPUTS,
     inputs: Iterable[str] = SBV2_TEXT_ENCODER_INPUTS,
 ) -> str:
-    """門が読む最小の IR メタデータ（層番号つき initializer 名・出力名・入力名だけ）。"""
+    """門が読む最小の IR メタデータ（層番号つき initializer 名・出力名・入力名だけ）。
+
+    `values` / `nodes` は**空**で持つ — text_encoder 席には「上限を運ぶ焼き込み定数が 1 本も
+    無い」ことを見る門（{@link assert_baked_sym_max_absent}）も掛かっており、欄ごと欠けた
+    メタデータはそちらの構造検査で先に落ちて、こちらの門の失敗理由が観測できなくなる。
+    """
     return json.dumps(
         {
             "initializers": {
@@ -151,6 +172,8 @@ def _fake_ir(
             },
             "outputs": [f"layer_norm_{index}" for index in range(outputs)],
             "inputs": [{"name": name} for name in inputs],
+            "values": {},
+            "nodes": [],
         }
     )
 
@@ -204,7 +227,7 @@ _SBV2_STORAGES: Mapping[str, str] = {
 }
 
 
-def _sbv2_container(role: str, *, storage: str | None = None, model: str = "") -> bytes:
+def _sbv2_container(role: str, *, storage: str | None = None, model: str = "") -> list[bytes]:
     """weights の席へ挿す**正当な IR コンテナ**（役割ごとに違うバイト列）。
 
     組み立ては入力コンテナを IR v1 の全規則で見る
@@ -347,9 +370,11 @@ def _build_sbv2_sources(
         demo=root / "outputs" / "sbv2-demo",
         model=root / "inputs" / "sbv2" / model,
     )
-    _write(sources.text_encoder / "model.safetensors", _SBV2_PAYLOADS["text_encoder"])
+    write_component(sources.text_encoder / "model.safetensors", _SBV2_PAYLOADS["text_encoder"])
     _write(sources.text_encoder / "io.case0.safetensors", b"io-fixture")
-    _write(sources.text_encoder_i4 / "model.safetensors", _SBV2_PAYLOADS["text_encoder_i4"])
+    write_component(
+        sources.text_encoder_i4 / "model.safetensors", _SBV2_PAYLOADS["text_encoder_i4"]
+    )
     _write(sources.text_encoder_i4 / "io.case0.safetensors", b"io-fixture")
     for series_dir, label in (
         (sources.series_f16, "f16"),
@@ -359,7 +384,7 @@ def _build_sbv2_sources(
         for target in ("front", "voice"):
             role = f"{target}_{label}"
             payload = _SBV2_PAYLOADS[role] if not offset else _sbv2_container(role, model=model)
-            _write(series_dir / target / "model.safetensors", payload)
+            write_component(series_dir / target / "model.safetensors", payload)
             _write(series_dir / target / "io.p2.safetensors", b"io-fixture")
         # 配布しない単体グラフ（golden 検証専用）も系列には並ぶ。
         for target in ("dp", "flow", "dec"):
@@ -403,7 +428,7 @@ def _sbv2_model(manifest: Mapping[str, Any], name: str = SBV2_DEFAULT_MODEL) -> 
 class TestSbv2Layout:
     def test_it_places_every_declared_path_under_the_model_subtree(self, sbv2_assembled) -> None:
         out_dir, _ = sbv2_assembled
-        expected = _in_subtree(SBV2_DEFAULT_MODEL, SBV2_OUTPUT_PATHS.values())
+        expected = _in_subtree(SBV2_DEFAULT_MODEL, _placed_paths())
         assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
 
     def test_it_never_carries_io_fixtures_into_the_distribution(self, sbv2_assembled) -> None:
@@ -428,7 +453,7 @@ class TestSbv2Layout:
         out_dir, _ = sbv2_assembled
         for role in ("front_f16", "front_i8", "voice_f16", "voice_i8"):
             placed = out_dir / SBV2_DEFAULT_MODEL / SBV2_OUTPUT_PATHS[role]
-            assert placed.read_bytes() == _SBV2_PAYLOADS[role]
+            assert read_component(placed) == _SBV2_PAYLOADS[role]
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path)
@@ -645,8 +670,9 @@ class TestSbv2StorageGate:
 
     def test_it_stops_when_an_f16_series_holds_raw_f32(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path)
-        (sources.series_f16 / "front" / "model.safetensors").write_bytes(
-            _fake_safetensors("F32", b"front-f16-weights")
+        replace_component(
+            sources.series_f16 / "front" / "model.safetensors",
+            _fake_safetensors("F32", b"front-f16-weights"),
         )
         out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
         with pytest.raises(DistError, match=r"front_f16: .* F16 が無い"):
@@ -656,8 +682,9 @@ class TestSbv2StorageGate:
 
     def test_it_stops_when_an_i8_series_lacks_i8_storage(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path)
-        (sources.series_i8 / "voice" / "model.safetensors").write_bytes(
-            _fake_safetensors("F16", b"voice-i8-weights")
+        replace_component(
+            sources.series_i8 / "voice" / "model.safetensors",
+            _fake_safetensors("F16", b"voice-i8-weights"),
         )
         with pytest.raises(DistError, match=r"voice_i8: .* I8 が無い"):
             _assemble_sbv2(sources, tmp_path / "out")
@@ -665,8 +692,9 @@ class TestSbv2StorageGate:
     def test_it_stops_when_the_text_encoder_is_not_i8(self, tmp_path: Path) -> None:
         """DeBERTa は i8 系列 1 本だけを配る（f32 の 1.32GB は配布に非現実的）。"""
         sources = _build_sbv2_sources(tmp_path)
-        (sources.text_encoder / "model.safetensors").write_bytes(
-            _fake_safetensors("F32", b"deberta-f32-weights")
+        replace_component(
+            sources.text_encoder / "model.safetensors",
+            _fake_safetensors("F32", b"deberta-f32-weights"),
         )
         with pytest.raises(DistError, match=r"text_encoder: .* I8 が無い"):
             _assemble_sbv2(sources, tmp_path / "out")
@@ -678,7 +706,9 @@ class TestSbv2StorageGate:
         格納 dtype の要求だけが席を区別できる。
         """
         sources = _build_sbv2_sources(tmp_path)
-        (sources.text_encoder_i4 / "model.safetensors").write_bytes(_SBV2_PAYLOADS["text_encoder"])
+        replace_component(
+            sources.text_encoder_i4 / "model.safetensors", _SBV2_PAYLOADS["text_encoder"]
+        )
         with pytest.raises(DistError, match=r"text_encoder_i4: .* I4 が無い"):
             _assemble_sbv2(sources, tmp_path / "out")
 
@@ -689,7 +719,9 @@ class TestSbv2StorageGate:
         i8 系列を挿しても層数も入力も出力も一致する。格納 dtype の要求だけが席を区別できる。
         """
         sources = _build_sbv2_sources(tmp_path)
-        (sources.series_i4 / "voice" / "model.safetensors").write_bytes(_SBV2_PAYLOADS["voice_i8"])
+        replace_component(
+            sources.series_i4 / "voice" / "model.safetensors", _SBV2_PAYLOADS["voice_i8"]
+        )
         with pytest.raises(DistError, match=r"voice_i4: .* I4 が無い"):
             _assemble_sbv2(sources, tmp_path / "out")
 
@@ -702,10 +734,11 @@ class TestSbv2StorageGate:
         （`SBV2_STORAGE_FORBIDDEN`）が唯一の検出器。
         """
         sources = _build_sbv2_sources(tmp_path)
-        (sources.series_i8 / "voice" / "model.safetensors").write_bytes(
+        replace_component(
+            sources.series_i8 / "voice" / "model.safetensors",
             _mixed_safetensors(
                 ("F32", "I8", "I4"), b"voice-i4-weights", _SBV2_IR_METADATA["voice_i4"]
-            )
+            ),
         )
         out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
         with pytest.raises(DistError, match=r"voice_i8: .* I4 がある"):
@@ -718,10 +751,11 @@ class TestSbv2StorageGate:
     ) -> None:
         """DeBERTa の i8 席も同じ — 2 本は同じ 22 層なので形の門は両方とも通る。"""
         sources = _build_sbv2_sources(tmp_path)
-        (sources.text_encoder / "model.safetensors").write_bytes(
+        replace_component(
+            sources.text_encoder / "model.safetensors",
             _mixed_safetensors(
                 ("F32", "I8", "I4"), b"deberta-i4-weights", _SBV2_IR_METADATA["text_encoder_i4"]
-            )
+            ),
         )
         with pytest.raises(DistError, match=r"text_encoder: .* I4 がある"):
             _assemble_sbv2(sources, tmp_path / "out")
@@ -766,10 +800,11 @@ class TestSbv2StorageGate:
                     # 格納 dtype の門だけを回すため — 席と系列の両方を動かすと、どちらの門で
                     # 落ちたのか分からなくなる）。動かすのは格納 dtype だけで、その集合は
                     # {@link _SBV2_SERIES_HEADERS} が名指しする実物の形になる。
-                    sbv2_placements(sources)[seat].write_bytes(
+                    replace_component(
+                        sbv2_placements(sources)[seat],
                         _sbv2_container(
                             seat, storage=_SBV2_STORAGES[series], model="swapped-series"
-                        )
+                        ),
                     )
                     out_dir = tmp_path / "out" / f"{seat}-{series}"
 
@@ -786,17 +821,21 @@ class TestSbv2SymGate:
     `sbv2.export --target voice --sym-max 1024` は公式 CLI で通り、golden も 512 までなので
     export は成立する。配布側は `maxFrames` を 4096 で焼くので**配布も緑**になり、利用者が
     1025〜4096 フレームの発話を頼んだときに初めて `sym_prefix_slice` の Tmax 超過で落ちる。
+
+    text_encoder 席だけは向きが逆で、上限を運ぶ焼き込み定数が**無い**ことを見る（記録だけが
+    突合の手段である前提そのもの）— 焼き戻ったら席の分類を移す合図になる。
     """
 
     @staticmethod
     def _rebake(sources: Sbv2Sources, role: str, symbol: str, sym_max: int) -> None:
         """席の資産だけを別の記号次元で焼き直した形にする（格納 dtype は正しいまま）。"""
-        sbv2_placements(sources)[role].write_bytes(
+        replace_component(
+            sbv2_placements(sources)[role],
             _fake_safetensors(
                 SBV2_STORAGE_REQUIREMENTS[role],
                 f"{role}-rebaked".encode(),
                 {IR_METADATA_KEY: _fake_sym_ir(symbol, sym_max)},
-            )
+            ),
         )
 
     def test_it_stops_when_the_voice_graph_is_baked_at_another_frame_max(
@@ -821,6 +860,20 @@ class TestSbv2SymGate:
         with pytest.raises(DistError, match=r"front_f16: .*上限 256 .*宣言は 512"):
             _assemble_sbv2(sources, tmp_path / "out")
 
+    def test_it_stops_when_the_text_encoder_grew_a_baked_symbol_slice(self, tmp_path: Path) -> None:
+        """text_encoder 席の恒真化の門 — 「読めない」はグラフの形の事実で、恒久の保証ではない。
+
+        DeBERTa は相対位置の添字表を ADR 0045 波 3 でグラフ入力へ昇格させたので上限を運ぶ
+        焼き込み定数を持たず、突合は記録（記録の無い系列は受理）だけが担う。表が焼き戻れば
+        `sym_prefix_slice` が生えて artifact から読めるようになるので、そのときは席を
+        `baked=True` 側へ移すのが正しい — 黙って記録だけの弱い門に留まらせない。
+        """
+        sources = _build_sbv2_sources(tmp_path)
+        self._rebake(sources, "text_encoder", "T", SBV2_MAX_TOKENS)
+
+        with pytest.raises(DistError, match=r"text_encoder: .* sym_prefix_slice が 1 本ある"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
     def test_it_stops_when_the_graph_has_no_baked_symbol_slice(self, tmp_path: Path) -> None:
         """恒真化の門 — 表が入力へ昇格するなどして対象ノードが消えたら、黙って緑にしない。"""
         promoted = json.dumps(
@@ -830,24 +883,33 @@ class TestSbv2SymGate:
             }
         )
         sources = _build_sbv2_sources(tmp_path)
-        sbv2_placements(sources)["front_i4"].write_bytes(
-            _fake_safetensors("I4", b"front-i4-weights", {IR_METADATA_KEY: promoted})
+        replace_component(
+            sbv2_placements(sources)["front_i4"],
+            _fake_safetensors("I4", b"front-i4-weights", {IR_METADATA_KEY: promoted}),
         )
 
         with pytest.raises(DistError, match=r"front_i4: .* sym_prefix_slice が 1 本も無い"):
             _assemble_sbv2(sources, tmp_path / "out")
 
-    def test_the_expectations_cover_every_front_and_voice_seat(self) -> None:
-        """dtype 席が 1 本増えた日に、名指ししなかった席だけが黙って素通りする形にしない。"""
-        expected = {
-            files.file for name in ("front", "voice") for files in SBV2_WEIGHTS[name].values()
-        }
+    def test_the_expectations_cover_every_weights_seat(self) -> None:
+        """dtype 席が 1 本増えた日に、名指ししなかった席だけが黙って素通りする形にしない。
+
+        text_encoder も対象（席は全 8 役）— front と DeBERTa は `SBV2_MAX_TOKENS` を兼務する
+        別々の台本なので、片方だけ非既定で採り直した組が普通に組み上がる。
+        """
+        expected = {files.file for seats in SBV2_WEIGHTS.values() for files in seats.values()}
 
         assert set(SBV2_SYM_EXPECTATIONS) == expected
-        assert {entry.sym_max for role, entry in SBV2_SYM_EXPECTATIONS.items()} == {
+        assert {entry.sym_max for entry in SBV2_SYM_EXPECTATIONS.values()} == {
             SBV2_MAX_TOKENS,
             SBV2_MAX_FRAMES,
         }
+
+    def test_only_the_text_encoder_seats_are_unreadable_from_the_artifact(self) -> None:
+        """`baked` が偽なのは text_encoder だけ（front / voice の焼き込み門を落とさない）。"""
+        unreadable = {role for role, entry in SBV2_SYM_EXPECTATIONS.items() if not entry.baked}
+
+        assert unreadable == {files.file for files in SBV2_WEIGHTS["text_encoder"].values()}
 
 
 class TestSbv2SymProvenance:
@@ -888,6 +950,50 @@ class TestSbv2SymProvenance:
         with pytest.raises(DistError, match=r"voice_i4: 出所記録の target が 'front'"):
             _assemble_sbv2(sources, tmp_path / "out")
 
+    def test_a_matching_text_encoder_record_changes_nothing(self, tmp_path: Path) -> None:
+        """正常対 — 既定の `--sym-max` で焼いた 22 層 variant の記録は素通りする。"""
+        sources = _build_sbv2_sources(tmp_path)
+        self._record(
+            sources,
+            "text_encoder",
+            {"target": SBV2_TEXT_ENCODER_VARIANT, "sym_max": SBV2_MAX_TOKENS},
+        )
+
+        _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_it_stops_when_the_text_encoder_was_baked_at_another_token_max(
+        self, tmp_path: Path
+    ) -> None:
+        """text_encoder 席は**記録だけ**が上限を運ぶ（`deberta.export --sym-max` の逸脱）。
+
+        DeBERTa のグラフには上限を運ぶ焼き込み定数が無い（相対位置の表がグラフ入力 —
+        ADR 0045 波 3）ので、`assert_baked_sym_max` に当たる artifact 側の検出器が存在しない。
+        `pipelineConfig.maxTokens` は定数で焼かれるため、ここが落とさなければ配布形は
+        「512 まで受けると宣言しているのに 256 で焼かれた text_encoder」で成立する。
+        """
+        sources = _build_sbv2_sources(tmp_path)
+        self._record(
+            sources, "text_encoder_i4", {"target": SBV2_TEXT_ENCODER_VARIANT, "sym_max": 256}
+        )
+
+        with pytest.raises(DistError, match=r"text_encoder_i4: 出所記録の sym_max が 256"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_it_stops_when_the_text_encoder_record_names_another_variant(
+        self, tmp_path: Path
+    ) -> None:
+        """検証用 variant（全層出し / dev）を 22 層の席へ写した取り違え。
+
+        層数と出力本数は {@link assert_bert_hidden} が見るが、それは**中身が正しい 22 層**なら
+        通る — `--layers 22` を別の出力形で焼き直した系列は形の門を素通りする。どの variant と
+        して焼いたかを名乗れるのは記録だけ。
+        """
+        sources = _build_sbv2_sources(tmp_path)
+        self._record(sources, "text_encoder", {"target": "full-24layer", "sym_max": 512})
+
+        with pytest.raises(DistError, match=r"text_encoder: 出所記録の target が 'full-24layer'"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
     def test_it_stops_when_the_record_is_not_json(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path)
         (sbv2_placements(sources)["front_i8"].parent / EXPORT_PROVENANCE_FILE).write_text(
@@ -909,8 +1015,9 @@ class TestSbv2BertHiddenGate:
     def test_it_stops_when_the_encoder_was_not_truncated(self, tmp_path: Path) -> None:
         """切り詰め忘れの 24 層資産（出力 1 本）は、最終出力が layer 23 なので別の層になる。"""
         sources = _build_sbv2_sources(tmp_path)
-        (sources.text_encoder / "model.safetensors").write_bytes(
-            _fake_safetensors("I8", b"deberta-i8-weights", {IR_METADATA_KEY: _fake_ir(layers=24)})
+        replace_component(
+            sources.text_encoder / "model.safetensors",
+            _fake_safetensors("I8", b"deberta-i8-weights", {IR_METADATA_KEY: _fake_ir(layers=24)}),
         )
         out_dir = tmp_path / "out"
         with pytest.raises(DistError, match=r"encoder は 24 層で、期待の 22 層でない"):
@@ -921,8 +1028,9 @@ class TestSbv2BertHiddenGate:
     def test_it_stops_when_the_verification_variant_slipped_in(self, tmp_path: Path) -> None:
         """全層出し（検証用）の資産が配布経路に混ざると、readback も取り出し位置も変わる。"""
         sources = _build_sbv2_sources(tmp_path)
-        (sources.text_encoder / "model.safetensors").write_bytes(
-            _fake_safetensors("I8", b"deberta-i8-weights", {IR_METADATA_KEY: _fake_ir(outputs=23)})
+        replace_component(
+            sources.text_encoder / "model.safetensors",
+            _fake_safetensors("I8", b"deberta-i8-weights", {IR_METADATA_KEY: _fake_ir(outputs=23)}),
         )
         with pytest.raises(DistError, match=r"グラフ出力が 23 本で、配布形が要求する 1 本でない"):
             _assemble_sbv2(sources, tmp_path / "out")
@@ -937,12 +1045,13 @@ class TestSbv2BertHiddenGate:
     def test_it_stops_when_the_position_tables_were_baked_back_in(self, tmp_path: Path) -> None:
         """添字表が入力から外れた資産（= 2MiB の定数が焼き戻った形）を配布経路で止める。"""
         sources = _build_sbv2_sources(tmp_path)
-        (sources.text_encoder / "model.safetensors").write_bytes(
+        replace_component(
+            sources.text_encoder / "model.safetensors",
             _fake_safetensors(
                 "I8",
                 b"deberta-i8-weights",
                 {IR_METADATA_KEY: _fake_ir(inputs=("input_ids", "attention_mask"))},
-            )
+            ),
         )
         with pytest.raises(DistError, match=r"グラフ入力が \['input_ids', 'attention_mask'\]"):
             _assemble_sbv2(sources, tmp_path / "out")
@@ -953,8 +1062,9 @@ class TestSbv2BertHiddenGate:
         2 本は別々の `deberta/export.py` 実行の産物なので、対で動かし忘れる形は普通に起きる。
         """
         sources = _build_sbv2_sources(tmp_path)
-        (sources.text_encoder_i4 / "model.safetensors").write_bytes(
-            _fake_safetensors("I4", b"deberta-i4-weights", {IR_METADATA_KEY: _fake_ir(layers=24)})
+        replace_component(
+            sources.text_encoder_i4 / "model.safetensors",
+            _fake_safetensors("I4", b"deberta-i4-weights", {IR_METADATA_KEY: _fake_ir(layers=24)}),
         )
         with pytest.raises(DistError, match=r"encoder は 24 層で、期待の 22 層でない"):
             _assemble_sbv2(sources, tmp_path / "out")
@@ -972,11 +1082,12 @@ class TestSbv2Manifest:
 
     def test_it_derives_size_and_sha256_from_the_placed_files(self, sbv2_assembled) -> None:
         out_dir, manifest = sbv2_assembled
-        ref = _sbv2_model(manifest)["weights"]["front"]["i8"]["shards"][0]
-        payload = _SBV2_PAYLOADS["front_i8"]
-        assert ref["size"] == len(payload)
-        assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
-        assert (out_dir / ref["path"]).read_bytes() == payload
+        shards = _sbv2_model(manifest)["weights"]["front"]["i8"]["shards"]
+        # 3 点セットは shard 1 本ずつに掛かる（列のどこかだけ古い、を作れない）。
+        for ref, payload in zip(shards, _SBV2_PAYLOADS["front_i8"], strict=True):
+            assert ref["size"] == len(payload)
+            assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
+            assert (out_dir / ref["path"]).read_bytes() == payload
 
     def test_the_text_encoder_declares_both_storage_forms(self, sbv2_assembled) -> None:
         """dtype キーは常に要る統一形（ADR 0041 §3 — 2 形パースを消した）。
@@ -987,19 +1098,33 @@ class TestSbv2Manifest:
         _, manifest = sbv2_assembled
         entry = _sbv2_model(manifest)["weights"]["text_encoder"]
         assert list(entry) == ["i8", "i4"]
-        assert entry["i8"]["shards"][0]["path"].endswith("model.i8.safetensors")
-        assert entry["i4"]["shards"][0]["path"].endswith("model.i4.safetensors")
+        for label in ("i8", "i4"):
+            paths = [ref["path"] for ref in entry[label]["shards"]]
+            expected = shard_paths(f"model.{label}.safetensors", len(paths))
+            assert [path.rsplit("/", 1)[-1] for path in paths] == expected
 
-    def test_every_dtype_seat_declares_a_single_shard(self, sbv2_assembled) -> None:
-        """`karume/4` の shard 列は、この配布形では常に 1 要素（= `karume_ir` を持つコンテナ）。
+    def test_every_dtype_seat_declares_an_ordered_shard_list(self, sbv2_assembled) -> None:
+        """`karume/4` の shard 列は**常に 2 要素以上**（グラフ shard + weight shard — ADR 0081）。
 
-        exporter に分割規則が無いこと（ADR 0070 決定 1 は席だけ）の実 recipe 側の観測点 —
-        列に移した後も「1 本のコンテナを 1 本として配る」形が変わっていないことを固定する。
+        以前ここは「常に 1 要素」を固定していた（分割規則が席だけで、1 本のコンテナを 1 本として
+        配っていた時代の観測点）。常時分割になった今それは配布形の不変条件そのものが反転した
+        ので、主張も反転させる — 1 要素の宣言が出たら、それは書き手がグラフ shard を作って
+        いない形で、`karume verify` のグラフ shard 空の門が落とすべき資産である。
+
+        並びの検査（連番が 1 始まりで欠けなく揃う）まで見るのは、ロード側が**列の順**に読む
+        から（先頭がグラフ shard）— 集合として合っていても順が崩れれば読めない。
         """
         _, manifest = sbv2_assembled
         for name, labels in _sbv2_model(manifest)["weights"].items():
             for label, entry in labels.items():
-                assert len(entry["shards"]) == 1, (name, label)
+                paths = [ref["path"] for ref in entry["shards"]]
+                assert len(paths) >= 2, (name, label)
+                stem = paths[0].rsplit("/", 1)[0]
+                base = f"model.{label}.safetensors"
+                assert paths == [f"{stem}/{rel}" for rel in shard_paths(base, len(paths))], (
+                    name,
+                    label,
+                )
 
     def test_it_carries_the_quant_table(self, sbv2_assembled) -> None:
         _, manifest = sbv2_assembled
@@ -1049,8 +1174,9 @@ class TestSbv2Manifest:
             entry = _sbv2_model(manifest)["weights"][role]
             assert list(entry) == ["f16", "i8", "i4"], role
             for label in entry:
-                path = entry[label]["shards"][0]["path"]
-                assert path.endswith(f"model.{label}.safetensors"), role
+                paths = [ref["path"] for ref in entry[label]["shards"]]
+                names = shard_paths(f"model.{label}.safetensors", len(paths))
+                assert [path.rsplit("/", 1)[-1] for path in paths] == names, role
 
     def test_the_i4_quant_takes_the_mixed_form_in_every_role(self, sbv2_assembled) -> None:
         """`i4` の意味は「3 席とも i4 混成・session は `i8` のまま」— 軸が 1 つであることを固定。
@@ -1094,7 +1220,7 @@ class TestSbv2QuantNaming:
 class TestSbv2VerifyDist:
     def test_it_passes_on_a_freshly_assembled_tree(self, sbv2_assembled) -> None:
         out_dir, _ = sbv2_assembled
-        expected = _in_subtree(SBV2_DEFAULT_MODEL, SBV2_OUTPUT_PATHS.values())
+        expected = _in_subtree(SBV2_DEFAULT_MODEL, _placed_paths())
         assert sorted(verify_dist(out_dir)) == sorted(expected)
 
     def test_it_passes_without_a_model_card(self, sbv2_assembled) -> None:
@@ -1128,11 +1254,13 @@ class TestSbv2Family:
     def test_the_text_encoder_is_fetched_once_for_the_whole_family(self, family) -> None:
         """319MB の DeBERTa がモデルごとに複製されるのが v1 の実害（ADR 0041 Context ②）。"""
         _, manifest = family
-        paths = {
-            name: model["weights"]["text_encoder"]["i8"]["shards"][0]["path"]
-            for name, model in manifest["models"].items()
-        }
-        assert set(paths.values()) == {f"{SHARED_DIRNAME}/{SBV2_OUTPUT_PATHS['text_encoder']}"}
+        shared = [
+            f"{SHARED_DIRNAME}/{rel}" for rel in shard_paths(SBV2_OUTPUT_PATHS["text_encoder"])
+        ]
+        # 畳まれるのは**コンポーネント丸ごと**（shard 列がそのまま shared/ の下へ移る）。
+        for name, model in manifest["models"].items():
+            refs = model["weights"]["text_encoder"]["i8"]["shards"]
+            assert [ref["path"] for ref in refs] == shared, name
 
     def test_the_tables_that_differ_stay_per_model(self, family) -> None:
         out_dir, manifest = family
@@ -1265,7 +1393,7 @@ class TestSbv2Cli:
         )
 
         out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
-        expected = _in_subtree(SBV2_DEFAULT_MODEL, SBV2_OUTPUT_PATHS.values())
+        expected = _in_subtree(SBV2_DEFAULT_MODEL, _placed_paths())
         assert sorted(verify_dist(out_dir)) == sorted(expected)
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         defaults = _sbv2_model(manifest)["pipelineConfig"]["defaults"]

@@ -436,26 +436,35 @@ def assert_checkpoint_bytes(path: Path, state_dict: Mapping[str, torch.Tensor]) 
     重み由来でない initializer（畳み込みで焼かれた定数）は `const.` 接頭辞を持つので、
     それ以外の余剰キーは「重みが黙って書き換えられて別名で入った」形として落とす。
     一致した本数を返す。
+
+    MUST: 突合は**全 shard の和**で見る（ADR 0081 — 配布形は常に「グラフ shard + weight
+    shard 列」）。代表 path 1 本だけを開く形にすると、テンソルを 1 本も持たないグラフ shard を
+    読んで「全部欠けている」になる（分割前は代表 path が現物だったので素で通っていた）。
     """
-    with safe_open(str(path), framework="pt") as handle:
-        keys = set(handle.keys())
-        missing = sorted(set(state_dict) - keys)
-        if missing:
-            raise AssertionError(f"{path}: state_dict の鍵が initializer に無い: {missing}")
-        extra = sorted(key for key in keys - set(state_dict) if not key.startswith(CONST_PREFIX))
-        if extra:
-            raise AssertionError(f"{path}: 重み由来でない initializer がある: {extra}")
-        for name in sorted(state_dict):
-            source = state_dict[name]
-            stored = handle.get_tensor(name)
-            if stored.dtype != source.dtype or tuple(stored.shape) != tuple(source.shape):
-                raise AssertionError(
-                    f"テンソル '{name}': dtype / shape 不一致"
-                    f"（元 {source.dtype} {tuple(source.shape)} /"
-                    f" 読み直し {stored.dtype} {tuple(stored.shape)}）"
-                )
-            if stored.numpy().tobytes() != source.numpy().tobytes():
-                raise AssertionError(f"テンソル '{name}': バイト列が一致しない")
+    shards = resolve_shards(path)
+    keys: set[str] = set()
+    for shard in shards:
+        with safe_open(str(shard), framework="pt") as handle:
+            keys |= set(handle.keys())
+    missing = sorted(set(state_dict) - keys)
+    if missing:
+        raise AssertionError(f"{path}: state_dict の鍵が initializer に無い: {missing}")
+    extra = sorted(key for key in keys - set(state_dict) if not key.startswith(CONST_PREFIX))
+    if extra:
+        raise AssertionError(f"{path}: 重み由来でない initializer がある: {extra}")
+    for shard in shards:
+        with safe_open(str(shard), framework="pt") as handle:
+            for name in sorted(set(handle.keys()) & set(state_dict)):
+                source = state_dict[name]
+                stored = handle.get_tensor(name)
+                if stored.dtype != source.dtype or tuple(stored.shape) != tuple(source.shape):
+                    raise AssertionError(
+                        f"テンソル '{name}': dtype / shape 不一致"
+                        f"（元 {source.dtype} {tuple(source.shape)} /"
+                        f" 読み直し {stored.dtype} {tuple(stored.shape)}）"
+                    )
+                if stored.numpy().tobytes() != source.numpy().tobytes():
+                    raise AssertionError(f"テンソル '{name}': バイト列が一致しない")
     return len(state_dict)
 
 

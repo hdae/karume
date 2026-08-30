@@ -9,8 +9,8 @@ manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一�
 
 core だけで観測できる層（合成計画で足りる規模上限・quant 完全写像・staging/swap の不変条件・
 帰属プロファイルの解決規則）は `tools/exporter/tests/test_dist.py` が持つ（ADR 0065 段 3+4 の
-分割）。カードの観測も**組み立て 1 周ぶん**でここが持つ — 母音検出のテンプレートは core の
-`tests/test_modelcard.py` に固有の節を持っていなかったので、`test_card.py` は作らない。
+分割）。カードの観測は**組み立て 1 周ぶん**をここが持ち、テンプレート単位の門（案内するロード
+入口）は `vowel_detector/tests/test_card.py`。
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 from ir_fixtures import ir_container
 from safetensors.numpy import load_file
+from shard_series import placed_paths, write_component
 
 from dist import default_out_dir, main
 from karume.dist import (
@@ -38,8 +39,10 @@ from karume.ir import IR_METADATA_KEY
 from vowel_detector.distribution import (
     PIPELINE,
     VOWEL_DETECTOR_DEFAULT_MODEL,
+    VOWEL_DETECTOR_GRAPH_ROLE,
     VOWEL_DETECTOR_MAX_FRAMES,
     VOWEL_DETECTOR_OUTPUT_PATHS,
+    VOWEL_DETECTOR_WEIGHTS,
     VowelDetectorSources,
     vowel_detector_plan,
     vowel_detector_repo_name,
@@ -71,6 +74,15 @@ def _write(path: Path, payload: bytes) -> None:
 def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
     """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。"""
     return [f"{model}/{rel}" for rel in paths]
+
+
+def _placed_paths() -> list[str]:
+    """配布形に現れる相対 path — **weights の席だけ**が shard 連番に展開される（ADR 0081）。
+
+    mel 基底は assets の席（1 ファイル参照）なので分割されない — 2 種の席が並ぶこの family では、
+    展開が weights にだけ掛かることがそのまま期待値に出る。
+    """
+    return placed_paths(VOWEL_DETECTOR_OUTPUT_PATHS, VOWEL_DETECTOR_WEIGHTS)
 
 
 def _present(out_dir: Path) -> list[str]:
@@ -134,22 +146,29 @@ def _vowel_detector_graph(
     )
 
 
-def _vowel_detector_container(dtype: str, graph: str | None) -> bytes:
+def _vowel_detector_container(
+    dtype: str, graph: str | None, storage: str | None
+) -> bytes | list[bytes]:
     """系列に置く母音検出グラフの中身。
 
-    組み立てへ届く既定の形は**正当な IR コンテナ**でなければならない（組み立ては入力を
-    IR v1 の全規則で見る — `karume.dist.assert_weight_components_verified`）。
+    組み立てへ届く既定の形は**正当な IR コンポーネント**でなければならない（組み立ては入力を
+    IR v1 の全規則で見る — `karume.dist.assert_weight_components_verified`）。正当な側は
+    shard 列（`list[bytes]`・先頭がグラフ shard — ADR 0081）で、偽コンテナは代表 path 1 本の
+    `bytes` のまま（計画の門で止まるので分割の側まで届かない）。
 
-    門に落とされることを見るケース（合成メタデータ / 別 dtype の系列）は計画段
-    （`vowel_detector_plan`）で止まって組み立てへ届かないので、従来の偽コンテナのままにする —
-    実物どおりの f16 コンテナ（適格外の重みと bias が F32 で残る）にすると「F32 が無い」では
-    落ちなくなる。閉じ方は禁止 dtype 表（Anima / Irodori の `*_STORAGE_FORBIDDEN`）で、
-    この family はまだ持っていない。
+    軸は 2 本ある:
+
+    - `dtype` は**単一 dtype の偽コンテナ**が名乗るヘッダ dtype。要求検査（「F32 が無い」）を
+      見るケースはこちらでしか作れない — 実物どおりの f16 系列は F32 も含むので、要求検査は
+      通ってしまう。
+    - `storage` は**実物どおりの混成コンテナ**の格納形（f16 / i8 / i4 は適格外の重みと bias が
+      F32 で残り、i4 はさらに I8 が混ざる）。禁止表（{@link VOWEL_DETECTOR_STORAGE_FORBIDDEN}）の
+      門はこの形でしか試せない。
     """
-    if graph is None and dtype == "F32":
+    if storage is not None or (graph is None and dtype == "F32"):
         return ir_container(
             mark="vowel-detector",
-            storage=dtype.lower(),
+            storage=storage if storage is not None else dtype.lower(),
             inputs=(("features", (1, "2T", _VOWEL_DETECTOR_N_MELS + 3)),),
             outputs=([1, "T", len(_VOWEL_DETECTOR_CLASSES)],),
         )
@@ -167,6 +186,7 @@ def _build_vowel_detector_sources(
     omit_feature_config: bool = False,
     omit_graph: bool = False,
     dtype: str = "F32",
+    storage: str | None = None,
 ) -> VowelDetectorSources:
     """系列 1 本と上流素材を偽資産で再現する（配布しない `io.*` の混入込み）。
 
@@ -179,7 +199,10 @@ def _build_vowel_detector_sources(
         model_name=model,
     )
     if not omit_graph:
-        _write(sources.series / "model.safetensors", _vowel_detector_container(dtype, graph))
+        write_component(
+            sources.series / "model.safetensors",
+            _vowel_detector_container(dtype, graph, storage),
+        )
         # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
         _write(sources.series / "io.silence.safetensors", b"io-fixture")
     if not omit_feature_config:
@@ -207,7 +230,7 @@ def _vowel_detector_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
 class TestVowelDetectorLayout:
     def test_it_places_the_graph_under_the_model_subtree(self, vowel_detector_assembled) -> None:
         out_dir, _ = vowel_detector_assembled
-        expected = _in_subtree(VOWEL_DETECTOR_DEFAULT_MODEL, VOWEL_DETECTOR_OUTPUT_PATHS.values())
+        expected = _in_subtree(VOWEL_DETECTOR_DEFAULT_MODEL, _placed_paths())
         assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
 
     def test_it_never_carries_the_io_fixtures(self, vowel_detector_assembled) -> None:
@@ -253,6 +276,27 @@ class TestVowelDetectorLayout:
         sources = _build_vowel_detector_sources(tmp_path, dtype="F16")
         with pytest.raises(DistError, match="F32 が無い"):
             vowel_detector_plan(sources)
+
+    @pytest.mark.parametrize(("storage", "intruder"), [("f16", "F16"), ("i8", "I8"), ("i4", "I4")])
+    def test_it_refuses_a_real_compressed_series_in_the_f32_seat(
+        self, tmp_path: Path, storage: str, intruder: str
+    ) -> None:
+        """実物どおりの圧縮系列は**要求検査を満たす** — 禁止表だけが系列 root の取り違えを見る。
+
+        圧縮系列も適格外の重みと bias を F32 で持つので「F32 を含む」は真になり、上の
+        単一 dtype の偽資産と違って要求検査では 1 バイトも落ちない。落ちるべき理由は
+        「f32 席に別系列の資産が居る」で、数値の門では原理的に検出できない
+        （ADR 0027 / 0029）。
+        """
+        sources = _build_vowel_detector_sources(tmp_path, storage=storage)
+        with pytest.raises(DistError, match=rf"{VOWEL_DETECTOR_GRAPH_ROLE}: .* {intruder} がある"):
+            vowel_detector_plan(sources)
+
+    def test_the_plain_f32_series_passes_both_storage_gates(self, tmp_path: Path) -> None:
+        """正常対 — 素の f32 系列は要求検査も禁止表も通る（禁止表が恒真に倒れていない）。"""
+        sources = _build_vowel_detector_sources(tmp_path, storage="f32")
+
+        assert vowel_detector_plan(sources).name == VOWEL_DETECTOR_DEFAULT_MODEL
 
 
 class TestVowelDetectorPipelineConfig:
@@ -514,5 +558,5 @@ class TestVowelDetectorCli:
         main(["--pipeline", "vowel-detector", "--series", str(sources.series_dir)])
 
         out_dir = tmp_path / "models" / "karume-vowel-detector"
-        expected = _in_subtree(VOWEL_DETECTOR_DEFAULT_MODEL, VOWEL_DETECTOR_OUTPUT_PATHS.values())
+        expected = _in_subtree(VOWEL_DETECTOR_DEFAULT_MODEL, _placed_paths())
         assert sorted(verify_dist(out_dir)) == sorted(expected)

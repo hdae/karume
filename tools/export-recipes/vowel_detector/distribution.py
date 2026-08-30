@@ -50,6 +50,7 @@ from karume.dist import (
     WeightFiles,
     assert_model_name,
     assert_storage,
+    assert_storage_absent,
     complete_quant_weights,
     graph_inputs,
     ir_graph,
@@ -119,11 +120,26 @@ VOWEL_DETECTOR_OUTPUT_PATHS: Mapping[str, str] = {
 
 #: 格納 dtype の要求（他ファミリと同じ根拠 — 素の資産が組み立て・ロード・実行を全て通って
 #: 参照一致の門まで沈黙した実測事故）。mel 基底はこちらが書く F32 なので載せない。
-#:
-#: NOTE: 禁止表（{@link assert_storage_absent}）は持たない — 圧縮系列が 1 本も無いので、
-#: 「F32 を含む」で系列 × 格納 dtype が一意に決まる。f16 / i8 の席を足すときは**同時に**禁止表も
-#: 足す（圧縮系列も適格外の重みを F32 で持つので、存在検査だけでは f32 席へ混入する）。
 VOWEL_DETECTOR_STORAGE_REQUIREMENTS: Mapping[str, str] = {VOWEL_DETECTOR_GRAPH_ROLE: "F32"}
+
+#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: {@link VOWEL_DETECTOR_STORAGE_REQUIREMENTS} は「要求 dtype が在るか」の片方向検査で、**圧縮
+#: 系列も適格外の重み**（bias / norm / グラフ定数・i8 の per-channel scale・i4 の group scale）を
+#: F32 で持つため「F32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
+#: 取り違えが存在検査だけでは素通りする。
+#:
+#: この台本（`vowel_detector/export.py`）は f32 しか焼かないが、禁止表が閉じるのは**系列 root の
+#: 取り違え**（`--series` が別の木を指す / 別 family の圧縮系列を手で置く）で、台本が対応する
+#: dtype とは無関係に起こる。系列 root の取り違えは数値の門では原理的に検出できない
+#: （ADR 0027 / 0029）ので、ここが唯一の検出器。
+#:
+#: MUST: 禁止は**役割ごとに集合**で持ち、書き出しうる圧縮格納（`karume.emit.WEIGHT_DTYPES` の
+#: f32 以外）を**全部**名指しする — 1 つでも抜けると、抜けた格納形だけが黙って素通りする
+#: （anima / irodori / sbv2 と同じ規律）。I32 を載せないのは、i32 が圧縮ではなく素の格納
+#: （`karume.emit` の plain 側）で、添字表として素の系列にも普通に居るから。
+VOWEL_DETECTOR_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
+    VOWEL_DETECTOR_GRAPH_ROLE: ("F16", "I8", "I4")
+}
 
 #: weights の宣言（dtype ラベル → 役割名）。グラフは 1 本で dtype も 1 つしかないので quant 表は
 #: 空でよい（{@link complete_quant_weights} が完全写像へ埋める）。
@@ -355,6 +371,7 @@ def vowel_detector_plan(
     placements = vowel_detector_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, VOWEL_DETECTOR_STORAGE_REQUIREMENTS)
+        assert_storage_absent(role, source, VOWEL_DETECTOR_STORAGE_FORBIDDEN)
     feature_config = vowel_detector_feature_config(sources.model)
     where = str(sources.model / VOWEL_DETECTOR_FEATURE_CONFIG_FILE)
     pipeline_config = vowel_detector_pipeline_config(feature_config, where)

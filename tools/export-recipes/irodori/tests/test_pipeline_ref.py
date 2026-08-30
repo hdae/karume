@@ -42,6 +42,7 @@ from karume.quantize import (
     quantize_to_int4,
     quantize_to_int8,
 )
+from karume.shards import shard_path
 
 
 class TestTSchedule:
@@ -366,30 +367,36 @@ def _write_series(
     method: str | None = "gptq",
     budget: Mapping[str, int] | None = None,
 ) -> Path:
-    """合成の i4 系列（コンテナ 1 本 + 校正記録）を書く（`method=None` で記録を落とす）。
+    """合成の i4 系列（shard 2 本 + 校正記録）を書く（`method=None` で記録を落とす）。
 
     `budget` は校正予算の 2 欄（既定は配布の下限ちょうど = 出荷済み系列と同じ形）。smoke 予算で
     焼いた系列から golden を焼こうとする軸をここで振る。
 
     `safetensors` のライタは `I4` を知らないので、ヘッダ JSON とデータ節を素で組む
     （読み手も自前 — `irodori.pipeline_ref._read_stored` の MUST と対）。
+
+    形は実物どおりの**常時分割**（ADR 0081）: shard 1 が `karume_ir` だけを持つグラフ shard
+    （データ節 0 本）、shard 2 が重み。1 本にまとめると読み手が「グラフ shard を開いて I4 が
+    1 本も無い」と落ちる経路を試せない — 読み手が全 shard を畳んでいることがここに掛かる。
     """
     directory.mkdir(parents=True, exist_ok=True)
-    header: dict[str, Any] = {
-        "__metadata__": {"karume_ir": json.dumps({"initializers": initializers})}
-    }
+    graph_header = {"__metadata__": {"karume_ir": json.dumps({"initializers": initializers})}}
+    weight_header: dict[str, Any] = {}
     blob = bytearray()
     for key, dtype, shape, payload in entries:
-        header[key] = {
+        weight_header[key] = {
             "dtype": dtype,
             "shape": shape,
             "data_offsets": [len(blob), len(blob) + len(payload)],
         }
         blob += payload
-    raw = json.dumps(header).encode()
-    (directory / ex.MODEL_FILE).write_bytes(
-        len(raw).to_bytes(8, "little") + raw + bytes(blob),
-    )
+    for index, (header, data) in enumerate(
+        ((graph_header, b""), (weight_header, bytes(blob))), start=1
+    ):
+        raw = json.dumps(header).encode()
+        shard_path(directory / ex.MODEL_FILE, index, 2).write_bytes(
+            len(raw).to_bytes(8, "little") + raw + data
+        )
     if method is not None:
         record = {
             "method": method,

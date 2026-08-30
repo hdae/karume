@@ -94,8 +94,17 @@ outputs/series/sbv2-FN4/front/model.safetensors    IR  911 nodes / 263 initializ
 outputs/series/sbv2-FN4/flow/model.safetensors     IR 1589 nodes / 458 initializers / 158.9MB (0.15MB of baked tables)
 outputs/series/sbv2-FN4/dec/model.safetensors      IR  246 nodes / 197 initializers /  58.7MB
 outputs/series/sbv2-FN4/voice/model.safetensors    IR 1836 nodes / 655 initializers / 217.6MB
-outputs/series/sbv2-FN4/<target>/io.<case>.safetensors  inputs and expected torch CPU outputs
+outputs/series/sbv2-FN4/<target>/io.<case>.safetensors        inputs and expected torch CPU outputs
+outputs/series/sbv2-FN4/<target>/export_provenance.json       the symbolic-dimension ceiling this
+                                                              target was baked at (--sym-max)
 ```
+
+`model.safetensors` above names the **component**, not one file: every container is written as a
+numbered shard sequence — `model-00001-of-00003.safetensors` (graph only, no tensors) followed by
+`model-00002-of-00003.safetensors` … (the weight shards; ADR 0081), and the byte counts are the
+component totals. `export_provenance.json` is what the distribution recipe cross-checks the ceiling
+against (`sbv2.distribution.assert_sym_provenance`), because `--sym-max` takes any value while the
+shipped `pipelineConfig` bakes a constant.
 
 #### Storage dtype series (`--dtype f16` / `--dtype i8` / `--dtype i4` — ADR 0018 / 0019 / 0069)
 

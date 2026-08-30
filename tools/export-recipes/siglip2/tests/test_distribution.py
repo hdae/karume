@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 from ir_fixtures import ir_container
+from shard_series import placed_paths, write_component
 
 from dist import default_out_dir, main
 from karume.dist import (
@@ -38,6 +39,7 @@ from siglip2.distribution import (
     SIGLIP2_DEFAULT_MODEL,
     SIGLIP2_OUTPUT_PATHS,
     SIGLIP2_ROLE,
+    SIGLIP2_WEIGHTS,
     Siglip2Sources,
     siglip2_checkpoint,
     siglip2_plan,
@@ -70,6 +72,11 @@ def _write(path: Path, payload: bytes) -> None:
 def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
     """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。"""
     return [f"{model}/{rel}" for rel in paths]
+
+
+def _placed_paths() -> list[str]:
+    """配布形に現れる相対 path（weights の席は shard 連番に展開される — ADR 0081）。"""
+    return placed_paths(SIGLIP2_OUTPUT_PATHS, SIGLIP2_WEIGHTS)
 
 
 def _present(out_dir: Path) -> list[str]:
@@ -131,22 +138,27 @@ def _siglip2_graph(
     )
 
 
-def _siglip2_container(dtype: str, graph: str | None) -> bytes:
+def _siglip2_container(dtype: str, graph: str | None, storage: str | None) -> bytes | list[bytes]:
     """系列に置く vision tower の中身。
 
-    組み立てへ届く既定の形は**正当な IR コンテナ**でなければならない（組み立ては入力を
-    IR v1 の全規則で見る — `karume.dist.assert_weight_components_verified`）。
+    組み立てへ届く既定の形は**正当な IR コンポーネント**でなければならない（組み立ては入力を
+    IR v1 の全規則で見る — `karume.dist.assert_weight_components_verified`）。正当な側は
+    shard 列（`list[bytes]`・先頭がグラフ shard — ADR 0081）で、偽コンテナは代表 path 1 本の
+    `bytes` のまま（計画の門で止まるので分割の側まで届かない）。
 
-    門に落とされることを見るケース（合成メタデータ / 別 dtype の系列）は計画段
-    （`siglip2_plan`）で止まって組み立てへ届かないので、従来の偽コンテナのままにする —
-    実物どおりの f16 コンテナ（適格外の重みと bias が F32 で残る）にすると「F32 が無い」では
-    落ちなくなる。閉じ方は禁止 dtype 表（Anima / Irodori の `*_STORAGE_FORBIDDEN`）で、
-    この family はまだ持っていない。
+    軸は 2 本ある:
+
+    - `dtype` は**単一 dtype の偽コンテナ**が名乗るヘッダ dtype。要求検査（「F32 が無い」）を
+      見るケースはこちらでしか作れない — 実物どおりの f16 系列は F32 も含むので、要求検査は
+      通ってしまう。
+    - `storage` は**実物どおりの混成コンテナ**の格納形（f16 / i8 / i4 は適格外の重みと bias が
+      F32 で残り、i4 はさらに I8 が混ざる）。禁止表（{@link SIGLIP2_STORAGE_FORBIDDEN}）の門は
+      この形でしか試せない。
     """
-    if graph is None and dtype == "F32":
+    if storage is not None or (graph is None and dtype == "F32"):
         return ir_container(
             mark="siglip2-vision",
-            storage=dtype.lower(),
+            storage=storage if storage is not None else dtype.lower(),
             inputs=(("pixel_values", (1, 3, _SIGLIP2_HEIGHT, _SIGLIP2_WIDTH)),),
             outputs=([1, _SIGLIP2_HIDDEN],),
         )
@@ -161,6 +173,7 @@ def _build_siglip2_sources(
     model: str = SIGLIP2_DEFAULT_MODEL,
     graph: str | None = None,
     dtype: str = "F32",
+    storage: str | None = None,
     preprocessor: Mapping[str, Any] | None = _SIGLIP2_PREPROCESSOR,
 ) -> Siglip2Sources:
     """系列 + 実重みの置き場を偽資産で再現する（配布しない `io.*` の混入込み）。
@@ -173,7 +186,7 @@ def _build_siglip2_sources(
         series=root / "outputs" / "series" / checkpoint,
         model=root / "inputs" / "siglip2" / checkpoint,
     )
-    _write(sources.series / "model.safetensors", _siglip2_container(dtype, graph))
+    write_component(sources.series / "model.safetensors", _siglip2_container(dtype, graph, storage))
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.series / "io.ramp.safetensors", b"io-fixture")
     if preprocessor is not None:
@@ -201,7 +214,7 @@ def _siglip2_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
 class TestSiglip2Layout:
     def test_it_places_the_single_graph_under_the_model_subtree(self, siglip2_assembled) -> None:
         out_dir, _ = siglip2_assembled
-        expected = _in_subtree(SIGLIP2_DEFAULT_MODEL, SIGLIP2_OUTPUT_PATHS.values())
+        expected = _in_subtree(SIGLIP2_DEFAULT_MODEL, _placed_paths())
         assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
 
     def test_it_never_carries_the_io_fixtures(self, siglip2_assembled) -> None:
@@ -233,6 +246,27 @@ class TestSiglip2Layout:
         sources = _build_siglip2_sources(tmp_path, dtype="F16")
         with pytest.raises(DistError, match="F32 が無い"):
             siglip2_plan(sources)
+
+    @pytest.mark.parametrize(("storage", "intruder"), [("f16", "F16"), ("i8", "I8"), ("i4", "I4")])
+    def test_it_refuses_a_real_compressed_series_in_the_f32_seat(
+        self, tmp_path: Path, storage: str, intruder: str
+    ) -> None:
+        """実物どおりの圧縮系列は**要求検査を満たす** — 禁止表だけが系列 root の取り違えを見る。
+
+        圧縮系列も適格外の重みと bias を F32 で持つので「F32 を含む」は真になり、上の
+        単一 dtype の偽資産と違って要求検査では 1 バイトも落ちない。落ちるべき理由は
+        「f32 席に別系列の資産が居る」で、数値の門では原理的に検出できない
+        （ADR 0027 / 0029）。
+        """
+        sources = _build_siglip2_sources(tmp_path, storage=storage)
+        with pytest.raises(DistError, match=rf"{SIGLIP2_ROLE}: .* {intruder} がある"):
+            siglip2_plan(sources)
+
+    def test_the_plain_f32_series_passes_both_storage_gates(self, tmp_path: Path) -> None:
+        """正常対 — 素の f32 系列は要求検査も禁止表も通る（禁止表が恒真に倒れていない）。"""
+        sources = _build_siglip2_sources(tmp_path, storage="f32")
+
+        assert siglip2_plan(sources).name == SIGLIP2_DEFAULT_MODEL
 
 
 class TestSiglip2PipelineConfig:
@@ -468,5 +502,5 @@ class TestSiglip2Cli:
         main(["--pipeline", "siglip2", "--series", str(sources.series.parent)])
 
         out_dir = tmp_path / "models" / siglip2_repo_name(SIGLIP2_DEFAULT_MODEL)
-        expected = _in_subtree(SIGLIP2_DEFAULT_MODEL, SIGLIP2_OUTPUT_PATHS.values())
+        expected = _in_subtree(SIGLIP2_DEFAULT_MODEL, _placed_paths())
         assert sorted(verify_dist(out_dir)) == sorted(expected)

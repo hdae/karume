@@ -55,6 +55,7 @@ from karume.artifacts import SUPERSEDED_SUFFIX
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_module
+from karume.shards import shard_name
 from karume.states import StatesFormError, StatesPlan, to_states_form
 
 #: decode 側の tiny な層構成。**KV 共有が成立する最小形**にしてある — 共有開始（層 3）より
@@ -1037,6 +1038,11 @@ class TestLoadWrapper:
 #: 系列の門（`GREEDY_CASES` の絞り込みと第 1 継続の突合）が実物と違う枝を通る。
 TINY_CASE_NAMES = ("capital-en", "capital-ja")
 
+#: tiny 系列が据えるコンテナのファイル名。配布形は**常時分割**（ADR 0081）なので、単一
+#: ファイルは出ない — tiny 模型は数 KB なので「グラフ shard + weight shard 1 本」の 2 本になる。
+#: 連番は焼かずに {@link karume.shards.shard_name} から引く（規則が動けばここも一緒に動く）。
+TINY_CONTAINER_FILES = [shard_name(gx.MODEL_FILE, index, 2) for index in (1, 2)]
+
 #: 系列ごとの要約の欄（順序込み）。ここが変わると実走の記録の形が変わる。
 DECODE_SUMMARY_KEYS = [
     "dir",
@@ -1143,13 +1149,15 @@ class TestExportSeries:
             steps=1,
         )
 
-        assert sorted(path.name for path in out_dir.iterdir()) == [
-            "greedy.capital-en.safetensors",
-            "greedy.capital-ja.safetensors",
-            "io.capital-en.safetensors",
-            "io.capital-ja.safetensors",
-            "model.safetensors",
-        ]
+        assert sorted(path.name for path in out_dir.iterdir()) == sorted(
+            [
+                "greedy.capital-en.safetensors",
+                "greedy.capital-ja.safetensors",
+                "io.capital-en.safetensors",
+                "io.capital-ja.safetensors",
+                *TINY_CONTAINER_FILES,
+            ]
+        )
         assert summary["outputs"] == 2
         assert list(summary) == DECODE_SUMMARY_KEYS
         assert set(tiny_series.sanity["greedy"]) == set(TINY_CASE_NAMES)
@@ -1171,10 +1179,9 @@ class TestExportSeries:
             reference=tiny_series.reference,
         )
 
-        assert sorted(path.name for path in out_dir.iterdir()) == [
-            "model.safetensors",
-            "reference.json",
-        ]
+        assert sorted(path.name for path in out_dir.iterdir()) == sorted(
+            [*TINY_CONTAINER_FILES, "reference.json"]
+        )
         assert summary["outputs"] == 1
         assert list(summary) == TOKEN_ONLY_SUMMARY_KEYS
         # sanity は全ケースぶん（greedy 記録が無いので全長 forward で採る）。

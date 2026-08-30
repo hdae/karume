@@ -7,9 +7,13 @@
 - `--act-quant` が `--dtype i8` 無しでは通らないこと（f32 資産の鏡像は再現不能）
 - 鏡像 io の prefix が Deno 側の通常ケース列挙（`io.` の startsWith）に**引っかからない**こと
 - 通常の golden io が**フックなし**で採られること（掛けたままだと w8 E2E の期待値が汚染される）
+- 記号次元の出所記録が読み手（`sbv2.distribution`）と同じ綴り・同じ欄で書かれること
+  （DeBERTa の Tmax は artifact から読めないので、記録が唯一の運び手）
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 import torch
@@ -102,6 +106,54 @@ class TestSeries:
         """
         assert set(export_deberta.BASE_WEIGHT_DTYPES) == set(export_deberta.WEIGHT_DTYPES)
         assert export_deberta.BASE_WEIGHT_DTYPES["i4"] == "i8"
+
+
+class TestExportProvenance:
+    """記号次元の出所記録 — DeBERTa の Tmax は **artifact から読めない**ので記録だけが運ぶ。
+
+    front / voice は上限を `sym_prefix_slice` の焼き込み定数として持つが、DeBERTa は相対位置の
+    添字表を ADR 0045 波 3 でグラフ入力へ昇格させたので、上限を運ぶ定数がグラフに 1 本も残って
+    いない（出荷 4 コンテナの実測 — `sym_prefix_slice` 0 本）。配布側の `maxTokens` は定数で
+    焼かれるため、非既定の `--sym-max` で採った系列は export も配布も緑のまま宣言だけが嘘になる。
+    """
+
+    def test_the_spelling_matches_the_reader(self):
+        """MUST: 読み手（`sbv2.distribution`）と同じ綴り。
+
+        `deberta` は SBV2 の消費者ではないので向こうを import しない（配布形の text_encoder 席は
+        資産の共有であって結合ではない）。写しを 2 つ持つ以上、独立に動く形にはしない。
+        """
+        from sbv2.distribution import EXPORT_PROVENANCE_FILE
+
+        assert export_deberta.EXPORT_PROVENANCE_FILE == EXPORT_PROVENANCE_FILE
+
+    def test_it_records_the_variant_and_the_symbolic_maximum(self, tmp_path):
+        """記録の欄は読み手が突き合わせる 2 つ（`target` / `sym_max`）そのもの。"""
+        from sbv2.distribution import SBV2_MAX_TOKENS, SBV2_TEXT_ENCODER_VARIANT
+
+        export_deberta._write_export_provenance(
+            SBV2_TEXT_ENCODER_VARIANT, export_deberta.SYM_MAX, tmp_path
+        )
+
+        record = json.loads(
+            (tmp_path / export_deberta.EXPORT_PROVENANCE_FILE).read_text(encoding="utf-8")
+        )
+        assert record == {"target": SBV2_TEXT_ENCODER_VARIANT, "sym_max": SBV2_MAX_TOKENS}
+
+    def test_it_carries_a_non_default_symbolic_maximum(self, tmp_path):
+        """`--sym-max` の逸脱が記録に残る（配布側の突合はこの値を見る）。"""
+        export_deberta._write_export_provenance("sbv2-22layer", 256, tmp_path)
+
+        record = json.loads(
+            (tmp_path / export_deberta.EXPORT_PROVENANCE_FILE).read_text(encoding="utf-8")
+        )
+        assert record["sym_max"] == 256
+
+    def test_the_default_symbolic_maximum_agrees_with_the_distribution_declaration(self):
+        """台本の既定と配布形の `maxTokens` は同じ数（記録が既定を名乗れる前提）。"""
+        from sbv2.distribution import SBV2_MAX_TOKENS
+
+        assert export_deberta.SYM_MAX == SBV2_MAX_TOKENS
 
 
 class TestActQuantCli:

@@ -71,7 +71,18 @@ outputs/series/deberta-i8/<variant>/io-i8a8.<case>.safetensors  w8a8 mirror (--a
 outputs/series/deberta-i4/sbv2-22layer/model.safetensors      22 layers, linear in i4 / the rest in
                                                               i8 (1128 nodes / 202.5MB / 1 output)
 outputs/series/deberta-i4/sbv2-22layer/io.<case>.safetensors  goldens taken after the i4 rounding
+
+outputs/series/<series>/<variant>/export_provenance.json      the symbolic-dimension ceiling this
+                                                              variant was baked at (--sym-max)
 ```
+
+`model.safetensors` above names the **component**, not one file: every container is written as a
+numbered shard sequence — `model-00001-of-00003.safetensors` (graph only, no tensors) followed by
+`model-00002-of-00003.safetensors` … (the weight shards; ADR 0081), and the byte counts are the
+component totals. `export_provenance.json` is the only way the `--sym-max` ceiling travels: DeBERTa
+promoted its relative-position index tables to graph **inputs** (ADR 0045 wave 3), so no baked
+constant carries that ceiling any more and the distribution recipe has to read the record instead
+(`sbv2.distribution.assert_sym_provenance`).
 
 The io tensor key naming is the same as the tiny goldens (`input.<graph input name>` /
 `output.<position>`). The only difference is that a single model has **several io files, one per

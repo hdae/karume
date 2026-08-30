@@ -22,6 +22,13 @@ from typing import Any
 
 import pytest
 from ir_fixtures import ir_container
+from shard_series import (
+    placed_paths,
+    read_component,
+    replace_component,
+    shard_paths,
+    write_component,
+)
 
 from anima.card import ATTRIBUTION_NOTICE, LORA_NAME, LORA_SHA256, LORA_SOURCE
 from anima.distribution import (
@@ -64,6 +71,7 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
+from karume.shards import resolve_shards
 
 
 def _fake_safetensors(
@@ -100,7 +108,7 @@ def _mixed_safetensors(dtypes: tuple[str, ...], payload: bytes) -> bytes:
     return len(encoded).to_bytes(8, "little") + encoded + payload * len(dtypes)
 
 
-def _weights_container(role: str, storage: str) -> bytes:
+def _weights_container(role: str, storage: str) -> list[bytes]:
     """weights の席へ挿す**正当な IR コンテナ**（役割ごとに違うバイト列）。
 
     組み立ては入力コンテナを IR v1 の全規則で見る
@@ -185,12 +193,12 @@ def _build_series(
     """
     spec = anima_model(model)
     sources = anima_sources(series_dir, model)
-    _write(sources.base / "text_encoder" / "model.safetensors", _PAYLOADS["text_encoder"])
-    _write(
+    write_component(sources.base / "text_encoder" / "model.safetensors", _PAYLOADS["text_encoder"])
+    write_component(
         sources.text_conditioner / "text_conditioner" / "model.safetensors",
         _PAYLOADS["text_conditioner"],
     )
-    _write(sources.base / "vae_decoder" / "model.safetensors", _PAYLOADS["vae_decoder"])
+    write_component(sources.base / "vae_decoder" / "model.safetensors", _PAYLOADS["vae_decoder"])
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.base / "text_encoder" / "io.t005.safetensors", b"io-fixture")
     _write(sources.base / "vae_decoder" / "io.case0.safetensors", b"io-fixture")
@@ -202,7 +210,7 @@ def _build_series(
             if not mark
             else _weights_container(f"{role}{mark.decode('utf-8')}", storage)
         )
-        _write(series / "transformer" / "model.safetensors", payload)
+        write_component(series / "transformer" / "model.safetensors", payload)
         _write(series / "transformer" / "io.s01024t0699.safetensors", b"io-fixture")
         # 焼き込んだモデルだけが帰属を残す — 素のモデルでは**記録が無いこと**が検査対象。
         if spec.lora_sha256 is not None:
@@ -236,15 +244,18 @@ def _assemble_anima(
 def _in_subtree(model: str, paths: Iterable[str] | None = None) -> list[str]:
     """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。
 
-    省略時はそのモデルが**宣言した格納形だけ**（i4 席を持たないモデルに i4 のファイルは出ない）。
+    省略時はそのモデルが**宣言した格納形だけ**（i4 席を持たないモデルに i4 のファイルは出ない）
+    を、配布形に現れる形へ展開する — weights の 5 役は shard 連番になり（ADR 0081）、
+    rope_base（extras）と tokenizer（assets）は 1 ファイルのまま。
     """
     if paths is None:
         storages = anima_model(model).storages
-        paths = [
-            rel
+        declared = {
+            role: rel
             for role, rel in OUTPUT_PATHS.items()
             if not role.startswith("transformer_") or role.removeprefix("transformer_") in storages
-        ]
+        }
+        paths = placed_paths(declared, ANIMA_WEIGHTS)
     return [f"{model}/{rel}" for rel in paths]
 
 
@@ -274,15 +285,15 @@ class TestLayout:
     def test_it_renames_the_two_transformer_series_into_dtype_files(self, assembled) -> None:
         out_dir, _ = assembled
         subtree = out_dir / ANIMA_TURBO_MODEL_NAME / "transformer"
-        assert (subtree / "model.f16.safetensors").read_bytes() == _PAYLOADS["transformer_f16"]
-        assert (subtree / "model.i8.safetensors").read_bytes() == _PAYLOADS["transformer_i8"]
+        assert read_component(subtree / "model.f16.safetensors") == _PAYLOADS["transformer_f16"]
+        assert read_component(subtree / "model.i8.safetensors") == _PAYLOADS["transformer_i8"]
 
     def test_it_gives_the_i4_series_its_own_dtype_file(self, assembled) -> None:
         """i4 は f16 / i8 と並ぶ 3 本目の格納席（同じ path へ載せると席が 1 つ消える）。"""
         out_dir, _ = assembled
         placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]
         assert placed.name == "model.i4.safetensors"
-        assert placed.read_bytes() == _PAYLOADS["transformer_i4"]
+        assert read_component(placed) == _PAYLOADS["transformer_i4"]
 
     def test_a_single_model_repository_has_no_shared_directory(self, assembled) -> None:
         """`shared/` は 2 モデル以上が同じ中身を持ったときだけ現れる席（ADR 0041 §5）。"""
@@ -311,8 +322,9 @@ class TestPlacementStrategy:
         """配布形はハードリンクを持たない（系列から独立した自己完結スナップショット）。"""
         out_dir, _ = assembled
         placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
-        assert placed.read_bytes() == _PAYLOADS["text_encoder"]
-        assert placed.stat().st_nlink == 1
+        assert read_component(placed) == _PAYLOADS["text_encoder"]
+        # 独立コピーであることは shard 1 本ずつに掛かる（分割で漏れる席を作らない）。
+        assert [shard.stat().st_nlink for shard in resolve_shards(placed)] == [1, 1]
 
     def test_a_series_rewrite_does_not_reach_the_dist(self, tmp_path: Path) -> None:
         """系列の再 export（truncate 上書き）が組み立て済み配布形へ波及しないこと。
@@ -323,15 +335,17 @@ class TestPlacementStrategy:
         sources = _build_series(tmp_path / "series")
         out_dir = tmp_path / "models" / "anima-turbo"
         _assemble_anima(sources, out_dir)
-        source = sources.base / "text_encoder" / "model.safetensors"
+        # 書き直すのは系列の**グラフ shard**（再 export は shard ごとに truncate 上書きする）。
+        source = resolve_shards(sources.base / "text_encoder" / "model.safetensors")[0]
         with source.open("wb") as handle:
             handle.write(_fake_safetensors("F16", b"rewritten-after-assembly"))
         placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
-        assert placed.read_bytes() == _PAYLOADS["text_encoder"]
+        assert read_component(placed) == _PAYLOADS["text_encoder"]
 
     def test_it_stops_when_an_input_is_missing(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        (sources.base / "vae_decoder" / "model.safetensors").unlink()
+        for shard in resolve_shards(sources.base / "vae_decoder" / "model.safetensors"):
+            shard.unlink()
         with pytest.raises(DistError, match="組み立ての入力が無い"):
             _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
@@ -606,8 +620,9 @@ class TestStorageGate:
 
     def test_it_stops_when_an_f16_component_is_stored_as_raw_f32(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        (sources.base / "text_encoder" / "model.safetensors").write_bytes(
-            _fake_safetensors("F32", b"text-encoder-weights")
+        replace_component(
+            sources.base / "text_encoder" / "model.safetensors",
+            _fake_safetensors("F32", b"text-encoder-weights"),
         )
         out_dir = tmp_path / "models" / "anima-turbo"
         with pytest.raises(DistError, match=r"text_encoder: .* F16 が無い"):
@@ -617,8 +632,9 @@ class TestStorageGate:
 
     def test_it_stops_when_the_i8_transformer_lacks_i8_storage(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        (sources.transformer["i8"] / "transformer" / "model.safetensors").write_bytes(
-            _fake_safetensors("F16", b"transformer-i8-weights")
+        replace_component(
+            sources.transformer["i8"] / "transformer" / "model.safetensors",
+            _fake_safetensors("F16", b"transformer-i8-weights"),
         )
         with pytest.raises(DistError, match=r"transformer_i8: .* I8 が無い"):
             _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
@@ -626,8 +642,9 @@ class TestStorageGate:
     def test_it_stops_when_the_i4_transformer_lacks_i4_storage(self, tmp_path: Path) -> None:
         """i4 席へ i8 系列が入る取り違え — 要求が I8 のままだと素通りして沈黙する。"""
         sources = _build_series(tmp_path / "series")
-        (sources.transformer["i4"] / "transformer" / "model.safetensors").write_bytes(
-            _fake_safetensors("I8", b"transformer-i4-weights")
+        replace_component(
+            sources.transformer["i4"] / "transformer" / "model.safetensors",
+            _fake_safetensors("I8", b"transformer-i4-weights"),
         )
         with pytest.raises(DistError, match=r"transformer_i4: .* I4 が無い"):
             _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
@@ -643,8 +660,9 @@ class TestStorageGate:
         唯一の検出器。
         """
         sources = _build_series(tmp_path / "series")
-        (sources.transformer["i8"] / "transformer" / "model.safetensors").write_bytes(
-            _mixed_safetensors(("I4", "I8", "F32"), b"transformer-i4-weights")
+        replace_component(
+            sources.transformer["i8"] / "transformer" / "model.safetensors",
+            _mixed_safetensors(("I4", "I8", "F32"), b"transformer-i4-weights"),
         )
         with pytest.raises(DistError, match=r"transformer_i8: .* I4 がある"):
             _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
@@ -690,8 +708,9 @@ class TestStorageGate:
                 sources = _build_series(tmp_path / f"series-{seat}-{series}")
                 storage = seat.removeprefix("transformer_")
                 target = sources.transformer[storage] / "transformer" / "model.safetensors"
-                target.write_bytes(
-                    _weights_container("swapped-series", series.removeprefix("transformer_"))
+                replace_component(
+                    target,
+                    _weights_container("swapped-series", series.removeprefix("transformer_")),
                 )
                 out_dir = tmp_path / "models" / f"{seat}-{series}"
 
@@ -703,7 +722,7 @@ class TestStorageGate:
 
     def test_it_stops_when_a_header_is_not_safetensors(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        (sources.base / "vae_decoder" / "model.safetensors").write_bytes(b"not-a-safetensors")
+        replace_component(sources.base / "vae_decoder" / "model.safetensors", b"not-a-safetensors")
         with pytest.raises(DistError, match="ヘッダが読めない"):
             _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
 
@@ -757,13 +776,14 @@ class TestManifest:
 
     def test_it_derives_size_and_sha256_from_the_placed_files(self, assembled) -> None:
         out_dir, manifest = assembled
-        ref = manifest["models"][ANIMA_TURBO_MODEL_NAME]["weights"]["text_encoder"]["f16"][
+        shards = manifest["models"][ANIMA_TURBO_MODEL_NAME]["weights"]["text_encoder"]["f16"][
             "shards"
-        ][0]
-        payload = _PAYLOADS["text_encoder"]
-        assert ref["size"] == len(payload)
-        assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
-        assert (out_dir / ref["path"]).read_bytes() == payload
+        ]
+        # 3 点セットは shard 1 本ずつに掛かる（列のどこかだけ古い、を作れない）。
+        for ref, payload in zip(shards, _PAYLOADS["text_encoder"], strict=True):
+            assert ref["size"] == len(payload)
+            assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
+            assert (out_dir / ref["path"]).read_bytes() == payload
 
     def test_it_carries_the_quant_table_and_pipeline_config(self, assembled) -> None:
         _, manifest = assembled
@@ -871,7 +891,8 @@ class TestVerifyDist:
 
     def test_it_catches_a_file_that_no_longer_matches_its_declared_size(self, assembled) -> None:
         out_dir, _ = assembled
-        target = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["vae_decoder"]
+        # 分割された役割は shard 1 本の破損で落ちる（列の中の 1 本も突合の対象）。
+        target = resolve_shards(out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["vae_decoder"])[1]
         target.unlink()  # ハードリンクを外してから書く（源の系列を壊さない）
         target.write_bytes(b"shorter")
         with pytest.raises(DistError, match="size が manifest と違う"):
@@ -1013,28 +1034,31 @@ class TestFamilyAssembly:
 
     def test_it_places_a_byte_identical_file_once_under_shared(self, family) -> None:
         out_dir, manifest = family
-        shared_path = f"{SHARED_DIRNAME}/{OUTPUT_PATHS['text_encoder']}"
+        # 畳まれるのは**コンポーネント丸ごと**（shard 列がそのまま shared/ の下へ移る）。
+        shared = [f"{SHARED_DIRNAME}/{rel}" for rel in shard_paths(OUTPUT_PATHS["text_encoder"])]
         for name in manifest["models"]:
-            ref = manifest["models"][name]["weights"]["text_encoder"]["f16"]["shards"][0]
-            assert ref["path"] == shared_path
-        assert (out_dir / shared_path).read_bytes() == _PAYLOADS["text_encoder"]
+            refs = manifest["models"][name]["weights"]["text_encoder"]["f16"]["shards"]
+            assert [ref["path"] for ref in refs] == shared
+        for rel, payload in zip(shared, _PAYLOADS["text_encoder"], strict=True):
+            assert (out_dir / rel).read_bytes() == payload
         # 各モデルのサブツリーには残らない（1 回だけ置く = 重複を配らない）。
         for name in manifest["models"]:
-            assert not (out_dir / name / OUTPUT_PATHS["text_encoder"]).exists()
+            for rel in shard_paths(OUTPUT_PATHS["text_encoder"]):
+                assert not (out_dir / name / rel).exists()
 
     def test_it_keeps_the_files_that_differ_inside_each_model_subtree(self, family) -> None:
         out_dir, manifest = family
         paths = {
-            name: manifest["models"][name]["weights"]["transformer"]["i8"]["shards"][0]["path"]
-            for name in manifest["models"]
+            name: [ref["path"] for ref in entry["weights"]["transformer"]["i8"]["shards"]]
+            for name, entry in manifest["models"].items()
         }
         assert paths == {
-            "anima-v1.0": f"anima-v1.0/{OUTPUT_PATHS['transformer_i8']}",
-            "anima-wai-v1.0": f"anima-wai-v1.0/{OUTPUT_PATHS['transformer_i8']}",
+            name: [f"{name}/{rel}" for rel in shard_paths(OUTPUT_PATHS["transformer_i8"])]
+            for name in ("anima-v1.0", "anima-wai-v1.0")
         }
-        assert (out_dir / paths["anima-v1.0"]).read_bytes() != (
-            out_dir / paths["anima-wai-v1.0"]
-        ).read_bytes()
+        assert [(out_dir / rel).read_bytes() for rel in paths["anima-v1.0"]] != [
+            (out_dir / rel).read_bytes() for rel in paths["anima-wai-v1.0"]
+        ]
 
     def test_the_shared_and_the_private_files_together_cover_the_tree(self, family) -> None:
         out_dir, _ = family
@@ -1048,11 +1072,18 @@ class TestFamilyAssembly:
             "tokenizer_2",
             "rope_base",
         )
-        expected = [f"{SHARED_DIRNAME}/{OUTPUT_PATHS[role]}" for role in shared_roles]
+        # weights の席は shard 連番へ展開される（ADR 0081）— 畳む単位はコンポーネント丸ごと。
+        expected = [
+            f"{SHARED_DIRNAME}/{rel}"
+            for rel in placed_paths(
+                {role: OUTPUT_PATHS[role] for role in shared_roles}, ANIMA_WEIGHTS
+            )
+        ]
         expected += [
-            f"{model}/{OUTPUT_PATHS[f'transformer_{storage}']}"
+            f"{model}/{rel}"
             for model in ("anima-v1.0", "anima-wai-v1.0")
             for storage in anima_model(model).storages
+            for rel in shard_paths(OUTPUT_PATHS[f"transformer_{storage}"])
         ]
         assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
 
@@ -1241,8 +1272,11 @@ class TestModelCard:
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         for rel_path in _in_subtree(ANIMA_TURBO_MODEL_NAME):
             assert f"`{rel_path}`" in card
-        size = (out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["transformer_i8"]).stat().st_size
-        assert f"{size:,} B" in card
+        # 表が引くのは shard 1 本ずつのサイズ（分割された役割は行が本数ぶん並ぶ）。
+        for shard in resolve_shards(
+            out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["transformer_i8"]
+        ):
+            assert f"{shard.stat().st_size:,} B" in card
 
     def test_it_names_the_repository_after_the_assembled_directory(self, tmp_path: Path) -> None:
         """ファミリーリポの ID は pipeline の定数にできない — 組み立て先から引く。"""

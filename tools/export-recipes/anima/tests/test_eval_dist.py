@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 from ir_fixtures import ir_container
+from shard_series import write_component
 
 from anima import eval_dist
 from anima.distribution import (
@@ -83,15 +84,15 @@ def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> P
     IR コンテナではなく、従来どおりヘッダだけの偽資産でよい。
     """
     sources = anima_sources(series_dir, MODEL)
-    _write(
+    write_component(
         sources.base / "text_encoder" / "model.safetensors",
         ir_container(mark="te", storage="f16"),
     )
-    _write(
+    write_component(
         sources.text_conditioner / "text_conditioner" / "model.safetensors",
         ir_container(mark="tc", storage="f16"),
     )
-    _write(
+    write_component(
         sources.base / "vae_decoder" / "model.safetensors",
         ir_container(mark="vae", storage="f16"),
     )
@@ -104,7 +105,7 @@ def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> P
         (sources.transformer["i8"], "i8"),
         (variant, "i4"),
     ):
-        _write(
+        write_component(
             series / "transformer" / "model.safetensors",
             ir_container(mark=f"dit-{storage}", storage=storage),
         )

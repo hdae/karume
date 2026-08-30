@@ -11,8 +11,8 @@ manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一�
 
 core だけで観測できる層（合成計画で足りる規模上限・quant 完全写像・staging/swap の不変条件・
 帰属プロファイルの解決規則）は `tools/exporter/tests/test_dist.py` が持つ（ADR 0065 段 3+4 の
-分割）。カードの描画も**組み立て 1 周ぶん**でここが見る — Irodori のテンプレートは core の
-`tests/test_modelcard.py` に固有の節を持っていなかったので、`test_card.py` は作らない。
+分割）。カードの描画は**組み立て 1 周ぶん**をここが見て、テンプレート単位の門（案内するロード
+入口）は `irodori/tests/test_card.py`。
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 from ir_fixtures import ir_container
+from shard_series import placed_paths, replace_component, shard_paths, write_component
 
 from dist import default_out_dir, main
 from irodori.distribution import (
@@ -88,6 +89,14 @@ def _write(path: Path, payload: bytes) -> None:
 def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
     """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。"""
     return [f"{model}/{rel}" for rel in paths]
+
+
+def _placed_paths() -> list[str]:
+    """配布形に現れる相対 path — **weights の席だけ**が shard 連番に展開される（ADR 0081）。
+
+    tokenizer は assets の席（1 ファイル参照）なので分割されない。
+    """
+    return placed_paths(IRODORI_OUTPUT_PATHS, IRODORI_WEIGHTS)
 
 
 def _present(out_dir: Path) -> list[str]:
@@ -238,14 +247,15 @@ def _irodori_graphs() -> dict[str, str]:
     }
 
 
-def _irodori_input(dtype: str, role: str) -> bytes:
-    """組み立てへ届く系列 1 本ぶんの入力（**正当な IR コンテナ**）。
+def _irodori_input(dtype: str, role: str) -> list[bytes]:
+    """組み立てへ届く系列 1 本ぶんの入力（**正当な IR コンポーネント**の shard 列）。
 
     組み立ては入力コンテナを IR v1 の全規則で見る
     （`karume.dist.assert_weight_components_verified`）ので、既定の系列は本物でなければ
     ならない。格納 dtype の集合は実物と同じ形になる（適格な重みだけが圧縮・bias / 定数 /
     scale は F32・i4 は I4 + I8 + F32 の混成）ので、席の取り違えを見る門
-    （{@link IRODORI_STORAGE_FORBIDDEN}）はこの形にも同じように掛かる。
+    （{@link IRODORI_STORAGE_FORBIDDEN}）はこの形にも同じように掛かる。返るのは実物どおり
+    **常時分割**（ADR 0081）の shard 列で、先頭がグラフ shard。
     """
     inputs, outputs, _ = _irodori_specs()[role]
     return ir_container(
@@ -331,7 +341,7 @@ def _build_irodori_sources(
                 if graphs is None
                 else _irodori_container(dtype, role, graphs[role])
             )
-            _write(series / directory / "model.safetensors", payload)
+            write_component(series / directory / "model.safetensors", payload)
             # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
             _write(series / directory / "io.case0.safetensors", b"io-fixture")
     if calib_provenance is not None:
@@ -379,7 +389,7 @@ def _irodori_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
 class TestIrodoriLayout:
     def test_it_places_every_declared_path_under_the_model_subtree(self, irodori_assembled) -> None:
         out_dir, _ = irodori_assembled
-        expected = _in_subtree(IRODORI_DEFAULT_MODEL, IRODORI_OUTPUT_PATHS.values())
+        expected = _in_subtree(IRODORI_DEFAULT_MODEL, _placed_paths())
         assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
 
     def test_it_never_carries_io_fixtures_or_tokenizer_goldens(self, irodori_assembled) -> None:
@@ -440,9 +450,12 @@ class TestIrodoriLayout:
         for name, seat in IRODORI_QUANT_SEATS.items():
             for role, label in model["quants"][name]["weights"].items():
                 dtype = seat.roles.get(role, seat.dtype)
-                path = model["weights"][role][label]["shards"][0]["path"]
-                assert path.endswith(f"model.{dtype}.safetensors"), (role, name, path)
-                assert (out_dir / path).is_file()
+                shards = model["weights"][role][label]["shards"]
+                # 分割されているので突合は列で（ADR 0081 — 席の綴りは連番の手前に残る）。
+                expected = shard_paths(f"model.{dtype}.safetensors", len(shards))
+                for ref, tail in zip(shards, expected, strict=True):
+                    assert ref["path"].endswith(tail), (role, name, ref["path"])
+                    assert (out_dir / ref["path"]).is_file()
 
     def test_the_two_i8_seats_share_one_set_of_bytes(self, irodori_assembled) -> None:
         """`i8-a8` は席を 1 行足すだけ（ADR 0050 波 2 — 配布サイズは 1 バイトも増えない）。"""
@@ -683,7 +696,7 @@ class TestIrodoriGraphGate:
 
     def test_it_refuses_a_container_without_ir_metadata(self, tmp_path: Path) -> None:
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series / "dit" / "model.safetensors", _fake_safetensors("F32", b"dit-weights")
         )
         with pytest.raises(DistError, match="IR メタデータ"):
@@ -692,7 +705,7 @@ class TestIrodoriGraphGate:
     def test_it_refuses_an_f32_seat_whose_container_has_no_f32(self, tmp_path: Path) -> None:
         """格納形は series 名でなくヘッダが正（要求 dtype の存在検査）。"""
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series / "dit" / "model.safetensors",
             _fake_safetensors("F16", b"dit-weights", {IR_METADATA_KEY: _irodori_graphs()["dit"]}),
         )
@@ -711,7 +724,7 @@ class TestIrodoriStorageSeries:
     def test_it_refuses_an_f16_series_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
         """圧縮コンテナも適格外の重みを F32 で持つので、**存在検査だけでは素通りする**形。"""
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series / "dit" / "model.safetensors",
             _irodori_container("f16", "dit", _irodori_graphs()["dit"]),
         )
@@ -722,7 +735,7 @@ class TestIrodoriStorageSeries:
     def test_it_refuses_an_f32_series_asset_in_the_f16_seat(self, tmp_path: Path) -> None:
         """逆向き（丸め忘れ = `--dtype f16` のつもりが素の f32）は F16 の不在で落ちる。"""
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series_by_dtype["f16"] / "dit" / "model.safetensors",
             _irodori_container("f32", "dit", _irodori_graphs()["dit"]),
         )
@@ -737,7 +750,7 @@ class TestIrodoriStorageSeries:
         （波 1 で f16 について同じ穴を塞いだのと同じ機序 — 禁止は集合で持つ）。
         """
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series / "dit" / "model.safetensors",
             _irodori_container("i8", "dit", _irodori_graphs()["dit"]),
         )
@@ -748,7 +761,7 @@ class TestIrodoriStorageSeries:
     def test_it_refuses_an_f32_series_asset_in_the_i8_seat(self, tmp_path: Path) -> None:
         """逆向き（丸め忘れ = `--dtype i8` のつもりが素の f32）は I8 の不在で落ちる。"""
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series_by_dtype["i8"] / "dit" / "model.safetensors",
             _irodori_container("f32", "dit", _irodori_graphs()["dit"]),
         )
@@ -759,7 +772,7 @@ class TestIrodoriStorageSeries:
     def test_it_refuses_an_i8_series_asset_in_the_f16_seat(self, tmp_path: Path) -> None:
         """圧縮系列どうしの取り違えは、**要求 dtype の不在**が落とす（禁止表は要らない）。"""
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series_by_dtype["f16"] / "dit" / "model.safetensors",
             _irodori_container("i8", "dit", _irodori_graphs()["dit"]),
         )
@@ -769,7 +782,7 @@ class TestIrodoriStorageSeries:
 
     def test_it_refuses_an_f16_series_asset_in_the_i8_seat(self, tmp_path: Path) -> None:
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series_by_dtype["i8"] / "dit" / "model.safetensors",
             _irodori_container("f16", "dit", _irodori_graphs()["dit"]),
         )
@@ -787,7 +800,7 @@ class TestIrodoriStorageSeries:
         ADR 0076 の w4a8 経路が int8 を名乗る席のまま黙って走る）。
         """
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series_by_dtype["i8"] / "dit" / "model.safetensors",
             _irodori_container("i4", "dit", _irodori_graphs()["dit"], extra=("I8",)),
         )
@@ -798,7 +811,7 @@ class TestIrodoriStorageSeries:
     def test_it_refuses_an_i8_series_asset_in_the_i4_seat(self, tmp_path: Path) -> None:
         """逆向き（`--dtype i4` のつもりが i8 系列）は I4 の不在で落ちる。"""
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series_by_dtype["i4"] / "dit" / "model.safetensors",
             _irodori_container("i8", "dit", _irodori_graphs()["dit"]),
         )
@@ -809,7 +822,7 @@ class TestIrodoriStorageSeries:
     def test_it_refuses_an_i4_series_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
         """i4 資産も F32（bias / norm / group scale）を持つので、**存在検査は真になる**。"""
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.series / "dit" / "model.safetensors",
             _irodori_container("i4", "dit", _irodori_graphs()["dit"]),
         )
@@ -820,7 +833,7 @@ class TestIrodoriStorageSeries:
     def test_it_refuses_a_codec_series_mixup_too(self, tmp_path: Path) -> None:
         """コーデックは別系列（`dacvae-32dim{,-f16,-i8}`）— 同じ門が 8 役全部に掛かる。"""
         sources = _build_irodori_sources(tmp_path)
-        _write(
+        replace_component(
             sources.codec_series_by_dtype["f16"] / "decoder" / "model.safetensors",
             _irodori_container("f32", "codec_decoder", _irodori_graphs()["codec_decoder"]),
         )
@@ -1085,7 +1098,7 @@ class TestIrodoriCli:
         main(["--pipeline", "irodori", "--series", str(sources.series.parent)])
 
         out_dir = tmp_path / "models" / irodori_repo_name(IRODORI_DEFAULT_MODEL)
-        expected = _in_subtree(IRODORI_DEFAULT_MODEL, IRODORI_OUTPUT_PATHS.values())
+        expected = _in_subtree(IRODORI_DEFAULT_MODEL, _placed_paths())
         assert sorted(verify_dist(out_dir)) == sorted(expected)
 
     def test_the_model_flag_moves_the_series_and_the_default_directory(
