@@ -118,6 +118,109 @@ Deno.test("toSbv2Utterance: 句の記号は句末尾モーラへ、句より前�
   assertEquals(withLeading.leadingPunctuations, ["…"]);
 });
 
+// ---- 複数句（句境界・辞書なし）----------------------------------------------
+//
+// 1 句フィクスチャでは「発話の末尾モーラ」と「句の末尾モーラ」が同一なので、記号の付け替えを
+// 見分ける検出力が構造的にゼロになる。句を跨ぐ添字ずれ・記号の流出・モーラを持たない句は
+// ここでしか捕まらない（辞書経路のテストは資産のある環境でしか走らない）。
+
+/** 「カルメ」+「トク」の 2 句（`words` は句の音素列どおりに手で組む — 記号は 1 要素 1 語）。 */
+const twoPhrases = (
+  nuclei: readonly [number, number],
+  punctuations: readonly [string[], string[]] = [[], []],
+): Sbv2Phrases => ({
+  result: {
+    leadingPunctuations: [],
+    accentPhrases: [
+      {
+        moras: [
+          { kana: "カ", consonant: "k", vowel: "a" },
+          { kana: "ル", consonant: "r", vowel: "u" },
+          { kana: "メ", consonant: "m", vowel: "e" },
+        ],
+        accentNucleus: nuclei[0],
+        punctuations: punctuations[0],
+      },
+      {
+        moras: [
+          { kana: "ト", consonant: "t", vowel: "o" },
+          { kana: "ク", consonant: "k", vowel: "u" },
+        ],
+        accentNucleus: nuclei[1],
+        punctuations: punctuations[1],
+      },
+    ],
+  },
+  words: [
+    { surface: TEXT, phones: ["k", "a", "r", "u", "m", "e"] },
+    ...punctuations[0].map((punct) => ({ surface: punct, phones: [punct] })),
+    { surface: "特", phones: ["t", "o", "k", "u"] },
+    ...punctuations[1].map((punct) => ({ surface: punct, phones: [punct] })),
+  ],
+});
+
+Deno.test("toSbv2Utterance: 核は句ごとに独立して展開される（句 2 が句 1 の核に汚されない）", () => {
+  // `tones[at]` の `at` を発話全体の添字にしてしまう退行は、1 句のテストでは一度も踏めない。
+  assertEquals(tonesOf(toSbv2Utterance(twoPhrases([1, 0]))), [1, 0, 0, 0, 1]);
+  assertEquals(tonesOf(toSbv2Utterance(twoPhrases([0, 0]))), [0, 1, 1, 0, 1]);
+  // 展開は「句 1 の展開 ++ 句 2 の展開」に厳密一致する（1 句版の答えを連結した形）。
+  assertEquals(
+    tonesOf(toSbv2Utterance(twoPhrases([1, 2]))),
+    [...tonesOf(toSbv2Utterance(karumePhrases(1))), 0, 1],
+  );
+  // 句を跨いでも音素列と語アライメントは一致する。
+  const utterance = toSbv2Utterance(twoPhrases([1, 0]));
+  assertWordPhones(toSbv2PhoneTone(utterance, "_").phones, utterance.words);
+});
+
+Deno.test("toSbv2Utterance: 記号は**その句の**末尾モーラへ付く（中間句の記号が末尾句へ流れない）", () => {
+  const utterance = toSbv2Utterance(twoPhrases([1, 0], [[","], ["."]]));
+  assertEquals(utterance.moras.length, 5, "句を跨いでモーラが落ちている");
+  assertEquals(utterance.moras[2].punctuations, [","], "中間句の記号が句 1 の末尾モーラに無い");
+  assertEquals(utterance.moras[4].punctuations, ["."], "末尾句の記号が句 2 の末尾モーラに無い");
+  assertEquals(utterance.moras[3].punctuations, undefined, "句 2 の先頭モーラに欄が生えた");
+  assertEquals(utterance.leadingPunctuations, []);
+  // 位置は音素列にも出る（記号が末尾句へ流れれば並びが変わる）。
+  assertEquals(
+    toSbv2PhoneTone(utterance, "_").phones,
+    ["_", "k", "a", "r", "u", "m", "e", ",", "t", "o", "k", "u", ".", "_"],
+  );
+  assertWordPhones(toSbv2PhoneTone(utterance, "_").phones, utterance.words);
+});
+
+Deno.test("toSbv2Utterance: モーラを持たない句の記号は直前モーラへ寄る（先頭なら先頭欄へ）", () => {
+  // `utterance.ts` の doc が明示している 2 分岐。1 句フィクスチャは必ず 3 モーラを持つので、
+  // どちらの分岐にも到達しない。
+  const emptyPhrase = { moras: [], accentNucleus: 0, punctuations: ["…"] };
+  const karume = karumePhrases(0);
+
+  const trailing = toSbv2Utterance({
+    result: {
+      leadingPunctuations: [],
+      accentPhrases: [...karume.result.accentPhrases, emptyPhrase],
+    },
+    words: [...karume.words, { surface: "…", phones: ["…"] }],
+  });
+  assertEquals(trailing.moras.length, 3, "モーラの無い句がモーラを生やした");
+  assertEquals(trailing.moras[2].punctuations, ["…"], "直前モーラへ寄っていない");
+  assertEquals(trailing.leadingPunctuations, []);
+  assertWordPhones(toSbv2PhoneTone(trailing, "_").phones, trailing.words);
+
+  // 先頭に置くと寄せ先のモーラが無い → `leadingPunctuations`（構造でしか運べない情報）。
+  const leading = toSbv2Utterance({
+    result: {
+      leadingPunctuations: [],
+      accentPhrases: [emptyPhrase, ...karume.result.accentPhrases],
+    },
+    words: [{ surface: "…", phones: ["…"] }, ...karume.words],
+  });
+  assertEquals(leading.leadingPunctuations, ["…"]);
+  for (const [index, mora] of leading.moras.entries()) {
+    assertEquals(mora.punctuations, undefined, `moras[${index}] に欄が生えた`);
+  }
+  assertWordPhones(toSbv2PhoneTone(leading, "_").phones, leading.words);
+});
+
 Deno.test("toSbv2Utterance: 促音は音素へ畳む（`Sbv2Mora.vowel` は音素そのもの）", () => {
   // 上流の解析は促音を "cl" で表すが、語アライメントの音素は "q"。畳まずに運ぶと、
   // 音素列と words の突合がその 1 個だけで割れる（= 促音を含む入力が全部落ちる）。
