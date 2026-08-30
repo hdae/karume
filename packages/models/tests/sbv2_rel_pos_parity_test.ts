@@ -27,7 +27,7 @@ const IO_SUFFIX = ".safetensors";
 
 /** バケット規則の出所（配布形の資産 — TS 側に写経しないための 1 箇所）。 */
 const SYMBOLS_FILE = new URL(
-  "../../../models/karume-sbv2-fn/shared/text/symbols.json",
+  "../../../models/karume-sbv2-jvnv/shared/text/symbols.json",
   import.meta.url,
 );
 

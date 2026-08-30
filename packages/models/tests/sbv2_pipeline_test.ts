@@ -34,7 +34,7 @@ const FILE = {
   sha256: "a".repeat(64),
 };
 
-/** `models/karume-sbv2-fn/karume.json` の骨格（検査に要る欄だけ）。 */
+/** `models/karume-sbv2-jvnv/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
     format: "karume/4",
@@ -242,7 +242,7 @@ Deno.test("parseSbv2PipelineConfig: 行番号の重複を落とす（名前と�
 });
 
 Deno.test("parseSbv2PipelineConfig: 配布形の pipelineConfig を読み切る", () => {
-  // `models/karume-sbv2-fn/karume.json` の実物と同じ形。名前 → 行番号が Map で引けること。
+  // `models/karume-sbv2-jvnv/karume.json` の実物と同じ形。名前 → 行番号が Map で引けること。
   const config = parseSbv2PipelineConfig({
     styles: { Neutral: 0, high: 1, low: 2, NSFW: 3 },
     speakers: { FN4: 0 },
