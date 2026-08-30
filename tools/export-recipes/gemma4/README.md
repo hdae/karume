@@ -96,8 +96,10 @@ ADR [0069](../../../docs/decisions/0069-packed-w4-storage.md) (packed int4) — 
 carries a sliding window, shared KV and mixed storage at once.
 
 `M` is the physical chunk extent — `chunkLength` when prefilling, 1 when decoding — and only its
-leading `queryLength` rows are valid. The capacity is the symbol `C` on every slot, so it is chosen
-by `createGenerationContext` instead of being baked in at export time.
+leading `queryLength` rows are valid. Capacity is declared per layer type: the 6 full slots carry
+the symbol `C`, chosen by `createGenerationContext` at run time, while the 24 sliding slots bake
+`sliding_window` as a literal — their ring closes at exactly `window` rows, so a symbolic capacity
+would only reserve rows that can never be read (ADR 0066 addendum 9).
 
 Three structural differences from the 1-shot recipe, and the export fails loudly when any is lost:
 

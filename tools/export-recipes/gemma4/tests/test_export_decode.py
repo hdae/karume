@@ -377,8 +377,15 @@ class TestStatesPlan:
         plan = decode.states_plan(_pre_surgery_graph(), TINY_IR_CONFIG)
 
         assert [spec.window for spec in plan.attentions] == [WINDOW, WINDOW, None, WINDOW, None]
-        # 容量は全スロット共通の記号（数値上書きはしない — ADR 0066 決定 3）
-        assert all(spec.capacity is None for spec in plan.attentions)
+        # 容量は層種別で分かれる: sliding = window 実数（ring は window ちょうどで閉じる）/
+        # full = 記号（実行時に選ぶ — ADR 0066 決定 3）。states_plan docstring が正本。
+        assert [spec.capacity for spec in plan.attentions] == [
+            WINDOW,
+            WINDOW,
+            None,
+            WINDOW,
+            None,
+        ]
 
     def test_a_layer_count_mismatch_fails_loudly(self):
         """MUST: 取りこぼした層は chunk 局所 causal のまま残る（沈黙誤値）。"""
@@ -497,20 +504,36 @@ class TestAssertIrFormDecode:
         with pytest.raises(AssertionError, match="window"):
             decode.assert_ir_form_decode(graph, TINY_IR_CONFIG, STORAGE_COUNTS)
 
-    def test_a_baked_capacity_is_rejected(self):
-        """容量を数値で焼くと `createGenerationContext` で容量を選べない（ADR 0066 決定 3）。"""
+    def test_a_baked_full_capacity_is_rejected(self):
+        """full の容量を数値で焼くと `createGenerationContext` で容量を選べない（ADR 0066 決定 3）。"""
         graph = _pre_surgery_graph()
         baked = StatesPlan(
             capacity_symbol=decode.CAPACITY_SYMBOL,
             attentions=tuple(
-                replace(spec, capacity=8)
+                replace(spec, capacity=8) if spec.window is None else spec
                 for spec in decode.states_plan(graph, TINY_IR_CONFIG).attentions
             ),
         )
 
-        with pytest.raises(AssertionError, match="容量は記号のまま残す"):
+        with pytest.raises(AssertionError, match="full の容量は記号のまま残す"):
             decode.assert_ir_form_decode(
                 to_states_form(graph, baked), TINY_IR_CONFIG, STORAGE_COUNTS
+            )
+
+    def test_a_symbolic_sliding_capacity_is_rejected(self):
+        """sliding の容量が記号のままだと window 超の死蔵行が戻る（緩めると素通りする側）。"""
+        graph = _pre_surgery_graph()
+        symbolic = StatesPlan(
+            capacity_symbol=decode.CAPACITY_SYMBOL,
+            attentions=tuple(
+                replace(spec, capacity=None)
+                for spec in decode.states_plan(graph, TINY_IR_CONFIG).attentions
+            ),
+        )
+
+        with pytest.raises(AssertionError, match="sliding は window 実数ちょうど"):
+            decode.assert_ir_form_decode(
+                to_states_form(graph, symbolic), TINY_IR_CONFIG, STORAGE_COUNTS
             )
 
     def test_a_missing_state_append_is_rejected(self):

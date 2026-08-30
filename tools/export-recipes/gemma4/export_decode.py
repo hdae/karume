@@ -78,8 +78,9 @@ karume の sliding 述語は `in_window(col, limit) = col <= limit && (limit - c
 幅 512 で厳密同値**。1-shot 形の帯 mask（`(cols <= rows) & ((rows - cols) < window)`）とも同じ
 包含なので、`config.sliding_window` をそのまま `window` attrs へ宣言する。
 
-容量は全スロット共通の記号 `C`（数値上書きはしない — ADR 0066 決定 3）。sliding スロットの
-ring 写像は `col % window` なので `C >= 512` なら正しさは容量に依らず、余分は数 MB に留まる。
+容量は層種別で分ける（ADR 0066 追記 9）: full スロットは記号 `C`（context 生成時に選ぶ —
+決定 3）・sliding スロットは `window` 実数。ring は window ちょうどで閉じるので、記号のままだと
+`C - window` 行が常に死蔵になる（C=8192 で約 180MiB）。詳細は {@link states_plan}。
 
 ## mask は「trace を通すためだけ」に居る
 
@@ -509,8 +510,11 @@ def states_plan(
     - 層 15..34（共有読者）: 自分のスロットを作らず、layer_type の所有層のスロットを読む。
       sliding の読者は同じ `window` を宣言する（states.py の `_register` が完全一致を検査）。
 
-    容量は全スロット共通の記号（`StateAttentionSpec.capacity` の数値上書きは使わない —
-    容量は `createGenerationContext` が決める値 / ADR 0066 決定 3）。
+    容量は層種別で分ける: **sliding スロットは `window` 実数**（ring は window ちょうどで
+    閉じる — ADR 0067 決定 4 の「全読者が past を読み終えてから append」保証。記号のままだと
+    容量 C ぶんの行を確保して window 超の行が死蔵になるだけで、読める行集合は変わらない）・
+    **full スロットは記号のまま**（全 context を保持する側だけが「容量を実行時に選ぶ」自由 —
+    ADR 0066 決定 3 — を必要とする）。
     """
     nodes = attention_nodes(graph, config)
     window = int(config.sliding_window)
@@ -522,6 +526,7 @@ def states_plan(
                 k_slot=slot_name(owner, "k"),
                 v_slot=slot_name(owner, "v"),
                 window=window if layer_type == one_shot.SLIDING_ATTENTION else None,
+                capacity=window if layer_type == one_shot.SLIDING_ATTENTION else None,
             )
             for node, layer_type, owner in zip(
                 nodes, config.layer_types, slot_layers(config), strict=True
@@ -567,7 +572,9 @@ def assert_ir_form_decode(
     - attention が 1 本でも従来形（mask 込み 4 本）で残ると、その層だけ過去を見ない
     - `window` の有無が層種別と食い違うと、full 層が窓外を捨てる / sliding 層が窓を無視する
     - スロットの割り当てを間違えると、共有層が別の層の KV を読む（形も型も合う）
-    - 容量が記号でなく数値だと、context 生成時に容量を選べない（ADR 0066 決定 3）
+    - full スロットの容量が記号でなく数値だと、context 生成時に容量を選べない（ADR 0066
+      決定 3）。sliding スロットは逆に window 実数ちょうどでないと死蔵行が戻る
+      （states_plan docstring — 層種別で理由が違うので検査も分けている）
     - `sym_prefix_slice` / `sin` が残ると、誰も読まない Tmax 定数や畳み残しが配布物に居座る
     - グラフ入力に mask が残ると「ホストが毎 chunk T² を作って渡す」別物になる
     - 圧縮の適格判定を外した重みは**黙って f32 のまま**残る（`emit._plan_weight_dtype` の
@@ -709,15 +716,25 @@ def assert_ir_form_decode(
             f" {len(expected_slots)} 本でない"
         )
     for layer in range(boundary):
-        depth = one_shot._attention_depth(config, layer_types[layer])
-        slot_shape = [1, kv_heads, capacity_symbol, depth]
+        layer_type = layer_types[layer]
+        depth = one_shot._attention_depth(config, layer_type)
+        # 容量の検査は層種別で分ける MUST — 記号一色に緩めると「全部数値に焼かれた資産」
+        # （容量を実行時に選べない — ADR 0066 決定 3）が素通りし、数値一色に緩めると full の
+        # 容量自由が黙って消える。sliding は window 実数ちょうど（states_plan docstring）。
+        sliding = layer_type == one_shot.SLIDING_ATTENTION
+        slot_shape = [1, kv_heads, window if sliding else capacity_symbol, depth]
         for part in ("k", "v"):
             name = slot_name(layer, part)
             slot = graph.states[name]
             if slot.dtype != "f32" or list(slot.shape) != slot_shape:
+                kind = (
+                    "sliding は window 実数ちょうど"
+                    if sliding
+                    else "full の容量は記号のまま残す MUST"
+                )
                 raise AssertionError(
                     f"states['{name}'] が {slot.dtype} {list(slot.shape)} —"
-                    f" f32 {slot_shape} でない（容量は記号のまま残す MUST）"
+                    f" f32 {slot_shape} でない（{kind}）"
                 )
 
     symbols = sorted(graph.symbols)

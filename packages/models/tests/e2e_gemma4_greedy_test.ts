@@ -115,8 +115,8 @@ const CHUNK_LENGTH = 32;
  * ケースごとに実測で見る（下の {@link CAPACITY} 検査）— prompt が伸びた再エクスポートで
  * 容量が足りなくなったとき、無音で丸まらず落ちる位置をここに置く。
  *
- * NOTE: sliding スロットは `col % 512` の ring なので容量 512 超の余りを使わないが、容量記号は
- * 全スロット共通（ADR 0066 決定 3）なので full スロットの要求で決まる。
+ * NOTE: 記号 C を持つのは full スロット 6 本だけ — sliding スロット 24 本は `window` 実数
+ * （512）が容量として焼かれており、この束縛の影響を受けない（ADR 0066 追記 9）。
  */
 const CAPACITY_SYMBOL = "C";
 const CAPACITY = 640;
@@ -348,6 +348,21 @@ const assertDecodeForm = (parsed: PreparedModel): void => {
     .sort();
   assertEquals(Object.keys(graph.states).sort(), expectedSlots, "states スロットの名前");
   assertEquals(Object.keys(graph.states).length, SLOTS, "states スロットの本数");
+
+  // スロット容量は層種別で分かれる: sliding 所有層 = window 実数（ring は window ちょうどで
+  // 閉じる）/ full 所有層 = 記号 C（実行時に選ぶ）。完全検査は書き手側
+  // （`export_decode.assert_ir_form_decode`）— ここは読んだ資産がその形かの確認だけ。
+  for (let layer = 0; layer < OWNED_LAYERS; layer += 1) {
+    const capacity = FULL_LAYERS.has(layer) ? CAPACITY_SYMBOL : WINDOW;
+    for (const part of ["k", "v"] as const) {
+      const name = slotName(layer, part);
+      assertEquals(
+        graph.states[name].shape[2],
+        capacity,
+        `states['${name}'] の容量（sliding = window 実数 / full = 記号）`,
+      );
+    }
+  }
 
   const attentions = graph.nodes.filter((node) => node.op === "attention");
   assertEquals(attentions.length, LAYERS, "attention ノードの本数（= 層数）");

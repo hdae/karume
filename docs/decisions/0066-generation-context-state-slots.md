@@ -216,3 +216,13 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
    なった（有効行しか覆わない現行構成では発火経路を持たない — dispatch とカーネルの行範囲が
    割れた実装バグの検出線として温存）。非有限な V が空行出力を `0 · NaN` で汚す残穴も同時に
    閉じている。
+9. **sliding スロットの容量は window 実数で焼く（決定 3 の適用範囲の精密化 — 2026-08-30
+   LLM 先行波）**: 「容量は context 生成時に選ぶ」（決定 3）が要るのは**全 context を保持する
+   full スロットだけ**で、sliding スロットは ring が window ちょうどで閉じる（ADR 0067
+   決定 4 — 全読者が past を読み終えてから append するので slack 不要）ため、容量記号のまま
+   だと `C − window` 行が常に死蔵になる（gemma4 E2B: 24 スロット × 256 × 4B — C=8192 で
+   約 180MiB）。以後の states 形 recipe は sliding スロットに `capacity = window` を数値で
+   与える（`StateAttentionSpec.capacity` の既存席）。決定 1 の「sliding と full は容量の違う
+   別スロット」の実適用で、機能は不変（token 列 parity が検収 — gemma4 で 3 ケース不変を
+   実測）。form 検査は「full = 記号 / sliding = window 実数」の層種別で分ける（一色に緩めると
+   どちらかの退行が素通りする — `export_decode.assert_ir_form_decode`）。
