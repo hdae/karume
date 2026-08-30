@@ -526,6 +526,25 @@ const finiteKnob = (value: number, name: string): number => {
 };
 
 /**
+ * `seed` の受理集合（非負の安全整数 — `host/random.ts` の `Randn` と同一条件）を見る門。
+ *
+ * MUST: 他のノブと同じ段（Session を張る前）で呼ぶ。唯一の検査が `Randn` のコンストラクタ
+ * だけだと、実行不能と最初から判っている要求に text_encoder（配布形で 334MB）の構築と
+ * 1 run を丸ごと払ってから落ちる（{@link assertTokenLimit} の位置の MUST と同じ理由）。
+ * MUST: 型は `Sbv2InputError`。`Randn` が投げる `RangeError` は `errors.ts` の分類軸
+ * （呼び手の要求の不受理 = `Sbv2InputError` / 内部不変条件の破れ = 素の `Error`）の外にあり、
+ * HTTP を被せる消費側で 400 が 500 に化ける。`Randn` 側の検査はテスト専用の第 2 の門として
+ * 残す（`examples/sbv2/dump.ts` が直接叩くので入口が 2 つある）。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ */
+export const assertSeed = (seed: number): void => {
+  if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
+    throw new Sbv2InputError(`seed ${seed} が非負の安全整数でない`);
+  }
+};
+
+/**
  * トークン列の運用上限（`pipelineConfig.maxTokens`）を見る門。
  *
  * MUST: 相対位置表（`c2p_pos` / `p2c_pos` は各 4·T² bytes）の生成と Session の確保**より前**に
@@ -718,6 +737,7 @@ export const synthesizeSbv2 = async (
     throw new Sbv2InputError(`lengthScale ${knobs.lengthScale} が正でない`);
   }
   const seed = options.seed ?? 0;
+  assertSeed(seed);
   const styleRow = resolveRow(state.config.styles, style, "スタイル");
   const speakerRow = resolveRow(state.config.speakers, speaker, "話者");
 
