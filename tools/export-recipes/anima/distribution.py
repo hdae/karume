@@ -104,11 +104,16 @@ LICENSE_SOURCE_PATH = Path(__file__).parent / "circlestone_license.txt"
 #: MUST: 改変の列挙は**リポごと**に持つ（1 本を使い回さない）。turbo リポと base リポでは
 #: 焼き込みの有無も格納系列の数も違うので、共有した瞬間にどちらかの告知が事実と食い違う —
 #: 値としては妥当な散文なので、`verify_dist` も manifest 検査も素通りして配ってから露見する。
+#: MUST: 文面は分割の有無に依らず正しいものを 1 本だけ持つ（manifest を見て出し分けない）—
+#: `root_files` は Pipeline 構築時に固定で組むので、manifest 依存の分岐はここに置けない。
+#: 「1 個の safetensors ファイル」と綴っていた旧文面は 2026-08-29 の shard 分割で事実と食い違い、
+#: §3(d)(i) が求める「改変内容の告知」が改変内容を述べていない状態になっていた（X2-103）。
 CONTAINER_MODIFICATION = (
     "- The weights were converted into the container format of the WebGPU inference"
     " runtime Karume\n"
-    "  (a single safetensors file holding the weights plus an inference graph in"
-    " `__metadata__`)."
+    "  (safetensors holding the weights plus an inference graph in `__metadata__`,"
+    " split across\n"
+    "  numbered shards when a component is too large for one file)."
 )
 
 

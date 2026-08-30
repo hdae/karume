@@ -144,6 +144,60 @@ def base_card() -> str:
     return render_base_card(_base_manifest(), REPO, ANIMA_QUANT_ABBREVIATIONS)
 
 
+def _sharded_manifest() -> dict[str, Any]:
+    """1 コンポーネントが複数ファイルへ割れた配布形（1GiB 超の分割 — ADR 0071 / 0070 追記）。
+
+    実配布の anima はこの形（transformer が 2〜4 shard）。単一 shard のフィクスチャしか無いと、
+    「コンテナ = 1 個の safetensors ファイル」という散文が事実と食い違ったまま素通りする
+    （実際に公開カードで起きた — X2-103）。
+    """
+    manifest = _manifest()
+    manifest["models"]["turbo"]["weights"]["transformer"]["f16"]["shards"] = [
+        _ref("turbo/transformer/model.f16-00001-of-00002.safetensors", 777, "1"),
+        _ref("turbo/transformer/model.f16-00002-of-00002.safetensors", 888, "2"),
+    ]
+    return manifest
+
+
+@pytest.fixture
+def sharded_card() -> str:
+    return render_model_card(_sharded_manifest(), REPO, ANIMA_QUANT_ABBREVIATIONS)
+
+
+class TestShardedDistribution:
+    """分割された配布形（実配布の形）でカードが事実と食い違わないこと。"""
+
+    def test_it_lists_every_shard_of_a_split_component(self, sharded_card: str) -> None:
+        """ファイル表は shard を 1 本残らず並べる（`karume.modelcard` の導出 MUST の帰結）。"""
+        for path in (
+            "turbo/transformer/model.f16-00001-of-00002.safetensors",
+            "turbo/transformer/model.f16-00002-of-00002.safetensors",
+        ):
+            assert sharded_card.count(f"`{path}`") == 1, path
+        assert "`turbo/transformer/model.f16.safetensors`" not in sharded_card
+
+    def test_it_never_calls_the_container_a_single_file(
+        self, card: str, sharded_card: str, base_card: str
+    ) -> None:
+        """散文は分割の有無に依らず 1 本（manifest 依存の出し分けはしない — X2-103 裁定 a）。
+
+        `NOTICE.md` の改変列挙は Pipeline 構築時に固定で組まれ manifest を見られないので、
+        カード側だけ出し分けると 2 つの文書が別のことを言う。したがって**どの manifest でも**
+        「1 個の safetensors ファイル」とは書かない。
+        """
+        for text in (card, sharded_card, base_card):
+            flat = " ".join(text.split())
+            assert "a single safetensors file" not in flat
+            assert "split across numbered shards" in flat
+
+    def test_it_does_not_advertise_the_local_asset_entry_point(
+        self, card: str, sharded_card: str, base_card: str
+    ) -> None:
+        """`fromAssets` は案内しない（2026-08-29 裁定）— HF から使う入口は `fromPretrained`。"""
+        for text in (card, sharded_card, base_card):
+            assert "fromAssets" not in text
+
+
 class TestBaseCard:
     """素の base 系カード — turbo 前提の記述が 1 つも残っていないこと + 出所の帰属。"""
 

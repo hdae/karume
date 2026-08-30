@@ -154,8 +154,9 @@ def _overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         f"A distribution that bakes **{LORA_NAME}** into"
         f" [{base_model}](https://huggingface.co/{base_model}) and converts it into the WebGPU",
-        "inference runtime **Karume**'s container format (a single safetensors file = weights +",
-        "a graph JSON embedded in `__metadata__`). Runs as-is in the browser and in Deno.",
+        "inference runtime **Karume**'s container format (safetensors = weights + a graph JSON",
+        "embedded in `__metadata__`, split across numbered shards when a component is too large",
+        "for one file). Runs as-is in the browser and in Deno.",
         "",
         f"- A few-step distillation (from the LoRA) tuned for **{defaults['steps']} steps /"
         f" guidance {defaults['guidanceScale']}**.",
@@ -218,6 +219,11 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
     ので、モデル / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ
     進める形。
+
+    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
+    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
+    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
+    判断させることになる。
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -281,7 +287,6 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "```",
         "",
         "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
-        "You can also load from a local directory (`AnimaPipeline.fromAssets`).",
     ]
 
 
@@ -316,9 +321,9 @@ def _base_overview(manifest: Mapping[str, Any]) -> list[str]:
         "## What is this",
         "",
         f"[{base_model}](https://huggingface.co/{base_model}) — and community fine-tunes of it —",
-        "converted into the WebGPU inference runtime **Karume**'s container format (a single",
-        "safetensors file = weights + a graph JSON embedded in `__metadata__`). Runs as-is in the",
-        "browser and in Deno.",
+        "converted into the WebGPU inference runtime **Karume**'s container format (safetensors =",
+        "weights + a graph JSON embedded in `__metadata__`, split across numbered shards when a",
+        "component is too large for one file). Runs as-is in the browser and in Deno.",
         "",
         f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
