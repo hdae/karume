@@ -83,7 +83,7 @@ from gemma4 import ple, provenance
 from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph
-from karume.ops import ARGMAX_OP, ATTENTION_OP, EMBEDDING_OP, LINEAR_OP, STATE_APPEND_OP
+from karume.ops import ARGMAX_OP, EMBEDDING_OP
 from karume.pipeline import export_module
 from karume.quantize import quantize_to_int8
 from karume.shapes import declared_shape
@@ -426,10 +426,10 @@ def assert_ir_form_product(
 ) -> dict[str, Any]:
     """製品グラフの形を検査する（**数値が合ったまま静かに壊れる**性質を全部見る）。
 
-    NOTE: states / 層種別 / 残骸 / 格納の各節は {@link decode.assert_ir_form_decode} と同じ
-    規律を見る。あちらを呼べないのは入口（4 本）と出口（argmax 無し）の検査が排他だから
-    （`token_only` の 2 値では表せない第 3 の形）で、両者の統合は入口 / 出口を引数化する
-    改修になる — 段 1b の射程外なので、ここでは同じ規律を独立に綴る。
+    states / 層種別 / 残骸 / 格納の各節は {@link decode.assert_ir_form_common} に預ける
+    （3 形が共有する本体 — 段 1b では「入口 / 出口が排他だから」と独立に綴っていたが、
+    共有部分だけを関数に括れば入口 / 出口の引数化は要らない）。ここが綴るのは製品形に固有の
+    入口・出口だけである。
 
     製品形に固有の 3 本（PLE 外出しと logits 出口の実証）:
 
@@ -447,14 +447,8 @@ def assert_ir_form_product(
     - 出力の宣言 shape が `[1, 1, vocab_size]`（最終**行**のみ）であること。全行 logits へ
       退行しても token 列は一致するので、構造検査でしか固定できない（ADR 0068 の実効）。
     """
-    heads = int(config.num_attention_heads)
-    kv_heads = int(config.num_key_value_heads)
-    layer_types = list(config.layer_types)
+    decode.assert_layer_type_count(config)
     layers = int(config.num_hidden_layers)
-    if len(layer_types) != layers:
-        raise AssertionError(f"config.layer_types が {len(layer_types)} 本（{layers} 層と違う）")
-    owners = decode.slot_layers(config)
-    window = int(config.sliding_window)
     ple_dim = int(config.hidden_size_per_layer_input)
 
     expected_inputs = [
@@ -518,165 +512,21 @@ def assert_ir_form_product(
             f"出力 0 の宣言 shape が {logits_shape} — {expected_logits}（最終行のみ）でない"
         )
 
-    # **1 行 lm_head の固定**（token-only 形と同じ構造検査）。行ごとの lm_head と行選択は
-    # 可換なので「全行 lm_head → 行選択」でも値は一致する — ADR 0068 の実効（lm_head 1 行・
-    # [M,V] バッファ消滅）はこの検査でしか固定できない。softcap 鎖（mul/tanh/div — いずれも
-    # ins[0] が本流）を遡って最初の linear が lm_head。
+    # 1 行 lm_head の固定は token-only 形と**同じ構造検査**（decode 側の 1 本を通す）。
     producer = {out: node for node in graph.nodes for out in node.outs}
-    node = producer.get(graph.outputs[0])
-    if node is None:
+    logits_source = producer.get(graph.outputs[0])
+    if logits_source is None:
         raise AssertionError(f"出力 0 ('{graph.outputs[0]}') がノード出力でない")
-    for _ in range(8):
-        source = producer.get(node.ins[0])
-        if source is None:
-            raise AssertionError(
-                f"logits 出力の祖先（'{node.ins[0]}'）が途切れた — lm_head（linear）に届かない"
-            )
-        node = source
-        if node.op == LINEAR_OP:
-            break
-    else:
-        raise AssertionError(f"logits 出力の 8 段以内に lm_head（{LINEAR_OP}）が無い")
-    row_shape = declared_shape(graph, node.ins[0])
-    if list(row_shape[:2]) != [1, 1]:
-        raise AssertionError(
-            f"lm_head の入力が {row_shape} — [1,1,H]（選択済みの 1 行）でない"
-            "（全行 lm_head へ退行している）"
-        )
-    input_names = {spec.name for spec in graph.inputs}
-    frontier = [node.ins[0]]
-    seen: set[str] = set()
-    reachable: set[str] = set()
-    while frontier:
-        name = frontier.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        if name in input_names:
-            reachable.add(name)
-            continue
-        upstream = producer.get(name)
-        if upstream is not None:
-            frontier.extend(upstream.ins)
-    if decode.TOKEN_ONLY_LAST_ROW not in reachable:
-        raise AssertionError(
-            f"lm_head の入力が `{decode.TOKEN_ONLY_LAST_ROW}` に依存しない"
-            f"（到達した入力: {sorted(reachable)}）— 行選択が lm_head より前に居ない"
-        )
+    decode.assert_single_row_lm_head(graph, producer, logits_source)
 
-    attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
-    if len(attentions) != layers:
-        raise AssertionError(f"attention が {len(attentions)} 本（{layers} 層と一致しない）")
-    for layer, (node, layer_type, owner) in enumerate(
-        zip(attentions, layer_types, owners, strict=True)
-    ):
-        where = f"attention[{layer}] ({layer_type})"
-        if len(node.ins) != 3:
-            raise AssertionError(
-                f"{where}: ins が {len(node.ins)} 本 — states 形は q / k / v の 3 本ちょうど"
-                "（4 本なら mask 込みの従来形が残っている）"
-            )
-        expected_states = {
-            "k": decode.slot_name(owner, "k"),
-            "v": decode.slot_name(owner, "v"),
-        }
-        if node.states != expected_states:
-            raise AssertionError(f"{where}: states 欄が {node.states}（期待 {expected_states}）")
-        expected_window = window if layer_type == one_shot.SLIDING_ATTENTION else None
-        if node.attrs.get("window") != expected_window:
-            raise AssertionError(
-                f"{where}: attrs の window が {node.attrs.get('window')}"
-                f"（期待 {expected_window}）— 層種別と窓の対応が崩れている"
-            )
-        query, key, value = (declared_shape(graph, name) for name in node.ins)
-        if query[1] != heads or key[1] != kv_heads or value[1] != kv_heads:
-            raise AssertionError(
-                f"{where}: head 軸が {[query[1], key[1], value[1]]} —"
-                f" 真の GQA 形 {[heads, kv_heads, kv_heads]} でない"
-            )
-        depth = one_shot._attention_depth(config, layer_type)
-        if query[3] != depth or key[3] != depth or value[3] != depth:
-            raise AssertionError(
-                f"{where}: D 軸が {[query[3], key[3], value[3]]} — この層種別の head_dim"
-                f" {depth} と違う"
-            )
-
-    boundary = decode.first_shared_layer(config)
-    expected_slots = sorted(
-        decode.slot_name(layer, part) for layer in range(boundary) for part in ("k", "v")
+    form = decode.assert_ir_form_common(
+        graph,
+        config,
+        storage_expectation,
+        seq_symbol=seq_symbol,
+        capacity_symbol=capacity_symbol,
     )
-    appends = [node for node in graph.nodes if node.op == STATE_APPEND_OP]
-    written = sorted(node.states["slot"] for node in appends)
-    if written != expected_slots:
-        raise AssertionError(
-            f"`{STATE_APPEND_OP}` の書き先が {len(written)} 本 — 所有層のスロット"
-            f" {len(expected_slots)} 本を 1 本ずつでない"
-            f"（欠落 {sorted(set(expected_slots) - set(written))} /"
-            f" 余剰 {sorted(set(written) - set(expected_slots))}）"
-        )
-    if sorted(graph.states) != expected_slots:
-        raise AssertionError(
-            f"states 宣言が {sorted(graph.states)} — 所有層 {boundary} 本の k / v"
-            f" {len(expected_slots)} 本でない"
-        )
-    for layer in range(boundary):
-        sliding = layer_types[layer] == one_shot.SLIDING_ATTENTION
-        depth = one_shot._attention_depth(config, layer_types[layer])
-        slot_shape = [1, kv_heads, window if sliding else capacity_symbol, depth]
-        for part in ("k", "v"):
-            name = decode.slot_name(layer, part)
-            slot = graph.states[name]
-            if slot.dtype != "f32" or list(slot.shape) != slot_shape:
-                kind = (
-                    "sliding は window 実数ちょうど"
-                    if sliding
-                    else "full の容量は記号のまま残す MUST"
-                )
-                raise AssertionError(
-                    f"states['{name}'] が {slot.dtype} {list(slot.shape)} —"
-                    f" f32 {slot_shape} でない（{kind}）"
-                )
-
-    symbols = sorted(graph.symbols)
-    if symbols != sorted({seq_symbol, capacity_symbol}):
-        raise AssertionError(
-            f"symbols が {symbols} — {sorted({seq_symbol, capacity_symbol})} でない"
-        )
-    residue = sorted(set(graph.required_ops) & set(decode.RESIDUE_OPS))
-    if residue:
-        raise AssertionError(
-            f"手術で死ぬはずの op が残っている: {residue}"
-            "（mask の Tmax 畳み込み残骸 / 畳み残した RoPE）"
-        )
-
-    storage: dict[str, int] = {}
-    for initializer in graph.initializers.values():
-        dtype = initializer.storage.dtype
-        storage[dtype] = storage.get(dtype, 0) + 1
-    wrong = {
-        dtype: (storage.get(dtype, 0), expected)
-        for dtype, expected in storage_expectation.items()
-        if storage.get(dtype, 0) != expected
-    }
-    if wrong:
-        raise AssertionError(
-            f"格納 dtype の本数が想定と違う（実測, 想定）: {wrong} / 全内訳 {storage}"
-        )
-    return {
-        "attention_nodes": len(attentions),
-        "state_append_nodes": len(appends),
-        "slots": len(expected_slots),
-        "embedding_nodes": len(embeddings),
-        "kv_owners": decode.kv_owner_layers(config),
-        "heads": [heads, kv_heads, kv_heads],
-        "head_dim": {
-            layer_type: one_shot._attention_depth(config, layer_type)
-            for layer_type in decode.unique_layer_types(config)
-        },
-        "window": window,
-        "logits": logits_shape,
-        "storage": dict(sorted(storage.items())),
-    }
+    return {**form, "embedding_nodes": len(embeddings), "logits": logits_shape}
 
 
 # ---- 系列 ------------------------------------------------------------------

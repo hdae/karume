@@ -129,7 +129,7 @@ from gemma4 import ple, provenance
 from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph, IrNode
-from karume.ops import ARGMAX_OP, ATTENTION_OP, STATE_APPEND_OP
+from karume.ops import ARGMAX_OP, ATTENTION_OP, LINEAR_OP, STATE_APPEND_OP
 from karume.pipeline import export_module, publish_model
 from karume.shapes import declared_shape
 from karume.shards import resolve_shards
@@ -551,21 +551,86 @@ def last_row_for(ids: torch.Tensor) -> torch.Tensor:
     return torch.tensor([int(ids.shape[1]) - 1], dtype=torch.int64)
 
 
-def assert_ir_form_decode(
+def assert_layer_type_count(config: Any) -> None:
+    """層種別の宣言本数を確かめる（形検査の**前口上** — 3 形すべてが最初に通る）。
+
+    ここが崩れていると後段の `zip(..., strict=True)` が「本数が違う」という真因から遠い
+    例外で落ちるので、入口・出口の検査より前に置く（{@link assert_ir_form_decode} /
+    {@link gemma4.export_product.assert_ir_form_product} の並び）。
+    """
+    layers = int(config.num_hidden_layers)
+    declared = len(list(config.layer_types))
+    if declared != layers:
+        raise AssertionError(f"config.layer_types が {declared} 本（{layers} 層と違う）")
+
+
+def assert_single_row_lm_head(
+    graph: IrGraph,
+    producer: Mapping[str, IrNode],
+    start: IrNode,
+) -> None:
+    """**1 行 lm_head の固定**（Codex 波 H 指摘 H-01）。
+
+    行ごとの lm_head と行選択は可換なので「全行 lm_head → softcap → 行選択」でも token 列は
+    一致する — ADR 0068 の実効（lm_head 1 行・`[M,V]` バッファ消滅）はこの構造検査でしか
+    固定できない。`start`（token-only なら argmax ノード / 製品形なら logits 出力の生産者）
+    から softcap 鎖（div/tanh/mul — いずれも `ins[0]` が本流）を遡って最初の linear が
+    lm_head で、その入力が `[1,1,H]`（行 1 本）かつ祖先に `last_row` 入力を持つこと。
+    """
+    node = start
+    for _ in range(8):
+        source = producer.get(node.ins[0])
+        if source is None:
+            raise AssertionError(
+                f"出力の祖先（'{node.ins[0]}'）が途切れた — lm_head（linear）に届かない"
+            )
+        node = source
+        if node.op == LINEAR_OP:
+            break
+    else:
+        raise AssertionError(f"出力の 8 段以内に lm_head（{LINEAR_OP}）が無い")
+    row_shape = declared_shape(graph, node.ins[0])
+    if list(row_shape[:2]) != [1, 1]:
+        raise AssertionError(
+            f"lm_head の入力が {row_shape} — [1,1,H]（選択済みの 1 行）でない"
+            "（全行 lm_head へ退行している）"
+        )
+    input_names = {spec.name for spec in graph.inputs}
+    frontier = [node.ins[0]]
+    seen: set[str] = set()
+    reachable: set[str] = set()
+    while frontier:
+        name = frontier.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in input_names:
+            reachable.add(name)
+            continue
+        upstream = producer.get(name)
+        if upstream is not None:
+            frontier.extend(upstream.ins)
+    if TOKEN_ONLY_LAST_ROW not in reachable:
+        raise AssertionError(
+            f"lm_head の入力が `{TOKEN_ONLY_LAST_ROW}` に依存しない"
+            f"（到達した入力: {sorted(reachable)}）— 行選択が lm_head より前に居ない"
+        )
+
+
+def assert_ir_form_common(
     graph: IrGraph,
     config: Any,
     storage_expectation: Mapping[str, int],
     *,
-    seq_symbol: str = SEQ_SYMBOL,
-    capacity_symbol: str = CAPACITY_SYMBOL,
-    token_only: bool = False,
+    seq_symbol: str,
+    capacity_symbol: str,
 ) -> dict[str, Any]:
-    """states 形 decode グラフの形を検査する（**数値が合ったまま静かに壊れる**性質を全部見る）。
+    """入口・出口**以外**の全規律（3 形が共有する本体）。
 
-    `token_only` は ADR 0068 決定 4 の**既定出口形**（`export_token` — 入力に `last_row` が
-    増え、出力が argmax token 1 本になる）。入口・出口以外の検査（states / 層種別 / 残骸 /
-    格納内訳）は両形で同一なので、この 1 関数が両方を受ける（別関数に割ると片方だけ検査が
-    痩せていく）。
+    decode 系列は入口 / 出口が 3 形ある（logits opt-in / token-only / 製品）が、states の
+    形・層種別との対応・スロット割り・記号・手術の残骸・格納内訳は**どの形でも同一**である。
+    ここを 1 本にしておかないと、片方だけ検査が痩せていく（実際に製品形の追加時、同じ規律を
+    独立に綴った結果 90 行が二重化していた）。
 
     golden の突合では捕まらない性質だけを並べる:
 
@@ -576,91 +641,20 @@ def assert_ir_form_decode(
       決定 3）。sliding スロットは逆に window 実数ちょうどでないと死蔵行が戻る
       （states_plan docstring — 層種別で理由が違うので検査も分けている）
     - `sym_prefix_slice` / `sin` が残ると、誰も読まない Tmax 定数や畳み残しが配布物に居座る
-    - グラフ入力に mask が残ると「ホストが毎 chunk T² を作って渡す」別物になる
     - 圧縮の適格判定を外した重みは**黙って f32 のまま**残る（`emit._plan_weight_dtype` の
       既定側は静かに落とす経路を持つ）ので、格納 dtype の本数を数えないと気づけない
 
     MUST: head_dim は層種別で引く（`hidden_size / num_attention_heads` = 192 はどちらとも
     違う）。片方の値で全層を見ると、もう片方の層が丸ごと無検査になる。
+    MUST: 呼び手は {@link assert_layer_type_count} を**先に**通していること（本数が合って
+    いる前提で `zip(..., strict=True)` を張る）。
     """
     heads = int(config.num_attention_heads)
     kv_heads = int(config.num_key_value_heads)
     layer_types = list(config.layer_types)
     layers = int(config.num_hidden_layers)
-    if len(layer_types) != layers:
-        raise AssertionError(f"config.layer_types が {len(layer_types)} 本（{layers} 層と違う）")
     owners = slot_layers(config)
     window = int(config.sliding_window)
-
-    names = [spec.name for spec in graph.inputs]
-    expected_inputs = (
-        [INPUT_IDS, POSITION_IDS, TOKEN_ONLY_LAST_ROW] if token_only else [INPUT_IDS, POSITION_IDS]
-    )
-    if names != expected_inputs:
-        raise AssertionError(
-            f"グラフ入力が {names} — {expected_inputs} でない"
-            "（mask が畳み込まれずに入力へ残っている可能性）"
-        )
-    expected_outputs = 1 if token_only else 2
-    if len(graph.outputs) != expected_outputs:
-        kind = (
-            "token-only 出口は token の 1 本"
-            if token_only
-            else "decode 出口は logits / token の 2 本"
-        )
-        raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（{kind}）")
-    producer = {out: node for node in graph.nodes for out in node.outs}
-    token_source = producer.get(graph.outputs[-1])
-    if token_source is None or token_source.op != ARGMAX_OP:
-        found = "ノード出力でない" if token_source is None else token_source.op
-        raise AssertionError(
-            f"出力 {len(graph.outputs) - 1} の供給元が {found} — `{ARGMAX_OP}` でない"
-            "（ADR 0068 決定 4 の decode 出口）"
-        )
-    if token_only:
-        # **1 行 lm_head の固定**（Codex 波 H 指摘 H-01）。行ごとの lm_head と行選択は可換
-        # なので「全行 lm_head → softcap → 行選択 → argmax」でも token 列は一致する —
-        # ADR 0068 の実効（lm_head 1 行・[M,V] バッファ消滅）はこの構造検査でしか固定できない。
-        # argmax から softcap 鎖（div/tanh/mul — いずれも ins[0] が本流）を遡って最初の
-        # linear が lm_head。その入力が [1,1,H]（行 1 本）で、祖先に last_row 入力を持つこと。
-        node = token_source
-        for _ in range(8):
-            source = producer.get(node.ins[0])
-            if source is None:
-                raise AssertionError(
-                    f"token 出力の祖先（'{node.ins[0]}'）が途切れた — lm_head（linear）に届かない"
-                )
-            node = source
-            if node.op == "linear":
-                break
-        else:
-            raise AssertionError("token 出力の 8 段以内に lm_head（linear）が無い")
-        row_shape = declared_shape(graph, node.ins[0])
-        if list(row_shape[:2]) != [1, 1]:
-            raise AssertionError(
-                f"lm_head の入力が {row_shape} — [1,1,H]（選択済みの 1 行）でない"
-                "（全行 lm_head へ退行している）"
-            )
-        input_names = {spec.name for spec in graph.inputs}
-        frontier = [node.ins[0]]
-        seen: set[str] = set()
-        reachable: set[str] = set()
-        while frontier:
-            name = frontier.pop()
-            if name in seen:
-                continue
-            seen.add(name)
-            if name in input_names:
-                reachable.add(name)
-                continue
-            upstream = producer.get(name)
-            if upstream is not None:
-                frontier.extend(upstream.ins)
-        if TOKEN_ONLY_LAST_ROW not in reachable:
-            raise AssertionError(
-                f"lm_head の入力が `{TOKEN_ONLY_LAST_ROW}` に依存しない"
-                f"（到達した入力: {sorted(reachable)}）— 行選択が lm_head より前に居ない"
-            )
 
     attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
     if len(attentions) != layers:
@@ -775,6 +769,68 @@ def assert_ir_form_decode(
         "window": window,
         "storage": dict(sorted(storage.items())),
     }
+
+
+def assert_ir_form_decode(
+    graph: IrGraph,
+    config: Any,
+    storage_expectation: Mapping[str, int],
+    *,
+    seq_symbol: str = SEQ_SYMBOL,
+    capacity_symbol: str = CAPACITY_SYMBOL,
+    token_only: bool = False,
+) -> dict[str, Any]:
+    """states 形 decode グラフの形を検査する（**数値が合ったまま静かに壊れる**性質を全部見る）。
+
+    `token_only` は ADR 0068 決定 4 の**既定出口形**（`export_token` — 入力に `last_row` が
+    増え、出力が argmax token 1 本になる）。入口・出口以外の検査（states / 層種別 / 残骸 /
+    格納内訳）は両形で同一なので、この 1 関数が両方を受ける（別関数に割ると片方だけ検査が
+    痩せていく）。本体は {@link assert_ir_form_common} で、製品形
+    （{@link gemma4.export_product.assert_ir_form_product}）とも共有する。
+
+    ここが見るのは入口・出口だけ:
+
+    - グラフ入力に mask が残ると「ホストが毎 chunk T² を作って渡す」別物になる
+    - 出口が argmax でなければ decode 出口（ADR 0068 決定 4）ではない
+    - `token_only` では行選択が lm_head より**前**に居ること（{@link assert_single_row_lm_head}）
+    """
+    assert_layer_type_count(config)
+
+    names = [spec.name for spec in graph.inputs]
+    expected_inputs = (
+        [INPUT_IDS, POSITION_IDS, TOKEN_ONLY_LAST_ROW] if token_only else [INPUT_IDS, POSITION_IDS]
+    )
+    if names != expected_inputs:
+        raise AssertionError(
+            f"グラフ入力が {names} — {expected_inputs} でない"
+            "（mask が畳み込まれずに入力へ残っている可能性）"
+        )
+    expected_outputs = 1 if token_only else 2
+    if len(graph.outputs) != expected_outputs:
+        kind = (
+            "token-only 出口は token の 1 本"
+            if token_only
+            else "decode 出口は logits / token の 2 本"
+        )
+        raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（{kind}）")
+    producer = {out: node for node in graph.nodes for out in node.outs}
+    token_source = producer.get(graph.outputs[-1])
+    if token_source is None or token_source.op != ARGMAX_OP:
+        found = "ノード出力でない" if token_source is None else token_source.op
+        raise AssertionError(
+            f"出力 {len(graph.outputs) - 1} の供給元が {found} — `{ARGMAX_OP}` でない"
+            "（ADR 0068 決定 4 の decode 出口）"
+        )
+    if token_only:
+        assert_single_row_lm_head(graph, producer, token_source)
+
+    return assert_ir_form_common(
+        graph,
+        config,
+        storage_expectation,
+        seq_symbol=seq_symbol,
+        capacity_symbol=capacity_symbol,
+    )
 
 
 def _write_container(
