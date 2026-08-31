@@ -13,10 +13,11 @@
 MUST: `torch.round` は偶数丸めで、WGSL の `round` と一致する（実測で確認済み）。half-up の
 実装（JS の `Math.round` 等）に差し替えると格子の境界で ±1 段ずれる。
 
-NOTE: ランタイム側は scale を `amax * (1/127)` の**乗算**で作る（WGSL の除算が 2.5 ULP まで
-許されるため — quantize-rows.ts の MUST）。ここは torch の除算（正しい丸め）なので、`s` が
-1 ULP 違う組が数 % 出る。E2E の tolerance は実測導出なのでこの差は吸収されるが、
-**ビット一致は成立しない**（設計 doc §6.1 の「ほころび」に含まれる）。
+MUST: scale はランタイムと同じ **`amax * float32(1/127)` の乗算**で作る（quantize-rows.ts の
+MUST の鏡像 — torch の除算 `amax / 127` は正しい丸めなので、乗算形と `s` が 1 ULP 違う行が
+数 % 出る。2026-08-31 に乗算形へ揃えた）。残る非鏡像は `x / s` の除算だけで、これは GPU 側が
+WGSL の 2.5 ULP 許容を受けるため半整数境界の近傍で ±1 段揺れうる（quantize-rows.ts §除算の
+精度 — ビット一致はそこでだけ成立しない）。
 """
 
 from __future__ import annotations
@@ -37,7 +38,9 @@ def quantize_rows_parts(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     fake-quant と**同じ 1 本の式**から取り出すことで、両者が別々に仕様から外れる余地を消す。
     """
     amax = x.abs().amax(dim=-1, keepdim=True)
-    scale = torch.clamp(amax / INT8_MAX, min=torch.finfo(torch.float32).tiny)
+    # MUST: 除算でなく f32(1/127) との乗算（ランタイム鏡像 — モジュール docstring）。
+    # python float は weak scalar として amax の dtype（f32）へ落ちてから乗算される。
+    scale = torch.clamp(amax * (1.0 / INT8_MAX), min=torch.finfo(torch.float32).tiny)
     return torch.round(x / scale).clamp_(-INT8_MAX, INT8_MAX), scale
 
 
