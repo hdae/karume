@@ -55,6 +55,7 @@ import {
 import {
   type AssetProgress,
   type CacheDiagnostic,
+  type DistributionSource,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -73,7 +74,7 @@ import { normalizeToNchw, resizeRgb8, type Rgb8Image } from "../image/preprocess
 import { createOperationChain } from "../concurrency/serial.ts";
 import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
-import { toRepoRef } from "../hub/repo-ref.ts";
+import { toManifestSource } from "../hub/repo-ref.ts";
 import {
   assetComponentOpener,
   type ComponentOpener,
@@ -115,7 +116,13 @@ export type Siglip2PipelineOptions = {
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
-/** {@link Siglip2Pipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。 */
+/**
+ * {@link Siglip2Pipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。
+ *
+ * NOTE: `headers` / `fetch` / `caches` は **HTTP 取得元専用**のノブで、取得元ハンドル
+ * （`localDirectory` / `denoDirectory`）を渡した呼び出しでは 1 つも効かない — 手元の配布形は
+ * network も CacheStorage も通らない。
+ */
 export type Siglip2FromPretrainedOptions = Siglip2PipelineOptions & {
   readonly signal?: AbortSignal;
   /** `Authorization` 等。付けた取得は認証専用のキャッシュ名前空間へ隔離される。 */
@@ -428,17 +435,21 @@ export class Siglip2Pipeline {
   }
 
   /**
-   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
+   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
    * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
    * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
    * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
    * `src/hub/repo-ref.ts` の MUST。このファミリは公開配布リポを持たないので pin 定数も無い）。
+   *
+   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
+   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
+   * 通らない（{@link Siglip2FromPretrainedOptions} の HTTP 専用ノブは効かない）。
    */
   static async fromPretrained(
-    ref: string | HubRepoRef,
+    ref: string | HubRepoRef | DistributionSource,
     options: Siglip2FromPretrainedOptions = {},
   ): Promise<Siglip2Pipeline> {
-    const repoRef = toRepoRef(ref, "Siglip2Pipeline.fromPretrained");
+    const source = toManifestSource(ref, "Siglip2Pipeline.fromPretrained");
     const hubOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),
@@ -446,7 +457,7 @@ export class Siglip2Pipeline {
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(options.caches === undefined ? {} : { caches: options.caches }),
     };
-    const loaded = await loadManifest(repoRef, hubOptions);
+    const loaded = await loadManifest(source, hubOptions);
     const selection = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),

@@ -1,6 +1,7 @@
 /**
- * `fromPretrained` の `ref`（文字列 | {@link HubRepoRef}）を hub へ渡す形へ正規化する
- * （**パイプライン非依存の共通処理** — 7 家族の `fromPretrained` が同じ形で使う）。
+ * `fromPretrained` の第 1 引数（文字列 | {@link HubRepoRef} | {@link DistributionSource}）を
+ * hub へ渡す形へ正規化する（**パイプライン非依存の共通処理** — 8 家族の `fromPretrained` が
+ * 同じ形で使う）。
  *
  * MUST: barrel には出さない。これは引数の綴りを揃える内部機構で、利用者が触る面ではない。
  *
@@ -13,7 +14,7 @@
  * 「repo が undefined の URL を叩いた」という原因の遠い失敗にしない。
  */
 
-import type { HubRepoRef } from "@karume/hub";
+import { type DistributionSource, type HubRepoRef, isDistributionSource } from "@karume/hub";
 
 /**
  * HF の repo 名 1 セグメントの許可文字（hub の `manifest.ts` の越境参照検査と**同じ規則** —
@@ -75,3 +76,19 @@ export const toRepoRef = (
   assertRepoSpelling(repo, where);
   return typeof ref === "string" ? { repo } : ref;
 };
+
+/**
+ * `fromPretrained` の第 1 引数を `loadManifest` の第 1 引数へ写す。取得元ハンドル
+ * （{@link DistributionSource} — `localDirectory` / `denoDirectory` が返す不透明な値）は
+ * **そのまま通す**: HF の repo ではないので `owner/name` の綴りを要求する {@link toRepoRef} の
+ * 門を通す意味が無い（ローカルの配布形が「repo が必須」で落ちる）。
+ *
+ * MUST: 判別は hub の {@link isDistributionSource} に委ねる — 構造判別（`"repo" in ref`）や
+ * ブランド欄の検査をこちらに書くと、`HubRepoRef` の綴り間違いが取得元として通る。
+ */
+export const toManifestSource = (
+  ref: string | HubRepoRef | DistributionSource | undefined,
+  where: string,
+  current?: string,
+): HubRepoRef | DistributionSource =>
+  isDistributionSource(ref) ? ref : toRepoRef(ref, where, current);

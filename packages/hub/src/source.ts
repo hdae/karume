@@ -168,6 +168,17 @@ export class DistributionSource {
 export const driverOf = (source: DistributionSource): SourceDriver => readDriver(source);
 
 /**
+ * 値が取得元ハンドルかを見る（`ref | source` の union を捌く**唯一の判別点**）。
+ *
+ * `mod.ts` は {@link DistributionSource} を**型としてしか**輸出しない（生やすメンバが無い以上、
+ * クラスの値を出しても利用者にできるのは壊れた取得元の生成だけ）ので、hub の外から同一性判別を
+ * 綴る手段はこの述語しかない。上の MUST のとおり、判別を利用者側に書かせると構造判別
+ * （`"repo" in value`）へ流れ、`HubRepoRef` の綴り間違いが黙って取得元として通る。
+ */
+export const isDistributionSource = (value: unknown): value is DistributionSource =>
+  value instanceof DistributionSource;
+
+/**
  * 1 本の `FileRef` を取りに行く取得元を決める。**越境参照（`repo` + `revision` が両方ある ref）
  * だけ**がセッションの取得元ではなく宣言された (repo, revision) から来る。
  *

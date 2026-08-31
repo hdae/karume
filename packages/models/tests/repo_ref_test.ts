@@ -10,10 +10,19 @@
 //  ③ 公開配布リポを持たないファミリには存在しない定数を案内しない。
 //  ④ **綴りが HF の `owner/name` であること**（パスにしか見えない文字列を URL へ綴り込まない）。
 //     救えない綴り（`models/karume-gemma4-e2b` のような合法な `owner/name`）も対で固定する。
+//  ⑤ **取得元ハンドル**（`localDirectory` / `denoDirectory`）はこの門を通さず素通りし、かつ
+//     素通りの席を作ったことで HF 側の門が緩んでいないこと。
 // 正常系（文字列 = main 追従 / オブジェクトはそのまま）も同じ 1 本が担うので合わせて縛る。
 
-import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
-import { toRepoRef } from "../src/hub/repo-ref.ts";
+import {
+  assertEquals,
+  assertRejects,
+  assertStrictEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
+import { localDirectory } from "@karume/hub";
+import { toManifestSource, toRepoRef } from "../src/hub/repo-ref.ts";
 import { AnimaPipeline } from "../src/anima/pipeline.ts";
 
 Deno.test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択で落ちる", () => {
@@ -86,6 +95,30 @@ Deno.test("toRepoRef: 文字列は `{ repo }`（= main 追従）・オブジェ�
   // revision / hubUrl は hub の語彙なので、ここで削らない・足さない。
   const pinned = { repo: "someone/karume-fork", revision: "a".repeat(40), hubUrl: "https://m" };
   assertEquals(toRepoRef(pinned, "X.fromPretrained"), pinned);
+});
+
+Deno.test("toManifestSource: 取得元ハンドルは綴りの門を通さずそのまま渡る", () => {
+  // ローカルの配布形は HF の repo ではないので、`owner/name` を要求する門に掛けてはならない
+  // （掛けると「repo が必須」で落ち、手元のディレクトリからは 1 バイトも読めない）。
+  // 実体は 1 度も読まないので、アダプターは読まれたら落ちる形で十分。
+  const source = localDirectory({
+    readFile: () => Promise.reject(new Error("repo_ref_test: 判別だけで実体を読んだ")),
+  }, { label: "./models/karume-test" });
+  assertStrictEquals(toManifestSource(source, "Gemma4Pipeline.fromPretrained"), source);
+});
+
+Deno.test("toManifestSource: 取得元ハンドルでない値は従来どおり綴りの門を通る", () => {
+  // union を足しても HF 側の門が緩まないこと（取得元ハンドルの判別は同一性なので、
+  // 「repo を持つオブジェクト」が取得元として素通りする形にはならない）。
+  assertEquals(toManifestSource("someone/karume-fork", "X.fromPretrained"), {
+    repo: "someone/karume-fork",
+  });
+  assertThrows(
+    () => toManifestSource("./models/karume-gemma4-e2b", "X.fromPretrained"),
+    Error,
+    "'owner/name' でない",
+  );
+  assertThrows(() => toManifestSource(undefined, "X.fromPretrained"), Error, "repo が必須");
 });
 
 Deno.test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばずに落ちる", async () => {

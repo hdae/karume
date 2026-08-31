@@ -76,6 +76,7 @@ import {
 import {
   type AssetProgress,
   type CacheDiagnostic,
+  type DistributionSource,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -124,7 +125,7 @@ import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
-import { toRepoRef } from "../hub/repo-ref.ts";
+import { toManifestSource } from "../hub/repo-ref.ts";
 import {
   assetComponentOpener,
   type ComponentOpener,
@@ -365,6 +366,10 @@ export type IrodoriPipelineOptions = {
 /**
  * {@link IrodoriPipeline.fromPretrained} が追加で受ける取得層のオプション（hub へ透過する）。
  * `signal` は構築側と共有なので {@link IrodoriPipelineOptions} が持つ。
+ *
+ * NOTE: `headers` / `fetch` / `caches` は **HTTP 取得元専用**のノブで、取得元ハンドル
+ * （`localDirectory` / `denoDirectory`）を渡した呼び出しでは 1 つも効かない — 手元の配布形は
+ * network も CacheStorage も通らない。
  */
 export type IrodoriFromPretrainedOptions = IrodoriPipelineOptions & {
   /** `Authorization` 等。付けた取得は認証専用のキャッシュ名前空間へ隔離される。 */
@@ -1544,17 +1549,21 @@ export class IrodoriPipeline {
   }
 
   /**
-   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
+   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
    * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
    * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
    * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
    * `src/hub/repo-ref.ts` の MUST）。
+   *
+   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
+   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
+   * 通らない（{@link IrodoriFromPretrainedOptions} の HTTP 専用ノブは効かない）。
    */
   static async fromPretrained(
-    ref: string | HubRepoRef,
+    ref: string | HubRepoRef | DistributionSource,
     options: IrodoriFromPretrainedOptions = {},
   ): Promise<IrodoriPipeline> {
-    const repoRef = toRepoRef(
+    const source = toManifestSource(
       ref,
       "IrodoriPipeline.fromPretrained",
       "IRODORI_V4_SMALL_CURRENT（@karume/models/irodori）",
@@ -1566,7 +1575,7 @@ export class IrodoriPipeline {
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(options.caches === undefined ? {} : { caches: options.caches }),
     };
-    const loaded = await loadManifest(repoRef, hubOptions);
+    const loaded = await loadManifest(source, hubOptions);
     const selection = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),

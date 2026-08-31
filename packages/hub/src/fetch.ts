@@ -41,7 +41,13 @@ import {
   pinnedSourceOf,
   type StreamAssetsOptions,
 } from "./session.ts";
-import { DistributionSource, driverOf, type PinnedSource, sourceForRef } from "./source.ts";
+import {
+  type DistributionSource,
+  driverOf,
+  isDistributionSource,
+  type PinnedSource,
+  sourceForRef,
+} from "./source.ts";
 import { createHfSource } from "./sources/hf.ts";
 
 /**
@@ -137,7 +143,7 @@ export const loadManifest = async (
 ): Promise<LoadedManifest> => {
   await purgeLegacyCaches(options);
   // 取得元の判別は**同一性**で行う（`source.ts` — ブランド欄も構造判別も持たせない）。
-  const driver = driverOf(ref instanceof DistributionSource ? ref : createHfSource(ref));
+  const driver = driverOf(isDistributionSource(ref) ? ref : createHfSource(ref));
   let generation: string;
   try {
     generation = await driver.resolveGeneration(options);

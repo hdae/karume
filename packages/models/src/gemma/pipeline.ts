@@ -39,6 +39,7 @@ import { acquireGpu, type GpuContext, type Session } from "@karume/runtime";
 import {
   type AssetProgress,
   type CacheDiagnostic,
+  type DistributionSource,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -54,7 +55,7 @@ import {
   type ModelComponent,
   readCachedAsset,
 } from "../hub/components.ts";
-import { toRepoRef } from "../hub/repo-ref.ts";
+import { toManifestSource } from "../hub/repo-ref.ts";
 import {
   GEMMA4_PIPELINE_MAJOR,
   GEMMA4_PIPELINE_NAME,
@@ -147,6 +148,10 @@ export type Gemma4PipelineOptions = {
 
 /**
  * {@link Gemma4Pipeline.fromPretrained} が追加で受けるもの（選択軸 + 取得層へ透過するノブ）。
+ *
+ * NOTE: `headers` / `fetch` / `caches` は **HTTP 取得元専用**のノブで、取得元ハンドル
+ * （`localDirectory` / `denoDirectory`）を渡した呼び出しでは 1 つも効かない — 手元の配布形は
+ * network も CacheStorage も通らない。
  */
 export type Gemma4FromPretrainedOptions = Gemma4PipelineOptions & {
   /** manifest のモデル名（省略時は `defaultModel`）。 */
@@ -479,7 +484,7 @@ export class Gemma4Pipeline {
   }
 
   /**
-   * HF リポジトリから取得して組む（`loadManifest` → `resolveFiles` → **グラフ shard だけ**を
+   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **グラフ shard だけ**を
    * 取って `prepareModel` → 家族 admission → 重み shard と PLE sidecar の prefetch →
    * tokenizer と索引の取得 → 構築）。重み shard は Session を組むときに 1 本ずつ流れ、PLE
    * sidecar は**触った 1 本だけ**が永続キャッシュから読み直される（ADR 0070 / 0085 決定 3）。
@@ -487,13 +492,17 @@ export class Gemma4Pipeline {
    * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。gemma4 は公開配布
    * リポをまだ持たないので pin 定数も無い（`./config.ts` の NOTE）— `{ repo, revision }` を
    * 呼び手が明示する。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。
+   *
+   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
+   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
+   * 通らない（{@link Gemma4FromPretrainedOptions} の HTTP 専用ノブは効かない）。
    */
   static async fromPretrained(
-    ref: string | HubRepoRef,
+    ref: string | HubRepoRef | DistributionSource,
     options: Gemma4FromPretrainedOptions = {},
   ): Promise<Gemma4Pipeline> {
     const where = "Gemma4Pipeline.fromPretrained";
-    const repoRef = toRepoRef(ref, where);
+    const source = toManifestSource(ref, where);
     const hubOptions: StreamAssetsOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),
@@ -501,7 +510,7 @@ export class Gemma4Pipeline {
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(options.caches === undefined ? {} : { caches: options.caches }),
     };
-    const loaded = await loadManifest(repoRef, hubOptions);
+    const loaded = await loadManifest(source, hubOptions);
     const selection = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),

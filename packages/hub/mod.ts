@@ -57,9 +57,12 @@ export type { ResolvedFiles, ResolveOptions } from "./src/resolve.ts";
 /**
  * 取得元。`loadManifest` / `fromPretrained` は HF のリポ参照（{@link HubRepoRef}）か、ここで
  * 作った取得元ハンドル（{@link DistributionSource} — **中身は不透明**）のどちらでも受ける。
+ * union を自前で捌く面（`@karume/models` の `fromPretrained`）は {@link isDistributionSource} で
+ * 判別する — 不透明ハンドルを構造で見分けようとすると綴り間違いが取得元として通る。
  */
 export { localDirectory } from "./src/sources/local.ts";
 export type { DirectoryAdapter, LocalDirectoryOptions } from "./src/sources/local.ts";
+export { isDistributionSource } from "./src/source.ts";
 export type { DistributionSource } from "./src/source.ts";
 
 export { clearHubCache } from "./src/cache.ts";
