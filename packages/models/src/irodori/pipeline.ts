@@ -372,7 +372,13 @@ export type IrodoriPipelineOptions = {
  * network も CacheStorage も通らない。
  */
 export type IrodoriFromPretrainedOptions = IrodoriPipelineOptions & {
-  /** `Authorization` 等。付けた取得は認証専用のキャッシュ名前空間へ隔離される。 */
+  /**
+   * `Authorization` 等。取得（revision 解決・ファイル）へそのまま透過する。
+   *
+   * NOTE: **キャッシュは credential で分けない**（by-design — キーにヘッダは入らないので、
+   * 認証付きで取得したバイト列は以後の無認証呼び出しにもヒットする）。ADR 0080 決定 3 /
+   * `docs/limitations.md` の「hub: キャッシュは credential で隔離しない」が正本。
+   */
   readonly headers?: HeadersInit;
   readonly onProgress?: (progress: AssetProgress) => void;
   readonly onCacheError?: (diagnostic: CacheDiagnostic) => void;
