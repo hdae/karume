@@ -2,6 +2,7 @@
 // テスト本体（runCase / checkAll / Deno.test 群）は gpu_ops_test.ts に残し、ここは
 // 「checkAll に渡すデータ」だけを持つ — 依存は helpers → src の一方向のみ。
 
+import type { Tolerance } from "../../src/reference/allclose.ts";
 import type { RefTensor } from "../../src/reference/ops.ts";
 import { fill } from "./graph.ts";
 
@@ -14,6 +15,11 @@ export type OpCase = {
   /** 出力 slot 昇順の dtype（既定は入力と同型 — cast / argmax / topk の添字側だけが違う）。 */
   readonly outDtypes?: readonly ("f32" | "i32" | "bool")[];
   readonly attrs?: Record<string, unknown>;
+  /**
+   * ケース単位の tolerance 上書き（悪条件入力の逃げ道 — helpers/op-tolerance.ts の表は
+   * 変えない）。省略時は op 別表（{@link "./op-tolerance.ts"} の `opTolerance`）。
+   */
+  readonly tolerance?: Tolerance;
 };
 
 /** 負値・0・正値を跨ぐ決定的な列。 */

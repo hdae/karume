@@ -19,6 +19,7 @@ import { decodeF16, f16BitsToF32 } from "../src/format/f16.ts";
 import { parseIrGraph } from "../src/format/ir.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
+import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
 import { RUNTIME_SUPPORT } from "../src/ops.ts";
 import { eligibleCompressedInitializers } from "../src/runtime/plan.ts";
@@ -351,7 +352,7 @@ Deno.test({
           testCase.outShape,
         );
         assertEquals(output.shape, expected.shape, testCase.name);
-        const report = compareTensors(output, expected);
+        const report = compareTensors(output, expected, GEMM_TOLERANCE);
         assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
       }
     } finally {
@@ -411,7 +412,7 @@ Deno.test({
           testCase.outShape,
         );
         assertEquals(output.shape, expected.shape, testCase.name);
-        const report = compareTensors(output, expected);
+        const report = compareTensors(output, expected, GEMM_TOLERANCE);
         assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
       }
     } finally {
@@ -705,7 +706,7 @@ Deno.test({
         {},
         [2, 3],
       );
-      const report = compareTensors(eligible.y, expected);
+      const report = compareTensors(eligible.y, expected, GEMM_TOLERANCE);
       assertEquals(report.pass, true, formatAllclose(report));
     } finally {
       gpu.destroy();
@@ -776,7 +777,7 @@ Deno.test({
         [2, 3],
       );
       const expected = applyReferenceOp("mul", [linear, scale as RefTensor], {}, [2, 3]);
-      const report = compareTensors(outputs["y"], expected);
+      const report = compareTensors(outputs["y"], expected, GEMM_TOLERANCE);
       assertEquals(report.pass, true, formatAllclose(report));
     } finally {
       await session.dispose();
@@ -826,7 +827,7 @@ Deno.test({
         {},
         [2, 3],
       );
-      const report = compareTensors(outputs["y"], expected);
+      const report = compareTensors(outputs["y"], expected, GEMM_TOLERANCE);
       assertEquals(report.pass, true, formatAllclose(report));
     } finally {
       await session.dispose();

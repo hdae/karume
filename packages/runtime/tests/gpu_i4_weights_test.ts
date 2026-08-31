@@ -20,6 +20,7 @@ import { openModel } from "../src/format/container.ts";
 import { decodeI4 } from "../src/format/i4.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
+import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
 import { conv1dUsesVec4 } from "../src/kernels/conv1d.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
@@ -174,7 +175,7 @@ Deno.test({
         );
         const expected = expectedLinear(testCase, quantized);
         assertEquals(output.shape, expected.shape, testCase.name);
-        const report = compareTensors(output, expected);
+        const report = compareTensors(output, expected, GEMM_TOLERANCE);
         assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
       }
     } finally {
@@ -247,7 +248,7 @@ Deno.test({
             {},
             [9, 20],
           );
-          const report = compareTensors(outputs[name], expected);
+          const report = compareTensors(outputs[name], expected, GEMM_TOLERANCE);
           assertEquals(report.pass, true, `${name}: ${formatAllclose(report)}`);
         }
       } finally {
@@ -382,7 +383,7 @@ Deno.test({
           [testCase.picks, testCase.hidden],
         );
         assertEquals(output.shape, expected.shape, testCase.name);
-        const report = compareTensors(output, expected);
+        const report = compareTensors(output, expected, GEMM_TOLERANCE);
         assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
       }
     } finally {
@@ -801,7 +802,7 @@ Deno.test({
           { ...attrs, groups },
           outShape,
         );
-        const report = compareTensors(output["y"], expected);
+        const report = compareTensors(output["y"], expected, GEMM_TOLERANCE);
         assertEquals(report.pass, true, formatAllclose(report));
       } finally {
         await session.dispose();

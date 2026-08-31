@@ -36,6 +36,7 @@ import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { linearGemvKey } from "../src/kernels/linear-gemv.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
+import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
@@ -196,7 +197,7 @@ Deno.test({
           {},
           [1, n],
         );
-        const report = compareTensors(gemv.output, reference);
+        const report = compareTensors(gemv.output, reference, GEMM_TOLERANCE);
         assertEquals(report.pass, true, `${name}: ${formatAllclose(report)}`);
       }
     } finally {

@@ -20,9 +20,12 @@ export type Tolerance = {
 };
 
 /**
- * NOTE: 根拠は薄い。M0 の f32 カーネル（縮約順序が torch と違う）で経験的に通る値を
- * 置いただけで、op ごと・shape ごとの誤差伝播から導いたものではない。torch 由来の
- * ゴールデンが入る M1 で、op 単位に根拠付きの値へ置き換える（ADR 0005 の未決事項）。
+ * 省略時の既定帯。**op 語彙掃引の門ではなくなった**（2026-08-31 — M1 宿題の消化）:
+ * 掃引（tests/gpu_ops_test.ts の checkAll）と GEMM 系突合は op 別の実測導出表
+ * （tests/helpers/op-tolerance.ts・正本 =
+ * docs/research/2026-08-31-op-tolerance-measurement.md）を明示的に使う。
+ * ここに残る用途は「呼び手が独自に帯を持つまでの一時値」と配線テストの既定だけで、
+ * **新しい数値門にこの既定を使わない**（表へ行を足すか、実測から明示値を渡す）。
  */
 export const DEFAULT_TOLERANCE: Tolerance = { atol: 1e-5, rtol: 1e-3 };
 

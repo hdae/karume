@@ -104,6 +104,9 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   - norm の 1/dim ホスト化は**保留**（uncertain — 開発機の除算実測から凍結 sha が割れ得る。
     実 GPU プローブが先・費用対効果低）・reduce identity の params −inf 化は現状維持
     （W-2/W-3 と同じ器 — 採るならセット裁定）
+  - tolerance B 案（`allclose` へ縮約スケール項 `κ·√K·max|期待|` — 公開 API 変更を伴う後続
+    改善。A 案 = op 別表は 2026-08-31 実装済み。研究 §8.2）・layer_norm の悪条件入力
+    （分散 ≈0 の摂動）はケース個別 tolerance の席で扱う（同 §7 注記）
 - ~~M2 実機の手動確認 2 点~~ **消化（2026-09-01 実測）**: dp4a カナリア **16/16 緑**（QK f16
   格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
   読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤 → 裁定済み（既定維持

@@ -18,6 +18,7 @@ import { assert, assertEquals } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
+import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor } from "../src/reference/ops.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
@@ -119,7 +120,7 @@ Deno.test({
         const actual = await runCase(gpu, testCase);
         const expected = applyReferenceOp(testCase.op, testCase.inputs, {}, testCase.outShape);
         assertEquals(actual.shape, expected.shape, testCase.name);
-        const report = compareTensors(actual, expected);
+        const report = compareTensors(actual, expected, GEMM_TOLERANCE);
         assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
       }
     } finally {

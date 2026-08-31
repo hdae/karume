@@ -41,6 +41,7 @@ import {
   UNARY_CASES,
   UPSAMPLE_CASES,
 } from "./helpers/gpu_op_cases.ts";
+import { BIT_IDENTICAL_OPS, opTolerance } from "./helpers/op-tolerance.ts";
 import { fill, graphModelBuffer, outputName, singleOpGraph } from "./helpers/graph.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import {
@@ -105,8 +106,13 @@ const checkAll = async (cases: readonly OpCase[]): Promise<void> => {
         const label = expected.length === 1 ? testCase.name : `${testCase.name} 出力 ${slot}`;
         assertEquals(tensor.shape, expected[slot].shape, label);
         assertEquals(tensor.dtype, expected[slot].dtype, `${label}: dtype`);
-        // f32 は allclose、i32 / bool は厳密一致（整数演算に丸め差は無い — ADR 0009）
-        const report = compareTensors(tensor, expected[slot]);
+        // f32 は op 別 tolerance 表（helpers/op-tolerance.ts — 表に無い op は fail loudly）、
+        // i32 / bool は compareTensors が dtype で厳密一致を選ぶ（ADR 0009）
+        const report = compareTensors(
+          tensor,
+          expected[slot],
+          testCase.tolerance ?? opTolerance(testCase.op),
+        );
         assertEquals(report.pass, true, `${label}: ${formatAllclose(report)}`);
       });
     }
@@ -308,6 +314,75 @@ Deno.test({
     // f32 の eps は 1.19e-7。log / 除算・乗算の合成で数 ulp を見込んで 8 倍を上限にする
     // （素朴形の誤差は x = 1e-8 で 1.0 = この閾値の 7 桁上）。
     assertEquals(worst < 1e-6, true, `log1p の最悪相対誤差 ${worst}`);
+  },
+});
+
+/**
+ * GEMM / conv / 縮約系の**ビット同一門**（op-tolerance 研究 §7.1 = 案 γ の後半）。
+ *
+ * 現行コーパスの入力は 2 進格子（0.75 / 0.125 / 0.5 の倍数）に載っており、中間和も f32 の
+ * 厳密整数域に収まるため丸めが一度も起きない — IEEE-754 f32 準拠のどの実装でも GPU と
+ * f64 オラクルは**ビット単位で一致する**（格子論証は研究 §2 で機械確認済み）。op 別
+ * tolerance 表の GEMM / 縮約帯はこのコーパスでは消費率 0 なので、退行検出はこの門が担う。
+ *
+ * MUST: 割れても tolerance を緩めない。意味は「ドライバが f32 未満で計算している / 生成
+ * WGSL が別演算へ落ちた」— 特定ドライバで割れる場合は op 単位で門を外して理由を記録する
+ * （tanh 飽和カナリアと同じ運用）。
+ */
+Deno.test({
+  name: "GEMM / conv / 縮約系は現行コーパスで f64 オラクルとビット同一（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      const cases = [
+        ...MATMUL_CASES,
+        ...BMM_CASES,
+        ...FUSED_CASES,
+        ...DEFORM_CASES,
+        ...UPSAMPLE_CASES,
+        ...REDUCE_CASES,
+      ].filter((testCase) => BIT_IDENTICAL_OPS.has(testCase.op));
+      // 対象 9 op が 1 ケースも拾えていない形（リスト構成の変更で門が空転する形）を塞ぐ
+      assertEquals(cases.length >= 15, true, `ビット同一門の対象が ${cases.length} ケースしかない`);
+      for (const testCase of cases) {
+        const actual = await runOutputs(gpu, testCase);
+        const expected = applyReferenceOpOutputs(
+          testCase.op,
+          testCase.inputs,
+          testCase.attrs ?? {},
+          testCase.outShapes[0],
+        );
+        actual.forEach((tensor, slot) => {
+          const got = new Uint32Array(
+            tensor.data.buffer,
+            tensor.data.byteOffset,
+            tensor.data.length,
+          );
+          const want = new Uint32Array(
+            expected[slot].data.buffer,
+            expected[slot].data.byteOffset,
+            expected[slot].data.length,
+          );
+          let bad = -1;
+          for (let i = 0; i < got.length; i += 1) {
+            if (got[i] !== want[i]) {
+              bad = i;
+              break;
+            }
+          }
+          assertEquals(
+            bad,
+            -1,
+            `${testCase.name}: 要素 #${bad} が 0x${(got[bad] ?? 0).toString(16)} vs 0x${
+              (want[bad] ?? 0).toString(16)
+            }（現行コーパスは丸めゼロのはず — 研究 §2）`,
+          );
+        });
+      }
+    } finally {
+      gpu.destroy();
+    }
   },
 });
 
