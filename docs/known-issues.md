@@ -45,10 +45,13 @@ conv2d parity 2 本が赤（Linux / Vulkan は全緑）。**2026-08-29 のカナ
   完全一致門が M2 で 1 ULP 赤（2026-09-01 実測）**: `gpu_linear_gemv_test.ts` の門キー検査は
   緑・既定経路との u32 突合が整除形 k128 n64 g32 の列 1 で `0x414b3249` vs `0x414b3248`
   （12.699776… vs 12.699775… = 1 ULP）。Linux / Vulkan は緑。見立て = 本節冒頭と同一クラス
-  （naga → MSL の FMA 契約差で乗算連鎖の丸めが変わる — 未確定）。**動作・品質は M2 で健全**:
-  chat e2e（製品グラフ + gemv 全経路）が golden と同一 token 列で完走しており、margin 門
-  （≥2.5e-2）が 1 ULP を吸収する。実害は attention i8a8 と同じく「クロス経路の atol=0 門が
-  Metal で立たない」ことのみ。**切り分け済み（2026-09-01）**: `gpu_gemm_skinny_test.ts` の
+  （naga → MSL の FMA 契約差で乗算連鎖の丸めが変わる — 未確定）。**撤回（2026-09-01）**: 旧記述
+  「chat e2e が M2 で golden 完走 = 動作・品質は健全」は**実走の裏付けが無いまま書かれていた**
+  （M2 で実測されたのはカナリア / reduce parity / skinny / gemv 門のみ — ユーザー指摘で発覚）。
+  実際には chat e2e は M2 で下記の prefill NaN により**走り切れない**（gemv とは独立の未解決
+  バグ）。margin 門が 1 ULP を吸収するという命題は NaN 解消後に M2 実測で立て直す
+  （ADR [0082](decisions/0082-linear-gemv-decode.md) 追記 2）。既知の実害は attention i8a8 と
+  同じく「クロス経路の atol=0 門が Metal で立たない」こと。**切り分け済み（2026-09-01）**: `gpu_gemm_skinny_test.ts` の
   バケット跨ぎ u32 門は M2 で緑 — **GEMV 固有**（一般則説は棄却）。**裁定 = 既定経路維持**
   （ADR [0082](decisions/0082-linear-gemv-decode.md) 追記 1 — 機序の見立て: GEMM は逆量子化を
   共有タイルへ格納してから読む = 丸め障壁あり / GEMV は 1 式インライン = MSL の contraction が
@@ -62,7 +65,26 @@ Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36
 [research/2026-08-29-chatgpt-review-verification.md](research/2026-08-29-chatgpt-review-verification.md)
 （M2 再検証）。
 
-## EmbeddingGemma の batch>1 export が変換段で通らない
+## Metal（Apple GPU）で gemma4 の prefill logits が決定的に NaN — 生成が 1 token も出ない
+
+実機 **Apple M2**（Deno 2.9.4・2026-09-01 実測）で gemma4 E2B の**最初の抽選**が
+`logits[0] が NaN` で落ちる。切り分け済みの事実:
+
+- **決定的**（5 回以上同一）・**プロンプト非依存**（11 token / 16 token とも赤）・
+  **取得経路非依存**（`denoDirectory` 直読も疑似 HF + CacheStorage も赤）・
+  **コード世代非依存**（波前 `182ced7` でも赤 = 回帰ではなく**最初から壊れていて未実測**だった）。
+- ミラーは 8 ファイル全て size + sha256 一致（バイト破損は棄却）。配布 sampler では加工鎖が
+  恒等（`processLogits` 素通し）なので **GPU が返した生 f32 に真の NaN** が入っている。
+- クラッシュ点は prefill 最終 chunk からの最初の抽選 — **decode（GEMV — ADR 0082）は
+  1 本も走っておらず無関係**。lm_head は i8 格納で GEMV 門外。
+- ベースラインは緑: dp4a カナリア 16/16・`gpu_gemm_skinny` 2/2・`gpu_reduce_axis_parity`
+  2/2（既知赤 = gemv u32 門 1 ULP のみ）。Linux / Vulkan は同一入力で NaN=0・ビット同一。
+
+有力仮説（未確定・調査中）: states 形 attention は実 −Inf（`0xff800000`）を書いて
+`exp(s − amax)` を回すため、pad 行（"hello?" は 32 行 chunk 中 21 行）で −Inf − (−Inf) = NaN が
+構造的に生まれ、Linux では行独立で無害だが **Metal（naga → MSL・fast-math）では有効行へ漏れる**
+可能性。pad 行数を振るローカライズプローブで判別予定。**gemma4 を Metal で使う経路は現状すべて
+不能**（対話 example 含む）。
 
 `karume export-embeddinggemma --batch N`（N>1）は `karume/convert.py` で fail loudly する
 （B=1 は従来どおり成功）。機序は 2 段:

@@ -157,3 +157,15 @@ known-issues Metal 節の 1 ULP エピローグ問題と同じクラス）。
 決定 3 の実測命題は「**Vulkan / Linux で成立・Metal は 1 ULP 帯**」へ精密化する。根治候補
 （未着手）= GEMV の逆量子化に明示の丸め点を入れて contraction を遮る式形の探索
 （M2 実機ループが要る — known-issues の根治候補と同席）。
+
+## 追記 2（2026-09-01）: 追記 1 の根拠 1 の撤回と裁定の維持
+
+追記 1 の根拠 1「chat e2e が M2 で golden 同一 token 列を実測済み・decode 高速化も M2 で有効」
+は**実走の裏付けが無いまま書かれていた**（M2 で実測されたのはカナリア / reduce parity /
+skinny / gemv 門のみ — ユーザー指摘で発覚・撤回）。実際には gemma4 は M2 で **prefill logits が
+決定的に NaN** になり 1 token も生成できない（GEMV とは独立・波前コードでも再現 =
+最初から未実測だった未解決バグ — known-issues「gemma4 の prefill logits が Metal で NaN」節）。
+
+**裁定（既定 GEMV 維持）は根拠 2・3 で維持する** — u32 門の目的は CI（Linux / Vulkan）での
+退行検出であり、Metal の 1 ULP は既知の赤のまま。margin 門が 1 ULP を吸収するという実測命題は
+**NaN バグの解消後に M2 で立て直す**（それまで「M2 で品質健全」を本 ADR の根拠として使わない）。
