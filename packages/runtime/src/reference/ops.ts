@@ -928,7 +928,8 @@ export const referenceLayerNorm = (
       const deviation = x.data[base + i] - mean;
       squares += deviation * deviation;
     }
-    const inv = 1 / Math.sqrt(squares / dim + eps);
+    // eps は f32 語で運ばれるスカラ attr なので参照側も f32 へ丸めてから使う（他のスカラと同じ規律）
+    const inv = 1 / Math.sqrt(squares / dim + Math.fround(eps));
     for (let i = 0; i < dim; i += 1) {
       out[base + i] = Math.fround((x.data[base + i] - mean) * inv * weight.data[i] + bias.data[i]);
     }
@@ -961,7 +962,8 @@ export const referenceRmsNorm = (
     const base = row * dim;
     let squares = 0;
     for (let i = 0; i < dim; i += 1) squares += x.data[base + i] * x.data[base + i];
-    const inv = 1 / Math.sqrt(squares / dim + eps);
+    // eps は f32 語で運ばれるスカラ attr なので参照側も f32 へ丸めてから使う（layer_norm と同じ）
+    const inv = 1 / Math.sqrt(squares / dim + Math.fround(eps));
     for (let i = 0; i < dim; i += 1) {
       out[base + i] = Math.fround(x.data[base + i] * inv * weight.data[i]);
     }

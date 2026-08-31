@@ -2534,7 +2534,7 @@ export class RecipeBuilder {
       embeddingWgsl(weightStorage, groupSize),
     );
     const params = this.#writeParams(
-      embeddingParams(count, weight[1], weight[0]),
+      embeddingParams(count, weight[1], weight[0], groupSize),
       PARAMS_UNIFORM_USAGE,
     );
     const groups = gridStrideWorkgroups(

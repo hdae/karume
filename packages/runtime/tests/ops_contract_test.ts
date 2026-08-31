@@ -1010,9 +1010,13 @@ Deno.test("融合 op の attrs スキーマが値域まで検査する", () => {
   // f32 へ丸めると 0 になる eps は「0 を許さない」理由が GPU 側だけで復活する（GPU は params の
   // f32 語で運び、CPU 参照は f64 のまま計算する）— 全ゼロ行で GPU が NaN・CPU が 0 に分岐する
   reject("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: 1e-50 });
-  // f32 の非正規化域でも丸めた先が 0 でなければ両側の意味は一致するので通す
+  // f32 の subnormal へ丸まる eps も拒否（WGSL は subnormal 保存を要求しない — FTZ 実装で
+  // 0 に潰れ、上と同じ分岐が GPU 側だけで復活する）。境界 = 最小正規化数 2^-126
+  reject("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: 1e-45 });
+  reject("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: 1e-40 });
   assertEquals(
-    accept("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: 1e-45 }).kind,
+    accept("layer_norm", ["x", "w", "b"], { normalized_shape: [8], eps: 1.1754943508222875e-38 })
+      .kind,
     "layerNorm",
   );
 

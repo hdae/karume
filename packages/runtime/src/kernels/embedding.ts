@@ -119,16 +119,27 @@ fn main(
 /**
  * uniform の Dims（ちょうど 4 語 = 16 バイト。uniform アドレス空間の整列要件を満たす）。
  * `hidden` は 0 でもよい（そのとき `n` も 0 でカーネルのループが 1 度も回らない）。
+ *
+ * MUST: i4 の group 長は `hidden` を割り切ること（linear の `k % group_size` 門と同じ規律）。
+ * 割り切れないと scale の添字 `pick·(hidden >> shift) + (col >> shift)` が行を跨いでずれ、
+ * storage 読みの境界クランプにより**例外なしの沈黙誤値**になる。IR 経由は format 層の門が
+ * 守るが、カーネル直呼びの経路はここが唯一の門。
  */
 export const embeddingParams = (
   count: number,
   hidden: number,
   vocab: number,
+  groupSize?: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("embedding params", { count, hidden, vocab });
   if (hidden === 0 && count !== 0) {
     // 0 除算になる組み合わせ（要素数 > 0 なのに hidden が無い）は shape 契約上ありえない。
     throw new CodegenError(`embedding params: hidden 0 で要素数 ${count} の組み合わせは無い`);
+  }
+  if (groupSize !== undefined && hidden % groupSize !== 0) {
+    throw new CodegenError(
+      `embedding params: hidden=${hidden} が group_size ${groupSize} で割り切れない`,
+    );
   }
   const params = new Uint32Array(4);
   params[0] = count;

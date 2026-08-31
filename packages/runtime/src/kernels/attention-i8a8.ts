@@ -434,8 +434,10 @@ export const attentionQkI8a8Params = (
   scale: number,
   window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
-  if (!Number.isFinite(scale)) {
-    throw new CodegenError(`attention_qk i8a8 params: scale は有限の数値（${scale}）`);
+  // MUST: 有限判定は f32 語で見る（attention.ts / state-attention.ts と同じ — f64 では有限でも
+  // f32 へ落とすと +Inf になる値が 0·Inf = NaN で S を汚染する。公開 API 側 attrs 門との二重化）。
+  if (!Number.isFinite(Math.fround(scale))) {
+    throw new CodegenError(`attention_qk i8a8 params: scale は f32 で有限の数値（${scale}）`);
   }
   if (!Number.isSafeInteger(k) || k < 0 || k % 4 !== 0) {
     throw new CodegenError(`attention_qk i8a8 params: k は 4 の倍数の非負整数（${k}）`);

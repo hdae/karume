@@ -285,10 +285,11 @@ const assertNormalizedShape = (value: unknown, where: string): readonly number[]
  * 正規化 op（layer_norm / rms_norm）の eps。**有限の正数**のみ（0 を許すと分散 0・
  * 全要素 0 の行で `1/sqrt(0)` が inf になり、「定数行の正規化」が黙って NaN を吐く）。
  *
- * MUST: **f32 へ丸めても 0 にならない**こと（`1e-50` のような非正規化域の eps）。GPU は
- * eps を params の f32 語で運ぶ（kernels/layer-norm.ts / rms-norm.ts）ので丸めた先が 0 になる
- * 一方、CPU 参照は f64 のまま `1/sqrt(… + eps)` を計算する（reference/ops.ts）。上の「0 を
- * 許さない」理由が GPU 側だけで復活し、**全ゼロ行で GPU が NaN・CPU が 0** と意味が分岐する。
+ * MUST: **f32 の正規化数へ丸まる**こと（`1e-50` のような丸めて 0 になる値も、`1e-40` のような
+ * 非正規化数へ丸まる値も拒否）。GPU は eps を params の f32 語で運ぶ（kernels/layer-norm.ts /
+ * rms-norm.ts）が、WGSL は非正規化数の保存を要求しない — FTZ 実装では f32 の subnormal が
+ * 0 に潰れ、上の「0 を許さない」理由が **GPU 側だけ**で復活する（全ゼロ行で GPU が NaN・
+ * CPU が 0 と意味が分岐する）。
  * MUST: **f32 へ丸めても無限大にならない**こと（`1e39` のような上振れ）。丸めた先が `+Inf` に
  * なると GPU は `1/sqrt(… + Inf) = 0` で出力が bias 一色になる一方、CPU 参照は有限の f64 で
  * 正規化を続ける — 下振れと同じ分岐が逆向きに起きる（どちらも例外なしの沈黙誤値）。
@@ -299,9 +300,11 @@ const assertEps = (value: unknown, where: string, what: string): number => {
       `${where}: ${what} の eps は有限の正数でない: ${JSON.stringify(value)}`,
     );
   }
-  if (Math.fround(value) === 0) {
+  // f32 の最小正規化数（2^-126）。これ未満（0 と subnormal）は FTZ 実装で 0 に潰れうる。
+  const F32_MIN_NORMAL = 1.1754943508222875e-38;
+  if (Math.fround(value) < F32_MIN_NORMAL) {
     throw new OpContractError(
-      `${where}: ${what} の eps が f32 へ丸めると 0 になる（GPU 側だけ eps=0 で走る）: ${
+      `${where}: ${what} の eps が f32 の正規化数へ丸まらない（FTZ 実装では GPU 側だけ eps=0 で走る）: ${
         JSON.stringify(value)
       }`,
     );
