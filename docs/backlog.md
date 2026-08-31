@@ -44,19 +44,24 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   [0085](decisions/0085-ple-host-gather.md)（PLE 配布形）+ ADR 0068 追記 6（最終行 logits 出口の
   製品採用）。候補比較・棄却理由・実資産の実測は
   [research 2026-08-31](research/2026-08-31-generation-api-design-draft.md)。
-  **段 0〜4 は消化済み（2026-08-31〜09-01 — 全合格線達成）**: 段 0 = ADR 3 本 + 0068 追記 6 /
-  段 1a = tokenizer compile-to-asset + BPE merge queue + streaming detokenizer（HF fixture
-  ビット一致・EG 同乗）/ 段 1b = 製品系列 `gemma4-e2b-product`（容器 1,512MiB・PLE sidecar +
-  loader・交差 parity 厳密一致）/ 段 2 = sampler + EOS 集合停止 + `generateGreedy` 格下げ
-  （**breaking** — limitations 記載）/ 段 3 = `GenerationProgram` + `GenerationSequence`
-  （AsyncIterable・AbortSignal・多ターン pendingToken 連結）/ 段 4 = `gemma4ChatPrompt` +
-  `Gemma4Pipeline`（barrel + `./gemma` 配線・**文字列 in → 文字列 out を実重みで実証**）。
-  - **段 5 配布形（残 — 着手可能）**: manifest 席 / dist recipe / モデルカード / shard
-    （ADR 0081）/ pin 定数 / `fromPretrained`。合格線 = dist 全門通過 + 実 DL 疎通。
-    **ライセンス門（ADR 0065 stage 6）は 2026-09-01 に消化** — Gemma 4 は **Apache 2.0**
-    （snapshot README frontmatter + license_link 本文で現物確認。従来の「Gemma ToU」記述は
-    Gemma 3 知識の持ち越しの誤りで撤回）。ユーザー裁定: モデルの使われ方はこのプロジェクトの
-    関知外 — カードは Apache 2.0 帰属 + 上流モデルカードへの誘導リンク（他モデルと同じ扱い）
+  **段 0〜5 すべて消化済み（2026-08-31〜09-01 — 全合格線達成・波クローズ）**: 段 0 = ADR 3 本 +
+  0068 追記 6 / 段 1a = tokenizer compile-to-asset + BPE merge queue + streaming detokenizer
+  （HF fixture ビット一致・EG 同乗）/ 段 1b = 製品系列 `gemma4-e2b-product`（容器 1,512MiB・
+  PLE sidecar + loader・交差 parity 厳密一致）/ 段 2 = sampler + EOS 集合停止 +
+  `generateGreedy` 格下げ（**breaking** — limitations 記載）/ 段 3 = `GenerationProgram` +
+  `GenerationSequence`（AsyncIterable・AbortSignal・多ターン pendingToken 連結）/ 段 4 =
+  `gemma4ChatPrompt` + `Gemma4Pipeline`（barrel + `./gemma` 配線・**文字列 in → 文字列 out を
+  実重みで実証**）/ **段 5 = 配布形（2026-09-01）**: 配布ミラー `models/karume-gemma4-e2b/`
+  （3.8GiB・manifest は既存欄のみ・PLE sidecar と tokenizer は assets・`pipelineConfig` に
+  sampler 推奨値 = ADR 0083 決定 7 の完成）+ モデルカード（Apache 2.0 帰属 + 上流誘導 +
+  LICENSE/NOTICE 同梱）+ `fromPretrained`（hub の遅延資産席 `eagerAssets` 新設 — PLE 2.27GiB を
+  常駐させない）+ 疑似 HF サーバで実 DL 疎通（`fromPretrained → chat` golden 一致）。
+  **ライセンス門（ADR 0065 stage 6）は 2026-09-01 に消化** — Gemma 4 は **Apache 2.0**
+  （snapshot README frontmatter + license_link 本文で現物確認。「Gemma ToU」記述は撤回済み）。
+  **残 = HF 公開のみ（ユーザー確認待ち）**: 新規リポ `karume-gemma4-e2b` の作成・アップ・
+  `GEMMA4_CURRENT` pin 焼き込み・事後疎通（素材は完備 — 次リリース一括の anima/irodori/jvnv
+  再アップに同乗させるかは裁定待ち）。付随の要判断: `pipelineConfig.capacity` 640 据え置き
+  （1024 = RoPE 表上限まで上げても full スロット +5MB 級 — 会話長の政策裁定）
 - **L-11 裁定（2026-08-30）**: 技術先行 = **gemma4 E2B**（品質実証済み — tokenizer / L-5 の
   実装対象）。ライセンス門は上記のとおり**消化済み（Apache 2.0）**。配布経路の
   minicpm5 先行は**採らない**（2026-08-31 裁定 10 — 段 5 の対象は gemma4 E2B のみ）

@@ -24,10 +24,12 @@
   detokenizer・温度 0 golden 固定・EOS `<turn|>` 自停止・多ターン日本語込み）。公開面 =
   barrel + `./gemma`（**breaking 1 件 = `generateGreedy` の公開 export 削除** — limitations が
   消費側 doc）。製品系列 = `outputs/series/gemma4-e2b-product/`（容器 1,512MiB + PLE sidecar
-  2,275MiB・GPU 常駐実測 1,504MiB）。**残 = 段 5 配布形のみ — ライセンス門は 2026-09-01 に
-  消化（Gemma 4 は Apache 2.0。従来の「Gemma ToU」記述は Gemma 3 知識の持ち越しの誤りで撤回・
-  カードは上流モデルカードへ誘導）**。実行計画は [backlog](../docs/backlog.md)
-  now、候補比較は
+  2,275MiB・GPU 常駐実測 1,504MiB）。**段 5（配布形）も 2026-09-01 に消化 = 波クローズ**:
+  配布ミラー `models/karume-gemma4-e2b/`（3.8GiB）+ カード（Apache 2.0 帰属 + 上流誘導 —
+  ライセンス門は現物確認 + ユーザー裁定で消化・「Gemma ToU」記述は撤回）+ `fromPretrained`
+  （hub 遅延資産席 `eagerAssets`）+ 疑似 HF 疎通。**残 = HF 公開のみ（新規リポ作成 —
+  ユーザー確認待ち・pin `GEMMA4_CURRENT` は公開時に焼く）**。実行計画は
+  [backlog](../docs/backlog.md) now、候補比較は
   [research 2026-08-31](../docs/research/2026-08-31-generation-api-design-draft.md)。
   **スケール戦略は調査 + 裁定とも完了** =
   [research 2026-08-31](../docs/research/2026-08-31-freetoken-moe-over-arraybuffer.md)
