@@ -54,6 +54,30 @@ KV の論理長は正しいまま位置だけが静かにずれる。並行さ�
 `AbortSignal` / 多ターン）で、ホスト側 sampling は `src/generation/sampler.ts`（同 決定 7〜8）。
 sequence が出るまでの間、この面に相当するものは公開されていない。
 
+## 生成 API は公開前に 5 点変わった（ADR 0083 / 0084 の初版記述に対する破壊的変更）
+
+生成 API（`GenerationSequence` / `Gemma4Pipeline`）は **JSR にはまだ出ていない**（`@karume/models`
+の最新公開は 0.7.0 で gemma を含まない）。ただし ADR・examples・デモ台本は波の途中の面で書かれて
+いるので、公開面レビュー（2026-08-31）の消化で変わった 5 点をここに残す。追記の正本は ADR
+[0083](decisions/0083-generation-api-surface.md) / [0084](decisions/0084-gemma-tokenizer-chat.md)。
+
+- **`dispose()` 後の `generate` は同期に throw する**（従来は最初の反復で `GenerationContext` 側の
+  汎用文言になり、真因〈自分が dispose した〉が読み取れなかった）。寿命の検査だけが同期で、予算の
+  検査（位置表・容量）は従来どおり反復側で `GenerationCapacityError` になる。
+- **`GenerationStop` に `tokens` 欄が増えた**（そのターンが生成した token 数・`eos` の停止 token も
+  1 個）。`done` の一致アサーションを書いていたコードは欄の追加ぶん追随が要る。
+- **`GenerationCapacityError` のコンストラクタが 2 引数**になり、構造化欄（`constraint` /
+  `pastLength` / `promptLength` / `requestedNewTokens` / `limit` / `maxNewTokens`）を持つ。
+- **公開 `GenerationProgram` から配線欄が消えた**（グラフ入出力の名前・記号束縛・`derivedInputs` は
+  内部型 `GenerationWiring` へ分離）。残るのは `chunkLength` / `capacity` / `maxPosition` /
+  `vocabSize` / `stopTokens` で、面は凍結・`stopTokens` は凍結コピーである（消費側の `sort()` /
+  `length = 0` が生成ループの停止集合を書き換える口を塞いだ）。
+- **`Gemma4Pipeline.sampler` → `defaultSampler` へ改名**し、`Gemma4PipelineConfig.sampler` の型が
+  `SamplerSpec` から `Gemma4DefaultSampler`（`temperature` / `topK` / `topP` の 3 欄必須）へ縮小
+  された。あわせて `fromAssets` も `fromPretrained` と同じ門（未知キー・値域・
+  `chunkLength ≤ capacity ≤ maxPosition`）をバイト列を開く前に通すので、**不正な宣言は
+  3.7GiB のロードが終わる前に落ちる**（従来は初回 `generate` で初めて `RangeError` になった）。
+
 ## params キャッシュは Session 寿命で無界（by-design）
 
 params バッファの内容アドレスキャッシュ（`RecipeBuilder.#writeParams`）には追い出しが無く、
@@ -788,6 +812,25 @@ shard 分割し（`karume.shards` — ADR 0070 追記 2026-08-29）、ロード�
 ヒットする。gated 資産の運用予定が無く、credential 別の名前空間隔離は過剰防御だったため
 撤去した（ADR [0080](decisions/0080-hub-fetch-cache-050.md) 決定 3 — 将来 gated 運用を
 始める場合は custom `caches` ラッパで隔離を再導入できる）。
+
+## hub: ローカル取得元の検証は `size` だけ（sha256 は照合しない・改竄は検出しない）
+
+`localDirectory` / `denoDirectory`（`@karume/hub/deno`）で手元のディレクトリを取得元にした場合、
+読んだバイト列に掛かる門は **`karume.json` が宣言する `size` との厳密一致だけ**である。**`sha256`
+は照合しない**（記録を信頼する）ので、次の 2 つは区別できる:
+
+- 検出する: 途中で切れたコピー・別 quant / 別モデルのファイルの取り違え・欠損（読めなければ
+  実体のパスを名乗って fail loudly）。
+- **検出しない**: バイト数が変わらない書き換え（改竄・ディスク上のサイレントなビット腐敗）。
+
+by-design の理由は取得物と資産の違いで、**手元の配布形は利用者の管理物**という前提に立っている
+（配布元から取得したバイト列ではない）。毎起動の全量ハッシュ（gemma4 E2B なら 3.8GiB）に見合う
+脅威が無く、ADR [0080](decisions/0080-hub-fetch-cache-050.md) 決定 1 が network 経路から消した
+コストをローカルで買い戻すことになる。`size` は読み終えた時点でタダで分かるので門として残す。
+
+**改竄検出が要る運用は HF 経路（`HubRepoRef`）を使うこと** — そちらは取得時に sha256 を検証して
+記録を焼き、記録との不一致は自動 evict + 取り直し（self-heal）になる。設計の正本は ADR
+[0086](decisions/0086-distribution-source.md) 決定 2。
 
 ## sha256 参照門は参照環境専用 — クロスデバイスのビット同一は保証しない
 

@@ -94,3 +94,12 @@ satisfies HubRepoRef` を置き、サブパス export で公開する。対象 =
   「タグは付け替え可能で不変性が運用規律依存になる」を理由に落としたが、今回の理由はもう 1 つ
   増える — 「パッケージ版に対応する版を指す」という意図は `*_CURRENT` が既に満たしており、
   タグはその二重持ちになる。
+- 2026-08-31: **「取得元に既定を持たない」MUST は取得元ハンドルにも継承する**（ADR
+  [0086](0086-distribution-source.md)）。`fromPretrained` の第 1 引数は
+  `string | HubRepoRef | DistributionSource` の union になったが、**どの綴りでも省略は不可**で、
+  取得元は呼び出し側の決定として必ず綴らせる（2026-08-25 の撤回の理由がそのまま掛かる）。ただし
+  **取得元ハンドルは `toRepoRef` の綴り門を通らない** — HF の repo ではないので `owner/name` を
+  要求するのは筋違いで、ローカルの配布形が「repo が必須」で落ちる。判別は hub 公開の型述語
+  `isDistributionSource` 1 本（`toManifestSource`）に集約し、ハンドルは `loadManifest` へ直行する。
+  pin（`*_CURRENT`）に対応するものはハンドル側に無い — 世代の概念を持たない取得元なので、手元に
+  あるバイト列がそのまま正である（ADR 0086 決定 1・暗黙 `main` の警告も出ない）。

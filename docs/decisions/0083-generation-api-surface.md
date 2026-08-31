@@ -227,3 +227,37 @@ full スロットの `P + Q ≤ C` 超過は今日「汎用メッセージで fa
      エクスポータがグラフに焼く」と衝突する。
 - 射程外（本波でやらない）: decode 性能そのもの（ADR 0082 で消化済み・以降はレンズ L-7 / L-12 の
   再評価 = perf-ledger）/ KV の f16 席 / topk の exporter 配線（決定 6 を採る限り実需が立たない）。
+
+## 追記
+
+- 2026-08-31（公開面レビューの消化 — 裁定の原文 = `.claude/reviews/2026-08-31_182ced7/`）:
+  実走した消費者が「面から読めない数」を推定で埋めていた 3 点と、公開面の書き換え口 1 点を閉じた。
+  いずれも決定 1〜10 の設計は不変で、**読み口を足すか、書ける口を塞ぐか**である。
+  - **`GenerationStop.tokens`**（決定 2 の停止イベント）: そのターンが生成した token 数。
+    MUST: `eos` の停止 token も 1 個として数える — 抽選 1 回 = run 1 回なので、この数がそのまま
+    生成に費やした run 数と一致し、`tok/s` を**再エンコード無し**で書ける（それがこの欄の目的）。
+    本文だけの数が要るなら `reason === "eos"` のとき 1 引く。従来は消費者が本文を再 encode して
+    token 数を推定していた（tokenizer の往復が恒真でない以上、推定は原理的に外れうる）。
+  - **`GenerationSequence.used`**（決定 1 の「可変な寿命」の読み口）: この会話が既に占めている
+    論理位置の数。MUST: **導出値**（`context.pastLength` + 未 commit frontier — ADR 0066 決定 6 の
+    二重簿記の禁止）で、独立した counter は持たない。次のターンが通るかは
+    `used + prompt.length + maxNewTokens - 1 ≤ capacity` かつ
+    `used + prompt.length + maxNewTokens - 2 < maxPosition` で事前に判定できる。
+  - **`GenerationCapacityError` の構造化欄**（決定 10 の専用型を「読み解かせない」形へ）:
+    `constraint`（`capacity` / `maxPosition` のどちらを踏んだか）/ `pastLength` / `promptLength`
+    （**`pendingToken` 連結後**の実数 — 呼び手が渡した `prompt` より 1 多いことがある）/
+    `requestedNewTokens` / `limit` / `maxNewTokens`（この prompt のまま今なら通る上限・負値は
+    「何 token 溢れているか」）。専用型を持つ意味は文言ではなく**切り詰めの計算に要る数**なので、
+    それを欄で渡す。
+  - **公開 `GenerationProgram` を読み口だけへ絞る**（決定 1 の「program は不変」の強制）:
+    生成ループが読む全欄は内部型 `GenerationWiring` へ分離し、公開面（`Gemma4Pipeline.program`）が
+    出すのは自分で `sequence()` を回すときに要る数（`chunkLength` / `capacity` / `maxPosition` /
+    `vocabSize` / `stopTokens`）だけにした。グラフ入出力の名前・記号束縛・`derivedInputs` を
+    公開すると、①消費者が読んでも使い道が無い（配線の相手である Session は公開面に無い）
+    ②`derive` の差し替えや `bindings` の改変が公開面から書ける — **検証済みであること**が
+    `GenerationProgram` の意味そのものなので、書ける口は意味を壊す。面は凍結して返し、
+    `stopTokens` は**凍結コピー**にする（同じ配列を出すと消費側の `sort()` / `length = 0` が
+    生成ループの停止集合を書き換え、「EOS で止まらない生成」として沈黙劣化する）。
+  - **破壊的変更（未リリース面）**: `GenerationStop` の欄追加・`GenerationCapacityError` の
+    コンストラクタ 2 引数化・`GenerationProgram` からの配線欄の消滅・`dispose()` 後の `generate`
+    が**同期 throw** になったこと。消費側の doc は `docs/limitations.md`。

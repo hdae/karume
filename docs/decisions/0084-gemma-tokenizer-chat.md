@@ -170,3 +170,37 @@ export / runtime attention_mask 配線は本波の射程外で later に残る�
   モデルカードへの反映は段 5。
 - レンズ見積りの訂正 2 点が本 ADR に織り込まれている: encode 側の実装コストは焼き表が要らない
   ぶん**小さい**が、BPE の探索構造は**最初から merge queue が要る**（決定 3）。
+
+## 追記
+
+- 2026-08-31（公開面レビューの消化 — 裁定の原文 = `.claude/reviews/2026-08-31_182ced7/`）:
+  - **`gemma4ChatTurn(tokenizer, message)` を足した**（決定 5 の chat 関数 1 本に対する **差分
+    描画**の対）。`gemma4ChatPrompt` は毎ターン会話全体を描くので `GenerationSequence` で多ターンを
+    回すと O(n²) の prefill になり、実走した消費者は「全体を描いて先頭の `<bos>` を剥がす」当て
+    推量を書いていた（温度 0 で `chat()` と逐語一致したが**無保証**）。turn-local 契約を関数と
+    doc で正本化する。MUST: **前 turn を閉じる `<turn|>` は含めない** — その綴りは生成が出して
+    sequence が未 commit の frontier（`pendingToken`）として持ち、次の `generate` が prompt の
+    先頭へ自動連結する（ADR 0083 決定 4）。二重に描くと turn の区切りが 2 つになり、例外は
+    1 つも出ない。成立する等式 `gemma4ChatPrompt(全会話) = gemma4ChatPrompt(先頭 turn まで) ⧺
+    生成本文 ⧺ [<turn|>] ⧺ gemma4ChatTurn(次の発話) ⧺ …` を任意の分割で見る門を置く。
+    MUST: `assistant` は**拒否**する（model turn は生成が埋める席で、上流 template も連続
+    assistant を 1 つの turn へ畳む — 差し込むなら `gemma4ChatPrompt` で全体を描き直す）。
+    使えるのは生成が `<turn|>` で閉じた直後だけで、max-tokens / `break` で打ち切ったターンの
+    続きは増分ではなく続きの生成（`prompt: []`）が正である。
+  - **`parseGemma4PipelineConfig` を公開した**（決定 5 の「同一 digest set」を消費者側でも保つ）。
+    `fromPretrained` は内部で通すので呼ぶ必要は無く、要るのは `karume.json` を自分で読んで
+    `fromAssets` へ渡す側である — 手元にあるのは hub の `ModelEntry.pipelineConfig`
+    （`Record<string, unknown>`）なので、この口が無いと `as` で被せるか 3 つの数を配布形と自分の
+    コードに二重持ちするしかない（どちらも配布形が動いたときに黙って食い違う）。あわせて
+    `fromAssets` も `fromPretrained` と**同じ門**（未知キー・値域・`chunkLength ≤ capacity ≤
+    maxPosition`）をバイト列を開く前に通す。
+  - **`Gemma4Pipeline.sampler` → `defaultSampler` へ改名**し、`Gemma4PipelineConfig.sampler` の型を
+    `SamplerSpec` から `Gemma4DefaultSampler`（`temperature` / `topK` / `topP` の **3 欄必須**）へ
+    縮小した（ADR 0083 決定 7 の「既定値は配布形が宣言する」の綴り直し）。旧名は「今この生成が
+    使っている sampler」と読めるが、実際には要求が省略したときだけ使われる**既定**である。
+    型を `SamplerSpec` のままにすると受理集合より広い型になり（`logitBias` は `Map` で JSON に
+    載らず、`seed` / `repetitionPenalty` は配布者が推奨する性質の値ではない）、「型は通るのに
+    パーサが未知キーで落とす」欄が公開面に生える。部分宣言を許さないのは「温度だけ推奨・top-k は
+    低層の既定」という**上流のどこにも無い**組み合わせを作らないため。
+  - **破壊的変更（未リリース面）**: 上の改名・`config.sampler` の型縮小・`fromAssets` が不正宣言を
+    ロード前に拒否するようになったこと。GPU golden は全て不変。

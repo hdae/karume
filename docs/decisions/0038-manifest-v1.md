@@ -515,3 +515,12 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   解決するため**受け側は 0 行変更**（受理はテストで固定）。assets / extras の席（1 ファイル
   参照のみ）は従来どおり分割参照を fail loudly。焼く側の突合（参照先現物 = 自分で組むバイト列）
   は shard 全要素へ適用。
+- 2026-08-31: **§5 の HF 固有記述は「HF アダプターの契約」へ降格する**（ADR
+  [0086](0086-distribution-source.md)）。取得元は HF だけではなくなり、§5 が並べていた接続契約は
+  2 つに割れる — **取得元固有**（可変 ref → commit SHA の解決・キャッシュ名前空間の所有・
+  `hubUrl`・相 1 の streaming prefetch・sha256 照合）は `sources/hf.ts` の契約として読み、
+  **取得元非依存**（進捗の算出と `AbortSignal` の透過・同時取得数と in-flight バイト予算・
+  `openModel` へ渡す前の tight view assert・エラーの形と利用可能ラベル・`onCacheError` の
+  アプリ配達）は共通層の契約として §5 のまま全取得元に掛かる。§7 の越境参照（`repo` /
+  `revision`）は取得元契約の 1 つ（`originFor`）になり、ローカル取得元では明示 mapping と明示
+  fallback だけが解決手段になる（ADR 0086 決定 3）。
