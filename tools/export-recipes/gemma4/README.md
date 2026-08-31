@@ -1,8 +1,9 @@
 # Gemma 4 E2B export recipe
 
 **Outside the wheel** — this recipe is repo-only (ADR
-[0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)) and it produces a series, not a
-distribution, so it has no dist recipe and no model card.
+[0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)). It produces four series and,
+from the product one, a **distribution** (`distribution.py` / `card.py` — see "Assembling the
+distribution" below).
 
 The checkpoint is `google/gemma-4-E2B-it`, licensed **Apache 2.0** (the snapshot's own README
 frontmatter says `license: apache-2.0`, and its `license_link` page carries the plain Apache 2.0
@@ -10,8 +11,9 @@ text — the earlier claim here that the weights fell under the Gemma Terms of U
 was Gemma 3 knowledge carried over, retracted 2026-09-01). The per-revision license interview (ADR
 0065 stage 6) was held for this revision on 2026-09-01: distribution is allowed, the model card
 carries the Apache 2.0 attribution and links to the upstream model card for the usage details this
-project does not curate. Nothing derived from these weights is published from this repository
-_yet_ — publication is stage 5 of the generation-API wave.
+project does not curate. Nothing derived from these weights has been **uploaded** from this
+repository yet — the distribution form is assembled locally and publication is a separate step
+(`docs/release-runbook.md`).
 
 The authority for the design decisions is the module docstrings (`export.py`, `export_decode.py`,
 `export_product.py`); this file is the entry point only.
@@ -303,3 +305,62 @@ fixture is whatever the repository formatter produces (`deno task verify` checks
 `transformers` is pinned to 5.14.1 for the same reason as DeBERTa, EmbeddingGemma and MiniCPM5 (a
 change in the modeling code changes the graph shape); it is brought in temporarily with `--with`
 rather than declared as a dependency group.
+
+## Assembling the distribution
+
+```sh
+cd tools/export-recipes
+uv run python dist.py --pipeline gemma4        # → models/karume-gemma4-e2b/ (~4.0 GiB)
+```
+
+The distribution folds **two series** into one HF repository: the product container
+(`gemma4-e2b-product`, three shards) plus its PLE sidecar, and the compiled tokenizer asset
+(`gemma4-e2b-tokenizer`). The acceptance-only files that live beside the product container
+(`ple.probe.safetensors`, `reference.json`) are not in the placement table and therefore never
+reach the output. Layout inside the repository:
+
+| Manifest seat                        | Path                                            |
+| ------------------------------------ | ----------------------------------------------- |
+| `weights.model.i4.shards`            | `e2b/model/model.i4-NNNNN-of-NNNNN.safetensors` |
+| `assets.tokenizer`                   | `e2b/tokenizer/tokenizer.json`                  |
+| `assets.ple_index`                   | `e2b/ple/ple.json`                              |
+| `assets.<the index's own file name>` | `e2b/ple/ple-NNNNN-of-NNNNN.safetensors`        |
+
+The PLE sidecar rides in the `assets` seat rather than `weights` — it is not an IR container, and
+the host reads only the vocabulary ranges a conversation touches (ADR
+[0085](../../../docs/decisions/0085-ple-host-gather.md) decision 3). **The asset name of a sidecar
+shard is the file name the index itself writes**, so `packages/models/src/gemma/ple.ts` can look up
+a fetch key with the one spelling it already has (`ple.json`'s `shards[].file`); introducing a
+second naming would make the correspondence positional, and a reordering of either side would pass
+silently.
+
+`pipelineConfig` splits the way Irodori's does. Derived from the assets: `maxPosition` (the row
+count of the baked rotary tables, which all four must agree on) and `sampler` (the checkpoint's own
+`generation_config.json` — temperature / top-k / top-p, ADR
+[0083](../../../docs/decisions/0083-generation-api-surface.md) decision 7). Declared as runtime
+knobs, because no asset can state them: `chunkLength` and `capacity`. The assembly refuses
+`chunkLength > capacity` and `capacity > maxPosition` — a conversation that fills the declared
+capacity reaches position `capacity - 1`, so a capacity beyond the rotary tables only fails on long
+conversations, at run time, on someone else's machine.
+
+Gates that run **before a single byte is placed** (each one covers a mismatch that leaves shape,
+dtype and manifest all correct, and shows up only as wrong values):
+
+- the container carries both `I4` (linear weights) and `I8` (embeddings) and no `F16`
+- graph inputs are exactly `input_ids` / `position_ids` / `per_layer_inputs` / `last_row`, the exit
+  is `[1, 1, V]`, and exactly one symbol is free of the input shapes (the full slot's capacity)
+- `per_layer_inputs`' layer and dim axes match the sidecar index
+- the sidecar index is a gap-free ascending partition of `[0, tokens)`, `tokens` equals `V`, and
+  every shard's tensors and `__metadata__.karume_ple` name the same generation as the index
+- the compiled tokenizer names the compile format and has exactly `V` rows
+- the checkpoint's recommended sampler is present and inside the range the TypeScript
+  `pipelineConfig` parser accepts
+
+Apache 2.0 §4 applies to the redistribution, so the repository root also carries `LICENSE.md` (a
+verbatim copy of `apache_license_2_0.txt`) and `NOTICE.md` (the list of modifications). Both are
+`karume.dist`'s legal-text seat, not manifest-declared assets.
+
+Loading it back is `Gemma4Pipeline.fromPretrained` (`packages/models/src/gemma/pipeline.ts`). There
+is **no pin constant** (`*_CURRENT`) yet: ADR
+[0073](../../../docs/decisions/0073-models-source-pin.md) decision 1 gives one only to families
+with a published repository, so the fetch source is spelled out by the caller until then.

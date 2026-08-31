@@ -52,7 +52,15 @@ uv run python dist.py --pipeline sbv2 --card-profile jvnv \
 uv run python dist.py --pipeline sbv2 --card-profile fn \
     --model FN1 --model FN2 --model FN3 --model FN4 --model FN5 --model FN6 \
     --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
+uv run python dist.py --pipeline gemma4              # → models/karume-gemma4-e2b/（約 4.0GiB）
 ```
+
+- `karume-gemma4-e2b` は**系列 2 本**（`gemma4-e2b-product` の製品コンテナ + PLE sidecar と
+  `gemma4-e2b-tokenizer` の compile 済み資産）を 1 リポへ畳む。PLE sidecar は `assets` の席に載り、
+  **asset 名は `ple.json` が書いた shard のファイル名そのもの**（読み手が索引 1 本で取得キーも
+  引けるようにするため — 詳細は `tools/export-recipes/gemma4/README.md`）。上流が Apache 2.0 なので
+  リポ直下に `LICENSE.md` / `NOTICE.md` が入る（`karume.dist` の法的テキスト席）。**未公開**なので
+  pin 定数（`*_CURRENT`）はまだ無い（ADR [0073](decisions/0073-models-source-pin.md) 決定 1）。
 
 - `karume-sbv2-fn` のミラーは**常設しない**（2026-08-30 裁定 — e2e の門はライセンス記述が正の
   `karume-sbv2-jvnv` を正本にする）。上のコマンドは再生成方法の記録で、系列（`inputs/sbv2/FN*`
