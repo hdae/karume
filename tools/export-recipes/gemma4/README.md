@@ -4,9 +4,14 @@
 [0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)) and it produces a series, not a
 distribution, so it has no dist recipe and no model card.
 
-The checkpoint is `google/gemma-4-E2B-it`, whose weights are covered by the **Gemma Terms of Use**;
-the per-revision license interview is a release gate (ADR 0065 stage 6) and nothing derived from
-these weights is published from this repository today.
+The checkpoint is `google/gemma-4-E2B-it`, licensed **Apache 2.0** (the snapshot's own README
+frontmatter says `license: apache-2.0`, and its `license_link` page carries the plain Apache 2.0
+text — the earlier claim here that the weights fell under the Gemma Terms of Use was wrong; that
+was Gemma 3 knowledge carried over, retracted 2026-09-01). The per-revision license interview (ADR
+0065 stage 6) was held for this revision on 2026-09-01: distribution is allowed, the model card
+carries the Apache 2.0 attribution and links to the upstream model card for the usage details this
+project does not curate. Nothing derived from these weights is published from this repository
+_yet_ — publication is stage 5 of the generation-API wave.
 
 The authority for the design decisions is the module docstrings (`export.py`, `export_decode.py`,
 `export_product.py`); this file is the entry point only.

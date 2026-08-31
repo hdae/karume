@@ -51,14 +51,19 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   （**breaking** — limitations 記載）/ 段 3 = `GenerationProgram` + `GenerationSequence`
   （AsyncIterable・AbortSignal・多ターン pendingToken 連結）/ 段 4 = `gemma4ChatPrompt` +
   `Gemma4Pipeline`（barrel + `./gemma` 配線・**文字列 in → 文字列 out を実重みで実証**）。
-  - **段 5 配布形（残 — ライセンス門待ち）**: manifest 席 / dist recipe / モデルカード / shard
+  - **段 5 配布形（残 — 着手可能）**: manifest 席 / dist recipe / モデルカード / shard
     （ADR 0081）/ pin 定数 / `fromPretrained`。合格線 = dist 全門通過 + 実 DL 疎通。
-    **ADR 0065 stage 6 のライセンス門（Gemma ToU の人間確認 — ユーザー）が前提**
+    **ライセンス門（ADR 0065 stage 6）は 2026-09-01 に消化** — Gemma 4 は **Apache 2.0**
+    （snapshot README frontmatter + license_link 本文で現物確認。従来の「Gemma ToU」記述は
+    Gemma 3 知識の持ち越しの誤りで撤回）。ユーザー裁定: モデルの使われ方はこのプロジェクトの
+    関知外 — カードは Apache 2.0 帰属 + 上流モデルカードへの誘導リンク（他モデルと同じ扱い）
 - **L-11 裁定（2026-08-30）**: 技術先行 = **gemma4 E2B**（品質実証済み — tokenizer / L-5 の
-  実装対象）。**公開はライセンス門（ADR 0065 stage 6 = Gemma ToU）の確認後**。配布経路の
+  実装対象）。ライセンス門は上記のとおり**消化済み（Apache 2.0）**。配布経路の
   minicpm5 先行は**採らない**（2026-08-31 裁定 10 — 段 5 の対象は gemma4 E2B のみ）
-- **M2 実機の手動確認 2 点**: dp4a カナリア（①QK f16 格子化後の 16 本）と軸 reduce NaN
-  パリティ 4 本（[known-issues](known-issues.md) Metal 節に読み方）
+- ~~M2 実機の手動確認 2 点~~ **消化（2026-09-01 実測）**: dp4a カナリア **16/16 緑**（QK f16
+  格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
+  読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤**（既知の FMA 契約
+  クラスの見立て — [known-issues](known-issues.md) Metal 節・扱いは裁定中）
 - anima-web の cold ロード DL スロット改善（提案 b+a — `FamilyAdmission` 席は実装済みで、
   残りは admission 前倒しの graph shard 単位化 + extras の並行開始。shard 仕様 v2 で
   graph shard が数 MB になり前倒しの価値が確定する。opt-in の c 案は再裁定要）
