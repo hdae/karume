@@ -4,7 +4,7 @@
  * | 段 | キー                                     | 役割                                            |
  * | -- | ---------------------------------------- | ----------------------------------------------- |
  * | ①  | `attention_state_qk:v1:f32:wg16x4`       | 論理 col 空間の `S` を**行ブロック窓で実体化**  |
- * | ②  | `attention_state_stats:v1:f32:wg256`     | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`    |
+ * | ②  | `attention_state_stats:v2:f32:wg256`     | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`    |
  * | ③  | `attention_state_pv:v1:f32:wg16x4`       | `O = P @ V`（`P = exp(S−m)·inv` は**非実体化**）|
  *
  * 既存の融合 attention（src/kernels/attention.ts + GEMM 骨格）とは**別族**で、1 バイトも共有
@@ -84,6 +84,7 @@
  * (−inf))` = `exp(NaN)` = NaN が分母へ入る）。
  */
 
+import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
 import { assertU32Params } from "../codegen/params.ts";
@@ -134,8 +135,10 @@ export const stateQkKey = (sliding: boolean, gqa: boolean): string =>
     stateVariantKeyPart(sliding, gqa)
   }`;
 
+// v2: 行 max を nan_max へ（全 NaN 行が空行判定へ化けて stats (0,0) になる穴を塞ぐ —
+// ADR 0020。非 NaN 入力ではビット不変）
 export const stateStatsKey = (sliding: boolean): string =>
-  `attention_state_stats:v1:f32:wg${STATE_STATS_WORKGROUP_SIZE}${
+  `attention_state_stats:v2:f32:wg${STATE_STATS_WORKGROUP_SIZE}${
     stateVariantKeyPart(sliding, false)
   }`;
 
@@ -366,7 +369,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
  * `z · rows_block + 局所行` で、pad 行のぶんは書かれないまま残る（読者が居ない — ③ は pad 行で
  * `stats` を 1 語も読まずに 0 を書く）。
  * MUST: `col_cap` は**ストライド**で、走査は live まで。
- * NOTE: `max` は NaN 伝播を保証しない（softmax / reduce.ts と同じ既知の乖離）。
+ * MUST: 行 max は `nan_max`（ビット列 NaN 判定 — ADR 0020）。素の `max` は仕様レベルで
+ * NaN を落とし、全 NaN 行が空行（stats (0,0)）へ化ける。nan_max なら m = NaN が ③ へ渡り
+ * 出力の NaN 分類が保存される。非 NaN 入力ではビット不変（v2）。
  */
 export const stateStatsWgsl = (sliding: boolean): string =>
   `// karume attention_state_stats (states 形の行統計 m = amax(S) と inv = 1/Σexp(S - m), f32${
@@ -389,6 +394,10 @@ ${STATE_LENGTHS_STRUCT}
 ${stateLiveWgsl(sliding)}
 
 ${stateEffectiveRowsWgsl}
+
+${IS_NAN_BITS_WGSL}
+
+${NAN_MAX_WGSL}
 
 var<workgroup> scratch: array<f32, ${STATE_STATS_WORKGROUP_SIZE}>;
 
@@ -414,7 +423,7 @@ fn main(
     var hi = neg_inf;
     var i = lid;
     while (i < live) {
-      hi = max(hi, s[base + i]);
+      hi = nan_max(hi, s[base + i]);
       i = i + ${STATE_STATS_WORKGROUP_SIZE}u;
     }
     scratch[lid] = hi;
@@ -422,7 +431,7 @@ fn main(
     var stride = ${STATE_STATS_WORKGROUP_SIZE / 2}u;
     while (stride > 0u) {
       if (lid < stride) {
-        scratch[lid] = max(scratch[lid], scratch[lid + stride]);
+        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
       }
       workgroupBarrier();
       stride = stride / 2u;

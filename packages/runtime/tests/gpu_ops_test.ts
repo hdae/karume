@@ -458,6 +458,82 @@ Deno.test({
 });
 
 /**
+ * softmax 族の NaN 保存と融合 attention の空行ガード（v2 — nan_max 統一 + safe ガード移植。
+ * ADR 0044 追記 2026-08-31）。
+ *
+ * - 旧実装は WGSL の `max` が仕様レベルで NaN を落とすため、**全要素 NaN の行が safe_softmax
+ *   の空行判定に化けて厳密 0 になり NaN が黙って消えていた**（部分 NaN 行は総和経由で従来
+ *   から伝播 — 穴は全 NaN 行だけ）。
+ * - 融合 attention は全マスク行（mask が全列 −inf）で `1/0` の不定値だった — v2 の空行ガード
+ *   で safe_softmax と同じ「出力 0 行」に確定する（契約違反 → 正規入力への拡張）。
+ */
+Deno.test({
+  name: "softmax 族は全 NaN 行を 0 に潰さず、融合 attention の全マスク行は厳密 0（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      // 行 0 = 全 NaN・行 1 = 通常行（NaN 行が隣の行を汚染しないことも同時に見る）
+      const nanRows = (i: number): number => i < 4 ? Number.NaN : SIGNED(i);
+      for (const op of ["softmax", "safe_softmax"] as const) {
+        const actual = await runCase(gpu, {
+          name: `${op} 全 NaN 行`,
+          op,
+          inputs: [fill([2, 4], nanRows)],
+          outShapes: [[2, 4]],
+          attrs: { dim: 1 },
+        });
+        for (let i = 0; i < 4; i += 1) {
+          assertEquals(
+            Number.isNaN(actual.data[i]),
+            true,
+            `${op}: 全 NaN 行の要素 ${i} が ${actual.data[i]}（NaN が消えた）`,
+          );
+        }
+        const tail = [...actual.data.slice(4)];
+        assertEquals(tail.every(Number.isFinite), true, `${op}: 通常行が汚染された（${tail}）`);
+        const sum = tail.reduce((a, b) => a + b, 0);
+        assertEquals(Math.abs(sum - 1) < 1e-5, true, `${op}: 通常行の総和 ${sum} ≠ 1`);
+      }
+
+      // 融合 attention: mask の行 0 を全列 −inf（全マスク行）にする。出力の行 0 は厳密 0・
+      // 行 1 は有限のまま（CPU 参照の空行分岐と同じ値になることは掃引側が担うので、ここは
+      // 「不定値でも NaN でもなく厳密 0」というガードの発火だけを固定する）
+      const m = 2;
+      const n = 3;
+      const d = 4;
+      const scale = Math.fround(Math.sqrt(1 / Math.sqrt(d)));
+      const masked = await runCase(gpu, {
+        name: "attention 全マスク行",
+        op: "attention",
+        inputs: [
+          fill([1, 1, m, d], SIGNED),
+          fill([1, 1, n, d], POSITIVE),
+          fill([1, 1, n, d], SIGNED),
+          fill([1, 1, m, n], (i) => i < n ? -Infinity : 0),
+        ],
+        outShapes: [[1, 1, m, d]],
+        attrs: { scale },
+      });
+      for (let i = 0; i < d; i += 1) {
+        assertEquals(
+          Object.is(masked.data[i], 0),
+          true,
+          `attention: 全マスク行の要素 ${i} が ${masked.data[i]}（厳密 0 でない）`,
+        );
+      }
+      assertEquals(
+        [...masked.data.slice(d)].every(Number.isFinite),
+        true,
+        "attention: 通常行が汚染された",
+      );
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
  * 上のカナリアの NaN 側。`tanh` はビット列判定の外殻、`gelu_tanh` は式の外に残る因子 `x` で
  * それぞれ NaN を運ぶ（機序が違うので op ごとに見る）。
  */

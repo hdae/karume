@@ -2,10 +2,19 @@
 struct Params {
   rows: u32,
   dim: u32,
+  neg_inf: u32,
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> s: array<f32>;
 @group(0) @binding(2) var<storage, read_write> stats: array<f32>;
+
+fn is_nan_bits(x: f32) -> bool {
+  return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
+}
+
+fn nan_max(a: f32, b: f32) -> f32 {
+  return select(select(max(a, b), b, is_nan_bits(b)), a, is_nan_bits(a));
+}
 
 var<workgroup> scratch: array<f32, 256>;
 
@@ -17,6 +26,7 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
+  let neg_inf = bitcast<f32>(params.neg_inf);
   let i0 = lid;
   let i1 = lid + 256u;
   let i2 = lid + 512u;
@@ -37,99 +47,102 @@ fn main(
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の最大値（safe-softmax の減算項）
-    var hi = -3.402823466e38;
+    // ① 行の最大値（safe-softmax の減算項 — identity は -inf）
+    var hi = neg_inf;
     var c0 = 0.0;
     if (i0 < dim) {
       c0 = s[base + i0];
-      hi = max(hi, c0);
+      hi = nan_max(hi, c0);
     }
     var c1 = 0.0;
     if (i1 < dim) {
       c1 = s[base + i1];
-      hi = max(hi, c1);
+      hi = nan_max(hi, c1);
     }
     var c2 = 0.0;
     if (i2 < dim) {
       c2 = s[base + i2];
-      hi = max(hi, c2);
+      hi = nan_max(hi, c2);
     }
     var c3 = 0.0;
     if (i3 < dim) {
       c3 = s[base + i3];
-      hi = max(hi, c3);
+      hi = nan_max(hi, c3);
     }
     var c4 = 0.0;
     if (i4 < dim) {
       c4 = s[base + i4];
-      hi = max(hi, c4);
+      hi = nan_max(hi, c4);
     }
     var c5 = 0.0;
     if (i5 < dim) {
       c5 = s[base + i5];
-      hi = max(hi, c5);
+      hi = nan_max(hi, c5);
     }
     var c6 = 0.0;
     if (i6 < dim) {
       c6 = s[base + i6];
-      hi = max(hi, c6);
+      hi = nan_max(hi, c6);
     }
     var c7 = 0.0;
     if (i7 < dim) {
       c7 = s[base + i7];
-      hi = max(hi, c7);
+      hi = nan_max(hi, c7);
     }
     var c8 = 0.0;
     if (i8 < dim) {
       c8 = s[base + i8];
-      hi = max(hi, c8);
+      hi = nan_max(hi, c8);
     }
     var c9 = 0.0;
     if (i9 < dim) {
       c9 = s[base + i9];
-      hi = max(hi, c9);
+      hi = nan_max(hi, c9);
     }
     var c10 = 0.0;
     if (i10 < dim) {
       c10 = s[base + i10];
-      hi = max(hi, c10);
+      hi = nan_max(hi, c10);
     }
     var c11 = 0.0;
     if (i11 < dim) {
       c11 = s[base + i11];
-      hi = max(hi, c11);
+      hi = nan_max(hi, c11);
     }
     var c12 = 0.0;
     if (i12 < dim) {
       c12 = s[base + i12];
-      hi = max(hi, c12);
+      hi = nan_max(hi, c12);
     }
     var c13 = 0.0;
     if (i13 < dim) {
       c13 = s[base + i13];
-      hi = max(hi, c13);
+      hi = nan_max(hi, c13);
     }
     var c14 = 0.0;
     if (i14 < dim) {
       c14 = s[base + i14];
-      hi = max(hi, c14);
+      hi = nan_max(hi, c14);
     }
     var c15 = 0.0;
     if (i15 < dim) {
       c15 = s[base + i15];
-      hi = max(hi, c15);
+      hi = nan_max(hi, c15);
     }
     scratch[lid] = hi;
     workgroupBarrier();
     var stride = 128u;
     while (stride > 0u) {
       if (lid < stride) {
-        scratch[lid] = max(scratch[lid], scratch[lid + stride]);
+        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
       }
       workgroupBarrier();
       stride = stride / 2u;
     }
-    let amax = scratch[0u];
+    let row_max = scratch[0u];
+    // 全要素 -inf の行（全マスク行）— 減算項を 0 にして NaN を作らない（safe_softmax と同形）
+    let empty = row_max == neg_inf;
+    let amax = select(row_max, 0.0, empty);
     // scratch の読み終わりを揃えてから ② で上書きする
     workgroupBarrier();
 
@@ -196,8 +209,9 @@ fn main(
     // MUST: 逆数はここで作る（③ で割り算に戻すと softmax のパス③と演算が変わる）
     let inv = 1.0 / scratch[0u];
     if (lid == 0u) {
+      // 空行は (0.0, 0.0) — ③ の exp(S - 0) = exp(-inf) = 0 に inv = 0 が掛かり出力が厳密 0
       stats[row * 2u] = amax;
-      stats[row * 2u + 1u] = inv;
+      stats[row * 2u + 1u] = select(inv, 0.0, empty);
     }
     // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
     workgroupBarrier();

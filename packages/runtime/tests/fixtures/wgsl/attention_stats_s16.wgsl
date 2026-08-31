@@ -2,6 +2,7 @@
 struct Params {
   rows: u32,
   dim: u32,
+  neg_inf: u32,
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> s: array<u32>;
@@ -11,6 +12,14 @@ struct Params {
 fn score_at(i: u32) -> f32 {
   let pair = unpack2x16float(s[i >> 1u]);
   return select(pair.x, pair.y, (i & 1u) == 1u);
+}
+
+fn is_nan_bits(x: f32) -> bool {
+  return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
+}
+
+fn nan_max(a: f32, b: f32) -> f32 {
+  return select(select(max(a, b), b, is_nan_bits(b)), a, is_nan_bits(a));
 }
 
 var<workgroup> scratch: array<f32, 256>;
@@ -23,15 +32,16 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
+  let neg_inf = bitcast<f32>(params.neg_inf);
   var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の最大値（safe-softmax の減算項）
-    var hi = -3.402823466e38;
+    // ① 行の最大値（safe-softmax の減算項 — identity は -inf）
+    var hi = neg_inf;
     var i = lid;
     while (i < dim) {
-      hi = max(hi, score_at(base + i));
+      hi = nan_max(hi, score_at(base + i));
       i = i + 256u;
     }
     scratch[lid] = hi;
@@ -39,12 +49,15 @@ fn main(
     var stride = 128u;
     while (stride > 0u) {
       if (lid < stride) {
-        scratch[lid] = max(scratch[lid], scratch[lid + stride]);
+        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
       }
       workgroupBarrier();
       stride = stride / 2u;
     }
-    let amax = scratch[0u];
+    let row_max = scratch[0u];
+    // 全要素 -inf の行（全マスク行）— 減算項を 0 にして NaN を作らない（safe_softmax と同形）
+    let empty = row_max == neg_inf;
+    let amax = select(row_max, 0.0, empty);
     // scratch の読み終わりを揃えてから ② で上書きする
     workgroupBarrier();
 
@@ -68,8 +81,9 @@ fn main(
     // MUST: 逆数はここで作る（③ で割り算に戻すと softmax のパス③と演算が変わる）
     let inv = 1.0 / scratch[0u];
     if (lid == 0u) {
+      // 空行は (0.0, 0.0) — ③ の exp(S - 0) = exp(-inf) = 0 に inv = 0 が掛かり出力が厳密 0
       stats[row * 2u] = amax;
-      stats[row * 2u + 1u] = inv;
+      stats[row * 2u + 1u] = select(inv, 0.0, empty);
     }
     // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
     workgroupBarrier();

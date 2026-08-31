@@ -31,6 +31,14 @@ fn effective_rows(query: u32) -> u32 {
   return min(params.rows_block, query - params.row_offset);
 }
 
+fn is_nan_bits(x: f32) -> bool {
+  return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
+}
+
+fn nan_max(a: f32, b: f32) -> f32 {
+  return select(select(max(a, b), b, is_nan_bits(b)), a, is_nan_bits(a));
+}
+
 var<workgroup> scratch: array<f32, 256>;
 
 @compute @workgroup_size(256)
@@ -55,7 +63,7 @@ fn main(
     var hi = neg_inf;
     var i = lid;
     while (i < live) {
-      hi = max(hi, s[base + i]);
+      hi = nan_max(hi, s[base + i]);
       i = i + 256u;
     }
     scratch[lid] = hi;
@@ -63,7 +71,7 @@ fn main(
     var stride = 128u;
     while (stride > 0u) {
       if (lid < stride) {
-        scratch[lid] = max(scratch[lid], scratch[lid + stride]);
+        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
       }
       workgroupBarrier();
       stride = stride / 2u;

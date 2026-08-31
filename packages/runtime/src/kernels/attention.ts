@@ -4,7 +4,7 @@
  * | 段 | キー                                        | 役割                                              |
  * | -- | ------------------------------------------- | ------------------------------------------------- |
  * | ①  | `attention_qk:v1:f32:reg64x64r8x4w16{v4}`   | `S = (q·scale) @ (k·scale)ᵀ` を**実体化**         |
- * | ②  | `attention_stats:v1:f32:lastdim:safe:wg256` | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`      |
+ * | ②  | `attention_stats:v2:f32:lastdim:safe:wg256` | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`      |
  * | ③  | `attention_pv:v1:f32:reg64x64r8x4w16{v4}`   | `O = P @ v`（`P = exp(S−m)·inv` は**非実体化**）  |
  *
  * ① と ③ は GEMM 骨格（src/kernels/gemm.ts）の断片共有で、内積ループの正本は 1 箇所のまま。
@@ -19,7 +19,11 @@
  * 2. `scale` は**タイル充填時に q 側と k 側の両方**へ掛ける（半スケール契約 — src/ops.ts）。
  *    内積の後に 1 度だけ掛ける形に変えると、`(q·s)·(k·s)` の各積が f32 へ丸まる位置が動く。
  * 3. ② は**現行 softmax.ts のパス①②を逐語で切り出したもの**（同じ 256 幅ツリー縮約・
- *    同じ走査順 `i += 256`・同じ identity `-F32_MAX`・同じ `inv = 1.0 / Σ`）。
+ *    同じ走査順 `i += 256`・同じ `inv = 1.0 / Σ`）。v2 からは identity と空行ガードも
+ *    **safe_softmax 側**に揃う（identity −inf・空行は stats (0,0)）— 有限要素を 1 つでも
+ *    持つ行では amax / inv のビット列が plain softmax 形と同一なので、mask 無し経路の
+ *    分解 parity（plain softmax）はそのまま成立する。全 −inf 行だけが「契約違反で
+ *    不定値」から「出力 0 の正規入力」へ広がった（ADR 0044 追記 2026-08-31）。
  * 4. ③ の A 要素は `exp(S − m) · inv` を f32 で評価した値で、現行 softmax がパス③で
  *    書き出す値と同じ式・同じ演算順。以降の縮約も現行 bmm と同一。
  *
@@ -44,8 +48,10 @@
  * 「S が f16 に丸まった f32 経路」としてそのまま生きる。
  */
 
+import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
+import { SAFE_SOFTMAX_NEG_INF_BITS } from "./softmax.ts";
 import {
   assertGemmRowWindow,
   type GemmCompute,
@@ -149,12 +155,14 @@ export const attentionStatsRegCache = (dim: number): number | undefined => {
   return perThread <= ATTENTION_STATS_REG_CACHE_MAX ? perThread : undefined;
 };
 
+// v2: ① を nan_max + identity −inf（params 経由）にし、全 −inf 行は stats (0,0) を書く
+// （safe_softmax のガード 3 点の移植 — 有限行のビット列は不変）
 export const attentionStatsKey = (
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
   regCache?: number,
 ): string =>
-  `attention_stats:v1:f32:lastdim:safe:wg${ATTENTION_STATS_WORKGROUP_SIZE}${
+  `attention_stats:v2:f32:lastdim:safe:wg${ATTENTION_STATS_WORKGROUP_SIZE}${
     gemmComputeKeyPart(compute)
   }${scoreKeyPart(score)}${regCache === undefined ? "" : `:rc${regCache}`}`;
 
@@ -178,9 +186,6 @@ export const attentionPvWgsl = (
   rowWindow = false,
 ): string => gemmWgsl({ op: "attention_pv", v4, compute, score, gqa, rowWindow });
 
-/** f32 の最大有限値。WGSL に無限大リテラルが無いため amax の identity にこれを使う（softmax と同じ）。 */
-const F32_MAX = "3.402823466e38";
-
 /**
  * ② 行統計。**現行 softmax.ts のパス①②をそのまま切り出したもの**で、書き出しだけが
  * 「行ごとの 2 語」に変わっている（`exp` の 2 度目の評価と行全体の書き戻しが消えた）。
@@ -188,7 +193,9 @@ const F32_MAX = "3.402823466e38";
  * MUST: 走査順（`i = lid; i += 256`）とツリー縮約の段（`stride = 128, 64, …`）を
  * softmax と一致させる。1 行の総和は加算順序で最終 ulp が動くので、ここが違うと
  * 分解経路とのビット同一が壊れる。
- * NOTE: `max` は NaN 伝播を保証しない（softmax / reduce.ts と同じ既知の乖離）。
+ * MUST: 行 max は `nan_max`・identity は params 経由の −inf・空行は stats (0,0)
+ * （safe_softmax のガード 3 点と同形 — モジュール doc の根拠 3。③PV は空行で
+ * `exp(S − 0) = exp(−inf) = 0` に `inv = 0` が掛かり出力が厳密 0 になる）。
  */
 export const attentionStatsWgsl = (
   compute: GemmCompute = "f32",
@@ -217,7 +224,7 @@ export const attentionStatsWgsl = (
   const maxPass = regCache === undefined
     ? `    var i = lid;
     while (i < dim) {
-      hi = max(hi, ${read("base + i")});
+      hi = nan_max(hi, ${read("base + i")});
       i = i + ${ATTENTION_STATS_WORKGROUP_SIZE}u;
     }`
     : slots
@@ -225,7 +232,7 @@ export const attentionStatsWgsl = (
         `    var c${at} = 0.0;
     if (i${at} < dim) {
       c${at} = ${read(`base + i${at}`)};
-      hi = max(hi, c${at});
+      hi = nan_max(hi, c${at});
     }`
       )
       .join("\n");
@@ -250,11 +257,16 @@ export const attentionStatsWgsl = (
 struct Params {
   rows: u32,
   dim: u32,
+  neg_inf: u32,
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> s: array<${scoreArrayType(score, f16 ? "f16" : "f32")}>;
 @group(0) @binding(2) var<storage, read_write> stats: array<f32>;
 ${scoreScalarLoaderWgsl("s", score)}
+${IS_NAN_BITS_WGSL}
+
+${NAN_MAX_WGSL}
+
 var<workgroup> scratch: array<f32, ${ATTENTION_STATS_WORKGROUP_SIZE}>;
 
 @compute @workgroup_size(${ATTENTION_STATS_WORKGROUP_SIZE})
@@ -265,24 +277,28 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
+  let neg_inf = bitcast<f32>(params.neg_inf);
 ${indexPrologue}  var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の最大値（safe-softmax の減算項）
-    var hi = -${F32_MAX};
+    // ① 行の最大値（safe-softmax の減算項 — identity は -inf）
+    var hi = neg_inf;
 ${maxPass}
     scratch[lid] = hi;
     workgroupBarrier();
     var stride = ${ATTENTION_STATS_WORKGROUP_SIZE / 2}u;
     while (stride > 0u) {
       if (lid < stride) {
-        scratch[lid] = max(scratch[lid], scratch[lid + stride]);
+        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
       }
       workgroupBarrier();
       stride = stride / 2u;
     }
-    let amax = scratch[0u];
+    let row_max = scratch[0u];
+    // 全要素 -inf の行（全マスク行）— 減算項を 0 にして NaN を作らない（safe_softmax と同形）
+    let empty = row_max == neg_inf;
+    let amax = select(row_max, 0.0, empty);
     // scratch の読み終わりを揃えてから ② で上書きする
     workgroupBarrier();
 
@@ -302,8 +318,9 @@ ${sumPass}
     // MUST: 逆数はここで作る（③ で割り算に戻すと softmax のパス③と演算が変わる）
     let inv = 1.0 / scratch[0u];
     if (lid == 0u) {
+      // 空行は (0.0, 0.0) — ③ の exp(S - 0) = exp(-inf) = 0 に inv = 0 が掛かり出力が厳密 0
       stats[row * ${ATTENTION_STATS_STRIDE}u] = amax;
-      stats[row * ${ATTENTION_STATS_STRIDE}u + 1u] = inv;
+      stats[row * ${ATTENTION_STATS_STRIDE}u + 1u] = select(inv, 0.0, empty);
     }
     // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
     workgroupBarrier();
@@ -448,5 +465,8 @@ export const attentionStatsParams = (
   const params = new Uint32Array(4);
   params[0] = rows;
   params[1] = dim;
+  // −inf のビット列（identity と空行判定 — 定数式 bitcast の shader-creation error 回避で
+  // params 経由。softmax.ts の MUST と同じ）
+  params[2] = SAFE_SOFTMAX_NEG_INF_BITS;
   return params;
 };

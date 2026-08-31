@@ -280,6 +280,16 @@ export const IS_NAN_BITS_WGSL = `fn is_nan_bits(x: f32) -> bool {
 }`;
 
 /**
+ * NaN 伝播する `max`（ADR 0020）。ドライバの `max` は NaN を飲む（WGSL 仕様も「e1 < e2 なら
+ * e2、さもなくば e1」で NaN を落とす）ので、縮約で NaN を保存したい側はこれを使う。
+ * 非 NaN の 2 引数では素の `max` と同値 — 既存の数値結果は 1 ビットも動かない。
+ * 要 {@link IS_NAN_BITS_WGSL}（依存は注入側が並べる）。
+ */
+export const NAN_MAX_WGSL = `fn nan_max(a: f32, b: f32) -> f32 {
+  return select(select(max(a, b), b, is_nan_bits(b)), a, is_nan_bits(a));
+}`;
+
+/**
  * NaN 入力をそのまま返す外殻。中の値式（`finite`）は**非 NaN 経路だけ**を担うので、
  * 既存の式をそのまま包める（= 非 NaN の数値結果がビット単位で動かない）。
  */

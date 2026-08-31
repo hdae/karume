@@ -111,15 +111,13 @@ Karume 側の Record は null プロトタイプで `"__proto__"` キーを保�
 -Infinity ではなく -F32_MAX を返す。非有限値を含むモデルを扱う場合は呼び出し側で事前検査
 すること。
 
-NOTE: 伝播一致の保証は `clamp` / `clamp_min` / `relu` / `amax` / `amin` についてはビット列
-NaN 判定で担保している（一時期 GPU 側が破っていた — 機序と裁定は
-[decisions/0020](decisions/0020-nan-propagation-bitwise.md)）。**softmax / safe_softmax /
-attention の行統計の行 max は素の `max` のまま**で、WGSL の `max` は仕様レベルで NaN を
-落とす（"Returns e2 if e1 is less than e2, and e1 otherwise"）— 全要素 NaN の行は
-safe_softmax が 0 を返し、CPU 参照（NaN）と分岐する。attention のスコア域の非有限値は
-[decisions/0044](decisions/0044-runtime-attention-mask.md) が明示的に契約外へ置いており
-（mask の意味論は有限 sentinel と −inf だけを規定）、この分岐は契約違反ではないが
-「NaN が黙って消える」経路として残っている（2026-08-31 レビュー W-3 — nan_max 化は裁定事項）。
+NOTE: 伝播一致の保証は `clamp` / `clamp_min` / `relu` / `amax` / `amin` に加え、
+**softmax / safe_softmax / attention の行統計（融合・states 形とも）**もビット列 NaN 判定
+（`nan_max`）で担保している（2026-08-31 の v2 で統一 — それ以前は WGSL の `max` が仕様レベルで
+NaN を落とすため、全要素 NaN の行が safe 系の空行判定に化けて厳密 0 になり NaN が黙って
+消えていた）。機序と裁定は
+[decisions/0020](decisions/0020-nan-propagation-bitwise.md) と
+[decisions/0044](decisions/0044-runtime-attention-mask.md) 追記 2026-08-31。
 
 ## 融合 attention の加算 mask は −inf を**値として**運ぶ（Finite Math Assumption 依存）
 
@@ -127,10 +125,10 @@ exporter が焼く加算 mask 定数は帯外を literal −Infinity で表し�
 sentinel −3.4028e38 とは別方式）、融合 attention の f32 経路はそれをそのまま加算して
 `exp(S−m)` で 0 に落とす。WGSL の Finite Math Assumption（実装は実行中に ∞ / NaN が現れない
 と仮定してよい — §15.7.2）の下では、∞ を値として運ぶこと自体が実装の自由度に晒されるが、
-実測（Vulkan / Metal の出荷資産）では期待どおり動作している。**全列が −inf の行（全マスク行）
-だけは行和 0 → `1/0` = indeterminate になる**（safe_softmax が持つ空行ガードは融合側に無い —
-現行の配布資産は全マスク行を含まないため未発火。2026-08-31 レビュー W-2 — ガード移植は
-裁定事項）。
+実測（Vulkan / Metal の出荷資産）では期待どおり動作している。全列が −inf の行（全マスク行）
+は **attention_stats v2 の空行ガードで出力 0 の正規入力**（2026-08-31 — それ以前は
+`1/0` = indeterminate の契約違反だった。[decisions/0044](decisions/0044-runtime-attention-mask.md)
+追記）。
 
 ## `attentionCompute: "a8"` の PV は attention 重みを 1/127 格子で量子化する（1:254 打ち切り）
 

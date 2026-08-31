@@ -58,8 +58,8 @@ Deno.test("states 形のキーは :sliding / :gqa の 2 ビットだけで分か
   assertEquals(stateQkKey(false, true), "attention_state_qk:v1:f32:wg16x4:gqa");
   assertEquals(stateQkKey(true, true), "attention_state_qk:v1:f32:wg16x4:sliding:gqa");
   assertEquals(statePvKey(true, true), "attention_state_pv:v1:f32:wg16x4:sliding:gqa");
-  assertEquals(stateStatsKey(false), "attention_state_stats:v1:f32:wg256");
-  assertEquals(stateStatsKey(true), "attention_state_stats:v1:f32:wg256:sliding");
+  assertEquals(stateStatsKey(false), "attention_state_stats:v2:f32:wg256");
+  assertEquals(stateStatsKey(true), "attention_state_stats:v2:f32:wg256:sliding");
   assertEquals(stateAppendKey(false), "state_append:v1:f32:wg256");
   assertEquals(stateAppendKey(true), "state_append:v1:f32:wg256:sliding");
   // 幾何の定数がキーに出ている（workgroup を動かせばキーが動く = 別パイプライン）

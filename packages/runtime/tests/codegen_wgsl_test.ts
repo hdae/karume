@@ -1854,15 +1854,14 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
   }
 
   // MUST: ② は現行 softmax のパス①② を**逐語で**切り出したもの。ツリー縮約の段・走査順・
-  // identity・`1.0 / Σ` のどれかが変わればビット同一が壊れるので、softmax 側の本文と
-  // 断片単位で突き合わせる（写し崩れの唯一の機械的検出器）。
+  // `1.0 / Σ` のどれかが変わればビット同一が壊れるので、softmax 側の本文と断片単位で
+  // 突き合わせる（写し崩れの唯一の機械的検出器）。v2 から identity と空行ガードは
+  // **safe_softmax 側**と共有する（有限行では plain 形とビット同一 — attention.ts 根拠 3）。
   for (
     const shared of [
-      "    var hi = -3.402823466e38;",
       "    var i = lid;\n    while (i < dim) {",
       "    var stride = 128u;",
-      "        scratch[lid] = max(scratch[lid], scratch[lid + stride]);",
-      "    let amax = scratch[0u];",
+      "        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
       "    var stride2 = 128u;",
       "        scratch[lid] = scratch[lid] + scratch[lid + stride2];",
       "    let inv = 1.0 / scratch[0u];",
@@ -1875,20 +1874,41 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
       `attention_stats 側に無い: ${shared}`,
     );
   }
+  // safe_softmax と共有するガード 3 点（identity −inf・空行判定・amax の select）
+  for (
+    const guard of [
+      "let neg_inf = bitcast<f32>(params.neg_inf);",
+      "    var hi = neg_inf;",
+      "    let row_max = scratch[0u];",
+      "    let empty = row_max == neg_inf;",
+      "    let amax = select(row_max, 0.0, empty);",
+    ]
+  ) {
+    assertEquals(SAFE_SOFTMAX_WGSL.includes(guard), true, `safe_softmax 側に無い: ${guard}`);
+    assertEquals(
+      ATTENTION_STATS_WGSL.includes(guard),
+      true,
+      `attention_stats 側に無い: ${guard}`,
+    );
+  }
   // 走査の本体は行の要素を読む式まで一致する（`x[base + …]` が `s[base + …]` になるだけ）
   assertEquals(
     ATTENTION_STATS_WGSL.includes("acc = acc + exp(s[base + j] - amax);"),
     true,
   );
   assertEquals(SOFTMAX_WGSL.includes("acc = acc + exp(x[base + j] - amax);"), true);
-  // ② は行を書き戻さない（3 パス → 1 パス化の実体 — 出力は行あたり 2 語だけ）
+  // ② は行を書き戻さない（3 パス → 1 パス化の実体 — 出力は行あたり 2 語だけ）。
+  // 空行は (0.0, 0.0)（amax は select 済み・inv だけここで確定する）
   assertEquals(ATTENTION_STATS_WGSL.includes("stats[row * 2u] = amax;"), true);
-  assertEquals(ATTENTION_STATS_WGSL.includes("stats[row * 2u + 1u] = inv;"), true);
+  assertEquals(
+    ATTENTION_STATS_WGSL.includes("stats[row * 2u + 1u] = select(inv, 0.0, empty);"),
+    true,
+  );
   // 行方向は grid-stride（縮退ハーネスの対象 — tests/gpu_gridstride_test.ts）
   assertEquals(ATTENTION_STATS_WGSL.includes("row = row + nwg.x;"), true);
   assertEquals(
     ATTENTION_STATS_KEY,
-    `attention_stats:v1:f32:lastdim:safe:wg${ATTENTION_STATS_WORKGROUP_SIZE}`,
+    `attention_stats:v2:f32:lastdim:safe:wg${ATTENTION_STATS_WORKGROUP_SIZE}`,
   );
   assertEquals(ATTENTION_STATS_WORKGROUP_SIZE, 256);
 
@@ -1898,7 +1918,7 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
   assertEquals([...qkParams.slice(0, 3)], [5, 7, 4]);
   assertEquals(new Float32Array(qkParams.buffer)[3], Math.fround(0.2973017692565918));
   assertEquals([...attentionPvParams(5, 4, 7)], [5, 4, 7, 0]);
-  assertEquals([...attentionStatsParams(30, 7)], [30, 7, 0, 0]);
+  assertEquals([...attentionStatsParams(30, 7)], [30, 7, 0xff800000, 0]);
   assertEquals(attentionStatsParams(30, 7).byteLength, 16);
   assertThrows(() => attentionQkParams(5, 7, 4, Number.NaN), CodegenError);
   assertThrows(() => attentionQkParams(-1, 7, 4, 1), CodegenError);
@@ -1912,7 +1932,7 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
   assertThrows(() => attentionStatsParams(-1, 7), CodegenError);
   // MUST: regcache 変種は `dim <= epc · 256` をここでも見る（生成側と二重だが、カーネル
   // 直呼びの経路も塞ぐ門）。超えた要素は max にも Σ にも入らず沈黙誤値になる。
-  assertEquals([...attentionStatsParams(4, 4096, 16)], [4, 4096, 0, 0]);
+  assertEquals([...attentionStatsParams(4, 4096, 16)], [4, 4096, 0xff800000, 0]);
   assertThrows(() => attentionStatsParams(4, 8192, 16), CodegenError, "担当範囲");
   assertThrows(
     () => attentionStatsParams(4, 4096, ATTENTION_STATS_REG_CACHE_MAX + 1),
@@ -1925,7 +1945,7 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
   assertThrows(() => attentionStatsParams(4, 300, 1.5), CodegenError, "整数でない");
   assertThrows(() => attentionStatsParams(4, 100, 0.5), CodegenError, "整数でない");
   // 整数の正常形（切り捨てが起きない形）は通る
-  assertEquals([...attentionStatsParams(4, 300, 2)], [4, 300, 0, 0]);
+  assertEquals([...attentionStatsParams(4, 300, 2)], [4, 300, 0xff800000, 0]);
   await Promise.resolve();
 });
 
@@ -3316,7 +3336,7 @@ Deno.test("attention_stats の regcache 変種は割当と縮約順を変えず�
   assertEquals(cached.includes("  let i1 = lid + 256u;"), true);
   assertEquals(cached.includes("  let i2 = lid + 512u;"), true);
   // ① max は読んだ値をそのまま畳む / ② 総和は同じ順で `exp(c - amax)` を足す
-  assertEquals(cached.includes("      c0 = s[base + i0];\n      hi = max(hi, c0);"), true);
+  assertEquals(cached.includes("      c0 = s[base + i0];\n      hi = nan_max(hi, c0);"), true);
   assertEquals(
     cached.includes("    if (i2 < dim) {\n      acc = acc + exp(c2 - amax);\n    }"),
     true,
@@ -3326,7 +3346,7 @@ Deno.test("attention_stats の regcache 変種は割当と縮約順を変えず�
   // ツリー縮約と書き出しは 2 回読み版と逐語同一
   for (
     const shared of [
-      "      scratch[lid] = max(scratch[lid], scratch[lid + stride]);",
+      "      scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
       "      scratch[lid] = scratch[lid] + scratch[lid + stride2];",
       "    let inv = 1.0 / scratch[0u];",
       "      stats[row * 2u] = amax;",
@@ -3457,8 +3477,8 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
   // ビット同一）が黙って壊れるので、共有断片を素の softmax 側と突き合わせて固定する。
   for (
     const shared of [
-      "      hi = max(hi, x[base + i]);",
-      "        scratch[lid] = max(scratch[lid], scratch[lid + stride]);",
+      "      hi = nan_max(hi, x[base + i]);",
+      "        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
       "      acc = acc + exp(x[base + j] - amax);",
       "        scratch[lid] = scratch[lid] + scratch[lid + stride2];",
       "    let inv = 1.0 / scratch[0u];",
@@ -3481,10 +3501,10 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
   assertEquals(SOFTMAX_WGSL.includes("neg_inf"), false);
   assertEquals(SOFTMAX_WGSL.includes("empty"), false);
   assertNotEquals(SAFE_SOFTMAX_KEY, SOFTMAX_KEY);
-  assertEquals(SOFTMAX_KEY, `softmax:v1:f32:lastdim:safe:wg${SOFTMAX_WORKGROUP_SIZE}`);
+  assertEquals(SOFTMAX_KEY, `softmax:v2:f32:lastdim:safe:wg${SOFTMAX_WORKGROUP_SIZE}`);
   assertEquals(
     SAFE_SOFTMAX_KEY,
-    `safe_softmax:v1:f32:lastdim:safe:emptyrow0:wg${SOFTMAX_WORKGROUP_SIZE}`,
+    `safe_softmax:v2:f32:lastdim:safe:emptyrow0:wg${SOFTMAX_WORKGROUP_SIZE}`,
   );
   assertEquals(SOFTMAX_WORKGROUP_SIZE, 256);
 
@@ -3756,7 +3776,7 @@ Deno.test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡
   // ② 行統計も S を f32 へ広げてから縮約する（縮約の丸め列は f32 変種と同一）
   const stats16 = attentionStatsWgsl("f16");
   assertEquals(stats16.includes("var<storage, read> s: array<f16>;"), true);
-  assertEquals(stats16.includes("hi = max(hi, f32(s[base + i]));"), true);
+  assertEquals(stats16.includes("hi = nan_max(hi, f32(s[base + i]));"), true);
   assertEquals(stats16.includes("acc = acc + exp(f32(s[base + j]) - amax);"), true);
   assertEquals(stats16.includes("var<workgroup> scratch: array<f32, 256>;"), true, "縮約は f32");
 });
@@ -3897,7 +3917,7 @@ Deno.test("S の f16 格納変種は pack2x16float 1 点だけで丸め、shader
     true,
   );
   assertEquals(
-    attentionStatsWgsl("f32", "f16").includes("hi = max(hi, score_at(base + i));"),
+    attentionStatsWgsl("f32", "f16").includes("hi = nan_max(hi, score_at(base + i));"),
     true,
   );
   // 書き手は f32 変種と同じ値式のまま（丸めが値の計算へ紛れ込んでいない）

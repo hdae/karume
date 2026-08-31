@@ -20,8 +20,11 @@
  *
  * MUST: params は uniform で渡す（行ループ内に workgroupBarrier があり、ループ条件が
  * workgroup 内で一様である必要がある）。
- * NOTE: WGSL の `max` は NaN 伝播を保証しない（reduce.ts と同じ既知の乖離）。入力に NaN を
- * 含む行の結果は未規定で、M1 の対象は有限値のみ。
+ * MUST: ① の行 max は `nan_max`（ビット列 NaN 判定 — ADR 0020）。WGSL の `max` は仕様レベルで
+ * NaN を落とす（"Returns e2 if e1 is less than e2, and e1 otherwise"）ため、素の `max` だと
+ * **全要素 NaN の行が safe_softmax の空行判定に化けて厳密 0 になり、NaN が黙って消える**
+ * （部分 NaN 行は ② の総和経由で従来から伝播していた — 穴は全 NaN 行だけ）。非 NaN 入力では
+ * nan_max = 素の max なので既存の数値結果は 1 ビットも動かない（v2）。
  *
  * ## safe_softmax 変種（ADR 0044）
  *
@@ -46,15 +49,17 @@
  * 実装がありうる）。
  */
 
+import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
 export const SOFTMAX_WORKGROUP_SIZE = 256;
 
-export const SOFTMAX_KEY = `softmax:v1:f32:lastdim:safe:wg${SOFTMAX_WORKGROUP_SIZE}`;
+// v2: 行 max を nan_max へ（全 NaN 行の沈黙 0 化を塞ぐ — 上の MUST）
+export const SOFTMAX_KEY = `softmax:v2:f32:lastdim:safe:wg${SOFTMAX_WORKGROUP_SIZE}`;
 
 export const SAFE_SOFTMAX_KEY =
-  `safe_softmax:v1:f32:lastdim:safe:emptyrow0:wg${SOFTMAX_WORKGROUP_SIZE}`;
+  `safe_softmax:v2:f32:lastdim:safe:emptyrow0:wg${SOFTMAX_WORKGROUP_SIZE}`;
 
 /** f32 の最大有限値。WGSL に無限大リテラルが無いため amax の identity にこれを使う。 */
 const F32_MAX = "3.402823466e38";
@@ -78,6 +83,10 @@ ${safe ? "  neg_inf: u32,\n" : ""}}
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
 
+${IS_NAN_BITS_WGSL}
+
+${NAN_MAX_WGSL}
+
 var<workgroup> scratch: array<f32, ${SOFTMAX_WORKGROUP_SIZE}>;
 
 @compute @workgroup_size(${SOFTMAX_WORKGROUP_SIZE})
@@ -96,7 +105,7 @@ ${safe ? "  let neg_inf = bitcast<f32>(params.neg_inf);\n" : ""}  var row = wid.
     var hi = ${safe ? "neg_inf" : `-${F32_MAX}`};
     var i = lid;
     while (i < dim) {
-      hi = max(hi, x[base + i]);
+      hi = nan_max(hi, x[base + i]);
       i = i + ${SOFTMAX_WORKGROUP_SIZE}u;
     }
     scratch[lid] = hi;
@@ -104,7 +113,7 @@ ${safe ? "  let neg_inf = bitcast<f32>(params.neg_inf);\n" : ""}  var row = wid.
     var stride = ${SOFTMAX_WORKGROUP_SIZE / 2}u;
     while (stride > 0u) {
       if (lid < stride) {
-        scratch[lid] = max(scratch[lid], scratch[lid + stride]);
+        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
       }
       workgroupBarrier();
       stride = stride / 2u;

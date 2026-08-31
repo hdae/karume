@@ -108,3 +108,19 @@ fail loudly だったこの形は正規の受理形になった（実測 =
 「空行 ⊂ pad 行」に対する pad 行の 0 書き — ADR 0066 追記 8。行統計の「identity −inf +
 空行 `(0,0)`」ガードは防御専用）。2 つの契約は同一 op 名の別形として並立し、
 欄の有無が形を判別する。
+
+## 追記（2026-08-31 — OP 数値レビュー W-2 / W-3 の裁定 a）
+
+決定 3 の「plain softmax / 融合 attention に全 -inf 行を渡すのは契約違反で NaN 汚染」の
+うち、**融合 attention 側は撤回する**: attention_stats v2 が safe_softmax のガード 3 点
+（identity −inf・空行判定・空行 stats (0,0)）を移植し、全マスク行は**出力 0 の正規入力**に
+なった（CPU 参照 referenceAttention も同じ空行分岐を持つ）。有限要素を 1 つでも持つ行の
+ビット列は不変なので、分解経路（plain softmax）との parity は従来どおり成立する。
+plain softmax への全 -inf 行は引き続き契約違反（不変）。
+
+併せて softmax / safe_softmax / attention_stats / attention_state_stats の行 max を
+`nan_max`（ADR 0020 のビット列判定）へ統一した。素の `max` は WGSL 仕様レベルで NaN を
+落とすため、**全要素 NaN の行が safe 系の空行判定に化けて厳密 0 になり NaN が黙って消えて
+いた**（部分 NaN 行は総和経由で従来から伝播 — 穴は全 NaN 行だけ）。v2 では全 NaN 行が
+NaN のまま出力へ流れる（fail loudly と limitations の伝播規約に整合）。非 NaN 入力の
+ビット列は全変種で不変（golden / WAV / PNG 門はそのまま）。

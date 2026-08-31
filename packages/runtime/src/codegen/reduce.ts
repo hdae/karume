@@ -26,7 +26,7 @@
  */
 
 import type { IrDtype } from "../format/ir.ts";
-import { IS_NAN_BITS_WGSL } from "./elementwise.ts";
+import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "./elementwise.ts";
 import { outputDtypeOf, REDUCE_OPS, type ReduceOpName, resolveOpContract } from "../ops.ts";
 import { CodegenError } from "./errors.ts";
 import { assertU32Params } from "./params.ts";
@@ -80,9 +80,7 @@ const IDENTITY: Readonly<Record<ReduceOpName, Readonly<Partial<Record<IrDtype, s
  * 非 NaN のときは素の `max` / `min` そのままで、既存の数値結果は動かない。
  */
 const NAN_PROPAGATING_FN: Readonly<Partial<Record<ReduceOpName, string>>> = {
-  amax: `fn nan_max(a: f32, b: f32) -> f32 {
-  return select(select(max(a, b), b, is_nan_bits(b)), a, is_nan_bits(a));
-}`,
+  amax: NAN_MAX_WGSL,
   amin: `fn nan_min(a: f32, b: f32) -> f32 {
   return select(select(min(a, b), b, is_nan_bits(b)), a, is_nan_bits(a));
 }`,

@@ -1080,13 +1080,20 @@ export const referenceAttention = (
           ? Math.fround(acc)
           : Math.fround(Math.fround(acc) + mask.data[row * cols + col]);
       }
-      // ② safe-softmax（amax を引く形 MUST — referenceSoftmax と同じ）
+      // ② safe-softmax（amax を引く形 MUST — referenceSoftmax と同じ）。全列 −inf の行
+      //（全マスク行）は P を全 0 に確定する — GPU 側 attention_stats v2 の空行ガードの鏡像
+      //（ADR 0044 追記 2026-08-31）。NaN を含む行は JS の Math.max が NaN を伝播するので
+      // この分岐に入らず、NaN のまま出力へ流れる（GPU 側の nan_max と同じ分類）。
       let amax = scores[0];
       for (let col = 1; col < cols; col += 1) amax = Math.max(amax, scores[col]);
-      let total = 0;
-      for (let col = 0; col < cols; col += 1) total += Math.exp(scores[col] - amax);
-      for (let col = 0; col < cols; col += 1) {
-        weights[col] = Math.fround(Math.exp(scores[col] - amax) / total);
+      if (amax === -Infinity) {
+        weights.fill(0);
+      } else {
+        let total = 0;
+        for (let col = 0; col < cols; col += 1) total += Math.exp(scores[col] - amax);
+        for (let col = 0; col < cols; col += 1) {
+          weights[col] = Math.fround(Math.exp(scores[col] - amax) / total);
+        }
       }
       // ③ O[row, d] = Σ_col P[row,col] · v[col,d]
       for (let d = 0; d < depth; d += 1) {

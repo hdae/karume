@@ -50,7 +50,7 @@
  *   数値差として乗る（E2E の tolerance を実測導出する理由の 1 つ）。
  */
 
-import { IS_NAN_BITS_WGSL } from "../codegen/elementwise.ts";
+import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
@@ -72,10 +72,6 @@ export const INV_ABS_MAX = 1 / QUANTIZE_ROWS_ABS_MAX;
 export const QUANTIZE_ROWS_KEY =
   `quantize_rows:v1:f32>i8:pertoken:wg${QUANTIZE_ROWS_WORKGROUP_SIZE}`;
 
-const NAN_MAX_FN = `fn nan_max(a: f32, b: f32) -> f32 {
-  return select(select(max(a, b), b, is_nan_bits(b)), a, is_nan_bits(a));
-}`;
-
 export const QUANTIZE_ROWS_WGSL: string =
   `// karume quantize_rows (行ごとの per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127))
 struct Params {
@@ -89,7 +85,7 @@ struct Params {
 
 ${IS_NAN_BITS_WGSL}
 
-${NAN_MAX_FN}
+${NAN_MAX_WGSL}
 
 var<workgroup> scratch: array<f32, ${QUANTIZE_ROWS_WORKGROUP_SIZE}>;
 
