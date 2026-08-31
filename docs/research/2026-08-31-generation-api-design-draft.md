@@ -1,6 +1,10 @@
 > **性格**: 時点スナップショット（2026-08-31・生成 API 波の設計ドラフト逐語退避）。裁定 10 点は
-> すべて★推奨案で承認済み（2026-08-31 ユーザー裁定）。正本化された決定は docs/decisions/ の
-> 該当 ADR が正本 — 本書は候補比較・棄却理由・導出の記録として残す。
+> すべて★推奨案で承認済み（2026-08-31 ユーザー裁定）。**正本化済み** — 決定の正本は ADR
+> [0083](../decisions/0083-generation-api-surface.md)（API 面）/
+> [0084](../decisions/0084-gemma-tokenizer-chat.md)（tokenizer・chat）/
+> [0085](../decisions/0085-ple-host-gather.md)（PLE 配布形）+ ADR
+> [0068](../decisions/0068-decode-exit-multi-output.md) 追記 6 で、本書は候補比較・棄却理由・
+> 導出の記録として残す。
 
 # 生成 API 波 — 設計案ドラフト（裁定用）
 

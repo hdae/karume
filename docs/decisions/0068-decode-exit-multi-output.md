@@ -186,3 +186,33 @@ gather → lm_head へ通す新配線（+ models 側の入力供給・token-only
 - 出力レイアウト: `gemma4-e2b-decode-token/` = `model.safetensors` + `reference.json`。
 - 送り: logits opt-in 系列側の同形記録（両系列が同じ checkpoint を名乗ることの機械照合）は
   次にその系列を採り直すときに同時導入する（greedy 再採取が高価なため — レビュー隣接記録）。
+
+## 追記 6（2026-08-31・生成 API 波 — 製品グラフの既定出口は「最終行 logits」）
+
+決定 4 は readback の既定を「sampled token または topk の 2 本」とし、全語彙 logits を
+**グラフ出力に logits を宣言した場合の opt-in として残す（欄を消さない）**と書いた。生成 API 波の
+設計裁定（2026-08-31）で、**gemma4 の製品グラフはこの opt-in 側を既定にする** — ただし全 M 行では
+なく **`last_row` で選んだ最終行だけ**の `logits[1,1,V]` を出す形である（正本 = ADR
+[0083](0083-generation-api-surface.md) 決定 6）。決定 4 の欄をそのまま使うので**本 ADR の決定は
+撤回しない**（既定の選び方が「token-only」から「最終行 logits」へ移るだけで、topk 出口と GPU 側
+sampling の扱いは不変）。
+
+- **配線は追記 4 の実装から argmax を外すだけ**（`export_token.py` の `TokenOnlyChunkWrapper` —
+  最終 norm 後 hidden から `last_row` 行を `embedding` で選び、その 1 行に lm_head + softcap を
+  通す）。新規 op ゼロ・IR / ランタイム / エクスポータ core は無変更のまま。
+- **topk 出口は実需が立たない**ので保留を続ける（`operator.getitem` 配線も同様 — 追記 3）。
+  理由は**追記 2 の実装上限 k ≤ 63 が、gemma-4-E2B-it の `generation_config.json` の推奨既定
+  `top_k: 64` に 1 だけ足りない**こと（実資産の実測）。本 ADR の「検討した代替案」欄が却下の
+  比較対象を「topk k 本（k ≤ 64 で 512B 級）」と書いていたのに実装が 63 に着地したので、その 1 の
+  差がそのままモデル既定と噛み合わない。加えて repetition penalty / logit bias / full-vocab
+  nucleus は全語彙を要求する。
+- **決定 4 の「sampling / RNG はホスト維持」は不変**（GPU 側 full sampling は却下のまま — 採るなら
+  再裁定）。ホスト sampler の置き場と契約は ADR 0083 決定 7。
+- **読み戻しの実効**: decode は 4B → 1 MiB へ増えるが、同じ submit に相乗りするのでフェンスは
+  増えず、262,144 要素の JS 走査込みで 0.3〜0.6ms 級の見積り（decode 32.5ms/token = ADR 0082 に
+  対して数%）。**prefill はむしろ減る**（logits opt-in 系列の `[1,M,V]` は chunk 32 で 32 MiB →
+  最終行だけなら 1 MiB）。追記 3 が「この形の上で decode 性能を主張しない」と書いた過大な
+  readback は、最終行に絞ることで再来しない。
+- 既存 2 系列（logits opt-in / token-only）は**検収 fixture として併存**させる（追記 3 の裁定を
+  維持）。製品グラフ 1 系列への集約は生成 API 波の段 1b で、PLE 外出し（ADR
+  [0085](0085-ple-host-gather.md)）と同じ再 export に載せる。

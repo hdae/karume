@@ -38,14 +38,40 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   K-11 起票）/ L-1 = sliding スロット容量の window 実数宣言（ADR 0066 追記 9・decode +
   token 2 系列再 export・token 列 parity 不変）/ L-10 = 融合カウント門を gemma4 /
   minicpm5 decode 資産へ（実数固定: gemma4 rope 15@M=1・minicpm5 rope 48 + silu 24）
-- **生成 API 波 = 設計フェーズとして起票**（design-review 型）: PLE ホスト gather
-  （GPU 常駐 3.70→1.51GiB）/ 最終行 logits 出口 / EOS 停止・token イベント・streaming /
-  tokenizer + detokenizer / chat template。入力 = レビューの検証済み設計資料
-  （GenerationSequence / PLE sidecar / topk 製品グラフ / tokenizer compile-to-asset）+
-  lens-llm + **L-0 実測**（decode 律速は K-11 のカーネル側 — API 設計の性能前提はそちらを見る）
+- **生成 API 波 — 設計正本化済み・実行計画（2026-08-31 裁定 10 点すべて★推奨案）**: 正本 = ADR
+  [0083](decisions/0083-generation-api-surface.md)（API 面）/
+  [0084](decisions/0084-gemma-tokenizer-chat.md)（tokenizer・detokenizer・chat）/
+  [0085](decisions/0085-ple-host-gather.md)（PLE 配布形）+ ADR 0068 追記 6（最終行 logits 出口の
+  製品採用）。候補比較・棄却理由・実資産の実測は
+  [research 2026-08-31](research/2026-08-31-generation-api-design-draft.md)。**段 1a と 1b は
+  並行レーン**（前者は GPU 不要）:
+  - **段 0 契約固め — 完了（2026-08-31・コード 0 行）**: ADR 3 本 + 0068 追記 6。
+    合格線 = 型と契約が文書に載り裁定が全て解決済み（**達成** — ADR がイベント契約そのもの）
+  - **段 1a tokenizer レーン**（GPU 不要）: compile 台本（recipe 側 Python・**EG 資産も同乗** =
+    裁定 9）+ `src/text/` の BPE / byteFallback / streaming decoder + `src/gemma/text/` の受理
+    schema + parity fixture（ADR 0084）。合格線 = 独立採取した HF fixture と encode / decode が
+    ビット一致・全 chunk partition の streaming 一致・merge queue が日本語長文で線形
+  - **段 1b 製品グラフレーン**（実 GPU）: **案 α**（裁定 5）= PLE 外出しと最終行 logits 出口を
+    1 回の再 export に載せ製品グラフを 1 系列化 + ホスト PLE sidecar loader（ADR 0085 / 0083
+    決定 6）。合格線 = 既存 `greedy.<case>` golden との交差 parity（`argmax(logits)` == 既存
+    token 列・3 ケース × K=16）+ PLE 逆量子化のビット一致
+  - **段 2 sampling + 停止**: `src/generation/sampler.ts`（温度 / top-k / top-p / repetition
+    penalty / logit bias / seed）+ EOS 集合 `[1,106,50]` での停止 + `generateGreedy` の内部
+    ヘルパ格下げ（**breaking** — ADR 0083 決定 7〜9）。合格線 = 温度 0 で既存 greedy 列と一致・
+    sampler 自体は自前 fixture + 分布門
+  - **段 3 sequence API**: `GenerationProgram` + `GenerationSequence` + `AsyncIterable` +
+    AbortSignal + 多ターン（`pendingToken` 連結 prefill）（ADR 0083 決定 1〜5）。合格線 =
+    多ターンで「直前 assistant の最後の token が落ちない」直接門 + `break` 中断後の再開門 +
+    cancel が `signal.reason` を素通し
+  - **段 4 chat + パイプライン**: `gemma4ChatPrompt`（素の会話のみ・tools / thinking は
+    fail loudly）+ `Gemma4Pipeline.fromAssets` + **文字列 in → 文字列 out** の e2e（ADR 0084
+    決定 5）。合格線 = HF `apply_chat_template` 出力との id 列一致 + e2e が実重みで完走
+  - **段 5 配布形**（ライセンス門待ち）: manifest 席 / dist recipe / モデルカード / shard
+    （ADR 0081）/ pin 定数 / `fromPretrained`。合格線 = dist 全門通過 + 実 DL 疎通。
+    **ADR 0065 stage 6 のライセンス門が前提**
 - **L-11 裁定（2026-08-30）**: 技術先行 = **gemma4 E2B**（品質実証済み — tokenizer / L-5 の
   実装対象）。**公開はライセンス門（ADR 0065 stage 6 = Gemma ToU）の確認後**。配布経路の
-  検証だけは minicpm5 で先行可
+  minicpm5 先行は**採らない**（2026-08-31 裁定 10 — 段 5 の対象は gemma4 E2B のみ）
 - **M2 実機の手動確認 2 点**: dp4a カナリア（①QK f16 格子化後の 16 本）と軸 reduce NaN
   パリティ 4 本（[known-issues](known-issues.md) Metal 節に読み方）
 - anima-web の cold ロード DL スロット改善（提案 b+a — `FamilyAdmission` 席は実装済みで、
@@ -229,11 +255,11 @@ autoregressive 波の**残項目（波外へ送り）**:
 - **irodori adaLN i8 の出荷リグ A/B（起票 2026-08-24）**: sim で効いた adaLN i8（+13.1 MiB）が
   出荷リグでも読み上げ方を改善するかは未検証（sim → 出荷の転移限界 — 同 research §2）。
   復活 = `i8+dit4` 席（旧 `w4`）の品質不満、またはサイズ最適化の実需。
-- **生成 API 波（起票 2026-08-19 — 全体レビューの Codex 提案を採用裁定）**: 静的配線と
-  リクエストを分離した `GenerationProgram`（setup 時に全結線を検証）+ stateful sequence API
-  （`for await` の token イベント・EOS 停止・cancel・多ターン継続）+ `last_row` の runner 側
-  導出（ADR 0068 追記 4 の所有関係のみ reopen）。`generateGreedy` は parity 検収用の内部
-  ヘルパへ格下げ。LLM 実需（streaming / チャット）に直結する最大の API 波。
+- ~~生成 API 波（起票 2026-08-19）~~ **now 節へ昇格・設計正本化済み（2026-08-31）** — 起票が
+  書いていた形（`GenerationProgram` / stateful sequence / `generateGreedy` 格下げ）は
+  ADR [0083](decisions/0083-generation-api-surface.md) が正本。tokenizer は
+  [0084](decisions/0084-gemma-tokenizer-chat.md)・PLE 配布形は
+  [0085](decisions/0085-ple-host-gather.md)。実行計画と各段の合格線は **now 節**。
 - **バレル・ファミリープレフィックスの見直し（起票 2026-08-25 — ユーザー意向「今後見直し
   たい」）**: `mod.ts` の全ファミリ平面 export のためにシンボルへ族名プレフィックスが付くが、
   SBV2 族では「2」が変換イディオム（x2y）に誤読される実害が出た（`sbv2Utterance` →
@@ -253,8 +279,10 @@ autoregressive 波の**残項目（波外へ送り）**:
   候補調査の時点記録は [recon-2](research/2026-08-14-model-expansion-recon-2.md)。
 - **性能候補**: perf-ledger の 🚧（K-2 VAE conv2d / K-4b conv1d i8a8 / K-6 encoder tile /
   K-9 relattn / L-1 cold-load 分解 / L-2 EG 低精度）— 採否・順序は perf-ledger。
-- EmbeddingGemma の完成（models pipeline / tokenizer〈Gemma SPM BPE + byte_fallback 新規実装〉/
-  配布形・batch>1 export・runtime attention_mask 配線）。
+- EmbeddingGemma の完成（models pipeline / 配布形・batch>1 export・runtime attention_mask 配線）。
+  **tokenizer〈Gemma SPM BPE + byte_fallback〉の実装と EG 資産 compile は生成 API 波の段 1a に
+  同乗**（2026-08-31 裁定 9 — ADR [0084](decisions/0084-gemma-tokenizer-chat.md) 決定 6。実装は
+  共用・資産は別 compile）。
 - **w8a8 鏡像門の設置**: `e2e_deberta_w8a8_test.ts`（ADR
   [0026](decisions/0026-w8a8-deberta-deployment.md) 決定 3 — `e2e_deberta_test.ts` は移植済み・
   鏡像側だけ未設置。2026-08-16 裁定で起票）。
@@ -274,7 +302,8 @@ autoregressive 波の**残項目（波外へ送り）**:
   イベント（step ループが無く提供できるのは段遷移のみ）と、**生成ループ**の AbortSignal 中断席
   （現状は onEvent の throw が step 粒度の中断手段 — 席は温存）。**構築経路の AbortSignal は
   anima で実装済み**（`AnimaPipelineOptions.signal` — 段境界での検査・取得層への透過・
-  `signal.reason` 素通し）なので、流儀の先例はそこ。
+  `signal.reason` 素通し）なので、流儀の先例はそこ。**生成ループの席は LLM 面で先に開く**
+  （ADR [0083](decisions/0083-generation-api-surface.md) 決定 5 — 他 4 家族への横展開は需要待ちのまま）。
 - **`AssetProgress.path` が越境参照を識別できない（起票 2026-08-25・優先度低）**: 進捗イベントの
   `path` は文字列 1 本で、越境コンポーネント参照（ADR
   [0038](decisions/0038-manifest-v1.md) §7 追記）が入った以上**別リポの同名 path と区別が

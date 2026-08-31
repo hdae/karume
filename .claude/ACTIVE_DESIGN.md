@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-30
+> Last updated: 2026-08-31
 
 ## Now
 
@@ -16,13 +16,25 @@
   i4 linear を GEMV 族へ・**ビット同一のまま ×8.45・decode 84.2→32.5ms/token = 30.8 tok/s**。
   律速はフェンス床 ≈11ms 側へ戻った — 機序と方法論は
   [research 2026-08-30](../docs/research/2026-08-30-gemma4-decode-wallclock.md) §7）。
-  **生成 API 設計は 10 裁定点すべて★推奨で承認済み**（ドラフト = セッション scratchpad・
-  正本化はスケール裁定後）。**スケール戦略の調査完了** =
+  **生成 API 波は設計正本化済み（2026-08-31 — 裁定 10 点すべて★推奨案）**: ADR
+  [0083](../docs/decisions/0083-generation-api-surface.md)（API 面 = `GenerationProgram` +
+  `GenerationSequence` + `AsyncIterable` / AbortSignal / 最終行 logits 出口 + sampling ホスト /
+  **`generateGreedy` 格下げ = breaking**）/
+  [0084](../docs/decisions/0084-gemma-tokenizer-chat.md)（tokenizer・detokenizer・chat の
+  compile-to-asset・初版射程は素の会話のみ）/
+  [0085](../docs/decisions/0085-ple-host-gather.md)（PLE を token-major sidecar へ外出し —
+  GPU 常駐 3.70→1.51GiB）+ ADR 0068 追記 6。**段 0（契約固め）は完了 = ADR がイベント契約
+  そのもの**で、**次は段 1a（tokenizer レーン・GPU 不要）と段 1b（製品グラフレーン・実 GPU）の
+  並行実装**。実行計画と各段の合格線は [backlog](../docs/backlog.md) now、候補比較・棄却理由は
+  [research 2026-08-31](../docs/research/2026-08-31-generation-api-design-draft.md)。
+  **スケール戦略は調査 + 裁定とも完了** =
   [research 2026-08-31](../docs/research/2026-08-31-freetoken-moe-over-arraybuffer.md)
   （FreeToken 中核は WebGPU へ移植不能 / 真の壁は VRAM 総量 / MoE 動的常駐は IR 語彙級の
-  再設計）— **裁定待ち 4 分岐**（IR 値依存実行選択 / 未着荷 initializer 席 / scale F32 /
-  admission 空き比較）。L-11 裁定済み: 技術先行 = gemma4 E2B・公開はライセンス門
-  （ADR 0065 stage 6）後。
+  再設計）→ 4 分岐は①IR 値依存実行選択 = 入れない（backlog parked・MoE は全 expert 常駐前提を
+  limitations へ恒久記載）②未着荷 initializer 席 = ①従属で見送り③companion scale f16 =
+  perf-ledger Q-10 起票のみ④admission 空き比較 = 現状維持（ADR 0070 のまま）。L-11 裁定済み:
+  技術先行 = gemma4 E2B・公開はライセンス門（ADR 0065 stage 6）後で、**配布対象は gemma4 のみ**
+  （裁定 10 — minicpm5 の配布経路先行は不採用）。
 - **全体レビューの修正波 A〜E クローズ（2026-08-30）**: 網羅レビュー（Opus 15 + レンズ 2 →
   敵対検証 → Codex / ブラウザ第 2 波）の確定 50 件（E4 / W46）+ 追補を 5 波で全消化。裁定と
   台帳の正本 = `.claude/reviews/2026-08-29_9614ba9/`（git 追跡外）。**破壊的変更 2 件**
