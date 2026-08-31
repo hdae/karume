@@ -69,8 +69,11 @@ export class Randn {
     }
     const out = new Float32Array(count);
     for (let i = 0; i < count; i += 2) {
-      // u1 = 0 は log(0) = -Inf を生む。最小の正規化数へ寄せる（分布への影響は 2^-53 未満）。
-      const u1 = this.#uniform() || Number.MIN_VALUE;
+      // u1 = 0 は log(0) = -Inf を生む。53-bit 格子の中点 0.5/2^53 へ寄せる（半径 ≈8.65σ =
+      // 格子の自然な最大 ≈8.57σ と同程度。旧 Number.MIN_VALUE は最小の**非正規化数**で
+      // ≈38.6σ の異常値を作る形だった）。発生は 1 ドローあたり厳密に 2^-53 なので、この置換で
+      // 既存 seed の出力ビットは実質動かない（凍結 sha の生成量では踏まない）。
+      const u1 = this.#uniform() || 0.5 / 2 ** 53;
       const u2 = this.#uniform();
       const radius = Math.sqrt(-2 * Math.log(u1));
       out[i] = radius * Math.cos(2 * Math.PI * u2) * scale;
