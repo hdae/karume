@@ -234,7 +234,7 @@ const NAN_CASES: readonly OpCase[] = [
  *
  * torch は 5 op とも「入力（縮約なら縮約対象の語群）に NaN があれば結果は NaN」。ドライバの
  * `max` / `min` は NaN を飲むので、伝播を担うのは生成 WGSL のビット列判定だけ
- * （機序は src/codegen/elementwise.ts の IS_NAN_FN）。
+ * （機序は src/codegen/elementwise.ts の IS_NAN_BITS_WGSL）。
  * MUST: allclose は NaN をどちらの側でも不合格にするので checkAll には載せられない —
  * **CPU 参照との isNaN パターン一致**で突合する（NaN のビットパターン一致までは求めない）。
  */
@@ -326,7 +326,7 @@ Deno.test({
  * MUST: 入力に**飽和帯の内と外の両方**を含める。打ち切り閾値（9.5）の内側だけを見ると
  * 「打ち切りが効いていない実装」も緑で通る。
  * MUST: NaN 伝播を対で見る。打ち切りを `clamp` イディオムで書くと NaN が閾値に化けて
- * ±1.0 に飲まれる（機序は src/codegen/elementwise.ts の IS_NAN_FN）— そこを見張る 1 本。
+ * ±1.0 に飲まれる（機序は src/codegen/elementwise.ts の IS_NAN_BITS_WGSL）— そこを見張る 1 本。
  */
 const TANH_SATURATION_INPUTS = [
   0,
@@ -334,6 +334,12 @@ const TANH_SATURATION_INPUTS = [
   -5,
   9,
   -9,
+  // 9.2 = 「打ち切らない（< 9.5）が f32 では既に 1.0（> 9.011）」の帯 — 閾値を 9.011 未満へ
+  // 下げる退行と、飽和境界そのもののずれをここで検出する。9.5 は打ち切り境界ちょうど。
+  9.2,
+  -9.2,
+  9.5,
+  -9.5,
   10.6,
   -10.6,
   12,
@@ -385,10 +391,66 @@ Deno.test({
             `${op}(${x}): GPU ${actual.data[index]} vs CPU 参照 ${want}`,
           );
         });
+        // MUST: 飽和域は**厳密値**で固定する（打ち切りの中核主張 = 非 NaN の値をビット単位で
+        // 変えない、の device 側の門）。上の 1e-6 帯は 2.5 ulp 低い 0.99999985 も通すため、
+        // 「打ち切りが値を変えていない」ことはここでしか見えない。tanh は ±1.0、gelu_tanh は
+        // 正側 = x そのもの・負側 = **−0.0**（0.5·x·(1 + (−1.0)) の符号付きゼロ）。
+        // NOTE: WGSL は tanh に絶対誤差 1e-5 を許すので、仕様適合のままこの門が赤くなる
+        // ドライバは理論上ありうる — そのときはビット同一 golden 群も同時に割れているはずで、
+        // この門は「その事実を単体テストで最初に知る」カナリア（機で緩めない）。
+        TANH_SATURATION_INPUTS.forEach((x, index) => {
+          const v = actual.data[index];
+          if (op === "tanh" && Math.abs(x) >= 9.2) {
+            assertEquals(
+              Object.is(v, Math.sign(x)),
+              true,
+              `tanh(${x}) = ${v}（飽和域が厳密な ±1.0 でない）`,
+            );
+          }
+          if (op === "gelu_tanh" && x >= 9) {
+            assertEquals(
+              Object.is(v, Math.fround(x)),
+              true,
+              `gelu_tanh(${x}) = ${v}（正の飽和域が x 厳密でない）`,
+            );
+          }
+          if (op === "gelu_tanh" && x <= -9) {
+            assertEquals(
+              Object.is(v, -0),
+              true,
+              `gelu_tanh(${x}) = ${v}（負の飽和域が −0.0 厳密でない）`,
+            );
+          }
+        });
         // MUST: 恒真化しない。飽和域の外（x = ±5）が定数へ潰れていないことを見る
         // （「全部 ±1 を返す」実装は上の 2 つの判定だけでは落ちない）。
         assertNotEquals(actual.data[1], actual.data[3], `${op}: x=5 と x=9 が同値`);
       }
+
+      // ±Inf（打ち切りが副次的に塞いだ穴 — 素の exp 経由実装では tanh(±Inf) = Inf/Inf = NaN）。
+      // gelu_tanh(−Inf) は NaN が正: 0.5·(−Inf)·0.0 の 0·Inf で、torch も NaN
+      //（F.gelu(-inf) 実測 torch 2.13.0 — approximate 両方）。CPU 参照とも三者一致。
+      const infInput = fill([2], (i) => i === 0 ? Infinity : -Infinity);
+      const tanhInf = await runCase(gpu, {
+        name: "tanh ±Inf",
+        op: "tanh",
+        inputs: [infInput],
+        outShapes: [[2]],
+      });
+      assertEquals(Object.is(tanhInf.data[0], 1), true, `tanh(+Inf) = ${tanhInf.data[0]}`);
+      assertEquals(Object.is(tanhInf.data[1], -1), true, `tanh(-Inf) = ${tanhInf.data[1]}`);
+      const geluInf = await runCase(gpu, {
+        name: "gelu_tanh ±Inf",
+        op: "gelu_tanh",
+        inputs: [infInput],
+        outShapes: [[2]],
+      });
+      assertEquals(geluInf.data[0], Infinity, `gelu_tanh(+Inf) = ${geluInf.data[0]}`);
+      assertEquals(
+        Number.isNaN(geluInf.data[1]),
+        true,
+        `gelu_tanh(-Inf) = ${geluInf.data[1]}（torch と同じ NaN のはず）`,
+      );
     } finally {
       gpu.destroy();
     }
