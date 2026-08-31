@@ -505,7 +505,7 @@ class TestAssertIrFormDecode:
             decode.assert_ir_form_decode(graph, TINY_IR_CONFIG, STORAGE_COUNTS)
 
     def test_a_baked_full_capacity_is_rejected(self):
-        """full の容量を数値で焼くと `createGenerationContext` で容量を選べない（ADR 0066 決定 3）。"""
+        """full の容量を数値で焼くと context 生成時に容量を選べない（ADR 0066 決定 3）。"""
         graph = _pre_surgery_graph()
         baked = StatesPlan(
             capacity_symbol=decode.CAPACITY_SYMBOL,
