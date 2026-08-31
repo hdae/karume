@@ -86,8 +86,26 @@ m=1 含む）・**logits 262,144 個が全数 NaN**・`per_layer_inputs`（PLE �
 — pad 行仮説・exp(−Inf) fast-math 仮説・M=32/M=1 経路差はいずれも**棄却済み**。全 logits 全滅
 は「幹の早い段の NaN を rms_norm（行内平均）が行全体へ広げた」形で、残る容疑は attention 以外の
 op 族 = i8 embedding（×6・入口）/ i4 linear の GEMM 形 dequant / rms_norm / RoPE 合成
-（slice/neg/cat）/ gelu_tanh / 最終 softcap。合成入力の runtime 全テストで赤の全数を採取中。
+（slice/neg/cat）/ gelu_tanh / 最終 softcap。
+**追加実測（M2・素 WebGPU プローブ）**: runtime 合成テストは 854 緑（赤 12 = 既知ビット一致
+クラス 11 + 下記 OOM 門）・単一バッファの確保→書込→storage 束縛読みは **64〜640MiB 全一致・
+全 errorScope clean** — バッファ層は無罪で、容疑は**演算側（実サイズ・実バイトでだけ出る破れ）**
+へ確定。Metal の limits 差も記録: `maxStorageBuffersPerShaderStage=31`・
+`maxComputeWorkgroupStorageSize=32768`（Linux 524288 / 49152）。実バイト × 最小グラフ梯子
+（embedding → i4 linear → rms_norm → attention 組合せ）で最初の NaN op を特定中。
 **gemma4 を Metal で使う経路は現状すべて不能**（対話 example 含む）。
+
+## Metal で out-of-memory errorScope が沈黙する — fail loudly 門が不発（独立バグ）
+
+実機 **M2（24GB / maxBufferSize 14.3GB）**で `gpu_generation_context_test.ts` の
+「state 確保の失敗は out-of-memory errorScope で fail loudly」が
+**Expected function to reject** で赤（2026-09-01）= **64GiB の state スロット確保が黙って成功
+する**（Metal の遅延確保 — wgpu の Metal backend は総量予算を持たず、`newBufferWithLength:` が
+物理超過でも nil を返さない形）。実害: runtime の重みアップロード経路は size 門を持たず
+errorScope に全面依存しているため（ADR 0070 決定 4）、**errorScope が沈黙する環境では
+「確保失敗 = ゴミを読む」が例外なしで通り得る**。gemma4 の NaN とは独立と実測で切り分け済み
+（上記プローブでバッファ健全）。修正候補 = 重み経路への明示サイズ門 +
+`karume.json` の `requiredLimits`（hub が parse するのみで現状誰も読んでいない）のロード時実効化。
 
 `karume export-embeddinggemma --batch N`（N>1）は `karume/convert.py` で fail loudly する
 （B=1 は従来どおり成功）。機序は 2 段:
