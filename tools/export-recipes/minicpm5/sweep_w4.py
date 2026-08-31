@@ -82,6 +82,7 @@ from torch import nn
 
 from _shared.decode_series import EXPECTED_KEY, GREEDY_PREFIX, GREEDY_SUFFIX, PROMPT_KEY
 from karume.quant_calib import (
+    GPTQ_DAMPING,
     CalibMethod,
     CalibReport,
     GridSpec,
@@ -370,11 +371,23 @@ class CalibConfig:
     projected_bits: Callable[[TargetCounts], float]
     #: `projected_bits` の式（**出力へそのまま載せる**）。
     formula: str
+    #: GPTQ の掃引軸（既定 = core 既定でビット同一 — {@link karume.quant_calib} の実験軸）。
+    static_groups: bool = False
+    act_order: bool = False
+    #: 振った値は出力へ明記する MUST（core 側 docstring）— {@link label} が担う。
+    damping: float = GPTQ_DAMPING
 
     @property
     def label(self) -> str:
-        """表と JSON に出る方式名（`<方式>/<格納グリッド>`）。"""
-        return f"{self.method}/{self.grid.kind}"
+        """表と JSON に出る方式名（`<方式>/<格納グリッド>` + 非既定の掃引軸）。"""
+        axes = ""
+        if self.act_order:
+            axes += "+act"
+        elif self.static_groups:
+            axes += "+static"
+        if self.damping != GPTQ_DAMPING:
+            axes += f"+damp{self.damping:g}"
+        return f"{self.method}/{self.grid.kind}{axes}"
 
 
 #: 校正グリッド = 5 本（この順で走る）。丸めは全て core の共有実装
@@ -424,6 +437,43 @@ AnyConfig = SweepConfig | MethodConfig | CalibConfig
 
 #: `--only` が選べる全 config（宣言順 = 実行順）。
 ALL_CONFIGS: tuple[AnyConfig, ...] = (*SWEEP_CONFIGS, *METHOD_CONFIGS, *CALIB_CONFIGS)
+
+#: GPTQ 掃引軸の実験点（2026-08-31 起票 — upstream --static-groups × --act-order の移植と
+#: damping 感度）。**`--only` 指定でだけ走る** — 既定の全掃引（引数なし）には載せない
+#: （1 構成 ≈ フル校正 1 回ぶんの追加コストで、既定の掃引時間を黙って倍にしない）。
+EXPERIMENT_CONFIGS: tuple[CalibConfig, ...] = (
+    CalibConfig(
+        "gptq-rtn-static",
+        "gptq",
+        GridSpec(kind="rtn", group_size=CALIB_GROUP_SIZE),
+        group_scale_bits,
+        GROUP_SCALE_FORMULA,
+        static_groups=True,
+    ),
+    CalibConfig(
+        "gptq-rtn-act",
+        "gptq",
+        GridSpec(kind="rtn", group_size=CALIB_GROUP_SIZE),
+        group_scale_bits,
+        GROUP_SCALE_FORMULA,
+        static_groups=True,
+        act_order=True,
+    ),
+    *(
+        CalibConfig(
+            f"gptq-rtn-damp{tag}",
+            "gptq",
+            GridSpec(kind="rtn", group_size=CALIB_GROUP_SIZE),
+            group_scale_bits,
+            GROUP_SCALE_FORMULA,
+            damping=value,
+        )
+        for tag, value in (("001", 0.001), ("003", 0.003), ("03", 0.03), ("1", 0.1))
+    ),
+)
+
+#: `--only` の名前解決の母集合（既定実行 = ALL_CONFIGS / 実験点は明示選択のみ）。
+SELECTABLE_CONFIGS: tuple[AnyConfig, ...] = (*ALL_CONFIGS, *EXPERIMENT_CONFIGS)
 
 
 # ---- 量子化式（ADR 0069 決定 3）--------------------------------------------
@@ -772,7 +822,15 @@ def apply_calib(config: CalibConfig, rig: CalibRig, shared_stride: int) -> Calib
     spec = config.grid
     if spec.kind == "kmeans_shared" and shared_stride > 1:
         spec = replace(spec, fit_stride=shared_stride)
-    return calibrate_stages(rig.stages, rig.batches, method=config.method, spec=spec)
+    return calibrate_stages(
+        rig.stages,
+        rig.batches,
+        method=config.method,
+        spec=spec,
+        static_groups=config.static_groups,
+        act_order=config.act_order,
+        damping=config.damping,
+    )
 
 
 def assert_calib_covers_scan(
@@ -996,7 +1054,7 @@ def select_configs(only: Sequence[str]) -> tuple[AnyConfig, ...]:
     if not only:
         return ALL_CONFIGS
     chosen = {BASELINE_NAME, *only}
-    return tuple(config for config in ALL_CONFIGS if config.name in chosen)
+    return tuple(config for config in SELECTABLE_CONFIGS if config.name in chosen)
 
 
 def run_sweep(
@@ -1277,8 +1335,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--only",
         action="append",
         default=[],
-        choices=[config.name for config in ALL_CONFIGS],
-        help="この config だけ走らせる（複数可・部分再実行用）。baseline は常に先行する。",
+        choices=[config.name for config in SELECTABLE_CONFIGS],
+        help="この config だけ走らせる（複数可・部分再実行用）。baseline は常に先行する。"
+        "GPTQ 掃引軸の実験点（EXPERIMENT_CONFIGS）はここで名指ししたときだけ走る。",
     )
     parser.add_argument("--json", type=Path, default=None, help="機械可読の測定値の書き出し先。")
     parser.add_argument(
