@@ -35,17 +35,23 @@ conv2d parity 2 本が赤（Linux / Vulkan は全緑）。**2026-08-29 のカナ
   `acc` の有効桁を f16 仮数に収めることで、既知解 8,192 要素が全て f16 ちょうどになり、
   エピローグに**丸めが 1 度も起きない**。よって①QK は健全な device でも M2 でも既知解と厳密
   一致する見込みで、**この 1 ULP 差が今後観測されるのは③PV 側だけ**になる（③PV は
-  `qP = round(127·exp(S−m))` を GPU が作るため丸めが残る）。**M2 実機での再確認は未了** —
-  実機の判定分岐が「両腕帯内かつビット同一」から「dp4a 厳密一致」へ移るかは、次に M2 で
-  `deno test packages/runtime/tests/gpu_attention_dp4a_canary_test.ts` を回して確かめる。
+  `qP = round(127·exp(S−m))` を GPU が作るため丸めが残る）。**M2 実機で再確認済み
+  （2026-09-01）**: カナリア 16 本すべて緑 — 素の判定が dp4a を選び分岐と厳密一致フラグが
+  整合・故障注入系も想定どおり。軸 reduce パリティ（`gpu_reduce_axis_parity_test.ts` 2 本）も
+  M2 緑。
 - **conv2d parity 2 本**（implicit GEMM ↔ 直接カーネルのビット一致・golden の tolerance 判定は
   緑）は従来どおり原因未特定 — 同種のエピローグ丸め差の可能性が高いが未検証。
-- **linear の GEMV 族（M=1 × i4 — ADR [0082](decisions/0082-linear-gemv-decode.md)）は M2 実機
-  未確認**。threadgroup `vec4` への動的添字は避けてある（x は静的成分で引く — ACTIVE_DESIGN の
-  Metal 落とし穴）が、**数値も動作も Apple GPU では 1 度も走らせていない**。確認は
-  `deno test -A packages/runtime/tests/gpu_linear_gemv_test.ts` の 2 本（既定経路との u32 完全
-  一致 / 門のキー検査）— 落ちた場合、この族はビット同一が実測命題（ADR 0082 決定 3）なので、
-  変種の調整ではなく**命題そのもの**を疑って設計判断へ戻す。
+- **linear の GEMV 族（M=1 × i4 — ADR [0082](decisions/0082-linear-gemv-decode.md)）の u32
+  完全一致門が M2 で 1 ULP 赤（2026-09-01 実測）**: `gpu_linear_gemv_test.ts` の門キー検査は
+  緑・既定経路との u32 突合が整除形 k128 n64 g32 の列 1 で `0x414b3249` vs `0x414b3248`
+  （12.699776… vs 12.699775… = 1 ULP）。Linux / Vulkan は緑。見立て = 本節冒頭と同一クラス
+  （naga → MSL の FMA 契約差で乗算連鎖の丸めが変わる — 未確定）。**動作・品質は M2 で健全**:
+  chat e2e（製品グラフ + gemv 全経路）が golden と同一 token 列で完走しており、margin 門
+  （≥2.5e-2）が 1 ULP を吸収する。実害は attention i8a8 と同じく「クロス経路の atol=0 門が
+  Metal で立たない」ことのみ。扱い（既定経路維持 + 門の成立プラットフォーム限定 or 根治調査）は
+  裁定中 — 切り分け候補 = `gpu_gemm_skinny_test.ts` のバケット跨ぎ門を M2 で回す（GEMM 幾何
+  同士でも同じ 1 ULP が出るなら gemv 固有でなく「Metal では別カーネル間のビット同一が一般に
+  成立しない」ことが確定する）。
 
 Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36257 = mapped range の
 み）。根治候補 = TS 参照の FMA 許容化 or WGSL 側で丸めを固定する手段の調査（未着手）。記録 =
