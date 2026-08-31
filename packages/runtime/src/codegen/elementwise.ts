@@ -190,10 +190,18 @@ export const SIGMOID_STABLE_WGSL = `fn sigmoid_stable(x: f32) -> f32 {
 }`;
 
 /**
- * Abramowitz–Stegun 7.1.26（最大絶対誤差 ≈1.5e-7）。WGSL に erf 組込は無い。
+ * Abramowitz–Stegun 7.1.26。WGSL に erf 組込は無い。
  * gelu は torch 既定の `approximate="none"`（erf 形）を実装するため必要になる。
  * CPU 参照は別式（Chebyshev fit）で erf を出す — 同じ近似式を写すと誤差が相殺して
  * テストが恒真化するため。
+ *
+ * 誤差の勘定（3 層 — 混同しない）: ①近似式そのものの理論値 ≈1.4e-7（倍精度評価・
+ * x≈0.045 で最大）②この f32 Horner + exp を f32 逐次丸めで評価した実測 ≈5.3e-7
+ * （x≈0.035 で最大 — CPU の f32 エミュ掃引 2026-08-31）③WGSL 仕様の exp は 3+2|x| ULP まで
+ * 許すので、仕様準拠実装の上界はさらに上（a→0 で寄与 ≈3.6e-7）。「1.5e-7」を shader の
+ * 保証値として引用しない。gelu 全体では最大絶対 ≈6.8e-7（|gelu|≈4.2 で ≈1.4 ULP）だが、
+ * 負側テール（x≈−3.4）は桁落ちで**相対**誤差 ≈2.2e-4 — op 別 tolerance を相対帯で切ると
+ * ここが偽陽性になる。
  */
 const ERF_FN = `fn erf_approx(x: f32) -> f32 {
   let s = sign(x);

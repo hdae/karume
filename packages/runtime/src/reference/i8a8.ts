@@ -5,8 +5,12 @@
  * 実装で変わる）と決定的に違う性質になる。成立の根拠は 2 つ:
  *
  * 1. 内積が `i32` の**厳密加算**なので、タイル分割・端数 0 埋め・加算順序のどれも値を変えない。
- * 2. 浮動小数の演算は出力 1 要素あたり 3 つだけ — `f32(acc)` / `xs·wscale` / `fma`。どれも
- *    IEEE の round-to-nearest-even で決定的。
+ * 2. 浮動小数の演算は出力 1 要素あたり 3 つだけ — `f32(acc)` / `xs·wscale` / `fma`。変換と
+ *    乗算は WGSL 仕様も correctly rounded を要求する。**`fma` だけは仕様保証が無い**
+ *    （WGSL §15.7.4.1 は精度を `x*y+z` から継承と規定 — 融合実装なら単一丸めで本参照と
+ *    一致し、非融合展開も仕様適合で 1 ULP 帯の差になり得る。Vulkan 実測は融合側で atol=0
+ *    成立・Metal は 1 ULP 差 = docs/known-issues.md）。atol=0 は「仕様の帰結」ではなく
+ *    **device 別 conformance の門**として維持する。
  *
  * MUST: GPU 側のタイル構造を写さない（src/kernels/linear-i8a8.ts の 64×64 タイル・共有
  * メモリ・K 端数 0 埋めは**ここには無い**）。素の 3 重ループで書くことが、タイル境界と端数の
@@ -246,6 +250,10 @@ const INV_P_ABS_MAX = Math.fround(1 / P_ABS_MAX);
  * MUST: 丸めは偶数丸め（{@link roundTiesToEven}）。`Math.round` は half-up で割れる。
  * NOTE: clamp を置かないのは GPU 側と同じ理由（`m` が行の厳密な最大なら `exp(S−m) ≤ 1`）。
  * `rowMax` に行の最大でない値を渡すと 127 を超えうるが、それは呼び出し側の契約違反。
+ * そのとき 128 は Int8Array の格納で **−128 へ暗黙ラップ**する（throw しない）— GPU 側も
+ * `pack4xI8` が下位 8 bit を詰めるので同じ −128 になり、参照と GPU は**揃って**静かに誤る。
+ * 参照だけ throw にすると契約違反入力で GPU と別挙動になるため、明記に留める（境界は
+ * `S − m > ln(127.5/127) ≈ 0.00393` で 128 到達 — 偶数丸めで 127.5 が 128 側へ丸まる）。
  */
 export const referenceAttentionPvQuant = (
   s: ArrayLike<number>,

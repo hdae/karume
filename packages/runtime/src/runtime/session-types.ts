@@ -158,10 +158,11 @@ export type SessionOptions = {
    * 格納形は別軸** — 格納形で数値契約の違う 2 変種に分かれる:
    * - i8 常駐 → **w8a8**: 縮約全体が 1 つの i32（整数部は丸め 0 回）で、dequant は
    *   `xs · wscale` を先に 1 つの f32 へ畳んでから `f32(acc)` へ掛ける形 — 丸めは**その積と
-   *   最後の fma の 2 回**（設計 = docs/research/2026-08-03-dp4a-w8a8-design.md）。
+   *   最後の fma の 2 回**（設計 = docs/research/2026-08-03-dp4a-w8a8-design.md。丸め回数の
+   *   勘定は fma 融合実装での性質 — 仕様保証ではない。src/kernels/linear-i8a8.ts の MUST）。
    * - i4 常駐 → **w4a8**: group ごとに i32 内積して group 境界で f32 へ flush するので、
-   *   丸めは `k/g + 1` 回。wscale が group ごとに変わり畳めないため `xs` は**最後の fma
-   *   1 回**へ回る。数値契約の差は 2 つ — ①縮約の粒度（全体 vs group 部分縮約 = 丸め回数が
+   *   丸めは `k/g + 1` 回（同じく融合実装での勘定）。wscale が group ごとに変わり畳めないため
+   *   `xs` は**最後の fma 1 回**へ回る。数値契約の差は 2 つ — ①縮約の粒度（全体 vs group 部分縮約 = 丸め回数が
    *   k と g に依る）②`xs` の掛け位置（ADR 0076 決定 2）。起票は
    *   docs/perf-ledger.md の Q-8、契約は src/kernels/linear-i8a8.ts の「w4a8 変種」節。
    *
