@@ -752,7 +752,11 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
 
   // ⑤ 混成格納が decode 経路でも保たれている（ADR 0069 決定 5 — 1-shot 門と同じ 2 条件）。
   // 適格から落ちた重みは例外を出さず f32 展開されるので、キーの側からしか見えない。
-  const linear = entries.filter((entry) => entry.key.startsWith("linear:"));
+  // M=1 の i4 linear は GEMV 族 `linear_gemv:`（ADR 0082）で走るので両族を拾う —
+  // `linear:` 前置だけだと decode run の 276 本が検査から抜ける（ADR 0082 帰結の注意）。
+  const linear = entries.filter((entry) =>
+    entry.key.startsWith("linear:") || entry.key.startsWith("linear_gemv:")
+  );
   assert(linear.length > 0, `${where}: linear の内訳が無い（走った内訳: ${shown}）`);
   assertEquals(
     linear
@@ -870,6 +874,13 @@ Deno.test({
         { context, queryLength: 1 },
       );
       const decodeCensus = assertStateCensus(session.diagnostics(), "decode");
+      // decode（M=1）の i4 linear 276 本が GEMV 族に乗ったこと（ADR 0082）。キー単位の門は
+      // gpu_linear_gemv_test — ここは実グラフの run が実際にその族で走ったことの検査で、
+      // 分岐述語が黙って狭まる退行（値は正しいまま速度だけ戻る）の検出線。
+      const gemvDispatches = (session.diagnostics().lastRunTiming?.entries ?? [])
+        .filter((entry) => entry.key.startsWith("linear_gemv:"))
+        .reduce((total, entry) => total + entry.dispatchCount, 0);
+      assertEquals(gemvDispatches, 276, "decode の linear_gemv dispatch 本数（i4 linear 276 本）");
       console.log(
         `[e2e] gemma4 decode census: prefill ${JSON.stringify(prefillCensus)} / ` +
           `decode ${JSON.stringify(decodeCensus)}`,
