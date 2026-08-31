@@ -48,9 +48,11 @@ conv2d parity 2 本が赤（Linux / Vulkan は全緑）。**2026-08-29 のカナ
   （naga → MSL の FMA 契約差で乗算連鎖の丸めが変わる — 未確定）。**撤回（2026-09-01）**: 旧記述
   「chat e2e が M2 で golden 完走 = 動作・品質は健全」は**実走の裏付けが無いまま書かれていた**
   （M2 で実測されたのはカナリア / reduce parity / skinny / gemv 門のみ — ユーザー指摘で発覚）。
-  実際には chat e2e は M2 で下記の prefill NaN により**走り切れない**（gemv とは独立の未解決
-  バグ）。margin 門が 1 ULP を吸収するという命題は NaN 解消後に M2 実測で立て直す
-  （ADR [0082](decisions/0082-linear-gemv-decode.md) 追記 2）。既知の実害は attention i8a8 と
+  当時 chat e2e は M2 で gemma4 prefill NaN（gemv とは独立・`gelu_tanh` の Metal fast-math
+  オーバーフロー — `tanh_stable` で解消済み・対話実走は M2 確認済み）により走り切れなかった。
+  margin 門が 1 ULP を吸収するという命題は **M2 での温度 0 golden e2e 実測が未取得のまま**
+  （NaN 解消で実測可能になった — 立て直しは ADR
+  [0082](decisions/0082-linear-gemv-decode.md) 追記 2）。既知の実害は attention i8a8 と
   同じく「クロス経路の atol=0 門が Metal で立たない」こと。**切り分け済み（2026-09-01）**: `gpu_gemm_skinny_test.ts` の
   バケット跨ぎ u32 門は M2 で緑 — **GEMV 固有**（一般則説は棄却）。**裁定 = 既定経路維持**
   （ADR [0082](decisions/0082-linear-gemv-decode.md) 追記 1 — 機序の見立て: GEMM は逆量子化を
@@ -65,42 +67,6 @@ Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36
 [research/2026-08-29-chatgpt-review-verification.md](research/2026-08-29-chatgpt-review-verification.md)
 （M2 再検証）。
 
-## Metal（Apple GPU）で gemma4 の prefill logits が決定的に NaN — 生成が 1 token も出ない
-
-実機 **Apple M2**（Deno 2.9.4・2026-09-01 実測）で gemma4 E2B の**最初の抽選**が
-`logits[0] が NaN` で落ちる。切り分け済みの事実:
-
-- **決定的**（5 回以上同一）・**プロンプト非依存**（11 token / 16 token とも赤）・
-  **取得経路非依存**（`denoDirectory` 直読も疑似 HF + CacheStorage も赤）・
-  **コード世代非依存**（波前 `182ced7` でも赤 = 回帰ではなく**最初から壊れていて未実測**だった）。
-- ミラーは 8 ファイル全て size + sha256 一致（バイト破損は棄却）。配布 sampler では加工鎖が
-  恒等（`processLogits` 素通し）なので **GPU が返した生 f32 に真の NaN** が入っている。
-- クラッシュ点は prefill 最終 chunk からの最初の抽選 — **decode（GEMV — ADR 0082）は
-  1 本も走っておらず無関係**。lm_head は i8 格納で GEMV 門外。
-- ベースラインは緑: dp4a カナリア 16/16・`gpu_gemm_skinny` 2/2・`gpu_reduce_axis_parity`
-  2/2（既知赤 = gemv u32 門 1 ULP のみ）。Linux / Vulkan は同一入力で NaN=0・ビット同一。
-
-ローカライズ実測（2026-09-01・M2 プローブ）: **実効長 T = 1〜64 の全形で赤**（decode 形
-m=1 含む）・**logits 262,144 個が全数 NaN**・`per_layer_inputs`（PLE ホスト gather）は NaN=0。
-一方 `gpu_state_attention_test.ts`（合成入力・実 −Inf の causal マスク込み）は **M2 で 6/6 緑**
-— pad 行仮説・exp(−Inf) fast-math 仮説・M=32/M=1 経路差はいずれも**棄却済み**。全 logits 全滅
-は「幹の早い段の NaN を rms_norm（行内平均）が行全体へ広げた」形で、残る容疑は attention 以外の
-op 族 = i8 embedding（×6・入口）/ i4 linear の GEMM 形 dequant / rms_norm / RoPE 合成
-（slice/neg/cat）/ gelu_tanh / 最終 softcap。
-**根本原因特定 → 修正済み（2026-09-01・Mac 実機の事後確認待ち）**: 接頭辞二分探索
-（tools/metal-diagnostics/probe4）で最小 K=56 = `mul(gelu(...), linear_6)` に NaN **1/6144** を
-特定。機序 = `gelu_tanh` が素の `tanh()` 組込を無防備な引数で呼び、exp(2z) 経由実装
-（Metal fast-math）では z > 44.36（前活性 x ≳ 10.05）で f32 オーバーフロー → Inf/Inf = 沈黙
-NaN（実測の前活性 max 11.45 に対し該当ちょうど 1 要素 — 定量一致）。1 個の NaN が down_proj
-縮約 → rms_norm で行全滅 → 全 logits NaN。修正 = `tanh_stable`（飽和打ち切り 9.5・非 NaN
-ビット不変・NaN 伝播はビット列判定 — `67eb07a`・語彙 `tanh` = logits softcap も同穴のため適用・
-飽和域 canary テスト常設 = Metal でだけ赤→緑の門）。Linux はフル verify + WAV sha256 6 本 +
-gemma golden で前後ビット同一を実証済み。途中実測の記録: バッファ層無罪
-（単一 64〜640MiB・実プロファイル 835 本累積とも全一致）・Metal limits 差
-（`maxStorageBuffersPerShaderStage=31`・`maxComputeWorkgroupStorageSize=32768`）。
-残: Mac 実機で ①飽和域テスト ②probe4 --at 56 ③demo の 3 点確認 → 緑なら本節を閉じる。
-同クラスの横断監査 = backlog「数値危険クラス監査波」（gru-scan の別写し tanh 含む）。
-
 ## Metal で out-of-memory errorScope が沈黙する — fail loudly 門が不発（独立バグ）
 
 実機 **M2（24GB / maxBufferSize 14.3GB）**で `gpu_generation_context_test.ts` の
@@ -109,9 +75,13 @@ gemma golden で前後ビット同一を実証済み。途中実測の記録: �
 する**（Metal の遅延確保 — wgpu の Metal backend は総量予算を持たず、`newBufferWithLength:` が
 物理超過でも nil を返さない形）。実害: runtime の重みアップロード経路は size 門を持たず
 errorScope に全面依存しているため（ADR 0070 決定 4）、**errorScope が沈黙する環境では
-「確保失敗 = ゴミを読む」が例外なしで通り得る**。gemma4 の NaN とは独立と実測で切り分け済み
-（上記プローブでバッファ健全）。修正候補 = 重み経路への明示サイズ門 +
-`karume.json` の `requiredLimits`（hub が parse するのみで現状誰も読んでいない）のロード時実効化。
+「確保失敗 = ゴミを読む」が例外なしで通り得る**。バッファ層自体は M2 実測で健全
+（tools/metal-diagnostics/ のプローブ — 単一 64〜640MiB・実プロファイル 835 本累積とも全一致）。
+修正候補 = 重み経路への明示サイズ門 +
+`karume.json` の `requiredLimits`（hub が parse するのみで現状誰も読んでいない）のロード時実効化
+（backlog「数値危険クラス監査波」に同席）。
+
+## EmbeddingGemma の batch>1 export が変換段で通らない
 
 `karume export-embeddinggemma --batch N`（N>1）は `karume/convert.py` で fail loudly する
 （B=1 は従来どおり成功）。機序は 2 段:
