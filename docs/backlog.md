@@ -90,7 +90,10 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   fast-math 下の Inf/NaN 伝播差含む）②修正可能なものは同じ流儀（飽和打ち切り・stable 形）で
   修正 ③飽和域テストを門として常設。隣接: Metal で OOM errorScope 沈黙
   （known-issues 起票済み — 重み経路の明示 size 門 + requiredLimits のロード時実効化も同波で
-  検討）。調査の正本 = known-issues「gemma4 prefill NaN」節 + tools/metal-diagnostics/。
+  検討）。前例の正本 = tanh_stable 修正 `67eb07a`（TANH_STABLE_WGSL doc の懸念 3 点・
+  gru-scan の別写し tanh が先頭候補）+ tools/metal-diagnostics/（probe2〜4 = Metal 実機ループの
+  道具・監査波クローズ時に削除可）。追加候補: gemv margin 命題の M2 温度 0 golden 実測
+  （ADR 0082 追記 2 の立て直し — NaN 解消で可能になった）。
 - ~~M2 実機の手動確認 2 点~~ **消化（2026-09-01 実測）**: dp4a カナリア **16/16 緑**（QK f16
   格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
   読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤 → 裁定済み（既定維持
