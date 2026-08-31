@@ -1,10 +1,11 @@
 /**
- * 取得元の内部契約（`DistributionSource`）。**公開面ではない** — 公開面は `mod.ts` のまま
- * （ADR 0008 の薄さ）で、ここは共通層（`fetch.ts`）とアダプター（`sources/`）の間の境界。
+ * 取得元の内部契約（{@link SourceDriver} / {@link PinnedSource}）と、公開面が持ち回る**不透明
+ * ハンドル**（{@link DistributionSource}）。契約そのものは公開面ではない — 公開面は `mod.ts` の
+ * まま（ADR 0008 の薄さ）で、ここは共通層（`fetch.ts`）とアダプター（`sources/`）の間の境界。
  *
  * 現行の取得経路を畳むと、取得元が実際に答えているのは 5 つの質問しかない:
  *
- * 1. 可変 ref → 不変な世代識別子（{@link DistributionSource.resolveGeneration}）
+ * 1. 可変 ref → 不変な世代識別子（{@link SourceDriver.resolveGeneration}）
  * 2. `karume.json` 1 本の全量バイト（{@link PinnedSource.readManifest} — 上限は
  *    {@link ../manifest.ts MAX_MANIFEST_BYTES}・sha256 の期待値は**持てない**）
  * 3. ある `FileRef` の全量バイト（{@link PinnedSource.readFile} — sha256 / size の期待値つき）
@@ -18,14 +19,38 @@
  * 取得元が増えるたびに同じ不変条件を書き直すことになる。
  */
 
+import type { IntegritySource } from "./errors.ts";
 import type { FileRef } from "./manifest.ts";
+import type { LoadManifestOptions } from "./session.ts";
+
+/**
+ * 診断が名乗る取得元の身元。**エラーを組み立てるのは共通層**（`context.ts`）なので、取得元が
+ * 持つのは「自分は何者か」を表すこの値だけ。
+ *
+ * MUST: 持っていない身元を合成しない — ローカル取得元が repo / commit SHA を名乗ると、実在
+ * しないリポを指す診断（HF へ探しに行けと言う案内）を生む。持たない欄は省いてよい設計で、
+ * 代わりに {@link label} が**必ず**実際に取りに行った先を名乗る。
+ */
+export type SourceOrigin = {
+  /**
+   * 診断の文言に載る 1 行の名乗り（HF: `repo owner/name @ <commit SHA>` /
+   * ローカル: `ディレクトリ <ラベル>`）。取得元ごとに語彙が違ってよい唯一の欄。
+   */
+  readonly label: string;
+  /** 完全性検証が破れたときの失敗元（{@link ../errors.ts IntegrityError} の `source`）。 */
+  readonly integrity: IntegritySource;
+  /** HF 語彙の構造化欄。**持たない取得元は省く**（{@link ../errors.ts HubFetchError} も同様）。 */
+  readonly repo?: string;
+  /** 解決済み世代識別子（commit SHA）。世代の概念を持たない取得元は省く。 */
+  readonly revisionSha?: string;
+};
 
 /** バイト数の門を破ったと気づいた場所（診断の文言に載る）。 */
 export type SizeViolationSite = "content-length" | "body";
 
 /**
  * バイト数が宣言と食い違ったときに投げるエラーの組み立て。**取得元は組み立てない** —
- * 診断の文脈（repo / 世代識別子 / 利用可能ラベル）を持つのは共通層なので、取得元は
+ * 診断の文脈（取得元の名乗り・利用可能ラベル）を持つのは共通層なので、取得元は
  * 「どこで、いくつだったか」だけを渡す（組み立て点は `context.ts` の 1 箇所）。
  */
 export type SizeViolation = (actual: number, where: SizeViolationSite) => Error;
@@ -61,11 +86,14 @@ export type ManifestReadOptions = {
  * この 1 つの世代に留まる（可変 ref のまま複数回解決すると manifest と重みが別の世代から来る）。
  */
 export type PinnedSource = {
+  /** 診断が名乗る身元（この世代・この座標のもの）。 */
+  readonly origin: SourceOrigin;
   /** ②`karume.json` を読み、`parse` を通す。バイト列そのものは共通層へ渡さない。 */
   readonly readManifest: (options: ManifestReadOptions) => Promise<void>;
   /**
-   * ③1 本の全量バイト。sha256 / size の検証は取得元が持つ（共通層は buffer 全体を占めるか
-   * だけを見る — `fetch.ts` の tight view 検査）。
+   * ③1 本の全量バイト。検証は取得元が持つ（共通層は buffer 全体を占めるかだけを見る —
+   * `fetch.ts` の tight view 検査）。**何を検証できるかは取得元によって違う** — HF は
+   * sha256 まで照合し、ローカル取得元は size 厳密一致だけを見る（sha256 は信頼する）。
    */
   readonly readFile: (ref: FileRef, options: FileReadOptions) => Promise<Uint8Array>;
   /**
@@ -77,20 +105,67 @@ export type PinnedSource = {
   /**
    * ⑤越境参照（`FileRef` の `repo` / `revision` — ADR 0038 §7）の取得元。参照先は世代識別子
    * 固定が必須なので、越境先で世代の解決は起きない。
+   *
+   * 越境先を**決められない取得元は throw してよい**（ローカル取得元は明示 mapping しか持たず、
+   * 未 mapping は fail loudly — 隣接同名ディレクトリの推測はしない）。共通層はこの throw を
+   * 取得失敗として文脈付きで包む。
    */
   readonly originFor: (repo: string, revision: string) => PinnedSource;
 };
 
-/** 世代を解決する前の取得元（①）。 */
-export type DistributionSource = {
+/**
+ * 世代を解決する前の取得元（①）。公開面の {@link DistributionSource} が包んでいる実装本体。
+ *
+ * 面ごとの作法（`fetch` / `caches` / `headers` / `onCacheError`）は**取得元の生成時ではなく
+ * {@link pin} の呼び出しごとに**渡す。取得元は「どこから取るか」だけを持ち、「どんな作法で
+ * 取るか」は面のオプションから来る — こうしないと `loadManifest` に渡した `fetch` が以後の
+ * `fetchAssets` にも黙って効き続け、面ごとの差し替えが効かなくなる。
+ */
+export type SourceDriver = {
+  /** 世代解決前の名乗り（HF なら `repo owner/name @ main` のように**要求した** ref を含む）。 */
+  readonly origin: SourceOrigin;
   /**
    * ①可変 ref → 不変な世代識別子。**セッション唯一の解決点**で、返り値が以降の取得を固定する。
-   * 世代という概念を持たない取得元は固定値を返してよい。
+   * 世代という概念を持たない取得元は固定値（空文字）を返してよい。
    */
-  readonly resolveGeneration: (options: { readonly signal?: AbortSignal }) => Promise<string>;
-  /** 解決済みの世代へ固定した取得元を開く。 */
-  readonly pin: (generation: string) => PinnedSource;
+  readonly resolveGeneration: (options: LoadManifestOptions) => Promise<string>;
+  /** 解決済みの世代へ固定した取得元を、その呼び出しの作法で開く。 */
+  readonly pin: (generation: string, options: LoadManifestOptions) => PinnedSource;
 };
+
+// MUST: クラス定義より前に置く — `static` ブロックはクラス評価時に走るので、後ろに置くと
+// TDZ で ReferenceError になる（import 時に落ちる）。
+let readDriver: (source: DistributionSource) => SourceDriver;
+
+/**
+ * 取得元の**公開ハンドル**。`loadManifest(source, …)` / `fromPretrained(source)` が受け取る値で、
+ * 中身（{@link SourceDriver}）は hub の内部にしかない。
+ *
+ * MUST: 公開メンバを生やさない — 取得の実装詳細（世代の解決・pin・越境）が公開面に漏れると、
+ * 取得元が増えるたびに公開面の互換を気にすることになる。判別も**同一性**（`instanceof`）で
+ * 行う: ブランド欄を生やすと利用者が偽造でき、構造判別（`"repo" in value`）にすると
+ * `HubRepoRef` の綴り間違いが黙って取得元として通る。
+ */
+export class DistributionSource {
+  readonly #driver: SourceDriver;
+
+  /**
+   * MUST: 取得元アダプター（`sources/`）の factory だけが呼ぶ。`SourceDriver` は `mod.ts` が
+   * 輸出しないので、利用者はこの引数を型として綴れない。
+   */
+  constructor(driver: SourceDriver) {
+    this.#driver = driver;
+  }
+
+  // `#driver` を読めるのはクラス本体の中だけなので、モジュール内の 1 関数へ束縛して外へ出す
+  // （static メンバにすると公開面に現れてしまう — このクラスは「メンバを持たない」ことが仕様）。
+  static {
+    readDriver = (source) => source.#driver;
+  }
+}
+
+/** 公開ハンドルから実装を取り出す（hub の内部だけが呼ぶ）。 */
+export const driverOf = (source: DistributionSource): SourceDriver => readDriver(source);
 
 /**
  * 1 本の `FileRef` を取りに行く取得元を決める。**越境参照（`repo` + `revision` が両方ある ref）

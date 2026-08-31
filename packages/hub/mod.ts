@@ -1,9 +1,12 @@
 /**
- * `@karume/hub` — 配布 manifest v4（`karume.json` / `karume/4`）の解決と HF からの取得。
+ * `@karume/hub` — 配布 manifest v4（`karume.json` / `karume/4`）の解決と、HF またはローカル
+ * ディレクトリからの取得。
  *
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
  * 面は利用者ストーリーに対応する — manifest を読む（{@link parseManifest} /
- * {@link loadManifest}）/ モデルと実行構成を選ぶ（{@link resolveFiles}）/ 資産を取る
+ * {@link loadManifest}）/ 手元の配布形を取得元にする（{@link localDirectory} — ランタイム別の
+ * 読み口は `@karume/hub/deno` 等のサブパス）/ モデルと実行構成を選ぶ（{@link resolveFiles}）/
+ * 資産を取る
  * （{@link fetchAssets}）/ shard を 2 相で逐次受け取る（{@link streamAssets} — RAM ピーク
  * O(最大 shard)。`docs/decisions/0070-shard-loading-admission.md` 決定 2）/ 資産を先に永続
  * キャッシュへ落とす（{@link prefetchAssets} — 逐次面の相 1 単体）/ 失敗を型で捌く
@@ -50,6 +53,14 @@ export type {
 
 export { resolveFiles } from "./src/resolve.ts";
 export type { ResolvedFiles, ResolveOptions } from "./src/resolve.ts";
+
+/**
+ * 取得元。`loadManifest` / `fromPretrained` は HF のリポ参照（{@link HubRepoRef}）か、ここで
+ * 作った取得元ハンドル（{@link DistributionSource} — **中身は不透明**）のどちらでも受ける。
+ */
+export { localDirectory } from "./src/sources/local.ts";
+export type { DirectoryAdapter, LocalDirectoryOptions } from "./src/sources/local.ts";
+export type { DistributionSource } from "./src/source.ts";
 
 export { clearHubCache } from "./src/cache.ts";
 export { fetchAssets, loadManifest, prefetchAssets, streamAssets } from "./src/fetch.ts";

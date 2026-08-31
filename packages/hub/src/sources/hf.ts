@@ -1,6 +1,7 @@
 /**
  * HuggingFace 取得元アダプター（ADR 0038 §5「hub の取得層」）。土台は `@hdae/fetch-cache`
- * （実行時依存ゼロ・Web 標準 API のみ）。**取得元契約 `source.ts` の唯一の実装**。
+ * （実行時依存ゼロ・Web 標準 API のみ）。取得元契約 `source.ts` の実装のひとつ
+ * （もう 1 つは `local.ts` — こちらだけが世代・キャッシュ・network を持つ）。
  *
  * このアダプターが持つもの（= HF / HTTP + 永続キャッシュに固有のもの）:
  * - 可変 ref → commit SHA の解決と、暗黙 `main` の pin 案内
@@ -26,7 +27,12 @@ import {
 } from "@hdae/fetch-cache/hf";
 import { MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
 import type { HubRepoRef, LoadManifestOptions } from "../session.ts";
-import type { DistributionSource, PinnedSource, SizeViolation } from "../source.ts";
+import {
+  DistributionSource,
+  type PinnedSource,
+  type SizeViolation,
+  type SourceDriver,
+} from "../source.ts";
 import { type ByteBudget, createGuardedFetch } from "../transport.ts";
 
 /** HF 上の 1 つの座標（世代は解決済み）。`hubUrl` は**ホストの選択**なので越境先にも効かせる。 */
@@ -86,6 +92,14 @@ const pinnedHfSource = (
   };
 
   return {
+    // 診断の名乗り（HF は repo と commit SHA を持つ取得元 — 完全性検証は network 取得の側）。
+    origin: {
+      label: `repo ${repo} @ ${generation}`,
+      integrity: "network",
+      repo,
+      revisionSha: generation,
+    },
+
     readManifest: async ({ parse, signal, sizeViolation }) => {
       const url = hfResolveUrl({ ...target, path: MANIFEST_FILENAME });
       // MUST: UTF-8 decode と parse は取得層の `validate` フックの中で行う — 取得の外でやると
@@ -155,30 +169,32 @@ const pinnedHfSource = (
 };
 
 /**
- * HF の取得元を作る。`ref.revision` は可変 ref でよい（{@link DistributionSource.resolveGeneration}
+ * HF の取得元を作る。`ref.revision` は可変 ref でよい（{@link SourceDriver.resolveGeneration}
  * が commit SHA へ解決する）。
+ *
+ * 取得の作法（`fetch` / `caches` / `headers`）は**面ごと**に渡る（`pin` の引数）— この factory が
+ * 持つのは「どこから取るか」（repo / 要求 ref / ミラー）だけ。
  */
-export const createHfSource = (
-  ref: HubRepoRef,
-  options: LoadManifestOptions,
-): DistributionSource => ({
-  resolveGeneration: async ({ signal }) => {
-    const requested = ref.revision ?? "main";
-    if (isCommitSha(requested)) return requested;
-    const revisionSha = await resolveHfRevision(hfTarget(ref.repo, requested, ref.hubUrl), {
-      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-      init: requestInit(options.headers, signal),
-    });
-    // 解決の**後**に出す — 印字する SHA が確定するのがここで、解決に失敗した場合は警告ではなく
-    // 失敗そのものが報告されるべきだから（fail loudly が先）。
-    if (ref.revision === undefined) warnImplicitMain(ref.repo, revisionSha);
-    return revisionSha;
-  },
-  pin: (generation) => pinnedHfSource(ref.repo, generation, ref.hubUrl, options),
-});
+export const createHfSource = (ref: HubRepoRef): DistributionSource => {
+  const requested = ref.revision ?? "main";
+  const driver: SourceDriver = {
+    // 世代解決前の名乗り。解決に失敗したときの診断はこれ 1 つで「どこの何を引きに行ったか」を
+    // 言えなければならないので、要求した ref（可変 ref のまま）まで載せる。
+    origin: { label: `repo ${ref.repo} @ ${requested}`, integrity: "network", repo: ref.repo },
 
-/** 解決済みのセッション（{@link ../session.ts LoadedManifest}）から取得元を開く。 */
-export const hfSourceFor = (
-  loaded: { readonly repo: string; readonly revisionSha: string; readonly hubUrl?: string },
-  options: LoadManifestOptions,
-): PinnedSource => pinnedHfSource(loaded.repo, loaded.revisionSha, loaded.hubUrl, options);
+    resolveGeneration: async (options) => {
+      if (isCommitSha(requested)) return requested;
+      const revisionSha = await resolveHfRevision(hfTarget(ref.repo, requested, ref.hubUrl), {
+        ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+        init: requestInit(options.headers, options.signal),
+      });
+      // 解決の**後**に出す — 印字する SHA が確定するのがここで、解決に失敗した場合は警告ではなく
+      // 失敗そのものが報告されるべきだから（fail loudly が先）。
+      if (ref.revision === undefined) warnImplicitMain(ref.repo, revisionSha);
+      return revisionSha;
+    },
+
+    pin: (generation, options) => pinnedHfSource(ref.repo, generation, ref.hubUrl, options),
+  };
+  return new DistributionSource(driver);
+};

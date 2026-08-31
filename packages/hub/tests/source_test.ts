@@ -16,6 +16,7 @@ const SHA = "b".repeat(40);
 const recordingSource = (): { source: PinnedSource; calls: [string, string][] } => {
   const calls: [string, string][] = [];
   const source: PinnedSource = {
+    origin: { label: "repo someone/anima @ " + SHA, integrity: "network" },
     readManifest: () => Promise.reject(new Error("呼ばれてはいけない")),
     readFile: () => Promise.reject(new Error("呼ばれてはいけない")),
     prefetchFile: () => Promise.reject(new Error("呼ばれてはいけない")),

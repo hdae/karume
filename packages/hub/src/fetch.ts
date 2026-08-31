@@ -1,6 +1,6 @@
 /**
  * 取得の共通層。**取得元そのものは持たない** — 取得元の面は `source.ts` の契約で、実装は
- * `sources/`（現状 HF の 1 アダプターだけ）。ここに残るのは、取得元が何であっても同じでなければ
+ * `sources/`（HF とローカルディレクトリ）。ここに残るのは、取得元が何であっても同じでなければ
  * ならない作法だけ:
  *
  * - 世代は**セッションあたり 1 回だけ**解決し、manifest も全ファイルも同一世代に固定して取得する
@@ -33,15 +33,16 @@ import {
 } from "./manifest.ts";
 import { createProgressEmitter, type ProgressEmitter } from "./progress.ts";
 import type { ResolvedFiles } from "./resolve.ts";
-import type {
-  FetchAssetsOptions,
-  HubRepoRef,
+import {
+  type FetchAssetsOptions,
+  type HubRepoRef,
   LoadedManifest,
-  LoadManifestOptions,
-  StreamAssetsOptions,
+  type LoadManifestOptions,
+  pinnedSourceOf,
+  type StreamAssetsOptions,
 } from "./session.ts";
-import { type PinnedSource, sourceForRef } from "./source.ts";
-import { createHfSource, hfSourceFor } from "./sources/hf.ts";
+import { DistributionSource, driverOf, type PinnedSource, sourceForRef } from "./source.ts";
+import { createHfSource } from "./sources/hf.ts";
 
 /**
  * 逐次面 {@link streamAssets} 相 1 の同時取得数（数十コンポーネントの manifest で接続を
@@ -117,47 +118,50 @@ const decodeManifest = (bytes: Uint8Array): Manifest => {
 };
 
 /**
- * `karume.json` を取得して parse する。世代の解決はここで 1 回だけ行い、結果を返り値に載せる
- * （{@link fetchAssets} 以降はその世代で取得する）。
+ * `karume.json` を取得して parse する。世代の解決はここで 1 回だけ行い、**取得元ごと**返り値に
+ * 載せる（{@link fetchAssets} 以降はその取得元・その世代で取得する）。
  *
- * セッションの入口でもあるので、ここで旧名前空間（`karume/1` 系）を 1 回だけ回収する。
+ * 第 1 引数は HF のリポ参照（{@link HubRepoRef}）か、取得元そのもの
+ * （`localDirectory(...)` 等が返す不透明ハンドル）。前者は HF 取得元の省略記法。
+ *
+ * セッションの入口でもあるので、ここで旧名前空間（`karume/1` 系）を 1 回だけ回収する
+ * （取得元に関わらず — 旧版の hub が残した写しは、今どの取得元を使っていても不要）。
  *
  * NOTE: manifest は資産と違い**期待 sha256 を事前に持てない**（正本の根なので）。したがって
  * キーは SHA 固定 resolve URL のままで、`parse` = UTF-8 decode + parse がバイト列 →
  * `Manifest` の唯一の変換点として残る（資産側の検証だけが取得元へ移った）。
  */
 export const loadManifest = async (
-  ref: HubRepoRef,
+  ref: HubRepoRef | DistributionSource,
   options: LoadManifestOptions = {},
 ): Promise<LoadedManifest> => {
   await purgeLegacyCaches(options);
-  const source = createHfSource(ref, options);
-  const requested = ref.revision ?? "main";
-  let revisionSha: string;
+  // 取得元の判別は**同一性**で行う（`source.ts` — ブランド欄も構造判別も持たせない）。
+  const driver = driverOf(ref instanceof DistributionSource ? ref : createHfSource(ref));
+  let generation: string;
   try {
-    revisionSha = await source.resolveGeneration(
-      options.signal === undefined ? {} : { signal: options.signal },
-    );
+    generation = await driver.resolveGeneration(options);
   } catch (error) {
     if (isAborted(error, options.signal)) throw error;
-    throw revisionResolutionFailure(ref.repo, requested, error);
+    throw revisionResolutionFailure(driver.origin, error);
   }
   // MUST: SHA 固定 URL のキャッシュヒットは network に出ない＝取得元の signal 監視が効かないので、
   // 取得の前後で明示的に中断を見る（見ないと中断済みの signal で呼んでも manifest が返り、
   // 取り消したはずのロードがそのまま先へ進む）。
   options.signal?.throwIfAborted();
+  const pinned = driver.pin(generation, options);
   let manifest: Manifest | undefined;
   try {
-    await source.pin(revisionSha).readManifest({
+    await pinned.readManifest({
       parse: (bytes) => {
         manifest = decodeManifest(bytes);
       },
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      sizeViolation: manifestOversize(ref.repo, revisionSha),
+      sizeViolation: manifestOversize(pinned.origin),
     });
   } catch (error) {
     if (error instanceof HubError || isAborted(error, options.signal)) throw error;
-    throw manifestFetchFailure(ref.repo, revisionSha, error);
+    throw manifestFetchFailure(pinned.origin, error);
   }
   // 取得を抜けた直後にも見る（この後は同期の組み立てだけなので、これが返却前の最後の関門）。
   options.signal?.throwIfAborted();
@@ -166,12 +170,8 @@ export const loadManifest = async (
       `hub: ${MANIFEST_FILENAME} の検証フックが走っていない（取得層の不変条件破れ）`,
     );
   }
-  return {
-    repo: ref.repo,
-    revisionSha,
-    ...(ref.hubUrl === undefined ? {} : { hubUrl: ref.hubUrl }),
-    manifest,
-  };
+  // 取得元は**この値が運ぶ**（識別欄から組み立て直さない — 復元手段の無い取得元が入れられない）。
+  return new LoadedManifest(manifest, { driver, generation }, pinned.origin);
 };
 
 /**
@@ -188,8 +188,8 @@ export const fetchAssets = async (
   files: ResolvedFiles,
   options: FetchAssetsOptions = {},
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
-  const context = createFetchContext(loaded);
-  const source = hfSourceFor(loaded, options);
+  const source = pinnedSourceOf(loaded, options);
+  const context = createFetchContext(loaded, source.origin);
 
   const keys = Object.keys(files);
   // MUST: 一意化は path ではなく {@link fileRefKey} で行う — 越境参照が入った以上、別リポの
@@ -430,6 +430,11 @@ const runPrefetchPhase = async (
  * 進捗は `downloading`* に続けて**ファイルごとに `complete` を 1 回**出す（相 2 を伴わない
  * この面が終端 — `AssetPhase` の契約。キャッシュ済みのファイルは `complete` 1 点だけ）。
  *
+ * **相 1 を持たない取得元（ローカルディレクトリ）では、入力検査だけを行って何もしない** —
+ * 進捗も 1 つも出ない。fail loudly にはしない: この面の約束は「後続の読みが安く済む状態にする」
+ * ことで、直接読める取得元では**最初から満たされている**（温めるべきキャッシュが無いのは失敗
+ * ではない）。落とすと、取得元を差し替えられるはずのアプリが取得元ごとに分岐する羽目になる。
+ *
  * NOTE: HF 取得元では `caches` が無い環境・キャッシュ書込み失敗（quota 超過等）は **fail loud**
  * （バイト列を手元に持たない面なので素 fetch へ縮退する余地が無い）。
  */
@@ -438,9 +443,10 @@ export const prefetchAssets = async (
   refs: readonly FileRef[],
   options: FetchAssetsOptions = {},
 ): Promise<void> => {
-  const context = createFetchContext(loaded);
+  const source = pinnedSourceOf(loaded, options);
+  const context = createFetchContext(loaded, source.origin);
   const progress = preparePhase("prefetchAssets", context, refs, options);
-  await runPrefetchPhase(hfSourceFor(loaded, options), context, refs, options, progress, {
+  await runPrefetchPhase(source, context, refs, options, progress, {
     emitComplete: true,
   });
   // MUST: 全ファイルがキャッシュ済みの呼び出しは 1 度も network に出ない＝取得元の signal 監視が
@@ -478,8 +484,8 @@ export const streamAssets = async function* (
   refs: readonly FileRef[],
   options: StreamAssetsOptions = {},
 ): AsyncGenerator<StreamedAsset, void, unknown> {
-  const context = createFetchContext(loaded);
-  const source = hfSourceFor(loaded, options);
+  const source = pinnedSourceOf(loaded, options);
+  const context = createFetchContext(loaded, source.origin);
 
   // ---- 相 1: ここを抜けるまで 1 本も yield しない。入力検査もこの中（取得元に触れる前）で済む。
   // `complete` は相 2 が出すので発行しない。

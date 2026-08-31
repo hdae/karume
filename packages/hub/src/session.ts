@@ -1,15 +1,16 @@
 /**
- * セッションの語彙 — 「どのリポの、どの世代を、どんな作法で読むか」。取得元の実装
+ * セッションの語彙 — 「どの取得元の、どの世代を、どんな作法で読むか」。取得元の実装
  * （`sources/`）にも共通層（`fetch.ts`）にも属さない、面と面の間で受け渡す型だけを置く。
  *
- * NOTE: `fetch` / `caches` / `headers` は HTTP 取得元の語彙がそのまま公開面に出ているもの
- * （現行の取得元は HF 1 つだけなので、ここに置いても嘘にならない）。取得元が増えたら
- * 「全取得元に共通の作法（`signal` / `onProgress` / `onCacheError`）」と「取得元ごとの設定」
- * へ割り直す席になる — 割り方の裁定はここではなく入口（`fromPretrained` の union）側の話。
+ * NOTE: `fetch` / `caches` / `headers` は HTTP 取得元の語彙がそのまま公開面に出ているもの。
+ * 直接読める取得元（ローカルディレクトリ等）はこれらを**無視する**（`caches` を通らない・
+ * `fetch` を呼ばない）。全取得元に共通の作法は `signal` / `onProgress` / `onCacheError` の側で、
+ * 取得元ごとの設定は取得元を作る factory（`localDirectory(...)` 等）が受け取る。
  */
 
 import type { Manifest } from "./manifest.ts";
 import type { AssetProgress } from "./progress.ts";
+import type { PinnedSource, SourceDriver, SourceOrigin } from "./source.ts";
 
 /** 取得対象リポジトリ。`hubUrl` は**アプリが明示指定した場合のみ**有効（manifest からは来ない）。 */
 export type HubRepoRef = {
@@ -49,20 +50,62 @@ export type LoadManifestOptions = {
   readonly caches?: CacheStorage;
 };
 
+/** 解決済みのセッション（取得元の実装 + そこで固定した世代識別子）。 */
+type SessionSource = {
+  readonly driver: SourceDriver;
+  /** {@link SourceDriver.resolveGeneration} の返り値（世代を持たない取得元では空文字）。 */
+  readonly generation: string;
+};
+
+// MUST: クラス定義より前に置く（`static` ブロックの TDZ — `source.ts` の同じ綴りを参照）。
+let readSession: (loaded: LoadedManifest) => SessionSource;
+
 /**
- * 解決済み revision に固定された manifest。以降の取得は全てこの SHA で行う。
+ * 解決済み世代に固定された manifest。以降の取得は全てこの世代で行う。
  *
- * MUST: 識別欄（{@link repo} / {@link revisionSha} / {@link hubUrl}）を読むのは hub の中だけに
- * 留める — 組み立ては `loadManifest` の 1 箇所、読み手は `sources/` のアダプター構築と
- * `context.ts` の診断組み立ての 2 箇所しかない。消費側（`@karume/models`）はこの値を
- * **不透明に持ち回る**だけなので、世代識別子を持たない取得元が入っても消費側は動かない。
+ * **取得元そのものを内部欄として運ぶ** — 資産 3 面（`fetchAssets` / `prefetchAssets` /
+ * `streamAssets`）は識別欄から取得元を組み立て直すのではなく、この値が持っている取得元を開く。
+ * 組み立て直す形だと「HF なら repo と SHA から復元できる」という HF 固有の性質に全面が
+ * 寄りかかり、復元手段の無い取得元（ローカルディレクトリ）が入れられない。
+ *
+ * 公開の識別欄（{@link repo} / {@link revisionSha}）は**診断と表示のための情報**であって、
+ * 取得の再構成には使われない。持たない取得元（世代も repo も無いローカル配布形）では欄ごと
+ * 現れない — 合成した repo や偽の SHA を名乗らせない（実在しないリポを指す診断になる）。
+ *
+ * MUST: この型は hub の外で組み立てられない（`mod.ts` は型だけを輸出する）。取得元は
+ * `#session` に閉じており、値を作り替えて渡すと取得元ごと失われる。
  */
-export type LoadedManifest = {
-  readonly repo: string;
-  /** 解決済み commit SHA（40 桁）。返り値・エラー・診断に必ず載る。 */
-  readonly revisionSha: string;
-  readonly hubUrl?: string;
+export class LoadedManifest {
+  /** 取得元が repo という概念を持つ場合のみ（HF: `"owner/name"`）。 */
+  readonly repo?: string;
+  /** 解決済み commit SHA（40 桁）。世代の概念を持つ取得元のみ。 */
+  readonly revisionSha?: string;
   readonly manifest: Manifest;
+  readonly #session: SessionSource;
+
+  constructor(manifest: Manifest, session: SessionSource, origin: SourceOrigin) {
+    this.manifest = manifest;
+    this.#session = session;
+    if (origin.repo !== undefined) this.repo = origin.repo;
+    if (origin.revisionSha !== undefined) this.revisionSha = origin.revisionSha;
+  }
+
+  static {
+    readSession = (loaded) => loaded.#session;
+  }
+}
+
+/**
+ * セッションの取得元を**その呼び出しの作法で**開く。`fetch` / `caches` / `headers` を面ごとに
+ * 差し替えられるのは、取得元が生成時ではなくここで作法を受け取るため（`source.ts` の
+ * {@link SourceDriver.pin}）。
+ */
+export const pinnedSourceOf = (
+  loaded: LoadedManifest,
+  options: LoadManifestOptions,
+): PinnedSource => {
+  const session = readSession(loaded);
+  return session.driver.pin(session.generation, options);
 };
 
 export type FetchAssetsOptions = LoadManifestOptions & {

@@ -87,12 +87,17 @@ export class ManifestPathError extends HubError {
   }
 }
 
-/** 完全性検証の失敗元（キャッシュ読出し / network 取得）。 */
-export type IntegritySource = "cache" | "network";
+/**
+ * 完全性検証の失敗元（キャッシュ読出し / network 取得 / ローカルの実体読み）。
+ *
+ * `"local"` は CacheStorage も network も通らない取得元（ローカルディレクトリ）が読んだバイト列
+ * のこと。取り直しても同じものが返るので、`"network"` と違って再試行は回復手段にならない。
+ */
+export type IntegritySource = "cache" | "network" | "local";
 
 type IntegrityErrorOptions = HubErrorOptions & {
-  readonly repo: string;
-  readonly revisionSha: string;
+  readonly repo?: string;
+  readonly revisionSha?: string;
   readonly path: string;
   readonly expected: string;
   readonly actual: string;
@@ -106,9 +111,10 @@ type IntegrityErrorOptions = HubErrorOptions & {
  * 使うため通常は外へ出ない。外へ出るのは network 取得物の不一致（`source: "network"`）が主。
  */
 export class IntegrityError extends HubError {
-  readonly repo: string;
-  /** 取得を固定していた commit SHA（40 桁）。 */
-  readonly revisionSha: string;
+  /** 取得元が repo という概念を持つ場合のみ（HF）。ローカル取得元では**名乗らない**。 */
+  readonly repo?: string;
+  /** 取得を固定していた commit SHA（40 桁）。世代の概念を持つ取得元のみ。 */
+  readonly revisionSha?: string;
   readonly path: string;
   /** manifest が宣言していた値（sha256 / バイト数）。 */
   readonly expected: string;
@@ -119,8 +125,9 @@ export class IntegrityError extends HubError {
   constructor(message: string, options: IntegrityErrorOptions) {
     super(message, options);
     this.name = "IntegrityError";
-    this.repo = options.repo;
-    this.revisionSha = options.revisionSha;
+    // 持たない身元は欄ごと現れない（合成 repo・偽 SHA を作らない — `source.ts` SourceOrigin）。
+    if (options.repo !== undefined) this.repo = options.repo;
+    if (options.revisionSha !== undefined) this.revisionSha = options.revisionSha;
     this.path = options.path;
     this.expected = options.expected;
     this.actual = options.actual;
@@ -129,7 +136,7 @@ export class IntegrityError extends HubError {
 }
 
 type HubFetchErrorOptions = HubErrorOptions & {
-  readonly repo: string;
+  readonly repo?: string;
   readonly revisionSha?: string;
   readonly path?: string;
 };
@@ -139,8 +146,12 @@ type HubFetchErrorOptions = HubErrorOptions & {
  * （ADR 0038 §5）。原因は `cause` にそのまま残す。
  */
 export class HubFetchError extends HubError {
-  readonly repo: string;
-  /** 解決済み commit SHA。revision 解決自体に失敗した場合は undefined。 */
+  /**
+   * 取得元が repo という概念を持つ場合のみ（HF）。ローカル取得元では**名乗らない** —
+   * どこを読んだかは `message` の名乗り（ディレクトリ / path）が一次情報になる。
+   */
+  readonly repo?: string;
+  /** 解決済み commit SHA。revision 解決自体に失敗した場合・世代を持たない取得元では undefined。 */
   readonly revisionSha?: string;
   /** 対象ファイルの path。manifest 取得前 / revision 解決失敗では undefined。 */
   readonly path?: string;
@@ -148,7 +159,7 @@ export class HubFetchError extends HubError {
   constructor(message: string, options: HubFetchErrorOptions) {
     super(message, options);
     this.name = "HubFetchError";
-    this.repo = options.repo;
+    if (options.repo !== undefined) this.repo = options.repo;
     if (options.revisionSha !== undefined) this.revisionSha = options.revisionSha;
     if (options.path !== undefined) this.path = options.path;
   }
