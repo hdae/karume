@@ -80,11 +80,14 @@ Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36
 - ベースラインは緑: dp4a カナリア 16/16・`gpu_gemm_skinny` 2/2・`gpu_reduce_axis_parity`
   2/2（既知赤 = gemv u32 門 1 ULP のみ）。Linux / Vulkan は同一入力で NaN=0・ビット同一。
 
-有力仮説（未確定・調査中）: states 形 attention は実 −Inf（`0xff800000`）を書いて
-`exp(s − amax)` を回すため、pad 行（"hello?" は 32 行 chunk 中 21 行）で −Inf − (−Inf) = NaN が
-構造的に生まれ、Linux では行独立で無害だが **Metal（naga → MSL・fast-math）では有効行へ漏れる**
-可能性。pad 行数を振るローカライズプローブで判別予定。**gemma4 を Metal で使う経路は現状すべて
-不能**（対話 example 含む）。
+ローカライズ実測（2026-09-01・M2 プローブ）: **実効長 T = 1〜64 の全形で赤**（decode 形
+m=1 含む）・**logits 262,144 個が全数 NaN**・`per_layer_inputs`（PLE ホスト gather）は NaN=0。
+一方 `gpu_state_attention_test.ts`（合成入力・実 −Inf の causal マスク込み）は **M2 で 6/6 緑**
+— pad 行仮説・exp(−Inf) fast-math 仮説・M=32/M=1 経路差はいずれも**棄却済み**。全 logits 全滅
+は「幹の早い段の NaN を rms_norm（行内平均）が行全体へ広げた」形で、残る容疑は attention 以外の
+op 族 = i8 embedding（×6・入口）/ i4 linear の GEMM 形 dequant / rms_norm / RoPE 合成
+（slice/neg/cat）/ gelu_tanh / 最終 softcap。合成入力の runtime 全テストで赤の全数を採取中。
+**gemma4 を Metal で使う経路は現状すべて不能**（対話 example 含む）。
 
 `karume export-embeddinggemma --batch N`（N>1）は `karume/convert.py` で fail loudly する
 （B=1 は従来どおり成功）。機序は 2 段:
