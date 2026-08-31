@@ -16,16 +16,17 @@
   i4 linear を GEMV 族へ・**ビット同一のまま ×8.45・decode 84.2→32.5ms/token = 30.8 tok/s**。
   律速はフェンス床 ≈11ms 側へ戻った — 機序と方法論は
   [research 2026-08-30](../docs/research/2026-08-30-gemma4-decode-wallclock.md) §7）。
-  **生成 API 波は設計正本化済み（2026-08-31 — 裁定 10 点すべて★推奨案）**: ADR
-  [0083](../docs/decisions/0083-generation-api-surface.md)（API 面 = `GenerationProgram` +
-  `GenerationSequence` + `AsyncIterable` / AbortSignal / 最終行 logits 出口 + sampling ホスト /
-  **`generateGreedy` 格下げ = breaking**）/
-  [0084](../docs/decisions/0084-gemma-tokenizer-chat.md)（tokenizer・detokenizer・chat の
-  compile-to-asset・初版射程は素の会話のみ）/
-  [0085](../docs/decisions/0085-ple-host-gather.md)（PLE を token-major sidecar へ外出し —
-  GPU 常駐 3.70→1.51GiB）+ ADR 0068 追記 6。**段 0（契約固め）は完了 = ADR がイベント契約
-  そのもの**で、**次は段 1a（tokenizer レーン・GPU 不要）と段 1b（製品グラフレーン・実 GPU）の
-  並行実装**。実行計画と各段の合格線は [backlog](../docs/backlog.md) now、候補比較・棄却理由は
+  **生成 API 波は段 0〜4 完了（2026-08-31〜09-01）**: 設計正本 = ADR
+  [0083](../docs/decisions/0083-generation-api-surface.md) /
+  [0084](../docs/decisions/0084-gemma-tokenizer-chat.md) /
+  [0085](../docs/decisions/0085-ple-host-gather.md) + ADR 0068 追記 6。**gemma4 の chat が
+  文字列 in → 文字列 out で実重み完走**（`Gemma4Pipeline.fromAssets` → `chat()` → streaming
+  detokenizer・温度 0 golden 固定・EOS `<turn|>` 自停止・多ターン日本語込み）。公開面 =
+  barrel + `./gemma`（**breaking 1 件 = `generateGreedy` の公開 export 削除** — limitations が
+  消費側 doc）。製品系列 = `outputs/series/gemma4-e2b-product/`（容器 1,512MiB + PLE sidecar
+  2,275MiB・GPU 常駐実測 1,504MiB）。**残 = 段 5 配布形のみ（Gemma ToU ライセンス門 =
+  ユーザーの人間確認が前提 — ADR 0065 stage 6）**。実行計画は [backlog](../docs/backlog.md)
+  now、候補比較は
   [research 2026-08-31](../docs/research/2026-08-31-generation-api-design-draft.md)。
   **スケール戦略は調査 + 裁定とも完了** =
   [research 2026-08-31](../docs/research/2026-08-31-freetoken-moe-over-arraybuffer.md)

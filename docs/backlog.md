@@ -43,32 +43,17 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   [0084](decisions/0084-gemma-tokenizer-chat.md)（tokenizer・detokenizer・chat）/
   [0085](decisions/0085-ple-host-gather.md)（PLE 配布形）+ ADR 0068 追記 6（最終行 logits 出口の
   製品採用）。候補比較・棄却理由・実資産の実測は
-  [research 2026-08-31](research/2026-08-31-generation-api-design-draft.md)。**段 1a と 1b は
-  並行レーン**（前者は GPU 不要）:
-  - **段 0 契約固め — 完了（2026-08-31・コード 0 行）**: ADR 3 本 + 0068 追記 6。
-    合格線 = 型と契約が文書に載り裁定が全て解決済み（**達成** — ADR がイベント契約そのもの）
-  - **段 1a tokenizer レーン**（GPU 不要）: compile 台本（recipe 側 Python・**EG 資産も同乗** =
-    裁定 9）+ `src/text/` の BPE / byteFallback / streaming decoder + `src/gemma/text/` の受理
-    schema + parity fixture（ADR 0084）。合格線 = 独立採取した HF fixture と encode / decode が
-    ビット一致・全 chunk partition の streaming 一致・merge queue が日本語長文で線形
-  - **段 1b 製品グラフレーン**（実 GPU）: **案 α**（裁定 5）= PLE 外出しと最終行 logits 出口を
-    1 回の再 export に載せ製品グラフを 1 系列化 + ホスト PLE sidecar loader（ADR 0085 / 0083
-    決定 6）。合格線 = 既存 `greedy.<case>` golden との交差 parity（`argmax(logits)` == 既存
-    token 列・3 ケース × K=16）+ PLE 逆量子化のビット一致
-  - **段 2 sampling + 停止**: `src/generation/sampler.ts`（温度 / top-k / top-p / repetition
-    penalty / logit bias / seed）+ EOS 集合 `[1,106,50]` での停止 + `generateGreedy` の内部
-    ヘルパ格下げ（**breaking** — ADR 0083 決定 7〜9）。合格線 = 温度 0 で既存 greedy 列と一致・
-    sampler 自体は自前 fixture + 分布門
-  - **段 3 sequence API**: `GenerationProgram` + `GenerationSequence` + `AsyncIterable` +
-    AbortSignal + 多ターン（`pendingToken` 連結 prefill）（ADR 0083 決定 1〜5）。合格線 =
-    多ターンで「直前 assistant の最後の token が落ちない」直接門 + `break` 中断後の再開門 +
-    cancel が `signal.reason` を素通し
-  - **段 4 chat + パイプライン**: `gemma4ChatPrompt`（素の会話のみ・tools / thinking は
-    fail loudly）+ `Gemma4Pipeline.fromAssets` + **文字列 in → 文字列 out** の e2e（ADR 0084
-    決定 5）。合格線 = HF `apply_chat_template` 出力との id 列一致 + e2e が実重みで完走
-  - **段 5 配布形**（ライセンス門待ち）: manifest 席 / dist recipe / モデルカード / shard
+  [research 2026-08-31](research/2026-08-31-generation-api-design-draft.md)。
+  **段 0〜4 は消化済み（2026-08-31〜09-01 — 全合格線達成）**: 段 0 = ADR 3 本 + 0068 追記 6 /
+  段 1a = tokenizer compile-to-asset + BPE merge queue + streaming detokenizer（HF fixture
+  ビット一致・EG 同乗）/ 段 1b = 製品系列 `gemma4-e2b-product`（容器 1,512MiB・PLE sidecar +
+  loader・交差 parity 厳密一致）/ 段 2 = sampler + EOS 集合停止 + `generateGreedy` 格下げ
+  （**breaking** — limitations 記載）/ 段 3 = `GenerationProgram` + `GenerationSequence`
+  （AsyncIterable・AbortSignal・多ターン pendingToken 連結）/ 段 4 = `gemma4ChatPrompt` +
+  `Gemma4Pipeline`（barrel + `./gemma` 配線・**文字列 in → 文字列 out を実重みで実証**）。
+  - **段 5 配布形（残 — ライセンス門待ち）**: manifest 席 / dist recipe / モデルカード / shard
     （ADR 0081）/ pin 定数 / `fromPretrained`。合格線 = dist 全門通過 + 実 DL 疎通。
-    **ADR 0065 stage 6 のライセンス門が前提**
+    **ADR 0065 stage 6 のライセンス門（Gemma ToU の人間確認 — ユーザー）が前提**
 - **L-11 裁定（2026-08-30）**: 技術先行 = **gemma4 E2B**（品質実証済み — tokenizer / L-5 の
   実装対象）。**公開はライセンス門（ADR 0065 stage 6 = Gemma ToU）の確認後**。配布経路の
   minicpm5 先行は**採らない**（2026-08-31 裁定 10 — 段 5 の対象は gemma4 E2B のみ）
