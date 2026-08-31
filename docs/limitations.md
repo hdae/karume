@@ -225,6 +225,19 @@ ArrayBuffer の大きさ**（Chromium の壁 — 下記）であって合計の�
 添字の欠番や、素キー（`transformer`）と分割キー（`transformer[0]`）の混在は **shard の語を含む
 診断**で fail loudly（黙って片方を採らない）。
 
+## MoE は全エキスパート VRAM 常駐が前提（エキスパート単位の動的ロード/退避はしない）
+
+by-design（2026-08-31 裁定）。MoE モデルの VRAM 予算は **active でなく総パラメータ**で組む —
+「使う expert だけロードする」動的常駐は提供しない。根拠は 3 層の構造衝突（実測記録 =
+[research/2026-08-31-freetoken-moe-over-arraybuffer.md](research/2026-08-31-freetoken-moe-over-arraybuffer.md)）:
+①`ShardValidator.finish()` は宣言された全 initializer の存在を要求する（全量/逐次 2 面で
+共有された唯一の門 — 穴を開けると受理集合の一本化が崩れる）②重み常駐は Session 構築時
+1 回組みで退避/再ロードの席が無い ③IR v1 に値依存の実行選択が無く（op-vocabulary の意図的
+保留・`topk` も static-k）、MoE は全 expert を計算して gate で畳む dense 展開でしか書けない。
+さらに外部要因として、expert キャッシュ系の先行手法（FreeToken ほか）が前提にする
+「device 起動の host メモリ転送」が WebGPU に存在しない。復活条件つきの再検討席は
+[backlog](backlog.md) parked。
+
 ## 要素数が奇数の f16 テンソル・I8 テンソルは safetensors 上の並び順に制約がある
 
 裁定の正本は ADR [0063](decisions/0063-safetensors-physical-layout.md)。リーダはデータ節の
