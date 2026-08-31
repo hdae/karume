@@ -2,12 +2,13 @@
  * `@karume/models/gemma` — Gemma ファミリ（gemma4 = 文字列 → 文字列の生成）のサブパス面。
  *
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — 組む（{@link Gemma4Pipeline.fromAssets}）/ 会話する
- * （`chat`）/ 自分で回す（`sequence` + {@link gemma4ChatPrompt} + tokenizer の復号）/
- * 解放する（`dispose`）。
+ * 面は利用者ストーリーに対応する — 組む（{@link Gemma4Pipeline.fromPretrained} /
+ * {@link Gemma4Pipeline.fromAssets}）/ 会話する（`chat`）/ 自分で回す（`sequence` +
+ * {@link gemma4ChatPrompt} + tokenizer の復号）/ 解放する（`dispose`）。
  *
- * **配布形はまだ無い**（段 5 — ADR 0065 stage 6 のライセンス門待ち）。`fromPretrained` も
- * pin 定数も出していないので、資産は呼び手が用意する（`Gemma4Assets`）。
+ * NOTE: pin 定数（`*_CURRENT` — ADR 0073）は**まだ無い**。公開配布リポを持たないファミリは
+ * 定数自体を持たない（同 決定 1）ので、`fromPretrained` の取得元は呼び手が
+ * `{ repo, revision }` で明示する（`src/gemma/config.ts` の NOTE）。
  *
  * 生成の語彙（`GenerationEvent` / `GenerationStop` / `SamplerSpec` / `GenerationCapacityError`）
  * は**パイプライン非依存**だが、今のところ触れるのはこのファミリだけなので barrel とこの面の
@@ -22,9 +23,11 @@ export type {
   Gemma4Assets,
   Gemma4ChatOptions,
   Gemma4ChatStream,
-  Gemma4PipelineConfig,
+  Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,
 } from "./src/gemma/pipeline.ts";
+/** 配布形が宣言する静的配線（`karume.json` の `pipelineConfig` — ADR 0038 §1）。 */
+export type { Gemma4PipelineConfig } from "./src/gemma/config.ts";
 
 /**
  * 会話 → token id 列（`<bos>` 込み・末尾は生成プロンプト）。素の会話だけを受け、tools /

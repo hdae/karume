@@ -116,9 +116,10 @@ export type {
   Gemma4Assets,
   Gemma4ChatOptions,
   Gemma4ChatStream,
-  Gemma4PipelineConfig,
+  Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,
 } from "./src/gemma/pipeline.ts";
+export type { Gemma4PipelineConfig } from "./src/gemma/config.ts";
 /**
  * 会話 → token id 列（`<bos>` 込み — 素の会話だけを受け、tools / thinking は fail loudly。
  * `./gemma` を参照）。`chat` は内部でこれを通すので、要るのは低レベル面（`sequence`）を

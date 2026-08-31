@@ -32,6 +32,14 @@
  * assetComponentOpener}）— 「`fromPretrained` で読める配布形は `fromAssets` でも読める」が
  * 全量面の契約（X2-101）。バイト列の連結はしない（shard は独立ヘッダの safetensors 1 本ずつで、
  * 連結しても単一コンテナにはならない）。
+ *
+ * ## 常駐させない資産（{@link LoadShardOptions.eagerAssets}）
+ *
+ * weights 以外の資産は既定で全量常駐だが、それが成立しない配布形がある（gemma4 の PLE sidecar =
+ * 1 本 758MB × 3・ADR 0085 決定 3 の「触った shard だけ遅延ロード」）。`eagerAssets` を渡した
+ * 家族は、並べなかった資産を**参照のまま**（{@link ShardComponents.deferred}）受け取り、要る
+ * 1 本を {@link readCachedAsset} でキャッシュから読み直す。取得（prefetch）は重み shard と
+ * 同じ 1 回に載るので、進捗の総量も DL の順序も変わらない。
  */
 
 import {
@@ -215,8 +223,30 @@ export type ShardComponents<Admitted> = {
   readonly open: ComponentOpener;
   /** コンポーネント以外の資産（extras / assets）のバイト列 — 従来どおり全量で受け取る。 */
   readonly assets: Record<string, Uint8Array<ArrayBuffer>>;
+  /**
+   * 常駐させずに**参照だけ**返した資産（{@link LoadShardOptions.eagerAssets} で絞った残り）。
+   *
+   * バイト列は永続キャッシュに落ちている（下の prefetch）ので、家族側は要る 1 本だけを
+   * {@link readCachedAsset} で読み直す。
+   */
+  readonly deferred: ResolvedFiles;
   /** 家族 admission（{@link FamilyAdmission}）が確定させた材料。 */
   readonly admitted: Admitted;
+};
+
+/**
+ * {@link loadShardComponents} の追加オプション（取得層のオプションはそのまま透過する）。
+ */
+export type LoadShardOptions = StreamAssetsOptions & {
+  /**
+   * **全量で受け取る**資産キーの allowlist（省略時は残り全部 = 従来どおり）。
+   *
+   * MUST: 「常駐させない側」ではなく「常駐させる側」を並べる — 資産の一覧は manifest 次第で
+   * 増えるので、除外リストで書くと**新しく増えた資産が黙って全量常駐へ落ちる**。gemma4 の PLE
+   * sidecar は 1 本 758MB × 3 で、全量常駐は ADR 0085 決定 3（触った shard だけ遅延ロード）
+   * そのものを壊す。
+   */
+  readonly eagerAssets?: readonly string[];
 };
 
 /**
@@ -316,11 +346,12 @@ export const loadShardComponents = async <Admitted>(
   files: ResolvedFiles,
   componentKeys: readonly string[],
   admit: FamilyAdmission<Admitted>,
-  options: StreamAssetsOptions = {},
+  options: LoadShardOptions = {},
 ): Promise<ShardComponents<Admitted>> => {
-  const aggregated = aggregateProgress(files, options.onProgress);
+  const { eagerAssets, ...streamOptions } = options;
+  const aggregated = aggregateProgress(files, streamOptions.onProgress);
   const hubOptions: StreamAssetsOptions = {
-    ...options,
+    ...streamOptions,
     ...(aggregated === undefined ? {} : { onProgress: aggregated }),
   };
 
@@ -392,6 +423,20 @@ export const loadShardComponents = async <Admitted>(
   // 別のコンポーネントを検査したことになる）。
   const admitted = await admit(open);
 
+  // 取得を 2 群へ割る。extras（`<weights>.<extra>`）と assets は IR コンテナとは限らないので
+  // 全量面のままで、`eagerAssets` を渡した家族だけが並べなかった資産を**参照のまま**受け取る
+  // （バイト列は下の prefetch でキャッシュに入る）。
+  let rest: ResolvedFiles = {};
+  let deferred: ResolvedFiles = {};
+  for (const key of Object.keys(files)) {
+    if (consumed.has(key)) continue;
+    if (eagerAssets !== undefined && !eagerAssets.includes(key)) {
+      deferred = { ...deferred, [key]: files[key] };
+      continue;
+    }
+    rest = { ...rest, [key]: files[key] };
+  }
+
   // MUST: 重み shard の prefetch は admission **2 つとも**（グラフ = `prepareModel` / 家族 =
   // 上の `admit`）の後に置く（決定 5 — 実行できないモデルの重みは 1 バイトも落とさない。
   // 文面が無限定なので、家族の門が後段に残っていると実装がこの MUST より狭くなる — CG3-1）。
@@ -399,16 +444,46 @@ export const loadShardComponents = async <Admitted>(
   // 「重みの DL が初回実行まで遅れ、ロード進捗にも現れない」形を無くすため
   // （進捗の `total` は元から全ファイルの合計なので、集約は追加の細工なしで整合する）。
   // グラフ shard は上の `streamAssets` の相 1 が既にキャッシュへ落としているので、ここで
-  // 落とすのは 2 本目以降だけでよい。
-  const weightRefs = shards.flatMap((componentRefs) => componentRefs.slice(1));
-  if (weightRefs.length > 0) await prefetchAssets(loaded, weightRefs, hubOptions);
+  // 落とすのは 2 本目以降だけでよい。**遅延資産も同じ 1 回に載せる** — 常駐させないだけで
+  // 「いつか必ず要るバイト列」なので、後回しにすると生成の途中で無進捗の DL が始まる。
+  const prefetched = [
+    ...shards.flatMap((componentRefs) => componentRefs.slice(1)),
+    ...Object.keys(deferred).map((key) => deferred[key]),
+  ];
+  if (prefetched.length > 0) await prefetchAssets(loaded, prefetched, hubOptions);
 
-  // 残りは extras（`<weights>.<extra>`）と assets — IR コンテナとは限らないので全量面のまま。
-  let rest: ResolvedFiles = {};
-  for (const key of Object.keys(files)) {
-    if (!consumed.has(key)) rest = { ...rest, [key]: files[key] };
-  }
   const assets = Object.keys(rest).length === 0 ? {} : await fetchAssets(loaded, rest, hubOptions);
 
-  return { open, assets, admitted };
+  return { open, assets, deferred, admitted };
+};
+
+/**
+ * 遅延資産 1 本を**永続キャッシュから**読み直す（{@link ShardComponents.deferred} の相方）。
+ *
+ * `streamAssets` の相 1 は prefetch 済みなのでキャッシュヒットで済み、ホスト RAM に載るのは
+ * その 1 本だけ。呼ぶたびに新しい列を作るのは、家族側の LRU が同じ shard を何度でも読み直す
+ * ため（使い切った iterator を持ち回さない）。
+ *
+ * MUST: 返す `ArrayBuffer` は view が buffer 全体を占めていることを確かめてから渡す
+ * （取得層の契約 — 崩れていたら `slice` で写さず落とす。1 本 758MB 級の資産で RAM ピークを
+ * 倍にしない）。
+ */
+export const readCachedAsset = async (
+  where: string,
+  loaded: LoadedManifest,
+  ref: FileRef,
+  options: StreamAssetsOptions = {},
+): Promise<ArrayBuffer> => {
+  for await (const asset of streamAssets(loaded, [ref], options)) {
+    const { bytes } = asset;
+    if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
+      throw new Error(
+        `${where}: 資産 '${ref.path}' の bytes が buffer 全体を占めていない` +
+          `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
+          ` buffer ${bytes.buffer.byteLength}）`,
+      );
+    }
+    return bytes.buffer;
+  }
+  throw new Error(`${where}: 資産 '${ref.path}' が逐次面から 1 本も届かなかった`);
 };
