@@ -96,11 +96,11 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   - **Metal OOM errorScope 沈黙**（known-issues — 重み経路の明示 size 門 + `requiredLimits`
     のロード時実効化。監査波から分離・独立に着手可）
   - gemv margin 命題の M2 温度 0 golden 実測（ADR 0082 追記 2 の立て直し）
-  - **GPTQ static-groups + act-order 実験**（upstream は act-order + 推論側変更なしを実装済み
-    と一次確認 — 現行不採用理由は dynamic group 前提でのみ成立。段階導入・既定 off で
-    ビット同一・SBV2/gemma4 4 点 sweep・評価分離。実装 2〜3 日級 — 裁定待ち）
-  - GPTQ damping sweep（0.001〜0.1 × 校正量 1x/4x/16x — 0.01 固定の妥当性を実測で封印。
-    上と同一リグ相乗り・provenance への damping 記録は先行可）
+  - ~~GPTQ static-groups + act-order 実験 / damping sweep~~ **実装 + 実測消化（2026-08-31）**:
+    軸は opt-in で実装済み（既定 off ビット同一 — `892bfb3`/`683d6a0`）・minicpm5 8 構成の
+    実測で **act-order / static は本条件で利得なし・damping 0.01 は実測で封印 → 既定は現状維持**
+    （正本 = [research/2026-08-31-gptq-axes-sweep.md](research/2026-08-31-gptq-axes-sweep.md)）。
+    復活条件 = 校正量 16× での act-order 再評価（gemma4 校正 rig 新設もそこまで保留）
   - norm の 1/dim ホスト化は**保留**（uncertain — 開発機の除算実測から凍結 sha が割れ得る。
     実 GPU プローブが先・費用対効果低）・reduce identity の params −inf 化は現状維持
     （W-2/W-3 と同じ器 — 採るならセット裁定）
