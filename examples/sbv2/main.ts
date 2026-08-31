@@ -7,9 +7,10 @@
  * MUST: `--source` は必須（既定を置かない）。ローカルミラーは環境ごとの生成物で、公開保留の
  * 系列（FN 等）は pin 定数も持たない（ADR 0073 決定 1）— 既定を書くと環境によって
  * 「存在しないパス / リポの取得」に化ける。
- * `karume.json` を持つディレクトリなら使い捨ての HF 形サーバ（`serveLocalDist`）越しに読み、
- * それ以外は HF リポジトリ名として読む。どちらも `fromPretrained` の 1 本なので、shard 分割
- * された配布形もそのまま通る。未指定のノブは manifest の `pipelineConfig.defaults` が埋める。
+ * `karume.json` を持つディレクトリなら `denoDirectory` で直に読み、それ以外は HF リポジトリ名
+ * として読む。どちらも `fromPretrained` の 1 本なので、shard 分割された配布形もそのまま通る
+ * （越境参照を持つ配布形は `--source-map owner/name=<パス>` で越境先を名指しする — 繰り返し可）。
+ * 未指定のノブは manifest の `pipelineConfig.defaults` が埋める。
  *
  * ## テキスト解析は呼び手の責務（0.6.0）
  *
@@ -26,14 +27,15 @@
 import { analyzeWithWords } from "@hdae/yomi";
 import { getDictionary } from "@hdae/yomi/loader";
 import { encodeWav, Sbv2Pipeline, toSbv2Utterance } from "../../packages/models/mod.ts";
-import { isLocalDist } from "../shared/local-assets.ts";
-import { serveLocalDist } from "../shared/local-dist-server.ts";
+import { distributionSource } from "../shared/local-source.ts";
 
-const USAGE = "--source <パス|HF repo> --text <文字列> --model <名前> --quant <名前>" +
+const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --text <文字列>" +
+  " --model <名前> --quant <名前>" +
   " --style <名前> --style-weight <数> --sdp-ratio <数> --noise-scale <数>" +
   " --noise-scale-w <数> --length-scale <数> --seed <整数> --out <パス>";
 const KNOWN = new Set([
   "source",
+  "source-map",
   "model",
   "quant",
   "text",
@@ -50,6 +52,8 @@ const DEFAULT_TEXT = "こんにちは、これはテストです。";
 
 /** `--key value` の対だけを受ける。MUST: 次のフラグを値として食わない（黙って既定へ落ちる）。 */
 const args = new Map<string, string>();
+/** `--source-map` だけは繰り返せる（越境先が複数ある配布形があるため）。 */
+const sourceMaps: string[] = [];
 for (let at = 0; at < Deno.args.length; at += 2) {
   const [key, value] = [Deno.args[at], Deno.args[at + 1]];
   if (!key.startsWith("--") || value === undefined || value.startsWith("--")) {
@@ -58,7 +62,8 @@ for (let at = 0; at < Deno.args.length; at += 2) {
   // MUST: 未知のキーは落とす。打ち間違えたノブが黙って既定値で走ると、出力の違いが
   // 「モデルの揺れ」に見える。
   if (!KNOWN.has(key.slice(2))) throw new Error(`未知のオプション ${key}（使い方: ${USAGE}）`);
-  args.set(key.slice(2), value);
+  if (key === "--source-map") sourceMaps.push(value);
+  else args.set(key.slice(2), value);
 }
 
 const encoder = new TextEncoder();
@@ -93,12 +98,8 @@ const noiseScale = number("noise-scale");
 const noiseScaleW = number("noise-scale-w");
 const lengthScale = number("length-scale");
 
-/**
- * ローカルの配布形は使い捨ての HF 形サーバ越しに読む。サーバは台本の最後まで畳まない —
- * 重み shard は Session を組むその瞬間に流れ、破損キャッシュの取り直し（self-heal）は
- * そこで network に出る。
- */
-await using served = await isLocalDist(source) ? serveLocalDist(source) : undefined;
+/** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
+const from = await distributionSource(source, sourceMaps);
 
 console.log(
   `[sbv2] ${source} / model ${model ?? "（manifest の既定）"}` +
@@ -108,7 +109,7 @@ console.log(
 const started = performance.now();
 // テキスト → 発話（読み・アクセント）は呼び手側。karume には解析済みの構造だけを渡す。
 const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(), text));
-await using pipeline = await Sbv2Pipeline.fromPretrained(served?.source ?? source, {
+await using pipeline = await Sbv2Pipeline.fromPretrained(from, {
   ...selection,
   onProgress: ({ phase, loaded, total }) =>
     Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),

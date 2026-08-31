@@ -5,7 +5,8 @@
  * ## 役割は 2 つに割れている
  *
  * - {@link isLocalDist}（ローカル配布形かの判定）は**デモと dump の共有**。デモはこれで
- *   使い捨ての HF 形サーバ（`local-dist-server.ts`）へ回すかを決める。
+ *   `--source` を取得元ハンドル（`denoDirectory`）へ回すか HF リポジトリ名として読むかを
+ *   決める（`local-source.ts`）。
  * - {@link loadLocalAssets}（全量読み）は **`examples/sbv2/dump.ts` 専用**。torch 参照突合の
  *   dump は分割対象外の小資産しか触らないので、この面のままでよい。
  *

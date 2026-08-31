@@ -1,15 +1,23 @@
 /**
  * ローカルの配布形ディレクトリ（`karume.json` を持つ）を **HF 形の HTTP** で配る使い捨て
- * サーバ。デモの `--source <ローカルのパス>` はこれ越しに `fromPretrained` を通る。
+ * サーバ。
  *
- * ## なぜローカル読みを HTTP へ回すのか
+ * ## 消費者は「HTTP 疎通そのものを見る門」だけ
+ *
+ * デモの `--source <ローカルのパス>` はここを通らない — 手元の配布形は取得元ハンドル
+ * （`@karume/hub/deno` の `denoDirectory` — `local-source.ts`）で直に読めるようになり、
+ * ポートも永続キャッシュへの複製も要らなくなった。残る消費者は
+ * `packages/models/tests/e2e_gemma4_pretrained_test.ts` で、あちらは**実 DL 経路**（revision
+ * 解決 → resolve URL → 受信バイト門 → 永続キャッシュ）を通すことが門の目的なので、疑似 HF
+ * を喋るこのサーバでなければならない。
+ *
+ * ## なぜ HTTP でも全量読みにしないのか
  *
  * 1GiB 超のコンポーネントは配布形の時点で **shard 分割**されている。全量読み
  * （`local-assets.ts` + `from*Assets`）でも分割形は読めるが、その面は**全 shard を同時に
  * ホスト RAM へ載せる**（3.7GiB の DiT がそのまま常駐する）。取得層を通せば shard 面
  * （グラフ shard → `prepareModel` → 重み shard の逐次流し）がそのまま効いて RAM に載るのは
- * 常に「今の 1 本」だけになり、デモのロード経路が**本番（hub + prefetch + streamAssets）と
- * 1 本になる**。越境参照（下の節）を解けるのも取得層だけ。
+ * 常に「今の 1 本」だけになる。
  *
  * 喋るのは hub が実際に叩く 2 経路だけ（revision 解決 API と resolve URL — 綴りの正本は
  * `@hdae/fetch-cache/hf` の `resolveHfRevision` / `hfResolveUrl`）。Range も HEAD も要らない

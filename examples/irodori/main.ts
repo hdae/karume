@@ -7,9 +7,10 @@
  *
  * `--source` 未指定ならこの台本が {@link IRODORI_V4_SMALL_CURRENT}（このパッケージ版が検証した
  * 取得元 — ADR 0073）を渡す。`fromPretrained` 自体に既定は無いので、取得元を綴るのは常に
- * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリなら使い捨ての HF 形サーバ
- * （`serveLocalDist`）越しに読み、それ以外は HF リポジトリ名として読む（どちらも
- * `fromPretrained` の 1 本 — shard 分割された配布形もそのまま通る）。`--ref` は参照音声
+ * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリなら `denoDirectory` で直に
+ * 読み、それ以外は HF リポジトリ名として読む（どちらも `fromPretrained` の 1 本 — shard 分割
+ * された配布形もそのまま通る）。越境参照を持つ配布形は `--source-map owner/name=<パス>` で
+ * 越境先を名指しする（繰り返し可）。`--ref` は参照音声
  * （WAV — 配布形と同じ 48kHz の mono/多ch PCM16 か IEEE float）で、渡すとその声質に寄る
  * （voice cloning）。`--caption` は声質の指示文（Voice Design）。サンプラのノブ（steps / CFG）は
  * manifest の `pipelineConfig` が固定していて、実行時には `--seed` と `--seconds`（発話長の
@@ -23,13 +24,14 @@ import {
   type IrodoriSpeakerInput,
 } from "../../packages/models/mod.ts";
 import { IRODORI_V4_SMALL_CURRENT } from "../../packages/models/irodori.ts";
-import { isLocalDist } from "../shared/local-assets.ts";
-import { serveLocalDist } from "../shared/local-dist-server.ts";
+import { distributionSource } from "../shared/local-source.ts";
 
-const USAGE = "--source <パス|HF repo> --text <文字列> --caption <文字列> --ref <WAV パス>" +
+const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --text <文字列>" +
+  " --caption <文字列> --ref <WAV パス>" +
   " --model <名前> --quant <名前> --seconds <数> --seed <整数> --out <パス>";
 const KNOWN = new Set([
   "source",
+  "source-map",
   "model",
   "quant",
   "text",
@@ -43,6 +45,8 @@ const DEFAULT_TEXT = "こんにちは、これはテストです。";
 
 /** `--key value` の対だけを受ける。MUST: 次のフラグを値として食わない（黙って既定へ落ちる）。 */
 const args = new Map<string, string>();
+/** `--source-map` だけは繰り返せる（越境先が複数ある配布形があるため）。 */
+const sourceMaps: string[] = [];
 for (let at = 0; at < Deno.args.length; at += 2) {
   const [key, value] = [Deno.args[at], Deno.args[at + 1]];
   if (!key.startsWith("--") || value === undefined || value.startsWith("--")) {
@@ -51,7 +55,8 @@ for (let at = 0; at < Deno.args.length; at += 2) {
   // MUST: 未知のキーは落とす。打ち間違えたノブが黙って既定値で走ると、出力の違いが
   // 「モデルの揺れ」に見える。
   if (!KNOWN.has(key.slice(2))) throw new Error(`未知のオプション ${key}（使い方: ${USAGE}）`);
-  args.set(key.slice(2), value);
+  if (key === "--source-map") sourceMaps.push(value);
+  else args.set(key.slice(2), value);
 }
 
 const encoder = new TextEncoder();
@@ -87,14 +92,10 @@ const speaker: IrodoriSpeakerInput | undefined = ref === undefined
   ? undefined
   : { audio: decodeWav(await Deno.readFile(ref)) };
 
-/**
- * ローカルの配布形は使い捨ての HF 形サーバ越しに読む。サーバは台本の最後まで畳まない —
- * 重み shard は Session を組むその瞬間に流れ、破損キャッシュの取り直し（self-heal）は
- * そこで network に出る。
- */
-await using served = source !== undefined && await isLocalDist(source)
-  ? serveLocalDist(source)
-  : undefined;
+/** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
+const from = source === undefined
+  ? IRODORI_V4_SMALL_CURRENT
+  : await distributionSource(source, sourceMaps);
 
 console.log(
   `[irodori] ${source ?? `${IRODORI_V4_SMALL_CURRENT.repo}（台本の既定 = 検証済み pin）`}` +
@@ -106,7 +107,7 @@ console.log(
 );
 const started = performance.now();
 await using pipeline = await IrodoriPipeline.fromPretrained(
-  served?.source ?? source ?? IRODORI_V4_SMALL_CURRENT,
+  from,
   {
     ...selection,
     onProgress: ({ phase, loaded, total }) =>
