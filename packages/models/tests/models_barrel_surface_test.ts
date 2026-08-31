@@ -39,7 +39,14 @@ Deno.test("barrel: 内部ヘルパとしての generateGreedy は残っている
 //    入口はパイプラインだけにする（ADR 0008）。増えた export は型検査では咎められない
 
 /** barrel と `./gemma` の両方が出す gemma / 生成 API の**値** export。 */
-const GEMMA_VALUES = ["Gemma4Pipeline", "gemma4ChatPrompt", "GenerationCapacityError"];
+const GEMMA_VALUES = [
+  "Gemma4Pipeline",
+  "gemma4ChatPrompt",
+  "GenerationCapacityError",
+  // `fromAssets` を使う消費者が hub の `Record<string, unknown>` から config を組む口。
+  // 出していないと `as` で被せるか、3 つの数を配布形と消費側で二重持ちすることになる。
+  "parseGemma4PipelineConfig",
+];
 
 /** 公開面に出してはならない綴り（内部の組み立て口）。 */
 const INTERNAL_VALUES = [

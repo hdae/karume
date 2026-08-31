@@ -260,12 +260,21 @@ Deno.test({
       );
     });
 
-    await t.step("dispose は PLE sidecar のホストキャッシュも返す", async () => {
-      // shard 1 本 758MB 級 × 常駐ぶんがホスト RAM に残るかどうかは例外にならないので、
-      // 解放済みの sidecar が「引けない」ことで見る（`program` は dispose 後も読める）。
-      const derive = pipeline.program.derivedInputs?.derive;
-      assert(derive !== undefined, "製品グラフの derivedInputs が結線されていない");
-      await assertRejects(() => derive([0]), Error, "dispose 済み");
+    await t.step("公開の program 面は凍結された数だけで、dispose 後も読める", () => {
+      // NOTE: PLE sidecar のホストキャッシュが dispose で返ることは `gemma_ple_test.ts` の
+      // 単体門が持つ（公開面から `derivedInputs.derive` は引けない = 面を絞った意図どおり）。
+      // ここで見るのは絞った後の面の性質 — 配布形が宣言した数がそのまま読め、消費者側の
+      // 書き込みが生成ループの停止集合へ届かないこと。
+      const program = pipeline.program;
+      assertEquals(program.chunkLength, CHUNK_LENGTH);
+      assertEquals(program.capacity, CAPACITY);
+      assertEquals(program.maxPosition, MAX_POSITION);
+      assertEquals(Object.isFrozen(program), true, "program が凍結されていない");
+      assertEquals(Object.isFrozen(program.stopTokens), true, "stopTokens が凍結されていない");
+      // 凍結コピーなので、停止集合を空にしようとしても落ちる（黙って EOS で止まらなくならない）。
+      assertThrows(() => {
+        (program.stopTokens as number[]).length = 0;
+      }, TypeError);
     });
   },
 });

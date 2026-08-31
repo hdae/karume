@@ -27,7 +27,16 @@ export type {
   Gemma4PipelineOptions,
 } from "./src/gemma/pipeline.ts";
 /** 配布形が宣言する静的配線（`karume.json` の `pipelineConfig` — ADR 0038 §1）。 */
-export type { Gemma4PipelineConfig } from "./src/gemma/config.ts";
+export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
+/**
+ * 生の宣言（`unknown`）→ 検証済みの {@link Gemma4PipelineConfig}（失敗は fail loudly）。
+ *
+ * **`fromAssets` を使う消費者のための口**である。`fromPretrained` は内部でこれを通すので呼ぶ
+ * 必要は無く、要るのは `karume.json` を自分で読んで {@link Gemma4Pipeline.fromAssets} へ渡す側
+ * （手元にあるのは hub の `ModelEntry.pipelineConfig` = `Record<string, unknown>` なので、
+ * この口が無いと `as` で被せるか 3 つの数を二重持ちするしかない）。
+ */
+export { parseGemma4PipelineConfig } from "./src/gemma/config.ts";
 
 /**
  * 会話 → token id 列（`<bos>` 込み・末尾は生成プロンプト）。素の会話だけを受け、tools /

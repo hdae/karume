@@ -8,7 +8,7 @@
 //     `e2e_gemma4_chat_test.ts` と**同じ golden** に一致する。同じバイト列を別経路で読んでいる
 //     ことの証明で、割れたら動いたのは配布形か取得経路である
 //  ② **既定サンプラの結線**（ADR 0083 決定 7）: 配布形が宣言した推奨値がそのまま
-//     `pipeline.sampler` に載り、要求が `sampler` を省略したときの既定になる。宣言が
+//     `pipeline.defaultSampler` に載り、要求が `sampler` を省略したときの既定になる。宣言が
 //     `pipelineConfig` に焼かれていても結線が抜けていれば、①（温度 0 を明示する経路）は緑の
 //     ままなので、この門が要る
 //  ③ **PLE sidecar が全量常駐しない**（ADR 0085 決定 3）: 索引の shard は `assets` の遅延側で
@@ -138,7 +138,7 @@ Deno.test({
     });
     try {
       await t.step("② 配布形が宣言した推奨サンプラが省略時の既定として載っている", () => {
-        assertEquals(pipeline.sampler, RECOMMENDED_SAMPLER);
+        assertEquals(pipeline.defaultSampler, RECOMMENDED_SAMPLER);
       });
 
       await t.step("① 温度 0 の chat が fromAssets 経路と同じ golden を出す", async () => {

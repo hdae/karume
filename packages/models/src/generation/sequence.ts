@@ -50,7 +50,7 @@ import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import { planPrefillChunks } from "./greedy.ts";
 import { createSampler, isStopToken, type SamplerSpec } from "./sampler.ts";
-import type { GenerationProgram } from "./program.ts";
+import type { GenerationWiring } from "./program.ts";
 
 /**
  * 容量を超えた（= この会話はもう入り切らない）— ADR 0083 決定 10。
@@ -178,7 +178,7 @@ export type GenerationSession<C extends GenerationContextFace = GenerationContex
 export type GenerationSequenceOptions<C extends GenerationContextFace> = {
   readonly session: GenerationSession<C>;
   /** 検証済みの静的配線（`createGenerationProgram` の返り値）。 */
-  readonly program: GenerationProgram;
+  readonly program: GenerationWiring;
 };
 
 /** i32 の入力テンソル 1 本（token id 列も絶対位置列も `[1, rows]`）。 */
@@ -204,7 +204,7 @@ const lastRowInput = (row: number): Tensor => ({
  */
 const readLogits = (
   outputs: RunOutputs,
-  program: GenerationProgram,
+  program: GenerationWiring,
   where: string,
 ): Float32Array<ArrayBuffer> => {
   if (!Object.hasOwn(outputs, program.logits)) {
@@ -234,7 +234,7 @@ const readLogits = (
  * - `pastLength + queryLength` の最大は最後の decode の `past+T+K-1`（K=1 なら `past+T`）。
  */
 const assertBudget = (
-  program: GenerationProgram,
+  program: GenerationWiring,
   pastLength: number,
   promptLength: number,
   maxNewTokens: number,

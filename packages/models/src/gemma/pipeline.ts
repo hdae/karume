@@ -7,7 +7,7 @@
  *    export_product.py` が書く shard 列
  * 2. ホスト PLE gather（`src/gemma/ple.ts` — ADR
  *    [0085](../../../../docs/decisions/0085-ple-host-gather.md)）を
- *    {@link GenerationProgram.derivedInputs} の席へ差す
+ *    {@link GenerationWiring.derivedInputs} の席へ差す
  * 3. compile 済み tokenizer（`src/gemma/text/`）と chat フォーマット（`src/gemma/text/chat.ts`）
  * 4. 生成ループ（`src/generation/` — ADR
  *    [0083](../../../../docs/decisions/0083-generation-api-surface.md) の program / sequence /
@@ -58,6 +58,7 @@ import { toRepoRef } from "../hub/repo-ref.ts";
 import {
   GEMMA4_PIPELINE_MAJOR,
   GEMMA4_PIPELINE_NAME,
+  type Gemma4DefaultSampler,
   type Gemma4PipelineConfig,
   parseGemma4PipelineConfig,
 } from "./config.ts";
@@ -65,6 +66,8 @@ import {
   createGenerationProgram,
   type GenerationGraph,
   type GenerationProgram,
+  generationProgramFace,
+  type GenerationWiring,
 } from "../generation/program.ts";
 import {
   createGenerationSequence,
@@ -190,11 +193,19 @@ type Gemma4State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly session: Session;
+  /** 生成ループが読む内部配線（`createGenerationSequence` へ渡す実体）。 */
+  readonly wiring: GenerationWiring;
+  /**
+   * 公開の読み口（{@link Gemma4Pipeline.program}）。
+   *
+   * 凍結した狭い面を getter のたびに作らないための席で、{@link buildGemma4Program} が返した
+   * {@link Gemma4State.wiring} 1 本からその場で導いた値である（別経路で更新される欄ではない）。
+   */
   readonly program: GenerationProgram;
   /**
    * PLE sidecar のホスト側キャッシュ（**{@link Gemma4Pipeline.dispose} の解放先**）。
    *
-   * MUST: 席は dispose のためだけ — 引くのは `program.derivedInputs.derive` の閉包だけである。
+   * MUST: 席は dispose のためだけ — 引くのは `wiring.derivedInputs.derive` の閉包だけである。
    * どちらも {@link buildGemma4Program} の 1 回の返り値なので「片方だけ差し替えた」形は書けず、
    * 解放口を持たないと shard 1 本 758MB 級 × 常駐 2 本がプロセス寿命まで残る。
    */
@@ -206,7 +217,7 @@ type Gemma4State = {
 /**
  * 家族 admission（GPU を取りに行く前・shard 面では重み prefetch の前に通す門）が確定させる材料。
  *
- * NOTE: PLE loader はここに載せない — `program.derivedInputs.derive` の閉包が持つのが唯一の
+ * NOTE: PLE loader はここに載せない — `wiring.derivedInputs.derive` の閉包が持つのが唯一の
  * 参照で、席を 2 つ作ると「片方だけ差し替えた」形が書ける。
  */
 type Gemma4Admission = {
@@ -227,12 +238,6 @@ type Gemma4SidecarAssets = {
   readonly tokenizer: Uint8Array<ArrayBuffer>;
   readonly pleIndex: Uint8Array<ArrayBuffer>;
   readonly readPleShard: (file: string, options?: Gemma4PleReadOptions) => Promise<ArrayBuffer>;
-};
-
-const assertPositiveInteger = (value: number, where: string): void => {
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`Gemma4Pipeline: ${where} ${value} が 1 以上の整数でない`);
-  }
 };
 
 /**
@@ -334,11 +339,12 @@ const capacitySymbolOf = (graph: GenerationGraph): string => {
  * NOTE: tokenizer / PLE sidecar の解析はここに置けない — admission の時点では assets を
  * まだ取っていない（取ってからでは重み prefetch より前という位置が保てない）ので、
  * {@link buildGemma4Program} に残る（anima の `#admit` と同じ分け方）。
+ *
+ * NOTE: `config` の検査はここには無い — 2 つの入口が**どちらも**
+ * {@link parseGemma4PipelineConfig} を通してから呼ぶ（値域・関係・未知キーの門はそこが正本で、
+ * 同じ検査を 2 実装持たない）。
  */
 const admitGemma4 = (component: ModelComponent, config: Gemma4PipelineConfig): Gemma4Admission => {
-  assertPositiveInteger(config.chunkLength, "config.chunkLength");
-  assertPositiveInteger(config.maxPosition, "config.maxPosition");
-  assertPositiveInteger(config.capacity, "config.capacity");
   const { graph } = component;
   return {
     component,
@@ -359,7 +365,7 @@ const buildGemma4Program = (
   assets: Gemma4SidecarAssets,
   options: Gemma4PipelineOptions,
 ): {
-  readonly program: GenerationProgram;
+  readonly wiring: GenerationWiring;
   readonly tokenizer: GemmaTokenizer;
   readonly ple: Gemma4Ple;
 } => {
@@ -384,7 +390,7 @@ const buildGemma4Program = (
       : { residentShards: options.residentPleShards }),
   });
 
-  const program = createGenerationProgram({
+  const wiring = createGenerationProgram({
     graph: component.graph,
     inputIds: INPUT_IDS,
     positionIds: POSITION_IDS,
@@ -407,7 +413,7 @@ const buildGemma4Program = (
       }),
     },
   });
-  return { program, tokenizer, ple };
+  return { wiring, tokenizer, ple };
 };
 
 /**
@@ -554,12 +560,18 @@ export class Gemma4Pipeline {
    * 製品グラフは配布形の時点で常に分割されている（ADR 0081）ので、`model` は**宣言順の
    * shard 列**（先頭がグラフ shard）を受け、`fromPretrained` と同じ shard 逐次面へ流す
    * （受け口の実装は `src/hub/components.ts` — 7 家族共有の {@link assetComponentOpener}）。
+   *
+   * MUST: `config` は {@link fromPretrained} と**同じ門**（{@link parseGemma4PipelineConfig}）を
+   * 通す。TS の型は未知キーも値域も見ないので、門が無いと `temperature: -1` のような宣言が
+   * 3.7GiB を読み切った後の初 `chat` で初めて落ちる。宣言を検査するのは**バイト列を 1 本も
+   * 開く前**である。
    */
   static async fromAssets(
     input: Gemma4Assets,
     options: Gemma4PipelineOptions = {},
   ): Promise<Gemma4Pipeline> {
     const where = "Gemma4Pipeline.fromAssets";
+    const config = parseGemma4PipelineConfig(input.config);
     if (input.model.length === 0) {
       throw new Error(`${where}: 製品グラフの shard 列が空（先頭がグラフ shard）`);
     }
@@ -568,7 +580,7 @@ export class Gemma4Pipeline {
       shards = { ...shards, [`${MODEL}[${index}]`]: bytes };
     });
     const open = assetComponentOpener(where, shards, (key) => assetBuffer(where, shards, key));
-    const admitted = admitGemma4(open(MODEL), input.config);
+    const admitted = admitGemma4(open(MODEL), config);
     return await Gemma4Pipeline.#build(admitted, input, options);
   }
 
@@ -586,7 +598,7 @@ export class Gemma4Pipeline {
     assets: Gemma4SidecarAssets,
     options: Gemma4PipelineOptions,
   ): Promise<Gemma4Pipeline> {
-    const { program, tokenizer, ple } = buildGemma4Program(admitted, assets, options);
+    const { wiring, tokenizer, ple } = buildGemma4Program(admitted, assets, options);
     const gpu = options.gpu ?? await acquireGpu();
     const ownsGpu = options.gpu === undefined;
     try {
@@ -594,7 +606,8 @@ export class Gemma4Pipeline {
         gpu,
         ownsGpu,
         session: await admitted.component.createSession(gpu),
-        program,
+        wiring,
+        program: generationProgramFace(wiring),
         ple,
         tokenizer,
         config: admitted.config,
@@ -655,7 +668,7 @@ export class Gemma4Pipeline {
         release = await acquire();
         sequence = await createGenerationSequence({
           session: state.session,
-          program: state.program,
+          program: state.wiring,
         });
         const detokenizer = state.tokenizer.createDetokenizer();
         stream = sequence.generate({
@@ -716,7 +729,7 @@ export class Gemma4Pipeline {
     }
     const inner = await createGenerationSequence({
       session: this.#state.session,
-      program: this.#state.program,
+      program: this.#state.wiring,
     });
     // 正しく返された sequence は追跡から外す（外さないと、多ターン UI が会話ごとに作って
     // 畳んでも Set が単調増加し、`dispose` が破棄済みの実体を全数もう一度 await する）。
@@ -734,7 +747,14 @@ export class Gemma4Pipeline {
     return handed;
   }
 
-  /** 静的配線（`sequence()` で回すときに chunk 長・容量・停止集合を読む口）。 */
+  /**
+   * 静的配線の読み口（`sequence()` で回すときに chunk 長・位置上限・容量・語彙数・停止集合を
+   * 読む）。**凍結**した値で、`stopTokens` も凍結コピーである。
+   *
+   * 出るのは数だけで、グラフ入力 / 出力の名前や `derivedInputs` は出ない（`GenerationProgram`
+   * の doc — 配線の相手である Session が公開面に無いので読んでも使い道が無く、書ける口は
+   * 「検証済み」という型の意味を壊す）。
+   */
   get program(): GenerationProgram {
     return this.#state.program;
   }
@@ -745,14 +765,15 @@ export class Gemma4Pipeline {
   }
 
   /**
-   * 配布形が宣言した sampler の既定（ADR 0083 決定 7 — 宣言が無ければ `undefined` = greedy）。
+   * 配布形が宣言した sampler の**既定**（ADR 0083 決定 7 — 宣言が無ければ `undefined` = greedy）。
    *
-   * {@link Gemma4Pipeline.chat} は要求が省略したときこれを使う。低レベル面
+   * MUST: 名前は「今この生成が使っている sampler」ではない。{@link Gemma4Pipeline.chat} は
+   * 要求が `sampler` を省略したときだけこれを使い、要求が渡せばそちらが勝つ。低レベル面
    * （{@link Gemma4Pipeline.sequence}）を自分で回すときは `generate` の `sampler` へ**自分で
    * 渡す** — `GenerationSequence` は配布形を知らないので、渡さなければ低層の既定（温度 0）で
    * 走る（parity 門がその経路である）。
    */
-  get sampler(): SamplerSpec | undefined {
+  get defaultSampler(): Gemma4DefaultSampler | undefined {
     return this.#state.config.sampler;
   }
 

@@ -22,8 +22,8 @@ import type {
 import {
   createGenerationProgram,
   type GenerationGraph,
-  type GenerationProgram,
   type GenerationProgramSpec,
+  type GenerationWiring,
 } from "../src/generation/program.ts";
 import {
   createGenerationSequence,
@@ -55,7 +55,7 @@ const graphOf = (derived: boolean): GenerationGraph => ({
   values: { [LOGITS]: { dtype: "f32", shape: [1, 1, VOCAB] } },
 });
 
-const programOf = (override: Partial<GenerationProgramSpec> = {}): GenerationProgram =>
+const programOf = (override: Partial<GenerationProgramSpec> = {}): GenerationWiring =>
   createGenerationProgram({
     graph: graphOf(override.derivedInputs !== undefined),
     inputIds: IDS,
@@ -563,7 +563,7 @@ Deno.test("DerivedRunInputs: 生成の signal が derive まで降りる（best-
   const fake = fakeSession({ tokens: [5, 6] });
   const seen: (AbortSignal | undefined)[] = [];
   const controller = new AbortController();
-  const derived = (): GenerationProgram["derivedInputs"] => ({
+  const derived = (): GenerationWiring["derivedInputs"] => ({
     names: [DERIVED],
     derive: (ids, options) => {
       seen.push(options?.signal);

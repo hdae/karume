@@ -119,7 +119,12 @@ export type {
   Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,
 } from "./src/gemma/pipeline.ts";
-export type { Gemma4PipelineConfig } from "./src/gemma/config.ts";
+export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
+/**
+ * 生の宣言（`unknown`）→ 検証済みの `Gemma4PipelineConfig`。**`fromAssets` を使う消費者のための
+ * 口**で、`fromPretrained` は内部で通すので呼ぶ必要は無い（`./gemma` を参照）。
+ */
+export { parseGemma4PipelineConfig } from "./src/gemma/config.ts";
 /**
  * 会話 → token id 列（`<bos>` 込み — 素の会話だけを受け、tools / thinking は fail loudly。
  * `./gemma` を参照）。`chat` は内部でこれを通すので、要るのは低レベル面（`sequence`）を

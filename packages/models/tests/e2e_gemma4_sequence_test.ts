@@ -30,7 +30,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareModel, type SafetensorsFile } from "@karume/runtime";
 import { createGemma4Ple, parseGemma4PleIndex } from "../src/gemma/ple.ts";
-import { createGenerationProgram, type GenerationProgram } from "../src/generation/program.ts";
+import { createGenerationProgram, type GenerationWiring } from "../src/generation/program.ts";
 import {
   createGenerationSequence,
   type GenerationEvent,
@@ -163,7 +163,7 @@ Deno.test({
     });
 
     /** 静的配線（停止集合だけを変えて 2 本作る — 他は同じ資産の同じ結線）。 */
-    const programOf = (stopTokens: readonly number[]): GenerationProgram =>
+    const programOf = (stopTokens: readonly number[]): GenerationWiring =>
       createGenerationProgram({
         graph: parsed.graph,
         inputIds: INPUT_IDS,

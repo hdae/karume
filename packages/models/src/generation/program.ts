@@ -9,6 +9,9 @@
  * リクエストを何度も出す」形なので、ここを割らないと**毎回すべての配線を書き直す**面になる。
  * program は不変で、可変な寿命は {@link GenerationSequence}（`sequence.ts`）だけが持つ。
  *
+ * 配線の型はさらに 2 つに割れている — 生成ループが読む全欄が {@link GenerationWiring}（内部）、
+ * 消費者が `sequence()` を回すときに読む数だけが {@link GenerationProgram}（公開・凍結）。
+ *
  * ## MUST: setup 時に全結線を検証する
  *
  * 名前の取り違えは**例外も警告も出ない**（`greedy.ts` の `readToken` が同じ理由で dtype と形を
@@ -138,12 +141,53 @@ export type GenerationProgramSpec = {
 };
 
 /**
- * 検証済みの静的配線（{@link createGenerationProgram} だけが作る）。
+ * 検証済みの静的配線（{@link createGenerationProgram} だけが作る）。**内部の型**で、公開面には
+ * 出さない（出す面は {@link GenerationProgram}）。
  *
  * MUST: フィールドを足すときは {@link createGenerationProgram} の検証も同時に足す — 検証されない
  * 配線欄は「setup 時に全結線を検証する」という本型の存在理由を静かに壊す。
  */
-export type GenerationProgram = Omit<GenerationProgramSpec, "graph">;
+export type GenerationWiring = Omit<GenerationProgramSpec, "graph">;
+
+/**
+ * 検証済み静的配線の**読み口**（公開面 — `Gemma4Pipeline.program`）。
+ *
+ * 出すのは「自分で `sequence()` を回すときに読む必要がある数」だけである。グラフ入力 / 出力の
+ * 名前・記号束縛・`derivedInputs` は**内部配線**（{@link GenerationWiring}）で、公開すると
+ * ①消費者が読んでも使い道が無い（配線の相手である Session は公開面に出ていない）
+ * ②`derive` の差し替えや `bindings` の改変が公開面から書ける — 検証済みであることが
+ * `GenerationProgram` の意味そのものなので、書ける口は意味を壊す。
+ *
+ * MUST: {@link generationProgramFace} が凍結して返す（`stopTokens` は凍結コピー）。
+ */
+export type GenerationProgram = {
+  /** 固定長 prefill chunk の行数（ADR 0066 決定 4）。 */
+  readonly chunkLength: number;
+  /** 資産が引ける絶対位置の排他的上限（位置は `0..maxPosition-1`）。 */
+  readonly maxPosition: number;
+  /** full スロットの容量（`pastLength + queryLength ≤ capacity`）。 */
+  readonly capacity: number;
+  /** 語彙数（`prompt` の token id の値域はここで決まる）。 */
+  readonly vocabSize: number;
+  /** 停止 token の集合（ADR 0083 決定 8 — 空なら EOS 停止をしない）。 */
+  readonly stopTokens: readonly number[];
+};
+
+/**
+ * 内部配線 → 公開の読み口（**凍結**）。
+ *
+ * MUST: `stopTokens` は凍結**コピー**にする。同じ配列を出すと、消費者側の `sort()` /
+ * `length = 0` が生成ループの停止集合そのものを書き換える（例外にならない沈黙劣化で、
+ * 「EOS で止まらない生成」として現れる）。
+ */
+export const generationProgramFace = (wiring: GenerationWiring): GenerationProgram =>
+  Object.freeze({
+    chunkLength: wiring.chunkLength,
+    maxPosition: wiring.maxPosition,
+    capacity: wiring.capacity,
+    vocabSize: wiring.vocabSize,
+    stopTokens: Object.freeze([...wiring.stopTokens]),
+  });
 
 const assertPositiveInteger = (value: number, where: string): void => {
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -288,7 +332,7 @@ const assertSymbols = (graph: GenerationGraph, bindings: SymbolBindings | undefi
  * MUST: GPU に触る前に落ちる（引数はグラフと数値だけ）。配線の誤りが 3.7GiB のロードの末に
  * 出るのと、`prepareModel` の直後に出るのとでは診断の価値が違う。
  */
-export const createGenerationProgram = (spec: GenerationProgramSpec): GenerationProgram => {
+export const createGenerationProgram = (spec: GenerationProgramSpec): GenerationWiring => {
   const { graph } = spec;
   assertPositiveInteger(spec.chunkLength, "chunkLength");
   assertPositiveInteger(spec.maxPosition, "maxPosition");
