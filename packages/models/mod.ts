@@ -1,7 +1,7 @@
 /**
  * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima` / `./birefnet` /
- * `./depth-anything` / `./irodori` / `./sbv2` / `./siglip2` / `./vowel-detector`）と両建て
- * （ADR 0037）。
+ * `./depth-anything` / `./gemma` / `./irodori` / `./sbv2` / `./siglip2` / `./vowel-detector`）と
+ * 両建て（ADR 0037）。
  *
  * ADR 0008 の流儀で**薄い面**にする — ここに並ぶのは「パイプラインを組んで生成する」「出た
  * 画像を書き出す」という利用者ストーリーだけで、内部モジュールの素通し再輸出はしない。
@@ -110,6 +110,39 @@ export type {
   Siglip2FromPretrainedOptions,
   Siglip2PipelineOptions,
 } from "./src/siglip2/pipeline.ts";
+
+export { Gemma4Pipeline } from "./src/gemma/pipeline.ts";
+export type {
+  Gemma4Assets,
+  Gemma4ChatOptions,
+  Gemma4ChatStream,
+  Gemma4PipelineConfig,
+  Gemma4PipelineOptions,
+} from "./src/gemma/pipeline.ts";
+/**
+ * 会話 → token id 列（`<bos>` 込み — 素の会話だけを受け、tools / thinking は fail loudly。
+ * `./gemma` を参照）。`chat` は内部でこれを通すので、要るのは低レベル面（`sequence`）を
+ * 自分で回すときだけ。
+ */
+export { gemma4ChatPrompt } from "./src/gemma/text/chat.ts";
+export type { Gemma4ChatMessage, Gemma4ChatRole } from "./src/gemma/text/chat.ts";
+/** 低レベル面で受けた token id を文字列へ戻す口（`./gemma` を参照）。 */
+export type { GemmaDecodeOptions, GemmaTokenizer } from "./src/gemma/text/tokenizer.ts";
+export type { StreamingDetokenizer } from "./src/text/detokenizer.ts";
+/**
+ * 生成の語彙（ADR 0083）。`Gemma4Pipeline.sequence()` を自分で回すときに要る型と、「会話が
+ * 入り切らない」を他の失敗と読み分けるための例外（決定 10 — `./gemma` を参照）。
+ */
+export { GenerationCapacityError } from "./src/generation/sequence.ts";
+export type {
+  GenerationEvent,
+  GenerationRequest,
+  GenerationSequence,
+  GenerationStop,
+  GenerationStream,
+} from "./src/generation/sequence.ts";
+export type { GenerationProgram } from "./src/generation/program.ts";
+export type { SamplerSpec } from "./src/generation/sampler.ts";
 
 export { VowelDetectorPipeline } from "./src/vowel-detector/pipeline.ts";
 export type {

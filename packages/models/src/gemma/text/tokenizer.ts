@@ -61,6 +61,36 @@ export class GemmaTokenizer {
     return this.#assets.spec.postProcessor;
   }
 
+  /** 資産が宣言している `<eos>` の id（停止条件の起点 — ADR 0083 決定 8）。 */
+  get eosId(): number {
+    return this.#assets.eosId;
+  }
+
+  /**
+   * この資産が生成しうる**最大の token id**（id 空間の相互照合 — ADR 0085 決定 5）。
+   *
+   * 追加語彙は語彙表の**外**へ採番されうる（EmbeddingGemma の `<image_soft_token>` は
+   * id 262144 / 語彙 262,144 行）ので、語彙行数だけでは上限にならない。ここが主 embedding の
+   * 行数を超える資産の組み合わせは、OOB ではなく**別 token の有効な行**を引く。
+   */
+  get maxTokenId(): number {
+    let max = this.#assets.model.pairStride - 1;
+    for (const id of this.#assets.addedTokens.values()) if (id > max) max = id;
+    return max;
+  }
+
+  /**
+   * 追加語彙の綴り → id（無ければ `undefined`）。
+   *
+   * chat の綴り（`<|turn>` / `<turn|>`）も停止 token（`<|tool_response>`）も**同じ資産**から
+   * 引くための口である（ADR 0084 決定 5 の「同一 digest set」— 別々の場所から拾うと片方だけ
+   * 古くなる）。欠けている綴りを名指しで落とすのは呼び手の責務なので、ここは `undefined` を
+   * 返すだけにする（この面自体は「知らない綴り」を異常と見なせない）。
+   */
+  addedTokenId(token: string): number | undefined {
+    return this.#assets.addedTokens.get(token);
+  }
+
   /**
    * `tokenizer.encode(text, add_special_tokens=False)` と同じ id 列。
    *

@@ -1,0 +1,61 @@
+/**
+ * `@karume/models/gemma` — Gemma ファミリ（gemma4 = 文字列 → 文字列の生成）のサブパス面。
+ *
+ * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
+ * 面は利用者ストーリーに対応する — 組む（{@link Gemma4Pipeline.fromAssets}）/ 会話する
+ * （`chat`）/ 自分で回す（`sequence` + {@link gemma4ChatPrompt} + tokenizer の復号）/
+ * 解放する（`dispose`）。
+ *
+ * **配布形はまだ無い**（段 5 — ADR 0065 stage 6 のライセンス門待ち）。`fromPretrained` も
+ * pin 定数も出していないので、資産は呼び手が用意する（`Gemma4Assets`）。
+ *
+ * 生成の語彙（`GenerationEvent` / `GenerationStop` / `SamplerSpec` / `GenerationCapacityError`）
+ * は**パイプライン非依存**だが、今のところ触れるのはこのファミリだけなので barrel とこの面の
+ * 両方から出す。`GenerationProgram` / `GenerationSequence` を**作る**関数は出さない — 入口は
+ * パイプラインだけで、静的配線を迂回して組める面を作らない。
+ *
+ * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ */
+
+export { Gemma4Pipeline } from "./src/gemma/pipeline.ts";
+export type {
+  Gemma4Assets,
+  Gemma4ChatOptions,
+  Gemma4ChatStream,
+  Gemma4PipelineConfig,
+  Gemma4PipelineOptions,
+} from "./src/gemma/pipeline.ts";
+
+/**
+ * 会話 → token id 列（`<bos>` 込み・末尾は生成プロンプト）。素の会話だけを受け、tools /
+ * thinking / 未知 role は fail loudly で拒否する（ADR 0084 決定 5）。
+ *
+ * `chat` は内部でこれを通すので、要るのは低レベル面（`sequence`）を自分で回すときだけ。
+ */
+export { gemma4ChatPrompt } from "./src/gemma/text/chat.ts";
+export type { Gemma4ChatMessage, Gemma4ChatRole } from "./src/gemma/text/chat.ts";
+
+/**
+ * 資産から組んだトークナイザ（`Gemma4Pipeline.tokenizer`）。低レベル面で受け取った token id を
+ * 文字列へ戻す口（`decode` / `createDetokenizer`）がここにある。
+ *
+ * 値としては公開しない — 入口は `Gemma4Pipeline.fromAssets` で、資産の突合を迂回した半端な
+ * トークナイザを作れる面にしない（ADR 0008）。
+ */
+export type { GemmaDecodeOptions, GemmaTokenizer } from "./src/gemma/text/tokenizer.ts";
+export type { StreamingDetokenizer } from "./src/text/detokenizer.ts";
+
+/**
+ * 生成の語彙（ADR 0083）。`sequence()` を自分で回すときに要る型と、「会話が入り切らない」を
+ * 他の失敗と読み分けるための例外（決定 10 — 会話の切り詰めはホストの責務）。
+ */
+export { GenerationCapacityError } from "./src/generation/sequence.ts";
+export type {
+  GenerationEvent,
+  GenerationRequest,
+  GenerationSequence,
+  GenerationStop,
+  GenerationStream,
+} from "./src/generation/sequence.ts";
+export type { GenerationProgram } from "./src/generation/program.ts";
+export type { SamplerSpec } from "./src/generation/sampler.ts";

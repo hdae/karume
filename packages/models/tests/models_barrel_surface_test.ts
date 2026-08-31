@@ -28,3 +28,49 @@ Deno.test("barrel: 内部ヘルパとしての generateGreedy は残っている
   assertEquals(typeof greedy.generateGreedy, "function");
   assertEquals(typeof greedy.planPrefillChunks, "function");
 });
+
+// ---- gemma（生成 API 波の段 4）--------------------------------------------
+//
+// 値 export の集合だけを見る（型は実行時に観測できない）。ここで縛るのは 2 点:
+//
+// ① 出すべきものが出ていること — 面が痩せると消費者は内部パスへ直接 import する
+// ② **組み立ての入口を出さないこと** — `createGenerationProgram` / `createGenerationSequence` /
+//    `createGemma4Ple` は静的配線の検証と資産の突合を通す前の半端な実体を作れる面で、
+//    入口はパイプラインだけにする（ADR 0008）。増えた export は型検査では咎められない
+
+/** barrel と `./gemma` の両方が出す gemma / 生成 API の**値** export。 */
+const GEMMA_VALUES = ["Gemma4Pipeline", "gemma4ChatPrompt", "GenerationCapacityError"];
+
+/** 公開面に出してはならない綴り（内部の組み立て口）。 */
+const INTERNAL_VALUES = [
+  "createGenerationProgram",
+  "createGenerationSequence",
+  "createSampler",
+  "createGemma4Ple",
+  "parseGemma4PleIndex",
+  "parseGemmaTokenizerAsset",
+  "renderGemma4Chat",
+  "gemma4StopTokens",
+  "GemmaTokenizer",
+];
+
+Deno.test("barrel: gemma の公開面（薄い面 — 組み立ての入口は出さない）", async () => {
+  const gemma = await import("../gemma.ts");
+  const barrel = Object.keys(models);
+  const subpath = Object.keys(gemma);
+
+  for (const name of GEMMA_VALUES) {
+    assert(barrel.includes(name), `barrel に ${name} が無い`);
+    assert(subpath.includes(name), `./gemma に ${name} が無い`);
+  }
+  for (const name of INTERNAL_VALUES) {
+    assertEquals(barrel.includes(name), false, `barrel に内部の ${name} が出ている`);
+    assertEquals(subpath.includes(name), false, `./gemma に内部の ${name} が出ている`);
+  }
+  // 両建て（ADR 0037）の食い違いを塞ぐ — サブパスの値 export は barrel にも全部載ること。
+  assertEquals(
+    subpath.filter((name) => !barrel.includes(name)),
+    [],
+    "./gemma にあって barrel に無い値 export",
+  );
+});
