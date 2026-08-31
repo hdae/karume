@@ -83,6 +83,14 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   decode の P 依存実測と同時）。起票のみ（第 2 波候補）: ChatSession 高レベル面・stop strings・
   `chatText()`・onProgress 可読化・maxResidentPleBytes・logitBias 配列化・防御コピー
   （prompt/options の発行時スナップショット）・example の residentPleShards フラグ化
+- **数値危険クラス監査波（2026-09-01 ユーザー指示・tanh_stable 修正の次タスク）**: Metal NaN
+  調査で確定した危険クラス =「WGSL 組込 / 合成式の**中間**がオーバーフローしうるが最終値は有限」
+  （前例: sigmoid_stable の MUST・今回の gelu_tanh/tanh）を kernels / codegen 横断で洗い、
+  ①警戒ケースの台帳化（op ごとに 安全根拠 or 危険判定を記録 — exp/log/div/pow/softmax 系・
+  fast-math 下の Inf/NaN 伝播差含む）②修正可能なものは同じ流儀（飽和打ち切り・stable 形）で
+  修正 ③飽和域テストを門として常設。隣接: Metal で OOM errorScope 沈黙
+  （known-issues 起票済み — 重み経路の明示 size 門 + requiredLimits のロード時実効化も同波で
+  検討）。調査の正本 = known-issues「gemma4 prefill NaN」節 + tools/metal-diagnostics/。
 - ~~M2 実機の手動確認 2 点~~ **消化（2026-09-01 実測）**: dp4a カナリア **16/16 緑**（QK f16
   格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
   読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤 → 裁定済み（既定維持
