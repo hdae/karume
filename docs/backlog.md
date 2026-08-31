@@ -58,13 +58,24 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   常駐させない）+ 疑似 HF サーバで実 DL 疎通（`fromPretrained → chat` golden 一致）。
   **ライセンス門（ADR 0065 stage 6）は 2026-09-01 に消化** — Gemma 4 は **Apache 2.0**
   （snapshot README frontmatter + license_link 本文で現物確認。「Gemma ToU」記述は撤回済み）。
-  **残 = HF 公開のみ（ユーザー確認待ち）**: 新規リポ `karume-gemma4-e2b` の作成・アップ・
-  `GEMMA4_CURRENT` pin 焼き込み・事後疎通（素材は完備 — 次リリース一括の anima/irodori/jvnv
-  再アップに同乗させるかは裁定待ち）。付随の要判断: `pipelineConfig.capacity` 640 据え置き
-  （1024 = RoPE 表上限まで上げても full スロット +5MB 級 — 会話長の政策裁定）
+  **HF 公開は次リリース一括に同乗（2026-09-01 裁定）**: 新規リポ `karume-gemma4-e2b` の作成・
+  アップ・`GEMMA4_CURRENT` pin 焼き込み・事後疎通を、anima/irodori/jvnv の shard v2 再アップ +
+  turbo 越境 2 巡 + pin 4 本と同じ回で実施（素材は完備）。リリースノートは検証 WF 経由で、
+  **breaking 2 件**（`generateGreedy` 公開削除 / 会話切り詰めのホスト責務化）+ 新面 `./gemma` を
+  記載（2026-09-01 裁定 OK）。**capacity は引き上げ裁定済み（2026-09-01）**: 1024（RoPE 表
+  上限）へ上げる — full スロット +5MB 級でほぼ無料。**それ以上に利点があれば RoPE 表の
+  再 export も可**（表は 6MiB/1024 行級・full KV は C×12KB 級で伸ばしやすい — 上げ幅は
+  対話 example 波で decode 速度の P 依存〈full 側 KV 読みが P に線形〉と合わせて確定）
 - **L-11 裁定（2026-08-30）**: 技術先行 = **gemma4 E2B**（品質実証済み — tokenizer / L-5 の
   実装対象）。ライセンス門は上記のとおり**消化済み（Apache 2.0）**。配布経路の
   minicpm5 先行は**採らない**（2026-08-31 裁定 10 — 段 5 の対象は gemma4 E2B のみ）
+- **対話 example 波（2026-09-01 起票・次の現行波 — compact 後に着手）**: ①`examples/gemma4/`
+  にプロンプト入力でインタラクティブに対話できるサンプル（streaming 表示・多ターン —
+  `Gemma4Pipeline` + `chat()` の写経見本）②その前提整備 = **Deno でディレクトリ指定の
+  ローカルローダー**（`fromPretrained` 同等の体験で `models/karume-gemma4-e2b/` を直接読む —
+  疑似 HF サーバや手組み `fromAssets` Record を要らなくする）+ **公開 API の調整**（ローダーの
+  置き場・公開面の形はまず設計を出して裁定）③capacity 1024 の反映（dist 再生成 —
+  上の引き上げ裁定・>1024 の再 export 判断は decode の P 依存実測と同時）
 - ~~M2 実機の手動確認 2 点~~ **消化（2026-09-01 実測）**: dp4a カナリア **16/16 緑**（QK f16
   格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
   読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤 → 裁定済み（既定維持
