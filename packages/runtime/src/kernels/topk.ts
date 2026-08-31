@@ -48,7 +48,7 @@
  * 無い。
  *
  * MUST: NaN は**最大として扱う**（argmax と同じ規律。torch も NaN を先頭へ出す — 実測同上）。
- * 判定は**ビット列**（{@link IS_NAN_FN}）— ドライバの比較は NaN で全て false になるので、
+ * 判定は**ビット列**（{@link IS_NAN_BITS_WGSL}）— ドライバの比較は NaN で全て false になるので、
  * 素の `>` に任せると NaN が黙って負ける。
  *
  * MUST: params は uniform で渡す（行ループ内に workgroupBarrier があり、ループ条件が
@@ -58,6 +58,7 @@
  * 実装がありうる）。
  */
 
+import { IS_NAN_BITS_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
@@ -123,15 +124,6 @@ export const assertTopkK = (k: number, storageLimitBytes: number, where: string)
 };
 
 /**
- * f32 の NaN を**ビット列**で判定する（符号を落として指数部全 1 + 仮数部非 0）。
- * src/kernels/argmax.ts / codegen/reduce.ts と同じ判定式（浮動小数の比較で判定しない — 比較を
- * 含む式はシェーダコンパイラが `max` イディオムへ畳み、ドライバの `max` が NaN を飲む）。
- */
-const IS_NAN_FN = `fn is_nan_bits(x: f32) -> bool {
-  return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
-}`;
-
-/**
  * `(vb, ib)` が `(va, ia)` に勝つか。順序は **NaN > 有限 > −inf**、同値なら **index が
  * 小さい方**（モジュール doc の MUST）。
  *
@@ -171,7 +163,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> values: array<f32>;
 @group(0) @binding(3) var<storage, read_write> indices: array<i32>;
 
-${IS_NAN_FN}
+${IS_NAN_BITS_WGSL}
 
 ${TOPK_BEATS_FN}
 

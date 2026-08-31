@@ -208,6 +208,28 @@ const inputsFor = (geometry: Geometry): Record<string, FilledTensor> => {
   };
 };
 
+/**
+ * 飽和域の門（gru_scan v2 = tanh_stable 共有の回帰検出）。n ゲート入力を飽和域
+ * （|x| > 9.5）〜 exp(2x) の f32 オーバーフロー域（|x| > 44.36）に置く。素の組込 `tanh` へ
+ * 戻す退行は、IEEE 忠実な実装ではビット同一のまま緑だが、`(exp(2x)−1)/(exp(2x)+1)` で
+ * 計算する実装（Metal fast-math）では下の Number.isFinite 門が赤くなる。r / z ゲートは
+ * 従来の値域のまま（sigmoid が 0 / 1 に張り付くと更新式の丸め差が値に出ない）。
+ */
+const SATURATED_N_GATE = [12, -15, 50, -50, 120, -120, 9.4, -9.6] as const;
+
+const saturatedInputsFor = (geometry: Geometry): Record<string, FilledTensor> => {
+  const { time, batch, hidden } = geometry;
+  const gates = 3 * hidden;
+  const gi = (i: number): number =>
+    (i % gates) >= 2 * hidden ? SATURATED_N_GATE[i % SATURATED_N_GATE.length] : GATE_INPUT(i);
+  return {
+    gi: fill([time, batch, gates], gi),
+    h0: fill([batch, hidden], STATE_INIT),
+    w: fill([gates, hidden], WEIGHT),
+    b: fill([gates], BIAS),
+  };
+};
+
 const scanGraph = (op: string, geometry: Geometry): GraphJson => {
   const { time, batch, hidden } = geometry;
   const gates = 3 * hidden;
@@ -236,9 +258,17 @@ for (const op of ["gru_scan", "gru_scan_reverse"] as const) {
     fn: async () => {
       const gpu = await acquireGpu();
       try {
-        for (const geometry of CASES) {
-          const label = `${op} T${geometry.time} N${geometry.batch} H${geometry.hidden}`;
-          const named = inputsFor(geometry);
+        const parityCases = [
+          ...CASES.map((geometry) => ({ geometry, named: inputsFor(geometry), tag: "" })),
+          // 飽和域ケース（H = 実測形の 128 — 候補ゲートの引数が ±9.5 を跨ぐ）
+          {
+            geometry: { time: 3, batch: 2, hidden: 128 },
+            named: saturatedInputsFor({ time: 3, batch: 2, hidden: 128 }),
+            tag: " 飽和域",
+          },
+        ];
+        for (const { geometry, named, tag } of parityCases) {
+          const label = `${op} T${geometry.time} N${geometry.batch} H${geometry.hidden}${tag}`;
           const fused = await run(gpu, scanGraph(op, geometry), asSingleOpInputs(named));
           const decomposed = await run(
             gpu,

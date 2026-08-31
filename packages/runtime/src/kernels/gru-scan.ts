@@ -21,11 +21,12 @@
  * MUST: `sigmoid` の本体は elementwise codegen と**同じ文字列**を共有する（silu.ts と同じ理由 —
  * 書き写すと primitive と融合版で丸め列が割れうる）。
  *
- * NOTE: `tanh` はここだけ**組込のまま**で、primitive 側の飽和打ち切り
- * （src/codegen/elementwise.ts の `TANH_STABLE_WGSL`）を共有していない。打ち切りは IEEE 忠実な
- * tanh に対してビット同一なので上のビット同一門は割れないが、`(exp(2x)−1)/(exp(2x)+1)` で
- * 計算する実装（Metal fast-math）では |gi_n + gh_n·r| > 44.36 でこの op だけが沈黙 NaN を返す。
- * 同じ危険クラスの横断監査（この op を含む）は別波の宿題。
+ * MUST: `tanh` の本体も elementwise codegen の `TANH_STABLE_WGSL` を**同じ文字列**で共有する
+ * （sigmoid と同じ理由）。素の組込 `tanh` は `(exp(2x)−1)/(exp(2x)+1)` で計算する実装
+ * （Metal fast-math）で |gi_n + gh_n·r| > 44.36 の沈黙 NaN になり、分解経路（tanh_stable 済み）
+ * とのビット同一も飽和域で割れる。配布資産の実測は前活性 最大 17.81 で飽和域 9.5 を既に
+ * 踏んでいる（NaN 境界への静的上界は層 1 で 31.57 — docs/research/2026-08-31-op-numerics-review.md）。
+ * 打ち切りは IEEE 忠実な tanh に対してビット同一（根拠は TANH_STABLE_WGSL の doc）。
  *
  * ## 丸め障壁（workgroup memory 往復）
  *
@@ -51,7 +52,7 @@
  * この op の存在理由の 1 つ — ADR 0056 決定 2）。
  */
 
-import { SIGMOID_STABLE_WGSL } from "../codegen/elementwise.ts";
+import { IS_NAN_BITS_WGSL, SIGMOID_STABLE_WGSL, TANH_STABLE_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { GRU_SCAN_MAX_HIDDEN } from "../codegen/limits.ts";
 import { assertU32Params } from "../codegen/params.ts";
@@ -72,9 +73,12 @@ const canonicalizeDirection = (direction: GruScanDirection): GruScanDirection =>
   throw new CodegenError(`gru_scan codegen: 走査方向が不正（${direction}）`);
 };
 
-/** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
+/**
+ * MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。
+ * v2: 候補ゲートの tanh を TANH_STABLE_WGSL の共有へ差し替え（Metal fast-math の沈黙 NaN 根治）。
+ */
 export const gruScanKey = (direction: GruScanDirection): string =>
-  `gru_scan:v1:f32:${
+  `gru_scan:v2:f32:${
     canonicalizeDirection(direction)
   }:wg${GRU_SCAN_WORKGROUP_SIZE}:h${GRU_SCAN_MAX_HIDDEN}`;
 
@@ -100,6 +104,10 @@ var<workgroup> h_shared: array<f32, ${GRU_SCAN_MAX_HIDDEN}>;
 var<workgroup> stage: array<u32, ${GRU_SCAN_MAX_HIDDEN}>;
 
 ${SIGMOID_STABLE_WGSL}
+
+${IS_NAN_BITS_WGSL}
+
+${TANH_STABLE_WGSL}
 
 @compute @workgroup_size(${GRU_SCAN_WORKGROUP_SIZE})
 fn main(
@@ -149,7 +157,7 @@ fn main(
       var cand = 0.0;
       if (lane_used) {
         // n = tanh(i_n + h_n·r) — 入力側が第 1 引数
-        cand = tanh(gi[gi_base + hidden * 2u + lid] + bitcast<f32>(stage[lid]));
+        cand = tanh_stable(gi[gi_base + hidden * 2u + lid] + bitcast<f32>(stage[lid]));
         // 丸め障壁 ②: h' = (h − n)·z + n の mul と add の間
         stage[lid] = bitcast<u32>((h_prev - cand) * gate_z);
       }

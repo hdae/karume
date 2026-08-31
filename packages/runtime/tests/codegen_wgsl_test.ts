@@ -1525,11 +1525,11 @@ Deno.test("gru_scan は更新式を分解形の逐語で書き、mul と add の
   assertEquals(GRU_SCAN_MAX_HIDDEN, 256);
   assertEquals(
     gruScanKey("forward"),
-    `gru_scan:v1:f32:forward:wg${GRU_SCAN_WORKGROUP_SIZE}:h${GRU_SCAN_MAX_HIDDEN}`,
+    `gru_scan:v2:f32:forward:wg${GRU_SCAN_WORKGROUP_SIZE}:h${GRU_SCAN_MAX_HIDDEN}`,
   );
   assertEquals(
     gruScanKey("reverse"),
-    `gru_scan:v1:f32:reverse:wg${GRU_SCAN_WORKGROUP_SIZE}:h${GRU_SCAN_MAX_HIDDEN}`,
+    `gru_scan:v2:f32:reverse:wg${GRU_SCAN_WORKGROUP_SIZE}:h${GRU_SCAN_MAX_HIDDEN}`,
   );
   assertNotEquals(gruScanKey("forward"), gruScanKey("reverse"));
   const invalid = "backward" as GruScanDirection;
@@ -1547,6 +1547,13 @@ Deno.test("gru_scan は更新式を分解形の逐語で書き、mul と add の
       true,
       where,
     );
+    // MUST: 候補ゲートは素の tanh でなく tanh_stable（Metal fast-math の沈黙 NaN — v2）
+    assertEquals(
+      wgsl.includes("cand = tanh_stable(gi[gi_base + hidden * 2u + lid]"),
+      true,
+      where,
+    );
+    assertEquals(wgsl.includes("fn tanh_stable(x: f32)"), true, where);
     // MUST: 丸め障壁 ①（n の積）と ②（更新式の積）が workgroup memory 往復で残っている
     assertEquals(wgsl.includes("stage[lid] = bitcast<u32>(gh_n * gate_r);"), true, where);
     assertEquals(

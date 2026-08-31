@@ -22,10 +22,11 @@
  * workgroup 内で一様である必要があり、storage からのロードは一様性解析で保証されない。
  *
  * MUST: `amax` / `amin` は縮約対象に NaN があれば NaN を返す（torch と同じ）。ドライバの
- * `max` / `min` は NaN を飲むので、伝播はビット列判定の {@link IS_NAN_FN} が担う。
+ * `max` / `min` は NaN を飲むので、伝播はビット列判定の {@link IS_NAN_BITS_WGSL} が担う。
  */
 
 import type { IrDtype } from "../format/ir.ts";
+import { IS_NAN_BITS_WGSL } from "./elementwise.ts";
 import { outputDtypeOf, REDUCE_OPS, type ReduceOpName, resolveOpContract } from "../ops.ts";
 import { CodegenError } from "./errors.ts";
 import { assertU32Params } from "./params.ts";
@@ -72,18 +73,6 @@ const IDENTITY: Readonly<Record<ReduceOpName, Readonly<Partial<Record<IrDtype, s
   amax: { f32: `-${F32_MAX}` },
   amin: { f32: F32_MAX },
 };
-
-/**
- * f32 の NaN を**ビット列**で判定する（符号を落として指数部全 1 + 仮数部非 0）。
- *
- * MUST: 浮動小数の比較で NaN を判定しない。比較単体は仕様どおり false になるのに、
- * `select(x, m, x < m)` 全体はシェーダコンパイラが `max` イディオムへ畳み、ドライバの
- * `max` が NaN を飲む（実測・2026-08-02 / 本リポジトリの検証環境）。整数の `&` と `>` は
- * その畳み込みの対象にならない。src/codegen/elementwise.ts と同じ判定式。
- */
-const IS_NAN_FN = `fn is_nan_bits(x: f32) -> bool {
-  return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
-}`;
 
 /**
  * NaN 伝播する `max` / `min`。**縮約は 2 段（1 スレッドの走査 + workgroup の木）**なので、
@@ -134,7 +123,7 @@ export const reduceWgsl = (spec: ReduceSpec): string => {
   // 同型なら 1 語で書く（f32 形の生成物はスナップショットでバイト単位に凍結されている）。
   const label = from === to ? from : `${from}>${to}`;
   const propagate = NAN_PROPAGATING_FN[op];
-  const helpers = propagate === undefined ? [] : [IS_NAN_FN, propagate];
+  const helpers = propagate === undefined ? [] : [IS_NAN_BITS_WGSL, propagate];
   return [
     `// karume row reduce ${op} (last dim, ${label}, generated)`,
     "struct Params {",
@@ -245,7 +234,7 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
   const accumulator = WGSL_SCALAR[to];
   const label = from === to ? from : `${from}>${to}`;
   const propagate = NAN_PROPAGATING_FN[op];
-  const helpers = propagate === undefined ? [] : [IS_NAN_FN, propagate];
+  const helpers = propagate === undefined ? [] : [IS_NAN_BITS_WGSL, propagate];
   const size = AXIS_REDUCE_WORKGROUP_SIZE;
   return [
     `// karume axis reduce ${op} (non-last dim, ${label}, generated)`,

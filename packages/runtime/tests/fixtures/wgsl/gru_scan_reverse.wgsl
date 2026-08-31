@@ -20,6 +20,16 @@ fn sigmoid_stable(x: f32) -> f32 {
   return select(1.0 / (1.0 + t), t / (1.0 + t), x < 0.0);
 }
 
+fn is_nan_bits(x: f32) -> bool {
+  return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
+}
+
+fn tanh_stable(x: f32) -> f32 {
+  let lo = select(x, -9.5, x < -9.5);
+  let t = select(lo, 9.5, x > 9.5);
+  return select(tanh(t), x, is_nan_bits(x));
+}
+
 @compute @workgroup_size(256)
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
@@ -68,7 +78,7 @@ fn main(
       var cand = 0.0;
       if (lane_used) {
         // n = tanh(i_n + h_n·r) — 入力側が第 1 引数
-        cand = tanh(gi[gi_base + hidden * 2u + lid] + bitcast<f32>(stage[lid]));
+        cand = tanh_stable(gi[gi_base + hidden * 2u + lid] + bitcast<f32>(stage[lid]));
         // 丸め障壁 ②: h' = (h − n)·z + n の mul と add の間
         stage[lid] = bitcast<u32>((h_prev - cand) * gate_z);
       }

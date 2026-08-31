@@ -28,7 +28,7 @@
  *
  * MUST: NaN は**最大として扱う**（torch 準拠 — 実測 2026-08-17: `argmax` は NaN の index を
  * 返し、複数あれば最小 index）。`amax` / `amin` の NaN 伝播（reduce.ts）と同じ規律で、
- * 判定は**ビット列**（{@link IS_NAN_FN}）が担う — ドライバの比較は NaN で全て false に
+ * 判定は**ビット列**（{@link IS_NAN_BITS_WGSL}）が担う — ドライバの比較は NaN で全て false に
  * なるので、素の `>` に任せると NaN が黙って負けて「amax は NaN・argmax は別要素」という
  * 族内で食い違う結果になる。
  *
@@ -39,6 +39,7 @@
  * する実装がありうる）。
  */
 
+import { IS_NAN_BITS_WGSL } from "../codegen/elementwise.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
@@ -48,15 +49,6 @@ export const ARGMAX_KEY = `argmax:v1:f32>i32:lastdim:minindex:wg${ARGMAX_WORKGRO
 
 /** −inf の f32 ビット列（params 3 語目 — WGSL に無限大リテラルが無い）。 */
 export const ARGMAX_NEG_INF_BITS = 0xff800000;
-
-/**
- * f32 の NaN を**ビット列**で判定する（符号を落として指数部全 1 + 仮数部非 0）。
- * src/codegen/reduce.ts / elementwise.ts と同じ判定式（浮動小数の比較で判定しない — 比較を
- * 含む式はシェーダコンパイラが `max` イディオムへ畳み、ドライバの `max` が NaN を飲む）。
- */
-const IS_NAN_FN = `fn is_nan_bits(x: f32) -> bool {
-  return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
-}`;
 
 /**
  * `(vb, ib)` が `(va, ia)` に勝つか。順序は **NaN > 有限 > −inf**、同値なら **index が
@@ -90,7 +82,7 @@ export const ARGMAX_WGSL: string = [
   "@group(0) @binding(1) var<storage, read> x: array<f32>;",
   "@group(0) @binding(2) var<storage, read_write> out: array<i32>;",
   "",
-  IS_NAN_FN,
+  IS_NAN_BITS_WGSL,
   "",
   ARGMAX_BEATS_FN,
   "",

@@ -267,7 +267,7 @@ const LOG1P_FN = `fn log1p_series(x: f32) -> f32 {
  * WGSL には演算の畳み込みを禁じる手段が無いので、**畳み込みの対象にならない整数演算**
  * （`&` と `>`）で判定する。これが {@link nanGuard} を使う唯一の理由。
  */
-const IS_NAN_FN = `fn is_nan_bits(x: f32) -> bool {
+export const IS_NAN_BITS_WGSL = `fn is_nan_bits(x: f32) -> bool {
   return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
 }`;
 
@@ -310,8 +310,8 @@ export const TANH_SATURATION = 9.5;
  * 結果が 1 ビットも動かない（打ち切られる側は既に ±1.0）。閾値の根拠は
  * {@link TANH_SATURATION}。
  *
- * MUST: NaN 伝播はビット列判定（{@link IS_NAN_FN}）で担い、打ち切りの比較には委ねない。
- * 2 段 select はシェーダコンパイラが `clamp` イディオムへ畳みうるので（機序は IS_NAN_FN の
+ * MUST: NaN 伝播はビット列判定（{@link IS_NAN_BITS_WGSL}）で担い、打ち切りの比較には委ねない。
+ * 2 段 select はシェーダコンパイラが `clamp` イディオムへ畳みうるので（機序は IS_NAN_BITS_WGSL の
  * doc）、素朴に書くと `clamp(NaN)` が閾値に化けて **NaN が黙って ±1.0 に飲まれる**。
  *
  * MUST: この本文を書き写さない（{@link SIGMOID_STABLE_WGSL} と同じ理由 — 写すと primitive と
@@ -326,9 +326,10 @@ export const TANH_SATURATION = 9.5;
  *    できない）。実測では否定済み — 生成物は WGSL スナップショットで、値は golden 群
  *    （sbv2 の WAV sha256 6 本・gemma4 の系列厳密一致）で固定されており、いずれも
  *    本修正の前後で不変だった。
- * 3. 「中間でオーバーフローするが最終値は有限」という**同じ危険クラス**の横断監査は
- *    未実施（別波）。この doc が押さえているのは tanh / gelu_tanh の 2 op だけで、
- *    src/kernels/gru-scan.ts の組込 `tanh` は意図的に手つかず（同ファイルの NOTE）。
+ * 3. 「中間でオーバーフローするが最終値は有限」という**同じ危険クラス**は横断監査済み
+ *    （docs/research/2026-08-31-op-numerics-review.md）。exp 系は全経路が max 減算か -|x|
+ *    固定で構造的に安全、softplus は threshold-where 分解が守り、唯一の取り残しだった
+ *    src/kernels/gru-scan.ts の組込 `tanh` も本関数の共有で解消した。
  */
 export const TANH_STABLE_WGSL = `fn tanh_stable(x: f32) -> f32 {
   let lo = select(x, ${f32Literal(-TANH_SATURATION)}, x < ${f32Literal(-TANH_SATURATION)});
@@ -341,7 +342,7 @@ export const TANH_STABLE_WGSL = `fn tanh_stable(x: f32) -> f32 {
  * WGSL 名を返す。
  *
  * MUST: `clamp` / `clamp_min` / `relu` は {@link nanGuard} で包む。torch は 3 つとも
- * NaN を伝播するが、素の式は畳み込みで NaN を飲む（機序は {@link IS_NAN_FN}）。
+ * NaN を伝播するが、素の式は畳み込みで NaN を飲む（機序は {@link IS_NAN_BITS_WGSL}）。
  * MUST: `clamp` は組込の `clamp(x, lo, hi)` を使わない。`lo > hi` の結果が indeterminate
  * である（契約側で min <= max を拒否してはいる）。
  * MUST: `leaky_relu` は `max` / `min` を使わず **select 形**（ADR 0015）。`relu(x) + s·min(x, 0)`
@@ -383,7 +384,7 @@ const UNARY_WGSL: Readonly<
     ),
   // ADR 0017 の裁定どおり select 形（`max(x, m)` は WGSL が NaN 伝播を保証しない）。
   // NOTE: 「2 段 select なら NaN が伝播する」という ADR 0015 / op-vocabulary.md の当初の
-  // 見立ては実測で否定された（畳み込みで `max` に化ける — {@link IS_NAN_FN}）。
+  // 見立ては実測で否定された（畳み込みで `max` に化ける — {@link IS_NAN_BITS_WGSL}）。
   // 伝播を担うのは select の形ではなく、外殻のビット列判定だけ。
   clamp_min: (a, scalar) => nanGuard(a, `select(${a}, ${scalar(0)}, ${a} < ${scalar(0)})`),
   leaky_relu: (a, scalar) => `select(${scalar(0)} * ${a}, ${a}, ${a} >= 0.0)`,
@@ -412,7 +413,7 @@ const castWgsl = (a: string, from: IrDtype, to: IrDtype): string =>
 /** 補助関数の注入順は固定（式の出現順にしない）— 同一キー → バイト同一 WGSL のため。 */
 const HELPERS: readonly (readonly [string, string])[] = [
   ["erf_approx", ERF_FN],
-  ["is_nan_bits", IS_NAN_FN],
+  ["is_nan_bits", IS_NAN_BITS_WGSL],
   ["log1p_series", LOG1P_FN],
   ["sigmoid_stable", SIGMOID_STABLE_WGSL],
   ["tanh_stable", TANH_STABLE_WGSL],
@@ -451,7 +452,7 @@ const usedHelpers = (value: string): readonly string[] => {
  * NOTE: 載るのは**値スロットの dtype と出力 dtype**だけで足りる。条件スロット（where の
  * bool）とスカラの本数は op 名から一意に決まるため、独立した軸にならない。
  *
- * v2: clamp / clamp_min / relu に NaN 伝播の外殻が入り WGSL 本文が変わった（IS_NAN_FN）。
+ * v2: clamp / clamp_min / relu に NaN 伝播の外殻が入り WGSL 本文が変わった（IS_NAN_BITS_WGSL）。
  * v3: tanh / gelu_tanh が飽和打ち切りを通るようになった（{@link TANH_STABLE_WGSL}）。
  * 版は **族ごと**に上げる（ADR 0020 決定 3）— op 別の例外表を持つと、次の改版で「どの op が
  * 今どの版か」を二重管理することになる（他の op はキーが変わるだけで生成物は同一）。
