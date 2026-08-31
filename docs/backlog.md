@@ -88,10 +88,20 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   （危険クラス台帳・C 0 / E 0・レビュー原本 = `.claude/reviews/2026-08-31_b35cf5c/`）
   ②修正 = gru_scan tanh_stable 化（is_nan_bits 正本化と同時）+ 門 4 点 + doc 訂正群 +
   Box–Muller + exporter act_quant 鏡像化 ③門の常設 = 飽和域の厳密カナリア（±1.0/x/−0.0 +
-  ±Inf）+ op-vocabulary へ危険クラス門を規約化。**残り（裁定待ち → 消化）**:
-  W-2/W-3（融合 attention 空行ガード + 全 NaN 行の意味論）・W-5（DEFAULT_TOLERANCE の
-  op 別化 = M1 宿題・省略呼び実測 46 か所）。tools/metal-diagnostics/ は Mac 側の
-  gru_scan v2 実走確認（parity 飽和域ケース）まで温存 → 削除。
+  ±Inf）+ op-vocabulary へ危険クラス門を規約化 ④W-2/W-3 裁定 a 消化 = softmax 族 nan_max
+  統一 + 融合 attention 空行ガード（breaking 2 点 — ADR 0044 追記）⑤W-5 消化 =
+  DEFAULT_TOLERANCE 退役 → op 別実測表 + ビット同一門
+  （[research/2026-08-31-op-tolerance-measurement.md](research/2026-08-31-op-tolerance-measurement.md)）。
+  **残 = Mac（M2）手動検証**（下の手順）→ 緑なら tools/metal-diagnostics/ を削除して波クローズ。
+  - **Mac 検証手順（/clear 後の再開点）**: リポを pull → ① `deno test -A
+    packages/runtime/tests/gpu_gru_scan_parity_test.ts`（**飽和域ケース込み 12 本** — 旧 v1 なら
+    Metal で NaN になった入力で tanh_stable の根治を実証する本命）② `deno test -A
+    packages/runtime/tests/gpu_ops_test.ts --filter 飽和域`（厳密 ±1.0 門 — 仕様適合のまま赤に
+    なるドライバならビット同一 golden も割れている知らせ）③ `deno test -A
+    packages/runtime/tests/gpu_ops_test.ts --filter "ビット同一"`（GEMM/縮約の格子門 — Metal の
+    FMA 差はこの入力では出ない見込み・赤なら op 名を記録）④ 余力があればフル
+    `deno task verify`（既知の Metal 赤 = attention i8a8 系 4 + conv2d parity 2 + gemv u32 1 —
+    known-issues 記載のもの以外が出たら新規）。
 - **数値レビュー後続の起票（2026-08-31）**:
   - **Metal OOM errorScope 沈黙**（known-issues — 重み経路の明示 size 門 + `requiredLimits`
     のロード時実効化。監査波から分離・独立に着手可）

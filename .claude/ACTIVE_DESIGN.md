@@ -11,6 +11,20 @@
 
 ## Now
 
+- **OP 数値レビュー波 + 修正波（2026-08-31 — ローカル作業クローズ・Mac 検証待ち）**:
+  Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
+  台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・
+  原本 `.claude/reviews/2026-08-31_b35cf5c/`）。修正 12 コミット消化:
+  **gru_scan tanh_stable 化**（is_nan_bits/nan_max 正本化・キー v2）/ **softmax 族 nan_max
+  統一 + 融合 attention 空行ガード**（breaking 2 点 — ADR 0044 追記・limitations が消費側 doc）/
+  **DEFAULT_TOLERANCE 退役 = op 別実測表 + ビット同一門**（M1 宿題消化 —
+  [research/2026-08-31-op-tolerance-measurement.md](../docs/research/2026-08-31-op-tolerance-measurement.md)・
+  表 = `tests/helpers/op-tolerance.ts`・表に無い op は fail loudly）/ 飽和域の厳密カナリア /
+  L 群軽微修正 + fma 契約 doc 訂正（ADR 0076 追記）/ exporter act_quant 鏡像化 /
+  **GPTQ 掃引軸**（opt-in 実装 + 実測 → **既定現状維持を封印** —
+  [research/2026-08-31-gptq-axes-sweep.md](../docs/research/2026-08-31-gptq-axes-sweep.md)）。
+  **残 = Mac（M2）手動検証**（gru_scan v2 飽和域 parity ほか — backlog now の手順）と
+  tools/metal-diagnostics/ の削除（Mac 緑確認後）。
 - **LLM（gemma4 E2B）トラック（2026-08-30〜31）**: 先行波（L-0/L-1/L-10）クローズ →
   **K-11 も消化済み**（ADR [0082](../docs/decisions/0082-linear-gemv-decode.md) — decode M=1 の
   i4 linear を GEMV 族へ・**ビット同一のまま ×8.45・decode 84.2→32.5ms/token = 30.8 tok/s**。
