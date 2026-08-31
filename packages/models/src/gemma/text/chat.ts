@@ -89,6 +89,48 @@ const trim = (text: string): string => {
 };
 
 /**
+ * 発話 1 つが素の会話の射程に入ることを確かめる（射程外は fail loudly）。
+ *
+ * `where` は診断の頭に付く場所（呼び手ごとに違う — 会話なら `… messages[i]`）。
+ */
+const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => {
+  if (typeof message !== "object" || message === null) {
+    throw new Error(`${where} がオブジェクトでない`);
+  }
+  const extra = Object.keys(message).filter((key) => !MESSAGE_KEYS.includes(key));
+  if (extra.length > 0) {
+    throw new Error(
+      `${where}: 射程外の欄 ${extra.join(" / ")}` +
+        `（tools / reasoning / tool_calls などは初版では拒否する — ADR 0084 決定 5。` +
+        `黙って無視すると「渡したのに効かない」が例外なしで通る）`,
+    );
+  }
+  if (!ROLES.includes(message.role)) {
+    throw new Error(
+      `${where}.role '${String(message.role)}' が ${ROLES.join(" / ")} のどれでもない` +
+        `（'model' は template の出力側の綴りで、入力の role ではない）`,
+    );
+  }
+  if (typeof message.content !== "string") {
+    throw new Error(
+      `${where}.content が文字列でない` +
+        `（画像 / 音声パートの配列は初版では拒否する — ADR 0084 決定 5）`,
+    );
+  }
+  // 上流は model turn の本文にだけ `strip_thinking` を掛ける（thinking チャネルを本文から
+  // 巻き戻す）。ここは掛けないので、綴りが本文に居ると**黙って別の文字列**になる。
+  if (
+    message.role === "assistant" &&
+    (message.content.includes(START_OF_CHANNEL) || message.content.includes(END_OF_CHANNEL))
+  ) {
+    throw new Error(
+      `${where}.content に thinking チャネルの綴り（${START_OF_CHANNEL} / ` +
+        `${END_OF_CHANNEL}）がある（初版の射程外 — ADR 0084 決定 5）`,
+    );
+  }
+};
+
+/**
  * 素の会話であることを確かめる（射程外は fail loudly）。
  *
  * MUST: 空の会話も落とす — 上流の `apply_chat_template` が `ValueError` で拒否するので、
@@ -99,41 +141,7 @@ const assertPlainConversation = (messages: readonly Gemma4ChatMessage[]): void =
     throw new Error("gemma4ChatPrompt: 会話が空（上流の apply_chat_template も拒否する）");
   }
   messages.forEach((message, index) => {
-    const where = `gemma4ChatPrompt: messages[${index}]`;
-    if (typeof message !== "object" || message === null) {
-      throw new Error(`${where} がオブジェクトでない`);
-    }
-    const extra = Object.keys(message).filter((key) => !MESSAGE_KEYS.includes(key));
-    if (extra.length > 0) {
-      throw new Error(
-        `${where}: 射程外の欄 ${extra.join(" / ")}` +
-          `（tools / reasoning / tool_calls などは初版では拒否する — ADR 0084 決定 5。` +
-          `黙って無視すると「渡したのに効かない」が例外なしで通る）`,
-      );
-    }
-    if (!ROLES.includes(message.role)) {
-      throw new Error(
-        `${where}.role '${String(message.role)}' が ${ROLES.join(" / ")} のどれでもない` +
-          `（'model' は template の出力側の綴りで、入力の role ではない）`,
-      );
-    }
-    if (typeof message.content !== "string") {
-      throw new Error(
-        `${where}.content が文字列でない` +
-          `（画像 / 音声パートの配列は初版では拒否する — ADR 0084 決定 5）`,
-      );
-    }
-    // 上流は model turn の本文にだけ `strip_thinking` を掛ける（thinking チャネルを本文から
-    // 巻き戻す）。ここは掛けないので、綴りが本文に居ると**黙って別の文字列**になる。
-    if (
-      message.role === "assistant" &&
-      (message.content.includes(START_OF_CHANNEL) || message.content.includes(END_OF_CHANNEL))
-    ) {
-      throw new Error(
-        `${where}.content に thinking チャネルの綴り（${START_OF_CHANNEL} / ` +
-          `${END_OF_CHANNEL}）がある（初版の射程外 — ADR 0084 決定 5）`,
-      );
-    }
+    assertPlainMessage(message, `gemma4ChatPrompt: messages[${index}]`);
   });
 };
 
@@ -192,6 +200,60 @@ export const gemma4ChatPrompt = (
   tokenizer: GemmaTokenizer,
   messages: readonly Gemma4ChatMessage[],
 ): number[] => tokenizer.encode(renderGemma4Chat(messages));
+
+/**
+ * 新しい発話 1 つ → **会話の続きとして描き足す差分**（`<bos>` も過去 turn も含まない）。
+ *
+ * ## MUST: 前 turn を閉じる `<turn|>` は含めない（turn-local 契約）
+ *
+ * 直前の model turn を閉じる `<turn|>` は、生成が出して `GenerationSequence` が未 commit の
+ * frontier（`pendingToken`）として持っている綴りで、**次の `generate` が prompt の先頭へ自動で
+ * 連結する**（ADR 0083 決定 4）。ここが描くのはその**次**からで、先頭は `<turn|>` の直後に来る
+ * 改行である。二重に描くと turn の区切りが 2 つになり、例外は 1 つも出ない。
+ *
+ * つまり成立する等式は（`⧺` は token 列の連結）:
+ *
+ * ```text
+ * gemma4ChatPrompt(全会話)
+ *   = gemma4ChatPrompt(先頭 turn まで) ⧺ 生成された本文 ⧺ [<turn|>] ⧺ gemma4ChatTurn(次の発話) ⧺ …
+ * ```
+ *
+ * この等式は `gemma_chat_test.ts` の門が任意の分割で見る（template の turn-local 性が壊れたら
+ * そこで割れる — 消費者に「先頭の `<bos>` を剥がす」当て推量を書かせないための正本）。
+ *
+ * MUST: 使えるのは**生成が `<turn|>` で閉じた直後**だけである。max-tokens や `break` で打ち切った
+ * ターンの続きは model turn が閉じていないので、増分ではなく続きの生成（`prompt: []`）が正。
+ *
+ * MUST: `assistant` は拒否する。model turn は生成が埋める席で、上流の template も連続 assistant を
+ * 1 つの turn へ畳む（`renderGemma4Chat` の分岐 2）ため、「閉じた model turn の後ろへ assistant を
+ * 足す」形は差分として描けない。会話へ差し込むなら {@link gemma4ChatPrompt} で全体を描き直す。
+ */
+export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
+  assertPlainMessage(message, "gemma4ChatTurn: message");
+  if (message.role === "assistant") {
+    throw new Error(
+      `gemma4ChatTurn: role 'assistant' は差分にできない` +
+        `（model turn は生成が埋める席で、template も連続 assistant を 1 つへ畳む — ` +
+        `会話へ差し込むなら gemma4ChatPrompt で全体を描き直す）`,
+    );
+  }
+  // 先頭の改行は「前 turn を閉じた `<turn|>` の直後」の 1 文字（`renderGemma4Chat` の
+  // `${END_OF_TURN}\n`）。`<turn|>` 自体は pendingToken が前置するのでここには無い。
+  return `\n${START_OF_TURN}${message.role}\n${trim(message.content)}${END_OF_TURN}\n` +
+    `${START_OF_TURN}${MODEL_ROLE}\n`;
+};
+
+/**
+ * 新しい発話 1 つ → **次の `generate` にそのまま渡せる差分 token 列**（turn-local 契約は
+ * {@link renderGemma4ChatTurn} の doc が正本 — 前 turn を閉じる `<turn|>` は含めない）。
+ *
+ * 多ターンの会話を `Gemma4Pipeline.sequence()` で回すときの入口である。過去 turn は context の
+ * KV にあるので、毎ターン会話全体を描き直す（= O(n²) の prefill）必要は無い。
+ */
+export const gemma4ChatTurn = (
+  tokenizer: GemmaTokenizer,
+  message: Gemma4ChatMessage,
+): number[] => tokenizer.encode(renderGemma4ChatTurn(message));
 
 /**
  * 停止 token の集合（ADR 0083 決定 8）— **トークナイザ資産から導出する**。

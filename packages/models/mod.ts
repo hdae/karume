@@ -131,6 +131,11 @@ export { parseGemma4PipelineConfig } from "./src/gemma/config.ts";
  * 自分で回すときだけ。
  */
 export { gemma4ChatPrompt } from "./src/gemma/text/chat.ts";
+/**
+ * 新しい発話 1 つ → 会話の続きとして描き足す**差分** token 列（多ターンを `sequence` で回すときの
+ * 2 ターン目以降の入口。前 turn を閉じる `<turn|>` は含めない — `./gemma` を参照）。
+ */
+export { gemma4ChatTurn } from "./src/gemma/text/chat.ts";
 export type { Gemma4ChatMessage, Gemma4ChatRole } from "./src/gemma/text/chat.ts";
 /** 低レベル面で受けた token id を文字列へ戻す口（`./gemma` を参照）。 */
 export type { GemmaDecodeOptions, GemmaTokenizer } from "./src/gemma/text/tokenizer.ts";
@@ -141,6 +146,8 @@ export type { StreamingDetokenizer } from "./src/text/detokenizer.ts";
  */
 export { GenerationCapacityError } from "./src/generation/sequence.ts";
 export type {
+  GenerationCapacityConstraint,
+  GenerationCapacityDetail,
   GenerationEvent,
   GenerationRequest,
   GenerationSequence,

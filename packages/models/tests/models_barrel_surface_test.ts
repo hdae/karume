@@ -42,6 +42,9 @@ Deno.test("barrel: 内部ヘルパとしての generateGreedy は残っている
 const GEMMA_VALUES = [
   "Gemma4Pipeline",
   "gemma4ChatPrompt",
+  // 多ターンを `sequence` で回す消費者の入口。無いと「全体を描いて先頭の `<bos>` を剥がす」
+  // 当て推量を書かされる（turn-local 契約が公開面から読めない）。
+  "gemma4ChatTurn",
   "GenerationCapacityError",
   // `fromAssets` を使う消費者が hub の `Record<string, unknown>` から config を組む口。
   // 出していないと `as` で被せるか、3 つの数を配布形と消費側で二重持ちすることになる。
@@ -57,6 +60,7 @@ const INTERNAL_VALUES = [
   "parseGemma4PleIndex",
   "parseGemmaTokenizerAsset",
   "renderGemma4Chat",
+  "renderGemma4ChatTurn",
   "gemma4StopTokens",
   "GemmaTokenizer",
 ];

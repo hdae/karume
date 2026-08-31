@@ -216,7 +216,11 @@ Deno.test({
           });
 
           assertEquals(tokenIds(events), expected, `${name}: sequence 経由の生成 token 列`);
-          assertEquals(stop, { reason: "max-tokens" }, `${name}: 停止理由`);
+          assertEquals(
+            stop,
+            { reason: "max-tokens", tokens: GREEDY_STEPS },
+            `${name}: 停止理由と生成 token 数`,
+          );
           // prefill イベントは chunk の割り方どおり（T=10 級なので 1 本）。
           const prefills = events.filter((event) => event.kind === "prefill");
           assertEquals(
@@ -252,7 +256,11 @@ Deno.test({
               head.push(event.id);
               if (head.length === BREAK_AFTER) break;
             }
-            assertEquals(await first.done, { reason: "closed" }, "1 ターン目の停止理由");
+            assertEquals(
+              await first.done,
+              { reason: "closed", tokens: BREAK_AFTER },
+              "1 ターン目の停止理由と生成 token 数",
+            );
             assertEquals(head, expected.slice(0, BREAK_AFTER), "1 ターン目の token 列");
 
             // 2 ターン目: 新しい token を足さずに続きだけ（pendingToken が先頭へ連結される）。
@@ -264,7 +272,11 @@ Deno.test({
             for await (const event of second) {
               if (event.kind === "token") tail.push(event.id);
             }
-            assertEquals(await second.done, { reason: "max-tokens" }, "2 ターン目の停止理由");
+            assertEquals(
+              await second.done,
+              { reason: "max-tokens", tokens: GREEDY_STEPS - BREAK_AFTER },
+              "2 ターン目の停止理由と生成 token 数",
+            );
             return [...head, ...tail];
           });
 
@@ -301,7 +313,8 @@ Deno.test({
           );
           assertEquals(
             stop,
-            { reason: "eos", token: expected[firstStop] },
+            // 停止 token 自体も生成 1 個ぶん（`GenerationStop.tokens` の doc）— 本文は firstStop 個。
+            { reason: "eos", token: expected[firstStop], tokens: firstStop + 1 },
             `${name}: EOS 集合 [${STOP_TOKENS.join(",")}] での停止`,
           );
           console.log(`[e2e] gemma4 sequence ${name}: EOS 停止 @${firstStop}`);

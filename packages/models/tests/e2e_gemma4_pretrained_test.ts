@@ -55,7 +55,7 @@ const CASES = [
     fixture: "single-user",
     maxNewTokens: 24,
     expected: "The capital of France is **Paris**.",
-    stop: { reason: "eos", token: 106 },
+    stop: { reason: "eos", token: 106, tokens: 9 },
   },
 ] as const;
 

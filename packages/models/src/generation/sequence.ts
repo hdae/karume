@@ -52,6 +52,41 @@ import { planPrefillChunks } from "./greedy.ts";
 import { createSampler, isStopToken, type SamplerSpec } from "./sampler.ts";
 import type { GenerationWiring } from "./program.ts";
 
+/** {@link GenerationCapacityError} が踏んだ上限（どちらも「もう入らない」）。 */
+export type GenerationCapacityConstraint = "capacity" | "maxPosition";
+
+/**
+ * {@link GenerationCapacityError} が運ぶ実値（`assertBudget` が落とす**その時点**の観測）。
+ *
+ * MUST: 全部その場で導出した値である（保存した counter から作らない = 二重簿記の禁止）。
+ * MUST: 文言を読み解かせない。切り詰めの判断に要る数を欄で渡すのが専用型を持つ意味である。
+ */
+export type GenerationCapacityDetail = {
+  /** 踏んだ上限（`capacity` = state 容量 / `maxPosition` = 位置表の行数）。 */
+  readonly constraint: GenerationCapacityConstraint;
+  /** 検査した時点の会話の論理長（`GenerationSequence.used` から未 commit frontier を除いた値）。 */
+  readonly pastLength: number;
+  /**
+   * このターンが流す token 数 — **`pendingToken` の連結後**である。
+   *
+   * 呼び手が渡した `prompt` より 1 多いことがある（前ターンが token を出していれば連結される）。
+   * 切り詰めの計算はこちらの値で行う（次ターンでも同じ 1 token が先頭に付く）。
+   */
+  readonly promptLength: number;
+  /** 落ちた要求の `maxNewTokens`。 */
+  readonly requestedNewTokens: number;
+  /** `constraint` が指す上限の値。 */
+  readonly limit: number;
+  /**
+   * この `promptLength` のまま**今なら**通る `maxNewTokens` の上限。
+   *
+   * 0 以下なら prompt だけで入らない（負値は「何 token 溢れているか」を保つ — 切り詰めの目安）。
+   * 両制約とも `K ≤ limit − pastLength − promptLength + 1` に畳める（`capacity` は包括上限・
+   * `maxPosition` は排他上限で、`assertBudget` の 2 本の式がちょうど同じ形になる）。
+   */
+  readonly maxNewTokens: number;
+};
+
 /**
  * 容量を超えた（= この会話はもう入り切らない）— ADR 0083 決定 10。
  *
@@ -61,12 +96,26 @@ import type { GenerationWiring } from "./program.ts";
  * その判断に要る 1 件だけを型で分ける。
  *
  * 位置表の上限（`maxPosition`）超過も同じ型で落とす — 呼び手にとっては同じ「もう入らない」で、
- * 打つ手（古い turn を落とす / 新しい context を作る）も同じである。
+ * 打つ手（古い turn を落とす / 新しい context を作る）も同じである。どちらを踏んだかと、
+ * そこから切り詰めを計算するのに要る実値は {@link GenerationCapacityDetail} の欄が運ぶ。
  */
 export class GenerationCapacityError extends Error {
-  constructor(message: string) {
+  readonly constraint: GenerationCapacityConstraint;
+  readonly pastLength: number;
+  readonly promptLength: number;
+  readonly requestedNewTokens: number;
+  readonly limit: number;
+  readonly maxNewTokens: number;
+
+  constructor(message: string, detail: GenerationCapacityDetail) {
     super(message);
     this.name = "GenerationCapacityError";
+    this.constraint = detail.constraint;
+    this.pastLength = detail.pastLength;
+    this.promptLength = detail.promptLength;
+    this.requestedNewTokens = detail.requestedNewTokens;
+    this.limit = detail.limit;
+    this.maxNewTokens = detail.maxNewTokens;
   }
 }
 
@@ -96,10 +145,25 @@ export type GenerationEvent =
  * `closed` は消費側が `break` / `return()` で閉じた場合（`aborted` は `AbortSignal` 経由）。
  */
 export type GenerationStop =
-  | { readonly reason: "eos"; readonly token: number }
-  | { readonly reason: "max-tokens" }
-  | { readonly reason: "aborted" }
-  | { readonly reason: "closed" };
+  & {
+    /**
+     * このターンが**生成した** token の数（prompt は含まない）。
+     *
+     * MUST: `eos` の停止 token も 1 個として数える。抽選 1 回 = run 1 回なので、この数がそのまま
+     * 生成に費やした run 数と一致し、`tok/s` を再エンコード無しで書ける（それがこの欄の目的）。
+     * 本文だけの数（= `token` イベントの数）が要るなら `reason === "eos"` のとき 1 引く。
+     *
+     * `max-tokens` なら要求の `maxNewTokens` に一致し、`closed` / `aborted` では打ち切りまでに
+     * 出した数になる（どちらも「成功した run のぶんだけ会話は進んでいる」— 上の節と同じ線）。
+     */
+    readonly tokens: number;
+  }
+  & (
+    | { readonly reason: "eos"; readonly token: number }
+    | { readonly reason: "max-tokens" }
+    | { readonly reason: "aborted" }
+    | { readonly reason: "closed" }
+  );
 
 /** 1 回ぶんの生成リクエスト（ADR 0083 決定 1）。 */
 export type GenerationRequest = {
@@ -129,6 +193,19 @@ export type GenerationStream = AsyncIterable<GenerationEvent> & {
 };
 
 export type GenerationSequence = {
+  /**
+   * この会話が既に占めている論理位置の数（= 次のターンの `prompt` が積み上がる起点）。
+   *
+   * MUST: **導出値**である（`context.pastLength` + 未 commit frontier 1 — ADR 0066 決定 6 の
+   * 二重簿記の禁止）。独立した counter は持たないので、走行中に読むと**その時点で成功済みの
+   * run まで**が反映される（生成が進むにつれ増える）。生成の合間に読めば「直近に完了した生成
+   * までの確定値」で、切り詰めの判断はそこで行う。
+   *
+   * 次のターンが通るかは `used + prompt.length + maxNewTokens - 1 ≤ program.capacity` かつ
+   * `used + prompt.length + maxNewTokens - 2 < program.maxPosition`（溢れたときの実値は
+   * {@link GenerationCapacityError} が運ぶ）。
+   */
+  readonly used: number;
   /**
    * 1 ターンぶんを生成する。返り値を汲み切る（または `break` する）まで、この sequence の次の
    * `generate` / `dispose` は動き出さない（ADR 0083 決定 2 の直列化）。
@@ -239,12 +316,25 @@ const assertBudget = (
   promptLength: number,
   maxNewTokens: number,
 ): void => {
+  // 「今なら入る maxNewTokens」は 2 制約とも同じ形に畳める（{@link GenerationCapacityDetail}）。
+  const detail = (
+    constraint: GenerationCapacityConstraint,
+    limit: number,
+  ): GenerationCapacityDetail => ({
+    constraint,
+    pastLength,
+    promptLength,
+    requestedNewTokens: maxNewTokens,
+    limit,
+    maxNewTokens: limit - pastLength - promptLength + 1,
+  });
   const lastPosition = pastLength + promptLength + maxNewTokens - 2;
   if (lastPosition >= program.maxPosition) {
     throw new GenerationCapacityError(
       `会話が位置表の外へ出る: 既存 ${pastLength} + prompt ${promptLength} + ` +
         `maxNewTokens ${maxNewTokens} は最終位置 ${lastPosition} を踏む` +
         `（この資産が引けるのは 0..${program.maxPosition - 1} — 会話の切り詰めはホストの責務）`,
+      detail("maxPosition", program.maxPosition),
     );
   }
   const peak = pastLength + promptLength + maxNewTokens - 1;
@@ -253,6 +343,7 @@ const assertBudget = (
       `会話が state 容量を超える: 既存 ${pastLength} + prompt ${promptLength} + ` +
         `maxNewTokens ${maxNewTokens} は ${peak} 行を要求する` +
         `（容量 ${program.capacity} — 会話の切り詰めはホストの責務）`,
+      detail("capacity", program.capacity),
     );
   }
 };
@@ -363,6 +454,8 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
       let stop: GenerationStop | undefined;
       let failure: { readonly error: unknown } | undefined;
       let release: (() => void) | undefined;
+      /** 抽選した token の数（停止 token も 1 個 — `GenerationStop.tokens` の doc）。 */
+      let generated = 0;
       try {
         release = await acquire();
         // 順番待ちの間に届いた中断は、ここで閉じる（先行の生成が長ければ待ちも長い）。同期の
@@ -426,10 +519,11 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
 
         // 生成の起点は最終 chunk の最終有効行（`last_row` で選んだ 1 行）。
         let token = sampler.next(logits, history);
+        generated += 1;
         history.push(token);
         pendingToken = token;
         if (isStopToken(token, program.stopTokens)) {
-          stop = { reason: "eos", token };
+          stop = { reason: "eos", token, tokens: generated };
           return;
         }
         yield { kind: "token", id: token, position: context.pastLength };
@@ -454,17 +548,18 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             { context, queryLength: 1 },
           );
           token = sampler.next(readLogits(outputs, program, `decode@${step}`), history);
+          generated += 1;
           history.push(token);
           pendingToken = token;
           if (isStopToken(token, program.stopTokens)) {
-            stop = { reason: "eos", token };
+            stop = { reason: "eos", token, tokens: generated };
             return;
           }
           yield { kind: "token", id: token, position: context.pastLength };
         }
-        stop = { reason: "max-tokens" };
+        stop = { reason: "max-tokens", tokens: generated };
       } catch (error) {
-        if (isAbortOf(error, request.signal)) stop = { reason: "aborted" };
+        if (isAbortOf(error, request.signal)) stop = { reason: "aborted", tokens: generated };
         else failure = { error };
         // MUST: 包まずそのまま投げる（ADR 0083 決定 5 — 消費側が
         // `error === controller.signal.reason` で自分の中断を識別できる）。
@@ -472,7 +567,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
       } finally {
         if (failure !== undefined) fail(failure.error);
         // `stop` が空のまま `finally` に来るのは `break` / `return()` 経由だけ。
-        else settle(stop ?? { reason: "closed" });
+        else settle(stop ?? { reason: "closed", tokens: generated });
         release?.();
       }
     };
@@ -482,6 +577,10 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
   };
 
   return {
+    // MUST: getter で毎回導出する（`context.pastLength` と `pendingToken` が唯一の源）。
+    get used(): number {
+      return context.pastLength + (pendingToken === undefined ? 0 : 1);
+    },
     generate,
     dispose(): Promise<void> {
       // MUST: 2 度目以降も同じ完了を返す（先に返すと呼び手が破棄前の窓を掴む）。

@@ -15,6 +15,12 @@
 //    「finish() まで全部溜める偽 streaming」になっても①は緑のままなので、この門が要る
 // ④ **停止集合**が上流の `generation_config.json` の宣言（`[1, 106, 50]`）と一致する
 // ⑤ **射程外は GPU に触る前に落ちる**（tools / 未知 role — `chat` は同期に throw する）
+// ⑥ **増分描画の多ターン**（`gemma4ChatTurn` + `sequence()`）が、同じ会話を毎ターン全体描画で
+//    回した `chat()` と**逐語一致**する。turn-local 契約（`gemma_chat_test.ts` の門）が id 列の
+//    等式で、こちらは同じ等式を**実重みの出力**で見る門である
+//
+// MUST: 入口は公開面（`../gemma.ts`）から import する — `src/...` を直に掴むと、面が痩せていても
+// 門が緑のままになる（消費者が書けない経路で検収したことになる）。
 //
 // ## 資産
 //
@@ -23,8 +29,15 @@
 // では**明示 SKIP** する。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { type Gemma4ChatStream, Gemma4Pipeline } from "../src/gemma/pipeline.ts";
-import { type Gemma4ChatMessage, gemma4ChatPrompt } from "../src/gemma/text/chat.ts";
+// MUST: 入口は**公開面**（`./gemma` サブパス）から取る — 消費者が書けない import で検収すると、
+// 「面が痩せていること」に門が気づけない（`src/...` を直に掴めば何でも見える）。
+import {
+  type Gemma4ChatMessage,
+  gemma4ChatPrompt,
+  type Gemma4ChatStream,
+  gemma4ChatTurn,
+  Gemma4Pipeline,
+} from "../gemma.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
@@ -64,16 +77,21 @@ const CASES = [
     maxNewTokens: 24,
     expected: "The capital of France is **Paris**.",
     // `<turn|>`（106）で自分から turn を閉じる = 停止集合が実出力に効いている証拠。
-    stop: { reason: "eos", token: 106 },
+    // `tokens` は**停止 token 込み**の生成数（`GenerationStop.tokens` の doc — 本文は 8 個）。
+    stop: { reason: "eos", token: 106, tokens: 9 },
   },
   {
     fixture: "japanese",
     maxNewTokens: 24,
     // 多ターン（system + user + assistant + user）の 4 通目への応答。
     expected: "2023年時点で、およそ1,400万人です。",
-    stop: { reason: "eos", token: 106 },
+    stop: { reason: "eos", token: 106, tokens: 18 },
   },
 ] as const;
+
+/** ⑥ の 2 ターン目（1 ターン目は `CASES[0]` の会話をそのまま使う）。 */
+const FOLLOW_UP: Gemma4ChatMessage = { role: "user", content: "And of Japan?" };
+const FOLLOW_UP_TOKENS = 24;
 
 type ChatFixture = {
   readonly stopTokens: number[];
@@ -230,6 +248,74 @@ Deno.test({
           Error,
           "role",
         );
+      });
+
+      await t.step("⑥ 増分描画の多ターンが chat() の全体描画と逐語一致", async () => {
+        const { fixture: name, maxNewTokens } = CASES[0];
+        const first = caseOf(name).messages;
+
+        /** 高レベル面（毎ターン会話全体を描き直す）で 1 ターン汲む。 */
+        const viaChat = async (
+          messages: readonly Gemma4ChatMessage[],
+          limit: number,
+        ): Promise<string> => {
+          const parts: string[] = [];
+          for await (const chunk of pipeline.chat(messages, { maxNewTokens: limit })) {
+            parts.push(chunk);
+          }
+          return parts.join("");
+        };
+
+        const answer1 = await viaChat(first, maxNewTokens);
+        // 2 ターン目の参照は「1 ターン目の応答を会話へ入れて全体を描き直した」もの。
+        const grown: Gemma4ChatMessage[] = [
+          ...first,
+          { role: "assistant", content: answer1 },
+          FOLLOW_UP,
+        ];
+        const answer2 = await viaChat(grown, FOLLOW_UP_TOKENS);
+
+        // 低レベル面: 1 会話 = 1 sequence。2 ターン目に流すのは**差分だけ**で、前 turn を閉じる
+        // `<turn|>` は `pendingToken` が前置する（turn-local 契約 — ADR 0083 決定 4 / 0084 決定 5）。
+        const sequence = await pipeline.sequence();
+        try {
+          const turn = async (prompt: readonly number[], limit: number) => {
+            const stream = sequence.generate({ prompt, maxNewTokens: limit });
+            const ids: number[] = [];
+            for await (const event of stream) if (event.kind === "token") ids.push(event.id);
+            return { text: pipeline.tokenizer.decode(ids), stop: await stream.done };
+          };
+
+          const prompt1 = gemma4ChatPrompt(pipeline.tokenizer, first);
+          const first1 = await turn(prompt1, maxNewTokens);
+          assertEquals(first1.text, answer1, "1 ターン目（全体描画は chat と同じ経路）");
+          // `used` は「会話が占めている論理位置」— prompt + 生成（停止 token 込み）で説明が付く。
+          assertEquals(
+            sequence.used,
+            prompt1.length + first1.stop.tokens,
+            "1 ターン目の後の used",
+          );
+
+          const delta = gemma4ChatTurn(pipeline.tokenizer, FOLLOW_UP);
+          const second = await turn(delta, FOLLOW_UP_TOKENS);
+          console.log(
+            `[e2e] gemma4 増分ターン: ${JSON.stringify(second.text)} / ` +
+              `差分 ${delta.length} token / used ${sequence.used}`,
+          );
+          assertEquals(
+            second.text,
+            answer2,
+            "2 ターン目が全体描画の chat() と逐語一致しない（差分描画か pendingToken の連結が" +
+              "会話を別物にしている）",
+          );
+          assertEquals(
+            sequence.used,
+            prompt1.length + first1.stop.tokens + delta.length + second.stop.tokens,
+            "2 ターン目の後の used",
+          );
+        } finally {
+          await sequence.dispose();
+        }
       });
 
       // async generator の本体は最初の `next()` まで走らないので、発行時の検査だけでは

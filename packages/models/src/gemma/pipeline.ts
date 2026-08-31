@@ -694,7 +694,7 @@ export class Gemma4Pipeline {
         // という sequence 側の分け方を、ここで作り直さない）。
         if (stream === undefined) {
           if (failure !== undefined) fail(failure.error);
-          else settle({ reason: "closed" });
+          else settle({ reason: "closed", tokens: 0 });
         } else {
           try {
             settle(await stream.done);
@@ -715,8 +715,11 @@ export class Gemma4Pipeline {
   /**
    * 低レベル面 — 多ターンの会話を自分で回す（ADR 0083 決定 1〜4 の `GenerationSequence`）。
    *
-   * `prompt` は token id 列なので、会話の描画は {@link gemma4ChatPrompt}（`./gemma` サブパス）
-   * を呼び手が通す。**返った実体は呼び手が `dispose()` する** — 会話が終わった時点で返すのが
+   * `prompt` は token id 列なので、会話の描画は呼び手が通す（`./gemma` サブパス）— 最初の
+   * ターンが {@link gemma4ChatPrompt}（`<bos>` 込みの全体）、2 ターン目以降は
+   * `gemma4ChatTurn`（**その turn の差分だけ**。前 turn を閉じる `<turn|>` は
+   * `GenerationSequence` の `pendingToken` が前置するので含めない — ADR 0083 決定 4）。
+   * **返った実体は呼び手が `dispose()` する** — 会話が終わった時点で返すのが
    * 正で、取りこぼしても {@link Gemma4Pipeline.dispose} が巻き取る（Session を live な context
    * ごと畳まないため）。
    *
@@ -736,6 +739,10 @@ export class Gemma4Pipeline {
     // 実体そのものではなく薄い包みを渡すのは、`GenerationSequence` に pipeline を知らせる席を
     // 作らないため（生成面は最後までパイプライン非依存 — ADR 0083）。
     const handed: GenerationSequence = {
+      // 導出値なので包みも getter で素通しする（値を写すと「渡した瞬間の値」で固まる）。
+      get used(): number {
+        return inner.used;
+      },
       generate: (request) => inner.generate(request),
       dispose: async (): Promise<void> => {
         await inner.dispose();

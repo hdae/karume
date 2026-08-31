@@ -45,6 +45,14 @@ export { parseGemma4PipelineConfig } from "./src/gemma/config.ts";
  * `chat` は内部でこれを通すので、要るのは低レベル面（`sequence`）を自分で回すときだけ。
  */
 export { gemma4ChatPrompt } from "./src/gemma/text/chat.ts";
+/**
+ * 新しい発話 1 つ → **会話の続きとして描き足す差分 token 列**（多ターンを `sequence` で回すときの
+ * 2 ターン目以降の入口 — 過去 turn は context の KV にあるので描き直さない）。
+ *
+ * MUST: 前 turn を閉じる `<turn|>` は含めない（`GenerationSequence` の `pendingToken` が前置する
+ * — turn-local 契約の正本は `renderGemma4ChatTurn` の doc、成立は `gemma_chat_test.ts` の門）。
+ */
+export { gemma4ChatTurn } from "./src/gemma/text/chat.ts";
 export type { Gemma4ChatMessage, Gemma4ChatRole } from "./src/gemma/text/chat.ts";
 
 /**
@@ -63,6 +71,8 @@ export type { StreamingDetokenizer } from "./src/text/detokenizer.ts";
  */
 export { GenerationCapacityError } from "./src/generation/sequence.ts";
 export type {
+  GenerationCapacityConstraint,
+  GenerationCapacityDetail,
   GenerationEvent,
   GenerationRequest,
   GenerationSequence,

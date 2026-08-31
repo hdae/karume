@@ -6,6 +6,7 @@
 //   例外は出ず「直前 assistant の最後の 1 token が履歴から消える」だけなので、実 GPU の
 //   parity 門では気づけない。EOS 停止後 / max-tokens 停止後 / `break` 中断後の **3 経路**を見る。
 // - 可変状態は context と `pendingToken` の 2 つだけ（位置は `context.pastLength` から都度導出）。
+//   観測口（`used` / `GenerationStop.tokens` / 容量例外の欄）も**同じ 2 つからの導出**であること。
 // - 「generate 1 回ぶん」の直列化・`AbortSignal` の素通し・容量超過の専用型。
 //
 // Session と context は narrow interface（`GenerationSession` / `GenerationContextFace`）で
@@ -211,7 +212,7 @@ Deno.test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶
     { kind: "token", id: 6, position: 4 },
     { kind: "token", id: 7, position: 5 },
   ]);
-  assertEquals(stop, { reason: "max-tokens" });
+  assertEquals(stop, { reason: "max-tokens", tokens: 3 });
 });
 
 Deno.test("GenerationSequence: 長い prompt は chunk ごとに prefill イベントを出す", async () => {
@@ -269,7 +270,8 @@ Deno.test("多ターン: EOS 停止でも停止 token は会話に残る（イ�
 
   // 停止 token 自体は本文でなく終端記号なので `token` イベントに出さない。
   assertEquals(tokenIds(first.events), [5]);
-  assertEquals(first.stop, { reason: "eos", token: 11 });
+  // 停止 token 自体も 1 個として数える（抽選 1 回 = run 1 回 — `GenerationStop.tokens` の doc）。
+  assertEquals(first.stop, { reason: "eos", token: 11, tokens: 2 });
   // 停止で decode を打ち切る（maxNewTokens まで回さない）。
   assertEquals(fake.calls.length, 2);
 
@@ -295,7 +297,7 @@ Deno.test("多ターン: break 中断後も pendingToken が残り、次ター�
     if (seen.length === 2) break;
   }
   assertEquals(seen, [5, 6]);
-  assertEquals(await stream.done, { reason: "closed" });
+  assertEquals(await stream.done, { reason: "closed", tokens: 2 });
   const callsAtBreak = fake.calls.length;
   assertEquals(callsAtBreak, 2);
   assertEquals(fake.pastLength(), 3);
@@ -371,7 +373,7 @@ Deno.test("GenerationSequence: abort は signal.reason を包まずそのまま 
   // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
   assert(caught === reason, `中断の例外が包まれている: ${String(caught)}`);
   assertEquals(seen, [5]);
-  assertEquals(await stream.done, { reason: "aborted" });
+  assertEquals(await stream.done, { reason: "aborted", tokens: 1 });
   // 中断は段の境目（次の run の直前）で効く — 走行中の run を殺しはしない。
   assertEquals(fake.calls.length, 1);
 
@@ -403,7 +405,7 @@ Deno.test("GenerationSequence: 発行済みの signal は 1 本も run を出さ
   }
   assert(caught === reason);
   assertEquals(fake.calls.length, 0);
-  assertEquals(await stream.done, { reason: "aborted" });
+  assertEquals(await stream.done, { reason: "aborted", tokens: 0 });
 });
 
 Deno.test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本も出さずに閉じる", async () => {
@@ -443,7 +445,7 @@ Deno.test("GenerationSequence: 順番待ちの間に届いた中断は run を 1
     caught = error;
   }
   assert(caught === reason, `中断ではなく別の失敗で閉じた: ${String(caught)}`);
-  assertEquals(await queued.done, { reason: "aborted" });
+  assertEquals(await queued.done, { reason: "aborted", tokens: 0 });
   assertEquals(fake.calls.length, callsAfterFirst);
 });
 
@@ -489,6 +491,81 @@ Deno.test("GenerationSequence: 容量超過は GenerationCapacityError（run の
   // ちょうど収まる形は通る（peak = 8）。
   await drain(sequence.generate({ prompt: [1, 2, 3, 4, 5], maxNewTokens: 4 }));
   assertEquals(fake.pastLength(), 8);
+});
+
+Deno.test("GenerationSequence: used は pastLength + 未 commit frontier から都度導出する", async () => {
+  // 独立 counter を持たない（ADR 0066 決定 6 の二重簿記の禁止）ので、走行中に読めば
+  // 「その時点で成功済みの run まで」が出る。切り詰めの判断は生成の合間に読んだ値で行う。
+  const fake = fakeSession({ tokens: [5, 6, 7, 9] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(),
+  });
+  assertEquals(sequence.used, 0, "生成前");
+
+  const stream = sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 3 });
+  const iterator = stream[Symbol.asyncIterator]();
+  await iterator.next(); // prefill イベント（frontier は KV に入り、pendingToken は空）。
+  assertEquals(sequence.used, 3, "prefill 直後");
+  await iterator.next(); // 最初の token（未 commit の frontier が 1 つ立つ）。
+  assertEquals(sequence.used, 4, "1 token 目の直後");
+  while (!(await iterator.next()).done) { /* 汲み切る */ }
+
+  // pastLength は T + K − 1（最後の 1 個は未 commit）だが、会話が占めているのは T + K。
+  assertEquals(fake.pastLength(), 5);
+  assertEquals(sequence.used, 6, "1 ターン目の後");
+
+  // 次ターンは used を起点に積み上がる（連結される pendingToken を二重に数えない）。
+  await drain(sequence.generate({ prompt: [8, 9], maxNewTokens: 1 }));
+  assertEquals(sequence.used, 9, "2 ターン目の後（6 + 新規 2 + 生成 1）");
+});
+
+Deno.test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ（文言を読み解かせない）", async () => {
+  const fake = fakeSession({ tokens: [5] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf({ capacity: 8 }),
+  });
+  await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 1 }));
+  assertEquals(sequence.used, 3);
+
+  // past 2 + prompt(連結 1 + 4) 5 + K 4 − 1 = 10 > 容量 8。
+  const error = await assertRejects(
+    () => drain(sequence.generate({ prompt: [1, 2, 3, 4], maxNewTokens: 4 })),
+    GenerationCapacityError,
+    "state 容量を超える",
+  );
+  assertEquals(error.constraint, "capacity");
+  assertEquals(error.pastLength, 2);
+  assertEquals(error.promptLength, 5, "pendingToken の連結後の実効長（呼び手の 4 ではない）");
+  assertEquals(error.requestedNewTokens, 4);
+  assertEquals(error.limit, 8);
+  assertEquals(error.maxNewTokens, 2);
+  // 欄どおりに縮めれば本当に通る（この 1 本が「導ける」を恒真でなくする）。
+  await drain(
+    sequence.generate({ prompt: [1, 2, 3, 4], maxNewTokens: error.maxNewTokens }),
+  );
+});
+
+Deno.test("GenerationCapacityError: 位置表の上限も同じ欄で運ぶ（constraint だけが違う）", async () => {
+  const fake = fakeSession();
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf({ maxPosition: 5 }),
+  });
+  const error = await assertRejects(
+    () => drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 4 })),
+    GenerationCapacityError,
+    "位置表の外",
+  );
+  assertEquals(error.constraint, "maxPosition");
+  assertEquals(error.limit, 5);
+  assertEquals(error.pastLength, 0);
+  assertEquals(error.promptLength, 3);
+  assertEquals(error.requestedNewTokens, 4);
+  // 排他上限だが式は容量側と同じ形に畳める（5 − 0 − 3 + 1 = 3）。
+  assertEquals(error.maxNewTokens, 3);
+  await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: error.maxNewTokens }));
 });
 
 Deno.test("GenerationSequence: 位置表の上限超過も同じ型で落とす", async () => {
@@ -641,7 +718,7 @@ Deno.test("DerivedRunInputs: derive の await 明けに届いた中断は run �
       caught = error;
     }
     assert(caught === reason, `${name}: 中断が包まれている（${String(caught)}）`);
-    assertEquals(await stream.done, { reason: "aborted" }, name);
+    assertEquals(await stream.done, { reason: "aborted", tokens: tokensBefore }, name);
     // 中断が届いた後の run は 1 本も出ていない = token も 1 個も余分に届いていない。
     assertEquals(fake.calls.length, tokensBefore, `${name}: 中断後に run が進んだ`);
     assertEquals(tokenIds(events).length, tokensBefore === 0 ? 0 : 1, `${name}: 余分な token`);
