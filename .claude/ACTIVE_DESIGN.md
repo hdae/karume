@@ -28,7 +28,18 @@
   配布ミラー `models/karume-gemma4-e2b/`（3.8GiB）+ カード（Apache 2.0 帰属 + 上流誘導 —
   ライセンス門は現物確認 + ユーザー裁定で消化・「Gemma ToU」記述は撤回）+ `fromPretrained`
   （hub 遅延資産席 `eagerAssets`）+ 疑似 HF 疎通。**残 = HF 公開のみ（新規リポ作成 —
-  ユーザー確認待ち・pin `GEMMA4_CURRENT` は公開時に焼く）**。実行計画は
+  ユーザー確認待ち・pin `GEMMA4_CURRENT` は公開時に焼く）**。
+  **対話 example 波もほぼクローズ（2026-08-31・11 コミット e7e53dd〜dce91c7）**: 公開面レビュー
+  （Opus2+Codex3 → 敵対検証 15 判定 refuted 0 — 正本 `.claude/reviews/2026-08-31_182ced7/`）→
+  **取得元抽象 DistributionSource**（ADR
+  [0086](../docs/decisions/0086-distribution-source.md) — `denoDirectory` でローカルミラー直読・
+  CacheStorage 複製ゼロ・越境は明示 mapping・`@karume/hub/deno` carve-out）+ 検証済みバグ修正
+  （PLE 解放口 / 生成 signal の PLE 伝播 / headers doc 8 家族訂正ほか）+ 公開面調整
+  （`gemma4ChatTurn` 増分描画 = turn-local 契約の正本化・`parseGemma4PipelineConfig` 公開・
+  `GenerationProgram` 凍結絞り込み・`defaultSampler` 改名・`used` + `GenerationCapacityError`
+  構造化欄・`GenerationStop.tokens`）+ `examples/gemma4/` 対話 chat（sequence KV 継続の
+  写経見本・デモ 4 本も denoDirectory 移行）。**残 = capacity 1024 の dist 再生成**（P 依存
+  実測と同時）。実行計画は
   [backlog](../docs/backlog.md) now、候補比較は
   [research 2026-08-31](../docs/research/2026-08-31-generation-api-design-draft.md)。
   **スケール戦略は調査 + 裁定とも完了** =

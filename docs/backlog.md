@@ -69,13 +69,20 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
 - **L-11 裁定（2026-08-30）**: 技術先行 = **gemma4 E2B**（品質実証済み — tokenizer / L-5 の
   実装対象）。ライセンス門は上記のとおり**消化済み（Apache 2.0）**。配布経路の
   minicpm5 先行は**採らない**（2026-08-31 裁定 10 — 段 5 の対象は gemma4 E2B のみ）
-- **対話 example 波（2026-09-01 起票・次の現行波 — compact 後に着手）**: ①`examples/gemma4/`
-  にプロンプト入力でインタラクティブに対話できるサンプル（streaming 表示・多ターン —
-  `Gemma4Pipeline` + `chat()` の写経見本）②その前提整備 = **Deno でディレクトリ指定の
-  ローカルローダー**（`fromPretrained` 同等の体験で `models/karume-gemma4-e2b/` を直接読む —
-  疑似 HF サーバや手組み `fromAssets` Record を要らなくする）+ **公開 API の調整**（ローダーの
-  置き場・公開面の形はまず設計を出して裁定）③capacity 1024 の反映（dist 再生成 —
-  上の引き上げ裁定・>1024 の再 export 判断は decode の P 依存実測と同時）
+- **対話 example 波（2026-09-01 起票）**: ①② **消化済み（2026-08-31 実装・11 コミット
+  e7e53dd〜dce91c7）**。公開面レビュー（Opus2+Codex3 → 敵対検証 15 判定 refuted 0・正本 =
+  `.claude/reviews/2026-08-31_182ced7/SUMMARY.md`）→ 裁定どおり: ローカルローダー =
+  **取得元抽象 DistributionSource**（ADR [0086](decisions/0086-distribution-source.md) —
+  `denoDirectory(models/karume-gemma4-e2b)` を `fromPretrained` へ直渡し・CacheStorage
+  複製ゼロ・越境は明示 mapping）+ 検証済みバグ修正（PLE 解放口 / signal 伝播 / headers doc
+  8 家族ほか）+ 公開面調整（`gemma4ChatTurn` 増分描画・`parseGemma4PipelineConfig` 公開・
+  `GenerationProgram` 絞り込み・`defaultSampler` 改名・`used`/`GenerationCapacityError`
+  構造化欄・`GenerationStop.tokens`）+ `examples/gemma4/`（sequence KV 継続の写経見本・
+  デモ 4 本も denoDirectory 移行）。フル verify 2043/0/13 緑。
+  **残 = ③capacity 1024 の反映**（dist 再生成 — 上の引き上げ裁定・>1024 の再 export 判断は
+  decode の P 依存実測と同時）。起票のみ（第 2 波候補）: ChatSession 高レベル面・stop strings・
+  `chatText()`・onProgress 可読化・maxResidentPleBytes・logitBias 配列化・防御コピー
+  （prompt/options の発行時スナップショット）・example の residentPleShards フラグ化
 - ~~M2 実機の手動確認 2 点~~ **消化（2026-09-01 実測）**: dp4a カナリア **16/16 緑**（QK f16
   格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
   読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤 → 裁定済み（既定維持
