@@ -453,13 +453,17 @@ def assert_no_byte_merges(compiled: CompiledTokenizer) -> None:
             )
 
 
-def _asset_subset(
+def asset_subset(
     compiled: CompiledTokenizer,
     *,
     texts: Sequence[str],
     required_ids: Iterable[int],
 ) -> dict[str, Any]:
-    """フィクスチャへ載せる語彙・merges の部分集合を作る。"""
+    """フィクスチャへ載せる語彙・merges の部分集合を作る。
+
+    NOTE: 公開名なのは chat のフィクスチャ（`gemma4/chat.py`）も同じ切り方を使うため —
+    絞り方を 2 実装持つと、片方だけが「足りない部分集合」を作っても気づけない。
+    """
     assert_no_byte_merges(compiled)
     max_token_chars = max(len(list(token)) for token in compiled.vocab)
     keys = subset_keys(texts, max_token_chars=max_token_chars)
@@ -558,7 +562,7 @@ def build_fixture(
     return {
         "source": dict(source),
         "spec": spec_of(compiled),
-        "asset": _asset_subset(
+        "asset": asset_subset(
             compiled,
             texts=[case.text for case in encode_cases],
             required_ids=required,

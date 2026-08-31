@@ -259,6 +259,27 @@ TypeScript port (decision 7); the vocabulary and merges it carries are the subse
 EmbeddingGemma runs through the same machinery (`embeddinggemma/tokenizer.py`): the implementation
 is shared, the assets are not.
 
+## What `chat.py` emits
+
+The git-tracked chat parity fixture
+`packages/models/tests/fixtures/gemma-text/gemma4-chat.json`: for each plain-conversation case, the
+**rendered string** and the **token id list** taken from upstream `apply_chat_template`
+independently (decision 7 again — the TypeScript renderer is never in the path), plus the vocabulary
+subset the cases need and the stop-token set declared by `generation_config.json` with its
+spellings.
+
+The scope of the first release is a **plain conversation** only: roles `system` / `developer` /
+`user` / `assistant` with string content. Tools, thinking (`reasoning`), tool calls and
+image/audio parts are **not** harvested, and the TypeScript side rejects them loudly rather than
+ignoring them (ADR [0084](../../../docs/decisions/0084-gemma-tokenizer-chat.md) decision 5). The
+turn markers of this checkpoint are `<|turn>` / `<turn|>` / `<|channel>` / `<|think|>` — the
+Gemma 3 spelling `<start_of_turn>` is not in this vocabulary at all.
+
+The chat format and the stop-token set are harvested together on purpose: both come from the
+checkpoint's companion files, and picking them up separately is how one of them goes stale
+(decision 5, "same digest set"). The TypeScript port derives the stop set from the compiled
+tokenizer's added tokens and this fixture is what that derivation is checked against.
+
 ## Running
 
 ```sh
@@ -268,7 +289,11 @@ uv run --with 'transformers==5.14.1' python -m gemma4.export_decode
 uv run --with 'transformers==5.14.1' python -m gemma4.export_token
 uv run --with 'transformers==5.14.1' python -m gemma4.export_product
 uv run python -m gemma4.tokenizer   # tokenizer asset + parity fixture (no transformers needed)
+uv run --with 'transformers==5.14.1' python -m gemma4.chat   # chat parity fixture
 ```
+
+Both fixture writers print the `deno fmt` command to run afterwards — the committed shape of a
+fixture is whatever the repository formatter produces (`deno task verify` checks it).
 
 `transformers` is pinned to 5.14.1 for the same reason as DeBERTa, EmbeddingGemma and MiniCPM5 (a
 change in the modeling code changes the graph shape); it is brought in temporarily with `--with`
