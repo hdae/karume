@@ -37,6 +37,23 @@ KV の論理長は正しいまま位置だけが静かにずれる。並行さ�
 同じ失敗は enqueue の戻り Promise にも従来どおり出る（1 つの事実が 2 経路で見えるのは `run` と
 同じ）。`finish()` から `ExecutionError` 等が出るのは 0.7.0 までに対する**破壊的な挙動変更**。
 
+## `generateGreedy` は公開面から外れた（parity 検収用の内部ヘルパへ格下げ）
+
+`@karume/models` の barrel（`mod.ts`）が出していた `generateGreedy` と `GreedySpec` は
+**削除した**（ADR [0083](decisions/0083-generation-api-surface.md) 決定 9 — 0.7.0 までの公開面に
+対する**破壊的変更**）。実装は `src/generation/greedy.ts` に残っており、既存 golden の token 列を
+突き合わせる parity 門は経路として生き続けるが、**パッケージの外からは import できない**。
+
+理由は面の性格で、この関数は「固定 token id 列での検収」のための決定的な 1 本である
+（sampling も EOS 停止も**載せない** MUST がある）。静的配線とリクエストが 1 つの型に同居し、
+`GenerationContext` の寿命が呼び手へ漏れるので、多ターンの chat をこの面の上に組むと
+「直前 assistant の最後の token が落ちる」事故を消費側で再生産する（ADR 0083 Context / 決定 4）。
+「当面は公開のまま残して次の breaking 波で外す」は採らなかった。
+
+代替は生成 API 波の `GenerationSequence`（ADR 0083 決定 1〜5 — `AsyncIterable<GenerationEvent>` /
+`AbortSignal` / 多ターン）で、ホスト側 sampling は `src/generation/sampler.ts`（同 決定 7〜8）。
+sequence が出るまでの間、この面に相当するものは公開されていない。
+
 ## params キャッシュは Session 寿命で無界（by-design）
 
 params バッファの内容アドレスキャッシュ（`RecipeBuilder.#writeParams`）には追い出しが無く、

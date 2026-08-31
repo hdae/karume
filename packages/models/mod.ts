@@ -133,9 +133,7 @@ export { decodeWav, encodeWav } from "./src/audio/wav.ts";
 export type { DecodedWav } from "./src/audio/wav.ts";
 
 /**
- * 固定長 greedy 生成ループ。**パイプライン非依存の共通処理**（autoregressive な言語モデルは
- * 総じて「固定長 chunk の prefill → 1 token ずつ decode」を通る — ADR 0066 決定 4）なので、
- * `encodePng` / `decodeWav` と同じくファミリのサブパスではなく barrel 直下に置く。
+ * NOTE: 固定長 greedy 生成ループ（`generateGreedy` / `GreedySpec`）はここから**外した**
+ * （ADR 0083 決定 9 — 破壊的変更。消費側の doc は limitations）。parity 検収用の内部ヘルパ
+ * として `src/generation/greedy.ts` に残っており、生成の公開面は生成 API 波の sequence が持つ。
  */
-export { generateGreedy } from "./src/generation/greedy.ts";
-export type { GreedySpec } from "./src/generation/greedy.ts";
