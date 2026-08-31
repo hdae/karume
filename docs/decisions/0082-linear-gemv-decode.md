@@ -133,3 +133,27 @@ NOTE: `v4`（`n % 4 == 0`）は GEMV 自身の要件では**ない**（出力は
   数値も動作も M2 実機では未検証（known-issues の Metal 節に手動確認項目として記載）。
 - 診断・census で本族を数えるときは `linear:` 前置ではなく **`linear_gemv:` 前置**を見る
   （族名が変わったので、`startsWith("linear:")` のフィルタは本族を拾わない）。
+
+## 追記 1（2026-09-01 — Metal 実測: ビット同一の実測命題は M2 で 1 ULP 破れる・既定維持）
+
+M2 実機で u32 完全一致門が 1 ULP 差で落ちる（`0x414b3249` vs `0x414b3248`・整除形
+k128 n64 g32・門キー検査は緑・Linux / Vulkan は緑）。切り分け:
+`gpu_gemm_skinny_test.ts` のバケット跨ぎ u32 門は M2 で**緑** — 「Metal では別カーネル間の
+ビット同一が一般に成立しない」は棄却され、**GEMV 固有**と確定。機序の見立て（未確定）:
+既定 GEMM の linear は i4 の逆量子化を共有 B タイルへ**格納してから** MAC が読む
+（workgroup memory が丸め障壁になり fp contraction が跨げない — ACTIVE_DESIGN の
+「丸め障壁は実測依存」Pitfall と同じ概念）のに対し、GEMV は `x × (f32(q−8) × ws)` を
+1 式で書くため MSL 側の contraction が丸め点を変えうる（naga → MSL の FMA 契約 —
+known-issues Metal 節の 1 ULP エピローグ問題と同じクラス）。
+
+裁定（2026-09-01 ユーザー実機実測を受けて）: **既定経路は維持**する。
+
+1. 製品契約は破れない — margin 門（≥2.5e-2）≫ 1 ULP で、chat e2e が M2 で golden 同一
+   token 列を実測済み。decode 高速化も M2 で有効。
+2. u32 門の目的はカーネル退行の検出で、それは CI（Linux / Vulkan）で立ち続ける — M2 の赤は
+   attention i8a8 parity と同じ「既知の赤」扱い（known-issues が消費側 doc）。
+3. Metal で GEMV を無効化する代替は decode ×8 退行で不均衡。
+
+決定 3 の実測命題は「**Vulkan / Linux で成立・Metal は 1 ULP 帯**」へ精密化する。根治候補
+（未着手）= GEMV の逆量子化に明示の丸め点を入れて contraction を遮る式形の探索
+（M2 実機ループが要る — known-issues の根治候補と同席）。

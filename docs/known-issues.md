@@ -48,10 +48,12 @@ conv2d parity 2 本が赤（Linux / Vulkan は全緑）。**2026-08-29 のカナ
   （naga → MSL の FMA 契約差で乗算連鎖の丸めが変わる — 未確定）。**動作・品質は M2 で健全**:
   chat e2e（製品グラフ + gemv 全経路）が golden と同一 token 列で完走しており、margin 門
   （≥2.5e-2）が 1 ULP を吸収する。実害は attention i8a8 と同じく「クロス経路の atol=0 門が
-  Metal で立たない」ことのみ。扱い（既定経路維持 + 門の成立プラットフォーム限定 or 根治調査）は
-  裁定中 — 切り分け候補 = `gpu_gemm_skinny_test.ts` のバケット跨ぎ門を M2 で回す（GEMM 幾何
-  同士でも同じ 1 ULP が出るなら gemv 固有でなく「Metal では別カーネル間のビット同一が一般に
-  成立しない」ことが確定する）。
+  Metal で立たない」ことのみ。**切り分け済み（2026-09-01）**: `gpu_gemm_skinny_test.ts` の
+  バケット跨ぎ u32 門は M2 で緑 — **GEMV 固有**（一般則説は棄却）。**裁定 = 既定経路維持**
+  （ADR [0082](decisions/0082-linear-gemv-decode.md) 追記 1 — 機序の見立て: GEMM は逆量子化を
+  共有タイルへ格納してから読む = 丸め障壁あり / GEMV は 1 式インライン = MSL の contraction が
+  跨げる）。根治候補 = GEMV に明示の丸め点を入れる式形の探索（M2 実機ループ要・下の根治候補と
+  同席・未着手）。
 
 Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36257 = mapped range の
 み）。根治候補 = TS 参照の FMA 許容化 or WGSL 側で丸めを固定する手段の調査（未着手）。記録 =

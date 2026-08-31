@@ -62,8 +62,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   minicpm5 先行は**採らない**（2026-08-31 裁定 10 — 段 5 の対象は gemma4 E2B のみ）
 - ~~M2 実機の手動確認 2 点~~ **消化（2026-09-01 実測）**: dp4a カナリア **16/16 緑**（QK f16
   格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
-  読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤**（既知の FMA 契約
-  クラスの見立て — [known-issues](known-issues.md) Metal 節・扱いは裁定中）
+  読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤 → 裁定済み（既定維持
+  — GEMV 固有と切り分け確定・ADR 0082 追記 1・[known-issues](known-issues.md) Metal 節）**
 - anima-web の cold ロード DL スロット改善（提案 b+a — `FamilyAdmission` 席は実装済みで、
   残りは admission 前倒しの graph shard 単位化 + extras の並行開始。shard 仕様 v2 で
   graph shard が数 MB になり前倒しの価値が確定する。opt-in の c 案は再裁定要）
