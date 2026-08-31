@@ -19,7 +19,8 @@ const ALIGNMENT = 8;
 /** 書き出せる要素型（意味論 dtype と 1 対 1 — bool は使わないので持たない）。 */
 export type DumpTensor =
   | { readonly dtype: "F32"; readonly shape: readonly number[]; readonly data: Float32Array }
-  | { readonly dtype: "I32"; readonly shape: readonly number[]; readonly data: Int32Array };
+  | { readonly dtype: "I32"; readonly shape: readonly number[]; readonly data: Int32Array }
+  | { readonly dtype: "I8"; readonly shape: readonly number[]; readonly data: Int8Array };
 
 const elementCount = (shape: readonly number[]): number =>
   shape.reduce((product, dim) => product * dim, 1);

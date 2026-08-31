@@ -73,7 +73,12 @@ import {
   type GenerationStream,
 } from "../generation/sequence.ts";
 import type { SamplerSpec } from "../generation/sampler.ts";
-import { createGemma4Ple, parseGemma4PleIndex } from "./ple.ts";
+import {
+  createGemma4Ple,
+  type Gemma4Ple,
+  type Gemma4PleReadOptions,
+  parseGemma4PleIndex,
+} from "./ple.ts";
 import { parseGemmaTokenizerAsset } from "./text/asset.ts";
 import { GemmaTokenizer } from "./text/tokenizer.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4StopTokens } from "./text/chat.ts";
@@ -112,8 +117,14 @@ export type Gemma4Assets = {
   readonly tokenizer: Uint8Array<ArrayBuffer>;
   /** PLE sidecar の索引（`ple.json` のバイト列）。 */
   readonly pleIndex: Uint8Array<ArrayBuffer>;
-  /** PLE sidecar shard 1 本を取る（ファイル読み / hub の `streamAssets` — 呼び手の責務）。 */
-  readonly readPleShard: (file: string) => Promise<ArrayBuffer>;
+  /**
+   * PLE sidecar shard 1 本を取る（ファイル読み / hub の `streamAssets` — 呼び手の責務）。
+   *
+   * `options.signal` は**その読みを起こした生成**の中断で、**best-effort**（無視しても壊れない
+   * — 中断が「この shard を読み終わってから」効くだけ）。1 本 758MB 級なので、対話的に止める
+   * 使い方をするなら見る価値がある。
+   */
+  readonly readPleShard: (file: string, options?: Gemma4PleReadOptions) => Promise<ArrayBuffer>;
 };
 
 export type Gemma4PipelineOptions = {
@@ -180,6 +191,14 @@ type Gemma4State = {
   readonly ownsGpu: boolean;
   readonly session: Session;
   readonly program: GenerationProgram;
+  /**
+   * PLE sidecar のホスト側キャッシュ（**{@link Gemma4Pipeline.dispose} の解放先**）。
+   *
+   * MUST: 席は dispose のためだけ — 引くのは `program.derivedInputs.derive` の閉包だけである。
+   * どちらも {@link buildGemma4Program} の 1 回の返り値なので「片方だけ差し替えた」形は書けず、
+   * 解放口を持たないと shard 1 本 758MB 級 × 常駐 2 本がプロセス寿命まで残る。
+   */
+  readonly ple: Gemma4Ple;
   readonly tokenizer: GemmaTokenizer;
   readonly config: Gemma4PipelineConfig;
 };
@@ -207,7 +226,7 @@ type Gemma4Admission = {
 type Gemma4SidecarAssets = {
   readonly tokenizer: Uint8Array<ArrayBuffer>;
   readonly pleIndex: Uint8Array<ArrayBuffer>;
-  readonly readPleShard: (file: string) => Promise<ArrayBuffer>;
+  readonly readPleShard: (file: string, options?: Gemma4PleReadOptions) => Promise<ArrayBuffer>;
 };
 
 const assertPositiveInteger = (value: number, where: string): void => {
@@ -339,7 +358,11 @@ const buildGemma4Program = (
   admitted: Gemma4Admission,
   assets: Gemma4SidecarAssets,
   options: Gemma4PipelineOptions,
-): { readonly program: GenerationProgram; readonly tokenizer: GemmaTokenizer } => {
+): {
+  readonly program: GenerationProgram;
+  readonly tokenizer: GemmaTokenizer;
+  readonly ple: Gemma4Ple;
+} => {
   const { config, vocabSize, capacitySymbol, component } = admitted;
   const tokenizer = new GemmaTokenizer(parseGemmaTokenizerAsset(assets.tokenizer));
   // ① tokenizer が生成しうる id と ② 主 embedding の vocab 行数。
@@ -375,13 +398,16 @@ const buildGemma4Program = (
     // chat 形式と同じ digest set から来る）。
     stopTokens: gemma4StopTokens(tokenizer),
     bindings: { [capacitySymbol]: config.capacity },
-    // ホスト由来の per-chunk 入力の席に PLE gather を差す（ADR 0085）。
+    // ホスト由来の per-chunk 入力の席に PLE gather を差す（ADR 0085）。`options` は
+    // そのまま降ろす — shard 1 本 758MB 級の読みが中断の届かない区間になるのを避ける。
     derivedInputs: {
       names: [PER_LAYER_INPUTS],
-      derive: async (ids) => ({ [PER_LAYER_INPUTS]: await ple.gather(ids) }),
+      derive: async (ids, deriveOptions) => ({
+        [PER_LAYER_INPUTS]: await ple.gather(ids, deriveOptions),
+      }),
     },
   });
-  return { program, tokenizer };
+  return { program, tokenizer, ple };
 };
 
 /**
@@ -491,7 +517,10 @@ export class Gemma4Pipeline {
     // MUST: 遅延側は PLE sidecar **ちょうど**であること。索引が知らないファイルが残っていれば
     // 「配布形が宣言した資産を 1 本も読まないまま動く」形で、逆に足りなければ会話の途中で
     // 初めて落ちる（どちらもロードの時点で分かる）。
-    const readPleShard = (file: string): Promise<ArrayBuffer> => {
+    const readPleShard = (
+      file: string,
+      readOptions: Gemma4PleReadOptions = {},
+    ): Promise<ArrayBuffer> => {
       if (!Object.hasOwn(deferred, file)) {
         throw new Error(
           `${where}: PLE sidecar の shard '${file}' が manifest の assets に無い` +
@@ -499,9 +528,13 @@ export class Gemma4Pipeline {
         );
       }
       // MUST: 取得層のオプションから `signal` を落とす（`hub/components.ts` の相 2 と同じ理由 —
-      // ロード 1 回の寿命を表す signal を、以後の生成が使う読み口へ持ち越さない）。
+      // ロード 1 回の寿命を表す signal を、以後の生成が使う読み口へ持ち越さない）。載せ直すのは
+      // **その読みを起こした生成**の signal だけで、寿命が読み 1 回と一致する。
       const { signal: _load, onProgress: _progress, ...streamOptions } = hubOptions;
-      return readCachedAsset(where, loaded, deferred[file], streamOptions);
+      return readCachedAsset(where, loaded, deferred[file], {
+        ...streamOptions,
+        ...(readOptions.signal === undefined ? {} : { signal: readOptions.signal }),
+      });
     };
     return await Gemma4Pipeline.#build(
       admitted,
@@ -553,7 +586,7 @@ export class Gemma4Pipeline {
     assets: Gemma4SidecarAssets,
     options: Gemma4PipelineOptions,
   ): Promise<Gemma4Pipeline> {
-    const { program, tokenizer } = buildGemma4Program(admitted, assets, options);
+    const { program, tokenizer, ple } = buildGemma4Program(admitted, assets, options);
     const gpu = options.gpu ?? await acquireGpu();
     const ownsGpu = options.gpu === undefined;
     try {
@@ -562,6 +595,7 @@ export class Gemma4Pipeline {
         ownsGpu,
         session: await admitted.component.createSession(gpu),
         program,
+        ple,
         tokenizer,
         config: admitted.config,
       });
@@ -604,12 +638,20 @@ export class Gemma4Pipeline {
 
     const state = this.#state;
     const acquire = this.#acquire.bind(this);
+    const disposed = (): boolean => this.#disposal !== undefined;
     const chunks = async function* (): AsyncGenerator<string, void, undefined> {
       let release: (() => void) | undefined;
       let sequence: GenerationSequence | undefined;
       let stream: GenerationStream | undefined;
       let failure: { readonly error: unknown } | undefined;
       try {
+        // MUST: 本体の先頭でもう一度見る。async generator の本体は最初の `next()` まで走らない
+        // ので、発行時の検査だけでは「発行 → dispose → 汲み始める」が抜ける。抜けた先でも
+        // ランタイムが受け付けはしない（dispose 済み Session）が、真因から遠い**runtime の
+        // 文言**で落ちるため、ここで**発行時と同じ pipeline の文言**へ揃える。
+        if (disposed()) {
+          throw new Error("Gemma4Pipeline: dispose 済みでは生成できない");
+        }
         release = await acquire();
         sequence = await createGenerationSequence({
           session: state.session,
@@ -672,12 +714,24 @@ export class Gemma4Pipeline {
     if (this.#disposal !== undefined) {
       throw new Error("Gemma4Pipeline: dispose 済みでは sequence を作れない");
     }
-    const sequence = await createGenerationSequence({
+    const inner = await createGenerationSequence({
       session: this.#state.session,
       program: this.#state.program,
     });
-    this.#handed.add(sequence);
-    return sequence;
+    // 正しく返された sequence は追跡から外す（外さないと、多ターン UI が会話ごとに作って
+    // 畳んでも Set が単調増加し、`dispose` が破棄済みの実体を全数もう一度 await する）。
+    // 実体そのものではなく薄い包みを渡すのは、`GenerationSequence` に pipeline を知らせる席を
+    // 作らないため（生成面は最後までパイプライン非依存 — ADR 0083）。
+    const handed: GenerationSequence = {
+      generate: (request) => inner.generate(request),
+      dispose: async (): Promise<void> => {
+        await inner.dispose();
+        // 失敗した dispose は外さない（context が返っていないので `dispose` が巻き取る側に残す）。
+        this.#handed.delete(handed);
+      },
+    };
+    this.#handed.add(handed);
+    return handed;
   }
 
   /** 静的配線（`sequence()` で回すときに chunk 長・容量・停止集合を読む口）。 */
@@ -703,10 +757,14 @@ export class Gemma4Pipeline {
   }
 
   /**
-   * 解放する。渡した sequence を先に畳み、Session を畳み、**内部で取得した GPU だけ**破棄する。
+   * 解放する。渡した sequence を先に畳み、Session を畳み、**内部で取得した GPU だけ**破棄し、
+   * 最後に PLE sidecar のホストキャッシュを返す。
    *
    * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
    * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す。
+   *
+   * MUST: PLE も解放する。GPU 常駐と違い**ホスト RAM**（shard 1 本 758MB 級 × 既定 2 本）なので、
+   * 口が無いと「dispose 済みのハンドルを 1 つ持ち続ける」だけで 1.5GiB がプロセス寿命まで残る。
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(async () => {
@@ -714,6 +772,8 @@ export class Gemma4Pipeline {
       this.#handed.clear();
       await this.#state.session.dispose();
       if (this.#state.ownsGpu) this.#state.gpu.destroy();
+      // 順序は GPU の後（走行中の生成は既に畳んであるので、ここで引き手はもう居ない）。
+      this.#state.ple.dispose();
     });
     return this.#disposal;
   }

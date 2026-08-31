@@ -23,7 +23,7 @@
 // では**明示 SKIP** する。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
+import { type Gemma4ChatStream, Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt } from "../src/gemma/text/chat.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
@@ -154,6 +154,8 @@ Deno.test({
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
     const pipeline = await openPipeline();
+    /** dispose の**前**に発行し、汲み始めるのは**後**にする stream（下の寿命の門で使う）。 */
+    let issuedBeforeDispose: Gemma4ChatStream | undefined;
     try {
       await t.step("① 温度 0 の chat が実重みで完走し、固定した greedy golden と一致", async () => {
         for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
@@ -229,6 +231,10 @@ Deno.test({
           "role",
         );
       });
+
+      // async generator の本体は最初の `next()` まで走らないので、発行時の検査だけでは
+      // 「発行 → dispose → 汲み始める」が抜ける。汲まないまま dispose を跨がせる。
+      issuedBeforeDispose = pipeline.chat([{ role: "user", content: "hi" }], { maxNewTokens: 4 });
     } finally {
       await pipeline.dispose();
     }
@@ -240,6 +246,26 @@ Deno.test({
         "dispose 済み",
       );
       await assertRejects(() => pipeline.sequence(), Error, "dispose 済み");
+
+      // 発行済み・未反復の stream も**発行時と同じ pipeline の文言**で閉じる（ランタイムの
+      // Session 文言に化けると、呼び手には真因＝自分が dispose したことが読み取れない）。
+      const issued = issuedBeforeDispose;
+      assert(issued !== undefined, "dispose の前に stream を発行していない");
+      await assertRejects(
+        async () => {
+          for await (const _chunk of issued) { /* 1 個も来ない */ }
+        },
+        Error,
+        "Gemma4Pipeline: dispose 済みでは生成できない",
+      );
+    });
+
+    await t.step("dispose は PLE sidecar のホストキャッシュも返す", async () => {
+      // shard 1 本 758MB 級 × 常駐ぶんがホスト RAM に残るかどうかは例外にならないので、
+      // 解放済みの sidecar が「引けない」ことで見る（`program` は dispose 後も読める）。
+      const derive = pipeline.program.derivedInputs?.derive;
+      assert(derive !== undefined, "製品グラフの derivedInputs が結線されていない");
+      await assertRejects(() => derive([0]), Error, "dispose 済み");
     });
   },
 });

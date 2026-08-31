@@ -48,6 +48,23 @@ export type GenerationGraph = {
 };
 
 /**
+ * {@link DerivedRunInputs.derive} が受ける実行時のノブ（静的配線ではなく**その run 1 回**の事情）。
+ *
+ * MUST: **best-effort** の契約である — 実装が `signal` を無視しても壊れない（無視すれば中断が
+ * 「今の派生入力を作り終えてから」効くだけ）。生成ループは `derive` の `await` 明けに自分でも
+ * `signal` を見て run の発行を止めるので、中断の正しさをこの席へ委ねていない。
+ */
+export type DeriveInputsOptions = {
+  /**
+   * この生成の中断（`GenerationRequest.signal` がそのまま降りてくる）。
+   *
+   * 派生入力の材料が GB 級の遅延ロードになる配布形（gemma4 の PLE sidecar — ADR 0085）では、
+   * ここを見ないと「停止を押しても 758MB の読みが終わるまで返らない」形になる。
+   */
+  readonly signal?: AbortSignal;
+};
+
+/**
  * ホスト由来の per-chunk 入力の席（ADR 0083 決定 1 の「モデル固有の入力の作り方は models 側の
  * 知識」— gemma4 の PLE `per_layer_inputs[1,M,35,256]` がこの一実装。ADR 0085）。
  *
@@ -71,9 +88,13 @@ export type DerivedRunInputs = {
    * `gather` doc と ADR 0066 追記 6 の値契約）。
    *
    * MUST: **純関数席**（同じ id 列に同じ値。呼ぶ順序に依らない）。返り値のキーは
-   * {@link DerivedRunInputs.names} と過不足なく一致すること。
+   * {@link DerivedRunInputs.names} と過不足なく一致すること。`options` は値に影響しない
+   * 事情（中断）だけを運ぶので、この MUST とは両立する。
    */
-  readonly derive: (ids: readonly number[]) => Promise<RunInputs>;
+  readonly derive: (
+    ids: readonly number[],
+    options?: DeriveInputsOptions,
+  ) => Promise<RunInputs>;
 };
 
 /** {@link createGenerationProgram} の指定（グラフを伴う — 検証はここで全部済ませる）。 */

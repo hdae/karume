@@ -61,10 +61,22 @@ export type Gemma4PleIndex = {
   readonly shards: readonly Gemma4PleShard[];
 };
 
+/**
+ * shard 読みへ透過するノブ（{@link Gemma4PleOptions.readShard} と {@link Gemma4Ple.gather}）。
+ *
+ * MUST: **best-effort** の契約である — 読み口が無視しても壊れない（無視した実装では中断が
+ * 「この shard を読み終わってから」効くだけで、値も寿命も変わらない）。生成側は run の発行前に
+ * 自分で `signal` を見る（`generation/sequence.ts`）ので、中断の正しさをここへ委ねていない。
+ */
+export type Gemma4PleReadOptions = {
+  /** この読みの中断（生成 1 回ぶんの `signal` がそのまま降りてくる）。 */
+  readonly signal?: AbortSignal;
+};
+
 export type Gemma4PleOptions = {
   readonly index: Gemma4PleIndex;
   /** shard 1 本ぶんのバイト列を取る（ファイル読み / hub の `streamAssets` — 呼び手の責務）。 */
-  readonly readShard: (file: string) => Promise<ArrayBuffer>;
+  readonly readShard: (file: string, options?: Gemma4PleReadOptions) => Promise<ArrayBuffer>;
   /**
    * 主 embedding の vocab 行数（id 空間の相互照合 — ADR 0085 決定 5）。
    *
@@ -92,8 +104,19 @@ export type Gemma4Ple = {
    * ここにも 0 行の PLE が入る）— グラフ内で引いていたときと同じ値になり、pad 行の値契約
    * （ADR 0066 追記 6）が保たれる。
    */
-  gather(ids: readonly number[]): Promise<Tensor>;
+  gather(ids: readonly number[], options?: Gemma4PleReadOptions): Promise<Tensor>;
   stats(): Gemma4PleStats;
+  /**
+   * 常駐 shard を解放する（ホスト RAM で shard 1 本 758MB 級 × 既定 2 本）。
+   *
+   * MUST: 解放口を持つ。GPU 側の常駐は `Session.dispose` が返すが、ここは**ホスト RAM の
+   * キャッシュ**なので、口が無いと「パイプラインを dispose しても 1.5GiB が返らない」
+   * （実体を掴む参照を 1 つ残せばプロセス寿命まで残る）。
+   *
+   * 以後の {@link Gemma4Ple.gather} は fail loudly — 解放済みの実体が黙って読み直しを始めると、
+   * 「dispose したのに RAM が戻らない」形が復活する。冪等。
+   */
+  dispose(): void;
 };
 
 /** sidecar のテンソルキーと索引のメタデータキー（綴りの正本は `gemma4/export_product.py`）。 */
@@ -307,6 +330,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   /** 挿入順 = LRU（触った shard を末尾へ付け替え、超過分は先頭から落とす）。 */
   const resident = new Map<number, Promise<ResidentShard>>();
   let loads = 0;
+  let disposed = false;
 
   const shardOf = (id: number): number => {
     // 索引は昇順の隙間なし分割（`parseGemma4PleIndex` の MUST）なので二分探索でよい。
@@ -320,7 +344,18 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     return low;
   };
 
-  const acquire = (position: number): Promise<ResidentShard> => {
+  /**
+   * shard 1 本を常駐キャッシュから取る（未常駐なら読む）。
+   *
+   * NOTE: `signal` が効くのは**その shard の読みを始めた gather** に対してだけである。同じ
+   * shard を待つ後続の gather は先行の読みに相乗りするので、先行が中断されれば同じ拒否を
+   * 受ける（中断は自分のものでないので失敗として上がる = 沈黙はしない）。読みを要求ごとに
+   * 分けると 758MB の二重読みになるため、best-effort の側を取っている。
+   */
+  const acquire = (
+    position: number,
+    options: Gemma4PleReadOptions,
+  ): Promise<ResidentShard> => {
     const cached = resident.get(position);
     if (cached !== undefined) {
       // 参照したので末尾へ付け替える（Map の反復順 = 挿入順）。
@@ -330,7 +365,9 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     }
     const shard = index.shards[position];
     loads += 1;
-    const pending = readShard(shard.file).then((bytes) => readResidentShard(bytes, index, shard));
+    const pending = readShard(shard.file, options).then((bytes) =>
+      readResidentShard(bytes, index, shard)
+    );
     // MUST: 失敗した取得を常駐させない（次の gather が同じ拒否済み Promise を掴み続ける）。
     pending.catch(() => {
       if (resident.get(position) === pending) resident.delete(position);
@@ -344,7 +381,10 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   };
 
   return {
-    async gather(ids: readonly number[]): Promise<Tensor> {
+    async gather(ids: readonly number[], options: Gemma4PleReadOptions = {}): Promise<Tensor> {
+      if (disposed) {
+        throw new Error("PLE gather: dispose 済みの sidecar は引けない（常駐は解放済み）");
+      }
       if (ids.length < 1) throw new Error("PLE gather の token 列が空");
       ids.forEach((id, position) => {
         // ③ 実際に引く id（tokenizer が生成しうる special id を含む）— 範囲外は OOB ではなく
@@ -365,7 +405,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         else rows.push(position);
       });
       for (const [shard, positions] of grouped) {
-        const loaded = await acquire(shard);
+        const loaded = await acquire(shard, options);
         for (const position of positions) {
           const row = ids[position] - loaded.start;
           const source = row * stride;
@@ -390,6 +430,11 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     },
     stats(): Gemma4PleStats {
       return { loads, resident: resident.size };
+    },
+    dispose(): void {
+      disposed = true;
+      // 走行中の読みまでは止めない（返ってきた buffer は誰も掴まないので回収される）。
+      resident.clear();
     },
   };
 };

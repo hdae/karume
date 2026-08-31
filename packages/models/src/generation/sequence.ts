@@ -133,9 +133,10 @@ export type GenerationSequence = {
    * 1 ターンぶんを生成する。返り値を汲み切る（または `break` する）まで、この sequence の次の
    * `generate` / `dispose` は動き出さない（ADR 0083 決定 2 の直列化）。
    *
-   * 受理集合の検査（`maxNewTokens` / prompt の token id / sampler の指定）は**同期に**落ちる。
-   * 予算の検査（位置表・容量）は自分の順番が来てからで、先行する生成が会話をどこまで進めるかが
-   * 発行時点では決まっていないため（保存された counter から判断しない = 二重簿記の禁止）。
+   * 受理集合の検査（`maxNewTokens` / prompt の token id / sampler の指定）と**寿命**の検査
+   * （dispose 済みの sequence では生成できない）は**同期に**落ちる。予算の検査（位置表・容量）は
+   * 自分の順番が来てからで、先行する生成が会話をどこまで進めるかが発行時点では決まっていない
+   * ため（保存された counter から判断しない = 二重簿記の禁止）。
    */
   generate(request: GenerationRequest): GenerationStream;
   /** context を返す（`generate` と同じ鎖に積むので、走行中の生成の後に走る）。 */
@@ -302,11 +303,19 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
     return release;
   };
 
-  /** ホスト由来の追加入力（宣言した名前と過不足なく一致することを毎回見る）。 */
-  const deriveInputs = async (ids: Int32Array<ArrayBuffer>): Promise<RunInputs> => {
+  /**
+   * ホスト由来の追加入力（宣言した名前と過不足なく一致することを毎回見る）。
+   *
+   * `signal` を降ろすのは、派生入力の材料が GB 級の遅延ロードになる配布形（gemma4 の PLE
+   * sidecar）があるため — best-effort なので、無視する実装でも run の前の検査で閉じる。
+   */
+  const deriveInputs = async (
+    ids: Int32Array<ArrayBuffer>,
+    signal: AbortSignal | undefined,
+  ): Promise<RunInputs> => {
     const derived = program.derivedInputs;
     if (derived === undefined) return {};
-    const extra = await derived.derive([...ids]);
+    const extra = await derived.derive([...ids], signal === undefined ? {} : { signal });
     const keys = Object.keys(extra);
     const missing = derived.names.filter((name) => !Object.hasOwn(extra, name));
     const surplus = keys.filter((name) => !derived.names.includes(name));
@@ -320,6 +329,12 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
   };
 
   const generate = (request: GenerationRequest): GenerationStream => {
+    // MUST: 寿命の検査も**同期**（ADR 0083 決定 3 — context を外へ出さないので、dispose 済みで
+    // あることを呼び手が確かめる術がここ以外に無い）。遅らせると初反復まで落ちず、しかも
+    // `GenerationContext` 側の汎用文言で出るため、真因（自分が dispose した）が読み取れない。
+    if (disposal !== undefined) {
+      throw new Error("GenerationSequence: dispose 済みでは生成できない");
+    }
     // 受理集合は同期に落とす（GPU にも順番待ちにも入る前）。
     if (!Number.isSafeInteger(request.maxNewTokens) || request.maxNewTokens < 1) {
       throw new Error(`maxNewTokens ${request.maxNewTokens} が 1 以上の整数でない`);
@@ -350,6 +365,9 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
       let release: (() => void) | undefined;
       try {
         release = await acquire();
+        // 順番待ちの間に届いた中断は、ここで閉じる（先行の生成が長ければ待ちも長い）。同期の
+        // 検査で足りるのは、待ち自体が `await` = 中断タスクの配送済みを意味するため。
+        request.signal?.throwIfAborted();
 
         const past = context.pastLength;
         // 多ターンの連結（ADR 0083 決定 4）— 未 commit frontier を新 prompt の先頭へ。
@@ -384,12 +402,17 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             ids[row] = promptIds[chunk.position + row];
             positions[row] = base + row;
           }
+          const extra = await deriveInputs(ids, request.signal);
+          // MUST: 派生入力の `await` 明けにもう一度見る（ADR 0083 決定 5 の「段の境目」は run の
+          // **発行直前**）。ここを省くと、中断が届いた後に run が 1 本まるごと進む — 先頭 chunk は
+          // 常に cold miss で GB 級の shard を読むので、「送信直後に停止」で必ず踏む窓になる。
+          request.signal?.throwIfAborted();
           const outputs = await session.run(
             {
               [program.inputIds]: i32Row(rows, ids),
               [program.positionIds]: i32Row(rows, positions),
               [program.lastRow]: lastRowInput(chunk.queryLength - 1),
-              ...await deriveInputs(ids),
+              ...extra,
             },
             undefined,
             { context, queryLength: chunk.queryLength },
@@ -416,12 +439,16 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         for (let step = 0; step + 1 < request.maxNewTokens; step += 1) {
           await settleAbort(request.signal);
           const ids = Int32Array.of(token);
+          const extra = await deriveInputs(ids, request.signal);
+          // prefill 側と同じ理由で run の発行直前にもう一度見る（decode で踏むと token が 1 個
+          // 余分に消費者へ届く）。
+          request.signal?.throwIfAborted();
           const outputs = await session.run(
             {
               [program.inputIds]: i32Row(1, ids),
               [program.positionIds]: i32Row(1, Int32Array.of(context.pastLength)),
               [program.lastRow]: lastRowInput(0),
-              ...await deriveInputs(ids),
+              ...extra,
             },
             undefined,
             { context, queryLength: 1 },

@@ -406,6 +406,47 @@ Deno.test("GenerationSequence: 発行済みの signal は 1 本も run を出さ
   assertEquals(await stream.done, { reason: "aborted" });
 });
 
+Deno.test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本も出さずに閉じる", async () => {
+  // 待っている間に abort されたリクエストは、順番が回ってきても**何も判定せずに**閉じる。
+  // 予算超過を先に返すと「止めたのに容量エラーが出た」になり、呼び手は自分の中断を識別できない。
+  const fake = fakeSession({ tokens: [5, 6, 7] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf({ capacity: 8 }),
+  });
+
+  const first = sequence.generate({ prompt: [1, 2], maxNewTokens: 3 });
+  const iterator = first[Symbol.asyncIterator]();
+  await iterator.next();
+
+  const controller = new AbortController();
+  const reason = new Error("順番待ちの間に止めた");
+  // past 4 + prompt(連結 1 + 6) + K 4 − 1 = 14 > 容量 8 = 自分の番が来れば必ず容量超過。
+  const queued = sequence.generate({
+    prompt: [1, 2, 3, 4, 5, 6],
+    maxNewTokens: 4,
+    signal: controller.signal,
+  });
+  const consumed = (async () => {
+    for await (const _event of queued) { /* 1 個も来ない */ }
+  })();
+  // 順番待ちに入らせてから中断する。
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  controller.abort(reason);
+
+  while (!(await iterator.next()).done) { /* 席を空ける */ }
+  const callsAfterFirst = fake.calls.length;
+  let caught: unknown;
+  try {
+    await consumed;
+  } catch (error) {
+    caught = error;
+  }
+  assert(caught === reason, `中断ではなく別の失敗で閉じた: ${String(caught)}`);
+  assertEquals(await queued.done, { reason: "aborted" });
+  assertEquals(fake.calls.length, callsAfterFirst);
+});
+
 Deno.test("GenerationSequence: 2 本の generate は直列化される（run が混ざらない）", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8, 9, 10] });
   const sequence = await createGenerationSequence({
@@ -514,6 +555,97 @@ Deno.test("DerivedRunInputs: pad 行込みの id 列が渡り、入力として�
   // prefill は物理行数ぶん（pad 行にも `input_ids` と同じ 0 が入る）・decode は 1 行。
   assertEquals(seen, [[1, 2, 3, 0], [5]]);
   assertEquals(fake.calls.map((call) => call.extra), [[DERIVED], [DERIVED]]);
+});
+
+Deno.test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effort の材料）", async () => {
+  // 派生入力の材料は配布形によっては GB 級の遅延ロード（gemma4 の PLE sidecar）。降ろさないと
+  // 「停止を押しても shard を読み終わるまで返らない」区間ができる。
+  const fake = fakeSession({ tokens: [5, 6] });
+  const seen: (AbortSignal | undefined)[] = [];
+  const controller = new AbortController();
+  const derived = (): GenerationProgram["derivedInputs"] => ({
+    names: [DERIVED],
+    derive: (ids, options) => {
+      seen.push(options?.signal);
+      return Promise.resolve(
+        {
+          [DERIVED]: {
+            dtype: "f32",
+            shape: [1, ids.length, 2],
+            data: new Float32Array(ids.length * 2),
+          },
+        } satisfies RunInputs,
+      );
+    },
+  });
+
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf({ derivedInputs: derived() }),
+  });
+  await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 2, signal: controller.signal }));
+  assertEquals(seen.length, 2);
+  assert(seen.every((signal) => signal === controller.signal), "derive に別の signal が渡っている");
+
+  // 購読していない要求には捏造しない。
+  const bare = await createGenerationSequence({
+    session: fakeSession().session,
+    program: programOf({ derivedInputs: derived() }),
+  });
+  await drain(bare.generate({ prompt: [1], maxNewTokens: 1 }));
+  assertEquals(seen[2], undefined);
+});
+
+Deno.test("DerivedRunInputs: derive の await 明けに届いた中断は run を出さない", async () => {
+  // 中断の観測点が「ループ先頭」だけだと、派生入力を作っている間に届いた中断の後に run が
+  // 1 本まるごと進む（prefill 先頭は常に cold miss なので、送信直後の停止で必ず踏む）。
+  for (const [name, maxNewTokens, tokensBefore] of [["prefill", 2, 0], ["decode", 3, 1]] as const) {
+    const fake = fakeSession({ tokens: [5, 6, 7] });
+    const controller = new AbortController();
+    const reason = new Error(`${name} の派生入力の途中で止めた`);
+    let derives = 0;
+    const sequence = await createGenerationSequence({
+      session: fake.session,
+      program: programOf({
+        derivedInputs: {
+          names: [DERIVED],
+          derive: async (ids) => {
+            derives += 1;
+            // この derive の「読み」の最中に中断が届く形。
+            if (derives > tokensBefore) {
+              controller.abort(reason);
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            return {
+              [DERIVED]: {
+                dtype: "f32",
+                shape: [1, ids.length, 2],
+                data: new Float32Array(ids.length * 2),
+              },
+            } satisfies RunInputs;
+          },
+        },
+      }),
+    });
+
+    const stream = sequence.generate({
+      prompt: [1, 2],
+      maxNewTokens,
+      signal: controller.signal,
+    });
+    const events: GenerationEvent[] = [];
+    let caught: unknown;
+    try {
+      for await (const event of stream) events.push(event);
+    } catch (error) {
+      caught = error;
+    }
+    assert(caught === reason, `${name}: 中断が包まれている（${String(caught)}）`);
+    assertEquals(await stream.done, { reason: "aborted" }, name);
+    // 中断が届いた後の run は 1 本も出ていない = token も 1 個も余分に届いていない。
+    assertEquals(fake.calls.length, tokensBefore, `${name}: 中断後に run が進んだ`);
+    assertEquals(tokenIds(events).length, tokensBefore === 0 ? 0 : 1, `${name}: 余分な token`);
+  }
 });
 
 Deno.test("DerivedRunInputs: 宣言と違うキーを返したら fail loudly", async () => {
@@ -630,6 +762,35 @@ Deno.test("GenerationSequence: dispose は走行中の生成の後に走り、2 
   assertEquals(fake.disposals(), 1);
   await sequence.dispose();
   assertEquals(fake.disposals(), 1);
+});
+
+Deno.test("GenerationSequence: dispose 済みの generate は同期に落ちる（自分の文言で）", async () => {
+  // context は外へ出さない（決定 3）ので、呼び手が寿命を確かめる術はこの検査しかない。遅らせると
+  // 初反復まで落ちず、しかも `GenerationContext` 側の汎用文言になって真因が読めない。
+  const fake = fakeSession();
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(),
+  });
+  await sequence.dispose();
+  assertThrows(
+    () => sequence.generate({ prompt: [1], maxNewTokens: 1 }),
+    Error,
+    "GenerationSequence: dispose 済み",
+  );
+  assertEquals(fake.calls.length, 0);
+  // dispose 発行直後（完了前）も同じ — `disposal` が立った時点で新しい生成は受けない。
+  const running = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(),
+  });
+  const disposal = running.dispose();
+  assertThrows(
+    () => running.generate({ prompt: [1], maxNewTokens: 1 }),
+    Error,
+    "GenerationSequence: dispose 済み",
+  );
+  await disposal;
 });
 
 Deno.test("GenerationSession: 実 Session の面を型で満たす（綴りのドリフト検出）", () => {
