@@ -4,7 +4,9 @@
 載る（`q·scale`・`|q| ≤ 7`）③ `H` が対角なら `quantize.fake_quant_int4` と**ビット同一**
 （補償項が消える数学的帰結 = 恒真化していないオラクル）④相関入力では GPTQ の `H` 加重誤差が
 RTN より**小さい**（方式が実際に効く対照）⑤ stage 逐次の**誤差伝播**が後段へ届いている
-（伝播を止めると結果が変わる故障注入）。
+（伝播を止めると結果が変わる故障注入）⑥掃引軸（`static_groups` / `act_order` / `damping`）は
+**既定で既存経路とビット同一**、かつ有効時は格納の形（元列順・連続 group・group scale）を
+1 つも動かさない。
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from torch.nn import functional
 from karume.quant_calib import (
     AWQ_ALPHA_STEPS,
     DEFAULT_GRID,
+    GPTQ_DAMPING,
     CalibReport,
     GridSpec,
     awq_search_scale,
@@ -265,6 +268,156 @@ class TestGptqRows:
     def test_a_hessian_of_the_wrong_shape_fails_loudly(self):
         with pytest.raises(QuantizeError, match=r"\[in, in\]"):
             gptq_quantize_rows(weights(3, 32, seed=16), torch.eye(16, dtype=torch.float64), GRID)
+
+
+class TestGptqOptions:
+    """掃引軸 `static_groups` / `act_order` / `damping`（既定は現行経路とビット同一の opt-in）。
+
+    見るのは 3 点: ①既定のままなら 1bit も動かない ② `static_groups` の scale が**丸める前の
+    元の連続列ブロック**由来である ③ `act_order` は処理順しか変えず、格納の形（元列順・連続
+    group・group scale の台帳）を動かさない。
+    """
+
+    @staticmethod
+    def fixture(seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """`H` が対角から遠い（= 補償が実際に効く）小さい模型。"""
+        return weights(6, 32, seed=seed), gram(correlated_inputs(96, 32, seed=seed + 1))
+
+    @staticmethod
+    def order_of(hessian: torch.Tensor) -> torch.Tensor:
+        """`diag(H)` 降順の処理順（実装と同じ安定ソート）。"""
+        return torch.argsort(torch.diagonal(hessian), descending=True, stable=True)
+
+    def test_the_options_off_are_bit_identical_to_the_call_without_them(self):
+        """MUST: 掃引軸を足しても既定経路は 1bit も動かない（既存 i4 配布資産の再現性）。"""
+        rows, hessian = self.fixture(seed=101)
+
+        bare, bare_ledger = gptq_quantize_rows(rows, hessian, GRID)
+        off, off_ledger = gptq_quantize_rows(
+            rows, hessian, GRID, static_groups=False, act_order=False, damping=GPTQ_DAMPING
+        )
+
+        assert torch.equal(bare, off)
+        assert bare_ledger is not None
+        assert off_ledger is not None
+        assert torch.equal(bare_ledger, off_ledger)
+
+    def test_static_groups_takes_the_scale_from_the_original_block(self):
+        """`static_groups=True` の台帳 = **丸める前**の `rows` の連続列ブロックの group scale。
+
+        対（恒真化の排除）は dynamic 側 — 補償済みの現在値から採るので**別物**になる。
+        差が出ない模型ではこの門は何も言っていないので、差そのものを assert で固定する。
+        """
+        rows, hessian = self.fixture(seed=103)
+
+        static, static_ledger = gptq_quantize_rows(rows, hessian, GRID, static_groups=True)
+        dynamic, dynamic_ledger = gptq_quantize_rows(rows, hessian, GRID)
+
+        assert static_ledger is not None
+        assert dynamic_ledger is not None
+        assert torch.equal(static_ledger, group_scale(rows, GROUP))
+        assert not torch.equal(dynamic_ledger, static_ledger), "dynamic と差が出ない模型"
+        assert not torch.equal(static, dynamic)
+        # 台帳は「使った scale そのもの」のまま = 格納値が復元される（MUST は静的化でも不変）。
+        assert torch.equal(
+            dequantize_int4(quantize_to_int4(static, static_ledger), static_ledger), static
+        )
+
+    def test_a_diagonal_hessian_reproduces_the_storage_round_with_static_groups(self):
+        """オラクルは静的化でも成立 — 対角 `H` では補償が 0 なので dynamic と static が一致する。"""
+        module = nn.Linear(32, 6, bias=False)
+        twin = copy.deepcopy(module)
+        fake_quant_int4(twin, group_size=GROUP)
+
+        rounded, ledger = gptq_quantize_rows(
+            channel_rows(module.weight.detach(), 0),
+            torch.eye(32, dtype=torch.float64),
+            GRID,
+            static_groups=True,
+        )
+
+        assert torch.equal(rounded, twin.weight.detach())
+        assert ledger is not None
+        assert torch.equal(ledger, group_scale(channel_rows(twin.weight.detach(), 0), GROUP))
+
+    def test_act_order_writes_the_columns_back_in_the_original_order(self):
+        """**オラクル**: 対角 `H` なら並べ替えても `fake_quant_int4` とビット同一。
+
+        補償項が厳密に 0 なので丸めの中身は処理順に依らない。したがって一致することは
+        「並べ替えた列が**元の列へ**戻り、group 帰属も元の連続ブロックのまま」の証明になる
+        （upstream の `Q = Q[:, invperm]` と同値）。対角値は非一様にして perm を**恒等でない**
+        ものにする — 恒等 perm では並べ替えの門にならない。
+        """
+        module = nn.Linear(32, 6, bias=False)
+        twin = copy.deepcopy(module)
+        fake_quant_int4(twin, group_size=GROUP)
+        diagonal = torch.arange(32, 0, -1, dtype=torch.float64).roll(7)
+        assert not torch.equal(self.order_of(torch.diag(diagonal)), torch.arange(32))
+
+        rounded, ledger = gptq_quantize_rows(
+            channel_rows(module.weight.detach(), 0),
+            torch.diag(diagonal),
+            GRID,
+            static_groups=True,
+            act_order=True,
+        )
+
+        assert torch.equal(rounded, twin.weight.detach())
+        assert ledger is not None
+        assert torch.equal(ledger, group_scale(channel_rows(module.weight.detach(), 0), GROUP))
+
+    def test_act_order_changes_the_result_but_not_the_storage_shape(self):
+        """対 — 相関 `H` では処理順が実際に効く。それでも**格納の形は 1 つも動かない**。"""
+        rows, hessian = self.fixture(seed=105)
+        assert not torch.equal(self.order_of(hessian), torch.arange(32))
+
+        ordered, ordered_ledger = gptq_quantize_rows(
+            rows, hessian, GRID, static_groups=True, act_order=True
+        )
+        plain, plain_ledger = gptq_quantize_rows(rows, hessian, GRID, static_groups=True)
+
+        assert not torch.equal(ordered, plain)
+        assert ordered_ledger is not None
+        assert plain_ledger is not None
+        # group 整列（元順・連続 group）は不変 = ランタイム側の変更ゼロ。
+        assert torch.equal(ordered_ledger, plain_ledger)
+        quantized = quantize_to_int4(ordered, ordered_ledger)
+        assert int(quantized.abs().amax()) <= INT4_MAX
+        assert torch.equal(dequantize_int4(quantized, ordered_ledger), ordered)
+
+    def test_act_order_without_static_groups_fails_loudly(self):
+        """dynamic group で並べ替えると group 帰属が写し戻せない — 黙って近似しない。"""
+        rows, hessian = self.fixture(seed=106)
+
+        with pytest.raises(QuantizeError, match="static_groups=True が前提"):
+            gptq_quantize_rows(rows, hessian, GRID, act_order=True)
+
+    def test_the_explicit_default_damping_matches_the_constant(self):
+        rows, hessian = self.fixture(seed=107)
+
+        explicit, _ = gptq_quantize_rows(rows, hessian, GRID, damping=GPTQ_DAMPING)
+        default, _ = gptq_quantize_rows(rows, hessian, GRID)
+
+        assert torch.equal(explicit, default)
+
+    def test_damping_reaches_the_solver(self):
+        """対照 — `damping` は `_inverse_cholesky` の `λ` に届いて結果を動かす。"""
+        rows = weights(24, 128, seed=108)
+        hessian = gram(correlated_inputs(512, 128, seed=109))
+        grid = GridSpec(group_size=32)
+
+        light, _ = gptq_quantize_rows(rows, hessian, grid, damping=0.001)
+        heavy, _ = gptq_quantize_rows(rows, hessian, grid, damping=0.1)
+
+        assert not torch.equal(light, heavy)
+
+    @pytest.mark.parametrize("damping", [0.0, -0.01])
+    def test_a_non_positive_damping_fails_loudly(self, damping):
+        """`λ = 0` では対角 0 の入力チャネルが残って `H` が特異になりうる。"""
+        rows, hessian = self.fixture(seed=110)
+
+        with pytest.raises(QuantizeError, match="damping は正の値"):
+            gptq_quantize_rows(rows, hessian, GRID, damping=damping)
 
 
 class TestAwqSearch:
@@ -582,6 +735,58 @@ class TestCalibrateStagesMethods:
         assert report.fit_stride == 3
         assert "fit_stride 3" in report.describe()
         assert report.int4 is None
+
+
+class TestCalibrateStagesOptions:
+    """掃引軸が駆動から層まで**そのまま**届く（sweep は `calibrate_stages` 越しに回す）。"""
+
+    @staticmethod
+    def stage_and_inputs() -> tuple[nn.Linear, torch.Tensor]:
+        torch.manual_seed(112)
+        return nn.Linear(32, 8), correlated_inputs(64, 32, seed=113)
+
+    def test_the_options_reach_the_layer(self):
+        stage, inputs = self.stage_and_inputs()
+        original = stage.weight.detach().clone()
+
+        calibrate_stages(
+            [("only", stage)],
+            [((inputs,), {})],
+            spec=GRID,
+            static_groups=True,
+            act_order=True,
+            damping=0.05,
+        )
+
+        expected, _ = gptq_quantize_rows(
+            original, gram(inputs), GRID, static_groups=True, act_order=True, damping=0.05
+        )
+        assert torch.equal(stage.weight.detach(), expected)
+        # 対 — 既定で回した結果とは違う（軸が素通しされていることの裏取り）。
+        default, _ = gptq_quantize_rows(original, gram(inputs), GRID)
+        assert not torch.equal(expected, default)
+
+    def test_the_defaults_leave_the_driver_bit_identical(self):
+        stage, inputs = self.stage_and_inputs()
+        original = stage.weight.detach().clone()
+
+        calibrate_stages([("only", stage)], [((inputs,), {})], spec=GRID)
+
+        expected, _ = gptq_quantize_rows(original, gram(inputs), GRID)
+        assert torch.equal(stage.weight.detach(), expected)
+
+    def test_gptq_options_on_a_method_without_a_hessian_fail_loudly(self):
+        """`GridSpec.fit_stride` と同じ流儀 — 効かない軸を渡されて黙って無視しない。"""
+        stage, inputs = self.stage_and_inputs()
+
+        with pytest.raises(QuantizeError, match="効かない"):
+            calibrate_stages(
+                [("only", stage)],
+                [((inputs,), {})],
+                method="awq",
+                spec=GRID,
+                static_groups=True,
+            )
 
 
 class TestStageHandoff:

@@ -38,11 +38,18 @@ NOTE（オラクル）: `H` が対角（例 `λI`）のとき補償項 `U[j, j+1
 `gptq` × `rtn` は {@link quantize.fake_quant_int4} と**ビット同一**になる。これは実装の性質
 ではなく数学的帰結で、`tests/test_quant_calib.py` が門として固定する。
 
-NOTE（act-order を実装しない理由）: 参照実装の GPTQ は `diag(H)` の降順で in 軸を並べ替えて
-から丸める（act-order / desc_act）と品質が上がるが、本リポの格納は **in 軸の連続 32 要素を
-1 group** として scale を張る（ADR 0069 決定 2・端数 group 禁止）ので、並べ替えると格納の
-group 整列が壊れる。復元するには「並べ替え順」を companion テンソルとして配る実装が要り、
-それ無しでは**出荷できない**。測定だけできても出口が無い列は作らない。
+NOTE（act-order / static-groups は **opt-in の実験軸**）: 参照実装の GPTQ は `diag(H)` の降順で
+in 軸を並べ替えてから丸める（act-order / desc_act）と品質が上がる。並べ替えが格納の group 整列を
+壊すのは **dynamic group（補償済みの現在値から scale を採る）前提のときだけ**で、
+`static_groups=True`（scale を丸める前の**元の連続列ブロック**から先に一括確定する）と併せれば、
+並べ替えは「補償ループの処理順」にしか及ばない — 格納は元の in 軸順・連続 `group_size` 列 =
+1 group のままなので、companion の permutation テンソルは要らず**ランタイム変更もゼロ**
+（upstream `IST-DASLab/gptq` の `--static-groups` × `--act-order` と同じ成立条件）。
+
+MUST: 両方とも**既定 `False`**。既定経路は現行の dynamic group と**ビット同一**で、既存の i4
+配布資産・golden の再現性はこのフラグを足しても 1bit も動かない（`tests/test_quant_calib.py` の
+A/B 突合が門）。`act_order=True` × `static_groups=False` は fail loudly（並べ替えた処理順の
+現在値から採った scale は、元の連続 group へ写し戻せない）。
 """
 
 from __future__ import annotations
@@ -83,9 +90,10 @@ from .quantize import (
 #: 数学的な結果はブロック長に依らない（浮動小数の加算順だけが変わる）。
 DEFAULT_GPTQ_BLOCK = 128
 
-#: damping 係数 — `λ = GPTQ_DAMPING × mean(diag(H))` を対角へ加える。**定数固定**にするのは、
-#: 可変にすると「方式の差」と「damping の差」が分離できなくなるから（`quant_methods` の
-#: Lloyd 反復を固定回数にしてあるのと同じ理由）。
+#: damping 係数の**既定値** — `λ = damping × mean(diag(H))` を対角へ加える。upstream
+#: `fasterquant(percdamp=.01)` と同値。呼び出し側が `damping=` で振れるのは**感度掃引のため
+#: だけ**で、既定を動かさない限り既存経路はビット同一（振った値は測定側の出力へ明記する MUST
+#: — 「方式の差」と「damping の差」が混ざった数字は読めない）。
 GPTQ_DAMPING = 0.01
 
 #: AWQ の α 格子の分割数（`α ∈ {0, 1/16, …, 1}` の 17 点）。
@@ -248,14 +256,22 @@ def _bind_grid(spec: GridSpec, fit_source: torch.Tensor, where: str) -> _BoundGr
 # ---- GPTQ（層単位）----------------------------------------------------------
 
 
-def _inverse_cholesky(hessian: torch.Tensor, where: str) -> torch.Tensor:
+def _inverse_cholesky(
+    hessian: torch.Tensor, where: str, damping: float = GPTQ_DAMPING
+) -> torch.Tensor:
     """damping 済み `H` の逆行列の上三角 Cholesky 因子 `U`（`H⁻¹ = Uᵀ U`）を F64 で返す。
 
-    `λ = GPTQ_DAMPING × mean(diag(H))` を対角へ加えるので、校正データで 1 度も動かなかった
+    `λ = damping × mean(diag(H))` を対角へ加えるので、校正データで 1 度も動かなかった
     入力チャネル（対角 0）が混ざっていても正定値性は保たれる。**H が丸ごと 0** のときだけ
     `λ = 0` で特異になるので fail loudly — 「校正 forward に載っていない層を量子化した」を
-    沈黙させない。
+    沈黙させない。`damping = 0` を明示で渡した場合も同じ理由で正定値性の保証が消えるので、
+    ここは受け取らない（掃引の下端は 0 ではなく小さい正の値で刻む）。
     """
+    if not damping > 0.0:
+        raise QuantizeError(
+            f"{where}: damping は正の値（実測 {damping}）— λ = 0 では対角 0 の入力チャネルが"
+            "残って H が特異になりうる"
+        )
     wide = hessian.to(torch.float64)
     average = float(torch.diagonal(wide).mean())
     # NaN も落とすので `<= 0` ではなく `not > 0` で書く（NaN は全比較が偽になる）。
@@ -265,12 +281,36 @@ def _inverse_cholesky(hessian: torch.Tensor, where: str) -> torch.Tensor:
             "流れていないか全ゼロで、damping λ = 0 では H が特異になる"
         )
     damped = wide.clone()
-    damped.diagonal().add_(GPTQ_DAMPING * average)
+    damped.diagonal().add_(damping * average)
     try:
         factor = torch.linalg.cholesky(damped)
         return torch.linalg.cholesky(torch.cholesky_inverse(factor), upper=True)
     except RuntimeError as error:  # torch の LinAlgError は RuntimeError の派生
         raise QuantizeError(f"{where}: Hessian の Cholesky 分解に失敗した（{error}）") from error
+
+
+def _static_group_scales(
+    grid: _BoundGrid, rows: torch.Tensor, group_size: int
+) -> list[torch.Tensor]:
+    """**丸める前**の重みの連続列ブロックごとに group scale を先に確定する（static-groups）。
+
+    dynamic group（{@link _BoundGrid.scale_of} の docstring）が「group に到達した時点の現在値」
+    から採るのに対し、こちらは補償を 1 度も見ない元の `rows` から採る。処理順を並べ替えても
+    group の帰属と scale が動かないので、act-order の前提になる。
+    """
+    source = rows.to(torch.float32)
+    return [
+        grid.scale_of(source[:, head : head + group_size])
+        for head in range(0, int(rows.shape[1]), group_size)
+    ]
+
+
+def _activation_order(hessian: torch.Tensor) -> torch.Tensor:
+    """`diag(H)` の降順に列の**処理順**を返す（act-order）。
+
+    同値は元の列順が先（`stable=True`）— 乱数も実装依存のタイブレークも挟まない決定性 MUST。
+    """
+    return torch.argsort(torch.diagonal(hessian), descending=True, stable=True)
 
 
 def gptq_quantize_rows(
@@ -279,6 +319,10 @@ def gptq_quantize_rows(
     spec: GridSpec = DEFAULT_GRID,
     where: str = "重み",
     block_size: int = DEFAULT_GPTQ_BLOCK,
+    *,
+    static_groups: bool = False,
+    act_order: bool = False,
+    damping: float = GPTQ_DAMPING,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """`[チャネル, in]` に畳んだ重みを GPTQ で丸め、`(丸め済み rows, scale 台帳)` を返す。
 
@@ -304,7 +348,24 @@ def gptq_quantize_rows(
     NOTE: `block_size` は `group_size` の倍数へ丸められる（group が 2 つのブロックへ跨ると
     「group の列に到達した時点の現在値」が採れなくなるため）。結果は数学的にはブロック長に
     依らない。
+
+    `static_groups` / `act_order` / `damping` は**掃引用の opt-in 軸**（モジュール docstring）:
+
+    - `static_groups=True` … scale を**丸める前**の `rows` の連続列ブロックから先に一括確定する
+      （{@link _static_group_scales}）。台帳の意味は変わらない（**使った scale そのもの**）
+    - `act_order=True` … `diag(H)` 降順で列を処理する。`H` と `W` を perm で並べ替えて解き、
+      group の帰属は**元の列添字**（`perm[位置] // group_size`）から引き、丸め結果は元の列へ
+      直接書き戻す（upstream の `Q = Q[:, invperm]` と同値）。**`static_groups=True` が前提**
+    - `damping` … `_inverse_cholesky` の `λ` 係数。既定値のままなら経路はビット同一
+
+    MUST: 既定（両 `False` × `damping=GPTQ_DAMPING`）は現行経路と**ビット同一**。
     """
+    if act_order and not static_groups:
+        raise QuantizeError(
+            f"{where}: act_order は static_groups=True が前提"
+            "（dynamic group は並べ替えた処理順の現在値から scale を採ることになり、"
+            "元の連続 group へ写し戻せない）"
+        )
     if rows.dim() != 2:
         raise QuantizeError(
             f"{where}: GPTQ の入力は `[チャネル, in]` の 2 次元（実測 {list(rows.shape)}）"
@@ -317,10 +378,17 @@ def gptq_quantize_rows(
     # 端数 group の fail loudly は格納側と同じ 1 本（ADR 0069 決定 2）。
     groups = int(grouped_view(rows, spec.group_size, where).shape[-2])
     grid = _bind_grid(spec, rows, where)
-    upper = _inverse_cholesky(hessian, where)
+    static = _static_group_scales(grid, rows, spec.group_size) if static_groups else None
+    # 並べ替えは `H` と `W` の**両方**へ同じ perm を当てる（`U` の添字も処理順の空間になる）。
+    order = _activation_order(hessian) if act_order else None
+    upper = _inverse_cholesky(
+        hessian if order is None else hessian[order][:, order], where, damping
+    )
     block = spec.group_size * max(1, block_size // spec.group_size)
 
-    work = rows.to(torch.float64)
+    work = (rows if order is None else rows[:, order]).to(torch.float64)
+    # 処理順の位置 → 元の列添字。`None` は恒等（既定経路は写しも tolist も作らない）。
+    columns = None if order is None else order.tolist()
     # 受け皿は**入力と同じデバイス**に作る（既定の `torch.empty` は CPU 固定なので、GPU の重みを
     # 渡された瞬間に列の書き込みでデバイス不一致になる）。全 CPU なら従来と同じ置き場。
     rounded = torch.empty(rows.shape, dtype=torch.float32, device=rows.device)
@@ -329,23 +397,32 @@ def gptq_quantize_rows(
         if spec.shippable
         else None
     )
+    if ledger is not None and static is not None:
+        for index, fixed in enumerate(static):
+            ledger[:, index] = fixed
+    # `scale` は各ブロックの `offset == 0` で必ず束縛される（static は全列・dynamic は group 先頭
+    # で採るが、ブロック長は group_size の倍数なので offset 0 は常に group 先頭）。
     for start in range(0, in_axis, block):
         stop = min(start + block, in_axis)
         span = work[:, start:stop].clone()
         residuals = torch.zeros_like(span)
-        for head in range(0, stop - start, spec.group_size):
-            scale = grid.scale_of(span[:, head : head + spec.group_size].to(torch.float32))
-            if ledger is not None:
-                ledger[:, (start + head) // spec.group_size] = scale
-            for offset in range(head, head + spec.group_size):
-                column = start + offset
-                quantized = grid.round_column(span[:, offset].to(torch.float32), scale)
-                rounded[:, column] = quantized
-                residual = (span[:, offset] - quantized.to(torch.float64)) / upper[column, column]
-                residuals[:, offset] = residual
-                tail = upper[column, column + 1 : stop]
-                if tail.numel():
-                    span[:, offset + 1 :] -= residual.unsqueeze(1) * tail
+        for offset in range(stop - start):
+            position = start + offset
+            column = position if columns is None else columns[position]
+            if static is not None:
+                scale = static[column // spec.group_size]
+            elif not offset % spec.group_size:
+                # dynamic group — group の先頭列に到達した時点の**現在値**から採る。
+                scale = grid.scale_of(span[:, offset : offset + spec.group_size].to(torch.float32))
+                if ledger is not None:
+                    ledger[:, position // spec.group_size] = scale
+            quantized = grid.round_column(span[:, offset].to(torch.float32), scale)
+            rounded[:, column] = quantized
+            residual = (span[:, offset] - quantized.to(torch.float64)) / upper[position, position]
+            residuals[:, offset] = residual
+            tail = upper[position, position + 1 : stop]
+            if tail.numel():
+                span[:, offset + 1 :] -= residual.unsqueeze(1) * tail
         if stop < in_axis:
             work[:, stop:] -= residuals @ upper[start:stop, stop:]
     return rounded, ledger
@@ -636,6 +713,10 @@ def calibrate_stages(
     samples: int = DEFAULT_AWQ_SAMPLES,
     select_output: Callable[[object], torch.Tensor] = first_tensor_output,
     advance_kwargs: Callable[[int, Mapping[str, object]], Mapping[str, object]] | None = None,
+    *,
+    static_groups: bool = False,
+    act_order: bool = False,
+    damping: float = GPTQ_DAMPING,
 ) -> CalibReport:
     """stage を 1 つずつ進めながら校正付き丸めを当てる（**校正データを 2 周しない**駆動）。
 
@@ -669,6 +750,10 @@ def calibrate_stages(
     戻す（{@link _advance_batch}）ので、常駐するのは「重み + `H` + 1 バッチ」だけで、GPU 校正でも
     バッチ本数がメモリに効かない。全 CPU では `Tensor.to` が self を返す no-op なので、既定経路の
     値も演算順も 1bit も変わらない。
+
+    `static_groups` / `act_order` / `damping` は {@link gptq_quantize_rows} の掃引軸をそのまま
+    素通しする（GPTQ を通す方式でだけ効く — AWQ 単独の経路には `H` が無い）。既定は現行経路と
+    ビット同一。
     """
     if method not in CALIB_METHODS:
         raise QuantizeError(f"方式 '{method}' は未対応（{', '.join(CALIB_METHODS)}）")
@@ -680,6 +765,12 @@ def calibrate_stages(
         raise QuantizeError(f"samples は 1 以上（実測 {samples}）")
     needs_hessian = method in ("gptq", "awq+gptq")
     needs_act = method in ("awq", "awq+gptq")
+    if not needs_hessian and (static_groups or act_order or damping != GPTQ_DAMPING):
+        # `GridSpec.fit_stride` と同じ流儀 — 効かない軸を渡されて黙って無視しない。
+        raise QuantizeError(
+            f"方式 '{method}' は GPTQ を通さないので static_groups / act_order / damping は"
+            "効かない（黙って無視もしない）"
+        )
 
     current: list[StageBatch] = [(tuple(args), dict(kwargs)) for args, kwargs in batches]
     reports: list[LayerCalibReport] = []
@@ -693,7 +784,17 @@ def calibrate_stages(
             for local, weight, axis in targets:
                 fqn = _qualify(prefix, local)
                 report, ledger = _quantize_layer(
-                    stats[local], weight, axis, index, fqn, method, spec, block_size
+                    stats[local],
+                    weight,
+                    axis,
+                    index,
+                    fqn,
+                    method,
+                    spec,
+                    block_size,
+                    static_groups=static_groups,
+                    act_order=act_order,
+                    damping=damping,
                 )
                 reports.append(report)
                 if ledger is not None:
@@ -773,6 +874,10 @@ def _quantize_layer(
     method: CalibMethod,
     spec: GridSpec,
     block_size: int,
+    *,
+    static_groups: bool = False,
+    act_order: bool = False,
+    damping: float = GPTQ_DAMPING,
 ) -> tuple[LayerCalibReport, torch.Tensor | None]:
     """1 層を丸めて in-place 書き戻し、`(層レポート, scale 台帳 or None)` を返す。
 
@@ -792,7 +897,16 @@ def _quantize_layer(
     ledger: torch.Tensor | None = None
 
     if method == "gptq":
-        rounded, ledger = gptq_quantize_rows(rows, stats.hessian, spec, where, block_size)
+        rounded, ledger = gptq_quantize_rows(
+            rows,
+            stats.hessian,
+            spec,
+            where,
+            block_size,
+            static_groups=static_groups,
+            act_order=act_order,
+            damping=damping,
+        )
     else:
         search = awq_search_scale(rows, stats.act_amax, torch.cat(stats.samples), spec, where)
         alpha, error = search.alpha, search.error
@@ -801,7 +915,16 @@ def _quantize_layer(
         if method == "awq+gptq":
             inverse = 1.0 / channel
             transformed = stats.hessian * inverse.unsqueeze(0) * inverse.unsqueeze(1)
-            quantized, _ = gptq_quantize_rows(scaled, transformed, spec, where, block_size)
+            quantized, _ = gptq_quantize_rows(
+                scaled,
+                transformed,
+                spec,
+                where,
+                block_size,
+                static_groups=static_groups,
+                act_order=act_order,
+                damping=damping,
+            )
         else:
             quantized, _ = _bind_grid(spec, scaled, where).round_rows(scaled)
         rounded = (quantized.to(torch.float64) / channel).to(torch.float32)
