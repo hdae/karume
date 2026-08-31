@@ -8,11 +8,15 @@ The checkpoint is `google/gemma-4-E2B-it`, whose weights are covered by the **Ge
 the per-revision license interview is a release gate (ADR 0065 stage 6) and nothing derived from
 these weights is published from this repository today.
 
-The authority for the design decisions is the module docstrings (`export.py`, `export_decode.py`);
-this file is the entry point only.
+The authority for the design decisions is the module docstrings (`export.py`, `export_decode.py`,
+`export_product.py`); this file is the entry point only.
 
-Two scripts read the same checkpoint: `export.py` emits the 1-shot (prefill-equivalent) graph, and
-`export_decode.py` emits the states-form chunk graph that the generation path is accepted against.
+Four scripts export a graph from the same checkpoint (`tokenizer.py` below reads only its
+`tokenizer.json`). `export.py` emits the 1-shot (prefill-equivalent) graph and
+`export_decode.py` emits the states-form chunk graph that the generation path is accepted against;
+`export_token.py` and `export_product.py` are two further exits on that same chunk graph. The
+product series is the one a shipped pipeline would run; the other three are acceptance fixtures and
+are deliberately kept.
 
 ## What `export.py` emits
 
@@ -184,6 +188,77 @@ those digests before it replays anything, so a combination where only one of the
 regenerated fails loudly instead of passing quietly. Recording it needs no re-export of the logits
 series — the existing golden bytes are only read.
 
+## What `export_product.py` emits
+
+The **product graph**, `outputs/series/gemma4-e2b-product/`: the same states-form chunk graph with
+two changes that ship together in a single re-export (ADR
+[0083](../../../docs/decisions/0083-generation-api-surface.md) consequences, plan α).
+
+- The **per-layer embeddings leave the graph.** They are a pure row lookup over `input_ids` alone,
+  so they become an ordinary graph input `per_layer_inputs[1, M, 35, 256]` supplied by the host.
+  Nothing in the runtime contract changes — there is no "pageable initializer" (ADR
+  [0085](../../../docs/decisions/0085-ple-host-gather.md) decision 6). The container drops from
+  3,787 MiB to **1,512 MiB** (measured), because every initializer is given a resident GPU slot at
+  session build time and 2,240 MiB of int8 tables plus 35 MiB of per-row scales were exactly that.
+- The **exit is the final-row logits** `logits[1, 1, 262144]`, i.e. `export_token.py`'s wiring with
+  the `argmax` removed. Sampling, temperature, top-k and the RNG stay on the host (ADR 0083
+  decision 6); the read-back for a prefill chunk drops from 32 MiB (`[1, M, V]`) to 1 MiB.
+
+The tables are redistributed as a **sidecar** next to the container:
+
+```
+outputs/series/gemma4-e2b-product/ple.json                        index: 262,144 tokens / 35 / 256 / embed scale
+outputs/series/gemma4-e2b-product/ple-NNNNN-of-NNNNN.safetensors  values [rows,35,256] i8 + scales [rows,35] f32
+outputs/series/gemma4-e2b-product/ple.probe.safetensors           the dequantization reference
+```
+
+The layout is **token-major and sharded by vocabulary range** (ADR 0085 decisions 1 and 2), which
+makes one token's PLE a single contiguous 9,100-byte read; a table-major layout would need 35
+scattered reads per token the moment a host wants to read rows instead of whole files. Splitting is
+not an optimization here: the full int8 table is 2,348,810,240 bytes and a single Chromium
+`ArrayBuffer` tops out at 2,145,386,496. The per-shard ceiling is the one constant from ADR
+[0081](../../../docs/decisions/0081-shard-spec-v2.md) (1 GiB), which puts the real model at three
+shards of ~758 MiB. The sidecar is not an IR container, so the graph-shard contract does not apply
+to it — only the byte ceiling and the `-NNNNN-of-NNNNN` spelling are shared.
+
+Two properties are checked inside the export, because both fail with the right shape, dtype and
+element count:
+
+- the re-layout is **bit-identical** to the 35-table path. The reference is what
+  `ple.per_layer_inputs` computes from the fake-quantized tables — that is, the value the in-graph
+  `embedding` and the `mul` after it used to produce — and the check reads the written shard bytes
+  back rather than comparing in memory. A scale shifted by one layer, or a shard range off by one
+  row, yields a valid row of a _different_ token.
+- the sidecar row count comes from the **split tables**, never from
+  `config.vocab_size_per_layer_input`: `load_model_and_tables` replaces that field with the 8 probe
+  rows it keeps on the model, and reading it there produces an 8-token sidecar that is internally
+  consistent. It must also equal the main embedding's vocabulary, which is the writer's half of the
+  id-space cross-check (ADR 0085 decision 5).
+
+Like `export_token.py` this series takes no goldens of its own and writes the same `reference.json`
+binding. The acceptance test is `packages/models/tests/e2e_gemma4_product_test.ts`: it dequantizes
+through the host loader (`packages/models/src/gemma/ple.ts`), takes `argmax` on the host, and
+requires the resulting token sequence to match the logits opt-in series' `greedy.<case>` records
+exactly for 3 cases × 16 steps.
+
+## What `tokenizer.py` emits
+
+The **compiled tokenizer asset**, `outputs/series/gemma4-e2b-tokenizer/tokenizer.json` (~9.6 MB):
+the id-ordered vocabulary, the merge table as id pairs, the 256 byte-fallback ids stated
+explicitly, the added tokens and the special-id set — nothing else. The upstream `tokenizer.json`
+is 32.2 MB and is not distributed; anything outside the accepted shape (normalizer, pre-tokenizer,
+decoder chain, BPE flags, post-processor) fails at compile time rather than at run time (ADR
+[0084](../../../docs/decisions/0084-gemma-tokenizer-chat.md) decision 1). It touches no model
+graph — the scope is "string in, id list out" only.
+
+The same run also writes the git-tracked parity fixture
+`packages/models/tests/fixtures/gemma-text/gemma4-parity.json`. Its expectations are taken by
+calling upstream `tokenizers.Tokenizer` **independently**, so no preprocessing is shared with the
+TypeScript port (decision 7); the vocabulary and merges it carries are the subset the cases need.
+
+EmbeddingGemma runs through the same machinery (`embeddinggemma/tokenizer.py`): the implementation
+is shared, the assets are not.
+
 ## Running
 
 ```sh
@@ -191,6 +266,8 @@ cd tools/export-recipes
 uv run --with 'transformers==5.14.1' python -m gemma4.export
 uv run --with 'transformers==5.14.1' python -m gemma4.export_decode
 uv run --with 'transformers==5.14.1' python -m gemma4.export_token
+uv run --with 'transformers==5.14.1' python -m gemma4.export_product
+uv run python -m gemma4.tokenizer   # tokenizer asset + parity fixture (no transformers needed)
 ```
 
 `transformers` is pinned to 5.14.1 for the same reason as DeBERTa, EmbeddingGemma and MiniCPM5 (a

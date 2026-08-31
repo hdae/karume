@@ -14,6 +14,16 @@
 | `outputs/misc/<名前>/`                 | ホスト資産（**消すと再取得・再エミットが要る**）                   | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`        |
 | `inputs/<family>/<name>/`              | 手置きの実重み（ckpt・config — 生成物ではない）                    | `inputs/sbv2/F1/`                                         |
 
+- 系列出力にはコンテナ以外の**ホスト側資産**も入る（グラフを持たない compile 生成物）—
+  トークナイザは `<系列名>-tokenizer/tokenizer.json`（例
+  `outputs/series/gemma4-e2b-tokenizer/`）、anima のデモ用表は `anima-demo/text/`。export 系列の
+  ディレクトリへは混ぜない（`dist` の宣言外ファイル検査が拾う）。
+- **例外は同一コンポーネントの sidecar** — gemma4 製品系列の PLE（`ple.json` /
+  `ple-NNNNN-of-NNNNN.safetensors` / `ple.probe.safetensors`）は系列ディレクトリの**中**に置く。
+  トークナイザと違って独立コンポーネントではなく、製品グラフと**同じ配布 digest set の一員**
+  （ADR [0085](decisions/0085-ple-host-gather.md) Consequences / ADR
+  [0084](decisions/0084-gemma-tokenizer-chat.md) 決定 5）なので、別ディレクトリに据えると
+  「新しいグラフ + 古い PLE」の組が作れてしまう（据え替えは系列ディレクトリごと 1 回）。
 - `bench/` の `<日付>_<目的>` は実行日 YYYY-MM-DD + 短い識別スラグ（`e2e-mismatch` /
   `eval-images` / `quant-sim` 等）。ファイル取り違え防止のための規約で、機械（テスト・台本）も
   この形で書く。

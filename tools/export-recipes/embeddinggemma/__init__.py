@@ -1,9 +1,10 @@
 """EmbeddingGemma-300m（文埋め込み）の export recipe（ADR 0065 決定 2 — wheel 外・リポ専用）。
 
 ここに入るのは**汎用 exporter core に載せられないもの**だけ: export 台本
-（{@link embeddinggemma.export}）1 本。パッチ層は持たない（上流のモデリングコードを差し替えず
-に export できる）し、配布 recipe も持たない — この系列は golden io と性能計測のための資産で、
-HF へ配る形は今のところ無い。
+（{@link embeddinggemma.export}）1 本と、トークナイザ資産の compile
+（{@link embeddinggemma.tokenizer} — gemma4 と同じ台本系で回る。実装は共用・**資産は別**）。
+パッチ層は持たない（上流のモデリングコードを差し替えずに export できる）し、配布 recipe も
+持たない — この系列は golden io と性能計測のための資産で、HF へ配る形は今のところ無い。
 
 依存方向は **recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py`
 が機械で守る）。

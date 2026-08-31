@@ -24,12 +24,27 @@ outputs/series/embeddinggemma-300m/io.<case>.safetensors input tensors and expec
 The io tensor key convention is the same as the tiny goldens and DeBERTa (`input.<graph input name>`
 / `output.<position>`).
 
+## What `tokenizer.py` emits
+
+The **compiled tokenizer asset**, `outputs/series/embeddinggemma-300m-tokenizer/tokenizer.json`,
+plus the git-tracked parity fixture
+`packages/models/tests/fixtures/gemma-text/embeddinggemma-parity.json`. It runs through the same
+machinery as gemma4 (`_shared/gemma_tokenizer.py`, ADR
+[0084](../../../docs/decisions/0084-gemma-tokenizer-chat.md) decision 6): the BPE core is identical
+and the merge table is byte-for-byte the same, but **the assets are not interchangeable** — 6,206
+vocabulary slots are spelled differently, there are 6,415 added tokens against gemma4's 24, and the
+post-processor here wraps the sequence in `<bos>` … `<eos>` where gemma4 adds nothing.
+
+The rest of "EmbeddingGemma completion" (models pipeline, distribution shape, batch>1 export,
+runtime attention-mask wiring) is still open — only the tokenizer part is done.
+
 ## Running
 
 ```sh
 cd tools/export-recipes
 uv run --with 'transformers==5.14.1' python -m embeddinggemma.export
 uv run --with 'transformers==5.14.1' python -m embeddinggemma.export --batch 8 --out /path/to/out
+uv run python -m embeddinggemma.tokenizer   # tokenizer asset + parity fixture
 ```
 
 `transformers` is pinned to 5.14.1 for the same reason as DeBERTa (a change in the modeling code
