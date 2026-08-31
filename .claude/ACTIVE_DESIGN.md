@@ -11,15 +11,18 @@
 
 ## Now
 
-- **LLM（gemma4 E2B）先行波クローズ（2026-08-30）**: decode の初回実測で **1 token ≈85ms・
-  `linear:wi4g32`（M=1）カーネル律速**が確定 — 「フェンス床 ≈11ms が支配」の読みは覆った
-  （正本 = [research 2026-08-30](../docs/research/2026-08-30-gemma4-decode-wallclock.md)・
-  perf-ledger **K-11** 起票・着手はユーザー裁定待ち）。sliding スロット容量は window 実数へ
-  （ADR [0066](../docs/decisions/0066-generation-context-state-slots.md) 追記 9 — decode +
-  token 2 系列再 export・token 列 parity 不変で機能不変を証明）・融合カウント門を gemma4 /
-  minicpm5 decode 資産へ拡張（gemma4 の rope 融合は 15/50 のみ適合 — 機序未特定の隣接、
-  性能寄与 1ms 級）。次 = **生成 API 設計波**（design-review 型 — backlog now）。L-11 裁定済み:
-  技術先行 = gemma4 E2B・公開はライセンス門（ADR 0065 stage 6）後。
+- **LLM（gemma4 E2B）トラック（2026-08-30〜31）**: 先行波（L-0/L-1/L-10）クローズ →
+  **K-11 も消化済み**（ADR [0082](../docs/decisions/0082-linear-gemv-decode.md) — decode M=1 の
+  i4 linear を GEMV 族へ・**ビット同一のまま ×8.45・decode 84.2→32.5ms/token = 30.8 tok/s**。
+  律速はフェンス床 ≈11ms 側へ戻った — 機序と方法論は
+  [research 2026-08-30](../docs/research/2026-08-30-gemma4-decode-wallclock.md) §7）。
+  **生成 API 設計は 10 裁定点すべて★推奨で承認済み**（ドラフト = セッション scratchpad・
+  正本化はスケール裁定後）。**スケール戦略の調査完了** =
+  [research 2026-08-31](../docs/research/2026-08-31-freetoken-moe-over-arraybuffer.md)
+  （FreeToken 中核は WebGPU へ移植不能 / 真の壁は VRAM 総量 / MoE 動的常駐は IR 語彙級の
+  再設計）— **裁定待ち 4 分岐**（IR 値依存実行選択 / 未着荷 initializer 席 / scale F32 /
+  admission 空き比較）。L-11 裁定済み: 技術先行 = gemma4 E2B・公開はライセンス門
+  （ADR 0065 stage 6）後。
 - **全体レビューの修正波 A〜E クローズ（2026-08-30）**: 網羅レビュー（Opus 15 + レンズ 2 →
   敵対検証 → Codex / ブラウザ第 2 波）の確定 50 件（E4 / W46）+ 追補を 5 波で全消化。裁定と
   台帳の正本 = `.claude/reviews/2026-08-29_9614ba9/`（git 追跡外）。**破壊的変更 2 件**

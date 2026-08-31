@@ -53,8 +53,11 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   graph shard が数 MB になり前倒しの価値が確定する。opt-in の c 案は再裁定要）
 - perf: レンズ E-1 は裁定済み — **P-1〜P-3 スパイク承認・P-4 起票・P-5 計測のみ** +
   M1-2 代償の L-9（いずれも [perf-ledger](perf-ledger.md)）。既存起票 H-8〜H-10 / L-7 / L-8。
-  **新規 K-11（2026-08-30 L-0 実測から起票・未裁定）**: decode `wi4g32` の M=1 変種 —
-  decode 壁の 8 割超を握る最優先候補（着手順はユーザー裁定待ち）
+  K-11 は**消化済み（2026-08-31・ADR
+  [0082](decisions/0082-linear-gemv-decode.md) — decode 84.2→32.5ms/token・ビット同一）**。
+  復活条件が満ちた再評価候補 = **レンズ L-7 / L-12**（decode がフェンス床支配へ戻ったため —
+  research 2026-08-30 §7。perf-ledger の L-7 とは別番号系）+ 隣接起票候補 = lm_head `wi8`
+  M=1（decode GPU の 23% の新 2 位・機序は別）
 
 ## 消化済み（既知問題 3 件 + anima 素版 i4 感度 — 2026-08-25〜28）
 

@@ -40,6 +40,12 @@ conv2d parity 2 本が赤（Linux / Vulkan は全緑）。**2026-08-29 のカナ
   `deno test packages/runtime/tests/gpu_attention_dp4a_canary_test.ts` を回して確かめる。
 - **conv2d parity 2 本**（implicit GEMM ↔ 直接カーネルのビット一致・golden の tolerance 判定は
   緑）は従来どおり原因未特定 — 同種のエピローグ丸め差の可能性が高いが未検証。
+- **linear の GEMV 族（M=1 × i4 — ADR [0082](decisions/0082-linear-gemv-decode.md)）は M2 実機
+  未確認**。threadgroup `vec4` への動的添字は避けてある（x は静的成分で引く — ACTIVE_DESIGN の
+  Metal 落とし穴）が、**数値も動作も Apple GPU では 1 度も走らせていない**。確認は
+  `deno test -A packages/runtime/tests/gpu_linear_gemv_test.ts` の 2 本（既定経路との u32 完全
+  一致 / 門のキー検査）— 落ちた場合、この族はビット同一が実測命題（ADR 0082 決定 3）なので、
+  変種の調整ではなく**命題そのもの**を疑って設計判断へ戻す。
 
 Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36257 = mapped range の
 み）。根治候補 = TS 参照の FMA 許容化 or WGSL 側で丸めを固定する手段の調査（未着手）。記録 =
