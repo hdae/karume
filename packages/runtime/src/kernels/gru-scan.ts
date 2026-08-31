@@ -39,6 +39,9 @@
  * **この丸め障壁は WGSL 仕様の保証ではない** — 仕様は fusion を許すだけで、workgroup memory
  * 往復を最適化障壁として尊重することは要求していない。ビット同一門
  * （tests/gpu_gru_scan_parity_test.ts）が割れたら、まずここを疑うこと。
+ * NOTE（M2 実測・2026-08-31）: Metal では実際にこの門が割れる（H=128 で 1〜64 ULP・
+ * tanh_stable 化の前後で同一署名 = 既存。docs/known-issues.md の Metal 節）。実品質は
+ * vowel-detector golden が M2 緑で担保 — 障壁の式形強化は根治候補として起票済み。
  *
  * ## 走査の裁定（性能ではなく正しさの都合）
  *

@@ -92,16 +92,11 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   統一 + 融合 attention 空行ガード（breaking 2 点 — ADR 0044 追記）⑤W-5 消化 =
   DEFAULT_TOLERANCE 退役 → op 別実測表 + ビット同一門
   （[research/2026-08-31-op-tolerance-measurement.md](research/2026-08-31-op-tolerance-measurement.md)）。
-  **残 = Mac（M2）手動検証**（下の手順）→ 緑なら tools/metal-diagnostics/ を削除して波クローズ。
-  - **Mac 検証手順（/clear 後の再開点）**: リポを pull → ① `deno test -A
-    packages/runtime/tests/gpu_gru_scan_parity_test.ts`（**飽和域ケース込み 12 本** — 旧 v1 なら
-    Metal で NaN になった入力で tanh_stable の根治を実証する本命）② `deno test -A
-    packages/runtime/tests/gpu_ops_test.ts --filter 飽和域`（厳密 ±1.0 門 — 仕様適合のまま赤に
-    なるドライバならビット同一 golden も割れている知らせ）③ `deno test -A
-    packages/runtime/tests/gpu_ops_test.ts --filter "ビット同一"`（GEMM/縮約の格子門 — Metal の
-    FMA 差はこの入力では出ない見込み・赤なら op 名を記録）④ 余力があればフル
-    `deno task verify`（既知の Metal 赤 = attention i8a8 系 4 + conv2d parity 2 + gemv u32 1 —
-    known-issues 記載のもの以外が出たら新規）。
+  **Mac（M2）手動検証も消化（2026-08-31 実測）→ 波クローズ**: 飽和域厳密門 緑（根治実証）・
+  ビット同一格子門 緑・vowel golden 緑（実品質健全）・フル verify の赤 12 本はすべて既知クラス
+  へ帰着（conv1d parity 2 本の台帳漏れを訂正 + **新規記載 = gru_scan 分解 parity の Metal
+  1〜64 ULP** — 変更前 HEAD との A/B で同一署名 = v2 regression でないことを確定・
+  known-issues Metal 節が正本）。tools/metal-diagnostics/ は削除済み（復元は git 履歴）。
 - **数値レビュー後続の起票（2026-08-31）**:
   - **Metal OOM errorScope 沈黙**（known-issues — 重み経路の明示 size 門 + `requiredLimits`
     のロード時実効化。監査波から分離・独立に着手可）
@@ -110,7 +105,9 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     軸は opt-in で実装済み（既定 off ビット同一 — `892bfb3`/`683d6a0`）・minicpm5 8 構成の
     実測で **act-order / static は本条件で利得なし・damping 0.01 は実測で封印 → 既定は現状維持**
     （正本 = [research/2026-08-31-gptq-axes-sweep.md](research/2026-08-31-gptq-axes-sweep.md)）。
-    復活条件 = 校正量 16× での act-order 再評価（gemma4 校正 rig 新設もそこまで保留）
+    **ユーザー裁定（2026-08-31）: 既定現状維持で確定・opt-in 実装は温存**。復活条件 =
+    **多モデル**（act-order の効果はモデル依存の見立て）× 校正量 16× での再評価 —
+    時間のある時に別波で（gemma4 校正 rig 新設もそこまで保留）
   - norm の 1/dim ホスト化は**保留**（uncertain — 開発機の除算実測から凍結 sha が割れ得る。
     実 GPU プローブが先・費用対効果低）・reduce identity の params −inf 化は現状維持
     （W-2/W-3 と同じ器 — 採るならセット裁定）

@@ -12,11 +12,13 @@ verify を並行させた走りで 2 回観測（単独走行でも過去に観�
 
 運用の回避 = **失敗したファイルを単独で再走して確認する**（緑ならフレーク）。
 
-## Metal（Apple GPU）で attention i8a8 の GPU 出力が TS 参照と 1 ULP ずれる（+ conv2d parity 2 本）
+## Metal（Apple GPU）で attention i8a8 の GPU 出力が TS 参照と 1 ULP ずれる（+ conv1d/conv2d parity 4 本 + gru_scan parity 2 本）
 
-実機 **Apple M2**（初出 Deno 2.9.4・2026-08-29 に 2.9.6 で再検証）で attention i8a8 系 4 本 +
-conv2d parity 2 本が赤（Linux / Vulkan は全緑）。**2026-08-29 のカナリア実機検証で機序の理解が
-更新された**:
+実機 **Apple M2**（初出 Deno 2.9.4・2026-08-29 に 2.9.6 で再検証・2026-08-31 フル verify で
+節の対象を棚卸し）で attention i8a8 系 4 本 + **conv1d parity 2 本 + conv2d parity 2 本**
+（旧記述は conv2d のみ — conv1d の 2 本が記載から漏れていた・症状は同型）+
+**gru_scan / gru_scan_reverse の分解 parity 2 本**（下の節）が赤（Linux / Vulkan は全緑）。
+**2026-08-29 のカナリア実機検証で機序の理解が更新された**:
 
 - **dp4a とエミュの両変種は M2 でもビット同一**（カナリア両腕が同値・PV の相互一致テスト緑・
   qP 整数段 62,088 要素で不一致 0%）。旧記述「整数演算に丸め差が無い以上 QK / PV では実際に
@@ -39,8 +41,19 @@ conv2d parity 2 本が赤（Linux / Vulkan は全緑）。**2026-08-29 のカナ
   （2026-09-01）**: カナリア 16 本すべて緑 — 素の判定が dp4a を選び分岐と厳密一致フラグが
   整合・故障注入系も想定どおり。軸 reduce パリティ（`gpu_reduce_axis_parity_test.ts` 2 本）も
   M2 緑。
-- **conv2d parity 2 本**（implicit GEMM ↔ 直接カーネルのビット一致・golden の tolerance 判定は
-  緑）は従来どおり原因未特定 — 同種のエピローグ丸め差の可能性が高いが未検証。
+- **conv1d / conv2d parity 4 本**（implicit GEMM ↔ 直接カーネルのビット一致・golden の
+  tolerance 判定は緑）は従来どおり原因未特定 — 同種のエピローグ丸め差の可能性が高いが未検証。
+- **gru_scan / gru_scan_reverse の分解 parity 2 本が M2 で赤（2026-08-31 実測）**:
+  `gpu_gru_scan_parity_test.ts` の T4 N1 H128 で 158/512・71/512 要素が 1〜64 ULP 不一致
+  （NaN なし・小さい H のケースは緑・Linux / Vulkan は全緑）。**tanh_stable 化（gru_scan v2）
+  の regression ではない** — 変更前 HEAD `b35cf5c` で同一署名（同ケース・同件数・同ビット列）の
+  赤を実測 = 既存かつ v2 が Metal でも in-band ビット不変であることの実証。機序の見立て =
+  本節冒頭と同一クラス: fused 側の縮約 / 更新式を MSL の contraction が跨ぎ、workgroup memory
+  往復の**丸め障壁が Metal では障壁として機能していない**（src/kernels/gru-scan.ts の doc が
+  予告していた形 — 「丸め障壁は WGSL 仕様の保証ではない」）。H=128 = 縮約長が伸びると顕在化。
+  実害は他と同じく「クロス経路の atol=0 門が Metal で立たない」ことのみ — 実品質は
+  vowel-detector golden（tolerance 門）が M2 緑で担保。根治候補 = 丸め障壁の式形強化
+  （bitcast 往復は無効と実測済みなので別手段 — 下の根治候補と同席・M2 実機ループ要・未着手）。
 - **linear の GEMV 族（M=1 × i4 — ADR [0082](decisions/0082-linear-gemv-decode.md)）の u32
   完全一致門が M2 で 1 ULP 赤（2026-09-01 実測）**: `gpu_linear_gemv_test.ts` の門キー検査は
   緑・既定経路との u32 突合が整除形 k128 n64 g32 の列 1 で `0x414b3249` vs `0x414b3248`
@@ -76,7 +89,8 @@ Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36
 物理超過でも nil を返さない形）。実害: runtime の重みアップロード経路は size 門を持たず
 errorScope に全面依存しているため（ADR 0070 決定 4）、**errorScope が沈黙する環境では
 「確保失敗 = ゴミを読む」が例外なしで通り得る**。バッファ層自体は M2 実測で健全
-（tools/metal-diagnostics/ のプローブ — 単一 64〜640MiB・実プロファイル 835 本累積とも全一致）。
+（Metal NaN 調査時のプローブ実測 — 単一 64〜640MiB・実プロファイル 835 本累積とも全一致。
+プローブ群は役目を終え 2026-08-31 に削除済み — 復元は git 履歴から）。
 修正候補 = 重み経路への明示サイズ門 +
 `karume.json` の `requiredLimits`（hub が parse するのみで現状誰も読んでいない）のロード時実効化
 （backlog「数値危険クラス監査波」に同席）。

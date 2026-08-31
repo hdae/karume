@@ -23,8 +23,10 @@
   L 群軽微修正 + fma 契約 doc 訂正（ADR 0076 追記）/ exporter act_quant 鏡像化 /
   **GPTQ 掃引軸**（opt-in 実装 + 実測 → **既定現状維持を封印** —
   [research/2026-08-31-gptq-axes-sweep.md](../docs/research/2026-08-31-gptq-axes-sweep.md)）。
-  **残 = Mac（M2）手動検証**（gru_scan v2 飽和域 parity ほか — backlog now の手順）と
-  tools/metal-diagnostics/ の削除（Mac 緑確認後）。
+  **Mac（M2）検証も消化して波クローズ（2026-08-31）**: 飽和域門・格子門・vowel golden 全緑 =
+  根治実証。新規 known-issue = gru_scan 分解 parity の Metal 1〜64 ULP（変更前 HEAD と同一署名 =
+  既存・known-issues Metal 節）。GPTQ 掃引軸は**既定現状維持で確定**（復活 = 多モデル ×
+  校正量 16×）。プローブ群削除済み。
 - **LLM（gemma4 E2B）トラック（2026-08-30〜31）**: 先行波（L-0/L-1/L-10）クローズ →
   **K-11 も消化済み**（ADR [0082](../docs/decisions/0082-linear-gemv-decode.md) — decode M=1 の
   i4 linear を GEMV 族へ・**ビット同一のまま ×8.45・decode 84.2→32.5ms/token = 30.8 tok/s**。
