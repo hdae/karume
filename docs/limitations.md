@@ -839,3 +839,31 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
   既に持つ）。speculative decoding 等の「読み戻し無しで複数 step を積める」実需が出た時に再訪。
 - state スロットの dtype は f32 のみ（f16 は席予約 — ADR 0066 追記 5）・複数シーケンス /
   batch>1 の生成・paged KV は ADR 0066 決定 8 のスコープ外。
+
+## 生成 sequence: 会話の切り詰めはホストの責務（容量超過は専用型で落とす）
+
+`GenerationSequence`（`packages/models/src/generation/sequence.ts`・ADR
+[0083](decisions/0083-generation-api-surface.md) 決定 10）は会話を**自動で切り詰めない**。
+配布形が宣言する 2 つの上限 — full スロットの容量（`pastLength + queryLength ≤ C` — ADR
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 ④）と位置表の排他的上限
+（`maxPosition`）— を超えるターンは、run を 1 本も出す前に `GenerationCapacityError` で落ちる。
+どちらも同じ型なのは、呼び手にとって「この会話はもう入らない」という同じ事実で、打つ手も同じ
+だから。
+
+打つ手は**ホスト側**にある: 古い turn を落として新しい context へ token transcript を replay する
+（`rewind` は sliding スロットを含む context では全拒否 — ADR
+[0066](decisions/0066-generation-context-state-slots.md) 追記 2）か、prompt を短くするか、
+`maxNewTokens` を下げる。ランタイム側も同じ超過を拒否するが、それは run のエンコード直前の汎用
+メッセージで、「切り詰めれば通る」のか「配線が壊れている」のかを文言から読み分けることになる —
+専用型はその 1 件だけを分ける。
+
+同じ「ホストの責務」の線に乗る制約が 2 つある:
+
+- **中断は「成功した run のぶんだけ会話が進んだ状態」で閉じる**（`break` / `return()` /
+  `AbortSignal` のいずれも）。token を 1 つも受け取っていない中断（= prefill の途中）は prompt が
+  途中まで会話へ入った状態で、`prefill` イベントの `chunk` が commit 済み chunk 数を表す。続きを
+  送るか sequence を捨てるかは呼び手が決める。
+- **repetition penalty が見る履歴は今ターンぶんだけ**（そのターンの prompt + 生成した token）。
+  sequence は会話全体の token transcript を持たない（可変状態は context と `pendingToken` の
+  2 つだけ — ADR 0083 決定 1）ので、過去 turn の token は penalty の対象にならない。会話全体へ
+  掛けたい場合は、そのターンの `prompt` に効かせたい範囲を含めるのが今の唯一の手である。
