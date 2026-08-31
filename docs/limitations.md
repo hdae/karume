@@ -105,14 +105,40 @@ Karume 側の Record は null プロトタイプで `"__proto__"` キーを保�
 
 ## 非有限値（NaN / ±Infinity）は検査しない
 
-入力・重みの非有限値はコストの理由で検査せず、そのまま演算に流れる（GPU と CPU 参照で
-伝播が一致することのみ保証対象）。付随して `amax` / `amin` の縮約 identity は ±F32_MAX で、
-全要素が -Infinity の行の `amax` は -Infinity ではなく -F32_MAX を返す。非有限値を含むモデルを
-扱う場合は呼び出し側で事前検査すること。
+入力・重みの非有限値はコストの理由で検査せず、そのまま演算に流れる。**GPU と CPU 参照の
+伝播一致が担保されるのは下の NOTE に列挙した op だけ**で、全称の保証ではない。付随して
+`amax` / `amin` の縮約 identity は ±F32_MAX で、全要素が -Infinity の行の `amax` は
+-Infinity ではなく -F32_MAX を返す。非有限値を含むモデルを扱う場合は呼び出し側で事前検査
+すること。
 
 NOTE: 伝播一致の保証は `clamp` / `clamp_min` / `relu` / `amax` / `amin` についてはビット列
 NaN 判定で担保している（一時期 GPU 側が破っていた — 機序と裁定は
-[decisions/0020](decisions/0020-nan-propagation-bitwise.md)）。
+[decisions/0020](decisions/0020-nan-propagation-bitwise.md)）。**softmax / safe_softmax /
+attention の行統計の行 max は素の `max` のまま**で、WGSL の `max` は仕様レベルで NaN を
+落とす（"Returns e2 if e1 is less than e2, and e1 otherwise"）— 全要素 NaN の行は
+safe_softmax が 0 を返し、CPU 参照（NaN）と分岐する。attention のスコア域の非有限値は
+[decisions/0044](decisions/0044-runtime-attention-mask.md) が明示的に契約外へ置いており
+（mask の意味論は有限 sentinel と −inf だけを規定）、この分岐は契約違反ではないが
+「NaN が黙って消える」経路として残っている（2026-08-31 レビュー W-3 — nan_max 化は裁定事項）。
+
+## 融合 attention の加算 mask は −inf を**値として**運ぶ（Finite Math Assumption 依存）
+
+exporter が焼く加算 mask 定数は帯外を literal −Infinity で表し（`masked_fill` の有限
+sentinel −3.4028e38 とは別方式）、融合 attention の f32 経路はそれをそのまま加算して
+`exp(S−m)` で 0 に落とす。WGSL の Finite Math Assumption（実装は実行中に ∞ / NaN が現れない
+と仮定してよい — §15.7.2）の下では、∞ を値として運ぶこと自体が実装の自由度に晒されるが、
+実測（Vulkan / Metal の出荷資産）では期待どおり動作している。**全列が −inf の行（全マスク行）
+だけは行和 0 → `1/0` = indeterminate になる**（safe_softmax が持つ空行ガードは融合側に無い —
+現行の配布資産は全マスク行を含まないため未発火。2026-08-31 レビュー W-2 — ガード移植は
+裁定事項）。
+
+## `attentionCompute: "a8"` の PV は attention 重みを 1/127 格子で量子化する（1:254 打ち切り）
+
+a8 の ③PV は `qP = round(127·exp(S−m))` の固定格子（clamp なし・行最大からの相対）で、
+`S − m < −ln 254 ≈ −5.537` のスコアは**厳密に 0** に落ちる — 行内の最大値の 1/254 未満の
+attention 重みは消える（f32 経路は保持する）。落ちた質量は逆数和 `inv` が補償しない設計
+（[decisions/0044](decisions/0044-runtime-attention-mask.md) の契約系・opt-in 席）。CPU 参照も
+同一格子なので突合はこの打ち切りを検出しない — 精度影響の裁定は E2E の実測 tolerance が担う。
 
 ## w8a8（`linearCompute: "i8a8"`）では非有限値の伝播粒度は同じだが Inf の符号が f32 経路と一致しない
 

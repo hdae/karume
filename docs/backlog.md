@@ -83,17 +83,27 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   decode の P 依存実測と同時）。起票のみ（第 2 波候補）: ChatSession 高レベル面・stop strings・
   `chatText()`・onProgress 可読化・maxResidentPleBytes・logitBias 配列化・防御コピー
   （prompt/options の発行時スナップショット）・example の residentPleShards フラグ化
-- **数値危険クラス監査波（2026-09-01 ユーザー指示・tanh_stable 修正の次タスク）**: Metal NaN
-  調査で確定した危険クラス =「WGSL 組込 / 合成式の**中間**がオーバーフローしうるが最終値は有限」
-  （前例: sigmoid_stable の MUST・今回の gelu_tanh/tanh）を kernels / codegen 横断で洗い、
-  ①警戒ケースの台帳化（op ごとに 安全根拠 or 危険判定を記録 — exp/log/div/pow/softmax 系・
-  fast-math 下の Inf/NaN 伝播差含む）②修正可能なものは同じ流儀（飽和打ち切り・stable 形）で
-  修正 ③飽和域テストを門として常設。隣接: Metal で OOM errorScope 沈黙
-  （known-issues 起票済み — 重み経路の明示 size 門 + requiredLimits のロード時実効化も同波で
-  検討）。前例の正本 = tanh_stable 修正 `67eb07a`（TANH_STABLE_WGSL doc の懸念 3 点・
-  gru-scan の別写し tanh が先頭候補）+ tools/metal-diagnostics/（probe2〜4 = Metal 実機ループの
-  道具・監査波クローズ時に削除可）。追加候補: gemv margin 命題の M2 温度 0 golden 実測
-  （ADR 0082 追記 2 の立て直し — NaN 解消で可能になった）。
+- ~~数値危険クラス監査波~~ **本体消化（2026-08-31 — OP 数値レビューとして拡大実施）**:
+  ①台帳化 = [research/2026-08-31-op-numerics-review.md](research/2026-08-31-op-numerics-review.md)
+  （危険クラス台帳・C 0 / E 0・レビュー原本 = `.claude/reviews/2026-08-31_b35cf5c/`）
+  ②修正 = gru_scan tanh_stable 化（is_nan_bits 正本化と同時）+ 門 4 点 + doc 訂正群 +
+  Box–Muller + exporter act_quant 鏡像化 ③門の常設 = 飽和域の厳密カナリア（±1.0/x/−0.0 +
+  ±Inf）+ op-vocabulary へ危険クラス門を規約化。**残り（裁定待ち → 消化）**:
+  W-2/W-3（融合 attention 空行ガード + 全 NaN 行の意味論）・W-5（DEFAULT_TOLERANCE の
+  op 別化 = M1 宿題・省略呼び実測 46 か所）。tools/metal-diagnostics/ は Mac 側の
+  gru_scan v2 実走確認（parity 飽和域ケース）まで温存 → 削除。
+- **数値レビュー後続の起票（2026-08-31）**:
+  - **Metal OOM errorScope 沈黙**（known-issues — 重み経路の明示 size 門 + `requiredLimits`
+    のロード時実効化。監査波から分離・独立に着手可）
+  - gemv margin 命題の M2 温度 0 golden 実測（ADR 0082 追記 2 の立て直し）
+  - **GPTQ static-groups + act-order 実験**（upstream は act-order + 推論側変更なしを実装済み
+    と一次確認 — 現行不採用理由は dynamic group 前提でのみ成立。段階導入・既定 off で
+    ビット同一・SBV2/gemma4 4 点 sweep・評価分離。実装 2〜3 日級 — 裁定待ち）
+  - GPTQ damping sweep（0.001〜0.1 × 校正量 1x/4x/16x — 0.01 固定の妥当性を実測で封印。
+    上と同一リグ相乗り・provenance への damping 記録は先行可）
+  - norm の 1/dim ホスト化は**保留**（uncertain — 開発機の除算実測から凍結 sha が割れ得る。
+    実 GPU プローブが先・費用対効果低）・reduce identity の params −inf 化は現状維持
+    （W-2/W-3 と同じ器 — 採るならセット裁定）
 - ~~M2 実機の手動確認 2 点~~ **消化（2026-09-01 実測）**: dp4a カナリア **16/16 緑**（QK f16
   格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
   読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤 → 裁定済み（既定維持
