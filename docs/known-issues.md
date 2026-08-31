@@ -87,13 +87,19 @@ m=1 含む）・**logits 262,144 個が全数 NaN**・`per_layer_inputs`（PLE �
 は「幹の早い段の NaN を rms_norm（行内平均）が行全体へ広げた」形で、残る容疑は attention 以外の
 op 族 = i8 embedding（×6・入口）/ i4 linear の GEMM 形 dequant / rms_norm / RoPE 合成
 （slice/neg/cat）/ gelu_tanh / 最終 softcap。
-**追加実測（M2・素 WebGPU プローブ）**: runtime 合成テストは 854 緑（赤 12 = 既知ビット一致
-クラス 11 + 下記 OOM 門）・単一バッファの確保→書込→storage 束縛読みは **64〜640MiB 全一致・
-全 errorScope clean** — バッファ層は無罪で、容疑は**演算側（実サイズ・実バイトでだけ出る破れ）**
-へ確定。Metal の limits 差も記録: `maxStorageBuffersPerShaderStage=31`・
-`maxComputeWorkgroupStorageSize=32768`（Linux 524288 / 49152）。実バイト × 最小グラフ梯子
-（embedding → i4 linear → rms_norm → attention 組合せ）で最初の NaN op を特定中。
-**gemma4 を Metal で使う経路は現状すべて不能**（対話 example 含む）。
+**根本原因特定 → 修正済み（2026-09-01・Mac 実機の事後確認待ち）**: 接頭辞二分探索
+（tools/metal-diagnostics/probe4）で最小 K=56 = `mul(gelu(...), linear_6)` に NaN **1/6144** を
+特定。機序 = `gelu_tanh` が素の `tanh()` 組込を無防備な引数で呼び、exp(2z) 経由実装
+（Metal fast-math）では z > 44.36（前活性 x ≳ 10.05）で f32 オーバーフロー → Inf/Inf = 沈黙
+NaN（実測の前活性 max 11.45 に対し該当ちょうど 1 要素 — 定量一致）。1 個の NaN が down_proj
+縮約 → rms_norm で行全滅 → 全 logits NaN。修正 = `tanh_stable`（飽和打ち切り 9.5・非 NaN
+ビット不変・NaN 伝播はビット列判定 — `67eb07a`・語彙 `tanh` = logits softcap も同穴のため適用・
+飽和域 canary テスト常設 = Metal でだけ赤→緑の門）。Linux はフル verify + WAV sha256 6 本 +
+gemma golden で前後ビット同一を実証済み。途中実測の記録: バッファ層無罪
+（単一 64〜640MiB・実プロファイル 835 本累積とも全一致）・Metal limits 差
+（`maxStorageBuffersPerShaderStage=31`・`maxComputeWorkgroupStorageSize=32768`）。
+残: Mac 実機で ①飽和域テスト ②probe4 --at 56 ③demo の 3 点確認 → 緑なら本節を閉じる。
+同クラスの横断監査 = backlog「数値危険クラス監査波」（gru-scan の別写し tanh 含む）。
 
 ## Metal で out-of-memory errorScope が沈黙する — fail loudly 門が不発（独立バグ）
 
