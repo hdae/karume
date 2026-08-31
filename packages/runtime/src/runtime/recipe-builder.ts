@@ -109,6 +109,12 @@ import { LAYER_NORM_KEY, LAYER_NORM_WGSL, layerNormParams } from "../kernels/lay
 import { RMS_NORM_KEY, RMS_NORM_WGSL, rmsNormParams } from "../kernels/rms-norm.ts";
 import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../kernels/linear.ts";
 import {
+  defaultLinearGemvVariant,
+  LINEAR_GEMV_UNIT,
+  linearGemvKey,
+  linearGemvWgsl,
+} from "../kernels/linear-gemv.ts";
+import {
   LINEAR_ACT_SCALE_BINDING,
   LINEAR_I8A8_MAX_K,
   linearI8a8Key,
@@ -1429,6 +1435,32 @@ export class RecipeBuilder {
     // i4 は group 長がキーと WGSL（shift の焼き込み）の両方に効く（ADR 0069 — 同一キー →
     // バイト同一 WGSL の codegen 決定性）。
     const groupSize = weightStorage === "i4" ? this.#weightGroupSize(step) : undefined;
+    // **decode（M=1）は GEMV 族へ分岐する**（ADR 0082 — perf-ledger K-11）。既定の GEMM 骨格は
+    // M=1 のバケット（M16N16）で 64 スレッド中 4 本しか出力を書かず、K タイル 16 ごとの二重
+    // barrier が重み読みのレイテンシを逐次に露出させる（k 比例・n 非依存・L2 常駐形でも同じ —
+    // 帯域飢餓ではない）。gemma4 E2B decode で対既定 ×8.45。
+    // MUST: 縮約順・積和の字面・bias の足し順は既定経路と同一 = **ビット同一**
+    // （src/kernels/linear-gemv.ts の数値契約・門は tests/gpu_linear_gemv_test.ts）。
+    // 門の内訳:
+    // - `m === 1` — GEMV そのものの前提（1 スレッドが 1 出力列の縮約を丸ごと持つ）。
+    // - `i4` × `f32` 計算 — 実測して採った組み合わせはここだけ。i8 / f16 格納にも同じ機序は
+    //   効くはずだが、**実測の無い区間を選択で埋めない**（gemm-geometry `gemmGeometryForRows`
+    //   の MUST と同じ規律）。
+    // - `groupSize % LINEAR_GEMV_UNIT === 0` — 重み 1 語 32 要素が group を跨がない条件
+    //   （跨ぐと語あたり 1 個の scale では足りず沈黙誤値になる）。`k % LINEAR_GEMV_UNIT === 0`
+    //   は宣言層の「行長は group_size の倍数」（ADR 0069 決定 2）から従うが、重み束縛が
+    //   `vec4<u32>` = 16 B 整列を要求する以上ここで言い直す。
+    // - `v4` は GEMV の要件では**ない**（出力はスカラ書きなので n の整除は要らない）が、
+    //   掃引した実形が全て v4 なので門を実測の範囲に留める。n % 4 != 0 の M=1 × i4 は既定の
+    //   スカラ変種のまま（値は同じ・速度だけ従来どおり）。
+    if (
+      m === 1 && weightStorage === "i4" && compute === "f32" && v4 &&
+      groupSize !== undefined && groupSize % LINEAR_GEMV_UNIT === 0 &&
+      k % LINEAR_GEMV_UNIT === 0
+    ) {
+      await this.#buildLinearGemv(step, binds, outs, builder, n, k, groupSize);
+      return;
+    }
     // MUST: タイル幾何は平坦化後の行数 m のバケット（src/kernels/gemm-geometry.ts）。
     // キー・WGSL・dispatch に**同じ m** を通す。
     const key = linearKey(weightStorage, v4, compute, m, groupSize);
@@ -1453,6 +1485,57 @@ export class RecipeBuilder {
       workgroups: [
         tiledWorkgroups(n, gemmTileN(geometry), limit, where),
         tiledWorkgroups(m, gemmTileM(geometry), limit, where),
+        1,
+      ],
+    });
+  }
+
+  /**
+   * linear の **GEMV 族**（M=1 × 重み i4 — ADR 0082）。
+   *
+   * 束縛・uniform・出力実体は既定経路と同一で、変わるのは「どのスレッドがどの出力を担当するか」
+   * だけ（1 スレッド = 1 出力列・共有タイルと barrier を持たない）。1 出力要素あたりの K 縮約順は
+   * k 昇順の逐次のままなので**ビット同一**（src/kernels/linear-gemv.ts の数値契約）。
+   * MUST: 1 スレッド 1 出力なので dispatch は `ceil(n / cols)` の 1 次元。grid-stride ではない
+   * ので上限超過は fail loudly（既定経路と同じ規律）。
+   */
+  async #buildLinearGemv(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    outs: readonly BindingSource[],
+    builder: StepRecipeBuilder,
+    n: number,
+    k: number,
+    groupSize: number,
+  ): Promise<void> {
+    const variant = defaultLinearGemvVariant();
+    const key = linearGemvKey(groupSize, variant);
+    const { pipeline, layout } = await this.#state.cache.get(
+      key,
+      linearGemvWgsl(groupSize, variant),
+    );
+    // uniform は既定経路と同じ 3 語（m は 1 固定 — 束縛レイアウトを分けない）。
+    const params = this.#writeParams(linearParams(1, n, k), PARAMS_UNIFORM_USAGE);
+    const [x, weight] = step.inputShapes;
+    const where = `linear gemv [${x.join(",")}] × [${weight.join(",")}]`;
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      params,
+      bindings: [
+        ...binds.map((source, index) => ({ binding: index + 1, source })),
+        { binding: 4, source: outs[0] },
+        ...this.#weightScaleBindings(step, LINEAR_SCALE_BINDING),
+      ],
+      workgroups: [
+        tiledWorkgroups(
+          n,
+          variant.cols,
+          this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
+          where,
+        ),
+        1,
         1,
       ],
     });

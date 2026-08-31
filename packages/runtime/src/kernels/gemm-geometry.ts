@@ -35,6 +35,11 @@
  * 既定は M ≥ 128 を前提にした形なので、skinny-M（M < 128）だけ {@link gemmGeometryForRows} が
  * 別の幾何を返す。**選択は静的な shape の純関数**（実行時オートチューンは ADR 0022 で禁止）で、
  * 返り値はそのままキーに載るため「同一キー → バイト同一 WGSL」は保たれる。
+ *
+ * NOTE: 上の「唯一の選択点」の射程は**この骨格の内側**（どの幾何でタイルを切るか）。linear は
+ * M=1 × i4 でこの骨格自体を使わない別族（{@link "./linear-gemv.ts"} の GEMV — ADR 0082）を
+ * 持ち、族の選択は `src/runtime/recipe-builder.ts` の `#buildLinear` 1 箇所にある。段が 2 つに
+ * なっても純関数であることとキーに載ることは両段とも変わらない（ADR 0082 決定 2）。
  */
 
 import { CodegenError } from "../codegen/errors.ts";

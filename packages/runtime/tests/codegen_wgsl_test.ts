@@ -148,6 +148,7 @@ import {
 } from "../src/kernels/rms-norm.ts";
 import { ROPE_KEY, ROPE_WGSL, ROPE_WORKGROUP_SIZE, ropeParams } from "../src/kernels/rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
+import { linearGemvKey, linearGemvWgsl } from "../src/kernels/linear-gemv.ts";
 import {
   DP4A_WGSL_FEATURE,
   dp4aAvailable,
@@ -449,6 +450,13 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // カーネル本体で要素ごと〉なので、片方だけ動いた生成物が普通に組み上がる）。
     ["linear_wi4.wgsl", linearWgsl("i4", false, "f32", undefined, 32)],
     ["linear_wi4_v4.wgsl", linearWgsl("i4", true, "f32", undefined, 32)],
+    // linear の **GEMV 族**（M=1 × i4 — ADR 0082）。骨格を共有しない別カーネルなので、この
+    // 2 本を足すことより **上の linear_wi4* が 1 バイトも動かない**（= M>1 の既定経路は
+    // 分岐前と完全に同一）が列挙の主目的。
+    // MUST: group 2 種を**対で置く**。g32 では scale 添字の `(unit · 32) >> shift` が恒等式に
+    // 縮むので、shift の焼き込みが実際に効いていることは g64 側でしか見えない。
+    ["linear_gemv_g32.wgsl", linearGemvWgsl(32)],
+    ["linear_gemv_g64.wgsl", linearGemvWgsl(64)],
     ["embedding_wi4.wgsl", embeddingWgsl("i4", 32)],
     ["embedding_wi8.wgsl", embeddingWgsl("i8")],
     ["conv1d_wi8.wgsl", conv1dWgsl("i8")],
@@ -618,6 +626,15 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
       `strided_write:${dtype}`,
     );
   }
+  // GEMV 族（ADR 0082）は骨格を共有しない別カーネルで、生成入力は group 長だけ（v4 は取らない
+  // — 出力がスカラ書き）。shift の焼き込みが状態を持たないことを group 3 種で固定する。
+  for (const groupSize of [32, 64, 128]) {
+    assertEquals(
+      linearGemvWgsl(groupSize),
+      linearGemvWgsl(groupSize),
+      `linear gemv:g=${groupSize}`,
+    );
+  }
   // GEMM は 6 op × 重み格納 × v4 が 1 本の骨格を共有する（生成が状態を持たないことの固定）
   for (const v4 of [false, true]) {
     assertEquals(matmulWgsl(v4), matmulWgsl(v4), `matmul:v4=${v4}`);
@@ -733,6 +750,14 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
       linearKey("i4", v4, "f32", undefined, 64),
       linearKey("i4", v4, "f32", undefined, 128),
     ]),
+    // GEMV 族（ADR 0082）は **`linear:` の族名ごと別**（束縛の要素型も workgroup 形も違うので、
+    // 衝突すると片方の WGSL が他方の dispatch に配られて即座に誤値になる）。group 長ごとに
+    // 別キーなのは i4 の既定経路と同じ規律（shift を WGSL に焼く — ADR 0069）。
+    ...[32, 64, 128].map((groupSize) => linearGemvKey(groupSize)),
+    // 変種（列数 / 先読み本数）もキーに載る — 載っていないと最初に組んだ形の
+    // パイプラインが別の形の dispatch で走り、workgroup 形の食い違いで沈黙誤値になる。
+    linearGemvKey(32, { cols: 64, unroll: 4 }),
+    linearGemvKey(32, { cols: 32, unroll: 2 }),
     ...[16, 32, 64].map((groupSize) => embeddingKey("i4", groupSize)),
     // w8a8: v4 × 整数内積変種の 4 本 + 活性量子化。**dp4a とエミュを別キーにする**のが条件で、
     // 同じキーに割り当たると診断でどちらが走ったか分からなくなる（設計 §4.4-5）。
