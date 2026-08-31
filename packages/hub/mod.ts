@@ -51,24 +51,18 @@ export type {
 export { resolveFiles } from "./src/resolve.ts";
 export type { ResolvedFiles, ResolveOptions } from "./src/resolve.ts";
 
-export {
-  clearHubCache,
-  fetchAssets,
-  loadManifest,
-  prefetchAssets,
-  streamAssets,
-} from "./src/fetch.ts";
+export { clearHubCache } from "./src/cache.ts";
+export { fetchAssets, loadManifest, prefetchAssets, streamAssets } from "./src/fetch.ts";
+export type { StreamedAsset } from "./src/fetch.ts";
+export type { AssetPhase, AssetProgress } from "./src/progress.ts";
 export type {
-  AssetPhase,
-  AssetProgress,
   CacheDiagnostic,
   FetchAssetsOptions,
   HubRepoRef,
   LoadedManifest,
   LoadManifestOptions,
   StreamAssetsOptions,
-  StreamedAsset,
-} from "./src/fetch.ts";
+} from "./src/session.ts";
 
 /**
  * エラー型は「利用者の入力・環境に起因する失敗」だけを公開する。取得層の不変条件破れ
