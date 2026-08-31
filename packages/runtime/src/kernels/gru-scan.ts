@@ -19,7 +19,13 @@
  * の `accumulatorUpdate`）。GEMM は K タイル 16 で分割するが 1 出力あたりの加算順は k 昇順の
  * ままなので、この素の逐次ループと丸め列が一致する。
  * MUST: `sigmoid` の本体は elementwise codegen と**同じ文字列**を共有する（silu.ts と同じ理由 —
- * 書き写すと primitive と融合版で丸め列が割れうる）。`tanh` は WGSL 組込なので共有の問題は無い。
+ * 書き写すと primitive と融合版で丸め列が割れうる）。
+ *
+ * NOTE: `tanh` はここだけ**組込のまま**で、primitive 側の飽和打ち切り
+ * （src/codegen/elementwise.ts の `TANH_STABLE_WGSL`）を共有していない。打ち切りは IEEE 忠実な
+ * tanh に対してビット同一なので上のビット同一門は割れないが、`(exp(2x)−1)/(exp(2x)+1)` で
+ * 計算する実装（Metal fast-math）では |gi_n + gh_n·r| > 44.36 でこの op だけが沈黙 NaN を返す。
+ * 同じ危険クラスの横断監査（この op を含む）は別波の宿題。
  *
  * ## 丸め障壁（workgroup memory 往復）
  *

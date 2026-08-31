@@ -5,6 +5,7 @@ import {
   elementwiseParams,
   type ElementwiseSpec,
   elementwiseWgsl,
+  TANH_SATURATION,
 } from "../src/codegen/elementwise.ts";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { GRU_SCAN_MAX_HIDDEN } from "../src/codegen/limits.ts";
@@ -293,6 +294,12 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["elementwise_relu_r1.wgsl", elementwiseWgsl({ op: "relu", rank: 1, dtype: "f32" })],
     ["elementwise_sigmoid_r1.wgsl", elementwiseWgsl({ op: "sigmoid", rank: 1, dtype: "f32" })],
     ["elementwise_gelu_r2.wgsl", elementwiseWgsl({ op: "gelu", rank: 2, dtype: "f32" })],
+    // 飽和打ち切り版の tanh（src/codegen/elementwise.ts の TANH_STABLE_WGSL）。**2 op を対で
+    // 置く**のが条件で、打ち切りは「引数の帯」だけを変える改変なので、片方だけ通した状態
+    // （gelu_tanh の内側だけ / unary tanh だけ）が値の突合では素通りする。上の
+    // elementwise_gelu_r2.wgsl（erf 形）が 1 バイトも動かないことも同じ列挙で見る。
+    ["elementwise_tanh_r1.wgsl", elementwiseWgsl({ op: "tanh", rank: 1, dtype: "f32" })],
+    ["elementwise_gelu_tanh_r1.wgsl", elementwiseWgsl({ op: "gelu_tanh", rank: 1, dtype: "f32" })],
     ["elementwise_add_r3.wgsl", elementwiseWgsl({ op: "add", rank: 3, dtype: "f32" })],
     ["elementwise_mul_i32_r2.wgsl", elementwiseWgsl({ op: "mul", rank: 2, dtype: "i32" })],
     [
@@ -984,14 +991,20 @@ Deno.test("elementwise の生成 WGSL は補助関数を使う op にだけ注�
   assertEquals(gelu.includes("fn erf_approx"), true);
   assertEquals(gelu.includes("fn sigmoid_stable"), false);
   assertEquals(relu.includes("fn erf_approx"), false);
-  // tanh 形は組込の tanh だけで書ける — erf の近似式を巻き込まないことと、√(2/π) の
-  // リテラルをここで固定する（2 つの gelu を取り違えても shape も dtype も合ってしまう）。
+  // tanh 形は erf の近似式を巻き込まない。√(2/π) のリテラルをここで固定する（2 つの gelu を
+  // 取り違えても shape も dtype も合ってしまう）。
+  // MUST: 内側は組込 `tanh` ではなく飽和打ち切り版（TANH_STABLE_WGSL）を呼ぶ — 素の tanh に
+  // 戻ると exp 経由実装で前活性 x ≳ 10.05 が沈黙 NaN になる。
   const geluTanh = elementwiseWgsl({ op: "gelu_tanh", rank: 1, dtype: "f32" });
   assertEquals(geluTanh.includes("fn erf_approx"), false);
   assertEquals(
-    geluTanh.includes("tanh(0.7978845608028654 * (v0 + 0.044715 * v0 * v0 * v0))"),
+    geluTanh.includes("tanh_stable(0.7978845608028654 * (v0 + 0.044715 * v0 * v0 * v0))"),
     true,
   );
+  // 補助関数どうしの依存（tanh_stable → is_nan_bits）が閉じていること。値式の字面には
+  // is_nan_bits が出ないので、注入が 1 段で止まると未定義関数のまま WGSL が出る。
+  assertEquals(geluTanh.includes("fn tanh_stable"), true);
+  assertEquals(geluTanh.includes("fn is_nan_bits"), true);
   // sin は WGSL 組込の素通し。多項式近似（erf 形の前例）へ差し替えられていないことと、
   // NaN 外殻（{@link nanGuard} 由来のビット列判定）が紛れ込んでいないことを固定する。
   const sin = elementwiseWgsl({ op: "sin", rank: 1, dtype: "f32" });
@@ -1003,6 +1016,31 @@ Deno.test("elementwise の生成 WGSL は補助関数を使う op にだけ注�
     elementwiseWgsl({ op: "sigmoid", rank: 1, dtype: "f32" }).includes("exp(-abs(x))"),
     true,
   );
+});
+
+/**
+ * tanh の飽和打ち切り閾値（src/codegen/elementwise.ts の {@link TANH_SATURATION}）が、
+ * 選定の 2 条件を**数値で**満たすことを常設で固定する。定数を動かした瞬間にここが割れる。
+ *
+ * 1. **ビット同一の条件**: f32 の tanh が閾値で既に厳密な ±1.0 に丸まっていること。
+ *    これが崩れると打ち切りが値を変える = 「IEEE 忠実な実装とはビット同一」の主張が失効する。
+ * 2. **オーバーフロー回避の条件**: `exp(2·閾値)` が f32 の上限から十分遠いこと。
+ *    これが崩れると打ち切っても exp 経由実装が Inf/Inf = NaN を返す（修正の目的そのもの）。
+ *
+ * MUST: 恒真化しないこと — 閾値**未満**では条件 1 が実際に破れる（下に対照を置く）。
+ */
+Deno.test("tanh の飽和打ち切り閾値が「飽和済み × オーバーフローから遠い」帯に入っている", () => {
+  // 条件 1: 閾値と、その符号反転側の両方で f32 の tanh が厳密な ±1.0。
+  assertEquals(Math.fround(Math.tanh(TANH_SATURATION)), 1);
+  assertEquals(Math.fround(Math.tanh(-TANH_SATURATION)), -1);
+  // 対照: f32 の飽和点（実測 9.011）より下では 1.0 に丸まらない — 上の 2 本は恒真ではない。
+  assertEquals(Math.fround(Math.tanh(9)) < 1, true, `${Math.fround(Math.tanh(9))}`);
+  // 条件 2: exp 経由実装（(exp(2x)−1)/(exp(2x)+1)）の中間値が f32 の上限 3.4028e38 から
+  // 桁で離れていること。素の gelu_tanh が踏んでいたのは前活性 11.45 → 内側引数 62.7 →
+  // exp(125.4) = 2.8e54（= オーバーフロー）。
+  assertEquals(Math.exp(2 * TANH_SATURATION) < 1e30, true);
+  // 対照: 打ち切りが無ければ f32 の上限を超える引数が実在する（44.36 が境界）。
+  assertEquals(Math.exp(2 * 44.4) > 3.4028234663852886e38, true);
 });
 
 // M1-P3 波3 で足した数理 op 群。カーネル固有の不変条件を生成物の側から固定する

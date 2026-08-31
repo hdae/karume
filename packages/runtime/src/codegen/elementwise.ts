@@ -279,6 +279,64 @@ const nanGuard = (a: string, finite: string): string =>
   `select(${finite}, ${a}, is_nan_bits(${a}))`;
 
 /**
+ * `tanh` の引数を飽和域で打ち切る閾値。**この値は 2 つの条件の同時成立でしか選べない**
+ * （根拠は {@link TANH_STABLE_WGSL} の doc）:
+ *
+ * 1. f32 の `tanh` がここで既に厳密な ±1.0 に丸まっていること（実測の下限は 9.011）。
+ *    下回ると打ち切りが**値を変える** = ビット同一の主張が崩れる。
+ * 2. `exp(2·t)` が f32 のオーバーフロー（引数 88.72 = 値 3.40e38）から十分遠いこと。
+ *    t = 9.5 なら `exp(19)` = 1.78e8 で 30 桁の余裕がある。
+ *
+ * 帯 [9.011, 44.36) のほぼ下端寄りを取る — 上へ寄せる利得は無く（打ち切り後の値は
+ * どこでも ±1.0）、下端に近いほど条件 2 の余裕が大きい。tests/codegen_wgsl_test.ts が
+ * この 2 条件を数値で常設固定する。
+ */
+export const TANH_SATURATION = 9.5;
+
+/**
+ * `tanh` の**飽和打ち切り**版。引数を ±{@link TANH_SATURATION} で頭打ちにしてから組込
+ * `tanh` へ渡す。
+ *
+ * MUST: 素の `tanh(x)` を呼ばない。WGSL は `tanh` の実装を規定しておらず、
+ * `(exp(2x) − 1)/(exp(2x) + 1)` で計算する実装（Metal の fast-math 経路 — 実測）は
+ * **|x| > 44.36 で exp(2x) が f32 のオーバーフロー**に入り `Inf/Inf` = 沈黙 NaN を返す。
+ * `gelu_tanh` の内側引数 `√(2/π)·(x + 0.044715x³)` は前活性 x ≳ 10.05 でそこへ届き、
+ * 実モデルの活性（実測最大 11.45）が毎 token 踏む。飽和域を先に潰せば中間の指数が
+ * そもそも育たない = オーバーフローが**構造的に**起きない（{@link SIGMOID_STABLE_WGSL}
+ * が exp の引数を -|x| に固定しているのと同じ手筋）。
+ *
+ * MUST: 打ち切りは**非 NaN の値をビット単位で変えない**閾値でだけ許される。f32 の tanh は
+ * |x| ≥ 9.011 でちょうど ±1.0 に丸まるので、IEEE 忠実な実装に対しては打ち切りの有無で
+ * 結果が 1 ビットも動かない（打ち切られる側は既に ±1.0）。閾値の根拠は
+ * {@link TANH_SATURATION}。
+ *
+ * MUST: NaN 伝播はビット列判定（{@link IS_NAN_FN}）で担い、打ち切りの比較には委ねない。
+ * 2 段 select はシェーダコンパイラが `clamp` イディオムへ畳みうるので（機序は IS_NAN_FN の
+ * doc）、素朴に書くと `clamp(NaN)` が閾値に化けて **NaN が黙って ±1.0 に飲まれる**。
+ *
+ * MUST: この本文を書き写さない（{@link SIGMOID_STABLE_WGSL} と同じ理由 — 写すと primitive と
+ * 融合版で丸め列が割れうる）。
+ *
+ * ## 残る懸念（打ち切りを足したことで新たに生じた / 生じなかったもの）
+ *
+ * 1. 「IEEE 忠実でない tanh 実装が閾値**未満**でも別値を返す」可能性は本修正の射程外。
+ *    従来から存在する差で、打ち切りで悪化も改善もしない（閾値未満は式の入力値が不変）。
+ * 2. 閾値未満の値はビット同一だが、**式の形が変わったことにシェーダコンパイラが反応して
+ *    丸めが動く**理論的余地は残る（WGSL に再結合を禁じる手段が無い以上、原理的に否定
+ *    できない）。実測では否定済み — 生成物は WGSL スナップショットで、値は golden 群
+ *    （sbv2 の WAV sha256 6 本・gemma4 の系列厳密一致）で固定されており、いずれも
+ *    本修正の前後で不変だった。
+ * 3. 「中間でオーバーフローするが最終値は有限」という**同じ危険クラス**の横断監査は
+ *    未実施（別波）。この doc が押さえているのは tanh / gelu_tanh の 2 op だけで、
+ *    src/kernels/gru-scan.ts の組込 `tanh` は意図的に手つかず（同ファイルの NOTE）。
+ */
+export const TANH_STABLE_WGSL = `fn tanh_stable(x: f32) -> f32 {
+  let lo = select(x, ${f32Literal(-TANH_SATURATION)}, x < ${f32Literal(-TANH_SATURATION)});
+  let t = select(lo, ${f32Literal(TANH_SATURATION)}, x > ${f32Literal(TANH_SATURATION)});
+  return ${nanGuard("x", "tanh(t)")};
+}`;
+
+/**
  * 単項の値式。第 2 引数は params 末尾のスカラ（{@link SCALAR_PARAM_ATTRS} の並び）を指す
  * WGSL 名を返す。
  *
@@ -301,17 +359,21 @@ const UNARY_WGSL: Readonly<
   log1p: (a) => `log1p_series(${a})`,
   sqrt: (a) => `sqrt(${a})`,
   sin: (a) => `sin(${a})`,
-  tanh: (a) => `tanh(${a})`,
+  // MUST: 組込 `tanh` の素通しにしない（機序と閾値は {@link TANH_STABLE_WGSL}）。この op は
+  // logits softcap（`div` → `tanh` → `mul`）の内側でも踏むので、gelu_tanh と同じ穴が空く。
+  tanh: (a) => `tanh_stable(${a})`,
   sigmoid: (a) => `sigmoid_stable(${a})`,
   relu: (a) => nanGuard(a, `max(${a}, 0.0)`),
   // 0.7071067811865476 = 1/√2
   gelu: (a) => `0.5 * ${a} * (1.0 + erf_approx(${a} * 0.7071067811865476))`,
-  // torch の approximate="tanh"。0.7978845608028654 = √(2/π)。tanh は WGSL 組込なので
-  // 補助関数を足さない（erf 形と違い、この式そのものが定義で、近似の精度を上げる余地が無い）。
-  // NaN の外殻（{@link nanGuard}）は掛けない — 掛ける理由は `max` / `clamp` イディオムへの
-  // 畳み込み（{@link IS_NAN_FN}）だけで、この式にはその形が無い（erf 形の gelu と同じ扱い）。
+  // torch の approximate="tanh"。0.7978845608028654 = √(2/π)。式そのものが定義なので
+  // （erf 形と違い）近似の精度を上げる余地は無い。
+  // MUST: 内側は {@link TANH_STABLE_WGSL} を通す。素の `tanh` だと 3 次項が効いて
+  // 前活性 x ≳ 10.05 で内側引数が 44.36 を超え、exp 経由実装が沈黙 NaN を返す。
+  // NaN の外殻（{@link nanGuard}）は式全体には掛けない — 外側に因子 `x` が残るので
+  // `0.5 · NaN · (…)` が NaN のままで、伝播は畳み込みの有無に依らない（erf 形の gelu と同じ扱い）。
   gelu_tanh: (a) =>
-    `0.5 * ${a} * (1.0 + tanh(0.7978845608028654 * (${a} + 0.044715 * ${a} * ${a} * ${a})))`,
+    `0.5 * ${a} * (1.0 + tanh_stable(0.7978845608028654 * (${a} + 0.044715 * ${a} * ${a} * ${a})))`,
   // bool は u32 の 0 / 1。`1u - x` にすると格納規約が破れたときに 0/1 の外へ出る。
   bitwise_not: (a) => `select(1u, 0u, ${a} != 0u)`,
   clamp: (a, scalar) =>
@@ -353,7 +415,32 @@ const HELPERS: readonly (readonly [string, string])[] = [
   ["is_nan_bits", IS_NAN_FN],
   ["log1p_series", LOG1P_FN],
   ["sigmoid_stable", SIGMOID_STABLE_WGSL],
+  ["tanh_stable", TANH_STABLE_WGSL],
 ];
+
+/**
+ * 値式が呼ぶ補助関数を、**補助関数どうしの依存も閉じて**選ぶ（`tanh_stable` が
+ * `is_nan_bits` を呼ぶ）。
+ *
+ * MUST: 依存表を手で持たない。本文の字面が正本で、別に持つ表は被参照側を足したり外したり
+ * するたびに黙って腐る。値式の字面だけで絞ると、呼ばれている側が未定義のまま残った WGSL が
+ * 出る（コンパイル時に落ちるので沈黙誤値にはならないが、生成の入口で塞ぐ）。
+ * 返す順は {@link HELPERS} の並びのままで、選び方は順序に影響しない。
+ */
+const usedHelpers = (value: string): readonly string[] => {
+  const selected = new Set<string>();
+  let scope = value;
+  for (;;) {
+    const added = HELPERS.filter(([name]) => !selected.has(name) && scope.includes(name));
+    if (added.length === 0) {
+      return HELPERS.filter(([name]) => selected.has(name)).map(([, body]) => body);
+    }
+    for (const [name, body] of added) {
+      selected.add(name);
+      scope = `${scope}\n${body}`;
+    }
+  }
+};
 
 /**
  * MUST: WGSL に埋まる生成パラメータは全てキーに載せる。workgroup サイズは
@@ -365,12 +452,13 @@ const HELPERS: readonly (readonly [string, string])[] = [
  * bool）とスカラの本数は op 名から一意に決まるため、独立した軸にならない。
  *
  * v2: clamp / clamp_min / relu に NaN 伝播の外殻が入り WGSL 本文が変わった（IS_NAN_FN）。
- * 版は **族ごと**に上げる — op 別の例外表を持つと、次の改版で「どの op が今どの版か」を
- * 二重管理することになる（他の op はキーが変わるだけで生成物は同一）。
+ * v3: tanh / gelu_tanh が飽和打ち切りを通るようになった（{@link TANH_STABLE_WGSL}）。
+ * 版は **族ごと**に上げる（ADR 0020 決定 3）— op 別の例外表を持つと、次の改版で「どの op が
+ * 今どの版か」を二重管理することになる（他の op はキーが変わるだけで生成物は同一）。
  */
 export const elementwiseKey = (spec: ElementwiseSpec): string => {
   const { op, rank, from, to } = canonicalize(spec);
-  return `ew:v2:${op}:${from}>${to}:r${rank}:wg${ELEMENTWISE_WORKGROUP_SIZE}`;
+  return `ew:v3:${op}:${from}>${to}:r${rank}:wg${ELEMENTWISE_WORKGROUP_SIZE}`;
 };
 
 /**
@@ -426,7 +514,7 @@ export const elementwiseWgsl = (spec: ElementwiseSpec): string => {
     ? BINARY_WGSL[canonical.op]("v0", "v1")
     // torch の where(cond, a, b) = cond ? a : b。WGSL の select(f, t, cond) は引数順が逆。
     : `select(v2, v1, v0 != 0u)`;
-  const used = HELPERS.filter(([name]) => value.includes(name)).map(([, body]) => body);
+  const used = usedHelpers(value);
 
   return [
     `// karume elementwise ${op} (rank ${rank}, generated)`,

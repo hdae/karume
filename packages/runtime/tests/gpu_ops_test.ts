@@ -311,6 +311,121 @@ Deno.test({
   },
 });
 
+/**
+ * tanh / gelu_tanh の**飽和域**（src/codegen/elementwise.ts の TANH_STABLE_WGSL）。
+ *
+ * **この 2 本は「Metal でだけ赤 → 修正後に緑」になるカナリア**で、Vulkan / DXC のように
+ * tanh を IEEE 忠実に実装するドライバでは打ち切りの前後どちらでも緑のまま（打ち切りは
+ * 非 NaN の値をビット単位で変えない）。赤くなるのは tanh を `(exp(2x)−1)/(exp(2x)+1)` で
+ * 計算する実装（Metal の fast-math 経路 — 実測）だけで、そこでは
+ *   - `tanh` は |x| > 44.36
+ *   - `gelu_tanh` は前活性 x ≳ 10.05（内側引数 √(2/π)·(x + 0.044715x³) が 44.36 を超える）
+ * で exp(2x) が f32 のオーバーフローに入り `Inf/Inf` = 沈黙 NaN を返す。実モデル
+ * （gemma4 E2B の活性は実測最大 11.45）が毎 token 踏んでいた穴がこれ。
+ *
+ * MUST: 入力に**飽和帯の内と外の両方**を含める。打ち切り閾値（9.5）の内側だけを見ると
+ * 「打ち切りが効いていない実装」も緑で通る。
+ * MUST: NaN 伝播を対で見る。打ち切りを `clamp` イディオムで書くと NaN が閾値に化けて
+ * ±1.0 に飲まれる（機序は src/codegen/elementwise.ts の IS_NAN_FN）— そこを見張る 1 本。
+ */
+const TANH_SATURATION_INPUTS = [
+  0,
+  5,
+  -5,
+  9,
+  -9,
+  10.6,
+  -10.6,
+  12,
+  -12,
+  50,
+  -50,
+  88,
+  -88,
+  120,
+  -120,
+] as const;
+
+Deno.test({
+  name: "tanh / gelu_tanh が飽和域で CPU 参照と一致する（NaN を吐かない — 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const op of ["tanh", "gelu_tanh"] as const) {
+        const actual = await runCase(gpu, {
+          name: `${op} 飽和域`,
+          op,
+          inputs: [fill([TANH_SATURATION_INPUTS.length], (i) => TANH_SATURATION_INPUTS[i])],
+          outShapes: [[TANH_SATURATION_INPUTS.length]],
+        });
+        const expected = applyReferenceOp(
+          op,
+          [fill([TANH_SATURATION_INPUTS.length], (i) => TANH_SATURATION_INPUTS[i])],
+          {},
+          [TANH_SATURATION_INPUTS.length],
+        );
+        // MUST: NaN を先に落とす。下の許容差判定は NaN をどちらの側でも不合格にするが、
+        // 「どの入力で NaN になったか」がメッセージに出ないと Metal の切り分けに使えない。
+        TANH_SATURATION_INPUTS.forEach((x, index) => {
+          assertEquals(
+            Number.isNaN(actual.data[index]),
+            false,
+            `${op}(${x}) が NaN（tanh の exp 経由実装が中間でオーバーフローしている）`,
+          );
+        });
+        // 絶対 + 相対の合成で見る（gelu_tanh の負の飽和側は期待値が ±0 になり、相対だけでは
+        // 判定できない）。WGSL は tanh の精度を保証しないので厳密一致は求めない。
+        TANH_SATURATION_INPUTS.forEach((x, index) => {
+          const want = expected.data[index];
+          const gap = Math.abs(actual.data[index] - want);
+          assertEquals(
+            gap <= 1e-6 * Math.max(1, Math.abs(want)),
+            true,
+            `${op}(${x}): GPU ${actual.data[index]} vs CPU 参照 ${want}`,
+          );
+        });
+        // MUST: 恒真化しない。飽和域の外（x = ±5）が定数へ潰れていないことを見る
+        // （「全部 ±1 を返す」実装は上の 2 つの判定だけでは落ちない）。
+        assertNotEquals(actual.data[1], actual.data[3], `${op}: x=5 と x=9 が同値`);
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 上のカナリアの NaN 側。`tanh` はビット列判定の外殻、`gelu_tanh` は式の外に残る因子 `x` で
+ * それぞれ NaN を運ぶ（機序が違うので op ごとに見る）。
+ */
+Deno.test({
+  name: "tanh / gelu_tanh が NaN を伝播する（打ち切りが NaN を飲まない — 実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const op of ["tanh", "gelu_tanh"] as const) {
+        // 飽和帯の内（0.5）・外（12）と NaN を混ぜる。対照が無いと「常に NaN」で緑になる。
+        const inputs = [Number.NaN, 0.5, 12, Number.NaN] as const;
+        const actual = await runCase(gpu, {
+          name: `${op} NaN`,
+          op,
+          inputs: [fill([4], (i) => inputs[i])],
+          outShapes: [[4]],
+        });
+        assertEquals(
+          [...actual.data].map((value) => Number.isNaN(value)),
+          [true, false, false, true],
+          `${op}: NaN の位置`,
+        );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
 Deno.test({
   name: "matmul がタイル端数込みで CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
