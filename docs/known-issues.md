@@ -12,7 +12,7 @@ verify を並行させた走りで 2 回観測（単独走行でも過去に観�
 
 運用の回避 = **失敗したファイルを単独で再走して確認する**（緑ならフレーク）。
 
-## Metal（Apple GPU）で attention i8a8 の GPU 出力が TS 参照と 1 ULP ずれる（+ conv1d/conv2d parity 4 本 + gru_scan parity 2 本）
+## Metal（Apple GPU）で attention i8a8 の GPU 出力が TS 参照と 1 ULP ずれる（+ conv1d/conv2d parity 4 本 + gru_scan parity 2 本 + linear GEMV u32 門 1 本）
 
 実機 **Apple M2**（初出 Deno 2.9.4・2026-08-29 に 2.9.6 で再検証・2026-08-31 フル verify で
 節の対象を棚卸し）で attention i8a8 系 4 本 + **conv1d parity 2 本 + conv2d parity 2 本**
@@ -97,7 +97,8 @@ errorScope に全面依存しているため（ADR 0070 決定 4）、**errorSco
 
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 
-`karume export-embeddinggemma --batch N`（N>1）は `karume/convert.py` で fail loudly する
+`python -m embeddinggemma.export --batch N`（N>1・tools/export-recipes 側 — 起動形は
+ADR 0065 の recipe 分離どおり）は core 側 `karume/convert.py` で fail loudly する
 （B=1 は従来どおり成功）。機序は 2 段:
 
 1. transformers（5.14 系）の `masking_utils.find_packed_sequence_indices` が、
@@ -119,11 +120,11 @@ batch>1 のマスク畳み込み対応）で、コア変換基盤への設計判
 
 実機報告のエラー文言 "BodyStreamBuffer was aborted" は Chrome が巻き添え中断の reason を
 差し替えた固定文言で、真因ではない（hub が巻き添え側を表面化させていた診断バグは
-2026-08-25 に修正済み — 真因復元 + バイト予算 + 検証直列化。未リリース）。最有力仮説は
-メモリ逼迫（turbo i4 でも完走時常駐 ~2.56GiB + 検証一時。i8 ではブラウザ強制終了の報告
-あり）だが、回線切断・アプリ側 abort と見え方が同一のため、修正版で `err.cause` を実機
-観測するまで確定できない。常駐そのものの削減は shard 配布 + streamAssets 接続
-（backlog next の R1）まで残る。
+2026-08-25 に修正済み — 真因復元 + バイト予算 + 検証直列化。**0.7.0 でリリース済み**）。
+最有力仮説はメモリ逼迫（turbo i4 でも完走時常駐 ~2.56GiB + 検証一時。i8 ではブラウザ強制
+終了の報告あり）だが、回線切断・アプリ側 abort と見え方が同一のため、修正版で `err.cause`
+を実機観測するまで確定できない。常駐そのものの削減（shard 配布 + streamAssets 接続 —
+R1 統合波）も 0.7.0 に同梱済み。残タスク = 修正版・分割配布での実機再観測のみ。
 
 ## HF: base リポの shared/text_encoder が中程度の断片化（4.1 MiB/term — 2026-08-29）
 
