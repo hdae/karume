@@ -82,6 +82,7 @@ from safetensors.numpy import save
 
 from karume.artifacts import ArtifactSwapError, staged_publication
 from karume.ir import IR_METADATA_KEY
+from karume.limits import LimitsError, max_state_slot_bytes, max_tensor_payload, required_limits
 from karume.modelcard import HF_OWNER
 from karume.shards import MAX_SHARDS, ShardError, resolve_shards, shard_name
 
@@ -628,6 +629,79 @@ def complete_quant_weights(
     return completed
 
 
+#: quant の optional 欄の綴り（ADR 0038 §7 — hub の `parseRequiredLimits` が読む）。
+REQUIRED_LIMITS_KEY = "requiredLimits"
+
+
+def component_demand_bytes(
+    source: Path, pipeline_config: Mapping[str, Any], memo: dict[Path, int]
+) -> int:
+    """コンポーネント 1 つの**常駐 1 バッファの最大バイト数**（重みテンソル / state スロット）。
+
+    読むのは safetensors の**ヘッダだけ**（数 GB のペイロードは舐めない）。`memo` は代表 path
+    単位の覚え書き — 複数の quant が同じコンポーネントを選ぶ席（共有 text_encoder のような形）
+    で、数 MB のグラフ JSON を読み直さないため。
+
+    導出規則の正本は {@link karume.limits}（純関数側）。ここが足すのは「配布に入る現物のどこを
+    入口にするか」だけ — 代表 path から shard 列とグラフを引く。
+    """
+    remembered = memo.get(source)
+    if remembered is not None:
+        return remembered
+    try:
+        demand = 0
+        for shard in component_shards(source):
+            demand = max(demand, max_tensor_payload(safetensors_header(shard), str(shard)))
+        demand = max(demand, max_state_slot_bytes(ir_graph(source), pipeline_config, str(source)))
+    except LimitsError as cause:
+        raise DistError(str(cause)) from cause
+    memo[source] = demand
+    return demand
+
+
+def bake_required_limits(plan: ModelPlan) -> ModelPlan:
+    """quant ごとの `requiredLimits`（ADR 0038 §7）を**現物から**導いて焼いた計画を返す。
+
+    需要は quant が選ぶコンポーネントの ① 最大テンソルの格納 payload と ② 最大 state スロット
+    （容量を `pipelineConfig` で数値化した寸法）の最大で、保証既定を超える席だけが欄になる
+    （既定以内なら欄そのものが無い — 規則と理由の正本は {@link karume.limits}）。
+
+    MUST: **計画側が同じ欄を書いていたら fail loudly** — 導出できる値を recipe の quant 表にも
+    持たせると、格納形や容量を変えた回に「表だけが古い下限を名乗る」形が作れる（宣言と現物が
+    独立に動く二重管理）。読み手は宣言を信じて取得の前に拒否するので、古い下限は「宣言は
+    満たすのに動かない」配布物になる。
+    """
+    memo: dict[Path, int] = {}
+    quants: dict[str, Any] = {}
+    for quant_name, quant in plan.quants.items():
+        where = f"{plan.name}.quants.{quant_name}"
+        if REQUIRED_LIMITS_KEY in quant:
+            raise DistError(
+                f"{where}.{REQUIRED_LIMITS_KEY} を計画が書いている — この欄は組み立てが配布に"
+                "入る現物（テンソル寸法と state スロット）から導く席で、表に書く席ではない"
+            )
+        demand = 0
+        for name, label in quant["weights"].items():
+            labels = plan.weights.get(name)
+            files = labels.get(label) if labels is not None else None
+            if files is None:
+                raise DistError(f"{where}.weights: '{name}' に dtype '{label}' が無い")
+            artifact = plan.artifacts.get(files.file)
+            if artifact is None:
+                raise DistError(f"{where}.weights: 役割 '{files.file}' が artifacts に無い")
+            # 出所が生成物（`payload`）の役割は IR コンテナではない（{@link weight_components}
+            # と同じ扱い）。extras / assets も同様に見ない — 表・tokenizer・sidecar が GPU の
+            # 常駐バッファになるかは family 側の事情で、コンテナの宣言からは決まらない。
+            if artifact.source is None:
+                continue
+            demand = max(
+                demand, component_demand_bytes(artifact.source, plan.pipeline_config, memo)
+            )
+        limits = required_limits(demand)
+        quants[quant_name] = {**quant, **({REQUIRED_LIMITS_KEY: limits} if limits else {})}
+    return replace(plan, quants=quants)
+
+
 def file_ref(out_dir: Path, rel_path: str, sha256: str) -> dict[str, Any]:
     """ADR 0041 §2 の 3 点セット `{path, size, sha256}`（size は置いた現物から採る）。"""
     return {
@@ -1058,6 +1132,11 @@ def assemble_family(
     """
     if not plans:
         raise DistError("組み立てるモデルが 1 つも無い")
+    # MUST: `requiredLimits` は組み立てが**現物から**導いて焼く（{@link bake_required_limits}）
+    # — 宣言の意味は「このバイト列を常駐させるのに要る device limit」なので、配布に入る現物
+    # 以外に正本は無い。展開より前に置くのは、導出の入口が**代表 path**（`component_shards` /
+    # `ir_graph` が受ける口）だから — 展開後の shard 役割からは代表 path を引き直せない。
+    plans = [bake_required_limits(plan) for plan in plans]
     # MUST: 展開は**全ての門より前**（1 バイトも書く前）— 展開後の役割が持つ相対 path も
     # 出所も、以降の検査（path の収まり・入力の実在・共有の畳み込み）に掛かる必要がある。
     sharded = [expand_weight_shards(plan) for plan in plans]

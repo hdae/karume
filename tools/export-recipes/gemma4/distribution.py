@@ -46,7 +46,6 @@ from karume.dist import (
     assert_storage,
     assert_storage_absent,
     complete_quant_weights,
-    component_shards,
     graph_inputs,
     ir_graph,
     safetensors_header,
@@ -202,13 +201,6 @@ GEMMA4_PLE_SHARD_KEYS: tuple[str, ...] = ("file", "start", "stop")
 GEMMA4_PLE_VALUES_KEY = "values"
 GEMMA4_PLE_SCALES_KEY = "scales"
 GEMMA4_PLE_METADATA_KEY = "karume_ple"
-
-#: 宣言する device limit（ADR 0075 / 0038 §7 の optional `requiredLimits`）。値は**コンテナの
-#: 最大テンソル**から導く — 実重みの 1 本を 1 つの storage buffer へ束ねるので、この 2 つが
-#: 足りない device ではロードが必ず失敗する（WebGPU の既定は 256MiB / 128MiB で、どちらも
-#: E2B の最大テンソルに届かない）。写経しないのは、格納形を変えたときにホストだけが古い
-#: 下限を名乗る形を作らないため。
-GEMMA4_LIMIT_NAMES: tuple[str, ...] = ("maxBufferSize", "maxStorageBufferBindingSize")
 
 
 def gemma4_checkpoint(model: str) -> str:
@@ -641,35 +633,6 @@ def gemma4_pipeline_config(max_position: int, sampler: Mapping[str, Any]) -> dic
     }
 
 
-def gemma4_required_limits(path: Path) -> dict[str, int]:
-    """コンテナの**最大テンソル**から `requiredLimits` を導く（ADR 0075 / 0038 §7）。
-
-    実重みの 1 本がそのまま 1 つの storage buffer になるので、この 2 つの limit が最大テンソルに
-    届かない device ではロードが必ず失敗する。ヘッダしか読まない（全 shard を走る）。
-    """
-    largest = 0
-    for shard in component_shards(path):
-        header = safetensors_header(shard)
-        for name, spec in header.items():
-            if name == "__metadata__":
-                continue
-            offsets = spec.get("data_offsets")
-            if not isinstance(offsets, list) or len(offsets) != 2:
-                raise DistError(f"{shard}: テンソル '{name}' の data_offsets が 2 要素でない")
-            largest = max(largest, int(offsets[1]) - int(offsets[0]))
-    if largest <= 0:
-        raise DistError(f"{path}: テンソルが 1 本も無い")
-    return dict.fromkeys(GEMMA4_LIMIT_NAMES, largest)
-
-
-def gemma4_quants(required_limits: Mapping[str, int]) -> dict[str, Any]:
-    """quant 表（1 席）に導出した `requiredLimits` を載せる。"""
-    return {
-        name: {**quant, "requiredLimits": dict(required_limits)}
-        for name, quant in GEMMA4_QUANTS.items()
-    }
-
-
 def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> ModelPlan:
     """gemma4 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる）。"""
     assert_model_name(model)
@@ -702,9 +665,9 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
         },
         weights=GEMMA4_WEIGHTS,
         assets=gemma4_assets(index),
-        quants=complete_quant_weights(
-            GEMMA4_WEIGHTS, gemma4_quants(gemma4_required_limits(container))
-        ),
+        # requiredLimits は書かない — core の dist が組み立て時に一括導出して焼く
+        # （karume/limits.py。計画側の手書きは二重管理として拒否される）。
+        quants=complete_quant_weights(GEMMA4_WEIGHTS, GEMMA4_QUANTS),
         default_quant=GEMMA4_DEFAULT_QUANT,
         pipeline_config=pipeline_config,
     )

@@ -53,6 +53,8 @@ CORE_MODULES: tuple[str, ...] = (
     "emit",
     # 配布コンテナの shard 分割規則（ADR 0070 決定 1）。path とバイト数しか知らない。
     "shards",
+    # quant の `requiredLimits` 導出（ADR 0038 §7）。寸法と WebGPU の既定値しか知らない。
+    "limits",
     "verify",
     # 容器の詰め替え（ADR 0081 の移行経路）。バイト列と宣言しか知らない。
     "repack",

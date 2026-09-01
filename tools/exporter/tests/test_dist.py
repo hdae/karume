@@ -28,7 +28,7 @@ import pytest
 from ir_fixtures import ir_container, ir_shards
 from safetensors.numpy import load, save
 
-from karume import dist
+from karume import dist, limits
 from karume.artifacts import SUPERSEDED_SUFFIX
 from karume.dist import (
     MANIFEST_FILENAME,
@@ -1228,6 +1228,156 @@ class TestShardExpansion:
 
         with pytest.raises(DistError, match="assets / extras も"):
             assemble_family([plan], tmp_path / "models" / "aliased", "A")
+
+
+class TestRequiredLimits:
+    """quant の `requiredLimits`（ADR 0038 §7）は組み立てが**現物から**導いて焼く。
+
+    導出規則そのもの（何を需要と数え、どこから焼くか）の門は `test_limits.py` — ここが見るのは
+    結線だけ: 現物のどこを入口にするか・quant の席にどう載るか・計画側が同じ欄を書いたら
+    落ちるか。既定を差し替える 2 本は、合成資産（数 KB）では 128MiB の帯へ届かないため
+    （実配布資産を作らずに「導出が現物のどこを見ているか」を観測する）。
+    """
+
+    #: フィクスチャの最大テンソル = linear 重み 4×32 の f32 = 512 バイト（`ir_fixtures`）。
+    _LARGEST_TENSOR: ClassVar[int] = 512
+
+    def _plan(
+        self,
+        series: Path,
+        *,
+        pipeline_config: Mapping[str, Any] | None = None,
+        quant: Mapping[str, Any] | None = None,
+    ) -> ModelPlan:
+        """1 役だけの計画（weights の席は正当な IR コンテナ = 導出の入口）。"""
+        source = _write_series(series, ir_container(mark="w"))
+        return ModelPlan(
+            name="A",
+            pipeline="anima/1",
+            artifacts={"w": Artifact(rel_path="w/model.safetensors", source=source)},
+            weights={"w": {"f16": WeightFiles(file="w")}},
+            assets={},
+            quants={"f16": {"weights": {"w": "f16"}, "session": {}, **(quant or {})}},
+            default_quant="f16",
+            pipeline_config=dict(pipeline_config or {}),
+        )
+
+    def _assemble(self, tmp_path: Path, plan: ModelPlan) -> dict[str, Any]:
+        return assemble_family([plan], tmp_path / "models" / "limits", "A")
+
+    def test_a_distribution_within_the_defaults_declares_nothing(self, tmp_path: Path) -> None:
+        """既定スペックで動く資産に欄は生えない（「欄が無い = 既定で動く」の意味論）。"""
+        manifest = self._assemble(tmp_path, self._plan(tmp_path / "series"))
+
+        assert manifest["models"]["A"]["quants"]["f16"] == {
+            "weights": {"w": "f16"},
+            "session": {},
+        }
+
+    def test_it_bakes_the_largest_tensor_of_the_container(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """需要の出所は**配布に入る現物**のテンソル寸法（モデル定義の再計算ではない）。"""
+        monkeypatch.setattr(
+            limits,
+            "WEBGPU_DEFAULT_LIMITS",
+            {"maxBufferSize": 400, "maxStorageBufferBindingSize": 200},
+        )
+
+        manifest = self._assemble(tmp_path, self._plan(tmp_path / "series"))
+
+        assert manifest["models"]["A"]["quants"]["f16"]["requiredLimits"] == {
+            "maxBufferSize": self._LARGEST_TENSOR,
+            "maxStorageBufferBindingSize": self._LARGEST_TENSOR,
+        }
+        # 焼いた欄は据わった `karume.json` にも居る（返り値だけの飾りではない）。
+        written = json.loads(
+            (tmp_path / "models" / "limits" / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        assert written["models"]["A"]["quants"]["f16"]["requiredLimits"] == {
+            "maxBufferSize": self._LARGEST_TENSOR,
+            "maxStorageBufferBindingSize": self._LARGEST_TENSOR,
+        }
+
+    def test_it_declares_only_the_limit_the_demand_actually_exceeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """既定の違う 2 つなので、片方だけを超える帯では欄も片方だけ（実配布 irodori f16 の形）。"""
+        monkeypatch.setattr(
+            limits,
+            "WEBGPU_DEFAULT_LIMITS",
+            {"maxBufferSize": 4096, "maxStorageBufferBindingSize": 200},
+        )
+
+        manifest = self._assemble(tmp_path, self._plan(tmp_path / "series"))
+
+        assert manifest["models"]["A"]["quants"]["f16"]["requiredLimits"] == {
+            "maxStorageBufferBindingSize": self._LARGEST_TENSOR
+        }
+
+    def test_a_state_slot_can_be_the_largest_resident_buffer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """KV 容量の大きい系列では**最大テンソルより state スロットの方が大きい**。
+
+        states 形のコンテナは合成できない（手術済み IR = attention の契約ごと組む必要がある）
+        ので、読み口だけを差し替えて「state も需要に入る」ことを観測する。容量は
+        `pipelineConfig` の席から来る（束縛点は `createGenerationContext` — ADR 0066 追記 7）。
+        """
+        monkeypatch.setattr(
+            dist,
+            "ir_graph",
+            lambda path: {"states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}},
+        )
+        plan = self._plan(tmp_path / "series", pipeline_config={"capacity": 200_000})
+
+        manifest = self._assemble(tmp_path, plan)
+
+        slot_bytes = 200_000 * 512 * 4
+        assert slot_bytes > self._LARGEST_TENSOR
+        assert manifest["models"]["A"]["quants"]["f16"]["requiredLimits"] == {
+            "maxBufferSize": slot_bytes,
+            "maxStorageBufferBindingSize": slot_bytes,
+        }
+
+    def test_a_state_slot_the_config_cannot_bind_fails_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """容量席が無ければ落とす — 黙って state を外すと「宣言があるのに足りない」欄が焼ける。"""
+        monkeypatch.setattr(
+            dist,
+            "ir_graph",
+            lambda path: {"states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}},
+        )
+        plan = self._plan(tmp_path / "series")
+
+        with pytest.raises(DistError, match="capacity"):
+            self._assemble(tmp_path, plan)
+
+    def test_it_refuses_a_plan_that_writes_the_field_itself(self, tmp_path: Path) -> None:
+        """導出できる値を表にも持たせない（表だけが古い下限を名乗る形を作らせない）。"""
+        plan = self._plan(
+            tmp_path / "series", quant={"requiredLimits": {"maxBufferSize": 1_073_741_824}}
+        )
+
+        with pytest.raises(DistError, match="requiredLimits"):
+            self._assemble(tmp_path, plan)
+
+    def test_nothing_is_written_when_the_derivation_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """導出は**1 バイトも書く前**（落ちるなら途中の配布形を 1 ファイルも残さない）。"""
+        monkeypatch.setattr(
+            dist,
+            "ir_graph",
+            lambda path: {"states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}},
+        )
+        out_dir = tmp_path / "models" / "limits"
+
+        with pytest.raises(DistError):
+            assemble_family([self._plan(tmp_path / "series")], out_dir, "A")
+
+        assert not out_dir.exists()
 
 
 class TestInputContainerVerification:

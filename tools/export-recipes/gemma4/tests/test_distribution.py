@@ -208,18 +208,6 @@ class TestGemma4Config:
         with pytest.raises(DistError, match="1 chunk すら入らない"):
             gemma4_plan(sources)
 
-    def test_it_derives_the_required_limits_from_the_largest_tensor(self, gemma4_assembled) -> None:
-        out_dir, manifest = gemma4_assembled
-        limits = _model(manifest)["quants"]["i4"]["requiredLimits"]
-        assert sorted(limits) == ["maxBufferSize", "maxStorageBufferBindingSize"]
-        assert len(set(limits.values())) == 1
-        largest = max(
-            ref["size"] for ref in _model(manifest)["weights"][GEMMA4_ROLE]["i4"]["shards"]
-        )
-        # 最大テンソルはコンテナのどれか 1 本の中に収まる（= shard 長を超えない）。
-        assert 0 < next(iter(limits.values())) <= largest
-        assert (out_dir / MANIFEST_FILENAME).is_file()
-
 
 class TestGemma4Graph:
     """製品グラフの形 — 入力の並びと、PLE 索引との噛み合い。"""
