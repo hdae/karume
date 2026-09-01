@@ -1,6 +1,6 @@
 /**
  * manifest の weights コンポーネントを **2 段境界 + shard 逐次面**へ載せる内部機構
- * （7 家族の `fromPretrained` が共有する 1 本 — ADR 0070 決定 3 / 決定 5）。
+ * （8 家族の `fromPretrained` が共有する 1 本 — ADR 0070 決定 3 / 決定 5）。
  *
  * MUST: barrel には出さない。ロード経路の綴りを揃えるための機構で、利用者が触る面ではない。
  *
@@ -142,7 +142,7 @@ const assetShardStream = (shards: readonly ModelShard[]): AsyncIterable<ModelSha
 });
 
 /**
- * 全量面（`from*Assets`）のコンポーネント供給口 — 7 家族が共有する 1 本。
+ * 全量面（`from*Assets`）のコンポーネント供給口 — 8 家族が共有する 1 本。
  *
  * 取得キーの形は `resolveFiles` の規約そのままで、2 形とも受ける:
  *
