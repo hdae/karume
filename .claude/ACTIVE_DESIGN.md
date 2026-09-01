@@ -15,11 +15,13 @@
   「モデル更新波」）**: **N1 Irodori v4.1-small = ローカル完了**（凍結をバイトで確証・
   全系列 export + dist + スモーク緑・pin 新設と examples 既定切替はリリース時 = runbook §3。
   副産物: full-loop 検証を 2 段化 — 誤差増幅 37,107 倍の実測は
-  [research](../docs/research/2026-09-01-irodori-v41-euler-sensitivity.md)）→ N2 Anima 再構造（公式 3 変種を karume-anima 同居・**defaultModel =
-  anima-turbo-v1.1**・wai/copycat は karume-anima-extra へ移設 + 越境参照・**breaking =
-  `ANIMA_TURBO_CURRENT` 廃止**・ライセンス = CircleStone NC v1.2 一次確認済み = 条件付き
-  再配布可）→ N3 Civitai AIR 取り込み機構。完了で HF 一括リリース。その後 =
-  メモリ管理波 → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
+  [research](../docs/research/2026-09-01-irodori-v41-euler-sensitivity.md)）→
+  **N2 Anima 再構造 = ローカル完了（ADR 0087）**: karume-anima = 公式 5 変種同居（既定 =
+  turbo-v1.1・aesthetic 既定 30step/CFG4 視認裁定・i4 席は全モデル退役）・breaking =
+  `ANIMA_TURBO_CURRENT` / `--pipeline anima-turbo` 廃止・e2e は turbo-v1.1 で参照 sha
+  新規凍結（base 側 sha 不変 = v1.0 バイト不変の証明）・extra（wai/copycat）の組み立ては
+  リリース時の越境焼き → **N3 Civitai AIR 取り込み機構（次の作業）**。完了で HF 一括
+  リリース。その後 = メモリ管理波 → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
 - **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
   Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
   台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・

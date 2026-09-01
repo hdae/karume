@@ -138,18 +138,19 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     [research](research/2026-09-01-irodori-v41-euler-sensitivity.md)。
     **残 = リリース時**: pin `IRODORI_V4_1_SMALL_CURRENT` 新設（旧 pin 温存）+ examples
     既定切替（ADR 0073 決定 1 = 未公開リポに pin を置かない — runbook §3 に手順記載済み）。
-  - **N2 Anima 再構造**: 上流 = Civitai 2458426 の公式 3 変種（base-v1.0 /
-    aesthetic-v1.1 / turbo-v1.1 — 全て単一 safetensors 3.9GB BF16・turbo は公式
-    checkpoint 化 = **LoRA 焼き込み不要に**）。**ライセンス確認済み（2026-09-01・
-    LICENSE.md v1.2 を一次確認）**: 再配布可（ライセンス同梱 + Attribution Notice +
-    改変明示が条件 = 現行カード機構が既に満たす形）・モデル本体 NC 維持・**生成物は商用可 +
-    個人の派生販売可（v1.2 で寛容化）**。構成 = `karume-anima` に 3 変種同居
-    （**defaultModel = anima-turbo-v1.1**〈裁定 — 公式が最初に触るのは Turbo 推奨・Base は
-    LoRA 作成向け〉・`anima-v1.0` は改名せず）+ `karume-anima-extra`（wai / copycat 移設・
-    text stack は公式リポへ越境参照）。**breaking = `ANIMA_TURBO_CURRENT` 廃止 →
-    `ANIMA_CURRENT` へ統合**。新 ADR（リポ分割軸 = 公式 / 追加学習）。波内確認 =
-    aesthetic の step/guidance 視認裁定（seed 4 本以上）・新旧 turbo の系譜（PNG 参照 sha
-    流用可否）・base 単一ファイル vs 既存 diffusers の同一性・カード許諾欄の v1.2 追随。
+  - **N2 Anima 再構造 — ローカル完了（2026-09-01・ADR 0087）**: `karume-anima` = 公式
+    **5 変種**同居（turbo-v1.1〈既定〉/ v1.0 / aesthetic-v1.1 / **turbo-v1.0 /
+    aesthetic-v1.0 — 同日追加裁定「バージョン間で好みが分かれる」**）+ `karume-anima-extra`
+    （wai / copycat・**組み立てはリリース時** = 公式リポの公開 SHA で越境焼き — runbook）。
+    breaking 消化 = `ANIMA_TURBO_CURRENT` 廃止・`--pipeline anima-turbo` 廃止・**i4 席は
+    全モデル退役（同日裁定 — 機構は eval_dist の復活レバーとして温存）**。波内確認の結果:
+    base 単一ファイル = diffusers と全ビット同一（v1.0 系列再 export 不要・PNG 参照 sha
+    不変を e2e で証明）/ 新旧 turbo は別重み → e2e 参照 sha を turbo-v1.1 で新規凍結・
+    聴視認 OK（「LoRA マージよりパキッとした絵」）/ conditioner 共有は f16 丸め後ビット比較
+    で判定（turbo-v1.1 のみ共有）/ **aesthetic 既定 = 30 step / CFG 4（20/30/50 視認裁定）**/
+    カード v1.2 追随（Outputs 商用可の明記・ライセンス原文は v1.2 逐語一致確認済み）。
+    残 = リリース時: extra 越境焼き + `ANIMA_EXTRA_CURRENT` 新設 + 旧 karume-anima-turbo
+    リポの deprecation 扱い（アップロード時にユーザー裁定）。
   - **N3 Civitai 追加機構**: `--air urn:air:...` / URL 指定で extra リポへ取り込む recipe 側
     コマンド（model-versions API メタ + sha256 + provenance 記録・命名は ADR 0077）。
     ライセンス門 = **エージェント事前確認形**（裁定 2026-09-01 — 手動フラグ強制はしない・
