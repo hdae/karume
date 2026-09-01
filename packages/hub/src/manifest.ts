@@ -55,6 +55,34 @@ const MAX_FILE_BYTES = 16 * 2 ** 30;
  * 数千の shard 参照を詰めた入力がそのまま取得計画になる。
  */
 const MAX_SHARDS = 1024;
+/**
+ * shard 1 本の上限バイト数（1GiB — ADR 0081 の読み手契約 2。席による例外は無い）。
+ *
+ * MUST: 読み手側にも張る。上限の門は書き手（exporter の `pack_shards`）と読み返し
+ * （`karume verify`）にしか無く、規則を守っていない shard 列（手で組んだ / 別実装が書いた /
+ * 外部ツールの出力）は焼く側が全て緑で通す。読み手は **RAM ピーク O(最大 shard)**
+ * （ADR 0070 決定 2）を前提に組まれているので、超過 shard を黙って受けるとその前提が崩れ、
+ * Chromium の単一 `ArrayBuffer` 上限や取得層のバイト予算に**ブラウザで初めて**ぶつかる。
+ * parse 時が正位置 — 読み手契約はフォーマット契約であり、「DL 開始後に初めて分かる」を
+ * 許さないのが manifest 検査の目的そのもの（{@link parseManifest}）。
+ *
+ * MUST: 掛けるのは `shards` **だけ**。上限は shard 分割の契約であって、`assets` / `extras`
+ * （単一ファイルで配る付帯資産）はこの規則の外にある — 混同すると 1GiB 超の実在資産
+ * （例: PLE sidecar）が読めなくなる。全 FileRef 共通の天井は {@link MAX_FILE_BYTES}。
+ *
+ * MUST: 綴りは Python 正本 `tools/exporter/src/karume/shards.py` の `SHARD_BYTE_LIMIT` と
+ * 同値に保つ（hub は exporter に依存しないので写しになる）。判定も向こうと同じ**閉区間**
+ * （ちょうど上限は合法・超過だけを落とす）。
+ *
+ * NOTE: 数えるバイトは両側で厳密には同じでない。Python が数えるのは safetensors の**データ節**
+ * だけ（ヘッダ長を決めるには所属が要り、所属を決めるにはヘッダ長が要るという循環を避けるため）
+ * で、manifest の `size` は**ヘッダ込みのファイル全体**。よってこの門は書き手の契約より
+ * ヘッダぶんだけ厳しい。それでよい — 読み手が RAM に載せるのはファイル全体なので、上限の根拠
+ * （ArrayBuffer 天井・バイト予算）に対して正しいのはこちらの数え方で、差は実測で weight shard
+ * 約 27KB（テンソル 1 本あたり 100 バイト前後）・グラフ shard で数 MB 級と、1GiB に対する
+ * 余裕のうちに収まる（実配布の最大 shard は 993,725,828 バイト = 上限の 92.5%）。
+ */
+const MAX_SHARD_BYTES = 2 ** 30;
 /** hub が理解する `format` の major。未知 major は fail loudly（ADR 0041 §1）。 */
 const FORMAT_MAJOR = 4;
 /** 表示欄の長さ上限（ADR 0075 決定 1）。 */
@@ -195,7 +223,8 @@ export const fileRefKey = (ref: FileRef): string =>
 /**
  * weights の 1 dtype ぶんのファイル群（`{shards, extras?}`）。
  *
- * MUST: `shards` は**順序付き**（1 要素以上・{@link MAX_SHARDS} 以下）。宣言順は保存され、
+ * MUST: `shards` は**順序付き**（1 要素以上・{@link MAX_SHARDS} 以下で、1 本ずつが
+ * {@link MAX_SHARD_BYTES} 以下）。宣言順は保存され、
  * 先頭 = グラフ shard（`karume_ir` を持つ）・後続 = 重み shard という**意味**を持つ
  * （ADR 0070 決定 3）。hub はその意味を検査しない — safetensors を開かないのが hub の境界で、
  * 順序の意味は shard を消費する runtime 側の契約。hub が保証するのは「宣言順のまま渡す」ことだけ。
@@ -498,6 +527,10 @@ const parseFileRef = (
  * shard 列を宣言順のまま読む。並べ替えも重複畳み込みもしない — 位置が shard の id なので、
  * 列を触った瞬間に識別子が壊れる（同一 path の 3 点セット一致だけは {@link parseFileRef} の
  * 表が全域で見る）。
+ *
+ * バイト上限（{@link MAX_SHARD_BYTES}）を掛けるのはここ — 1 本ずつ独立に見る検査で、席
+ * （先頭 / 末尾）による例外は無い。{@link parseFileRef} 側へ下ろさないのは、あの関数を
+ * `assets` / `extras` と共有しているため（上限は shard 分割の契約に限る）。
  */
 const parseShards = (
   fail: Fail,
@@ -510,7 +543,16 @@ const parseShards = (
   if (raw.length > MAX_SHARDS) {
     throw fail.format(`${where}: ${raw.length} 件が上限 ${MAX_SHARDS} を超えた`);
   }
-  return raw.map((entry, index) => parseFileRef(fail, entry, `${where}[${index}]`, seen));
+  return raw.map((entry, index) => {
+    const ref = parseFileRef(fail, entry, `${where}[${index}]`, seen);
+    if (ref.size > MAX_SHARD_BYTES) {
+      throw fail.format(
+        `${where}[${index}]: shard '${ref.path}' が ${ref.size} バイトで` +
+          `上限 ${MAX_SHARD_BYTES} を超えた（分割規則 — ADR 0081）`,
+      );
+    }
+    return ref;
+  });
 };
 
 const parseWeightFiles = (

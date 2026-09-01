@@ -490,6 +490,66 @@ Deno.test("parseManifest: weights の shards 欄（ADR 0070 決定 1）", async 
   });
 });
 
+Deno.test("parseManifest: shard のバイト上限 1GiB（ADR 0081 の読み手契約 2）", async (t) => {
+  // 読み手は RAM ピーク O(最大 shard)（ADR 0070 決定 2）を前提に組まれているので、上限違反の
+  // shard を parse が黙って通すとブラウザで初めて破綻する。上限の綴りは exporter の
+  // `SHARD_BYTE_LIMIT`（tools/exporter/src/karume/shards.py）と同値。
+  const LIMIT = 2 ** 30;
+  const big = (size: number, mark: string) => ({
+    path: `net/model.f16-of-2.safetensors`,
+    size,
+    sha256: mark.repeat(32),
+  });
+
+  await t.step("上限超過は落ち、エラーが shard の path・寸法・上限を名指しする", () => {
+    const error = assertThrows(
+      () =>
+        parseManifest(withModel({
+          weights: { net: { f16: { shards: [FILE, big(LIMIT + 1, "b2")] } } },
+        })),
+      ManifestFormatError,
+    );
+    for (const expected of ["net/model.f16-of-2.safetensors", String(LIMIT + 1), String(LIMIT)]) {
+      assert(error.message.includes(expected), `${error.message} に '${expected}' が無い`);
+    }
+  });
+
+  await t.step("席に依らない — 先頭（グラフ shard）でも落ちる", () => {
+    assertThrows(
+      () =>
+        parseManifest(withModel({
+          weights: { net: { f16: { shards: [big(LIMIT + 1, "b2"), FILE] } } },
+        })),
+      ManifestFormatError,
+    );
+  });
+
+  await t.step("ちょうど 1GiB は通る（書き手と同じ閉区間）", () => {
+    // 片側だけだと「常に落ちる」実装でも緑になる。境界の向きは shards.py / verify.py の
+    // `size > SHARD_BYTE_LIMIT` と揃える（ちょうどは合法）。
+    const manifest = parseManifest(withModel({
+      weights: { net: { f16: { shards: [big(LIMIT, "b2")] } } },
+    }));
+    assertEquals(manifest.models["m"].weights["net"]["f16"].shards[0].size, LIMIT);
+  });
+
+  await t.step("非 shard の FileRef は対象外 — assets / extras は 1GiB 超でも通る", () => {
+    // MUST: 上限は**shard 分割の契約**であって全 FileRef の天井ではない（それは 16GiB の
+    // `MAX_FILE_BYTES`）。ここを取り違えると 1GiB 超の実在資産（例: PLE sidecar）が読めなくなる。
+    const huge = (mark: string) => ({
+      path: `net/sidecar.${mark}.safetensors`,
+      size: LIMIT + 1,
+      sha256: mark.repeat(32),
+    });
+    const manifest = parseManifest(withModel({
+      weights: { net: { f16: { shards: [FILE], extras: { ple: huge("e5") } } } },
+      assets: { style_vectors: huge("f6") },
+    }));
+    assertEquals(manifest.models["m"].weights["net"]["f16"].extras["ple"].size, LIMIT + 1);
+    assertEquals(manifest.models["m"].assets["style_vectors"].size, LIMIT + 1);
+  });
+});
+
 Deno.test("parseManifest: pipeline の major は形だけ検査し、裁定は models 側へ渡す", () => {
   // ADR 0038 §1: 未知 pipeline major を弾けるのは対応 major を宣言する models 実装だけ。
   // hub は綴りを検査して major を型で取り出すところまでを持つ。
