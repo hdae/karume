@@ -463,12 +463,18 @@ class TestCalibConditions:
             assert conditions.branches == 1, "CFG=1 は uncond 分岐を計算しない"
 
     def test_the_cfg_models_derive_their_cfg_conditions(self) -> None:
-        """Turbo 以外は多 step + CFG — 1 step が forward 2 本になる。"""
+        """Turbo 以外は多 step + CFG — 1 step が forward 2 本になる。
+
+        step 数は視認裁定の写し（base 系 = 20〈2026-08-22〉/ aesthetic 系 = 30
+        〈2026-09-01〉）— 導出元の pipeline_config から引き直すと恒真化するので、
+        期待値はここに固定で書く。
+        """
+        expected_steps = {name: 30 if "aesthetic" in name else 20 for name in CFG_MODELS}
         assert CFG_MODELS, "CFG を使うモデルが 1 つも無い（テストが空振りしている）"
         for model in CFG_MODELS:
             conditions = calib.calib_conditions(model)
 
-            assert (conditions.steps, conditions.guidance) == (20, 4.0), model
+            assert (conditions.steps, conditions.guidance) == (expected_steps[model], 4.0), model
             assert conditions.branches == 2, model
             assert conditions.negative_prompt, model
 

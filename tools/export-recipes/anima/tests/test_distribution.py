@@ -559,7 +559,7 @@ class TestModelVariants:
         assert not (out_dir / ANIMA_BASE_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]).exists()
 
     def test_the_official_aesthetic_carries_the_same_two_storages(self, tmp_path: Path) -> None:
-        """Aesthetic も f16 / i8 の 2 席（既定は base 流用の 20 step / CFG 4 — 暫定値）。"""
+        """Aesthetic も f16 / i8 の 2 席（既定は視認裁定の 30 step / CFG 4 — 2026-09-01）。"""
         sources = _build_series(tmp_path / "series", model=ANIMA_AESTHETIC_MODEL_NAME)
         out_dir = tmp_path / "models" / ANIMA_AESTHETIC_MODEL_NAME
         manifest = _assemble_anima(sources, out_dir, ANIMA_AESTHETIC_MODEL_NAME)
@@ -567,7 +567,7 @@ class TestModelVariants:
         entry = manifest["models"][ANIMA_AESTHETIC_MODEL_NAME]
         assert sorted(entry["weights"]["transformer"]) == ["f16", "i8"]
         defaults = entry["pipelineConfig"]["defaults"]
-        assert (defaults["steps"], defaults["guidanceScale"]) == (20, 4)
+        assert (defaults["steps"], defaults["guidanceScale"]) == (30, 4)
 
     def test_no_shipped_model_declares_an_i4_seat(self) -> None:
         """MUST: 配布の i4 席は**全モデルから**消えた（2026-09-01 ユーザー裁定 — ADR 0087）。

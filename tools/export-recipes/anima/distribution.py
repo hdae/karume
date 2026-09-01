@@ -339,15 +339,16 @@ ANIMA_BASE_PIPELINE_CONFIG: Mapping[str, Any] = {
     },
 }
 
-#: 公式 Aesthetic 変種の既定。CFG を使う点は base と同じ。値は**暫定で base の視認裁定
-#: （20 step / CFG 4 — 2026-08-22）を流用**している — 上流 README の一般推奨（30-50 step /
-#: CFG 4-5・Aesthetic 固有の推奨は無し）と、Aesthetic は Turbo 同様安定寄りという記述が根拠。
-#: TODO: aesthetic 自身の seed 4 本以上 × プロンプト複数の視認裁定で確定する（N2 波内 —
-#: 裁定が動いたらここだけを更新する）。
+#: 公式 Aesthetic 変種の既定。CFG を使う点は base と同じ。
+#:
+#: step 数は 20 / 30 / 50 を seed 42-45 × 4 題材（人物・風景・遠近・全身+街）で焼いて視認
+#: 裁定した **30**（2026-09-01・v1.0 / v1.1 両方で確認）。50 は良くなっている気はするが
+#: 20 からの劇的改善ではない、の中庸 — 上流 README の一般推奨（30-50 step / CFG 4-5）の
+#: 下端でもある。上げたい利用者は `steps` を渡せばよい。
 ANIMA_AESTHETIC_PIPELINE_CONFIG: Mapping[str, Any] = {
     "scheduler": ANIMA_SCHEDULER,
     "defaults": {
-        "steps": 20,
+        "steps": 30,
         "guidanceScale": 4,
         "resolution": ANIMA_RESOLUTION,
         "negativePrompt": ANIMA_NEGATIVE_PROMPT,
