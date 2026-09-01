@@ -52,11 +52,13 @@ fake-quant**、段 2 は **`--dtype i4` で export 済みの `dit` コンテナ�
 emit の前に全て実測し、1 つでも外れたら**何も書かない**（ADR 0005 の fail loudly）:
 
 - **S の決定が上流と一致**すること（上流 `predict_duration_log_frames` から独立に S を出す）
-- **最終 z が上流の `sample_euler_rf_cfg` と一致**すること（{@link EULER_REFERENCE_ATOL}）。
+- **最終 z が上流の `sample_euler_rf_cfg` と一致**すること（2 段判定）。
   グラフ経路は「条件 KV を毎 forward 再計算・列を詰めて backbone を呼ぶ・uncond をマスク還元」
-  の 3 点で上流と実装が違うので**ビット一致はしない**が、40 step 積み上げても差が値域の
-  1/1000 に収まることを毎回実測する。ここが崩れたら CFG の合成式・t スケジュール・
-  マスクの区間割りのどれかが違っている
+  の 3 点で上流と実装が違うので**ビット一致はしない**。1 段目は固定閾値
+  {@link EULER_REFERENCE_ATOL}。誤差の蓄積・増幅のされ方はモデル × 入力 × 丸めで桁ごと
+  動く（v4.1 f16 で実測 37,107 倍 — 定数コメントの追記 2026-09-01）ので、超過時は増幅率を
+  実測し {@link euler_reference_within_sensitivity} で正規化判定する。それでも落ちたら
+  CFG の合成式・t スケジュール・マスクの区間割りのどれかが違っている
 - CFG が**実際に効いている**こと（cond のみで回した z との差 — 恒真化の遮断）
 - 初期ノイズが上流と**ビット一致**すること（同じ seed・同じ生成順）
 """
@@ -126,8 +128,39 @@ MIN_SECONDS, MAX_SECONDS = 0.5, 30.0
 #: 差は f32 系列と同じ「実装差だけ」であり、量子化誤差は両辺で相殺する。
 #: 桁が変わりうるのは丸めが条件数の悪い領域を踏んだ場合だけで、それは**実測で決着させる**
 #: （閾値を系列ごとに割るのは、実測が実際に外れてからにする — 先回りして緩めると、外れた
-#: ことが分からなくなる）。f16 の実測値はまだ無い。
+#: ことが分からなくなる）。
+#:
+#: 追記（2026-09-01）: v4.1-small の f16 で実際に外れた（full = 1.33e-2）。実測で決着させた
+#: 結果は「実装差の種は従来水準のまま、40 step の反復がそれを 37,107 倍に蓄積・増幅する
+#: 入力だった」（v4-small f16 は 353 倍 —
+#: docs/research/2026-09-01-irodori-v41-euler-sensitivity.md）。
+#: 蓄積後の値はモデル × 入力 × 丸めで桁ごと動くため、この定数は**1 段目（fast path）**に
+#: 格下げし、超過時は増幅率を実測して正規化する 2 段目（下の
+#: {@link euler_reference_within_sensitivity}）で合否を決める。
 EULER_REFERENCE_ATOL = 1e-3
+
+#: 2 段目: 増幅率で正規化した実装差の上限。実測（2026-09-01・v4 / v4.1 × f32 / f16 / i8 の
+#: 10 セル）の worst / amp は 1.6e-8〜2.2e-6 に収まる — ここはその上限の約 2 倍。
+EULER_NOISE_PER_AMP = 5e-6
+
+#: 2 段目: 増幅率と無関係に掛ける絶対上限。式の取り違え（CFG の符号・スケール・t スケジュール・
+#: マスク区間）は O(1) で出る（`cfgEffectMaxAbs` 実測 3〜5）ので、その遥か下で止める。
+EULER_REFERENCE_ABS_CEILING = 5e-2
+
+#: 増幅率実測の摂動幅。実装差の種（f32 の縮約順序差 ~1e-7）より十分大きく、
+#: 線形応答が読める大きさ。
+SENSITIVITY_EPS = 1e-6
+
+
+def euler_reference_within_sensitivity(worst: float, amp: float) -> bool:
+    """2 段目の合否 — 増幅率 `amp` で正規化した実装差が種の水準か、かつ絶対上限内か。
+
+    `worst` は上流との最終 z の最大絶対差、`amp` は初期 noise への微小摂動が最終 z へ届く
+    倍率（{@link run_case} の `sensitivity_probe`）。1 段目（{@link EULER_REFERENCE_ATOL}）を
+    超えた場合にだけ呼ばれる。
+    """
+    return worst <= amp * EULER_NOISE_PER_AMP and worst <= EULER_REFERENCE_ABS_CEILING
+
 
 #: CFG が実際に効いていることを見る下限（cond のみで回した z との最大絶対差）。
 #: MUST: 恒真にしない — スケールを 0 にしたり uncond のマスクを間違えて cond と同じにすると、
@@ -349,6 +382,7 @@ def run_case(
     caps: Mapping[str, int],
     *,
     frames_override: int | None = None,
+    sensitivity_probe: bool = False,
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     """1 ケースぶんのホスト経路を回して `(保存テンソル, meta)` を返す。
 
@@ -358,6 +392,10 @@ def run_case(
     できないため（`measure_quant_sbv2.py` が dump 側 `w_ceil` で時間グリッドを固定するのと
     同じ理由）。**予測そのもの**は `meta["predictedS"]` に残す — S ドリフトはこの台本が測る
     量ではなく、測る側が読む診断値。
+
+    `sensitivity_probe=True` は Euler ループをもう 1 周（noise + {@link SENSITIVITY_EPS}）
+    走らせ、増幅率を `meta["sensitivityAmp"]` に載せる。emit の 2 段目
+    （{@link euler_reference_within_sensitivity}）専用 — 常時は測らない（コスト倍化）。
     """
     bos_id = int(text_config["bos_token_id"])
     embed_dim = int(config.timestep_embed_dim)
@@ -472,6 +510,20 @@ def run_case(
             f"{case.name}: CFG 有無の差が {cfg_effect} — CFG が効いていない疑い"
             "（スケール 0 / uncond マスクが cond と同じ）"
         )
+    sensitivity_amp = None
+    if sensitivity_probe:
+        perturbed, _fw = _euler(
+            graphs,
+            source,
+            noise + SENSITIVITY_EPS,
+            states,
+            used,
+            caps,
+            enabled,
+            embed_dim,
+            schedule,
+        )
+        sensitivity_amp = float((perturbed - latent).abs().max()) / SENSITIVITY_EPS
 
     # MUST: id 列は保存時に IR の実表現（i64 → i32）へ落とす — TS 側が同じ境界規約
     # （ADR 0009）で読むため。ここでは int64 のまま持ち、上流突合にもこの列を渡す。
@@ -495,6 +547,11 @@ def run_case(
         "cfg": {name: CFG_SCALES[name] for name in enabled},
         "forwards": forwards,
         "cfgEffectMaxAbs": float(f"{cfg_effect:.4e}"),
+        **(
+            {"sensitivityAmp": float(f"{sensitivity_amp:.4e}")}
+            if sensitivity_amp is not None
+            else {}
+        ),
         "reference": (
             None
             if case.reference is None
@@ -1151,10 +1208,36 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             raise SystemExit(f"{case.name}: 初期ノイズが上流と一致しない（seed の使い方が違う）")
         worst = float((reference - tensors["z"]).abs().max())
         if worst > EULER_REFERENCE_ATOL:
-            raise SystemExit(
-                f"{case.name}: 最終 z が上流と {worst} 違う（許容 {EULER_REFERENCE_ATOL}）"
-                " — CFG 合成式 / t スケジュール / マスク区間のどれかが崩れている"
+            # ---- 2 段目: 増幅率を実測して正規化判定（定数コメントの追記 2026-09-01） ----
+            # run_case は決定的なので再実行 + 摂動走行で増幅率だけを足す。z の同一性は
+            # 判定の前提（違えば「同じ軌道の感度」を測れていない）なので明示的に確かめる。
+            probed_tensors, probed_meta = run_case(
+                case,
+                graphs,
+                source,
+                duration_predictor,
+                tokenizer,
+                text_config,
+                model_config,
+                config,
+                caps,
+                sensitivity_probe=True,
             )
+            if not torch.equal(probed_tensors["z"], tensors["z"]):
+                raise SystemExit(
+                    f"{case.name}: 再実行の z が一致しない — ホスト経路が非決定的で、"
+                    "増幅率の実測が成立しない"
+                )
+            amp = float(probed_meta["sensitivityAmp"])
+            meta["sensitivityAmp"] = probed_meta["sensitivityAmp"]
+            if not euler_reference_within_sensitivity(worst, amp):
+                raise SystemExit(
+                    f"{case.name}: 最終 z が上流と {worst} 違う（1 段目の許容"
+                    f" {EULER_REFERENCE_ATOL} を超過）。増幅率 {amp:.4g} で正規化しても"
+                    f" {worst / amp:.4g} > {EULER_NOISE_PER_AMP}、または絶対上限"
+                    f" {EULER_REFERENCE_ABS_CEILING} 超え — 誤差の蓄積では説明できない差で、"
+                    " CFG 合成式 / t スケジュール / マスク区間のどれかが崩れている疑い"
+                )
         meta["upstreamMaxAbs"] = float(f"{worst:.4e}")
         cases[case.name] = meta
         payloads[case.name] = tensors

@@ -629,3 +629,26 @@ class TestCli:
         for case in ip.PIPELINE_CASES:
             if case.reference is not None:
                 assert case.reference.frames % 4 == 0
+
+
+class TestEulerReferenceSensitivity:
+    """2 段目の合否関数（増幅率で正規化した実装差の判定 — 2026-09-01 追記の型）。"""
+
+    def test_the_measured_v41_f16_pair_passes(self):
+        """導入の動機になった実測ペア（worst 1.33e-2 / amp 37,107）は 2 段目を通る。"""
+        assert ip.euler_reference_within_sensitivity(1.33e-2, 37_107.0)
+
+    def test_a_low_amplification_trajectory_keeps_the_tight_bound(self):
+        """増幅がおとなしい軌道（v4-small 級 amp≈353）では 1e-2 の差は退行として落ちる。"""
+        assert not ip.euler_reference_within_sensitivity(1.0e-2, 353.0)
+
+    def test_the_absolute_ceiling_stops_gross_breakage(self):
+        """式の取り違え級（O(1)）は増幅率がいくら大きくても落ちる。"""
+        assert not ip.euler_reference_within_sensitivity(0.5, 1.0e9)
+
+    def test_the_ceiling_binds_even_when_normalized_noise_is_small(self):
+        """正規化では通る大きさでも絶対上限が先に効く。"""
+        amp = 1.0e5  # amp × EULER_NOISE_PER_AMP = 0.5 > 上限 5e-2
+        worst = 1.0e-1
+        assert worst <= amp * ip.EULER_NOISE_PER_AMP
+        assert not ip.euler_reference_within_sensitivity(worst, amp)
