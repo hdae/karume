@@ -161,10 +161,12 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     読み継ぐ（出所が dist まで連鎖）。ライセンス確認 = **エージェント事前確認形**（判定も
     フラグ強制もしない・食い違いは `license-review.md`）。DL トークン = env
     `CIVITAI_API_TOKEN`（`?token=` クエリ渡し）・UA は urllib 既定が 403 のため独自名
-    （実測）。実 DL 疎通のみトークン未設定で未実施（メタ・冪等スキップ・provenance 連鎖は
-    実走緑）。
-  - **リリース**: N1〜N3 完了 =「準備が整う」→ HF 一括（anima 新構成 + extra +
-    irodori v4.1 + gemma4 + jvnv + BiRefNet ほか + pin 更新 — 上の shard v2 一括と同じ回）。
+    （実測）。**全経路実走緑**（メタ・冪等スキップ・provenance 連鎖・実 DL = turbo LoRA
+    142MiB を取得し既存手置きとビット同一 → 手置き資産の出所を provenance で確証）。
+  - **リリース**: HF 一括（anima 新構成 + extra + irodori v4.1 + gemma4 + jvnv +
+    BiRefNet ほか + pin 更新 — 上の shard v2 一括と同じ回）。**時期 = メモリ管理波を含む
+    リリースの直前**（2026-09-01 裁定 — N1〜N3 完了は「準備が整った」であって即アップでは
+    ない）。
   - **export-recipes 切り出し（裁定済み・案 A）**: 切り出すのは**レシピ部分のみ**・
     exporter core（tools/exporter）は本リポ残留。sibling checkout + path 依存 +
     資産根 / fixture 書き先の注入形。**時期 = モデル波の後**（parked 起票の復活裁定）。

@@ -23,8 +23,9 @@
   リリース時の越境焼き → **N3 Civitai AIR 取り込み = 完了（ADR 0088）**: `anima.civitai`
   コマンド（AIR / URL → sha256 突合 DL → `inputs/anima/civitai-<versionId>/` +
   `civitai.json`・命名は機械正規化 = 0077 改訂・ライセンスはエージェント事前確認形 =
-  判定せず記録 + `license-review.md`）。**モデル更新波クローズ → HF 一括リリースが次**。
-  その後 = メモリ管理波 → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
+  判定せず記録 + `license-review.md`・実 DL 疎通済み）。**モデル更新波クローズ →
+  次 = メモリ管理波**（HF 一括アップはメモリ管理波を含むリリースの直前 — 2026-09-01 裁定）
+  → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
 - **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
   Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
   台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・
