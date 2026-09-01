@@ -1104,14 +1104,24 @@ class TestIrodoriCli:
     def test_the_model_flag_moves_the_series_and_the_default_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        sources = _build_irodori_sources(tmp_path, model="v9-large")
+        # NOTE: カードの帰属がモデル名から `IRODORI_UPSTREAMS` で引かれる（2026-09-01）ので、
+        # 旧 `v9-large` のような偽名は組み立てが fail loudly で落ちる。既定と異なる実在キーで
+        # 「--model が系列と出力先を動かす」という主眼はそのまま観測できる。
+        sources = _build_irodori_sources(tmp_path, model="v4.1-small")
         self._reroot(tmp_path, monkeypatch)
 
         main(
-            ["--pipeline", "irodori", "--model", "v9-large", "--series", str(sources.series.parent)]
+            [
+                "--pipeline",
+                "irodori",
+                "--model",
+                "v4.1-small",
+                "--series",
+                str(sources.series.parent),
+            ]
         )
 
-        out_dir = tmp_path / "models" / "karume-irodori-v9-large"
+        out_dir = tmp_path / "models" / "karume-irodori-v4.1-small"
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-        assert list(manifest["models"]) == ["v9-large"]
+        assert list(manifest["models"]) == ["v4.1-small"]
         assert verify_dist(out_dir)

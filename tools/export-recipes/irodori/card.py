@@ -16,6 +16,7 @@ MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残ら
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from karume.modelcard import (
@@ -37,42 +38,79 @@ IRODORI_SUPPORTED_PIPELINE = "irodori/1"
 
 IRODORI_PIPELINE_TAG = "text-to-speech"
 
-IRODORI_TITLE = "Irodori-TTS v4 Small — Karume"
 
-#: 重みの出所（`inputs/irodori/<モデル名>/` に手で置く HF リポ）と、その中の text backbone の
-#: 素になった日本語 ModernBERT（チェックポイントの `config_json` が `text_tokenizer_repo` /
-#: `text_encoder_revision` で名指ししている 1 本）。**どちらも再配布している**ので両方並べる。
-#: ライセンスは実地確認（2026-08-12・HF の models API の `tags`）: どちらも `license: mit`。
-IRODORI_BASE_MODEL = "Aratako/Irodori-TTS-v4-Small"
+@dataclass(frozen=True)
+class IrodoriUpstream:
+    """配布モデル 1 つぶんの上流の事実（manifest に存在しないのでここが持つ — 冒頭の MUST）。"""
+
+    #: 重みの出所（`inputs/irodori/<モデル名>/` に手で置く HF リポ）。
+    repo: str
+    #: タイトルと概要の太字に使う表示名（上流の名乗りに合わせる）。
+    display: str
+
+
+#: 配布モデル名 → 上流の事実。v4.1-small は duration predictor のみ再学習した後継
+#: （他 683 テンソルは v4 とビット同一・tokenizer もバイト同一 — 2026-09-01 実測）。
+#: 表に無いモデル名は fail loudly — 黙って別の版の帰属を書くと出所表記が現物と食い違う。
+#: ライセンスは実地確認（2026-08-12 / v4.1 は 2026-09-01・HF の models API の `tags`）:
+#: いずれも `license: mit`。
+IRODORI_UPSTREAMS: Mapping[str, IrodoriUpstream] = {
+    "v4-small": IrodoriUpstream(
+        repo="Aratako/Irodori-TTS-v4-Small", display="Irodori-TTS v4 Small"
+    ),
+    "v4.1-small": IrodoriUpstream(
+        repo="Aratako/Irodori-TTS-v4.1-Small", display="Irodori-TTS v4.1 Small"
+    ),
+}
+
+#: text backbone の素になった日本語 ModernBERT（チェックポイントの `config_json` が
+#: `text_tokenizer_repo` / `text_encoder_revision` で名指ししている 1 本）。上流の版に依らず
+#: 同一（v4 → v4.1 で text encoder は凍結 — 上の実測と同根）。再配布しているので帰属に並べる。
+#: ライセンスは実地確認（2026-08-12）: `license: mit`。
 IRODORI_TEXT_BACKBONE_MODEL = "sbintuitions/modernbert-ja-310m"
+
+
+def irodori_upstream(model_name: str) -> IrodoriUpstream:
+    """配布モデル名から上流の事実を引く（未知の名前は fail loudly）。"""
+    if model_name not in IRODORI_UPSTREAMS:
+        known = " / ".join(sorted(IRODORI_UPSTREAMS))
+        raise ValueError(
+            f"モデル名 '{model_name}' の上流が {__name__}.IRODORI_UPSTREAMS に無い"
+            f"（既知: {known}）— 新しい版はまず出所と表示名をこの表に足す"
+        )
+    return IRODORI_UPSTREAMS[model_name]
+
 
 #: 波形へ落とすコーデック（上流では別リポ・別重み — この配布形には**同梱している**）。
 #: ライセンスは MIT（`docs/research/2026-08-11-irodori-source-recon.md` の実地確認）。
 #: 再配布しているので `base_model` にも帰属節にも並べる。
 IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 
-IRODORI_METADATA = CardMetadata(
-    pipeline_tag=IRODORI_PIPELINE_TAG,
-    base_model=(IRODORI_BASE_MODEL, IRODORI_TEXT_BACKBONE_MODEL, IRODORI_CODEC_MODEL),
-    # 既定 quant（`i8-a8`）の DL 実体が int8 系列なので `quantized` を宣言する（sbv2 / anima と
-    # 同型。
-    # 旧「f32 のまま・quantized ではない」は i8 系列同梱前の陳腐化した前提だった）。
-    base_model_relation="quantized",
-    license="mit",
-    tags=("text-to-speech", "webgpu", "japanese"),
-)
+
+def _irodori_metadata(upstream: IrodoriUpstream) -> CardMetadata:
+    return CardMetadata(
+        pipeline_tag=IRODORI_PIPELINE_TAG,
+        base_model=(upstream.repo, IRODORI_TEXT_BACKBONE_MODEL, IRODORI_CODEC_MODEL),
+        # 既定 quant（`i8-a8`）の DL 実体が int8 系列なので `quantized` を宣言する（sbv2 /
+        # anima と同型。
+        # 旧「f32 のまま・quantized ではない」は i8 系列同梱前の陳腐化した前提だった）。
+        base_model_relation="quantized",
+        license="mit",
+        tags=("text-to-speech", "webgpu", "japanese"),
+    )
+
 
 #: 使い方スニペットのデモ入力（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
 IRODORI_DEMO_TEXT = "こんにちは、これはテストです。"
 IRODORI_DEMO_CAPTION = "落ち着いた女性の声で、ゆっくりと丁寧に話している。"
 
 
-def _irodori_overview(manifest: Mapping[str, Any]) -> list[str]:
+def _irodori_overview(manifest: Mapping[str, Any], upstream: IrodoriUpstream) -> list[str]:
     sample_rate = default_model(manifest)["pipelineConfig"]["sampleRate"]
     return [
         "## What is this",
         "",
-        "A Japanese text-to-speech distribution: the **Irodori-TTS v4 (Small)** rectified-flow DiT",
+        f"A Japanese text-to-speech distribution: the **{upstream.display}** rectified-flow DiT",
         "converted into the WebGPU inference runtime **Karume**'s container format (a single",
         "safetensors file = weights + a graph JSON embedded in `__metadata__`). Runs as-is in the",
         "browser and in Deno.",
@@ -100,14 +138,14 @@ def _irodori_overview(manifest: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _irodori_base_weights() -> list[str]:
+def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
     """帰属節。変換 + 量子化（int8 系列の生成）を主張する — 再学習・fine-tune はしていない。"""
     return [
         "## Base weights and attribution",
         "",
         "Converted into the container format — the original checkpoint is not distributed here.",
         "",
-        f"- **Weights**: [{IRODORI_BASE_MODEL}](https://huggingface.co/{IRODORI_BASE_MODEL}),"
+        f"- **Weights**: [{upstream.repo}](https://huggingface.co/{upstream.repo}),"
         " licensed **MIT**",
         "  (as of retrieval). The training / inference implementation it comes with",
         "  ([Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS)) is MIT as well;",
@@ -242,13 +280,14 @@ def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
 def render_irodori_model_card(manifest: Mapping[str, Any], repo: str) -> str:
     """Irodori 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)
+    upstream = irodori_upstream(manifest["defaultModel"])
     return render(
         (
-            frontmatter(IRODORI_METADATA),
-            ["", f"# {IRODORI_TITLE}", ""],
-            _irodori_overview(manifest),
+            frontmatter(_irodori_metadata(upstream)),
+            ["", f"# {upstream.display} — Karume", ""],
+            _irodori_overview(manifest, upstream),
             [""],
-            _irodori_base_weights(),
+            _irodori_base_weights(upstream),
             [""],
             models(manifest),
             [""],

@@ -17,7 +17,7 @@ Six text-side graphs plus the DACVAE codec pair, with host-side goldens. The scr
 **required regeneration order** (later ones read earlier outputs):
 
 ```sh
-# 0. one-time inputs: inputs/irodori/{v4-small,dacvae-32dim,Irodori-TTS,dacvae-src}/
+# 0. one-time inputs: inputs/irodori/{v4-small,v4.1-small,dacvae-32dim,Irodori-TTS,dacvae-src}/
 uv run python -m irodori.dacvae.convert                                  # 1. codec pth → safetensors
 uv run --with 'transformers==5.14.1' python -m irodori.export            # 2. six graphs + io goldens
 uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref     # 3. tokenizer asset + goldens + parity fixture (deno fmt it)
@@ -63,3 +63,14 @@ Order caveats measured in practice: step 2 reads step 5's real latent for the sp
 from scratch runs 2 once more after 5 (2 → 3 → 4 → 5 → 2 → 6 → 7). Incremental regeneration of a
 single script is safe as long as its inputs above exist. Design records: ADR 0044 / 0046 / 0047
 (graphs), 0048 (host port), 0049 (codec integration).
+
+## Another model of the same architecture (v4.1-small)
+
+One distribution repository per model. The text-side scripts (steps 2 / 3 / 4 and the dtype
+variants) all take `--model-dir inputs/irodori/<model>/` and derive the series names from that
+directory name, so exporting e.g. `v4.1-small` is the same chain with `--model-dir
+inputs/irodori/v4.1-small` — plus `--model v4.1-small` on step 7 (the output directory
+`models/karume-irodori-v4.1-small/` follows). The codec series (`dacvae-32dim*`) is shared across
+models and its inputs are model-independent, so steps 1 / 5 / 6 are **not** re-run when they
+already exist. `card.py`'s `IRODORI_UPSTREAMS` must know the model name (upstream repository +
+display name), or the card render — and with it step 7 — fails loudly.

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from irodori.card import IRODORI_SUPPORTED_PIPELINE, render_irodori_model_card
 
 #: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
@@ -25,14 +27,19 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": digit * 64}
 
 
-def _irodori_manifest() -> dict[str, Any]:
-    """Irodori の最小 manifest（値は実物と重ならない偽値）。"""
+#: 偽 manifest のモデル名。帰属（上流リポ・表示名）はモデル名から `IRODORI_UPSTREAMS` で
+#: 引くようになった（2026-09-01）ので、ここだけは実在キーを使う — それ以外の値は偽のまま。
+MODEL = "v4.1-small"
+
+
+def _irodori_manifest(model: str = MODEL) -> dict[str, Any]:
+    """Irodori の最小 manifest（モデル名以外の値は実物と重ならない偽値）。"""
     return {
         "format": "karume/3",
         "generator": "karume/9.9.9",
-        "defaultModel": "ZA",
+        "defaultModel": model,
         "models": {
-            "ZA": {
+            model: {
                 "pipeline": IRODORI_SUPPORTED_PIPELINE,
                 "weights": {
                     "backbone": {"f16": {"shards": [_ref("ZA/backbone/model.f16.st", 11, "a")]}},
@@ -87,3 +94,24 @@ class TestIrodoriEntryPoint:
         card = render_irodori_model_card(_irodori_manifest(), REPO)
         assert "fromAssets" not in card
         assert "IrodoriPipeline.fromPretrained" in card
+
+
+class TestIrodoriUpstreamAttribution:
+    """帰属はモデル名から引く — 版を取り違えた出所表記を門で止める。"""
+
+    def test_v4_renders_its_own_upstream(self) -> None:
+        card = render_irodori_model_card(_irodori_manifest("v4-small"), REPO)
+        assert "Aratako/Irodori-TTS-v4-Small" in card
+        assert "# Irodori-TTS v4 Small — Karume" in card
+        assert "Irodori-TTS-v4.1-Small" not in card
+
+    def test_v4_1_renders_its_own_upstream(self) -> None:
+        card = render_irodori_model_card(_irodori_manifest("v4.1-small"), REPO)
+        assert "Aratako/Irodori-TTS-v4.1-Small" in card
+        assert "# Irodori-TTS v4.1 Small — Karume" in card
+        assert "Irodori-TTS-v4-Small" not in card
+
+    def test_unknown_model_name_fails_loudly(self) -> None:
+        """表に無い版で黙って別の帰属を書かない（fail loudly）。"""
+        with pytest.raises(ValueError, match="IRODORI_UPSTREAMS"):
+            render_irodori_model_card(_irodori_manifest("v9-small"), REPO)

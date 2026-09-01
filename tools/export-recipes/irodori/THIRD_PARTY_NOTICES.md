@@ -1,4 +1,4 @@
-# Third-party notices — Irodori-TTS v4
+# Third-party notices — Irodori-TTS v4 / v4.1
 
 Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
 directory is known to derive from. **It is not a license determination.**
@@ -14,7 +14,9 @@ questions it has to answer.
 
 ## Upstream sources
 
-- **Weights** — [Aratako/Irodori-TTS-v4-Small](https://huggingface.co/Aratako/Irodori-TTS-v4-Small).
+- **Weights** — [Aratako/Irodori-TTS-v4-Small](https://huggingface.co/Aratako/Irodori-TTS-v4-Small)
+  and [Aratako/Irodori-TTS-v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small)
+  (one distribution repository per model; `card.py`'s `IRODORI_UPSTREAMS` picks by model name).
 - **Model implementation** — [Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS),
   imported from a local clone through `sys.path` (`--source-dir`); no copy lives here. `patch.py`
   replaces class attributes and self-reports that the untouched parts of the replaced forwards are
@@ -42,6 +44,17 @@ published.
 | Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                             |
 | Code license             | n/a (weights only)                                                                                        |
 | Weights license          | `card.py` records `mit` (checked on the HF models API, 2026-08-12). Unverified against the revision used. |
+| Attribution requirements | Unverified                                                                                                |
+
+### Aratako/Irodori-TTS-v4.1-Small (weights)
+
+| Item                     | Value                                                                                                     |
+| ------------------------ | --------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small>                                                   |
+| Revision used            | Unverified                                                                                                |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                             |
+| Code license             | n/a (weights only)                                                                                        |
+| Weights license          | `card.py` records `mit` (checked on the HF models API, 2026-09-01). Unverified against the revision used. |
 | Attribution requirements | Unverified                                                                                                |
 
 ### Aratako/Irodori-TTS (model implementation)
