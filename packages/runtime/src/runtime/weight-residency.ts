@@ -7,11 +7,17 @@
  * ときに **見積りと実ロードが別のモデルを説明する**（例外も警告も出ない）。
  * MUST: 実テンソル（safetensors）を見ない。バイト数は宣言 shape と格納メタデータから導き、
  * 実バイトとの一致は container の突合門が保証する（{@link declaredPayloadBytes} の doc）。
+ *
+ * 席から「実際に確保される GPU バッファ」への写像（{@link planWeightBuffers}）と、その寸法を
+ * device の絶対上限と突き合わせる門（{@link assertWeightsWithinLimits}）も同じ理由でここに置く
+ * — 確保する側（executor.ts）と数える側（estimate.ts）が別々に席を展開すると、片方だけ直された
+ * ときに検査・見積り・実ロードが別の寸法を主張する。
  */
 
 import { declaredPayloadBytes, declaredScaleBytes } from "../format/container.ts";
 import { groupScaleShape } from "../format/i4.ts";
 import type { IrGraph } from "../format/ir.ts";
+import { toSizeClass } from "../gpu/arena.ts";
 import { numel } from "../ops.ts";
 import {
   eligibleCompressedInitializers,
@@ -146,4 +152,124 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     });
   }
   return plan;
+};
+
+/**
+ * 席 1 つが GPU に確保させるバッファ 1 本（{@link planWeightBuffers} の要素）。
+ *
+ * MUST: 「席のどのバイト数が GPU バッファになるか」の分岐はここ 1 本 — 上限検査
+ * （{@link assertWeightsWithinLimits}）と見積り（estimate.ts の `weightEstimate`）が席の分岐を
+ * 別々に書くと、適格判定が動いたときに片方だけが別の寸法を主張する。
+ */
+export type WeightBuffer = {
+  readonly name: string;
+  readonly seat: WeightResidency["seat"];
+  /** `payload` = 重み本体（`expanded` 席は f32 展開後）/ `scale` = companion scale。 */
+  readonly kind: "payload" | "scale";
+  /** `createBuffer` に渡るバイト数（`toSizeClass` = 4 バイト整列 + 4 バイト床）。 */
+  readonly byteLength: number;
+  /** 整列前の宣言由来バイト数（見積りの「厳密」欄が数えるのはこちら）。 */
+  readonly declaredBytes: number;
+};
+
+/**
+ * 常駐計画が GPU に確保させるバッファを宣言順に並べる（GPU も device も要らない純関数）。
+ *
+ * 適格席（f16 / i8 / i4）と生バイト席は payload をそのまま上げ、適格外席（`expanded`）は CPU で
+ * f32 展開した**後**のバイト列を上げる（配布形の圧縮バイト数は GPU に載らない）。i8 / i4 は
+ * companion scale が payload とは別に**もう 1 本**確保される（executor の
+ * `timedAlloc(Math.max(4, scale.bytes.byteLength))`）。
+ */
+export const planWeightBuffers = (
+  residency: ReadonlyMap<string, WeightResidency>,
+): readonly WeightBuffer[] => {
+  const buffers: WeightBuffer[] = [];
+  const add = (
+    name: string,
+    seat: WeightResidency["seat"],
+    kind: WeightBuffer["kind"],
+    declaredBytes: number,
+  ): void => {
+    buffers.push({ name, seat, kind, byteLength: toSizeClass(declaredBytes), declaredBytes });
+  };
+  for (const [name, seat] of residency) {
+    add(
+      name,
+      seat.seat,
+      "payload",
+      seat.seat === "expanded" ? seat.expandedBytes : seat.payloadBytes,
+    );
+    if (seat.seat === "i8" || seat.seat === "i4") add(name, seat.seat, "scale", seat.scaleBytes);
+  }
+  return buffers;
+};
+
+/**
+ * 上限検査が見る device limits（`GpuContext.limits` の部分集合）。
+ *
+ * MUST: 2 本とも見る。`maxStorageBufferBindingSize ≤ maxBufferSize` は device を計画する側
+ * （gpu/device.ts の `planRequiredLimits`）が保っている関係であって、外から渡された
+ * `GpuContext` にまで効く保証ではない — 片方だけ見る形にすると関係が崩れた device で沈黙する。
+ */
+export type WeightLimits = {
+  readonly maxStorageBufferBindingSize: number;
+  readonly maxBufferSize: number;
+};
+
+/** エラー文言の主語（席が `expanded` のときだけ「確保されるのは展開後」を明示する）。 */
+const bufferLabel = (buffer: WeightBuffer): string =>
+  buffer.kind === "scale"
+    ? "scale"
+    : buffer.seat === "expanded"
+    ? "payload（f32 展開後）"
+    : "payload";
+
+/**
+ * 重み 1 本ずつの確保寸法を device の絶対上限と突き合わせ、超過があれば**確保の前に**落とす。
+ *
+ * 動機は「確保失敗の検出は shard 単位 errorScope に全面依存」（ADR 0070 決定 4）の弱点 —
+ * docs/known-issues.md「Metal で out-of-memory errorScope が沈黙する」が名指しした修正候補
+ * （重み経路への明示サイズ門）そのもの。errorScope の網では 3 点足りない:
+ * ①**実装依存** — 上限超過そのものは validation で捕まる実装が普通だが、同じ経路の
+ * out-of-memory scope が黙る device は実在する（M2 実測）。網の成立を実装の報告品質に賭ける形が
+ * 残るかぎり「確保失敗 = 無効バッファへの no-op writeBuffer = ゴミを読む」が通り得る。
+ * ②**遅い** — 検出は shard を上げ始めた後で、数 GiB 転送してからになる。
+ * ③**粒度が粗い** — 名乗れるのは失敗した shard までで、どの重みが何バイト超えたのかは出ない。
+ * 寸法は確保より前に宣言だけで確定している（常駐計画は prepare 相の純関数）ので、決定論的に
+ * 落とせるぶんはここで落とす。
+ *
+ * MUST: 見るのは**絶対上限との比較だけ**。空き VRAM とは比べない（ADR 0070 決定 5 — WebGPU は
+ * 総 / 空き VRAM を露出しないので、比較の形にした瞬間に当て推量になる）。合計サイズも見ない
+ * （ここが見ているのは 1 バッファ単位の device 制約で、総量の可否は最終門 = errorScope の担当）。
+ * MUST: 超過は**全件列挙して 1 回で落とす**。1 本ずつ落とすと、export をやり直すたびに次の 1 本が
+ * 現れる形になり、何本直せば載るのかが最後まで分からない。
+ */
+export const assertWeightsWithinLimits = (
+  residency: ReadonlyMap<string, WeightResidency>,
+  limits: WeightLimits,
+): void => {
+  // 文言が「どの上限か」を必ず名乗るための組（state 側のゲートと同じ形 —
+  // generation-context.ts の `limits`）。
+  const entries = [
+    ["maxStorageBufferBindingSize", limits.maxStorageBufferBindingSize],
+    ["maxBufferSize", limits.maxBufferSize],
+  ] as const;
+  const violations: string[] = [];
+  for (const buffer of planWeightBuffers(residency)) {
+    const exceeded = entries
+      .filter(([, limit]) => buffer.byteLength > limit)
+      .map(([key, limit]) => `${key} ${limit} バイトを ${buffer.byteLength - limit} バイト超える`);
+    if (exceeded.length === 0) continue;
+    violations.push(
+      `  - initializer '${buffer.name}' の ${bufferLabel(buffer)}（席 ${buffer.seat}・確保 ` +
+        `${buffer.byteLength} バイト）: ${exceeded.join("・")}`,
+    );
+  }
+  if (violations.length === 0) return;
+  throw new ExecutionError(
+    `重みバッファ ${violations.length} 本が device の上限を超える（確保の前に検出）:\n` +
+      `${violations.join("\n")}\n` +
+      "1 バッファ単位の上限なので shard を分けても解消しない — より小さい格納 dtype で export し" +
+      "直すか、重みを分割してグラフを組み直すこと",
+  );
 };

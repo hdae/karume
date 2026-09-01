@@ -399,19 +399,28 @@ export class GenerationContext {
     }
     assertChunkLength(spec.chunkLength);
     const bindings = resolveBindings(graph, spec.bindings);
-    const limit = gpu.limits.maxStorageBufferBindingSize;
+    // MUST: 上限は 2 本とも見る。`maxStorageBufferBindingSize ≤ maxBufferSize` は device を計画
+    // する側（gpu/device.ts の `planRequiredLimits`）が保っている関係であって、外から渡された
+    // GpuContext にまで効く保証ではない — 束縛上限だけを見る形にすると、関係が崩れた device で
+    // 「確保そのものが通らない大きさ」を素通しして無効バッファを掴む。
+    const limits = [
+      ["maxStorageBufferBindingSize", gpu.limits.maxStorageBufferBindingSize],
+      ["maxBufferSize", gpu.limits.maxBufferSize],
+    ] as const;
     const planned = names.map((name) => {
       const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
       const byteLength = numel(shape) * STATE_ELEMENT_BYTES;
-      // MUST: スロット単体の束縛バイト数が上限を超える容量指定は fail loudly（追記 5）。
+      // MUST: スロット単体のバイト数が上限を超える容量指定は fail loudly（追記 5）。
       // 分割して束ねる形は持たない（KV は連続容量 — 決定 8 の明示選択）ので、超過は容量設計の
       // 誤りとして呼び出し点で落とす以外に手が無い。
-      if (byteLength > limit) {
-        throw new ExecutionError(
-          `state '${name}': 容量 [${shape.join(",")}] の ${byteLength} バイトが ` +
-            `maxStorageBufferBindingSize ${limit} バイトを超える（ADR 0066 追記 5）。` +
-            "容量を下げるか、スロットを分けてグラフを組み直すこと",
-        );
+      for (const [limitName, limit] of limits) {
+        if (byteLength > limit) {
+          throw new ExecutionError(
+            `state '${name}': 容量 [${shape.join(",")}] の ${byteLength} バイトが ` +
+              `${limitName} ${limit} バイトを超える（ADR 0066 追記 5）。` +
+              "容量を下げるか、スロットを分けてグラフを組み直すこと",
+          );
+        }
       }
       return { name, shape, byteLength };
     });

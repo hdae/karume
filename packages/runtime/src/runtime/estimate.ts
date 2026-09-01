@@ -57,7 +57,11 @@ import {
   validateGraphContracts,
 } from "./plan.ts";
 import type { GenerationContextSpec } from "./session-types.ts";
-import { planWeightResidency, type WeightResidency } from "./weight-residency.ts";
+import {
+  planWeightBuffers,
+  planWeightResidency,
+  type WeightResidency,
+} from "./weight-residency.ts";
 
 /**
  * シナリオの名前。`generation` を渡さない見積りは `"run"` の 1 本、渡した見積りは
@@ -319,12 +323,13 @@ const stateEstimate = (
 
 /**
  * 重みの見積り。分類も宣言由来のバイト数も **Session 構築と同じプランナ**
- * （{@link planWeightResidency}）の結果を受け取る — ここで分類を書き直すと、片方だけ直された
+ * （{@link planWeightResidency}）の結果を受け取り、席から実バッファへの展開も構築 / 上限検査と
+ * 同じ 1 本（{@link planWeightBuffers}）を通す — ここで分類や展開を書き直すと、片方だけ直された
  * 実装に対して estimator が例外も警告も無く別の数を主張し続ける（モジュール doc の MUST）。
  *
- * ここが足すのは席ごとのカテゴリ分けと整列だけ。整列詰め物とバッファ床は {@link toSizeClass}
- * が持つ — `alignF16Payload` / `alignI8Payload` の 4 バイト切り上げと `allocHostWritten` の
- * `Math.max(4, …)` を合わせた値と同じ。
+ * ここが足すのは席ごとのカテゴリ分けだけ。整列詰め物とバッファ床（{@link toSizeClass}）は
+ * `WeightBuffer.byteLength` 側が持つ — `alignF16Payload` / `alignI8Payload` の 4 バイト切り上げと
+ * `allocHostWritten` の `Math.max(4, …)` を合わせた値と同じ。
  */
 const weightEstimate = (
   residency: ReadonlyMap<string, WeightResidency>,
@@ -332,24 +337,26 @@ const weightEstimate = (
   let compressed = 0;
   let uncompressed = 0;
   let expanded = 0;
-  for (const seat of residency.values()) {
-    switch (seat.seat) {
+  for (const buffer of planWeightBuffers(residency)) {
+    switch (buffer.seat) {
       case "raw":
         // 圧縮しない格納は生バイトがそのまま GPU 表現（executor の分岐 3 本目）。
-        uncompressed += toSizeClass(seat.payloadBytes);
+        uncompressed += buffer.byteLength;
         break;
       case "expanded":
         // 適格外はロード時に CPU で f32 展開する（VRAM 削減はゼロ）。
-        expanded += seat.expandedBytes;
+        // MUST: この欄だけ整列前のバイト数で数える — 診断 `storage.hostExpandedBytes` は
+        // writeBuffer した実バイトを積むので 4 バイト床を含まず、ここを確保寸法に替えると
+        // 0 要素テンソルを持つモデルで「厳密対応」が沈黙して崩れる。
+        expanded += buffer.declaredBytes;
         break;
+      // 圧縮常駐は payload と companion scale の**両方**を数える（executor の
+      // residentCompressedBytes と同じ規律 — 実際に GPU が抱えるバイト数を表す欄なので、
+      // scale を除くと実績と食い違う）。どちらも `WeightBuffer` として並んでいる。
       case "f16":
-        compressed += toSizeClass(seat.payloadBytes);
-        break;
       case "i8":
       case "i4":
-        // MUST: companion scale のバッファも数える（executor の residentCompressedBytes と同じ
-        // 規律 — 実際に GPU が抱えるバイト数を表す欄なので、scale を除くと実績と食い違う）。
-        compressed += toSizeClass(seat.payloadBytes) + toSizeClass(seat.scaleBytes);
+        compressed += buffer.byteLength;
         break;
     }
   }

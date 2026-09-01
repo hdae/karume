@@ -100,6 +100,7 @@ import {
 } from "./recipe.ts";
 import { RecipeBuilder } from "./recipe-builder.ts";
 import {
+  assertWeightsWithinLimits,
   planWeightResidency,
   type ResidentWeight,
   type WeightResidency,
@@ -872,6 +873,16 @@ export class Session {
           "（feature は device 作成時にしか要求できない）",
       );
     }
+
+    // MUST: 重みの確保に入る前に、席ごとの確保寸法を device の絶対上限と突き合わせる（shard
+    // ループより前 = 1 バイトも上げる前）。確保失敗の検出は shard 単位 errorScope（ADR 0070
+    // 決定 4）が担うが、それは実装の報告品質に依存し（out-of-memory scope が黙る device が実在
+    // する — docs/known-issues.md の Metal 節）、捕まえても診断は shard 粒度で、しかも数 GiB
+    // 転送した後にしか出ない。寸法は宣言だけで確定している（常駐計画は prepare 相の純関数）ので、
+    // 決定論的に落とせるぶんはここで落とす（同 known-issues が名指しした「明示サイズ門」）。
+    // NOTE: 見るのは絶対上限だけで空き VRAM とは比べない（ADR 0070 決定 5 の規律 — 検査は
+    // 純粋な比較のままで、総量の可否の最終門は errorScope に残る）。
+    assertWeightsWithinLimits(residency, gpu.limits);
 
     // 整数内積変種は **linear と attention で別席**（{@link SessionState}）。どちらも
     // `I8A8_DOT` の指定が最優先で、指定が無ければ族ごとの既定に落ちる。
