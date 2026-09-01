@@ -127,11 +127,17 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   research 2026-08-30 §7。perf-ledger の L-7 とは別番号系）+ 隣接起票候補 = lm_head `wi8`
   M=1（decode GPU の 23% の新 2 位・機序は別）
 - **モデル更新波（2026-09-01 裁定 — 最優先・メモリ管理波より先）**: 順に N1→N2→N3。
-  - **N1 Irodori v4.1-small**: 上流 = HF `Aratako/Irodori-TTS-v4.1-Small`（**MIT**・3.06GB・
-    0.8B・変更 = duration predictor のみ再学習・他パラメータ凍結 = アーキ不変）。新リポ
-    `karume-irodori-v4.1-small`・pin `IRODORI_V4_1_SMALL_CURRENT` 追加（旧 pin 温存）・
-    examples 既定 = 新版。波内検証 = duration predictor の shape 突合 + tokenizer バイト
-    diff（v4 recipe 流用の確証）。
+  - **N1 Irodori v4.1-small — ローカル完了（2026-09-01）**: 上流 = HF
+    `Aratako/Irodori-TTS-v4.1-Small`（**MIT** を API 一次確認・main SHA `2b28324d`・変更 =
+    duration predictor のみ再学習）。検証 = 714 テンソル全数突合（差 31 本 = 全て
+    `duration_predictor.*`・他 683 本ビット同一 = 凍結の明言をバイトで確証）+ tokenizer
+    バイト同一（parity fixture 差分ゼロ）。全系列 export（f32/f16/i8/i4=GPTQ 12×40）+
+    dist 組み立て `models/karume-irodori-v4.1-small/`（default i8-a8）+ examples スモーク緑。
+    途中で full-loop 検証の許容超過を発見 → 機序実測（誤差増幅 37,107 倍・実装差は従来水準・
+    聴感 A/B 区別不能）→ **2 段判定へ改修（ユーザー裁定 a・2026-09-01）** —
+    [research](research/2026-09-01-irodori-v41-euler-sensitivity.md)。
+    **残 = リリース時**: pin `IRODORI_V4_1_SMALL_CURRENT` 新設（旧 pin 温存）+ examples
+    既定切替（ADR 0073 決定 1 = 未公開リポに pin を置かない — runbook §3 に手順記載済み）。
   - **N2 Anima 再構造**: 上流 = Civitai 2458426 の公式 3 変種（base-v1.0 /
     aesthetic-v1.1 / turbo-v1.1 — 全て単一 safetensors 3.9GB BF16・turbo は公式
     checkpoint 化 = **LoRA 焼き込み不要に**）。**ライセンス確認済み（2026-09-01・

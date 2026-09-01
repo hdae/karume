@@ -951,3 +951,14 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
   sequence は会話全体の token transcript を持たない（可変状態は context と `pendingToken` の
   2 つだけ — ADR 0083 決定 1）ので、過去 turn の token は penalty の対象にならない。会話全体へ
   掛けたい場合は、そのターンの `prompt` に効かせたい範囲を含めるのが今の唯一の手である。
+
+## 実装間パリティ検証の厳しさは軌道の誤差増幅率に上限される（by-design）
+
+拡散系パイプライン（Irodori 等）の「参照実装との最終出力突合」は、反復ステップが浮動小数の
+演算順差（~1e-7 級・構造的に不可避）を**モデル × 入力 × 格納丸め依存の倍率**で蓄積・増幅した
+後の値を比べている。この倍率は数百〜数万倍まで実測で振れる（v4.1-small f16 の case.full で
+37,107 倍 — [research](research/2026-09-01-irodori-v41-euler-sensitivity.md)）ため、増幅の
+激しい軌道では固定の厳しい許容は原理的に成立しない。Irodori の full-loop 検証は 2 段判定
+（固定 1e-3 → 超過時は増幅率実測で正規化 + 絶対上限）でこれを吸収する — 恒久ロジックは
+`tools/export-recipes/irodori/pipeline_ref.py`。配布物のビット同一性（同一バイト + 同一実装 =
+同一出力）はこの制約と無関係に成立する。

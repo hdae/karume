@@ -11,9 +11,11 @@
 
 ## Now
 
-- **モデル更新波（2026-09-01 裁定 — 次の実装波・詳細は [backlog](../docs/backlog.md) now の
-  「モデル更新波」）**: N1 Irodori v4.1-small（MIT・duration predictor のみ変更 → 新リポ +
-  pin 追加）→ N2 Anima 再構造（公式 3 変種を karume-anima 同居・**defaultModel =
+- **モデル更新波（2026-09-01 裁定 — 実装中・詳細は [backlog](../docs/backlog.md) now の
+  「モデル更新波」）**: **N1 Irodori v4.1-small = ローカル完了**（凍結をバイトで確証・
+  全系列 export + dist + スモーク緑・pin 新設と examples 既定切替はリリース時 = runbook §3。
+  副産物: full-loop 検証を 2 段化 — 誤差増幅 37,107 倍の実測は
+  [research](../docs/research/2026-09-01-irodori-v41-euler-sensitivity.md)）→ N2 Anima 再構造（公式 3 変種を karume-anima 同居・**defaultModel =
   anima-turbo-v1.1**・wai/copycat は karume-anima-extra へ移設 + 越境参照・**breaking =
   `ANIMA_TURBO_CURRENT` 廃止**・ライセンス = CircleStone NC v1.2 一次確認済み = 条件付き
   再配布可）→ N3 Civitai AIR 取り込み機構。完了で HF 一括リリース。その後 =

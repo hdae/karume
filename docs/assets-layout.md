@@ -47,6 +47,8 @@ uv run python dist.py --model anima-v1.0 --model anima-wai-v1.0 \
     --out ../../models/karume-anima                  # 素の base 系（多 step + CFG）
 uv run python dist.py --pipeline anima-turbo         # → models/karume-anima-turbo/（LoRA 焼き込み）
 uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/
+uv run python dist.py --pipeline irodori \
+    --model v4.1-small                               # → models/karume-irodori-v4.1-small/
 uv run python dist.py --pipeline sbv2 --card-profile jvnv \
     --model F1 --model F2 --model M1 --model M2 --out ../../models/karume-sbv2-jvnv
 uv run python dist.py --pipeline sbv2 --card-profile fn \
