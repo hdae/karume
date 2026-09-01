@@ -96,9 +96,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   known-issues Metal 節が正本）。tools/metal-diagnostics/ は削除済み（復元は git 履歴）。
 - **数値レビュー後続の起票（2026-08-31）**:
   - **Metal OOM errorScope 沈黙**（known-issues — 重み経路の明示 size 門 + `requiredLimits`
-    のロード時実効化。監査波から分離・独立に着手可）— **次波へ昇格（2026-09-01 ユーザー指示）**:
-    メモリ管理周りの改善・検証の波として、現時点で進められるもの（棚卸しの文書修正）の
-    消化後に着手
+    のロード時実効化。監査波から分離・独立に着手可）— **メモリ管理波として起票済み
+    （2026-09-01 ユーザー指示）**: 着手は**モデル更新波の後**（同日順序改訂）
   - gemv margin 命題の M2 温度 0 golden 実測（ADR 0082 追記 2 の立て直し）
   - ~~GPTQ static-groups + act-order 実験 / damping sweep~~ **実装 + 実測消化（2026-08-31）**:
     軸は opt-in で実装済み（既定 off ビット同一 — `892bfb3`/`683d6a0`）・minicpm5 8 構成の
@@ -127,7 +126,35 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   復活条件が満ちた再評価候補 = **レンズ L-7 / L-12**（decode がフェンス床支配へ戻ったため —
   research 2026-08-30 §7。perf-ledger の L-7 とは別番号系）+ 隣接起票候補 = lm_head `wi8`
   M=1（decode GPU の 23% の新 2 位・機序は別）
-- **次波計画（2026-09-01 裁定 — 棚卸し後トリアージの優先順位）**:
+- **モデル更新波（2026-09-01 裁定 — 最優先・メモリ管理波より先）**: 順に N1→N2→N3。
+  - **N1 Irodori v4.1-small**: 上流 = HF `Aratako/Irodori-TTS-v4.1-Small`（**MIT**・3.06GB・
+    0.8B・変更 = duration predictor のみ再学習・他パラメータ凍結 = アーキ不変）。新リポ
+    `karume-irodori-v4.1-small`・pin `IRODORI_V4_1_SMALL_CURRENT` 追加（旧 pin 温存）・
+    examples 既定 = 新版。波内検証 = duration predictor の shape 突合 + tokenizer バイト
+    diff（v4 recipe 流用の確証）。
+  - **N2 Anima 再構造**: 上流 = Civitai 2458426 の公式 3 変種（base-v1.0 /
+    aesthetic-v1.1 / turbo-v1.1 — 全て単一 safetensors 3.9GB BF16・turbo は公式
+    checkpoint 化 = **LoRA 焼き込み不要に**）。**ライセンス確認済み（2026-09-01・
+    LICENSE.md v1.2 を一次確認）**: 再配布可（ライセンス同梱 + Attribution Notice +
+    改変明示が条件 = 現行カード機構が既に満たす形）・モデル本体 NC 維持・**生成物は商用可 +
+    個人の派生販売可（v1.2 で寛容化）**。構成 = `karume-anima` に 3 変種同居
+    （**defaultModel = anima-turbo-v1.1**〈裁定 — 公式が最初に触るのは Turbo 推奨・Base は
+    LoRA 作成向け〉・`anima-v1.0` は改名せず）+ `karume-anima-extra`（wai / copycat 移設・
+    text stack は公式リポへ越境参照）。**breaking = `ANIMA_TURBO_CURRENT` 廃止 →
+    `ANIMA_CURRENT` へ統合**。新 ADR（リポ分割軸 = 公式 / 追加学習）。波内確認 =
+    aesthetic の step/guidance 視認裁定（seed 4 本以上）・新旧 turbo の系譜（PNG 参照 sha
+    流用可否）・base 単一ファイル vs 既存 diffusers の同一性・カード許諾欄の v1.2 追随。
+  - **N3 Civitai 追加機構**: `--air urn:air:...` / URL 指定で extra リポへ取り込む recipe 側
+    コマンド（model-versions API メタ + sha256 + provenance 記録・命名は ADR 0077）。
+    ライセンス門 = **エージェント事前確認形**（裁定 2026-09-01 — 手動フラグ強制はしない・
+    Anima 派生は元ライセンス引き継ぎ前提・API 欄と本文の食い違いは記録に残す）。
+  - **リリース**: N1〜N3 完了 =「準備が整う」→ HF 一括（anima 新構成 + extra +
+    irodori v4.1 + gemma4 + jvnv + BiRefNet ほか + pin 更新 — 上の shard v2 一括と同じ回）。
+  - **export-recipes 切り出し（裁定済み・案 A）**: 切り出すのは**レシピ部分のみ**・
+    exporter core（tools/exporter）は本リポ残留。sibling checkout + path 依存 +
+    資産根 / fixture 書き先の注入形。**時期 = モデル波の後**（parked 起票の復活裁定）。
+- **次波計画（2026-09-01 裁定 — 棚卸し後トリアージ。同日改訂: モデル更新波が先行し、以下は
+  その後）**:
   ①**メモリ管理波** — Phase A 実装（重み / state 経路の明示 size 門 = Metal OOM 根治・
   `max(payload, expanded) ≤ maxStorageBufferBindingSize` 等の admission preflight・manifest
   `requiredLimits` の DL 前接続〈hub は runtime 非依存なので呼び手が limits を渡す形〉・

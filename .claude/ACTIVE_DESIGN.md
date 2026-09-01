@@ -11,6 +11,13 @@
 
 ## Now
 
+- **モデル更新波（2026-09-01 裁定 — 次の実装波・詳細は [backlog](../docs/backlog.md) now の
+  「モデル更新波」）**: N1 Irodori v4.1-small（MIT・duration predictor のみ変更 → 新リポ +
+  pin 追加）→ N2 Anima 再構造（公式 3 変種を karume-anima 同居・**defaultModel =
+  anima-turbo-v1.1**・wai/copycat は karume-anima-extra へ移設 + 越境参照・**breaking =
+  `ANIMA_TURBO_CURRENT` 廃止**・ライセンス = CircleStone NC v1.2 一次確認済み = 条件付き
+  再配布可）→ N3 Civitai AIR 取り込み機構。完了で HF 一括リリース。その後 =
+  メモリ管理波 → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
 - **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
   Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
   台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・
