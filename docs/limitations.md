@@ -138,7 +138,7 @@ attention 重みは消える（f32 経路は保持する）。落ちた質量は
 （[decisions/0044](decisions/0044-runtime-attention-mask.md) の契約系・opt-in 席）。CPU 参照も
 同一格子なので突合はこの打ち切りを検出しない — 精度影響の裁定は E2E の実測 tolerance が担う。
 
-## w8a8（`linearCompute: "i8a8"`）では非有限値の伝播粒度は同じだが Inf の符号が f32 経路と一致しない
+## w8a8（`linearCompute: "a8"`）では非有限値の伝播粒度は同じだが Inf の符号が f32 経路と一致しない
 
 活性 per-token i8 の実行経路（opt-in — 設計は
 [research/2026-08-03-dp4a-w8a8-design.md](research/2026-08-03-dp4a-w8a8-design.md)）では、
@@ -179,8 +179,9 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 ## BiRefNet 系の配布形は 1024² だけ（2048² は未実測・組み立てが拒否する）
 
 `karume dist --pipeline birefnet` が受け付けるのは入力 `[1,3,1024,1024]` で焼かれた系列だけで、
-それ以外の解像度は `DistError` で落ちる（`karume/dist.py` の `BIREFNET_RESOLUTION`）。export
-段（`export_birefnet.py --resolution 2048`）は通るので、系列を作ること自体はできる。
+それ以外の解像度は `DistError` で落ちる（`tools/export-recipes/birefnet/distribution.py` の
+`BIREFNET_RESOLUTION`）。export 段（`python -m birefnet.export --resolution 2048`）は通るので、
+系列を作ること自体はできる。
 
 配らないのは実行段が未実測だから: 中間テンソルが `[1, 192, 2048, 2048]` = 3.22GB になる。
 （かつては「上の conv2d dispatch 上限に decoder の 1×1 conv が当たる」も理由に挙げていたが、
@@ -456,7 +457,7 @@ SBV2 の `flow` / `voice` は相対位置注意の `(T,T)` 表（`idx_k` / `vali
 生成して渡す**必要があり、ランタイムはこの表の正しさを検査しない（値としては単なる i32 添字と
 f32 マスクで、1 ずれても shape エラーにならない沈黙誤値クラス）。
 
-- 式の正本は Python 側 `tools/exporter/karume/patch_sbv2.build_relattn_tables`
+- 式の正本は Python 側 `tools/export-recipes/sbv2/patch.py` の `build_relattn_tables`
   （front の in-graph 構築も同じ関数を呼ぶ）。
 - ホスト側の正本は `packages/models/src/sbv2/relattn-tables.ts`（SBV2 固有なので
   `packages/runtime/src/` には置かない — モデル側の知識を持つ models パッケージが持ち、
@@ -554,7 +555,7 @@ GB 級ロードとタイル decode の進捗は観測できる。
 
 ## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
 
-export 済みグラフ（台本 `tools/exporter/export_embeddinggemma.py`）は `attention_mask` を
+export 済みグラフ（台本 `tools/export-recipes/embeddinggemma/export.py`）は `attention_mask` を
 入力に持たない。双方向 + sliding window の帯マスクは **Tmax=512 の定数**として焼かれ
 （`sym_prefix_slice` で先頭 T を切り出す）、パディングを注意から隠す経路は無い。
 パディングを含む列は**呼び出し側が詰めて T を短くする**（単一シーケンスなら torch eager と
@@ -579,7 +580,7 @@ EG 台本の配線だけ（bool マスク入力を受けて帯定数と加算合
 ## Irodori テキスト系（backbone / projector）: 実行時 attention_mask 非対応・空 caption と T=1 は非表現
 
 EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める）。「右詰め pad + マスク」との
-同値は export 台本の常設門が毎 emit 実測する（`export_irodori.py` の
+同値は export 台本の常設門が毎 emit 実測する（`tools/export-recipes/irodori/export.py` の
 `_static_scheme_evidence` — 実測 8.3e-6 以下・門 1e-3。崩れれば export ごと落ちる）。付随:
 
 - **空 caption（マスク全 0）は graph で表現しない** — eager では projector 出力が厳密に全 0
@@ -595,8 +596,8 @@ EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める�
 
 - **参照なし（`no_ref` — 参照マスク全 0）はグラフを呼ばない**。eager 側の出力が
   **厳密に全 0** になる形（SDPA の safe-softmax が全マスク行に 0 を返し、末尾の `x * mask_f`
-  が全体を 0 にする）なので、ホストがゼロ行列を置けば同値。**恒真化しないよう
-  `export_irodori.py` の `_no_reference_evidence` が毎 emit 実測する**（非ゼロ latent を
+  が全体を 0 にする）なので、ホストがゼロ行列を置けば同値。**恒真化しないよう同 export
+  台本の `_no_reference_evidence` が毎 emit 実測する**（非ゼロ latent を
   全 0 マスクで通し、出力の最大絶対値が 0 でなければ export ごと落ちる）。
 - **平均トークンの前置（`_prepend_masked_mean_token`）は現行パイプラインではホスト**。IR v1 の
   `cat` は `1 + S → S+1` を受理する（ADR [0046](decisions/0046-cat-symbolic-axis.md)）ので、
@@ -687,24 +688,24 @@ DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-a
 - WAV の読み（/32768）と書き（×32767）は非対称のまま固定（それぞれ外部との一致が正 —
   `src/audio/wav.ts` の MUST。往復は 1LSB 級でずれる）。
 
-## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・i8a8 と非併用・ビット同一門は f32 経路
+## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・a8 と非併用・ビット同一門は f32 経路
 
 `attention` の第 4 入力 mask（ADR 0023 追記 2026-08-11）は意図的に狭い:
 
 - 受理は **f32・加算型・`[1,1,M,N]` ちょうど**（B·H へ broadcast）。実行時 bool マスク・
   `[B,1,M,N]`（バッチ別）・`[1,H,M,N]`（head 別）は fail loudly — Irodori CFG の裁定
   「実行時 bool マスク（案 a）」の波で、ADR 0016 のガード不活性証明の再設計とセットで広げる。
-- **mask × `attentionCompute:'i8a8'` は fail loudly**（i8a8 の ①QK に epilogue が無い —
+- **mask × `attentionCompute:'a8'` は fail loudly**（i8a8 族の ①QK に epilogue が無い —
   黙って f32 へ縮退させない）。対応するかは別波の設計判断。
 - 分解経路とのビット同一の恒久門（parity）は **f32 経路のみ**。s16 / c16 × mask は WGSL
   生成・パイプライン作成・実 GPU 実行の確認まで（門を足すか ADR に f32 限定と明記し続けるかは
   そのケースが実資産に現れた時に判断）。
 
-## 融合 attention の GQA × `attentionCompute:'i8a8'` は fail loudly（暫定）
+## 融合 attention の GQA × `attentionCompute:'a8'` は fail loudly（暫定）
 
 GQA / MQA 形（`H % Hkv == 0`・ADR
 [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 1）は f32 / f16 経路のみ。
-i8a8 は head 基底が 5 本（`attention-i8a8.ts`）で K / V の量子化・確保も `B·H` 前提のため、
+a8 経路は head 基底が 5 本（`attention-i8a8.ts`）で K / V の量子化・確保も `B·H` 前提のため、
 GQA 形は**縮退せず fail loudly**（黙って f32 へ落とすと性能が静かに変わる — ADR 0058
 決定 3）。**拒否は暫定で後日サポート前提**（ADR 0067 決定 3 — 追補面は確定済み: K/scale・
 V/scale 基底のみ kv-head 写像 + recipe-builder の Hkv 化。検証は f32 経路の repeat_kv
@@ -792,8 +793,8 @@ Failed to create counter sample buffer: Cannot allocate sample buffer (MTLCounte
 計測は Linux / Vulkan 機で行うか、dispatch 数の少ない小さいグラフに限る。壁時計だけなら
 計測を切って（既定）測れる。
 
-なお同じ理由で `docs/limitations.md` の「GPUBuffer 総確保がドライバ申告予算の 97% で頭打ち」は
-**Metal には効かない** — wgpu の `MemoryBudgetThresholds` は D3D12 と Vulkan のみ対応で、
+なお同じ理由で本ファイルの「Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる」
+節の制約は **Metal には効かない** — wgpu の `MemoryBudgetThresholds` は D3D12 と Vulkan のみ対応で、
 wgpu-hal metal の `check_if_oom()` は `Ok(())` を返す no-op（[wgpu#7460](https://github.com/gfx-rs/wgpu/issues/7460)
 の TODO 付き）。Metal では予算超過が例外にならず、遅くなるだけで進む。
 
@@ -894,7 +895,7 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 `states` 欄つき attention / `state_append`（ADR
 [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 / 5）の意図的な制約:
 
-- **`attentionCompute: 'i8a8' / 'f16'` × states 形は fail loudly**（別族カーネルは f32 のみ —
+- **`attentionCompute: 'a8' / 'f16'` × states 形は fail loudly**（別族カーネルは f32 のみ —
   縮退せず拒否・ADR 0058 決定 3。opt-in の席は実需が出た時に ADR 0058 流儀で起こす）。
   **`attentionScoreStorage: 'f16'` × states 形も同様**（S の格納は f32 のみ）。
 - **sliding スロットを 1 本でも含む GenerationContext の `rewind` は全拒否**（ADR
