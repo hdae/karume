@@ -172,10 +172,16 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     資産根 / fixture 書き先の注入形。**時期 = モデル波の後**（parked 起票の復活裁定）。
 - **次波計画（2026-09-01 裁定 — 棚卸し後トリアージ。同日改訂: モデル更新波が先行し、以下は
   その後）**:
-  ①**メモリ管理波** — Phase A 実装（重み / state 経路の明示 size 門 = Metal OOM 根治・
-  `max(payload, expanded) ≤ maxStorageBufferBindingSize` 等の admission preflight・manifest
-  `requiredLimits` の DL 前接続〈hub は runtime 非依存なので呼び手が limits を渡す形〉・
-  TS 読み手側の shard ≤ 1GiB 門）+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
+  ①**メモリ管理波** — Phase A（ADR 0089・2026-09-01）: **波 1 = runtime 重み/state の
+  絶対上限検査・波 3 = exporter requiredLimits 一括導出・波 4 = hub shard 読み手検査は
+  実装済み**（f8b67c0 / 6503e6b / 0b3967a。「Metal OOM 根治」は単発上限まで — 合計 vs
+  物理は原理的に検査不能で limitations に by-design 記録）。**残 = 波 2**: manifest
+  `requiredLimits` の models 読み手（admission で GPU limits と比較・adapter 取得の
+  DL 前繰り上げ = 裁定 1a）+ `estimateSessionMemory` のロード面結線 + **全 8 家族 dist
+  再生成**（欄新設: anima 30 quant / irodori f32・f16 — gemma4 はバイト不変）+
+  limitations「DL 前の適合チェックは GPU feature 軸のみ」節の書き換え。
+  隣接起票（ADR 0089 Consequences）: createResident / run 時 transient の同型弱点・
+  PLE sidecar は extras 席で shard 門の外。+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
   A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+
   capacity 1024 反映を同乗。Phase C 起票 = 単一 tensor >1GiB 非対応の期間裁定・fromAssets の
   位置づけ・large asset の reference-first 一般則・**cache-less streaming mode（26B A4B 級の

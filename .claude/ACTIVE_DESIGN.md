@@ -23,9 +23,16 @@
   リリース時の越境焼き → **N3 Civitai AIR 取り込み = 完了（ADR 0088）**: `anima.civitai`
   コマンド（AIR / URL → sha256 突合 DL → `inputs/anima/civitai-<versionId>/` +
   `civitai.json`・命名は機械正規化 = 0077 改訂・ライセンスはエージェント事前確認形 =
-  判定せず記録 + `license-review.md`・実 DL 疎通済み）。**モデル更新波クローズ →
-  次 = メモリ管理波**（HF 一括アップはメモリ管理波を含むリリースの直前 — 2026-09-01 裁定）
-  → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
+  判定せず記録 + `license-review.md`・実 DL 疎通済み）。**モデル更新波クローズ**（HF 一括
+  アップはメモリ管理波を含むリリースの直前 — 2026-09-01 裁定）。
+- **メモリ管理波 Phase A（2026-09-01・ADR 0089 — 波 1/3/4 実装済み・波 2 が次）**:
+  GPU メモリ適合を「絶対上限との決定論的比較」へ昇格 — runtime 重み/state の確保前検査
+  （`assertWeightsWithinLimits` = 席→バッファ写像 `planWeightBuffers` を見積りと共有）・
+  exporter `requiredLimits` 一括導出（常駐前提・既定超過のみ・手書き拒否）・hub shard
+  ≤1GiB 読み手検査。空き VRAM・合計は比較しない（ADR 0070 決定 5 維持 — Metal errorScope
+  沈黙で残る限界は limitations 記録）。**波 2 = models 読み手結線**（requiredLimits の
+  DL 前拒否・裁定 1a = adapter 先行 + `estimateSessionMemory` 結線 + 全 8 家族 dist
+  再生成）→ Phase B 実測 → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
 - **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
   Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
   台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・

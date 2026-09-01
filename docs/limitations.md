@@ -962,3 +962,15 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 （固定 1e-3 → 超過時は増幅率実測で正規化 + 絶対上限）でこれを吸収する — 恒久ロジックは
 `tools/export-recipes/irodori/pipeline_ref.py`。配布物のビット同一性（同一バイト + 同一実装 =
 同一出力）はこの制約と無関係に成立する。
+
+## GPU メモリの事前検査は「デバイスの絶対上限」まで — 合計 vs 物理空き容量は検査しない（by-design）
+
+メモリ管理波（2026-09-01 裁定）で入る事前検査が決定論的に見られるのは、**個々のバッファ寸法と
+デバイスの絶対上限（`maxBufferSize` / `maxStorageBufferBindingSize`）の比較まで**。確保の
+**合計**が物理メモリを超えるかは検査しない — WebGPU は総量・空き容量を露出せず（ADR 0070
+決定 5 の「予算が取れない環境で当て推量しない」）、当て推量の閾値は健全な環境で誤拒否を作る。
+合計超過の最終検出は out-of-memory errorScope のままで、**Metal ではそれが沈黙する既知環境が
+ある**（上の「Metal には効かない」注記 — wgpu-hal metal の `check_if_oom()` は no-op。
+known-issues「Metal で out-of-memory errorScope が沈黙する」）。つまり Metal では
+「単発上限は事前に確実に落ちる・合計の物理超過は依然黙って進み得る」が残る。緩和は必要量の
+事前見積り（`estimateSessionMemory` のロード面結線）で呼び手に判断材料を渡すところまで。

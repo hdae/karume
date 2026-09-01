@@ -86,14 +86,17 @@ Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36
 「state 確保の失敗は out-of-memory errorScope で fail loudly」が
 **Expected function to reject** で赤（2026-09-01）= **64GiB の state スロット確保が黙って成功
 する**（Metal の遅延確保 — wgpu の Metal backend は総量予算を持たず、`newBufferWithLength:` が
-物理超過でも nil を返さない形）。実害: runtime の重みアップロード経路は size 門を持たず
-errorScope に全面依存しているため（ADR 0070 決定 4）、**errorScope が沈黙する環境では
-「確保失敗 = ゴミを読む」が例外なしで通り得る**。バッファ層自体は M2 実測で健全
+物理超過でも nil を返さない形）。バッファ層自体は M2 実測で健全
 （Metal NaN 調査時のプローブ実測 — 単一 64〜640MiB・実プロファイル 835 本累積とも全一致。
 プローブ群は役目を終え 2026-08-31 に削除済み — 復元は git 履歴から）。
-修正候補 = 重み経路への明示サイズ門 +
-`karume.json` の `requiredLimits`（hub が parse するのみで現状誰も読んでいない）のロード時実効化
-（backlog「数値危険クラス監査波」に同席）。
+
+**部分消化（2026-09-01・ADR 0089 = メモリ管理波 Phase A）**: 重み・state とも**単発バッファの
+絶対上限超過は確保前の明示検査で決定論的に落ちる**ようになった（`assertWeightsWithinLimits` /
+state 側の 2 上限化 — 修正候補だった「明示サイズ門」は消化）。残るのは**複数バッファ合計の
+物理超過**で、これは WebGPU が空き容量を露出しないため事前検査できず（ADR 0070 決定 5）、
+Metal では errorScope 沈黙のまま — by-design 制約として limitations「GPU メモリの事前検査は
+絶対上限まで」節に移管。`requiredLimits` のロード時実効化（DL 前拒否）は波 2 で結線予定
+（書き手側の一括導出は消化済み — ADR 0089 決定 3）。
 
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 
