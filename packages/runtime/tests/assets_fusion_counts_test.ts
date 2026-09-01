@@ -9,12 +9,11 @@
  * 出さない）。安全のため safetensors の**ヘッダだけ**を読む — 実体は合計 7GB 級で、
  * IR は `__metadata__.karume_ir` に載っている。
  *
- * MUST: 資産は `models/karume-anima-turbo/` + `models/karume-anima/` と
- * `outputs/series/embeddinggemma-300m/` / `gemma4-e2b-decode{,-token}` / `minicpm5-1b-decode` と
- * `models/karume-irodori-v4-small/`（いずれも untracked・ローカル資産）。無い環境は理由を
- * 出して**明示 SKIP** する（テストを消して無音で緑にしない — ADR 0005）。turbo が 2 リポ
- * 要るのは、共有コンポーネント（text_encoder / text_conditioner / vae_decoder）が base リポ
- * への**越境参照**（ADR 0038 §7）で焼かれていて、現物が turbo ミラー側に 1 バイトも無いため。
+ * MUST: 資産は `models/karume-anima/`（公式 3 変種同居・既定 = anima-turbo-v1.1 —
+ * ADR 0087）と `outputs/series/embeddinggemma-300m/` / `gemma4-e2b-decode{,-token}` /
+ * `minicpm5-1b-decode` と `models/karume-irodori-v4-small/`（いずれも untracked・ローカル
+ * 資産）。無い環境は理由を出して**明示 SKIP** する（テストを消して無音で緑にしない —
+ * ADR 0005）。
  *
  * NOTE: ここで固定するのは **run 1 回あたり**の値（`lastRunFusions` と同じ寿命）。ADR 0040 の
  * 実測欄が載せている predict 1 回ぶんの合計は、これらをパイプラインの run 回数で畳んだもの:
@@ -33,8 +32,7 @@ import { type FusionCounts, planFusions } from "../src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../src/runtime/plan.ts";
 import { resolveShards } from "./helpers/shard-files.ts";
 
-const TURBO_DIR = new URL("../../../models/karume-anima-turbo/", import.meta.url);
-const BASE_DIR = new URL("../../../models/karume-anima/", import.meta.url);
+const ANIMA_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 /**
  * グラフを持つのは配布形の**先頭 shard** だけ（ADR 0081）。分割されていない資産では代表 path
  * そのものが返るので、どちらの形でも同じ 1 行で足りる。
@@ -93,27 +91,27 @@ const exists = async (url: URL): Promise<boolean> => {
   }
 };
 
-const ASSETS_AVAILABLE = await exists(new URL("karume.json", TURBO_DIR)) &&
-  await exists(new URL("karume.json", BASE_DIR));
+const ASSETS_AVAILABLE = await exists(new URL("karume.json", ANIMA_DIR));
 if (!ASSETS_AVAILABLE) {
   console.warn(
-    `[karume] ${TURBO_DIR.pathname} と ${BASE_DIR.pathname} が揃っていないため実資産の` +
+    `[karume] ${ANIMA_DIR.pathname} に karume.json が無いため実資産の` +
       "融合ヒット数を SKIP する（エクスポータのノード発行順の退行は実資産でしか検出できない）",
   );
 }
 
 /**
- * 越境参照（ADR 0038 §7）の repo → ローカルミラー。turbo の共有コンポーネントは base リポの
- * (repo, commit SHA) を名乗るので、現物はこちらから読む。
+ * 越境参照（ADR 0038 §7）の repo → ローカルミラー。公式リポは自己完結（ADR 0087）なので
+ * 現在は空 — `karume-anima-extra` のミラー（リリース時に越境で焼く）が生えたら、その門と
+ * 一緒にエントリを戻す。読み分けの機構は残す。
  */
-const MIRRORS: ReadonlyMap<string, URL> = new Map([["hdae/karume-anima", BASE_DIR]]);
+const MIRRORS: ReadonlyMap<string, URL> = new Map();
 
 /**
  * manifest のうちこのファイルが引く欄だけ。**綴りを持つのは配布形**（shard 本数・path・越境の
  * 有無はエクスポータが決める）なので、テスト側に焼かずここから引く — 焼くと分割数が動いた
  * 瞬間に融合ヒット数の門が NotFound で落ちて、退行検出そのものが止まる。
  */
-type TurboManifest = {
+type AnimaManifest = {
   readonly defaultModel: string;
   readonly models: Readonly<
     Record<string, {
@@ -129,8 +127,8 @@ type TurboManifest = {
 type ShardRef = { readonly path: string; readonly repo?: string };
 
 // 資産が無い環境では 1 バイトも読まない（この定数を触るのは ignore を抜けたテストだけ）。
-const TURBO_MANIFEST: TurboManifest | undefined = ASSETS_AVAILABLE
-  ? JSON.parse(await Deno.readTextFile(new URL("karume.json", TURBO_DIR)))
+const ANIMA_MANIFEST: AnimaManifest | undefined = ASSETS_AVAILABLE
+  ? JSON.parse(await Deno.readTextFile(new URL("karume.json", ANIMA_DIR)))
   : undefined;
 
 /**
@@ -138,9 +136,9 @@ const TURBO_MANIFEST: TurboManifest | undefined = ASSETS_AVAILABLE
  * 後続の重み shard は metadata を持たないので、融合の計画に要るのはこの 1 本だけ。
  */
 const readAnimaGraph = (component: string, dtype: string): Promise<IrGraph> => {
-  const manifest = TURBO_MANIFEST as TurboManifest;
+  const manifest = ANIMA_MANIFEST as AnimaManifest;
   const [head] = manifest.models[manifest.defaultModel].weights[component][dtype].shards;
-  if (head.repo === undefined) return readIrGraph(new URL(head.path, TURBO_DIR));
+  if (head.repo === undefined) return readIrGraph(new URL(head.path, ANIMA_DIR));
   const mirror = MIRRORS.get(head.repo);
   if (mirror === undefined) {
     throw new Error(
