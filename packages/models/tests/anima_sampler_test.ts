@@ -8,7 +8,7 @@ import { cfgEulerStep, sigmaSchedule, timestepsProj } from "../src/anima/sampler
 // `needsUncond` の定義は更新則に依らない共通処理側にある（`sampler.ts` は import して使う）。
 import { needsUncond } from "../src/generation/dpm-solver-multistep.ts";
 
-/** `models/karume-anima-turbo/karume.json` の `pipelineConfig.scheduler` と同じ値（形の検査用）。 */
+/** `models/karume-anima/karume.json` の `pipelineConfig.scheduler` と同じ値（形の検査用）。 */
 const SHIFT = 3;
 const NUM_TRAIN_TIMESTEPS = 1000;
 

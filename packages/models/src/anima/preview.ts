@@ -24,7 +24,7 @@ import { imageToRgba } from "./image.ts";
  * ## 較正空間の実測（2026-08-24）
  *
  * この表が**どちらの latent 空間**で較正されているかの一次記録は見つからなかったので、実測で
- * 決めた。リグ = local の turbo 配布形（`models/karume-anima-turbo` / 既定 quant）・512×512・
+ * 決めた。リグ = local の turbo 配布形（`models/karume-anima` の turbo / 既定 quant）・512×512・
  * seed 0・manifest 既定 steps（8）で 1 枚生成し、最終 step の latent を捕まえて
  * (A) 正規化 latent 直当て / (B) `denormalizeLatents` を通した逆正規化 latent 直当て の 2 通りを、
  * 生成画像を 8×8 box 平均で latent 解像度へ落とした参照と突き合わせた。

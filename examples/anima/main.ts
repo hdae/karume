@@ -2,24 +2,25 @@
  * Anima（テキスト → 画像）の 1 画面デモ。資産の出所だけが分岐で、あとは `generate` のノブ。
  *
  *     deno task demo:anima --prompt "1girl, solo, ..." --resolution 1344x768 --seed 42
- *     deno task demo:anima --source someone/anima --model anima-turbo --quant f16 --steps 8
+ *     deno task demo:anima --source someone/anima --model anima-v1.0 --quant f16 --steps 20
  *     deno task demo:anima --source models/karume-anima --steps 32 --guidance 6
- *     deno task demo:anima --source models/karume-anima-turbo \
+ *     deno task demo:anima --source models/karume-anima-extra \
  *         --source-map hdae/karume-anima=models/karume-anima
  *
- * `--source` 未指定ならこの台本が {@link ANIMA_TURBO_CURRENT}（このパッケージ版が検証した
- * 取得元 — ADR 0073）を渡す。`fromPretrained` 自体に既定は無いので、取得元を綴るのは常に
- * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリなら `denoDirectory` で直に
- * 読み、それ以外は HF リポジトリ名として読む。どちらも `fromPretrained` の 1 本なので、shard
- * 分割された配布形もそのまま通る。未指定のノブは manifest の `defaults` が埋める。
+ * `--source` 未指定ならこの台本が {@link ANIMA_CURRENT}（このパッケージ版が検証した
+ * 取得元 — ADR 0073・既定モデル = Turbo）を渡す。`fromPretrained` 自体に既定は無いので、
+ * 取得元を綴るのは常に呼び出し側。明示したときだけ、`karume.json` を持つディレクトリなら
+ * `denoDirectory` で直に読み、それ以外は HF リポジトリ名として読む。どちらも
+ * `fromPretrained` の 1 本なので、shard 分割された配布形もそのまま通る。未指定のノブは
+ * manifest の `defaults` が埋める。
  *
- * turbo 系のミラーは `text_encoder` を base リポへ**越境参照**するので、その取得元を
- * `--source-map owner/name=<パス>` で名指しする（繰り返し可。未指定で越境を踏むと hub が
- * 案内付きで落ちる — 隣接ディレクトリの推測はしない）。
+ * 追加学習系（karume-anima-extra）のミラーは text stack を公式リポへ**越境参照**するので、
+ * その取得元を `--source-map owner/name=<パス>` で名指しする（繰り返し可。未指定で越境を
+ * 踏むと hub が案内付きで落ちる — 隣接ディレクトリの推測はしない）。
  */
 
 import { AnimaPipeline, encodePng } from "../../packages/models/mod.ts";
-import { ANIMA_TURBO_CURRENT, parseResolution } from "../../packages/models/anima.ts";
+import { ANIMA_CURRENT, parseResolution } from "../../packages/models/anima.ts";
 import { distributionSource } from "../shared/local-source.ts";
 
 const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --prompt <文字列>" +
@@ -89,12 +90,10 @@ const guidanceScale = rawGuidance === undefined ? undefined : Number(rawGuidance
 const negativePrompt = args.get("negative");
 
 /** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
-const from = source === undefined
-  ? ANIMA_TURBO_CURRENT
-  : await distributionSource(source, sourceMaps);
+const from = source === undefined ? ANIMA_CURRENT : await distributionSource(source, sourceMaps);
 
 console.log(
-  `[anima] ${source ?? `${ANIMA_TURBO_CURRENT.repo}（台本の既定 = 検証済み pin）`}` +
+  `[anima] ${source ?? `${ANIMA_CURRENT.repo}（台本の既定 = 検証済み pin）`}` +
     ` / model ${model ?? "（manifest の既定）"}` +
     ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}`,
 );
@@ -119,7 +118,7 @@ const png = await encodePng(image.data, image.width, image.height);
 const name = `anima-${quant ?? "default"}-${image.width}x${image.height}` +
   `-${steps ?? "default"}step-seed${seed}.png`;
 /** 既定の出力先に使うモデル名（取得元の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
-const sourceRef = source ?? ANIMA_TURBO_CURRENT.repo;
+const sourceRef = source ?? ANIMA_CURRENT.repo;
 const sourceName = sourceRef.replace(/\/+$/, "").split("/").at(-1) ?? sourceRef;
 const outDir = `outputs/examples/${sourceName}`;
 await Deno.mkdir(outDir, { recursive: true });

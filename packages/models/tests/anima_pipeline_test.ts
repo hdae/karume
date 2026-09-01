@@ -44,7 +44,7 @@ const FILE = {
   sha256: "a".repeat(64),
 };
 
-/** `models/karume-anima-turbo/karume.json` の骨格（検査に要る欄だけ）。 */
+/** `models/karume-anima/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
     format: "karume/4",

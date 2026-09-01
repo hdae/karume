@@ -14,7 +14,7 @@
  * ## 越境参照は明示 mapping だけ
  *
  * 配布形は自リポの外を指せる（`FileRef` の `repo` / `revision` — ADR 0038 §7。例:
- * `karume-anima-turbo` の `text_encoder` は `hdae/karume-anima` の 1 commit を指す）。
+ * `karume-anima-extra` の text stack は `hdae/karume-anima` の 1 commit を指す）。
  * `localDirectory` は**隣接する同名ディレクトリを推測しない**ので、越境先は `--source-map
  * owner/name=<パス>` で名指しする。未指定のまま越境を踏めば hub がそのまま案内を出して落ちる
  * （取り違えたバイト列を黙って読ませないための線 — `packages/hub/src/sources/local.ts`）。

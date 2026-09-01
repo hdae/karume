@@ -16,7 +16,7 @@
 // 持たないので、この門の対象外（ADR 0073 決定 1）。
 
 import { assertEquals, assertMatch, assertRejects } from "@std/assert";
-import { ANIMA_CURRENT, ANIMA_TURBO_CURRENT } from "../src/anima/config.ts";
+import { ANIMA_CURRENT } from "../src/anima/config.ts";
 import { IRODORI_V4_SMALL_CURRENT } from "../src/irodori/config.ts";
 import { SBV2_JVNV_CURRENT } from "../src/sbv2/config.ts";
 import { AnimaPipeline } from "../src/anima/pipeline.ts";
@@ -60,7 +60,6 @@ const SOURCES = [
     source: IRODORI_V4_SMALL_CURRENT,
     repo: "hdae/karume-irodori-v4-small",
   },
-  { name: "ANIMA_TURBO_CURRENT", source: ANIMA_TURBO_CURRENT, repo: "hdae/karume-anima-turbo" },
   { name: "ANIMA_CURRENT", source: ANIMA_CURRENT, repo: "hdae/karume-anima" },
 ] as const;
 
@@ -87,14 +86,8 @@ Deno.test("irodori: IRODORI_V4_SMALL_CURRENT の pin がそのまま取得 URL �
   assertEquals(paths, [manifestPath(IRODORI_V4_SMALL_CURRENT)]);
 });
 
-Deno.test("anima: ANIMA_TURBO_CURRENT の pin がそのまま取得 URL に載る", async () => {
-  const paths = await requestedPaths((options) =>
-    AnimaPipeline.fromPretrained(ANIMA_TURBO_CURRENT, options)
-  );
-  assertEquals(paths, [manifestPath(ANIMA_TURBO_CURRENT)]);
-});
-
-// 素版 3 モデルの同居リポ（`{ model }` で 1 本を選ぶ席）。pin の MUST は turbo と同じ。
+// 公式モデル同居リポ（既定 = Turbo・既定以外は `{ model }` で選ぶ席）。旧
+// ANIMA_TURBO_CURRENT は廃止（2026-09-01・breaking — anima/config.ts の NOTE）。
 Deno.test("anima: ANIMA_CURRENT の pin がそのまま取得 URL に載る", async () => {
   const paths = await requestedPaths((options) =>
     AnimaPipeline.fromPretrained(ANIMA_CURRENT, options)

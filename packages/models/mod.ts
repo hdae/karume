@@ -65,7 +65,7 @@ export { approximatePreview } from "./src/anima/preview.ts";
  */
 export { animaLatents, denormalizeLatents } from "./src/anima/latents.ts";
 /** このパッケージ版が検証した取得元（`./anima` を参照 — 追従したい場合のオプトイン）。 */
-export { ANIMA_CURRENT, ANIMA_TURBO_CURRENT } from "./src/anima/config.ts";
+export { ANIMA_CURRENT } from "./src/anima/config.ts";
 
 export { IrodoriPipeline } from "./src/irodori/pipeline.ts";
 export type {

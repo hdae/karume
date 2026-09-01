@@ -1,7 +1,7 @@
 /**
  * 評価用サンプル画像 4 枚を **再現可能な形で**焼き直す台本（SigLIP2 の実画像 e2e が読む）。
  *
- *     deno task demo:eval-images --source models/karume-anima-turbo
+ *     deno task demo:eval-images --source models/karume-anima
  *
  * 中身は `examples/anima/main.ts` を seed とプロンプトを変えて 4 回呼ぶだけ。**プロンプト /
  * seed / 解像度の正本はこのファイル**で、生成物は `outputs/bench/<model>/<日付>_eval-images/`

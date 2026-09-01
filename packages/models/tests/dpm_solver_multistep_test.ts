@@ -21,7 +21,7 @@ import { dpmSolverMultistepStep, needsUncond } from "../src/generation/dpm-solve
  */
 const TOLERANCE = 4e-6;
 
-/** `models/karume-anima-turbo/karume.json` の `pipelineConfig.scheduler.shift` と同じ値。 */
+/** `models/karume-anima/karume.json` の `pipelineConfig.scheduler.shift` と同じ値。 */
 const SHIFT = 3;
 
 type Series = {

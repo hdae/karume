@@ -26,7 +26,7 @@
  * ## 越境参照は隣のミラーから配る
  *
  * 配布形は自リポの外を指せる（`FileRef` の `repo` / `revision` — ADR 0038 §7。例:
- * `karume-anima-turbo` の `text_encoder` は `hdae/karume-anima` の 1 commit を指す）。取得層は
+ * `karume-anima-extra` の text stack は `hdae/karume-anima` の 1 commit を指す）。取得層は
  * その 1 本を**セッションの (repo, SHA) ではなく宣言された (repo, revision) から**取りに来る
  * ので、1 組しか名乗らないサーバでは越境ぶんが丸ごと 404 になる。そこで配信表を
  * 「(repo, revision) → 配信ディレクトリ」の**複数エントリ**にし、越境先は **repo 名の最終要素と

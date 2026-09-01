@@ -8,9 +8,8 @@
  * 縮退すると、配布者の意図した既定と実行が食い違ったまま気づけない）。
  * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
  *
- * NOTE: 公開配布リポの pin 定数（{@link ANIMA_TURBO_CURRENT} / {@link ANIMA_CURRENT}）も
- * ここに置く。manifest から導ける値ではなく「どの manifest を取りに行くか」の側なので、
- * 配布形が持てない（ADR 0073）。
+ * NOTE: 公開配布リポの pin 定数（{@link ANIMA_CURRENT}）もここに置く。manifest から導ける
+ * 値ではなく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -22,8 +21,10 @@ export const ANIMA_PIPELINE_NAME = "anima";
 export const ANIMA_PIPELINE_MAJOR = 1;
 
 /**
- * `hdae/karume-anima-turbo`（turbo 1 モデル）を**このパッケージ版が検証した取得元**
- * （pin 済み commit SHA — ADR 0073）。
+ * `hdae/karume-anima`（公式モデルが**同居する**リポ — 再構造後は Turbo / Base / Aesthetic の
+ * 3 変種・既定 = Turbo）を**このパッケージ版が検証した取得元**（pin 済み commit SHA —
+ * ADR 0073）。1 リポ = 複数モデルなので、リポ参照だけでは 1 本に決まらない —
+ * 既定以外を使うときは `fromPretrained(ANIMA_CURRENT, { model })` と綴る。
  *
  * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
  * 固定したい場合は、この定数ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
@@ -33,22 +34,11 @@ export const ANIMA_PIPELINE_MAJOR = 1;
  * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
  * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
  * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...ANIMA_TURBO_CURRENT, revision: "main" }` を明示的に選ぶ。
- */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
-export const ANIMA_TURBO_CURRENT = {
-  repo: "hdae/karume-anima-turbo",
-  revision: "bb820ad62f96fdec0250c7ba7a3499f88897a12b",
-} as const satisfies HubRepoRef;
-
-/**
- * `hdae/karume-anima`（素版〈非 turbo〉3 モデルが**同居する**リポ）を**このパッケージ版が
- * 検証した取得元**（pin 済み commit SHA — ADR 0073）。1 リポ = 3 モデルなので、リポ参照だけ
- * では 1 本に決まらない — `fromPretrained(ANIMA_CURRENT, { model })` と綴る。
+ * `{ ...ANIMA_CURRENT, revision: "main" }` を明示的に選ぶ。
  *
- * 位置づけと MUST は {@link ANIMA_TURBO_CURRENT} と同じ（パッケージ版への自動追従が要る
- * ときのオプトインで、pin は commit SHA 固定）。
+ * NOTE: 旧 `ANIMA_TURBO_CURRENT`（hdae/karume-anima-turbo — LoRA 焼き込みの旧 turbo 専用
+ * リポ）は廃止（2026-09-01 裁定・breaking）。公式 Turbo checkpoint（anima-turbo-v1.1）が
+ * このリポの既定モデルとして同居する形に統合された。
  */
 // NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
 // SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。

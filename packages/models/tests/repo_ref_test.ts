@@ -28,14 +28,14 @@ import { AnimaPipeline } from "../src/anima/pipeline.ts";
 Deno.test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択で落ちる", () => {
   // JS からの引数なし呼び出しの形（TS では型検査が先に落とす）。
   const error = assertThrows(
-    () => toRepoRef(undefined, "AnimaPipeline.fromPretrained", "ANIMA_TURBO_CURRENT"),
+    () => toRepoRef(undefined, "AnimaPipeline.fromPretrained", "ANIMA_CURRENT"),
     Error,
     "repo が必須",
   );
   // 主語（どの入口が落ちたか）と記述例 2 択が揃っていること。
   assertStringIncludes(error.message, "AnimaPipeline.fromPretrained");
   assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40 桁の commit SHA>" }');
-  assertStringIncludes(error.message, "ANIMA_TURBO_CURRENT");
+  assertStringIncludes(error.message, "ANIMA_CURRENT");
 });
 
 Deno.test("toRepoRef: 公開配布リポを持たないファミリには定数を案内しない", () => {
