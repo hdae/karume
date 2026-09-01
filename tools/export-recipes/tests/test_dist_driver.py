@@ -15,8 +15,8 @@ import pytest
 
 import dist
 from _shared.paths import DIST_ROOT, SERIES_ROOT
-from anima.distribution import BASE_PIPELINE as ANIMA_BASE_PIPELINE
-from anima.distribution import TURBO_PIPELINE as ANIMA_TURBO_PIPELINE
+from anima.distribution import EXTRA_PIPELINE as ANIMA_EXTRA_PIPELINE
+from anima.distribution import OFFICIAL_PIPELINE as ANIMA_OFFICIAL_PIPELINE
 from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
 from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
@@ -30,8 +30,8 @@ from vowel_detector.distribution import PIPELINE as VOWEL_DETECTOR_PIPELINE
 #: 配布 recipe を持つ family の全量（名前 → その family が公開する `PIPELINE`）。
 #: **ここが受理集合の期待値**で、`dist.PIPELINES` の載せ忘れも余剰も 1 つの表で検出する。
 RECIPE_PIPELINES = {
-    "anima": ANIMA_BASE_PIPELINE,
-    "anima-turbo": ANIMA_TURBO_PIPELINE,
+    "anima": ANIMA_OFFICIAL_PIPELINE,
+    "anima-extra": ANIMA_EXTRA_PIPELINE,
     "sbv2": SBV2_PIPELINE,
     "irodori": IRODORI_PIPELINE,
     "siglip2": SIGLIP2_PIPELINE,
@@ -66,6 +66,19 @@ class TestRegistry:
         """旧 `karume dist`（引数なし）の UX をドライバ側で維持する。"""
         assert dist.DEFAULT_PIPELINE == "anima"
         assert dist.DEFAULT_PIPELINE in dist.PIPELINES
+
+    def test_the_two_anima_repositories_stay_separate_pipelines(self) -> None:
+        """公式（`anima`）と追加学習（`anima-extra`）は**別の席**（ADR 0087 の分割軸）。
+
+        `root_files` は Pipeline に固定で載る 1 組なので、1 つに畳むとどちらかのリポの
+        改変告知が中身と食い違う — 散文としては妥当なままなので `verify_dist` も manifest
+        検査も素通りし、配ってからでないと誰も気づけない。
+        """
+        official = dist.PIPELINES["anima"]
+        extra = dist.PIPELINES["anima-extra"]
+
+        assert official is not extra
+        assert official.root_files["NOTICE.md"] != extra.root_files["NOTICE.md"]
 
     def test_every_pipeline_renders_its_own_model_card(self) -> None:
         """カードは pipeline ごとのテンプレート — 描き手が他 pipeline の manifest を拒む。"""

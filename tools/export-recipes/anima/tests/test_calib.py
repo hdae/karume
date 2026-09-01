@@ -43,10 +43,21 @@ from anima.distribution import (
     ANIMA_BASE_MODEL_NAME,
     ANIMA_MODELS,
     ANIMA_TURBO_MODEL_NAME,
-    BASE_MODELS,
     CALIB_SHIPPABLE_DEVICE,
 )
 from karume.quantize import fake_quant_int4, fake_quant_int8
+
+#: CFG を使うモデル（= guidance 1 の蒸留系以外の全量）。**列挙を書き下さずに宣言から導く**
+#: のは、モデルが増えた日に「この門を 1 度も踏まないモデル」が黙って生えないため
+#: （2026-09-01 の再構造で公式 Aesthetic と v1.0 世代が増えた実例 — ADR 0087）。名前でなく
+#: pipeline_config の guidance で分けるのは、turbo が複数版になった（anima-turbo-v1.0 /
+#: v1.1）ため。
+CFG_MODELS = tuple(
+    name
+    for name, spec in ANIMA_MODELS.items()
+    if spec.pipeline_config["defaults"]["guidanceScale"] != 1
+)
+TURBO_LIKE_MODELS = tuple(name for name in ANIMA_MODELS if name not in CFG_MODELS)
 
 #: 量子化軸（= group 長）。i4 は端数 group を作らない（ADR 0069 決定 2）。
 HIDDEN = 32
@@ -443,15 +454,18 @@ class TestCalibConditions:
     """
 
     def test_turbo_derives_what_the_module_constants_used_to_hold(self) -> None:
-        """MUST: turbo の校正条件は据え置き（丸め結果が動くと配布済みの資産と食い違う）。"""
-        conditions = calib.calib_conditions(ANIMA_TURBO_MODEL_NAME)
+        """MUST: turbo 系の校正条件は据え置き（丸め結果が動くと配布済みの資産と食い違う）。"""
+        assert TURBO_LIKE_MODELS, "蒸留系のモデルが 1 つも無い（テストが空振りしている）"
+        for model in TURBO_LIKE_MODELS:
+            conditions = calib.calib_conditions(model)
 
-        assert (conditions.steps, conditions.guidance) == (8, 1.0)
-        assert conditions.branches == 1, "CFG=1 は uncond 分岐を計算しない"
+            assert (conditions.steps, conditions.guidance) == (8, 1.0), model
+            assert conditions.branches == 1, "CFG=1 は uncond 分岐を計算しない"
 
-    def test_the_plain_models_derive_their_cfg_conditions(self) -> None:
-        """素版 3 モデルは多 step + CFG — 1 step が forward 2 本になる。"""
-        for model in BASE_MODELS:
+    def test_the_cfg_models_derive_their_cfg_conditions(self) -> None:
+        """Turbo 以外は多 step + CFG — 1 step が forward 2 本になる。"""
+        assert CFG_MODELS, "CFG を使うモデルが 1 つも無い（テストが空振りしている）"
+        for model in CFG_MODELS:
             conditions = calib.calib_conditions(model)
 
             assert (conditions.steps, conditions.guidance) == (20, 4.0), model

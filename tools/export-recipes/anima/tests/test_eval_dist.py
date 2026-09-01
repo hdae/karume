@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -150,9 +151,20 @@ class TestEvalPlan:
         with pytest.raises(DistError):
             eval_dist.eval_plan(tmp_path / "series", MODEL)
 
-    def test_turbo_is_refused(self, tmp_path):
-        """turbo は配布で i4 席を持つ — 視認したいなら `dist.py` の配布経路がそのまま使える。"""
+    def test_an_unknown_model_is_refused(self, tmp_path):
+        """知らない名前は選択肢を並べて落とす（受理集合 = ANIMA_MODELS）。"""
         with pytest.raises(DistError, match="視認評価の対象外"):
+            eval_dist.eval_plan(tmp_path / "series", "anima-nonexistent")
+
+    def test_a_model_with_a_shipped_i4_seat_is_refused(self, tmp_path, monkeypatch):
+        """配布へ i4 席が戻ったモデルは配布経路で組む — この口では受けない。
+
+        2026-09-01 の裁定で配布の i4 席は全モデルから消えた（旧 fused turbo の席も持ち越さ
+        ない）ので、実在のモデルではこの分岐を踏めない — i4 席を注入した spec で機構を守る。
+        """
+        spec = replace(anima_model(ANIMA_TURBO_MODEL_NAME), storages=("f16", "i8", "i4"))
+        monkeypatch.setattr(eval_dist, "anima_model", lambda name: spec)
+        with pytest.raises(DistError, match="既に配布で i4 席を持っている"):
             eval_dist.eval_plan(tmp_path / "series", ANIMA_TURBO_MODEL_NAME)
 
     def test_the_default_output_never_lands_in_the_distribution_root(self):
@@ -194,27 +206,39 @@ class TestEndToEnd:
 class TestShippingRefusesTheVariant:
     """取り違えのもう片方向: 変種の記録は**配布の**組み立てで落ちる。
 
-    素版は i4 席そのものが配布から外れているので、この網が効くのは i4 席を持つ turbo。
-    席が将来素版へ戻っても同じ 1 実装が掛かる（判定は `spec.calib_method` 1 箇所）。
+    2026-09-01 の裁定で配布の i4 席は全モデルから消えたので、実在の spec ではこの網を
+    踏めない — i4 席を注入した spec と系列で機構を守る。席が将来どのモデルへ戻っても
+    同じ 1 実装が掛かる（判定は `spec.calib_method` 1 箇所）。
     """
 
-    def test_a_variant_record_fails_the_shipping_gate(self, tmp_path):
+    def _i4_seat(self, tmp_path):
         model = ANIMA_TURBO_MODEL_NAME
+        spec = replace(anima_model(model), storages=(*anima_model(model).storages, "i4"))
         sources = anima_sources(tmp_path / "series", model)
+        sources = replace(
+            sources,
+            transformer={
+                **sources.transformer,
+                "i4": tmp_path / "series" / f"{model}-i4-dyn",
+            },
+        )
+        return model, sources, spec
+
+    def test_a_variant_record_fails_the_shipping_gate(self, tmp_path):
+        model, sources, spec = self._i4_seat(tmp_path)
         _write(
             sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE,
             _calib_record(ADALN_I8_CALIB_METHOD, model),
         )
 
         with pytest.raises(DistError, match="配布して良い丸め方式で作られていない"):
-            assert_calib_provenance(sources, anima_model(model))
+            assert_calib_provenance(sources, spec)
 
     def test_the_shipping_gate_still_accepts_the_default_record(self, tmp_path):
-        model = ANIMA_TURBO_MODEL_NAME
-        sources = anima_sources(tmp_path / "series", model)
+        model, sources, spec = self._i4_seat(tmp_path)
         _write(
             sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE,
             _calib_record(CALIB_SHIPPABLE_METHOD, model),
         )
 
-        assert_calib_provenance(sources, anima_model(model))
+        assert_calib_provenance(sources, spec)

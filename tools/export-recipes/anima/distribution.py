@@ -4,8 +4,8 @@
 `karume.dist` が持つ。ここが持つのは **Anima 固有の事実**だけ: どの系列ディレクトリから
 何を拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
 
-公開面は Pipeline 2 つ（{@link TURBO_PIPELINE} / {@link BASE_PIPELINE}）— リポの dist ドライバ
-（`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
+公開面は Pipeline 2 つ（{@link OFFICIAL_PIPELINE} / {@link EXTRA_PIPELINE} — ADR 0087）—
+リポの dist ドライバ（`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
 """
 
 from __future__ import annotations
@@ -20,11 +20,8 @@ from typing import Any
 from _shared.calib_provenance import calib_complaint
 from anima.card import (
     ATTRIBUTION_NOTICE,
-    LORA_NAME,
-    LORA_SHA256,
-    LORA_SOURCE,
     render_base_card,
-    render_model_card,
+    render_extra_card,
 )
 from karume.dist import (
     Artifact,
@@ -39,13 +36,22 @@ from karume.dist import (
     sha256_file,
 )
 
-#: turbo LoRA を焼き込んだ配布物のモデル名（= そのリポの既定モデル）。焼いてあることを
-#: 名前に出す。
-ANIMA_TURBO_MODEL_NAME = "anima-turbo"
+#: 公式 Turbo 変種のモデル名（= 公式リポの既定モデル — 上流 README が「まず Turbo を」と
+#: 推奨・2026-09-01 裁定）。上流の名乗りをそのまま使う（ADR 0077）。旧 `anima-turbo`
+#: （turbo LoRA v0.2 を焼き込んだ配布物・hdae/karume-anima-turbo）はこの公式 checkpoint 版で
+#: 置き換えられ、受理集合から退役した（2026-09-01 — 焼き込み由来の旧系列
+#: `outputs/series/anima-turbo-*-dyn` は `lora_provenance.json` を持つので、誤って新しい席へ
+#: 挿すと {@link assert_lora_provenance} が落とす）。
+ANIMA_TURBO_MODEL_NAME = "anima-turbo-v1.1"
 
-#: 素の base（LoRA を焼いていない）配布物のモデル名。多 step + CFG で使う席で、negative
-#: prompt が効くのはこちらだけ（turbo は CFG=1 運用なので uncond 側を計算しない）。
+#: 素の base 配布物のモデル名。多 step + CFG で使う席で、negative prompt が効くのは
+#: この系（base / aesthetic / extra）だけ（turbo は CFG=1 運用なので uncond 側を計算しない）。
 ANIMA_BASE_MODEL_NAME = "anima-v1.0"
+
+#: 公式 Aesthetic 変種のモデル名（base を高品質画風へ fine-tune した公式版 — 上流の名乗り
+#: そのまま）。text_conditioner は base と f16 丸め後も 64 テンソル差が残る実測
+#: （2026-09-01）から自前で持つ。
+ANIMA_AESTHETIC_MODEL_NAME = "anima-aesthetic-v1.1"
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。
 ANIMA_PIPELINE = "anima/1"
@@ -153,26 +159,25 @@ def notice_markdown(modifications: tuple[str, ...]) -> str:
     )
 
 
-TURBO_NOTICE_MARKDOWN = notice_markdown(
+#: 公式リポ（karume-anima — CircleStone の 3 変種同居）の告知。
+#: 旧 base 告知の「int4 series を足した」は i4 席の無い現物と食い違っていた（2026-09-01 に
+#: 是正 — 全モデル i4 なしへ揃えた同日裁定で int4 の行自体が消えた。旧 turbo 告知にあった
+#: LoRA 焼き込みの行も公式 checkpoint 化で消えた）。
+OFFICIAL_NOTICE_MARKDOWN = notice_markdown(
     (
-        f"- The official {LORA_NAME} ({LORA_SOURCE}) was baked into the weights at export.",
         CONTAINER_MODIFICATION,
-        "- An int8-quantized series and an int4-quantized series of the transformer were added",
-        "  alongside the f16 one.",
+        "- An int8-quantized series of the transformer was added alongside the f16 one.",
     )
 )
 
-#: base リポの告知。第三者 fine-tune の同梱は「どのモデルがそうか」を README へ委ねる形で
-#: 書く — モデルの並びは組み立ての引数で変わるのに、この文面は Pipeline に固定で載るため、
-#: 並びに依存する書き方をすると片方の組み立てで嘘になる。
-BASE_NOTICE_MARKDOWN = notice_markdown(
+#: 追加学習リポ（karume-anima-extra — 第三者 fine-tune）の告知。出所は README へ委ねる形で
+#: 書く（上の NOTE と同じ理由）。
+EXTRA_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
-        "- An int8-quantized series and an int4-quantized series of the transformer were added",
-        "  alongside the f16 one.",
-        "- Where a model in this repository is a community fine-tune of the same CircleStone",
-        "  Anima base model rather than the base model itself, its origin, author and license",
-        "  terms are stated in README.md.",
+        "- An int8-quantized series of the transformer was added alongside the f16 one.",
+        "- Every model in this repository is a community fine-tune of the CircleStone",
+        "  Anima base model; its origin, author and license terms are stated in README.md.",
     )
 )
 
@@ -334,6 +339,21 @@ ANIMA_BASE_PIPELINE_CONFIG: Mapping[str, Any] = {
     },
 }
 
+#: 公式 Aesthetic 変種の既定。CFG を使う点は base と同じ。値は**暫定で base の視認裁定
+#: （20 step / CFG 4 — 2026-08-22）を流用**している — 上流 README の一般推奨（30-50 step /
+#: CFG 4-5・Aesthetic 固有の推奨は無し）と、Aesthetic は Turbo 同様安定寄りという記述が根拠。
+#: TODO: aesthetic 自身の seed 4 本以上 × プロンプト複数の視認裁定で確定する（N2 波内 —
+#: 裁定が動いたらここだけを更新する）。
+ANIMA_AESTHETIC_PIPELINE_CONFIG: Mapping[str, Any] = {
+    "scheduler": ANIMA_SCHEDULER,
+    "defaults": {
+        "steps": 20,
+        "guidanceScale": 4,
+        "resolution": ANIMA_RESOLUTION,
+        "negativePrompt": ANIMA_NEGATIVE_PROMPT,
+    },
+}
+
 #: 各役割の safetensors ヘッダに**要求する格納 dtype**（存在検査）。実測の事故が根拠:
 #: f16 系列のつもりで `--dtype` を付け忘れた素の F32 資産は、組み立て・ロード・実行の全てを
 #: 通って**PNG の参照一致まで露見しなかった**。格納形は series ディレクトリ名でなくヘッダが正。
@@ -416,18 +436,24 @@ class AnimaModel:
     calib_method: str = CALIB_SHIPPABLE_METHOD
 
 
-#: モデル名 → 事実。リポの分かれ目でもある（{@link TURBO_MODELS} / {@link BASE_MODELS}）。
+#: モデル名 → 事実。リポの分かれ目でもある（{@link OFFICIAL_MODELS} / {@link EXTRA_MODELS}）。
 #:
-#: NOTE: base 3 モデルは **"i4" を持たない**（席とファイルが {@link anima_quants} /
+#: NOTE: 全モデルが **"i4" を持たない**（席とファイルが {@link anima_quants} /
 #: {@link anima_weights} の導出で両方消える）— i4 の視認裁定（2026-08-24）で構図分岐が大きく
-#: 配布スキップ、0.5.0 の上げ直し（2026-08-25）でも除外の裁定。復活条件 = adaLN 関連で出て
-#: いた量子化感度の高い部分の特定（系列は outputs/series/ の *-i4-dyn に温存 — 校正済み退避の
-#: series-archive は 2026-08-30 の掃除裁定で削除済み）。turbo の i4 席は別裁定で公開済みのため
-#: 維持。
+#: 配布スキップ、0.5.0 の上げ直し（2026-08-25）でも除外の裁定。旧 fused turbo だけが持って
+#: いた i4 席も公式 checkpoint 化（ADR 0087）の際に持ち越さない裁定（2026-09-01）。復活条件 =
+#: adaLN 関連で出ていた量子化感度の高い部分の特定（旧系列は outputs/series/ の *-i4-dyn に
+#: 温存 — 校正済み退避の series-archive は 2026-08-30 の掃除裁定で削除済み）。
 ANIMA_MODELS: Mapping[str, AnimaModel] = {
+    # 公式 Turbo（蒸留済み checkpoint そのもの — 旧 anima-turbo の LoRA 焼き込みは不要に
+    # なった）。lora_sha256=None は「焼いていない」の積極検査で、lora_provenance.json を持つ
+    # 旧 fused 系列の挿し込みを落とす。text_conditioner は base と f16 丸め後ビット同一の実測
+    # （2026-09-01）で共有系列を使う。旧 fused turbo が持っていた i4 席は**持ち越さない**
+    # （2026-09-01 ユーザー裁定 — 全モデル i4 なしに揃う。復活レバーは素版と同じ
+    # `anima.eval_dist`）。
     ANIMA_TURBO_MODEL_NAME: AnimaModel(
-        lora_sha256=LORA_SHA256,
-        storages=("f16", "i8", "i4"),
+        lora_sha256=None,
+        storages=("f16", "i8"),
         own_text_conditioner=False,
         pipeline_config=ANIMA_TURBO_PIPELINE_CONFIG,
     ),
@@ -436,6 +462,28 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
         storages=("f16", "i8"),
         own_text_conditioner=False,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
+    ),
+    # 公式 Aesthetic。i4 席を持たないのは素版と同じ裁定線（上の NOTE — 全モデル i4 なし）。
+    ANIMA_AESTHETIC_MODEL_NAME: AnimaModel(
+        lora_sha256=None,
+        storages=("f16", "i8"),
+        own_text_conditioner=True,
+        pipeline_config=ANIMA_AESTHETIC_PIPELINE_CONFIG,
+    ),
+    # v1.0 世代の公式 2 変種も並行配布（2026-09-01 ユーザー裁定 — バージョン間で好みが
+    # 分かれる系なので旧版へ戻る先を残す = ADR 0077 の動機そのもの）。conditioner は
+    # どちらも base と f16 丸め後 64/118 テンソル差の実測（2026-09-01）で自前。
+    "anima-turbo-v1.0": AnimaModel(
+        lora_sha256=None,
+        storages=("f16", "i8"),
+        own_text_conditioner=True,
+        pipeline_config=ANIMA_TURBO_PIPELINE_CONFIG,
+    ),
+    "anima-aesthetic-v1.0": AnimaModel(
+        lora_sha256=None,
+        storages=("f16", "i8"),
+        own_text_conditioner=True,
+        pipeline_config=ANIMA_AESTHETIC_PIPELINE_CONFIG,
     ),
     "anima-wai-v1.0": AnimaModel(
         lora_sha256=None,
@@ -453,8 +501,17 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
 
 #: リポごとの受理集合。**Pipeline が違えば直下の法的テキスト（NOTICE）も違う**ので、
 #: 取り違えて組むと「改変告知が中身と食い違うリポ」が黙って出来上がる — 計画段で落とす。
-TURBO_MODELS: tuple[str, ...] = (ANIMA_TURBO_MODEL_NAME,)
-BASE_MODELS: tuple[str, ...] = (ANIMA_BASE_MODEL_NAME, "anima-wai-v1.0", "anima-copycat-20260610")
+#: 分割の軸は**公式 / 追加学習**（2026-09-01 裁定 — ADR 0087）: 公式リポ（karume-anima）は
+#: CircleStone の 3 変種同居・既定 = Turbo、追加学習リポ（karume-anima-extra）は第三者
+#: fine-tune で text stack を公式リポへ越境参照する。
+OFFICIAL_MODELS: tuple[str, ...] = (
+    ANIMA_TURBO_MODEL_NAME,
+    ANIMA_BASE_MODEL_NAME,
+    ANIMA_AESTHETIC_MODEL_NAME,
+    "anima-turbo-v1.0",
+    "anima-aesthetic-v1.0",
+)
+EXTRA_MODELS: tuple[str, ...] = ("anima-wai-v1.0", "anima-copycat-20260610")
 
 
 @dataclass(frozen=True)
@@ -735,28 +792,29 @@ def _repo_name(model: str) -> str:
     return f"karume-{model}"
 
 
-#: `--pipeline anima-turbo` の 1 行（既存の公開リポ — 蒸留済み・8 step / CFG=1）。
-TURBO_PIPELINE = Pipeline(
+#: `--pipeline anima` の 1 行（公式リポ karume-anima — CircleStone の 3 変種同居・既定 =
+#: Turbo〈上流 README の推奨・2026-09-01 裁定〉）。
+#:
+#: MUST: extra と**別の Pipeline**にする。`root_files` は Pipeline に固定で載る 1 組なので、
+#: 1 つに畳むと改変告知がどちらかのリポで嘘になる（§3(d)(i) の要件を落とす）。
+OFFICIAL_PIPELINE = Pipeline(
     default_model=ANIMA_TURBO_MODEL_NAME,
     repo_name=_repo_name,
-    plan=lambda series_dir, model: anima_dist_plan(series_dir, model, TURBO_MODELS),
-    # 帰属は 1 通りだけ（LoRA を焼いた base 1 本）— 選択肢が無いので省略で通る。
-    card_profiles={
-        "anima-turbo": partial(render_model_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)
-    },
+    plan=lambda series_dir, model: anima_dist_plan(series_dir, model, OFFICIAL_MODELS),
+    card_profiles={"anima": partial(render_base_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)},
     # 上流ライセンスの再配布条件（§3）は配布リポ 1 つに掛かるので、読みも組み立ての回数に
     # よらず**ここで 1 回**。
-    root_files=root_files(TURBO_NOTICE_MARKDOWN),
+    root_files=root_files(OFFICIAL_NOTICE_MARKDOWN),
 )
 
-#: `--pipeline anima` の 1 行（素の base + 第三者 fine-tune — 多 step + CFG）。
-#:
-#: MUST: turbo と**別の Pipeline**にする。`root_files` は Pipeline に固定で載る 1 組なので、
-#: 1 つに畳むと改変告知が turbo 側か base 側のどちらかで嘘になる（§3(d)(i) の要件を落とす）。
-BASE_PIPELINE = Pipeline(
-    default_model=ANIMA_BASE_MODEL_NAME,
+#: `--pipeline anima-extra` の 1 行（追加学習リポ karume-anima-extra — 第三者 fine-tune。
+#: text stack は公式リポへ越境参照して組む: dist の `--ref-*` 5 指定・runbook の公開順序）。
+EXTRA_PIPELINE = Pipeline(
+    default_model="anima-wai-v1.0",
     repo_name=_repo_name,
-    plan=lambda series_dir, model: anima_dist_plan(series_dir, model, BASE_MODELS),
-    card_profiles={"anima": partial(render_base_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)},
-    root_files=root_files(BASE_NOTICE_MARKDOWN),
+    plan=lambda series_dir, model: anima_dist_plan(series_dir, model, EXTRA_MODELS),
+    card_profiles={
+        "anima-extra": partial(render_extra_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)
+    },
+    root_files=root_files(EXTRA_NOTICE_MARKDOWN),
 )

@@ -41,9 +41,9 @@ from anima.distribution import (
     ADALN_I8_CALIB_METHOD,
     ADALN_I8_TAG,
     ANIMA_BASE_MODEL_NAME,
+    ANIMA_MODELS,
     ANIMA_QUANT_ABBREVIATIONS,
-    BASE_MODELS,
-    BASE_NOTICE_MARKDOWN,
+    OFFICIAL_NOTICE_MARKDOWN,
     anima_model,
     anima_plan,
     anima_sources,
@@ -69,15 +69,13 @@ EVAL_PIPELINE = "anima-i4-adaln8-eval"
 def eval_plan(series_dir: Path, model: str) -> ModelPlan:
     """視認評価用の計画を組む（i4 席を戻し、変種の系列と丸め方式を要求する）。
 
-    MUST: 受理するのは素版（{@link anima.distribution.BASE_MODELS}）だけ。turbo は i4 席を
-    配布で持っているので、視認したいなら `dist.py` の配布経路がそのまま使える — ここへ通すと
-    「配布と同じ席名・違う中身」の turbo が理由も無く増える。
+    MUST: 受理するのは**配布で i4 席を持たない** Anima モデルだけ（2026-09-01 の全モデル
+    i4 なし裁定後は全員が該当）。将来 i4 席が配布へ戻ったモデルは `dist.py` の配布経路が
+    そのまま使えるので、ここへ通すと「配布と同じ席名・違う中身」が理由も無く増える —
+    下の storages 検査が落とす。
     """
-    if model not in BASE_MODELS:
-        raise DistError(
-            f"モデル {model!r} は視認評価の対象外（対象: {', '.join(BASE_MODELS)}）— "
-            "turbo の i4 席は配布経路（dist.py --pipeline anima-turbo）で組める"
-        )
+    if model not in ANIMA_MODELS:
+        raise DistError(f"モデル {model!r} は視認評価の対象外（対象: {', '.join(ANIMA_MODELS)}）")
     spec = anima_model(model)
     if "i4" in spec.storages:
         raise DistError(
@@ -107,9 +105,9 @@ PIPELINE = Pipeline(
     repo_name=lambda model: f"karume-{model}-{ADALN_I8_TAG}",
     plan=eval_plan,
     card_profiles={"anima": partial(render_base_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)},
-    # 法的テキストは配布形と同じものを入れる — 手元でしか開かないとはいえ、素版リポの改変告知が
+    # 法的テキストは配布形と同じものを入れる — 手元でしか開かないとはいえ、改変告知が
     # 抜けた配布形を作る練習にはしない（うっかり上げたときに落ちるのはここではない）。
-    root_files=root_files(BASE_NOTICE_MARKDOWN),
+    root_files=root_files(OFFICIAL_NOTICE_MARKDOWN),
 )
 
 

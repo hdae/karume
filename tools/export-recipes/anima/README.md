@@ -39,16 +39,14 @@ uv run --group anima python -m anima.export --target transformer --num-layers 2 
 uv run --group anima python -m anima.export --verify text_encoder
 uv run --group anima python -m anima.export --verify vae_decoder
 
-# fuse a LoRA before emitting (applies to transformer / text_conditioner)
+# fuse a LoRA before emitting (applies to transformer / text_conditioner). NOTE: since the
+# official Turbo checkpoint (anima-turbo-v1.1 — ADR 0087) no shipped series is LoRA-fused any
+# more; the mechanism stays for future fine-tune intake and as the provenance gate's subject
 uv run --group anima python -m anima.export --target transformer \
   --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors
 
 # S form (one symbol for the token length), an additional series — transformer only; the default out gets -dyn
-uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn \
-  --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
-  --out ../../outputs/series/anima-turbo-f16-dyn
-uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn --verify transformer \
-  --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors
+uv run --group anima python -m anima.export --dtype f16 --dit-graph dyn --verify transformer
 
 # the plain (no LoRA) shipping series — just drop --lora. --out is spelled out because the model
 # name carries the upstream version (ADR 0077), and the series name is derived from the model name
@@ -76,6 +74,14 @@ uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diff
 uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-wai-v1.0 \
   --dtype i4 --dit-graph dyn --model anima-wai-v1.0 \
   --out ../../outputs/series/anima-wai-v1.0-i4-dyn
+
+# the official variants (anima-aesthetic-v1.1 / anima-turbo-v1.1 — ADR 0087) are shipped by
+# CircleStone as the same kind of single ComfyUI-style file (HF circlestone-labs/Anima,
+# split_files/diffusion_models/, mirrored under inputs/anima/upstream-2458426/), so they go
+# through the same single_file → export chain. Turbo shares the base text_conditioner (measured
+# bit-identical after f16 rounding, 2026-09-01) so it skips the --target text_conditioner step;
+# Aesthetic does not (64 tensors differ) and exports its own like wai above. No model ships an
+# i4 series (the old fused turbo's i4 seat was not carried over — 2026-09-01 ruling).
 ```
 
 - **`--verify` and `--target` cannot be combined in the same process.** The VAE patches replace

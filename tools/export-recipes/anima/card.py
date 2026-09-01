@@ -46,9 +46,11 @@ ANIMA_METADATA = CardMetadata(
     tags=("text-to-image", "webgpu"),
 )
 
-ANIMA_TITLE = "Anima Turbo — Karume"
+#: 公式リポ（karume-anima — CircleStone の 3 変種同居）のタイトル。
+ANIMA_OFFICIAL_TITLE = "Anima — Karume"
 
-ANIMA_BASE_TITLE = "Anima — Karume"
+#: 追加学習リポ（karume-anima-extra — 第三者 fine-tune）のタイトル。
+ANIMA_EXTRA_TITLE = "Anima Extra — Karume"
 
 
 @dataclass(frozen=True)
@@ -72,14 +74,45 @@ class UpstreamModel:
 #: 許諾欄を実地確認した日（カードに「as of」で出す — 後から変わりうる事実だから）。
 PERMISSIONS_RETRIEVED = "2026-08-22"
 
-#: モデル名 → 出所。`anima` は base そのものなので civitai の許諾欄を持たない
-#: （掛かるのは CircleStone のライセンス 1 本だけ）。
+#: モデル名 → 出所。CircleStone 公式（base / aesthetic / turbo）は civitai の許諾欄を
+#: 持たない — 掛かるのは CircleStone のライセンス 1 本だけ。公式変種の単一ファイル
+#: checkpoint は HF `circlestone-labs/Anima`（civitai 2458426 と同一バイト配布）から。
 UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
+    "anima-turbo-v1.1": UpstreamModel(
+        title="Anima Turbo v1.1",
+        author="circlestone_labs",
+        source="https://huggingface.co/circlestone-labs/Anima",
+        file="anima-turbo-v1.1.safetensors",
+        permissions=(),
+    ),
     "anima-v1.0": UpstreamModel(
         title="Anima Base v1.0",
         author="circlestone_labs",
         source="https://huggingface.co/circlestone-labs/Anima-Base-v1.0-Diffusers",
         file=None,
+        permissions=(),
+    ),
+    "anima-aesthetic-v1.1": UpstreamModel(
+        title="Anima Aesthetic v1.1",
+        author="circlestone_labs",
+        source="https://huggingface.co/circlestone-labs/Anima",
+        file="anima-aesthetic-v1.1.safetensors",
+        permissions=(),
+    ),
+    # v1.0 世代も並行配布する（2026-09-01 ユーザー裁定 — この系はバージョン間で好みが
+    # 分かれるため。ADR 0077 の「最新が優れるとは限らない」の実例）。
+    "anima-turbo-v1.0": UpstreamModel(
+        title="Anima Turbo v1.0",
+        author="circlestone_labs",
+        source="https://huggingface.co/circlestone-labs/Anima",
+        file="anima-turbo-v1.0.safetensors",
+        permissions=(),
+    ),
+    "anima-aesthetic-v1.0": UpstreamModel(
+        title="Anima Aesthetic v1.0",
+        author="circlestone_labs",
+        source="https://huggingface.co/circlestone-labs/Anima",
+        file="anima-aesthetic-v1.0.safetensors",
         permissions=(),
     ),
     "anima-wai-v1.0": UpstreamModel(
@@ -131,86 +164,60 @@ RESOLUTION_NOTE = (
 #: 折り返した日にもう片方のカード本文まで動く）。
 CFG_NOTE = "  // Classifier-free guidance runs a second (uncond) branch — twice the work per step."
 
-#: 焼き込んだ LoRA（manifest には現れない — 重みの中に畳まれているため）。
-LORA_NAME = "Anima Turbo LoRA v0.2"
-LORA_AUTHOR = "circlestone_labs"
-LORA_SOURCE = "https://civitai.com/models/2560840?modelVersionId=2979642"
-LORA_FILE = "anima-turbo-lora-v0.2.safetensors"
-LORA_SHA256 = "1b55e40bdb1d0e5a78cb498f245fccfdaae97823265db957d2aabdcf4cd3caf1"
-#: 出所の権限欄（実地確認: https://civitai.com/api/v1/models/2560840）。
-LORA_PERMISSIONS = (
-    ("allowNoCredit", "true"),
-    ("allowCommercialUse", "Image / RentCivit / Rent"),
-    ("allowDerivatives", "true"),
-    ("allowDifferentLicense", "true"),
-)
 
-
-def _overview(manifest: Mapping[str, Any]) -> list[str]:
+def _official_overview(manifest: Mapping[str, Any]) -> list[str]:
+    model_name = manifest["defaultModel"]
     defaults = default_model(manifest)["pipelineConfig"]["defaults"]
     base_model = ANIMA_METADATA.base_model[0]
-    return [
+    lines = [
         "## What is this",
         "",
-        f"A distribution that bakes **{LORA_NAME}** into"
-        f" [{base_model}](https://huggingface.co/{base_model}) and converts it into the WebGPU",
-        "inference runtime **Karume**'s container format (safetensors = weights + a graph JSON",
-        "embedded in `__metadata__`, split across numbered shards when a component is too large",
-        "for one file). Runs as-is in the browser and in Deno.",
+        "The official CircleStone **Anima** models —"
+        f" [{base_model}](https://huggingface.co/{base_model}) and its official variants —",
+        "converted into the WebGPU inference runtime **Karume**'s container format (safetensors =",
+        "weights + a graph JSON embedded in `__metadata__`, split across numbered shards when a",
+        "component is too large for one file). Runs as-is in the browser and in Deno.",
         "",
-        f"- A few-step distillation (from the LoRA) tuned for **{defaults['steps']} steps /"
-        f" guidance {defaults['guidanceScale']}**.",
+        f"- The default model is `{model_name}` — **{defaults['steps']} steps / guidance"
+        f" {defaults['guidanceScale']}** by default.",
+    ]
+    if defaults["guidanceScale"] == 1:
+        lines += [
+            "  At guidance 1 the second CFG branch is skipped and **the negative prompt is not"
+            " used** —",
+            "  pick a model that runs classifier-free guidance (see the model list below) when"
+            " you want",
+            "  the negative prompt to take effect.",
+        ]
+    lines += [
         "- Not readable by diffusers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
         f" is `karume.json` (`{manifest['format']}`).",
     ]
+    return lines
 
 
-def _merged_lora() -> list[str]:
+def _extra_overview(manifest: Mapping[str, Any]) -> list[str]:
+    defaults = default_model(manifest)["pipelineConfig"]["defaults"]
+    base_model = ANIMA_METADATA.base_model[0]
     return [
-        "## Baked-in LoRA",
+        "## What is this",
         "",
-        "Folded into the weights — not distributed as a separate file.",
+        "Community fine-tunes of the CircleStone **Anima** base model"
+        f" ([{base_model}](https://huggingface.co/{base_model})),",
+        "converted into the WebGPU inference runtime **Karume**'s container format (safetensors =",
+        "weights + a graph JSON embedded in `__metadata__`, split across numbered shards when a",
+        "component is too large for one file). Runs as-is in the browser and in Deno.",
         "",
-        f"- **Name**: {LORA_NAME}",
-        f"- **Author**: {LORA_AUTHOR} (same author as the base model)",
-        f"- **Source**: {LORA_SOURCE}",
-        f"- **File**: `{LORA_FILE}`",
-        f"- **sha256**: `{LORA_SHA256}`",
-        "",
-        "Permissions listed on the source page (as of retrieval):",
-        "",
-        *(f"- `{name}`: {value}" for name, value in LORA_PERMISSIONS),
-        "",
-        "(These are the LoRA page's own permissions. The merged distribution in this",
-        "repository stays under the CircleStone Non-Commercial License — see the License"
-        " section below.)",
-    ]
-
-
-def _license() -> list[str]:
-    """ライセンス節 — 上流の再配布条件（§3(a) / (b) / (d)）を配布形のどこで満たしているか。
-
-    Notice の本文はカードにも**逐語で**出す: §3(b) は「Distribution と並べて目立つように
-    掲示する」ことを求めており、HF のリポジトリで最初に読まれるのはこのカードなので、
-    同梱の `NOTICE.md` を指すだけでは掲示したことにならない。
-    """
-    return [
-        "## License",
-        "",
-        "The weights derive from the CircleStone Anima base model and stay under the CircleStone",
-        "Non-Commercial License (non-commercial use only). This repository ships `LICENSE.md`"
-        " (the full",
-        "license text) and `NOTICE.md` (this attribution plus the list of modifications).",
-        "",
-        ATTRIBUTION_NOTICE,
-        "",
-        f"- Baked-in LoRA: the official {LORA_NAME} ([source]({LORA_SOURCE})), folded into the"
-        " weights at export.",
-        "- This is not an official product of CircleStone Labs LLC, and it is not endorsed,"
-        " approved or",
-        "  validated by CircleStone Labs LLC.",
+        f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
+        f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
+        "  what makes the **negative prompt take effect**. The official models (base / Aesthetic /",
+        "  Turbo) live in [hdae/karume-anima](https://huggingface.co/hdae/karume-anima).",
+        "- Not readable by diffusers (it's a different container with an embedded graph); the"
+        f" reader is a pipeline that implements `{SUPPORTED_PIPELINE}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
+        f" is `karume.json` (`{manifest['format']}`).",
     ]
 
 
@@ -234,7 +241,7 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     resolution = defaults["resolution"]
     guidance = defaults["guidanceScale"]
     steps_note = (
-        "the baked-in LoRA is distilled for few-step sampling"
+        "the model is distilled for few-step sampling"
         if guidance == 1
         else "more steps trade time for detail"
     )
@@ -314,29 +321,7 @@ def _defaults(model: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _base_overview(manifest: Mapping[str, Any]) -> list[str]:
-    defaults = default_model(manifest)["pipelineConfig"]["defaults"]
-    base_model = ANIMA_METADATA.base_model[0]
-    return [
-        "## What is this",
-        "",
-        f"[{base_model}](https://huggingface.co/{base_model}) — and community fine-tunes of it —",
-        "converted into the WebGPU inference runtime **Karume**'s container format (safetensors =",
-        "weights + a graph JSON embedded in `__metadata__`, split across numbered shards when a",
-        "component is too large for one file). Runs as-is in the browser and in Deno.",
-        "",
-        f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
-        f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",
-        "  what makes the **negative prompt take effect**. For a few-step distilled build see",
-        "  [hdae/karume-anima-turbo](https://huggingface.co/hdae/karume-anima-turbo).",
-        "- Not readable by diffusers (it's a different container with an embedded graph); the"
-        f" reader is a pipeline that implements `{SUPPORTED_PIPELINE}`.",
-        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
-        f" is `karume.json` (`{manifest['format']}`).",
-    ]
-
-
-def _origins(manifest: Mapping[str, Any]) -> list[str]:
+def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
     """モデルごとの出所（**このリポに入っているモデルだけ**を manifest から引いて並べる）。
 
     MUST: 並びは manifest 由来にする — 出所の表を組み立ての引数と独立に持つと、モデルを
@@ -350,8 +335,7 @@ def _origins(manifest: Mapping[str, Any]) -> list[str]:
     lines = [
         "## Models and their origins",
         "",
-        "Each model below is either the CircleStone Anima base model itself or a community",
-        "fine-tune of it. The text encoder, VAE and tokenizers are shared across them.",
+        *intro,
     ]
     for name in manifest["models"]:
         upstream = UPSTREAM_MODELS.get(name)
@@ -398,6 +382,9 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
         "",
         ATTRIBUTION_NOTICE,
         "",
+        "- Outputs you generate are yours to use for any purpose, including commercially",
+        "  (license §2(e)); the non-commercial restriction applies to the model weights and",
+        "  derivatives, not to outputs.",
     ]
     if fine_tunes:
         lines += [
@@ -420,10 +407,23 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def render_model_card(
+#: 出所節の導入（リポごとに事実が違う — 公式 / 追加学習）。
+OFFICIAL_ORIGINS_INTRO = (
+    "Each model below is an official CircleStone release — the Anima base model itself or an",
+    "official variant of it. The text encoder, VAE and tokenizers are shared across them.",
+)
+EXTRA_ORIGINS_INTRO = (
+    "Each model below is a community fine-tune of the CircleStone Anima base model. The text",
+    "encoder, VAE and tokenizers are shared with the official repository",
+    "([hdae/karume-anima](https://huggingface.co/hdae/karume-anima)) through pinned",
+    "cross-repository references in `karume.json`.",
+)
+
+
+def render_base_card(
     manifest: Mapping[str, Any], repo: str, abbreviations: Mapping[str, str]
 ) -> str:
-    """Anima Turbo 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+    """公式リポ（CircleStone の 3 変種同居）配布形の `README.md` 本文。
 
     `abbreviations` は席名の部品上書きトークンの対応表（正本は `anima.distribution` —
     ADR 0074 決定 4）。manifest に無い事実なので、定数として写さず引数で受ける。
@@ -432,12 +432,12 @@ def render_model_card(
     return render(
         (
             frontmatter(ANIMA_METADATA),
-            ["", f"# {ANIMA_TITLE}", ""],
-            _overview(manifest),
+            ["", f"# {ANIMA_OFFICIAL_TITLE}", ""],
+            _official_overview(manifest),
             [""],
-            _merged_lora(),
+            _origins(manifest, OFFICIAL_ORIGINS_INTRO),
             [""],
-            _license(),
+            _base_license(manifest),
             [""],
             models(manifest),
             [""],
@@ -450,18 +450,18 @@ def render_model_card(
     )
 
 
-def render_base_card(
+def render_extra_card(
     manifest: Mapping[str, Any], repo: str, abbreviations: Mapping[str, str]
 ) -> str:
-    """素の base 系（LoRA 無し + 第三者 fine-tune）配布形の `README.md` 本文。"""
+    """追加学習リポ（第三者 fine-tune）配布形の `README.md` 本文。"""
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (
             frontmatter(ANIMA_METADATA),
-            ["", f"# {ANIMA_BASE_TITLE}", ""],
-            _base_overview(manifest),
+            ["", f"# {ANIMA_EXTRA_TITLE}", ""],
+            _extra_overview(manifest),
             [""],
-            _origins(manifest),
+            _origins(manifest, EXTRA_ORIGINS_INTRO),
             [""],
             _base_license(manifest),
             [""],

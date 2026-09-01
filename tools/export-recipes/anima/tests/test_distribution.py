@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,30 +31,37 @@ from shard_series import (
     write_component,
 )
 
-from anima.card import ATTRIBUTION_NOTICE, LORA_NAME, LORA_SHA256, LORA_SOURCE
+from anima.card import ATTRIBUTION_NOTICE
 from anima.distribution import (
+    ANIMA_AESTHETIC_MODEL_NAME,
+    ANIMA_BASE_MODEL_NAME,
     ANIMA_DEFAULT_QUANT,
+    ANIMA_MODELS,
     ANIMA_QUANT_ABBREVIATIONS,
     ANIMA_QUANTS,
     ANIMA_STORAGE_FORBIDDEN,
     ANIMA_TURBO_MODEL_NAME,
     ANIMA_TURBO_PIPELINE_CONFIG,
     ANIMA_WEIGHTS,
-    BASE_MODELS,
-    BASE_NOTICE_MARKDOWN,
     CALIB_PROVENANCE_FILE,
+    EXTRA_MODELS,
+    EXTRA_NOTICE_MARKDOWN,
+    EXTRA_PIPELINE,
     LICENSE_SOURCE_PATH,
     LORA_PROVENANCE_FILE,
+    OFFICIAL_MODELS,
+    OFFICIAL_NOTICE_MARKDOWN,
+    OFFICIAL_PIPELINE,
     OUTPUT_PATHS,
     STORAGE_REQUIREMENTS,
-    TURBO_MODELS,
-    TURBO_NOTICE_MARKDOWN,
-    TURBO_PIPELINE,
+    AnimaModel,
     AnimaSources,
     anima_dist_plan,
     anima_model,
     anima_plan,
+    anima_quants,
     anima_sources,
+    anima_weights,
 )
 from dist import main
 from karume.artifacts import STAGING_SUFFIX
@@ -141,11 +149,25 @@ def _write(path: Path, payload: bytes) -> None:
     path.write_bytes(payload)
 
 
-def _lora_record(sha256: str) -> bytes:
-    """`anima/export.py` が焼き込み時に残す帰属の記録（実物と同じ形）。"""
-    return json.dumps({"file": "anima-turbo-lora-v0.2.safetensors", "sha256": sha256}).encode(
-        "utf-8"
+#: 「焼いた記録」の偽値（実在の LoRA と重ならない sha256）。**どのモデルも LoRA を焼かなく
+#: なった**（2026-09-01 — 公式 Turbo checkpoint 化で焼き込みが消えた）ので、この記録は
+#: 「在ってはならないものが在る」side を作るためだけに書く。
+FAKE_LORA_SHA256 = "9" * 64
+
+
+def _bake_lora_record(series: Path, sha256: str = FAKE_LORA_SHA256) -> Path:
+    """旧 fused 系列が持っていた帰属の記録を 1 本の系列へ置く（実物と同じ形）。
+
+    旧 `anima-turbo`（LoRA 焼き込み）の系列は `outputs/series/` にまだ残っているので、
+    新しい席へ挿し込む取り違えは**実際に起こしうる**。融合済みと素の資産は形が 1 バイトも
+    変わらないので、記録の**不在**を見る門だけがこれを捕まえる。
+    """
+    path = series / "transformer" / LORA_PROVENANCE_FILE
+    _write(
+        path,
+        json.dumps({"file": "anima-turbo-lora-v0.2.safetensors", "sha256": sha256}).encode("utf-8"),
     )
+    return path
 
 
 def _calib_record(method: str, model: str) -> bytes:
@@ -174,25 +196,35 @@ def _build_series(
     series_dir: Path,
     *,
     model: str = ANIMA_TURBO_MODEL_NAME,
+    with_i4: bool = False,
     i8_rope: bytes | None = None,
     i4_rope: bytes | None = None,
     mark: bytes = b"",
-    lora_sha256: str | None = None,
     calib_method: str = "gptq",
     calib_model: str | None = None,
 ) -> AnimaSources:
     """系列レイアウト（`outputs/series/` 相当）を偽資産で再現する（`io.*` の混入込み）。
 
     `mark` は transformer 系列だけに混ぜる差分 — ファミリー組み立てで「モデルごとに違う重み」と
-    「モデル間で同一の base 資産」を作り分けるための軸。`lora_sha256` は帰属の記録を
-    カードの宣言からずらす軸（既定は一致する値）。`i8_rope` / `i4_rope` は rope 素表を
+    「モデル間で同一の base 資産」を作り分けるための軸。`i8_rope` / `i4_rope` は rope 素表を
     f16 系列からずらす軸（系列ごとに独立に振れる — 網が全系列に掛かっていることを見るため）。
     `calib_method` は i4 系列の丸め方式をずらす軸（既定は配布可の `gptq`）。`calib_model` は
     **校正条件だけ**を別モデルのものへずらす軸（`--model` を取り違えて焼いた系列 — 重みも
     格納形も正しいまま条件だけが別）。
+
+    `with_i4` は**受理集合に無い 3 本目の格納系列**を足す軸（{@link _i4_seat} の相方 —
+    i4 の機構テスト専用）。綴りは `anima_sources` と同じ `<model>-i4-dyn` で、系列を作るのは
+    ここ・席を宣言するのは spec 側という分担にしてある。
+
+    LoRA 帰属の記録は**どのモデルでも書かない**（焼き込みが消えた 2026-09-01 以降の実物と
+    同じ状態）— 記録が在る側は {@link _bake_lora_record} でテストが明示的に作る。
     """
-    spec = anima_model(model)
     sources = anima_sources(series_dir, model)
+    if with_i4:
+        sources = replace(
+            sources,
+            transformer={**sources.transformer, "i4": series_dir / f"{model}-i4-dyn"},
+        )
     write_component(sources.base / "text_encoder" / "model.safetensors", _PAYLOADS["text_encoder"])
     write_component(
         sources.text_conditioner / "text_conditioner" / "model.safetensors",
@@ -212,12 +244,6 @@ def _build_series(
         )
         write_component(series / "transformer" / "model.safetensors", payload)
         _write(series / "transformer" / "io.s01024t0699.safetensors", b"io-fixture")
-        # 焼き込んだモデルだけが帰属を残す — 素のモデルでは**記録が無いこと**が検査対象。
-        if spec.lora_sha256 is not None:
-            _write(
-                series / "transformer" / LORA_PROVENANCE_FILE,
-                _lora_record(LORA_SHA256 if lora_sha256 is None else lora_sha256),
-            )
         rope = ropes[storage]
         _write(
             series / "transformer" / "rope_base.safetensors",
@@ -234,22 +260,55 @@ def _build_series(
     return sources
 
 
+#: ファミリー組み立てのフィクスチャが並べる 2 モデル（公式リポの素版 + Aesthetic）。
+#: **同じリポに実際に同居する組**を使う — 受理集合が別リポへ分けた組み合わせで組み立てると、
+#: フィクスチャと {@link TestPipelineMembership} が別のことを言う。
+FAMILY_MODELS = (ANIMA_BASE_MODEL_NAME, ANIMA_AESTHETIC_MODEL_NAME)
+
+
+#: 配布の i4 席は**全モデルから消えた**（2026-09-01 ユーザー裁定 — 旧 fused turbo が持って
+#: いた最後の 1 席も公式 checkpoint 化で持ち越さない）。それでも i4 の**機構**は
+#: 復活レバーとしてコードに残っている（3 本目の格納系列の配置・rope 素表の系列横断突合・
+#: 校正条件の門・格納 dtype の要求と禁止・quant 席の導出）ので、席を注入した spec で
+#: 機構だけを守る。
+#:
+#: MUST: 注入は `anima_plan(..., spec=…)` の口 1 つに閉じる — {@link ANIMA_MODELS} は 1 行も
+#: 動かさない（動かすと「配布の受理集合」が実験のために揺れ、席の有無を見る門〈全モデル i4
+#: なし〉が自分のフィクスチャを検査するだけになる）。`anima.eval_dist` が視認評価で使うのと
+#: **同じ口**なので、機構が外れれば向こうも一緒に落ちる。
+def _i4_seat(model: str = ANIMA_TURBO_MODEL_NAME) -> AnimaModel:
+    spec = anima_model(model)
+    assert "i4" not in spec.storages, "配布の受理集合に i4 席が戻っている（注入が要らない）"
+    return replace(spec, storages=(*spec.storages, "i4"))
+
+
 def _assemble_anima(
-    sources: AnimaSources, out_dir: Path, model: str = ANIMA_TURBO_MODEL_NAME
+    sources: AnimaSources,
+    out_dir: Path,
+    model: str = ANIMA_TURBO_MODEL_NAME,
+    *,
+    spec: AnimaModel | None = None,
 ) -> dict[str, Any]:
-    """単一モデルの組み立て（計画 → 実体化）を 1 行で回すテスト用の糊。"""
-    return assemble_family([anima_plan(sources, model)], out_dir, model)
+    """単一モデルの組み立て（計画 → 実体化）を 1 行で回すテスト用の糊。
+
+    `spec` は席を差し替える口（省略時はモデル名から引く = 配布経路）— 渡すのは i4 の機構を
+    見るテストだけで、{@link _i4_seat} が作った「i4 席を足した spec」が入る。
+    """
+    return assemble_family([anima_plan(sources, model, spec=spec)], out_dir, model)
 
 
-def _in_subtree(model: str, paths: Iterable[str] | None = None) -> list[str]:
+def _in_subtree(
+    model: str, paths: Iterable[str] | None = None, *, storages: tuple[str, ...] | None = None
+) -> list[str]:
     """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。
 
     省略時はそのモデルが**宣言した格納形だけ**（i4 席を持たないモデルに i4 のファイルは出ない）
     を、配布形に現れる形へ展開する — weights の 5 役は shard 連番になり（ADR 0081）、
-    rope_base（extras）と tokenizer（assets）は 1 ファイルのまま。
+    rope_base（extras）と tokenizer（assets）は 1 ファイルのまま。`storages` は席を注入して
+    組んだ木を見るときだけ渡す（{@link _i4_seat}）。
     """
     if paths is None:
-        storages = anima_model(model).storages
+        storages = anima_model(model).storages if storages is None else storages
         declared = {
             role: rel
             for role, rel in OUTPUT_PATHS.items()
@@ -266,8 +325,21 @@ def _present(out_dir: Path) -> list[str]:
 @pytest.fixture
 def assembled(tmp_path: Path) -> tuple[Path, dict]:
     sources = _build_series(tmp_path / "series")
-    out_dir = tmp_path / "models" / "anima-turbo"
+    out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
     manifest = _assemble_anima(sources, out_dir)
+    return out_dir, manifest
+
+
+#: 席を注入して組んだときの格納形（{@link _i4_seat}）。
+I4_SEAT_STORAGES = ("f16", "i8", "i4")
+
+
+@pytest.fixture
+def assembled_with_i4(tmp_path: Path) -> tuple[Path, dict]:
+    """**受理集合には無い** i4 席を注入して組んだ配布形（機構の保存 — {@link _i4_seat}）。"""
+    sources = _build_series(tmp_path / "series", with_i4=True)
+    out_dir = tmp_path / "models" / "i4-seat"
+    manifest = _assemble_anima(sources, out_dir, spec=_i4_seat())
     return out_dir, manifest
 
 
@@ -288,12 +360,28 @@ class TestLayout:
         assert read_component(subtree / "model.f16.safetensors") == _PAYLOADS["transformer_f16"]
         assert read_component(subtree / "model.i8.safetensors") == _PAYLOADS["transformer_i8"]
 
-    def test_it_gives_the_i4_series_its_own_dtype_file(self, assembled) -> None:
-        """i4 は f16 / i8 と並ぶ 3 本目の格納席（同じ path へ載せると席が 1 つ消える）。"""
+    def test_no_shipped_model_places_an_i4_file(self, assembled) -> None:
+        """配布の i4 席は全モデルから消えた（2026-09-01 裁定）— ファイルも 1 本も出ない。"""
         out_dir, _ = assembled
+        assert not (out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]).exists()
+        assert not any("i4" in name for name in _present(out_dir))
+
+    def test_an_injected_i4_seat_gets_its_own_dtype_file(self, assembled_with_i4) -> None:
+        """i4 は f16 / i8 と並ぶ 3 本目の格納席（同じ path へ載せると席が 1 つ消える）。
+
+        席そのものは配布から降りたが、3 本目を別 path へ載せる**機構**は復活レバーとして
+        残っている（`anima.eval_dist` が今まさに使う経路でもある）ので、席を注入して守る。
+        """
+        out_dir, _ = assembled_with_i4
         placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]
         assert placed.name == "model.i4.safetensors"
         assert read_component(placed) == _PAYLOADS["transformer_i4"]
+        assert _present(out_dir) == sorted(
+            [
+                *_in_subtree(ANIMA_TURBO_MODEL_NAME, storages=I4_SEAT_STORAGES),
+                MANIFEST_FILENAME,
+            ]
+        )
 
     def test_a_single_model_repository_has_no_shared_directory(self, assembled) -> None:
         """`shared/` は 2 モデル以上が同じ中身を持ったときだけ現れる席（ADR 0041 §5）。"""
@@ -302,7 +390,7 @@ class TestLayout:
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        out_dir = tmp_path / "models" / "anima-turbo"
+        out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
         _assemble_anima(sources, out_dir)
         _assemble_anima(sources, out_dir)  # 既存リンクがあっても落ちない
         assert verify_dist(out_dir)
@@ -333,7 +421,7 @@ class TestPlacementStrategy:
         manifest の sha256 と現物を黙って食い違わせる。
         """
         sources = _build_series(tmp_path / "series")
-        out_dir = tmp_path / "models" / "anima-turbo"
+        out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
         _assemble_anima(sources, out_dir)
         # 書き直すのは系列の**グラフ shard**（再 export は shard ごとに truncate 上書きする）。
         source = resolve_shards(sources.base / "text_encoder" / "model.safetensors")[0]
@@ -347,7 +435,7 @@ class TestPlacementStrategy:
         for shard in resolve_shards(sources.base / "vae_decoder" / "model.safetensors"):
             shard.unlink()
         with pytest.raises(DistError, match="組み立ての入力が無い"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
 
 class TestRopeBase:
@@ -362,65 +450,93 @@ class TestRopeBase:
 
     def test_it_refuses_to_pick_a_side_when_the_series_disagree(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series", i8_rope=b"rope-base-table-DIFFERENT")
-        out_dir = tmp_path / "models" / "anima-turbo"
+        out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
         with pytest.raises(DistError, match="バイト同一でない"):
             _assemble_anima(sources, out_dir)
         # 止めた以上、途中の配布形を残さない（片方だけ入った出力を後段に見せない）。
         assert not (out_dir / MANIFEST_FILENAME).exists()
 
-    def test_the_check_reaches_the_i4_series_too(self, tmp_path: Path) -> None:
-        """網が f16 / i8 の 2 系列に留まっていると、i4 席だけ別の幾何で走って絵が静かに壊れる。"""
-        sources = _build_series(tmp_path / "series", i4_rope=b"rope-base-table-DIFFERENT")
-        out_dir = tmp_path / "models" / "anima-turbo"
+    def test_the_check_reaches_a_third_series_too(self, tmp_path: Path) -> None:
+        """網は**宣言された全系列**に掛かる（2 本目までで止まっていると 3 本目が漏れる）。
+
+        漏れた系列の quant は「別の幾何の rope 表」で走り、ロードも実行も通って絵だけが
+        静かに壊れる。3 本目は配布から降りた i4 席を注入して踏む（{@link _i4_seat}）。
+        """
+        sources = _build_series(
+            tmp_path / "series", with_i4=True, i4_rope=b"rope-base-table-DIFFERENT"
+        )
+        out_dir = tmp_path / "models" / "i4-seat"
         with pytest.raises(DistError, match="バイト同一でない"):
-            _assemble_anima(sources, out_dir)
+            _assemble_anima(sources, out_dir, spec=_i4_seat())
         assert not (out_dir / MANIFEST_FILENAME).exists()
 
 
 class TestLoraProvenance:
-    """カードが印字する LoRA の帰属は、系列に残った記録と組み立て時に突き合わせる。
+    """**どのモデルも LoRA を焼いていない**ことを、系列に記録が無いことで確かめる。
 
-    融合後の重みからは焼いた LoRA を復元できないので、突き合わせが無いと差し替え後も古い
-    sha256 が公開される — 値は 64 桁 hex として形式が妥当なので `verify_dist` の構造検査も
-    通り、配布 README の帰属だけが黙って嘘になる。
+    2026-09-01 の再構造で公式 Turbo が checkpoint 配布になり、焼き込みは受理集合から消えた
+    （`ANIMA_MODELS` の `lora_sha256` は全て `None`）。融合済みと素の資産は形が 1 バイトも
+    変わらないので、旧 fused 系列（`outputs/series/` に現存する）を新しい席へ挿し込む取り違えは
+    他のどの検査にも掛からない — 「記録が無いこと」の検査だけが唯一の網。
     """
 
-    def test_it_stops_when_the_recorded_lora_is_not_the_one_the_card_declares(
+    def test_no_model_declares_a_baked_lora_any_more(self) -> None:
+        """受理集合の側の事実（`None` = 記録の不在を積極検査する側へ全員が回る）。"""
+        assert [spec.lora_sha256 for spec in ANIMA_MODELS.values()] == [None] * len(ANIMA_MODELS)
+
+    def test_it_stops_when_the_official_turbo_gets_a_series_with_a_baked_lora(
         self, tmp_path: Path
     ) -> None:
-        sources = _build_series(tmp_path / "series", lora_sha256="9" * 64)
-        out_dir = tmp_path / "models" / "anima-turbo"
+        """旧 `anima-turbo`（LoRA 焼き込み）の系列を公式 Turbo の席へ挿す取り違え。"""
+        sources = _build_series(tmp_path / "series")
+        _bake_lora_record(sources.transformer["f16"])
+        out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
 
-        with pytest.raises(DistError, match="カードの宣言と違う"):
+        with pytest.raises(DistError, match="焼いた記録のある系列が来ている"):
             _assemble_anima(sources, out_dir)
 
         # 計画段の検査なので配布形は 1 ファイルも生えない。
         assert not out_dir.exists()
 
-    def test_it_stops_when_the_series_carries_no_record_at_all(self, tmp_path: Path) -> None:
-        """記録の無い系列（帰属を突き合わせられない）も緑にしない。"""
-        sources = _build_series(tmp_path / "series")
-        (sources.transformer["i8"] / "transformer" / LORA_PROVENANCE_FILE).unlink()
+    def test_it_stops_when_a_plain_model_gets_a_series_with_a_baked_lora(
+        self, tmp_path: Path
+    ) -> None:
+        """素版の席でも同じ 1 実装が掛かる（網はモデルではなく系列に掛かる）。"""
+        sources = _build_series(tmp_path / "series", model=ANIMA_BASE_MODEL_NAME)
+        _bake_lora_record(sources.transformer["f16"])
+        out_dir = tmp_path / "models" / ANIMA_BASE_MODEL_NAME
 
-        with pytest.raises(DistError, match="焼き込んだ LoRA の記録が無い"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+        with pytest.raises(DistError, match="焼いた記録のある系列が来ている"):
+            _assemble_anima(sources, out_dir, ANIMA_BASE_MODEL_NAME)
 
-    def test_it_stops_when_the_record_is_not_readable_json(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series")
-        (sources.transformer["f16"] / "transformer" / LORA_PROVENANCE_FILE).write_bytes(b"{oops")
+        assert not out_dir.exists()
 
-        with pytest.raises(DistError, match="LoRA の記録を解析できない"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+    def test_the_check_reaches_every_transformer_series(self, tmp_path: Path) -> None:
+        """網が f16 の 1 本に留まっていると、他の格納席に紛れた記録が素通りする。
 
-    def test_the_record_never_reaches_the_distribution(self, assembled) -> None:
-        """記録は系列側の事実 — 配布形（HF リポ）には持ち出さない。"""
-        out_dir, _ = assembled
+        旧 fused 系列は f16 / i8 / i4 の 3 本が並んでいるので、配布側の格納席（今は f16 /
+        i8 の 2 本）へどれか 1 本だけを差し替える取り違えは実際に起こしうる形。列挙元を
+        宣言側へ縛るのは、席が増えた日に自動で網が広がるようにするため。
+        """
+        for storage in ANIMA_MODELS[ANIMA_TURBO_MODEL_NAME].storages:
+            sources = _build_series(tmp_path / f"series-{storage}")
+            _bake_lora_record(sources.transformer[storage])
 
-        assert not any(name.endswith(LORA_PROVENANCE_FILE) for name in _present(out_dir))
+            with pytest.raises(DistError, match="焼いた記録のある系列が来ている"):
+                _assemble_anima(sources, tmp_path / "models" / storage)
+
+    # NOTE: 旧「記録は配布形へ持ち出さない」テストはこの波で削除した。記録を持つ系列は
+    # 上の門で計画段に落ちるので、組み立て済みの木に記録が無いのは**恒真**になった
+    # （系列側の記録が配布へ出ないことは、校正記録の同名テストと `io.*` の混入テストが
+    # 実在のファイルで見ている）。
 
 
-class TestBaseModels:
-    """LoRA を焼かないモデル（`anima` / 第三者 fine-tune）— turbo とは席も検査も違う。"""
+class TestModelVariants:
+    """モデルごとに違う事実（席の範囲・text_conditioner の出所・既定の step / CFG）。
+
+    公式 3 変種（Turbo / base / Aesthetic）と第三者 fine-tune 2 本が同じ 1 実装を通る
+    （ADR 0087）— 違いは {@link ANIMA_MODELS} の宣言だけで、組み立ての経路は 1 本。
+    """
 
     def test_a_plain_model_excludes_the_i4_seat(self, tmp_path: Path) -> None:
         """素版は i4 の席もファイルも**持たない**（0.5.0 の除外裁定 — `ANIMA_MODELS` の NOTE）。
@@ -432,38 +548,56 @@ class TestBaseModels:
         rtn 方式の校正門も turbo 側の既存門（丸め方式の受理検査）が被覆を保つ — 素版の i4 は
         構成として組めなくなったので、素版側の校正門テストはこの裁定で削除した。
         """
-        sources = _build_series(tmp_path / "series", model="anima-v1.0")
-        out_dir = tmp_path / "models" / "anima-v1.0"
-        manifest = _assemble_anima(sources, out_dir, "anima-v1.0")
+        sources = _build_series(tmp_path / "series", model=ANIMA_BASE_MODEL_NAME)
+        out_dir = tmp_path / "models" / ANIMA_BASE_MODEL_NAME
+        manifest = _assemble_anima(sources, out_dir, ANIMA_BASE_MODEL_NAME)
 
-        entry = manifest["models"]["anima-v1.0"]
+        entry = manifest["models"][ANIMA_BASE_MODEL_NAME]
         assert sorted(entry["weights"]["transformer"]) == ["f16", "i8"]
         assert "f16+dit4" not in entry["quants"]
         assert "f16+dit4-attn8-s16" not in entry["quants"]
-        assert not (out_dir / "anima-v1.0" / OUTPUT_PATHS["transformer_i4"]).exists()
+        assert not (out_dir / ANIMA_BASE_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]).exists()
 
-    def test_it_stops_when_a_plain_model_gets_a_series_with_a_baked_lora(
-        self, tmp_path: Path
-    ) -> None:
-        """turbo の系列を素モデルの席へ挿し込む取り違えを、記録の**不在**で捕まえる。
+    def test_the_official_aesthetic_carries_the_same_two_storages(self, tmp_path: Path) -> None:
+        """Aesthetic も f16 / i8 の 2 席（既定は base 流用の 20 step / CFG 4 — 暫定値）。"""
+        sources = _build_series(tmp_path / "series", model=ANIMA_AESTHETIC_MODEL_NAME)
+        out_dir = tmp_path / "models" / ANIMA_AESTHETIC_MODEL_NAME
+        manifest = _assemble_anima(sources, out_dir, ANIMA_AESTHETIC_MODEL_NAME)
 
-        融合済みと素の資産は形が 1 バイトも変わらないので、他のどの検査にも掛からない。
+        entry = manifest["models"][ANIMA_AESTHETIC_MODEL_NAME]
+        assert sorted(entry["weights"]["transformer"]) == ["f16", "i8"]
+        defaults = entry["pipelineConfig"]["defaults"]
+        assert (defaults["steps"], defaults["guidanceScale"]) == (20, 4)
+
+    def test_no_shipped_model_declares_an_i4_seat(self) -> None:
+        """MUST: 配布の i4 席は**全モデルから**消えた（2026-09-01 ユーザー裁定 — ADR 0087）。
+
+        旧 fused turbo だけが持っていた最後の 1 席も公式 checkpoint 化で持ち越さない裁定。
+        席の取捨は宣言した格納形から導く（`anima_quants` / `anima_weights`）ので、
+        ここを 1 モデルでも戻すと quant 表・ファイル・NOTICE の int4 記載が連動して動く —
+        逆に言えば、宣言側のこの 1 行が席の唯一の正本。
         """
-        sources = _build_series(tmp_path / "series", model="anima-v1.0")
-        _write(
-            sources.transformer["f16"] / "transformer" / LORA_PROVENANCE_FILE,
-            _lora_record(LORA_SHA256),
-        )
-        out_dir = tmp_path / "models" / "anima-v1.0"
+        assert [name for name, spec in ANIMA_MODELS.items() if "i4" in spec.storages] == []
+        for name, spec in ANIMA_MODELS.items():
+            assert spec.storages == ("f16", "i8"), name
 
-        with pytest.raises(DistError, match="焼いた記録のある系列が来ている"):
-            _assemble_anima(sources, out_dir, "anima-v1.0")
+    def test_the_official_variants_split_on_the_text_conditioner(self, tmp_path: Path) -> None:
+        """text_conditioner を共有するのは実測でビット同一だった変種だけ（2026-09-01）。
 
-        assert not out_dir.exists()
+        Turbo は base と f16 丸め後ビット同一なので共有系列を読み、Aesthetic は 64 テンソル
+        差が残る実測なので自前で持つ — 取り違えると**別のモデルのテキスト条件付け**で走り、
+        ロードも実行も通って絵だけが静かにずれる。
+        """
+        turbo = anima_sources(tmp_path / "series", ANIMA_TURBO_MODEL_NAME)
+        aesthetic = anima_sources(tmp_path / "series", ANIMA_AESTHETIC_MODEL_NAME)
+
+        assert turbo.text_conditioner == turbo.base
+        assert aesthetic.text_conditioner != aesthetic.base
+        assert aesthetic.text_conditioner.name == f"{ANIMA_AESTHETIC_MODEL_NAME}-f16"
 
     def test_a_fine_tune_reads_its_own_text_conditioner(self, tmp_path: Path) -> None:
         """第三者 fine-tune は llm_adapter も焼き直しているので、共有系列を読ませない。"""
-        base = anima_sources(tmp_path / "series", "anima-v1.0")
+        base = anima_sources(tmp_path / "series", ANIMA_BASE_MODEL_NAME)
         wai = anima_sources(tmp_path / "series", "anima-wai-v1.0")
 
         assert base.text_conditioner == base.base
@@ -472,38 +606,89 @@ class TestBaseModels:
 
     def test_the_default_quant_stays_the_same_seat(self, tmp_path: Path) -> None:
         """既定席は turbo と揃える（利用者が model を変えても既定の意味が動かない）。"""
-        sources = _build_series(tmp_path / "series", model="anima-v1.0")
-        manifest = _assemble_anima(sources, tmp_path / "out", "anima-v1.0")
+        sources = _build_series(tmp_path / "series", model=ANIMA_BASE_MODEL_NAME)
+        manifest = _assemble_anima(sources, tmp_path / "out", ANIMA_BASE_MODEL_NAME)
 
-        assert manifest["models"]["anima-v1.0"]["defaultQuant"] == ANIMA_DEFAULT_QUANT
+        assert manifest["models"][ANIMA_BASE_MODEL_NAME]["defaultQuant"] == ANIMA_DEFAULT_QUANT
 
     def test_a_plain_model_defaults_to_many_steps_with_guidance(self, tmp_path: Path) -> None:
         """CFG を使う既定であること — negative prompt が効くのはこの経路だけ。"""
-        sources = _build_series(tmp_path / "series", model="anima-v1.0")
-        manifest = _assemble_anima(sources, tmp_path / "out", "anima-v1.0")
+        sources = _build_series(tmp_path / "series", model=ANIMA_BASE_MODEL_NAME)
+        manifest = _assemble_anima(sources, tmp_path / "out", ANIMA_BASE_MODEL_NAME)
 
-        defaults = manifest["models"]["anima-v1.0"]["pipelineConfig"]["defaults"]
+        defaults = manifest["models"][ANIMA_BASE_MODEL_NAME]["pipelineConfig"]["defaults"]
         assert defaults["guidanceScale"] != 1
         assert defaults["steps"] > 8
         assert defaults["negativePrompt"]
 
+    def test_the_default_model_is_the_official_turbo(self, tmp_path: Path) -> None:
+        """公式リポの既定は Turbo（上流 README の「まず Turbo を」に合わせた 2026-09-01 裁定）。
+
+        既定は `pipelineConfig` ごと動く軸（8 step / CFG 1 = 負プロンプトが効かない席）なので、
+        既定モデルと既定の中身は**同じ 1 本のテスト**で押さえる。
+        """
+        assert OFFICIAL_PIPELINE.default_model == ANIMA_TURBO_MODEL_NAME
+        assert OFFICIAL_MODELS[0] == ANIMA_TURBO_MODEL_NAME
+
+        sources = _build_series(tmp_path / "series")
+        manifest = _assemble_anima(sources, tmp_path / "out")
+
+        defaults = manifest["models"][ANIMA_TURBO_MODEL_NAME]["pipelineConfig"]["defaults"]
+        assert (defaults["steps"], defaults["guidanceScale"]) == (8, 1)
+
 
 class TestPipelineMembership:
-    """リポ直下の改変告知は Pipeline に固定で載る 1 組 — 取り違えて組めないようにする。"""
+    """リポ直下の改変告知は Pipeline に固定で載る 1 組 — 取り違えて組めないようにする。
 
-    def test_the_base_pipeline_refuses_the_turbo_model(self, tmp_path: Path) -> None:
-        with pytest.raises(DistError, match="この pipeline のリポに入らない"):
-            anima_dist_plan(tmp_path / "series", ANIMA_TURBO_MODEL_NAME, BASE_MODELS)
+    分割の軸は**公式 / 追加学習**（2026-09-01 裁定 — ADR 0087）。公式リポは CircleStone の
+    ライセンス 1 本だけ、追加学習リポは出所ページごとの許諾が重なるので、告知も出所節も違う。
+    """
 
-    def test_the_turbo_pipeline_refuses_a_base_model(self, tmp_path: Path) -> None:
+    def test_the_official_pipeline_refuses_a_community_fine_tune(self, tmp_path: Path) -> None:
         with pytest.raises(DistError, match="この pipeline のリポに入らない"):
-            anima_dist_plan(tmp_path / "series", "anima-wai-v1.0", TURBO_MODELS)
+            anima_dist_plan(tmp_path / "series", "anima-wai-v1.0", OFFICIAL_MODELS)
+
+    def test_the_extra_pipeline_refuses_an_official_model(self, tmp_path: Path) -> None:
+        with pytest.raises(DistError, match="この pipeline のリポに入らない"):
+            anima_dist_plan(tmp_path / "series", ANIMA_TURBO_MODEL_NAME, EXTRA_MODELS)
+
+    def test_the_two_lists_partition_the_accepted_models(self) -> None:
+        """MUST: 全モデルがどちらか一方**だけ**に居る。
+
+        重なると同じモデルが 2 つの告知の下で配られ、漏れると受理集合に居るのに
+        どのリポからも組めないモデルが黙って生まれる（`--pipeline` の選択肢からは読めない）。
+        """
+        official, extra = set(OFFICIAL_MODELS), set(EXTRA_MODELS)
+
+        assert official | extra == set(ANIMA_MODELS)
+        assert official & extra == set()
 
     def test_the_two_repositories_declare_different_modifications(self) -> None:
         """告知が 1 本に畳まれていたら（= 同じ文面なら）どちらかが嘘になる。"""
-        assert TURBO_NOTICE_MARKDOWN != BASE_NOTICE_MARKDOWN
-        assert LORA_NAME in TURBO_NOTICE_MARKDOWN
-        assert LORA_NAME not in BASE_NOTICE_MARKDOWN
+        assert OFFICIAL_NOTICE_MARKDOWN != EXTRA_NOTICE_MARKDOWN
+        assert "community fine-tune" in EXTRA_NOTICE_MARKDOWN
+        assert "community fine-tune" not in OFFICIAL_NOTICE_MARKDOWN
+
+    def test_neither_notice_claims_a_baked_lora(self) -> None:
+        """焼き込みは 2026-09-01 に消えた — 告知に残ると改変内容の記載が事実と食い違う。
+
+        §3(d)(i) が求めるのは「改変内容の告知」なので、していない改変を挙げるのは
+        余計な文言ではなく**誤った告知**（値としては妥当な散文なので配ってから露見する）。
+        """
+        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN):
+            assert "LoRA" not in notice
+
+    def test_neither_notice_claims_an_int4_series(self) -> None:
+        """配布に i4 席が 1 つも無い以上、「int4 系列も足した」は**していない改変の告知**。
+
+        §3(d)(i) が求めるのは改変内容の告知なので、余分な 1 行ではなく誤りになる（旧 base
+        告知が実際にこの状態だった — 2026-09-01 に是正）。告知は Pipeline に固定で載って
+        manifest を見られないので、席の有無と文面は**別々に**動く = 突き合わせが要る。
+        """
+        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN):
+            assert "int4" not in notice
+            assert "int8-quantized series of the transformer was added" in notice
+        assert not any("i4" in spec.storages for spec in ANIMA_MODELS.values())
 
     def test_an_unknown_model_name_is_refused_with_the_choices(self, tmp_path: Path) -> None:
         with pytest.raises(DistError, match="知らない Anima のモデル名"):
@@ -519,35 +704,47 @@ class TestCalibProvenance:
     素通りする。`--no-calib` / `--calib-prompts 1` は smoke 用の opt-out・`--model` は条件を
     引くだけのノブなのに、その生成物が配布へ紛れても資産からは読めず、出るのは
     「全体的にぼやけた」絵だけ — LoRA 帰属と同じ規律をここにも敷く。
+
+    2026-09-01 の裁定で配布の i4 席は全モデルから消えたので、実在の spec ではこの門を 1 度も
+    踏めない。門は復活レバー（席が戻った日に真っ先に効く安全網）であり、`anima.eval_dist` が
+    今まさに使っている経路でもあるので、**席を注入した spec**（{@link _i4_seat}）で機構を守る。
     """
+
+    def _plan(self, tmp_path: Path, **kwargs) -> tuple[AnimaSources, Path]:
+        """i4 席を注入した系列と出力先（この class の全テストが同じ 1 経路を踏む）。"""
+        return _build_series(tmp_path / "series", with_i4=True, **kwargs), (
+            tmp_path / "models" / "i4-seat"
+        )
+
+    def _assemble(self, sources: AnimaSources, out_dir: Path) -> dict[str, Any]:
+        return _assemble_anima(sources, out_dir, spec=_i4_seat())
 
     def test_it_stops_when_the_i4_series_was_rounded_without_calibration(
         self, tmp_path: Path
     ) -> None:
         """`--no-calib` の生成物（method = rtn）を名指しで拒否する。"""
-        sources = _build_series(tmp_path / "series", calib_method="rtn")
-        out_dir = tmp_path / "models" / "anima-turbo"
+        sources, out_dir = self._plan(tmp_path, calib_method="rtn")
 
         with pytest.raises(DistError, match="配布して良い丸め方式で作られていない"):
-            _assemble_anima(sources, out_dir)
+            self._assemble(sources, out_dir)
 
         # 計画段の検査なので配布形は 1 ファイルも生えない。
         assert not out_dir.exists()
 
     def test_it_stops_when_the_i4_series_carries_no_record_at_all(self, tmp_path: Path) -> None:
         """記録の無い系列（校正条件を突き合わせられない）も緑にしない。"""
-        sources = _build_series(tmp_path / "series")
+        sources, out_dir = self._plan(tmp_path)
         (sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE).unlink()
 
         with pytest.raises(DistError, match="校正条件の記録が無い"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            self._assemble(sources, out_dir)
 
     def test_it_stops_when_the_record_is_not_readable_json(self, tmp_path: Path) -> None:
-        sources = _build_series(tmp_path / "series")
+        sources, out_dir = self._plan(tmp_path)
         (sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE).write_bytes(b"{oops")
 
         with pytest.raises(DistError, match="校正条件の記録を解析できない"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            self._assemble(sources, out_dir)
 
     def test_a_record_written_before_the_guidance_field_is_still_accepted(
         self, tmp_path: Path
@@ -555,17 +752,17 @@ class TestCalibProvenance:
         """後方互換 MUST: 欄を足しても**既存の系列を作り直させない**。
 
         `guidance` は校正条件をモデル別化した 2026-08-23 に足した欄で、それ以前に採った
-        turbo の i4 系列（HF へ上げた現物）には無い。読み手が欄の存在を要求すると、この 1 行の
-        追加が「丸め時間ぶんの再 export」を既存系列へ課すことになる — 見るのは**在る欄だけ**に
-        留める（`_shared.calib_provenance` の同 MUST）。
+        turbo の i4 系列（当時 HF へ上げた現物）には無い。読み手が欄の存在を要求すると、この
+        1 行の追加が「丸め時間ぶんの再 export」を既存系列へ課すことになる — 見るのは**在る欄
+        だけ**に留める（`_shared.calib_provenance` の同 MUST）。
         """
-        sources = _build_series(tmp_path / "series")
+        sources, out_dir = self._plan(tmp_path)
         path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
         legacy = json.loads(path.read_text(encoding="utf-8"))
         del legacy["guidance"]
         path.write_text(json.dumps(legacy), encoding="utf-8")
 
-        manifest = _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+        manifest = self._assemble(sources, out_dir)
 
         assert "f16+dit4" in manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]
 
@@ -574,13 +771,13 @@ class TestCalibProvenance:
 
         丸めの格子は動かないのでファイルサイズは 1 バイトも変わらず、絵がぼやけるだけ。
         """
-        sources = _build_series(tmp_path / "series")
+        sources, out_dir = self._plan(tmp_path)
         path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
         record = json.loads(path.read_text(encoding="utf-8"))
         path.write_text(json.dumps({**record, "prompts": 1}), encoding="utf-8")
 
         with pytest.raises(DistError, match="校正予算 'prompts' が配布の下限を下回る"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            self._assemble(sources, out_dir)
 
     def test_it_stops_when_the_series_was_calibrated_under_another_models_conditions(
         self, tmp_path: Path
@@ -590,27 +787,31 @@ class TestCalibProvenance:
         `anima.export` の `--model` は**校正条件を引くためだけ**のノブなので、turbo の重みを
         `--model anima-v1.0` で焼いた資産は「正しい turbo i4」に見える — 格納形も本数も
         LoRA 記録も全て正しく、素版の多 step・CFG で校正されていることだけが違う。
-        （0.5.0 で素版が i4 を持たなくなったため、取り違えの向きを素版→turbo から
-        turbo→素版へ反転して同じ門を踏む。）
+        （席の持ち主が入れ替わっても条件は `pipeline_config` 1 箇所から導くので、
+        取り違えの向きは turbo→素版のまま同じ門を踏む。）
         """
-        sources = _build_series(tmp_path / "series", calib_model="anima-v1.0")
+        sources, out_dir = self._plan(tmp_path, calib_model=ANIMA_BASE_MODEL_NAME)
 
         with pytest.raises(DistError, match="校正条件 'steps' がこのモデルの既定と違う"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            self._assemble(sources, out_dir)
 
     def test_it_stops_when_only_the_guidance_came_from_another_model(self, tmp_path: Path) -> None:
         """step が一致していても CFG がずれていれば落ちる（2 欄とも門に載っている）。"""
-        sources = _build_series(tmp_path / "series")
+        sources, out_dir = self._plan(tmp_path)
         path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
         record = json.loads(path.read_text(encoding="utf-8"))
         path.write_text(json.dumps({**record, "guidance": 4.0}), encoding="utf-8")
 
         with pytest.raises(DistError, match="校正条件 'guidance' がこのモデルの既定と違う"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            self._assemble(sources, out_dir)
 
-    def test_the_record_never_reaches_the_distribution(self, assembled) -> None:
-        """記録は系列側の事実 — 配布形（HF リポ）には持ち出さない。"""
-        out_dir, _ = assembled
+    def test_the_record_never_reaches_the_distribution(self, assembled_with_i4) -> None:
+        """記録は系列側の事実 — 配布形（HF リポ）には持ち出さない。
+
+        記録が実在する系列（= i4 席を注入した組み立て）で見る。配布経路には i4 系列自体が
+        無いので、そちらで見ると「無いものが出てこない」を確かめるだけの恒真になる。
+        """
+        out_dir, _ = assembled_with_i4
 
         assert not any(name.endswith(CALIB_PROVENANCE_FILE) for name in _present(out_dir))
 
@@ -624,7 +825,7 @@ class TestStorageGate:
             sources.base / "text_encoder" / "model.safetensors",
             _fake_safetensors("F32", b"text-encoder-weights"),
         )
-        out_dir = tmp_path / "models" / "anima-turbo"
+        out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
         with pytest.raises(DistError, match=r"text_encoder: .* F16 が無い"):
             _assemble_anima(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない（rope 不一致と同じ規律）。
@@ -637,17 +838,21 @@ class TestStorageGate:
             _fake_safetensors("F16", b"transformer-i8-weights"),
         )
         with pytest.raises(DistError, match=r"transformer_i8: .* I8 が無い"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
     def test_it_stops_when_the_i4_transformer_lacks_i4_storage(self, tmp_path: Path) -> None:
-        """i4 席へ i8 系列が入る取り違え — 要求が I8 のままだと素通りして沈黙する。"""
-        sources = _build_series(tmp_path / "series")
+        """i4 席へ i8 系列が入る取り違え — 要求が I8 のままだと素通りして沈黙する。
+
+        席は配布から降りたが要求表（`STORAGE_REQUIREMENTS`）には残っているので、注入した
+        席で門を守る（{@link _i4_seat}）。
+        """
+        sources = _build_series(tmp_path / "series", with_i4=True)
         replace_component(
             sources.transformer["i4"] / "transformer" / "model.safetensors",
             _fake_safetensors("I8", b"transformer-i4-weights"),
         )
         with pytest.raises(DistError, match=r"transformer_i4: .* I4 が無い"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            _assemble_anima(sources, tmp_path / "models" / "i4-seat", spec=_i4_seat())
 
     def test_it_stops_when_the_i4_series_lands_in_the_i8_seat(self, tmp_path: Path) -> None:
         """逆向きの取り違え（i4 系列 → i8 席）— 存在検査だけでは**素通りする**。
@@ -665,7 +870,7 @@ class TestStorageGate:
             _mixed_safetensors(("I4", "I8", "F32"), b"transformer-i4-weights"),
         )
         with pytest.raises(DistError, match=r"transformer_i8: .* I4 がある"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
     def test_no_transformer_series_slips_into_another_series_seat(self) -> None:
         """3 席 × 他 2 系列の**全ての**取り違えが、要求か禁止のどちらかで落ちる。
@@ -698,14 +903,15 @@ class TestStorageGate:
 
         上のテストは述語を再実装しているので、`anima_plan` から
         `assert_storage_absent` の呼びが 1 行消えても落ちない。ここは組み立てを実際に通すので、
-        呼びが外れた瞬間に非対角が緑になって落ちる。
+        呼びが外れた瞬間に非対角が緑になって落ちる。i4 席は配布から降りたので、3 席そろった
+        盤面を作るために席を注入する（{@link _i4_seat} — 表は 3 席のまま残っている）。
         """
         # 挿し込むのは**正当な IR コンテナ**（対角は組み立てまで通るので本物が要る）。格納 dtype
         # の集合は系列そのままで、f16 = {F32, F16} / i8 = {F32, I8} / i4 = {F32, I8, I4}。
-        seats = ["transformer_f16", "transformer_i8", "transformer_i4"]
+        seats = [f"transformer_{storage}" for storage in I4_SEAT_STORAGES]
         for seat in seats:
             for series in seats:
-                sources = _build_series(tmp_path / f"series-{seat}-{series}")
+                sources = _build_series(tmp_path / f"series-{seat}-{series}", with_i4=True)
                 storage = seat.removeprefix("transformer_")
                 target = sources.transformer[storage] / "transformer" / "model.safetensors"
                 replace_component(
@@ -715,16 +921,17 @@ class TestStorageGate:
                 out_dir = tmp_path / "models" / f"{seat}-{series}"
 
                 if series == seat:
-                    _assemble_anima(sources, out_dir)  # 対角は通る（同じ系列を同じ席へ）
+                    # 対角は通る（同じ系列を同じ席へ）
+                    _assemble_anima(sources, out_dir, spec=_i4_seat())
                 else:
                     with pytest.raises(DistError):
-                        _assemble_anima(sources, out_dir)
+                        _assemble_anima(sources, out_dir, spec=_i4_seat())
 
     def test_it_stops_when_a_header_is_not_safetensors(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
         replace_component(sources.base / "vae_decoder" / "model.safetensors", b"not-a-safetensors")
         with pytest.raises(DistError, match="ヘッダが読めない"):
-            _assemble_anima(sources, tmp_path / "models" / "anima-turbo")
+            _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
 
 class TestPlanGates:
@@ -740,7 +947,7 @@ class TestPlanGates:
         """
         sources = _build_series(tmp_path / "series")
         (sources.tokenizers / "qwen2-tokenizer.json").unlink()
-        out_dir = tmp_path / "models" / "anima-turbo"
+        out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
         with pytest.raises(DistError, match="組み立ての入力が無い"):
             _assemble_anima(sources, out_dir)
         assert not out_dir.exists()
@@ -758,12 +965,21 @@ class TestManifest:
         assert manifest["models"][ANIMA_TURBO_MODEL_NAME]["pipeline"] == "anima/1"
 
     def test_every_weights_entry_is_keyed_by_dtype(self, assembled) -> None:
-        """v1 の `{file}` / `{variants}` の 2 形は消えた — i8 単体も dtype キーを持つ（§3）。"""
+        """v1 の `{file}` / `{variants}` の 2 形は消えた — i8 単体も dtype キーを持つ（§3）。
+
+        期待値は**モデルが宣言した格納形**から導く（`anima_weights`）— 語彙の全量
+        （{@link ANIMA_WEIGHTS}）をそのまま期待すると、席を降ろしたモデルで落ちる。語彙との
+        繋がりは「役割は全量・ラベルは部分集合」で保つ。
+        """
         _, manifest = assembled
         weights = manifest["models"][ANIMA_TURBO_MODEL_NAME]["weights"]
-        assert sorted(weights) == sorted(ANIMA_WEIGHTS)
+        declared = anima_weights(anima_model(ANIMA_TURBO_MODEL_NAME))
+
+        assert set(declared) == set(ANIMA_WEIGHTS)
+        assert set(declared["transformer"]) < set(ANIMA_WEIGHTS["transformer"]), "i4 席が復活した"
+        assert sorted(weights) == sorted(declared)
         for name, entry in weights.items():
-            assert sorted(entry) == sorted(ANIMA_WEIGHTS[name]), name
+            assert sorted(entry) == sorted(declared[name]), name
             for files in entry.values():
                 assert sorted(files) in (["shards"], ["extras", "shards"])
 
@@ -786,9 +1002,17 @@ class TestManifest:
             assert (out_dir / ref["path"]).read_bytes() == payload
 
     def test_it_carries_the_quant_table_and_pipeline_config(self, assembled) -> None:
+        """quant 表は**宣言した格納形で成立する席だけ**（`anima_quants` の導出）。
+
+        席の取捨を quant 名の直書きリストで持つと、格納形を降ろした日に席だけが残る
+        （選ぶと 404）— 期待値も同じ導出から引いて、表と現物が 1 箇所から動くようにする。
+        """
         _, manifest = assembled
         model = manifest["models"][ANIMA_TURBO_MODEL_NAME]
-        assert sorted(model["quants"]) == sorted(ANIMA_QUANTS)
+        declared = anima_quants(anima_model(ANIMA_TURBO_MODEL_NAME))
+
+        assert sorted(model["quants"]) == sorted(declared)
+        assert set(declared) < set(ANIMA_QUANTS), "i4 席が quant 表から落ちていない"
         assert model["defaultQuant"] == ANIMA_DEFAULT_QUANT
         assert model["defaultQuant"] in model["quants"]
         assert model["pipelineConfig"] == dict(ANIMA_TURBO_PIPELINE_CONFIG)
@@ -834,9 +1058,10 @@ class TestQuantNaming:
 class TestI4Quants:
     """i4 常駐の 2 席（`f16+dit4` = 格納だけ / `f16+dit4-attn8-s16` = **低 VRAM 席**）。
 
-    波 J-4a の視認裁定で `f16+dit4-attn8-s16` を採用済み（既定は
-    `f16+dit8-a8-attn8-s16` 据え置き）。位置づけの正本は `distribution.py` の
-    `ANIMA_QUANTS` 直上コメント。
+    2026-09-01 の裁定で**どの配布モデルもこの 2 席を持たない**（`storages` から i4 が消え、
+    `anima_quants` の導出で席ごと落ちる）。席の定義は quant 語彙（{@link ANIMA_QUANTS}）に
+    残っており、`storages` に i4 を足せばそのまま生える復活レバー — ここが見るのは
+    「語彙側の定義が壊れていないこと」と「配布へは 1 席も出ないこと」の 2 つ。
     """
 
     @staticmethod
@@ -874,11 +1099,31 @@ class TestI4Quants:
         """席が増えても既定は動かさない（既定の変更は品質裁定を要する別の判断）。"""
         assert ANIMA_DEFAULT_QUANT == "f16+dit8-a8-attn8-s16"
 
-    def test_the_seats_reach_the_manifest_with_their_session_knobs(self, assembled) -> None:
-        """表に足しただけで配布形へ出ること（quant 表は manifest 由来 — ADR 0041 §3）。"""
+    def test_no_shipped_model_carries_an_i4_seat(self, assembled) -> None:
+        """MUST: 配布形の quant 表に i4 席が 1 つも出ない（2026-09-01 裁定）。
+
+        「席は消えたがファイルだけ配られる（無駄な GB）」と「ファイルは消えたが席が残る
+        （選ぶと 404）」は別の壊れ方なので、quant 表と現物の**両方**で見る。
+        """
         _, manifest = assembled
         quants = manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]
 
+        assert set(quants) & set(self._i4_seats()) == set()
+        for entry in quants.values():
+            assert entry["weights"]["transformer"] != "i4"
+        for spec in ANIMA_MODELS.values():
+            assert set(anima_quants(spec)) & set(self._i4_seats()) == set()
+
+    def test_the_seats_reach_the_manifest_with_their_session_knobs(self, assembled_with_i4) -> None:
+        """席が戻れば表に足しただけで配布形へ出ること（quant 表は manifest 由来 — §3）。
+
+        導出（`anima_quants`）が壊れると復活レバーが引けなくなるので、席を注入した spec で
+        「宣言 → quant 表 → manifest」の 1 本を通しておく。
+        """
+        _, manifest = assembled_with_i4
+        quants = manifest["models"][ANIMA_TURBO_MODEL_NAME]["quants"]
+
+        assert set(self._i4_seats()) <= set(quants)
         for name, quant in self._i4_seats().items():
             assert quants[name]["weights"]["transformer"] == "i4"
             assert quants[name]["session"] == dict(quant["session"])
@@ -1011,26 +1256,30 @@ class TestVerifyDistStructure:
 
 
 class TestFamilyAssembly:
-    """1 リポに複数モデル（ADR 0041 §2）+ 共有ファイルは `shared/` に 1 回だけ（§5）。"""
+    """1 リポに複数モデル（ADR 0041 §2）+ 共有ファイルは `shared/` に 1 回だけ（§5）。
+
+    並べるのは**実際に同居する組**（公式リポの素版 + Aesthetic）— 受理集合が別リポへ分けた
+    組み合わせをフィクスチャで組むと、テストと {@link TestPipelineMembership} が別のことを言う。
+    """
 
     @pytest.fixture
     def family(self, tmp_path: Path) -> tuple[Path, dict]:
         series = tmp_path / "series"
         # base（text 経路 / VAE / tokenizer）は共通、transformer だけモデルごとに違う中身。
-        first = _build_series(series, model="anima-v1.0", mark=b"-base")
-        second = _build_series(series, model="anima-wai-v1.0", mark=b"-wai")
+        first = _build_series(series, model=FAMILY_MODELS[0], mark=b"-base")
+        second = _build_series(series, model=FAMILY_MODELS[1], mark=b"-aesthetic")
         out_dir = tmp_path / "models" / "anima-family"
         manifest = assemble_family(
-            [anima_plan(first, "anima-v1.0"), anima_plan(second, "anima-wai-v1.0")],
+            [anima_plan(first, FAMILY_MODELS[0]), anima_plan(second, FAMILY_MODELS[1])],
             out_dir,
-            "anima-v1.0",
+            FAMILY_MODELS[0],
         )
         return out_dir, manifest
 
     def test_it_declares_every_model_with_the_first_as_default(self, family) -> None:
         _, manifest = family
-        assert list(manifest["models"]) == ["anima-v1.0", "anima-wai-v1.0"]
-        assert manifest["defaultModel"] == "anima-v1.0"
+        assert list(manifest["models"]) == list(FAMILY_MODELS)
+        assert manifest["defaultModel"] == FAMILY_MODELS[0]
 
     def test_it_places_a_byte_identical_file_once_under_shared(self, family) -> None:
         out_dir, manifest = family
@@ -1054,10 +1303,10 @@ class TestFamilyAssembly:
         }
         assert paths == {
             name: [f"{name}/{rel}" for rel in shard_paths(OUTPUT_PATHS["transformer_i8"])]
-            for name in ("anima-v1.0", "anima-wai-v1.0")
+            for name in FAMILY_MODELS
         }
-        assert [(out_dir / rel).read_bytes() for rel in paths["anima-v1.0"]] != [
-            (out_dir / rel).read_bytes() for rel in paths["anima-wai-v1.0"]
+        assert [(out_dir / rel).read_bytes() for rel in paths[FAMILY_MODELS[0]]] != [
+            (out_dir / rel).read_bytes() for rel in paths[FAMILY_MODELS[1]]
         ]
 
     def test_the_shared_and_the_private_files_together_cover_the_tree(self, family) -> None:
@@ -1081,7 +1330,7 @@ class TestFamilyAssembly:
         ]
         expected += [
             f"{model}/{rel}"
-            for model in ("anima-v1.0", "anima-wai-v1.0")
+            for model in FAMILY_MODELS
             for storage in anima_model(model).storages
             for rel in shard_paths(OUTPUT_PATHS[f"transformer_{storage}"])
         ]
@@ -1115,12 +1364,12 @@ class TestFamilyAssembly:
     def test_it_reassembles_a_family_over_a_previous_run(self, tmp_path: Path) -> None:
         """畳んだ後の木をもう一度組んでも落ちない（`shared/` の既存ファイルを踏み直す経路）。"""
         series = tmp_path / "series"
-        first = _build_series(series, model="anima-v1.0", mark=b"-base")
-        second = _build_series(series, model="anima-wai-v1.0", mark=b"-wai")
+        first = _build_series(series, model=FAMILY_MODELS[0], mark=b"-base")
+        second = _build_series(series, model=FAMILY_MODELS[1], mark=b"-aesthetic")
         out_dir = tmp_path / "models" / "anima-family"
-        plans = [anima_plan(first, "anima-v1.0"), anima_plan(second, "anima-wai-v1.0")]
-        before = assemble_family(plans, out_dir, "anima-v1.0")
-        after = assemble_family(plans, out_dir, "anima-v1.0")
+        plans = [anima_plan(first, FAMILY_MODELS[0]), anima_plan(second, FAMILY_MODELS[1])]
+        before = assemble_family(plans, out_dir, FAMILY_MODELS[0])
+        after = assemble_family(plans, out_dir, FAMILY_MODELS[0])
         assert before == after
         assert verify_dist(out_dir)
 
@@ -1191,23 +1440,23 @@ class TestAtomicReplacement:
     def test_reassembling_a_subset_replaces_the_whole_repository(self, tmp_path: Path) -> None:
         """再組み立ては plan に無いモデルごと丸ごと置き換える（前回の残骸が生き残らない）。"""
         series = tmp_path / "series"
-        first = _build_series(series, model="anima-v1.0", mark=b"-base")
-        second = _build_series(series, model="anima-wai-v1.0", mark=b"-wai")
+        first = _build_series(series, model=FAMILY_MODELS[0], mark=b"-base")
+        second = _build_series(series, model=FAMILY_MODELS[1], mark=b"-aesthetic")
         out_dir = tmp_path / "models" / "anima-family"
         assemble_family(
-            [anima_plan(first, "anima-v1.0"), anima_plan(second, "anima-wai-v1.0")],
+            [anima_plan(first, FAMILY_MODELS[0]), anima_plan(second, FAMILY_MODELS[1])],
             out_dir,
-            "anima-v1.0",
+            FAMILY_MODELS[0],
         )
 
-        manifest = assemble_family([anima_plan(first, "anima-v1.0")], out_dir, "anima-v1.0")
+        manifest = assemble_family([anima_plan(first, FAMILY_MODELS[0])], out_dir, FAMILY_MODELS[0])
 
-        assert list(manifest["models"]) == ["anima-v1.0"]
-        assert not (out_dir / "anima-wai-v1.0").exists()
+        assert list(manifest["models"]) == [FAMILY_MODELS[0]]
+        assert not (out_dir / FAMILY_MODELS[1]).exists()
         # 1 モデルだけなら畳む相手が居ない = `shared/` も残らない（ADR 0041 §5）。
         assert not (out_dir / SHARED_DIRNAME).exists()
-        assert _present(out_dir) == sorted([*_in_subtree("anima-v1.0"), MANIFEST_FILENAME])
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree("anima-v1.0"))
+        assert _present(out_dir) == sorted([*_in_subtree(FAMILY_MODELS[0]), MANIFEST_FILENAME])
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(FAMILY_MODELS[0]))
 
     def test_it_discards_a_working_directory_left_by_an_interrupted_run(
         self, tmp_path: Path
@@ -1252,7 +1501,7 @@ class TestModelCard:
         main(
             [
                 "--pipeline",
-                "anima-turbo",
+                "anima",
                 "--series",
                 str(tmp_path / "series"),
                 "--out",
@@ -1293,7 +1542,7 @@ class TestModelCard:
         main(
             [
                 "--pipeline",
-                "anima-turbo",
+                "anima",
                 "--series",
                 str(tmp_path / "series"),
                 "--out",
@@ -1315,13 +1564,22 @@ class TestLegalTexts:
     #: 1 バイトでも動けば「このライセンスのコピー」でなくなるため（§3(a)）。
     LICENSE_SHA256 = "ee956174133d7c2cdcf220440c7726187eaf4b50e8e48ee32194353a22164d15"
 
-    def _run(self, tmp_path: Path) -> Path:
-        _build_series(tmp_path / "series")
+    def _run(
+        self, tmp_path: Path, *, pipeline: str = "anima", model: str = ANIMA_TURBO_MODEL_NAME
+    ) -> Path:
+        """`dist.py` の CLI を 1 周させる（既定は公式リポ = `--pipeline anima`）。
+
+        リポは 2 つに分かれ、直下の `NOTICE.md` は Pipeline ごとに違う 1 組なので、
+        法的テキストの検査は**どちらのリポで組んだか**まで含めて回す。
+        """
+        _build_series(tmp_path / "series", model=model)
         out_dir = tmp_path / "dist"
         main(
             [
                 "--pipeline",
-                "anima-turbo",
+                pipeline,
+                "--model",
+                model,
                 "--series",
                 str(tmp_path / "series"),
                 "--out",
@@ -1347,12 +1605,23 @@ class TestLegalTexts:
     def test_the_notice_displays_the_attribution_verbatim(self, tmp_path: Path) -> None:
         """§3(b) — 掲示する文言は逐語（2 文とも）。"""
         notice = (self._run(tmp_path) / "NOTICE.md").read_text(encoding="utf-8")
-        assert notice == TURBO_NOTICE_MARKDOWN
+        assert notice == OFFICIAL_NOTICE_MARKDOWN
         for sentence in ATTRIBUTION_NOTICE.split("\n"):
             assert sentence in notice
 
-    def test_the_notice_states_the_modifications_with_the_lora_source(self, tmp_path: Path) -> None:
-        """§3(d)(i) — 改変した旨を **Attribution Notice の中に**含める（出所つき）。"""
+    def test_the_extra_repository_ships_its_own_notice(self, tmp_path: Path) -> None:
+        """追加学習リポの直下には**そのリポの**改変告知が入る（取り違えると告知が嘘になる）。"""
+        out_dir = self._run(tmp_path, pipeline="anima-extra", model="anima-wai-v1.0")
+
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+        assert notice == EXTRA_NOTICE_MARKDOWN
+        assert (out_dir / "LICENSE.md").read_bytes() == LICENSE_SOURCE_PATH.read_bytes()
+        assert ATTRIBUTION_NOTICE in notice
+
+    def test_the_notice_states_the_modifications_inside_the_attribution_notice(
+        self, tmp_path: Path
+    ) -> None:
+        """§3(d)(i) — 改変した旨を **Attribution Notice の中に**含める。"""
         text = (self._run(tmp_path) / "NOTICE.md").read_text(encoding="utf-8")
         # 改変記載は独立節ではなく Attribution Notice 節の内側（次見出しの前）に居ること。
         notice_section = text.split("## Not an official product")[0]
@@ -1360,8 +1629,10 @@ class TestLegalTexts:
         flat = self._flat(notice_section)
         assert flat.count("this Attribution Notice also states that") == 1
         assert flat.count("modified as follows:") == 1
-        assert f"The official {LORA_NAME} ({LORA_SOURCE}) was baked into the weights" in text
-        assert "https://civitai.com/models/2560840" in text
+        # 実際にした改変（コンテナ形式への変換と量子化系列の追加）が列挙されていること。
+        assert "converted into the container format" in flat
+        assert "split across numbered shards when a component is too large for one file" in flat
+        assert "An int8-quantized series of the transformer was added alongside the f16 one" in flat
 
     def test_the_notice_disclaims_any_official_standing(self, tmp_path: Path) -> None:
         """§3(d)(iii) — 公式製品・承認済みと誤認させない。"""
@@ -1386,32 +1657,50 @@ class TestLegalTexts:
         assert (out_dir / "LICENSE.md").is_file()
         assert (out_dir / "NOTICE.md").is_file()
 
-    def test_the_pipeline_declares_exactly_the_two_legal_seats(self) -> None:
-        assert sorted(TURBO_PIPELINE.root_files) == ["LICENSE.md", "NOTICE.md"]
+    def test_both_pipelines_declare_exactly_the_two_legal_seats(self) -> None:
+        for pipeline in (OFFICIAL_PIPELINE, EXTRA_PIPELINE):
+            assert sorted(pipeline.root_files) == ["LICENSE.md", "NOTICE.md"]
+
+    def test_both_pipelines_ship_the_same_license_text(self) -> None:
+        """上流ライセンスは 1 本しか掛からない — リポで違うのは改変告知だけ（§3(a) は同文）。"""
+        assert OFFICIAL_PIPELINE.root_files["LICENSE.md"] == EXTRA_PIPELINE.root_files["LICENSE.md"]
 
 
 class TestPipelineEntry:
-    """ドライバへ差す 1 行（{@link TURBO_PIPELINE}）— 名前・リポ名・帰属の 3 点。"""
+    """ドライバへ差す 2 行（{@link OFFICIAL_PIPELINE} / {@link EXTRA_PIPELINE}）。
+
+    名前・リポ名・帰属の 3 点を、リポごとに独立に見る（1 つに畳めない理由は
+    {@link TestPipelineMembership}）。
+    """
 
     def test_the_model_name_is_a_legal_path_segment(self) -> None:
         """モデル名は manifest のキーであると同時にリポ内のディレクトリ名（ADR 0041 §6 / §9）。"""
-        assert assert_model_name(ANIMA_TURBO_MODEL_NAME) == ANIMA_TURBO_MODEL_NAME
+        for model in (*OFFICIAL_MODELS, *EXTRA_MODELS):
+            assert assert_model_name(model) == model
 
     def test_it_names_the_default_model_and_its_repository(self) -> None:
-        assert TURBO_PIPELINE.default_model == ANIMA_TURBO_MODEL_NAME
-        assert (
-            TURBO_PIPELINE.repo_name(ANIMA_TURBO_MODEL_NAME) == f"karume-{ANIMA_TURBO_MODEL_NAME}"
-        )
+        assert OFFICIAL_PIPELINE.default_model == ANIMA_TURBO_MODEL_NAME
+        assert EXTRA_PIPELINE.default_model == EXTRA_MODELS[0]
+        for pipeline in (OFFICIAL_PIPELINE, EXTRA_PIPELINE):
+            model = pipeline.default_model
+            assert pipeline.repo_name(model) == f"karume-{model}"
 
     def test_one_attribution_needs_no_choice(self) -> None:
-        """帰属は 1 通りしかない（選びようがないものを聞かない）。"""
-        assert len(TURBO_PIPELINE.card_profiles) == 1
+        """帰属は 1 リポにつき 1 通りしかない（選びようがないものを聞かない）。"""
+        for pipeline, profile in ((OFFICIAL_PIPELINE, "anima"), (EXTRA_PIPELINE, "anima-extra")):
+            assert len(pipeline.card_profiles) == 1
+            assert resolve_card_renderer(pipeline, None) is pipeline.card_profiles[profile]
+
+    def test_the_two_repositories_render_different_cards(self) -> None:
+        """公式 / 追加学習で題も出所節の導入も違う — 描き手を取り違えると帰属が入れ替わる。"""
         assert (
-            resolve_card_renderer(TURBO_PIPELINE, None)
-            is TURBO_PIPELINE.card_profiles["anima-turbo"]
+            OFFICIAL_PIPELINE.card_profiles["anima"]
+            is not EXTRA_PIPELINE.card_profiles["anima-extra"]
         )
 
-    def test_its_card_refuses_another_pipelines_manifest(self) -> None:
+    def test_their_cards_refuse_another_pipelines_manifest(self) -> None:
         manifest = {"models": {"m": {"pipeline": "anima/0"}}}
-        with pytest.raises(ValueError):
-            TURBO_PIPELINE.card_profiles["anima-turbo"](manifest, "hdae/x")
+        for pipeline in (OFFICIAL_PIPELINE, EXTRA_PIPELINE):
+            for render_card in pipeline.card_profiles.values():
+                with pytest.raises(ValueError):
+                    render_card(manifest, "hdae/x")
