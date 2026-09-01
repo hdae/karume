@@ -20,14 +20,23 @@
  *    capability 門だけを踏むので、「実行できないモデルの重みは 1 バイトも落とさない」の
  *    うち家族側（pipeline major / `pipelineConfig`）が前段に居ることは縛れない。実家族
  *    （siglip2 = コンポーネント 1 本の最小形）を `fromPretrained` で通して同じ観測法で見る。
+ * ⑧ **`requiredLimits` 超過でも重み shard は取得されない（共有 GPU）**（⑦の limits 版 —
+ *    ADR 0089 決定 5）。突き合わせ相手は渡された `GpuContext.limits`。
+ * ⑨ **同じことが自前 GPU 取得の経路でも成り立つ**（突き合わせ相手が `readAdapterLimits()` の
+ *    アダプタ実測値に変わる側）。⑨ だけは実 GPU が要る。
  *
  * NOTE: hub / runtime のテスト helper は import しない（向こうの都合がこちらへ漏れる —
- * `helpers/memory-cache.ts` と同じ規律）。モックはこのファイル内で最小限だけ組む。
+ * `helpers/memory-cache.ts` と同じ規律）。モックはこのファイル内で最小限だけ組む。**唯一の
+ * 例外が⑧の `fake-gpu.ts`** — `GpuContext` は runtime が値として公開しない（`acquireGpu` が
+ * 唯一の入口 — ADR 0008）ので、共有 GPU 経路を GPU 無し環境で踏むには向こうの実物を包む
+ * helper が要る。ここで自前に偽物を組むと、検査対象そのもの（limits を持つ GpuContext）が
+ * 偽物になる。
  */
 
 import { assertEquals, assertRejects } from "@std/assert";
 import { type AssetProgress, loadManifest, resolveFiles } from "@karume/hub";
 import { acquireGpu } from "@karume/runtime";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { loadShardComponents } from "../src/hub/components.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -459,6 +468,37 @@ const SIGLIP2_CONFIG: Record<string, unknown> = {
   interpolation: "bilinear",
 };
 
+const CHANNELS = 3;
+const IMAGE_SIZE = 224;
+const HIDDEN_DIM = 768;
+
+/**
+ * siglip2 の家族 admission が読むグラフ**宣言**（入出力の名前と形）まで再現した最小の IR。
+ *
+ * MUST: `admitSiglip2` の構造検査（`pixel_values` の 4 軸 / 出力の `hiddenDim`）を**通る**形で
+ * 綴る — ここで落ちると、その後段に居る門（quant / GPU 前提）を踏んだことにならない。実行は
+ * しない（Session を張るテストはこの rig を使わない）ので、`linear` の内側の整合は問わない。
+ */
+const siglip2Graph = (): unknown => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["linear"] },
+  symbols: [],
+  inputs: [{ name: "pixel_values", dtype: "f32", shape: [1, CHANNELS, IMAGE_SIZE, IMAGE_SIZE] }],
+  outputs: ["pooler_output"],
+  initializers: {
+    w: { tensor: "m.w", storage: { dtype: "f32" } },
+    b: { tensor: "m.b", storage: { dtype: "f32" } },
+  },
+  values: {
+    w: { dtype: "f32", shape: [HIDDEN_DIM, IMAGE_SIZE] },
+    b: { dtype: "f32", shape: [HIDDEN_DIM] },
+    pooler_output: { dtype: "f32", shape: [1, HIDDEN_DIM] },
+  },
+  states: {},
+  nodes: [{ op: "linear", ins: ["pixel_values", "w", "b"], outs: ["pooler_output"], attrs: {} }],
+});
+
 /**
  * siglip2 の配布形（グラフ shard + 重み shard の 2 本）を疑似 HF に載せる。`patch` で
  * `models["test"]` の欄を差し替えて**家族 admission だけ**が落ちる形を作る。
@@ -467,8 +507,11 @@ const SIGLIP2_CONFIG: Record<string, unknown> = {
  * （②が既に縛る側）で落ちてしまい、家族の門を通ったことの証明にならない。
  */
 const prepareSiglip2 = async (patch: Record<string, unknown>) => {
-  const graph = graphShardBytes("linear", [["m.b", f32Tensor([2], 0.25)]]);
-  const weights = weightShardBytes([["m.w", f32Tensor([2, 2], 0.5)]]);
+  const graph = writeSafetensors(
+    new Map([["m.b", f32Tensor([HIDDEN_DIM], 0.25)]]),
+    { karume_ir: JSON.stringify(siglip2Graph()) },
+  );
+  const weights = weightShardBytes([["m.w", f32Tensor([HIDDEN_DIM, IMAGE_SIZE], 0.5)]]);
   const refs = {
     graph: await fileRef("vision/model-00000.safetensors", graph),
     weights: await fileRef("vision/model-00001.safetensors", weights),
@@ -540,6 +583,63 @@ Deno.test(
     assertEquals(mock.paths.includes(refs.weights.path), false);
   },
 );
+
+/** ⑧⑨で使う quant 欄（`requiredLimits` だけが違う 2 通り）。 */
+const quantsRequiring = (maxBufferSize: number): Record<string, unknown> => ({
+  f32: { weights: { vision: "f32" }, session: {}, requiredLimits: { maxBufferSize } },
+});
+
+Deno.test(
+  "家族 admission（requiredLimits 超過）でも重み shard は取得されない（共有 GPU）",
+  async () => {
+    // 全 limit が 0 の GpuContext（`fake-gpu.ts` の ZERO_LIMITS）へ、1 バイトでも要求する
+    // 配布形を渡す。共有 GPU は取り直せない（feature も limits も device 生成時の話）ので、
+    // 落とせる唯一の場所が admission 席になる。
+    const { refs, mock, caches } = await prepareSiglip2({ quants: quantsRequiring(1) });
+
+    const error = await assertRejects(
+      () =>
+        Siglip2Pipeline.fromPretrained(
+          { repo: REPO, revision: SHA, hubUrl: HUB_URL },
+          { fetch: mock.fetch, caches, gpu: fakeGpuContext(fakeDevice()) },
+        ),
+      Error,
+    );
+    // 落ちた理由が limits 検査であること（別の失敗で「重みを取らなかった」が成立しない）。
+    if (!error.message.includes("maxBufferSize")) {
+      throw new Error(`limits 門の文言でない: ${error.message}`);
+    }
+    assertEquals(mock.paths.includes(refs.graph.path), true);
+    assertEquals(mock.paths.includes(refs.weights.path), false);
+  },
+);
+
+Deno.test({
+  name: "requiredLimits 超過は自前 GPU 取得の経路でも重み shard を取らない（アダプタ実測）",
+  // MUST: アダプタ無し環境は明示 SKIP（ADR 0005）。この経路の突き合わせ相手は
+  // `readAdapterLimits()` なので、アダプタが無いと GpuUnavailableError に化けて門が見えない。
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // どの実機も満たせない要求（`Number.MAX_SAFE_INTEGER` — manifest が受ける最大値）。
+    const { refs, mock, caches } = await prepareSiglip2({
+      quants: quantsRequiring(Number.MAX_SAFE_INTEGER),
+    });
+
+    const error = await assertRejects(
+      () =>
+        Siglip2Pipeline.fromPretrained(
+          { repo: REPO, revision: SHA, hubUrl: HUB_URL },
+          { fetch: mock.fetch, caches },
+        ),
+      Error,
+    );
+    if (!error.message.includes("maxBufferSize")) {
+      throw new Error(`limits 門の文言でない: ${error.message}`);
+    }
+    assertEquals(mock.paths.includes(refs.graph.path), true);
+    assertEquals(mock.paths.includes(refs.weights.path), false);
+  },
+});
 
 Deno.test(
   "loadShardComponents: グラフ shard のバイト列を握らない（別プロセスで gc 観測）",

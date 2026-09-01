@@ -44,6 +44,7 @@ import {
   loadManifest,
   type Manifest,
   type ModelEntry,
+  type Quant,
   resolveFiles,
   type StreamAssetsOptions,
 } from "@karume/hub";
@@ -56,6 +57,7 @@ import {
   readCachedAsset,
 } from "../hub/components.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
+import { assertRequiredLimitsBeforeDownload } from "../session/gpu-features.ts";
 import {
   GEMMA4_PIPELINE_MAJOR,
   GEMMA4_PIPELINE_NAME,
@@ -433,11 +435,20 @@ const buildGemma4Program = (
  * MUST: 未知 major は fail loudly（ADR 0038 §1 — 「古い実装 × 新しいリポ」の沈黙劣化を止める
  * 唯一の門）。`quant` の実在検査は取得の前に済ませる（`resolveFiles` も同じことを見るが、
  * こちらは利用可能な一覧を添えて落とす）。
+ *
+ * MUST: 選ばれた `Quant` を**捨てずに返す** — `requiredLimits` の DL 前検査
+ * （ADR 0089 決定 5）は呼び手（{@link Gemma4Pipeline.fromPretrained} の admission 閉包）が
+ * 通す。ここで名前の実在だけ見て中身を落とすと、宣言された GPU 前提を誰も読まないまま
+ * 3.7GiB を落とす形へ戻る。
  */
 const gemma4ManifestConfig = (
   manifest: Manifest,
   selection: { readonly model?: string; readonly quant?: string },
-): Gemma4PipelineConfig => {
+): {
+  readonly config: Gemma4PipelineConfig;
+  readonly quantName: string;
+  readonly quant: Quant;
+} => {
   const modelName = selection.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
@@ -466,7 +477,11 @@ const gemma4ManifestConfig = (
         `（利用可能: ${entry.available.quants.join(" / ")}）`,
     );
   }
-  return parseGemma4PipelineConfig(entry.pipelineConfig);
+  return {
+    config: parseGemma4PipelineConfig(entry.pipelineConfig),
+    quantName,
+    quant: entry.quants[quantName],
+  };
 };
 
 /**
@@ -528,7 +543,20 @@ export class Gemma4Pipeline {
       files,
       [MODEL],
       // 家族の門は admission 席で通す（重み shard を取る前 — `src/hub/components.ts`）。
-      (open) => admitGemma4(open(MODEL), gemma4ManifestConfig(loaded.manifest, selection)),
+      async (open) => {
+        const { config, quantName, quant } = gemma4ManifestConfig(loaded.manifest, selection);
+        const admitted = admitGemma4(open(MODEL), config);
+        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        // 他 7 家族と違って席が閉包側にあるのは、{@link admitGemma4} が構築オプションを
+        // 受け取らない（グラフだけで決まる）ため。
+        await assertRequiredLimitsBeforeDownload(
+          quant.requiredLimits,
+          options.gpu,
+          `Gemma4Pipeline: quant '${quantName}'`,
+        );
+        return admitted;
+      },
       {
         ...hubOptions,
         eagerAssets: EAGER_ASSETS,
@@ -595,6 +623,9 @@ export class Gemma4Pipeline {
       shards = { ...shards, [`${MODEL}[${index}]`]: bytes };
     });
     const open = assetComponentOpener(where, shards, (key) => assetBuffer(where, shards, key));
+    // NOTE: `requiredLimits` の検査はこの面には無い — {@link Gemma4Assets} は manifest を
+    // 持たない（バイト列と `config` だけ）ので、宣言そのものへ到達できない。実寸の検査は
+    // Session 構築時の `assertWeightsWithinLimits`（ADR 0089 決定 1）が受け持つ。
     const admitted = admitGemma4(open(MODEL), config);
     return await Gemma4Pipeline.#build(admitted, input, options);
   }

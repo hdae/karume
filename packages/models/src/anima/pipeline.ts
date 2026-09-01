@@ -94,7 +94,12 @@ import { type AnimaTokenizers, createTokenizers } from "./text/tokenizer.ts";
 import { assertAcceptableSeed, Randn } from "./random.ts";
 import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
-import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
+import {
+  assertGpuFeaturesGranted,
+  assertRequiredLimitsBeforeDownload,
+  assertRequiredLimitsSatisfied,
+  toAcquireGpuOptions,
+} from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import {
@@ -651,7 +656,17 @@ export class AnimaPipeline {
       loaded,
       files,
       [TEXT_ENCODER, TEXT_CONDITIONER, TRANSFORMER, VAE_DECODER],
-      () => AnimaPipeline.#admit(loaded.manifest, buildOptions),
+      async () => {
+        const admitted = AnimaPipeline.#admit(loaded.manifest, buildOptions);
+        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        await assertRequiredLimitsBeforeDownload(
+          admitted.quant.requiredLimits,
+          buildOptions.gpu,
+          `AnimaPipeline: quant '${admitted.quantName}'`,
+        );
+        return admitted;
+      },
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
@@ -715,13 +730,18 @@ export class AnimaPipeline {
     const quant = entry.quants[quantName];
     const sessionOptions = toSessionOptions(quant.session);
 
-    // MUST: 共有 GPU の能力不足はこの席で落とす — 自前で取る場合と違って `acquireGpu` を
-    // 待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の網羅表は
-    // `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+    // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
+    // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
+    // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
     if (options.gpu !== undefined) {
       assertGpuFeaturesGranted(
         quant.gpuFeatures,
         options.gpu,
+        `AnimaPipeline: quant '${quantName}'`,
+      );
+      assertRequiredLimitsSatisfied(
+        quant.requiredLimits,
+        options.gpu.limits,
         `AnimaPipeline: quant '${quantName}'`,
       );
     }

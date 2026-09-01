@@ -276,9 +276,10 @@ export type Quant = {
   /**
    * この席が要求する device limit の最小値（ADR 0038 §7）。
    *
-   * NOTE: hub は受理・検査・型面への露出までを持ち、**DL 前チェックへは結線していない**
-   * （利用側の工事は別タスク — 現状の limits 不足は従来どおり DL 後に runtime が
-   * fail loudly で受け止める）。
+   * NOTE: hub は受理・検査・型面への露出までを持ち、読み手は `@karume/models` の家族
+   * admission（重み shard を 1 バイトも取る前に GPU 側の limits と突き合わせる — ADR 0089
+   * 決定 5）。突き合わせ相手は、共有 GPU を渡された経路なら `GpuContext.limits`、自前で
+   * device を取る経路なら `readAdapterLimits()` のアダプタ実測値。
    */
   readonly requiredLimits?: RequiredLimitsSpec;
 };

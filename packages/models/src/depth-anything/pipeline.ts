@@ -116,7 +116,12 @@ import {
   type Rgb8Image,
 } from "../image/preprocess.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
-import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../session/gpu-features.ts";
+import {
+  assertGpuFeaturesGranted,
+  assertRequiredLimitsBeforeDownload,
+  assertRequiredLimitsSatisfied,
+  toAcquireGpuOptions,
+} from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import {
@@ -459,13 +464,18 @@ const admitDepthAnything = (
   assertStaticDim(depth, PIXEL_VALUES, 3, config.imageWidth, "imageWidth");
   assertDepthShape(depth, config, "深度地図の形");
 
-  // MUST: 共有 GPU の能力不足はこの席で落とす — 自前で取る場合と違って `acquireGpu` を
-  // 待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の網羅表は
-  // `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
+  // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
+  // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(
       quant.gpuFeatures,
       options.gpu,
+      `DepthAnythingPipeline: quant '${quantName}'`,
+    );
+    assertRequiredLimitsSatisfied(
+      quant.requiredLimits,
+      options.gpu.limits,
       `DepthAnythingPipeline: quant '${quantName}'`,
     );
   }
@@ -607,7 +617,17 @@ export class DepthAnythingPipeline {
       loaded,
       files,
       [DEPTH],
-      (open) => admitDepthAnything(loaded.manifest, open, buildOptions),
+      async (open) => {
+        const admitted = admitDepthAnything(loaded.manifest, open, buildOptions);
+        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        await assertRequiredLimitsBeforeDownload(
+          admitted.quant.requiredLimits,
+          buildOptions.gpu,
+          `DepthAnythingPipeline: quant '${admitted.quantName}'`,
+        );
+        return admitted;
+      },
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
