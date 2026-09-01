@@ -312,6 +312,22 @@ by-design（2026-08-31 裁定）。MoE モデルの VRAM 予算は **active で�
 「F32 → I32 → I4 → 偶数要素 F16 → 奇数要素 F16 → I8」+ `verify.assert_reader_layout` で保証する。
 HF の `safe_open` は整列違反を読めてしまうので、そちらを通すだけでは検出できない。
 
+## 格納 dtype `I4` は safetensors の方言（公式パーサは読めない）
+
+packed int4（ADR [0069](decisions/0069-packed-w4-storage.md)）は safetensors ヘッダに
+dtype `I4` を書くが、これは**公式仕様に無い語**で、公式 safetensors ライブラリは該当
+テンソルを含むファイルを拒否する（実測 2026-09-01・safetensors 0.8.0 — 受理 dtype は
+`F4` / `F6_*` / F8 系まで拡張済みだが int4 系は無い）。sub-byte の機構自体（論理 shape +
+bit 幅からのバイト長導出）は公式 `F4` と同型で、非互換は dtype 名の 1 点。
+
+- 影響: i4 テンソルを含む shard は **karume のリーダ / exporter 以外では読めない**
+  （HF へのアップロード・DL は内容非依存なので通る）。i4 を含まない shard は公式互換のまま。
+- 対象: i4 系列を含む配布形すべて（例: anima `w4` 系・irodori `w4`・sbv2 `w8-bert4` の
+  text_encoder）。モデルカードへの注記は次リリース一括のカード再生成で入れる。
+- 公式仕様への追随提案（upstream への I4/U4 追加要望）はしない — 2026-09-01 ユーザー裁定。
+  目指す方向が違うため、将来は**別形式 / 独自形式への移行**を検討する（器は次の
+  manifest format 変更時 — [backlog](backlog.md) の次波計画）。
+
 ## gather / embedding の範囲外添字は GPU で NaN 汚染になる（例外にならない）
 
 裁定の正本は ADR [0061](decisions/0061-index-oob-semantics.md)。契約は「添字は範囲内」。
