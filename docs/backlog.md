@@ -7,7 +7,7 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — shard 仕様 v2 波 + レビュー後続（2026-08-30 裁定・着手）
+## now — 数値レビュー後続 + リリース準備（2026-09-01 棚卸しで更新）
 
 網羅レビュー（正本 = `.claude/reviews/2026-08-29_9614ba9/` — git 追跡外）の確定 50 件 + 追補は
 **修正波 A〜E で全消化（2026-08-30）**。破壊的変更 2 件（`BatchScope.finish()` のホスト側失敗
@@ -23,15 +23,11 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   0.8.0）。**後続 = 次リリース時に一括（2026-08-30 ユーザー裁定）**: HF アップ（anima /
   irodori / jvnv）→ base SHA で turbo 越境焼き → turbo アップ → pin 4 本更新、を
   **アップロードと SHA 更新まで含めて Claude が実施**（ユーザー明示許可済み — hf upload の
-  分類器拒否はこの許可で通す）。リリース判定は turbo 再焼き後の e2e 全緑（現在の ignored +8 =
-  turbo ミラー不在の想定内 SKIP）が条件。karume-sbv2-fn は**アップしない**（非公開のまま —
+  分類器拒否はこの許可で通す）。**時期（2026-09-01 裁定）: BiRefNet 等の他家族分も揃えてから・
+  アップ直後にリリースする形 — 準備が十分整うまで着手しない**。リリース判定は turbo 再焼き後の
+  e2e 全緑（現在の ignored +8 = turbo ミラー不在の想定内 SKIP）が条件。karume-sbv2-fn は**アップしない**（非公開のまま —
   e2e の WAV sha 門と parity は 2026-08-30 に jvnv へ付け替え済みで、fn ローカルミラーは削除。
   再生成 = assets-layout の dist コマンドで `inputs/sbv2/FN*` から）
-- **配布門の水平展開（実装中）**: 4 家族の `*_STORAGE_FORBIDDEN`（f32 席へ f16 系列の
-  挿し込みが素通り — 実測確認済み・X2-102 の兄弟穴）+ deberta（text_encoder 席）の
-  `--sym-max` 門（CG4-3 の同型）
-- **カード統一（実装中）**: 全家族から fromAssets 案内を削除（anima は済 — 削除理由は
-  家族非依存のため統一）
 - ~~LLM 先行波~~ **消化済み（2026-08-30）**: L-0 = decode 初回実測（**≈85ms/token・
   `wi4g32` カーネル律速が確定** — フェンス床支配の読みは覆った。正本 =
   [research/2026-08-30-gemma4-decode-wallclock.md](research/2026-08-30-gemma4-decode-wallclock.md)・
@@ -69,7 +65,7 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
 - **L-11 裁定（2026-08-30）**: 技術先行 = **gemma4 E2B**（品質実証済み — tokenizer / L-5 の
   実装対象）。ライセンス門は上記のとおり**消化済み（Apache 2.0）**。配布経路の
   minicpm5 先行は**採らない**（2026-08-31 裁定 10 — 段 5 の対象は gemma4 E2B のみ）
-- **対話 example 波（2026-09-01 起票）**: ①② **消化済み（2026-08-31 実装・11 コミット
+- **対話 example 波（2026-09-01 起票）**: ①② **消化済み（2026-08-31 実装・10 コミット
   e7e53dd〜dce91c7）**。公開面レビュー（Opus2+Codex3 → 敵対検証 15 判定 refuted 0・正本 =
   `.claude/reviews/2026-08-31_182ced7/SUMMARY.md`）→ 裁定どおり: ローカルローダー =
   **取得元抽象 DistributionSource**（ADR [0086](decisions/0086-distribution-source.md) —
@@ -80,7 +76,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   構造化欄・`GenerationStop.tokens`）+ `examples/gemma4/`（sequence KV 継続の写経見本・
   デモ 4 本も denoDirectory 移行）。フル verify 2043/0/13 緑。
   **残 = ③capacity 1024 の反映**（dist 再生成 — 上の引き上げ裁定・>1024 の再 export 判断は
-  decode の P 依存実測と同時）。起票のみ（第 2 波候補）: ChatSession 高レベル面・stop strings・
+  decode の P 依存実測と同時。**ユーザー意向〈2026-09-01〉= コンテキスト窓は可能な限り大きく
+  — 1024 反映を先行し、上げ幅の最大化は P 依存実測とセットで検討**）。起票のみ（第 2 波候補）: ChatSession 高レベル面・stop strings・
   `chatText()`・onProgress 可読化・maxResidentPleBytes・logitBias 配列化・防御コピー
   （prompt/options の発行時スナップショット）・example の residentPleShards フラグ化
 - ~~数値危険クラス監査波~~ **本体消化（2026-08-31 — OP 数値レビューとして拡大実施）**:
@@ -99,7 +96,9 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   known-issues Metal 節が正本）。tools/metal-diagnostics/ は削除済み（復元は git 履歴）。
 - **数値レビュー後続の起票（2026-08-31）**:
   - **Metal OOM errorScope 沈黙**（known-issues — 重み経路の明示 size 門 + `requiredLimits`
-    のロード時実効化。監査波から分離・独立に着手可）
+    のロード時実効化。監査波から分離・独立に着手可）— **次波へ昇格（2026-09-01 ユーザー指示）**:
+    メモリ管理周りの改善・検証の波として、現時点で進められるもの（棚卸しの文書修正）の
+    消化後に着手
   - gemv margin 命題の M2 温度 0 golden 実測（ADR 0082 追記 2 の立て直し）
   - ~~GPTQ static-groups + act-order 実験 / damping sweep~~ **実装 + 実測消化（2026-08-31）**:
     軸は opt-in で実装済み（既定 off ビット同一 — `892bfb3`/`683d6a0`）・minicpm5 8 構成の

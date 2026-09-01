@@ -7,11 +7,11 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-08-31
+> Last updated: 2026-09-01
 
 ## Now
 
-- **OP 数値レビュー波 + 修正波（2026-08-31 — ローカル作業クローズ・Mac 検証待ち）**:
+- **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
   Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
   台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・
   原本 `.claude/reviews/2026-08-31_b35cf5c/`）。修正 12 コミット消化:
@@ -32,7 +32,7 @@
   i4 linear を GEMV 族へ・**ビット同一のまま ×8.45・decode 84.2→32.5ms/token = 30.8 tok/s**。
   律速はフェンス床 ≈11ms 側へ戻った — 機序と方法論は
   [research 2026-08-30](../docs/research/2026-08-30-gemma4-decode-wallclock.md) §7）。
-  **生成 API 波は段 0〜4 完了（2026-08-31〜09-01）**: 設計正本 = ADR
+  **生成 API 波は段 0〜5 完了 = 波クローズ（2026-08-31〜09-01）**: 設計正本 = ADR
   [0083](../docs/decisions/0083-generation-api-surface.md) /
   [0084](../docs/decisions/0084-gemma-tokenizer-chat.md) /
   [0085](../docs/decisions/0085-ple-host-gather.md) + ADR 0068 追記 6。**gemma4 の chat が
@@ -45,7 +45,7 @@
   ライセンス門は現物確認 + ユーザー裁定で消化・「Gemma ToU」記述は撤回）+ `fromPretrained`
   （hub 遅延資産席 `eagerAssets`）+ 疑似 HF 疎通。**残 = HF 公開のみ（新規リポ作成 —
   ユーザー確認待ち・pin `GEMMA4_CURRENT` は公開時に焼く）**。
-  **対話 example 波もほぼクローズ（2026-08-31・11 コミット e7e53dd〜dce91c7）**: 公開面レビュー
+  **対話 example 波もほぼクローズ（2026-08-31・10 コミット e7e53dd〜dce91c7）**: 公開面レビュー
   （Opus2+Codex3 → 敵対検証 15 判定 refuted 0 — 正本 `.claude/reviews/2026-08-31_182ced7/`）→
   **取得元抽象 DistributionSource**（ADR
   [0086](../docs/decisions/0086-distribution-source.md) — `denoDirectory` でローカルミラー直読・
@@ -71,9 +71,10 @@
   台帳の正本 = `.claude/reviews/2026-08-29_9614ba9/`（git 追跡外）。**破壊的変更 2 件**
   （`BatchScope.finish()` のホスト側失敗 throw / 同一 `GenerationContext` への並行発行拒否）と
   **`fromAssets` の shard 分割形受け口**（追加）は [limitations](../docs/limitations.md) が
-  消費側 doc。レンズ E-1 / E-2 / L-11 は裁定済み（backlog now に反映）。残り =
-  **M2 実機の手動確認 2 点**（カナリア 16 本 + NaN パリティ 4 本 — known-issues Metal 節）・
-  anima-web DL スロット改善（`FamilyAdmission` 席は実装済み）。残件と隣接発見の一覧 =
+  消費側 doc。レンズ E-1 / E-2 / L-11 は裁定済み（backlog now に反映）。M2 実機の手動確認
+  2 点は**消化済み（2026-09-01 実測 — カナリア 16/16 緑・軸 reduce パリティ 2/2 緑。新規 =
+  gemv u32 門の 1 ULP は既定維持を裁定済み — ADR 0082 追記 1）**。残り = anima-web DL
+  スロット改善（`FamilyAdmission` 席は実装済み）。残件と隣接発見の一覧 =
   [backlog](../docs/backlog.md) now。
 - **R1 統合波はコード完了（2026-08-29）**: API 工事 4 件（union/プランナ・`ModelShard` 実名
   帰属・`prepareModel` 2 段境界・`AdmissionReport`）+ hub `prefetchAssets` + models 7 pipelines
@@ -93,7 +94,8 @@
   `archive/hub-cas-0.5.0` の再適用は不要）。anima-web への追随 3 点（`verifying` 消滅・
   sha256 不一致が `HubFetchError`+`cause`・`clearHubCache` の対象拡大）+ R1 分の 1 点
   （`StreamedAsset.path`→`id`）。
-- **既知問題 3 件 + anima 素版 i4 感度の波（2026-08-25 進行中）**: ①Pixel の
+- **既知問題 3 件 + anima 素版 i4 感度の波（2026-08-25〜28 消化済み — 残 = Pixel 実機
+  `err.cause` 再判定のみ）**: ①Pixel の
   BodyStreamBuffer abort — 真因マスキング解消 + バイト予算 1.5GiB + 検証直列化**コミット済み**
   （実機再判定はリリース後 — known-issues）②NVIDIA の 2GiB 天井 — 融合 attention の
   行ブロック化**コミット済み**（1824×1248 実生成 27.9s 完走を確認）③Chromium の単一
@@ -101,13 +103,11 @@
   R1 shard 配布を next へ昇格・DL 前即エラーは hub 側では実装しない — プローブは
   fetch-cache 次版で実装予定〈2026-08-25 裁定〉）④素版 i4 — adaLN-i8 変種は**不採用**・**i4 系は保留**（2026-08-28 裁定 — サイズ動機は
   R1 shard 化が根治・速度は i4 が遅い。perf-ledger Q-9 / research 2026-08-28）。GPU 校正は
-  **実用採用**（探索 3.6 倍速・配布焼きは CPU — research cuda-calibration）。**優先順位 =
-  R1 完了 → 0.7.0 リリース → ChatGPT 全体レビュー消化（ユーザーがリリース後に持参）**。
+  **実用採用**（探索 3.6 倍速・配布焼きは CPU — research cuda-calibration）。
 - **0.6.0（yomi 依存分離）リリース完了（2026-08-25）**: JSR 3 パッケージ = 0.6.0・Release
   v0.6.0・**公開依存から `@hdae/yomi` の消滅を API 実測で確定**（hub / runtime の 2 本のみ）・
   消費者ストーリー疎通緑。設計の正本 = ADR
-  [0079](../docs/decisions/0079-sbv2-two-layer-input.md)。**次波はユーザー裁定待ち**
-  （候補 = [backlog](../docs/backlog.md) now 節）。**0.6.0 で変わった面**（breaking・SBV2 のみ
+  [0079](../docs/decisions/0079-sbv2-two-layer-input.md)。**0.6.0 で変わった面**（breaking・SBV2 のみ
   — 消費側の doc はここが索引）:
   - `Sbv2Pipeline.generate(utterance, options?)` — 第 1 引数は解析済みの `Sbv2Utterance`
     （フレーズ層 `Sbv2Phrases` = yomi `analyzeWithWords` の返り値が構造的に満たす →
@@ -164,14 +164,16 @@
 
 - **フル走行の verify は VRAM 圧で稀にフレークする**（毎回別のテストが落ち、単独再走は常に緑
   — known-issues）。落ちたファイルの単独再走で切り分ける。
-- **eval-images は turbo 配布形以外を指さない**（出力名がソースリポを区別せず siglip2
-  実画像門の入力を上書きする — known-issues）。
+- **ベンチ生成先と実画像コーパスは席が別** — コーパスは `outputs/misc/corpus/` の凍結コピー
+  （再実行上書き事故は構造解消済み — [assets-layout](../docs/assets-layout.md)）。凍結コピーへ
+  機械が直接書く形へ戻さない。
 - **`linearCompute: "a8"` は i8 常駐と i4 常駐で数値契約が別**（i8 = full-k 厳密 / i4 = group
   部分縮約 — ADR [0076](../docs/decisions/0076-w4a8-linear-execution.md)）。取り違えると atol=0 の
   主張が意味を失う。経路の識別はパイプラインキーの `:wi4g32` サフィックスと診断が担う。
 - **Metal**: threadgroup `vec4` への動的インデックス書きは黙って捨てられる（`gemm.ts` の
-  `storeBTransposed` の switch 展開を新しい箇所で崩さない）。attention i8a8 / conv2d の
-  Metal 数値差は known-issues・Metal は gpuTiming 不可（limitations）。
+  `storeBTransposed` の switch 展開を新しい箇所で崩さない）。attention i8a8 / conv1d /
+  conv2d / gru_scan / linear GEMV の Metal 数値差は known-issues・Metal は gpuTiming 不可
+  （limitations）。
 - **融合 matcher は実測形 exact-match** — exporter の発行順・形が変わると黙って外れ、値は
   正しいまま性能だけ落ちる。観測 = `Diagnostics.lastRunFusions` +
   `assets_fusion_counts_test.ts`。**row-block だけは外れ方が性能でなく資源** — 128MiB 級
