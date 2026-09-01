@@ -59,6 +59,21 @@ WEIGHT_FILENAME = "diffusion_pytorch_model.safetensors"
 #: 変換の出所を残す記録（人が辿るためのもの — 配布の帰属は `anima/card.py` が持つ）。
 SOURCE_PROVENANCE_FILE = "source_provenance.json"
 
+#: 取り込み記録（`anima.civitai` が checkpoint の隣へ書く機械専有ファイル）。
+CIVITAI_PROVENANCE_FILE = "civitai.json"
+
+#: 上の記録から運ぶ欄（説明本文の HTML は運ばない — 変換の出所を辿るのに要らない）。
+#: `sha256` だけは `file` の下にあるので別扱い。
+CIVITAI_CARRIED_FIELDS = (
+    "air",
+    "model_id",
+    "version_id",
+    "model_name",
+    "version_name",
+    "derived_name",
+    "permissions",
+)
+
 
 def _strip_prefix(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """既知の前置を剥がして、変換表が期待する `net.` へ揃える。"""
@@ -103,12 +118,59 @@ def _link(target: Path, link: Path) -> None:
     link.symlink_to(target)
 
 
+def _civitai_provenance(checkpoint: Path) -> dict[str, object] | None:
+    """checkpoint の隣の `civitai.json`（`anima.civitai` の記録）を、運ぶ欄だけに絞る。
+
+    手で置いた checkpoint には無いので、無ければ `None`（従来どおりの記録になる）。**在って
+    読めない・欄が欠けている場合は落とす** — 黙って節を落とすと、出所の分からない重みが
+    「provenance 付き」の体裁で出てくる。
+    """
+    record_path = checkpoint.parent / CIVITAI_PROVENANCE_FILE
+    if not record_path.exists():
+        return None
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"{record_path} を読めない: {error}") from error
+    if not isinstance(record, dict):
+        raise SystemExit(f"{record_path} が JSON オブジェクトでない")
+
+    file = record.get("file")
+    missing = [field for field in CIVITAI_CARRIED_FIELDS if field not in record]
+    if not isinstance(file, dict) or "sha256" not in file:
+        missing.append("file.sha256")
+    if missing:
+        raise SystemExit(f"{record_path} に欄が足りない: {missing}（`anima.civitai` が書く形）")
+
+    return {
+        "air": record["air"],
+        "model_id": record["model_id"],
+        "version_id": record["version_id"],
+        "model_name": record["model_name"],
+        "version_name": record["version_name"],
+        "derived_name": record["derived_name"],
+        "sha256": file["sha256"],
+        "permissions": record["permissions"],
+    }
+
+
+def _source_provenance(checkpoint: Path, base_repo: str) -> dict[str, object]:
+    """`source_provenance.json` の中身（civitai 取り込みの記録があれば `civitai` 節を足す）。"""
+    provenance: dict[str, object] = {"file": checkpoint.name, "base_repo": base_repo}
+    civitai = _civitai_provenance(checkpoint)
+    if civitai is not None:
+        provenance["civitai"] = civitai
+    return provenance
+
+
 def convert(checkpoint: Path, out: Path, base_repo: str = BASE_REPO) -> None:
     from diffusers.loaders.single_file_utils import (
         convert_cosmos_transformer_checkpoint_to_diffusers,
     )
     from huggingface_hub import snapshot_download
 
+    # 記録は**重い処理の前に**読む（壊れていれば数分の変換を回す前に落ちる）。
+    provenance = _source_provenance(checkpoint, base_repo)
     base = Path(snapshot_download(base_repo))
     stripped = _strip_prefix(load_file(checkpoint))
     # MUST: text_conditioner は**変換表を通さない**、かつ**表を呼ぶ前に取り出す**。
@@ -144,12 +206,7 @@ def convert(checkpoint: Path, out: Path, base_repo: str = BASE_REPO) -> None:
     print(f"[single-file] base から symlink: {', '.join(SHARED_ENTRIES)}", flush=True)
 
     (out / SOURCE_PROVENANCE_FILE).write_text(
-        json.dumps(
-            {"file": checkpoint.name, "base_repo": base_repo},
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
+        json.dumps(provenance, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     print(f"[single-file] {out}", flush=True)
