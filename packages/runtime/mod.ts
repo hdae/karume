@@ -29,6 +29,7 @@ export {
   GpuFeatureError,
   GpuLimitError,
   GpuUnavailableError,
+  readAdapterLimits,
   ResidentTensorError,
 } from "./src/gpu/device.ts";
 /** errorScope の規律から出る型付きエラー（置き場は `src/gpu/error-scope.ts` — 公開面は不変）。 */
@@ -52,6 +53,7 @@ export type {
   BatchScope,
   DeviceLostHandler,
   GpuContext,
+  RequiredLimits,
   ResidentData,
   ResidentTensor,
 } from "./src/gpu/device.ts";

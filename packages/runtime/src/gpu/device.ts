@@ -1363,18 +1363,29 @@ export class BatchScope {
 }
 
 /**
- * アダプタ取得 → limits 引き上げ → device 取得 → 取得結果の検証、までを行う。
- * 途中の失敗は全て例外（黙って能力を落とした device を返さない）。
+ * `navigator.gpu` とアダプタを取る（{@link acquireGpu} と {@link readAdapterLimits} の共通部）。
+ * 無い環境は {@link GpuUnavailableError} — 2 つの入口で診断文言を揃えるためにここ 1 本にする。
  */
-export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuContext> => {
+const requestAdapterOrThrow = async (
+  options: GPURequestAdapterOptions | undefined,
+): Promise<{ readonly gpu: GPU; readonly adapter: GPUAdapter }> => {
   const gpu: GPU | undefined = navigator.gpu;
   if (gpu === undefined) {
     throw new GpuUnavailableError("navigator.gpu が存在しない（WebGPU 非対応環境）");
   }
-  const adapter = await gpu.requestAdapter(options.adapter);
+  const adapter = await gpu.requestAdapter(options);
   if (adapter === null) {
     throw new GpuUnavailableError("GPUAdapter を取得できない（対応 GPU / ドライバが無い）");
   }
+  return { gpu, adapter };
+};
+
+/**
+ * アダプタ取得 → limits 引き上げ → device 取得 → 取得結果の検証、までを行う。
+ * 途中の失敗は全て例外（黙って能力を落とした device を返さない）。
+ */
+export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuContext> => {
+  const { gpu, adapter } = await requestAdapterOrThrow(options.adapter);
   const limits = planRequiredLimits(adapter.limits, options[LIMIT_CAPS]);
   // 条件付き feature の判定はここだけ（不足は例外 — 黙って能力を落とさない）。ADR 0021 / 0028。
   const timestampQuery = planTimestampFeature(adapter.features, options.gpuTiming);
@@ -1402,4 +1413,28 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
     readWgslLanguageFeatures(gpu),
     options.onDeviceLost,
   );
+};
+
+/**
+ * アダプタの limits だけを読む（device は作らない）。
+ *
+ * 配布形が宣言する `requiredLimits`（manifest の quant 欄）を**重みを落とす前**に突き合わせる
+ * ための入口（ADR 0089 決定 5）。戻りは {@link acquireGpu} が同じ引数で計画する limits と同じ式
+ * （{@link planRequiredLimits}・絞り無し）なので、呼び手は取得後の `GpuContext.limits` と同じ
+ * 物差しで比較できる。
+ *
+ * MUST: アダプタは読んだら捨てる（持ち回らない）。WebGPU のアダプタは「いつでも失効しうる」
+ * （仕様 §4.2 — システム状態の変化が無くても数秒〜数分で失効してよい）うえ、失効後の
+ * `requestDevice` は例外ではなく生まれた時点で lost な device を返す静かな失敗になる。device は
+ * 従来どおり {@link acquireGpu} が直前に取り直したアダプタから作る。
+ *
+ * NOTE: `requestAdapter` を 2 回呼んで同じ物理アダプタが選ばれる保証は仕様に無い。ここで読む
+ * limits は事前検査の材料で、最終の検査は Session 構築時の実バッファ検査
+ * （`assertWeightsWithinLimits`）が担う。
+ */
+export const readAdapterLimits = async (
+  options: Pick<AcquireGpuOptions, "adapter"> = {},
+): Promise<RequiredLimits> => {
+  const { adapter } = await requestAdapterOrThrow(options.adapter);
+  return planRequiredLimits(adapter.limits);
 };

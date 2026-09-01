@@ -17,6 +17,7 @@ import {
   planRequiredLimits,
   planShaderF16Feature,
   readAdapterInfo,
+  readAdapterLimits,
   REQUIRED_LIMIT_KEYS,
   type RequiredLimits,
   RUNTIME_INTERNAL,
@@ -93,6 +94,23 @@ Deno.test({
       assertGreaterOrEqual(gpu.limits.maxComputeInvocationsPerWorkgroup, 256);
       assertGreaterOrEqual(gpu.limits.maxComputeWorkgroupSizeX, 256);
       assert(gpu.limits.maxStorageBufferBindingSize <= gpu.limits.maxBufferSize);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "readAdapterLimits は acquireGpu が計画する limits と同じ値を返す（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 配布形の requiredLimits を重み DL 前に突き合わせる側（models の admission）は、この戻りと
+    // 取得後の `GpuContext.limits` を同じ物差しとして使う。式がずれると「DL 前は通ったのに
+    // 構築で落ちる」（または逆）が生まれる。
+    const limits = await readAdapterLimits();
+    const gpu = await acquireGpu();
+    try {
+      assertEquals(limits, gpu.limits);
     } finally {
       gpu.destroy();
     }
