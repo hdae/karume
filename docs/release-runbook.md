@@ -26,23 +26,26 @@
 ### 越境参照を含むリポの公開順序（MUST）
 
 越境コンポーネント参照（ADR [0038](decisions/0038-manifest-v1.md) §7 追記）は**参照先の
-commit SHA を焼き込む**ので、参照先が先に公開されていないと焼けない。turbo が anima の
-text stack を参照する現行の組では:
+commit SHA を焼き込む**ので、参照先が先に公開されていないと焼けない。extra（追加学習系）が
+公式リポの text stack を参照する現行の組（ADR 0087 — 旧 turbo → anima の向きと同型）では:
 
-1. **`karume-anima` を先に上げる**（§2 の断片化対策込み）
+1. **`karume-anima` を先に上げる**（§2 の断片化対策込み・公式 3 変種 — ADR 0087）
 2. その **main の commit SHA を確定**させる（§3 と同じ取り方）
-3. その SHA を渡して **`karume-anima-turbo` を越境参照で焼く** — `tools/export-recipes/dist.py`
+3. その SHA を渡して **`karume-anima-extra` を越境参照で焼く** — `tools/export-recipes/dist.py`
    の 5 指定（`--ref-repo` / `--ref-revision` / `--ref-dist` / `--ref-model` / `--ref-role`）は
    **全部揃うか 1 つも無いか**の 2 通りだけで、部分指定は落ちる。
    **ステージングの `--out` は必ずリポ名と同名のディレクトリにする** — カードの Usage 例の
    repo 名は出力ディレクトリ名から導出されるため、別名で焼くと誤った repo 名がカードに載る
    （0.5.0 で `-release` 付きステージング名がそのまま公開カードに写った実害 — 2026-08-25 に
    修正。恒久策は backlog later）
-4. **`karume-anima-turbo` を上げる**
+4. **`karume-anima-extra` を上げる**
 
-参照先を後から上げ直すと SHA が変わり、turbo の manifest は**古い revision を指したまま**に
+参照先を後から上げ直すと SHA が変わり、extra の manifest は**古い revision を指したまま**に
 なる（バイト列は二重 pin で守られるので誤配は起きないが、2 リポの内容が別世代になる）—
-**参照先を上げ直したら turbo も焼き直して上げ直す**。
+**参照先を上げ直したら extra も焼き直して上げ直す**。
+
+NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で退役 — 上げ直さない。
+公開済みリポの扱い（deprecation 掲示・README 差し替え等）はアップロード時にユーザー裁定。
 
 ## 1. 事前検証
 
@@ -113,13 +116,15 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       `curl -sS "https://huggingface.co/api/models/<owner>/<repo>/revision/main"` の `sha` 欄
 - [ ] `packages/models` の pin 定数（`<FAMILY>[_<VARIANT>]_CURRENT` — ADR 0073 追記
       2026-08-25）の `revision` へ記入。**公開リポ 1 つにつき 1 定数**なので、上げたリポの
-      定数を漏れなく: `ANIMA_TURBO_CURRENT` / `ANIMA_CURRENT` / `SBV2_JVNV_CURRENT` /
-      `IRODORI_V4_SMALL_CURRENT`
+      定数を漏れなく: `ANIMA_CURRENT` / `SBV2_JVNV_CURRENT` / `IRODORI_V4_SMALL_CURRENT`
+      （旧 `ANIMA_TURBO_CURRENT` は廃止 — ADR 0087。extra リポの pin 定数
+      `ANIMA_EXTRA_CURRENT` は公開時に新設 = 下の項目）
 - [ ] **初公開リポの pin 定数はこの時点で新設**（ADR 0073 決定 1 — 公開前に置くと 404 にしか
       ならない定数が公開面に生える。gemma4 の config.ts 冒頭 NOTE と同型）。次リリースで新設:
-      `GEMMA4_CURRENT`・`IRODORI_V4_1_SMALL_CURRENT`（`irodori/config.ts` + `mod.ts` re-export +
-      `current_source_test.ts` の CASES 追随）。あわせて `examples/irodori/main.ts` の台本既定を
-      `IRODORI_V4_1_SMALL_CURRENT` へ切替（2026-09-01 裁定 — 旧 pin は温存）
+      `GEMMA4_CURRENT`・`IRODORI_V4_1_SMALL_CURRENT`・`ANIMA_EXTRA_CURRENT`
+      （各 config.ts + `mod.ts` re-export + `current_source_test.ts` の CASES 追随）。あわせて
+      `examples/irodori/main.ts` の台本既定を `IRODORI_V4_1_SMALL_CURRENT` へ切替
+      （2026-09-01 裁定 — 旧 pin は温存）
 - [ ] pin の更新は **bump のたびの義務**（`*_CURRENT` = 「このパッケージ版が**検証した**
       取得元」— ADR 0073 追記 2026-08-25）。下の疎通に加え、席や既定 quant が動いたなら
       動作テストまで通してから「検証した」と名乗る

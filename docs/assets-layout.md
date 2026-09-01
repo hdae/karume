@@ -42,10 +42,13 @@
 
 ```sh
 cd tools/export-recipes
-uv run python dist.py --model anima-v1.0 --model anima-wai-v1.0 \
-    --model anima-copycat-20260610 \
-    --out ../../models/karume-anima                  # 素の base 系（多 step + CFG）
-uv run python dist.py --pipeline anima-turbo         # → models/karume-anima-turbo/（LoRA 焼き込み）
+uv run python dist.py --model anima-turbo-v1.1 --model anima-v1.0 \
+    --model anima-aesthetic-v1.1 --model anima-turbo-v1.0 \
+    --model anima-aesthetic-v1.0 \
+    --out ../../models/karume-anima                  # 公式 5 変種（既定 = Turbo v1.1 — ADR 0087）
+# 追加学習系（wai / copycat）は text stack を公式リポへ越境参照するため、公式リポの公開 SHA が
+# 要る = 組むのはリリース時（--ref-* 5 指定・手順は release-runbook「越境参照を含むリポ」節）
+# → models/karume-anima-extra/
 uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/
 uv run python dist.py --pipeline irodori \
     --model v4.1-small                               # → models/karume-irodori-v4.1-small/
