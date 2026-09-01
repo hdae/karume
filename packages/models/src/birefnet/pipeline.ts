@@ -105,7 +105,7 @@ import {
 /** manifest の weights 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const MATTE = "matte";
 
-/** グラフ入力の名前（`export_birefnet.py` の `INPUT_NAME`）。 */
+/** グラフ入力の名前（`tools/export-recipes/birefnet/export.py` の `INPUT_NAME`）。 */
 const PIXEL_VALUES = "pixel_values";
 
 /** 入力のチャネル数（RGB）。batch と併せてグラフ側も静的 1 / 3 で焼かれている。 */

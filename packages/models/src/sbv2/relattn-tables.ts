@@ -18,7 +18,7 @@
  *
  * ## MUST: Python 側とバイト一致であること
  *
- * 正本は `tools/exporter/karume/patch_sbv2.py` の `build_relattn_tables`。式が
+ * 正本は `tools/export-recipes/sbv2/patch.py` の `build_relattn_tables`。式が
  * 割れても **shape は合う**ので、モデルは落ちずに黙って別の埋め込みを読む（沈黙誤値）。
  * `packages/models/tests/sbv2_relattn_parity_test.ts` が golden io に格納された Python 生成の
  * 表とバイト一致を実データで固定する。
