@@ -5,7 +5,9 @@
 - Date: 2026-08-22
 - 関連: ADR [0041](0041-manifest-v2.md)（`models` マップとモデル別サブツリー）/
   [0073](0073-models-source-pin.md)（既定ソースの pin）/
-  [0074](0074-quant-seat-naming.md)（quant 席の命名 — 軸が違うので同乗しない）
+  [0074](0074-quant-seat-naming.md)（quant 席の命名 — 軸が違うので同乗しない）/
+  [0088](0088-civitai-air-intake.md)（**追記 2026-09-01**: 下の「表記を正規化しない」を改訂 —
+  Civitai 取り込みでは機械正規化した名前を既定にする。逐語表記は provenance が保持）
 
 ## Context
 

@@ -59,6 +59,17 @@ uv run --group anima python -m anima.export --dtype i8 --dit-graph dyn \
 uv run --group anima python -m anima.export --dtype i4 --dit-graph dyn --model anima-v1.0 \
   --out ../../outputs/series/anima-v1.0-i4-dyn
 
+# intake from Civitai (ADR 0088): resolve an AIR / model-page URL, download the primary
+# checkpoint (sha256-verified against the API) into inputs/anima/civitai-<versionId>/ and write
+# the machine provenance (civitai.json) next to it. Metadata needs no auth; the download needs
+# CIVITAI_API_TOKEN. The command does NOT judge the license — read the permissions and the
+# description it records, cross-check them against the model page, and note discrepancies in
+# license-review.md in the same directory before distributing (agent pre-check — 2026-09-01
+# ruling). On success it prints the follow-up single_file invocation, which carries the
+# provenance forward into source_provenance.json.
+uv run python -m anima.civitai --url "https://civitai.com/models/2544636"   # list the versions
+uv run python -m anima.civitai --air "urn:air:anima:checkpoint:civitai:2544636@2983680"
+
 # a community fine-tune shipped as a single ComfyUI-style file: rebuild it into a diffusers
 # layout first, then export from that directory. Such a checkpoint carries its own llm_adapter,
 # so the text_conditioner has to be exported per model (the base one would be the wrong weights).

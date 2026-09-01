@@ -13,6 +13,7 @@
 | `outputs/bench/<model>/<日付>_<目的>/` | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継） | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`     |
 | `outputs/misc/<名前>/`                 | ホスト資産（**消すと再取得・再エミットが要る**）                   | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`        |
 | `inputs/<family>/<name>/`              | 手置きの実重み（ckpt・config — 生成物ではない）                    | `inputs/sbv2/F1/`                                         |
+| `inputs/anima/civitai-<versionId>/`    | Civitai 取り込み（重み + `civitai.json` — ADR 0088）               | `inputs/anima/civitai-2983680/`                           |
 
 - 系列出力にはコンテナ以外の**ホスト側資産**も入る（グラフを持たない compile 生成物）—
   トークナイザは `<系列名>-tokenizer/tokenizer.json`（例

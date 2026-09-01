@@ -20,8 +20,11 @@
   turbo-v1.1・aesthetic 既定 30step/CFG4 視認裁定・i4 席は全モデル退役）・breaking =
   `ANIMA_TURBO_CURRENT` / `--pipeline anima-turbo` 廃止・e2e は turbo-v1.1 で参照 sha
   新規凍結（base 側 sha 不変 = v1.0 バイト不変の証明）・extra（wai/copycat）の組み立ては
-  リリース時の越境焼き → **N3 Civitai AIR 取り込み機構（次の作業）**。完了で HF 一括
-  リリース。その後 = メモリ管理波 → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
+  リリース時の越境焼き → **N3 Civitai AIR 取り込み = 完了（ADR 0088）**: `anima.civitai`
+  コマンド（AIR / URL → sha256 突合 DL → `inputs/anima/civitai-<versionId>/` +
+  `civitai.json`・命名は機械正規化 = 0077 改訂・ライセンスはエージェント事前確認形 =
+  判定せず記録 + `license-review.md`）。**モデル更新波クローズ → HF 一括リリースが次**。
+  その後 = メモリ管理波 → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
 - **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
   Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
   台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・

@@ -151,10 +151,18 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     カード v1.2 追随（Outputs 商用可の明記・ライセンス原文は v1.2 逐語一致確認済み）。
     残 = リリース時: extra 越境焼き + `ANIMA_EXTRA_CURRENT` 新設 + 旧 karume-anima-turbo
     リポの deprecation 扱い（アップロード時にユーザー裁定）。
-  - **N3 Civitai 追加機構**: `--air urn:air:...` / URL 指定で extra リポへ取り込む recipe 側
-    コマンド（model-versions API メタ + sha256 + provenance 記録・命名は ADR 0077）。
-    ライセンス門 = **エージェント事前確認形**（裁定 2026-09-01 — 手動フラグ強制はしない・
-    Anima 派生は元ライセンス引き継ぎ前提・API 欄と本文の食い違いは記録に残す）。
+  - **N3 Civitai 追加機構 — 完了（2026-09-01・ADR 0088）**: `anima.civitai` コマンド
+    （`--air urn:air:…@<versionId>` / `--url`・版未指定は版一覧の案内）。model-versions API
+    から AIR（サーバ発行値を実測確認）+ sha256 + 許諾 4 欄 + 本文 HTML を取り、primary
+    checkpoint をストリーミング DL（`.part` → sha 突合後 rename・既存 sha 一致はスキップ =
+    冪等）→ `inputs/anima/civitai-<versionId>/` + `civitai.json`（機械専有）。命名 =
+    機械正規化 `anima-<モデル名>-<版名>`（同日裁定 — ADR 0077 を 0088 で改訂・逐語は
+    provenance 保持）。`single_file` が同居 `civitai.json` を `source_provenance.json` へ
+    読み継ぐ（出所が dist まで連鎖）。ライセンス確認 = **エージェント事前確認形**（判定も
+    フラグ強制もしない・食い違いは `license-review.md`）。DL トークン = env
+    `CIVITAI_API_TOKEN`（`?token=` クエリ渡し）・UA は urllib 既定が 403 のため独自名
+    （実測）。実 DL 疎通のみトークン未設定で未実施（メタ・冪等スキップ・provenance 連鎖は
+    実走緑）。
   - **リリース**: N1〜N3 完了 =「準備が整う」→ HF 一括（anima 新構成 + extra +
     irodori v4.1 + gemma4 + jvnv + BiRefNet ほか + pin 更新 — 上の shard v2 一括と同じ回）。
   - **export-recipes 切り出し（裁定済み・案 A）**: 切り出すのは**レシピ部分のみ**・
