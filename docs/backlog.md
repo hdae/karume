@@ -127,6 +127,23 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   復活条件が満ちた再評価候補 = **レンズ L-7 / L-12**（decode がフェンス床支配へ戻ったため —
   research 2026-08-30 §7。perf-ledger の L-7 とは別番号系）+ 隣接起票候補 = lm_head `wi8`
   M=1（decode GPU の 23% の新 2 位・機序は別）
+- **次波計画（2026-09-01 裁定 — 棚卸し後トリアージの優先順位）**:
+  ①**メモリ管理波** — Phase A 実装（重み / state 経路の明示 size 門 = Metal OOM 根治・
+  `max(payload, expanded) ≤ maxStorageBufferBindingSize` 等の admission preflight・manifest
+  `requiredLimits` の DL 前接続〈hub は runtime 非依存なので呼び手が limits を渡す形〉・
+  TS 読み手側の shard ≤ 1GiB 門）+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
+  A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+
+  capacity 1024 反映を同乗。Phase C 起票 = 単一 tensor >1GiB 非対応の期間裁定・fromAssets の
+  位置づけ・large asset の reference-first 一般則・**cache-less streaming mode（26B A4B 級の
+  前提 — CacheStorage quota が先に壁）** ②OP マイクロベンチ波（PyTorch 対照 + ブラウザ実測 +
+  CPU/TS 側配置の系統評価 — 先例 = PLE host gather / relattn ホスト生成）③Fusion 半自動発見
+  （②の基盤上 — Inductor の融合決定を候補ヒント化。K-7 / K-5b の棄却実測は現行資産限定）
+  ④TurboQuant recon スパイク（軽・並行可 — 既存 screening rig に載せる）⑤MoE page-fault =
+  前倒しせず **Opus PoC を並行起動（2026-09-01・リポ外 spike）**: miss 相乗り readback +
+  step 再実行の成立性実測が先・設計スパイク（IR 語彙裁定 = ADR 級）は PoC の結果を見て。
+  **safetensors `I4` は方言と実測確定**（公式 0.8.0 が拒否 — limitations 明記済み・上流提案は
+  しない裁定・別形式 / 独自形式への移行は次 manifest format 変更時の器。モデルカード注記は
+  次リリースのカード再生成に同乗）
 
 ## 消化済み（既知問題 3 件 + anima 素版 i4 感度 — 2026-08-25〜28）
 
