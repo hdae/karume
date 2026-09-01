@@ -67,3 +67,39 @@ shard 1GiB 上限（ADR 0081）の門は書き手側にしか無かった。
 - 残る同型の弱点（起票のみ・本 ADR 対象外）: `GpuContext.createResident` と run 時 transient
   の確保は依然 errorScope 頼み。gemma4 PLE sidecar は shard 連番形だが `extras` 席なので
   決定 4 の門の外（現物は上限内）。
+
+## 追記 2026-09-01（波 2 = models 読み手結線の実装）
+
+- **limits の入手 = 案 A（アダプタを読んで捨てる）で実装**（裁定 1a）。runtime に
+  `readAdapterLimits`（`requestAdapter` → `planRequiredLimits`・絞り無し・device は作らない）を
+  新設し、models の `session/gpu-features.ts` に `assertRequiredLimitsSatisfied`（部分写像・
+  不足は全件列挙）と `assertRequiredLimitsBeforeDownload`（共有 GPU なら `GpuContext.limits`、
+  自前経路ならアダプタ実測値）を同居。席は 7 家族の admission（共有 GPU・`fromAssets` も守る）
+  - 8 家族の `fromPretrained` admission 閉包（重み prefetch の前）。gemma4 は
+    `gemma4ManifestConfig` が quant を返す形へ変更して閉包側に席を置き、`fromAssets`
+    （manifest 無し）は対象外（limitations 記録）。
+- 案 B（device を DL 前に取る）/ 案 C（アダプタを持ち回る）を採らなかった理由: 8 家族の
+  「資産の解析は GPU を取りに行く前」の順序 MUST と衝突する。加えて WebGPU 仕様はアダプタが
+  「いつでも失効しうる」（システム変化が無くても数秒〜数分後でも可、と Note が明記）と定め、
+  失効後の `requestDevice` は例外ではなく生まれた時点で lost な device を返す静かな失敗になる。
+  実装者側の指針も「device 要求の直前に新しいアダプタを取れ」。A の弱点（2 回の
+  `requestAdapter` が同じ物理アダプタを返す保証は無い）は、決定 1 の構築時検査が最終検査として
+  残ることで吸収する（DL 前検査は事前判定）。
+- **`estimateSessionMemory` のロード面結線（決定 5 の後半）は Phase B へ送る**: 見積りは
+  グラフ入力の記号次元の全束縛が前提（未束縛は fail loudly）で、ロード時に束縛値を持つのは
+  gemma4（capacity / chunkLength が config にある）だけ。他 7 家族は生成時の形状に依存するため、
+  今結線すると家族ごとに恣意的な代表形状を焼くことになる。limitations の該当節は「呼び手に
+  判断材料を渡すところまで」が目的で拒否は担わないので、遅らせても安全性は落ちない。Phase B の
+  RAM ピーク実測で「どの数字が判断に効くか」を見てから席を決める。
+- **dist 再生成は既存 5 ミラー**（karume-anima / irodori v4-small / irodori v4.1-small /
+  sbv2-jvnv / gemma4-e2b）で実施。Consequences の見込みどおり: anima 30 quant に
+  `maxBufferSize` = `maxStorageBufferBindingSize` = 311,164,928（296.75MiB）、irodori f32 に
+  両上限 314,572,800（300MiB）/ f16 に binding のみ 157,286,400（150MiB）、gemma4 は manifest
+  不変、sbv2 は欄なし。shard のサイズ・sha は全て不変（manifest の差分は `requiredLimits` 欄
+  のみを機械比較）。「全 8 家族」は文書上の数え方で、siglip2 / birefnet / depth-anything /
+  vowel-detector は未配布（ミラーも pin も無い）— 初回組み立てはリリース波。
+- 再生成で見えた既存ドリフト 2 点（本 ADR の対象外・記録のみ）: ①sbv2 の
+  `shared/text/symbols.json` が源（`outputs/misc/sbv2-demo/`・2026-08-30 17:40 再生成）に追随して
+  1,642 → 1,647 バイトへ変化（WAV 凍結 e2e は緑 = 出力に影響しないメタデータ差）②gemma4 と
+  irodori v4-small の README がカード生成器の文言変更に追随（折り返し・「v4 (Small)」→
+  「v4 Small」）。

@@ -814,14 +814,23 @@ Failed to create counter sample buffer: Cannot allocate sample buffer (MTLCounte
 wgpu-hal metal の `check_if_oom()` は `Ok(())` を返す no-op（[wgpu#7460](https://github.com/gfx-rs/wgpu/issues/7460)
 の TODO 付き）。Metal では予算超過が例外にならず、遅くなるだけで進む。
 
-## hub: DL 前の適合チェックは GPU feature 軸のみ（limits は DL 後に fail loudly）
+## DL 前の GPU 適合チェックは quant が宣言した feature と limits まで（合計・空きは見ない）
 
-quant が宣言できる GPU 前提のうち、DL 前に突き合わせるのは `gpuFeatures`（現行は
-`shaderF16`）だけ。`requiredLimits` は manifest `karume/4` で**宣言可能になった**
-（ADR 0038 追記 2026-08-25 / ADR 0075）が、hub はまだこれをデバイス実測値と突き合わせて
-いない — `maxBufferSize` / `maxStorageBufferBindingSize` 等の limits 不足は
-**ダウンロード後**の device / Session 構築時に fail loudly で判明する（数 GB を
-落とし切ってから落ちる）。宣言の消費（DL 前判定）は将来課題。
+quant が宣言する GPU 前提のうち、重み shard を取る前（家族 admission）に突き合わせるのは
+`gpuFeatures`（共有 GPU を渡された経路のみ — 自前で device を取る経路は要求として `acquireGpu`
+へ渡す）と `requiredLimits`（ADR 0089 決定 5・2026-09-01 結線）。limits の突き合わせ相手は、
+共有 GPU なら `GpuContext.limits`、自前で取る経路なら直前に読んだアダプタ実測値
+（`readAdapterLimits` — アダプタは読んで捨てる）。残る限界:
+
+- **DL 前に読んだアダプタと device を作るアダプタが同一である保証は WebGPU 仕様に無い**
+  （`requestAdapter` は呼ぶたび別オブジェクトを返し、同じ物理アダプタを選ぶとは定めない）。
+  DL 前検査は事前判定で、最終の検査は Session 構築時の実バッファ検査（ADR 0089 決定 1）。
+- `requiredLimits` は**常駐前提の寸法**（既定超過分だけ — ADR 0089 決定 3）。実行時の一時確保や
+  f32 展開のワーストは含まない（そちらは構築時・実行時の検査が担う）。
+- gemma4 の `fromAssets` は manifest を受け取らない（`Gemma4Assets` はバイト列と config だけ）
+  ため宣言に到達できず、この面の守りは構築時検査のみ。`fromAssets` 一般は DL が無いので
+  事前判定の席自体が無い（共有 GPU を渡した場合だけ admission で見る）。
+- 合計 vs 物理空き容量は見ない（下の「GPU メモリの事前検査は…」節）。
 
 ## ブラウザ: Chromium は単一 ArrayBuffer を 2,145,386,496 バイトで打ち切る（分割前の旧資産のみ該当）
 
@@ -972,5 +981,7 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 合計超過の最終検出は out-of-memory errorScope のままで、**Metal ではそれが沈黙する既知環境が
 ある**（上の「Metal には効かない」注記 — wgpu-hal metal の `check_if_oom()` は no-op。
 known-issues「Metal で out-of-memory errorScope が沈黙する」）。つまり Metal では
-「単発上限は事前に確実に落ちる・合計の物理超過は依然黙って進み得る」が残る。緩和は必要量の
-事前見積り（`estimateSessionMemory` のロード面結線）で呼び手に判断材料を渡すところまで。
+「単発上限は事前に確実に落ちる・合計の物理超過は依然黙って進み得る」が残る。緩和候補は必要量の
+事前見積り（`estimateSessionMemory`）を呼び手へ渡すことだが、見積りはグラフ入力の記号次元が全て
+束縛されていることを要し、ロード時に束縛値を持つ家族は gemma4 だけなので、席の設計は Phase B の
+実測後に行う（ADR 0089 追記 2026-09-01 — 未実装）。

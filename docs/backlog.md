@@ -172,28 +172,29 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     資産根 / fixture 書き先の注入形。**時期 = モデル波の後**（parked 起票の復活裁定）。
 - **次波計画（2026-09-01 裁定 — 棚卸し後トリアージ。同日改訂: モデル更新波が先行し、以下は
   その後）**:
-  ①**メモリ管理波** — Phase A（ADR 0089・2026-09-01）: **波 1 = runtime 重み/state の
-  絶対上限検査・波 3 = exporter requiredLimits 一括導出・波 4 = hub shard 読み手検査は
-  実装済み**（f8b67c0 / 6503e6b / 0b3967a。「Metal OOM 根治」は単発上限まで — 合計 vs
-  物理は原理的に検査不能で limitations に by-design 記録）。**残 = 波 2**: manifest
-  `requiredLimits` の models 読み手（admission で GPU limits と比較・adapter 取得の
-  DL 前繰り上げ = 裁定 1a）+ `estimateSessionMemory` のロード面結線 + **全 8 家族 dist
-  再生成**（欄新設: anima 30 quant / irodori f32・f16 — gemma4 はバイト不変）+
-  limitations「DL 前の適合チェックは GPU feature 軸のみ」節の書き換え。
-  隣接起票（ADR 0089 Consequences）: createResident / run 時 transient の同型弱点・
-  PLE sidecar は extras 席で shard 門の外。+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
-  A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+
-  capacity 1024 反映を同乗。Phase C 起票 = 単一 tensor >1GiB 非対応の期間裁定・fromAssets の
-  位置づけ・large asset の reference-first 一般則・**cache-less streaming mode（26B A4B 級の
-  前提 — CacheStorage quota が先に壁）** ②OP マイクロベンチ波（PyTorch 対照 + ブラウザ実測 +
-  CPU/TS 側配置の系統評価 — 先例 = PLE host gather / relattn ホスト生成）③Fusion 半自動発見
-  （②の基盤上 — Inductor の融合決定を候補ヒント化。K-7 / K-5b の棄却実測は現行資産限定）
-  ④TurboQuant recon スパイク（軽・並行可 — 既存 screening rig に載せる）⑤MoE page-fault =
-  前倒しせず **Opus PoC を並行起動（2026-09-01・リポ外 spike）**: miss 相乗り readback +
-  step 再実行の成立性実測が先・設計スパイク（IR 語彙裁定 = ADR 級）は PoC の結果を見て。
-  **safetensors `I4` は方言と実測確定**（公式 0.8.0 が拒否 — limitations 明記済み・上流提案は
-  しない裁定・別形式 / 独自形式への移行は次 manifest format 変更時の器。モデルカード注記は
-  次リリースのカード再生成に同乗）
+  ①**メモリ管理波** — Phase A（ADR 0089・2026-09-01）: **波 1〜4 実装済み = Phase A
+  クローズ**（波 1 f8b67c0 / 波 4 6503e6b / 波 3 0b3967a / 波 2 = runtime `readAdapterLimits`
+  - models 8 家族の DL 前 limits 検査〈案 A = アダプタを読んで捨てる〉+ 既存 5 ミラー再生成
+    〈anima 30 quant / irodori f32・f16 に欄新設・gemma4 不変・sbv2 欄なし〉— ADR 0089 追記
+    2026-09-01）。「Metal OOM 根治」は単発上限まで — 合計 vs 物理は原理的に検査不能で
+    limitations に by-design 記録。**Phase B へ持ち越し**: `estimateSessionMemory` のロード面
+    結線（見積りは全記号の束縛が前提でロード時に束縛値を持つのは gemma4 だけ — 実測後に席を
+    決める）。未配布 4 家族（siglip2 / birefnet / depth-anything / vowel-detector）の初回
+    ミラー組み立てはリリース波。
+    隣接起票（ADR 0089 Consequences）: createResident / run 時 transient の同型弱点・
+    PLE sidecar は extras 席で shard 門の外。+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
+    A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+
+    capacity 1024 反映を同乗。Phase C 起票 = 単一 tensor >1GiB 非対応の期間裁定・fromAssets の
+    位置づけ・large asset の reference-first 一般則・**cache-less streaming mode（26B A4B 級の
+    前提 — CacheStorage quota が先に壁）** ②OP マイクロベンチ波（PyTorch 対照 + ブラウザ実測 +
+    CPU/TS 側配置の系統評価 — 先例 = PLE host gather / relattn ホスト生成）③Fusion 半自動発見
+    （②の基盤上 — Inductor の融合決定を候補ヒント化。K-7 / K-5b の棄却実測は現行資産限定）
+    ④TurboQuant recon スパイク（軽・並行可 — 既存 screening rig に載せる）⑤MoE page-fault =
+    前倒しせず **Opus PoC を並行起動（2026-09-01・リポ外 spike）**: miss 相乗り readback +
+    step 再実行の成立性実測が先・設計スパイク（IR 語彙裁定 = ADR 級）は PoC の結果を見て。
+    **safetensors `I4` は方言と実測確定**（公式 0.8.0 が拒否 — limitations 明記済み・上流提案は
+    しない裁定・別形式 / 独自形式への移行は次 manifest format 変更時の器。モデルカード注記は
+    次リリースのカード再生成に同乗）
 
 ## 消化済み（既知問題 3 件 + anima 素版 i4 感度 — 2026-08-25〜28）
 
