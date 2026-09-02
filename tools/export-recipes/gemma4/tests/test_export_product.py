@@ -45,11 +45,11 @@ from gemma4.tests.test_export_decode import (
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.pipeline import export_module
 from karume.quantize import quantize_to_int8
-from karume.shards import SHARD_BYTE_LIMIT
+from karume.shards import SHARD_DATA_CAPACITY
 from karume.states import to_states_form
 
-#: tiny 系列で **2 本以上**の sidecar を作らせる上限（実物は 1GiB で 3 本 — 1 本しか出ない
-#: 上限で driver を回すと、連番・索引・probe の shard 跨ぎが 1 度も踏まれない）。
+#: tiny 系列で **2 本以上**の sidecar を作らせる容量（実物は既定の容量で 9 本 — 1 本しか
+#: 出ない容量で driver を回すと、連番・索引・probe の shard 跨ぎが 1 度も踏まれない）。
 TINY_PLE_LIMIT = product.ple_token_bytes(len(DECODE_LAYER_TYPES), PLE_DIM) * (VOCAB // 2)
 
 #: 系列の要約の欄（順序込み）。ここが変わると実走の記録の形が変わる。
@@ -106,14 +106,18 @@ class TestPlanPleShards:
         assert rows == [334, 333, 333]
 
     def test_every_shard_stays_under_the_limit(self):
-        for start, stop in product.plan_ple_shards(262144, 9100, limit=SHARD_BYTE_LIMIT):
-            assert (stop - start) * 9100 <= SHARD_BYTE_LIMIT
+        for start, stop in product.plan_ple_shards(262144, 9100):
+            assert (stop - start) * 9100 <= SHARD_DATA_CAPACITY
 
-    def test_the_real_model_lands_on_three_shards(self):
-        """実物の見込み（262,144 token × 9,100B = 2,275MiB → 1GiB 上限で 3 本）。"""
-        ranges = product.plan_ple_shards(262144, 9100, limit=SHARD_BYTE_LIMIT)
+    def test_the_real_model_lands_on_nine_shards(self):
+        """実物の見込み（262,144 token × 9,100B = 2,275MiB → 既定の容量で 9 本）。
 
-        assert len(ranges) == 3
+        既定は書き手の容量（{@link karume.shards.SHARD_DATA_CAPACITY}）— 受理上限が
+        ファイル長で測る値になったので、sidecar もヘッダぶんを空けた容量で切る。
+        """
+        ranges = product.plan_ple_shards(262144, 9100)
+
+        assert len(ranges) == 9
         assert ranges[-1][1] == 262144
 
     def test_a_single_token_over_the_limit_fails_loudly(self):

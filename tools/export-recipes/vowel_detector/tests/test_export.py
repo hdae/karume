@@ -30,7 +30,9 @@ from safetensors.torch import load_file, save_file
 from torch.export import Dim
 
 from _shared.paths import SERIES_ROOT
+from karume import emit
 from karume.pipeline import export_to_file
+from karume.shards import parse_piece_key, resolve_shards
 from vowel_detector import export as vd
 
 #: tiny な合成重みの寸法（特徴 83 次元だけは {@link vd.build_cases} と揃える）。
@@ -438,3 +440,49 @@ class TestCli:
         vd.main(["--length", "500"])
 
         assert seen == [vd.default_out_dir(vd.DEFAULT_CKPT)]
+
+
+class TestCheckpointBytesOfASplitComponent:
+    """分割テンソル（piece — ADR 0090）を含む配布形でも突合は成立する。
+
+    容量を人工的に下げて conv の重み（tiny でも 1 行 1,660 バイト）を行で割らせる。畳まない
+    リーダなら state_dict の鍵が全部「欠けている」に化けるので、この 1 本で読み替えの有無が
+    決まる。
+    """
+
+    def split_export(self, tmp_path: Path, module: vd.Crnn, monkeypatch) -> Path:
+        monkeypatch.setattr(emit, "SHARD_DATA_CAPACITY", 2048)
+        _export_tiny(module, tmp_path)
+        return tmp_path / vd.MODEL_FILE
+
+    def test_the_component_really_carries_pieces(self, tmp_path, tiny_module, monkeypatch) -> None:
+        """前提の観測点 — piece が 1 本も無ければこのテストは空振りになる。"""
+        path = self.split_export(tmp_path, tiny_module, monkeypatch)
+
+        keys = [
+            key
+            for shard in resolve_shards(path)
+            for key in load_file(shard)
+            if parse_piece_key(key) is not None
+        ]
+        assert keys
+
+    def test_every_checkpoint_tensor_is_still_byte_identical(
+        self, tmp_path, tiny_module, monkeypatch
+    ) -> None:
+        path = self.split_export(tmp_path, tiny_module, monkeypatch)
+
+        matched = vd.assert_checkpoint_bytes(path, tiny_module.state_dict())
+
+        assert matched == len(tiny_module.state_dict())
+
+    def test_a_changed_byte_still_fails_loudly(self, tmp_path, tiny_module, monkeypatch) -> None:
+        """畳んだ実体で突き合わせている（分割で門が緩まない）。"""
+        path = self.split_export(tmp_path, tiny_module, monkeypatch)
+        state_dict = dict(tiny_module.state_dict())
+        tampered = state_dict["conv.0.weight"].clone()
+        tampered[0, 0, 0] += 1.0
+        state_dict["conv.0.weight"] = tampered
+
+        with pytest.raises(AssertionError, match="バイト列が一致しない"):
+            vd.assert_checkpoint_bytes(path, state_dict)

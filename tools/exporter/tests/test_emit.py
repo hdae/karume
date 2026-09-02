@@ -9,6 +9,7 @@ import struct
 import weakref
 from dataclasses import replace
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import torch
@@ -43,7 +44,13 @@ from karume.quantize import (
     quantize_to_int4,
     quantize_to_int8,
 )
-from karume.shards import ShardError, resolve_shards, shard_path, shard_siblings
+from karume.shards import (
+    ShardError,
+    parse_piece_key,
+    resolve_shards,
+    shard_path,
+    shard_siblings,
+)
 from karume.verify import (
     ContainerError,
     assert_reader_layout,
@@ -1749,8 +1756,8 @@ class TestTheWrittenShardSet:
         graph, tensors = sample_graph()
         final = tmp_path / "model.safetensors"
 
-        # `enc.w` は f32 4 要素 = 16 バイト（ヘッダは上限に数えない）。
-        written = write_model(final, graph, tensors, _shard_byte_limit=16)
+        # `enc.w` は f32 4 要素 = 16 バイト（容量はデータ節に対する値で、ヘッダは別枠）。
+        written = write_model(final, graph, tensors, _shard_capacity=16)
 
         assert written == [shard_path(final, 1, 2), shard_path(final, 2, 2)]
         assert tuple(hashlib.sha256(p.read_bytes()).hexdigest() for p in written) == (
@@ -1761,14 +1768,14 @@ class TestTheWrittenShardSet:
 class TestShardSplitting:
     """weight shard は決定的に割り付けられる（規則の正本は `karume.shards`）。
 
-    上限は合成の小テンソルへ人工的に下げて踏む（`_shard_byte_limit` — テスト専用の差し込み。
-    実データで 1GiB を踏むテストは書けない）。`fixed_int8_weight_graph` の payload は
+    容量は合成の小テンソルへ人工的に下げて踏む（`_shard_capacity` — テスト専用の差し込み。
+    実データで 256MiB を踏むテストは書けない）。`fixed_int8_weight_graph` の payload は
     F32 群が `enc.b` 12B → `karume.scale.enc.emb` 12B → `karume.scale.enc.w` 12B、
     I8 群が `enc.emb` 15B → `enc.w` 12B（並びは ADR 0063 の書き出し順）で、跨げない単位は
     `enc.b` 12B / `scale.emb + enc.emb` 27B / `scale.w + enc.w` 24B の 3 つ。
     """
 
-    def split(self, tmp_path, limit: int) -> list:
+    def split(self, tmp_path, capacity: int) -> list:
         graph, tensors, scales = fixed_int8_weight_graph()
         return write_model(
             tmp_path / "model.safetensors",
@@ -1776,7 +1783,7 @@ class TestShardSplitting:
             tensors,
             weight_dtype="i8",
             weight_scales=scales,
-            _shard_byte_limit=limit,
+            _shard_capacity=capacity,
         )
 
     def tensors_of(self, path) -> set[str]:
@@ -1868,9 +1875,13 @@ class TestShardSplitting:
         expected = compressed_view(graph, {"w": "i8", "emb": "i8"})
         assert verify_shards(written).to_dict() == expected.to_dict()
 
-    def test_a_pair_that_alone_exceeds_the_limit_fails_loudly(self, tmp_path):
-        """1 対（重み + scale）は分割できない — 黙って上限を破らない。"""
-        with pytest.raises(ShardError, match="1 対は分割できない"):
+    def test_a_pair_whose_weight_cannot_be_split_fails_loudly(self, tmp_path):
+        """行で割っても入らない対は fail loudly — 黙って容量を破らない。
+
+        `enc.emb` は I8 `[3,5]` = 1 行 5 バイトなので、4 バイト整列の刻みは 4 行 = 20 バイト
+        （読み手契約 5）。相方の scale 12B を差し引いた 8 バイトには 1 ブロックも入らない。
+        """
+        with pytest.raises(ShardError, match="これ以上細かく割れない"):
             self.split(tmp_path, 20)
 
     def test_it_refuses_to_read_a_shard_set_that_split_a_pair(self, tmp_path):
@@ -1901,3 +1912,170 @@ class TestShardSplitting:
 
         with pytest.raises(ContainerError, match="グラフ shard は先頭 1 本だけ"):
             verify_shards([head, head])
+
+
+def piece_graph(
+    storage: str, rows: int = 8, cols: int = 32
+) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """`[rows, cols]` の linear 重み 1 本を `storage` で丸めたグラフ（行分割の被験体）。
+
+    値は決定的な等差列（`rounded` の乱数を使わない — 分割の前後でバイト列が同じであることを
+    突き合わせるので、同じ引数から同じバイトが出る必要がある）。`cols` は 32 なので 1 行は
+    F16 で 64B・I8 で 32B・I4（g16）で 16B と、どれも 4 の倍数になる。
+    """
+    weight = ((torch.arange(rows * cols, dtype=torch.float32) % 7) - 3).reshape(rows, cols)
+    scales: dict[str, torch.Tensor] = {}
+    if storage == "f16":
+        weight = weight.to(torch.float16).to(torch.float32)
+    elif storage == "i8":
+        scale = channel_scale(weight, 0)
+        weight = quantize_to_int8(weight, scale).to(torch.float32) * scale
+        scales["enc.w"] = scale
+    else:
+        scale = group_scale(weight, 16)
+        weight = dequantize_int4(quantize_to_int4(weight, scale), scale)
+        scales["enc.w"] = scale
+    graph = IrGraph(
+        symbols=["T"],
+        inputs=[IrInput(name="x", dtype="f32", shape=["T", cols])],
+        outputs=["h"],
+        initializers={
+            "w": IrInitializer(tensor="enc.w", storage=IrStorage(dtype="f32")),
+            "b": IrInitializer(tensor="enc.b", storage=IrStorage(dtype="f32")),
+        },
+        values={
+            "w": IrValue(dtype="f32", shape=[rows, cols]),
+            "b": IrValue(dtype="f32", shape=[rows]),
+            "h": IrValue(dtype="f32", shape=["T", rows]),
+        },
+        nodes=[IrNode(op="linear", ins=["x", "w", "b"], outs=["h"], attrs={})],
+    )
+    tensors = {"enc.w": weight, "enc.b": (torch.arange(rows, dtype=torch.float32) % 5) - 2}
+    return graph, tensors, scales
+
+
+def stored_tensors(paths) -> dict[str, tuple[str, tuple[int, ...], bytes]]:
+    """shard 列の全テンソル（キー → dtype・shape・生バイト）。piece は畳まずそのまま。"""
+    found: dict[str, tuple[str, tuple[int, ...], bytes]] = {}
+    for path in paths:
+        raw = path.read_bytes()
+        length = struct.unpack("<Q", raw[:8])[0]
+        header = json.loads(raw[8 : 8 + length])
+        start = 8 + length
+        for key, spec in header.items():
+            if key == "__metadata__":
+                continue
+            begin, end = spec["data_offsets"]
+            found[key] = (spec["dtype"], tuple(spec["shape"]), raw[start + begin : start + end])
+    return found
+
+
+def joined_payload(paths, name: str) -> bytes:
+    """`name` の生バイト（分割されていれば piece を index 順に連結して親へ畳む）。"""
+    found = stored_tensors(paths)
+    if name in found:
+        return found[name][2]
+    numbered = []
+    for key, (_dtype, _shape, payload) in found.items():
+        parsed = parse_piece_key(key)
+        if parsed is not None and parsed[0] == name:
+            numbered.append((parsed[1], payload))
+    assert numbered, f"テンソル '{name}' が shard 列に無い: {sorted(found)}"
+    return b"".join(payload for _index, payload in sorted(numbered))
+
+
+class TestTensorPieces:
+    """容量に収まらないテンソルは**行**で割って連続 shard へ配る（ADR 0090 決定 1）。
+
+    被験体は `[8,32]` の linear 重み 1 本（{@link piece_graph}）。容量は f16 / i8 が 200B・
+    i4 が 150B — どれも「重み（+ scale）が 1 shard に入らないが、行ブロックなら入る」帯に
+    取ってある（実データで 256MiB を踏むテストは書けない）。
+    """
+
+    CAPACITY: ClassVar[dict[str, int]] = {"f16": 200, "i8": 200, "i4": 150}
+
+    def write(self, tmp_path, storage: str, capacity: int | None) -> list:
+        graph, tensors, scales = piece_graph(storage)
+        return write_model(
+            tmp_path / "model.safetensors",
+            graph,
+            tensors,
+            weight_dtype=storage,
+            weight_scales=scales,
+            _shard_capacity=capacity,
+        )
+
+    def pieces_of(self, paths, name: str) -> list[tuple[int, int, int, str, tuple[int, ...]]]:
+        """`name` の piece を `(index, count, shard, dtype, shape)` で index 順に。"""
+        found = []
+        for shard, path in enumerate(paths):
+            for key, (dtype, shape, _payload) in stored_tensors([path]).items():
+                parsed = parse_piece_key(key)
+                if parsed is not None and parsed[0] == name:
+                    found.append((parsed[1], parsed[2], shard, dtype, shape))
+        return sorted(found)
+
+    @pytest.mark.parametrize("storage", ["f16", "i8", "i4"])
+    def test_the_weight_becomes_a_run_of_pieces_on_consecutive_shards(self, tmp_path, storage):
+        """index は 1..n で、shard は 1 本ずつ進む（読み手契約 5）。"""
+        written = self.write(tmp_path, storage, self.CAPACITY[storage])
+
+        pieces = self.pieces_of(written, "enc.w")
+        assert len(pieces) >= 2
+        assert [index for index, *_ in pieces] == list(range(1, len(pieces) + 1))
+        assert {count for _index, count, *_ in pieces} == {len(pieces)}
+        assert [shard for _index, _count, shard, *_ in pieces] == list(
+            range(pieces[0][2], pieces[0][2] + len(pieces))
+        )
+
+    @pytest.mark.parametrize("storage", ["f16", "i8", "i4"])
+    def test_each_piece_declares_its_row_range_with_the_parent_dtype(self, tmp_path, storage):
+        """dtype は親と同じ・shape は先頭次元だけが行数（残りの次元は親のまま）。"""
+        written = self.write(tmp_path, storage, self.CAPACITY[storage])
+
+        pieces = self.pieces_of(written, "enc.w")
+        assert {dtype for *_head, dtype, _shape in pieces} == {storage.upper()}
+        assert all(shape[1:] == (32,) for *_head, shape in pieces)
+        assert sum(shape[0] for *_head, shape in pieces) == 8
+
+    @pytest.mark.parametrize("storage", ["f16", "i8", "i4"])
+    def test_the_split_container_passes_the_full_verification(self, tmp_path, storage):
+        """読み返しの門は piece を親へ畳んでから、分割前と同じ集合を見る。"""
+        written = self.write(tmp_path, storage, self.CAPACITY[storage])
+
+        graph = verify_shards(written)
+
+        assert graph.initializers["w"].storage.dtype == storage
+        assert graph.values["w"].shape == [8, 32]
+
+    @pytest.mark.parametrize("storage", ["f16", "i8", "i4"])
+    def test_the_parent_bytes_match_an_unsplit_write(self, tmp_path, storage):
+        """piece を連結すると分割前と**ビット同一**（切ってから変換 = 変換してから切る）。
+
+        i8 の per-channel scale も i4 の group scale も先頭次元が行なので、断片ごとに切った
+        scale で変換しても親の格納バイトと 1 バイトも変わらない。
+        """
+        whole = self.write(tmp_path / "whole", storage, None)
+        split = self.write(tmp_path / "split", storage, self.CAPACITY[storage])
+
+        assert len(split) > len(whole)
+        assert joined_payload(split, "enc.w") == joined_payload(whole, "enc.w")
+
+    @pytest.mark.parametrize("storage", ["i8", "i4"])
+    def test_the_scale_shares_the_shard_of_the_first_piece(self, tmp_path, storage):
+        """companion scale は割らず piece 1 と同居する（co-shard MUST の piece 版）。"""
+        written = self.write(tmp_path, storage, self.CAPACITY[storage])
+
+        first_shard = self.pieces_of(written, "enc.w")[0][2]
+        assert "karume.scale.enc.w" in stored_tensors([written[first_shard]])
+        assert joined_payload(written, "karume.scale.enc.w") == joined_payload(
+            self.write(tmp_path / "whole", storage, None), "karume.scale.enc.w"
+        )
+
+    @pytest.mark.parametrize("storage", ["f16", "i8", "i4"])
+    def test_a_capacity_that_fits_writes_no_piece_at_all(self, tmp_path, storage):
+        """容量に収まるなら丸ごと 1 本のまま（小さいテンソルが piece に化けない）。"""
+        written = self.write(tmp_path, storage, None)
+
+        assert self.pieces_of(written, "enc.w") == []
+        assert "enc.w" in stored_tensors(written)

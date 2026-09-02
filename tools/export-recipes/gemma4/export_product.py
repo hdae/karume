@@ -28,8 +28,8 @@ chunk 系列の経路（素材の読み方・RoPE の表引き・KV 共有の手
 グラフから外した 35 表は **token-major**（`[token][layer][256]` i8 + `[token][layer]` の
 per-row scale）へ再配置し、**vocab の範囲**で shard する（ADR 0085 決定 1 / 2）。1 token の
 PLE が連続 1 読み（8,960B + 35 scale）になる形で、後から「キャッシュから行だけ読む」
-（同 ADR の代替案 b）へ移るときに再 export も再アップロードも要らない。上限は ADR 0081 の
-唯一の定数（{@link karume.shards.SHARD_BYTE_LIMIT} = 1GiB）をそのまま使う。
+（同 ADR の代替案 b）へ移るときに再 export も再アップロードも要らない。1 shard の大きさは
+書き手の容量（{@link karume.shards.SHARD_DATA_CAPACITY}）をそのまま使う。
 
 NOTE: sidecar は **IR コンテナではない**（付帯資産 — ADR 0038 §2 の extras と同じ位置づけで、
 読み手は `parseSafetensors` の厳格リーダ）。したがって ADR 0081 の読み手契約 1（shard 0 =
@@ -87,7 +87,7 @@ from karume.ops import ARGMAX_OP, EMBEDDING_OP
 from karume.pipeline import export_module
 from karume.quantize import quantize_to_int8
 from karume.shapes import declared_shape
-from karume.shards import SHARD_TARGET_BYTES, resolve_shards, shard_name
+from karume.shards import SHARD_DATA_CAPACITY, resolve_shards, shard_name
 from karume.states import to_states_form
 
 #: 生成物の既定の置き場（既存 2 系列とは別ディレクトリ — 入口も出口も違う別資産）。
@@ -224,18 +224,18 @@ def ple_table_rows(tables: Sequence[torch.nn.Module], vocab_size: int) -> int:
 
 
 def plan_ple_shards(
-    tokens: int, token_bytes: int, limit: int = SHARD_TARGET_BYTES
+    tokens: int, token_bytes: int, limit: int = SHARD_DATA_CAPACITY
 ) -> tuple[tuple[int, int], ...]:
-    """vocab を目標内の**最小本数**へ割り、行数を均した `[start, stop)` の列。
+    """vocab を容量内の**最小本数**へ割り、行数を均した `[start, stop)` の列。
 
     方針は {@link karume.shards.pack_shards} と同型（最小本数 k を先に決めてから均す —
     端数 shard を作らない・ADR 0081）。単位が **1 token 固定長**なので貪欲の最小本数は
-    `ceil(総量 / 目標)` に一致し、均しも行数の等分で済む（対の原子性も可変長も無い）。
-    `limit` の既定は書き手の目標 {@link karume.shards.SHARD_TARGET_BYTES}（sidecar は遅延ロードで
-    触った shard だけをホストへ読むので、目標がそのまま 1 回の読みの上限になる）。
+    `ceil(総量 / 容量)` に一致し、均しも行数の等分で済む（対の原子性も可変長も無い）。
+    `limit` の既定は書き手の容量 {@link karume.shards.SHARD_DATA_CAPACITY}（sidecar は遅延
+    ロードで触った shard だけをホストへ読むので、容量がそのまま 1 回の読みの上限になる）。
 
-    MUST: 1 token が単独で目標を超える形は fail loudly（層数か層当たり次元が想定外に大きい
-    — 分割の粒度をこれ以上細かくできないので、黙って目標を破るしかなくなる）。
+    MUST: 1 token が単独で容量を超える形は fail loudly（層数か層当たり次元が想定外に大きい
+    — 分割の粒度をこれ以上細かくできないので、黙って容量を破るしかなくなる）。
     """
     if tokens < 1:
         raise ValueError(f"PLE sidecar の token 数 {tokens} が 1 以上でない")

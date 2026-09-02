@@ -644,14 +644,22 @@ def component_demand_bytes(
 
     導出規則の正本は {@link karume.limits}（純関数側）。ここが足すのは「配布に入る現物のどこを
     入口にするか」だけ — 代表 path から shard 列とグラフを引く。
+
+    MUST: 全 shard のヘッダを**1 枚へ畳んでから**渡す。分割テンソル（ADR 0090 決定 1）の
+    断片は shard を跨いで散るので、shard ごとに最大を採ると断片 1 つぶんしか数えられない
+    （GPU 側は親 1 本のバッファを確保する — `karume.limits.max_tensor_payload`）。shard 跨ぎの
+    同名テンソルは禁止なので、キーで畳んでも衝突しない。
     """
     remembered = memo.get(source)
     if remembered is not None:
         return remembered
     try:
-        demand = 0
+        merged: dict[str, Any] = {}
         for shard in component_shards(source):
-            demand = max(demand, max_tensor_payload(safetensors_header(shard), str(shard)))
+            for name, spec in safetensors_header(shard).items():
+                if name != "__metadata__":
+                    merged[name] = spec
+        demand = max_tensor_payload(merged, str(source))
         demand = max(demand, max_state_slot_bytes(ir_graph(source), pipeline_config, str(source)))
     except LimitsError as cause:
         raise DistError(str(cause)) from cause

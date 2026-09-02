@@ -34,6 +34,7 @@ from torch import nn
 from irodori import export as ex
 from irodori import pipeline_ref as ip
 from irodori.distribution import CALIB_PROVENANCE_FILE, irodori_calib_floor
+from karume.dist import safetensors_header
 from karume.emit import pack_int4, unpack_int4
 from karume.quantize import (
     channel_scale,
@@ -42,7 +43,7 @@ from karume.quantize import (
     quantize_to_int4,
     quantize_to_int8,
 )
-from karume.shards import shard_path
+from karume.shards import piece_key, shard_path
 
 
 class TestTSchedule:
@@ -652,3 +653,91 @@ class TestEulerReferenceSensitivity:
         worst = 1.0e-1
         assert worst <= amp * ip.EULER_NOISE_PER_AMP
         assert not ip.euler_reference_within_sensitivity(worst, amp)
+
+
+def _split_entries(entries: list[list[Any]], key: str, parts: int) -> list[list[Any]]:
+    """`key` のヘッダ項目を先頭次元の均等な `parts` 本の piece へ差し替える（ADR 0090）。
+
+    生バイトは行の連続範囲そのままなので、読み手が畳めば元の実体に戻る。
+    """
+    found = [entry for entry in entries if entry[0] == key]
+    assert len(found) == 1, f"分割する席が 1 本でない: {key}"
+    _name, dtype, shape, payload = found[0]
+    rows = shape[0]
+    row_bytes = len(payload) // rows
+    step = rows // parts
+    pieces: list[list[Any]] = []
+    for index in range(parts):
+        begin = index * step
+        end = rows if index == parts - 1 else begin + step
+        pieces.append(
+            [
+                piece_key(key, index + 1, parts),
+                dtype,
+                [end - begin, *shape[1:]],
+                payload[begin * row_bytes : end * row_bytes],
+            ]
+        )
+    kept = [entry for entry in entries if entry[0] != key]
+    return [*kept, *pieces]
+
+
+def _write_split_series(
+    directory: Path, entries: list[list[Any]], initializers: dict[str, Any], key: str
+) -> Path:
+    """`key` を 2 本の piece へ割った合成 i4 系列（グラフ shard + weight shard 2 本）。
+
+    piece 1 は他のテンソル（scale を含む）と同じ shard、piece 2 は次の shard — 配布形の規則
+    どおりの並びで、読み手が「連続 shard の piece 列」を畳む経路をそのまま踏む。
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    split = _split_entries(entries, key, 2)
+    tail = piece_key(key, 2, 2)
+    groups = [
+        [entry for entry in split if entry[0] != tail],
+        [entry for entry in split if entry[0] == tail],
+    ]
+    graph_header = {"__metadata__": {"karume_ir": json.dumps({"initializers": initializers})}}
+    headers: list[tuple[dict[str, Any], bytes]] = [(graph_header, b"")]
+    for group in groups:
+        header: dict[str, Any] = {}
+        blob = bytearray()
+        for name, dtype, shape, payload in group:
+            header[name] = {
+                "dtype": dtype,
+                "shape": shape,
+                "data_offsets": [len(blob), len(blob) + len(payload)],
+            }
+            blob += payload
+        headers.append((header, bytes(blob)))
+    for index, (header, data) in enumerate(headers, start=1):
+        raw = json.dumps(header).encode()
+        shard_path(directory / ex.MODEL_FILE, index, len(headers)).write_bytes(
+            len(raw).to_bytes(8, "little") + raw + data
+        )
+    record = {"method": "gptq", "grid": "rtn", "group_size": GROUP, **irodori_calib_floor()}
+    (directory / CALIB_PROVENANCE_FILE).write_text(json.dumps(record), encoding="utf-8")
+    return directory
+
+
+class TestRestoreDitFromASplitSeries:
+    """分割テンソル（piece — ADR 0090）を含む系列でも読み戻しは同じ結果になる。
+
+    畳まない読み手だと i4 席の集合突合が piece キーで数えられ、「I4 格納のテンソルが 1 本も
+    無い」で落ちる（= この 1 本が畳みの有無を決める）。
+    """
+
+    def test_every_owned_parameter_still_comes_from_the_shipped_bytes(self, tmp_path):
+        module = _DitWrapper()
+        entries, initializers, shipped = _material()
+        series = _write_split_series(tmp_path / "dit", entries, initializers, I4_KEY)
+        # 前提の観測点 — piece が 1 本も無ければこのテストは空振りになる。
+        weight_shard = shard_path(series / ex.MODEL_FILE, 2, 3)
+        assert piece_key(I4_KEY, 1, 2) in safetensors_header(weight_shard)
+
+        record = ip.restore_dit_from_i4_series(module, series)
+
+        assert (record.int4, record.int8, record.plain, record.changed) == (1, 1, 4, 1)
+        owned = dict(module.named_parameters())
+        for key, value in shipped.items():
+            assert torch.equal(owned[key].detach(), value), key

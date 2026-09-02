@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from karume.dims import DimError, DimExpr, eval_dim, try_parse_dim
+from karume.shards import parse_piece_key
 
 
 class LimitsError(ValueError):
@@ -69,15 +70,20 @@ def required_limits(demand: int) -> dict[str, int]:
 
 
 def max_tensor_payload(header: Mapping[str, Any], where: str) -> int:
-    """safetensors ヘッダ 1 本の**最大テンソル payload バイト数**（テンソル 0 本なら 0）。
+    """safetensors ヘッダの**最大テンソル payload バイト数**（テンソル 0 本なら 0）。
 
     数えるのは `data_offsets` の差 = **格納形そのままのバイト数**（f16 / i8 / i4 は圧縮寸法の
     まま）。1 テンソルが 1 つの storage buffer になるので、この値がそのまま需要になる。
 
-    グラフ shard（ADR 0081 の「`karume_ir` だけ・データ節は空」）は 0 を返す — 呼び手が
-    コンポーネント全 shard の最大を採るので、空の shard は素通しでよい。
+    MUST: 分割テンソル（`<親名>#NNNNN-of-NNNNN` — ADR 0090 決定 1）は**親へ畳んで
+    合算**する。GPU 側は分割を知らず親 1 本ぶんのバッファを確保するので、断片の最大を採ると
+    `requiredLimits` が過小に焼かれ、「宣言は満たすのに `createSession` で落ちる」という最も
+    損な形になる。呼び手はコンポーネント全 shard のヘッダを 1 枚へ畳んで渡す
+    （`karume.dist.component_demand_bytes` — 断片は shard を跨いで散る）。
+
+    グラフ shard（ADR 0081 の「`karume_ir` だけ・データ節は空」）は 0 を返す。
     """
-    largest = 0
+    totals: dict[str, int] = {}
     for name, spec in header.items():
         if name == "__metadata__":
             continue
@@ -91,8 +97,10 @@ def max_tensor_payload(header: Mapping[str, Any], where: str) -> int:
             raise LimitsError(
                 f"{where}: テンソル '{name}' の data_offsets [{begin}, {end}] が昇順の非負でない"
             )
-        largest = max(largest, end - begin)
-    return largest
+        parsed = parse_piece_key(name)
+        owner = name if parsed is None else parsed[0]
+        totals[owner] = totals.get(owner, 0) + (end - begin)
+    return max(totals.values(), default=0)
 
 
 def state_bindings(
@@ -139,8 +147,8 @@ def max_state_slot_bytes(
 
     スロットは `createGenerationContext` が容量ぶん丸ごと確保する常駐バッファ（1 スロット =
     1 バッファ = 1 binding）なので、記号を束縛した具体寸法がそのまま需要になる。KV 容量の
-    大きい系列では**最大テンソルより state の方が大きい**（重みは shard 上限 1GiB で割れるが、
-    スロットは 1 本のまま）。
+    大きい系列では**最大テンソルより state の方が大きい**（どちらも 1 バッファのまま —
+    重みは shard を跨いで配れるが、GPU 側で 1 本に戻る）。
     """
     states = graph.get("states")
     if states is None:

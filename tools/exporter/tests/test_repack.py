@@ -1,10 +1,13 @@
-"""容器の詰め替え（`karume.repack`）— 旧規則の配布形を shard 仕様 v2 へ移す。
+"""容器の詰め替え（`karume.repack`）— 旧規則の配布形を現行の shard 仕様へ移す。
 
-被験体の**旧レイアウト**は手組みする: 旧 writer はもう無い（v2 は常時分割で、fat グラフ
+被験体の**旧レイアウト**は手組みする: 旧 writer はもう無い（現行は常時分割で、fat グラフ
 shard も単一ファイルも書けない — ADR 0081）ので、器の低レベル面
 （`emit.write_container`）だけを借りて「どのテンソルがどのファイルに居るか」をここが決める。
-中身そのものは {@link ir_fixtures.ir_container} が v2 の書き手で作った**本物**なので、
-「詰め替えたら v2 の書き手が書いたのと同じバイト列になる」を突き合わせられる。
+中身そのものは {@link ir_fixtures.ir_container} が現行の書き手で作った**本物**なので、
+「詰め替えたら書き手が書いたのと同じバイト列になる」を突き合わせられる。
+
+分割テンソル（piece — ADR 0090）を入力に持つ形も同じ手組みで作る。読み手が piece を親へ
+畳むので、突き合わせるのは切り目ではなく**親の全バイト**になる。
 """
 
 from __future__ import annotations
@@ -21,15 +24,15 @@ from ir_fixtures import ir_container
 from karume import repack
 from karume.emit import ContainerEntry, container_order, write_container
 from karume.ir import IR_METADATA_KEY
-from karume.shards import pack_shards, shard_name, shard_path
+from karume.shards import pack_shards, parse_piece_key, piece_key, shard_name, shard_path
 from karume.verify import ContainerError, verify_shards
 
 #: コンポーネントの代表 path のファイル名（系列の綴りと同じ）。
 COMPONENT = "model.safetensors"
 
-#: 合成資産（f32 で 660 バイト）を weight shard 2 本へ割る上限 — 詰め替えの前後で本数が
+#: 合成資産（f32 で 660 バイト）を weight shard 2 本へ割る容量 — 詰め替えの前後で本数が
 #: 変わる形（= 前回の連番が残骸になる形）を踏むための差し込み。
-SPLIT_LIMIT = 512
+SPLIT_CAPACITY = 512
 
 #: 名前 → (safetensors dtype, 論理 shape, 生バイト)。
 Payload = dict[str, tuple[str, tuple[int, ...], bytes]]
@@ -232,7 +235,7 @@ class TestRepackingALegacyTailSlackPair:
             "model-00002-of-00002.safetensors",
         ]
 
-        published = repack.repack_component(path, _shard_byte_limit=SPLIT_LIMIT)
+        published = repack.repack_component(path, _shard_capacity=SPLIT_CAPACITY)
 
         assert [entry.name for entry in published] == [
             "model-00001-of-00003.safetensors",
@@ -246,7 +249,7 @@ class TestRepackingALegacyTailSlackPair:
         path = legacy_tail_slack(series, ir_container())
         before = tensors_of(list(series.iterdir()))
 
-        published = repack.repack_component(path, _shard_byte_limit=SPLIT_LIMIT)
+        published = repack.repack_component(path, _shard_capacity=SPLIT_CAPACITY)
 
         assert tensors_of(published) == before
         verify_shards(published)
@@ -298,8 +301,8 @@ class TestFaultInjection:
         path = legacy_single(series, ir_container())
         before = listing(series)
 
-        def drop_the_last(order, payload_bytes, companions, limit, target=None):
-            groups = pack_shards(order, payload_bytes, companions, limit, target=target)
+        def drop_the_last(order, payload_bytes, shapes, companions, capacity):
+            groups = pack_shards(order, payload_bytes, shapes, companions, capacity=capacity)
             return [tuple(name for name in group if name != order[-1]) for group in groups]
 
         monkeypatch.setattr(repack, "pack_shards", drop_the_last)
@@ -307,5 +310,169 @@ class TestFaultInjection:
 
         with pytest.raises(ContainerError, match="ファイルに無い"):
             repack.repack_component(path)
+
+        assert listing(series) == before
+
+
+#: 合成資産の linear 重み（f32 `[4,32]` = 512 バイト・1 行 128 バイト）。分割の被験体。
+WEIGHT_KEY = "fixture.weight"
+
+
+def split_material(tensors: Payload, name: str, parts: int) -> Payload:
+    """`name` を先頭次元の均等な `parts` 本の piece へ差し替えた素材。
+
+    生バイトは行の連続範囲そのまま（分割は器の話で、値は 1 バイトも動かない）。
+    """
+    dtype, shape, blob = tensors[name]
+    rows = shape[0]
+    row_bytes = len(blob) // rows
+    step = rows // parts
+    found = {key: value for key, value in tensors.items() if key != name}
+    for index in range(parts):
+        begin = index * step
+        end = rows if index == parts - 1 else begin + step
+        found[piece_key(name, index + 1, parts)] = (
+            dtype,
+            (end - begin, *shape[1:]),
+            blob[begin * row_bytes : end * row_bytes],
+        )
+    return found
+
+
+def split_component(
+    directory: Path, shards: Sequence[bytes], groups: Sequence[Sequence[str]] | None = None
+) -> Path:
+    """`fixture.weight` を 2 本の piece へ割った入力コンポーネントを書く。
+
+    既定の並びは規則どおり（グラフ shard / 他のテンソル + piece 1 / piece 2）。`groups` を
+    渡すと**手組みの並び**になり、読み手側の門（piece 列の整合）を踏める。
+    """
+    metadata, tensors = source_material(shards)
+    material = split_material(tensors, WEIGHT_KEY, 2)
+    first, second = (piece_key(WEIGHT_KEY, index, 2) for index in (1, 2))
+    plain = sorted(key for key in material if parse_piece_key(key) is None)
+    write_legacy(
+        directory / COMPONENT,
+        metadata,
+        material,
+        groups if groups is not None else [[], [*plain, first], [second]],
+    )
+    return directory / COMPONENT
+
+
+def folded(paths: Sequence[Path]) -> Payload:
+    """shard 列の全テンソル（piece は親 1 本へ畳む — 詰め替えの前後で一致する MUST の写像）。"""
+    found = tensors_of(paths)
+    whole = {key: value for key, value in found.items() if parse_piece_key(key) is None}
+    runs: dict[str, list[tuple[int, tuple[str, tuple[int, ...], bytes]]]] = {}
+    for key, value in found.items():
+        parsed = parse_piece_key(key)
+        if parsed is not None:
+            runs.setdefault(parsed[0], []).append((parsed[1], value))
+    for name, pieces in runs.items():
+        ordered = [value for _index, value in sorted(pieces)]
+        rows = sum(shape[0] for _dtype, shape, _blob in ordered)
+        whole[name] = (
+            ordered[0][0],
+            (rows, *ordered[0][1][1:]),
+            b"".join(blob for _dtype, _shape, blob in ordered),
+        )
+    return whole
+
+
+class TestRepackingASplitComponent:
+    """入力が piece でも、突き合わせるのは常に**親の全バイト**（ADR 0090 決定 1）。"""
+
+    def test_a_capacity_that_fits_folds_the_pieces_back_into_one_tensor(self, tmp_path):
+        """容量に収まるなら丸ごとへ戻る — 出力は v3 の書き手が書いたバイト列そのもの。"""
+        series = tmp_path / "series"
+        shards = ir_container()
+        path = split_component(series, shards)
+
+        published = repack.repack_component(path)
+
+        assert [entry.read_bytes() for entry in published] == list(shards)
+        assert WEIGHT_KEY in tensors_of(published)
+
+    def test_a_tighter_capacity_recuts_the_pieces_without_touching_a_byte(self, tmp_path):
+        """切り目が変わっても親のバイト列は不変（詰め替えが動かすのは容器だけ）。"""
+        series = tmp_path / "series"
+        path = split_component(series, ir_container())
+        before = folded(list(series.iterdir()))
+
+        published = repack.repack_component(path, _shard_capacity=200)
+
+        pieces = [key for key in tensors_of(published) if parse_piece_key(key) is not None]
+        assert len(pieces) > 2  # 入力の 2 本より細かく切り直された
+        assert folded(published) == before
+        verify_shards(published)
+
+    def test_the_recut_pieces_still_pass_the_full_verification(self, tmp_path):
+        series = tmp_path / "series"
+        path = split_component(series, ir_container())
+
+        published = repack.repack_component(path, _shard_capacity=300)
+
+        verify_shards(published)  # 例外が出なければ合格
+
+
+class TestSplitInputFaults:
+    """壊れた piece 列は**読む時点で**落とす（手元の入力は 1 バイトも動かさない）。"""
+
+    def material(self, tmp_path, groups) -> tuple[Path, dict[str, str]]:
+        series = tmp_path / "series"
+        path = split_component(series, ir_container(), groups)
+        return path, listing(series)
+
+    def plain_keys(self, shards) -> list[str]:
+        _metadata, tensors = source_material(shards)
+        return sorted(key for key in tensors if key != WEIGHT_KEY)
+
+    def test_a_missing_piece_fails_loudly(self, tmp_path):
+        shards = ir_container()
+        first = piece_key(WEIGHT_KEY, 1, 2)
+        path, before = self.material(tmp_path, [[], [*self.plain_keys(shards), first]])
+
+        with pytest.raises(repack.RepackError, match="piece が 1 本で宣言の総数 2"):
+            repack.repack_component(path)
+
+        assert listing(path.parent) == before
+
+    def test_a_run_that_arrives_out_of_order_fails_loudly(self, tmp_path):
+        shards = ir_container()
+        first, second = (piece_key(WEIGHT_KEY, index, 2) for index in (1, 2))
+        path, before = self.material(tmp_path, [[], [*self.plain_keys(shards), second], [first]])
+
+        with pytest.raises(repack.RepackError, match="1 本目の piece が index 2"):
+            repack.repack_component(path)
+
+        assert listing(path.parent) == before
+
+    def test_two_pieces_in_one_shard_fail_loudly(self, tmp_path):
+        shards = ir_container()
+        first, second = (piece_key(WEIGHT_KEY, index, 2) for index in (1, 2))
+        path, before = self.material(tmp_path, [[], [*self.plain_keys(shards), first, second]])
+
+        with pytest.raises(repack.RepackError, match="同じ親の piece が 2 本"):
+            repack.repack_component(path)
+
+        assert listing(path.parent) == before
+
+    def test_mixing_a_whole_tensor_with_pieces_fails_loudly(self, tmp_path):
+        """丸ごとと piece が同居する入力は「どちらのバイト列を配るか」が決まらない。"""
+        series = tmp_path / "series"
+        metadata, tensors = source_material(ir_container())
+        material = {**split_material(tensors, WEIGHT_KEY, 2), WEIGHT_KEY: tensors[WEIGHT_KEY]}
+        plain = sorted(key for key in material if parse_piece_key(key) is None)
+        write_legacy(
+            series / COMPONENT,
+            metadata,
+            material,
+            [[], plain, [piece_key(WEIGHT_KEY, 1, 2)], [piece_key(WEIGHT_KEY, 2, 2)]],
+        )
+        before = listing(series)
+
+        with pytest.raises(repack.RepackError, match="どちらか一方"):
+            repack.repack_component(series / COMPONENT)
 
         assert listing(series) == before

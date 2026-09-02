@@ -93,7 +93,7 @@ def _write(
     storage: str,
     scales: dict[str, torch.Tensor],
     overrides: dict[str, str],
-    limit: int | None = None,
+    capacity: int | None = None,
 ) -> list[bytes]:
     """書いて検証して、shard ごとのバイト列を読む順に返す。"""
     with TemporaryDirectory() as staging:
@@ -104,7 +104,7 @@ def _write(
             weight_dtype=storage,
             weight_scales=scales,
             weight_dtype_overrides=overrides,
-            _shard_byte_limit=limit,
+            _shard_capacity=capacity,
         )
         verify_shards(written)
         return [path.read_bytes() for path in written]
@@ -148,7 +148,7 @@ def ir_shards(count: int, *, mark: str) -> list[bytes]:
     """`count` 本の shard 列になる正当なコンポーネント（読む順 — 先頭がグラフ shard）。
 
     何本に割れるかは現物のバイト数が決める（`karume.shards`）ので、同じ大きさのテンソルを
-    `count - 1` 本並べ、テスト用の上限差し込み（`write_model` の `_shard_byte_limit`）を
+    `count - 1` 本並べ、テスト用の容量差し込み（`write_model` の `_shard_capacity`）を
     その 1 本ぶんに合わせて **1 weight shard = 1 テンソル**へ割り付ける。`count` は
     グラフ shard を含む総数なので 2 以上（グラフだけの列は weights の席に置けない）。
     """
@@ -169,7 +169,7 @@ def ir_shards(count: int, *, mark: str) -> list[bytes]:
         storage="f32",
         scales={},
         overrides={},
-        limit=_FILL_ELEMENTS * 4,
+        capacity=_FILL_ELEMENTS * 4,
     )
 
 

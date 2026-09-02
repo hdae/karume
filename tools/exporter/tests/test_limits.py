@@ -118,6 +118,36 @@ class TestTensorPayloadDemand:
         with pytest.raises(LimitsError, match="data_offsets"):
             max_tensor_payload({"a": {"dtype": "F32", "data_offsets": offsets}}, "where")
 
+    def test_the_pieces_of_one_tensor_are_summed_into_the_parent(self) -> None:
+        """分割テンソル（ADR 0090）の需要は**親の全体長**（1 テンソル = 1 GPU バッファ）。
+
+        断片の最大を採ると要求が過小に焼かれ、「宣言は満たすのに `createSession` で落ちる」
+        という最も損な形になる。
+        """
+        header = {
+            "w#00001-of-00003": _tensor(0, 512),
+            "w#00002-of-00003": _tensor(512, 1024),
+            "w#00003-of-00003": _tensor(1024, 1280),
+            "other": _tensor(1280, 1920),
+        }
+
+        assert max_tensor_payload(header, "where") == 1280
+
+    def test_a_piece_run_smaller_than_a_whole_tensor_does_not_win(self) -> None:
+        """合算しても最大でなければ需要にならない（採るのは親どうしの最大）。"""
+        header = {"w#00001-of-00002": _tensor(0, 64), "w#00002-of-00002": _tensor(64, 128)}
+
+        assert max_tensor_payload({**header, "big": _tensor(128, 1024)}, "where") == 896
+
+    def test_a_key_that_only_looks_like_a_piece_stays_its_own_tensor(self) -> None:
+        """域外の綴りは piece ではない（`parse_piece_key` の鏡像 — 親へ合算しない）。
+
+        合算してしまう実装なら 100 + 64 = 164 が需要になる。
+        """
+        header = {"w#00003-of-00002": _tensor(0, 100), "w#00001-of-00002": _tensor(100, 164)}
+
+        assert max_tensor_payload(header, "where") == 100
+
 
 class TestStateSlotDemand:
     """需要の 2 本目 — **容量ぶん常駐する** state スロット（ADR 0066 決定 2）。"""

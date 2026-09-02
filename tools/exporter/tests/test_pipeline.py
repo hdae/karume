@@ -112,16 +112,16 @@ class TestAtomicReplacement:
 class TestShardedPublication:
     """コンポーネントは**連番の shard 列**として据わる（ADR 0081 — 常時分割）。
 
-    weight shard の本数は合成の小テンソルへ人工的に上限を下げて増やす — `export_to_file` は
+    weight shard の本数は合成の小テンソルへ人工的に容量を下げて増やす — `export_to_file` は
     分割の可否を選べない（配布形の不変条件）ので、書き手が引く定数を差し替える。
     """
 
     def tiny_limit(self, monkeypatch: pytest.MonkeyPatch, limit: int) -> None:
-        """`emit` が呼び出しのたびに引くモジュール定数を下げる。"""
-        monkeypatch.setattr(emit, "SHARD_BYTE_LIMIT", limit)
+        """`emit` が呼び出しのたびに引くモジュール定数（データ節の容量）を下げる。"""
+        monkeypatch.setattr(emit, "SHARD_DATA_CAPACITY", limit)
 
     def test_it_publishes_the_numbered_sequence(self, tmp_path, monkeypatch):
-        # `TwoWeights` の格納テンソルは 16 バイト × 2 本。上限 16 で weight shard は 1 本ずつ。
+        # `TwoWeights` の格納テンソルは 16 バイト × 2 本。容量 16 で weight shard は 1 本ずつ。
         self.tiny_limit(monkeypatch, 16)
         final = tmp_path / "model.safetensors"
 

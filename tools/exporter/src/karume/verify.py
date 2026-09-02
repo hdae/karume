@@ -50,7 +50,7 @@ from karume.ops import (
     sym_prefix_slice_attrs,
 )
 from karume.shapes import assert_graph_shapes, declared_shape
-from karume.shards import SHARD_BYTE_LIMIT, resolve_shards
+from karume.shards import SHARD_BYTE_LIMIT, parse_piece_key, resolve_shards
 
 
 class IrError(ValueError):
@@ -1007,7 +1007,7 @@ def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
 def _read_container(
     path: str | Path,
 ) -> tuple[Mapping[str, str], Mapping[str, _StoredTensor], int]:
-    """配布形を**自前で**読み、`(__metadata__, テンソルキー → 宣言, データ節のバイト長)` を返す。
+    """配布形を**自前で**読み、`(__metadata__, テンソルキー → 宣言, ファイル長)` を返す。
 
     MUST: `safetensors` のリーダを通さない。ライブラリ（0.8.0）の dtype 語彙に `I4` が無く、
     packed 4bit を含む配布形は `safe_open` の時点で開けない（ADR 0069 決定 2）— verify は
@@ -1018,7 +1018,7 @@ def _read_container(
     NOTE: レイアウト規則（隙間なし・整列・宣言バイト長の一致）は `assert_reader_layout` の
     担当で、呼び出し側（`verify_model`）が**先に**通す。ここは宣言の読み取りだけ。
     """
-    header, _, data_length = _read_header(path)
+    header, data_start, data_length = _read_header(path)
     raw = header.get("__metadata__", {})
     if not isinstance(raw, dict) or any(
         not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
@@ -1035,7 +1035,7 @@ def _read_container(
             for axis, dim in enumerate(entry["shape"])
         ]
         tensors[name] = _StoredTensor(dtype=entry["dtype"], shape=shape)
-    return raw, tensors, data_length
+    return raw, tensors, data_start + data_length
 
 
 def assert_reader_layout(path: str | Path) -> None:
@@ -1229,23 +1229,27 @@ def _assert_no_surplus_tensors(graph: IrGraph, stored: Mapping[str, _StoredTenso
 
 
 def assert_shard_byte_limits(shards: Sequence[tuple[str | Path, int]]) -> None:
-    """全 shard のデータ節が上限に収まっていることを落とす（`karume.shards` の鏡像）。
+    """全 shard の**ファイル長**が上限に収まっていることを落とす（`karume.shards` の鏡像）。
 
     上限は {@link karume.shards.SHARD_BYTE_LIMIT} **1 本だけ**で、席（先頭 / 末尾）による
-    例外は無い（ADR 0081 — 尾部スラック則の廃止）。
+    例外は無い（ADR 0081 — 尾部スラック則の廃止）。測るのは**ファイル長**（データ節ではない）—
+    読み手が確保するのはファイル 1 本ぶんのバイト列で、ヘッダもそこに載る（hub は manifest の
+    `size`、ここは実ファイル長で見る）。書き手はヘッダぶんの余裕を残して詰めるので
+    （`shards.SHARD_DATA_CAPACITY`）、ここに掛かるのは余裕を食い潰したコンポーネントと
+    規則外の資産だけになる。
 
     MUST: 読み返し側にも張る。上限は書く側（`shards.pack_shards`）にしか門が無く、規則を
     守っていない shard 列（手で組んだ / 別実装が書いた / 外部ツールの出力）は `karume verify`
     も `karume dist` も緑で通り、**ブラウザで初めて落ちる**（Chromium の単一 ArrayBuffer 上限・
     取得層のバイト予算）。co-shard の門（{@link verify_shards}）と同じ層・同じ理由づけ。
 
-    `shards` は読む順（= shard 番号順）の `(path, データ節のバイト長)`。
+    `shards` は読む順（= shard 番号順）の `(path, ファイル長)`。
     """
     for index, (path, size) in enumerate(shards):
         if size > SHARD_BYTE_LIMIT:
             raise ContainerError(
-                f"{path}: shard[{index}] のデータ節が {size:,} バイトで"
-                f"上限 {SHARD_BYTE_LIMIT:,} を超える（分割規則 — ADR 0081）"
+                f"{path}: shard[{index}] のファイル長が {size:,} バイトで"
+                f"上限 {SHARD_BYTE_LIMIT:,} を超える（分割規則 — ADR 0090）"
             )
 
 
@@ -1268,6 +1272,89 @@ def assert_empty_graph_shard(path: str | Path, names: Sequence[str]) -> None:
         )
 
 
+@dataclass(frozen=True)
+class _PieceView:
+    """読み込み中の piece 1 本（畳む前 — 連番と収容 shard の並びを見るための材料）。"""
+
+    shard: int
+    index: int
+    count: int
+    view: _StoredTensor
+    nbytes: int
+
+
+def _stored_bytes(view: _StoredTensor) -> int:
+    """宣言（dtype と論理 shape）から格納バイト長を出す。
+
+    `assert_reader_layout` が `data_offsets` の差と一致することを先に見ているので、宣言だけで
+    実バイト長になる（オフセットを 2 度読まない）。
+    """
+    count = 1
+    for dim in view.shape:
+        count *= dim
+    return count * READER_DTYPE_BITS[view.dtype] // 8
+
+
+def _join_pieces(name: str, pieces: Sequence[_PieceView]) -> tuple[_StoredTensor, int]:
+    """piece 列を親 1 本へ畳み、`(親の宣言, piece 1 の shard)` を返す（読み手契約 5 の門）。
+
+    `pieces` は**読む順**（shard 番号順）。ランタイム側の shard intake が同じ規則で親バッファへ
+    書き戻すので、ここが緩むと「verify は緑・`createSession` だけ落ちる」非対称が piece の分だけ
+    増える。
+    """
+    shards = [piece.shard for piece in pieces]
+    repeated = sorted({shard for shard in shards if shards.count(shard) > 1})
+    if repeated:
+        raise ContainerError(
+            f"テンソル '{name}': shard{repeated} に同じ親の piece が 2 本ある"
+            "（piece は連続する shard に 1 本ずつ — ADR 0090）"
+        )
+    # count >= 2 と index の域は `parse_piece_key` が既に見ている（域外の綴りはそもそも piece と
+    # 解釈されず、畳んだ親ではなく余剰テンソルとして落ちる）。ここが見るのは**列**の整合。
+    count = pieces[0].count
+    if len(pieces) != count:
+        raise ContainerError(
+            f"テンソル '{name}': piece が {len(pieces)} 本で宣言の総数 {count} と合わない"
+        )
+    head = pieces[0].view
+    rows = 0
+    previous: int | None = None
+    for position, piece in enumerate(pieces, start=1):
+        where = f"テンソル '{name}': piece {piece.index}"
+        if piece.count != count:
+            raise ContainerError(
+                f"テンソル '{name}': piece の総数が {count} と {piece.count} で食い違っている"
+            )
+        if piece.index != position:
+            raise ContainerError(
+                f"テンソル '{name}': shard 順で {position} 本目の piece が index {piece.index}"
+                "（index は shard 順に 1 から増える）"
+            )
+        if previous is not None and piece.shard != previous + 1:
+            raise ContainerError(
+                f"{where} が shard[{piece.shard}]・前の piece が shard[{previous}]"
+                "（piece は連続する shard に 1 本ずつ）"
+            )
+        if piece.view.dtype != head.dtype:
+            raise ContainerError(
+                f"{where} の dtype が {piece.view.dtype}（piece 1 は {head.dtype}）"
+            )
+        if piece.view.shape[1:] != head.shape[1:]:
+            raise ContainerError(
+                f"{where} の残り次元 {piece.view.shape[1:]} が piece 1 の {head.shape[1:]} と違う"
+            )
+        if not piece.view.shape or piece.view.shape[0] < 1:
+            raise ContainerError(f"{where} が 1 行未満（piece は 1 行以上 MUST）")
+        if position < count and piece.nbytes % 4:
+            raise ContainerError(
+                f"{where} が {piece.nbytes} バイトで 4 の倍数でない"
+                "（末尾以外の piece は 4 バイト整列 MUST — 読み手が親バッファへオフセット書きする）"
+            )
+        rows += piece.view.shape[0]
+        previous = piece.shard
+    return _StoredTensor(dtype=head.dtype, shape=[rows, *head.shape[1:]]), pieces[0].shard
+
+
 def _read_shard_set(
     paths: Sequence[str | Path],
 ) -> tuple[str, dict[str, _StoredTensor], dict[str, int]]:
@@ -1279,17 +1366,25 @@ def _read_shard_set(
     fail loudly（ランタイム側 `createShardValidator` の鏡像）。バイト上限
     （{@link assert_shard_byte_limits}）は列全体の並びで決まるので、全 shard のヘッダを
     読んでから 1 回だけ見る。
+
+    分割テンソル（piece キー — 読み手契約 5）は**親 1 本へ畳む**（{@link _join_pieces}）。
+    畳んだ宣言は「親の dtype・全体 shape」なので、以降の突合（宣言 shape・scale の形・余剰）は
+    分割の有無を知らずに済む。所属 shard は **piece 1** の shard で、co-shard の門がそこを見る。
+    親が宣言に無い piece キーは畳んだ親の名前のまま残り、`_assert_no_surplus_tensors` が余剰と
+    して落とす（piece だけを見て「この親は宣言されているか」を答えられる層はここではない）。
     """
     if not paths:
         raise ContainerError("検証する shard が 1 本も無い")
     text: str | None = None
     stored: dict[str, _StoredTensor] = {}
     owner: dict[str, int] = {}
+    pieces: dict[str, list[_PieceView]] = {}
+    keys: dict[str, int] = {}
     sizes: list[tuple[str | Path, int]] = []
     for index, path in enumerate(paths):
         assert_reader_layout(path)
-        metadata, tensors, data_length = _read_container(path)
-        sizes.append((path, data_length))
+        metadata, tensors, file_size = _read_container(path)
+        sizes.append((path, file_size))
         embedded = metadata.get(IR_METADATA_KEY)
         if index == 0:
             if embedded is None:
@@ -1304,12 +1399,33 @@ def _read_shard_set(
                 " — グラフ shard は先頭 1 本だけ（ADR 0070 決定 3）"
             )
         for name, view in tensors.items():
-            if name in owner:
+            if name in keys:
                 raise ContainerError(
-                    f"テンソル '{name}' が shard[{owner[name]}] と shard[{index}] に重複している"
+                    f"テンソル '{name}' が shard[{keys[name]}] と shard[{index}] に重複している"
                 )
-            stored[name] = view
-            owner[name] = index
+            keys[name] = index
+            parsed = parse_piece_key(name)
+            if parsed is None:
+                stored[name] = view
+                owner[name] = index
+                continue
+            parent, piece_index, piece_count = parsed
+            pieces.setdefault(parent, []).append(
+                _PieceView(
+                    shard=index,
+                    index=piece_index,
+                    count=piece_count,
+                    view=view,
+                    nbytes=_stored_bytes(view),
+                )
+            )
+    for parent in sorted(pieces):
+        if parent in stored:
+            raise ContainerError(
+                f"テンソル '{parent}' が丸ごとと piece の両方でコンテナに居る"
+                "（1 テンソルはどちらか一方 MUST — ADR 0090）"
+            )
+        stored[parent], owner[parent] = _join_pieces(parent, pieces[parent])
     assert_shard_byte_limits(sizes)
     assert text is not None  # 先頭 shard の分岐が保証する
     return text, stored, owner
@@ -1330,10 +1446,11 @@ def verify_shards(paths: Sequence[str | Path]) -> IrGraph:
 
     見る集合は分割前と同一 — 宣言と実体の突合・scale の 5 点・余剰テンソル・ランタイム支援・
     op 契約は**全 shard の和**に対して掛かる（ADR 0070 決定 1 の宣言完全性を書いた直後に
-    確かめる）。分割で増える門は 5 つ: shard ごとのレイアウト規則・`karume_ir` の在処・
-    **グラフ shard が空**（{@link assert_empty_graph_shard} — ADR 0081）・**データ節のバイト
+    確かめる）。分割で増える門は 6 つ: shard ごとのレイアウト規則・`karume_ir` の在処・
+    **グラフ shard が空**（{@link assert_empty_graph_shard} — ADR 0081）・**ファイル長の
     上限**（{@link assert_shard_byte_limits}）・**co-shard**（weight と companion scale が
-    同じ shard に居る MUST）。
+    同じ shard に居る MUST。分割された重みは piece 1 の shard）・**piece 列の整合**
+    （{@link _read_shard_set} が畳むときに見る連番 / 連続 shard / dtype / 残り次元 / 整列）。
     """
     text, stored, owner = _read_shard_set(paths)
     graph = parse_ir_graph(text)

@@ -1,4 +1,4 @@
-"""配布コンテナの shard 分割規則（ADR 0081 — ADR 0070 決定 1 / ADR 0071 決定 4 の改訂）。
+"""配布コンテナの shard 分割規則（ADR 0081 + 0090 — shard 仕様 v3・テンソル分割）。
 
 1 コンポーネントの safetensors を**グラフ shard（`karume_ir` だけ・データ節は空）+ weight
 shard 列**へ決定的に割り付ける層。持つのは規則だけ（テンソルの実体も torch も知らない）—
@@ -14,90 +14,173 @@ shard 列**へ決定的に割り付ける層。持つのは規則だけ（テン
 1. **shard 0 = グラフ shard**: `karume_ir` メタデータだけを持ち、データ節は**0 テンソル**
    （器は safetensors のまま）。グラフだけを先に取れる形にするのが目的で、admission
    （ADR 0070 決定 5）が「グラフ 1 本ぶんの DL / RAM」で判断できる。
-2. **全 shard のデータ節が {@link SHARD_BYTE_LIMIT} 以下**（読み手が見る上限はこの 1 本だけ）。
-   単独で上限を超える対の reject は「1 shard に入らない」から自動で従うので、独立の定数に
-   しない。書き手が実際に詰める大きさ（{@link SHARD_TARGET_BYTES}）はポリシー側の値で、
-   読み手契約ではない。
+2. **全 shard の**ファイル長**が {@link SHARD_BYTE_LIMIT} 以下**（読み手が見る上限はこの 1 本
+   だけ — ADR 0090 決定 2）。データ節ではなく**ファイル長**で測るのが v2 からの変更点 —
+   読み手が確保するのはファイル 1 本ぶんのバイト列で、ヘッダもそこに載る（hub は manifest の
+   `size`、verify は実ファイル長で見る）。
 3. **順序は変えない**: 詰める順は書き手が決めた書き出し順（ADR 0063 の整列規約）そのまま。
    並べ替えは shard の**中**でだけ起きる（各 shard は自分のテンソルだけで同じ規約を満たす
    独立に整合な safetensors になる）。
 4. **weight と companion scale は原子対**（co-shard MUST — ADR 0070 決定 1）: 逐次消費は
    両方を同時に要求するので、shard を跨ぐと「参照を手放す」契約と両立しない。対の片方に
    到達した時点で相方ごと同じ shard へ入れる（= 相方が順序上あとに居ても引き寄せる）。
-5. 重複禁止・`karume_ir` は shard 0 だけ・本数は {@link MAX_SHARDS} 以下。
-6. **常時分割**（ADR 0081）: fat グラフ shard（shard 0 に実重みを載せる形）と単一ファイル
+   重みが分割されているときは **piece 1 と同じ shard**（scale 自体は割らない）。
+5. **テンソル分割（piece — ADR 0090 決定 1）**: 上限に収まらないテンソルは**先頭次元（行）の
+   範囲**で複数 shard へ割って配る。キーは `<親名>#NNNNN-of-NNNNN`（{@link piece_key}）で、
+   そのキーがこの形に一致し**親名が宣言（`initializer.tensor`）に在るときだけ** piece と解釈する
+   （karume が書く通常のテンソル名に `#` は現れない — torch の state_dict キー由来）。
+   - dtype は親と同一・shape は `[行数, *親.shape[1:]]`・行数 ≥ 1
+   - piece 1..n は親の行 `[0, rows)` を順に**隙間なく**覆う
+   - piece は**連続する shard に 1 本ずつ**（index は shard 順に増える。同じ shard に同じ親の
+     piece が 2 本は違反）。piece 1 の shard には前のテンソルが、piece n の shard には後の
+     テンソルが同居してよい
+   - 1 テンソルは「丸ごと」か「piece 列」のどちらか一方（混在は違反）
+   - **末尾以外の piece はバイト長が 4 の倍数 MUST** — 読み手が `queue.writeBuffer` で親
+     バッファへオフセット書きするため。末尾 piece は任意長（読み手の末尾詰め物が整列する）
+6. 重複禁止・`karume_ir` は shard 0 だけ・本数は {@link MAX_SHARDS} 以下。
+7. **常時分割**（ADR 0081）: fat グラフ shard（shard 0 に実重みを載せる形）と単一ファイル
    配布形は**廃止**。テンソルを 1 本でも持つコンポーネントは「グラフ shard + weight shard
    1 本以上」になる。
 
 ## 書き手ポリシー（本数と cut 位置）
 
-- 詰める大きさ（bound）= **実効目標 = max({@link SHARD_TARGET_BYTES}, 最大単位)**（ADR 0081
-  追記 2026-09-02）。目標より大きい単位（割れないテンソル）を持つコンポーネントだけ、その単位に
-  合わせて一様に持ち上がる。bound は常に上限 {@link SHARD_BYTE_LIMIT} 以下。
-- 本数 k = bound の下での**最小連続分割数**（貪欲に詰めて数える — 連続分割では貪欲が最小）。
-  NOTE: 連続順序 + 対の原子性の下では k が `ceil(総量 / bound)` を上回る並びが理論上ある
-  （例: 0.6GiB の対が 3 つ → bound 1GiB なら総量 1.8GiB でも 3 本）。ここは正直に受け入れる。
-- k を固定して**均す**: 各 shard の目標 = 残量 ÷ 残 shard 数。単位（weight + scale の対）を
-  跨がず、**suffix 実行可能性ガード**（残りの単位が残りの shard へ bound 内で収まる位置でだけ
-  cut を打つ）を掛けるので、全 shard が bound 以下に収まることは構造的に保たれる。
+- 詰める大きさ（capacity）= {@link SHARD_DATA_CAPACITY}（= 受理上限 − ヘッダ余裕）。v2 の
+  「実効目標 = max(目標, 最大単位)」はテンソル分割が入ったぶん**不要**になった（割れない
+  単位がもう無いので、目標は常に目標のまま）。
+- 容量に収まらない単位の重みは**行ブロック**（{@link SPLIT_BLOCK_BYTES} 刻み・末尾以外が
+  4 バイト整列になる行数）へ砕き、**通常の単位として**詰める。詰め終わってから、同じ shard に
+  落ちた同一親の連続ブロックを 1 本の {@link Piece} へ畳む。
+- 本数 k = capacity の下での**最小連続分割数**（貪欲に詰めて数える — 連続分割では貪欲が最小）。
+- k を固定して**均す**: 各 shard の目標 = 残量 ÷ 残 shard 数。単位（weight + scale の対 /
+  行ブロック）を跨がず、**suffix 実行可能性ガード**（残りの単位が残りの shard へ capacity 内で
+  収まる位置でだけ cut を打つ）を掛けるので、全 shard が capacity 以下に収まることは構造的に
+  保たれる。
 - cut 位置の選好（層割り・MoE のエキスパート割り等）は**将来の書き手ポリシー拡張**で、
   読み手契約を 1 文字も変えずに足せる（ADR 0081 の扉 — 今は実装しない）。
 
-## ヘッダを勘定に入れない理由
+## ヘッダぶんの余裕
 
-上限に数えるのは**データ節のバイト数**だけで、safetensors ヘッダ（JSON + 8 バイト長 +
-`karume_ir` 埋め込み）は数えない。上限 1GiB に対して余裕は 1GiB 近くあり（下の上限の根拠）、
-グラフ JSON は実測で数 MB 級・ヘッダ本体はテンソル 1 本あたり 100 バイト前後なので、
-1 shard あたりのヘッダが余裕を食い潰す形にならない。勘定に入れると「ヘッダ長を決めるには
-所属を決める必要があり、所属を決めるにはヘッダ長が要る」という循環になるので、余裕で
-吸収する側を選ぶ。
+受理上限は**ファイル長**なので、書き手はデータ節を {@link SHARD_DATA_CAPACITY} までに留めて
+ヘッダ（8 バイト長 + JSON + `karume_ir` 埋め込み）ぶんの {@link SHARD_HEADER_ALLOWANCE} を
+空けておく。weight shard のヘッダはテンソル 1 本あたり 100〜150 バイトなので、1MiB は
+7,000 本ぶんにあたる。固定の余裕にするのは「所属を決めるにはヘッダ長が要り、ヘッダ長を
+決めるには所属が要る」という循環を避けるためで、それでも足りなかった回は verify の
+ファイル長門が fail loudly で受ける（書き手側で黙って縮めない）。
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-#: 1 shard のデータ節の**受理上限**（1GiB — 読み手契約。hub の `MAX_SHARD_BYTES` と同値）。
+#: 1 shard の**ファイル長**の受理上限（256MiB — 読み手契約。hub の `MAX_SHARD_BYTES` と同値）。
 #: 固定定数・公開ノブにしない — 不変条件であって呼び手の好みではない（緩めた資産は特定の環境で
-#: だけ読めなくなる）。書き手が実際に詰める大きさは {@link SHARD_TARGET_BYTES}（目標）で、
-#: こちらは天井。
+#: だけ読めなくなる）。書き手がデータ節に詰める大きさは {@link SHARD_DATA_CAPACITY}。
 #:
 #: 根拠 3 点:
 #:
-#: 1. Chromium の単一 `ArrayBuffer` 上限 2,145,386,496 バイトの**約 1/2**。shard 1 本は
-#:    ホスト側で 1 つの `ArrayBuffer` に載るので、この天井を割るのが必要条件（docs/limitations）。
-#:    半分に取るのは、ヘッダぶんの余裕（上のモジュール doc）と、取得層が同時に触る
-#:    バイト列（検証中の 1 本 + 引き渡し中の 1 本）を見込むため。
-#: 2. `streamAssets` の RAM ピークは O(最大 shard)（ADR 0070 決定 2）。1GiB ならモバイルの
-#:    安全域に収まり、2GiB 級だと Pixel の実測失敗域（known-issues の BodyStreamBuffer）に入る。
-#: 3. hub 側の同時 RAM 予算 1.5GiB（2026-08-25 の取得層 fix）と整合する — 1 shard を持ちながら
-#:    次を取りに行っても予算内に収まる。
-SHARD_BYTE_LIMIT = 1_073_741_824
-#: 書き手が shard を詰める**目標**（256MiB — 書き手ポリシー。ADR 0081 追記 2026-09-02）。ロード時の
-#: ホスト RAM ピークは「定数 + 最大 shard 1 本」（器の使い回し — ADR 0070 追記）なので、目標が
-#: そのままピークの上乗せ分になる。256MiB は「リクエスト数・ファイル数の増加が hub の 4 並列取得と
-#: 読み手上限 1024 本の内側に収まる」下限側の値（docs/research/2026-09-02-shard-size-ram-peak.md）。
-#:
-#: 単位（テンソル、または weight + companion scale の対）が目標より大きいコンポーネントでは、
-#: **実効目標 = その最大単位**へ持ち上げる（{@link pack_shards}）— テンソルは割らないので
-#: これより小さくは切れず、目標のまま特例（上限超えの単独 shard）を作るより「全 shard が実効
-#: 目標以下」の一様性を保つ方が読み手・カード・検査の綴りが 1 本で済む。
-SHARD_TARGET_BYTES = 268_435_456
+#: 1. ロード時のホスト RAM ピークは「定数 + 最大 shard 1 本」（器の使い回し — ADR 0070 追記
+#:    2026-09-02）。shard 1 本の大きさがそのままピークの上乗せ分になるので、上限はモバイルの
+#:    安全域に収まる値で切る。
+#: 2. ファイル数・リクエスト数の増加が hub の 4 並列取得と読み手上限 1024 本の内側に収まる
+#:    下限側の値（docs/research/2026-09-02-shard-size-ram-peak.md）。
+#: 3. Chromium の単一 `ArrayBuffer` 上限 2,145,386,496 バイトの**十分下**。shard 1 本は
+#:    ホスト側で 1 つの `ArrayBuffer` に載るので、この天井を割るのが必要条件
+#:    （docs/limitations）。
+SHARD_BYTE_LIMIT = 268_435_456
+
+#: ヘッダのために空けておく余裕（1MiB — モジュール doc の「ヘッダぶんの余裕」）。
+SHARD_HEADER_ALLOWANCE = 1_048_576
+
+#: 書き手がデータ節に詰める上限（= 受理上限 − ヘッダ余裕）。
+SHARD_DATA_CAPACITY = SHARD_BYTE_LIMIT - SHARD_HEADER_ALLOWANCE
+
+#: 上限を超えるテンソルを砕く**行ブロック**の刻み（1MiB）。刻みが細かいほど shard の詰まり方は
+#: 均一になり、粗いほど piece の本数（= ヘッダ項目と読み手の writeBuffer 呼び出し）が減る。
+#: 実際の 1 ブロックは「この値に届く最小の行数」を 4 バイト整列（読み手契約 5）へ丸めた行数で、
+#: 容量に収まらなければそこまで縮む（{@link _block_rows}）。
+SPLIT_BLOCK_BYTES = 1_048_576
 
 #: 1 dtype エントリが並べられる shard 数（ADR 0071 決定 2 — hub の `MAX_SHARDS` と同値）。
 #: 焼く側で先に落とすため、書き手（分割）と宣言側（manifest 検査）が同じ綴りを引く。
 MAX_SHARDS = 1024
 
-#: 連番の桁数（`-NNNNN-of-NNNNN`）。HF の慣行に似せた形だが `index.json` は作らない —
-#: 振り分け表の正本は manifest（ADR 0070 決定 1）。
+#: 連番の桁数（`-NNNNN-of-NNNNN` / piece キーの `#NNNNN-of-NNNNN`）。HF の慣行に似せた形だが
+#: `index.json` は作らない — 振り分け表の正本は manifest（ADR 0070 決定 1）。
 _INDEX_DIGITS = 5
 _MAX_INDEX = 10**_INDEX_DIGITS - 1
 
+#: piece キーの綴り（`<親名>#NNNNN-of-NNNNN`）。親名は貪欲に取る — `#` を含む親名は karume の
+#: 書き出しには現れないので、末尾の連番だけが分割の印になる。
+_PIECE_PATTERN = re.compile(rf"^(.+)#(\d{{{_INDEX_DIGITS}}})-of-(\d{{{_INDEX_DIGITS}}})$")
+
 
 class ShardError(ValueError):
-    """分割規則の前提が破れた（上限を単独で超える対・不完全な連番・両形の同居）。"""
+    """分割規則の前提が破れた（分割できない単位・不完全な連番・両形の同居）。"""
+
+
+def piece_key(name: str, index: int, count: int) -> str:
+    """分割テンソルの 1 断片の safetensors キー（`<親名>#NNNNN-of-NNNNN`・`index` は 1 始まり）。
+
+    綴りは読み手契約（モジュール doc の 5）— TS ランタイム側の正規表現と 1 文字も違わない。
+    `count` が 2 未満なら分割ではないので fail loudly（丸ごと 1 本を piece キーで名乗ると、
+    読み手が「丸ごとと piece の混在」を判定できる根拠が消える）。
+    """
+    if count < 2:
+        raise ShardError(
+            f"piece の総数 {count} が 2 未満（分割は 2 本以上 — 丸ごとは piece でない）"
+        )
+    if not 1 <= index <= count <= _MAX_INDEX:
+        raise ShardError(f"piece 連番 {index}/{count} が 1..{_MAX_INDEX} の範囲に無い")
+    return f"{name}#{index:0{_INDEX_DIGITS}d}-of-{count:0{_INDEX_DIGITS}d}"
+
+
+def parse_piece_key(key: str) -> tuple[str, int, int] | None:
+    """piece キー → `(親名, index, count)`（piece でなければ None）。
+
+    ランタイム側 `packages/runtime/src/format/container.ts` の `parsePieceKey` の鏡像。
+
+    MUST: `count >= 2` と `1 <= index <= count` を**ここで**見る。範囲外の綴り
+    （`#00003-of-00002`・1 本しかない piece 列）を piece として通すと、それが列の進行状態の
+    初期値になって違反の帰属が「piece 列の並び」へ移る。実際にはそのキー自体が配布形の誤り
+    なので、piece と解釈せず**余剰テンソル**（どの initializer からも参照されない）として
+    落とすほうが直す側にとって決定的になる。列そのものの整合（1..n が揃う・連続 shard・行の
+    被覆）は畳む側の門が持つ（{@link assert_shard_partition} / `karume.verify` /
+    `karume.repack`）。
+    """
+    match = _PIECE_PATTERN.fullmatch(key)
+    if match is None:
+        return None
+    index, count = int(match.group(2)), int(match.group(3))
+    if count < 2 or not 1 <= index <= count:
+        return None
+    return match.group(1), index, count
+
+
+@dataclass(frozen=True)
+class Piece:
+    """分割テンソルの 1 断片（親の**行範囲** `[begin, end)`）。
+
+    割り付けの結果に現れる値で、実バイトは持たない（このモジュールはテンソルの実体を知らない
+    — 行範囲からバイト範囲を出すのは書き手側）。
+    """
+
+    #: 親テンソルのキー（safetensors のキー空間）。
+    name: str
+    #: 1 始まりの連番（shard 順に増える）。
+    index: int
+    #: この親の piece 総数（2 以上）。
+    count: int
+    #: 親の先頭次元での行範囲 `[begin, end)`。
+    begin: int
+    end: int
+
+    @property
+    def key(self) -> str:
+        """この断片が safetensors に載るときのキー。"""
+        return piece_key(self.name, self.index, self.count)
 
 
 def shard_name(name: str, index: int, total: int) -> str:
@@ -192,33 +275,168 @@ def shard_siblings(path: Path) -> tuple[Path, ...]:
     return tuple(siblings)
 
 
+@dataclass(frozen=True)
+class _Block:
+    """分割テンソルの**行ブロック 1 つ**（詰める前の単位 — 畳むと {@link Piece} になる）。
+
+    ブロックのまま詰めるのは、割り付け（最小本数 → 均し）に「分割テンソル」という特例を
+    足さないため。同じ shard に落ちた連続ブロックは {@link _fold_blocks} が 1 本の piece へ
+    畳むので、読み手が受け取る本数は「shard を跨いだ回数」ちょうどになる。
+    """
+
+    name: str
+    begin: int
+    end: int
+    nbytes: int
+
+
+def _block_rows(row_bytes: int, capacity: int) -> int:
+    """1 ブロックの行数（{@link SPLIT_BLOCK_BYTES} に届く最小行数を 4 バイト整列へ丸めた値）。
+
+    末尾以外の piece はバイト長が 4 の倍数 MUST（読み手契約 5）なので、行数は
+    `step = 4 / gcd(行バイト長, 4)` の倍数でなければならない — 行バイト長が 4 の倍数なら
+    1 行刻み、偶数なら 2 行刻み、奇数なら 4 行刻み。刻みへ切り上げた行数が容量を超える場合は
+    容量に収まる最大の刻み倍数まで**縮める**（テストの小容量と、1 行が MiB 級の巨大テンソルの
+    両方がここを通る）。
+
+    MUST: 1 ブロック（= `step` 行）すら容量に入らない形は fail loudly。これ以上細かい粒度が
+    無いので、黙って上限を破るか読めない配布形を書くかしか残らない。
+    """
+    step = 1 if row_bytes % 4 == 0 else (2 if row_bytes % 2 == 0 else 4)
+    fit = capacity // row_bytes
+    if fit < step:
+        raise ShardError(
+            f"1 行 {row_bytes:,} バイト（4 バイト整列には {step} 行）が shard の容量"
+            f" {capacity:,} を超える — これ以上細かく割れない"
+        )
+    wanted = -(-SPLIT_BLOCK_BYTES // row_bytes)
+    rows = -(-wanted // step) * step
+    return rows if rows <= fit else fit // step * step
+
+
+def _row_blocks(name: str, nbytes: int, shape: Sequence[int] | None, capacity: int) -> list[_Block]:
+    """1 テンソルを**先頭次元（行）の連続範囲**へ砕く（容量に収まるブロック列）。
+
+    実データは読まない — 宣言（バイト長と shape）だけで決まるので、割り付けはピーク RAM に
+    一切載らない。行の並びは safetensors の連続メモリ順そのものなので、行範囲はそのまま
+    バイト範囲になる（`begin * 行バイト長` から）。
+    """
+    if shape is None:
+        raise ShardError(f"テンソル '{name}': shape が分からないので行で割れない")
+    if not shape:
+        raise ShardError(f"テンソル '{name}': rank 0（行が無いので割れない）")
+    rows = int(shape[0])
+    if rows < 1:
+        raise ShardError(f"テンソル '{name}': 先頭次元が {rows} 行（1 行以上でないと割れない）")
+    if nbytes % rows:
+        raise ShardError(
+            f"テンソル '{name}': {nbytes:,} バイトが行数 {rows} で割り切れない"
+            "（1 行が整数バイトでない形は行で割れない）"
+        )
+    row_bytes = nbytes // rows
+    if row_bytes < 1:
+        raise ShardError(f"テンソル '{name}': 1 行 0 バイト（割る意味が無い）")
+    per = _block_rows(row_bytes, capacity)
+    blocks: list[_Block] = []
+    for begin in range(0, rows, per):
+        end = min(begin + per, rows)
+        blocks.append(_Block(name=name, begin=begin, end=end, nbytes=(end - begin) * row_bytes))
+    return blocks
+
+
 def _atomic_units(
     order: Sequence[str],
     payload_bytes: Mapping[str, int],
+    shapes: Mapping[str, Sequence[int]],
     companions: Mapping[str, str],
-    limit: int,
-) -> list[tuple[tuple[str, ...], int]]:
-    """書き出し順を**跨げない単位**（単独テンソル / weight + companion scale の対）へ畳む。
+    capacity: int,
+) -> list[tuple[tuple[str | _Block, ...], int]]:
+    """書き出し順を**跨げない単位**（単独テンソル / 対 / 行ブロック）へ畳む。
 
     対の片方に到達した時点で相方ごと 1 単位にする（相方が順序上あとに居ても引き寄せる —
-    読み手契約の 4）。単独で上限を超える単位は次の shard へ送っても同じなので fail loudly。
+    読み手契約の 4）。単位が容量に収まらないときは**重みを行ブロックへ砕き**、
+    `[scale + ブロック 1], [ブロック 2], …` という**連続した単位列**をその位置に置く
+    （ブロック 1 だけを引き寄せて残りが末尾に取り残される形を作らない）。
+
+    MUST: 砕くのは対のうち**書き出し順で後ろ**の側 = 重み。companion scale は F32 群に居るので
+    必ず前に来る（ADR 0063 の並び規約）ので、この選び方は「scale は割らない」（読み手契約 4）
+    と同値になる。ブロックの大きさは `容量 − 相方` で頭打ちにするので、piece 1 と scale が
+    同居できることは構造的に保たれ、piece が 2 本以上になることも保たれる（1 本で収まるなら
+    そもそも分割条件を満たさない）。
     """
-    units: list[tuple[tuple[str, ...], int]] = []
+    units: list[tuple[tuple[str | _Block, ...], int]] = []
     assigned: set[str] = set()
     for name in order:
         if name in assigned:
             continue
         partner = companions.get(name)
-        unit = (name,) if partner is None or partner in assigned else (name, partner)
-        size = sum(payload_bytes[member] for member in unit)
-        if size > limit:
+        members = [name] if partner is None or partner in assigned else [name, partner]
+        size = sum(payload_bytes[member] for member in members)
+        assigned.update(members)
+        if size <= capacity:
+            units.append((tuple(members), size))
+            continue
+        split = members[-1]
+        rest = members[:-1]
+        rest_bytes = sum(payload_bytes[member] for member in rest)
+        if rest_bytes >= capacity:
             raise ShardError(
-                f"{' + '.join(unit)} だけで {size:,} バイト = shard 上限 {limit:,} を超える"
-                "（1 対は分割できない — co-shard MUST）"
+                f"'{split}' の相方 {' + '.join(rest)} だけで {rest_bytes:,} バイト = shard の容量"
+                f" {capacity:,} 以上（companion scale は割らない — co-shard MUST）"
             )
-        assigned.update(unit)
-        units.append((unit, size))
+        blocks = _row_blocks(split, payload_bytes[split], shapes.get(split), capacity - rest_bytes)
+        units.append(((*rest, blocks[0]), rest_bytes + blocks[0].nbytes))
+        units.extend(((block,), block.nbytes) for block in blocks[1:])
     return units
+
+
+def _fold_blocks(groups: Sequence[Sequence[str | _Block]]) -> list[tuple[str | Piece, ...]]:
+    """同じ shard に落ちた同一親の**連続ブロック**を 1 本の {@link Piece} へ畳む。
+
+    ブロックは 1 テンソルぶんが連続した単位列なので、同じ group に隣り合って落ちたブロックは
+    必ず行範囲も連続している。畳んでから連番を振ると、piece の本数と index が「shard を跨いだ
+    回数」そのものになる（刻みの細かさが読み手に漏れない）。
+    """
+    runs: list[list[str | _Block]] = []
+    counts: dict[str, int] = {}
+    for group in groups:
+        row: list[str | _Block] = []
+        for member in group:
+            if not isinstance(member, _Block):
+                row.append(member)
+                continue
+            previous = row[-1] if row else None
+            if isinstance(previous, _Block) and previous.name == member.name:
+                row[-1] = _Block(
+                    name=member.name,
+                    begin=previous.begin,
+                    end=member.end,
+                    nbytes=previous.nbytes + member.nbytes,
+                )
+                continue
+            row.append(member)
+            counts[member.name] = counts.get(member.name, 0) + 1
+        runs.append(row)
+    numbered: dict[str, int] = {}
+    folded: list[tuple[str | Piece, ...]] = []
+    for row in runs:
+        members: list[str | Piece] = []
+        for item in row:
+            if not isinstance(item, _Block):
+                members.append(item)
+                continue
+            numbered[item.name] = numbered.get(item.name, 0) + 1
+            members.append(
+                Piece(
+                    name=item.name,
+                    index=numbered[item.name],
+                    count=counts[item.name],
+                    begin=item.begin,
+                    end=item.end,
+                )
+            )
+        folded.append(tuple(members))
+    return folded
 
 
 def _suffix_shard_counts(sizes: Sequence[int], limit: int) -> list[int]:
@@ -246,54 +464,49 @@ def _suffix_shard_counts(sizes: Sequence[int], limit: int) -> list[int]:
 def pack_shards(
     order: Sequence[str],
     payload_bytes: Mapping[str, int],
+    shapes: Mapping[str, Sequence[int]],
     companions: Mapping[str, str],
-    limit: int = SHARD_BYTE_LIMIT,
-    *,
-    target: int | None = None,
-) -> list[tuple[str, ...]]:
+    capacity: int = SHARD_DATA_CAPACITY,
+) -> list[tuple[str | Piece, ...]]:
     """書き出し順を shard 列へ割り付ける（規則はモジュール doc）。
 
     `order` は書き手が決めた**全体の**書き出し順、`payload_bytes` は名前 → データ節の
-    バイト数、`companions` は原子対の**対称**写像（weight → scale と scale → weight の両方）。
-    返すのは shard ごとの名前列で、**先頭は必ず空**（= グラフ shard・読み手契約の 1）。
-    以降が weight shard で、並びは `order` の部分列 + 引き寄せた相方（shard の中の最終的な
-    書き出し順は書き手が自分の規約で決め直す）。
+    バイト数、`shapes` は名前 → 論理 shape（**分割の要否と行の長さにだけ**使う）、
+    `companions` は原子対の**対称**写像（weight → scale と scale → weight の両方）。
+    返すのは shard ごとの member 列（丸ごとなら名前・分割なら {@link Piece}）で、
+    **先頭は必ず空**（= グラフ shard・読み手契約の 1）。以降が weight shard で、並びは
+    `order` の部分列 + 引き寄せた相方（shard の中の最終的な書き出し順は書き手が自分の規約で
+    決め直す）。
 
-    `limit` は受理上限（単位がこれを超えたら fail loudly）、`target` は詰める目標（既定 =
-    `min(SHARD_TARGET_BYTES, limit)`）。**実効目標 = max(target, 最大単位)** — 目標より大きい
-    単位を持つコンポーネントは、その単位に合わせて一様に詰める（{@link SHARD_TARGET_BYTES}）。
+    `capacity` は**データ節**に詰める上限（既定 {@link SHARD_DATA_CAPACITY}）。受理上限は
+    ファイル長で測る（{@link SHARD_BYTE_LIMIT}）ので、ここが見るのはヘッダ余裕を引いた側。
 
-    割り付けは 2 段。①**最小本数** k を貪欲で数える（`_suffix_shard_counts`）②k を固定して
-    **均す** — 各 shard の目標を「残量 ÷ 残 shard 数」に取り、目標に届いたら cut を打つ。
-    cut を打てるのは suffix 実行可能性ガード（`counts[i] <= 残 shard 数 - 1`）が立つ位置だけ
-    なので、均しても最後の 1 本が上限を破ることはない。上限に届いてしまった場合は目標に
-    関係なく cut（そこがちょうど貪欲の右端で、ガードは必ず立っている）。
+    割り付けは 3 段。①容量に収まらない単位を**行ブロック**へ砕く（`_atomic_units`）
+    ②**最小本数** k を貪欲で数える（`_suffix_shard_counts`）③k を固定して**均す** — 各 shard の
+    目標を「残量 ÷ 残 shard 数」に取り、目標に届いたら cut を打つ。cut を打てるのは suffix
+    実行可能性ガード（`counts[i] <= 残 shard 数 - 1`）が立つ位置だけなので、均しても最後の
+    1 本が容量を破ることはない。容量に届いてしまった場合は目標に関係なく cut（そこがちょうど
+    貪欲の右端で、ガードは必ず立っている）。最後に、同じ shard に落ちた連続ブロックを
+    {@link Piece} へ畳む。
 
-    検算（規則の逐語 — テストと対で固定する。bound = 1GiB を明示した場合）:
+    検算（規則の逐語 — テストと対で固定する。capacity を明示した場合）:
 
-    - 3.2GiB → `[0.8GiB × 4]`。k = 4 を先に決めてから均すので端数 shard が出ない
-      （旧・尾部スラック則の `[1GiB, 1GiB, 1.2GiB]` を置き換える形）。
-    - 0.6GiB の単位 3 つ → `[0.6, 0.6, 0.6]`。総量 1.8GiB でも 2 本には詰め替えられない
-      （連続順序 + 原子性の下では k > ceil(総量 / bound) がありうる — モジュール doc）。
-    - 既定（目標 256MiB）では 1GiB の 1MiB × 1024 本 → `[256MiB × 4]`。
+    - 容量の 3.2 倍 → 0.8 倍 × 4 本。k = 4 を先に決めてから均すので端数 shard が出ない。
+    - 容量の 0.6 倍の**対**が 3 つ → 3 本。隣接 2 つで 1.2 倍になるのでどの 2 つも同居できない
+      （連続順序 + 対の原子性の下では k > ceil(総量 / 容量) がありうる — モジュール doc）。
+    - 容量を超える単独テンソルは piece 列になり、連続する shard に 1 本ずつ並ぶ。
 
-    MUST: weight shard を空で作らない。k は「全単位を上限内で覆う最小本数」なので、均しの
+    MUST: weight shard を空で作らない。k は「全単位を容量内で覆う最小本数」なので、均しの
     ガードが立つ位置は常に残り単位が残っている位置になる。**テンソルが 1 本も無い**
     コンポーネントだけが例外で、そのときはグラフ shard 1 本（`[()]`）を返す。
     """
-    if limit <= 0:
-        raise ShardError(f"shard の上限 {limit} が正でない")
-    goal = min(SHARD_TARGET_BYTES, limit) if target is None else target
-    if not 0 < goal <= limit:
-        raise ShardError(f"shard の目標 {goal} が 1..上限 {limit} の範囲に無い")
-    units = _atomic_units(order, payload_bytes, companions, limit)
-    groups: list[tuple[str, ...]] = [()]
+    if capacity <= 0:
+        raise ShardError(f"shard の容量 {capacity} が正でない")
+    units = _atomic_units(order, payload_bytes, shapes, companions, capacity)
+    groups: list[list[str | _Block]] = [[]]
     if units:
         sizes = [size for _, size in units]
-        # 実効目標: 目標より大きい単位があれば、その単位に合わせる（単位は割れない — 上限内で
-        # あることは _atomic_units が見た）。以降の最小本数・均し・cut は全てこの値で判定する。
-        bound = max(goal, max(sizes))
-        counts = _suffix_shard_counts(sizes, bound)
+        counts = _suffix_shard_counts(sizes, capacity)
         total = counts[0]
         remaining = sum(sizes)
         index = 0
@@ -301,52 +514,136 @@ def pack_shards(
             left = total - opened
             # 残量を残 shard 数で割った目標（切り上げ — 端数は手前の shard が引き受ける）。
             target = -(-remaining // left)
-            members: list[str] = []
+            members: list[str | _Block] = []
             used = 0
             while index < len(units):
                 unit, size = units[index]
                 closable = bool(members) and counts[index] <= left - 1
-                if closable and (used + size > bound or used >= target):
+                if closable and (used + size > capacity or used >= target):
                     break
                 members.extend(unit)
                 used += size
                 index += 1
-            groups.append(tuple(members))
+            groups.append(members)
             remaining -= used
     if len(groups) > MAX_SHARDS:
         raise ShardError(f"shard が {len(groups)} 本で上限 {MAX_SHARDS} を超えた")
-    return groups
+    return _fold_blocks(groups)
 
 
-def assert_shard_partition(groups: Sequence[Sequence[str]], names: Sequence[str]) -> None:
+def _owner_of(groups: Sequence[Sequence[str | Piece]]) -> dict[str, int]:
+    """テンソル → 所属 shard 添字（分割テンソルは **piece 1** の shard）。"""
+    owner: dict[str, int] = {}
+    for index, group in enumerate(groups):
+        for member in group:
+            if isinstance(member, Piece):
+                if member.index == 1:
+                    owner[member.name] = index
+            else:
+                owner[member] = index
+    return owner
+
+
+def _assert_piece_run(
+    name: str, placed: Sequence[tuple[int, Piece]], shapes: Mapping[str, Sequence[int]]
+) -> None:
+    """1 テンソルの piece 列が読み手契約 5 を満たすことを落とす（shard 順に受け取る）。"""
+    shape = shapes.get(name)
+    if shape is None or not shape:
+        raise ShardError(f"テンソル '{name}': 分割されているのに親の shape が分からない")
+    count = placed[0][1].count
+    if len(placed) != count:
+        raise ShardError(
+            f"テンソル '{name}': piece が {len(placed)} 本で宣言の総数 {count} と合わない"
+        )
+    cursor = 0
+    previous: int | None = None
+    for position, (shard, piece) in enumerate(placed, start=1):
+        if piece.count != count:
+            raise ShardError(
+                f"テンソル '{name}': piece の総数が {count} と {piece.count} で食い違っている"
+            )
+        if piece.index != position:
+            raise ShardError(
+                f"テンソル '{name}': shard 順で {position} 本目の piece が index {piece.index}"
+                "（index は shard 順に 1 から増える）"
+            )
+        if previous is not None and shard != previous + 1:
+            raise ShardError(
+                f"テンソル '{name}': piece {piece.index} が shard[{shard}]・前の piece が"
+                f" shard[{previous}]（piece は連続する shard に 1 本ずつ）"
+            )
+        if piece.end <= piece.begin:
+            raise ShardError(
+                f"テンソル '{name}': piece {piece.index} の行範囲"
+                f" [{piece.begin}, {piece.end}) が空（1 行以上 MUST）"
+            )
+        if piece.begin != cursor:
+            raise ShardError(
+                f"テンソル '{name}': piece {piece.index} が行 {piece.begin} から始まる"
+                f"（前の piece の末尾は {cursor} — 行は隙間なく覆う MUST）"
+            )
+        cursor = piece.end
+        previous = shard
+    if cursor != int(shape[0]):
+        raise ShardError(
+            f"テンソル '{name}': piece 列が行 {cursor} までしか覆っていない"
+            f"（親は {int(shape[0])} 行）"
+        )
+
+
+def assert_shard_partition(
+    groups: Sequence[Sequence[str | Piece]],
+    names: Sequence[str],
+    shapes: Mapping[str, Sequence[int]],
+) -> None:
     """shard 群が対象テンソルの**分割**（欠け・重複・余剰なし）であることを落とす。
 
     ランタイム側の宣言完全性検査（ADR 0070 決定 1 — 全 shard 読了後の突合）を、書く側でも
     同じ集合に対して張る。ここが緩むと「配布形は書けたのにロードで落ちる」非対称になる。
+    1 テンソルは**丸ごと 1 回**か、**index 順に連続 shard へ 1 本ずつ並ぶ piece 列**の
+    どちらか一方（読み手契約 5 — 混在・欠け・重複・非連続・行の取りこぼしは全部ここで落ちる）。
     """
-    seen: dict[str, int] = {}
+    whole: dict[str, int] = {}
+    pieces: dict[str, list[tuple[int, Piece]]] = {}
     for index, group in enumerate(groups):
-        for name in group:
-            if name in seen:
+        for member in group:
+            if isinstance(member, Piece):
+                pieces.setdefault(member.name, []).append((index, member))
+                continue
+            if member in whole:
                 raise ShardError(
-                    f"テンソル '{name}' が shard[{seen[name]}] と shard[{index}] に重複している"
+                    f"テンソル '{member}' が shard[{whole[member]}] と"
+                    f" shard[{index}] に重複している"
                 )
-            seen[name] = index
+            whole[member] = index
+    mixed = sorted(set(whole) & set(pieces))
+    if mixed:
+        raise ShardError(
+            f"テンソル {mixed} が丸ごとと piece の両方で割り付けられている"
+            "（1 テンソルはどちらか一方 MUST）"
+        )
+    for name in sorted(pieces):
+        _assert_piece_run(name, pieces[name], shapes)
     expected = set(names)
-    missing = sorted(expected - set(seen))
-    surplus = sorted(set(seen) - expected)
+    seen = set(whole) | set(pieces)
+    missing = sorted(expected - seen)
+    surplus = sorted(seen - expected)
     if missing or surplus:
         raise ShardError(f"shard の割り付けが分割になっていない（欠け {missing} / 余剰 {surplus}）")
 
 
-def assert_co_shard(groups: Sequence[Sequence[str]], companions: Mapping[str, str]) -> None:
+def assert_co_shard(groups: Sequence[Sequence[str | Piece]], companions: Mapping[str, str]) -> None:
     """weight と companion scale が同じ shard に居ることを落とす（co-shard MUST）。
+
+    分割された重みは **piece 1** の shard が所属（読み手契約 4 の piece 版）— 逐次消費は
+    「重みの先頭を読み始める時点で scale が要る」ので、scale は最初の断片と同居する。
 
     {@link pack_shards} は対を原子単位で詰めるので構造的に破れないが、**規則と検査は別物**に
     しておく（分割の入口が増えたとき、規則の写経ではなく検査が受け止める）。ランタイム側の
     `createShardValidator` の鏡像で、破れると「shard を跨いだ scale」を読む側が拒否する。
     """
-    owner = {name: index for index, group in enumerate(groups) for name in group}
+    owner = _owner_of(groups)
     for name, partner in companions.items():
         if name not in owner or partner not in owner:
             continue

@@ -81,7 +81,7 @@ from karume.convert import normalize_boundary_tensor
 from karume.dist import ir_graph, safetensors_header
 from karume.emit import unpack_int4
 from karume.quantize import dequantize_int4
-from karume.shards import resolve_shards
+from karume.shards import parse_piece_key, resolve_shards
 from karume.verify import READER_DTYPE_BITS
 
 from . import export as ex
@@ -838,15 +838,69 @@ def _stored_parameters(graph: Mapping[str, Any], where: Path) -> dict[str, tuple
     return stored
 
 
-def _component_headers(container: Path) -> tuple[dict[str, Any], dict[str, Path]]:
-    """コンポーネント全 shard のヘッダを 1 枚へ畳み、テンソルキー → 収容 shard も返す。
+#: テンソル 1 本の在処（収容 shard・データ節内の `[begin, end)`）。piece 列は index 順に並ぶ。
+_Parts = dict[str, tuple[tuple[Path, int, int], ...]]
+
+
+def _entry_offsets(container: Path, key: str, entry: Any) -> tuple[int, int]:
+    """ヘッダ項目の `data_offsets`（形が違えば即エラー）。"""
+    offsets = entry.get("data_offsets") if isinstance(entry, dict) else None
+    if not isinstance(offsets, list) or len(offsets) != 2:
+        raise SystemExit(f"{container}: '{key}' のヘッダ項目が読めない")
+    return int(offsets[0]), int(offsets[1])
+
+
+def _fold_piece_entries(
+    container: Path, name: str, found: list[tuple[int, int, Path, Any]]
+) -> tuple[dict[str, Any], tuple[tuple[Path, int, int], ...]]:
+    """piece 列を親 1 本の宣言と区間列へ畳む（読み手契約 5 — ADR 0090 決定 1）。
+
+    宣言は親の dtype と全体 shape（先頭次元 = 各 piece の行数の和）。ここで畳まないと i4 席の
+    集合突合が piece キーで数えられ、「I4 格納のテンソルが 1 本も無い」と誤って落ちる。
+    """
+    ordered = sorted(found)
+    count = ordered[0][1]
+    if [index for index, *_rest in ordered] != list(range(1, count + 1)):
+        raise SystemExit(
+            f"{container}: '{name}' の piece 連番 1..{count} が揃っていない"
+            f"（現物 {[index for index, *_rest in ordered]}）"
+        )
+    head = ordered[0][3]
+    rows = 0
+    parts: list[tuple[Path, int, int]] = []
+    for index, _count, shard, entry in ordered:
+        if entry.get("dtype") != head.get("dtype"):
+            raise SystemExit(
+                f"{container}: '{name}' の piece {index} が {entry.get('dtype')!r}"
+                f"（piece 1 は {head.get('dtype')!r}）— dtype は親と同一 MUST"
+            )
+        shape = entry.get("shape")
+        if not isinstance(shape, list) or not shape or shape[1:] != head["shape"][1:]:
+            raise SystemExit(
+                f"{container}: '{name}' の piece {index} の shape {shape} が"
+                f" piece 1 の {head['shape']} と先頭次元以外で違う"
+            )
+        rows += int(shape[0])
+        begin, end = _entry_offsets(container, name, entry)
+        parts.append((shard, begin, end))
+    return {"dtype": head["dtype"], "shape": [rows, *head["shape"][1:]]}, tuple(parts)
+
+
+def _component_headers(container: Path) -> tuple[dict[str, Any], _Parts]:
+    """コンポーネント全 shard のヘッダを 1 枚へ畳み、テンソルキー → 在処の区間列も返す。
 
     MUST: 代表 path 1 本だけを見ない — 配布形は常に「グラフ shard（データ節 0 本）+ weight
     shard 列」（ADR 0081）なので、先頭を読むだけでは I4 のテンソルが 1 本も見えず、
     「i4 系列ではない」と誤って落ちる。`__metadata__` は畳んだ表に入れない（IR の取り出しは
     `karume.dist.ir_graph` の側の仕事で、あちらがグラフ shard を名指しで読む）。
+
+    分割テンソル（`<親名>#NNNNN-of-NNNNN` — ADR 0090）も**親 1 本へ畳む**。畳んだ宣言は親の
+    dtype と全体 shape で、在処は piece の index 順に並ぶ区間列になる（配布形の shard 順の
+    整合そのものは `karume verify` が持つ — ここは読むために要る整合だけを見る）。
     """
     merged: dict[str, Any] = {}
+    parts: _Parts = {}
+    pieces: dict[str, list[tuple[int, int, Path, Any]]] = {}
     owner: dict[str, Path] = {}
     for shard in resolve_shards(container):
         for key, entry in safetensors_header(shard).items():
@@ -857,15 +911,28 @@ def _component_headers(container: Path) -> tuple[dict[str, Any], dict[str, Path]
                     f"{container}: テンソル '{key}' が {owner[key].name} と {shard.name} に"
                     "重複している（shard 跨ぎの重複は配布形の不変条件違反）"
                 )
-            merged[key] = entry
             owner[key] = shard
-    return merged, owner
+            parsed = parse_piece_key(key)
+            if parsed is None:
+                merged[key] = entry
+                parts[key] = ((shard, *_entry_offsets(container, key, entry)),)
+                continue
+            name, index, count = parsed
+            pieces.setdefault(name, []).append((index, count, shard, entry))
+    for name, found in pieces.items():
+        if name in merged:
+            raise SystemExit(
+                f"{container}: テンソル '{name}' が丸ごとと piece の両方でコンテナに居る"
+                "（1 テンソルはどちらか一方 MUST）"
+            )
+        merged[name], parts[name] = _fold_piece_entries(container, name, found)
+    return merged, parts
 
 
 def _read_stored(
     container: Path,
     header: Mapping[str, Any],
-    owner: Mapping[str, Path],
+    parts: Mapping[str, tuple[tuple[Path, int, int], ...]],
     expected: Mapping[str, str],
 ) -> dict[str, torch.Tensor]:
     """コンテナの生バイトを論理形の torch テンソルへ読む（I4 は nibble 展開まで・I8 は素の器）。
@@ -874,54 +941,54 @@ def _read_stored(
     packed 4bit を含むコンテナは開く時点で落ちる（`karume.verify` が自前リーダを持つのと同じ
     理由）。展開そのものは**書き下ろさず** core（`karume.emit.unpack_int4`）を呼ぶ。
 
-    `expected` は「テンソルキー → IR が宣言した格納 dtype」、`owner` は
-    {@link _component_headers} が引いた収容 shard。データ節のオフセットは **shard ごとに
-    独立**（ADR 0081）なので、shard 単位でまとめて開いてから席を引く。ヘッダの dtype が宣言と
-    食い違う / 宣言した形と実バイト長が合わない、はどちらも即エラー（宣言と実体の 2 面を
-    突き合わせる）。
+    `expected` は「テンソルキー → IR が宣言した格納 dtype」、`parts` は
+    {@link _component_headers} が引いた在処の区間列（分割テンソルなら piece の index 順）。
+    データ節のオフセットは **shard ごとに独立**（ADR 0081）なので、shard 単位でまとめて開いて
+    から席を引き、最後に親ごとへ連結する（行は連続メモリ順なので、バイト列の連結がそのまま
+    親の実体になる）。ヘッダの dtype が宣言と食い違う / 宣言した形と実バイト長が合わない、は
+    どちらも即エラー（宣言と実体の 2 面を突き合わせる）。
     """
-    by_shard: dict[Path, list[str]] = {}
+    by_shard: dict[Path, list[tuple[str, int, int, int]]] = {}
     for key in sorted(expected):
-        shard = owner.get(key)
-        if shard is None:
+        found = parts.get(key)
+        if found is None or not isinstance(header.get(key), dict):
             raise SystemExit(f"{container}: テンソル '{key}' がコンテナに無い")
-        by_shard.setdefault(shard, []).append(key)
+        for position, (shard, begin, end) in enumerate(found):
+            by_shard.setdefault(shard, []).append((key, position, begin, end))
 
-    values: dict[str, torch.Tensor] = {}
-    for shard, keys in by_shard.items():
+    raw: dict[tuple[str, int], bytes] = {}
+    for shard, wanted in by_shard.items():
         with shard.open("rb") as stream:
             head = stream.read(_HEADER_LENGTH_BYTES)
             data_start = _HEADER_LENGTH_BYTES + int.from_bytes(head, "little")
-            for key in keys:
-                dtype = expected[key]
-                name, container_dtype = _RESTORE_STORAGE[dtype]
-                entry = header.get(key)
-                if not isinstance(entry, dict):
-                    raise SystemExit(f"{container}: テンソル '{key}' がコンテナに無い")
-                if entry.get("dtype") != name:
-                    raise SystemExit(
-                        f"{container}: '{key}' は IR の宣言が {dtype} なのにヘッダは"
-                        f" {entry.get('dtype')!r}（宣言と実体が割れている）"
-                    )
-                shape = entry.get("shape")
-                offsets = entry.get("data_offsets")
-                bad_shape = not isinstance(shape, list)
-                bad_offsets = not isinstance(offsets, list) or len(offsets) != 2
-                if bad_shape or bad_offsets:
-                    raise SystemExit(f"{container}: '{key}' のヘッダ項目が読めない")
-                bits = math.prod(int(dim) for dim in shape) * READER_DTYPE_BITS[name]
-                begin, end = int(offsets[0]), int(offsets[1])
-                if bits % 8 or end - begin != bits // 8:
-                    raise SystemExit(
-                        f"{container}: '{key}' の宣言 {shape} × {name} と実バイト {end - begin} が"
-                        "食い違う"
-                    )
+            for key, position, begin, end in wanted:
                 stream.seek(data_start + begin)
-                raw = stream.read(end - begin)
-                if len(raw) != end - begin:
+                chunk = stream.read(end - begin)
+                if len(chunk) != end - begin:
                     raise SystemExit(f"{shard}: '{key}' のデータ節がファイル末尾で切れている")
-                flat = torch.frombuffer(bytearray(raw), dtype=container_dtype)
-                values[key] = unpack_int4(flat, shape) if dtype == "i4" else flat.reshape(shape)
+                raw[(key, position)] = chunk
+
+    values: dict[str, torch.Tensor] = {}
+    for key in sorted(expected):
+        dtype = expected[key]
+        name, container_dtype = _RESTORE_STORAGE[dtype]
+        entry = header[key]
+        if entry.get("dtype") != name:
+            raise SystemExit(
+                f"{container}: '{key}' は IR の宣言が {dtype} なのにヘッダは"
+                f" {entry.get('dtype')!r}（宣言と実体が割れている）"
+            )
+        shape = entry.get("shape")
+        if not isinstance(shape, list):
+            raise SystemExit(f"{container}: '{key}' のヘッダ項目が読めない")
+        blob = b"".join(raw[(key, position)] for position in range(len(parts[key])))
+        bits = math.prod(int(dim) for dim in shape) * READER_DTYPE_BITS[name]
+        if bits % 8 or len(blob) != bits // 8:
+            raise SystemExit(
+                f"{container}: '{key}' の宣言 {shape} × {name} と実バイト {len(blob)} が食い違う"
+            )
+        flat = torch.frombuffer(bytearray(blob), dtype=container_dtype)
+        values[key] = unpack_int4(flat, shape) if dtype == "i4" else flat.reshape(shape)
     return values
 
 
@@ -976,7 +1043,7 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
     calib = _shippable_calib(series_dir)
     # ヘッダは 2 度読む（オフセット表と IR メタデータ）— IR の取り出しは core の `ir_graph` に
     # 任せて綴りを写経しない。読むのはどちらもヘッダだけで、数 GB のデータ節は舐めない。
-    header, owner = _component_headers(container)
+    header, parts = _component_headers(container)
     stored = _stored_parameters(ir_graph(container), container)
     owned = dict(wrapper.named_parameters())
     absent = sorted(set(owned) - set(stored))
@@ -1002,7 +1069,7 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
         raise SystemExit(f"{container}: I4 格納のテンソルが 1 本も無い（i4 系列ではない）")
     expected = {key: dtype for key, (dtype, _scale) in stored.items()}
     expected.update({scale: "f32" for _dtype, scale in stored.values() if scale is not None})
-    values = _read_stored(container, header, owner, expected)
+    values = _read_stored(container, header, parts, expected)
 
     # 1 本ずつ「戻して → 比べて → 書いて → 捨てる」。全部を f32 で持ってから書くと、`dit` の
     # f32 一式（1.4GB 級）と同じ大きさの複製がもう 1 つ同時に生きる（`karume.emit` が格納側で

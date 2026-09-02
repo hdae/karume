@@ -113,7 +113,7 @@ from karume.artifacts import staged_publication
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.shards import resolve_shards
+from karume.shards import parse_piece_key, resolve_shards
 
 from .patch import gru_forward
 
@@ -440,32 +440,51 @@ def assert_checkpoint_bytes(path: Path, state_dict: Mapping[str, torch.Tensor]) 
     MUST: 突合は**全 shard の和**で見る（ADR 0081 — 配布形は常に「グラフ shard + weight
     shard 列」）。代表 path 1 本だけを開く形にすると、テンソルを 1 本も持たないグラフ shard を
     読んで「全部欠けている」になる（分割前は代表 path が現物だったので素で通っていた）。
+
+    MUST: 分割テンソル（`<親名>#NNNNN-of-NNNNN` — ADR 0090）は**親 1 本へ畳んで**から突き合わ
+    せる。行の連続範囲を index 順に `torch.cat` すれば親の実体そのものなので、突合の意味は
+    分割の有無で変わらない（畳まないと state_dict の鍵が全部「欠けている」に化ける）。
     """
-    shards = resolve_shards(path)
-    keys: set[str] = set()
-    for shard in shards:
-        with safe_open(str(shard), framework="pt") as handle:
-            keys |= set(handle.keys())
-    missing = sorted(set(state_dict) - keys)
+    stored = _read_initializers(resolve_shards(path))
+    missing = sorted(set(state_dict) - set(stored))
     if missing:
         raise AssertionError(f"{path}: state_dict の鍵が initializer に無い: {missing}")
-    extra = sorted(key for key in keys - set(state_dict) if not key.startswith(CONST_PREFIX))
+    extra = sorted(key for key in set(stored) - set(state_dict) if not key.startswith(CONST_PREFIX))
     if extra:
         raise AssertionError(f"{path}: 重み由来でない initializer がある: {extra}")
+    for name in sorted(set(stored) & set(state_dict)):
+        source = state_dict[name]
+        found = stored[name]
+        if found.dtype != source.dtype or tuple(found.shape) != tuple(source.shape):
+            raise AssertionError(
+                f"テンソル '{name}': dtype / shape 不一致"
+                f"（元 {source.dtype} {tuple(source.shape)} /"
+                f" 読み直し {found.dtype} {tuple(found.shape)}）"
+            )
+        if found.numpy().tobytes() != source.numpy().tobytes():
+            raise AssertionError(f"テンソル '{name}': バイト列が一致しない")
+    return len(state_dict)
+
+
+def _read_initializers(shards: Sequence[Path]) -> dict[str, torch.Tensor]:
+    """shard 列の全テンソル（piece は親へ畳む）。読み直しは**別実装のリーダ**で行う。
+
+    piece の連結は先頭次元（行）方向の `torch.cat` — 配布形の piece は親の行の連続範囲なので、
+    index 順に積めば親の実体に戻る（規則の正本は `karume.shards`）。
+    """
+    whole: dict[str, torch.Tensor] = {}
+    pieces: dict[str, list[tuple[int, torch.Tensor]]] = {}
     for shard in shards:
         with safe_open(str(shard), framework="pt") as handle:
-            for name in sorted(set(handle.keys()) & set(state_dict)):
-                source = state_dict[name]
-                stored = handle.get_tensor(name)
-                if stored.dtype != source.dtype or tuple(stored.shape) != tuple(source.shape):
-                    raise AssertionError(
-                        f"テンソル '{name}': dtype / shape 不一致"
-                        f"（元 {source.dtype} {tuple(source.shape)} /"
-                        f" 読み直し {stored.dtype} {tuple(stored.shape)}）"
-                    )
-                if stored.numpy().tobytes() != source.numpy().tobytes():
-                    raise AssertionError(f"テンソル '{name}': バイト列が一致しない")
-    return len(state_dict)
+            for key in handle.keys():  # noqa: SIM118
+                parsed = parse_piece_key(key)
+                if parsed is None:
+                    whole[key] = handle.get_tensor(key)
+                else:
+                    pieces.setdefault(parsed[0], []).append((parsed[1], handle.get_tensor(key)))
+    for name, found in pieces.items():
+        whole[name] = torch.cat([tensor for _index, tensor in sorted(found)], dim=0)
+    return whole
 
 
 def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:

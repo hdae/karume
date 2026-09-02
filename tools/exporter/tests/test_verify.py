@@ -1590,43 +1590,55 @@ class TestContainer:
 
 
 class TestShardByteLimits:
-    """shard 1 本のデータ節の上限（`karume.shards` の読み手契約 2）を**読み返し側でも**見る。
+    """shard 1 本の**ファイル長**の上限（`karume.shards` の読み手契約 2）を読み返し側でも見る。
 
     上限は書く側（`pack_shards`）にしか門が無かったので、規則を守らない shard 列（手で組んだ /
     別実装が書いた / 外部ツールの出力・越境参照で別リポから引いたもの）は `karume verify` も
     `karume dist` も緑で通り、ブラウザで初めて落ちていた（Chromium の単一 ArrayBuffer 上限・
     取得層のバイト予算）。co-shard と同じ「書く側にだけ門がある非対称」の型。
 
-    判定は実 GiB を積まずに済むよう規則そのもの（{@link assert_shard_byte_limits}）へ直に
-    掛け、`verify_shards` への配線は上限を差し替えた故障注入で見る。
+    測るのが**ファイル長**なのは hub（manifest の `size`）と同じ量を見るため（ADR 0090 決定 2）—
+    データ節で測ると「データ節ちょうど上限 + ヘッダ」が exporter だけ緑で hub で落ちる。
+    判定は実寸を積まずに済むよう規則そのもの（{@link assert_shard_byte_limits}）へ直に掛け、
+    `verify_shards` への配線は上限を差し替えた故障注入で見る。
     """
 
     def test_a_shard_at_the_limit_passes(self):
         assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", 1)])
 
     def test_a_shard_one_byte_over_the_limit_is_rejected(self):
-        with pytest.raises(ContainerError, match=r"shard\[0\] のデータ節"):
+        with pytest.raises(ContainerError, match=r"shard\[0\] のファイル長"):
             assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT + 1), ("b", 1)])
 
     def test_the_last_shard_gets_no_slack_of_its_own(self):
         """上限は 1 本だけ（尾部スラックは廃止 — ADR 0081 決定 2）。"""
         assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", SHARD_BYTE_LIMIT)])
-        with pytest.raises(ContainerError, match=r"shard\[1\] のデータ節"):
+        with pytest.raises(ContainerError, match=r"shard\[1\] のファイル長"):
             assert_shard_byte_limits([("a", SHARD_BYTE_LIMIT), ("b", SHARD_BYTE_LIMIT + 1)])
 
-    def test_verify_shards_actually_applies_the_gate(self, tmp_path, monkeypatch):
+    def test_verify_shards_measures_the_whole_file_not_the_data_section(
+        self, tmp_path, monkeypatch
+    ):
         """配線の故障注入 — 上限を差し込むと実ファイルの検証がその門で落ちる。
 
-        規則を実寸で踏むには 1GiB 超の合成資産が要るので、上限側を動かして同じ判定へ届かせる
-        （門が呼ばれていなければ緑のまま通り、この検査は空振りになる）。
+        規則を実寸で踏むには 256MiB 超の合成資産が要るので、上限側を動かして同じ判定へ
+        届かせる（門が呼ばれていなければ緑のまま通り、この検査は空振りになる）。閾値を
+        「データ節 16 バイト」ではなく**ファイル長**に取るのがこの検査の眼目で、データ節で
+        測っていれば上限 16 でも通ってしまう。
         """
         path = write_container(tmp_path / "m.safetensors", base_graph(), {"enc.w": torch.ones(4)})
-        # weight shard のデータ節は f32×4 = 16 バイト。境界（= 上限ちょうど）は通る。
-        monkeypatch.setattr(verify, "SHARD_BYTE_LIMIT", 16)
+        sizes = [shard_path(Path(path), index, 2).stat().st_size for index in (1, 2)]
+        largest = max(sizes)
+        # データ節はグラフ shard が 0 バイト・weight shard が f32×4 = 16 バイトなので、
+        # 「データ節で測る」実装ならこの閾値でも両方通ってしまう。
+        assert largest > 16
+
+        monkeypatch.setattr(verify, "SHARD_BYTE_LIMIT", largest)
         assert verify_model(path).initializers["w"].storage.dtype == "f32"
 
-        monkeypatch.setattr(verify, "SHARD_BYTE_LIMIT", 15)
-        with pytest.raises(ContainerError, match=r"shard\[1\] のデータ節が 16 バイト"):
+        monkeypatch.setattr(verify, "SHARD_BYTE_LIMIT", largest - 1)
+        pattern = rf"shard\[{sizes.index(largest)}\] のファイル長が {largest:,}"
+        with pytest.raises(ContainerError, match=pattern):
             verify_model(path)
 
 
@@ -2232,3 +2244,289 @@ class TestStridedRank:
 
         with pytest.raises(OpContractError, match="strided カーネルの上限"):
             assert_op_contracts(graph)
+
+
+def write_shards(path, graph: dict, groups: list[dict[str, torch.Tensor]]) -> Path:
+    """グラフ shard + 指定した内容の weight shard 列を書いて**代表 path** を返す。
+
+    どのキーをどの shard に置くかをテスト側が決めるための手組み — 書き手（`emit.write_model`）は
+    規則に沿った列しか作れないので、読み返しの門を踏むにはこちらの入口が要る。
+    """
+    total = len(groups) + 1
+    save_file(
+        {}, str(shard_path(Path(path), 1, total)), metadata={IR_METADATA_KEY: json.dumps(graph)}
+    )
+    for index, tensors in enumerate(groups, start=2):
+        save_file(dict(tensors), str(shard_path(Path(path), index, total)))
+    return path
+
+
+def i8_piece_rows(rows: int) -> torch.Tensor:
+    """`i8_graph` の `enc.w`（I8 `[3,4]` = 1 行 4 バイト）の `rows` 行ぶん。"""
+    return torch.ones(rows, 4, dtype=torch.int8)
+
+
+class TestTensorPieces:
+    """分割テンソル（piece — ADR 0090 決定 1）の読み返し。
+
+    親は `i8_graph` の `enc.w`（I8 `[3,4]`・1 行 4 バイト）。piece は shard の中では普通の
+    テンソルなので、故障注入は「どのキーをどの shard に置くか」だけで組める。畳んだ結果が
+    親の宣言（dtype・全体 shape）と突き合わされるところまでが読み返しの門で、ランタイム側の
+    shard intake（`packages/runtime/src/format/container.ts`）と同じ規則を写している。
+    """
+
+    def test_a_well_formed_run_folds_into_the_parent(self, tmp_path):
+        """piece 1 + piece 2 で宣言 `[3,4]` が満たされる（親は分割を知らずに突合される）。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00001-of-00002": i8_piece_rows(1),
+                },
+                {"enc.w#00002-of-00002": i8_piece_rows(2)},
+            ],
+        )
+
+        assert verify_model(path).initializers["w"].storage.dtype == "i8"
+
+    def test_a_run_that_skips_a_shard_is_rejected(self, tmp_path):
+        """piece は**連続する** shard に 1 本ずつ（間を空けると読み手の進行状態が壊れる）。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00001-of-00002": i8_piece_rows(1),
+                },
+                {},
+                {"enc.w#00002-of-00002": i8_piece_rows(2)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="連続する shard に 1 本ずつ"):
+            verify_model(path)
+
+    def test_two_pieces_of_one_parent_in_the_same_shard_are_rejected(self, tmp_path):
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00001-of-00002": i8_piece_rows(1),
+                    "enc.w#00002-of-00002": i8_piece_rows(2),
+                }
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="同じ親の piece が 2 本"):
+            verify_model(path)
+
+    def test_a_run_that_arrives_out_of_order_is_rejected(self, tmp_path):
+        """index は shard 順に増える（逆順で来た列は行オフセットが逆に積まれる）。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00002-of-00002": i8_piece_rows(2),
+                },
+                {"enc.w#00001-of-00002": i8_piece_rows(1)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="1 本目の piece が index 2"):
+            verify_model(path)
+
+    def test_a_missing_piece_is_rejected(self, tmp_path):
+        """途中までしか来なかった列は読了時に欠けとして落ちる。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00001-of-00003": i8_piece_rows(1),
+                },
+                {"enc.w#00002-of-00003": i8_piece_rows(2)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="piece が 2 本で宣言の総数 3"):
+            verify_model(path)
+
+    def test_a_piece_with_another_dtype_is_rejected(self, tmp_path):
+        """dtype は親と同一 MUST（混ざると畳んだ実体がビット列の読み替えになる）。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00001-of-00002": i8_piece_rows(1),
+                },
+                {"enc.w#00002-of-00002": torch.ones(2, 4, dtype=torch.float16)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="dtype が F16"):
+            verify_model(path)
+
+    def test_a_piece_with_different_trailing_dimensions_is_rejected(self, tmp_path):
+        """割るのは**先頭次元だけ** — 残りが動くと行の長さが piece ごとに変わる。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00001-of-00002": i8_piece_rows(1),
+                },
+                {"enc.w#00002-of-00002": torch.ones(2, 3, dtype=torch.int8)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="残り次元"):
+            verify_model(path)
+
+    def test_an_empty_piece_is_rejected(self, tmp_path):
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00001-of-00002": i8_piece_rows(0),
+                },
+                {"enc.w#00002-of-00002": i8_piece_rows(3)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="1 行未満"):
+            verify_model(path)
+
+    def test_mixing_a_whole_tensor_with_pieces_is_rejected(self, tmp_path):
+        """1 テンソルは丸ごとか piece 列のどちらか一方（両方在ると実体が 2 つある）。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {"enc.b": torch.ones(3), "enc.s": torch.ones(3, 1), "enc.w": i8_piece_rows(3)},
+                {"enc.w#00001-of-00002": i8_piece_rows(1)},
+                {"enc.w#00002-of-00002": i8_piece_rows(2)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="どちらか一方"):
+            verify_model(path)
+
+    def test_a_scale_parked_with_a_later_piece_is_rejected(self, tmp_path):
+        """companion scale は **piece 1** と同じ shard（co-shard MUST の piece 版）。
+
+        逐次消費は「重みの先頭を書き込む時点で scale が要る」ので、後ろの piece と同居した
+        scale は「参照を手放す」契約と両立しない。
+        """
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {"enc.b": torch.ones(3), "enc.w#00001-of-00002": i8_piece_rows(1)},
+                {"enc.s": torch.ones(3, 1), "enc.w#00002-of-00002": i8_piece_rows(2)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="co-shard MUST"):
+            verify_model(path)
+
+    def test_a_piece_that_is_not_the_last_must_be_four_byte_aligned(self, tmp_path):
+        """末尾以外の piece は 4 の倍数長 MUST（読み手が親バッファへオフセット書きする）。
+
+        親を I8 `[3,5]`（1 行 5 バイト）にすると、1 行の piece が 5 バイト = 非整列になる。
+        """
+        graph = i8_graph()
+        graph["inputs"] = [{"name": "x", "dtype": "f32", "shape": ["T", 5]}]
+        graph["values"]["w"] = {"dtype": "f32", "shape": [3, 5]}
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            graph,
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00001-of-00002": torch.ones(1, 5, dtype=torch.int8),
+                },
+                {"enc.w#00002-of-00002": torch.ones(2, 5, dtype=torch.int8)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match="4 の倍数でない"):
+            verify_model(path)
+
+    def test_a_folded_run_that_does_not_match_the_declared_shape_is_rejected(self, tmp_path):
+        """畳んだ全体 shape は宣言と一致 MUST（行が足りない列は宣言 shape で落ちる）。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w#00001-of-00002": i8_piece_rows(1),
+                },
+                {"enc.w#00002-of-00002": i8_piece_rows(1)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match=r"宣言 shape \[3, 4\] ≠ 実テンソル \[2, 4\]"):
+            verify_model(path)
+
+    def test_a_piece_of_a_tensor_no_initializer_declares_is_surplus(self, tmp_path):
+        """親が宣言に無ければ piece も余剰（畳んだ親の名前で落ちる）。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w": i8_piece_rows(3),
+                    "enc.stale#00001-of-00002": i8_piece_rows(1),
+                },
+                {"enc.stale#00002-of-00002": i8_piece_rows(2)},
+            ],
+        )
+
+        with pytest.raises(ContainerError, match=r"参照されないテンソル \(1\): enc.stale"):
+            verify_model(path)
+
+    def test_an_out_of_range_run_is_not_read_as_a_piece_at_all(self, tmp_path):
+        """域外の綴りは piece ではない（キー自体の誤り — 余剰として落とす）。"""
+        path = write_shards(
+            tmp_path / "m.safetensors",
+            i8_graph(),
+            [
+                {
+                    "enc.b": torch.ones(3),
+                    "enc.s": torch.ones(3, 1),
+                    "enc.w": i8_piece_rows(3),
+                    "enc.w#00003-of-00002": i8_piece_rows(1),
+                }
+            ],
+        )
+
+        with pytest.raises(
+            ContainerError, match=r"参照されないテンソル \(1\): enc.w#00003-of-00002"
+        ):
+            verify_model(path)
