@@ -37,19 +37,29 @@ import {
  * （`FileSystemDirectoryHandle` → `File.arrayBuffer()`）・IndexedDB・File System Access の
  * picker が同じ形で乗る。
  *
- * MUST: 返す `Uint8Array` は **buffer 全体を占める**（tight view）— 共通層はここで受けた
- * バイト列をそのまま `openModel` へ渡すので、余白のある view を返すと辻褄合わせの `slice` で
- * RAM ピークが倍増する（共通層の tight view 検査がその場で落とす）。
+ * MUST: `readFile` が返す `Uint8Array` は **buffer 全体を占める**（tight view）— 共通層はここで
+ * 受けたバイト列をそのまま `openModel` へ渡すので、余白のある view を返すと辻褄合わせの `slice`
+ * で RAM ピークが倍増する（共通層の tight view 検査がその場で落とす）。
  * MUST: 欠損は fail loudly（`undefined` や空バイト列を返さない）。エラーには**実体のパス**を
  * 載せる — 共通層が付けられるのは manifest 上の相対 path までで、「どのディレクトリの下を
  * 探したか」を知っているのはアダプターだけ。
  * MUST: `signal` を透過する（大きい shard の読みは中断できなければならない）。
+ *
+ * `readFileInto`（任意）は逐次面の**器の使い回し**のための面: 実体を `target` の先頭へ読み、
+ * **ファイルの実長**を返す。`target` に収まらないファイルは読まずに（または途中で止めて）実長だけ
+ * を返す — size 違反を名乗るのは共通層（`sizeViolation`）で、アダプターは判定しない。持たない
+ * アダプターは `readFile` だけで従来どおり動く（器は確保されない）。
  */
 export type DirectoryAdapter = {
   readonly readFile: (
     path: string,
     options: { readonly signal?: AbortSignal },
   ) => Promise<Uint8Array<ArrayBuffer>>;
+  readonly readFileInto?: (
+    path: string,
+    target: Uint8Array<ArrayBuffer>,
+    options: { readonly signal?: AbortSignal },
+  ) => Promise<number>;
 };
 
 /** {@link localDirectory} の設定。 */
@@ -115,10 +125,22 @@ const pinnedLocalSource = (
       parse(bytes);
     },
 
-    readFile: async (ref, { signal, sizeViolation }) => {
-      const bytes = await adapter.readFile(ref.path, {
-        ...(signal === undefined ? {} : { signal }),
-      });
+    readFile: async (ref, { signal, sizeViolation, into }) => {
+      const abort = signal === undefined ? {} : { signal };
+      // 器を貸されていて、アダプターが器へ読めるなら、その経路（ホスト RAM に載る shard は常に
+      // 1 本）。どちらか欠ければ従来の全量読み（新しい buffer）。
+      if (into !== undefined && adapter.readFileInto !== undefined) {
+        const vessel = into();
+        if (vessel.byteLength < ref.size) {
+          throw new Error(
+            `hub: ${ref.path} の器（${vessel.byteLength} バイト）が宣言 size ${ref.size} より小さい`,
+          );
+        }
+        const actual = await adapter.readFileInto(ref.path, vessel.subarray(0, ref.size), abort);
+        if (actual !== ref.size) throw sizeViolation(actual, "body");
+        return new Uint8Array(vessel.buffer, 0, ref.size);
+      }
+      const bytes = await adapter.readFile(ref.path, abort);
       // 検証は size 厳密一致だけ（sha256 は信頼する）。onProgress は 1 度も呼ばない —
       // 受信の途中という状態が無いので、共通層が complete の 1 点で閉じる。
       if (bytes.byteLength !== ref.size) throw sizeViolation(bytes.byteLength, "body");

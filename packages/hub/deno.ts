@@ -66,6 +66,34 @@ export const denoDirectory = (
         throw new Error(`@karume/hub/deno: ${at} を読めない`, { cause: error });
       }
     },
+    // 逐次面の器へ直接読む（`DirectoryAdapter.readFileInto` の契約）: 実長を返し、器に収まらない
+    // ファイルは読まずに実長だけ返す（size 違反を名乗るのは共通層）。`Deno.open` / `read` は
+    // signal を受けないので、読みの切れ目で中断を見る。
+    readFileInto: async (path, target, { signal }) => {
+      const at = locate(base, path);
+      let file: Deno.FsFile;
+      try {
+        file = await Deno.open(at);
+      } catch (error) {
+        throw new Error(`@karume/hub/deno: ${at} を読めない`, { cause: error });
+      }
+      try {
+        const { size } = await file.stat();
+        if (size > target.byteLength) return size;
+        let filled = 0;
+        while (filled < size) {
+          signal?.throwIfAborted();
+          const read = await file.read(target.subarray(filled, size));
+          if (read === null) {
+            throw new Error(`@karume/hub/deno: ${at} が stat の ${size} バイトより短い`);
+          }
+          filled += read;
+        }
+        return size;
+      } finally {
+        file.close();
+      }
+    },
   };
   return localDirectory(adapter, { label: String(root), ...options });
 };

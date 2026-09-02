@@ -64,6 +64,17 @@ export type FileReadOptions = {
    */
   readonly onProgress: (loaded: number) => void;
   readonly sizeViolation: SizeViolation;
+  /**
+   * 器の貸し出し（逐次面だけが渡す）。呼ぶと **`ref.size` 以上の長さの buffer** が返り、取得元は
+   * そこへ実体を先頭から読み、器の prefix view（byteOffset 0 / byteLength = `ref.size`）を返して
+   * よい。器は shard ごとに使い回されるので、ホスト RAM に同時に載る shard は常に 1 本になる
+   * （ADR 0070 追記 — 係数 1 化）。
+   *
+   * 使えない取得元（取得層が自前で buffer を確保する HF など）は**呼ばずに**従来どおり tight
+   * view を返す — 呼ばなければ器は確保されない（遅延確保）。MUST: 呼んだら器へ読む
+   * （呼んで別の buffer を返すと、器 1 本ぶんの RAM が無駄に居座る）。
+   */
+  readonly into?: () => Uint8Array<ArrayBuffer>;
 };
 
 /** manifest 1 本の読みの作法。 */

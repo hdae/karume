@@ -300,7 +300,11 @@ export type StreamedAsset = {
    * 帰属先に使う — 到着順の連番では配布形のどのファイルかが決まらない。
    */
   readonly id: string;
-  /** 検証（size / sha256）を通ったバイト列。buffer 全体を占める。 */
+  /**
+   * 検証（size / sha256）を通ったバイト列。buffer の先頭からの view — 取得元が自前で確保した
+   * tight view か、逐次面が使い回す器の prefix view（`shardVessel`）。器の場合、次の `next()` で
+   * 上書きされるので、消費側は次を要求する前に使い終える（runtime の `ModelShard.bytes` の契約）。
+   */
   readonly bytes: Uint8Array<ArrayBuffer>;
 };
 
@@ -499,6 +503,8 @@ export const streamAssets = async function* (
   await runPrefetchPhase(source, context, refs, options, progress, { emitComplete: false });
 
   // ---- 相 2: 1 本ずつ引き渡す。
+  // 器（最大 shard 長 1 本）は取得元が使うときだけ確保される（shardVessel）。
+  const vessel = shardVessel(refs);
   for (const ref of refs) {
     // 相 2 は大半がキャッシュ読出しで network に出ない＝取得元の signal 監視が効かない区間なので、
     // shard の切れ目で明示的に中断を見る（数 GB の読出しを何本も回している最中に取り消しが
@@ -515,6 +521,7 @@ export const streamAssets = async function* (
         //       `fileLoaded` も同じ 1 巡だけそのファイルの先頭から数え直しになる。
         onProgress: (received) => progress.downloading(ref, received),
         sizeViolation: context.sizeViolation(ref),
+        into: vessel.lease,
       });
     } catch (error) {
       if (error instanceof HubError || isAborted(error, options.signal)) throw error;
@@ -524,11 +531,45 @@ export const streamAssets = async function* (
     // 最中に中断された」形が観測されず、取り消したはずのロードが正常完了して下流の Session
     // 構築まで走る（検証済みバイトを配ってから止まるのでは中断の意味が無い）。
     options.signal?.throwIfAborted();
-    const asset = assertTightView(bytes, ref.path);
+    const asset = vessel.assertView(bytes, ref);
     progress.complete(ref);
     // MUST: ここで手放す — 引き渡したバイト列を generator 側の表に溜めない（溜めた瞬間に
-    // 全量面と同じ RAM 特性に戻り、この面の存在理由が消える）。次の反復に入れば `bytes` の
-    // 束縛ごと到達不能になるので、常駐するのは「今の 1 本」だけ。
+    // 全量面と同じ RAM 特性に戻り、この面の存在理由が消える）。器を使う取得元では次の反復が
+    // 同じ器へ上書きするので、消費側は次の `next()` までにバイト列を使い終える契約
+    // （runtime の `ModelShard.bytes`）。器を使わない取得元では従来どおり束縛ごと到達不能になる。
     yield { id: ref.path, bytes: asset };
   }
+};
+
+/**
+ * 逐次面の器 — コンポーネントの**最大 shard 長で 1 本**（`refs` の `size` は manifest で確定）。
+ * 遅延確保: 取得元が {@link FileReadOptions.into} を呼んだときだけ作る（器を使わない HF 取得元に
+ * 1GiB 級の buffer を無駄に持たせない）。
+ *
+ * 引き渡す view は 2 形のどちらか: ①器の prefix view（byteOffset 0 / byteLength = `ref.size`）
+ * ②取得元が自前で確保した tight view。どちらも runtime の shard 受け口の契約（buffer の先頭からの
+ * view）に収まる。器を使ったのに先頭 `ref.size` バイトを指していない view は取得元の実装ミスなので
+ * fail loudly。
+ */
+const shardVessel = (refs: readonly FileRef[]) => {
+  const largest = refs.reduce((max, ref) => Math.max(max, ref.size), 0);
+  let buffer: Uint8Array<ArrayBuffer> | undefined;
+  return {
+    lease: (): Uint8Array<ArrayBuffer> => {
+      buffer ??= new Uint8Array(new ArrayBuffer(largest));
+      return buffer;
+    },
+    assertView: (bytes: Uint8Array, ref: FileRef): Uint8Array<ArrayBuffer> => {
+      if (buffer === undefined || bytes.buffer !== buffer.buffer) {
+        return assertTightView(bytes, ref.path);
+      }
+      if (bytes.byteOffset !== 0 || bytes.byteLength !== ref.size) {
+        throw new Error(
+          `hub: ${ref.path} の bytes が器の先頭 ${ref.size} バイトを占めていない` +
+            `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength}）`,
+        );
+      }
+      return new Uint8Array(buffer.buffer, 0, ref.size);
+    },
+  };
 };
