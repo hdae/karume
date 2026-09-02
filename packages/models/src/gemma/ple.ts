@@ -84,8 +84,17 @@ export type Gemma4PleOptions = {
    * shape も dtype も合ったまま**別 token の行**を引く。
    */
   readonly vocabSize: number;
-  /** 常駐させる shard 数の上限（LRU — ADR 0085 決定 3。既定 2）。 */
-  readonly residentShards?: number;
+  /**
+   * 常駐させる shard の**ホスト RAM 上限（バイト）**（LRU — ADR 0085 決定 3）。
+   *
+   * 省略時は {@link defaultGemma4PleResidentBytes}（= 最大 shard 2 本ぶん）。`0` は「常駐させ
+   * ない」= gather が使い終わった shard を即座に落とす形で、正当な指定である（読み直しが毎回
+   * 走るのと引き換えに、この sidecar のホスト RAM がピーク 1 本ぶんで収まる）。
+   *
+   * MUST: 本数ではなくバイトで受ける。shard 幅は資産世代（書き手の shard 上限）で変わるので、
+   * 「2 本」は世代ごとに違う RAM を意味してしまう（ADR 0085 追記 2026-09-02）。
+   */
+  readonly maxResidentBytes?: number;
 };
 
 /** 遅延ロードの実測（門が「触った shard だけ読んだ」を恒真でなく見るための欄）。 */
@@ -94,6 +103,13 @@ export type Gemma4PleStats = {
   readonly loads: number;
   /** 現在常駐している shard 数。 */
   readonly resident: number;
+  /**
+   * 常駐が占めるホスト RAM（{@link Gemma4PleOptions.maxResidentBytes} と同じ単位）。
+   *
+   * 読み**始めた**時点で計上する（取得の完了を待たない）— 予算は席の予約として使わないと、
+   * 走行中の読みが束になったときに上限を黙って超える。
+   */
+  readonly residentBytes: number;
 };
 
 export type Gemma4Ple = {
@@ -107,10 +123,10 @@ export type Gemma4Ple = {
   gather(ids: readonly number[], options?: Gemma4PleReadOptions): Promise<Tensor>;
   stats(): Gemma4PleStats;
   /**
-   * 常駐 shard を解放する（ホスト RAM で shard 1 本 758MB 級 × 既定 2 本）。
+   * 常駐 shard を解放する（ホスト RAM で {@link Gemma4PleOptions.maxResidentBytes} ぶん）。
    *
    * MUST: 解放口を持つ。GPU 側の常駐は `Session.dispose` が返すが、ここは**ホスト RAM の
-   * キャッシュ**なので、口が無いと「パイプラインを dispose しても 1.5GiB が返らない」
+   * キャッシュ**なので、口が無いと「パイプラインを dispose しても常駐ぶんが返らない」
    * （実体を掴む参照を 1 つ残せばプロセス寿命まで残る）。
    *
    * 以後の {@link Gemma4Ple.gather} は fail loudly — 解放済みの実体が黙って読み直しを始めると、
@@ -215,6 +231,36 @@ export const parseGemma4PleIndex = (raw: unknown, where = "ple.json"): Gemma4Ple
   return { tokens, layers, dim, embedScale, shards };
 };
 
+/** per-row scale 1 個ぶんのバイト数（`scales` は f32 — `readResidentShard` の dtype 門と対）。 */
+const SCALE_BYTES = 4;
+
+/** 既定の常駐予算を導く shard 本数（{@link defaultGemma4PleResidentBytes} の意味づけ）。 */
+const DEFAULT_RESIDENT_SHARDS = 2;
+
+/**
+ * shard 1 本を常駐させたときのホスト RAM（i8 `values` + f32 `scales`）。
+ *
+ * 索引だけで決まる（バイト列を読む前に分かる）ので、予算の検査も LRU の追い出しも取得の完了を
+ * 待たずに判定できる。
+ */
+export const gemma4PleShardBytes = (index: Gemma4PleIndex, shard: Gemma4PleShard): number =>
+  (shard.stop - shard.start) * index.layers * (index.dim + SCALE_BYTES);
+
+/** 索引中で最も大きい shard 1 本ぶん（予算の下限 = これを割ると 1 本も載せられない）。 */
+const largestShardBytes = (index: Gemma4PleIndex): number =>
+  index.shards.reduce((largest, shard) => Math.max(largest, gemma4PleShardBytes(index, shard)), 0);
+
+/**
+ * 常駐予算の既定 = **最も大きい shard 2 本ぶん**（{@link Gemma4PleOptions.maxResidentBytes}）。
+ *
+ * 「2 本」を本数のまま既定にすると、資産世代で shard 幅が変わった瞬間に同じ数字が別の RAM を
+ * 意味する（実例: shard 上限 1GiB 世代の 3 本 = 1 本 758MiB → 256MiB 世代の 9 本 = 1 本 253MiB）。
+ * **最大** shard を基準に取るのは、どの 2 本を掴んでも予算に収まる = 「2 本常駐」の意味が幅に
+ * 依らず保たれる唯一の取り方だからである（ADR 0085 追記 2026-09-02）。
+ */
+export const defaultGemma4PleResidentBytes = (index: Gemma4PleIndex): number =>
+  DEFAULT_RESIDENT_SHARDS * largestShardBytes(index);
+
 /** 読み込み済みの shard 1 本（i8 値と per-row scale の**生の並び**）。 */
 type ResidentShard = {
   readonly start: number;
@@ -314,9 +360,20 @@ const readResidentShard = (
  */
 export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   const { index, readShard, vocabSize } = options;
-  const capacity = options.residentShards ?? 2;
-  if (!Number.isSafeInteger(capacity) || capacity < 1) {
-    throw new Error(`residentShards ${capacity} が 1 以上の整数でない`);
+  const budget = options.maxResidentBytes ?? defaultGemma4PleResidentBytes(index);
+  if (!Number.isSafeInteger(budget) || budget < 0) {
+    throw new Error(`maxResidentBytes ${budget} が 0 以上の整数でない`);
+  }
+  const shardBytes = index.shards.map((shard) => gemma4PleShardBytes(index, shard));
+  const largest = largestShardBytes(index);
+  // MUST: 「1 本すら載らない予算」は fail loudly。黙って超過すれば予算が意味を失い、黙って
+  // 守れば gather が引けない — どちらも呼び手の指定を裏切る。0 は例外で、「常駐させない」
+  // という指定として正当（読み終えた shard を即座に落とす形）。
+  if (budget > 0 && budget < largest) {
+    throw new Error(
+      `maxResidentBytes ${budget} が PLE shard 1 本ぶん ${largest} バイトに満たない` +
+        `（この索引の shard は ${index.shards.length} 本 — 常駐させないなら 0 を渡す）`,
+    );
   }
   // ① sidecar の行数 と ② 主 embedding の vocab 行数（ADR 0085 決定 5 の相互照合）。
   if (index.tokens !== vocabSize) {
@@ -327,10 +384,17 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   }
   const stride = index.layers * index.dim;
 
-  /** 挿入順 = LRU（触った shard を末尾へ付け替え、超過分は先頭から落とす）。 */
+  /** 挿入順 = LRU（触った shard を末尾へ付け替え、予算超過分は先頭から落とす）。 */
   const resident = new Map<number, Promise<ResidentShard>>();
+  /** 常駐（= 読みを始めたぶんを含む）の合計バイト。`resident` の増減と必ず対で動かす。 */
+  let residentBytes = 0;
   let loads = 0;
   let disposed = false;
+
+  const release = (position: number): void => {
+    resident.delete(position);
+    residentBytes -= shardBytes[position];
+  };
 
   const shardOf = (id: number): number => {
     // 索引は昇順の隙間なし分割（`parseGemma4PleIndex` の MUST）なので二分探索でよい。
@@ -370,12 +434,15 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     );
     // MUST: 失敗した取得を常駐させない（次の gather が同じ拒否済み Promise を掴み続ける）。
     pending.catch(() => {
-      if (resident.get(position) === pending) resident.delete(position);
+      if (resident.get(position) === pending) release(position);
     });
     resident.set(position, pending);
+    residentBytes += shardBytes[position];
+    // 予算はバイトで測る（本数ではない — shard 幅は資産世代で変わる）。予算 0 では今入れた
+    // ぶんもここで落ちるが、走行中の gather は解決済みの実体を自分で掴んでいるので値は揃う。
     for (const oldest of resident.keys()) {
-      if (resident.size <= capacity) break;
-      resident.delete(oldest);
+      if (residentBytes <= budget) break;
+      release(oldest);
     }
     return pending;
   };
@@ -429,12 +496,13 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
       return { dtype: "f32", shape: [1, ids.length, index.layers, index.dim], data };
     },
     stats(): Gemma4PleStats {
-      return { loads, resident: resident.size };
+      return { loads, resident: resident.size, residentBytes };
     },
     dispose(): void {
       disposed = true;
       // 走行中の読みまでは止めない（返ってきた buffer は誰も掴まないので回収される）。
       resident.clear();
+      residentBytes = 0;
     },
   };
 };

@@ -39,7 +39,12 @@ import {
   type SafetensorsFile,
   type Tensor,
 } from "@karume/runtime";
-import { createGemma4Ple, type Gemma4Ple, parseGemma4PleIndex } from "../src/gemma/ple.ts";
+import {
+  createGemma4Ple,
+  type Gemma4Ple,
+  gemma4PleShardBytes,
+  parseGemma4PleIndex,
+} from "../src/gemma/ple.ts";
 import { planPrefillChunks } from "../src/generation/greedy.ts";
 import { createSampler, isStopToken, type SamplerSpec } from "../src/generation/sampler.ts";
 import {
@@ -252,7 +257,11 @@ Deno.test({
       index,
       readShard: (file) => readBuffer(PRODUCT_ROOT, file),
       vocabSize: VOCAB,
-      residentShards: index.shards.length,
+      // 全 shard 常駐（生成の往復で読み直さない）= sidecar 全量ぶんの予算。
+      maxResidentBytes: index.shards.reduce(
+        (sum, shard) => sum + gemma4PleShardBytes(index, shard),
+        0,
+      ),
     });
 
     const gpu = await acquireGpu();

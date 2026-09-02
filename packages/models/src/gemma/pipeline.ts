@@ -105,7 +105,7 @@ const LAST_ROW = "last_row";
 /**
  * 配布形（manifest）の取得キー — weights 1 本と、全量で受け取る assets 2 本。
  *
- * MUST: PLE sidecar の shard は {@link EAGER_ASSETS} に**入れない**。1 本 758MB 級で、全量常駐
+ * MUST: PLE sidecar の shard は {@link EAGER_ASSETS} に**入れない**。1 本 250MiB 級 × 9 本で、全量常駐
  * させると ADR 0085 決定 3（触った shard だけ遅延ロード + LRU）そのものが成立しなくなる。
  * 取得キーは索引が書いたファイル名（`ple.json` の `shards[].file`）なので、遅延側の表は
  * 「eager に並べなかった残り」として自動的に PLE shard だけになる。
@@ -134,7 +134,7 @@ export type Gemma4Assets = {
    * PLE sidecar shard 1 本を取る（ファイル読み / hub の `streamAssets` — 呼び手の責務）。
    *
    * `options.signal` は**その読みを起こした生成**の中断で、**best-effort**（無視しても壊れない
-   * — 中断が「この shard を読み終わってから」効くだけ）。1 本 758MB 級なので、対話的に止める
+   * — 中断が「この shard を読み終わってから」効くだけ）。1 本 250MiB 級なので、対話的に止める
    * 使い方をするなら見る価値がある。
    */
   readonly readPleShard: (file: string, options?: Gemma4PleReadOptions) => Promise<ArrayBuffer>;
@@ -147,12 +147,16 @@ export type Gemma4PipelineOptions = {
    */
   readonly gpu?: GpuContext;
   /**
-   * PLE sidecar shard の常駐本数（LRU — ADR 0085 決定 3。省略時は `ple.ts` の既定 2）。
+   * PLE sidecar の常駐に使ってよい**ホスト RAM の上限（バイト）**（LRU — ADR 0085 決定 3）。
    *
-   * shard 1 本は 758MB 級なので、常駐を絞るほど RAM は減り、範囲をまたぐ会話では読み直しが
-   * 増える。全部載せる（= shard 本数）と読み直しはゼロになる。
+   * 絞るほど RAM は減り、token 範囲をまたぐ会話では shard の読み直しが増える（値も token 列も
+   * 変わらない）。`0` は「常駐させない」、sidecar 全体ぶんを渡せば読み直しはゼロになる。
+   * 省略時は最大 shard 2 本ぶん（`ple.ts` の `defaultGemma4PleResidentBytes`）。
+   *
+   * NOTE: 本数ではなくバイトで受ける — shard 幅は資産世代で変わるので、「N 本」は世代ごとに
+   * 違う RAM を意味する（ADR 0085 追記 2026-09-02）。
    */
-  readonly residentPleShards?: number;
+  readonly maxResidentPleBytes?: number;
 };
 
 /**
@@ -282,7 +286,8 @@ type Gemma4State = {
    *
    * MUST: 席は dispose のためだけ — 引くのは `wiring.derivedInputs.derive` の閉包だけである。
    * どちらも {@link buildGemma4Program} の 1 回の返り値なので「片方だけ差し替えた」形は書けず、
-   * 解放口を持たないと shard 1 本 758MB 級 × 常駐 2 本がプロセス寿命まで残る。
+   * 解放口を持たないと常駐ぶん（{@link Gemma4PipelineOptions.maxResidentPleBytes}）が
+   * プロセス寿命まで残る。
    */
   readonly ple: Gemma4Ple;
   readonly tokenizer: GemmaTokenizer;
@@ -460,9 +465,9 @@ const buildGemma4Program = (
     ),
     readShard: assets.readPleShard,
     vocabSize,
-    ...(options.residentPleShards === undefined
+    ...(options.maxResidentPleBytes === undefined
       ? {}
-      : { residentShards: options.residentPleShards }),
+      : { maxResidentBytes: options.maxResidentPleBytes }),
   });
 
   const wiring = createGenerationProgram({
@@ -480,7 +485,7 @@ const buildGemma4Program = (
     stopTokens: gemma4StopTokens(tokenizer),
     bindings: { [capacitySymbol]: config.capacity },
     // ホスト由来の per-chunk 入力の席に PLE gather を差す（ADR 0085）。`options` は
-    // そのまま降ろす — shard 1 本 758MB 級の読みが中断の届かない区間になるのを避ける。
+    // そのまま降ろす — shard 1 本 250MiB 級の読みが中断の届かない区間になるのを避ける。
     derivedInputs: {
       names: [PER_LAYER_INPUTS],
       derive: async (ids, deriveOptions) => ({
@@ -1003,8 +1008,9 @@ export class Gemma4Pipeline {
    * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
    * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す。
    *
-   * MUST: PLE も解放する。GPU 常駐と違い**ホスト RAM**（shard 1 本 758MB 級 × 既定 2 本）なので、
-   * 口が無いと「dispose 済みのハンドルを 1 つ持ち続ける」だけで 1.5GiB がプロセス寿命まで残る。
+   * MUST: PLE も解放する。GPU 常駐と違い**ホスト RAM**（{@link Gemma4PipelineOptions.maxResidentPleBytes}
+   * ぶん = 既定で最大 shard 2 本ぶん）なので、口が無いと「dispose 済みのハンドルを 1 つ持ち
+   * 続ける」だけでその RAM がプロセス寿命まで残る。
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(async () => {

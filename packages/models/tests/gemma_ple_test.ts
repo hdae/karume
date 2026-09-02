@@ -1,37 +1,53 @@
 // PLE sidecar のホスト gather（`src/gemma/ple.ts` — ADR 0085）の寿命と中断の門。GPU も実資産も
 // 要らない（合成 sidecar を `writeSafetensors` で組む）。
 //
-// ここで縛るのは 2 つ:
+// ここで縛るのは 3 つ:
 //
-// - **解放**: `dispose()` で常駐（shard 1 本 758MB 級 × 既定 2 本）が空になり、以後の gather は
-//   fail loudly。口が無いと「パイプラインを dispose しても 1.5GiB がホスト RAM に残る」形が
+// - **解放**: `dispose()` で常駐（`maxResidentBytes` ぶんのホスト RAM）が空になり、以後の
+//   gather は fail loudly。口が無いと「パイプラインを dispose してもホスト RAM が返らない」形が
 //   復活するが、解放は例外にならないので stats の実数で見るしかない。
 // - **中断の透過**: gather の `signal` が shard の読み口まで降りる（best-effort）。降りないと
-//   「停止を押しても 758MB の読みが終わるまで返らない」。中断された読みは常駐に残らず、
+//   「停止を押しても shard 1 本の読みが終わるまで返らない」。中断された読みは常駐に残らず、
 //   同じ id をもう一度引けば読み直す（拒否済み Promise を掴み続けない）。
+// - **バイト予算**: 常駐上限は**本数ではなくバイト**（shard 幅は資産世代で変わる）。索引だけから
+//   決まる計算・既定（最大 shard 2 本ぶん）・予算内の LRU 追い出し順・0（常駐なし）・
+//   1 本すら載らない予算の拒否を凍結する。
 
-import { assert, assertEquals, assertRejects } from "@std/assert";
-import { createGemma4Ple, type Gemma4PleIndex } from "../src/gemma/ple.ts";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  createGemma4Ple,
+  defaultGemma4PleResidentBytes,
+  type Gemma4PleIndex,
+  gemma4PleShardBytes,
+} from "../src/gemma/ple.ts";
 import { type DumpTensor, writeSafetensors } from "./helpers/safetensors-write.ts";
 
 const LAYERS = 2;
 const DIM = 2;
 const ROWS_PER_SHARD = 2;
-const TOKENS = 4;
+const TOKENS = 6;
 /** 2 冪（f32 の乗算が厳密 — ADR 0085 決定 4 と同じ性質を合成側でも保つ）。 */
 const EMBED_SCALE = 4;
-const SHARD_FILES = ["ple-00001-of-00002.safetensors", "ple-00002-of-00002.safetensors"] as const;
+const SHARD_FILES = [
+  "ple-00001-of-00003.safetensors",
+  "ple-00002-of-00003.safetensors",
+  "ple-00003-of-00003.safetensors",
+] as const;
 
 const INDEX: Gemma4PleIndex = {
   tokens: TOKENS,
   layers: LAYERS,
   dim: DIM,
   embedScale: EMBED_SCALE,
-  shards: [
-    { file: SHARD_FILES[0], start: 0, stop: ROWS_PER_SHARD },
-    { file: SHARD_FILES[1], start: ROWS_PER_SHARD, stop: TOKENS },
-  ],
+  shards: SHARD_FILES.map((file, position) => ({
+    file,
+    start: position * ROWS_PER_SHARD,
+    stop: (position + 1) * ROWS_PER_SHARD,
+  })),
 };
+
+/** shard 1 本ぶんのバイト数（この索引は全 shard 同幅）。 */
+const SHARD_BUDGET = gemma4PleShardBytes(INDEX, INDEX.shards[0]);
 
 /** i8 の値は `id * 10 + 層 * 2 + 列`、per-row scale は `1 / 2^(層+1)`（2 冪で厳密）。 */
 const quantized = (id: number, layer: number, column: number): number =>
@@ -107,7 +123,7 @@ Deno.test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fa
     index: INDEX,
     readShard: reader.readShard,
     vocabSize: TOKENS,
-    residentShards: 2,
+    maxResidentBytes: 2 * SHARD_BUDGET,
   });
 
   // 2 本にまたがる id を引く（常駐が実際に埋まっている状態を作る）。
@@ -127,7 +143,7 @@ Deno.test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fa
       expectedValue(3, 1, 1),
     ],
   );
-  assertEquals(ple.stats(), { loads: 2, resident: 2 });
+  assertEquals(ple.stats(), { loads: 2, resident: 2, residentBytes: 2 * SHARD_BUDGET });
 
   ple.dispose();
   // 解放は例外にならないので、実数で見るしかない（ここが 2 のままなら shard は返っていない）。
@@ -138,7 +154,7 @@ Deno.test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fa
 
   // 冪等（2 度目の dispose も、その後の stats も落ちない）。
   ple.dispose();
-  assertEquals(ple.stats(), { loads: 2, resident: 0 });
+  assertEquals(ple.stats(), { loads: 2, resident: 0, residentBytes: 0 });
 });
 
 Deno.test("Gemma4Ple: gather の signal は shard の読み口へ降りる（best-effort）", async () => {
@@ -150,7 +166,7 @@ Deno.test("Gemma4Ple: gather の signal は shard の読み口へ降りる（bes
   assertEquals(reader.calls.length, 1);
   assert(
     reader.calls[0].signal === controller.signal,
-    "gather の signal が読み口へ降りていない（758MB の読みが中断の届かない区間になる）",
+    "gather の signal が読み口へ降りていない（shard 1 本の読みが中断の届かない区間になる）",
   );
 
   // 省略した gather は何も渡さない（購読していない呼び出しに signal を捏造しない）。
@@ -174,11 +190,170 @@ Deno.test("Gemma4Ple: 中断された読みは常駐に残らず、引き直し�
   }
   // 読み口が honor した中断はそのまま上がる（包まない）。
   assert(caught === reason, `中断の例外が包まれている: ${String(caught)}`);
-  assertEquals(ple.stats(), { loads: 1, resident: 0 }, "拒否された取得を常駐させている");
+  assertEquals(
+    ple.stats(),
+    { loads: 1, resident: 0, residentBytes: 0 },
+    "拒否された取得を常駐させている",
+  );
 
   // 同じ id をもう一度引けば読み直す（拒否済み Promise を掴み続けない）。
   const tensor = await ple.gather([0]);
   assert("data" in tensor);
   assertEquals(tensor.data[0], expectedValue(0, 0, 0));
-  assertEquals(ple.stats(), { loads: 2, resident: 1 });
+  assertEquals(ple.stats(), { loads: 2, resident: 1, residentBytes: SHARD_BUDGET });
+});
+
+/**
+ * 幅の違う shard を持つ索引（バイト計算だけを見る — 読み口は呼ばれない）。
+ *
+ * 本数で数える限り「2 本ぶん」は幅に依存して別の RAM を指す。ここが**索引だけで決まる**ことが、
+ * 予算をバイトで受ける根拠そのものである。
+ */
+const UNEVEN_INDEX: Gemma4PleIndex = {
+  tokens: 10,
+  layers: 3,
+  dim: 8,
+  embedScale: EMBED_SCALE,
+  shards: [
+    { file: "wide.safetensors", start: 0, stop: 7 },
+    { file: "narrow.safetensors", start: 7, stop: 10 },
+  ],
+};
+
+/** 読み口が呼ばれたら落とす（構築時の検査だけを見るテスト用）。 */
+const unusedReader = (file: string): Promise<ArrayBuffer> =>
+  Promise.reject(new Error(`fake: 読んではいけない '${file}'`));
+
+Deno.test("Gemma4Ple: shard の常駐バイトは索引だけから決まる（i8 values + f32 scales）", () => {
+  // 7 行 × 3 層 ×（8 列 i8 + 4B scale）= 252 / 3 行ぶん = 108。
+  assertEquals(gemma4PleShardBytes(UNEVEN_INDEX, UNEVEN_INDEX.shards[0]), 252);
+  assertEquals(gemma4PleShardBytes(UNEVEN_INDEX, UNEVEN_INDEX.shards[1]), 108);
+  assertEquals(gemma4PleShardBytes(INDEX, INDEX.shards[0]), ROWS_PER_SHARD * LAYERS * (DIM + 4));
+});
+
+Deno.test("Gemma4Ple: 既定の予算は最大 shard 2 本ぶん（どの 2 本でも収まる）", () => {
+  // 合計（252 + 108 = 360）でも小さい方の 2 本ぶんでもなく、**最大**の 2 本ぶん。
+  assertEquals(defaultGemma4PleResidentBytes(UNEVEN_INDEX), 504);
+  assertEquals(defaultGemma4PleResidentBytes(INDEX), 2 * SHARD_BUDGET);
+});
+
+Deno.test("Gemma4Ple: 既定は shard 2 本常駐と等価（3 本目で最古が落ちる）", async () => {
+  const reader = fakeReader();
+  // `maxResidentBytes` を渡さない = 既定（最大 shard 2 本ぶん）。
+  const ple = createGemma4Ple({ index: INDEX, readShard: reader.readShard, vocabSize: TOKENS });
+
+  await ple.gather([0]);
+  await ple.gather([2]);
+  assertEquals(ple.stats(), { loads: 2, resident: 2, residentBytes: 2 * SHARD_BUDGET });
+
+  await ple.gather([4]);
+  assertEquals(
+    ple.stats(),
+    { loads: 3, resident: 2, residentBytes: 2 * SHARD_BUDGET },
+    "3 本目を載せても 2 本ぶんに収まっていない（既定が本数の 2 と等価でない）",
+  );
+  // 落ちたのは最古の shard 0（引き直せば読み直しになる）。
+  await ple.gather([0]);
+  assertEquals(ple.stats().loads, 4);
+});
+
+Deno.test("Gemma4Ple: 追い出しは LRU（参照した shard は予算内に残る）", async () => {
+  const reader = fakeReader();
+  const ple = createGemma4Ple({
+    index: INDEX,
+    readShard: reader.readShard,
+    vocabSize: TOKENS,
+    maxResidentBytes: 2 * SHARD_BUDGET,
+  });
+
+  await ple.gather([0]);
+  await ple.gather([2]);
+  // shard 0 を触り直す = 最近使ったのは 0 → 次に落ちるのは 1。
+  await ple.gather([0]);
+  assertEquals(ple.stats().loads, 2, "常駐にある shard を読み直している");
+
+  await ple.gather([4]);
+  assertEquals(ple.stats(), { loads: 3, resident: 2, residentBytes: 2 * SHARD_BUDGET });
+
+  // 残っているのは 0 と 4 の shard（0 は読み直しゼロ・1 は読み直しになる）。
+  await ple.gather([0]);
+  assertEquals(ple.stats().loads, 3, "参照した shard が落ちている（LRU でなく FIFO）");
+  await ple.gather([2]);
+  assertEquals(ple.stats().loads, 4);
+});
+
+Deno.test("Gemma4Ple: 予算 0 は常駐なし（値は揃うが毎回読み直す）", async () => {
+  const reader = fakeReader();
+  const ple = createGemma4Ple({
+    index: INDEX,
+    readShard: reader.readShard,
+    vocabSize: TOKENS,
+    maxResidentBytes: 0,
+  });
+
+  const tensor = await ple.gather([0, 3]);
+  assert("data" in tensor && tensor.data instanceof Float32Array);
+  // 常駐しなくても値は同じ（予算は RAM と読み直しの交換で、数値契約には触らない）。
+  assertEquals(tensor.data[0], expectedValue(0, 0, 0));
+  assertEquals(tensor.data[4], expectedValue(3, 0, 0));
+  assertEquals(
+    ple.stats(),
+    { loads: 2, resident: 0, residentBytes: 0 },
+    "予算 0 なのに gather 後も常駐が残っている",
+  );
+
+  // 同じ id でも読み直す（キャッシュが無いことの裏取り）。
+  await ple.gather([0]);
+  assertEquals(ple.stats(), { loads: 3, resident: 0, residentBytes: 0 });
+});
+
+Deno.test("Gemma4Ple: shard 1 本すら載らない予算は構築時に fail loudly", () => {
+  assertThrows(
+    () =>
+      createGemma4Ple({
+        index: UNEVEN_INDEX,
+        readShard: unusedReader,
+        vocabSize: UNEVEN_INDEX.tokens,
+        // 小さい方（108）は載るが最大（252）は載らない = 引く id 次第で黙って超過する。
+        maxResidentBytes: 251,
+      }),
+    Error,
+    "PLE shard 1 本ぶん 252 バイトに満たない",
+  );
+  // 最大 shard ちょうどは通る（0 も「常駐させない」指定として通る）。
+  createGemma4Ple({
+    index: UNEVEN_INDEX,
+    readShard: unusedReader,
+    vocabSize: UNEVEN_INDEX.tokens,
+    maxResidentBytes: 252,
+  });
+  createGemma4Ple({
+    index: UNEVEN_INDEX,
+    readShard: unusedReader,
+    vocabSize: UNEVEN_INDEX.tokens,
+    maxResidentBytes: 0,
+  });
+
+  assertThrows(
+    () =>
+      createGemma4Ple({
+        index: INDEX,
+        readShard: unusedReader,
+        vocabSize: TOKENS,
+        maxResidentBytes: -1,
+      }),
+    Error,
+    "0 以上の整数でない",
+  );
+  assertThrows(
+    () =>
+      createGemma4Ple({
+        index: INDEX,
+        readShard: unusedReader,
+        vocabSize: TOKENS,
+        maxResidentBytes: 1.5,
+      }),
+    Error,
+    "0 以上の整数でない",
+  );
 });

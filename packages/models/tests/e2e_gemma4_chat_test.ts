@@ -57,8 +57,12 @@ const GENERATE_COMMAND =
 const CHUNK_LENGTH = 32;
 const CAPACITY = 640;
 const MAX_POSITION = 1024;
-/** PLE は 3 shard 全部を常駐させる（範囲をまたぐ会話で 758MB の読み直しを起こさない）。 */
-const RESIDENT_PLE_SHARDS = 3;
+/**
+ * PLE の常駐に使う予算（バイト）。現行世代の shard は 1 本 ≈253MiB なので 3 本ぶんが載る
+ * （token 範囲をまたぐ会話で読み直しを増やしすぎない）。**本数ではなくバイト**で渡すのは、
+ * shard 幅が資産世代で変わると「N 本」が別の RAM を意味するため（ADR 0085 追記 2026-09-02）。
+ */
+const MAX_RESIDENT_PLE_BYTES = 768 * 1024 * 1024;
 
 /** gemma-4-E2B-it の `generation_config.json` の `eos_token_id`（ADR 0083 決定 8）。 */
 const STOP_TOKENS = [1, 106, 50];
@@ -164,7 +168,7 @@ const openPipeline = async (): Promise<Gemma4Pipeline> => {
     tokenizer: await Deno.readFile(TOKENIZER_ASSET),
     pleIndex: await Deno.readFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)),
     readPleShard: (file) => readBuffer(PRODUCT_ROOT, file),
-  }, { residentPleShards: RESIDENT_PLE_SHARDS });
+  }, { maxResidentPleBytes: MAX_RESIDENT_PLE_BYTES });
 };
 
 Deno.test({

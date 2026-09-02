@@ -52,10 +52,11 @@ import type {
   SamplerSpec,
 } from "../../packages/models/gemma.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
+import type { AssetProgress } from "../../packages/hub/mod.ts";
 
 const USAGE = "--source <配布形のパス> | --repo <owner/name[@revision]>" +
   " --system <文字列> --max-new-tokens <整数> --temperature <数> --top-k <整数>" +
-  " --top-p <数> --seed <整数>";
+  " --top-p <数> --seed <整数> --max-resident-ple-bytes <整数>";
 const KNOWN = new Set([
   "source",
   "repo",
@@ -65,6 +66,7 @@ const KNOWN = new Set([
   "top-k",
   "top-p",
   "seed",
+  "max-resident-ple-bytes",
 ]);
 
 /** 取得元の既定（`dist.py --pipeline gemma4` が組むローカルミラー — `docs/assets-layout.md`）。 */
@@ -72,16 +74,6 @@ const DEFAULT_SOURCE = "models/karume-gemma4-e2b";
 
 /** 1 ターンで生成する token 数の上限（停止 token は含まれない）。 */
 const DEFAULT_MAX_NEW_TOKENS = 256;
-
-/**
- * PLE sidecar の常駐本数（ADR 0085 決定 3 の LRU）。
- *
- * 既定は 2 本だが、この台本は**対話の応答時間**を優先して 3 本（= E2B の全 shard）を載せる。
- * shard は token 範囲で割ってあり、1 文の中でも id は語彙全体へ散るので、常駐が shard 本数を
- * 下回ると 1 ターンの間に 795MB の読み直しが何度も走る。代償はホスト RAM 約 2.3GiB で、
- * 絞りたければこの定数を下げる（読み直しが増えるだけで、値も token 列も変わらない）。
- */
-const RESIDENT_PLE_SHARDS = 3;
 
 /** `--key value` の対だけを受ける。MUST: 次のフラグを値として食わない（黙って既定へ落ちる）。 */
 const args = new Map<string, string>();
@@ -113,6 +105,20 @@ const temperature = number("temperature");
 const topK = integer("top-k");
 const topP = number("top-p");
 const seed = integer("seed");
+
+/**
+ * PLE sidecar の常駐上限（バイト・ADR 0085 決定 3 の LRU）。
+ *
+ * shard は token 範囲で割ってあり、1 文の中でも id は語彙全体へ散るので、常駐が薄いと 1 ターン
+ * の間に shard の読み直しが何度も走る（**対話の応答時間**に直に効く）。厚くすればそのぶんホスト
+ * RAM を抱える。読み直しが増えても値も token 列も変わらないので、ここは純粋に「RAM と応答時間の
+ * 交換レート」を選ぶノブである。
+ *
+ * 省略時はライブラリの既定（= 最大 shard 2 本ぶん）。全量を載せたいならバイト数で渡す（E2B の
+ * 現行世代は shard 1 本 ≈253MiB × 9 本 ≈2.2GiB）。**本数ではなくバイト**なのは、shard 幅が資産
+ * 世代で変わるため「N 本」が世代ごとに違う RAM を意味するからである。
+ */
+const maxResidentPleBytes = integer("max-resident-ple-bytes");
 
 const sourceDir = args.get("source");
 const repoRef = args.get("repo");
@@ -160,17 +166,48 @@ async function* readLines(): AsyncGenerator<string> {
 const describeStop = (stop: GenerationStop): string =>
   stop.reason === "eos" ? `eos(${stop.token})` : stop.reason;
 
+/** 上書きで描く 1 行の幅（短い行が前の行の尻を残さないよう、ここまで空白で埋める）。 */
+const LINE_WIDTH = 76;
+
 /** 1 行ぶんの進捗表示を消す（次の出力が食い込まないように空白で塗ってから戻す）。 */
-const clearLine = (): void => note(`\r${" ".repeat(40)}\r`);
+const clearLine = (): void => note(`\r${" ".repeat(LINE_WIDTH)}\r`);
+
+const percent = (part: number, whole: number): string => (part / whole * 100).toFixed(1);
+const mib = (bytes: number): string => (bytes / 1024 / 1024).toFixed(0);
+
+/** 取得したファイルに現れた順の通し番号を振る（`AssetProgress` は本数を運ばない — 下の doc）。 */
+const fileOrder = new Map<string, number>();
+
+/**
+ * 取得の進捗を**ファイル 1 本 = 1 行**で描く。
+ *
+ * `AssetProgress` は「今のファイル」（`path` / `fileLoaded` / `fileTotal`）と「全体」
+ * （`loaded` / `total`）の 2 組を運ぶので、両方を 1 行に出す。1 本終わるたびに改行して行を残す
+ * ので、同じ位置を上書きし続ける形（全体の % だけを描く）と違い「進んでいるのか同じ所を
+ * 繰り返しているのか」が読める — gemma4 の配布形は重み shard だけで 7 本ある。
+ *
+ * 通し番号は**この台本が数える**。hub は「何本目 / 全何本」を運ばない（取得は相に分かれていて、
+ * 共通層の 1 イベントからは全体の本数を名乗れない）ので、分母は出さずに全体の % とバイト数で
+ * 残りを示す。
+ */
+const showProgress = (
+  { phase, path, loaded, total, fileLoaded, fileTotal }: AssetProgress,
+): void => {
+  const ordinal = fileOrder.get(path) ?? fileOrder.size + 1;
+  fileOrder.set(path, ordinal);
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const line = `  [${ordinal}] ${name} ${percent(fileLoaded, fileTotal)}%` +
+    ` · 全体 ${percent(loaded, total)}% (${mib(loaded)}/${mib(total)} MiB)`;
+  note(`\r${line.padEnd(LINE_WIDTH)}${phase === "complete" ? "\n" : ""}`);
+};
 
 const started = performance.now();
 note(`[gemma4] ${sourceDir ?? repoRef ?? DEFAULT_SOURCE} を読み込む\n`);
 await using pipeline = await Gemma4Pipeline.fromPretrained(
   repoRef === undefined ? denoDirectory(sourceDir ?? DEFAULT_SOURCE) : parseRepo(repoRef),
   {
-    residentPleShards: RESIDENT_PLE_SHARDS,
-    onProgress: ({ phase, loaded, total }) =>
-      note(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `),
+    ...(maxResidentPleBytes === undefined ? {} : { maxResidentPleBytes }),
+    onProgress: showProgress,
   },
 );
 clearLine();

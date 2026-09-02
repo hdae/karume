@@ -32,7 +32,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareModel, type SafetensorsFile } from "@karume/runtime";
-import { createGemma4Ple, parseGemma4PleIndex } from "../src/gemma/ple.ts";
+import { createGemma4Ple, gemma4PleShardBytes, parseGemma4PleIndex } from "../src/gemma/ple.ts";
 import { createGenerationProgram, type GenerationWiring } from "../src/generation/program.ts";
 import {
   createGenerationSequence,
@@ -162,7 +162,11 @@ Deno.test({
       index,
       readShard: (file) => readBuffer(PRODUCT_ROOT, file),
       vocabSize: VOCAB,
-      residentShards: index.shards.length,
+      // 全 shard 常駐（生成の往復で読み直さない）= sidecar 全量ぶんの予算。
+      maxResidentBytes: index.shards.reduce(
+        (sum, shard) => sum + gemma4PleShardBytes(index, shard),
+        0,
+      ),
     });
 
     /** 静的配線（停止集合だけを変えて 2 本作る — 他は同じ資産の同じ結線）。 */

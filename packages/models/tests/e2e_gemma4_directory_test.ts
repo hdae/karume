@@ -32,8 +32,12 @@ const MIRROR_DIR = new URL("../../../models/karume-gemma4-e2b/", import.meta.url
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
 
-/** PLE は 3 shard 全部を常駐させる（範囲をまたぐ会話で 758MB の読み直しを起こさない）。 */
-const RESIDENT_PLE_SHARDS = 3;
+/**
+ * PLE の常駐に使う予算（バイト）。現行世代の shard は 1 本 ≈253MiB なので 3 本ぶんが載る
+ * （token 範囲をまたぐ会話で読み直しを増やしすぎない）。**本数ではなくバイト**で渡すのは、
+ * shard 幅が資産世代で変わると「N 本」が別の RAM を意味するため（ADR 0085 追記 2026-09-02）。
+ */
+const MAX_RESIDENT_PLE_BYTES = 768 * 1024 * 1024;
 
 /**
  * 検収ケース。**`e2e_gemma4_chat_test.ts` の CASES と同じ golden**（同じバイト列を別の取得元で
@@ -131,7 +135,7 @@ Deno.test({
     const cacheDiagnostics: string[] = [];
 
     const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
-      residentPleShards: RESIDENT_PLE_SHARDS,
+      maxResidentPleBytes: MAX_RESIDENT_PLE_BYTES,
       // HTTP 取得元専用のノブ。ローカル取得元では 1 つも効かない = 触られない。
       fetch: fetchStub,
       caches,

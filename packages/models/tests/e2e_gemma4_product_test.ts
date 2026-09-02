@@ -41,7 +41,14 @@ import {
   type SafetensorsFile,
   type Tensor,
 } from "@karume/runtime";
-import { createGemma4Ple, type Gemma4Ple, parseGemma4PleIndex } from "../src/gemma/ple.ts";
+import {
+  createGemma4Ple,
+  defaultGemma4PleResidentBytes,
+  type Gemma4Ple,
+  type Gemma4PleIndex,
+  gemma4PleShardBytes,
+  parseGemma4PleIndex,
+} from "../src/gemma/ple.ts";
 import { planPrefillChunks } from "../src/generation/greedy.ts";
 import {
   modelPresent,
@@ -275,8 +282,12 @@ const goldenF32 = (file: SafetensorsFile, name: string): Float32Array<ArrayBuffe
   return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
+/** sidecar 全量を常駐させる予算（= 読み直しゼロ）。 */
+const allResidentBytes = (index: Gemma4PleIndex): number =>
+  index.shards.reduce((sum, shard) => sum + gemma4PleShardBytes(index, shard), 0);
+
 /** 索引を読んで loader を組む（shard の読みは実ファイル — hub は通さない）。 */
-const openPle = async (residentShards: number): Promise<Gemma4Ple> => {
+const openPle = async (maxResidentBytes: number): Promise<Gemma4Ple> => {
   const index = parseGemma4PleIndex(
     JSON.parse(await Deno.readTextFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT))),
   );
@@ -284,7 +295,7 @@ const openPle = async (residentShards: number): Promise<Gemma4Ple> => {
     index,
     readShard: (file) => readBuffer(PRODUCT_ROOT, file),
     vocabSize: VOCAB,
-    residentShards,
+    maxResidentBytes,
   });
 };
 
@@ -329,7 +340,9 @@ Deno.test({
     );
     assertEquals(touched.size, index.shards.length, "probe が踏む shard 数（全 shard を踏むこと）");
 
-    const ple = await openPle(2);
+    // 既定の予算（= 最大 shard 2 本ぶん）で引く。本数ではなくバイトで頭打ちになることを見る。
+    const budget = defaultGemma4PleResidentBytes(index);
+    const ple = await openPle(budget);
     const gathered = await ple.gather(tokens);
     assertEquals(gathered.dtype, "f32", "gather の dtype");
     assertEquals(gathered.shape, [1, tokens.length, LAYERS, PLE_DIM], "gather の shape");
@@ -352,13 +365,20 @@ Deno.test({
       `PLE 逆量子化が torch の 35 表経路と違う（${mismatches} 要素 / 最初の食い違い ${first}）`,
     );
 
-    // 決定 3 の実測: 触った shard だけ読み、LRU が上限で落とす。
+    // 決定 3 の実測: 触った shard だけ読み、LRU がバイト予算で落とす。
     const stats = ple.stats();
     assertEquals(stats.loads, index.shards.length, "取りに行った shard 数（触ったぶんだけ）");
-    assertEquals(stats.resident, 2, "常駐 shard 数（LRU の上限で頭打ち）");
+    assertEquals(stats.resident, 2, "常駐 shard 数（既定 = 最大 shard 2 本ぶんで頭打ち）");
+    assert(
+      stats.residentBytes <= budget,
+      `常駐 ${stats.residentBytes} バイトが予算 ${budget} を超えている`,
+    );
     console.log(
       `[e2e] gemma4 product PLE: probe ${tokens.length} token × ${LAYERS} 層 × ${PLE_DIM} 次元が` +
-        `ビット一致 / shard ${stats.loads} 本ロード・常駐 ${stats.resident} 本`,
+        `ビット一致 / shard ${stats.loads} 本ロード・常駐 ${stats.resident} 本` +
+        `（${(stats.residentBytes / 1024 / 1024).toFixed(0)} / 予算 ${
+          (budget / 1024 / 1024).toFixed(0)
+        } MiB）`,
     );
   },
 });
@@ -557,7 +577,7 @@ Deno.test({
     const index = await readPleIndex();
     // 全 shard 常駐（LRU の観測は GPU 不要の②が持つ — こちらは生成の往復で shard を
     // 読み直さないことだけを見る）。
-    const ple = await openPle(index.shards.length);
+    const ple = await openPle(allResidentBytes(index));
     const gpu = await acquireGpu();
     const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
     try {
