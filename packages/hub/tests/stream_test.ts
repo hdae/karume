@@ -92,11 +92,18 @@ const prepare = async (
   return { loaded, refs: shardRefs(loaded), mock: createMockFetch(routes) };
 };
 
+/**
+ * 全 shard を溜めて後から見る（順序・中身の検査用）。
+ *
+ * MUST: bytes は yield ごとに写す — 逐次面の契約は「次の `next()` までに使い終える」で、器を使う
+ * 取得元（ディレクトリ / HF）では次の反復が同じ buffer を上書きする。view を溜めると最後の
+ * shard の中身に化ける。
+ */
 const drain = async (
   stream: AsyncGenerator<StreamedAsset, void, unknown>,
 ): Promise<StreamedAsset[]> => {
   const seen: StreamedAsset[] = [];
-  for await (const asset of stream) seen.push(asset);
+  for await (const asset of stream) seen.push({ ...asset, bytes: asset.bytes.slice() });
   return seen;
 };
 
@@ -127,14 +134,20 @@ Deno.test("streamAssets: yield は refs の入力順で、bytes は宣言どお�
   // manifest 順ではなく「渡した列の順」で届くこと。
   const order = [...refs].reverse();
 
-  const seen = await drain(streamAssets(loaded, order, { fetch: mock.fetch, caches }));
-
-  assertEquals(seen.map((asset) => asset.id), order.map((ref) => ref.path));
-  for (const asset of seen) {
+  // 器の形（同じ buffer の prefix view）を見るので、写しを取る drain を通さず yield 中に検査する。
+  const ids: string[] = [];
+  const buffers = new Set<ArrayBufferLike>();
+  for await (const asset of streamAssets(loaded, order, { fetch: mock.fetch, caches })) {
+    ids.push(asset.id);
+    buffers.add(asset.bytes.buffer);
     assertEquals(asset.bytes, payloadFor(asset.id));
     assertEquals(asset.bytes.byteOffset, 0);
-    assertEquals(asset.bytes.byteLength, asset.bytes.buffer.byteLength);
+    assertEquals(asset.bytes.byteLength, payloadFor(asset.id).byteLength);
   }
+
+  assertEquals(ids, order.map((ref) => ref.path));
+  // HF 取得元も逐次面の器を使う（取得層の `into`）— 全 shard が 1 本の buffer に届く。
+  assertEquals(buffers.size, 1, "HF 取得元が器を使っていない（shard ごとに別 buffer）");
 });
 
 Deno.test("streamAssets: 記録の無い破損エントリは相 2 が捕まえ、1 往復で治る", async () => {

@@ -7,7 +7,7 @@
     "./deno": "./deno.ts"
   },
   "imports": {
-    "@hdae/fetch-cache": "jsr:@hdae/fetch-cache@^0.5.0"
+    "@hdae/fetch-cache": "jsr:@hdae/fetch-cache@^0.6.0"
   },
   "publish": {
     "exclude": ["tests/"]

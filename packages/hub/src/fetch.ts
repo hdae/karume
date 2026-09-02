@@ -543,8 +543,8 @@ export const streamAssets = async function* (
 
 /**
  * 逐次面の器 — コンポーネントの**最大 shard 長で 1 本**（`refs` の `size` は manifest で確定）。
- * 遅延確保: 取得元が {@link FileReadOptions.into} を呼んだときだけ作る（器を使わない HF 取得元に
- * 1GiB 級の buffer を無駄に持たせない）。
+ * 遅延確保: 取得元が {@link FileReadOptions.into} を呼んだときだけ作る（器を使わない取得元に
+ * 数百 MiB の buffer を無駄に持たせない — 組み込みの 2 取得元〈ディレクトリ / HF〉はどちらも使う）。
  *
  * 引き渡す view は 2 形のどちらか: ①器の prefix view（byteOffset 0 / byteLength = `ref.size`）
  * ②取得元が自前で確保した tight view。どちらも runtime の shard 受け口の契約（buffer の先頭からの
