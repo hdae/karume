@@ -490,11 +490,11 @@ Deno.test("parseManifest: weights の shards 欄（ADR 0070 決定 1）", async 
   });
 });
 
-Deno.test("parseManifest: shard のバイト上限 1GiB（ADR 0081 の読み手契約 2）", async (t) => {
+Deno.test("parseManifest: shard のバイト上限 256MiB（ADR 0090 の読み手契約 — ファイル長で測る）", async (t) => {
   // 読み手は RAM ピーク O(最大 shard)（ADR 0070 決定 2）を前提に組まれているので、上限違反の
   // shard を parse が黙って通すとブラウザで初めて破綻する。上限の綴りは exporter の
   // `SHARD_BYTE_LIMIT`（tools/exporter/src/karume/shards.py）と同値。
-  const LIMIT = 2 ** 30;
+  const LIMIT = 2 ** 28;
   const big = (size: number, mark: string) => ({
     path: `net/model.f16-of-2.safetensors`,
     size,
@@ -524,7 +524,7 @@ Deno.test("parseManifest: shard のバイト上限 1GiB（ADR 0081 の読み手�
     );
   });
 
-  await t.step("ちょうど 1GiB は通る（書き手と同じ閉区間）", () => {
+  await t.step("ちょうど 256MiB は通る（書き手と同じ閉区間）", () => {
     // 片側だけだと「常に落ちる」実装でも緑になる。境界の向きは shards.py / verify.py の
     // `size > SHARD_BYTE_LIMIT` と揃える（ちょうどは合法）。
     const manifest = parseManifest(withModel({
@@ -533,9 +533,9 @@ Deno.test("parseManifest: shard のバイト上限 1GiB（ADR 0081 の読み手�
     assertEquals(manifest.models["m"].weights["net"]["f16"].shards[0].size, LIMIT);
   });
 
-  await t.step("非 shard の FileRef は対象外 — assets / extras は 1GiB 超でも通る", () => {
+  await t.step("非 shard の FileRef は対象外 — assets / extras は上限超でも通る", () => {
     // MUST: 上限は**shard 分割の契約**であって全 FileRef の天井ではない（それは 16GiB の
-    // `MAX_FILE_BYTES`）。ここを取り違えると 1GiB 超の実在資産（例: PLE sidecar）が読めなくなる。
+    // `MAX_FILE_BYTES`）。ここを取り違えると上限超の実在資産（例: PLE sidecar）が読めなくなる。
     const huge = (mark: string) => ({
       path: `net/sidecar.${mark}.safetensors`,
       size: LIMIT + 1,

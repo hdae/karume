@@ -56,7 +56,14 @@ const MAX_FILE_BYTES = 16 * 2 ** 30;
  */
 const MAX_SHARDS = 1024;
 /**
- * shard 1 本の上限バイト数（1GiB — ADR 0081 の読み手契約 2。席による例外は無い）。
+ * shard 1 本の上限バイト数（256MiB — ADR 0090 の読み手契約。席による例外は無い）。
+ *
+ * 測るのは manifest の `size` = ヘッダ込みの**ファイル長**で、exporter の読み返し（`karume verify`）
+ * が実ファイル長で見る量と同じ。読み手が RAM に載せるのはファイル全体なので、上限の根拠
+ * （ロード時ホスト RAM ピーク = 定数 + 最大 shard 1 本〈ADR 0070 追記 2026-09-02〉・Chromium の
+ * 単一 `ArrayBuffer` 天井・取得層のバイト予算）に対して正しい数え方はこちら。書き手はデータ節を
+ * 「上限 − ヘッダ余裕 1MiB」まで詰める（`SHARD_DATA_CAPACITY`）ので、ここは書き手より緩い側に
+ * ならない。
  *
  * MUST: 読み手側にも張る。上限の門は書き手（exporter の `pack_shards`）と読み返し
  * （`karume verify`）にしか無く、規則を守っていない shard 列（手で組んだ / 別実装が書いた /
@@ -67,22 +74,14 @@ const MAX_SHARDS = 1024;
  * 許さないのが manifest 検査の目的そのもの（{@link parseManifest}）。
  *
  * MUST: 掛けるのは `shards` **だけ**。上限は shard 分割の契約であって、`assets` / `extras`
- * （単一ファイルで配る付帯資産）はこの規則の外にある — 混同すると 1GiB 超の実在資産
+ * （単一ファイルで配る付帯資産）はこの規則の外にある — 混同すると上限超の実在資産
  * （例: PLE sidecar）が読めなくなる。全 FileRef 共通の天井は {@link MAX_FILE_BYTES}。
  *
  * MUST: 綴りは Python 正本 `tools/exporter/src/karume/shards.py` の `SHARD_BYTE_LIMIT` と
  * 同値に保つ（hub は exporter に依存しないので写しになる）。判定も向こうと同じ**閉区間**
  * （ちょうど上限は合法・超過だけを落とす）。
- *
- * NOTE: 数えるバイトは両側で厳密には同じでない。Python が数えるのは safetensors の**データ節**
- * だけ（ヘッダ長を決めるには所属が要り、所属を決めるにはヘッダ長が要るという循環を避けるため）
- * で、manifest の `size` は**ヘッダ込みのファイル全体**。よってこの門は書き手の契約より
- * ヘッダぶんだけ厳しい。それでよい — 読み手が RAM に載せるのはファイル全体なので、上限の根拠
- * （ArrayBuffer 天井・バイト予算）に対して正しいのはこちらの数え方で、差は実測で weight shard
- * 約 27KB（テンソル 1 本あたり 100 バイト前後）・グラフ shard で数 MB 級と、1GiB に対する
- * 余裕のうちに収まる（実配布の最大 shard は 993,725,828 バイト = 上限の 92.5%）。
  */
-const MAX_SHARD_BYTES = 2 ** 30;
+const MAX_SHARD_BYTES = 2 ** 28;
 /** hub が理解する `format` の major。未知 major は fail loudly（ADR 0041 §1）。 */
 const FORMAT_MAJOR = 4;
 /** 表示欄の長さ上限（ADR 0075 決定 1）。 */
@@ -549,7 +548,7 @@ const parseShards = (
     if (ref.size > MAX_SHARD_BYTES) {
       throw fail.format(
         `${where}[${index}]: shard '${ref.path}' が ${ref.size} バイトで` +
-          `上限 ${MAX_SHARD_BYTES} を超えた（分割規則 — ADR 0081）`,
+          `上限 ${MAX_SHARD_BYTES} を超えた（分割規則 — ADR 0090）`,
       );
     }
     return ref;
