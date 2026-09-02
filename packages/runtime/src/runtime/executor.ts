@@ -375,6 +375,28 @@ const scaleTensor = (
 };
 
 /**
+ * piece（先頭次元の行範囲）の CPU 展開が読む companion scale の切り出し。
+ *
+ * 先頭軸が scale の伸びている軸のときだけ行で切る — i4 の group 形 `[行, group 数]`
+ * （`groupScaleShape`）は常に当たり、i8 の keepdim 形はチャネル軸が先頭のときに当たる。
+ * 残りの keepdim 形（先頭軸が 1）は全ての行へ同じ値が配られる形なので、切らずにそのまま渡す
+ * （`decodeI8` の stride がその軸で 0 になり、行オフセットに依らず同じ値を引く）。
+ */
+const scaleForPiece = (
+  scale: { readonly values: Float32Array<ArrayBuffer>; readonly shape: readonly number[] },
+  declaredRows: number,
+  rowOffset: number,
+  rows: number,
+): { readonly values: Float32Array<ArrayBuffer>; readonly shape: readonly number[] } => {
+  if (scale.shape[0] !== declaredRows) return scale;
+  const stride = scale.shape.slice(1).reduce((product, dim) => product * dim, 1);
+  return {
+    values: scale.values.subarray(rowOffset * stride, (rowOffset + rows) * stride),
+    shape: [rows, ...scale.shape.slice(1)],
+  };
+};
+
+/**
  * GPU 常駐経路の scale が**平坦添字で引ける形**であることを見る（ADR 0019）。
  *
  * カーネルは `wscale[出力チャネル]` と読む。したがって scale はチャネル軸だけが伸びた
@@ -907,6 +929,18 @@ export class Session {
     const weights = new RunArena(gpu.device, () => scheduler.flush());
     const weightBuffers = new Map<string, GPUBuffer>();
     const residentWeights = new Map<string, ResidentWeight>();
+    /**
+     * 展開席の piece 列が持ち越す companion scale の**写し**（キー = initializer 名）。
+     *
+     * MUST: view ではなく値の写しを持つ。scale の実体は piece 1 の shard にしか無く
+     * （co-shard 契約の piece 版）、view のまま抱えるとその shard の ArrayBuffer が列の
+     * 最後まで解放されず、RAM ピーク O(最大 shard) が崩れる。写すのは scale だけで、重み
+     * 本体は 1 バイトも写さない。
+     */
+    const carriedScales = new Map<
+      string,
+      { readonly values: Float32Array<ArrayBuffer>; readonly shape: readonly number[] }
+    >();
     let residentCompressedBytes = 0;
     let hostExpandedBytes = 0;
     // 構築相の費用内訳（{@link SessionBuildStats}）。ホスト時計だけで刻む集計器で、
@@ -934,12 +968,15 @@ export class Session {
       bufferCreateMs += performance.now() - start;
       return buffer;
     };
+    // 書き込み先オフセットは piece 列（分割テンソル）のためにある — 丸ごとの経路は常に 0 で、
+    // piece は「行オフセット × 1 行のバイト長」を渡して 1 本のバッファへ継ぎ足す。
     const timedWrite = (
       buffer: GPUBuffer,
       data: Uint8Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
+      offset: number,
     ): void => {
       const start = performance.now();
-      gpu.device.queue.writeBuffer(buffer, 0, data);
+      gpu.device.queue.writeBuffer(buffer, offset, data);
       writeBufferIssueMs += performance.now() - start;
       uploadedBytes += data.byteLength;
     };
@@ -982,14 +1019,64 @@ export class Session {
             if (seat === undefined) {
               throw new ExecutionError(`initializer '${name}': 常駐分類が無い`);
             }
+            // initializer の宣言 shape は数値のみ（parseIrGraph が保証 — 記号次元は拒否）。
+            const declaredShape = graph.values[name].shape.map(Number);
+            const declaredRows = declaredShape[0];
+            // 分割テンソル（piece 列）は「先頭次元の連続範囲」で届く。展開に渡す shape はその
+            // piece の形、バイト位置と長さは**宣言由来の 1 行あたりバイト長**の按分で決まる
+            // （行あたりの長さは宣言から割り切れる — 進行検証が shape の残り次元を突き合わせて
+            // いるので、行数だけが piece ごとに変わる）。
+            const piece = item.piece;
+            const pieceShape = piece === undefined ? declaredShape : [...item.view.shape];
+            const rows = pieceShape[0];
             // MUST: 宣言由来のバイト長と現物が食い違ったら落とす。プランナ（と見積り）は実
             // テンソルを見ずに宣言だけで数えるので、ここが「宣言 = 現物」を実際に確かめる唯一の
             // 点になる（container の突合門が成立していれば発火しない — 二重の網）。
-            if (raw.byteLength !== seat.payloadBytes) {
+            const expectedBytes = piece === undefined
+              ? seat.payloadBytes
+              : rows * (seat.payloadBytes / declaredRows);
+            if (raw.byteLength !== expectedBytes) {
               throw new ExecutionError(
-                `initializer '${name}': 宣言由来 ${seat.payloadBytes} バイトに対し実テンソルが ${raw.byteLength} バイト`,
+                `initializer '${name}': 宣言由来 ${expectedBytes} バイトに対し実テンソルが ${raw.byteLength} バイト`,
               );
             }
+            // 書き込み先のバイト位置（丸ごとは常に 0）。生バイト席は格納バイト列、展開席は f32
+            // 展開後のバイト列が GPU に載るので、按分の基準になる全体長が席で違う。
+            const wholeBytes = seat.seat === "expanded" ? seat.expandedBytes : seat.payloadBytes;
+            const byteOffset = piece === undefined
+              ? 0
+              : piece.rowOffset * (wholeBytes / declaredRows);
+            // 末尾のゼロ詰めを掛けてよいのは「丸ごと」と「piece 列の末尾」だけ。中間 piece に
+            // 掛けると詰め物が次の piece の先頭バイトを 0 で潰す（中間 piece が 4 バイト整列で
+            // あることは進行検証の担当 — こちらは詰め物を掛けない側で不変条件を守る）。
+            const tailAligned = piece === undefined || piece.last;
+            /**
+             * 展開席（CPU で f32 化）が読む scale — piece 列ではその piece の行範囲だけを返す。
+             * 実体は piece 1 の shard にしか無いので、そこで値を写して列の最後まで持ち越す
+             * （{@link carriedScales} の MUST）。
+             */
+            const expandedScale = (
+              storage: string,
+            ): {
+              readonly values: Float32Array<ArrayBuffer>;
+              readonly shape: readonly number[];
+            } => {
+              if (piece === undefined) return scaleTensor(item, storage);
+              if (piece.first) {
+                const scale = scaleTensor(item, storage);
+                carriedScales.set(name, {
+                  values: new Float32Array(scale.values),
+                  shape: scale.shape,
+                });
+              }
+              const carried = carriedScales.get(name);
+              if (carried === undefined) {
+                throw new ExecutionError(
+                  `initializer '${name}': piece の scale が piece 1 から持ち越されていない`,
+                );
+              }
+              return scaleForPiece(carried, declaredRows, piece.rowOffset, rows);
+            };
             // 格納 f16 / i8 / i4 だけが 2 経路に分かれる（ADR 0018 / 0019 / 0069）。適格なら
             // 生バイトのまま常駐させ dequant はカーネル内（VRAM 削減はこれで初めて成立する）、
             // 適格外はここで f32 へ展開する（正しさは保たれ VRAM 削減はゼロ）。他の格納 dtype は
@@ -999,7 +1086,7 @@ export class Session {
               if (seat.seat === "f16") {
                 // MUST: 奇数要素長は末尾 2 バイトのゼロ詰めで 4 バイト整列させる。writeBuffer は
                 // 4 の倍数でないサイズを validation で拒む（= 重みが空のまま走り出す）。
-                payload = alignF16Payload(raw);
+                payload = tailAligned ? alignF16Payload(raw) : raw;
                 residentWeights.set(name, { storage: "f16" });
                 residentCompressedBytes += payload.byteLength;
               } else {
@@ -1008,29 +1095,32 @@ export class Session {
               }
             }
             if (initializer.storage.dtype === "i8") {
-              const scale = scaleTensor(item, "i8");
-              // initializer の宣言 shape は数値のみ（parseIrGraph が保証 — 記号次元は拒否）。
-              const shape = graph.values[name].shape.map(Number);
               if (seat.seat === "i8") {
-                assertChannelScale(name, shape, scale.shape, seat.channelAxis);
+                // scale は分割前の**全体**に掛かる 1 本きりなので、形の突合も確保も転送も
+                // piece 1（丸ごとなら唯一の実体）でだけ行う。突合に渡すのは piece の形では
+                // なく宣言 shape。
+                if (piece === undefined || piece.first) {
+                  const scale = scaleTensor(item, "i8");
+                  assertChannelScale(name, declaredShape, scale.shape, seat.channelAxis);
+                  // MUST: scale のバッファも「GPU 常駐圧縮」に数える（実際に抱えるバイト数）。
+                  residentCompressedBytes += scale.bytes.byteLength;
+                  const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
+                  if (scale.bytes.byteLength > 0) {
+                    timedWrite(scaleBuffer, scale.bytes, 0);
+                  }
+                  residentWeights.set(name, { storage: "i8", scale: scaleBuffer });
+                }
                 // MUST: 要素数が 4 の倍数でない重みは末尾をゼロ詰めして 4 バイト整列させる
                 // （f16 の 2 バイト詰めと同じ理由 — writeBuffer が validation で落ちる）。
-                payload = alignI8Payload(raw);
-                // MUST: scale のバッファも「GPU 常駐圧縮」に数える（実際に抱えるバイト数）。
-                residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
-                const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
-                if (scale.bytes.byteLength > 0) {
-                  timedWrite(scaleBuffer, scale.bytes);
-                }
-                residentWeights.set(name, { storage: "i8", scale: scaleBuffer });
+                payload = tailAligned ? alignI8Payload(raw) : raw;
+                residentCompressedBytes += payload.byteLength;
               } else {
-                payload = timedDecode(() => decodeI8(raw, shape, scale.values, scale.shape));
+                const scale = expandedScale("i8");
+                payload = timedDecode(() => decodeI8(raw, pieceShape, scale.values, scale.shape));
                 hostExpandedBytes += payload.byteLength;
               }
             }
             if (initializer.storage.dtype === "i4") {
-              const scale = scaleTensor(item, "i4");
-              const shape = graph.values[name].shape.map(Number);
               // 適格は f16 / i8 より狭い「消費が linear / embedding / conv1d(groups==1) の
               // 重みスロットのみ」（ADR 0069 決定 5 とその追補 — 展開経路が GEMM 骨格のタイル
               // 読み〈linear は B 側・conv1d igemm は A 側〉と embedding のカーネルにしか無い）。
@@ -1040,20 +1130,25 @@ export class Session {
               if (seat.seat === "i4") {
                 // ペイロードは詰め物不要で常に 4 バイト整列 — バイト長 = numel / 2 で、numel は
                 // group_size（2 冪 ≥ 16）の倍数だからバイト長は 8 の倍数（ADR 0069 決定 2）。
-                // MUST: scale のバッファも「GPU 常駐圧縮」に数える（i8 と同じ — 実際に抱える
-                // バイト数。exporter の storage_breakdown と診断の意味を揃える）。
-                residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
-                const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
-                if (scale.bytes.byteLength > 0) {
-                  timedWrite(scaleBuffer, scale.bytes);
+                // piece の行あたり長も同じ理由で 8 の倍数になる。
+                residentCompressedBytes += payload.byteLength;
+                if (piece === undefined || piece.first) {
+                  const scale = scaleTensor(item, "i4");
+                  // MUST: scale のバッファも「GPU 常駐圧縮」に数える（i8 と同じ — 実際に抱える
+                  // バイト数。exporter の storage_breakdown と診断の意味を揃える）。
+                  residentCompressedBytes += scale.bytes.byteLength;
+                  const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
+                  if (scale.bytes.byteLength > 0) {
+                    timedWrite(scaleBuffer, scale.bytes, 0);
+                  }
+                  // group 長は宣言から写した 1 箇所（プランナ）だけが決める — 別経路で渡せる形に
+                  // すると「group 64 の資産が group 32 のパイプラインで走る」沈黙誤値になる。
+                  residentWeights.set(name, {
+                    storage: "i4",
+                    scale: scaleBuffer,
+                    groupSize: seat.groupSize,
+                  });
                 }
-                // group 長は宣言から写した 1 箇所（プランナ）だけが決める — 別経路で渡せる形に
-                // すると「group 64 の資産が group 32 のパイプラインで走る」沈黙誤値になる。
-                residentWeights.set(name, {
-                  storage: "i4",
-                  scale: scaleBuffer,
-                  groupSize: seat.groupSize,
-                });
               } else {
                 // 値域（2 冪 ≥ 16・整除）は parseIrGraph が保証済み。存在は型の上でだけ optional
                 // なので、黙って読み飛ばさず言い直す（「格納 i8 なのに scale が無い」と同じ流儀）。
@@ -1063,15 +1158,33 @@ export class Session {
                     `initializer '${name}': 格納 i4 なのに group_size が無い`,
                   );
                 }
+                const scale = expandedScale("i4");
                 payload = timedDecode(() =>
-                  decodeI4(raw, shape, scale.values, scale.shape, groupSize)
+                  decodeI4(raw, pieceShape, scale.values, scale.shape, groupSize)
                 );
                 hostExpandedBytes += payload.byteLength;
               }
             }
-            const buffer = timedAlloc(Math.max(4, payload.byteLength));
-            if (payload.byteLength > 0) timedWrite(buffer, payload);
-            weightBuffers.set(name, buffer);
+            // バッファの確保は丸ごと 1 回 / piece 列なら先頭 1 回。piece でも寸法は**全体ぶん**
+            // を宣言から出す（分割は GPU 側の配置を 1 バイトも変えない — 生バイト席は格納
+            // バイト長の 4 バイト切り上げ = 末尾詰め物ぶん、展開席は f32 展開後のバイト長）。
+            if (piece === undefined) {
+              weightBuffers.set(name, timedAlloc(Math.max(4, payload.byteLength)));
+            } else if (piece.first) {
+              const aligned = seat.seat === "expanded"
+                ? seat.expandedBytes
+                : seat.payloadBytes + ((4 - (seat.payloadBytes % 4)) % 4);
+              weightBuffers.set(name, timedAlloc(Math.max(4, aligned)));
+            }
+            const buffer = weightBuffers.get(name);
+            if (buffer === undefined) {
+              throw new ExecutionError(
+                `initializer '${name}': piece 1 で確保したバッファが台帳に無い`,
+              );
+            }
+            if (payload.byteLength > 0) timedWrite(buffer, payload, byteOffset);
+            // 持ち越した scale は列を読み切ったところで捨てる（生きているのは 1 列ぶんだけ）。
+            if (piece?.last === true) carriedScales.delete(name);
           }
         } catch (cause) {
           // MUST: push した 2 本は必ず pop して積み残さない（積み残すと以後の検証結果が誤った

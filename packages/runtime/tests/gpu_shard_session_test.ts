@@ -22,7 +22,7 @@ import {
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { buildSafetensors, type TensorSpec } from "./helpers/format.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { buildFixture, shardStream } from "./helpers/shard-fixture.ts";
+import { buildFixture, buildPieceFixture, shardStream } from "./helpers/shard-fixture.ts";
 
 const bitsOf = (tensor: Tensor): readonly number[] => [
   ...new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length),
@@ -71,6 +71,46 @@ Deno.test({
       } finally {
         await whole.dispose();
         await single.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+// テンソル分割（piece）の受入: 単独で 1 shard に収まらない大テンソルを先頭次元で割って
+// 連続する shard へ配っても、GPU 側のバッファ配置と常駐バイト列は分割前と 1 バイトも変わらない。
+// 検出器は shard 面 A/B と同じ「出力のビット同一 + storage 診断の一致」で、そこへ
+// 「流れたバイト総和の一致」を足す（piece の合算が丸ごと 1 本と同じ数になる = 末尾詰め物と
+// scale の二重計上が無いこと）。
+Deno.test({
+  name: "piece 列は分割なしと出力ビット同一・診断一致（4 格納 × 常駐 / 展開席・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const fixture = buildPieceFixture();
+    const gpu = await acquireGpu();
+    try {
+      const whole = await createSession(gpu, openModel(fixture.fullBuffer()));
+      const split = await createSessionFromShards(gpu, shardStream(fixture.shards()));
+      try {
+        const wholeOut = await whole.run({ x: fixture.x });
+        const splitOut = await split.run({ x: fixture.x });
+        // y は 4 格納の重みを全て通った出力・z は展開席（i4）の値がそのまま足された出力
+        assertEquals(bitsOf(splitOut["y"]), bitsOf(wholeOut["y"]), "出力 y がビット同一でない");
+        assertEquals(bitsOf(splitOut["z"]), bitsOf(wholeOut["z"]), "出力 z がビット同一でない");
+        assertEquals(split.diagnostics().storage, whole.diagnostics().storage);
+        assertEquals(
+          split.diagnostics().buildStats.uploadedBytes,
+          whole.diagnostics().buildStats.uploadedBytes,
+        );
+        // 席が両方とも実在すること（片方が 0 だと A/B が半分しか効いていない）
+        assert(whole.diagnostics().storage.residentCompressedBytes > 0, "圧縮常駐が 1 本も無い");
+        assert(whole.diagnostics().storage.hostExpandedBytes > 0, "CPU 展開が 1 本も無い");
+        // 分割した側は shard 3 本を消費している（丸ごと 1 本との対照）
+        assertEquals(split.diagnostics().buildStats.shardCount, 3);
+      } finally {
+        await whole.dispose();
+        await split.dispose();
       }
     } finally {
       gpu.destroy();

@@ -8,6 +8,7 @@ import {
   createShardValidator,
   extractIrGraph,
   IR_METADATA_KEY,
+  parsePieceKey,
 } from "../src/format/container.ts";
 import { parseSafetensors, type SafetensorsFile } from "../src/format/safetensors.ts";
 import {
@@ -62,6 +63,58 @@ const W_I4_SCALE: TensorSpec = {
   shape: [4, 2],
   data: f32Bytes(new Array(8).fill(1)),
 };
+
+// テンソル分割（piece）の素材。単独で 1 shard に収まらない大テンソルを
+// 先頭次元（行）の連続範囲へ割り、連続する shard へ 1 本ずつ配る形を最小サイズで写す。
+
+/** `enc.w`（f32 [4,3]）を 2 行ずつ 2 本へ割った piece（1 行 = 12 バイト = 常に 4 の倍数）。 */
+const pieceSpec = (
+  index: number,
+  count: number,
+  rows: number,
+  overrides: Partial<TensorSpec> = {},
+): TensorSpec => ({
+  name: `enc.w#${String(index).padStart(5, "0")}-of-${String(count).padStart(5, "0")}`,
+  dtype: "F32",
+  shape: [rows, 3],
+  data: f32Bytes(new Array(rows * 3).fill(0.5)),
+  ...overrides,
+});
+const W_PIECE_1 = pieceSpec(1, 2, 2);
+const W_PIECE_2 = pieceSpec(2, 2, 2);
+
+/**
+ * piece + companion scale 用の最小 i8 グラフ（`w` は [4,4] — 1 行 = 4 バイトなので、どの行
+ * 境界で割っても「末尾以外の piece は 4 の倍数」を満たす）。
+ */
+const i8PieceGraph = (): GraphJson => {
+  const graph = baseGraph();
+  graph.values["w"] = { dtype: "f32", shape: [4, 4] };
+  graph.values["b"] = { dtype: "f32", shape: [4] };
+  graph.values["h"] = { dtype: "f32", shape: ["T", 4] };
+  graph.values["y"] = { dtype: "f32", shape: ["T", 4] };
+  graph.initializers["w"].storage = { dtype: "i8", scale: "enc.w.scale" };
+  return graph;
+};
+const B4_F32: TensorSpec = {
+  name: "enc.b",
+  dtype: "F32",
+  shape: [4],
+  data: f32Bytes([1, 2, 3, 4]),
+};
+const W_I8_WIDE_SCALE: TensorSpec = {
+  name: "enc.w.scale",
+  dtype: "F32",
+  shape: [4, 1],
+  data: f32Bytes([1, 1, 1, 1]),
+};
+const W_I8_PIECE_1: TensorSpec = {
+  name: "enc.w#00001-of-00002",
+  dtype: "I8",
+  shape: [2, 4],
+  data: new Uint8Array(8),
+};
+const W_I8_PIECE_2: TensorSpec = { ...W_I8_PIECE_1, name: "enc.w#00002-of-00002" };
 
 Deno.test("extractIrGraph: グラフ shard から IR を取り出す", () => {
   const graph = extractIrGraph(graphShard(baseGraph(), [B_F32]));
@@ -348,4 +401,238 @@ Deno.test("createShardValidator: scale キーが別々の 2 本は従来どお�
   assertEquals(ready[0].scale?.shape, [3, 1]);
   assertEquals(ready[1].scale?.shape, [3, 1]);
   validator.finish();
+});
+
+// ここからテンソル分割（piece）。読み手契約は「キーが `<親名>#NNNNN-of-NNNNN`・親の先頭次元の
+// 連続範囲・連続する shard に 1 本ずつ・scale は piece 1 と同居・末尾以外は 4 の倍数バイト」。
+
+Deno.test("parsePieceKey: 5 桁ゼロ詰めで count ≥ 2 の形だけを piece と解釈する", () => {
+  assertEquals(parsePieceKey("enc.w#00002-of-00003"), { name: "enc.w", index: 2, count: 3 });
+  // 親名に `#` を含む形も末尾の綴りで割れる（貪欲一致 = 最後の `#` が区切り）
+  assertEquals(parsePieceKey("a#00001-of-00002#00002-of-00002"), {
+    name: "a#00001-of-00002",
+    index: 2,
+    count: 2,
+  });
+  // 素のテンソル名・桁数違い・範囲外はどれも piece ではない（= 突合集合の外 → 余剰）
+  assertEquals(parsePieceKey("enc.w"), undefined);
+  assertEquals(parsePieceKey("enc.w#1-of-2"), undefined);
+  assertEquals(parsePieceKey("enc.w#00001-of-00001"), undefined);
+  assertEquals(parsePieceKey("enc.w#00003-of-00002"), undefined);
+  assertEquals(parsePieceKey("enc.w#00000-of-00002"), undefined);
+});
+
+Deno.test("createShardValidator: piece 列を宣言順に受理して rowOffset / first / last を返す", () => {
+  const graph = extractIrGraph(graphShard(baseGraph()));
+  const validator = createShardValidator(graph);
+
+  const first = validator.intake(weightShard([W_PIECE_1, B_F32]));
+  // 戻りは宣言順（w → b）で、piece でも位置は 1 件ぶん
+  assertEquals(first.map((item) => item.name), ["w", "b"]);
+  assertEquals(first[0].view.shape, [2, 3]);
+  assertEquals(first[0].piece, { rowOffset: 0, first: true, last: false });
+  // 分割されていないテンソルは従来どおり piece 欄を持たない
+  assertEquals(first[1].piece, undefined);
+
+  const second = validator.intake(weightShard([W_PIECE_2]));
+  assertEquals(second.map((item) => item.name), ["w"]);
+  assertEquals(second[0].piece, { rowOffset: 2, first: false, last: true });
+  validator.finish();
+});
+
+Deno.test("createShardValidator: piece 列の companion scale は piece 1 とだけ同居する", () => {
+  const graph = extractIrGraph(graphShard(i8PieceGraph()));
+  const validator = createShardValidator(graph);
+
+  const first = validator.intake(weightShard([B4_F32, W_I8_WIDE_SCALE, W_I8_PIECE_1]));
+  assertEquals(first[0].scale?.shape, [4, 1]);
+  assertEquals(first[0].piece?.first, true);
+  // 2 本目以降の shard に scale は来ない（消費側は piece 1 で読んだ値を持ち越す）
+  const second = validator.intake(weightShard([W_I8_PIECE_2]));
+  assertEquals(second[0].scale, undefined);
+  assertEquals(second[0].piece, { rowOffset: 2, first: false, last: true });
+  validator.finish();
+});
+
+Deno.test("createShardValidator: piece 2 の shard に置かれた scale を落とす", () => {
+  const graph = extractIrGraph(graphShard(i8PieceGraph()));
+  const validator = createShardValidator(graph);
+  validator.intake(weightShard([W_I8_WIDE_SCALE, W_I8_PIECE_1]));
+
+  const error = assertThrows(
+    () => validator.intake(weightShard([W_I8_WIDE_SCALE, W_I8_PIECE_2])),
+    ContainerError,
+    "別の shard で既に定義されたテンソル (1)",
+  );
+  assertEquals(error.message.includes("enc.w.scale"), true, error.message);
+});
+
+// index は shard 順に 1 ずつ増える。飛び・逆行・総数の食い違いはどれも「どの行が欠けたか」が
+// 転送後には分からなくなる形なので、その shard で落とす。
+Deno.test("createShardValidator: piece の index の飛び・逆行・count の食い違いを落とす", () => {
+  const skipped = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  skipped.intake(weightShard([pieceSpec(1, 3, 1)]));
+  assertThrows(
+    () => skipped.intake(weightShard([pieceSpec(3, 3, 1)])),
+    ContainerError,
+    "index 3 が期待 2 と違う",
+  );
+
+  const rewound = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  rewound.intake(weightShard([pieceSpec(1, 2, 2)]));
+  assertThrows(
+    () => rewound.intake(weightShard([pieceSpec(1, 2, 2)])),
+    ContainerError,
+    "index 1 が期待 2 と違う",
+  );
+
+  const miscounted = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  miscounted.intake(weightShard([pieceSpec(1, 2, 2)]));
+  assertThrows(
+    () => miscounted.intake(weightShard([pieceSpec(2, 3, 2)])),
+    ContainerError,
+    "総数 3 が先行 piece の 2 と違う",
+  );
+});
+
+Deno.test("createShardValidator: 同じ shard に同じ親の piece が 2 本ある形を落とす", () => {
+  const validator = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+
+  const error = assertThrows(
+    () => validator.intake(weightShard([W_PIECE_1, W_PIECE_2])),
+    ContainerError,
+    "同じ shard に piece が 2 本ある",
+  );
+  assertEquals(error.message.includes("enc.w#00002-of-00002"), true, error.message);
+});
+
+// 「途中まで来て次の shard に続きが無い」は欠けとして読了まで持ち越さない — どの shard から
+// 崩れたのかが失われるため、次の shard の intake で落とす。
+Deno.test("createShardValidator: piece 列が途切れた shard を落とす", () => {
+  const validator = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  validator.intake(weightShard([pieceSpec(1, 3, 1)]));
+
+  assertThrows(
+    () => validator.intake(weightShard([B_F32])),
+    ContainerError,
+    "piece 列がこの shard で途切れた",
+  );
+});
+
+Deno.test("createShardValidator: piece の dtype と残り次元の不一致を落とす", () => {
+  const wrongDtype = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  assertThrows(
+    () =>
+      wrongDtype.intake(
+        weightShard([pieceSpec(1, 2, 2, { dtype: "BF16", data: new Uint8Array(12) })]),
+      ),
+    ContainerError,
+    "F32 が必要",
+  );
+
+  // 先頭次元だけが piece ごとに変わる — 残りの次元は宣言と同値 MUST
+  const wrongTail = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  assertThrows(
+    () =>
+      wrongTail.intake(
+        weightShard([
+          pieceSpec(1, 2, 2, { shape: [2, 4], data: f32Bytes(new Array(8).fill(0.5)) }),
+        ]),
+      ),
+    ContainerError,
+    "の行範囲でない",
+  );
+});
+
+Deno.test("createShardValidator: piece の累積行数が宣言の先頭次元と合わない形を落とす", () => {
+  // 超過は即座に（残りの piece を待たずに決まる）
+  const over = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  over.intake(weightShard([pieceSpec(1, 2, 3)]));
+  assertThrows(
+    () => over.intake(weightShard([pieceSpec(2, 2, 3)])),
+    ContainerError,
+    "累積行数 6 が宣言 shape の先頭次元 4 を超える",
+  );
+
+  // 不足は最後の piece で決まる（そこまでは後続で埋まりうる）
+  const under = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  under.intake(weightShard([pieceSpec(1, 2, 1)]));
+  assertThrows(
+    () => under.intake(weightShard([pieceSpec(2, 2, 1)])),
+    ContainerError,
+    "累積行数が 2 行で宣言 shape の先頭次元 4 行に届かない",
+  );
+});
+
+// 続きの piece は「行オフセット由来のバイト位置」へ書かれるので、末尾以外の piece が 4 の倍数
+// でないと writeBuffer が validation で no-op になる（= 重みが欠けたまま走り出す）。
+Deno.test("createShardValidator: 末尾でない piece の非整列バイト長を落とす", () => {
+  const graph = extractIrGraph(graphShard(i8Graph()));
+  const validator = createShardValidator(graph);
+
+  // i8 [4,3] は 1 行 3 バイト — 2 行の piece は 6 バイトで 4 の倍数にならない
+  assertThrows(
+    () =>
+      validator.intake(weightShard([
+        W_I8_SCALE,
+        { name: "enc.w#00001-of-00002", dtype: "I8", shape: [2, 3], data: new Uint8Array(6) },
+      ])),
+    ContainerError,
+    "が 6 バイト（4 の倍数が必要",
+  );
+});
+
+// 1 テンソルは「丸ごと」か「piece 列」のどちらか一方。混在はどちらのバイトが勝つかが転送順で
+// 決まる沈黙誤値なので、3 通りとも落とす。
+Deno.test("createShardValidator: 丸ごとと piece の混在を落とす", () => {
+  const sameShard = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  assertThrows(
+    () => sameShard.intake(weightShard([W_F32, W_PIECE_1])),
+    ContainerError,
+    "の両方でこの shard に在る",
+  );
+
+  const wholeFirst = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  wholeFirst.intake(weightShard([W_F32]));
+  assertThrows(
+    () => wholeFirst.intake(weightShard([W_PIECE_1])),
+    ContainerError,
+    "別の shard で実体が確定しているのに piece",
+  );
+
+  const piecesFirst = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+  piecesFirst.intake(weightShard([W_PIECE_1]));
+  piecesFirst.intake(weightShard([W_PIECE_2]));
+  assertThrows(
+    () => piecesFirst.intake(weightShard([W_F32])),
+    ContainerError,
+    "別の shard で既に定義されたテンソル (1)",
+  );
+});
+
+// 親が宣言に無い piece キーは piece と解釈しない（= 突合集合の外）。綴りだけで受理集合が
+// 広がると、消えた重みの置き土産が「分割の途中」として黙って通る。
+Deno.test("createShardValidator: 親が宣言に無い piece キーは余剰として落ちる", () => {
+  const validator = createShardValidator(extractIrGraph(graphShard(baseGraph())));
+
+  const error = assertThrows(
+    () => validator.intake(weightShard([W_F32, { ...W_PIECE_1, name: "enc.dead#00001-of-00002" }])),
+    ContainerError,
+    "参照されないテンソル (1)",
+  );
+  assertEquals(error.message.includes("enc.dead#00001-of-00002"), true, error.message);
+});
+
+Deno.test("createShardValidator: 読了時に未完の piece 列を欠けとして列挙する", () => {
+  const validator = createShardValidator(extractIrGraph(graphShard(baseGraph(), [B_F32])));
+  validator.intake(graphShard(baseGraph(), [B_F32]));
+  validator.intake(weightShard([pieceSpec(1, 3, 1)]));
+
+  const error = assertThrows(() => validator.finish(), ContainerError, "不足するテンソル (1)");
+  // どこまで来て何行残っているか — 配布形を組み直す側はこの 2 つで作り直す piece を決める
+  assertEquals(
+    error.message.includes("piece 列が未完（piece 1/3 まで受理・残り 3 行）"),
+    true,
+    error.message,
+  );
 });
