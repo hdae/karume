@@ -73,3 +73,16 @@ out-of-memory の errorScope は無音、読み戻し（`mapAsync`）は元デ�
 合算する必要がある。
 
 台本 = `scratchpad/pack_spike.py` / `convert_spike.py`（使い捨て・リポ外）。
+
+## 4. 実装後のホスト RAM ピーク（Linux パイプライン面・各 3 回・`tools/ram-peak/measure.ts`）
+
+再生成したミラー（piece 入り・全 shard ≤ 256MiB）で、Phase B の最終形（結果 7 — 目標 256MiB・実効目標で
+持ち上がった shard あり）と同じ台本を再測定。
+
+| 構成                                  | 最大 shard（前 → 後）                        | 前（結果 7） |           後 |   差 |
+| ------------------------------------- | -------------------------------------------- | -----------: | -----------: | ---: |
+| gemma4 i4（e2b・chat 最小生成）       | 385 → 254MiB                                 |      745 MiB | 611〜615 MiB | −18% |
+| anima f16（turbo v1.1・512²・2 step） | 297 → 252MiB（text_encoder は 297 → 233MiB） |      766 MiB | 710〜712 MiB |  −7% |
+
+所見: 「定数 + 最大 shard 1 本」のとおり、最大 shard の減少分（gemma4 −131MiB / anima −45〜64MiB）が
+そのままピークから消えた。ロード・生成時間は不変（anima 生成 5.8〜6.0 s・gemma4 ロード 1.8〜2.2 s）。
