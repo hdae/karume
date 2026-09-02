@@ -164,15 +164,16 @@ GEMMA4_DEFAULT_QUANT = GEMMA4_DTYPE
 #: prefill の刻みが変わって token 列も動きうるため、golden を採った値をそのまま宣言する。
 GEMMA4_CHUNK_LENGTH = 32
 
-#: full スロットの容量（会話が使える最大の論理長）。同じく実行時ノブで、同じ検収門の
-#: `CAPACITY`。上限は {@link gemma4_pipeline_config} が RoPE 表の行数で押さえる。
+#: full スロットの容量（会話が使える最大の論理長）。同じく実行時ノブ。上限は
+#: {@link gemma4_pipeline_config} が RoPE 表の行数で押さえる。
 #:
 #: NOTE: **VRAM と会話長のトレードオフの政策値**で、資産は `maxPosition`（現行 1024）まで
-#: 引ける。検収門が通した組み合わせをそのまま宣言しているだけなので、引き上げる裁定が出たら
-#: ここを動かして `e2e_gemma4_chat_test.ts` / `e2e_gemma4_pretrained_test.ts` の golden が
-#: 不変であることを確かめる（full スロットは `pastLength` 行しか読まないので不変の見込みだが、
-#: 実測していない — speculation）。
-GEMMA4_CAPACITY = 640
+#: 引ける。2026-09-02 に 640 → 1024（= 表の上限）へ引き上げた（裁定「コンテキスト窓は可能な
+#: 限り大きく」）。fromAssets 側の検収門（`e2e_gemma4_chat_test.ts` ほか）は 640 のままで、
+#: 宣言どおりの組み合わせは配布形を読む `e2e_gemma4_pretrained_test.ts` /
+#: `e2e_gemma4_directory_test.ts` が通す。golden は full スロットが `pastLength` 行しか読まない
+#: ため不変（同 2 門で実測）。さらに上げるには RoPE 表の再 export（`--positions`）が要る。
+GEMMA4_CAPACITY = 1024
 
 #: 上流 `generation_config.json` → `pipelineConfig.sampler` の欄名（TS 側 `SamplerSpec` の綴り）。
 GEMMA4_SAMPLER_FIELDS: tuple[tuple[str, str], ...] = (
