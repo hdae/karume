@@ -57,6 +57,7 @@ import {
   maskedFillCase,
   padCase,
   quantizeRowsCase,
+  quantizeRowsGroupedCase,
   reduceCase,
   rmsNormCase,
   softmaxCase,
@@ -192,6 +193,7 @@ const CASES: readonly DegenerateCase[] = [
   attentionStatsS16Case(),
   // w8a8 の活性量子化（1 ノード 2 dispatch の前段 — i8a8 GEMM 側はタイル系でカテゴリ違い）
   quantizeRowsCase(),
+  quantizeRowsGroupedCase(),
   layerNormCase(),
   rmsNormCase(),
   gruScanCase(),

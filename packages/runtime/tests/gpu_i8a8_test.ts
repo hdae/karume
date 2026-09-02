@@ -37,9 +37,11 @@ import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
 import {
-  QUANTIZE_ROWS_KEY,
-  QUANTIZE_ROWS_WGSL,
+  type QuantizeRowsGeometry,
+  quantizeRowsGeometry,
+  quantizeRowsKey,
   quantizeRowsParams,
+  quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
 import {
   LINEAR_I8A8_MAX_K,
@@ -173,12 +175,15 @@ const runQuantizeRows = async (
   rows: number,
   dim: number,
   groups?: number,
+  // 既定は従来形（1 行 = 1 workgroup）。小 D 変種の門は幾何を明示して呼ぶ。
+  geometry: QuantizeRowsGeometry = { lanesPerRow: 256, rowsPerGroup: 1 },
 ): Promise<QuantizeResult> => {
   const scheduler = new SubmitScheduler(gpu);
   const cache = new PipelineCache(gpu.device);
   const arena = new RunArena(gpu.device, () => scheduler.flush());
+  const key = quantizeRowsKey(geometry);
   try {
-    const { pipeline, layout } = await cache.get(QUANTIZE_ROWS_KEY, QUANTIZE_ROWS_WGSL);
+    const { pipeline, layout } = await cache.get(key, quantizeRowsWgsl(geometry));
     const params = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(params, 0, quantizeRowsParams(rows, dim));
     const src = arena.allocHostWritten(Math.max(4, x.byteLength), STORAGE_IN);
@@ -197,10 +202,15 @@ const runQuantizeRows = async (
       ],
     });
     scheduler.dispatch(pipeline, bindGroup, [
-      groups ?? gridStrideWorkgroups(rows, 1, gpu.limits.maxComputeWorkgroupsPerDimension),
+      groups ??
+        gridStrideWorkgroups(
+          rows,
+          geometry.rowsPerGroup,
+          gpu.limits.maxComputeWorkgroupsPerDimension,
+        ),
       1,
       1,
-    ], QUANTIZE_ROWS_KEY);
+    ], key);
     await scheduler.flush();
     const qBytes = await readbackBytes(gpu.device, xq, rows * dim);
     const scaleBytes = await readbackBytes(gpu.device, xs, rows * 4);
@@ -230,6 +240,53 @@ Deno.test({
       assertEquals([...actual.q], [127, 0, 2, 0, -2, 2, 4, -4]);
       // TS 参照（roundTiesToEven）と同じ列であることも同時に固定する
       assertEquals([...actual.q], [...quantizeRowsReference(x, 1, values.length).q]);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "quantize_rows: 小 D 変種は従来形と q / scale ともビット同一（幾何 4 通り × 縮退経路・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 幾何は dim から決まる: 128 → 8 行 × 32 レーン / 64 → 16 × 16 / 20 → 32 × 8 / 8 → 128 × 2。
+    // 行ごとに大きさを変える（全行同じ scale だと「別の行の amax を使う」誤りが値に出ない）。
+    // 行数は rowsPerGroup の倍数から外し、末尾の「行が無い組」の経路も踏む。
+    const gpu = await acquireGpu();
+    try {
+      for (const dim of [128, 64, 20, 8]) {
+        const geometry = quantizeRowsGeometry(dim);
+        assertEquals(geometry.lanesPerRow * geometry.rowsPerGroup, 256);
+        assertEquals(geometry.lanesPerRow >= dim / 4, true, `dim ${dim}: レーン幅が quad 数未満`);
+        const rows = 1_003;
+        const x = new Float32Array(rows * dim);
+        for (let row = 0; row < rows; row += 1) {
+          for (let i = 0; i < dim; i += 1) {
+            x[row * dim + i] = row % 97 === 3 ? 0 : SIGNED(row * dim + i) * (1 + (row % 11) * 0.75);
+          }
+        }
+        const baseline = await runQuantizeRows(gpu, x, rows, dim);
+        // 変種同士の突合は GPU 同士（同じ除算）なので同点の余裕は要らない。TS 参照との突合だけ
+        // 余裕がある形に限る（短い行は比が粗く、この列では dim 8 が境界近傍に乗る）。
+        if (quantizeRowsTieMargin(x, rows, dim) > TIE_MARGIN) {
+          const reference = quantizeRowsReference(x, rows, dim);
+          assertEquals([...baseline.q], [...reference.q], `dim ${dim}: 従来形 q`);
+        }
+        // 自然な本数と、縮退（2 workgroup で grid-stride を回す）の両方。
+        for (const groups of [undefined, 2]) {
+          const grouped = await runQuantizeRows(gpu, x, rows, dim, groups, geometry);
+          const label =
+            `dim ${dim} r${geometry.rowsPerGroup}w${geometry.lanesPerRow} groups ${groups}`;
+          assertEquals([...grouped.q], [...baseline.q], `${label}: q`);
+          assertEquals(
+            Array.from(new Uint32Array(grouped.scale.buffer)),
+            Array.from(new Uint32Array(baseline.scale.buffer)),
+            `${label}: scale のビット列`,
+          );
+        }
+      }
     } finally {
       gpu.destroy();
     }
@@ -464,7 +521,7 @@ Deno.test({
             actual.keys,
             [
               linearI8a8Key(linearI8a8UsesVec4(testCase.n), true),
-              QUANTIZE_ROWS_KEY,
+              quantizeRowsKey(quantizeRowsGeometry(testCase.k)),
             ].sort(),
             `${testCase.name}: 走ったパイプラインキー`,
           );
@@ -845,7 +902,7 @@ Deno.test({
           );
           assertEquals(
             actual.keys,
-            [key, QUANTIZE_ROWS_KEY].sort(),
+            [key, quantizeRowsKey(quantizeRowsGeometry(testCase.k))].sort(),
             `${testCase.name}: 走ったパイプラインキー`,
           );
           // 診断で「i4 常駐 × その group 長」が読めること（ADR 0021）

@@ -94,7 +94,10 @@ import { SOFTMAX_KEY, SOFTMAX_WGSL, softmaxParams } from "../../src/kernels/soft
 import {
   QUANTIZE_ROWS_KEY,
   QUANTIZE_ROWS_WGSL,
+  quantizeRowsGeometry,
+  quantizeRowsKey,
   quantizeRowsParams,
+  quantizeRowsWgsl,
 } from "../../src/kernels/quantize-rows.ts";
 import { quantizeRowsReference } from "../../src/reference/i8a8.ts";
 import {
@@ -903,6 +906,29 @@ export const quantizeRowsCase = (): DegenerateCase => {
     expected: refTensor([rows], quantizeRowsReference(input.data, rows, dim).scale),
     // 1 行 = 1 workgroup（行長は workgroup 内で畳む）ので必要数は行数そのもの
     natural: rows,
+    groups: 2,
+  };
+};
+
+/**
+ * `quantize_rows` の小 D 変種（perf-ledger P-1 — D=128 は 8 行 × 32 レーン）。行ループが
+ * workgroup あたり複数行を進めるので、縮退で「組の末尾の行が無い」経路と grid-stride の両方を踏む。
+ */
+export const quantizeRowsGroupedCase = (): DegenerateCase => {
+  const rows = 5_003;
+  const dim = 128;
+  const geometry = quantizeRowsGeometry(dim);
+  const input = fill([rows, dim], (i) => SIGNED(i) * (1 + (Math.floor(i / dim) % 7) * 0.5));
+  return {
+    name: `quantize_rows r${geometry.rowsPerGroup}w${geometry.lanesPerRow}`,
+    key: quantizeRowsKey(geometry),
+    wgsl: quantizeRowsWgsl(geometry),
+    params: quantizeRowsParams(rows, dim),
+    uniformParams: true,
+    inputs: [input],
+    sideOutputBytes: rows * dim,
+    expected: refTensor([rows], quantizeRowsReference(input.data, rows, dim).scale),
+    natural: Math.ceil(rows / geometry.rowsPerGroup),
     groups: 2,
   };
 };

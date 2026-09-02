@@ -123,9 +123,10 @@ import {
   linearI8a8Wgsl,
 } from "../kernels/linear-i8a8.ts";
 import {
-  QUANTIZE_ROWS_KEY,
-  QUANTIZE_ROWS_WGSL,
+  quantizeRowsGeometry,
+  quantizeRowsKey,
   quantizeRowsParams,
+  quantizeRowsWgsl,
 } from "../kernels/quantize-rows.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import {
@@ -1581,12 +1582,14 @@ export class RecipeBuilder {
     const xs = builder.allocTemp(Math.max(4, m * 4));
 
     // ① 活性の per-token 量子化（1 行 = 1 workgroup・行方向 grid-stride）
+    const quantizeGeometry = quantizeRowsGeometry(k);
+    const quantizeKey = quantizeRowsKey(quantizeGeometry);
     const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
-      QUANTIZE_ROWS_KEY,
-      QUANTIZE_ROWS_WGSL,
+      quantizeKey,
+      quantizeRowsWgsl(quantizeGeometry),
     );
     builder.dispatch({
-      key: QUANTIZE_ROWS_KEY,
+      key: quantizeKey,
       pipeline: quantizePipeline,
       layout: quantizeLayout,
       params: this.#writeParams(quantizeRowsParams(m, k), PARAMS_UNIFORM_USAGE),
@@ -1595,7 +1598,7 @@ export class RecipeBuilder {
         { binding: 2, source: xq },
         { binding: 3, source: xs },
       ],
-      workgroups: [gridStrideWorkgroups(m, 1, limit), 1, 1],
+      workgroups: [gridStrideWorkgroups(m, quantizeGeometry.rowsPerGroup, limit), 1, 1],
     });
 
     // ② 整数内積の GEMM。タイル幾何は op → 幾何の純関数が決める（src/kernels/i8a8-geometry.ts）
@@ -2363,10 +2366,13 @@ export class RecipeBuilder {
     const kq = builder.allocTemp(Math.max(4, batch * cols * depth));
     const ks = builder.allocTemp(Math.max(4, batch * cols * 4));
 
-    // (a)(b) 活性の per-token 量子化（1 行 = 1 workgroup・行方向 grid-stride）
+    // (a)(b) 活性の per-token 量子化（行方向 grid-stride。D が短いので 1 workgroup に複数行を
+    // 並べて畳む小 D 変種になる — `quantizeRowsGeometry`・perf-ledger P-1）
+    const quantizeGeometry = quantizeRowsGeometry(depth);
+    const quantizeKey = quantizeRowsKey(quantizeGeometry);
     const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
-      QUANTIZE_ROWS_KEY,
-      QUANTIZE_ROWS_WGSL,
+      quantizeKey,
+      quantizeRowsWgsl(quantizeGeometry),
     );
     const quantize = (
       source: BindingSource,
@@ -2375,7 +2381,7 @@ export class RecipeBuilder {
       count: number,
     ): void => {
       builder.dispatch({
-        key: QUANTIZE_ROWS_KEY,
+        key: quantizeKey,
         pipeline: quantizePipeline,
         layout: quantizeLayout,
         params: this.#writeParams(quantizeRowsParams(count, depth), PARAMS_UNIFORM_USAGE),
@@ -2384,7 +2390,7 @@ export class RecipeBuilder {
           { binding: 2, source: payload },
           { binding: 3, source: scales },
         ],
-        workgroups: [gridStrideWorkgroups(count, 1, limit), 1, 1],
+        workgroups: [gridStrideWorkgroups(count, quantizeGeometry.rowsPerGroup, limit), 1, 1],
       });
     };
     quantize(binds[0], qq, qs, batch * rows);
@@ -2482,12 +2488,14 @@ export class RecipeBuilder {
     });
 
     // (b) Vᵀ の量子化（行 = (b,h,d)・行長 N — per-column scale と N 連続パックが同時に出る）
+    const quantizeGeometry = quantizeRowsGeometry(cols);
+    const quantizeKey = quantizeRowsKey(quantizeGeometry);
     const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
-      QUANTIZE_ROWS_KEY,
-      QUANTIZE_ROWS_WGSL,
+      quantizeKey,
+      quantizeRowsWgsl(quantizeGeometry),
     );
     builder.dispatch({
-      key: QUANTIZE_ROWS_KEY,
+      key: quantizeKey,
       pipeline: quantizePipeline,
       layout: quantizeLayout,
       params: this.#writeParams(quantizeRowsParams(batch * depth, cols), PARAMS_UNIFORM_USAGE),
@@ -2496,7 +2504,7 @@ export class RecipeBuilder {
         { binding: 2, source: vq },
         { binding: 3, source: vs },
       ],
-      workgroups: [gridStrideWorkgroups(batch * depth, 1, limit), 1, 1],
+      workgroups: [gridStrideWorkgroups(batch * depth, quantizeGeometry.rowsPerGroup, limit), 1, 1],
     });
 
     // (c) 整数内積の GEMM（P̃ は A タイル充填で作る = 非実体化のまま）。dispatch はブロック

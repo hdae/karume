@@ -163,3 +163,138 @@ export const quantizeRowsParams = (rows: number, dim: number): Uint32Array<Array
   params[1] = dim;
   return params;
 };
+
+/**
+ * 行長に対する workgroup の割り当て（**小 D 変種** — perf-ledger P-1）。
+ *
+ * 上の形は 1 行 = 1 workgroup（256 レーン）で、行長が短いとレーンの大半が遊ぶ（D=128 なら
+ * パス① は 128 レーン・パス② は 32 quad = レーン利用 12.5%）うえ、固定費（8 段の木 reduce +
+ * barrier）を行数ぶん払う。実形状では融合 attention の QK 前段（D=128）が量子化の行数の 87% を
+ * 占める。そこで **パス② の quad 数以上の最小の 2 のべきをレーン幅**にし、余ったレーンで別の行を
+ * 同じ workgroup に並べて畳む（`rowsPerGroup = 256 / lanesPerRow`）。
+ *
+ * 数値契約は不変: absmax の縮約は `nan_max`（結合的・可換）なので木の形を変えても amax は
+ * ビット同一、パス② は要素独立。1 行が 256 レーンを使い切る行長（quad ≥ 256 = dim ≥ 1024）は
+ * 従来の形そのもの（`rowsPerGroup = 1`・キーも WGSL も {@link QUANTIZE_ROWS_KEY} /
+ * {@link QUANTIZE_ROWS_WGSL} のまま — 既存の生成物は 1 バイトも動かない）。
+ */
+export type QuantizeRowsGeometry = {
+  /** 1 行を畳むレーン数（2 のべき・1..256）。 */
+  readonly lanesPerRow: number;
+  /** 1 workgroup が並べて畳む行数（= 256 / lanesPerRow）。 */
+  readonly rowsPerGroup: number;
+};
+
+export const quantizeRowsGeometry = (dim: number): QuantizeRowsGeometry => {
+  if (!Number.isSafeInteger(dim) || dim < 1 || dim % 4 !== 0) {
+    throw new CodegenError(`quantize_rows geometry: dim は 4 の倍数の正整数（${dim}）`);
+  }
+  const quads = dim / 4;
+  let lanesPerRow = 1;
+  while (lanesPerRow < quads && lanesPerRow < QUANTIZE_ROWS_WORKGROUP_SIZE) lanesPerRow *= 2;
+  return { lanesPerRow, rowsPerGroup: QUANTIZE_ROWS_WORKGROUP_SIZE / lanesPerRow };
+};
+
+/**
+ * 幾何ごとのパイプラインキー。従来形（1 行 = 1 workgroup）は {@link QUANTIZE_ROWS_KEY} を
+ * そのまま（過去の内訳 research と照合できるよう名前を変えない）、並べ畳む形だけ `:r<行数>w<幅>`
+ * を足す（幾何が違えば WGSL が違う = 別キー、の決定性契約）。
+ */
+export const quantizeRowsKey = (geometry: QuantizeRowsGeometry): string =>
+  geometry.rowsPerGroup === 1
+    ? QUANTIZE_ROWS_KEY
+    : `${QUANTIZE_ROWS_KEY}:r${geometry.rowsPerGroup}w${geometry.lanesPerRow}`;
+
+/** 幾何ごとの WGSL（従来形は {@link QUANTIZE_ROWS_WGSL} そのもの）。 */
+export const quantizeRowsWgsl = (geometry: QuantizeRowsGeometry): string =>
+  geometry.rowsPerGroup === 1 ? QUANTIZE_ROWS_WGSL : quantizeRowsGroupedWgsl(geometry);
+
+/**
+ * 並べ畳む形の WGSL。1 workgroup（256）を幅 W のレーン組 R 本に切り、組 `slot` が行
+ * `rowBase + slot` を担当する。行ループ（`rowBase`）は workgroup 一様なので barrier は
+ * 従来形と同じ位置に置ける — 行が無い組（末尾）はメモリに触らずに barrier だけ揃える。
+ * 木 reduce は組の中（幅 W・log2(W) 段）で閉じる。
+ */
+const quantizeRowsGroupedWgsl = ({ lanesPerRow, rowsPerGroup }: QuantizeRowsGeometry): string =>
+  `// karume quantize_rows (行ごとの per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127)) — ${rowsPerGroup} 行 × ${lanesPerRow} レーン / workgroup
+struct Params {
+  rows: u32,
+  dim: u32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> xq: array<u32>;
+@group(0) @binding(3) var<storage, read_write> xs: array<f32>;
+
+${IS_NAN_BITS_WGSL}
+
+${NAN_MAX_WGSL}
+
+var<workgroup> scratch: array<f32, ${QUANTIZE_ROWS_WORKGROUP_SIZE}>;
+
+@compute @workgroup_size(${QUANTIZE_ROWS_WORKGROUP_SIZE})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid3: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+  let lid = lid3.x;
+  let dim = params.dim;
+  // 呼び出し側が dim % 4 == 0 を保証する（i8 ペイロードは平坦添字 4 詰め）
+  let quads = dim / 4u;
+  // レーン組: 幅 ${lanesPerRow} × ${rowsPerGroup} 組。組の中の位置 lane と組の番号 slot
+  let lane = lid % ${lanesPerRow}u;
+  let slot = lid / ${lanesPerRow}u;
+  var rowBase = wid.x * ${rowsPerGroup}u;
+  while (rowBase < params.rows) {
+    let row = rowBase + slot;
+    // 末尾で行が無い組は読み書きをせず barrier だけ揃える（行ループは workgroup 一様）
+    let has_row = row < params.rows;
+    let base = row * dim;
+
+    // ① 行の絶対値最大（NaN はビット列判定で伝播 — 素の max は NaN を飲む）
+    var acc = 0.0;
+    if (has_row) {
+      var i = lane;
+      while (i < dim) {
+        acc = nan_max(acc, abs(x[base + i]));
+        i = i + ${lanesPerRow}u;
+      }
+    }
+    scratch[lid] = acc;
+    workgroupBarrier();
+    var stride = ${Math.floor(lanesPerRow / 2)}u;
+    while (stride > 0u) {
+      if (lane < stride) {
+        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
+      }
+      workgroupBarrier();
+      stride = stride / 2u;
+    }
+    let amax = scratch[slot * ${lanesPerRow}u];
+    // 全ゼロ行は s = tiny → q = 0 → 0·tiny = 0 で厳密。NaN は max に飲まれるので外殻で通す。
+    // MUST: 127 での除算ではなく **1/127 との乗算**（乗算だけが正しく丸められる — 上の MUST）
+    let s = select(max(amax * ${INV_ABS_MAX}, ${F32_TINY}), amax, is_nan_bits(amax));
+    if (has_row && lane == 0u) {
+      xs[row] = s;
+    }
+
+    // ② 4 連続要素（quad）ごとに量子化して 1 語へ詰める
+    if (has_row) {
+      let qbase = row * quads;
+      var q = lane;
+      while (q < quads) {
+        let e = base + q * 4u;
+        let v = vec4<f32>(x[e], x[e + 1u], x[e + 2u], x[e + 3u]) / s;
+        let r = clamp(round(v), vec4<f32>(-${QUANTIZE_ROWS_ABS_MAX}.0), vec4<f32>(${QUANTIZE_ROWS_ABS_MAX}.0));
+        xq[qbase + q] = pack4xI8(vec4<i32>(r));
+        q = q + ${lanesPerRow}u;
+      }
+    }
+
+    // 次の行が scratch[lid] を上書きする前に scratch の読み終わりを揃える
+    workgroupBarrier();
+    rowBase = rowBase + nwg.x * ${rowsPerGroup}u;
+  }
+}
+`;

@@ -301,6 +301,13 @@ const runAttentionQkI8a8 = async (
 // 丸め境界からの余裕（atol=0 を主張してよいデータであることの門）
 // ---------------------------------------------------------------------------
 
+/** `quantize_rows` の dispatch 数（小 D 変種でキーが幾何ごとに割れるので接頭辞で束ねる）。 */
+const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
+  [...byKey].filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY)).reduce(
+    (sum, [, count]) => sum + count,
+    0,
+  );
+
 Deno.test("attention_qk i8a8: 形状群の q / k は丸め境界から十分離れている（atol=0 の前提）", () => {
   // GPU の除算は 2.5 ULP まで許されるので、`x/s` が半整数の近傍にある要素は ±1 段揺れうる。
   // 余裕を**毎回実測**して門にしないと、atol=0 は「たまたま通っているだけ」になる。
@@ -499,7 +506,7 @@ Deno.test({
           assertEquals(byKey.has(attentionPvKey(v4)), false, "f32 の attention_pv が残っている");
         }
         // 量子化は q / k / Vᵀ の 3 本（linear と同じキーを共有する）
-        assertEquals(byKey.get(QUANTIZE_ROWS_KEY), 3, "quantize_rows が q / k / v の 3 本でない");
+        assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows が q / k / v の 3 本でない");
       }
 
       // 整数内積変種のノブが attention 側にも結線されている（linear と同じ 1 つのノブ）。
@@ -539,7 +546,11 @@ Deno.test({
       if (degraded.entries.length > 0) {
         const keys = new Set(degraded.entries.map((entry) => entry.key));
         assertEquals(keys.has(attentionQkKey(false)), true, "f32 の attention_qk が走っていない");
-        assertEquals(keys.has(QUANTIZE_ROWS_KEY), false, "縮退したのに量子化が走っている");
+        assertEquals(
+          [...keys].some((key) => key.startsWith(QUANTIZE_ROWS_KEY)),
+          false,
+          "縮退したのに量子化が走っている",
+        );
         for (const dp4a of [false, true]) {
           assertEquals(
             keys.has(attentionQkI8a8Key(false, dp4a)),

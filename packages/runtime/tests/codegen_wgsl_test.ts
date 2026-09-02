@@ -165,7 +165,10 @@ import {
   QUANTIZE_ROWS_KEY,
   QUANTIZE_ROWS_WGSL,
   QUANTIZE_ROWS_WORKGROUP_SIZE,
+  quantizeRowsGeometry,
+  quantizeRowsKey,
   quantizeRowsParams,
+  quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
 import { WEIGHT_STORAGES } from "../src/kernels/weight-storage.ts";
 import { MASKED_FILL_KEY, MASKED_FILL_WGSL, maskedFillParams } from "../src/kernels/masked-fill.ts";
@@ -512,6 +515,9 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // w8a8（活性 i8 化 + 整数内積）。**dp4a 版とエミュ版の両方**を置くのが条件で、
     // 「数値は同じで速度だけ違う」という主張は生成物が 2 つ別々に存在することが前提になる。
     ["quantize_rows.wgsl", QUANTIZE_ROWS_WGSL],
+    // 小 D 変種（perf-ledger P-1 — D=128 の QK 前段が使う 8 行 × 32 レーン）。**上の従来形と
+    // 対で置く**のが条件で、変種追加で従来形のバイト列が動くのが最大の事故。
+    ["quantize_rows_r8w32.wgsl", quantizeRowsWgsl(quantizeRowsGeometry(128))],
     ["linear_i8a8.wgsl", linearI8a8Wgsl(false, true)],
     ["linear_i8a8_v4.wgsl", linearI8a8Wgsl(true, true)],
     ["linear_i8a8_emu.wgsl", linearI8a8Wgsl(false, false)],
@@ -2748,6 +2754,33 @@ Deno.test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を
     `quantize_rows:v1:f32>i8:pertoken:wg${QUANTIZE_ROWS_WORKGROUP_SIZE}`,
   );
   assertEquals(QUANTIZE_ROWS_WORKGROUP_SIZE, 256);
+  // ---- 小 D 変種（P-1）: 幾何は dim から決まり、丸めの 3 点と NaN 伝播は従来形と同じ綴り ----
+  assertEquals(quantizeRowsGeometry(1024), { lanesPerRow: 256, rowsPerGroup: 1 });
+  assertEquals(quantizeRowsGeometry(128), { lanesPerRow: 32, rowsPerGroup: 8 });
+  assertEquals(quantizeRowsGeometry(96), { lanesPerRow: 32, rowsPerGroup: 8 }, "quad 24 → 幅 32");
+  assertEquals(quantizeRowsGeometry(4), { lanesPerRow: 1, rowsPerGroup: 256 });
+  assertEquals(quantizeRowsKey(quantizeRowsGeometry(2048)), QUANTIZE_ROWS_KEY, "従来形はキー不変");
+  assertEquals(
+    quantizeRowsWgsl(quantizeRowsGeometry(2048)),
+    QUANTIZE_ROWS_WGSL,
+    "従来形は WGSL 不変",
+  );
+  assertEquals(quantizeRowsKey(quantizeRowsGeometry(128)), `${QUANTIZE_ROWS_KEY}:r8w32`);
+  const grouped = quantizeRowsWgsl(quantizeRowsGeometry(128));
+  for (
+    const line of [
+      "let s = select(max(amax * 0.007874015748031496, 1.1754943508222875e-38), amax, is_nan_bits(amax));",
+      "let r = clamp(round(v), vec4<f32>(-127.0), vec4<f32>(127.0));",
+      "xq[qbase + q] = pack4xI8(vec4<i32>(r));",
+      "acc = nan_max(acc, abs(x[base + i]));",
+      "scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
+      "rowBase = rowBase + nwg.x * 8u;",
+    ]
+  ) {
+    assertEquals(grouped.includes(line), true, `小 D 変種に無い: ${line}`);
+  }
+  assertEquals(grouped.includes("/ 127"), false);
+  assertEquals(grouped.includes("pack4xI8Clamp"), false);
   assertEquals([...quantizeRowsParams(30, 8)], [30, 8, 0, 0]);
   assertEquals(quantizeRowsParams(30, 8).byteLength, 16, "uniform struct の 16 バイト整列");
   assertThrows(() => quantizeRowsParams(30, 6), CodegenError, "4 の倍数");

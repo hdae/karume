@@ -362,6 +362,13 @@ const readbackBytes = async (
   return new Uint8Array(copy, 0, bytes);
 };
 
+/** `quantize_rows` の dispatch 数（小 D 変種でキーが幾何ごとに割れるので接頭辞で束ねる）。 */
+const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
+  [...byKey].filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY)).reduce(
+    (sum, [, count]) => sum + count,
+    0,
+  );
+
 Deno.test({
   name:
     "①QK の s16 書き出しは Math.f16round とビット一致する（pack2x16float の丸めが RTE であることの直接の門・実 GPU）",
@@ -645,7 +652,7 @@ Deno.test({
           assertEquals(byKey.has(key), false, `f32 格納の '${key}' が残っている`);
         }
         // i8a8 の前段（q / k / Vᵀ の量子化と Vᵀ の permute）は s16 に影響されない
-        assertEquals(byKey.get(QUANTIZE_ROWS_KEY), 3, "quantize_rows が q / k / v の 3 本でない");
+        assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows が q / k / v の 3 本でない");
         assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
       }
     } finally {

@@ -471,6 +471,13 @@ const observeQuantizedP = (
 // 丸め境界からの余裕（Vᵀ の量子化を atol=0 で突合してよいことの門）
 // ---------------------------------------------------------------------------
 
+/** `quantize_rows` の dispatch 数（小 D 変種でキーが幾何ごとに割れるので接頭辞で束ねる）。 */
+const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
+  [...byKey].filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY)).reduce(
+    (sum, [, count]) => sum + count,
+    0,
+  );
+
 Deno.test("attention_pv i8a8: 形状群の Vᵀ は丸め境界から十分離れている（vq 突合の前提）", () => {
   // GPU の除算（`x/s`）は 2.5 ULP まで許されるので、`x/s` が半整数の近傍にある要素は ±1 段
   // 揺れうる。余裕を**毎回実測**して門にしないと、(a2) の atol=0 は「たまたま通っているだけ」。
@@ -720,7 +727,7 @@ Deno.test({
           "②行統計は f32 のまま",
         );
         // 量子化は q / k / Vᵀ の 3 本、permute は Vᵀ の 1 本（ノード全体で 7 dispatch）
-        assertEquals(byKey.get(QUANTIZE_ROWS_KEY), 3, "quantize_rows が q / k / v の 3 本でない");
+        assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows が q / k / v の 3 本でない");
         assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
         assertEquals(
           [...byKey.values()].reduce((sum, count) => sum + count, 0),
@@ -764,7 +771,7 @@ Deno.test({
           assertEquals(byKey.has(attentionPvI8a8Key(v4, true)), false);
         }
         // 量子化は q / k の 2 本だけ・Vᵀ の permute は走らない
-        assertEquals(byKey.get(QUANTIZE_ROWS_KEY), 2, "quantize_rows が q / k の 2 本でない");
+        assertEquals(quantizeRowsDispatches(byKey), 2, "quantize_rows が q / k の 2 本でない");
         assertEquals(byKey.has(stridedKey({ dtype: "f32" })), false, "Vᵀ の permute が走っている");
       }
 
@@ -779,7 +786,7 @@ Deno.test({
           assertEquals(byKey.has(attentionQkI8a8Key(v4, true)), false);
         }
         // 量子化は Vᵀ の 1 本だけ（q / k は f32 のまま読まれる）
-        assertEquals(byKey.get(QUANTIZE_ROWS_KEY), 1, "quantize_rows が Vᵀ の 1 本でない");
+        assertEquals(quantizeRowsDispatches(byKey), 1, "quantize_rows が Vᵀ の 1 本でない");
         assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
       }
 
@@ -790,7 +797,11 @@ Deno.test({
       assertExact(degraded.output, plain.output, "両段の縮退が f32 経路と一致しない");
       if (degraded.entries.length > 0) {
         const keys = new Set(degraded.entries.map((entry) => entry.key));
-        assertEquals(keys.has(QUANTIZE_ROWS_KEY), false, "縮退したのに量子化が走っている");
+        assertEquals(
+          [...keys].some((key) => key.startsWith(QUANTIZE_ROWS_KEY)),
+          false,
+          "縮退したのに量子化が走っている",
+        );
         assertEquals(keys.has(stridedKey({ dtype: "f32" })), false, "縮退したのに permute が走る");
       }
     } finally {
