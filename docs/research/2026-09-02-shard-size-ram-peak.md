@@ -152,7 +152,7 @@ runtime の shard 受け口は「buffer の先頭からの view」を受ける�
     キャッシュ本数）の側で決めてよい。
 14. 効くのはローカル取得元（Deno / ディレクトリアダプター）だけ。HF（ブラウザ）経路は取得層
     `@hdae/fetch-cache` がキャッシュから読むたびに buffer を確保するので、`into` 相当の口を取得層へ
-    足すまで従来の係数のまま（起票）。
+    足すまで従来の係数のまま（起票 → **同日夜に消化・結果 8**）。
 
 ## 結果 6 — 器の使い回し・Mac（Apple M2 / Metal / Deno 2.9.4・ユーザー実測・各 3 回）
 
@@ -201,3 +201,32 @@ Mac（Apple M2 / Metal / Deno 2.9.4・ユーザー実測・各 3 回）の最終
 19. Mac でも shard 縮小の効きは Linux と同じ傾き（1 × shard 分 = 約 0.7GB 減 + 器の余白分）。Linux の
     766 MiB との差 ≈ 0.5〜0.7GB は結果 6 の所見 16（ユニファイドメモリで GPU 側バッファが RSS に
     混ざる分）と整合する。
+
+## 結果 8 — HF 経路の器（取得層 `into`・Linux パイプライン面・2026-09-02 夜）
+
+取得層 `@hdae/fetch-cache` に「呼び出し側のバッファへ読む」口（`into` — 向こうの ADR 0009・
+0.6.0）を足し、hub の HF アダプターが逐次面の器を渡すようにした（`hf.ts` `readFile` →
+`HfFileSpec.into`）。network 受信もキャッシュヒットの読出し（`arrayBuffer()` → body stream）も
+器の先頭へ入るので、HF 経路でも shard ごとのバッファ確保が消える。
+
+計測は疑似 HF サーバ（`examples/shared/local-dist-server.ts`）越しの `fromPretrained` →
+最小生成 1 回（anima は 512² 2 step）。cold = 取得層の永続キャッシュを消してから（相 1 の
+prefetch 込み）、warm = 全 shard キャッシュヒット。配布形は結果 7 + piece（gemma4 7 shard ≤
+254MiB・anima transformer 16 shard ≤ 256MiB）。各 1 回。
+
+| 構成            | 配線前（fetch-cache 0.5.0） | **配線後（`into`）** | 対 配線前 | 参考: ディレクトリ取得元 |
+| --------------- | --------------------------: | -------------------: | --------: | -----------------------: |
+| gemma4 i4・cold |                   1,740 MiB |          **703 MiB** |  **−60%** |                        — |
+| gemma4 i4・warm |                   1,408 MiB |          **684 MiB** |  **−51%** |             611〜615 MiB |
+| anima f16・cold |                    （未測） |          **746 MiB** |         — |                        — |
+| anima f16・warm |                   2,242 MiB |          **743 MiB** |  **−67%** |             710〜712 MiB |
+
+ロード時間は不変（gemma4 cold 24.3 → 23.8 s・warm 2.2 → 2.1 s・anima 生成込み 6.4 → 5.3 s）。
+
+所見の追記:
+
+20. HF 経路のピークも ≈ 定数 + 最大 shard 1 本になり、ディレクトリ取得元との差は 70 MiB 前後
+    （取得層・Cache Storage の分）。「係数 3」は shard ごとの `ArrayBuffer` 確保と GC の往復そのもので、
+    取得元の種類には依らないことが HF 側でも裏付けられた。
+21. Deno の Cache 実装は `Response.body` を stream で返す（全量を一度 materialize しない）— 数字が
+    それを示す。Chrome（Dawn / Cache Storage）は未測のまま（次の追試対象）。

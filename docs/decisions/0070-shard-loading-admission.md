@@ -277,3 +277,10 @@ GC しても消えない 1 本）で、定数も 1GB 級だった。shard ごと
 - 追記（2026-09-02・ADR [0090](0090-shard-spec-v3-tensor-pieces.md)）: テンソル分割（piece）を
   実装。決定 1 の co-shard は「scale は piece 1 と同じ shard」へ拡張、上限は 256MiB 1 本（ファイル長）
   へ。書き手の目標値の裁定はこれで閉じた。
+- 追記（2026-09-02 夜・取得層 `@hdae/fetch-cache` 0.6.0 `into`）: HF 取得元も器を使う。取得層に
+  「呼び出し側のバッファへ読む」口が入り（向こうの ADR 0009 — network 受信もキャッシュヒットの
+  読出しも器の先頭へ・容量不足は fail loud・single-flight の合流者へ器は渡らない）、`hf.ts` の
+  `readFile` が `into` を `HfFileSpec.into` へ配線する。「外に残るもの」の HF 経路の係数はこれで
+  閉じた（実測: gemma4 warm 1,408 → 684 MiB・anima f16 warm 2,242 → 743 MiB —
+  [research 結果 8](../research/2026-09-02-shard-size-ram-peak.md)）。組み込みの 2 取得元は
+  どちらも器を使い、器を使わないのは外部実装の取得元だけになった。

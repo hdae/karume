@@ -198,8 +198,10 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     同じ量を見る）・`SHARD_TARGET_BYTES` と実効目標の式は廃止・書き手容量 = 上限 − ヘッダ余裕 1MiB・
     `requiredLimits` は piece を親で合算。実資産で変わるのは gemma4 model / anima text_encoder /
     irodori backbone ×2 と、データ節ちょうど 256MiB だった anima transformer f16 系列（ファイル長門で再 repack）。
-    **残: ①HF 経路の器（`@hdae/fetch-cache` に into 相当の口 — 外部リポ）②Chrome の追試（HF 経路は
-    取得層対応後）**。
+    ~~①HF 経路の器~~ **消化（2026-09-02 夜）**: `@hdae/fetch-cache` に `into`（呼び出し側バッファへ
+    読む口 — 向こうの ADR 0009・0.6.0）を足し、hub の HF アダプターが逐次面の器を渡す。実測 gemma4
+    warm 1,408 → 684 MiB・anima f16 warm 2,242 → 743 MiB（ディレクトリ取得元 + 約 70 MiB —
+    [research 結果 8](research/2026-09-02-shard-size-ram-peak.md)）。karume 側は fetch-cache 0.6.0 公開後にコミット済み（2026-09-03 — `@hdae/fetch-cache@^0.6.0`・`hf.ts` 配線・`stream_test` の drain 写し化）。**残: ②Chrome の追試（HF 経路・ユーザー実行）**。
     隣接起票（ADR 0089 Consequences）: createResident / run 時 transient の同型弱点・
     PLE sidecar は extras 席で shard 門の外。+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
     A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+

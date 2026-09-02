@@ -11,7 +11,7 @@
 
 ## Now
 
-- **並列作業（2026-09-02 深夜 — 裁定済み優先順）**: ①DL 改善 = 実測で b+a を kill（[research](../docs/research/2026-09-02-cold-load-dl-timeline.md)・残る問い = 実回線の同時本数）②gemma4 対話 example 第 2 弾 = **全消化**（②〜⑧ `f7f0b66` `c659dd9`・① ChatSession `d72bd9d` = 溢れ処理は注入 + 既定 clear・残起票 = send の prefill 進捗の口）③perf: P-1 採用（`3175161`・短い行 ×4.1）・P-2 採用（`e7b4489`・submit −95%・壁は揺れ内・追試 no-ref / Chrome）・P-3 実装済み（`9591783`・VAE A/B と視認は実行中） ④可変 capacity 波（RoPE 表 TS 正本ホスト生成 + 見積り結線）= P 依存計測を先行 ⑤TurboQuant = 記録のみ（perf-ledger Q-11 / L-10）。hub HF `into` 配線は stash@{0}（fetch-cache 0.6.0 公開待ち）。
+- **並列作業（2026-09-02 深夜 — 裁定済み優先順）**: ①DL 改善 = 実測で b+a を kill（[research](../docs/research/2026-09-02-cold-load-dl-timeline.md)・残る問い = 実回線の同時本数）②gemma4 対話 example 第 2 弾 = **全消化**（②〜⑧ `f7f0b66` `c659dd9`・① ChatSession `d72bd9d` = 溢れ処理は注入 + 既定 clear・残起票 = send の prefill 進捗の口）③perf: P-1 採用（`3175161`・短い行 ×4.1）・P-2 採用（`e7b4489`・submit −95%・壁は揺れ内・追試 no-ref / Chrome）・P-3 実装済み（`9591783`・VAE A/B と視認は実行中） ④可変 capacity 波（RoPE 表 TS 正本ホスト生成 + 見積り結線）= P 依存計測を先行 ⑤TurboQuant = 記録のみ（perf-ledger Q-11 / L-10）。hub HF `into` 配線はコミット済み（fetch-cache 0.6.0）。
 - **モデル更新波（2026-09-01 裁定 — 実装中・詳細は [backlog](../docs/backlog.md) now の
   「モデル更新波」）**: **N1 Irodori v4.1-small = ローカル完了**（凍結をバイトで確証・
   全系列 export + dist + スモーク緑・pin 新設と examples 既定切替はリリース時 = runbook §3。
@@ -41,8 +41,10 @@
   shard 1 本（anima 4,069 → 1,402 MiB）・HF 経路は取得層側の対応待ち。**shard 目標 256MiB も反映済み**（ADR 0081
   追記・実効目標 = max(目標, 最大単位)・全ミラー再生成 — anima 1GiB shard → 256MiB で 1,402 → 約 0.7GB 見込み）。
   C-2 テンソル分割も実装済み（2026-09-02・ADR 0090 — piece・受理上限 256MiB 1 本をファイル長で・書き手容量
-  255MiB・実資産は 4 コンポーネント + 256MiB ちょうどの transformer 系列を再 repack）。残 = HF 経路の器
-  （fetch-cache の into）** → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
+  255MiB・実資産は 4 コンポーネント + 256MiB ちょうどの transformer 系列を再 repack）。HF 経路の器も
+  消化（2026-09-02 夜 — fetch-cache 0.6.0 `into` + hub HF アダプター配線・gemma4 warm 1,408 → 684 MiB。
+  0.6.0 公開後にコミット済み 2026-09-03）。残 = Chrome 追試** → export-recipes 切り出し（案 A = レシピのみ・
+  core 残留）。
 - **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
   Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
   台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・
