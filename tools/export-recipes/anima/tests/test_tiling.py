@@ -2,10 +2,11 @@
 
 ここで固定するのは、壊れても例外が出ず**数だけが静かにずれる**側:
 
-- 等間隔スナップ配置の不変条件（`(extent − tile) % stride == 0` / 末尾が `extent − tile` /
-  重なりが下限以上 / 本数が最小）
+- 丸め等間隔スナップ配置の不変条件（末尾が `extent − tile` / 重なりが下限以上 /
+  本数が解析式どおり / 間隔のばらつきが高々 1 latent）
+- 開始位置が TS 側（`packages/models/src/anima/tiling.ts`）と一致すること
 - ブレンド式が上流（`AutoencoderKLQwenImage.blend_v` / `blend_h`）と**ビット一致**
-- 貼り付けの担当領域（stride 幅で切り詰めると末端が欠ける — 上流からの意図的逸脱の帰結）
+- 貼り付けの担当領域（間隔ぶんで切り詰めると末端が欠ける — 上流からの意図的逸脱の帰結）
 
 実重みでの参照フィクスチャ生成は手動（モジュール doc）。
 """
@@ -17,52 +18,66 @@ import torch
 
 from anima import tiling as anima_tiling
 
+#: TS 側（`packages/models/src/anima/tiling.ts` の `planTileAxis`）と一致する開始位置の実測
+#: （辺 px → latent の開始位置列）。**両実装の一致を機械で突き合わせる経路が無い**
+#: （フィクスチャ生成は手動）ので、代表 3 辺を値で凍結して鏡像のずれを検出する。1456px は
+#: 旧規則で 60 本に跳ねて入口で拒否していた辺、1824px は P-3 の測定対象。
+MIRRORED_STARTS = {
+    1024: (0, 32, 64),
+    1456: (0, 39, 79, 118),
+    1824: (0, 55, 109, 164),
+}
+
 
 class TestPlanTileAxis:
-    def test_1024_latent_is_three_tiles_of_stride_32(self):
-        """1024px（latent 128）は 3 タイル・stride 32・重なり latent 32（= sample 256）。"""
+    @pytest.mark.parametrize("side", sorted(MIRRORED_STARTS))
+    def test_starts_match_the_ts_side(self, side):
+        axis = anima_tiling.plan_tile_axis(side // anima_tiling.SPATIAL_COMPRESSION, 64, 8)
+
+        assert axis.starts == MIRRORED_STARTS[side]
+
+    def test_1024_latent_is_three_tiles_blended_over_256_sample_px(self):
+        """1024px（latent 128）は 3 タイル・重なり latent 32（= sample 256）— 旧規則と同配置。"""
         axis = anima_tiling.plan_tile_axis(128, 64, 8)
 
         assert axis.starts == (0, 32, 64)
-        assert axis.stride == 32
-        assert axis.blend(8) == 256
+        assert axis.blends(8) == [256, 256]
 
     def test_single_tile_degenerates_without_blending(self):
-        """`extent == tile`（512px）は 1 枚・ブレンド幅 0 — 非タイル経路とビット同一の前提。"""
+        """`extent == tile`（512px）は 1 枚・ブレンド対なし — 非タイル経路とビット同一の前提。"""
         axis = anima_tiling.plan_tile_axis(64, 64, 8)
 
         assert axis.starts == (0,)
-        assert axis.stride == 64
-        assert axis.blend(8) == 0
+        assert axis.blends(8) == []
 
-    @pytest.mark.parametrize("extent", [64, 80, 96, 112, 128, 160, 192, 256, 384, 512])
+    @pytest.mark.parametrize(
+        "extent", [64, 80, 96, 112, 128, 160, 182, 192, 228, 242, 256, 384, 512]
+    )
     def test_invariants_hold_for_every_extent(self, extent):
-        """固定形の decoder が食える配置であることの不変条件（本数から stride を決める帰結）。"""
+        """固定形の decoder が食える配置であることの不変条件（丸め等間隔配置の帰結）。"""
         axis = anima_tiling.plan_tile_axis(extent, 64, 8)
+        span = extent - 64
+        gaps = [second - first for first, second in zip(axis.starts, axis.starts[1:], strict=False)]
 
         assert axis.starts[0] == 0
-        assert axis.starts[-1] == extent - 64, "最後のタイルは末端へスナップする"
-        assert (extent - 64) % axis.stride == 0
-        assert all(
-            second - first == axis.stride
-            for first, second in zip(axis.starts, axis.starts[1:], strict=False)
-        ), "開始位置は等間隔"
-        assert axis.tile - axis.stride >= 8 or len(axis.starts) == 1
+        assert axis.starts[-1] == span, "最後のタイルは末端へスナップする"
+        assert all(64 - gap >= 8 for gap in gaps), "どの対も重なりが下限以上"
+        assert axis.blends(8) == [(64 - gap) * 8 for gap in gaps]
+        # 丸め等間隔の実体 = 間隔（したがってブレンド幅）の差は高々 1 latent。上流同型の
+        # 「固定 stride + 末尾だけスナップ」に退行すると最後の対だけ大きく開いて割れる。
+        assert not gaps or max(gaps) - min(gaps) <= 1, f"間隔のばらつき {gaps}"
 
-    @pytest.mark.parametrize("extent", [80, 96, 112, 128, 160, 192, 256, 384, 512])
+    @pytest.mark.parametrize("extent", [80, 96, 112, 128, 160, 182, 192, 228, 242, 256, 384, 512])
     def test_tile_count_is_minimal(self, extent):
-        """本数は「重なりの下限を満たす最小」— 1 本減らすと下限を割るか割り切れない。
+        """本数は「重なりの下限だけを制約にした最小」= `ceil(span / (tile − 下限)) + 1`。
 
-        これが無いと「常に stride 1」のような安全側の実装が緑のまま通り、タイル数が
+        これが無いと「常に間隔 1」のような安全側の実装が緑のまま通り、タイル数が
         跳ね上がる（時間の冗長がそのまま効く）。
         """
         axis = anima_tiling.plan_tile_axis(extent, 64, 8)
         span = extent - 64
 
-        for count in range(2, len(axis.starts)):
-            assert span % (count - 1) != 0 or 64 - span // (count - 1) < 8, (
-                f"{count} 本で足りるのに {len(axis.starts)} 本になっている"
-            )
+        assert len(axis.starts) == -(-span // (64 - 8)) + 1
 
     def test_minimum_overlap_is_honored(self):
         """重なりの下限を上げると本数が増える（下限が本当に効いている）。"""
@@ -70,7 +85,7 @@ class TestPlanTileAxis:
         tight = anima_tiling.plan_tile_axis(128, 64, 48)
 
         assert len(tight.starts) > len(loose.starts)
-        assert tight.tile - tight.stride >= 48
+        assert all(tight.blend_at(1, index) >= 48 for index in range(1, len(tight.starts)))
 
     def test_extent_shorter_than_the_tile_is_rejected(self):
         """固定形の decoder は短い入力を食えない — 黙ってゼロ埋めしない。"""
@@ -80,6 +95,11 @@ class TestPlanTileAxis:
     def test_overlap_at_or_above_the_tile_width_is_rejected(self):
         with pytest.raises(ValueError, match="最小の重なり"):
             anima_tiling.plan_tile_axis(128, 64, 64)
+
+    def test_a_pair_outside_the_axis_is_rejected(self):
+        """縮退（1 枚）に対を求めるのは幾何の取り違え — 0 を返して黙って素通ししない。"""
+        with pytest.raises(ValueError, match="ブレンド対"):
+            anima_tiling.plan_tile_axis(64, 64, 8).blend_at(8, 1)
 
 
 class TestPlanTiling:
@@ -106,9 +126,8 @@ class TestGeometryMeta:
         assert meta["rows"] == {
             "extent": 128,
             "tile": 64,
-            "stride": 32,
             "starts": [0, 32, 64],
-            "blend_sample": 256,
+            "blend_sample": [256, 256],
         }
         assert meta["cols"] == meta["rows"]
 
@@ -180,9 +199,9 @@ class TestTiledDecode:
     def test_linear_ramp_is_reconstructed_across_the_seams(self, axis):
         """位置依存の decoder に対する解析解と一致する。
 
-        extent 16 / tile 8 / stride 4（重なり 4）で開始位置は 0,4,8。タイル内の値が
+        extent 16 / tile 8 / 間隔 4（重なり 4）で開始位置は 0,4,8。タイル内の値が
         `0..7` の傾斜のとき、貼り合わせ後は `0,1,2,3` → 中間は全て 4 → 末尾が `4,5,6,7`
-        になる（重なり幅の線形ランプが傾斜を平坦へ潰す）。ブレンドの向き反転・stride の
+        になる（重なり幅の線形ランプが傾斜を平坦へ潰す）。ブレンドの向き反転・間隔の
         off-by-one・末端タイルのスナップ落とし・担当領域の取り違えは全てここで割れる。
         """
         geometry = anima_tiling.plan_tiling((1, 2, 16, 16), tile=8, min_overlap=2, scale=1)
@@ -195,7 +214,7 @@ class TestTiledDecode:
         assert torch.equal(line, expected)
 
     def test_the_far_edge_is_covered(self):
-        """末端まで覆う（stride 幅で切り詰めるだけだと `n·stride < extent` で欠ける）。"""
+        """末端まで覆う（間隔ぶんで切り詰めるだけだと総和が `extent − tile` で欠ける）。"""
         geometry = anima_tiling.plan_tiling((1, 2, 16, 16), tile=8, min_overlap=2, scale=1)
 
         out = anima_tiling.tiled_decode(

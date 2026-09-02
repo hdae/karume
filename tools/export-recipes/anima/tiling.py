@@ -9,7 +9,7 @@ Karume の VAE decoder のグラフは**解像度に対して構造不変**な�
 
 MUST: `vae.enable_tiling()` を**呼ばない**。上流（`autoencoder_kl_qwenimage.tiled_decode`）は
 `range(0, H, stride)` で走査するので最後のタイルが短くなり、固定形のタイル decoder では
-食えない。走査は「最後のタイルの開始位置を `extent − tile` にスナップする等間隔配置」へ
+食えない。走査は「最後のタイルの開始位置を `extent − tile` にスナップする丸め等間隔配置」へ
 変えてある（recon §4.2 が予告した意図的逸脱）— したがって幾何は**自前実装**でなければ
 TS 側と一致しない。**ブレンドの式**は上流の `blend_v` / `blend_h` の逐語移植で、同値は
 `anima/tests/test_tiling.py` が本物のメソッドとの突合で固定する。
@@ -21,7 +21,7 @@ MUST: 重みは資産系列と同じ dtype へ fake-quant してから参照を�
 出力（既定 `<repo>/outputs/series/anima-tiling-f16-1024/`）:
 
     tiling.safetensors   latents_denorm（タイル decode の入力）/ image_tiled（出力）
-    tiling.json          タイル幾何（開始位置列・stride・ブレンド幅）とメタ
+    tiling.json          タイル幾何（開始位置列・対ごとのブレンド幅）とメタ
 
     uv run python -m anima.tiling
     uv run python -m anima.tiling --dtype f16 --resolution 1024
@@ -67,16 +67,28 @@ SPATIAL_COMPRESSION = 8
 
 @dataclass(frozen=True)
 class TileAxis:
-    """latent の 1 軸ぶんのタイル配置（TS 側 `TileAxis` と同じ意味論）。"""
+    """latent の 1 軸ぶんのタイル配置（TS 側 `TileAxis` と同じ意味論）。
+
+    MUST: 開始位置の差（間隔）を欄として持たない — 丸め等間隔なので対ごとに 1 latent まで
+    動く。要るところで `starts` から引く（`blend_at`）。
+    """
 
     extent: int
     tile: int
-    stride: int
     starts: tuple[int, ...]
 
-    def blend(self, scale: int) -> int:
-        """ブレンド幅（**sample 空間** — 上流の `blend_height` / `blend_width` と同じ単位）。"""
-        return (self.tile - self.stride) * scale
+    def blend_at(self, scale: int, index: int) -> int:
+        """対 `(index − 1, index)` のブレンド幅（**sample 空間** — 上流と同じ単位）。"""
+        if not 1 <= index < len(self.starts):
+            raise ValueError(
+                f"ブレンド対 {index} が範囲外（開始位置 {len(self.starts)} 本 = "
+                f"対 {len(self.starts) - 1} 組）"
+            )
+        return (self.tile - (self.starts[index] - self.starts[index - 1])) * scale
+
+    def blends(self, scale: int) -> list[int]:
+        """全対のブレンド幅（先頭のタイルには対が無いので `本数 − 1` 個）。"""
+        return [self.blend_at(scale, index) for index in range(1, len(self.starts))]
 
 
 @dataclass(frozen=True)
@@ -92,11 +104,11 @@ class TileGeometry:
 
 
 def plan_tile_axis(extent: int, tile: int, min_overlap: int) -> TileAxis:
-    """1 軸ぶんの等間隔スナップ配置（TS 側 `planTileAxis` と同じ規則）。
+    """1 軸ぶんの丸め等間隔スナップ配置（TS 側 `planTileAxis` と同じ規則）。
 
-    「重なり `tile − stride` が `min_overlap` 以上」を満たす**最小のタイル本数**を選び、
-    本数から stride を割り出す。本数から決めるので `(extent − tile) % stride == 0` は
-    構成上つねに成立する。
+    本数は「重なりが `min_overlap` 以上」を満たす最小値 `ceil(span / (tile − min_overlap)) + 1`
+    （`span = extent − tile`）、開始位置は `round(i · span / (本数 − 1))`。間隔が整数に
+    割り切れる必要は無く、丸めの誤差が ±0.5 に収まるので間隔は 2 値にしかならない。
     """
     if tile < 1:
         raise ValueError(f"タイル幅 {tile} が 1 未満")
@@ -106,18 +118,23 @@ def plan_tile_axis(extent: int, tile: int, min_overlap: int) -> TileAxis:
         raise ValueError(f"最小の重なり {min_overlap} が [0, {tile}) の外")
     span = extent - tile
     if span == 0:
-        # 縮退: 1 枚。stride = tile とすると重なり 0 → ブレンド無し・貼り付けは素の写し。
-        return TileAxis(extent=extent, tile=tile, stride=tile, starts=(0,))
-    for count in range(2, span + 2):
-        if span % (count - 1) != 0:
-            continue
-        stride = span // (count - 1)
-        if tile - stride < min_overlap:
-            continue
-        return TileAxis(
-            extent=extent, tile=tile, stride=stride, starts=tuple(i * stride for i in range(count))
-        )
-    raise ValueError(f"latent {extent} をタイル {tile}（最小の重なり {min_overlap}）で覆えない")
+        # 縮退: 1 枚。対が 1 つも無いのでブレンド無し・貼り付けは素の写し。
+        return TileAxis(extent=extent, tile=tile, starts=(0,))
+    count = -(-span // (tile - min_overlap)) + 1
+    # MUST: 組み込みの `round` を使わない — Python は偶数丸め・TS の `Math.round` は
+    # 0.5 切り上げで、ちょうど半分になる対だけ両者の開始位置が黙って 1 latent ずれる。
+    # 整数演算の floor((2·i·span + (本数 − 1)) / (2·(本数 − 1))) は 0.5 切り上げそのもの。
+    starts = tuple((2 * index * span + (count - 1)) // (2 * (count - 1)) for index in range(count))
+    # 重なりの下限は本数の式から導けるが、その導出は丸めの誤差評価に依っていて目で追えない。
+    # 破れたら継ぎ目がランプで隠れなくなる（絵にしか出ない沈黙誤り）ので、構造で落とす。
+    for index in range(1, count):
+        overlap = tile - (starts[index] - starts[index - 1])
+        if overlap < min_overlap:
+            raise ValueError(
+                f"タイル {index - 1}/{index} の重なり {overlap} が下限 {min_overlap} 未満"
+                f"（latent {extent} / タイル {tile} / 開始位置 {starts}）"
+            )
+    return TileAxis(extent=extent, tile=tile, starts=starts)
 
 
 def plan_tiling(
@@ -165,9 +182,10 @@ def tiled_decode(decode, z: torch.Tensor, geometry: TileGeometry) -> torch.Tenso
 
     MUST: ブレンドは **縦（上のタイル）→ 横（左のタイル）** の順・タイル配列は in-place に
     書き換える（上流 `tiled_decode` と同じ — 隣に効くのは**ブレンド済み**のタイル）。
+    MUST: ブレンド幅は**対ごと**に引く（丸め等間隔なので対で 1 latent まで違う）。
     MUST: 貼り付けは「タイル i の担当領域 = `[starts[i], starts[i+1])`、最後だけ末端まで」の
-    領域割り当て（上流の「stride 幅へ切り詰め + 全体 crop」の等間隔スナップ版）。素朴に
-    stride 幅で切り詰めると `n·stride = extent − 重なり` にしかならず末端が欠ける。
+    領域割り当て（上流の「間隔ぶんへ切り詰め + 全体 crop」のスナップ版）。素朴に間隔ぶんで
+    切り詰めると総和が `extent − tile` にしかならず末端が欠ける。
     """
     rows_axis, cols_axis = geometry.rows, geometry.cols
     scale = geometry.scale
@@ -179,14 +197,12 @@ def tiled_decode(decode, z: torch.Tensor, geometry: TileGeometry) -> torch.Tenso
             row.append(decode(tile.contiguous()))
         tiles.append(row)
 
-    blend_rows = rows_axis.blend(scale)
-    blend_cols = cols_axis.blend(scale)
     for i, row in enumerate(tiles):
         for j, tile in enumerate(row):
             if i > 0:
-                tile = blend_v(tiles[i - 1][j], tile, blend_rows)
+                tile = blend_v(tiles[i - 1][j], tile, rows_axis.blend_at(scale, i))
             if j > 0:
-                tile = blend_h(row[j - 1], tile, blend_cols)
+                tile = blend_h(row[j - 1], tile, cols_axis.blend_at(scale, j))
             row[j] = tile
 
     sample = tiles[0][0]
@@ -222,9 +238,8 @@ def geometry_meta(geometry: TileGeometry) -> dict[str, Any]:
         return {
             "extent": value.extent,
             "tile": value.tile,
-            "stride": value.stride,
             "starts": list(value.starts),
-            "blend_sample": value.blend(geometry.scale),
+            "blend_sample": value.blends(geometry.scale),
         }
 
     return {
@@ -281,9 +296,8 @@ def main() -> None:
     geometry = plan_tiling(tuple(latents.shape))
     print(
         f"[geometry] {geometry.rows.starts} × {geometry.cols.starts} / tile {TILE_LATENT} / "
-        f"stride {geometry.rows.stride},{geometry.cols.stride} / "
-        f"blend(sample) {geometry.rows.blend(geometry.scale)},{geometry.cols.blend(geometry.scale)}"
-        f" / {geometry.tiles} タイル",
+        f"blend(sample) {geometry.rows.blends(geometry.scale)}"
+        f"×{geometry.cols.blends(geometry.scale)} / {geometry.tiles} タイル",
         flush=True,
     )
 

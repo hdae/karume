@@ -11,7 +11,6 @@ import {
   formatResolution,
   MAX_DIT_TOKENS,
   MAX_RESOLUTION_SIDE,
-  MAX_TILES_PER_AXIS,
   MIN_RESOLUTION_SIDE,
   parseResolution,
   RESOLUTION_GRANULARITY,
@@ -30,11 +29,40 @@ const CANDIDATE_SIDES = ((): readonly number[] => {
 })();
 
 /**
- * VAE タイルの本数が跳ねる辺（実測 — `planTileAxis` は「重なりを満たす最小本数」を
- * `extent − tile` の**約数**から選ぶので、約数の乏しい辺だけが 60 本以上に化ける）。
- * この一覧は受理集合の実測そのものなので、判定式ではなく**値**で置く。
+ * 丸め等間隔配置（ADR 0033 追記 2026-09-02）で**本数が旧規則から変わる辺**の実測
+ * （P-3 スパイク）。`[辺, 旧本数, 新本数]`。旧規則は本数を `extent − tile` の約数から
+ * 選んでいたので、約数の乏しい辺だけが 60 本以上に化けており、10 本超の 8 通り
+ * （1456 / 1488 / 1584 / 1648 / 1680 / 1776 / 1840 / 1936）は入口で拒否していた。
+ *
+ * この表に無い 73 辺は本数も配置も旧規則と同一 = **出荷バイト不変**（1024² / 512² /
+ * 1344×768 系の配置そのものは `anima_tiling_test.ts` が literal で凍結する）。
  */
-const EXPLODING_SIDES: readonly number[] = [1456, 1488, 1584, 1648, 1680, 1776, 1840, 1936];
+const RECOUNTED_SIDES: readonly (readonly [number, number, number])[] = [
+  [1440, 5, 4],
+  [1456, 60, 4],
+  [1488, 62, 4],
+  [1504, 5, 4],
+  [1536, 5, 4],
+  [1552, 6, 4],
+  [1584, 68, 4],
+  [1600, 5, 4],
+  [1632, 5, 4],
+  [1648, 72, 4],
+  [1680, 74, 4],
+  [1696, 5, 4],
+  [1728, 5, 4],
+  [1744, 8, 4],
+  [1776, 80, 4],
+  [1792, 5, 4],
+  [1824, 5, 4],
+  [1840, 84, 4],
+  [1872, 6, 5],
+  [1904, 7, 5],
+  [1936, 90, 5],
+  [1968, 8, 5],
+  [2000, 7, 5],
+  [2032, 6, 5],
+];
 
 /** その辺を VAE タイルで覆う本数（分割計画そのものを回して数える）。 */
 const tilesOf = (side: number): number =>
@@ -60,7 +88,7 @@ Deno.test("parseResolution: 綴りでない入力を落とす（既定へ縮退�
   }
 });
 
-Deno.test("受理集合: 5 条件をそれぞれ名指しで落とす", () => {
+Deno.test("受理集合: 4 条件をそれぞれ名指しで落とす", () => {
   // ①刻み（16 の倍数）— 8 の倍数でも latent が patch 2 で割り切れない。
   assertThrows(() => parseResolution("1352x768"), Error, `${RESOLUTION_GRANULARITY} の倍数でない`);
   // ②下限（VAE タイル decoder の latent 64 が入らない）。
@@ -70,11 +98,9 @@ Deno.test("受理集合: 5 条件をそれぞれ名指しで落とす", () => {
   // ④S の上限。現行定数では各辺の天井が S の上限を含意するので**超える形は作れない**
   // （2048×2048 = 16,384 がちょうど上限 — 定数関係そのものは下の門が固定する）。
   assertEquals(parseResolution("2048x2048"), { width: 2048, height: 2048 });
-  // ⑤VAE タイルの本数（内訳は下の 3 本）。
-  assertThrows(() => parseResolution("1456x1024"), Error, "VAE タイルが");
 });
 
-Deno.test("assertAcceptableResolution: 構造体で渡す経路も同じ 5 条件で見る", () => {
+Deno.test("assertAcceptableResolution: 構造体で渡す経路も同じ 4 条件で見る", () => {
   // manifest の `pipelineConfig.defaults.resolution` と `generate` の request はここを通る
   // （綴りを経由しないので、綴り側だけに検査があると素通しになる）。
   assertAcceptableResolution({ width: 1024, height: 1024 });
@@ -96,9 +122,9 @@ Deno.test("受理集合: 4 パターン（16:9 / 3:4 の縦横）が全て S=4,0
   }
 });
 
-Deno.test("タイル本数: 跳ねる 8 通りだけを落とし、他の辺は 1 つも落とさない", () => {
-  // 本数の条件を足したことで**既存の受理値が巻き添えで落ちない**ことが要点。落ちる集合を
-  // 判定式ではなく実測の値で固定するので、閾や `planTileAxis` を触れば赤くなる。
+Deno.test("受理集合: 刻みの上に並ぶ辺を 1 つも落とさない（タイル本数の門は撤廃）", () => {
+  // 旧規則では本数が跳ねる 8 通りを入口で拒否していた（対症の門 — P-3 で根治）。落ちる集合が
+  // 空であることを両軸で見るので、拒否がどこかへ復活すればここで割れる。
   for (const axis of ["width", "height"] as const) {
     const rejected = CANDIDATE_SIDES.filter((side) => {
       try {
@@ -110,49 +136,38 @@ Deno.test("タイル本数: 跳ねる 8 通りだけを落とし、他の辺は 
         return true;
       }
     });
-    assertEquals(rejected, [...EXPLODING_SIDES], `${axis} 軸で落ちた辺`);
+    assertEquals(rejected, [], `${axis} 軸で落ちた辺`);
   }
 });
 
-Deno.test("タイル本数: 本数を名指しし、近傍の受理値を添えて落ちる", () => {
-  // 「1 つ下の刻み」を機械的に案内すると、また跳ねる形を勧めうる（跳ねる辺は飛び飛びに現れる）。
-  // 実際に通る値が診断に載ることを、両側の近傍で見る。
-  for (
-    const [raw, tiles, nearby] of [
-      ["1456x1024", 60, "1440 / 1472"],
-      ["1024x1680", 74, "1664 / 1696"],
-      ["1936x1024", 90, "1920 / 1952"],
-    ] as const
-  ) {
-    const error = assertThrows(
-      () => parseResolution(raw),
-      Error,
-      `VAE タイルが ${tiles} 本`,
-      `${raw} の本数`,
-    );
-    assert(
-      error.message.includes(`近傍の受理値: ${nearby}`),
-      `${raw} の診断に近傍の受理値が無い: ${error.message}`,
-    );
-    // 案内された値は本当に受理される（診断が行き止まりを勧めていない）。
-    for (const side of nearby.split(" / ")) {
-      assertAcceptableResolution({ width: Number(side), height: Number(side) });
-    }
-  }
+Deno.test("タイル本数: 全 97 辺で 5 本以下（本数が跳ねる辺はもう存在しない）", () => {
+  // 入口から本数の門を外せる根拠そのもの。`decodeTiled` は decode 出力を全枚数ぶん抱えるので
+  // 本数の上限がホスト RAM の上限になる — 跳ねる辺が復活したら（= 配置規則が退行したら）
+  // 拒否ではなく OOM で出る。ここで先に割れるようにしておく。
+  const worst = Math.max(...CANDIDATE_SIDES.map(tilesOf));
+  assertEquals(worst, 5, `辺あたりの最大タイル本数（両辺最悪でも ${worst * worst} 枚）`);
 });
 
-Deno.test("MAX_TILES_PER_AXIS: 閾が実測の谷間（受理側の最大と拒否側の最小の間）にある", () => {
-  // 上限の置き所そのものの門。受理側が 8 本・拒否側が 60 本で大きく離れているという実測が
-  // 閾 10 の根拠なので、その谷間が消えたら（= 分割計画が変わったら）ここで気づく。
-  const accepted = CANDIDATE_SIDES.filter((side) => !EXPLODING_SIDES.includes(side));
-  const worstAccepted = Math.max(...accepted.map(tilesOf));
-  const bestRejected = Math.min(...EXPLODING_SIDES.map(tilesOf));
-  assertEquals(worstAccepted, 8, "受理側の最大本数");
-  assertEquals(bestRejected, 60, "拒否側の最小本数");
-  assert(
-    worstAccepted <= MAX_TILES_PER_AXIS && MAX_TILES_PER_AXIS < bestRejected,
-    `閾 ${MAX_TILES_PER_AXIS} が谷間 (${worstAccepted}, ${bestRejected}) の外にある`,
-  );
+Deno.test("タイル本数: 旧規則から変わる 24 辺の新しい本数を実測で凍結する", () => {
+  // 変わらない 73 辺は配置まで旧規則と同一 = 出荷バイト不変。変わる辺は**値で**凍結する
+  // （式で書くと `tilesOf` の写しになって門が空虚になる）。
+  const recounted = new Map(RECOUNTED_SIDES.map(([side, , after]) => [side, after]));
+  for (const side of CANDIDATE_SIDES) {
+    const expected = recounted.get(side);
+    if (expected !== undefined) assertEquals(tilesOf(side), expected, `${side}px の新本数`);
+  }
+  // 旧本数が上限 10 本を超えていた 8 通り（= 旧規則が入口で拒否していた辺）が全て復帰した。
+  const restored = RECOUNTED_SIDES.filter(([, before]) => before > 10).map(([side]) => side);
+  assertEquals(restored, [1456, 1488, 1584, 1648, 1680, 1776, 1840, 1936], "復帰した辺");
+  for (const side of restored) assertAcceptableResolution({ width: side, height: 1024 });
+});
+
+Deno.test("タイル枚数: 1824×1248 は 4×3 = 12 枚（旧規則は 5×3 = 15 枚）", () => {
+  // P-3 の測定対象そのもの。枚数がそのまま VAE decode の実行時間に効くので、外挿の前提を
+  // 数で押さえる（実 GPU の A/B は e2e 側）。
+  assertAcceptableResolution({ width: 1824, height: 1248 });
+  assertEquals(tilesOf(1824), 4, "幅 1824px");
+  assertEquals(tilesOf(1248), 3, "高さ 1248px");
 });
 
 Deno.test('定数関係: 各辺の天井を使い切っても S は Dim("S") の上限に収まる', () => {

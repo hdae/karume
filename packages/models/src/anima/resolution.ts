@@ -12,9 +12,9 @@
  * 組めるか（`tiling.ts` の `planTileAxis`）は、資産から引いた実際の値で別途落ちる。ここの
  * 定数はその**写し**で、資産を差し替えたときに追随するのは向こう側である。
  *
- * NOTE: 例外はタイルの**本数**で、これは写しを持たず `planTileAxis` をそのまま呼んで数える
- * （本数の決まり方は約数の乏しさに依存する非自明な式なので、二重に持つと必ず割れる）。
- * タイル幅と最小の重なりは向こう側の値を引く。
+ * NOTE: タイルの**本数**は入口で見ない。丸め等間隔配置（ADR 0033 追記 2026-09-02）では
+ * `ceil((latent − 64) / 56) + 1` で、この受理集合の上限 latent 256 でも 5 本にしかならない
+ * ため、跳ねる辺そのものが存在しない。下限 512px を満たせばタイルは必ず組める。
  *
  * MUST: 受理集合を manifest に書かない（ADR 0038 §2「導出元を一意に保つ」）— アーキ定数は
  * パイプライン実装、`S` の上限は dyn グラフの `Dim` 宣言、資産の実在は weights / assets 表。
@@ -22,7 +22,6 @@
  */
 
 import { ANIMA_SPATIAL_COMPRESSION } from "./dit-tokens.ts";
-import { MIN_TILE_OVERLAP_LATENT, planTileAxis } from "./tiling.ts";
 
 /** 画像の寸法（ピクセル）。軸の順は綴りと同じ `幅 × 高さ`。 */
 export type ImageSize = {
@@ -58,51 +57,6 @@ export const MAX_RESOLUTION_SIDE = MAX_LATENT_SIDE * ANIMA_SPATIAL_COMPRESSION;
 /** トークン長 `S` の上限（S 形グラフの `Dim("S", max=16384)` — ADR 0034）。 */
 export const MAX_DIT_TOKENS = 16384;
 
-/** VAE タイル decoder の latent 1 辺（下限 512px の由来そのもの）。 */
-const VAE_TILE_LATENT_SIDE = MIN_RESOLUTION_SIDE / ANIMA_SPATIAL_COMPRESSION;
-
-/**
- * 1 辺あたりの VAE タイル本数の上限。
- *
- * `planTileAxis` は「重なりを満たす**最小本数**」を `extent − tile` の約数の中から選ぶので、
- * 約数の乏しい辺では本数が跳ねる（1456px = latent 182・span 118 = 2·59 → 60 本）。
- * `decodeTiled` は全タイルの decode 出力を抱えたまま貼り付けへ渡すため、両辺が跳ねると
- * ホスト確保は枚数の積で効く（1680px は 74×74 = 5,476 枚 ≈ 17GiB）。実質実行不能なのに
- * どこも fail loudly しないので、入口で名指しして落とす。
- *
- * 閾は実測の谷間に置く: 受理集合の他の辺は最大 8 本で、跳ねる 8 通りは 60 本以上と離れている
- * （`anima_resolution_test.ts` が本数の実測でこの谷間を固定する）。
- */
-export const MAX_TILES_PER_AXIS = 10;
-
-/** その辺を VAE タイルで覆うのに要る本数（式は `planTileAxis` と共有する）。 */
-const tilesOf = (side: number): number =>
-  planTileAxis(side / ANIMA_SPATIAL_COMPRESSION, VAE_TILE_LATENT_SIDE, MIN_TILE_OVERLAP_LATENT)
-    .starts.length;
-
-/**
- * 近傍の受理値（下側・上側それぞれ最も近い、本数の条件まで満たす辺）。
- *
- * 跳ねる辺は刻みの並びの中に飛び飛びで現れるので、「1 つ下の刻み」を機械的に案内すると
- * また跳ねる形を勧めうる。実際に数え直して通る値だけを返す。
- */
-const nearbyAcceptableSides = (side: number): number[] => {
-  const found: number[] = [];
-  for (const step of [-RESOLUTION_GRANULARITY, RESOLUTION_GRANULARITY]) {
-    for (
-      let candidate = side + step;
-      candidate >= MIN_RESOLUTION_SIDE && candidate <= MAX_RESOLUTION_SIDE;
-      candidate += step
-    ) {
-      if (tilesOf(candidate) <= MAX_TILES_PER_AXIS) {
-        found.push(candidate);
-        break;
-      }
-    }
-  }
-  return found.sort((a, b) => a - b);
-};
-
 /** 正方か。 */
 const isSquare = (size: ImageSize): boolean => size.width === size.height;
 
@@ -134,7 +88,7 @@ const tokensOf = (size: ImageSize): number =>
   (size.width / RESOLUTION_GRANULARITY) * (size.height / RESOLUTION_GRANULARITY);
 
 /**
- * 受理集合の検査（5 条件）。呼び出し側の綴りに依らず**同じ順**で見る — 複数破っている形で
+ * 受理集合の検査（4 条件）。呼び出し側の綴りに依らず**同じ順**で見る — 複数破っている形で
  * 診断が run ごとに変わると、直した先でまた別の条件に当たったのかが分からない。
  */
 export const assertAcceptableResolution = (size: ImageSize): void => {
@@ -161,14 +115,6 @@ export const assertAcceptableResolution = (size: ImageSize): void => {
       throw new Error(
         `解像度 ${label} の${axis} ${side} が上限 ${MAX_RESOLUTION_SIDE} 超` +
           `（rope 素表の天井 = latent ${MAX_LATENT_SIDE}）`,
-      );
-    }
-    const tiles = tilesOf(side);
-    if (tiles > MAX_TILES_PER_AXIS) {
-      throw new Error(
-        `解像度 ${label} の${axis} ${side} は VAE タイルが ${tiles} 本必要で上限 ` +
-          `${MAX_TILES_PER_AXIS} 超（decode 出力を全枚数ぶん抱えるのでホスト RAM が破綻する）。` +
-          `近傍の受理値: ${nearbyAcceptableSides(side).join(" / ")}`,
       );
     }
   }

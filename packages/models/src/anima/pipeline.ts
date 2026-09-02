@@ -79,7 +79,7 @@ import {
 } from "./latents.ts";
 import { imageToRgba } from "./image.ts";
 import { assertAcceptableResolution, formatResolution, type ImageSize } from "./resolution.ts";
-import { blendExtent, decodeTiled, planVaeTiling, tileCount } from "./tiling.ts";
+import { blendExtentAt, decodeTiled, planVaeTiling, tileCount } from "./tiling.ts";
 import {
   ANIMA_SPATIAL_COMPRESSION,
   type DitPatchGeometry,
@@ -1065,6 +1065,8 @@ export class AnimaPipeline {
         const sampleShape = staticOutputShape(state.vaeDecoder);
         const geometry = planVaeTiling(latentShape, tileShape, sampleShape);
         const tiles = tileCount(geometry);
+        const blendsOf = (axis: typeof geometry.rows): number[] =>
+          axis.starts.slice(1).map((_, index) => blendExtentAt(axis, geometry.scale, index + 1));
         let decodedTiles = 0;
         const pixels = await decodeTiled(denormalized, geometry, async (tile, row, col) => {
           const output = await run({ latents: { dtype: "f32", shape: tileShape, data: tile } });
@@ -1080,10 +1082,9 @@ export class AnimaPipeline {
           width: geometry.cols.extent * geometry.scale,
           height: geometry.rows.extent * geometry.scale,
           tiles,
-          blend: [
-            blendExtent(geometry.rows, geometry.scale),
-            blendExtent(geometry.cols, geometry.scale),
-          ] as const,
+          // ブレンド幅は**対ごと**（丸め等間隔なので 1 latent まで動く）。診断に載るのは
+          // 幾何そのもので、代表値へ畳むと食い違いの手掛かりが消える。
+          blend: [blendsOf(geometry.rows), blendsOf(geometry.cols)] as const,
         };
       },
     );
@@ -1094,7 +1095,9 @@ export class AnimaPipeline {
       throw new Error(
         `VAE 出力が ${decoded.width}×${decoded.height} で要求解像度 ${
           formatResolution(resolution)
-        } と違う（タイル ${decoded.tiles} 枚 / ブレンド ${decoded.blend.join(",")}px）`,
+        } と違う（タイル ${decoded.tiles} 枚 / ブレンド 縦 [${decoded.blend[0]}] 横 [${
+          decoded.blend[1]
+        }]px）`,
       );
     }
 

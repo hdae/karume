@@ -8,16 +8,16 @@
  * したがってタイル decoder（入力 `[1,16,64,64]`）を敷き詰めれば全解像度をカバーできる。
  * 要るのはタイルの切り出し・ブレンド・貼り付けだけで、それがこのモジュール。
  *
- * ## タイル幾何 = 等間隔スナップ配置（diffusers からの意図的な逸脱）
+ * ## タイル幾何 = 丸め等間隔配置（diffusers からの意図的な逸脱）
  *
  * 上流（`autoencoder_kl_qwenimage.py` の `tiled_decode`）は `range(0, H, stride)` で走査する
  * ので**最後のタイルが短くなる**。こちらのタイル decoder は**形が固定**なので短いタイルを
  * 食えない。そこで走査を「最後のタイルの開始位置を `extent − tile` にスナップする」形へ
- * 変える。開始位置を等間隔に取れば `(extent − tile) % stride == 0` が要求されるが、これは
- * **タイル本数から stride を決める**ことで常に満たせる（{@link planTileAxis}）。
+ * 変える。開始位置は 0 と `extent − tile` の間を**丸めて等分**したもので、間隔は整数に
+ * 割り切れなくてよい（{@link planTileAxis}）— 制約は「隣り合う対の重なりが下限以上」だけ。
  *
- * 帰結として、上流の「各タイルを stride 幅へ切り詰めて連結 → 全体 crop」はそのままでは
- * **画像の末端に届かない**（`n·stride = extent − 重なり < extent`）。等間隔スナップでの
+ * 帰結として、上流の「各タイルを間隔ぶんへ切り詰めて連結 → 全体 crop」はそのままでは
+ * **画像の末端に届かない**（間隔の総和 = `extent − tile < extent`）。スナップ配置での
  * 正しい対応物は「タイル i の担当領域 = `[starts[i], starts[i+1])`、最後だけ `[starts[n−1],
  * extent)`」という**領域割り当て**で、これは上流の crop + 全体 crop と同じ分割を与えつつ
  * 末端まで覆う（{@link assembleTiles}）。
@@ -58,9 +58,13 @@ type TileAxis = {
   readonly extent: number;
   /** タイル 1 枚の latent 幅（= タイル decoder の入力形）。 */
   readonly tile: number;
-  /** 隣り合うタイルの開始位置の差（latent）。縮退時は `tile` と等しい。 */
-  readonly stride: number;
-  /** 各タイルの開始位置（latent・昇順・末尾はちょうど `extent − tile`）。 */
+  /**
+   * 各タイルの開始位置（latent・昇順・末尾はちょうど `extent − tile`）。
+   *
+   * MUST: 開始位置の差（間隔）を欄として持たない — 対ごとに 1 latent まで動くので、
+   * 1 つの数に畳むと配置と黙って食い違う。要るところで `starts` から引く
+   * （{@link blendExtentAt}）。
+   */
   readonly starts: readonly number[];
 };
 
@@ -77,16 +81,18 @@ type TileGeometry = {
 };
 
 /**
- * 1 軸ぶんの等間隔スナップ配置を決める。
+ * 1 軸ぶんの丸め等間隔スナップ配置を決める。
  *
- * 「重なり `tile − stride` が `minOverlap` 以上」を満たす**最小のタイル本数**を選び、
- * その本数から stride を割り出す（`stride = (extent − tile) / (本数 − 1)`）。本数から
- * 決めるので `(extent − tile) % stride == 0` は構成上つねに成立する。
+ * 本数は「重なりが `minOverlap` 以上」を満たす最小値 `ceil(span / (tile − minOverlap)) + 1`
+ * （`span = extent − tile`）、開始位置は `round(i · span / (本数 − 1))`。丸めの誤差が
+ * ±0.5 に収まるので**間隔は 2 値（`floor` と `ceil`）にしかならず**、どの対の重なりも
+ * `tile − ceil(span / (本数 − 1)) ≥ minOverlap` を満たす。
  *
- * MUST: stride を先に決めて本数を割り出す形に**しない** — 割り切れない stride を選ぶと
- * 最後のタイルだけ重なりが変わり、ブレンド幅がタイル位置ごとに変わる（上流の
- * `blend_extent = min(a, b, blend_extent)` は短いタイルの安全弁で、幾何そのものを
- * 揃えるものではない）。
+ * NOTE: 旧規則（ADR 0033 決定 2）は「間隔が整数に割り切れる」ことまで課しており、本数を
+ * `span` の約数から選んでいた。約数の乏しい辺では本数が跳ね（1456px = latent 182・
+ * span 118 = 2·59 → 60 本）、実行不能な形を入口で拒否する必要があった。割り切れを外しても
+ * 崩れるのは「全対で同じブレンド幅」だけで、それは対ごとに持てば済む
+ * （{@link blendExtentAt}）— 均一性の実体は「重なりが下限以上・対ごとの差は高々 1 latent」。
  */
 export const planTileAxis = (extent: number, tile: number, minOverlap: number): TileAxis => {
   if (!Number.isInteger(extent) || !Number.isInteger(tile) || !Number.isInteger(minOverlap)) {
@@ -103,26 +109,43 @@ export const planTileAxis = (extent: number, tile: number, minOverlap: number): 
   }
   const span = extent - tile;
   if (span === 0) {
-    // 縮退: 1 枚で覆える。stride を tile と等しくしておくと重なり 0 → ブレンド幅 0 になり、
-    // 貼り付けが素の写しになる（非タイル経路とビット同一 — モジュール doc の MUST）。
-    return { extent, tile, stride: tile, starts: [0] };
+    // 縮退: 1 枚で覆える。対が 1 つも無いのでブレンドは走らず、貼り付けが素の写しになる
+    // （非タイル経路とビット同一 — モジュール doc の MUST）。
+    return { extent, tile, starts: [0] };
   }
-  for (let count = 2; count <= span + 1; count += 1) {
-    if (span % (count - 1) !== 0) continue;
-    const stride = span / (count - 1);
-    if (tile - stride < minOverlap) continue;
-    const starts: number[] = [];
-    for (let index = 0; index < count; index += 1) starts.push(index * stride);
-    return { extent, tile, stride, starts };
+  const count = Math.ceil(span / (tile - minOverlap)) + 1;
+  const starts: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    starts.push(Math.round((index * span) / (count - 1)));
   }
-  // `count − 1 = span` なら stride 1・重なり `tile − 1 ≥ minOverlap`（入口で minOverlap <
-  // tile を検査済み）なので到達しない。到達したら上の不変条件が壊れている。
-  throw new Error(`latent ${extent} をタイル ${tile}（最小の重なり ${minOverlap}）で覆えない`);
+  // 重なりの下限は本数の式から導けるが、その導出は丸めの誤差評価に依っていて目で追えない。
+  // 破れたら継ぎ目がランプで隠れなくなる（絵にしか出ない沈黙誤り）ので、構造で落とす。
+  for (let index = 1; index < count; index += 1) {
+    const overlap = tile - (starts[index] - starts[index - 1]);
+    if (overlap < minOverlap) {
+      throw new Error(
+        `タイル ${index - 1}/${index} の重なり ${overlap} が下限 ${minOverlap} 未満` +
+          `（latent ${extent} / タイル ${tile} / 開始位置 ${starts}）`,
+      );
+    }
+  }
+  return { extent, tile, starts };
 };
 
-/** ブレンドの幅（**sample 空間** — 上流の `blend_height` / `blend_width` と同じ単位）。 */
-export const blendExtent = (axis: TileAxis, scale: number): number =>
-  (axis.tile - axis.stride) * scale;
+/**
+ * 対 `(index − 1, index)` のブレンド幅（**sample 空間** — 上流の `blend_height` /
+ * `blend_width` と同じ単位）。丸め等間隔なので対ごとに 1 latent まで動く。
+ */
+export const blendExtentAt = (axis: TileAxis, scale: number, index: number): number => {
+  if (!Number.isInteger(index) || index < 1 || index >= axis.starts.length) {
+    throw new RangeError(
+      `ブレンド対 ${index} が範囲外（開始位置 ${axis.starts.length} 本 = 対 ${
+        axis.starts.length - 1
+      } 組）`,
+    );
+  }
+  return (axis.tile - (axis.starts[index] - axis.starts[index - 1])) * scale;
+};
 
 /**
  * latent の形とタイル decoder の入出力の形から幾何を組む。
@@ -292,10 +315,10 @@ const assembleOwnedTiles = (
     }
   }
 
-  const blendRows = blendExtent(rows, scale);
-  const blendCols = blendExtent(cols, scale);
   // MUST: 縦（上）→ 横（左）の順（上流 `tiled_decode` と同じ）。順序を入れ替えると角の
   // 4 枚が重なる領域で係数の積の順が変わり、継ぎ目に十字の筋が出る。
+  // MUST: ブレンド幅は**対ごと**に引く（丸め等間隔なので対で 1 latent まで違う）。1 つの
+  // 数を使い回すと、ずれた側の継ぎ目でランプの端が担当領域からはみ出す。
   for (let row = 0; row < rowCount; row += 1) {
     for (let col = 0; col < colCount; col += 1) {
       const current = working[row * colCount + col];
@@ -306,7 +329,7 @@ const assembleOwnedTiles = (
           channels,
           tileHeight,
           tileWidth,
-          blendRows,
+          blendExtentAt(rows, scale, row),
         );
       }
       if (col > 0) {
@@ -316,7 +339,7 @@ const assembleOwnedTiles = (
           channels,
           tileHeight,
           tileWidth,
-          blendCols,
+          blendExtentAt(cols, scale, col),
         );
       }
     }

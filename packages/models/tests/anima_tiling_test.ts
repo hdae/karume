@@ -7,7 +7,7 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   assembleTiles,
-  blendExtent,
+  blendExtentAt,
   decodeTiled,
   latentTile,
   planTileAxis,
@@ -15,42 +15,47 @@ import {
   tileCount,
 } from "../src/anima/tiling.ts";
 
-Deno.test("planTileAxis: 1024px（latent 128）は 3 タイル・stride 32・重なり latent 32", () => {
+Deno.test("planTileAxis: 1024px（latent 128）は 3 タイル・開始 [0,32,64]・ブレンド 256px", () => {
+  // 旧規則（整除スナップ）と同じ配置になる辺。**出荷解像度のバイト不変**がここに乗って
+  // いるので、値は literal で凍結する（1824×1248 の枚数変更で巻き添えにしない）。
   const axis = planTileAxis(128, 64, 8);
   assertEquals([...axis.starts], [0, 32, 64]);
-  assertEquals(axis.stride, 32);
-  assertEquals(blendExtent(axis, 8), 256);
+  assertEquals([blendExtentAt(axis, 8, 1), blendExtentAt(axis, 8, 2)], [256, 256]);
 });
 
-Deno.test("planTileAxis: latent 64（512px）は 1 タイルに縮退しブレンド幅 0", () => {
+Deno.test("planTileAxis: latent 64（512px）は 1 タイルに縮退しブレンド対が無い", () => {
   const axis = planTileAxis(64, 64, 8);
   assertEquals([...axis.starts], [0]);
-  assertEquals(axis.stride, 64);
-  assertEquals(blendExtent(axis, 8), 0);
+  assertThrows(() => blendExtentAt(axis, 8, 1), RangeError, "範囲外");
 });
 
 Deno.test("planTileAxis: どの latent 全長でも配置の不変条件が成り立つ", () => {
-  for (const extent of [64, 80, 96, 112, 128, 160, 192, 256, 384, 512]) {
+  // 182 / 228 / 242 は旧規則で本数が跳ねた辺（1456 / 1824 / 1936px）— 撤廃の対象そのもの。
+  for (const extent of [64, 80, 96, 112, 128, 160, 182, 192, 228, 242, 256, 384, 512]) {
     const axis = planTileAxis(extent, 64, 8);
     const where = `extent=${extent}`;
+    const span = extent - 64;
     assertEquals(axis.starts[0], 0, where);
     // 末端へのスナップ = 固定形の decoder が最後のタイルも食えることの条件。
-    assertEquals(axis.starts.at(-1), extent - 64, `${where}: 末端へスナップ`);
-    assertEquals((extent - 64) % axis.stride, 0, `${where}: stride の割り切れ`);
-    for (let index = 1; index < axis.starts.length; index += 1) {
-      assertEquals(axis.starts[index] - axis.starts[index - 1], axis.stride, `${where}: 等間隔`);
-    }
-    assert(
-      axis.starts.length === 1 || axis.tile - axis.stride >= 8,
-      `${where}: 重なりが下限 8 未満`,
+    assertEquals(axis.starts.at(-1), span, `${where}: 末端へスナップ`);
+    // 本数は「重なりの下限だけを制約にした最小」の解析式そのもの。安全側に倒して間隔 1 に
+    // する実装も、旧規則の約数探索も、ここで割れる。
+    assertEquals(
+      axis.starts.length,
+      span === 0 ? 1 : Math.ceil(span / (64 - 8)) + 1,
+      `${where}: 本数`,
     );
-    // 本数は最小（1 本減らせるなら下限を割るか割り切れない）。安全側に倒して常に
-    // stride 1 にする実装は、この 1 本が無いと緑のまま通る。
-    for (let count = 2; count < axis.starts.length; count += 1) {
-      const span = extent - 64;
+    const gaps = axis.starts.slice(1).map((start, index) => start - axis.starts[index]);
+    for (const [index, gap] of gaps.entries()) {
+      assert(64 - gap >= 8, `${where}: 対 ${index} の重なり ${64 - gap} が下限 8 未満`);
+      assertEquals(blendExtentAt(axis, 8, index + 1), (64 - gap) * 8, `${where}: 対 ${index}`);
+    }
+    // 丸め等間隔の実体 = 間隔（したがってブレンド幅）の差は高々 1 latent。上流同型の
+    // 「固定 stride + 末尾だけスナップ」に退行すると最後の対だけ大きく開いてここで割れる。
+    if (gaps.length > 0) {
       assert(
-        span % (count - 1) !== 0 || 64 - span / (count - 1) < 8,
-        `${where}: ${count} 本で足りるのに ${axis.starts.length} 本`,
+        Math.max(...gaps) - Math.min(...gaps) <= 1,
+        `${where}: 間隔のばらつき ${gaps}`,
       );
     }
   }
