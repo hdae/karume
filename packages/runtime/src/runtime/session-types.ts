@@ -132,6 +132,19 @@ export const I8A8_DOT: unique symbol = Symbol("karume.i8a8Dot");
 export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
 
 /**
+ * **実験・診断専用の非公開面**（mod.ts からは輸出しない — {@link I8A8_DOT} と同じ流儀）。
+ *
+ * 重みアップロードの完了待ち（空 submit + `onSubmittedWorkDone`）を shard 末尾だけでなく、
+ * **宣言バイト数の累計がこの値に達するごと**にも入れる。`queue.writeBuffer` は完了まで staging
+ * を抱えるので、待ちの間隔がホスト RAM ピークのうち staging 分を決める（ADR 0070 決定 3 の
+ * 「shard ごとに 1 回」は、このノブが無いときの既定）。メモリ管理波 Phase B の実測ノブで、
+ * 未指定なら従来と 1 命令も変わらない。
+ *
+ * MUST: 正の有限値のみ。0 以下・非数は fail loudly（「毎テンソルで待つ」を黙って作らない）。
+ */
+export const UPLOAD_FENCE_BYTES: unique symbol = Symbol("karume.uploadFenceBytes");
+
+/**
  * op 族ごとの計算精度ノブ（ADR 0028 / attention の i8a8 は設計 §9.2）。**重み格納の f16
  * （ADR 0018）とは別の軸**で、`"f16"` は共有タイルを f16 に落として内積を回す変種
  * （累積は f32）、`"a8"` は活性を per-token i8 へ量子化して整数内積で回す変種を選ぶ。
@@ -218,6 +231,8 @@ export type SessionOptions = {
   readonly [I8A8_DOT]?: I8a8Dot;
   /** テスト専用（{@link ROW_BLOCK_SPLIT}）。既定は device の limit から静的に決まる枚数。 */
   readonly [ROW_BLOCK_SPLIT]?: number;
+  /** 実験専用（{@link UPLOAD_FENCE_BYTES}）。既定は shard 末尾で 1 回だけ待つ。 */
+  readonly [UPLOAD_FENCE_BYTES]?: number;
 };
 
 /**
