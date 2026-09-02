@@ -78,9 +78,9 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   ~~残 = ③capacity 1024 の反映~~ **消化（2026-09-02 `fafca9d` — 定数 1024 + ミラー再生成・golden 不変・
   RoPE 表は既に 1024 行で再 export 不要）**（>1024 の再 export 判断は
   decode の P 依存実測と同時。**ユーザー意向〈2026-09-01〉= コンテキスト窓は可能な限り大きく
-  — 1024 反映を先行し、上げ幅の最大化は P 依存実測とセットで検討**）。起票のみ（第 2 波候補）: ChatSession 高レベル面・stop strings・
+  — 1024 反映を先行し、上げ幅の最大化は P 依存実測とセットで検討**）。**可変 capacity 波を起票（2026-09-02 裁定）**: RoPE 表を **TS 正本**でホスト生成し capacity を実行時ノブへ（exporter は theta / dim / 上限 128K を宣言・KV / 表 / state の見積りを `estimateSessionMemory` のロード面へ結線）。P 依存計測を先行（pos16k / pos128k の計測専用配布形 + P 掃引）・実装は ChatSession の後。起票のみ（第 2 波候補）: ChatSession 高レベル面・stop strings・
   `chatText()`・onProgress 可読化・maxResidentPleBytes・logitBias 配列化・防御コピー
-  （prompt/options の発行時スナップショット）・example の residentPleShards フラグ化
+  （prompt/options の発行時スナップショット）・example の residentPleShards フラグ化 → **②③④⑤⑥⑦⑧ 消化（2026-09-02 `f7f0b66` / `c659dd9`）**・① ChatSession = 実装中（溢れ処理は注入可能な関数 + 既定 clear〈最古ターン削除〉・compact〈要約〉は窓拡大後に追加）
 - ~~数値危険クラス監査波~~ **本体消化（2026-08-31 — OP 数値レビューとして拡大実施）**:
   ①台帳化 = [research/2026-08-31-op-numerics-review.md](research/2026-08-31-op-numerics-review.md)
   （危険クラス台帳・C 0 / E 0・レビュー原本 = `.claude/reviews/2026-08-31_b35cf5c/`）
@@ -118,9 +118,7 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
   読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤 → 裁定済み（既定維持
   — GEMV 固有と切り分け確定・ADR 0082 追記 1・[known-issues](known-issues.md) Metal 節）**
-- anima-web の cold ロード DL スロット改善（提案 b+a — `FamilyAdmission` 席は実装済みで、
-  残りは admission 前倒しの graph shard 単位化 + extras の並行開始。shard 仕様 v2 で
-  graph shard が数 MB になり前倒しの価値が確定する。opt-in の c 案は再裁定要）
+- ~~anima-web の cold ロード DL スロット改善（提案 b+a）~~ **kill（2026-09-02 実測 — [research](research/2026-09-02-cold-load-dl-timeline.md)）**: 起票時 2.4GiB だったグラフ相は shard 仕様 v2/v3 で 1.15MiB になり、extras は既に 3 本同時・相境界の空白は 0.2 s で、a / b の利得は ≤0.3%。c（コンポーネント単位の門）も同時に閉じる。律速は回線帯域そのもの（50MB/s で床 +2.7%）。**残る問い = 同時 4 本 vs 接続ごとの上限（HF CDN の実回線で 4 本 / 8 本の実測 — 要判断）**。接続上限が確認されたら同時本数の定数引き上げか末尾向けの shard 細分化を再起票
 - perf: レンズ E-1 は裁定済み — **P-1〜P-3 スパイク承認・P-4 起票・P-5 計測のみ** +
   M1-2 代償の L-9（いずれも [perf-ledger](perf-ledger.md)）。既存起票 H-8〜H-10 / L-7 / L-8。
   K-11 は**消化済み（2026-08-31・ADR
