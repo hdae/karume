@@ -11,7 +11,7 @@
 
 ## Now
 
-- **並列作業（2026-09-02 深夜 — 裁定済み優先順）**: ①DL 改善 = 実測で b+a を kill（[research](../docs/research/2026-09-02-cold-load-dl-timeline.md)・残る問い = 実回線の同時本数）②gemma4 対話 example 第 2 弾 = ②〜⑧ 消化（`f7f0b66` `c659dd9`）・① ChatSession 実装中（溢れ処理 = 注入 + 既定 clear）③perf P-3 実装済み（`9591783`・VAE A/B と視認は残）・P-1 / P-2 は主セッションで着手待ち ④可変 capacity 波（RoPE 表 TS 正本ホスト生成 + 見積り結線）= P 依存計測を先行 ⑤TurboQuant = 記録のみ（perf-ledger Q-11 / L-10）。hub HF `into` 配線は stash@{0}（fetch-cache 0.6.0 公開待ち）。
+- **並列作業（2026-09-02 深夜 — 裁定済み優先順）**: ①DL 改善 = 実測で b+a を kill（[research](../docs/research/2026-09-02-cold-load-dl-timeline.md)・残る問い = 実回線の同時本数）②gemma4 対話 example 第 2 弾 = **全消化**（②〜⑧ `f7f0b66` `c659dd9`・① ChatSession `d72bd9d` = 溢れ処理は注入 + 既定 clear・残起票 = send の prefill 進捗の口）③perf: P-1 採用（`3175161`・短い行 ×4.1）・P-2 採用（`e7b4489`・submit −95%・壁は揺れ内・追試 no-ref / Chrome）・P-3 実装済み（`9591783`・VAE A/B と視認は実行中） ④可変 capacity 波（RoPE 表 TS 正本ホスト生成 + 見積り結線）= P 依存計測を先行 ⑤TurboQuant = 記録のみ（perf-ledger Q-11 / L-10）。hub HF `into` 配線は stash@{0}（fetch-cache 0.6.0 公開待ち）。
 - **モデル更新波（2026-09-01 裁定 — 実装中・詳細は [backlog](../docs/backlog.md) now の
   「モデル更新波」）**: **N1 Irodori v4.1-small = ローカル完了**（凍結をバイトで確証・
   全系列 export + dist + スモーク緑・pin 新設と examples 既定切替はリリース時 = runbook §3。
