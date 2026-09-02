@@ -314,3 +314,47 @@ full スロットの `P + Q ≤ C` 超過は今日「汎用メッセージで fa
   - **破壊的変更（未リリース面）**: `GenerationStop` の union に `stop-token` が増えた・
     `Gemma4ChatStream.done` の型が `GenerationStop` から `Gemma4ChatStop` になった。消費側の doc は
     `docs/limitations.md`。
+
+- 2026-09-02（同じ第 2 波の続き — **中間層 `Gemma4ChatSession`** と、それに伴う**決定 10 の改訂**）:
+  実走した消費者の指摘は「普通の stateful chat が欲しいだけなのに、`chat()` は毎回全履歴を
+  再計算し、効率化しようとすると急に token id / `<bos>` / 未 commit frontier の世界へ落とされる」。
+  低レベル面（決定 1〜5）も `chat()` も設計は不変で、**その落差だけを持つ層**を足す
+  （`packages/models/src/gemma/chat-session.ts`）。素材は既存の公開面だけ — `sequence()` の KV 継続 /
+  `gemma4ChatPrompt` と `gemma4ChatTurn` / `GenerationSequence.used` /
+  `GenerationCapacityError` の構造化欄 / `chat()` の停止条件と `Gemma4ChatStream` — なので、
+  消費者は同じものを自分で書ける（写経見本だった `examples/gemma4/main.ts` の中身がここへ
+  昇格し、example は「普通の chat」の書き方に戻った）。
+  - **決定 10 の改訂**: 「会話の切り詰めはホストの責務」は**低レベル面についてはそのまま**
+    （`sequence()` / `chat()` は今も `GenerationCapacityError` を投げて終わる）。~~高レベル面でも
+    同じ~~ ← 打ち消し: `Gemma4ChatSession` は**注入可能な既定ポリシー**
+    （`Gemma4ChatSessionOptions.onOverflow`）を持つ。既定は `dropOldestTurns` = **最古の
+    user / assistant の対を落とす**（system 発話は残す・片方だけ落とすと「答えだけ」「問いだけ」の
+    壊れた文脈になるので対を単位にする）。ホストが throw する関数を渡せば従来の意味論に戻る。
+    「切り詰めない」を既定にしなかったのは、会話 UI で**必ず**要る打ち手を全消費者に再実装させる
+    形だからで、方針そのものは差し替えられるべきという判断は決定 10 のまま残っている。
+  - **判定は事前**（例外を待たない）: 各ターンの prompt を組んだ直後に
+    `used + prompt + maxNewTokens - 1` を上限（`capacity` と `maxPosition` の小さい方）と比べ、
+    超えていれば送る前に `onOverflow` を回す。`used` を公開したのはこの判定のためである
+    （追記 2026-08-31）。走行中に踏む `GenerationCapacityError` の捕捉は**安全網として残さない** —
+    事前判定が正しい限り到達しないので、掴んで再試行すると事前判定のずれが黙って隠れる。
+  - **収束の保証**: 再試行が続くのは**履歴が縮んだとき**だけ（縮まない結果を返したポリシーは
+    `GenerationCapacityError`）。履歴の件数は非負整数なので、試行回数は入口の発話数を超えない —
+    その不変条件が破れたことは `#prepare` の門が名指しで落とす（回数の定数を置かない）。
+  - **KV を継ぐ条件**: 直前のターンが**配布形の EOS で閉じた**ときだけ差分（`gemma4ChatTurn`）で
+    継ぐ。max-tokens / 停止文字列 / 中断 / 失敗で閉じたターンの後ろは model turn が閉じていないので、
+    sequence を捨てて履歴から描き直す（決定 4 の turn-local 契約をそのまま門にした形）。ターンの
+    締めで履歴へ積むのは**実際に流した本文**だけで、1 文字も出なかったターンはその発話ごと履歴から
+    外す（答えの無い問いを残さない）。
+  - **1 セッション = 1 生成**: 2 本目の `send` は**同期に** throw する（`chat()` のように順番待ちに
+    しない）。履歴は 1 本の会話として順に積まれるので、2 本が同じ履歴を押すと「答えの無い問い」を
+    挟んだ会話が KV へ入る — 例外にならない取り違えなので口の側で塞ぐ。代償として、発行した
+    stream を汲まずに捨てるとセッションはそのターンのまま止まる（締めが列の終端で走るため）。
+  - **入口はコンストラクタ**（`new Gemma4ChatSession(pipeline, options)`）: `Gemma4Pipeline` に
+    `createChatSession()` を生やすと pipeline → chat-session → pipeline の相互 import になる
+    （`decodeChatChunks` / `chatStreamOf` を共有するため）。依存を一方向に保つ方を採り、
+    セッションが読む面は `Gemma4ChatSessionHost`（tokenizer / program / defaultSampler /
+    `sequence()`）へ絞った — この層が公開面より内側を 1 つも使っていないことが型で読め、
+    実 GPU 無しの門（`tests/gemma_chat_session_test.ts`）もそこから来る。
+  - **今回入れないもの**: モデルに要約させる compact（`onOverflow` の実装の 1 つとして後から
+    足せる席はある）。**窓（`capacity`）を広げた後に再検討する** — 今の 640 では要約自体が
+    入らない。

@@ -121,6 +121,19 @@ export type {
   Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,
 } from "./src/gemma/pipeline.ts";
+/**
+ * 多ターンの会話を持ち回る中間層（`chat` と `sequence` の間 — 会話の履歴を持ち、KV を継ぎ、
+ * 容量が足りないターンは送る前に切り詰める。既定の切り詰めは `dropOldestTurns` =
+ * 最古の user / assistant の対を落とす。`./gemma` を参照）。
+ */
+export { dropOldestTurns, Gemma4ChatSession } from "./src/gemma/chat-session.ts";
+export type {
+  Gemma4ChatOverflow,
+  Gemma4ChatOverflowPolicy,
+  Gemma4ChatSessionHost,
+  Gemma4ChatSessionOptions,
+  Gemma4ChatTurnOptions,
+} from "./src/gemma/chat-session.ts";
 export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
 /**
  * 生の宣言（`unknown`）→ 検証済みの `Gemma4PipelineConfig`。**`fromAssets` を使う消費者のための

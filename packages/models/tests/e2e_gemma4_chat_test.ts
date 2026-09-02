@@ -18,6 +18,10 @@
 // ⑥ **増分描画の多ターン**（`gemma4ChatTurn` + `sequence()`）が、同じ会話を毎ターン全体描画で
 //    回した `chat()` と**逐語一致**する。turn-local 契約（`gemma_chat_test.ts` の門）が id 列の
 //    等式で、こちらは同じ等式を**実重みの出力**で見る門である
+// ⑦ **`Gemma4ChatSession` の 2 ターン**が⑥と同じ文字列になる。⑥は「差分描画を手で回せば一致
+//    する」を、⑦は「中間層に任せても同じ会話になる」を見る（KV の継続条件と履歴の積み方は
+//    セッションの中にあるので、実重みで見る門はここにしかない — `gemma_chat_session_test.ts`
+//    は偽 sequence で組み立てだけを見る）
 //
 // MUST: 入口は公開面（`../gemma.ts`）から import する — `src/...` を直に掴むと、面が痩せていても
 // 門が緑のままになる（消費者が書けない経路で検収したことになる）。
@@ -34,6 +38,7 @@ import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   type Gemma4ChatMessage,
   gemma4ChatPrompt,
+  Gemma4ChatSession,
   type Gemma4ChatStream,
   gemma4ChatTurn,
   Gemma4Pipeline,
@@ -254,6 +259,9 @@ Deno.test({
         );
       });
 
+      /** ⑥ が採った 2 ターン目の参照（⑦ が同じ会話をセッションで組んで突き合わせる）。 */
+      let followUpAnswer: string | undefined;
+
       await t.step("⑥ 増分描画の多ターンが chat() の全体描画と逐語一致", async () => {
         const { fixture: name, maxNewTokens } = CASES[0];
         const first = caseOf(name).messages;
@@ -278,6 +286,7 @@ Deno.test({
           FOLLOW_UP,
         ];
         const answer2 = await viaChat(grown, FOLLOW_UP_TOKENS);
+        followUpAnswer = answer2;
 
         // 低レベル面: 1 会話 = 1 sequence。2 ターン目に流すのは**差分だけ**で、前 turn を閉じる
         // `<turn|>` は `pendingToken` が前置する（turn-local 契約 — ADR 0083 決定 4 / 0084 決定 5）。
@@ -320,6 +329,29 @@ Deno.test({
         } finally {
           await sequence.dispose();
         }
+      });
+
+      await t.step("⑦ ChatSession の 2 ターンが⑥と同じ会話になる", async () => {
+        const { fixture: name, maxNewTokens, expected } = CASES[0];
+        const first = caseOf(name).messages;
+        // このケースは user 1 発話（セッションは文字列で受けるので、system も過去 turn も無い）。
+        assertEquals(first.length, 1, `${name}: 1 発話のケースでないと send に写せない`);
+        assert(followUpAnswer !== undefined, "⑥ が 2 ターン目の参照を採っていない");
+
+        await using session = new Gemma4ChatSession(pipeline, { maxNewTokens });
+        // 1 ターン目は golden そのもの（`chat()` と同じ全体描画から始まる）。
+        assertEquals(await session.send(first[0].content).text(), expected, "1 ターン目");
+        // 2 ターン目は差分描画 + KV の継続。セッションが継ぐ条件（前ターンが EOS で閉じた）と
+        // 履歴の積み方が壊れれば、ここで⑥の参照から離れる。
+        const second = session.send(FOLLOW_UP.content, { maxNewTokens: FOLLOW_UP_TOKENS });
+        assertEquals(await second.text(), followUpAnswer, "2 ターン目（⑥ の参照と逐語一致）");
+        assertEquals((await second.done).reason, "eos", "2 ターン目の停止理由");
+        assertEquals(session.turns, [
+          first[0],
+          { role: "assistant", content: expected },
+          FOLLOW_UP,
+          { role: "assistant", content: followUpAnswer },
+        ], "履歴は「流した本文」だけで積まれる");
       });
 
       // async generator の本体は最初の `next()` まで走らないので、発行時の検査だけでは

@@ -973,10 +973,11 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 - state スロットの dtype は f32 のみ（f16 は席予約 — ADR 0066 追記 5）・複数シーケンス /
   batch>1 の生成・paged KV は ADR 0066 決定 8 のスコープ外。
 
-## 生成 sequence: 会話の切り詰めはホストの責務（容量超過は専用型で落とす）
+## 生成 sequence: 会話の切り詰めは低レベル面ではホストの責務（容量超過は専用型で落とす）
 
 `GenerationSequence`（`packages/models/src/generation/sequence.ts`・ADR
-[0083](decisions/0083-generation-api-surface.md) 決定 10）は会話を**自動で切り詰めない**。
+[0083](decisions/0083-generation-api-surface.md) 決定 10・改訂は同 追記 2026-09-02）は会話を
+**自動で切り詰めない**。
 配布形が宣言する 2 つの上限 — full スロットの容量（`pastLength + queryLength ≤ C` — ADR
 [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 ④）と位置表の排他的上限
 （`maxPosition`）— を超えるターンは、run を 1 本も出す前に `GenerationCapacityError` で落ちる。
@@ -990,7 +991,18 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 メッセージで、「切り詰めれば通る」のか「配線が壊れている」のかを文言から読み分けることになる —
 専用型はその 1 件だけを分ける。
 
-同じ「ホストの責務」の線に乗る制約が 2 つある:
+**この制約が掛かるのは低レベル面（`Gemma4Pipeline.sequence()` / `chat()`）だけ**である。高レベル
+面の `Gemma4ChatSession` は同じ打ち手を**既定ポリシーとして持つ** — 各ターンを送る**前**に
+`used + prompt + maxNewTokens - 1` を上限と比べ、超えていれば `onOverflow`（既定
+`dropOldestTurns` = 最古の user / assistant の対を落とし system は残す）で履歴を作り直してから
+撃つ。ポリシーは丸ごと差し替えられ、throw する関数を渡せば従来どおりホスト側で扱える。落とせる
+ものが尽きた場合（と、ポリシーが履歴を縮めなかった場合）は同じ `GenerationCapacityError` で
+落ちる。**モデルに要約させる compact は持たない**（窓拡大の後に再検討 — ADR 0083 追記
+2026-09-02）。
+
+同じ「ホストの責務」の線に乗る制約が 2 つある（1 つ目はセッションが会話の側で吸収する — 中断した
+ターンは出た本文だけを履歴へ残し、KV との対応が読めない sequence は捨てる。2 つ目はセッションの
+`send` にも同じ規律で掛かる）:
 
 - **中断は「成功した run のぶんだけ会話が進んだ状態」で閉じる**（`break` / `return()` /
   `AbortSignal` のいずれも）。token を 1 つも受け取っていない中断（= prefill の途中）は prompt が

@@ -1,5 +1,5 @@
 /**
- * Gemma 4 E2B（文字列 → 文字列）の対話デモ — **低レベル面（`sequence`）の写経見本**。
+ * Gemma 4 E2B（文字列 → 文字列）の対話デモ — **`Gemma4ChatSession` の写経見本**。
  *
  *     deno task demo:gemma4
  *     deno task demo:gemma4 --system "Answer in one short sentence." --max-new-tokens 128
@@ -14,41 +14,39 @@
  * `--repo owner/name[@revision]` は HF から取る。gemma4 は公開配布リポをまだ持たないので pin
  * 定数（`*_CURRENT` — ADR 0073）も無く、既定はローカルミラーの綴り {@link DEFAULT_SOURCE}。
  *
- * ## なぜ `chat` ではなく `sequence` なのか
+ * ## なぜ `chat` ではなく `Gemma4ChatSession` なのか
  *
  * `Gemma4Pipeline.chat` は **1 ターン = 1 sequence** で、過去 turn は毎回 prompt へ描き直される
- * （会話が伸びるほど prefill が O(n²)）。多ターンの対話は `sequence()` を 1 本持ち回り、新しい
- * turn の**差分だけ**を流すのが正で、この台本はその写経見本である:
+ * （会話が伸びるほど prefill が O(n²)）。多ターンの対話は `Gemma4ChatSession` が 1 本の
+ * sequence を持ち回り、新しい turn の**差分だけ**を流す — 会話の履歴も、KV を継げるかの判定
+ * （前ターンが EOS で閉じたか）も、容量が足りないときの切り詰めもセッションの中にある。
+ * この台本が書くのは「普通の chat」そのもので、token id も `<bos>` も未 commit frontier も
+ * 出てこない:
  *
- * - 初回 = `gemma4ChatPrompt`（`<bos>` 込みの全体・末尾は生成プロンプト）
- * - 2 ターン目以降 = `gemma4ChatTurn`（その turn の差分だけ — 過去は context の KV にある）
- * - 前 turn を閉じる `<turn|>` は**自分で足さない**。生成が出したその 1 token は sequence の
- *   未 commit frontier（`pendingToken`）として残っていて、次の `generate` が prompt の先頭へ
- *   自動で連結する（ADR 0083 決定 4）。二重に描いても例外は 1 つも出ず、turn の区切りだけが
- *   静かに 2 つになる。
- * - 差分を継げるのは**生成が停止 token で閉じた直後だけ**（`gemma4ChatTurn` の MUST）。
- *   max-tokens や中断で打ち切ったターンの後ろは model turn が閉じていないので、この台本は
- *   sequence を捨てて履歴から組み直す（{@link releaseSequence}）。
+ *     const session = new Gemma4ChatSession(pipeline, { system, maxNewTokens });
+ *     for await (const chunk of session.send(line)) write(chunk);
  *
- * ## 会話の切り詰めはホストの責務
+ * 自分で 1 段下（`sequence()` + `gemma4ChatPrompt` / `gemma4ChatTurn`）を回す形は
+ * `packages/models/src/gemma/chat-session.ts` が正本で、そこに写経の中身が全部ある。
  *
- * 容量（`program.capacity`）と位置表（`program.maxPosition`）を超えた要求は
- * `GenerationCapacityError` で落ちる。何を捨てるかはアプリの意味論なので、ここが「古い turn から
- * 落として新しい sequence で組み直す」を実装する（ADR 0083 決定 10）。判断に要る実値は例外の
- * 欄が運ぶので、文言を読み解く必要は無い。
+ * ## 会話の切り詰めは**注入できる**
+ *
+ * 容量（`program.capacity`）と位置表（`program.maxPosition`）に入らないターンは、送る前に
+ * `onOverflow` へ回る。既定は `dropOldestTurns`（最古の user / assistant の対を落とす・system は
+ * 残す）で、この台本は「落としたことを画面に出す」ためだけに包んでいる。落とせるものが尽きたら
+ * `GenerationCapacityError` で落ちる — 判断に要る実値は例外の欄が運ぶので、文言を読み解く必要は
+ * 無い（ADR 0083 決定 10 の改訂）。
  */
 
 import {
-  gemma4ChatPrompt,
-  gemma4ChatTurn,
+  dropOldestTurns,
+  Gemma4ChatSession,
   Gemma4Pipeline,
   GenerationCapacityError,
 } from "../../packages/models/gemma.ts";
 import type {
-  Gemma4ChatMessage,
-  GenerationSequence,
-  GenerationStop,
-  GenerationStream,
+  Gemma4ChatSessionOptions,
+  Gemma4ChatStop,
   SamplerSpec,
 } from "../../packages/models/gemma.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
@@ -163,8 +161,10 @@ async function* readLines(): AsyncGenerator<string> {
   if (buffer.length > 0) yield buffer;
 }
 
-const describeStop = (stop: GenerationStop): string =>
-  stop.reason === "eos" ? `eos(${stop.token})` : stop.reason;
+const describeStop = (stop: Gemma4ChatStop): string =>
+  stop.reason === "eos" || stop.reason === "stop-token"
+    ? `${stop.reason}(${stop.token})`
+    : stop.reason;
 
 /** 上書きで描く 1 行の幅（短い行が前の行の尻を残さないよう、ここまで空白で埋める）。 */
 const LINE_WIDTH = 76;
@@ -240,50 +240,35 @@ write(
 );
 
 /**
- * 会話の履歴は**この台本が持つ**（sequence の可変状態は context と `pendingToken` の 2 つだけで、
- * transcript は持たない）。切り詰めも組み直しもここでしかできない。
+ * セッションの設定（`/reset` は同じ設定で組み直す — 会話を捨てるとはそういうこと）。
+ *
+ * `onOverflow` を包んでいるのは**画面に出すため**だけで、切り詰めそのものは既定の
+ * `dropOldestTurns` に任せる（最古の user / assistant の対を落とし、system は残す）。
  */
-const history: Gemma4ChatMessage[] = [];
-if (system !== undefined) history.push({ role: "system", content: system });
-/** 落とせない先頭（system 発話）の件数。 */
-const floor = history.length;
-
-/** 現在の sequence（`undefined` = 次のターンで作り直す）。 */
-let sequence: GenerationSequence | undefined;
-/** その sequence の KV が持っている履歴の件数（0 = 空 = 全体を描き直す）。 */
-let committed = 0;
+const sessionOptions: Gemma4ChatSessionOptions = {
+  ...(system === undefined ? {} : { system }),
+  maxNewTokens,
+  ...(sampler === undefined ? {} : { sampler }),
+  onOverflow: (context) => {
+    write(
+      `\n  [容量超過（上限 ${context.capacity} に対し ${context.needed} 要る）— ` +
+        `古い turn を落として再構成]\n`,
+    );
+    return dropOldestTurns(context);
+  },
+};
+let session = new Gemma4ChatSession(pipeline, sessionOptions);
 
 /**
  * 1 ターンの締め。tok/s は `stop.tokens`（停止 token も 1 個 = 抽選 1 回 = run 1 回）から書く —
  * 出力文字列を符号化し直すと、byte_fallback や停止 token のぶんだけ数がずれる。
  */
-const report = (stop: GenerationStop, at: number): void => {
+const report = (stop: Gemma4ChatStop, at: number): void => {
   const elapsed = (performance.now() - at) / 1000;
   write(
     `\n  [${describeStop(stop)} · ${stop.tokens} tok · ${elapsed.toFixed(1)}s · ` +
-      `${(stop.tokens / elapsed).toFixed(1)} tok/s · 会話 ${sequence?.used ?? 0}/${capacity}]\n`,
+      `${(stop.tokens / elapsed).toFixed(1)} tok/s · 会話 ${session.turns.length} 発話]\n`,
   );
-};
-
-/** context を返して組み直しに備える（KV と履歴の対応が切れたときは必ずここを通る）。 */
-const releaseSequence = async (): Promise<void> => {
-  const held = sequence;
-  sequence = undefined;
-  committed = 0;
-  await held?.dispose();
-};
-
-/**
- * 古い turn を先頭から落とす（system は残す）。落とせるものが無ければ `false`。
- *
- * 2 件ずつ落とすのは user / assistant の対を単位にするため。奇数個しか残っていなければ
- * 残り 1 件（= 今のターンの user 発話）は必ず残す。
- */
-const dropOldestTurn = (): boolean => {
-  const droppable = history.length - floor - 1;
-  if (droppable <= 0) return false;
-  history.splice(floor, Math.min(2, droppable));
-  return true;
 };
 
 /**
@@ -311,125 +296,46 @@ for await (const raw of readLines()) {
   }
   if (line === "/exit" || line === "/quit") break;
   if (line === "/reset") {
-    await releaseSequence();
-    history.length = floor;
+    // 会話を捨てる = セッションを畳んで同じ設定で組み直す（履歴も KV も持っているのは
+    // セッションなので、捨てる口を別に持たない）。
+    await session.dispose();
+    session = new Gemma4ChatSession(pipeline, sessionOptions);
     write("(reset)\n> ");
     continue;
   }
 
-  history.push({ role: "user", content: line });
-
-  // 容量で落ちたら履歴を切り詰めて同じターンを撃ち直す（成功か fail loudly で必ず抜ける）。
-  for (;;) {
-    if (sequence === undefined) {
-      sequence = await pipeline.sequence();
-      committed = 0;
-    }
-    // 差分を継ぐのは「直前の発話 1 件だけが未 commit」のときに限る。ずれたまま差分を流すと
-    // 会話が静かに欠けるので、写経の前提そのものを門にしておく。
-    if (committed !== 0 && committed !== history.length - 1) {
-      throw new Error(`内部不整合: KV は ${committed} 件だが履歴は ${history.length} 件`);
-    }
-    const prompt = committed === 0
-      ? gemma4ChatPrompt(pipeline.tokenizer, history)
-      : gemma4ChatTurn(pipeline.tokenizer, history[history.length - 1]);
-
-    const controller = new AbortController();
-    turn = controller;
-    const turnStarted = performance.now();
-    const detokenizer = pipeline.tokenizer.createDetokenizer();
-    let stream: GenerationStream | undefined;
-    let reply = "";
-    let prefilled = false;
-    try {
-      stream = sequence.generate({
-        prompt,
-        maxNewTokens,
-        ...(sampler === undefined ? {} : { sampler }),
-        signal: controller.signal,
-      });
-      for await (const event of stream) {
-        if (event.kind === "prefill") {
-          // chunk が 1 本で終わる prompt（= chunk 長以下）では出さない — 進捗にならない。
-          if (event.chunks > 1) {
-            note(`\r  prefill ${event.chunk}/${event.chunks}  `);
-            prefilled = true;
-          }
-          continue;
-        }
-        if (prefilled) {
-          clearLine();
-          prefilled = false;
-        }
-        // MUST: 逐次復号器が**確定させたぶん**だけを書く（byte_fallback の途中は次の token まで
-        // 持ち越される — 自分で `decode` を呼び直すと途中のバイト列が U+FFFD になる）。
-        const text = detokenizer.push(event.id);
-        if (text !== "") {
-          reply += text;
-          write(text);
-        }
-      }
-      const tail = detokenizer.finish();
-      if (tail !== "") {
-        reply += tail;
-        write(tail);
-      }
-      const stop = await stream.done;
-      report(stop, turnStarted);
-      // 生成が停止 token で閉じたターンだけ、次のターンを差分で継げる。
-      if (stop.reason === "eos") {
-        history.push({ role: "assistant", content: reply });
-        committed = history.length;
-      } else {
-        // max-tokens / break は model turn を閉じていない = 差分の前提が無い。答えは履歴へ
-        // 残し、次のターンは新しい sequence へ全体を描き直す。
-        if (reply !== "") history.push({ role: "assistant", content: reply });
-        await releaseSequence();
-      }
-      break;
-    } catch (error) {
-      if (error instanceof GenerationCapacityError) {
-        // 予算の検査は run の**前**なので KV は 1 行も進んでいない。ただし切り詰めた履歴は
-        // 先頭から描き直すことになるので、context は返して組み直す。
-        await releaseSequence();
-        if (!dropOldestTurn()) {
-          // 落とせるものが無い = この 1 発話だけで入り切らない。黙って縮めない（切り詰めの
-          // 判断はホストの責務だが、判断材料が尽きたことは利用者に見せる）。
-          history.pop();
-          write(
-            `\n  [入り切らない: ${error.constraint} 上限 ${error.limit} に対し` +
-              ` 既存 ${error.pastLength} + prompt ${error.promptLength}` +
-              `（この長さなら maxNewTokens ≤ ${error.maxNewTokens}）— 発話を短くするか /reset]\n`,
-          );
-          break;
-        }
-        write(
-          `\n  [容量超過（${error.constraint} 上限 ${error.limit}）— 古い turn を落として` +
-            `再構成（この会話で通る maxNewTokens は ${error.maxNewTokens} だった）]\n`,
-        );
-        continue;
-      }
-      if (error === controller.signal.reason) {
-        // 中断でも「成功した run のぶんだけ」会話は進んでいる。done は reject ではなく
-        // `aborted` で settle するので、生成できた token 数はそのまま読める。
-        if (prefilled) clearLine();
-        if (stream !== undefined) report(await stream.done, turnStarted);
-        if (reply !== "") history.push({ role: "assistant", content: reply });
-        else history.pop();
-        // prompt が途中まで KV へ入った可能性がある（中断は prefill の chunk 境界でも起きる）。
-        // 履歴との対応を再構成する術は無いので、context は捨てる。
-        await releaseSequence();
-        break;
-      }
+  const controller = new AbortController();
+  turn = controller;
+  const turnStarted = performance.now();
+  // 発行した stream は必ず汲み切るか break で閉じる（ターンの締めは列の終端で走る）。
+  const stream = session.send(line, { signal: controller.signal });
+  try {
+    // 片は逐次復号器が**確定させたぶん**だけで、連結すると全体の decode と一致する。
+    for await (const chunk of stream) write(chunk);
+    report(await stream.done, turnStarted);
+  } catch (error) {
+    if (error instanceof GenerationCapacityError) {
+      // 溢れ処理で落とせるものが尽きた = この 1 発話だけで入り切らない。判断に要る実値は
+      // 例外の欄が運ぶ（文言を読み解かない）。
+      write(
+        `\n  [入り切らない: ${error.constraint} 上限 ${error.limit} に対し` +
+          ` 既存 ${error.pastLength} + prompt ${error.promptLength}` +
+          `（この長さなら maxNewTokens ≤ ${error.maxNewTokens}）— 発話を短くするか /reset]\n`,
+      );
+    } else if (error === controller.signal.reason) {
+      // 中断でも「成功した run のぶんだけ」会話は進んでいる。done は reject ではなく
+      // `aborted` で settle するので、生成できた token 数はそのまま読める。
+      report(await stream.done, turnStarted);
+    } else {
       throw error;
-    } finally {
-      turn = undefined;
     }
+  } finally {
+    turn = undefined;
   }
 
   write("> ");
 }
 
 Deno.removeSignalListener("SIGINT", onInterrupt);
-await releaseSequence();
+await session.dispose();
 write("\nbye\n");

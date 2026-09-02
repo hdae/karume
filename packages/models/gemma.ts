@@ -28,6 +28,23 @@ export type {
   Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,
 } from "./src/gemma/pipeline.ts";
+/**
+ * 多ターンの会話を持ち回る中間層（`chat` と `sequence` の間 — ADR 0083 追記 2026-09-02）。
+ *
+ * `chat` は 1 ターン = 1 sequence で過去 turn を毎回描き直し（会話が伸びるほど prefill が
+ * O(n²)）、`sequence` は token id と KV の寿命を呼び手へ渡す。{@link Gemma4ChatSession} は
+ * その落差だけを持つ — KV を継ぎ、容量が足りないターンは**送る前に**
+ * {@link Gemma4ChatSessionOptions.onOverflow}（既定 {@link dropOldestTurns}）で切り詰める。
+ */
+export { dropOldestTurns, Gemma4ChatSession } from "./src/gemma/chat-session.ts";
+export type {
+  Gemma4ChatOverflow,
+  Gemma4ChatOverflowPolicy,
+  /** セッションがパイプラインから読む面（{@link Gemma4Pipeline} がそのまま満たす）。 */
+  Gemma4ChatSessionHost,
+  Gemma4ChatSessionOptions,
+  Gemma4ChatTurnOptions,
+} from "./src/gemma/chat-session.ts";
 /** 配布形が宣言する静的配線（`karume.json` の `pipelineConfig` — ADR 0038 §1）。 */
 export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
 /**
@@ -69,7 +86,8 @@ export type { StreamingDetokenizer } from "./src/text/detokenizer.ts";
 
 /**
  * 生成の語彙（ADR 0083）。`sequence()` を自分で回すときに要る型と、「会話が入り切らない」を
- * 他の失敗と読み分けるための例外（決定 10 — 会話の切り詰めはホストの責務）。
+ * 他の失敗と読み分けるための例外（決定 10 — **低レベル面では**会話の切り詰めはホストの責務。
+ * 高レベル面 {@link Gemma4ChatSession} は注入可能な既定ポリシーを持つ — 同 追記 2026-09-02）。
  */
 export { GenerationCapacityError } from "./src/generation/sequence.ts";
 export type {
