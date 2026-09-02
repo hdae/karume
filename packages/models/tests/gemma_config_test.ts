@@ -21,6 +21,8 @@ import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 
 /** 受理される最小形（3 つの数だけ — `sampler` は optional）。 */
 const MINIMAL = { chunkLength: 32, maxPosition: 1024, capacity: 640 } as const;
+/** 配布形ミラーが宣言する capacity（= 焼き込んだ RoPE 表の行数 `maxPosition`）。 */
+const SHIPPED_CAPACITY = 1024;
 
 /** 上流 `gemma-4-E2B-it` の `generation_config.json` の推奨（ADR 0083 決定 7）。 */
 const RECOMMENDED = { temperature: 1, topK: 64, topP: 0.95 } as const;
@@ -178,6 +180,8 @@ Deno.test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサ�
   // 推奨サンプラは**上流の宣言そのもの**（写経していれば値が動く）。
   assertEquals(config.sampler, RECOMMENDED, "配布形が宣言する sampler の既定");
   assertEquals(config.chunkLength, MINIMAL.chunkLength);
-  assertEquals(config.capacity, MINIMAL.capacity);
+  // 配布形の capacity は RoPE 表の上限まで引き上げ済み（2026-09-02・recipes gemma4/distribution.py の
+  // GEMMA4_CAPACITY）。合成の MINIMAL（640）は「表の内側の任意値」で、配布形の宣言とは別物。
+  assertEquals(config.capacity, SHIPPED_CAPACITY);
   assertEquals(config.maxPosition, MINIMAL.maxPosition);
 });
