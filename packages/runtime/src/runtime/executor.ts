@@ -447,7 +447,15 @@ export type ModelShard = {
    * 連番は runtime から見た到着順でしかない）。
    */
   readonly id: string;
-  /** shard のバイト列。buffer 全体を占める view MUST（slice で辻褄を合わせると RAM ピークが倍増する）。 */
+  /**
+   * shard のバイト列。**buffer の先頭からの view**（byteOffset 0）MUST — buffer 全体を占める
+   * tight view でも、供給側が使い回す器（最大 shard 長の buffer）の prefix view でもよい。
+   * byteOffset ≠ 0 は拒否する（slice で辻褄を合わせる形 = RAM ピーク倍増の防波堤）。
+   *
+   * MUST（供給側）: この shard の処理が終わって**次の shard を要求される（`next()` が呼ばれる）
+   * まで器を書き換えない**。runtime は `queue.writeBuffer`（呼び出し時に同期コピー）を出し
+   * 終えるまでしかバイト列を参照せず、次を要求した時点で前の shard への参照は尽きている。
+   */
   readonly bytes: Uint8Array<ArrayBuffer>;
 };
 
@@ -519,21 +527,22 @@ const followingShards = async function* (
 };
 
 /**
- * shard のバイト列を parse する。bytes が buffer 全体を占めることの確認は ADR 0038 §5 の
- * `openModel` への受け渡しと同じ規律（slice で辻褄を合わせると RAM ピークが倍増する）。
+ * shard のバイト列を parse する。bytes は buffer の先頭からの view（{@link ModelShard.bytes}）—
+ * tight view（ADR 0038 §5 の `openModel` と同じ）か、供給側が使い回す器の prefix view。
+ * byteOffset ≠ 0（slice で辻褄を合わせた形）は RAM ピーク倍増の防波堤として拒否する。
  *
- * 非 tight view もパーサ門（`SafetensorsError`）も**その shard を名乗って**落ちる —
+ * 非先頭 view もパーサ門（`SafetensorsError`）も**その shard を名乗って**落ちる —
  * 壊れた 1 本を配布形から特定するのに要るのは連番ではなくファイル名。
  */
 const parseShard = (bytes: Uint8Array<ArrayBuffer>, origin: string): SafetensorsFile => {
-  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
+  if (bytes.byteOffset !== 0) {
     throw new ExecutionError(
-      `${origin}: bytes が buffer 全体を占めていない（byteOffset ${bytes.byteOffset} / ` +
+      `${origin}: bytes が buffer の先頭から始まっていない（byteOffset ${bytes.byteOffset} / ` +
         `byteLength ${bytes.byteLength} / buffer ${bytes.buffer.byteLength}）`,
     );
   }
   try {
-    return parseSafetensors(bytes.buffer);
+    return parseSafetensors(bytes.buffer, bytes.byteLength);
   } catch (cause) {
     throw attributeToShard(origin, cause);
   }

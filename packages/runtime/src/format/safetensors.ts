@@ -197,11 +197,24 @@ const decodeHeader = (buffer: ArrayBuffer, headerLength: number): Record<string,
 /**
  * ファイル全体を 1 本の ArrayBuffer で受け取り、テンソル表を厳密に検査して view を返す。
  * view はコピーを作らず buffer 上の byteOffset / byteLength で参照する。
+ *
+ * `byteLength` はファイルの実長（既定 = buffer 全体）。供給側が **器を使い回す**（最大 shard 長の
+ * buffer へ毎回の shard を先頭から読む — ADR 0070 追記の RAM ピーク係数 1 化）と buffer の末尾に
+ * 前回の残りが居るので、ファイル長を別に受けて「データ節末尾の未使用領域」の検査をその長さで
+ * 行う。buffer より長い指定は fail loudly（ファイルが器に収まっていない）。
  */
-export const parseSafetensors = (buffer: ArrayBuffer): SafetensorsFile => {
-  if (buffer.byteLength < HEADER_LENGTH_BYTES) {
+export const parseSafetensors = (
+  buffer: ArrayBuffer,
+  byteLength: number = buffer.byteLength,
+): SafetensorsFile => {
+  if (!Number.isInteger(byteLength) || byteLength < 0 || byteLength > buffer.byteLength) {
     throw new SafetensorsError(
-      `ファイルが短すぎる: ${buffer.byteLength} バイト（ヘッダ長すら無い）`,
+      `ファイル長 ${byteLength} が buffer（${buffer.byteLength} バイト）に収まっていない`,
+    );
+  }
+  if (byteLength < HEADER_LENGTH_BYTES) {
+    throw new SafetensorsError(
+      `ファイルが短すぎる: ${byteLength} バイト（ヘッダ長すら無い）`,
     );
   }
   const rawHeaderLength = new DataView(buffer).getBigUint64(0, true);
@@ -210,9 +223,9 @@ export const parseSafetensors = (buffer: ArrayBuffer): SafetensorsFile => {
   }
   const headerLength = Number(rawHeaderLength);
   const dataStart = HEADER_LENGTH_BYTES + headerLength;
-  if (dataStart > buffer.byteLength) {
+  if (dataStart > byteLength) {
     throw new SafetensorsError(
-      `ヘッダ長 ${headerLength} がファイル長 ${buffer.byteLength} を超える`,
+      `ヘッダ長 ${headerLength} がファイル長 ${byteLength} を超える`,
     );
   }
 
@@ -233,7 +246,7 @@ export const parseSafetensors = (buffer: ArrayBuffer): SafetensorsFile => {
     declared.push(parseDeclaration(name, value));
   }
 
-  const dataLength = buffer.byteLength - dataStart;
+  const dataLength = byteLength - dataStart;
   const ordered = [...declared].sort((a, b) => a.begin - b.begin || a.end - b.end);
   const tensors = new Map<string, TensorView>();
   // データ節は宣言の集合で隙間なく覆われる MUST — 重複は同一バイトの二重意味、隙間と

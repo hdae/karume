@@ -90,11 +90,28 @@ Deno.test("prepareModel の失敗は資産名（shard [0] 'id'）を名乗る", 
   assert(brokenIr.message.includes(GRAPH_SHARD_ID), brokenIr.message);
 });
 
-Deno.test("prepareModel は bytes が buffer 全体を占めない view を受けない", () => {
+Deno.test("prepareModel は buffer の先頭から始まらない view（slice の混入）を受けない", () => {
   const loose = new Uint8Array(new ArrayBuffer(16), 4, 8) as Uint8Array<ArrayBuffer>;
   assertThrows(
     () => prepareModel({ id: GRAPH_SHARD_ID, bytes: loose }),
     Error,
-    "buffer 全体",
+    "buffer の先頭",
+  );
+});
+
+Deno.test("prepareModel は使い回しの器（余白のある buffer）の prefix view を受ける", () => {
+  // 供給側が最大 shard 長の器へ読んだ形: buffer は shard より長く、view は先頭から shard 長だけ。
+  const shard = new Uint8Array(graphModelBuffer(baseGraph()));
+  const vessel = new Uint8Array(new ArrayBuffer(shard.byteLength + 4096));
+  vessel.set(shard);
+  const prefix = new Uint8Array(vessel.buffer, 0, shard.byteLength);
+  const fromVessel = prepareModel({ id: GRAPH_SHARD_ID, bytes: prefix });
+  const fromTight = prepareModel({ id: GRAPH_SHARD_ID, bytes: shard });
+  assertEquals(fromVessel.graph, fromTight.graph, "器の余白がグラフの読みに混ざった");
+  // 余白ぶんを shard 長に数える形（view を buffer 全体にする）は末尾の未使用領域として落ちる。
+  assertThrows(
+    () => prepareModel({ id: GRAPH_SHARD_ID, bytes: vessel }),
+    SafetensorsError,
+    "未使用領域",
   );
 });

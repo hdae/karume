@@ -320,7 +320,7 @@ Deno.test({
             })(),
           ),
         ExecutionError,
-        "buffer 全体",
+        "buffer の先頭",
       );
 
       // 途中失敗の後で errorScope が積み残されていないこと（積み残すと以後の検証結果が
@@ -335,6 +335,49 @@ Deno.test({
         assertEquals(output.shape, [2, 4]);
       } finally {
         await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+// 器の使い回し（ADR 0070 追記 — ホスト RAM ピークの係数 1 化）: 供給側が最大 shard 長の buffer
+// 1 本へ毎回の shard を先頭から読み、prefix view を渡す形でも、Session は tight view の列と
+// ビット同一に組める。runtime 側の契約「次の next() まで器を書き換えない」の成立をここで縛る —
+// 参照を shard の処理後まで握っていれば、次の shard の上書きで前の重みが化ける。
+const vesselStream = async function* (
+  shards: readonly ArrayBuffer[],
+): AsyncGenerator<{ id: string; bytes: Uint8Array<ArrayBuffer> }> {
+  const largest = shards.reduce((max, shard) => Math.max(max, shard.byteLength), 0);
+  const vessel = new Uint8Array(new ArrayBuffer(largest));
+  for (const [index, shard] of shards.entries()) {
+    vessel.set(new Uint8Array(shard));
+    yield {
+      id: `fixture/vessel-${index}.safetensors`,
+      bytes: new Uint8Array(vessel.buffer, 0, shard.byteLength),
+    };
+  }
+};
+
+Deno.test({
+  name:
+    "shard 面は使い回しの器（prefix view）からでも tight view の列とビット同一に組める（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const fixture = buildFixture();
+    const gpu = await acquireGpu();
+    try {
+      const tight = await createSessionFromShards(gpu, shardStream(fixture.shards()));
+      const reused = await createSessionFromShards(gpu, vesselStream(fixture.shards()));
+      try {
+        const tightOut = (await tight.run({ x: fixture.x }))["y"];
+        const reusedOut = (await reused.run({ x: fixture.x }))["y"];
+        assertEquals(bitsOf(reusedOut), bitsOf(tightOut), "器の使い回しで重みが化けた");
+        assertEquals(reused.diagnostics().storage, tight.diagnostics().storage);
+      } finally {
+        await tight.dispose();
+        await reused.dispose();
       }
     } finally {
       gpu.destroy();
