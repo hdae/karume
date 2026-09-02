@@ -209,6 +209,9 @@ class TestSubsetKeys:
 class TestFixture:
     def test_expectations_come_from_the_upstream_tokenizer(self, tmp_path: Any) -> None:
         """期待値の経路に compile を通さない（通すと突合が恒真化する — ADR 0084 決定 7）。"""
+        # 上流参照の `tokenizers` は家族グループ（transformers）の推移依存で、既定 sync の CI には
+        # 無い — 他の家族依存テストと同じく SKIP で守る（`test_optional_group_imports.py` の作法）。
+        pytest.importorskip("tokenizers")
         from _shared.gemma_tokenizer import EncodeCase
 
         raw = _tokenizer_json()
