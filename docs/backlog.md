@@ -75,7 +75,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   `GenerationProgram` 絞り込み・`defaultSampler` 改名・`used`/`GenerationCapacityError`
   構造化欄・`GenerationStop.tokens`）+ `examples/gemma4/`（sequence KV 継続の写経見本・
   デモ 4 本も denoDirectory 移行）。フル verify 2043/0/13 緑。
-  **残 = ③capacity 1024 の反映**（dist 再生成 — 上の引き上げ裁定・>1024 の再 export 判断は
+  ~~残 = ③capacity 1024 の反映~~ **消化（2026-09-02 `fafca9d` — 定数 1024 + ミラー再生成・golden 不変・
+  RoPE 表は既に 1024 行で再 export 不要）**（>1024 の再 export 判断は
   decode の P 依存実測と同時。**ユーザー意向〈2026-09-01〉= コンテキスト窓は可能な限り大きく
   — 1024 反映を先行し、上げ幅の最大化は P 依存実測とセットで検討**）。起票のみ（第 2 波候補）: ChatSession 高レベル面・stop strings・
   `chatText()`・onProgress 可読化・maxResidentPleBytes・logitBias 配列化・防御コピー
@@ -186,6 +187,13 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     115 ignored — 赤 27 = 既知 Metal 12（同一署名）+ sha 参照門 15（資産同期で初走・limitations
     どおり）・新規 0。gemma4 / anima の DL 前検査は M2 アダプタ値で誤拒否なく通過・chat golden 緑
     （gemv margin 命題成立 — ADR 0082 追記 3）。
+    **Phase B 実測 + Phase C-1 実装（2026-09-02）**: ピーク ≈ 定数 + 3 × 最大 shard（Linux）・刻みは Vulkan 無効 /
+    Metal −13%・明示 GC で 1 本分 → **器の使い回し（ADR 0070 追記 2026-09-02）で anima 4,069 → 1,402 MiB・
+    gemma4 2,622 → 1,116 MiB・ロード 11.2 → 5.7 s**（research 2026-09-02-shard-size-ram-peak.md）。
+    **残: ①shard 目標値の裁定（512 or 256MiB — 目標/上限の 2 値化・ADR 0081 追記・全ミラー再生成）
+    ②C-2 テンソル単位ストリーミング（ピーク → 定数 + 最大テンソル・shard サイズを RAM から切り離す）
+    ③HF 経路の器（`@hdae/fetch-cache` に into 相当の口 — 外部リポ）④実験ノブ UPLOAD_FENCE_BYTES の削除
+    （C-2 と同時）⑤Mac / Chrome の追試**。
     隣接起票（ADR 0089 Consequences）: createResident / run 時 transient の同型弱点・
     PLE sidecar は extras 席で shard 門の外。+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
     A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+

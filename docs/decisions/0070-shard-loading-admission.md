@@ -248,3 +248,29 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
   undefined` を見て何もせず抜けるので、`prefetchAssets` はローカル取得元では no-op である。逆に
   **越境先だけが相 1 を落とす形は取得元契約の破れ**として fail loudly する（`originFor` は同じ
   取得元の別座標を返す口であって、能力を落とす口ではない）。
+
+### 追記 2026-09-02 — 器の使い回し（ホスト RAM ピークの係数 1 化）と shard 受け口の契約変更
+
+メモリ管理波 Phase B の実測（[research/2026-09-02-shard-size-ram-peak.md](../research/2026-09-02-shard-size-ram-peak.md)）
+で、逐次面の RAM ピークは「O(最大 shard)」ではあっても**係数 3**（今の shard + GC 待ちの前 shard +
+GC しても消えない 1 本）で、定数も 1GB 級だった。shard ごとに新しい `ArrayBuffer` を作る限り
+係数は下がらない（明示 GC で 1 本ぶんしか減らない・writeBuffer の完了待ちを刻んでも Vulkan では
+不変）。
+
+**決定（Phase C-1）**: 逐次面は**コンポーネントの最大 shard 長の器を 1 本だけ確保して使い回す**。
+
+- hub: `FileReadOptions.into`（器の貸し出し・遅延確保）を逐次面 `streamAssets` が渡し、取得元は
+  器へ読んで prefix view（byteOffset 0 / byteLength = `size`）を返してよい。`DirectoryAdapter` に
+  `readFileInto`（任意）を追加し、Deno のディレクトリ取得元が実装。器を使わない取得元（HF —
+  取得層 `@hdae/fetch-cache` がキャッシュ読出しで buffer を確保する）は従来どおり tight view を
+  返し、器は確保されない。
+- runtime: `ModelShard.bytes` の契約を「buffer 全体を占める tight view MUST」から「**buffer の先頭
+  からの view MUST**（tight view か器の prefix view・byteOffset ≠ 0 は拒否）」へ。供給側の義務は
+  「次の `next()` まで器を書き換えない」。`parseSafetensors` はファイル長を別に受け、末尾未使用領域の
+  検査をその長さで行う。
+- 決定 2 の RAM ピーク目標「O(最大 shard)」は**係数 1**へ具体化: 実測 anima f16（1GiB shard）
+  4,069 → 1,402 MiB・gemma4 i4 2,622 → 1,116 MiB・ロード時間も 11.2 → 5.7 s（確保と GC の往復が
+  消えた分）。
+- 外に残るもの: HF 経路の係数（取得層へ `into` 相当を足すまで従来どおり）／テンソル単位の
+  ストリーミング（Phase C-2 候補 — ピークを「定数 + 最大テンソル」へ）／書き手の shard 目標値
+  （512 or 256MiB・ADR 0081 側の裁定）。

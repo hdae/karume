@@ -46,6 +46,8 @@ const fenceBytes = fenceBytesRaw === undefined ? undefined : Number(fenceBytesRa
 const steps = Number(args.get("steps") ?? "2");
 // 診断: shard 境界で明示 GC（`deno run --v8-flags=--expose-gc` が前提・無ければ no-op）。
 const explicitGc = args.get("gc") === "true";
+// コンポーネント面の読み手で器を使い回す（hub 逐次面の器の再利用と同じ形 — 新旧の A/B 用）。
+const reuseVessel = args.get("vessel") === "true";
 const size = Number(args.get("size") ?? "512");
 
 const mib = (bytes: number): number => Math.round(bytes / 1048576);
@@ -73,10 +75,27 @@ const componentShards = async (): Promise<
   return { model: modelName, quant: quantName, shards: weights.shards };
 };
 async function* streamShards(shards: readonly ManifestShard[]): AsyncGenerator<ModelShard> {
+  const largest = shards.reduce((max, shard) => Math.max(max, shard.size), 0);
+  const vessel = reuseVessel ? new Uint8Array(new ArrayBuffer(largest)) : undefined;
   for (const shard of shards) {
     if (explicitGc) (globalThis as { gc?: () => void }).gc?.();
-    const bytes = await Deno.readFile(`${source}/${shard.path}`);
-    yield { id: shard.path, bytes: bytes as Uint8Array<ArrayBuffer> };
+    if (vessel === undefined) {
+      const bytes = await Deno.readFile(`${source}/${shard.path}`);
+      yield { id: shard.path, bytes: bytes as Uint8Array<ArrayBuffer> };
+      continue;
+    }
+    const file = await Deno.open(`${source}/${shard.path}`);
+    try {
+      let filled = 0;
+      while (filled < shard.size) {
+        const read = await file.read(vessel.subarray(filled, shard.size));
+        if (read === null) throw new Error(`${shard.path} が宣言 size より短い`);
+        filled += read;
+      }
+    } finally {
+      file.close();
+    }
+    yield { id: shard.path, bytes: new Uint8Array(vessel.buffer, 0, shard.size) };
   }
 }
 
@@ -145,6 +164,7 @@ console.log(JSON.stringify({
   component: mode === "component" ? component : null,
   fenceBytes: fenceBytes ?? null,
   explicitGc,
+  reuseVessel,
   source,
   ...resolved,
   os: Deno.build.os,

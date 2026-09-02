@@ -291,6 +291,16 @@ ArrayBuffer の大きさ**（Chromium の壁 — 下記）であって合計の�
 添字の欠番や、素キー（`transformer`）と分割キー（`transformer[0]`）の混在は **shard の語を含む
 診断**で fail loudly（黙って片方を採らない）。
 
+## ホスト RAM ピークの係数 1 化はローカル取得元だけ（HF 経路は取得層の buffer 確保に依存）
+
+逐次面の器の使い回し（ADR [0070](decisions/0070-shard-loading-admission.md) 追記 2026-09-02）で、
+ロード時のホスト RAM ピークは「約 0.45GB + 最大 shard 1 本」になった（Linux 実測: anima f16 1GiB shard
+4,069 → 1,402 MiB）。ただし効くのは**取得元が器へ読める経路**（Deno の `denoDirectory`・
+`readFileInto` を実装したディレクトリアダプター）だけで、**HF 取得元（ブラウザの通常経路）は従来の
+係数（約 3 × 最大 shard + 1GB）のまま** — 取得層 `@hdae/fetch-cache` がキャッシュから読むたびに
+自前で buffer を確保するため、hub からは器を渡せない。取得層に「与えられた buffer へ読む」口が
+入った時点で hub 側は同じ `into` を渡すだけで揃う（外部リポの起票）。
+
 ## MoE は全エキスパート VRAM 常駐が前提（エキスパート単位の動的ロード/退避はしない）
 
 by-design（2026-08-31 裁定）。MoE モデルの VRAM 予算は **active でなく総パラメータ**で組む —
