@@ -1222,6 +1222,10 @@ const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<D
           if (observe !== undefined) observe(dit.diagnostics());
         };
         await forward(loop.condMask, vCond);
+        // 区間の最初の 1 forward だけフェンスを張って推定を裏付ける（P-2）。これが無いと区間の
+        // 間ずっと実測 0 = チャンクは初期値 16 のままで、約 96,000 dispatch が 6,000 回の submit に
+        // 割れる。代償はフェンス 1 本（≈11 ms）。
+        if (step === 0) await batch.settle();
         const guided = t >= config.cfgMinT && t <= config.cfgMaxT &&
           loop.uncondVariants.length > 0;
         if (guided) {

@@ -1231,6 +1231,8 @@ export class BatchScope {
   readonly #drained = Promise.withResolvers<void>();
   #leases = 0;
   #finished = false;
+  /** {@link BatchScope.settle} の途中か（この間の enqueue は拒否する — 窓の帰属を守る）。 */
+  #settling = false;
   /** 区間で最初に起きたホスト側の失敗（{@link BatchInternals.leave}）。2 件目以降は捨てる。 */
   #failure: { readonly cause: unknown } | undefined;
   /** {@link BatchScope.finish} が返す決着（errorScope の結果と {@link #failure} の合流）。 */
@@ -1296,6 +1298,12 @@ export class BatchScope {
         if (this.#finished) {
           throw new BatchScopeError("finish() 済みの batch には enqueue できない");
         }
+        if (this.#settling) {
+          throw new BatchScopeError(
+            "settle() の途中の batch には enqueue できない（窓を閉じる前に submit が混ざると、" +
+              "フェンスが待っていない dispatch まで実測に入って推定が過小 = チャンクが TDR 域へ膨らむ）",
+          );
+        }
         this.#leases += 1;
       },
       leave: (failure) => {
@@ -1313,6 +1321,47 @@ export class BatchScope {
   /** 決着済みか（{@link BatchScope.finish} を 1 度でも呼んだか）。 */
   get finished(): boolean {
     return this.#finished;
+  }
+
+  /**
+   * 区間の**途中**でフェンスを 1 本だけ張り、ここまでに出した dispatch の実測で
+   * {@link SubmitScheduler} の推定を裏付ける（perf-ledger P-2）。
+   *
+   * 区間の計測窓は {@link BatchScope.finish} の 1 回でしか閉じないので、区間の間ずっと
+   * 「実測 0」= チャンクは `initialChunkSize` に据え置かれる（submit.ts の不変条件 1 —
+   * 実測 0 は成長の根拠にならない）。数万 dispatch の区間（irodori の DiT ループ）では
+   * submit が数千回になり、1 回 ≈0.5 ms のホスト固定費が壁時計に積む。最初の 1 実行を
+   * await した直後にここを 1 度呼ぶと、残りの区間は裏付けのある予算でチャンクが伸びる。
+   *
+   * やることは finish の ①未 submit を出し切る ②`onSubmittedWorkDone` を 1 回待つ ③窓を
+   * 閉じる、だけ（リースの決着待ちと errorScope の pop はしない — 区間は続く）。
+   *
+   * MUST: 呼ぶのは in-flight の enqueue が無い時点（enqueue を await した直後）。未 await の
+   * enqueue が残っていれば fail loudly — その enqueue の submit がフェンスの後・窓を閉じる前に
+   * 混ざると、フェンスが待っていない dispatch まで実測に入って推定が過小に出る（過小 =
+   * チャンクが膨らむ = TDR 域へ向かう危険側）。待っている間の新規 enqueue も同じ理由で拒否する。
+   * MUST: finish 済みの区間では fail loudly。device 消失は finish と同じく例外へ変換する。
+   */
+  async settle(): Promise<void> {
+    if (this.#finished) throw new BatchScopeError("finish() 済みの batch では settle() できない");
+    if (this.#settling) throw new BatchScopeError("settle() を重ねて呼べない");
+    if (this.#leases > 0) {
+      throw new BatchScopeError(
+        `in-flight の enqueue が ${this.#leases} 本ある batch では settle() できない` +
+          "（enqueue を await してから呼ぶこと）",
+      );
+    }
+    this.#settling = true;
+    try {
+      for (const member of this.#members) member.submitPending();
+      await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
+        this.#gpu.device.queue.onSubmittedWorkDone(),
+        "batch の途中決着",
+      );
+      for (const member of this.#members) member.closeMeasurementWindowAfterFence();
+    } finally {
+      this.#settling = false;
+    }
   }
 
   /**

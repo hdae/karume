@@ -24,6 +24,7 @@ import { countFences } from "./helpers/fences.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import { graphModelBuffer } from "./helpers/graph.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
+import { DEFAULT_SUBMIT_POLICY } from "../src/gpu/submit.ts";
 
 const ROWS = 4;
 const COLS = 3;
@@ -144,6 +145,80 @@ Deno.test({
       assertEquals(producer.diagnostics().lastRun, undefined, "enqueue はアリーナを使わない");
     } finally {
       fences.restore();
+      await producer.dispose();
+      await consumer.dispose();
+      carrier.dispose();
+      sink.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "settle() は区間の途中でフェンスを 1 本だけ張り、以後のチャンク上限を推定へ切り替える（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const producer = await producerSession(gpu);
+    const consumer = await consumerSession(gpu);
+    const carrier = await gpu.createResident(BYTES, "carrier");
+    const sink = await gpu.createResident(BYTES, "sink");
+    const fences = countFences(gpu);
+    try {
+      const batch = await gpu.beginBatch();
+      await producer.enqueue({ x: input(0) }, { batch, copyOutputs: { y: carrier } });
+      const before = producer.diagnostics().submit;
+      assertEquals(before.measuredCount, 0, "区間の途中では窓が閉じない");
+      assertEquals(before.currentChunkSize, DEFAULT_SUBMIT_POLICY.initialChunkSize);
+
+      await batch.settle();
+      assertEquals(fences.count(), 1, "settle() のフェンスは 1 本");
+      const after = producer.diagnostics().submit;
+      assertEquals(after.measuredCount, 1, "settle() で窓が 1 つ閉じる");
+      // 実測が分解能未満（0）だと裏付けにならない（不変条件 1）— この形は数 µs の dispatch 1 本
+      // なので、裏付けが付いたときだけ上限の切り替えを見る。
+      if (after.msPerWorkgroup !== undefined) {
+        assertEquals(after.currentChunkSize, DEFAULT_SUBMIT_POLICY.maxChunkSize);
+      }
+
+      // 区間は続く: 後続の enqueue は同じ区間に入り、finish のフェンスで完了する。
+      await consumer.enqueue({ z: carrier }, { batch, copyOutputs: { w: sink } });
+      await batch.finish();
+      assertEquals(fences.count(), 2, "settle() 1 本 + finish 1 本");
+      assertEquals(bits(await sink.read()), bits(expectedChain(0)));
+
+      await assertRejects(() => batch.settle(), BatchScopeError, "finish() 済み");
+    } finally {
+      fences.restore();
+      await producer.dispose();
+      await consumer.dispose();
+      carrier.dispose();
+      sink.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "settle() は in-flight の enqueue がある間は fail loudly（窓の帰属を守る・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const producer = await producerSession(gpu);
+    const consumer = await consumerSession(gpu);
+    const carrier = await gpu.createResident(BYTES, "carrier");
+    const sink = await gpu.createResident(BYTES, "sink");
+    try {
+      const batch = await gpu.beginBatch();
+      const pending = producer.enqueue({ x: input(0) }, { batch, copyOutputs: { y: carrier } });
+      await assertRejects(() => batch.settle(), BatchScopeError, "in-flight");
+      await pending;
+      await batch.settle();
+      await consumer.enqueue({ z: carrier }, { batch, copyOutputs: { w: sink } });
+      await batch.finish();
+      assertEquals(bits(await sink.read()), bits(expectedChain(0)));
+    } finally {
       await producer.dispose();
       await consumer.dispose();
       carrier.dispose();
