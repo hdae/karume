@@ -106,3 +106,26 @@ dist の共有畳み込みで「グラフ shard は `shared/`・重み shard は
   規則は 1 本道になった（単一ファイル分岐が消えた）。
 - 均しにより各 shard が小さくなる（3.2GiB なら最大 1GiB → 0.8GiB）。取得層の同時 RAM 予算
   1.5GiB に対する余裕はそのぶん増える。
+
+## 追記 2026-09-02 — 書き手の目標 256MiB（受理上限 1GiB とは別の値）
+
+メモリ管理波 Phase B / C-1（[research/2026-09-02-shard-size-ram-peak.md](../research/2026-09-02-shard-size-ram-peak.md)・
+ADR [0070](0070-shard-loading-admission.md) 追記 2026-09-02）で、ロード時のホスト RAM ピークは
+「定数 + 最大 shard 1 本」になった。shard サイズがそのままピークの上乗せ分なので、決定 4 の
+書き手ポリシーに**詰める目標**を足す。
+
+- **受理上限（決定 2）は 1GiB のまま**: 読み手（hub `MAX_SHARD_BYTES` / exporter verify）が見る値は
+  この 1 本だけで、変えない。「上限は 1 本」の趣旨（読み手がどの上限で判定するかを規則に持たせない）
+  は保たれる — 目標は書き手ポリシーの値で、読み手契約ではない。
+- **目標 `SHARD_TARGET_BYTES` = 256MiB**（`karume.shards`）。実効目標 = max(目標, 最大単位)。目標より
+  大きい単位（割れないテンソル / weight + scale の対）を持つコンポーネントは、その単位に合わせて
+  一様に詰める。HF transformers / gguf-split の慣行「上限超えの単独ファイルを許す」ではなく実効目標へ
+  揃えるのは、全 shard が実効目標以下という一様性を保ち、規則に特例の分岐を足さないため。
+  今の実資産で持ち上がるのは 3 コンポーネント（gemma4 model 384MiB・irodori backbone 300MiB・
+  anima text_encoder 297MiB）。
+- gemma4 PLE sidecar の分割（`plan_ple_shards`）も既定で目標を使う（遅延ロードで触った shard だけを
+  ホストへ読むので、目標がそのまま 1 回の読みの上限）。
+- 裁定（ユーザー・2026-09-02）: 512 / 256 のうち 256MiB。代償はファイル数とリクエスト数
+  （anima transformer f16 5 → 16 本・text_encoder 3 → 6 本）で、hub の 4 並列取得と読み手上限 1024 本の内側。
+- 将来: テンソル分割（Phase C-2）が入れば「実効目標」の式は常に目標へ潰れて不要になり、受理上限も
+  目標へ揃えて定数 1 本へ戻せる。manifest に分割単位は書かない — shard ごとの `size` から導ける。

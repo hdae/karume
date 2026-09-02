@@ -190,10 +190,14 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     **Phase B 実測 + Phase C-1 実装（2026-09-02）**: ピーク ≈ 定数 + 3 × 最大 shard（Linux）・刻みは Vulkan 無効 /
     Metal −13%・明示 GC で 1 本分 → **器の使い回し（ADR 0070 追記 2026-09-02）で anima 4,069 → 1,402 MiB・
     gemma4 2,622 → 1,116 MiB・ロード 11.2 → 5.7 s**（research 2026-09-02-shard-size-ram-peak.md）。
-    **残: ①shard 目標値の裁定（512 or 256MiB — 目標/上限の 2 値化・ADR 0081 追記・全ミラー再生成）
-    ②C-2 テンソル単位ストリーミング（ピーク → 定数 + 最大テンソル・shard サイズを RAM から切り離す）
-    ③HF 経路の器（`@hdae/fetch-cache` に into 相当の口 — 外部リポ）④実験ノブ UPLOAD_FENCE_BYTES の削除
-    （C-2 と同時）⑤Mac / Chrome の追試**。
+    **shard 目標 256MiB を反映（2026-09-02 裁定・ADR 0081 追記）**: 受理上限 1GiB とは別に書き手の目標
+    `SHARD_TARGET_BYTES` = 256MiB（実効目標 = max(目標, 最大単位) — gemma4 lm_head 384MiB / irodori backbone
+    300MiB / anima text_encoder 297MiB の 3 コンポーネントだけ持ち上がる）。系列 146 コンポーネント repack +
+    PLE sidecar 3 → 9 + 5 ミラー再生成済み（anima transformer f16 5 → 16 本・HF 再アップはリリース時）。
+    実験ノブ UPLOAD_FENCE_BYTES は撤去。Mac 追試も消化（Metal でも係数 1）。
+    **残: ①C-2 テンソル分割（割れないテンソルを複数 shard へ — 入れば実効目標の式と受理上限 1GiB を
+    256MiB へ潰して定数 1 本に戻す）②HF 経路の器（`@hdae/fetch-cache` に into 相当の口 — 外部リポ）
+    ③Chrome の追試（HF 経路は取得層対応後）**。
     隣接起票（ADR 0089 Consequences）: createResident / run 時 transient の同型弱点・
     PLE sidecar は extras 席で shard 門の外。+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
     A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+

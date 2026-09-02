@@ -860,7 +860,8 @@ Chromium（Chrome / Edge — 全 OS 共通・Mac も同じ）は PartitionAlloc 
 
 **根本解は 2026-08-29 の R1 統合波で実装済み**: exporter が 1GiB 超のコンポーネントを
 shard 分割し（`karume.shards` — ADR 0070 追記 2026-08-29）、ロードは shard 逐次面が
-1 shard ずつ materialize する（単一バッファは常に ≤ 1GiB + ヘッダ）。Base f16 の実ロード +
+1 shard ずつ materialize する（単一バッファは常に ≤ 書き手の目標 256MiB + ヘッダ — 割れないテンソルを持つ
+コンポーネントだけそのテンソル長まで上がる・受理上限は 1GiB。ADR 0081 追記 2026-09-02）。Base f16 の実ロード +
 生成は分割配布形で実証済み。公開 HF リポ 2 本（anima / anima-turbo）も 2026-08-29 に分割形で
 上げ直し済み。**この制約が残るのは「分割前に焼かれた手元の旧資産」だけ**（`outputs/` の
 旧 series 等 — 再 export で自動的に規則内へ入る）。

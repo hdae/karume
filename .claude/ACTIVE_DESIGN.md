@@ -37,8 +37,9 @@
   errorScope 沈黙で残る限界は limitations 記録）。**Phase B へ持ち越し = `estimateSessionMemory`
   のロード面結線**（ロード時に束縛値を持つ家族が gemma4 だけ — 実測後に席を決める）→
   **Phase B 実測済み → Phase C-1 器の使い回しを実装（2026-09-02・ADR 0070 追記）= ピーク ≈ 0.45GB + 最大
-  shard 1 本（anima 4,069 → 1,402 MiB）・HF 経路は取得層側の対応待ち。残 = shard 目標値の裁定（512 or 256MiB）
-  → C-2 テンソル単位ストリーミング** → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
+  shard 1 本（anima 4,069 → 1,402 MiB）・HF 経路は取得層側の対応待ち。**shard 目標 256MiB も反映済み**（ADR 0081
+  追記・実効目標 = max(目標, 最大単位)・全ミラー再生成 — anima 1GiB shard → 256MiB で 1,402 → 約 0.7GB 見込み）。
+  残 = C-2 テンソル分割 → 受理上限も 256MiB へ** → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
 - **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
   Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
   台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・
