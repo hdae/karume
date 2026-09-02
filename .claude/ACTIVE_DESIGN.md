@@ -31,7 +31,9 @@
   exporter `requiredLimits` 一括導出（常駐前提・既定超過のみ・手書き拒否）・hub shard
   ≤1GiB 読み手検査・**models 読み手結線**（`requiredLimits` を重み DL 前に検査 — 共有 GPU は
   `GpuContext.limits`、自前経路は `readAdapterLimits` でアダプタを読んで捨てる = 案 A・
-  既存 5 ミラー再生成済み）。空き VRAM・合計は比較しない（ADR 0070 決定 5 維持 — Metal
+  既存 5 ミラー再生成済み・**M2 検証消化 2026-09-02** = 赤は既知 12 + sha 参照門 15 のみ・DL 前
+  検査は gemma4 / anima で通過・chat golden 緑 = gemv margin 命題成立〈ADR 0082 追記 3〉）。
+  空き VRAM・合計は比較しない（ADR 0070 決定 5 維持 — Metal
   errorScope 沈黙で残る限界は limitations 記録）。**Phase B へ持ち越し = `estimateSessionMemory`
   のロード面結線**（ロード時に束縛値を持つ家族が gemma4 だけ — 実測後に席を決める）→
   Phase B 実測 → export-recipes 切り出し（案 A = レシピのみ・core 残留）。

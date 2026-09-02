@@ -15,9 +15,13 @@ verify を並行させた走りで 2 回観測（単独走行でも過去に観�
 ## Metal（Apple GPU）で attention i8a8 の GPU 出力が TS 参照と 1 ULP ずれる（+ conv1d/conv2d parity 4 本 + gru_scan parity 2 本 + linear GEMV u32 門 1 本）
 
 実機 **Apple M2**（初出 Deno 2.9.4・2026-08-29 に 2.9.6 で再検証・2026-08-31 フル verify で
-節の対象を棚卸し）で attention i8a8 系 4 本 + **conv1d parity 2 本 + conv2d parity 2 本**
+節の対象を棚卸し・**2026-09-02 にメモリ管理波 Phase A 後の HEAD `2b096c4` を Deno 2.9.4 で
+再実測 = 計 12 本が同一署名で再現・新規 0**）で attention i8a8 系 4 本
+（`gpu_attention_i8a8_test.ts` 3 本 + `gpu_attention_pv_i8a8_test.ts` 1 本）+
+**conv1d parity 2 本 + conv2d parity 2 本**
 （旧記述は conv2d のみ — conv1d の 2 本が記載から漏れていた・症状は同型）+
-**gru_scan / gru_scan_reverse の分解 parity 2 本**（下の節）が赤（Linux / Vulkan は全緑）。
+**gru_scan / gru_scan_reverse の分解 parity 2 本**（下の節）+ GEMV u32 門 1 本 + OOM 門 1 本
+（次節）が赤（Linux / Vulkan は全緑）。
 **2026-08-29 のカナリア実機検証で機序の理解が更新された**:
 
 - **dp4a とエミュの両変種は M2 でもビット同一**（カナリア両腕が同値・PV の相互一致テスト緑・
@@ -63,15 +67,21 @@ verify を並行させた走りで 2 回観測（単独走行でも過去に観�
   （M2 で実測されたのはカナリア / reduce parity / skinny / gemv 門のみ — ユーザー指摘で発覚）。
   当時 chat e2e は M2 で gemma4 prefill NaN（gemv とは独立・`gelu_tanh` の Metal fast-math
   オーバーフロー — `tanh_stable` で解消済み・対話実走は M2 確認済み）により走り切れなかった。
-  margin 門が 1 ULP を吸収するという命題は **M2 での温度 0 golden e2e 実測が未取得のまま**
-  （NaN 解消で実測可能になった — 立て直しは ADR
-  [0082](decisions/0082-linear-gemv-decode.md) 追記 2）。既知の実害は attention i8a8 と
+  margin 門が 1 ULP を吸収するという命題は **M2 で成立を実測（2026-09-02）**: NaN 解消後の
+  `e2e_gemma4_chat_test.ts`（温度 0 の greedy golden と文字単位一致 — 6 門）が M2 で全緑
+  （ADR [0082](decisions/0082-linear-gemv-decode.md) 追記 3 — 追記 2 で保留した根拠 1 の
+  立て直し）。既知の実害は attention i8a8 と
   同じく「クロス経路の atol=0 門が Metal で立たない」こと。**切り分け済み（2026-09-01）**: `gpu_gemm_skinny_test.ts` の
   バケット跨ぎ u32 門は M2 で緑 — **GEMV 固有**（一般則説は棄却）。**裁定 = 既定経路維持**
   （ADR [0082](decisions/0082-linear-gemv-decode.md) 追記 1 — 機序の見立て: GEMM は逆量子化を
   共有タイルへ格納してから読む = 丸め障壁あり / GEMV は 1 式インライン = MSL の contraction が
   跨げる）。根治候補 = GEMV に明示の丸め点を入れる式形の探索（M2 実機ループ要・下の根治候補と
   同席・未着手）。
+- **sha256 参照門（anima PNG 9 本 / sbv2 WAV 6 本）は Metal で赤（2026-09-02 — 資産を Mac へ
+  同期して初めて走った）**: limitations「sha256 参照門は参照環境専用」節の仕様どおりで、本節の
+  対象には数えない。別経路同士の実測 sha は一致（base CFG の fromPretrained と fromAssets
+  分割形・512 euler と fromPretrained-512・1024 と onEvent-1024）= Metal 上で決定的で、ロード
+  経路は出力バイトを変えていない。出力はユーザーが目視 / 聴感で健全を確認済み。
 
 Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36257 = mapped range の
 み）。根治候補 = TS 参照の FMA 許容化 or WGSL 側で丸めを固定する手段の調査（未着手）。記録 =
@@ -95,8 +105,13 @@ Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36
 state 側の 2 上限化 — 修正候補だった「明示サイズ門」は消化）。残るのは**複数バッファ合計の
 物理超過**で、これは WebGPU が空き容量を露出しないため事前検査できず（ADR 0070 決定 5）、
 Metal では errorScope 沈黙のまま — by-design 制約として limitations「GPU メモリの事前検査は
-絶対上限まで」節に移管。`requiredLimits` のロード時実効化（DL 前拒否）は波 2 で結線予定
-（書き手側の一括導出は消化済み — ADR 0089 決定 3）。
+絶対上限まで」節に移管。`requiredLimits` のロード時実効化（DL 前拒否）は波 2 で結線済み
+（`335ad7a` — ADR 0089 追記 2026-09-01）。
+
+**Phase A 後の M2 再実測（2026-09-02・Deno 2.9.4）**: 本門は予告どおり赤のまま（1GiB × 64 本は
+各バッファが上限内で、合計超過は検査対象外）。DL 前検査は gemma4（宣言 384MiB）/ anima
+（宣言 311,164,928B）の配布形ミラーが M2 のアダプタ値（maxBufferSize 14,302,248,960 /
+maxStorageBufferBindingSize 4,294,967,292）で誤拒否なく通過し、生成まで完走。
 
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 

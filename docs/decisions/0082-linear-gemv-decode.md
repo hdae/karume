@@ -169,3 +169,17 @@ skinny / gemv 門のみ — ユーザー指摘で発覚・撤回）。実際に�
 **裁定（既定 GEMV 維持）は根拠 2・3 で維持する** — u32 門の目的は CI（Linux / Vulkan）での
 退行検出であり、Metal の 1 ULP は既知の赤のまま。margin 門が 1 ULP を吸収するという実測命題は
 **NaN バグの解消後に M2 で立て直す**（それまで「M2 で品質健全」を本 ADR の根拠として使わない）。
+
+## 追記 3（2026-09-02）: 実測命題の M2 での立て直し — 成立
+
+追記 2 が保留した「margin 門が GEMV の 1 ULP 差を吸収する（貪欲デコードの出力が動かない）」を、
+NaN バグ（`tanh_stable` で解消済み）の後に M2 で実測した。
+
+- 環境: Apple M2（24GB）・Deno 2.9.4・HEAD `2b096c4`（メモリ管理波 Phase A 後）。
+- 実測: `e2e_gemma4_chat_test.ts`（`fromAssets` → `chat` の温度 0 出力が Linux で採った greedy
+  golden と文字単位一致 — 6 門）が M2 で全緑。同時に `gpu_linear_gemv_test.ts` の u32 完全一致門は
+  追記 1 と同一署名（`0x414b3249` vs `0x414b3248`）で赤のまま = 1 ULP 差は残っているのに出力は
+  動かない。
+- 結論: 追記 1 の根拠 1 は「M2 で実走の裏付けあり」の形で立て直せた。裁定（既定 GEMV 維持）は
+  根拠 1〜3 が揃った状態で維持する。u32 門は引き続き CI（Linux / Vulkan）の退行検出器で、Metal の
+  1 ULP は known-issues の既知の赤。

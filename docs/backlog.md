@@ -98,7 +98,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   - **Metal OOM errorScope 沈黙**（known-issues — 重み経路の明示 size 門 + `requiredLimits`
     のロード時実効化。監査波から分離・独立に着手可）— **メモリ管理波として起票済み
     （2026-09-01 ユーザー指示）**: 着手は**モデル更新波の後**（同日順序改訂）
-  - gemv margin 命題の M2 温度 0 golden 実測（ADR 0082 追記 2 の立て直し）
+  - ~~gemv margin 命題の M2 温度 0 golden 実測~~ **消化（2026-09-02）**: `e2e_gemma4_chat_test.ts`
+    が M2 で全緑 = 命題成立（ADR 0082 追記 3）
   - ~~GPTQ static-groups + act-order 実験 / damping sweep~~ **実装 + 実測消化（2026-08-31）**:
     軸は opt-in で実装済み（既定 off ビット同一 — `892bfb3`/`683d6a0`）・minicpm5 8 構成の
     実測で **act-order / static は本条件で利得なし・damping 0.01 は実測で封印 → 既定は現状維持**
@@ -181,6 +182,10 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     結線（見積りは全記号の束縛が前提でロード時に束縛値を持つのは gemma4 だけ — 実測後に席を
     決める）。未配布 4 家族（siglip2 / birefnet / depth-anything / vowel-detector）の初回
     ミラー組み立てはリリース波。
+    **Mac（M2）検証消化（2026-09-02・Deno 2.9.4）**: フル verify 1742 passed / 27 failed /
+    115 ignored — 赤 27 = 既知 Metal 12（同一署名）+ sha 参照門 15（資産同期で初走・limitations
+    どおり）・新規 0。gemma4 / anima の DL 前検査は M2 アダプタ値で誤拒否なく通過・chat golden 緑
+    （gemv margin 命題成立 — ADR 0082 追記 3）。
     隣接起票（ADR 0089 Consequences）: createResident / run 時 transient の同型弱点・
     PLE sidecar は extras 席で shard 門の外。+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
     A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+
