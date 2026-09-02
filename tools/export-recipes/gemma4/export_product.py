@@ -87,7 +87,7 @@ from karume.ops import ARGMAX_OP, EMBEDDING_OP
 from karume.pipeline import export_module
 from karume.quantize import quantize_to_int8
 from karume.shapes import declared_shape
-from karume.shards import SHARD_BYTE_LIMIT, resolve_shards, shard_name
+from karume.shards import SHARD_TARGET_BYTES, resolve_shards, shard_name
 from karume.states import to_states_form
 
 #: 生成物の既定の置き場（既存 2 系列とは別ディレクトリ — 入口も出口も違う別資産）。
@@ -224,16 +224,18 @@ def ple_table_rows(tables: Sequence[torch.nn.Module], vocab_size: int) -> int:
 
 
 def plan_ple_shards(
-    tokens: int, token_bytes: int, limit: int = SHARD_BYTE_LIMIT
+    tokens: int, token_bytes: int, limit: int = SHARD_TARGET_BYTES
 ) -> tuple[tuple[int, int], ...]:
-    """vocab を上限内の**最小本数**へ割り、行数を均した `[start, stop)` の列。
+    """vocab を目標内の**最小本数**へ割り、行数を均した `[start, stop)` の列。
 
     方針は {@link karume.shards.pack_shards} と同型（最小本数 k を先に決めてから均す —
     端数 shard を作らない・ADR 0081）。単位が **1 token 固定長**なので貪欲の最小本数は
-    `ceil(総量 / 上限)` に一致し、均しも行数の等分で済む（対の原子性も可変長も無い）。
+    `ceil(総量 / 目標)` に一致し、均しも行数の等分で済む（対の原子性も可変長も無い）。
+    `limit` の既定は書き手の目標 {@link karume.shards.SHARD_TARGET_BYTES}（sidecar は遅延ロードで
+    触った shard だけをホストへ読むので、目標がそのまま 1 回の読みの上限になる）。
 
-    MUST: 1 token が単独で上限を超える形は fail loudly（層数か層当たり次元が想定外に大きい
-    — 分割の粒度をこれ以上細かくできないので、黙って上限を破るしかなくなる）。
+    MUST: 1 token が単独で目標を超える形は fail loudly（層数か層当たり次元が想定外に大きい
+    — 分割の粒度をこれ以上細かくできないので、黙って目標を破るしかなくなる）。
     """
     if tokens < 1:
         raise ValueError(f"PLE sidecar の token 数 {tokens} が 1 以上でない")

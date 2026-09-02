@@ -14,6 +14,7 @@ import pytest
 from karume.shards import (
     MAX_SHARDS,
     SHARD_BYTE_LIMIT,
+    SHARD_TARGET_BYTES,
     ShardError,
     assert_co_shard,
     assert_shard_partition,
@@ -152,14 +153,14 @@ class TestTheMinimalShardCount:
     """本数は「上限の下での最小連続分割数」（書き手ポリシー — ADR 0081 決定 4）。
 
     実 GiB を踏むテストは書けないので、1MiB のテンソルを並べて総量だけ実寸に合わせる
-    （上限は既定 = 実際に配布で使う 1GiB のまま）。
+    （bound = 1GiB を `target` で明示する — 既定の目標 256MiB の検算は `TestTheTargetBytes`）。
     """
 
     def test_the_count_is_the_ceiling_of_the_total_over_the_limit(self) -> None:
         """3.2GiB → 4 本（`ceil(3.2)`）。均すので 1GiB × 3 + 端数 0.2GiB にはならない。"""
         order, sizes = uniform(3277)
 
-        groups = pack_shards(order, sizes, {})
+        groups = pack_shards(order, sizes, {}, target=SHARD_BYTE_LIMIT)
 
         assert shard_mib(groups, sizes) == [820, 819, 819, 819]
 
@@ -167,7 +168,7 @@ class TestTheMinimalShardCount:
         """1.11GiB（text_encoder 相当）は 2 本 — 単一ファイルの席はもう無い（ADR 0081）。"""
         order, sizes = uniform(1137)
 
-        groups = pack_shards(order, sizes, {})
+        groups = pack_shards(order, sizes, {}, target=SHARD_BYTE_LIMIT)
 
         assert shard_mib(groups, sizes) == [569, 568]
 
@@ -175,7 +176,7 @@ class TestTheMinimalShardCount:
         """ちょうど 1GiB は 1 本のまま（境界は「超えたら」）。"""
         order, sizes = uniform(1024)
 
-        groups = pack_shards(order, sizes, {})
+        groups = pack_shards(order, sizes, {}, target=SHARD_BYTE_LIMIT)
 
         assert groups == [(), tuple(order)]
 
@@ -208,7 +209,7 @@ class TestBalancing:
         """2.6GiB → 3 本がほぼ等分（旧規則の `[1024, 1024, 614]` を置き換える形）。"""
         order, sizes = uniform(2662)
 
-        groups = pack_shards(order, sizes, {})
+        groups = pack_shards(order, sizes, {}, target=SHARD_BYTE_LIMIT)
 
         assert shard_mib(groups, sizes) == [888, 887, 887]
 
@@ -216,7 +217,7 @@ class TestBalancing:
         """均しは上限を緩めない（目標に届いても、上限を跨ぐ単位は次の shard へ送る）。"""
         order, sizes = uniform(2662)
 
-        groups = pack_shards(order, sizes, {})
+        groups = pack_shards(order, sizes, {}, target=SHARD_BYTE_LIMIT)
 
         assert all(sum(sizes[name] for name in group) <= SHARD_BYTE_LIMIT for group in groups)
 
@@ -388,3 +389,59 @@ class TestResolvingTheShardsOnDisk:
         _touch(tmp_path / "other.safetensors")
 
         assert set(shard_siblings(tmp_path / "model.safetensors")) == {single, stale}
+
+
+class TestTheTargetBytes:
+    """書き手の目標（256MiB）と実効目標 = max(目標, 最大単位)（ADR 0081 追記 2026-09-02）。"""
+
+    def test_it_is_256_mebibytes_under_the_limit(self) -> None:
+        assert SHARD_TARGET_BYTES == 256 * MIB
+        assert SHARD_TARGET_BYTES < SHARD_BYTE_LIMIT
+
+    def test_the_default_target_packs_a_component_into_256_mib_shards(self) -> None:
+        """上限（1GiB）ではなく目標（256MiB）で切る — 1GiB は受理上限であって詰め方ではない。"""
+        order, sizes = uniform(1024)
+
+        groups = pack_shards(order, sizes, {})
+
+        assert shard_mib(groups, sizes) == [256, 256, 256, 256]
+
+    def test_the_target_is_the_packing_bound_when_smaller_than_the_limit(self) -> None:
+        """同じ 3 単位（各 3）を、上限 8 なら 2 本、目標 4 なら 3 本に切る。"""
+        sizes = {"a": 3, "b": 3, "c": 3}
+
+        assert pack_shards(["a", "b", "c"], sizes, {}, limit=8) == [(), ("a", "b"), ("c",)]
+        assert pack_shards(["a", "b", "c"], sizes, {}, limit=8, target=4) == [
+            (),
+            ("a",),
+            ("b",),
+            ("c",),
+        ]
+
+    def test_a_unit_larger_than_the_target_raises_the_bound_to_that_unit(self) -> None:
+        """目標 4 に単位 6 が居れば実効目標は 6 — 大きい単位は単独ではなく、周りも 6 まで詰める。"""
+        sizes = {"a": 2, "b": 6, "c": 2, "d": 2, "e": 2}
+
+        groups = pack_shards(["a", "b", "c", "d", "e"], sizes, {}, limit=16, target=4)
+
+        assert all(sum(sizes[name] for name in group) <= 6 for group in groups[1:])
+        assert any(sum(sizes[name] for name in group) > 4 for group in groups[1:])
+        assert groups[0] == ()
+
+    def test_a_pair_larger_than_the_target_is_kept_whole(self) -> None:
+        """実効目標が持ち上がるのは対（weight + scale）でも同じ — 対は割れない。"""
+        sizes = {"karume.scale.w": 1, "w": 5, "x": 2}
+
+        groups = pack_shards(["karume.scale.w", "w", "x"], sizes, PAIR, limit=16, target=4)
+
+        assert groups[1] == ("karume.scale.w", "w")
+        assert_co_shard(groups, PAIR)
+
+    def test_a_unit_over_the_limit_still_fails_loudly(self) -> None:
+        with pytest.raises(ShardError, match="上限"):
+            pack_shards(["a"], {"a": 9}, {}, limit=8, target=4)
+
+    def test_a_target_outside_the_limit_is_refused(self) -> None:
+        for bad in (0, 9):
+            with pytest.raises(ShardError, match="目標"):
+                pack_shards(["a"], {"a": 1}, {}, limit=8, target=bad)

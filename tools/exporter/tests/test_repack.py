@@ -298,8 +298,8 @@ class TestFaultInjection:
         path = legacy_single(series, ir_container())
         before = listing(series)
 
-        def drop_the_last(order, payload_bytes, companions, limit):
-            groups = pack_shards(order, payload_bytes, companions, limit)
+        def drop_the_last(order, payload_bytes, companions, limit, target=None):
+            groups = pack_shards(order, payload_bytes, companions, limit, target=target)
             return [tuple(name for name in group if name != order[-1]) for group in groups]
 
         monkeypatch.setattr(repack, "pack_shards", drop_the_last)

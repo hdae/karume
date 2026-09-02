@@ -211,13 +211,14 @@ def _assert_same_bytes(
 
 
 def plan_shards(
-    stored: Mapping[str, _Stored], graph_text: str, limit: int
+    stored: Mapping[str, _Stored], graph_text: str, limit: int, target: int | None = None
 ) -> list[tuple[str, ...]]:
     """v2 の規則で shard 群を決める（規則の正本は {@link karume.shards.pack_shards}）。
 
     並べる順は書き手の規約（{@link karume.emit.container_order}）そのままで、原子対
     （weight ↔ companion scale）は**宣言から**引く — 旧配布形では対が別 shard に居ることも
-    ありうるので、現物の並びからは復元できない。
+    ありうるので、現物の並びからは復元できない。`limit` は受理上限、`target` は詰める目標
+    （None = 既定の `SHARD_TARGET_BYTES`）。
     """
     graph = parse_ir_graph(graph_text)
     companions: dict[str, str] = {}
@@ -228,7 +229,7 @@ def plan_shards(
             companions[scale] = initializer.tensor
     order = [entry.name for entry in container_order(source.entry for source in stored.values())]
     groups = pack_shards(
-        order, {name: stored[name].entry.nbytes for name in order}, companions, limit
+        order, {name: stored[name].entry.nbytes for name in order}, companions, limit, target=target
     )
     # 規則（pack_shards）と検査を分けて持つのは `emit._shard_groups` と同じ理由。
     assert_shard_partition(groups, order)
@@ -278,8 +279,9 @@ def repack_component(
     """
     source_paths = resolve_shards(Path(path))
     metadata, stored = read_component(source_paths)
+    # テスト用の差し込みは上限と目標を同じ値にする（emit.write_model と同じ読み）。
     limit = SHARD_BYTE_LIMIT if _shard_byte_limit is None else _shard_byte_limit
-    groups = plan_shards(stored, metadata[IR_METADATA_KEY], limit)
+    groups = plan_shards(stored, metadata[IR_METADATA_KEY], limit, _shard_byte_limit)
 
     final = Path(path) if out_dir is None else Path(out_dir) / Path(path).name
     # 一意 suffix — 同じ final を狙う別プロセスの一時ファイルと衝突させない。

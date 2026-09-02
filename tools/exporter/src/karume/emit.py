@@ -965,16 +965,18 @@ def _shard_groups(
     order: Sequence[str],
     conversions: Mapping[str, _Conversion],
     limit: int,
+    target: int | None = None,
 ) -> list[tuple[str, ...]]:
     """書き出し順を shard へ割り付ける（規則の正本は `karume.shards`）。
 
     返るのは先頭が空のグラフ shard で始まる列。バイト数は**実データを読まずに**出る
     （論理要素数 × 格納 bit 幅 — `_stored_dtype_of` がヘッダを変換前に決めるのと同じ導出）
-    ので、割り付けはピーク RAM に一切載らない。
+    ので、割り付けはピーク RAM に一切載らない。`limit` は受理上限、`target` は詰める目標
+    （None = 既定の `SHARD_TARGET_BYTES`）。
     """
     payload_bytes = {entry.name: entry.nbytes for entry in _entries(tensors, conversions, order)}
     companions = _companion_pairs(conversions)
-    groups = pack_shards(order, payload_bytes, companions, limit)
+    groups = pack_shards(order, payload_bytes, companions, limit, target=target)
     # 規則（pack_shards）と検査（下 2 本）を分けて持つ — 割り付けの入口が増えた日に、
     # 規則の写経ではなく検査が受け止める（ADR 0070 決定 1 の受入条件⑤と同じ集合）。
     assert_shard_partition(groups, order)
@@ -1052,8 +1054,9 @@ def write_model(
     committed = replace(graph, initializers={**graph.initializers, **plan.declarations})
     metadata = {IR_METADATA_KEY: committed.to_json()}
     order = _write_order(source, plan.conversions)
+    # テスト用の差し込みは上限と目標を同じ値にする（「上限 N で分割を起こす」旧来の読みを保つ）。
     limit = SHARD_BYTE_LIMIT if _shard_byte_limit is None else _shard_byte_limit
-    groups = _shard_groups(source, order, plan.conversions, limit)
+    groups = _shard_groups(source, order, plan.conversions, limit, target=_shard_byte_limit)
     total = len(groups)
     written: list[Path] = []
     for index, group in enumerate(groups, start=1):
