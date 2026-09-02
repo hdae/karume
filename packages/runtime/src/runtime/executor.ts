@@ -122,7 +122,6 @@ import {
   type SessionOptions,
   type StorageDiagnostics,
   type Tensor,
-  UPLOAD_FENCE_BYTES,
 } from "./session-types.ts";
 export type {
   ComputePrecision,
@@ -142,7 +141,7 @@ export type {
   StorageDiagnostics,
   Tensor,
 } from "./session-types.ts";
-export { I8A8_DOT, ROW_BLOCK_SPLIT, UPLOAD_FENCE_BYTES } from "./session-types.ts";
+export { I8A8_DOT, ROW_BLOCK_SPLIT } from "./session-types.ts";
 
 /** 意味論 dtype ごとのホスト側 TypedArray（診断と入力検査で使う）。 */
 const HOST_ARRAY: Readonly<
@@ -401,35 +400,6 @@ const assertChannelScale = (
       }] の軸 ${axis} の keepdim 形でない`,
     );
   }
-};
-
-/**
- * shard 内の重みを、完了待ち（空 submit + フェンス）を入れる区切りへ分ける。`fenceBytes` が
- * 無ければ shard 全体で 1 区切り（既定 = ADR 0070 決定 3 の「shard ごとに 1 回」）。あるときは
- * 宣言バイト数の累計が `fenceBytes` に達した項目で区切る — 1 項目がそれより大きくても単独で
- * 1 区切り（テンソルは割らない）。席の無い項目は 0 として数える（欠けはループ本体が fail loudly
- * で拾う）。項目が 0 のとき（グラフ shard）も 1 区切り返し、既定と同じ回数だけ待つ。
- */
-const uploadBatches = <T extends { readonly name: string }>(
-  ready: readonly T[],
-  residency: ReadonlyMap<string, { readonly payloadBytes: number }>,
-  fenceBytes: number | undefined,
-): readonly (readonly T[])[] => {
-  if (fenceBytes === undefined) return [ready];
-  const batches: T[][] = [];
-  let current: T[] = [];
-  let accumulated = 0;
-  for (const item of ready) {
-    current.push(item);
-    accumulated += residency.get(item.name)?.payloadBytes ?? 0;
-    if (accumulated >= fenceBytes) {
-      batches.push(current);
-      current = [];
-      accumulated = 0;
-    }
-  }
-  if (current.length > 0) batches.push(current);
-  return batches.length === 0 ? [ready] : batches;
 };
 
 /**
@@ -923,15 +893,6 @@ export class Session {
     // 純粋な比較のままで、総量の可否の最終門は errorScope に残る）。
     assertWeightsWithinLimits(residency, gpu.limits);
 
-    // 実験ノブ（{@link UPLOAD_FENCE_BYTES}）: shard 内で完了待ちを入れる刻み。未指定 = shard 末尾のみ。
-    const uploadFenceBytes = options[UPLOAD_FENCE_BYTES];
-    if (
-      uploadFenceBytes !== undefined &&
-      !(Number.isFinite(uploadFenceBytes) && uploadFenceBytes > 0)
-    ) {
-      throw new ExecutionError(`UPLOAD_FENCE_BYTES ${uploadFenceBytes} が正の有限値でない`);
-    }
-
     // 整数内積変種は **linear と attention で別席**（{@link SessionState}）。どちらも
     // `I8A8_DOT` の指定が最優先で、指定が無ければ族ごとの既定に落ちる。
     const dp4a = dp4aAvailable(gpu.wgslLanguageFeatures);
@@ -1010,148 +971,143 @@ export class Session {
         // 保つことが、device 単位ロックを取らずに LIFO の交錯を防いでいる根拠になっている。
         // 区間は shard 単位（ADR 0070 決定 4 — 網の撤去ではなく粒度の変更。次 shard の取得と
         // フェンスの await は区間の外に出る。副次利得として失敗 shard の特定が細かくなる）。
-        // 実験ノブ {@link UPLOAD_FENCE_BYTES} があるときだけ shard の中をバイト累計で区切り、
-        // 区切りごとに同じ「push → 同期区間 → pop → 空 submit → 完了待ち」を繰り返す
-        // （既定は 1 区切り = shard で、従来と同じ列になる）。
-        for (const batch of uploadBatches(ready, residency, uploadFenceBytes)) {
-          pushFailureScopes(gpu.device);
-          try {
-            for (const item of batch) {
-              const name = item.name;
-              const initializer = graph.initializers[name];
-              const raw = tensorBytes(item.file, item.view);
-              // 席はプランナが正本（全 initializer を載せる契約 — 欠けは簿記の破れ）。
-              const seat = residency.get(name);
-              if (seat === undefined) {
-                throw new ExecutionError(`initializer '${name}': 常駐分類が無い`);
-              }
-              // MUST: 宣言由来のバイト長と現物が食い違ったら落とす。プランナ（と見積り）は実
-              // テンソルを見ずに宣言だけで数えるので、ここが「宣言 = 現物」を実際に確かめる唯一の
-              // 点になる（container の突合門が成立していれば発火しない — 二重の網）。
-              if (raw.byteLength !== seat.payloadBytes) {
-                throw new ExecutionError(
-                  `initializer '${name}': 宣言由来 ${seat.payloadBytes} バイトに対し実テンソルが ${raw.byteLength} バイト`,
-                );
-              }
-              // 格納 f16 / i8 / i4 だけが 2 経路に分かれる（ADR 0018 / 0019 / 0069）。適格なら
-              // 生バイトのまま常駐させ dequant はカーネル内（VRAM 削減はこれで初めて成立する）、
-              // 適格外はここで f32 へ展開する（正しさは保たれ VRAM 削減はゼロ）。他の格納 dtype は
-              // 生バイトがそのまま GPU 表現。
-              let payload: Uint8Array<ArrayBuffer> | Float32Array<ArrayBuffer> = raw;
-              if (initializer.storage.dtype === "f16") {
-                if (seat.seat === "f16") {
-                  // MUST: 奇数要素長は末尾 2 バイトのゼロ詰めで 4 バイト整列させる。writeBuffer は
-                  // 4 の倍数でないサイズを validation で拒む（= 重みが空のまま走り出す）。
-                  payload = alignF16Payload(raw);
-                  residentWeights.set(name, { storage: "f16" });
-                  residentCompressedBytes += payload.byteLength;
-                } else {
-                  payload = timedDecode(() => decodeF16(raw));
-                  hostExpandedBytes += payload.byteLength;
-                }
-              }
-              if (initializer.storage.dtype === "i8") {
-                const scale = scaleTensor(item, "i8");
-                // initializer の宣言 shape は数値のみ（parseIrGraph が保証 — 記号次元は拒否）。
-                const shape = graph.values[name].shape.map(Number);
-                if (seat.seat === "i8") {
-                  assertChannelScale(name, shape, scale.shape, seat.channelAxis);
-                  // MUST: 要素数が 4 の倍数でない重みは末尾をゼロ詰めして 4 バイト整列させる
-                  // （f16 の 2 バイト詰めと同じ理由 — writeBuffer が validation で落ちる）。
-                  payload = alignI8Payload(raw);
-                  // MUST: scale のバッファも「GPU 常駐圧縮」に数える（実際に抱えるバイト数）。
-                  residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
-                  const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
-                  if (scale.bytes.byteLength > 0) {
-                    timedWrite(scaleBuffer, scale.bytes);
-                  }
-                  residentWeights.set(name, { storage: "i8", scale: scaleBuffer });
-                } else {
-                  payload = timedDecode(() => decodeI8(raw, shape, scale.values, scale.shape));
-                  hostExpandedBytes += payload.byteLength;
-                }
-              }
-              if (initializer.storage.dtype === "i4") {
-                const scale = scaleTensor(item, "i4");
-                const shape = graph.values[name].shape.map(Number);
-                // 適格は f16 / i8 より狭い「消費が linear / embedding / conv1d(groups==1) の
-                // 重みスロットのみ」（ADR 0069 決定 5 とその追補 — 展開経路が GEMM 骨格のタイル
-                // 読み〈linear は B 側・conv1d igemm は A 側〉と embedding のカーネルにしか無い）。
-                // 展開経路の無い重みスロット（conv2d / conv_transpose1d / groups > 1 の conv1d）と
-                // 共有される i4 は CPU 展開の受け皿へ（正しさは保たれ VRAM 削減はゼロ —
-                // i8 の適格外と同じ設計）。判定はプランナが済ませている。
-                if (seat.seat === "i4") {
-                  // ペイロードは詰め物不要で常に 4 バイト整列 — バイト長 = numel / 2 で、numel は
-                  // group_size（2 冪 ≥ 16）の倍数だからバイト長は 8 の倍数（ADR 0069 決定 2）。
-                  // MUST: scale のバッファも「GPU 常駐圧縮」に数える（i8 と同じ — 実際に抱える
-                  // バイト数。exporter の storage_breakdown と診断の意味を揃える）。
-                  residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
-                  const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
-                  if (scale.bytes.byteLength > 0) {
-                    timedWrite(scaleBuffer, scale.bytes);
-                  }
-                  // group 長は宣言から写した 1 箇所（プランナ）だけが決める — 別経路で渡せる形に
-                  // すると「group 64 の資産が group 32 のパイプラインで走る」沈黙誤値になる。
-                  residentWeights.set(name, {
-                    storage: "i4",
-                    scale: scaleBuffer,
-                    groupSize: seat.groupSize,
-                  });
-                } else {
-                  // 値域（2 冪 ≥ 16・整除）は parseIrGraph が保証済み。存在は型の上でだけ optional
-                  // なので、黙って読み飛ばさず言い直す（「格納 i8 なのに scale が無い」と同じ流儀）。
-                  const groupSize = initializer.storage.groupSize;
-                  if (groupSize === undefined) {
-                    throw new ExecutionError(
-                      `initializer '${name}': 格納 i4 なのに group_size が無い`,
-                    );
-                  }
-                  payload = timedDecode(() =>
-                    decodeI4(raw, shape, scale.values, scale.shape, groupSize)
-                  );
-                  hostExpandedBytes += payload.byteLength;
-                }
-              }
-              const buffer = timedAlloc(Math.max(4, payload.byteLength));
-              if (payload.byteLength > 0) timedWrite(buffer, payload);
-              weightBuffers.set(name, buffer);
+        pushFailureScopes(gpu.device);
+        try {
+          for (const item of ready) {
+            const name = item.name;
+            const initializer = graph.initializers[name];
+            const raw = tensorBytes(item.file, item.view);
+            // 席はプランナが正本（全 initializer を載せる契約 — 欠けは簿記の破れ）。
+            const seat = residency.get(name);
+            if (seat === undefined) {
+              throw new ExecutionError(`initializer '${name}': 常駐分類が無い`);
             }
-          } catch (cause) {
-            // MUST: push した 2 本は必ず pop して積み残さない（積み残すと以後の検証結果が誤った
-            // スコープに吸われ、エラーが恒久的に見えなくなる）。破棄は外側の transaction 境界が
-            // 1 箇所で持つ。
-            await discardFailureScopes(gpu.device);
-            throw attributeToShard(shard.origin, cause);
+            // MUST: 宣言由来のバイト長と現物が食い違ったら落とす。プランナ（と見積り）は実
+            // テンソルを見ずに宣言だけで数えるので、ここが「宣言 = 現物」を実際に確かめる唯一の
+            // 点になる（container の突合門が成立していれば発火しない — 二重の網）。
+            if (raw.byteLength !== seat.payloadBytes) {
+              throw new ExecutionError(
+                `initializer '${name}': 宣言由来 ${seat.payloadBytes} バイトに対し実テンソルが ${raw.byteLength} バイト`,
+              );
+            }
+            // 格納 f16 / i8 / i4 だけが 2 経路に分かれる（ADR 0018 / 0019 / 0069）。適格なら
+            // 生バイトのまま常駐させ dequant はカーネル内（VRAM 削減はこれで初めて成立する）、
+            // 適格外はここで f32 へ展開する（正しさは保たれ VRAM 削減はゼロ）。他の格納 dtype は
+            // 生バイトがそのまま GPU 表現。
+            let payload: Uint8Array<ArrayBuffer> | Float32Array<ArrayBuffer> = raw;
+            if (initializer.storage.dtype === "f16") {
+              if (seat.seat === "f16") {
+                // MUST: 奇数要素長は末尾 2 バイトのゼロ詰めで 4 バイト整列させる。writeBuffer は
+                // 4 の倍数でないサイズを validation で拒む（= 重みが空のまま走り出す）。
+                payload = alignF16Payload(raw);
+                residentWeights.set(name, { storage: "f16" });
+                residentCompressedBytes += payload.byteLength;
+              } else {
+                payload = timedDecode(() => decodeF16(raw));
+                hostExpandedBytes += payload.byteLength;
+              }
+            }
+            if (initializer.storage.dtype === "i8") {
+              const scale = scaleTensor(item, "i8");
+              // initializer の宣言 shape は数値のみ（parseIrGraph が保証 — 記号次元は拒否）。
+              const shape = graph.values[name].shape.map(Number);
+              if (seat.seat === "i8") {
+                assertChannelScale(name, shape, scale.shape, seat.channelAxis);
+                // MUST: 要素数が 4 の倍数でない重みは末尾をゼロ詰めして 4 バイト整列させる
+                // （f16 の 2 バイト詰めと同じ理由 — writeBuffer が validation で落ちる）。
+                payload = alignI8Payload(raw);
+                // MUST: scale のバッファも「GPU 常駐圧縮」に数える（実際に抱えるバイト数）。
+                residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
+                const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
+                if (scale.bytes.byteLength > 0) {
+                  timedWrite(scaleBuffer, scale.bytes);
+                }
+                residentWeights.set(name, { storage: "i8", scale: scaleBuffer });
+              } else {
+                payload = timedDecode(() => decodeI8(raw, shape, scale.values, scale.shape));
+                hostExpandedBytes += payload.byteLength;
+              }
+            }
+            if (initializer.storage.dtype === "i4") {
+              const scale = scaleTensor(item, "i4");
+              const shape = graph.values[name].shape.map(Number);
+              // 適格は f16 / i8 より狭い「消費が linear / embedding / conv1d(groups==1) の
+              // 重みスロットのみ」（ADR 0069 決定 5 とその追補 — 展開経路が GEMM 骨格のタイル
+              // 読み〈linear は B 側・conv1d igemm は A 側〉と embedding のカーネルにしか無い）。
+              // 展開経路の無い重みスロット（conv2d / conv_transpose1d / groups > 1 の conv1d）と
+              // 共有される i4 は CPU 展開の受け皿へ（正しさは保たれ VRAM 削減はゼロ —
+              // i8 の適格外と同じ設計）。判定はプランナが済ませている。
+              if (seat.seat === "i4") {
+                // ペイロードは詰め物不要で常に 4 バイト整列 — バイト長 = numel / 2 で、numel は
+                // group_size（2 冪 ≥ 16）の倍数だからバイト長は 8 の倍数（ADR 0069 決定 2）。
+                // MUST: scale のバッファも「GPU 常駐圧縮」に数える（i8 と同じ — 実際に抱える
+                // バイト数。exporter の storage_breakdown と診断の意味を揃える）。
+                residentCompressedBytes += payload.byteLength + scale.bytes.byteLength;
+                const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
+                if (scale.bytes.byteLength > 0) {
+                  timedWrite(scaleBuffer, scale.bytes);
+                }
+                // group 長は宣言から写した 1 箇所（プランナ）だけが決める — 別経路で渡せる形に
+                // すると「group 64 の資産が group 32 のパイプラインで走る」沈黙誤値になる。
+                residentWeights.set(name, {
+                  storage: "i4",
+                  scale: scaleBuffer,
+                  groupSize: seat.groupSize,
+                });
+              } else {
+                // 値域（2 冪 ≥ 16・整除）は parseIrGraph が保証済み。存在は型の上でだけ optional
+                // なので、黙って読み飛ばさず言い直す（「格納 i8 なのに scale が無い」と同じ流儀）。
+                const groupSize = initializer.storage.groupSize;
+                if (groupSize === undefined) {
+                  throw new ExecutionError(
+                    `initializer '${name}': 格納 i4 なのに group_size が無い`,
+                  );
+                }
+                payload = timedDecode(() =>
+                  decodeI4(raw, shape, scale.values, scale.shape, groupSize)
+                );
+                hostExpandedBytes += payload.byteLength;
+              }
+            }
+            const buffer = timedAlloc(Math.max(4, payload.byteLength));
+            if (payload.byteLength > 0) timedWrite(buffer, payload);
+            weightBuffers.set(name, buffer);
           }
-          const failure = await popFailureScopes(gpu.device, label);
-          if (failure !== undefined) throw failure;
-
-          // MUST: 区切り（既定 = shard）ごとに**実際の submit を 1 回**出して完了まで待つ（ADR 0070 決定 3）。
-          // queue.writeBuffer は staging を確保して溜め込み、submit の完了までそれを解放しない —
-          // 数 GiB の重みを上げた直後は VRAM が二重計上のまま最初の run に入り、初回ピークが
-          // 重み 1 本ぶん押し上がる（f16 preset で実測 +2.7GiB。
-          // docs/research/2026-08-08-vram-oom-misreport.md §4）。shard 逐次消費ではこの解放が
-          // RAM ピーク O(最大 shard) の成立条件そのものになる。フェンスの後にループ末尾へ抜けて
-          // shard.file への参照が尽きる — CPU 側バイト列は転送完了後にだけ手放される
-          // （フェンス後解放の順序契約 — ADR 0070 決定 3）。
-          // MUST NOT: scheduler.flush() で代用しない。pending dispatch が空だと submit を出さずに
-          // 即 return するため、staging は溜まったまま残る。
-          // NOTE: submit ごとの onSubmittedWorkDone を禁じているのは run のホットパス（submit.ts の
-          // 「計測の帰属」）で、ここは shard ごと 1 回・窓の外なので推定にも壁時計にも乗らない。
-          // NOTE: errorScope で囲まないのは、空の submit が確保も検証も伴わないため（両建てで囲む
-          // のは「確保を伴う区間」— device.ts の pushFailureScopes）。加えて Session の構築は
-          // GpuContext のスコープロック外なので、await を跨ぐスコープをここに張ると並行 Session の
-          // 失敗を誤帰属させる口になる。
-          gpu.device.queue.submit([]);
-          // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
-          // raceCanaryDeviceLost の doc）ため競わせる — ハングを失敗に変換する保険。
-          const fenceStart = performance.now();
-          await gpu[RUNTIME_INTERNAL].raceDeviceLost(
-            gpu.device.queue.onSubmittedWorkDone(),
-            label,
-          );
-          uploadFenceMs += performance.now() - fenceStart;
+        } catch (cause) {
+          // MUST: push した 2 本は必ず pop して積み残さない（積み残すと以後の検証結果が誤った
+          // スコープに吸われ、エラーが恒久的に見えなくなる）。破棄は外側の transaction 境界が
+          // 1 箇所で持つ。
+          await discardFailureScopes(gpu.device);
+          throw attributeToShard(shard.origin, cause);
         }
+        const failure = await popFailureScopes(gpu.device, label);
+        if (failure !== undefined) throw failure;
+
+        // MUST: shard ごとに**実際の submit を 1 回**出して完了まで待つ（ADR 0070 決定 3）。
+        // queue.writeBuffer は staging を確保して溜め込み、submit の完了までそれを解放しない —
+        // 数 GiB の重みを上げた直後は VRAM が二重計上のまま最初の run に入り、初回ピークが
+        // 重み 1 本ぶん押し上がる（f16 preset で実測 +2.7GiB。
+        // docs/research/2026-08-08-vram-oom-misreport.md §4）。shard 逐次消費ではこの解放が
+        // RAM ピーク O(最大 shard) の成立条件そのものになる。フェンスの後にループ末尾へ抜けて
+        // shard.file への参照が尽きる — CPU 側バイト列は転送完了後にだけ手放される
+        // （フェンス後解放の順序契約 — ADR 0070 決定 3）。
+        // MUST NOT: scheduler.flush() で代用しない。pending dispatch が空だと submit を出さずに
+        // 即 return するため、staging は溜まったまま残る。
+        // NOTE: submit ごとの onSubmittedWorkDone を禁じているのは run のホットパス（submit.ts の
+        // 「計測の帰属」）で、ここは shard ごと 1 回・窓の外なので推定にも壁時計にも乗らない。
+        // NOTE: errorScope で囲まないのは、空の submit が確保も検証も伴わないため（両建てで囲む
+        // のは「確保を伴う区間」— device.ts の pushFailureScopes）。加えて Session の構築は
+        // GpuContext のスコープロック外なので、await を跨ぐスコープをここに張ると並行 Session の
+        // 失敗を誤帰属させる口になる。
+        gpu.device.queue.submit([]);
+        // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
+        // raceCanaryDeviceLost の doc）ため競わせる — ハングを失敗に変換する保険。
+        const fenceStart = performance.now();
+        await gpu[RUNTIME_INTERNAL].raceDeviceLost(
+          gpu.device.queue.onSubmittedWorkDone(),
+          label,
+        );
+        uploadFenceMs += performance.now() - fenceStart;
         shardBoundary = performance.now();
       }
       // 宣言完全性（欠け）は全 shard を読み終えて初めて判定できる（ADR 0070 決定 1）。

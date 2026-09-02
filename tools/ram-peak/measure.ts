@@ -7,7 +7,7 @@
  *     deno run -A tools/ram-peak/measure.ts --family gemma4 --source models/karume-gemma4-e2b
  *     # コンポーネント面（createSessionFromShards 直叩き・1 コンポーネントだけ・刻みノブ付き）
  *     deno run -A tools/ram-peak/measure.ts --mode component --source models/karume-anima \
- *         --model anima-turbo-v1.1 --quant f16 --component transformer --fence-bytes 134217728
+ *         --model anima-turbo-v1.1 --quant f16 --component transformer --vessel true
  *
  * MUST: 1 構成 = 1 プロセス。ピークはプロセス終端で読む（Linux は `/proc/self/status` の
  * VmHWM = 高水位標・Mac は無いので `Deno.memoryUsage().rss` の 50ms サンプリング最大値のみ）。
@@ -25,8 +25,6 @@ import {
   type ModelShard,
   type SessionBuildStats,
 } from "../../packages/runtime/mod.ts";
-// 実験専用の非公開ノブ（mod.ts からは輸出しない — テストと同じく src を直接読む）。
-import { UPLOAD_FENCE_BYTES } from "../../packages/runtime/src/runtime/session-types.ts";
 
 const args = new Map<string, string>();
 for (let at = 0; at < Deno.args.length; at += 2) {
@@ -41,8 +39,6 @@ if (source === undefined) throw new Error("--source <配布形ディレクトリ
 const model = args.get("model");
 const quant = args.get("quant");
 const component = args.get("component") ?? "transformer";
-const fenceBytesRaw = args.get("fence-bytes");
-const fenceBytes = fenceBytesRaw === undefined ? undefined : Number(fenceBytesRaw);
 const steps = Number(args.get("steps") ?? "2");
 // 診断: shard 境界で明示 GC（`deno run --v8-flags=--expose-gc` が前提・無ければ no-op）。
 const explicitGc = args.get("gc") === "true";
@@ -121,9 +117,7 @@ if (mode === "component") {
   resolved = { model: target.model, quant: target.quant };
   const gpu = await acquireGpu();
   try {
-    const session = await createSessionFromShards(gpu, streamShards(target.shards), {
-      ...(fenceBytes === undefined ? {} : { [UPLOAD_FENCE_BYTES]: fenceBytes }),
-    });
+    const session = await createSessionFromShards(gpu, streamShards(target.shards));
     loadMs = performance.now() - started;
     builds[component] = session.diagnostics().buildStats;
     await session.dispose();
@@ -162,7 +156,6 @@ console.log(JSON.stringify({
   mode,
   family: mode === "component" ? null : family,
   component: mode === "component" ? component : null,
-  fenceBytes: fenceBytes ?? null,
   explicitGc,
   reuseVessel,
   source,
