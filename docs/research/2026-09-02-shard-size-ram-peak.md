@@ -99,3 +99,26 @@
   （`model.f16.safetensors`）を渡す。manifest は対象 (model, component, quant) の shards 表
   （path / size / sha256）だけを書き換える。
 - 生データ: `outputs/bench/karume-anima/2026-09-02_shard-size/{results,fence,gc}.jsonl`。
+
+## 結果 4 — Mac（Apple M2 24GB / Metal / Deno 2.9.4）コンポーネント面・ユーザー実測
+
+ピークは `/usr/bin/time -l` の maximum resident set size（バイト → MiB）。各 3 回、1 回目は
+ファイルキャッシュが冷えていて時間だけ長い（ピークは同水準）。
+
+| 構成               |       刻み | 最大 RSS MiB（平均 / 範囲） | 対 1GiB | 構築 s（2〜3 回目） | フェンス待ち ms |
+| ------------------ | ---------: | --------------------------: | ------: | ------------------: | --------------: |
+| transformer 1GiB   | shard 末尾 |       4,727（4,622〜4,780） |       — |            1.4〜1.6 |        316〜409 |
+| transformer 512MiB | shard 末尾 |       3,608（3,472〜3,676） |    −24% |                 1.4 |        334〜349 |
+| transformer 1GiB   |    128 MiB |       4,121（4,116〜4,124） |    −13% |            1.9〜2.3 |        685〜846 |
+
+所見の追記:
+
+8. **Metal では刻みが効く**（−606 MiB・−13%。Linux では 0）。ユニファイドメモリでは writeBuffer
+   の staging がプロセスの RSS に載り、完了待ちの間隔がそのまま滞留量になる — 所見 2 の棄却は
+   **Vulkan / Linux 限定**に狭める。代償は構築 +0.5〜0.9 s（フェンス 1 回 ≈ 13 ms × 追加 ~25 回 +
+   転送の直列化）。
+9. **512MiB 化は Mac でも −1.1GB（−24%）で、時間は増えない**（1.4 s のまま — SSD とユニファイド
+   メモリで shard 待ちが Linux より短い）。
+10. Mac の傾きは 2.4 MiB / MiB・定数 ≈ 2.4GB と、Linux（3.0 / 1.05GB）より定数が大きい。GPU 側の
+    常駐バッファがユニファイドメモリ上でプロセスの RSS に混ざっている可能性（speculation —
+    分離するには Metal 側の計測が要る）。
