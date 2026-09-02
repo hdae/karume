@@ -597,7 +597,7 @@ export class BirefnetPipeline {
    * 全てここで済ませ、**`matte` の Session を 1 本張って**返す（モジュール doc の MUST）。
    *
    * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`matte`）と、
-   * 1GiB 超のコンポーネントの shard 分割形（`matte[0]` / `matte[1]` / …）。分割形は
+   * shard 分割形（`matte[0]` / `matte[1]` / …）。分割形は
    * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
    * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
    */

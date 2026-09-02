@@ -418,7 +418,7 @@ const assertBasePng = async (
  * 素の base を {@link BASE_REFERENCE} のノブで 1 枚焼き、参照 sha256 と突き合わせる。
  *
  * 経路は**取得層経由**（ローカル HTTP + `fromPretrained`）— この配布形の text_encoder と
- * transformer は 1GiB 超で shard 分割されていて、越境参照と併せて解けるのは取得層だけ
+ * transformer は shard 分割されていて、越境参照と併せて解けるのは取得層だけ
  * （デモの `--source` と同型 — `examples/shared/local-dist-server.ts`）。分割形は全量面
  * （`fromAssets`）でも読めるが、そちらは全 shard がホスト RAM に同時に載る面で、門としては
  * 下の 1 本（同じ参照 sha を要求する）で別に閉じる。

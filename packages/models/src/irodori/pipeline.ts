@@ -1637,7 +1637,7 @@ export class IrodoriPipeline {
    * 中断できる（`admitIrodori` の NOTE）。
    *
    * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`dit`）と、
-   * 1GiB 超のコンポーネントの shard 分割形（`dit[0]` / `dit[1]` / …）。分割形は
+   * shard 分割形（`dit[0]` / `dit[1]` / …）。分割形は
    * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
    * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
    */

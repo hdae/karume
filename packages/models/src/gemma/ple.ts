@@ -19,7 +19,7 @@
  * - `ple.json` — 索引（token 総数 / 層数 / 層当たり次元 / embed scale / shard の token 範囲）
  * - `ple-NNNNN-of-NNNNN.safetensors` — **token-major**。`values` `[rows, layers, dim]` i8 と
  *   `scales` `[rows, layers]` f32 で、1 token の PLE が**連続 1 読み**になる（ADR 0085 決定 1）。
- *   vocab の範囲で shard し、上限は ADR 0081 の 1GiB（単一 ArrayBuffer 天井の約 1/2）。
+ *   vocab の範囲で shard し、上限は書き手の容量（ADR 0090 — 256MiB − ヘッダ余裕 = 1 回の読みの上限）。
  *
  * ## MUST: 逆量子化は GPU 側 `embedding` とビット一致する
  *

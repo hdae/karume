@@ -39,7 +39,9 @@
   **Phase B 実測済み → Phase C-1 器の使い回しを実装（2026-09-02・ADR 0070 追記）= ピーク ≈ 0.45GB + 最大
   shard 1 本（anima 4,069 → 1,402 MiB）・HF 経路は取得層側の対応待ち。**shard 目標 256MiB も反映済み**（ADR 0081
   追記・実効目標 = max(目標, 最大単位)・全ミラー再生成 — anima 1GiB shard → 256MiB で 1,402 → 約 0.7GB 見込み）。
-  残 = C-2 テンソル分割 → 受理上限も 256MiB へ** → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
+  C-2 テンソル分割も実装済み（2026-09-02・ADR 0090 — piece・受理上限 256MiB 1 本をファイル長で・書き手容量
+  255MiB・実資産は 4 コンポーネント + 256MiB ちょうどの transformer 系列を再 repack）。残 = HF 経路の器
+  （fetch-cache の into）** → export-recipes 切り出し（案 A = レシピのみ・core 残留）。
 - **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
   Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
   台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・

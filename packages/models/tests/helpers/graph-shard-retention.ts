@@ -26,7 +26,7 @@ const MANIFEST_PATH = "karume.json";
 const REVISION_RE = /^\/api\/models\/(.+)\/revision\/(.+)$/;
 const RESOLVE_RE = /^\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
 
-/** グラフ shard に載せる実重みの大きさ（4096² f32 = 64MiB — 実配布形は最大 1GiB）。 */
+/** グラフ shard に載せる実重みの大きさ（4096² f32 = 64MiB — 実配布形は最大 256MiB — ADR 0090）。 */
 const WIDTH = 4096;
 const GRAPH_SHARD_WEIGHT_BYTES = WIDTH * WIDTH * 4;
 /** 合格線: gc 後に残ってよい外部メモリ。握っていれば 64MiB が丸ごと残る。 */

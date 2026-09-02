@@ -45,6 +45,9 @@ ADR 0070 の 2026-08-29 追記で入れた分割規則は「書き出し順の�
 
 ### 2. 読み手契約: 上限は `SHARD_BYTE_LIMIT`（1GiB）1 本だけ
 
+> 置換（ADR [0090](0090-shard-spec-v3-tensor-pieces.md)）: 値は 256MiB、測る量はデータ節ではなく
+> ファイル長へ。「1 本だけ」は据え置き。
+
 全 shard のデータ節が 1GiB 以下。席（先頭 / 末尾）による例外は無く、`SHARD_TAIL_LIMIT`
 （1.5GiB の尾部スラック）は**廃止**する。
 
@@ -108,6 +111,10 @@ dist の共有畳み込みで「グラフ shard は `shared/`・重み shard は
   1.5GiB に対する余裕はそのぶん増える。
 
 ## 追記 2026-09-02 — 書き手の目標 256MiB（受理上限 1GiB とは別の値）
+
+> **置換（2026-09-02・ADR [0090](0090-shard-spec-v3-tensor-pieces.md)）**: 本追記の「目標 256MiB /
+> 実効目標 = max(目標, 最大単位)」と決定 2 の上限 1GiB は、テンソル分割（piece）の導入で「受理上限
+> 256MiB 1 本・ファイル長で測る」へ置き換わった。以下は経緯の記録。
 
 メモリ管理波 Phase B / C-1（[research/2026-09-02-shard-size-ram-peak.md](../research/2026-09-02-shard-size-ram-peak.md)・
 ADR [0070](0070-shard-loading-admission.md) 追記 2026-09-02）で、ロード時のホスト RAM ピークは

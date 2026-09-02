@@ -27,8 +27,7 @@
  * 畳む。Session の構築は全量面 `createSession` のままなので、失敗の帰属も文言も 1 文字も
  * 変わらない（ADR 0070 受入①の契約 — 全量面は `origin` を名乗らない）。
  *
- * ただし取得キーが `<役割>[i]` の **shard 分割形**（`resolveFiles` の規約 — 1GiB 超の
- * コンポーネント）で届いた役割だけは、全量面でも shard 逐次面へ流す（{@link
+ * ただし取得キーが `<役割>[i]` の **shard 分割形**（`resolveFiles` の規約）で届いた役割だけは、全量面でも shard 逐次面へ流す（{@link
  * assetComponentOpener}）— 「`fromPretrained` で読める配布形は `fromAssets` でも読める」が
  * 全量面の契約（X2-101）。バイト列の連結はしない（shard は独立ヘッダの safetensors 1 本ずつで、
  * 連結しても単一コンテナにはならない）。

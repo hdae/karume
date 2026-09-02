@@ -6,7 +6,8 @@
   空き側と比較しない・決定 6 = limits preflight の席予約 — 本 ADR がその席の実装）/
   [0066](0066-generation-context-state-slots.md)（追記 5 = state の binding 上限検査）/
   [0038](0038-manifest-v1.md)（§7 追記 = `requiredLimits` 欄の導入）/
-  [0081](0081-shard-spec-v2.md)（shard 1GiB 上限 — 本 ADR が読み手側の門を実装）
+  [0081](0081-shard-spec-v2.md)（shard 上限 — 本 ADR が読み手側の門を実装。値と測り方は ADR
+  [0090](0090-shard-spec-v3-tensor-pieces.md) で 256MiB・ファイル長へ）
 
 ## Context
 
@@ -49,9 +50,9 @@ shard 1GiB 上限（ADR 0081）の門は書き手側にしか無かった。
    （256MiB / 128MiB）を超える席だけ**（「欄なし = 既定スペックで動く」の意味論）。
    workgroup 系はカーネル設計依存なので焼かない。**計画側の手書きは二重管理として拒否**
    （gemma4 recipe の手書き席は退役 — core 導出値と完全一致を確認済み）。
-4. **shard ≤ 1GiB の読み手検査**（hub）: manifest parse 時に `shards` の各 `size` を検査
-   （閉区間・Python 正本 `shards.py` と同値）。`assets` / `extras` は対象外 — 上限は shard
-   分割の契約で、1GiB 超の単一付帯資産は合法。
+4. **shard 上限の読み手検査**（hub — 当時 1GiB・ADR 0090 で 256MiB のファイル長へ）: manifest parse
+   時に `shards` の各 `size` を検査（閉区間・Python 正本 `shards.py` と同値）。`assets` / `extras` は
+   対象外 — 上限は shard 分割の契約で、上限超の単一付帯資産は合法。
 5. **席（次段 = 波 2）**: manifest `requiredLimits` の読み手（models の admission で GPU
    limits と比較して DL 前拒否・adapter 取得の先行）と、`estimateSessionMemory` のロード面
    結線。ADR 0070 決定 6 の残り半分。

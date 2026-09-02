@@ -93,7 +93,7 @@
 
 - 計測: `deno run -A tools/ram-peak/measure.ts …`（ファイル冒頭の使い方）。Mac は `--v8-flags` 無し・
   `/usr/bin/time -l` の最大 RSS で読む。
-- 変種: `karume.repack.repack_component(<一時 dir の代表名>, out_dir=…, _shard_byte_limit=N)`。
+- 変種: `karume.repack.repack_component(<一時 dir の代表名>, out_dir=…, _shard_capacity=N)`。
   コンポーネントの shard は 2 dir に割れる（グラフ shard = `shared/…`・重み = モデル dir）ので、
   manifest の shards 表から全 shard を一時 dir へ symlink で集め、**番号なしの代表名**
   （`model.f16.safetensors`）を渡す。manifest は対象 (model, component, quant) の shards 表

@@ -831,7 +831,7 @@ export class AnimaPipeline {
    * - 全 weights / assets の `openModel` / rope 素表 / トークナイザ 2 本の解釈
    *
    * weights の取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本
-   * （`transformer`）と、1GiB 超のコンポーネントの shard 分割形（`transformer[0]` /
+   * （`transformer`）と、shard 分割形（`transformer[0]` /
    * `transformer[1]` / …）。分割形はバイト列を連結せず `fromPretrained` と同じ shard 逐次面へ
    * 流す。添字の欠番と素キーとの混在は fail loudly（受け口の実装は `src/hub/components.ts`）。
    *

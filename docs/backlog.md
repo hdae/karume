@@ -195,9 +195,13 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     300MiB / anima text_encoder 297MiB の 3 コンポーネントだけ持ち上がる）。系列 146 コンポーネント repack +
     PLE sidecar 3 → 9 + 5 ミラー再生成済み（anima transformer f16 5 → 16 本・HF 再アップはリリース時）。
     実験ノブ UPLOAD_FENCE_BYTES は撤去。Mac 追試も消化（Metal でも係数 1）。
-    **残: ①C-2 テンソル分割（割れないテンソルを複数 shard へ — 入れば実効目標の式と受理上限 1GiB を
-    256MiB へ潰して定数 1 本に戻す）②HF 経路の器（`@hdae/fetch-cache` に into 相当の口 — 外部リポ）
-    ③Chrome の追試（HF 経路は取得層対応後）**。
+    **C-2 テンソル分割を実装（2026-09-02・ADR 0090）**: 上限超えのテンソルを先頭次元の行範囲（piece
+    `<親名>#NNNNN-of-NNNNN`）で連続 shard へ配る。受理上限は 256MiB 1 本（**ファイル長** — hub と verify が
+    同じ量を見る）・`SHARD_TARGET_BYTES` と実効目標の式は廃止・書き手容量 = 上限 − ヘッダ余裕 1MiB・
+    `requiredLimits` は piece を親で合算。実資産で変わるのは gemma4 model / anima text_encoder /
+    irodori backbone ×2 と、データ節ちょうど 256MiB だった anima transformer f16 系列（ファイル長門で再 repack）。
+    **残: ①HF 経路の器（`@hdae/fetch-cache` に into 相当の口 — 外部リポ）②Chrome の追試（HF 経路は
+    取得層対応後）**。
     隣接起票（ADR 0089 Consequences）: createResident / run 時 transient の同型弱点・
     PLE sidecar は extras 席で shard 門の外。+ Phase B 実測（shard 256 / 512MiB vs 1GiB の RAM ピーク
     A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+
