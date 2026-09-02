@@ -115,6 +115,8 @@ export { Gemma4Pipeline } from "./src/gemma/pipeline.ts";
 export type {
   Gemma4Assets,
   Gemma4ChatOptions,
+  /** `chat` の停止理由（sequence 層の理由 + この層でしか判定できない `stop-string`）。 */
+  Gemma4ChatStop,
   Gemma4ChatStream,
   Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,

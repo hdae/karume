@@ -261,3 +261,56 @@ full スロットの `P + Q ≤ C` 超過は今日「汎用メッセージで fa
   - **破壊的変更（未リリース面）**: `GenerationStop` の欄追加・`GenerationCapacityError` の
     コンストラクタ 2 引数化・`GenerationProgram` からの配線欄の消滅・`dispose()` 後の `generate`
     が**同期 throw** になったこと。消費側の doc は `docs/limitations.md`。
+
+- 2026-09-02（同じ公開面レビューの第 2 波 — 決定 1 の「program は不変」と同じ規律を**要求の側**へ
+  広げた）: 面の設計は不変で、**呼び手が握ったままの object を後から書き換える口**を 2 つ塞ぐ。
+  - **`SamplerSpec.logitBias` は `Map` ではなくタプルの配列**（`readonly [token, bias][]` —
+    決定 7 の sampler の受理集合）。この指定は JSON を通る経路（配布形の宣言・ホスト側の設定
+    保存・ログ）と worker 境界を跨ぐが、`Map` は `JSON.stringify` が `{}` へ潰すので、往復した
+    指定は**黙って空の bias** になる（例外は出ず「効いていないノブ」としてだけ現れる）。
+    MUST: 同じ token を 2 度書いたら fail loudly — `Map` は後勝ちで畳んでいたが、加算の面で
+    畳むと「2 つ書いた bias の片方だけが効く」形になり、足すのか上書きするのかを呼び手が
+    読めない。**破壊的変更（未リリース面）**。
+  - **要求は発行時に写す**（`GenerationSequence.generate` / `Gemma4Pipeline.chat`）: `prompt` の
+    複製・`maxNewTokens` / `signal` の束縛・sampler 指定のスナップショット（`logitBias` は要素の
+    タプルまで写す）を**発行の同期部分**で済ませる。async generator の本体は最初の `next()` まで
+    走らないので、写さないと「受理集合を検査した値」と「実際に流す値」が別物になり得た — 検査後に
+    `prompt` へ語彙外 id を足す / 走行中に `maxNewTokens` を伸ばす / `logitBias` を差し替える、の
+    どれも例外にならない。複製はレイヤごとに 1 箇所（`generate` が prompt・`createSampler` が
+    sampler 指定）で、`samplerDistribution` は 1 回の呼び出しの中でしか spec を読まないので写さない。
+    観測できる変化は「発行後の書き換えが効かなくなる」ことだけで、消費側の doc は
+    `docs/limitations.md`。
+
+- 2026-09-02（同じ第 2 波の続き — **要求ごとの停止条件**と**一括受け取り**）: 決定 8 の停止集合は
+  「配布形が宣言した EOS」しか無く、ターンごとに止め方を変える術が公開面に無かった（消費者は
+  detokenize しながら自分で `break` する = 停止文字列の跨ぎと未 commit frontier の扱いを再実装
+  することになる）。面の設計は不変で、**停止条件を 2 層に分けて要求側へ開く**。
+  - **停止 token は sequence 層**（`GenerationRequest.stopTokens`）: 配布形の集合との**和集合**で
+    判定する（配布形の EOS は常に効く）。`GenerationStop` に枝 `stop-token` を足して読み分ける —
+    両方の集合に居る id は `eos` で閉じる（配布形の終端記号としての意味が優先する）。語彙外・
+    重複は**同期に** fail loudly: 停止 token は「出力に現れない id」なので、間違っていても生成は
+    普通に完走し、出力が伸び続けることでしか気づけない。指定は発行時に写す（上の追記と同じ規律）。
+  - **停止文字列は chat 層**（`Gemma4ChatOptions.stopStrings`）: sequence は token id しか扱わない
+    ので、文字列の判定は復号の**後**にしか置けない（1 つの停止文字列が複数 token に割れることも、
+    1 つの token が停止文字列の末尾と次の本文をまたぐこともある）。実体は
+    `src/text/detokenizer.ts` の `createStopStringFilter`（ファミリ非依存）で、`byte_fallback` の
+    run 持ち越しとは**別の状態機械**である。
+  - **保留（holdback）の規則**: 確定した文字列でも、**停止文字列の接頭辞になっている末尾**だけは
+    出力を保留する。固定長（最長の停止文字列 − 1 文字）で保留すると止まらないターンでも描画が
+    常に遅れるので、接頭辞から外れた時点でまとめて流す（例: 停止 `"END"` に対し `"E"` `"N"` `"X"`
+    は 3 片目で `"ENX"` がまとめて出る）。一致したら**停止文字列の手前まで**を流し、停止文字列
+    そのものとその後ろは流さない。止まらずに終わったターンは保留ぶんを最後に流す（1 文字も
+    落とさない — 保留は判定のための遅延であって切り詰めではない）。
+  - **早期終了の畳み方**: 停止文字列で止めるときはイベント列から `return` で抜ける（`for await`
+    の脱出が `return()` を呼ぶ）。既存の `break` 中断とまったく同じ後始末で、会話は成功した run の
+    ぶんだけ進み、最後の token は未 commit frontier（`pendingToken`）に残る — 停止 token で
+    止めたときと同じ状態である。停止理由は chat 層で `stop-string`（`Gemma4ChatStop`）へ差し替え、
+    `tokens` は内側の `done` の数をそのまま運ぶ（この層で数え直さない = 二重簿記の禁止）。
+  - **一括受け取り `Gemma4ChatStream.text()`**: 汲み切って連結した 1 本を返す。**1 つの
+    ストリームは 1 通りにしか消費できない**（反復と `text()` の併用も、2 度の反復も**同期に**
+    throw）— 生成は 1 度しか走らないので、2 通り目には「残り」しか流れず、例外にならない
+    取り違えになる。メソッドを `chat` の隣に増やさず stream 側に置いたのは、停止理由（`done`）と
+    同じ 1 つの返り値にぶら下がる観測口だからである。
+  - **破壊的変更（未リリース面）**: `GenerationStop` の union に `stop-token` が増えた・
+    `Gemma4ChatStream.done` の型が `GenerationStop` から `Gemma4ChatStop` になった。消費側の doc は
+    `docs/limitations.md`。

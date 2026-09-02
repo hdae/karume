@@ -24,6 +24,13 @@
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { createBpeModel } from "../src/text/bpe.ts";
+import {
+  createStopStringFilter,
+  type DetokenizerSource,
+  StreamingDetokenizer,
+} from "../src/text/detokenizer.ts";
+import { chatStreamOf, decodeChatChunks, type Gemma4ChatStop } from "../src/gemma/pipeline.ts";
+import type { GenerationEvent } from "../src/generation/sequence.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { GemmaTokenizer } from "../src/gemma/text/tokenizer.ts";
 import {
@@ -366,6 +373,166 @@ Deno.test("gemma4 chat 停止 token: 綴りが欠けた資産は fail loudly", (
     Error,
     "<|tool_response>",
   );
+});
+
+// ---- 停止文字列と一括受け取り（chat 層 — ADR 0083 追記 2026-09-02）----------
+//
+// 停止条件は 2 層に分かれる: **token** は sequence 層（`generation_sequence_test.ts` の門）、
+// **文字列**は復号の後 = chat 層でしか判定できない（1 つの停止文字列が複数 token に割れることも、
+// 1 つの token が停止文字列の末尾と次の本文をまたぐこともある）。ここで縛るのはその chat 層側で、
+// 実体は `decodeChatChunks`（`src/gemma/pipeline.ts`）+ `createStopStringFilter`
+// （`src/text/detokenizer.ts`）である。id → 綴りの対応をテストが決められるよう、復号器は実
+// `StreamingDetokenizer` に**フィクスチャの綴り表**（`DetokenizerSource`）を差して組む — token の
+// 割れ方を握らないと「境界を跨いだ停止文字列」を再現できない。
+
+/** id → 綴りの表（`undefined` = skip 対象の特殊トークン）。byte_fallback は `bytes` で与える。 */
+const sourceOf = (
+  spellings: readonly string[],
+  bytes: Readonly<Record<number, number>> = {},
+): DetokenizerSource => ({
+  byteOf: (id) => Object.hasOwn(bytes, id) ? bytes[id] : undefined,
+  textOf: (id) => {
+    assert(id < spellings.length, `テストの綴り表に id ${id} が無い`);
+    return spellings[id];
+  },
+});
+
+/** 「どこまで汲まれたか」を観測できる token イベント列（早期終了の畳み方を見るため）。 */
+const fakeEvents = (ids: readonly number[]) => {
+  const state = { emitted: 0, exhausted: false, closed: false };
+  const events = (async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
+    try {
+      yield { kind: "prefill", chunk: 1, chunks: 1 };
+      for (const [index, id] of ids.entries()) {
+        state.emitted += 1;
+        yield { kind: "token", id, position: index };
+      }
+      state.exhausted = true;
+    } finally {
+      // `return()`（= 早期終了）でも通常終了でも走る。`exhausted` との組で「途中で畳まれた」が読める。
+      state.closed = true;
+    }
+  })();
+  return { events, state };
+};
+
+/** chat 層の復号 1 回ぶん（返り値の停止文字列まで受けるので `for await` は使わない）。 */
+const decodeChat = async (
+  spellings: readonly string[],
+  ids: readonly number[],
+  stopStrings: readonly string[],
+  bytes: Readonly<Record<number, number>> = {},
+): Promise<{
+  readonly parts: string[];
+  readonly matched: string | undefined;
+  readonly state: { emitted: number; exhausted: boolean; closed: boolean };
+}> => {
+  const { events, state } = fakeEvents(ids);
+  const chunks = decodeChatChunks(
+    events,
+    new StreamingDetokenizer(sourceOf(spellings, bytes)),
+    createStopStringFilter(stopStrings),
+  );
+  const parts: string[] = [];
+  for (;;) {
+    const step = await chunks.next();
+    if (step.done) return { parts, matched: step.value, state };
+    parts.push(step.value);
+  }
+};
+
+/** 綴り表: 0..3 で "Hello " + 停止文字列 "END" が **token 境界を跨いで** 現れる形。 */
+const SPELLINGS = ["Hel", "lo ", "EN", "D!", "X!", " tail"];
+
+Deno.test("chat 停止文字列: token 境界を跨いでも止まり、停止文字列は出力に入らない", async () => {
+  // "EN" と "D!" の 2 token に割れた "END"。復号後の本文でしか判定できない形である。
+  const { parts, matched, state } = await decodeChat(SPELLINGS, [0, 1, 2, 3, 5], ["END"]);
+  assertEquals(matched, "END", "一致した停止文字列");
+  assertEquals(parts.join(""), "Hello ", "停止文字列そのものと、その後ろは流れない");
+  assertEquals(parts.filter((part) => part === "").length, 0, "空の片を作らない");
+  // 消費はそこで止まる（残りの token は要求していない）= sequence の早期終了が畳まれている。
+  assertEquals(state.emitted, 4, "停止を確定させた token までしか汲まない");
+  assertEquals(state.exhausted, false, "イベント列を最後まで汲んでいる（止まっていない）");
+  assertEquals(state.closed, true, "イベント列の return() が呼ばれていない（後始末が漏れる）");
+});
+
+Deno.test("chat 停止文字列: 一致しなければ保留ぶんが最後に流れる（1 文字も落とさない）", async () => {
+  // 保留は判定のための遅延であって出力の切り詰めではない — "EN" の次が "D" でなければ全部出る。
+  const { parts, matched, state } = await decodeChat(SPELLINGS, [0, 1, 2, 4], ["END"]);
+  assertEquals(matched, undefined, "止まっていない");
+  assertEquals(parts.join(""), "Hello ENX!", "保留していた接頭辞まで含めて全部流れる");
+  assertEquals(state.exhausted, true, "イベント列は最後まで汲まれる");
+});
+
+Deno.test("chat 停止文字列: 保留するのは接頭辞になっている間だけ（描画を止めっぱなしにしない）", async () => {
+  // 片の**並び**まで見る（連結だけ見ると「最後にまとめて出す」偽 streaming が通る）。停止文字列の
+  // 接頭辞になった "EN" の間だけ保留し、外れた時点でまとめて流す。
+  const { parts } = await decodeChat(SPELLINGS, [0, 1, 2, 4], ["END"]);
+  assertEquals(parts, ["Hel", "lo ", "ENX!"], "接頭辞の間だけ保留（3 番目の片で追い付く）");
+  // 停止文字列と無縁のターンでは 1 文字も保留しない（毎片そのまま流れる）。
+  const bare = await decodeChat(SPELLINGS, [0, 1, 5], ["ZZZ"]);
+  assertEquals(bare.parts, ["Hel", "lo ", " tail"]);
+});
+
+Deno.test("chat 停止文字列: byte run の確定ぶんも判定に入る（列の終わりで止まる）", async () => {
+  // byte_fallback の run は次の非 byte token か `finish()` まで確定しない（ADR 0084 決定 4）。
+  // その確定ぶんを判定へ通さないと、run の中で完成した停止文字列を取りこぼす。
+  const spellings = ["Hi ", "EN", "<0x44>"];
+  const { parts, matched } = await decodeChat(spellings, [0, 1, 2], ["END"], { 2: 0x44 });
+  assertEquals(matched, "END", "列の終わりで確定した 'D' が停止文字列を完成させる");
+  assertEquals(parts.join(""), "Hi ");
+});
+
+Deno.test("chat 停止文字列: 空文字列と重複は fail loudly", () => {
+  // 空文字列は「常に一致する」= 1 文字も出せない指定、重複は同じ条件の二重書き（どちらも取り違え）。
+  assertThrows(() => createStopStringFilter([""]), Error, "stopStrings[0] が空文字列");
+  assertThrows(
+    () => createStopStringFilter(["END", "END"]),
+    Error,
+    'stopStrings に "END" が 2 度出る',
+  );
+});
+
+Deno.test("chat 停止文字列: 複数の停止文字列は本文に先に現れた方で切る", async () => {
+  // 宣言の順ではなく**流れを実際に切った方**を運ぶ（"d" を先に宣言しても本文では "b" が先）。
+  const { parts, matched } = await decodeChat(["ab", "cd"], [0, 1], ["d", "b"]);
+  assertEquals(matched, "b");
+  assertEquals(parts.join(""), "a");
+});
+
+Deno.test("chat 一括: text() は片の連結と一致し、done も併せて読める", async () => {
+  const stop: Gemma4ChatStop = { reason: "max-tokens", tokens: 3 };
+  const chunks = (async function* (): AsyncGenerator<string, void, undefined> {
+    yield "Hel";
+    yield "lo ";
+    yield "world";
+  })();
+  const stream = chatStreamOf(chunks, Promise.resolve(stop));
+  assertEquals(await stream.text(), "Hello world");
+  assertEquals(await stream.done, stop, "停止理由は text() の後でも読める");
+});
+
+Deno.test("chat 一括: 1 つのストリームは 1 通りにしか消費できない（同期に落ちる）", async () => {
+  const stop: Gemma4ChatStop = { reason: "max-tokens", tokens: 1 };
+  const streamOf = () =>
+    chatStreamOf(
+      (async function* (): AsyncGenerator<string, void, undefined> {
+        yield "a";
+      })(),
+      Promise.resolve(stop),
+    );
+  // 生成は 1 度しか走らないので、2 通り目には「残り」しか流れない（例外にならない取り違え）。
+  const iterated = streamOf();
+  for await (const _part of iterated) { /* 汲み切る */ }
+  assertThrows(() => iterated.text(), Error, "1 通りにしか消費できない");
+
+  const collected = streamOf();
+  assertEquals(await collected.text(), "a");
+  assertThrows(() => collected[Symbol.asyncIterator](), Error, "1 通りにしか消費できない");
+
+  const twice = streamOf();
+  twice[Symbol.asyncIterator]();
+  assertThrows(() => twice[Symbol.asyncIterator](), Error, "1 通りにしか消費できない");
 });
 
 Deno.test({

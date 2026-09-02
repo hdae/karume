@@ -17,6 +17,9 @@
 // ③ **EOS 集合での実停止**（決定 8）: 停止 token を宣言した program では、実 GPU の出力に対して
 //    ケースごとに固定した添字（段 2 の門と同じ 2 / 3 / 2）で止まり、停止 token 自体は `token`
 //    イベントに出ず `done` が運ぶ。
+// ④ **要求が足した停止 token**（ADR 0083 追記 2026-09-02）: program の集合が**空**でも、
+//    `GenerationRequest.stopTokens` だけで③と同じ添字・同じ列で止まる（理由は `stop-token`）。
+//    和集合の判定が program 側しか見ていないと、ここだけが max-tokens まで走る。
 //
 // NOTE: golden の出所（`reference.json` が束ねた digest）を突き合わせる門は
 // `e2e_gemma4_product_test.ts` の④が同じ 3 本に対して持っている — 同じ資産に 2 つ置かない。
@@ -146,7 +149,7 @@ const tokenIds = (events: readonly GenerationEvent[]): number[] =>
   events.filter((event) => event.kind === "token").map((event) => event.id);
 
 Deno.test({
-  name: "Gemma 4 E2B sequence 検収: 1 ターン parity・多ターン連結・EOS 停止（実 GPU）",
+  name: "Gemma 4 E2B sequence 検収: 1 ターン parity・多ターン連結・停止 token 2 系統（実 GPU）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
     const shards = resolveShards(new URL(MODEL_FILE, PRODUCT_ROOT));
@@ -318,6 +321,37 @@ Deno.test({
             `${name}: EOS 集合 [${STOP_TOKENS.join(",")}] での停止`,
           );
           console.log(`[e2e] gemma4 sequence ${name}: EOS 停止 @${firstStop}`);
+        }
+      });
+
+      await t.step("④ 要求が足した停止 token でも実出力で止まる（配布形の集合は空）", async () => {
+        // ③と同じ添字で止まるが、停止集合の出どころが違う — program は**空**で、その要求だけが
+        // 停止 token を宣言する。ここが割れたら和集合の判定が program 側しか見ていない。
+        for (const { name, firstStop } of EXPECTED_CASES) {
+          const { prompt, expected } = await readCase(name);
+          const { events, stop } = await withSequence([], async (sequence) => {
+            const stream = sequence.generate({
+              prompt,
+              maxNewTokens: GREEDY_STEPS,
+              stopTokens: [expected[firstStop]],
+            });
+            const collected: GenerationEvent[] = [];
+            for await (const event of stream) collected.push(event);
+            return { events: collected, stop: await stream.done };
+          });
+
+          assertEquals(
+            tokenIds(events),
+            expected.slice(0, firstStop),
+            `${name}: 停止までに出た token 列（③と同じ列であること）`,
+          );
+          assertEquals(
+            stop,
+            // 理由だけが③と違う（配布形の終端記号ではなく、この要求の都合で止めた）。
+            { reason: "stop-token", token: expected[firstStop], tokens: firstStop + 1 },
+            `${name}: 要求の停止 token [${expected[firstStop]}] での停止`,
+          );
+          console.log(`[e2e] gemma4 sequence ${name}: 要求の停止 token @${firstStop}`);
         }
       });
     } finally {

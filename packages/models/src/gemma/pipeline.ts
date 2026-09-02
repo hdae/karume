@@ -74,6 +74,8 @@ import {
 } from "../generation/program.ts";
 import {
   createGenerationSequence,
+  type GenerationEvent,
+  type GenerationRequest,
   type GenerationSequence,
   type GenerationStop,
   type GenerationStream,
@@ -85,6 +87,11 @@ import {
   type Gemma4PleReadOptions,
   parseGemma4PleIndex,
 } from "./ple.ts";
+import {
+  createStopStringFilter,
+  type StopStringFilter,
+  type StreamingDetokenizer,
+} from "../text/detokenizer.ts";
 import { parseGemmaTokenizerAsset } from "./text/asset.ts";
 import { GemmaTokenizer } from "./text/tokenizer.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4StopTokens } from "./text/chat.ts";
@@ -178,10 +185,35 @@ export type Gemma4FromPretrainedOptions = Gemma4PipelineOptions & {
   readonly signal?: AbortSignal;
 };
 
-/** 1 ターンぶんの chat リクエスト。 */
+/**
+ * 1 ターンぶんの chat リクエスト。
+ *
+ * MUST: 中身は {@link Gemma4Pipeline.chat} が**発行時に写す**（ADR 0083 追記 2026-09-02）— 返った
+ * 列を汲み始めた後にこの object や `sampler` の指定を書き換えても、走行中のターンには効かない。
+ */
 export type Gemma4ChatOptions = {
   /** 生成する token 数の上限（1 以上）。停止 token はこの数に**含めない**。 */
   readonly maxNewTokens: number;
+  /**
+   * このターンだけ効かせる追加の停止 **token**（配布形の EOS 集合との和集合 —
+   * `GenerationRequest.stopTokens`）。語彙外・重複は fail loudly。
+   */
+  readonly stopTokens?: readonly number[];
+  /**
+   * このターンだけ効かせる停止**文字列**（どれかが**復号後の本文**に現れた時点で止める）。
+   *
+   * 判定は復号の後（この層）で、token 境界を跨いで現れても止まる。一致した停止文字列そのものと
+   * その後ろは**流れない**ので、`for await` で受けた片を連結したものが「停止文字列の手前まで」に
+   * なる（`done` は `stop-string` とその綴りを運ぶ）。空文字列・重複は fail loudly。
+   *
+   * NOTE: 判定のために、停止文字列の**接頭辞になっている末尾**だけは確定していても出力を保留
+   * する（`src/text/detokenizer.ts` の `createStopStringFilter`）。接頭辞でなくなった時点で
+   * まとめて流れるので、止まらなかったターンの出力は 1 文字も欠けない。
+   *
+   * NOTE: 低レベル面（{@link Gemma4Pipeline.sequence}）にはこのノブが無い — `GenerationSequence`
+   * は token id しか扱わないので、自分で回すなら停止は token で書く（`docs/limitations.md`）。
+   */
+  readonly stopStrings?: readonly string[];
   /** sampling の指定（省略時は {@link Gemma4PipelineConfig.sampler}、それも無ければ greedy）。 */
   readonly sampler?: SamplerSpec;
   /** 中断（段の境目で検査し `signal.reason` をそのまま throw する — ADR 0083 決定 5）。 */
@@ -189,16 +221,46 @@ export type Gemma4ChatOptions = {
 };
 
 /**
- * 文字列片の列（`for await` で汲む）+ 停止理由。
+ * chat 1 ターンの停止理由。
+ *
+ * sequence 層の理由（`eos` / `stop-token` / `max-tokens` / `aborted` / `closed`）に、この層でしか
+ * 判定できない 1 つ（{@link Gemma4ChatOptions.stopStrings} の一致）を足したもの。`tokens` の
+ * 意味は sequence 層と同じ（そのターンが生成した token 数 — 停止 token も 1 個）で、
+ * `stop-string` では**停止文字列を含む片を出した token まで**が数に入る。
+ */
+export type Gemma4ChatStop =
+  | GenerationStop
+  | {
+    readonly reason: "stop-string";
+    /** 一致した停止文字列（出力には含まれない）。 */
+    readonly stopString: string;
+    readonly tokens: number;
+  };
+
+/**
+ * 文字列片の列（`for await` で汲む）+ 停止理由 + 一括で受け取る口。
  *
  * 片は逐次復号器が**確定させたぶん**だけで（ADR 0084 決定 4）、byte_fallback の途中は次の
- * token まで持ち越される。連結すると `decode(全 token id)` と一致する。
+ * token まで持ち越される。連結すると `decode(全 token id)` と一致する（停止文字列で切った
+ * ターンだけは、その手前までになる）。
+ *
+ * MUST: **1 つのストリームは 1 通りにしか消費できない** — 反復（`for await`）と
+ * {@link Gemma4ChatStream.text} の併用も、2 度の反復も、同期に throw する。生成は 1 度しか
+ * 走らないので、2 通り目には「残り」しか流れない（先に汲んだ側だけが本文を持つ）— 例外に
+ * ならない取り違えなので、口の側で塞ぐ。
  *
  * MUST: `done` は**二次的な**通知路である（`GenerationStream.done` と同じ規律）— 失敗は
  * iterable 側が throw するのが一次で、`done` は同じ例外で reject するだけ。
  */
 export type Gemma4ChatStream = AsyncIterable<string> & {
-  readonly done: Promise<GenerationStop>;
+  readonly done: Promise<Gemma4ChatStop>;
+  /**
+   * 汲み切って連結した 1 本の文字列（逐次表示が要らない呼び手の口）。
+   *
+   * 反復と同じ列を同じ順で汲むだけなので、`text()` の結果は「片を全部連結したもの」と一致する。
+   * 停止理由が要るなら {@link Gemma4ChatStream.done} を併せて読む（`text()` の後でよい）。
+   */
+  text(): Promise<string>;
 };
 
 /** {@link Gemma4Pipeline} の内部状態（公開面には出さない）。 */
@@ -485,6 +547,90 @@ const gemma4ManifestConfig = (
 };
 
 /**
+ * 生成イベント → **確定した文字列片**（復号 → 停止文字列の判定）。返り値は一致した停止文字列
+ * （`undefined` = 止まらずに列が終わった）。
+ *
+ * MUST: 停止文字列で止めるときは `return` で抜ける — `for await` の脱出はイベント列の
+ * `return()` を呼ぶので、sequence は**中断（`break`）と同じ後始末**で畳まれる。畳み方を自前で
+ * 書くと、KV の committed 整合（未 commit frontier 1 token）が 2 実装に分かれる。
+ *
+ * NOTE: 停止 token（sequence 層）と違い、停止文字列は復号の**後**でしか判定できない — 1 つの
+ * 停止文字列が複数 token に割れることも、1 つの token が停止文字列の末尾と次の本文をまたぐ
+ * こともあるため。だから席が 2 層に分かれる（ADR 0083 追記 2026-09-02）。
+ *
+ * NOTE: barrel（`mod.ts` / `./gemma`）には出さない**内部の口**である（公開の入口は
+ * {@link Gemma4Pipeline.chat} だけ）。export してあるのは、この単位なら停止文字列の契約を
+ * 実 GPU 無しで縛れるため（`tests/gemma_chat_test.ts`）。
+ */
+export const decodeChatChunks = async function* (
+  events: AsyncIterable<GenerationEvent>,
+  detokenizer: StreamingDetokenizer,
+  stopStrings: StopStringFilter,
+): AsyncGenerator<string, string | undefined, undefined> {
+  for await (const event of events) {
+    if (event.kind !== "token") continue;
+    const chunk = stopStrings.push(detokenizer.push(event.id));
+    if (chunk.text !== "") yield chunk.text;
+    if (chunk.matched !== undefined) return chunk.matched;
+  }
+  // 復号器の持ち越し（byte_fallback の run）を確定させたぶんも判定へ通す — 停止文字列の最後の
+  // 1 文字がその run の中に居ることがある。
+  const tail = stopStrings.push(detokenizer.finish());
+  if (tail.text !== "") yield tail.text;
+  if (tail.matched !== undefined) return tail.matched;
+  // 止まらずに終わったターンは、接頭辞として保留していたぶんを最後に流す（1 文字も落とさない —
+  // 保留は判定のための遅延であって、出力の切り詰めではない）。
+  const held = stopStrings.finish();
+  if (held !== "") yield held;
+  return undefined;
+};
+
+/**
+ * 片の generator + 停止理由 → 公開の {@link Gemma4ChatStream}（**1 通りにしか消費できない**口）。
+ *
+ * MUST: 反復と {@link Gemma4ChatStream.text} は**同じ generator**を汲む（別経路を作らない）—
+ * 生成は 1 度しか走らないので、一括の口が独自のループを持つと「どちらで読んだかで結果が違う」
+ * 形が書けてしまう。2 通り目は静かに空を返すだけで例外にならないので、口の側で塞ぐ。
+ *
+ * NOTE: {@link decodeChatChunks} と同じく barrel には出さない内部の口である。
+ */
+export const chatStreamOf = (
+  chunks: AsyncGenerator<string, void, undefined>,
+  done: Promise<Gemma4ChatStop>,
+): Gemma4ChatStream => {
+  let claimed: "反復" | "text()" | undefined;
+  const claim = (how: "反復" | "text()"): void => {
+    if (claimed !== undefined) {
+      throw new Error(
+        `Gemma4ChatStream: 1 つのストリームは 1 通りにしか消費できない` +
+          `（${claimed} で消費済み — ${how} は同じ生成をもう一度読もうとしている）`,
+      );
+    }
+    claimed = how;
+  };
+  return {
+    [Symbol.asyncIterator]: (): AsyncGenerator<string, void, undefined> => {
+      claim("反復");
+      return chunks;
+    },
+    done,
+    // async にしない — 併用の検査は**同期に**落とす（返り値を await するまで気づけない形に
+    // しない。`generate` の寿命検査と同じ規律）。
+    text: (): Promise<string> => {
+      claim("text()");
+      return joinChunks(chunks);
+    },
+  };
+};
+
+/** 片を汲み切って連結する（{@link Gemma4ChatStream.text} の本体）。 */
+const joinChunks = async (chunks: AsyncIterable<string>): Promise<string> => {
+  let text = "";
+  for await (const chunk of chunks) text += chunk;
+  return text;
+};
+
+/**
  * gemma4 の chat パイプライン（製品グラフ 1 本 + ホスト PLE + tokenizer）。
  *
  * 構築の入口は {@link Gemma4Pipeline.fromPretrained}（HF から取得）と
@@ -673,6 +819,13 @@ export class Gemma4Pipeline {
    * sequence は返る。**1 ターン = 1 sequence** なので過去 turn は残らない — 多ターンの会話を
    * 自分で回すなら {@link Gemma4Pipeline.sequence} を使う。
    *
+   * 逐次表示が要らないなら {@link Gemma4ChatStream.text} で 1 本の文字列として受け取れる
+   * （反復との併用は同期に throw する — 1 つのストリームは 1 通りにしか消費しない）。
+   *
+   * 停止条件は 2 層で、要求ごとに足せる（配布形の EOS 集合は常に効く）:
+   * {@link Gemma4ChatOptions.stopTokens} は sequence 層（token id）、
+   * {@link Gemma4ChatOptions.stopStrings} はこの層（復号後の本文）が判定する。
+   *
    * 並行に呼ばれた場合は**待たされて順に**走る（1 つの Session を 2 本の会話で同時に押さない）。
    */
   chat(
@@ -685,10 +838,24 @@ export class Gemma4Pipeline {
     // 受理集合は同期に落とす（GPU にも順番待ちにも入る前）。
     const prompt = gemma4ChatPrompt(this.#state.tokenizer, messages);
     const sampler = options.sampler ?? this.#state.config.sampler;
+    // MUST: 要求は**発行時に写す**（ADR 0083 追記 2026-09-02）。本体（async generator）は最初の
+    // `next()` まで走らないので、ここで `options` を読み切らないと `maxNewTokens` / `signal` は
+    // 「汲み始めた時点の値」になる — 発行と消費の間に書き換えた option が黙って効く形である。
+    // `prompt` と sampler 指定の複製は受け手の `GenerationSequence.generate` が済ませる。
+    const request: GenerationRequest = {
+      prompt,
+      maxNewTokens: options.maxNewTokens,
+      ...(options.stopTokens === undefined ? {} : { stopTokens: options.stopTokens }),
+      ...(sampler === undefined ? {} : { sampler }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    };
+    // 停止文字列の状態機械もここで作る（指定の検査と複製がその中で済む = 受理集合が同期に
+    // 落ちる）。停止文字列が無ければ素通しになるので、経路を 2 本に割らない。
+    const stopStrings = createStopStringFilter(options.stopStrings ?? []);
 
-    let settle!: (stop: GenerationStop) => void;
+    let settle!: (stop: Gemma4ChatStop) => void;
     let fail!: (error: unknown) => void;
-    const done = new Promise<GenerationStop>((resolve, reject) => {
+    const done = new Promise<Gemma4ChatStop>((resolve, reject) => {
       settle = resolve;
       fail = reject;
     });
@@ -703,6 +870,8 @@ export class Gemma4Pipeline {
       let sequence: GenerationSequence | undefined;
       let stream: GenerationStream | undefined;
       let failure: { readonly error: unknown } | undefined;
+      /** 一致した停止文字列（この層の停止理由 — 立ったら sequence の消費もそこで止める）。 */
+      let matched: string | undefined;
       try {
         // MUST: 本体の先頭でもう一度見る。async generator の本体は最初の `next()` まで走らない
         // ので、発行時の検査だけでは「発行 → dispose → 汲み始める」が抜ける。抜けた先でも
@@ -716,20 +885,12 @@ export class Gemma4Pipeline {
           session: state.session,
           program: state.wiring,
         });
-        const detokenizer = state.tokenizer.createDetokenizer();
-        stream = sequence.generate({
-          prompt,
-          maxNewTokens: options.maxNewTokens,
-          ...(sampler === undefined ? {} : { sampler }),
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
-        });
-        for await (const event of stream) {
-          if (event.kind !== "token") continue;
-          const text = detokenizer.push(event.id);
-          if (text !== "") yield text;
-        }
-        const tail = detokenizer.finish();
-        if (tail !== "") yield tail;
+        stream = sequence.generate(request);
+        matched = yield* decodeChatChunks(
+          stream,
+          state.tokenizer.createDetokenizer(),
+          stopStrings,
+        );
       } catch (error) {
         failure = { error };
         // MUST: 包まずそのまま投げる（ADR 0083 決定 5 — 消費側が `error === signal.reason` で
@@ -737,13 +898,19 @@ export class Gemma4Pipeline {
         throw error;
       } finally {
         // 停止理由は**内側の `done` をそのまま**運ぶ（中断は resolve `aborted`・失敗は reject
-        // という sequence 側の分け方を、ここで作り直さない）。
+        // という sequence 側の分け方を、ここで作り直さない）。停止文字列だけはこの層の判定なので
+        // 理由を差し替えるが、`tokens` は内側の数をそのまま使う（この層で数え直さない）。
         if (stream === undefined) {
           if (failure !== undefined) fail(failure.error);
           else settle({ reason: "closed", tokens: 0 });
         } else {
           try {
-            settle(await stream.done);
+            const inner = await stream.done;
+            settle(
+              matched === undefined
+                ? inner
+                : { reason: "stop-string", stopString: matched, tokens: inner.tokens },
+            );
           } catch (error) {
             fail(error);
           }
@@ -754,8 +921,7 @@ export class Gemma4Pipeline {
       }
     };
 
-    const iterable = chunks();
-    return { [Symbol.asyncIterator]: () => iterable, done };
+    return chatStreamOf(chunks(), done);
   }
 
   /**

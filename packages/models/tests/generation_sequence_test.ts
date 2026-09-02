@@ -30,6 +30,7 @@ import {
   createGenerationSequence,
   GenerationCapacityError,
   type GenerationEvent,
+  type GenerationRequest,
   type GenerationSession,
   type GenerationStop,
 } from "../src/generation/sequence.ts";
@@ -279,6 +280,96 @@ Deno.test("多ターン: EOS 停止でも停止 token は会話に残る（イ�
   // 停止 token は次ターンの prefill 先頭へ（chat の `<turn|>` を落とすと会話が壊れる）。
   assertEquals(fake.calls[2].ids, [11, 4, 0, 0]);
   assertEquals(fake.calls[2].positions, [3, 4, 0, 0]);
+});
+
+Deno.test("要求の stopTokens: 配布形の集合が空でも、そのターンだけ停止 token を足せる", async () => {
+  const fake = fakeSession({ tokens: [5, 11, 3] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf({ stopTokens: [] }),
+  });
+  const first = await drain(
+    sequence.generate({ prompt: [1, 2], maxNewTokens: 4, stopTokens: [11] }),
+  );
+
+  // 停止 token 自体は本文でないので `token` イベントに出さない（EOS 停止と同じ扱い）。
+  assertEquals(tokenIds(first.events), [5]);
+  // 理由だけが EOS と別（配布形の終端記号ではなく、この要求の都合で止めた）。
+  assertEquals(first.stop, { reason: "stop-token", token: 11, tokens: 2 });
+  assertEquals(fake.calls.length, 2, "停止で decode を打ち切る");
+
+  // 会話には残る = 次ターンの prefill 先頭へ連結される（EOS 停止後と同じ後始末）。
+  await drain(sequence.generate({ prompt: [4], maxNewTokens: 1 }));
+  assertEquals(fake.calls[2].ids, [11, 4, 0, 0]);
+  assertEquals(fake.calls[2].positions, [3, 4, 0, 0]);
+});
+
+Deno.test("要求の stopTokens: 配布形の EOS 集合との和集合で判定する（EOS は常に効く）", async () => {
+  // 要求が停止集合を渡しても、配布形の EOS を上書きはしない（両方が効く = 和集合）。
+  const eos = await createGenerationSequence({
+    session: fakeSession({ tokens: [5, 11, 3] }).session,
+    program: programOf({ stopTokens: [11] }),
+  });
+  assertEquals(
+    (await drain(eos.generate({ prompt: [1, 2], maxNewTokens: 4, stopTokens: [9] }))).stop,
+    { reason: "eos", token: 11, tokens: 2 },
+    "配布形の EOS で止まったターン",
+  );
+
+  // 両方に居る id は `eos` で閉じる（配布形の終端記号としての意味が優先する）。
+  const both = await createGenerationSequence({
+    session: fakeSession({ tokens: [5, 11, 3] }).session,
+    program: programOf({ stopTokens: [11] }),
+  });
+  assertEquals(
+    (await drain(both.generate({ prompt: [1, 2], maxNewTokens: 4, stopTokens: [11] }))).stop,
+    { reason: "eos", token: 11, tokens: 2 },
+    "両方の集合に居る停止 token",
+  );
+});
+
+Deno.test("要求の stopTokens: 語彙外・重複は同期に落ちる（効かない停止条件を残さない）", async () => {
+  // 停止 token は「出力に現れない id」なので、間違っていても生成は普通に完走する（その id が
+  // 抽選されないだけ）— 出力が伸び続けることでしか気づけないので、入口で落とす。
+  const fake = fakeSession();
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(),
+  });
+  assertThrows(
+    () => sequence.generate({ prompt: [1], maxNewTokens: 1, stopTokens: [VOCAB] }),
+    Error,
+    `stopTokens[0] ${VOCAB} が語彙 0..${VOCAB - 1} の外`,
+  );
+  assertThrows(
+    () => sequence.generate({ prompt: [1], maxNewTokens: 1, stopTokens: [1, -1] }),
+    Error,
+    "stopTokens[1] -1",
+  );
+  assertThrows(
+    () => sequence.generate({ prompt: [1], maxNewTokens: 1, stopTokens: [3, 5, 3] }),
+    Error,
+    "stopTokens に token 3 が 2 度出る",
+  );
+  assertEquals(fake.calls.length, 0);
+});
+
+Deno.test("要求の stopTokens: 発行後に配列へ足しても走行中の生成には効かない", async () => {
+  const fake = fakeSession({ tokens: [5, 6, 7] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(),
+  });
+  // 呼び手が握ったままの可変な停止集合（発行時は空 = 止まらない指定）。
+  const stopTokens: number[] = [];
+  const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 3, stopTokens });
+  // 本体は最初の `next()` まで走らないので、汲む前がいちばん広い書き換えの窓である。
+  stopTokens.push(6);
+
+  const { events, stop } = await drain(stream);
+  // 後付けが効いていれば 6 で止まって [5] になる。
+  assertEquals(tokenIds(events), [5, 6, 7]);
+  assertEquals(stop, { reason: "max-tokens", tokens: 3 });
 });
 
 Deno.test("多ターン: break 中断後も pendingToken が残り、次ターンが 1 token も落とさない", async () => {
@@ -790,6 +881,39 @@ Deno.test("GenerationSequence: 受理集合は同期に落ちる（順番待ち�
     "temperature -1",
   );
   assertEquals(fake.calls.length, 0);
+});
+
+/** 発行後に書き換えるための可変版（公開型は全欄 readonly）。 */
+type MutableRequest = { -readonly [Field in keyof GenerationRequest]: GenerationRequest[Field] };
+
+Deno.test("GenerationSequence: 要求は発行時に写す（発行後の書き換えは走行中の生成に効かない）", async () => {
+  const fake = fakeSession({ tokens: [5, 6, 7, 8] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(),
+  });
+  // 呼び手が握ったままの可変な要求（配列も sampler の bias も後から触れる形）。
+  const prompt = [1, 2];
+  const bias: [number, number][] = [];
+  const request: MutableRequest = { prompt, maxNewTokens: 2, sampler: { logitBias: bias } };
+
+  const stream = sequence.generate(request);
+  // 本体は最初の `next()` まで走らないので、汲む前がいちばん広い書き換えの窓である。
+  prompt.push(VOCAB + 5); // 受理集合の検査を通った後で語彙外 id を足す
+  request.prompt = [3, 4]; // 別の配列へ差し替える
+  request.maxNewTokens = 4; // 走行中に上限を伸ばす
+  bias.push([6, Number.NEGATIVE_INFINITY]); // 2 個目に出るはずの token を禁止する
+  const controller = new AbortController();
+  request.signal = controller.signal; // 発行時に無かった中断を後から挿す
+  controller.abort();
+
+  const { events, stop } = await drain(stream);
+  // 流れたのは発行時の prompt（長さ 2 = 有効 2 行 + pad 2 行）。
+  assertEquals(fake.calls.length, 2);
+  assertEquals(fake.calls[0].ids, [1, 2, 0, 0]);
+  // token も停止も発行時の指定どおり（bias の後付けが効けば 6 は別 id に化ける）。
+  assertEquals(tokenIds(events), [5, 6]);
+  assertEquals(stop, { reason: "max-tokens", tokens: 2 });
 });
 
 Deno.test("GenerationSequence: run の失敗は iterable と done の両方へ同じ例外で届く", async () => {

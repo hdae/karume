@@ -138,7 +138,10 @@ export type GenerationEvent =
 /**
  * 停止理由（{@link GenerationStream.done} が返す）。
  *
- * `eos` は**停止 token 自体**を運ぶ。停止 token は `token` イベントに出さない（本文ではなく
+ * 停止 token で閉じた枝は 2 つあり、どちらも**停止 token 自体**を運ぶ — `eos` は配布形が宣言した
+ * 集合（`GenerationWiring.stopTokens`）で、`stop-token` はその要求だけが足した集合
+ * （{@link GenerationRequest.stopTokens}）である。両方に居る id は `eos` で閉じる（配布形の
+ * 終端記号としての意味が優先する）。停止 token は `token` イベントに出さない（本文ではなく
  * 終端記号で、chat では `<turn|>` のような書式トークンになる）が、会話には残る = 次ターンの
  * prefill 先頭へ連結される `pendingToken` である。
  *
@@ -149,9 +152,10 @@ export type GenerationStop =
     /**
      * このターンが**生成した** token の数（prompt は含まない）。
      *
-     * MUST: `eos` の停止 token も 1 個として数える。抽選 1 回 = run 1 回なので、この数がそのまま
-     * 生成に費やした run 数と一致し、`tok/s` を再エンコード無しで書ける（それがこの欄の目的）。
-     * 本文だけの数（= `token` イベントの数）が要るなら `reason === "eos"` のとき 1 引く。
+     * MUST: 停止 token（`eos` / `stop-token`）も 1 個として数える。抽選 1 回 = run 1 回なので、
+     * この数がそのまま生成に費やした run 数と一致し、`tok/s` を再エンコード無しで書ける
+     * （それがこの欄の目的）。本文だけの数（= `token` イベントの数）が要るなら、停止 token を
+     * 運ぶ 2 枝（`"eos"` / `"stop-token"`）のとき 1 引く。
      *
      * `max-tokens` なら要求の `maxNewTokens` に一致し、`closed` / `aborted` では打ち切りまでに
      * 出した数になる（どちらも「成功した run のぶんだけ会話は進んでいる」— 上の節と同じ線）。
@@ -160,12 +164,19 @@ export type GenerationStop =
   }
   & (
     | { readonly reason: "eos"; readonly token: number }
+    | { readonly reason: "stop-token"; readonly token: number }
     | { readonly reason: "max-tokens" }
     | { readonly reason: "aborted" }
     | { readonly reason: "closed" }
   );
 
-/** 1 回ぶんの生成リクエスト（ADR 0083 決定 1）。 */
+/**
+ * 1 回ぶんの生成リクエスト（ADR 0083 決定 1）。
+ *
+ * MUST: 中身は {@link GenerationSequence.generate} が**発行時に写す**（ADR 0083 追記
+ * 2026-09-02）。発行後にこの object や `prompt` / `stopTokens` 配列・`sampler` の指定を
+ * 書き換えても、走行中の生成には効かない — 次のターンに効かせたいなら次の要求として渡す。
+ */
 export type GenerationRequest = {
   /**
    * 今ターンぶんの token 列。多ターンでは**新しい turn のぶんだけ**を渡す（過去は context の
@@ -175,6 +186,17 @@ export type GenerationRequest = {
   readonly prompt: readonly number[];
   /** 生成する token 数の上限（1 以上）。停止 token はこの数に**含めない**。 */
   readonly maxNewTokens: number;
+  /**
+   * このターンだけ効かせる**追加の**停止 token（配布形が宣言した集合との**和集合**で判定する）。
+   *
+   * 配布形の EOS（`GenerationWiring.stopTokens`）は常に効くので、ここに書くのは「この要求の
+   * 都合で止めたい id」だけである（chat の書式トークンで止めたい・道具呼び出しの開始札で
+   * 切りたい、など）。止まったことは {@link GenerationStop} の `stop-token` で読み分けられる。
+   *
+   * MUST: 語彙外と重複は fail loudly（黙って無視すると「効かない停止条件」が例外なしで残り、
+   * 出力が伸び続けることでしか気づけない）。
+   */
+  readonly stopTokens?: readonly number[];
   /** sampling の指定（省略時は温度 0 = greedy — ADR 0083 決定 7 のこの層の既定）。 */
   readonly sampler?: SamplerSpec;
   /** 中断（段の境目で検査し `signal.reason` をそのまま throw する）。 */
@@ -210,10 +232,16 @@ export type GenerationSequence = {
    * 1 ターンぶんを生成する。返り値を汲み切る（または `break` する）まで、この sequence の次の
    * `generate` / `dispose` は動き出さない（ADR 0083 決定 2 の直列化）。
    *
-   * 受理集合の検査（`maxNewTokens` / prompt の token id / sampler の指定）と**寿命**の検査
-   * （dispose 済みの sequence では生成できない）は**同期に**落ちる。予算の検査（位置表・容量）は
+   * 受理集合の検査（`maxNewTokens` / prompt と `stopTokens` の token id / sampler の指定）と
+   * **寿命**の検査（dispose 済みの sequence では生成できない）は**同期に**落ちる。予算の検査（位置表・容量）は
    * 自分の順番が来てからで、先行する生成が会話をどこまで進めるかが発行時点では決まっていない
    * ため（保存された counter から判断しない = 二重簿記の禁止）。
+   *
+   * MUST: 要求は**発行時に写す**（`prompt` / `stopTokens` の複製・`maxNewTokens` / `signal` の
+   * 束縛・sampler 指定のスナップショット）。本体は最初の `next()` まで走らないので、写さないと
+   * 「検査した値」と「実際に流す値」が別物になり得る（検査後に `prompt` へ語彙外 id を足す・
+   * 走行中に `maxNewTokens` を伸ばす・`stopTokens` を空にする・`logitBias` を差し替える —
+   * どれも例外にならない）。
    */
   generate(request: GenerationRequest): GenerationStream;
   /** context を返す（`generate` と同じ鎖に積むので、走行中の生成の後に走る）。 */
@@ -426,11 +454,30 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
     if (disposal !== undefined) {
       throw new Error("GenerationSequence: dispose 済みでは生成できない");
     }
-    // 受理集合は同期に落とす（GPU にも順番待ちにも入る前）。
-    if (!Number.isSafeInteger(request.maxNewTokens) || request.maxNewTokens < 1) {
-      throw new Error(`maxNewTokens ${request.maxNewTokens} が 1 以上の整数でない`);
+    // MUST: 要求はここで**写す**（{@link GenerationSequence.generate} の MUST）。async generator の
+    // 本体は最初の `next()` まで走らないので、写さずに `request` を読み続けると受理集合の検査は
+    // 「発行時の値」を、run は「汲み始めた時の値」を見る — 検査を通った要求が別物になって流れる。
+    const prompt = [...request.prompt];
+    const requestStopTokens = request.stopTokens === undefined ? [] : [...request.stopTokens];
+    const maxNewTokens = request.maxNewTokens;
+    const signal = request.signal;
+    // 受理集合は同期に落とす（GPU にも順番待ちにも入る前）。写した後の値を見る。
+    if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1) {
+      throw new Error(`maxNewTokens ${maxNewTokens} が 1 以上の整数でない`);
     }
-    request.prompt.forEach((id, index) => {
+    // 停止 token は「出力に現れない id」なので、語彙外でも生成は**普通に完走してしまう**
+    // （その id は抽選されないだけ）。効かない停止条件を静かに残さないため、program 側の
+    // 集合（`createGenerationProgram`）と同じ値域門をここでも通す。
+    const declared = new Set<number>();
+    requestStopTokens.forEach((token, index) => {
+      if (!Number.isSafeInteger(token) || token < 0 || token >= program.vocabSize) {
+        throw new Error(`stopTokens[${index}] ${token} が語彙 0..${program.vocabSize - 1} の外`);
+      }
+      // 重複は「同じ条件を 2 度書いた」以上の意味を持てない = 呼び手の取り違えの徴候。
+      if (declared.has(token)) throw new Error(`stopTokens に token ${token} が 2 度出る`);
+      declared.add(token);
+    });
+    prompt.forEach((id, index) => {
       // `Int32Array` への書き込みは非整数の切り詰めも値域外の wrap も**黙って**行う
       // （2^32+1 → 1 = 別の有効 token id）ので、入口で落とす。語彙の外は embedding の
       // 範囲外 gather = 行ごと NaN 汚染になるので、同じ位置で見る。
@@ -438,8 +485,21 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         throw new Error(`prompt[${index}] ${id} が語彙 0..${program.vocabSize - 1} の外`);
       }
     });
-    // 抽選器は 1 生成に 1 つ（RNG 状態を step 越しに持つ）。指定の検査もここで済む。
+    // 抽選器は 1 生成に 1 つ（RNG 状態を step 越しに持つ）。指定の検査と、その指定の
+    // スナップショット（`logitBias` の要素まで写す）も `createSampler` の中で済む。
     const sampler = createSampler(request.sampler);
+
+    /**
+     * 停止判定（配布形の集合と要求の集合の**和集合**）。
+     *
+     * 順序が意味を持つのは理由の側だけ — 両方に居る id は配布形の終端記号として `eos` で閉じる
+     * （{@link GenerationStop} の doc）。
+     */
+    const stopFor = (token: number, tokens: number): GenerationStop | undefined => {
+      if (isStopToken(token, program.stopTokens)) return { reason: "eos", token, tokens };
+      if (isStopToken(token, requestStopTokens)) return { reason: "stop-token", token, tokens };
+      return undefined;
+    };
 
     let settle!: (stop: GenerationStop) => void;
     let fail!: (error: unknown) => void;
@@ -460,19 +520,17 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         release = await acquire();
         // 順番待ちの間に届いた中断は、ここで閉じる（先行の生成が長ければ待ちも長い）。同期の
         // 検査で足りるのは、待ち自体が `await` = 中断タスクの配送済みを意味するため。
-        request.signal?.throwIfAborted();
+        signal?.throwIfAborted();
 
         const past = context.pastLength;
         // 多ターンの連結（ADR 0083 決定 4）— 未 commit frontier を新 prompt の先頭へ。
-        const promptIds = pendingToken === undefined
-          ? [...request.prompt]
-          : [pendingToken, ...request.prompt];
+        const promptIds = pendingToken === undefined ? prompt : [pendingToken, ...prompt];
         if (promptIds.length === 0) {
           throw new Error(
             "prompt が空（前ターンの pendingToken も無いので流す token が 1 つも無い）",
           );
         }
-        assertBudget(program, past, promptIds.length, request.maxNewTokens);
+        assertBudget(program, past, promptIds.length, maxNewTokens);
 
         const chunks = planPrefillChunks(promptIds.length, program.chunkLength);
         // repetition penalty が見る「それまでの token 列」（HF が `input_ids` 全体に掛けるのと
@@ -482,7 +540,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
 
         let logits: Float32Array<ArrayBuffer> | undefined;
         for (const [index, chunk] of chunks.entries()) {
-          await settleAbort(request.signal);
+          await settleAbort(signal);
           // 有効行 1 本の chunk は decode 形（M=1）で流す — 計画を増やさず、かつ中断からの
           // 再開が「中断しなかった走り」と**同じ run** になる（`pendingToken` の再投入は
           // 常に 1 行なので、ここが多ターンのビット同一性の要）。
@@ -495,11 +553,11 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             ids[row] = promptIds[chunk.position + row];
             positions[row] = base + row;
           }
-          const extra = await deriveInputs(ids, request.signal);
+          const extra = await deriveInputs(ids, signal);
           // MUST: 派生入力の `await` 明けにもう一度見る（ADR 0083 決定 5 の「段の境目」は run の
           // **発行直前**）。ここを省くと、中断が届いた後に run が 1 本まるごと進む — 先頭 chunk は
           // 常に cold miss で GB 級の shard を読むので、「送信直後に停止」で必ず踏む窓になる。
-          request.signal?.throwIfAborted();
+          signal?.throwIfAborted();
           const outputs = await session.run(
             {
               [program.inputIds]: i32Row(rows, ids),
@@ -522,21 +580,22 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         generated += 1;
         history.push(token);
         pendingToken = token;
-        if (isStopToken(token, program.stopTokens)) {
-          stop = { reason: "eos", token, tokens: generated };
+        const stopped = stopFor(token, generated);
+        if (stopped !== undefined) {
+          stop = stopped;
           return;
         }
         yield { kind: "token", id: token, position: context.pastLength };
 
         // decode は「位置 P に `g_i` を置くと `g_{i+1}` が出る」形。回るのは `maxNewTokens - 1`
         // 回で、最後の token は未 commit のまま `pendingToken` に残る（決定 4）。
-        for (let step = 0; step + 1 < request.maxNewTokens; step += 1) {
-          await settleAbort(request.signal);
+        for (let step = 0; step + 1 < maxNewTokens; step += 1) {
+          await settleAbort(signal);
           const ids = Int32Array.of(token);
-          const extra = await deriveInputs(ids, request.signal);
+          const extra = await deriveInputs(ids, signal);
           // prefill 側と同じ理由で run の発行直前にもう一度見る（decode で踏むと token が 1 個
           // 余分に消費者へ届く）。
-          request.signal?.throwIfAborted();
+          signal?.throwIfAborted();
           const outputs = await session.run(
             {
               [program.inputIds]: i32Row(1, ids),
@@ -551,15 +610,16 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           generated += 1;
           history.push(token);
           pendingToken = token;
-          if (isStopToken(token, program.stopTokens)) {
-            stop = { reason: "eos", token, tokens: generated };
+          const stopped = stopFor(token, generated);
+          if (stopped !== undefined) {
+            stop = stopped;
             return;
           }
           yield { kind: "token", id: token, position: context.pastLength };
         }
         stop = { reason: "max-tokens", tokens: generated };
       } catch (error) {
-        if (isAbortOf(error, request.signal)) stop = { reason: "aborted", tokens: generated };
+        if (isAbortOf(error, signal)) stop = { reason: "aborted", tokens: generated };
         else failure = { error };
         // MUST: 包まずそのまま投げる（ADR 0083 決定 5 — 消費側が
         // `error === controller.signal.reason` で自分の中断を識別できる）。

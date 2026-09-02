@@ -198,8 +198,8 @@ export / runtime attention_mask 配線は本波の射程外で later に残る�
     `SamplerSpec` から `Gemma4DefaultSampler`（`temperature` / `topK` / `topP` の **3 欄必須**）へ
     縮小した（ADR 0083 決定 7 の「既定値は配布形が宣言する」の綴り直し）。旧名は「今この生成が
     使っている sampler」と読めるが、実際には要求が省略したときだけ使われる**既定**である。
-    型を `SamplerSpec` のままにすると受理集合より広い型になり（`logitBias` は `Map` で JSON に
-    載らず、`seed` / `repetitionPenalty` は配布者が推奨する性質の値ではない）、「型は通るのに
+    型を `SamplerSpec` のままにすると受理集合より広い型になり（`logitBias` /
+    `seed` / `repetitionPenalty` は配布者が推奨する性質の値ではない）、「型は通るのに
     パーサが未知キーで落とす」欄が公開面に生える。部分宣言を許さないのは「温度だけ推奨・top-k は
     低層の既定」という**上流のどこにも無い**組み合わせを作らないため。
   - **破壊的変更（未リリース面）**: 上の改名・`config.sampler` の型縮小・`fromAssets` が不正宣言を

@@ -54,11 +54,12 @@ KV の論理長は正しいまま位置だけが静かにずれる。並行さ�
 `AbortSignal` / 多ターン）で、ホスト側 sampling は `src/generation/sampler.ts`（同 決定 7〜8）。
 sequence が出るまでの間、この面に相当するものは公開されていない。
 
-## 生成 API は公開前に 5 点変わった（ADR 0083 / 0084 の初版記述に対する破壊的変更）
+## 生成 API は公開前に 7 点変わった（ADR 0083 / 0084 の初版記述に対する破壊的変更）
 
 生成 API（`GenerationSequence` / `Gemma4Pipeline`）は **JSR にはまだ出ていない**（`@karume/models`
 の最新公開は 0.7.0 で gemma を含まない）。ただし ADR・examples・デモ台本は波の途中の面で書かれて
-いるので、公開面レビュー（2026-08-31）の消化で変わった 5 点をここに残す。追記の正本は ADR
+いるので、公開面レビュー（2026-08-31 / 第 2 波 2026-09-02）の消化で変わった 7 点をここに残す。
+追記の正本は ADR
 [0083](decisions/0083-generation-api-surface.md) / [0084](decisions/0084-gemma-tokenizer-chat.md)。
 
 - **`dispose()` 後の `generate` は同期に throw する**（従来は最初の反復で `GenerationContext` 側の
@@ -72,11 +73,32 @@ sequence が出るまでの間、この面に相当するものは公開され�
   内部型 `GenerationWiring` へ分離）。残るのは `chunkLength` / `capacity` / `maxPosition` /
   `vocabSize` / `stopTokens` で、面は凍結・`stopTokens` は凍結コピーである（消費側の `sort()` /
   `length = 0` が生成ループの停止集合を書き換える口を塞いだ）。
+- **`SamplerSpec.logitBias` が `Map` からタプルの配列へ**（`readonly [token, bias][]` —
+  2026-09-02）。`new Map([[id, bias]])` を書いていたコードは `[[id, bias]]` へ書き換える。`Map` は
+  `JSON.stringify` が `{}` へ潰すので、設定として保存・復元した指定が**黙って空の bias** になって
+  いた。あわせて**同じ token を 2 度書いたら `RangeError`**（`Map` の後勝ちの畳み込みは無くなった）。
 - **`Gemma4Pipeline.sampler` → `defaultSampler` へ改名**し、`Gemma4PipelineConfig.sampler` の型が
   `SamplerSpec` から `Gemma4DefaultSampler`（`temperature` / `topK` / `topP` の 3 欄必須）へ縮小
   された。あわせて `fromAssets` も `fromPretrained` と同じ門（未知キー・値域・
   `chunkLength ≤ capacity ≤ maxPosition`）をバイト列を開く前に通すので、**不正な宣言は
   3.7GiB のロードが終わる前に落ちる**（従来は初回 `generate` で初めて `RangeError` になった）。
+- **停止理由の union に `stop-token` が増え、`Gemma4ChatStream.done` の型が `Gemma4ChatStop` へ
+  広がった**（2026-09-02 — 要求ごとの停止条件）。`switch (stop.reason)` を網羅で書いていたコードは
+  枝の追加ぶん追随が要る（`chat` 側はさらに `stop-string` が増える）。あわせて
+  `Gemma4ChatStream` に `text()` が生えたので、**1 つのストリームは 1 通りにしか消費できない**
+  （反復と `text()` の併用・2 度の反復は同期に throw する — 従来は 2 度目の `for await` が
+  黙って 0 反復で終わっていた）。
+
+## 停止**文字列**で止められるのは `chat` だけ（`sequence()` は token で止める）
+
+`Gemma4ChatOptions.stopStrings`（復号後の本文に現れたら止める）は **chat 層のノブ**である。
+低レベル面（`Gemma4Pipeline.sequence()` → `GenerationSequence.generate`）には無く、そちらで
+止めるなら `GenerationRequest.stopTokens`（token id・配布形の EOS 集合との和集合）を使う。
+`GenerationSequence` は token id しか扱わない（tokenizer も配布形も知らない）ので、文字列の判定は
+復号器を持つ層にしか置けない — ADR [0083](decisions/0083-generation-api-surface.md) 追記
+2026-09-02 の 2 層である。自分で `sequence()` を回しながら文字列で止めたい場合は、復号した本文を
+自分で見て `break` する（会話は「成功した run のぶんだけ」進み、最後の token は未 commit の
+frontier に残る = `chat` の停止文字列と同じ状態になる）。
 
 ## params キャッシュは Session 寿命で無界（by-design）
 
@@ -974,6 +996,11 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
   `AbortSignal` のいずれも）。token を 1 つも受け取っていない中断（= prefill の途中）は prompt が
   途中まで会話へ入った状態で、`prefill` イベントの `chunk` が commit 済み chunk 数を表す。続きを
   送るか sequence を捨てるかは呼び手が決める。
+- **要求は発行時のスナップショットで走る**（`generate` / `Gemma4Pipeline.chat` — ADR 0083 追記
+  2026-09-02）。`prompt` 配列・`maxNewTokens` / `signal`・sampler の指定（`logitBias` の中身まで）は
+  発行の同期部分で写されるので、返った列を汲み始めた後に要求 object を書き換えても**走行中の
+  生成は変わらない** — 次のターンに効かせるなら次の要求として渡す。中断は発行時に `signal` を
+  渡した場合だけ効く（後から挿した signal は読まれない）。
 - **repetition penalty が見る履歴は今ターンぶんだけ**（そのターンの prompt + 生成した token）。
   sequence は会話全体の token transcript を持たない（可変状態は context と `pendingToken` の
   2 つだけ — ADR 0083 決定 1）ので、過去 turn の token は penalty の対象にならない。会話全体へ

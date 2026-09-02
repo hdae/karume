@@ -259,13 +259,13 @@ Deno.test("sampler: logit bias は温度の前に加算される", () => {
   const logits = f32([2, 1, 0]);
   const distribution = samplerDistribution(
     logits,
-    { temperature: 2, logitBias: new Map([[2, 6]]) },
+    { temperature: 2, logitBias: [[2, 6]] },
     [],
   );
   // 加算 → 除算の順（[2,1,6] / 2 = [1,0.5,3]）。温度の後に足す実装なら [1,0.5,3] にならない。
   assertProbabilities(distribution.probabilities, softmax([1, 0.5, 3]), "bias then temperature");
   assertEquals(
-    createSampler({ logitBias: new Map([[2, 6]]) }).next(logits, []),
+    createSampler({ logitBias: [[2, 6]] }).next(logits, []),
     2,
     "温度 0 でも効く",
   );
@@ -273,7 +273,7 @@ Deno.test("sampler: logit bias は温度の前に加算される", () => {
 
 Deno.test("sampler: logit bias の -Infinity はその token を候補から外す", () => {
   const logits = f32([5, 1, 2]);
-  const spec = { logitBias: new Map([[0, Number.NEGATIVE_INFINITY]]) } satisfies SamplerSpec;
+  const spec = { logitBias: [[0, Number.NEGATIVE_INFINITY]] } satisfies SamplerSpec;
   assertEquals(createSampler(spec).next(logits, []), 2, "温度 0");
   const distribution = samplerDistribution(logits, { ...spec, temperature: 1 }, []);
   assertEquals([...distribution.tokens], [0, 1, 2]);
@@ -281,7 +281,7 @@ Deno.test("sampler: logit bias の -Infinity はその token を候補から外�
 });
 
 Deno.test("sampler: 全 token を禁止したら fail loudly（黙って 0 を返さない）", () => {
-  const banned = new Map([[0, -Infinity], [1, -Infinity]]);
+  const banned: SamplerSpec["logitBias"] = [[0, -Infinity], [1, -Infinity]];
   assertThrows(
     () => samplerDistribution(f32([1, 2]), { temperature: 1, logitBias: banned }, []),
     Error,
@@ -289,12 +289,42 @@ Deno.test("sampler: 全 token を禁止したら fail loudly（黙って 0 を�
   );
 });
 
-Deno.test("sampler: logit bias のキーが語彙の外なら fail loudly", () => {
+Deno.test("sampler: logit bias の token が語彙の外なら fail loudly", () => {
   assertThrows(
-    () => createSampler({ logitBias: new Map([[9, 1]]) }).next(f32([1, 2]), []),
+    () => createSampler({ logitBias: [[9, 1]] }).next(f32([1, 2]), []),
     RangeError,
     "語彙",
   );
+});
+
+Deno.test("sampler: 同じ token の logit bias を 2 度書いたら fail loudly（後勝ちで畳まない）", () => {
+  // `Map` なら黙って後勝ちで畳んでいた形（`[[2,6],[2,-1]]`）— 配列では「2 つ書いた bias の
+  // 片方だけが効く」ことになるので落とす。値が同じでも落とす（畳み方の疑義は同じ）。
+  assertThrows(
+    () => createSampler({ logitBias: [[2, 6], [2, -1]] }),
+    RangeError,
+    "token 2 が 2 度出る",
+  );
+  assertThrows(
+    () => samplerDistribution(f32([1, 2, 3]), { temperature: 1, logitBias: [[0, 1], [0, 1]] }, []),
+    RangeError,
+    "token 0 が 2 度出る",
+  );
+});
+
+Deno.test("sampler: 発行後に logitBias 配列を書き換えても抽選は変わらない（防御コピー）", () => {
+  const logits = f32([5, 1, 2]);
+  // 呼び手が握ったままの可変配列（外側も内側のタプルも書き換えられる形）で発行する。
+  const bias: [number, number][] = [[0, Number.NEGATIVE_INFINITY]];
+  const sampler = createSampler({ logitBias: bias });
+  assertEquals(sampler.next(logits, []), 2, "発行時の指定（token 0 を禁止）");
+
+  bias[0][1] = 0; // 禁止を解く
+  assertEquals(sampler.next(logits, []), 2, "タプルの書き換えは効かない");
+  bias.push([2, Number.NEGATIVE_INFINITY]); // 勝った token を禁止する
+  assertEquals(sampler.next(logits, []), 2, "配列への追加も効かない");
+  bias.length = 0;
+  assertEquals(sampler.next(logits, []), 2, "空にしても効かない");
 });
 
 // ---------------------------------------------------------------------------
@@ -313,9 +343,10 @@ Deno.test("sampler: 受理できない指定は構築時に落ちる", () => {
     { repetitionPenalty: -1 },
     { seed: -1 },
     { seed: 0.5 },
-    { logitBias: new Map([[-1, 1]]) },
-    { logitBias: new Map([[0, Number.POSITIVE_INFINITY]]) },
-    { logitBias: new Map([[0, Number.NaN]]) },
+    { logitBias: [[-1, 1]] },
+    { logitBias: [[0, Number.POSITIVE_INFINITY]] },
+    { logitBias: [[0, Number.NaN]] },
+    { logitBias: [[0, 1], [0, 2]] },
   ];
   for (const spec of rejected) {
     assertThrows(

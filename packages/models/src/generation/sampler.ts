@@ -56,10 +56,20 @@ export type SamplerSpec = {
    */
   readonly repetitionPenalty?: number;
   /**
-   * token id → logit への加算（値は有限数、または `-Infinity` = その token の禁止）。
-   * キーが語彙の外なら fail loudly（黙って無視すると「効かない bias」が静かに残る）。
+   * token id への logit 加算（`[token, bias]` の並び。値は有限数、または `-Infinity` =
+   * その token の禁止）。token が語彙の外なら fail loudly（黙って無視すると「効かない bias」が
+   * 静かに残る）。
+   *
+   * MUST: `Map` ではなく**タプルの配列**で受ける。この指定は JSON を通る経路（配布形の宣言・
+   * ホスト側の設定保存・ログ）と worker 境界を跨ぐが、`Map` は `JSON.stringify` が `{}` へ
+   * 潰すので、往復した指定は**黙って空の bias** になる（例外は出ず「効いていないノブ」として
+   * だけ現れる）。配列なら往復しても同じ指定である。
+   *
+   * MUST: 同じ token を 2 度書いたら落とす（後勝ちで畳まない）。`Map` は畳んでいたが、
+   * 加算のこの面で畳むと「2 つ書いた bias の片方だけが効く」— 足すのか上書きするのかを
+   * 呼び手が読めない。
    */
-  readonly logitBias?: ReadonlyMap<number, number>;
+  readonly logitBias?: readonly (readonly [token: number, bias: number])[];
   /** 抽選列の seed（非負の安全整数・既定 0 — 同じ seed なら同じ token 列）。 */
   readonly seed?: number;
 };
@@ -116,10 +126,15 @@ const assertSpec = (spec: SamplerSpec): void => {
       throw new RangeError(`repetitionPenalty ${spec.repetitionPenalty} が正の有限数でない`);
     }
   }
+  const biased = new Set<number>();
   for (const [token, bias] of spec.logitBias ?? []) {
     if (!Number.isSafeInteger(token) || token < 0) {
-      throw new RangeError(`logitBias のキー ${token} が 0 以上の整数でない`);
+      throw new RangeError(`logitBias の token ${token} が 0 以上の整数でない`);
     }
+    if (biased.has(token)) {
+      throw new RangeError(`logitBias に token ${token} が 2 度出る（後勝ちで畳まない）`);
+    }
+    biased.add(token);
     // `-Infinity` は「その token を禁止する」慣用（HF の `SequenceBias` と同じ）。`+Infinity` と
     // `NaN` は softmax を NaN にするだけなので受けない。
     if (Number.isNaN(bias) || bias === Number.POSITIVE_INFINITY) {
@@ -143,7 +158,7 @@ const processLogits = (
   const penalty = spec.repetitionPenalty ?? 1;
   const bias = spec.logitBias;
   const scaled = temperature !== 0 && temperature !== 1;
-  if (penalty === 1 && (bias === undefined || bias.size === 0) && !scaled) return logits;
+  if (penalty === 1 && (bias === undefined || bias.length === 0) && !scaled) return logits;
 
   const processed = new Float32Array(logits.length);
   processed.set(logits);
@@ -162,7 +177,7 @@ const processLogits = (
   if (bias !== undefined) {
     for (const [token, amount] of bias) {
       if (token >= processed.length) {
-        throw new RangeError(`logitBias のキー ${token} が語彙 0..${processed.length - 1} の外`);
+        throw new RangeError(`logitBias の token ${token} が語彙 0..${processed.length - 1} の外`);
       }
       processed[token] += amount;
     }
@@ -334,18 +349,41 @@ export const samplerDistribution = (
 };
 
 /**
+ * 指定の**発行時スナップショット**（ADR 0083 追記 2026-09-02 の防御コピー）。
+ *
+ * MUST: 呼び手が握っている object をそのまま持たない。抽選器は step をまたいで生き、毎 step
+ * この指定を読み直すので、走行中に書き換えられると**生成の途中で分布が変わる**（例外にならず、
+ * 「同じ seed で同じ列」という決定性の契約だけが静かに壊れる）。
+ *
+ * MUST: `logitBias` は要素まで写す — 配列だけ写すと中のタプルが共有され、`bias[0][1] = -Infinity`
+ * が走行中の抽選へ通る。**配列の複製はここ 1 箇所だけ**である（{@link samplerDistribution} は
+ * 1 回の呼び出しの中でしか spec を読まないので、写す必要が無い）。
+ */
+const snapshotSpec = (spec: SamplerSpec): SamplerSpec =>
+  Object.freeze({
+    ...spec,
+    ...(spec.logitBias === undefined ? {} : {
+      logitBias: Object.freeze(
+        spec.logitBias.map(([token, bias]) => Object.freeze([token, bias] as const)),
+      ),
+    }),
+  });
+
+/**
  * 抽選器を組む（RNG 状態を持つので、1 本の生成では**同じ実体を使い回す**）。
  *
  * 指定を省略すると greedy（温度 0）— この層が既定を持たないことの表現である（ADR 0083 決定 7）。
  */
 export const createSampler = (spec: SamplerSpec = {}): Sampler => {
   assertSpec(spec);
+  // 検査を通った指定を**写して**持つ（{@link snapshotSpec} — 検査した値と抽選が読む値を同じに保つ）。
+  const frozen = snapshotSpec(spec);
   // seed の受理集合検査もここで済ませる（抽選が走るのは decode の途中なので、生成器を作るのを
   // 遅らせると不正な seed が GB 級のロードの末に落ちる — anima の `assertAcceptableSeed` と同趣旨）。
-  const random = new Randu(spec.seed ?? 0);
+  const random = new Randu(frozen.seed ?? 0);
   return {
     next(logits: Float32Array<ArrayBuffer>, history: readonly number[]): number {
-      const { tokens, probabilities } = samplerDistribution(logits, spec, history);
+      const { tokens, probabilities } = samplerDistribution(logits, frozen, history);
       // 候補 1 件（温度 0 / topK 1 / 語彙 1）は抽選が自明なので RNG を回さない。
       if (tokens.length === 1) return tokens[0];
       const draw = random.uniform();

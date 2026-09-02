@@ -26,7 +26,7 @@ export const GEMMA4_PIPELINE_MAJOR = 1;
 /**
  * 配布形が宣言できる sampler の既定（`SamplerSpec` の**部分集合**）。
  *
- * MUST: `SamplerSpec` 全体を開けない — `logitBias` は `Map` で JSON に載らず、`seed` /
+ * MUST: `SamplerSpec` 全体を開けない — `logitBias` / `seed` /
  * `repetitionPenalty` は「配布者が推奨する」性質の値ではない（上流 `generation_config.json` が
  * 持つのもこの 3 つだけ）。型を `SamplerSpec` のままにすると**受理集合より広い型**になり、
  * 「型は通るのにパーサが未知キーで落とす」欄が公開面に生える。欄を増やすのは実需が出てから。
