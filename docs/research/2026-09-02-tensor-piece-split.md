@@ -86,3 +86,8 @@ out-of-memory の errorScope は無音、読み戻し（`mapAsync`）は元デ�
 
 所見: 「定数 + 最大 shard 1 本」のとおり、最大 shard の減少分（gemma4 −131MiB / anima −45〜64MiB）が
 そのままピークから消えた。ロード・生成時間は不変（anima 生成 5.8〜6.0 s・gemma4 ロード 1.8〜2.2 s）。
+
+Mac（Apple M2 / Metal / Deno 2.9.4・ユーザー実測）: 同じ台本で gemma4 の最大 RSS は 841 MiB（計測器）/
+915 MiB（`/usr/bin/time -l`）。Mac の gemma4 は初計測で比較対象は無い。piece 入りミラー（`lm_head` 2 piece・
+7 shard）は `e2e_gemma4_pretrained_test` / `e2e_gemma4_directory_test` の chat golden（温度 0 で fromAssets 経路と
+同じ token 列）が緑 — Metal でもビット同一に読めている。
