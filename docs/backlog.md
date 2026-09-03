@@ -207,8 +207,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     A/B〈Deno + Chrome — ブラウザ側はユーザー実行〉・writeBuffer の chunk→submit/fence 刻み）+
     capacity 1024 反映を同乗。Phase C 起票 = 単一 tensor >1GiB 非対応の期間裁定・fromAssets の
     位置づけ・large asset の reference-first 一般則・**cache-less streaming mode（26B A4B 級の
-    前提 — CacheStorage quota が先に壁）** ②OP マイクロベンチ波（PyTorch 対照 + ブラウザ実測 +
-    CPU/TS 側配置の系統評価 — 先例 = PLE host gather / relattn ホスト生成）③Fusion 半自動発見
+    前提 — CacheStorage quota が先に壁）** ②OP マイクロベンチ波 — **1 段目消化（2026-09-03 — `tools/opbench census`・[research](research/2026-09-03-op-census-fusion-hints.md)・8 家族の実形状 census と P-5 / K-1b / K-4b の実数根拠）**・2 段目（単体 / graph / PyTorch 対照 = 列 B 基準・ブラウザ / 配置評価）はリリース後（PyTorch 対照 + ブラウザ実測 +
+    CPU/TS 側配置の系統評価 — 先例 = PLE host gather / relattn ホスト生成）③Fusion 半自動発見 — **1 段目消化（2026-09-03 — `tools/fusion-hints enumerate` + `enumerateUnfusedWindows`・gemma4 rope 35 未掴 / Irodori 偶奇 RoPE 24 / 分解 attention 116 本 = 同 research §2）**・2 段目 = Inductor 裏付け + census 突合
     （②の基盤上 — Inductor の融合決定を候補ヒント化。K-7 / K-5b の棄却実測は現行資産限定）
     ④TurboQuant recon スパイク（軽・並行可 — 既存 screening rig に載せる）⑤MoE page-fault =
     前倒しせず **Opus PoC を並行起動（2026-09-01・リポ外 spike）**: miss 相乗り readback +
