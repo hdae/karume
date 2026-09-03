@@ -28,6 +28,7 @@ import {
   type GenerationWiring,
 } from "../src/generation/program.ts";
 import {
+  assertGenerationRequestValues,
   createGenerationSequence,
   GenerationCapacityError,
   type GenerationEvent,
@@ -991,6 +992,67 @@ Deno.test("GenerationSequence: 受理集合は同期に落ちる（順番待ち�
     "temperature -1",
   );
   assertEquals(fake.calls.length, 0);
+});
+
+Deno.test("受理集合の値域検査は 1 本の純関数（高レベル面と generate が同じ式を見る）", async (t) => {
+  // 高レベル面（`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`）は `generate` を async
+  // generator の本体で呼ぶので、発行時に落とすにはこの関数を自分で呼ぶしかない。式を写して
+  // 2 本持つと片方だけが古くなるので、正本が 1 本であること自体をここで縛る。
+  await t.step("受理される要求は通る（門が恒真に落ちていないことの対）", () => {
+    assertGenerationRequestValues(VOCAB, { maxNewTokens: 1 });
+    assertGenerationRequestValues(VOCAB, {
+      maxNewTokens: 8,
+      stopTokens: [0, VOCAB - 1],
+      sampler: { temperature: 1, topK: 4 },
+    });
+  });
+
+  await t.step("maxNewTokens の値域", () => {
+    assertThrows(() => assertGenerationRequestValues(VOCAB, { maxNewTokens: 0 }), Error, "0 が 1");
+    assertThrows(
+      () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1.5 }),
+      Error,
+      "maxNewTokens 1.5",
+    );
+  });
+
+  await t.step("stopTokens の語彙外と重複", () => {
+    assertThrows(
+      () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1, stopTokens: [VOCAB] }),
+      Error,
+      `stopTokens[0] ${VOCAB} が語彙 0..${VOCAB - 1} の外`,
+    );
+    assertThrows(
+      () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1, stopTokens: [2, 2] }),
+      Error,
+      "token 2 が 2 度出る",
+    );
+  });
+
+  await t.step("sampler の指定（抽選は decode の途中で走るので発行時に落とす）", () => {
+    assertThrows(
+      () =>
+        assertGenerationRequestValues(VOCAB, {
+          maxNewTokens: 1,
+          sampler: { temperature: -1 },
+        }),
+      RangeError,
+      "temperature -1",
+    );
+  });
+
+  await t.step("generate は同じ関数を通る（片方だけ緩む形を作らない）", async () => {
+    // 故障注入: 関数が受理する値は generate も受理し、拒む値は generate も拒む。
+    const fake = fakeSession();
+    const sequence = await createGenerationSequence({
+      session: fake.session,
+      program: programOf(fake),
+    });
+    const request = { prompt: [1], maxNewTokens: 1, stopTokens: [2, 2] };
+    assertThrows(() => assertGenerationRequestValues(VOCAB, request), Error, "2 度出る");
+    assertThrows(() => sequence.generate(request), Error, "2 度出る");
+    assertEquals(fake.calls.length, 0);
+  });
 });
 
 /** 発行後に書き換えるための可変版（公開型は全欄 readonly）。 */

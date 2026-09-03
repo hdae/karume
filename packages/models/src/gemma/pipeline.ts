@@ -82,6 +82,7 @@ import {
   type GenerationWiring,
 } from "../generation/program.ts";
 import {
+  assertGenerationRequestValues,
   createGenerationSequence,
   type GenerationEvent,
   type GenerationRequest,
@@ -96,7 +97,13 @@ import {
   type Gemma4PleReadOptions,
   parseGemma4PleIndex,
 } from "./ple.ts";
-import { gemma4RopeInputNames, gemma4RopeInputs } from "./rope.ts";
+import {
+  GEMMA4_ROPE_LAYER_TYPES,
+  GEMMA4_ROPE_PARTS,
+  gemma4RopeInputName,
+  gemma4RopeInputNames,
+  gemma4RopeInputs,
+} from "./rope.ts";
 import {
   createStopStringFilter,
   type StopStringFilter,
@@ -529,6 +536,43 @@ const capacitySymbolOf = (graph: GenerationGraph): string => {
 };
 
 /**
+ * RoPE 派生入力 4 本の宣言形（`[1, M, headDim]`）と `pipelineConfig.rope.<層種>.headDim` の突合。
+ *
+ * MUST: setup で見られる配線は setup で見る。`createGenerationProgram` が見るのは派生入力の
+ * **名前の被覆**だけなので、幅の食い違い（層種別の取り違え = sliding 256 と full 512 の引き違い。
+ * exporter 側 `rope.py` が `head_dim` / `global_head_dim` の分岐で自認している間違い方）は、
+ * ホストが渡す表を初 `run` が受けるまで落ちない — 3.7GiB のロードの**後**で、しかも文言は
+ * 「要素数が shape と合わない」になる。焼く側の鏡像は `export_decode.py` の `assert_rope_inputs`。
+ *
+ * NOTE: 内部の口だが export してあるのは、この単位なら宣言の突合を実 GPU も実資産も無しで
+ * 縛れるため（`tests/gemma_config_test.ts` — siglip2 の `assertStaticDim` と同じ流儀）。
+ */
+export const assertRopeInputShapes = (
+  graph: GenerationGraph,
+  config: Gemma4PipelineConfig,
+): void => {
+  for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
+    const { headDim } = config.rope[layerType];
+    for (const part of GEMMA4_ROPE_PARTS) {
+      const name = gemma4RopeInputName(layerType, part);
+      const input = graph.inputs.find((entry) => entry.name === name);
+      if (input === undefined) {
+        throw new Error(
+          `Gemma4Pipeline: グラフ入力 '${name}' が無い（RoPE がホスト供給の資産でない）`,
+        );
+      }
+      if (input.shape.length !== 3 || input.shape[2] !== headDim) {
+        throw new Error(
+          `Gemma4Pipeline: グラフ入力 '${name}' の shape [${input.shape.join(",")}] が` +
+            ` pipelineConfig.rope.${layerType}.headDim ${headDim} と食い違う` +
+            `（[1, M, ${headDim}] が要る）`,
+        );
+      }
+    }
+  }
+};
+
+/**
  * この製品グラフを gemma4 として実行できるかを見る（**重み shard を 1 バイトも取る前**）。
  *
  * MUST: 家族の門はこの 1 本に集める（他ファミリの `admit*` と同じ規律 — `hub/components.ts` の
@@ -539,12 +583,14 @@ const capacitySymbolOf = (graph: GenerationGraph): string => {
  * まだ取っていない（取ってからでは重み prefetch より前という位置が保てない）ので、
  * {@link buildGemma4Program} に残る（anima の `#admit` と同じ分け方）。
  *
- * NOTE: `config` の検査はここには無い — 2 つの入口が**どちらも**
+ * NOTE: `config` **単体**の検査はここには無い — 2 つの入口が**どちらも**
  * {@link parseGemma4PipelineConfig} を通してから呼ぶ（値域・関係・未知キーの門はそこが正本で、
- * 同じ検査を 2 実装持たない）。
+ * 同じ検査を 2 実装持たない）。ここが見るのは宣言**とグラフの突合**だけで、
+ * {@link assertRopeInputShapes} がその 1 本である（グラフはこの席で初めて手に入る）。
  */
 const admitGemma4 = (component: ModelComponent, config: Gemma4PipelineConfig): Gemma4Admission => {
   const { graph } = component;
+  assertRopeInputShapes(graph, config);
   return {
     component,
     config,
@@ -805,6 +851,42 @@ const withRunDiagnostics = (
   return { [Symbol.asyncIterator]: () => iterable, done: stream.done };
 };
 
+/**
+ * ターンの後始末 1 本（`chat` と `Gemma4ChatSession.send` が共有する）。
+ *
+ * MUST: `release` は**無条件に**呼ぶ。`cleanup`（sequence の返却・セッションの締め）が投げたら
+ * 席を返さない形にすると、直列化鎖は前段の決着を得られないまま以後の `chat` / `dispose` を
+ * 永久に待つ — 例外 1 つで二度と動かないパイプラインになる（device 消失時に `context.dispose`
+ * が `flush` の失敗を伝播させる経路が実在する）。順序は flush-before-destroy のまま
+ * 「`cleanup` → `release`」である。
+ *
+ * MUST: 本体（`failure`）も失敗しているときは**両方**運ぶ。呼び手の `finally` から呼ぶので、
+ * ここで投げる例外は本体の例外を置き換える — 包まずに `AggregateError` へ 2 本とも載せる
+ * （`errors[0]` が本体・`errors[1]` が後始末。中断の識別 `error === signal.reason` は
+ * `errors[0]` に残る）。
+ *
+ * NOTE: 関数に切り出してあるのは、呼び手の `finally` に制御フロー文を置かないため
+ * （`no-unsafe-finally` が禁ずるのは「元の例外を黙って捨てる」形で、ここは捨てずに畳んでいる）。
+ */
+export const closeChatTurn = async (
+  where: string,
+  failure: { readonly error: unknown } | undefined,
+  cleanup: () => Promise<void>,
+  release?: () => void,
+): Promise<void> => {
+  try {
+    await cleanup();
+  } catch (error) {
+    if (failure === undefined) throw error;
+    throw new AggregateError(
+      [failure.error, error],
+      `${where}: ターン本体と後始末の両方が失敗した`,
+    );
+  } finally {
+    release?.();
+  }
+};
+
 /** 片を汲み切って連結する（{@link Gemma4ChatStream.text} の本体）。 */
 const joinChunks = async (chunks: AsyncIterable<string>): Promise<string> => {
   let text = "";
@@ -1038,6 +1120,10 @@ export class Gemma4Pipeline {
       ...(sampler === undefined ? {} : { sampler }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
+    // MUST: 受理集合の値域も**ここで**見る（検査の正本は `sequence.ts` の 1 本 — 式を写さない）。
+    // `generate` は下の async generator の本体で呼ぶので、ここで呼ばないと `maxNewTokens: 0` の
+    // ような要求が「汲み始めるまで落ちない」＝ 発行元から遠い場所でしか診断が出ない。
+    assertGenerationRequestValues(this.#state.wiring.vocabSize, request);
     // 停止文字列の状態機械もここで作る（指定の検査と複製がその中で済む = 受理集合が同期に
     // 落ちる）。停止文字列が無ければ素通しになるので、経路を 2 本に割らない。
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
@@ -1099,18 +1185,27 @@ export class Gemma4Pipeline {
         } else {
           try {
             const inner = await stream.done;
-            settle(
-              matched === undefined
-                ? inner
-                : { reason: "stop-string", stopString: matched, tokens: inner.tokens },
-            );
+            // MUST: この層で起きた失敗（`onPrefill` / `onRunDiagnostics` / 復号器の未知 id・
+            // 不正 UTF-8）は内側からは見えない — 内側は `return()` で閉じられて `closed` で
+            // resolve するので、そのまま運ぶと `done` だけを読む呼び手が**失敗を成功として
+            // 記録する**。中断は内側が `aborted` で運ぶ形が正なので、そこだけは触らない。
+            if (failure !== undefined && inner.reason !== "aborted") fail(failure.error);
+            else {
+              settle(
+                matched === undefined
+                  ? inner
+                  : { reason: "stop-string", stopString: matched, tokens: inner.tokens },
+              );
+            }
           } catch (error) {
             fail(error);
           }
         }
-        // 1 ターン = 1 sequence（context を抱えたままにしない）。
-        if (sequence !== undefined) await sequence.dispose();
-        release?.();
+        // 1 ターン = 1 sequence（context を抱えたままにしない）。席は無条件に返す
+        // （{@link closeChatTurn} の MUST）。
+        await closeChatTurn("Gemma4Pipeline.chat", failure, async () => {
+          if (sequence !== undefined) await sequence.dispose();
+        }, release);
       }
     };
 
@@ -1144,6 +1239,13 @@ export class Gemma4Pipeline {
       program: state.wiring,
       ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
     });
+    // MUST: `await` 明けにもう一度見る。`dispose` の鎖本体は `#handed` を走査してから畳むので、
+    // 確保の途中で dispose された実体は**どちらの経路からも畳まれない**（この再検査だけが
+    // 塞げる窓 — runtime 側 `executor.ts` の `#createGenerationContext` と同型）。
+    if (this.#disposal !== undefined) {
+      await inner.dispose();
+      throw new Error("Gemma4Pipeline: dispose 済みでは sequence を作れない");
+    }
     // 正しく返された sequence は追跡から外す（外さないと、多ターン UI が会話ごとに作って
     // 畳んでも Set が単調増加し、`dispose` が破棄済みの実体を全数もう一度 await する）。
     // 実体そのものではなく薄い包みを渡すのは、`GenerationSequence` に pipeline を知らせる席を
@@ -1245,15 +1347,38 @@ export class Gemma4Pipeline {
    * MUST: PLE も解放する。GPU 常駐と違い**ホスト RAM**（{@link Gemma4PipelineOptions.maxResidentPleBytes}
    * ぶん = 既定で最大 shard 2 本ぶん）なので、口が無いと「dispose 済みのハンドルを 1 つ持ち
    * 続ける」だけでその RAM がプロセス寿命まで残る。
+   *
+   * MUST: 途中の 1 本が投げても**残りの段まで進む**。`#disposal` は失敗も含めて 1 本を保持する
+   * （2 度目も同じ拒否を返す = 再試行の口が無い）ので、最初の失敗で打ち切ると Session も GPU も
+   * PLE のホスト RAM も**二度と**解放されない。失敗は 1 件ならそのまま、2 件以上は
+   * `AggregateError` で運ぶ（どの段が落ちたかを消さない）。
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(async () => {
-      for (const sequence of this.#handed) await sequence.dispose();
+      const failures: unknown[] = [];
+      /** 後始末 1 段（失敗を集めて次の段へ進む）。 */
+      const step = async (run: () => void | Promise<void>): Promise<void> => {
+        try {
+          await run();
+        } catch (error) {
+          failures.push(error);
+        }
+      };
+      for (const sequence of this.#handed) await step(() => sequence.dispose());
       this.#handed.clear();
-      await this.#state.session.dispose();
-      if (this.#state.ownsGpu) this.#state.gpu.destroy();
+      await step(() => this.#state.session.dispose());
+      await step(() => {
+        if (this.#state.ownsGpu) this.#state.gpu.destroy();
+      });
       // 順序は GPU の後（走行中の生成は既に畳んであるので、ここで引き手はもう居ない）。
-      this.#state.ple.dispose();
+      await step(() => this.#state.ple.dispose());
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(
+          failures,
+          `Gemma4Pipeline.dispose: 後始末が ${failures.length} 件失敗した`,
+        );
+      }
     });
     return this.#disposal;
   }

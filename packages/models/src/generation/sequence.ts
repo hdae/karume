@@ -204,6 +204,42 @@ export type GenerationRequest = {
 };
 
 /**
+ * 要求の**値域**検査（`maxNewTokens` / `stopTokens` / sampler の指定）— **検査の正本 1 本**。
+ *
+ * MUST: 同じ式を写して 2 本持たない。{@link GenerationSequence.generate} の同期区間と、
+ * 高レベル面（`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`）の**発行時**の両方がここを呼ぶ。
+ * 高レベル面は `generate` を async generator の本体で呼ぶので、ここを自分で呼ばないと不正な
+ * 要求が「最初の `next()` まで落ちない」（診断の位置が発行元から遠くなる）。
+ *
+ * NOTE: 見ないものが 2 つある — `prompt` の token id は**写した後**の配列に対して見る必要が
+ * あり（写すのは `generate` の仕事）、予算（容量・位置上限）は自分の順番が来るまで確定しない
+ * （`assertBudget`）。
+ */
+export const assertGenerationRequestValues = (
+  vocabSize: number,
+  request: Pick<GenerationRequest, "maxNewTokens" | "stopTokens" | "sampler">,
+): void => {
+  if (!Number.isSafeInteger(request.maxNewTokens) || request.maxNewTokens < 1) {
+    throw new Error(`maxNewTokens ${request.maxNewTokens} が 1 以上の整数でない`);
+  }
+  // 停止 token は「出力に現れない id」なので、語彙外でも生成は**普通に完走してしまう**
+  // （その id は抽選されないだけ）。効かない停止条件を静かに残さないため、program 側の
+  // 集合（`createGenerationProgram`）と同じ値域門をここでも通す。
+  const declared = new Set<number>();
+  (request.stopTokens ?? []).forEach((token, index) => {
+    if (!Number.isSafeInteger(token) || token < 0 || token >= vocabSize) {
+      throw new Error(`stopTokens[${index}] ${token} が語彙 0..${vocabSize - 1} の外`);
+    }
+    // 重複は「同じ条件を 2 度書いた」以上の意味を持てない = 呼び手の取り違えの徴候。
+    if (declared.has(token)) throw new Error(`stopTokens に token ${token} が 2 度出る`);
+    declared.add(token);
+  });
+  // 抽選器の指定もここで落とす。`createSampler` は検査と写しと `Randu` の初期化だけで外部状態を
+  // 触らないので、検査のために 1 度作って捨ててよい（実際に回す実体は `generate` が作る）。
+  createSampler(request.sampler);
+};
+
+/**
  * token 列そのもの（`for await` で汲む）+ 停止理由。
  *
  * MUST: `done` は**二次的な**通知路である。失敗（run の失敗・容量超過）は iterable 側が throw
@@ -503,20 +539,10 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
     const maxNewTokens = request.maxNewTokens;
     const signal = request.signal;
     // 受理集合は同期に落とす（GPU にも順番待ちにも入る前）。写した後の値を見る。
-    if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1) {
-      throw new Error(`maxNewTokens ${maxNewTokens} が 1 以上の整数でない`);
-    }
-    // 停止 token は「出力に現れない id」なので、語彙外でも生成は**普通に完走してしまう**
-    // （その id は抽選されないだけ）。効かない停止条件を静かに残さないため、program 側の
-    // 集合（`createGenerationProgram`）と同じ値域門をここでも通す。
-    const declared = new Set<number>();
-    requestStopTokens.forEach((token, index) => {
-      if (!Number.isSafeInteger(token) || token < 0 || token >= program.vocabSize) {
-        throw new Error(`stopTokens[${index}] ${token} が語彙 0..${program.vocabSize - 1} の外`);
-      }
-      // 重複は「同じ条件を 2 度書いた」以上の意味を持てない = 呼び手の取り違えの徴候。
-      if (declared.has(token)) throw new Error(`stopTokens に token ${token} が 2 度出る`);
-      declared.add(token);
+    assertGenerationRequestValues(program.vocabSize, {
+      maxNewTokens,
+      stopTokens: requestStopTokens,
+      sampler: request.sampler,
     });
     prompt.forEach((id, index) => {
       // `Int32Array` への書き込みは非整数の切り詰めも値域外の wrap も**黙って**行う

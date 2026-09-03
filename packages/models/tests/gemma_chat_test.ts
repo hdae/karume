@@ -6,7 +6,7 @@
 // [0084](../../../docs/decisions/0084-gemma-tokenizer-chat.md) 決定 7 — 共有すると parity が
 // 恒真化する）。
 //
-// 門は 4 本:
+// 門は 6 本:
 //
 // ① **描画**が上流のレンダリング結果と文字単位で一致する（割れたときに「描画」と「符号化」の
 //    どちらの段かが読み手に伝わるよう、id 列とは別に見る）
@@ -18,6 +18,8 @@
 //    一致する（ADR 0083 決定 8 / 0084 決定 5 — chat 形式と EOS 集合は同じ digest set）
 // ⑤ **増分描画の turn-local 契約**（`gemma4ChatTurn`）— 「初回の全体描画 + 生成された本文 +
 //    `<turn|>` + 以後の差分」の連結が、全会話を 1 度に描いたものと token 単位で一致する
+// ⑥ **ターンの後始末**（`closeChatTurn`）— 後始末が失敗しても直列化席は返り、本体の失敗と
+//    後始末の失敗はどちらも消えない（席が返らないと以後の `chat` / `dispose` が永久に待つ）
 //
 // 実資産（`outputs/series/gemma4-e2b-tokenizer/`）が在れば**全語彙**でも同じ id 列になること
 // を併せて見る（部分集合と full の食い違いを塞ぐ門）。無い環境では SKIP する。
@@ -29,7 +31,12 @@ import {
   type DetokenizerSource,
   StreamingDetokenizer,
 } from "../src/text/detokenizer.ts";
-import { chatStreamOf, decodeChatChunks, type Gemma4ChatStop } from "../src/gemma/pipeline.ts";
+import {
+  chatStreamOf,
+  closeChatTurn,
+  decodeChatChunks,
+  type Gemma4ChatStop,
+} from "../src/gemma/pipeline.ts";
 import type { GenerationEvent } from "../src/generation/sequence.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { GemmaTokenizer } from "../src/gemma/text/tokenizer.ts";
@@ -561,6 +568,61 @@ Deno.test("chat 一括: 1 つのストリームは 1 通りにしか消費でき
   const twice = streamOf();
   twice[Symbol.asyncIterator]();
   assertThrows(() => twice[Symbol.asyncIterator](), Error, "1 通りにしか消費できない");
+});
+
+// ---- ターンの後始末（`closeChatTurn`）---------------------------------------
+//
+// `Gemma4Pipeline.chat` の直列化席は「後始末が失敗したら返らない」形だと、鎖が前段の決着を
+// 得られないまま以後の `chat` / `dispose` を永久に待つ（device 消失で `context.dispose` が
+// `flush` の失敗を伝播させる経路が実在する = 例外 1 つで二度と動かないパイプライン）。
+// 席の返却と例外の畳み方はこの 1 本に集めてあるので、故障注入もここで書ける（GPU 不要）。
+
+Deno.test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の例外と併せて運ぶ", async (t) => {
+  const failing = (error: unknown) => (): Promise<void> => Promise.reject(error);
+  const caughtOf = (work: Promise<void>): Promise<unknown> =>
+    work.then(() => undefined, (error: unknown) => error);
+
+  await t.step("成功した後始末は席を返すだけ", async () => {
+    let released = 0;
+    await closeChatTurn("test", undefined, () => Promise.resolve(), () => {
+      released += 1;
+    });
+    assertEquals(released, 1);
+  });
+
+  await t.step("後始末が失敗しても席は返る（鎖を握ったままにしない）", async () => {
+    const boom = new Error("context.dispose が flush の失敗を伝播した");
+    let released = 0;
+    const caught = await caughtOf(
+      closeChatTurn("test", undefined, failing(boom), () => {
+        released += 1;
+      }),
+    );
+    assertEquals(caught, boom, "本体が成功していれば後始末の例外がそのまま届く");
+    assertEquals(released, 1, "席は無条件に返る");
+  });
+
+  await t.step("本体も失敗していれば 2 本とも運ぶ（どちらの事実も消さない）", async () => {
+    const body = new Error("ターン本体");
+    const cleanup = new Error("後始末");
+    let released = 0;
+    const caught = await caughtOf(
+      closeChatTurn("test", { error: body }, failing(cleanup), () => {
+        released += 1;
+      }),
+    );
+    assert(caught instanceof AggregateError, `AggregateError でない: ${caught}`);
+    assertEquals(caught.errors, [body, cleanup], "errors[0] が本体・errors[1] が後始末");
+    assertEquals(released, 1);
+  });
+
+  await t.step("席を持たない呼び手（send）でも畳み方は同じ", async () => {
+    const body = new Error("ターン本体");
+    const cleanup = new Error("後始末");
+    const caught = await caughtOf(closeChatTurn("test", { error: body }, failing(cleanup)));
+    assert(caught instanceof AggregateError, `AggregateError でない: ${caught}`);
+    assertEquals(caught.errors, [body, cleanup]);
+  });
 });
 
 Deno.test({

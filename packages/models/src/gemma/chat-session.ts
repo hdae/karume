@@ -39,6 +39,7 @@
 import type { GenerationProgram } from "../generation/program.ts";
 import type { SamplerSpec } from "../generation/sampler.ts";
 import {
+  assertGenerationRequestValues,
   type GenerationCapacityDetail,
   GenerationCapacityError,
   type GenerationSequence,
@@ -48,6 +49,7 @@ import { createStopStringFilter } from "../text/detokenizer.ts";
 import type { Gemma4DefaultSampler } from "./config.ts";
 import {
   chatStreamOf,
+  closeChatTurn,
   decodeChatChunks,
   type Gemma4ChatStop,
   type Gemma4ChatStream,
@@ -95,6 +97,10 @@ export type Gemma4ChatOverflow = {
  * MUST: 返す履歴は渡された `turns` より**短い**こと。同じ長さ（= 打つ手が無い）を返せば
  * セッションが `GenerationCapacityError` で落とす — 縮まない再試行は無限ループにしかならず、
  * 「会話が入り切らない」という事実を握り潰す形でもある。throw すればそのまま呼び手へ届く。
+ *
+ * MUST: **末尾（今答えようとしている発話）は残す**こと。落とした履歴は例外にならずに描画へ
+ * 通り（`gemma4ChatPrompt` は末尾 role を制約しない）、「問いの無い会話」に答えが付く。写しを
+ * 返す実装（`turns.map((turn) => ({ ...turn }))`）は正当で、判定は値で行う。
  */
 export type Gemma4ChatOverflowPolicy = (
   context: Gemma4ChatOverflow,
@@ -214,6 +220,17 @@ const neededOf = (detail: GenerationCapacityDetail): number =>
   detail.pastLength + detail.promptLength + detail.requestedNewTokens - 1;
 
 /**
+ * 発話の同値（`#shrink` の末尾門と `#finish` の巻き戻しが**同じ比較**を使う）。
+ *
+ * MUST: 参照同一性で見ない。溢れポリシーは `turns.map((turn) => ({ ...turn }))` のように写しを
+ * 返してよい（渡すのは凍結コピーなので、写して返す実装は正当）。同一性で見ると、その正当な
+ * ポリシーが「末尾を保っているのに落としたと判定される」（門側）か「1 文字も出なかったターンの
+ * 巻き戻しが黙って効かなくなる」（`#finish` 側）になる。
+ */
+const sameTurn = (left: Gemma4ChatMessage, right: Gemma4ChatMessage): boolean =>
+  left.role === right.role && left.content === right.content;
+
+/**
  * 1 本の会話（履歴 + KV）を持つセッション。
  *
  * ```ts
@@ -298,6 +315,14 @@ export class Gemma4ChatSession {
     // 停止文字列の状態機械もここで作る（指定の検査と複製がその中で済む = 受理集合が同期に落ちる）。
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
     const detokenizer = this.#host.tokenizer.createDetokenizer();
+    // MUST: 受理集合の値域は**セッションの状態を動かす前**に見る（検査の正本は `sequence.ts` の
+    // 1 本）。後ろに置くと、不正な要求が履歴へ発話を積み `#busy` を立てたまま「汲み始めるまで
+    // 落ちない」形になり、呼び手から見ると 1 度の取り違えでセッションが使えなくなる。
+    assertGenerationRequestValues(this.#host.program.vocabSize, {
+      maxNewTokens,
+      ...(stopTokens === undefined ? {} : { stopTokens }),
+      ...(sampler === undefined ? {} : { sampler }),
+    });
 
     const asked: Gemma4ChatMessage = { role: "user", content: text };
     this.#turns.push(asked);
@@ -359,17 +384,31 @@ export class Gemma4ChatSession {
         } else {
           try {
             const inner = await stream.done;
-            // 停止文字列だけはこの層の判定なので理由を差し替える（`tokens` は内側の数をそのまま
-            // 使う = この層で数え直さない）。
-            stop = matched === undefined
-              ? inner
-              : { reason: "stop-string", stopString: matched, tokens: inner.tokens };
-            settle(stop);
+            // MUST: この層で起きた失敗（`onPrefill` / 復号器の未知 id・不正 UTF-8）は内側からは
+            // 見えない — 内側は `return()` で閉じられて `closed` で resolve するので、そのまま
+            // 運ぶと `done` だけを読む呼び手が失敗を成功として記録する。中断は内側が `aborted`
+            // で運ぶ形が正なので触らない。`stop` は **undefined のまま**にして `#finish` へ渡す
+            // （閉じた turn として KV を継がせない）。
+            if (failure !== undefined && inner.reason !== "aborted") fail(failure.error);
+            else {
+              // 停止文字列だけはこの層の判定なので理由を差し替える（`tokens` は内側の数をそのまま
+              // 使う = この層で数え直さない）。
+              stop = matched === undefined
+                ? inner
+                : { reason: "stop-string", stopString: matched, tokens: inner.tokens };
+              settle(stop);
+            }
           } catch (error) {
             fail(error);
           }
         }
-        await finish(asked, reply, stop);
+        // ターンの締めは**必ず**通す（`#finish` の `finally` が `#busy` を戻すので、後始末が
+        // 失敗してもセッションは次のターンを受けられる）。失敗の畳み方は `chat` と同じ 1 本。
+        await closeChatTurn(
+          "Gemma4ChatSession.send",
+          failure,
+          () => finish(asked, reply, stop),
+        );
       }
     };
 
@@ -395,6 +434,11 @@ export class Gemma4ChatSession {
   /**
    * このターンの sequence と prompt を用意する（容量が足りなければ溢れ処理を回してから）。
    *
+   * MUST: 溢れ判定は sequence の**確保より前**に行う。判定に要るのは `used` だけで、`#committed`
+   * が 0 なら KV は空 = `used` は 0 と決まるので、確保しなくても判定できる。順序が逆だと
+   * 「切り詰めるターンが capacity ぶんの KV を 1 度確保してすぐ捨てる」形になる（会話の初回・
+   * 前ターンが max-tokens / 停止文字列 / 中断 / 失敗で閉じた場合に踏む = 珍しくない）。
+   *
    * MUST: 再試行は履歴が**縮んだ**ときだけ続く（`#shrink` の門）ので、
    * 試行回数は入口の発話数を超えない — 下の門はその不変条件が破れたことを名指しで落とす席で、
    * 成り立っている限り踏まない。
@@ -404,11 +448,13 @@ export class Gemma4ChatSession {
   ): Promise<{ readonly sequence: GenerationSequence; readonly prompt: number[] }> {
     const attempts = this.#turns.length;
     for (let attempt = 0;; attempt += 1) {
-      if (this.#sequence === undefined) {
-        this.#sequence = await this.#host.sequence({ capacity: this.#capacity });
-        this.#committed = 0;
+      // MUST: `await` 明けの再検査（`send` は発行時に見るが、本体が走り出すのはその後）。
+      // セッションだけを dispose した後に発行済みの stream を汲むと、生きた pipeline から
+      // 新しい容量ぶんの sequence を取れてしまう。
+      if (this.#disposal !== undefined) {
+        throw new Error("Gemma4ChatSession: dispose 済みでは生成できない");
       }
-      const sequence = this.#sequence;
+      const held = this.#sequence;
       // 差分を継ぐのは「直前の発話 1 件だけが未 commit」のときに限る。ずれたまま差分を流すと
       // 会話が静かに欠けるので、継承の前提そのものを門にしておく。
       if (this.#committed !== 0 && this.#committed !== this.#turns.length - 1) {
@@ -417,17 +463,38 @@ export class Gemma4ChatSession {
             `${this.#turns.length} 件`,
         );
       }
+      // `used` は導出値（`#committed === 0` ⇔ KV は空 ⇔ `used === 0`）。同値が破れたまま 0 を
+      // 仮定すると溢れ判定が実際より緩くなるので、破れを名指しで落とす席を隣に置く。
+      let used = 0;
+      if (this.#committed !== 0) {
+        if (held === undefined) {
+          throw new Error(
+            `Gemma4ChatSession 内部不整合: KV は ${this.#committed} 件だが sequence が無い`,
+          );
+        }
+        used = held.used;
+      } else if (held !== undefined && held.used !== 0) {
+        throw new Error(
+          `Gemma4ChatSession 内部不整合: KV は空だが sequence の used が ${held.used}`,
+        );
+      }
       const prompt = this.#committed === 0
         ? gemma4ChatPrompt(this.#host.tokenizer, this.#turns)
         : gemma4ChatTurn(this.#host.tokenizer, this.#turns[this.#turns.length - 1]);
       const detail = overflowOf(
         this.#host.program,
         this.#capacity,
-        sequence.used,
+        used,
         prompt.length,
         maxNewTokens,
       );
-      if (detail === undefined) return { sequence, prompt };
+      if (detail === undefined) {
+        if (held !== undefined) return { sequence: held, prompt };
+        const created = await this.#host.sequence({ capacity: this.#capacity });
+        this.#sequence = created;
+        this.#committed = 0;
+        return { sequence: created, prompt };
+      }
       if (attempt >= attempts) {
         throw new Error(
           `Gemma4ChatSession 内部不整合: 溢れ処理が ${attempts} 回で収束しなかった`,
@@ -440,6 +507,7 @@ export class Gemma4ChatSession {
   /** 溢れ処理を 1 回回す（履歴を差し替え、KV との対応が切れた sequence を捨てる）。 */
   async #shrink(detail: GenerationCapacityDetail): Promise<void> {
     const before = this.#turns.length;
+    const asked = this.#turns[before - 1];
     const needed = neededOf(detail);
     const next = await this.#onOverflow({
       turns: Object.freeze([...this.#turns]),
@@ -447,6 +515,16 @@ export class Gemma4ChatSession {
       capacity: detail.limit,
       needed,
     });
+    // MUST: 今答えようとしている発話（末尾）が残っていること。落ちたまま通すと `#prepare` が
+    // 「問いの無い会話」を描き直し、`gemma4ChatPrompt` も末尾 role を制約しないので**例外ゼロ**で
+    // 答えだけが確定する。比較は値（{@link sameTurn}）— 写しを返す正当なポリシーを弾かない。
+    const last = next.at(-1);
+    if (last === undefined || !sameTurn(last, asked)) {
+      throw new Error(
+        `Gemma4ChatSession: 溢れ処理が今の発話（末尾）を落とした` +
+          `（履歴 ${before} 件 → ${next.length} 件 — 今答えようとしている発話は残すこと）`,
+      );
+    }
     if (next.length >= before) {
       throw new GenerationCapacityError(
         `会話が入り切らない: ${detail.constraint} 上限 ${detail.limit} に対し ${needed} 要る` +
@@ -476,8 +554,12 @@ export class Gemma4ChatSession {
       }
       // max-tokens / 停止文字列 / 中断 / 失敗は model turn を閉じていない = 差分の前提が無い。
       if (reply !== "") this.#turns.push({ role: "assistant", content: reply });
-      // 1 文字も出なかったターンは**無かったことにする**（答えの無い問いを履歴へ残さない）。
-      else if (this.#turns.at(-1) === asked) this.#turns.pop();
+      else {
+        // 1 文字も出なかったターンは**無かったことにする**（答えの無い問いを履歴へ残さない）。
+        // 比較は値（{@link sameTurn}）— 溢れ処理が履歴を写して返すと参照は切れる。
+        const last = this.#turns.at(-1);
+        if (last !== undefined && sameTurn(last, asked)) this.#turns.pop();
+      }
       await this.#releaseSequence();
     } finally {
       this.#busy = false;
