@@ -97,7 +97,7 @@ state 記号の束縛源を `capacity` → `maxPosition` へ。既定容量で�
 
 decode の線形項は本 ADR の外（perf-ledger K-12・ADR 0067 追記 2026-09-03）。opt-in 席で実装済み
 （`8b76ef4`）。既定への昇格は ADR 0058 決定 6（品質裁定 + golden 更新を同一コミット）に従い、本波の
-golden 再凍結と同じ回で行うかはユーザー裁定。
+golden 再凍結と同じ回に行った（2026-09-03 ユーザー裁定 — `Gemma4Pipeline` の既定 = `"parallel"`・`stateAttentionReduce: "sequential"` で参照経路へ戻せる・runtime の既定は不変）。
 
 ## Consequences
 

@@ -19,7 +19,7 @@
   並列縮約（`stateAttentionReduce: "parallel"`・opt-in・decode 16K ×2）。**落とし穴**: ①旧配布形
   （表を焼いた karume/4 gemma4）は読めない ②`GreedySpec` / `GenerationProgramSpec` は `positionIds`
   を持たない（派生入力 `derive` が位置の唯一の供給口）③states 形 attention を持つグラフの見積りは
-  `maxStorageBufferBindingSize` 必須 ④K-12 を既定にする昇格は品質裁定 + golden 更新を同一コミットで。
+  `maxStorageBufferBindingSize` 必須 ④K-12 は `Gemma4Pipeline` の既定（`"parallel"`）— runtime / 低レベル面の既定は `"sequential"` のまま（参照経路）。
   次 = フル verify → リリース（gemma4 のアップまで）→ ②OP マイクロベンチ / ③Fusion 半自動発見
   （1 段目 = census / IR n-gram・GPU 不要）→ K-13 / K-14。
 

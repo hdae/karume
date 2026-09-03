@@ -43,6 +43,7 @@ import {
   planWeightResidency,
   type Session,
   type SessionDiagnostics,
+  type StateAttentionReduce,
 } from "@karume/runtime";
 import {
   type AssetProgress,
@@ -196,7 +197,29 @@ export type Gemma4PipelineOptions = {
    * コールバックの例外は握らない（fail loudly — そのターンごと落ちる）。
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
+  /**
+   * states 形 attention ③PV の縮約形（省略時は {@link GEMMA4_STATE_ATTENTION_REDUCE} =
+   * `"parallel"`）。
+   *
+   * `"parallel"` は KV 長方向を 16 レーンで分担する変種（perf-ledger K-12）で、decode の
+   * attention が KV 長に比例して伸びる形を潰す（P=16K で 82 → 41 ms/token）。縮約順が違うので
+   * `"sequential"`（runtime の参照経路）とビット同一ではないが、gemma4 の greedy / chat golden は
+   * 両者で同一 — 既定への昇格はユーザーの品質裁定（2026-09-03）と golden の再走を同一コミットで
+   * 行った（ADR 0058 決定 6・ADR 0067 追記 2026-09-03）。`"sequential"` は parity の突合や
+   * 「順序依存の差を疑う」ときに戻す口。
+   */
+  readonly stateAttentionReduce?: StateAttentionReduce;
 };
+
+/**
+ * gemma4 パイプラインが Session に与える ③PV の縮約形の既定
+ * （{@link Gemma4PipelineOptions.stateAttentionReduce}）。
+ *
+ * MUST: runtime 側の既定（`"sequential"` = 参照経路 — ADR 0058 決定 2）は動かさない。既定を
+ * 変えるのは「品質裁定を経た家族のパイプライン」だけで、低レベル面（`createSession` を自分で
+ * 呼ぶ消費者・decode 系列の検収門）は参照経路のまま。
+ */
+export const GEMMA4_STATE_ATTENTION_REDUCE: StateAttentionReduce = "parallel";
 
 /**
  * {@link Gemma4Pipeline.fromPretrained} が追加で受けるもの（選択軸 + 取得層へ透過するノブ）。
@@ -956,7 +979,10 @@ export class Gemma4Pipeline {
       return new Gemma4Pipeline({
         gpu,
         ownsGpu,
-        session: await admitted.component.createSession(gpu),
+        // ③PV の縮約形は家族の既定（K-12 昇格済み）— 呼び手が明示すればそれに従う。
+        session: await admitted.component.createSession(gpu, {
+          stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,
+        }),
         graph: admitted.component.graph,
         wiring,
         program: generationProgramFace(wiring),

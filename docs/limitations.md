@@ -990,6 +990,11 @@ capacity ≤ maxPosition`（モデルの宣言・E2B は 131,072）。VRAM は�
   32 / 256 / 512 / 768 で一致したが、余裕の小さい step では反転しうる。検収の golden は配布形の
   宣言値で採る。
 - **`capacity` は token 列に効かない**（仕事量は論理長で切られ、値は容量非依存 — ビット門あり）。
+- **decode の attention ③PV は `Gemma4Pipeline` では KV 並列縮約（perf-ledger K-12）が既定**
+  （`GEMMA4_STATE_ATTENTION_REDUCE = "parallel"`）。runtime の参照経路 `"sequential"` とは縮約順が
+  違い（A/B 帯 5e-6・実測 2.4e-7）、gemma4 の golden は両者で同一。`Gemma4PipelineOptions.
+  stateAttentionReduce: "sequential"` で参照経路へ戻せる。低レベル面（`createSession` を自分で呼ぶ
+  消費者）の既定は runtime のまま `"sequential"`。
 - `chunkLength` の上限は焼いた記号 `M` の trace 上限（E2B は 768）で、配布形はその値を宣言しない。
   超える値は run のエンコードでランタイムが落とす（fail loudly だが文言は真因から遠い）。
 - 上流の RoPE 表とはビット同一でない（TS が f64 で計算し f32 へ丸める — 上流は全経路 f32）。

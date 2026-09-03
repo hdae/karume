@@ -30,10 +30,11 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
+import { acquireGpu } from "@karume/runtime";
 import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import type { Gemma4ChatMessage } from "../src/gemma/text/chat.ts";
 import { serveLocalDist } from "../../../examples/shared/local-dist-server.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4-e2b/", import.meta.url);
 
@@ -183,6 +184,64 @@ Deno.test({
       });
     } finally {
       await pipeline.dispose();
+    }
+  },
+});
+
+/**
+ * **census**（ADR 0058 決定 4 ③）— `Gemma4Pipeline` の既定（`GEMMA4_STATE_ATTENTION_REDUCE` =
+ * `"parallel"`・K-12 昇格）で ③' のキー（`:par`）が**実際に走り**、③（逐次）のキーが 1 本も出ない
+ * こと。`stateAttentionReduce: "sequential"` を渡せば逆になる（戻す口が生きていること）。
+ *
+ * MUST: 計測を要求しない device では明示 SKIP し、走るときは空の内訳を無条件に FAIL にする
+ * （`entries` が空なら素通り、にすると無検査のまま緑になる）。
+ */
+Deno.test({
+  name:
+    "gemma4 配布形: パイプラインの既定は ③' 並列縮約で走り、sequential 指定で参照経路へ戻る（census）",
+  ignore: !AVAILABLE || !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async (t) => {
+    await using server = serveLocalDist(new URL(".", MIRROR_DIR).pathname);
+    for (const reduce of ["parallel", "sequential"] as const) {
+      await t.step(`stateAttentionReduce = ${reduce}`, async () => {
+        const gpu = await acquireGpu({ gpuTiming: true });
+        const keys = new Set<string>();
+        try {
+          const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
+            gpu,
+            maxResidentPleBytes: MAX_RESIDENT_PLE_BYTES,
+            onRunDiagnostics: (diagnostics) => {
+              for (const entry of diagnostics.lastRunTiming?.entries ?? []) keys.add(entry.key);
+            },
+            // 既定を見る側は欄そのものを渡さない（省略時の既定が問われている）。
+            ...(reduce === "sequential" ? { stateAttentionReduce: "sequential" } : {}),
+          });
+          try {
+            const { messages } = caseOf(CASES[0].fixture);
+            const stream = pipeline.chat(messages, {
+              maxNewTokens: 4,
+              sampler: { temperature: 0 },
+            });
+            for await (const _ of stream) { /* 走らせるだけ */ }
+            await stream.done;
+          } finally {
+            await pipeline.dispose();
+          }
+        } finally {
+          gpu.destroy();
+        }
+        const pv = [...keys].filter((key) => key.startsWith("attention_state_pv"));
+        assert(pv.length > 0, `内訳に ③PV のキーが無い（${[...keys].join(" / ")}）`);
+        const parallel = pv.filter((key) => key.includes(":par"));
+        const sequential = pv.filter((key) => !key.includes(":par"));
+        if (reduce === "parallel") {
+          assert(parallel.length > 0, `③' のキーが走っていない（${pv.join(" / ")}）`);
+          assertEquals(sequential, [], `既定なのに ③（逐次）のキーが混ざっている`);
+        } else {
+          assert(sequential.length > 0, `③（逐次）のキーが走っていない（${pv.join(" / ")}）`);
+          assertEquals(parallel, [], `sequential 指定なのに ③' のキーが混ざっている`);
+        }
+      });
     }
   },
 });

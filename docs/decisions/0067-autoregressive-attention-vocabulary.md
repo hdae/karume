@@ -201,7 +201,7 @@ KV 長が 1 スレッドの逐次長にしか効かない — P=16K で attentio
   （`tests/gpu_state_execution_test.ts` — 席どおりのキーが走り、他方が混ざらない）。
 - **実測**（[research 2026-09-03](../research/2026-09-03-gemma4-chunklength-k12-sweep.md) §3）:
   full PV 35.0 → 3.6 ms・sliding PV 6.2 → 0.8 ms・decode 壁 P=16K 81.3 → 41.0 ms/token（×1.98）・
-  token 列一致。既定への昇格は ADR 0058 決定 6（品質裁定 + golden 更新を同一コミット）に従う。
+  token 列一致。**既定への昇格（2026-09-03）**: ADR 0058 決定 6 のとおりユーザーの品質裁定（対話 example の目視）と e2e golden の再走（不変）を同一コミットで行い、`Gemma4Pipeline` は `stateAttentionReduce: "parallel"` を既定で Session に与える（`GEMMA4_STATE_ATTENTION_REDUCE`）。runtime の既定と低レベル面（decode 系列の検収門）は参照経路のまま。
 - why-not（split-KV + merge 段 / online softmax / subgroup）: workgroup 内分割は dispatch 数も中間
   バッファも増やさず実装が最小で、③' を段 A の中身として流用する形で split-KV へ伸ばせる。
   online 形は S 一時を消す別の価値を持つが decode の並列度を単体では解かない。subgroup はアダプタが
