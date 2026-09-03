@@ -9,7 +9,7 @@
  * **tolerance 化も参照値の差し替えも禁止**で、赤のまま止めて差分の内容（PNG バイト長 /
  * 画素の統計 / 実物の PNG）を出す。ここを緩めると「移植できた」の意味が消える。
  *
- * MUST: 資産は `models/karume-anima/`（untracked・実 GPU 機のローカル資産 — 公式 3 変種同居・
+ * MUST: 資産は `models/karume-anima/`（untracked・実 GPU 機のローカル資産 — 公式 5 変種同居・
  * 既定 = anima-turbo-v1.1）。turbo（8 step / CFG 無し）の門は既定モデルで、**CFG≠1 の門**
  * （素の base = `model: "anima-v1.0"` — そこだけが 2 本目の text 経路と `cfgEulerStep` を
  * 通る）は同じリポのモデル選択で走る。無い環境と GPU 無し環境は理由を出して**明示 SKIP**する
@@ -45,7 +45,7 @@ import { ANIMA_SPATIAL_COMPRESSION } from "../src/anima/dit-tokens.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
-/** 資産の置き場（リポ直下 `models/karume-anima/` — 公式 3 変種同居・既定 = turbo-v1.1）。 */
+/** 資産の置き場（リポ直下 `models/karume-anima/` — 公式 5 変種同居・既定 = turbo-v1.1）。 */
 const ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 /** CFG の門が選ぶモデル（素の base — 既定の turbo は CFG=1 で uncond 側を通らない）。 */
 const BASE_MODEL = "anima-v1.0";

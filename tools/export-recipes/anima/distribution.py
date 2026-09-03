@@ -159,7 +159,7 @@ def notice_markdown(modifications: tuple[str, ...]) -> str:
     )
 
 
-#: 公式リポ（karume-anima — CircleStone の 3 変種同居）の告知。
+#: 公式リポ（karume-anima — CircleStone の 5 変種同居）の告知。
 #: 旧 base 告知の「int4 series を足した」は i4 席の無い現物と食い違っていた（2026-09-01 に
 #: 是正 — 全モデル i4 なしへ揃えた同日裁定で int4 の行自体が消えた。旧 turbo 告知にあった
 #: LoRA 焼き込みの行も公式 checkpoint 化で消えた）。
@@ -503,7 +503,7 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
 #: リポごとの受理集合。**Pipeline が違えば直下の法的テキスト（NOTICE）も違う**ので、
 #: 取り違えて組むと「改変告知が中身と食い違うリポ」が黙って出来上がる — 計画段で落とす。
 #: 分割の軸は**公式 / 追加学習**（2026-09-01 裁定 — ADR 0087）: 公式リポ（karume-anima）は
-#: CircleStone の 3 変種同居・既定 = Turbo、追加学習リポ（karume-anima-extra）は第三者
+#: CircleStone の 5 変種同居・既定 = Turbo、追加学習リポ（karume-anima-extra）は第三者
 #: fine-tune で text stack を公式リポへ越境参照する。
 OFFICIAL_MODELS: tuple[str, ...] = (
     ANIMA_TURBO_MODEL_NAME,
@@ -793,7 +793,7 @@ def _repo_name(model: str) -> str:
     return f"karume-{model}"
 
 
-#: `--pipeline anima` の 1 行（公式リポ karume-anima — CircleStone の 3 変種同居・既定 =
+#: `--pipeline anima` の 1 行（公式リポ karume-anima — CircleStone の 5 変種同居・既定 =
 #: Turbo〈上流 README の推奨・2026-09-01 裁定〉）。
 #:
 #: MUST: extra と**別の Pipeline**にする。`root_files` は Pipeline に固定で載る 1 組なので、

@@ -10,7 +10,7 @@ manifest v2（`karume/2` — ADR 0041）以降、カードは 1 リポの複数�
 形（2 モデル・共有ファイルつき）を偽 manifest の既定にしてあるのは、単一モデルでしか通らない
 描画を素通ししないため。
 
-カードが 2 枚になったのは 2026-09-01 の再構造（ADR 0087）— 公式リポ（CircleStone の 3 変種
+カードが 2 枚になったのは 2026-09-01 の再構造（ADR 0087）— 公式リポ（CircleStone の 5 変種
 同居・既定 = Turbo）と追加学習リポ（第三者 fine-tune）でライセンス告知も出所節の導入も違う。
 Turbo が公式 checkpoint になったので **LoRA 焼き込みの帰属節そのものが消えた**（旧 turbo 専用
 カードとその帰属門はこの波で削除）。
@@ -236,7 +236,7 @@ class TestShardedDistribution:
 
 
 class TestOfficialCard:
-    """公式リポのカード（`render_base_card`）— CircleStone の 3 変種が同居するリポの 1 枚。"""
+    """公式リポのカード（`render_base_card`）— CircleStone の 5 変種が同居するリポの 1 枚。"""
 
     def test_it_titles_the_repository_as_the_official_one(self, card: str) -> None:
         assert f"# {ANIMA_OFFICIAL_TITLE}" in card

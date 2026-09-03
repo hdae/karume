@@ -4,7 +4,7 @@
 あって全量ではない（ADR 0065 決定 2 — モデル別 recipe は wheel の外）。family の移行が全部
 終わった今、core の表は**空**なので、受理集合の正本はこの辞書だけになった。
 
-    uv run python dist.py                                  # 既定 = anima（公式 3 変種 — ADR 0087）
+    uv run python dist.py                                  # 既定 = anima（公式 5 変種 — ADR 0087）
     uv run python dist.py --pipeline anima-extra           # 追加学習系（越境参照 — リリース時）
     uv run python dist.py --pipeline irodori
     uv run python dist.py --pipeline sbv2 --card-profile fn

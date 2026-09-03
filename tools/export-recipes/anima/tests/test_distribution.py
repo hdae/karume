@@ -534,7 +534,7 @@ class TestLoraProvenance:
 class TestModelVariants:
     """モデルごとに違う事実（席の範囲・text_conditioner の出所・既定の step / CFG）。
 
-    公式 3 変種（Turbo / base / Aesthetic）と第三者 fine-tune 2 本が同じ 1 実装を通る
+    公式 5 変種（Turbo / base / Aesthetic の各版）と第三者 fine-tune 2 本が同じ 1 実装を通る
     （ADR 0087）— 違いは {@link ANIMA_MODELS} の宣言だけで、組み立ての経路は 1 本。
     """
 

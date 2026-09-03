@@ -46,7 +46,7 @@ ANIMA_METADATA = CardMetadata(
     tags=("text-to-image", "webgpu"),
 )
 
-#: 公式リポ（karume-anima — CircleStone の 3 変種同居）のタイトル。
+#: 公式リポ（karume-anima — CircleStone の 5 変種同居）のタイトル。
 ANIMA_OFFICIAL_TITLE = "Anima — Karume"
 
 #: 追加学習リポ（karume-anima-extra — 第三者 fine-tune）のタイトル。
@@ -423,7 +423,7 @@ EXTRA_ORIGINS_INTRO = (
 def render_base_card(
     manifest: Mapping[str, Any], repo: str, abbreviations: Mapping[str, str]
 ) -> str:
-    """公式リポ（CircleStone の 3 変種同居）配布形の `README.md` 本文。
+    """公式リポ（CircleStone の 5 変種同居）配布形の `README.md` 本文。
 
     `abbreviations` は席名の部品上書きトークンの対応表（正本は `anima.distribution` —
     ADR 0074 決定 4）。manifest に無い事実なので、定数として写さず引数で受ける。

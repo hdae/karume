@@ -22,7 +22,7 @@ export const ANIMA_PIPELINE_MAJOR = 1;
 
 /**
  * `hdae/karume-anima`（公式モデルが**同居する**リポ — 再構造後は Turbo / Base / Aesthetic の
- * 3 変種・既定 = Turbo）を**このパッケージ版が検証した取得元**（pin 済み commit SHA —
+ * 5 変種・既定 = Turbo）を**このパッケージ版が検証した取得元**（pin 済み commit SHA —
  * ADR 0073）。1 リポ = 複数モデルなので、リポ参照だけでは 1 本に決まらない —
  * 既定以外を使うときは `fromPretrained(ANIMA_CURRENT, { model })` と綴る。
  *

@@ -9,7 +9,7 @@
  * 出さない）。安全のため safetensors の**ヘッダだけ**を読む — 実体は合計 7GB 級で、
  * IR は `__metadata__.karume_ir` に載っている。
  *
- * MUST: 資産は `models/karume-anima/`（公式 3 変種同居・既定 = anima-turbo-v1.1 —
+ * MUST: 資産は `models/karume-anima/`（公式 5 変種同居・既定 = anima-turbo-v1.1 —
  * ADR 0087）と `outputs/series/embeddinggemma-300m/` / `gemma4-e2b-decode{,-token}` /
  * `minicpm5-1b-decode` と `models/karume-irodori-v4-small/`（いずれも untracked・ローカル
  * 資産）。無い環境は理由を出して**明示 SKIP** する（テストを消して無音で緑にしない —
