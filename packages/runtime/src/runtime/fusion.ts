@@ -1284,3 +1284,136 @@ export const planFusions = (
   }
   return { steps, counts };
 };
+
+/**
+ * 候補窓 1 本（{@link enumerateUnfusedWindows} の返り値）。
+ *
+ * NOTE: これは**候補であって受理ではない**。ADR 0040 決定 2 の受理集合（各ルールの綴り・
+ * shape 条件・丸め位置の保存）を 1 つも代行していない — 共通の適格条件だけを通した「ここに
+ * ルールを書けば畳めるかもしれない」印。
+ */
+export type UnfusedWindow = {
+  /** 畳む対象になる鎖の op 名列（窓内 passthrough を除いた並び）。 */
+  readonly ops: readonly string[];
+  /** 連続窓のノード数。`ops.length` との差が窓内 passthrough の本数。 */
+  readonly windowSize: number;
+  /** 窓の先頭ノードの位置（ステップ列を展開したノード順の添字）。 */
+  readonly nodeIndex: number;
+  /** 鎖の最終ノードの出力名（IR 側で窓を引き当てる手掛かり）。 */
+  readonly outputName: string;
+};
+
+/**
+ * 窓内のノード 1 本を鎖に入れてよいか（= その出力が「消費者ちょうど 1 本・graph output で
+ * ない」か）。
+ *
+ * MUST: privacy の綴りをここに書き写さず、{@link internalsArePrivate} にそのまま判定させる
+ * — そのノードを先頭に置いた 2 本の鎖と見なせば、判定対象は 1 本目の出力だけになる
+ * （2 本目は鎖の末尾なので見られない）。別に持つと、受理集合が変わったとき候補表だけが
+ * 古い基準で「畳める」と言い続ける。
+ */
+const outputStaysInternal = (
+  step: NodePlan,
+  tail: NodePlan,
+  context: FusionContext,
+): boolean => internalsArePrivate([step, tail], context);
+
+/**
+ * 連続窓のうち**畳む部分列**（鎖）を求める。窓の最終ノードへ流れ込むノードのうち、出力が
+ * 窓の内側で閉じているものだけが鎖で、残りが窓内 passthrough
+ * （{@link passthroughIsIndependent} の対象）。
+ *
+ * この分け方は窓内 passthrough を持つ現行 2 ルールの実測形と一致する:
+ *
+ * - RoPE の cos / sin 表の `sym_prefix_slice` は鎖の `mul` へ流れ込むが、表は他の層でも
+ *   読まれる（消費者が 2 本以上）ので鎖に入らない。
+ * - adaLN の gate の `reshape` は鎖の外で消費される（窓の最終ノードへ流れ込まない）ので
+ *   鎖に入らない。
+ *
+ * 鎖の先頭が窓の先頭でない窓は `undefined` — 同じ鎖を「前に無関係なノードを足した窓」から
+ * 何度も数えないための足切りで、これで鎖 1 本は必ず窓 1 つ（先頭 = 鎖の先頭・末尾 = 鎖の
+ * 末尾）に対応する。
+ */
+const chainWithinWindow = (
+  window: readonly NodePlan[],
+  context: FusionContext,
+): readonly NodePlan[] | undefined => {
+  const last = window[window.length - 1];
+  const needed = new Set(last.node.ins);
+  const chain = [last];
+  for (let at = window.length - 2; at >= 0; at -= 1) {
+    const step = window[at];
+    if (!step.outputs.some((out) => needed.has(out.name))) continue;
+    // 出力が窓の外へ出るノードは鎖に入れない（畳むと値が消える）。その入力を needed へ
+    // 足さないので、このノード経由でしか最終ノードへ届かない上流も自動的に鎖から外れる。
+    if (!outputStaysInternal(step, last, context)) continue;
+    chain.push(step);
+    for (const name of step.node.ins) needed.add(name);
+  }
+  chain.reverse();
+  return chain[0] === window[0] ? chain : undefined;
+};
+
+/**
+ * **融合が掴まなかった連続窓の候補列挙**（tools/fusion-hints の 1 段目）。
+ *
+ * `planFusions` が `kind: "node"` のまま残した素のノードの連続列を、長さ 2〜`maxWindow` の窓で
+ * 走り、全ルール共通の適格条件を通る窓だけを返す。掛ける述語は融合と同じ 5 本:
+ * 窓に {@link windowIsSingleOutput} と {@link windowTouchesState}、鎖に {@link allF32}、
+ * 鎖と窓内 passthrough の分け方そのものに {@link internalsArePrivate}（{@link chainWithinWindow}
+ * が 1 ノードずつ掛ける）と {@link passthroughIsIndependent}。
+ *
+ * MUST: 述語は export しない — ADR 0040 決定 1 の「唯一の判定点」は融合の判定だけでなく
+ * 適格条件の綴りにも掛かる。列挙器を fusion.ts の外に置いて述語を持ち出すと、受理集合の
+ * 変更が候補表に追随しない（表だけが古い基準で「畳める」と言い続ける）。
+ * MUST: 融合ステップを跨いだ窓は作らない（既に掴めている鎖を候補として二重に数えない）。
+ * 走査は素のノードの**連続する走り**ごとに閉じる。
+ *
+ * NOTE: 返るのは候補であって設計ではない。長い窓の接頭辞も別の候補として出る（n-gram 列挙の
+ * 性質）ので、読むときは同じ `nodeIndex` の最長窓を見る。
+ */
+export const enumerateUnfusedWindows = (
+  steps: readonly ExecStep[],
+  context: FusionContext,
+  maxWindow: number,
+): readonly UnfusedWindow[] => {
+  if (!Number.isSafeInteger(maxWindow) || maxWindow < 2) {
+    throw new ExecutionError(`窓幅の上限 ${maxWindow} は 2 以上の整数でなければならない`);
+  }
+  const found: UnfusedWindow[] = [];
+  let run: NodePlan[] = [];
+  let runStart = 0;
+  let nodeIndex = 0;
+  const sweepRun = (): void => {
+    for (let start = 0; start < run.length; start += 1) {
+      for (let size = 2; size <= maxWindow && start + size <= run.length; size += 1) {
+        const window = run.slice(start, start + size);
+        if (!windowIsSingleOutput(window) || windowTouchesState(window)) continue;
+        const chain = chainWithinWindow(window, context);
+        if (chain === undefined || !allF32(chain)) continue;
+        const folded = new Set(chain);
+        const passthrough = window.filter((step) => !folded.has(step));
+        if (!passthroughIsIndependent(chain, passthrough)) continue;
+        found.push({
+          ops: chain.map((step) => step.node.op),
+          windowSize: size,
+          nodeIndex: runStart + start,
+          outputName: chain[chain.length - 1].outputs[0].name,
+        });
+      }
+    }
+    run = [];
+  };
+  for (const step of steps) {
+    if (step.kind === "node") {
+      if (run.length === 0) runStart = nodeIndex;
+      run.push(step.plan);
+      nodeIndex += 1;
+      continue;
+    }
+    sweepRun();
+    nodeIndex += step.nodeCount;
+  }
+  sweepRun();
+  return found;
+};
