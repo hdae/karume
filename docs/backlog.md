@@ -429,9 +429,6 @@ autoregressive 波の**残項目（波外へ送り）**:
   [0079](decisions/0079-sbv2-two-layer-input.md) 決定 2）。サブパス面での素名 export や
   namespace オブジェクト化などの選択肢を全ファミリ横断で再設計する（プレフィックスが外れれば
   `toUtterance` へ収斂できる）。breaking なので次の breaking 波に同乗させる。
-- **モデルカード定型文の条件出し**（公開前レビュー minor・2026-08-21）: `shared/` パスの
-  説明文が shared/ を持たないリポ（irodori / anima）でも出る — 空回りだが無害。core
-  `modelcard.py` の該当文を shared/ 実在時のみ出す形へ。
 - **measure_quant の配布試算の J-5b 追随**（J-3 中に発見・2026-08-22）: sbv2
   `project_distribution` が「linear の重みスロットだけ・conv / embedding の i4 は格納形も
   実行経路も無い」という pre-J-5b 前提のまま（実際は出荷済み — ADR 0069 追記 6/7）。相対
