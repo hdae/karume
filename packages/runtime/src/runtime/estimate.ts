@@ -37,8 +37,9 @@ import { assertRuntimeSupport, type KarumeModel } from "../format/container.ts";
 import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
-import { numel, RUNTIME_SUPPORT } from "../ops.ts";
-import { aliasesInput } from "./fusion.ts";
+import { STATE_STATS_STRIDE, stateSliding } from "../kernels/state-attention.ts";
+import { numel, RUNTIME_SUPPORT, stateWindow } from "../ops.ts";
+import { aliasesInput, planRowBlocks } from "./fusion.ts";
 import {
   assertChunkLength,
   LENGTHS_BYTES,
@@ -84,8 +85,10 @@ export type AdmissionScenario = {
    *
    * 融合前のノード列を宣言順に歩き、実行相と同じ確保規則（exact-size LIFO 再利用・
    * 消費回数は `countUses`・グラフ出力は pinned で解放しない・reshape / 恒等 expand の出力は
-   * 確保せず入力の実体を別名で使う）で slot 表を再生した総バイト。融合が消す中間・行ブロック
-   * 分割やノード内の一時は勘定に入らない（{@link AdmissionReport.unaccounted}）。
+   * 確保せず入力の実体を別名で使う）で slot 表を再生した総バイト。**states 形 attention の
+   * ノード内一時（スコア S と行統計）はここに入る** — 融合の成立に依存せず必ず出て、capacity
+   * 律速のグラフでは中間の主役になるため（算式は {@link stateAttentionTemps}）。それ以外の
+   * ノード内一時と、融合が畳んで消す中間は勘定に入らない（{@link AdmissionReport.unaccounted}）。
    */
   readonly workspaceBytes: number;
 };
@@ -151,6 +154,18 @@ export type EstimateOptions = {
   readonly bindings?: SymbolBindings;
   /** 見積る `GenerationContext` の仕様（省略すると state を数えない）。 */
   readonly generation?: GenerationContextSpec;
+  /**
+   * `maxStorageBufferBindingSize` の granted 値（`GPUDevice.limits` / `readAdapterLimits`）。
+   *
+   * states 形 attention のノード内一時は**行ブロック 1 枚ぶん**しか同時生存せず、その枚数は
+   * この上限だけで決まる（{@link planRowBlocks} — ADR 0022 の実行時オートチューン禁止により
+   * device の granted limit と束縛だけの純関数）。
+   *
+   * MUST: states 形 attention を持つグラフでは**必須**（{@link stateAttentionTemps} が
+   * fail loudly）。既定値で埋めると、どの device でも実際には出ない枚数を estimator だけが
+   * 主張する。states 形 attention を持たないグラフでは読まない。
+   */
+  readonly maxStorageBufferBindingSize?: number;
 };
 
 /**
@@ -160,8 +175,8 @@ export type EstimateOptions = {
  * ように読まれる（ADR 0070 決定 5 が unaccounted 欄を要求した理由そのもの）。
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
-  "融合が畳んで消す中間と、行ブロック分割の一時（どちらも device limit と融合の成立に依存する。reshape / 恒等 expand の別名は勘定に入っている）",
-  "states 形 attention のノード内一時（スコア S と行統計）— 融合の成立に依存せず必ず出る。行ブロック 1 枚ぶんが同時生存し、大きさは B·H × 行ブロック行数 × 列容量 × 4 バイト（行統計は列容量の代わりに固定 stride）",
+  "融合が畳んで消す中間と、融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。reshape / 恒等 expand の別名は勘定に入っている）",
+  "states 形でない attention のノード内一時（スコアの行ブロックと i8a8 の量子化中間）と、linear i8a8 の量子化中間 — どれも数値変種と device limit に依存する。states 形 attention のスコア S と行統計は勘定に入っている（融合の成立に依存せず必ず出るため）",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
   "シナリオ切替の窓（退役した slot backing は次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、prefill ⇄ decode の切替 run では 2 シナリオぶんの io + workspace が同時に載る）",
@@ -364,6 +379,75 @@ const weightEstimate = (
 };
 
 /**
+ * states 形 attention か（ADR 0067 決定 4 — **欄の有無が形を判別する**）。
+ *
+ * MUST: 判別は recipe-builder の `#buildStep` と同じ 1 条件（op が `attention` で `states` 欄が
+ * 非空）。別条件を書くと、融合 attention とは 1 バイトも共有しない別族カーネルの一時を
+ * estimator だけが取り違える。
+ */
+const isStateAttention = (node: NodePlan): boolean =>
+  node.contract.kind === "attention" && Object.keys(node.node.states).length > 0;
+
+/** 行ブロック 1 枚ぶんのノード内一時（確保順 — 解放は逆順）。 */
+type StateAttentionBlockTemps = {
+  /** スコア S = `B·H × 行ブロック行数 × 列容量 × 4` バイト。 */
+  readonly scoreBytes: number;
+  /** 行統計 = `B·H × 行ブロック行数 × STATE_STATS_STRIDE × 4` バイト。 */
+  readonly statsBytes: number;
+};
+
+/**
+ * states 形 attention 1 ノードが出すノード内一時（スコア S と行統計）を行ブロック順に並べる。
+ *
+ * 融合の成立に依存せず必ず出て、大きさは列容量（full = スロット容量 `C` / sliding = 窓の
+ * resident 幅 `W−1+M`）に比例するため、可変 capacity のグラフでは中間の主役になる。
+ *
+ * MUST: 算式の正本は recipe-builder の `#buildStateAttention` — 列容量 `colCap` の 2 分岐と、
+ * 行ブロック分割の {@link planRowBlocks}（ADR 0060 と同じ純関数）をそのまま写す。ここで別式を
+ * 書くと、片方だけ直された実装に対して estimator が例外も警告も無く別の数を主張し続ける
+ * （モジュール doc の MUST）。
+ * MUST: `maxStorageBufferBindingSize` が無ければ fail loudly。枚数は device の granted limit
+ * だけで決まるので、既定値で埋めると「どの device でも出ない一時の大きさ」を名乗ることになる。
+ */
+const stateAttentionTemps = (
+  node: NodePlan,
+  stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
+  limit: number | undefined,
+): readonly StateAttentionBlockTemps[] => {
+  const q = node.inputShapes[0];
+  const where = `attention (states) [${q.join(",")}]`;
+  if (limit === undefined) {
+    throw new ExecutionError(
+      `${where}: states 形 attention の一時は options.maxStorageBufferBindingSize が要る` +
+        "（行ブロックの枚数は device の granted limit だけで決まる — ADR 0060 / ADR 0022）",
+    );
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new ExecutionError(
+      `options.maxStorageBufferBindingSize ${limit} は正の安全整数でなければならない`,
+    );
+  }
+  const [batch, heads, chunkRows] = q;
+  // k / v スロットは同形（shape 層が済ませている）ので容量は片方から引く。
+  const slotName = node.node.states["k"];
+  const slotShape = slotName === undefined ? undefined : stateShapes?.get(slotName);
+  if (slotShape === undefined) {
+    throw new ExecutionError(
+      `${where}: state スロット 'k' の解決済み容量が引けない` +
+        "（GenerationContext を伴わない見積りでは states 形 attention を数えられない）",
+    );
+  }
+  const window = stateWindow(node.node.attrs, where) ?? 0;
+  // S の列ストライド上限。full は容量ぶん・sliding は resident 窓 `(W−1) + M`。
+  const colCap = stateSliding(window) ? window - 1 + chunkRows : slotShape[2];
+  const batchHeads = batch * heads;
+  return planRowBlocks(chunkRows, batchHeads * colCap * 4, limit).map((block) => ({
+    scoreBytes: batchHeads * block.rows * colCap * 4,
+    statsBytes: batchHeads * block.rows * STATE_STATS_STRIDE * 4,
+  }));
+};
+
+/**
  * 中間（transient）slot 表の必要バイト（近似）。融合前のノード列を宣言順に歩き、実行相と
  * **同じ確保規則**を再生する: 解放済み slot の再利用は**サイズクラスの厳密一致だけ**
  * （RunArena / `derivePlanSlots` の LIFO プール — 近いサイズへの縮めはしない）で、一致が
@@ -381,8 +465,17 @@ const weightEstimate = (
  * 根へ届かず ③グラフ出力が別名名義のときに根の実体だけプールへ戻る。retain / release は
  * **根の slot** へ合算する（実行相の「別名でも retain は実バッファに積む」— recipe.ts の
  * `executeStepRecipe`）。
+ * MUST: ノード内一時（states 形 attention の S / 行統計）は**出力の確保と入力の解放の間**で
+ * 取って返す（`derivePlanSlots` の並び — 出力 → dispatch ごとの temps → 入力の解放 → 出力の
+ * 解放）。位置をずらすと、同じサイズクラスの入力 slot を一時が先取りするかどうかが実行と
+ * 変わり、slot の本数（= 総バイト）が静かにずれる。
  */
-const transientSlotBytes = (graph: IrGraph, nodes: readonly NodePlan[]): number => {
+const transientSlotBytes = (
+  graph: IrGraph,
+  nodes: readonly NodePlan[],
+  stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
+  limit: number | undefined,
+): number => {
   const uses = countUses(graph);
   const outputNames = new Set(graph.outputs);
   /** slot 添字 → サイズクラス（`derivePlanSlots` の `bytes` と同じ表）。 */
@@ -432,6 +525,20 @@ const transientSlotBytes = (graph: IrGraph, nodes: readonly NodePlan[]): number 
       else env.set(out.name, slot);
       return slot;
     });
+    // ノード内一時は**行ブロック 1 枚ずつ**取って確保の逆順に返す（`#buildStateAttention` の
+    // MUST と `derivePlanSlots` の temps 走査の写し）。枚数ぶん累積はしない — 枚が変わっても
+    // 同じサイズクラスならプールから同じ slot が出る。端数で 1 行狭いブロックが混ざるときだけ
+    // サイズクラスが 2 種類になり、その 2 種類ぶんが総バイトに乗る。
+    if (isStateAttention(node)) {
+      for (const temp of stateAttentionTemps(node, stateShapes, limit)) {
+        const scores = alloc(temp.scoreBytes);
+        retain(scores, 0, false);
+        const stats = alloc(temp.statsBytes);
+        retain(stats, 0, false);
+        release(stats);
+        release(scores);
+      }
+    }
     for (const name of node.node.ins) release(env.get(name));
     // 消費者ゼロの中間出力が解放されるのはこの 1 本だけ（実行相の「定義ぶんの解放」と同位置）。
     for (const slot of slots) release(slot);
@@ -452,6 +559,8 @@ const transientSlotBytes = (graph: IrGraph, nodes: readonly NodePlan[]): number 
  *   `resident.stateBytes` は 0・シナリオは `"run"` の 1 本（states 形グラフでは省略できない —
  *   中間ピークの計画がスロットの解決済み shape を要求する）。渡すとシナリオは
  *   `"prefill"` / `"decode"` の 2 本になる。
+ * @param options.maxStorageBufferBindingSize device の granted 上限。states 形 attention を
+ *   持つグラフでは必須（ノード内一時の行ブロック枚数がこれだけで決まる）。
  */
 export const estimateSessionMemory = (
   model: KarumeModel,
@@ -461,6 +570,11 @@ export const estimateSessionMemory = (
 /**
  * 見積りの本体（グラフと常駐計画だけで完結する — 全量面 {@link estimateSessionMemory} と
  * `PreparedModel.estimate` が共有する 1 本）。
+ *
+ * **グラフ単位の見積り口**でもある: ロードを終えて初期化子のバイト列を手放した呼び手
+ * （models のパイプラインは `PreparedModel` を捨てて `IrGraph` だけ残す）が、握っている
+ * グラフと `planWeightResidency(graph)` の計画、そして `{capacity, chunkLength}` を
+ * `options.generation` に載せて同じ {@link AdmissionReport} を得る。
  *
  * MUST: 常駐計画は**呼び手が持っているものを渡す**（`PreparedModel` は prepare 時に 1 回だけ
  * 計算して構築とも共有する）。ここで引き直すと「見積りに使った席」と「実際に上げた席」が
@@ -518,7 +632,16 @@ export const estimateGraphMemory = (
       ioBytes += toSizeClass(numel(shapeOf(plan.shapes, spec.name)) * 4);
     }
     for (const name of graph.outputs) ioBytes += toSizeClass(numel(shapeOf(plan.shapes, name)) * 4);
-    return { name, ioBytes, workspaceBytes: transientSlotBytes(graph, plan.nodes) };
+    return {
+      name,
+      ioBytes,
+      workspaceBytes: transientSlotBytes(
+        graph,
+        plan.nodes,
+        state.shapes,
+        options.maxStorageBufferBindingSize,
+      ),
+    };
   });
 
   const weightBytes = weights.compressed + weights.uncompressed + weights.expanded;

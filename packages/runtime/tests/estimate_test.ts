@@ -885,6 +885,252 @@ Deno.test("融合が掛からない形では estimator の中間総量と slot �
 });
 
 // ---------------------------------------------------------------------------
+// states 形 attention のノード内一時（スコア S / 行統計）
+// ---------------------------------------------------------------------------
+
+/**
+ * states 形 attention 1 本 + `state_append` 2 本（gpu_state_execution_test の実行形と同じ姿の
+ * 最小版）。`B=1` / `H=4` / `Hkv=2`（GQA）/ `D=8` で、`M` が物理 chunk 行・`C` がスロット容量。
+ *
+ * `window` を渡すと sliding 変種（読み書き同式 MUST — attention と append の両方に載せる）。
+ */
+const stateAttentionGraph = (window?: number): GraphJson => {
+  const windowAttrs: Record<string, number> = window === undefined ? {} : { window };
+  const append = (name: string, slot: string) => ({
+    op: "state_append",
+    ins: [name],
+    outs: [] as string[],
+    attrs: { ...windowAttrs },
+    states: { slot },
+  });
+  return {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["attention", "state_append"] },
+    symbols: ["M", "C"],
+    inputs: [
+      { name: "q", dtype: "f32", shape: [1, 4, "M", 8] },
+      { name: "k", dtype: "f32", shape: [1, 2, "M", 8] },
+      { name: "v", dtype: "f32", shape: [1, 2, "M", 8] },
+    ],
+    outputs: ["o"],
+    initializers: {},
+    values: { o: { dtype: "f32", shape: [1, 4, "M", 8] } },
+    states: {
+      kslot: { dtype: "f32", shape: [1, 2, "C", 8] },
+      vslot: { dtype: "f32", shape: [1, 2, "C", 8] },
+    },
+    nodes: [
+      {
+        op: "attention",
+        ins: ["q", "k", "v"],
+        outs: ["o"],
+        attrs: { scale: 0.5, ...windowAttrs },
+        states: { k: "kslot", v: "vslot" },
+      },
+      append("k", "kslot"),
+      append("v", "vslot"),
+    ],
+  };
+};
+
+/** ストレージ束縛の上限が効かない大きさ（行ブロックが常に 1 枚になる）。 */
+const WIDE_LIMIT = 1 << 20;
+
+const stateAttentionReport = (options: {
+  readonly capacity: number;
+  readonly chunkLength: number;
+  readonly window?: number;
+  readonly limit?: number;
+}): AdmissionReport =>
+  estimateSessionMemory(openGraph(stateAttentionGraph(options.window)), {
+    generation: { chunkLength: options.chunkLength, bindings: { C: options.capacity } },
+    maxStorageBufferBindingSize: options.limit ?? WIDE_LIMIT,
+  });
+
+/** prefill / decode の 2 本を名前つきで引く（並びの前提もここで一緒に押さえる）。 */
+const bothScenarios = (
+  report: AdmissionReport,
+): { readonly prefill: AdmissionScenario; readonly decode: AdmissionScenario } => {
+  assertEquals(report.scenarios.map((scenario) => scenario.name), ["prefill", "decode"]);
+  return { prefill: report.scenarios[0], decode: report.scenarios[1] };
+};
+
+Deno.test("states 形 attention の S / 行統計が中間に乗る（full 変種・行ブロック 1 枚）", () => {
+  const { prefill, decode } = bothScenarios(
+    stateAttentionReport({ capacity: 16, chunkLength: 4 }),
+  );
+  // B·H = 4・列容量 = C = 16。prefill（M=4）は 1 行 4×16×4=256B で上限に余裕があり 1 枚。
+  //   出力 o [1,4,4,8]=128 要素 → 512 / S = 4×4×16×4 = 1024 / 行統計 = 4×4×2×4 = 128
+  assertEquals(prefill.workspaceBytes, 512 + 1024 + 128);
+  // io は q 512 + k 256 + v 256 + o 512
+  assertEquals(prefill.ioBytes, 1536);
+  // decode（M=1）: o 128 / S = 4×1×16×4 = 256 / 行統計 = 4×1×2×4 = 32
+  assertEquals(decode.workspaceBytes, 128 + 256 + 32);
+  assertEquals(decode.ioBytes, 384);
+});
+
+Deno.test("S は capacity に比例して増える（full 変種は列容量 = スロット容量）", () => {
+  const at = (capacity: number): number =>
+    bothScenarios(stateAttentionReport({ capacity, chunkLength: 4 })).prefill.workspaceBytes;
+  // 出力 512 + 行統計 128 は動かず、S だけが C に比例する（1024 → 2048 → 4096）。
+  assertEquals(at(16), 512 + 1024 + 128);
+  assertEquals(at(32), 512 + 2048 + 128);
+  assertEquals(at(64), 512 + 4096 + 128);
+});
+
+Deno.test("S と行統計は chunkLength に比例して増える（prefill 側だけ・decode は M=1 固定）", () => {
+  const at = (chunkLength: number): AdmissionScenario =>
+    bothScenarios(stateAttentionReport({ capacity: 32, chunkLength })).prefill;
+  // M=4: o 512 + S 4×4×32×4=2048 + 行統計 4×4×2×4=128
+  assertEquals(at(4).workspaceBytes, 512 + 2048 + 128);
+  // M=8: 3 項とも 2 倍（列容量は C のままなので S も行数ぶんだけ伸びる）
+  assertEquals(at(8).workspaceBytes, 1024 + 4096 + 256);
+  // decode は chunkLength に依らず M=1
+  const decode = (chunkLength: number): number =>
+    bothScenarios(stateAttentionReport({ capacity: 32, chunkLength })).decode.workspaceBytes;
+  assertEquals(decode(4), 128 + 512 + 32);
+  assertEquals(decode(8), 128 + 512 + 32);
+});
+
+Deno.test("sliding 変種の列容量は W−1+M（capacity を上げても S は動かない）", () => {
+  const at = (capacity: number): AdmissionScenario =>
+    bothScenarios(stateAttentionReport({ capacity, chunkLength: 4, window: 6 })).prefill;
+  // 列容量 = 6−1+4 = 9 → S = 4×4×9×4 = 576（C に依存しない）
+  assertEquals(at(16).workspaceBytes, 512 + 576 + 128);
+  assertEquals(at(32).workspaceBytes, 512 + 576 + 128);
+  // state スロットは C に比例したまま（S だけが窓で頭打ちになる）
+  assertEquals(
+    stateAttentionReport({ capacity: 32, chunkLength: 4, window: 6 }).resident.stateBytes,
+    (1 * 2 * 32 * 8) * 4 * 2 + 8,
+  );
+});
+
+Deno.test("行ブロックの枚数は maxStorageBufferBindingSize で変わる（1 枚ぶんだけが同時生存）", () => {
+  const at = (limit: number): number =>
+    bothScenarios(stateAttentionReport({ capacity: 16, chunkLength: 4, limit })).prefill
+      .workspaceBytes;
+  // 1 行 = 4×16×4 = 256B。上限に余裕があれば 1 枚（4 行）: S 1024 + 行統計 128
+  assertEquals(at(WIDE_LIMIT), 512 + 1024 + 128);
+  // 512B → 1 枚 2 行の 2 枚。2 枚目は 1 枚目が返した slot を掴むので総バイトは 1 枚ぶん。
+  assertEquals(at(512), 512 + 512 + 64);
+  // 256B → 1 枚 1 行の 4 枚。
+  assertEquals(at(256), 512 + 256 + 32);
+});
+
+Deno.test("端数で 1 行狭いブロックが混ざるとサイズクラス 2 種類ぶんが乗る", () => {
+  // M=3・上限 512B → 1 枚 2 行で 2 枚（等分は 2 行 + 1 行）。exact-size 再利用なので
+  // 2 枚目の 1 行ぶんは 1 枚目の slot を掴めず、新しい slot が生える。
+  const { prefill } = bothScenarios(
+    stateAttentionReport({ capacity: 16, chunkLength: 3, limit: 512 }),
+  );
+  const wide = 4 * 2 * 16 * 4 + 4 * 2 * 2 * 4; // 512 + 64
+  const narrow = 4 * 1 * 16 * 4 + 4 * 1 * 2 * 4; // 256 + 32
+  // 出力 o [1,4,3,8]=96 要素 → 384
+  assertEquals(prefill.workspaceBytes, 384 + wide + narrow);
+});
+
+Deno.test("上限が動かすのは中間だけ（io・state・重みの欄は 1 バイトも動かない）", () => {
+  const wide = stateAttentionReport({ capacity: 16, chunkLength: 4 });
+  const narrow = stateAttentionReport({ capacity: 16, chunkLength: 4, limit: 256 });
+  assertEquals(wide.resident, narrow.resident);
+  assertEquals(
+    wide.scenarios.map((scenario) => scenario.ioBytes),
+    narrow.scenarios.map((scenario) => scenario.ioBytes),
+  );
+  assert(wide.scenarios[0].workspaceBytes > narrow.scenarios[0].workspaceBytes);
+});
+
+Deno.test("states 形 attention を持たないグラフは上限を渡しても数字が変わらない", () => {
+  const without = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  const with_ = estimateSessionMemory(plainModel(), {
+    bindings: { T: 7 },
+    maxStorageBufferBindingSize: 256,
+  });
+  assertEquals(without, with_);
+  // state_append だけを持つグラフ（一時を出さないノード）も同じ。
+  const generation = { chunkLength: 4, bindings: { C: 8 } };
+  assertEquals(
+    estimateSessionMemory(stateModel(), { bindings: { T: 2 }, generation }),
+    estimateSessionMemory(stateModel(), {
+      bindings: { T: 2 },
+      generation,
+      maxStorageBufferBindingSize: 256,
+    }),
+  );
+});
+
+Deno.test("states 形 attention の見積りに上限を渡さないのは fail loudly", () => {
+  assertThrows(
+    () =>
+      estimateSessionMemory(openGraph(stateAttentionGraph()), {
+        generation: { chunkLength: 4, bindings: { C: 16 } },
+      }),
+    ExecutionError,
+    "options.maxStorageBufferBindingSize が要る",
+  );
+});
+
+/**
+ * S / 行統計の算式が recipe-builder と同じ導出元から出ていることの唯一の実測門。
+ *
+ * このグラフは融合が 1 本も掛からない（states を触るノードは窓を掴まない — ADR 0067 決定 5b）
+ * ので、`workspaceBytes` は slot 表の総バイト = `planBacking.residentBytes` と**厳密一致**する。
+ * 列容量 `colCap` か行ブロックの割り方が実装とずれれば、ここが例外なしで割れる。
+ */
+Deno.test({
+  name: "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      const model = openGraph(stateAttentionGraph());
+      const generation = { chunkLength: 4, bindings: { C: 16 } };
+      const { prefill } = bothScenarios(
+        estimateSessionMemory(model, {
+          generation,
+          maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+        }),
+      );
+      const session = await createSession(gpu, model);
+      try {
+        const context = await session.createGenerationContext(generation);
+        try {
+          // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
+          for (let step = 0; step < 2; step += 1) {
+            await session.run(
+              {
+                q: fill([1, 4, 4, 8], (i) => ((i % 5) - 2) / 4),
+                k: fill([1, 2, 4, 8], (i) => ((i % 3) - 1) / 4),
+                v: fill([1, 2, 4, 8], (i) => ((i % 7) - 3) / 4),
+              },
+              {},
+              { context, queryLength: 4 },
+            );
+          }
+        } finally {
+          await context.dispose();
+        }
+        assertEquals(session.diagnostics().planBacking.residentBytes, prefill.workspaceBytes);
+      } finally {
+        await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test("1 行でも上限に入らない形は fail loudly（行ブロックでは割り切れない）", () => {
+  assertThrows(
+    // 1 行 = 4×16×4 = 256B > 128B
+    () => stateAttentionReport({ capacity: 16, chunkLength: 4, limit: 128 }),
+    ExecutionError,
+    "既にストレージ束縛の上限を超える",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // fail loudly
 // ---------------------------------------------------------------------------
 
@@ -1055,16 +1301,18 @@ Deno.test("unaccounted は勘定に入っていないものを明示する（見
   assert(joined.includes("writeBuffer"), joined);
 });
 
-// states 形 attention の一時（S / 行統計）は**融合の成立に依存せず必ず出る**ので、融合の項の
-// 文言では覆えない。`transientSlotBytes` はノード出力しか歩かないため勘定にも入っていない。
-Deno.test("unaccounted は states 形 attention のノード内一時を名指しする", () => {
+// states 形 attention の S / 行統計は**勘定に入った**（融合の成立に依存せず必ず出るので、
+// 融合の項の文言では覆えない大きさだった）。残る非勘定は「states 形でない attention」と
+// linear の i8a8 量子化中間で、unaccounted はそちらを名乗る。
+Deno.test("unaccounted は states 形でない attention の一時を名乗り、S / 行統計は勘定済みと書く", () => {
   const { unaccounted } = estimateSessionMemory(stateModel(), {
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
   });
   const joined = unaccounted.join("\n");
-  assert(joined.includes("states 形 attention のノード内一時"), joined);
-  assert(joined.includes("行ブロック 1 枚"), joined);
+  assert(joined.includes("states 形でない attention のノード内一時"), joined);
+  assert(joined.includes("i8a8"), joined);
+  assert(joined.includes("行統計は勘定に入っている"), joined);
 });
 
 // ---------------------------------------------------------------------------
