@@ -102,6 +102,14 @@ anima・irodori・gemma4 は `packages/runtime/tests/assets_fusion_counts_test.t
 
 ## §2 融合候補（tools/fusion-hints）
 
+> **採取時点**: §2 の数値は 06:10 の掃引（生データ `candidates.jsonl` の mtime）で、道具の堅牢化
+> コミット `e23f8b2`（08:37 — 短い read の検査・数値引数の検査・ソートのタイブレーク）より前。
+> 最終版の道具で採り直しておらず、差の有無は未確認。\
+> **訂正（2026-09-03）**: §2.2 の偶奇 RoPE と §2.3 の分解 attention の数え方を生データから採り直して
+> 訂正した。誤りの機序は 2 つ — ① 窓幅の既定 9（`tools/fusion-hints/main.ts`）が 9 ノードを超える鎖を
+> 切り詰めるので、同じ構造が資産ごとに違う op 名列として現れ、別綴りの行を合算していた ② 完全一致形
+> （`bmm,reshape,softmax,…`）とマスク加算 `add` を挟む形を区別していなかった。
+
 ### §2.1 合格線（融合を切った計画 → 既知のヒット数が候補として再現）
 
 テスト `tools/fusion-hints/enumerate_test.ts` が実資産に対して固定（列挙器そのものの合成 IR による単体は `packages/runtime/tests/runtime_fusion_hints_test.ts` 側に残る）。左が融合を切った計画での候補本数、右が現行計画（融合あり）で残る本数。
@@ -130,34 +138,36 @@ anima・irodori・gemma4 は `packages/runtime/tests/assets_fusion_counts_test.t
 > 一致するのは `--no-fusion` のときだけ（融合ありの計画では融合ステップが 1 本に畳まれて添字が
 > ずれる）。鎖の現物を引くときは添字ではなく `outputName` で探す。
 
-| 既知の穴                                                                 | 出た数字（現行計画の候補）                                                      | 場所                                                                              |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| gemma4 decode の rope 50 鎖中 15 しか掴めない                            | `mul,slice,slice,neg,cat,mul,add,permute` = **35**（極大 35・窓幅 8）           | `outputs/bench/gemma4-e2b-decode/2026-09-03_fusion-hints/` 例 node 88 / `permute` |
-| Irodori DiT の偶奇 RoPE（ROPE_RULE は半割り形だけ受理）                  | `slice,neg,slice,cat,reshape,mul,mul,add` = **24**（12 ブロック × q/k・窓幅 8） | `karume-irodori-v4-small/…` v4-small/dit                                          |
-| Irodori DiT の rms_norm ベース adaLN（ADALN_RULE の先頭は `layer_norm`） | `rms_norm,add,mul,add` = **24**、拡張形 `add,rms_norm,add,mul,add` = 23         | 同上                                                                              |
-| （同族）Irodori speaker の偶奇 RoPE                                      | `slice,neg,slice,cat,reshape,mul,mul,add` = **15**（+ `neg,slice,cat,…` 形 8）  | v4-small/speaker                                                                  |
+| 既知の穴                                                                 | 出た数字（現行計画の候補）                                                                                                                                                                                                                                                         | 場所                                                                              |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| gemma4 decode の rope 50 鎖中 15 しか掴めない                            | `mul,slice,slice,neg,cat,mul,add,permute` = **35**（極大 35・窓幅 8）                                                                                                                                                                                                              | `outputs/bench/gemma4-e2b-decode/2026-09-03_fusion-hints/` 例 node 88 / `permute` |
+| Irodori DiT の偶奇 RoPE（ROPE_RULE は半割り形だけ受理）                  | `neg,slice,cat,reshape,mul,mul,add` = **24**（12 ブロック × q/k・窓幅 7）。先頭に `slice` を足した窓幅 8 の `slice,neg,slice,cat,reshape,mul,mul,add` は 23（24 本のうち 1 本だけ直前の op が `slice` でない）で、極大は窓幅 9 の `slice,neg,slice,cat,reshape,mul,mul,add,cat` 23 | `karume-irodori-v4-small/…` v4-small/dit                                          |
+| Irodori DiT の rms_norm ベース adaLN（ADALN_RULE の先頭は `layer_norm`） | `rms_norm,add,mul,add` = **24**、拡張形 `add,rms_norm,add,mul,add` = 23                                                                                                                                                                                                            | 同上                                                                              |
+| （同族）Irodori speaker の偶奇 RoPE                                      | `slice,neg,slice,cat,reshape,mul,mul,add` = **15**（+ `neg,slice,cat,…` 形 8）                                                                                                                                                                                                     | v4-small/speaker                                                                  |
 
 ### §2.3 家族 × 上位候補（現行計画・極大順・別名化のみの鎖は除外）
 
-| 家族 / グラフ           | ノード | 相異なる鎖 | 上位候補（極大本数）                                                                                                          |
-| ----------------------- | -----: | ---------: | ----------------------------------------------------------------------------------------------------------------------------- |
-| anima transformer       |   2603 |         69 | `permute,attention,permute,reshape,linear,mul,add` 56 / `linear,reshape,permute,rms_norm` 112 / `linear,mul,add` 84           |
-| anima text_encoder      |   1741 |        122 | `add,softmax,expand,reshape,expand,reshape,bmm,reshape,permute` 28 / `linear,reshape,rms_norm,permute` 56 / `linear,add` 55   |
-| anima text_conditioner  |    589 |        140 | `mul,slice,slice,neg,cat,mul,add` **24**（rope 綴りなのに未掴） / `linear,reshape,rms_norm` 24                                |
-| anima vae_decoder       |    378 |         86 | `mul,sum,sqrt,clamp_min,reshape,div,mul,mul` 29（weight-norm 相当）                                                           |
-| gemma4 e2b decode       |   1570 |        126 | `linear,rms_norm,add` 70 / `mul,linear,rms_norm,add` 35 / `linear,gelu_tanh,linear,mul,linear,rms_norm,add` 35 / rope 残り 35 |
-| irodori dit             |   1465 |        119 | `linear,reshape,rms_norm,mul` 36 / 偶奇 rope 24 / `rms_norm,add,mul,add` 24 / `linear,linear,add,tanh` 24                     |
-| irodori backbone        |    957 |         32 | `attention,permute,reshape,linear,add` 25 / `slice,slice,gelu,mul,linear,add` 24 / `layer_norm,linear` 49                     |
-| irodori codec enc/dec   |    248 |    37 / 40 | `mul,sin` 29（Snake 活性） / `mul,mul,add,reshape,conv1d,reshape` 13 / 12                                                     |
-| sbv2 F1/voice           |   1788 |        302 | `conv1d,leaky_relu,conv1d,add` 35 / `bmm,reshape` 族 72 / `add,permute,layer_norm,permute` 40                                 |
-| sbv2 F1/text_encoder    |   1128 |         74 | `softmax,reshape,bmm,reshape,permute,reshape,linear,add,layer_norm` 22 / `add,layer_norm` 44                                  |
-| sbv2 F1/front           |    899 |        427 | `conv1d,permute,layer_norm,permute,gelu,conv1d,permute,layer_norm,permute` 12                                                 |
-| siglip2 so400m          |    984 |        135 | `bmm,reshape,softmax,expand,reshape,expand,reshape,bmm,reshape` **28** / `linear,reshape,permute,mul` 56                      |
-| birefnet-hr-1024        |   3249 |        545 | 同分解 attention **48** / `layer_norm,linear,gelu,linear,add` 46 / `slice,reshape,permute` 96                                 |
-| depth-anything v2 small |    541 |        265 | 同分解 attention **12** / `linear,mul,add` 23                                                                                 |
-| vowel-detector CRNN     |     18 |         31 | `linear,gru_scan,linear,gru_scan_reverse,cat` 1（グラフが 18 ノードなので候補は各 1 本）                                      |
+| 家族 / グラフ           | ノード | 相異なる鎖 | 上位候補（極大本数）                                                                                                                                                                    |
+| ----------------------- | -----: | ---------: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| anima transformer       |   2603 |         69 | `permute,attention,permute,reshape,linear,mul,add` 56 / `linear,reshape,permute,rms_norm` 112 / `linear,mul,add` 84                                                                     |
+| anima text_encoder      |   1741 |        122 | `add,softmax,expand,reshape,expand,reshape,bmm,reshape,permute` 28 / `linear,reshape,rms_norm,permute` 56 / `linear,add` 55                                                             |
+| anima text_conditioner  |    589 |        140 | `mul,slice,slice,neg,cat,mul,add` **24**（rope 綴りなのに未掴） / `linear,reshape,rms_norm` 24 / 分解 attention（完全一致形）12                                                         |
+| anima vae_decoder       |    378 |         86 | `mul,sum,sqrt,clamp_min,reshape,div,mul,mul` 29（weight-norm 相当）                                                                                                                     |
+| gemma4 e2b decode       |   1570 |        126 | `linear,rms_norm,add` 70 / `mul,linear,rms_norm,add` 35 / `linear,gelu_tanh,linear,mul,linear,rms_norm,add` 35 / rope 残り 35                                                           |
+| irodori dit             |   1465 |        119 | `linear,reshape,rms_norm,mul` 36 / 偶奇 rope 23（極大形 `slice,neg,slice,cat,reshape,mul,mul,add,cat`・出現本数は 24 — §2.2） / `rms_norm,add,mul,add` 24 / `linear,linear,add,tanh` 24 |
+| irodori backbone        |    957 |         32 | `attention,permute,reshape,linear,add` 25 / `slice,slice,gelu,mul,linear,add` 24 / `layer_norm,linear` 49                                                                               |
+| irodori codec enc/dec   |    248 |    37 / 40 | `mul,sin` 29（Snake 活性） / `mul,mul,add,reshape,conv1d,reshape` 13 / 12                                                                                                               |
+| sbv2 F1/voice           |   1788 |        302 | `conv1d,leaky_relu,conv1d,add` 35 / `bmm,reshape` 族 72 / `add,permute,layer_norm,permute` 40                                                                                           |
+| sbv2 F1/text_encoder    |   1128 |         74 | `softmax,reshape,bmm,reshape,permute,reshape,linear,add,layer_norm` 22 / `add,layer_norm` 44                                                                                            |
+| sbv2 F1/front           |    899 |        427 | `conv1d,permute,layer_norm,permute,gelu,conv1d,permute,layer_norm,permute` 12                                                                                                           |
+| siglip2 so400m          |    984 |        135 | `bmm,reshape,softmax,expand,reshape,expand,reshape,bmm,reshape` **28** / `linear,reshape,permute,mul` 56                                                                                |
+| birefnet-hr-1024        |   3249 |        545 | 分解 attention のマスク加算入り綴り `add,softmax,expand,reshape,expand,reshape,bmm,reshape,permute` **48** / `layer_norm,linear,gelu,linear,add` 46 / `slice,reshape,permute` 96        |
+| depth-anything v2 small |    541 |        265 | 分解 attention（siglip2 と同じ完全一致形）**12** / `linear,mul,add` 23                                                                                                                  |
+| vowel-detector CRNN     |     18 |         31 | `linear,gru_scan,linear,gru_scan_reverse,cat` 1（グラフが 18 ノードなので候補は各 1 本）                                                                                                |
 
-**横断で最も本数が多い未掴の形**: 分解 attention `bmm,reshape,softmax,expand,reshape,expand,reshape,bmm,reshape` が 4 資産で計 116 本（birefnet 48 / siglip2 28 / anima text_encoder 28 / depth-anything 12）。ROW_BLOCK_ATTENTION_RULE はこの綴りを `safe_softmax` でだけ受理するので全て外れている（Irodori DiT の 12 本のみが `safe_softmax` 側）。
+**横断で最も本数が多い未掴の形**: 分解 attention。ただし**同じ構造でも op 名列は資産ごとに割れる**ので、1 行の本数を足し合わせると数を取り違える（訂正前の本文はそれをやっていた）。完全一致の `bmm,reshape,softmax,expand,reshape,expand,reshape,bmm,reshape` を持つのは siglip2 so400m 28 / depth-anything 12 / anima text_conditioner 12 の計 52 本。birefnet と anima text_encoder はマスク加算 `add` を挟む別綴りで、`bmm,reshape,add,softmax,expand,reshape,expand,reshape,bmm` が birefnet 12 / anima text_encoder 27（窓幅 9 で切れるため、同じ構造が `add,softmax,…,permute` のような別の窓としても出る）。
+
+綴りに依らないブロック本数は、どの資産でも共通の核 `softmax,expand,reshape,expand,reshape,bmm` の出現数で数えられる — **5 グラフ（4 家族）計 128 本**（birefnet 48 / siglip2 so400m 28 / anima text_encoder 28 / anima text_conditioner 12 / depth-anything 12）。ROW_BLOCK_ATTENTION_RULE はこの綴りを `safe_softmax` でだけ受理するので全て外れている（Irodori DiT の 12 本のみが `safe_softmax` 側）。
 
 ### §2.4 注意（表の読み方）
 
@@ -172,12 +182,18 @@ anima・irodori・gemma4 は `packages/runtime/tests/assets_fusion_counts_test.t
 - **K-1b は 2 形を別々に測る**（DiT self 4096 / cross 512・頭幅 128）。**K-4b は 1×1 と kernel 3/5 の
   2 群**（voice の 96 本が実質 GEMV）。
 - **融合の未開拓面は 5 資産**（sbv2・未配布 4 家族は融合ルールを 1 本も掴んでいない）。横断で最多の
-  未掴形は分解 attention `bmm,reshape,softmax,expand,reshape,expand,reshape,bmm,reshape`（4 資産・
-  116 本）で、ROW_BLOCK_ATTENTION_RULE の受理を `safe_softmax` から `softmax` へ広げるかは裁定事項
-  （ADR 0040 決定 2「式が似ていても広げない」との衝突）。
+  未掴形は分解 attention で、**構造のブロック本数**（共通核 `softmax,expand,reshape,expand,reshape,bmm`
+  の出現数）で数えると 5 グラフ計 128 本。op 名列は資産ごとに割れるので、この 128 はブロック本数であって
+  1 つの綴りの本数ではない（内訳は §2.3 末尾）。ROW_BLOCK_ATTENTION_RULE の受理を `safe_softmax` から
+  `softmax` へ広げるかは裁定事項（ADR 0040 決定 2「式が似ていても広げない」との衝突）。
 - **既知の穴が数字になった**: gemma4 decode の rope 50 鎖中 35 本未掴（`…,add,permute` の窓幅 8）・
   Irodori DiT の偶奇 RoPE 24 / rms_norm adaLN 24（K-7 の再評価材料）・anima text_conditioner の rope
   24 本（並ぶのに 0 本 — 機序未特定）。
+- **起票（リリース後・道具側）**: ① `tools/fusion-hints` を `--max-window 10`〜`12` で採り直す — 既定 9
+  では 9 ノードを超える鎖が切り詰められ、同じ構造が資産ごとに違う op 名列になって横断突合が効かない
+  （§2.3 の分解 attention が実例）。② fusion-hints は siglip2-base-patch16-224 と
+  karume-irodori-v4.1-small に掛かっていない（census は §1 のとおり掛かっている）— 家族内の大小 2 形の
+  突合ができないままなので、掃引対象に足す。
 - 2 段目（GPU）: `tools/opbench single`（計測規約を実装として内蔵・timing / wall 2 モード・K-11 と P-1
   の再現が合格線）→ `graph` → PyTorch 対照（CUDA venv・列 B「torch が実際に速い形」を基準・常駐
   バイト併記 — 2026-09-03 裁定）→ ブラウザ面 → CPU/TS 配置評価。Inductor は候補の裏付け役（2 段目）。
