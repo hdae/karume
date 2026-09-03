@@ -83,3 +83,15 @@ token 列は 3 点とも旧計測用配布形（pos16k）と一致 — 出荷バ
 
 workspace が 65,536 で頭打ちなのは states 形 attention の一時 S が行ブロック（binding 上限で等分）に
 収まるため。128K の会話は 12 GB 級の device なら見積り上は載る（時間の壁は §2 / §3 のとおり）。
+
+### §4.1 32K / 128K（参考値 — 別プロセスの負荷下）
+
+- P=32,000（capacity 32,768・cl 768・K-12 on・停止 token 無効）: prefill 228 s・decode 56.6 ms/token（22 サンプル）。
+  実行中に Opus レッグ 3 本（CPU）と別の対話プロセス（VRAM 2.2 GiB）が同居していたので壁時計は上振れの参考値。
+  同条件の P=992 が 62.9 ms/token（無負荷時 33.0）だったことから、無負荷なら 45 ms/token 前後と見込む
+  （①QK の線形項 — perf-ledger K-14）。合成 prompt（同文の繰り返し）は停止 token を有効にすると
+  prefill 直後に EOS を出す（decode を測るには `--no-stop` が要る）。
+- P=131,000（capacity 131,072・cl 768）は `GpuOutOfMemoryError`（run のエンコードと readback）で落ちた。
+  ただし同時刻に VRAM 12 GB のうち 7.5 GiB を別プロセス（前回計測の残骸 5.3 GiB + 対話プロセス 2.2 GiB）が
+  握っていたので、環境要因の疑いが強い。無負荷での再現（cl 768 / 192）は未実施 — 結果は追記する。
+  見積り上は peak 4,956 MiB（§4）で 12 GB 機に載る。
