@@ -59,9 +59,17 @@ const GENERATE_COMMAND =
   "（tokenizer 資産は … python -m gemma4.tokenizer）";
 
 /** 実行条件は既存の gemma4 検収門と同値（同じ資産世代の裁定をそのまま使う）。 */
-const CHUNK_LENGTH = 32;
-const CAPACITY = 640;
-const MAX_POSITION = 1024;
+const CHUNK_LENGTH = 768;
+const CAPACITY = 4096;
+const MAX_POSITION = 131072;
+/**
+ * RoPE のパラメータ（配布形の宣言と同じ値 — 表は資産に無く、cos / sin はホストが作る）。
+ * 正本は上流 config で、綴りと値域の門は `src/gemma/rope.ts`。
+ */
+const ROPE = {
+  sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
+  full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
+} as const;
 /**
  * PLE の常駐に使う予算（バイト）。現行世代の shard は 1 本 ≈253MiB なので 3 本ぶんが載る
  * （token 範囲をまたぐ会話で読み直しを増やしすぎない）。**本数ではなくバイト**で渡すのは、
@@ -168,7 +176,12 @@ const openPipeline = async (): Promise<Gemma4Pipeline> => {
   const model: Uint8Array<ArrayBuffer>[] = [];
   for (const file of MODEL_SHARDS) model.push(new Uint8Array(await readBuffer(PRODUCT_ROOT, file)));
   return await Gemma4Pipeline.fromAssets({
-    config: { chunkLength: CHUNK_LENGTH, maxPosition: MAX_POSITION, capacity: CAPACITY },
+    config: {
+      chunkLength: CHUNK_LENGTH,
+      maxPosition: MAX_POSITION,
+      capacity: CAPACITY,
+      rope: ROPE,
+    },
     model,
     tokenizer: await Deno.readFile(TOKENIZER_ASSET),
     pleIndex: await Deno.readFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)),

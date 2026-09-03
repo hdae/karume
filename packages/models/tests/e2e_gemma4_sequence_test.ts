@@ -33,6 +33,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareModel, type SafetensorsFile } from "@karume/runtime";
 import { createGemma4Ple, gemma4PleShardBytes, parseGemma4PleIndex } from "../src/gemma/ple.ts";
+import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import { createGenerationProgram, type GenerationWiring } from "../src/generation/program.ts";
 import {
   createGenerationSequence,
@@ -78,14 +79,22 @@ const BREAK_AFTER = 5;
 const STOP_TOKENS = [1, 106, 50] as const;
 
 /** 実行条件は既存の門と同値（同じ資産世代の裁定をそのまま使う）。 */
-const CHUNK_LENGTH = 32;
+const CHUNK_LENGTH = 768;
 const CAPACITY_SYMBOL = "C";
-const CAPACITY = 640;
-const MAX_POSITION = 1024;
+const CAPACITY = 4096;
+const MAX_POSITION = 131072;
 
-/** グラフ入力の名前（正本は `export_product` の定数）。 */
+/**
+ * RoPE のパラメータ（配布形の宣言と同じ値）。表は資産から外れ、cos / sin は位置列から
+ * `gemma4RopeInputs` が作る（式の正本は `src/gemma/rope.ts`）。
+ */
+const ROPE: Gemma4RopeSpec = {
+  sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
+  full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
+};
+
+/** グラフ入力の名前（正本は `export_product` の定数 — `position_ids` はもう無い）。 */
 const INPUT_IDS = "input_ids";
-const POSITION_IDS = "position_ids";
 const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
 
@@ -174,7 +183,6 @@ Deno.test({
       createGenerationProgram({
         graph: parsed.graph,
         inputIds: INPUT_IDS,
-        positionIds: POSITION_IDS,
         lastRow: LAST_ROW,
         logits: parsed.graph.outputs[0],
         chunkLength: CHUNK_LENGTH,
@@ -182,11 +190,15 @@ Deno.test({
         capacity: CAPACITY,
         vocabSize: VOCAB,
         stopTokens,
-        bindings: { [CAPACITY_SYMBOL]: CAPACITY },
-        // ホスト由来の per-chunk 入力の席に PLE gather を差す（ADR 0085 — `ple.ts` は無改変）。
+        capacitySymbol: CAPACITY_SYMBOL,
+        // ホスト由来の per-chunk 入力の席に PLE gather と RoPE を差す（ADR 0085 / 可変 capacity 波
+        // — `ple.ts` / `rope.ts` は無改変）。
         derivedInputs: {
-          names: [PER_LAYER_INPUTS],
-          derive: async (ids) => ({ [PER_LAYER_INPUTS]: await ple.gather(ids) }),
+          names: [PER_LAYER_INPUTS, ...gemma4RopeInputNames()],
+          derive: async (ids, positions) => ({
+            [PER_LAYER_INPUTS]: await ple.gather(ids),
+            ...gemma4RopeInputs(ROPE, positions),
+          }),
         },
       });
 

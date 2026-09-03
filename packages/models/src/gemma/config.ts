@@ -19,6 +19,14 @@
  * `docs/release-runbook.md` §3 の手順でここへ `GEMMA4_CURRENT` を足す。
  */
 
+import {
+  assertGemma4RopeSpec,
+  GEMMA4_ROPE_LAYER_TYPES,
+  type Gemma4RopeLayerSpec,
+  type Gemma4RopeLayerType,
+  type Gemma4RopeSpec,
+} from "./rope.ts";
+
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const GEMMA4_PIPELINE_NAME = "gemma4";
 export const GEMMA4_PIPELINE_MAJOR = 1;
@@ -50,12 +58,36 @@ export type Gemma4DefaultSampler = {
  * 二重持ちすると、片方だけ古びる（`pipeline.ts` の `capacitySymbolOf`）。
  */
 export type Gemma4PipelineConfig = {
-  /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。 */
+  /**
+   * 固定長 prefill chunk の行数の**既定**（ADR 0066 決定 4 — context の計画時定数）。
+   *
+   * 実行時ノブでもある（`Gemma4PipelineOptions.chunkLength`）— グラフの chunk 行は記号 `M` なので、
+   * 資産を焼き直さずに選べる（上限は焼いた記号の max）。
+   */
   readonly chunkLength: number;
-  /** 資産が引ける絶対位置の排他的上限（= 焼き込んだ RoPE 表の行数）。 */
+  /**
+   * この**モデルが宣言する**絶対位置の排他的上限（上流 `max_position_embeddings`）。
+   *
+   * NOTE: 以前は「焼き込んだ RoPE 表の行数」だった。表は配布形から外れ、cos / sin は chunk ぶんだけ
+   * ホストが作る（`./rope.ts`）ので、この数はもう資産の物理的な形ではなく**モデルの宣言**である。
+   * 読み手にとっての意味（`capacity` はこれを超えられない）は変わらない。
+   */
   readonly maxPosition: number;
-  /** full スロットの容量（会話が使える最大の論理長 — 実行時に選ぶ）。 */
+  /**
+   * full スロットの容量の**既定**（会話が使える最大の論理長）。
+   *
+   * 実行時ノブでもある（`createGenerationSequence` / `Gemma4Pipeline.sequence` の `capacity`）—
+   * 容量は state スロットの物理確保量そのものなので、長い会話と VRAM の交換を呼び手が選ぶ。
+   */
   readonly capacity: number;
+  /**
+   * RoPE の cos / sin をホストで作るためのパラメータ（層種別 2 本 — ADR 0067 決定 4 の改訂）。
+   *
+   * MUST: 必須。表がグラフから外れた配布形では、この宣言が**位置エンコーディングの唯一の出どころ**
+   * である（欠けたまま動けば、回転しない attention が例外なしで走る）。式と値域の正本は
+   * `./rope.ts`。
+   */
+  readonly rope: Gemma4RopeSpec;
   /**
    * 配布形が宣言する sampler の既定（ADR 0083 決定 7）。
    *
@@ -66,10 +98,19 @@ export type Gemma4PipelineConfig = {
   readonly sampler?: Gemma4DefaultSampler;
 };
 
-const ROOT_KEYS: readonly string[] = ["chunkLength", "maxPosition", "capacity", "sampler"];
+const ROOT_KEYS: readonly string[] = [
+  "chunkLength",
+  "maxPosition",
+  "capacity",
+  "rope",
+  "sampler",
+];
 
 /** 受理する sampler の欄（型の正本は {@link Gemma4DefaultSampler} — 増やす理由も同 doc）。 */
 const SAMPLER_KEYS: readonly string[] = ["temperature", "topK", "topP"];
+
+/** 受理する rope 層種別の欄（型の正本は `./rope.ts` の {@link Gemma4RopeLayerSpec}）。 */
+const ROPE_LAYER_KEYS: readonly string[] = ["theta", "headDim", "rotaryDim"];
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -86,6 +127,14 @@ const assertAllowedKeys = (
   }
 };
 
+/** 欄が実在して数であることだけを見る（値域は呼び手が足す）。 */
+const readRawNumber = (raw: Record<string, unknown>, key: string, where: string): number => {
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  const value = raw[key];
+  if (typeof value !== "number") throw new Error(`${where}.${key}: 数でない（${String(value)}）`);
+  return value;
+};
+
 const readNumber = (
   raw: Record<string, unknown>,
   key: string,
@@ -93,11 +142,8 @@ const readNumber = (
   check: (value: number) => boolean,
   requirement: string,
 ): number => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
-  const value = raw[key];
-  if (typeof value !== "number" || !check(value)) {
-    throw new Error(`${where}.${key}: ${requirement}（${String(value)}）`);
-  }
+  const value = readRawNumber(raw, key, where);
+  if (!check(value)) throw new Error(`${where}.${key}: ${requirement}（${String(value)}）`);
   return value;
 };
 
@@ -137,12 +183,46 @@ const parseSampler = (raw: unknown, where: string): Gemma4DefaultSampler => {
 };
 
 /**
+ * 層種別 1 つぶんの rope パラメータを読む。
+ *
+ * MUST: 値域はここで見ない — 数の受理集合（正の theta・偶数の headDim・`2 ≤ rotaryDim ≤ headDim`）は
+ * `./rope.ts` の `assertGemma4RopeLayerSpec` が正本で、同じ式を 2 実装持つと片方だけが古びる。
+ * ここが持つのは**宣言の形**（未知キー・欠落・型）だけである。
+ */
+const parseRopeLayer = (raw: unknown, where: string): Gemma4RopeLayerSpec => {
+  if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない（${String(raw)}）`);
+  assertAllowedKeys(raw, ROPE_LAYER_KEYS, where);
+  return {
+    theta: readRawNumber(raw, "theta", where),
+    headDim: readRawNumber(raw, "headDim", where),
+    rotaryDim: readRawNumber(raw, "rotaryDim", where),
+  };
+};
+
+/** 層種別 2 本ぶんを読み、値域は `./rope.ts` の門へ委ねる。 */
+const parseRope = (raw: unknown, where: string): Gemma4RopeSpec => {
+  if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない（${String(raw)}）`);
+  assertAllowedKeys(raw, GEMMA4_ROPE_LAYER_TYPES, where);
+  const layer = (layerType: Gemma4RopeLayerType): Gemma4RopeLayerSpec => {
+    if (!Object.hasOwn(raw, layerType)) throw new Error(`${where}.${layerType}: 無い`);
+    return parseRopeLayer(raw[layerType], `${where}.${layerType}`);
+  };
+  const spec: Gemma4RopeSpec = {
+    sliding_attention: layer("sliding_attention"),
+    full_attention: layer("full_attention"),
+  };
+  assertGemma4RopeSpec(where, spec);
+  return spec;
+};
+
+/**
  * `unknown`（hub が素通しした生の宣言）を検査して {@link Gemma4PipelineConfig} にする。
  *
  * MUST: 3 つの数の関係まで見る — `chunkLength ≤ capacity ≤ maxPosition`。容量いっぱいの会話は
- * 位置 `capacity - 1` まで進むので、RoPE 表の行数を超える宣言は**長い会話でだけ**実行時に
- * 落ちる（焼く側の `gemma4_pipeline_config` が同じ関係を見るが、他人の配布形は検査を通って
- * いない前提で読む）。
+ * 位置 `capacity - 1` まで進むので、モデルが宣言した位置上限を超える既定は**長い会話でだけ**
+ * 実行時に落ちる（焼く側の `gemma4_pipeline_config` が同じ関係を見るが、他人の配布形は検査を
+ * 通っていない前提で読む）。実行時ノブ（sequence の `capacity`）にも同じ関係が掛かる
+ * （`generation/sequence.ts`）。
  *
  * ## 公開している理由 — `fromAssets` を使う消費者のための口
  *
@@ -172,11 +252,14 @@ export const parseGemma4PipelineConfig = (raw: unknown): Gemma4PipelineConfig =>
         `（容量いっぱいの会話が位置表の外を引く）`,
     );
   }
-  if (!Object.hasOwn(raw, "sampler")) return { chunkLength, maxPosition, capacity };
+  if (!Object.hasOwn(raw, "rope")) throw new Error(`${where}.rope: 無い`);
+  const rope = parseRope(raw["rope"], `${where}.rope`);
+  if (!Object.hasOwn(raw, "sampler")) return { chunkLength, maxPosition, capacity, rope };
   return {
     chunkLength,
     maxPosition,
     capacity,
+    rope,
     sampler: parseSampler(raw["sampler"], `${where}.sampler`),
   };
 };

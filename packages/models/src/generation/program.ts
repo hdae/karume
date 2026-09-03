@@ -19,15 +19,15 @@
  * グラフ入力が 1 本結線されないまま run へ行けば診断は真因から遠い場所で出る。よって
  * {@link createGenerationProgram} は**グラフと突き合わせて**次を全部見る:
  *
- * - 名前の実在（入力 3 本 + 派生入力の名前 + 出力 1 本）
+ * - 名前の実在（入力 2 本 + 派生入力の名前 + 出力 1 本）
  * - 形と dtype（`[1,M]` の i32・`[1]` の i32・`[1,1,V]` の f32）
  * - **グラフ入力の完全被覆**（program が結線しない入力が 1 本も残らない・余分な名前も無い）
- * - 記号（入力 shape から決まらない記号は `bindings` で与えられていること）
+ * - 記号（入力 shape から決まらない記号は容量記号ちょうど 1 本であること）
  *
  * MUST: program は可変状態を持たない（ADR 0083 決定 1）。
  */
 
-import type { RunInputs, SymbolBindings } from "@karume/runtime";
+import type { RunInputs } from "@karume/runtime";
 
 /**
  * program が結線検証に使うグラフの面（`PreparedModel["graph"]` の部分集合）。
@@ -84,18 +84,23 @@ export type DerivedRunInputs = {
    */
   readonly names: readonly string[];
   /**
-   * 物理 chunk 1 本ぶんの token id 列 → 追加入力。
+   * 物理 chunk 1 本ぶんの token id 列と**絶対位置列** → 追加入力。
    *
-   * 渡るのは**物理行数ぶん**（prefill は pad 行を含む・decode は 1 行）で、pad 行にも
+   * 渡るのはどちらも**物理行数ぶん**（prefill は pad 行を含む・decode は 1 行）で、pad 行には
    * `input_ids` と同じ 0 が入る — グラフ内で引いていたときと同じ値にするため（PLE の
-   * `gather` doc と ADR 0066 追記 6 の値契約）。
+   * `gather` doc と ADR 0066 追記 6 の値契約）。位置も同じ規約で、pad 行は 0 である。
    *
-   * MUST: **純関数席**（同じ id 列に同じ値。呼ぶ順序に依らない）。返り値のキーは
+   * `positions` を渡すのは、位置に依存するホスト由来入力（gemma4 の RoPE cos / sin —
+   * `gemma/rope.ts`）がこの席を使うため。`position_ids` を**グラフ入力として**渡す形は
+   * もう無いので、位置の唯一の行き先がここである。
+   *
+   * MUST: **純関数席**（同じ `(ids, positions)` に同じ値。呼ぶ順序に依らない）。返り値のキーは
    * {@link DerivedRunInputs.names} と過不足なく一致すること。`options` は値に影響しない
    * 事情（中断）だけを運ぶので、この MUST とは両立する。
    */
   readonly derive: (
     ids: readonly number[],
+    positions: readonly number[],
     options?: DeriveInputsOptions,
   ) => Promise<RunInputs>;
 };
@@ -106,8 +111,6 @@ export type GenerationProgramSpec = {
   readonly graph: GenerationGraph;
   /** token id 列を受けるグラフ入力の名前（`[1,M]` の i32）。 */
   readonly inputIds: string;
-  /** 絶対位置を受けるグラフ入力の名前（`[1,M]` の i32）。 */
-  readonly positionIds: string;
   /** 最終有効行の添字を受けるグラフ入力の名前（`[1]` の i32 — ADR 0068 決定 4 の行選択）。 */
   readonly lastRow: string;
   /** 最終行 logits を出すグラフ出力の名前（`[1,1,V]` の f32 — ADR 0083 決定 6）。 */
@@ -115,27 +118,38 @@ export type GenerationProgramSpec = {
   /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。 */
   readonly chunkLength: number;
   /**
-   * 資産が引ける絶対位置の**排他的上限**（位置は `0..maxPosition-1` — RoPE 表を焼いた系列なら
-   * 表の行数）。
+   * 引ける絶対位置の**排他的上限**（位置は `0..maxPosition-1` — モデルが宣言する位置上限）。
    *
-   * MUST: 省略可能にしない（`greedy.ts` の `maxPosition` と同じ理由 — 表の外の gather は例外を
-   * 出さず、非有限 logits が「もっともらしい token id」に畳まれる）。
+   * MUST: 省略可能にしない（`greedy.ts` の `maxPosition` と同じ理由 — 上限の外の位置は例外を
+   * 出さず、学習していない位置の attention が「もっともらしい token id」に畳まれる）。
    */
   readonly maxPosition: number;
   /**
-   * full スロットの容量（`pastLength + queryLength ≤ capacity` — ADR 0067 決定 4 ④）。
+   * full スロットの容量の**既定**（`pastLength + queryLength ≤ capacity` — ADR 0067 決定 4 ④）。
    *
    * MUST: 省略可能にしない。超過はランタイムも拒否するが、それは **run のエンコード直前**で、
    * 「会話が入り切らない」という**ホストが判断すべき事実**が汎用メッセージに埋もれる
    * （ADR 0083 決定 10）。sequence はこの値で run の**前**に見て専用型で落とす。
+   *
+   * NOTE: 実際に使う容量は sequence（= context）ごとに選べる（`createGenerationSequence` の
+   * `capacity`）。program が持つのは**既定**で、context の物理確保はその sequence の値で決まる。
    */
   readonly capacity: number;
   /** 語彙数（logits 出口の最終軸 — グラフと相互照合する）。 */
   readonly vocabSize: number;
   /** 停止 token の集合（ADR 0083 決定 8 — 空なら EOS 停止をしない）。 */
   readonly stopTokens: readonly number[];
-  /** state スロット容量の記号束縛（`createGenerationContext` へ素通し）。 */
-  readonly bindings?: SymbolBindings;
+  /**
+   * full スロット容量の**記号名**（`createGenerationContext` の束縛点で使う綴り）。
+   *
+   * MUST: 束縛**値**は持たない。容量は sequence ごとに選べるので、値を配線側にも持つと
+   * 「program の `capacity` と `bindings` のどちらが本当の容量か」という独立に更新される
+   * 二重持ちになる（CLAUDE.md の派生状態の禁止）。記号は資産の綴りで不変、値は実行時ノブ。
+   *
+   * MUST: 入力 shape から決まる記号を指してはならない（{@link createGenerationProgram} が見る）—
+   * その記号は run の入力から決まるので、context 側の束縛と分裂して run が拒否する。
+   */
+  readonly capacitySymbol: string;
   /** ホスト由来の per-chunk 入力（無い配布形は省略）。 */
   readonly derivedInputs?: DerivedRunInputs;
 };
@@ -153,19 +167,23 @@ export type GenerationWiring = Omit<GenerationProgramSpec, "graph">;
  * 検証済み静的配線の**読み口**（公開面 — `Gemma4Pipeline.program`）。
  *
  * 出すのは「自分で `sequence()` を回すときに読む必要がある数」だけである。グラフ入力 / 出力の
- * 名前・記号束縛・`derivedInputs` は**内部配線**（{@link GenerationWiring}）で、公開すると
+ * 名前・容量記号・`derivedInputs` は**内部配線**（{@link GenerationWiring}）で、公開すると
  * ①消費者が読んでも使い道が無い（配線の相手である Session は公開面に出ていない）
- * ②`derive` の差し替えや `bindings` の改変が公開面から書ける — 検証済みであることが
+ * ②`derive` の差し替えや記号の改変が公開面から書ける — 検証済みであることが
  * `GenerationProgram` の意味そのものなので、書ける口は意味を壊す。
  *
  * MUST: {@link generationProgramFace} が凍結して返す（`stopTokens` は凍結コピー）。
  */
 export type GenerationProgram = {
-  /** 固定長 prefill chunk の行数（ADR 0066 決定 4）。 */
+  /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — この pipeline が使う値）。 */
   readonly chunkLength: number;
-  /** 資産が引ける絶対位置の排他的上限（位置は `0..maxPosition-1`）。 */
+  /** 引ける絶対位置の排他的上限（位置は `0..maxPosition-1` — モデルの宣言）。 */
   readonly maxPosition: number;
-  /** full スロットの容量（`pastLength + queryLength ≤ capacity`）。 */
+  /**
+   * full スロットの容量の**既定**（`pastLength + queryLength ≤ capacity`）。
+   *
+   * 実際に使う容量は sequence ごとに選べる（`GenerationSequence.capacity` が**その会話の**値）。
+   */
   readonly capacity: number;
   /** 語彙数（`prompt` の token id の値域はここで決まる）。 */
   readonly vocabSize: number;
@@ -299,29 +317,35 @@ const assertInputCoverage = (graph: GenerationGraph, wired: readonly string[]): 
 /**
  * 記号が全部決まることを見る。
  *
- * 入力 shape に現れる記号は run の入力から決まり、残り（states の容量記号など）は `bindings` が
- * 与える唯一の源である（`resolveBindings` の MUST — states は束縛源にならない）。両方から
- * 漏れた記号は context 生成まで気づけないので、ここで落とす。
+ * 入力 shape に現れる記号は run の入力から決まり、残り（states の容量記号）は
+ * `createGenerationContext` の束縛が与える唯一の源である（`resolveBindings` の MUST — states は
+ * 束縛源にならない）。両方から漏れた記号は context 生成まで気づけないので、ここで落とす。
  */
-const assertSymbols = (graph: GenerationGraph, bindings: SymbolBindings | undefined): void => {
+const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => {
   const fromInputs = new Set<string>();
   for (const input of graph.inputs) {
     for (const dim of input.shape) if (typeof dim === "string") fromInputs.add(dim);
   }
-  const bound = new Set(Object.keys(bindings ?? {}));
-  const unknown = [...bound].filter((symbol) => !graph.symbols.includes(symbol));
-  if (unknown.length > 0) {
+  if (!graph.symbols.includes(capacitySymbol)) {
     throw new Error(
-      `束縛 ${unknown.join(" / ")} がグラフの symbols [${graph.symbols.join(", ")}] に無い`,
+      `容量記号 ${capacitySymbol} がグラフの symbols [${graph.symbols.join(", ")}] に無い`,
+    );
+  }
+  // 入力由来の記号を容量記号に選ぶと、run の入力と context の束縛が同じ記号を別の値で決める
+  // （runtime が分裂として拒否する）— 綴りの取り違えなので、配線を組む時点で落とす。
+  if (fromInputs.has(capacitySymbol)) {
+    throw new Error(
+      `容量記号 ${capacitySymbol} は入力 shape から決まる記号である` +
+        `（state スロットの容量記号は入力に現れない 1 本 — ADR 0066 追記 7）`,
     );
   }
   const unresolved = graph.symbols.filter(
-    (symbol) => !fromInputs.has(symbol) && !bound.has(symbol),
+    (symbol) => !fromInputs.has(symbol) && symbol !== capacitySymbol,
   );
   if (unresolved.length > 0) {
     throw new Error(
-      `記号 ${unresolved.join(" / ")} が入力 shape からも bindings からも決まらない` +
-        `（state スロットの容量記号は bindings で与える — ADR 0066 追記 7）`,
+      `記号 ${unresolved.join(" / ")} が入力 shape からも容量記号からも決まらない` +
+        `（state スロットの容量記号は 1 本だけ — ADR 0066 追記 7）`,
     );
   }
 };
@@ -345,20 +369,17 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
   });
 
   assertRowInput(graph, spec.inputIds, "token id 入力");
-  assertRowInput(graph, spec.positionIds, "位置入力");
   assertLastRowInput(graph, spec.lastRow);
   assertLogitsOutput(graph, spec.logits, spec.vocabSize);
   assertInputCoverage(graph, [
     spec.inputIds,
-    spec.positionIds,
     spec.lastRow,
     ...(spec.derivedInputs?.names ?? []),
   ]);
-  assertSymbols(graph, spec.bindings);
+  assertSymbols(graph, spec.capacitySymbol);
 
   return {
     inputIds: spec.inputIds,
-    positionIds: spec.positionIds,
     lastRow: spec.lastRow,
     logits: spec.logits,
     chunkLength: spec.chunkLength,
@@ -366,7 +387,7 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     capacity: spec.capacity,
     vocabSize: spec.vocabSize,
     stopTokens: [...spec.stopTokens],
-    ...(spec.bindings === undefined ? {} : { bindings: spec.bindings }),
+    capacitySymbol: spec.capacitySymbol,
     ...(spec.derivedInputs === undefined ? {} : { derivedInputs: spec.derivedInputs }),
   };
 };

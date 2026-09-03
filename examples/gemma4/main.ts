@@ -5,6 +5,8 @@
  *     deno task demo:gemma4 --system "Answer in one short sentence." --max-new-tokens 128
  *     deno task demo:gemma4 --source models/karume-gemma4-e2b --temperature 0
  *     deno task demo:gemma4 --repo someone/karume-gemma4-e2b@1a2b3c4 --seed 7
+ *     deno task demo:gemma4 --capacity 16384 --chunk-length 1536
+ *     deno task demo:gemma4 --diagnostics
  *
  * 1 行 = 1 発話。`/reset` で会話を捨て、`/exit`（または Ctrl+D）で終わる。生成中の Ctrl+C は
  * **そのターンだけ**を中断する（生成していないときに押すとプロセスごと終わる）。
@@ -31,11 +33,20 @@
  *
  * ## 会話の切り詰めは**注入できる**
  *
- * 容量（`program.capacity`）と位置表（`program.maxPosition`）に入らないターンは、送る前に
+ * 容量（このセッションが確保した値 — `--capacity` か配布形の既定）と位置表
+ * （`program.maxPosition`）に入らないターンは、送る前に
  * `onOverflow` へ回る。既定は `dropOldestTurns`（最古の user / assistant の対を落とす・system は
  * 残す）で、この台本は「落としたことを画面に出す」ためだけに包んでいる。落とせるものが尽きたら
  * `GenerationCapacityError` で落ちる — 判断に要る実値は例外の欄が運ぶので、文言を読み解く必要は
  * 無い（ADR 0083 決定 10 の改訂）。
+ *
+ * ## 容量と chunk 長は**実行時ノブ**
+ *
+ * 配布形が宣言する `capacity` / `chunkLength` は**既定**でしかなく、資産を焼き直さずに選び直せる
+ * （RoPE の cos / sin は chunk ぶんだけホストが作るので、位置表がグラフに焼かれていない）。
+ * `--capacity` はこの会話が確保する KV の容量（GPU メモリ ↔ 会話の長さ）、`--chunk-length` は
+ * prefill 1 run の行数（run 本数 ↔ 1 run の一時バッファ）で、どちらも確保の**前**に
+ * `estimateSessionMemory` で必要量として読める — 起動時の 1 行がそれである。
  */
 
 import {
@@ -47,14 +58,18 @@ import {
 import type {
   Gemma4ChatSessionOptions,
   Gemma4ChatStop,
+  Gemma4PrefillProgress,
   SamplerSpec,
 } from "../../packages/models/gemma.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
 import type { AssetProgress } from "../../packages/hub/mod.ts";
+import { acquireGpu } from "../../packages/runtime/mod.ts";
+import type { GpuTimingStats, SessionDiagnostics } from "../../packages/runtime/mod.ts";
 
 const USAGE = "--source <配布形のパス> | --repo <owner/name[@revision]>" +
   " --system <文字列> --max-new-tokens <整数> --temperature <数> --top-k <整数>" +
-  " --top-p <数> --seed <整数> --max-resident-ple-bytes <整数>";
+  " --top-p <数> --seed <整数> --max-resident-ple-bytes <整数> --capacity <整数>" +
+  " --chunk-length <整数> --diagnostics";
 const KNOWN = new Set([
   "source",
   "repo",
@@ -65,7 +80,11 @@ const KNOWN = new Set([
   "top-p",
   "seed",
   "max-resident-ple-bytes",
+  "capacity",
+  "chunk-length",
 ]);
+/** 値を取らないスイッチ（`--key value` の対ではなく 1 語で立つ）。 */
+const FLAGS = new Set(["diagnostics"]);
 
 /** 取得元の既定（`dist.py --pipeline gemma4` が組むローカルミラー — `docs/assets-layout.md`）。 */
 const DEFAULT_SOURCE = "models/karume-gemma4-e2b";
@@ -73,17 +92,32 @@ const DEFAULT_SOURCE = "models/karume-gemma4-e2b";
 /** 1 ターンで生成する token 数の上限（停止 token は含まれない）。 */
 const DEFAULT_MAX_NEW_TOKENS = 256;
 
-/** `--key value` の対だけを受ける。MUST: 次のフラグを値として食わない（黙って既定へ落ちる）。 */
+/**
+ * `--key value` の対と、値を取らない {@link FLAGS} だけを受ける。
+ *
+ * MUST: 次のフラグを値として食わない（黙って既定へ落ちる）。MUST: 未知のキーは落とす —
+ * 打ち間違えたノブが黙って既定値で走ると、出力の違いが「モデルの揺れ」に見える。
+ */
 const args = new Map<string, string>();
-for (let at = 0; at < Deno.args.length; at += 2) {
-  const [key, value] = [Deno.args[at], Deno.args[at + 1]];
-  if (!key.startsWith("--") || value === undefined || value.startsWith("--")) {
+const flags = new Set<string>();
+for (let at = 0; at < Deno.args.length;) {
+  const key = Deno.args[at];
+  if (!key.startsWith("--")) {
     throw new Error(`引数 ${key} が --key value の対になっていない（使い方: ${USAGE}）`);
   }
-  // MUST: 未知のキーは落とす。打ち間違えたノブが黙って既定値で走ると、出力の違いが
-  // 「モデルの揺れ」に見える。
-  if (!KNOWN.has(key.slice(2))) throw new Error(`未知のオプション ${key}（使い方: ${USAGE}）`);
-  args.set(key.slice(2), value);
+  const name = key.slice(2);
+  if (FLAGS.has(name)) {
+    flags.add(name);
+    at += 1;
+    continue;
+  }
+  if (!KNOWN.has(name)) throw new Error(`未知のオプション ${key}（使い方: ${USAGE}）`);
+  const value = Deno.args[at + 1];
+  if (value === undefined || value.startsWith("--")) {
+    throw new Error(`引数 ${key} が --key value の対になっていない（使い方: ${USAGE}）`);
+  }
+  args.set(name, value);
+  at += 2;
 }
 
 const integer = (key: string): number | undefined => {
@@ -117,6 +151,32 @@ const seed = integer("seed");
  * 世代で変わるため「N 本」が世代ごとに違う RAM を意味するからである。
  */
 const maxResidentPleBytes = integer("max-resident-ple-bytes");
+
+/**
+ * この会話が確保する KV の容量（論理位置の数・省略時は配布形の宣言）。
+ *
+ * 大きいほど長い会話が切り詰めなしで入り、そのぶん KV の state スロットを GPU に抱える（要る量は
+ * 起動時の見積り行が出す）。上限はモデルの位置表 `maxPosition` で、下限は `chunkLength`。
+ * **値の検査はライブラリ側**（起動時の `estimateSessionMemory` と、会話ごとの sequence の生成）が
+ * 持つので、ここでは整数であることしか見ない — 同じ門を 2 実装持たない。
+ */
+const capacityArg = integer("capacity");
+
+/**
+ * prefill 1 run の行数（省略時は配布形の宣言）。
+ *
+ * 上げるほど prefill の run 本数が減る（フェンス待ちの回数も比例して減る）が、1 run あたりの
+ * 一時バッファと attention のスコア行列が増える。生成する token 列は変わらない。
+ */
+const chunkLengthArg = integer("chunk-length");
+
+/**
+ * op 別 GPU 時間の内訳を stderr へ出す（ADR 0021 — 既定は計測しない）。
+ *
+ * 計測は無償ではない — 有効な device は 1 dispatch = 1 pass に開くので**壁時計が伸びる**。
+ * MUST NOT: 付けた実行の tok/s を速度の数値として読む（速度の比較は付けずに採る）。
+ */
+const diagnostics = flags.has("diagnostics");
 
 const sourceDir = args.get("source");
 const repoRef = args.get("repo");
@@ -201,12 +261,40 @@ const showProgress = (
   note(`\r${line.padEnd(LINE_WIDTH)}${phase === "complete" ? "\n" : ""}`);
 };
 
+/**
+ * `--diagnostics` の観測席が溜めるもの — そのターンの run 本数と、**直近 run** の op 別内訳。
+ *
+ * 内訳を run 単位のまま持つのは、prefill と decode で run の形がまるで違うからである（前者は
+ * chunk 1 本ぶんの行列、後者は 1 行）。ターン全体で足し合わせると 2 つの形が混ざった表になり、
+ * どちらの op が重いのかがかえって読めなくなる。`Session.diagnostics()` が返す表はその場で
+ * 組まれる写しなので、後で読むために持っておける（run が進んでも書き換わらない）。
+ */
+let turnRuns = 0;
+let lastTiming: GpuTimingStats | undefined;
+const observeRun = (diagnostic: SessionDiagnostics): void => {
+  turnRuns += 1;
+  lastTiming = diagnostic.lastRunTiming;
+};
+
+/**
+ * 計測が有効な device は `--diagnostics` のときだけ**台本が**持つ（feature は device 作成時に
+ * しか要求できないので、pipeline に任せる口が無い）。貸した device は渡した側が所有者なので
+ * `pipeline.dispose()` は破棄しない — 破棄は台本の責務で、しかも **pipeline を畳んだ後**で
+ * なければならない（flush-before-destroy）。`using` の解放は宣言の逆順に走るので、pipeline より
+ * 前に宣言したこの口が最後に片付く。
+ */
+const gpu = diagnostics ? await acquireGpu({ gpuTiming: true }) : undefined;
+using _gpuOwned = gpu === undefined ? undefined : { [Symbol.dispose]: (): void => gpu.destroy() };
+
 const started = performance.now();
 note(`[gemma4] ${sourceDir ?? repoRef ?? DEFAULT_SOURCE} を読み込む\n`);
 await using pipeline = await Gemma4Pipeline.fromPretrained(
   repoRef === undefined ? denoDirectory(sourceDir ?? DEFAULT_SOURCE) : parseRepo(repoRef),
   {
     ...(maxResidentPleBytes === undefined ? {} : { maxResidentPleBytes }),
+    ...(chunkLengthArg === undefined ? {} : { chunkLength: chunkLengthArg }),
+    ...(gpu === undefined ? {} : { gpu }),
+    ...(diagnostics ? { onRunDiagnostics: observeRun } : {}),
     onProgress: showProgress,
   },
 );
@@ -228,10 +316,27 @@ const sampler: SamplerSpec | undefined = Object.keys(overrides).length === 0
   ? pipeline.defaultSampler
   : { ...pipeline.defaultSampler, ...overrides };
 
-const { capacity, maxPosition, chunkLength } = pipeline.program;
+const { capacity: defaultCapacity, maxPosition, chunkLength } = pipeline.program;
+const capacity = capacityArg ?? defaultCapacity;
+
+/**
+ * 確保の**前**に読む必要量（ADR 0070 決定 5 の estimator）。
+ *
+ * **上限ではない**（`unaccounted` に載っているものは勘定に入っていない）ので、可否の最終門は
+ * 今も out-of-memory である。ここで出すのは「この容量と chunk 長なら何 MiB 要るのか」を選ぶ前に
+ * 見るためで、`--capacity` の値の検査（`chunkLength ≤ capacity ≤ maxPosition`）もこの呼び出しが
+ * 兼ねる（sequence を作る最初のターンまで待たずに落ちる）。
+ */
+const estimate = pipeline.estimateSessionMemory({ capacity });
+const residentBytes = estimate.resident.weights.totalBytes + estimate.resident.stateBytes;
+
 write(
   `[gemma4] ready（${((performance.now() - started) / 1000).toFixed(1)}s）` +
-    ` / capacity ${capacity} / maxPosition ${maxPosition} / chunk ${chunkLength}\n` +
+    ` / capacity ${capacity}${capacity === defaultCapacity ? "" : `（既定 ${defaultCapacity}）`}` +
+    ` / maxPosition ${maxPosition} / chunk ${chunkLength}\n` +
+    `         GPU 見積り resident ${mib(residentBytes)} MiB` +
+    ` / peakAccounted ${mib(estimate.peakAccountedBytes)} MiB` +
+    `（上限ではない — 勘定外 ${estimate.unaccounted.length} 項目）\n` +
     `         sampler ${
       sampler === undefined ? "greedy（配布形の宣言なし）" : JSON.stringify(sampler)
     }` +
@@ -248,6 +353,9 @@ write(
 const sessionOptions: Gemma4ChatSessionOptions = {
   ...(system === undefined ? {} : { system }),
   maxNewTokens,
+  // 容量はセッション 1 本 = 会話 1 本の単位で決まる（切り詰めの物差しでもあるので、
+  // `/reset` で組み直しても同じ値を渡す）。
+  ...(capacityArg === undefined ? {} : { capacity: capacityArg }),
   ...(sampler === undefined ? {} : { sampler }),
   onOverflow: (context) => {
     write(
@@ -260,15 +368,65 @@ const sessionOptions: Gemma4ChatSessionOptions = {
 let session = new Gemma4ChatSession(pipeline, sessionOptions);
 
 /**
+ * prefill の進捗を 1 行で上書きする（`Gemma4ChatTurnOptions.onPrefill` の受け手）。
+ *
+ * 長い prompt では最初の文字が出るまでの無音時間が prefill そのもので、`send` が流すのは復号後の
+ * **本文**だけなので、進捗を出す口はここにしか無い。chunk が 1 本で終わる prompt（= chunk 長
+ * 以下）では出さない — 進捗にならないうえ、出しても次の瞬間に消すだけである。
+ */
+let prefilling = false;
+const showPrefill = ({ chunk, chunks }: Gemma4PrefillProgress): void => {
+  if (chunks <= 1) return;
+  note(`\r${`  prefill ${chunk}/${chunks}`.padEnd(LINE_WIDTH)}`);
+  prefilling = true;
+};
+
+/** prefill の行を消す（本文が出始めた時点・ターンが落ちた時点。2 度目以降は何もしない）。 */
+const clearPrefill = (): void => {
+  if (!prefilling) return;
+  clearLine();
+  prefilling = false;
+};
+
+/** `--diagnostics` の内訳に書く op の本数（GPU 時間の降順で上位から）。 */
+const TIMING_TOP = 5;
+
+/**
+ * 直近 run の op 別 GPU 時間を上位から書く（`--diagnostics` のときだけ埋まっている）。
+ *
+ * `clampedNegativeSamples` は 0 でなければ添える — ドライバの timestamp が非単調で 0 に丸めた
+ * 件数で、0 でないなら内訳の読みそのものが疑わしい（黙って捨てない）。
+ */
+const showTiming = (): void => {
+  if (lastTiming === undefined) return;
+  const { entries, totalNs, dispatchCount, clampedNegativeSamples } = lastTiming;
+  const ms = (ns: number): string => (ns / 1e6).toFixed(3);
+  note(
+    `  [diagnostics] run ${turnRuns} 本 · 直近 run ${ms(totalNs)} ms / dispatch ${dispatchCount}` +
+      `${clampedNegativeSamples === 0 ? "" : ` · 非単調 timestamp ${clampedNegativeSamples} 件`}\n`,
+  );
+  for (const entry of entries.slice(0, TIMING_TOP)) {
+    const share = totalNs === 0 ? "—" : `${percent(entry.ns, totalNs)}%`;
+    note(
+      `                ${entry.key} ${ms(entry.ns)} ms（${share}）` +
+        ` · ${entry.dispatchCount} dispatch\n`,
+    );
+  }
+};
+
+/**
  * 1 ターンの締め。tok/s は `stop.tokens`（停止 token も 1 個 = 抽選 1 回 = run 1 回）から書く —
  * 出力文字列を符号化し直すと、byte_fallback や停止 token のぶんだけ数がずれる。
  */
 const report = (stop: Gemma4ChatStop, at: number): void => {
+  // 本文が 1 片も出なかったターン（即 EOS）では、ここが prefill の行を畳む唯一の席になる。
+  clearPrefill();
   const elapsed = (performance.now() - at) / 1000;
   write(
     `\n  [${describeStop(stop)} · ${stop.tokens} tok · ${elapsed.toFixed(1)}s · ` +
       `${(stop.tokens / elapsed).toFixed(1)} tok/s · 会話 ${session.turns.length} 発話]\n`,
   );
+  showTiming();
 };
 
 /**
@@ -307,13 +465,20 @@ for await (const raw of readLines()) {
   const controller = new AbortController();
   turn = controller;
   const turnStarted = performance.now();
+  turnRuns = 0;
+  lastTiming = undefined;
   // 発行した stream は必ず汲み切るか break で閉じる（ターンの締めは列の終端で走る）。
-  const stream = session.send(line, { signal: controller.signal });
+  const stream = session.send(line, { onPrefill: showPrefill, signal: controller.signal });
   try {
     // 片は逐次復号器が**確定させたぶん**だけで、連結すると全体の decode と一致する。
-    for await (const chunk of stream) write(chunk);
+    for await (const chunk of stream) {
+      // 本文が出始めたら prefill の行は用済み（1 片目で 1 度だけ効く）。
+      clearPrefill();
+      write(chunk);
+    }
     report(await stream.done, turnStarted);
   } catch (error) {
+    clearPrefill();
     if (error instanceof GenerationCapacityError) {
       // 溢れ処理で落とせるものが尽きた = この 1 発話だけで入り切らない。判断に要る実値は
       // 例外の欄が運ぶ（文言を読み解かない）。

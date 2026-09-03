@@ -216,6 +216,13 @@ export type GenerationStream = AsyncIterable<GenerationEvent> & {
 
 export type GenerationSequence = {
   /**
+   * この会話が使える full スロットの容量（生成時に選んだ値 — 以後動かない）。
+   *
+   * 次のターンが通るかを自分で計算するときの上限がこれで、`program.capacity`（配布形の既定）
+   * ではない（`capacity` を渡して作った sequence では 2 つが食い違う）。
+   */
+  readonly capacity: number;
+  /**
    * この会話が既に占めている論理位置の数（= 次のターンの `prompt` が積み上がる起点）。
    *
    * MUST: **導出値**である（`context.pastLength` + 未 commit frontier 1 — ADR 0066 決定 6 の
@@ -223,7 +230,7 @@ export type GenerationSequence = {
    * run まで**が反映される（生成が進むにつれ増える）。生成の合間に読めば「直近に完了した生成
    * までの確定値」で、切り詰めの判断はそこで行う。
    *
-   * 次のターンが通るかは `used + prompt.length + maxNewTokens - 1 ≤ program.capacity` かつ
+   * 次のターンが通るかは `used + prompt.length + maxNewTokens - 1 ≤ capacity` かつ
    * `used + prompt.length + maxNewTokens - 2 < program.maxPosition`（溢れたときの実値は
    * {@link GenerationCapacityError} が運ぶ）。
    */
@@ -284,6 +291,17 @@ export type GenerationSequenceOptions<C extends GenerationContextFace> = {
   readonly session: GenerationSession<C>;
   /** 検証済みの静的配線（`createGenerationProgram` の返り値）。 */
   readonly program: GenerationWiring;
+  /**
+   * この会話が使う full スロットの容量（省略時は {@link GenerationWiring.capacity} = 配布形の既定）。
+   *
+   * **sequence 生成時のノブ**である — 容量は state スロットの物理確保量そのもの（gemma4 E2B なら
+   * full 層 12,288 B/token）なので、「長い会話」と「VRAM」の交換はここで 1 度だけ決まる。以後
+   * 動かせないのは、context の物理確保が生成時に済んでいるためで、変えたいなら別の sequence を
+   * 作る（KV は引き継げない — ADR 0066 追記 2 の `rewind` 全拒否と同じ線）。
+   *
+   * MUST: `program.chunkLength ≤ capacity ≤ program.maxPosition`（生成時に fail loudly）。
+   */
+  readonly capacity?: number;
 };
 
 /** i32 の入力テンソル 1 本（token id 列も絶対位置列も `[1, rows]`）。 */
@@ -340,6 +358,7 @@ const readLogits = (
  */
 const assertBudget = (
   program: GenerationWiring,
+  capacity: number,
   pastLength: number,
   promptLength: number,
   maxNewTokens: number,
@@ -366,12 +385,12 @@ const assertBudget = (
     );
   }
   const peak = pastLength + promptLength + maxNewTokens - 1;
-  if (peak > program.capacity) {
+  if (peak > capacity) {
     throw new GenerationCapacityError(
       `会話が state 容量を超える: 既存 ${pastLength} + prompt ${promptLength} + ` +
         `maxNewTokens ${maxNewTokens} は ${peak} 行を要求する` +
-        `（容量 ${program.capacity} — 会話の切り詰めはホストの責務）`,
-      detail("capacity", program.capacity),
+        `（容量 ${capacity} — 会話の切り詰めはホストの責務）`,
+      detail("capacity", capacity),
     );
   }
 };
@@ -390,9 +409,26 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
   options: GenerationSequenceOptions<C>,
 ): Promise<GenerationSequence> => {
   const { session, program } = options;
+  const capacity = options.capacity ?? program.capacity;
+  if (!Number.isSafeInteger(capacity) || capacity < 1) {
+    throw new Error(`capacity ${capacity} が 1 以上の整数でない`);
+  }
+  // 容量の関係は context を確保する前に見る（`parseGemma4PipelineConfig` が宣言に対して見るのと
+  // 同じ 2 式を、実行時ノブに対しても通す）。
+  if (capacity < program.chunkLength) {
+    throw new Error(
+      `capacity ${capacity} が chunkLength ${program.chunkLength} を下回る（1 chunk すら入らない）`,
+    );
+  }
+  if (capacity > program.maxPosition) {
+    throw new Error(
+      `capacity ${capacity} が maxPosition ${program.maxPosition} を超えた` +
+        `（容量いっぱいの会話がモデルの位置上限の外を引く）`,
+    );
+  }
   // MUST: 容量記号の束縛点は context 生成だけ（ADR 0066 追記 7 — run の bindings へは渡さない）。
   const context = await session.createGenerationContext({
-    bindings: program.bindings,
+    bindings: { [program.capacitySymbol]: capacity },
     chunkLength: program.chunkLength,
   });
 
@@ -430,11 +466,16 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
    */
   const deriveInputs = async (
     ids: Int32Array<ArrayBuffer>,
+    positions: Int32Array<ArrayBuffer>,
     signal: AbortSignal | undefined,
   ): Promise<RunInputs> => {
     const derived = program.derivedInputs;
     if (derived === undefined) return {};
-    const extra = await derived.derive([...ids], signal === undefined ? {} : { signal });
+    const extra = await derived.derive(
+      [...ids],
+      [...positions],
+      signal === undefined ? {} : { signal },
+    );
     const keys = Object.keys(extra);
     const missing = derived.names.filter((name) => !Object.hasOwn(extra, name));
     const surplus = keys.filter((name) => !derived.names.includes(name));
@@ -530,7 +571,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             "prompt が空（前ターンの pendingToken も無いので流す token が 1 つも無い）",
           );
         }
-        assertBudget(program, past, promptIds.length, maxNewTokens);
+        assertBudget(program, capacity, past, promptIds.length, maxNewTokens);
 
         const chunks = planPrefillChunks(promptIds.length, program.chunkLength);
         // repetition penalty が見る「それまでの token 列」（HF が `input_ids` 全体に掛けるのと
@@ -553,7 +594,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             ids[row] = promptIds[chunk.position + row];
             positions[row] = base + row;
           }
-          const extra = await deriveInputs(ids, signal);
+          const extra = await deriveInputs(ids, positions, signal);
           // MUST: 派生入力の `await` 明けにもう一度見る（ADR 0083 決定 5 の「段の境目」は run の
           // **発行直前**）。ここを省くと、中断が届いた後に run が 1 本まるごと進む — 先頭 chunk は
           // 常に cold miss で GB 級の shard を読むので、「送信直後に停止」で必ず踏む窓になる。
@@ -561,7 +602,6 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           const outputs = await session.run(
             {
               [program.inputIds]: i32Row(rows, ids),
-              [program.positionIds]: i32Row(rows, positions),
               [program.lastRow]: lastRowInput(chunk.queryLength - 1),
               ...extra,
             },
@@ -592,14 +632,14 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         for (let step = 0; step + 1 < maxNewTokens; step += 1) {
           await settleAbort(signal);
           const ids = Int32Array.of(token);
-          const extra = await deriveInputs(ids, signal);
+          const positions = Int32Array.of(context.pastLength);
+          const extra = await deriveInputs(ids, positions, signal);
           // prefill 側と同じ理由で run の発行直前にもう一度見る（decode で踏むと token が 1 個
           // 余分に消費者へ届く）。
           signal?.throwIfAborted();
           const outputs = await session.run(
             {
               [program.inputIds]: i32Row(1, ids),
-              [program.positionIds]: i32Row(1, Int32Array.of(context.pastLength)),
               [program.lastRow]: lastRowInput(0),
               ...extra,
             },
@@ -637,6 +677,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
   };
 
   return {
+    capacity,
     // MUST: getter で毎回導出する（`context.pastLength` と `pendingToken` が唯一の源）。
     get used(): number {
       return context.pastLength + (pendingToken === undefined ? 0 : 1);

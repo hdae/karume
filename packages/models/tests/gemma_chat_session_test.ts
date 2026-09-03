@@ -113,6 +113,8 @@ type FakeHost = Gemma4ChatSessionHost & {
   disposed(): number;
   /** `generate` が受けた prompt を発行順に。 */
   prompts(): readonly (readonly number[])[];
+  /** `sequence()` が受けた容量を発行順に（セッションのノブが降りているか）。 */
+  capacities(): readonly (number | undefined)[];
 };
 
 /**
@@ -123,6 +125,7 @@ type FakeHost = Gemma4ChatSessionHost & {
  */
 const fakeHost = (answers: readonly Answer[], program: GenerationProgram): FakeHost => {
   const prompts: number[][] = [];
+  const capacities: (number | undefined)[] = [];
   let created = 0;
   let disposed = 0;
   let turn = 0;
@@ -133,11 +136,15 @@ const fakeHost = (answers: readonly Answer[], program: GenerationProgram): FakeH
     created: () => created,
     disposed: () => disposed,
     prompts: () => prompts,
-    sequence: (): Promise<GenerationSequence> => {
+    capacities: () => capacities,
+    sequence: (options = {}): Promise<GenerationSequence> => {
       created += 1;
+      capacities.push(options.capacity);
+      const capacity = options.capacity ?? program.capacity;
       let used = 0;
       let gone = false;
       return Promise.resolve({
+        capacity,
         get used(): number {
           return used;
         },
@@ -393,6 +400,57 @@ Deno.test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す 
     // 縮まない結果は 1 回で打ち切る（再試行の回数は履歴の件数に張り付かない）。
     assertEquals(calls, 1);
   });
+});
+
+Deno.test("ChatSession capacity: 省略時は program の既定・渡せばそれが sequence と溢れ判定の物差し", async (t) => {
+  await t.step("省略時は配布形の既定がそのまま降りる", async () => {
+    const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+    const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+    assertEquals(await session.send("Name a color.").text(), "Blue.");
+    assertEquals(host.capacities(), [640], "sequence へ渡る容量");
+  });
+
+  await t.step("渡した容量が sequence へ降り、切り詰めの判断もその値で行う", async () => {
+    // program の既定は十分広い（640）が、セッションは狭い容量を選ぶ — 既定で判断していれば
+    // 溢れ処理は 1 度も呼ばれず、選んだ容量で判断していれば呼ばれる。
+    const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+    let overflows = 0;
+    const session = new Gemma4ChatSession(host, {
+      maxNewTokens: MAX_NEW_TOKENS,
+      capacity: 8,
+      onOverflow: (context) => {
+        overflows += 1;
+        return dropOldestTurns(context);
+      },
+    });
+    const error = await assertRejects(
+      () => session.send("Name a color.").text(),
+      GenerationCapacityError,
+      "会話が入り切らない",
+    );
+    assertEquals(error.limit, 8, "選んだ容量が上限として運ばれる");
+    assertEquals(overflows, 1, "溢れ処理は選んだ容量で呼ばれる");
+    assertEquals(host.capacities(), [8], "sequence にも同じ容量が降りる");
+  });
+});
+
+Deno.test("ChatSession: onPrefill が chunk ごとの進捗を運ぶ（本文には出ない情報）", async () => {
+  const host = fakeHost(
+    [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
+    programOf(640),
+  );
+  const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+  const seen: { readonly chunk: number; readonly chunks: number }[] = [];
+
+  assertEquals(
+    await session.send("Name a color.", { onPrefill: (progress) => seen.push(progress) }).text(),
+    "Blue.",
+  );
+  assertEquals(seen, [{ chunk: 1, chunks: 1 }], "台本の prefill イベントがそのまま届く");
+
+  // ターンごとの指定なので、渡さなかったターンには届かない（購読を持ち越さない）。
+  assertEquals(await session.send("Another one.").text(), "Red.");
+  assertEquals(seen.length, 1);
 });
 
 Deno.test("ChatSession: 1 セッション = 1 生成（同時 send と dispose 後は同期に throw）", async () => {

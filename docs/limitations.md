@@ -18,9 +18,9 @@ device（= `acquireGpu()`）を分けること。解除は WebGPU 側に「ス�
 `Session.run` は「戻り Promise を await せずに次を発行してよい」を公開契約に持つが、**第 3 引数
 `generation` の `context` が同じ run だけは例外**で、未決着の 1 本目がある間の 2 本目は
 `ExecutionError` で落ちる（`GenerationContext` の run リースが 1 本上限）。理由は沈黙誤値:
-2 本目は 1 本目が進めた論理長で uniform と dispatch を組む一方、位置入力（RoPE の
-`position_ids` 等）は**呼び出し側が発行時に組んだ普通のグラフ入力**でランタイムは中身を見ない —
-KV の論理長は正しいまま位置だけが静かにずれる。並行させたい生成は **context を分ける**
+2 本目は 1 本目が進めた論理長で uniform と dispatch を組む一方、位置を運ぶ入力（gemma4 なら
+RoPE の cos / sin 派生入力 — ホストが位置から組む）は**呼び出し側が発行時に組んだ普通のグラフ
+入力**でランタイムは中身を見ない — KV の論理長は正しいまま位置だけが静かにずれる。並行させたい生成は **context を分ける**
 （別 context 同士と、generation 面を持たない 1-shot run の並行発行は従来どおり通る）。
 
 なお第 3 引数の 2 欄（`context` / `queryLength`）は `inputs` / `bindings` / `copyOutputs` と同じく
@@ -973,16 +973,39 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 - state スロットの dtype は f32 のみ（f16 は席予約 — ADR 0066 追記 5）・複数シーケンス /
   batch>1 の生成・paged KV は ADR 0066 決定 8 のスコープ外。
 
+## gemma4: capacity / chunkLength は実行時ノブ — 値を変えると token 列が動きうる
+
+配布形の `pipelineConfig.capacity` / `chunkLength` は**既定値**で、呼び手が
+`Gemma4Pipeline.sequence({ capacity })` / `Gemma4ChatSession` の `capacity`（1 会話 = 1 容量）と
+`Gemma4PipelineOptions.chunkLength`（pipeline 単位）で上書きできる（ADR
+[0091](decisions/0091-gemma4-host-rope-variable-capacity.md) 決定 4）。上限は `chunkLength ≤
+capacity ≤ maxPosition`（モデルの宣言・E2B は 131,072）。VRAM は容量に比例して伸びる（full 層 KV
+12,288 B/token + states 形 attention の一時 S = `8 × 行ブロック行数 × capacity × 4 B`）ので、
+`Gemma4Pipeline.estimateSessionMemory({ capacity, chunkLength })` で確保前に見積もれる（必要側の
+合計だけ — 空き側との比較はしない）。
+
+- **`chunkLength` を変えると greedy の token 列が動きうる**: sliding 層の行統計は S の列を 256
+  レーンへ `past` 依存の原点で割り当てるので、chunk の刻み（= `past` の系列）が変わると f32 の
+  部分和の畳み方が変わる（full 層と linear は不変）。実測（RTX 3080 Ti・P=4,096・24 token）では
+  32 / 256 / 512 / 768 で一致したが、余裕の小さい step では反転しうる。検収の golden は配布形の
+  宣言値で採る。
+- **`capacity` は token 列に効かない**（仕事量は論理長で切られ、値は容量非依存 — ビット門あり）。
+- `chunkLength` の上限は焼いた記号 `M` の trace 上限（E2B は 768）で、配布形はその値を宣言しない。
+  超える値は run のエンコードでランタイムが落とす（fail loudly だが文言は真因から遠い）。
+- 上流の RoPE 表とはビット同一でない（TS が f64 で計算し f32 へ丸める — 上流は全経路 f32）。
+  差は位置比例で P=131,071 の最悪 4.8e-3。golden はこの表で採り直してある（同 ADR 決定 2）。
+
 ## 生成 sequence: 会話の切り詰めは低レベル面ではホストの責務（容量超過は専用型で落とす）
 
 `GenerationSequence`（`packages/models/src/generation/sequence.ts`・ADR
 [0083](decisions/0083-generation-api-surface.md) 決定 10・改訂は同 追記 2026-09-02）は会話を
 **自動で切り詰めない**。
-配布形が宣言する 2 つの上限 — full スロットの容量（`pastLength + queryLength ≤ C` — ADR
-[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 ④）と位置表の排他的上限
-（`maxPosition`）— を超えるターンは、run を 1 本も出す前に `GenerationCapacityError` で落ちる。
-どちらも同じ型なのは、呼び手にとって「この会話はもう入らない」という同じ事実で、打つ手も同じ
-だから。
+2 つの上限 — その会話が確保した full スロットの容量（`pastLength + queryLength ≤ C` — ADR
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 ④・sequence 生成時に選ぶ
+実行時ノブで既定は配布形の宣言 `capacity`）とモデルが宣言する位置の排他的上限（`maxPosition` —
+ADR [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)）— を超えるターンは、run を
+1 本も出す前に `GenerationCapacityError` で落ちる。どちらも同じ型なのは、呼び手にとって「この
+会話はもう入らない」という同じ事実で、打つ手も同じだから。
 
 打つ手は**ホスト側**にある: 古い turn を落として新しい context へ token transcript を replay する
 （`rewind` は sliding スロットを含む context では全拒否 — ADR

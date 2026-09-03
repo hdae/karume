@@ -51,6 +51,8 @@ import {
   decodeChatChunks,
   type Gemma4ChatStop,
   type Gemma4ChatStream,
+  type Gemma4PrefillProgress,
+  type Gemma4SequenceOptions,
 } from "./pipeline.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4ChatTurn } from "./text/chat.ts";
 import type { GemmaTokenizer } from "./text/tokenizer.ts";
@@ -66,15 +68,15 @@ export type Gemma4ChatSessionHost = {
   readonly tokenizer: GemmaTokenizer;
   readonly program: GenerationProgram;
   readonly defaultSampler: Gemma4DefaultSampler | undefined;
-  sequence(): Promise<GenerationSequence>;
+  sequence(options?: Gemma4SequenceOptions): Promise<GenerationSequence>;
 };
 
 /**
  * 溢れ処理に渡る文脈（「今の会話」と「あとどれだけ足りないか」）。
  *
  * `capacity` / `needed` は**同じ物差し**（会話が占める論理位置の数）で、`needed > capacity` が
- * 呼ばれた理由である。`capacity` は配布形の 2 つの上限のうち**先に効いた方**（state 容量と位置表
- * の小さい方）で、どちらでも打つ手は同じ（会話を短くする）。
+ * 呼ばれた理由である。`capacity` は 2 つの上限のうち**先に効いた方**（このセッションが確保した
+ * state 容量と、モデルが宣言する位置上限の小さい方）で、どちらでも打つ手は同じ（会話を短くする）。
  */
 export type Gemma4ChatOverflow = {
   /** 現在の履歴（system 発話を宣言していれば先頭がそれ）。 */
@@ -105,6 +107,17 @@ export type Gemma4ChatSessionOptions = {
   /** 1 ターンで生成する token 数の上限（ターンごとに上書きできる）。 */
   readonly maxNewTokens: number;
   /**
+   * このセッションが確保する容量（省略時は配布形の既定 = `host.program.capacity`）。
+   *
+   * セッション 1 本 = 会話 1 本なので、ここが「この会話に KV をどれだけ取るか」である。溢れ判定
+   * （{@link Gemma4ChatSessionOptions.onOverflow} を呼ぶ線）もこの値で行う — 切り詰めの基準と
+   * 実際に確保した容量が別の数だと、通るはずのターンを落としたりその逆をしたりする。
+   *
+   * MUST: sequence を作り直しても同じ値を使う（会話の途中で容量が変わると、切り詰めの判断が
+   * ターンごとに別の物差しになる）。
+   */
+  readonly capacity?: number;
+  /**
    * このセッションの sampling 指定。省略時は配布形の宣言
    * （{@link Gemma4ChatSessionHost.defaultSampler}）で、それも無ければ温度 0（greedy）。
    */
@@ -128,6 +141,13 @@ export type Gemma4ChatTurnOptions = {
   readonly stopStrings?: readonly string[];
   /** 省略時はセッションの sampler。 */
   readonly sampler?: SamplerSpec;
+  /**
+   * prefill の進捗（chunk が 1 本 commit されるたび — `Gemma4ChatOptions.onPrefill` と同じ意味）。
+   *
+   * 会話が伸びるほど「KV を継げず全体を描き直すターン」の prefill は長くなるので、無音時間を
+   * 出す口が要る。
+   */
+  readonly onPrefill?: (progress: Gemma4PrefillProgress) => void;
   /** 中断（`signal.reason` をそのまま throw する — ADR 0083 決定 5）。 */
   readonly signal?: AbortSignal;
 };
@@ -160,9 +180,13 @@ export const dropOldestTurns: Gemma4ChatOverflowPolicy = (
  * NOTE: 欄の割り振りは sequence 層と 1 だけずれる — この層の `pastLength` は `used`（未 commit
  * frontier 込み）で、`promptLength` はこの層が渡す prompt の長さである。合計も
  * `maxNewTokens`（= 今なら通る上限）も sequence 層の欄と一致する。
+ *
+ * MUST: `capacity` は**このセッションが確保した容量**（`program.capacity` = 配布形の既定ではない）。
+ * 実際に確保した容量と別の数で切り詰めを判断すると、通るターンを落とすか、落ちるターンを送る。
  */
 const overflowOf = (
   program: GenerationProgram,
+  capacity: number,
   used: number,
   promptLength: number,
   maxNewTokens: number,
@@ -181,7 +205,7 @@ const overflowOf = (
   const peak = used + promptLength + maxNewTokens - 1;
   // 順序は sequence 層と同じ（両方踏むターンで同じ constraint を名乗る）。
   if (peak - 1 >= program.maxPosition) return detail("maxPosition", program.maxPosition);
-  if (peak > program.capacity) return detail("capacity", program.capacity);
+  if (peak > capacity) return detail("capacity", capacity);
   return undefined;
 };
 
@@ -213,6 +237,8 @@ export class Gemma4ChatSession {
   readonly #maxNewTokens: number;
   readonly #sampler: SamplerSpec | undefined;
   readonly #onOverflow: Gemma4ChatOverflowPolicy;
+  /** このセッションが確保する容量（sequence を作り直しても不変 — 溢れ判定の物差しでもある）。 */
+  readonly #capacity: number;
   /** 会話の履歴（この層の唯一の可変状態 — sequence は transcript を持たない）。 */
   #turns: Gemma4ChatMessage[];
   /** 現在の sequence（`undefined` = 次のターンで作り直す）。 */
@@ -230,6 +256,7 @@ export class Gemma4ChatSession {
     this.#maxNewTokens = options.maxNewTokens;
     this.#sampler = options.sampler;
     this.#onOverflow = options.onOverflow ?? dropOldestTurns;
+    this.#capacity = options.capacity ?? host.program.capacity;
     this.#turns = options.system === undefined ? [] : [{ role: "system", content: options.system }];
   }
 
@@ -267,6 +294,7 @@ export class Gemma4ChatSession {
     const sampler = options.sampler ?? this.#sampler ?? this.#host.defaultSampler;
     const stopTokens = options.stopTokens === undefined ? undefined : [...options.stopTokens];
     const signal = options.signal;
+    const onPrefill = options.onPrefill;
     // 停止文字列の状態機械もここで作る（指定の検査と複製がその中で済む = 受理集合が同期に落ちる）。
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
     const detokenizer = this.#host.tokenizer.createDetokenizer();
@@ -302,7 +330,7 @@ export class Gemma4ChatSession {
           ...(sampler === undefined ? {} : { sampler }),
           ...(signal === undefined ? {} : { signal }),
         });
-        const parts = decodeChatChunks(stream, detokenizer, stopStrings);
+        const parts = decodeChatChunks(stream, detokenizer, stopStrings, onPrefill);
         try {
           for (;;) {
             const step = await parts.next();
@@ -377,7 +405,7 @@ export class Gemma4ChatSession {
     const attempts = this.#turns.length;
     for (let attempt = 0;; attempt += 1) {
       if (this.#sequence === undefined) {
-        this.#sequence = await this.#host.sequence();
+        this.#sequence = await this.#host.sequence({ capacity: this.#capacity });
         this.#committed = 0;
       }
       const sequence = this.#sequence;
@@ -392,7 +420,13 @@ export class Gemma4ChatSession {
       const prompt = this.#committed === 0
         ? gemma4ChatPrompt(this.#host.tokenizer, this.#turns)
         : gemma4ChatTurn(this.#host.tokenizer, this.#turns[this.#turns.length - 1]);
-      const detail = overflowOf(this.#host.program, sequence.used, prompt.length, maxNewTokens);
+      const detail = overflowOf(
+        this.#host.program,
+        this.#capacity,
+        sequence.used,
+        prompt.length,
+        maxNewTokens,
+      );
       if (detail === undefined) return { sequence, prompt };
       if (attempt >= attempts) {
         throw new Error(

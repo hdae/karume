@@ -500,6 +500,34 @@ Deno.test("chat 停止文字列: 複数の停止文字列は本文に先に現�
   assertEquals(parts.join(""), "a");
 });
 
+Deno.test("chat prefill: 進捗は onPrefill が受け、本文の列は 1 文字も変わらない", async () => {
+  // 長い prompt では最初の文字が出るまでの無音時間が prefill そのもので、文字列の面には
+  // その進捗を運ぶ片が無い（本文はまだ 1 文字も出ていない）。観測席が唯一の経路である。
+  const events = (async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
+    yield { kind: "prefill", chunk: 1, chunks: 3 };
+    yield { kind: "prefill", chunk: 2, chunks: 3 };
+    yield { kind: "prefill", chunk: 3, chunks: 3 };
+    yield { kind: "token", id: 0, position: 0 };
+    yield { kind: "token", id: 1, position: 1 };
+  })();
+  const seen: { readonly chunk: number; readonly chunks: number }[] = [];
+  const chunks = decodeChatChunks(
+    events,
+    new StreamingDetokenizer(sourceOf(SPELLINGS)),
+    createStopStringFilter([]),
+    (progress) => seen.push(progress),
+  );
+  const parts: string[] = [];
+  for await (const part of chunks) parts.push(part);
+
+  assertEquals(seen, [
+    { chunk: 1, chunks: 3 },
+    { chunk: 2, chunks: 3 },
+    { chunk: 3, chunks: 3 },
+  ], "commit 済み chunk 数がそのまま届く");
+  assertEquals(parts, ["Hel", "lo "], "本文の片は観測席の有無で変わらない");
+});
+
 Deno.test("chat 一括: text() は片の連結と一致し、done も併せて読める", async () => {
   const stop: Gemma4ChatStop = { reason: "max-tokens", tokens: 3 };
   const chunks = (async function* (): AsyncGenerator<string, void, undefined> {

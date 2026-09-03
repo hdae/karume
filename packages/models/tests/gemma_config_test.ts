@@ -19,10 +19,22 @@ import { parseManifest } from "@karume/hub";
 import { type Gemma4PipelineConfig, parseGemma4PipelineConfig } from "../src/gemma/config.ts";
 import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 
-/** 受理される最小形（3 つの数だけ — `sampler` は optional）。 */
-const MINIMAL = { chunkLength: 32, maxPosition: 1024, capacity: 640 } as const;
-/** 配布形ミラーが宣言する capacity（= 焼き込んだ RoPE 表の行数 `maxPosition`）。 */
-const SHIPPED_CAPACITY = 1024;
+/**
+ * 受理される最小形（3 つの数 + `rope` — `sampler` だけが optional）。
+ *
+ * `rope` は Gemma 4 E2B の実値（sliding は default rope・full は partial rotary 0.25 の
+ * proportional）。表は配布形に無く、cos / sin はこの宣言からホストが作る。
+ */
+const ROPE = {
+  sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
+  full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
+} as const;
+const MINIMAL = { chunkLength: 32, maxPosition: 1024, capacity: 640, rope: ROPE } as const;
+/** 配布形ミラーが宣言する既定（capacity / chunkLength はどちらも実行時ノブの**既定**）。 */
+const SHIPPED_CHUNK_LENGTH = 768;
+const SHIPPED_CAPACITY = 4096;
+/** 上流 `max_position_embeddings`（= モデルが宣言する位置上限）。 */
+const SHIPPED_MAX_POSITION = 131072;
 
 /** 上流 `gemma-4-E2B-it` の `generation_config.json` の推奨（ADR 0083 決定 7）。 */
 const RECOMMENDED = { temperature: 1, topK: 64, topP: 0.95 } as const;
@@ -38,7 +50,7 @@ const readMirror = (): string | undefined => {
   }
 };
 
-Deno.test("gemma4 pipelineConfig: 3 つの数と optional な sampler を読む", () => {
+Deno.test("gemma4 pipelineConfig: 3 つの数 + rope と optional な sampler を読む", () => {
   assertEquals(parseGemma4PipelineConfig(MINIMAL), MINIMAL);
   assertEquals(
     parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...RECOMMENDED } }),
@@ -70,8 +82,93 @@ Deno.test("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", async (
     const { capacity: _dropped, ...rest } = MINIMAL;
     assertThrows(() => parseGemma4PipelineConfig(rest), Error, "pipelineConfig.capacity: 無い");
   });
+  await t.step("rope は必須（欠けたまま動くと回転しない attention が黙って走る）", () => {
+    const { rope: _dropped, ...rest } = MINIMAL;
+    assertThrows(() => parseGemma4PipelineConfig(rest), Error, "pipelineConfig.rope: 無い");
+  });
   await t.step("sampler は欄ごと無ければ通る（= 低層の既定 = greedy）", () => {
     assertEquals(parseGemma4PipelineConfig(MINIMAL).sampler, undefined);
+  });
+});
+
+Deno.test("gemma4 pipelineConfig: rope の受理集合", async (t) => {
+  const withRope = (rope: unknown): unknown => ({ ...MINIMAL, rope });
+
+  await t.step("層種別は 2 本ちょうど（未知の層種別・欠落）", () => {
+    assertThrows(
+      () => parseGemma4PipelineConfig(withRope({ ...ROPE, local_attention: ROPE.full_attention })),
+      Error,
+      "未知キー 'local_attention'",
+    );
+    const { full_attention: _dropped, ...sliding } = ROPE;
+    assertThrows(
+      () => parseGemma4PipelineConfig(withRope(sliding)),
+      Error,
+      "pipelineConfig.rope.full_attention: 無い",
+    );
+  });
+
+  await t.step("層種別の欄は 3 つちょうど（綴り違いが既定へ縮退しない）", () => {
+    assertThrows(
+      () =>
+        parseGemma4PipelineConfig(
+          withRope({ ...ROPE, full_attention: { ...ROPE.full_attention, ropeType: "linear" } }),
+        ),
+      Error,
+      "未知キー 'ropeType'",
+    );
+    assertThrows(
+      () =>
+        parseGemma4PipelineConfig(
+          withRope({ ...ROPE, sliding_attention: { theta: 10000, headDim: 256 } }),
+        ),
+      Error,
+      "pipelineConfig.rope.sliding_attention.rotaryDim: 無い",
+    );
+    assertThrows(
+      () =>
+        parseGemma4PipelineConfig(
+          withRope({ ...ROPE, sliding_attention: { ...ROPE.sliding_attention, theta: "10000" } }),
+        ),
+      Error,
+      "pipelineConfig.rope.sliding_attention.theta: 数でない",
+    );
+  });
+
+  await t.step("値域の門は rope.ts が持つ（同じ式を 2 実装しない）", () => {
+    // 奇数の rotaryDim は「前半 = 後半」の並びが崩れる = 上流と別の表を黙って作る。
+    assertThrows(
+      () =>
+        parseGemma4PipelineConfig(
+          withRope({ ...ROPE, full_attention: { ...ROPE.full_attention, rotaryDim: 129 } }),
+        ),
+      Error,
+      "rotaryDim は 2 以上 headDim 以下の偶数",
+    );
+    assertThrows(
+      () =>
+        parseGemma4PipelineConfig(
+          withRope({ ...ROPE, full_attention: { ...ROPE.full_attention, rotaryDim: 1024 } }),
+        ),
+      Error,
+      "rotaryDim は 2 以上 headDim 以下の偶数",
+    );
+    assertThrows(
+      () =>
+        parseGemma4PipelineConfig(
+          withRope({ ...ROPE, sliding_attention: { ...ROPE.sliding_attention, theta: 0 } }),
+        ),
+      Error,
+      "theta は正の有限値",
+    );
+    assertThrows(
+      () =>
+        parseGemma4PipelineConfig(
+          withRope({ ...ROPE, sliding_attention: { ...ROPE.sliding_attention, headDim: 255 } }),
+        ),
+      Error,
+      "headDim は 2 以上の偶数",
+    );
   });
 });
 
@@ -103,14 +200,14 @@ Deno.test("gemma4 pipelineConfig: 値域", async (t) => {
 Deno.test("gemma4 pipelineConfig: chunkLength ≤ capacity ≤ maxPosition", async (t) => {
   await t.step("1 chunk すら入らない容量", () => {
     assertThrows(
-      () => parseGemma4PipelineConfig({ chunkLength: 64, capacity: 32, maxPosition: 1024 }),
+      () => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 64, capacity: 32 }),
       Error,
       "capacity 32 を超えた",
     );
   });
-  await t.step("容量いっぱいの会話が位置表の外を引く", () => {
+  await t.step("容量いっぱいの会話がモデルの位置上限の外を引く", () => {
     assertThrows(
-      () => parseGemma4PipelineConfig({ chunkLength: 32, capacity: 2048, maxPosition: 1024 }),
+      () => parseGemma4PipelineConfig({ ...MINIMAL, capacity: 2048, maxPosition: 1024 }),
       Error,
       "maxPosition 1024 を超えた",
     );
@@ -179,9 +276,11 @@ Deno.test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサ�
   const config = parseGemma4PipelineConfig(entry.pipelineConfig);
   // 推奨サンプラは**上流の宣言そのもの**（写経していれば値が動く）。
   assertEquals(config.sampler, RECOMMENDED, "配布形が宣言する sampler の既定");
-  assertEquals(config.chunkLength, MINIMAL.chunkLength);
-  // 配布形の capacity は RoPE 表の上限まで引き上げ済み（2026-09-02・recipes gemma4/distribution.py の
-  // GEMMA4_CAPACITY）。合成の MINIMAL（640）は「表の内側の任意値」で、配布形の宣言とは別物。
+  assertEquals(config.chunkLength, SHIPPED_CHUNK_LENGTH);
+  // capacity / chunkLength は実行時ノブで、配布形が宣言するのはその**既定**である。
   assertEquals(config.capacity, SHIPPED_CAPACITY);
-  assertEquals(config.maxPosition, MINIMAL.maxPosition);
+  // 位置上限は上流 `max_position_embeddings`（表の行数ではない — 表は配布形から外れた）。
+  assertEquals(config.maxPosition, SHIPPED_MAX_POSITION);
+  // RoPE のパラメータは上流 config の実値そのもの（写し損ねると回転が別物になる）。
+  assertEquals(config.rope, ROPE, "配布形が宣言する rope");
 });

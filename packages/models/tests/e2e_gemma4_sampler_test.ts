@@ -45,6 +45,7 @@ import {
   gemma4PleShardBytes,
   parseGemma4PleIndex,
 } from "../src/gemma/ple.ts";
+import { gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import { planPrefillChunks } from "../src/generation/greedy.ts";
 import { createSampler, isStopToken, type SamplerSpec } from "../src/generation/sampler.ts";
 import {
@@ -84,14 +85,19 @@ const GREEDY_STEPS = 16;
 const STOP_TOKENS = [1, 106, 50] as const;
 
 /** 実行条件は既存の門と同値（同じ資産世代の裁定をそのまま使う）。 */
-const CHUNK_LENGTH = 32;
+const CHUNK_LENGTH = 768;
 const CAPACITY_SYMBOL = "C";
-const CAPACITY = 640;
-const MAX_POSITION = 1024;
+const CAPACITY = 4096;
+const MAX_POSITION = 131072;
 
-/** グラフ入力の名前（正本は `export_product` の定数）。 */
+/** RoPE のパラメータ（配布形の宣言と同じ値 — 表は資産に無く cos / sin はホストが作る）。 */
+const ROPE: Gemma4RopeSpec = {
+  sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
+  full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
+};
+
+/** グラフ入力の名前（正本は `export_product` の定数 — `position_ids` はもう無い）。 */
 const INPUT_IDS = "input_ids";
-const POSITION_IDS = "position_ids";
 const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
 
@@ -183,7 +189,7 @@ const generate = async (
 ): Promise<number[]> => {
   const chunks = planPrefillChunks(prompt.length, CHUNK_LENGTH);
   const lastPosition = prompt.length + maxNewTokens - 2;
-  assert(lastPosition < MAX_POSITION, `最終位置 ${lastPosition} が RoPE 表の外`);
+  assert(lastPosition < MAX_POSITION, `最終位置 ${lastPosition} がモデルの位置上限の外`);
   assert(prompt.length + maxNewTokens <= CAPACITY, `T + K が容量 ${CAPACITY} を超える`);
 
   const sampler = createSampler(spec);
@@ -204,8 +210,8 @@ const generate = async (
       const outputs = await session.run(
         {
           [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
-          [POSITION_IDS]: i32Row(CHUNK_LENGTH, positions),
           [PER_LAYER_INPUTS]: await ple.gather([...ids]),
+          ...gemma4RopeInputs(ROPE, positions),
           [LAST_ROW]: lastRowInput(chunk.queryLength - 1),
         },
         undefined,
@@ -224,8 +230,8 @@ const generate = async (
       const outputs = await session.run(
         {
           [INPUT_IDS]: i32Row(1, Int32Array.of(current)),
-          [POSITION_IDS]: i32Row(1, Int32Array.of(prompt.length + index)),
           [PER_LAYER_INPUTS]: await ple.gather([current]),
+          ...gemma4RopeInputs(ROPE, [prompt.length + index]),
           [LAST_ROW]: lastRowInput(0),
         },
         undefined,

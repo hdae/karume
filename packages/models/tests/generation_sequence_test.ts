@@ -22,6 +22,7 @@ import type {
 } from "@karume/runtime";
 import {
   createGenerationProgram,
+  type DerivedRunInputs,
   type GenerationGraph,
   type GenerationProgramSpec,
   type GenerationWiring,
@@ -37,31 +38,35 @@ import {
 
 const VOCAB = 16;
 const IDS = "input_ids";
-const POSITIONS = "position_ids";
 const LAST_ROW = "last_row";
 const LOGITS = "logits";
 const DERIVED = "per_layer_inputs";
 const CHUNK_LENGTH = 4;
 
-type GraphInput = GenerationGraph["inputs"][number];
-
-const graphOf = (derived: boolean): GenerationGraph => ({
+const graphOf = (): GenerationGraph => ({
   symbols: ["C", "M"],
   inputs: [
     { name: IDS, dtype: "i32", shape: [1, "M"] },
-    { name: POSITIONS, dtype: "i32", shape: [1, "M"] },
-    ...(derived ? [{ name: DERIVED, dtype: "f32", shape: [1, "M", 2] } satisfies GraphInput] : []),
+    { name: DERIVED, dtype: "f32", shape: [1, "M", 2] },
     { name: LAST_ROW, dtype: "i32", shape: [1] },
   ],
   outputs: [LOGITS],
   values: { [LOGITS]: { dtype: "f32", shape: [1, 1, VOCAB] } },
 });
 
-const programOf = (override: Partial<GenerationProgramSpec> = {}): GenerationWiring =>
+/**
+ * 静的配線。**派生入力の席は fake が持つ**（既定は位置列を記録する実装）。
+ *
+ * 位置は run の入力ではなくなった（`position_ids` はグラフから消え、位置に依存するホスト入力は
+ * 派生入力の席が受ける）ので、「どの run にどの位置が渡ったか」を見られる唯一の場所がここである。
+ */
+const programOf = (
+  fake: FakeSession,
+  override: Partial<GenerationProgramSpec> = {},
+): GenerationWiring =>
   createGenerationProgram({
-    graph: graphOf(override.derivedInputs !== undefined),
+    graph: graphOf(),
     inputIds: IDS,
-    positionIds: POSITIONS,
     lastRow: LAST_ROW,
     logits: LOGITS,
     chunkLength: CHUNK_LENGTH,
@@ -69,7 +74,8 @@ const programOf = (override: Partial<GenerationProgramSpec> = {}): GenerationWir
     capacity: 64,
     vocabSize: VOCAB,
     stopTokens: [],
-    bindings: { C: 64 },
+    capacitySymbol: "C",
+    derivedInputs: fake.derivedInputs,
     ...override,
   });
 
@@ -105,11 +111,34 @@ type FakeOptions = {
   readonly failAt?: number;
 };
 
+type FakeSession = ReturnType<typeof fakeSession>;
+
 const fakeSession = (options: FakeOptions = {}) => {
   const calls: RunCall[] = [];
   const specs: GenerationContextSpec[] = [];
   let pastLength = 0;
   let disposals = 0;
+  /** 直前の `derive` が受けた位置列（run の記録へ合流させる — 位置は run の入力ではない）。 */
+  let derivedPositions: readonly number[] = [];
+  /** 既定の派生入力の席（`[1,M,2]` の f32 を返しつつ、渡った位置列を記録する）。 */
+  const derivedInputs: DerivedRunInputs = {
+    names: [DERIVED],
+    derive: (ids, positions) => {
+      if (ids.length !== positions.length) {
+        throw new Error(`fake: ids ${ids.length} と positions ${positions.length} の長さが違う`);
+      }
+      derivedPositions = [...positions];
+      return Promise.resolve(
+        {
+          [DERIVED]: {
+            dtype: "f32",
+            shape: [1, ids.length, 2],
+            data: new Float32Array(ids.length * 2),
+          },
+        } satisfies RunInputs,
+      );
+    },
+  };
   const context = {
     get pastLength(): number {
       return pastLength;
@@ -128,20 +157,18 @@ const fakeSession = (options: FakeOptions = {}) => {
     run: async (inputs, bindings, generation): Promise<RunOutputs> => {
       const call = calls.length;
       const ids = readRow(inputs, IDS);
-      const positions = readRow(inputs, POSITIONS);
       const lastRow = readRow(inputs, LAST_ROW);
       calls.push({
         ids: ids.values,
         idsShape: ids.shape,
-        positions: positions.values,
+        // この run の直前に `derive` が受けた位置列（run の入力には無い）。
+        positions: derivedPositions,
         lastRow: lastRow.values[0],
         lastRowShape: lastRow.shape,
         queryLength: generation.queryLength,
         pastBefore: pastLength,
         bindings,
-        extra: Object.keys(inputs).filter(
-          (name) => name !== IDS && name !== POSITIONS && name !== LAST_ROW,
-        ),
+        extra: Object.keys(inputs).filter((name) => name !== IDS && name !== LAST_ROW),
         sameContext: generation.context === context,
       });
       if (options.failAt === call) throw new Error("run が落ちた");
@@ -155,6 +182,7 @@ const fakeSession = (options: FakeOptions = {}) => {
   };
   return {
     session,
+    derivedInputs,
     calls,
     specs,
     disposals: (): number => disposals,
@@ -178,7 +206,7 @@ Deno.test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const { events, stop } = await drain(
     sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 3 }),
@@ -220,7 +248,7 @@ Deno.test("GenerationSequence: 長い prompt は chunk ごとに prefill イベ�
   const fake = fakeSession({ tokens: [1, 2, 3] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const { events } = await drain(
     sequence.generate({ prompt: [1, 2, 3, 4, 5, 6], maxNewTokens: 1 }),
@@ -246,7 +274,7 @@ Deno.test("多ターン: max-tokens 停止後の pendingToken が次ターン pr
   const fake = fakeSession({ tokens: [5, 6, 7, 9] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const first = await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 3 }));
   assertEquals(tokenIds(first.events), [5, 6, 7]);
@@ -265,7 +293,7 @@ Deno.test("多ターン: EOS 停止でも停止 token は会話に残る（イ�
   const fake = fakeSession({ tokens: [5, 11, 3] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({ stopTokens: [11] }),
+    program: programOf(fake, { stopTokens: [11] }),
   });
   const first = await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 4 }));
 
@@ -286,7 +314,7 @@ Deno.test("要求の stopTokens: 配布形の集合が空でも、そのター�
   const fake = fakeSession({ tokens: [5, 11, 3] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({ stopTokens: [] }),
+    program: programOf(fake, { stopTokens: [] }),
   });
   const first = await drain(
     sequence.generate({ prompt: [1, 2], maxNewTokens: 4, stopTokens: [11] }),
@@ -306,9 +334,10 @@ Deno.test("要求の stopTokens: 配布形の集合が空でも、そのター�
 
 Deno.test("要求の stopTokens: 配布形の EOS 集合との和集合で判定する（EOS は常に効く）", async () => {
   // 要求が停止集合を渡しても、配布形の EOS を上書きはしない（両方が効く = 和集合）。
+  const eosFake = fakeSession({ tokens: [5, 11, 3] });
   const eos = await createGenerationSequence({
-    session: fakeSession({ tokens: [5, 11, 3] }).session,
-    program: programOf({ stopTokens: [11] }),
+    session: eosFake.session,
+    program: programOf(eosFake, { stopTokens: [11] }),
   });
   assertEquals(
     (await drain(eos.generate({ prompt: [1, 2], maxNewTokens: 4, stopTokens: [9] }))).stop,
@@ -317,9 +346,10 @@ Deno.test("要求の stopTokens: 配布形の EOS 集合との和集合で判定
   );
 
   // 両方に居る id は `eos` で閉じる（配布形の終端記号としての意味が優先する）。
+  const bothFake = fakeSession({ tokens: [5, 11, 3] });
   const both = await createGenerationSequence({
-    session: fakeSession({ tokens: [5, 11, 3] }).session,
-    program: programOf({ stopTokens: [11] }),
+    session: bothFake.session,
+    program: programOf(bothFake, { stopTokens: [11] }),
   });
   assertEquals(
     (await drain(both.generate({ prompt: [1, 2], maxNewTokens: 4, stopTokens: [11] }))).stop,
@@ -334,7 +364,7 @@ Deno.test("要求の stopTokens: 語彙外・重複は同期に落ちる（効�
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 1, stopTokens: [VOCAB] }),
@@ -358,7 +388,7 @@ Deno.test("要求の stopTokens: 発行後に配列へ足しても走行中の�
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   // 呼び手が握ったままの可変な停止集合（発行時は空 = 止まらない指定）。
   const stopTokens: number[] = [];
@@ -376,7 +406,7 @@ Deno.test("多ターン: break 中断後も pendingToken が残り、次ター�
   const fake = fakeSession({ tokens: [5, 6, 7, 8, 9, 10] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
 
   const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 5 });
@@ -404,7 +434,7 @@ Deno.test("多ターン: 続きだけのターン（prompt 空）は pendingToke
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 5 });
   for await (const event of stream) {
@@ -424,7 +454,7 @@ Deno.test("GenerationSequence: prompt が空で pendingToken も無ければ fai
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   await assertRejects(
     () => drain(sequence.generate({ prompt: [], maxNewTokens: 1 })),
@@ -440,7 +470,7 @@ Deno.test("GenerationSequence: abort は signal.reason を包まずそのまま 
   const fake = fakeSession({ tokens: [5, 6, 7, 8] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const controller = new AbortController();
   const reason = new Error("呼び手が止めた");
@@ -478,7 +508,7 @@ Deno.test("GenerationSequence: 発行済みの signal は 1 本も run を出さ
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const controller = new AbortController();
   const reason = new Error("最初から中断");
@@ -505,7 +535,7 @@ Deno.test("GenerationSequence: 順番待ちの間に届いた中断は run を 1
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({ capacity: 8 }),
+    program: programOf(fake, { capacity: 8 }),
   });
 
   const first = sequence.generate({ prompt: [1, 2], maxNewTokens: 3 });
@@ -544,7 +574,7 @@ Deno.test("GenerationSequence: 2 本の generate は直列化される（run が
   const fake = fakeSession({ tokens: [5, 6, 7, 8, 9, 10] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
 
   const log: string[] = [];
@@ -564,13 +594,88 @@ Deno.test("GenerationSequence: 2 本の generate は直列化される（run が
   assertEquals(fake.calls[2].ids, [6, 3, 0, 0]);
 });
 
-// ---- 容量（ADR 0083 決定 10） ----
+// ---- 容量（ADR 0083 決定 10 / 可変 capacity 波の実行時ノブ） ----
+
+Deno.test("capacity ノブ: 既定は program の宣言・渡した値が context の束縛になる", async () => {
+  const declared = fakeSession();
+  const byDefault = await createGenerationSequence({
+    session: declared.session,
+    program: programOf(declared),
+  });
+  assertEquals(byDefault.capacity, 64, "省略時は配布形の既定");
+  assertEquals(declared.specs[0].bindings, { C: 64 }, "容量記号の束縛も既定");
+
+  const chosen = fakeSession();
+  const narrowed = await createGenerationSequence({
+    session: chosen.session,
+    program: programOf(chosen),
+    capacity: 16,
+  });
+  // 束縛点は context 生成だけ（ADR 0066 追記 7）— state スロットの物理確保がこの値で決まる。
+  assertEquals(narrowed.capacity, 16);
+  assertEquals(chosen.specs[0].bindings, { C: 16 });
+  assertEquals(chosen.specs[0].chunkLength, CHUNK_LENGTH, "chunk 長は program のまま");
+});
+
+Deno.test("capacity ノブ: 予算検査は program の既定ではなく選んだ容量で行う", async () => {
+  const fake = fakeSession({ tokens: [5] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+    capacity: 8,
+  });
+  // peak = 0 + 6 + 4 − 1 = 9 > 8（program の既定 64 なら通ってしまう形）。
+  const error = await assertRejects(
+    () => drain(sequence.generate({ prompt: [1, 2, 3, 4, 5, 6], maxNewTokens: 4 })),
+    GenerationCapacityError,
+    "state 容量を超える",
+  );
+  assertEquals(error.limit, 8, "例外が運ぶ上限も選んだ容量");
+  assertEquals(fake.calls.length, 0);
+});
+
+Deno.test("capacity ノブ: 関係を破る値は sequence を作る時点で fail loudly", async () => {
+  const fake = fakeSession();
+  // 1 chunk すら入らない容量（run を 1 本も出せない context を作らせない）。
+  await assertRejects(
+    () =>
+      createGenerationSequence({
+        session: fake.session,
+        program: programOf(fake),
+        capacity: CHUNK_LENGTH - 1,
+      }),
+    Error,
+    `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
+  );
+  // モデルの位置上限の外まで容量を取る形（容量いっぱいの会話が学習外の位置を踏む）。
+  await assertRejects(
+    () =>
+      createGenerationSequence({
+        session: fake.session,
+        program: programOf(fake),
+        capacity: 129,
+      }),
+    Error,
+    "capacity 129 が maxPosition 128 を超えた",
+  );
+  await assertRejects(
+    () =>
+      createGenerationSequence({
+        session: fake.session,
+        program: programOf(fake),
+        capacity: 8.5,
+      }),
+    Error,
+    "capacity 8.5 が 1 以上の整数でない",
+  );
+  assertEquals(fake.specs.length, 0, "context を 1 本も確保していない");
+});
 
 Deno.test("GenerationSequence: 容量超過は GenerationCapacityError（run の前に落ちる）", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({ capacity: 8 }),
+    program: programOf(fake, { capacity: 8 }),
   });
   // peak = past 0 + prompt 6 + maxNewTokens 4 − 1 = 9 > 8。
   await assertRejects(
@@ -590,7 +695,7 @@ Deno.test("GenerationSequence: used は pastLength + 未 commit frontier から�
   const fake = fakeSession({ tokens: [5, 6, 7, 9] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   assertEquals(sequence.used, 0, "生成前");
 
@@ -615,7 +720,7 @@ Deno.test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ�
   const fake = fakeSession({ tokens: [5] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({ capacity: 8 }),
+    program: programOf(fake, { capacity: 8 }),
   });
   await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 1 }));
   assertEquals(sequence.used, 3);
@@ -642,7 +747,7 @@ Deno.test("GenerationCapacityError: 位置表の上限も同じ欄で運ぶ（co
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({ maxPosition: 5 }),
+    program: programOf(fake, { maxPosition: 5, capacity: 5 }),
   });
   const error = await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 4 })),
@@ -663,7 +768,7 @@ Deno.test("GenerationSequence: 位置表の上限超過も同じ型で落とす"
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({ maxPosition: 5 }),
+    program: programOf(fake, { maxPosition: 5, capacity: 5 }),
   });
   // 最終位置 = 0 + 3 + 4 − 2 = 5（排他的上限 5 の外）。
   await assertRejects(
@@ -681,7 +786,7 @@ Deno.test("GenerationSequence: 容量は自分の順番が来てから見る（�
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({ capacity: 10 }),
+    program: programOf(fake, { capacity: 10 }),
   });
   await drain(sequence.generate({ prompt: [1, 2, 3, 4], maxNewTokens: 4 }));
   assertEquals(fake.pastLength(), 7);
@@ -695,16 +800,16 @@ Deno.test("GenerationSequence: 容量は自分の順番が来てから見る（�
 
 // ---- ホスト由来の per-chunk 入力（PLE の席） ----
 
-Deno.test("DerivedRunInputs: pad 行込みの id 列が渡り、入力として結線される", async () => {
+Deno.test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入力として結線される", async () => {
   const fake = fakeSession({ tokens: [5, 6] });
-  const seen: (readonly number[])[] = [];
+  const seen: { readonly ids: readonly number[]; readonly positions: readonly number[] }[] = [];
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({
+    program: programOf(fake, {
       derivedInputs: {
         names: [DERIVED],
-        derive: (ids) => {
-          seen.push([...ids]);
+        derive: (ids, positions) => {
+          seen.push({ ids: [...ids], positions: [...positions] });
           return Promise.resolve(
             {
               [DERIVED]: {
@@ -720,8 +825,12 @@ Deno.test("DerivedRunInputs: pad 行込みの id 列が渡り、入力として�
   });
   await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 2 }));
 
-  // prefill は物理行数ぶん（pad 行にも `input_ids` と同じ 0 が入る）・decode は 1 行。
-  assertEquals(seen, [[1, 2, 3, 0], [5]]);
+  // prefill は物理行数ぶん（pad 行にも `input_ids` と同じ 0 が入る）・decode は 1 行。位置も
+  // 同じ規約（pad 行は 0）で、絶対位置が prompt の続きから 1 ずつ進む。
+  assertEquals(seen, [
+    { ids: [1, 2, 3, 0], positions: [0, 1, 2, 0] },
+    { ids: [5], positions: [3] },
+  ]);
   assertEquals(fake.calls.map((call) => call.extra), [[DERIVED], [DERIVED]]);
 });
 
@@ -733,7 +842,7 @@ Deno.test("DerivedRunInputs: 生成の signal が derive まで降りる（best-
   const controller = new AbortController();
   const derived = (): GenerationWiring["derivedInputs"] => ({
     names: [DERIVED],
-    derive: (ids, options) => {
+    derive: (ids, _positions, options) => {
       seen.push(options?.signal);
       return Promise.resolve(
         {
@@ -749,16 +858,17 @@ Deno.test("DerivedRunInputs: 生成の signal が derive まで降りる（best-
 
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf({ derivedInputs: derived() }),
+    program: programOf(fake, { derivedInputs: derived() }),
   });
   await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 2, signal: controller.signal }));
   assertEquals(seen.length, 2);
   assert(seen.every((signal) => signal === controller.signal), "derive に別の signal が渡っている");
 
   // 購読していない要求には捏造しない。
+  const bareFake = fakeSession();
   const bare = await createGenerationSequence({
-    session: fakeSession().session,
-    program: programOf({ derivedInputs: derived() }),
+    session: bareFake.session,
+    program: programOf(bareFake, { derivedInputs: derived() }),
   });
   await drain(bare.generate({ prompt: [1], maxNewTokens: 1 }));
   assertEquals(seen[2], undefined);
@@ -774,7 +884,7 @@ Deno.test("DerivedRunInputs: derive の await 明けに届いた中断は run �
     let derives = 0;
     const sequence = await createGenerationSequence({
       session: fake.session,
-      program: programOf({
+      program: programOf(fake, {
         derivedInputs: {
           names: [DERIVED],
           derive: async (ids) => {
@@ -832,7 +942,7 @@ Deno.test("DerivedRunInputs: 宣言と違うキーを返したら fail loudly", 
     const fake = fakeSession();
     const sequence = await createGenerationSequence({
       session: fake.session,
-      program: programOf({
+      program: programOf(fake, {
         derivedInputs: { names: [DERIVED], derive: () => Promise.resolve(result) },
       }),
     });
@@ -851,7 +961,7 @@ Deno.test("GenerationSequence: 受理集合は同期に落ちる（順番待ち�
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 0 }),
@@ -890,7 +1000,7 @@ Deno.test("GenerationSequence: 要求は発行時に写す（発行後の書き�
   const fake = fakeSession({ tokens: [5, 6, 7, 8] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   // 呼び手が握ったままの可変な要求（配列も sampler の bias も後から触れる形）。
   const prompt = [1, 2];
@@ -920,7 +1030,7 @@ Deno.test("GenerationSequence: run の失敗は iterable と done の両方へ�
   const fake = fakeSession({ failAt: 1 });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 3 });
   await assertRejects(() => drain(stream), Error, "run が落ちた");
@@ -931,7 +1041,7 @@ Deno.test("GenerationSequence: done を読まない失敗が unhandled rejection
   const fake = fakeSession({ failAt: 0 });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 2 });
   await assertRejects(
@@ -949,7 +1059,7 @@ Deno.test("GenerationSequence: dispose は走行中の生成の後に走り、2 
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 3 });
   const iterator = stream[Symbol.asyncIterator]();
@@ -971,7 +1081,7 @@ Deno.test("GenerationSequence: dispose 済みの generate は同期に落ちる�
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   await sequence.dispose();
   assertThrows(
@@ -983,7 +1093,7 @@ Deno.test("GenerationSequence: dispose 済みの generate は同期に落ちる�
   // dispose 発行直後（完了前）も同じ — `disposal` が立った時点で新しい生成は受けない。
   const running = await createGenerationSequence({
     session: fake.session,
-    program: programOf(),
+    program: programOf(fake),
   });
   const disposal = running.dispose();
   assertThrows(

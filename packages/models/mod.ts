@@ -118,8 +118,14 @@ export type {
   /** `chat` の停止理由（sequence 層の理由 + この層でしか判定できない `stop-string`）。 */
   Gemma4ChatStop,
   Gemma4ChatStream,
+  /** `estimateSessionMemory` が見積る生成の形（容量 / chunk 長 — `./gemma` を参照）。 */
+  Gemma4EstimateOptions,
   Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,
+  /** prefill の進捗 1 通（`chunk / chunks` — `onPrefill` が受ける）。 */
+  Gemma4PrefillProgress,
+  /** `sequence()` の指定（この会話が確保する容量）。 */
+  Gemma4SequenceOptions,
 } from "./src/gemma/pipeline.ts";
 /**
  * 多ターンの会話を持ち回る中間層（`chat` と `sequence` の間 — 会話の履歴を持ち、KV を継ぎ、
@@ -140,6 +146,16 @@ export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/con
  * 口**で、`fromPretrained` は内部で通すので呼ぶ必要は無い（`./gemma` を参照）。
  */
 export { parseGemma4PipelineConfig } from "./src/gemma/config.ts";
+/**
+ * 配布形が宣言する RoPE のパラメータ（`pipelineConfig.rope` — 表は配布形に無く、cos / sin は
+ * chunk ぶんだけホストが作る。`./gemma` を参照）。
+ */
+export type { Gemma4RopeLayerSpec, Gemma4RopeLayerType, Gemma4RopeSpec } from "./src/gemma/rope.ts";
+/**
+ * 位置列 → RoPE のグラフ入力 4 本（`[1, rows, headDim]` の f32）。`Gemma4Pipeline` は内部で通すので、
+ * 要るのは製品グラフを自分で回す側だけ（`./gemma` を参照）。
+ */
+export { gemma4RopeInputs } from "./src/gemma/rope.ts";
 /**
  * 会話 → token id 列（`<bos>` 込み — 素の会話だけを受け、tools / thinking は fail loudly。
  * `./gemma` を参照）。`chat` は内部でこれを通すので、要るのは低レベル面（`sequence`）を

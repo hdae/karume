@@ -35,7 +35,15 @@
  * ## MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）
  */
 
-import { acquireGpu, type GpuContext, type Session } from "@karume/runtime";
+import {
+  acquireGpu,
+  type AdmissionReport,
+  estimateGraphMemory,
+  type GpuContext,
+  planWeightResidency,
+  type Session,
+  type SessionDiagnostics,
+} from "@karume/runtime";
 import {
   type AssetProgress,
   type CacheDiagnostic,
@@ -87,6 +95,7 @@ import {
   type Gemma4PleReadOptions,
   parseGemma4PleIndex,
 } from "./ple.ts";
+import { gemma4RopeInputNames, gemma4RopeInputs } from "./rope.ts";
 import {
   createStopStringFilter,
   type StopStringFilter,
@@ -96,9 +105,13 @@ import { parseGemmaTokenizerAsset } from "./text/asset.ts";
 import { GemmaTokenizer } from "./text/tokenizer.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4StopTokens } from "./text/chat.ts";
 
-/** グラフ入力の名前（正本は `export_product.py` の定数）。 */
+/**
+ * グラフ入力の名前（正本は `export_product.py` の定数）。
+ *
+ * NOTE: `position_ids` はもう無い — RoPE の cos / sin 4 本（`./rope.ts` が名前も値も作る）が
+ * 位置を運ぶ唯一の入力になった。位置は「表を引く添字」ではなく「表そのもの」として渡る。
+ */
 const INPUT_IDS = "input_ids";
-const POSITION_IDS = "position_ids";
 const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
 
@@ -157,6 +170,32 @@ export type Gemma4PipelineOptions = {
    * 違う RAM を意味する（ADR 0085 追記 2026-09-02）。
    */
   readonly maxResidentPleBytes?: number;
+  /**
+   * 固定長 prefill chunk の行数（省略時は配布形の宣言 {@link Gemma4PipelineConfig.chunkLength}）。
+   *
+   * 上げるほど prefill の run 本数が減り（フェンス待ちの回数もその比で減る）、1 run あたりの
+   * 一時バッファと attention のスコア行列が増える。グラフの chunk 行は記号なので、資産を
+   * 焼き直さずに選べる（ただし焼いた記号の上限を超える値は run のエンコードで落ちる）。
+   *
+   * MUST: 2 以上・`maxPosition` 以下（このパイプラインの門）。1 は decode 形の専用値で、prefill
+   * 形として流す経路が無い（有効行 1 本の chunk は `GenerationSequence` が decode 形で流す）。
+   * 各 sequence の容量に対する `chunkLength ≤ capacity` は `createGenerationSequence` が見る。
+   */
+  readonly chunkLength?: number;
+  /**
+   * 実行 1 回ごとの診断を受け取る観測席（他 7 家族と同型）。op 別 GPU 時間（`lastRunTiming`）が
+   * 要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
+   *
+   * 呼ばれるのは **run 1 本ごと**（prefill は chunk ごと・decode は step ごと）で、その run の
+   * 完了後である。prefill 直後の最初の token は最終 chunk の logits から抽選するだけで run を
+   * 伴わないので、そこでは呼ばない（呼ぶと同じ run の診断が 2 度届く）。
+   *
+   * NOTE: 他ファミリと違ってコンポーネント名を渡さない — グラフが 1 本しかないので、名前が
+   * 常に同じ 1 値になる（受け手が分岐できない引数を渡さない）。
+   *
+   * コールバックの例外は握らない（fail loudly — そのターンごと落ちる）。
+   */
+  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
@@ -187,6 +226,25 @@ export type Gemma4FromPretrainedOptions = Gemma4PipelineOptions & {
   readonly caches?: CacheStorage;
   /** 取得の中断（構築側へは渡らない — `chat` / `sequence` の中断は要求ごとの `signal`）。 */
   readonly signal?: AbortSignal;
+};
+
+/** {@link Gemma4Pipeline.sequence} の指定（1 会話ぶんの寿命に効く唯一のノブ）。 */
+export type Gemma4SequenceOptions = {
+  /**
+   * この会話が確保する full スロットの容量（省略時は配布形の既定 —
+   * {@link Gemma4PipelineConfig.capacity}）。
+   *
+   * MUST: `chunkLength ≤ capacity ≤ maxPosition`（`createGenerationSequence` が fail loudly）。
+   */
+  readonly capacity?: number;
+};
+
+/** {@link Gemma4Pipeline.estimateSessionMemory} の指定（見積る生成の形）。 */
+export type Gemma4EstimateOptions = {
+  /** 見積る容量（省略時はこの pipeline の既定）。 */
+  readonly capacity?: number;
+  /** 見積る chunk 長（省略時はこの pipeline が使う値）。 */
+  readonly chunkLength?: number;
 };
 
 /**
@@ -220,8 +278,36 @@ export type Gemma4ChatOptions = {
   readonly stopStrings?: readonly string[];
   /** sampling の指定（省略時は {@link Gemma4PipelineConfig.sampler}、それも無ければ greedy）。 */
   readonly sampler?: SamplerSpec;
+  /**
+   * このターンの sequence が確保する容量（省略時は配布形の既定 —
+   * {@link Gemma4PipelineConfig.capacity}）。
+   *
+   * `chat` は 1 ターン = 1 sequence なので、ここが「このターンの KV をどれだけ取るか」になる。
+   * 長い会話を持ち回るなら `Gemma4ChatSession`（セッション 1 本ぶんの容量）を使う。
+   */
+  readonly capacity?: number;
+  /**
+   * prefill の進捗（chunk が 1 本 commit されるたび）。
+   *
+   * 長い prompt では最初の文字が出るまでの無音時間が prefill そのものなので、進捗を出す口が
+   * ここにしか無い（`chat` が流すのは復号後の**本文**だけ — ADR 0084 決定 4）。
+   *
+   * コールバックの例外は握らない（fail loudly — そのターンごと落ちる）。
+   */
+  readonly onPrefill?: (progress: Gemma4PrefillProgress) => void;
   /** 中断（段の境目で検査し `signal.reason` をそのまま throw する — ADR 0083 決定 5）。 */
   readonly signal?: AbortSignal;
+};
+
+/**
+ * prefill の進捗 1 通ぶん（`chunk / chunks` がそのまま進捗）。
+ *
+ * `chunk` は**commit 済み**の chunk 数（1 始まり）で、`GenerationEvent` の `prefill` と同じ意味・
+ * 同じ数である（この層は文字列の面なのでイベント型そのものを出さない）。
+ */
+export type Gemma4PrefillProgress = {
+  readonly chunk: number;
+  readonly chunks: number;
 };
 
 /**
@@ -272,6 +358,14 @@ type Gemma4State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly session: Session;
+  /**
+   * 製品グラフの宣言（`estimateSessionMemory` の材料 — ADR 0070 決定 5 の estimator は
+   * `graph + 常駐計画` から純関数で出る）。
+   *
+   * MUST: `PreparedModel` ではなくグラフだけを持つ（`hub/components.ts` の同 MUST — 全量の
+   * バイト列を掴んだままにしない）。
+   */
+  readonly graph: ModelComponent["graph"];
   /** 生成ループが読む内部配線（`createGenerationSequence` へ渡す実体）。 */
   readonly wiring: GenerationWiring;
   /**
@@ -292,6 +386,8 @@ type Gemma4State = {
   readonly ple: Gemma4Ple;
   readonly tokenizer: GemmaTokenizer;
   readonly config: Gemma4PipelineConfig;
+  /** 実行 1 回ごとの観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）。 */
+  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
@@ -435,6 +531,28 @@ const admitGemma4 = (component: ModelComponent, config: Gemma4PipelineConfig): G
 };
 
 /**
+ * 実行時ノブの `chunkLength` を検査して返す（{@link Gemma4PipelineOptions.chunkLength} の門）。
+ *
+ * MUST: 2 以上（グラフの chunk 記号は prefill 形の最小 2 で焼かれており、1 行の chunk は decode 形
+ * として流れる）かつ `maxPosition` 以下。宣言（`parseGemma4PipelineConfig`）が同じ関係を既定値に
+ * 対して見るので、ここが見るのは**呼び手が上書きした値**である。
+ *
+ * NOTE: 容量との関係（`chunkLength ≤ capacity`）はここでは見ない — 容量は sequence ごとに選ぶので、
+ * 両者が揃う唯一の場所が `createGenerationSequence` である（同じ式を 2 箇所に持たない）。
+ */
+const assertChunkLength = (chunkLength: number, config: Gemma4PipelineConfig): number => {
+  if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
+    throw new Error(`Gemma4Pipeline: chunkLength ${chunkLength} が 2 以上の整数でない`);
+  }
+  if (chunkLength > config.maxPosition) {
+    throw new Error(
+      `Gemma4Pipeline: chunkLength ${chunkLength} が maxPosition ${config.maxPosition} を超えた`,
+    );
+  }
+  return chunkLength;
+};
+
+/**
  * admission を通った材料 + 資産から静的配線を組む（`fromAssets` と `fromPretrained` が共有）。
  *
  * ここが id 空間の相互照合（ADR 0085 決定 5）を全部通す — ①tokenizer が生成しうる id
@@ -473,23 +591,24 @@ const buildGemma4Program = (
   const wiring = createGenerationProgram({
     graph: component.graph,
     inputIds: INPUT_IDS,
-    positionIds: POSITION_IDS,
     lastRow: LAST_ROW,
     logits: component.graph.outputs[0],
-    chunkLength: config.chunkLength,
+    chunkLength: assertChunkLength(options.chunkLength ?? config.chunkLength, config),
     maxPosition: config.maxPosition,
     capacity: config.capacity,
     vocabSize,
     // 停止集合は tokenizer 資産の追加語彙から導出する（ADR 0083 決定 8 / 0084 決定 5 —
     // chat 形式と同じ digest set から来る）。
     stopTokens: gemma4StopTokens(tokenizer),
-    bindings: { [capacitySymbol]: config.capacity },
-    // ホスト由来の per-chunk 入力の席に PLE gather を差す（ADR 0085）。`options` は
-    // そのまま降ろす — shard 1 本 250MiB 級の読みが中断の届かない区間になるのを避ける。
+    capacitySymbol,
+    // ホスト由来の per-chunk 入力の席に PLE gather と RoPE の cos / sin を差す（ADR 0085 / 本波）。
+    // `options` は PLE へそのまま降ろす — shard 1 本 250MiB 級の読みが中断の届かない区間に
+    // なるのを避ける（rope は同期の計算なので中断の窓を作らない）。
     derivedInputs: {
-      names: [PER_LAYER_INPUTS],
-      derive: async (ids, deriveOptions) => ({
+      names: [PER_LAYER_INPUTS, ...gemma4RopeInputNames()],
+      derive: async (ids, positions, deriveOptions) => ({
         [PER_LAYER_INPUTS]: await ple.gather(ids, deriveOptions),
+        ...gemma4RopeInputs(config.rope, positions),
       }),
     },
   });
@@ -571,9 +690,15 @@ export const decodeChatChunks = async function* (
   events: AsyncIterable<GenerationEvent>,
   detokenizer: StreamingDetokenizer,
   stopStrings: StopStringFilter,
+  onPrefill?: (progress: Gemma4PrefillProgress) => void,
 ): AsyncGenerator<string, string | undefined, undefined> {
   for await (const event of events) {
-    if (event.kind !== "token") continue;
+    if (event.kind === "prefill") {
+      // 文字列の面には prefill の片が無い（本文はまだ 1 文字も出ていない）ので、進捗だけを
+      // 観測席へ渡す。例外は握らない（fail loudly — 呼び手のコールバックの誤りを飲まない）。
+      onPrefill?.({ chunk: event.chunk, chunks: event.chunks });
+      continue;
+    }
     const chunk = stopStrings.push(detokenizer.push(event.id));
     if (chunk.text !== "") yield chunk.text;
     if (chunk.matched !== undefined) return chunk.matched;
@@ -626,6 +751,35 @@ export const chatStreamOf = (
       return joinChunks(chunks);
     },
   };
+};
+
+/**
+ * 生成イベント列に観測席を挟む（{@link Gemma4PipelineOptions.onRunDiagnostics}）。
+ *
+ * 席が pipeline 層にあるのは、`GenerationSequence` が**パイプライン非依存**だからである（Session
+ * も診断も知らない — ADR 0083）。イベントは run 1 本ごとに 1 通 …… ただし 1 箇所だけ例外があり、
+ * prefill 直後の最初の token は「最終 chunk の logits から抽選しただけ」で run を伴わない。そこで
+ * 呼ぶと同じ run の診断が 2 度届くので、最初の token だけ飛ばす（`tokens === 1`）。
+ *
+ * MUST: 観測席が無ければ**元の列をそのまま返す**（包みを 1 枚も増やさない — 中断や `return()` の
+ * 伝播経路を、使わない人にまで足さない）。
+ */
+const withRunDiagnostics = (
+  stream: GenerationStream,
+  state: Pick<Gemma4State, "session" | "onRunDiagnostics">,
+): GenerationStream => {
+  const listener = state.onRunDiagnostics;
+  if (listener === undefined) return stream;
+  const events = async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
+    let tokens = 0;
+    for await (const event of stream) {
+      if (event.kind === "token") tokens += 1;
+      if (event.kind !== "token" || tokens > 1) listener(state.session.diagnostics());
+      yield event;
+    }
+  };
+  const iterable = events();
+  return { [Symbol.asyncIterator]: () => iterable, done: stream.done };
 };
 
 /** 片を汲み切って連結する（{@link Gemma4ChatStream.text} の本体）。 */
@@ -803,11 +957,15 @@ export class Gemma4Pipeline {
         gpu,
         ownsGpu,
         session: await admitted.component.createSession(gpu),
+        graph: admitted.component.graph,
         wiring,
         program: generationProgramFace(wiring),
         ple,
         tokenizer,
         config: admitted.config,
+        ...(options.onRunDiagnostics === undefined
+          ? {}
+          : { onRunDiagnostics: options.onRunDiagnostics }),
       });
     } catch (error) {
       // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
@@ -857,6 +1015,8 @@ export class Gemma4Pipeline {
     // 停止文字列の状態機械もここで作る（指定の検査と複製がその中で済む = 受理集合が同期に
     // 落ちる）。停止文字列が無ければ素通しになるので、経路を 2 本に割らない。
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
+    const capacity = options.capacity;
+    const onPrefill = options.onPrefill;
 
     let settle!: (stop: Gemma4ChatStop) => void;
     let fail!: (error: unknown) => void;
@@ -889,12 +1049,14 @@ export class Gemma4Pipeline {
         sequence = await createGenerationSequence({
           session: state.session,
           program: state.wiring,
+          ...(capacity === undefined ? {} : { capacity }),
         });
-        stream = sequence.generate(request);
+        stream = withRunDiagnostics(sequence.generate(request), state);
         matched = yield* decodeChatChunks(
           stream,
           state.tokenizer.createDetokenizer(),
           stopStrings,
+          onPrefill,
         );
       } catch (error) {
         failure = { error };
@@ -942,25 +1104,32 @@ export class Gemma4Pipeline {
    *
    * MUST: {@link Gemma4Pipeline.chat} との直列化はしない（別の会話は別の context なので
    * ランタイム側は受ける）。同時に走らせれば KV も 2 本ぶん常駐する。
+   *
+   * `capacity` はこの会話が確保する容量（省略時は配布形の既定）。KV の物理確保はここで済むので、
+   * 短い会話に大きな容量を取らせない / 長い会話に必要なぶんだけ取る、の判断はこの 1 箇所である。
    */
-  async sequence(): Promise<GenerationSequence> {
+  async sequence(options: Gemma4SequenceOptions = {}): Promise<GenerationSequence> {
     if (this.#disposal !== undefined) {
       throw new Error("Gemma4Pipeline: dispose 済みでは sequence を作れない");
     }
+    const state = this.#state;
     const inner = await createGenerationSequence({
-      session: this.#state.session,
-      program: this.#state.wiring,
+      session: state.session,
+      program: state.wiring,
+      ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
     });
     // 正しく返された sequence は追跡から外す（外さないと、多ターン UI が会話ごとに作って
     // 畳んでも Set が単調増加し、`dispose` が破棄済みの実体を全数もう一度 await する）。
     // 実体そのものではなく薄い包みを渡すのは、`GenerationSequence` に pipeline を知らせる席を
     // 作らないため（生成面は最後までパイプライン非依存 — ADR 0083）。
     const handed: GenerationSequence = {
+      capacity: inner.capacity,
       // 導出値なので包みも getter で素通しする（値を写すと「渡した瞬間の値」で固まる）。
       get used(): number {
         return inner.used;
       },
-      generate: (request) => inner.generate(request),
+      // 観測席（家族固有）はここで挟む — 中の sequence は Session も診断も知らない。
+      generate: (request) => withRunDiagnostics(inner.generate(request), state),
       dispose: async (): Promise<void> => {
         await inner.dispose();
         // 失敗した dispose は外さない（context が返っていないので `dispose` が巻き取る側に残す）。
@@ -969,6 +1138,45 @@ export class Gemma4Pipeline {
     };
     this.#handed.add(handed);
     return handed;
+  }
+
+  /**
+   * この pipeline で 1 会話を回すときの GPU メモリ必要量を見積もる（ADR 0070 決定 5 の estimator）。
+   *
+   * **ロードの後・sequence 生成の前**の面である。容量と chunk 長は実行時ノブなので、必要量は
+   * 「呼び手が生成の形を決めた後」でなければ決まらない（ADR 0089 追記 2026-09-02 の据え置きと
+   * 同じ読み — ロード面には結線しない）。
+   *
+   * MUST: 返るのは**必要側のカテゴリ別合計だけ**で、空き側との比較も可否判定もしない（同 決定 5）。
+   * 判定の最終門は out-of-memory errorScope のままで、この見積りは事前診断である。
+   *
+   * NOTE: `AdmissionReport` は runtime の型で、`@karume/models` は再輸出しない（ADR 0008 の薄い面 —
+   * 見積りを読む消費者は runtime の型をそのまま使う）。
+   */
+  estimateSessionMemory(options: Gemma4EstimateOptions = {}): AdmissionReport {
+    const { wiring, graph, gpu } = this.#state;
+    const capacity = options.capacity ?? wiring.capacity;
+    const chunkLength = assertChunkLength(
+      options.chunkLength ?? wiring.chunkLength,
+      this.#state.config,
+    );
+    if (!Number.isSafeInteger(capacity) || capacity < chunkLength) {
+      throw new Error(
+        `Gemma4Pipeline: capacity ${capacity} が chunkLength ${chunkLength} 未満`,
+      );
+    }
+    if (capacity > wiring.maxPosition) {
+      throw new Error(
+        `Gemma4Pipeline: capacity ${capacity} が maxPosition ${wiring.maxPosition} を超えた`,
+      );
+    }
+    return estimateGraphMemory(graph, planWeightResidency(graph), {
+      bindings: {},
+      generation: { chunkLength, bindings: { [wiring.capacitySymbol]: capacity } },
+      // MUST: 渡す（states 形 attention のノード内一時は行ブロック枚数がこの上限だけで決まるので、
+      // 省くと estimator が fail loudly する — 既定値で埋めない）。
+      maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+    });
   }
 
   /**

@@ -6,7 +6,7 @@
 //
 // 門は 4 本:
 //
-// ① 形の前提（入力 4 本 = input_ids / position_ids / **per_layer_inputs** / last_row・出力 1 本 =
+// ① 形の前提（入力 7 本 = input_ids / **per_layer_inputs** / **rope 4 本** / last_row・出力 1 本 =
 //    最終行 logits `[1,1,V]`・**argmax はグラフに無い**・PLE 表を引く embedding が無い・
 //    states 30 スロットは既存 2 系列と同一）
 // ② **PLE 逆量子化のビット一致**（ADR 0085 決定 4）: ホスト loader の gather が、台本が torch の
@@ -49,6 +49,7 @@ import {
   gemma4PleShardBytes,
   parseGemma4PleIndex,
 } from "../src/gemma/ple.ts";
+import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import { planPrefillChunks } from "../src/generation/greedy.ts";
 import {
   modelPresent,
@@ -84,14 +85,19 @@ const EXPECTED_CASES = ["capital-en", "capital-ja", "context-en"] as const;
 const GREEDY_STEPS = 16;
 
 /** 実行条件は既存 2 系列の門と同値（同じ資産世代の裁定をそのまま使う）。 */
-const CHUNK_LENGTH = 32;
+const CHUNK_LENGTH = 768;
 const CAPACITY_SYMBOL = "C";
-const CAPACITY = 640;
-const MAX_POSITION = 1024;
+const CAPACITY = 4096;
+const MAX_POSITION = 131072;
+
+/** RoPE のパラメータ（配布形の宣言と同じ値 — 表は資産に無く cos / sin はホストが作る）。 */
+const ROPE: Gemma4RopeSpec = {
+  sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
+  full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
+};
 
 /** グラフ入力の名前（正本は `export_decode` / `export_product` の定数）。 */
 const INPUT_IDS = "input_ids";
-const POSITION_IDS = "position_ids";
 const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
 
@@ -391,9 +397,11 @@ Deno.test({
 const assertProductForm = (parsed: PreparedModel): void => {
   const graph = parsed.graph;
   assertEquals(
-    graph.inputs.map((spec) => spec.name),
-    [INPUT_IDS, POSITION_IDS, PER_LAYER_INPUTS, LAST_ROW],
-    "グラフ入力（製品形は per_layer_inputs と last_row が増える）",
+    // 順序は書き手の宣言順に依らせない（名前で見る — 増えたのは rope 4 本で、`position_ids` は
+    // 消えた: 位置は「表を引く添字」ではなく「表そのもの」としてホストから渡る）。
+    [...graph.inputs.map((spec) => spec.name)].sort(),
+    [INPUT_IDS, PER_LAYER_INPUTS, LAST_ROW, ...gemma4RopeInputNames()].sort(),
+    "グラフ入力（製品形は per_layer_inputs / rope 4 本 / last_row）",
   );
   const perLayer = graph.inputs.find((spec) => spec.name === PER_LAYER_INPUTS);
   assert(perLayer !== undefined, `'${PER_LAYER_INPUTS}' が無い`);
@@ -437,8 +445,13 @@ const assertProductForm = (parsed: PreparedModel): void => {
     0,
     `PLE 表 [${VOCAB},${PLE_DIM}] を引く embedding が残っている（ホスト gather へ出し切れていない）`,
   );
-  // 主 embedding 1 + RoPE 表 4（cos/sin × 層種別 2）+ 最終行の行選択 1。
-  assertEquals(embeddings.length, 6, "embedding ノードの本数（PLE 35 本が消えた形）");
+  // 主 embedding 1 + 最終行の行選択 1（RoPE の cos / sin は表引きでなくホスト供給の派生入力 —
+  // ADR 0091 — なので gather は無い）。
+  assertEquals(
+    embeddings.length,
+    2,
+    "embedding ノードの本数（PLE 35 本と RoPE 表 4 本が消えた形）",
+  );
 
   assertEquals(
     Object.keys(graph.states).length,
@@ -506,7 +519,7 @@ const generate = async (
 ): Promise<GenerationRecord> => {
   const chunks = planPrefillChunks(prompt.length, CHUNK_LENGTH);
   const lastPosition = prompt.length + maxNewTokens - 2;
-  assert(lastPosition < MAX_POSITION, `最終位置 ${lastPosition} が RoPE 表の外`);
+  assert(lastPosition < MAX_POSITION, `最終位置 ${lastPosition} がモデルの位置上限の外`);
   assert(prompt.length + maxNewTokens <= CAPACITY, `T + K が容量 ${CAPACITY} を超える`);
 
   const context = await session.createGenerationContext({
@@ -528,8 +541,8 @@ const generate = async (
       const outputs = await session.run(
         {
           [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
-          [POSITION_IDS]: i32Row(CHUNK_LENGTH, positions),
           [PER_LAYER_INPUTS]: perLayer,
+          ...gemma4RopeInputs(ROPE, positions),
           [LAST_ROW]: lastRowInput(chunk.queryLength - 1),
         },
         undefined,
@@ -546,8 +559,8 @@ const generate = async (
       const outputs = await session.run(
         {
           [INPUT_IDS]: i32Row(1, Int32Array.of(current)),
-          [POSITION_IDS]: i32Row(1, Int32Array.of(prompt.length + index)),
           [PER_LAYER_INPUTS]: perLayer,
+          ...gemma4RopeInputs(ROPE, [prompt.length + index]),
           [LAST_ROW]: lastRowInput(0),
         },
         undefined,

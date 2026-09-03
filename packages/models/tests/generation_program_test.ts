@@ -15,7 +15,6 @@ import {
 
 const VOCAB = 64;
 const IDS = "input_ids";
-const POSITIONS = "position_ids";
 const LAST_ROW = "last_row";
 const LOGITS = "logits";
 const DERIVED = "per_layer_inputs";
@@ -27,7 +26,6 @@ const graphOf = (options: { readonly derived?: boolean } = {}): GenerationGraph 
   symbols: ["C", "M"],
   inputs: [
     { name: IDS, dtype: "i32", shape: [1, "M"] },
-    { name: POSITIONS, dtype: "i32", shape: [1, "M"] },
     ...(options.derived === false
       ? []
       : [{ name: DERIVED, dtype: "f32", shape: [1, "M", 2, 3] } satisfies GraphInput]),
@@ -42,7 +40,6 @@ const specOf = (
 ): GenerationProgramSpec => ({
   graph: graphOf(),
   inputIds: IDS,
-  positionIds: POSITIONS,
   lastRow: LAST_ROW,
   logits: LOGITS,
   chunkLength: 4,
@@ -50,7 +47,7 @@ const specOf = (
   capacity: 64,
   vocabSize: VOCAB,
   stopTokens: [7],
-  bindings: { C: 64 },
+  capacitySymbol: "C",
   derivedInputs: { names: [DERIVED], derive: () => Promise.resolve({}) },
   ...override,
 });
@@ -100,7 +97,6 @@ Deno.test("createGenerationProgram: 数値の受理集合", () => {
 Deno.test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly", () => {
   const cases: readonly (readonly [string, Partial<GenerationProgramSpec>, string])[] = [
     ["token id 入力が無い", { inputIds: "tokens" }, "token id 入力 'tokens' がグラフ入力に無い"],
-    ["位置入力が無い", { positionIds: "pos" }, "位置入力 'pos' がグラフ入力に無い"],
     ["last_row が無い", { lastRow: "row" }, "last_row 入力 'row' がグラフ入力に無い"],
     [
       "token id 入力が f32",
@@ -219,27 +215,40 @@ Deno.test("createGenerationProgram: グラフ入力の被覆を両方向で見�
   assertThrows(
     () =>
       createGenerationProgram(
-        specOf({ positionIds: IDS, derivedInputs: undefined, graph: graphOf({ derived: false }) }),
+        specOf({
+          graph: graphOf({ derived: false }),
+          derivedInputs: { names: [IDS], derive: () => Promise.resolve({}) },
+        }),
       ),
     Error,
     "結線した入力名に重複がある",
   );
 });
 
-Deno.test("createGenerationProgram: 記号は入力 shape か bindings のどちらかで決まること", () => {
-  // C（state スロットの容量記号）は入力 shape に現れない = bindings が唯一の源。
+Deno.test("createGenerationProgram: 記号は入力 shape か容量記号のどちらかで決まること", () => {
+  // C（state スロットの容量記号）は入力 shape に現れない = 容量記号が唯一の源。
   assertThrows(
-    () => createGenerationProgram(specOf({ bindings: undefined })),
+    () => createGenerationProgram(specOf({ capacitySymbol: "K" })),
     Error,
-    "記号 C が入力 shape からも bindings からも決まらない",
+    "容量記号 K がグラフの symbols [C, M] に無い",
   );
+  // 入力 shape から決まる記号を容量記号に選ぶと、run の束縛と context の束縛が分裂する。
   assertThrows(
-    () => createGenerationProgram(specOf({ bindings: { K: 64 } })),
+    () => createGenerationProgram(specOf({ capacitySymbol: "M" })),
     Error,
-    "束縛 K がグラフの symbols [C, M] に無い",
+    "容量記号 M は入力 shape から決まる記号である",
   );
-  // M は入力 shape から決まるので bindings に要らない（C だけで通る）。
-  createGenerationProgram(specOf({ bindings: { C: 64 } }));
+  // 容量記号が 1 本足りない形（states の記号が 2 本ある資産）。
+  assertThrows(
+    () =>
+      createGenerationProgram(
+        specOf({ graph: { ...graphOf(), symbols: ["C", "D", "M"] } }),
+      ),
+    Error,
+    "記号 D が入力 shape からも容量記号からも決まらない",
+  );
+  // M は入力 shape から決まるので容量記号に要らない（C だけで通る）。
+  assertEquals(createGenerationProgram(specOf()).capacitySymbol, "C");
 });
 
 Deno.test("GenerationGraph: 実 IrGraph がこの面を満たす（綴りのドリフト検出）", () => {
