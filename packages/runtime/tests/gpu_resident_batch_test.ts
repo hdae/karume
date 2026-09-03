@@ -229,6 +229,52 @@ Deno.test({
 });
 
 Deno.test({
+  name: "settle() の途中は enqueue も 2 度目の settle() も finish() も fail loudly（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const producer = await producerSession(gpu);
+    const consumer = await consumerSession(gpu);
+    const carrier = await gpu.createResident(BYTES, "carrier");
+    const sink = await gpu.createResident(BYTES, "sink");
+    try {
+      const batch = await gpu.beginBatch();
+      await producer.enqueue({ x: input(0) }, { batch, copyOutputs: { y: carrier } });
+
+      // 3 本の拒否は `settle()` を await しない**同期区間**でまとめて取る。await を挟むと
+      // 途中でフェンスが解けて区間が open へ戻りうるので、拒否を踏めたかどうかが実行時の
+      // 運になる（門としては空振りする）。
+      const settling = batch.settle();
+      const duplicated = batch.settle();
+      const late = producer.enqueue({ x: input(1) }, { batch, copyOutputs: { y: carrier } });
+      const closing = batch.finish();
+
+      await assertRejects(() => duplicated, BatchScopeError, "重ねて");
+      await assertRejects(() => late, BatchScopeError, "settle() の途中");
+      await assertRejects(() => closing, BatchScopeError, "finish() できない");
+      await settling;
+
+      // 拒否された enqueue が区間へ入っていないことは値で確かめる: 通っていれば carrier は
+      // phase 1 の 2 倍で上書きされ、消費側の出力は expectedChain(1) になる。
+      assert(
+        JSON.stringify(bits(expectedChain(0))) !== JSON.stringify(bits(expectedChain(1))),
+        "phase ごとに期待値が変わっていない（検出器として空振る）",
+      );
+      // 拒否は区間を壊さない: settle 後の finish は従来どおり通り、リースも簿記も残らない。
+      await consumer.enqueue({ z: carrier }, { batch, copyOutputs: { w: sink } });
+      await batch.finish();
+      assertEquals(bits(await sink.read()), bits(expectedChain(0)));
+    } finally {
+      await producer.dispose();
+      await consumer.dispose();
+      carrier.dispose();
+      sink.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "連続 enqueue の入力書き込みは先行 dispatch を追い越さない（eager submit の門・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

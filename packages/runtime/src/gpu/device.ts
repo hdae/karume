@@ -1378,25 +1378,44 @@ export class BatchScope {
    * `enqueue` が本体で落ちた区間が、dispatch を 1 本落としたまま成功で決着する」— しかも
    * 戻り Promise を握っていなければ未処理拒否として抜けるだけになる。同じ失敗は enqueue の
    * 戻り Promise 側にも従来どおり出る（1 つの事実が 2 経路で見えるのは `run` と同じ）。
+   * MUST: {@link BatchScope.settle} の途中では閉じられない（fail loudly）。区間の遷移は
+   * open → settling → open → finished の 1 方向で、飛び越えを許すと settle 側のフェンスが
+   * errorScope の pop より後に解け、未 await の `settle()` が未処理拒否として抜ける
+   * （finish は既に決着を返しているので事実が 1 つ消える）。拒否は**同期 throw ではなく
+   * 拒否済み Promise** で返す — finish は従来から同期には投げない規約で、`await using` /
+   * `Symbol.asyncDispose` 経路の後始末で例外が置き換わるのを避ける。
    * NOTE: in-flight を待つので、`enqueue()` の戻り Promise を await せずに `finish()` を
    * 呼んでも積んだぶんは必ず区間に入って完了する（リースの機構は {@link BatchInternals.enter}）。
    */
   finish(): Promise<void> {
+    if (this.#settling) {
+      // MUST: 決着は積まない（`#settled` を拒否で埋めると settle を await した後の正当な
+      // finish() まで同じ拒否を返し続ける）。
+      return Promise.reject(
+        new BatchScopeError(
+          "settle() の途中の batch は finish() できない（settle() を await してから閉じること）",
+        ),
+      );
+    }
     if (this.#settled === undefined) {
       this.#finished = true;
       // in-flight が 1 本も無ければここで決着させる（enqueue を 1 本も出していない区間・
       // 全て await 済みの区間は従来どおり待ちが増えない）。
       if (this.#leases === 0) this.#drained.resolve();
       this.#release();
-      this.#settled = this.#settle();
+      this.#settled = this.#resolveFinish();
       // 決着を呼び出し側が受け取るまで未処理拒否にしない（中身は finish がそのまま返す）。
       void this.#settled.catch(() => undefined);
     }
     return this.#settled;
   }
 
-  /** errorScope の pop 結果と記録したホスト側失敗を 1 本の決着にまとめる。 */
-  async #settle(): Promise<void> {
+  /**
+   * errorScope の pop 結果と記録したホスト側失敗を 1 本の決着にまとめる
+   * （{@link BatchScope.finish} の中身 — 区間の**途中**決着である公開
+   * {@link BatchScope.settle} とは別物なので、同名を避けてこの名前にしている）。
+   */
+  async #resolveFinish(): Promise<void> {
     try {
       await this.#completion;
     } catch (cause) {
