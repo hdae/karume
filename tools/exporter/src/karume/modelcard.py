@@ -231,6 +231,18 @@ def files(model: Mapping[str, Any]) -> list[str]:
         " `karume.json` — verify against that at the fetch layer).",
         "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `i8` / `i4`), not"
         " the `fp16` spelling common elsewhere in the ecosystem.",
+    ]
+    # `I4` は safetensors の方言（ADR 0069・docs/limitations.md「格納 dtype `I4` は
+    # safetensors の方言」）— 公式パーサで開けない事実は、その配布形を選んだ読み手にだけ
+    # 関わるので i4 ラベルが表に出たときだけ綴る（全カードに載せると事実でない主張になる）。
+    if any("i4" in labels for _, labels, _ in rows):
+        lines.append(
+            "A row labeled `i4` uses a packed int4 dtype (`I4`) that is **not part of the official"
+            " safetensors specification** — the official `safetensors` library rejects a file that"
+            " contains it (checked with 0.8.0). Karume's runtime and exporter read it; files"
+            " without `i4` stay fully compatible."
+        )
+    lines += [
         "A path under `shared/` is one this model shares byte for byte with another model in this"
         " repository (it is fetched and cached once).",
     ]

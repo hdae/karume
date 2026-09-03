@@ -183,6 +183,22 @@ class TestFilesSection:
         assert any("`source/front.safetensors` in [`hdae/karume-source`]" in line for line in lines)
         assert any(line.startswith("A row that names another repository") for line in lines)
 
+    def test_an_i4_row_flags_the_safetensors_dialect(self) -> None:
+        """`I4` は公式仕様に無い語（docs/limitations.md）— 公式パーサで開けない事実を表に添える。"""
+        manifest = _manifest()
+        manifest["models"]["zeta"]["weights"]["front"]["i4"] = {
+            "shards": [_ref("zeta/front-i4.safetensors", 1024, "1" * 64)]
+        }
+        lines = files(manifest["models"]["zeta"])
+
+        assert any(line.startswith("A row labeled `i4`") for line in lines)
+
+    def test_a_model_without_i4_says_nothing_about_the_dialect(self) -> None:
+        """f16 / i8 だけの配布形は公式互換のまま — 掛からない注意書きを載せない。"""
+        assert not any(
+            line.startswith("A row labeled `i4`") for line in files(_manifest()["models"]["zeta"])
+        )
+
     def test_a_self_contained_model_says_nothing_about_other_repositories(self) -> None:
         assert not any(
             line.startswith("A row that names another repository")
