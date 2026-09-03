@@ -43,6 +43,16 @@ ATOL_PER_POSITION = 1.2e-7
 #: 見る — 散点だけだと「先頭と上限だけ合う」形（周波数の並びが逆など）が素通りしうる。
 CONTIGUOUS_POSITIONS: tuple[int, ...] = tuple(range(65))
 
+#: 手写しの宣言（{@link rope_fixture.E2B_TEXT_CONFIG_FIELDS}）を実物へ結ぶ欄。RoPE の角度に
+#: 効くのはこの 4 つで、残りの欄は rotary モジュールを組むための足場（層数・hidden_size など）
+#: なので cos / sin の値には効かない。
+UPSTREAM_ROPE_FIELDS: tuple[str, ...] = (
+    "max_position_embeddings",
+    "head_dim",
+    "global_head_dim",
+    "rope_parameters",
+)
+
 
 def atol_for(position: int) -> float:
     """位置 1 つの許容差（位置に比例して開く）。"""
@@ -216,8 +226,11 @@ class TestUpstreamParity:
     def test_the_tolerance_is_not_slack(self, e2b_config, upstream) -> None:
         """許容差が実測の何倍かを固定する — 緩めすぎれば故障注入も通ってしまう。
 
-        余裕が 2 倍を切ったら「上流の f32 誤差が想定より大きい」ので、許容差ではなく前提を
-        見直す（余裕が 100 倍もあれば逆に緩すぎる）。
+        見るのは fixture の 13 点での最悪比（実測 0.548 = 余裕 1.8 倍・full sin の P=511）。
+        上限 0.9 は「余裕が 1.1 倍を切ったら上流の f32 誤差が想定より大きい」線で、位置
+        0..131,071 を全掃引したときの最悪比 0.756（余裕 1.3 倍）もその内側に入る。下限 0.01 は
+        逆に緩すぎる側（余裕 100 倍）を落とす。{@link ATOL_PER_POSITION} は角度の f32 表現誤差の
+        **上界**から採った係数なので、この比を理由に動かさない（動かすなら前提の側を採り直す）。
         """
         positions = rope_fixture.FIXTURE_POSITIONS
         worst = 0.0
@@ -296,6 +309,25 @@ class TestFixture:
             rope.SLIDING_ATTENTION: {"theta": 10000.0, "headDim": 256, "rotaryDim": 256},
         }
         assert stored["positions"] == list(rope_fixture.FIXTURE_POSITIONS)
+
+    @pytest.mark.skipif(
+        not rope_fixture.E2B_CONFIG_PATH.exists(),
+        reason=f"上流チェックポイントが無い（{rope_fixture.E2B_CONFIG_PATH}）",
+    )
+    def test_the_declaration_matches_the_upstream_checkpoint(self) -> None:
+        """MUST（`rope_fixture` の module docstring）: 手写しの宣言は実物の `config.json` と
+        同じ数を持つ。
+
+        上の 2 本は「フィクスチャが宣言どおり」までしか見ない — 宣言そのものが実物とずれると、
+        フィクスチャ・TS 実装・Python 実装の三者は自己整合したまま**配布形とだけ**食い違う
+        （上流が E2B の theta を変えた版を出したときの壊れ方）。
+        """
+        text_config = json.loads(rope_fixture.E2B_CONFIG_PATH.read_text(encoding="utf-8"))[
+            "text_config"
+        ]
+
+        for field in UPSTREAM_ROPE_FIELDS:
+            assert rope_fixture.E2B_TEXT_CONFIG_FIELDS[field] == text_config[field], field
 
     def test_the_tables_decode_to_the_declared_shape(self) -> None:
         """base64 は f32 リトルエンディアンの `positions × headDim`（TS 側の読み方の前提）。"""

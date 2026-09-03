@@ -52,6 +52,12 @@ const GEMMA_VALUES = [
   // RoPE の cos / sin はグラフに焼かれておらずホストが chunk ごとに作る（ADR 0091 決定 1）。
   // 低レベル面（`fromAssets` / 自前の生成ループ）の消費者はこれが無いと表を自前で組む羽目になる。
   "gemma4RopeInputs",
+  // 多ターンの会話を KV 継続で回す高レベル面（ADR 0083 追記 2026-09-02）。`mod.ts` の 1 行が
+  // 消えても両建て門（`./gemma` ⊆ barrel）は緑のままなので、名指しで縛るのはここだけ。
+  "Gemma4ChatSession",
+  // 溢れたときの既定ポリシー。消費者が**名指しで差し替える**口なので公開面に要る
+  // （出していないと「既定と同じものを自分で書く」しかなくなる）。
+  "dropOldestTurns",
 ];
 
 /** 公開面に出してはならない綴り（内部の組み立て口）。 */
@@ -66,6 +72,15 @@ const INTERNAL_VALUES = [
   "renderGemma4ChatTurn",
   "gemma4StopTokens",
   "GemmaTokenizer",
+  // chat 層の内部実装（`gemma_chat_test.ts` が `src/` から直に掴んでいる面）。公開面は
+  // `Gemma4Pipeline.chat` / `Gemma4ChatSession` だけで、逐次復号の部品は出さない
+  // — 出すと「停止文字列フィルタと detokenizer を自分で繋ぐ」形が消費者の正道になってしまう。
+  // `StreamingDetokenizer` は `export type` の再輸出なので**値としては**出ていない（型だけを
+  // 戻した場合は消費側の `deno check` が落ちる — 冒頭の NOTE）。
+  "createStopStringFilter",
+  "decodeChatChunks",
+  "chatStreamOf",
+  "StreamingDetokenizer",
 ];
 
 Deno.test("barrel: gemma の公開面（薄い面 — 組み立ての入口は出さない）", async () => {

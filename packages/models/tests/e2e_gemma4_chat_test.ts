@@ -44,6 +44,7 @@ import {
   Gemma4Pipeline,
 } from "../gemma.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { allResidentPleBytesAt } from "./helpers/ple-budget.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
 const TOKENIZER_ASSET = new URL(
@@ -72,12 +73,6 @@ const ROPE = {
   sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
   full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
 } as const;
-/**
- * PLE の常駐に使う予算（バイト）。現行世代の shard は 1 本 ≈253MiB なので 3 本ぶんが載る
- * （token 範囲をまたぐ会話で読み直しを増やしすぎない）。**本数ではなくバイト**で渡すのは、
- * shard 幅が資産世代で変わると「N 本」が別の RAM を意味するため（ADR 0085 追記 2026-09-02）。
- */
-const MAX_RESIDENT_PLE_BYTES = 768 * 1024 * 1024;
 
 /** gemma-4-E2B-it の `generation_config.json` の `eos_token_id`（ADR 0083 決定 8）。 */
 const STOP_TOKENS = [1, 106, 50];
@@ -189,7 +184,9 @@ const openPipeline = async (): Promise<Gemma4Pipeline> => {
     tokenizer: await Deno.readFile(TOKENIZER_ASSET),
     pleIndex: await Deno.readFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)),
     readPleShard: (file) => readBuffer(PRODUCT_ROOT, file),
-  }, { maxResidentPleBytes: MAX_RESIDENT_PLE_BYTES });
+    // 予算は索引から導く（= sidecar 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で
+    // 書くと資産世代で shard 幅が変われば別の本数を意味してしまう — helper の doc。
+  }, { maxResidentPleBytes: allResidentPleBytesAt(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)) });
 };
 
 Deno.test({

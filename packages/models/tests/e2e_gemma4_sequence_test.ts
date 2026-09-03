@@ -78,8 +78,23 @@ const BREAK_AFTER = 5;
 /** gemma-4-E2B-it の `generation_config.json` の `eos_token_id`（ADR 0083 決定 8）。 */
 const STOP_TOKENS = [1, 106, 50] as const;
 
-/** 実行条件は既存の門と同値（同じ資産世代の裁定をそのまま使う）。 */
-const CHUNK_LENGTH = 768;
+/**
+ * 固定長 prefill chunk の行数。**32 は「sequence 層の多 chunk 経路を実重みで踏む」ための値**で、
+ * 配布形の既定（768 — ADR 0091 決定 3）ではない。
+ *
+ * 768 だと 3 ケース（最長 T=598）が全て 1 chunk に収まり、この層に固有の 2 つの形が実重みで
+ * 1 度も走らなくなる: ①`base = context.pastLength` を基点にした位置生成が、2 本目以降の chunk と
+ * 同居した状態で回ること ②`index === 0` の frontier 確定（`pendingToken` の前置）が後続 chunk と
+ * 同居すること。合成 fake（`generation_sequence_test.ts`）は位置列まで見ているので、失われるのは
+ * 「実重みでの再確認」— ただし下の門①②が突き合わせる parity はそこを通って初めて意味を持つ。
+ *
+ * NOTE: 過去つき prefill そのものと sliding ring の折り返しは `e2e_gemma4_greedy_test.ts`
+ * （同じく 32 刻み・T=598 を 19 chunk）が担保しており、ここの担当ではない。期待列は torch の
+ * 全長 full re-forward で採ってあり刻みに依存しない。
+ */
+const CHUNK_LENGTH = 32;
+
+/** 容量まわりの実行条件は既存の門と同値（同じ資産世代の裁定をそのまま使う）。 */
 const CAPACITY_SYMBOL = "C";
 const CAPACITY = 4096;
 const MAX_POSITION = 131072;
@@ -222,6 +237,8 @@ Deno.test({
 
     try {
       await t.step("① 温度 0 の sequence が 3 ケース × 16 step で期待列と一致", async () => {
+        /** 2 本以上に割れた prefill を 1 度でも踏んだか（刻みの退行検出 — `CHUNK_LENGTH` の doc）。 */
+        let sawMultipleChunks = false;
         for (const { name } of EXPECTED_CASES) {
           const { prompt, expected } = await readCase(name);
           assertEquals(expected.length, GREEDY_STEPS, `${name}: golden の step 数`);
@@ -240,13 +257,14 @@ Deno.test({
             { reason: "max-tokens", tokens: GREEDY_STEPS },
             `${name}: 停止理由と生成 token 数`,
           );
-          // prefill イベントは chunk の割り方どおり（T=10 級なので 1 本）。
+          // prefill イベントは chunk の割り方どおり（短い 2 ケースは 1 本・最長ケースは 19 本）。
           const prefills = events.filter((event) => event.kind === "prefill");
           assertEquals(
             prefills.length,
             Math.ceil(prompt.length / CHUNK_LENGTH),
             `${name}: prefill イベント数`,
           );
+          if (prefills.length > 1) sawMultipleChunks = true;
           // 位置は prompt の続きから 1 ずつ（sequence は counter を持たず context から導出する）。
           assertEquals(
             events.filter((event) => event.kind === "token").map((event) => event.position),
@@ -258,6 +276,12 @@ Deno.test({
               `${(performance.now() - started).toFixed(0)}ms`,
           );
         }
+        // 刻みを「全ケースが 1 chunk に収まる値」へ戻すと、この門が守っている sequence 層の
+        // 多 chunk 経路が例外も差分も出さずに消える（`CHUNK_LENGTH` の doc）。ここで落とす。
+        assert(
+          sawMultipleChunks,
+          `刻み ${CHUNK_LENGTH} ではどのケースも 1 chunk に収まる（多 chunk prefill が走らない）`,
+        );
       });
 
       await t.step(

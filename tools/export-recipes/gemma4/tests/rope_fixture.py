@@ -11,7 +11,9 @@ MUST: 値は上流モジュールから採る（式を書き直さない）— �
 書いて比べただけ」の恒真になり、TS 実装との突合が上流との突合でなくなる。
 MUST: E2B の宣言値（theta / head_dim / partial_rotary_factor）は**上流チェックポイントの
 `config.json` と同じ数**を持つ（{@link E2B_TEXT_CONFIG_FIELDS}）。ここが実物とずれると、
-フィクスチャは自己整合したまま配布形と無関係な表になる。
+フィクスチャは自己整合したまま配布形と無関係な表になる。門は `test_rope.py` の
+`test_the_declaration_matches_the_upstream_checkpoint`（{@link E2B_CONFIG_PATH} が無い環境は
+明示 SKIP）。
 """
 
 from __future__ import annotations
@@ -23,13 +25,17 @@ from typing import Any
 
 import numpy as np
 
-from _shared.paths import REPO_ROOT
+from _shared.paths import INPUTS_ROOT, REPO_ROOT
 from gemma4 import rope
 
 #: TS 側の fixture の置き場（読み手は `packages/models/tests/` の parity 門）。
 FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "gemma4-rope-upstream.json"
 )
+
+#: 上流チェックポイントの config（{@link E2B_TEXT_CONFIG_FIELDS} の出所）。綴りの正本は
+#: `_shared.paths.INPUTS_ROOT` 側（`export.py` の `DEFAULT_MODEL_DIR` と同じ置き場）。
+E2B_CONFIG_PATH = INPUTS_ROOT / "gemma4" / "gemma-4-E2B-it" / "config.json"
 
 #: 突合に使う位置（両端・境界・累乗の前後・上限）。**連続でない点を混ぜる**のは、位置に
 #: 比例して開く誤差の当て方が「先頭だけ合っている」形にならないようにするため。

@@ -35,6 +35,7 @@ import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import type { Gemma4ChatMessage } from "../src/gemma/text/chat.ts";
 import { serveLocalDist } from "../../../examples/shared/local-dist-server.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
+import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4-e2b/", import.meta.url);
 
@@ -42,11 +43,12 @@ const MIRROR_DIR = new URL("../../../models/karume-gemma4-e2b/", import.meta.url
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
 
 /**
- * PLE の常駐に使う予算（バイト）。現行世代の shard は 1 本 ≈253MiB なので 3 本ぶんが載る
- * （token 範囲をまたぐ会話で読み直しを増やしすぎない）。**本数ではなくバイト**で渡すのは、
- * shard 幅が資産世代で変わると「N 本」が別の RAM を意味するため（ADR 0085 追記 2026-09-02）。
+ * PLE の常駐に使う予算（バイト）。索引から導く = sidecar 全量常駐で、token 範囲をまたぐ会話でも
+ * 読み直しが起きない。定数（旧: 768MiB = 現行世代の shard 3 本）で書くと、資産世代で shard 幅が
+ * 変われば同じ数が別の本数を意味してしまう（ADR 0085 追記 2026-09-02 の「本数ではなくバイト」は
+ * テスト側の定数にも同じく効く）。ミラーが無い環境では評価しない（SKIP 判定の後で呼ぶ）。
  */
-const MAX_RESIDENT_PLE_BYTES = 768 * 1024 * 1024;
+const maxResidentPleBytes = (): number => allResidentPleBytesOfMirror(MIRROR_DIR);
 
 /** 上流 `generation_config.json` の推奨（配布形が `pipelineConfig.sampler` へ焼いた値）。 */
 const RECOMMENDED_SAMPLER = { temperature: 1, topK: 64, topP: 0.95 } as const;
@@ -139,7 +141,7 @@ Deno.test({
   fn: async (t) => {
     await using server = serveLocalDist(new URL(".", MIRROR_DIR).pathname);
     const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
-      maxResidentPleBytes: MAX_RESIDENT_PLE_BYTES,
+      maxResidentPleBytes: maxResidentPleBytes(),
     });
     try {
       await t.step("② 配布形が宣言した推奨サンプラが省略時の既定として載っている", () => {
@@ -209,7 +211,7 @@ Deno.test({
         try {
           const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
             gpu,
-            maxResidentPleBytes: MAX_RESIDENT_PLE_BYTES,
+            maxResidentPleBytes: maxResidentPleBytes(),
             onRunDiagnostics: (diagnostics) => {
               for (const entry of diagnostics.lastRunTiming?.entries ?? []) keys.add(entry.key);
             },

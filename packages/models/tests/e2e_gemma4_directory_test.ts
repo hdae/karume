@@ -26,18 +26,12 @@ import { denoDirectory } from "@karume/hub/deno";
 // 門が緑のままになる（消費者が書けない経路で検収したことになる）。
 import { type Gemma4ChatMessage, Gemma4Pipeline } from "../gemma.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4-e2b/", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
-
-/**
- * PLE の常駐に使う予算（バイト）。現行世代の shard は 1 本 ≈253MiB なので 3 本ぶんが載る
- * （token 範囲をまたぐ会話で読み直しを増やしすぎない）。**本数ではなくバイト**で渡すのは、
- * shard 幅が資産世代で変わると「N 本」が別の RAM を意味するため（ADR 0085 追記 2026-09-02）。
- */
-const MAX_RESIDENT_PLE_BYTES = 768 * 1024 * 1024;
 
 /**
  * 検収ケース。**`e2e_gemma4_chat_test.ts` の CASES と同じ golden**（同じバイト列を別の取得元で
@@ -135,7 +129,9 @@ Deno.test({
     const cacheDiagnostics: string[] = [];
 
     const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
-      maxResidentPleBytes: MAX_RESIDENT_PLE_BYTES,
+      // 予算は索引から導く（= sidecar 全量常駐 → 読み直しゼロ）。定数で書くと資産世代で
+      // shard 幅が変わったときに別の本数を意味してしまう — helper の doc。
+      maxResidentPleBytes: allResidentPleBytesOfMirror(MIRROR_DIR),
       // HTTP 取得元専用のノブ。ローカル取得元では 1 つも効かない = 触られない。
       fetch: fetchStub,
       caches,

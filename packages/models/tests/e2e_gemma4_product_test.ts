@@ -45,8 +45,6 @@ import {
   createGemma4Ple,
   defaultGemma4PleResidentBytes,
   type Gemma4Ple,
-  type Gemma4PleIndex,
-  gemma4PleShardBytes,
   parseGemma4PleIndex,
 } from "../src/gemma/ple.ts";
 import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
@@ -58,6 +56,8 @@ import {
   streamShards,
 } from "../../runtime/tests/helpers/shard-files.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+// 全量常駐の予算は helper が正本（同じ式を e2e ごとに写さない）。
+import { allResidentBytes } from "./helpers/ple-budget.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
@@ -86,6 +86,14 @@ const GREEDY_STEPS = 16;
 
 /** 実行条件は既存 2 系列の門と同値（同じ資産世代の裁定をそのまま使う）。 */
 const CHUNK_LENGTH = 768;
+/**
+ * 最長ケース（`context-en` = T:598）だけに使う刻み。768 では 3 ケースとも 1 chunk に収まり、
+ * **製品グラフ固有の多 chunk prefill**（chunk ごとの `ple.gather` + LRU が跨ぐ形）が実重みで
+ * 1 度も走らない。256 なら 3 chunk に割れるので、gather が chunk 境界で正しい token 範囲を
+ * 引いているか（= 表を跨いだときの逆量子化と行選択）が交差 parity の値そのもので出る。
+ */
+const LONG_CASE = "context-en";
+const LONG_CASE_CHUNK_LENGTH = 256;
 const CAPACITY_SYMBOL = "C";
 const CAPACITY = 4096;
 const MAX_POSITION = 131072;
@@ -287,10 +295,6 @@ const goldenF32 = (file: SafetensorsFile, name: string): Float32Array<ArrayBuffe
   assertEquals(view.dtype, "F32", `golden '${name}' の格納 dtype`);
   return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
-
-/** sidecar 全量を常駐させる予算（= 読み直しゼロ）。 */
-const allResidentBytes = (index: Gemma4PleIndex): number =>
-  index.shards.reduce((sum, shard) => sum + gemma4PleShardBytes(index, shard), 0);
 
 /** 索引を読んで loader を組む（shard の読みは実ファイル — hub は通さない）。 */
 const openPle = async (maxResidentBytes: number): Promise<Gemma4Ple> => {
@@ -516,22 +520,23 @@ const generate = async (
   ple: Gemma4Ple,
   prompt: readonly number[],
   maxNewTokens: number,
+  chunkLength: number,
 ): Promise<GenerationRecord> => {
-  const chunks = planPrefillChunks(prompt.length, CHUNK_LENGTH);
+  const chunks = planPrefillChunks(prompt.length, chunkLength);
   const lastPosition = prompt.length + maxNewTokens - 2;
   assert(lastPosition < MAX_POSITION, `最終位置 ${lastPosition} がモデルの位置上限の外`);
   assert(prompt.length + maxNewTokens <= CAPACITY, `T + K が容量 ${CAPACITY} を超える`);
 
   const context = await session.createGenerationContext({
     bindings: { [CAPACITY_SYMBOL]: CAPACITY },
-    chunkLength: CHUNK_LENGTH,
+    chunkLength,
   });
   let gathers = 0;
   try {
     let token = 0;
     for (const chunk of chunks) {
-      const ids = new Int32Array(CHUNK_LENGTH);
-      const positions = new Int32Array(CHUNK_LENGTH);
+      const ids = new Int32Array(chunkLength);
+      const positions = new Int32Array(chunkLength);
       for (let row = 0; row < chunk.queryLength; row += 1) {
         ids[row] = prompt[chunk.position + row];
         positions[row] = chunk.position + row;
@@ -540,7 +545,7 @@ const generate = async (
       gathers += 1;
       const outputs = await session.run(
         {
-          [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
+          [INPUT_IDS]: i32Row(chunkLength, ids),
           [PER_LAYER_INPUTS]: perLayer,
           ...gemma4RopeInputs(ROPE, positions),
           [LAST_ROW]: lastRowInput(chunk.queryLength - 1),
@@ -618,8 +623,26 @@ Deno.test({
           const expected = [...goldenI32(golden, "expected")];
           assertEquals(expected.length, GREEDY_STEPS, `${caseName}: golden の step 数`);
 
+          // 最長ケースだけ細かい刻みで流す（多 chunk prefill = chunk を跨ぐ PLE gather を
+          // 実重みで踏む唯一の経路 — `LONG_CASE_CHUNK_LENGTH` の doc）。
+          const chunkLength = caseName === LONG_CASE ? LONG_CASE_CHUNK_LENGTH : CHUNK_LENGTH;
+          const chunks = planPrefillChunks(prompt.length, chunkLength).length;
+          if (caseName === LONG_CASE) {
+            assert(
+              chunks > 1,
+              `${caseName}: 刻み ${chunkLength} で 1 chunk に収まる（chunk を跨ぐ gather が走らない）`,
+            );
+          }
+
           const started = performance.now();
-          const generated = await generate(session, logitsName, ple, prompt, GREEDY_STEPS);
+          const generated = await generate(
+            session,
+            logitsName,
+            ple,
+            prompt,
+            GREEDY_STEPS,
+            chunkLength,
+          );
           totalGathers += generated.gathers;
           assertEquals(
             generated.tokens,
@@ -627,8 +650,9 @@ Deno.test({
             `${caseName}: 生成 token 列（対 logits opt-in 系列 golden）`,
           );
           console.log(
-            `[e2e] gemma4 product ${caseName}: T=${prompt.length} + K=${GREEDY_STEPS} step / ` +
-              `PLE gather ${generated.gathers} 回 / ${(performance.now() - started).toFixed(0)}ms`,
+            `[e2e] gemma4 product ${caseName}: T=${prompt.length}（刻み ${chunkLength} = ` +
+              `${chunks} chunk）+ K=${GREEDY_STEPS} step / PLE gather ${generated.gathers} 回 / ` +
+              `${(performance.now() - started).toFixed(0)}ms`,
           );
         }
         // 遅延ロードが実効（恒真でない）: gather は数十回走るのに、shard の取得は最大でも
