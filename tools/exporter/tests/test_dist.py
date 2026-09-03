@@ -932,14 +932,119 @@ class TestExternalComponents:
             )
         assert not out_dir.exists()
 
-    def test_it_refuses_to_apply_one_reference_to_a_whole_family(self, tmp_path: Path) -> None:
-        """役割名はモデルを跨いで同じ綴りなので、一括で掛けると指し先が曖昧になる。"""
+    def test_it_applies_one_reference_to_every_model_of_a_family(self, tmp_path: Path) -> None:
+        """複数モデル同居リポでも越境参照は掛けられる（ADR 0087 の extra リポがこの形）。
+
+        成立条件は「指定役割の現物が全モデルで参照先とバイト同一」— 満たしていれば全モデルの
+        同名役割が**同一の参照**を宣言し、そのバイト列は自リポのどこにも置かれない。
+        """
         source = self._source_dist(tmp_path)
         out_dir = tmp_path / "models" / "karume-family"
 
-        with pytest.raises(DistError, match="1 モデルの組み立てにだけ許す"):
+        manifest = assemble_family(
+            [self._plan("A"), self._plan("B")],
+            out_dir,
+            "A",
+            external=self._components(source),
+        )
+
+        expected = [
+            {
+                "repo": "hdae/karume-source",
+                "revision": self._REVISION,
+                "path": "source/text_encoder/model.safetensors",
+                "size": len(self._SHARED),
+                "sha256": hashlib.sha256(self._SHARED).hexdigest(),
+            }
+        ]
+        assert manifest["models"]["A"]["weights"]["text_encoder"]["f16"]["shards"] == expected
+        assert manifest["models"]["B"]["weights"]["text_encoder"]["f16"]["shards"] == expected
+        # 参照したバイト列は自リポのどの席（モデル別サブツリー・`shared/`）にも無い。
+        assert not (out_dir / "A" / "text_encoder").exists()
+        assert not (out_dir / "B" / "text_encoder").exists()
+        assert not (out_dir / SHARED_DIRNAME / "text_encoder").exists()
+        # 自リポ固有の役割は 2 モデルで同一バイトなので従来どおり `shared/` へ畳まれる。
+        assert sorted(verify_dist(out_dir)) == [f"{SHARED_DIRNAME}/transformer/model.safetensors"]
+
+    def test_it_refuses_a_family_where_one_model_holds_different_bytes(
+        self, tmp_path: Path
+    ) -> None:
+        """1 モデルだけ現物が参照先と違う形 — 「同じ役割名が別バイトを指す」の実体。
+
+        通してしまうと、そのモデルには**別のモデルの重み**を指す manifest が配られる。
+        """
+        source = self._source_dist(tmp_path)
+        out_dir = tmp_path / "models" / "karume-family"
+        divergent = replace(
+            self._plan("B"),
+            artifacts={
+                "text_encoder": Artifact("text_encoder/model.safetensors", payload=b"other-bytes!"),
+                "transformer": Artifact("transformer/model.safetensors", payload=self._OWN),
+            },
+        )
+
+        with pytest.raises(DistError, match="自分で組むバイト列と違う"):
             assemble_family(
-                [self._plan("A"), self._plan("B")],
+                [self._plan("A"), divergent],
+                out_dir,
+                "A",
+                external=self._components(source),
+            )
+        assert not out_dir.exists()
+
+    def test_it_refuses_a_family_whose_models_resolve_to_different_references(
+        self, tmp_path: Path
+    ) -> None:
+        """バイト列が同じでも**指し先が 1 つに定まらない**なら落とす。
+
+        参照は全モデルへ同じ 1 つを書く形なので、モデルごとに別の path へ解決する組み合わせは
+        そもそも宣言できない（食い違った役割名と両モデル名を綴る）。
+        """
+        source = tmp_path / "models" / "karume-source"
+        # 同じバイト列を 2 つの相対 path で宣言する参照元（借り手ごとに別の席が当たる）。
+        assemble_family(
+            [
+                replace(
+                    self._plan("source"),
+                    artifacts={
+                        "text_encoder": Artifact(
+                            "text_encoder/model.safetensors", payload=self._SHARED
+                        ),
+                        "transformer": Artifact("transformer/model.safetensors", payload=self._OWN),
+                        "alt_encoder": Artifact("alt/model.safetensors", payload=self._SHARED),
+                    },
+                    weights={
+                        "text_encoder": {"f16": WeightFiles("text_encoder")},
+                        "transformer": {"f16": WeightFiles("transformer")},
+                        "alt_encoder": {"f16": WeightFiles("alt_encoder")},
+                    },
+                    quants={
+                        "f16": {
+                            "weights": {
+                                "text_encoder": "f16",
+                                "transformer": "f16",
+                                "alt_encoder": "f16",
+                            },
+                            "session": {},
+                        }
+                    },
+                )
+            ],
+            source,
+            "source",
+        )
+        out_dir = tmp_path / "models" / "karume-family"
+        elsewhere = replace(
+            self._plan("B"),
+            artifacts={
+                "text_encoder": Artifact("alt/model.safetensors", payload=self._SHARED),
+                "transformer": Artifact("transformer/model.safetensors", payload=self._OWN),
+            },
+        )
+
+        with pytest.raises(DistError, match=r"指し先がモデル間で食い違う.*text_encoder.*'A'.*'B'"):
+            assemble_family(
+                [self._plan("A"), elsewhere],
                 out_dir,
                 "A",
                 external=self._components(source),

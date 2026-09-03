@@ -1052,7 +1052,18 @@ def _materialize_family(
     placed: dict[tuple[str, str], str] = {}
     digests: dict[str, str] = {}
     folded: dict[tuple[str, str], str] = {}
-    for seat in _plan_shared(plans):
+    # MUST: 共有席の判定は**越境参照の役割を外した集合**で行う — 自リポへ置かない役割が
+    # `shared/` の席を取ると、どのモデルも宣言していない現物が 1 本残る（複数モデルが同じ
+    # バイト列を借りる形＝ADR 0087 の extra リポでちょうどこれが起きる）。下の配置ループが
+    # `external` を飛ばすのと同じ集合を見る。
+    shareable = [
+        replace(
+            plan,
+            artifacts={role: a for role, a in plan.artifacts.items() if role not in external},
+        )
+        for plan in plans
+    ]
+    for seat in _plan_shared(shareable):
         target = f"{SHARED_DIRNAME}/{seat.rel_path}"
         materialize(seat.artifact, out_dir / target)
         # sha256 は**置いた現物**から採る（表と現物が食い違う失敗様式を構造的に消す）。
@@ -1161,20 +1172,31 @@ def assemble_family(
     # 入力コンテナの全検証は**実在検査の後・1 バイトも書く前**（ヘッダしか読まないので、
     # ここに置いても数 GB の再読みにはならない）。
     assert_weight_components_verified(sharded)
-    # MUST: 越境参照は**単一モデルの組み立てだけ**に許す — 役割名はモデルを跨いで同じ綴りな
-    # ので、複数モデルへ一括で掛けると「どのモデルの席をどこへ向けるか」が曖昧なまま全モデル
-    # の同名役割が 1 つの参照先を指す（別モデルの重みを黙って配る形）。実需は release 時の
-    # 単一リポ焼きだけなので、曖昧さを許さずここで落とす。
-    if external is not None and len(plans) != 1:
-        raise DistError(
-            f"越境参照は 1 モデルの組み立てにだけ許す（対象 {names} は {len(plans)} モデル）"
-            " — 役割名はモデルを跨いで同じ綴りなので、一括で掛けると指し先が曖昧になる"
-        )
+    # 越境参照は**複数モデルへ掛けてよい**。MUST: 指定役割の現物が全モデルで参照先とバイト
+    # 同一（plan ごとの {@link external_refs} の突合 + 全 plan の参照一致）でなければ落とす —
+    # 「同じ役割名が別バイトを指す」形が曖昧さの実体なので、モデル数で代理せずそれを直接
+    # 検査する（食い違えば役割名と両モデル名を綴って fail loudly）。
+    #
     # 分割されたコンポーネントも越境参照にできる — `shards` は**要素ごとに**従来の FileRef
     # 検査を通る配列なので（ADR 0038 §7 / ADR 0071 決定 2）、shard 1 本を参照 1 つで指せる。
     # 展開（{@link expand_weight_shards}）が代表役割を shard 役割へ割った後にここへ来るので、
     # {@link external_refs} は shard ごとに参照先の現物を引き当てる。
-    references = external_refs(external, sharded[0]) if external is not None else {}
+    references: dict[str, dict[str, Any]] = {}
+    if external is not None:
+        resolved = [(item.plan.name, external_refs(external, item)) for item in sharded]
+        first_model, references = resolved[0]
+        for model_name, refs in resolved[1:]:
+            differing = sorted(
+                role
+                for role in set(references) | set(refs)
+                if references.get(role) != refs.get(role)
+            )
+            if differing:
+                raise DistError(
+                    f"越境参照の指し先がモデル間で食い違う: {differing}"
+                    f"（'{first_model}' と '{model_name}'）"
+                    " — 同じ役割名が別バイトを指す形は 1 つの参照では宣言できない"
+                )
 
     try:
         with staged_publication(out_dir) as staging:
