@@ -87,10 +87,11 @@ The layout inside a distribution is uniform — `<model>/…` subtrees plus `sha
 
 `karume dist` writes a **model card `README.md`** after assembly and `verify_dist`
 (`karume.modelcard` — including the ADR 0037 §3 frontmatter), from a template per pipeline. The
-model list, the numbers, the file list, the quant table and the style / speaker tables are derived
-mechanically from the manifest; the only constants a template carries are the facts the manifest
-does not record (base model, license, provenance of the fused LoRA). `README.md` is a metadata file
-on par with `karume.json`, so it is exempt from the undeclared-file check.
+model list, the numbers, the quant table (with the download size of each quant) and the style /
+speaker tables are derived mechanically from the manifest; the only constants a template carries
+are the facts the manifest does not record (base model, license, provenance of the fused LoRA).
+`README.md` is a metadata file on par with `karume.json`, so it is exempt from the undeclared-file
+check.
 
 **Attribution is a separate axis from the template**: `--card-profile` picks which upstream family
 the card credits (source repository, source directories and version, license terms, citations).

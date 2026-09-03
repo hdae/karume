@@ -206,7 +206,6 @@ class TestSbv2Sections:
         first, _, second = rest.partition("## Model: ZB")
         for part in (first, second):
             assert [line for line in part.splitlines() if line.startswith("### ")] == [
-                "### Files",
                 "### Quants",
                 "### Styles",
                 "### Speakers",
@@ -258,32 +257,29 @@ class TestSbv2QuantRounding:
 
 
 class TestSbv2Derivation:
-    """MUST: 数値・ファイル一覧・quant 表・スタイル表・話者表は manifest 由来。"""
+    """MUST: 数値・ダウンロード量・quant 表・スタイル表・話者表は manifest 由来。"""
 
-    def test_the_file_table_lists_every_declared_path_once(self, sbv2_card: str) -> None:
-        """表の行は宣言されたファイルと 1 対 1（宣言外の行も、重複した行も無い）。"""
+    def test_each_seat_counts_the_files_it_declares(self, sbv2_card: str) -> None:
+        """shard 1 本 1 行の表は廃止（2026-09-03 裁定）— 席ごとの合計が Download 欄に入る。
+
+        `f16` = text_encoder 555 + front 666 + voice 888 + assets 110 = 2,219 B、`i8` は
+        front / voice が 777 / 999 に替わって 2,441 B。重みの path はカードに 1 つも出ない。
+        """
         _, _, rest = sbv2_card.partition("## Model: ZA")
-        files, _, _ = rest.partition("### Quants")
-        model = _sbv2_manifest()["models"]["ZA"]
-        declared = [
-            ref["path"]
-            for weights in model["weights"].values()
-            for entry in weights.values()
-            for ref in entry["shards"]
-        ]
-        declared += [ref["path"] for ref in model["assets"].values()]
-        rows = [line for line in files.splitlines() if line.startswith("| `")]
-        assert len(rows) == len(declared)
-        for path in declared:
-            assert files.count(f"`{path}`") == 1, path
+        quants, _, _ = rest.partition("### Styles")
+
+        assert "| 2.17 KiB (588 B shared; 110 B of assets, read on the host) |" in quants
+        assert "| 2.38 KiB (588 B shared; 110 B of assets, read on the host) |" in quants
+        for path in ("shared/text_encoder/model.i8.safetensors", "ZA/voice/model.f16.safetensors"):
+            assert path not in sbv2_card, path
 
     def test_it_takes_the_sizes_from_the_manifest(self, sbv2_card: str) -> None:
         manifest = _sbv2_manifest()
         manifest["models"]["ZA"]["weights"]["text_encoder"]["i8"]["shards"][0]["size"] = 12345
         moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
-        assert "555 B" in sbv2_card
-        assert "555 B" not in moved
-        assert "12,345 B" in moved
+        assert "| 2.17 KiB (" in sbv2_card
+        assert "| 2.17 KiB (" not in moved
+        assert "| 13.7 KiB (" in moved
 
     def test_it_lists_every_style_with_its_row_id(self, sbv2_card: str) -> None:
         rows = [line for line in sbv2_card.splitlines() if line.startswith("| `")]
@@ -346,7 +342,8 @@ class TestSbv2Derivation:
         assert len(default) == 1
         assert default[0].startswith("| `i8-a8` (default) |")
         assert (
-            "| `f16` | — | `text_encoder` = `i8` / `front` = `f16` / `voice` = `f16` | — |" in rows
+            "| `f16` | — | 2.17 KiB (588 B shared; 110 B of assets, read on the host) |"
+            " `text_encoder` = `i8` / `front` = `f16` / `voice` = `f16` | — |" in rows
         )
 
     def test_it_prints_the_presentation_fields_the_manifest_carries(self, sbv2_card: str) -> None:

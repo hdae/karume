@@ -1,6 +1,6 @@
 """Irodori 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
 
-汎用の描画部品（frontmatter・モデル一覧・ファイル表・quant 表・節の組み立て）は
+汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
 `karume.modelcard` が持つ。ここが持つのは **Irodori 固有の事実**だけ: 帰属（重みの出所・
 同梱するコーデックと text backbone・ライセンス）と、この pipeline のカードに何を書くか。
 
@@ -8,7 +8,7 @@
 声のファミリーで出所が割れる軸を持たないので、{@link irodori.distribution.PIPELINE} は
 `card_profiles` に 1 席しか置かない。
 
-MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
+MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
 （`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
 **存在しない事実**だけ。
 """
@@ -22,7 +22,6 @@ from typing import Any
 from karume.modelcard import (
     CardMetadata,
     default_model,
-    files,
     from_pretrained,
     frontmatter,
     knob,
@@ -292,6 +291,6 @@ def render_irodori_model_card(manifest: Mapping[str, Any], repo: str) -> str:
             models(manifest),
             [""],
             _irodori_usage(manifest, repo),
-            *model_sections(manifest, (files, quants, _irodori_shape, _irodori_defaults)),
+            *model_sections(manifest, (quants, _irodori_shape, _irodori_defaults)),
         )
     )

@@ -1,6 +1,6 @@
 """SBV2 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
 
-汎用の描画部品（frontmatter・モデル一覧・ファイル表・quant 表・節の組み立て）は
+汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
 `karume.modelcard` が持つ。ここが持つのは **SBV2 固有の事実**だけ: 帰属（声の出所・
 ライセンス・引用・再配布する text encoder）と、この pipeline のカードに何を書くか。
 
@@ -8,7 +8,7 @@
 どのファミリーの重みを配るかで出所・ライセンス・引用が丸ごと変わるので、そこだけを
 プロファイルに分けて**呼び出し側に明示させる**。
 
-MUST: **数値・ファイル一覧・quant 表・dtype ラベル・スタイル表・話者表は 1 つ残らず manifest
+MUST: **数値・ダウンロード量・quant 表・dtype ラベル・スタイル表・話者表は 1 つ残らず manifest
 から導出する**（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、
 manifest に**存在しない事実**だけ。
 """
@@ -23,7 +23,6 @@ from typing import Any
 from karume.modelcard import (
     CardMetadata,
     default_model,
-    files,
     from_pretrained,
     frontmatter,
     knob,
@@ -418,7 +417,6 @@ def render_sbv2_model_card(
             *model_sections(
                 manifest,
                 (
-                    files,
                     partial(_sbv2_quants, abbreviations=abbreviations),
                     _sbv2_styles,
                     _sbv2_speakers,

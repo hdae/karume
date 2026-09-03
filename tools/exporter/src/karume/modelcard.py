@@ -4,12 +4,12 @@ HF は `README.md` の YAML frontmatter をモデルの機械可読メタデー�
 「そのまま HF リポとしてアップロードできる形」の最後の 1 枚）。ライセンスと由来は manifest に
 書かない決定なので（ADR 0038 §6）、その責務はカード側が持つ。
 
-ここにあるのは「frontmatter を組む / モデル一覧を並べる / ファイル表を並べる / quant 表を
-並べる / 節を組み立てる」層だけで、**pipeline 別のテンプレートは 1 つも持たない** — 何を説明し
+ここにあるのは「frontmatter を組む / モデル一覧を並べる / quant 表を並べる / 節を組み立てる」
+層だけで、**pipeline 別のテンプレートは 1 つも持たない** — 何を説明し
 何を使い方に綴るかは family 固有の事実なので、`tools/export-recipes/<family>/card.py` が持つ
 （ADR 0065 決定 1・2）。`karume.dist` と同じ層分け。
 
-NOTE: 描画部品（{@link frontmatter} / {@link models} / {@link files} / {@link quants} /
+NOTE: 描画部品（{@link frontmatter} / {@link models} / {@link quants} /
 {@link model_sections} / {@link render} / {@link require_pipeline} / {@link default_model} /
 {@link knob} / {@link from_pretrained}）は **recipe 向けの公開面**（ADR 0065 段 6）。wheel の
 外にある `card.py` が名指しで呼ぶ以上、private 名のままにしておくと「private を跨いで呼ぶ」
@@ -25,11 +25,16 @@ manifest（現行は `karume/4` — ADR 0041 で複数モデル化し、ADR 0070
 dtype エントリが shard 列になり、ADR 0075 決定 1 で quant へ表示欄が付いた形）は
 **1 リポに複数モデル**を持てるので、カードも
 「リポ全体の説明 → モデル一覧 → 使い方 → モデルごとの節」の形にする。モデルごとの節が
-`## Model: <name>` で、その中にファイル表・quant 表・（SBV2 は）スタイル表と話者表が並ぶ。
+`## Model: <name>` で、その中に quant 表・（SBV2 は）スタイル表と話者表が並ぶ。
 単一モデルのリポでも同じ形で描く（配布形のレイアウトが一様なのと同じ理由 — 2 個目が増えた
 瞬間に構成が変わるカードは、読み手の目印も壊す）。
 
-MUST: **数値・ファイル一覧・quant 表・dtype ラベル・スタイル表・話者表は 1 つ残らず manifest
+shard 上限を 256 MiB へ下げてファイル本数が 3〜4 倍になったので、**shard 1 本 1 行のファイル表は
+廃止した**（2026-09-03 裁定 — 5 モデルのリポでカードの半分が表になり、読み手が知りたい
+「このプリセットで何 GiB 落ちるか」がその中に埋もれた）。per-file の `size` / `sha256` の正本は
+`karume.json` で、カードは quant ごとの合計（{@link quants} の Download 欄）だけを持つ。
+
+MUST: **数値・ダウンロード量・quant 表・dtype ラベル・スタイル表・話者表は 1 つ残らず manifest
 から導出する**。手書きのサイズや dtype 名は資産と独立に動けてしまい、「表と現物が食い違う」
 失敗様式が manifest を導出物にした意味ごと消える（ADR 0038 Context）。テンプレート側が持って
 よい定数は manifest に**存在しない事実**（base model・ライセンス・焼き込んだ LoRA の出所）
@@ -58,7 +63,7 @@ LIBRARY_NAME = "karume"
 #: `<HF_OWNER>/<ディレクトリ名>` を渡す）ので、ここが持つのは所有者だけ。
 HF_OWNER = "hdae"
 
-#: 表に出す sha256 の桁数（完全な値は karume.json が持つ — 表は同一性の目視照合用）。
+#: 注記に出す commit sha の桁数（完全な値は karume.json が持つ — 注記は指し先の目安）。
 _SHA_DIGITS = 16
 
 _UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
@@ -92,43 +97,68 @@ class CardMetadata:
     license_link: str | None = None
 
 
-def format_size(size: int) -> str:
-    """バイト数を「単位付き + 生バイト」で綴る（両方出す — 前者は目安、後者が manifest の値）。"""
+def _download_size(size: int) -> str:
+    """ダウンロード量を有効 3 桁で綴る（`3.24 GiB` / `248 MiB` — 単位を跨いでも精度が揃う）。
+
+    生バイトは併記しない。ここで読み手が決めたいのは「この回線とこのディスクで現実的か」の
+    1 点で、per-file の正確な値は `karume.json` が持つ（その所在は表の注記が指す）。
+    """
     for unit, scale in _UNITS:
         if size >= scale:
-            return f"{size / scale:.2f} {unit} ({size:,} B)"
+            value = size / scale
+            return f"{value:.{max(0, 3 - len(str(int(value))))}f} {unit}"
     return f"{size:,} B"
 
 
-def file_rows(model: Mapping[str, Any]) -> list[tuple[str, list[str], Mapping[str, Any]]]:
-    """`(hub のキー, 参照する dtype 一覧, ファイル参照)` を **path で一意化**して並べる。
+def _is_shared(ref: Mapping[str, Any]) -> bool:
+    """2 本目のモデルでは落とし直さない参照か（同リポの `shared/` か、別リポからの越境）。"""
+    return ref["path"].startswith("shared/") or "repo" in ref
 
-    キーは hub の `resolve()` が返す綴り（`<weights>` / `<weights>.<extra>` / `<asset>`）。
-    一意化は rope_base のため — f16 / i8 の両 dtype が同一ファイルを指すので（1 本化済み）、
-    素直に並べると現物にない 2 行目が表に生える。付帯資産は本体の dtype を並べ切ってから
-    出す（本体 f16 / 付帯 / 本体 i8 と挟まると、どの行が何の重みか読めなくなる）。
 
-    assets は quant 選択に依存しないので dtype 列は空（`—`）で並ぶ。
+def _collect(refs: dict[str, Mapping[str, Any]], weight_files: Mapping[str, Any]) -> None:
+    """1 つの dtype エントリのファイル（shard 列 + 付帯）を **path で一意化**して足す。
+
+    一意化は 2 つのコンポーネントが同じファイルを指す形（1 本化済みの rope_base と同型）で
+    バイトを二重に数えないため。
     """
-    rows: dict[str, tuple[str, list[str], Mapping[str, Any]]] = {}
+    for ref in weight_files["shards"]:
+        refs.setdefault(ref["path"], ref)
+    for ref in weight_files.get("extras", {}).values():
+        refs.setdefault(ref["path"], ref)
 
-    def add(key: str, label: str | None, ref: Mapping[str, Any]) -> None:
-        _, labels, _ = rows.setdefault(ref["path"], (key, [], ref))
-        if label is not None and label not in labels:
-            labels.append(label)
 
-    for name, entry in model["weights"].items():
-        for label, weight_files in entry.items():
-            # shard 列は全要素を並べる（表の役目は「配るファイルの一覧」— 先頭のグラフ shard
-            # だけ載せると、残りの shard が manifest にしか現れない）。
-            for ref in weight_files["shards"]:
-                add(name, label, ref)
-        for label, weight_files in entry.items():
-            for extra, ref in weight_files.get("extras", {}).items():
-                add(f"{name}.{extra}", label, ref)
-    for name, ref in model["assets"].items():
-        add(name, None, ref)
-    return list(rows.values())
+def _quant_refs(model: Mapping[str, Any], quant: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """その quant を選んだ読み手が実際に落とすファイル参照。
+
+    重みは quant が選んだ dtype のファイルだけ。assets は quant 選択に依存しない無条件
+    ファイル（ADR 0041 §3）なので全部入る。
+    """
+    refs: dict[str, Mapping[str, Any]] = {}
+    for name, label in quant["weights"].items():
+        _collect(refs, model["weights"][name][label])
+    for ref in model["assets"].values():
+        refs.setdefault(ref["path"], ref)
+    return list(refs.values())
+
+
+def _model_refs(model: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """モデルが載せる全ファイル参照（dtype を跨いだ和 + assets）。
+
+    注記は quant 表 1 つに 1 度出るので、条件も**モデル単位**で見る（選んだ quant 次第で
+    注記が現れたり消えたりすると、同じモデルの説明が席ごとに変わる）。
+    """
+    refs: dict[str, Mapping[str, Any]] = {}
+    for entry in model["weights"].values():
+        for weight_files in entry.values():
+            _collect(refs, weight_files)
+    for ref in model["assets"].values():
+        refs.setdefault(ref["path"], ref)
+    return list(refs.values())
+
+
+def _borrowed(refs: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
+    """越境参照の指し先（`(リポ, revision)` の重複なし・現れた順 — ADR 0038 §7）。"""
+    return list(dict.fromkeys((ref["repo"], ref["revision"]) for ref in refs if "repo" in ref))
 
 
 def require_pipeline(manifest: Mapping[str, Any], supported: str) -> None:
@@ -196,65 +226,6 @@ def models(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _path_cell(ref: Mapping[str, Any]) -> str:
-    """ファイル表の Path 欄。越境参照（別リポの pin 済み revision）はその出所ごと出す。
-
-    自リポの path だけを綴ると、この配布形に**無い**ファイルが在るように読める（読み手は
-    「取ってくる場所」を知りたいので、指し先まで出して初めて表が事実になる）。
-    """
-    if "repo" not in ref:
-        return f"`{ref['path']}`"
-    return (
-        f"`{ref['path']}` in"
-        f" [`{ref['repo']}`](https://huggingface.co/{ref['repo']})"
-        f" at `{ref['revision'][:_SHA_DIGITS]}…`"
-    )
-
-
-def files(model: Mapping[str, Any]) -> list[str]:
-    rows = file_rows(model)
-    lines = [
-        "### Files",
-        "",
-        "| Key | Dtype | Path | Size | sha256 |",
-        "| ---- | ----- | ---- | ------ | ------ |",
-    ]
-    for key, labels, ref in rows:
-        dtype = " / ".join(labels) if labels else "—"
-        lines.append(
-            f"| `{key}` | {dtype} | {_path_cell(ref)} | {format_size(ref['size'])} |"
-            f" `{ref['sha256'][:_SHA_DIGITS]}…` |"
-        )
-    lines += [
-        "",
-        "Only the first 16 hex digits of the sha256 are shown (the full value and `size` live in"
-        " `karume.json` — verify against that at the fetch layer).",
-        "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `i8` / `i4`), not"
-        " the `fp16` spelling common elsewhere in the ecosystem.",
-    ]
-    # `I4` は safetensors の方言（ADR 0069・docs/limitations.md「格納 dtype `I4` は
-    # safetensors の方言」）— 公式パーサで開けない事実は、その配布形を選んだ読み手にだけ
-    # 関わるので i4 ラベルが表に出たときだけ綴る（全カードに載せると事実でない主張になる）。
-    if any("i4" in labels for _, labels, _ in rows):
-        lines.append(
-            "A row labeled `i4` uses a packed int4 dtype (`I4`) that is **not part of the official"
-            " safetensors specification** — the official `safetensors` library rejects a file that"
-            " contains it (checked with 0.8.0). Karume's runtime and exporter read it; files"
-            " without `i4` stay fully compatible."
-        )
-    lines += [
-        "A path under `shared/` is one this model shares byte for byte with another model in this"
-        " repository (it is fetched and cached once).",
-    ]
-    if any("repo" in ref for _, _, ref in rows):
-        lines.append(
-            "A row that names another repository is fetched from that repository at the pinned"
-            " commit shown — those bytes are identical to this model's own, so they are not"
-            " stored here a second time."
-        )
-    return lines
-
-
 def _session(quant: Mapping[str, Any]) -> str:
     session = quant["session"]
     features = quant.get("gpuFeatures", {})
@@ -278,29 +249,57 @@ def _presentation(quant: Mapping[str, Any]) -> str:
     return description or "—"
 
 
+def _download(model: Mapping[str, Any], quant: Mapping[str, Any]) -> str:
+    """quant 表の Download 欄 — この席を選んだときに落ちる合計と、合計と GPU 常駐量の差。
+
+    注記は 2 つ。`shared` は「2 本目のモデルではこの分を落とさない」量（{@link _is_shared}）で、
+    assets は**ホスト側で読むだけで GPU に載らない**分（gemma4 の PLE sidecar のように
+    Download の大半が assets という配布形がある）。後者は無視できない比率のときだけ添える —
+    どのカードにも書くと、数 MiB の tokenizer に読み手の目を向けさせるだけになる。
+    """
+    refs = _quant_refs(model, quant)
+    asset_paths = {ref["path"] for ref in model["assets"].values()}
+    total = sum(ref["size"] for ref in refs)
+    shared = sum(ref["size"] for ref in refs if _is_shared(ref))
+    assets = sum(ref["size"] for ref in refs if ref["path"] in asset_paths)
+    notes = []
+    if shared:
+        notes.append(f"{_download_size(shared)} shared")
+    if assets and assets * 100 >= total:
+        notes.append(f"{_download_size(assets)} of assets, read on the host")
+    return _download_size(total) + (f" ({'; '.join(notes)})" if notes else "")
+
+
 def quants(
     model: Mapping[str, Any], *, abbreviations: Mapping[str, str] | None = None
 ) -> list[str]:
-    """quant 表（ADR 0074 の席名 + ADR 0075 の表示欄）。
+    """quant 表（ADR 0074 の席名 + ADR 0075 の表示欄 + 席ごとのダウンロード量）。
 
     `abbreviations` は席名の部品上書きトークン（`i8+bert4` の `bert`）→ その weights 名。
     **略称は recipe が定めるので、対応をカードに必ず出す**（ADR 0074 決定 4）— 表の 1 列目と
-    3 列目の綴りが繋がるのはこの 1 行だけで、無いと `bert4` がどの部品の話か読めない。
+    Weights 列の綴りが繋がるのはこの 1 行だけで、無いと `bert4` がどの部品の話か読めない。
     略称を使っていない family は渡さない（トークンが weights 名そのものなら対応表は要らない）。
+
+    表の後ろの注記は、廃止したファイル表から**掛かるときだけ**引き継いだもの（sha256 の正本の
+    所在・dtype 語彙・`i4` 方言・`shared/`・越境参照）。掛からない配布形に載せると事実でない
+    主張になるので、条件は manifest から見る。
     """
     default = model["defaultQuant"]
     lines = [
         "### Quants",
         "",
-        "| Quant | What it is | Weights | Compute |",
-        "| ----- | ---------- | ---- | ---- |",
+        "| Quant | What it is | Download | Weights | Compute |",
+        "| ----- | ---------- | -------- | ---- | ---- |",
     ]
     for name, quant in model["quants"].items():
         weights = " / ".join(
             f"`{weight}` = `{label}`" for weight, label in quant["weights"].items()
         )
         mark = " (default)" if name == default else ""
-        lines.append(f"| `{name}`{mark} | {_presentation(quant)} | {weights} | {_session(quant)} |")
+        lines.append(
+            f"| `{name}`{mark} | {_presentation(quant)} | {_download(model, quant)} |"
+            f" {weights} | {_session(quant)} |"
+        )
     lines += [
         "",
         f"If no quant is given, it runs as `{default}` (this model's recommended default).",
@@ -312,6 +311,34 @@ def quants(
                 f"`{token}` is the `{name}` component" for token, name in abbreviations.items()
             )
             + "."
+        )
+    refs = _model_refs(model)
+    lines += [
+        "Per-file `size` and `sha256` live in `karume.json` — verify against that at the fetch"
+        " layer.",
+        "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `i8` / `i4`), not"
+        " the `fp16` spelling common elsewhere in the ecosystem.",
+    ]
+    # `I4` は safetensors の方言（ADR 0069・docs/limitations.md「格納 dtype `I4` は
+    # safetensors の方言」）— 公式パーサで開けない事実は、その配布形を選んだ読み手にだけ
+    # 関わるので i4 の席があるときだけ綴る（全カードに載せると事実でない主張になる）。
+    if any("i4" in entry for entry in model["weights"].values()):
+        lines.append(
+            "A component stored as `i4` uses a packed int4 dtype (`I4`) that is **not part of the"
+            " official safetensors specification** — the official `safetensors` library rejects a"
+            " file that contains it (checked with 0.8.0). Karume's runtime and exporter read it;"
+            " files without `i4` stay fully compatible."
+        )
+    if any(ref["path"].startswith("shared/") for ref in refs):
+        lines.append(
+            "A path under `shared/` is one this model shares byte for byte with another model in"
+            " this repository (it is fetched and cached once)."
+        )
+    for repo, revision in _borrowed(refs):
+        lines.append(
+            f"Some components are fetched from [`{repo}`](https://huggingface.co/{repo}) at commit"
+            f" `{revision[:_SHA_DIGITS]}…` — those bytes are identical to this model's own, so they"
+            " are not stored here a second time."
         )
     return lines
 

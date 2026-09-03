@@ -1,6 +1,6 @@
 """BiRefNet 系配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
 
-汎用の描画部品（frontmatter・モデル一覧・ファイル表・quant 表・節の組み立て）は
+汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
 `karume.modelcard` が持つ。ここが持つのは **BiRefNet 系固有の事実**だけ: 帰属（出所・
 ライセンス・引用・学習データ）と、この pipeline のカードに何を書くか。
 
@@ -8,7 +8,7 @@
 割らない — 分けると「Lucida を BiRefNet_HR の帰属で配る」取り違えを操作者が起こせるように
 なる。
 
-MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
+MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
 （`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
 **存在しない事実**だけ。
 """
@@ -22,7 +22,6 @@ from typing import Any
 from karume.modelcard import (
     CardMetadata,
     default_model,
-    files,
     from_pretrained,
     frontmatter,
     model_sections,
@@ -281,6 +280,6 @@ def render_birefnet_model_card(manifest: Mapping[str, Any], repo: str) -> str:
             models(manifest),
             [""],
             _birefnet_usage(manifest, repo),
-            *model_sections(manifest, (files, quants, _birefnet_shape)),
+            *model_sections(manifest, (quants, _birefnet_shape)),
         )
     )

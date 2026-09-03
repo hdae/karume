@@ -181,6 +181,13 @@ def extra_card() -> str:
     return _extra(_extra_manifest())
 
 
+def _quant_row(card: str, name: str) -> str:
+    """quant 表からその席の行を 1 本引く（席名で引く — 列の位置にも既定マークにも依らない）。"""
+    rows = [line for line in card.splitlines() if line.startswith(f"| `{name}`")]
+    assert len(rows) == 1, name
+    return rows[0]
+
+
 def _sharded_manifest() -> dict[str, Any]:
     """1 コンポーネントが複数ファイルへ割れた配布形（1GiB 超の分割 — ADR 0071 / 0070 追記）。
 
@@ -204,14 +211,14 @@ def sharded_card() -> str:
 class TestShardedDistribution:
     """分割された配布形（実配布の形）でカードが事実と食い違わないこと。"""
 
-    def test_it_lists_every_shard_of_a_split_component(self, sharded_card: str) -> None:
-        """ファイル表は shard を 1 本残らず並べる（`karume.modelcard` の導出 MUST の帰結）。"""
-        for path in (
-            f"{OFFICIAL_DEFAULT}/transformer/model.f16-00001-of-00002.safetensors",
-            f"{OFFICIAL_DEFAULT}/transformer/model.f16-00002-of-00002.safetensors",
-        ):
-            assert sharded_card.count(f"`{path}`") == 1, path
-        assert f"`{OFFICIAL_DEFAULT}/transformer/model.f16.safetensors`" not in sharded_card
+    def test_it_counts_every_shard_of_a_split_component(self, card: str, sharded_card: str) -> None:
+        """Download 欄は shard を 1 本残らず足す（先頭 shard だけだと配布量が過小に出る）。
+
+        分割前の f16 席は 111 + 222 + rope 333 + tokenizer 555 = 1,221 B（= 1.19 KiB）、
+        分割後は 222 が 777 + 888 に割れて 2,664 B（= 2.60 KiB）。
+        """
+        assert "| 1.19 KiB (" in _quant_row(card, "f16")
+        assert "| 2.60 KiB (" in _quant_row(sharded_card, "f16")
 
     def test_it_never_calls_the_container_a_single_file(
         self, card: str, sharded_card: str, extra_card: str
@@ -465,7 +472,6 @@ class TestSections:
         first, _, second = rest.partition(f"## Model: {OFFICIAL_SECOND}")
         for part in (first, second):
             assert [line for line in part.splitlines() if line.startswith("### ")] == [
-                "### Files",
                 "### Quants",
                 "### Defaults",
             ]
@@ -527,31 +533,41 @@ class TestModelSelection:
 
 
 class TestDerivation:
-    """MUST: 数値・ファイル一覧・quant 表は manifest 由来（手書きが混ざっていない）。"""
+    """MUST: 数値・ダウンロード量・quant 表は manifest 由来（手書きが混ざっていない）。"""
 
-    def test_it_lists_every_declared_path_of_the_model_it_describes(self, card: str) -> None:
+    def test_each_model_section_counts_only_its_own_files(self, card: str) -> None:
+        """節ごとに数え直す — 既定席は 111 + i8 444 + rope 333 + tokenizer 555 = 1,443 B
+        （= 1.41 KiB）、2 本目は 111 + i8 666 + tokenizer 555 = 1,332 B（= 1.30 KiB）。
+        """
         _, _, rest = card.partition(f"## Model: {OFFICIAL_DEFAULT}")
         first, _, second = rest.partition(f"## Model: {OFFICIAL_SECOND}")
-        for path in (
-            "shared/text_encoder/model.safetensors",
-            f"{OFFICIAL_DEFAULT}/transformer/model.f16.safetensors",
-            f"{OFFICIAL_DEFAULT}/transformer/model.i8.safetensors",
-            f"{OFFICIAL_DEFAULT}/transformer/rope_base.safetensors",
-            "shared/tokenizer/qwen2.json",
-        ):
-            assert first.count(f"`{path}`") == 1, path
-        assert second.count(f"`{OFFICIAL_SECOND}/transformer/model.i8.safetensors`") == 1
-        assert f"{OFFICIAL_DEFAULT}/transformer" not in second
 
-    def test_it_folds_a_shared_extra_into_one_row_naming_both_dtypes(self, card: str) -> None:
-        row = next(line for line in card.splitlines() if "rope_base.safetensors`" in line)
-        assert "`transformer.rope_base`" in row
-        assert "f16 / i8" in row
+        assert "| 1.41 KiB (666 B shared; 555 B of assets, read on the host) |" in first
+        assert "| 1.30 KiB (666 B shared; 555 B of assets, read on the host) |" in second
+        # shard 1 本 1 行の表は廃止（2026-09-03 裁定）— 重みの path はカードに 1 つも出ない。
+        assert f"{OFFICIAL_DEFAULT}/transformer" not in card
+        assert "shared/text_encoder/model.safetensors" not in card
 
-    def test_an_asset_has_no_dtype_of_its_own(self, card: str) -> None:
-        """assets は quant 選択に依存しない無条件ファイル（ADR 0041 §3）。"""
-        row = next(line for line in card.splitlines() if "qwen2.json`" in line)
-        assert row.startswith("| `tokenizer` | — |")
+    def test_it_counts_the_extra_in_every_seat_that_declares_it(self, card: str) -> None:
+        """付帯資産（`extras` の rope 素表）も落ちるファイル — 両 dtype の席が同じ 1 本を持つ。"""
+        manifest = _official_manifest()
+        for entry in manifest["models"][OFFICIAL_DEFAULT]["weights"]["transformer"].values():
+            del entry["extras"]
+        dropped = _official(manifest)
+
+        assert "| 1.19 KiB (" in _quant_row(card, "f16")
+        assert "| 888 B (" in _quant_row(dropped, "f16")
+        assert "| 1.08 KiB (" in _quant_row(dropped, "f16+dit8-a8")
+
+    def test_an_asset_is_counted_in_every_quant(self, card: str) -> None:
+        """assets は quant 選択に依存しない無条件ファイル（ADR 0041 §3）— どの席にも乗る。"""
+        manifest = _official_manifest()
+        manifest["models"][OFFICIAL_DEFAULT]["assets"] = {}
+        dropped = _official(manifest)
+
+        assert "555 B of assets, read on the host" in _quant_row(card, "f16")
+        assert "| 666 B (" in _quant_row(dropped, "f16")
+        assert "of assets" not in _quant_row(dropped, "f16+dit8-a8")
 
     def test_it_takes_the_sizes_from_the_manifest(self, card: str) -> None:
         manifest = _official_manifest()
@@ -559,9 +575,8 @@ class TestDerivation:
             "size"
         ] = 999
         moved = _official(manifest)
-        assert "111 B" in card
-        assert "111 B" not in moved
-        assert "999 B" in moved
+        assert "| 1.41 KiB (" in _quant_row(card, "f16+dit8-a8")
+        assert "| 2.28 KiB (" in _quant_row(moved, "f16+dit8-a8")
 
     def test_it_marks_exactly_the_default_quant_of_each_model(self, card: str) -> None:
         """印は**モデルごとに 1 つ**（既定は quant 表の持ち主が決める — ADR 0041 §2）。"""
@@ -580,10 +595,13 @@ class TestDerivation:
             assert len(default) == 1
             assert default[0].startswith(expected)
         # 表に「既定」列を持たない（印は名前の横だけ — 列が空欄で並ぶ形にしない）。
-        assert "| Quant | What it is | Weights | Compute |" in card
+        assert "| Quant | What it is | Download | Weights | Compute |" in card
 
     def test_it_carries_every_quant_with_its_session_knobs(self, card: str) -> None:
-        assert "| `f16` | — | `text_encoder` = `f16` / `transformer` = `f16` | — |" in card
+        assert (
+            "| `f16` | — | 1.19 KiB (666 B shared; 555 B of assets, read on the host) |"
+            " `text_encoder` = `f16` / `transformer` = `f16` | — |" in card
+        )
         assert "`linearCompute` = `a8`" in card
         assert "requires `shaderF16`" in card
 

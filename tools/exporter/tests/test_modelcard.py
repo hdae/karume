@@ -12,14 +12,13 @@ NOTE: pipeline 別のカードテンプレートは 1 つ残らず wheel の外�
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
 
 from karume.modelcard import (
     CardMetadata,
-    file_rows,
-    files,
     from_pretrained,
     frontmatter,
     model_sections,
@@ -74,7 +73,7 @@ class TestFrontmatterOptionalFields:
 
 # ---- recipe 向けの公開描画部品 -------------------------------------------------
 #
-# `file_rows` / `files` / `quants` / `models` / `require_pipeline` / `render` は wheel の外の
+# `quants` / `models` / `require_pipeline` / `render` は wheel の外の
 # `card.py` が名指しで呼ぶ公開面（ADR 0065 段 6）。core だけを回したときにこの面の回帰が
 # 見えるよう、偽 manifest を被験体として core 側に門を置く（recipe 側の門は family ごとの
 # 間接的な踏み方で、回帰の主語が読めない）。
@@ -138,36 +137,68 @@ def _manifest() -> dict[str, Any]:
     }
 
 
-class TestFileRows:
-    """行は **path で一意化**する（現物にない 2 行目を表に生やさない）。"""
-
-    def test_two_dtypes_that_point_at_one_path_fold_into_a_single_row(self) -> None:
-        rows = file_rows(_manifest()["models"]["zeta"])
-
-        folded = [
-            (key, labels) for key, labels, ref in rows if ref["path"].endswith("tables.safetensors")
-        ]
-        assert folded == [("tables", ["f16", "i8"])]
-        # 席は path で 1 つだけ（front f16 / front i8 / rope / tables / tokenizer）。
-        assert [ref["path"] for _, _, ref in rows] == [
-            "zeta/front-f16.safetensors",
-            "zeta/front-i8.safetensors",
-            "zeta/front-rope.safetensors",
-            "zeta/tables.safetensors",
-            "shared/tokenizer.json",
-        ]
+def _row(lines: Sequence[str], name: str) -> str:
+    """quant 表からその席の行を 1 本引く（列の位置ではなく席名で引く）。"""
+    return next(line for line in lines if line.startswith(f"| `{name}`"))
 
 
-class TestFilesSection:
-    def test_a_shared_path_is_listed_and_explained(self) -> None:
-        """`shared/` の行は本文の注記と対（注記だけ残って行が消えると読み手が迷子になる）。"""
-        lines = files(_manifest()["models"]["zeta"])
+class TestQuantsDownload:
+    """Download 欄 = その席を選んだ読み手が実際に落とすバイト数（2026-09-03 裁定）。
 
-        assert any("`shared/tokenizer.json`" in line for line in lines)
-        assert any(line.startswith("A path under `shared/`") for line in lines)
+    shard 上限 256 MiB でファイル本数が 3〜4 倍になり、shard 1 本 1 行のファイル表は廃止した。
+    読み手が知りたい「このプリセットで何 GiB 落ちるか」を席ごとの合計 1 セルで持つ。
+    """
 
-    def test_a_borrowed_path_names_the_repository_it_comes_from(self) -> None:
-        """越境参照（ADR 0038 §7）の行は指し先ごと出す — 自リポの path だけだと在るように読める。"""
+    def test_it_sums_the_shards_extras_and_assets_the_quant_selects(self) -> None:
+        """f16 = front 4,096 + rope 64 + tables 128 + tokenizer 32 = 4,320 B（= 4.22 KiB）。"""
+        lines = quants(_manifest()["models"]["zeta"])
+
+        assert "| 4.22 KiB (32 B shared) |" in _row(lines, "f16")
+
+    def test_it_leaves_out_the_dtype_the_quant_does_not_select(self) -> None:
+        """w8 = front i8 2,048 + tables 128 + tokenizer 32 = 2,208 B = 2.16 KiB（f16 の 4,096 は
+        入らない）。
+
+        席ごとに数え直していなければ、f16 側の重みを動かしたとき w8 の欄も動く。
+        """
+        manifest = _manifest()
+        manifest["models"]["zeta"]["weights"]["front"]["f16"]["shards"][0]["size"] = 1 << 30
+
+        before = _row(quants(_manifest()["models"]["zeta"]), "w8")
+        after = _row(quants(manifest["models"]["zeta"]), "w8")
+        assert "| 2.16 KiB (" in before
+        assert after == before
+        assert "| 1.00 GiB (" in _row(quants(manifest["models"]["zeta"]), "f16")
+
+    def test_it_counts_the_extras_of_the_selected_dtype(self) -> None:
+        """付帯資産（`extras`）も落ちるファイル — f16 だけが持つ rope 64 B が合計に入る。"""
+        manifest = _manifest()
+        del manifest["models"]["zeta"]["weights"]["front"]["f16"]["extras"]
+
+        assert "| 4.16 KiB (" in _row(quants(manifest["models"]["zeta"]), "f16")
+
+    def test_a_file_two_components_point_at_is_counted_once(self) -> None:
+        """1 本のファイルを 2 席が指す形（1 本化済みの rope_base と同型）で二重に数えない。"""
+        manifest = _manifest()
+        front = manifest["models"]["zeta"]["weights"]["front"]["f16"]["shards"]
+        manifest["models"]["zeta"]["weights"]["tables"]["f16"]["shards"] = front
+
+        # front 4,096 + rope 64 + tokenizer 32 = 4,192 B（tables の 128 は同一 path なので消える）。
+        assert "| 4.09 KiB (" in _row(quants(manifest["models"]["zeta"]), "f16")
+
+    def test_it_calls_out_the_bytes_a_second_model_does_not_fetch_again(self) -> None:
+        """`shared/` の分は「2 本目のモデルではこの分を落とさない」量として添える。"""
+        assert "(32 B shared)" in _row(quants(_manifest()["models"]["zeta"]), "f16")
+
+    def test_a_model_that_shares_nothing_keeps_the_cell_bare(self) -> None:
+        """掛からない注記は出さない（0 B shared と綴ると、共有がある形に読める）。"""
+        row = _row(quants(_manifest()["models"]["alpha"]), "f16")
+
+        assert row.count("512 B") == 1
+        assert "shared" not in row
+
+    def test_bytes_borrowed_from_another_repository_count_as_shared(self) -> None:
+        """越境参照（ADR 0038 §7）も 2 度は落ちない — 同じ「落とし直さない量」に入る。"""
         manifest = _manifest()
         manifest["models"]["alpha"]["weights"]["front"]["f16"]["shards"] = [
             {
@@ -178,31 +209,93 @@ class TestFilesSection:
                 "sha256": "f" * 64,
             }
         ]
-        lines = files(manifest["models"]["alpha"])
 
-        assert any("`source/front.safetensors` in [`hdae/karume-source`]" in line for line in lines)
-        assert any(line.startswith("A row that names another repository") for line in lines)
+        assert "| 512 B (512 B shared) |" in _row(quants(manifest["models"]["alpha"]), "f16")
 
-    def test_an_i4_row_flags_the_safetensors_dialect(self) -> None:
-        """`I4` は公式仕様に無い語（docs/limitations.md）— 公式パーサで開けない事実を表に添える。"""
-        manifest = _manifest()
-        manifest["models"]["zeta"]["weights"]["front"]["i4"] = {
-            "shards": [_ref("zeta/front-i4.safetensors", 1024, "1" * 64)]
-        }
-        lines = files(manifest["models"]["zeta"])
+    def test_it_calls_out_assets_that_are_a_real_share_of_the_download(self) -> None:
+        """assets は**ホスト側で読むだけ**（gemma4 の PLE sidecar）— Download と常駐量の差になる。
 
-        assert any(line.startswith("A row labeled `i4`") for line in lines)
+        w8 では tokenizer 32 B が 2,208 B の 1.4%（≥ 1%）なので内訳が出る。f16 では 4,320 B の
+        0.7% なので出ない — どのカードにも書くと、数 MiB の tokenizer に読み手の目を向ける
+        だけの行になる。
+        """
+        lines = quants(_manifest()["models"]["zeta"])
 
-    def test_a_model_without_i4_says_nothing_about_the_dialect(self) -> None:
-        """f16 / i8 だけの配布形は公式互換のまま — 掛からない注意書きを載せない。"""
+        assert "(32 B shared; 32 B of assets, read on the host)" in _row(lines, "w8")
+        assert "of assets" not in _row(lines, "f16")
+
+
+class TestQuantsNotes:
+    """廃止したファイル表から引き継いだ注記 — **掛かるときだけ**出す（条件は manifest 由来）。"""
+
+    def test_it_points_at_karume_json_for_the_per_file_values(self) -> None:
+        """表から sha256 が消えた分、正本の所在は必ず残す（fetch 層の照合先）。"""
+        lines = quants(_manifest()["models"]["zeta"])
+
+        assert (
+            "Per-file `size` and `sha256` live in `karume.json` — verify against that at the fetch"
+            " layer." in lines
+        )
+
+    def test_a_shared_path_is_explained(self) -> None:
+        """`(N shared)` の意味は本文の 1 文と対（注記が無いと何と共有なのか読めない）。"""
+        assert any(
+            line.startswith("A path under `shared/`")
+            for line in quants(_manifest()["models"]["zeta"])
+        )
+
+    def test_a_model_without_a_shared_path_says_nothing_about_shared(self) -> None:
         assert not any(
-            line.startswith("A row labeled `i4`") for line in files(_manifest()["models"]["zeta"])
+            line.startswith("A path under `shared/`")
+            for line in quants(_manifest()["models"]["alpha"])
+        )
+
+    def test_it_names_the_repository_borrowed_bytes_come_from(self) -> None:
+        """指し先（リポ + pin した commit）まで出して初めて注記が事実になる。"""
+        manifest = _manifest()
+        manifest["models"]["alpha"]["weights"]["front"]["f16"]["shards"] = [
+            {
+                "repo": "hdae/karume-source",
+                "revision": "9" * 40,
+                "path": "source/front.safetensors",
+                "size": 512,
+                "sha256": "f" * 64,
+            }
+        ]
+        lines = quants(manifest["models"]["alpha"])
+
+        assert any(
+            line.startswith(
+                "Some components are fetched from"
+                " [`hdae/karume-source`](https://huggingface.co/hdae/karume-source)"
+                " at commit `9999999999999999…`"
+            )
+            for line in lines
         )
 
     def test_a_self_contained_model_says_nothing_about_other_repositories(self) -> None:
         assert not any(
-            line.startswith("A row that names another repository")
-            for line in files(_manifest()["models"]["zeta"])
+            line.startswith("Some components are fetched from")
+            for line in quants(_manifest()["models"]["zeta"])
+        )
+
+    def test_an_i4_component_flags_the_safetensors_dialect(self) -> None:
+        """`I4` は公式仕様に無い語（docs/limitations.md）— 公式パーサで開けない事実を添える。"""
+        manifest = _manifest()
+        manifest["models"]["zeta"]["weights"]["front"]["i4"] = {
+            "shards": [_ref("zeta/front-i4.safetensors", 1024, "1" * 64)]
+        }
+
+        assert any(
+            line.startswith("A component stored as `i4`")
+            for line in quants(manifest["models"]["zeta"])
+        )
+
+    def test_a_model_without_i4_says_nothing_about_the_dialect(self) -> None:
+        """f16 / i8 だけの配布形は公式互換のまま — 掛からない注意書きを載せない。"""
+        assert not any(
+            line.startswith("A component stored as `i4`")
+            for line in quants(_manifest()["models"]["zeta"])
         )
 
 
@@ -213,14 +306,15 @@ class TestQuantsSection:
 
         assert [line for line in lines if "(default)" in line] == [
             "| `w8` (default) | **Half size (int8)** — Both components in int8 storage."
-            " | `front` = `i8` / `tables` = `i8` | `linearCompute` = `a8` |"
+            " | 2.16 KiB (32 B shared; 32 B of assets, read on the host) |"
+            " `front` = `i8` / `tables` = `i8` | `linearCompute` = `a8` |"
         ]
 
     def test_a_seat_without_the_presentation_fields_keeps_an_empty_cell(self) -> None:
         """表示欄は optional（ADR 0075 決定 1）— 書いていない席は id をそのまま読ませる。"""
         lines = quants(_manifest()["models"]["alpha"])
 
-        assert "| `f16` (default) | — | `front` = `f16` | — |" in lines
+        assert "| `f16` (default) | — | 512 B | `front` = `f16` | — |" in lines
 
     def test_it_writes_the_abbreviation_legend_only_when_one_is_given(self) -> None:
         """略称の対応は**カードに必ず出す**（ADR 0074 決定 4）が、略称のない family には出ない。
@@ -281,8 +375,16 @@ class TestRenderDeterminism:
 
     @staticmethod
     def _card(manifest: dict[str, Any]) -> str:
-        sections = [models(manifest), *model_sections(manifest, [files, quants])]
+        sections = [models(manifest), *model_sections(manifest, [quants])]
         return render(sections)
+
+    def test_it_draws_no_file_table(self) -> None:
+        """shard 1 本 1 行の表は廃止（2026-09-03 裁定）— 席ごとの合計が Download 欄に入る。"""
+        card = self._card(_manifest())
+
+        assert "### Files" not in card
+        assert "| Key | Dtype | Path | Size | sha256 |" not in card
+        assert "| Quant | What it is | Download | Weights | Compute |" in card
 
     def test_two_renderings_of_an_equal_manifest_agree_byte_for_byte(self) -> None:
         # JSON 経由で組み直した別オブジェクト（同値・同じ挿入順）— 同一 dict の再描画だけだと

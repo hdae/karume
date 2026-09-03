@@ -1516,16 +1516,34 @@ class TestModelCard:
         assert card.startswith("---\n")
         assert "base_model: circlestone-labs/Anima-Base-v1.0-Diffusers" in card
 
-    def test_it_derives_the_file_table_from_the_assembled_tree(self, tmp_path: Path) -> None:
+    def test_it_derives_the_download_size_from_the_assembled_tree(self, tmp_path: Path) -> None:
+        """カードが持つ数値は**組み立てた木の実バイト数**（2026-09-03 裁定で表 → 合計 1 セル）。
+
+        既定 quant の Download 欄を桁まで戻して、その席が選ぶファイルを木から `stat()` した
+        合計と突き合わせる（有効 3 桁の丸めぶんだけ許す）。宣言と現物のズレは `verify_dist`
+        の領分なので、ここで見るのは「カードの数え方が現物と合っているか」。
+        """
         out_dir = self._run(tmp_path)
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        model = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))["models"][
+            ANIMA_TURBO_MODEL_NAME
+        ]
+        selected = {ref["path"] for ref in model["assets"].values()}
+        for role, label in model["quants"][ANIMA_DEFAULT_QUANT]["weights"].items():
+            entry = model["weights"][role][label]
+            selected |= {ref["path"] for ref in entry["shards"]}
+            selected |= {ref["path"] for ref in entry.get("extras", {}).values()}
+        total = sum((out_dir / path).stat().st_size for path in selected)
+
+        # 表の廃止で shard 1 本ずつの path も size も出なくなった（読み手が知るのは合計）。
         for rel_path in _in_subtree(ANIMA_TURBO_MODEL_NAME):
-            assert f"`{rel_path}`" in card
-        # 表が引くのは shard 1 本ずつのサイズ（分割された役割は行が本数ぶん並ぶ）。
-        for shard in resolve_shards(
-            out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["transformer_i8"]
-        ):
-            assert f"{shard.stat().st_size:,} B" in card
+            assert f"`{rel_path}`" not in card
+        row = next(
+            line for line in card.splitlines() if line.startswith(f"| `{ANIMA_DEFAULT_QUANT}`")
+        )
+        value, unit = row.split("|")[3].split("(")[0].strip().split(" ")
+        scale = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}[unit]
+        assert abs(float(value.replace(",", "")) * scale - total) <= total * 0.005
 
     def test_it_names_the_repository_after_the_assembled_directory(self, tmp_path: Path) -> None:
         """ファミリーリポの ID は pipeline の定数にできない — 組み立て先から引く。"""

@@ -1,6 +1,6 @@
 """gemma4 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
 
-汎用の描画部品（frontmatter・モデル一覧・ファイル表・quant 表・節の組み立て）は
+汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
 `karume.modelcard` が持つ。ここが持つのは **gemma4 固有の事実**だけ: 帰属（出所・ライセンス）と、
 この pipeline のカードに何を書くか。
 
@@ -12,7 +12,7 @@
 誘導する**（このプロジェクトが keep する情報ではない）。再配布条件のファイル（`LICENSE.md` /
 `NOTICE.md`）はカードではなく `gemma4.distribution.gemma4_root_files` が配布リポ直下へ置く。
 
-MUST: **数値・ファイル一覧・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
+MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
 （`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
 **存在しない事実**だけ。
 """
@@ -25,7 +25,6 @@ from typing import Any
 from karume.modelcard import (
     CardMetadata,
     default_model,
-    files,
     from_pretrained,
     frontmatter,
     knob,
@@ -241,6 +240,6 @@ def render_gemma4_model_card(manifest: Mapping[str, Any], repo: str) -> str:
             models(manifest),
             [""],
             _gemma4_usage(manifest, repo),
-            *model_sections(manifest, (files, quants, _gemma4_generation)),
+            *model_sections(manifest, (quants, _gemma4_generation)),
         )
     )
