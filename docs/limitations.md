@@ -314,15 +314,15 @@ ArrayBuffer の大きさ**（Chromium の壁 — 下記）であって合計の�
 添字の欠番や、素キー（`transformer`）と分割キー（`transformer[0]`）の混在は **shard の語を含む
 診断**で fail loudly（黙って片方を採らない）。
 
-## ホスト RAM ピークの係数 1 化はローカル取得元だけ（HF 経路は取得層の buffer 確保に依存）
+## ホスト RAM ピークの係数 1 化は組み込みの 2 取得元だけ（外部実装の取得元は `into` を実装したときに揃う）
 
 逐次面の器の使い回し（ADR [0070](decisions/0070-shard-loading-admission.md) 追記 2026-09-02）で、
-ロード時のホスト RAM ピークは「約 0.45GB + 最大 shard 1 本」になった（Linux 実測: anima f16 1GiB shard
-4,069 → 1,402 MiB）。ただし効くのは**取得元が器へ読める経路**（Deno の `denoDirectory`・
-`readFileInto` を実装したディレクトリアダプター）だけで、**HF 取得元（ブラウザの通常経路）は従来の
-係数（約 3 × 最大 shard + 1GB）のまま** — 取得層 `@hdae/fetch-cache` がキャッシュから読むたびに
-自前で buffer を確保するため、hub からは器を渡せない。取得層に「与えられた buffer へ読む」口が
-入った時点で hub 側は同じ `into` を渡すだけで揃う（外部リポの起票）。
+ロード時のホスト RAM ピークは「約 0.45GB + 最大 shard 1 本」になった。効くのは**取得元が器へ読める
+経路**で、組み込みの 2 取得元はどちらも使う — ディレクトリ（Deno の `denoDirectory`・`readFileInto`
+を実装したディレクトリアダプター）と HF（取得層 `@hdae/fetch-cache` 0.6.0 の「与えられた buffer へ
+読む」口 — Linux 実測: gemma4 cold 1,740 → 703 MiB・warm 1,408 → 684 MiB・anima f16 warm 2,242 → 743
+MiB）。外部実装の `DistributionSource` は `FileReadOptions.into` を呼んで器へ読むときだけ同じ係数に
+なり、呼ばずに tight view を返す実装は従来の係数のまま（契約は `packages/hub/src/source.ts`）。
 
 ## MoE は全エキスパート VRAM 常駐が前提（エキスパート単位の動的ロード/退避はしない）
 

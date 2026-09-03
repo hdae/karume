@@ -1,7 +1,7 @@
 # shard サイズ × 転送の刻み × GC — ロード時ホスト RAM ピークの実測（メモリ管理波 Phase B）
 
 > **性格**: 時点スナップショット（2026-09-02・RTX 3080 Ti 12GB / Linux / Vulkan (wgpu) /
-> Deno 2.9.6・ホスト RAM 31GB）。ADR [0089](../decisions/0089-memory-admission-limits.md) の
+> Deno 2.9.6・ホスト RAM 31GB）。ADR [0089](../decisions/0089-memory-limits-preflight.md) の
 > Phase B。2026-08-19 の実測（[shard-load-ram-peak](2026-08-19-shard-load-ram-peak.md) —
 > f32 単一モデル・512MB 分割）を、**実配布形**（anima transformer f16 3.7GB / gemma4 i4 1.6GB）と
 > 3 つの軸（shard 上限・shard 内の完了待ちの刻み・shard 境界の明示 GC）へ広げたもの。
