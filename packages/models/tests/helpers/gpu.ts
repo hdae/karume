@@ -31,7 +31,9 @@ if (!GPU_AVAILABLE) {
  * `acquireGpu({ gpuTiming: true })` を明示的に渡す。既定は**要求しない**ので、渡し忘れると
  * `lastRunTiming` が undefined になり、`entries` を数えるキー検査が**黙って空振りする**。
  * `true` は feature 不在で fail loudly するため、列挙が無いアダプタではこのフラグでケースごと
- * SKIP する（Metal は dispatch 数が上限を超えるため、そもそもここが false 側になる）。
+ * SKIP する（**Metal も `timestamp-query` を広告するのでここは true 側になる** — 実際に計測が
+ * 成立するかは別問題で、query set を多数同時に生かす経路は device ごと落ちる。2026-09-03 M2 実測・
+ * `docs/known-issues.md`「Metal で `--diagnostics` が device ごと落ちる」節）。
  */
 const detectTimestampQuery = async (): Promise<boolean> => {
   const gpu: GPU | undefined = navigator.gpu;

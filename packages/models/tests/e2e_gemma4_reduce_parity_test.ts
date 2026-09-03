@@ -9,9 +9,11 @@
 // 2 本の golden（greedy = sequential 経由 / chat = parallel 経由）は別々の期待値で別々に緑になる
 // だけで「両者が同一」は導けない。
 //
-// MUST: この門は census へ相乗りさせない。census は `timestamp-query` を要求するので Metal では
-// 常に SKIP になり、等式の門まで Mac で永久に走らなくなる（W-G7-4 / Pass2）。ここは計測を
-// 要求しないので、SKIP 条件は**資産と GPU の有無だけ**である。
+// MUST: この門は census へ相乗りさせない。census は `timestamp-query` を要求し、Metal はその
+// feature を**広告する**ので走ってしまい、query set を多数同時に生かした時点で device が落ちる
+// （2026-09-03 M2 実測 — `docs/known-issues.md` の `--diagnostics` 節）。相乗りさせると等式の門まで
+// Mac で道連れになる（W-G7-4 / Pass2）。ここは計測を要求しないので、SKIP 条件は**資産と GPU の
+// 有無だけ**である。
 //
 // ## 資産と経路
 //
