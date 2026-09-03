@@ -1,7 +1,8 @@
 // 固定長 greedy 生成ループ（`src/generation/greedy.ts`）の挙動テスト。GPU も実資産も要らない。
 //
 // ここで縛るのは「ホストが組み立てる 1 step ぶんの形」— 固定長 chunk の割り方・pad 行の 0・
-// 絶対位置の進み方・前 step の返り token の feedback・context の寿命。どれも実 GPU で回すと
+// 絶対位置の進み方・派生入力の席（`derive`）・前 step の返り token の feedback・context の
+// 寿命。どれも実 GPU で回すと
 // 「値が少しおかしい」という形でしか出ず（ADR 0066 決定 4 の pad no-op 契約は、間違った位置や
 // 残骸を食っても例外を出さない）、実装の誤りが検収 e2e の 1 個の不一致に潰れてしまう位置に
 // ある。Session は narrow interface（`GreedySession`）で受けるので、fake は素の object 1 個。
@@ -32,6 +33,20 @@ type RunCall = {
 const IDS = "input_ids";
 const POSITIONS = "position_ids";
 const TOKEN = "next_token";
+
+/**
+ * 位置列をそのままグラフ入力へ流す派生入力（`derive` 席の最小の実装）。
+ *
+ * 実際の配布形が置くのは位置から組んだ f32 の行（gemma4 の RoPE cos / sin — `gemma/rope.ts`）
+ * だが、この単体テストが見るのは**位置列そのものの組み立て**（pad 行の 0・絶対位置の進み方・
+ * 物理行数）なので、位置を i32 のまま素通しして fake の呼び出し記録から読む。
+ */
+const derivePositions = (
+  _ids: Int32Array<ArrayBuffer>,
+  positions: Int32Array<ArrayBuffer>,
+): RunInputs => ({
+  [POSITIONS]: { dtype: "i32", shape: [1, positions.length], data: positions },
+});
 
 const readRow = (
   inputs: RunInputs,
@@ -155,7 +170,7 @@ Deno.test("generateGreedy: prefill は固定長 chunk で流し、pad 行は 0�
   const generated = await generateGreedy({
     session: fake.session,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 32,
     maxPosition: 512,
@@ -191,7 +206,7 @@ Deno.test("generateGreedy: T = chunkLength ちょうどは 1 chunk で pad 行�
   const generated = await generateGreedy({
     session: fake.session,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 4,
     maxPosition: 512,
@@ -211,7 +226,7 @@ Deno.test("generateGreedy: T < chunkLength は 1 chunk・末尾が pad 0 で埋�
   const generated = await generateGreedy({
     session: fake.session,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 4,
     maxPosition: 512,
@@ -232,7 +247,7 @@ Deno.test("generateGreedy: decode は queryLength=1 固定で、位置が T, T+1
   const generated = await generateGreedy({
     session: fake.session,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 4,
     maxPosition: 512,
@@ -259,7 +274,7 @@ Deno.test("generateGreedy: maxNewTokens=1 は decode を 1 回も回さない", 
   const generated = await generateGreedy({
     session: fake.session,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 4,
     maxPosition: 512,
@@ -278,7 +293,7 @@ Deno.test("generateGreedy: 容量記号は createGenerationContext だけへ渡�
   await generateGreedy({
     session: fake.session,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 4,
     maxPosition: 512,
@@ -300,7 +315,7 @@ Deno.test("generateGreedy: 正常終了で context を 1 度だけ dispose す�
   await generateGreedy({
     session: fake.session,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 4,
     maxPosition: 512,
@@ -320,7 +335,7 @@ Deno.test("generateGreedy: run が落ちても context を dispose し、例外�
         generateGreedy({
           session: fake.session,
           inputIds: IDS,
-          positionIds: POSITIONS,
+          derive: derivePositions,
           token: TOKEN,
           chunkLength: 4,
           maxPosition: 512,
@@ -382,7 +397,7 @@ Deno.test("generateGreedy: token 出力の名前 / dtype / 形が違えば fail 
         generateGreedy({
           session: fake.session,
           inputIds: IDS,
-          positionIds: POSITIONS,
+          derive: derivePositions,
           token: TOKEN,
           chunkLength: 4,
           maxPosition: 512,
@@ -401,7 +416,7 @@ Deno.test("generateGreedy: token 出力の名前 / dtype / 形が違えば fail 
 Deno.test("generateGreedy: 入口検査は context を作る前に落ちる", async () => {
   const base = {
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 4,
     maxPosition: 512,
@@ -443,7 +458,7 @@ Deno.test("generateGreedy: maxPosition は排他的上限（最終位置 + 1 で
   const generated = await generateGreedy({
     session: fake.session,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 4,
     maxPosition: 3,
@@ -462,6 +477,61 @@ Deno.test("GreedySession: 実 Session の面を型で満たす（綴りのドリ
   // 沈黙劣化の唯一の検出点）。
   const asGreedySession = (session: Session): GreedySession => session;
   assertEquals(typeof asGreedySession, "function");
+});
+
+Deno.test("generateGreedy(derive): 物理行数ぶんの ids / positions が渡り、返り値が run の入力になる", async () => {
+  // 位置依存のグラフ入力（gemma4 の RoPE cos / sin — ADR 0091 決定 1）はこの席**だけ**から
+  // run へ入る。2 本が同じ物理行数で、pad 行が両方 0 であることは他のどの門でも見えない
+  // （グラフ側は pad 行の値を黙って食う — ADR 0066 追記 6）。
+  const seen: { readonly ids: readonly number[]; readonly positions: readonly number[] }[] = [];
+  const fake = fakeSession();
+  const generated = await generateGreedy({
+    session: fake.session,
+    inputIds: IDS,
+    token: TOKEN,
+    derive: (ids, positions) => {
+      seen.push({ ids: [...ids], positions: [...positions] });
+      return derivePositions(ids, positions);
+    },
+    chunkLength: 4,
+    maxPosition: 512,
+    prompt: [10, 11],
+    maxNewTokens: 2,
+  });
+
+  assertEquals(generated.length, 2);
+  // prefill は物理 4 行（有効 2 + pad 2 = 0）・decode は 1 行で、位置は T から進む。
+  assertEquals(seen, [
+    { ids: [10, 11, 0, 0], positions: [0, 1, 0, 0] },
+    { ids: [generated[0]], positions: [2] },
+  ]);
+  // 返り値のキーがそのまま run の入力に乗っている（fake は `position_ids` を必須で読む）。
+  assertEquals(fake.calls.map((call) => call.positions), [[0, 1, 0, 0], [2]]);
+});
+
+Deno.test("generateGreedy: derive 省略時は input_ids のほかに何も渡さない", async () => {
+  // 派生入力を持たない資産（1 入力のグラフ）で余分な入力を送ると、ランタイムは「結線されて
+  // いない入力」として落とす。省略が無風であることをキーの集合で固定する。
+  const keys: (readonly string[])[] = [];
+  const session: GreedySession<FakeContext> = {
+    createGenerationContext: () => Promise.resolve({ dispose: () => Promise.resolve() }),
+    run: (inputs) => {
+      keys.push(Object.keys(inputs).sort());
+      return Promise.resolve(defaultOutputs(keys.length - 1, readRow(inputs, IDS).values.length));
+    },
+  };
+
+  await generateGreedy({
+    session,
+    inputIds: IDS,
+    token: TOKEN,
+    chunkLength: 4,
+    maxPosition: 64,
+    prompt: [10, 11],
+    maxNewTokens: 2,
+  });
+
+  assertEquals(keys, [[IDS], [IDS]]);
 });
 
 // ---- token-only 出口（ADR 0068 決定 4 の既定形 — `lastRow` 指定時の 1 行ぶん出力） ----
@@ -503,7 +573,7 @@ Deno.test("generateGreedy(lastRow): prefill は最終有効行の添字・decode
   const generated = await generateGreedy({
     session: fake.session,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     lastRow: LAST_ROW,
     chunkLength: 4,
@@ -536,7 +606,7 @@ Deno.test("generateGreedy(lastRow): token 出力が [1,1,1] でなければ fail
       generateGreedy({
         session,
         inputIds: IDS,
-        positionIds: POSITIONS,
+        derive: derivePositions,
         token: TOKEN,
         lastRow: LAST_ROW,
         chunkLength: 4,
@@ -565,7 +635,7 @@ Deno.test("generateGreedy: lastRow 省略時は last_row 入力を渡さない�
   await generateGreedy({
     session: spying,
     inputIds: IDS,
-    positionIds: POSITIONS,
+    derive: derivePositions,
     token: TOKEN,
     chunkLength: 4,
     maxPosition: 64,

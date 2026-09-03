@@ -18,8 +18,8 @@
 //
 // 門は 5 本:
 //
-// ① 形の前提（入力 2 本 / 出力 2 本 / 出力 1 の供給元が argmax / states 30 スロットと共有規則 /
-//    層種別の window / 記号 M・C）
+// ① 形の前提（入力 5 本 = input_ids + RoPE 派生入力 4 本 / 出力 2 本 / 出力 1 の供給元が argmax /
+//    states 30 スロットと共有規則 / 層種別の window / 記号 M・C）
 // ② **greedy parity**（3 ケース × K=16 step が torch の期待列と厳密一致） — この門の主張
 // ③ prefill 最終 chunk の logits tolerance（`generateGreedy` を通さない手組み・診断線）
 // ④ census（states 形カーネル族が sliding / full の両変種で走り、q 側だけ `:gqa` が付き、
@@ -60,6 +60,7 @@ import {
   type Tensor,
 } from "@karume/runtime";
 import { generateGreedy } from "../src/generation/greedy.ts";
+import { gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import {
   modelPresent,
   readShard,
@@ -105,6 +106,12 @@ const GREEDY_STEPS = 16;
  *
  * 窓 512 を跨ぐのも `context-en` だけで、chunk 17 以降（絶対位置 512 以上）が sliding スロットの
  * ring 折り返し（`col % window`）とエビクトを実際に踏む。
+ *
+ * NOTE: 配布形の既定は 768（ADR 0091 決定 3）だが、この門は 32 のままにする — 768 では 3 ケース
+ * とも 1 chunk に収まり、上の 2 経路（過去つき prefill と ring 折り返し）が 1 度も走らない。
+ * 期待列は torch の全長 full re-forward で採ってあり刻みに依存しないので、値の側は動かない
+ * （刻みで f32 の部分和の畳み方は変わりうるが、②の余裕門がその幅を覆う — limitations の
+ * 「chunkLength を変えると token 列が動きうる」節）。
  */
 const CHUNK_LENGTH = 32;
 
@@ -122,15 +129,30 @@ const CAPACITY_SYMBOL = "C";
 const CAPACITY = 640;
 
 /**
- * この系列が引ける絶対位置の排他的上限（正本は `export_decode.ROPE_TABLE_POSITIONS` = RoPE 表の
- * 行数）。表の外の gather は非有限を返し argmax が沈黙誤 token に畳むので、`generateGreedy` は
- * この値を要求して入口で落とす。
+ * 引ける絶対位置の排他的上限 = **モデルが宣言する位置上限**（上流 `max_position_embeddings`）。
+ *
+ * RoPE 表はもうグラフに焼かれておらず（ADR 0091 決定 1 — cos / sin はホストが chunk ごとに
+ * 作る派生入力）、上限は表の行数ではなくモデルの宣言になった。学習していない位置の attention は
+ * 例外を出さず「もっともらしい token id」に畳まれるので、`generateGreedy` はこの値を要求して
+ * 入口で落とす。
  */
-const MAX_POSITION = 1024;
+const MAX_POSITION = 131_072;
 
-/** グラフ入力の名前（正本は `export_decode.INPUT_IDS` / `POSITION_IDS`）。 */
+/** グラフ入力の名前（正本は `export_decode.INPUT_IDS`）。 */
 const INPUT_IDS = "input_ids";
-const POSITION_IDS = "position_ids";
+
+/**
+ * RoPE 派生入力 4 本の名前と並び（正本は `export_decode.ROPE_INPUTS` = 層種別 × cos / sin）。
+ *
+ * MUST: TS 側の生成器（`gemma4RopeInputName`）から導かない。ここは**資産のグラフ入力が
+ * exporter の綴りどおりか**を見る門で、TS の綴りから作ると両側が同時にずれても緑になる。
+ */
+const ROPE_INPUTS = [
+  "rope_sliding_attention_cos",
+  "rope_sliding_attention_sin",
+  "rope_full_attention_cos",
+  "rope_full_attention_sin",
+] as const;
 
 /** 層数（config の `num_hidden_layers`）。 */
 const LAYERS = 35;
@@ -156,6 +178,23 @@ const FULL_OWNER = 14;
 /** 層種別ごとの head_dim（sliding = `head_dim` / full = `global_head_dim`）。 */
 const SLIDING_HEAD_DIM = 256;
 const FULL_HEAD_DIM = 512;
+
+/**
+ * この系列の RoPE パラメータ（層種別 2 本 — ホストが cos / sin を組む式の宣言）。
+ *
+ * 配布形なら `karume.json` の `pipelineConfig.rope` が宣言するが、decode 系列は検収用の裸の IR
+ * なので `karume.json` を持たない（台本は config から導いて例示入力に使うだけ —
+ * `gemma4/rope.py` の `rope_specs`）。よってここに定数として置く。値は E2B の config 由来で、
+ * 配布形（`models/karume-gemma4-e2b/karume.json` の `pipelineConfig.rope`）の宣言と同値:
+ * sliding = `rope_local_base_freq` 10,000 / `head_dim` 256（全次元を回す）、
+ * full = `rope_theta` 1,000,000 / `global_head_dim` 512 / `partial_rotary_factor` 0.25 → 128。
+ *
+ * 幅（`headDim`）が層種別の head_dim と食い違えば①の D 軸検査ではなく run が形で落ちる。
+ */
+const ROPE_SPEC: Gemma4RopeSpec = {
+  sliding_attention: { theta: 10_000, headDim: SLIDING_HEAD_DIM, rotaryDim: SLIDING_HEAD_DIM },
+  full_attention: { theta: 1_000_000, headDim: FULL_HEAD_DIM, rotaryDim: 128 },
+};
 
 /** sliding 層の窓幅（config の `sliding_window` — attrs `window` にそのまま宣言される）。 */
 const WINDOW = 512;
@@ -289,10 +328,16 @@ const loadGreedy = async (caseName: string): Promise<GreedyGolden> => {
   };
 };
 
-/** `io.<case>.safetensors`（無 pad 全長 1 回の入出力）。 */
+/**
+ * `io.<case>.safetensors`（無 pad 全長 1 回の入出力）。
+ *
+ * RoPE 派生入力 4 本も記録されているが、こちらは**読まない** — Deno 側は同じ位置列から
+ * `gemma4RopeInputs` で組み直す（台本が組んだ表をそのまま食わせると、TS 実装の式が壊れても
+ * ③が緑になる）。表そのものの突合は `gemma_rope_test.ts`（上流モジュールの実出力との parity）
+ * が受け持つ。
+ */
 type IoGolden = {
   readonly ids: Int32Array<ArrayBuffer>;
-  readonly positions: Int32Array<ArrayBuffer>;
   readonly logits: Float32Array<ArrayBuffer>;
   readonly tokens: Int32Array<ArrayBuffer>;
 };
@@ -301,12 +346,16 @@ const loadIo = async (caseName: string): Promise<IoGolden> => {
   const file = parseSafetensors(await readBuffer(`${IO_PREFIX}${caseName}${SUFFIX}`));
   assertEquals(
     [...file.tensors.keys()].sort(),
-    [`input.${INPUT_IDS}`, `input.${POSITION_IDS}`, "output.0", "output.1"].sort(),
+    [
+      `input.${INPUT_IDS}`,
+      ...ROPE_INPUTS.map((name) => `input.${name}`),
+      "output.0",
+      "output.1",
+    ].sort(),
     `${IO_PREFIX}${caseName}${SUFFIX} のテンソルキー`,
   );
   return {
     ids: goldenI32(file, `input.${INPUT_IDS}`),
-    positions: goldenI32(file, `input.${POSITION_IDS}`),
     logits: goldenF32(file, "output.0"),
     tokens: goldenI32(file, "output.1"),
   };
@@ -330,7 +379,22 @@ const loadIo = async (caseName: string): Promise<IoGolden> => {
  */
 const assertDecodeForm = (parsed: PreparedModel): void => {
   const graph = parsed.graph;
-  assertEquals(graph.inputs.map((spec) => spec.name), [INPUT_IDS, POSITION_IDS], "グラフ入力");
+  // 入力は token id 列 + RoPE 派生入力 4 本（ADR 0091 決定 1 — `position_ids` は消えた）。
+  assertEquals(
+    graph.inputs.map((spec) => spec.name),
+    [INPUT_IDS, ...ROPE_INPUTS],
+    "グラフ入力（position_ids が残っていれば表を焼いた旧世代の資産）",
+  );
+  // 派生入力の幅は層種別の head_dim そのもの（行数は物理 chunk 記号 M）。ここが食い違うと
+  // 「行数の合う別の幅の表」を渡せる形になり、attention の D 軸と噛み合わないまま宣言は通る。
+  for (const spec of graph.inputs.filter((input) => input.name !== INPUT_IDS)) {
+    assertEquals(spec.dtype, "f32", `RoPE 派生入力 '${spec.name}' の dtype`);
+    assertEquals(
+      spec.shape,
+      [1, "M", spec.name.includes("full") ? FULL_HEAD_DIM : SLIDING_HEAD_DIM],
+      `RoPE 派生入力 '${spec.name}' の shape`,
+    );
+  }
   assertEquals(graph.outputs.length, 2, "graph.outputs の本数（logits / token の 2 本）");
 
   // 出力 1 の供給元が argmax（ADR 0068 決定 4 の decode 出口）。`generateGreedy` はこの出力を
@@ -507,7 +571,8 @@ Deno.test({
           const generated = await generateGreedy({
             session,
             inputIds: INPUT_IDS,
-            positionIds: POSITION_IDS,
+            // RoPE の cos / sin は chunk ごとにホストが組む（ADR 0091 決定 1）。
+            derive: (_ids, positions) => gemma4RopeInputs(ROPE_SPEC, positions),
             token: tokenName,
             chunkLength: CHUNK_LENGTH,
             maxPosition: MAX_POSITION,
@@ -597,7 +662,7 @@ Deno.test({
               const outputs = await session.run(
                 {
                   [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
-                  [POSITION_IDS]: i32Row(CHUNK_LENGTH, positions),
+                  ...gemma4RopeInputs(ROPE_SPEC, positions),
                 },
                 undefined,
                 { context, queryLength },
@@ -765,19 +830,18 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
     [],
     `${where}: 圧縮格納でない linear が走った（適格落ちで f32 展開された重み — ${shown}）`,
   );
-  // embedding は 2 群が**両方**走る（1-shot 門と違う点）: 量子化群（主 embedding + PLE 35 =
-  // `:wi8`）と **RoPE 表引き**（cos/sin × 層種別 2 = 4 本 — 表引き化で embedding の重み
-  // スロットに入るが、位置表の丸めは角度誤差が位置に沿って蓄積するので f32 の明示除外 —
-  // `export_decode.rope_table_keys`）。素の f32 キーを全面禁止すると RoPE 表が誤検出になり、
-  // 逆に本数を見ないと「量子化落ちした重み」が RoPE 表のふりで素通りする — 本数で切り分ける。
+  // embedding は**量子化群だけ**（主 embedding + PLE 35 = `:wi8`）。RoPE 表を焼いていた世代は
+  // cos/sin × 層種別 2 の 4 本が f32 の表引きとして混ざっていたが、表はホストが作る派生入力に
+  // なったので（ADR 0091 決定 1）素の f32 キーは **1 本も出ない** — 出たら量子化落ちで f32
+  // 展開された重み（例外を出さないので、キーの側からしか見えない）か、表を焼いた旧世代の資産。
   const embedding = entries.filter((entry) => entry.key.startsWith("embedding:"));
   assert(embedding.length > 0, `${where}: embedding の内訳が無い（走った内訳: ${shown}）`);
   const plainEmbedding = embedding.filter((entry) => !entry.key.includes(":wi8"));
   assertEquals(
     dispatches(plainEmbedding),
-    4,
-    `${where}: f32 格納の embedding が RoPE 表引き 4 本（cos/sin × 層種別 2）と違う` +
-      `（多ければ量子化落ち・少なければ表引きの欠落 — 走った内訳: ${shown}）`,
+    0,
+    `${where}: f32 格納の embedding が走った（量子化落ち、または RoPE 表を焼いた旧世代の資産 —` +
+      ` 走った内訳: ${shown}）`,
   );
   assert(
     dispatches(embedding.filter((entry) => entry.key.includes(":wi8"))) >= 36,
@@ -842,7 +906,7 @@ Deno.test({
       const prefill = await session.run(
         {
           [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
-          [POSITION_IDS]: i32Row(CHUNK_LENGTH, positions),
+          ...gemma4RopeInputs(ROPE_SPEC, positions),
         },
         undefined,
         { context, queryLength: golden.prompt.length },
@@ -868,7 +932,7 @@ Deno.test({
       await session.run(
         {
           [INPUT_IDS]: i32Row(1, Int32Array.of(first)),
-          [POSITION_IDS]: i32Row(1, Int32Array.of(golden.prompt.length)),
+          ...gemma4RopeInputs(ROPE_SPEC, Int32Array.of(golden.prompt.length)),
         },
         undefined,
         { context, queryLength: 1 },

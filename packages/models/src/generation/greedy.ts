@@ -51,8 +51,22 @@ export type GreedySpec<C extends GenerationDisposable = GenerationContext> = {
   readonly session: GreedySession<C>;
   /** token id 列を受けるグラフ入力の名前（`[1,M]` の i32）。 */
   readonly inputIds: string;
-  /** 絶対位置を受けるグラフ入力の名前（`[1,M]` の i32）。 */
-  readonly positionIds: string;
+  /**
+   * ホスト由来の派生入力の作り手（`program.ts` の `DerivedRunInputs` と同じ席の最小形）。
+   *
+   * 渡るのは**物理行数ぶん**の token id 列と絶対位置列（prefill は pad 行込み・decode は 1 行）で、
+   * pad 行にはどちらも 0 が入る（ADR 0066 追記 6 の値契約）。返り値はそのまま run の入力へ
+   * 展開するので、位置に依存するグラフ入力（gemma4 の RoPE cos / sin — `gemma/rope.ts`・
+   * MiniCPM5 decode 系列の `position_ids`）はここが唯一の供給口である。
+   *
+   * MUST: **同期の純関数**（同じ `(ids, positions)` に同じ値）。`sequence.ts` 側が非同期なのは
+   * GB 級の遅延ロード（PLE sidecar）を待つ席が要るためで、この関数の目的は固定 token id 列での
+   * 検収なので、待ちの入る派生入力は通さない。
+   */
+  readonly derive?: (
+    ids: Int32Array<ArrayBuffer>,
+    positions: Int32Array<ArrayBuffer>,
+  ) => RunInputs;
   /** argmax token を出すグラフ出力の名前（`[1,M,1]` の i32 — token-only 形は `[1,1,1]`）。 */
   readonly token: string;
   /**
@@ -65,13 +79,14 @@ export type GreedySpec<C extends GenerationDisposable = GenerationContext> = {
   /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。 */
   readonly chunkLength: number;
   /**
-   * 資産が引ける絶対位置の**排他的上限**（位置は `0..maxPosition-1`。RoPE 表を焼いた系列なら
-   * 表の行数 — MiniCPM5 decode 系列は 512）。
+   * 引ける絶対位置の**排他的上限**（位置は `0..maxPosition-1` — モデルが宣言する位置上限。
+   * RoPE 表を焼いたまま出す系列ではその表の行数がそのまま上限で、MiniCPM5 decode 系列は 512）。
    *
-   * MUST: 省略可能にしない。表の外の gather は例外を出さず（OOB は by-design で非有限 —
-   * limitations）、argmax がその非有限 logits を**もっともらしい token id に畳む**ので、
-   * 上限を知らないまま回すと生成の後半が沈黙誤 token になる（2026-08-18 実測 — 位置 512 で
-   * 全 logits 非有限 → token 0）。ここで落とすのが唯一の fail loudly の位置。
+   * MUST: 省略可能にしない。上限の外の位置は例外を出さず（表を焼いた系列の OOB gather は
+   * by-design で非有限 — limitations。表を持たない系列でも学習していない位置の attention に
+   * なる）、argmax がその logits を**もっともらしい token id に畳む**ので、上限を知らないまま
+   * 回すと生成の後半が沈黙誤 token になる（2026-08-18 実測 — 位置 512 で全 logits 非有限 →
+   * token 0）。ここで落とすのが唯一の fail loudly の位置。
    */
   readonly maxPosition: number;
   /** state スロット容量の記号束縛（`createGenerationContext` へ素通し）。 */
@@ -145,9 +160,9 @@ const prefillInputs = <C extends GenerationDisposable>(
   }
   return {
     [spec.inputIds]: i32Row(spec.chunkLength, ids),
-    [spec.positionIds]: i32Row(spec.chunkLength, positions),
     // token-only 形は最終**有効**行を添字で選ぶ（pad 行の lm_head は走らない — ADR 0068 決定 4）。
     ...(spec.lastRow === undefined ? {} : { [spec.lastRow]: lastRowInput(chunk.queryLength - 1) }),
+    ...(spec.derive === undefined ? {} : spec.derive(ids, positions)),
   };
 };
 
@@ -155,11 +170,15 @@ const decodeInputs = <C extends GenerationDisposable>(
   spec: GreedySpec<C>,
   token: number,
   position: number,
-): RunInputs => ({
-  [spec.inputIds]: i32Row(1, Int32Array.of(token)),
-  [spec.positionIds]: i32Row(1, Int32Array.of(position)),
-  ...(spec.lastRow === undefined ? {} : { [spec.lastRow]: lastRowInput(0) }),
-});
+): RunInputs => {
+  const ids = Int32Array.of(token);
+  const positions = Int32Array.of(position);
+  return {
+    [spec.inputIds]: i32Row(1, ids),
+    ...(spec.lastRow === undefined ? {} : { [spec.lastRow]: lastRowInput(0) }),
+    ...(spec.derive === undefined ? {} : spec.derive(ids, positions)),
+  };
+};
 
 /**
  * argmax 出力の 1 行から token id を読む。

@@ -386,7 +386,10 @@ Deno.test({
           const generated = await generateGreedy({
             session,
             inputIds: INPUT_IDS,
-            positionIds: POSITION_IDS,
+            // この系列は RoPE 表を焼いたままなのでグラフ入力は今も `position_ids` 1 本だが、
+            // 位置の供給口は `GreedySpec.derive` に一本化された（ADR 0091 決定 1 — gemma4 側が
+            // 位置から cos / sin を組む形になり、`positionIds` 欄は退役した）。
+            derive: (_ids, positions) => ({ [POSITION_IDS]: i32Row(positions.length, positions) }),
             token: tokenName,
             chunkLength: CHUNK_LENGTH,
             maxPosition: MAX_POSITION,

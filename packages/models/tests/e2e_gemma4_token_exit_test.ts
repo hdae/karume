@@ -3,8 +3,8 @@
 // `e2e_gemma4_greedy_test.ts`（logits opt-in 形 — `[logits, token]` の 2 出力）が生成ループと
 // KV 機構の本体を受け持つのに対し、こちらは**出口の差し替えだけ**を検収する:
 //
-// ① 形の前提（入力 3 本 = input_ids / position_ids / **last_row**・出力 1 本 = argmax token・
-//    states 30 スロットは opt-in 形と同一）
+// ① 形の前提（入力 6 本 = input_ids / RoPE 派生入力 4 本 / **last_row**・出力 1 本 = argmax
+//    token・states 30 スロットは opt-in 形と同一）
 // ② **系列間交差 parity**: token-only 系列の greedy が logits opt-in 系列の
 //    `greedy.<case>.safetensors`（torch full re-forward の期待列）と 3 ケース × K=16 で
 //    厳密一致する。同じ重み・同じ丸め・同じ手術で出口だけが違うので、列が割れたら
@@ -33,6 +33,7 @@ import {
   type SafetensorsFile,
 } from "@karume/runtime";
 import { generateGreedy } from "../src/generation/greedy.ts";
+import { gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import {
   modelPresent,
   readShard,
@@ -59,16 +60,38 @@ const GENERATE_COMMAND =
 const EXPECTED_CASES = ["capital-en", "capital-ja", "context-en"] as const;
 const GREEDY_STEPS = 16;
 
-/** 実行条件は e2e_gemma4_greedy_test.ts と同値（同じ資産世代の裁定をそのまま使う）。 */
+/**
+ * 実行条件は e2e_gemma4_greedy_test.ts と同値（同じ資産世代の裁定をそのまま使う）。
+ * `MAX_POSITION` はモデルが宣言する位置上限（上流 `max_position_embeddings`）— RoPE 表は
+ * もうグラフに無いので、上限は表の行数ではない（ADR 0091 決定 1・3）。
+ */
 const CHUNK_LENGTH = 32;
 const CAPACITY_SYMBOL = "C";
 const CAPACITY = 640;
-const MAX_POSITION = 1024;
+const MAX_POSITION = 131_072;
 
 const INPUT_IDS = "input_ids";
-const POSITION_IDS = "position_ids";
+/** RoPE 派生入力 4 本の名前と並び（正本は `export_decode.ROPE_INPUTS`）。 */
+const ROPE_INPUTS = [
+  "rope_sliding_attention_cos",
+  "rope_sliding_attention_sin",
+  "rope_full_attention_cos",
+  "rope_full_attention_sin",
+] as const;
 /** token-only 形の行選択入力（正本は export_decode.TOKEN_ONLY_LAST_ROW）。 */
 const LAST_ROW = "last_row";
+
+/**
+ * この系列の RoPE パラメータ（opt-in 系列と同値 — 同じ config・同じ手術で出口だけが違う）。
+ *
+ * 値の出どころは `e2e_gemma4_greedy_test.ts` の `ROPE_SPEC` の doc と同じ E2B の config
+ * （配布形 `pipelineConfig.rope` と同値）で、decode 系列は `karume.json` を持たないため
+ * テスト定数として置く。
+ */
+const ROPE_SPEC: Gemma4RopeSpec = {
+  sliding_attention: { theta: 10_000, headDim: 256, rotaryDim: 256 },
+  full_attention: { theta: 1_000_000, headDim: 512, rotaryDim: 128 },
+};
 
 const exists = (url: URL): boolean => {
   try {
@@ -236,7 +259,7 @@ const assertTokenOnlyForm = (parsed: PreparedModel): void => {
   const graph = parsed.graph;
   assertEquals(
     graph.inputs.map((spec) => spec.name),
-    [INPUT_IDS, POSITION_IDS, LAST_ROW],
+    [INPUT_IDS, ...ROPE_INPUTS, LAST_ROW],
     "グラフ入力（token-only は last_row が増える）",
   );
   assertEquals(graph.outputs.length, 1, "graph.outputs の本数（token 1 本 — logits は出さない）");
@@ -327,7 +350,8 @@ Deno.test({
           const generated = await generateGreedy({
             session,
             inputIds: INPUT_IDS,
-            positionIds: POSITION_IDS,
+            // RoPE の cos / sin は chunk ごとにホストが組む（ADR 0091 決定 1）。
+            derive: (_ids, positions) => gemma4RopeInputs(ROPE_SPEC, positions),
             token: tokenName,
             lastRow: LAST_ROW,
             chunkLength: CHUNK_LENGTH,

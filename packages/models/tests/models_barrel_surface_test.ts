@@ -49,6 +49,9 @@ const GEMMA_VALUES = [
   // `fromAssets` を使う消費者が hub の `Record<string, unknown>` から config を組む口。
   // 出していないと `as` で被せるか、3 つの数を配布形と消費側で二重持ちすることになる。
   "parseGemma4PipelineConfig",
+  // RoPE の cos / sin はグラフに焼かれておらずホストが chunk ごとに作る（ADR 0091 決定 1）。
+  // 低レベル面（`fromAssets` / 自前の生成ループ）の消費者はこれが無いと表を自前で組む羽目になる。
+  "gemma4RopeInputs",
 ];
 
 /** 公開面に出してはならない綴り（内部の組み立て口）。 */
